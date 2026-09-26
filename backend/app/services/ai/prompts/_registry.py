@@ -79,10 +79,34 @@ def _is_false_positive(key: str, var: str, template: str) -> bool:
     3. 模板整体不是明显的业务上下文（长度 > 200 字符，含较多中文）。
 
     不满足任一条则保留告警，让运维看到"真实"缺变量。
+
+    ✅ 可选区块例外（2026-09-26）：变量在模板中**独占一整行**
+    （`^\\s*\\{var\\}\\s*$`）时，语义是「有值才注入这一段」—— 调用方
+    不传时 render_prompt 会整行丢弃，不会留下残留占位符。因此
+    「未传」不是缺陷，不应报缺失（否则每次调用都刷无意义 WARNING）。
+    ⚠️ 仅供**运行期缺失告警**（validate_prompt_variables）使用；
+    契约漂移校验（check_prompt_variables）走的是「模板里到底有没有这个
+    占位符」的语义，不能套用本例外 —— 否则整行区块会被误判成
+    「声明了但没用」（declared_not_used）而报假漂移。
     """
     if var not in _FALSE_POSITIVE_VARS:
         return False
     return _looks_like_json_example(template, var)
+
+
+#: 整行独占的可选区块占位符（行内无其它文字）
+_OPTIONAL_BLOCK_RE = re.compile(
+    r"^[ \t]*\{([A-Za-z_]\w{1,})\}[ \t]*$", re.MULTILINE)
+
+
+def _is_optional_block_var(var: str, template: str) -> bool:
+    """变量在模板中是否独占一整行（= 可选区块，未传即整行丢弃）。"""
+    if not template or not var:
+        return False
+    for m in _OPTIONAL_BLOCK_RE.finditer(template):
+        if m.group(1) == var:
+            return True
+    return False
 
 # ⚠️ 排除 JSON 对象键上下文：`{key}:`（ASCII 冒号）是 JSON 示例而非变量占位符。
 #    否则提示词里未加引号的 JSON 示例（如 {tasks: [...]}）会被误当作变量：
@@ -182,9 +206,13 @@ def validate_prompt_variables(key: str, **kwargs) -> list[str]:
     """
     required = get_prompt_variables(key)
     kwargs_lower = {k.lower(): v for k, v in kwargs.items()}
-    missing = [v for v in required if v.lower() not in kwargs_lower or kwargs_lower[v.lower()] is None]
-    # 过滤误报：保留业务语义变量，只抑制"JSON 示例"类短字段
     template = _ALL_PROMPTS.get(key, {}).get("content", "")
+    # ✅ 整行独占的可选区块（2026-09-26）：未传时 render_prompt 整行丢弃，
+    #    不留残留占位符 → 不算"缺失"，否则每次调用都刷无意义 WARNING。
+    missing = [v for v in required
+               if v.lower() not in kwargs_lower or kwargs_lower[v.lower()] is None
+               if not _is_optional_block_var(v, template)]
+    # 过滤误报：保留业务语义变量，只抑制"JSON 示例"类短字段
     missing = [v for v in missing if not _is_false_positive(key, v, template)]
     return missing
 
@@ -257,6 +285,17 @@ def render_prompt(template: str, **kwargs) -> str:
         result = pattern.sub(_replace, template)
     else:
         result = template
+
+    # ✅ 整行独占占位符 = 可选区块（2026-09-26）：模板里单独占一行的
+    #    {scheme_basis} 之类区块，语义是「有值才注入这一段」。
+    #    旧实现不丢行 → 调用方未传时**字面量 "{scheme_basis}" 原样进入发给
+    #    模型的提示词**，模型要么把它当正文读、要么按未知变量编内容。
+    #    只处理「整行就是这一个占位符」；行内混排（如 "【事实】：{project_facts}"）
+    #    不在此处理 —— 空串渲染成 "【事实】：" 是可接受的降级。
+    result = re.sub(r"^[ \t]*\{[A-Za-z_][A-Za-z0-9_]*\}[ \t]*\r?\n", "",
+                    result, flags=re.MULTILINE)
+    result = re.sub(r"^[ \t]*\{[A-Za-z_][A-Za-z0-9_]*\}[ \t]*$", "",
+                    result, flags=re.MULTILINE)
 
     # ✅ 只在【模板】层面检测未解析占位符：
     #    旧实现检测的是"渲染后文本"，会把注入的文档正文 / 模型原始输出中

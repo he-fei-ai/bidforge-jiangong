@@ -1173,7 +1173,10 @@ async def _fallback_chain() -> list[dict]:
 #:    ``resolve_scene_config`` 只查路由表、不校验白名单。
 KNOWN_SCENES: dict[str, str] = {
     # —— 目录 ——
-    "outline": "目录生成（总调度）",
+    # ⚠️ 不设 "outline" 总调度场景：目录链路的每个调用点都已细分打标
+    #    （draft / level1 / sublevel / review / fix / adjust / recognition），
+    #    再留一个从不使用的"总调度"入口只会让人在「场景模型路由」里
+    #    配了它却发现运行时不生效（静默失效）。故此处只登记真实调用点。
     "outline_draft": "目录草稿生成",
     "outline_level1": "一级章节生成",
     "outline_sublevel": "子级章节生成",
@@ -1182,6 +1185,8 @@ KNOWN_SCENES: dict[str, str] = {
     "outline_adjust": "目录调整",
     "outline_recognition": "上传目录 AI 识别",
     # —— 正文 ——
+    # "content" 为总调度场景（正文链路入口），"场景模型路由"的白名单会
+    # 校验它确实被引用，故保留；细分统计仍以 draft/continue/shrink 为准。
     "content": "正文生成（总调度）",
     "content_draft": "正文生成",
     "content_continue": "正文续写扩充",
