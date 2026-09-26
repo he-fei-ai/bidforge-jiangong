@@ -1,0 +1,16 @@
+# docchart 配置样例：复制为 my.yaml 后用 --config my.yaml 传入
+render:
+  fonts: ["Microsoft YaHei", "SimHei"]
+  dpi: 150
+  figure_size: [8.0, 4.5]
+  flow_size: [8.0, 6.0]
+detection:
+  min_confidence: 0.35
+  table_min_rows: 3
+  ref_window_blocks: 12
+  semantic_hint: true
+output:
+  image_format: png        # png / svg
+  image_dir: charts
+  caption_prefix: 图
+  auto_caption_suffix: （AI 补全）

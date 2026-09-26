@@ -1,0 +1,343 @@
+import { useEffect, useState } from "react";
+import {
+  App, Card, Table, Button, Modal, Form, Input, Select, Space,
+  Tag, Typography,
+} from "antd";
+import { PlusOutlined, DeleteOutlined, EditOutlined,
+  FolderOutlined, FileTextOutlined, RocketOutlined,
+  ArrowUpOutlined } from "@ant-design/icons";
+import { useNavigate } from "react-router-dom";
+import { hookAntdMessage } from "../utils/activityCenter";
+import { projectsApi } from "../api";
+
+const { Title, Text } = Typography;
+
+const ENGINEERING_TYPES = [
+  "房建", "市政", "公路", "铁路", "水利", "电力",
+  "地铁", "桥梁", "隧道", "管廊", "机电安装",
+];
+
+export default function ProjectListPage() {
+  const { message: _antdMsg, modal } = App.useApp();
+  const msg = hookAntdMessage(_antdMsg, "项目列表");
+  const navigate = useNavigate();
+  const [items, setItems] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [form] = Form.useForm();
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const { data } = await projectsApi.list();
+      setItems(data.items || []);
+    } catch (e: any) {
+      msg.error(e.message || "加载失败");
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const handleSubmit = async () => {
+    try {
+      const values = await form.validateFields();
+      setSubmitting(true);
+      if (editingId) {
+        await projectsApi.update(editingId, values);
+        msg.success("项目已更新");
+      } else {
+        await projectsApi.create(values);
+        msg.success("项目创建成功");
+      }
+      setModalOpen(false);
+      setEditingId(null);
+      form.resetFields();
+      load();
+    } catch (e: any) {
+      if (e.errorFields) return;
+      msg.error(e.message || (editingId ? "更新失败" : "创建失败"));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const openEdit = (record: any) => {
+    setEditingId(record.id);
+    form.setFieldsValue({
+      name: record.name,
+      engineering_type: record.engineering_type,
+      description: record.description,
+      location: record.location,
+      client_name: record.client_name,
+      contractor_name: record.contractor_name,
+      project_period: record.project_period,
+    });
+    setModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setModalOpen(false);
+    setEditingId(null);
+    form.resetFields();
+  };
+
+  const handleDelete = async (id: string) => {
+    modal.confirm({
+      title: "确认删除",
+      content: "删除项目将级联删除所有方案、章节和附件，不可恢复。",
+      okType: "danger",
+      onOk: async () => {
+        try {
+          await projectsApi.delete(id);
+          msg.success("已删除");
+          load();
+        } catch (e: any) {
+          msg.error(e.message || "删除失败");
+        }
+      },
+    });
+  };
+
+  // ---------- 统计数据 ----------
+  const totalProjects = items.length;
+  const totalSchemes = items.reduce((s, p) => s + (p.scheme_count ?? 0), 0);
+  const activeProjects = items.filter((p) => !p.status || p.status === "active").length;
+
+  const columns = [
+    {
+      title: "项目名称", dataIndex: "name", key: "name",
+      render: (text: string, record: any) => (
+        <a onClick={() => navigate(`/project/${record.id}`)}>{text}</a>
+      ),
+    },
+    {
+      title: "工程类型", dataIndex: "engineering_type", key: "engineering_type",
+      render: (t: string) => t ? (
+        <Tag
+          color="blue"
+          style={{
+            borderRadius: 3,
+            border: "1px solid rgba(0, 212, 255, 0.3)",
+            background: "rgba(0, 212, 255, 0.08)",
+            color: "#0088AA",
+            fontWeight: 500,
+          }}
+        >
+          {t}
+        </Tag>
+      ) : "-",
+    },
+    { title: "方案数", dataIndex: "scheme_count", key: "scheme_count",
+      render: (n: number) => (
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "#0088AA", fontWeight: 600 }}>
+          {n ?? 0}
+        </span>
+      ),
+    },
+    { title: "建设单位", dataIndex: "client_name", key: "client_name" },
+    { title: "状态", dataIndex: "status", key: "status",
+      render: (s: string) => (
+        <Tag color={s === "active" || !s ? "green" : "default"}>{s || "active"}</Tag>
+      ),
+    },
+    {
+      title: "操作", key: "action",
+      render: (_: any, record: any) => (
+        <Space>
+          <Button size="small" type="link" onClick={() => navigate(`/project/${record.id}`)}>进入</Button>
+          <Button size="small" type="link" onClick={() => openEdit(record)}>编辑</Button>
+          <Button size="small" danger type="link" icon={<DeleteOutlined />}
+            onClick={() => handleDelete(record.id)}>删除</Button>
+        </Space>
+      ),
+    },
+  ];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>
+      {/* ========== Hero 区域 ========== */}
+      <div
+        style={{
+          position: "relative",
+          padding: "24px 28px",
+          background: "linear-gradient(135deg, #0F2B4F 0%, #16395F 60%, #1A4D7A 100%)",
+          borderRadius: 4,
+          overflow: "hidden",
+          flexShrink: 0,
+        }}
+      >
+        {/* 蓝图网格 */}
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            backgroundImage:
+              "linear-gradient(rgba(0, 212, 255, 0.12) 1px, transparent 1px)," +
+              "linear-gradient(90deg, rgba(0, 212, 255, 0.12) 1px, transparent 1px)",
+            backgroundSize: "24px 24px",
+            pointerEvents: "none",
+          }}
+        />
+        {/* 装饰光效 */}
+        <div
+          style={{
+            position: "absolute",
+            top: -60, right: -40, width: 200, height: 200,
+            borderRadius: "50%",
+            background: "radial-gradient(circle, rgba(0, 212, 255, 0.25), transparent 70%)",
+            pointerEvents: "none",
+          }}
+        />
+        <div style={{ position: "relative", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <Title level={3} style={{ color: "#FFFFFF", margin: 0, fontSize: 22, fontWeight: 700 }}>
+              项目列表
+            </Title>
+            <Text
+              style={{
+                color: "rgba(0, 212, 255, 0.75)",
+                fontSize: 12,
+                letterSpacing: "1.5px",
+                fontFamily: "'JetBrains Mono', monospace",
+                marginTop: 4,
+                display: "block",
+              }}
+            >
+              BLUEPRINT ENGINEERING · PROJECTS
+            </Text>
+          </div>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            size="large"
+            onClick={() => { setEditingId(null); form.resetFields(); setModalOpen(true); }}
+            style={{
+              height: 40,
+              paddingInline: 20,
+              background: "#00D4FF",
+              borderColor: "#00D4FF",
+              fontWeight: 600,
+              boxShadow: "0 4px 14px rgba(0, 212, 255, 0.35)",
+            }}
+          >
+            新建项目
+          </Button>
+        </div>
+      </div>
+
+      {/* ========== 统计卡片 ========== */}
+      <div className="bp-project-stats" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, flexShrink: 0, minWidth: 0, width: "100%" }}>
+        {[
+          { icon: <FolderOutlined />, label: "项目总数", value: totalProjects, color: "#00D4FF" },
+          { icon: <FileTextOutlined />, label: "方案总数", value: totalSchemes, color: "#00C853" },
+          { icon: <RocketOutlined />, label: "活跃项目", value: activeProjects, color: "#FFB800" },
+        ].map((s) => (
+          <div
+            key={s.label}
+            style={{
+              background: "#FFFFFF",
+              borderRadius: 4,
+              padding: "14px 18px",
+              display: "flex",
+              alignItems: "center",
+              gap: 14,
+              border: "1px solid #E8EDF4",
+              transition: "box-shadow 0.2s",
+            }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.boxShadow = "0 2px 6px rgba(15,43,79,0.06), 0 4px 12px rgba(15,43,79,0.05)"; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.boxShadow = "none"; }}
+          >
+            <div
+              style={{
+                width: 40, height: 40, borderRadius: 4,
+                background: `${s.color}15`,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                color: s.color, fontSize: 20,
+              }}
+            >
+              {s.icon}
+            </div>
+            <div>
+              <div style={{ fontSize: 22, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: "#1A2332", lineHeight: 1.1 }}>
+                {s.value}
+              </div>
+              <div style={{ fontSize: 12, color: "#8B99AC", marginTop: 2 }}>{s.label}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* ========== 项目表格 ========== */}
+      <Card
+        variant="outlined"
+        style={{ flex: 1, minHeight: 0, borderRadius: 4 }}
+        styles={{ body: { padding: 0, height: "100%" } }}
+      >
+        <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+          <div
+            style={{
+              display: "flex", justifyContent: "space-between",
+              alignItems: "center", padding: "12px 20px",
+              borderBottom: "1px solid #E8EDF4", flexShrink: 0,
+            }}
+          >
+            <span style={{ fontWeight: 600, color: "#1A2332", fontSize: 14 }}>
+              项目清单
+              <span style={{ color: "#8B99AC", fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
+                共 {totalProjects} 个项目 · {totalSchemes} 个方案
+              </span>
+            </span>
+            <Button size="small" icon={<ArrowUpOutlined />} onClick={load}>刷新</Button>
+          </div>
+          <Table
+            dataSource={items}
+            columns={columns}
+            rowKey="id"
+            loading={loading}
+            pagination={{ pageSize: 20, showSizeChanger: false }}
+            style={{ flex: 1 }}
+          />
+        </div>
+      </Card>
+
+      {/* ========== 编辑弹窗 ========== */}
+      <Modal
+        title={editingId ? "编辑项目" : "新建项目"}
+        open={modalOpen}
+        forceRender
+        onOk={handleSubmit}
+        confirmLoading={submitting}
+        okText={editingId ? "保存" : "创建"}
+        onCancel={closeModal}
+        width={600}
+      >
+        <Form form={form} layout="vertical">
+          <Form.Item name="name" label="项目名称" rules={[{ required: true }]}>
+            <Input placeholder="如：XX商业综合体项目" />
+          </Form.Item>
+          <Form.Item name="engineering_type" label="工程类型">
+            <Select options={ENGINEERING_TYPES.map(t => ({ label: t, value: t }))} />
+          </Form.Item>
+          <Form.Item name="description" label="项目描述">
+            <Input.TextArea rows={2} />
+          </Form.Item>
+          <Form.Item name="location" label="项目地点">
+            <Input placeholder="如：北京市朝阳区" />
+          </Form.Item>
+          <Form.Item name="client_name" label="建设单位">
+            <Input />
+          </Form.Item>
+          <Form.Item name="contractor_name" label="施工单位">
+            <Input />
+          </Form.Item>
+          <Form.Item name="project_period" label="项目周期">
+            <Input placeholder="如：450日历天" />
+          </Form.Item>
+        </Form>
+      </Modal>
+    </div>
+  );
+}

@@ -1,0 +1,67 @@
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import ReactDOM from "react-dom/client";
+import { App as AntdApp, ConfigProvider, theme } from "antd";
+import zhCN from "antd/locale/zh_CN";
+import App from "./App";
+import "./index.css";
+import {
+  BLUEPRINT_TOKENS,
+  BLUEPRINT_TOKENS_DARK_OVERRIDE,
+  BlueprintThemeContext,
+  LS_THEME_KEY,
+  readInitialTheme,
+  type ThemeMode,
+} from "./utils/theme";
+
+/**
+ * 工程蓝图 · Blueprint Engineering
+ * =================================
+ * 主题切换：亮色 / 深色，持久化到 localStorage。
+ * 侧边栏始终保持深色（蓝图感），仅主区域跟随切换。
+ */
+
+function BlueprintRoot() {
+  const [mode, setModeState] = useState<ThemeMode>(() => readInitialTheme());
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-bp-mode", mode);
+    try { localStorage.setItem(LS_THEME_KEY, mode); } catch { /* ignore */ }
+  }, [mode]);
+
+  const setMode = useCallback((m: ThemeMode) => setModeState(m), []);
+  const toggle = useCallback(() => setModeState((m) => (m === "dark" ? "light" : "dark")), []);
+
+  const algorithm = mode === "dark" ? theme.darkAlgorithm : theme.defaultAlgorithm;
+  const tokens = useMemo(() => {
+    if (mode === "dark") {
+      return { ...BLUEPRINT_TOKENS, ...BLUEPRINT_TOKENS_DARK_OVERRIDE };
+    }
+    return BLUEPRINT_TOKENS;
+  }, [mode]);
+
+  const ctxValue = useMemo(() => ({
+    mode,
+    toggle,
+    setMode,
+    algorithm: () => algorithm,
+  }), [mode, toggle, setMode, algorithm]);
+
+  return (
+    <BlueprintThemeContext.Provider value={ctxValue}>
+      <ConfigProvider
+        locale={zhCN}
+        theme={{ algorithm, token: tokens }}
+      >
+        <AntdApp>
+          <App />
+        </AntdApp>
+      </ConfigProvider>
+    </BlueprintThemeContext.Provider>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <BlueprintRoot />
+  </React.StrictMode>
+);

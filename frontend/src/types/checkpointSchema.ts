@@ -1,0 +1,34 @@
+// AUTO-GENERATED — DO NOT EDIT
+// Source: backend/app/services/checkpoint_schema.py
+// Regenerate: python tools/generate_checkpoint_schema.py
+
+export interface outline_result {
+  event?: string;
+  partial?: boolean;
+  outline?: unknown[];
+  review?: Record<string, unknown>;
+  failed_chapters?: unknown[];
+  failed_count?: number;
+}
+
+export interface content_result {
+  event?: string;
+  message?: string;
+  done?: number;
+  total?: number;
+  failed_count?: number;
+  failed_sections?: unknown[];
+  words?: number;
+  word_count?: number;
+  run_words?: number;
+  over_count?: number;
+}
+
+export interface TaskTerminalInfo {
+  status: string;
+  message?: string;
+  progress?: number;
+  outline_result?: outline_result;
+  content_result?: content_result;
+  [k: string]: unknown;
+}

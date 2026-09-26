@@ -1,0 +1,2815 @@
+"""全局事实变量路由（增强版）
+
+增强点（基于可行性研究报告）：
+1. 支持结构化字段：source_ref, is_simulated, confidence, is_resolved, has_conflict
+2. 分段提取管线：长资料智能切分 → 并发提取 → 合并去重 → 矛盾检测
+3. 缓存失效联动：事实变更后自动清空 export_cache
+4. 模拟值闸门：正文生成前可强制拦截未确认模拟值
+5. 统计 API：模拟值占比、矛盾统计、待审核统计
+"""
+
+import asyncio
+from contextlib import asynccontextmanager
+import json
+import logging
+import re
+import uuid
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+
+from app.config import DATA_DIR, FACT_UPLOADS_DIR, settings
+from app.db import get_db
+from app.models import FactGroupIn, FactGroupUpdate
+from app.services.ai.json_response import collect_json_response
+from app.services.ai.prompts._registry import render
+from app.services.file_parser import (
+    SUPPORTED_EXTENSIONS, ParseError, parse_file_content_ex, signature_valid,
+    dump_parse_warnings,
+)
+from app.services.facts_extractor import (
+    invalidate_export_cache, extract_value_from_markdown_line, normalize_key,
+    CATEGORY_TITLES, CATEGORY_TO_FACT_TYPE, is_safety_critical_name,
+    _safe_confidence, strip_simulated_marker, append_simulated_marker,
+    is_simulated_marked, _clip_excerpt, MAX_SOURCE_EXCERPT,
+)
+from app.services.doc_pipeline import pipeline as doc_pipeline
+# ✅ 2026-09-25：文档分类唯一事实源（分类清单 / 自动分类规则 / 提取优先级）
+from app.services.doc_categories import (
+    AUTO_CLASSIFY_RULES, auto_classify_document, category_options,
+)
+# ✅ 2026-09-24：全局事实「九大章节分类体系」四维标注（纯函数、零 AI、零 DB 依赖）
+from app.services.facts_classification import (
+    CHAPTER_ORDER, CHAPTER_TITLES, chapter_of_row, classify_source_kind,
+    chapter_field_completeness, classify_chapter_from_text, classify_fact_attr,
+    dimensions_for_row, extract_danger_params, FACT_ATTR_TITLES,
+    nine_chapter_summary, SOURCE_KIND_TITLES, category_map_payload,
+    shared_chapters_for,
+)
+# 提取项目模块的分类与阈值判定核心（本仓「分类单一事实源」，不重复维护阈值表）
+from app.services import scheme_classification as scheme_clf
+from app.utils.log_context import new_trace_id, set_context
+
+logger = logging.getLogger("global_facts")
+router = APIRouter(prefix="/api/v1/global-facts", tags=["global_facts"])
+
+MAX_UPLOAD_BYTES = 30 * 1024 * 1024  # 单文件上传上限 30MB
+# ✅ 完整性：解析结果落库上限。旧值 80000 会让长篇招标文件在解析阶段就被截断，
+#    后续无论提取多少段都拿不到后半部分内容。SQLite TEXT 可容纳，放宽到 40 万字
+#    （≈ 300~400 页），配合 MAX_CHUNKS=60 基本覆盖常规招标文件全文。
+MAX_PARSED_CHARS = 400_000
+
+# ✅ 资源配额：单次上传请求的文件数与累计体积上限。
+#    单文件 30MB 的限制挡不住"一个请求塞进大量文件"——落盘与随后的解析
+#    会线性放大磁盘/内存占用，且解析是串行阻塞在服务进程内的。
+MAX_UPLOAD_FILES_PER_REQUEST = 20
+MAX_UPLOAD_TOTAL_BYTES = 200 * 1024 * 1024
+
+
+# ---------------------------------------------------------------------------
+# 查询接口
+# ---------------------------------------------------------------------------
+
+def _coerce_conflict_values(raw: str) -> list[dict]:
+    """把冲突候选 JSON 解析为 [{value:str, source:str, confidence:float}]。
+
+    ✅ 序列类候选值（list）统一转字符串，保证前端可直接渲染。
+    """
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    out: list[dict] = []
+    for c in parsed:
+        if not isinstance(c, dict):
+            continue
+        v = c.get("value", "")
+        if isinstance(v, (list, tuple)):
+            v = "、".join(str(x) for x in v if x is not None)
+        elif v is not None and not isinstance(v, str):
+            v = str(v)
+        raw_conf = c.get("confidence")
+        # ✅ BUG 修复（两处）：
+        #   1. `x or 1.0` 会把合法的 0 置信度吞成 1.0（0 为 falsy），
+        #      模拟兜底值常为 0~0.3，被抬高后前端失去"低置信度"提示依据。
+        #   2. `float(raw_conf)` 未防御脏值：模型若输出 "high"/"高" 会抛
+        #      ValueError → 整个列表接口 500（所有事实都读不出来）。
+        out.append({
+            "value": v or "",
+            "source": str(c.get("source", "") or ""),
+            "confidence": _safe_confidence(raw_conf, 1.0),
+            # ✅ 候选值自带的模拟值语义一并下发：前端可标注「候选亦为模拟值」，
+            #    resolve_conflict 也据此重算被采纳行的 is_simulated。
+            #    旧数据无该字段时按 False（候选来自文档摘录，视为真实证据）。
+            "is_simulated": bool(c.get("is_simulated")),
+        })
+    return out
+
+
+def _find_conflict_candidate(raw: str, value: str) -> dict | None:
+    """在 conflict_keys 候选中按值匹配，返回候选元数据（含 is_simulated）。
+
+    ✅ 供 resolve_conflict 用：裁决换值时按「候选值自身的模拟值语义」重算该行的
+    is_simulated，而不是沿用原行的旧标记（编造值被裁决为文档实值后，
+    原 is_simulated=1 会残留 → stats.simulated 永不归零）。
+    """
+    target = strip_simulated_marker(str(value or ""))
+    for c in _coerce_conflict_values(raw):
+        if strip_simulated_marker(c.get("value") or "") == target:
+            return c
+    return None
+
+
+def _parse_source_ref(raw: str) -> list[dict]:
+    """解析 source_ref 列（JSON 数组 / 旧版纯文件名字符串）为统一结构。
+
+    ✅ BUG 修复：旧实现在 JSON 解析失败时直接返回 []，导致早期以纯文本写入
+    来源的旧数据在界面上"来源"一栏永远为空，且 persist_extraction 的
+    「手动录入保护」判定失效（进而被重新提取误删）。
+    """
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return [{"file": str(raw), "quote": ""}]
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        return []
+    out: list[dict] = []
+    for ref in parsed:
+        if isinstance(ref, dict):
+            out.append({"file": str(ref.get("file") or ""),
+                        "quote": str(ref.get("quote") or "")})
+        elif ref:
+            out.append({"file": str(ref), "quote": ""})
+    return out
+
+
+def _fact_dimension_fields(row: dict, name: str, value: str, fact_key: str,
+                           source_list: list, fact_type: str | None = None) -> dict:
+    """派生/回读九大章节四维标注（读路径惰性兜底，纯函数、不写库）。
+
+    口径（与提取管线 ``apply_fact_dimensions`` 一致）：
+    - 库列有值 → 原样回传（尊重人工归类，不被重提取冲掉）；
+    - 库列为空（2026-09-24 前的历史行 / 手工录入行）→ 按确定性规则派生。
+    历史行因此不会在「章节视图」与「按章节精选正文」中丢失。
+
+    ``fact_type`` 为空时使用行内 ``fact_type`` 列；``list_facts`` 会把已按
+    ``CATEGORY_TO_FACT_TYPE`` 反查出的有效值传入，让历史行也能更准确地分章。
+    """
+    src = (source_list[0].get("file") if source_list else "") or \
+          (row.get("source") or "")
+    stored_kind = row.get("source_kind") or ""
+    stored_chapter = row.get("chapter") or ""
+    stored_attr = row.get("fact_attr") or ""
+    stored_shared = row.get("is_shared")
+
+    dims = dimensions_for_row({
+        "name": name,
+        "value": value,
+        "category": row.get("category") or "",
+        # 传入的有效 fact_type 优先（list_facts 已按 CATEGORY_TO_FACT_TYPE 反查）
+        "fact_type": fact_type if fact_type is not None else (row.get("fact_type") or ""),
+        "fact_key": fact_key,
+        "chapter": stored_chapter,
+        "fact_attr": stored_attr,
+        "source_kind": stored_kind,
+        "is_shared": bool(stored_shared) if stored_shared is not None else False,
+    })
+    return {
+        # 九大章节归属（overview/basis/plan/technique/safety/personnel/
+        # acceptance/emergency/calc_drawings；空串=未分类）
+        "chapter": stored_chapter or dims.get("chapter") or "",
+        "chapter_title": CHAPTER_TITLES.get(stored_chapter or dims.get("chapter") or "", ""),
+        # 事实属性（quantitative 定量 / qualitative 定性 / relation 关系 / norm 规范）
+        "fact_attr": stored_attr or dims.get("fact_attr") or "",
+        # 数据来源（bid_doc/drawing/survey/overall_plan/manual）
+        "source_kind": stored_kind or classify_source_kind(src, row.get("source_ref") or ""),
+        # 跨章节共性事实（True = 多章节复用，避免重复提取）
+        "is_shared": bool(stored_shared) or bool(dims.get("is_shared")),
+        "shared_chapters": list(dims.get("shared_chapters") or ()),
+    }
+
+
+def _chapter_stats_for_items(items: list[dict]) -> dict:
+    """九大章节聚合统计 + 字段完整性差集（供前端章节视图直接渲染）。
+
+    Args:
+        items: ``list_facts`` 已回解出的条目（含 name/value/chapter/fact_attr/...）。
+
+    Returns:
+        ``{"chapters": [...], "totals": {...}, "field_completeness": {...}}``
+    """
+    rows = [
+        {"name": it.get("name", ""), "value": it.get("value", ""),
+         "chapter": it.get("chapter") or "", "fact_attr": it.get("fact_attr") or "",
+         "source_kind": it.get("source_kind") or "",
+         "is_shared": it.get("is_shared", False),
+         "category": it.get("category") or "", "fact_type": it.get("fact_type") or ""}
+        for it in items
+    ]
+    summary = nine_chapter_summary(rows)
+    # 事实属性 / 数据来源 两个维度的分布（四维分类的另两个维度）
+    by_attr: dict[str, int] = {k: 0 for k in FACT_ATTR_TITLES}
+    by_kind: dict[str, int] = {k: 0 for k in SOURCE_KIND_TITLES}
+    for it in rows:
+        a = it.get("fact_attr") or ""
+        if a in by_attr:
+            by_attr[a] += 1
+        k = it.get("source_kind") or ""
+        if k in by_kind:
+            by_kind[k] += 1
+    out = {
+        "chapters": summary["chapters"],
+        "totals": summary["totals"],
+        "by_fact_attr": by_attr,
+        "by_source_kind": by_kind,
+        "shared_count": sum(1 for it in rows if it.get("is_shared")),
+    }
+    return out
+
+
+async def _validate_fact_scope(db, scheme_id: str, project_id: str) -> tuple[str, str]:
+    """校验事实读取作用域，返回 ``(有效 scheme_id, 有效 project_id)``。
+
+    ``/chapters`` 与 ``/danger-check`` 历史实现允许两个 ID 都为空，最终退化为
+    ``SELECT * FROM global_facts``，会把全库事实暴露给无作用域请求。这里统一做
+    存在性校验：有 scheme 时反查其真实 project；仅传 project 时也必须真实存在。
+    """
+    sid = scheme_id.strip() if isinstance(scheme_id, str) else ""
+    pid = project_id.strip() if isinstance(project_id, str) else ""
+    if sid:
+        cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (sid,))
+        row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "方案不存在")
+        real_pid = str(row[0] or "")
+        if pid and pid != real_pid:
+            raise HTTPException(400, "scheme_id 与 project_id 不匹配")
+        return sid, real_pid
+    if not pid:
+        raise HTTPException(400, "需要 scheme_id 或 project_id")
+    cur = await db.execute("SELECT id FROM projects WHERE id=?", (pid,))
+    if not await cur.fetchone():
+        raise HTTPException(404, "项目不存在")
+    return "", pid
+
+
+async def _assert_fact_in_scheme_scope(db, fact_id: str, scheme_id: str) -> dict:
+    """确保按 fact_id 的写操作属于当前方案或其项目共享范围。
+
+    scheme_id 为空时保留旧脚本/内部调用兼容；前端事实写接口全部传当前方案，
+    防止路由切换竞态或旧弹窗误改其它方案数据。
+    """
+    cur = await db.execute(
+        "SELECT id, project_id, scheme_id FROM global_facts WHERE id=? OR group_id=? LIMIT 1",
+        (fact_id, fact_id))
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "事实不存在")
+    if not scheme_id:
+        return dict(row)
+    target_pid = str(row["project_id"] or "")
+    target_sid = str(row["scheme_id"] or "")
+    if target_sid:
+        if target_sid != scheme_id:
+            raise HTTPException(409, "事实不属于当前方案，请刷新后重试")
+    else:
+        cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
+        current = await cur.fetchone()
+        if not current or str(current[0] or "") != target_pid:
+            raise HTTPException(409, "项目共享事实不属于当前方案，请刷新后重试")
+    return dict(row)
+
+
+async def _invalidate_fact_scope_cache(db, scheme_id: str, project_id: str = "") -> None:
+    """事实变更后失效导出缓存；项目共享事实需覆盖项目下全部方案。"""
+    if scheme_id:
+        await invalidate_export_cache(db, scheme_id)
+        return
+    if not project_id:
+        return
+    cur = await db.execute("SELECT id FROM schemes WHERE project_id=?", (project_id,))
+    for item in await cur.fetchall():
+        await invalidate_export_cache(db, str(item[0] or ""))
+        if not item[0]:
+            break
+
+
+async def _load_fact_rows(db, scheme_id: str, project_id: str) -> list[dict]:
+    """按统一作用域取全局事实：方案私有 + 同项目共享事实。
+
+    该集合与 ``build_injectable_facts_query`` 保持一致；仅传 project_id 时保持
+    历史语义，返回该项目下全部事实。
+    """
+    sid, pid = await _validate_fact_scope(db, scheme_id, project_id)
+    if sid and pid:
+        sql = (
+            "SELECT * FROM global_facts WHERE "
+            "(scheme_id=? OR (project_id=? AND (scheme_id='' OR scheme_id IS NULL)))"
+        )
+        params: list = [sid, pid]
+    elif sid:
+        sql, params = "SELECT * FROM global_facts WHERE scheme_id=?", [sid]
+    else:
+        sql, params = "SELECT * FROM global_facts WHERE project_id=?", [pid]
+    sql += " ORDER BY category, group_id, updated_at, id"
+    cur = await db.execute(sql, params)
+    return [dict(r) for r in await cur.fetchall()]
+
+
+@router.get("")
+async def list_facts(
+    scheme_id: str = Query(""),
+    project_id: str = Query(""),
+    db=Depends(get_db),
+):
+    """查询全局事实（支持按 scheme_id 或 project_id 过滤）
+
+    返回增强版数据，包含 category/source_ref/is_simulated/confidence/
+    is_resolved/has_conflict 等字段。
+    """
+    sql = "SELECT * FROM global_facts WHERE 1=1"
+    params: list = []
+    if scheme_id:
+        # 与目录/正文/导出一致：方案页必须同时看到本方案事实和同项目共享事实，
+        # 否则会出现「页面看不见，但生成链路实际会注入」的隐蔽数据断链。
+        real_pid = ""
+        if project_id:
+            real_pid = project_id.strip()
+        else:
+            cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
+            scheme_row = await cur.fetchone()
+            if not scheme_row:
+                raise HTTPException(404, "方案不存在")
+            real_pid = str(scheme_row[0] or "")
+        if real_pid:
+            sql += (" AND (scheme_id=? OR (project_id=? AND "
+                    "(scheme_id='' OR scheme_id IS NULL)))")
+            params.extend([scheme_id, real_pid])
+        else:
+            sql += " AND scheme_id=?"
+            params.append(scheme_id)
+    elif project_id:
+        sql += " AND project_id=?"
+        params.append(project_id)
+    if not scheme_id and not project_id:
+        raise HTTPException(400, "需要 scheme_id 或 project_id")
+    # ✅ 稳定排序：末尾追加 id 兜底，避免 updated_at 相同（批量插入时常见）
+    #    导致同一分组内事实顺序每次刷新都抖动，用户编辑时难以定位。
+    sql += " ORDER BY category, group_id, updated_at, id"
+
+    cur = await db.execute(sql, params)
+    rows = [dict(r) for r in await cur.fetchall()]
+
+    # 按 group_id 聚合
+    # ✅ BUG 修复：分组标题此前未落库，重新查询时误用单条事实名（如"项目经理"）
+    #    作为分组标题（应为"人员角色"）。现优先取 group_title 列，
+    #    回退 category 中文名，最后才用事实名兜底。
+    def _resolve_group_title(row: dict) -> str:
+        gtitle = (row.get("group_title") or "").strip()
+        if gtitle:
+            return gtitle
+        cat = (row.get("category") or "").strip()
+        return CATEGORY_TITLES.get(cat, "") or (row.get("title") or "")
+
+    groups: dict[str, dict] = {}
+    for r in rows:
+        gid = r.get("group_id") or r["id"]
+        if gid not in groups:
+            groups[gid] = {
+                "id": gid,
+                "title": _resolve_group_title(r),
+                # ✅ BUG 修复：group.content 需聚合【全部分行】的 Markdown 内容，
+                # 供前端编辑弹窗使用。旧实现只取首行 → 前端编辑保存时后端按
+                # 首行重建整个分组，分组内第 2..N 行被永久删除（数据丢失）。
+                "_content_lines": [],
+                "category": r.get("category", ""),
+                "items": [],
+            }
+        elif not groups[gid]["title"]:
+            groups[gid]["title"] = _resolve_group_title(r)
+
+        # 解析单条事实
+        # ✅ 兼容旧数据：source_ref 可能是 JSON 数组，也可能是早期写入的纯文件名
+        source_list = _parse_source_ref(r.get("source_ref", "") or "")
+
+        # 解析矛盾候选值（conflict_keys 列实际存储的是 conflict_values 的 JSON）
+        # ✅ 兼容旧数据：value 可能是数组，统一转字符串，避免前端渲染数组报错
+        conflict_values = _coerce_conflict_values(r.get("conflict_keys", "") or "")
+
+        # 从 content 中提取结构化 name/value（兼容旧数据）
+        name = r.get("title", "")
+        content = r.get("content", "")
+        value = ""
+        m = re.match(r'^-?\s*\*\*(.+?)\*\*\s*[:：]\s*(.*)', (content or "").strip())
+        if m:
+            name = m.group(1)
+            # ✅ BUG 修复（2026-09-21）：旧正则 `\s*\*\(?\s*(?:⚠️?\s*)?模拟值\s*\)?\*\s*$`
+            #    只能从 `*` 开始匹配，而 `⚠️` 前缀写在 `*` 之前 → **残留半个标记**：
+            #      "15.0m ⚠️*(模拟值)*"  → value = "15.0m ⚠️"（悬空 emoji 当正文展示）
+            #      "12.5m  *(⚠ 模拟值)*" → value = "12.5m"（to_db_row 写法恰好干净）
+            #    两种落库写法结果不一致，且脏值 "15.0m ⚠️" 被 _apply_item_updates /
+            #    persist_extraction 当作真实取值参与「值是否变化」比较 → 凡走过
+            #    PATCH（分组重建 / 单条编辑 / 矛盾裁决）或手工新增的模拟值事实，
+            #    其值恒被判为「已变化」，2026-09-20 修的「只改分类/改名静默清矛盾」
+            #    漏洞实际未堵住（详见 facts_extractor.SIMULATED_MARKER_RE 说明）。
+            value = strip_simulated_marker(m.group(2))
+        elif (content or "").strip():
+            # ✅ BUG 修复：旧实现仅在 content 以 "-" 开头时才解析 name/value，
+            #    非列表行（整段文本、或没写减号的 "**名称**: 值"）会把整块原文
+            #    （含 Markdown 标记前缀）当作 value 回传 → 前端原样显示 "**x**: y"。
+            _, value = extract_value_from_markdown_line(content)
+
+        item = {
+            "fact_id": r["id"],
+            "name": name,
+            "value": value or content,
+            "source": source_list[0]["file"] if source_list else "",
+            "source_ref": source_list[0]["quote"] if source_list else "",
+            "is_simulated": bool(r.get("is_simulated", 0)),
+            # ✅ 修复：confidence 列若被写入脏值（旧数据/手工 SQL），
+            #    float() 会抛异常导致整个列表接口 500。
+            "confidence": _safe_confidence(r.get("confidence"), 1.0),
+            "is_resolved": bool(r.get("is_resolved", 1)),
+            "has_conflict": bool(r.get("has_conflict", 0)),
+            "conflict_values": conflict_values,
+            "conflict_keys": r.get("conflict_keys", ""),
+            "fact_key": r.get("fact_key", ""),
+            "category": r.get("category", ""),
+            # 方案私有事实与项目共享事实会同时进入当前方案页面；显式标记作用域，
+            # 防止用户把跨方案共享事实误判为本方案私有数据。
+            "scheme_id": r.get("scheme_id") or "",
+            "scope": "project" if not (r.get("scheme_id") or "") else "scheme",
+            "is_stale": bool(r.get("is_stale", 0)),
+            # ✅ 增强：回传提取阶段产出的分类扩展字段。
+            #    is_safety_critical 始终以程序规则复算（启发式为权威下限，覆盖历史/手动行），
+            #    fact_type 优先取提取期落库的列、缺失时由 category 反查，供前端展示与注入决策使用。
+            "is_safety_critical": is_safety_critical_name(
+                name, value or content, r.get("fact_key", "")),
+            "fact_type": (r.get("fact_type") or "") or CATEGORY_TO_FACT_TYPE.get(r.get("category", ""), ""),
+            # ✅ 信息调用完整性（2026-09-23）：补全提取期已落库、SSE 已下发的溯源/单位
+            #    扩展字段。旧 list_facts 仅回传部分字段，前端刷新后丢失页码溯源(page_ref)、
+            #    证据类型(evidence_kind)、计量单位(value_unit)、语义区(zone_type)、
+            #    归一化组(norm_group)、分段指纹(chunk_hash)。SELECT * 已含这些列，此处
+            #    补齐以保证「刷新 == 流式」数据一致（不丢溯源信息）。
+            "value_unit": r.get("value_unit") or "",
+            "evidence_kind": r.get("evidence_kind") or "",
+            "page_ref": r.get("page_ref") or "",
+            "zone_type": r.get("zone_type") or "",
+            "norm_group": r.get("norm_group") or "",
+            "chunk_hash": r.get("chunk_hash") or "",
+            # ✅ 2026-09-24：九大章节四维标注（正交于 22 类 category）。
+            #    历史行（2026-09-24 前落库）没有这 4 列的值，读路径做惰性派生
+            #    兜底（纯函数、不写库）—— 保证「章节视图/按章节精选」不会因为
+            #    存量数据没标注而看不到事实。已标注的行取库值（尊重人工归类）。
+            **_fact_dimension_fields(
+                r, name, value or content, r.get("fact_key", ""), source_list,
+                fact_type=(r.get("fact_type") or "")
+                or CATEGORY_TO_FACT_TYPE.get(r.get("category", ""), "")),
+        }
+        groups[gid]["items"].append(item)
+        # 累积原始 Markdown 内容行（供前端编辑弹窗使用，避免丢行）
+        groups[gid]["_content_lines"].append(r.get("content", "") or "")
+
+    group_list = list(groups.values())
+    # 落定 group.content = 全部分行拼接（前端编辑弹窗依赖此字段完整回显）
+    for g in group_list:
+        lines = g.pop("_content_lines", []) or []
+        g["content"] = "\n".join(l for l in lines if l.strip())
+
+    # ✅ 增强：分组按类别稳定排序（此前按随机 group_id 排序 → 每次刷新顺序抖动）
+    _cat_order = {c: i for i, c in enumerate(CATEGORY_TITLES.keys())}
+    group_list.sort(key=lambda g: (_cat_order.get(g.get("category") or "", 999),
+                                   g.get("title") or ""))
+
+    # 计算统计信息
+    all_items = [it for g in group_list for it in g["items"]]
+    stats: dict = {
+        "total": len(all_items),
+        "simulated": sum(1 for it in all_items if it["is_simulated"]),
+        "unresolved": sum(1 for it in all_items if not it["is_resolved"]),
+        "conflicts": sum(1 for it in all_items if it["has_conflict"]),
+        "safety_critical": sum(1 for it in all_items if it["is_safety_critical"]),
+        "simulated_ratio": (sum(1 for it in all_items if it["is_simulated"])
+                            / max(len(all_items), 1)),
+        "project_shared": sum(1 for it in all_items if it.get("scope") == "project"),
+        "stale": sum(1 for it in all_items if it.get("is_stale")),
+    }
+
+    # ✅ 增强：分类维度统计（"信息分类"的可观测性）。
+    #    前端据此展示「各类别事实分布/风险分布」，用户可快速定位
+    #    哪一类事实缺失（如 0 条"工期安排"）或模拟值集中在哪里。
+    by_cat: dict[str, dict] = {}
+    for g in group_list:
+        cat = g.get("category") or "other"
+        s = by_cat.setdefault(cat, {
+            "category": cat,
+            "title": CATEGORY_TITLES.get(cat, "") or cat,
+            "groups": 0, "items": 0, "simulated": 0,
+            "conflicts": 0, "unresolved": 0, "safety_critical": 0,
+        })
+        s["groups"] += 1
+        for it in g["items"]:
+            s["items"] += 1
+            if it["is_simulated"]:
+                s["simulated"] += 1
+            if it["has_conflict"]:
+                s["conflicts"] += 1
+            if not it["is_resolved"]:
+                s["unresolved"] += 1
+            if it["is_safety_critical"]:
+                s["safety_critical"] += 1
+    stats["by_category"] = sorted(
+        by_cat.values(),
+        key=lambda x: (_cat_order.get(x["category"], 999), x["title"]))
+
+    # ✅ 2026-09-24：九大章节维度统计（建办质〔2018〕31号 专项方案结构）。
+    #    正交于上面的 22 类 category：category 是「事实类型」视角，
+    #    chapter 是「方案章节」视角。前端「章节视图」与「字段完整性」面板
+    #    直接消费这里，不必再自己把事实重新分章（口径统一在后端）。
+    stats["by_chapter"] = _chapter_stats_for_items(all_items)
+
+    return {"groups": group_list, "stats": stats}
+
+
+# ---------------------------------------------------------------------------
+# 写接口（带缓存失效联动）
+# ---------------------------------------------------------------------------
+
+#: 列表项识别：单字符列表符 + 空白 + 正文（与 update_fact 的 multi_line 判定对齐）
+_LIST_BULLET_RE = re.compile(r"^\s*[-*•+·]\s+(\S.*)$")
+#: 行首是否为列表标记：update_fact 判定「多行列表 → 转分组重建」的口径。
+#: ✅ BUG 修复（2026-09-21）：旧实现用 startswith(("-", "*", "•"))，只认三种，
+#:    而「保存后重建」用的 _split_fact_lines 认的是完整集合——手写 "+ 项: 值" /
+#:    "· 项: 值" 的多行分组编辑会被判为「非列表正文」而整体塞进单行 content，
+#:    第 2..N 行永久丢失（静默数据丢失）。两处口径现已共用同一字符集。
+_LIST_MARKER_PREFIX_RE = re.compile(r"^\s*[-*•+·]\s*(\S|$)")
+
+
+def _looks_like_fact_line(text: str) -> bool:
+    """content 是否为可回解的结构化事实行（列表符开头 或 含名:值冒号）。
+
+    ✅ 与 update_fact 的行级 / 分组级分流配套：只有结构化行才走
+    _apply_item_updates 的条目级口径（能同步 name / value / is_simulated）；
+    非结构化的普通正文（如"基坑深度约 12.5 米"）回解不出 value，只能原样
+    落到 content 列，否则会被退化成空值。
+    """
+    s = str(text or "").strip()
+    if not s:
+        return False
+    return bool(_LIST_BULLET_RE.match(s)) or "：" in s or ":" in s
+
+
+#: 纯列表符 / 水平分隔线（无任何正文）：不构成事实，直接跳过。
+#: ✅ BUG 修复（2026-09-21）：旧口径只认「单个列表符 + 空白」与「≥3 个 -_ *」，
+#:    "* *" / "- -" / "• •" 这类多列表符的噪音行会漏过，被当成正文解析成
+#:    (name="*", value="") 的假事实，出现在事实列表里。
+_LIST_NOISE_RE = re.compile(r"^\s*[-*•+·][-*•+·\s]*$")
+
+
+def _split_fact_lines(title: str, content: str) -> list[tuple[str, str, bool]]:
+    """把 Markdown 列表 content 拆为 (name, value, is_simulated) 行。
+
+    - 列表行 "- **名**: 值" / "* **名**: 值" / "• **名**: 值" → 提取名称与值，保留模拟值标记
+    - 非列表行 → (title, 整行, False)
+    - 全部为空时回退为单行 (title, 整段 content, False)
+
+    ✅ BUG 修复（2026-09-21）：旧实现只认 "-" 开头的列表项，而 update_fact 判定
+    「是否走分组重建」用的是 ("-", "*", "•")——同一份 content 在两条路径口径不同。
+    手工编辑保存后："* 补充说明" 被当「非列表正文」处理，name 被填成分组标题、
+    value 带着原始 "*" 前缀入库（假事实）；"• **A**: 1" 更会把整行原文塞进 value；
+    "-" 单独一行也会造出 value="-" 的空事实。现统一列表符识别，并在解析前剥掉
+    列表符（extract_value_from_markdown_line 只会 lstrip("-")，不认 "*" / "•"）。
+    """
+    parsed: list[tuple[str, str, bool]] = []
+    for line in (content or "").split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if _LIST_NOISE_RE.match(line):
+            # 纯 "-" / "* *" / "---" 之类无正文的行，不应当成事实
+            continue
+        m = _LIST_BULLET_RE.match(line)
+        if m:
+            body = m.group(1).strip()
+            is_sim = is_simulated_marked(body)
+            nm, val = extract_value_from_markdown_line(body)
+            if nm or val:
+                parsed.append((nm or title or "未命名", val, is_sim))
+            else:
+                parsed.append((title or "未命名", body, False))
+        else:
+            parsed.append((title or line[:30], line, False))
+    if not parsed:
+        parsed = [(title or "未命名", content or "", False)]
+    return parsed
+
+
+@router.get("/categories")
+async def list_fact_categories():
+    """事实分类清单（CATEGORY_TITLES 单一事实源）。
+
+    ✅ 消三侧口径债（2026-09-20）：前端此前硬编码 FACT_CATEGORY_OPTIONS
+    （仅 12 类，缺 deployment/process/quality 等 11 类），与后端 23 类
+    双份维护。前端下拉改取本端点，本地常量仅作离线回退。
+    """
+    return {
+        "categories": [
+            {"value": k, "label": v} for k, v in CATEGORY_TITLES.items()
+        ]
+    }
+
+
+@router.get("/category-map")
+async def get_fact_category_map():
+    """九大章节分类映射表（前端下拉 / 章节视图的单一事实源）。
+
+    ✅ 消口径债：与 /categories 同理，九大章节的编码-中文名、事实属性枚举、
+    数据来源枚举、category→chapter 映射全部由后端下发，前端不再硬编码。
+    纯静态数据、无 DB 查询，供前端一次性拉取。
+    """
+    return category_map_payload()
+
+
+@router.get("/chapters")
+async def list_facts_by_chapters(
+    scheme_id: str = Query(""),
+    project_id: str = Query(""),
+    db=Depends(get_db),
+):
+    """九大章节视图：每章的事实清单 + 应提取字段覆盖率 + 缺失字段差集。
+
+    建办质〔2018〕31号 规定专项方案分九大章节；本端点把已提取的全局事实
+    按章节重组，并给出「该章节应提取哪些字段 / 已覆盖哪些 / 还缺哪些」，
+    供用户在提取后快速定位缺口（而不是靠肉眼比对正文）。
+
+    Returns:
+        ``{"chapters": [{"chapter","key","title","count","coverage",
+                         "missing_fields","items":[...]}], "totals": {...}}``
+    """
+    rows = await _load_fact_rows(db, scheme_id, project_id)
+    enriched = []
+    for r in rows:
+        r = dict(r)
+        # ✅ 字段完整性判定需要「事实名」，而落库的 title 列即事实名；
+        #    content 列是 Markdown 行（"- **名**: 值"），拿它匹配字段名会全不命中。
+        dims = _fact_dimension_fields(
+            r, r.get("title") or "", r.get("title") or "",
+            r.get("fact_key") or "",
+            _parse_source_ref(r.get("source_ref", "") or ""))
+        r.update(dims)
+        enriched.append(r)
+    summary = nine_chapter_summary(enriched)
+    comp = chapter_field_completeness(enriched)
+
+    # 把每条事实挂回它的章节（未分类的归入 __uncategorized，便于发现遗漏）
+    by_chapter: dict[str, list[dict]] = {k: [] for k in CHAPTER_ORDER}
+    uncategorized: list[dict] = []
+    for r in enriched:
+        # content 是 Markdown 行（"- **名**: 值"），此处解出干净的名称与取值
+        _n, _v = extract_value_from_markdown_line(r.get("content") or "")
+        item = {
+            "fact_id": r["id"],
+            "name": _n or r.get("title") or "",
+            "value": _v or "",
+            "category": r.get("category") or "",
+            "chapter": r.get("chapter") or "",
+            "chapter_title": r.get("chapter_title") or "",
+            "fact_attr": r.get("fact_attr") or "",
+            "source_kind": r.get("source_kind") or "",
+            "is_shared": bool(r.get("is_shared")),
+            "is_simulated": bool(r.get("is_simulated", 0)),
+            "is_resolved": bool(r.get("is_resolved", 1)),
+            "is_stale": bool(r.get("is_stale", 0)),
+        }
+        ch = r.get("chapter") or ""
+        if ch in by_chapter:
+            by_chapter[ch].append(item)
+        else:
+            uncategorized.append(item)
+
+    chapters_out = []
+    for ch_info in summary["chapters"]:
+        key = ch_info["key"]
+        cp = comp["chapters"][key]
+        chapters_out.append({
+            **ch_info,
+            "fields": cp["fields"],
+            "covered_fields": cp["covered_fields"],
+            "missing_fields": cp["missing_fields"],
+            "items": by_chapter.get(key, []),
+        })
+
+    return {
+        "chapters": chapters_out,
+        "uncategorized": uncategorized,
+        "totals": summary["totals"],
+        "by_fact_attr": _chapter_stats_for_items(enriched)["by_fact_attr"],
+        "by_source_kind": _chapter_stats_for_items(enriched)["by_source_kind"],
+    }
+
+
+@router.post("/danger-check")
+async def check_danger_scheme(
+    data: dict,
+    scheme_id: str = Query(""),
+    project_id: str = Query(""),
+    db=Depends(get_db),
+):
+    """专项方案类型自动识别 + 危大工程/超过一定规模 阈值判定。
+
+    两步判定，均按确定性规则执行（不调用 AI，可解释、可复算）：
+    1. **方案类型识别**：方案名称（或 ``extra_text`` 补充文本）关键词解析
+       → 六大类危大工程（基坑/模板支撑/起重吊装/脚手架/拆除/其他）及子类；
+    2. **阈值判定**：从全局事实中抽取定量参数（开挖深度/支撑高度/跨度/
+       荷载/起重量等，长度类自动换算为米），再对照 HAZARD_THRESHOLDS
+       → 是否危大 / 是否超过一定规模 / 命中的阈值条目 / 仍需补全的参数。
+
+    本端点为**只读**诊断接口，不改动任何数据；阈值的单一事实源在
+    ``app.services.scheme_classification``（与提取项目模块共用，不重复维护）。
+
+    Returns:
+        ``{"classification": {...}, "threshold_params": {...},
+           "category_id": str, "missing_params": [str]}``
+    """
+    name = str((data or {}).get("scheme_name") or "").strip()
+    extra = str((data or {}).get("extra_text") or "").strip()
+    if not name and not extra:
+        raise HTTPException(400, "需要 scheme_name 或 extra_text")
+    # 方案名称为空但前端只传了 scheme_id 时，从库中取方案名（不要求 extra_text）
+    if not name and scheme_id:
+        cur = await db.execute("SELECT name FROM schemes WHERE id=?", (scheme_id,))
+        row = await cur.fetchone()
+        if row:
+            name = row["name"] or ""
+    rows = await _load_fact_rows(db, scheme_id, project_id)
+    # ✅ 抽取参数用的是「事实名 + 取值」，而落库列是 title / content（Markdown 行）。
+    #    直接用原始行会让 name/value 恒为空 → 参数抽不出、阈值判定退化为缺参。
+    facts = []
+    for r in rows:
+        n, v = extract_value_from_markdown_line(r.get("content") or "")
+        facts.append({
+            "name": n or r.get("title") or "",
+            "value": v or "",
+            "value_unit": r.get("value_unit") or "",
+            "fact_key": r.get("fact_key") or "",
+        })
+    params = extract_danger_params(facts)
+    result = scheme_clf.classify_scheme(name, params, extra)
+    category_id = (result.category_ids[0] if result.category_ids else "")
+    # 缺失参数聚合自各命中子类的阈值判定（missing_params 不在聚合对象顶层）
+    missing: list[str] = []
+    for h in (result.hazards or []):
+        for p in (h.get("missing_params") or []):
+            if p and p not in missing:
+                missing.append(p)
+    return {
+        "classification": result.to_dict(),
+        "threshold_params": params,
+        "category_id": category_id,
+        "missing_params": missing,
+    }
+
+
+@router.post("")
+async def create_fact(
+    data: FactGroupIn,
+    scheme_id: str = Query(""),
+    project_id: str = Query(""),
+    db=Depends(get_db),
+):
+    """创建事实分组（兼容旧版 + 新版结构化 items）"""
+    real_pid = await _resolve_project_id(db, scheme_id, project_id)
+    if not real_pid:
+        raise HTTPException(400, "需要 scheme_id 或 project_id")
+    # scheme_id 为空时保存为项目级事实；有 scheme_id 时使用数据库归属的项目 ID。
+    # ✅ 同 _resolve_project_id：非字符串（如未解析的 Query 默认值）必须按空处理，
+    #    否则会把 "Query('')" 当成真实 scheme_id 落库，产生永远查不到的幽灵作用域。
+    scheme_scope = scheme_id.strip() if isinstance(scheme_id, str) else ""
+    gid = str(uuid.uuid4())
+    # ✅ 归类兜底为 other（与提取/编辑一致），避免空类别导致排序/展示异常
+    category = (data.category or "").strip() or "other"
+    # ✅ 修复：分组标题此前未落库，重查后分组名退化为单条事实名。
+    #    用户输入的分组标题优先，其次类别中文名。
+    group_title = (data.title or "").strip() or CATEGORY_TITLES.get(category, "")
+
+    # 如果传了结构化 items，逐条持久化
+    if data.items:
+        insert_buf = []
+        for it in data.items:
+            fid = str(uuid.uuid4())
+            content = _build_fact_content(it.name, it.value, it.is_simulated)
+            # ✅ BUG 修复（2026-09-21）：模拟值闸门是**不变式**而非冗余标记。
+            #    注入 / 导出门控是 `has_conflict=0 AND is_resolved=1`（不含
+            #    is_simulated 列），全靠 `is_simulated=1 ⟹ is_resolved=0` 维持。
+            #    旧实现按模型默认值 is_resolved=True 直落库，客户端只传
+            #    is_simulated 不传 is_resolved 时（模型默认 True），编造值会
+            #    带着 is_resolved=1 直接越过闸门注入正文与导出。与
+            #    _apply_item_updates 的既有口径对齐。
+            item_resolved = 1 if (it.is_resolved and not it.is_simulated) else 0
+            # ✅ BUG 修复：无来源时也必须写入"手动录入"标记——persist_extraction
+            #    的 _is_protected 靠 source_ref 识别手动来源保护未确认事实，
+            #    旧实现 source/source_ref 皆空时留空 → 手动新增但未确认的事实
+            #    会在「重新提取」时被当旧 AI 数据删除。
+            source_json = json.dumps(
+                [{"file": it.source or "手动录入",
+                  # ✅ 修复（数据流审计 2026-09-23）：与 AI 提取落库路径统一口径，
+                  #    不再静默截 30 字，改走 _clip_excerpt（超长自动补省略号）。
+                  "quote": _clip_excerpt(it.source_ref or "", MAX_SOURCE_EXCERPT)}],
+                ensure_ascii=False)
+            item_cat = it.category or category
+            insert_buf.append((
+                fid, real_pid, scheme_scope, gid, group_title,
+                it.name, content,
+                item_cat,
+                source_json,
+                1 if it.is_simulated else 0,
+                # ✅ 修复：手工录入的 confidence 未做范围收敛，前端进度条
+                #    （width 按 0~1 计算）遇越界值会渲染异常。
+                _safe_confidence(it.confidence, 1.0),
+                item_resolved,
+                0,  # has_conflict
+                "",  # conflict_keys
+                it.key or normalize_key(it.name),  # fact_key（手工录入也生成去重键）
+            ))
+        if insert_buf:
+            await db.executemany(
+                "INSERT INTO global_facts "
+                "(id, project_id, scheme_id, group_id, group_title, title, content, "
+                "category, source_ref, is_simulated, confidence, "
+                "is_resolved, has_conflict, conflict_keys, fact_key) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                insert_buf)
+    else:
+        # 旧版单条：title + content
+        # ✅ 修复：content 常为多行 Markdown 列表（前端「手动新增」弹窗多行输入），
+        #    原实现整块存为一行 → 列表接口只解析出第一行，其余行"凭空消失"。
+        #    现与分组编辑（PATCH）一致，逐行拆开入库。
+        rows_buf = []
+        for nm, val, is_sim in _split_fact_lines(data.title, data.content):
+            rows_buf.append((
+                str(uuid.uuid4()), real_pid, scheme_scope, gid, group_title,
+                nm, _build_fact_content(nm, val, is_sim), category,
+                # ✅ BUG 修复：旧版单条路径同样必须写入"手动录入"来源标记，
+                # 否则未确认的手动事实会被「重新提取」误删（同上）
+                json.dumps([{"file": "手动录入", "quote": ""}], ensure_ascii=False),
+                # ✅ BUG 修复（2026-09-21）：is_simulated ⟹ is_resolved=0（模拟值闸门
+                #    是不变式，门控 SQL 只判 is_resolved）。旧实现恒写 is_resolved=1，
+                #    粘贴了模拟值标记的手工分组会立刻被当确定性事实注入正文。
+                1 if is_sim else 0, 1.0, 0 if is_sim else 1, 0, "",
+                normalize_key(nm)))  # 手工录入也生成归一化去重键
+        await db.executemany(
+            "INSERT INTO global_facts "
+            "(id, project_id, scheme_id, group_id, group_title, title, content, "
+            "category, source_ref, is_simulated, confidence, "
+            "is_resolved, has_conflict, conflict_keys, fact_key) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            rows_buf)
+
+    await db.commit()
+    # 缓存失效联动
+    if scheme_scope:
+        await invalidate_export_cache(db, scheme_scope)
+    return {"id": gid, "ok": True}
+
+
+def _build_fact_content(name: str, value: str, is_simulated: bool) -> str:
+    """构造事实行的 Markdown content（模拟值标记后置，供列表接口回解）
+
+    ✅ BUG 修复（2026-09-21）：标记改用 facts_extractor.append_simulated_marker
+    单一口径（落库 / SSE 下发 / 回解三侧共用），并在写入前先剥离旧标记，
+    避免同一行叠加两个模拟值标记。
+    """
+    return f"- **{name}**: {append_simulated_marker(value, is_simulated)}"
+
+
+async def _invalidate_item_update_caches(db, updates: list[dict]) -> None:
+    """按条目实际作用域失效缓存；项目共享事实变更影响项目下所有方案。"""
+    ids = [str(u.get("fact_id") or "").strip() for u in updates if u.get("fact_id")]
+    if not ids:
+        return
+    ph = ",".join("?" for _ in ids)
+    cur = await db.execute(
+        f"SELECT DISTINCT project_id, scheme_id FROM global_facts WHERE id IN ({ph})", ids)
+    for r in await cur.fetchall():
+        await _invalidate_fact_scope_cache(
+            db, str(r["scheme_id"] or ""), str(r["project_id"] or ""))
+
+
+async def _apply_item_updates(db, updates: list[dict]) -> tuple[int, str]:
+    """按 fact_id 逐条更新单条事实（name/value/category/is_simulated/confidence）。
+
+    ✅ 修复（死字段 + 能力缺失）：FactGroupUpdate.item_updates 在模型中早已
+    声明，后端却从未读取 —— 前端只能「整组重建」来改一条事实，代价是
+    组内其它行的溯源/矛盾标记被一并重置。现提供真正的条目级更新。
+
+    返回 (更新条数, scheme_id)。
+    """
+    # ✅ 性能修复：旧实现每条 update 各执行一次 SELECT（N+1 查询），
+    # 批量保存大分组（数十条）时数据库往返线性放大。先一次 SELECT IN 取全。
+    fids: list[str] = []
+    seen: set[str] = set()
+    for u in updates:
+        fid = str(u.get("fact_id") or "").strip()
+        if fid and fid not in seen:
+            seen.add(fid)
+            fids.append(fid)
+    if not fids:
+        return 0, ""
+    placeholders = ",".join("?" for _ in fids)
+    cur = await db.execute(
+        f"SELECT id, title, content, category, is_simulated, confidence, scheme_id, "
+        f"fact_key FROM global_facts WHERE id IN ({placeholders})", fids)
+    rows = {r["id"]: r for r in await cur.fetchall()}
+
+    scheme_id = ""
+    updated = 0
+    for u in updates:
+        fid = str(u.get("fact_id") or "").strip()
+        row = rows.get(fid)
+        if not row:
+            continue
+        scheme_id = scheme_id or (row["scheme_id"] or "")
+
+        sets: list[str] = []
+        vals: list = []
+        title = str(row["title"] or "")
+        is_sim = bool(row["is_simulated"])
+        title_changed = False
+        value_changed = False
+
+        raw_name = u.get("name")
+        if raw_name is not None and str(raw_name).strip():
+            title = str(raw_name).strip()
+            title_changed = title != (str(row["title"] or ""))
+            if title_changed:
+                sets.append("title=?")
+                vals.append(title)
+                # ✅ BUG 修复：改名后 fact_key 不重算 —— 键仍指向旧名的归一化结果，
+                # 重新提取时按新名生成的键无法与已确认事实去重，导致同一事实重复入库。
+                new_key = normalize_key(title)
+                if new_key and new_key != (row["fact_key"] or ""):
+                    sets.append("fact_key=?")
+                    vals.append(new_key)
+
+        if u.get("is_simulated") is not None:
+            is_sim = bool(u.get("is_simulated"))
+            sets.append("is_simulated=?")
+            vals.append(1 if is_sim else 0)
+            # ✅ 模拟值闸门：标为模拟值即回到「待审核」，防止模拟值直接注入正文
+            if is_sim:
+                sets.append("is_resolved=?")
+                vals.append(0)
+
+        old_value = extract_value_from_markdown_line(row["content"] or "")[1]
+
+        if u.get("value") is not None:
+            new_value = str(u.get("value"))
+            sets.append("content=?")
+            vals.append(_build_fact_content(title, new_value, is_sim))
+            # ✅ BUG 修复（2026-09-18）：人工改值即为对矛盾的裁决，必须同时清除
+            #    冲突标记 —— 否则 has_conflict 仍为 1，该事实继续被注入门控
+            #    （has_conflict=0 AND is_resolved=1）排除、界面也仍显示「存在矛盾」，
+            #    用户被迫改用「分组编辑」或「选此值」。与分组重建路径（清
+            #    has_conflict + conflict_keys）保持同一口径。
+            # ✅ BUG 修复（2026-09-20）：但【仅在值真正变化时】才清除——前端
+            #    单条编辑弹窗总是全量提交 value，旧实现无条件清冲突标记，
+            #    导致「只改分类/改名/切换模拟值」等操作静默吞掉未裁决矛盾。
+            #    比较口径与 persist_extraction 的冲突登记口径一致：
+            #    strip 后文本不同且 normalize_key 不同才视为改值。
+            value_changed = (
+                old_value.strip() != new_value.strip()
+                and normalize_key(old_value) != normalize_key(new_value)
+            )
+            if value_changed:
+                sets.append("has_conflict=?")
+                vals.append(0)
+                sets.append("conflict_keys=?")
+                vals.append("")
+        elif title_changed:
+            # 改名但没改值 → 同步 content 中的名称，避免列表回解出旧名
+            sets.append("content=?")
+            vals.append(_build_fact_content(title, old_value, is_sim))
+
+        if u.get("category"):
+            sets.append("category=?")
+            vals.append(str(u["category"]).strip())
+
+        if u.get("confidence") is not None:
+            sets.append("confidence=?")
+            vals.append(_safe_confidence(u.get("confidence"), 1.0))
+
+        if not sets:
+            continue
+        # 来源已变化的事实只有在人工真正改值后才解除 stale；仅改分类/名称不能
+        # 伪装成已核对。冲突裁决走 resolve_conflict 的专用写路径。
+        if value_changed:
+            sets.append("is_stale=0")
+        # ✅ 统一时间戳口径：与分组重建一致使用 SQLite datetime 函数
+        sets.append("updated_at=datetime('now','localtime')")
+        await db.execute(
+            f"UPDATE global_facts SET {', '.join(sets)} WHERE id=?", (*vals, fid))
+        updated += 1
+
+    if updated:
+        await db.commit()
+    return updated, scheme_id
+
+
+@router.patch("/{fact_id}")
+async def update_fact(
+    fact_id: str,
+    data: FactGroupUpdate,
+    scheme_id: str = Query(""),
+    db=Depends(get_db),
+):
+    """更新事实（支持字段级更新 + 条目级更新 + 缓存失效联动）
+
+    fact_id 兼容两种模式：
+    1. 行 id（单条事实行）→ 原地字段更新
+    2. group_id（分组编辑，前端编辑弹窗传 group.id）→ 按编辑后的
+       content（Markdown 列表）重建该分组，保留模拟值/矛盾标记
+
+    另支持 data.item_updates：按 fact_id 逐条更新，不重建分组。
+    """
+    fields = {k: v for k, v in data.model_dump(exclude_none=True).items()
+              if k not in ("id", "item_updates")}
+    item_updates = [u for u in (data.item_updates or [])
+                    if isinstance(u, dict) and u.get("fact_id")]
+
+    scheme_scope = scheme_id.strip() if isinstance(scheme_id, str) else ""
+
+    # ---- 模式 0：条目级更新（可独立使用，也可与分组字段同时提交）----
+    if scheme_scope:
+        for u in item_updates:
+            await _assert_fact_in_scheme_scope(db, str(u.get("fact_id") or ""), scheme_scope)
+        await _assert_fact_in_scheme_scope(db, fact_id, scheme_scope)
+    if item_updates:
+        n, sid = await _apply_item_updates(db, item_updates)
+        if not fields:
+            await _invalidate_item_update_caches(db, item_updates)
+            return {"ok": True, "updated_items": n}
+
+    cur = await db.execute(
+        "SELECT * FROM global_facts WHERE id=?", (fact_id,))
+    row = await cur.fetchone()
+
+    # ✅ BUG 修复：行级更新收到【多行 Markdown content】时（前端把整组内容
+    #    提交到某一行，或用户粘贴多行列表），旧实现把整块文本塞进单行 content，
+    #    列表接口只解析首行 → 第 2..N 行永久丢失（静默数据丢失）。
+    #    现识别多行列表并转走「分组重建」路径。
+    # ✅ 加固（2026-09-21）：旧判定 `count("-") >= 1` 过宽 —— 只要全文任意位置
+    #    出现一个连字符（如日期区间 "2024-2025"）就把普通多行文本误判为列表，
+    #    走「分组重建」（DELETE+INSERT，行 id 全换），前端持有旧行 id 的后续
+    #    编辑会 404。现收紧为「至少一个非空行以列表标记开头」，与
+    #    _split_fact_lines 的解析口径对齐。
+    _content_val = str(fields.get("content") or "")
+    multi_line = "\n" in _content_val.strip() and any(
+        _LIST_MARKER_PREFIX_RE.match(ln.strip())
+        for ln in _content_val.splitlines() if ln.strip())
+
+    if row and not multi_line:
+        # ---- 模式 1：行级更新 ----
+        # ✅ BUG 修复（2026-09-21）：结构化的 title / content 不再裸写列，改走
+        #    _apply_item_updates 的条目级口径。旧实现三处失同步：
+        #      1) 改 title 只写 title 列，content 里的「**旧名**」不跟着改、
+        #         fact_key 不重新归一化 → 列表接口按 content 回解，界面永远显示
+        #         旧名；重新提取也按旧键去重，同一事实重复入库；
+        #      2) 改 content 为模拟值文本，is_simulated / is_resolved 不动 →
+        #         模拟值闸门失效，编造值被当确定性事实注入正文与导出；
+        #      3) 改值不清 has_conflict（条目级口径会清）→ 与分组重建路径漂移。
+        #    非结构化的普通正文（无列表符、无冒号）回解不出 name/value，
+        #    仍走原地更新，避免被退化成空值。
+        _structured = bool(fields) and (
+            "title" in fields or _looks_like_fact_line(fields.get("content")))
+        if _structured:
+            iu: dict = {"fact_id": fact_id}
+            if "content" in fields and _looks_like_fact_line(fields.get("content")):
+                nm, val = extract_value_from_markdown_line(str(fields["content"] or ""))
+                iu["value"] = val
+                # ✅ 从 content 回解模拟值标记（历史两种写法通吃），与 is_simulated 列对齐
+                iu["is_simulated"] = is_simulated_marked(str(fields["content"] or ""))
+                if nm and nm != str(row["title"] or ""):
+                    iu["name"] = nm
+            if "title" in fields and str(fields.get("title") or "").strip():
+                iu["name"] = str(fields["title"]).strip()
+            if fields.get("category"):
+                iu["category"] = str(fields["category"]).strip()
+            if len(iu) > 1:
+                n, sid = await _apply_item_updates(db, [iu])
+                await db.commit()
+                if sid:
+                    await invalidate_export_cache(db, sid)
+                return {"ok": True, "updated_items": n}
+        if fields:
+            # ✅ 统一时间戳口径：与其它写接口一致使用 SQLite datetime 函数。
+            #    旧实现用 datetime.now().isoformat()（'T' 分隔），与
+            #    'YYYY-MM-DD HH:MM:SS' 混排导致 updated_at 排序错乱。
+            sets = ", ".join(f"{k}=?" for k in fields)
+            await db.execute(
+                f"UPDATE global_facts SET {sets}, "
+                f"updated_at=datetime('now','localtime') WHERE id=?",
+                (*fields.values(), fact_id))
+        await db.commit()
+        if row["scheme_id"]:
+            await invalidate_export_cache(db, row["scheme_id"])
+        return {"ok": True}
+
+    # ---- 模式 2：分组重建 ----
+    group_id = (row["group_id"] if row else None) or fact_id
+    cur = await db.execute(
+        "SELECT * FROM global_facts WHERE group_id=?", (group_id,))
+    old_rows = [dict(r) for r in await cur.fetchall()]
+    if not old_rows:
+        raise HTTPException(404, "事实不存在")
+    grow = old_rows[0]
+
+    title = fields.get("title", "") or ""
+    content = fields.get("content", "") or ""
+    # ✅ BUG 修复：前端编辑分组未回传 category 时沿用原分组类别；
+    #    旧实现取空串后落库为 "other"，编辑一次即丢失归类。
+    category = ((fields.get("category") or "").strip()
+                or (grow.get("category") or "").strip() or "other")
+    # ✅ 修复：分组标题需落到 group_title 列，否则重查后分组名退化。
+    group_title = title.strip() or CATEGORY_TITLES.get(category, "") or "其他事实"
+
+    # ✅ BUG 修复：重建前按名称索引旧行，保留溯源(source_ref)/归一化键(fact_key)/
+    #    置信度。旧实现重建时把这些字段一律清空 —— 编辑一次分组即丢失来源引用，
+    #    且 fact_key 丢失会使后续「重新提取」无法与已确认事实去重而重复入库。
+    meta_by_name = {(r.get("title") or "").strip(): r for r in old_rows}
+
+    # 解析 Markdown 列表行为 (name, value, is_simulated)
+    parsed: list[tuple[str, str, bool]] = _split_fact_lines(title, content)
+
+    # 注：DELETE 延迟到 insert_buf 构建完成后执行，与 INSERT+commit 同事务包裹
+    # （防止中途异常导致悬空 DELETE 被后续请求连带提交、整组静默丢失）。
+
+    insert_buf = []
+    for nm, val, is_sim in parsed:
+        content_line = _build_fact_content(nm, val, is_sim)
+        # ✅ BUG 修复：模拟值行必须保持 is_resolved=0（模拟值闸门生效）；
+        # 非模拟值行才是用户主动编辑后视为已确认（is_resolved=1）。
+        is_resolved = 0 if is_sim else 1
+        old = meta_by_name.get((nm or "").strip())
+        source_ref = (old.get("source_ref") if old else "") or ""
+        fact_key = (old.get("fact_key") if old else "") or normalize_key(nm)
+        # 人工编辑保存的非模拟值视为已确认 → 置信度拉满；
+        # 模拟值保留原置信度（仍待审核，受闸门约束）。
+        confidence = 1.0
+        if is_sim:
+            confidence = (_safe_confidence(old.get("confidence"), 0.8)
+                          if old else 0.8)
+        # ✅ BUG 修复：旧实现无条件把 has_conflict / conflict_keys 清零，
+        #    用户只是改了分组标题或调整了某一行的措辞，整组的矛盾候选值就
+        #    全部消失，未裁决的矛盾再也无法在界面上找回（只能重新提取）。
+        #    现仅当该行内容确实被改动时才清除矛盾；内容未变则原样保留。
+        has_conflict, conflict_keys = 0, ""
+        if old:
+            if (old.get("content") or "").strip() == content_line.strip():
+                has_conflict = int(old.get("has_conflict") or 0)
+                conflict_keys = old.get("conflict_keys") or ""
+        insert_buf.append((
+            str(uuid.uuid4()), grow["project_id"], grow["scheme_id"],
+            group_id, group_title, nm, content_line, category,
+            source_ref, 1 if is_sim else 0, confidence, is_resolved,
+            has_conflict, conflict_keys, fact_key))
+    # content 不是列表（旧版纯文本）→ 整块存为单行
+    if not insert_buf:
+        old = meta_by_name.get(title.strip())
+        insert_buf.append((
+            str(uuid.uuid4()), grow["project_id"], grow["scheme_id"],
+            group_id, group_title, title, content, category,
+            (old.get("source_ref") if old else "") or "", 0, 1.0, 1, 0, "",
+            (old.get("fact_key") if old else "") or normalize_key(title)))
+    # ✅ 事务守卫：DELETE 与 INSERT+commit 原子完成，异常回滚，避免悬空事务
+    # （连接归还写池后 DELETE 被下个请求的 commit 连带提交 → 整组静默删除）。
+    try:
+        await db.execute(
+            "DELETE FROM global_facts WHERE group_id=? AND project_id=? AND scheme_id=?",
+            (group_id, grow["project_id"], grow["scheme_id"] or ""))
+        await db.executemany(
+            "INSERT INTO global_facts "
+            "(id, project_id, scheme_id, group_id, group_title, title, content, "
+            "category, source_ref, is_simulated, confidence, "
+            "is_resolved, has_conflict, conflict_keys, fact_key) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            insert_buf)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    if grow["scheme_id"]:
+        await invalidate_export_cache(db, grow["scheme_id"])
+    else:
+        await _invalidate_fact_scope_cache(db, "", str(grow.get("project_id") or ""))
+    return {"ok": True}
+
+
+@router.patch("/{fact_id}/resolve")
+async def resolve_fact(
+    fact_id: str,
+    scheme_id: str = Query(""),
+    db=Depends(get_db),
+):
+    """标记事实为已审核（模拟值闸门：未确认的模拟值禁止注入正文）"""
+    scheme_scope = scheme_id.strip() if isinstance(scheme_id, str) else ""
+    if scheme_scope:
+        await _assert_fact_in_scheme_scope(db, fact_id, scheme_scope)
+    cur = await db.execute(
+        "SELECT scheme_id, is_simulated, has_conflict, is_stale FROM global_facts WHERE id=?",
+        (fact_id,))
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "事实不存在")
+    # 模拟值必须先改成有真实依据的取值；未裁决冲突必须先走 resolve-conflict。
+    # 409 保留原状态，前端据此引导用户完成对应操作，避免绕过安全闸门。
+    if bool(row["is_simulated"]):
+        raise HTTPException(409, "模拟值不能直接确认，请先核对并修改为真实值")
+    if bool(row["has_conflict"]):
+        raise HTTPException(409, "事实存在多来源矛盾，请先选择正确的候选值")
+    if bool(row["is_stale"]):
+        raise HTTPException(409, "事实来源资料已变化，请重新提取或先编辑核对")
+
+    await db.execute(
+        "UPDATE global_facts SET is_resolved=1, is_stale=0, "
+        "updated_at=datetime('now','localtime') WHERE id=?", (fact_id,))
+    await db.commit()
+
+    if row["scheme_id"]:
+        await invalidate_export_cache(db, row["scheme_id"])
+    else:
+        cur = await db.execute("SELECT project_id FROM global_facts WHERE id=?", (fact_id,))
+        prow = await cur.fetchone()
+        await _invalidate_fact_scope_cache(db, "", str(prow[0] or "") if prow else "")
+    return {"ok": True}
+
+
+@router.patch("/{fact_id}/resolve-conflict")
+async def resolve_conflict(
+    fact_id: str,
+    data: dict,
+    scheme_id: str = Query(""),
+    db=Depends(get_db),
+):
+    """选择一个候选值解决矛盾：更新取值、清除矛盾标记、置为已确认。
+
+    ✅ 增强：此前矛盾事实只能整体「确认」（沿用首个提取值），无法在多个
+    候选值之间裁决。新增按值选择——前端在候选值列表点「选此值」即落库。
+
+    ✅ BUG 修复（2026-09-21）：模拟值闸门（is_simulated）随裁决结果重算。
+    旧实现只写 content / has_conflict / is_resolved，`is_simulated` 原样保留 →
+    一条编造值被裁决为文档实值后，行上仍带模拟值标记，`stats.simulated` 永不
+    归零；前端「全部就绪 / 下一步：正文生成」入口因此永远不出现，用户被卡在
+    事实 Tab（矛盾已全部裁决完却仍显示"待确认模拟值 N 项"）。
+    口径：
+      - 值真正变化 → 按被采纳候选自带的 is_simulated 重算（候选即模拟值时
+        闸门继续生效）；候选不在登记列表 / 旧数据无该字段 → 视为人工确认的
+        真实取值，is_simulated 归 0；
+      - 值未变（前端「保留当前值」）→ 只清矛盾标记，模拟值语义保持原样。
+    """
+    new_value = strip_simulated_marker(str(data.get("value") or "").strip())
+    if not new_value:
+        raise HTTPException(400, "需提供选择的值")
+    scheme_scope = scheme_id.strip() if isinstance(scheme_id, str) else ""
+    if scheme_scope:
+        await _assert_fact_in_scheme_scope(db, fact_id, scheme_scope)
+    cur = await db.execute(
+        "SELECT id, title, content, is_simulated, conflict_keys, scheme_id "
+        "FROM global_facts WHERE id=?", (fact_id,))
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "事实不存在")
+
+    name = (row["title"] or "").strip() or "未命名"
+    is_sim = bool(row["is_simulated"])
+    prior_value = extract_value_from_markdown_line(row["content"] or "")[1]
+    if prior_value.strip() != new_value:
+        chosen = _find_conflict_candidate(row["conflict_keys"] or "", new_value)
+        is_sim = bool(chosen.get("is_simulated")) if chosen else False
+    # ✅ 统一 content 构造（与分组重建一致），避免两种模拟值标记写法
+    #    在列表接口回解时出现解析差异。
+    content = _build_fact_content(name, new_value, is_sim)
+    # ✅ BUG 修复：人工裁决应把 confidence 拉满（1.0）并重置 has_conflict。
+    # 旧实现只更新 content/has_conflict/is_resolved，confidence 保持原值，
+    # 前端仍显示"低置信度"标签，与"已人工确认"的语义冲突。
+    # 人工选择模拟候选只完成「冲突裁决」，不等于确认了真实值；保持未审核闸门。
+    resolved_flag = 0 if is_sim else 1
+    await db.execute(
+        "UPDATE global_facts SET content=?, is_simulated=?, has_conflict=0, "
+        "conflict_keys='', confidence=1.0, is_resolved=?, is_stale=0, "
+        "updated_at=datetime('now','localtime') WHERE id=?",
+        (content, 1 if is_sim else 0, resolved_flag, fact_id))
+    await db.commit()
+
+    if row["scheme_id"]:
+        await invalidate_export_cache(db, row["scheme_id"])
+    else:
+        cur = await db.execute("SELECT project_id FROM global_facts WHERE id=?", (fact_id,))
+        prow = await cur.fetchone()
+        await _invalidate_fact_scope_cache(db, "", str(prow[0] or "") if prow else "")
+    return {"ok": True}
+
+
+@router.post("/clear")
+async def clear_all_facts(data: dict, db=Depends(get_db)):
+    """一键清除某方案（项目）下全部已提取的项目信息。
+
+    ✅ 新增（2026-09-17）：此前没有任何「清空重来」入口 —— factsApi.delete
+    定义了但前端无调用点，用户只能逐组删除。现提供作用域级清空：
+    - 删除该 scheme 作用域下【全部】事实（含已确认/手动，操作前前端二次确认）；
+    - 同步清空该项目的增量提取进度（facts_extracted_chunks），
+      下次提取将全量重跑；
+    - 联动清空 export_cache（含磁盘产物）。
+    """
+    scheme_id = str(data.get("scheme_id", "") or "").strip()
+    if not scheme_id:
+        raise HTTPException(400, "需要 scheme_id")
+    cur = await db.execute(
+        "SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "方案不存在")
+    project_id = str(row[0] or "")
+
+    try:
+        cur = await db.execute(
+            "SELECT count(*) FROM global_facts WHERE scheme_id=? OR "
+            "(project_id=? AND (scheme_id='' OR scheme_id IS NULL))",
+            (scheme_id, project_id))
+        total = int((await cur.fetchone())[0] or 0)
+        await db.execute(
+            "DELETE FROM global_facts WHERE scheme_id=? OR "
+            "(project_id=? AND (scheme_id='' OR scheme_id IS NULL))",
+            (scheme_id, project_id))
+        # 增量提取进度按项目作用域清空（下次提取全量重跑）
+        if project_id:
+            await db.execute(
+                "DELETE FROM facts_extracted_chunks WHERE project_id=? AND scheme_id=?",
+                (project_id, scheme_id))
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    await _invalidate_fact_scope_cache(db, scheme_id, project_id)
+    logger.info("已清除方案 %s 可见范围的全局事实（%d 条）并重置提取进度", scheme_id, total)
+    return {"ok": True, "deleted": total}
+
+
+@router.post("/batch-resolve")
+async def batch_resolve(data: dict, db=Depends(get_db)):
+    """批量确认事实（mark all as resolved）
+
+    ✅ 安全约束（F1 遗留缺口修复）：批量确认时跳过以下条目，
+    防止编造值/关键参数被一次性放行进入正文生成与导出链路：
+    - is_simulated = 1：模拟值/编造值事实
+    - is_safety_critical = 1：安全关键类事实（17 类白名单）
+    被跳过的条目在响应体 `skipped_safety` 中显式返回，供前端提示。
+    保持不变式：`is_simulated=1 ⟹ is_resolved=0`（模拟值闸门）。
+    """
+    fact_ids = data.get("fact_ids", [])
+    scheme_id = str(data.get("scheme_id", "") or "").strip()
+    if not isinstance(fact_ids, list):
+        raise HTTPException(400, "fact_ids 必须是数组")
+    if len(fact_ids) > 500:
+        raise HTTPException(400, "单次最多确认 500 条事实")
+
+    skipped_safety: list[dict] = []
+    changed_ids: list[str] = []
+    skipped_count = 0  # 已确认/不在范围内，无需变更
+
+    if fact_ids:
+        fact_ids = [str(fid).strip() for fid in fact_ids if str(fid).strip()]
+        if not fact_ids:
+            return {"ok": True, "updated": 0,
+                    "skipped_safety": [], "skipped_safety_count": 0,
+                    "safety_blocked": False}
+        placeholders = ",".join("?" * len(fact_ids))
+        if scheme_id:
+            cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
+            scheme_row = await cur.fetchone()
+            if not scheme_row:
+                raise HTTPException(404, "方案不存在")
+            real_pid = str(scheme_row[0] or "")
+            scope = (
+                " AND (scheme_id=? OR (project_id=? AND "
+                "(scheme_id='' OR scheme_id IS NULL)))"
+            )
+            params = [*fact_ids, scheme_id, real_pid]
+        else:
+            scope, params = "", fact_ids
+
+        # 先查询目标事实，检测安全约束
+        cur = await db.execute(
+            f"SELECT id, title, fact_key, is_simulated, is_resolved, has_conflict, is_stale "
+            f"FROM global_facts WHERE id IN ({placeholders}){scope}",
+            params)
+        rows = [dict(r) for r in await cur.fetchall()]
+
+    elif scheme_id:
+        cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
+        scheme_row = await cur.fetchone()
+        if not scheme_row:
+            raise HTTPException(404, "方案不存在")
+        real_pid = str(scheme_row[0] or "")
+        cur = await db.execute(
+            "SELECT id, title, fact_key, is_simulated, is_resolved, has_conflict, is_stale "
+            "FROM global_facts WHERE scheme_id=? OR (project_id=? AND "
+            "(scheme_id='' OR scheme_id IS NULL))",
+            (scheme_id, real_pid))
+        rows = [dict(r) for r in await cur.fetchall()]
+    else:
+        raise HTTPException(400, "需要 scheme_id 才能批量确认")
+
+    # 安全关键判定：以名称/类别白名单启发式为准，辅以落库的 is_safety_critical 列。
+    # ✅ 数据流审计 2026-09-23：该列已幂等补入所有运行库，`has_safety_col` 恒为 True；
+    #    但历史行/手动行未经 to_db_row 写入时列默认 0，若仅信列会漏拦。
+    #    故改为「启发式 或 列标记」：启发式始终作为权威下限，列作为补充信号。
+    has_safety_col = False
+    try:
+        cur = await db.execute("PRAGMA table_info(global_facts)")
+        cols = {dict(r)["name"] for r in await cur.fetchall()}
+        has_safety_col = "is_safety_critical" in cols
+    except Exception:
+        pass
+
+    for row in rows:
+        # 已确认的跳过（幂等）
+        if row["is_resolved"]:
+            skipped_count += 1
+            continue
+
+        # 安全约束检查
+        is_sim = bool(row.get("is_simulated"))
+        is_stale = bool(row.get("is_stale"))
+        has_conflict = bool(row.get("has_conflict"))
+        is_safety = is_safety_critical_name(
+            row.get("title", ""), "", row.get("fact_key", "")) or (
+            bool(row.get("is_safety_critical")) if has_safety_col else False)
+
+        if is_sim:
+            skipped_safety.append({
+                "id": row["id"],
+                "title": row.get("title", ""),
+                "reason": "模拟值事实禁止批量确认，请逐条裁决并补充真实依据",
+            })
+        elif has_conflict:
+            skipped_safety.append({
+                "id": row["id"], "title": row.get("title", ""),
+                "reason": "多来源矛盾尚未裁决，禁止批量确认",
+            })
+        elif is_stale:
+            skipped_safety.append({
+                "id": row["id"], "title": row.get("title", ""),
+                "reason": "来源资料已变化，请重新提取或人工核对",
+            })
+        elif is_safety:
+            skipped_safety.append({
+                "id": row["id"],
+                "title": row.get("title", ""),
+                "reason": "安全关键事实禁止批量确认，请逐条确认",
+            })
+        else:
+            changed_ids.append(row["id"])
+
+    # 执行更新（仅安全条目的）
+    if changed_ids:
+        ph = ",".join("?" * len(changed_ids))
+        await db.execute(
+            f"UPDATE global_facts SET is_resolved=1, "
+            f"updated_at=datetime('now','localtime') "
+            f"WHERE id IN ({ph})",
+            changed_ids)
+
+    await db.commit()
+
+    if scheme_id:
+        # 批量确认可能同时改变项目共享事实，失效项目下所有方案缓存。
+        cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
+        prow = await cur.fetchone()
+        if prow:
+            await _invalidate_fact_scope_cache(db, "", str(prow[0] or ""))
+        else:
+            await invalidate_export_cache(db, scheme_id)
+
+    return {
+        "ok": True,
+        "changed": len(changed_ids),
+        "skipped": skipped_count,
+        "skipped_safety": skipped_safety,
+        "skipped_safety_count": len(skipped_safety),
+        "safety_blocked": len(skipped_safety) > 0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 全局事实 AI 自然语言调整（引入自参考软件 globalFactsAdjustmentTask，2026-09-22）
+# ---------------------------------------------------------------------------
+
+# 合法分类集合：以 CATEGORY_TITLES 的键（= fact_type 枚举）为准，兼容 other。
+_ALLOWED_FACT_CATEGORIES = set(CATEGORY_TITLES.keys()) | {"other"}
+
+
+def _facts_for_adjust_prompt(rows: list) -> list:
+    """把事实行转为喂给 AI 的精简结构：fact_id / name / value / category。
+
+    ✅ 不携 source/conflict 等运营字段（与目录调整同思路：降 token、
+    避免模型误改无关字段）；fact_id 作为稳定引用键供 AI 回传。
+    """
+    out = []
+    for r in rows:
+        nm, val = extract_value_from_markdown_line(r.get("content") or "")
+        out.append({
+            "fact_id": r["id"],
+            "name": nm or (r.get("title") or ""),
+            "value": val or (r.get("content") or ""),
+            "category": r.get("category") or "other",
+        })
+    return out
+
+
+def _validate_adjust_ops(obj, valid_ids: set) -> tuple:
+    """校验 AI 操作计划，返回 (合法操作列表, summary)。非法项一律丢弃（绝不将就）。
+
+    核心防线：update/delete 的 fact_id 必须命中现有真实行（AI 幻觉 id → 丢弃，
+    避免误删/误改别的方案）；add 必须有 name+value；category 非法→ other。
+    """
+    raw = obj.get("operations") if isinstance(obj, dict) else None
+    if not isinstance(raw, list):
+        raw = []
+    clean = []
+    for op in raw:
+        if not isinstance(op, dict):
+            continue
+        kind = str(op.get("op") or "").strip().lower()
+        if kind == "update":
+            fid = str(op.get("fact_id") or "").strip()
+            if fid not in valid_ids:
+                continue
+            upd = {"op": "update", "fact_id": fid}
+            if op.get("value") is not None and str(op.get("value")).strip():
+                upd["value"] = str(op.get("value"))
+            if op.get("name") is not None and str(op.get("name")).strip():
+                upd["name"] = str(op.get("name")).strip()
+            if op.get("category"):
+                cat = str(op["category"]).strip()
+                upd["category"] = cat if cat in _ALLOWED_FACT_CATEGORIES else "other"
+            if len(upd) > 2:  # 除 op+fact_id 外至少有一个实质变更
+                clean.append(upd)
+        elif kind == "delete":
+            fid = str(op.get("fact_id") or "").strip()
+            if fid in valid_ids:
+                clean.append({"op": "delete", "fact_id": fid,
+                              "reason": str(op.get("reason") or "")[:200]})
+        elif kind == "add":
+            nm = str(op.get("name") or "").strip()
+            val = "" if op.get("value") is None else str(op.get("value")).strip()
+            if not nm or not val:
+                continue
+            cat = str(op.get("category") or "").strip()
+            clean.append({"op": "add", "name": nm, "value": val,
+                          "category": cat if cat in _ALLOWED_FACT_CATEGORIES else "other"})
+    return clean, str(obj.get("summary") or "").strip()
+
+
+@router.post("/adjust")
+async def adjust_facts(data: dict, db=Depends(get_db)):
+    """全局事实 AI 自然语言调整：按用户要求产出最小操作计划（可选直接应用）。
+
+    【引入背景】参考软件支持用自然语言批量修改已有事实（如"把涉及的年份统一改成 2026"、
+    "新增一条：项目经理=张伟"）；本软件此前只能逐条 CRUD 或全量重提取。
+
+    【与参考软件的取舍】参考软件持久会话直接重写 global-facts.json 文件；本软件事实
+    库带溯源/矛盾/模拟值闸门等不变式，若让 AI 重写整库会冲掉这些元数据。故改为
+    返回**按 fact_id 定位的最小操作计划**，应用时全走既有写路径（update →
+    _apply_item_updates、delete → 行级删除、add → 单行插入），天然保住不变式。
+
+    【兼容性】默认 apply=False，仅返回待确认计划，零数据风险；apply=True 时才落库。
+    未引入任何图表/人工配图逻辑（严守全自动图表约束）。
+    """
+    instruction = str(data.get("instruction") or "").strip()
+    if not instruction:
+        raise HTTPException(400, "需要提供 instruction（调整要求）")
+    scheme_id = data.get("scheme_id") if isinstance(data.get("scheme_id"), str) else ""
+    project_id = data.get("project_id") if isinstance(data.get("project_id"), str) else ""
+    do_apply = bool(data.get("apply"))
+    real_pid = await _resolve_project_id(db, scheme_id, project_id)
+    if not real_pid:
+        raise HTTPException(400, "需要 scheme_id 或 project_id")
+    scheme_scope = scheme_id.strip() if isinstance(scheme_id, str) else ""
+
+    # 载入当前事实（有 scheme 限定本方案，否则整个项目）
+    sql = "SELECT id, title, content, category FROM global_facts WHERE project_id=?"
+    params = [real_pid]
+    if scheme_scope:
+        sql += " AND scheme_id=?"
+        params.append(scheme_scope)
+    cur = await db.execute(sql, params)
+    rows = [dict(r) for r in await cur.fetchall()]
+    if not rows:
+        raise HTTPException(400, "当前作用域还没有任何全局事实，请先提取或新增")
+
+    valid_ids = {r["id"] for r in rows}
+    confirmed_ops = data.get("operations")
+    if do_apply and isinstance(confirmed_ops, list):
+        # 用户已在 UI 预览并二次确认具体操作；直接校验这份计划，禁止再次调用 AI
+        # 生成另一份可能不同的计划（否则“确认内容”与“实际落库内容”存在漂移）。
+        ops, summary = _validate_adjust_ops({"operations": confirmed_ops}, valid_ids)
+    else:
+        prompt = render(
+            "global_facts_adjust_system",
+            current_facts=json.dumps(_facts_for_adjust_prompt(rows), ensure_ascii=False)[:30000],
+            instruction=instruction[:3000],
+        )
+        try:
+            obj, _ = await asyncio.wait_for(
+                collect_json_response(
+                    [{"role": "system", "content": prompt}],
+                    lambda o: [] if isinstance(o, dict) and "operations" in o
+                    else ["缺少 operations 字段"],
+                    json_mode=True, temperature=0.2, scene="global_facts_adjust"),
+                timeout=settings.ai_adjust_timeout)
+        except asyncio.TimeoutError:
+            raise HTTPException(504, "事实调整超时，请缩小调整范围后重试")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning("全局事实 AI 调整失败: %s", e)
+            raise HTTPException(502, f"事实调整失败：{e}")
+        ops, summary = _validate_adjust_ops(obj, valid_ids)
+
+    applied = {"updated": 0, "added": 0, "deleted": 0}
+    if do_apply and ops:
+        for op in ops:
+            if op["op"] == "update":
+                n, _sid = await _apply_item_updates(db, [{
+                    "fact_id": op["fact_id"],
+                    "value": op.get("value"),
+                    "name": op.get("name"),
+                    "category": op.get("category"),
+                }])
+                applied["updated"] += n
+            elif op["op"] == "delete":
+                await db.execute("DELETE FROM global_facts WHERE id=?", (op["fact_id"],))
+                applied["deleted"] += 1
+            else:  # add
+                content = _build_fact_content(op["name"], op["value"], False)
+                await db.execute(
+                    "INSERT INTO global_facts (id, project_id, scheme_id, group_id, group_title,"
+                    " title, content, category, source_ref, is_simulated, confidence,"
+                    " is_resolved, has_conflict, conflict_keys, fact_key)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), real_pid, scheme_scope, str(uuid.uuid4()),
+                     CATEGORY_TITLES.get(op["category"], ""),
+                     op["name"], content, op["category"],
+                     json.dumps([{"file": "AI调整", "quote": ""}], ensure_ascii=False),
+                     0, 1.0, 1, 0, "", normalize_key(op["name"])))
+                applied["added"] += 1
+        await db.commit()
+        if scheme_scope:
+            await invalidate_export_cache(db, scheme_scope)
+    return {
+        "ok": True,
+        "operations": ops,
+        "summary": summary,
+        "applied": applied if do_apply else None,
+    }
+
+
+@router.delete("/{fact_id}")
+async def delete_fact(
+    fact_id: str,
+    scheme_id: str = Query(""),
+    db=Depends(get_db),
+):
+    # ✅ 修复 P1：先查后删（原实现先 DELETE 再 SELECT，缓存失效永远不生效）
+    # ✅ 修复 P2：fact_id 兼容行 id 与分组 group_id —— 前端「删除分组」传
+    #    group.id，分组经编辑重建后行 id 均为新 uuid，原实现只按 id 匹配
+    #    会删除 0 行且返回 ok，导致分组永远删不掉。
+    scheme_scope = scheme_id.strip() if isinstance(scheme_id, str) else ""
+    if scheme_scope:
+        await _assert_fact_in_scheme_scope(db, fact_id, scheme_scope)
+    cur = await db.execute(
+        "SELECT id, project_id, scheme_id, group_id FROM global_facts WHERE id=? OR group_id=? LIMIT 1",
+        (fact_id, fact_id))
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "事实不存在")
+
+    # group_id 不是全局唯一约束（历史数据/复制方案可能复用），删除分组时
+    # 必须把作用域限制在命中的方案，避免误删其它方案的同组事实。
+    if row["id"] == fact_id:
+        await db.execute("DELETE FROM global_facts WHERE id=?", (fact_id,))
+    else:
+        await db.execute(
+            "DELETE FROM global_facts WHERE group_id=? AND project_id=? AND scheme_id=?",
+            (fact_id, row["project_id"], row["scheme_id"] or ""))
+    await db.commit()
+
+    if row["scheme_id"]:
+        await invalidate_export_cache(db, row["scheme_id"])
+    else:
+        await _invalidate_fact_scope_cache(db, "", str(row["project_id"] or ""))
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# 资料文档管理
+# ---------------------------------------------------------------------------
+
+@router.get("/documents")
+async def list_documents(
+    project_id: str = "",
+    scheme_id: str = "",
+    db=Depends(get_db),
+):
+    """列出项目资料文档。
+
+    ✅ 加固：支持直接传 scheme_id（内部反查 project_id）。
+    此前前端完全依赖 sections 接口返回的 scheme.project_id：一旦该字段缺失
+    （如后端未重启、旧版本返回），查询参数为空 → 前端静默跳过 → 列表恒为空，
+    表现为「上传了文件却不显示、像是没保存」，而文件其实已正常落库落盘。
+
+    ✅ BUG 修复（跨项目数据泄漏）：旧实现无作用域时返回【全部项目】的文档列表。
+    与 list_facts 口径对齐：缺 scheme_id/project_id 直接 400。
+
+    ⚠️ 排序差异（有意设计，勿"统一"）：
+    - 本函数 `ORDER BY created_at DESC`：最新上传在前，符合【列表展示】直觉；
+    - `load_parsed_docs` `ORDER BY created_at, id`：按上传先后，供【下游消费】
+      （事实提取按资料顺序拼 `=== 文件名 ===` 来源标注、批量解析按上传顺序
+      给进度）。两者口径不同是刻意保留的，改任何一侧前先核对全部调用方。
+    """
+    real_pid = await _resolve_project_id(db, scheme_id, project_id)
+    if not real_pid:
+        raise HTTPException(400, "需要 scheme_id 或 project_id")
+    sql = ("SELECT id, project_id, file_name, file_type, doc_type, "
+           "length(parsed_markdown) as text_len, "
+           "doc_category, file_size, parse_time, parse_warnings, "
+           "parse_status, created_at FROM project_documents")
+    params: list = [real_pid]
+    sql += " WHERE project_id=?"
+    sql += " ORDER BY created_at DESC"
+    cur = await db.execute(sql, params)
+    rows = [dict(r) for r in await cur.fetchall()]
+    # ✅ 增强：解析器诊断告警（JSON 列 → 数组回传，畸形数据容错为空数组）
+    for r in rows:
+        r["parse_warnings"] = _decode_parse_warnings(r.get("parse_warnings"))
+        # 标记「可能被截断」的文档：存储的 parsed_markdown 已被截断到
+        # MAX_PARSED_CHARS，故 text_len 达到上限即意味着原文 >= 上限、已被截断
+        # （恰好等于上限也提示用户可强制重解析以补齐，重解析无副作用）。
+        r["truncated"] = _is_truncated(r.get("text_len"))
+    return {"documents": rows}
+
+
+async def load_parsed_docs(db, project_id: str,
+                           limit: int | None = None) -> list[tuple[str, str]]:
+    """✅ 唯一读取入口：按上传先后取该项目【已解析】文档的 (file_name, 正文)。
+
+    - 仅返回正文非空的文档；`limit=None` 表示不限份数（全量，供事实提取使用）。
+    - 「非空」条件下推到 SQL、并按 (created_at, id) 固定排序 —— 旧写法
+      （先 LIMIT 再在 Python 里过滤空值）会让新上传的未解析文档占满名额，
+      已解析资料一份都取不到，生成端静默退化成"只有工程类型 + 项目名称"。
+    - 需要**文件名**的调用方（如事实提取要拼 `=== 文件名 ===` 做来源标注）用本
+      函数；只需要正文的用 load_parsed_texts（它委托到本函数）。
+    """
+    if not project_id:
+        return []
+    sql = ("SELECT file_name, parsed_markdown FROM project_documents "
+           "WHERE project_id=? AND parsed_markdown IS NOT NULL AND parsed_markdown!='' "
+           "ORDER BY created_at, id")
+    params: list = [project_id]
+    if limit is not None:
+        try:
+            n = max(int(limit), 1)
+        except (TypeError, ValueError):
+            n = 5
+        sql += " LIMIT ?"
+        params.append(n)
+    cur = await db.execute(sql, tuple(params))
+    return [(r[0], r[1]) for r in await cur.fetchall() if r[1]]
+
+
+async def load_parsed_texts(db, project_id: str, limit: int = 5) -> list[str]:
+    """（兼容入口）只返回已解析文档的正文，最多 limit 份。
+
+    ✅ 统一入口：完整语义见 load_parsed_docs —— 本函数委托它，避免"已解析文档"
+    的 SQL 在多处各写一份而漂移（历史上正是这种漂移导致过资料取不到）。
+    """
+    return [text for _name, text in await load_parsed_docs(db, project_id, limit)]
+
+
+def _decode_parse_warnings(raw) -> list[str]:
+    """把 parse_warnings 列（JSON 数组字符串）安全解码为字符串数组。"""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(w) for w in parsed if w]
+
+
+@router.delete("/documents/{doc_id}")
+async def delete_document(doc_id: str, db=Depends(get_db)):
+    cur = await db.execute(
+        "SELECT file_path, project_id FROM project_documents WHERE id=?", (doc_id,))
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "文档不存在")
+    # 只删除事实上传目录内的文件。历史/手工写入的异常路径只清理数据库，
+    # 避免删除接口被利用为任意文件删除器。
+    fpath = row["file_path"] if "file_path" in row.keys() else ""
+    candidate = _managed_upload_path(fpath)
+    if candidate and candidate.exists():
+        try:
+            candidate.unlink()
+        except OSError as e:
+            logger.warning("删除原始文件失败（忽略）: %s", e)
+    elif fpath:
+        logger.warning("拒绝删除上传目录外的文档路径: %s", fpath)
+    await db.execute("DELETE FROM project_documents WHERE id=?", (doc_id,))
+    await db.commit()
+    # ✅ 四层存储清理：解析层/提取层/语义层目录 + doc_chunks/doc_extractions/
+    #    doc_validation_reports 关联行 + 文档索引条目（项目级事实不删，多文档共享）
+    proj_id = row["project_id"] if "project_id" in row.keys() else ""
+    if proj_id:
+        try:
+            await doc_pipeline.purge_document(db, doc_id=doc_id,
+                                              project_id=proj_id)
+        except Exception:
+            logger.exception("文档 %s 四层产物清理失败（记录已删除）", doc_id)
+        # ✅ 跨模块链路收敛：删除源文档后旧事实立即退出生成链路，并失效所有方案缓存。
+        stale_count = await _mark_project_facts_stale(db, proj_id)
+        await db.commit()
+        await _invalidate_project_export_caches(db, proj_id)
+        logger.info("删除文档 %s，标记项目 %s 的 %d 条事实为 stale",
+                    doc_id, proj_id, stale_count)
+    return {"ok": True, "stale_facts": stale_count if proj_id else 0}
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# ✅ 分步工作流（2026-09）：
+#    ① 上传保存（仅存原始文件，不解析不提取）
+#    ② 解析（用户点击 → parse_file_content → parsed_markdown 落库）
+#    ③ 提取（用户点击 → SSE /sse/generate-facts 基于已解析文档提取）
+#    ④ 修改（列表编辑/确认/删除，既有功能）
+# ---------------------------------------------------------------------------
+
+# ✅ 历史落库上限。早期版本按 80000 字截断，这些文档的长度恰好等于旧上限，
+#    若只按当前 MAX_PARSED_CHARS 判定会被误判为"未截断" → 前端永远不显示
+#    「重新解析」入口，旧截断文档无法自愈。
+_LEGACY_PARSE_LIMITS: tuple[int, ...] = (80_000,)
+
+
+def _is_truncated(text_len) -> bool:
+    """判断文档文本是否疑似被截断（当前上限 或 历史上限 命中）。"""
+    try:
+        n = int(text_len or 0)
+    except (TypeError, ValueError):
+        return False
+    if n <= 0:
+        return False
+    # 注意：本函数入参是**已落库文本的长度**，而落库时 `stored = text[:MAX]` ——
+    # 只要发生过截断，落库长度就恰好等于 MAX。故此处必须用 `>=`（用 `>` 会漏判
+    # 所有真实截断），与写入侧 `len(text) > MAX` 判定互为补充、并不矛盾。
+    return n >= MAX_PARSED_CHARS or n in _LEGACY_PARSE_LIMITS
+
+
+def _safe_filename(raw: str) -> str:
+    """清洗上传文件名：剥离路径（防目录穿越）、去除非法字符与控制字符。
+
+    ✅ BUG 修复：旧实现直接用客户端提供的 filename 参与路径拼接与落盘。
+    部分客户端（旧版 IE/某些 HTTP 库）会携带完整路径（如 "C:\\a\\b.docx"），
+    在 Windows 上会导致落盘路径被篡改；控制字符与通配符亦会造成写盘失败。
+    """
+    name = (raw or "").replace("\\", "/").split("/")[-1]
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip().strip(".")
+    return name or "uploaded_file"
+
+
+def _signature_valid(ftype: str, prefix: bytes) -> bool:
+    """对常见二进制格式做轻量文件头校验，拒绝扩展名伪造。
+
+    ✅ 增强：签名表已抽到 `file_parser.signature_valid` 统一维护 ——
+    目录识别上传链路（upload-outline）此前完全没有这道校验，两条上传
+    路径的防护口径不一致。此处保留原函数名以兼容既有调用/测试。
+    """
+    return signature_valid(ftype, prefix)
+
+
+async def _stream_to_disk(f: UploadFile, dest: Path, limit: int) -> int:
+    """流式落盘：分块读取，避免整份文件（可达 30MB×N）一次性驻留内存。
+
+    返回写入字节数；超过 limit 时删除半成品并返回 -1。
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    total = 0
+    with dest.open("wb") as out:
+        while True:
+            chunk = await f.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                break
+            out.write(chunk)
+    if total > limit:
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        return -1
+    return total
+
+
+async def _resolve_project_id(db, scheme_id: str, project_id: str) -> str:
+    """解析并校验资料作用域，禁止客户端伪造跨项目 scheme_id。"""
+    # 只接受真正的字符串：直接以函数方式调用路由（测试 / 内部复用）时，
+    # FastAPI 的 Query(...) 默认值会以【对象】形式传入，str() 化后得到
+    # "Query('')" 这种假值 → 被误判为"scheme_id 与 project_id 不匹配"，
+    # 报错信息完全指向错误方向。非字符串一律按"未提供"处理。
+    sid = scheme_id.strip() if isinstance(scheme_id, str) else ""
+    pid = project_id.strip() if isinstance(project_id, str) else ""
+    if sid:
+        cur = await db.execute(
+            "SELECT project_id FROM schemes WHERE id=?", (sid,))
+        row = await cur.fetchone()
+        if not row or not row[0]:
+            raise HTTPException(404, "方案不存在")
+        real_pid = str(row[0])
+        if pid and pid != real_pid:
+            raise HTTPException(400, "scheme_id 与 project_id 不匹配")
+        return real_pid
+    if pid:
+        cur = await db.execute("SELECT id FROM projects WHERE id=?", (pid,))
+        if not await cur.fetchone():
+            raise HTTPException(404, "项目不存在")
+        return pid
+    return ""
+
+
+def _doc_file_path(project_id: str, doc_id: str, fname: str) -> Path:
+    safe_name = _safe_filename(fname)
+    return FACT_UPLOADS_DIR / project_id / f"{doc_id[:8]}_{safe_name}"
+
+
+def _managed_upload_path(raw_path: str | Path) -> Path | None:
+    """返回事实上传目录内的安全路径，目录外路径返回 None。"""
+    if not raw_path:
+        return None
+    try:
+        root = FACT_UPLOADS_DIR.resolve()
+        candidate = Path(raw_path).resolve()
+        candidate.relative_to(root)
+        return candidate
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+@router.post("/upload-documents")
+async def upload_documents(
+    scheme_id: str = Query(""),
+    project_id: str = Query(""),
+    files: list[UploadFile] = File(...),
+    db=Depends(get_db),
+):
+    """① 上传保存：仅保存原始文件与档案记录，不做解析与提取。
+
+    同名文件重复上传时替换旧记录（含旧文件删除）。
+    """
+    real_pid = await _resolve_project_id(db, scheme_id, project_id)
+    if not real_pid:
+        raise HTTPException(400, "需要 scheme_id 或 project_id")
+
+    # ✅ 2026-09-23 日志埋点：上传入口生成全链路 trace_id，并绑定 project 上下文，
+    #    使后续解析 / 提取 / 保存 / 分类的日志都能凭 trace_id 串联（见 log_context）。
+    set_context(trace_id=new_trace_id(), project_id=real_pid, scheme_id=scheme_id)
+
+    saved: list[dict] = []
+    oversize: list[str] = []
+    unsupported: list[str] = []
+    signature_invalid: list[str] = []
+    empty_files: list[str] = []
+    replaced = 0
+    written: list[Path] = []  # 已落盘文件，整体异常时回滚，避免产生孤儿文件
+    old_paths_to_delete: list[Path] = []  # DB 提交成功后再清理，保证可回滚
+    # ✅ BUG 修复（同名替换孤儿泄漏）：被替换旧文档只删了 project_documents 行，
+    #    其 doc_chunks 行、提取/校验产物与四层磁盘目录无人清理 ——
+    #    /documents/{id}/chunks 等按 doc_id 查询的入口虽在，索引却查不到该文档，
+    #    旧块与旧层目录永久残留（占空间且与「删除文档即 purge_document」口径不一致）。
+    #    与旧原件同策略：commit 成功后再清理，失败可回滚。
+    purged_old_doc_ids: list[tuple[str, str]] = []  # (doc_id, project_id)
+
+    # ✅ 配额：单请求文件数上限。超出部分直接拒绝，不做任何落盘。
+    too_many: list[str] = []
+    if len(files) > MAX_UPLOAD_FILES_PER_REQUEST:
+        too_many = [(x.filename or "uploaded_file")
+                    for x in files[MAX_UPLOAD_FILES_PER_REQUEST:]]
+        files = files[:MAX_UPLOAD_FILES_PER_REQUEST]
+    total_bytes = 0
+    quota_exceeded = False
+    # ✅ 回归（2026-09-21）：累计体积超限被拒的文件必须归入 quota_files 独立上报，
+    #    不得混进 oversize —— oversize 语义是「单文件超 30MB」，前端据此提示
+    #    「超过 30MB」；一个 8 字节文件因累计配额被拒时混入 oversize 会让用户
+    #    误以为文件太大去拆分重试（错误归因）。
+    quota_files: list[str] = []
+
+    try:
+        for f in files:
+            raw_name = f.filename or "uploaded_file"
+            fname = _safe_filename(raw_name)
+            ftype = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+            # 格式预检：不支持的扩展名直接拒绝，避免存了却解析不了
+            if ftype and ftype not in SUPPORTED_EXTENSIONS:
+                unsupported.append(raw_name)
+                continue
+            # 大小预检：优先用 Content-Length（f.size），避免大文件白读一遍
+            declared_size = getattr(f, "size", None)
+            if declared_size and declared_size > MAX_UPLOAD_BYTES:
+                oversize.append(raw_name)
+                continue
+            # 文件头校验只读取极小前缀并复位指针，不改变后续流式落盘。
+            prefix = await f.read(16)
+            await f.seek(0)
+            if not _signature_valid(ftype, prefix):
+                signature_invalid.append(raw_name)
+                continue
+            doc_id = str(uuid.uuid4())
+            fpath = _doc_file_path(real_pid, doc_id, fname)
+            # ✅ 优化：流式落盘（分块），旧实现 `await f.read()` 会把整份文件
+            #    读入内存——多文件同时上传时峰值 = N × 30MB，易触发 OOM。
+            size = await _stream_to_disk(f, fpath, MAX_UPLOAD_BYTES)
+            if size < 0:
+                oversize.append(raw_name)
+                continue
+            if size == 0:
+                # ✅ 修复：0 字节文件既占档案位又注定解析失败，直接拒绝并说明
+                try:
+                    fpath.unlink()
+                except OSError:
+                    pass
+                empty_files.append(raw_name)
+                continue
+            # ✅ 配额：累计体积上限。已落盘文件需立即清理，避免孤儿文件。
+            if total_bytes + size > MAX_UPLOAD_TOTAL_BYTES:
+                try:
+                    fpath.unlink()
+                except OSError:
+                    pass
+                quota_files.append(raw_name)
+                quota_exceeded = True
+                break
+            total_bytes += size
+            written.append(fpath)
+
+            # 同名替换：先删旧记录，旧文件延迟到 DB commit 成功后清理。
+            # 若后续文件/数据库失败，rollback 后旧记录和旧文件仍可用。
+            cur = await db.execute(
+                "SELECT id, file_path FROM project_documents "
+                "WHERE project_id=? AND file_name=?",
+                (real_pid, fname))
+            for old in await cur.fetchall():
+                old_path = old["file_path"] if "file_path" in old.keys() else ""
+                safe_old = _managed_upload_path(old_path)
+                if safe_old and safe_old != fpath:
+                    old_paths_to_delete.append(safe_old)
+                elif old_path:
+                    logger.warning("跳过上传目录外旧文件清理: %s", old_path)
+                await db.execute(
+                    "DELETE FROM project_documents WHERE id=?", (old["id"],))
+                purged_old_doc_ids.append((str(old["id"]), real_pid))
+                replaced += 1
+            # 落库（parsed_markdown 留空 = 待解析）
+            # ✅ 增强：自动文件分类 + 文件大小记录（供前端「文件导入」Tab 展示）
+            doc_category = _auto_classify_document(fname, ftype)
+            await db.execute(
+                "INSERT INTO project_documents "
+                "(id, project_id, file_name, file_type, doc_type, parsed_markdown, file_path, "
+                "doc_category, file_size) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (doc_id, real_pid, fname, ftype, "全局事实上传", "", str(fpath),
+                 doc_category, size))
+            # ✅ 四层存储（阶段1 原文层）：指纹入库 + meta 落盘 + 文档索引。
+            #    失败只降级告警，不阻断既有上传主链路（DB 档案已建）。
+            try:
+                meta = await doc_pipeline.ingest_upload(
+                    doc_id=doc_id, project_id=real_pid, file_name=fname,
+                    file_type=ftype, saved_path=fpath, size=size,
+                    doc_category=doc_category)
+                if meta:
+                    await db.execute(
+                        "UPDATE project_documents SET file_hash_md5=?,"
+                        " file_hash_sha256=?, parse_status='pending' WHERE id=?",
+                        (meta.get("file_hash_md5", ""),
+                         meta.get("file_hash_sha256", ""), doc_id))
+            except Exception:
+                logger.exception("文档 %s 原文层入库失败（不影响上传）", fname)
+            saved.append({"id": doc_id, "file_name": fname, "size": size})
+    except Exception:
+        # ✅ BUG 修复（悬空事务）：循环中途抛异常时，此前执行的 DELETE（同名替换）
+        #    与 INSERT（档案记录）已在连接的隐式事务中排布但【尚未 commit】。
+        #    旧实现只清理磁盘文件、不 rollback —— 连接归还写池后被下一个请求复用，
+        #    这些残留语句会随该请求的 commit 一并提交，产生"幽灵删除/幽灵新增"。
+        try:
+            await db.rollback()
+        except Exception:
+            # 连接已损坏（如 disk I/O）时忽略，交由连接池剔除逻辑处理
+            pass
+        # ✅ 修复：旧实现在循环中抛异常时，已写盘的文件没有对应 DB 记录，
+        #    成为永久孤儿文件（占空间且无法在界面删除）。异常时统一清理。
+        for p in written:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        logger.exception("上传保存失败，已回滚 %d 个已落盘文件", len(written))
+        raise
+
+    await db.commit()
+    # 新记录已提交后再删除旧文件；删除失败不影响已提交的数据库状态。
+    for old_path in old_paths_to_delete:
+        try:
+            old_path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("清理被替换的旧上传文件失败: %s (%s)", old_path, e)
+    # 被替换旧文档的四层产物同步清理（与手动删除文档同一 purge 口径）。
+    for old_doc_id, old_pid in purged_old_doc_ids:
+        try:
+            await doc_pipeline.purge_document(db, doc_id=old_doc_id,
+                                              project_id=old_pid)
+        except Exception:
+            logger.warning("清理被替换旧文档 %s 的四层产物失败", old_doc_id)
+    result: dict = {"ok": True, "saved": saved,
+                    "saved_count": len(saved),
+                    "replaced": replaced}
+    warnings: list[str] = []
+    if oversize:
+        result["oversize"] = oversize
+        warnings.append(
+            f"以下文件超过 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB 未保存：{', '.join(oversize)}")
+    if unsupported:
+        result["unsupported"] = unsupported
+        warnings.append(
+            f"以下文件格式不支持（支持 {', '.join(sorted(SUPPORTED_EXTENSIONS))}）：{', '.join(unsupported)}")
+    if signature_invalid:
+        result["signature_invalid"] = signature_invalid
+        warnings.append("以下文件扩展名与文件头不匹配，未保存：" + ", ".join(signature_invalid))
+    if empty_files:
+        result["empty"] = empty_files
+        warnings.append(f"以下文件为空（0 字节）已忽略：{', '.join(empty_files)}")
+    if too_many:
+        result["too_many"] = too_many
+        warnings.append(
+            f"单次最多上传 {MAX_UPLOAD_FILES_PER_REQUEST} 个文件，"
+            f"以下 {len(too_many)} 个文件未处理：" + "、".join(too_many[:10]))
+    if quota_exceeded:
+        result["quota_exceeded"] = True
+        # ✅ 独立字段：被累计体积上限拒绝的文件清单（勿混入 oversize）
+        if quota_files:
+            result["quota_files"] = quota_files
+        warn_files = f"（{', '.join(quota_files[:10])}）" if quota_files else ""
+        warnings.append(
+            f"本次上传累计体积超过 {MAX_UPLOAD_TOTAL_BYTES // (1024 * 1024)}MB 上限，"
+            f"超出部分未保存{warn_files}，请分批上传")
+    if replaced:
+        warnings.append(f"替换了 {replaced} 个同名旧文件")
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
+async def _ingest_parsed_doc(db, doc_id: str, project_id: str, file_name: str,
+                             elapsed: float, diag: dict,
+                             warnings: list[str], reparse: bool) -> dict:
+    """✅ 四层存储（阶段2+3）：解析成功后落盘解析层产物 + 分块入 doc_chunks。
+
+    失败只告警不阻断主链路（DB parsed_markdown 才是下游消费的唯一硬依赖，
+    磁盘四层产物可通过 reparse 重建）。返回落盘摘要（可能为空 dict）。
+    """
+    try:
+        cur = await db.execute(
+            "SELECT parsed_markdown, parse_version FROM project_documents"
+            " WHERE id=?", (doc_id,))
+        r = dict(await cur.fetchone() or {})
+        # 首次解析 prev='' → v1；重解析（源文档此前已成功解析过）→ 代次递增。
+        # ✅ BUG 修复：旧版文档的 parse_version 列可能为空（四层存储上线前解析的），
+        #    重解析时若拿空串当 prev_version，bump 不出来会被当成【首次解析】
+        #    重置回 v1 —— 代次回退，时效性/增量判定永久失真。
+        #    重解析路径上空版本一律视作 v1，本次落 v2。
+        prev_version = (r.get("parse_version") or "v1") if reparse else ""
+        md = r.get("parsed_markdown") or ""
+        return await doc_pipeline.ingest_parse_result(
+            db, doc_id=doc_id, project_id=project_id, file_name=file_name,
+            markdown=md, page_count=int(diag.get("page_count") or 1),
+            parse_duration_s=elapsed, parse_engine=str(diag.get("file_type") or ""),
+            warnings=warnings, prev_version=prev_version)
+    except Exception:
+        logger.exception("文档 %s 解析层/分块落盘失败（不影响解析结果）", file_name)
+        return {}
+
+
+# ✅ 上传解析模块并发守卫（2026-09-23）：同一文档可能被多个请求并发解析
+#    （前端 parsingDocId/parsingDocs 仅防主路径；外部直连 / 多标签页 /
+#    批量 parse-all 与单份 parse 同时触发会绕过前端守卫）。并发解析同一份文件
+#    会导致：重复 OCR 资源争用（扫描件尤甚）、parsed_markdown 被后写者覆盖、
+#    四层分块重复写入。逐文档 asyncio.Lock 串行化同文档解析；锁对象在解析
+#    完成后释放引用，避免随文档数无限增长。
+_doc_parse_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_doc_parse_lock(doc_id: str) -> asyncio.Lock:
+    lock = _doc_parse_locks.get(doc_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _doc_parse_locks[doc_id] = lock
+    return lock
+
+
+@asynccontextmanager
+async def _doc_parse_guard(doc_id: str):
+    """✅ 性能稳定性（2026-09-23）：解析并发守卫 + 锁条目自动回收。
+
+    逐文档串行化解析（防并发重复 OCR / 后写覆盖），并在锁释放后从
+    `_doc_parse_locks` 字典删除该条目 —— 旧实现只增不删，长生命周期服务下
+    随文档数无限增长（内存泄漏）。单线程事件循环中，`async with` 退出到
+    `finally` 之间不会有其他协程插入，锁必然空闲；即便有等待者，其已持有
+    锁对象引用，从字典移除只是撤掉"登记"，不影响等待者，故安全删除。
+    """
+    lock = _get_doc_parse_lock(doc_id)
+    try:
+        async with lock:
+            yield
+    finally:
+        _doc_parse_locks.pop(doc_id, None)
+
+
+async def _reconcile_parse_status(db, doc_id: str) -> bool:
+    """✅ BUG 修复（2026-09-25，解析结果「看起来丢了」/ 状态错乱）：
+
+    把「正文非空但 parse_status 未置为 success」的陈旧行修正为 success。
+
+    成因：``project_documents.parse_status`` 由 ``db._migrate`` 以
+    ``TEXT DEFAULT 'pending'`` 增量补列 —— 四层存储上线前就已解析好的存量
+    文档，正文躺在 ``parsed_markdown`` 里，状态列却被回填成 'pending'。
+    而 ``parse_document`` / ``parse_all_documents`` 的「已解析」短路分支
+    只回 ``already_parsed`` / 直接 ``continue``，**从不修正状态列**，于是：
+
+      · 前端 ``computeDocStats`` 把这类文档恒计为「待解析」；
+      · 点「解析」→ 后端回「已解析过」但列表标签仍是「待解析」；
+      · 点「解析全部」→ 后端回「所有文档均已解析」、什么都没改；
+      · 唯一出口是「全部重解析」(force)，白白重跑一遍 OCR。
+
+    本函数在短路命中时顺带修正状态列：单条条件 UPDATE、幂等（已 success
+    不重复写）、失败只告警不阻断解析主链路。
+
+    :return: 是否实际执行了修正（True = 本次把状态从非 success 改为 success）。
+    """
+    try:
+        cur = await db.execute(
+            "UPDATE project_documents SET parse_status='success' "
+            "WHERE id=? AND parsed_markdown IS NOT NULL AND parsed_markdown<>'' "
+            "AND (parse_status IS NULL OR parse_status<>'success')",
+            (doc_id,))
+        await db.commit()
+        return int(getattr(cur, "rowcount", 0) or 0) > 0
+    except Exception:
+        logger.exception("修正文档 %s 的解析状态失败（可忽略）", doc_id)
+        return False
+
+
+async def _reconcile_parse_status_all(db, project_id: str) -> int:
+    """项目级批量修正陈旧 parse_status（见 :func:`_reconcile_parse_status`）。
+
+    用于 ``parse_all_documents`` 入口：**放在 SELECT 待解析列表之前**，
+    这样"所有文档均已解析"的早退分支也不会漏掉这批行。单条条件 UPDATE，
+    只动"正文非空 + 状态非 success"的行；返回值供响应回传修正条数。
+    """
+    try:
+        cur = await db.execute(
+            "UPDATE project_documents SET parse_status='success' "
+            "WHERE project_id=? AND parsed_markdown IS NOT NULL "
+            "AND parsed_markdown<>'' AND (parse_status IS NULL "
+            "OR parse_status<>'success')",
+            (project_id,))
+        await db.commit()
+        return int(getattr(cur, "rowcount", 0) or 0)
+    except Exception:
+        logger.exception("批量修正项目 %s 的解析状态失败（可忽略）", project_id)
+        return 0
+
+
+async def _mark_parse_failed(db, doc_id: str, reason: str) -> None:
+    """✅ 解析失败可观测性（2026-09-23）：把 parse_status 置为 'failed' 并把失败
+    原因写入 parse_warnings 持久化，使文档列表能区分"待解析"与"解析失败"。
+
+    旧实现解析失败时既不写状态、也不留痕 —— 文档永远停留在 'pending'，前端
+    恒显"待解析"，用户无从得知已失败、会反复重试同一份文件。失败原因随列表
+    回传，前端可展示"⚠ 解析失败"标签与具体原因。
+
+    失败写入独立于主解析链路；即便写入本身异常也不影响已经抛出的解析错误。
+    """
+    try:
+        await db.execute(
+            "UPDATE project_documents SET parse_status='failed', "
+            "parse_warnings=? WHERE id=?",
+            (dump_parse_warnings([f"解析失败：{reason}"]), doc_id))
+        await db.commit()
+    except Exception:
+        logger.exception("标记文档 %s 解析失败状态失败（可忽略）", doc_id)
+
+
+async def _mark_project_facts_stale(db, project_id: str) -> int:
+    """资料来源发生变化后，保守标记项目下全部事实为 stale。
+
+    当前事实表尚未逐事实保存 source_doc_id，精确血缘无法可靠反查；项目级失效
+    会在多方案共享事实场景下偏保守，但能确保正文/导出不继续使用旧解析结果。
+    重新提取或人工改值/裁决后对应行可解除标记。
+    """
+    if not project_id:
+        return 0
+    cur = await db.execute(
+        "UPDATE global_facts SET is_stale=1, "
+        "updated_at=datetime('now','localtime') WHERE project_id=? AND is_stale=0",
+        (project_id,))
+    return int(getattr(cur, "rowcount", 0) or 0)
+
+
+async def _invalidate_project_export_caches(db, project_id: str) -> None:
+    """✅ 跨模块链路收敛（2026-09-23）：删除 / 强制重解析文档后，失效该项目下所有方案的
+    导出缓存，避免下游导出陈旧 docx。
+
+    导出缓存默认关闭（O11），无缓存行时 `invalidate_export_cache` 为 no-op，安全；
+    即便开启，也只删 export_cache 行 + 磁盘产物（不回滚已生成正文，既定设计）。
+    按 scheme 失效：文档属项目级，项目下可能有多个方案，需逐一失效。
+    """
+    try:
+        cur = await db.execute(
+            "SELECT id FROM schemes WHERE project_id=?", (project_id,))
+        sids = [r["id"] for r in await cur.fetchall()]
+        for sid in sids:
+            await invalidate_export_cache(db, sid)
+    except Exception:
+        logger.exception("失效项目 %s 导出缓存失败（可忽略）", project_id)
+
+
+@router.post("/documents/{doc_id}/parse")
+async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
+    """② 解析单份文档：读取原始文件 → parse_file_content → 落库
+
+    force=true 时忽略"已解析"直接重解析：用于早期版本受 80000 字上限
+    截断的文档，重解析后可按当前上限（400000 字）获得完整内容。
+    """
+    import time as _time
+    _parse_start = _time.time()
+    cur = await db.execute(
+        "SELECT file_name, file_path, parsed_markdown, project_id, parse_version "
+        "FROM project_documents WHERE id=?", (doc_id,))
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "文档不存在")
+    # ✅ 2026-09-23 日志埋点：解析入口绑定 project/doc 上下文，使本次解析及后续
+    #    四层落盘 / 提取的日志都能凭 trace_id + doc 串联。
+    set_context(trace_id=new_trace_id(),
+                project_id=(row["project_id"] or "") if "project_id" in row.keys() else "",
+                doc_id=doc_id)
+    fname = row["file_name"]
+    fpath = row["file_path"] if "file_path" in row.keys() else ""
+    safe_path = _managed_upload_path(fpath)
+    if fpath and safe_path is None:
+        raise HTTPException(400, "文档路径不在事实上传目录内，请重新上传")
+    # ✅ 并发守卫（2026-09-23）：锁内串行化同文档解析，并在锁内复核"已解析"
+    #    状态 —— 否则两个并发请求都会在各自读到的 parsed_markdown='' 上各解析
+    #    一次（重复 OCR + 后写覆盖）。锁内再查一次，已解析且非强制则直接返回。
+    #    解析结束（含异常）后由 _doc_parse_guard 自动回收锁字典条目（防内存泄漏）。
+    async with _doc_parse_guard(doc_id):
+        cur = await db.execute(
+            "SELECT parsed_markdown FROM project_documents WHERE id=?", (doc_id,))
+        _cur = await cur.fetchone()
+        if _cur and _cur["parsed_markdown"] and not force:
+            # ✅ BUG 修复（2026-09-25）：短路返回前先自修复陈旧的 parse_status
+            #    （存量文档正文非空但状态仍为 pending → 前端恒显「待解析」、
+            #    点解析永远「已解析过」却无任何变化，体感「解析结果丢失」）。
+            reconciled = await _reconcile_parse_status(db, doc_id)
+            result = {"ok": True, "already_parsed": True,
+                      "parse_status": "success",
+                      "text_len": len(_cur["parsed_markdown"])}
+            if reconciled:
+                result["reconciled"] = True
+            return result
+        if not safe_path or not safe_path.exists():
+            raise HTTPException(400, f"原始文件缺失（{fname}），请重新上传")
+        # 本次是否为重解析（源文档此前已有解析内容）—— 解析代次递增判定
+        _was_parsed = bool(_cur and _cur["parsed_markdown"])
+        try:
+            content = await asyncio.to_thread(safe_path.read_bytes)
+            text, diag = await asyncio.to_thread(
+                parse_file_content_ex, content, fname)
+        except ParseError as e:
+            # ParseError 的消息是给用户看的（缺依赖 / 无 OCR 引擎 / 压缩炸弹），
+            # 属于可操作提示，原样返回。
+            logger.warning("文档 %s 解析失败: %s", fname, e)
+            # ✅ 解析失败可观测性：标记 failed 状态 + 持久化原因（前端区分"待解析"）
+            await _mark_parse_failed(db, doc_id, str(e))
+            raise HTTPException(400, f"解析失败：{e}")
+        except Exception:
+            # ✅ 其它异常（库版本、路径、编码等）只进日志，不回传细节，避免泄露环境信息
+            logger.exception("文档 %s 解析出现未预期异常", fname)
+            await _mark_parse_failed(db, doc_id, "文件无法识别或已损坏")
+            raise HTTPException(400, "解析失败：文件无法识别或已损坏，请查看服务端日志")
+        if len(text.strip()) < 10:
+            await _mark_parse_failed(
+                db, doc_id,
+                "未解析到有效文本（空白文件 / 扫描件无 OCR / 已损坏）")
+            raise HTTPException(400,
+                f"「{fname}」未解析到有效文本：可能是空白文件、扫描件或已损坏。"
+                f"若为扫描件/图片，请确认 OCR 引擎可用"
+                f"（打开 /api/v1/diagnostics/capabilities 查看启用方法）")
+        # ✅ BUG 修复：落库长度与实际存储长度一致，避免前端显示"文本长度 X"
+        # 但库里只存了 Y < X 的假象。超限时返回 truncated=true 让前端提示重解析。
+        # ✅ 两类截断都要告知：① 落库字数超上限；② 解析器自身截断（PDF 页数 /
+        #    表格行数）。旧实现只认第 ① 类，"第 50 页之后的设计参数没进事实库"
+        #    这类问题在界面上完全无提示。
+        char_truncated = len(text) > MAX_PARSED_CHARS
+        stored = text[:MAX_PARSED_CHARS]
+        # ✅ 增强：记录解析耗时（供前端显示「解析用时」诊断）
+        _elapsed = round(_time.time() - _parse_start, 2)
+        # ✅ 增强：解析器诊断告警持久化（截断 / OCR 兜底 / 加密 PDF）。
+        #    旧实现告警只在本次响应里出现，刷新后丢失 —— 用户事后查看文档列表
+        #    无从得知"该文档内容不完整"。落库后由 /documents 随列表回传。
+        parser_warnings = [str(w) for w in (diag.get("warnings") or [])]
+        if char_truncated:
+            parser_warnings.append(
+                f"原文 {len(text)} 字，已截断至 {MAX_PARSED_CHARS} 字上限")
+        # ✅ 解析成功即置 parse_status='success'（2026-09-23）：旧实现依赖四层入库
+        #    （_ingest_parsed_doc）成功才写该列；一旦四层落盘失败，列仍为 'pending'
+        #    而 parsed_markdown 已填充 → 状态矛盾，下游 doc_pipeline 去重/结构化
+        #    读取会误判"未解析"，造成「解析结果丢失」隐患。此处让状态列与真实
+        #    解析结果一致，独立于四层入库成败。
+        await db.execute(
+            "UPDATE project_documents SET parsed_markdown=?, parse_time=?, parse_warnings=?,"
+            " file_type=COALESCE(NULLIF(?, ''), file_type), parse_status='success' WHERE id=?",
+            (stored, _elapsed, dump_parse_warnings(parser_warnings),
+             # ✅ 修复（2026-09-18）：回写解析器嗅探出的真实类型（无扩展名/被改名的
+             #    PDF/图片按文件头识别）—— 旧实现只用文件后缀推导值落库，列表展示
+             #    的格式与实际解析类型不一致。
+             str(diag.get("file_type") or "").strip().lower(), doc_id))
+        await db.commit()
+        truncated = char_truncated or bool(diag.get("truncated"))
+        # ✅ 四层存储（阶段2+3）：解析层产物落盘 + 分块入库（失败不阻断解析主结果）
+        layer_info = await _ingest_parsed_doc(
+            db, doc_id, row["project_id"], fname, _elapsed, diag,
+            parser_warnings, _was_parsed)
+        logger.info("文档 %s 解析完成：%d 字%s%s", fname, len(stored),
+                    "（已截断至上限）" if char_truncated else "",
+                    "（解析器截断）" if diag.get("truncated") else "")
+        result: dict = {"ok": True, "text_len": len(stored), "truncated": truncated}
+        if layer_info:
+            result["layers"] = layer_info
+        if parser_warnings:
+            result["warnings"] = parser_warnings
+        if char_truncated:
+            result["warning"] = (f"原文 {len(text)} 字，已截断至 {MAX_PARSED_CHARS} 字上限；"
+                                 "如需完整提取请拆分文件后重新上传")
+        if force:
+            # 强制重解析改变了源文本：旧事实立即退出目录/正文/导出生成链路。
+            stale_count = await _mark_project_facts_stale(db, row["project_id"])
+            await db.commit()
+            # ✅ 跨模块链路收敛：强制重解析改变了源文本 → 失效该项目所有方案的
+            #    导出缓存，避免下游导出陈旧 docx（导出缓存默认关闭时为 no-op）。
+            await _invalidate_project_export_caches(db, row["project_id"])
+            result["stale_facts"] = stale_count
+            result["note"] = (f"文档已重新解析，{stale_count} 条旧事实已停止注入；"
+                              "请重新执行「AI 提取事实」更新全局事实")
+        return result
+
+
+@router.post("/documents/parse-all")
+async def parse_all_documents(
+    scheme_id: str = Query(""),
+    project_id: str = Query(""),
+    force: bool = False,
+    db=Depends(get_db),
+):
+    """② 批量解析：解析该项目下所有未解析的文档
+
+    ✅ 增强：force=true 时【连同已解析文档一起重解析】。用于两类场景：
+      1. 早期版本按 80000 字上限截断的旧文档，重解析后可按当前上限补齐；
+      2. 中途启用了 OCR 引擎后，重解析可让此前识别失败的扫描件重新获得文本。
+    """
+    real_pid = await _resolve_project_id(db, scheme_id, project_id)
+    if not real_pid:
+        raise HTTPException(400, "需要 scheme_id 或 project_id")
+    # ✅ 2026-09-23 日志埋点：批量解析入口绑定 project 上下文，便于按 trace_id 串联
+    #    本次批量解析涉及的所有文档。
+    set_context(trace_id=new_trace_id(), project_id=real_pid, scheme_id=scheme_id)
+    # ✅ BUG 修复（2026-09-25，「解析全部」体感失效）：先做一轮状态自修复。
+    #    存量文档正文非空但 parse_status 仍是 pending（四层存储上线前的默认值
+    #    回填）时，它们**不进**下方 pending 列表 → 直接命中"所有文档均已解析"
+    #    早退，用户看到的还是「待解析」。放在 SELECT 之前使两个分支都正确。
+    reconciled_count = await _reconcile_parse_status_all(db, real_pid)
+    sql = ("SELECT id, project_id, file_name, file_path FROM project_documents "
+           "WHERE project_id=?")
+    if not force:
+        sql += " AND (parsed_markdown='' OR parsed_markdown IS NULL)"
+    # ✅ 顺序固定：批量解析进度与失败列表按上传先后给出，避免 SQLite 返回顺序漂移
+    sql += " ORDER BY created_at, id"
+    cur = await db.execute(sql, (real_pid,))
+    pending = [dict(r) for r in await cur.fetchall()]
+    for _p in pending:
+        _p["force_reparse"] = bool(force)
+    if not pending:
+        _msg = "所有文档均已解析"
+        if reconciled_count:
+            _msg += (f"（已修正 {reconciled_count} 份存量文档的解析状态）")
+        return {"ok": True, "parsed": 0, "failed_count": 0, "failed": [],
+                "truncated_count": 0, "truncated": [],
+                # ✅ 响应形状一致（2026-09-25）：早退分支与主分支都带
+                # reconciled/reconciled_count，前端才能用统一判据做提示。
+                "reconciled_count": reconciled_count, "reconciled": [],
+                "message": _msg}
+
+    import time as _time
+
+    parsed, failed = 0, []
+    truncated_files: list[dict] = []
+    reconciled: list[str] = []
+    for doc in pending:
+        # ✅ 并发守卫（2026-09-23）：逐文档锁串行化，防与并发单份 parse / 另一
+        #    次 parse-all 重复解析同一文档（重复 OCR + 后写覆盖）。锁内先复核
+        #    "已解析"状态，已解析且非强制则跳过（与单份解析同口径）。解析结束
+        #    后由 _doc_parse_guard 自动回收锁字典条目（防内存泄漏）。
+        async with _doc_parse_guard(doc["id"]):
+            try:
+                cur = await db.execute(
+                    "SELECT parsed_markdown FROM project_documents WHERE id=?", (doc["id"],))
+                _c = await cur.fetchone()
+                if _c and _c["parsed_markdown"] and not force:
+                    # ✅ BUG 修复（2026-09-25）：与单份解析同口径，短路前自修复
+                    #    陈旧的 parse_status —— 否则「解析全部」对存量文档回
+                    #    「所有文档均已解析」却不改状态，前端列表恒显「待解析」。
+                    if await _reconcile_parse_status(db, doc["id"]):
+                        reconciled.append(doc["file_name"])
+                    continue
+            except Exception:
+                pass
+            try:
+                _parse_start = _time.time()
+                fpath = doc.get("file_path", "")
+                safe_path = _managed_upload_path(fpath)
+                if not safe_path:
+                    # ✅ BUG 修复（2026-09-24）：路径不安全/原文件缺失/有效文本不足三个
+                    #    分支此前只 append failed 后 continue，未落 parse_status='failed'，
+                    #    文档永久停留 pending、前端恒显「待解析」（与单文档解析口径不一致）。
+                    _reason = "原始文件路径不安全或缺失"
+                    await _mark_parse_failed(db, doc["id"], _reason)
+                    failed.append({"file_name": doc["file_name"], "reason": _reason})
+                    continue
+                if not safe_path.exists():
+                    _reason = "原始文件缺失"
+                    await _mark_parse_failed(db, doc["id"], _reason)
+                    failed.append({"file_name": doc["file_name"], "reason": _reason})
+                    continue
+                content = await asyncio.to_thread(safe_path.read_bytes)
+                text, diag = await asyncio.to_thread(
+                    parse_file_content_ex, content, doc["file_name"])
+                if len(text.strip()) < 10:
+                    _reason = ("未解析到有效文本（空白/扫描件/损坏）；"
+                               "扫描件需 OCR 引擎，见 /api/v1/diagnostics/capabilities")
+                    await _mark_parse_failed(db, doc["id"], _reason)
+                    failed.append({"file_name": doc["file_name"], "reason": _reason})
+                    continue
+                # ✅ BUG 修复：截断是「解析成功但内容不完整」的告警，不应计入 failed，
+                #    否则前端提示"失败 N 个"会让用户误以为整份解析失败。
+                char_truncated = len(text) > MAX_PARSED_CHARS
+                stored = text[:MAX_PARSED_CHARS]
+                # ✅ 增强：解析器诊断告警随解析结果持久化（与单文档解析一致）
+                all_warnings = [str(w) for w in (diag.get("warnings") or [])]
+                if char_truncated:
+                    all_warnings.append(
+                        f"原文 {len(text)} 字，已截断至 {MAX_PARSED_CHARS} 字上限")
+                # ✅ BUG 修复（口径不一致）：单文档解析会写 parse_time，批量解析不写，
+                #    于是「解析全部」之后前端列表的「解析用时」恒为空 —— 用户无法
+                #    判断到底是哪份文件拖慢了整批解析。现与单文档解析保持一致。
+                _elapsed = round(_time.time() - _parse_start, 2)
+                # ✅ 解析成功即置 parse_status='success'（与单份解析同口径，2026-09-23）：
+                #    消除四层入库失败导致 parse_status 陈旧、下游误判"未解析"。
+                await db.execute(
+                    "UPDATE project_documents SET parsed_markdown=?, parse_time=?,"
+                    " parse_warnings=?,"
+                    " file_type=COALESCE(NULLIF(?, ''), file_type), parse_status='success' WHERE id=?",
+                    (stored, _elapsed, dump_parse_warnings(all_warnings),
+                     str(diag.get("file_type") or "").strip().lower(), doc["id"]))
+                await db.commit()
+                # ✅ 四层存储（阶段2+3）：逐文档落盘解析层 + 分块（失败不阻断批量）
+                await _ingest_parsed_doc(
+                    db, doc["id"], doc["project_id"], doc["file_name"],
+                    _elapsed, diag, all_warnings,
+                    bool(doc.get("force_reparse")))
+                parsed += 1
+                # ✅ BUG 修复（2026-09-25，口径不一致）：单文档解析的截断判定是
+                #    `char_truncated or bool(diag["truncated"])`，本函数旧实现多加了
+                #    一个 `and diag["warnings"]` 条件 —— 解析器标记了 truncated
+                #    但 warnings 为空时（例如仅页数截断、未附告警文本）批量解析
+                #    **静默漏报**，用户以为拿到了全文。现与单份解析完全对齐。
+                doc_truncated = char_truncated or bool(diag.get("truncated"))
+                if doc_truncated:
+                    if char_truncated:
+                        truncated_files.append({
+                            "file_name": doc["file_name"],
+                            "reason": f"原文 {len(text)} 字，已截断至 {MAX_PARSED_CHARS} 字上限（建议拆分文件后重新上传）",
+                        })
+                    else:
+                        truncated_files.append({
+                            "file_name": doc["file_name"],
+                            "reason": ("；".join(str(w) for w in diag["warnings"])
+                                       if diag.get("warnings")
+                                       else "解析器判定内容不完整（PDF 页数/表格行数截断）"),
+                        })
+            except ParseError as e:
+                logger.warning("文档 %s 批量解析失败: %s", doc["file_name"], e)
+                # ✅ 解析失败可观测性：标记 failed 状态（前端区分"待解析"）
+                await _mark_parse_failed(db, doc["id"], str(e)[:120])
+                failed.append({"file_name": doc["file_name"], "reason": str(e)[:120]})
+            except Exception:
+                logger.exception("文档 %s 批量解析出现未预期异常", doc["file_name"])
+                await _mark_parse_failed(db, doc["id"], "文件无法识别或已损坏")
+                failed.append({"file_name": doc["file_name"],
+                               "reason": "文件无法识别或已损坏，请查看服务端日志"})
+    # ✅ 循环内已对每个成功文档逐条 commit（避免长事务锁库），此处无需再 commit；
+    #    旧实现的尾部重复 commit 属无谓 IO 且造成「事务已完成」的误导语义。
+
+    result: dict = {"ok": True, "parsed": parsed, "failed_count": len(failed),
+                    "failed": failed,
+                    "truncated_count": len(truncated_files),
+                    "truncated": truncated_files,
+                    "force": force,
+                    # ✅ 2026-09-25：本轮自修复的陈旧 parse_status 条数（0 表示无）
+                    "reconciled_count": reconciled_count + len(reconciled),
+                    "reconciled": reconciled}
+    if force and parsed:
+        stale_count = await _mark_project_facts_stale(db, real_pid)
+        await db.commit()
+        # ✅ 跨模块链路收敛：强制重解析整批文档 → 失效该项目所有方案导出缓存
+        #    （避免下游导出陈旧 docx；导出缓存默认关闭时为 no-op）。
+        await _invalidate_project_export_caches(db, real_pid)
+        result["stale_facts"] = stale_count
+        result["note"] = (f"已强制重新解析，{stale_count} 条旧事实已停止注入；"
+                          "请重新执行「③ AI 提取事实」")
+    warnings: list[str] = []
+    if failed:
+        warnings.append(
+            f"{len(failed)} 份文档解析失败：" + "；".join(
+                f"{f['file_name']}（{f['reason']}）" for f in failed[:5]))
+    if truncated_files:
+        warnings.append(
+            f"{len(truncated_files)} 份文档内容超长被截断：" + "；".join(
+                f"{f['file_name']}（{f['reason']}）" for f in truncated_files[:5]))
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
+# =========================================================================
+# ✅ 文件导入/解析模块增强：自动分类 + 文件预览 API
+# =========================================================================
+
+# ✅ 口径收敛（2026-09-25）：分类清单与关键词规则的**唯一事实源**已迁到
+# ``services/doc_categories.py``（该模块同时被 bid_analysis 的提取优先级复用）。
+# 此处保留 `_DOC_CATEGORY_KEYWORDS` 名称作为**只读别名**，兼容既有调用方与
+# 单测的引用习惯；新代码请直接用 doc_categories.AUTO_CLASSIFY_RULES。
+_DOC_CATEGORY_KEYWORDS = tuple(AUTO_CLASSIFY_RULES)
+
+
+def _auto_classify_document(file_name: str, file_type: str = "") -> str:
+    """根据文件名自动判断文档分类（用于「文件导入」Tab 展示）。
+
+    ✅ 口径收敛（2026-09-25）：分类清单与关键词规则的**唯一事实源**已迁到
+    ``services/doc_categories.py`` —— 旧实现把 9 类关键词只写在本文件里，
+    而 ``bid_analysis._combine_doc_texts`` 另写了一份只覆盖 6 类的优先级表，
+    三处口径彼此漂移（漏改「资质材料/人员资料/财务资料/业绩证明」→ 命中后
+    被 AI 提取静默排到最后）。现只做委托，保留原函数名兼容既有调用与单测。
+    """
+    return auto_classify_document(file_name, file_type)
+
+
+@router.get("/documents/{doc_id}/preview")
+async def preview_document(doc_id: str, max_chars: int = Query(5000, ge=100, le=50000),
+                              db=Depends(get_db)):
+    """文件预览：返回已解析 Markdown 的前 N 个字符供前端快速浏览。
+
+    用于「文件解析」Tab 的「查看解析内容」弹窗——**不下载整份文件**，
+    避免大文件（20 万+ 字）把前端内存打爆。
+    """
+    cur = await db.execute(
+        "SELECT id, file_name, file_type, parsed_markdown, doc_category, "
+        "file_size, parse_time, parse_warnings, created_at "
+        "FROM project_documents WHERE id=?",
+        (doc_id,))
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "文档不存在")
+    # ✅ BUG 修复（2026-09-18）：get_conn 的 row_factory 是 sqlite3.Row ——
+    #    它支持 row["col"] 下标但**没有 .get() 方法**。旧实现用 row.get(...)
+    #    使 /documents/{id}/preview 在文档已存在时必然抛 AttributeError → 500
+    #    （HTTP 冒烟实测崩溃点）。
+    row = dict(row)
+    md = row["parsed_markdown"] or ""
+    if not md:
+        # ✅ BUG 修复（契约对称，2026-09-21）：未解析分支此前只回 6 个字段，
+        #    缺 file_type / doc_category / file_size / parse_time / created_at /
+        #    preview_truncated —— 前端用同一 interface 消费预览响应时，未解析
+        #    文档拿到 undefined 会渲染出空白占位（如「格式：」空值）。
+        #    现两条返回路径字段集合完全一致（由
+        #    test_preview_response_contract_symmetric 钉住）。
+        return {
+            "doc_id": doc_id,
+            "file_name": row["file_name"],
+            "file_type": row["file_type"],
+            "doc_category": row["doc_category"],
+            "file_size": row["file_size"],
+            "parse_time": row["parse_time"],
+            "parse_warnings": _decode_parse_warnings(row.get("parse_warnings")),
+            "created_at": row["created_at"],
+            "preview": "",
+            "text_len": 0,
+            "is_parsed": False,
+            "preview_truncated": False,
+            "message": "该文档尚未解析，请先执行解析",
+        }
+
+    total_len = len(md)
+    preview = md[:max_chars]
+    truncated = total_len > max_chars
+
+    return {
+        "doc_id": doc_id,
+        "file_name": row["file_name"],
+        "file_type": row["file_type"],
+        "doc_category": row["doc_category"],
+        "file_size": row["file_size"],
+        "parse_time": row["parse_time"],
+        "parse_warnings": _decode_parse_warnings(row.get("parse_warnings")),
+        "created_at": row["created_at"],
+        "preview": preview,
+        "text_len": total_len,
+        # ✅ 补齐契约对称：未解析分支回 is_parsed=False，已解析分支旧实现
+        #    漏回该字段 —— 前端用 `data.is_parsed === true` 硬判断时会退到
+        #    「未解析」分支。现两条返回路径字段集合一致。
+        "is_parsed": True,
+        "preview_truncated": truncated,
+        "message": "（预览仅显示前 {0} 字，完整内容请到「结构化解析」中使用或重新解析）".format(max_chars) if truncated else "",
+    }
+
+
+@router.patch("/documents/{doc_id}/category")
+async def update_document_category(doc_id: str, body: dict, db=Depends(get_db)):
+    """手动修改文件分类（自动分类不准确时用户可手动调整）。
+
+    ✅ 三侧口径对齐：分类值参与多处下游逻辑（提取侧按分类排优先级、
+    展示侧按分类映射 Tag 颜色），写入未知值会让这些口径静默退化。
+    故只接受 category-options 登记的合法分类（含「其他」）。
+    """
+    category = body.get("doc_category", "").strip()
+    if not category:
+        raise HTTPException(400, "doc_category 不能为空")
+    valid_categories = {cat for cat, _ in _DOC_CATEGORY_KEYWORDS} | {"其他"}
+    if category not in valid_categories:
+        raise HTTPException(
+            400, f"未知分类（{category}），可选："
+            f"{', '.join(sorted(valid_categories))}")
+    cur = await db.execute("SELECT id FROM project_documents WHERE id=?", (doc_id,))
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "文档不存在")
+    await db.execute(
+        "UPDATE project_documents SET doc_category=? WHERE id=?", (category, doc_id))
+    await db.commit()
+    return {"ok": True, "doc_id": doc_id, "doc_category": category}
+
+
+@router.get("/documents/category-options")
+async def list_category_options():
+    """返回所有可用的文档分类选项（供前端下拉选择）。
+
+    ✅ 口径收敛（2026-09-25）：选项与关键词规则统一取自
+    ``services/doc_categories.py``（分类唯一事实源），不再在本文件散落维护。
+    """
+    return {
+        "options": category_options(),
+        "auto_keywords": [{"category": cat, "keywords": list(kws)}
+                          for cat, kws in AUTO_CLASSIFY_RULES],
+    }
+
+
+# ✅ 提取入口：SSE /sse/generate-facts/{scheme_id}（见 sse_handlers.py）

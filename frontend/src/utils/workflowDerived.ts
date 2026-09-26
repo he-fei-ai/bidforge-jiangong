@@ -1,0 +1,321 @@
+/**
+ * 方案工作台 · 文档工作流派生函数
+ *
+ * 从 SchemeWorkbenchPage.tsx 抽离的纯逻辑，零依赖、可单测。
+ * 负责：
+ *   1. 文档列表派生统计（已解析 / 待解析 / 截断 / 全部就绪）
+ *   2. 起始 Tab 智能判定（无文档 → 导入；无解析 → 解析；...）
+ *
+ * 这些逻辑原先散落在巨型组件内联表达式与 useEffect 中，
+ * 导致：修改只能靠人肉点页面验证、无边界保护、重构风险高。
+ * 抽出来后，组件只做「调用 + 渲染」，逻辑正确性由单测兜底。
+ */
+
+export type DocRecord = {
+  id: string;
+  text_len?: number;
+  truncated?: boolean;
+  /** 解析状态：success / pending / failed（后端 parse_status 透传，2026-09-23 起） */
+  parse_status?: string;
+  [k: string]: unknown;
+};
+
+export type DocStats = {
+  /** 已成功解析（parse_status==='success' 或旧数据 text_len > 0） */
+  parsedCount: number;
+  /** 待解析（导入但尚未生成纯文本，且非失败） */
+  pendingCount: number;
+  /** 可能被截断的文档（超大文件） */
+  truncatedCount: number;
+  /** 解析失败的文档数（parse_status==='failed'） */
+  failedCount: number;
+  /**
+   * 「解析全部」实际会处理的文档数 = 待解析 + 失败。
+   * ✅ 2026-09-24：后端 parse-all（force=false）按 parsed_markdown 为空选取，
+   *    failed 文档也在其中（支持批量重试失败文档）；此前前端按钮只看
+   *    pendingCount，项目只剩失败文档时批量入口被禁用、重试能力不可达。
+   */
+  actionableCount: number;
+  /** 是否所有已导入文档都解析完毕（无待解析、无失败） */
+  allParsed: boolean;
+};
+
+/**
+ * 文档是否已解析（单一判定口径）。
+ *
+ * ✅ 2026-09-25 收敛：该判定此前在 `computeDocStats`（统计条）与
+ * `DocumentParseList`（列表行标签）**各写一份、逐字重复**——两处一旦有一处
+ * 被改，就会立刻出现「统计条显示待解析 0、列表标签仍显示待解析」的分裂，
+ * 且无法通过单测发现（两处各自的测试都通过）。现抽为唯一纯函数，两侧共用。
+ *
+ * 判定规则（与既有行为完全一致，仅去重）：
+ *   - `parse_status === "success"` → 已解析（后端权威口径）；
+ *   - `parse_status == null` 且 `text_len > 0` → 旧数据兜底（该字段上线前
+ *     解析完成的存量行）；
+ *   - 其余（pending / 旧数据无正文 / NaN）→ 未解析。
+ */
+export function isDocParsed(d: DocRecord | null | undefined): boolean {
+  if (!d) return false;
+  if (d.parse_status === "success") return true;
+  const len = typeof d.text_len === "number" && !Number.isNaN(d.text_len) ? d.text_len : 0;
+  return d.parse_status == null && len > 0;
+}
+
+/** 文档是否解析失败（`parse_status === "failed"`）。 */
+export function isDocFailed(d: DocRecord | null | undefined): boolean {
+  return !!d && d.parse_status === "failed";
+}
+
+/**
+ * 从文档列表派生工作流统计。
+ *
+ * 边界行为：
+ *   - 空数组 → parsedCount=0 pendingCount=0 truncatedCount=0 allParsed=false
+ *     （allParsed 要求「至少导入了一个 + 全部解析」，空数组不算"全部就绪"）
+ *   - text_len 缺失或为 0 → 视为待解析
+ *   - text_len 非数字（NaN）→ 视为待解析（防御性）
+ */
+export function computeDocStats(docs: DocRecord[]): DocStats {
+  if (!Array.isArray(docs) || docs.length === 0) {
+    return { parsedCount: 0, pendingCount: 0, truncatedCount: 0, failedCount: 0, actionableCount: 0, allParsed: false };
+  }
+  let parsedCount = 0;
+  let truncatedCount = 0;
+  let failedCount = 0;
+  for (const d of docs) {
+    // ✅ 增强（2026-09-23）：failed 单独计数，不再计入"已解析"或"待解析"
+    if (isDocFailed(d)) {
+      failedCount += 1;
+      continue;
+    }
+    // 判定口径统一到 isDocParsed（与列表行标签共用，防两侧漂移）
+    if (isDocParsed(d)) {
+      parsedCount += 1;
+      if (d.truncated) truncatedCount += 1;
+    }
+  }
+  // 待解析 = 总数 - 已解析 - 失败
+  const pendingCount = docs.length - parsedCount - failedCount;
+  return {
+    parsedCount,
+    pendingCount,
+    truncatedCount,
+    failedCount,
+    // 与后端 parse-all 选取口径一致：parsed_markdown 为空 = 待解析 + 失败
+    actionableCount: pendingCount + failedCount,
+    // ✅ 失败文档未全部解析完成，故 allParsed 同时要求 failedCount 为 0
+    allParsed: pendingCount === 0 && failedCount === 0,
+  };
+}
+
+/** 后端 upload-documents 响应的最小结构（各字段按需出现） */
+export type UploadResultLike = {
+  saved_count?: number;
+  replaced?: number;
+  oversize?: unknown[];
+  unsupported?: unknown[];
+  signature_invalid?: unknown[];
+  empty?: unknown[];
+  too_many?: unknown[];
+  quota_exceeded?: boolean;
+  /** 被「本次累计体积上限」拒绝的文件名（2026-09-21 起独立于 oversize） */
+  quota_files?: unknown[];
+  warnings?: string[];
+};
+
+export type UploadFeedback = {
+  /** 成功保存的文件数 */
+  savedCount: number;
+  /** 被替换的同名旧文件数 */
+  replaced: number;
+  /** 被拒绝 / 忽略的数量摘要（精简，用于 toast） */
+  rejected: string[];
+  /** 后端逐文件明细（详细，用于 modal；无明细则为空数组） */
+  details: string[];
+};
+
+/**
+ * 归一化「上传保存」接口的响应，产出用户可读的反馈。
+ *
+ * 为什么需要它？后端 upload-documents 会分门别类地回报未保存的文件：
+ *   oversize / unsupported / signature_invalid / empty / too_many / quota_exceeded
+ * 旧实现只读了其中三类（oversize/unsupported/empty），
+ * signature_invalid（文件头校验失败）、too_many（超单次 20 个上限）、
+ * quota_exceeded（累计体积超限）被完全吞掉 —— 用户看到「已保存 N 个」，
+ * 却不知道其余文件为什么没进去。这里把六类统一纳入上报。
+ *
+ * 边界行为：
+ *   - 入参 null/undefined → savedCount=0，rejected=[]，details=[]
+ *   - 数组字段非数组 / 计数缺失 → 按 0 处理，不抛异常
+ *   - details 取后端 warnings（逐文件、含文件名），过滤空串
+ */
+export function summarizeUploadResult(
+  data: UploadResultLike | null | undefined
+): UploadFeedback {
+  const d = data || {};
+  const savedCount = Number(d.saved_count || 0);
+  const replaced = Number(d.replaced || 0);
+  const n = (v: unknown[] | undefined) => (Array.isArray(v) ? v.length : 0);
+
+  const rejected: string[] = [];
+  if (n(d.unsupported)) rejected.push(`${n(d.unsupported)} 个格式不支持`);
+  if (n(d.oversize)) rejected.push(`${n(d.oversize)} 个超过 30MB`);
+  if (n(d.signature_invalid))
+    rejected.push(`${n(d.signature_invalid)} 个文件头校验不通过（扩展名与实际内容不符）`);
+  if (n(d.empty)) rejected.push(`${n(d.empty)} 个空文件`);
+  if (n(d.too_many)) rejected.push(`${n(d.too_many)} 个超出单次 20 个上限`);
+  if (d.quota_exceeded) {
+    // ✅ 后端 quota_files 给出被累计体积上限拒绝的具体文件数（2026-09-21 起
+    //    不再混进 oversize），有则带上数量，让用户知道"少了几个"。
+    const qn = n(d.quota_files);
+    rejected.push(qn
+      ? `累计体积超过 200MB 上限（${qn} 个文件未保存）`
+      : "累计体积超过 200MB 上限");
+  }
+  const details = Array.isArray(d.warnings)
+    ? d.warnings.filter((w) => !!w).map(String)
+    : [];
+
+  return { savedCount, replaced, rejected, details };
+}
+
+export type UploadNoticeTone = "success" | "error";
+
+export type UploadNotice = {
+  /** success = 至少保存了一个文件；error = 一个都没保存 */
+  tone: UploadNoticeTone;
+  /** toast 主文案（已把六类拒绝原因汇总为一句） */
+  text: string;
+  /** 后端逐文件明细（用于「查看详情」） */
+  details: string[];
+};
+
+/**
+ * 把上传接口响应转成一条用户消息。
+ *
+ * 为什么单独抽出：页面原先在 `handleUploadDocuments` 里手写了一套提示拼装，
+ * 与 `summarizeUploadResult` **口径重复且已漂移** —— 手写版漏了
+ * `quota_exceeded`（累计体积超 200MB），于是「已保存 3 个文件，其余为什么没了」
+ * 在界面上完全无解释；而 summarizeUploadResult（含单测）却从未被任何生产代码
+ * 调用。现在统一收敛到本函数：六类拒绝原因 + 替换数 + 成功数，口径唯一。
+ *
+ * 边界：
+ *   - savedCount === 0 → tone="error"，文案为「没有文件被保存：<原因>」
+ *   - savedCount > 0   → tone="success"，文案含成功数/替换数/拒绝摘要
+ *   - 入参 null/脏数据 → 走 summarizeUploadResult 的防御分支，不抛异常
+ */
+export function buildUploadNotice(
+  data: UploadResultLike | null | undefined
+): UploadNotice {
+  const fb = summarizeUploadResult(data);
+  if (fb.savedCount === 0) {
+    return {
+      tone: "error",
+      text: fb.rejected.length
+        ? `没有文件被保存：${fb.rejected.join("；")}`
+        : "没有文件被保存，请重试",
+      details: fb.details,
+    };
+  }
+  const parts = [`已保存 ${fb.savedCount} 个文件（待解析）`];
+  if (fb.replaced) parts.push(`替换 ${fb.replaced} 个同名旧文件`);
+  parts.push(...fb.rejected);
+  return { tone: "success", text: parts.join("，"), details: fb.details };
+}
+
+/** 导出预渲染只处理正文已有落点的图表，避免清单中的历史/未放置图表产生无效 PNG。 */
+export type ExportChartCandidate = {
+  chart_type: string;
+  code?: string;
+  placed?: boolean;
+};
+
+export function selectPlacedExportCharts<T extends ExportChartCandidate>(items: T[] | null | undefined): T[] {
+  if (!Array.isArray(items)) return [];
+  return items.filter((item) => item?.placed !== false && !!item?.code);
+}
+
+/** 默认预设仅作为首次进入导出页的初始配置，用户随后仍可手动修改。 */
+export function findDefaultExportPreset<T extends { id: string; is_default?: boolean; config?: Record<string, unknown> }>(presets: T[] | null | undefined): T | null {
+  if (!Array.isArray(presets)) return null;
+  return presets.find((p) => !!p?.is_default) || null;
+}
+
+
+/**
+ * 6 步工作流的合法 Tab key。
+ *
+ * 演进历史：
+ *   1. 「文件导入」「文件解析」合并为「上传解析」= import（2026-09-17）
+ *   2. 「上传解析」吸收「提取项目」= 内嵌子 Tab（2026-09-23，docs/merge_upload_parse_and_bid_analysis_plan.md）
+ *      —— bidAnalysis 不再是顶层 Tab key，改由 import 内部子 Tab（docs/extract）承载。
+ *
+ * 保留「bidAnalysis」字面量的向后兼容映射由 SchemeWorkbenchPage 内部处理
+ * （见 import-tab-sub 逻辑），此处类型不再暴露。
+ */
+export type WorkflowTabKey =
+  | "import"
+  | "outline"
+  | "facts"
+  | "content"
+  | "review"
+  | "export";
+
+export type PickInitialTabInput = {
+  docs: DocRecord[];
+  tree: unknown[];
+  /** 全局事实条目总数；null 表示还在加载中，不应做决策 */
+  factsTotal: number | null;
+};
+
+/**
+ * 决定用户进入工作台时落到哪个 Tab。
+ *
+ * 当前行为（产品明确要求，2026-09-17 起固定）：
+ *   1. factsTotal 为 null → 返回 null（数据还在加载，暂不决策，调用方等下一轮）
+ *   2. 否则**恒返回 "import"**（「上传解析」）—— 打开工作台一律先落在第一步，
+ *      由用户自己决定往哪走，不根据已有数据自动跳步。
+ *
+ * 说明：`PickInitialTabInput.docs` / `tree` 为历史兼容保留（早期"智能单调链"
+ * 曾据其判断）；当前决策并不读它们，`factsTotal` 只作"是否加载完成"的判据。
+ * 行为已由 utils 单测钉住（workflowDerived.test.ts）。
+ *
+ * @returns WorkflowTabKey；或 null 表示数据尚未加载完成，调用方应再等一轮
+ */
+export function pickInitialTab(input: PickInitialTabInput): WorkflowTabKey | null {
+  // 数据还在加载中
+  if (input.factsTotal === null) return null;
+
+  // ✅ 用户要求（2026-09-17）：打开专项方案工作台时固定进「上传解析」，
+  //    不管当前方案是否已有文档/目录/正文，让用户主动决定从哪一步开始。
+  //    （原「智能单调链」已废弃 —— 不再保留大段注释死代码，避免误导后人。）
+  return "import";
+}
+
+/**
+ * 给定当前 Tab key，返回下一步 CTA 应该引导用户去哪个 Tab。
+ * 用于「下一步：XXX」按钮的 onClick 目标。
+ *
+ * 注：不做前置校验——调用方负责在按钮 disabled 状态里拦住非法跳转。
+ */
+export const NEXT_TAB: Record<WorkflowTabKey, WorkflowTabKey> = {
+  import: "outline", // 2026-09-23 合并后：bidAnalysis 已被 import 子 Tab（extract）吸收
+  outline: "facts",
+  facts: "content",
+  content: "review",
+  review: "export",
+  export: "export", // 最后一步
+};
+
+/**
+ * 给定当前 Tab key，返回上一步（返回 / 重走）应该去哪个 Tab。
+ * 用于「返回上一步」按钮，不做前置校验。
+ */
+export const PREV_TAB: Record<WorkflowTabKey, WorkflowTabKey | null> = {
+  import: null,
+  outline: "import", // 2026-09-23 合并后：bidAnalysis 已被 import 子 Tab（extract）吸收
+  facts: "outline",
+  content: "facts",
+  review: "content",
+  export: "review",
+};

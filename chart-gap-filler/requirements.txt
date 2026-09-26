@@ -1,0 +1,5 @@
+# docchart 依赖（Python >= 3.10）
+matplotlib>=3.8
+python-docx>=1.1
+PyYAML>=6.0        # 可选：使用 .yaml 配置文件时需要
+pytest>=8.0        # 仅测试

@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 940" width="1180" height="940" font-family="'Microsoft YaHei','PingFang SC','Helvetica Neue',Arial,sans-serif">
+  <rect width="1180" height="940" fill="#ffffff"/>
+
+  <!-- 标题 -->
+  <text x="40" y="46" font-size="24" font-weight="700" fill="#0f172a">正文生成（content-generation）主流程</text>
+  <text x="40" y="72" font-size="13" fill="#64748b">client/electron/services/contentGenerationTask.cjs · runContentGenerationTask · 12 个 phase + 1 个决策点</text>
+
+  <!-- 前置校验 -->
+  <g>
+    <rect x="40" y="96" width="1100" height="56" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
+    <text x="60" y="120" font-size="14" font-weight="700" fill="#92400e">前置校验（不满足直接抛错）</text>
+    <text x="60" y="142" font-size="12.5" fill="#78350f">outlineData.outline 非空 · globalFactsTask.status === 'success' 且全局事实非空 · outlineWordControlSnapshot 已固化 · 存在 content_mode === 'ai-generate' 叶子 · 扩写流程需原方案可读且分段非空</text>
+  </g>
+  <path d="M590 152 L590 176" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- 阶段列表 -->
+  <g font-size="13">
+    <!-- 1 planning -->
+    <g transform="translate(40,176)">
+      <rect width="1100" height="46" rx="7" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+      <circle cx="26" cy="23" r="13" fill="#3b82f6"/>
+      <text x="26" y="28" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+      <text x="52" y="21" font-size="13.5" font-weight="700" fill="#1e3a8a">planning</text>
+      <text x="130" y="21" font-size="12.5" fill="#334155">正文编排</text>
+      <text x="52" y="38" font-size="12" fill="#475569">逐叶子 collectJsonResponse(buildChapterContentPlanMessages) → writing_focus / knowledge.item_ids / facts.titles / table.needed / original_material；失败降级纯正文</text>
+    </g>
+    <path d="M590 222 L590 240" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 2 restoring -->
+    <g transform="translate(40,240)">
+      <rect width="1100" height="46" rx="7" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.5"/>
+      <circle cx="26" cy="23" r="13" fill="#8b5cf6"/>
+      <text x="26" y="28" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+      <text x="52" y="21" font-size="13.5" font-weight="700" fill="#4c1d95">restoring</text>
+      <text x="130" y="21" font-size="12.5" fill="#334155">原方案还原（仅扩写流程）</text>
+      <text x="52" y="38" font-size="12" fill="#475569">可直接重建＝分段拼接；需映射＝AI 分配 source_ids；提示词超上下文阈值(0.7×limit) 切 Agent 文件模式</text>
+    </g>
+    <path d="M590 286 L590 304" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 3 generating -->
+    <g transform="translate(40,304)">
+      <rect width="1100" height="46" rx="7" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+      <circle cx="26" cy="23" r="13" fill="#3b82f6"/>
+      <text x="26" y="28" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+      <text x="52" y="21" font-size="13.5" font-weight="700" fill="#1e3a8a">generating</text>
+      <text x="130" y="21" font-size="12.5" fill="#334155">正文生成</text>
+      <text x="52" y="38" font-size="12" fill="#475569">预热首项（restored|normal × table|plain 四类键）→ 并发 runOne；needsOptimization 走还原扩写 Prompt；超阈值走 Agent；失败保留已有有效正文</text>
+    </g>
+    <path d="M590 350 L590 368" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 决策点 -->
+    <g transform="translate(40,368)">
+      <rect width="1100" height="60" rx="7" fill="#fef2f2" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="6 4"/>
+      <circle cx="26" cy="30" r="13" fill="#ef4444"/>
+      <text x="26" y="35" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">!</text>
+      <text x="52" y="22" font-size="13.5" font-weight="700" fill="#7f1d1d">决策点：persistContentDecisionWait</text>
+      <text x="52" y="42" font-size="12" fill="#7f1d1d">存在 status 既非 success 也非 ignored 的叶子 → 落库等待用户选择（任务 return，不报错）</text>
+      <text x="52" y="58" font-size="12" fill="#7f1d1d">重试失败小节（retryFailedSections）／忽略并继续（continuePostProcessing → 标为 ignored）；单节重生成与重试矫正跳过此点</text>
+    </g>
+    <path d="M590 428 L590 446" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 5 section-word-adjusting -->
+    <g transform="translate(40,446)">
+      <rect width="1100" height="46" rx="7" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+      <circle cx="26" cy="23" r="13" fill="#10b981"/>
+      <text x="26" y="28" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">5</text>
+      <text x="52" y="21" font-size="13.5" font-weight="700" fill="#065f46">section-word-adjusting</text>
+      <text x="215" y="21" font-size="12.5" fill="#334155">小节字数调整</text>
+      <text x="52" y="38" font-size="12" fill="#475569">仅 strictSectionWords；范围 [ceil(0.8×S), floor(1.2×S)]；每节最多 3 轮；差异&gt;20% 用 paragraph 粒度否则 sentence</text>
+    </g>
+    <path d="M590 492 L590 510" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 6 original-auditing -->
+    <g transform="translate(40,510)">
+      <rect width="1100" height="46" rx="7" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.5"/>
+      <circle cx="26" cy="23" r="13" fill="#8b5cf6"/>
+      <text x="26" y="28" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">6</text>
+      <text x="52" y="21" font-size="13.5" font-weight="700" fill="#4c1d95">original-auditing</text>
+      <text x="205" y="21" font-size="12.5" fill="#334155">原方案覆盖检查（扩写流程，默认关闭）</text>
+      <text x="52" y="38" font-size="12" fill="#475569">normal：逐节审计 covered/partial/missing/conflict → partial+missing 局部补写(2 次)；agent：单 Agent 直改 technical-plan.md（失败不中断）</text>
+    </g>
+    <path d="M590 556 L590 574" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 7 auditing -->
+    <g transform="translate(40,574)">
+      <rect width="1100" height="46" rx="7" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+      <circle cx="26" cy="23" r="13" fill="#3b82f6"/>
+      <text x="26" y="28" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">7</text>
+      <text x="52" y="21" font-size="13.5" font-weight="700" fill="#1e3a8a">auditing</text>
+      <text x="130" y="21" font-size="12.5" fill="#334155">全文一致性检查（默认开启）</text>
+      <text x="52" y="38" font-size="12" fill="#475569">normal：按 30 万字分组并发审计 → 冲突小节局部 patch(2 次)；agent：global-facts.md + technical-plan.md 全量重写（失败会 throw）</text>
+    </g>
+    <path d="M590 620 L590 638" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 8 table-cleaning -->
+    <g transform="translate(40,638)">
+      <rect width="1100" height="46" rx="7" fill="#fff7ed" stroke="#f97316" stroke-width="1.5"/>
+      <circle cx="26" cy="23" r="13" fill="#f97316"/>
+      <text x="26" y="28" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">8</text>
+      <text x="52" y="21" font-size="13.5" font-weight="700" fill="#7c2d12">table-cleaning</text>
+      <text x="175" y="21" font-size="12.5" fill="#334155">表格清理（仅 tableRequirement === 'none'）</text>
+      <text x="52" y="38" font-size="12" fill="#475569">抽取 Markdown/HTML 表格块（排除代码围栏）→ 分批次（3 万字/批）转普通文字；替换后仍含表格则跳过</text>
+    </g>
+    <path d="M590 684 L590 702" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 9 final-section -->
+    <g transform="translate(40,702)">
+      <rect width="1100" height="46" rx="7" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+      <circle cx="26" cy="23" r="13" fill="#10b981"/>
+      <text x="26" y="28" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">9</text>
+      <text x="52" y="21" font-size="13.5" font-weight="700" fill="#065f46">final-section-word-adjusting</text>
+      <text x="285" y="21" font-size="12.5" fill="#334155">最终小节复核</text>
+      <text x="52" y="38" font-size="12" fill="#475569">矫正阶段改动正文后重新把越界小节拉回区间（同阶段 5 的逻辑，stage = 'final-section'）</text>
+    </g>
+    <path d="M590 748 L590 766" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 10 total-word-adjusting -->
+    <g transform="translate(40,766)">
+      <rect width="1100" height="46" rx="7" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+      <circle cx="26" cy="23" r="13" fill="#10b981"/>
+      <text x="26" y="28" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">10</text>
+      <text x="52" y="21" font-size="13.5" font-weight="700" fill="#065f46">total-word-adjusting</text>
+      <text x="255" y="21" font-size="12.5" fill="#334155">全文字数调整</text>
+      <text x="52" y="38" font-size="12" fill="#475569">低于 minimum 扩写 / 高于 maximum 缩写；每轮最多 10 节；缩写最多 3 轮且单节最多减 25%；扩写连续 3 轮无进展停止</text>
+    </g>
+    <path d="M590 812 L590 830" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 11 illustration-planning -->
+    <g transform="translate(40,830)">
+      <rect width="1100" height="46" rx="7" fill="#fdf2f8" stroke="#ec4899" stroke-width="1.5"/>
+      <circle cx="26" cy="23" r="13" fill="#ec4899"/>
+      <text x="26" y="28" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">11</text>
+      <text x="52" y="21" font-size="13.5" font-weight="700" fill="#831843">illustration-planning</text>
+      <text x="215" y="21" font-size="12.5" fill="#334155">全文图片编排（Agent）</text>
+      <text x="52" y="38" font-size="12" fill="#475569">先清除旧配图 → html/ai/mermaid 三类上限 → Agent 输出 illustration-plan.json → 按 html&gt;ai&gt;mermaid 择优、小节互斥、标题去重</text>
+    </g>
+    <path d="M590 876 L590 894" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 12 illustration-generating -->
+    <g transform="translate(40,894)">
+      <rect width="1100" height="46" rx="7" fill="#fdf2f8" stroke="#ec4899" stroke-width="1.5"/>
+      <circle cx="26" cy="23" r="13" fill="#ec4899"/>
+      <text x="26" y="28" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">12</text>
+      <text x="52" y="21" font-size="13.5" font-weight="700" fill="#831843">illustration-generating</text>
+      <text x="215" y="21" font-size="12.5" fill="#334155">全文图片生成</text>
+      <text x="52" y="38" font-size="12" fill="#475569">文本组(mermaid+短 html，文本并发) 与 AI 生图组(图片并发) 并行；超长 html 走 Agent 串行 → 回插正文</text>
+    </g>
+  </g>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+</svg>

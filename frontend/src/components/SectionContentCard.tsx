@@ -1,0 +1,324 @@
+import { memo, useEffect, useState } from "react";
+import { App, Button, Card, Empty, Input, Select, Space, Tag, Tooltip, Typography } from "antd";
+import {
+  EditOutlined,
+  FileTextOutlined,
+  InfoCircleOutlined,
+} from "@ant-design/icons";
+import MarkdownRenderer from "./MarkdownRenderer";
+// F-CONTENT-STANDARD(2026-09-26): 章节级标准选项文案与生效值（与后端 resolve 口径同源）
+import { sectionStandardOptionLabel, effectiveSectionStandard, STANDARD_LABELS } from "../utils/contentStandard";
+
+const { Text } = Typography;
+
+/** 章节树节点类型（与 SchemeWorkbenchPage 保持一致） */
+export type TreeNode = {
+  key: string;
+  title: string;
+  level: number;
+  status: string;
+  word_count: number;
+  word_budget: number;
+  content?: string;
+  description?: string;
+  outlineId?: string;
+  children?: TreeNode[];
+};
+
+/** 排除 Markdown 标记的纯文本字数估算 */
+export function countPlainTextWords(text: string): number {
+  if (!text) return 0;
+  let s = text;
+  s = s.replace(/```[\s\S]*?```/g, "");
+  s = s.replace(/`[^`]*`/g, "");
+  s = s.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");
+  s = s.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
+  s = s.replace(/^#{1,6}\s+/gm, "");
+  s = s.replace(/\*\*([^*]+)\*\*/g, "$1");
+  s = s.replace(/\*([^*]+)\*/g, "$1");
+  s = s.replace(/__([^_]+)__/g, "$1");
+  s = s.replace(/_([^_]+)_/g, "$1");
+  s = s.replace(/^\s*[-*+]\s+/gm, "");
+  s = s.replace(/^\s*\d+\.\s+/gm, "");
+  s = s.replace(/^\s*>\s?/gm, "");
+  s = s.replace(/^-{3,}\s*$/gm, "");
+  s = s.replace(/<[^>]+>/g, "");
+  return s.replace(/\s+/g, "").length;
+}
+
+interface SectionContentCardProps {
+  section: TreeNode | null;
+  treeEmpty: boolean;
+  isEditing: boolean;
+  saving: boolean;
+  generating: boolean;
+  draftKey: string | null;
+  statusColor: Record<string, string>;
+  statusText: Record<string, string>;
+  /** 通知父级进入编辑模式（草稿由卡片自持，父级只翻转 isEditing 开关） */
+  onEditStart: () => void;
+  /** 保存：草稿内容作为参数上抛，父级负责写库与同步树节点 */
+  onSave: (content: string) => void;
+  /** 取消/放弃编辑（父级翻转 isEditing + editDirty） */
+  onCancel: () => void;
+  /** ✅ 性能优化：dirty 仅在 false↔true 跳变时上抛（父级守卫/离开页确认需要） */
+  onDirtyChange: (dirty: boolean) => void;
+  onRegenerate: () => void;
+  /** 图表 AI 修复且后端已重写章节正文后回调（newContent 为修复后完整正文），用于同步预览状态 */
+  onChartFixed?: (newContent: string) => void;
+  /**
+   * F-CONTENT-STANDARD(2026-09-26)：章节级生成标准覆盖。
+   * - `sectionStandard`：`""` 表示沿用方案级（后端落库口径），否则 precise/fuzzy；
+   * - `onSectionStandardChange`：变更上抛，父级负责 PATCH + 同步树节点；
+   * - `schemeStandard`：方案级默认值，仅用于「沿用方案（X）」的文案翻译。
+   */
+  sectionStandard?: string;
+  schemeStandard?: string;
+  onSectionStandardChange?: (v: string) => void;
+}
+
+/**
+ * 章节正文卡片：展示/编辑单个章节的正文内容
+ *
+ * ✅ 性能优化（稳妥方案·改动一）：编辑草稿状态（draft/dirty）下沉到本组件，
+ *    打字只触发卡片局域重渲，不再驱动 ~7500 行的工作台页面整页重渲；
+ *    组件本体 memo 化，配合页面侧稳定回调，隔离无关状态变化的穿透渲染。
+ */
+function SectionContentCard({
+  section,
+  treeEmpty,
+  isEditing,
+  saving,
+  generating,
+  draftKey,
+  statusColor,
+  statusText,
+  onEditStart,
+  onSave,
+  onCancel,
+  onDirtyChange,
+  onRegenerate,
+  onChartFixed,
+  sectionStandard,
+  schemeStandard,
+  onSectionStandardChange,
+}: SectionContentCardProps) {
+  const { modal } = App.useApp();
+  // 编辑草稿：仅编辑期间存在，退出编辑（保存/取消/守卫放弃）即重置
+  // 注：编辑态由父级通过 isEditing 受控翻转（startEditing 只填充草稿并上抛 onEditStart），
+  // 组件内部不再维护独立的 editing 标志，避免受控/非受控两套状态不一致。
+  const [draft, setDraft] = useState("");
+  const [dirty, setDirty] = useState(false);
+
+  // 退出编辑 → 重置本地草稿（保存成功/取消/切章节守卫都会走到这里）
+  useEffect(() => {
+    if (!isEditing) {
+      setDraft("");
+      setDirty(false);
+    }
+  }, [isEditing]);
+
+  // ✅ 自动保存草稿到 localStorage（防抖 800ms；原为页面级 effect，随草稿状态下沉）
+  useEffect(() => {
+    if (!isEditing || !dirty || !draftKey) return;
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem(draftKey, JSON.stringify({
+          content: draft,
+          savedAt: Date.now(),
+        }));
+      } catch { /* localStorage 满或不可用时静默 */ }
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [draft, isEditing, dirty, draftKey]);
+
+  if (!section) {
+    return (
+      <Empty
+        description={
+          treeEmpty
+            ? "暂无目录，请先在左侧点击「AI 生成目录」，或切换到「目录生成」页导入/套用目录"
+            : "👈 从左侧目录树选择一个章节查看正文"
+        }
+      />
+    );
+  }
+
+  const setDirtyAndReport = (d: boolean) => {
+    setDirty(d);
+    onDirtyChange(d);
+  };
+
+  const startEditing = (content: string, isDirty: boolean) => {
+    setDraft(content);
+    setDirty(isDirty);
+    onDirtyChange(isDirty);
+    onEditStart();
+  };
+
+  const handleEditClick = () => {
+    const currentContent = section.content || "";
+    let draftContent = "";
+    let hasDraft = false;
+    if (draftKey) {
+      try {
+        const raw = localStorage.getItem(draftKey);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed.content && parsed.content !== currentContent) {
+            draftContent = parsed.content;
+            hasDraft = true;
+          }
+        }
+      } catch { /* ignore */ }
+    }
+    if (hasDraft) {
+      modal.confirm({
+        title: "发现未保存的草稿",
+        content: "检测到上次编辑未保存的草稿，是否恢复？",
+        okText: "恢复草稿",
+        cancelText: "放弃草稿",
+        onOk: () => startEditing(draftContent, true),
+        onCancel: () => {
+          try { localStorage.removeItem(draftKey!); } catch { /* ignore */ }
+          startEditing(currentContent, false);
+        },
+      });
+    } else {
+      startEditing(currentContent, false);
+    }
+  };
+
+  const handleCancel = () => {
+    if (dirty) {
+      modal.confirm({
+        title: "有未保存的更改",
+        content: "确定要放弃当前编辑吗？",
+        okText: "放弃",
+        okType: "danger",
+        cancelText: "继续编辑",
+        onOk: onCancel,
+      });
+    } else {
+      onCancel();
+    }
+  };
+
+  return (
+    <Card
+      size="small"
+      title={
+        <Space>
+          <FileTextOutlined />
+          <span>{section.title}</span>
+          <Tag color={statusColor[section.status] || "default"}>
+            {statusText[section.status] || section.status}
+          </Tag>
+          {section.word_count > 0 && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {section.word_count} / {section.word_budget} 字
+            </Text>
+          )}
+          {/* ✅ F-CONTENT-STANDARD(2026-09-26 · F3)：章节级生成标准覆盖。
+              放在标题区而非正文区：它是「下一次生成本章用哪种标准」的设置，
+              与「重写本章」按钮同属生成本章动作，物理相邻才不会漏看。
+              运行中禁用 —— 生成进行中改标准会让本次结果与设置不一致。 */}
+          {onSectionStandardChange && (
+            <Tooltip title={`仅影响本章：下次生成/重写本章时按「${STANDARD_LABELS[effectiveSectionStandard(sectionStandard, schemeStandard)]}」执行。留空表示沿用方案默认；任务级选「按章节设置」时按本章取值生效。`}>
+              <Select
+                size="small"
+                value={sectionStandard || ""}
+                disabled={generating}
+                onChange={(v) => onSectionStandardChange(v)}
+                style={{ width: 168, fontSize: 12 }}
+                options={[
+                  { value: "", label: sectionStandardOptionLabel("", schemeStandard) },
+                  { value: "precise", label: "精准内容" },
+                  { value: "fuzzy", label: "模糊内容" },
+                ]}
+              />
+            </Tooltip>
+          )}
+        </Space>
+      }
+      extra={
+        <Space size={6}>
+          {!isEditing ? (
+            <>
+              <Button
+                size="small"
+                icon={<EditOutlined />}
+                onClick={handleEditClick}
+                disabled={generating}
+                title={generating ? "后台正在生成本文，编辑会被生成结果覆盖，请等待完成" : ""}
+              >
+                手动编辑
+              </Button>
+              <Button
+                size="small"
+                danger
+                onClick={onRegenerate}
+                disabled={generating}
+              >
+                🔄 重写本章
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button
+                size="small"
+                type="primary"
+                loading={saving}
+                onClick={() => onSave(draft)}
+              >
+                💾 保存
+              </Button>
+              <Button size="small" onClick={handleCancel}>
+                取消
+              </Button>
+            </>
+          )}
+        </Space>
+      }
+    >
+      {isEditing ? (
+        <>
+          <Input.TextArea
+            value={draft}
+            onChange={(e) => {
+              const v = e.target.value;
+              setDraft(v);
+              if (!dirty) setDirtyAndReport(true);
+            }}
+            autoSize={{ minRows: 12, maxRows: 30 }}
+            placeholder="在这里手动编辑章节正文，支持 Markdown 格式..."
+            style={{ fontFamily: "monospace", fontSize: 14 }}
+          />
+          <div style={{
+            marginTop: 8,
+            fontSize: 12,
+            color: "#999",
+            textAlign: "right",
+          }}>
+            <Text type={dirty ? "warning" : "secondary"}>
+              {dirty ? "● 未保存" : "已保存"}
+            </Text>
+            {" · "}
+            编辑中约 <Text strong>{countPlainTextWords(draft)}</Text> 字
+            （含标记 {draft.length} 字，保存后以服务端统计为准）
+          </div>
+        </>
+      ) : (
+        <div className="scroll-area" style={{ minHeight: 200, maxHeight: "calc(100vh - 420px)", overflow: "auto", paddingRight: 8 }}>
+          <MarkdownRenderer
+            content={section.content || "（章节尚未生成，点击「一键生成全文」开始）"}
+            sectionId={section.key}
+            onContentReplaced={onChartFixed}
+          />
+        </div>
+      )}
+    </Card>
+  );
+}
+
+export default memo(SectionContentCard);

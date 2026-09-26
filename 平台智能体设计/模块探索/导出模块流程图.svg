@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 1010" width="1180" height="1010" font-family="'Microsoft YaHei','PingFang SC','Helvetica Neue',Arial,sans-serif">
+  <rect width="1180" height="1010" fill="#ffffff"/>
+
+  <text x="40" y="46" font-size="24" font-weight="700" fill="#0f172a">导出模块三条链路与 Word 导出主流程</text>
+  <text x="40" y="72" font-size="13" fill="#64748b">electron/services/exportService.cjs · createExportService.exportWord · buildDocxResult</text>
+
+  <!-- 三条链路 -->
+  <g>
+    <text x="40" y="108" font-size="14" font-weight="700" fill="#0f172a">三条导出链路</text>
+
+    <g transform="translate(40,120)">
+      <rect width="356" height="72" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+      <text x="18" y="24" font-size="13.5" font-weight="700" fill="#1e3a8a">① Word 导出（技术方案）</text>
+      <text x="18" y="44" font-size="12" fill="#334155">技术标 / 可研报告 → .docx</text>
+      <text x="18" y="62" font-size="12" fill="#475569">入口：TechnicalPlanHome、FeasibilityReportHome、ExportFormatPage</text>
+    </g>
+
+    <g transform="translate(412,120)">
+      <rect width="356" height="72" rx="8" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+      <text x="18" y="24" font-size="13.5" font-weight="700" fill="#065f46">② Excel 导出（检查类）</text>
+      <text x="18" y="44" font-size="12" fill="#334155">废标 4 表 / 查重 6 表 → .xlsx</text>
+      <text x="18" y="62" font-size="12" fill="#475569">checkResultExportService.cjs（xlsx 库）</text>
+    </g>
+
+    <g transform="translate(784,120)">
+      <rect width="356" height="72" rx="8" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.5"/>
+      <text x="18" y="24" font-size="13.5" font-weight="700" fill="#4c1d95">③ 导出模板库</text>
+      <text x="18" y="44" font-size="12" fill="#334155">ExportFormatConfig 增删改查</text>
+      <text x="18" y="62" font-size="12" fill="#475569">templateStore.cjs → export_templates 表</text>
+    </g>
+  </g>
+
+  <line x1="40" y1="214" x2="1140" y2="214" stroke="#e2e8f0" stroke-width="1.5"/>
+  <text x="40" y="240" font-size="14" font-weight="700" fill="#0f172a">Word 导出主流程</text>
+
+  <g font-size="12.5">
+    <!-- 1 -->
+    <g transform="translate(40,252)">
+      <rect width="1100" height="44" rx="7" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+      <circle cx="26" cy="22" r="13" fill="#64748b"/>
+      <text x="26" y="27" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+      <text x="52" y="20" font-size="13" font-weight="700" fill="#0f172a">exportWord(payload, onProgress)</text>
+      <text x="52" y="37" font-size="12" fill="#475569">countOutlineStats 统计叶子数与 Mermaid 图数 → outline 为空直接抛「没有可导出的目录内容」→ progress 2%</text>
+    </g>
+    <path d="M590 296 L590 314" stroke="#94a3b8" stroke-width="2" marker-end="url(#a)"/>
+
+    <!-- 2 -->
+    <g transform="translate(40,314)">
+      <rect width="1100" height="52" rx="7" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
+      <circle cx="26" cy="26" r="13" fill="#f59e0b"/>
+      <text x="26" y="31" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+      <text x="52" y="20" font-size="13" font-weight="700" fill="#78350f">dialog.showSaveDialog</text>
+      <text x="52" y="38" font-size="12" fill="#78350f">默认目录 app.getPath('downloads')；文件名 {项目名}_{YYYYMMDD_HHmmss}.docx</text>
+      <text x="760" y="20" font-size="12" font-weight="700" fill="#b91c1c">取消 → { success:false, canceled:true }</text>
+    </g>
+    <path d="M590 366 L590 384" stroke="#94a3b8" stroke-width="2" marker-end="url(#a)"/>
+
+    <!-- 3 -->
+    <g transform="translate(40,384)">
+      <rect width="1100" height="46" rx="7" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+      <circle cx="26" cy="23" r="13" fill="#3b82f6"/>
+      <text x="26" y="28" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+      <text x="52" y="21" font-size="13" font-weight="700" fill="#1e3a8a">buildDocxResult：封面 + 说明</text>
+      <text x="52" y="38" font-size="12" fill="#475569">非可研：固定「内容由 AI 生成」+ 项目名居中标题；可研：封面 8 段 + 编制说明 + 责任签发表 → progress 10%</text>
+    </g>
+    <path d="M590 430 L590 448" stroke="#94a3b8" stroke-width="2" marker-end="url(#a)"/>
+
+    <!-- 4 -->
+    <g transform="translate(40,448)">
+      <rect width="1100" height="70" rx="7" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+      <circle cx="26" cy="35" r="13" fill="#3b82f6"/>
+      <text x="26" y="40" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">4</text>
+      <text x="52" y="20" font-size="13" font-weight="700" fill="#1e3a8a">addOutlineItems 递归遍历目录树</text>
+      <text x="52" y="39" font-size="12" fill="#475569">一级标题且开启章节边框 → 整章装进一个 Table（上下结构：标题行+内容行；左右结构：叶子标题列 1800tw + 内容列 7200tw）</text>
+      <text x="52" y="57" font-size="12" fill="#475569">否则：标题段落（带编号/分页/样式）+ 叶子正文；空叶子按 content_mode 输出占位提示</text>
+    </g>
+    <path d="M590 518 L590 536" stroke="#94a3b8" stroke-width="2" marker-end="url(#a)"/>
+
+    <!-- 5 markdown pipeline -->
+    <g transform="translate(40,536)">
+      <rect width="1100" height="88" rx="7" fill="#f0fdfa" stroke="#14b8a6" stroke-width="1.5"/>
+      <circle cx="26" cy="44" r="13" fill="#14b8a6"/>
+      <text x="26" y="49" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">5</text>
+      <text x="52" y="20" font-size="13" font-weight="700" fill="#134e4a">叶子正文：Markdown → HTML → docx</text>
+      <text x="70" y="40" font-size="12" fill="#334155">① normalizeMarkdownTablesForDocx：拆「压缩表格行」、拆「同行多表格」、表前补空行</text>
+      <text x="70" y="58" font-size="12" fill="#334155">② normalizeMarkdownListMarkers：•●○■◆✓– 等特殊项目符号统一成 <![CDATA[-]]]></text>
+      <text x="70" y="76" font-size="12" fill="#334155">③ renderMarkdownHtml（markdown-it + cjk-friendly + tasklists，allowRawHtml）→ cheerio → htmlNodeToDocxBlocks</text>
+    </g>
+    <path d="M590 624 L590 642" stroke="#94a3b8" stroke-width="2" marker-end="url(#a)"/>
+
+    <!-- 6 blocks -->
+    <g transform="translate(40,642)">
+      <rect width="1100" height="78" rx="7" fill="#f0fdfa" stroke="#14b8a6" stroke-width="1.5"/>
+      <circle cx="26" cy="39" r="13" fill="#14b8a6"/>
+      <text x="26" y="44" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">6</text>
+      <text x="52" y="20" font-size="13" font-weight="700" fill="#134e4a">块级节点映射（htmlNodeToDocxBlocks）</text>
+      <text x="70" y="39" font-size="12" fill="#334155">h1-h6 → 标题段落 · table → docx Table（表头/首列独立样式，列宽均分 9000tw）· ul/ol → 编号引用段落 · img → 图片段落</text>
+      <text x="70" y="57" font-size="12" fill="#334155">blockquote → 蓝色左边框灰底（可研插图指引转专用提示框）· pre+mermaid → 本地转图 · pre 其他 → Consolas 灰底</text>
+      <text x="70" y="73" font-size="12" fill="#334155">br → 换行 · hr → 横线 · p/div/section/span/strong/em/del/a/code… → 正文段落；未支持标签记 warning 后降级递归</text>
+    </g>
+    <path d="M590 720 L590 738" stroke="#94a3b8" stroke-width="2" marker-end="url(#a)"/>
+
+    <!-- 7 image / mermaid -->
+    <g transform="translate(40,738)">
+      <rect width="1100" height="88" rx="7" fill="#fdf2f8" stroke="#ec4899" stroke-width="1.5"/>
+      <circle cx="26" cy="44" r="13" fill="#ec4899"/>
+      <text x="26" y="49" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">7</text>
+      <text x="52" y="20" font-size="13" font-weight="700" fill="#831843">图片与 Mermaid（唯一的耗时与失败来源）</text>
+      <text x="70" y="39" font-size="12" fill="#334155">图片：dataURL / yibiao-asset://（generated-images、imported-images，含目录穿越防护）/ http(s) fetch / 本地路径 → 失败重试 2 次间隔 3s</text>
+      <text x="70" y="57" font-size="12" fill="#334155">→ normalizeImageForDocx → imageSize 量尺寸 → 按像素密度折算 → 缩放到「页面可用宽 × max_width_percent」与「可用高 × 90%」内</text>
+      <text x="70" y="75" font-size="12" fill="#334155">Mermaid：先看本地缓存（v5，hash 命中直接用）→ 未命中用离屏 BrowserWindow 渲染 PNG（3 倍图，680 宽）→ 写回缓存</text>
+    </g>
+    <path d="M590 826 L590 844" stroke="#94a3b8" stroke-width="2" marker-end="url(#a)"/>
+
+    <!-- 8 -->
+    <g transform="translate(40,844)">
+      <rect width="1100" height="62" rx="7" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+      <circle cx="26" cy="31" r="13" fill="#3b82f6"/>
+      <text x="26" y="36" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">8</text>
+      <text x="52" y="20" font-size="13" font-weight="700" fill="#1e3a8a">组装 Document → Packer.toBuffer</text>
+      <text x="52" y="38" font-size="12" fill="#475569">页面：纸张 mm→twips、横纵向、页边距、首页不同；页眉/页脚/页码（格式串按 {page} 拆分）</text>
+      <text x="52" y="55" font-size="12" fill="#475569">样式：文档默认字体字号 + Heading1-6 段落样式；编号：标题多级编号配置 + 列表编号引用（每个列表一套 reference，3 级）</text>
+    </g>
+    <path d="M590 906 L590 924" stroke="#94a3b8" stroke-width="2" marker-end="url(#a)"/>
+
+    <!-- 9 -->
+    <g transform="translate(40,924)">
+      <rect width="1100" height="52" rx="7" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+      <circle cx="26" cy="26" r="13" fill="#10b981"/>
+      <text x="26" y="31" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">9</text>
+      <text x="52" y="20" font-size="13" font-weight="700" fill="#065f46">writeFileSync + 收尾</text>
+      <text x="52" y="38" font-size="12" fill="#065f46">progress 96% → 写盘 → 100%；有 warning 时提示「有 N 处图片未能插入，请打开文档核对」</text>
+      <text x="52" y="52" font-size="12" fill="#065f46">失败时 IPC 层发 progress phase=error 并 rethrow；finally 触发捐赠引导</text>
+    </g>
+  </g>
+
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+</svg>

@@ -1,0 +1,101 @@
+"""目录整理为标准结构服务测试"""
+import json
+
+import pytest
+
+from app.services.outline_reorganize import (
+    reorganize_to_standard,
+    _strip_number,
+    _group_of,
+)
+
+
+def test_strip_number():
+    assert _strip_number("一、工程简介") == "工程简介"
+    assert _strip_number("1.1 项目概况") == "项目概况"
+    assert _strip_number("（一）编制说明") == "编制说明"
+    assert _strip_number("第3章 施工工艺") == "施工工艺"
+    assert _strip_number("五、安全保障") == "安全保障"
+
+
+def test_group_of():
+    assert _group_of("工程概况") == "工程概况"
+    assert _group_of("一、工程简介") == "工程概况"
+    assert _group_of("五、安全保障") == "施工安全保证措施"
+    assert _group_of("施工总体部署") == "施工计划"
+    assert _group_of("BIM应用管理") is None
+
+
+def test_preserves_standard_framework():
+    """导入野路子目录，整理后仍保留标准 9 章框架 + 编写要点"""
+    raw = [
+        {"title": "一、工程简介", "level": 2, "children": [
+            {"title": "1.1 项目概况", "level": 3, "children": []},
+        ]},
+        {"title": "二、编制说明", "level": 2, "children": []},
+        {"title": "三、施工总体部署", "level": 2, "children": []},
+        {"title": "四、主要施工方法", "level": 2, "children": [
+            {"title": "4.1 钻孔灌注桩", "level": 3, "children": []},
+        ]},
+        {"title": "五、安全保障", "level": 2, "children": []},
+        {"title": "六、项目信息化管理（BIM）", "level": 2, "children": []},
+    ]
+    res = reorganize_to_standard(raw, "深基坑工程专项施工方案")
+    out = res["outline"]
+    tops = [n["title"] for n in out]
+    # 标准顶层 9 章必须全在（监测方案是子章，不入顶层）
+    for must in ["工程概况", "编制依据", "施工计划", "施工工艺技术",
+                 "施工安全保证措施", "验收要求", "应急处置措施", "计算书及相关图纸"]:
+        assert any(must in t for t in tops), f"标准章节缺失: {must}"
+    # 监测方案子章保留在施工安全保证措施下
+    safety = next(n for n in out if n["title"].startswith("施工安全保证措施"))
+    assert any("监测" in c["title"] for c in safety["children"])
+    # 用户真实子章节被保留
+    flat = __import__("json").dumps(out, ensure_ascii=False)
+    assert "钻孔灌注桩" in flat
+    # 未归位内容进入补充章节
+    assert any("补充章节" in t for t in tops)
+    # 每个标准节点都带描述（与软件生成标准一致）
+    assert all(n.get("description") for n in out if n["title"] not in ("补充章节（导入补充）",))
+
+
+def test_preserve_unmatched_false_drops_extras():
+    raw = [{"title": "野路子章节", "level": 1, "children": []}]
+    res = reorganize_to_standard(raw, "塔吊安装专项施工方案", preserve_unmatched=False)
+    tops = [n["title"] for n in res["outline"]]
+    assert not any("补充章节" in t for t in tops)
+
+
+def test_unmatched_children_titles_merged_not_dropped():
+    """✅ BUG 修复（2026-09-16）：标准骨架没有对应分支时，真实子章节标题
+    必须并入描述（"（含：…）"）而不是被静默丢弃。
+
+    旧实现在 `_reorg_children` 里只保留"能对上标准骨架"的真实子章节，
+    标准模板只到三级、用户上传的是四级时，最细一层标题整体消失。
+    """
+    raw = [{"title": "第五章 安全保障", "children": [
+        {"title": "5.1 安全技术交底流程", "children": [
+            {"title": "交底记录归档要求", "children": []}]},
+        {"title": "5.2 危险源辨识清单", "children": []},
+    ]}]
+    res = reorganize_to_standard(raw, "深基坑工程专项施工方案")
+    flat = json.dumps(res["outline"], ensure_ascii=False)
+    assert "安全技术交底流程" in flat
+    assert "危险源辨识清单" in flat
+    assert "交底记录归档要求" in flat, "更深层级的标题应并入父节点描述"
+
+
+def test_reorganize_output_never_exceeds_three_levels():
+    """整理结果本身仍受三级约束（深层内容以并入描述的方式保留）。"""
+    raw = [{"title": "第一章 工程概况", "children": [
+        {"title": "1.1 工程基本情况", "children": [
+            {"title": "1.1.1 建设规模", "children": [
+                {"title": "建筑面积", "children": []}]}]}]}]
+    res = reorganize_to_standard(raw, "深基坑工程专项施工方案")
+
+    def depth(nodes, d=1):
+        if not nodes:
+            return d - 1
+        return max(depth(n.get("children") or [], d + 1) for n in nodes)
+
+    assert depth(res["outline"]) <= 3

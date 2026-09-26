@@ -1,0 +1,156 @@
+import { useCallback, useRef, useState } from "react";
+import { aiApi } from "../api";
+import type {
+  AIConfigAuditItem, AIRuntimeResponse, AISceneRouteItem,
+} from "../types/aiConfig";
+
+export interface GovernanceMessage {
+  success: (text: string) => void;
+  warning: (text: string) => void;
+  info: (text: string) => void;
+  error: (text: string) => void;
+}
+
+/**
+ * AIConfigPage 治理子模块状态 hook：
+ * 场景模型路由、多环境切换、运行时厂商开关、配置变更审计。
+ *
+ * 数据加载与操作统一收口，页面 JSX 只负责渲染与用户交互。
+ */
+export function useAiConfigGovernance(msg: GovernanceMessage) {
+  const [sceneRoutes, setSceneRoutes] = useState<AISceneRouteItem[]>([]);
+  const [sceneSaving, setSceneSaving] = useState<string>("");
+  const [activeEnv, setActiveEnv] = useState<string>("");
+  const [envOptions, setEnvOptions] = useState<string[]>([]);
+  const [envSaving, setEnvSaving] = useState(false);
+  const [runtime, setRuntime] = useState<AIRuntimeResponse | null>(null);
+  const [runtimeDraft, setRuntimeDraft] = useState<string[]>([]);
+  const [runtimeSaving, setRuntimeSaving] = useState(false);
+  const [configAudits, setConfigAudits] = useState<AIConfigAuditItem[]>([]);
+  const [rollingBack, setRollingBack] = useState<string>("");
+  /**
+   * 场景路由列表返回的「当前生效环境」——env_mismatch 的判定基准已由后端算好，
+   * 这里只保留下来供界面说明「以哪个环境为准」。
+   */
+  const [sceneActiveEnv, setSceneActiveEnv] = useState<string>("");
+  /**
+   * ✅ 2026-09-25：「当前生效环境」值损坏时的原因（空串 = 正常）。
+   * 后端此时不会 500，而是按通用环境返回数据 + 回传本字段；页面必须显式提示，
+   * 否则用户看到的是一份「改不动、也解释不了」的配置。
+   */
+  const [envError, setEnvError] = useState<string>("");
+
+  /** 旧后端无 env_error 字段时不要覆盖成新状态（保持 undefined → 不改动） */
+  const syncEnvError = (raw: string | undefined) => {
+    if (typeof raw === "string") setEnvError(raw);
+  };
+
+  const loadSceneRoutes = useCallback(async () => {
+    try {
+      const { data } = await aiApi.getSceneRoutes();
+      setSceneRoutes(data.items || []);
+      setSceneActiveEnv(data.active_env || "");
+    } catch {
+      // 场景路由加载失败不影响主配置展示
+    }
+  }, []);
+
+  const loadConfigAudits = useCallback(async () => {
+    try {
+      const { data } = await aiApi.configAuditLogs({ limit: 20, days: 30 });
+      setConfigAudits(data.items || []);
+    } catch {
+      // 配置审计加载失败不影响主配置展示
+    }
+  }, []);
+
+  const loadEnv = useCallback(async () => {
+    try {
+      const { data } = await aiApi.getEnv();
+      setActiveEnv(data.active_env || "");
+      setEnvOptions(data.envs || []);
+      syncEnvError(data.env_error);
+    } catch {
+      // 旧后端无该端点时静默
+    }
+  }, []);
+
+  const loadRuntime = useCallback(async () => {
+    try {
+      const { data } = await aiApi.getRuntime();
+      setRuntime(data);
+      setRuntimeDraft(data.disabled_providers || []);
+      syncEnvError(data.env_error);
+    } catch {
+      // 旧后端无该端点时静默
+    }
+  }, []);
+
+  const handleSceneRouteChange = async (scene: string, configId: string) => {
+    setSceneSaving(scene);
+    try {
+      const { data } = await aiApi.updateSceneRoute(scene, configId);
+      // ✅ 2026-09-25：后端会用 warning 说明「保存成功但暂不生效」的原因
+      //    （跨环境 / 目标配置没有可用 Key）。以前只回 ok:true 就直接提示成功，
+      //    用户以为已经按场景选模型了，实际运行时一直回落主配置。
+      if (data?.warning) msg.warning(data.warning);
+      else msg.success(configId ? "已为该场景指定模型" : "已恢复为共用「当前使用」配置");
+      await refreshRef.current?.();
+    } catch (e: any) {
+      msg.error(e.response?.data?.detail || e.message || "保存场景路由失败");
+    } finally {
+      setSceneSaving("");
+    }
+  };
+
+  const handleSaveRuntime = async () => {
+    setRuntimeSaving(true);
+    try {
+      const { data } = await aiApi.setDisabledProviders(runtimeDraft);
+      setRuntime((prev) => (prev
+        ? { ...prev, disabled_providers: data.disabled_providers || [] }
+        : prev));
+      if (data?.warning) msg.warning(data.warning);
+      else if (!data?.count) msg.success("已恢复全部厂商");
+      else msg.success(`已禁用 ${data.count} 个厂商（即时生效，可随时恢复）`);
+      await refreshRef.current?.();
+    } catch (e: any) {
+      msg.error(e.response?.data?.detail || e.message || "保存运行时开关失败");
+    } finally {
+      setRuntimeSaving(false);
+    }
+  };
+
+  const handleEnvChange = async (env: string) => {
+    setEnvSaving(true);
+    try {
+      const { data } = await aiApi.setEnv(env);
+      setActiveEnv(data.active_env || "");
+      // 能走到这里说明新值已通过后端白名单校验：环境损坏状态随之解除
+      setEnvError("");
+      if (data.hint) msg.info(data.hint);
+      await refreshRef.current?.();
+    } catch (e: any) {
+      msg.error(e.response?.data?.detail || e.message || "切换环境失败");
+    } finally {
+      setEnvSaving(false);
+    }
+  };
+
+  // ✅ BUG 修复：原实现是「普通对象」，每次渲染都新建一个 —— 而 setRefresh 只在
+  //    AIConfigPage 的挂载 effect 里调用一次，写入的是「挂载那一次渲染」创建的对象；
+  //    此后每次重渲创建的新对象 current 恒为 null，导致保存场景路由 / 切换环境 /
+  //    切换运行时厂商开关后 refreshRef.current?.() 静默 no-op，列表不刷新（用户看到
+  //    「已保存」但页面无变化，必须手动 F5）。改为 useRef 后引用稳定，刷新真正生效。
+  const refreshRef = useRef<(() => Promise<void>) | null>(null);
+  const setRefresh = useCallback((fn: () => Promise<void>) => { refreshRef.current = fn; }, []);
+
+  return {
+    sceneRoutes, sceneSaving, activeEnv, envOptions, envSaving,
+    runtime, runtimeDraft, runtimeSaving, configAudits, rollingBack,
+    sceneActiveEnv, envError,
+    loadSceneRoutes, loadConfigAudits, loadEnv, loadRuntime,
+    handleSceneRouteChange, handleSaveRuntime, handleEnvChange,
+    setRuntimeDraft, setRollingBack, setRefresh,
+  };
+}

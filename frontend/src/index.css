@@ -1,0 +1,1344 @@
+/* ================================================================
+   工程蓝图 · Blueprint Engineering — 全局视觉层
+   ================================================================ */
+
+/* ---------- 字体全局应用 ---------- */
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: 'Geologica', 'Noto Sans SC', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', Roboto, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  color: #1A2332;
+  background: #F4F6FA;
+}
+
+/* ---------- 全局横向溢出防线（窄屏兜底） ----------
+   任何元素因 min-width:auto 或固定宽度导致横向溢出时，
+   这里作为最后一道防线防止页面出现横向滚动。
+   注意：html/body 层用 hidden 而非 clip —— clip 会阻止所有祖先的滚动，
+   包括 antd Table 的 scroll.x 容器；hidden 不会阻止后代显式 overflow-x:auto。 */
+html, body {
+  max-width: 100vw;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  /* 支持 iOS 安全区（刘海/全面屏底部横条） */
+  padding-top: env(safe-area-inset-top, 0);
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+#root {
+  max-width: 100vw;
+  overflow-x: hidden;
+  min-height: 100dvh;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Flex/Grid 容器默认把直接子元素的 min-width 设为 auto，
+   子元素内容过长时会撑破父容器（经典 flex 陷阱）。
+   这里给常见 flex/grid 容器的直接子元素显式设 min-width:0，让它们能随父收缩。
+   注意：不作用于 antd Table 相关节点，避免破坏 scroll.x 横向滚动。 */
+:is(.ant-flex, .ant-row, .ant-layout, .ant-layout-content,
+    .ant-layout-header, .ant-layout-footer, .ant-card-body, .ant-form-item,
+    .ant-form-item-control, .ant-form-item-row, .ant-descriptions,
+    .ant-descriptions-row, .ant-descriptions-item, .ant-tabs-tabpane,
+    .ant-tabs-content-holder, .ant-tabs-nav-list, .ant-statistic,
+    .ant-list-item, .ant-space, .ant-space-item,
+    .bp-hero, .bp-stat-cards, .bp-stat-card, .bp-header, .bp-header-crumbs,
+    .bp-header-right, .bp-content, .bp-sidebar) > * {
+  min-width: 0;
+}
+
+/* 常见容器自身也要能收缩，不能反过来撑破它们的父 */
+.ant-flex, .ant-row, .ant-col, .ant-layout, .ant-layout-content,
+.ant-card, .ant-card-body, .ant-form, .ant-form-item, .ant-form-item-control,
+.ant-descriptions, .ant-tabs, .ant-tabs-content-holder, .ant-tabs-tabpane,
+.ant-space, .ant-list, .ant-list-item, .ant-statistic,
+.bp-hero, .bp-stat-card, .bp-stat-cards, .bp-header, .bp-header-crumbs,
+.bp-header-right, .bp-content {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* 内联 flex/grid 容器：直接子元素 min-width:0 兜底 */
+[style*="display: flex"] > *,
+[style*="display:flex"] > *,
+[style*="display: grid"] > *,
+[style*="display:grid"] > *,
+[style*="flex-direction: row"] > *,
+[style*="flex-direction:row"] > *,
+[style*="grid-template-columns"] > * {
+  min-width: 0;
+}
+
+/* 更宽泛兜底：任何 inline-style flex/grid 容器自身也能收缩 */
+.flex-shrink-safe {
+  min-width: 0;
+}
+
+/* 所有长文本默认允许在任意位置换行，防止英文单词溢出容器 */
+.ant-typography,
+.bp-text-wrap,
+.ant-modal-body,
+.ant-drawer-body,
+.ant-card-body,
+.ant-descriptions-item-label,
+.ant-descriptions-item-content {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* 表格/代码块在窄屏允许横向滚动而不是撑爆布局 */
+.ant-table-wrapper,
+.code-block-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Modal / Drawer 窄屏撑满、留出安全边距 */
+@media (max-width: 768px) {
+  /* .ant-modal-wrap 是滚动容器，必须限制宽度才能约束 .ant-modal 的滚动行为 */
+  .ant-modal-wrap {
+    max-width: 100vw !important;
+    overflow-x: hidden !important;
+  }
+  .ant-modal {
+    max-width: calc(100vw - 24px) !important;
+    width: calc(100vw - 24px) !important;
+    margin: 0 auto !important;
+  }
+  .ant-modal .ant-modal-content {
+    max-width: calc(100vw - 24px) !important;
+    width: 100% !important;
+    margin: 0 !important;
+  }
+  .ant-modal-confirm,
+  .ant-modal-confirm .ant-modal-content {
+    max-width: calc(100vw - 24px) !important;
+    width: 100% !important;
+  }
+  .ant-drawer-content-wrapper {
+    max-width: 100vw !important;
+  }
+  .ant-drawer-body {
+    padding: 12px !important;
+  }
+  /* 弹窗按钮组换行 */
+  .ant-modal-footer {
+    flex-wrap: wrap !important;
+    row-gap: 6px !important;
+  }
+  .ant-modal-footer .ant-btn {
+    flex: 1 1 auto;
+    min-width: 96px;
+    margin-inline: 4px !important;
+    max-width: 100% !important;
+  }
+}
+
+/* 全局按钮/表格在窄屏允许自动换行/滚动 */
+@media (max-width: 768px) {
+  .ant-btn {
+    max-width: 100%;
+    white-space: normal;
+    height: auto;
+  }
+  .ant-form-item-label {
+    padding-bottom: 4px;
+  }
+}
+
+/* 触屏友好的可点击区域 */
+
+
+/* 2026-09-23：import 模块顶层子 Tab 栏 —— 只渲染 tab bar 标签，隐藏空的 tab pane。
+   与之前嵌在右侧 flex row 里的 swb-import-sub-tabs 不同（那个需要 flex:1 撑满），
+   现在这个 Tabs 是 column 容器的第 1 行，只需 auto height。 */
+.swb-sub-tabs-bar-only {
+  flex: 0 0 auto !important;
+  min-height: 0;
+}
+.swb-sub-tabs-bar-only > .ant-tabs-content-holder {
+  display: none !important;
+}
+
+
+/* 2026-09-23：文档解析 Tab 文件列表行距砍半（0.5x 视觉密度） */
+.dpl-compact-list .ant-list-item {
+  /* 2026-09-23 晚：资料与解析高度再减 1/3，padding 从 6 → 4px（比初始 12px 减 2/3） */
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+}
+.dpl-compact-list .ant-list-item-main {
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+}
+@media (hover: none) and (pointer: coarse) {
+  button,
+  a,
+  [role="button"],
+  .ant-btn,
+  .ant-menu-item,
+  .ant-tabs-tab {
+    min-height: 32px;
+  }
+}
+
+/* 长 URL/代码避免撑爆容器 */
+code,
+pre,
+.ant-typography code {
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 侧边栏：蓝图网格底纹 ---------- */
+.bp-sidebar {
+  position: relative;
+  background: #0F2B4F !important;
+  isolation: isolate;
+}
+
+.bp-sidebar::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(0, 212, 255, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 212, 255, 0.08) 1px, transparent 1px);
+  background-size: 24px 24px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.bp-sidebar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at top left, rgba(0, 212, 255, 0.08), transparent 60%),
+    radial-gradient(ellipse at bottom right, rgba(0, 212, 255, 0.04), transparent 60%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.bp-sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* ---------- 侧边栏 Logo ---------- */
+.bp-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px !important;
+  height: 52px !important;
+  border-bottom: 1px solid rgba(0, 212, 255, 0.15) !important;
+  flex-shrink: 0;
+}
+
+.bp-logo-mark {
+  width: 28px;
+  height: 28px;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.bp-logo-mark svg {
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 0 6px rgba(0, 212, 255, 0.4));
+}
+
+.bp-logo-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.1;
+  color: #FFFFFF;
+}
+
+.bp-logo-text .bp-logo-title {
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.5px;
+  background: linear-gradient(90deg, #FFFFFF, #00D4FF);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.bp-logo-text .bp-logo-sub {
+  font-size: 10px;
+  font-weight: 400;
+  color: rgba(0, 212, 255, 0.7);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ---------- 侧边栏折叠态 Logo ---------- */
+.bp-logo-collapsed {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 52px !important;
+  border-bottom: 1px solid rgba(0, 212, 255, 0.15) !important;
+  flex-shrink: 0;
+}
+
+/* ---------- 侧边栏 Menu 视觉 ---------- */
+.bp-sidebar .ant-menu {
+  background: transparent !important;
+  border-right: 0 !important;
+}
+
+.bp-sidebar .ant-menu-item,
+.bp-sidebar .ant-menu-submenu-title {
+  margin: 2px 8px !important;
+  padding: 0 10px !important;
+  border-radius: 4px !important;
+  height: 34px !important;
+  line-height: 34px !important;
+  transition: all 0.18s ease-out !important;
+}
+
+.bp-sidebar .ant-menu-item:hover,
+.bp-sidebar .ant-menu-submenu-title:hover {
+  background: rgba(0, 212, 255, 0.1) !important;
+  transform: translateX(2px);
+}
+
+.bp-sidebar .ant-menu-item-selected {
+  background: rgba(0, 212, 255, 0.18) !important;
+  color: #00D4FF !important;
+  box-shadow: inset 2px 0 0 #00D4FF;
+}
+
+.bp-sidebar .ant-menu-group-title {
+  color: rgba(255, 255, 255, 0.35) !important;
+  font-size: 11px !important;
+  letter-spacing: 1px !important;
+  text-transform: uppercase !important;
+}
+
+.bp-sidebar .ant-menu-sub.ant-menu-inline {
+  background: transparent !important;
+}
+
+/* ---------- 状态指示器脉冲动画 ----------
+   ✅ 性能优化：旧实现动画的是 box-shadow 的 spread（0 → 6px）。box-shadow 不是
+   合成器属性，每一帧都要重新绘制（paint）+ 阴影重算，而这两三个状态点在侧栏
+   常驻显示、`infinite` 永不空闲 —— 浏览器永远进不了合成器空闲，与 SSE 高频
+   渲染叠加会放大掉帧。
+   改为「伪元素光环 + transform: scale + opacity」：两者都是可合成属性，动画
+   全程在 GPU 合成层完成，不触发 layout/paint。视觉保持一致（圆点外一圈同色
+   光环扩散并淡出，2.4s/1.6s 节奏不变）。
+   三个状态共用同一条 keyframes（只动 transform/opacity），颜色由伪元素背景
+   决定，避免维护三份几乎相同的动画。 */
+@keyframes bp-pulse-ring {
+  0% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  70% {
+    transform: scale(2.5);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(2.5);
+    opacity: 0;
+  }
+}
+
+.bp-status-dot {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background-color 0.3s ease;
+}
+
+/* 光环层：默认不可见，仅在对应状态类上启动动画 */
+.bp-status-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.bp-status-dot.online {
+  background: #00C853;
+}
+
+.bp-status-dot.online::after {
+  background: #00C853;
+  will-change: transform, opacity;
+  animation: bp-pulse-ring 2.4s ease-in-out infinite;
+}
+
+.bp-status-dot.checking {
+  background: #00D4FF;
+}
+
+.bp-status-dot.checking::after {
+  background: #00D4FF;
+  will-change: transform, opacity;
+  animation: bp-pulse-ring 1.6s ease-in-out infinite;
+}
+
+.bp-status-dot.offline {
+  background: #FF3D5A;
+}
+
+.bp-status-dot.offline::after {
+  background: #FF3D5A;
+  will-change: transform, opacity;
+  animation: bp-pulse-ring 1.6s ease-in-out infinite;
+}
+
+/* ✅ 无障碍：用户显式偏好「减少动态效果」时停止脉冲（不影响静态状态色） */
+@media (prefers-reduced-motion: reduce) {
+  .bp-status-dot::after {
+    animation: none !important;
+    opacity: 0 !important;
+  }
+}
+
+/* ---------- 后台任务运行状态栏（侧边栏底部） ---------- */
+.bp-task-bar {
+  height: 34px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 0 12px;
+  cursor: pointer;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.75);
+  border-top: 1px solid rgba(0, 212, 255, 0.12);
+  transition: background-color 0.18s ease-out;
+  user-select: none;
+}
+.bp-task-bar:hover {
+  background: rgba(0, 212, 255, 0.08);
+}
+.bp-task-bar.busy {
+  background: rgba(0, 212, 255, 0.05);
+}
+.bp-task-bar-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bp-task-bar-ai {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.45);
+  font-family: "JetBrains Mono", monospace;
+}
+.bp-task-badge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.bp-task-badge-dot {
+  position: absolute;
+  top: -7px;
+  right: -10px;
+  background: #FAAD14;
+  color: #0F2B4F;
+  border-radius: 8px;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 600;
+  line-height: 14px;
+  padding: 0 4px;
+}
+.bp-task-panel {
+  background: #0B2140;
+  border: 1px solid rgba(0, 212, 255, 0.18);
+  border-radius: 6px;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  flex-shrink: 0;
+  margin: 0 8px 6px;
+}
+.bp-task-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 8px 4px 10px;
+  font-size: 12px;
+  color: #00D4FF;
+  letter-spacing: 1px;
+  border-bottom: 1px solid rgba(0, 212, 255, 0.12);
+}
+.bp-task-panel-section {
+  font-size: 11px;
+  color: rgba(0, 212, 255, 0.7);
+  letter-spacing: 1px;
+  margin: 6px 0 2px;
+}
+.bp-task-empty {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.35);
+  padding: 6px 0;
+}
+.bp-task-recent-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  padding: 3px 0;
+  color: rgba(255, 255, 255, 0.7);
+}
+.bp-task-recent-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bp-task-recent-time {
+  color: rgba(255, 255, 255, 0.35);
+  flex-shrink: 0;
+  font-family: "JetBrains Mono", monospace;
+}
+
+/* ---------- 方案工作台标题栏：后台任务运行提示 ---------- */
+.bp-live-task-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: #FAAD14;
+  background: rgba(250, 173, 20, 0.08);
+  border: 1px solid rgba(250, 173, 20, 0.35);
+  border-radius: 4px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.bp-live-task-hint .anticon-spin {
+  color: #FAAD14;
+}
+
+/* ---------- 标题栏消息中心（ActivityHint） ---------- */
+.bp-activity-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  max-width: 440px;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 2px 8px;
+  border: 1px solid #E8EDF4;
+  border-radius: 4px;
+  background: #FAFBFD;
+  cursor: pointer;
+  transition: border-color 0.18s ease-out, background-color 0.18s ease-out;
+}
+.bp-activity-chip:hover {
+  border-color: #B8C4D4;
+  background: #F0F4FA;
+}
+.bp-activity-chip-text {
+  color: #4A5568;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bp-activity-bell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  color: #98A6B8;
+  font-size: 14px;
+  cursor: pointer;
+  transition: color 0.18s ease-out, background-color 0.18s ease-out;
+}
+.bp-activity-bell:hover {
+  color: #1677FF;
+  background: #F0F4FA;
+}
+.bp-activity-history {
+  width: 400px;
+  max-width: 76vw;
+}
+.bp-activity-history-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1F2937;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #EDF1F7;
+  margin-bottom: 4px;
+}
+.bp-activity-history-body {
+  max-height: 320px;
+  overflow-y: auto;
+}
+.bp-activity-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 5px 0;
+  font-size: 12px;
+  line-height: 1.5;
+  border-bottom: 1px dashed #F0F2F5;
+}
+.bp-activity-row:last-child {
+  border-bottom: 0;
+}
+.bp-activity-row-icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.bp-activity-row-src {
+  flex-shrink: 0;
+  color: #98A6B8;
+  background: #F4F6FA;
+  border-radius: 3px;
+  padding: 0 5px;
+  font-size: 11px;
+}
+.bp-activity-row-text {
+  flex: 1;
+  color: #374151;
+  word-break: break-all;
+}
+.bp-activity-row-time {
+  flex-shrink: 0;
+  color: #98A6B8;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  margin-top: 1px;
+}
+[data-bp-mode='dark'] .bp-activity-chip {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+[data-bp-mode='dark'] .bp-activity-chip:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+[data-bp-mode='dark'] .bp-activity-chip-text {
+  color: rgba(255, 255, 255, 0.75);
+}
+[data-bp-mode='dark'] .bp-activity-bell {
+  color: rgba(255, 255, 255, 0.45);
+}
+[data-bp-mode='dark'] .bp-activity-bell:hover {
+  color: #00D4FF;
+  background: rgba(0, 212, 255, 0.08);
+}
+
+/* ---------- 主区域 Header ---------- */
+.bp-header {
+  background: rgba(255, 255, 255, 0.85) !important;
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid #E8EDF4 !important;
+  height: 44px !important;
+  line-height: 44px !important;
+  padding: 0 24px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+}
+
+.bp-header-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #5A6A80;
+}
+
+.bp-header-crumbs .bp-crumb-sep {
+  color: #B8C4D4;
+  font-size: 11px;
+}
+
+.bp-header-crumbs .bp-crumb-current {
+  color: #1A2332;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.bp-header-crumbs .bp-crumb-link {
+  color: #00D4FF;
+  cursor: pointer;
+  text-decoration: none;
+  transition: opacity 0.15s;
+}
+
+.bp-header-crumbs .bp-crumb-link:hover {
+  opacity: 0.75;
+  text-decoration: underline;
+}
+
+.bp-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: #8B99AC;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ---------- 主区域 Content ---------- */
+.bp-content {
+  margin: 20px !important;
+  height: calc(100vh - 84px) !important;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: #F4F6FA !important;
+}
+
+/* ---------- 页面进入动效 ---------- */
+@keyframes bp-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ant-layout-content > * {
+  animation: bp-fade-up 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ---------- 卡片 hover 微位移 ---------- */
+.ant-card {
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+  border-radius: 4px !important;
+}
+
+.ant-card:hover {
+  box-shadow: 0 2px 6px rgba(15, 43, 79, 0.06), 0 4px 16px rgba(15, 43, 79, 0.05) !important;
+}
+
+/* ---------- 按钮 hover 微动效 ---------- */
+.ant-btn-primary {
+  transition: all 0.18s ease-out !important;
+}
+
+.ant-btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(0, 212, 255, 0.3) !important;
+}
+
+.ant-btn-primary:active {
+  transform: translateY(0);
+}
+
+/* ---------- 表格行 hover 增强 ---------- */
+.ant-table-tbody > tr:hover > td {
+  background: rgba(0, 212, 255, 0.04) !important;
+}
+
+/* ---------- 主区域滚动条（浅色模式） ---------- */
+.ant-layout-content::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.ant-layout-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ant-layout-content::-webkit-scrollbar-thumb {
+  background: #D8DFE8;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.ant-layout-content::-webkit-scrollbar-thumb:hover {
+  background: #B8C4D4;
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+
+/* ---------- 侧边栏滚动条（深色模式） ---------- */
+.bp-sidebar .ant-menu::-webkit-scrollbar,
+.bp-sidebar::-webkit-scrollbar {
+  width: 8px;
+}
+.bp-sidebar .ant-menu::-webkit-scrollbar-thumb,
+.bp-sidebar::-webkit-scrollbar-thumb {
+  background: rgba(0, 212, 255, 0.25);
+  border-radius: 4px;
+}
+.bp-sidebar .ant-menu::-webkit-scrollbar-thumb:hover,
+.bp-sidebar::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 212, 255, 0.4);
+}
+
+/* ---------- 全局滚动条美化 ---------- */
+
+.scroll-area {
+  /* 让滚动条占位不闪烁 */
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;           /* Firefox */
+  scrollbar-color: #bfbfbf transparent;
+  /* ✅ 性能优化：布局/样式包含。长列表（目录树 260 节点、事实数百条、章节日志）
+     滚动时，浏览器可以把 layout/style 重算边界限制在滚动容器内，不必波及整页。
+     刻意不加 paint（会裁剪溢出）与 size（与 flex/百分比高度相互作用有反馈环风险）。
+     注意：本类不使用 position:fixed 子元素（唯一的 fixed 元素在侧栏 TaskStatusBar，
+     不在此容器内），故 contain: layout 不会改变现有定位基准。 */
+  contain: layout style;
+}
+
+/* Webkit (Chrome / Edge / Safari) */
+.scroll-area::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.scroll-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scroll-area::-webkit-scrollbar-thumb {
+  background: #d9d9d9;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.scroll-area::-webkit-scrollbar-thumb:hover {
+  background: #bfbfbf;
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+.scroll-area::-webkit-scrollbar-thumb:active {
+  background: #8c8c8c;
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+.scroll-area::-webkit-scrollbar-button {
+  height: 0;
+  width: 0;
+  display: none;
+}
+
+/* Ant Design Tree 滚动容器也应用 */
+.ant-tree-list-holder-inner,
+.ant-table-body,
+.ant-table-body-inner {
+  scrollbar-width: thin;
+  scrollbar-color: #bfbfbf transparent;
+}
+.ant-tree-list-holder-inner::-webkit-scrollbar,
+.ant-table-body::-webkit-scrollbar,
+.ant-table-body-inner::-webkit-scrollbar {
+  width: 10px;
+}
+.ant-tree-list-holder-inner::-webkit-scrollbar-thumb,
+.ant-table-body::-webkit-scrollbar-thumb,
+.ant-table-body-inner::-webkit-scrollbar-thumb {
+  background: #d9d9d9;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.ant-tree-list-holder-inner::-webkit-scrollbar-thumb:hover {
+  background: #bfbfbf;
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+
+/* ========== 布局高度链路修复 ========== */
+/* 让 antd Tabs 在 flex 父里真正撑满：content-holder / tabpane 必须能接收 flex 高度 */
+
+.ant-tabs.swb-tabs-flex,
+.ant-tabs.swb-tabs-flex > .ant-tabs-content-holder,
+.ant-tabs.swb-tabs-flex > .ant-tabs-content-holder > .ant-tabs-content,
+.ant-tabs.swb-tabs-flex > .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane:not(.ant-tabs-tabpane-hidden) {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+}
+
+/* 🔴 关键修复：非激活 Tab 面板必须隐藏。
+   旧选择器对 .ant-tabs-tabpane 统一 display:flex，特异性盖过了 antd 自身的
+   .ant-tabs-tabpane-hidden 隐藏规则，导致切换 Tab 时多个功能面板内容
+   同时堆叠显示（全局事实/目录生成/正文生成内容叠在同一个页面里）——
+   这正是「导航栏内功能混乱」的直接观感来源。 */
+.ant-tabs.swb-tabs-flex > .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane.ant-tabs-tabpane-hidden {
+  display: none !important;
+}
+
+/* ✅ 导航栏间距收紧：方案工作台顶部工作流导航各标题之间水平间距过大，
+   覆盖 antd 默认的 32px 相邻 Tab 左边距与 12px 上下内边距，让步骤条更紧凑。
+   2026-09-23 再收紧：padding 从 6px→3px、相邻 margin 从 6px→3px，整体行距压缩。 */
+.ant-tabs.swb-tabs-flex > .ant-tabs-nav .ant-tabs-tab {
+  padding: 3px 1px;
+  line-height: 1.2;
+}
+.ant-tabs.swb-tabs-flex > .ant-tabs-nav .ant-tabs-tab + .ant-tabs-tab {
+  margin: 0 0 0 3px;
+}
+
+/* 顶层 Tabs 底部默认分隔线太粗，改成细灰线 */
+.ant-tabs.swb-tabs-flex > .ant-tabs-nav::before {
+  border-bottom-color: #f0f0f0;
+}
+
+/* ✅ 工作流导航栏自适应：窗口较窄（扣除左侧 Sider 后放不下 7 个全标题）时
+   隐藏步骤标题与提示图标，仅保留步骤序号和状态徽标，避免导航标签相互挤压。
+   类名 swb-tab-title / swb-tab-hint 由 WorkflowTabLabel 提供（2026-09-20 曾因
+   页面重建丢失类名导致本规则失效，护栏测试 workflowTabsGuard.test.ts 已锁定）。 */
+@media (max-width: 1440px) {
+  .ant-tabs.swb-tabs-flex > .ant-tabs-nav .ant-tabs-tab {
+    padding: 2px 2px;
+  }
+  .ant-tabs.swb-tabs-flex > .ant-tabs-nav .ant-tabs-tab + .ant-tabs-tab {
+    margin: 0 0 0 3px;
+  }
+  .ant-tabs.swb-tabs-flex .swb-tab-title,
+  .ant-tabs.swb-tabs-flex .swb-tab-hint {
+    display: none;
+  }
+}
+
+@media (max-width: 992px) {
+  .ant-tabs.swb-tabs-flex > .ant-tabs-nav .ant-tabs-tab {
+    padding: 2px 1px;
+  }
+  .ant-tabs.swb-tabs-flex > .ant-tabs-nav .ant-tabs-tab + .ant-tabs-tab {
+    margin: 0 0 0 2px;
+  }
+}
+
+/* 2026-09-23：import（解析提取）模块内嵌子 Tabs
+   tabPosition="left" → 文档解析/项目提取 垂直排列在左侧，让出顶部空间给主内容（信息显示窗口）。
+   需要覆盖 .swb-tabs-flex 的 flex-direction:column 冲突（顶层 Tabs 是 top+column，内嵌是 left+row）。 */
+.ant-tabs.swb-import-sub-tabs {
+  display: flex !important;
+  flex-direction: row !important;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+.ant-tabs.swb-import-sub-tabs > .ant-tabs-nav-container {
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 0 0 auto;
+  width: 96px;
+  min-width: 96px;
+  max-width: 108px;
+  border-right: 1px solid #f0f0f0;
+  margin: 0 !important;
+  padding: 4px 0 !important;
+}
+.ant-tabs.swb-import-sub-tabs > .ant-tabs-nav-container .ant-tabs-nav {
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 1 auto;
+  margin: 0 !important;
+}
+.ant-tabs.swb-import-sub-tabs > .ant-tabs-nav-container .ant-tabs-nav::before {
+  display: none !important;
+}
+.ant-tabs.swb-import-sub-tabs > .ant-tabs-nav-container .ant-tabs-nav-list {
+  flex-direction: column;
+  gap: 2px;
+}
+.ant-tabs.swb-import-sub-tabs > .ant-tabs-nav-container .ant-tabs-tab {
+  padding: 6px 10px !important;
+  margin: 0 !important;
+  text-align: left;
+  border-radius: 4px;
+}
+/* 激活态左侧竖条 —— 替代 antd 默认的底部横条（因为 tabPosition="left"） */
+.ant-tabs.swb-import-sub-tabs > .ant-tabs-nav-container .ant-tabs-tab.ant-tabs-tab-active {
+  background: #e6f4ff;
+  color: #1677ff;
+  position: relative;
+}
+.ant-tabs.swb-import-sub-tabs > .ant-tabs-nav-container .ant-tabs-tab.ant-tabs-tab-active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  background: #1677ff;
+  border-radius: 1px;
+}
+
+/* 内嵌子 Tabs 的 content-holder 要跟随 row 布局 */
+.ant-tabs.swb-import-sub-tabs > .ant-tabs-content-holder {
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+.ant-tabs.swb-import-sub-tabs > .ant-tabs-content-holder > .ant-tabs-content {
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+.ant-tabs.swb-import-sub-tabs > .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane:not(.ant-tabs-tabpane-hidden) {
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+.ant-tabs.swb-import-sub-tabs > .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane.ant-tabs-tabpane-hidden {
+  display: none !important;
+}
+
+/* ant-tree 在 flex 父里：容器不能被内容撑爆 */
+.ant-tree {
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;  /* 裁剪子元素溢出 */
+}
+/* ant-tree 直接子层：ant-tree-list / ant-tree-treenode 等都要能跟随父 */
+.ant-tree > .ant-tree-list {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.ant-tree-list-holder {
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+}
+.ant-tree-list-holder-inner {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto !important;
+}
+
+/* ant-layout-content 高度链路：Content 是 flex 列锚点，所有页面根元素都变成 flex column */
+.ant-layout-content > * {
+  display: flex !important;
+  flex-direction: column !important;
+  min-height: 0;
+  flex: 1 1 auto;
+  width: 100%;
+  overflow: hidden;  /* 防止页面整体滚，让内部子区自己滚 */
+}
+
+/* antd Table 在 flex 父里：给个高度锚点，让 ant-table-body 能撑满 */
+.ant-table-wrapper {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ant-table-wrapper > .ant-table {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.ant-table-wrapper > .ant-table > .ant-table-container,
+.ant-table-wrapper > .ant-table .ant-table-content,
+.ant-table-wrapper > .ant-table .ant-table-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none !important;
+}
+
+/* ================================================================
+   CSS 变量（语义化）—— 亮色默认，暗色在 [data-bp-mode='dark'] 下覆盖
+   ================================================================ */
+:root {
+  --bp-primary: #00D4FF;
+  --bp-text: #1A2332;
+  --bp-text-secondary: #5A6A80;
+  --bp-text-tertiary: #8B99AC;
+  --bp-bg-layout: #F4F6FA;
+  --bp-bg-container: #FFFFFF;
+  --bp-border: #E8EDF4;
+  --bp-border-strong: #D8DFE8;
+}
+[data-bp-mode='dark'] {
+  --bp-primary: #00D4FF;
+  --bp-text: #D8E6F4;
+  --bp-text-secondary: #9AB4D0;
+  --bp-text-tertiary: #6F87A5;
+  --bp-bg-layout: #0A1626;
+  --bp-bg-container: #12243D;
+  --bp-border: #1F3854;
+  --bp-border-strong: #284466;
+}
+
+/* ================================================================
+   暗色模式 · 主区域覆盖
+   ================================================================ */
+[data-bp-mode='dark'] .bp-content {
+  background: var(--bp-bg-layout) !important;
+}
+[data-bp-mode='dark'] .bp-header {
+  background: rgba(18, 36, 61, 0.85) !important;
+  border-bottom-color: #1F3854 !important;
+}
+[data-bp-mode='dark'] .bp-header-crumbs .bp-crumb-current { color: #D8E6F4; }
+[data-bp-mode='dark'] .bp-header-right { color: #6F87A5; }
+
+[data-bp-mode='dark'] .ant-card {
+  background: #12243D !important;
+  border-color: #1F3854 !important;
+  color: var(--bp-text);
+}
+[data-bp-mode='dark'] .ant-table {
+  background: #12243D !important;
+  color: var(--bp-text);
+}
+[data-bp-mode='dark'] .ant-table-thead > tr > th {
+  background: #0F2B4F !important;
+  color: #9AB4D0 !important;
+  border-bottom-color: #1F3854 !important;
+}
+[data-bp-mode='dark'] .ant-table-tbody > tr > td {
+  border-bottom-color: #1F3854 !important;
+}
+[data-bp-mode='dark'] .ant-table-tbody > tr:hover > td {
+  background: rgba(0, 212, 255, 0.06) !important;
+}
+
+[data-bp-mode='dark'] .bp-hero-flat {
+  border-color: #284466 !important;
+}
+
+[data-bp-mode='dark'] .ant-btn-default {
+  background: #12243D;
+  border-color: #284466;
+  color: #D8E6F4;
+}
+[data-bp-mode='dark'] .ant-input,
+[data-bp-mode='dark'] .ant-select-selector,
+[data-bp-mode='dark'] .ant-input-number,
+[data-bp-mode='dark'] .ant-input-affix-wrapper {
+  background: #0F2B4F !important;
+  border-color: #284466 !important;
+  color: #D8E6F4 !important;
+}
+
+/* ================================================================
+   响应式断点（移动优先 · 6 级断点）
+   ================================================================
+   断点定义：
+   - xs : < 380   小手机（iPhone SE/mini 375）
+   - sm : 380-560 手机竖屏（iPhone 14/15 390-430）
+   - md : 560-768 手机横屏 / 小平板
+   - lg : 768-1200 iPad 竖屏 / 小笔记本
+   - xl : 1200-1440 笔记本常规
+   - xxl: >= 1440 大屏
+   断点值与 utils/ui.tsx 的 BP_SMALL/BP_TABLET 保持一致。
+   ================================================================ */
+
+@media (max-width: 1200px) {
+  .bp-content {
+    margin: 12px !important;
+    height: calc(100dvh - 68px) !important;
+  }
+  .bp-stat-cards {
+    grid-template-columns: repeat(3, 1fr) !important;
+  }
+}
+
+@media (max-width: 900px) {
+  .bp-stat-cards {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+  /* Hero 内 accent 靠上，主标题不挤压 */
+  .bp-hero > div {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 8px !important;
+  }
+  .bp-hero [style*="maxWidth"] {
+    max-width: 100% !important;
+  }
+}
+
+@media (max-width: 768px) {
+  /* Header：允许换行，右侧按钮组允许挤压 */
+  .bp-header {
+    height: auto !important;
+    min-height: 44px !important;
+    line-height: normal !important;
+    padding: 6px 10px !important;
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+    row-gap: 4px !important;
+  }
+  .bp-header-crumbs {
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    gap: 4px !important;
+    font-size: 12px !important;
+  }
+  .bp-header-crumbs .bp-crumb-current {
+    font-size: 13px !important;
+  }
+  .bp-header-crumbs .bp-crumb-link {
+    font-size: 12px !important;
+  }
+  .bp-header-right {
+    gap: 6px !important;
+    flex-shrink: 0;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+  .bp-header-right span:not(.bp-toggle-text) { display: none; }
+  /* 全局消息中心在窄屏隐藏，只保留铃铛 */
+  .bp-activity-chip {
+    display: none !important;
+  }
+  /* Content 用 dvh 避免移动端 URL 栏遮挡 */
+  .bp-content {
+    margin: 8px !important;
+    height: calc(100dvh - 68px) !important;
+  }
+  .bp-stat-cards {
+    grid-template-columns: 1fr !important;
+  }
+  .bp-stat-card {
+    padding: 10px 12px !important;
+    gap: 10px !important;
+  }
+  .ant-table-wrapper { font-size: 12px; }
+  /* Hero 更紧凑 */
+  .bp-hero {
+    padding: 14px 12px !important;
+  }
+}
+
+/* 手机专属：xs/sm 断点进一步收敛 */
+@media (max-width: 560px) {
+  /* Header 单行显示，只保留最必要元素 */
+  .bp-header {
+    padding: 6px 8px !important;
+  }
+  .bp-header-crumbs .bp-crumb-sep {
+    display: none;
+  }
+  /* Modal 全屏 */
+  .ant-modal {
+    max-width: calc(100vw - 16px) !important;
+  }
+  .ant-modal .ant-modal-content {
+    max-width: calc(100vw - 16px) !important;
+  }
+  .ant-drawer {
+    max-width: 100vw !important;
+  }
+  /* 内容 padding 更紧凑 */
+  .bp-content {
+    margin: 4px !important;
+    height: calc(100dvh - 60px) !important;
+  }
+  /* 卡片内边距收敛 */
+  .ant-card-body {
+    padding: 10px !important;
+  }
+  /* 表单紧凑 */
+  .ant-form .ant-form-item {
+    margin-bottom: 8px !important;
+  }
+  /* Tab 允许横向滚动 */
+  .ant-tabs-nav {
+    overflow-x: auto !important;
+    flex-wrap: nowrap !important;
+  }
+  .ant-tabs-nav-list {
+    flex-wrap: nowrap !important;
+  }
+  /* Table 单元格不换行时允许溢出容器滚动 */
+  .ant-table-wrapper {
+    overflow-x: auto !important;
+  }
+  /* Descriptions 单列 */
+  .ant-descriptions.ant-descriptions-multiple {
+    display: block !important;
+  }
+}
+
+/* 极窄屏：iPhone SE (320) / 小屏手机 */
+@media (max-width: 380px) {
+  .bp-header {
+    padding: 4px 6px !important;
+    gap: 4px !important;
+  }
+  .bp-header-crumbs .bp-crumb-current {
+    font-size: 12px !important;
+  }
+  .bp-content {
+    margin: 2px !important;
+    height: calc(100dvh - 56px) !important;
+  }
+  .bp-hero {
+    padding: 10px 8px !important;
+  }
+  /* 单列强制 */
+  .bp-stat-cards {
+    grid-template-columns: 1fr !important;
+    gap: 8px !important;
+  }
+  /* Modal 全屏无留白 */
+  .ant-modal {
+    max-width: 100vw !important;
+    margin: 0 !important;
+  }
+  .ant-modal .ant-modal-content {
+    max-width: 100vw !important;
+    margin: 0 !important;
+    border-radius: 0 !important;
+  }
+  /* 按钮组垂直排列 */
+  .ant-modal-footer .ant-btn,
+  .ant-btn {
+    width: 100% !important;
+    min-width: 0 !important;
+    margin-inline: 0 !important;
+  }
+  /* 触屏最小可点击高度提升 */
+  button, .ant-btn {
+    min-height: 40px;
+  }
+}
+
+/* ---------- 触屏设备通用优化 ---------- */
+@media (hover: none) and (pointer: coarse) {
+  .ant-btn {
+    min-height: 40px;
+  }
+  .ant-tabs-tab {
+    padding: 8px 4px !important;
+  }
+  /* 表格行点击区域加高 */
+  .ant-table-tbody > tr > td {
+    padding: 10px 6px !important;
+  }
+}

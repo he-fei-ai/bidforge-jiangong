@@ -1,0 +1,163 @@
+# ================================================================
+# 专项方案工具箱 · .gitignore
+# 生成时间：2026-09-26
+# 原则：只跟踪源代码、配置模板、文档、测试；
+#      排除缓存、临时产物、日志、真实数据库、密钥、用户数据。
+# ================================================================
+
+# ---------------- 密钥与凭证（安全红线） ----------------
+# 真实密钥文件绝不入库；.env.example 才是可入库的配置模板
+.env
+.env.local
+.env.*.local
+*.key
+!requirements.txt
+secret_key.key
+data/secret_key.key
+
+# ---------------- Python ----------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+.tox/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pytype/
+.coverage
+.coverage.*
+htmlcov/
+.nose
+.hypothesis/
+.pytest_tmp*
+# AI Agent 临时 pytest 目录（.pt_ 前缀）
+.pt_*
+# AI Agent 临时覆盖率目录
+_no_cover*
+_no_cov*
+_diagnostics/
+_exports/
+*.bak-*
+*.bak-preswap
+*.orig_gbk
+start_all.bat.orig_gbk
+
+# ---------------- 后端运行时数据（真实数据/密钥，均不入库） ----------------
+# 数据库、上传文件、导出目录、缓存
+backend/app.db
+backend/app.db.*
+backend/scheme_assistant.db
+backend/scheme_assistant.db.*
+# 整个 data/ 目录：projects/ uploads/ _exports/ module_map.json（真实用户数据不入库）
+backend/data/
+backend/cache/
+backend/logs/
+backend/_exports/
+backend/_diagnostics/
+backend/_pt_reg/
+backend/.pytest_cgf/
+backend/*.log
+backend/*.txt
+backend/*.ps1.log
+backend/*.err
+backend/*.out
+# backend 根目录下所有一次性调试脚本 / 临时文件
+backend/check_db.py
+backend/_*
+# backend/tests/ 下调试输出（保留 test_*.py / conftest.py / TEST_REPORT.md / .bak-*）
+backend/tests/_*.txt
+backend/tests/_*.log
+backend/tests/_*.out
+backend/tests/_*.err
+backend/tests/.*_cache/
+# 其他历史调试产物（字面量 $null 文件等）
+backend/$null
+
+# ---------------- 前端 ----------------
+node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+frontend/out.log
+frontend/*.log
+frontend/*.txt
+frontend/*.out
+frontend/*.err
+frontend/_*
+frontend/_audit*
+frontend/_chk*
+frontend/_dump*
+frontend/_facts_modal_dump*
+frontend/_fe_after_*
+frontend/_fi_*
+frontend/_inline*
+frontend/_probe*
+frontend/_qoder_*
+frontend/_reg_*
+frontend/_rg*
+frontend/_round*
+frontend/_swap*
+frontend/_s_*
+frontend/_tsc*
+frontend/_vitest*
+frontend/_swap_*
+vitest_result.json
+
+# ---------------- 图表子项目 ----------------
+chart-gap-filler/.pytest_cache/
+chart-gap-filler/.ruff_cache/
+chart-gap-filler/__pycache__/
+chart-gap-filler/_demo/
+chart-gap-filler/*.log
+
+# ---------------- 根目录临时产物 ----------------
+_openapi.json
+_probe_conn.py
+_tmp_*.ps1
+_tmp_*.py
+_find_copy.log
+patch_preview_pipeline_summary.py
+patch_preview_pipeline_summary.py.bak*
+kill_port_selftest.ps1.log
+*.lock
+~$*
+~$xport*
+
+# ---------------- 日志 ----------------
+logs/
+*.log
+*.log.*
+
+# ---------------- IDE / AI 工具 / 编辑器缓存 ----------------
+.arts/
+.codeartsdoer/
+.codebuddy/
+.trae/
+.vscode/
+.workbuddy-ai/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------------- 系统 & 备份 ----------------
+.DS_Store
+Thumbs.db
+desktop.ini
+*.bak
+*.tmp
+*.temp
+
+# ---------------- 导出/截图产物 ----------------
+*.docx
+!docs/**/*.docx
+_tmp_screenshot.png
+*.png
+!docs/**/*.png
+!examples/**/*.png
+!backend/app/**/*.png

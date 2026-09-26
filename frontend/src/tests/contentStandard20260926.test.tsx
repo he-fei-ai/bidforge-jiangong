@@ -1,0 +1,368 @@
+// @vitest-environment jsdom
+/**
+ * F-CONTENT-STANDARD · 2026-09-26 缺口闭环（F1~F7）前端测试
+ *
+ * 锁死的前端缺口：
+ * - **F1/F2 选项未生效**：`generationStandard` 只进了 UI state，请求体里
+ *   从来没有 `task_standard` → 用户切「模糊内容」后生成结果与精准完全一致。
+ *   这里对**三态映射**逐条断言，并显式验证「按章节设置」不携带任何新字段
+ *   （与旧客户端逐字节一致，NFR-3）。
+ * - **F3 章节级入口**：章节卡片三选项 + 运行中禁用 + 沿用文案翻译方案默认。
+ * - **F4 报告展示**：问题码中文、告警显隐、终态汇总提示语。
+ * - **F5 方案默认**：仅精准/模糊可存为方案默认。
+ */
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { render, fireEvent, cleanup } from "@testing-library/react";
+import React from "react";
+import {
+  buildStandardRequestFields, normalizeStandard, sectionStandardOptionLabel,
+  effectiveSectionStandard, standardSummaryHint, issueLabel,
+  reportHasIssues, reportIssueCount, STANDARD_LABELS,
+} from "../utils/contentStandard";
+import ContentGenerationTab from "../components/ContentGenerationTab";
+import SectionContentCard from "../components/SectionContentCard";
+
+afterEach(cleanup);
+
+// jsdom 缺 matchMedia / ResizeObserver（antd Radio/Select/Tooltip 需要）
+if (!(window as any).matchMedia) {
+  (window as any).matchMedia = (query: string) => ({
+    matches: false, media: query, onchange: null,
+    addListener: () => {}, removeListener: () => {},
+    addEventListener: () => {}, removeEventListener: () => {},
+    dispatchEvent: () => false,
+  });
+}
+if (!(globalThis as any).ResizeObserver) {
+  (globalThis as any).ResizeObserver = class {
+    observe() {} unobserve() {} disconnect() {}
+  };
+}
+
+// ============================================================
+// F1/F2：UI 三选一 → SSE 请求体（**死选项的守门断言**）
+// ============================================================
+describe("buildStandardRequestFields（选项真正生效）", () => {
+  it("precise → 传值 + 强覆盖", () => {
+    expect(buildStandardRequestFields("precise")).toEqual({
+      task_standard: "precise", override_section_standard: true,
+    });
+  });
+
+  it("fuzzy → 传值 + 强覆盖（载荷与 precise 不同，后端行为不同）", () => {
+    expect(buildStandardRequestFields("fuzzy")).toEqual({
+      task_standard: "fuzzy", override_section_standard: true,
+    });
+    // 两模式载荷必须不同 —— 相同即「两选项无差异」
+    expect(buildStandardRequestFields("precise"))
+      .not.toEqual(buildStandardRequestFields("fuzzy"));
+  });
+
+  it("按章节设置 → 不携带任何新字段（逐章回落 + 向后兼容）", () => {
+    // 关键：不能返回 { override_section_standard: false } —— 那是新增字段，
+    // 会改变与后端的交互面；不传才是真正的「旧行为不变」
+    expect(buildStandardRequestFields("inherit")).toEqual({});
+  });
+
+  it("undefined / 脏值一律按「按章节设置」处理", () => {
+    const bad = [undefined, null, "", "strict", "PRECISE", 1, {}] as any[];
+    bad.forEach((v) => {
+      expect(buildStandardRequestFields(v)).toEqual({});
+    });
+  });
+});
+
+describe("normalizeStandard", () => {
+  it("合法值透传，非法值归一为空串（= 未设置）", () => {
+    expect(normalizeStandard("precise")).toBe("precise");
+    expect(normalizeStandard("fuzzy")).toBe("fuzzy");
+    [null, undefined, "", "strict", "Precise", 0, 1].forEach((v) => {
+      expect(normalizeStandard(v)).toBe("");
+    });
+  });
+});
+
+// ============================================================
+// F3：章节级回显口径（与后端 resolve 顺序一致）
+// ============================================================
+describe("章节级标准回显", () => {
+  it("章节有值时以章节为准", () => {
+    expect(effectiveSectionStandard("fuzzy", "precise")).toBe("fuzzy");
+    expect(effectiveSectionStandard("precise", "fuzzy")).toBe("precise");
+  });
+
+  it("章节为空时回落方案默认", () => {
+    expect(effectiveSectionStandard("", "fuzzy")).toBe("fuzzy");
+    expect(effectiveSectionStandard(undefined, "precise")).toBe("precise");
+  });
+
+  it("两者都为空时兜底精准（与后端 DEFAULT_STANDARD 一致）", () => {
+    expect(effectiveSectionStandard("", "")).toBe("precise");
+    expect(effectiveSectionStandard("strict", "junk")).toBe("precise");
+  });
+
+  it("「沿用方案」文案翻译出方案默认值", () => {
+    expect(sectionStandardOptionLabel("", "fuzzy")).toBe("沿用方案（模糊内容）");
+    expect(sectionStandardOptionLabel("", "precise")).toBe("沿用方案（精准内容）");
+    // 方案默认缺失/脏值 → 按精准兜底，不得显示空括号
+    expect(sectionStandardOptionLabel("", "")).toBe("沿用方案（精准内容）");
+    expect(sectionStandardOptionLabel("", "nope")).toBe("沿用方案（精准内容）");
+  });
+
+  it("非沿用项直接显示标准名", () => {
+    expect(sectionStandardOptionLabel("precise", "fuzzy")).toBe("精准内容");
+    expect(sectionStandardOptionLabel("fuzzy", "precise")).toBe("模糊内容");
+  });
+});
+
+// ============================================================
+// F4：校验报告展示判定
+// ============================================================
+describe("标准校验报告展示", () => {
+  const rep = (over: any = {}) => ({
+    standard: "precise", passed: true, error_count: 0, warning_count: 0,
+    issues: [], ...over,
+  });
+
+  it("无问题时不出告警", () => {
+    expect(reportHasIssues(rep())).toBe(false);
+    expect(reportIssueCount(rep())).toBe(0);
+  });
+
+  it("有 warning 即出告警（咨询性，warning 也要提示）", () => {
+    const r = rep({ warning_count: 2, passed: false });
+    expect(reportHasIssues(r)).toBe(true);
+    expect(reportIssueCount(r)).toBe(2);
+  });
+
+  it("只有 issues 明细、无计数字段时也能识别（后端形态兜底）", () => {
+    const r = { issues: [{ type: "fuzzy_expression" }] };
+    expect(reportHasIssues(r)).toBe(true);
+    expect(reportIssueCount(r)).toBe(1);
+  });
+
+  it("null / undefined / 非对象一律判为无问题（不得崩溃）", () => {
+    [null, undefined, 0, "", "x"].forEach((v) => {
+      expect(reportHasIssues(v)).toBe(false);
+      expect(reportIssueCount(v)).toBe(0);
+    });
+  });
+
+  it("问题码有中文标签，未知码原样回退（不显示空白）", () => {
+    expect(issueLabel({ type: "fuzzy_expression" })).toBe("模糊表述");
+    expect(issueLabel({ type: "fact_value_missing" })).toBe("事实未引用");
+    expect(issueLabel({ type: "value_mismatch" })).toBe("数值不一致");
+    expect(issueLabel({ type: "value_conflict" })).toBe("数值与事实冲突");
+    expect(issueLabel({ type: "model_conflict" })).toBe("型号与事实冲突");
+    expect(issueLabel({ type: "brand_new_type" })).toBe("brand_new_type");
+    expect(issueLabel(null)).toBe("");
+  });
+});
+
+describe("standardSummaryHint（终态汇总提示）", () => {
+  it("无问题时不提示（返回空串 → 不制造噪音）", () => {
+    expect(standardSummaryHint(null)).toBe("");
+    expect(standardSummaryHint({ issue_sections: 0, total_issues: 0 })).toBe("");
+    expect(standardSummaryHint({})).toBe("");
+  });
+
+  it("有问题时给出章数 + 处数 + 模式分布", () => {
+    const h = standardSummaryHint({
+      precise: 8, fuzzy: 2, issue_sections: 3, total_issues: 5,
+      errors: 2, warnings: 3,
+    });
+    expect(h).toContain("3 章");
+    expect(h).toContain("5 处");
+    expect(h).toContain("精准 8 章");
+    expect(h).toContain("模糊 2 章");
+  });
+
+  it("单一模式时不输出多余括号内容", () => {
+    const h = standardSummaryHint({ precise: 10, issue_sections: 1, total_issues: 1 });
+    expect(h).toContain("精准 10 章");
+    expect(h).not.toContain("模糊");
+  });
+});
+
+it("中文标签常量齐全（与后端 STANDARD_LABELS 对齐）", () => {
+  expect(STANDARD_LABELS.precise).toBe("精准内容");
+  expect(STANDARD_LABELS.fuzzy).toBe("模糊内容");
+});
+
+// ============================================================
+// 组件层：入口可达 + 回调透传 + 运行中禁用
+// ============================================================
+function tabProps(over: any = {}): any {
+  return {
+    generating: false, running: false, taskPaused: false, shrinking: false,
+    hasTree: true, hasSelectedSection: true, canShrink: true,
+    wordBudgetOption: "default", customWordBudget: 2000,
+    concurrencyOption: "balanced", autoConsistencyRepair: true,
+    consistencySeverity: "high", autoShrinkOver: false, crSummary: null,
+    onGenerateAll: vi.fn(), onGenerateCurrent: vi.fn(), onGenerateMissing: vi.fn(),
+    onContinueSection: vi.fn(), onShrinkSection: vi.fn(), onReset: vi.fn(),
+    canReset: false, onControl: vi.fn(), onWordBudgetChange: vi.fn(),
+    onCustomWordBudgetChange: vi.fn(), onConcurrencyChange: vi.fn(),
+    onAutoConsistencyChange: vi.fn(), onSeverityChange: vi.fn(),
+    onOpenConsistencyWorkbench: vi.fn(), onAutoShrinkChange: vi.fn(),
+    onNextStep: vi.fn(),
+    ...over,
+  };
+}
+
+function cardProps(over: any = {}): any {
+  return {
+    section: {
+      key: "s1", title: "1.1 基坑支护", level: 2, status: "generated",
+      word_count: 1200, word_budget: 1500, content: "正文内容",
+    },
+    treeEmpty: false, isEditing: false, saving: false, generating: false,
+    draftKey: null,
+    statusColor: { generated: "green" },
+    statusText: { generated: "已生成" },
+    onEditStart: vi.fn(), onSave: vi.fn(), onCancel: vi.fn(),
+    onDirtyChange: vi.fn(), onRegenerate: vi.fn(),
+    ...over,
+  };
+}
+
+/** 打开卡片里的 antd Select（antd5 下拉挂在 body，需先触发 mouseDown） */
+async function openSelect(container: HTMLElement) {
+  const trigger = container.querySelector(".ant-select-selector") as HTMLElement;
+  fireEvent.mouseDown(trigger);
+  // rc-virtual-list 渲染需要一拍
+  await new Promise((r) => setTimeout(r, 0));
+}
+
+/** 在已展开的下拉里按可见文本找选项并点击 */
+function screenOption(label: string): HTMLElement {
+  const nodes = Array.from(document.querySelectorAll(
+    ".ant-select-item-option-content"));
+  const hit = nodes.find((n) => n.textContent?.trim() === label);
+  if (!hit) throw new Error(`下拉里找不到选项：${label}`);
+  return hit.closest(".ant-select-item-option") as HTMLElement;
+}
+
+describe("ContentGenerationTab 生成标准入口", () => {
+  it("三选项点击分别上抛正确值", () => {
+    const onChange = vi.fn();
+    const { getByText } = render(
+      <ContentGenerationTab {...tabProps({
+        generationStandard: "inherit", onGenerationStandardChange: onChange,
+      })} />
+    );
+    fireEvent.click(getByText("精准内容"));
+    expect(onChange).toHaveBeenCalledWith("precise");
+    fireEvent.click(getByText("模糊内容"));
+    expect(onChange).toHaveBeenCalledWith("fuzzy");
+  });
+
+  it("切回「按章节设置」上抛 inherit（从非初始态切入）", () => {
+    // 注意：antd Radio 对**已选中**项不再触发 onChange，
+    // 故必须从一个非 inherit 的选中态出发，才能验证切回路径。
+    const onChange = vi.fn();
+    const { getByText } = render(
+      <ContentGenerationTab {...tabProps({
+        generationStandard: "precise", onGenerationStandardChange: onChange,
+      })} />
+    );
+    fireEvent.click(getByText("按章节设置"));
+    expect(onChange).toHaveBeenCalledWith("inherit");
+  });
+
+  it("F5：选择精准/模糊时可存为方案默认，按钮触发回调", () => {
+    const onSave = vi.fn();
+    const { getByText } = render(
+      <ContentGenerationTab {...tabProps({
+        generationStandard: "precise", onGenerationStandardChange: vi.fn(),
+        onSaveSchemeDefault: onSave,
+      })} />
+    );
+    const btn = getByText("存为方案默认").closest("button")!;
+    expect(btn.disabled).toBe(false);
+    fireEvent.click(btn);
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
+
+  it("F5：「按章节设置」时存默认按钮禁用（该值不是方案级取值）", () => {
+    const { getByText } = render(
+      <ContentGenerationTab {...tabProps({
+        generationStandard: "inherit", onGenerationStandardChange: vi.fn(),
+        onSaveSchemeDefault: vi.fn(),
+      })} />
+    );
+    expect(getByText("存为方案默认").closest("button")!.disabled).toBe(true);
+  });
+
+  it("生成运行中：存默认按钮禁用，且切换标准被 Radio 自身禁用拦截", () => {
+    const onChange = vi.fn();
+    const { getByText } = render(
+      <ContentGenerationTab {...tabProps({
+        generating: true, generationStandard: "precise",
+        onGenerationStandardChange: onChange, onSaveSchemeDefault: vi.fn(),
+      })} />
+    );
+    expect(getByText("存为方案默认").closest("button")!.disabled).toBe(true);
+    fireEvent.click(getByText("模糊内容"));
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("按章节设置时提示语带出方案默认值", () => {
+    const { container } = render(
+      <ContentGenerationTab {...tabProps({
+        generationStandard: "inherit", schemeDefault: "fuzzy",
+        onGenerationStandardChange: vi.fn(),
+      })} />
+    );
+    expect(container.textContent).toContain("模糊内容");
+  });
+});
+
+// ============================================================
+// F3：章节级入口（SectionContentCard）
+// ============================================================
+describe("SectionContentCard 章节级生成标准", () => {
+  it("渲染三选项且沿用项文案翻译出方案默认", async () => {
+    const { container } = render(
+      <SectionContentCard {...cardProps({
+        sectionStandard: "", schemeStandard: "fuzzy",
+        onSectionStandardChange: vi.fn(),
+      })} />
+    );
+    // antd Select 未展开时把 label 渲染进 DOM，可直接断言
+    expect(container.textContent).toContain("沿用方案（模糊内容）");
+    await openSelect(container);
+    expect(document.body.textContent).toContain("精准内容");
+    expect(document.body.textContent).toContain("模糊内容");
+  });
+
+  it("选择模糊 → 上抛 fuzzy", async () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <SectionContentCard {...cardProps({
+        sectionStandard: "", schemeStandard: "precise",
+        onSectionStandardChange: onChange,
+      })} />
+    );
+    await openSelect(container);
+    fireEvent.click(screenOption("模糊内容"));
+    expect(onChange).toHaveBeenCalledWith("fuzzy");
+  });
+
+  it("运行中（generating）禁用标准下拉", () => {
+    const { container } = render(
+      <SectionContentCard {...cardProps({
+        generating: true, sectionStandard: "",
+        onSectionStandardChange: vi.fn(),
+      })} />
+    );
+    const sel = container.querySelector(".ant-select");
+    expect(sel?.className).toContain("ant-select-disabled");
+  });
+
+  it("未传 onSectionStandardChange 时不渲染该控件（保持旧版纯展示形态）", () => {
+    const { container } = render(<SectionContentCard {...cardProps()} />);
+    expect(container.textContent).not.toContain("沿用方案");
+  });
+});
+
