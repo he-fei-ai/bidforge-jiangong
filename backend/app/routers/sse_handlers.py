@@ -5188,11 +5188,10 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     logger.warning("保存正文生成 checkpoint 失败（task=%s）", task_id, exc_info=True)
                 await _update_progress_safe(stop_progress, "用户已停止", event="stopped")
                 await finish_task(task_id, "stopped", "用户已停止")
-                # ✅ 统一收口：stopped 与 completed 同口径携带 failed_sections
-                yield "data: " + json.dumps(_stopped_payload(
-                    task_id, "用户已停止", progress=stop_progress,
-                    failed_sections=list(_failed_reasons.values())[:50],
-                    standard_summary=_std_sum), ensure_ascii=False) + "\n\n"
+                # ✅ 2026-09-24：stopped 与 completed 同口径携带
+                #    failed_sections —— 此前只有 completed 下发，停止后前端
+                #    日志区整片空白，用户看不到停止前已有哪几章失败。
+                yield f"data: {json.dumps({'event':'stopped','task_id':task_id,'progress':stop_progress,'message':'用户已停止','failed_sections':list(_failed_reasons.values())[:50],'standard_summary':_std_sum}, ensure_ascii=False)}\n\n"
                 return
 
             # ✅ 自动流程：全文一致性 Agent 修复阶段
@@ -5474,10 +5473,7 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 logger.warning("取消路径保存正文 checkpoint 失败（task=%s）",
                                task_id, exc_info=True)
             await finish_task(task_id, "stopped", "任务已取消")
-            yield "data: " + json.dumps(_stopped_payload(
-                task_id, "任务已取消",
-                failed_sections=list(_failed_reasons.values())[:50]),
-                ensure_ascii=False) + "\n\n"
+            yield f"data: {json.dumps({'event':'stopped','task_id':task_id,'message':'任务已取消','failed_sections':list(_failed_reasons.values())[:50]}, ensure_ascii=False)}\n\n"
         except Exception as e:
             logger.exception("正文生成失败")
             # ✅ 成果清单落库：整批失败时已落库的章节仍需可追溯（哪几章成功/失败）
