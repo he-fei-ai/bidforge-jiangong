@@ -102,7 +102,7 @@ def _collect_descendant_titles(node: dict) -> list[str]:
     L5 细项标题丢失，导致裁剪后内容线索不完整。
     """
     titles = []
-    title = str(node.get("title", "")).strip()
+    title = str(node.get("title") or "").strip()
     if title:
         titles.append(title)
     children = node.get("children") or []

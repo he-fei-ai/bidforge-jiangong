@@ -17,7 +17,10 @@
   （export.py 的 figure_counters / table_counters）管理，不与本模块混用。
 """
 import json
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # 编号字符表（唯一事实源；heading_templates / heading_v2 由此再导出）
@@ -42,17 +45,39 @@ ALPHABET: list[str] = [
 # 在前端/导出时套用。但 AI 经常无视指令在标题里自带编号（"第一章 工程概况"、
 # "2.1 相关法律法规"），若不清洗则显示层再套一层 → "第一章 第一章 工程概况"。
 # ------------------------------------------------------------
+# 编号分隔符字符类（顿号 / 半角点 / 全角点 / 逗号 / 冒号 / 空格 / 横线）
+_SEP_CLASS = r"[、.．，,：: \-—]"
+# 正文起始边界：全角标点与 CJK 汉字 —— 编号后直接跟中文或全角括号（无空格）时，
+# 也应判定为「编号前缀已结束」（"2.4.1钢筋工程"）。
+_CJK_BOUNDARY = r"[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]"
+
 _STRIP_NUMBER_RE = re.compile(
     r"^\s*(?:"
-    r"第[一二三四五六七八九十百千零0-9]+[章节]"      # 第X章 / 第X节 / 第1章
-    r"|[（(][一二三四五六七八九十0-9]+[)）]"          # （三） / (3)
-    r"|[0-9]+[)）]"                                    # 1） / 2）
-    r"|[0-9]+(?:\.[0-9]+){0,7}[、.．，,：: \-—]+"      # 1 / 1.2 / 1.2.3 + 分隔符
-    r"|[一二三四五六七八九十百千零]+[、.．，,：: \-—]+"  # 一、 / 十二、
-    r")[、.．，,：: \-—]*"
+    r"第\s*[一二三四五六七八九十百千零0-9]+\s*[章节]"   # 第X章 / 第X节 / 第 1 章
+    r"|[（(][一二三四五六七八九十0-9]+[)）]"            # （三） / (3)
+    r"|[0-9]+[)）]"                                     # 1） / 2）
+    # ✅ BUG 修复（2026-09-27 · 标题损坏）：点分编号（1.2 / 1.2.3 …）此前写作
+    #    `[0-9]+(?:\.[0-9]+){0,7}[分隔符]+` —— 路径后**没有**分隔符时，
+    #    正则引擎会回退成「更短的前缀 + 把点当分隔符」，把标题剥成残句：
+    #        "1.2.3（1）细部构造" → "3（1）细部构造"
+    #        "2.4.1钢筋工程"      → "1钢筋工程"（残留数字 + 双重编号）
+    #    现改为「前瞻捕获最长路径 + 反向引用整条吃满」模拟原子组（Python/JS
+    #    均不支持原子组，但前瞻是原子的、反向引用不可回退），路径后要求
+    #    紧跟分隔符，或紧跟 CJK/全角字符（中文标题常常不留空格）。
+    r"|(?=([0-9]+(?:\.[0-9]+)*))\1(?:" + _SEP_CLASS + r"+|(?=" + _CJK_BOUNDARY + r"))"
+    # 单段编号（"1 施工准备"）：必须带分隔符，且分隔符后不能仍是数字 ——
+    # 否则 "1.5m 深" 会被剥成 "5m 深"（把数值/单位剥坏）。
+    r"|[0-9]+" + _SEP_CLASS + r"+(?![0-9])"
+    r"|[一二三四五六七八九十百千零]+" + _SEP_CLASS + r"+"   # 一、 / 十二、
+    r")" + _SEP_CLASS + r"*"
 )
 # 纯数字路径型标题（整个标题就是一个编号，如 "1" / "1.1" / "1.2.3"）
 _PURE_NUMBER_TITLE_RE = re.compile(r"[0-9]+(?:[.．][0-9]+)*")
+
+# ✅ 增强（2026-09-27 · 年份不是编号）：4 位数字后紧跟「年」是年份
+#    （"2023 年度安全生产计划" / "2024年施工计划"），旧实现对带空格的写法
+#    会剥成「年度安全生产计划」（标题丢年份）。命中即原样保留。
+_YEAR_PREFIX_RE = re.compile(r"^\s*[0-9]{4}\s*年")
 
 # 合法存储编号：点分数字路径（1 / 1.1 / 1.1.1）
 _DOT_PATH_RE = re.compile(r"\d+(\.\d+)*")
@@ -63,8 +88,11 @@ def strip_outline_numbering(title: str) -> str:
 
     安全性设计：
     - "第X章/节"、"（三）"、"1）" 为无歧义结构，直接剥离；
-    - 纯数字/中文数字编号必须后跟分隔符（顿号/点/空格等）才剥离，
+    - 点分编号一次性吃满整条路径（"1.2.3（1）细部构造" → "（1）细部构造"，
+      绝不回退成 "3（1）细部构造"）；
+    - 单段数字/中文数字编号必须后跟分隔符才剥离，
       因此 "2023年规范"、"3D打印"、"十二层平面" 等正常标题不受影响；
+    - 4 位数字 + "年" 视为年份（"2023 年度安全生产计划"）原样保留；
     - 若剥离后为空（标题本身就是一个编号），返回原标题；
     - 整体即纯数字路径的标题（"1.1" / "1.2.3"）直接原样返回——
       否则 "." 同时属于分隔符字符类，会只剥半截（"1.1" → "1"），
@@ -72,10 +100,14 @@ def strip_outline_numbering(title: str) -> str:
     """
     if not title:
         return title
-    if _PURE_NUMBER_TITLE_RE.fullmatch(title.strip()):
-        return title.strip()
+    trimmed = title.strip()
+    if _PURE_NUMBER_TITLE_RE.fullmatch(trimmed):
+        return trimmed
+    if _YEAR_PREFIX_RE.match(title):
+        # 年份不是编号：原样保留（仅去首尾空白）
+        return trimmed
     stripped = _STRIP_NUMBER_RE.sub("", title, count=1).strip()
-    return stripped or title.strip()
+    return stripped or trimmed
 
 
 def renumber_outline_nodes(nodes: list, *, strip_titles: bool = True,
@@ -267,10 +299,12 @@ def renumber_section_body_subheadings(
         # 不做改写（导出端会按展示编号重算，此处不猜测）。
         return content, []
 
-    # 函数级 import：export 路由体量大且被众多模块引用，模块级引入会形成
-    # services → routers 的反向依赖与循环 import 风险；此处运行时引入安全
-    # （export 模块级只 import services 层，不 import 本模块）。
-    from app.routers.export import (
+    # ✅ 2026-09-27（T-2 已修）：原先在此运行时 `from app.routers.export import`
+    # （services → routers 反向依赖）。四个纯函数已整体下沉到
+    # services/content_blocks.py，routers/export.py 反过来从那里导入，
+    # 依赖方向恢复为 routers → services。此处仍用函数级 import 以避免
+    # 任何残余的导入期环（content_blocks 模块级已引用本模块的 ALPHABET）。
+    from app.services.content_blocks import (
         _compute_subheading,
         _parse_content_blocks,
         _strip_duplicate_leading_title,
@@ -353,3 +387,408 @@ def renumber_section_body_subheadings(
     for idx, new_line in rewrites.items():
         lines[idx] = new_line
     return "\n".join(lines), changes
+
+
+# ============================================================
+# 正文落库前的编号规范化接线（唯一实现）
+# ------------------------------------------------------------
+# 历史：sections.update_section 与 sse_handlers._persist_section 各自内联了
+# 一份「读 outline_json/level/title → 查子章节数 → 调 renumber」的样板代码。
+# 两份样板漂移过一次真实事故：`content_subheading_renumber` 开关在两处都
+# 没有被读取，配置项形同虚设（文档承诺「设为 False 回退旧行为」实际无效）。
+# 现收口到本函数，两条落库路径只调用它，开关与口径由单一实现保证。
+# ============================================================
+async def load_scheme_section_index(db, scheme_id: str) -> dict:
+    """一次性预取方案内全部章节的编号元数据，供批量校验/修复复用。
+
+    ✅ 性能修复（2026-09-27 · 消除导出路径的 N+1）：
+    旧实现里 `validate_scheme_numbering_consistency` 虽然把 content 批量读出来了，
+    但每章仍要调用 `normalize_section_content_subheadings`，而后者**逐章**再查两次
+    （读 outline_json/level/title + COUNT 子章节）。实测 200 章方案 =
+    **401 次 db.execute / 480ms**，而该函数在 `export.py::_guard_numbering_consistency`
+    的 strict 与非 strict **两个分支都会跑**（即每次导出都付一次）。
+
+    本函数把这两类信息压成 2 条查询：
+      1) 一次 SELECT 取回全方案 id/outline_json/level/title；
+      2) 一次 GROUP BY parent_id 统计子章节数。
+    返回结构（供 `_normalize_from_meta` 消费，调用方不必理解）：
+        {"meta": {section_id: {"number": str, "level": int, "title": str}},
+         "has_children": {section_id: bool}}
+
+    契约：查询失败一律返回空索引（`{"meta": {}, "has_children": {}}`），
+    调用方据此回退到逐章查询的原路径，**行为与旧版完全一致**（fail-soft）。
+    """
+    empty: dict = {"meta": {}, "has_children": {}}
+    meta: dict = {}
+    has_children: dict = {}
+    try:
+        cur = await db.execute(
+            "SELECT id, outline_json, level, title FROM sections WHERE scheme_id=?",
+            (scheme_id,))
+        for r in await cur.fetchall():
+            sid = r["id"]
+            raw = r["outline_json"] or "{}"
+            try:
+                obj = json.loads(raw) if isinstance(raw, str) else raw
+            except (json.JSONDecodeError, TypeError):
+                obj = {}
+            if not isinstance(obj, dict):
+                obj = {}
+            number = str(obj.get("id") or "").strip()
+            if not number:
+                # 存储编号非法（历史脏数据 / UUID 主键）→ 与旧实现一致：跳过规范化
+                continue
+            try:
+                level = int(r["level"] or 1)
+            except (TypeError, ValueError):
+                level = 1
+            meta[sid] = {"number": number, "level": level,
+                         "title": str(r["title"] or "")}
+        cur = await db.execute(
+            "SELECT parent_id, COUNT(*) AS n FROM sections "
+            "WHERE scheme_id=? AND COALESCE(parent_id,'')!='' GROUP BY parent_id",
+            (scheme_id,))
+        for r in await cur.fetchall():
+            has_children[r["parent_id"]] = bool((r["n"] or 0) > 0)
+    except Exception as e:  # noqa: BLE001 — 预取失败必须回退逐章查询，不得阻断
+        logger.warning("预取方案编号索引失败（回退逐章查询）: %s", e)
+        return empty
+    return {"meta": meta, "has_children": has_children}
+
+
+def _normalize_from_meta(content: str, info: dict, has_db_children: bool
+                         ) -> tuple[str, bool]:
+    """用已预取的元数据执行规范化（纯计算，无 IO）。
+
+    与 `normalize_section_content_subheadings` 的查库之后那半段**逐行等价**，
+    是「唯一编号算法」的第二入口：算法本体只此一份，批量/单章共用，
+    避免出现第二套实现再次漂移。
+    """
+    new_content, changes = renumber_section_body_subheadings(
+        content, info["number"], info["level"], info["title"],
+        has_db_children=has_db_children)
+    return new_content, bool(changes)
+
+
+def _renumber_disabled() -> bool:
+    """`content_subheading_renumber` 开关（读取失败时按默认开启，与旧版一致）。"""
+    try:
+        from app.config import settings
+        return not settings.content_subheading_renumber
+    except Exception:  # pragma: no cover - 配置不可用时按默认开启
+        return False
+
+
+async def normalize_section_content_subheadings(
+        db, scheme_id: str, section_id: str, content: str,
+        *, index: dict | None = None) -> tuple[str, bool]:
+    """正文落库前规范化 Markdown 子标题编号，返回 (规范化后正文, 是否发生改写)。
+
+    与导出 write_section 同算法（renumber_section_body_subheadings），
+    使「前端预览 = 落库正文 = 导出成稿」三处同源。
+
+    契约（务必保持）：
+    - 开关 `content_subheading_renumber=False` 时**原样返回**（回退旧行为：
+      正文保留 AI 原始编号，仅导出端重算）；
+    - 章节不存在 / 存储编号非法（历史脏数据、UUID 主键）时原样返回；
+    - 任何异常一律降级为「原样返回 + WARNING」，绝不阻断正文落库
+      （正文丢失的代价远高于编号不完美）。
+
+    调用点必须在**结构重排之后**调用（update_section 的 parent_id 变更、
+    create/delete/reorder 的重排都会改写 outline_json.id）：否则会按旧编号
+    规范化，随后编号又被重排，正文子标题与新编号永久错位。
+
+    参数 `index`：批量调用方（`load_scheme_section_index`）预取的元数据。
+    传入时**跳过全部查库**（消除 N+1）；缺省/查不到该章时回退到原逐章查询路径，
+    因此本函数对既有单章调用方**完全向后兼容**（签名仅新增 keyword-only 可选参数）。
+    """
+    if not content:
+        return content, False
+    if _renumber_disabled():
+        return content, False
+
+    try:
+        if index is not None:
+            info = (index.get("meta") or {}).get(section_id)
+            if info is not None:
+                return _normalize_from_meta(
+                    content, info,
+                    bool((index.get("has_children") or {}).get(section_id, False)))
+
+        cur = await db.execute(
+            "SELECT outline_json, level, title FROM sections WHERE id=? AND scheme_id=?",
+            (section_id, scheme_id))
+        rec = await cur.fetchone()
+        if rec is None:
+            return content, False
+        raw = rec["outline_json"] or "{}"
+        try:
+            obj = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            obj = {}
+        if not isinstance(obj, dict):
+            obj = {}
+        section_number = str(obj.get("id") or "").strip()
+        if not section_number:
+            return content, False
+        try:
+            section_level = int(rec["level"] or 1)
+        except (TypeError, ValueError):
+            section_level = 1
+        cur = await db.execute(
+            "SELECT COUNT(*) AS n FROM sections WHERE parent_id=? AND scheme_id=?",
+            (section_id, scheme_id))
+        child_row = await cur.fetchone()
+        has_db_children = bool(child_row and (child_row["n"] or 0) > 0)
+
+        return _normalize_from_meta(
+            content,
+            {"number": section_number, "level": section_level,
+             "title": str(rec["title"] or "")},
+            has_db_children)
+    except Exception as e:  # noqa: BLE001 — 编号规范化绝不能阻断正文落库
+        import logging
+        logging.getLogger("numbering").warning(
+            "章节 %s 正文子标题编号规范化失败（保留原文）: %s", section_id[:8], e)
+        return content, False
+
+
+# ============================================================
+# 编号一致性显式跨校验器（2026-09-26）
+# ============================================================
+async def validate_section_content_numbering(
+        db, scheme_id: str, section_id: str, content: str,
+        *, index: dict | None = None) -> dict:
+    """单章落库正文子标题编号 vs 当前 outline 编号 一致性校验（显式跨模块校验器）。
+
+    复用 normalize_section_content_subheadings 同一规范化逻辑：若按当前 outline 重算后
+    子标题文本与落库内容不同，即落库正文编号与目录/导出不一致（典型 D4 类漂移）。
+    content_subheading_renumber=False 时规范化被跳过 → 返回 skipped=True（无法判定，
+    视为通过，与落库行为一致）。
+
+    参数 `index`：批量调用方传入的预取索引（见 `load_scheme_section_index`），
+    用于消除逐章查库的 N+1；缺省时行为与旧版完全一致。
+
+    Returns:
+        {section_id, consistent, skipped, changed, diffs, error?}
+        diffs 为差异行列表（tag/old/new），便于前端/日志定位。
+    """
+    # ✅ BUG 修复（2026-09-27 · 契约不成立）：docstring 一直承诺
+    #    「content_subheading_renumber=False 时返回 skipped=True」，但旧实现
+    #    只靠 normalize_section_content_subheadings 返回 changed=False 间接等价，
+    #    `skipped` 字段恒为 False —— 消费方（validate_scheme_numbering_consistency /
+    #    路由返回体 / 前端）永远看不到「本次校验被开关跳过」，会把
+    #    「无法判定」误读成「校验通过」。现按承诺显式回传。
+    disabled = _renumber_disabled()
+    if not content or not content.strip():
+        return {"section_id": section_id, "consistent": True,
+                "skipped": disabled, "changed": False, "diffs": []}
+    try:
+        new_content, changed = await normalize_section_content_subheadings(
+            db, scheme_id, section_id, content, index=index)
+    except Exception as e:  # noqa: BLE001 — 校验本身不应阻断
+        return {"section_id": section_id, "consistent": False, "skipped": disabled,
+                "changed": True, "diffs": [], "error": str(e)}
+    if not changed:
+        return {"section_id": section_id, "consistent": True,
+                "skipped": disabled, "changed": False, "diffs": []}
+    return {"section_id": section_id, "consistent": False, "changed": True,
+            "skipped": disabled, "diffs": _diff_content_lines(content, new_content)}
+
+
+async def validate_scheme_numbering_consistency(db, scheme_id: str) -> dict:
+    """批量校验方案内所有含正文章节的编号一致性，返回汇总报告。
+
+    ✅ 性能（2026-09-27）：预取一次编号索引并透传给逐章校验，
+    把「1 + 2N 次查询」压到「3 次固定查询」。旧实现 200 章 = 401 次 execute / 480ms，
+    而本函数在**每次导出**都会跑（`export.py::_guard_numbering_consistency`）。
+    预取失败时索引为空，调用方自动回退逐章查询，行为与旧版一致。
+    """
+    try:
+        cur = await db.execute(
+            "SELECT id, content FROM sections WHERE scheme_id=? "
+            "AND COALESCE(content,'')!=''",
+            (scheme_id,))
+        rows = await cur.fetchall()
+    except Exception as e:  # noqa: BLE001
+        return {"scheme_id": scheme_id, "checked": 0, "mismatched": 0,
+                "consistent": True, "sections": [], "error": str(e)}
+    index = await load_scheme_section_index(db, scheme_id)
+    sections = []
+    mismatched = 0
+    for r in rows:
+        rep = await validate_section_content_numbering(
+            db, scheme_id, r["id"], r["content"] or "", index=index)
+        sections.append(rep)
+        if not rep.get("consistent"):
+            mismatched += 1
+    return {"scheme_id": scheme_id, "checked": len(sections),
+            "mismatched": mismatched, "consistent": mismatched == 0,
+            "sections": sections}
+
+
+async def repair_scheme_numbering_consistency(db, scheme_id: str) -> dict:
+    """将落库正文子标题编号按当前 outline 重新规范化（修复 D4 类漂移）并落库。
+
+    仅对「不一致且未跳过」的章节写回规范化结果；单章失败仅告警、不阻断其余章节。
+    ✅ 编号版本管理（2026-09-26）：修复前对全部漂移章节建 numbering_repair 快照
+    （scheme_snapshots，复用 repair_record.create_snapshot），返回值带 snapshot_id，
+    支持经 /numbering-consistency/rollback/{snapshot_id} 一键回滚；无漂移不建快照。
+    返回 {fixed, total, report, snapshot_id}。
+    """
+    from app.services.content_utils import text_word_count
+    from app.services.repair_record import create_snapshot
+    report = await validate_scheme_numbering_consistency(db, scheme_id)
+    drifted = [s for s in report.get("sections", [])
+               if not s.get("consistent") and not s.get("skipped")]
+    if not drifted:
+        return {"fixed": 0, "total": report["checked"], "report": report,
+                "snapshot_id": None}
+    # ✅ 性能（2026-09-27）：快照与修复两段各自逐章 SELECT content（各 N 次），
+    #    修复段还逐章调 normalize（再 2N 次）。实测 200 章漂移方案合计 >1000 次
+    #    execute。这里各用**一次批量查询**取回 content 字典，两段共用。
+    content_by_id: dict = {}
+    if drifted:
+        try:
+            ids = [s["section_id"] for s in drifted if s.get("section_id")]
+            if ids:
+                qs = ",".join("?" * len(ids))
+                cur = await db.execute(
+                    f"SELECT id, content FROM sections WHERE scheme_id=? "
+                    f"AND id IN ({qs})", (scheme_id, *ids))
+                content_by_id = {r["id"]: (r["content"] or "") for r in await cur.fetchall()}
+        except Exception as e:  # noqa: BLE001 — 取不到就回退逐章查询，不阻断修复
+            logger.warning("批量读取漂移章节正文失败（回退逐章读取）: %s", e)
+            content_by_id = {}
+    # ✅ 版本管理：写库前快照（漂移章节写库前即可由报告确定，无需边修边记；
+    #    create_snapshot 自带 commit，位于所有正文写操作之前）
+    snapshot_id = None
+    try:
+        snap_rows = []
+        for sec in drifted:
+            sid = sec["section_id"]
+            if sid in content_by_id:
+                content_before = content_by_id[sid]
+            else:
+                cur = await db.execute(
+                    "SELECT content FROM sections WHERE id=? AND scheme_id=?",
+                    (sid, scheme_id))
+                row = await cur.fetchone()
+                if not row:
+                    continue
+                content_before = row["content"] or ""
+            snap_rows.append({"section_id": sid, "content_before": content_before})
+        if snap_rows:
+            snapshot_id = await create_snapshot(
+                db, scheme_id, snap_rows, snapshot_type="numbering_repair")
+    except Exception as e:  # noqa: BLE001 — 快照失败不阻断修复（回退为无版本修复）
+        logger.warning("编号修复前快照失败（继续修复，本次无版本记录）: %s", e)
+        snapshot_id = None
+    # 复用 validate 已建好的索引，避免修复段再逐章查元数据
+    index = await load_scheme_section_index(db, scheme_id)
+    fixed = 0
+    for sec in report.get("sections", []):
+        if sec.get("consistent") or sec.get("skipped"):
+            continue
+        sec_id = sec["section_id"]
+        try:
+            if sec_id in content_by_id:
+                content = content_by_id[sec_id]
+            else:
+                cur = await db.execute(
+                    "SELECT content FROM sections WHERE id=? AND scheme_id=?",
+                    (sec_id, scheme_id))
+                row = await cur.fetchone()
+                if not row:
+                    continue
+                content = row["content"] or ""
+            new_content, changed = await normalize_section_content_subheadings(
+                db, scheme_id, sec_id, content, index=index)
+            if changed:
+                await db.execute(
+                    "UPDATE sections SET content=?, word_count=? WHERE id=? AND scheme_id=?",
+                    (new_content, text_word_count(new_content), sec_id, scheme_id))
+                fixed += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning("章节 %s 编号修复失败（保留原正文）: %s", sec_id[:8], e)
+    await db.commit()
+    return {"fixed": fixed, "total": report["checked"], "report": report,
+            "snapshot_id": snapshot_id}
+
+
+# ============================================================
+# 编号版本管理 / 回滚（2026-09-26 ·「八」遗留建议收口）
+# ============================================================
+_NUMBERING_SNAPSHOT_TYPES = ("numbering_repair", "numbering_rollback")
+
+
+async def rollback_numbering_version(db, scheme_id: str, snapshot_id: str) -> dict:
+    """编号版本一键回滚：把指定 numbering_* 快照涉及章节的正文恢复为快照前内容。
+
+    复用 repair_record.rollback_snapshot 引擎（回滚前自动建 undo 快照保证可撤销、
+    word_count/word_status 按全项目唯一口径重算）。安全约束：
+      - 快照必须存在；
+      - 必须属于当前方案；
+      - type 必须为 numbering_*（一致性修复快照走 /consistency/rollback，互不串用）。
+    失败抛 ValueError（路由层转 404/400）。
+    """
+    from app.services.repair_record import get_snapshot, rollback_snapshot
+    snap = await get_snapshot(db, snapshot_id)
+    if not snap:
+        raise ValueError("快照不存在")
+    if snap.get("scheme_id") != scheme_id:
+        raise ValueError("快照不属于当前方案")
+    if snap.get("type") not in _NUMBERING_SNAPSHOT_TYPES:
+        raise ValueError(
+            f"快照类型 {snap.get('type')!r} 不属于编号版本管理，请使用对应模块的回滚端点")
+    res = await rollback_snapshot(db, snapshot_id, undo_type="numbering_rollback")
+    return {**res, "scheme_id": scheme_id, "snapshot_type": snap.get("type")}
+
+
+async def list_numbering_versions(db, scheme_id: str, limit: int = 20) -> dict:
+    """编号版本历史：列出 numbering_repair / numbering_rollback 快照（新→旧）。
+
+    返回 {scheme_id, versions:[{snapshot_id, type, created_at, section_count,
+    section_ids}]}；limit 上限 50（与 repair_record.list_repairs 同口径）。
+    """
+    limit = max(1, min(int(limit or 20), 50))
+    try:
+        cur = await db.execute(
+            "SELECT id, type, sections, created_at FROM scheme_snapshots "
+            "WHERE scheme_id=? AND type IN (?,?) "
+            "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (scheme_id, *_NUMBERING_SNAPSHOT_TYPES, limit))
+        rows = await cur.fetchall()
+    except Exception as e:  # noqa: BLE001
+        return {"scheme_id": scheme_id, "versions": [], "error": str(e)}
+    versions = []
+    for r in rows:
+        try:
+            secs = json.loads(r["sections"] or "[]")
+        except Exception:  # noqa: BLE001 — 坏行跳过，不影响其余版本展示
+            secs = []
+        versions.append({
+            "snapshot_id": r["id"],
+            "type": r["type"],
+            "created_at": r["created_at"],
+            "section_count": len(secs),
+            "section_ids": [s.get("section_id") for s in secs
+                            if isinstance(s, dict) and s.get("section_id")],
+        })
+    return {"scheme_id": scheme_id, "versions": versions}
+
+
+def _diff_content_lines(old: str, new: str) -> list[dict]:
+    """精简 diff：只返回有差异的行（按 difflib  opcode 汇总）。"""
+    import difflib
+    old_lines = old.splitlines()
+    new_lines = new.splitlines()
+    out = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            None, old_lines, new_lines).get_opcodes():
+        if tag == "equal":
+            continue
+        out.append({"tag": tag,
+                    "old": old_lines[i1:i2],
+                    "new": new_lines[j1:j2]})
+    return out

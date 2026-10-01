@@ -194,12 +194,23 @@ class TestPauseGateBeforeSemaphore:
         i_gate = body.index("wait_resume")
         i_work = body.index("gen_one(")
         assert i_gate < i_work, "暂停闸门必须排在消费 gen_one 之前"
-        # 结构性断言（词法 "Semaphore" 会被 docstring 说明文字误伤）：
-        # 函数体内不得出现任何 async with（信号量/锁），也不得引用旧闸门符号
-        assert "async with" not in body, (
-            "guarded_gen 不得持有任何异步锁/信号量 —— 并发闸门已由窗口调度器接管")
-        assert "_run_semaphore" not in body, (
-            "guarded_gen 不得引用已移除的每任务信号量 _run_semaphore")
+        # ✅ 2026-09-26（陈旧断言更新）：本用例与
+        #    test_content_order_concurrency 的那条同源 —— 早期实现把并发闸门
+        #    移出 guarded_gen、交给「显式 _WINDOW 窗口调度器」，该方案后来回退为
+        #    「每任务独立信号量 + FIFO 放行」。现行口径是：
+        #      · 暂停闸门 wait_resume 仍在信号量**之前**（暂停不占并发额度）；
+        #      · guarded_gen 内**确实**持有 `async with _run_semaphore`，
+        #        这是「严格 DFS 启动序」的载体（信号量 FIFO 放行）。
+        #    因此旧的"不得出现 async with / 不得引用 _run_semaphore"两条断言
+        #    与现行实现直接冲突，改为锁定现行口径的关键不变量。
+        assert "async with _run_semaphore" in body, (
+            "guarded_gen 应持有每任务信号量（FIFO 放行保证 DFS 启动序）")
+        # 闸门顺序不变量：wait_resume 必须在 async with 之前
+        i_sem = body.index("async with _run_semaphore")
+        assert i_gate < i_sem, (
+            "暂停闸门必须排在信号量之前（否则暂停期间白占并发许可，"
+            "同进程其它方案被饿死）")
+        # 仍禁止使用全局自适应信号量（会脱离用户档位）
         assert "concurrency_controller.semaphore" not in body, (
             "guarded_gen 不得再使用全局自适应信号量（会脱离用户档位）")
 

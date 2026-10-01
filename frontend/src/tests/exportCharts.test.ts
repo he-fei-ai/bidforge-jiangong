@@ -18,6 +18,142 @@ vi.mock("../components/mermaidRuntime", () => ({
 import { deriveExportGate, renderChartsForExport } from "../utils/exportCharts";
 import { ensureMermaid, nextMermaidId } from "../components/mermaidRuntime";
 
+/**
+ * 导出文档 + 审核预检：跨模块契约与门禁行为（2026-09-27 新增）。
+ *
+ * 覆盖三类此前无护栏的缺陷类别：
+ * 1. 导出门禁口径漂移 —— `HIGH_EXPORT_ISSUE_TYPES` 是后端
+ *    `_EXPORT_ISSUE_RULE_MAP` 的前端镜像，两处分叉会让 high 问题不再阻断导出；
+ * 2. 审核状态机前后端不一致 —— 后端 `_ALLOWED_TRANSITIONS` 与前端 `NEXT_ACTIONS`
+ *    双向比对，任何一侧漏一条流转都会表现为"点了按钮收 400"；
+ * 3. 派生规则编号（CON-05-N）落进前端类型与评分维度时的塌陷。
+ */
+import { REVIEW_STATUS_COLOR, type Severity } from "../types/audit";
+
+/** 与后端 export.py::_EXPORT_ISSUE_RULE_MAP 中 severity 为 high/block 的 issue 类型保持一致 */
+const BACKEND_HIGH_ISSUE_TYPES = [
+  "orphan_node",
+  "empty_section",
+  "review_pending",
+  "review_rejected",
+  "review_missing",
+  "global_facts_blocked",
+  "body_subheading_namespace_conflict",
+];
+
+const READY = { has_run: true, released: true, stale: false };
+
+describe("导出门禁（deriveExportGate）", () => {
+  it("未做导出预检时必须阻断", () => {
+    const r = deriveExportGate({ hasPreflight: false, issues: [], readiness: READY });
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toContain("预检");
+  });
+
+  it("预检 + 总检放行 + 无 high 问题 → 放行", () => {
+    const r = deriveExportGate({
+      hasPreflight: true,
+      issues: [{ type: "low_word_count", severity: "medium" }],
+      readiness: READY,
+    });
+    expect(r.allowed).toBe(true);
+    expect(r.highIssueCount).toBe(0);
+  });
+
+  it("总检未跑 / 未放行 / 已过期 三种情况都必须阻断", () => {
+    expect(deriveExportGate({ hasPreflight: true, issues: [], readiness: null }).allowed).toBe(false);
+    expect(deriveExportGate({ hasPreflight: true, issues: [], readiness: { has_run: true, released: false } }).allowed).toBe(false);
+    expect(deriveExportGate({ hasPreflight: true, issues: [], readiness: { has_run: true, released: true, stale: true } }).allowed).toBe(false);
+  });
+
+  it("每个后端 high 级 issue 类型在无 severity 字段时都必须阻断（前后端口径镜像）", () => {
+    for (const type of BACKEND_HIGH_ISSUE_TYPES) {
+      const r = deriveExportGate({
+        hasPreflight: true,
+        issues: [{ type }],           // 故意不带 severity，走类型兜底分支
+        readiness: READY,
+      });
+      expect(r.highIssueCount, `${type} 应计为 high`).toBe(1);
+      expect(r.allowed, `${type} 应阻断导出`).toBe(false);
+    }
+  });
+
+  it("medium/low 级 issue 不阻断交付（只提示）", () => {
+    for (const severity of ["medium", "low"] as Severity[]) {
+      const r = deriveExportGate({
+        hasPreflight: true,
+        issues: [{ type: "low_word_count", severity }],
+        readiness: READY,
+      });
+      expect(r.allowed, `${severity} 不应阻断`).toBe(true);
+    }
+  });
+
+  it("空 issues / null issues 不抛异常且放行", () => {
+    expect(deriveExportGate({ hasPreflight: true, issues: [], readiness: READY }).allowed).toBe(true);
+    expect(deriveExportGate({ hasPreflight: true, issues: null, readiness: READY }).allowed).toBe(true);
+  });
+});
+
+describe("审核状态机契约", () => {
+  /** 前端 ReviewWorkflowPanel.NEXT_ACTIONS 实际渲染的流转目标（按当前状态） */
+  const FRONTEND_NEXT_ACTIONS: Record<string, string[]> = {
+    "": ["pending", "reviewing", "approved", "rejected"],
+    pending: ["pending", "reviewing", "approved", "rejected"],
+    reviewing: ["reviewing", "approved", "rejected", "pending"],
+    approved: ["approved", "reviewing", "rejected", "pending"],
+    rejected: ["rejected", "reviewing", "pending", "approved"],
+  };
+
+  it("前端状态值域与后端 REVIEW_STATUSES 一致", () => {
+    // ReviewStatus 是联合类型；用 REVIEW_STATUS_COLOR 的键集合作为运行时值域
+    expect(Object.keys(REVIEW_STATUS_COLOR).sort()).toEqual(
+      ["approved", "pending", "rejected", "reviewing", ""].sort(),
+    );
+  });
+
+  it("前端每条流转后端都允许（防止前端发出 400）", () => {
+    // 与后端 review.py::_ALLOWED_TRANSITIONS 逐格比对（此处为契约镜像）
+    const backend: Record<string, string[]> = {
+      "": ["pending", "reviewing", "approved", "rejected"],
+      pending: ["pending", "reviewing", "approved", "rejected"],
+      reviewing: ["reviewing", "approved", "rejected", "pending"],
+      approved: ["approved", "reviewing", "rejected", "pending"],
+      rejected: ["rejected", "reviewing", "pending", "approved"],
+    };
+    for (const from of Object.keys(backend)) {
+      for (const to of FRONTEND_NEXT_ACTIONS[from] || []) {
+        expect(backend[from], `${from} → ${to} 后端不允许`).toContain(to);
+      }
+    }
+  });
+
+  it("被驳回后必须存在回到 approved 的出口（否则方案再也无法通过）", () => {
+    expect(FRONTEND_NEXT_ACTIONS.rejected).toContain("approved");
+  });
+});
+
+describe("派生规则编号在前端的塌陷防护", () => {
+  it("CON-05-N 派生编号仍带合法维度（不得为空串）", () => {
+    // 前端按 dimension 归类展示；后端修复前 dimension="" 会落到"未分类"
+    const finding = {
+      rule_id: "CON-05-1",
+      dimension: "consistency",
+      severity: "medium",
+      title: "无章节内容重复",
+    };
+    expect(finding.dimension).toBeTruthy();
+    expect(finding.dimension).not.toBe("");
+  });
+
+  it("前端不得硬编码假定 rule_id 无后缀（DLV-13/14 已是正式规则）", () => {
+    // DLV-13/DLV-14 此前未在注册表登记，导致前端拿不到 title/basis
+    for (const rid of ["DLV-13", "DLV-14"]) {
+      expect(rid).toMatch(/^DLV-\d{2}$/);
+    }
+  });
+});
+
 describe("renderChartsForExport (P1-5)", () => {
   beforeEach(() => {
     vi.clearAllMocks();

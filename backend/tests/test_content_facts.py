@@ -127,10 +127,23 @@ def test_render_truncates_per_fact_and_total():
     assert len(text) <= len("### 组\n") + 101
 
 
-def test_render_stops_before_exceeding_max_total():
+def test_render_never_exceeds_budget_and_covers_all_facts():
+    """预算硬上限 + 「不丢尾部事实」。
+
+    ✅ 2026-09-27 契约变更：旧实现是**头部优先的 break**
+    （`total+len(fact) > max_total` 即跳出），第 3 条之后整段消失 ——
+    危大参数/验收标准这类**排在后面**的事实在提示词里完全不可见，
+    AI 判定「事实缺失」→ 写出【待补充】（假性占位符）。
+    现改为按比例分配预算：超预算时**每条都拿到保底额度**，宁可都短一点，
+    也不丢任何一条；未超预算时与旧实现逐字一致。
+    外层契约「len(text) <= max_total」不变（提示词长度是硬上限）。
+    """
     rows = [(f"组{i}", "t", "乙" * 100) for i in range(10)]
     text = _render_facts_text(rows, max_total=250, per_fact=100)
-    assert text.count("乙" * 100) == 2      # 第 3 条会超出 250 → 提前停止
+    # 10 组全部出现（旧实现只有2组）；
+    # 每组内容被等比例缩短，但**一条不丢**。
+    assert text.count("### ") == 10, "尾部事实被整段丢弃"
+    assert len(text) <= 250, "不得突破提示词长度硬上限"      # 第 3 条会超出 250 → 提前停止
 
 
 def test_render_empty_rows():

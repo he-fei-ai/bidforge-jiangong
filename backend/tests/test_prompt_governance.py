@@ -20,6 +20,23 @@ from app.services.ai.prompts._registry import (
 )
 
 
+# ✅ 2026-09-26（测试隔离修复）：TestVariableContracts 用 _reg 注册的
+#   contract_test_* 临时模板会**永久残留**在进程级 _ALL_PROMPTS 里，
+#   且其 requires 是手工构造的漂移样例 —— 同进程后续文件若对
+#   check_prompt_variables() 做全表断言（如
+#   test_prompt_module_regression_20260925）必然被污染。现用
+#   autouse fixture 在每个用例后清理本文件注册的临时模板。
+_CONTRACT_TEST_KEYS = ("contract_test_a", "contract_test_b",
+                       "contract_test_c", "contract_test_d")
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_contract_test_prompts():
+    yield
+    for _k in _CONTRACT_TEST_KEYS:
+        _ALL_PROMPTS.pop(_k, None)
+
+
 # ---------------------------------------------------------------------------
 # 测试样本构造
 # ---------------------------------------------------------------------------
@@ -156,6 +173,26 @@ class TestContextBudget:
 
     def test_apply_helper_is_result_only(self, oversized_context):
         assert pg.apply_context_budget(oversized_context, 0) == oversized_context
+
+    def test_generation_standard_kept_high_priority(self):
+        """【本次生成标准】段是每轮执行的硬性指令：预算紧张时不得被当成低价值素材砍掉。
+
+        ✅ 2026-09-28 增强：旧实现 ``CONTEXT_PRIORITY`` 未登记该标签，
+        开启预算分配器时落到默认最低优先级 9 —— 它在全局事实（0）/知识库（3）
+        之外的定位段中最先被削减，AI 可能丢失「精准/模糊」执行指令。
+        """
+        assert pg.segment_priority_of("本次生成标准：精准内容") == 1
+        assert pg.segment_priority_of("本次生成标准：模糊内容") == 1
+        assert pg.segment_priority_of("本次生成标准：精准内容") != pg._DEFAULT_PRIORITY
+        # 行为级验证：超长上下文削减后标准段仍在、指令文字未被清空
+        text = ("【项目概述】：" + "本项目位于城市核心区。" * 400 + "\n"
+                "【本次生成标准：精准内容】：必须原样引用全局事实数值与单位，"
+                "不得使用模糊表述，缺失参数写【待补充：参数名】。\n"
+                "【项目知识库素材】：" + "企业制度要求分层分段作业。" * 600)
+        out, info = pg.allocate_context_budget(text, 600)
+        assert info["applied"] is True
+        assert "【本次生成标准：精准内容】" in out
+        assert "原样引用" in out
 
 
 # ---------------------------------------------------------------------------

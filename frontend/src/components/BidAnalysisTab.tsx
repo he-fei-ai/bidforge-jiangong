@@ -49,6 +49,7 @@ import {
   type BaSummary,
   type BaTextStats,
 } from "../utils/bidAnalysis";
+import { sourceNotice } from "../utils/parseSourceNotice";
 
 const { Text } = Typography;
 
@@ -670,6 +671,21 @@ function BidAnalysisTab({
               ≈ <Text strong>{textStats.est_model_calls.toLocaleString()}</Text> 次模型调用
             </Text>
           )}
+          {/* ✅ 2026-09-26 提取依据完整性：任一文档被截断、或预算不足导致有文档
+              整份未被纳入时，所有提取项的可信度都受影响——必须在结果区显性提示，
+              而不是只停在后端日志里（此前用户全程看不到「提取依据不完整」）。 */}
+          {(() => {
+            const n = textStats ? sourceNotice(textStats) : null;
+            return n ? (
+              <Alert
+                type="warning"
+                showIcon
+                message={n.title}
+                description={n.detail}
+                style={{ marginTop: 4 }}
+              />
+            ) : null;
+          })()}
         </Card>
       )}
 

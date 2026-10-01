@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS schemes (
     -- ✅ 2026-09-26（F-CONTENT-STANDARD）：方案级正文生成标准
     --    precise=精准内容（默认，与既有数据真实性红线口径一致）/ fuzzy=模糊内容。
     generation_standard TEXT DEFAULT 'precise',
+    -- ✅ 2026-09-29：最近一次「全局事实变更」时刻（章节失效标记的数据源）。
+    --    由 invalidate_export_cache(..., facts_touched=True) 在事实写操作后写入；
+    --    章节树读路径据此派生 facts_stale（空串 = 无从判定，不标记任何章节）。
+    facts_updated_at TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now','localtime')),
     updated_at TEXT DEFAULT (datetime('now','localtime'))
 );
@@ -142,12 +146,13 @@ CREATE TABLE IF NOT EXISTS project_documents (
     file_size INTEGER DEFAULT 0,
     parse_time REAL DEFAULT 0,
     parse_warnings TEXT DEFAULT '',               -- JSON: 解析器诊断告警（截断/OCR 兜底等）
+    parse_truncated INTEGER DEFAULT 0,            -- 解析器级截断（PDF 截页/表格截行）持久化标记
     -- ✅ 四层存储架构（规范 §2/§4.2 时效性）：文件指纹 + 版本 + 解析/提取状态
     --   注：旧库仅存本文 DDL 不生效，同名列已全部同步声明进 db._migrate 补列
     file_hash_md5 TEXT DEFAULT '',
     file_hash_sha256 TEXT DEFAULT '',
     page_count INTEGER DEFAULT 0,
-    parse_status TEXT DEFAULT 'pending',          -- pending | success | error
+    parse_status TEXT DEFAULT 'pending',          -- pending | success | failed（前端 isDocFailed 依赖 'failed'）
     parse_version TEXT DEFAULT 'v1',              -- 解析代次，每次重解析 vN+1
     parsed_at TEXT DEFAULT '',                    -- 本次解析完成时间（ISO8601 UTC）
     parse_duration_ms INTEGER DEFAULT 0,
@@ -157,7 +162,7 @@ CREATE TABLE IF NOT EXISTS project_documents (
     quality_score REAL DEFAULT -1,                -- 完整性质量评分（-1=未评估）
     completeness_json TEXT DEFAULT '',            -- 解析层覆盖率快照
     expires_at TEXT DEFAULT '',                   -- 解析结果有效期（超期提示重解析）
-    status TEXT DEFAULT 'valid',                  -- valid | file_changed | expired
+    status TEXT DEFAULT 'valid',                  -- valid | file_changed | expired | not_parsed（compute_freshness 未解析时回写 not_parsed）
     created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_project_documents_project ON project_documents(project_id);
@@ -247,10 +252,16 @@ CREATE TABLE IF NOT EXISTS bid_analysis_items (
     sort_order INTEGER DEFAULT 0,
     source TEXT DEFAULT 'ai',                     -- ai | manual（manual = 人工校正结果）
     evidence TEXT DEFAULT '',                     -- 来源位置 JSON（提取结果反查原文的出处列表，2026-09-23）
-    updated_at TEXT DEFAULT (datetime('now','localtime'))
+    updated_at TEXT DEFAULT (datetime('now','localtime')),
+    domain TEXT DEFAULT 'scheme'                 -- 提取域：scheme(方案编制域) | bid_response(招标响应域)
 );
 CREATE INDEX IF NOT EXISTS idx_bid_analysis_project ON bid_analysis_items(project_id);
 CREATE INDEX IF NOT EXISTS idx_bid_analysis_scheme ON bid_analysis_items(scheme_id);
+-- ✅ 2026-10-01 修复启动失败：idx_bid_analysis_project_domain 引用 domain 列，而 domain
+--     由 _migrate 补列（旧库 CREATE TABLE 被 IF NOT EXISTS 跳过、domain 尚不存在），
+--     原索引写在 SCHEMA_SQL 的 executescript 中、早于 _migrate 执行，会对「已存在旧库」
+--     抛 "no such column: domain" 致 init_db 整体失败、后端无法启动。故该索引改由
+--     db.py::_migrate 在补列之后创建（见 _migrate 内同名块），新旧库均安全幂等。
 
 -- 多标段检测结果（招标文件疑似多标段时存储识别结果供前端展示）
 CREATE TABLE IF NOT EXISTS bid_sections (

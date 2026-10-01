@@ -1,7 +1,10 @@
 """数据库连接（aiosqlite，含死线程检测与自动建表）"""
 import asyncio
 from contextlib import asynccontextmanager
+import datetime as _dt
 import logging
+import os
+import shutil
 import sqlite3
 import time
 import aiosqlite
@@ -59,6 +62,35 @@ def is_retryable_db_error(exc: BaseException) -> bool:
     return any(k in msg for k in _RETRYABLE_DB_ERRORS)
 
 
+def safe_rowcount(cur, what: str = "") -> int:
+    """UPDATE/DELETE 影响行数的**唯一出口**（R13 判空护栏，2026-09-29 收口）。
+
+    AGENTS.md §5.5 的 R13：全局单写连接 + aiosqlite 下 ``db.execute()`` **可能
+    返回 None**（连接/事务瞬时异常），直接 ``cur.rowcount`` 即
+    ``AttributeError: 'NoneType' object has no attribute 'rowcount'``。
+
+    此前全仓 7 处 ``.rowcount`` 各自裸取，命中后分两种结局：
+      · 外层有 ``except Exception`` → 异常被吞、**写操作没生效却无任何日志**
+        （``bid_analysis.clear_interrupted_items`` 即典型：中断遗留的 running
+        项静默残留，UI 永远显示「运行中」、18 项永久判缺失）；
+      · 外层无守卫 → 直接 500（批量审核状态、审计日志清理）。
+    现在统一走本函数：None 时返回 0 并打 WARNING，调用方据此走「本次写未生效」
+    分支 —— 既不再崩、也不再静默。
+
+    Args:
+        cur: ``db.execute()`` 的返回值（可能为 None）；
+        what: 只用于告警文案（说明是哪笔写操作未生效），便于日志定位。
+    """
+    if cur is None:
+        logger.warning("db.execute 返回 None（R13），%s 本次未生效",
+                       what or "写操作")
+        return 0
+    # rowcount 为负（非行级语句/未知）时按「本次未影响行」处理，
+    # 避免调用方 `if affected > 0` 之类的守卫被 -1 意外触发。
+    n = cur.rowcount or 0
+    return n if n > 0 else 0
+
+
 async def retry_db_op(coro_factory, *, max_retries: int = 3,
                       base_delay: float = 0.05) -> object:
     """对瞬态 SQLite 错误做有限重试的共享助手。
@@ -87,13 +119,23 @@ async def retry_db_op(coro_factory, *, max_retries: int = 3,
 
 
 async def _probe_conn(conn: aiosqlite.Connection) -> bool:
-    """返回 True 表示连接可用；False 表示底层 IO 抖动，必须剔除。"""
+    """返回 True 表示连接可用；False 表示连接已死/底层 IO 抖动，必须剔除。"""
     try:
         # wal_checkpoint(PASSIVE) 会强制 WAL → 主库刷盘往返，
         # 是探测"写入时抖动"的最小代价探针。失败即视为坏连接。
         await conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
         return True
     except Exception as e:
+        # ✅ BUG 修复（2026-09-26 · 「no active connection」类 cryptic 失败）：
+        #    旧实现只把 disk I/O error 判为坏连接，**已关闭的连接**抛的
+        #    ValueError("Connection closed" / "no active connection") 落在
+        #    "非 IO 类异常 → 视为可用" 分支里被原样放行 —— 池/全局缓存把死连接
+        #    发给业务代码，错误在**业务深处**才炸，且信息完全指不到根因
+        #    （全量套件里 test_perf_content_pipeline / test_reasoning_effort 的
+        #    8 个用例正是这么红的：单独跑 100% 通过）。连接被关闭是不可恢复的
+        #    确定性失效，必须与 disk I/O 同等对待。
+        if _is_dead_conn(conn) or _is_closed_conn_error(e):
+            return False
         if _is_disk_io_error(e):
             return False
         # 非 IO 类异常（如 query_only 拒绝）不视为坏连接，交由上层语义处理
@@ -109,6 +151,29 @@ def _mark_poisoned(conn: aiosqlite.Connection) -> None:
 
 def _is_poisoned(conn: aiosqlite.Connection) -> bool:
     return getattr(conn, "_poisoned", False)
+
+
+# ---------- 死连接判定（2026-09-26） ----------
+# ⚠️ aiosqlite 的 `Connection._conn` 是 **property**：连接关闭后访问它会抛
+#    `ValueError("no active connection")`（aiosqlite/core.py: `_conn` property）。
+#    这正是生产日志与全量测试里那条 cryptic 错误的出处 —— 症状离根因极远：
+#    真正的失败是"缓存/池里躺着一个已关闭的连接"，却在业务代码深处才暴露。
+#    因此判定必须**只读不抛**的属性（`_connection` / `_running`），绝不能碰 `_conn`。
+def _is_dead_conn(conn) -> bool:
+    """连接是否已关闭 / 已失去底层 sqlite 连接（只读属性，不抛异常）。"""
+    if conn is None:
+        return True
+    if getattr(conn, "_connection", None) is None:
+        return True
+    if getattr(conn, "_running", True) is False:
+        return True
+    return False
+
+
+def _is_closed_conn_error(exc: BaseException) -> bool:
+    """异常是否表示「连接已关闭」（aiosqlite 的两种措辞都覆盖）。"""
+    text = str(exc).lower()
+    return "no active connection" in text or "connection closed" in text
 
 
 # 探针连续失败上限：防止 J 盘彻底离线时空转
@@ -212,8 +277,12 @@ async def get_conn() -> aiosqlite.Connection:
             _conn_path = None
         if _conn is not None:
             # poisoned 检查必须先于 TTL 短路（否则坏连接在 30s TTL 窗口内仍被复用）
-            if _is_poisoned(_conn):
-                logger.warning("全局连接已标记 poisoned，重建连接")
+            # ✅ 2026-09-26：同样地，**已关闭**的连接也必须先于 TTL 短路被识别 ——
+            #    旧实现只认 _poisoned 自定义标记，外部 close_db() / 异常路径 / 测试
+            #    换库留下的死连接会在 30s 窗口内被原样发出去，调用方随后拿到
+            #    aiosqlite 的 "no active connection"（错误信息完全指不到根因）。
+            if _is_poisoned(_conn) or _is_dead_conn(_conn):
+                logger.warning("全局连接已失效（poisoned/已关闭），重建连接")
                 try:
                     await _conn.close()
                 except Exception:
@@ -272,7 +341,89 @@ async def settle_global_conn(tag: str = "") -> None:
         logger.warning("收敛全局连接悬挂事务失败（tag=%s）: %s", tag, e)
 
 
+def _self_heal_corrupt_wal() -> bool:
+    """启动自愈：当「主库本身完好，但 -wal/-shm 损坏」导致整库被 SQLite 判定为
+    ``database disk image is malformed`` 时，备份并丢弃损坏的 WAL/SHM，使主库以
+    回滚日志模式正常打开，避免应用被永久卡死在 malformed（典型症状：所有 DB 操作
+    报 ``no such table`` / ``database is locked`` / ``database disk image is malformed``，
+    全局事实等重度依赖 DB 的模块整体「提取失败」）。
+
+    仅在该操作**安全**时执行：
+    - 必须存在 -wal 文件（WAL 才是可疑方，主库本身完好）；无 WAL 则不触碰；
+    - 丢弃前把 主库+WAL+SHM 一并备份到 ``data/recov_bak_<时间戳>/``，**绝不删除主库**；
+    - 若丢弃后主库仍不通过 ``PRAGMA integrity_check`` 自检，则把备份**还原**，
+      保持原状、让应用以原始错误暴露根因，绝不雪上加霜。
+    返回 True 表示本次确实丢弃了损坏的 WAL 并完成自愈。
+    """
+    if not DB_PATH.exists():
+        return False
+    wal = DB_PATH.with_name(DB_PATH.name + "-wal")
+    shm = DB_PATH.with_name(DB_PATH.name + "-shm")
+    if not wal.exists():
+        return False
+
+    # 1) 只读自检：主库 + 当前 WAL 是否真的损坏
+    try:
+        _probe = sqlite3.connect(str(DB_PATH))
+        try:
+            _row = _probe.execute("PRAGMA integrity_check(1)").fetchone()
+        finally:
+            _probe.close()
+        if _row == ("ok",):
+            return False  # 主库完好且 WAL 未触发损坏，无需处理
+    except sqlite3.DatabaseError:
+        pass  # 落到下方自愈分支
+
+    # 2) 备份（连同主库，便于事后追查/恢复 WAL 中未提交事务）
+    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    bak_dir = DB_PATH.parent / f"recov_bak_{ts}"
+    try:
+        bak_dir.mkdir(parents=True, exist_ok=True)
+        for _f in (DB_PATH, wal, shm):
+            if _f.exists():
+                shutil.copyfile(_f, bak_dir / _f.name)
+    except OSError as e:
+        logger.warning("WAL 自愈：备份失败，跳过自愈（保持原状）: %s", e)
+        return False
+
+    # 3) 丢弃损坏的 WAL/SHM（主库保留，数据不丢）
+    try:
+        if wal.exists():
+            os.remove(wal)
+        if shm.exists():
+            os.remove(shm)
+    except OSError as e:
+        logger.warning("WAL 自愈：删除损坏 WAL 失败: %s", e)
+        return False
+
+    # 4) 自愈后自检：主库应能正常打开；若仍损坏则还原备份
+    try:
+        _probe2 = sqlite3.connect(str(DB_PATH))
+        try:
+            _row2 = _probe2.execute("PRAGMA integrity_check(1)").fetchone()
+        finally:
+            _probe2.close()
+        if _row2 != ("ok",):
+            raise sqlite3.DatabaseError(f"自愈后完整性仍异常: {_row2}")
+    except sqlite3.DatabaseError as e:
+        logger.warning("WAL 自愈：丢弃 WAL 后主库仍损坏，还原备份: %s", e)
+        for _f in (DB_PATH, wal, shm):
+            _bak = bak_dir / _f.name
+            if _bak.exists():
+                try:
+                    shutil.copyfile(_bak, _f)
+                except OSError:
+                    pass
+        return False
+
+    logger.warning("WAL 自愈：已丢弃损坏的 WAL/SHM（备份至 %s），主库恢复正常", bak_dir)
+    return True
+
+
 async def init_db():
+    # ✅ 启动自愈（2026-09-29）：主库完好但 WAL 损坏会让整库被判 malformed，
+    #    此前必须人工停服+清理 WAL 才能恢复。现于首次建连前自动尝试自愈。
+    _self_heal_corrupt_wal()
     conn = await get_conn()
     await conn.executescript(SCHEMA_SQL)
     await _migrate(conn)
@@ -340,6 +491,10 @@ async def _migrate(conn: aiosqlite.Connection):
         # --- 解析器诊断告警持久化（PDF 页数截断 / Excel 行数截断 / OCR 兜底等，
         #     旧实现只在解析响应里出现一次，刷新后丢失，用户无从得知内容不完整）---
         ("project_documents", "parse_warnings", "TEXT DEFAULT ''"),
+        # --- ✅ 2026-09-26（F2）：解析器级截断持久化。旧实现列表接口的 truncated
+        #     仅按落库字数反推，漏报 PDF 截页 / 表格截行等解析器级截断（刷新后丢失）。
+        #     现持久化截断布尔，列表直接读取，与单/批量解析响应口径一致。---
+        ("project_documents", "parse_truncated", "INTEGER DEFAULT 0"),
         # --- 上传目录识别的诊断告警持久化（与 project_documents 口径一致，
         #     刷新/重新拉取后仍能回显「识别结果可能不完整」）---
         ("uploaded_outlines", "parse_warnings", "TEXT DEFAULT ''"),
@@ -425,6 +580,20 @@ async def _migrate(conn: aiosqlite.Connection):
         #     只存非敏感字段（不含明文/密文 Key）；历史行为空串 = 无快照，
         #     读取端容忍，仅回滚能力对历史记录不可用。
         ("ai_config_audit_logs", "snapshot_json", "TEXT DEFAULT ''"),
+        # --- ✅ 2026-09-29：章节「事实变更失效标记」的数据源。
+        #     全局事实（global_facts）发生任何写操作后，由唯一出口
+        #     invalidate_export_cache(..., facts_touched=True) 把本方案的时间戳
+        #     推到当前时刻；章节树读路径据此派生 facts_stale（章节 updated_at
+        #     早于该时刻且有正文 → 章节正文引用的事实已变更，建议重新生成）。
+        #     选「方案级单点时间戳 + 读侧派生」而不是「13 处正文写路径各清一个
+        #     布尔列」：后者正是本仓反复踩的「同一判据散落多处、漏改一处」陷阱。
+        #     历史行为空串 → 视为「无从判定」，所有章节 facts_stale=0（不打扰用户）。
+        ("schemes", "facts_updated_at", "TEXT DEFAULT ''"),
+        # --- ✅ 2026-09-30（第十一轮 · 招标响应域）：提取域标记。
+        #     历史行默认 'scheme'（本软件原有 18 项），主键 {project_id}_{item_id}
+        #     完全不变；bid_response 域行主键为 {project_id}__bid_response__{item_id}。
+        #     空串视同 'scheme'（读侧 fail-closed 兜底），旧数据零迁移。
+        ("bid_analysis_items", "domain", "TEXT DEFAULT 'scheme'"),
     ]
     for table, column, definition in migrations:
         try:
@@ -443,6 +612,18 @@ async def _migrate(conn: aiosqlite.Connection):
                 logger.info("迁移：为 %s 添加列 %s", table, column)
         except Exception as e:
             logger.warning("迁移 %s.%s 失败: %s", table, column, e)
+
+    # --- ✅ 2026-10-01 修复启动失败：域索引依赖 domain 列，必须等上方补列后再建。
+    #     旧实现把该索引写在 SCHEMA_SQL 的 executescript 中、早于本迁移执行；
+    #     对「已存在旧库」（CREATE TABLE 被 IF NOT EXISTS 跳过、domain 尚不存在）
+    #     会抛 "no such column: domain" 致 init_db 整体失败、后端无法启动。
+    #     现改为补列之后创建：新库（domain 已随 CREATE TABLE 存在）与旧库均安全幂等。
+    try:
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bid_analysis_project_domain "
+            "ON bid_analysis_items(project_id, domain)")
+    except Exception as e:
+        logger.warning("bid_analysis_items 域索引创建失败（可忽略）: %s", e)
 
     # --- ✅ 一致性扫描增量缓存表（2026-09-22 · P0-1）：旧库没有此表，
     #     一致性扫描会退化为「每章必调 AI」（不报错，但增量优化失效）。
@@ -570,7 +751,7 @@ async def _migrate(conn: aiosqlite.Connection):
                 "UPDATE schemes SET review_status=status"
                 " WHERE status IN ('pending','reviewing','approved','rejected')"
                 " AND COALESCE(review_status,'')=''")
-            moved = cur.rowcount or 0
+            moved = safe_rowcount(cur, what="schemes 审核状态迁移")
             if moved:
                 await conn.execute(
                     "UPDATE schemes SET status='目录已确认'"
@@ -642,8 +823,9 @@ async def _migrate(conn: aiosqlite.Connection):
             " AND chart_type NOT IN ('layout','timeline')"
             " AND COALESCE(json_extract(data_json, '$.mermaid_code'), '') = ''"
             " AND json_extract(data_json, '$.data') IS NULL")
-        if cur.rowcount:
-            logger.info("迁移：重置 %d 条空代码图表预测为 pending（等待重新生成）", cur.rowcount)
+        _reset = safe_rowcount(cur, what="空代码图表预测重置迁移")
+        if _reset:
+            logger.info("迁移：重置 %d 条空代码图表预测为 pending（等待重新生成）", _reset)
     except Exception as e:
         # json_extract 需要 SQLite JSON1 扩展，极老版本可能不支持——失败不影响启动
         logger.warning("图表预测僵尸行迁移失败（可忽略）: %s", e)
@@ -707,7 +889,12 @@ async def _setup_connection(conn: aiosqlite.Connection) -> aiosqlite.Connection:
 async def close_db():
     global _conn, _conn_path, _db_pool_total, _read_pool_total
     if _conn is not None:
-        await _conn.close()
+        # ✅ 幂等：连接可能已被外部关闭（再 close 会抛），关闭流程不应因
+        #    重复关闭而中断 —— 否则启动/关闭竞态下残留的池连接永远不被清理。
+        try:
+            await _conn.close()
+        except Exception:
+            pass
         _conn = None
         _conn_path = None
     # P1-3：关闭连接池中全部空闲连接
@@ -760,13 +947,15 @@ async def _acquire_pool_conn() -> aiosqlite.Connection:
             if _db_pool:
                 conn = _db_pool.pop()
                 # poisoned 标记：写路径里曾抛过 disk I/O error，直接剔除
-                if _is_poisoned(conn):
+                # ✅ 2026-09-26：已关闭的连接同样剔除（见 _probe_conn 说明：
+                #    死连接探针会被"非 IO 异常"分支误判为可用而放行）
+                if _is_poisoned(conn) or _is_dead_conn(conn):
                     _db_pool_total -= 1
                     try:
                         await conn.close()
                     except Exception:
                         pass
-                    logger.warning("剔除 poisoned 写池连接（写路径曾 disk I/O error）")
+                    logger.warning("剔除失效写池连接（poisoned 或已关闭）")
                     continue
                 # PRAGMA wal_checkpoint 探针：真实 IO 往返，覆盖"写入才抖"场景
                 if not await _probe_conn(conn):
@@ -809,10 +998,12 @@ async def _acquire_pool_conn() -> aiosqlite.Connection:
 
 
 async def _release_pool_conn(conn: aiosqlite.Connection) -> None:
-    """归还连接；poisoned 或探活失败的连接直接关闭"""
+    """归还连接；poisoned / 已关闭 / 探活失败的连接直接关闭"""
     global _db_pool_total
-    # 写路径标记了 disk I/O error：不再归还，直接剔除
-    if _is_poisoned(conn):
+    # 写路径标记了 disk I/O error、或连接已被关闭：不再归还，直接剔除
+    # ✅ 2026-09-26：死连接**绝不能回到池里** —— 那正是「池里躺着已关闭连接、
+    #    业务深处抛 no active connection」的传播路径。
+    if _is_poisoned(conn) or _is_dead_conn(conn):
         async with _db_pool_cv:
             _db_pool_total -= 1
             _db_pool_cv.notify()  # 容量已释放，唤醒等待者
@@ -907,6 +1098,9 @@ async def _read_probe(conn: aiosqlite.Connection) -> bool:
         await conn.execute("PRAGMA wal_checkpoint(NOOP)")
         return True
     except Exception as e:
+        # ✅ 2026-09-26：与 _probe_conn 同口径 —— 已关闭的连接判为坏连接
+        if _is_dead_conn(conn) or _is_closed_conn_error(e):
+            return False
         if _is_disk_io_error(e):
             return False
         return True
@@ -930,13 +1124,14 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
             if _read_pool:
                 conn = _read_pool.pop()
                 # poisoned 标记：读路径曾抛过 disk I/O error，直接剔除
-                if _is_poisoned(conn):
+                # ✅ 2026-09-26：已关闭的连接同样剔除（与写池同口径）
+                if _is_poisoned(conn) or _is_dead_conn(conn):
                     _read_pool_total -= 1
                     try:
                         await conn.close()
                     except Exception:
                         pass
-                    logger.warning("剔除 poisoned 读池连接（读路径曾 disk I/O error）")
+                    logger.warning("剔除失效读池连接（poisoned 或已关闭）")
                     continue
                 # 用 PRAGMA wal_checkpoint(NOOP) 走 IO 层，覆盖"读取时抖"场景
                 if not await _read_probe(conn):
@@ -981,10 +1176,10 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
 
 
 async def _release_read_conn(conn: aiosqlite.Connection) -> None:
-    """归还只读连接；poisoned 或探活失败的连接直接关闭"""
+    """归还只读连接；poisoned / 已关闭 / 探活失败的连接直接关闭"""
     global _read_pool_total
-    # 读路径标记了 disk I/O error：不再归还，直接剔除
-    if _is_poisoned(conn):
+    # 读路径标记了 disk I/O error、或连接已被关闭：不再归还，直接剔除
+    if _is_poisoned(conn) or _is_dead_conn(conn):
         async with _read_pool_cv:
             _read_pool_total -= 1
             _read_pool_cv.notify()  # 容量已释放，唤醒等待者

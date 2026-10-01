@@ -6,7 +6,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.db import get_db, get_read_conn, release_read_conn
+from app.db import get_db, get_read_conn, release_read_conn, safe_rowcount
 from app.models import OutlineLibraryCreate, OutlineLibraryUpdate
 
 router = APIRouter(prefix="/api/v1/outline-library", tags=["outline_library"])
@@ -288,7 +288,8 @@ async def batch_review(body: dict, db=Depends(get_db)):
         cur = await db.execute(
             "UPDATE outline_library SET review_status=?, updated_at=? WHERE id=?",
             (status, now, lid))
-        affected += cur.rowcount or 0
+        # R13：循环内逐条 UPDATE，任一条 execute() 返回 None 都会让整个批量端点 500
+        affected += safe_rowcount(cur, what=f"目录库审核状态更新 id={lid}")
     await db.commit()
     return {"ok": True, "affected": affected, "review_status": status}
 
@@ -652,6 +653,15 @@ async def apply_library_and_save(library_id: str, body: dict, db=Depends(get_db)
         "tree": result["tree"],
         "name": row["name"],
         "source": row["source"],
+        # ✅ 2026-09-30（P1-7）：透传 _save_outline_to_db 的量化回传字段。
+        # 套用目录库是「is_new 全 True」的整表重建 —— 目录库节点的 id 是编号
+        # （1/1.1）而非 sections 主键，必然无法匹配旧章节，因此**已生成的正文会
+        # 被级联删除**。旧实现只挑了 count / tree，把 cleared_content_sections
+        # 丢弃，前端无从提示「本次套用清除了 N 章正文」→ 用户静默丢正文。
+        # 与 upload_outline.py 的 apply 路径（把 cleared_content 拼进 note）同口径。
+        **({"cleared_content_sections": result["cleared_content_sections"]}
+           if result.get("cleared_content_sections") else {}),
+        **({"roots_locked": True} if result.get("roots_locked") else {}),
         # ✅ 措辞修正：目录库节点的 id 是"编号"（1/1.1/1.1.1）而非 sections 主键，
         #    无法与已有章节做 id 匹配，因此套用目录库会按新结构重建章节
         #    （旧文案误称"智能保留已有正文"，与 /apply-and-save 的实际行为不符）。

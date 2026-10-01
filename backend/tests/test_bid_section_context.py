@@ -134,10 +134,18 @@ async def test_run_single_call_injects_section_hint(monkeypatch):
     await ba._run_single_call(item, "项目资料", "markdown", section_hint=hint)
 
     assert captured, "必须发生一次 AI 调用"
-    system = captured[0][0]
-    assert system["role"] == "system"
-    assert hint in system["content"], "标段上下文必须注入 system 消息"
-    assert captured[0][1]["role"] == "user"
+    # ✅ 2026-09-30 第十四轮：标段上下文改为**独立的第二条 system 消息**
+    #    （对齐易标 buildTenderContextMessages），不再拼进通用 system 提示词。
+    #    断言因此从「第一条 system 含 hint」升级为「messages 里存在一条
+    #    只承载标段上下文的 system 消息」——后者才真正锁住参考实现的口径。
+    systems = [m for m in captured[0] if m["role"] == "system"]
+    assert systems, "必须存在 system 消息"
+    assert systems[0]["content"] == STABLE_SYSTEM_PROMPT, \
+        "第一条 system 必须是原样的通用提示词（标段上下文不得再拼进去）"
+    assert len(systems) == 2, "标段上下文必须是独立的第二条 system 消息"
+    assert hint in systems[1]["content"]
+    users = [m for m in captured[0] if m["role"] == "user"]
+    assert users and users[0] is captured[0][-1]
 
 
 @pytest.mark.asyncio
@@ -196,9 +204,13 @@ async def test_segment_merge_carries_section_hint_and_task_schema(monkeypatch):
     assert {c["text"] for c in seg_calls} == {"段1", "段2"}
     assert all(c["section_hint"] == hint for c in seg_calls)
     assert all(c["classification_hint"] == class_hint for c in seg_calls)
-    system, user = merge_calls[0][0], merge_calls[0][1]
-    assert hint in system["content"], "合并调用同样要注入标段上下文"
-    assert class_hint in system["content"], "合并调用同样要注入危大分类结论"
+    # ✅ 标段上下文已是独立第二条 system 消息（易标口径）；
+    #    危大分类结论仍拼在第一条（它与通用纪律同属「提取要求」）。
+    systems = [m for m in merge_calls[0] if m["role"] == "system"]
+    assert len(systems) == 2, "合并调用也要带独立的标段 system 消息"
+    assert hint in systems[1]["content"], "合并调用同样要注入标段上下文"
+    assert class_hint in systems[0]["content"], "合并调用同样要注入危大分类结论"
+    user = [m for m in merge_calls[0] if m["role"] == "user"][0]
     assert "project_number" in user["content"], (
         "合并消息必须包含原始任务的 JSON 字段清单，否则合并丢字段")
     assert "原始任务要求" in user["content"]

@@ -177,7 +177,29 @@ REM changing either file:  powershell -File kill_port_selftest.ps1
 REM NOTE: keep this block ASCII-only - the file must stay GBK/CP936.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0kill_port.ps1" -Ports 8000,5175 -WaitSec 8
 if errorlevel 1 echo   [!] kill_port.ps1 could not release every port, see above.
+REM ---- pass 3: sweep leftover zombie pytest / test workers ----
+REM A leaked `python -m pytest` keeps a handle on logs/backend.log, which
+REM freezes the 5MB rotation and starves every later log write (see
+REM AGENTS.md 5.6). kill_zombie_pytest.ps1 lists PID/PPID/cmd before
+REM killing and never touches this script or its ancestors.
+REM NOTE: keep this block ASCII-only - the file must stay GBK/CP936.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0kill_zombie_pytest.ps1"
 
+REM ---- pass 4: cleanup_guard sweeps leftover frontend / timeout stubs -------
+REM (ASCII-only block - this file is GBK/CP936; keep it pure ASCII.)
+REM cleanup_guard.ps1 is the unified check+clean mechanism: it re-checks the
+REM ports, sweeps leftover node/npm/vite and titled toolbox console windows,
+REM kills timeout leftovers / orphaned python stubs, and re-sweeps zombie
+REM pytest. -Quiet keeps this file's console output clean; the exit code
+REM drives the messages below (0=clean, 1=not fully removed, 2=still found).
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cleanup_guard.ps1" -Mode Startup -Quiet
+if errorlevel 2 (
+    echo   [!] cleanup_guard: leftover processes still detected after cleanup.
+) else if errorlevel 1 (
+    echo   [!] cleanup_guard: some leftover could not be removed, check above.
+) else (
+    echo   [OK] cleanup_guard: no leftover toolkit / timeout / zombie processes.
+)
 set "PORT_8000_BUSY="
 set "PORT_5175_BUSY="
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8000 " ^| findstr "LISTENING"') do (
@@ -326,7 +348,12 @@ echo [4/5] 启动后端服务 (FastAPI :8000)...
 cd /d "%~dp0backend"
 REM 用 start /D 指定工作目录，配合 cmd /S /K 保证引号按字面量解析
 REM （不再写成 cmd /k "cd /d "path" && ..." 这种嵌套引号写法）
-start "后端-专项方案工具箱" /D "%~dp0backend" cmd /S /K ""%PY%" -m uvicorn app.main:app --reload --reload-exclude *.pytest_cache* --reload-exclude *__pycache__* --reload-exclude *.pt_* --host 0.0.0.0 --port 8000"
+REM NOTE: single-process mode (no --reload). The reloader parent owns the
+REM :8000 listen socket and the worker child inherits the handle, which
+REM produced parent/child accept() races plus orphan workers holding the
+REM port after the parent died. One process = one socket owner.
+REM For hot reload during development, stop the server and restart it.
+start "后端-专项方案工具箱" /D "%~dp0backend" cmd /S /K ""%PY%" -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
 REM 等后端起来。旧脚本用 for /l %%i in (1,1,15) 只等 15 秒，且直接调裸 curl：
 REM 精简系统 / 旧版 Windows 没有 curl.exe 时会永远判定未就绪并误报「超时」，

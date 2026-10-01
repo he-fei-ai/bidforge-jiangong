@@ -16,6 +16,7 @@ import inspect
 import pytest
 
 from app.routers import sse_handlers as sh
+from app.services import content_runtime as crt
 from app.services.ai.prompts._registry import render
 
 
@@ -40,12 +41,18 @@ class TestWordBudgetHint:
         assert sh._word_budget_hint("bad") == ""
 
     def test_runtime_uses_the_hint(self):
-        """源码级护栏：正文上下文与续写消息都必须带上区间/上限，不得只写"目标 X 字"。"""
+        """源码级护栏：正文上下文与续写消息都必须带上区间/上限，不得只写"目标 X 字"。
+
+        ✅ 2026-09-28（T-1 收口）：续写消息构造已下沉 content_runtime，
+        故「补充后总字数上限」/「int(word_budget * 1.1)」的断言同时检查
+        generate_content 调用点与 content_runtime 实现点两处宿主。
+        """
         src = inspect.getsource(sh.generate_content)
         assert '_word_budget_hint(word_budget)' in src
+        cr_src = inspect.getsource(crt)
         # 续写：给出「补充后总字数上限」
-        assert "补充后总字数上限" in src
-        assert "int(word_budget * 1.1)" in src
+        assert "补充后总字数上限" in cr_src
+        assert "int(word_budget * 1.1)" in cr_src
 
 
 class TestPromptWordCountControl:

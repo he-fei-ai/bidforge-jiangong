@@ -155,7 +155,10 @@ def build_continue_hint(standard: str) -> str:
 # ---------------------------------------------------------------------------
 
 #: 围栏代码块（mermaid / chart-json / ai_image / 普通代码）整体剔除
-_FENCE_RE = re.compile(r"```[\s\S]*?```")
+# ✅ 2026-09-28（围栏口径收敛）：正则语义保持向后兼容（含行内 ``` 片段——
+#    test_content_standard_service.TestExtractors 已钉住该行为），并补上
+#    ```~~~``` 波浪线围栏剔除（此前波浪线图表代码里的数字会参与事实校验）。
+_FENCE_RE = re.compile(r"(?:```[\s\S]*?```|~~~[\s\S]*?~~~)")
 #: 行内代码剔除
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 

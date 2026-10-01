@@ -48,7 +48,14 @@ class FieldEntry:
     key: str            # 数据源内唯一键（item_id / 事实分组 / 施工内容片段）
     label: str          # 人类可读名（提示词中应出现的锚点文本）
     chars: int = 0      # 源内容字符量（0=无有效内容）
-    status: str = "available"  # available | empty | not_success | filtered_unresolved | filtered_conflict
+    # available | empty | not_success | filtered_unresolved | filtered_conflict
+    #   | filtered_stale | filtered_simulated
+    # ✅ 2026-09-30 新增 filtered_stale / filtered_simulated：此前来源过期(is_stale=1)
+    #   与 AI 编造值(is_simulated=1)两类被过滤事实**在台账里完全不可见**
+    #   （既不计 available 也不计任何 filtered_*），恰好违背本模块"让静默丢失
+    #   变显式台账"的设计目的。新增为 additive，旧调用方按前缀/枚举白名单
+    #   过滤时行为不变。
+    status: str = "available"
     note: str = ""
 
     def as_dict(self) -> dict:
@@ -134,14 +141,35 @@ async def build_inventory(db, project_id: str, scheme_id: str,
         logger.warning("盘点解析提取字段清单失败（降级跳过该源）: %s", e)
 
     # ---- 2. 全局事实（按分组聚合，含被过滤事实的可见化）----
+    # ✅ BUG 修复（2026-09-30 · 口径分叉 → 假"已调用"）：ok_cnt 旧口径只判
+    #   has_conflict=0 AND is_resolved=1，漏 is_simulated=0 / is_stale=0。而
+    #   生成侧 facts_extractor._FACTS_INJECT_WHERE 是四条件 fail-closed。
+    #   后果与 placeholder_inventory 同源：is_stale=1（_mark_project_facts_stale
+    #   批量置位且不清 is_resolved，故 resolved=1 且 stale=1 可达）或
+    #   is_simulated=1（AI 编造值）的事实，生成侧**不注入**，此处却被计进
+    #   ok_cnt → 差集报告标 available → audit_prompt_coverage 再按
+    #   "### {分组标题}" 锚点判为**已调用**，而提示词里根本没有该事实。
+    #   本模块的存在意义正是"把未被调用从静默丢失变成显式台账"，此处反而
+    #   制造了静默丢失 + 假绿。
+    #   另：旧实现完全没有 stale/simulated 的计数，被过滤的这两类事实
+    #   **在台账里完全不可见**（既不计入 ok 也不计入任何 filtered_*）。
+    #   修法：ok_cnt 改走唯一出口；并补两条 filtered_* 台账（additive，
+    #   旧调用方读 available/not_injectable 的行为不变）。
     try:
-        from app.services.facts_extractor import FACTS_GT_COLUMN
+        from app.services.facts_extractor import FACTS_GT_COLUMN, get_facts_inject_where
         # FACTS_GT_COLUMN 自带 `AS gt` 别名，不可重复拼接
+        inject_where = get_facts_inject_where()
+        # 门控是「A AND B AND C」形式，直接嵌入 CASE WHEN ... THEN 即可
+        ok_case = inject_where
         cur = await db.execute(
             f"SELECT {FACTS_GT_COLUMN}, "
-            "SUM(CASE WHEN has_conflict=0 AND is_resolved=1 THEN 1 ELSE 0 END) AS ok_cnt, "
-            "SUM(CASE WHEN has_conflict=1 THEN 1 ELSE 0 END) AS conflict_cnt, "
-            "SUM(CASE WHEN has_conflict=0 AND is_resolved=0 THEN 1 ELSE 0 END) AS pending_cnt, "
+            f"SUM(CASE WHEN {ok_case} THEN 1 ELSE 0 END) AS ok_cnt, "
+            "SUM(CASE WHEN COALESCE(has_conflict,0)=1 THEN 1 ELSE 0 END) AS conflict_cnt, "
+            "SUM(CASE WHEN COALESCE(has_conflict,0)=0 AND COALESCE(is_resolved,0)=0 "
+            "AND COALESCE(is_simulated,0)=0 AND COALESCE(is_stale,0)=0 "
+            "THEN 1 ELSE 0 END) AS pending_cnt, "
+            "SUM(CASE WHEN COALESCE(is_stale,0)=1 THEN 1 ELSE 0 END) AS stale_cnt, "
+            "SUM(CASE WHEN COALESCE(is_simulated,0)=1 THEN 1 ELSE 0 END) AS simulated_cnt, "
             "SUM(LENGTH(COALESCE(content,''))) AS chars "
             "FROM global_facts "
             "WHERE scheme_id=? OR (project_id=? AND (scheme_id='' OR scheme_id IS NULL)) "
@@ -154,7 +182,9 @@ async def build_inventory(db, project_id: str, scheme_id: str,
                     source=SRC_FACTS, key=gt, label=gt, chars=r["chars"] or 0))
             for cnt, status, note in (
                     (r["conflict_cnt"] or 0, "filtered_conflict", "存在未裁决矛盾，按红线不注入"),
-                    (r["pending_cnt"] or 0, "filtered_unresolved", "未经人工确认，按红线不注入")):
+                    (r["pending_cnt"] or 0, "filtered_unresolved", "未经人工确认，按红线不注入"),
+                    (r["stale_cnt"] or 0, "filtered_stale", "来源资料已变化，按红线不注入"),
+                    (r["simulated_cnt"] or 0, "filtered_simulated", "AI 编造值，按红线不注入")):
                 if cnt:
                     inv.entries.append(FieldEntry(
                         source=SRC_FACTS, key=f"{gt}#{status}", label=gt,

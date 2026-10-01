@@ -177,6 +177,16 @@ describe("treeFingerprint（目录树去重，避免 3s 轮询空转重渲）", 
     expect(treeFingerprint([...tree(), tree()[0]] as TreeNode[])).not.toBe(base);
   });
 
+  // ✅ 2026-09-29：facts_stale 是用户可感知的状态（目录树上的「事实已变更」徽标）。
+  // 若指纹不含它，3s 轻量轮询会因指纹相同而保留旧树 —— 事实刚变更后
+  // 徽标要等下一次完整 load() 才出现，表现为「后端已标、界面没显示」。
+  it("反例：事实变更标记变化必须改变指纹（避免轮询吞掉刚出现的徽标）", () => {
+    const base = treeFingerprint(tree());
+    expect(treeFingerprint(tree({ facts_stale: 1 }))).not.toBe(base);
+    expect(treeFingerprint(tree({ facts_stale: true }))).not.toBe(base);
+    expect(treeFingerprint(tree({ facts_stale: false }))).toBe(base);
+  });
+
   it("空树安全", () => {
     expect(treeFingerprint([])).toBe("");
     expect(treeFingerprint([])).toBe(treeFingerprint([]));

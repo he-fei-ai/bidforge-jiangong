@@ -9,7 +9,16 @@ import math
 import re
 
 # 围栏代码块（```lang ... ```）：图表（mermaid / chart-json）与普通代码块
-_FENCE_RE = re.compile(r"```[\s\S]*?```")
+# ✅ 2026-09-28 修复（围栏剔除语义与 find_unclosed_fences 对齐）：
+#   旧 `_FENCE_RE` 只认反引号、且按「最早出现的 ```」非贪婪闭合，导致：
+#      · `````~~~mermaid````` 波浪线围栏完全不剔除 → 图表代码被计入正文字数，
+#        超长章节误判 over / 续写触发阈值失真；
+#      · `````` 4 反引号围栏只有前 3 个反引号参与匹配，闭合后残留 1 个反引号
+#        字符被计入字数。
+#   现改为逐行有穷状态机（与 find_unclosed_fences 同一套 `_FENCE_LINE_RE`，
+#   闭合要求同种字符且长度 ≥ 开围栏），两种围栏统一剔除；未闭合围栏按
+#   「从开围栏处截断」处理（与旧口径一致，regression 见 test_content_utils）。
+_FENCE_RE = None  # deprecated：请用 strip_fenced_code_blocks
 
 # ---------- 字数口径常量（全项目唯一口径，避免魔法数字分散） ----------
 DEFAULT_WORD_BUDGET = 1500   # 未设置预算时的默认目标字数
@@ -95,7 +104,7 @@ def normalize_word_budget_override(raw) -> int | None:
 
 
 def text_word_count(content: str) -> int:
-    """正文字数（剔除 ``` 围栏代码块后的字符数）—— 全项目唯一口径。
+    r"""正文字数（剔除 ``` 与 ~~~ 代码围栏后的字符数）—— 全项目唯一口径。
 
     背景（"图表与正文一体生成"带来的口径问题）：正文 AI 会把 ```mermaid /
     ```chart-json 图表代码块直接内嵌在章节正文里。若沿用 ``len(content)`` 统计，
@@ -106,11 +115,12 @@ def text_word_count(content: str) -> int:
       · 续写判定（``wc < budget*0.8``）提前满足，正文偏短也不再补写。
 
     图表代码不是"正文文字"，故剔除后再计数，统计的是用户实际阅读到的文字量。
-    与 ``content_polish.sanitize_ai_content`` 的"围栏保护"口径一致。
 
-    ⚠️ 未闭合围栏按"从围栏处截断"处理：正则匹配不到成对围栏，剩余 ````` ``` ````
-    即为未闭合起点，其后内容一律不计（与导出/登记的未闭合保护语义一致），
-    避免把整段代码当正文。
+    ✅ 2026-09-28 修复（剔除口径与 ``find_unclosed_fences`` 对齐）：
+      旧实现用正则 ````` ```[\s\S]*?``` ````` 剔除，只认反引号、且 4 反引号
+      围栏会残留字符、`````~~~````` 波浪线围栏完全不剔除 —— 波浪线图表代码
+      被误计入字数；现改用 ``strip_fenced_code_blocks``（逐行状态机，两种
+      围栏同口径剔除），未闭合围栏仍按"从围栏处截断"处理。
 
     Args:
         content: 章节正文（Markdown，可能含 ```mermaid / ```chart-json / 普通代码块）。
@@ -120,11 +130,7 @@ def text_word_count(content: str) -> int:
     """
     if not content:
         return 0
-    text = _FENCE_RE.sub("", content)
-    fence_idx = text.find("```")
-    if fence_idx != -1:
-        text = text[:fence_idx]
-    return len(text)
+    return len(strip_fenced_code_blocks(content))
 
 
 # ---------- 未闭合围栏自动修复（2026-09-22） ----------
@@ -137,6 +143,118 @@ _FENCE_LINE_RE = re.compile(
     # 独立成行的围栏标记：至少 3 个反引号或波浪号，后面可选语言标签
     r"^[ \t]{0,3}(`{3,}|~{3,})([^`~\n]*)$"
 )
+
+
+def fence_spans(content: str | None) -> list[tuple[int, int]]:
+    """返回正文中**已闭合**代码围栏的字符区间（含开/闭围栏行）。
+
+    语义与 ``strip_fenced_code_blocks`` / ``find_unclosed_fences`` 完全一致
+    （CommonMark §4.7）：反引号（```）与波浪线（~~~）分别处理、闭合需同种字符
+    且长度 ≥ 开围栏、围栏内不解析新围栏、未闭合的围栏**不产出区间**。
+
+    用途：需要**按字符区间**保护代码围栏的调用方（如
+    ``content_shrink.collect_protected_ranges`` —— "压缩禁区"必须知道围栏的
+    确切起止位置，而非只剔除文本）。
+
+    Args:
+        content: 原始 Markdown 正文。
+
+    Returns:
+        ``[(start, end), ...]`` 列表，end 为闭围栏行尾（不含行尾换行符）。
+        空输入 / 无闭合围栏返回 ``[]``。
+    """
+    if not content:
+        return []
+    lines = content.split("\n")
+    # 预计算每行起始偏移（含行尾换行符）
+    offsets: list[int] = []
+    off = 0
+    for ln in lines:
+        offsets.append(off)
+        off += len(ln) + 1
+    spans: list[tuple[int, int]] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        m = _FENCE_LINE_RE.match(lines[i])
+        if m is None:
+            i += 1
+            continue
+        ch = m.group(1)[0]
+        open_len = len(m.group(1))
+        open_start = offsets[i]
+        j = i + 1
+        close_idx = -1
+        while j < n:
+            cm = _FENCE_LINE_RE.match(lines[j])
+            if cm is not None and cm.group(1)[0] == ch \
+                    and len(cm.group(1)) >= open_len \
+                    and not cm.group(2).strip():
+                close_idx = j
+                break
+            j += 1
+        if close_idx >= 0:
+            close_end = offsets[close_idx] + len(lines[close_idx])
+            spans.append((open_start, close_end))
+            i = close_idx + 1
+        else:
+            # 未闭合：其后内容均视为代码，不产出区间
+            break
+    return spans
+
+
+def strip_fenced_code_blocks(content: str | None) -> str:
+    """剔除正文中的全部（已闭合）代码围栏块，保留围栏外正文。
+
+    语义与 ``find_unclosed_fences`` 严格一致（CommonMark §4.7）：
+      · 反引号（```）与波浪线（~~~）两种围栏分别处理；
+      · 开围栏是独立成行、≤3 个前导空格、≥3 个同种字符、后接可选语言标签；
+      · 闭合围栏必须与开围栏同种字符、长度 ≥ 开围栏、且不带语言标签；
+      · 围栏内部不再解析新围栏；
+      · 到达末尾仍未闭合时，从该开围栏起「截断」（其后内容均视为代码）。
+
+    结果按换行拼接，围栏外正文的换行结构整体保留（不吞行、不折叠）。
+    注意：紧邻围栏行的空行/正文换行会因围栏整段移除而小幅变化 —— 这是
+    有意为之（代码不参与正文字数口径），回归见 ``test_content_utils``。
+
+    Args:
+        content: 原始 Markdown 正文（可含 mermaid / chart-json / 普通代码块）。
+
+    Returns:
+        剔除代码围栏后的正文（未闭合围栏作为截断点，其后内容不保留）。
+    """
+    if not content:
+        return ""
+    lines = content.split("\n")
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        m = _FENCE_LINE_RE.match(lines[i])
+        if m is None:
+            out.append(lines[i])
+            i += 1
+            continue
+        ch = m.group(1)[0]
+        open_len = len(m.group(1))
+        # 向前寻找闭合围栏：同种字符、长度 ≥ open_len、且不带标签
+        j = i + 1
+        closed_idx = -1
+        while j < n:
+            cm = _FENCE_LINE_RE.match(lines[j])
+            if cm is not None and cm.group(1)[0] == ch \
+                    and len(cm.group(1)) >= open_len \
+                    and not cm.group(2).strip():
+                closed_idx = j
+                break
+            j += 1
+        if closed_idx >= 0:
+            # 已闭合：跳过整段围栏（含开闭行）
+            i = closed_idx + 1
+        else:
+            # 未闭合：从开围栏处截断，其余视为代码
+            break
+    return "\n".join(out)
 
 
 def find_unclosed_fences(content: str) -> list[dict]:

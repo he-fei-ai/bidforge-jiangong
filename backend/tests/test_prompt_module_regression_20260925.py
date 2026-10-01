@@ -392,3 +392,51 @@ class TestDefaultsBackwardCompatible:
         test_all_declared_contracts_match_templates 断言。
         """
         assert _my_issues() == [], f"TEST_KEY 出厂模板与契约表存在漂移：{_my_issues()}"
+
+
+# ---------------------------------------------------------------------------
+# 七、T8（2026-09-26）：误报白名单收窄 + 首处判定修复
+# ---------------------------------------------------------------------------
+class TestFalsePositiveNarrowing:
+    """白名单收窄为极短名 + 全出现检查（零现有模板行为变化，已探针验证）。"""
+
+    def test_whitelist_contains_only_short_names(self):
+        from app.services.ai.prompts._registry import _FALSE_POSITIVE_VARS
+        assert all(len(v) <= 3 for v in _FALSE_POSITIVE_VARS), \
+            f"白名单只允许极短名（≤3字符）：{_FALSE_POSITIVE_VARS}"
+        # 真实业务变量名一律不得在白名单
+        for name in ("title", "name", "content", "status", "type",
+                     "value", "count", "total", "code", "text", "label"):
+            assert name not in _FALSE_POSITIVE_VARS, f"{name} 是业务变量名，不得入白名单"
+
+    def test_business_var_no_longer_swallowed(self):
+        """收窄前 {title} 在含 JSON 特征的上下文会被误抑制，收窄后必须告警。"""
+        from app.services.ai.prompts._registry import _is_false_positive
+        tpl = '{"title": "示例"}\n标题：{title}'
+        assert not _is_false_positive("k", "title", tpl)
+
+    def test_first_occurrence_json_but_second_real_usage_alarms(self):
+        """T8-b：第一处是 JSON 示例、第二处是真实使用 → 必须告警（旧实现被吞）。"""
+        from app.services.ai.prompts._registry import _is_false_positive
+        tpl = '示例 {max: 200}；正文最多引用 {max} 条'
+        assert not _is_false_positive("k", "max", tpl)
+
+    def test_all_occurrences_json_like_still_suppressed(self):
+        """全部出现都像示例 → 仍抑制（不误伤既有行为）。"""
+        from app.services.ai.prompts._registry import _is_false_positive
+        tpl = '数量 {max} 的取值: 200；另一处 {max} 见下: 列表'
+        assert _is_false_positive("k", "max", tpl)
+
+    def test_latex_subscript_still_suppressed(self):
+        from app.services.ai.prompts._registry import _is_false_positive
+        assert _is_false_positive("k", "max", '公式 $p_{max}$ 与 $q_{max}$')
+
+    def test_existing_template_max_still_suppressed(self):
+        """回归：content_generation_system 的 {max}（LaTeX 下标）仍被抑制。"""
+        from app.services.ai.prompts._registry import _is_false_positive
+        real = _ALL_PROMPTS["content_generation_system"]["default_content"]
+        assert _is_false_positive("content_generation_system", "max", real)
+
+    def test_var_not_in_template_is_not_fp(self):
+        from app.services.ai.prompts._registry import _is_false_positive
+        assert not _is_false_positive("k", "max", "完全不含占位符的文本")

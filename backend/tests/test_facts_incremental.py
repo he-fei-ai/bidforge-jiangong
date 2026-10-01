@@ -211,6 +211,40 @@ async def test_persist_deletes_stale_empty_hash_rows(ctx):
     assert rows == [("总工期", "CCC")]
 
 
+async def test_persist_deletes_vanished_source_rows(ctx):
+    """2026-09-28 回归：文档内容变化导致分段指纹漂移后的过期未确认事实清理。
+
+    场景：旧文档的分段指纹 V1（对应一次提取落库的事实行）；重新解析/更新
+    文档后，新文档分段变为 {SKIP, V2} —— 其中 V2 段本次重跑，SKIP 段被增量
+    跳过。旧实现只删「空指纹 / 本次重跑指纹」：V1 行既不在 run 也不在 all，
+    永远残留 → 与新的 V2 事实同 key 重复堆积（界面出现两条同名未确认事实）。
+    新口径：指纹已不在当前文档**全量**分段集合 → 源头已消失 → 立即清除；
+    而仍在 all 但被跳过的 SKIP 段事实必须保留（增量语义不回归）。
+    """
+    db, pid, sid = ctx
+    await _fact_row(db, pid, sid, name="总工期", key="total_duration",
+                    chunk_hash="V1")                     # 源头已消失 → 应清除
+    await _fact_row(db, pid, sid, name="机械数量", key="machinery_count",
+                    chunk_hash="SKIP", category="machinery")  # 被跳过 → 应保留
+    await db.commit()
+
+    item = FactItem(name="总工期", value="300天", key="total_duration",
+                    category="schedule", source="doc.docx", chunk_hash="V2")
+    result = ExtractionResult()
+    result.groups = [FactGroup(title="工期安排", category="schedule",
+                               items=[item])]
+    result.total_items = 1
+    result.chunk_hashes_all = {"SKIP", "V2"}      # 当前文档全量分段（含跳过的 SKIP）
+    result.chunk_hashes_run = {"V2"}              # 本次实际重跑的段
+    await persist_extraction(result, db, pid, sid)
+
+    cur = await db.execute(
+        "SELECT title, chunk_hash FROM global_facts WHERE scheme_id=?", (sid,))
+    rows = {(r["title"], r["chunk_hash"]) for r in await cur.fetchall()}
+    # V1 源已消失 → 清除；SKIP 被跳过 → 保留；V2 新事实 → 落库
+    assert rows == {("机械数量", "SKIP"), ("总工期", "V2")}
+
+
 # ---------------------------------------------------------------------------
 # 进度表：写入与残留清理
 # ---------------------------------------------------------------------------

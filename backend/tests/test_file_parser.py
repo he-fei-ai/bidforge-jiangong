@@ -162,6 +162,43 @@ class TestParseFileContent:
         content = "测试内容".encode("utf-8")
         assert parse_file_content(content, "test.unknown") == "测试内容"
 
+    # ============================================================
+    # F1 / F5 防护（2026-09-26）
+    # ============================================================
+
+    def test_f1_binary_disguised_as_txt_rejected(self):
+        # ✅ F1：.exe 改名为 .txt 应被二进制防护拒绝（避免乱码入库污染事实库）
+        content = b"MZ" + b"\x00" * 64 + b"\x01\x02\x03"
+        from app.services.file_parser import ParseError
+        with pytest.raises(ParseError):
+            parse_file_content_ex(content, "evil.txt")
+
+    def test_f1_png_bytes_as_txt_rejected(self):
+        # PNG 二进制头改名 .txt 同样应拒绝
+        content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+        from app.services.file_parser import ParseError
+        with pytest.raises(ParseError):
+            parse_file_content_ex(content, "img.txt")
+
+    def test_f1_legit_gbk_text_allowed(self):
+        # 合法 GBK 文本改名 .txt 不应被误杀
+        _text, _diag = parse_file_content_ex("专项方案测试文本".encode("gbk"), "a.txt")
+        assert "专项方案测试文本" in _text
+
+    def test_f5_invisible_chars_normalized(self):
+        # ✅ F5：零宽字符 / NBSP / 控制字符被归一，并给出告警
+        raw = "工程名称\u200b：\u00a0测试\u0007结束".encode("utf-8")
+        _text, diag = parse_file_content_ex(raw, "a.txt")
+        assert "\u200b" not in _text
+        assert "\u00a0" not in _text
+        assert "\u0007" not in _text
+        assert any("不可见" in w for w in diag["warnings"])
+
+    def test_f5_normal_text_no_warning(self):
+        _text, diag = parse_file_content_ex("正常中文文本 123".encode("utf-8"), "a.txt")
+        assert _text == "正常中文文本 123"
+        assert not any("不可见" in w for w in diag["warnings"])
+
 
 # ============================================================
 # OLE 容器细分（旧版 .xls / .doc 流名嗅探 + 扩展名双向纠错）

@@ -86,6 +86,45 @@ describe("stripOutlineNumbering（剥离标题内嵌编号）", () => {
   it("空标题安全返回（不抛异常）", () => {
     expect(stripOutlineNumbering("")).toBe("");
   });
+
+  // ============================================================
+  // ✅ BUG 修复（2026-09-27 · 标题损坏，与后端 numbering.py 同步）
+  //    旧正则的点分编号分支 `[0-9]+(?:\.[0-9]+){0,7}[分隔符]+` 在路径后
+  //    没有分隔符时会回退成「更短前缀 + 把点当分隔符」：
+  //      "1.2.3（1）细部构造" → "3（1）细部构造"
+  //      "2.4.1钢筋工程"      → "1钢筋工程"
+  //    修复：前瞻捕获最长路径 + 反向引用整条吃满（模拟原子组）。
+  // ============================================================
+  it("点分编号后紧跟中文/全角括号：整条路径一次剥掉，绝不残留数字", () => {
+    expect(stripOutlineNumbering("1.2.3（1）细部构造")).toBe("（1）细部构造");
+    expect(stripOutlineNumbering("2.4.1钢筋工程")).toBe("钢筋工程");
+    expect(stripOutlineNumbering("3.2.4.5钢筋")).toBe("钢筋");
+    // 不变量：剥离结果不得以「来自编号的孤立数字」开头
+    for (const raw of ["1.2.3（1）细部构造", "2.4.1钢筋工程", "3.2.4.5钢筋"]) {
+      expect(/^\d/.test(stripOutlineNumbering(raw))).toBe(false);
+    }
+  });
+
+  it("第二遍剥离「（1）」子项标记并收敛", () => {
+    const once = stripOutlineNumbering("1.2.3（1）细部构造");
+    expect(once).toBe("（1）细部构造");
+    expect(stripOutlineNumbering(once)).toBe("细部构造");
+    expect(stripOutlineNumbering("细部构造")).toBe("细部构造");
+  });
+
+  it("「第 X 章」允许数字与「第」之间有空格", () => {
+    expect(stripOutlineNumbering("第 3 章 施工计划")).toBe("施工计划");
+    expect(stripOutlineNumbering("第 一 章 工程概况")).toBe("工程概况");
+  });
+
+  it("数值 + 单位不被当作编号剥坏（1.5m 深）", () => {
+    expect(stripOutlineNumbering("1.5m 深")).toBe("1.5m 深");
+  });
+
+  it("4 位年份前缀原样保留（与后端 _YEAR_PREFIX_RE 同口径）", () => {
+    expect(stripOutlineNumbering("2023 年度安全生产计划")).toBe("2023 年度安全生产计划");
+    expect(stripOutlineNumbering("2024年施工计划")).toBe("2024年施工计划");
+  });
 });
 
 describe("formatOutlineTitle（按层级套编号）", () => {

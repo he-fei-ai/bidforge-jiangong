@@ -34,6 +34,14 @@ def test_protected_ranges_plain_text_empty():
     assert collect_protected_ranges("普通正文，没有保护区。") == []
 
 
+def test_protected_ranges_tilde_fence():
+    # ✅ 2026-09-28：~~~ 波浪线围栏也必须受保护（旧正则只认反引号）
+    content = "前文\n~~~chart-json\n{\"a\": 1}\n~~~\n后文\n"
+    ranges = collect_protected_ranges(content)
+    fence_start = content.index("~~~chart-json")
+    assert any(s <= fence_start < e for s, e in ranges)
+
+
 def test_parse_operations_valid_and_fence_stripped():
     raw = "```json\n{\"operations\":[{\"operation\":\"replace\",\"target_text\":\"旧句\",\"content\":\"新句\"},{\"operation\":\"delete\",\"target_text\":\"废话\"}]}\n```"
     ops = parse_shrink_operations(raw)

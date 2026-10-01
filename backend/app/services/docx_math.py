@@ -73,9 +73,18 @@ _CLIPBOARD_NL_RE = re.compile(r"<nl\s*/?>", re.I)
 _HTML_BR_RE = re.compile(r"<br\s*/?>", re.I)
 _HTML_CELL_END_RE = re.compile(r"</t[dh]\s*>", re.I)
 _HTML_ROW_END_RE = re.compile(r"</tr\s*>", re.I)
+# ✅ BUG 修复（2026-09-27）：属性段原为 ``[^>]*``，允许「标签名」与「>」之间夹任意文本，
+#    于是正文里合法的比较式被当成标签整段删除（实测「当 T<P 且 Q>R 时」→「当 TR 时」，
+#    静默丢正文，违反 AGENTS.md §3.1.6 数据真实性红线）。现按真实 HTML 属性语法收紧：
+#    属性名必须是 ASCII 标识符、属性值必须是引号串或无空白串，中文/空格内容不再匹配；
+#    同时保留「仅处理真实标签」的语义（``<p class="x">`` 仍被清理）。
+_HTML_ATTR = (
+    r"(?:\s+[a-zA-Z_:][-a-zA-Z0-9_:.]*"
+    r"(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s\"'>]+))?)*\s*"
+)
 _HTML_TABLE_TAG_RE = re.compile(
     r"</?(?:table|thead|tbody|tfoot|tr|td|th|col|colgroup|caption|div|span|p|font)"
-    r"\b[^>]*>",
+    r"\b" + _HTML_ATTR + r">",
     re.I,
 )
 
@@ -86,6 +95,12 @@ def strip_table_markup(text: str) -> str:
     - ``<nl>`` / ``<br>`` → 换行；``</td>`` / ``</th>`` → 空格（单元格分隔）；
       ``</tr>`` → 换行；``<fcel>`` 等占位标记与其余表格标签 → 丢弃。
     - 不删除单元格内正文，只去除包裹它的标记，故「宁可不改，不丢内容」。
+
+    ✅ BUG 修复（2026-09-27）：属性段由 ``[^>]*`` 收紧为真实 HTML 属性语法后，
+    正文里的合法比较式不再被当成标签整段删除（实测「当 T<P 且 Q>R 时设计」曾被删成
+    「当 TR 时设计」，**静默丢正文**且用户与导出日志均无提示，违反 AGENTS.md §3.1.6）。
+    误伤面已收敛为「只有形态确为标签的尖括号才会被删」：``<p class="x">``、``</span>``
+    照常清理，而 ``T<P``、``a<b 且 c>d``、``f(x) < 3`` 逐字节保留。
     """
     if not text or ("<" not in text):
         return text

@@ -360,7 +360,12 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str,
     traced_chunks = int((r["traced"] if r else 0) or 0)
 
     cur = await db.execute(
-        "SELECT extract_type, extract_data FROM doc_extractions WHERE doc_id=?",
+        # ✅ BUG 修复（2026-09-29 · 陈旧行虚高覆盖率）：sync_extract_layer 会把
+        #    「本轮已无源」的提取类别标记为 status='stale'（保留数据以便回溯）。
+        #    若此处不过滤，被清空的项目基本信息仍以旧内容计入字段覆盖率，
+        #    完整性报告与「提取结果已被清空」的实际状态分叉。
+        "SELECT extract_type, extract_data FROM doc_extractions"
+        " WHERE doc_id=? AND COALESCE(status,'') != 'stale'",
         (doc_id,))
     ext_rows = {r2["extract_type"]: r2["extract_data"] for r2 in await cur.fetchall()}
 
@@ -525,6 +530,21 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
         "FROM bid_analysis_items WHERE project_id=? AND status='success'",
         (project_id,))
     items = [dict(r) for r in await cur.fetchall()]
+    # ✅ BUG 修复（2026-09-29 · 失败哨兵被物化）：旧实现只按 status='success' 过滤，
+    #    而 bid_analysis 在「全部分段无有效结果」时写入 status='success' + content='{}'
+    #    的失败哨兵（见 routers/bid_analysis.py 的 _run_single_item / _repair_json）。
+    #    哨兵被物化后，完整性报告会把一个空壳 JSON 当成有效提取结果计入字段覆盖率，
+    #    与同表其它消费方（/bid-analysis/results、format_downstream_context）经
+    #    is_missing_result 判定的「缺失」口径分叉。现复用同一判据过滤（fail-soft：
+    #    判定函数不可用时退化为不过滤，保持旧行为）。
+    try:
+        from app.services.bid_analysis_service import is_missing_result
+    except Exception:  # pragma: no cover - 导入失败时退化为不过滤（旧行为）
+        is_missing_result = None
+    if is_missing_result is not None:
+        items = [it for it in items
+                 if not is_missing_result(it.get("content") or "",
+                                          it.get("output_type") or "markdown")]
     by_type: dict[str, list[dict]] = {}
     for it in items:
         for t in _ITEM_TO_EXTRACT_TYPE.get(it["item_id"], ()):
@@ -599,6 +619,32 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
              "ai-extractor-v1", "success", now))
         written_types.append(ext_type)
     await db.commit()
+
+    # ✅ BUG 修复（2026-09-29 · 陈旧提取层残留）：旧实现只 upsert 本轮有源的类别，
+    #    本轮无源的类别既不更新也不清理。用户清空/删除某类解析项（或全局事实被删空）
+    #    后再次物化，doc_extractions 里该类别的旧行仍是 status='success' + 旧内容，
+    #    GET /documents/{id}/extractions?type=X 返回「成功」的过期结果，
+    #    build_completeness_report 的字段覆盖率随之虚高；同时 project_documents
+    #    .extract_status 被写成 'pending'（written_types 为空），与表内 success 行
+    #    自相矛盾。现对本轮未写入的非预留类别做陈旧化标记：保留 extract_data 便于
+    #    回溯（彻底删除仍由 purge_document 负责），但 status 明确不再是 'success'，
+    #    各消费方据此可判定「该类别已无有效提取结果」。
+    stale_types = [
+        t for t in store.EXTRACT_TYPES
+        if t not in store.RESERVED_EXTRACT_TYPES and t not in written_types
+    ]
+    if stale_types:
+        ph = ",".join("?" * len(stale_types))
+        try:
+            await db.execute(
+                f"UPDATE doc_extractions SET status='stale', extract_time=? "
+                f"WHERE doc_id=? AND extract_type IN ({ph}) "
+                f"AND COALESCE(status,'') != 'stale'",
+                (now, doc_id, *stale_types))
+            await db.commit()
+        except Exception as e:  # noqa: BLE001 - 陈旧化失败不应阻断物化主流程
+            logger.warning("标记陈旧提取层失败（doc=%s，不影响物化结果）: %s",
+                           doc_id, e)
 
     extract_status = "success" if written_types else "pending"
     # ✅ 清理（2026-09-20）：此处曾有一条 SELECT doc_category 的查询但结果从未
@@ -845,6 +891,13 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
     cross_src_conflicts, cross_src_flagged = await detect_cross_source_conflicts(
         db, project_id=project_id)
     flagged_ids |= cross_src_flagged
+
+    # ✅ 修复（2026-09-26）：先把本项目全部 has_conflict 清零，再按「当前」校验结果
+    #    置 1，使标记严格反映最新交叉校验状态。旧实现只置 1 不清零，导致已消解的
+    #    冲突（如 bid_analysis_items 取值被改一致、或人工裁决后）永久残留
+    #    has_conflict=1，前端矛盾徽标误报、且下游注入门槛（has_conflict=0）误杀事实。
+    await db.execute(
+        "UPDATE global_facts SET has_conflict=0 WHERE project_id=?", (project_id,))
 
     if flagged_ids:
         ph = ",".join("?" * len(flagged_ids))

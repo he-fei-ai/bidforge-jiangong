@@ -392,42 +392,42 @@ class TestCharTableAliases:
 class TestBodySubheadingDemotion:
     """有 DB 子章节的章节，正文子标题降级为节内 body 命名空间。
 
-    降级后：正文子标题第一层用「1）/2）」（L6），更深层用「a、/b、」（L7 字母序列）。
+    降级后：正文子标题第一层用「1）、2）、」（L6），更深层用「a、/b、」（L7 字母序列）。
     这样正文子标题（L6+）与 DB 子章节（L3+）在同一文档内使用两个独立的命名空间——
     不再出现「1.1 正文标题」与「1.1 DB 子章节」成对撞号。
     """
 
     def test_rel0_demotes_to_l6(self):
-        """has_children=True、相对深度 0 → 1） 标题（L6）。"""
+        """has_children=True、相对深度 0 → 1）、标题（L6，顿号、无空格）。"""
         from app.routers.export import _compute_subheading
         sub = {}
         text, style = _compute_subheading("2", 2, 1, sub, "总体安排",
                                          sec_id="sec-1", has_children=True)
-        assert text == "1） 总体安排"
+        assert text == "1）、总体安排"
         assert style == 6  # L6 Heading
         text2, _ = _compute_subheading("2", 2, 1, sub, "资源配置",
                                        sec_id="sec-1", has_children=True)
-        assert text2 == "2） 资源配置"
+        assert text2 == "2）、资源配置"
 
     def test_rel1_demotes_to_l7_lowercase(self):
-        """has_children=True、相对深度 1 → a、 标题（L7）。"""
+        """has_children=True、相对深度 1 → a、标题（L7，顿号、无空格）。"""
         from app.routers.export import _compute_subheading
         sub = {}
         _compute_subheading("2", 2, 1, sub, "总体安排", has_children=True)  # rel0 → 1）
         text, style = _compute_subheading("2", 2, 2, sub, "劳动组织",
                                          sec_id="sec-1", has_children=True)  # rel1
-        assert text == "a、 劳动组织"
+        assert text == "a、劳动组织"
         assert style == 7
 
     def test_rel2_continues_l7(self):
-        """has_children=True、相对深度 2 → b、 标题（L7 字母序列续排）。"""
+        """has_children=True、相对深度 2 → b、标题（L7 字母序列续排）。"""
         from app.routers.export import _compute_subheading
         sub = {}
         _compute_subheading("2", 2, 1, sub, "总体安排", has_children=True)
         _compute_subheading("2", 2, 2, sub, "劳动组织", has_children=True)
         text, style = _compute_subheading("2", 2, 3, sub, "工种分配",
                                          sec_id="sec-1", has_children=True)
-        assert text == "b、 工种分配"
+        assert text == "b、工种分配"
         assert style == 7
 
     def test_no_demote_when_no_children(self):
@@ -452,7 +452,7 @@ class TestBodySubheadingDemotion:
         sub2 = {}  # 计数器重置
         t2, s2 = _compute_subheading("2", 2, 1, sub2, "总体安排",
                                      sec_id="sec-1", has_children=True)
-        assert t1 == t2 == "1） 总体安排"
+        assert t1 == t2 == "1）、总体安排"
         assert s1 == s2 == 6
 
     def test_mixed_depth_counter_resets_properly(self):
@@ -464,9 +464,9 @@ class TestBodySubheadingDemotion:
         _compute_subheading("2", 2, 2, sub, "A2", has_children=True)  # b、
         # rel0 回跳 → rel0 计数器续排（不是重置）
         t, _ = _compute_subheading("2", 2, 1, sub, "B", has_children=True)
-        # 相对深度 0 计数器在原 sub 上继续递增
+        # 相对深度 0 计数器在原 sub 上继续递增；L6 格式为 'N）、标题'（顿号）
         parts = t.split("）", 1)
-        assert parts[1].strip() == "B"
+        assert parts[1].strip() == "、B"
         assert int(parts[0].strip()) >= 2
 
 

@@ -71,13 +71,26 @@ _reg("chart_mermaid_fix", "charts", "Mermaid 修复（分类型专项）", """�
 | **P4** | 架构图同级重名 | 同级两个「技术组」 | 合并或改名区分 |
 | **P5** | Pie 百分比总和 ≠ 100 | 数据加和不等于 100 | 调整至总和 100（≥3 项） |
 | **P5** | Pie 数据项不足 | 仅 2 项 | 补至 ≥3 项 |
+| **P5** | 时间轴缺 `title`/`sections` | `timeline` 块无标题或无分区 | 补 `title` 与 `sections`，每节含 `name` + `items` |
+| **P5** | 时间轴节点标签未引号 | `items: [准备阶段]` | → `items: ["准备阶段"]` |
+| **P5** | 时间轴分区为空 | `sections: []` | 补 ≥2 个分区，每节 ≥2 个节点 |
 
 ## 三、按图表类型的修复侧重
 - **flowchart**：优先恢复「准备 → 施工 → 验收」主干；判断分支必须成对且带标签；删除样式与 HTML 标签
 - **gantt**：优先保证 `dateFormat` + `axisFormat` + 5～7 个任务 + `after` 依赖链 + 末尾竣工验收里程碑；任务数超限时按阶段归并
 - **architecture**：优先保证「单一根节点 + ≤3 层 + 同级不重名」；层级过深时合并最底层
 - **pie**：优先保证 ≥3 项且总和为 100
+- **timeline**（时间轴）：优先保证 `title` + `sections` 结构完整、每节 `name` + `items` 齐备、节点标签用 `["…"]` 包裹；分区少于 2 或空分区时补齐
 - 修复后节点/任务数量若与原图差异较大，以**逻辑正确、可渲染**为准
+
+> ✅ 2026-09-27（补齐 7 类覆盖缺口）：`timeline` 此前在本通用模板里**完全没有
+> 提及**，而 `chart_mermaid_fix` 只为 flowchart/gantt/comparison 注册了专项版
+> —— 于是「时间轴 + Mermaid 修复」这条链路回退到通用版时，模型拿不到任何
+> 时间轴的结构约束，只能照着 flowchart 的规则改，必然产出错误结构。
+> 本节与上面的 P5 诊断表补齐了 timeline 的规则，使通用版对
+> **全部 7 类**（flowchart/gantt/architecture/labor/comparison/layout/timeline）
+> 都有可依据的结构口径。回归护栏见
+> `tests/test_chart_prompt_coverage_20260927.py`（7×2 覆盖矩阵 parity 断言）。
 
 ## 四、兜底极简版本（原代码完全不可用时）
 - flowchart：`A1["施工准备"] --> B1["主体施工"]` → `B1 --> C1["验收移交"]`（3～5 节点）

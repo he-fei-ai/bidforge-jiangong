@@ -36,6 +36,12 @@ _STARTED_AT = time.time()
 # 用 time.monotonic() 而非 wall clock 判断过期（避免系统时间被改导致不刷新）。
 _today_prefix_cache: tuple[float, str] | None = None
 
+# 「运行中任务」查询的独立上限（2026-09-30 新增）。
+# 与 limit（历史任务条数）**刻意解耦**：不变量「只要存在运行中任务，
+# running 必非空」不应受展示条数影响。实测并发任务上限远小于此值，
+# 故这是防御性上限而非真实约束（AI 并发硬上限为 5，见 AGENTS.md §4.1）。
+_RUNNING_MAX = 50
+
 
 def _today_local_prefix() -> str:
     """返回今日本地时间零点前缀（1 天 TTL 缓存）。"""
@@ -66,6 +72,8 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
 
     # ---- 1. 任务列表（DB 历史 + 内存实时态合并）----
     tasks: list[dict] = []
+    rows: list[dict] = []
+    running_rows: list[dict] = []
     conn = None
     try:
         conn = await get_read_conn()
@@ -76,14 +84,53 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
             " ORDER BY t.created_at DESC LIMIT ?",
             (limit,))
         rows = [dict(r) for r in await cur.fetchall()]
+
+        # ✅ P0 BUG 修复（2026-09-30 · 「先截断后过滤」→ AI 在跑却显示"后台空闲"）：
+        #   旧实现把 ORDER BY created_at DESC LIMIT 与"挑出 running/paused"写成
+        #   两个独立步骤（:76 截断 → :109 过滤）。`created_at DESC` 把**最新创建**
+        #   的任务排在最前，而**正在运行的长任务恰恰是最早创建的那批**（正文生成
+        #   十几分钟）。用户在此期间每完成一章 / 切一次 Tab / 重跑一次其它任务，
+        #   都会插入更"新"的行 → 长任务被挤出 limit → running 变成空列表。
+        #   后果是**自相矛盾**的用户可见故障：同一份快照里 ai.in_flight 来自
+        #   get_ai_live_stats()（全局内存态，不受 LIMIT 影响）> 0，前端却按
+        #   running.length === 0 渲染「**后台空闲**」。
+        #   正确不变量：**「只要存在运行中任务，running 必非空」——与 limit 无关**。
+        #   limit 只应约束"历史终态任务"展示多少条。
+        #   修法：running 独立成一条**不受 limit 约束**的查询（上限 _RUNNING_MAX），
+        #   与 recent 按 id 去重合并。对既有场景逐字节一致（running 数本就 < limit），
+        #   仅在"长任务被挤出"时修正。与 recent 共用同一连接，避免重复借还。
+        cur = await conn.execute(
+            "SELECT t.id, t.task_type, t.status, t.progress, t.message,"
+            " t.scheme_id, t.created_at, t.updated_at, s.name AS scheme_name"
+            " FROM task_registry t LEFT JOIN schemes s ON s.id = t.scheme_id"
+            " WHERE t.status IN ('running','paused')"
+            " ORDER BY t.created_at DESC LIMIT ?",
+            (_RUNNING_MAX,))
+        running_rows = [dict(r) for r in await cur.fetchall()]
     except Exception as e:
+        # fail-soft：任一查询失败都不阻断状态栏（只读常驻 UI，不应弹错）
         logger.warning("activity: 读取任务列表失败: %s", e)
-        rows = []
+        # 退回旧行为：从已取到的 recent 里挑运行中任务
+        if not running_rows:
+            running_rows = [r for r in rows
+                            if r.get("status") in ("running", "paused")]
     finally:
         if conn is not None:
             await release_read_conn(conn)
 
-    for t in rows:
+    # 合并：running 在前（与 recent 按 id 去重），再补 recent 其余条目
+    # ⚠️ 合并**只在这一处**做。修复前下方还有一个 `for t in rows: ... tasks.append(t)`
+    # 循环，若两处并存会让 recent 里的任务重复出现（前端列表出现重复行）。
+    seen: set[str] = set()
+    for r in running_rows + rows:
+        rid = r.get("id")
+        if rid and rid in seen:
+            continue
+        if rid:
+            seen.add(rid)
+        tasks.append(r)
+
+    for t in tasks:
         st = _tr._tasks.get(t["id"])
         if st:
             # 内存态永远比 DB 新（进度落库有节流）
@@ -104,9 +151,11 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
             t["live"] = False
             t.setdefault("message", "")
             t["stats"] = {}
-        tasks.append(t)
 
     running = [t for t in tasks if t.get("status") in ("running", "paused")]
+    # recent 只回最近 limit 条（running 可能额外多出若干条，这是修复的预期差异：
+    # 之前它们是被静默丢弃的，现在必须出现，否则界面会说"后台空闲"）
+    recent = tasks[:limit]
 
     # ---- 2. 今日 AI 调用汇总（审计日志攒批落库最长延迟 ~10s）----
     ai_today: dict = {}
@@ -159,7 +208,7 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
             "version": APP_VERSION,
             "uptime": int(time.time() - _STARTED_AT),
         },
-        "tasks": {"running": running, "recent": tasks},
+        "tasks": {"running": running, "recent": recent},
         "ai": ai,
     }
 

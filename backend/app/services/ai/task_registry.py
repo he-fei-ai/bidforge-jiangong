@@ -12,7 +12,7 @@ import time
 import uuid
 from datetime import datetime, timedelta
 
-from app.db import get_conn, retry_db_op
+from app.db import get_conn, retry_db_op, safe_rowcount
 from app.services import activity_broadcaster as _ab
 # ✅ Fix C 接入：pause 时同步调用 reject_waiters 打断全局 provider 层排队协程
 from app.services.ai.workflows_base import concurrency_controller as _cc
@@ -303,7 +303,12 @@ async def _set_task_status_db(task_id: str, status: str) -> int:
         "WHERE id=? AND status IN ('running','paused')",
         (status, datetime.now().isoformat(), task_id))
     await conn.commit()
-    return int(getattr(cur, "rowcount", 0) or 0)
+    # ✅ 2026-09-30 收敛到 safe_rowcount 单一出口（R13）：旧写法
+    #   int(getattr(cur, "rowcount", 0) or 0) 不抛 AttributeError，但
+    #   execute() 返回 None 时**静默返回 0、零日志** —— 调用方会误判为
+    #   「任务已是终态」（正常的竞态守卫结果），从而把一次 R13 写失败
+    #   伪装成正常语义。safe_rowcount 打 WARNING 并把负 rowcount 归一为 0。
+    return safe_rowcount(cur, what=f"任务控制指令落库 status={status}")
 
 
 async def set_task_status(task_id: str, status: str) -> bool:
@@ -464,7 +469,7 @@ async def reap_orphan_tasks(max_stale_seconds: float = 900.0) -> int:
             f"WHERE id IN ({ph}) AND status IN ('running','paused')",
             [datetime.now().isoformat(), *orphan_ids])
         await conn.commit()
-        changed = int(getattr(cur2, "rowcount", 0) or 0)
+        changed = safe_rowcount(cur2, what="僵尸后台任务批量置 stopped")
         if changed:
             _ab.notify()
             logger.warning(

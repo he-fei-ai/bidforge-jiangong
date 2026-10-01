@@ -684,7 +684,11 @@ def test_score_findings_weight_normalization_total_bounded():
 
 def test_rule_version_bumped_and_get_rule_fallback():
     """RULE_VERSION 已升至 1.4.0（CON-02/CON-03 死规则改判 + TRC-01 跨维度双扣修复）；get_rule 对带后缀 rule_id 返回 None（不 crash）。"""
-    assert RULE_VERSION == "1.5.0"
+    # RULE_VERSION 按注册表维护约定随规则增删改递增（此处 1.6.0 起含 DLV-13/DLV-14），
+    # 故断言「不低于已知下界」而非硬钉某个具体值，避免每次新增规则都要改断言。
+    assert tuple(int(x) for x in RULE_VERSION.split(".")[:2]) >= (1, 6)
+    # get_rule 对派生编号仍返回 None（唯一事实源只登记基编号）；
+    # 派生编号的回退解析由 preflight_engine._resolve_rule 负责，两者职责不混。
     assert get_rule("CON-05-1") is None
     assert get_rule("CON-05") is not None
 

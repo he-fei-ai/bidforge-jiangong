@@ -27,6 +27,7 @@ from app.routers.export import _compute_subheading
 from app.routers.sections import create_section
 from app.services.ai.heading_templates import (
     build_heading_spec_prompt,
+    build_subheading_rule,
     format_heading_by_id,
     get_heading_template,
 )
@@ -209,18 +210,48 @@ class TestContentPromptAlignedWithExport:
         )
         assert "（一） 标题（中文数字加全角括号）" not in tpl
 
-        # 真正生效的点分规则文案在 generate_content 内
-        src = inspect.getsource(sh.generate_content)
-        i = src.index("_sub_rule = (")
-        block = src[i:src.index("sys_prompt = render(", i)]
-        assert "- 二级小标题：1.1 标题" in block
-        assert "- 三级小标题：1.1.1 标题" in block
-        assert "- 四级小标题：1.1.1.1 标题" in block
-        assert "- 五级小标题：1.1.1.1.1 标题" in block
+        # ✅ 2026-09-26：文案已从 generate_content 内部迁到
+        #    heading_templates.build_subheading_rule（唯一实现）。旧断言在
+        #    `inspect.getsource(generate_content)` 里找 "_sub_rule = ("，
+        #    该局部变量早已随模板化重构消失 → ValueError。
+        #    改为直接对**真正下发给模型的文案**断言（点分 + 降级两种命名空间）。
+        normal = build_subheading_rule(has_db_children=False)
+        assert "- 二级小标题：1.1 标题" in normal
+        assert "- 三级小标题：1.1.1 标题" in normal
+        assert "- 四级小标题：1.1.1.1 标题" in normal
+        assert "- 五级小标题：1.1.1.1.1 标题" in normal
         # 旧断号示例（第 2 节从 2 起）不得回归
-        assert "小标题从 2、2.1、2.1.1 起" not in block
+        assert "小标题从 2、2.1、2.1.1 起" not in normal
         # E3：body 命名空间分支必须与降级开关同在（否则正文/子章节撞号无提示）
-        assert "N）标题" in block and "字母、标题" in block
+        demoted = build_subheading_rule(has_db_children=True)
+        # ✅ 编号统一（2026-09-26）：降级命名空间 L6 文案须与导出实际产出一致（'1）、标题'，顿号）
+        assert "N）、标题" in demoted and "字母、标题" in demoted
+        assert "1.1 标题" not in demoted
+
+    def test_subheading_rule_actually_reaches_prompt(self):
+        """✅ BUG-8 回归：{subheading_rule} 必须真的被注入，否则整段规范为空。
+
+        该占位符自登记进 PROMPT_VARIABLE_CONTRACTS 起就**无任何生成方**，
+        render 时被丢弃 —— 发给模型的提示词是
+        「章节内部小标题编号规范（如需分层组织内容时使用）：」+ 空行，
+        AI 收不到编号规范只能自由发挥。本用例锁定「占位符不再残留」。
+        """
+        from app.services.ai.prompts._registry import render as _render
+        for has_children in (False, True):
+            out = _render(
+                "content_generation_system",
+                scheme_name="X", scheme_type="Y",
+                section_number="1.1", standards_text="",
+                subheading_rule=build_subheading_rule(
+                    has_db_children=has_children))
+            assert "{subheading_rule}" not in out, "占位符未被替换"
+            i = out.find("章节内部小标题编号规范")
+            assert i != -1, "提示词应保留小标题规范小节标题"
+            seg = out[i:i + 200]
+            # 规范标题之后必须紧跟实质内容，不能是空行
+            body = seg.split("：", 1)[1].lstrip() if "：" in seg else ""
+            assert body.strip(), f"小标题规范内容为空（has_children={has_children}）"
+            assert "标题" in body
 
     def test_export_subheading_matches_prompt_examples(self):
         """提示词示例与导出 _compute_subheading 实际产出一致"""

@@ -66,6 +66,21 @@ export type BaTextStats = {
   item_count: number;
   est_model_calls: number;
   chunk_size?: number;
+  // ===== 提取依据完整性（2026-09-26 起由后端 text_stats / completed 事件透传）=====
+  // 截断信号此前只停在后端（parse_truncated 已持久化、_combine_doc_texts 的报告
+  // 分支也早写好但从未被调用）—— 用户全程看不到「提取依据不完整」，
+  // 会拿着残缺的招标文件往下走。字段与后端 _combine_doc_texts_report 逐字对齐，
+  // 全部可选：旧后端 / 缓存的旧事件不带这些字段时前端按「未知」处理，不误报。
+  /** 任一参与提取的文档被截断，或预算不足导致有文档整份未被纳入 */
+  source_truncated?: boolean;
+  /** 被截断的文档清单（沿用后端 details 形状：name / category / chars） */
+  truncated_docs?: Array<{ name?: string; category?: string; chars?: number }>;
+  /** 纳入提取的文档数 */
+  used_doc_count?: number;
+  /** 项目文档总数 */
+  input_doc_count?: number;
+  /** 未纳入的文档数（预算耗尽被整份跳过，或正文为空） */
+  dropped_doc_count?: number;
 };
 
 /** 解析项「无有效内容」标记（与后端 MARKDOWN_MISSING_RESULT 一致） */

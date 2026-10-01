@@ -559,7 +559,12 @@ def test_render_facts_text_chapter_never_drops_facts():
     ]
     text = sh._render_facts_text(rows, chapter="plan", max_total=400)
     assert "A1" in text           # 本章事实必须注入
-    assert "B1" not in text       # 超预算时先舍弃补充事实
+    # ✅ 2026-09-27 契约变更：超预算时改为**按比例分配**，
+    # 本章事实优先，但其余事实**不再整段丢弃**（旧实现为头部优先
+    # break，尾部事实在提示词里完全不可见 → AI 误判「事实缺失」
+    # → 读出假性【待补充】）。
+    assert "B1" in text and "C1" in text
+    assert len(text) <= 400
     # 不传 chapter 时行为完全不变（默认行为）
     text_default = sh._render_facts_text(rows, max_total=2000)
     assert "A1" in text_default and "B1" in text_default and "C1" in text_default

@@ -165,7 +165,7 @@ async def test_con02_con03_migrated_to_ai_mode():
     # 改判后应出现在 AI 规则清单里（前端 /check 清单来源）
     ids = {r.rule_id for r in ai_rules()}
     assert {"CON-02", "CON-03"} <= ids
-    assert RULE_VERSION == "1.5.0"
+    assert tuple(int(x) for x in RULE_VERSION.split(".")[:2]) >= (1, 6)
 
 
 # ===========================================================================

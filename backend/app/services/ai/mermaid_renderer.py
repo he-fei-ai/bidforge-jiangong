@@ -110,11 +110,31 @@ def _code_cache_ident(mermaid_code) -> str:
         s.encode("utf-8", "surrogatepass")).hexdigest()
 
 
+# ✅ 深度审查修复（2026-09-20）：渲染器缓存版本号。
+#    修改渲染逻辑 / 升级 mermaid 引擎后必须加 1，使旧缓存图片自动失效。
+# ✅ P1 修复（2026-09-27 · 内存 LRU 未纳入版本号 → 磁盘版本机制形同虚设）：
+#    此前本常量定义在文件中部（第 712 行附近），只有**磁盘**缓存键
+#    （ChartCache 的 `material += f":v{_RENDERER_VERSION}"`）含版本号，
+#    而进程内 LRU（_render_cache）的键**不含**版本。升级渲染器后的实际行为是：
+#      内存 LRU 先命中 → 直接返回**旧版本渲染出的 PNG** → 根本不查磁盘 →
+#      磁盘版本机制完全被绕过；退一步说，即便重查磁盘，也会在新版本号的
+#      槽位里**写入旧图**（get_or_render 的 set 路径），把旧图「转正」为新版本，
+#      直到进程重启才恢复。clear_render_cache 在生产链路零调用，加剧该问题。
+#    修复：把版本号提升为**内存键的第一段**，使内存与磁盘两道缓存同时失效。
+#    （常量上移到此处仅为让 _render_cache_key 可见；定义位置不影响取值。）
+_RENDERER_VERSION = 1
+
+
 def _render_cache_key(mermaid_code: str, chart_type: str,
                      duration: int, unit: str, tick: int,
                      skip_http: bool, allow_pil: bool) -> tuple:
-    """构造缓存键。仅用可 hash 的元组，避免对 BytesIO 做 hash。"""
+    """构造缓存键。仅用可 hash 的元组，避免对 BytesIO 做 hash。
+
+    ✅ P1 修复（2026-09-27）：键首段为 ``_RENDERER_VERSION`` —— 渲染器
+    升级后进程内 LRU 与磁盘缓存**同时**失效（详见上方常量注释）。
+    """
     return (
+        f"v{_RENDERER_VERSION}",
         chart_type,
         _code_cache_ident(mermaid_code),
         duration, unit, tick, skip_http, allow_pil,
@@ -709,9 +729,11 @@ def render_mermaid_to_bytes(
     logger.warning("[渲染] 建议检查: 1)HTTP服务是否可用 2)PIL v2渲染器是否正常")
     return None
 
+
 # ✅ 深度审查修复（2026-09-20）：渲染器缓存版本号。
 #    修改渲染逻辑 / 升级 mermaid 引擎后必须加 1，使旧缓存图片自动失效。
-_RENDERER_VERSION = 1
+#    （2026-09-27 起该常量定义在文件顶部，内存 LRU 键与磁盘键共用，
+#      详见 _render_cache_key 上方注释；此处仅保留说明，不再重复定义。）
 
 
 class ChartCache:

@@ -115,10 +115,204 @@ ANALYSIS_ITEMS: list[dict] = [
         "item_id": "engineeringMethods", "label": "工程做法", "required": 1,
         "output_type": "markdown", "sort_order": 18, "group": "construction",
     },
+    # --- 技术评分要求（2026-09-30 第十五轮 · 对齐易标「标书智能体（一）」）---
+    # ⚠️ 排在最后（sort_order=19）而非插到前面：既有 18 项的 sort_order 是
+    #    **历史数据契约**（前端展示顺序、已落库行的顺序），插队会让老项目的
+    #    目录/正文消费顺序错位。新增项一律追加到末尾。
+    {
+        "item_id": "techScoring", "label": "技术评分要求", "required": 0,
+        "output_type": "json", "sort_order": 19, "group": "scoring",
+        "description": "技术评分项名称、权重/分值、评分标准与数据来源（评分依据），"
+                       "用于目录覆盖性校验与一级目录对齐。",
+        "fields": [["item_name", "评分项名称"],
+                   ["weight", "权重/分值（统一为分或 %）"],
+                   ["criteria", "评分标准"],
+                   ["source", "数据来源（招标文件章节/表格位置）"]],
+    },
 ]
 
-# 解析项 id → 定义 的快速索引
-_ITEM_MAP: dict[str, dict] = {it["item_id"]: it for it in ANALYSIS_ITEMS}
+# ================================================================
+# ✅ 2026-09-30（第十一轮 · 招标响应域引入）
+# 本软件原有 18 项属「专项方案编制域」(domain="scheme")，服务于专项方案正文编制；
+# 易标（OpenBidKit）的 18 项属「招标响应域」(domain="bid_response")，服务于招标文件
+# 响应分析（技术评分项、商务评分、废标项、评标要求、合同授予等）。
+#
+# ⚠️ 两域 item_id 零交集、业务域完全不同。故按「加法引入」而非替换：
+#   - 默认 domain="scheme"，`ANALYSIS_ITEMS` 引用与主键格式保持旧值，
+#     既有调用点、历史数据、下游消费契约全部零改动；
+#   - 招标响应域需显式打开（config.bid_response_domain_enabled=True，默认 False），
+#     与 AGENTS.md §4.8「facts_chapter_inject 默认 False」同一套向后兼容模式。
+# ================================================================
+BID_RESPONSE_ITEMS: list[dict] = [
+    {
+        "item_id": "projectOverview", "label": "项目概述", "required": 1,
+        "output_type": "markdown", "sort_order": 1, "group": "overview",
+        "description": "提取项目基本信息、背景目的、规模预算、时间安排、实施内容和技术特点。",
+    },
+    {
+        "item_id": "techRequirements", "label": "技术评分要求", "required": 1,
+        "output_type": "markdown", "sort_order": 2, "group": "scoring",
+        "description": "提取技术评分项、权重分值、评分标准和招标文件中的位置。",
+    },
+    {
+        "item_id": "projectInfo", "label": "项目信息", "required": 1,
+        "output_type": "json", "sort_order": 3, "group": "subject",
+        "description": "项目名称、编号、类型、预算和地址。",
+        "fields": [["project_name", "项目名称"], ["project_number", "项目编号"],
+                   ["project_type", "项目类型"], ["project_budget", "项目预算"],
+                   ["project_address", "项目地址"]],
+    },
+    {
+        "item_id": "partAInfo", "label": "甲方信息", "required": 1,
+        "output_type": "json", "sort_order": 4, "group": "subject",
+        "description": "招标人公司、地址、联系人和电话。",
+        "fields": [["company_name", "公司名称"], ["address", "地址"],
+                   ["contact_person", "联系人"], ["contact_phone", "联系电话"]],
+    },
+    {
+        "item_id": "deliveryAndServiceRequirements", "label": "交货和服务要求",
+        "required": 1, "output_type": "json", "sort_order": 5, "group": "subject",
+        "description": "实施周期、交付范围、地点、验收、质保、售后、响应、培训和文档要求。",
+        "fields": [["implementation_period", "实施周期/工期/交付期限"],
+                   ["delivery_scope", "交付范围"], ["delivery_location", "交付/实施地点"],
+                   ["acceptance_requirements", "验收要求"], ["warranty_period", "质保期"],
+                   ["after_sales_service", "售后服务要求"], ["response_time", "响应时限"],
+                   ["training_requirements", "培训要求"],
+                   ["documentation_requirements", "资料/文档交付要求"]],
+    },
+    {
+        "item_id": "procurementList", "label": "采购清单", "required": 0,
+        "output_type": "markdown", "sort_order": 6, "group": "subject",
+        "description": "采购内容、数量、规格参数、交付和验收要求。",
+    },
+    {
+        "item_id": "responseFileRequirements", "label": "响应文件要求", "required": 1,
+        "output_type": "markdown", "sort_order": 7, "group": "response",
+        "description": "响应文件组成、格式模板、签章、递交和偏离表要求。",
+    },
+    {
+        "item_id": "agentInfo", "label": "代理机构信息", "required": 0,
+        "output_type": "json", "sort_order": 8, "group": "subject",
+        "description": "代理机构联系方式和账户信息。",
+        "fields": [["company_name", "公司名称"], ["address", "地址"],
+                   ["contact_person", "联系人"], ["contact_phone", "联系电话"],
+                   ["email", "联系邮箱"], ["bank_account_name", "银行账户名称"],
+                   ["bank_account_number", "银行账户账号"],
+                   ["bank_account_address", "银行账户开户行"],
+                   ["bank_account_address_detail", "银行账户开户行地址"]],
+    },
+    {
+        "item_id": "keyInfo", "label": "投标关键节点", "required": 0,
+        "output_type": "json", "sort_order": 9, "group": "schedule",
+        "description": "公告、获取文件、递交、截止和开标信息。",
+        "fields": [["bid_announcement_time", "招标公告发布日期"],
+                   ["bid_file_get_way", "招标文件获取方式"], ["bid_file_price", "招标文件售价"],
+                   ["get_bid_file_time", "获取招标文件时间"],
+                   ["bid_document_submission_location", "投标文件提交地点"],
+                   ["bid_submission_deadline", "投标截止时间"],
+                   ["bid_opening_time", "开标时间"], ["bid_opening_address", "开标地点"],
+                   ["other_notes", "其他注意事项"]],
+    },
+    {
+        "item_id": "marginInfo", "label": "投标保证金", "required": 0,
+        "output_type": "json", "sort_order": 10, "group": "margin",
+        "description": "保证金金额、方式、截止和退还条件。",
+        "fields": [["bidding_deposit", "投标保证金"], ["payment_method", "缴纳方式"],
+                   ["due_date", "截止日期"], ["refund_conditions", "退还条件"],
+                   ["non_refundable_conditions", "不予退还的情形"],
+                   ["other_notes", "其他注意事项"]],
+    },
+]
+
+BID_RESPONSE_ITEMS += [
+    {
+        "item_id": "qualificationReview", "label": "资格性审查", "required": 0,
+        "output_type": "markdown", "sort_order": 11, "group": "review",
+        "description": "投标人资格条件和资格审查要求。",
+    },
+    {
+        "item_id": "complianceCheck", "label": "符合性检查", "required": 0,
+        "output_type": "markdown", "sort_order": 12, "group": "review",
+        "description": "文件完整性、有效性、规范和偏差处理要求。",
+    },
+    {
+        "item_id": "openBid", "label": "开标要求", "required": 0,
+        "output_type": "json", "sort_order": 13, "group": "open_bid",
+        "description": "开标时间地点、参与要求、无效标和流程。",
+        "fields": [["time_place", "时间地点"], ["part_req", "参与要求"],
+                   ["invalid_bid", "无效标认定"], ["objection", "异议处理"],
+                   ["bid_process", "开标流程"]],
+    },
+    {
+        "item_id": "evaluationBid", "label": "评标要求", "required": 0,
+        "output_type": "json", "sort_order": 14, "group": "evaluation",
+        "description": "评标委员会、评分构成、方法和原则。",
+        "fields": [["committee", "评标委员会组成"], ["duties", "评标委员会职责"],
+                   ["scoring", "评分构成"], ["method", "评标方法类型"],
+                   ["principles", "评标原则和方法细节"],
+                   ["others", "其他和评标相关的说明"]],
+    },
+    {
+        "item_id": "businessScoring", "label": "商务评分要求", "required": 0,
+        "output_type": "markdown", "sort_order": 15, "group": "scoring",
+        "description": "商务评分因素，为商务方案准备。",
+    },
+    {
+        "item_id": "discardedBids", "label": "无效标与废标项", "required": 0,
+        "output_type": "markdown", "sort_order": 16, "group": "risk",
+        "description": "投标无效、废标相关风险项。",
+    },
+    {
+        "item_id": "signingProcess", "label": "合同授予与签订", "required": 0,
+        "output_type": "json", "sort_order": 17, "group": "contract",
+        "description": "中标公示、合同签订、履约保证金和合同文本。",
+        "fields": [["bid_notice", "中标公示"], ["contract_sign", "合同签订"],
+                   ["performance_bond", "履约保证金"], ["contract_text", "合同文本"]],
+    },
+    {
+        "item_id": "terminationCondition", "label": "合同解除和终止", "required": 0,
+        "output_type": "json", "sort_order": 18, "group": "contract",
+        "description": "违约解除、不可抗力、合同终止和争议解决。",
+        "fields": [["breach_termination", "违约解除"], ["force_majeure", "不可抗力"],
+                   ["contract_termination", "合同终止"], ["dispute_resolution", "争议解决"]],
+    },
+]
+
+#: 提取域注册表：domain → 解析项清单。
+#: ⚠️ scheme 域保持原 `ANALYSIS_ITEMS` 引用不变，历史主键/下游契约零改动。
+EXTRACTION_DOMAINS: dict[str, list[dict]] = {
+    "scheme": ANALYSIS_ITEMS,
+    "bid_response": BID_RESPONSE_ITEMS,
+}
+
+#: 招标响应域分组定义（供前端展示，与 GROUPS 同构）
+BID_RESPONSE_GROUPS: list[dict] = [
+    dict(g, items=[it for it in BID_RESPONSE_ITEMS if it["group"] == g["group"]])
+    for g in (
+        {"group": "overview", "label": "项目概述"},
+        {"group": "subject", "label": "项目与主体信息"},
+        {"group": "response", "label": "响应文件要求"},
+        {"group": "scoring", "label": "评分要求"},
+        {"group": "schedule", "label": "投标关键节点"},
+        {"group": "margin", "label": "投标保证金"},
+        {"group": "review", "label": "资格与符合性"},
+        {"group": "open_bid", "label": "开标要求"},
+        {"group": "evaluation", "label": "评标要求"},
+        {"group": "risk", "label": "无效标与废标项"},
+        {"group": "contract", "label": "合同授予与终止"},
+    )
+]
+
+# 两域合并的全局索引（item_id → 定义），用于跨域查找与防重名校验。
+# ⚠️ 保持**对象同一性**：scheme 域定义仍是 `ANALYSIS_ITEMS` 里的同一个 dict，
+#    既有调用点（含 `get_item_def(...)["group"]` 取值）行为逐字不变；
+#    域归属由独立的 `_ITEM_DOMAIN` 承担，避免给原定义注入新键引发历史副作用。
+_ITEM_MAP: dict[str, dict] = {}
+_ITEM_DOMAIN: dict[str, str] = {}
+for _domain, _items in EXTRACTION_DOMAINS.items():
+    for _it in _items:
+        _ITEM_MAP[_it["item_id"]] = _it
+        _ITEM_DOMAIN[_it["item_id"]] = _domain
 
 # 必选项 id 列表（17 个必选项 + 1 个可选项 = 18 总项）
 REQUIRED_ITEM_IDS = [it["item_id"] for it in ANALYSIS_ITEMS if it["required"]]
@@ -138,10 +332,74 @@ GROUPS: list[dict] = [
     {"group": "emergency", "label": "应急处置", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "emergency"]},
     {"group": "calc_drawing", "label": "计算书与图纸", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "calc_drawing"]},
     {"group": "construction", "label": "施工组织设计（新增）", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "construction"]},
+    # ✅ 2026-09-30 第十五轮：技术评分要求分组（对齐易标「标书智能体（一）」§1.4）。
+    # 追加在末尾而非插到中间：GROUPS 的顺序即前端展示顺序，插队会让既有分组错位。
+    {"group": "scoring", "label": "技术评分要求", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "scoring"]},
 ]
 
 # Markdown 项无结果时模型应返回此标记
 MARKDOWN_MISSING_RESULT = "未提取到"
+
+# ================================================================
+# ✅ 2026-09-30（第十一轮 · 提取内容标准统一出口）
+# 对齐易标 bidAnalysisTask.cjs 的两套「缺失标注规范」：
+#   · JSON 任务统一模板（jsonTask 的 3 条约束）
+#   · Markdown 任务「整体无结果规则」（整项 vs 局部两种缺失语义严格区分）
+# ⚠️ 此前本仓把这两套规范散落在 STABLE_SYSTEM_PROMPT 与各单项 prompt 里，
+#    改一处漏一处（本仓 §4.3/§4.7/§4.14 反复踩的同构陷阱）。现收敛为唯一出口
+#    build_task_prompt()，新增解析项无需再手写这两段约束。
+# ================================================================
+
+#: 局部字段缺失的统一填充值（JSON 项字段值 / Markdown 项局部小节）
+PARTIAL_MISSING_TEXT = "没有提及"
+
+#: JSON 任务统一模板（对齐易标 jsonTask，键结构由字段字典生成）
+_JSON_TASK_TEMPLATE = """任务：{title}
+
+目标：{goals}
+
+约束：
+1. 输出格式必须为 JSON。
+2. 严格按照以下 JSON 格式输出，只修改 value，禁止修改 key 和结构。
+3. 招标文件中没有的字段填充「{partial}」。
+
+JSON 格式：
+{template}
+
+仅输出 JSON，不要输出其他内容。"""
+
+#: Markdown 任务整体无结果规则（追加在单项 prompt 之后）
+#: ⚠️ 关键语义区分：整项无内容 → 只返回「未提取到」；局部缺失 → 写「没有提及」。
+#:    两者不可混用，否则 is_missing_result 无法区分「真缺失」与「部分缺失」。
+MARKDOWN_MISSING_RULE_SUFFIX = (
+    "\n\n整体无结果规则：仅当当前任务完全未提取到任何相关内容时，"
+    "只返回「{full}」，不要附加标题、标点、解释或其他文字。"
+    "只要提取到任何有效内容，就正常返回结果；"
+    "局部字段或局部分类缺失时写「{partial}」，不要使用「{full}」。"
+)
+
+#: 技术评分项小节标题（is_missing_technical_score_items 的唯一锚点）
+TECH_SCORE_ITEMS_HEADING = "技术评分项"
+_TECH_SCORE_ITEMS_RE = re.compile(
+    r"^##[\t ]+" + re.escape(TECH_SCORE_ITEMS_HEADING)
+    + r"[\t ]*\r?\n([\s\S]*?)(?=^#{1,2}[\t ]|\Z)",
+    re.MULTILINE,
+)
+
+
+def is_missing_technical_score_items(content: str) -> bool:
+    """判断「技术评分要求」项中**技术评分项小节**是否为空。
+
+    ⚠️ 对齐易标 isMissingTechnicalScoreItems：技术评分项是技术方案编制的
+    主要依据（每一项都要在方案里展开编写），它缺失时用户会带着空白进入
+    目录生成，而 techRequirements 整体不算「未提取到」—— 因为「技术评分要求」
+    小节可能有内容。故必须单独判定该小节。
+    """
+    text = (content or "").strip()
+    if text == MARKDOWN_MISSING_RESULT:
+        return True
+    m = _TECH_SCORE_ITEMS_RE.search(text)
+    return m is not None and m.group(1).strip() == PARTIAL_MISSING_TEXT
 
 # =========================================================================
 # 二、通用约束 Prompt（system）
@@ -546,12 +804,205 @@ __CONTEXT__""",
 项目资料文本：
 __CONTEXT__""",
 
+    # ========================================================================
+    # ✅ 2026-09-30 第十五轮 · 技术评分要求（对齐易标「标书智能体（一）」§1.4）
+    # 自我反思式结构化提取：目标定位 → 提取内容 → 处理规则 → 验证 → 只返结果
+    # ========================================================================
+    "techScoring": """请从以下项目资料中提取【技术评分要求】，严格按以下 JSON 模板输出（只填 value，不要改 key）：
+
+```json
+{
+  "scoring_items": [
+    {
+      "item_name": "评分项名称",
+      "weight": "权重或分值（统一为“X分”或“X%”）",
+      "criteria": "评分标准（尽量摘录原文关键判定条件）",
+      "source": "数据来源（招标文件章节号 / 表格位置）"
+    }
+  ],
+  "total_weight": "技术分总分（若资料声明）",
+  "coverage_note": "覆盖性自检结论：是否已覆盖全部技术评分项、权重之和是否与技术总分一致"
+}
+```
+
+## 一、目标定位
+- **重点识别**技术评分、评标方法、评分标准、技术参数、技术要求、技术方案、评审要素相关章节。
+- **忽略**商务报价、资格审查、企业资质、业绩、财务等**非技术类**评分项。
+
+## 二、提取内容（结构化）
+每条评分项必须给出四项：评分项名称、权重/分值、评分标准、数据来源。
+
+## 三、处理规则
+1. 模糊表述按上下文判断（如“技术方案优”：对照“内容完整、措施可行、针对性强者得满分”推定评分标准）。
+2. 表格形式的评分表**按行提取**，`source` 标注为所在表格。
+3. 分层结构用缩进或编号表达层级，`item_name` 保留层级前缀（如“3.2 施工部署”）。
+4. 权重单位**统一**为分（5分）或百分比（5%），原文是“权重0.5”写成“50%”并保持数值等价。
+5. 资料中确实没有技术评分章节时，`scoring_items` 返回空数组，**不要编造**。
+
+## 四、验证（自我反思）
+提取完成后自检两点并写入 `coverage_note`：
+1. **覆盖性**：资料中列出的每一项技术评分要求是否都已出现在 `scoring_items` 中，有遗漏的补齐。
+2. **权重一致性**：各项权重之和是否与资料声明的技术总分一致；不一致时在 `coverage_note` 中写明差额与原因。
+
+## 五、输出
+只返回提取结果，不要输出任何分析过程、说明文字或 Markdown 代码块标记。
+
+项目资料文本：
+__CONTEXT__""",
+
 }
 
 
 def get_item_prompt(item_id: str) -> str | None:
     """获取指定解析项的 Prompt 模板（user 消息内容）。"""
     return _ITEM_PROMPTS.get(item_id)
+
+
+def get_item_domain(item_id: str) -> str:
+    """返回解析项所属提取域（"scheme" | "bid_response"）。
+
+    ⚠️ 域归属的唯一事实源。未知 item_id 返回空串（fail-closed），
+    调用方据此区分「未知项」与「属于某域」，不得默认当成 scheme 域。
+    """
+    return _ITEM_DOMAIN.get(item_id, "")
+
+
+def get_items_by_domain(domain: str) -> list[dict]:
+    """按域返回解析项清单（未知域返回空清单，不抛异常）。"""
+    return EXTRACTION_DOMAINS.get(domain, [])
+
+
+#: 提取域主键分隔符：scheme 域沿用历史的单下划线（旧主键 {project_id}_{item_id}），
+#: 其它域用双下划线承载域名，保证 scheme 域历史主键与既有查询**逐字节不变**。
+DOMAIN_PK_SEP = "__"
+
+
+def build_item_pk(project_id: str, item_id: str, domain: str = "scheme") -> str:
+    """构造 bid_analysis_items 主键（唯一出口）。
+
+    ⚠️ 主键格式的唯一事实源。scheme 域返回旧格式 ``{project_id}_{item_id}``
+    （历史数据、既有 WHERE id=? 查询全部继续可用）；其它域返回
+    ``{project_id}__{domain}__{item_id}``。域名缺失/空串视同 scheme（fail-closed）。
+    """
+    if not domain or domain == "scheme":
+        return f"{project_id}_{item_id}"
+    return f"{project_id}{DOMAIN_PK_SEP}{domain}{DOMAIN_PK_SEP}{item_id}"
+
+
+def parse_item_pk(pk: str) -> tuple:
+    """反解主键为 ``(project_id, item_id, domain)``；无法识别时 domain 返回 'scheme'。"""
+    parts = str(pk or "").split(DOMAIN_PK_SEP)
+    if len(parts) == 3:
+        return parts[0], parts[2], parts[1]
+    idx = str(pk or "").rfind("_")
+    if idx <= 0:
+        return "", "", "scheme"
+    return str(pk)[:idx], str(pk)[idx + 1:], "scheme"
+
+
+async def fetch_success_item_ids(db, project_id: str, domain: str = "scheme") -> set:
+    """查询该项目该域下已 ``status='success'`` 的解析项 id 集合（断点续跑用）。
+
+    ⚠️ 两处 fail-soft 兜底，任一命中都返回**空集合**（= 不跳过任何项 = 全量执行）：
+
+    1. ``db.execute`` 返回 ``None``（本仓 R13：全局单连接 + aiosqlite 下可能返回
+       None）→ 不做 ``.fetchall()``，直接返回空集；
+    2. 旧库尚未补 ``domain`` 列（``_migrate`` 未跑）→ 捕获 OperationalError 后
+       退化为**不带域过滤**的查询（item_id 在两域间本就唯一，等价且安全）。
+
+    ⚠️ 绝不抛异常：断点续跑是优化项，查库失败不得让整轮提取失败，更不得
+    因异常被上层误判为「本轮无成功项」而做出错误的下游失效动作。
+    """
+    if not db or not project_id:
+        return set()
+    base = ("SELECT item_id FROM bid_analysis_items "
+            "WHERE project_id=? AND status='success'")
+    params: tuple = (project_id,)
+    sql = base + " AND domain=?"
+    args = (project_id, domain)
+    try:
+        cur = await db.execute(sql, args)
+        if cur is None:
+            return set()
+        return {r["item_id"] for r in await cur.fetchall()}
+    except Exception as exc:
+        logger.warning("断点续跑查询失败（按域过滤），退化为不带域过滤: %s", exc)
+    try:
+        cur = await db.execute(base, params)
+        if cur is None:
+            return set()
+        return {r["item_id"] for r in await cur.fetchall()}
+    except Exception as exc:
+        logger.warning("断点续跑查询失败，回退为全量执行: %s", exc, exc_info=True)
+        return set()
+
+
+def get_groups_by_domain(domain: str) -> list[dict]:
+    """按域返回分组定义；未知域返回空清单。"""
+    return BID_RESPONSE_GROUPS if domain == "bid_response" else GROUPS
+
+
+def get_item_fields(item_id: str) -> list[tuple]:
+    """返回 JSON 项的字段清单 ``[(key, 中文标签), ...]``。
+
+    字段字典的唯一出口：前端字段展示、后端 JSON 模板生成、合并后字段完整性
+    校验三者共用，避免同一份字段表在多处各自维护（本仓反复踩的同构陷阱）。
+    Markdown 项返回空清单。
+    """
+    definition = get_item_def(item_id)
+    fields = (definition or {}).get("fields") or []
+    return [(str(k), str(label)) for k, label in fields]
+
+
+def build_json_template(item_id: str) -> str:
+    """按字段字典生成 JSON 任务模板（对齐易标 ``jsonTask`` 的「只改 value 禁止改 key」）。
+
+    模板值填中文标签，模型按标签理解语义后回填真实取值；键名固定为英文键。
+    """
+    import json as _json
+    return _json.dumps(
+        {key: label for key, label in get_item_fields(item_id)},
+        ensure_ascii=False, indent=2,
+    )
+
+
+def build_task_prompt(item_id: str, *, template_body: str = "", goals: str = "") -> str:
+    """组装解析项任务 prompt，统一附加「提取内容标准」两套规范（唯一出口）。
+
+    - json 项：套 ``_JSON_TASK_TEMPLATE``（3 条约束 + 由字段字典生成的键结构），
+      ``template_body`` 非空时替代默认字段模板（用于人工定制正文）。
+    - markdown 项：直接返回 ``template_body``，并在末尾追加
+      ``MARKDOWN_MISSING_RULE_SUFFIX``（整项「未提取到」 vs 局部「没有提及」）。
+
+    ⚠️ 缺失标注规范**只在本函数注入一次**：调用方不得再自行拼接这两段文本，
+    否则同一规范会有两份实现（本仓 §4.3/§4.14 的反复教训）。
+    新增解析项只需在 :data:`ANALYSIS_ITEMS` / :data:`BID_RESPONSE_ITEMS` 声明
+    ``output_type`` 与 ``fields``，无需手写约束。
+    """
+    definition = get_item_def(item_id)
+    output_type = (definition or {}).get("output_type", "markdown")
+    label = (definition or {}).get("label", item_id)
+
+    if output_type == "json":
+        goals_text = (goals or (definition or {}).get("description") or "").strip()
+        body = (template_body or "").strip()
+        if body:
+            template_text = body
+        else:
+            template_text = build_json_template(item_id)
+        if not template_text:
+            return f"任务：{label}\n\n请从招标文件中提取相关 JSON 信息。"
+        return _JSON_TASK_TEMPLATE.format(
+            title=label, goals=goals_text or f"提取{label}信息。",
+            partial=PARTIAL_MISSING_TEXT, template=template_text,
+        )
+
+    body = (template_body or "").rstrip()
+    if not body:
+        body = f"任务：提取并整理{label}信息。\n\n请保持原文准确性，直接返回整理结果。"
+    return body + MARKDOWN_MISSING_RULE_SUFFIX.format(
+        full=MARKDOWN_MISSING_RESULT, partial=PARTIAL_MISSING_TEXT,
+    )
 
 
 def get_item_def(item_id: str) -> dict | None:
@@ -592,6 +1043,11 @@ def build_system_prompt(section_hint: str = "", classification_hint: str = "") -
     ✅ 2026-09-24 新增 classification_hint（纯增量，默认空）：由 /bid-analysis/classify
     产出的方案危大工程分类结论（大类/子类/危大级别/适用规范），注入后引导 AI 在提取
     时按对应章节字段重点抽取；空值 → 与旧版逐字一致（向后兼容）。
+
+    ⚠️ 本函数把标段上下文**拼进同一条** system 消息，是历史契约（既有单测
+    ``test_bid_section_context.py::test_system_prompt_appends_hint_when_present``
+    锁定）。标段上下文要作为**独立第二条 system 消息**下发时，请改用
+    :func:`build_system_messages`（对齐易标 ``buildTenderContextMessages``）。
     """
     prompt = STABLE_SYSTEM_PROMPT
     if section_hint:
@@ -599,6 +1055,40 @@ def build_system_prompt(section_hint: str = "", classification_hint: str = "") -
     if classification_hint:
         prompt += f"\n\n【本方案危大工程分类结论（提取重点参考）】{classification_hint}"
     return prompt
+
+
+def build_system_messages(section_hint: str = "",
+                          classification_hint: str = "") -> list[dict]:
+    """组装 messages 里的 **system 段**（对齐易标 ``buildTenderContextMessages``）。
+
+    易标把「标段上下文」作为**独立的第二条 system 消息**下发，而不是拼进通用
+    system 提示词。两者对模型的差别在于：后者会与「必须逐条输出结构化结果」等
+    硬性纪律混在同一段里，弱模型容易把标段限定当成可忽略的上下文；独立消息
+    则在消息层级上表达「这是作用域约束」。
+
+    **向后兼容保证**：
+    - 两个 hint 都为空 → 返回**单条** system 消息，内容与旧版逐字一致
+      （与 :func:`build_system_prompt` 返回值完全相同）；
+    - 只有 ``classification_hint`` → 与旧版逐字一致（仍拼在同一条）；
+    - 只有 ``section_hint`` → 改为两条 system 消息（这正是本函数的目的）。
+
+    Args:
+        section_hint: 标段上下文（``build_bid_section_context_hint`` 产出）。
+        classification_hint: 危大工程分类结论（``/bid-analysis/classify`` 产出）。
+
+    Returns:
+        ``[{"role": "system", "content": ...}, ...]``，可直接前置到 messages。
+    """
+    system = STABLE_SYSTEM_PROMPT
+    if classification_hint:
+        system += (f"\n\n【本方案危大工程分类结论（提取重点参考）】"
+                   f"{classification_hint}")
+    msgs: list[dict] = [{"role": "system", "content": system}]
+    if section_hint:
+        # 独立第二条 system 消息（易标口径）
+        msgs.append({"role": "system",
+                     "content": f"【当前处理标段上下文】{section_hint}"})
+    return msgs
 
 
 # =========================================================================
@@ -635,6 +1125,111 @@ _BOUNDARY_GROUPS = (
 
 _BACK_WINDOW = 200   # 向前搜索边界的最大回退字符数（与旧实现一致）
 _FWD_WINDOW = 100    # 向后搜索边界的最大前伸字符数（与旧实现一致）
+
+
+# ---------------------------------------------------------------------------
+# ✅ 2026-09-30（第十一轮 · 均分分段策略）
+# 对齐 OpenBidKit userTextSplitter.cjs 的分段算法口径：
+#   · 段数由总长与「上下文上限 × 比例」推得，再**尽量均分**（旧滑动窗口会让前几段
+#     满额、最后一段只剩零头，AI 各段负载严重不均）；
+#   · 断点在「理想点 ± radius」窗口内搜索，先严格窗口(0.12×段长)再放宽(0.25×段长)；
+#   · 候选点必须落在 [min, max] 段长区间内，且**剩余长度 ≥ 剩余段数**、
+#     **剩余长度 / 剩余段数 ≤ max** —— 保证后面的每一段都填得满，不会尾段塌缩；
+#   · 硬切点做 Unicode 代理对保护（旧实现会拆散 emoji/生僻字的代理对）。
+# ⚠️ 默认关闭：`split_for_analysis(..., even=False)` 走旧滑动窗口，行为逐字不变。
+# ---------------------------------------------------------------------------
+
+#: 上下文上限（字符数）。0 = 不启用均分模式。对齐易标 DEFAULT_CONTEXT_LENGTH_LIMIT。
+SEGMENT_CONTEXT_LENGTH_LIMIT = 0
+#: 单段上限 = 上下文上限 × 本比例。对齐易标 DEFAULT_CONTEXT_LIMIT_RATIO。
+SEGMENT_LIMIT_RATIO = 0.8
+#: 严格窗口半径 = 目标段长 × 本比例（先搜）。对齐易标 STRICT_WINDOW_RATIO。
+SEGMENT_STRICT_RATIO = 0.12
+#: 放宽窗口半径 = 目标段长 × 本比例（严格窗口搜不到时）。对齐 RELAXED_WINDOW_RATIO。
+SEGMENT_RELAXED_RATIO = 0.25
+#: 单段最小长度 = 目标段长 × 本比例。对齐 MIN_SEGMENT_RATIO。
+SEGMENT_MIN_RATIO = 0.35
+#: 单段最大长度 = 段上限 × 本比例（给自然边界让路留余量）。对齐 MAX_SEGMENT_LIMIT_RATIO。
+SEGMENT_MAX_RATIO = 1.1
+
+
+def _avoids_surrogate_pair(text: str, cut: int) -> int:
+    """若切点正好落在 Unicode 代理对中间，顺延 1 个字符。
+
+    对齐易标 ``avoidsBreakingSurrogatePair``：CJK 扩展 B 区汉字与 emoji 在
+    Python ``len()`` 下占 1 个码点、不涉及代理对；但经 JSON/编码往返或来自
+    UTF-16 中间态的文本仍可能残留孤立代理对（``\\uD800-\\uDBFF`` 高半 +
+    ``\\uDC00-\\uDFFF`` 低半）。切在中间会产生两个不可编码的孤立代理对，
+    下游 ``.encode('utf-8')`` 直接 UnicodeEncodeError。
+    """
+    if cut <= 0 or cut >= len(text):
+        return cut
+    prev_ch = ord(text[cut - 1])
+    next_ch = ord(text[cut])
+    if 0xD800 <= prev_ch <= 0xDBFF and 0xDC00 <= next_ch <= 0xDFFF:
+        return cut + 1
+    return cut
+
+
+def _can_use_candidate(candidate: int, *, previous_cut: int, total_length: int,
+                       remaining_segments: int, minimum_segment_length: int,
+                       maximum_segment_length: int) -> bool:
+    """判断候选切点是否合法（对齐易标 ``canUseCandidate`` 的四重约束）。
+
+    关键在**剩余量校验**：保证剩余长度至少够填满剩余段数，且平均起来不超过
+    单段上限 —— 否则最后几段会塌缩成极短片段，AI 提取质量骤降。
+    """
+    if candidate <= previous_cut or candidate >= total_length:
+        return False
+    current_length = candidate - previous_cut
+    if current_length < minimum_segment_length or current_length > maximum_segment_length:
+        return False
+    if remaining_segments > 0:
+        remaining_length = total_length - candidate
+        if remaining_length < remaining_segments:
+            return False
+        if remaining_length / remaining_segments > maximum_segment_length:
+            return False
+    return True
+
+
+def _find_boundary_for_group(text: str, from_: int, to: int, pattern: "re.Pattern",
+                             state: dict, fence_ranges: list[tuple[int, int]]) -> int:
+    """在 [from_, to) 内按单组边界正则挑「离理想点最近且不在围栏内」的切点。"""
+    best_cut = 0
+    best_score = None
+    content = text[from_:to]
+    for m in pattern.finditer(content):
+        candidate = from_ + m.end()
+        if _inside_fence(candidate, fence_ranges):
+            continue
+        if not _can_use_candidate(
+            candidate, previous_cut=state["previous_cut"], total_length=state["total_length"],
+            remaining_segments=state["remaining_segments"],
+            minimum_segment_length=state["minimum_segment_length"],
+            maximum_segment_length=state["maximum_segment_length"],
+        ):
+            continue
+        score = abs(candidate - state["ideal_cut"])
+        if best_score is None or score < best_score:
+            best_score = score
+            best_cut = candidate
+    return best_cut
+
+
+def _find_natural_cut(text: str, radius: int, state: dict,
+                      fence_ranges: list[tuple[int, int]]) -> int:
+    """在理想点 ± radius 窗口内按边界优先级找切点；找不到返回 0。"""
+    from_ = max(state["previous_cut"] + 1, int(state["ideal_cut"] - radius))
+    to = min(state["total_length"] - state["remaining_segments"],
+             int(state["ideal_cut"] + radius))
+    if to <= from_:
+        return 0
+    for group in _BOUNDARY_GROUPS:
+        cut = _find_boundary_for_group(text, from_, to, group, state, fence_ranges)
+        if cut:
+            return cut
+    return 0
 
 
 def _collect_fence_ranges(text: str) -> list[tuple[int, int]]:
@@ -711,15 +1306,87 @@ def _choose_boundary_cut(text: str, start: int, end: int, limit: int,
     return -1
 
 
+def _split_even(text: str, context_length_limit: int,
+                limit_ratio: float = SEGMENT_LIMIT_RATIO,
+                strict_ratio: float = SEGMENT_STRICT_RATIO,
+                relaxed_ratio: float = SEGMENT_RELAXED_RATIO,
+                min_ratio: float = SEGMENT_MIN_RATIO,
+                max_ratio: float = SEGMENT_MAX_RATIO) -> list[str]:
+    """均分切分（对齐易标 ``splitUserTextByContextLimit``）。
+
+    步骤：① 段上限 = 上下文上限 × limit_ratio；② 段数 = ceil(总长 / 段上限)；
+    ③ 目标段长 = ceil(总长 / 段数)（尽量均分）；④ 每个理想点先搜严格窗口
+    再搜放宽窗口，最后硬切兜底。每段都过 :func:`_can_use_candidate` 校验，
+    保证尾段不塌缩。
+    """
+    source = text or ""
+    if not source:
+        return []
+    if limit_ratio <= 0:
+        limit_ratio = SEGMENT_LIMIT_RATIO
+    segment_limit = max(1, int(context_length_limit * limit_ratio))
+    if len(source) <= segment_limit:
+        return [source]
+
+    segment_count = max(1, -(-len(source) // segment_limit))  # 向上取整
+    target_size = max(1, -(-len(source) // segment_count))
+    strict_radius = max(1, int(target_size * strict_ratio))
+    relaxed_radius = max(strict_radius, int(target_size * relaxed_ratio))
+    maximum_segment_length = max(target_size, int(segment_limit * max_ratio))
+    minimum_segment_length = max(1, int(target_size * min_ratio))
+    fence_ranges = _collect_fence_ranges(source)
+
+    cuts: list[int] = []
+    previous_cut = 0
+    for segment_index in range(1, segment_count):
+        ideal_cut = (len(source) * segment_index) / segment_count
+        remaining_segments = segment_count - segment_index
+        state = {
+            "ideal_cut": ideal_cut,
+            "previous_cut": previous_cut,
+            "total_length": len(source),
+            "remaining_segments": remaining_segments,
+            "minimum_segment_length": minimum_segment_length,
+            "maximum_segment_length": maximum_segment_length,
+        }
+        cut = (_find_natural_cut(source, strict_radius, state, fence_ranges)
+               or _find_natural_cut(source, relaxed_radius, state, fence_ranges))
+        if not cut:
+            # 硬切兜底：夹在 [previous_cut+1, 总长-剩余段数] 内，保证每段非空
+            minimum_cut = previous_cut + 1
+            maximum_cut = len(source) - remaining_segments
+            ideal = min(maximum_cut, max(minimum_cut, round(ideal_cut))) \
+                if maximum_cut >= minimum_cut else min(len(source), minimum_cut)
+            cut = _avoids_surrogate_pair(source, ideal)
+        cuts.append(cut)
+        previous_cut = cut
+
+    parts: list[str] = []
+    start = 0
+    for cut in cuts:
+        parts.append(source[start:cut])
+        start = cut
+    parts.append(source[start:])
+    return parts
+
+
 def split_for_analysis(text: str, chunk_size: int = DEFAULT_CHUNK_SIZE,
-                        overlap: int = DEFAULT_CHUNK_OVERLAP) -> list[str]:
+                        overlap: int = DEFAULT_CHUNK_OVERLAP,
+                        *, even: bool = False,
+                        context_length_limit: int = SEGMENT_CONTEXT_LENGTH_LIMIT) -> list[str]:
     """把超长项目资料按字符切分为多段，保证 AI 调用不超上下文。
 
     切分策略：优先在自然边界（标题/空行 > 换行 > 句末 > 分号 > 逗号）断开，
     且**绝不切断 Markdown 代码围栏/表格**；窗口内无自然边界时退回硬切。
     保留 chunk_size/overlap 语义与「每轮至少前进 1 字符」的终止保证（向后兼容）。
+
+    ✅ 2026-09-30 新增 ``even`` / ``context_length_limit``（默认关闭）：
+      均分模式下段数由总长推导后尽量均分，并做段长区间与剩余量校验、
+      硬切点做 Unicode 代理对保护。默认参数下行为与旧版**逐字一致**。
     """
     text = text or ""
+    if even and context_length_limit > 0:
+        return _split_even(text, context_length_limit)
     if len(text) <= chunk_size:
         return [text]
     fence_ranges = _collect_fence_ranges(text)
@@ -793,19 +1460,77 @@ def format_downstream_context(items: dict[str, dict]) -> str:
             lines.append(content)
 
     emitted: set[str] = set()
-    # 按 ANALYSIS_ITEMS 权威顺序遍历，保证提示词拼装确定性
-    for defn in ANALYSIS_ITEMS:
-        iid = defn["item_id"]
-        if iid in items:
-            _emit(iid)
-            emitted.add(iid)
+    # ⚠️ 2026-09-30：按 EXTRACTION_DOMAINS 的权威顺序遍历（scheme 域在前，
+    #    与旧版逐字一致），保证提示词拼装确定性，且招标响应域的新增项也能
+    #    被下游「提取即消费」——旧实现只遍历 ANALYSIS_ITEMS，新增域的项
+    #    只能靠下面的兜底分支追加，顺序不确定。
+    for domain_items in EXTRACTION_DOMAINS.values():
+        for defn in domain_items:
+            iid = defn["item_id"]
+            if iid in items:
+                _emit(iid)
+                emitted.add(iid)
     # 兜底：items 里存在但不在权威清单中的 item_id（保持 dict 原顺序）
     for iid in items:
         if iid not in emitted:
             _emit(iid)
             emitted.add(iid)
 
-    return "\n".join(lines)
+    return _apply_downstream_budget("\n".join(lines))
+
+
+#: 下发预算（字符）。两域共 36 项全量下发时无上限，实测可达 10 万字以上 ——
+#: 单条提示词里放这么多「参考资料」会挤占模型对用户指令的注意力，且每章都重发
+#: 一次（目录/正文各注入一次），token 成本与命中率同时恶化。对比本仓 facts 链路
+#: 的 2000 字/章预算，此处取同一个量级并**逐项截断**（不是整段丢弃）——
+#: 保证「靠前的权威项」永远完整，靠后的项至少留下开头。
+DOWNSTREAM_CONTEXT_MAX_CHARS = 12_000
+
+#: 单项在预算内的软上限：避免某一项（如「编制依据」的长清单）独占全部预算。
+DOWNSTREAM_PER_ITEM_MAX_CHARS = 2_000
+
+
+def _apply_downstream_budget(text: str, max_chars: int = DOWNSTREAM_CONTEXT_MAX_CHARS,
+                             per_item: int = DOWNSTREAM_PER_ITEM_MAX_CHARS) -> str:
+    """给「提取项目结果」文本加预算上限（对齐 facts 链路的预算治理思路）。
+
+    两级裁剪，**均不丢项**：
+    ① 逐项软截断 —— 每个 ``## 小节`` 超过 ``per_item`` 时截断并补省略号；
+    ② 总量封顶 —— 超过 ``max_chars`` 时按小节**整节丢弃**（保留小节头），
+       并在末尾注明被省略的项数，让下游/用户知道「还有内容没下发」。
+    """
+    if not text:
+        return text
+    # ① 逐项软截断
+    if per_item > 0:
+        out: list[str] = []
+        for seg in text.split("\n\n"):
+            if len(seg) > per_item:
+                seg = seg[:per_item].rstrip() + f"…（本项已截断，原 {len(seg)} 字）"
+            out.append(seg)
+        text = "\n\n".join(out)
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    # ② 总量封顶：按小节贪心保留（首段是标题段，**同样受上限约束**）
+    #    ⚠️ 修复（2026-09-30 第十五轮）：旧实现把首段 `head` 无条件保留，
+    #    于是「只有一个巨型小节」时（标题行被首个小节吞掉、或下游只剩一项）
+    #    总长完全绕过上限 —— 12k 预算形同虚设。
+    head, *rest = text.split("\n\n")
+    if len(head) > max_chars:
+        head = head[:max_chars].rstrip() + "…（已截断）"
+    kept: list[str] = [head]
+    used = len(head)
+    dropped = 0
+    for seg in rest:
+        if used + len(seg) + 2 > max_chars:
+            dropped += 1
+            continue
+        kept.append(seg)
+        used += len(seg) + 2
+    if dropped:
+        kept.append(f"（另有 {dropped} 个提取项因超出下发预算被省略，"
+                    f"可在「提取项目」页查看完整结果）")
+    return "\n\n".join(kept)
 
 
 # JSON 项中表示「该字段没有提及」的取值（与 STABLE_SYSTEM_PROMPT 的约束一致）
@@ -822,8 +1547,9 @@ def _json_all_empty(content: str) -> bool:
 
     容错约定：
       - 模型可能包 ```json 代码块 → 先剥离围栏；
-      - 解析失败 / 非对象 / 空对象 → 返回 False（不擅自判为缺失，交由调用方
-        按原有逻辑处理，避免把「格式坏但内容存在」误判成「无内容」）。
+      - 解析失败 / 非对象 → 返回 False（不擅自判为缺失，交由调用方按原有逻辑
+        处理，避免把「格式坏但内容存在」误判成「无内容」）；
+      - **空对象 `{}` → 返回 True（视为无有效信息）**，见下方「失败哨兵」说明。
     """
     raw = (content or "").strip()
     if raw.startswith("```"):
@@ -833,8 +1559,22 @@ def _json_all_empty(content: str) -> bool:
         data = json.loads(raw)
     except (json.JSONDecodeError, TypeError, ValueError):
         return False
-    if not isinstance(data, dict) or not data:
+    if not isinstance(data, dict):
         return False
+    # ✅ BUG 修复（2026-09-29 · 失败哨兵被当成「已完成且有效」）：旧实现此处
+    #    `if not isinstance(data, dict) or not data: return False` —— 空对象被判
+    #    「不缺失」。而本模块在「全部分段无有效结果」时恰好产出 `{}` 作为 JSON 项
+    #    的失败哨兵（routers/bid_analysis.py 的 _run_single_item 与 _repair_json
+    #    兜底），于是哨兵与判缺失口径正面冲突，产生三重假绿：
+    #      1) /results 的 all_required_done=true、success_valid 计入；
+    #      2) finish_task("completed")、前端 Tab 徽标变绿；
+    #      3) format_downstream_context 下发一个只有 `## 标题`、没有任何键值的空小节，
+    #         且 input_coverage 因命中该锚点反而把此项报成「已覆盖」。
+    #    用户带着完全空白的项目级信息进入目录生成，而差集审计暴露不出这个空洞。
+    #    现把空对象归入「整体无有效信息」，与「所有字段均为没有提及」同义；
+    #    解析失败/非对象仍返回 False（保留既有容错语义，不误伤坏格式但有正文的情形）。
+    if not data:
+        return True
     for value in data.values():
         if isinstance(value, (dict, list, tuple, set)):
             if len(value) > 0:
@@ -851,7 +1591,8 @@ def is_missing_result(content: str, output_type: str = "markdown") -> bool:
 
     - 空 / 全空白 → 缺失；
     - markdown 项内容恰为「未提取到」 → 缺失；
-    - json 项所有字段都是「没有提及」 → 缺失。
+    - json 项所有字段都是「没有提及」 → 缺失；
+    - json 项为**空对象 `{}`** → 缺失（失败哨兵，见 `_json_all_empty`）。
     """
     if not content or not content.strip():
         return True
@@ -871,18 +1612,45 @@ class AnalysisConfig:
       - full  ：全部 18 项
       - custom：用户勾选项 + **强制补全**必选项（保证一次跑完即得到完整必选集）
       - item  ：单项/局部重跑，**严格按勾选执行、不补全必选项**
+
+    domain 语义（2026-09-30 新增，默认 "scheme" 与旧版逐字一致）：
+      - scheme      ：本软件原有 18 项（专项方案编制域）
+      - bid_response：易标引入的 18 项（招标响应域）
+
+    skip_done 语义（2026-09-30 新增，默认 False 与旧版一致）：
+      为 True 时，``get_task_items(db, project_id)`` 会跳过已落库且 status=='success'
+      的项 —— 即「断点续跑」。对齐易标
+      ``tasksToRun = ... : scopedTasks.filter(t => status !== 'success')``。
+      ⚠️ force_rerun 或显式指定 task_ids（单项重跑）时必须忽略 skip_done，
+      否则「重跑失败项」会变成空操作。
     """
     mode: str = "key"  # key | full | custom | item
     selected_item_ids: list[str] = field(default_factory=list)
     force_rerun: bool = False
+    domain: str = "scheme"
+    skip_done: bool = False
+
+    def _items(self) -> list[dict]:
+        """返回当前域的解析项清单（未知域回退 scheme 域，避免静默空跑）。"""
+        items = get_items_by_domain(self.domain)
+        return items if items else get_items_by_domain("scheme")
+
+    def _required_ids(self) -> list[str]:
+        """当前域的必选项 id（scheme 域沿用 REQUIRED_ITEM_IDS，保证口径不变）。"""
+        if self.domain == "scheme":
+            return list(REQUIRED_ITEM_IDS)
+        return [it["item_id"] for it in self._items() if it["required"]]
 
     def normalize(self) -> "AnalysisConfig":
         """归一化：full 含全部；key 含全部必选项；custom 保留用户选择并补全必选项；
         item 只保留用户勾选（合法的解析项 id）。"""
+        items = self._items()
+        all_ids = [it["item_id"] for it in items]
+        required_ids = self._required_ids()
         if self.mode == "full":
-            self.selected_item_ids = [it["item_id"] for it in ANALYSIS_ITEMS]
+            self.selected_item_ids = all_ids
         elif self.mode == "key":
-            self.selected_item_ids = list(REQUIRED_ITEM_IDS)
+            self.selected_item_ids = list(required_ids)
         elif self.mode == "item":
             # ✅ 单项重跑不补全必选项：其余必选项已在前一轮落库，_get_missing_required
             #    会回退 DB 校验；若强行补全，「重跑 1 项」会变成「重跑 17 项」
@@ -891,16 +1659,47 @@ class AnalysisConfig:
                                       if get_item_def(i)]
         else:  # custom
             # 强制包含必选项
-            for rid in REQUIRED_ITEM_IDS:
+            for rid in required_ids:
                 if rid not in self.selected_item_ids:
                     self.selected_item_ids.append(rid)
         return self
 
-    def get_task_items(self) -> list[dict]:
-        """返回实际要执行的解析项列表（按 sort_order 排序）。"""
+    def get_task_items(self, done_item_ids: Optional[set] = None,
+                       skip_done: Optional[bool] = None) -> list[dict]:
+        """返回实际要执行的解析项列表（按 sort_order 排序）。
+
+        ``done_item_ids`` 传入已成功落库的 item_id 集合时启用断点续跑过滤。
+        ⚠️ 本方法是**同步**的：aiosqlite 的 ``db.execute`` 是协程，不能在此 await。
+        异步调用方必须先经 :func:`fetch_success_item_ids` 取集合再传入
+        （见 :meth:`get_task_items_async`）—— 否则拿到的是未 await 的协程对象，
+        ``.fetchall()`` 抛 AttributeError 被下面的 fail-open 吞掉，
+        断点续跑**静默退化为全量执行**（用户以为跳过了，实际全跑了）。
+
+        ``force_rerun`` / ``mode="item"`` 恒忽略断点续跑（语义不变）。
+        """
         self.normalize()
         selected = set(self.selected_item_ids)
-        return [it for it in ANALYSIS_ITEMS if it["item_id"] in selected]
+        items = [it for it in self._items() if it["item_id"] in selected]
+        should_skip = self.skip_done if skip_done is None else skip_done
+        if not should_skip or self.mode == "item" or self.force_rerun:
+            return items
+        if not done_item_ids:
+            return items
+        return [it for it in items if it["item_id"] not in done_item_ids]
+
+    async def get_task_items_async(self, db, project_id: str) -> list[dict]:
+        """异步版本：自行查库取已成功项集合后再过滤（路由层唯一调用入口）。"""
+        self.normalize()
+        items = self.get_task_items()
+        if (not self.skip_done or self.mode == "item" or self.force_rerun
+                or not db or not project_id):
+            return items
+        done_ids = await fetch_success_item_ids(db, project_id, self.domain)
+        if not done_ids:
+            return items
+        logger.info("断点续跑：%s 域跳过 %d/%d 个已成功解析项",
+                    self.domain, len(done_ids), len(items))
+        return [it for it in items if it["item_id"] not in done_ids]
 
 
 # =========================================================================

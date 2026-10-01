@@ -4,7 +4,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from typing import Any
+from typing import Any, Callable
 
 from .prompts import get_prompt
 from .providers.base import AIMessage
@@ -852,3 +852,110 @@ def build_illustration_url(prompt: str, image_size: str = "landscape_16_9") -> s
 
     encoded_prompt = urllib.parse.quote(prompt)
     return f"https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt={encoded_prompt}&image_size={image_size}"
+
+
+# ---------------------------------------------------------------------------
+# ✅ G2（2026-09-30）：AI 配图全局预算 · 分段择优（纯函数、零 AI 成本、可单测）
+#
+# 上游设计（OpenBidKit 易标《标书智能体（六）》）：AI 可提名很多生图候选，但最终
+# 只按 maxAiImages 择优执行；且把候选小节「分段」，在每一段里选优先级最高的，
+# 避免前面章节把图片额度全部用完（前文 20 个候选、限 6 张时，前面几章不应独占
+# 6 张，后面章节完全无图）。
+#
+# 本仓每个 ```ai_image``` 占位码 = 一张图。导出自动生图前先按文档位置把候选分段，
+# 段内按 priority 降序取 top-k，跨段累计不超过 max_ai_images。
+# 确定性实现（同输入同输出），不依赖随机，便于回归测试。
+# ---------------------------------------------------------------------------
+
+def apply_image_budget(
+    candidates: list[dict],
+    max_images: int,
+) -> list[dict]:
+    """对 AI 配图候选做全局预算分段择优。
+
+    Args:
+        candidates: 候选列表，每个元素为 dict，至少含：
+            - ``key``    : 唯一标识（占位码 / 章节 id）
+            - ``order``  : 大纲顺序（int，越小越靠前）
+            - ``priority``: 优先级（int，可选，默认 0，越大越优先）
+        max_images: 全局上限；<=0 表示不限制（向后兼容，原样返回）。
+
+    Returns:
+        应保留的候选子集（至多 ``max_images`` 个）。列表按「文档位置分段、段内优先
+        级降序」选取，保证图片在全文均匀分布而非集中在前段。
+
+    边界：
+        - ``max_images<=0`` 或候选为空或候选数<=上限：返回原列表（行为不变）。
+        - 返回数量严格 <= ``max_images``。
+    """
+    if max_images is None or max_images <= 0:
+        return list(candidates)
+    if not candidates:
+        return []
+    if len(candidates) <= max_images:
+        return list(candidates)
+
+    # 按文档顺序升序；同位置按优先级降序（越重要越靠前被优先选取）
+    ordered = sorted(
+        candidates,
+        key=lambda c: (c.get("order", 0), -c.get("priority", 0)),
+    )
+
+    n = len(ordered)
+    # 分段：每段约 max_images 个候选，使每个文档区段都能分到额度
+    # seg_count = ceil(n / max_images)；seg_size = ceil(n / seg_count)
+    seg_count = max(1, (n + max_images - 1) // max_images)
+    seg_size = max(1, (n + seg_count - 1) // seg_count)
+
+    per_seg = max(1, max_images // seg_count)
+    remainder = max_images - per_seg * seg_count  # 余数顺次补给前若干段
+
+    chosen: list[dict] = []
+    for i in range(seg_count):
+        start = i * seg_size
+        if start >= n:
+            break
+        end = min(start + seg_size, n)
+        seg = ordered[start:end]
+        # 段内按优先级降序（整表已大致有序，段内再稳妥排一次）
+        seg_sorted = sorted(seg, key=lambda c: -c.get("priority", 0))
+        take = per_seg + (1 if i < remainder else 0)
+        chosen.extend(seg_sorted[:take])
+        if len(chosen) >= max_images:
+            break
+    return chosen[:max_images]
+
+
+def select_ai_image_codes(
+    groups: "dict[str, list[dict]]",
+    order_of: "dict[str, int] | Callable[[str], int]",
+    max_ai_images: int,
+) -> "set[str]":
+    """给定 ai_image 分组（占位码→块）与每码的文档顺序，按全局预算分段择优返回应保留的占位码集合。
+
+    封装 ``apply_image_budget``：把每个占位码构造成候选（key=占位码, order=文档顺序,
+    priority=0），预算内返回保留的占位码；``max_ai_images<=0`` 时返回全部占位码
+    （向后兼容，等同关闭预算）。
+
+    Args:
+        groups: 占位码 -> 该码对应的块列表（与 export._auto_generate_ai_image_blocks 的 groups 同构）
+        order_of: 占位码 -> 文档顺序（int）；可为 dict 或可调用对象
+        max_ai_images: 全局上限（<=0 关闭）
+    """
+    if max_ai_images is None or max_ai_images <= 0:
+        return set(groups.keys())
+    if not groups:
+        return set()
+
+    def _ord(code: str) -> int:
+        if callable(order_of):
+            return order_of(code)
+        return order_of.get(code, 0)
+
+    candidates = [
+        {"key": code, "order": _ord(code), "priority": 0}
+        for code in groups
+    ]
+    kept = apply_image_budget(candidates, max_ai_images)
+    return {c["key"] for c in kept}
+

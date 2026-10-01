@@ -83,8 +83,8 @@ async def test_export_docx_smoke(db_conn):
     joined = "\n".join(t for _, t in para)
 
     # ✅ E3（2026-09-25）：第一章有 DB 子章节 → 正文子标题降级为节内 body 命名空间
-    # （1）/ 2）…，与 DB 子章节的 X.X 命名空间彻底隔离——不再撞号。
-    assert "1） 总体安排" in joined, f"未找到降级后的正文子标题编号，实际内容:\n{joined}"
+    # （1）、2）、…，与 DB 子章节的 X.X 命名空间彻底隔离——不再撞号。
+    assert "1）、总体安排" in joined, f"未找到降级后的正文子标题编号，实际内容:\n{joined}"
     # c1-1 是叶子章节（无 DB 子章节），正文子标题不降级 → 保持旧点分格式
     assert "1.1 关键指标" in joined, f"未找到二级嵌套子标题，实际内容:\n{joined}"
     # 图号应生成为 "1-1"（章节号-序号）
@@ -161,8 +161,8 @@ async def test_export_docx_default_no_pil_fallback_skips_failed_chart(db_conn):
     from docx import Document
     joined = "\n".join(p.text for p in Document(resp.path).paragraphs)
     # 文档结构必须完整（编号照常生成），但不再有红字占位段
-    # ✅ E3：第一章有 DB 子章节 → 正文子标题降级为 1）/ 2）… 格式
-    assert "1） 总体安排" in joined, joined
+    # ✅ E3：第一章有 DB 子章节 → 正文子标题降级为 1）、2）、… 格式
+    assert "1）、总体安排" in joined, joined
 
     import zipfile as _zf
     with _zf.ZipFile(resp.path) as z:
@@ -709,9 +709,9 @@ def test_docx_content_subheadings_shift_child_section_numbers(tmp_path):
         page_number_style="simple",
     )
     joined = "\n".join(p.text for p in Document(out).paragraphs)
-    # ✅ E3 降级后：正文子标题走 body 命名空间（1）/ 2）…，不再占用 X.X 编号
-    assert "1） 项目概况" in joined, joined
-    assert "2） 建筑概况" in joined, joined
+    # ✅ E3 降级后：正文子标题走 body 命名空间（1）、2）、…，不再占用 X.X 编号
+    assert "1）、项目概况" in joined, joined
+    assert "2）、建筑概况" in joined, joined
     # DB 子章节展示编号是累积路径（heading_v2：L2→1，L3→1.1 / 1.2）
     # —— 旧计数器前移手段让 DB 从 1.3/1.4 续排；E3 降级隔离后 DB 回到 1.1/1.2
     # （因为正文子标题已不再占用 1.1/1.2 编号），更符合章节层级直觉。
@@ -736,12 +736,44 @@ def test_docx_embeds_ai_illustration(tmp_path):
 
 
 def test_docx_illustration_without_bytes_keeps_caption(tmp_path):
-    """配图下载失败时只保留图题，不写入「渲染失败」等报错文本"""
+    """配图下载失败（image_bytes 未命中）时：整块跳过、**不占图号**、不留孤立图题。
+
+    ✅ 2026-09-26（陈旧断言更新）：旧实现 `_add_illustration_from_bytes` 只写
+    图题不写位图，但 figure_counters 已 +1 → 交付文档出现「图 1-1」缺失、
+    编号却从「图 1-2」起跳的**图号虚跳**。现与图表分支同口径修复：
+    先判可用性（`_chart_ok`），不可用则不占图号、不留孤立图题，
+    并回收孤儿引导语（见 export.py:3403-3412 的注释）。
+    本用例据此改为断言「无图题、无图号、无报错文本残留」。
+
+    注意：函数名沿用历史命名（keeps_caption），实际语义已变为
+    "skips_and_frees_fig_number"。
+    """
     content = "基坑支护施工说明。\n\n![基坑支护示意](http://example.com/missing.png)\n"
     out = _build_illustration_docx(tmp_path, content, {})
     paras = [p.text for p in Document(out).paragraphs]
-    assert "图 1-1 基坑支护示意" in paras, paras
+    # 不应残留图题（否则占用图号造成后续编号虚跳）
+    assert not any("基坑支护示意" in t for t in paras), paras
+    assert not any("图 1-1" in t for t in paras), paras
+    # 也不得出现渲染失败类报错文本
     assert not any("渲染失败" in t or "插入失败" in t for t in paras), paras
+    # 正文本体仍应正常写入
+    assert any("基坑支护施工说明" in t for t in paras), paras
+
+
+def test_docx_figure_number_not_skipped_by_failed_illustration(tmp_path):
+    """配图失败不占图号 → 后续成功配图从「图 1-1」起（不再虚跳到 1-2）。"""
+    bad = "http://example.com/missing.png"
+    good = "http://example.com/ok.png"
+    content = (
+        "基坑支护施工说明。\n\n"
+        f"![基坑支护示意]({bad})\n\n"
+        f"![监测布置示意]({good})\n"
+    )
+    out = _build_illustration_docx(
+        tmp_path, content, {good: BytesIO(_png_bytes())})
+    paras = [p.text for p in Document(out).paragraphs]
+    assert "图 1-1 监测布置示意" in paras, paras
+    assert not any("基坑支护示意" in t for t in paras), paras
 
 
 def test_docx_ai_image_placeholder_skipped_without_leaking_prompt(tmp_path):

@@ -22,7 +22,7 @@ import json
 import logging
 import uuid
 
-from app.db import init_db, get_conn
+from app.db import get_conn, init_db, safe_rowcount
 from app.services.outline_templates import build_outline, get_meta
 
 logger = logging.getLogger("seed")
@@ -230,7 +230,7 @@ async def seed_catalog(force: bool = False) -> dict:
         f"DELETE FROM outline_library WHERE source='预置清单'"
         f" AND version<>? AND name NOT IN ({placeholders})",
         (SEED_VERSION, *valid_names))
-    removed = cur.rowcount or 0
+    removed = safe_rowcount(cur, what="历史遗留预置目录条目清理")
     if removed:
         # 同时清理其版本归档，避免孤儿记录
         await conn.execute(

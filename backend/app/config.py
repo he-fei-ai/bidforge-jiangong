@@ -32,6 +32,17 @@ class Settings(BaseSettings):
     ocr_pdf_dpi: int = 200             # PDF 渲染 DPI（越高越准、越慢）
     ocr_min_chars_per_page: int = 30   # 平均每页字符数低于该值 → 判定为扫描件
 
+    # ---------- PDF 文本层解析页数上限（2026-09-30 第十四轮） ----------
+    # ⚠️ 此前 MAX_PDF_PAGES 是 file_parser 里的**硬编码 50**，不可配置：
+    #    而招标文件 / 施工组织设计常见 100~400 页 —— 一份 300 页的招标文件
+    #    只提取前 50 页，**后面 250 页的工程参数、清单、图纸说明全部丢失**，
+    #    且这些内容不会进入任何一级（目录 / 正文 / 事实 / 导出）。
+    #    配合同仓 MAX_PARSED_CHARS=400000 的落库上限（约 800 字/页 ≈ 500 页），
+    #    此处取 500：两者口径对齐，不会出现「解析了却又在落库环节截断」的
+    #    二次浪费。逐页容错已就位（单页失败只跳过该页），提高上限不降稳健性。
+    #    ⚠️ 显式设小该值即可恢复「只取前 N 页」的旧行为。
+    pdf_text_max_pages: int = 500
+
     # ---------- MinerU 云端解析（扫描件 / 复杂 PDF 兜底，2026-09-17） ----------
     # provider 为空 = 关闭云端兜底；可选值：
     #   "agent"    MinerU-Agent 轻量解析（v1 API，免 Token，按 IP 限频）
@@ -97,6 +108,28 @@ class Settings(BaseSettings):
     image_download_max_redirects: int = 3
     image_max_per_project: int = 30
     image_price_per_image: float = 0.0
+    # ---------- AI 配图全局预算（G2 · 2026-09-30，默认关闭、零迁移） ----------
+    # 上游设计（OpenBidKit 易标《标书智能体（六）》）：AI 可提名很多生图候选，
+    # 但最终只按 maxAiImages 择优执行；且把候选小节「分段」，在每一段里选优先级
+    # 最高的，避免前面章节把图片额度全部用完（前文 20 个候选、限 6 张时，前面
+    # 几章不应独占 6 张，后面章节完全无图）。
+    # 本仓 AI 生图在导出时由 _auto_generate_ai_image_blocks 自动触发（每个
+    # ```ai_image``` 占位码=一张图）。此处新增全局上限：
+    #   <= 0  : 不限制（沿用旧行为，向后兼容）
+    #   >  0  : 按文档位置分段择优，全文累计生图数不超过该值；
+    #           分段逻辑在 image_engine.apply_image_budget（纯函数、可测）。
+    # 注意：Mermaid 配图另有「每章≤1 图表块」硬约束（content.py），本预算
+    # 只约束 AI 生图，二者正交、互不干扰。
+    max_ai_images: int = 0
+    # ---------- 导出补充附录（D-3 · 2026-10-01，默认关闭、零迁移） ----------
+    # 数据链断点修复：`knowledge_base`（知识库条目）与 `doc_extractions`
+    # （四层存储的提取成果）此前**从未被导出读取** —— 唯一消费点分别是正文生成
+    # 注入（sse_handlers:1515）与 doc_pipeline 的完整性报告，用户在软件里维护的
+    # 知识库与解析提取成果在交付文档中完全不可见。
+    # 开启后，导出 DOCX/PDF 在「附录：项目关键事实」之后追加一份
+    # 「附录：参考资料与提取成果」（按来源分组的二维表）。
+    # 默认 False：不渲染、产物与旧版逐字一致（向后兼容）。
+    export_appendix_sources: bool = False
     # ✅ P4（2026-09-23）：AI 配图人工入口门控。v17 产品约束为「图表全自动生成，
     #    无人工生图入口」——导出 DOCX 时由 _auto_generate_ai_image_blocks 自动生成。
     #    默认 False：/charts/generate-ai-image（兼容保留端点）拒绝人工/脚本触发，
@@ -207,6 +240,41 @@ class Settings(BaseSettings):
     # 仅在弱模型/慢链路上调大可放宽调整请求，调小则更快失败回退给用户重试。
     ai_adjust_timeout: int = 120
 
+    # ---------- 目录生成 · 超时与规模阈值配置化（2026-09-26） ----------
+    # ✅ 收口「配了不生效 / 想调只能改代码」：这 6 项此前是 sse_handlers 里的
+    #    模块级硬编码字面量，运维只能改源码调参。现绑定 Settings，
+    #    **默认值与原硬编码逐字相同**（180/60/120/50000/0.8/45.0）：
+    #    不设环境变量时行为与旧版完全一致，仅显式设环境变量时才改变。
+    # 单次目录 AI 调用（短方案直出 / 一级目录 / 单章二三级）的 provider 超时（秒）。
+    # 弱模型或慢链路（长降级链）下可上调；调小会更快失败并切下一个候选。
+    outline_request_timeout: int = 180
+    # 目录审核（AI 审核）单次调用超时（秒）；超时按「跳过审核直接完成」降级。
+    outline_review_timeout: int = 60
+    # 目录审核修复（按建议重写整份目录）单次调用超时（秒）；
+    # 超时按「保留原目录」降级——宁可未修复，不可丢目录。
+    outline_fix_timeout: int = 120
+    # 分步生成阈值：字数预算 > 此值走「一级目录 → 逐章二三级 → 审核」分步链路，
+    # 否则一次性直出。调小 => 更多方案走分步（更稳但调用次数更多）；
+    # 调大 => 更多方案一次性直出（更快但弱模型下更易截断）。
+    outline_stepwise_min_words: int = 50000
+    # 修复结果相对原目录的最小节点覆盖率：低于该比例判为「模型截断/敷衍」，
+    # 保留原目录（见 _outline_fix_looks_degraded）。
+    outline_fix_min_coverage: float = 0.8
+    # 单章子目录生成的出厂预期耗时（秒），用于进度渐近填充；
+    # 运行中会被本任务实测 EMA 校准覆盖，只是首个样本前的初值。
+    outline_chapter_expect_seconds: float = 45.0
+    # ✅ P2-2（2026-09-27 · 补齐遗留项）：短方案一次性直出的目录节点数上限。
+    #    原为 ``_validate_outline`` 的默认形参 500（写死在 services 层、无法调整）：
+    #    30 章 × 20 节点的紧凑三级目录会触碰上限并被判非法 → 触发无意义的 JSON
+    #    修复轮。修复轮早已放宽到 OUTLINE_FIX_MAX_NODES=1200，生成/修复两侧口径不一致。
+    #    默认 500 = 与修复前**逐字相同**（不改任何默认行为），仅暴露为可调项：
+    #    弱模型/大方案场景可设 OUTLINE_GENERATE_MAX_NODES=1200 与修复轮对齐。
+    outline_generate_max_nodes: int = 500
+    # ✅ P1-3（2026-09-27）：把 outline_templates 匹配到的**标准章节模板**注入
+    #    目录提示词（24 套模板此前解析出却从未使用）。默认 True = 生效；
+    #    置 False 回退到"仅用通用九大章节骨架"的旧行为。
+    outline_template_inject: bool = True
+
     # ---------- 正文生成·全文一致性扫描优化（2026-09-22，P0-1） ----------
     # 扫描的「单次调用合并章数」：1 = 逐章一次调用（旧行为，质量最稳）；
     # >1 时一次调用扫描 k 章（调用次数降为 ⌈N/k⌉），代价是批内上下文变长。
@@ -234,7 +302,12 @@ class Settings(BaseSettings):
     #    基线实测省重试会让 3/12 的高危冲突留在交付文档里。
     consistency_repair_retry_on_invalid_by_severity: bool = True
 
-    # ---------- 正文生成 · 批处理按 provider 成功率分级（2026-09-22 · O6） ----------
+    # ---------- 审核与预检 · 问题定向自动修复（2026-09-30） ----------
+    # 单次「自动修复」最多改写多少个章节（0 = 不限）。定位到的章节数可能很多
+    # （如全文 CON-01 数值口径不一致散落在十几章），一次全改既有超时风险、
+    # 也会让用户无法逐条复核；超出的按定位点数量降序跳过（可下一轮继续）。
+    review_autofix_max_sections: int = 10
+
     # False（默认）= 完全向后兼容：批大小恒为配置值，行为与现状逐字一致。
     # True = 按 provider 实时成功率**防御性降批**：成功率低于
     #   ai_batch_min_success_rate 的 provider 强制逐章调用（批=1）。
@@ -268,6 +341,11 @@ class Settings(BaseSettings):
     #    消除存储态编号（3.2）与展示态编号（2）的格式映射差及 AI 写错号/跳号残留。
     #    设为 False 回退旧行为（正文保留 AI 原始编号，仅导出端重算，预览与成稿可能不一致）。
     content_subheading_renumber: bool = True
+    # ✅ 编号统一（2026-09-26 · 显式跨校验器）：导出前编号一致性严格校验开关。
+    #    False（默认）= 导出时若发现落库正文子标题与目录编号不一致（D4 类漂移残留），
+    #    仅告警不阻断；导出成稿本身由 _compute_subheading 重算保证正确。
+    #    True = 导出前一致性校验失败直接 409 报错，阻止产出不一致文档（CI 校验场景）。
+    numbering_consistency_strict: bool = False
     # ✅ 编号统一（2026-09-25 · E3）：有 DB 子章节的章节，正文子标题降级为节内 body 命名空间。
     #    True（默认）= 统一行为：有子章节时，正文子标题第一层用「1）/2）」、更深层用「a、/b、」，
     #    与子章节的 X.X 命名空间彻底隔离，不再发生「1.1 正文标题」与「1.1 DB 子章节」撞号。
@@ -308,6 +386,47 @@ class Settings(BaseSettings):
     # 「不自动分类」的旧行为（旧库无 schemes 分类列，端点会优雅降级）。
     scheme_auto_classify: bool = True
 
+    # ---------- 提取项目模块 · 招标响应域与分段策略（2026-09-30 · 第十一轮） ----------
+    # ✅ 对齐 OpenBidKit 易标的「提取域」概念：本软件原有 18 项为「专项方案编制域」
+    # （domain="scheme"），易标的 18 项为「招标响应域」（domain="bid_response"，
+    # 含技术评分项/技术评分要求语义二分、无效标与废标项四象限等）。
+    # 两域 item_id 零交集、业务域不同，故加法引入而非替换。
+    # 默认 False：GET /bid-analysis/items 只返回 scheme 域，前端与既有调用点零变化。
+    bid_response_domain_enabled: bool = False
+
+    # 均分分段策略总开关。默认 False：沿用 16000 字符滑动窗口 + 500 overlap
+    # （既有行为）。设 True 后按 context_length_limit × 比例推导段数并尽量均分，
+    # 且断点做段长区间/剩余量校验与 Unicode 代理对保护（对齐 userTextSplitter.cjs）。
+    # ⚠️ 与 context_length_limit（本文件下方，默认 0=关闭）配合：该项开启但
+    # context_length_limit<=0 时仍回退滑动窗口，避免出现「0 段上限」的退化切分。
+    bid_analysis_segment_even: bool = False
+    # 均分模式的上下文上限（字符数）。对齐易标 DEFAULT_CONTEXT_LENGTH_LIMIT=400000。
+    bid_analysis_segment_context_limit: int = 400000
+
+    # 断点续跑总开关。默认 False：与旧版一致，重跑 = 全量重跑所选项。
+    # 设 True 后 /start 在非 force_rerun 且未指定单项时跳过已成功落库的项
+    # （对齐易标 tasksToRun 的 status!=='success' 过滤）；单项重跑与强制重跑
+    # 恒忽略本开关，语义不受影响。
+    bid_analysis_skip_done_when_rerun: bool = False
+
+    # 提取项级并发 / 分段并发 / 单项重试次数 / 分段预算。调参不再需要改代码；
+    # 调小可缓解 provider 配额打爆（AGENTS.md §4.1 降级历史）。
+    bid_analysis_item_concurrency: int = 2
+    bid_analysis_segment_concurrency: int = 3
+    bid_analysis_item_retries: int = 2
+    # ✅ A-1（2026-10-01 第七模块专项 · P0）：**多文档合计**参与 18 项提取的
+    #    字符预算（_MAX_DOC_CHARS 的唯一来源，见 bid_analysis.py）。
+    #    旧默认 30000 与上游解析能力严重错配：
+    #      · pdf_text_max_pages=500（第十四轮）≈ 40 万字
+    #      · MAX_PARSED_CHARS=400000（落库上限）
+    #      · 而提取侧只取合计 3 万字（≈7.5%）→ 前面几轮的「解析不丢页」收益
+    #        在提取环节被整体吃掉，招标文件中后段的清单/参数/技术要求全部不参与提取；
+    #        且预算耗尽后剩余文档被**整份跳过**（_combine_doc_texts 的 break）。
+    #    现默认对齐落库上限 400000，使「解析 → 落库 → 提取」三级口径一致。
+    #    ⚠️ 代价：分段数 ≈ 预算/16000，预算放大将同比放大 AI 调用量与墙上时间
+    #       （18 项 × 段数）。成本敏感场景显式调回 30000 即恢复旧行为（仍可配）。
+    bid_analysis_segment_budget: int = 400000
+
     # 目录生成：按方案危大工程类别（schemes.hazard_category）自动匹配 outline_library
     # 目录库、追加为【目录库参考】。默认关闭：旧行为仅按 config.library_ids 选库；
     # 设 True 后额外按类别命中「已通过」目录库（仅追加，不影响用户显式选库结果）。
@@ -334,6 +453,35 @@ class Settings(BaseSettings):
     # 设 True 后，章节标题可反推九大章节码时，优先注入该章归属的事实
     # （未命中该章的事实仍保留，仅作补充，不丢事实）。
     facts_chapter_inject: bool = False
+
+    # ---------- 全局事实 · 参考软件易标能力落地（2026-09-30 第十三轮） ----------
+    # 以下三项把 OpenBidKit 易标 globalFactsTask.cjs 的「补充 / 整理 / 预算分段」
+    # 三段能力接进本仓事实管线，**默认全部关闭**：
+    # 关闭时 facts_extractor 的行为与引入前逐字节一致（零新增 AI 调用、
+    # 零分段行为变化），因此可在无回归风险的前提下按需灰度开启。
+
+    # ① 知识库补充（对齐易标 runKnowledgeGlobalFactPatches，:876-891）：
+    #    把项目知识库条目作为**第二事实来源**，让 AI 只产出「补丁」而不是
+    #    重新生成全部事实。设 True 后每次事实提取多 1 次 AI 调用。
+    #    ⚠️ 本仓 knowledge_base 表早已存在并被目录/正文生成消费（见
+    #    sse_handlers._build_knowledge_text），但事实链路此前完全不读它——
+    #    上一轮 AGENTS.md 曾误记为「本仓无对应数据源」，本轮已更正。
+    facts_knowledge_patch_enabled: bool = False
+
+    # ② 最终整理（对齐易标 finalizeGlobalFacts，:909-920）：
+    #    一次 AI 调用做「同义项合并 + 要求句改写为事实句 + 强制保留工期类变量」。
+    #    本仓既有 merge_and_deduplicate 是**纯程序**归一化，缺语义改写这一步。
+    facts_finalize_enabled: bool = False
+
+    # ③ 上下文预算分段（对齐易标 getGlobalFactsSegmentLimit，:363-377）：
+    #    设 True 后分段上限改由「模型上下文窗口 × 0.8 - 固定消息」动态计算，
+    #    取不到配置时回落到本仓等价的 CHUNK_SIZE 基准（8000），下限 1000。
+    #    ⚠️ 关闭时 split_into_chunks 的切分行为与引入前完全一致。
+    facts_context_budget_split: bool = False
+
+    # 事实链路两次新增 AI 调用的超时（秒）。沿用 facts_extractor.FACTS_REQUEST_TIMEOUT
+    # 的量级（240s），单独可配以便长资料场景下调。
+    facts_enrich_timeout: int = 240
 
     # ---------- 目录生成 · 方案名称主线（2026-09-26 · 三项依据收敛） ----------
     # 以下三项对应需求「目录生成主要结合三项依据」，全部为**纯增量**改造：
@@ -373,6 +521,11 @@ class Settings(BaseSettings):
     # 相关项的预算份额放大倍数（仅在 outline_basis_relevance=True 时生效）。
     # 2.0 = 相关项份额约为无关项两倍；调大更激进，调到 1.0 等价于关闭加权。
     outline_relevance_boost: float = 2.0
+    # ✅ 2026-09-27（要求四 · 全面性）：目录生成后做「方案名称关键词 → 目录章节」
+    #    覆盖校验，缺口并入外科式补齐的 missing 列表（复用既有补齐链路，
+    #    缺失时才多 1 次小调用；全覆盖时反而省掉 AI 审核）。
+    #    默认 True = 新增能力；置 False 可回退到"只看编制要求/危大必备章节"口径。
+    outline_name_coverage_check: bool = True
 
     # G4 变量契约：模板可声明 requires（必需变量白名单），启动期比对「声明」与
     #   「模板实际占位符」是否一致，不一致打 WARNING。默认 False = 不改变启动行为。

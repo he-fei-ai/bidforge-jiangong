@@ -213,6 +213,54 @@ def build_heading_spec_prompt() -> str:
 1. 所有标题禁止使用倾斜（斜体）
 2. L1~L5 必须使用对应的编号格式，不得混用；L1~L4 编号后用空格分隔标题，L5~L7 编号后用顿号（、）分隔
 3. L3~L5 编号为节内相对路径、不含章号（如第二章第 3 节下的三级标题为 3.1、四级为 3.1.1、五级为 3.1.1.1）
-4. L6~L8 编号格式不限，但必须能从内容上区分层级
+4. L6 编号为「数字 + 右括号」（如 1）2）…），L7 为「小写字母 + 顿号」（如 a、b、…）；L8 编号格式不限，但必须能从内容上区分层级
 5. L1~L4 标题加粗、四号字；L5~L8 不加粗、字号/字体同正文
 """
+
+
+# ============================================================
+# 正文子标题编号规则（{subheading_rule} 占位符的唯一实现）
+# ------------------------------------------------------------
+# ✅ BUG 修复（2026-09-26）：content_generation_system 模板里有
+#    `{subheading_rule}` 占位符（prompts/content.py:99 + _registry 契约表），
+#    但**全仓没有任何代码生成这个变量** —— render 时被当成未解析占位符丢弃，
+#    实测发给模型的提示词是：
+#        「章节内部小标题编号规范（如需分层组织内容时使用）：」+ 空行
+#    即 AI 完全收不到子标题编号规范 → 自由发挥编号（实测会出现 1.1 / 2.1 /
+#    3.1 混用、跳号、与 DB 子章节撞号）。本函数补齐该生成方。
+#
+#    文案与导出端 export._compute_subheading 的实际产出一一对应
+#    （两种命名空间分支），保证「提示词说的 = 导出做的」。
+# ============================================================
+#: 本节有 DB 子章节时：正文子标题降级为节内 body 命名空间（与 E3 开关同口径）
+_SUBHEADING_RULE_DEMOTED = """\
+- 一级小标题：N）、标题（如 1）、标题、2）、标题）
+- 二级及更深小标题：字母、标题（如 a、标题、b、标题）
+（本章存在子章节，正文小标题使用节内独立编号，不与子章节编号混用）"""
+
+#: 本节无 DB 子章节：正文子标题使用点分相对编号
+_SUBHEADING_RULE_NORMAL = """\
+- 二级小标题：1.1 标题
+- 三级小标题：1.1.1 标题
+- 四级小标题：1.1.1.1 标题
+- 五级小标题：1.1.1.1.1 标题
+（按本节编号顺延编号，小标题从 1、1.1、1.1.1 起，不得跳号或重复）"""
+
+
+def build_subheading_rule(has_db_children: bool = False) -> str:
+    """生成正文子标题编号规则片段（注入 content_generation_system 的
+    ``{subheading_rule}``）。
+
+    Args:
+        has_db_children: 本节是否存在 DB 子章节。为真时降级为节内 body
+            命名空间（1）/ a、），与 export._compute_subheading 的
+            ``has_children=True`` 分支严格同口径，避免正文小标题与
+            子章节的 X.X 编号撞号。
+    """
+    try:
+        from app.config import settings
+        demote = bool(has_db_children) and bool(
+            settings.body_subheading_demote_with_children)
+    except Exception:  # pragma: no cover - 配置不可用时按默认开启
+        demote = bool(has_db_children)
+    return _SUBHEADING_RULE_DEMOTED if demote else _SUBHEADING_RULE_NORMAL

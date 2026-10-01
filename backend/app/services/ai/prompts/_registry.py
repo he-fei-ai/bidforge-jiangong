@@ -34,40 +34,55 @@ _ALL_PROMPTS: dict[str, dict] = {}
 # 白名单依据：`{max}` 是常见 JSON 示例字段；`{tasks}` `{type}` 等短字段同理。
 # 长度 1~3 的变量名如果**同时**在提示词中出现了 JSON 示例（含 ":" 或 "["）则视为误报。
 # 保守起见：白名单只影响告警，不影响 render_prompt 的实际替换行为。
+#
+# ✅ 2026-09-26（T8 · 白名单收窄）：旧版 40 个词条中含大量真实业务变量名
+#    （title/name/content/status/type/value/count/total/...）。实测全部注册
+#    模板后确认：仅 ``max`` 一个词条真正被「JSON 示例误报」路径依赖
+#    （content_generation_system 的 {max} 示例）；code/content 虽在白名单，
+#    但其上下文判定本就不像 JSON（FP=0），白名单对它们从未生效。
+#    因此收窄为「极短名（≤3 字符）」—— 这些名字几乎不可能是业务变量
+#    （业务变量均为 scheme_name / section_number 这类长名），
+#    既保留 {max}/{min} 误报抑制，又杜绝未来真业务变量（如 {title}）被漏报。
+#    已用探针验证：收窄后对全部现有模板的 FP 判定逐条一致（零行为变化）。
 _FALSE_POSITIVE_VARS = frozenset({
-    # 极短常见 JSON 字段名（长度 1-3）
+    # 极短常见 JSON 字段名（长度 ≤3），业务变量名均 ≥4 字符
     "max", "min", "id", "ok", "no", "to", "on", "off",
     "url", "api", "tag", "key", "val",
-    # 常见 JSON 结构字段
-    "tasks", "items", "steps", "rows", "cells", "lines", "text",
-    "status", "result", "output", "content", "value", "label",
-    "type", "code", "name", "role", "goal", "text", "text",
-    "level", "order", "index", "count", "total",
-    # markdown 语法
-    "title", "subtitle", "quote", "note", "warn",
 })
 
 
 def _looks_like_json_example(context: str, var: str) -> bool:
-    """判断变量在模板里的上下文是否像 JSON 示例或 LaTeX 下标（无需 render 替换）。
+    """判断变量在模板里的**所有出现**是否都像 JSON 示例或 LaTeX 下标。
 
-    ✅ 保守匹配：只有满足以下条件之一才视为误报（不产生 missing 告警）：
-    1. 变量后面 10 个字符内出现 ASCII 冒号 ":" 或英文方括号 "["/"}"（JSON 特征）；
-    2. 变量前面 5 个字符内出现 "{"（LaTeX 下标如 `$p_{max}$`）。
+    ✅ 保守匹配：某次出现满足以下条件之一才视为「该处是示例」：
+    1. 变量后面 10 个字符内出现 ASCII 冒号 ":" 或英文方括号 "["/"{"（JSON 特征）；
+    2. 变量前面 15 个字符内出现 "$" 且后面 10 个字符内有 "$"（LaTeX 下标如 `$p_{max}$`）。
     中文冒号"："不算，避免"最大数量：{max}"这类自然语言被误判。
+
+    ✅ 2026-09-26（T8-b · 首处判定缺陷）：旧实现 ``context.find(marker)`` 只检查
+    **第一处**出现 —— 若同一变量先以 JSON 示例出现、后有真实使用（如示例
+    `{max: 200}` 之后正文又写「不超过 {max} 条」），第一处命中示例特征就会
+    把真实使用的缺失告警一并吞掉。现改为**全部出现**都像示例才判定误报：
+    任何一处出现是真实使用（tail 无 JSON 特征）即返回 False，保留告警。
+    变量完全未出现（marker 找不到）返回 False（谈不上误报）。
     """
     marker = f"{{{var}}}"
-    idx = context.find(marker)
-    if idx < 0:
-        return False
-    tail = context[idx + len(marker): idx + len(marker) + 10]
-    if (":" in tail) or ("[" in tail) or ("{" in tail):
-        return True
-    # LaTeX 下标：$p_{max}$ —— 前 15 字符里有 `$` 且后 10 字符里有 `$`
-    head = context[max(0, idx - 15): idx]
-    if "$" in head and "$" in tail:
-        return True
-    return False
+    start, found = 0, False
+    while True:
+        idx = context.find(marker, start)
+        if idx < 0:
+            break
+        found = True
+        start = idx + len(marker)
+        tail = context[idx + len(marker): idx + len(marker) + 10]
+        if (":" in tail) or ("[" in tail) or ("{" in tail):
+            continue
+        # LaTeX 下标：$p_{max}$ —— 前 15 字符里有 `$` 且后 10 字符里有 `$`
+        head = context[max(0, idx - 15): idx]
+        if "$" in head and "$" in tail:
+            continue
+        return False  # 该处出现是真实使用 → 整体不算误报
+    return found
 
 
 def _is_false_positive(key: str, var: str, template: str) -> bool:
@@ -94,9 +109,19 @@ def _is_false_positive(key: str, var: str, template: str) -> bool:
     return _looks_like_json_example(template, var)
 
 
-#: 整行独占的可选区块占位符（行内无其它文字）
+#: 整行独占的可选区块占位符（行内无其它文字）。
+#:
+#: ✅ 2026-09-27（BUG-P0-1 · 判据收敛）：本常量是「可选区块」的**唯一事实源**，
+#:    同时被三处消费，历史上三处各写一份且互相分叉：
+#:      ① 渲染侧删行（render_prompt）
+#:      ② 校验侧豁免（_is_optional_block_var / validate_prompt_variables）
+#:      ③ 残留检测（has_residual_placeholders 用的 _RESIDUAL_PLACEHOLDER_PATTERN）
+#:    旧实现 ① 用 ``[A-Za-z0-9_]*``（≥1 字符）、② 用 ``[A-Za-z_]\w{1,}``（≥2 字符），
+#:    于是单字符变量 ``{x}``「被删行却仍报缺失」，非 ASCII 变量 ``{变量}``
+#:    「被豁免却不删行、字面量残留进模型」—— 同一判据两个方向都分叉。
+#:    现统一为「首字符 ASCII 字母/下划线 + 至少 1 个 \w 字符」。
 _OPTIONAL_BLOCK_RE = re.compile(
-    r"^[ \t]*\{([A-Za-z_]\w{1,})\}[ \t]*$", re.MULTILINE)
+    r"^[ \t]*\{([A-Za-z_]\w*)\}[ \t]*$", re.MULTILINE)
 
 
 def _is_optional_block_var(var: str, template: str) -> bool:
@@ -254,6 +279,50 @@ def has_residual_placeholders(text: str) -> bool:
     return bool(_RESIDUAL_PLACEHOLDER_PATTERN.search(text))
 
 
+def _render_by_line(template: str, pattern: re.Pattern | None,
+                    replace) -> str:
+    """逐行渲染模板，并把「本次未传值的整行独占占位符」整行丢弃。
+
+    ✅ 2026-09-27（BUG-P0-1 · 注入内容被静默删行）：
+    旧实现先对全文做一次替换、再用 ``re.sub(r"^[ \\t]*\\{\\w+\\}[ \\t]*$", ...)``
+    无条件删行。这条正则作用在**替换结果**上，于是「调用方注入的外部原文里
+    恰好有一行形如 ``{heading}``」也会被整行删掉 —— 资料正文、模型原始输出、
+    Mermaid 代码都被篡改，且无任何日志。
+
+    本实现把「行」这个概念限定在**模板自身**：
+
+    1. 先按 ``_OPTIONAL_BLOCK_RE`` 判定该行是否「整行就是一个占位符」；
+    2. 是且该变量本次没传（``pattern`` 不匹配它 / ``kwargs`` 里没有）→ 丢整行；
+    3. 其余情况只在本行内做替换 —— 替换出来的多行内容**原样保留**，
+       不会再被「删行」逻辑二次扫描。
+
+    因此「第 3 步产生的多行内容」与「第 2 步的行判定」在结构上不可能互相
+    干扰，BUG-P0-1 从根上消失，而不是靠加特判绕过。
+
+    :param template: 模板原文（未渲染）。
+    :param pattern: 已编译的替换正则；``None`` 表示无任何变量可替换
+                    （此时只做第 2 步的删行）。
+    :param replace: ``re.sub`` 的替换回调。
+    """
+    out: list[str] = []
+    # 保留原文的行尾形态（\n / \r\n / 无尾换行），避免仅因渲染就改变文本形态。
+    # 注意：split("\n") 产生的最后一个元素对应「原文末尾换行之后」的空串，
+    # 它本身**不带**换行 —— 逐行补 eol 时必须跳过它，否则会凭空多出一个 \n。
+    raw_lines = template.split("\n")
+    last_idx = len(raw_lines) - 1
+    for idx, raw in enumerate(raw_lines):
+        eol = "" if idx == last_idx else "\n"
+        line = raw
+        if idx != last_idx and line.endswith("\r"):
+            line, eol = line[:-1], "\r\n"
+        m = _OPTIONAL_BLOCK_RE.match(line)
+        if m and (pattern is None or not pattern.search(line)):
+            # 整行独占、且本次没有对应实参 → 可选区块，整行丢弃
+            continue
+        out.append((pattern.sub(replace, line) if pattern else line) + eol)
+    return "".join(out)
+
+
 def render_prompt(template: str, **kwargs) -> str:
     """统一的变量渲染函数，替换模板中的所有变量占位符。
 
@@ -277,25 +346,28 @@ def render_prompt(template: str, **kwargs) -> str:
             r"__(" + "|".join(names) + r")__",
             flags=re.IGNORECASE,
         )
-
-        def _replace(m: re.Match) -> str:
-            name = (m.group(1) or m.group(2) or "").lower()
-            return str(lookup[name])
-
-        result = pattern.sub(_replace, template)
     else:
-        result = template
+        pattern = None
 
-    # ✅ 整行独占占位符 = 可选区块（2026-09-26）：模板里单独占一行的
-    #    {scheme_basis} 之类区块，语义是「有值才注入这一段」。
-    #    旧实现不丢行 → 调用方未传时**字面量 "{scheme_basis}" 原样进入发给
-    #    模型的提示词**，模型要么把它当正文读、要么按未知变量编内容。
-    #    只处理「整行就是这一个占位符」；行内混排（如 "【事实】：{project_facts}"）
-    #    不在此处理 —— 空串渲染成 "【事实】：" 是可接受的降级。
-    result = re.sub(r"^[ \t]*\{[A-Za-z_][A-Za-z0-9_]*\}[ \t]*\r?\n", "",
-                    result, flags=re.MULTILINE)
-    result = re.sub(r"^[ \t]*\{[A-Za-z_][A-Za-z0-9_]*\}[ \t]*$", "",
-                    result, flags=re.MULTILINE)
+    def _replace(m: re.Match) -> str:
+        name = (m.group(1) or m.group(2) or "").lower()
+        return str(lookup[name])
+
+
+    #
+    # ✅ 2026-09-27（BUG-P0-1 · 注入内容被静默删行，数据丢失）：
+    #    旧实现在替换**之后**对 result 无条件删「整行就是一个 {word}」
+    #    的行，于是「注入值里恰好有一行形如 {word}」也被删掉。而调用方
+    #    注入的恰好是**外部原文**（facts_extractor 的 material、
+    #    json_response 的 invalid_content、charts 的 code、consistency_scanner
+    #    的 section_content…）—— 实测用真实模板 facts_json_fix_system
+    #    复现：invalid_content 里的 ``{heading}`` 整行消失，AI 拿到的是被悄悄
+    #    篡改过的「待修复原文」，比不修更糟，且与紧邻的残留检测
+    #    （那段明确用 template 而非 result）自相矛盾。
+    #    现改为**逐行处理**：只对「模板自身独占一整行的占位符」
+    #    判是否删行，注入值永远不参与行判定；且与 _is_optional_block_var
+    #    共用 _OPTIONAL_BLOCK_RE（唯一事实源），消除「删行正则 vs 豁免正则」分叉。
+    result = _render_by_line(template, pattern, _replace)
 
     # ✅ 只在【模板】层面检测未解析占位符：
     #    旧实现检测的是"渲染后文本"，会把注入的文档正文 / 模型原始输出中
@@ -439,6 +511,86 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     ],
     "facts_json_fix_system": ["issues", "target_description", "invalid_content"],
     "global_facts_adjust_system": ["current_facts", "instruction"],
+    # ✅ 2026-09-26（T9 · 契约表覆盖率扩展）：以下 25 个模板由「模板实际占位符
+    #    自动提取（同 check_prompt_variables 口径过滤误报）+ 高价值模板调用方
+    #    传参人工抽查（outline_sublevel_system / consistency_scan_batch_user /
+    #    consistency_repair_user / expert_review_system 四处 100% 对齐）」生成。
+    #    纳入后任一模板占位符被改而契约未同步，启动期 check_prompt_variables
+    #    立即检出（test_all_declared_contracts_match_templates 同步兜底）。
+    # --- 目录生成域 ---
+    "outline_sublevel_system": [
+        "chapter_desc", "chapter_id", "chapter_title", "construction_scope",
+        "other_outline", "prior_chapters", "project_brief", "project_facts",
+        "requirements", "scheme_name", "scheme_type",
+    ],
+    "outline_sublevel_batch_system": [
+        "chapter_count", "chapters_text", "construction_scope", "other_outline",
+        "prior_chapters", "project_brief", "project_facts", "requirements",
+        "scheme_name", "scheme_type",
+    ],
+    "outline_adjust_system": [
+        "current_outline", "instruction", "scheme_name", "scheme_type",
+    ],
+    "outline_json_fix_system": [
+        "invalid_content", "issues", "target_description",
+    ],
+    "outline_recognition_system": ["raw_text"],
+    # --- 正文生成域 ---
+    "content_shrink_system": [
+        "current_words", "max_rounds", "round_no", "scheme_name",
+        "scheme_type", "section_title", "target_words",
+    ],
+    "word_budget_allocate_system": ["units_json"],
+    # --- 一致性 Agent 域 ---
+    "consistency_scan_user": [
+        "design_docs_summary", "global_facts", "project_docs_summary",
+        "section_content", "section_id", "section_title", "standards_summary",
+    ],
+    "consistency_scan_batch_user": [
+        "design_docs_summary", "global_facts", "project_docs_summary",
+        "section_count", "sections_block", "standards_summary",
+    ],
+    "consistency_repair_user": [
+        "authoritative_sources", "conflicts_in_section", "global_facts",
+        "section_content", "section_id", "section_title",
+    ],
+    "consistency_arbitrate_user": [
+        "conflicts", "design_docs_summary", "global_facts",
+        "project_requirements", "standards_summary",
+    ],
+    "consistency_audit_system": [
+        "content", "facts", "scheme_name", "scheme_type",
+    ],
+    # --- 审核与预检域 ---
+    "expert_review_system": [
+        "attachments", "check_items", "outline_tree", "scheme_name",
+        "scheme_type",
+    ],
+    "compliance_check_system": [
+        "checklist", "content", "scheme_name", "scheme_type",
+    ],
+    # --- 审核预检 · 问题定向自动修复（services/review_autofix.py） ---
+    "review_autofix_user": [
+        "global_facts", "instruction", "issue", "must_contain",
+        "must_not_contain", "rule_id", "rule_title", "scheme_name",
+        "scheme_type", "section_content", "section_id", "section_title",
+        "standards_text", "targets",
+    ],
+    # --- 图表修复域（chart-json / mermaid 修复共用 {code}/{error} 口径） ---
+    "chart_json_fix": [
+        "chart_type", "code", "error", "scheme_type",
+    ],
+    "chart_json_fix_architecture": ["code", "error", "scheme_type"],
+    "chart_json_fix_comparison": ["code", "error", "scheme_type"],
+    "chart_json_fix_gantt": ["code", "error", "scheme_type"],
+    "chart_json_fix_labor": ["code", "error", "scheme_type"],
+    "chart_json_fix_layout": ["code", "error", "scheme_type"],
+    "chart_mermaid_fix": ["code", "error", "scheme_type"],
+    "chart_mermaid_fix_comparison": ["code", "error", "scheme_type"],
+    "chart_mermaid_fix_flowchart": ["code", "error", "scheme_type"],
+    "chart_mermaid_fix_gantt": ["code", "error", "scheme_type"],
+    # --- 配图域 ---
+    "ILLUSTRATION_PROMPT_OPTIMIZE": ["section_title", "style"],
 }
 
 
@@ -539,12 +691,146 @@ class PromptContractError(RuntimeError):
     """
 
 
+#: 保存期校验的问题级别 → 中文说明（前端直接展示）。
+PROMPT_ISSUE_LABELS = {
+    "unknown_shared_ref": "未注册的共享片段引用",
+    "contract_var_removed": "相对出厂默认删掉了契约变量",
+    "contract_var_added": "新增了契约表中没有的变量",
+}
+
+
+def validate_prompt_content(key: str, content: str) -> list[dict]:
+    """保存提示词前的**静态体检**，返回问题清单（空列表 = 通过）。
+
+    ✅ 2026-09-27（BUG-P1-C · 保存时零校验，坏模板一路跑到模型面前）：
+    旧实现的 PATCH 只检查「key 存在 / 长度不超限 / content 是字符串」，
+    于是用户可以把模板改成任意形态并立即对所有生成任务生效：
+
+    * 引用一个**不存在的** ``{SHARED_FOO}`` —— 运行时保留字面量，
+      提示词正文里就多出一段 ``{ SHARED_FOO }`` 垃圾，模型可能当成指令读；
+    * 删掉 ``content_generation_system`` 的 ``{scheme_name}`` —— 该变量
+      不再注入，模板里「【方案名称】：」后面直接空白，而**没有任何反馈**；
+    * 增删契约表里声明的变量 —— 启动期 ``check_prompt_variables`` 只比对
+      **出厂默认**（有意为之，见该函数注释「防基线污染」），所以用户改过
+      的模板**永远不参与契约校验**，漂移彻底无人把关。
+
+    本函数**不做任何阻断**（返回清单，由路由决定是否 400），保持
+    「保存成功 ≠ 一定正确」这一向后兼容语义；默认路由只把
+    ``errors`` 级问题升级为 400，其余作为 ``warnings`` 回传前端提示。
+
+    :param key: 提示词 key。
+    :param content: 待保存的正文。
+    :return: ``[{"level","code","message","detail"}]``；level ∈ error/warning。
+    """
+    issues: list[dict] = []
+    if content is None:
+        return issues
+    text = content or ""
+
+    # ① 未注册的 {SHARED_*} 引用 —— 运行时必然保留字面量
+    used_shared = sorted(set(re.findall(r"\{(SHARED_[A-Z0-9_]+)\}", text)))
+    unknown_shared = [k for k in used_shared if k not in _ALL_PROMPTS]
+    if unknown_shared:
+        avail = sorted(k for k in _ALL_PROMPTS if k.startswith("SHARED_"))
+        issues.append({
+            "level": "error",
+            "code": "unknown_shared_ref",
+            "message": (f"引用了不存在的共享片段：{', '.join(unknown_shared)}；"
+                        f"可用片段：{', '.join(avail) or '（无）'}"),
+            "detail": unknown_shared,
+        })
+
+    # ② 共享片段自引用 / 环引用 —— 运行时会被 BUG-P0-2 的防护挡下并留字面量
+    #    ✅ 判据修正（2026-09-30）：**必须检查待保存的 `text` 自身**。
+    #    旧实现只读注册表里 SHARED 片段的**旧内容**（`_ALL_PROMPTS[sk]`），
+    #    而 PATCH 路由的顺序是「先 validate_prompt_content → 再 update_prompt 落库」
+    #    （routers/prompts.py:187 / :214）—— 于是**首次**把
+    #    `SHARED_OUTPUT_SPEC` 改成含 `{SHARED_OUTPUT_SPEC}` 的内容时，
+    #    校验读到的仍是出厂默认（不含自引用）→ 判定通过 → 坏内容被写入 DB。
+    #    实测（探针复现）：首次保存 3 个 SHARED 片段的自引用内容，
+    #    `validate_prompt_content` 一律返回 `[]`（无 error），而二次保存才报错。
+    #    修法：以 `text` 为准判断「本次保存是否引入自引用」。
+    for sk in used_shared:
+        if sk not in _ALL_PROMPTS:
+            continue
+        # 本次保存的正文优先（首次保存自引用即在此命中）；
+        # 否则回退注册表旧内容（识别"已入库的互引"）。
+        body = text if key == sk else str(
+            _ALL_PROMPTS[sk].get("content")
+            or _ALL_PROMPTS[sk].get("default_content") or "")
+        if re.search(r"\{" + re.escape(sk) + r"\}", body):
+            issues.append({
+                "level": "error",
+                "code": "shared_self_reference",
+                "message": f"共享片段 {sk} 的内容里引用了自身，会造成循环展开",
+                "detail": [sk],
+            })
+            break
+
+    # ③ 契约变量增删（相对出厂默认的占位符集合）
+    #    ✅ 判据收敛（2026-09-30）：**必须复用 `_is_false_positive`**。
+    #    旧实现直接用 `extract_user_variables` 的原始结果，既不过滤 JSON/LaTeX
+    #    示例误报，也不套可选区块豁免 —— 而 `validate_prompt_variables`
+    #    （:241）与 `check_prompt_variables` 走的是同一套过滤。于是同一个变量
+    #    在「运行期缺失告警」里被正确豁免，在「保存期体检」里却被报成漂移。
+    #    实测（探针复现）：`content_generation_system` 的**出厂默认**里含
+    #    `$p_{max}$`（LaTeX 下标示例，`_is_false_positive` 判定 True），
+    #    但 ③ 分支未过滤 → 用户**原样保存出厂模板也会弹一条**
+    #    「新增了未在契约表中声明的变量 max」的假告警。
+    meta = _ALL_PROMPTS.get(key) or {}
+    requires = meta.get("requires") or []
+    if requires:
+
+        def _user_vars(tpl: str) -> set[str]:
+            """提取「调用方需提供的变量」，并套用与运行期告警**同一套**误报/豁免判据。
+
+            - `_is_false_positive`：JSON 示例 / LaTeX 下标（如 `$p_{max}$`）；
+            - `_is_optional_block_var`：整行独占的可选区块（未传即整行丢弃）。
+            两者都只影响**告警**口径，不改变模板实际渲染结果，故此处过滤安全。
+            """
+            out = set()
+            for v in extract_user_variables(tpl):
+                if _is_false_positive(key, v, tpl):
+                    continue
+                if _is_optional_block_var(v, tpl):
+                    continue
+                out.add(v.lower())
+            return out
+
+        default_text = meta.get("default_content") or meta.get("content") or ""
+        default_vars = _user_vars(default_text)
+        cur_vars = _user_vars(text)
+        removed = sorted(v for v in requires
+                         if v.lower() in default_vars and v.lower() not in cur_vars)
+        added = sorted(v for v in cur_vars
+                       if v.lower() not in {r.lower() for r in requires})
+        if removed:
+            issues.append({
+                "level": "warning",
+                "code": "contract_var_removed",
+                "message": (f"删掉了契约变量 {', '.join(removed)}："
+                            f"调用方仍会传入，但模板已不再使用；"
+                            f"若非有意请恢复"),
+                "detail": removed,
+            })
+        if added:
+            issues.append({
+                "level": "warning",
+                "code": "contract_var_added",
+                "message": (f"新增了未在契约表中声明的变量 {', '.join(added)}："
+                            f"运行时永远不会被填充，位置将留空"),
+                "detail": added,
+            })
+    return issues
+
+
 from app.services.ai.prompts import outline  # noqa: E402,F401
 from app.services.ai.prompts import content  # noqa: E402,F401
 from app.services.ai.prompts import charts  # noqa: E402,F401
 from app.services.ai.prompts import analysis  # noqa: E402,F401
 from app.services.ai.prompts import illustration  # noqa: E402,F401  （自招投标平台移植：配图编排/方案）
 from app.services.ai.prompts import consistency_repair  # noqa: E402,F401  （全文一致性 Agent 修复：扫描/仲裁/修复）
+from app.services.ai.prompts import review_autofix  # noqa: E402,F401  （审核预检问题定向修复）
 # ✅ G4 变量契约：模板全部注册后再套用契约表（见上方 PROMPT_VARIABLE_CONTRACTS）
 _apply_variable_contracts()
 

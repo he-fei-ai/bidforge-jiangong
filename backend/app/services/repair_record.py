@@ -70,10 +70,12 @@ async def get_snapshot(db, snapshot_id: str) -> dict | None:
     return item
 
 
-async def rollback_snapshot(db, snapshot_id: str) -> dict:
+async def rollback_snapshot(db, snapshot_id: str, *,
+                            undo_type: str = "consistency_rollback") -> dict:
     """一键回滚：把快照涉及章节的正文恢复为 content_before。
 
     回滚前再存一个"回滚前"快照，保证回滚本身也可撤销；只更新快照内章节。
+    undo_type：撤销快照的 type（编号版本管理传 "numbering_rollback" 以隔离场景）。
     """
     snap = await get_snapshot(db, snapshot_id)
     if not snap:
@@ -93,7 +95,7 @@ async def rollback_snapshot(db, snapshot_id: str) -> dict:
         current.append({"section_id": sid,
                         "content_before": row[0] if row else ""})
     undo_id = await create_snapshot(db, snap["scheme_id"], current,
-                                    snapshot_type="consistency_rollback")
+                                    snapshot_type=undo_type)
 
     restored = 0
     for sec in sections:

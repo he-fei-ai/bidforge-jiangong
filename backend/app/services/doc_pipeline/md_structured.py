@@ -9,8 +9,11 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+logger = logging.getLogger("doc_pipeline.md_structured")
 
 # 页标记（与 file_parser._PDF_PAGE_MARK_RE 同口径，独立定义避免私有耦合）
 _PAGE_MARK_RE = re.compile(r"<!--\s*page\s*:?\s*(\d+)\s*-->", re.I)
@@ -179,6 +182,24 @@ def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, A
             for m in _BRACKET_IMG_RE.finditer(ln):
                 img_id = f"img_{len(images) + 1:03d}"
                 pnum = int(m.group(2)) if m.group(2) else num
+                # ✅ BUG 修复（2026-09-27 · KeyError 导致解析产物整批丢失）：
+                #    显式 `page:N` 指向本文档**不存在**的页时（OCR / 转换链路常见：
+                #    标记里的页号来自原始 PDF，而 Markdown 的 `<!-- page:N -->`
+                #    标记可能因空页被跳过），旧实现直接 `_page_entry(pnum)` 会在
+                #    pages 字典里凭空插入一个「只有 images、没有任何 line_idx」的
+                #    新页，后果有两处：
+                #      ① 收尾拼装时该页 entry["text"] 尚不存在 →
+                #         KeyError('text') 直接抛给调用方 → 四层存储
+                #         （解析层 pages/tables/images + doc_chunks 分块）整批落盘
+                #         失败，用户「解析成功」但结构化/分块产物静默丢失；
+                #      ② page_count 被虚增到引用页号（3 页文档报 99 页），
+                #         project_documents.page_count 一并失真。
+                #    现按「标记实际所在的页」归位（未知页回退到当前页），
+                #    只留 DEBUG 痕迹，绝不阻断解析主链路。
+                if pnum not in pages:
+                    logger.debug("图片 %s 引用的页 %d 不存在，按标记所在页 %d 归位",
+                                 m.group(1), pnum, num)
+                    pnum = num
                 images.append({
                     "image_id": img_id,
                     "page_num": pnum,
@@ -216,7 +237,10 @@ def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, A
         e = pages[num]
         page_list.append({
             "page_num": num,
-            "text": e["text"],
+            # ✅ 防御（2026-09-27）：正常路径下上面已为每个页写好 text；
+            #    万一有别的分支在拼装之后/之中新增页条目，也不能让
+            #    KeyError('text') 把整批解析产物带走（空文本优于崩溃）。
+            "text": e.get("text", ""),
             "tables": e["tables"],
             "images": e["images"],
             "formulas": e["formulas"],

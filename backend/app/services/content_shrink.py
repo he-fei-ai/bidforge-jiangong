@@ -20,7 +20,7 @@ import json
 import logging
 import re
 
-from app.services.content_utils import text_word_count
+from app.services.content_utils import fence_spans, text_word_count
 
 logger = logging.getLogger("content_shrink")
 
@@ -29,8 +29,6 @@ logger = logging.getLogger("content_shrink")
 SHRINK_MAX_ROUNDS = 3          # 单次压缩最多轮数（每轮一次 AI 调用）
 SHRINK_SETTLE_RATIO = 1.15     # 收敛判定：字数降到目标的 1.15 倍以内即停
 
-# 围栏代码块（```lang ... ```）：图表（mermaid / chart-json / ai_image）与普通代码块
-_FENCE_RE = re.compile(r"```[\s\S]*?```")
 # Markdown 图片 ![alt](url) 与内联 <img ...>
 _IMAGE_MD_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
@@ -44,11 +42,18 @@ def collect_protected_ranges(content: str) -> list[tuple[int, int]]:
     对齐 OpenBidKit ``collectProtectedContentRanges``：代码围栏 + 表格 + 图片。
     表格按"连续表格行"合并为一个区间（含表头分隔行），避免逐行区间被
     跨行 target_text 的碎片命中绕过。
+
+    ✅ 2026-09-28（围栏口径收敛）：代码围栏改用 ``content_utils.fence_spans``
+      （与 ``strip_fenced_code_blocks`` / ``find_unclosed_fences`` 同一套
+       CommonMark 语义）—— 旧实现用正则 ``` ```[\\s\\S]*?``` ``` 只认反引号，
+       波浪线围栏不保护、4 反引号围栏保护区间残缺。
     """
     if not content:
         return []
     ranges: list[tuple[int, int]] = []
-    for pattern in (_FENCE_RE, _IMAGE_MD_RE, _IMG_TAG_RE):
+    # 代码围栏：CommonMark 语义的已闭合围栏区间
+    ranges.extend(fence_spans(content))
+    for pattern in (_IMAGE_MD_RE, _IMG_TAG_RE):
         for m in pattern.finditer(content):
             ranges.append((m.start(), m.end()))
 

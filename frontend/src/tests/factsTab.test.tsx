@@ -364,6 +364,42 @@ describe("buildFactsSummary（stats → summary）", () => {
     expect(buildFactsSummary({ total: 5, simulated: 0, unresolved: 0, conflicts: 0 }).has_warnings).toBe(false);
   });
 
+  // ✅ BUG 回归（2026-09-27 · 过期事实被误判为「全部就绪」）
+  it("has_warnings 必须计入来源过期（stale）——否则误显示「全部就绪」并放行正文生成", () => {
+    // 仅 stale>0、其余干净：这是资料变更/重新提取后的典型状态
+    const s = buildFactsSummary({ total: 5, simulated: 0, unresolved: 0, conflicts: 0, stale: 2 });
+    expect(s.stale).toBe(2);
+    expect(s.has_warnings).toBe(true); // 旧实现返回 false → 显示绿色「全部就绪」
+  });
+
+  it("stale 归一化：缺字段/脏值按 0 处理且不误报", () => {
+    // 老后端不返回 stale 字段时按 0 处理，行为与旧版逐字一致（向后兼容）
+    expect(buildFactsSummary({ total: 3, simulated: 0, unresolved: 0, conflicts: 0 }).stale).toBe(0);
+    expect(buildFactsSummary({ total: 3, simulated: 0, unresolved: 0, conflicts: 0 }).has_warnings).toBe(false);
+    const dirty = buildFactsSummary({ total: 3, simulated: 0, unresolved: 0, conflicts: 0, stale: undefined });
+    expect(dirty.stale).toBe(0);
+    expect(dirty.has_warnings).toBe(false);
+    const dirty2 = buildFactsSummary({ total: 3, simulated: 0, unresolved: 0, conflicts: 0, stale: "abc" });
+    expect(dirty2.stale).toBe(0);
+    expect(dirty2.has_warnings).toBe(false);
+  });
+
+  it("口径与后端注入门控四条件对齐：任一不满足注入条件即告警", () => {
+    // 对应后端 _FACTS_INJECT_WHERE:
+    // has_conflict=0 AND is_resolved=1 AND is_simulated=0 AND is_stale=0
+    const cases = [
+      { simulated: 1, unresolved: 0, conflicts: 0, stale: 0 },
+      { simulated: 0, unresolved: 1, conflicts: 0, stale: 0 },
+      { simulated: 0, unresolved: 0, conflicts: 1, stale: 0 },
+      { simulated: 0, unresolved: 0, conflicts: 0, stale: 1 },
+    ];
+    for (const c of cases) {
+      expect(buildFactsSummary({ total: 1, ...c }).has_warnings).toBe(true);
+    }
+    // 四条件全满足 → 允许进入下一步
+    expect(buildFactsSummary({ total: 1, simulated: 0, unresolved: 0, conflicts: 0, stale: 0 }).has_warnings).toBe(false);
+  });
+
   it("脏值（undefined / 字符串）按 0 处理，不抛异常", () => {
     const s = buildFactsSummary({ total: "3", simulated: undefined, unresolved: "x" });
     expect(s.total).toBe(3);

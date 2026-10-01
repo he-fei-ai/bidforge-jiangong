@@ -8,9 +8,19 @@
   * ``POST   /api/v1/prompts/{key}/rollback``  回滚到某条审计记录「变更前」的版本
 
 设计要点：
-  - 内容更新与审计写入同一事务，提交成功后才更新注册表内存并失效运行时缓存；
+  - 内容更新与审计写入**同一事务**（``BEGIN IMMEDIATE`` + 事务内重读 before
+    + ``updated_at`` CAS），提交成功后才更新注册表内存并失效运行时缓存；
+    并发写不丢版本，冲突时返回 409 而非静默覆盖（BUG-P1-B）。
+  - 保存前做**静态体检**（``validate_prompt_content``）：error 级
+    （不存在的 ``{SHARED_*}``、共享片段自引用）直接 400；warning 级
+    （契约变量增删）照常保存但随响应 ``warnings`` 回传 —— 保存成功 ≠ 一定正确。
+  - 入库、列表展示、运行时缓存加载三处统一经 ``clean_prompt_text``，
+    使「展示 = 渲染 = hash」三者恒等（BUG-P1-D）。
   - 审计保存 SHA-256 与变量集合，并按配置保存变更前后正文快照（版本回滚基础）；
+    ``rollbackable`` 与回滚端点的前置校验**共用同一函数**
+    （``audit_service.prompt_snapshot_is_rollbackable``），保证「按钮可点 ⟺ 回滚必成功」。
   - 列表直接查 DB，重启后不会因内存注册表回退而显示成“未修改”。
+  - ``db.execute()`` 返回 ``None`` 时按连接异常处理（AGENTS.md §5.5 R13）。
 """
 from __future__ import annotations
 
@@ -20,36 +30,122 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.db import get_db, read_db
 from app.services.audit_service import (
+    PROMPT_MAX_CHARS,
     list_prompt_audit_logs, prompt_content_hash, record_prompt_audit,
+)
+from app.services.ai.prompts._registry import (
+    clean_prompt_text, extract_user_variables,
+    validate_prompt_content,
 )
 
 router = APIRouter(prefix="/api/v1/prompts", tags=["prompts"])
 
 #: 提示词内容上限（防止单条超大内容进入数据库与审计链路）。
-PROMPT_MAX_CHARS = 200000
+#: ✅ 2026-09-27（BUG-P1-F）：直接 re-export `audit_service.PROMPT_MAX_CHARS`
+#:   （同一常量），消除「写入上限」与「回滚/快照长度校验」两份字面量漂移。
+__all__ = ["router", "PROMPT_MAX_CHARS"]
+
+
+async def _fetch_content_row(db, key: str):
+    """读一行 prompt_templates；``db.execute`` 返回 None 时按连接异常处理。
+
+    ✅ 2026-09-27（BUG-P1-A · R13 事故漏改点）：AGENTS.md §5.5 记载
+    「全局单连接上 execute() 可能返回 None」是 2026-09-22 的真实事故，
+    ``routers/_chart_pipeline.py`` 已按规范加守卫，而本文件 4 处全部裸解引用。
+    命中即 AttributeError → 500，且 PATCH 路径下内存注册表不更新、
+    运行时缓存不失效（内容存了却不生效）。
+    """
+    cur = await db.execute(
+        "SELECT content, updated_at FROM prompt_templates WHERE key=?", (key,))
+    if cur is None:
+        raise HTTPException(503, "数据库连接异常，请重试")
+    return await cur.fetchone()
+
+
+async def _write_with_before(db, key: str, before: str, after: str,
+                             action: str, request, *, expected_updated_at,
+                             effective_after: str | None = None):
+    """在**单个写事务**内做「CAS 改内容 + 写审计」，消除 lost update。
+
+    ✅ 2026-09-27（BUG-P1-B · 并发丢版本 / 审计链断裂）：
+    旧实现「先 SELECT 读 before，再 UPSERT 写」—— pysqlite 默认
+    ``isolation_level=""`` 只在 DML 前隐式 BEGIN，**SELECT 走 autocommit**，
+    两次读之间存在 TOCTOU 窗口。两个并发 PATCH 同 key 时：
+    两者都读到 before=X，各自写入 A / B，审计留下 (X→A) 与 (X→B)；
+    而回滚语义是恢复 before，于是**两条都只能回到 X，版本 A 永久丢失**，
+    审计序列与实际生效历史不符 —— 违背本模块自己声明的快照设计。
+
+    修法：用 ``BEGIN IMMEDIATE`` 抢占写锁后**在事务内重读** before，
+    并按 ``updated_at`` 做 CAS 比对；若期间被别人改过则回滚并返回 409，
+    让用户看到「已被他人修改，请刷新」，而不是静默覆盖别人的版本。
+
+    :param after: 落库正文；**空串 = 删除该行**（= 恢复出厂默认）。
+    :param effective_after: 变更后**实际生效**的正文（删除行时为出厂默认），
+        用于计算 ``after_vars``；``None`` 表示与 ``after`` 相同。
+    """
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        # 事务内重读：拿到的是「真正被覆盖的那一版」
+        cur = await db.execute(
+            "SELECT content, updated_at FROM prompt_templates WHERE key=?",
+            (key,))
+        row = await cur.fetchone() if cur is not None else None
+        real_before = (row["content"] if row else "") or before
+        real_updated_at = (row["updated_at"] if row else None)
+        if expected_updated_at is not None \
+                and real_updated_at != expected_updated_at:
+            await db.rollback()
+            raise HTTPException(
+                409, "提示词已被他人修改（版本冲突），请刷新后重试")
+        before_vars = extract_user_variables(real_before)
+        eff = effective_after if effective_after is not None else after
+        after_vars = extract_user_variables(eff)
+        if not after.strip():
+            await db.execute("DELETE FROM prompt_templates WHERE key=?", (key,))
+        else:
+            await db.execute(
+                "INSERT INTO prompt_templates (key, content) VALUES (?,?)"
+                " ON CONFLICT(key) DO UPDATE SET content=excluded.content,"
+                " updated_at=datetime('now','localtime')", (key, after))
+        await record_prompt_audit(
+            db, key, action, real_before, eff, before_vars, after_vars, request)
+        await db.commit()
+        return real_before, before_vars, after_vars
+    except HTTPException:
+        raise
+    except Exception:
+        await db.rollback()
+        raise
 
 
 @router.get("")
 async def list_prompts(category: str = "", db=Depends(read_db)):
     """列出全部提示词，并合并 DB 生效内容、修改时间与审计计数。"""
     from app.services.ai.prompts._registry import (
-        list_prompts as _lp, extract_user_variables,
+        list_prompts as _lp, extract_user_variables, clean_prompt_text,
     )
     items = _lp(category) if category else _lp()
-    rows = await (await db.execute(
-        "SELECT key, content, updated_at FROM prompt_templates")).fetchall()
+    cur = await db.execute("SELECT key, content, updated_at FROM prompt_templates")
+    rows = await cur.fetchall() if cur is not None else []
     meta = {r["key"]: dict(r) for r in rows}
+    cur2 = await db.execute(
+        "SELECT prompt_key, COUNT(*) AS n FROM prompt_audit_logs GROUP BY prompt_key")
     counts = {
         r["prompt_key"]: int(r["n"] or 0)
-        for r in await (await db.execute(
-            "SELECT prompt_key, COUNT(*) AS n FROM prompt_audit_logs GROUP BY prompt_key"
-        )).fetchall()
+        for r in (await cur2.fetchall() if cur2 is not None else [])
     }
     for it in items:
         row = meta.get(it["key"])
         if row and (row.get("content") or "").strip():
-            it["content"] = row["content"]
-            it["variables"] = extract_user_variables(row["content"])
+            # ✅ 2026-09-27（BUG-P1-D · 展示 ≠ 渲染 ≠ hash 三方分叉）：
+            #   运行时缓存加载时会 clean_prompt_text()（去 BOM/零宽字符/统一换行），
+            #   而这里直接回传 DB 原文。后果：编辑器里看到的正文与真正下发给
+            #   模型的**不是同一份**，且 content_hash 算的是原文哈希 ——
+            #   与审计里的 after_hash（同一函数）看似一致，实际「改一个字就
+            #   显示已修改」的同时「运行时可能仍是旧内容」。此处按同一函数清洗，
+            #   使「展示 = 渲染 = hash」三者恒等。
+            it["content"] = clean_prompt_text(row["content"])
+            it["variables"] = extract_user_variables(it["content"])
         it["modified"] = it.get("content", "") != it.get("default_content", "")
         it["content_hash"] = prompt_content_hash(str(it.get("content") or ""))
         it["updated_at"] = (row or {}).get("updated_at") or ""
@@ -73,7 +169,7 @@ async def update_prompt(key: str, body: dict, db=Depends(get_db),
     """保存提示词编辑；空内容按“恢复默认”处理。"""
     from app.services.ai.prompts._registry import (
         update_prompt as _up, _ALL_PROMPTS, reset_prompt as _reset,
-        get_default_prompt, extract_user_variables,
+        get_default_prompt,
     )
     from app.services.ai.prompts._cache import reload_prompt_cache
 
@@ -85,78 +181,69 @@ async def update_prompt(key: str, body: dict, db=Depends(get_db),
     if len(content) > PROMPT_MAX_CHARS:
         raise HTTPException(400, f"提示词内容过长（最多 {PROMPT_MAX_CHARS} 字符）")
 
-    cur = await db.execute("SELECT content FROM prompt_templates WHERE key=?", (key,))
-    row = await cur.fetchone()
+    # ✅ BUG-P1-C 保存期体检：error 级问题（不存在的 {SHARED_*} / 共享片段自引用）
+    #    直接 400 拒绝；warning 级（契约变量增删）照常保存但随响应回传，
+    #    让用户看到「保存成功 ≠ 一定正确」。
+    issues = validate_prompt_content(key, content)
+    errors = [i for i in issues if i["level"] == "error"]
+    warnings_ = [i for i in issues if i["level"] == "warning"]
+    if errors:
+        raise HTTPException(400, errors[0]["message"])
+
+    # ✅ 2026-09-27（BUG-P1-D）：入库前统一清洗，使「入库 = 展示 = 渲染 = hash」
+    #    恒等（旧实现只有运行时缓存清洗，编辑器展示的却是未清洗原文）。
+    content = clean_prompt_text(content)
+
+    row = await _fetch_content_row(db, key)
     before = (row["content"] if row else "") or get_default_prompt(key)
-    before_vars = extract_user_variables(before)
+    expected_updated_at = row["updated_at"] if row else None
 
-    if not content.strip():
-        default = get_default_prompt(key)
-        after_vars = extract_user_variables(default)
-        try:
-            await db.execute("DELETE FROM prompt_templates WHERE key=?", (key,))
-            await record_prompt_audit(
-                db, key, "reset", before, default, before_vars, after_vars, request)
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+    is_reset = not content.strip()
+    default = get_default_prompt(key)
+    # 恢复默认 = **删除该行**（落库空串），与 POST /reset 同口径 ——
+    # 保留行会把「出厂默认」复制一份进库，徒增表体积且让「是否被改过」
+    # 只能靠内容比对来推断。变更后实际生效的是出厂默认，故传 effective_after。
+    before, before_vars, after_vars = await _write_with_before(
+        db, key, before, "" if is_reset else content,
+        "reset" if is_reset else "update", request,
+        expected_updated_at=expected_updated_at,
+        effective_after=default if is_reset else None)
+    if is_reset:
         _reset(key)
-        reload_prompt_cache()
-        return {"ok": True, "content": default, "reset": True,
-                "content_hash": prompt_content_hash(default),
-                # ✅ 2026-09-25（BUG-D · 响应契约不对称）：空内容（=恢复默认）
-                #   分支必须与非空分支一样回传 variables —— 前端虽然只用
-                #   extractPromptVariables 自行重算，但两端契约不对称会让
-                #   后续依赖响应字段的调用方（脚本 / 其它页面）取到 undefined。
-                "variables": after_vars,
-                "added_variables": sorted(set(after_vars) - set(before_vars)),
-                "removed_variables": sorted(set(before_vars) - set(after_vars))}
-
-    after_vars = extract_user_variables(content)
-    try:
-        await db.execute(
-            "INSERT INTO prompt_templates (key, content) VALUES (?,?)"
-            " ON CONFLICT(key) DO UPDATE SET content=excluded.content,"
-            " updated_at=datetime('now','localtime')", (key, content))
-        await record_prompt_audit(
-            db, key, "update", before, content, before_vars, after_vars, request)
-        await db.commit()
-    except Exception:
-        await db.rollback()
-        raise
-    _up(key, content)
+    else:
+        _up(key, content)
     reload_prompt_cache()
-    return {"ok": True, "content": content,
-            "content_hash": prompt_content_hash(content),
-            "variables": after_vars,
-            "added_variables": sorted(set(after_vars) - set(before_vars)),
-            "removed_variables": sorted(set(before_vars) - set(after_vars))}
+    return {
+        "ok": True,
+        "content": default if is_reset else content,
+        # ✅ 2026-09-25（BUG-D · 响应契约对称）：空内容（=恢复默认）分支也
+        #   必须回传 variables，前端与脚本才能统一取「当前生效变量集合」。
+        "reset": True if is_reset else None,
+        "content_hash": prompt_content_hash(default if is_reset else content),
+        "variables": after_vars,
+        "added_variables": sorted(set(after_vars) - set(before_vars)),
+        "removed_variables": sorted(set(before_vars) - set(after_vars)),
+        "warnings": [i["message"] for i in warnings_],
+    }
 
 
 @router.post("/{key}/reset")
 async def reset_prompt(key: str, db=Depends(get_db), request: Request = None):
     """恢复出厂默认提示词。"""
     from app.services.ai.prompts._registry import (
-        _ALL_PROMPTS, reset_prompt as _reset, get_default_prompt, extract_user_variables,
+        _ALL_PROMPTS, reset_prompt as _reset, get_default_prompt,
     )
     from app.services.ai.prompts._cache import reload_prompt_cache
     default = get_default_prompt(key) if key in _ALL_PROMPTS else None
     if default is None:
         raise HTTPException(404, "提示词不存在")
-    cur = await db.execute("SELECT content FROM prompt_templates WHERE key=?", (key,))
-    row = await cur.fetchone()
+    row = await _fetch_content_row(db, key)
     before = (row["content"] if row else "") or default
-    before_vars = extract_user_variables(before)
-    after_vars = extract_user_variables(default)
-    try:
-        await db.execute("DELETE FROM prompt_templates WHERE key=?", (key,))
-        await record_prompt_audit(
-            db, key, "reset", before, default, before_vars, after_vars, request)
-        await db.commit()
-    except Exception:
-        await db.rollback()
-        raise
+    # 恢复出厂默认 = 删除该行（落库空串），变更后实际生效的是出厂默认
+    before, before_vars, after_vars = await _write_with_before(
+        db, key, before, "", "reset", request,
+        expected_updated_at=(row["updated_at"] if row else None),
+        effective_after=default)
     _reset(key)
     reload_prompt_cache()
     return {"ok": True, "content": default,
@@ -166,7 +253,8 @@ async def reset_prompt(key: str, db=Depends(get_db), request: Request = None):
             #   判断「当前生效模板的变量集合」而不必自行重算。
             "variables": after_vars,
             "added_variables": sorted(set(after_vars) - set(before_vars)),
-            "removed_variables": sorted(set(before_vars) - set(after_vars))}
+            "removed_variables": sorted(set(before_vars) - set(after_vars)),
+            "warnings": []}
 
 
 @router.post("/{key}/rollback")
@@ -189,9 +277,10 @@ async def rollback_prompt(key: str, body: dict, db=Depends(get_db),
     """
     from app.services.ai.prompts._registry import (
         _ALL_PROMPTS, update_prompt as _up,
-        get_default_prompt, extract_user_variables,
+        get_default_prompt,
     )
     from app.services.ai.prompts._cache import reload_prompt_cache
+    from app.services.audit_service import prompt_snapshot_is_rollbackable
 
     if key not in _ALL_PROMPTS:
         raise HTTPException(404, "提示词不存在")
@@ -203,6 +292,8 @@ async def rollback_prompt(key: str, body: dict, db=Depends(get_db),
     cur = await db.execute(
         "SELECT id, prompt_key, snapshot_json FROM prompt_audit_logs WHERE id=?",
         (audit_id,))
+    if cur is None:
+        raise HTTPException(503, "数据库连接异常，请重试")
     row = await cur.fetchone()
     if not row or row["prompt_key"] != key:
         raise HTTPException(404, "审计记录不存在或不属于该提示词")
@@ -212,43 +303,25 @@ async def rollback_prompt(key: str, body: dict, db=Depends(get_db),
         snap = json.loads(raw) if raw else {}
     except Exception:
         snap = {}
-    before = snap.get("before") if isinstance(snap, dict) else None
-    if not before:
-        raise HTTPException(
-            400,
-            "该变更记录没有可用的变更前正文（旧记录只存哈希，无法回滚）")
-    if snap.get("before_truncated"):
-        raise HTTPException(
-            400,
-            "该变更记录的变更前正文已被截断，不是完整提示词，为避免写入损坏模板"
-            "已拒绝回滚。请改用「恢复出厂默认」或手动重新编辑。")
-    if len(before) > PROMPT_MAX_CHARS:
-        raise HTTPException(400, f"快照正文超长（最多 {PROMPT_MAX_CHARS} 字符）")
+    # ✅ 2026-09-27（BUG-P1-E · rollbackable 与前置校验口径分叉）：
+    #   本段三条校验与 audit_service.list_prompt_audit_logs 里算
+    #   ``rollbackable`` 的判据曾是**两份独立实现** —— 后者只判「before 非空」，
+    #   于是被截断的审计行会向前端回 rollbackable=True，前端据此渲染可点的
+    #   「回滚」按钮（PromptEditorPage.tsx:427），用户一点必 400。
+    #   现统一到单一函数 prompt_snapshot_is_rollbackable()，两侧共用。
+    ok, reason = prompt_snapshot_is_rollbackable(snap, PROMPT_MAX_CHARS)
+    if not ok:
+        raise HTTPException(400, reason)
+    before = snap["before"]
 
     default = get_default_prompt(key)
-    cur2 = await db.execute("SELECT content FROM prompt_templates WHERE key=?", (key,))
-    r2 = await cur2.fetchone()
-    current = (r2["content"] if r2 else "") or default
-    current_vars = extract_user_variables(current)
-    restored_vars = extract_user_variables(before)
-
-    try:
-        if not before.strip():
-            await db.execute("DELETE FROM prompt_templates WHERE key=?", (key,))
-        else:
-            await db.execute(
-                "INSERT INTO prompt_templates (key, content) VALUES (?,?)"
-                " ON CONFLICT(key) DO UPDATE SET content=excluded.content,"
-                " updated_at=datetime('now','localtime')", (key, before))
-        await record_prompt_audit(
-            db, key, "rollback", current, before, current_vars, restored_vars, request)
-        await db.commit()
-    except Exception:
-        await db.rollback()
-        raise
-
-    # 与「保存/重置」同口径：事务提交成功后才更新内存注册表并失效运行时缓存，
-    # 避免出现「已落库但运行时仍用旧缓存」的不一致窗口。
+    row2 = await _fetch_content_row(db, key)
+    expected_updated_at = row2["updated_at"] if row2 else None
+    # 与「保存/重置」同口径：单事务 + CAS，事务提交成功后才更新内存注册表
+    # 并失效运行时缓存，避免出现「已落库但运行时仍用旧缓存」的不一致窗口。
+    current, current_vars, restored_vars = await _write_with_before(
+        db, key, (row2["content"] if row2 else "") or default, before,
+        "rollback", request, expected_updated_at=expected_updated_at)
     _up(key, before)
     reload_prompt_cache()
     return {
@@ -259,5 +332,7 @@ async def rollback_prompt(key: str, body: dict, db=Depends(get_db),
         "added_variables": sorted(set(restored_vars) - set(current_vars)),
         "removed_variables": sorted(set(current_vars) - set(restored_vars)),
         "rollback_from_audit": audit_id,
+        "warnings": [i["message"] for i in validate_prompt_content(key, before)
+                     if i["level"] == "warning"],
     }
 

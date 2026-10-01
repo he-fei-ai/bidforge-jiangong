@@ -193,6 +193,42 @@ class TestDeleteSection:
         assert result["ok"] is True
         assert await _count_sections(db_conn, "s1") == 1
 
+    async def test_delete_does_not_cross_scheme_on_dirty_parent(self, db_conn):
+        """P1-4：跨方案 parent_id 脏数据下不得误删其它方案的章节及其图表登记。
+
+        旧实现的级联收集是 `SELECT id FROM sections WHERE parent_id=?`（不带
+        scheme_id），越界的 b1 会流进 all_ids：sections 的 DELETE 虽带方案限定
+        （b1 行本身不受影响），但 chart_predictions 的清理语句**无方案限定**，
+        于是 b1 的图表登记被误删 —— 导出 fallback 会挂上已"消失"的图。
+        """
+        await _insert_project_scheme(db_conn, "p1", "s1")
+        # 第二个方案（同一 project 下）
+        await db_conn.execute(
+            "INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)",
+            ("s2", "p1", "方案二"))
+        await db_conn.commit()
+
+        await _insert_section(db_conn, "s1", "a1", "A章", parent_id="")
+        await _insert_section(db_conn, "s1", "a2", "A子", parent_id="a1", level=2)
+        # 人为构造跨方案脏数据：B 方案章节的 parent_id 指向 A 方案章节
+        await _insert_section(db_conn, "s2", "b1", "B章", parent_id="a2", level=2)
+        # B 方案章节的图表登记
+        await db_conn.execute(
+            "INSERT INTO chart_predictions (id, scheme_id, section_id, chart_type)"
+            " VALUES (?,?,?,?)",
+            ("cp1", "s2", "b1", "flowchart"))
+        await db_conn.commit()
+
+        await delete_section("s1", "a1", db=db_conn)
+
+        assert await _count_sections(db_conn, "s1") == 0, "本方案章节应全部删除"
+        assert await _count_sections(db_conn, "s2") == 1, \
+            "跨方案章节行不得被连带删除"
+        cur = await db_conn.execute(
+            "SELECT COUNT(*) FROM chart_predictions WHERE section_id='b1'")
+        assert (await cur.fetchone())[0] == 1, \
+            "跨方案章节的图表登记不得被误删（P1-4 有效修复点）"
+
     async def test_delete_parent_with_children(self, db_conn):
         """删除父节点：级联删除直接子节点"""
         await _insert_project_scheme(db_conn)

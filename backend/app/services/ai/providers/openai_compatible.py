@@ -6,37 +6,24 @@ from typing import AsyncIterator
 import httpx
 
 from app.services.ai.http_pool import get_async_client
+from app.services.ai.json_mode_compat import response_format_rejected
 from app.services.ai.providers.base import BaseProvider, normalize_messages
 
 logger = logging.getLogger("ai_provider")
 
 
-class OpenAICompatibleProvider(BaseProvider):
-    name = "openai_compatible"
-
-    @staticmethod
-    def _ensure_user_message(messages: list) -> list:
-        """Agnes 等厂商要求 messages 中必须存在 role=user 的消息，否则返回 400"""
-        if not any(m.get("role") == "user" for m in messages):
-            messages = list(messages) + [{"role": "user", "content": "请按系统提示执行任务。"}]
-        return messages
-
 def _is_response_format_unsupported(status: int, body: str) -> bool:
-    """检测厂商是否不支持 response_format 参数（参考 OpenBidKit isResponseFormatUnsupported）。
+    """检测厂商是否不支持 response_format 参数（薄包装）。
 
-    部分平台（旧版 qwen、glm、本地 Ollama 模型等）返回 400 + 包含 response_format
-    字样的错误，去掉该字段后用普通文本请求即可（系统提示词已约束 JSON 格式）。
-    命中后自动降级重试，避免整轮 AI 调用白烧。
+    ✅ 2026-10-01：判据本体已收敛到 ``services/ai/json_mode_compat.py``。
+    本函数此前是**第二份**独立实现（另一份在 ``provider_factory``），且只认
+    英文 marker —— 国内厂商返回的中文错误（「该模型暂不支持 JSON 输出」）
+    走 HTTP 层不摘字段、直接抛 ``RuntimeError``；即使侥幸抛到编排层，编排层
+    旧判据同样漏判、不回退普通模式，并把「参数不兼容」计入熔断失败与配额
+    冷却 → 整条候选链用同一原因逐个失败，全部 JSON 类任务挂死。
+    保留本函数名与签名（3 处调用点零改动）。
     """
-    if status != 400:
-        return False
-    low = (body or "").lower()
-    if "response_format" not in low:
-        return False
-    return any(marker in low for marker in (
-        "not supported", "does not support", "not support", "unsupported",
-        "unknown parameter", "invalid parameter", "must be",
-    ))
+    return response_format_rejected(status, body)
 
 
 class OpenAICompatibleProvider(BaseProvider):

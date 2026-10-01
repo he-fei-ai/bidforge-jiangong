@@ -37,11 +37,19 @@ async def _load_doc(db, doc_id: str) -> dict:
         " extract_status, extract_time, quality_score, completeness_json,"
         " expires_at, status, created_at "
         "FROM project_documents WHERE id=?", (doc_id,))
+    # ✅ P1 修复（2026-09-27 · R13 漏改点）：db.execute() 在全局单连接 + aiosqlite 下
+    #    可能返回 None（连接/事务异常），直接 .fetchone() → AttributeError → 500。
+    #    语义选择：返回 **503** 而非 404 —— 前端会据 404 把仍在库里的文档
+    #    判为「已丢失」并从列表中移除，而实际只是连接瞬时故障（R13 的本仓约定是
+    #    「log + 降级」，见 _chart_pipeline.py 同类守卫）。503 触发客户端重试，
+    #    不会造成数据误判。
+    if cur is None:
+        logger.warning("读取文档失败（db.execute 返回 None），doc=%s", doc_id)
+        raise HTTPException(503, "文档服务暂时不可用，请稍后重试")
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "文档不存在")
     return dict(row)
-
 
 def _doc_project_root(doc: dict):
     from app.routers.global_facts import _managed_upload_path
@@ -132,6 +140,11 @@ async def get_extractions(
     sql += " ORDER BY extract_type"
     cur = await db.execute(sql, params)
     items = []
+    # ✅ P1：同 R13 守卫（查询异常时返回空列表而非 500）
+    if cur is None:
+        logger.warning("查询提取结果失败（db.execute 返回 None），返回空列表")
+        return {"doc_id": doc_id, "project_id": doc["project_id"],
+                "items": [], "types": list(store.EXTRACT_TYPES)}
     for r in await cur.fetchall():
         d = dict(r)
         try:
@@ -172,7 +185,9 @@ async def get_chunks(
         filter_params.append(page_num)
     cur = await db.execute(
         f"SELECT COUNT(*) AS n FROM doc_chunks {where}", filter_params)
-    total = int(((await cur.fetchone()) or ["0"])[0] or 0)
+    # ✅ P1：COUNT 返回 None 时降级为 0（不抛异常），避免 total 为 None
+    #    让前端分页计算负数或报错。
+    total = int(((await cur.fetchone()) or ["0"])[0] or 0) if cur is not None else 0
     sql = ("SELECT chunk_id, chunk_type, title, level, page_num, text,"
            " source_ref, tables_json, images_json, hash, meta_json"
            f" FROM doc_chunks {where}"
@@ -180,6 +195,10 @@ async def get_chunks(
     params: list = filter_params + [limit, offset]
     cur = await db.execute(sql, params)
     items = []
+    # ✅ P1：同上，列表查询失败时返回空列表而非 500
+    if cur is None:
+        logger.warning("查询文档分块失败（db.execute 返回 None）")
+        return {"doc_id": doc_id, "total": 0, "items": []}
     for r in await cur.fetchall():
         d = dict(r)
         # 列表默认截断正文（预览用），完整内容按 chunk_id 单查即可
@@ -245,7 +264,15 @@ async def document_completeness(doc_id: str, refresh: bool = False,
             "SELECT report_json, created_at FROM doc_validation_reports"
             " WHERE doc_id=? AND kind='completeness'"
             " ORDER BY created_at DESC LIMIT 1", (doc_id,))
-        row = await cur.fetchone()
+        # ✅ P1（R13 漏改点 · 2026-09-29）：同文件 _load_doc / get_extractions /
+        #    get_chunks 四处均已对 db.execute() 返回 None 加守卫，唯独此处漏改。
+        #    命中即 AttributeError → 500，而本端点正是「解析质量体检」入口，
+        #    短暂连接故障会让用户无法看到覆盖率与缺失字段。
+        #    语义选择：按「无可用缓存」处理（继续实时计算）而非报错，
+        #    与 get_extractions 的 fail-soft 降级一致（缓存是加速而非唯一来源）。
+        if cur is None:
+            logger.warning("查询完整性缓存失败（db.execute 返回 None），改为实时计算")
+        row = await cur.fetchone() if cur is not None else None
         if row:
             try:
                 report = json.loads(row["report_json"])
@@ -325,7 +352,16 @@ async def project_documents_index(project_id: str, db=Depends(get_db)):
         " quality_score, file_hash_md5, expires_at, status, created_at"
         " FROM project_documents WHERE project_id=? ORDER BY created_at, id",
         (project_id,))
-    rows = [dict(r) for r in await cur.fetchall()]
+    # ✅ P1（R13 漏改点 · 2026-09-29）：与同文件 _load_doc / get_extractions /
+    #    get_chunks / document_completeness 同口径补判空。本端点是前端「资料列表」
+    #    的数据源，命中 None → AttributeError → 500，用户看不到项目资料全景。
+    #    语义选择：空索引（fail-soft）—— 磁盘索引仍照常合并返回，
+    #    调用方据此可区分「数据库暂不可用」与「项目确无资料」。
+    rows: list = []
+    if cur is not None:
+        rows = [dict(r) for r in await cur.fetchall()]
+    else:
+        logger.warning("查询项目文档索引失败（db.execute 返回 None），返回空索引")
     disk = await asyncio.to_thread(store.read_json, store.index_path(project_id))
     disk_map = {}
     if isinstance(disk, list):

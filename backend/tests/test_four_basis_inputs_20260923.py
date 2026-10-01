@@ -261,16 +261,19 @@ async def test_audit_accepts_callable_and_warns_on_failure(db_conn, caplog):
     from app.routers.sse_handlers import _run_input_coverage_audit
     await _seed_inputs(db_conn)
     # callable 正常路径：不抛
+    # ✅ 2026-09-26：scene 由 "content"（已从 KNOWN_SCENES 移除的僵尸总调度
+    #    场景）改为真实调用点 "content_draft"。此处只是 mock 参数，但保留一个
+    #    未登记的 scene 会让双向护栏 test_all_used_scenes_registered 误报。
     await _run_input_coverage_audit(
         db_conn, "p1", "s1", ["基坑支护"], "必须含监测",
-        lambda: "## 项目级基本信息\n### 工程概况\n编制要求", scene="content")
+        lambda: "## 项目级基本信息\n### 工程概况\n编制要求", scene="content_draft")
 
     # 样本求值抛错：审计内部吞掉，以 WARNING 曝露（不再只落 DEBUG）
     def _boom():
         raise RuntimeError("行序变化导致渲染失败")
     with caplog.at_level(logging.WARNING, logger="sse"):
         await _run_input_coverage_audit(
-            db_conn, "p1", "s1", [], "", _boom, scene="content")
+            db_conn, "p1", "s1", [], "", _boom, scene="content_draft")
     assert any("差集审计失败" in r.getMessage() for r in caplog.records)
 
 

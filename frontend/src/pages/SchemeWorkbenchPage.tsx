@@ -47,6 +47,9 @@ import {
   type WorkflowTabKey,
 } from "../utils/workflowDerived";
 import { UPLOAD_FILE_ACCEPT } from "../utils/uploadAccept";
+// ✅ 2026-09-26 解析可信度提示：把后端的「文档被截断 / 预算耗尽被跳过 / 编码降级」
+//    翻译成用户可见的告警。集中在 utils 的纯函数里，避免页面各处拼文案而漂移。
+import { sourceNotice, previewNotices } from "../utils/parseSourceNotice";
 import ContentGenerationTab from "../components/ContentGenerationTab";
 import {
   upsertSectionLog, finalizeRunningLogsIn, mergeFailedSectionsInto,
@@ -115,8 +118,28 @@ const CN_NUMBERS: string[] = [
 
 // ✅ 与后端 strip_outline_numbering 同源：剥离标题开头已嵌入的编号前缀，
 // 修复存量数据 "第一章 第一章 工程概况" / "2.1 2.1 相关法律法规" 双重编号
-const LEADING_NUMBER_RE =
-  /^\s*(?:第[一二三四五六七八九十百千零0-9]+[章节]|[（(][一二三四五六七八九十0-9]+[)）]|[0-9]+[)）]|[0-9]+(?:\.[0-9]+){0,7}[、.．，,：: \-—]+|[一二三四五六七八九十百千零]+[、.．，,：: \-—]+)[、.．，,：: \-—]*/;
+//
+// ✅ BUG 修复（2026-09-27 · 标题损坏，与后端 numbering.py 同步修改）：
+// 旧实现的点分编号分支写作 `[0-9]+(?:\.[0-9]+){0,7}[分隔符]+`，路径后**没有**
+// 分隔符时 JS 正则同样会回退成「更短前缀 + 把点当分隔符」，把标题剥成残句：
+//   "1.2.3（1）细部构造" → "3（1）细部构造"
+//   "2.4.1钢筋工程"      → "1钢筋工程"（残留数字 + 叠加位置编号后双重编号）
+// 现改为「前瞻捕获最长路径 + 反向引用整条吃满」（正则没有原子组语法，但前瞻
+// 是原子的、反向引用不可回退），路径后要求紧跟分隔符或 CJK/全角字符。
+// 分隔符与 CJK 边界字符类必须与后端 _SEP_CLASS / _CJK_BOUNDARY 逐字符一致。
+const LEADING_NUMBER_SEP = "[、.．，,：: \\-—]";
+const LEADING_NUMBER_CJK = "[\\u3000-\\u303f\\u4e00-\\u9fff\\uff00-\\uffef]";
+const LEADING_NUMBER_RE = new RegExp(
+  "^\\s*(?:" +
+    "第\\s*[一二三四五六七八九十百千零0-9]+\\s*[章节]" +   // 第X章 / 第 1 章
+    "|[（(][一二三四五六七八九十0-9]+[)）]" +               // （三） / (3)
+    "|[0-9]+[)）]" +                                        // 1） / 2）
+    "|(?=([0-9]+(?:\\.[0-9]+)*))\\1(?:" +
+      LEADING_NUMBER_SEP + "+|(?=" + LEADING_NUMBER_CJK + "))" +
+    "|[0-9]+" + LEADING_NUMBER_SEP + "+(?![0-9])" +          // 单段编号（"1 施工准备"）
+    "|[一二三四五六七八九十百千零]+" + LEADING_NUMBER_SEP + "+" +
+  ")" + LEADING_NUMBER_SEP + "*"
+);
 
 // 整条标题本身就是一个编号（"1" / "1.1" / "1.2.3"）时必须原样返回，
 // 不能走剥离流程 —— 否则 "." 同时属于分隔符字符类，会只剥半截
@@ -125,10 +148,15 @@ const LEADING_NUMBER_RE =
 // 叠加位置编号后即产生编号漂移 / 双重编号。
 const PURE_NUMBER_TITLE_RE = /^[0-9]+(?:[.．][0-9]+)*$/;
 
+// ✅ 年份不是编号（与后端 _YEAR_PREFIX_RE 同口径）：
+// "2023 年度安全生产计划" / "2024年施工计划" 原样保留，避免标题丢年份。
+const YEAR_PREFIX_RE = /^\s*[0-9]{4}\s*年/;
+
 export function stripOutlineNumbering(title: string): string {
   if (!title) return title;
   const trimmed = title.trim();
   if (PURE_NUMBER_TITLE_RE.test(trimmed)) return trimmed;
+  if (YEAR_PREFIX_RE.test(title)) return trimmed;
   const stripped = title.replace(LEADING_NUMBER_RE, "").trim();
   return stripped || trimmed;
 }
@@ -192,10 +220,24 @@ export type TreeNode = {
   description?: string;
   /** 后端权威编号（点分路径，如 "1" / "1.1" / "1.1.1"） */
   outlineId?: string;
+  /**
+   * ✅ BUG 修复（2026-09-26）：后端 AI 调整目录（/adjust-outline）回传的真实
+   * DB 主键。后端 renumber 会把节点 id 覆写成展示编号（"1"/"1.1"），
+   * 真实主键只存在于该字段；treeToOutline 需原样透传，否则保存时
+   * is_new 全为 True → 整表重建、已生成正文全部丢失。
+   */
+  __original_id?: string;
   /** F-CONTENT-STANDARD(2026-09-26)：章节级生成标准覆盖（""=沿用方案级） */
   generation_standard?: string;
   /** F-CONTENT-STANDARD(2026-09-26)：最近一次生成实际使用的标准（只读，供复查） */
   last_generation_standard?: string;
+  /**
+   * ✅ 2026-09-29（事实变更失效标记）：本章节的正文写于「全局事实变更」之前，
+   * 即正文里引用的参数可能已过期。后端按方案级 `schemes.facts_updated_at`
+   * 与章节 `updated_at` 读侧派生（非布尔列），重生成/手工编辑后自动消失。
+   * 仅提示，不阻断任何操作 —— 由用户显式决定要不要重新生成。
+   */
+  facts_stale?: boolean;
   children?: TreeNode[];
 };
 
@@ -308,7 +350,10 @@ export function treeFingerprint(nodes: TreeNode[]): string {
   let out = "";
   function walk(ns: TreeNode[]) {
     for (const n of ns) {
-      out += `${n.key}:${n.word_count}:${n.status};`;
+      // ✅ 2026-09-29：facts_stale 参与指纹 —— 它是用户可感知的状态（目录树上
+      // 的「事实已变更」徽标）。若不含它，3s 轻量轮询会因指纹相同而保留旧树，
+      // 事实刚变更后的徽标要等到下一次完整 load() 才出现（表现为「标了却没显示」）。
+      out += `${n.key}:${n.word_count}:${n.status}:${n.facts_stale ? 1 : 0};`;
       if (n.children?.length) walk(n.children);
     }
   }
@@ -655,22 +700,34 @@ export function FactsSegmentFailuresAlert({ stats }: {
 /**
  * 把后端 list 接口返回的 stats 收敛为前端事实 Tab 使用的 summary 对象。
  *
- * has_warnings = 模拟值 / 未确认 / 矛盾 任一 > 0，驱动「全部就绪」入口与徽标颜色。
+ * has_warnings = 模拟值 / 未确认 / 矛盾 / **来源过期** 任一 > 0，驱动「全部就绪」入口与徽标颜色。
  * ✅ 抽纯函数（2026-09-21）：loadFacts 此前内联算 has_warnings，与切方案重置
  *    setFactsSummary(null) 分散两处，口径漂移难以测试。
+ *
+ * ✅ BUG 修复（2026-09-27 · 过期事实被误判为「全部就绪」）：
+ *   后端 `list_facts` 的 stats 早已回传 `stale`（来源资料已变化 / 重新提取后
+ *   取代的旧值），且这些行已被注入门控 `... AND is_stale=0` 排除在正文与导出之外；
+ *   但本函数只读 simulated / unresolved / conflicts，**stale 从不参与判定**。
+ *   后果：项目资料变更后事实被整体标记过期，界面却仍显示绿色「全部就绪」并
+ *   放行「下一步：正文生成」—— 用户以为事实可用，实际正文里一条事实都注入不到
+ *   （静默失效，且方向是「看起来正常、实际数据全丢」，比报错更难发现）。
+ *   口径与后端 `_FACTS_INJECT_WHERE` 四个门控条件对齐：任何一条不满足注入条件
+ *   的事实都必须计入告警，不能让用户误以为可以进入下一步。
  */
 export function buildFactsSummary(stats: any): any {
   if (!stats || typeof stats !== "object") return null;
   const simulated = Number(stats.simulated) || 0;
   const unresolved = Number(stats.unresolved) || 0;
   const conflicts = Number(stats.conflicts) || 0;
+  const stale = Number(stats.stale) || 0;
   return {
     ...stats,
     simulated,
     unresolved,
     conflicts,
+    stale,
     total: Number(stats.total) || 0,
-    has_warnings: simulated > 0 || unresolved > 0 || conflicts > 0,
+    has_warnings: simulated > 0 || unresolved > 0 || conflicts > 0 || stale > 0,
   };
 }
 
@@ -798,6 +855,12 @@ export function hasUnsavedLocalNodes(nodes: TreeNode[]): boolean {
 export function treeToOutline(nodes: TreeNode[]): any[] {
   return nodes.map((n, i) => ({
     id: n.key,
+    // ✅ BUG 修复（2026-09-26）：原样透传 __original_id（后端 AI 调整目录
+    //    /adjust-outline 回传的真实 DB 主键）。缺失时后端 _save_outline_to_db
+    //    会退化成"按 id 字段匹配"——而此时 id 已被 renumberOutline 之前的
+    //    编号语义污染，is_new 全为 True → 整表重建、已生成正文全部丢失。
+    //    有 __original_id 时后端优先按它匹配已有 section。
+    ...(n.__original_id ? { __original_id: n.__original_id } : {}),
     title: n.title,
     level: n.level,
     sort_order: i,
@@ -827,22 +890,50 @@ export function renumberOutline(outline: any[], parentKey = ""): any[] {
 }
 
 /**
- * 「导入目录（智能识别）」结果 → 本地临时树（纯函数，可单测）。
+ * 「导入目录（智能识别）」/「AI 调整目录」结果 → 本地临时树（纯函数，可单测）。
  *
  * ✅ 编号由「位置」推导（与后端 renumber_outline 同口径），而不是直接用
  * n.id —— 识别结果里的 id 常为 "n1"/任意值，直接当编号用会让目录树完全不
  * 显示编号（保存前后观感不一致）。
  *
- * key 用 `upload_` 前缀标记「尚未落库」：保存目录后由后端换成 DB 主键。
- * 该前缀必须被 isUnsavedLocalKey 识别（见 UNSAVED_KEY_PREFIXES 说明）。
+ * key 的三档口径（顺序即优先级，缺一即造成正文丢失）：
+ *   1. `__original_id` —— 后端 AI 调整目录回传的**真实 DB 主键**。
+ *      其 id 字段已被 renumber 覆写成展示编号（"1"/"1.1"），主键只在该字段。
+ *   2. `upload_` 前缀 —— 尚未落库的本地临时节点（导入识别结果 / AI 新增章）。
+ *      必须在「id 是纯数字展示编号」时优先于 id：编号 "3" 既不是 DB 主键、
+ *      也不带 local_/upload_ 前缀 → isUnsavedLocalKey 判不出「未保存」，
+ *      保存时后端又匹配不到任何 section → 整表重建、正文丢失。
+ *   3. `n.id` —— 仅当它**不是**纯数字编号时才可用（如识别结果的 "n1"）。
+ *
+ * ✅ BUG 修复（2026-09-26 · 临时节点 key 冲突）：旧实现用
+ * `upload_${Date.now()}_${i}`，`i` 只是**同父内序号** —— 整棵树在一次
+ * `Date.now()` 毫秒内构造完（几十节点很常见，性能优化后更快），于是
+ * 「第1章的第1个子节」与「第2章的第1个子节」得到**完全相同的 key**
+ * （`upload_1767..._0`）。后果不是"仅 React 警告"：
+ *   · renameInNode / updateNodeFields / removeNode 按 key 匹配**所有**节点
+ *     → 改一个章节标题，另一章跟着一起改；
+ *   · findSectionById 只返回第一个命中 → 改名/删除/字数预算作用在错误的章节上；
+ *   · antd Tree 重复 key 渲染错乱，collectAllKeys(expandedKeys) 也出现重复项。
+ * 现改用**位置路径**（outlineId 点分路径，树内天然唯一）生成 key：
+ * 唯一、稳定（同一棵树重复构造得到同一批 key，便于 diff 与测试锁定）。
  */
+const _PURE_NUMERIC_ID_RE = /^\d+(?:\.\d+)*$/;
+
 export function outlineToTreeNode(outline: any[], parentPath = "", parentLevel = 0): TreeNode[] {
   return (outline || []).map((n, i) => {
     const level = n.level || parentLevel + 1;
     const outlineId = parentPath ? `${parentPath}.${i + 1}` : String(i + 1);
     const hasChildren = Array.isArray(n.children) && n.children.length > 0;
+    // ✅ 判定「n.id 是否只是展示编号」：纯数字点分路径（"1"/"1.1"）一律视为
+    //    编号而非主键 —— 后端 renumber 的产物必然落在此形态，必须走 upload_ 分支。
+    const rawId = n.id == null ? "" : String(n.id);
+    const isNumericId = _PURE_NUMERIC_ID_RE.test(rawId);
+    const key = n.__original_id
+      || (rawId && !isNumericId ? rawId : `upload_${outlineId}`);
     return {
-      key: n.id || `upload_${Date.now()}_${i}`,
+      key,
+      // 透传 __original_id，供 treeToOutline 原样回传给后端匹配正文
+      ...(n.__original_id ? { __original_id: n.__original_id } : {}),
       title: n.title,
       level,
       status: "empty",
@@ -1083,6 +1174,73 @@ export const OutlineNodeBudgetPanel = memo(function OutlineNodeBudgetPanel({
   );
 });
 
+/**
+ * 后端「生成后自动校验」报告（`review.quality`，由 services/outline_quality 产出）
+ * → 面向用户的一句话提示（纯函数，可单测）。
+ *
+ * 三类信号（对应需求要求三 / 要求四）：
+ * - `name_coverage.missing`：方案名称里解析出的施工内容/工序/工艺/对象，
+ *   在目录中**无任何落点**（全面性缺口，后端已尝试外科式补齐）；
+ * - `continuity.ok === false`：层级跳级 / 有父无子 / 同名章节 / 编号错位；
+ * - `redundant_titles`：与方案名称零关联、且不属于通用必要章节的标题候选。
+ *
+ * ⚠️ 刻意**不自动删除**任何章节：删章是不可逆的用户数据变更，
+ * 只提示 + 定位，由用户决定（与后端 `find_redundant_titles` 的口径一致）。
+ */
+export function summarizeOutlineQuality(review: unknown): {
+  level: "warn" | "info" | "none";
+  message: string;
+  logs: string[];
+} {
+  const empty = { level: "none" as const, message: "", logs: [] as string[] };
+  const q = (review as any)?.quality;
+  if (!q || typeof q !== "object") return empty;
+
+  const logs: string[] = [];
+  let warn = false;
+
+  const missing: string[] = Array.isArray(q.name_coverage?.missing)
+    ? q.name_coverage.missing.filter((m: unknown): m is string => typeof m === "string")
+    : [];
+  if (q.name_coverage?.evaluated && missing.length > 0) {
+    warn = true;
+    const head = missing.slice(0, 5).join("、");
+    const more = missing.length > 5 ? ` 等 ${missing.length} 项` : "";
+    logs.push(`⚠️ 方案名称涉及但目录未覆盖：${head}${more}`);
+  }
+
+  const cont = q.continuity;
+  if (cont && cont.ok === false) {
+    warn = true;
+    const c = cont.issue_counts || {};
+    const labels: Record<string, string> = {
+      level_gaps: "层级跳级",
+      empty_parents: "有父无子",
+      duplicate_titles: "同名章节",
+      numbering_mismatch: "编号错位",
+    };
+    const parts = Object.keys(labels)
+      .filter((k) => (c[k] || 0) > 0)
+      .map((k) => `${labels[k]} ${c[k]} 处`);
+    if (parts.length) logs.push(`⚠️ 目录连续性问题：${parts.join("、")}`);
+  }
+
+  // ⚠️ 脏数据防御：后端只保证是数组，元素仍可能是 null/非对象（旧数据或第三方
+  //    端点塞入），直接读 .title 会把整条提示抛在渲染路径上。
+  const redundant: unknown[] = Array.isArray(q.redundant_titles) ? q.redundant_titles : [];
+  if (redundant.length > 0) {
+    const head = redundant
+      .slice(0, 5)
+      .map((r) => ((r as { title?: string } | null)?.title) || "")
+      .filter(Boolean)
+      .join("、");
+    if (head) logs.push(`ℹ️ 疑似与方案名称无关的章节（未自动删除，请确认）：${head}`);
+  }
+
+  if (logs.length === 0) return empty;
+  return { level: warn ? "warn" : "info", message: logs.join("；"), logs };
+}
+
 // ============================================================
 // SSE 断线兜底轮询（2026-09-20 提取为模块级可注入实现）：
 // 原为组件内闭包（依赖 tasksApi/setProgress），无法在测试中驱动其
@@ -1124,6 +1282,27 @@ export interface TaskTerminalInfo {
     word_count?: number;
     run_words?: number;
     over_count?: number;
+  };
+  /**
+   * ✅ 契约补齐（2026-09-27）：全局事实提取 checkpoint
+   * （后端 `_CHECKPOINT_KINDS.facts_generation` 白名单，kind=`facts_result`）。
+   *
+   * 此前后端无此通道（既不写 checkpoint 也不在白名单里），断线重挂只能拿到
+   * status+message，segment_stats / cross_conflicts 全丢 —— 用户看到「已完成」
+   * 却不知道哪几段失败、是否存在跨段矛盾。
+   *
+   * 字段集必须与后端 `_FACTS_CHECKPOINT_FIELDS` 逐项一致（见 parity 断言）。
+   * `cross_conflicts` 用 unknown[] 而非具体结构：跨段矛盾的具体形态由
+   * facts_extractor 决定，前端 applyFactsCompletedEvent 只按数组消费。
+   */
+  facts_result?: {
+    event?: string;
+    message?: string;
+    segment_stats?: { total?: number; ok?: number; failed?: number; skipped?: number };
+    cross_conflicts?: unknown[];
+    warnings?: string[];
+    group_count?: number;
+    total_items?: number;
   };
   [k: string]: unknown;
 }
@@ -2989,6 +3168,10 @@ export default function SchemeWorkbenchPage() {
   const [previewDoc, setPreviewDoc] = useState<any>(null);
   const [previewText, setPreviewText] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
+  // 预览接口的完整响应：用于派生「文档内容不完整 / 仅预览截取 / 解析告警」提示。
+  // 只存 text 会把后端已经算好的 truncated / parse_warnings 丢掉，
+  // 用户在预览里看到的是一段看起来正常的短正文，无法判断内容是否真的完整。
+  const [previewData, setPreviewData] = useState<any>(null);
   // ✅ 四层存储（解析质量）预览接线：预览弹窗内展示 status/completeness 概览，
   //    并提供重新解析 / 物化提取层 / 交叉校验 / 刷新质量四个动作。
   const [pipelineStatus, setPipelineStatus] = useState<DocumentPipelineStatusLike | null>(null);
@@ -3104,6 +3287,11 @@ const draftKey = selectedSection && id
   // 会在新任务启动后才执行，若无世代校验，旧协程的 finally 会把新任务的
   // generating 复位为 false → 暂停/停止按钮消失，运行中的任务无法停止。
   const genSeqRef = useRef(0);
+  // ✅ 2026-09-26：本次「目录生成」是否已就正文覆盖风险做过二次确认。
+  // 闸门保存是唯一会整表重建 sections 的入口（AI 回传的 id 是展示编号，必然匹配不到
+  // 旧 DB 主键）—— 旧实现直接静默保存、用户毫无提示地丢掉全部已生成正文。
+  // 每次新生成重置，允许每代各确认一次。
+  const hasContentRef = useRef(false);
   // 生成中的刷新定时器
   const refreshTimerRef = useRef<number | null>(null);
   // ✅ 修复 stale closure：用 ref 保存 selectedSection 最新值，避免 load 回调读到旧值
@@ -3924,6 +4112,8 @@ const draftKey = selectedSection && id
         content: n.content,
         description: n.description || "",
         outlineId,
+        // ✅ 2026-09-29：事实变更失效标记（后端 _build_tree 读侧派生）
+        facts_stale: !!n.facts_stale,
         children: n.children ? buildTree(n.children) : [],
       };
     });
@@ -3986,6 +4176,17 @@ const draftKey = selectedSection && id
     }
   }
 
+  /** 整表重建可能清除未匹配章节的已生成正文（后端 2026-09-26 起量化回传）。
+   * 此前「重新生成目录 → 确认闸门保存」是无提示地清空正文，用户不可恢复。 */
+  function notifyClearedContent(data: any, prefix = "") {
+    const n = Number(data?.cleared_content_sections || 0);
+    if (n > 0) {
+      msg.warning(
+        `${prefix}${n} 个章节的已生成正文因未匹配到新目录而被清除（不可恢复）` +
+        `——如需保留，请在生成目录前先备份或用「AI 调整目录」定向修改`);
+    }
+  }
+
   /** 一级目录确认闸门（对齐 OpenBidKit outline-selection）：
    * 生成完成后不自动入库，由用户勾选确认一级章节后保存并锁定（locked=1） */
   function openOutlineGate(outline: any[]) {
@@ -4008,17 +4209,27 @@ const draftKey = selectedSection && id
           msg.error("至少保留一个一级章节");
           return Promise.reject(new Error("empty"));
         }
-        try {
-          await sectionsApi.saveOutline(id, {
-            outline: filtered,
-            source: "ai",
-            lock_roots: true,
+        // ✅ 已有正文时二次确认：AI 新目录与旧章节无法按主键匹配，整表重建会清空正文
+        if (hasAnyContent(treeRef.current) && !hasContentRef.current) {
+          modal.confirm({
+            title: "确认覆盖已有目录？",
+            okButtonProps: { danger: true },
+            content:
+              "当前目录已有章节生成过正文。AI 新目录与旧章节无法按主键匹配，" +
+              "确认保存将按新目录重建章节结构，**未匹配上的章节正文会被清除且不可恢复**。" +
+              "如需保留原文，请点「取消」并改用「AI 调整目录」定向修改。",
+            okText: "仍要保存（可能清除正文）",
+            cancelText: "取消",
+            onOk: () => {
+              // 仅在用户**确认后**置位：取消不应"消耗"掉这次风险提示，
+              // 否则用户取消一次后再点保存就静默清空正文（比原缺陷更隐蔽）。
+              hasContentRef.current = true;
+              return doSaveGate(filtered);
+            },
           });
-          msg.success(`目录已确认保存（${filtered.length} 个一级章节已锁定）`);
-        } catch (saveErr: any) {
-          msg.error(`目录已生成但保存失败：${saveErr?.message || "未知错误"}，请点击「保存目录」重试`);
+          return;
         }
-        load();
+        await doSaveGate(filtered);
       },
       onCancel: () => {
         // 目录已显示在目录树预览中，未入库 —— 用户可手动编辑后点「保存目录」
@@ -4027,10 +4238,29 @@ const draftKey = selectedSection && id
     });
   }
 
+  async function doSaveGate(filtered: any[]) {
+    if (!id) return;
+    try {
+      const { data } = await sectionsApi.saveOutline(id, {
+        outline: filtered,
+        source: "ai",
+        lock_roots: true,
+      });
+      msg.success(`目录已确认保存（${filtered.length} 个一级章节已锁定）`);
+      notifyClearedContent(data);
+    } catch (saveErr: any) {
+      msg.error(
+        `目录已生成但保存失败：${saveErr?.message || "未知错误"}，请点击「保存目录」重试`);
+    }
+    load();
+  }
+
   const doGenerateOutline = async () => {
     if (!id) return;
     // ✅ 世代校验：标记本代生成，收尾时仅当仍是最新一代才复位全局状态
     const mySeq = ++genSeqRef.current;
+    // 每代生成重新武装「正文覆盖风险」二次确认
+    hasContentRef.current = false;
     // 创建新的 AbortController，取消上一次未完成的 SSE
     abortControllerRef.current?.abort();
     const ac = new AbortController();
@@ -4082,8 +4312,9 @@ const draftKey = selectedSection && id
               cancelText: "不保存",
               onOk: async () => {
                 try {
-                  await sectionsApi.saveOutline(id, { outline: evt.outline, source: "ai" });
+                  const { data } = await sectionsApi.saveOutline(id, { outline: evt.outline, source: "ai" });
                   msg.success(`已保存 ${partialCount} 个章节节点`);
+                  notifyClearedContent(data);
                   load();
                 } catch (saveErr: any) {
                   msg.error(saveErr?.message || "保存失败");
@@ -4113,7 +4344,16 @@ const draftKey = selectedSection && id
           if (evt.outline && evt.outline.length > 0) {
             // ✅ 立即用已生成的 3 级目录刷新目录树（不依赖 load 时序，避免「目录生成至三级但树未更新」）
             setTree(buildTree(evt.outline));
-            // ✅ 一级目录确认闸门（对齐 OpenBidKit outline-selection）：
+            // ✅ P1-5：把后端「生成后自动校验」报告（全面性缺口 / 连续性问题 /
+            //    冗余候选）呈现在生成日志与提示条里 —— 此前 review.quality
+            //    没有任何消费方，用户看不到"方案名称里的工序没落到章节"。
+            //    只提示、绝不自动删章（删章不可逆）。
+            const _q = summarizeOutlineQuality(evt.review);
+            if (_q.level !== "none") {
+              _q.logs.forEach((line) => pushOutlineLog(1, line));
+              if (_q.level === "warn") msg.warning(_q.message);
+            }
+            // 一级目录确认闸门（对齐 OpenBidKit outline-selection）：
             //    旧实现 completed 即自动入库，用户没有确认一级结构的机会；
             //    现改为弹闸门勾选确认后再保存（lock_roots=true 锁定一级章节）。
             openOutlineGate(evt.outline);
@@ -4150,8 +4390,9 @@ const draftKey = selectedSection && id
               cancelText: "不保存",
               onOk: async () => {
                 try {
-                  await sectionsApi.saveOutline(id, { outline: evt.outline, source: "ai" });
+                  const { data } = await sectionsApi.saveOutline(id, { outline: evt.outline, source: "ai" });
                   msg.success(`已保存 ${partialCount} 个章节的目录`);
+                  notifyClearedContent(data);
                   load();
                 } catch (saveErr: any) {
                   msg.error(saveErr?.message || "保存失败");
@@ -4264,8 +4505,9 @@ const draftKey = selectedSection && id
                 okButtonProps: hint.tone === "warning" ? { danger: true } : undefined,
                 onOk: async () => {
                   try {
-                    await sectionsApi.saveOutline(id, { outline: failCkpt.outline, source: "ai" });
+                    const { data } = await sectionsApi.saveOutline(id, { outline: failCkpt.outline, source: "ai" });
                     msg.success(`已保存 ${partialCount} 个章节节点`);
+                    notifyClearedContent(data);
                     load();
                   } catch (saveErr: any) {
                     msg.error(saveErr?.message || "保存失败");
@@ -4290,8 +4532,9 @@ const draftKey = selectedSection && id
                 cancelText: hint.cancelText,
                 onOk: async () => {
                   try {
-                    await sectionsApi.saveOutline(id, { outline: ckpt.outline, source: "ai" });
+                    const { data } = await sectionsApi.saveOutline(id, { outline: ckpt.outline, source: "ai" });
                     msg.success(`已保存 ${partialCount} 个章节的目录`);
+                    notifyClearedContent(data);
                     load();
                   } catch (saveErr: any) {
                     msg.error(saveErr?.message || "保存失败");
@@ -5239,6 +5482,23 @@ const draftKey = selectedSection && id
           setProgress(lastProgress);
           setProgressMsg(evt.message || "");
           pushLog(lastProgress, evt.message || "");
+        } else if (evt.event === "ping") {
+          // ✅ P1 修复（2026-09-27 · 心跳统计消费）：后端 facts 链路已接入
+          //    stats_provider（sse_handlers.py generate_facts），单段 AI 调用期间
+          //    event_stream 挂起无法 yield progress，靠心跳周期推 ping 携带
+          //    progress/elapsed_ms。此处消费它消除「进度条长时间静止」。
+          //    注意：ping **不得**推进 lastProgress 的语义之外的东西，也不写日志
+          //    （否则日志行会被心跳刷屏）；仅按单调口径更新进度条与耗时提示。
+          //    未知/未来事件一律落到此分支之外被静默忽略，保持向前兼容。
+          const p = typeof evt.progress === "number" ? evt.progress : null;
+          if (p !== null && p > lastProgress) {
+            lastProgress = p;
+            setProgress(p);
+          }
+          const el = typeof evt.elapsed_ms === "number" ? evt.elapsed_ms : null;
+          if (el !== null && el >= 0) {
+            setProgressMsg(`正在提取全局事实…（已用时 ${Math.round(el / 1000)}s）`);
+          }
         }
       }
     } catch (e: any) {
@@ -5248,7 +5508,42 @@ const draftKey = selectedSection && id
           setProgressMsg("连接中断，正在重新挂接后台任务...");
           const fin = await pollTaskUntilTerminal(taskId);
           if (fin?.status === "completed") {
-            msg.success("全局事实提取已在后台完成");
+            // ✅ P0 修复（2026-09-27 · 断线重挂成果恢复）：后端已把 completed 事件的
+            //    segment_stats / cross_conflicts 落进 facts_result checkpoint 并由
+            //    GET /sse/task/{id} 回传。此处复用**同一个** applyFactsCompletedEvent
+            //    解析器（与在线 completed 分支 :5408 完全同源），保证重挂接后
+            //    失败段数/跨段矛盾横幅照常呈现，而不是只弹一句"已完成"。
+            //    缺 facts_result 时（后端版本旧 / checkpoint 写失败）回退原行为。
+            const _fin = fin.facts_result;
+            // ✅ 进度条收尾（2026-09-27）：断线重挂成功后必须把进度推到 100%
+            //    并回填终态文案，否则进度条永远停在中断刻度（对比在线分支
+            //    :5420-5423 的 setProgress(1) + setProgressMsg(doneMsg)）。
+            const _doneMsg = _fin?.message || "全局事实提取已在后台完成";
+            lastProgress = 1;
+            setProgress(1);
+            setProgressMsg(_doneMsg);
+            pushLog(1, `✅ ${_doneMsg}`);
+            if (_fin) {
+              const _d = applyFactsCompletedEvent(_fin);
+              setFactsSegmentStats(_d.segmentStats);
+              setFactsCrossConflicts(_d.crossConflicts);
+              if ((_fin.segment_stats?.failed || 0) > 0) {
+                msg.warning(_doneMsg);
+              } else {
+                msg.success(_doneMsg);
+              }
+            } else {
+              // ✅ 状态必须**显式清空**（2026-09-27）：在线路径的
+              // applyFactsCompletedEvent 语义是「缺字段即清空」，而重挂接
+              // 拿不到 checkpoint 时若什么都不做，上一次提取的失败告警 /
+              // 跨段矛盾横幅会残留在界面上（甚至跨方案）。此处复用**同一个**
+              // 解析器（传空对象）拿到规范化的「空」值，与在线路径逐字一致 ——
+              // 不手写 null/[]，避免两处口径再次分叉。
+              const _empty = applyFactsCompletedEvent({});
+              setFactsSegmentStats(_empty.segmentStats);
+              setFactsCrossConflicts(_empty.crossConflicts);
+              msg.success(_doneMsg);
+            }
             loadFacts();
           } else if (fin?.status === "failed") {
             msg.error(fin.message || "后台任务失败");
@@ -5430,7 +5725,13 @@ const draftKey = selectedSection && id
           ? `「${fileName}」已有解析结果，已修正其解析状态`
           : `「${fileName}」已解析过`);
       } else {
-        msg.success(`「${fileName}」${force ? "重新" : ""}解析完成（${data.text_len} 字）`);
+        // ✅ F6（2026-09-26）：与批量解析提示口径一致，即时告知截断/告警，
+        //    避免用户在点「解析」那一刻拿不到内容可能不完整的提示。
+        const cut = data.truncated ? "（内容可能被截断，请查看解析提示）" : "";
+        const warn = (data.warnings && data.warnings.length)
+          ? `（${data.warnings.length} 条解析提示）`
+          : "";
+        msg.success(`「${fileName}」${force ? "重新" : ""}解析完成（${data.text_len} 字）${cut}${warn}`);
       }
       loadDocuments();
     } catch (e: any) {
@@ -5451,6 +5752,7 @@ const draftKey = selectedSection && id
     if (!doc?.id) return;
     setPreviewDoc(doc);
     setPreviewText("");
+    setPreviewData(null);
     setPreviewLoading(true);
     // 重置四层质量概览，随后异步拉取（不阻断正文预览）
     setPipelineStatus(null);
@@ -5462,6 +5764,7 @@ const draftKey = selectedSection && id
         msg.warning(data.message || "该文档尚未解析");
       }
       setPreviewText(data.preview || "");
+      setPreviewData(data);
     } catch (e: any) {
       msg.error(e.message || "获取预览失败");
     } finally {
@@ -5593,9 +5896,21 @@ const draftKey = selectedSection && id
             item_count: evt.item_count ?? 0,
             est_model_calls: evt.est_model_calls ?? 0,
             chunk_size: evt.chunk_size ?? 0,
+            // 提取依据完整性：任一文档被截断/预算不足被跳过时，
+            // 「提取结果不可信」必须在提取结果区显性提示，而不是只藏在后端日志里
+            source_truncated: !!evt.source_truncated,
+            truncated_docs: evt.truncated_docs ?? [],
+            used_doc_count: evt.used_doc_count ?? 0,
+            input_doc_count: evt.input_doc_count ?? 0,
+            dropped_doc_count: evt.dropped_doc_count ?? 0,
           });
         } else if (t === "completed") {
           const r = evt.result || {};
+          // 后端把截断报告一并放进 completed 的 result，作为 SSE 中断时的兜底
+          if (r.source_truncated) {
+            const n = sourceNotice(r);
+            if (n) msg.warning(n.title + (n.detail ? `（${n.detail}）` : ""));
+          }
           if (r.ok) {
             msg.success(`结构化提取完成（${r.completed || 0}/${r.total || 0} 项）`);
             // ✅ 自动跳目录生成收紧为「key/full 且必选项齐备」（停止/报错/单项重跑不跳）
@@ -6095,6 +6410,7 @@ const draftKey = selectedSection && id
     try {
       const { data } = await sectionsApi.saveOutline(id, { outline, source: "手动编辑" });
       msg.success(`目录已保存，共 ${data.count || collectAllKeys(treeRef.current).length} 章节`);
+      notifyClearedContent(data);
       // ✅ G10：目录结构变更会改变预检的章节集合 → 刷新审核 / 就绪度工作台
       setReviewTick((t) => t + 1);
       await load();
@@ -6280,8 +6596,9 @@ const draftKey = selectedSection && id
       cancelText: "取消",
       onOk: async () => {
         try {
-          await sectionsApi.saveOutline(id, { outline: [], source: "手动清除" });
+          const { data } = await sectionsApi.saveOutline(id, { outline: [], source: "手动清除" });
           msg.success("所有目录已清除");
+          notifyClearedContent(data, "清空目录同时删除了：");
           setTree([]);
           setSelectedSection(null);
           setExpandedKeys([]);
@@ -6561,6 +6878,19 @@ const draftKey = selectedSection && id
                 >
                   {node.word_count}字
                 </Tag>
+              )}
+              {/* ✅ 2026-09-29（事实变更失效标记）：正文写于全局事实变更之前。
+                  只提示不阻断 —— 后端不会自动重写用户已编辑的章节。 */}
+              {node.facts_stale && (
+                <Tooltip title="全局事实已变更，本章正文引用的参数可能已过期，建议重新生成">
+                  <Tag
+                    color="warning"
+                    icon={<ExclamationCircleOutlined />}
+                    style={{ margin: "0 0 0 8px", fontSize: 11, lineHeight: "16px", cursor: "help" }}
+                  >
+                    事实已变更
+                  </Tag>
+                </Tooltip>
               )}
               <span
                 style={{
@@ -7775,7 +8105,7 @@ const draftKey = selectedSection && id
               ? "green"
               : "default"}
           hint={factsSummary?.has_warnings
-            ? `待确认模拟值 ${factsSummary.simulated || 0} 项 · 待审核 ${factsSummary.unresolved || 0} 项 · 矛盾 ${factsSummary.conflicts || 0} 项`
+            ? `待确认模拟值 ${factsSummary.simulated || 0} 项 · 待审核 ${factsSummary.unresolved || 0} 项 · 矛盾 ${factsSummary.conflicts || 0} 项${factsSummary.stale > 0 ? ` · 来源过期 ${factsSummary.stale} 项` : ""}`
             : "第三步：AI 从已解析资料提取全篇统一的事实变量，供正文生成保持一致"}
         />
       ),
@@ -7800,6 +8130,14 @@ const draftKey = selectedSection && id
                 {factsSummary.conflicts > 0 && (
                   <Tooltip title="同一事实存在多个取值，需人工裁决">
                     <Tag color="red">🔸 矛盾 {factsSummary.conflicts}</Tag>
+                  </Tooltip>
+                )}
+                {/* ✅ BUG 修复（2026-09-27）：过期事实此前既不计入 has_warnings
+                    也不展示，用户无法得知「为什么事实没进正文」。资料变更/重新提取
+                    会把旧值标记 is_stale=1 并被注入门控排除，必须显式可见。 */}
+                {factsSummary.stale > 0 && (
+                  <Tooltip title="来源资料已变化或已被重新提取取代，这些事实不会注入正文；请重新提取或人工核对">
+                    <Tag color="volcano">🕒 来源过期 {factsSummary.stale}</Tag>
                   </Tooltip>
                 )}
                 {factsSummary.has_warnings && (
@@ -8342,7 +8680,11 @@ const draftKey = selectedSection && id
           {/* ===== ✅ 交付就绪度总检（六维加权评分 + 阻断项 + 放行结论）=====
                放在最上方：用户进入本页首先要的是"能不能交付"这一个答案，
                下面的分项检查是拿到答案后的下钻入口。 */}
-          <ReadinessDashboard schemeId={id || ""} refreshKey={reviewTick} />
+          <ReadinessDashboard
+            schemeId={id || ""}
+            refreshKey={reviewTick}
+            onContentFixed={() => { load(); setReviewTick((v) => v + 1); }}
+          />
 
           {/* ===== ✅ 规范符合性检查（complianceApi.check）===== */}
           <Card
@@ -9774,6 +10116,22 @@ const draftKey = selectedSection && id
         width={760}
       >
         <Spin spinning={previewLoading}>
+          {/* ✅ 解析可信度提示：区分「文档内容真的不完整」（warning，需行动）
+              与「只是本弹窗没显示全」（info，完整内容仍在库里），二者互不覆盖 */}
+          {!previewLoading && previewData?.is_parsed && (
+            <div style={{ marginBottom: 12 }}>
+              {previewNotices(previewData).map((n, i) => (
+                <Alert
+                  key={i}
+                  type={n.kind}
+                  showIcon
+                  message={n.title}
+                  description={n.detail}
+                  style={{ marginBottom: 8 }}
+                />
+              ))}
+            </div>
+          )}
           {/* ✅ 四层存储解析质量概览 + 管线操作（修复 docPipelineApi/组件此前无调用点的断链） */}
           <div style={{ marginBottom: 12 }}>
             <DocumentPipelineSummary

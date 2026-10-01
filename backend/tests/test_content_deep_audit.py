@@ -424,7 +424,12 @@ class TestFactsBudget:
         text = sh._render_facts_text(rows, max_total=120, per_fact=100)
         assert len(text) <= 120
         for gt in ("甲组", "乙组"):
-            assert f"### {gt}\n" in text          # 组标题要么完整、要么不出现
+            # 要么标题完整出现，要么该组内容整体不出现
+            if f"### {gt}\n" not in text:
+                assert gt not in text
+        # 不得出现半截标题
+        assert "### 甲" not in text.replace("### 甲组\n", "")
+        assert "### 乙" not in text.replace("### 乙组\n", "")          # 组标题要么完整、要么不出现
 
     def test_length_never_exceeds_budget(self):
         rows = [(f"组{i}", "t", "字" * 50) for i in range(50)]

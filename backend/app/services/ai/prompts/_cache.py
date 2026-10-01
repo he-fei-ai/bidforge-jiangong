@@ -46,6 +46,74 @@ _cache_lock = threading.RLock()
 # {SHARED_*} 占位符：运行时动态解析为对应共享提示词的当前内容（DB 优先）
 _SHARED_KEY_RE = re.compile(r"\{(SHARED_[A-Z0-9_]+)\}")
 
+#: 共享片段解析的最大嵌套层数（防止模板互相引用导致无限递归）。
+#: ✅ 2026-09-27（BUG-P0-2 · SHARED 递归打爆调用栈）：
+#:   旧实现按注释假设「SHARED_* 内容本身不含 SHARED 占位符，无递归风险」——
+#:   但内容**由用户在提示词编辑器里自由编辑**，该假设不成立。实测把
+#:   ``SHARED_OUTPUT_SPEC`` 的内容改成 ``see {SHARED_OUTPUT_SPEC}`` 后，
+#:   ``get_prompt('outline_short_system')`` 直接抛 ``RecursionError``
+#:   （实测耗时 0.45s，且异常在 finally 之外逃逸）。互引（A→B→A）同理。
+#:   这是**可由用户配置触发**的可用性缺陷：一次误编辑就让所有依赖该共享
+#:   片段的生成任务全部失败。改为「深度上限 + 环检测 + 保留原字面量」。
+_SHARED_MAX_DEPTH = 4
+
+
+def _resolve_shared_keys(prompt: str, _depth: int = 0,
+                         _chain: tuple[str, ...] = ()) -> str:
+    """将模板中的 {SHARED_*} 占位符替换为对应共享提示词的当前内容（DB 优先）。
+
+    ✅ 修复：旧实现 SHARED_* 在 outline.py import 期字符串拼接（值拷贝），
+    前端编辑"共享规则"下的 SHARED_* key 后对目录生成永不生效。
+    现改为运行时动态解析。
+
+    ✅ 2026-09-27（BUG-P0-2）：新增**递归防护**。命中即保留原字面量
+    ``{SHARED_XXX}`` 并打 WARNING（既不崩，也不静默丢内容）：
+
+    1. ``key in _chain`` —— 该 key 已在本条解析链上出现，即成环（A→B→A）；
+    2. ``_depth`` 超过 :data:`_SHARED_MAX_DEPTH` —— 兜底深度上限；
+    3. 解析结果为空（key 未注册 / 拼写错误）—— 保留字面量并明确告警。
+
+    环检测用**解析链**而非「展开结果里是否还含 SHARED_」：后者会把
+    「A 引用了一个拼错的 B」误判成环，从而把 A 已成功展开的部分**整段
+    丢弃**；前者精确且不做无谓的内容损失。
+
+    :param _depth: 当前递归深度（内部参数，勿由调用方传）。
+    :param _chain: 本条解析链上已展开的 key，用于环检测（内部参数）。
+    """
+    if "{SHARED_" not in prompt:
+        return prompt
+
+    if _depth >= _SHARED_MAX_DEPTH:
+        logger.warning(
+            "共享提示词嵌套超过 %d 层，停止展开（剩余：%s）。"
+            "请检查是否存在互相引用。", _SHARED_MAX_DEPTH,
+            sorted(set(_SHARED_KEY_RE.findall(prompt))))
+        return prompt
+
+    def _repl(m: re.Match) -> str:
+        key = m.group(1)
+        if key in _chain:
+            logger.warning(
+                "共享提示词存在循环引用：%s（链：%s），已保留字面量 { %s }",
+                key, " → ".join((*_chain, key)), key)
+            return m.group(0)
+        try:
+            resolved = _resolve_shared_keys(
+                get_prompt(key), _depth + 1, (*_chain, key))
+        except Exception as e:
+            logger.warning("解析共享提示词 %s 失败: %s", key, e)
+            return m.group(0)
+        if not resolved:
+            # key 未注册（拼写错误或已下架）——保留字面量并明确告警
+            logger.warning(
+                "共享提示词 %s 不存在（未注册），{ %s } 已按字面量保留；"
+                "请检查拼写。可用共享片段：%s",
+                key, key, sorted(k for k in _ALL_PROMPTS if k.startswith("SHARED_")))
+            return m.group(0)
+        return resolved
+
+    return _SHARED_KEY_RE.sub(_repl, prompt)
+
 
 
 def _current_db_path() -> str | None:
@@ -112,27 +180,6 @@ def _load_prompt_cache_sync():
         except Exception as e:
             logger.warning("Failed to load prompt cache from DB: %s", e)
             _prompt_cache = None
-
-
-def _resolve_shared_keys(prompt: str) -> str:
-    """将模板中的 {SHARED_*} 占位符替换为对应共享提示词的当前内容（DB 优先）。
-
-    ✅ 修复：旧实现 SHARED_* 在 outline.py import 期字符串拼接（值拷贝），
-    前端编辑"共享规则"下的 SHARED_* key 后对目录生成永不生效。
-    现改为运行时动态解析；SHARED_* 内容本身不含 SHARED 占位符，无递归风险。
-    """
-    if "{SHARED_" not in prompt:
-        return prompt
-
-    def _repl(m: re.Match) -> str:
-        try:
-            resolved = get_prompt(m.group(1))
-            return resolved if resolved else m.group(0)
-        except Exception as e:
-            logger.warning("解析共享提示词 %s 失败: %s", m.group(1), e)
-            return m.group(0)
-
-    return _SHARED_KEY_RE.sub(_repl, prompt)
 
 
 def _get_prompt_cache() -> dict[str, str]:

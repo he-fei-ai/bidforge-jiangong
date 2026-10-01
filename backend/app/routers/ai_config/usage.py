@@ -1,7 +1,7 @@
 """AI 配置路由 · 用量统计 / 审计日志（stats / audit-logs）。"""
 from fastapi import APIRouter, Depends
 
-from app.db import get_db, read_db
+from app.db import get_db, read_db, safe_rowcount
 from app.models import AuditLogCleanup
 
 router = APIRouter(tags=["ai_config"])
@@ -251,7 +251,8 @@ async def cleanup_audit_logs(body: AuditLogCleanup, db=Depends(get_db)):
     if body.only_failed:
         sql += " AND success=0"
     cur = await db.execute(sql, tuple(params))
-    deleted = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+    # R13：旧实现 cur.rowcount 无守卫，execute() 返回 None 时该端点直接 500
+    deleted = safe_rowcount(cur, what="AI 审计日志清理")
     await db.commit()
     return {"ok": True, "deleted": deleted, "keep_days": keep_days,
             "only_failed": body.only_failed}

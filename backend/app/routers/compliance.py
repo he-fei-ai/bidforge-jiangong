@@ -40,6 +40,7 @@ from app.services.audit_scoring import (
 from app.services.preflight_engine import (
     PreflightContext, preflight_stats, run_preflight,
 )
+from app.services import review_autofix
 from app.services.content_utils import order_sections_dfs
 from app.services.standards_registry import (
     STANDARD_DB_CHECKED_AT, STANDARD_DB_VERSION,
@@ -818,6 +819,10 @@ async def _readiness_overview_compute(db, scheme_id: str) -> dict:
         logger.warning("overview: 读取专家论证预检结果失败（跳过）: %s", e)
 
     findings = merge_findings(program_findings, ai_findings, export_findings)
+    # ✅ 自动修复能力标注（services/review_autofix.py）：为每条 finding 补
+    #    ``autofix`` 字段（mode / fixable / reason），前端据此渲染「一键修复」
+    #    按钮。只新增字段，既有字段与评分口径完全不变（向后兼容）。
+    review_autofix.capability_summary(findings)
     result = score_findings(findings)
     stats = preflight_stats(ctx)
     stats["standard_db_version"] = STANDARD_DB_VERSION

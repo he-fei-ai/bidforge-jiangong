@@ -144,3 +144,103 @@ def test_adjust_outline_validate_fn_unit():
         {"outline": [{"title": "  "}]}
     ) != []
     assert sec._adjust_outline_validate_fn({"outline": [{"title": "合格章"}]}) == []
+
+
+# ============================================================
+# 2026-09-26 BUG 修复：AI 调整目录后保存必须保住已生成正文
+# ------------------------------------------------------------
+# 缺陷链（前后端各有一环，缺一即复发）：
+#   后端 _save_outline_to_db._preserve_original_ids 无条件执行
+#       `node["__original_id"] = node.get("id", "")`，把 /adjust-outline
+#       回传的真实 DB 主键冲掉、退化为用 renumber 覆写后的**展示编号**
+#       （"1"/"1.1"）当主键 → 匹配不到已有 section → is_new 全为 True
+#       → 整表重建 → **已生成正文全部丢失**。
+#   前端 outlineToTreeNode / treeToOutline 同样丢弃 __original_id。
+# ============================================================
+
+
+class TestAdjustThenSavePreservesContent:
+    async def test_preserve_original_ids_not_overwritten(self, db_conn):
+        """已有 __original_id 时不得被 id 覆盖（后端核心修复点）。"""
+        sid = await _seed_scheme(db_conn)
+        await _seed_section(db_conn, sid, "R1", "工程概况", level=1, sort=0)
+        # 模拟前端提交：id=展示编号、__original_id=真实主键
+        await sec._save_outline_to_db(
+            db_conn, sid, [{"id": "1", "__original_id": "R1", "title": "工程概况",
+                            "children": []}])
+        cur = await db_conn.execute(
+            "SELECT id, title FROM sections WHERE scheme_id=?", (sid,))
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0]["id"] == "R1", [dict(r) for r in rows]
+
+    async def test_adjust_then_save_keeps_generated_content(self, db_conn, monkeypatch):
+        """端到端：adjust-outline 返回树 save-outline 后，正文完整保留。"""
+        sid = await _seed_scheme(db_conn)
+        await _seed_section(db_conn, sid, "R1", "工程概况", level=1, sort=0)
+        await _seed_section(db_conn, sid, "R2", "施工工艺", level=1, sort=1)
+        await db_conn.execute(
+            "UPDATE sections SET content='工程概况正文,不可丢失' WHERE id='R1'")
+        await db_conn.execute(
+            "UPDATE sections SET content='施工工艺正文,不可丢失' WHERE id='R2'")
+        await db_conn.commit()
+
+        _patch_ai(monkeypatch, {
+            "outline": [
+                {"id": "R1", "title": "工程概况（已改名）", "children": []},
+                {"id": "R2", "title": "施工工艺", "children": []},
+            ],
+            "summary": "仅改第一章标题",
+        })
+        res = await sec.adjust_outline(sid, {"instruction": "改第一章标题"}, db=db_conn)
+        await sec._save_outline_to_db(db_conn, sid, res["outline"])
+
+        cur = await db_conn.execute(
+            "SELECT id, title, content FROM sections WHERE scheme_id=? ORDER BY sort_order",
+            (sid,))
+        rows = {r["id"]: dict(r) for r in await cur.fetchall()}
+        assert set(rows) == {"R1", "R2"}, rows
+        assert rows["R1"]["title"] == "工程概况（已改名）"
+        assert rows["R1"]["content"] == "工程概况正文,不可丢失"
+        assert rows["R2"]["content"] == "施工工艺正文,不可丢失"
+
+    async def test_new_chapter_from_adjust_still_creates(self, db_conn, monkeypatch):
+        """AI 新增的章（无 __original_id）仍应新建，且不影响已有章节正文。"""
+        sid = await _seed_scheme(db_conn)
+        await _seed_section(db_conn, sid, "R1", "工程概况", level=1, sort=0)
+        await db_conn.execute("UPDATE sections SET content='原有正文' WHERE id='R1'")
+        await db_conn.commit()
+
+        _patch_ai(monkeypatch, {
+            "outline": [
+                {"id": "R1", "title": "工程概况", "children": []},
+                {"title": "新增：监测方案", "children": []},
+            ],
+            "summary": "新增一章",
+        })
+        res = await sec.adjust_outline(sid, {"instruction": "新增监测方案章"}, db=db_conn)
+        await sec._save_outline_to_db(db_conn, sid, res["outline"])
+
+        cur = await db_conn.execute(
+            "SELECT id, title, content FROM sections WHERE scheme_id=? ORDER BY sort_order",
+            (sid,))
+        rows = [dict(r) for r in await cur.fetchall()]
+        assert len(rows) == 2
+        assert rows[0]["content"] == "原有正文"
+        assert any("监测方案" in r["title"] for r in rows)
+
+    async def test_id_only_submit_backward_compatible(self, db_conn):
+        """旧前端（只提交 id、不带 __original_id）行为不变：按 id 匹配已有章节。"""
+        sid = await _seed_scheme(db_conn)
+        await _seed_section(db_conn, sid, "R1", "工程概况", level=1, sort=0)
+        await db_conn.execute("UPDATE sections SET content='原有正文' WHERE id='R1'")
+        await db_conn.commit()
+
+        await sec._save_outline_to_db(
+            db_conn, sid, [{"id": "R1", "title": "工程概况", "children": []}])
+        cur = await db_conn.execute(
+            "SELECT id, content FROM sections WHERE scheme_id=?", (sid,))
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0]["id"] == "R1"
+        assert rows[0]["content"] == "原有正文"

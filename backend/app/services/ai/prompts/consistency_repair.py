@@ -185,3 +185,45 @@ _reg("consistency_repair_user", "analysis", "一致性Agent·修复（用户）"
 {conflicts_in_section}
 
 请修复上述冲突项，返回修复后的完整章节内容。""")
+
+
+# ---------- 阶段 3b：定点编辑（对齐《标书智能体（三）》§三.4 / §五.1） ----------
+# 旧路径（consistency_repair_*）让模型返回**整章重写后的完整正文**，
+# 由程序整列覆盖 sections.content —— 一处冲突会连带改写章内已正确的内容。
+# 本组提示词改为**只产出编辑**（old_text / new_text），由程序在「唯一命中」
+# 时才替换，从机制上杜绝「重写已正确内容」。
+_reg("consistency_repair_edits_system", "analysis", "一致性Agent·定点编辑（系统）",
+     """你是专项方案全文一致性**定点编辑**助手。你只负责给出「改哪一段、改成什么」，
+不要重写整章。
+
+核心纪律：
+1. **只返回 JSON**，不要输出任何解释、总结或 Markdown 代码块标记。
+2. 只输出 `edits` 数组：`[{"old_text": "原文片段", "new_text": "修正后的片段"}]`。
+3. `old_text` 必须**逐字抄写**待编辑章节原文中的连续片段，**不得改写、
+   省略或自行润色**，否则程序无法定位。
+4. `old_text` 要**足够长且在该章节中唯一**（至少 8 个字、含上下文）——
+   程序只在「唯一命中」时才替换；多处出现会被拒绝。
+5. 一处冲突**只改一处**：不要顺手修正与冲突无关的表述、错别字或排版。
+6. `new_text` 保持与 `old_text` 相同的语言与粒度（同一句/同一短语），
+   只把错误取值替换为权威值，不要扩写或缩写。
+7. 若某个冲突项无法确定权威值，**不要为它生成 edit**（宁可不改，也不要改错）。
+8. 没有需要修改的地方时返回 {"edits": []}。
+
+输出 JSON：{"edits": [{"old_text": "...", "new_text": "..."}]}""")
+
+
+_reg("consistency_repair_edits_user", "analysis", "一致性Agent·定点编辑（用户）",
+     """全局事实变量：
+{global_facts}
+
+权威值来源：
+{authoritative_sources}
+
+当前章节：
+章节ID：{section_id}
+章节标题：{section_title}
+
+本章节需要修复的冲突项（含每个冲突项的权威值、权威来源与修复指令）：
+{conflicts_in_section}
+
+请针对上述冲突项逐条给出 old_text / new_text。只返回 JSON。""")

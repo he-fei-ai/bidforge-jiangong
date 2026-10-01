@@ -204,7 +204,12 @@ async def test_clear_outline_resets_status_and_source(db_conn):
     """
     await _seed_scheme(db_conn)   # 预置 outline_source='ai' / status='已完成'
     res = await sec.save_outline("sc1", {"outline": []}, db_conn)
-    assert res == {"ok": True, "count": 0, "tree": []}
+    assert res["ok"] is True and res["count"] == 0 and res["tree"] == []
+    # ✅ 2026-09-26 新增字段：清空目录同样是「正文批量丢失」，必须量化告知
+    #    （seed 内有 1 个带正文的章节）。旧实现只回 {ok,count,tree}，用户在
+    #    前端看不到任何提示，正文静默消失且不可恢复。
+    assert res.get("cleared_content_sections") == 1, (
+        "清空目录必须回传被清除正文的章节数，供前端明示用户")
 
     cur = await db_conn.execute(
         "SELECT status, outline_source FROM schemes WHERE id=?", ("sc1",))

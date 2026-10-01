@@ -3,6 +3,7 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { chartsApi } from "../api";
 import { ensureMermaid, nextMermaidId } from "./mermaidRuntime";
+import { CHART_TITLE_FALLBACK, RENDERABLE_CHART_TYPES } from "../utils/chartTypes";
 
 // ✅ KaTeX 公式渲染：动态加载 katex（模块级缓存，多实例共享一次加载）
 let _katexPromise: Promise<any> | null = null;
@@ -130,12 +131,21 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
         const marker = `${markerPrefix}${counter}__`;
         if (lang === "chart-json") {
           // ✅ 图表同步生成：JSON 数据块调后端渲染引擎出图（与导出一致）
-          let chartType = "labor";
+          // ✅ BUG 修复（2026-09-27）：旧实现 `obj.type || "labor"` —— 载荷省略
+          //    type 时会**凭空捏造**一个 labor 类型发给后端，把甘特图/架构图载荷
+          //    送进 labor 渲染器必然失败，预览显示"渲染引擎暂不可用"，
+          //    而导出 DOCX 却是对的（导出侧按载荷结构推断）——预览/导出错配。
+          //    此处改为：解析不出合法类型就传空串，交给后端按结构推断
+          //    （与登记侧、导出侧同一个判据），不再在前端复制一份推断逻辑。
+          let chartType = "";
           let title = "";
           try {
             const obj = JSON.parse(code.trim());
-            chartType = String(obj.type || "labor");
-            title = String(obj.title || "");
+            if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+              const declared = String(obj.type || "").trim().toLowerCase();
+              if (RENDERABLE_CHART_TYPES.has(declared)) chartType = declared;
+              title = String(obj.title || "");
+            }
           } catch { /* 解析失败按占位卡片显示 */ }
           placeholders.push({
             marker, code: code.trim(), id,
@@ -327,7 +337,7 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
           // Mermaid 无法表达的类型，与导出 DOCX 同一渲染轨）——各自独立 IIFE 并发
           if (ph.json) {
             (async () => {
-              div.innerHTML = `<div style="padding:12px;color:#999;font-size:12px">📊 图表渲染中…（${DOMPurify.sanitize(ph.json!.title || ph.json!.chart_type)}）</div>`;
+              div.innerHTML = `<div style="padding:12px;color:#999;font-size:12px">📊 图表渲染中…（${DOMPurify.sanitize(ph.json!.title || ph.json!.chart_type || CHART_TITLE_FALLBACK)}）</div>`;
               try {
                 const resp = await chartsApi.render({
                   chart_type: ph.json!.chart_type,
@@ -343,7 +353,7 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
                 div.classList.add("mmd-rendered");
               } catch {
                 if (cancelled) return;
-                div.innerHTML = `<div style="padding:12px;border:1px dashed #faad14;border-radius:4px;color:#ad6800;background:#fffbe6;font-size:12px">📊 ${DOMPurify.sanitize(ph.json!.title || "数据图表")}（${DOMPurify.sanitize(ph.json!.chart_type)}）<br/><span style="color:#999">渲染引擎暂不可用，导出 DOCX 时将再次尝试</span></div>`;
+                div.innerHTML = `<div style="padding:12px;border:1px dashed #faad14;border-radius:4px;color:#ad6800;background:#fffbe6;font-size:12px">📊 ${DOMPurify.sanitize(ph.json!.title || CHART_TITLE_FALLBACK)}${ph.json!.chart_type ? `（${DOMPurify.sanitize(ph.json!.chart_type)}）` : ""}<br/><span style="color:#999">渲染引擎暂不可用，导出 DOCX 时将再次尝试</span></div>`;
                 div.classList.remove("mmd-ph");
               }
             })();

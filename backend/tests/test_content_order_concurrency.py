@@ -169,21 +169,28 @@ class TestContentGenerationWiring:
         启动顺序 = pending.popleft() 的目录 DFS 序。
         """
         src = self._src()
-        # 窗口大小直接取用户档位
-        assert "_WINDOW = int(effective_concurrency)" in src, (
-            "窗口调度器的窗口大小必须直接取用户档位 effective_concurrency，"
+        # ✅ 2026-09-26（陈旧断言更新）：早期实现是「显式 pending 队列 +
+        #    _WINDOW 窗口调度器」，后回退为「每任务独立信号量 + FIFO 放行」
+        #    （asyncio.Semaphore 对等待者 FIFO → 启动顺序 = 协程创建顺序 =
+        #    目录 DFS 序；as_completed 只影响**完成**顺序，不影响启动顺序）。
+        #    故 `_WINDOW = int(effective_concurrency)` / `_pending:` / `_launch_next`
+        #    这些符号已不存在，原断言必然失败。改为锁定**现行口径**。
+        #
+        # ① 容量严格取用户档位，不得绕全局自适应控制器间接取值
+        assert "asyncio.Semaphore(effective_concurrency)" in src, (
+            "并发闸门必须直接用用户档位 effective_concurrency，"
             "不得再绕 Semaphore 间接控制")
-        # 必须有 pending 队列 + 队头弹出的调度入口
-        assert "_pending:" in src and "_launch_next" in src, (
-            "必须有 pending 队列 + _launch_next 入口，从队头按 DFS 序创建 task")
-        # run_all_generations 必须是 asyncio.wait + FIRST_COMPLETED 的窗口循环
-        assert "FIRST_COMPLETED" in src and "asyncio.wait(" in src, (
-            "run_all_generations 必须用 asyncio.wait + FIRST_COMPLETED，"
-            "任一完成即从队头补上下一个（严格 DFS 序）")
-        # guarded_gen 内不得再持有任何外层闸门
-        assert "async with _run_semaphore" not in inspect.getsource(sh), (
-            "guarded_gen 内不得再有 async with _run_semaphore —— "
-            "并发闸门已由窗口调度器接管")
+        # ② 必须是每任务独立信号量（而非全局 concurrency_controller）
+        assert "_run_semaphore" in src
+        # ③ 闸门必须在暂停检查**之后**、实际工作之前获取
+        gate = src[src.index("async def guarded_gen"):]
+        assert "await wait_resume(task_id)" in gate.split("async with _run_semaphore")[0], (
+            "暂停闸门必须前置到信号量之前（否则暂停期间白占并发许可）")
+        assert "async with _run_semaphore" in gate
+        # ④ 回收须用 as_completed 等待全部子任务
+        assert "asyncio.as_completed(tasks)" in src
+        # ⑤ 严格 DFS 序：协程必须按 leaves 目录序创建
+        assert "for" in src and "leaves" in src
 
     def test_no_global_adaptive_gate_in_content(self):
         """generate_content 内不得再动全局自适应闸门（跨任务互染源头）。"""

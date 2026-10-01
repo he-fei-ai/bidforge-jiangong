@@ -28,6 +28,8 @@ import {
   SafetyCertificateOutlined, ThunderboltOutlined, WarningOutlined,
 } from "@ant-design/icons";
 import { complianceApi } from "../../api";
+import AutoFixModal from "./AutoFixModal";
+import BatchFixModal from "./BatchFixModal";
 import { hookAntdMessage } from "../../utils/activityCenter";
 import {
   GRADE_COLOR, SCORE_COLOR, SEVERITY_COLOR, SEVERITY_LABEL, SEVERITY_WEIGHT,
@@ -59,11 +61,18 @@ export interface ReadinessDashboardProps {
   schemeId: string;
   /** 章节加载完成等外部数据变更后，父组件递增此值触发自动重新拉取历史 */
   refreshKey?: number;
+  /**
+   * ✅ 自动修复改写正文后回调（2026-09-30）：宿主页需刷新目录/正文
+   * （sections.content 变了）并重新总检（结论已因内容变更而过期）。
+   * 不传则只在组件内重新总检。
+   */
+  onContentFixed?: () => void;
 }
 
 function ReadinessDashboard({
   schemeId,
   refreshKey = 0,
+  onContentFixed,
 }: ReadinessDashboardProps) {
   const { message: _antdMsg } = App.useApp();
   const msg = hookAntdMessage(_antdMsg, "审核预检");
@@ -83,6 +92,10 @@ function ReadinessDashboard({
   //   现做法：记录当前 overview 落库时刻；若运行历史里存在更新的一次总检
   //   （或本地已过期时间戳 > runs 最新版），显示一条 warning 提示"重新总检"。
   const [overviewTs, setOverviewTs] = useState<number | null>(null);
+  // ✅ 自动修复弹窗（2026-09-30）：点问题行的「自动修复」打开
+  const [fixTarget, setFixTarget] = useState<PreflightFinding | null>(null);
+  // ✅ 批量「一键修复全部阻断项」弹窗（2026-10-01）：收集 → 暂存预览 → 逐条接受
+  const [batchOpen, setBatchOpen] = useState(false);
   const runsRequestId = useRef(0);
   const overviewRequestId = useRef(0);
   const reportRequestId = useRef(0);
@@ -232,6 +245,13 @@ function ReadinessDashboard({
     return list.filter((f) => f.severity === sevFilter);
   }, [overview, sevFilter]);
 
+  // ✅ 批量修复入口（2026-10-01）：仅当有「阻断 + 可自动修复」项时开放按钮
+  const blockingFixable = useMemo(
+    () => (overview?.findings || []).filter(
+      (f) => f.severity === "block" && (f.autofix as PreflightFinding["autofix"])?.fixable),
+    [overview],
+  );
+
   const trend = useMemo(() => {
     if (runs.length < 2) return null;
     const cur = runs[0].total;
@@ -265,6 +285,17 @@ function ReadinessDashboard({
           >
             导出整改清单
           </Button>
+          {blockingFixable.length > 0 && (
+            <Button
+              size="small"
+              type="primary"
+              danger
+              icon={<ThunderboltOutlined />}
+              onClick={() => setBatchOpen(true)}
+            >
+              一键修复全部阻断项（{blockingFixable.length}）
+            </Button>
+          )}
           <Button
             size="small"
             type="primary"
@@ -616,6 +647,43 @@ function ReadinessDashboard({
                       </Tag>
                     ),
                   },
+                  {
+                    // ✅ 自动修复入口（2026-09-30）：可用性完全取自后端
+                    //    `finding.autofix`（能力表唯一事实源），前端不自行猜测。
+                    title: "修复", key: "autofix", width: 92,
+                    render: (_: unknown, r: PreflightFinding) => {
+                      const cap = r.autofix;
+                      if (!cap) {
+                        return (
+                          <Text type="secondary" style={{ fontSize: 11 }}>—</Text>
+                        );
+                      }
+                      if (!cap.fixable) {
+                        // 不支持自动修复：把「去哪处理」讲清楚（悬停可见）
+                        return (
+                          <Tooltip title={cap.reason || "该问题需人工处理"}>
+                            <Tag style={{ marginRight: 0, fontSize: 11 }}>需人工</Tag>
+                          </Tooltip>
+                        );
+                      }
+                      return (
+                        <Tooltip
+                          title={cap.mode === "auto"
+                            ? "程序化确定性修复，不调用 AI"
+                            : "定位矛盾位置后调用 AI 做最小必要修改"}
+                        >
+                          <Button
+                            size="small"
+                            type="link"
+                            icon={<ThunderboltOutlined />}
+                            onClick={() => setFixTarget(r)}
+                          >
+                            自动修复
+                          </Button>
+                        </Tooltip>
+                      );
+                    },
+                  },
                 ]}
               />
             </div>
@@ -727,6 +795,32 @@ function ReadinessDashboard({
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="规则目录加载中…" />
         )}
       </Drawer>
+
+      {/* ===== 自动修复弹窗（定位 → AI 改写 → 对比 / 回滚） ===== */}
+      <AutoFixModal
+        schemeId={schemeId}
+        finding={fixTarget}
+        open={!!fixTarget}
+        onClose={() => setFixTarget(null)}
+        onFixed={() => {
+          // 正文已改写 → 宿主页刷新正文/目录 + 本组件强制重算总检
+          // （服务端内容指纹已变，不 force 会命中旧结论缓存）
+          onContentFixed?.();
+          void runOverview(true);
+        }}
+      />
+
+      {/* ===== 批量「一键修复全部阻断项」弹窗（收集 → 暂存预览 → 逐条接受） ===== */}
+      <BatchFixModal
+        schemeId={schemeId}
+        open={batchOpen}
+        onClose={() => setBatchOpen(false)}
+        onFixed={() => {
+          // 正文已改写 → 宿主页刷新正文/目录 + 本组件强制重算总检
+          onContentFixed?.();
+          void runOverview(true);
+        }}
+      />
     </Card>
   );
 }

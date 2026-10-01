@@ -257,11 +257,25 @@ async def build_rerun_plan(scheme_id: str, db) -> dict:
     """重跑计划（DB 封装）：清单扫描 + 可注入语料读取 + 纯函数判定。
 
     可注入语料与生成侧同口径：
-    - 全局事实：``is_resolved=1 AND has_conflict=0``（与 _render_facts_text
-      的过滤口径一致——被过滤的事实不参与生成，也不算"已补齐"）；
+    - 全局事实：复用 ``facts_extractor.get_facts_inject_where()``（唯一出口，
+      四条件 fail-closed：has_conflict=0 AND is_resolved=1 AND is_simulated=0
+      AND is_stale=0）——与 _render_facts_text / build_injectable_facts_query
+      逐字同源（被过滤的事实不参与生成，也不算"已补齐"）；
     - 解析提取：``bid_analysis_items.status='success'`` 的成果全文。
     查询失败降级为"无语料"（所有字段不可补齐，只给清单不给重跑建议），
     绝不阻断调用方。
+
+    ✅ BUG 修复（2026-09-30 · 口径分叉 → 假"可重跑"）：旧实现硬编码
+    ``is_resolved=1 AND has_conflict=0``，漏掉 is_simulated=0 / is_stale=0，
+    而本函数 docstring 却宣称"与 _render_facts_text 的过滤口径一致"——
+    **声明与实现不符**。后果：一条 is_stale=1（来源资料已变化，
+    _mark_project_facts_stale 批量置位且**不清 is_resolved**，故
+    resolved=1 且 stale=1 是可达状态）或 is_simulated=1（AI 编造值）的事实在
+    生成侧被正确排除、在本处却被算作"可注入语料" → 字段标 fillable=true →
+    章节标 rerunnable → 前端提示"重跑本节即可消除占位"，而用户重跑后占位
+    **原样还在**（语料里本就没有它）。方向恰好是"让用户白跑一遍"。
+    与 §4.11.2「JSON 失败哨兵被当成已完成 → 三重假绿」同源。
+    修法：不再本地硬编码，改为调用唯一出口，从结构上消除分叉可能。
     """
     try:
         cur = await db.execute(
@@ -275,10 +289,18 @@ async def build_rerun_plan(scheme_id: str, db) -> dict:
 
     report = build_placeholder_report(sections)
     corpus: list[str] = []
+    # 门控走唯一出口（fail-closed），禁止本地硬编码，避免与生成侧分叉
+    try:
+        from app.services.facts_extractor import get_facts_inject_where
+        inject_where = get_facts_inject_where()
+    except Exception:  # pragma: no cover - 兜底仍 fail-closed，绝不 fail-open
+        logger.warning("取全局事实注入门控失败（按保守口径过滤该源）")
+        inject_where = (
+            "has_conflict=0 AND is_resolved=1 AND is_simulated=0 AND is_stale=0")
     try:
         cur = await db.execute(
             "SELECT group_title, title, content FROM global_facts"
-            " WHERE scheme_id=? AND is_resolved=1 AND has_conflict=0",
+            f" WHERE scheme_id=? AND {inject_where}",
             (scheme_id,))
         for r in (await cur.fetchall() or []):
             corpus.append(" ".join(str(r[k] or "") for k in

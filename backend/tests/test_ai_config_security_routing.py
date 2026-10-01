@@ -402,13 +402,52 @@ class TestKnownScenesDrift:
     """
 
     def _used_scenes(self) -> set[str]:
+        """从 app/ 源码中提取**真实**的 `scene="..."` 字面量。
+
+        ✅ 修复（2026-09-26 · 护栏自身缺陷）：旧实现用正则直接扫全文，
+        会把**注释与文档字符串里出现的 `scene="content"`** 当成真实调用点。
+        典型触发：修复「僵尸场景 content」时，我在 provider_factory 的注释里
+        写了 `无任何 scene="content" 调用点`，护栏随即把 content 判为
+        「已使用」→ `test_all_used_scenes_registered` 报「未登记」，
+        形成"注释越详细、护栏越糊涂"的死循环。
+
+        现改为**按行剥离注释**后再匹配：
+        - 去掉 `#` 行注释（含 `#` 之后的全部内容）；
+        - 跳过三引号文档字符串块。
+        真实的 `scene="x"` 一定出现在可执行代码里，不会被这两者吞掉。
+        """
         import re
         from pathlib import Path
         app_dir = Path(__file__).resolve().parents[1] / "app"
         pat = re.compile(r'scene\s*=\s*["\']([A-Za-z0-9_\-]+)["\']')
+        # 用 chr 拼装三引号，避免本函数的 docstring 自身被提前闭合
+        dq3 = chr(34) * 3
+        sq3 = chr(39) * 3
+        doc_markers = (dq3, sq3)
         used: set[str] = set()
         for p in app_dir.rglob("*.py"):
-            used |= set(pat.findall(p.read_text(encoding="utf-8", errors="ignore")))
+            in_doc: str | None = None
+            for raw in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw
+                # ① 文档字符串块：整行剥离（同一行内开闭也一并处理）
+                for mk in doc_markers:
+                    if in_doc is None:
+                        if mk in line:
+                            # 同一行既开又闭：取两个标记之间的内容再继续
+                            if line.count(mk) >= 2:
+                                line = line.split(mk)[1].rsplit(mk, 1)[0]
+                            else:
+                                in_doc = mk
+                                line = ""
+                    else:
+                        if mk in line:
+                            in_doc = None
+                        line = ""
+                if in_doc is not None:
+                    continue
+                # ② 行注释：'#' 之后的都是说明文字
+                code = line.split("#", 1)[0]
+                used |= set(pat.findall(code))
         return used
 
     def test_all_used_scenes_registered(self):
@@ -421,10 +460,32 @@ class TestKnownScenesDrift:
         assert not unused, f"KNOWN_SCENES 中存在代码里未使用的 scene：{unused}"
 
     def test_scene_route_whitelist_covers_real_scene(self, db_conn):
-        """真实存在的 scene 必须能配路由（不能因白名单过窄被 400 拒绝）。"""
-        for scene in ("content", "content_draft", "outline_sublevel",
+        """真实存在的 scene 必须能配路由（不能因白名单过窄被 400 拒绝）。
+
+        ✅ 2026-09-26：断言清单移除 "content"。该条目曾以「白名单会校验它
+        确实被引用，故保留」为由留在 KNOWN_SCENES，实际**无任何
+        scene="content" 调用点**（正文只用 content_draft / content_continue /
+        content_shrink）——注释与事实相反，是 AGENTS.md §4.5 禁止的死选项。
+        本用例自身正是它「应当被移除」的反向证据：若仍登记，恰恰能通过，
+        说明这条断言无法区分「真实场景」与「僵尸场景」，
+        真正的护栏是上方两条双向漂移用例（test_all_used_scenes_registered /
+        test_registered_scenes_are_actually_used）。
+        """
+        for scene in ("content_draft", "content_continue", "content_shrink",
+                      "outline_draft", "outline_level1", "outline_sublevel",
                       "chart_fix", "consistency_repair", "facts_extract"):
-            assert scene in pf.KNOWN_SCENES
+            assert scene in pf.KNOWN_SCENES, f"{scene} 应在白名单内"
+
+    def test_zombie_total_dispatch_scenes_removed(self):
+        """反向护栏：总调度型「僵尸场景」不得回到白名单。
+
+        目录侧早已移除 "outline"、正文侧本轮移除 "content"：调用点全部细分
+        打标后，总调度入口只会让用户在「场景模型路由」里配了却不生效。
+        """
+        for zombie in ("outline", "content"):
+            assert zombie not in pf.KNOWN_SCENES, (
+                f"僵尸总调度场景 {zombie!r} 不应登记：无任何 scene={zombie!r} 调用点，"
+                f"配了也不生效")
 
 
 class TestClientIp:

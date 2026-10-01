@@ -66,6 +66,124 @@ export interface PreflightFinding {
   count?: number;
   /** 来源（如 export_check / preflight / ai_compliance …） */
   source?: string;
+  /**
+   * ✅ 自动修复能力（后端 `services/review_autofix.py` 标注）。
+   * `mode`：`auto` = 纯程序化确定性修复（不调 AI）/ `ai` = 定位后调 AI 改写 /
+   * `manual` = 不支持自动修复，此时 `reason` 给出用户可执行的下一步。
+   * 前端**必须**据此决定按钮状态，不得自行按 rule_id 猜测。
+   */
+  autofix?: AutoFixCapability;
+}
+
+/** 自动修复能力声明 */
+export interface AutoFixCapability {
+  mode: "auto" | "ai" | "manual";
+  /** auto / ai 为 true；manual 为 false */
+  fixable: boolean;
+  /** manual 时给用户可执行的替代路径（AI 模式下为空） */
+  reason: string;
+}
+
+/** 矛盾位置（章节 + 行号 + 句子 + 原文上下文） */
+export interface AutoFixTarget {
+  section_id: string;
+  section_title: string;
+  /** 命中的取值 / 术语 / 编号（section 型为空） */
+  value: string;
+  /** 1-based 行号 */
+  line: number;
+  /** ✅ 句子级定位：命中句在段落内的序号（1-based；section 型为 0） */
+  sentence_idx: number;
+  /** 所在段落的句子总数 */
+  sentence_total: number;
+  matched: string;
+  context: string;
+  why: string;
+}
+
+/** 定位预览结果（POST /autofix/plan） */
+export interface AutoFixPlanResult {
+  ok: boolean;
+  fixable: boolean;
+  mode: "auto" | "ai" | "manual";
+  reason: string;
+  finding: PreflightFinding;
+  targets: AutoFixTarget[];
+  max_sections?: number;
+}
+
+/** 单章修复结果 */
+export interface AutoFixItem {
+  section_id: string;
+  section_title: string;
+  status: "repaired" | "failed";
+  targets: AutoFixTarget[];
+  before: string;
+  after: string;
+  problems: string[];
+}
+
+/** 修复执行结果（POST /autofix/apply） */
+export interface AutoFixResult {
+  ok: boolean;
+  status: "repaired" | "failed" | "unsupported" | "not_located";
+  mode: "auto" | "ai" | "manual";
+  rule_id: string;
+  reason?: string;
+  targets: AutoFixTarget[];
+  items: AutoFixItem[];
+  /** 回滚凭据（成功修复时非空） */
+  snapshot_id: string;
+  repair_id?: string;
+  stats?: { repaired: number; failed: number; skipped: number };
+}
+
+/** 批量暂存中的单条结果（POST /autofix/stage 的 items 元素） */
+export interface AutoFixStageItem {
+  rule_id: string;
+  section_id: string;
+  section_title: string;
+  mode: "auto" | "ai" | "manual";
+  status: "repaired" | "failed" | "unsupported" | "not_located";
+  reason?: string;
+  targets: AutoFixTarget[];
+  /** 该问题改写前的章节正文（截断预览） */
+  before: string;
+  /** 该问题改写后的章节正文（链式合并视角；截断预览） */
+  after: string;
+  problems: string[];
+  /** 同章内链式顺序（0-based），供「接受前缀」直接取末条合并结果 */
+  chain_index: number;
+  sentence_idx: number;
+  sentence_total: number;
+}
+
+/** 只读收集结果（POST /autofix/collect） */
+export interface AutoFixCollectResult {
+  scheme_id: string;
+  scope: "all_blocking" | "auto_fixable" | "all";
+  total: number;
+  items: PreflightFinding[];
+  content_fingerprint?: string;
+  stale?: boolean;
+}
+
+/** 批量暂存结果（POST /autofix/stage） */
+export interface AutoFixStageResult {
+  batch_id: string;
+  items: AutoFixStageItem[];
+  stats: { repaired: number; failed: number; skipped: number };
+  status: "pending_confirm" | "empty";
+  reason?: string;
+}
+
+/** 确认结果（POST /autofix/confirm） */
+export interface AutoFixConfirmResult {
+  status: "confirmed" | "rejected";
+  accepted: number;
+  repaired_sections: number;
+  snapshot_id: string;
+  batch_id: string;
 }
 
 /** 维度得分 */

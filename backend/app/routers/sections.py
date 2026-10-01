@@ -14,10 +14,23 @@ from app.routers.review import reset_review_on_content_change  # ✅ G9：正文
 from app.services.ai.json_response import (
     collect_json_response, renumber_outline, strip_outline_numbering,
 )
-from app.services.numbering import renumber_section_outline_ids  # ✅ 编号统一：DB 重排唯一实现
+from app.services.numbering import (
+    normalize_section_content_subheadings,  # ✅ 正文子标题编号落库前规范化（唯一实现）
+    renumber_section_outline_ids,  # ✅ 编号统一：DB 重排唯一实现
+    validate_scheme_numbering_consistency,  # ✅ 编号统一：显式跨校验器
+    repair_scheme_numbering_consistency,  # ✅ 编号统一：显式跨校验器（修复漂移）
+    list_numbering_versions as _list_numbering_versions,  # ✅ 编号版本管理
+    rollback_numbering_version as _rollback_numbering_version,  # ✅ 编号版本管理
+)
 from app.services.ai.provider_factory import chat_with_fallback
 from app.services.ai.prompts._registry import render
-from app.services.outline_utils import normalize_outline
+from app.services.outline_utils import MAX_OUTLINE_DEPTH, normalize_outline
+
+# ✅ 2026-09-30 深度上限文案单一来源：create_section 与 update_section（移动路径）
+# 共用同一条错误文案，避免两处各自硬编码后再次分叉（本仓反复出现的根因模式）。
+_DEPTH_EXCEEDED_MSG = (
+    f"目录最多支持 {MAX_OUTLINE_DEPTH} 级，请在上一级章节内编写正文小节"
+)
 from app.services.content_polish import quality_issues
 from app.services.content_shrink import (
     shrink_content_rounds, SHRINK_MAX_ROUNDS,
@@ -51,13 +64,46 @@ OUTLINE_SAVED_STATUS = "目录已确认"
 async def _build_tree(db, scheme_id: str, include_content: bool = False) -> list:
     # ✅ 性能优化：树构建默认不拉 content 大字段（单章可达数 KB，全方案 MB 级传输浪费）；
     # 仅正文工作台列表需要 content 时传 include_content=True
-    cols = "*" if include_content else (
-        "id, scheme_id, project_id, parent_id, title, description, level, status,"
-        " word_count, word_budget, word_status, outline_json, review_status, sort_order, locked,"
-        # F-CONTENT-STANDARD(2026-09-26): generation standard fields on tree
-        " generation_standard, last_generation_standard")
+    if include_content:
+        cols = "sec.*"
+    else:
+        cols = (
+            "sec.id, sec.scheme_id, sec.project_id, sec.parent_id, sec.title,"
+            "sec.description, sec.level, sec.status, sec.word_count, sec.word_budget,"
+            "sec.word_status, sec.outline_json, sec.review_status, sec.sort_order,"
+            "sec.locked,"
+            "sec.generation_standard, sec.last_generation_standard")
+    # ✅ 2026-09-29：章节「事实变更失效标记」（facts_stale）。
+    # 背景：全局事实变更后，已生成的正文仍是生成当时的事实快照，导出缓存也会被
+    # 清空，但**没有任何信号告知用户「这一章引用的事实已经变了」**—— 用户可能
+    # 带着过时参数交付方案。此前设计文档把它归为「需单立子项」，本轮以最小侵入
+    # 方式落地：**只提示、绝不静默重写**用户已编辑的正文。
+    # 为什么用「方案级单点时间戳 + 读侧派生」而不是给 sections 加布尔列：
+    #   · 写侧只有 1 处（invalidate_export_cache(..., facts_touched=True)），
+    #     而正文写路径有 13 处 —— 若各写一个布尔列，「漏改一处」就会让
+    #     重生后的章节被永久标成过时（本仓反复踩的同类陷阱）；
+    #   · 读侧派生天然自愈：任何一次正文重写都会推进 sections.updated_at，
+    #     标记自动消失，无需任何额外清理代码。
+    # 判定链（顺序即优先级，命中任一分支即判 0「不标记」）：
+    #   1. 章节无正文 → 没有可过时的内容；
+    #   2. 方案无事实变更时间戳 → 旧数据无从判定，不打扰用户（向后兼容）；
+    #   3. 章节 updated_at 无法解析 → 无法比较，按不标记处理（fail-soft）；
+    #   4. 事实变更早于或等于章节写入 → 正文已包含最新事实。
+    # 时间字符串格式并不统一（Python `datetime.now().isoformat()` 用 'T' + 微秒，
+    # SQLite `datetime('now','localtime')` 用空格），故统一交给 SQLite 的
+    # datetime() 归一化，**绝不直接做字符串比较**。
     cur = await db.execute(
-        f"SELECT {cols} FROM sections WHERE scheme_id=? ORDER BY sort_order, created_at", (scheme_id,))
+        f"SELECT {cols},"
+        " CASE WHEN COALESCE(sec.content, '') = '' THEN 0"
+        "      WHEN COALESCE(sch.facts_updated_at, '') = '' THEN 0"
+        "      WHEN datetime(sec.updated_at) IS NULL THEN 0"
+        "      WHEN datetime(sch.facts_updated_at)"
+        "           <= datetime(sec.updated_at) THEN 0"
+        "      ELSE 1 END AS facts_stale"
+        " FROM sections sec"
+        " LEFT JOIN schemes sch ON sch.id = sec.scheme_id"
+        " WHERE sec.scheme_id=?"
+        " ORDER BY sec.sort_order, sec.created_at, sec.id", (scheme_id,))
     rows = [dict(r) for r in await cur.fetchall()]
     nodes = {r["id"]: {**r, "children": []} for r in rows}
     roots = []
@@ -67,11 +113,27 @@ async def _build_tree(db, scheme_id: str, include_content: bool = False) -> list
             nodes[pid]["children"].append(n)
         else:
             roots.append(n)
+
+    # ✅ 确定性排序（2026-09-27）：兄弟章节 sort_order 相同时（拖拽 /reorder 只带
+    #    部分 id、外部脚本直改库、历史脏数据）旧实现只按 sort_order 排 —— 相等项的
+    #    相对顺序取决于 SQL 返回顺序（rowid/执行计划），同一份数据不同次调用可能得到
+    #    不同顺序，进而**编号漂移**（正文提示词里的「当前章节编号」与展示不一致）。
+    #    现统一以 (sort_order, id) 做最终排序：id 是主键、全局唯一，等值组也有全序。
+    #    注意 roots 同样要排 —— 旧实现只排 children，根节点顺序完全依赖 SQL。
+    def _sort_key(n: dict):
+        so = n.get("sort_order")
+        try:
+            so = int(so or 0)
+        except (TypeError, ValueError):
+            so = 0
+        return (so, str(n.get("id") or ""))
+
     def _sort_children(nodes_list):
+        nodes_list.sort(key=_sort_key)
         for n in nodes_list:
             if n["children"]:
-                n["children"].sort(key=lambda x: x.get("sort_order", 0))
                 _sort_children(n["children"])
+
     _sort_children(roots)
     return roots
 
@@ -175,9 +237,11 @@ async def list_sections(scheme_id: str, include_content: bool = True, db=Depends
     tree = await _build_tree(db, scheme_id, include_content=include_content)
     # ✅ 返回 id / project_id（前端全局事实模块按 project_id 拉取资料文档列表）
     # ✅ 2026-09-26：generation_standard 随方案快照下发（章节「沿用方案（X）」回显）
+    # ✅ 2026-09-29：随方案快照下发 facts_updated_at —— 前端据此显示
+    # 「事实已变更，共 N 章正文可能过时」的方案级提示（N 由树内 facts_stale 汇总）。
     cur = await db.execute(
-        "SELECT id, project_id, word_budget, word_count, status, generation_standard"
-        " FROM schemes WHERE id=?",
+        "SELECT id, project_id, word_budget, word_count, status, generation_standard,"
+        " facts_updated_at FROM schemes WHERE id=?",
         (scheme_id,))
     s = await cur.fetchone()
     return {"tree": tree, "scheme": dict(s) if s else None}
@@ -371,10 +435,26 @@ async def create_section(scheme_id: str, data: SectionCreate, db=Depends(get_db)
         data.title = strip_outline_numbering(data.title)
     level = data.level
     if data.parent_id:
-        p = await db.execute("SELECT level FROM sections WHERE id=?", (data.parent_id,))
+        # ✅ BUG 修复（2026-09-29 · parent_id 零校验）：旧实现只查 level、
+        #    不校验存在性与方案归属，直接把传入的 parent_id 原样入库。后果：
+        #    客户端/脚本传入任意 UUID（或其它方案的 section_id）时，
+        #    sections.parent_id 出现悬挂引用 —— _build_tree 把它当孤儿挂到根
+        #    （用户看到章节「凭空移到顶层」），且跨方案篡改无任何拦截；
+        #    而 update_section 早有「存在 + 同方案」强校验，两条路径口径分叉。
+        #    现补齐同口径校验（创建时 sid 尚未生成，无「自引用」可能，故无环检测）。
+        p = await db.execute(
+            "SELECT id, level FROM sections WHERE id=? AND scheme_id=?",
+            (data.parent_id, scheme_id))
         pr = await p.fetchone()
-        if pr:
-            level = pr[0] + 1
+        if not pr:
+            raise HTTPException(400, "父节点不存在或不属于本方案")
+        level = pr["level"] + 1
+        # ✅ BUG 修复（2026-09-29 · 深度上限分叉）：MAX_OUTLINE_DEPTH 是目录深度的
+        #    唯一事实源，save-outline / normalize_outline 都按它裁剪，唯独手工新增
+        #    章节路径无上限 —— 在三级章节下新增会落库四级，而前端目录树按三级
+        #    渲染，该章节已入库却在界面上不可见（数据与展示分叉）。
+        if level > MAX_OUTLINE_DEPTH:
+            raise HTTPException(400, _DEPTH_EXCEEDED_MSG)
     sort_order = data.sort_order
     if sort_order == 0:
         # ✅ BUG 修复（2026-09-22）：SectionCreate.sort_order 默认 0，旧实现原样入库 ——
@@ -397,6 +477,9 @@ async def create_section(scheme_id: str, data: SectionCreate, db=Depends(get_db)
     #    （/reorder、save-outline、上传落库均写编号，唯独此路径漏写；
     #    统一复用 renumber_sections_after_reorder 回写，位置即编号唯一事实源。）
     await renumber_sections_after_reorder(db, scheme_id)
+    # ✅ 编号统一（2026-09-26 · D4）：新增章节使后续章节编号顺移，按新编号统一
+    #    重规范化所有含正文章节的子标题（落库正文与导出成稿同源，避免旧号滞留）。
+    await _renormalize_all_section_contents(db, scheme_id)
     # ✅ 新增章节同样是结构变更（后续章节编号顺移）→ 作废扫描缓存
     await invalidate_consistency_scan_cache(db, scheme_id)
     await db.commit()
@@ -446,9 +529,14 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
             descendants: set[str] = set()
             pending_ids = [section_id]
             while pending_ids:
+                # ✅ 2026-09-30：补 scheme_id 限定。旧实现 `WHERE parent_id=?` 不带
+                #    方案过滤，一旦库内存在跨方案 parent_id 脏数据（历史悬挂引用），
+                #    遍历会越界进入其它方案 —— 既可能误判成环（把无关节点当后代
+                #    拦下合法移动），也是跨方案读取面。父节点校验（上方）已限定同
+                #    方案，此处应同口径。
                 cur = await db.execute(
-                    "SELECT id FROM sections WHERE parent_id=?",
-                    (pending_ids.pop(),))
+                    "SELECT id FROM sections WHERE parent_id=? AND scheme_id=?",
+                    (pending_ids.pop(), scheme_id))
                 for r in await cur.fetchall():
                     if r["id"] not in descendants:
                         descendants.add(r["id"])
@@ -456,8 +544,25 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
             if new_parent in descendants:
                 raise HTTPException(400, "不能把章节移动到它自己的子章节下（会形成循环引用）")
 
+            # ✅ 2026-09-30 P0 修复：移动路径补深度上限校验。MAX_OUTLINE_DEPTH=3
+            #    是目录深度的唯一事实源，create_section / save-outline / reorganize /
+            #    _outline_skeleton 四条路径都按它裁剪或校验，唯独本路径没有 —— 把一级
+            #    章节移动到三级章节下会静默成功，随后 renumber_sections_after_reorder
+            #    把 sections.level 写成 4，而前端目录树按三级渲染：该章节已入库却在
+            #    界面上彻底消失（用户看不到也无法恢复），是比丢失更难发现的
+            #    数据/展示分叉。校验必须放在「写入 + commit + renumber」之前，否则
+            #    结构变更事务已提交，无法回滚。
+            cur = await db.execute(
+                "SELECT level FROM sections WHERE id=? AND scheme_id=?",
+                (new_parent, scheme_id))
+            row = await cur.fetchone()
+            if row and row["level"] + 1 > MAX_OUTLINE_DEPTH:
+                raise HTTPException(400, _DEPTH_EXCEEDED_MSG)
+
     # ✅ G9：本次保存是否使审核结论失效（未传 content 时为 False）
     _review_reset = False
+    # 正文子标题编号规范化待办标记：必须在**结构重排之后**执行（见下方说明）
+    _content_renorm_pending = False
     if "content" in fields:
         # ✅ 竞态守卫：后台正文生成任务运行中，其 _persist_section 为无条件 UPDATE，
         # 用户此刻保存会与生成结果互相覆盖（丢失更新）。返回 409 提示等待任务完成。
@@ -525,6 +630,14 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
         except Exception as e:
             logger.warning("章节 %s 手动保存图表同步失败（保留原文）: %s",
                            section_id[:8], e)
+        # ✅ 统一编号命名空间（2026-09-26 · 补齐死代码）：正文落库前把 Markdown
+        #    子标题编号规范化为导出口径（与 export.write_section 同一套算法），使
+        #    「前端预览 = 落库正文 = 导出成稿」三处同源。实现收口到
+        #    numbering.normalize_section_content_subheadings（唯一实现，内含
+        #    content_subheading_renumber 开关 + 降级兜底），禁止再内联样板。
+        #    本节存在 DB 子章节时降级为节内 body 命名空间（1）/ a、），
+        #    彻底隔离 DB 子章节与正文子标题的编号冲突。
+        _content_renorm_pending = True
     if fields:
         fields["updated_at"] = datetime.now().isoformat()
         sets = ", ".join(f"{k}=?" for k in fields)
@@ -539,11 +652,45 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
     _struct_changed = bool({"parent_id", "level", "sort_order"} & set(fields.keys()))
     if _struct_changed:
         await renumber_sections_after_reorder(db, scheme_id)
+        # ✅ 编号统一（2026-09-26 · D4）：结构变更（移动/层级/排序）使本节及兄弟章节
+        #    编号整体顺移，按新编号统一重规范化所有含正文章节的子标题（落库正文与导出
+        #    成稿同源）。单章的规范化由下方 _content_renorm_pending 分支覆盖（无结构变更时）。
+        await _renormalize_all_section_contents(db, scheme_id)
+    # ✅ BUG 修复（2026-09-26 · 编号规范化时序）：正文子标题编号规范化必须在
+    #    **结构重排之后**执行。旧实现把它放在 fields UPDATE 之前 —— 同一次请求里
+    #    既改 parent_id 又改正文时（如「把第 3 章挂到第 1 章下并补充正文」），
+    #    规范化读到的是**移动前**的 outline_json.id，随后 renumber_sections_after_reorder
+    #    又把编号改成新位置 → 正文子标题永远停留在旧编号，与目录/导出永久错位。
+    #    现移到重排之后，按最终编号规范化。
+    #    ⚠️ 结构变更时该规范化已由 _renormalize_all_section_contents 统一处理（覆盖本节
+    #    及所有兄弟章节），此处仅负责「纯改正文、无结构变更」的情况，避免重复写库。
+    if _content_renorm_pending and not _struct_changed:
+        _new_content, _changed = await normalize_section_content_subheadings(
+            db, scheme_id, section_id, fields.get("content") or "")
+        if _changed:
+            _wb = fields.get("word_budget")
+            if not _wb:
+                _c = await db.execute(
+                    "SELECT word_budget FROM sections WHERE id=?", (section_id,))
+                _r = await _c.fetchone()
+                _wb = (_r[0] if _r else 1500) or 1500
+            fields["content"] = _new_content
+            fields["word_count"] = text_word_count(_new_content)
+            fields["word_status"] = word_status_for(fields["word_count"], _wb)
+            fields["updated_at"] = datetime.now().isoformat()
+            await db.execute(
+                "UPDATE sections SET content=?, word_count=?, word_status=?,"
+                " updated_at=? WHERE id=?",
+                (_new_content, fields["word_count"], fields["word_status"],
+                 fields["updated_at"], section_id))
     # ✅ 结构变更或改名 → 作废一致性扫描缓存（扫描行含章节定位/引用类冲突，
     #    正文指纹感知不到标题与编号变化；仅改正文时 content_hash 已自动失效，无需多清）
+    #    ⚠️ 编号规范化虽改写正文，但改的仍是 content 字段本身 → content_hash 自动
+    #    失效旧行即可。此处**不可**把 _content_renorm_pending 计入条件：那会让
+    #    「只改正文且无子标题」的普通保存也整方案清空（过度失效，与本段意图相反）。
     if _struct_changed or "title" in fields:
         await invalidate_consistency_scan_cache(db, scheme_id)
-        await db.commit()
+    await db.commit()
     # ✅ G9/G10：前端据此提示「审核结论已失效」并刷新审核工作台
     # （此前 update 只回 {"ok": true}，连 word_count 都不带，
     #  前端 `data.word_count` 恒为 undefined → 成功提示里显示「已保存，当前 0 字」）
@@ -568,12 +715,22 @@ async def delete_section(scheme_id: str, section_id: str, db=Depends(get_db)):
     pending = [section_id]
     while pending:
         pid = pending.pop(0)
-        cur = await db.execute("SELECT id FROM sections WHERE parent_id=?", (pid,))
+        # ✅ 2026-09-30：补 scheme_id 限定（P1-4）。旧实现不带方案过滤，库内若存在
+        # 跨方案 parent_id 脏数据（历史悬挂引用 / 外部脚本直写 / 库复制后 id 碰撞），
+        # 会把其它方案的章节一并收进删除集合 —— 即便 DELETE 语句本身带 scheme_id
+        # 限定（章节行不受影响），越界 id 仍会流到下方 chart_predictions 清理
+        # （该语句无方案限定）→ 误删其它方案章节的图表登记。与同文件
+        # update_section 环检测同口径。
+        cur = await db.execute(
+            "SELECT id FROM sections WHERE parent_id=? AND scheme_id=?",
+            (pid, scheme_id))
         children = [r[0] for r in await cur.fetchall()]
         all_ids.extend(children)
         pending.extend(children)
     placeholders = ",".join("?" * len(all_ids))
-    await db.execute(f"DELETE FROM sections WHERE id IN ({placeholders})", all_ids)
+    await db.execute(
+        f"DELETE FROM sections WHERE id IN ({placeholders}) AND scheme_id=?",
+        all_ids + [scheme_id])
     # ✅ 修复：同步清理 chart_predictions 残留（否则导出 fallback 会挂上已删章节旧图）
     await db.execute(f"DELETE FROM chart_predictions WHERE section_id IN ({placeholders})", all_ids)
     # ✅ BUG 修复（2026-09-22 · 删除后编号断号）：旧实现删除后不重排剩余章节的
@@ -581,6 +738,9 @@ async def delete_section(scheme_id: str, section_id: str, db=Depends(get_db)):
     #    正文提示词「当前章节编号」错乱，后续新增/拖拽才被动纠正。
     #    与 /reorder 同口径：删除即按新树位置统一重排（空树时自然无操作）。
     await renumber_sections_after_reorder(db, scheme_id)
+    # ✅ 编号统一（2026-09-26 · D4）：删章后剩余章节编号顺移，按新编号统一重规范化
+    #    所有含正文章节的子标题（落库正文与导出成稿同源，避免旧号滞留）。
+    await _renormalize_all_section_contents(db, scheme_id)
     # ✅ 删章后作废扫描缓存：剩余章节编号顺移 + 被删章节的孤儿缓存行一并清理
     await invalidate_consistency_scan_cache(db, scheme_id)
     await db.commit()
@@ -653,7 +813,14 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
         for node in nodes:
             if not isinstance(node, dict):
                 continue
-            node["__original_id"] = node.get("id", "")
+            # ✅ BUG 修复（2026-09-26）：已有 __original_id 时**不得覆盖**。
+            #    旧实现无条件写 `node["__original_id"] = node.get("id", "")`，
+            #    会把 /adjust-outline 回传的真实 DB 主键（前端已透传）冲掉、
+            #    退化成用「已被 renumber 覆写的展示编号」当主键 → 匹配不到任何
+            #    已有 section → is_new 全为 True → 用户确认调整即整表重建，
+            #    **已生成正文全部丢失**。仅在缺失时才用 id 兜底。
+            if not node.get("__original_id"):
+                node["__original_id"] = node.get("id", "")
             children = node.get("children")
             if isinstance(children, list) and children:
                 _preserve_original_ids(children)
@@ -675,6 +842,11 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
         row = await cur.fetchone()
         if not row:
             raise HTTPException(404, "方案不存在")
+        # ✅ 清空同样是「正文批量丢失」操作，量化后回传（与非空分支同口径）
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM sections WHERE scheme_id=?"
+            " AND COALESCE(content,'')!=''", (scheme_id,))
+        _cleared = (await cur.fetchone())[0]
         await db.execute("DELETE FROM sections WHERE scheme_id=?", (scheme_id,))
         await db.execute("DELETE FROM chart_predictions WHERE scheme_id=?", (scheme_id,))
         # ✅ BUG 修复（2026-09-21）：清空目录后 status 仍写成「目录已确认」。
@@ -688,8 +860,18 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
         await db.execute(
             "UPDATE schemes SET outline_source='', status=?, updated_at=? WHERE id=?",
             (OUTLINE_EMPTY_STATUS, datetime.now().isoformat(), scheme_id))
+        # ✅ BUG 修复（2026-09-29 · 缓存未失效）：清空目录同样删掉了章节，
+        #    非空分支末尾有 invalidate_consistency_scan_cache，唯独此分支漏调 ——
+        #    被删章节的扫描行成为孤儿残留，下次一致性扫描/预检可能命中脏结果，
+        #    把早已不存在的章节报成「仍有冲突」。与其它结构变更入口同口径补齐。
+        await invalidate_consistency_scan_cache(db, scheme_id)
         await db.commit()
-        return {"ok": True, "count": 0, "tree": []}
+        _empty_result: dict = {"ok": True, "count": 0, "tree": []}
+        if _cleared:
+            _empty_result["cleared_content_sections"] = _cleared
+            logger.warning("方案 %s 清空全部目录：%d 个章节的已生成正文被清除",
+                           scheme_id[:8], _cleared)
+        return _empty_result
 
     cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
     row = await cur.fetchone()
@@ -703,6 +885,19 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
         " FROM sections WHERE scheme_id=?", (scheme_id,))
     existing_rows = [dict(r) for r in await cur.fetchall()]
     existing_by_id = {r["id"]: r for r in existing_rows}
+    # ✅ 正文可丢性台账（2026-09-26）：整表重建前记录「哪些章节已有正文」。
+    #    旧实现保存后只回 {ok,count,tree}，用户点「确认并保存目录」把 AI 新目录
+    #    落库时，未匹配上的旧章节被级联 DELETE → 正文静默消失、无任何提示
+    #    （AI 生成链路回传的节点 id 是展示编号 "1"/"1.1"，必然匹配不到 DB 主键）。
+    #    现于返回值与日志中如实回传被清除正文的章节数，前端据此明示。
+    content_ids: set[str] = set()
+    try:
+        cur = await db.execute(
+            "SELECT id FROM sections WHERE scheme_id=? AND COALESCE(content,'')!=''",
+            (scheme_id,))
+        content_ids = {r[0] for r in await cur.fetchall()}
+    except Exception as e:  # noqa: BLE001 — 纯统计，失败不影响保存
+        logger.warning("统计已有正文章节失败（不影响保存）: %s", e)
 
     final_section_ids: set[str] = set()
     node_counter = {"n": 0}
@@ -827,9 +1022,28 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
         await db.execute(
             "UPDATE sections SET locked=1 WHERE scheme_id=? AND level=1", (scheme_id,))
         roots_locked = True
+    # ✅ 编号统一（2026-09-26 · D4 口径补齐）：整表重建会改变保留章节的编号
+    #    （在中间插入一章 → 后续章节整体顺移）。create / delete / reorder / PATCH
+    #    四个入口都调了 _renormalize_all_section_contents，唯独 save-outline 与
+    #    目录库套用（apply-and-save 复用本函数）没有 —— 落库正文的子标题编号因此
+    #    停留在旧号，只有导出时才重算，导致「前端预览 ≠ 落库正文」且
+    #    /numbering-consistency 长期报漂移。此处补齐，同事务提交。
+    await _renormalize_all_section_contents(db, scheme_id)
     # ✅ 整表重建（save-outline / 目录库套用共用此入口）→ 作废扫描缓存
     await invalidate_consistency_scan_cache(db, scheme_id)
     await db.commit()
+    # ✅ 正文丢失量化（见上方 content_ids 说明）：以提交后的实际留存内容为准，
+    #    不用「预期集合差集」估算 —— 级联删除/新增/复用同一条形都会影响结果。
+    cleared_content = 0
+    if content_ids:
+        try:
+            cur = await db.execute(
+                "SELECT id FROM sections WHERE scheme_id=?"
+                " AND COALESCE(content,'')!=''", (scheme_id,))
+            kept = {r[0] for r in await cur.fetchall()}
+            cleared_content = len(content_ids - kept)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("统计被清除正文的章节数失败（忽略）: %s", e)
     tree = await _build_tree(db, scheme_id)
     def _strip_internal_fields(nodes: list):
         for n in nodes:
@@ -840,6 +1054,12 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
     result: dict = {"ok": True, "count": node_counter["n"], "tree": tree}
     if roots_locked:
         result["roots_locked"] = True
+    if cleared_content:
+        # 前端据此明示「本次保存清除了 N 个章节的已生成正文」，不再静默丢失
+        result["cleared_content_sections"] = cleared_content
+        logger.warning(
+            "方案 %s 目录整表重建：未匹配到旧章节，%d 个章节的已生成正文被清除",
+            scheme_id[:8], cleared_content)
     return result
 
 
@@ -1039,6 +1259,120 @@ async def renumber_sections_after_reorder(db, scheme_id: str) -> None:
             [(*u, scheme_id) for u in oj_updates])
 
 
+async def _renormalize_all_section_contents(db, scheme_id: str) -> None:
+    """结构变更（增/删/重排/移动）后，按重排后的新编号统一重规范化所有含正文章节
+    的子标题编号，保证「落库正文 = 导出成稿」同源（修复 D4：重排后仅回写 outline_json，
+    已落库正文的子标题仍用旧号，仅导出时重算，导致预览/校验失真）。
+
+    - 复用 services.numbering.normalize_section_content_subheadings（唯一实现，含
+      content_subheading_renumber 开关 + 降级兜底），逐章按新 outline_json 重写子标题；
+    - ✅ 性能（2026-09-27 · 消除 N+1）：旧实现逐章调用规范化，而后者每次要查两次库
+      （读 outline_json/level/title + COUNT 子章节）。200 章方案 = 401 次 execute，
+      且该函数在 **5 个结构变更入口**（create/update/delete/reorder/save-outline）都会
+      跑一次，拖拽排序这类高频操作实测卡顿数百毫秒。现复用编号模块已有的
+      `load_scheme_section_index`（2 条查询压成一次预取，与
+      validate_scheme_numbering_consistency 同一套优化），整轮降为 3 次查询；
+      预取失败时传 index=None 回退逐章查询，**行为与旧版完全一致**（fail-soft）；
+    - 单章失败仅告警、绝不阻断事务（编号规范化代价远低于正文丢失）；
+    - 在 renumber 之后、commit 之前调用，复用同一事务。
+    """
+    try:
+        from app.config import settings
+        if not settings.content_subheading_renumber:
+            return
+    except Exception:
+        pass
+    try:
+        from app.services.numbering import (
+            load_scheme_section_index, normalize_section_content_subheadings)
+        cur = await db.execute(
+            "SELECT id, content FROM sections "
+            "WHERE scheme_id=? AND COALESCE(content,'')!=''",
+            (scheme_id,))
+        rows = await cur.fetchall()
+        # ✅ 编号元数据一次性预取（必须在 renumber 之后读，与本函数调用时序一致）
+        index = await load_scheme_section_index(db, scheme_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("结构重排后批量重规范化：读取章节失败（跳过）: %s", e)
+        return
+    # ✅ 性能（2026-09-27 · 写侧同样批量）：逐章 `normalize_...` 的**读**已被预取消掉，
+    #    但**写**仍是每章一条 UPDATE → 200 章 = 200 次 execute（拖拽排序实测卡顿主因）。
+    #    现收集后 executemany 一次写完；executemany 失败则回退逐条写（保 fail-soft）。
+    updates: list[tuple] = []
+    for r in rows:
+        sec_id = r["id"]
+        content = r["content"] or ""
+        if not content.strip():
+            continue
+        try:
+            new_content, changed = await normalize_section_content_subheadings(
+                db, scheme_id, sec_id, content, index=index)
+            if changed:
+                updates.append(
+                    (new_content, text_word_count(new_content), sec_id, scheme_id))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("章节 %s 结构重排后子标题重规范化失败（保留原正文）: %s",
+                           sec_id[:8], e)
+    if not updates:
+        return
+    _SQL = ("UPDATE sections SET content=?, word_count=? "
+            "WHERE id=? AND scheme_id=?")
+    try:
+        await db.executemany(_SQL, updates)
+    except Exception as e:  # noqa: BLE001 — 批量失败必须回退逐条，不丢已算好的改写
+        logger.warning("结构重排后批量重规范化：批量写库失败，回退逐条（%s）", e)
+        for upd in updates:
+            try:
+                await db.execute(_SQL, upd)
+            except Exception as e2:  # noqa: BLE001
+                logger.warning("章节 %s 重规范化写库失败（保留原正文）: %s",
+                               str(upd[2])[:8], e2)
+
+
+@router.get("/numbering-consistency")
+async def get_numbering_consistency(scheme_id: str, db=Depends(get_db)):
+    """显式跨校验器：返回方案内所有含正文章节的编号一致性报告。
+
+    用于「生成后校验目录与正文编号一致 / 导出前校验正文与导出编号一致」的手动或
+    CI 触发入口；落库正文子标题编号与当前 outline 不一致（D4 类漂移）的章节会被列出。
+    """
+    return await validate_scheme_numbering_consistency(db, scheme_id)
+
+
+@router.post("/numbering-consistency/repair")
+async def repair_numbering_consistency(scheme_id: str, db=Depends(get_db)):
+    """显式跨校验器：将落库正文子标题编号按当前 outline 重新规范化（修复 D4 类漂移）。
+
+    ✅ 编号版本管理：修复前自动建 numbering_repair 快照，返回值含 snapshot_id，
+    可经 POST /numbering-consistency/rollback/{snapshot_id} 一键回滚。
+    """
+    return await repair_scheme_numbering_consistency(db, scheme_id)
+
+
+@router.get("/numbering-consistency/versions")
+async def list_numbering_versions(scheme_id: str, limit: int = 20,
+                                  db=Depends(get_db)):
+    """编号版本历史：列出 numbering_repair / numbering_rollback 快照（新→旧）。"""
+    return await _list_numbering_versions(db, scheme_id, limit)
+
+
+@router.post("/numbering-consistency/rollback/{snapshot_id}")
+async def rollback_numbering_version(scheme_id: str, snapshot_id: str,
+                                     db=Depends(get_db)):
+    """编号版本一键回滚：恢复指定快照涉及章节的修复前正文（回滚本身可撤销）。
+
+    安全约束：快照必须存在（404）、属于当前方案（400）、type 为 numbering_*
+    （400）——一致性修复快照走 /consistency/rollback，互不串用。
+    """
+    try:
+        return await _rollback_numbering_version(db, scheme_id, snapshot_id)
+    except ValueError as e:
+        msg = str(e)
+        if "不存在" in msg:
+            raise HTTPException(404, msg)
+        raise HTTPException(400, msg)
+
+
 @router.post("/reorder")
 async def reorder_sections(scheme_id: str, body: dict, db=Depends(get_db)):
     """拖拽排序后统一重排 sort_order 与编号"""
@@ -1065,6 +1399,9 @@ async def reorder_sections(scheme_id: str, body: dict, db=Depends(get_db)):
     #    「当前章节编号」，导致拖拽后章节编号错乱（原第 3 章被当成第 1 章），
     #    正文里套错章节号。现拖拽后按新顺序统一重排编号并回写 outline_json.id / level。
     await renumber_sections_after_reorder(db, scheme_id)
+    # ✅ 编号统一（2026-09-26 · D4）：拖拽重排后按新编号统一重规范化所有含正文章节
+    #    的子标题（落库正文与导出成稿同源，避免重排后旧号滞留）。
+    await _renormalize_all_section_contents(db, scheme_id)
     # ✅ 拖拽后作废扫描缓存（缓存键不含结构指纹，旧扫描行仍会命中）
     await invalidate_consistency_scan_cache(db, scheme_id)
     await db.commit()

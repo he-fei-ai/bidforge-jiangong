@@ -17,9 +17,19 @@ import uuid
 
 from app.services.ai.image_engine import validate_mermaid, repair_mermaid
 from app.services.chart_payload import build_chart_envelope
+# ✅ 2026-09-27（T-2）：围栏工具已下沉到 services.content_blocks，
+#    此处转出以保持本模块命名空间（内部上百处引用 + 既有测试 import 不变）。
+#    连同下方两个常量一起**从唯一实现转发**，杜绝"下沉后残留第二份副本"的分叉。
+from app.services.content_blocks import (  # noqa: E402
+    parse_fence_line,
+    read_fenced_block,
+    MAX_INLINE_CODE_BLOCK_LINES as _CONTENT_BLOCKS_MAX_INLINE_CODE_BLOCK_LINES,
+    INLINE_CHART_FENCE_LANGS as _CONTENT_BLOCKS_INLINE_CHART_FENCE_LANGS,
+)
 from app.services.chart_validators import (
     MERMAID_KEYWORD_TO_CHART_TYPE,
     detect_mermaid_chart_type,
+    infer_chart_type_from_payload,
     normalize_architecture_tree,
     normalize_flowchart_data,
     validate_architecture_tree,
@@ -90,10 +100,17 @@ _CHART_SCHEME_TYPE_LIMITS = {"ai_image": 6}
 #    单位与阈值都不同：一份 500 行 / 约 3000 字符的超长围栏会被**登记侧**判为
 #    "未闭合 → 跳过登记"，却在**导出侧**正常解析并渲染成图 —— chart_predictions 里
 #    查不到它，导出预检与图表清单也统计不到，用户既无法定位也无法修复（幽灵图）。
-#    现提为模块级唯一常量并导出给 export.py，两侧必然同口径。
-MAX_INLINE_CODE_BLOCK_LINES = 500
+#    ✅ 2026-09-27（T-2 下沉后的收口）：真正消费该阈值的是
+#    `content_blocks.read_fenced_block` 的默认参数 `max_lines`，而本模块的
+#    `MAX_INLINE_CODE_BLOCK_LINES = 500` 是**下沉时残留的第二份副本** —— 注释声称
+#    "唯一常量"，实际存在两个可独立修改的来源，任一侧被改都会让登记/导出/改写
+#    三侧再次分叉（正是本行注释要杜绝的那个 BUG）。现改为**从 content_blocks 转发**，
+#    保持本模块命名空间（既有测试与上百处引用照常 import 不变），
+#    同时保证"改一处即三侧同生效"。
+MAX_INLINE_CODE_BLOCK_LINES = _CONTENT_BLOCKS_MAX_INLINE_CODE_BLOCK_LINES
 # 所有可能被"AI 截断 → 围栏未闭合"的图表家族围栏（登记侧 + 导出侧共用）
-INLINE_CHART_FENCE_LANGS = ("mermaid", "chart-json", "ai_image")
+# ✅ 同样转发自 content_blocks，消除第二份副本。
+INLINE_CHART_FENCE_LANGS = _CONTENT_BLOCKS_INLINE_CHART_FENCE_LANGS
 
 # 围栏内行尾出现中文句读 = 该"代码块"实际混入了正文段落（未闭合块吞正文的特征）。
 # 图表代码行（Mermaid 语句 / JSON）不会以句读收尾；与导出侧
@@ -106,41 +123,6 @@ _CJK_TAIL_RE = re.compile(r"[，。；：！？…]\s*$")
 _FENCE_LINE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})([^`~\n]*)$")
 
 
-def parse_fence_line(line: str) -> tuple[str, int, str] | None:
-    """解析一行是否为代码围栏。
-
-    返回 ``(围栏字符, 围栏长度, 语言标签)``；非围栏行返回 None。
-
-    ✅ BUG 修复（2026-09-24 · P0 幽灵图 + Mermaid 源码泄漏进成稿）：
-    登记/改写/导出三侧此前一律用 ``stripped[3:]`` 取语言标签。对 **4 个及以上
-    反引号**开头的围栏（````mermaid），第 4 个反引号会被算进标签，得到
-    ``lang="`mermaid"``：
-
-      · 登记侧 lang 既不是 "mermaid" 也不是 "chart-json"/"ai_image" → 该块
-        **从不登记**进 chart_predictions（图表清单 / 导出预检 / AI 修复都查不到，
-        即反复出现的"幽灵图"）；
-      · 改写侧同样匹配不到 → 每章≤1、全方案同类型上限、"校验失败删块"对该类块
-        全部失效（只要把围栏多写一个反引号就能绕过全部程序级配图上限）；
-      · 导出侧 lang 不匹配 → 落到通用 code 分支，把 **Mermaid/JSON 源码原样印进
-        交付 DOCX**（而不是渲染成图）。
-
-    同时围栏长度必须原样返回：CommonMark 规定闭围栏长度不小于开围栏，
-    改写代码块时若把开围栏统一写回 3 个反引号，4 反引号围栏会被降级 →
-    正文出现新的未闭合围栏、其后正文被整段吞进代码块。
-
-    语义上有意**比 CommonMark 宽松**：闭围栏只看同种字符、不要求长度 ≥ 开围栏、
-    也不排除带标签（见 read_fenced_block）。原因：AI 输出高频出现
-    ``4 反引号开 + 3 反引号闭`` 的错配，严格判未闭合会让整块图表被丢弃；
-    而 content_utils.find_unclosed_fences 的严格实现只用于"文档末尾悬着半块围栏"
-    的落库前自动补齐，两者用途不同、互不冲突。
-    """
-    m = _FENCE_LINE_RE.match(line)
-    if not m:
-        return None
-    marker = m.group(1)
-    return marker[0], len(marker), m.group(2).strip()
-
-
 def is_fence_line(line: str) -> bool:
     """该行是否为代码围栏行（≥3 个反引号或波浪号，最多 3 个前导空白）。"""
     return parse_fence_line(line) is not None
@@ -151,66 +133,6 @@ def is_chart_fence_lang(lang: str) -> bool:
     return lang.strip().lower() in INLINE_CHART_FENCE_LANGS
 
 
-def read_fenced_block(lines: list[str], body_start: int,
-                      max_lines: int = MAX_INLINE_CODE_BLOCK_LINES,
-                      open_char: str = "`", open_len: int = 3,
-                      ) -> tuple[list[str], str, int]:
-    """从开围栏行的下一行 ``body_start`` 起读取一个代码围栏块 —— 图表三侧共用唯一扫描器。
-
-    ✅ 根因修复（2026-09-23，超长闭合围栏幽灵图）：登记侧 `_scan_inline_charts` 在
-    2026-09-22 引入了"超长但闭合"的有界前视恢复，而导出侧 `export._parse_content_blocks`
-    与改写侧 `_rewrite_code_block` 未同步该恢复 —— 一份 500<行数≤1000 且首尾围栏齐全的
-    合法图表块会被登记侧提取入库、却被导出侧判为"未闭合"跳过 → 出现在图表清单/预览、
-    却在导出 DOCX 里凭空消失（正是本模块注释里反复强调要杜绝的"幽灵图/三侧口径分叉"）。
-    现把围栏读取的**全部判定逻辑**收敛到本函数，登记/改写/导出三侧共用同一实现，
-    从结构上杜绝再次分叉。
-
-    返回 ``(code_lines, state, next_index)``，``state`` 取值：
-      - ``"closed"``    ：常规闭合（命中结束围栏）；``next_index`` 指向结束围栏的下一行。
-      - ``"recovered"`` ：超上限但闭合 —— 结束围栏位于再 ``max_lines`` 行之内、且块内未
-                          混入中文句读正文行（有界前视恢复），按合法块交出；
-                          ``next_index`` 指向恢复到的结束围栏的下一行。
-      - ``"eof"``       ：到达正文末尾仍未见结束围栏（把剩余行作为块内容交出）。
-      - ``"truncated"`` ：超上限且前视窗口内无干净闭合 —— 判为未闭合；
-                          ``code_lines`` 为已消费的截断内容，``next_index`` 停在截断点，
-                          由调用方决定如何处理其后正文（导出侧据此还原段落）。
-    """
-    code_lines: list[str] = []
-    i = body_start
-    while i < len(lines):
-        pf = parse_fence_line(lines[i])
-        if pf is not None and pf[0] == open_char:
-            # 命中闭合围栏（同种字符；长度判据见 parse_fence_line 的宽松语义说明）
-            break
-        code_lines.append(lines[i])
-        i += 1
-        if len(code_lines) > max_lines:
-            # 命中行数上限：做**有界前视**（再扫最多 max_lines 行）寻找结束围栏。
-            _j = i
-            _extra = 0
-            while (_j < len(lines)
-                   and not (parse_fence_line(lines[_j]) is not None
-                            and parse_fence_line(lines[_j])[0] == open_char)
-                   and _extra <= max_lines):
-                _j += 1
-                _extra += 1
-            if _j < len(lines) and parse_fence_line(lines[_j]) is not None \
-                    and parse_fence_line(lines[_j])[0] == open_char:
-                _extended = code_lines + lines[i:_j]
-                # 防误吞守卫：图表代码行（Mermaid 语句 / JSON）不会以中文句读收尾；
-                # 围栏内混入句读行 = "未闭合块吞正文"，仍按未闭合处理。
-                if not any(_CJK_TAIL_RE.search(ln) for ln in _extended):
-                    return _extended, "recovered", _j + 1
-            logger.warning(
-                "内联代码块超过 %d 行且窗口内无干净闭合，判为未闭合（截断点行号=%d）",
-                max_lines, i)
-            return code_lines, "truncated", i
-    # 循环正常结束：要么命中结束围栏（break 退出），要么到达 EOF。
-    if i < len(lines):
-        _pf_end = parse_fence_line(lines[i])
-        if _pf_end is not None and _pf_end[0] == open_char:
-            return code_lines, "closed", i + 1
-    return code_lines, "eof", len(lines)
 
 
 def iter_inline_chart_fences(content: str) -> list[tuple[str, str, str, int]]:
@@ -295,13 +217,37 @@ def _scan_chart_fences_full(content: str) -> list[tuple[str, str, int]]:
             #    无人工生图入口）。见 AGENTS.md §4.3。
             results.append(("ai_image", code, ordinal))
         elif lang == "chart-json":
+            # ✅ BUG 修复（2026-09-27 · 幽灵图 / 登记-导出口径分叉）：
+            #    旧实现**只认载荷里显式写的 `type` 键**，缺失/非法即整块跳过登记。
+            #    而导出侧 `content_blocks._parse_content_blocks` 对同一块会调用
+            #    `infer_chart_type_from_payload` **按结构兜底推断**类型
+            #    （root/children→architecture、tasks→gantt、steps/edges→flowchart …）。
+            #    两侧口径分叉的直接后果（实测探针确认）：
+            #      · 一个**不带 type 字段**的合法 chart-json 块（AI 很常见地省略它），
+            #        导出时被正常解析成 chart 块 → 渲染成图 → **占用图号**；
+            #      · 但 `chart_predictions` 里**查无此图** → 不进「图表清单」、
+            #        不进导出预检、用户无法定位也无法用 AI 修复；
+            #      · 更糟：它**绕过了「每章 ≤1」与「同类型全方案 ≤3」的配图上限**
+            #        （上限判定全部发生在登记侧），AI 可以无限塞图撑爆版面。
+            #    即"成稿有图、系统查不到、限额失效"三重错配，与本模块反复修过的
+            #    幽灵图同源。修法：登记侧改用**与导出侧同一个推断函数**，
+            #    让「能不能渲染」在两侧只有一个判据（单一事实来源）。
             try:
                 obj = json.loads(code)
-                ct = str(obj.get("type", "")).strip().lower()
-                if ct in _ALL_CHART_TYPES:
-                    results.append((ct, code, ordinal))
-            except (json.JSONDecodeError, AttributeError):
+            except (json.JSONDecodeError, TypeError):
                 logger.warning("内联 chart-json 解析失败，跳过")
+                continue
+            if not isinstance(obj, dict):
+                continue
+            ct = infer_chart_type_from_payload(obj)
+            if ct and ct in _ALL_CHART_TYPES:
+                results.append((ct, code, ordinal))
+            else:
+                # 推断不出类型 = 结构上不是可渲染图表，与导出侧「整块跳过」同口径。
+                # 绝不静默丢弃：留 INFO 便于排查"正文有 chart-json 围栏却没出图"。
+                logger.info(
+                    "内联 chart-json 结构无法判定为可渲染图表（type=%r），跳过登记",
+                    str(obj.get("type", "") or "").strip() or "(缺失)")
     return results
 
 
@@ -631,6 +577,29 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
         ``(修正后的正文, rows)``；rows 每项为 ``INSERT INTO chart_predictions``
         的参数元组（不含 commit）。
     """
+    # ✅ P0 类型防御（2026-09-29 · 「内联图表登记失败: tuple has no split」在线事故）：
+    #    上游 auto_fix_unclosed_fences 返回 (str, list[dict])，若调用方漏解包直接透传，
+    #    content 就会是 tuple，content.split("\n") 抛 AttributeError。
+    #    根因同构于 sse_handlers.py:4870 的 auto_fix 返回契约修复（「改一处漏一处」）。
+    #    此处作为**最终防线**：若 content 非 str，尝试 tuple/list 取首元素、bytes 解码；
+    #    彻底无法恢复时降级为空字符串并打 WARNING + exc_info，便于回溯上游调用点。
+    if not isinstance(content, str):
+        if isinstance(content, (tuple, list)) and content:
+            logger.warning(
+                "build_inline_chart_plan: content 非 str（type=%s），尝试取首元素修复；"
+                "scheme=%s section=%s",
+                type(content).__name__, scheme_id[:8], section_id[:8])
+            content = content[0] if isinstance(content[0], str) else str(content[0])
+        elif isinstance(content, bytes):
+            content = content.decode("utf-8", errors="replace")
+        else:
+            logger.warning(
+                "build_inline_chart_plan: content 非 str 且无法修复（type=%s），"
+                "降级为空字符串；scheme=%s section=%s",
+                type(content).__name__, scheme_id[:8], section_id[:8],
+                exc_info=True)
+            content = str(content) if content else ""
+
     charts = _scan_chart_fences_full(content)
     if not charts:
         return content, []

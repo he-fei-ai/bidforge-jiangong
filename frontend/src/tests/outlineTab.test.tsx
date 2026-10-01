@@ -683,6 +683,103 @@ describe("outlineToTreeNode（导入识别结果 → 本地临时树）", () => 
   });
 });
 
+/**
+ * ✅ BUG 修复回归锁（2026-09-26）：AI 调整目录（/adjust-outline）返回的树
+ * 其 id 字段已被后端 renumber 覆写成展示编号（"1"/"1.1"），真实 DB 主键只在
+ * __original_id。修复前 outlineToTreeNode 只取 n.id → key 变成 "1"/"2"
+ * （既非 DB 主键、也非 local_/upload_ 前缀），treeToOutline 再提交给后端时
+ * 匹配不到任何已有 section → is_new 全为 True → 整表重建，
+ * **用户已生成的正文全部丢失**（不可恢复）。
+ */
+describe("AI 调整目录的 __original_id 贯通（保住已生成正文）", () => {
+  const adjustedOutline = [
+    {
+      id: "1", // 后端 renumber 覆写后的展示编号
+      __original_id: "DB_A", // 真实 DB 主键
+      title: "工程概况（已改名）",
+      level: 1,
+      children: [{ id: "1.1", __original_id: "DB_A1", title: "项目简介", level: 2 }],
+    },
+    { id: "2", __original_id: "DB_B", title: "施工工艺", level: 1, children: [] },
+    { id: "3", title: "新增：监测方案", level: 1, children: [] }, // AI 新增，无主键
+  ];
+
+  it("outlineToTreeNode 优先用 __original_id 作 key（而非展示编号）", () => {
+    const tree = outlineToTreeNode(adjustedOutline);
+    expect(tree.map((n) => n.key)).toEqual(["DB_A", "DB_B", expect.stringContaining("upload_")]);
+    // 有主键的节点不是「未落库」临时节点（否则保存时会被当新增）
+    expect(isUnsavedLocalKey(tree[0].key)).toBe(false);
+    expect(isUnsavedLocalKey(tree[1].key)).toBe(false);
+    // AI 新增章仍是未落库临时节点
+    expect(isUnsavedLocalKey(tree[2].key)).toBe(true);
+  });
+
+  it("子节点同样优先用 __original_id", () => {
+    const tree = outlineToTreeNode(adjustedOutline);
+    expect(tree[0].children![0].key).toBe("DB_A1");
+    // 展示编号仍按位置推导，不受影响
+    expect(tree[0].outlineId).toBe("1");
+    expect(tree[0].children![0].outlineId).toBe("1.1");
+  });
+
+  it("treeToOutline 原样回传 __original_id（后端据此匹配正文）", () => {
+    const tree = outlineToTreeNode(adjustedOutline);
+    const submitted = treeToOutline(tree);
+    expect(submitted[0].__original_id).toBe("DB_A");
+    expect(submitted[0].children[0].__original_id).toBe("DB_A1");
+    expect(submitted[1].__original_id).toBe("DB_B");
+    // 新增章不带该键 → 后端按新增处理
+    expect(submitted[2].__original_id).toBeUndefined();
+  });
+
+  it("往返一致：__original_id 贯通后不因 renumberOutline 丢失", () => {
+    const tree = outlineToTreeNode(adjustedOutline);
+    // 前端保存前会再走一次 renumberOutline 重排展示编号
+    const renumbered = renumberOutline(treeToOutline(tree));
+    expect(renumbered[0].__original_id).toBe("DB_A");
+    expect(renumbered[0].children[0].__original_id).toBe("DB_A1");
+    expect(renumbered[0].outlineId).toBe("1");
+  });
+
+  it("无 __original_id 的普通识别结果行为不变（向后兼容）", () => {
+    const tree = outlineToTreeNode([{ id: "n1", title: "A" }]);
+    expect(tree[0].key).toBe("n1");
+    expect(treeToOutline(tree)[0].__original_id).toBeUndefined();
+  });
+
+  /**
+   * ✅ 第二个同源缺陷（由上一条用例暴露）：AI 新增章虽无 __original_id，
+   * 其 id 是 renumber 产物 "3" —— 纯数字点分路径。若直接当 key：
+   *   · isUnsavedLocalKey("3") = false → 前端认为「已落库」，不显示未保存 Tag；
+   *   · 提交给后端时 id="3" 匹配不到任何 section → 整表重建 → 正文丢失。
+   * 故「纯数字 id」必须一律走 upload_ 分支。
+   */
+  it("纯数字展示编号（1 / 1.1）绝不充当 key，一律回落 upload_ 临时键", () => {
+    const tree = outlineToTreeNode([
+      { id: "1", title: "A" },
+      { id: "1.1", title: "A1" },
+      { id: "12", title: "B" },
+    ]);
+    // 三个节点都必须被判定为「未落库临时节点」
+    tree.forEach((n) => expect(isUnsavedLocalKey(n.key)).toBe(true));
+    // key 不得等于其数字编号
+    expect(tree.map((n) => n.key)).not.toContain("1");
+    expect(tree.map((n) => n.key)).not.toContain("1.1");
+    expect(tree.map((n) => n.key)).not.toContain("12");
+    // 展示编号仍按位置正确推导
+    expect(tree.map((n) => n.outlineId)).toEqual(["1", "2", "3"]);
+  });
+
+  it("非纯数字 id（如 n1 / uuid）仍按原样作 key（不误判为临时节点）", () => {
+    const tree = outlineToTreeNode([
+      { id: "n1", title: "A" },
+      { id: "550e8400-e29b-41d4", title: "B" },
+      { id: "1a", title: "C" },
+    ]);
+    expect(tree.map((n) => n.key)).toEqual(["n1", "550e8400-e29b-41d4", "1a"]);
+  });
+});
+
 
 
 // ============================================================
@@ -783,6 +880,71 @@ describe("OutlineNodeBudgetPanel（字数预算编辑面板）", () => {
     expect(low.onBudgetChange).toHaveBeenCalledTimes(1);
     expect(low.onBudgetChange).toHaveBeenCalledWith("sec-1", WORD_BUDGET_MIN);
     expect(low.input().value).toBe(String(WORD_BUDGET_MIN));
+
+
+
+// ============================================================
+// outlineToTreeNode · 临时节点 key 唯一性（2026-09-26 回归锁）
+// ------------------------------------------------------------
+// ✅ BUG 修复回归锁：旧实现 key = `upload_${Date.now()}_${i}`，i 只是同父内序号。
+// 整棵树在同一个 `Date.now()` 毫秒内构造完（性能优化后更快），于是
+// 「第1章的第1个子节」与「第2章的第1个子节」得到**完全相同的 key**。
+// 后果：renameInNode / updateNodeFields 按 key 匹配所有节点 → 改一个标题另一个
+// 跟着改；findSectionById 只返回首个命中 → 改名/删除/字数预算作用在错误章节。
+// 以下用例钉住「全树 key 唯一」与「同一棵树重复构造 key 稳定」两条不变式。
+describe("outlineToTreeNode（导入识别 / AI 调整结果 → 本地树）", () => {
+  const RECOG = [
+    { id: "1", title: "第一章", children: [{ id: "1.1", title: "一节" }] },
+    { id: "2", title: "第二章", children: [{ id: "2.1", title: "二节" }] },
+    { id: "3", title: "第三章", children: [{ id: "3.1", title: "三节" }] },
+  ];
+
+  const collect = (nodes: TreeNode[], out: string[] = []): string[] => {
+    for (const n of nodes) {
+      out.push(n.key);
+      if (n.children?.length) collect(n.children, out);
+    }
+    return out;
+  };
+
+  it("纯数字展示编号一律回落 upload_ 临时 key（绝不充当 DB 主键）", () => {
+    const tree = outlineToTreeNode(RECOG);
+    expect(collect(tree).every((k) => k.startsWith("upload_"))).toBe(true);
+  });
+
+  it("全树 key 唯一：不同父节点下的同序子节不再撞 key", () => {
+    const keys = collect(outlineToTreeNode(RECOG));
+    expect(keys.length).toBe(6);
+    expect(new Set(keys).size).toBe(6);
+    // 显式钉住历史撞车形态：1.1 与 2.1 的临时 key 必须不同
+    expect(keys[1]).not.toBe(keys[3]);
+  });
+
+  it("key 稳定：同一棵树重复构造得到同一批 key（位置派生，非时间戳）", () => {
+    const a = collect(outlineToTreeNode(RECOG));
+    const b = collect(outlineToTreeNode(RECOG));
+    expect(a).toEqual(b);
+  });
+
+  it("__original_id 优先作 key（AI 调整目录保住正文），新章才回落 upload_", () => {
+    const tree = outlineToTreeNode([
+      { id: "1", title: "工程概况", __original_id: "uuid-a" },
+      { id: "2", title: "新增章" },
+    ]);
+    expect(tree[0].key).toBe("uuid-a");
+    expect(tree[0].__original_id).toBe("uuid-a");
+    expect(tree[1].key.startsWith("upload_")).toBe(true);
+    expect(tree[1].__original_id).toBeUndefined();
+  });
+
+  it("非纯数字 id（识别结果的 n1/UUID）原样作 key（既有行为不变）", () => {
+    const tree = outlineToTreeNode([{ id: "n1", title: "识别章" }]);
+    expect(tree[0].key).toBe("n1");
+  });
+});
+
+
+
 
     const high = setupBudget();
     fireEvent.change(high.input(), { target: { value: "999999" } });

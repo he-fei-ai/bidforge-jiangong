@@ -110,6 +110,14 @@ class TestExtractors:
         assert "99m" not in out
         assert "12.5m" in out
 
+    def test_strip_tilde_fence(self):
+        # ✅ 2026-09-28：~~~ 波浪线围栏内的数字也必须剔除（此前会进入事实校验）
+        text = "说明12.5m。\n~~~chart-json\n{\"value\": 356}\n~~~\n结尾 20m"
+        out = strip_code_blocks(text)
+        assert "356" not in out
+        assert "12.5m" in out
+        assert "20m" in out
+
     def test_number_tokens_with_units_and_alias(self):
         toks = extract_number_tokens("基坑 12.5m，工期 450 日历天，混凝土 300方")
         pairs = {(t["value"], t["unit"]) for t in toks}

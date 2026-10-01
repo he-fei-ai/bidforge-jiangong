@@ -205,6 +205,16 @@ def prompt_content_hash(content: str) -> str:
     return hashlib.sha256((content or "").encode("utf-8")).hexdigest()
 
 
+#: 提示词正文长度上限（20 万字符）。
+#: ✅ 2026-09-27（BUG-P1-F · 同值双份字面量）：此前该值在
+#:   ``routers/prompts.py::PROMPT_MAX_CHARS`` 与
+#:   ``config.prompt_audit_snapshot_max_chars`` 各写一份 200000，
+#:   而「回滚时长度校验」与「快照截断阈值」必须同口径 —— 两者一旦调成
+#:   不同值就会出现「快照按 A 截断、按 B 放行」的窗口（截断标记没打，
+#:   但长度已超写入上限，写回去即损坏模板）。现统一到本常量。
+PROMPT_MAX_CHARS = 200000
+
+
 #: 提示词变更动作 → 中文标签（前端展示用）。
 PROMPT_AUDIT_ACTIONS: dict[str, str] = {
     "update": "修改提示词",
@@ -243,6 +253,49 @@ def prompt_snapshot_json(before: str, after: str) -> str:
         else:
             snap[role] = txt
     return json.dumps(snap, ensure_ascii=False)
+
+
+#: 无法回滚时的统一原因文案（前端 tooltip / HTTP 400 detail 共用同一份）。
+ROLLBACK_BLOCKED_REASONS = {
+    "no_snapshot": "该变更记录没有可用的变更前正文（旧记录只存哈希，无法回滚）",
+    "truncated": ("该变更记录的变更前正文已被截断，不是完整提示词，"
+                  "为避免写入损坏模板已拒绝回滚。"
+                  "请改用「恢复出厂默认」或手动重新编辑。"),
+    "too_long": "快照正文超长，已拒绝回滚",
+    "malformed": "该变更记录的快照格式异常，无法回滚",
+}
+
+
+def prompt_snapshot_is_rollbackable(snapshot, max_chars: int = 200000
+                                    ) -> tuple[bool, str]:
+    """快照是否可回滚 → ``(是否可回滚, 不可回滚时的原因)``。
+
+    ✅ 2026-09-27（BUG-P1-E · 「能不能回滚」判据曾有两份实现）：
+    本模块的 :func:`list_prompt_audit_logs` 算 ``rollbackable`` 时只判
+    「``before`` 非空」；而 ``routers/prompts.py::rollback_prompt`` 实际有
+    **三条**前置校验（非空 / 未截断 / 未超长）。两侧分叉的直接后果：
+    被截断的审计行 ``rollbackable=True`` → 前端渲染出可点的「回滚」按钮
+    （``PromptEditorPage.tsx`` 用 ``log.rollbackable`` 决定按钮是否 disabled）
+    → 用户一点必然 400，且提示语与按钮 tooltip 不一致。
+    这正是 AGENTS.md §4.3 点名的「同一判据在两处各自实现」模式。
+
+    现把判据收敛到本函数：列表接口用它算 ``rollbackable``，
+    回滚端点用它决定是否放行 —— **按钮可点 ⟺ 回滚必成功**（不变量）。
+
+    :param snapshot: 已解析的 ``snapshot_json``（dict；非 dict 一律不可回滚）。
+    :param max_chars: 正文长度上限，与写入侧 ``PROMPT_MAX_CHARS`` 同口径。
+    :return: ``(True, "")`` 或 ``(False, 原因文案)``。
+    """
+    if not isinstance(snapshot, dict):
+        return False, ROLLBACK_BLOCKED_REASONS["malformed"]
+    before = snapshot.get("before")
+    if not before:
+        return False, ROLLBACK_BLOCKED_REASONS["no_snapshot"]
+    if snapshot.get("before_truncated"):
+        return False, ROLLBACK_BLOCKED_REASONS["truncated"]
+    if max_chars and len(before) > max_chars:
+        return False, f"{ROLLBACK_BLOCKED_REASONS['too_long']}（最多 {max_chars} 字符）"
+    return True, ""
 
 
 def diff_prompt_snapshot(snapshot: dict | None) -> list[dict]:
@@ -348,9 +401,12 @@ async def list_prompt_audit_logs(db, key: str, limit: int = 50,
             except Exception:
                 snap = {}
         item["changes"] = diff_prompt_snapshot(snap)
-        # 只有「变更前」正文可用才允许回滚（前端据此决定是否显示回滚按钮，
-        # 避免点了必然 400）
-        item["rollbackable"] = bool(isinstance(snap, dict) and snap.get("before"))
+        # ✅ 2026-09-27（BUG-P1-E）：判据收敛到 prompt_snapshot_is_rollbackable，
+        #   与回滚端点共用 —— 保证「按钮可点 ⟺ 回滚必成功」。
+        #   附带回传不可回滚原因，前端 tooltip 直接用，无需自己猜文案。
+        _ok, _reason = prompt_snapshot_is_rollbackable(snap, PROMPT_MAX_CHARS)
+        item["rollbackable"] = _ok
+        item["rollback_blocked_reason"] = _reason
         # 快照仅用于服务端生成 diff / 回滚，原始 JSON 不必回传前端（减小载荷）
         item.pop("snapshot_json", None)
         items.append(item)

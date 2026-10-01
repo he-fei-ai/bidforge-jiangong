@@ -158,16 +158,71 @@ CHAPTER_TEXT_RULES: list[tuple[tuple[str, ...], str]] = [
       "技术措施", "临时用电", "临时用水", "临时道路", "临时设施", "施工段划分",
       "流水段"), "technique"),
     # 一、工程概况（专项工程特征 / 地质水文 / 周边环境 / 气候 / 参建单位）
+    # ✅ 修复（2026-09-30 · 危大判定参数的九大章节归属缺失）：原表只列了
+    #    「基坑周长 / 开挖深度 / 搭设高度 / 起升高度 / 起重量」，却漏掉了
+    #    ``DANGER_PARAM_RULES``（危大阈值参数的唯一事实源）与
+    #    ``NINE_CHAPTERS[0].category_fields``（工程概况必填字段）里
+    #    **实际使用的规范名**：基坑深度 / 支撑高度 / 跨度 / 荷载 等 13 个。
+    #    后果：这些正是危大判定的核心参数（用户亦点名要求），却全部落到
+    #    空串 =「未分类」——在九大章节视图里不显示、不计入
+    #    ``chapter_field_completeness`` 的任一章覆盖率，用户看到
+    #    「工程概况 0 条事实」却不知数据其实已提取。
+    #    本次按 NINE_CHAPTERS[0].category_fields 的口径补齐（基坑/模板支撑/
+    #    起重/脚手架/其他五类的专项工程特征均属第一章工程概况）。
     (("地质", "水文", "地层", "地下水", "地形", "周边环境", "周边管线", "气候",
       "支护形式", "支护安全等级", "设计使用年限", "基坑周长", "开挖深度",
-      "搭设高度", "架体形式", "起升高度", "起重量", "结构形式", "建设规模",
+      "基坑深度", "坑深", "搭设高度", "架体形式", "支撑高度", "支撑架高度",
+      "架体高度", "跨度", "跨距", "施工总荷载", "总荷载", "集中线荷载",
+      "线荷载", "起升高度", "起重量", "起吊重量", "单件起吊重量",
+      "边坡高度", "边坡开挖高度", "安装高度", "承载力", "立杆间距",
+      "立杆步距", "连墙件", "降水方式", "起重机高度", "起重设备高度",
+      "结构形式", "建设规模",
       "工程名称", "项目名称", "工程地点", "项目地点", "参建", "建设单位",
       "设计单位", "监理单位", "施工单位", "施工要求"), "overview"),
 ]
 
 
+#: 英文归一化键（fact_key）→ 九大章节。
+#: ✅ 修复（2026-09-30 第十三轮 · 英文键从未参与章节判定）：
+#: ``classify_fact_dimensions`` 早已把 ``fact_key`` 作为入参接收（并用于
+#: ``shared_chapters_for``），但 ``classify_chapter_from_text`` 的签名里
+#: **没有这个参数** —— 于是 ``foundation_depth`` / ``span`` / ``total_load``
+#: 等英文归一化键只对「共性事实」判定生效、对「章节归属」完全无效。
+#: 真实后果：模型若把事实名写成英文（或人工录入用英文键），该事实在九大章节
+#: 视图里落空串 =「未分类」，不显示、不计入 ``chapter_field_completeness``。
+#: 本表从 ``DANGER_PARAM_RULES`` 派生（危大参数一律属第一章「工程概况」的
+#: 专项工程特征），与中文规则共用同一结论，不会出现两套口径。
+FACT_KEY_TO_CHAPTER: dict[str, str] = {
+    "foundation_depth": "overview",
+    "excavation_depth": "overview",
+    "slope_height": "overview",
+    "install_height": "overview",
+    "support_type": "overview",
+    "height": "overview",
+    "span": "overview",
+    "total_load": "overview",
+    "line_load": "overview",
+    "single_weight": "overview",
+    "max_lift_weight": "overview",
+    "crane_capacity": "overview",
+    "crane_height": "overview",
+    "tower_crane_model": "overview",
+    "excavator_model": "overview",
+    "scaffold_type": "overview",
+    "formwork_type": "overview",
+    "water_table": "overview",
+    "bearing_capacity": "overview",
+    "slope_ratio": "overview",
+    "structure_type": "overview",
+    "building_area": "overview",
+    "building_height": "overview",
+    "site_area": "overview",
+}
+
+
 def classify_chapter_from_text(name: str, value: str = "",
-                               category: str = "", fact_type: str = "") -> str:
+                               category: str = "", fact_type: str = "",
+                               fact_key: str = "") -> str:
     """判定单条事实的九大章节归属（确定性规则，返回 chapter_key，空串 = 未分类）。
 
     判定优先级（专指 → 泛指）：
@@ -175,11 +230,15 @@ def classify_chapter_from_text(name: str, value: str = "",
        第一章工程概况的专项工程特征下，却把「混凝土强度等级」列在第四章工艺
        技术参数下；这类区分只存在于事实文本本身，粗粒度的 fact_type
        （design_param/tech_param）无法表达，故文本规则优先。
-    2. fact_type —— AI 已给出的细粒度类型，文本规则未命中时的次优信号。
-    3. category —— 兜底映射（category 为安全关键项被强制改写时仍可用）。
+    2. fact_key 英文归一化键 —— 事实名写英文时唯一可用的专指信号（§FACT_KEY_TO_CHAPTER）。
+    3. fact_type —— AI 已给出的细粒度类型，文本规则未命中时的次优信号。
+    4. category —— 兜底映射（category 为安全关键项被强制改写时仍可用）。
 
-    纯函数：输入仅依赖事实自身的 name/value/category/fact_type，可在任何读路径
-    惰性调用（历史行无 chapter 列值时也不会丢事实）。
+    纯函数：输入仅依赖事实自身的 name/value/category/fact_type/fact_key，可在任何
+    读路径惰性调用（历史行无 chapter 列值时也不会丢事实）。
+
+    ⚠️ ``fact_key`` 是**新增的可选参数**（默认空串），既有 4 参调用点全部
+    逐字保持原行为——中文事实名的判定链完全不受影响。
     """
     text = f"{name or ''} {value or ''}"
     if text.strip():
@@ -187,6 +246,9 @@ def classify_chapter_from_text(name: str, value: str = "",
             for kw in keywords:
                 if kw and kw in text:
                     return chapter
+    fk = (fact_key or "").strip()
+    if fk and fk in FACT_KEY_TO_CHAPTER:
+        return FACT_KEY_TO_CHAPTER[fk]
     ft = (fact_type or "").strip()
     if ft in FACT_TYPE_TO_CHAPTER:
         mapped = FACT_TYPE_TO_CHAPTER[ft]
@@ -241,7 +303,7 @@ _RELATION_KEYWORDS = (
 )
 
 
-def classify_fact_attr(name: str, value: str, category: str = "") -> str:
+def classify_fact_attr(name: str, value: str) -> str:
     """判定事实属性（quantitative 定量 / qualitative 定性 / relation 关系 / norm 规范）。
 
     判定优先级：
@@ -252,6 +314,14 @@ def classify_fact_attr(name: str, value: str, category: str = "") -> str:
 
     注：关系类关键词优先于定量判定，因为「与基坑距离 5m」这类事实的核心语义
     是关系，数值只是关系的量度。
+
+    ⚠️ **刻意不接收 ``category``**（2026-09-29 清理死参数）：事实属性只由事实
+    自身的 name/value 文本决定，与 22 类 ``category`` **正交**。旧签名曾声明
+    ``category="" `` 形参但函数体从未读取 —— 那是死参数，极易被误读成
+    「fact_attr 依赖分类结果」，从而把分类口径错误地耦合进属性判定（而属性
+    判定是纯文本正则，不该被上游的粗分类影响）。护栏：
+    ``tests/test_facts_content_fixes_20260930.py`` 用 ``inspect.signature``
+    锁死本函数只接受 ``(name, value)``。
     """
     text = f"{name or ''} {value or ''}"
     low = text.lower()
@@ -531,14 +601,14 @@ def classify_fact_dimensions(name: str, value: str = "", category: str = "",
     记录具体被哪些章节需要（含主归属章节去重后的完整集合，按章节序号排序）。
     """
     text_value = value if isinstance(value, str) else _as_text(value)
-    chapter = classify_chapter_from_text(name, text_value, category, fact_type)
+    chapter = classify_chapter_from_text(name, text_value, category, fact_type, fact_key)
     shared = shared_chapters_for(f"{name} {fact_key}", text_value)
     shared_set = set(shared)
     if chapter:
         shared_set.add(chapter)
     return {
         "chapter": chapter,
-        "fact_attr": classify_fact_attr(name, text_value, category),
+        "fact_attr": classify_fact_attr(name, text_value),
         "source_kind": classify_source_kind(source, source_ref),
         "is_shared": bool(shared),
         "shared_chapters": tuple(sorted(shared_set, key=_chapter_order)),
@@ -616,6 +686,7 @@ def chapter_of_row(row: dict) -> str:
         _as_text(row.get("value") or _content_value(row.get("content"))),
         _as_text(row.get("category")),
         _as_text(row.get("fact_type")),
+        _as_text(row.get("fact_key")),
     )["chapter"]
 
 

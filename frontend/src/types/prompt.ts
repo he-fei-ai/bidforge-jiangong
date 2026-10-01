@@ -33,6 +33,12 @@ export interface PromptMutationResponse {
   variables?: string[];
   added_variables: string[];
   removed_variables: string[];
+  /**
+   * ✅ 2026-09-27：保存期静态体检的提醒（如「删掉了契约变量 X」）。
+   * 这些问题**不阻断保存**，但必须如实回传 —— 保存成功 ≠ 一定正确。
+   * 空数组或 undefined 表示无提醒。
+   */
+  warnings?: string[];
 }
 
 export interface PromptAuditLog {
@@ -52,8 +58,14 @@ export interface PromptAuditLog {
    * 历史行（引入快照前写入）无快照 → 空数组。
    */
   changes?: { field: string; label: string; before: unknown; after: unknown }[];
-  /** 是否可回滚（只有带「变更前」正文快照的记录才为 true） */
+  /**
+   * 是否可回滚（只有带完整「变更前」正文快照的记录才为 true）。
+   * ✅ 2026-09-27：判据已与后端 `prompt_snapshot_is_rollbackable` 收敛 ——
+   * 被截断 / 超长的快照一律 false，保证「按钮可点 ⟺ 回滚必成功」。
+   */
   rollbackable?: boolean;
+  /** 不可回滚的原因（后端统一文案，供 tooltip 直接展示） */
+  rollback_blocked_reason?: string;
 }
 
 export interface PromptAuditLogsResponse {
@@ -75,5 +87,7 @@ export interface PromptRollbackResponse {
   removed_variables: string[];
   /** 回滚来源的审计行 id（可据此追溯「从哪个版本回滚回来的」） */
   rollback_from_audit?: string;
+  /** ✅ 2026-09-27：回滚后内容若触发保存期体检提醒，原样回传 */
+  warnings?: string[];
 }
 

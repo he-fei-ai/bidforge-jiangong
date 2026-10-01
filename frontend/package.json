@@ -7,7 +7,14 @@
     "dev": "vite --port 5175 --host",
     "build": "tsc && vite build",
     "preview": "vite preview --port 5175",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:facts": "vitest run factsTab factsApi",
+    "test:content": "vitest run contentTab contentEvents contentStandard SectionContentCard",
+    "test:outline": "vitest run outline OutlineLibrary",
+    "test:ai-config": "vitest run aiConfig",
+    "test:import-upload": "vitest run importSubTabBar upload documentParseList DocumentPipelineSummary parseResultCategoryPanel parseSourceNotice",
+    "test:review": "vitest run ReviewWorkflowPanel ReadinessDashboard reviewApiContract auditTypesContract",
+    "test:workflow": "vitest run schemeWorkbench baItemFlatList bidAnalysis workflowDerived workflowTabsGuard"
   },
   "dependencies": {
     "@ant-design/icons": "^5.6.0",

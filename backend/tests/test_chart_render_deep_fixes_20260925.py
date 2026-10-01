@@ -228,8 +228,10 @@ def test_render_cache_key_short_payload_keeps_legacy_form():
     """短载荷（≤8192）键值保持原样 —— 既有磁盘缓存与单测口径不变。"""
     code = "graph TD; A-->B;"
     assert _code_cache_ident(code) == code
+    # ✅ 2026-09-27：键首段新增渲染器版本号（memory LRU 与磁盘缓存同步失效）
+    from app.services.ai import mermaid_renderer as _mr
     assert _render_cache_key(code, "flowchart", 90, "天", 5, False, True) == \
-        ("flowchart", code, 90, "天", 5, False, True)
+        (f"v{_mr._RENDERER_VERSION}", "flowchart", code, 90, "天", 5, False, True)
     assert _code_cache_ident(None) == ""
 
 

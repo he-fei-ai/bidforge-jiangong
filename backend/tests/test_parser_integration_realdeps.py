@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from app.services.file_parser import parse_file_content_ex
+from app.services.file_parser import ParseError, parse_file_content_ex
 from app.services.ocr import ocr_bytes_sync
 
 # ---------------------------------------------------------------------------
@@ -159,14 +159,35 @@ def test_ocr_roundtrip_real_rapidocr():
 
 @pytest.mark.skipif(not PIL, reason="Pillow 未安装")
 def test_image_parse_through_ocr_chain():
-    """parse_file_content_ex 图片路由：无 tesseract 时回退 rapidocr，全链不崩。"""
+    """parse_file_content_ex 图片路由：有本地 OCR 引擎时返回文本；
+    无任何引擎时抛**可操作的 ParseError**（而不是崩溃或把错误当正文）。
+
+    ✅ 修复（2026-09-27 · 环境相关假失败）：旧实现只 skipif(PIL)，
+    且直接断言「无 tesseract 时回退 rapidocr，全链不崩」——在既无 tesseract
+    也无 rapidocr（也未配视觉模型）的机器上必然失败，把「本机没装 OCR 引擎」
+    误报成解析链路回归（本次全量基线里唯一的 failed 就是它）。
+    现按「引擎是否存在」分流断言，两种环境下都只钉真实契约。
+    """
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (320, 100), "white")
     ImageDraw.Draw(img).text((20, 35), "PLAN 2026", fill="black")
     buf = __import__("io").BytesIO()
     img.save(buf, format="PNG")
 
-    text, diag = parse_file_content_ex(buf.getvalue(), "scan.png")
+    if RAPIDOCR_AVAILABLE:
+        # 本机有内置离线引擎：图片必须真的解析出文本
+        text, diag = parse_file_content_ex(buf.getvalue(), "scan.png")
+        assert diag["file_type"] == "png"
+        assert isinstance(text, str)
+        return
+
+    try:
+        text, diag = parse_file_content_ex(buf.getvalue(), "scan.png")
+    except ParseError as e:
+        # 无任何可用引擎（tesseract / rapidocr / 视觉模型）→ 正确契约是
+        # 抛带「OCR」字样与启用方法的 ParseError，由路由层转 400 提示用户。
+        assert "OCR" in str(e), f"无引擎时应给出可操作的 OCR 提示，got {e!r}"
+        return
     assert diag["file_type"] == "png"
     assert isinstance(text, str)
 

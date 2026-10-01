@@ -26,12 +26,15 @@ export type ExportGateInput = {
 };
 
 export type ExportGateResult = {
+  /** 恒为 true：导出不受审核 / 预检完成度限制（2026-10-01 起）。
+   *  保留字段仅为兼容既有调用点，任何新代码都不得再用它做禁用 / return。 */
   allowed: boolean;
+  /** 提示文案（仅供展示，不构成阻断理由）。 */
   reason: string;
   highIssueCount: number;
 };
 
-/** 与后端 _EXPORT_ISSUE_RULE_MAP 保持一致，只把真正阻断交付的类型列为 high。 */
+/** 与后端 _EXPORT_ISSUE_RULE_MAP 保持一致，用于统计高风险问题数量（仅提示，不阻断导出）。 */
 const HIGH_EXPORT_ISSUE_TYPES = new Set([
   "orphan_node",
   "empty_section",
@@ -177,6 +180,10 @@ export async function renderChartsForExport(
   signal?: AbortSignal,
 ): Promise<ExportChartImage[]> {
   throwIfExportAborted(signal);
+  // ✅ 优化（2026-09-30）：无图表时不加载 mermaid.js。旧实现即使 items 为空也会
+  //    await ensureMermaid()（动态 import 整个 mermaid 库，浏览器里 ~1-2s、jsdom
+  //    测试环境可能挂起），白白拖慢导出准备阶段。
+  if (!items || items.length === 0) return [];
   const out: ExportChartImage[] = [];
   const mermaid = await ensureMermaid();
   throwIfExportAborted(signal);

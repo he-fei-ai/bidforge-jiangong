@@ -70,9 +70,23 @@ async def set_disabled_providers(body: DisabledProvidersIn, request: Request = N
     """整体覆盖「运行时禁用厂商」清单（传空数组 = 全部恢复）。
 
     ✅ 无需重启即时生效：写 ``ai_runtime_settings`` + 失效配置缓存。
+
+    ✅ BUG 修复（2026-09-27 · 恢复路径自我锁死）：白名单此前取
+    ``已配置 ∪ 内置预设``，**不含「当前已被禁用」的厂商**；而
+    ``GET /runtime`` 的 ``providers`` 却**包含**禁用集（注释明确写着
+    "后者可能既非配置也非预设，需能取消勾选"）。两侧口径分叉的后果：
+    某厂商被禁用后其配置被删除（或内置预设改名/下架），该厂商就变成
+    "既不在库、也不在预设、但仍在禁用清单里" —— 界面仍把它列为可选项，
+    用户点掉它想恢复，PUT 却因 `未知厂商` 直接 400。
+    即：**唯一能把厂商从禁用集里移出来的入口，恰好拒绝执行该操作**，
+    禁用集变成不可逆的脏数据，只能手工改库或删 ai_runtime_settings 行。
+    修复：白名单与展示端点**同口径**（都并入 ``disabled``），
+    保证「界面能点 = 后端能存」。
     """
     configured = await _configured_providers(db)
-    known = set(configured) | set(PROVIDER_PRESETS)
+    disabled_now = await resolve_disabled_providers()
+    # 白名单 = 已配置 ∪ 内置预设 ∪ 当前已禁用（与 GET /runtime 的 providers 严格同口径）
+    known = set(configured) | set(PROVIDER_PRESETS) | set(disabled_now)
 
     names: list[str] = []
     for raw in (body.providers or []):

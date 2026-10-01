@@ -272,9 +272,38 @@ class TestGovernanceDefaultOff:
         assert out.startswith("【以下为外部资料原文"), "开启后应加资料边界围栏"
 
     def test_facts_and_knowledge_segments_are_labelled(self):
-        """正文 user 上下文的全局事实/知识库必须用【标签】形式（预算分配器的前提）。"""
-        import inspect
-        from app.routers import sse_handlers
-        src = inspect.getsource(sse_handlers)
-        assert "【全局事实变量（唯一可信数据源）】" in src
-        assert "【项目知识库素材】" in src
+        """正文 user 上下文的全局事实/知识库必须用【标签】形式（预算分配器的前提）。
+
+        ✅ 2026-09-28（T-1 收口后修复）：正文 user 上下文装配自 sse_handlers
+        下沉到 ``services/content_runtime.build_chapter_user_content`` 后，
+        旧断言（``inspect.getsource(sse_handlers)`` 必须含标签字面量）失去
+        锚点、必然失败。改为**行为级 parity 断言**：
+          1) 真实装配函数产出的 user 上下文必须包含事实/知识库两个标签；
+          2) 两个标签必须被预算分配器 ``CONTEXT_PRIORITY`` 识别为高优先级段
+             （而非默认最低优先级 9）—— 否则开启 ``prompt_context_budget`` 后
+             该段会被最先削减。
+        """
+        from app.services.content_runtime import build_chapter_user_content
+        from app.services.prompt_governance import segment_priority_of, _DEFAULT_PRIORITY
+        user_content = build_chapter_user_content(
+            scheme={"name": "基坑支护专项方案", "type": "危大工程专项方案"},
+            project_brief="（项目概述摘要）",
+            content_scope="土方开挖与支护",
+            parent_chain="1、工程概况",
+            parent_points=["1、工程概况：场地与基坑概况"],
+            sibling_lines="1.1 工程概况；1.2 编制依据",
+            section_number="1.1",
+            leaf={"title": "工程概况", "description": "基坑规模与周边环境", "id": 1},
+            word_budget=1200,
+            word_budget_hint="",
+            prev_sibling_summary="",
+            facts_text="- **开挖深度**: 10.5m；-** 支护形式**: 排桩加锚索",
+            eff_standard="precise",
+            knowledge_text="企业管理制度与工艺要点。",
+        )
+        assert "【全局事实变量（唯一可信数据源）】" in user_content
+        assert "【项目知识库素材】" in user_content
+        # parity：标签必须被预算分配器识别（非默认最低优先级），否则开预算会被最先砍
+        assert segment_priority_of("全局事实变量（唯一可信数据源）") == 0
+        assert segment_priority_of("项目知识库素材") == 3
+        assert segment_priority_of("全局事实变量（唯一可信数据源）") != _DEFAULT_PRIORITY

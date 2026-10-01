@@ -196,7 +196,7 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     expect(screen.getAllByText("施工计划").length).toBeGreaterThan(0);
     // 加载完成后不再显示「加载中...」
     expect(screen.queryByText("加载中...")).toBeNull();
-  });
+  }, 60000); // ✅ 后续修复（2026-09-28）：重型组件全量并行时偶发 20s 超时，放大到 60s
 
   it("渲染冒烟：六个工作流 Tab 全部存在，点击可切换", async () => {
     renderPage();
@@ -220,6 +220,124 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     expect(apiCalls["exportApi.docx"]).toBeUndefined();
   });
 
+  /** 门禁测试通用流：切到「审核与预检」Tab 点「开始预检」→ 再切到「导出文档」Tab。
+ *  导出预检的「开始预检」按钮位于审核与预检页（导出页只有门禁 Alert + 导出按钮），
+ *  两者共享同一份 exportIssues/exportStats/exportPreflight 状态。
+ *  ⚠️ 页面上「专家论证预检」卡片也有同名「开始预检」按钮，必须精确点击
+ *  「导出预检（章节完整性）」卡片内的那个（DOM 结构上离该卡片标题最近的）。 */
+  async function runExportCheck() {
+    const reviewLabel = await screen.findByText("审核与预检");
+    fireEvent.click(reviewLabel.closest('[role="tab"]') || reviewLabel);
+    const precheckBtn = await waitFor(() => {
+      const all = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+        .filter((b) => (b.textContent || "").includes("开始预检"));
+      // 导出预检卡片的按钮带 loading={checkingExport}（antd 渲染为 primary 小按钮）；
+      // 专家论证预检卡片的是 default 按钮。精确匹配 primary 型小按钮。
+      const primary = all.filter((b) => b.className.includes("ant-btn-primary"));
+      if (primary.length !== 1) throw new Error("未找到导出预检的「开始预检」按钮");
+      return primary[0]!;
+    });
+    fireEvent.click(precheckBtn);
+    // 等待 placeholderRerunPlan 返回（handleExportCheck 末尾的非致命分支）后再断言
+    await waitFor(() => expect(apiCalls["exportApi.check"]?.length).toBeGreaterThan(0));
+    await waitFor(() => expect(apiCalls["exportApi.placeholderRerunPlan"]?.length).toBeGreaterThan(0));
+    const exportLabel = await screen.findByText("导出文档");
+    fireEvent.click(exportLabel.closest('[role="tab"]') || exportLabel);
+  }
+
+  it("导出门禁-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求", async () => {
+    apiDefaults["exportApi.check"] = {
+      data: {
+        issues: [],
+        section_count: 2,
+        generated_count: 2,
+        total_words: 3200,
+        empty_ratio: 0,
+        chart_total: 0,
+        chart_done: 0,
+        preflight_summary: { has_run: true, total: 92, grade: "A", verdict: "可交付", released: true, stale: false },
+      },
+    };
+    renderPage();
+    await runExportCheck();
+
+    // 门禁放行：Alert 显示通过文案
+    expect(await screen.findByText("导出预检通过，就绪度总检已放行")).toBeTruthy();
+    const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => (button.textContent || "").includes("导出 DOCX"));
+    expect(docxButton?.disabled).toBe(false);
+    fireEvent.click(docxButton!);
+    await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
+  });
+
+  it("导出门禁-高风险：预检存在 high 问题 → 按钮禁用并展示问题数", async () => {
+    apiDefaults["exportApi.check"] = {
+      data: {
+        issues: [
+          { type: "empty_section", severity: "high", section_id: "sec-1", title: "空章节" },
+        ],
+        section_count: 2,
+        generated_count: 1,
+        total_words: 1200,
+        empty_ratio: 50,
+        chart_total: 0,
+        chart_done: 0,
+        preflight_summary: { has_run: true, total: 60, grade: "C", verdict: "需整改", released: false, stale: false },
+      },
+    };
+    renderPage();
+    await runExportCheck();
+
+    expect(await screen.findByText(/导出预检仍有 1 个高风险问题/)).toBeTruthy();
+    const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => (button.textContent || "").includes("导出 DOCX"));
+    expect(docxButton?.disabled).toBe(true);
+  });
+
+  it("导出门禁-未放行：预检无 high 但就绪度未放行 → 按钮禁用", async () => {
+    apiDefaults["exportApi.check"] = {
+      data: {
+        issues: [],
+        section_count: 2,
+        generated_count: 2,
+        total_words: 3200,
+        empty_ratio: 0,
+        chart_total: 0,
+        chart_done: 0,
+        preflight_summary: { has_run: true, total: 60, grade: "C", verdict: "需整改", released: false, stale: false },
+      },
+    };
+    renderPage();
+    await runExportCheck();
+
+    expect(await screen.findByText("就绪度总检尚未放行")).toBeTruthy();
+    const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => (button.textContent || "").includes("导出 DOCX"));
+    expect(docxButton?.disabled).toBe(true);
+  });
+
+  it("导出门禁-结论过期：就绪度 stale=true → 按钮禁用并提示重新总检", async () => {
+    apiDefaults["exportApi.check"] = {
+      data: {
+        issues: [],
+        section_count: 2,
+        generated_count: 2,
+        total_words: 3200,
+        empty_ratio: 0,
+        chart_total: 0,
+        chart_done: 0,
+        preflight_summary: { has_run: true, total: 92, grade: "A", verdict: "可交付", released: true, stale: true },
+      },
+    };
+    renderPage();
+    await runExportCheck();
+
+    expect(await screen.findByText("就绪度总检结论已过期，请重新总检")).toBeTruthy();
+    const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => (button.textContent || "").includes("导出 DOCX"));
+    expect(docxButton?.disabled).toBe(true);
+  });
+
   it("import 子 Tab：文档解析 / 项目提取 切换均渲染且不崩溃（2026-09-25 补充）", async () => {
     renderPage();
     // 起点应在「解析提取」Tab（pickInitialTab 默认 import），否则先切过去
@@ -233,6 +351,88 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     const extractTab = extractLabel.closest('[role="tab"]') || extractLabel;
     fireEvent.click(extractTab);
     await waitFor(() => expect(screen.getByText("18 项结构化提取")).toBeTruthy());
+  });
+
+  it("解析内容预览：文档内容不完整时显示 warning，且不被「仅预览截取」覆盖", async () => {
+    // 复现场景：50 页 PDF 解析到 30000 字后被截断，正文很短（远小于预览上限），
+    // 于是 preview_truncated=false。旧实现用户在预览弹窗里看到的是一段看起来
+    // 正常的短正文，完全不知道招标文件只读了一半。
+    apiDefaults["factsApi.listDocuments"] = {
+      data: { documents: [{ id: "d1", file_name: "招标文件.pdf", parse_status: "success" }] },
+    };
+    apiDefaults["factsApi.previewDocument"] = {
+      data: {
+        is_parsed: true,
+        preview: "第一章 工程概况……（正文片段）",
+        text_len: 300,
+        truncated: true,            // 解析级截断：内容真的缺了
+        preview_truncated: false,  // 预览级未截取：正文本来就短
+        parse_warnings: [],
+      },
+    };
+    renderPage();
+    const importLabel = await screen.findByText("解析提取");
+    fireEvent.click(importLabel.closest('[role="tab"]') || importLabel);
+    const previewBtn = await screen.findByRole("button", { name: /预览/ });
+    fireEvent.click(previewBtn);
+
+    // 解析级截断必须显性提示，并给出可执行建议
+    expect(await screen.findByText(/该文档内容不完整/)).toBeTruthy();
+    expect(screen.getByText(/建议拆分文件后重新上传/)).toBeTruthy();
+    // 关键回归：不得被预览级截取文案覆盖成「只是没显示全」
+    expect(screen.queryByText(/预览仅显示前部分内容/)).toBeNull();
+    // 正文本身仍正常渲染
+    expect(screen.getByText(/第一章 工程概况/)).toBeTruthy();
+  });
+
+  it("解析内容预览：解析完整但被预览截取 → info 提示总字数，不报「不完整」", async () => {
+    apiDefaults["factsApi.listDocuments"] = {
+      data: { documents: [{ id: "d2", file_name: "施工组织设计.docx", parse_status: "success" }] },
+    };
+    apiDefaults["factsApi.previewDocument"] = {
+      data: {
+        is_parsed: true,
+        preview: "（正文片段）",
+        text_len: 20000,
+        truncated: false,
+        preview_truncated: true,   // 只是本弹窗没显示全，完整内容仍在库里
+        parse_warnings: [],
+      },
+    };
+    renderPage();
+    const importLabel = await screen.findByText("解析提取");
+    fireEvent.click(importLabel.closest('[role="tab"]') || importLabel);
+    const previewBtn = await screen.findByRole("button", { name: /预览/ });
+    fireEvent.click(previewBtn);
+
+    expect(await screen.findByText(/预览仅显示前部分内容/)).toBeTruthy();
+    expect(screen.getByText(/20,000 字/)).toBeTruthy();
+    // 解析完整时不得误报内容缺失
+    expect(screen.queryByText(/该文档内容不完整/)).toBeNull();
+  });
+
+  it("解析内容预览：解析告警（编码降级）必须知情可见", async () => {
+    apiDefaults["factsApi.listDocuments"] = {
+      data: { documents: [{ id: "d3", file_name: "旧编码合同.txt", parse_status: "success" }] },
+    };
+    apiDefaults["factsApi.previewDocument"] = {
+      data: {
+        is_parsed: true,
+        preview: "（正文片段）",
+        text_len: 120,
+        truncated: false,
+        preview_truncated: false,
+        parse_warnings: ["源文件编码无法识别，已按 UTF-8 容错解码"],
+      },
+    };
+    renderPage();
+    const importLabel = await screen.findByText("解析提取");
+    fireEvent.click(importLabel.closest('[role="tab"]') || importLabel);
+    const previewBtn = await screen.findByRole("button", { name: /预览/ });
+    fireEvent.click(previewBtn);
+
+    expect(await screen.findByText(/解析过程提示 1 条/)).toBeTruthy();
+    expect(screen.getByText(/编码无法识别/)).toBeTruthy();
   });
 
   it("新增子章节：树中出现「新章节」节点（本地新增，不发写库请求）", async () => {

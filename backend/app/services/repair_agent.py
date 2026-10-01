@@ -22,6 +22,8 @@ from app.services.content_utils import (
 )
 from app.services.repair_validator import validate_repair
 from app.services import repair_record
+# ✅ 2026-09-30 第十五轮：定点编辑（old_text/new_text，对齐参考软件 §三.4/§五.1）
+from app.services import consistency_edits
 
 logger = logging.getLogger("repair_agent")
 
@@ -128,7 +130,38 @@ def group_by_section(conflicts: list[dict]) -> dict[str, dict]:
 async def repair_section(*, section_id: str, section_title: str, section_content: str,
                          conflicts_in_section: list[dict], facts: str,
                          sources: str) -> str:
-    """调用 LLM 修复单章，返回修复后的完整正文（纯文本）。"""
+    """调用 LLM 修复单章，返回修复后的完整正文（纯文本）。
+
+    ✅ 2026-09-30 第十五轮：改为**定点编辑优先、整章重写兜底**
+    （对齐《标书智能体（三）》§三.4 / §五.1）。旧实现无论冲突大小都让模型
+    重写整章并整列覆盖 ``sections.content``，一处「工期 120 vs 90」会连带
+    改写章内已正确的内容；而拒绝单条冲突时又要把**整章**退回快照，同章其它
+    已修好的冲突一起丢。现先要「old_text/new_text」定点编辑，全部唯一命中
+    才落库；拿不到可用编辑时**回落到整章重写**（保证不因模型不支持 JSON
+    而让修复能力整体失效）。
+    """
+    # ① 定点编辑优先
+    try:
+        edit_res = await consistency_edits.collect_repair_edits(
+            section_id=section_id, section_title=section_title,
+            section_content=section_content,
+            conflicts_in_section=conflicts_in_section,
+            facts=facts, sources=sources,
+            # 注入模块级引用：既有单测 monkeypatch 的是 repair_agent 的
+            # chat_with_fallback，不注入就会绕过它们去打真实 provider。
+            chat_fn=chat_with_fallback)
+        if edit_res.applied > 0 and edit_res.content.strip() != (section_content or "").strip():
+            logger.info("[一致性修复] 第 %s 章定点编辑命中 %d 处（不改其余内容）",
+                        section_id, edit_res.applied)
+            return edit_res.content
+        if edit_res.applied > 0:
+            # 编辑命中但内容没变 → 模型空转，按未修复处理并回落到重写
+            logger.info("[一致性修复] 第 %s 章定点编辑内容无变化，回落整章重写", section_id)
+    except Exception as e:  # noqa: BLE001 - 定点编辑任何异常都不得阻断修复
+        logger.warning("[一致性修复] 第 %s 章定点编辑异常，回落整章重写: %s",
+                       section_id, e)
+
+    # ② 整章重写兜底（既有行为，保持不变）
     user = render(
         "consistency_repair_user",
         global_facts=facts or "（无）",

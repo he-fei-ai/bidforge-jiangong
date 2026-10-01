@@ -19,6 +19,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field, asdict
+from datetime import datetime
 from functools import lru_cache
 from typing import Any
 
@@ -31,6 +32,8 @@ from app.services.ai.prompts._norm_dicts import (
 from app.services.facts_cross_validators import run_cross_validations
 # ✅ 2026-09-24：九大章节分类体系（纯函数、零 AI、零 DB 依赖，无循环引用）
 from app.services.facts_classification import apply_fact_dimensions
+# ✅ 2026-09-30 第十三轮：缺值模式值域的单一出口（对齐参考软件 globalFactsMode）
+from app.services.facts_patches import normalize_missing_value_mode
 from app.config import settings
 
 logger = logging.getLogger("facts_extractor")
@@ -62,6 +65,14 @@ FACTS_RETRY_BACKOFF_RATE_LIMIT = 20.0
 # ✅ 结构化提取请求超时（秒）：事实提取提示词长、输出结构化，lite 类模型常需 60s+。
 #    线上日志显示配置 timeout=60 时大量分段以 ~62s 超时失败 → 这里显式放宽。
 FACTS_REQUEST_TIMEOUT = 240
+
+#: 固定提示词骨架的**估算**长度（字符）：system 提示词里与资料正文**无关**的部分
+#: = 核心纪律 + 类型规则块 P7~P20 + JSON Schema 说明 + 归一化字典块。
+#: 用于「上下文预算分段」时扣除固定开销（对齐易标 getMessagesContentLength 口径）。
+#: ⚠️ 这是**估算常量**而非实时测量：system 提示词随 zone_type 变化，若改为实时
+#:   render 会引入 lru_cache 依赖与额外的 IO。估算偏大是安全方向（宁可少切一段，
+#:   也不可让请求超窗口）。仅在 ``settings.facts_context_budget_split=True`` 时生效。
+_FIXED_PROMPT_SKELETON = "x" * 12000
 
 
 def _is_structural_error(exc: Exception) -> bool:
@@ -653,6 +664,44 @@ def _split_table_rows(sec: str, chunk_size: int, chunks: list, heading: str,
     _flush()
 
 
+def resolve_chunk_size(chunk_size: int = CHUNK_SIZE) -> int:
+    """按「模型上下文窗口 × 0.8 − 固定消息」动态决定分段上限（对齐易标 :363-377）。
+
+    默认关闭（``settings.facts_context_budget_split=False``）→ 原样返回调用方传入的
+    ``chunk_size``（本仓历史基线 8000），切分行为与引入前逐字节一致。
+
+    开启后的意义：本仓 8000 字是**固定值**，对上下文窗口 128k 的模型过于保守
+    （资料被切成大量小段 → AI 调用次数与 429 限流风险成倍上升）；而对
+    上下文只有 32k 的模型，8000 字 + 归一化字典 + 规则块又可能撑爆。
+    按易标口径动态计算可同时解决两端。
+
+    Args:
+        chunk_size: 调用方显式指定的上限（默认 ``CHUNK_SIZE``）。
+
+    Returns:
+        生效的分段上限；动态计算失败时回落到 ``chunk_size``（fail-soft）。
+    """
+    try:
+        if not settings.facts_context_budget_split:
+            return chunk_size
+    except Exception:  # pragma: no cover - 配置读取异常时保持旧行为
+        return chunk_size
+    try:
+        from app.services.facts_patches import get_segment_limit
+        # 固定消息 = system 提示词骨架 + 归一化字典块（两者都与资料长度无关），
+        # 与易标 getMessagesContentLength 的口径一致（每条额外计 64 字符开销）。
+        fixed = [{"role": "system", "content": _FIXED_PROMPT_SKELETON}]
+        limit = get_segment_limit(None, fixed)
+        # 动态值不得小于历史基线的下限保护：过小的窗口配上过小的段会让长资料
+        # 段数爆炸（调用次数/限流风险反而上升），故取 max(limit, CHUNK_SIZE)
+        # 在「窗口够大时放宽、窗口很小时不更激进」之间取得平衡。
+        return max(limit, CHUNK_SIZE)
+    except Exception:  # noqa: BLE001 - 任何异常都退回旧行为
+        logger.warning("上下文预算分段计算失败，回落到 CHUNK_SIZE=%d", chunk_size,
+                       exc_info=True)
+        return chunk_size
+
+
 def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE,
                        overlap: int = CHUNK_OVERLAP) -> list[Chunk]:
     """智能切分资料为多个重叠段落（报告步骤⑤语义分段升级）
@@ -663,9 +712,13 @@ def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE,
     3. 检测并保护表格完整性（表格段不强制切断，整表归入同一段）
     4. 高权重区（machinery_stat / construction_practice_zone 等）切分更细，
        低权重区（目录/规范引用）切分更粗
+    5. ``settings.facts_context_budget_split=True`` 时分段上限改由模型上下文
+       窗口动态决定（默认关闭 → 与引入前逐字节一致）
     """
     if not text:
         return []
+
+    chunk_size = resolve_chunk_size(chunk_size)
 
     # 先按章节标题边界切分（markdown # / Word 四级编号）
     heading_patterns = [
@@ -874,9 +927,7 @@ async def extract_from_single_chunk(text: str, context_summary: str = "",
     #  - fabricate（默认）：资料未给出的值允许 AI 合理补全（is_simulated 标记，前端可见）
     #  - omit：严禁编造，无法给出就跳过该条
     #  - placeholder：资料未给出的值逐字写「【待填写】」
-    _mode = (missing_value_mode
-             if missing_value_mode in ("fabricate", "omit", "placeholder")
-             else "fabricate")
+    _mode = normalize_missing_value_mode(missing_value_mode)
     if _mode == "omit":
         sys_prompt += (
             "\n\n【缺值模式：不杜撰（omit）】资料中未明确给出的确定性数据"
@@ -1379,6 +1430,7 @@ async def run_extraction_pipeline(
     wait_resume_cb=None,
     missing_value_mode: str = "fabricate",
     completed_chunks: set | None = None,
+    knowledge_text: str = "",
 ) -> ExtractionResult:
     """完整的事实提取管线（分段 → 合并 → 去重 → 分组）
 
@@ -1391,6 +1443,10 @@ async def run_extraction_pipeline(
     - completed_chunks：已完成段的指纹集合（增量提取）。二次提取时指纹命中的
       段直接跳过、不再发起 AI 调用（其事实已在上次提取落库），只提取
       新增/变更/上次失败的段，显著降低重复调用与限流失败
+    - knowledge_text：项目知识库文本块（``build_knowledge_text`` 产物）。
+      **仅当** ``settings.facts_knowledge_patch_enabled=True`` 时才消费
+      （默认关闭 → 零新增 AI 调用）；开启后走易标 ``runKnowledgeGlobalFactPatches``
+      的「只产补丁」补充阶段。
     """
     import time
     _t0 = time.perf_counter()
@@ -1638,9 +1694,8 @@ async def run_extraction_pipeline(
 
     # ✅ 缺值模式后处理（对齐 OpenBidKit 全局事实三模式，程序级保障 ——
     #    Prompt 约束可能被弱模型忽略，这里按模式做确定性兜底）：
-    _mode = (missing_value_mode
-             if missing_value_mode in ("fabricate", "omit", "placeholder")
-             else "fabricate")
+    #    值域走 facts_patches 单一出口（2026-09-30 第十三轮），与 SSE 入口同源。
+    _mode = normalize_missing_value_mode(missing_value_mode)
     if _mode == "omit":
         _before = len(merged)
         merged = [it for it in merged if not it.is_simulated]
@@ -1659,6 +1714,36 @@ async def run_extraction_pipeline(
             result.warnings.append(
                 f"缺值模式「留待填写」：{_ph} 条资料未给出的值已置为【待填写】"
                 f"（请人工补齐后再生成正文）")
+
+    # 5.5 知识库补充（对齐易标 runKnowledgeGlobalFactPatches，:876-891）
+    #    位置在缺值模式后处理**之后**：知识库给的是已确定的具体值，不该被
+    #    omit/placeholder 模式当成「模拟值」剔除或改写成【待填写】。
+    #    默认关闭（settings.facts_knowledge_patch_enabled=False）→ 零新增 AI 调用。
+    if settings.facts_knowledge_patch_enabled and knowledge_text.strip() and merged:
+        await _emit(_P_END + 0.10, "正在用项目知识库补充事实...")
+        try:
+            from app.services.facts_enrich import apply_knowledge_patches
+            merged, kb_n = await apply_knowledge_patches(merged, knowledge_text)
+            if kb_n:
+                result.warnings.append(f"知识库补充了 {kb_n} 条事实（已合并）")
+        except Exception as e:  # noqa: BLE001 - fail-soft：绝不中断已成功的提取
+            logger.warning("知识库补充阶段异常（已跳过）: %s", e, exc_info=True)
+            result.warnings.append("知识库补充阶段异常，本次未应用知识库补丁")
+
+    # 5.6 最终整理（对齐易标 finalizeGlobalFacts，:909-920）
+    #    必须在缺值模式与知识库补充**之后** —— 整理要改写「要求句 → 事实句」，
+    #    若先整理再走缺值模式，整理产出的新表述会被误判为「资料未给出」。
+    #    默认关闭（settings.facts_finalize_enabled=False）→ 零新增 AI 调用。
+    if settings.facts_finalize_enabled and merged:
+        await _emit(_P_END + 0.11, "正在最终整理事实（去重与口径统一）...")
+        try:
+            from app.services.facts_enrich import finalize_facts
+            merged, fin_n = await finalize_facts(merged)
+            if fin_n:
+                result.warnings.append(f"最终整理改写了 {fin_n} 条事实表述")
+        except Exception as e:  # noqa: BLE001 - fail-soft
+            logger.warning("最终整理阶段异常（已跳过）: %s", e, exc_info=True)
+            result.warnings.append("最终整理阶段异常，本次保留整理前结果")
 
     # 6. 交叉校验（报告补充②：三组纯程序规则，零 LLM 成本先行判定）
     await _emit(_P_END + 0.12, f"正在交叉校验（去重后 {len(merged)} 条）...")
@@ -1982,6 +2067,14 @@ def format_for_frontend(result: ExtractionResult) -> dict[str, Any]:
                     "is_safety_critical": it.is_safety_critical,
                     "confidence": it.confidence,
                     "has_conflict": it.has_conflict,
+                    # ✅ 2026-09-26（数据一致性）：补齐 scope / is_stale，与
+                    #    list_facts 刷新路径保持一致。SSE 提取事实恒为方案级且
+                    #    刚产出非过期，故 scope="scheme"、is_stale=False；避免
+                    #    任何直接消费 SSE 数据的客户端出现「项目共享」/「过期」
+                    #    徽标丢失（前端收口后虽会 loadFacts 刷新，但保持两路径
+                    #    字段同构可防止未来消费方遗漏）。
+                    "scope": "scheme",
+                    "is_stale": False,
                     "conflict_values": [
                         {"value": _as_text(c.get("value")),
                          "source": c.get("source", ""),
@@ -2158,11 +2251,17 @@ async def persist_extraction(
                             "is_simulated": bool(it.is_simulated),
                         })
                     # ✅ BUG-3 修复：用户已确认的事实在「重新提取」时不得被静默打回
-                    #    「待审核 + 有冲突」（否则会脱离注入/导出门控 has_conflict=0
-                    #    AND is_resolved=1，等于「重新提取丢了已审事实」）。
-                    #    现保留用户的确认状态：is_resolved 不变、has_conflict 不变，
-                    #    仅把新证据追加进 conflict_keys 供用户在界面人工裁决；用户已
-                    #    确认的权威值继续注入正文与导出。
+                    #    「待审核」（否则会脱离注入/导出门控 is_resolved=1，等于
+                    #    「重新提取丢了已审事实」）。
+                    #    现保留用户的确认状态：is_resolved 不变，仅把新证据追加进
+                    #    conflict_keys 供用户在界面人工裁决。
+                    #    注：同时置 is_stale=1 与 has_conflict=1 —— 门控
+                    #    （has_conflict=0 AND is_resolved=1 AND is_simulated=0
+                    #    AND is_stale=0）本就把「未裁决的矛盾值」排除在注入之外，
+                    #    故此处 stale 是**冗余但正确**的加固：新证据出现后该值在人工
+                    #    裁决前一律不进正文/导出（回归护栏见
+                    #    tests/test_facts_incremental.py 与
+                    #    tests/test_facts_inject_gate_failclosed_20260927.py）。
                     await db.execute(
                         "UPDATE global_facts SET conflict_keys=?, has_conflict=1, "
                         "is_stale=1, updated_at=datetime('now','localtime') WHERE id=?",
@@ -2212,6 +2311,18 @@ async def persist_extraction(
     #    未提供 run 的调用方（历史/测试直接构造）回退为 all，保持原语义。
     _run = result.chunk_hashes_run or result.chunk_hashes_all
     run_hashes = {str(h) for h in (_run or set()) if h}
+    # ✅ 2026-09-28（重复/过期事实清理）：
+    #   `all_hashes` = 当前文档的**全量**分段指纹（含被优先级截断的低价值段，
+    #   见管线 doc_chunk_hashes 注释：截断前的完整段集）。旧实现只删除
+    #   「空指纹 / 本次重跑段指纹」的非保护行 —— 当文档内容变化使分段指纹
+    #   漂移时（重新解析 / 资料更新），旧指纹既不在 run_hashes 也不在
+    #   all_hashes，该行既不被清除、也不被刷新，与本次新插入的事实**同 key
+    #   重复堆积**（界面出现多条同名未确认事实，一次提取比一次多）。
+    #   现追加「指纹已不在当前文档全量分段集合 → 源头已消失 → 立即清除」；
+    #   仍在 all_hashes 但被增量跳过的段（skipped）**保持保留**（与
+    #   test_persist_keeps_skipped_chunk_rows 的口径一致）。all_hashes 为空时
+    #   （历史/测试调用方未提供）跳过该分支，行为与旧版完全一致。
+    all_hashes = {str(h) for h in (result.chunk_hashes_all or set()) if h}
     if new_categories:
         non_protected_ids = [
             r["id"] for r in existing
@@ -2219,7 +2330,8 @@ async def persist_extraction(
             and (((r.get("category") or "other") or "other") in new_categories
                  or (r.get("fact_key") and r.get("fact_key") in new_keys))
             and ((not (r.get("chunk_hash") or ""))
-                 or (r.get("chunk_hash") in run_hashes))
+                 or (r.get("chunk_hash") in run_hashes)
+                 or (all_hashes and (r.get("chunk_hash") not in all_hashes)))
         ]
     else:
         # 本次结果为空（理论上 SSE 层已拦截，这里兜底）：不删除任何既有事实
@@ -2330,7 +2442,7 @@ async def save_extracted_chunks(db, project_id: str, scheme_id: str,
 # 工具函数：清空缓存（facts 变更后联动）
 # ---------------------------------------------------------------------------
 
-async def invalidate_export_cache(db, scheme_id: str) -> int:
+async def invalidate_export_cache(db, scheme_id: str, facts_touched: bool = False) -> int:
     """事实变更后清空 export_cache，强制下次导出重新生成。
 
     ✅ BUG 修复（磁盘文件泄漏）：旧实现只删 DB 记录、不删磁盘产物 ——
@@ -2338,10 +2450,23 @@ async def invalidate_export_cache(db, scheme_id: str) -> int:
     记录一旦被这里清空，那些 .docx 文件就再没有任何引用方，永远不会被
     保留策略回收，`data/_exports` 随事实迭代无限膨胀。现改为随记录一并删除。
 
-    ⚠️ 失效范围边界（数据流审计 2026-09-23 文档化）：本函数只失效「导出产物」层
-    （export_cache 行 + 磁盘 .docx）。已生成的正文 sections.content 不回滚、不自动重生。
-    原因：正文是生成当时对事实的快照，事实变更后需用户显式重新生成正文才会反映新值
-    （既定设计：避免后台静默重写用户已编辑的章节）。如需事实变更驱动正文重生，需另外补「章节失效标记」机制。
+    ⚠️ 失效范围边界（数据流审计 2026-09-23 文档化 + 2026-09-29 收口）：
+    本函数负责「导出产物」层（export_cache 行 + 磁盘 .docx）的失效。
+    已生成的正文 sections.content 仍**不回滚、不自动重生** —— 正文是生成当时
+    对事实的快照，避免后台静默重写用户已编辑的章节。
+    但「用户无从知道正文可能已过时」这个盲区已补齐：`facts_touched=True` 时
+    同时推进方案级 `schemes.facts_updated_at` 时间戳，章节树读路径据此**读侧
+    派生** `facts_stale` 标记（章节正文写在事实变更之前 → 界面提示
+    「事实已变更，建议重新生成」），由用户显式决定要不要重生。
+    选「方案级单点时间戳」而非「给 sections 加布尔列 + 13 处正文写路径各清一次」，
+    因为后者正是本仓反复踩的「同一判据散落多处、漏改一处」陷阱。
+
+    Args:
+        scheme_id: 方案 ID；
+        facts_touched: 本次调用是否伴随**全局事实的写操作**（True = 推进
+            ``schemes.facts_updated_at``）。默认 False 保持既有调用方（如
+            ``bid_analysis`` 的提取项失效）行为完全不变 —— 那些路径没有改动
+            事实表，推进时间戳会让已生成正文被**误标**为过时。
     """
     from pathlib import Path
 
@@ -2361,6 +2486,17 @@ async def invalidate_export_cache(db, scheme_id: str) -> int:
             except OSError as e:  # 文件被占用/权限不足不影响主流程
                 logger.warning("清理导出产物失败（可忽略）: %s (%s)", p, e)
         logger.info("已清空 %d 条 export_cache（scheme=%s）", cache_count, scheme_id)
+
+    if facts_touched:
+        # 章节失效标记的数据源。写失败只告警不阻断：正文与导出缓存已正确处理，
+        # 少一个「建议重生」提示不应让事实写操作整体失败。
+        try:
+            await db.execute(
+                "UPDATE schemes SET facts_updated_at=? WHERE id=?",
+                (datetime.now().isoformat(), scheme_id))
+            await db.commit()
+        except Exception as e:  # pragma: no cover - 仅告警，不改变主流程结论
+            logger.warning("推进方案事实变更时间戳失败（章节失效标记不可用）: %s", e)
     return cache_count
 
 
@@ -2374,6 +2510,32 @@ async def invalidate_export_cache(db, scheme_id: str) -> int:
 # 注入条件是最后一道数据安全闸门：即使历史脏数据误写 is_resolved=1，
 # 模拟值也不得进入目录/正文/导出。冲突与未确认值沿用原门控。
 _FACTS_INJECT_WHERE = "has_conflict=0 AND is_resolved=1 AND is_simulated=0 AND is_stale=0"
+
+# ✅ BUG 修复（2026-09-27 · 降级兜底放宽门控 → 数据真实性红线）：
+#   调用方（sse_handlers._load_facts_rows、global_facts._load_fact_rows）此前
+#   在 import 失败时各自回落到「has_conflict=0 AND is_resolved=1」这条**旧口径**，
+#   丢掉了 is_simulated=0（AI 编造值）与 is_stale=0（已被重新提取取代的过期值）。
+#   后果：一旦 facts_extractor 导入失败，正文/目录注入与 danger-check 危大判定
+#   就会把编造值、过期值当确定事实放行 —— 恰好在「最不该出错」的降级路径上
+#   把门控放宽，方向完全反了（降级必须 fail-closed，不能 fail-open）。
+#   修法：兜底常量与主口径**逐字相同**并集中在此导出，调用方不再各自硬编码，
+#   从结构上消除「主口径改了、兜底忘了改」的分叉。
+#: 降级兜底门控（与 _FACTS_INJECT_WHERE 逐字一致，故意不写成更宽松的旧口径）
+FACTS_INJECT_WHERE_FALLBACK = (
+    "has_conflict=0 AND is_resolved=1 AND is_simulated=0 AND is_stale=0"
+)
+
+
+def get_facts_inject_where() -> str:
+    """返回「可注入下游」的全局事实门控条件（唯一出口，fail-closed）。
+
+    调用方一律用本函数取门控，不要再各自 ``from ... import _FACTS_INJECT_WHERE``：
+    下划线前缀的内部常量跨模块 import 属于技术债，且一旦 import 失败就会静默
+    回落到各自硬编码的旧口径（见 FACTS_INJECT_WHERE_FALLBACK 注释）。
+    """
+    return FACTS_INJECT_WHERE_FALLBACK
+
+
 # gt 列表达式：空分组标题降级为「其他事实」，且供 ORDER BY gt 引用别名。
 FACTS_GT_COLUMN = "COALESCE(NULLIF(group_title,''), '其他事实') AS gt"
 

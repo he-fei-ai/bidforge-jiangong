@@ -69,6 +69,14 @@ vi.mock("../api", () => ({
     rules: vi.fn(async () => ({ data: mocks.RULES })),
     report: vi.fn(async () => ({ data: { content: "# 整改清单", filename: "报告.md" } })),
   },
+  // ✅ ReadinessDashboard 现挂载 AutoFixModal，后者会 import 本 API；
+  //    mock 工厂缺该导出会在导入期直接抛错（vitest 对缺失导出即报错）。
+  reviewAutoFixApi: {
+    plan: vi.fn(async () => ({ data: { ok: true, fixable: true, mode: "ai", reason: "", finding: {}, targets: [] } })),
+    apply: vi.fn(async () => ({ data: { ok: true, status: "repaired", mode: "ai", rule_id: "", targets: [], items: [], snapshot_id: "ver-1" } })),
+    rollback: vi.fn(async () => ({ data: { status: "rolled_back" } })),
+    capabilities: vi.fn(async () => ({ data: { items: [], total: 0 } })),
+  },
 }));
 
 beforeEach(() => {

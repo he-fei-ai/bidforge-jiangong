@@ -11,6 +11,7 @@ from app.services.ai.provider_factory import chat_with_fallback
 from app.services.ai.prompts._registry import render
 # 图表类型标签统一共享自 chart_validators（别名保持原引用点不变）
 from app.services.chart_validators import CHART_TYPE_LABELS as _CHART_LABELS
+from app.services.chart_validators import infer_chart_type_from_payload
 from app.services.chart_payload import build_chart_envelope, extract_chart_payload
 # ✅ BUG 修复（2026-09-16 · ruff F821）：`fix-mermaid` 里在 `if row:` 分支**内部**
 #    才 import `_rewrite_code_block`，而该名字在第 380 行（更早的
@@ -22,6 +23,25 @@ from app.routers._chart_pipeline import _rewrite_code_block  # noqa: E402
 
 logger = logging.getLogger("charts")
 router = APIRouter(prefix="/api/v1/charts", tags=["charts"])
+
+
+def _infer_payload_type(code: str) -> str:
+    """结构化图表载荷的**类型推断**（唯一判据，与登记侧/导出侧共用同一函数）。
+
+    仅当 ``code`` 是 JSON 对象时才有返回值；Mermaid 语法载荷返回空串
+    （语法载荷的类型由 ``chart_type`` 参数决定，不在此推断）。
+    显式写了 ``type`` 且合法时原样返回 —— 调用方的显式声明优先。
+    """
+    text = (code or "").strip()
+    if not text.startswith(("{", "[")):
+        return ""
+    try:
+        obj = json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return ""
+    if not isinstance(obj, dict):
+        return ""
+    return infer_chart_type_from_payload(obj)
 
 
 @router.post("/render")
@@ -36,6 +56,23 @@ async def render_chart(body: dict):
 
     if not mermaid_code:
         raise HTTPException(400, "缺少图表代码")
+
+    # ✅ BUG 修复（2026-09-27 · 预览与导出类型错配）：结构化载荷的 chart_type
+    #    此前**完全信任调用方**。而前端 MarkdownRenderer 对 chart-json 块取
+    #    `obj.type || "labor"` —— 载荷省略 type 时就发来一个**凭空捏造的
+    #    chart_type="labor"**，后端拿它去选渲染器：甘特图/架构图载荷被送进
+    #    labor 渲染器 → 必然渲染失败 → 预览显示"渲染引擎暂不可用"，
+    #    而**导出 DOCX 却是对的**（导出侧走 infer_chart_type_from_payload 推断）。
+    #    即"预览坏、导出好"的错配，且错误提示把类型问题误报成引擎不可用。
+    #    现与登记侧/导出侧**同用 infer_chart_type_from_payload**：
+    #    仅当载荷确实是结构化 JSON、且调用方给的类型不在可渲染白名单时才纠正；
+    #    显式合法类型与 Mermaid 语法载荷的行为完全不变（向后兼容）。
+    _inferred = _infer_payload_type(mermaid_code)
+    if _inferred and _inferred != chart_type:
+        logger.info(
+            "/charts/render：chart_type=%r 与载荷结构不符，按结构纠正为 %r",
+            chart_type, _inferred)
+        chart_type = _inferred
 
     try:
         from app.services.ai.mermaid_renderer import _chart_cache

@@ -42,7 +42,7 @@ def render_outline_text(nodes: list, prefix: str = "", max_chars: int = 0) -> st
             if not isinstance(n, dict):
                 continue
             code = f"{pre}{i}"
-            title = str(n.get("title", "")).strip()
+            title = str(n.get("title") or "").strip()
             desc = str(n.get("description", "")).strip()
             line = f"{code} {title}" + (f" —— {desc}" if desc else "")
             if max_chars and used + len(line) > max_chars:
@@ -64,7 +64,7 @@ def render_outline_md(nodes: list, level: int = 1) -> str:
     for n in nodes or []:
         if not isinstance(n, dict):
             continue
-        title = str(n.get("title", "")).strip()
+        title = str(n.get("title") or "").strip()
         desc = str(n.get("description", "")).strip()
         lines.append(f"{'#' * min(level, 6)} {title}")
         if desc:
@@ -100,7 +100,7 @@ def find_subtree(nodes: list, chapter_title: str) -> list:
     for n in nodes or []:
         if not isinstance(n, dict):
             continue
-        title = str(n.get("title", "")).strip()
+        title = str(n.get("title") or "").strip()
         if not title:
             continue
         if target in title or title in target:

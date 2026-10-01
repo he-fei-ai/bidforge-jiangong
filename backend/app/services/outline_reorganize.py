@@ -130,7 +130,7 @@ def _strip_tree(nodes: list) -> list:
         if not isinstance(n, dict):
             continue
         nn = copy.deepcopy(n)
-        nn["title"] = _strip_number(nn.get("title", ""))
+        nn["title"] = _strip_number(nn.get("title") or "")
         nn["children"] = _strip_tree(nn.get("children", []))
         out.append(nn)
     return out
@@ -177,7 +177,7 @@ def _match_node(std_title: str, candidates: list[dict], used: set[int],
     for c in candidates:
         if id(c) in used:
             continue
-        ct = c.get("title", "") or ""
+        ct = c.get("title") or ""
         cg = _group_of(ct)
         if sg and cg and sg == cg:
             return c, 1.0
@@ -229,7 +229,7 @@ def _loose_titles(nodes: list, used: set[int], limit: int = 12) -> list[str]:
             if not isinstance(n, dict) or len(out) >= limit:
                 continue
             if id(n) not in used:
-                t = str(n.get("title", "")).strip()
+                t = str(n.get("title") or "").strip()
                 if t and t not in seen:
                     seen.add(t)
                     out.append(t)
@@ -261,7 +261,7 @@ def _reorg_children(recognized_children: list, std_children: list,
     if depth >= MAX_OUTLINE_DEPTH:
         return out
     for sc in std_children:
-        m, _ = _match_node(sc.get("title", ""), recognized_children, used)
+        m, _ = _match_node(sc.get("title") or "", recognized_children, used)
         if m:
             used.add(id(m))
             kids = _reorg_children(m.get("children", []), sc.get("children", []), used, depth + 1)
@@ -304,7 +304,7 @@ def reorganize_to_standard(recognized: list, scheme_name: str,
     used: set[int] = set()
     out: list[dict] = []
     for sc in std:
-        m, _ = _match_node(sc.get("title", ""), rec_nodes, used)
+        m, _ = _match_node(sc.get("title") or "", rec_nodes, used)
         if m:
             used.add(id(m))
             report["matched_chapters"] += 1
@@ -323,7 +323,7 @@ def reorganize_to_standard(recognized: list, scheme_name: str,
     if extras and preserve_unmatched:
         appendix: list[dict] = []
         for ex in extras:
-            host, score = _match_node(ex.get("title", ""), out, set())
+            host, score = _match_node(ex.get("title") or "", out, set())
             if host and score >= 0.34:
                 host["children"].append(
                     _mk_node(ex["title"], "", _clone(ex.get("children", [])), ex.get("description", "")))

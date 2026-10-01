@@ -37,15 +37,31 @@
 2. ``rule_id`` 一经发布不得复用（废弃请设 ``deprecated=True`` 并保留条目），
    否则历史记录里的同 ID 会指向完全不同的语义。
 3. ``basis`` 必须写明具体条文出处，不得写"根据现行规范"这类无法核实的描述。
+4. **（2026-09-27 新增）** 本模块的"唯一事实源"地位必须**可验证**，否则承诺形同虚设：
+   - 导出预检在 ``routers/export.py::_EXPORT_ISSUE_RULE_MAP`` 引用本表规则，
+     ``preflight_engine`` 产出规则 —— 两侧任一漏登都会让 finding 落到兜底分支
+     （title 退化为 ID 本身、basis / suggestion 全空、dimension 塌陷为空串，
+     进而使 ``audit_scoring`` 把扣分记到错误维度，总分系统性偏移）。
+   - 护栏：``validate_rule_registry(mapping, emitted_rule_ids)`` 做双向校验，
+     回归用例见 ``tests/test_audit_fixes_20260927.py::TestRuleRegistryConsistency``。
+     新增规则时须同步登记 ``_PROGRAM_EMITTED_RULE_IDS``（引擎产出的基编号全集）。
+   - ⚠️ 本模块属 services 层，**禁止 import routers**（分层约束），故校验所需的
+     映射表由调用方传入。
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
 # 规则集版本：规则增删改后 +1（前端据此提示"规则已更新，建议重新预检"）
 # ---------------------------------------------------------------------------
-RULE_VERSION = "1.5.0"  # 2026-09-25：新增 DLV-15 全局事实门控（未确认/模拟/冲突/来源过期）
+RULE_VERSION = "1.7.0"  # 2026-10-01：新增 CON-06 跨章节段落搬运检测（骨架归一 + 双阈值 Dice）；
+                        #             并修正 CON-05 的行业依据引用（§3.12.4 → §3.12.3）
+                       #             导致 high 级问题无标题/无依据/无修复建议）
+# 2026-09-27：1.6.0 —— 补登记 DLV-13/DLV-14（此前由 export.py 产出但注册表缺失，
+                        #             导致 high 级问题无标题/无依据/无修复建议）
+# 2026-09-25：1.5.0 —— 新增 DLV-15 全局事实门控（未确认/模拟/冲突/来源过期）
 # 2026-09-23：1.4.0 —— TRC-01 改为只报"个别章节缺计算过程"，与 CMP-09 聚合口径互斥（跨维度双扣修复）
 # 2026-09-23：1.3.0 —— CON-02/CON-03 改判 ai 通道（程序化引擎无实现，死规则修复）
 # 2026-09-21：1.2.0 —— 新增 DLV-09~DLV-12（导出预检→就绪度总检共用规则词表，G1）
@@ -283,9 +299,19 @@ _CONSISTENCY_RULES: tuple[AuditRule, ...] = (
               "正文表述应与「全局事实」中已确认的事实值一致",
               "high", CHECK_MODE_AI, "全局事实为唯一可信数据源"),
     AuditRule("CON-05", "consistency", "无章节内容重复",
-              "不同章节之间不应存在大段雷同（相似度 > 80%）",
+              "不同章节之间不应存在大段雷同（整章相似度 > 80%）",
               "medium", CHECK_MODE_PROGRAM,
-              "《产品需求文档》§3.12.4 查重检查"),
+              "《产品需求文档》§3.12.3 程序化预检（含 Jaccard 相似度查重）"),
+    # ✅ 新增（2026-10-01）：CON-05 只做**整章级** 4-gram Jaccard，
+    #    两章整体不同时漏掉「成段照抄」（AI 生成最常见的雷同形态：
+    #    同一段「安全保证措施」被复制到多个章节）。CON-06 用**骨架归一**
+    #    （数字/日期/标准号 → 占位符）+ 双阈值 Dice 在**段落级**补上，
+    #    抓「换了数字的照抄」这类整章比对必然漏报的场景。
+    AuditRule("CON-06", "consistency", "无跨章节段落搬运",
+              "不同章节之间不应存在成段照抄（骨架归一后相似度达阈值，"
+              "含仅改数字 / 日期的变形）",
+              "medium", CHECK_MODE_PROGRAM,
+              "《产品需求文档》§3.12.3 程序化预检（含相似度查重）"),
 )
 
 # ---------------------------------------------------------------------------
@@ -362,6 +388,16 @@ _DELIVERABILITY_RULES: tuple[AuditRule, ...] = (
               "目录同级节点不应出现重复编号 / 重复标题（长方案分步生成易重复挂接子节点），"
               "重复会让导出文档的目录与标题编号错乱",
               "medium", CHECK_MODE_PROGRAM, "《建筑施工组织设计规范》GB/T 50502-2009"),
+    AuditRule("DLV-13", "deliverability", "正文子标题未与子章节编号撞号",
+              "正文内的 X.X 点分子标题与目录中真实存在的子章节编号占用同一命名空间，"
+              "导出后会与自动编号的子章节标题重号、目录层级错乱",
+              "high", CHECK_MODE_PROGRAM,
+              "《建筑施工组织设计规范》GB/T 50502-2009 章节编号唯一性"),
+    AuditRule("DLV-14", "deliverability", "正文交叉引用未失效",
+              "正文引用的图号 / 表号 / 节号在当前目录与图表清单中已不存在"
+              "（章节被删除或重排、图表未生成），交付后引用悬空",
+              "medium", CHECK_MODE_PROGRAM,
+              "《建筑施工组织设计规范》GB/T 50502-2009 图表编号与引用一致性"),
     AuditRule("DLV-15", "deliverability", "全局事实已核对且来源有效",
               "存在未确认、模拟值、多来源冲突或来源资料已变化的全局事实时，"
               "这些事实不会进入正文/导出，继续交付会造成关键参数缺失或使用过期值",
@@ -462,3 +498,118 @@ def expert_items() -> list[dict]:
             "severity": rule.severity if rule else "medium",
         })
     return out
+
+
+# ---------------------------------------------------------------------------
+# 注册表自检（导入期契约，双向校验）
+# ---------------------------------------------------------------------------
+#: 程序化引擎（preflight_engine）实际会产出的 rule_id 基编号全集。
+#: 维护约定：引擎内新增 ``_finding("XXX-NN")`` 时必须同步登记到本集合，
+#: 否则自检无法覆盖该规则。派生编号（``CON-05-1``）以基编号登记即可（可回退解析）。
+_PROGRAM_EMITTED_RULE_IDS: frozenset[str] = frozenset({
+    "CMP-01", "CMP-02", "CMP-03", "CMP-04", "CMP-05", "CMP-06", "CMP-07",
+    "CMP-08", "CMP-09",
+    "STD-01", "STD-02", "STD-03", "STD-04", "STD-05",
+    "SAF-01", "SAF-02", "SAF-03", "SAF-04", "SAF-05", "SAF-06", "SAF-07",
+    "CON-01", "CON-05", "CON-06",
+    "TRC-01", "TRC-03",
+    "DLV-01", "DLV-02", "DLV-03", "DLV-04", "DLV-05", "DLV-06", "DLV-07",
+    "DLV-08",
+})
+
+
+def _resolve_base_rule(rule_id: str):
+    """按 rule_id 定位规则，容忍派生编号（``CON-05-1`` → 基规则 ``CON-05``）。
+
+    ✅ BUG 修复（2026-09-27）：查重规则按出现顺序派生编号（``CON-05-1``、``CON-05-2``…）
+    以避免 ``merge_findings`` 按 rule_id 去重时把多对重复塌缩成一条。但派生 ID 在注册表里
+    并不存在，``get_rule`` 返回 None → **dimension 退化为空串**，后果有三：
+      1. ``audit_scoring.score_findings`` 把空维度计入 ``unknown_dimension_count``，
+         且 consistency 维度的扣分被记到 deliverability（权重 15 → 10），总分系统性偏移；
+      2. 前端「规则说明」抽屉查不到该 ID，用户只看到裸串 ``CON-05-1``；
+      3. high 级阻断项在报告里没有行业依据（basis 为空）。
+
+    修复策略：**rule_id 保持派生值不变**（去重语义依赖它），只回退取基规则的
+    维度 / 标题 / 依据。逐级向上剥离末尾的 ``-<数字>`` 后缀直到命中注册表。
+
+    放在本模块（唯一事实源）而非引擎里，使注册表自检无需反向 import 引擎。
+    """
+    rid = (rule_id or "").strip()
+    seen: set[str] = set()
+    while rid and rid not in seen:
+        seen.add(rid)
+        rule = get_rule(rid)
+        if rule is not None:
+            return rule
+        # 仅剥离「-<数字>」形态的序号后缀，避免误伤 CON-05 这类基编号本身
+        head, sep, tail = rid.rpartition("-")
+        if not sep or not tail.isdigit() or not head:
+            break
+        rid = head
+    return None
+
+
+def validate_rule_registry(*, mapping: dict | None = None,
+                           emitted_rule_ids: "Iterable[str] | None" = None) -> list[str]:
+    """校验规则注册表与各产出方的一致性，返回问题描述列表（空 = 健康）。
+
+    ✅ 缺陷类别根治（2026-09-27）：本模块被声明为「审核规则唯一事实源」，但此前
+    没有任何机制保证它真的覆盖了所有产出方，实际已发生两处分叉：
+
+    1. ``routers/export.py::_EXPORT_ISSUE_RULE_MAP`` 产出 ``DLV-13`` / ``DLV-14``，
+       注册表里**根本没有**这两条 → high 级问题落到兜底分支，title 退化为
+       「导出预检问题」、basis / suggestion 全空。
+    2. ``preflight_engine`` 产出派生编号 ``CON-05-1``（为避免 merge 去重塌缩），
+       注册表只登记基编号 ``CON-05`` → dimension 退化为空串，consistency 维度的
+       扣分被记到 deliverability，总分系统性偏移。
+
+    本函数把这些漂移变成**可自动检测的契约**：
+    - ``rule_id`` 唯一、格式合法、维度/严重度/方式合法、标题与依据非空；
+    - 所有外部映射表引用的 rule_id 均已注册（覆盖 export 的 issue 映射）；
+    - 程序化引擎产出的 rule_id 均可解析到基规则（容忍派生编号）。
+
+    纯函数、无副作用，可安全用于测试断言与启动期告警。
+    """
+    import re as _re
+
+    problems: list[str] = []
+    valid_dims = {d.key for d in DIMENSIONS}
+    valid_sevs = set(SEVERITY_ORDER)
+    valid_modes = {CHECK_MODE_PROGRAM, CHECK_MODE_AI}
+
+    seen: set[str] = set()
+    for r in ALL_RULES:
+        if r.rule_id in seen:
+            problems.append(f"rule_id 重复注册：{r.rule_id}")
+        seen.add(r.rule_id)
+        if not _re.match(r"^[A-Z]{3}-\d{2}$", r.rule_id):
+            problems.append(f"rule_id 格式非法（应为 XXX-NN）：{r.rule_id}")
+        if r.dimension not in valid_dims:
+            problems.append(f"{r.rule_id} 维度非法：{r.dimension}")
+        if r.severity not in valid_sevs:
+            problems.append(f"{r.rule_id} 严重度非法：{r.severity}")
+        if r.mode not in valid_modes:
+            problems.append(f"{r.rule_id} 检查方式非法：{r.mode}")
+        if not r.title:
+            problems.append(f"{r.rule_id} 缺少面向用户的标题")
+        if not r.basis:
+            problems.append(f"{r.rule_id} 缺少行业依据（维护约定要求可核实）")
+
+    # 外部映射表引用的 rule_id 必须已注册（唯一事实源的承诺必须可验证）。
+    # ⚠️ 架构约束：services 层**禁止 import routers**（见
+    #    tests/test_outline_name_line_20260927.py::test_services_never_import_routers），
+    #    故此处只接收调用方（路由层 / 测试）传入的映射表，不自行导入。
+    for issue_type, (rid, _sev) in sorted((mapping or {}).items()):
+        if rid not in RULE_MAP:
+            problems.append(
+                f"导出预检 issue 类型 {issue_type!r} 映射到未注册规则 {rid}，"
+                f"请在 _DELIVERABILITY_RULES 中补登记")
+
+    # 程序化引擎产出的 rule_id 必须能解析（容忍 CON-05-1 这类派生编号）。
+    # 同样只接收传入的产出集合，不反向 import（引擎 import 注册表才是正确方向）。
+    for rid in sorted(emitted_rule_ids or ()):
+        if _resolve_base_rule(rid) is None:
+            problems.append(
+                f"程序化引擎产出 {rid}，但注册表中查不到（含基编号回退）")
+
+    return problems

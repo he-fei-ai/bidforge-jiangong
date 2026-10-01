@@ -27,7 +27,7 @@ import sqlite3
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from app.db import get_db, settle_global_conn
+from app.db import get_db, safe_rowcount, settle_global_conn
 from app.services.ai.provider_factory import chat_with_fallback
 from app.services.ai.task_registry import (
     register_task, update_progress, finish_task,
@@ -37,9 +37,15 @@ from app.services.ai.sse_utils import with_heartbeat
 from app.services.bid_analysis_service import (
     ANALYSIS_ITEMS, REQUIRED_ITEM_IDS, MARKDOWN_MISSING_RESULT,
     get_item_def, get_item_prompt, build_item, build_system_prompt,
+    build_system_messages,
     split_for_analysis, is_missing_result,
     AnalysisConfig, get_all_items, get_groups,
     DEFAULT_CHUNK_SIZE, build_evidence_json,
+    # ✅ 2026-09-30（第十一轮 · 招标响应域 + 断点续跑）：域注册表与主键唯一出口
+    EXTRACTION_DOMAINS, BID_RESPONSE_GROUPS,
+    build_item_pk, parse_item_pk, get_items_by_domain,
+    get_groups_by_domain, get_item_domain, get_item_fields, build_json_template,
+    is_missing_technical_score_items, build_task_prompt,
 )
 from app.services.bid_section_detector import detect_bid_sections
 # ✅ 2026-09-22 新增（对齐 OpenBidKit bidSectionContext.cjs）：
@@ -76,6 +82,55 @@ def _safe_evidence(content: str, output_type: str, tender_text: str) -> str:
 # 提示词缓存预热等待（OpenBidKit 设为 5000ms）
 PROMPT_CACHE_WARMUP_DELAY_MS = 5000
 
+
+# ---------------------------------------------------------------------------
+# ✅ 2026-09-30（第十一轮）：分段策略单一出口
+# 均分模式（对齐 userTextSplitter.cjs）与滑动窗口模式的选择只在这一处判定，
+# 避免两处各自判定「是否均分」的分叉（本仓 §4.3/§4.14 的同构教训）。
+# 默认（bid_analysis_segment_even=False 或 context_length_limit<=0）走旧滑动
+# 窗口，行为与引入前逐字一致。
+# ---------------------------------------------------------------------------
+def _split_tender_text(tender_text: str) -> list[str]:
+    """按配置选择分段策略（唯一出口）。"""
+    limit = _cfg_int("bid_analysis_segment_context_limit", 0)
+    if _cfg_int("bid_analysis_segment_even", 0) and limit > 0:
+        return split_for_analysis(tender_text, even=True,
+                                  context_length_limit=limit)
+    return split_for_analysis(tender_text)
+
+
+def _cfg_int(name: str, default: int) -> int:
+    """从 settings 读取整数配置。
+
+    ⚠️ **不得写成** ``getattr(settings, name, default) or default`` ——
+    那会把用户显式配置的 ``0`` 当成「未配置」而回落到 default
+    （本轮 A/B 反向验证实测：配 0 并发被静默改成 2，与用户意图相反）。
+    这里用显式 ``is None`` 判定，只有「属性不存在 / 值为 None」才回落默认。
+    """
+    value = getattr(settings, name, None)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _item_concurrency() -> int:
+    """提取项级并发上限（默认 2，与既有硬编码一致；下限 1 —— 0 会死锁）。"""
+    return max(1, _cfg_int("bid_analysis_item_concurrency", 2))
+
+
+def _segment_concurrency() -> int:
+    """单解析项内分段并发上限（默认 3，与既有硬编码一致；下限 1）。"""
+    return max(1, _cfg_int("bid_analysis_segment_concurrency", 3))
+
+
+def _item_retries() -> int:
+    """单个解析项的 AI 重试次数（默认 2，与既有硬编码一致；下限 0）。"""
+    return max(0, _cfg_int("bid_analysis_item_retries", 2))
+
+
 # 分段结果合并 Prompt
 # ✅ 2026-09-22 增强（对齐 OpenBidKit utils/segmentedAiResultMerger.cjs）：
 #    合并调用必须同时携带【原始任务要求】（含 JSON 字段结构）。旧实现只给
@@ -103,35 +158,91 @@ __SEGMENTS__"""
 # 1. 解析项定义（给前端展示用）
 # =========================================================================
 @router.get("/items")
-async def list_analysis_items():
-    """返回全部 18 项定义（含必选标记、输出类型、13 分组）。
+async def list_analysis_items(domain: str = "scheme"):
+    """返回指定提取域的解析项定义（含必选标记、输出类型、分组）。
 
     同时返回 required_count / optional_count / markdown_count / json_count，
     供前端直接渲染「N 项（M 必选 + K 可选）」—— 此前前端硬编码「18 项」「17 必选」，
     增减解析项时文案失真（本轮已修正 api/index.ts 中残留的「20 项 / 14 项 / 15 分组」注释）。
+
+    ✅ 2026-09-30（第十一轮）：新增 ``domain`` 参数（默认 "scheme"）。
+      - ``domain="scheme"``：本软件原有 18 项，返回结构与旧版**逐字一致**；
+      - ``domain="bid_response"``：招标响应域 18 项（需
+        ``bid_response_domain_enabled=True``，否则 404 —— 避免配置关闭时
+        前端拿到一套无法执行的清单）；
+      - 未知 domain：返回空清单 + ``domain_unknown=true``（fail-closed，不静默回退）。
     """
+    items = get_items_by_domain(domain)
+    if not items:
+        return {
+            "items": [], "groups": [], "required_item_ids": [],
+            "total": 0, "required_count": 0, "optional_count": 0,
+            "markdown_count": 0, "json_count": 0, "group_count": 0,
+            "domain": domain, "domain_unknown": True,
+        }
+    if domain != "scheme" and not settings.bid_response_domain_enabled:
+        raise HTTPException(404, "提取域 %s 未启用（设置 bid_response_domain_enabled=true）" % domain)
+    # ⚠️ scheme 域沿用 get_groups() / REQUIRED_ITEM_IDS / get_all_items()，
+    #    保证既有调用点与测试看到的返回结构与旧版逐字一致。
+    if domain == "scheme":
+        items_list, groups_list, required_ids = get_all_items(), get_groups(), list(REQUIRED_ITEM_IDS)
+    else:
+        items_list = [dict(it) for it in items]
+        groups_list = get_groups_by_domain(domain)
+        required_ids = [it["item_id"] for it in items if it["required"]]
     return {
-        "items": get_all_items(),
-        "groups": get_groups(),
-        "required_item_ids": REQUIRED_ITEM_IDS,
-        "total": len(ANALYSIS_ITEMS),
-        "required_count": len(REQUIRED_ITEM_IDS),
-        "optional_count": len(ANALYSIS_ITEMS) - len(REQUIRED_ITEM_IDS),
-        "markdown_count": sum(1 for it in ANALYSIS_ITEMS
+        "domain": domain,
+        "items": items_list,
+        "groups": groups_list,
+        "required_item_ids": required_ids,
+        "total": len(items_list),
+        "required_count": len(required_ids),
+        "optional_count": len(items_list) - len(required_ids),
+        "markdown_count": sum(1 for it in items_list
                               if it.get("output_type") != "json"),
-        "json_count": sum(1 for it in ANALYSIS_ITEMS
+        "json_count": sum(1 for it in items_list
                           if it.get("output_type") == "json"),
-        "group_count": len(get_groups()),
+        "group_count": len(groups_list),
+        "domain_unknown": False,
     }
 
 
 @router.get("/items/{item_id}")
-async def get_analysis_item(item_id: str):
-    """返回单个解析项的定义。"""
+async def get_analysis_item(item_id: str, domain: str = ""):
+    """返回单个解析项的定义。
+
+    ✅ 2026-09-30：返回值额外带 ``domain`` 与 ``fields`` 两个**加法式**键
+    （前端可据此显示所属域与 JSON 字段清单；旧字段全部保留，不破坏既有断言）。
+    显式传 ``domain`` 时校验归属，跨域访问返回 404。
+    """
     item = get_item_def(item_id)
     if not item:
         raise HTTPException(404, f"解析项 {item_id} 不存在")
-    return item
+    item_domain = get_item_domain(item_id) or "scheme"
+    if domain and domain != item_domain:
+        raise HTTPException(404, "解析项 %s 属于 %s 域，不在 %s 域" % (
+            item_id, item_domain, domain))
+    result = dict(item)
+    result["domain"] = item_domain
+    result["fields"] = get_item_fields(item_id)
+    return result
+
+
+@router.get("/domains")
+async def list_extraction_domains():
+    """返回可用提取域清单及启用状态（前端据此决定是否展示域切换器）。"""
+    domains = []
+    for name in EXTRACTION_DOMAINS:
+        enabled = (name == "scheme") or settings.bid_response_domain_enabled
+        items = get_items_by_domain(name)
+        domains.append({
+            "domain": name,
+            "enabled": enabled,
+            "total": len(items),
+            "required_count": sum(1 for it in items if it["required"]),
+            "label": "专项方案编制域" if name == "scheme" else "招标响应域",
+        })
+    return {"domains": domains}
 
 
 # =========================================================================
@@ -152,15 +263,18 @@ async def check_bid_sections(
     if not real_pid:
         raise HTTPException(400, "需要 scheme_id 或 project_id")
 
-    # 读取该项目下所有已解析文档的合并文本
+    # 读取该项目下所有已解析文档的合并文本（优先招标文件，其次合同/设计/地勘）
     docs = await _list_parsed_documents(db, real_pid)
     if not docs:
-        return {"ok": True, "has_multiple": False, "source": "no_documents"}
+        return {"ok": True, "has_multiple": False, "source": "no_documents",
+                **_combine_doc_texts_report([])[1]}
 
-    # 把所有已解析文档拼接（优先招标文件）
-    combined_text = _combine_doc_texts(docs)
+    # 把所有已解析文档拼接，同时产出「提取依据完整性」报告
+    # （✅ 2026-09-26：报告透传给前端，让用户看到检测是否基于完整资料）
+    combined_text, source_report = _combine_doc_texts_report(docs)
     if not combined_text.strip():
-        return {"ok": True, "has_multiple": False, "source": "empty_text"}
+        return {"ok": True, "has_multiple": False, "source": "empty_text",
+                **source_report}
 
     # 规则检测
     result = detect_bid_sections(combined_text)
@@ -214,6 +328,10 @@ async def check_bid_sections(
         "selected_section_id": selected.get("id", ""),
         "selected_section_title": selected.get("title", ""),
         "needs_selection": bool(result.get("has_multiple")) and not bool(selected),
+        # ✅ 2026-09-26：检测依据的完整性（被截断的文档清单 / 预算耗尽被整份
+        #    跳过的文档数）。多标段检测建立在合并文本之上，资料不完整时
+        #    「疑似多标段」的结论可能失真，前端据此提示用户回解析提取模块补资料。
+        **source_report,
     }
 
 
@@ -375,7 +493,7 @@ async def extract_bid_sections_api(
     docs = await _list_parsed_documents(db, real_pid)
     if not docs:
         raise HTTPException(400, "请先在「上传解析」上传文件并完成解析后再执行标段识别")
-    text = _combine_doc_texts(docs)
+    text, source_report = _combine_doc_texts_report(docs)
     if not text.strip():
         raise HTTPException(400, "已解析文档未包含有效文本内容")
 
@@ -426,6 +544,8 @@ async def extract_bid_sections_api(
         "context_hint": build_bid_section_context_hint(
             selected, has_selected_section=bool(selected)),
         "message": msg,
+        # ✅ 2026-09-26：AI 标段识别同样建立在合并文本之上，透传依据完整性
+        **source_report,
     }
 
 
@@ -698,14 +818,18 @@ async def start_bid_analysis(
     mode = body.get("mode", "key")
     selected_item_ids = body.get("selected_item_ids") or []
     force_rerun = body.get("force_rerun", False)
+    # ✅ 2026-09-30（第十一轮）：提取域 + 断点续跑（默认值与旧版行为逐字一致）
+    domain = body.get("domain", "scheme")
+    skip_done = bool(body.get("skip_done") or settings.bid_analysis_skip_done_when_rerun)
 
     real_pid = await _resolve_pid(db, scheme_id, project_id)
     if not real_pid:
         raise HTTPException(400, "需要 scheme_id 或 project_id")
 
     config = AnalysisConfig(mode=mode, selected_item_ids=selected_item_ids,
-                            force_rerun=force_rerun).normalize()
-    if not config.get_task_items():
+                            force_rerun=force_rerun, domain=domain,
+                            skip_done=skip_done).normalize()
+    if not await config.get_task_items_async(db, real_pid):
         raise HTTPException(400, "未选择任何解析项")
 
     # 校验输入
@@ -713,8 +837,8 @@ async def start_bid_analysis(
     if not docs:
         raise HTTPException(400, "请先在「上传解析」上传文件并完成解析后再执行结构化提取")
 
-    # 读取招标文件文本
-    tender_text = _combine_doc_texts(docs)
+    # 读取招标文件文本（同时产出提取依据完整性报告）
+    tender_text, source_report = _combine_doc_texts_report(docs)
     if not tender_text.strip():
         raise HTTPException(400, "已解析文档未包含有效文本内容")
 
@@ -729,6 +853,8 @@ async def start_bid_analysis(
         result = await _run_bid_analysis_sync(
             db, real_pid, scheme_id or real_pid, config, tender_text,
             section_hint=section_hint)
+        # ✅ 2026-09-26：非 SSE 入口同样回传提取依据完整性（截断文档清单等）
+        result.update(source_report)
         return result
     except HTTPException:
         # ✅ BUG 修复：内层抛出的 400（缺参/无文档）被宽异常捕获后伪装成
@@ -746,12 +872,19 @@ async def start_bid_analysis_sse(
     mode: str = Query("key"),
     selected_item_ids: str = Query(""),  # JSON 数组字符串
     force_rerun: bool = Query(False),
+    domain: str = Query("scheme"),
+    skip_done: bool = Query(False),
     db=Depends(get_db),
 ):
-    """启动 18 项结构化提取（SSE 长任务，实时推送进度）。"""
+    """启动 18 项结构化提取（SSE 长任务，实时推送进度）。
+
+    ✅ 2026-09-30（第十一轮）：新增 ``domain``（默认 scheme，与旧版一致）与
+    ``skip_done``（默认 False，与旧版一致）。
+    """
     try:
         return await _start_sse_inner(db, scheme_id, project_id, mode,
-                                       selected_item_ids, force_rerun)
+                                       selected_item_ids, force_rerun,
+                                       domain=domain, skip_done=skip_done)
     except HTTPException:
         # ✅ BUG 修复：同上——_start_sse_inner 的 400 参数校验错误不得降级成 500
         raise
@@ -761,7 +894,8 @@ async def start_bid_analysis_sse(
 
 
 async def _start_sse_inner(db, scheme_id, project_id, mode,
-                           selected_item_ids, force_rerun):
+                           selected_item_ids, force_rerun,
+                           domain: str = "scheme", skip_done: bool = False):
     real_pid = await _resolve_pid(db, scheme_id, project_id)
     if not real_pid:
         raise HTTPException(400, "需要 scheme_id 或 project_id")
@@ -771,7 +905,9 @@ async def _start_sse_inner(db, scheme_id, project_id, mode,
     if not docs:
         raise HTTPException(400, "请先在「上传解析」上传文件并完成解析后再执行结构化提取")
 
-    tender_text = _combine_doc_texts(docs)
+    # ✅ 2026-09-26（调用链路补齐）：启用 report_truncation 分支 —— 该分支此前
+    #    自加入起从未被调用，截断信号停在后端、前端"项目提取"子页无感知。
+    tender_text, source_report = _combine_doc_texts_report(docs)
     if not tender_text.strip():
         raise HTTPException(400, "已解析文档未包含有效文本内容")
 
@@ -784,10 +920,13 @@ async def _start_sse_inner(db, scheme_id, project_id, mode,
             sel_ids = []
 
     config = AnalysisConfig(mode=mode, selected_item_ids=sel_ids,
-                            force_rerun=force_rerun).normalize()
+                            force_rerun=force_rerun, domain=domain,
+                            skip_done=skip_done).normalize()
 
     # ✅ 防呆：归一化后没有任何可执行项（如 mode=item 但未选/选了非法 id）时，
     #    直接 400。否则会跑出「0/0 完成」的假成功，前端任务栏与必选校验口径全乱。
+    #    ⚠️ 此处显式 skip_done=False 做「选择集合」校验，与运行时是否跳过已完成
+    #    项解耦 —— 否则「全部已完成 + 开启断点续跑」会被误报成「未选择任何解析项」。
     if not config.get_task_items():
         raise HTTPException(400, "未选择任何解析项")
 
@@ -850,9 +989,12 @@ async def _start_sse_inner(db, scheme_id, project_id, mode,
 
             ✅ 2026-09-22：附带投标范围状态（是否已注入标段上下文 / 是否待选择），
             让前端能在同一条事件里提示「本次提取只针对 X 标段」。
+
+            ✅ 2026-09-26：附带提取依据完整性（source_truncated / truncated_docs /
+            dropped_doc_count），让前端在提取开始时就提示「资料不完整」。
             """
             await queue.put({
-                "type": "text_stats", **stats,
+                "type": "text_stats", **stats, **source_report,
                 "section_title": selected_section.get("title", ""),
                 "section_hint_applied": bool(section_hint),
                 "multi_section_unselected": bool(_sec_row.get("is_multi")) and not selected_section,
@@ -864,7 +1006,8 @@ async def _start_sse_inner(db, scheme_id, project_id, mode,
                     db, real_pid, scheme_id or real_pid, config, tender_text,
                     progress_callback, task_id, stats_callback=stats_callback,
                     section_hint=section_hint)
-                await queue.put({"type": "completed", "result": result})
+                await queue.put({"type": "completed", "result": result,
+                                 **source_report})
             except asyncio.CancelledError:
                 # ✅ 取消（客户端断开 / event_generator 的 finally 会 task.cancel()）：
                 #    CancelledError 属 BaseException，**不会**走下面的 except Exception，
@@ -994,7 +1137,8 @@ async def _run_bid_analysis_sync(db, project_id: str, scheme_id: str,
     """
     # ✅ 2026-09-24：提取前解析方案危大工程分类提示（纯增量，异常已降级为空）
     classification_hint = await _resolve_classification_hint(db, scheme_id)
-    task_items = config.get_task_items()
+    # ✅ 2026-09-30：断点续跑 —— 跳过已成功落库的项（force_rerun/单项重跑时忽略）
+    task_items = await config.get_task_items_async(db, project_id)
     total = len(task_items)
 
     if config.force_rerun:
@@ -1002,7 +1146,7 @@ async def _run_bid_analysis_sync(db, project_id: str, scheme_id: str,
             db, project_id, [it["item_id"] for it in task_items])
 
     # 预切分
-    segments = split_for_analysis(tender_text)
+    segments = _split_tender_text(tender_text)  # 单一出口：按配置选分段策略
     logger.info("结构化解析：共 %d 项待执行，原文 %d 字，切分为 %d 段",
                 total, len(tender_text), len(segments))
 
@@ -1057,7 +1201,7 @@ async def _run_bid_analysis_sync(db, project_id: str, scheme_id: str,
         if remaining:
             await asyncio.sleep(PROMPT_CACHE_WARMUP_DELAY_MS / 1000)
 
-    semaphore = asyncio.Semaphore(2)  # ✅ 外层项并发降到 2（之前 4）
+    semaphore = asyncio.Semaphore(_item_concurrency())  # 外层项并发（可配，默认 2）
 
     async def _run_item(item: dict):
         """执行单个解析项（暂停闸门与并发许可由 run_with_pause_gate 负责）。"""
@@ -1148,10 +1292,11 @@ async def _run_bid_analysis_with_progress(db, project_id: str, scheme_id: str,
     """
     # ✅ 2026-09-24：提取前解析方案危大工程分类提示（纯增量，异常已降级为空）
     classification_hint = await _resolve_classification_hint(db, scheme_id)
-    task_items = config.get_task_items()
+    # ✅ 2026-09-30：断点续跑 —— 跳过已成功落库的项（force_rerun/单项重跑时忽略）
+    task_items = await config.get_task_items_async(db, project_id)
     total = len(task_items)
 
-    segments = split_for_analysis(tender_text)
+    segments = _split_tender_text(tender_text)  # 单一出口：按配置选分段策略
     logger.info("结构化解析（SSE）：共 %d 项待执行，原文 %d 字，切分为 %d 段",
                 total, len(tender_text), len(segments))
 
@@ -1187,7 +1332,7 @@ async def _run_bid_analysis_with_progress(db, project_id: str, scheme_id: str,
         await _update_item_status(db, project_id, item["item_id"], "running", "", "")
         await progress_callback(item["item_id"], "running", progress=completed / total)
 
-        max_retries = 2
+        max_retries = _item_retries()
         last_error = None
         try:
             for attempt in range(max_retries + 1):
@@ -1239,7 +1384,7 @@ async def _run_bid_analysis_with_progress(db, project_id: str, scheme_id: str,
         if remaining:
             await asyncio.sleep(PROMPT_CACHE_WARMUP_DELAY_MS / 1000)
 
-    semaphore = asyncio.Semaphore(2)  # ✅ SSE 版同样降到 2
+    semaphore = asyncio.Semaphore(_item_concurrency())  # SSE 版项并发（可配，默认 2）
     await asyncio.gather(*[
         run_with_pause_gate(task_id, semaphore, functools.partial(_do_item, it))
         for it in remaining
@@ -1337,7 +1482,7 @@ async def _run_single_item(db, project_id: str, scheme_id: str,
                                              classification_hint=classification_hint)
     else:
         # 多段并发提取 —— ✅ 加信号量限制（之前直接 gather 所有段，27 段就同时飞 27 个 AI 调用）
-        _seg_sem = asyncio.Semaphore(3)  # 单 item 内最多 3 个分段并发
+        _seg_sem = asyncio.Semaphore(_segment_concurrency())  # 分段并发（可配，默认 3）
         async def _seg_run(seg):
             async with _seg_sem:
                 return await _run_single_call(item, seg, output_type,
@@ -1357,7 +1502,10 @@ async def _run_single_item(db, project_id: str, scheme_id: str,
         valid_raw: list[str] = []
         for i, pr in enumerate(partial_results):
             if isinstance(pr, Exception):
-                logger.warning("分段 %d 提取异常: %s", i, pr)
+                # ✅ A-9（2026-10-01）：分段提取是 18 项链路**最高频**的失败点，
+                #    旧实现只用 %s 打印异常 message，堆栈全丢，线上无法定位根因
+                #    （provider 超时 / 限流 / JSON 解析失败表现完全不同）。
+                logger.warning("分段 %d 提取异常: %s", i, pr, exc_info=pr)
                 continue
             if pr and not is_missing_result(pr, output_type):
                 seg_contents.append(f"--- 分段 {i + 1} ---\n{pr}")
@@ -1397,9 +1545,7 @@ async def _run_single_item(db, project_id: str, scheme_id: str,
                           .replace("__TASK_LABEL__", item.get("label", item_id))
                           .replace("__TASK_PROMPT__", task_prompt)
                           .replace("__SEGMENTS__", "\n\n".join(seg_contents)))
-            messages = [
-                {"role": "system", "content": build_system_prompt(
-                    section_hint, classification_hint)},
+            messages = build_system_messages(section_hint, classification_hint) + [
                 {"role": "user", "content": merge_user},
             ]
             if output_type == "json":
@@ -1433,9 +1579,11 @@ async def _run_single_call(item: dict, text: str, output_type: str,
     section_hint 由 `services/bid_section_context.build_bid_section_context_hint`
     生成（多标段投标范围）；classification_hint 由本模块 classify 能力生成
     （危大工程分类结论，提取重点参考）。两者均为空串时 system 消息与旧版逐字一致。
+
+    ✅ 标段上下文按易标口径作为**独立的第二条 system 消息**下发
+    （``buildTenderContextMessages``），不再与通用纪律拼在同一条。
     """
-    system_msg = {"role": "system", "content": build_system_prompt(
-        section_hint, classification_hint)}
+    system_msgs = build_system_messages(section_hint, classification_hint)
     user_msg = {"role": "user", "content": build_item(text, item)}
 
     if output_type == "json":
@@ -1444,7 +1592,7 @@ async def _run_single_call(item: dict, text: str, output_type: str,
         #    /ai/stats 按 scene 聚合。本模块此前 5 处调用均未传（审计缺口），
         #    现统一标记为 bid_analysis，便于区分「提取」与目录/正文/事实的调用量。
         response = await chat_with_fallback(
-            [system_msg, user_msg],
+            [*system_msgs, user_msg],
             temperature=0.2,
             json_mode=True,
             timeout=180,
@@ -1457,13 +1605,13 @@ async def _run_single_call(item: dict, text: str, output_type: str,
             # ✅ scene 显式传参（2026-09-23）：这里是**单项提取**的 JSON 修复，
             #    必须归入 bid_analysis 场景，不能沿用 _repair_json 的合并场景默认值，
             #    否则 /ai/stats 按场景聚合时单项提取量会被错记到「分段合并」。
-            response = await _repair_json(response, [system_msg, user_msg],
+            response = await _repair_json(response, [*system_msgs, user_msg],
                                           scene="bid_analysis")
         return response
     else:
         # Markdown 项
         return await chat_with_fallback(
-            [system_msg, user_msg],
+            [*system_msgs, user_msg],
             temperature=0.3,
             timeout=180,
             scene="bid_analysis",
@@ -1537,11 +1685,52 @@ async def _resolve_pid(db, scheme_id: str = "", project_id: str = "") -> str:
     return ""
 
 
-# ✅ 2026-09-25：单份文档参与「18 项提取」的字符预算（单一常量）。
+# ✅ 2026-09-25：参与「18 项提取」的字符预算（单一常量）。
+# ⚠️ 语义更正（2026-10-01 · A-1）：注释原写「单份文档」，但 _combine_doc_texts
+#    的实际实现是 **多文档合计**：`headroom = _MAX_DOC_CHARS - total_chars`，
+#    累计达到预算后 `break` —— 后续文档被**整份跳过**（只计入 dropped_doc_count）。
+#    这一字之差会让调参者严重高估实际覆盖量，已更正。
 # 与 global_facts._extract_markdown_by_type 的入库截断阈值对齐，
 # 但语义不同：入库截断作用于 parsed_markdown 本身，本常量作用于
 # 多文档聚合时的切片预算 —— 两者必须分开，否则同一份预算被消耗两次。
-_MAX_DOC_CHARS = 30000
+# 默认值 400000 与 pdf_text_max_pages=500 / MAX_PARSED_CHARS=400000 三级对齐；
+# 显式把 bid_analysis_segment_budget 配回 30000 即恢复旧行为。
+# ⚠️ 模块级求值（import 期）：与 MAX_PDF_PAGES 同口径，运行期改配置需重启，
+#    单测通过 monkeypatch 该常量生效。
+_MAX_DOC_CHARS = max(1000, int(getattr(settings, "bid_analysis_segment_budget", None) or 400000))
+
+
+async def _project_document_cols(db) -> set[str]:
+    """读取 ``project_documents`` 的实际列名集合（不缓存：测试会换库）。
+
+    ✅ 幂等迁移友好：``parse_warnings`` / ``parse_truncated`` 均由
+    ``db._migrate`` 以「PRAGMA 探测 + 条件 ALTER」增量补列。旧库（迁移前创建、
+    或某个只跑部分迁移的临时库）可能缺其中一列。旧实现在整句 SELECT 报
+    ``OperationalError`` 时**一刀切回退到基础列**，会把已经存在的
+    ``parse_warnings`` 也一并丢掉 —— 新增列越多，降级造成的信息损失越大。
+    现按真实列集合动态拼装，缺哪列只丢哪列，其余照常返回。
+
+    :return: 列名集合；表不存在 / 无法探测时返回空集合（调用方按「全缺」处理）。
+    """
+    try:
+        cur = await db.execute("PRAGMA table_info(project_documents)")
+        return {dict(r)["name"] for r in await cur.fetchall()}
+    except (sqlite3.OperationalError, Exception):
+        return set()
+
+
+async def _bid_analysis_item_cols(db) -> set[str]:
+    """读取 ``bid_analysis_items`` 的实际列名集合（不缓存：测试会换库）。
+
+    ✅ 2026-09-30（第十一轮）：``domain`` 列由 ``db._migrate`` 以「PRAGMA 探测
+    + 条件 ALTER」增量补列。旧库可能缺该列 —— 写入路径必须先探测再决定是否
+    带列 INSERT，否则直接 ``OperationalError`` → 500（本仓 §5.2 同构坑）。
+    """
+    try:
+        cur = await db.execute("PRAGMA table_info(bid_analysis_items)")
+        return {dict(r)["name"] for r in await cur.fetchall()}
+    except (sqlite3.OperationalError, Exception):
+        return set()
 
 
 async def _list_parsed_documents(db, project_id: str) -> list[dict]:
@@ -1551,21 +1740,29 @@ async def _list_parsed_documents(db, project_id: str) -> list[dict]:
     （doc_pipeline 解析阶段写入截断/OCR 降级告警），却从未被任何 SELECT
     读取过，等于"写而不读"。本函数是唯一聚合文档内容的读路径，
     拿到原文后无法判断是否被截断，导致 18 项提取在残缺文本上做提取。
+
+    ✅ 2026-09-26（截断标记贯通）：再补一列 ``parse_truncated`` —— 解析阶段
+    已把「字数超限」与「解析器级截断（PDF 截页/表格截行）」持久化到该列，
+    本模块此前**始终读不到它**，于是 18 项提取的
+    ``_combine_doc_texts(report_truncation=True)`` 的 ``truncated`` 恒为 False，
+    前端「项目提取」子页永远看不到"源文档不完整"的告警。两列按
+    :func:`_project_document_cols` 的实际列集合动态拼装，缺列只降级该列。
     """
+    base = ("SELECT id, file_name, file_type, parsed_markdown, doc_category, "
+            "file_size, parse_time")
+    where = ("FROM project_documents WHERE project_id=? "
+             "AND parsed_markdown IS NOT NULL AND parsed_markdown != '' "
+             "ORDER BY created_at, id")
+    cols = await _project_document_cols(db)
+    diag_cols = [c for c in ("parse_warnings", "parse_truncated") if c in cols]
+    sql = base + ((", " + ", ".join(diag_cols)) if diag_cols else "") + " " + where
     try:
-        cur = await db.execute(
-            "SELECT id, file_name, file_type, parsed_markdown, doc_category, file_size, parse_time, parse_warnings "
-            "FROM project_documents WHERE project_id=? AND parsed_markdown IS NOT NULL "
-            "AND parsed_markdown != '' ORDER BY created_at, id",
-            (project_id,))
+        cur = await db.execute(sql, (project_id,))
         return [dict(r) for r in await cur.fetchall()]
     except sqlite3.OperationalError:
-        # 旧库可能尚未补列 parse_warnings → 降级到不含该列的 SELECT
-        cur = await db.execute(
-            "SELECT id, file_name, file_type, parsed_markdown, doc_category, file_size, parse_time "
-            "FROM project_documents WHERE project_id=? AND parsed_markdown IS NOT NULL "
-            "AND parsed_markdown != '' ORDER BY created_at, id",
-            (project_id,))
+        # 极端兜底：PRAGMA 结果与实际表结构不符（外部进程直改库、迁移中断等）
+        # → 只选基础列，保证读路径始终可用（诊断信息降级为「未知」）。
+        cur = await db.execute(base + " " + where, (project_id,))
         return [dict(r) for r in await cur.fetchall()]
 
 
@@ -1581,13 +1778,58 @@ def _doc_text_len(d: dict) -> int:
     return len(d.get("parsed_markdown") or "")
 
 
+#: 解析告警里表示"内容不完整"的关键词（中英都认，兼容历史/外部写入的告警文本）
+_TRUNCATION_HINTS: tuple[str, ...] = ("截断", "truncated")
+
+
 def _doc_is_truncated(d: dict) -> bool:
-    """文档正文是否被截断：``text_len`` 列为权威口径（解析阶段写入 -1），
-    库表尚无该列时回退到 parse_warnings 里出现的 "truncated" 文本。"""
-    tl = d.get("text_len")
-    if isinstance(tl, int):
-        return tl == -1
-    return "truncated" in (d.get("parse_warnings") or "")
+    """文档正文是否被截断（三层信号取「或」，任一命中即为截断）。
+
+    1. ``parse_truncated`` —— 解析阶段（``parse_document`` /
+       ``parse_all_documents``）持久化的权威标记，覆盖「字数超
+       ``MAX_PARSED_CHARS``」与「解析器级截断（PDF 截页 / 表格截行）」两类。
+    2. 字数达落库上限（当前或历史 80000 字）—— 口径与
+       ``global_facts._is_truncated`` 一致。
+    3. ``parse_warnings`` 文本兜底 —— 中文告警含「截断」即命中。
+
+    ✅ BUG 修复（2026-09-26，跨模块数据传递断裂）：旧实现只认两条恒为 False
+    的路径 —— 「不存在的 ``text_len`` 列 == -1」（``project_documents`` 表从未
+    有该列，本函数 SELECT 也不取它）与「``parse_warnings`` 里出现英文
+    ``truncated``」（而 :mod:`file_parser` 的告警全是中文，如「原文 X 字，已截断
+    至 N 字上限」，绝不含英文）。后果：18 项结构化提取在残缺资料上照常提取，
+    且 ``_combine_doc_texts(report_truncation=True)`` 的 ``truncated`` 恒为 False，
+    前端与下游都无从得知「提取依据不完整」。
+
+    ⚠️ 三层必须是「或」而不是「第一层命中即返回」：``parse_truncated`` 列
+    2026-09-26 才由 ``_migrate`` 补上，**上线前的存量行该列恒为 0**，
+    却可能早已在 ``parse_warnings`` 里留下截断告警（解析器与标记位由
+    ``_note_truncation`` 同步写入，标记位缺失只可能是补列默认值所致）。
+    把它当成「排除条件」会让这批存量文档继续漏报。
+    """
+    pt = d.get("parse_truncated")
+    if isinstance(pt, (int, float)) and not isinstance(pt, bool) and pt:
+        return True
+    # ② text_len 哨兵值：旧版入库截断写 -1（「入库时被截断」），是既有契约
+    #    （tests/test_import_module_fixes_20260925.py::test_doc_is_truncated_*
+    #    与 test_doc_text_len_falls_back_without_column 一起钉住的语义）。
+    #    新库改由 parse_truncated 列承载该语义，但保留这条判定对旧数据/外部
+    #    写入方无害——-1 永远不会出现在未截断的文档上。
+    text_len = _doc_text_len(d)
+    if text_len == -1:
+        return True
+    # ③ 字数达落库上限 —— 口径与 global_facts._is_truncated 一致。
+    #    注意必须在 ② 之后：_doc_text_len 缺列时回退 len(parsed_markdown)，
+    #    回退值恒 >= 0，不会把 -1 误当成截断。
+    if text_len > 0:
+        # 惰性导入：避免路由模块间的循环导入（global_facts 不反向依赖本模块）
+        from app.routers import global_facts as _gf
+        if _gf._is_truncated(text_len):
+            return True
+    # ④ 告警文本兜底（中英都认，兼容历史/外部写入的告警文本）
+    warnings = d.get("parse_warnings") or ""
+    if not isinstance(warnings, str):
+        warnings = " ".join(str(w) for w in warnings)
+    return any(k in warnings for k in _TRUNCATION_HINTS)
 
 
 def _combine_doc_texts(docs: list[dict], report_truncation: bool = False):
@@ -1655,9 +1897,56 @@ def _combine_doc_texts(docs: list[dict], report_truncation: bool = False):
     }
 
 
+def _combine_doc_texts_report(docs: list[dict]) -> tuple[str, dict]:
+    """合并文档文本 + 产出「提取依据完整性」报告（调用方统一入口）。
+
+    ✅ 调用链路补齐（2026-09-26）：``_combine_doc_texts`` 的
+    ``report_truncation=True`` 分支自 2026-09-25 加入起**从未被任何调用点
+    使用过**（4 处调用全走字符串默认分支）。截断信号已经持久化
+    （``project_documents.parse_truncated``）、也能判定（``_doc_is_truncated``），
+    却始终停在后端 —— 18 项结构化提取的用户全程无感知「提取依据不完整」。
+
+    本函数把报告收口成一个稳定的小字典，供四个入口（/check-sections、
+    /extract-sections、/start、/start-sse）原样透传给前端，避免各处
+    自行解释 report 形状而漂移：
+
+    - ``source_truncated``：任一参与提取的文档被截断，或预算不足导致有文档
+      整份未被纳入；
+    - ``truncated_docs``：被截断的文档清单（沿用 ``_combine_doc_texts`` 的
+      ``details`` 形状：name / category / chars / truncated）；
+    - ``used_doc_count`` / ``input_doc_count`` / ``dropped_doc_count``：
+      纳入提取的文档数 / 项目文档总数 / 未纳入的文档数（预算耗尽被整份
+      跳过，或正文为空的文档 —— 两类都意味着用户可能以为资料用上了）；
+    - ``total_chars``：实际进入提取的各文档正文片段字数之和
+      （不含拼接时插入的文档标题行）。
+
+    :return: ``(合并文本, 报告字典)``。文本语义与旧字符串分支逐字一致。
+    """
+    report = _combine_doc_texts(docs, report_truncation=True)
+    details = report.get("details") or []
+    truncated = [d for d in details if d.get("truncated")]
+    if truncated or len(details) < len(docs):
+        # 提取依据不完整必须留痕：这类问题不报错、静默完成，用户与下游
+        # （目录/正文/导出）都无法从失败日志里察觉。
+        logger.warning(
+            "结构化提取依据不完整：纳入 %d/%d 份文档，被截断 %s，合并文本 %d 字",
+            len(details), len(docs),
+            "、".join(d.get("name", "?") for d in truncated) or "无",
+            int(report.get("total_chars") or 0))
+    return report["text"], {
+        "source_truncated": bool(report.get("truncated")),
+        "truncated_docs": truncated,
+        "used_doc_count": len(details),
+        "input_doc_count": len(docs),
+        "dropped_doc_count": max(0, len(docs) - len(details)),
+        "total_chars": int(report.get("total_chars") or 0),
+    }
+
+
 async def _update_item_status(db, project_id: str, item_id: str, status: str,
                               content: str = "", error: str = "",
-                              evidence: str | None = None):
+                              evidence: str | None = None,
+                              domain: str = ""):
     """更新单个解析项的状态/内容（upsert）。
 
     ✅ source 契约：本函数是**AI 写路径**，任何写入都会把 source 复位为 'ai'。
@@ -1668,9 +1957,16 @@ async def _update_item_status(db, project_id: str, item_id: str, status: str,
     ✅ evidence（2026-09-23 来源位置溯源）：仅在调用方显式传入时写入（成功
     checkpoint 传反查结果，可以为空串表示本轮未匹配到出处）；传 None 不动该列
     （running/error 等中间态保留上一轮证据便于对照）。
+
+    ✅ domain（2026-09-30 招标响应域）：主键经 build_item_pk 唯一出口构造。
+    ``domain`` 留空时由 :func:`get_item_domain` **按 item_id 自动派生**（默认
+    'scheme'）—— 单一事实源，6 处调用点无需逐一传参，杜绝「漏传一处」
+    （本仓反复踩的同构陷阱）。scheme 域返回旧主键格式 {project_id}_{item_id}，
+    既有查询逐字节不变。旧库缺 domain 列时 INSERT 省略该列，不会 500。
     """
     def_ = get_item_def(item_id) or {}
-    pk = f"{project_id}_{item_id}"
+    resolved_domain = domain or get_item_domain(item_id) or "scheme"
+    pk = build_item_pk(project_id, item_id, resolved_domain)
     existing = False
     try:
         cur = await db.execute(
@@ -1702,14 +1998,25 @@ async def _update_item_status(db, project_id: str, item_id: str, status: str,
             f"UPDATE bid_analysis_items SET {', '.join(fields)} WHERE id=?",
             tuple(params))
     else:
-        await db.execute(
-            "INSERT INTO bid_analysis_items "
-            "(id, project_id, item_id, label, output_type, required, status, content, error, sort_order, source, evidence) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (pk, project_id, item_id, def_.get("label", item_id),
-             def_.get("output_type", "markdown"),
-             def_.get("required", 0), status, content, error,
-             def_.get("sort_order", 0), "ai", evidence or ""))
+        cur_cols = await _bid_analysis_item_cols(db)
+        if "domain" in cur_cols:
+            await db.execute(
+                "INSERT INTO bid_analysis_items "
+                "(id, project_id, item_id, label, output_type, required, status, content, error, sort_order, source, evidence, domain) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (pk, project_id, item_id, def_.get("label", item_id),
+                 def_.get("output_type", "markdown"),
+                 def_.get("required", 0), status, content, error,
+                 def_.get("sort_order", 0), "ai", evidence or "", resolved_domain))
+        else:
+            await db.execute(
+                "INSERT INTO bid_analysis_items "
+                "(id, project_id, item_id, label, output_type, required, status, content, error, sort_order, source, evidence) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (pk, project_id, item_id, def_.get("label", item_id),
+                 def_.get("output_type", "markdown"),
+                 def_.get("required", 0), status, content, error,
+                 def_.get("sort_order", 0), "ai", evidence or ""))
     await db.commit()
 
 
@@ -1751,7 +2058,72 @@ async def _invalidate_downstream_cache(db, project_id: str,
             logger.warning("方案 %s 导出缓存失效失败（不影响提取结果）: %s", sid, e)
     if done:
         logger.info("提取结果变化：已失效 %d 个方案的导出缓存", done)
+    # ✅ 不再受 `done` 门禁（2026-10-01 第七模块专项 · A-3）：
+    #    `done==0` 有两种成因 —— ① sids 为空（无 scheme_id 且项目下无方案，
+    #    或查询方案失败）；② 逐个 invalidate_export_cache 全部抛错。
+    #    两种情况下「提取结果已变化」这一事实依然成立，三处派生产物同样必须作废；
+    #    旧实现把它们关在 `if done:` 里，等于第十五轮的级联失效在这两条路径上
+    #    完全不生效 → 「已重跑提取，但一致性面板/完整性报告/事实时间戳仍是旧值」
+    #    的静默不一致。级联本身幂等且 fail-soft，移出门禁不改变成功路径行为。
+    # ✅ 级联补齐（2026-09-30 第十五轮 · 对齐易标重跑时作废下游的语义）：
+    #    旧实现**只**清 export_cache，漏掉三处同样以「提取结果」为输入的产物：
+    #      ① consistency_scan_cache —— 全文一致性扫描的结论基于旧提取结果，
+    #         不清则「刚重跑完提取、一致性面板仍显示旧的冲突清单」；
+    #      ② schemes.facts_updated_at —— 目录树据此派生「事实已变更」标记，
+    #         不推则用户改了提取项却收不到「章节可能需重写」的提示
+    #         （见 AGENTS.md §4.12 第 3 条的读侧派生契约）；
+    #      ③ doc_extractions —— 四层存储的提取层快照，清掉后
+    #         build_completeness_report 才会按新一轮结果重算覆盖率
+    #         （否则「已重新提取」但完整性报告仍是旧数字）。
+    #    全部**幂等**（UPDATE/DELETE，重复调用无副作用），且各自 fail-soft：
+    #    任一表缺失（测试库/迁移未跑）只记 WARNING，不影响其它。
+    await _invalidate_extraction_derived(db, project_id, sids)
     return done
+
+
+async def _invalidate_extraction_derived(db, project_id: str, sids: list[str]) -> None:
+    """提取结果变化后，作废「由提取结果派生」的三处产物（fail-soft、幂等）。"""
+    # ① 一致性扫描缓存
+    #    ⚠️ 空 sids 守卫（2026-10-01）：`IN ()` 是非法 SQL，靠 except 兜底会
+    #    产生一条误导性 WARNING。级联现已对空 sids 也执行（见调用点），故显式跳过。
+    if sids:
+        try:
+            cur = await db.execute(
+                "DELETE FROM consistency_scan_cache WHERE scheme_id IN "
+                f"({','.join('?' * len(sids))})", tuple(sids))
+            from app.db import safe_rowcount
+            n = safe_rowcount(cur, what="consistency_scan_cache")
+            if n:
+                logger.info("提取结果变化：已清 %d 条一致性扫描缓存", n)
+        except Exception as e:
+            logger.warning("清一致性扫描缓存失败（不影响提取结果）: %s", e)
+    # ② 方案级事实时间戳（目录树据此派生「事实已变更」标记）
+    if sids:
+        try:
+            cur = await db.execute(
+                "UPDATE schemes SET facts_updated_at=datetime('now','localtime') "
+                f"WHERE id IN ({','.join('?' * len(sids))})", tuple(sids))
+            from app.db import safe_rowcount
+            n = safe_rowcount(cur, what="schemes.facts_updated_at")
+            if n:
+                logger.info("提取结果变化：已推进 %d 个方案的事实时间戳", n)
+        except Exception as e:
+            logger.warning("推进事实时间戳失败（不影响提取结果）: %s", e)
+    # ③ 四层存储的提取层快照（重算完整性报告的前提）
+    #    ⚠️ 只更新 `status`：doc_extractions **没有** updated_at 列
+    #    （见 schema_sql.py 的建表语句），带上会整条 SQL 报错、连带这一轮失效全废。
+    #    'stale' 正是 §4.11.5 已确立的「物化陈旧」状态值，口径一致。
+    try:
+        cur = await db.execute(
+            "UPDATE doc_extractions SET status='stale' WHERE project_id=?",
+            (project_id,))
+        from app.db import safe_rowcount
+        n = safe_rowcount(cur, what="doc_extractions")
+        if n:
+            logger.info("提取结果变化：已把 %d 条提取层快照标记为 stale", n)
+        await db.commit()
+    except Exception as e:
+        logger.warning("作废提取层快照失败（不影响提取结果）: %s", e)
 
 
 async def _reset_items_for_rerun(db, project_id: str,
@@ -1838,14 +2210,23 @@ async def clear_interrupted_items(db, project_id: str = "") -> int:
             "UPDATE bid_analysis_items SET status='error', "
             "error='上次执行被中断（进程重启或任务取消），请重新提取', "
             f"updated_at=datetime('now','localtime') WHERE {where}", params)
+        # ✅ P1 修复（2026-09-29 · R13 漏改点）：AGENTS.md §5.5 —— 全局单写连接 +
+        #    aiosqlite 下 execute() **可能返回 None**，旧实现 `cur.rowcount` 直接
+        #    AttributeError，又被下方 `except Exception` 吞掉 → 中断遗留的 running
+        #    解析项**静默残留**（UI 永远显示「运行中」、summary.running>0、18 项
+        #    永久判缺失、Tab 徽标永远不绿）。现统一走 safe_rowcount 并在 None 时
+        #    打**带处置建议**的告警：既不再崩，也不再让调用方误以为清理成功。
         await db.commit()
-        n = cur.rowcount or 0
+        n = safe_rowcount(cur, what="中断遗留 running 解析项置 error")
         if n:
             logger.warning("清理了 %d 个中断遗留的 running 解析项（project=%s）",
                            n, project_id or "<全部>")
         return n
     except Exception as e:
-        logger.warning("清理中断解析项失败: %s", e)
+        # exc_info=True：这是启动恢复/任务收尾的关键路径，失败原因必须能定位，
+        # 只打 %s 会丢失堆栈（连接损坏 vs SQL 语法错误 vs 锁竞争，处置完全不同）。
+        logger.warning("清理中断解析项失败（中断项可能残留为 running，"
+                       "需重试提取或重启后端）: %s", e, exc_info=True)
         return 0
 
 

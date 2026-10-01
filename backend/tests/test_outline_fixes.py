@@ -440,6 +440,29 @@ class TestOutlineLibrary:
         assert result["ok"] is True
         assert result["count"] == 1
 
+    async def test_apply_and_save_passes_through_cleared_content(self, db_conn):
+        """P1-7：套用目录库必然整表重建（库节点 id 是编号而非主键，无法匹配旧章），
+        旧正文会被级联删除 —— 量化结果必须透传给前端，否则用户静默丢正文。"""
+        from app.routers.outline_library import apply_library_and_save
+        await _seed_scheme(db_conn)
+        # 先落一个已生成正文的章节
+        await db_conn.execute(
+            "INSERT INTO sections (id, scheme_id, title, level, sort_order,"
+            " content, word_count) VALUES (?,?,?,?,?,?,?)",
+            ("old1", "s1", "旧章节", 1, 1, "已生成的正文内容", 10))
+        await db_conn.commit()
+
+        await db_conn.execute(
+            "INSERT INTO outline_library (id, name, outline_json, review_status)"
+            " VALUES ('l2','库二',?,'已通过')",
+            (json.dumps([{"id": "1", "title": "新结构", "children": []}]),))
+        await db_conn.commit()
+
+        result = await apply_library_and_save("l2", {"scheme_id": "s1"}, db_conn)
+        # 旧章节与新结构不匹配 → 正文被清除，必须如实回传
+        assert result.get("cleared_content_sections", 0) >= 1, \
+            "套用目录库清空正文时必须回传 cleared_content_sections"
+
     async def test_review_missing_library_returns_404(self, db_conn):
         """BUG：旧实现对不存在的 id 也返回 ok=True，审核"看似生效"实则无落库。"""
         from app.routers.outline_library import review_library

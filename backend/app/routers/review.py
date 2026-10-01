@@ -195,7 +195,7 @@ async def review_summary(scheme_id: str, db=Depends(get_db)):
     cur = await db.execute(
         "SELECT id, section_id, section_title, from_status, to_status, reviewer,"
         " comment, created_at FROM review_records WHERE scheme_id=?"
-        " ORDER BY created_at DESC, rowid DESC LIMIT 20", (scheme_id,))
+        " ORDER BY created_at DESC LIMIT 20", (scheme_id,))
     records = [dict(r) for r in await cur.fetchall()]
 
     total = sum(counts.values())
@@ -242,8 +242,14 @@ async def review_checklist(scheme_id: str, db=Depends(get_db)):
         return {"items": []}
 
     cur = await db.execute(
+        # ✅ 确定性排序（2026-09-30）：review_records.created_at 精度只到秒（DB 默认
+        #    datetime('now','localtime')），批量审核 / 正文重生成重置会在同一秒内写入
+        #    多条记录。旧实现只按 created_at DESC —— 并列时 SQLite 返回行序不确定，
+        #    "最近一次评审意见"可能显示成同一秒内较早的那条（评审轨迹可追溯性失真）。
+        #    补 rowid DESC 兜底（rowid 单调递增 = 写入顺序），保证"最近"恒为最后写入。
         "SELECT section_id, to_status, reviewer, comment, created_at FROM review_records"
-        " WHERE scheme_id=? AND section_id!='' ORDER BY created_at DESC", (scheme_id,))
+        " WHERE scheme_id=? AND section_id!='' ORDER BY created_at DESC, rowid DESC",
+        (scheme_id,))
     latest: dict = {}
     for r in await cur.fetchall():
         # 已按时间倒序，首次出现即该章节最近一次评审
@@ -446,7 +452,7 @@ async def submit_scheme_review(scheme_id: str, body: SchemeReviewIn,
         # 未放行结论；只查 updated_at 又会漏掉内容变了但时间戳未变的历史脏数据。
         cur = await db.execute(
             "SELECT blocked, released, content_fingerprint, total, created_at FROM preflight_runs"
-            " WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,))
+            " WHERE scheme_id=? ORDER BY created_at DESC LIMIT 1", (scheme_id,))
         pf = await cur.fetchone()
         if pf and pf["blocked"]:
             raise HTTPException(
@@ -535,7 +541,7 @@ async def review_records(scheme_id: str, section_id: str = "", limit: int = 50,
     cur = await db.execute(
         "SELECT id, section_id, section_title, from_status, to_status, reviewer,"
         f" comment, created_at FROM review_records {where}"
-        " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
+        " ORDER BY created_at DESC LIMIT ? OFFSET ?",
         (*params, limit, offset))
     items = [dict(r) for r in await cur.fetchall()]
     for it in items:

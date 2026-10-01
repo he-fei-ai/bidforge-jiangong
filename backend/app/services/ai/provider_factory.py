@@ -16,6 +16,7 @@ from app.services import activity_broadcaster as _ab
 from app.services.ai.providers.base import BaseProvider
 from app.services.ai.providers.openai_compatible import OpenAICompatibleProvider
 from app.services.ai.providers.anthropic_compatible import AnthropicCompatibleProvider
+from app.services.ai.json_mode_compat import json_mode_unsupported
 from app.services.ai.workflows_base import circuit_breaker, concurrency_controller
 from app.config import settings
 
@@ -1185,15 +1186,28 @@ KNOWN_SCENES: dict[str, str] = {
     "outline_adjust": "目录调整",
     "outline_recognition": "上传目录 AI 识别",
     # —— 正文 ——
-    # "content" 为总调度场景（正文链路入口），"场景模型路由"的白名单会
-    # 校验它确实被引用，故保留；细分统计仍以 draft/continue/shrink 为准。
-    "content": "正文生成（总调度）",
+    # ⚠️ 不设 "content" 总调度场景：正文链路的每个调用点都已细分打标
+    #    （draft / continue / shrink），再留一个从不使用的"总调度"入口只会
+    #    让人在「场景模型路由」里配了它却发现运行时不生效（静默失效）——
+    #    与上方「outline」总调度场景的处理完全同口径。
+    #    ✅ 修复（2026-09-26）：该条目曾以「白名单会校验它确实被引用，故保留」
+    #    为由长期留在 KNOWN_SCENES，但代码中**无任何 scene="content" 调用点**
+    #    （正文只用 content_draft / content_continue / content_shrink），
+    #    注释与事实相反，属 AGENTS.md §4.5 明令禁止的「界面死选项」。
+    #    由 tests/test_ai_config_security_routing.py::TestKnownScenesDrift
+    #    的双向护栏查出。存量 ai_scene_routes 行不受影响：
+    #    scene_routes.py::_scene_items 有「白名单外场景也要展示」的兜底分支。
     "content_draft": "正文生成",
     "content_continue": "正文续写扩充",
     "content_shrink": "正文压缩",
     "word_budget_alloc": "章节字数预算分配",
     # —— 事实 / 项目信息 ——
     "facts_extract": "全局事实提取",
+    # ✅ 2026-09-30 第十三轮：知识库补充 / 最终整理两个新增 AI 调用点。
+    #    必须登记，否则「场景模型路由」里配了它们也不生效（静默失效），
+    #    且双向漂移护栏 TestKnownScenesDrift 会失败。
+    "facts_knowledge_patch": "全局事实·知识库补充",
+    "facts_finalize": "全局事实·最终整理",
     "global_facts_adjust": "全局事实调整",
     "bid_analysis": "项目信息提取",
     "bid_analysis_merge": "项目信息合并",
@@ -1207,6 +1221,7 @@ KNOWN_SCENES: dict[str, str] = {
     "compliance_check": "规范符合性检查",
     "expert_review": "专家论证预检",
     "consistency_audit": "全文一致性审计（预检）",
+    "review_autofix": "审核预检问题自动修复",
     # —— 图表 / 配图 ——
     "chart_fix": "图表（Mermaid/图表数据）修复",
     "image_prompt_optimize": "配图提示词优化",
@@ -1809,12 +1824,26 @@ def extract_usage(provider) -> dict:
         return empty
 
 
-def _json_mode_unsupported(err: str) -> bool:
-    """判断错误是否属于「厂商不支持 response_format(json_object)」。"""
-    s = (err or "").lower()
-    if "response_format" in s or "json_object" in s or "json mode" in s:
-        return True
-    return "400" in s and "json" in s
+# ---------------------------------------------------------------------------
+# JSON 模式（response_format=json_object）兼容性判定 —— 薄包装
+# ---------------------------------------------------------------------------
+def _json_mode_unsupported(err) -> bool:
+    """判断错误是否属于「厂商不支持 response_format(json_object)」（薄包装）。
+
+    ✅ 2026-10-01：判据本体已下沉到 ``services/ai/json_mode_compat.py``
+    （唯一事实源）。此前本模块与 ``providers/openai_compatible.py`` 各有一份
+    判据、且都只认英文关键词 —— 国内厂商返回中文错误（「该模型暂不支持 JSON
+    输出」等）时两端都漏判：不摘字段重试、不回退普通模式，且把「参数不兼容」
+    计入熔断失败与配额冷却，整条候选链用同一原因逐个失败，JSON 类任务全挂。
+
+    本函数**保留原名**（唯一调用点零改动），只做转发 —— 新增厂商 / 新增报错
+    形态时只改 json_mode_compat，禁止在此或 providers 侧内联关键词
+    （护栏：tests/test_json_mode_unsupported_20261001.py）。
+
+    注：关键字表随之从本模块移除，``_JSON_MODE_*`` 别名不再导出
+    （无其它调用点；重复导出会诱导后人绕过唯一事实源）。
+    """
+    return json_mode_unsupported(err)
 
 
 def _error_summary(e: Exception) -> str:

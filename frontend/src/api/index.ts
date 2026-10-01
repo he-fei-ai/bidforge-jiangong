@@ -429,13 +429,15 @@ export const docPipelineApi = {
 };
 
 // =========================================================================
-// ✅ 项目资料结构化提取（18 项 AI 并发提取：12 项方案基本信息 + 6 项施工组织设计，
-//    17 必选 + 1 可选，13 分组，对齐《专项方案生成与编制 — 基本信息需求清单》）
+// ✅ 项目资料结构化提取（19 项 AI 并发提取：12 项方案基本信息 + 6 项施工组织设计
+//    + 1 项技术评分要求，17 必选 + 2 可选，14 分组；
+//    前 18 项对齐《专项方案生成与编制 — 基本信息需求清单》，
+//    第 19 项「技术评分要求」为 2026-09-30 对齐参考软件新增）
 //
 // ⚠️ 口径唯一来源是后端 /bid-analysis/items（total / required_count /
 //    optional_count / markdown_count / json_count / group_count）。本节注释里的
-//    数字仅作导读；此前这里残留「20 项 / 14 项 / 15 分组」，与实际 18/12+6/13
-//    长期不一致，排查时极易被误导，故不再在此声明任何可能失真的数字。
+//    数字仅作导读；此前这里残留「20 项 / 14 项 / 15 分组」，与实际长期不一致，
+//    排查时极易被误导，故不再在此声明任何可能失真的数字。
 // =========================================================================
 export const bidAnalysisApi = {
   /**
@@ -446,8 +448,25 @@ export const bidAnalysisApi = {
    * 只读 API，无副作用，重试安全。
    */
   items: () => withRetry(() => api.get("/bid-analysis/items")),
-  /** 单个解析项定义 */
-  item: (itemId: string) => api.get(`/bid-analysis/items/${itemId}`),
+  /**
+   * ✅ 2026-09-30（第十一轮 · 招标响应域）：按提取域取解析项定义。
+   * domain 省略时后端返回 scheme 域（与旧版逐字一致）；未知域后端返回
+   * 空清单 + domain_unknown=true（fail-closed，不静默回退）。
+   */
+  itemsByDomain: (domain?: string) =>
+    withRetry(() =>
+      api.get("/bid-analysis/items", { params: domain ? { domain } : undefined }),
+    ),
+  /**
+   * 可用提取域清单及启用状态（前端据此决定是否展示域切换器）。
+   * 未启用的域 enabled=false，后端对未启用域的 /items 返回 404。
+   */
+  domains: () => withRetry(() => api.get("/bid-analysis/domains")),
+  /** 单个解析项定义（返回体带 domain 与 fields 两个加法式字段） */
+  item: (itemId: string, domain?: string) =>
+    api.get(`/bid-analysis/items/${itemId}`, {
+      params: domain ? { domain } : undefined,
+    }),
   /** 多标段检测（对已解析文档运行规则检测） */
   checkSections: (schemeId: string, projectId?: string) =>
     api.post("/bid-analysis/check-sections", null, {
@@ -521,6 +540,10 @@ export const bidAnalysisApi = {
     mode?: "key" | "full" | "custom" | "item";
     selected_item_ids?: string[];
     force_rerun?: boolean;
+    /** ✅ 2026-09-30：提取域，省略 = scheme 域（与旧版一致） */
+    domain?: "scheme" | "bid_response";
+    /** ✅ 2026-09-30：断点续跑，跳过已成功项（单项重跑/force_rerun 恒忽略） */
+    skip_done?: boolean;
   }) => api.post("/bid-analysis/start", data, { timeout: 600000 }),
   /**
    * ✅ SSE 实时推送版（正式使用）
@@ -532,6 +555,10 @@ export const bidAnalysisApi = {
     mode?: "key" | "full" | "custom" | "item";
     selectedItemIds?: string[];
     forceRerun?: boolean;
+    /** ✅ 2026-09-30：提取域，省略 = scheme 域（与旧版一致） */
+    domain?: "scheme" | "bid_response";
+    /** ✅ 2026-09-30：断点续跑 */
+    skipDone?: boolean;
   }) => {
     const params: Record<string, string> = { scheme_id: schemeId };
     if (projectId) params.project_id = projectId;
@@ -540,6 +567,8 @@ export const bidAnalysisApi = {
       params.selected_item_ids = JSON.stringify(opts.selectedItemIds);
     }
     if (opts?.forceRerun) params.force_rerun = "true";
+    if (opts?.domain) params.domain = opts.domain;
+    if (opts?.skipDone) params.skip_done = "true";
     return { path: "/bid-analysis/start-sse", params };
   },
   /**
@@ -676,6 +705,47 @@ export const consistencyRepairApi = {
     api.get(`/schemes/${schemeId}/consistency/repairs`, { params: { limit } }),
   snapshots: (schemeId: string, limit = 20) =>
     api.get(`/schemes/${schemeId}/consistency/snapshots`, { params: { limit } }),
+};
+
+// 审核与预检 · 问题定向自动修复（定位矛盾位置 → AI 改写 → 落库/回滚）
+// apply 会真实调用 AI 改写正文并落库，超时放宽到 3 分钟
+export const reviewAutoFixApi = {
+  /** 全部规则的修复能力表（按钮可用性的唯一判据） */
+  capabilities: (schemeId: string) =>
+    api.get(`/schemes/${schemeId}/review/autofix/capabilities`),
+  /** 定位矛盾位置（只读预览，不调 AI、不落库） */
+  plan: (schemeId: string, data: { rule_id: string; section_id?: string }) =>
+    api.post(`/schemes/${schemeId}/review/autofix/plan`, data, { timeout: 120000 }),
+  /** 执行修复 */
+  apply: (schemeId: string, data: { rule_id: string; section_id?: string }) =>
+    api.post(`/schemes/${schemeId}/review/autofix/apply`, data, { timeout: 180000 }),
+  /** 按快照回滚 */
+  rollback: (schemeId: string, data: { snapshot_id: string }) =>
+    api.post(`/schemes/${schemeId}/review/autofix/rollback`, data),
+  /** 修复批次历史 */
+  repairs: (schemeId: string, limit = 20) =>
+    api.get(`/schemes/${schemeId}/review/autofix/repairs`, { params: { limit } }),
+  /** 只读收集当前总检问题，标注自动修复能力 + 定位预览 */
+  collect: (schemeId: string, data: { scope?: "all_blocking" | "auto_fixable" | "all" } = {}) =>
+    api.post(`/schemes/${schemeId}/review/autofix/collect`, data, { timeout: 120000 }),
+  /** 批量定位 + 改写 + 校验，暂存为待确认批次（不落库） */
+  stage: (
+    schemeId: string,
+    data: {
+      rule_ids?: string[];
+      scope?: "all_blocking" | "auto_fixable" | "all";
+    } = {},
+  ) => api.post(`/schemes/${schemeId}/review/autofix/stage`, data, { timeout: 180000 }),
+  /** 逐条/批量 接受（落库）或 拒绝（丢弃/回滚） */
+  confirm: (
+    schemeId: string,
+    data: {
+      batch_id: string;
+      accept_all?: boolean;
+      accept?: string[];
+      reject?: string[];
+    },
+  ) => api.post(`/schemes/${schemeId}/review/autofix/confirm`, data, { timeout: 180000 }),
 };
 
 // 知识库 / 素材库（§3.9；生成链路自动注入项目级条目）

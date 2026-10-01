@@ -131,7 +131,74 @@ def _looks_binary(content: bytes) -> bool:
     return nontext / len(head) > 0.1
 
 
-MAX_PDF_PAGES = 50
+def _reject_binary_text_ext(content: bytes) -> None:
+    """文本扩展名（txt/md/csv）的二进制防护。
+
+    ✅ 修复（2026-09-26，F1）：旧实现二进制检测只在「扩展名未知」时执行，
+    ``.exe`` 改名 ``.txt`` 会绕过，经 ``utf-8(errors="ignore")`` 兜底解码成
+    乱码入库、污染事实提取。这里对文本扩展名同样做防护：以**原始字节**判定
+    为主（含 NUL / 高比例控制字符即疑似二进制）—— 避免 gbk 把含 0x00 的二进制
+    静默解成带 ``U+0000`` 的"文本"而漏过。仅当严格解码成功且解码结果**不含
+    NUL** 才确为文本放行。
+    """
+    if not _looks_binary(content):
+        # 原始字节不像二进制：正常文本（UTF-8/GBK 均无 NUL），直接放行
+        return
+    # 疑似二进制：二次确认 —— 严格解码（utf-8-sig/gbk）能成功且解码结果不含
+    # NUL，才确为文本；否则（解码失败或仍含 NUL）拒绝。
+    for enc in ("utf-8-sig", "gbk"):
+        try:
+            text = content.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        if "\x00" not in text:
+            return
+    raise ParseError(
+        "文件内容疑似二进制（扩展名与真实内容不符）：请确认源文件类型，"
+        "保留原始扩展名（.txt/.md/.csv 等文本）后重新上传")
+
+
+def _resolve_pdf_max_pages(default: int = 50) -> int:
+    """读取 PDF 文本层页数上限（``settings.pdf_text_max_pages``）。
+
+    独立的单一出口，便于：① 单测直接 monkeypatch 本函数验证回退；
+    ② 将来若改成「按文件体积动态决定」只需改这一处。
+
+    两类非法输入都必须回落到 ``default``，**绝不静默取小值**：
+
+    - 非正数（``0`` / 负数）→ 返回 0 会让 ``doc.pages(0, 0)`` 一页都不解析，
+      且因「页数 > 上限」不成立而**不产生任何截断告警** —— 用户拿到空文档
+      却看不到原因。
+    - **非整数**（``3.7`` / ``"50.5"``）→ 若直接 ``int()`` 截断会得到 3，
+      于是「配了个小数」静默变成「只解析 3 页」，比报错糟得多。
+    """
+    try:
+        from app.config import settings
+        raw = getattr(settings, "pdf_text_max_pages", default)
+    except Exception:  # pragma: no cover - 配置不可用时保持旧行为
+        return default
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return default
+    # 非整数输入：只有「数值上恰好等于其整数部分」时才接受
+    try:
+        if float(raw) != n:
+            return default
+    except (TypeError, ValueError):
+        return default
+    return n if n > 0 else default
+
+
+# ⚠️ 修复（2026-09-30 第十四轮 · P0 数据丢失）：旧值是**硬编码 50**且不可配置。
+#    招标文件 / 施工组织设计常见 100~400 页 —— 一份 300 页的招标文件只提取前
+#    50 页，**后面 250 页的工程参数、清单、图纸说明全部丢失**，且不会进入
+#    目录 / 正文 / 事实 / 导出任何一级。
+#    改为读 ``settings.pdf_text_max_pages``（默认 500，与 MAX_PARSED_CHARS
+#    =400000 字 ≈ 500 页对齐，避免「解析了却在落库环节二次截断」）。
+#    ⚠️ 仍保留为**模块级常量**：全部调用点按模块全局读取，故既有
+#    ``monkeypatch.setattr(fp, "MAX_PDF_PAGES", N)`` 的单测全部照常生效。
+MAX_PDF_PAGES = _resolve_pdf_max_pages()
 # ✅ 增强：机械统计表（全局事实最高价值结构化区）常超 100 行，旧上限会静默丢行。
 #    解析产物只是文本，后续 split_into_chunks 会按 8000 字/段切分，
 #    把超长表拆成多段（每段复用表头），不会造成输入爆炸。上调到 1000 行，
@@ -229,6 +296,11 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
 
     # 嗅探/兜底可能改写了 ftype，同步到诊断字典
     diag["file_type"] = ftype
+
+    # ✅ F1 修复（2026-09-26）：文本扩展名同样做二进制防护（见 _reject_binary_text_ext）。
+    #    旧实现二进制检测只在「扩展名未知」时执行，.exe 改名 .txt 会绕过。
+    if ftype in ("txt", "md", "csv"):
+        _reject_binary_text_ext(content)
 
     # ✅ 压缩炸弹闸门：DOCX/XLSX 为 ZIP 容器，解析前先校验归档规模。
     #    .xls / .doc / .wps 是 OLE 复合文档，不适用本检查。
@@ -460,23 +532,68 @@ def _decode_text_ex(content: bytes) -> tuple[str, list[str]]:
     持久化透传，前端可在「信息显示窗口」诊断区看见编码风险。
     """
     warnings: list[str] = []
+    text: str | None = None
     try:
-        return content.decode("utf-8-sig"), warnings
+        text = content.decode("utf-8-sig")
     except UnicodeDecodeError:
-        pass
-    for enc in ("gbk", "gb18030"):
-        try:
-            text = content.decode(enc)
-        except UnicodeDecodeError:
-            continue
+        text = None
+    if text is None:
+        for enc in ("gbk", "gb18030"):
+            try:
+                text = content.decode(enc)
+            except UnicodeDecodeError:
+                continue
+            warnings.append(
+                f"文本非 UTF-8，已按 {enc} 解码（可能存在乱码，建议确认源文件编码）")
+            break
+        if text is None:
+            # UTF-8 / GBK 均失败：以 UTF-8 容错解码，保证不崩、乱码可控（但需告警）
+            warnings.append(
+                "源文件编码无法识别（非 UTF-8/GBK/GB18030），已按 UTF-8 容错解码，"
+                "可能存在乱码，建议确认源文件编码（如 Big5/Shift-JIS）")
+            text = content.decode("utf-8", errors="ignore")
+    # ✅ F5 修复（2026-09-26）：归一不可见字符，避免污染事实去重与比对。
+    text, _inv_changed = _normalize_invisible(text)
+    if _inv_changed:
         warnings.append(
-            f"文本非 UTF-8，已按 {enc} 解码（可能存在乱码，建议确认源文件编码）")
-        return text, warnings
-    # UTF-8 / GBK 均失败：以 UTF-8 容错解码，保证不崩、乱码可控（但需告警）
-    warnings.append(
-        "源文件编码无法识别（非 UTF-8/GBK/GB18030），已按 UTF-8 容错解码，"
-        "可能存在乱码，建议确认源文件编码（如 Big5/Shift-JIS）")
-    return content.decode("utf-8", errors="ignore"), warnings
+            "源文件含不可见控制字符 / 零宽字符 / 不间断空格，已自动归一"
+            "（删除或替换为空格），可能影响事实去重与比对")
+    return text, warnings
+
+
+def _normalize_invisible(text: str) -> tuple[str, bool]:
+    """归一不可见字符：删除 NUL 与 C0 控制字符（保留 \\n/\\t、\\r 归一为 \\n）、
+    删除零宽字符（U+200B/C/D、非首部 U+FEFF）、NBSP(U+00A0) 替换为空格。
+
+    ✅ 修复（2026-09-26，F5）：这些字符会钻进 AI 返回的 JSON 围栏破坏解析、
+    让同一事实因隐藏字符被判为不同键产生重复、污染 normalized evidence 比对。
+    返回 ``(归一后文本, 是否发生过修改)``。
+    """
+    out: list[str] = []
+    changed = False
+    for ch in text:
+        o = ord(ch)
+        if ch == "\r":
+            # 归一为换行：\\r\\n → \\n，孤立 \\r 直接丢弃
+            changed = True
+            continue
+        if o == 0xFEFF:
+            # BOM 已由 utf-8-sig 剥离；残留的 FEFF 视为零宽删除
+            changed = True
+            continue
+        if ch in ("\u200b", "\u200c", "\u200d"):
+            changed = True
+            continue
+        if o == 0x00A0:
+            out.append(" ")
+            changed = True
+            continue
+        if o < 0x20 and ch != "\n" and ch != "\t":
+            # 其它 C0 控制字符（含 NUL）删除
+            changed = True
+            continue
+        out.append(ch)
+    return "".join(out), changed
 
 
 def _decode_text(content: bytes) -> str:
@@ -958,7 +1075,10 @@ def _parse_pdf(content: bytes, diag: dict | None = None,
                 text = _add_page_markers(page_items)
         except Exception as e:
             fitz_open_failed = True
-            logger.warning("PyMuPDF 解析失败: %s", e)
+            # ✅ A-9（2026-10-01）：这是 PDF **主通道整体失败**的唯一日志点，
+            #    旧实现无堆栈，无法区分「文件损坏 / 加密 / 缺字体 / 引擎版本问题」，
+            #    而这些成因的处理方式完全不同。
+            logger.warning("PyMuPDF 解析失败: %s", e, exc_info=True)
             text = ""
 
     if not text.strip():
@@ -1285,9 +1405,10 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
                 parts.append(f"【工作表：{ws.title}】")
                 # ✅ 增强：表头智能识别（与 CSV 同口径，2026-09-17）
                 parts.extend(render_table_with_header(rows))
-                # ✅ 修复：工作表行数超上限时记录告警（原静默截断，机械统计表
-                #    常超上限，用户无从得知部分行丢失）
-                if ws.max_row and ws.max_row > MAX_EXCEL_ROWS:
+                # ✅ 性能修复（2026-09-26，F3）：仅在读满上限（len(rows)==上限）
+                #    时才访问 ws.max_row —— 该属性在缺 <dimension> 元数据的文件里
+                #    会触发整表扫描。小表未读满上限则不触发扫描，避免无谓开销。
+                if len(rows) >= MAX_EXCEL_ROWS and (ws.max_row or 0) > MAX_EXCEL_ROWS:
                     _note_truncation(
                         diag,
                         f"Excel 工作表「{ws.title}」共 {ws.max_row} 行，"

@@ -1,0 +1,374 @@
+/**
+ * 审核预检 · 批量「一键修复全部阻断项」弹窗（2026-10-01）
+ *
+ * 在现有单条 AutoFixModal 之上做加法，对应后端三端点：
+ *   /collect（只读收集，标注 auto_fixable + 定位预览）
+ *   /stage （批量定位 + 改写 + 校验，暂存为待确认批次，**不落库**）
+ *   /confirm（逐条/批量 接受落库 或 拒绝丢弃）
+ *
+ * 交互分三步：
+ *   1. 收集：点开即调 /collect，列出当前所有「阻断 + 可自动修复」项及定位预览
+ *      （只读、不调 AI、不落库），让用户先看到「要修哪些、修在哪」。
+ *   2. 暂存预览：点「生成修复预览」调 /stage，逐条做最小必要改写并校验，
+ *      按章展示「修复前 / 修复后」对比（含句子级定位），每条可单独勾选接受/拒绝。
+ *   3. 确认：点「确认修复（接受选中）」调 /confirm 落库 + 退回审核 + 失效缓存 +
+ *      产生可回滚快照；或点「拒绝全部」丢弃该批次（正文不动）。
+ *
+ * 能力表可用性完全取自后端 finding.autofix（唯一事实源）；落库行为复用既有
+ * repair_record 快照链路，与单条修复完全一致。
+ */
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Alert, App, Button, Checkbox, Descriptions, Divider, Empty, Modal, Space, Spin, Tag,
+  Typography,
+} from "antd";
+import {
+  CheckCircleOutlined, CloseCircleOutlined, ThunderboltOutlined,
+} from "@ant-design/icons";
+import { reviewAutoFixApi } from "../../api";
+import { hookAntdMessage } from "../../utils/activityCenter";
+import type {
+  AutoFixCollectResult, AutoFixStageItem, AutoFixStageResult,
+} from "../../types/audit";
+
+const { Text, Paragraph } = Typography;
+
+const itemKey = (r: AutoFixStageItem) => `${r.rule_id}|${r.section_id}`;
+
+export interface BatchFixModalProps {
+  schemeId: string;
+  open: boolean;
+  onClose: () => void;
+  /** 确认修复/回滚后通知宿主页刷新（正文已变，总检结论已过期） */
+  onFixed?: (snapshotId: string) => void;
+}
+
+type Phase = "collecting" | "reviewing" | "done";
+
+function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps) {
+  const { message: _antdMsg } = App.useApp();
+  const msg = hookAntdMessage(_antdMsg, "审核预检");
+  const [collectData, setCollectData] = useState<AutoFixCollectResult | null>(null);
+  const [stageData, setStageData] = useState<AutoFixStageResult | null>(null);
+  const [phase, setPhase] = useState<Phase>("collecting");
+  const [busy, setBusy] = useState(false);
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [doneInfo, setDoneInfo] = useState<{
+    accepted: number; sections: number; snapshotId: string;
+  } | null>(null);
+
+  const reset = useCallback(() => {
+    setCollectData(null);
+    setStageData(null);
+    setPhase("collecting");
+    setBusy(false);
+    setSelected({});
+    setDoneInfo(null);
+  }, []);
+
+  const close = useCallback(() => {
+    reset();
+    onClose();
+  }, [reset, onClose]);
+
+  // 步骤 1：只读收集阻断 + 可修复项
+  const collect = useCallback(async () => {
+    setBusy(true);
+    setPhase("collecting");
+    try {
+      const { data } = await reviewAutoFixApi.collect(schemeId, { scope: "all_blocking" });
+      setCollectData(data as AutoFixCollectResult);
+    } catch (e: any) {
+      msg.error(`收集失败：${e?.message || e}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [schemeId, msg]);
+
+  // 打开弹窗即触发收集（只读、不落库）
+  const onOpen = useCallback(() => { void collect(); }, [collect]);
+  useEffect(() => { if (open) onOpen(); }, [open, onOpen]);
+
+  // 步骤 2：批量暂存改写 + 校验（不落库）
+  const stage = useCallback(async () => {
+    setBusy(true);
+    try {
+      const { data } = await reviewAutoFixApi.stage(schemeId, { scope: "all_blocking" });
+      const s = data as AutoFixStageResult;
+      if (s.status === "empty") {
+        msg.info(s.reason || "当前范围内没有可自动修复的阻断项");
+        return;
+      }
+      setStageData(s);
+      // 默认接受所有「已修复」项；unsupported / not_located 不可接受
+      const init: Record<string, boolean> = {};
+      for (const it of s.items) if (it.status === "repaired") init[itemKey(it)] = true;
+      setSelected(init);
+      setPhase("reviewing");
+    } catch (e: any) {
+      msg.error(`暂存失败：${e?.message || e}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [schemeId, msg]);
+
+  const repairedItems = useMemo(
+    () => (stageData?.items || []).filter((i) => i.status === "repaired"),
+    [stageData],
+  );
+
+  const acceptedRuleIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const it of repairedItems) if (selected[itemKey(it)]) ids.add(it.rule_id);
+    return Array.from(ids);
+  }, [repairedItems, selected]);
+
+  const allAccepted = repairedItems.length > 0 && repairedItems.every((i) => selected[itemKey(i)]);
+
+  const toggleAll = useCallback(() => {
+    setSelected((prev) => {
+      const next = { ...prev };
+      const target = !allAccepted;
+      for (const it of repairedItems) next[itemKey(it)] = target;
+      return next;
+    });
+  }, [allAccepted, repairedItems]);
+
+  // 步骤 3：确认（接受选中）/ 拒绝（全部丢弃）
+  const doConfirm = useCallback(async (accept: boolean) => {
+    if (!stageData?.batch_id) return;
+    setBusy(true);
+    try {
+      const payload: {
+        batch_id: string; accept_all?: boolean; accept?: string[]; reject?: string[];
+      } = { batch_id: stageData.batch_id };
+      if (accept) {
+        if (acceptedRuleIds.length === 0) {
+          msg.warning("请至少勾选一项要接受修复的问题");
+          setBusy(false);
+          return;
+        }
+        // 接受全部已勾选 → 若全选则走 accept_all（后端直接取末条合并，零额外 AI）
+        if (allAccepted) payload.accept_all = true;
+        else payload.accept = acceptedRuleIds;
+      } else {
+        payload.reject = repairedItems.map((i) => i.rule_id);
+      }
+      const { data } = await reviewAutoFixApi.confirm(schemeId, payload);
+      if (data.status === "rejected") {
+        msg.info("已拒绝，正文未改动");
+        close();
+        return;
+      }
+      setDoneInfo({
+        accepted: data.accepted, sections: data.repaired_sections,
+        snapshotId: data.snapshot_id || "",
+      });
+      setPhase("done");
+      msg.success(`已修复 ${data.accepted} 项问题，涉及 ${data.repaired_sections} 个章节`);
+      onFixed?.(data.snapshot_id || "");
+    } catch (e: any) {
+      msg.error(`确认失败：${e?.message || e}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [schemeId, stageData, acceptedRuleIds, allAccepted, repairedItems, msg, onFixed, close]);
+
+  const collectFixable = collectData?.items || [];
+  const unsupportedCount = collectFixable.filter(
+    (f) => (f.autofix as any)?.fixable === false).length;
+
+  return (
+    <Modal
+      open={open}
+      onCancel={close}
+      width={900}
+      destroyOnClose
+      title={
+        <Space>
+          <ThunderboltOutlined style={{ color: "#1677ff" }} />
+          <Text strong>一键修复全部阻断项</Text>
+          <Tag color="blue">{collectFixable.length} 项可修复</Tag>
+          {unsupportedCount > 0 && <Tag>需人工 {unsupportedCount} 项</Tag>}
+        </Space>
+      }
+      footer={[
+        <Button key="close" onClick={close}>
+          {phase === "done" ? "关闭" : "取消"}
+        </Button>,
+        phase === "collecting" && (
+          <Button
+            key="stage" type="primary" icon={<ThunderboltOutlined />}
+            loading={busy} onClick={stage}
+            disabled={collectFixable.length === 0}
+          >
+            生成修复预览
+          </Button>
+        ),
+        phase === "reviewing" && (
+          <Button
+            key="reject" onClick={() => doConfirm(false)}
+            loading={busy}
+          >
+            拒绝全部
+          </Button>
+        ),
+        phase === "reviewing" && (
+          <Button
+            key="confirm" type="primary" icon={<CheckCircleOutlined />}
+            loading={busy} onClick={() => doConfirm(true)}
+            disabled={acceptedRuleIds.length === 0}
+          >
+            确认修复（接受选中 {acceptedRuleIds.length}）
+          </Button>
+        ),
+      ]}
+    >
+      {phase === "collecting" && busy && (
+        <div style={{ textAlign: "center", padding: "24px 0" }}>
+          <Spin />
+          <div style={{ marginTop: 8, fontSize: 12, color: "#999" }}>
+            正在收集阻断项与定位信息（只读，不改动正文）…
+          </div>
+        </div>
+      )}
+
+      {phase === "collecting" && !busy && collectData && (
+        <div>
+          {collectFixable.length === 0 ? (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description="当前没有可自动修复的阻断项（阻断项均须人工处理，或已无阻断项）" />
+          ) : (
+            <>
+              <Alert
+                type="info" showIcon style={{ marginBottom: 8 }}
+                message={"共 " + collectFixable.length + " 项阻断问题支持自动修复"}
+                description="点击下方「生成修复预览」将逐条做最小必要改写并展示前后对比，你可逐项决定是否接受。"
+              />
+              <div style={{ maxHeight: 320, overflowY: "auto" }}>
+                {collectFixable.map((f, i) => (
+                  <div
+                    key={`${f.rule_id}-${i}`}
+                    style={{
+                      border: "1px solid #f0f0f0", borderRadius: 6,
+                      padding: "6px 8px", marginBottom: 6, background: "#fafafa",
+                    }}
+                  >
+                    <Space size={4} wrap>
+                      <Tag color="blue" style={{ marginRight: 0 }}>{f.rule_id}</Tag>
+                      <Text strong style={{ fontSize: 12 }}>{f.title}</Text>
+                      <Tag color="volcano" style={{ marginRight: 0, fontSize: 11 }}>阻断</Tag>
+                      {(f.autofix as any)?.mode === "auto"
+                        ? <Tag color="green" style={{ marginRight: 0, fontSize: 11 }}>程序化</Tag>
+                        : <Tag color="orange" style={{ marginRight: 0, fontSize: 11 }}>AI</Tag>}
+                    </Space>
+                    <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>
+                      {f.detail}
+                    </div>
+                    {Array.isArray((f as any).targets) && (f as any).targets.length > 0 && (
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        定位：{(f as any).targets.map((t: any) =>
+                          `${t.section_title || "（未命名）"} 第 ${t.line} 行` +
+                          (t.sentence_idx ? `（第 ${t.sentence_idx}/${t.sentence_total} 句）` : ""))
+                          .join("；")}
+                      </Text>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {phase === "reviewing" && stageData && (
+        <div>
+          <Space style={{ marginBottom: 6 }} wrap>
+            <Button size="small" onClick={toggleAll}>
+              {allAccepted ? "全不选" : "全选"}
+            </Button>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              共 {stageData.items.length} 条结果，其中 {repairedItems.length} 条可修复
+            </Text>
+          </Space>
+          <div style={{ maxHeight: 360, overflowY: "auto" }}>
+            {stageData.items.map((it, i) => {
+              const key = itemKey(it);
+              const fixable = it.status === "repaired";
+              return (
+                <div
+                  key={key}
+                  style={{
+                    border: `1px solid ${fixable ? "#b7eb8f" : "#f0f0f0"}`,
+                    borderRadius: 6, padding: "6px 8px", marginBottom: 6,
+                  }}
+                >
+                  <Space size={4} wrap style={{ marginBottom: 4 }}>
+                    {fixable ? (
+                      <Checkbox
+                        checked={!!selected[key]}
+                        onChange={(e) => setSelected((p) => ({ ...p, [key]: e.target.checked }))}
+                        style={{ marginRight: 0 }}
+                      />
+                    ) : (
+                      <CloseCircleOutlined style={{ color: "#bfbfbf" }} />
+                    )}
+                    <Tag color="blue" style={{ marginRight: 0, fontSize: 11 }}>{it.rule_id}</Tag>
+                    <Text strong style={{ fontSize: 12 }}>{it.section_title || "（未命名章节）"}</Text>
+                    {it.status === "repaired"
+                      ? <Tag color="green" style={{ marginRight: 0, fontSize: 11 }}>可修复</Tag>
+                      : it.status === "unsupported"
+                        ? <Tag style={{ marginRight: 0, fontSize: 11 }}>需人工</Tag>
+                        : it.status === "not_located"
+                          ? <Tag style={{ marginRight: 0, fontSize: 11 }}>未定位</Tag>
+                          : <Tag color="red" style={{ marginRight: 0, fontSize: 11 }}>失败</Tag>}
+                  </Space>
+                  {!fixable && (
+                    <div style={{ fontSize: 11, color: "#cf1322", marginLeft: 4 }}>
+                      {it.reason || "该问题无法自动修复"}
+                    </div>
+                  )}
+                  {fixable && (
+                    <div style={{ fontSize: 11, marginLeft: 4 }}>
+                      <Text type="secondary">修复前：</Text>
+                      <pre style={{
+                        margin: "2px 0", fontSize: 11, whiteSpace: "pre-wrap",
+                        wordBreak: "break-all", color: "#999", maxHeight: 100, overflowY: "auto",
+                      }}>{it.before}</pre>
+                      <Text type="secondary">修复后：</Text>
+                      <pre style={{
+                        margin: "2px 0 0", fontSize: 11, whiteSpace: "pre-wrap",
+                        wordBreak: "break-all", color: "#333", maxHeight: 100, overflowY: "auto",
+                      }}>{it.after}</pre>
+                      {it.sentence_idx > 0 && (
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          定位：第 {it.sentence_idx}/{it.sentence_total} 句
+                        </Text>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {phase === "done" && doneInfo && (
+        <>
+          <Alert
+            type="success" showIcon
+            message={"已修复 " + doneInfo.accepted + " 项问题，涉及 " + doneInfo.sections + " 个章节"}
+            description="正文已变更：相关章节审核结论已自动退回「待审核」，请复核后重新送审；导出缓存与总检结论亦已失效。"
+          />
+          <Alert
+            type="warning" showIcon style={{ marginTop: 8 }}
+            message="如修复结果不理想，可在「审核与预检」页对该问题使用单条「自动修复」弹窗的回滚，或重新总检后再次修复。"
+          />
+        </>
+      )}
+    </Modal>
+  );
+}
+
+export default BatchFixModal;

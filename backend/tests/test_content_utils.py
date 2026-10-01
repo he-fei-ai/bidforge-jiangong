@@ -8,6 +8,7 @@
 from app.services.content_utils import (
     select_target_leaves, build_sibling_context, word_status_for, text_word_count,
     normalize_word_budget_override, resolve_concurrency,
+    find_unclosed_fences, strip_fenced_code_blocks, fence_spans,
 )
 from app.routers.sse_handlers import _apply_word_budget_allocations
 
@@ -270,20 +271,31 @@ class TestTextWordCount:
 
     def test_excludes_mermaid_block(self):
         content = "前文\n```mermaid\nflowchart TD\n  A --> B\n```\n后文"
-        assert text_word_count(content) == len("前文\n\n后文")
+        # ✅ 2026-09-28：围栏行（含开闭行）整体移除，前后正文各保留一个换行分隔
+        assert text_word_count(content) == len("前文\n后文")
 
     def test_excludes_chart_json_block(self):
         content = "说明如下：\n```chart-json\n{\"type\": \"labor\"}\n```\n"
-        assert text_word_count(content) == len("说明如下：\n\n")
+        assert text_word_count(content) == len("说明如下：\n")
 
     def test_excludes_plain_code_block(self):
         content = "示例：\n```python\nprint('x')\n```\n完"
-        assert text_word_count(content) == len("示例：\n\n完")
+        assert text_word_count(content) == len("示例：\n完")
+
+    def test_excludes_tilde_fence(self):
+        # ✅ 2026-09-28 修复：~~~ 波浪线围栏不再被误计入正文字数
+        content = "前文\n~~~mermaid\nflowchart TD\n  A --> B\n~~~\n后文文"
+        assert text_word_count(content) == len("前文\n后文文")
+
+    def test_excludes_four_backtick_fence(self):
+        # ✅ 2026-09-28 修复：4 反引号围栏不再残留单个反引号字符
+        content = "前文\n````mermaid\nflowchart LR\n````\n后文文"
+        assert text_word_count(content) == len("前文\n后文文")
 
     def test_unclosed_fence_truncates_rest(self):
         # 未闭合围栏 → 从围栏处截断，避免把整段代码当正文
         content = "前文\n```mermaid\nflowchart TD\n  A --> B"
-        assert text_word_count(content) == len("前文\n")
+        assert text_word_count(content) == len("前文")
 
     def test_inflation_guard_changes_status(self):
         """回归：一张 mermaid 图不得把 under 的正文抬成 normal。"""
@@ -294,6 +306,81 @@ class TestTextWordCount:
                  + "\n```\n")
         raw = prose + chart
         assert len(raw) >= 1200                       # 旧口径 len(raw) ≥ 1200 → 误判 normal
-        assert text_word_count(raw) == 1002           # 仅“甲”*1000 + 两个换行
+        # ✅ 2026-09-28：围栏整段移除后正文保留 prose + 1 个换行（1001 字符），
+        #    语义不变（图表代码不计入正文字数）；旧实现因正则保留围栏外的前后换行
+        #    为 1002，两者都不影响 under/over 判定。
+        assert text_word_count(raw) == 1001           # 仅“甲”*1000 + 1 个换行
         assert word_status_for(text_word_count(raw), 1500) == "under"
         assert word_status_for(len(raw), 1500) != "under"
+
+    def test_strip_fenced_blocks_parity_with_find_unclosed(self):
+        """2026-09-28 三侧口径：全部围栏已闭合时，剔除结果不再含任何围栏标记，
+        且与 find_unclosed_fences 的「未闭合判定」严格一致（CommonMark 同语义）。"""
+        closed_sample = (
+            "段落A。\n```mermaid\nflowchart LR\nA-->B\n```\n段落B。\n"
+            "~~~chart-json\n{\"type\": \"labor\"}\n~~~\n段落C。\n"
+            "````python\nx = 1\n````\n末尾。"
+        )
+        # 全部闭合 → find_unclosed_fences 为空
+        assert find_unclosed_fences(closed_sample) == []
+        stripped = strip_fenced_code_blocks(closed_sample)
+        # 剔除后不再残留任何围栏标记
+        assert "```" not in stripped and "~~~" not in stripped
+        assert text_word_count(closed_sample) == len(stripped)
+        # 正文内容保留（围栏外的文字不丢失）
+        assert "段落A。" in stripped and "末尾。" in stripped
+
+    def test_strip_fenced_blocks_truncated_and_mixed(self):
+        """2026-09-28：未闭合围栏截断 + 反引号/波浪线混合，与 find_unclosed_fences 一致。"""
+        # 未闭合 tilde 围栏 → 其后内容均视为代码
+        unclosed_t = "前文。\n~~~mermaid\nflowchart LR\n没有闭合\n最后的尾巴"
+        assert find_unclosed_fences(unclosed_t)  # 非空 = 检测到未闭合
+        # 其余行均为代码，正文只剩首行（无尾部换行）
+        assert text_word_count(unclosed_t) == len("前文。")
+        # 闭合反引号块内出现短围栏行（3 反引号）→ 仍视为代码内容，不算闭合
+        nested = "前文。\n````mermaid\nflowchart LR\n```\n````\n后文。"
+        # 4 反引号 → 3 反引号行是内容；真正的闭合是 ```` （长度 >= open_len）
+        assert find_unclosed_fences(nested) == []
+        assert text_word_count(nested) == len("前文。\n后文。")
+
+    def test_fence_spans_only_closed_blocks(self):
+        """2026-09-28：fence_spans 只给「已闭合」围栏产出区间（未闭合不生效）。"""
+        txt = "前文。\n```mermaid\nflowchart LR\n```\n中段。\n~~~chart-json\n{}\n~~~\n末段。"
+        spans = fence_spans(txt)
+        assert len(spans) == 2
+        coords = {txt[s:e] for s, e in spans}
+        assert any("flowchart LR" in c for c in coords)
+        assert any("{" in c for c in coords)
+        # 区间内容通过 strip_fenced_code_blocks 剔除后应完全消失
+        stripped = strip_fenced_code_blocks(txt)
+        for s, e in spans:
+            assert txt[s:e] not in stripped
+        # 未闭合围栏不产出区间
+        unclosed = "前文。\n```mermaid\nflowchart LR\n"
+        assert fence_spans(unclosed) == []
+        # 4 反引号围栏的闭合（长度 >= 开围栏）与 3 反引号行（内容）区分
+        four = "前文。\n````mermaid\n```\n````\n后文。"
+        sp4 = fence_spans(four)
+        assert len(sp4) == 1
+
+
+def test_module_source_compile_without_invalid_escape_warning():
+    """模块源码不得产生无效转义 SyntaxWarning（P2 · 源码卫生）。
+
+    ✅ 2026-09-28 修复：``text_word_count`` 的 docstring 内嵌正则 ``[\\s\\S]*?``
+    写在非原始字符串里，Python 3.12+ 每次编译（含测试里 ``ast.parse``）都会
+    抛出 ``SyntaxWarning: "\\s" is an invalid escape sequence`` —— 现改为
+    raw docstring。本条断言锁定「后续新增同样写法会立即被发现」。
+    """
+    import ast
+    import pathlib
+    import warnings
+    import app.services.content_utils as cu
+
+    src = pathlib.Path(cu.__file__).read_text(encoding="utf-8")
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        ast.parse(src, filename=str(cu.__file__))
+    bad = [f"{wi.filename}:{wi.lineno}: {wi.message}"
+           for wi in w if isinstance(wi.message, SyntaxWarning)]
+    assert not bad, f"模块源码存在无效转义 SyntaxWarning：{bad}"

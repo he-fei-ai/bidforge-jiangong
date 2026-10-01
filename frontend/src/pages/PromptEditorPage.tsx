@@ -33,6 +33,32 @@ const CATEGORY_LABELS: Record<string, string> = {
   共享规则: "共享规则",
 };
 
+// ✅ 2026-09-27（前端契约修复）：后端 400/409 的 detail 已经被 axios 响应
+//   拦截器解析进 error.message（见 api/index.ts:135 注释），但本页 4 处
+//   `catch {}` 把它整个丢掉、只显示「保存失败」这类固定文案。后果是
+//   「引用了不存在的共享片段 / 被他人修改 / 内容过长」这三类**用户可以自己
+//   解决**的问题，全部退化成一句无信息量的提示。现统一透传。
+function promptErrorText(err: unknown, fallback: string): string {
+  const raw = (err as { response?: { data?: { detail?: unknown } };
+                     message?: string } | null);
+  const detail = raw?.response?.data?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail.trim();
+  if (Array.isArray(detail) && detail.length) {
+    // FastAPI 422 校验错误：[{loc, msg, type}, ...]
+    const first = detail[0] as { msg?: string };
+    if (first?.msg) return first.msg;
+  }
+  if (typeof raw?.message === "string" && raw.message.trim()
+      && !/^Request failed with status code \d+$/.test(raw.message.trim())) {
+    return raw.message.trim();
+  }
+  return fallback;
+}
+
+// 与后端 routers/prompts.py::PROMPT_MAX_CHARS 保持一致（单一值 200000）。
+// 前端提前拦一道，避免用户粘贴几十万字后才收到 400（整包上传白跑）。
+const PROMPT_MAX_CHARS = 200000;
+
 export default function PromptEditorPage() {
   const { message: _antdMsg, modal } = App.useApp();
   const msg = hookAntdMessage(_antdMsg, "提示词管理");
@@ -97,12 +123,25 @@ export default function PromptEditorPage() {
   }, []);
 
   const handleSave = async (key: string) => {
+    if (editContent.length > PROMPT_MAX_CHARS) {
+      msg.error(`内容过长（${editContent.length.toLocaleString()} 字符），上限 ${PROMPT_MAX_CHARS.toLocaleString()} 字符`);
+      return;
+    }
     try {
       const { data } = await promptsApi.update(key, editContent);
       // ✅ 修复：后端把空内容按"恢复默认"处理并返回 {content, reset}，
       // 旧实现忽略响应体用本地空串覆盖 state → 界面显示空提示词，实际生效的是出厂默认
       const finalContent = data?.content ?? editContent;
-      msg.success(data?.reset ? "内容为空，已恢复默认提示词" : "提示词已更新");
+      const warnings = data?.warnings || [];
+      msg.success(
+        data?.reset ? "内容为空，已恢复默认提示词"
+          : warnings.length ? `已保存，但有 ${warnings.length} 条提醒`
+          : "提示词已更新",
+      );
+      // ✅ 2026-09-27：把后端回传的 warning 原样展示（保存成功 ≠ 一定正确）。
+      //   例：删掉了契约变量、引用了未声明的新变量 —— 这些不会阻断保存，
+      //   但若不提示，用户会以为一切正常而模板实际已失效。
+      warnings.forEach((w: string) => msg.warning(w));
       setPrompts((prev) =>
         prev.map((p) =>
           p.key === key
@@ -119,8 +158,8 @@ export default function PromptEditorPage() {
         ),
       );
       setEditingKey(null);
-    } catch {
-      msg.error("保存失败");
+    } catch (e) {
+      msg.error(promptErrorText(e, "保存失败"));
     }
   };
 
@@ -147,8 +186,8 @@ export default function PromptEditorPage() {
         const latestPrompt = promptsRef.current.find((p) => p.key === key);
         setEditContent(data.content || latestPrompt?.content || "");
       }
-    } catch {
-      msg.error("重置失败");
+    } catch (e) {
+      msg.error(promptErrorText(e, "重置失败"));
     }
   };
 
@@ -162,8 +201,8 @@ export default function PromptEditorPage() {
       if (!isMountedRef.current) return;
       setHistoryLogs(data.items || []);
       setHistoryTotal(data.total || 0);
-    } catch {
-      if (isMountedRef.current) msg.error("加载变更历史失败");
+    } catch (e) {
+      if (isMountedRef.current) msg.error(promptErrorText(e, "加载变更历史失败"));
     } finally {
       if (isMountedRef.current) setHistoryLoading(false);
     }
@@ -198,8 +237,8 @@ export default function PromptEditorPage() {
           if (editingKey === key) setEditContent(data.content || "");
           // 刷新历史列表（回滚本身也写了一条审计）
           await openHistory(key);
-        } catch {
-          msg.error("回滚失败");
+        } catch (e) {
+          msg.error(promptErrorText(e, "回滚失败"));
         }
       },
     });
@@ -385,10 +424,22 @@ export default function PromptEditorPage() {
         <Typography.Text type="secondary" style={{ display: "block", marginBottom: 8 }}>
           提示词中可使用 <Tag>{"{变量名}"}</Tag> 格式的占位符，运行时会自动替换为实际内容。
         </Typography.Text>
+        {/* ✅ 2026-09-27：超长提前拦截（与后端 PROMPT_MAX_CHARS 同值）。
+            旧实现无任何长度提示，用户粘贴几十万字后整包上传才收 400。 */}
+        {editContent.length > PROMPT_MAX_CHARS && (
+          <Alert
+            type="error"
+            showIcon
+            style={{ marginBottom: 8 }}
+            message={`当前 ${editContent.length.toLocaleString()} 字符，超过上限 ${PROMPT_MAX_CHARS.toLocaleString()} 字符，无法保存`}
+          />
+        )}
         <Input.TextArea
           value={editContent}
           onChange={(e) => setEditContent(e.target.value)}
           rows={20}
+          showCount
+          maxLength={PROMPT_MAX_CHARS}
           style={{ fontFamily: "monospace", fontSize: 13 }}
         />
       </Modal>
@@ -436,7 +487,10 @@ export default function PromptEditorPage() {
                   ) : (
                     <Tooltip
                       key="rb-na"
-                      title="此记录较早于快照功能上线，只存了哈希，无法回滚"
+                      // ✅ 2026-09-27：直接展示后端给的不可回滚原因，
+                      //   不再自己猜「较早于快照功能上线」（截断/超长也属此类）。
+                      title={log.rollback_blocked_reason
+                        || "此记录没有可用的变更前正文，无法回滚"}
                     >
                       <Button size="small" disabled icon={<RollbackOutlined />}>
                         回滚

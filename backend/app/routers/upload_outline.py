@@ -394,6 +394,10 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     # 删除不再存在的旧章节（级联清理图表预测）
     old_ids = {er["id"] for er in existing_rows}
     to_delete = old_ids - final_section_ids
+    # ✅ 正文丢失量化（与 sections._save_outline_to_db 同口径，2026-09-26）：
+    #    未匹配上的旧章节若带正文，会随本次整表重建被级联删除且不可恢复，
+    #    必须如实回传给前端提示（此前只有 preserved_content 的正向提示）。
+    cleared_content = 0
     if to_delete:
         # ✅ BUG 修复：旧实现这里是一段 `for er in existing_rows: pass` 的死代码，
         #    注释声称"递归收集所有后代 ID"但从未实现；且 SELECT 未取 parent_id。
@@ -419,6 +423,9 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
             return all_ids
 
         full_delete_ids = _collect_subtree(to_delete)
+        cleared_content = sum(
+            1 for er in existing_rows
+            if er["id"] in full_delete_ids and str(er.get("content") or "").strip())
         placeholders = ",".join("?" * len(full_delete_ids))
         await db.execute(
             f"DELETE FROM chart_predictions WHERE section_id IN ({placeholders})",
@@ -449,11 +456,20 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     # ✅ 整表重建后作废一致性扫描缓存（与 /save-outline 同口径，2026-09-23）
     from app.routers.sections import invalidate_consistency_scan_cache
     await invalidate_consistency_scan_cache(db, scheme_id)
+    # ✅ 编号统一（2026-09-26 · D4 口径补齐）：本接口同样会改变保留章节的编号
+    #    （标题匹配命中后按新位置重排），必须按新编号重规范化已落库正文的子标题，
+    #    否则与 create/delete/reorder/save-outline 四处漂移。
+    from app.routers.sections import _renormalize_all_section_contents
+    await _renormalize_all_section_contents(db, scheme_id)
     await db.commit()
     result = {"ok": True, "count": counter["n"], "outline": outline}
     if preserved_count:
         result["preserved_content"] = preserved_count
         result["note"] = f"已通过标题匹配保留 {preserved_count} 个章节的已有正文内容"
+    if cleared_content:
+        result["cleared_content_sections"] = cleared_content
+        result["note"] = ((result.get("note", "") + "；") if result.get("note") else "") + \
+            f"另有 {cleared_content} 个未匹配章节的已生成正文被清除"
     return result
 
 

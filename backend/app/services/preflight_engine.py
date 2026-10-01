@@ -18,7 +18,8 @@
 -----------------
 - §3.10.3 控制字符检查 → ``DLV-05``
 - §3.10.3 计算书缺失检查 → ``TRC-01`` / ``CMP-09``
-- §3.12.4 查重检查（相似度 > 80%）→ ``CON-05``
+- §3.12.3 查重检查（相似度 > 80%）→ ``CON-05``（整章级 Jaccard）
+  / ``CON-06``（段落级骨架归一 + Dice，见 ``services/duplicate_detection.py``）
 
 输出契约
 --------
@@ -39,17 +40,23 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
 
-from app.services.audit_rules import RULE_VERSION, SEVERITY_ORDER, get_rule
+from app.services.audit_rules import (
+    RULE_VERSION, SEVERITY_ORDER, get_rule, _resolve_base_rule,
+)
 from app.services.content_polish import find_colloquial_hits
 from app.services.content_utils import find_unclosed_fences
+from app.services.duplicate_detection import find_cross_section_copies
 from app.services.standards_registry import (
     ABOLISHED_STANDARDS, CATEGORY_STANDARDS, find_abolished_codes,
     is_known_standard, match_categories, normalize_standard_code,
 )
+
+logger = logging.getLogger("preflight_engine")
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -143,10 +150,30 @@ class PreflightContext:
         return "\n\n".join((s.get("content") or "") for s in self.sections)
 
 
+def _resolve_rule(rule_id: str):
+    """按 rule_id 定位规则，容忍派生编号（``CON-05-1`` → 基规则 ``CON-05``）。
+
+    ✅ BUG 修复（2026-09-27）：查重规则按出现顺序派生编号（``CON-05-1``、``CON-05-2``…）
+    以避免 ``merge_findings`` 按 rule_id 去重时把多对重复塌缩成一条。但派生 ID 在注册表里
+    并不存在，``get_rule`` 返回 None → **dimension 退化为空串**，后果有三：
+      1. ``audit_scoring.score_findings`` 把空维度计入 ``unknown_dimension_count``，
+         且 consistency 维度的扣分被记到 deliverability（权重 15 → 10），总分系统性偏移；
+      2. 前端「规则说明」抽屉查不到该 ID，用户只看到裸串 ``CON-05-1``；
+      3. high 级阻断项在报告里没有行业依据（basis 为空）。
+
+    修复策略：**rule_id 保持派生值不变**（去重语义依赖它），只回退取基规则的
+    维度 / 标题 / 依据。逐级向上剥离末尾的 ``-<数字>`` 后缀直到命中注册表。
+
+    实现委托给 ``audit_rules._resolve_base_rule``（唯一事实源），避免同一套派生编号
+    解析逻辑在两处各写一遍而再次分叉（也避免 services 层反向 import 的架构问题）。
+    """
+    return _resolve_base_rule(rule_id)
+
+
 def _finding(rule_id: str, detail: str, *, evidence=None, section_id: str = "",
              section_title: str = "", suggestion: str = "") -> dict:
     """构造一条发现（自动补全规则的维度 / 严重度 / 标题 / 行业依据）。"""
-    rule = get_rule(rule_id)
+    rule = _resolve_rule(rule_id)
     return {
         "rule_id": rule_id,
         "dimension": rule.dimension if rule else "",
@@ -446,6 +473,74 @@ def _find_duplicates(sections: list) -> list:
     return out[:10]
 
 
+def check_duplication(ctx: PreflightContext) -> list:
+    """跨章节段落搬运检测（``CON-06``）。
+
+    ✅ 新增（2026-10-01）：CON-05 只做**整章级** 4-gram Jaccard —— 两章整体
+    不同时（相似度 < 80%）就漏掉「成段照抄」。而 AI 生成最常见的雷同形态恰恰
+    是整章不同、但有若干段落被原样复制到多个章节（如「安全保证措施」那段
+    被复制进「施工工艺」和「验收要求」）；加上**换数字变形**（深度 3m → 5m）
+    后，整章比对必然漏报。
+
+    本函数用**骨架归一**（数字 / 日期 / 标准号 / 百分比 → 语义占位符）
+    + **双阈值 Dice** 在**段落级**补上，纯程序、零 AI、零成本。
+
+    ⚠️ 与 CON-05 的边界（防双报）：
+      - CON-05 已判定的章节对必须从 CON-06 排除，否则同一现象被两条规则
+        同时报出、评分被双扣；
+      - 排除集合**直接复用 ``_find_duplicates`` 的输出**（同一函数、同一阈值
+        ``DUP_SIMILARITY_THRESHOLD``），不在本函数重写判定 —— 避免
+        「整章相似度」这一判据出现两份口径（本仓反复踩过的分叉陷阱）。
+
+    严重度：单句归一化字数 ≥ ``COPY_GROUP_LARGE_CHARS``（60 字）判为
+    「大段照抄」升级 high；否则 medium。派生编号 ``CON-06-N`` 与 CON-05 同法，
+    避免 ``merge_findings`` 按 rule_id 去重时把多组搬运塌缩成一条。
+    """
+    exclude_pairs = [(d.get("a_id"), d.get("b_id"))
+                     for d in _find_duplicates(ctx.sections)]
+    try:
+        res = find_cross_section_copies(ctx.sections,
+                                        exclude_pairs=exclude_pairs)
+    except Exception as exc:  # 防御性兜底：查重异常不应拖垮整轮预检
+        logger.warning("跨章节段落搬运检测异常: %s", exc, exc_info=True)
+        return []
+
+    if res.get("truncated"):
+        logger.info("跨章节段落搬运检测触顶截断（pairwise=%d），"
+                    "结论可能不完整", res.get("pairwise_compared", 0))
+
+    findings: list = []
+    for idx, g in enumerate(res.get("groups") or [], 1):
+        pairs = g.get("section_pairs") or []
+        if not pairs:
+            continue
+        head = pairs[0]
+        a_id, b_id, a_title, b_title = head
+        a_title = a_title or "（未命名章节）"
+        b_title = b_title or "（未命名章节）"
+        dice = float(g.get("dice") or 0.0)
+        detail = (f"「{a_title}」与「{b_title}」存在成段照抄"
+                  f"（骨架归一后相似度 {dice:.0%}）")
+        if len(pairs) > 1:
+            extra = "、".join(f"「{p[2] or '（未命名章节）'}」"
+                             for p in pairs[1:4])
+            detail += f"；同一段文本还出现在：{extra}"
+        f = _finding(
+            f"CON-06-{idx}",
+            detail,
+            section_title=a_title,
+            section_id=a_id or "",
+            evidence=list(g.get("sentences") or [])[:3],
+            suggestion="成段雷同属评审硬伤：请改写为各章节针对性的表述"
+                       "（换章节侧重、工艺细节与工程条件），不要复用同一段文字",
+        )
+        if g.get("large"):
+            f["severity"] = "high"
+            f["detail"] += "（大段照抄，疑似直接复制）"
+        findings.append(f)
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # 五、可追溯性（TRC-*）
 # ---------------------------------------------------------------------------
@@ -603,7 +698,8 @@ def run_preflight(ctx: PreflightContext) -> list:
         return findings
     for checker in (
         check_completeness, check_standards, check_safety,
-        check_consistency, check_traceability, check_deliverability,
+        check_consistency, check_duplication,
+        check_traceability, check_deliverability,
     ):
         try:
             findings.extend(checker(ctx))
@@ -620,7 +716,7 @@ def run_preflight(ctx: PreflightContext) -> list:
     #    章节会被 CMP-09 双发（「正文为空」+「无计算过程」），score_findings 不去重
     #    → 独立 /preflight 双扣 40 分，而 /overview 经 merge_findings 按 rule_id
     #    去重只扣一次，同一内容两条链路分数不一致。其余规则经排查均为单条最多
-    #    发一次（CON-05 已用 CON-05-N 后缀编号），去重不改变既有语义。
+    #    发一次（CON-05 / CON-06 已用 -N 后缀编号），去重不改变既有语义。
     #    异常兜底行 rule_id 为空串，不参与去重（保留全部，便于运维发现重复故障）。
     deduped: list = []
     index_by_rid: dict = {}
@@ -674,5 +770,6 @@ def preflight_stats(ctx: PreflightContext) -> dict:
 
 __all__ = [
     "PreflightContext", "run_preflight", "preflight_stats", "RULE_VERSION",
-    "LOW_WORD_THRESHOLD", "DUP_SIMILARITY_THRESHOLD",
+    "LOW_WORD_THRESHOLD", "DUP_MIN_WORDS", "DUP_SIMILARITY_THRESHOLD",
+    "check_duplication",
 ]
