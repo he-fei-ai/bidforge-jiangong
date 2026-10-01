@@ -53,8 +53,11 @@ const apiMock = vi.hoisted(() => ({
 }));
 
 vi.mock("../api", () => apiMock);
-// 编辑弹窗为独立组件（已有专门测试文件），此处 mock 为桩以隔离
-vi.mock("../components/OutlineLibraryEditModal", () => ({ default: () => null }));
+// 编辑弹窗为独立组件（已有专门测试文件），此处 mock 为探针以隔离并断言接线
+vi.mock("../components/OutlineLibraryEditModal", () => ({
+  default: ({ open, libraryId }: any) =>
+    open ? <div data-testid="edit-modal" data-library-id={libraryId ?? ""} /> : null,
+}));
 
 import OutlineLibraryPage from "../pages/OutlineLibraryPage";
 
@@ -98,6 +101,11 @@ function iconBtn(iconClass: string): HTMLButtonElement | null {
   return Array.from(document.body.querySelectorAll("button")).find(
     (b) => b.querySelector(iconClass),
   ) as HTMLButtonElement | null;
+}
+function linkBtn(text: string): HTMLAnchorElement | null {
+  return Array.from(document.body.querySelectorAll("a")).find(
+    (a) => (a.textContent || "").trim() === text,
+  ) as HTMLAnchorElement | null;
 }
 /** 点击 antd 确认弹窗的「确定/删除/回滚」等 OK 按钮（danger okType 的 OK 不是 ant-btn-primary，须按文本找） */
 async function confirmOk(okText: string) {
@@ -190,6 +198,30 @@ describe("OutlineLibraryPage（目录库页面）", () => {
     });
     // 无确认弹窗
     expect(document.body.querySelector(".ant-modal-confirm")).toBeNull();
+  });
+
+  /**
+   * 预览抽屉编辑入口（2026-10-01 增强）：
+   * 预览抽屉此前只读，用户预览时发现名称/章节要改必须关抽屉再找列表行编辑按钮。
+   * 「编辑本目录」按钮 → 关闭预览 + 打开编辑弹窗且 libraryId 正确传递。
+   */
+  it("预览抽屉：点「编辑本目录」→ 关预览 + 打开编辑弹窗（libraryId 正确传递）", async () => {
+    apiMock.outlineLibraryApi.get.mockResolvedValue({
+      data: { ...ITEMS[0], outline_json: "[]", versions: [] },
+    });
+    setup();
+    await waitFor(() => expect(bodyText()).toContain("深基坑标准目录"));
+    // 点名称列链接打开预览抽屉
+    fireEvent.click(linkBtn("深基坑标准目录")!);
+    await waitFor(() => expect(bodyText()).toContain("目录预览"));
+    const editInDrawer = bodyBtn("编辑本目录");
+    expect(editInDrawer).toBeTruthy();
+    fireEvent.click(editInDrawer!);
+    // 编辑弹窗打开且 libraryId 传递正确（antd Drawer 关闭是延迟卸载，DOM 中
+    // 隐藏的「目录预览」标题仍在，不能以文本消失判定关闭）
+    const probe = document.body.querySelector('[data-testid="edit-modal"]');
+    expect(probe).toBeTruthy();
+    expect(probe!.getAttribute("data-library-id")).toBe("lib-1");
   });
 
   /**

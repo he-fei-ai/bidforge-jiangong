@@ -157,6 +157,45 @@ __SEGMENTS__"""
 # =========================================================================
 # 1. 解析项定义（给前端展示用）
 # =========================================================================
+#: ⚠️ 2026-10-01 定位切换（招投标 → 专项施工方案）：招标响应域已**整域下线**。
+#:
+#: 它是 2026-09-30 对齐 OpenBidKit 易标时以「加法引入」的方式接入的，当时用
+#: ``settings.bid_response_domain_enabled``（默认 False）做软开关。但软开关存在
+#: 一个真实风险：一旦有人为了调试把它显式设为 True（或环境变量写错），招投标
+#: 域就会**静默复活** —— 前端拿到 18 项招标响应清单、/start 真的能跑完评标
+#: 方法/商务条款提取，而软件此时已明确定位为专项施工方案编写软件。
+#: 硬门禁消除这条路径：无论配置怎么写，非 scheme 域一律 404。
+#:
+#: 注意区分两件事：
+#:   - 招标响应域**代码**（BID_RESPONSE_ITEMS 等）保留 —— 删除它要同步清理
+#:     主键双格式、下游跨域消费、73 个域测试，收益为零；
+#:   - 招标响应域**入口**关闭 —— 这才是「去掉招投标功能」的实质。
+_BID_RESPONSE_RETIRED_MSG = (
+    "提取域 {domain} 已下线：本软件定位为「建筑工程专项施工方案编写软件」，"
+    "招标响应分析（评标方法 / 商务条款 / 废标项等）不在服务范围内。"
+    "请改用 domain=\"scheme\"（专项方案编制域）。"
+)
+
+
+def _assert_domain_available(domain: str) -> None:
+    """校验提取域可用性（非 scheme 域一律 404）。
+
+    所有暴露 ``domain`` 参数的端点必须调用本函数（唯一出口），避免门禁在
+    某个入口漏设 —— 这是本仓反复出现的「同一判据多处各自实现」模式的反面教材。
+    未知域**不在这里**处理：/items 对未知域返回空清单 + ``domain_unknown``
+    （fail-closed 但非错误），由调用方自行判定。
+    """
+    d = domain if isinstance(domain, str) else ""
+    d = d.strip()
+    if not d or d == "scheme":
+        return
+    # 只在「该域确实注册过、但已随定位切换下线」时拦截。未知域**不在此处理**：
+    # /items 对未知域返回空清单 + domain_unknown=True 是既有契约（fail-closed
+    # 但不算错误），改它会让脚本调用方拿到 404 而非空清单。
+    if d in EXTRACTION_DOMAINS:
+        raise HTTPException(404, _BID_RESPONSE_RETIRED_MSG.format(domain=d))
+
+
 @router.get("/items")
 async def list_analysis_items(domain: str = "scheme"):
     """返回指定提取域的解析项定义（含必选标记、输出类型、分组）。
@@ -166,12 +205,12 @@ async def list_analysis_items(domain: str = "scheme"):
     增减解析项时文案失真（本轮已修正 api/index.ts 中残留的「20 项 / 14 项 / 15 分组」注释）。
 
     ✅ 2026-09-30（第十一轮）：新增 ``domain`` 参数（默认 "scheme"）。
-      - ``domain="scheme"``：本软件原有 18 项，返回结构与旧版**逐字一致**；
-      - ``domain="bid_response"``：招标响应域 18 项（需
-        ``bid_response_domain_enabled=True``，否则 404 —— 避免配置关闭时
-        前端拿到一套无法执行的清单）；
+      - ``domain="scheme"``：本软件 18 项，返回结构与旧版**逐字一致**；
+      - ``domain="bid_response"``：⚠️ 2026-10-01 定位切换后已**硬门禁下线**
+        （见 :func:`_assert_domain_available`）；
       - 未知 domain：返回空清单 + ``domain_unknown=true``（fail-closed，不静默回退）。
     """
+    _assert_domain_available(domain)
     items = get_items_by_domain(domain)
     if not items:
         return {
@@ -180,8 +219,6 @@ async def list_analysis_items(domain: str = "scheme"):
             "markdown_count": 0, "json_count": 0, "group_count": 0,
             "domain": domain, "domain_unknown": True,
         }
-    if domain != "scheme" and not settings.bid_response_domain_enabled:
-        raise HTTPException(404, "提取域 %s 未启用（设置 bid_response_domain_enabled=true）" % domain)
     # ⚠️ scheme 域沿用 get_groups() / REQUIRED_ITEM_IDS / get_all_items()，
     #    保证既有调用点与测试看到的返回结构与旧版逐字一致。
     if domain == "scheme":
@@ -219,6 +256,13 @@ async def get_analysis_item(item_id: str, domain: str = ""):
     if not item:
         raise HTTPException(404, f"解析项 {item_id} 不存在")
     item_domain = get_item_domain(item_id) or "scheme"
+    # ⚠️ 2026-10-01 定位切换：属招标响应域的解析项（techRequirements /
+    # businessScoring / 评标方法等）一律不可读 —— 即使调用方知道 item_id，
+    # 也不应能从元数据端点把招标响应域「复活」。
+    if item_domain != "scheme":
+        raise HTTPException(404, _BID_RESPONSE_RETIRED_MSG.format(domain=item_domain))
+    # 显式传 domain 时同样走统一门禁（与 /items 同口径，不各写一份判据）。
+    _assert_domain_available(domain)
     if domain and domain != item_domain:
         raise HTTPException(404, "解析项 %s 属于 %s 域，不在 %s 域" % (
             item_id, item_domain, domain))
@@ -230,17 +274,27 @@ async def get_analysis_item(item_id: str, domain: str = ""):
 
 @router.get("/domains")
 async def list_extraction_domains():
-    """返回可用提取域清单及启用状态（前端据此决定是否展示域切换器）。"""
+    """返回可用提取域清单及启用状态（前端据此决定是否展示域切换器）。
+
+    ⚠️ 2026-10-01 定位切换：招标响应域恒 ``enabled=False`` 并附
+    ``retired=True`` + ``retired_reason``，即使
+    ``settings.bid_response_domain_enabled`` 被显式设为 True。前端据此可以
+    把该域从切换器里隐藏，而不是渲染出一个点击后必然 404 的选项。
+    """
     domains = []
     for name in EXTRACTION_DOMAINS:
-        enabled = (name == "scheme") or settings.bid_response_domain_enabled
+        retired = (name != "scheme")
+        enabled = (name == "scheme")
         items = get_items_by_domain(name)
         domains.append({
             "domain": name,
             "enabled": enabled,
+            "retired": retired,
+            "retired_reason": _BID_RESPONSE_RETIRED_MSG.format(domain=name)
+            if retired else "",
             "total": len(items),
             "required_count": sum(1 for it in items if it["required"]),
-            "label": "专项方案编制域" if name == "scheme" else "招标响应域",
+            "label": "专项方案编制域" if name == "scheme" else "招标响应域（已下线）",
         })
     return {"domains": domains}
 
@@ -820,6 +874,8 @@ async def start_bid_analysis(
     force_rerun = body.get("force_rerun", False)
     # ✅ 2026-09-30（第十一轮）：提取域 + 断点续跑（默认值与旧版行为逐字一致）
     domain = body.get("domain", "scheme")
+    # ⚠️ 2026-10-01：招标响应域已下线，硬门禁拒绝（与 /items 同口径）
+    _assert_domain_available(domain)
     skip_done = bool(body.get("skip_done") or settings.bid_analysis_skip_done_when_rerun)
 
     real_pid = await _resolve_pid(db, scheme_id, project_id)
@@ -896,6 +952,9 @@ async def start_bid_analysis_sse(
 async def _start_sse_inner(db, scheme_id, project_id, mode,
                            selected_item_ids, force_rerun,
                            domain: str = "scheme", skip_done: bool = False):
+    # ⚠️ 2026-10-01：招标响应域已下线，硬门禁拒绝（与 /items、/start 同口径）。
+    # 放在最前面：门禁用例不需要真的传文档就能验证，也避免门禁之后才做校验。
+    _assert_domain_available(domain)
     real_pid = await _resolve_pid(db, scheme_id, project_id)
     if not real_pid:
         raise HTTPException(400, "需要 scheme_id 或 project_id")

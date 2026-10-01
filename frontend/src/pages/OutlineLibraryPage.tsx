@@ -591,9 +591,21 @@ export default function OutlineLibraryPage() {
         width={720}
         onClose={() => setPreviewOpen(false)}
         extra={previewData && (
-          <Dropdown menu={exportMenu(previewData)} trigger={["click"]}>
-            <Button icon={<ExportOutlined />}>导出<DownOutlined /></Button>
-          </Dropdown>
+          <Space>
+            {/* ✅ 增强（2026-10-01）：预览抽屉此前只读，用户在预览时发现名称/章节
+                要改必须关抽屉再找列表行的编辑按钮。加直接入口，预览 → 编辑闭环。 */}
+            <Button icon={<EditOutlined />}
+              onClick={() => {
+                setPreviewOpen(false);
+                setEditingId(previewData.id);
+                setEditModalOpen(true);
+              }}>
+              编辑本目录
+            </Button>
+            <Dropdown menu={exportMenu(previewData)} trigger={["click"]}>
+              <Button icon={<ExportOutlined />}>导出<DownOutlined /></Button>
+            </Dropdown>
+          </Space>
         )}
       >
         {previewLoading ? (

@@ -117,7 +117,8 @@ def _parse_mermaid_gantt(mermaid_code: str) -> list[dict] | None:
         #    `任务名 :id, 起始天, 天数`（二者均为纯数字）。旧实现只识别日期 token 与带单位
         #    工期 token（10d/2w），纯数字被整体丢弃 → start_str/duration 恒为空 →
         #    所有任务退化为「cursor+1 起、每任务 5 天」的顺序排列，导出的横道图与 AI
-        #    给出的真实进度计划完全不符（进度计划是专项方案的核心评分项）。
+        #    给出的真实进度计划完全不符（进度计划是专项施工方案第三章「施工计划」的
+        #    核心内容，失真等于方案进度承诺与现场执行脱节）。
         #    现将纯数字按 [起始天, 天数] 位置解析；仅在「无日期 token」时生效，
         #    避免 dateFormat YYYY-MM-DD 场景下把杂散数字误判为进度。
         start_day = None
@@ -338,7 +339,8 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
                 # `remarks = [t.get("remark") ...]` 永远为空、备注区高度恒为 0 ——
                 # 甘特图备注（如「春节停工」「雨季顺延」）从未被渲染过。此处补回。
                 "remark": str(t.get("remark") or t.get("note") or "").strip(),
-                # ✅ 增强：保留阶段划分（阶段划分是进度计划的关键评分项）。
+                # ✅ 增强：保留阶段划分（阶段划分是进度计划的关键内容，直接体现
+                # 方案对工期节点的组织能力）。
                 #    旧实现丢弃 section，导出的横道图看不出"准备/主体/收尾"阶段。
                 "section": str(t.get("section") or t.get("phase") or "").strip(),
             }

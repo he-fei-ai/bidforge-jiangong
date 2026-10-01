@@ -13,7 +13,7 @@
  *   6. 三级深度拦截：在三级节点下继续加子章节被拦截（告警，不新增第四级）。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, fireEvent, act } from "@testing-library/react";
+import { render, fireEvent, act, waitFor } from "@testing-library/react";
 import React from "react";
 import { App } from "antd";
 
@@ -160,5 +160,51 @@ describe("OutlineLibraryEditModal · 三级深度拦截", () => {
     fireEvent.click(bodyBtn("新增子章节")!);
     expect(bodyText()).toContain("共 3 个章节");
     expect(getActivityItems().some((i) => i.text.includes("目录最多支持 3 级"))).toBe(true);
+  });
+});
+/**
+ * 编辑模式保存链路（2026-10-01 补齐）：
+ *   1. 编辑（libraryId 存在）保存必须走 api.update 而非 api.create（改名落库）；
+ *   2. 名称可修改：改名后 payload.name 是新名称；
+ *   3. 清空的 Select 字段（无分类的历史库 / allowClear 清除）以空串传入，
+ *      不再被 axios 丢弃导致「清空不生效」。
+ */
+describe("OutlineLibraryEditModal · 编辑保存（目录名称修改 + 清空字段生效）", () => {
+  it("编辑模式：保存调用 api.update 且上抛 onSaved；改名与空串清空随 payload 落库", async () => {
+    apiMock.outlineLibraryApi.get.mockResolvedValueOnce({
+      data: {
+        // 历史库：无 type/engineering_type/profession（无分类）
+        id: "lib-9", name: "旧名称",
+        outline_json: JSON.stringify([
+          { id: "1", title: "第一章 工程概况", level: 1, children: [] },
+        ]),
+      },
+    });
+    const { onSaved } = setup(true, "lib-9");
+    await waitFor(() => expect(bodyText()).toContain("编辑目录库"));
+    // 修改目录名称（核心交互：名称可修改）
+    const nameInput = document.body.querySelector(
+      'input[placeholder*="深基坑"]',
+    ) as HTMLInputElement;
+    expect(nameInput).toBeTruthy();
+    expect(nameInput.value).toBe("旧名称");
+    fireEvent.change(nameInput, { target: { value: "深基坑新目录" } });
+    await act(async () => { fireEvent.click(bodyBtn("保存")!); });
+    await waitFor(() => {
+      expect(apiMock.outlineLibraryApi.update).toHaveBeenCalledTimes(1);
+    });
+    // 不应误走创建分支
+    expect(apiMock.outlineLibraryApi.create).not.toHaveBeenCalled();
+    expect(onSaved).toHaveBeenCalledTimes(1);
+    const payload = (apiMock.outlineLibraryApi.update.mock.calls[0] as unknown as [string, Record<string, any>])[1];
+    expect(payload.name).toBe("深基坑新目录");
+    // 清空的 Select 字段显式传空串（修复点：undefined 不再被 axios 丢弃）
+    expect(payload.type).toBe("");
+    expect(payload.engineering_type).toBe("");
+    expect(payload.profession).toBe("");
+    // 章节随编辑保存一并落库
+    const nodes = JSON.parse(payload.outline_json);
+    expect(nodes.length).toBe(1);
+    expect(nodes[0].title).toBe("第一章 工程概况");
   });
 });

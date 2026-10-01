@@ -15,7 +15,7 @@ vi.mock("../components/mermaidRuntime", () => ({
   nextMermaidId: vi.fn(() => "test-id"),
 }));
 
-import { deriveExportGate, renderChartsForExport } from "../utils/exportCharts";
+import { deriveExportGate, renderChartsForExport, type ExportGateInput } from "../utils/exportCharts";
 import { ensureMermaid, nextMermaidId } from "../components/mermaidRuntime";
 
 /**
@@ -23,7 +23,8 @@ import { ensureMermaid, nextMermaidId } from "../components/mermaidRuntime";
  *
  * 覆盖三类此前无护栏的缺陷类别：
  * 1. 导出门禁口径漂移 —— `HIGH_EXPORT_ISSUE_TYPES` 是后端
- *    `_EXPORT_ISSUE_RULE_MAP` 的前端镜像，两处分叉会让 high 问题不再阻断导出；
+ *    `_EXPORT_ISSUE_RULE_MAP` 的前端镜像，两处分叉会让 high 问题统计失真
+ *    （2026-10-01 起门禁改为只提示不阻断，该表仍决定提示中的问题计数）；
  * 2. 审核状态机前后端不一致 —— 后端 `_ALLOWED_TRANSITIONS` 与前端 `NEXT_ACTIONS`
  *    双向比对，任何一侧漏一条流转都会表现为"点了按钮收 400"；
  * 3. 派生规则编号（CON-05-N）落进前端类型与评分维度时的塌陷。
@@ -43,30 +44,28 @@ const BACKEND_HIGH_ISSUE_TYPES = [
 
 const READY = { has_run: true, released: true, stale: false };
 
-describe("导出门禁（deriveExportGate）", () => {
-  it("未做导出预检时必须阻断", () => {
-    const r = deriveExportGate({ hasPreflight: false, issues: [], readiness: READY });
-    expect(r.allowed).toBe(false);
-    expect(r.reason).toContain("预检");
+describe("导出门禁（deriveExportGate · 2026-10-01 起只提示不阻断）", () => {
+  /** 所有「审核 / 预检未完成」的组合都必须放行 —— 这是本次需求的核心不变式。 */
+  const NOT_READY_CASES: Array<[string, ExportGateInput]> = [
+    ["未做导出预检", { hasPreflight: false, issues: [], readiness: READY }],
+    ["未做预检且存在 high 问题", { hasPreflight: false, issues: [{ type: "empty_section" }], readiness: null }],
+    ["就绪度缺失", { hasPreflight: true, issues: [], readiness: null }],
+    ["就绪度未执行", { hasPreflight: true, issues: [], readiness: { has_run: false } }],
+    ["就绪度已过期", { hasPreflight: true, issues: [], readiness: { has_run: true, released: true, stale: true } }],
+    ["就绪度未放行", { hasPreflight: true, issues: [], readiness: { has_run: true, released: false } }],
+    ["预检有 high 问题", { hasPreflight: true, issues: [{ type: "empty_section" }], readiness: READY }],
+  ];
+
+  it("审核 / 预检未完成（含未预检、未跑总检、过期、未放行、有 high 问题）一律放行", () => {
+    for (const [name, input] of NOT_READY_CASES) {
+      const r = deriveExportGate(input);
+      expect(r.allowed, `${name} 不应阻断导出`).toBe(true);
+      expect(typeof r.reason).toBe("string");
+      expect(r.reason.length).toBeGreaterThan(0);
+    }
   });
 
-  it("预检 + 总检放行 + 无 high 问题 → 放行", () => {
-    const r = deriveExportGate({
-      hasPreflight: true,
-      issues: [{ type: "low_word_count", severity: "medium" }],
-      readiness: READY,
-    });
-    expect(r.allowed).toBe(true);
-    expect(r.highIssueCount).toBe(0);
-  });
-
-  it("总检未跑 / 未放行 / 已过期 三种情况都必须阻断", () => {
-    expect(deriveExportGate({ hasPreflight: true, issues: [], readiness: null }).allowed).toBe(false);
-    expect(deriveExportGate({ hasPreflight: true, issues: [], readiness: { has_run: true, released: false } }).allowed).toBe(false);
-    expect(deriveExportGate({ hasPreflight: true, issues: [], readiness: { has_run: true, released: true, stale: true } }).allowed).toBe(false);
-  });
-
-  it("每个后端 high 级 issue 类型在无 severity 字段时都必须阻断（前后端口径镜像）", () => {
+  it("每个后端 high 级 issue 类型在无 severity 字段时仍计入 highIssueCount（前后端口径镜像）", () => {
     for (const type of BACKEND_HIGH_ISSUE_TYPES) {
       const r = deriveExportGate({
         hasPreflight: true,
@@ -74,24 +73,36 @@ describe("导出门禁（deriveExportGate）", () => {
         readiness: READY,
       });
       expect(r.highIssueCount, `${type} 应计为 high`).toBe(1);
-      expect(r.allowed, `${type} 应阻断导出`).toBe(false);
+      expect(r.allowed, `${type} 也不应阻断导出`).toBe(true);
     }
   });
 
-  it("medium/low 级 issue 不阻断交付（只提示）", () => {
+  it("medium/low 级 issue 不计入 highIssueCount", () => {
     for (const severity of ["medium", "low"] as Severity[]) {
       const r = deriveExportGate({
         hasPreflight: true,
         issues: [{ type: "low_word_count", severity }],
         readiness: READY,
       });
-      expect(r.allowed, `${severity} 不应阻断`).toBe(true);
+      expect(r.highIssueCount, `${severity} 不应计为 high`).toBe(0);
+      expect(r.allowed).toBe(true);
     }
   });
 
-  it("空 issues / null issues 不抛异常且放行", () => {
-    expect(deriveExportGate({ hasPreflight: true, issues: [], readiness: READY }).allowed).toBe(true);
-    expect(deriveExportGate({ hasPreflight: true, issues: null, readiness: READY }).allowed).toBe(true);
+  it("空 issues / null issues 不抛异常且 highIssueCount 为 0", () => {
+    expect(deriveExportGate({ hasPreflight: true, issues: [], readiness: READY })).toMatchObject({ allowed: true, highIssueCount: 0 });
+    expect(deriveExportGate({ hasPreflight: true, issues: null, readiness: READY })).toMatchObject({ allowed: true, highIssueCount: 0 });
+  });
+
+  it("有 high 问题时 reason 带上问题数量，无问题时给出「不受限制」提示", () => {
+    const withHigh = deriveExportGate({
+      hasPreflight: true,
+      issues: [{ type: "empty_section" }],
+      readiness: READY,
+    });
+    expect(withHigh.reason).toContain("1");
+    const clean = deriveExportGate({ hasPreflight: true, issues: [], readiness: READY });
+    expect(clean.reason).toContain("不受");
   });
 });
 
@@ -221,30 +232,30 @@ describe("renderChartsForExport (P1-5)", () => {
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
   });
 
-  it("导出门禁：未预检时阻止", () => {
+  it("导出不受限：未预检时仍放行", () => {
     expect(deriveExportGate({
       hasPreflight: false,
       readiness: { has_run: true, released: true },
-    })).toMatchObject({ allowed: false, highIssueCount: 0 });
+    })).toMatchObject({ allowed: true, highIssueCount: 0 });
   });
 
-  it("导出门禁：high 问题按后端类型映射并阻止", () => {
+  it("导出不受限：high 问题按后端类型映射计数但不阻止", () => {
     const result = deriveExportGate({
       hasPreflight: true,
       issues: [{ type: "empty_section" }, { type: "low_word_count" }],
       readiness: { has_run: true, released: true },
     });
-    expect(result).toMatchObject({ allowed: false, highIssueCount: 1 });
+    expect(result).toMatchObject({ allowed: true, highIssueCount: 1 });
   });
 
-  it("导出门禁：就绪度未执行、过期或未放行均阻止", () => {
+  it("导出不受限：就绪度未执行、过期或未放行均放行", () => {
     const base = { hasPreflight: true, issues: [] };
-    expect(deriveExportGate({ ...base, readiness: { has_run: false } }).allowed).toBe(false);
-    expect(deriveExportGate({ ...base, readiness: { has_run: true, released: true, stale: true } }).allowed).toBe(false);
-    expect(deriveExportGate({ ...base, readiness: { has_run: true, released: false } }).allowed).toBe(false);
+    expect(deriveExportGate({ ...base, readiness: { has_run: false } }).allowed).toBe(true);
+    expect(deriveExportGate({ ...base, readiness: { has_run: true, released: true, stale: true } }).allowed).toBe(true);
+    expect(deriveExportGate({ ...base, readiness: { has_run: true, released: false } }).allowed).toBe(true);
   });
 
-  it("导出门禁：预检完成、仅 medium 问题且就绪度放行时允许", () => {
+  it("导出不受限：无 high 问题时 highIssueCount 为 0", () => {
     expect(deriveExportGate({
       hasPreflight: true,
       issues: [{ type: "low_word_count" }, { type: "chart_failed" }],

@@ -46,8 +46,11 @@ const HIGH_EXPORT_ISSUE_TYPES = new Set([
 ]);
 
 /**
- * 导出门禁唯一判定口径：必须完成本方案预检，不能存在 high 问题，
- * 且就绪度总检必须已执行、未过期并明确 released。medium/low 问题仅提示不阻断。
+ * 导出门禁（2026-10-01 起改为「只提示、不阻断」）：
+ * 审核与预检属于质量辅助流程，完成与否**不再作为导出文档的前置条件** ——
+ * 未预检、存在 high 问题、就绪度未跑 / 过期 / 未放行，均不影响导出。
+ *
+ * 保留 highIssueCount 统计，供导出页给出「建议整改」的非阻断提示。
  */
 export function deriveExportGate(input: ExportGateInput): ExportGateResult {
   const issues = input.issues || [];
@@ -56,24 +59,11 @@ export function deriveExportGate(input: ExportGateInput): ExportGateResult {
     return severity === "high" || severity === "block"
       || (!severity && HIGH_EXPORT_ISSUE_TYPES.has(issue.type || ""));
   }).length;
-  const readiness = input.readiness;
 
-  if (!input.hasPreflight) {
-    return { allowed: false, reason: "尚未对当前方案完成导出预检", highIssueCount };
-  }
-  if (highIssueCount > 0) {
-    return { allowed: false, reason: `导出预检仍有 ${highIssueCount} 个高风险问题`, highIssueCount };
-  }
-  if (!readiness?.has_run) {
-    return { allowed: false, reason: "尚未执行就绪度总检，无法确认放行结论", highIssueCount };
-  }
-  if (readiness.stale) {
-    return { allowed: false, reason: "就绪度总检结论已过期，请重新总检", highIssueCount };
-  }
-  if (!readiness.released) {
-    return { allowed: false, reason: "就绪度总检尚未放行", highIssueCount };
-  }
-  return { allowed: true, reason: "导出预检通过，就绪度总检已放行", highIssueCount };
+  const reason = highIssueCount > 0
+    ? `导出预检提示：仍有 ${highIssueCount} 个高风险问题，建议整改后再交付（不影响导出）`
+    : "导出不受审核与预检状态限制，可随时导出";
+  return { allowed: true, reason, highIssueCount };
 }
 
 function createExportAbortError(): Error {

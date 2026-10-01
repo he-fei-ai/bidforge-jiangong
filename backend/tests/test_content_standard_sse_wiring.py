@@ -47,18 +47,29 @@ _CR_SRC = _CR.read_text(encoding="utf-8")
 # ============================================================
 class TestFactsHeaderByStandard:
 
-    def test_precise_header_is_byte_identical_to_legacy_hardcoded_text(self):
-        """精准 = 默认标准 → 必须与改造前 sse_handlers 硬编码的引导语逐字一致。
+    def test_precise_header_forbids_placeholders_and_requires_fuzzy_fill(self):
+        """2026-10-01（模糊生成改造）：精准引导语不再指向占位符。
 
-        这是 NFR-3「默认精准 → 旧行为不变」的守门断言：任何对精准文案的
-        「顺手优化」都会在此失败。
+        旧断言锁定「与改造前硬编码逐字一致」（NFR-3 旧行为不变）。
+        本轮需求明确要求「正文完整生成、不留占位标记」，精准文案因此
+        **有意**从「使用占位符」改为「按模糊生成规则补齐」—— 该差异是需求本身，
+        故断言改为锁定新文案，防止回退。
         """
         legacy = (
             "全局事实变量（唯一可信数据源：与各变量相关的数据必须直接引用，"
             "不得改写、推算或另取数值；未提供的数据严禁编造，"
             "按提示词“数据真实性红线”使用占位符或条件式表述）：\n"
         )
-        assert build_facts_header(PRECISE) == legacy
+        h = build_facts_header(PRECISE)
+        assert h != legacy
+        assert "使用占位符或条件式表述" not in h
+        # 精准模式的强制逐项引用口径必须保留
+        assert "必须直接引用" in h
+        assert "不得改写、推算或另取数值" in h
+        # 新口径：按模糊生成规则补齐 + 禁止占位标记与空话
+        assert "模糊生成规则" in h
+        assert "占位标记" in h
+        assert "空话" in h
 
     def test_fuzzy_header_differs_and_allows_generalization(self):
         h = build_facts_header(FUZZY)
@@ -103,7 +114,10 @@ class TestContinueHint:
 
     def test_precise_hint_forbids_hedging(self):
         h = build_continue_hint(PRECISE)
-        assert "精准" in h and "待补充" in h
+        assert "精准" in h
+        # ✅ 2026-10-01：缺失参数改为按模糊生成规则补齐，不再要求【待补充】
+        assert "模糊生成规则" in h
+        assert "【待补充" not in h
 
     def test_fuzzy_hint_forbids_conflict(self):
         h = build_continue_hint(FUZZY)

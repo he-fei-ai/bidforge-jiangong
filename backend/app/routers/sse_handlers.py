@@ -1268,6 +1268,29 @@ def _row_chapter(row) -> str:
         return ""
 
 
+def _chapter_inject_enabled() -> bool:
+    """是否启用「章节内事实前置」（配置 ``facts_chapter_inject``）。
+
+    ✅ BUG 修复（2026-10-01 · 死开关）：该配置项自 2026-09-24 声明以来
+    **从未被任何代码读取**——「章节内事实前置」在 ``chapter`` 非空时恒启用，
+    而配置注释与 AGENTS.md §4.8 都写着「默认关闭」。后果：用户改
+    ``FACTS_CHAPTER_INJECT=false`` 想关掉章节前置，界面/正文行为**没有任何变化**，
+    属「配了不生效」的静默失效。
+
+    默认值对齐 2026-09-27 起的**实际**行为（当时已把 ``chapter=`` 接到调用点，
+    章节前置事实上已生效），故开关默认 ``True`` 而非注释里的 ``False``——
+    否则接通开关等于默认关掉已生效的能力，构成回归。设 ``False`` 即回到
+    「逐章注入全量事实文本（不排序）」的旧顺序。
+
+    读配置失败按 ``True`` 兜底：与既有实际行为一致，避免配置层异常让
+    九大章节分类突然对正文零影响。
+    """
+    try:
+        return bool(settings.facts_chapter_inject)
+    except Exception:  # pragma: no cover - 配置层异常兜底
+        return True
+
+
 def _render_facts_text(
     rows: list, *, relevant_to: dict | None = None,
     max_total: int = 6000, per_fact: int = 300,
@@ -1285,11 +1308,14 @@ def _render_facts_text(
     if relevant_to is not None:
         rows = _filter_facts_rows(rows, relevant_to)
 
-    # ✅ 章节内事实前置（facts_chapter_inject，默认关闭）：把属于本章
+    # ✅ 章节内事实前置（开关 facts_chapter_inject）：把属于本章
     #    （chapter 匹配）的事实排到最前，其余保持原序跟在后面。
+    #    ✅ BUG 修复（2026-10-01）：此处此前**不读开关**，章节前置在
+    #    ``chapter`` 非空时恒启用，而配置注释宣称「默认关闭」——开关是死的。
+    #    现按 _chapter_inject_enabled() 门控（默认 True，与既有实际行为对齐）。
     #    稳定性契约：**绝不丢事实** —— 只是重排，不是筛选；超预算时
     #    被舍弃的只会是尾部（非本章）事实，本章事实必须优先保留。
-    if chapter:
+    if chapter and _chapter_inject_enabled():
         hit: list = []
         rest: list = []
         for r in rows:
@@ -3786,7 +3812,12 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
             #    且仅在命中非空文本时才计数 —— 否则 ref_count 虚增而参考
             #    从未进入提示词（2026-09-25 修复的正是这个静默失效）。
             if getattr(settings, "scheme_auto_match_outline", False):
-                _cat_ids = [str(scheme.get("hazard_category") or "").strip()]
+                # ✅ 2026-10-01 断链修复：bid_analysis 写入的 hazard_category 是
+                #    **逗号连接的多类别码**（",".join(category_ids)，如
+                #    "foundation_pit,scaffold"），旧代码整串当单个 type 传给
+                #    IN 查询 → 多类别方案永远匹配不到任何目录库。现按逗号拆分。
+                _cat_ids = [c.strip() for c in
+                            str(scheme.get("hazard_category") or "").split(",")]
                 _cat_ids = [c for c in _cat_ids if c]
                 if _cat_ids:
                     _cat_text, _cat_hits = await build_category_reference_outline(
@@ -4841,6 +4872,7 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                         word_budget: int,
                                         eff_standard: str = "",
                                         fact_rows_for_section=None,
+                                        section_title: str = "",
                                         ) -> tuple[str, int, str, dict]:
                 """章节完成后立即持久化到数据库（不复用 buffer，避免崩溃全丢）。
 
@@ -4993,7 +5025,8 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 if eff_standard or fact_rows_for_section:
                     try:
                         report = standard_report(
-                            content, std_for_report, fact_rows_for_section or [])
+                            content, std_for_report, fact_rows_for_section or [],
+                            section_id=section_id, section_title=section_title)
                         report_json = json.dumps(report, ensure_ascii=False)
                     except Exception:
                         # 校验器异常绝不影响正文落库（降级为空报告形态 + WARNING）
@@ -5394,7 +5427,8 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 content, wc, ws, report = await _persist_section(
                     leaf_id, result, wb,
                     eff_standard=eff_standard,
-                    fact_rows_for_section=fact_rows_for_section)
+                    fact_rows_for_section=fact_rows_for_section,
+                    section_title=str(leaf.get("title") or ""))
                 return content, wc, wb, ws, report
 
             async def _auto_shrink_if_over(result: str, leaf: dict,

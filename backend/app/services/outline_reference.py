@@ -23,6 +23,22 @@ logger = logging.getLogger(__name__)
 #: 单个目录库渲染的默认字符预算
 DEFAULT_PER_LIB_BUDGET = 1800
 
+#: 危大六大类码（scheme_classification.HAZARD_CATEGORIES.id，即
+#: schemes.hazard_category 里存的值）→ 预置目录库（seed_data.SCHEME_CATALOG）
+#: 的中文分类名。两套体系「码 vs 中文名」不同源，而 outline_library.type
+#: 存的是中文名 → 旧版按 `type IN (类别码)` 匹配对预置库恒不命中，
+#: 自动匹配链路形同虚设（开关 scheme_auto_match_outline 默认关，未暴露）。
+#: 映射依据 2026-10-01 预置清单实际归属：拆除三类在「应急与专项」，
+#: 其他危大逐型式在「其他危大工程」。仅追加匹配候选，不改写入侧。
+CATEGORY_CODE_TO_SEED_TYPES: dict[str, tuple[str, ...]] = {
+    "foundation_pit": ("基坑与土方",),
+    "formwork": ("模板与支撑",),
+    "hoisting": ("起重吊装",),
+    "scaffold": ("脚手架",),
+    "demolition": ("应急与专项",),
+    "other": ("其他危大工程",),
+}
+
 
 def render_outline_text(nodes: list, prefix: str = "", max_chars: int = 0) -> str:
     """把目录树渲染成多级编号文本：`1 工程概况 —— 编写要点`
@@ -184,14 +200,27 @@ async def build_category_reference_outline(
     """
     if not category_ids:
         return "", []
+    # ✅ 2026-10-01 断链修复：类别码与预置库 type（中文分类名）两套体系不同源，
+    #    按 CATEGORY_CODE_TO_SEED_TYPES 扩展候选；原始码仍保留（用户自建库
+    #    可能直接以类别码作 type），仅追加不改写入口参数。
+    candidates: list[str] = []
+    for cid in category_ids:
+        cid = str(cid or "").strip()
+        if not cid:
+            continue
+        candidates.append(cid)
+        candidates.extend(CATEGORY_CODE_TO_SEED_TYPES.get(cid, ()))
+    candidates = list(dict.fromkeys(candidates))
+    if not candidates:
+        return "", []
     # type 有索引（schema_sql.idx_outline_library_type）；IN 列表按实参数化。
-    placeholders = ",".join("?" for _ in category_ids)
+    placeholders = ",".join("?" for _ in candidates)
     sql = (
         f"SELECT id, name, type, version, outline_json FROM outline_library "
         f"WHERE type IN ({placeholders}) AND review_status='已通过'"
     )
     try:
-        cur = await db.execute(sql, tuple(category_ids))
+        cur = await db.execute(sql, tuple(candidates))
         rows = await cur.fetchall()
     except Exception as e:
         logger.warning("按类别匹配目录库失败（不影响生成）: %s", e)

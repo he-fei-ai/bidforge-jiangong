@@ -414,6 +414,36 @@ async def scheme_report_summary(scheme_id: str, db=Depends(get_db)):
     }
 
 
+@router.get("/report-trace")
+async def scheme_report_trace(scheme_id: str, limit: int = 200, db=Depends(get_db)):
+    """获取方案内所有章节的「模糊生成内部标记」汇总（审核 / 预检只读消费）。
+
+    标记**只落库、不落正文**：写入 ``sections.last_generation_report`` 的 ``trace``
+    键，导出 DOCX 成稿里完全看不到；本端点供审核与预检模块回答「哪一章、
+    哪个位置、精准还是模糊、数据来源是什么、为什么模糊」。
+
+    Returns:
+        section_count: 含标记的章节数 / total: 标记总数（受 limit 截断后计数）
+        precise_count / fuzzy_count / warn_count / error_count /
+        placeholder_residue_count / by_category / by_reason / truncated /
+        skipped（非法行计数）/ sections: [{section_id, title, total}]
+
+        ⚠️ 逐条标记明细在**单章**口径下取用：``GET /report/{section_id}`` 的
+        ``report.trace.items``（本端点是方案级聚合，只回汇总与逐章计数，
+        避免单请求返回过大载荷）。
+    """
+    from app.services.content_trace import collect_scheme_trace
+
+    cur = await db.execute(
+        "SELECT id, title, last_generation_report "
+        "FROM sections WHERE scheme_id=? ORDER BY sort_order, created_at",
+        (scheme_id,))
+    rows = [dict(r) for r in await cur.fetchall()]
+    # 上限双向收敛：防单请求返回过大的标记清单，也不允许 0
+    cap = max(1, min(int(limit or 200), 2000))
+    return collect_scheme_trace(rows, item_cap=cap)
+
+
 @router.post("")
 async def create_section(scheme_id: str, data: SectionCreate, db=Depends(get_db)):
     # ✅ BUG 修复（2026-09-23 · 守卫缺口）：与 update_section 同口径 —— 目录生成

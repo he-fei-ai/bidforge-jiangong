@@ -17,6 +17,25 @@ from __future__ import annotations
 
 import re
 
+# ✅ 2026-10-01（模糊生成改造）：模糊表述判据、占位/空话/暴露/编造检测、
+#    提示词块、内部标记派生均已下沉到独立模块，本文件只做「生成标准」编排。
+#    收敛理由：这几份判据此前各有一份字面量（提示词一处、校验器一处、
+#    《待补充清单》一处），改一处漏一处正是本仓反复出现的分叉病。
+from app.services.content_fuzzy import (
+    BARE_PLACEHOLDER_PHRASES,
+    HEDGE_PREFIX_RE,
+    HEDGE_SUFFIX_RE,
+    LIMIT_PHRASES,
+    build_fuzzy_rules_for_standard,
+    build_no_placeholder_block,
+    detect_fuzzy_expressions,
+    scan_fabricated_dates,
+    scan_missing_reveal,
+    scan_placeholder_marks,
+    scan_vague_statements,
+)
+from app.services.content_trace import build_trace as _build_trace
+
 # ---------------------------------------------------------------------------
 # 常量与基础解析
 # ---------------------------------------------------------------------------
@@ -78,12 +97,12 @@ _SYSTEM_BLOCKS: dict[str, str] = {
     PRECISE: """## 生成标准：精准内容（本次生成强制执行）
 1. 【全局事实变量】中已设定的数值、型号、人员姓名、工期、承诺口径，必须逐项**原样引用**：数值连同单位写出（如“基坑深度 12.5m”），型号写全（如“塔吊 QTZ80”），人员写姓名与岗位（如“项目经理张伟”），工期写具体天数（如“总工期 450 日历天”）。
 2. 严禁模糊表述：“约/大约/左右/大概”等概数；“满足要求的/符合规范的/按设计确定/按合同要求/按业主要求/按相关规定”等空泛指代；“不少于/不超过/不小于/不大于”等限值（**事实本身即为限值时除外**，此时须照抄事实原话）。
-3. 事实中未设定的参数，必须输出占位标识【待补充：参数名】并注明以设计/勘察/计算书为准，严禁编造数值、型号、人员姓名与文件编号。
+3. 事实中未设定的参数**不留空、不写占位标识**：必须按下方「模糊生成规则」做合理概括、归纳、泛化，写出一句完整、专业、可施工的话；严禁编造数值、型号、人员姓名、公司名、品牌名与文件编号。
 4. 引用规范写全《名称》（编号）；条款号无把握时只写到规范层级，严禁杜撰条文号。""",
     FUZZY: """## 生成标准：模糊内容（本次生成按此执行）
 1. 【全局事实变量】作为编写**方向参考**，不强制逐项引用：数值可使用范围值或限定性表述（如“约 12m”“不小于 12m”），型号可用限定性表述（如“满足要求的塔吊”），人员可只写岗位称谓，工期可写“按合同工期”。
 2. 底线是**不得与全局事实矛盾**：不得出现与事实不同的具体数值、不同型号或相反承诺；事实给出具体值时，模糊表述只能围绕该值展开（数值偏差不得超过 ±10%）。
-3. 事实中未设定的参数可用“按设计确定”“按规范要求”等表述，但不得编造具体数值、型号、人员姓名与文件编号。
+3. 事实中未设定的参数按下方「模糊生成规则」表述（技术原则 / 标准要求 / 行业惯例），但不得编造具体数值、型号、人员姓名、公司名、品牌名与文件编号。
 4. 引用规范可只写《名称》，不强制条款号，但不得引用已废止版本、不得杜撰标准编号。""",
 }
 
@@ -92,7 +111,8 @@ _USER_BLOCKS: dict[str, str] = {
         "【本次生成标准：精准内容】\n"
         "- 上方【全局事实变量】中与本章相关的事实必须逐项原样引用（数值+单位、型号、姓名、工期、承诺口径），不得遗漏、不得改写数值。\n"
         "- 禁止“约/大约/左右/满足要求的/按设计确定/按合同要求”等模糊表述；事实本身即为限值（如“不低于 C30”）时照抄事实原话。\n"
-        "- 事实未提供而正文必需的参数，写【待补充：参数名】，严禁编造。"
+        "- 事实未提供而正文必需的参数，按「模糊生成规则」写完整表述，"
+        "严禁编造、严禁留占位标记（【待补充】【待定】等一律不允许）。"
     ),
     FUZZY: (
         "【本次生成标准：模糊内容】\n"
@@ -102,8 +122,8 @@ _USER_BLOCKS: dict[str, str] = {
 }
 
 _CONTINUE_HINTS: dict[str, str] = {
-    PRECISE: "（续写仍执行【精准内容】标准：原样引用事实数值与单位，禁用“约/左右”等模糊表述；缺失参数用【待补充：参数名】）",
-    FUZZY: "（续写仍执行【模糊内容】标准：可使用范围与限定表述，但不得与全局事实的数值、型号相矛盾）",
+    PRECISE: "（续写仍执行【精准内容】标准：原样引用事实数值与单位，禁用“约/左右”等模糊表述；缺失参数按「模糊生成规则」补齐完整表述，严禁留占位标记）",
+    FUZZY: "（续写仍执行【模糊内容】标准：可使用范围与限定表述，但不得与全局事实的数值、型号相矛盾，也不得留占位标记）",
 }
 
 
@@ -128,13 +148,15 @@ _FACTS_HEADERS: dict[str, str] = {
     PRECISE: (
         "全局事实变量（唯一可信数据源：与各变量相关的数据必须直接引用，"
         "不得改写、推算或另取数值；未提供的数据严禁编造，"
-        "按提示词“数据真实性红线”使用占位符或条件式表述）：\n"
+        "按提示词“数据真实性红线”与「模糊生成规则」补齐完整表述，"
+        "严禁留占位标记或写空话）：\n"
     ),
     FUZZY: (
         "全局事实变量（唯一可信数据源：与本章节相关的数据以其为**编写方向参考**，"
         "允许合理概括、归纳与范围表述，但不得改写事实口径、"
         "不得出现与事实冲突的数值与型号；未提供的数据严禁编造，"
-        "按提示词“数据真实性红线”使用占位符或条件式表述）：\n"
+        "按提示词“数据真实性红线”与「模糊生成规则」补齐完整表述，"
+        "严禁留占位标记或写空话）：\n"
     ),
 }
 
@@ -162,8 +184,11 @@ _FENCE_RE = re.compile(r"(?:```[\s\S]*?```|~~~[\s\S]*?~~~)")
 #: 行内代码剔除
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 
-#: 【待补充：参数名】占位符（提示词要求的合规产物，只计数不算问题）
-_PLACEHOLDER_RE = re.compile(r"【待补充[:：][^】]*】")
+#: 占位标记扫描已下沉到 app.services.content_fuzzy::scan_placeholder_marks
+#: （四类：formatted / bare / fuzzy / extended，与《待补充清单》正则同源）。
+#: 2026-10-01 起占位标记不再视为「提示词要求的合规产物」—— 正文必须完整，
+#: 残留占位标记升级为 error 级 issue（placeholder_mark），同时保留
+#: stats.placeholders 计数（既有字段，只增不减）。
 
 #: 数值（支持千分位与小数）
 _NUMBER_RE = re.compile(r"(\d[\d,]{0,12}(?:\.\d+)?)")
@@ -191,21 +216,15 @@ _MODEL_RE = re.compile(r"(?<![A-Za-z0-9])(C\d{2}|[A-Z]{2,6}\d{2,4}[A-Z0-9-]*)")
 _NORM_PREFIXES = {"GB", "JGJ", "JG", "DB", "DBJ", "CJJ", "CECS", "TB", "TJ",
                   "GBJ", "JTJ", "SL", "DL", "QB", "HG", "SH", "SY"}
 
-#: 模糊表述：前缀型（约/大约/大概 + 数字）。
-#: 负向后顾屏蔽「合约12」这类「约」非模糊语素（约定/约束后跟数字时中间有别的字，本就不匹配）。
-_HEDGE_PREFIX_RE = re.compile(r"(?<![合结])(约|大约|大概)\s*(\d[\d.]{0,12})")
-#: 模糊表述：后缀型（数字 + 可选单位 + 左右/上下/前后，如“12.5 米左右”）
-_HEDGE_SUFFIX_RE = re.compile(r"(\d[\d.]{0,12})[^0-9]{0,3}(左右|上下|前后)")
-#: 模糊表述：空泛指代（无事实豁免例外）
-_BARE_PHRASES = (
-    "满足要求的", "符合规范的", "符合要求的", "按设计确定", "按设计要求确定",
-    "按设计要求", "按合同要求", "按业主要求", "按相关规定", "按有关规定", "按规范要求",
-)
-#: 模糊表述：限值措辞（仅当事实本身使用同一措辞时豁免）
-_LIMIT_PHRASES = (
-    "不少于", "不超过", "不小于", "不大于", "不高于", "不低于",
-    "不短于", "不长于", "不厚于", "不多于",
-)
+#: 模糊表述判据（前缀型 / 后缀型 / 空泛指代 / 限值措辞）—— **唯一实现已下沉到
+#: app.services.content_fuzzy**，此处仅保留同名私有别名：
+#: 1. 供本文件下方既有实现零改动引用；
+#: 2. 供既有测试继续 import 私有名（护栏不变）。
+#: ⚠️ 改判据只改 content_fuzzy，不要在这里复制回字面量（避免两处漂移）。
+_HEDGE_PREFIX_RE = HEDGE_PREFIX_RE
+_HEDGE_SUFFIX_RE = HEDGE_SUFFIX_RE
+_BARE_PHRASES = BARE_PLACEHOLDER_PHRASES
+_LIMIT_PHRASES = LIMIT_PHRASES
 
 #: 事实标题关键词同现窗口（字符）
 _COOCCUR_WINDOW = 30
@@ -336,17 +355,31 @@ def _fact_text(row) -> tuple[str, str]:
         return "", ""
 
 
-def standard_report(content: str, standard: str, fact_rows: list) -> dict:
+def standard_report(content: str, standard: str, fact_rows: list,
+                    *, section_id: str = "", section_title: str = "") -> dict:
     """对一章已生成正文执行生成标准校验，返回结构化报告（纯函数、不抛业务异常）。
 
     参数：
         content: 最终落库正文（Markdown）
         standard: precise / fuzzy（非法值按 precise 处理）
         fact_rows: 本章**实际注入**的相关事实行（5 元组 gt,title,content,conf,chapter）
+        section_id / section_title: 仅用于内部标记（trace）定位，不影响校验结论
 
     返回：
         {standard, passed, error_count, warning_count,
-         issues:[{type,severity,message,excerpt}], stats:{...}}
+         issues:[{type,severity,message,excerpt}],
+         trace:{available,items,summary}, trace_available, stats:{...}}
+
+    issue type 值域（2026-10-01 扩展）：
+        旧：fuzzy_expression / fact_value_missing / value_mismatch /
+            value_conflict / model_conflict
+        新：placeholder_mark（error，正文残留占位标记）
+            vague_statement（warning，空话：此处省略 / 详见附件 / 后续补充 …）
+            missing_reveal（warning，暴露数据缺失：由于资料不足 / 无法确定 …）
+            fabricated_date（error，凭空编造具体日期）
+
+    trace（内部标记，可追溯性）：只落库、**不写入正文**，因此导出 DOCX 的成稿
+    里不会出现任何模糊生成标记；审核与预检模块只读消费。
     """
     std = normalize_standard(standard) or DEFAULT_STANDARD
     issues: list[dict] = []
@@ -360,9 +393,11 @@ def standard_report(content: str, standard: str, fact_rows: list) -> dict:
         exempt_limits: set[str] = set()  # 事实本身使用的限值措辞
         exempt_hedges: set[tuple] = set()  # 事实本身使用的 (模糊词, 数值)
         exempt_bare: set[str] = set()   # 事实文本中出现的空泛指代（极端保守豁免）
+        fact_all_text: list[str] = []  # 全部事实文本（编造日期比对用）
         for row in fact_rows or []:
             title, ftext = _fact_text(row)
             joined = f"{title} {ftext}"
+            fact_all_text.append(joined)
             kw = _title_keywords(title)
             for nt in extract_number_tokens(joined):
                 fact_numbers.append({**nt, "title": title, "kw": kw})
@@ -379,7 +414,14 @@ def standard_report(content: str, standard: str, fact_rows: list) -> dict:
                 if bp in joined:
                     exempt_bare.add(bp)
 
-        placeholder_count = len(_PLACEHOLDER_RE.findall(scanned))
+        # ---- 占位标记 / 空话 / 暴露缺失 / 编造日期（唯一实现在 content_fuzzy）----
+        # 2026-10-01：占位标记由「提示词要求的合规产物」升级为 error 级 issue；
+        # 空话 / 暴露缺失 / 凭空日期是本轮新增口径（此前完全无检测）。
+        placeholder_hits = scan_placeholder_marks(scanned)
+        placeholder_count = len(placeholder_hits)
+        vague_hits = scan_vague_statements(scanned)
+        reveal_hits = scan_missing_reveal(scanned)
+        fabricated_hits = scan_fabricated_dates(scanned, "\n".join(fact_all_text))
 
         # ---- 正文侧 token ----
         body_numbers = extract_number_tokens(scanned)
@@ -516,6 +558,50 @@ def standard_report(content: str, standard: str, fact_rows: list) -> dict:
                         "excerpt": _excerpt(scanned, pos),
                     })
 
+        # ============ 2026-10-01 新增：占位标记 / 空话 / 暴露缺失 / 编造日期 ============
+        # 这四类是「正文完整生成」的底线口径，与生成标准无关（精准 / 模糊都查）：
+        #   placeholder_mark  error    正文残留【待补充】等占位标记 → 交付文档直接留空
+        #   vague_statement   warning  空话（此处省略 / 详见附件 / 后续补充 / 悬空空泛指代）
+        #   missing_reveal    warning  暴露数据缺失（由于资料不足 / 无法确定 / 尚未明确）
+        #   fabricated_date   error    凭空编造具体日期（年月日齐全且不在任何事实中）
+        for ph in placeholder_hits:
+            issues.append({
+                "type": "placeholder_mark", "severity": "error",
+                "message": f"正文残留占位标记「{(ph.get('mark') or '')[:24]}」（应为完整正文）",
+                "excerpt": _excerpt(scanned, ph["char_start"]),
+            })
+        for vg in vague_hits:
+            issues.append({
+                "type": "vague_statement", "severity": "warning",
+                "message": f"正文出现{vg.get('label', '空话')}「{(vg.get('mark') or '')[:24]}」",
+                "excerpt": _excerpt(scanned, vg["char_start"]),
+            })
+        for rv in reveal_hits:
+            issues.append({
+                "type": "missing_reveal", "severity": "warning",
+                "message": f"正文出现暴露数据缺失的表述「{(rv.get('mark') or '')[:24]}」",
+                "excerpt": _excerpt(scanned, rv["char_start"]),
+            })
+        for fd in fabricated_hits:
+            issues.append({
+                "type": "fabricated_date", "severity": "error",
+                "message": f"正文出现凭空编造的具体日期「{fd.get('mark', '')}」（全局事实中无此日期）",
+                "excerpt": _excerpt(scanned, fd["char_start"]),
+            })
+
+        # ---- 内部标记（可追溯性）：只落库、不落正文 ----
+        # 派生模糊生成标记：精准（数值/型号命中事实）与模糊（无事实支撑）逐条留痕，
+        # 供审核与预检模块只读消费；绝不写入 sections.content，故导出文档看不到。
+        fuzzy_expressions = detect_fuzzy_expressions(scanned)
+        trace = _build_trace(
+            scanned=scanned, standard=std,
+            section_id=section_id, section_title=section_title,
+            fact_numbers=fact_numbers, fact_models=fact_models,
+            body_numbers=body_numbers, body_models=body_models,
+            fuzzy_expressions=fuzzy_expressions,
+            placeholder_hits=placeholder_hits,
+        )
+
         # ---- 汇总（同类型同消息去重，保留首条带 excerpt 的命中） ----
         deduped: list[dict] = []
         seen_msgs: set[tuple] = set()
@@ -528,15 +614,29 @@ def standard_report(content: str, standard: str, fact_rows: list) -> dict:
         issues = deduped
         errors = [i for i in issues if i["severity"] == "error"]
         warnings = [i for i in issues if i["severity"] == "warning"]
+        trace_summary = trace.get("summary") or {}
         return {
             "standard": std,
             "passed": len(issues) == 0,
             "error_count": len(errors),
             "warning_count": len(warnings),
             "issues": issues,
+            # ✅ 2026-10-01：内部标记（可追溯性）。**只落库** —— 写入
+            #    sections.last_generation_report 的 trace 键，绝不写入 sections.content，
+            #    因此导出 DOCX 的成稿里不会出现任何模糊生成标记。
+            "trace": trace,
+            "trace_available": bool(trace.get("available")),
             "stats": {
                 "placeholders": placeholder_count,
+                "placeholder_marks": len(placeholder_hits),
+                "vague_statements": len(vague_hits),
+                "missing_reveals": len(reveal_hits),
+                "fabricated_dates": len(fabricated_hits),
                 "fuzzy_hits": fuzzy_hits,
+                "fuzzy_expressions": len(fuzzy_expressions),
+                "trace_items": int(trace_summary.get("total", 0)),
+                "trace_precise": int(trace_summary.get("precise_count", 0)),
+                "trace_fuzzy": int(trace_summary.get("fuzzy_count", 0)),
                 "checked_facts": len(fact_groups),
                 "fact_numbers": len(fact_numbers),
                 "fact_models": len(fact_models),
@@ -555,6 +655,18 @@ def _empty_report(standard: str) -> dict:
         "error_count": 0,
         "warning_count": 0,
         "issues": [],
-        "stats": {"placeholders": 0, "fuzzy_hits": 0, "checked_facts": 0,
+        # 降级形态下同样给出 trace 结构，避免调用方分支处理（available=False 表意）
+        "trace": {"available": False, "degraded": True, "standard": standard,
+                  "section_id": "", "section_title": "", "items": [],
+                  "summary": {"total": 0, "precise_count": 0, "fuzzy_count": 0,
+                              "warn_count": 0, "error_count": 0,
+                              "placeholder_residue_count": 0,
+                              "by_category": {}, "by_reason": {},
+                              "truncated": False}},
+        "trace_available": False,
+        "stats": {"placeholders": 0, "placeholder_marks": 0, "vague_statements": 0,
+                  "missing_reveals": 0, "fabricated_dates": 0, "fuzzy_hits": 0,
+                  "fuzzy_expressions": 0, "trace_items": 0, "trace_precise": 0,
+                  "trace_fuzzy": 0, "checked_facts": 0,
                   "fact_numbers": 0, "fact_models": 0, "degraded": True},
     }

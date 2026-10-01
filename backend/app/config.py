@@ -307,6 +307,16 @@ class Settings(BaseSettings):
     # （如全文 CON-01 数值口径不一致散落在十几章），一次全改既有超时风险、
     # 也会让用户无法逐条复核；超出的按定位点数量降序跳过（可下一轮继续）。
     review_autofix_max_sections: int = 10
+    # ---------- 自动修复的重试收敛（2026-10-01） ----------
+    # 「AI 正常返回但校验不合格」时是否再问一次（True = 每章最多 2 次 AI 调用）。
+    # 默认 False：与引入前**逐字一致**（每章恒 1 次调用），且实测「再问一次
+    # 多半仍不合格」——不合格多为模型能力/口径问题，不是随机抖动。
+    review_autofix_retry_on_invalid: bool = False
+    # 按严重度分级重试（对齐 repair_agent 的 consistency_repair_retry_on_invalid_by_severity）。
+    # 默认 False（保持向后兼容）：与上一项不同，本项开启后**只在 block/high 级**
+    # 问题上重试——这类问题不修就进交付文档，质量代价大于省下的那次调用。
+    # medium/low 维持不重试。
+    review_autofix_retry_on_invalid_by_severity: bool = False
 
     # False（默认）= 完全向后兼容：批大小恒为配置值，行为与现状逐字一致。
     # True = 按 provider 实时成功率**防御性降批**：成功率低于
@@ -387,10 +397,17 @@ class Settings(BaseSettings):
     scheme_auto_classify: bool = True
 
     # ---------- 提取项目模块 · 招标响应域与分段策略（2026-09-30 · 第十一轮） ----------
-    # ✅ 对齐 OpenBidKit 易标的「提取域」概念：本软件原有 18 项为「专项方案编制域」
-    # （domain="scheme"），易标的 18 项为「招标响应域」（domain="bid_response"，
-    # 含技术评分项/技术评分要求语义二分、无效标与废标项四象限等）。
-    # 两域 item_id 零交集、业务域不同，故加法引入而非替换。
+    # 历史背景：曾对齐 OpenBidKit 易标引入「提取域」概念 —— 本软件 18 项为
+    # 「专项方案编制域」(domain="scheme")，易标 18 项为「招标响应域」
+    # (domain="bid_response"，含技术评分项/技术评分要求语义二分、无效标与废标
+    # 项四象限等)，两域 item_id 零交集，故当时按加法引入而非替换。
+    #
+    # ⚠️ 2026-10-01 定位切换（招投标 → 专项施工方案）：本软件已明确定位为
+    # 「建筑工程专项施工方案编写软件」，招标响应域整域与产品目标无关，
+    # 因此路由层加了**硬门禁**（routers/bid_analysis.py::_assert_domain_available）——
+    # 即使把本开关显式设为 True，/items?domain=bid_response 与 /start 仍返回
+    # 404 并说明原因。保留本字段仅为向后兼容旧配置与环境变量（未知键不应
+    # 让配置加载失败），**不要**再依赖它启用任何招投标能力。
     # 默认 False：GET /bid-analysis/items 只返回 scheme 域，前端与既有调用点零变化。
     bid_response_domain_enabled: bool = False
 
@@ -449,10 +466,15 @@ class Settings(BaseSettings):
     facts_chapter_classification: bool = True
 
     # 正文生成：按九大章节把全局事实精准注入各章提示词（【本章相关事实】）。
-    # 默认关闭：旧行为逐章注入按 22 类 category 分组的全量事实文本；
-    # 设 True 后，章节标题可反推九大章节码时，优先注入该章归属的事实
+    # 设 True 后，章节标题可反推九大章节码时，把该章归属的事实前置
     # （未命中该章的事实仍保留，仅作补充，不丢事实）。
-    facts_chapter_inject: bool = False
+    # ✅ BUG 修复（2026-10-01 · 死开关）：本配置项此前声明后**从未被任何代码读取**，
+    # 「章节内事实前置」在 chapter 非空时恒启用 —— 而这里的注释一直写着「默认关闭」，
+    # 与实际行为不符，用户改配置没有任何效果。现已接到
+    # sse_handlers._render_facts_text（经 _chapter_inject_enabled() 单一出口门控）。
+    # 默认值取 **True** 以对齐 2026-09-27 起的实际行为（章节前置当时已生效）；
+    # 设 False 即回到「逐章注入全量事实文本（不排序）」的旧顺序。
+    facts_chapter_inject: bool = True
 
     # ---------- 全局事实 · 参考软件易标能力落地（2026-09-30 第十三轮） ----------
     # 以下三项把 OpenBidKit 易标 globalFactsTask.cjs 的「补充 / 整理 / 预算分段」

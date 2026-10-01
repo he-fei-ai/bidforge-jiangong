@@ -206,18 +206,18 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     }
   });
 
-  it("导出文档绑定预检门禁：未预检时按钮禁用且不发导出请求", async () => {
+  /** ✅ 2026-10-01：导出不再受审核 / 预检门禁限制，未预检也必须能导出。 */
+  it("导出不受预检门禁限制：未预检时按钮仍可用且点击发起导出请求", async () => {
     renderPage();
     const label = await screen.findByText("导出文档");
     const tab = label.closest('[role="tab"]') || label;
     fireEvent.click(tab);
 
-    expect(await screen.findByText("尚未对当前方案完成导出预检")).toBeTruthy();
     const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
       .find((button) => (button.textContent || "").includes("导出 DOCX"));
-    expect(docxButton?.disabled).toBe(true);
+    expect(docxButton?.disabled).toBe(false);
     fireEvent.click(docxButton!);
-    expect(apiCalls["exportApi.docx"]).toBeUndefined();
+    await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
   });
 
   /** 门禁测试通用流：切到「审核与预检」Tab 点「开始预检」→ 再切到「导出文档」Tab。
@@ -245,7 +245,7 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     fireEvent.click(exportLabel.closest('[role="tab"]') || exportLabel);
   }
 
-  it("导出门禁-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求", async () => {
+  it("导出-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求", async () => {
     apiDefaults["exportApi.check"] = {
       data: {
         issues: [],
@@ -261,8 +261,8 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     renderPage();
     await runExportCheck();
 
-    // 门禁放行：Alert 显示通过文案
-    expect(await screen.findByText("导出预检通过，就绪度总检已放行")).toBeTruthy();
+    // 无 high 问题 → 不展示阻断式提示，按钮可用
+    expect(screen.queryByText(/高风险问题/)).toBeNull();
     const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
       .find((button) => (button.textContent || "").includes("导出 DOCX"));
     expect(docxButton?.disabled).toBe(false);
@@ -270,7 +270,7 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
   });
 
-  it("导出门禁-高风险：预检存在 high 问题 → 按钮禁用并展示问题数", async () => {
+  it("导出-高风险：预检存在 high 问题 → 仅提示问题数，按钮仍可用", async () => {
     apiDefaults["exportApi.check"] = {
       data: {
         issues: [
@@ -288,13 +288,15 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     renderPage();
     await runExportCheck();
 
-    expect(await screen.findByText(/导出预检仍有 1 个高风险问题/)).toBeTruthy();
+    expect(await screen.findByText(/仍有 1 个高风险问题/)).toBeTruthy();
     const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
       .find((button) => (button.textContent || "").includes("导出 DOCX"));
-    expect(docxButton?.disabled).toBe(true);
+    expect(docxButton?.disabled).toBe(false);
+    fireEvent.click(docxButton!);
+    await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
   });
 
-  it("导出门禁-未放行：预检无 high 但就绪度未放行 → 按钮禁用", async () => {
+  it("导出-未放行：预检无 high 但就绪度未放行 → 按钮仍可用", async () => {
     apiDefaults["exportApi.check"] = {
       data: {
         issues: [],
@@ -310,13 +312,14 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     renderPage();
     await runExportCheck();
 
-    expect(await screen.findByText("就绪度总检尚未放行")).toBeTruthy();
     const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
       .find((button) => (button.textContent || "").includes("导出 DOCX"));
-    expect(docxButton?.disabled).toBe(true);
+    expect(docxButton?.disabled).toBe(false);
+    fireEvent.click(docxButton!);
+    await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
   });
 
-  it("导出门禁-结论过期：就绪度 stale=true → 按钮禁用并提示重新总检", async () => {
+  it("导出-结论过期：就绪度 stale=true → 不影响导出，按钮仍可用", async () => {
     apiDefaults["exportApi.check"] = {
       data: {
         issues: [],
@@ -332,10 +335,11 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     renderPage();
     await runExportCheck();
 
-    expect(await screen.findByText("就绪度总检结论已过期，请重新总检")).toBeTruthy();
     const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
       .find((button) => (button.textContent || "").includes("导出 DOCX"));
-    expect(docxButton?.disabled).toBe(true);
+    expect(docxButton?.disabled).toBe(false);
+    fireEvent.click(docxButton!);
+    await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
   });
 
   it("import 子 Tab：文档解析 / 项目提取 切换均渲染且不崩溃（2026-09-25 补充）", async () => {

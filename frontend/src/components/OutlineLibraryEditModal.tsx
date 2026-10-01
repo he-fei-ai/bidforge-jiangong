@@ -540,8 +540,15 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
         return;
       }
       setSaving(true);
+      // ✅ 修复（2026-10-01）：下拉字段清空后保存不生效。Select（allowClear）清空后
+      //    值为 undefined，axios JSON 序列化会丢弃该键 → 后端 model_dump(exclude_none=True)
+      //    收不到 → 字段保留旧值，用户看到「保存成功」刷新后旧分类/专业还在。
+      //    显式转为空串，让「清空」真正落库（后端空串会正常 UPDATE 为空）。
+      const normalized = Object.fromEntries(
+        Object.entries(values).map(([k, v]) => [k, v === undefined || v === null ? "" : v]),
+      );
       const outline_json = JSON.stringify(renumberOutline(tree), null, 2);
-      const payload = { ...values, outline_json };
+      const payload = { ...normalized, outline_json };
       if (isEdit) {
         await outlineLibraryApi.update(libraryId!, payload);
         msg.success("目录库已更新");

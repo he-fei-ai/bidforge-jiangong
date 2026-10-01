@@ -87,6 +87,21 @@ SUPPLEMENT_MAX_LEN_RATIO = 3.0
 #: 故无论原章多短，至少允许增加这么多字。
 SUPPLEMENT_MIN_GROWTH = 600
 
+# ---------- 重试收敛（2026-10-01，对齐 repair_agent 的同名机制） ----------
+# 方案要求「修复失败 → 重试 1 次 → 仍失败则跳过」。旧实现**恒 1 次调用**：
+# AI 正常返回但校验不合格时直接判 failed。
+# 两个开关默认全 False ⇒ 每章恒 1 次调用，行为与引入前逐字一致。
+# ⚠️ 口径与 ``repair_agent.REPAIR_RETRY_ON_INVALID*`` 保持一致（不另立一套），
+#    但**默认值不同**：本仓实测自动修复的不合格多为「模型没按 must_contain
+#    补齐要点」，重试收益低于多花一次调用，故默认关闭、由用户显式开启。
+AUTOFIX_RETRY_ON_INVALID = bool(
+    getattr(settings, "review_autofix_retry_on_invalid", False))
+AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY = bool(
+    getattr(settings, "review_autofix_retry_on_invalid_by_severity", False))
+#: 开启分级重试时，哪些严重度值得再问一次（阻断/严重=不修就进交付文档）。
+#: 取自 ``audit_rules.SEVERITY_ORDER`` 的值域（判据单一来源）。
+AUTOFIX_RETRY_SEVERITIES = ("block", "high")
+
 FIX_MODE_AUTO = "auto"       # 纯程序化修复（不调 AI）
 FIX_MODE_AI = "ai"           # 定位后调 AI 改写
 FIX_MODE_MANUAL = "manual"   # 不支持自动修复（必须给出替代路径）
@@ -713,6 +728,22 @@ def validate_fixed(before: str, after: str, cap: Capability) -> tuple[bool, list
     return (ok and not hard), problems + soft
 
 
+def should_retry_on_invalid(finding: dict) -> bool:
+    """该 finding 校验不合格时是否值得再问一次 AI（纯函数，可单测）。
+
+    ⚠️ ``auto`` 模式（纯程序化修复）**恒不重试** —— 它不调 AI，重试只是把
+    同一段确定性代码再跑一遍，既无收益又让「调用次数」统计失真。
+    """
+    cap = capability_of(finding.get("rule_id") or "")
+    if cap.mode != FIX_MODE_AI:
+        return False
+    if AUTOFIX_RETRY_ON_INVALID:
+        return True
+    if not AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY:
+        return False
+    return (finding.get("severity") or "") in AUTOFIX_RETRY_SEVERITIES
+
+
 async def _fix_each_section(finding: dict, sections: list[dict], cap: Capability,
                             scheme: dict, facts: str, standards_text: str,
                             targets: list[dict]):
@@ -720,6 +751,11 @@ async def _fix_each_section(finding: dict, sections: list[dict], cap: Capability
 
     ``pending`` 只含**校验通过且确有变化**的章节 —— 失败章一律不进 pending，
     落库阶段自然被跳过（保留原文）。
+
+    重试口径（方案「修复失败 → 重试 1 次 → 仍失败则跳过」）：仅当
+    ``should_retry_on_invalid`` 为真时才尝试第 2 次；两次都不合格才判 failed。
+    ⚠️ **AI 调用本身异常（超时/网络/空返回）始终重试一次** —— 那是偶发故障，
+    不是模型能力问题，与 repair_agent 的既有口径一致。
     """
     by_section: dict[str, list[dict]] = {}
     for t in targets:
@@ -738,21 +774,34 @@ async def _fix_each_section(finding: dict, sections: list[dict], cap: Capability
     for sid, tgts in by_section.items():
         section = sec_by_id.get(sid) or {}
         before = section.get("content") or ""
-        try:
-            if cap.mode == FIX_MODE_AUTO:
-                after, problems = fix_programmatic(cap, before)
-            else:
-                after, problems = await fix_by_ai(
-                    cap=cap, finding=finding, scheme=scheme, section=section,
-                    targets=tgts, facts=facts, standards_text=standards_text)
-                if not problems:
-                    ok, problems = validate_fixed(before, after, cap)
-                    if not ok:
-                        after = before
-        except Exception as exc:  # AI 异常 / 渲染失败 → 该章判失败，不写库
-            logger.warning("审核预检自动修复失败 rule=%s section=%s: %s",
-                           finding.get("rule_id") or "", sid[:8], exc, exc_info=True)
-            after, problems = before, [f"修复过程异常：{exc}"]
+        after, problems = before, []
+        for attempt in (1, 2):
+            raised = False
+            try:
+                if cap.mode == FIX_MODE_AUTO:
+                    after, problems = fix_programmatic(cap, before)
+                else:
+                    after, problems = await fix_by_ai(
+                        cap=cap, finding=finding, scheme=scheme, section=section,
+                        targets=tgts, facts=facts, standards_text=standards_text)
+                    if not problems:
+                        ok, problems = validate_fixed(before, after, cap)
+                        if not ok:
+                            after = before
+            except Exception as exc:  # AI 异常 / 渲染失败 → 该章判失败，不写库
+                logger.warning("审核预检自动修复失败 rule=%s section=%s"
+                               "（第 %d 次）: %s",
+                               finding.get("rule_id") or "", sid[:8], attempt,
+                               exc, exc_info=True)
+                after, problems = before, [f"修复过程异常：{exc}"]
+                raised = True
+            if not problems:
+                break
+            # 仅「本可重试且还有次数」才继续：raised=异常恒重试；校验不合格看开关
+            if attempt == 2 or not (raised or should_retry_on_invalid(finding)):
+                break
+            logger.info("审核预检自动修复第 1 次未通过，尝试重试：rule=%s section=%s：%s",
+                        finding.get("rule_id") or "", sid[:8], problems)
         changed = not problems and after != before
         if changed:
             pending.append((sid, before, after))
@@ -938,8 +987,10 @@ async def stage_fixes(db, *, scheme_id: str, findings: list[dict],
 
 
 __all__ = [
-    "AUTOFIX_MAX_SECTIONS", "FIX_MODE_AI", "FIX_MODE_AUTO", "FIX_MODE_MANUAL",
+    "AUTOFIX_MAX_SECTIONS", "AUTOFIX_RETRY_ON_INVALID",
+    "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", "AUTOFIX_RETRY_SEVERITIES",
+    "FIX_MODE_AI", "FIX_MODE_AUTO", "FIX_MODE_MANUAL",
     "MAX_TARGETS", "SUPPLEMENT_MAX_LEN_RATIO", "Capability", "apply_fix",
     "capability_of", "capability_summary", "fix_by_ai", "fix_programmatic",
-    "locate_targets", "stage_fixes", "validate_fixed",
+    "locate_targets", "should_retry_on_invalid", "stage_fixes", "validate_fixed",
 ]

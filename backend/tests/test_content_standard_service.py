@@ -78,7 +78,11 @@ class TestPromptBlocks:
         s = build_system_block(PRECISE)
         assert "精准内容" in s
         assert "原样引用" in s
-        assert "约" in s and "满足要求的" in s and "待补充" in s
+        assert "约" in s and "满足要求的" in s
+        # ✅ 2026-10-01（模糊生成改造）：精准模式缺失数据改为按模糊生成规则补齐，
+        #    不再要求输出【待补充：参数名】—— 文案必须出现该规则且无占位指令。
+        assert "模糊生成规则" in s
+        assert "【待补充：参数名】" not in s
 
     def test_fuzzy_block_contains_tolerance_and_no_contradiction(self):
         s = build_system_block(FUZZY)
@@ -227,12 +231,25 @@ class TestPreciseReport:
         rep = standard_report(body, PRECISE, rows)
         assert rep["passed"] is True
 
-    def test_placeholder_counted_not_flagged(self):
+    def test_placeholder_counted_and_flagged_as_error(self):
+        """2026-10-01：占位标记由「合规产物」升级为 error（正文必须完整）。
+
+        旧的 test_placeholder_counted_not_flagged 断言 passed=True，
+        与「不留占位标记、不留空」的需求直接冲突，已随语义一并更新。
+        """
         rows = [_fact("参数", "基坑深度", "基坑深度 12.5m")]
         body = "基坑深度 12.5m；地下水位见【待补充：地勘报告】。"
         rep = standard_report(body, PRECISE, rows)
+        # 既有字段保留（只增不减，不破坏老消费方）
         assert rep["stats"]["placeholders"] == 1
-        assert rep["passed"] is True
+        assert rep["stats"]["placeholder_marks"] == 1
+        marked = [i for i in rep["issues"] if i["type"] == "placeholder_mark"]
+        assert len(marked) == 1
+        assert marked[0]["severity"] == "error"
+        assert "待补充" in marked[0]["message"]
+        assert marked[0]["excerpt"]
+        assert rep["passed"] is False
+        assert rep["error_count"] == 1
 
 
 # ============================================================

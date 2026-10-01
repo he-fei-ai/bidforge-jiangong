@@ -7,8 +7,10 @@
 文档能力                        本轮落点
 ============================  ==========================================
 §一.4 技术评分要求提取          ``bid_analysis_service.ANALYSIS_ITEMS``
-（评分项名称/权重/评分标准/      新增 ``techScoring``（json）+ 自我反思
-数据来源 + 覆盖性与权重自检）    式结构化提示词
+（评分项名称/权重/评分标准/      ⚠️ **2026-10-01 已下线**：软件重新定位为
+数据来源 + 覆盖性与权重自检）    「专项施工方案编写软件」，该能力属招投标
+                                评审语境，提取项/分组/提示词全部移除；
+                                本文件第一组用例已**翻转为反向护栏**。
 §三.4 / §五.1 定点替换          ``services/consistency_edits.py``
 （old_text/new_text，            —— 唯一命中才替换，找不到/多处命中一律
 找不到/多处命中则拒绝）          拒绝；``repair_agent`` 定点优先、
@@ -28,37 +30,57 @@ from app.services import consistency_edits as ce
 
 
 # =========================================================================
-# 一、G1 · 技术评分要求提取
+# 一、G1 · 技术评分要求 —— ⚠️ 2026-10-01 定位切换后为**反向护栏**
 # =========================================================================
-class TestTechScoringItem:
-    def test_item_exists_in_scheme_domain(self):
+# 本类原为第十六轮「新增 techScoring」写的正向断言（共 11 例）。软件重新定位
+# 为「建筑工程专项施工方案编写软件」后，技术评分要求属招投标评审语境、已从
+# scheme 域移除。此处不删除用例（否则护栏丢失、日后有人照参考软件再加回来
+# 就无人拦截），而是**逐条翻转语义**：现在断言「已下线且不可回流」。
+# 保留 4 例与定位无关的历史契约护栏（sort_order 递增 / 18 项逐字不变 /
+# 两域零交集），它们对任何增删项改动仍然有效。
+class TestTechScoringRemoved:
+    def test_item_removed_from_scheme_domain(self):
+        """技术评分要求不得出现在专项方案编制域提取清单中。"""
         ids = {i["item_id"] for i in svc.ANALYSIS_ITEMS}
-        assert "techScoring" in ids, "专项方案编制域缺少技术评分要求提取项"
+        assert "techScoring" not in ids, "techScoring 已随定位切换下线，不得回流"
 
-    def test_output_type_is_json_with_four_fields(self):
-        """文档要求结构化四项：评分项名称 / 权重 / 评分标准 / 数据来源。"""
-        it = next(i for i in svc.ANALYSIS_ITEMS if i["item_id"] == "techScoring")
-        assert it["output_type"] == "json"
-        keys = {f[0] for f in it["fields"]}
-        assert keys == {"item_name", "weight", "criteria", "source"}
+    def test_item_contract_fields_all_empty(self):
+        """清单条目 / 提示词 / 字段字典 / 域归属四个出口必须**全部失效**。
 
-    def test_is_optional_not_required(self):
-        """非必选：招标文件可能没有技术评分章节，不得卡住提取流程。"""
-        it = next(i for i in svc.ANALYSIS_ITEMS if i["item_id"] == "techScoring")
-        assert it["required"] == 0
+        只删 `ANALYSIS_ITEMS` 而漏删 `_ITEM_PROMPTS` / `_ITEM_FIELDS` 会出现
+        「清单里没有该项、但按 id 仍能取到提示词与字段模板」的幽灵入口 ——
+        前端拿不到定义，脚本却仍可触发一次注定失败的 AI 调用。
+        """
+        assert svc.get_item_def("techScoring") is None
+        assert svc.get_item_prompt("techScoring") is None
+        assert svc.get_item_fields("techScoring") == []
+        assert svc.get_item_domain("techScoring") == "", (
+            "已下线项必须 fail-closed 返回空串，不得被当成 scheme 域")
 
-    def test_group_registered(self):
+    def test_group_removed(self):
+        """scoring 分组不得残留（空分组会让前端渲染出一个空白分组卡）。"""
         groups = {g["group"] for g in svc.GROUPS}
-        assert "scoring" in groups
-        scoring = next(g for g in svc.GROUPS if g["group"] == "scoring")
-        assert [i["item_id"] for i in scoring["items"]] == ["techScoring"]
+        assert "scoring" not in groups
+        # 分组 items 必须与 ANALYSIS_ITEMS 严格对应，不得出现空分组
+        for g in svc.GROUPS:
+            assert g["items"], "分组 %s 的 items 为空" % g["group"]
+
+    def test_source_has_no_scoring_prompt_template(self):
+        """静态护栏：提示词模板里不得残留技术评分的 JSON 结构。
+
+        用 AST 之外的文本判据即可（模板是字符串常量），但只查
+        「评分项名称 + coverage_note」这对**双关键字**，避免误伤
+        bid_response 域里仍在的 `businessScoring` / 评分相关合法文本。
+        """
+        src = inspect.getsource(svc)
+        assert "coverage_note" not in src, "techScoring 提示词模板残留"
+        assert "scoring_items" not in src, "techScoring JSON 键结构残留"
 
     def test_sort_order_appended_not_inserted(self):
-        """新增项必须**追加到末尾**：既有 sort_order 是历史数据契约，插队会让
-        老项目的展示/消费顺序错位。"""
+        """既有 sort_order 必须保持递增且无重复（历史数据契约）。"""
         orders = [i["sort_order"] for i in svc.ANALYSIS_ITEMS]
         assert orders == sorted(orders), "sort_order 必须保持递增"
-        assert orders.count(orders[-1]) == 1, "sort_order 不得重复"
+        assert len(orders) == len(set(orders)), "sort_order 不得重复"
 
     def test_existing_18_items_untouched(self):
         """既有 18 项的 item_id 与 sort_order 必须逐字不变。"""
@@ -75,30 +97,11 @@ class TestTechScoringItem:
         got = {i["item_id"]: i["sort_order"] for i in svc.ANALYSIS_ITEMS}
         for k, v in legacy.items():
             assert got[k] == v, f"{k} 的 sort_order 被改动"
-
-    def test_prompt_covers_reference_rules(self):
-        """提示词必须覆盖文档的五段式：目标定位/提取内容/处理规则/验证/只返结果。"""
-        p = svc.get_item_prompt("techScoring") or ""
-        assert "__CONTEXT__" in p
-        # 目标定位：识别技术评分、忽略商务/资格/资质
-        assert "技术评分" in p and "商务" in p and "资质" in p
-        # 提取内容四项
-        for k in ("评分项名称", "权重", "评分标准", "数据来源"):
-            assert k in p, k
-        # 处理规则：表格按行、分层编号、单位统一
-        assert "表格" in p and "单位" in p
-        # 验证：覆盖性 + 权重一致性
-        assert "覆盖性" in p and "权重" in p and "一致" in p
-        # 只返回结果
-        assert "不要输出" in p
-
-    def test_prompt_forbids_fabrication(self):
-        """文档要求「资料中没有时不要编造」。"""
-        p = svc.get_item_prompt("techScoring") or ""
-        assert "编造" in p
+        # 集合必须精确相等：既不允许多项，也不允许缺项
+        assert got == legacy
 
     def test_bid_response_domain_untouched(self):
-        """另一域（默认关闭）不得被本轮改动波及。"""
+        """招标响应域（默认关闭）不得被本轮改动波及。"""
         assert len(svc.BID_RESPONSE_ITEMS) == 18
         assert "techRequirements" in {i["item_id"] for i in svc.BID_RESPONSE_ITEMS}
         assert "techScoring" not in {i["item_id"] for i in svc.BID_RESPONSE_ITEMS}

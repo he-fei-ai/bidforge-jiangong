@@ -68,21 +68,21 @@ _SVC_SRC = Path(svc.__file__).resolve()
 # =========================================================================
 class TestDomainRegistry:
     def test_scheme_domain_items_unchanged(self):
-        """scheme 域：18 项历史基线 + 1 项第十六轮新增 = 19 项；必选仍 17 项。
+        """scheme 域：18 项历史基线；必选 17 项。
 
-        ✅ 2026-09-30 第十六轮：新增 ``techScoring``（技术评分要求，对齐易标
-        《标书智能体（一）》§1.4）。它是 ``required=0``，**不改变必选口径**；
-        既有 18 项的 item_id / sort_order 逐字不变（由
-        ``test_reference_alignment_20260930::test_existing_18_items_untouched``
-        逐项锁定）。
+        ⚠️ 2026-10-01 定位切换：第十六轮新增的 ``techScoring``（技术评分要求，
+        招投标评审语境）已随软件重新定位为「专项施工方案编写软件」而**下线移除**。
+        它是 ``required=0``，因此必选口径始终是 17 项，既有 18 项的 item_id /
+        sort_order 逐字不变（由 ``test_reference_alignment_20260930::
+        test_existing_18_items_untouched`` 逐项锁定）。
         """
-        assert len(get_items_by_domain("scheme")) == 19
+        assert len(get_items_by_domain("scheme")) == 18
         assert get_items_by_domain("scheme") is ANALYSIS_ITEMS
-        assert len(REQUIRED_ITEM_IDS) == 17, "新增项为可选，必选口径不得变"
+        assert len(REQUIRED_ITEM_IDS) == 17, "可选项增删不得改变必选口径"
 
     def test_scheme_domain_groups_count(self):
-        """13 个历史分组 + 1 个 scoring 分组 = 14。"""
-        assert len(get_groups_by_domain("scheme")) == 14
+        """13 个历史分组（第十六轮曾追加 scoring 分组，定位切换后已移除）。"""
+        assert len(get_groups_by_domain("scheme")) == 13
 
     def test_bid_response_domain_items(self):
         items = get_items_by_domain("bid_response")
@@ -595,12 +595,12 @@ class TestRouteContract:
     async def test_items_default_returns_scheme_shape(self, db_conn):
         u"""默认无参调用必须与旧版契约逐字一致（前端依赖）。"""
         res = await ba.list_analysis_items()
-        # ✅ 2026-09-30 第十六轮：新增 techScoring（可选）后的新口径。
-        #    必选仍 17 项；可选由 1 增至 2；分组由 13 增至 14。
-        assert res[u'total'] == 19
+        # ⚠️ 2026-10-01 定位切换：techScoring（技术评分要求）已下线 →
+        #    18 项 / 17 必选 / 1 可选 / 13 分组（原 19 / 17 / 2 / 14）。
+        assert res[u'total'] == 18
         assert res[u'required_count'] == 17
-        assert res[u'optional_count'] == 2
-        assert res[u'group_count'] == 14
+        assert res[u'optional_count'] == 1
+        assert res[u'group_count'] == 13
         assert res[u'required_item_ids'] == REQUIRED_ITEM_IDS
         assert res[u'items'] == [dict(it) for it in ANALYSIS_ITEMS]
         assert res[u'groups'] == ba.get_groups()
@@ -626,29 +626,45 @@ class TestRouteContract:
         assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_items_bid_response_enabled_after_flag(self, db_conn, monkeypatch):
+    async def test_items_bid_response_hard_retired(self, db_conn, monkeypatch):
+        u"""⚠️ 2026-10-01 定位切换：招标响应域是**硬门禁**，不是软开关。
+
+        原用例名为 ``_enabled_after_flag``，断言打开
+        ``bid_response_domain_enabled=True`` 就能拿到 18 项招标响应清单 ——
+        这恰恰是要下线的能力：软件已定位为「专项施工方案编写软件」，
+        评标方法/商务条款/废标项提取不在服务范围内。现断言无论开关怎么写都 404，
+        并把**定位说明**写进 detail，让调用方能看懂为什么被拒。
+        """
         from app.config import settings
-        monkeypatch.setattr(settings, u'bid_response_domain_enabled', True, raising=False)
-        res = await ba.list_analysis_items(u'bid_response')
-        assert res[u'total'] == 18
-        assert res[u'required_count'] == 6
-        assert res[u'group_count'] == 11
-        assert res[u'domain'] == u'bid_response'
-        assert res[u'domain_unknown'] is False
-        assert res[u'required_item_ids'] == [
-            u'projectOverview', u'techRequirements', u'projectInfo',
-            u'partAInfo', u'deliveryAndServiceRequirements',
-            u'responseFileRequirements']
+        from fastapi import HTTPException
+        for flag in (False, True):
+            monkeypatch.setattr(settings, u'bid_response_domain_enabled',
+                                flag, raising=False)
+            with pytest.raises(HTTPException) as exc:
+                await ba.list_analysis_items(u'bid_response')
+            assert exc.value.status_code == 404
+            assert u'专项施工方案' in (exc.value.detail or '')
+            assert u'已下线' in (exc.value.detail or '')
 
     @pytest.mark.asyncio
     async def test_items_single_item_additive_keys(self, db_conn):
-        u"""单项定义加法式新增 domain / fields 两键，旧字段全部保留。"""
-        res = await ba.get_analysis_item(u'projectInfo')
-        assert res[u'domain'] == u'bid_response'
-        assert res[u'fields'] == get_item_fields(u'projectInfo')
-        assert res[u'item_id'] == u'projectInfo'
-        assert res[u'label'] == u'项目信息'
+        u"""单项定义加法式新增 domain / fields 两键，旧字段全部保留。
+
+        ⚠️ 2026-10-01：原用例用 ``projectInfo``（属招标响应域）作样本；
+        该域下线后改用一个 scheme 域项，并单独断言招标响应域项返回 404。
+        """
+        res = await ba.get_analysis_item(u'projectBasicInfo')
+        assert res[u'domain'] == u'scheme'
+        assert res[u'fields'] == get_item_fields(u'projectBasicInfo')
+        assert res[u'item_id'] == u'projectBasicInfo'
+        assert res[u'label'] == u'项目级基本信息'
         assert res[u'required'] == 1
+
+        from fastapi import HTTPException
+        for retired_id in (u'projectInfo', u'techRequirements', u'businessScoring'):
+            with pytest.raises(HTTPException) as exc:
+                await ba.get_analysis_item(retired_id)
+            assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
     async def test_items_single_item_cross_domain_404(self, db_conn):
@@ -671,16 +687,23 @@ class TestRouteContract:
         res = await ba.list_extraction_domains()
         by_name = {d[u'domain']: d for d in res[u'domains']}
         assert by_name[u'scheme'][u'enabled'] is True
-        assert by_name[u'scheme'][u'total'] == 19
+        assert by_name[u'scheme'][u'total'] == 18
         assert by_name[u'scheme'][u'required_count'] == 17
         assert by_name[u'bid_response'][u'enabled'] is False
         assert by_name[u'bid_response'][u'total'] == 18
         assert by_name[u'bid_response'][u'required_count'] == 6
 
+        # ⚠️ 2026-10-01 定位切换：招标响应域是**硬门禁**下线，不是软开关。
+        # 显式把 bid_response_domain_enabled 设为 True 也不得让它复活 ——
+        # 否则用户「配一下就能跑评标方法/商务条款提取」，与专项方案定位相悖。
         monkeypatch.setattr(settings, u'bid_response_domain_enabled', True, raising=False)
         res2 = await ba.list_extraction_domains()
-        assert {d[u'domain']: d[u'enabled'] for d in res2[u'domains']} == {
-            u'scheme': True, u'bid_response': True}
+        by_name2 = {d[u'domain']: d for d in res2[u'domains']}
+        assert by_name2[u'scheme'][u'enabled'] is True
+        assert by_name2[u'bid_response'][u'enabled'] is False, (
+            "招标响应域不得被配置开关复活")
+        assert by_name2[u'bid_response'][u'retired'] is True
+        assert u'专项施工方案' in by_name2[u'bid_response'][u'retired_reason']
 
     @pytest.mark.asyncio
     async def test_domains_endpoint_never_404(self, db_conn):

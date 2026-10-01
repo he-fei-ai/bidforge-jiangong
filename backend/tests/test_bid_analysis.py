@@ -547,15 +547,18 @@ async def test_items_endpoint_exposes_breakdown_counts():
     """
     res = await ba.list_analysis_items()
     total = len(ANALYSIS_ITEMS)
-    # ✅ 2026-09-30 第十六轮：18 项历史基线 + techScoring（技术评分要求，可选）= 19。
-    assert res["total"] == total == 19
+    # ✅ 2026-10-01 定位切换：techScoring（技术评分要求，json 可选）已随招投标
+    #    功能一并下线 → 18 项（17 必选 + 1 可选 resourceAllocation），13 分组。
+    # ⚠️ 下方所有数字均由 ANALYSIS_ITEMS 派生校验，只有尾部的 == N 是历史口径
+    #    锚点；新增/删除解析项时同步更新它，护栏才不会静默失效。
+    assert res["total"] == total == 18
     assert res["required_count"] == len(REQUIRED_ITEM_IDS) == 17
-    assert res["optional_count"] == total - len(REQUIRED_ITEM_IDS) == 2
+    assert res["optional_count"] == total - len(REQUIRED_ITEM_IDS) == 1
     assert res["markdown_count"] == sum(
         1 for it in ANALYSIS_ITEMS if it.get("output_type") != "json") == 17
     assert res["json_count"] == sum(
-        1 for it in ANALYSIS_ITEMS if it.get("output_type") == "json") == 2
-    assert res["group_count"] == len(ba.get_groups()) == 14
+        1 for it in ANALYSIS_ITEMS if it.get("output_type") == "json") == 1
+    assert res["group_count"] == len(ba.get_groups()) == 13
     # 自洽校验：必填 + 可选 = 总数，markdown + json = 总数
     assert res["required_count"] + res["optional_count"] == res["total"]
     assert res["markdown_count"] + res["json_count"] == res["total"]

@@ -3000,7 +3000,8 @@ export default function SchemeWorkbenchPage() {
   const [rerunPlan, setRerunPlan] = useState<any>(null);
   const [rerunning, setRerunning] = useState(false);
   const [exportPhase, setExportPhase] = useState<string>("");
-  // 导出按钮与预检卡片共用同一结论，避免“审核页提示阻断、导出页仍可直接下载”。
+  // ✅ 2026-10-01：预检结论只用于展示提示，不再用于禁用导出按钮
+  // （旧实现会让「审核与预检未做完」直接卡死导出）。
   const exportGate = useMemo(() => deriveExportGate({
     hasPreflight: exportStats !== null,
     issues: exportIssues,
@@ -7232,10 +7233,6 @@ const draftKey = selectedSection && id
   const exportPctRef = useRef(-1);
   const handleExport = async (format: "docx" | "pdf" = "docx") => {
     if (!id || exportingRef.current) return;
-    if (!exportGate.allowed) {
-      msg.warning(exportGate.reason);
-      return;
-    }
     const sid = id;
     const controller = new AbortController();
     const exportSeq = ++exportSeqRef.current;
@@ -9640,24 +9637,25 @@ const draftKey = selectedSection && id
               style={{ marginBottom: 12 }}
             />
           )}
-          <Alert
-            type={exportGate.allowed ? "success" : "warning"}
-            showIcon
-            message={exportGate.reason}
-            description={exportGate.allowed
-              ? `当前方案已完成导出预检，就绪度总检评分 ${exportPreflight?.total ?? "—"}，结论未过期且已放行。`
-              : "请先到「审核与预检」完成当前方案的导出预检与就绪度总检；存在 high 问题、结论过期或未放行时不会生成文档。"}
-            action={<Button size="small" onClick={() => setActiveTab("review")}>前往审核与预检</Button>}
-            style={{ marginBottom: 12 }}
-          />
+          {/* ✅ 2026-10-01：审核 / 预检不再作为导出的前置条件，此处只做非阻断提示。
+              未完成预检、存在 high 问题、就绪度未放行均不影响导出按钮。 */}
+          {exportGate.highIssueCount > 0 && (
+            <Alert
+              type="warning"
+              showIcon
+              message={exportGate.reason}
+              description="审核与预检结论仅供参考，不限制导出；如用于正式交付，建议先整改上述问题。"
+              action={<Button size="small" onClick={() => setActiveTab("review")}>前往审核与预检</Button>}
+              style={{ marginBottom: 12 }}
+            />
+          )}
           <Space>
             <Button
               type="primary"
               icon={<ExportOutlined />}
               onClick={() => handleExport("docx")}
               loading={exporting}
-              disabled={!exportGate.allowed}
-              title={exportGate.reason}
+              title="导出 DOCX（不受审核与预检状态限制）"
             >
               {exporting ? "导出中..." : "导出 DOCX"}
             </Button>
@@ -9665,8 +9663,7 @@ const draftKey = selectedSection && id
               icon={<FilePdfOutlined />}
               onClick={() => handleExport("pdf")}
               loading={exporting}
-              disabled={!exportGate.allowed}
-              title={exportGate.allowed ? "先生成 DOCX 再转换为 PDF（需安装 Microsoft Word 或 LibreOffice）" : exportGate.reason}
+              title="先生成 DOCX 再转换为 PDF（需安装 Microsoft Word 或 LibreOffice）"
             >
               导出 PDF
             </Button>

@@ -27,8 +27,14 @@ from app.services.outline_templates import build_outline, get_meta
 
 logger = logging.getLogger("seed")
 
+#: 预置同步重入锁：串行化同进程内并发 seed_catalog 调用（见其 docstring）
+_seed_lock = asyncio.Lock()
+
 #: 预置目录内容版本：内容升级时递增，触发库内旧版本条目刷新
-SEED_VERSION = "v2.0"
+#: v3.0（2026-10-01）：目录库六大类危大逐型式全面更新，既有名称依新细粒度
+#:   路由重新归属专属模板（如「落地脚手架」→落地式钢管脚手架），并新增多个
+#:   型式与「其他危大工程」分类的专属条目，故必须递增版本以刷新存量预置库。
+SEED_VERSION = "v3.0"
 
 # 12 个一级分类及其包含的方案
 SCHEME_CATALOG: dict[str, list[str]] = {
@@ -46,6 +52,8 @@ SCHEME_CATALOG: dict[str, list[str]] = {
         "超限梁模板支撑专项施工方案", "超限梁模板支撑专家评审方案",
         "模板工程专项施工方案", "地下室结构模板工程专项施工方案",
         "地下结构支撑排架专项施工方案",
+        # 2026-10-01 逐型式补齐专属预置条目
+        "高大模板支撑体系专项施工方案", "承插型盘扣式模板支撑架专项施工方案",
     ],
     "脚手架": [
         "落地脚手架专项施工方案", "悬挑脚手架专项施工方案",
@@ -55,6 +63,11 @@ SCHEME_CATALOG: dict[str, list[str]] = {
         "地下结构临时脚手架专项方案", "室内脚手架专项施工方案",
         "移动操作平台专项方案", "屋面构架脚手架专项施工方案",
         "外墙防护脚手架工程专家评审方案", "附着式升降脚手架专项施工方案",
+        # 2026-10-01 逐型式补齐专属预置条目
+        "门式脚手架专项施工方案", "碗扣式钢管脚手架专项施工方案",
+        "承插型盘扣式脚手架专项施工方案", "悬挑式脚手架专项施工方案",
+        "落地式钢管脚手架专项施工方案", "高处作业吊篮专项施工方案",
+        "悬挑卸料平台专项施工方案", "移动式操作平台专项施工方案",
     ],
     "起重吊装": [
         "塔吊基础专项施工方案", "塔吊基础专家评审方案",
@@ -64,6 +77,8 @@ SCHEME_CATALOG: dict[str, list[str]] = {
         "预制装配构件吊装专项施工方案", "预制装配构件吊装专家评审方案",
         "地下结构汽车吊吊装专项方案", "人防门吊装专项施工方案",
         "升降机安装施工方案", "人货梯拆除", "钢结构吊装专项施工方案",
+        # 2026-10-01 逐型式补齐专属预置条目
+        "施工升降机安装与拆卸专项施工方案", "塔式起重机安装拆卸专项施工方案",
     ],
     "临时设施": [
         "大临设施专项施工方案", "临时用水专项施工方案",
@@ -129,6 +144,20 @@ SCHEME_CATALOG: dict[str, list[str]] = {
         "治本攻坚三年行动方案", "安全生产治本攻坚三年行动治理实施方案",
         "重大事故隐患专项排查整治行动工作方案",
         "各类突发情况应急处置措施", "建筑拆除工程专项施工方案",
+        # 2026-10-01 逐型式补齐拆除预置条目
+        "人工拆除工程专项施工方案", "机械拆除工程专项施工方案",
+        "爆破拆除工程专项施工方案",
+    ],
+    "其他危大工程": [
+        # 2026-10-01 目录库全面更新：§1「其他危大工程」逐型式专属条目。
+        # ⚠️ 幕墙/钢结构预置库已分属「装饰装修」/「装配式与结构」，而 seed
+        #    以「{方案名}标准目录」为唯一键 → 此处用差异化名称另行收录，
+        #    避免同名互相覆盖 type（两者经 match_template 仍命中同一专属模板）。
+        "预应力结构张拉专项施工方案", "幕墙安装工程专项施工方案",
+        "钢结构安装工程专项施工方案", "网架和索膜结构安装专项施工方案",
+        "人工挖孔桩工程专项施工方案", "边坡工程专项施工方案",
+        "地下暗挖工程专项施工方案", "顶管工程专项施工方案",
+        "水下作业工程专项施工方案", "新技术新工艺新材料新设备专项施工方案",
     ],
 }
 
@@ -146,6 +175,7 @@ CATEGORY_PROFILE: dict[str, tuple[str, str]] = {
     "装饰装修": ("房建", "装饰"),
     "机电与智能化": ("房建", "机电"),
     "应急与专项": ("房建", "安全"),
+    "其他危大工程": ("房建", "土建"),
 }
 
 
@@ -172,8 +202,24 @@ def _build_record(scheme_name: str, category: str) -> dict:
     }
 
 
+async def _refresh_record(conn, rec: dict, row_id: str) -> None:
+    """按预置字段刷新存量条目（保留 id 与 ref_count，不破坏既有引用）"""
+    await conn.execute(
+        "UPDATE outline_library SET type=?, engineering_type=?, profession=?,"
+        " applicable_conditions=?, basis=?, outline_json=?, tags=?, version=?,"
+        " updated_at=datetime('now','localtime') WHERE id=?",
+        (rec["type"], rec["engineering_type"], rec["profession"],
+         rec["applicable_conditions"], rec["basis"], rec["outline_json"],
+         rec["tags"], SEED_VERSION, row_id))
+
+
 async def seed_catalog(force: bool = False) -> dict:
-    """导入 / 升级预置方案目录到 outline_library 表。
+    """导入 / 升级预置方案目录到 outline_library 表（串行入口）。
+
+    ✅ 2026-10-01 并发护栏：同进程内多个调用方（启动钩子 / API 手动同步）
+    并发重入时，旧实现基于事务开头读到的 existing 快照判存在性，
+    两个调用会各自 INSERT 同一预置条目（uuid 不同）→ 清单重复、ref_count
+    分裂。现用进程内重入锁串行化，并在 INSERT 前按名复查兑底。
 
     Args:
         force: True 时忽略版本号，强制刷新全部预置条目。
@@ -181,6 +227,12 @@ async def seed_catalog(force: bool = False) -> dict:
     Returns:
         {"inserted": int, "updated": int, "skipped": int, "total": int}
     """
+    async with _seed_lock:
+        return await _seed_catalog_impl(force=force)
+
+
+async def _seed_catalog_impl(force: bool) -> dict:
+    """seed_catalog 的实际实现（由 seed_catalog 持锁调用，勿直接外部调用）"""
     await init_db()
     conn = await get_conn()
 
@@ -201,24 +253,29 @@ async def seed_catalog(force: bool = False) -> dict:
                 continue
 
             if old:
-                await conn.execute(
-                    "UPDATE outline_library SET type=?, engineering_type=?, profession=?,"
-                    " applicable_conditions=?, basis=?, outline_json=?, tags=?, version=?,"
-                    " updated_at=datetime('now','localtime') WHERE id=?",
-                    (rec["type"], rec["engineering_type"], rec["profession"],
-                     rec["applicable_conditions"], rec["basis"], rec["outline_json"],
-                     rec["tags"], SEED_VERSION, old["id"]))
+                await _refresh_record(conn, rec, old["id"])
                 updated += 1
             else:
-                await conn.execute(
-                    "INSERT INTO outline_library (id, name, type, engineering_type, profession,"
-                    " applicable_conditions, basis, outline_json, tags, version, source,"
-                    " review_status, ref_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (str(uuid.uuid4()), name, rec["type"], rec["engineering_type"],
-                     rec["profession"], rec["applicable_conditions"], rec["basis"],
-                     rec["outline_json"], rec["tags"], SEED_VERSION,
-                     "预置清单", "已通过", 0))
-                inserted += 1
+                # ✅ 2026-10-01 插前复查：existing 是函数开头读到的快照，跨进程
+                #    并发（两个 CLI 同时跑）下另一进程可能已插入同名条目 →
+                #    直接 INSERT 会产生重复行。命中则改走刷新，不新增。
+                cur2 = await conn.execute(
+                    "SELECT id FROM outline_library"
+                    " WHERE source='预置清单' AND name=?", (name,))
+                row2 = await cur2.fetchone()
+                if row2:
+                    await _refresh_record(conn, rec, row2["id"])
+                    updated += 1
+                else:
+                    await conn.execute(
+                        "INSERT INTO outline_library (id, name, type, engineering_type, profession,"
+                        " applicable_conditions, basis, outline_json, tags, version, source,"
+                        " review_status, ref_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (str(uuid.uuid4()), name, rec["type"], rec["engineering_type"],
+                         rec["profession"], rec["applicable_conditions"], rec["basis"],
+                         rec["outline_json"], rec["tags"], SEED_VERSION,
+                         "预置清单", "已通过", 0))
+                    inserted += 1
 
     await conn.commit()
 

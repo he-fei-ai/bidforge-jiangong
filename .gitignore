@@ -120,6 +120,7 @@ _openapi.json
 _probe_conn.py
 _tmp_*.ps1
 _tmp_*.py
+_tmp_*.txt
 _find_copy.log
 patch_preview_pipeline_summary.py
 patch_preview_pipeline_summary.py.bak*

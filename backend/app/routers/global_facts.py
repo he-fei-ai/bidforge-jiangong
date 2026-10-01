@@ -310,9 +310,14 @@ async def _invalidate_fact_scope_cache(db, scheme_id: str, project_id: str = "")
         return
     cur = await db.execute("SELECT id FROM schemes WHERE project_id=?", (project_id,))
     for item in await cur.fetchall():
-        await invalidate_export_cache(db, str(item[0] or ""), facts_touched=True)
-        if not item[0]:
-            break
+        # ✅ BUG 修复（2026-10-01）：旧实现是 `if not item[0]: break` ——
+        # 一旦命中第一个 id 为空的行就**中断整个循环**，其后所有方案的导出
+        # 缓存与 facts_updated_at 全部漏失效。schemes.id 虽是主键，但 TEXT
+        # 主键并不禁止 NULL，脏数据下就会触发。空 id 行应当**跳过**而非终止。
+        sid = str(item[0] or "")
+        if not sid:
+            continue
+        await invalidate_export_cache(db, sid, facts_touched=True)
 
 
 async def _load_fact_rows(db, scheme_id: str, project_id: str,
@@ -860,39 +865,27 @@ async def create_fact(
             #    带着 is_resolved=1 直接越过闸门注入正文与导出。与
             #    _apply_item_updates 的既有口径对齐。
             item_resolved = 1 if (it.is_resolved and not it.is_simulated) else 0
+            item_cat = it.category or category
             # ✅ BUG 修复：无来源时也必须写入"手动录入"标记——persist_extraction
             #    的 _is_protected 靠 source_ref 识别手动来源保护未确认事实，
             #    旧实现 source/source_ref 皆空时留空 → 手动新增但未确认的事实
             #    会在「重新提取」时被当旧 AI 数据删除。
-            source_json = json.dumps(
-                [{"file": it.source or "手动录入",
-                  # ✅ 修复（数据流审计 2026-09-23）：与 AI 提取落库路径统一口径，
-                  #    不再静默截 30 字，改走 _clip_excerpt（超长自动补省略号）。
-                  "quote": _clip_excerpt(it.source_ref or "", MAX_SOURCE_EXCERPT)}],
-                ensure_ascii=False)
-            item_cat = it.category or category
-            insert_buf.append((
-                fid, real_pid, scheme_scope, gid, group_title,
-                it.name, content,
-                item_cat,
-                source_json,
-                1 if it.is_simulated else 0,
-                # ✅ 修复：手工录入的 confidence 未做范围收敛，前端进度条
-                #    （width 按 0~1 计算）遇越界值会渲染异常。
-                _safe_confidence(it.confidence, 1.0),
-                item_resolved,
-                0,  # has_conflict
-                "",  # conflict_keys
-                it.key or normalize_key(it.name),  # fact_key（手工录入也生成去重键）
+            #    （quote 的超长截断口径见 _manual_fact_row → _clip_excerpt）
+            # ✅ BUG 修复（2026-10-01）：列清单与取值改走 _manual_fact_row
+            #    单一出口（原为手写 15 列 INSERT，与另两处新增路径各自维护）。
+            insert_buf.append(_manual_fact_row(
+                fid=fid, pid=real_pid, sid=scheme_scope,
+                group_id=gid, group_title=group_title,
+                name=it.name, content=content, category=item_cat,
+                source_file=it.source or "手动录入",
+                source_quote=it.source_ref or "",
+                is_simulated=it.is_simulated,
+                confidence=it.confidence,
+                is_resolved=bool(item_resolved),
+                fact_key=it.key or "",
             ))
         if insert_buf:
-            await db.executemany(
-                "INSERT INTO global_facts "
-                "(id, project_id, scheme_id, group_id, group_title, title, content, "
-                "category, source_ref, is_simulated, confidence, "
-                "is_resolved, has_conflict, conflict_keys, fact_key) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                insert_buf)
+            await db.executemany(MANUAL_FACT_INSERT_SQL, insert_buf)
     else:
         # 旧版单条：title + content
         # ✅ 修复：content 常为多行 Markdown 列表（前端「手动新增」弹窗多行输入），
@@ -900,24 +893,22 @@ async def create_fact(
         #    现与分组编辑（PATCH）一致，逐行拆开入库。
         rows_buf = []
         for nm, val, is_sim in _split_fact_lines(data.title, data.content):
-            rows_buf.append((
-                str(uuid.uuid4()), real_pid, scheme_scope, gid, group_title,
-                nm, _build_fact_content(nm, val, is_sim), category,
+            rows_buf.append(_manual_fact_row(
+                fid=str(uuid.uuid4()), pid=real_pid, sid=scheme_scope,
+                group_id=gid, group_title=group_title,
+                name=nm, content=_build_fact_content(nm, val, is_sim),
+                category=category,
                 # ✅ BUG 修复：旧版单条路径同样必须写入"手动录入"来源标记，
                 # 否则未确认的手动事实会被「重新提取」误删（同上）
-                json.dumps([{"file": "手动录入", "quote": ""}], ensure_ascii=False),
+                source_file="手动录入",
+                is_simulated=is_sim,
+                confidence=1.0,
                 # ✅ BUG 修复（2026-09-21）：is_simulated ⟹ is_resolved=0（模拟值闸门
                 #    是不变式，门控 SQL 只判 is_resolved）。旧实现恒写 is_resolved=1，
                 #    粘贴了模拟值标记的手工分组会立刻被当确定性事实注入正文。
-                1 if is_sim else 0, 1.0, 0 if is_sim else 1, 0, "",
-                normalize_key(nm)))  # 手工录入也生成归一化去重键
-        await db.executemany(
-            "INSERT INTO global_facts "
-            "(id, project_id, scheme_id, group_id, group_title, title, content, "
-            "category, source_ref, is_simulated, confidence, "
-            "is_resolved, has_conflict, conflict_keys, fact_key) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            rows_buf)
+                is_resolved=(not is_sim),
+            ))
+        await db.executemany(MANUAL_FACT_INSERT_SQL, rows_buf)
 
     await db.commit()
     # ✅ BUG 修复（2026-09-29 · 项目级新事实不失效导出缓存）：
@@ -937,6 +928,55 @@ def _build_fact_content(name: str, value: str, is_simulated: bool) -> str:
     避免同一行叠加两个模拟值标记。
     """
     return f"- **{name}**: {append_simulated_marker(value, is_simulated)}"
+
+
+#: ✅ BUG 修复（2026-10-01 · 手工事实 INSERT 列清单三处各自维护）：
+#: 「手工 / AI 调整新增事实」此前有**三份**硬编码 INSERT —— create_fact 的
+#: 结构化分支、create_fact 的旧版单条分支、adjust_facts 的 add 分支，列名与
+#: 占位符各写一遍。这与 2026-09-29 分组重建「27 个 ? vs 28 列」静默错位是
+#: 同一类陷阱：任何一处给 global_facts 加列（九大章节四维、溯源列、
+#: is_safety_critical…）都容易只改一处、漏两处，新增路径写进去的行就永远
+#: 是默认值，而读路径靠惰性派生「看起来正常」，问题难以发现。
+#: 现把列清单收敛为单一事实源，占位符由列数派生（不再手写）。
+MANUAL_FACT_INSERT_COLS = (
+    "id", "project_id", "scheme_id", "group_id", "group_title", "title", "content",
+    "category", "source_ref", "is_simulated", "confidence", "is_resolved",
+    "has_conflict", "conflict_keys", "fact_key",
+)
+MANUAL_FACT_INSERT_SQL = "INSERT INTO global_facts (%s) VALUES (%s)" % (
+    ", ".join(MANUAL_FACT_INSERT_COLS),
+    ",".join("?" for _ in MANUAL_FACT_INSERT_COLS))
+
+
+def _manual_fact_row(*, fid: str, pid: str, sid: str, group_id: str,
+                     group_title: str, name: str, content: str, category: str,
+                     source_file: str, source_quote: str = "",
+                     is_simulated: bool = False, confidence: float = 1.0,
+                     is_resolved: bool = True, fact_key: str = "") -> tuple:
+    """构造「手工 / AI 调整新增」事实行（列顺序与 MANUAL_FACT_INSERT_COLS 严格对齐）。
+
+    三处新增路径共用，杜绝「列名与占位符数量错位」与「漏写某一列」。
+    溯源/九大章节四维列（value_unit、fact_type、chapter、fact_attr…）不在
+    本清单内，落库取表默认值，由读路径惰性派生兜底（与历史行为一致）。
+
+    ``fact_key`` 允许调用方显式指定（客户端传入的归一化键优先），
+    缺省按事实名归一化生成去重键。
+    """
+    return (
+        fid, pid, sid, group_id, group_title,
+        name, content,
+        # 归类兜底 other（与提取/编辑一致），避免空类别导致排序/展示异常
+        (str(category or "").strip() or "other"),
+        json.dumps([{"file": source_file,
+                     # 与提取落库同口径：超长截断并补省略号，不静默截断
+                     "quote": _clip_excerpt(source_quote or "", MAX_SOURCE_EXCERPT)}],
+                   ensure_ascii=False),
+        1 if is_simulated else 0,
+        _safe_confidence(confidence, 1.0),
+        int(is_resolved),
+        0, "",  # has_conflict / conflict_keys：新增事实无矛盾候选
+        (str(fact_key or "").strip() or normalize_key(name)),
+    )
 
 
 async def _invalidate_item_update_caches(db, updates: list[dict]) -> None:
@@ -997,6 +1037,8 @@ async def _apply_item_updates(db, updates: list[dict]) -> tuple[int, str]:
         value_changed = False
 
         raw_name = u.get("name")
+        # 改名会替换归一化键；先取出旧键，改完后用新键参与章节派生
+        new_key = (row["fact_key"] or "").strip()
         if raw_name is not None and str(raw_name).strip():
             title = str(raw_name).strip()
             title_changed = title != (str(row["title"] or ""))
@@ -1005,8 +1047,8 @@ async def _apply_item_updates(db, updates: list[dict]) -> tuple[int, str]:
                 vals.append(title)
                 # ✅ BUG 修复：改名后 fact_key 不重算 —— 键仍指向旧名的归一化结果，
                 # 重新提取时按新名生成的键无法与已确认事实去重，导致同一事实重复入库。
-                new_key = normalize_key(title)
-                if new_key and new_key != (row["fact_key"] or ""):
+                new_key = normalize_key(title) or new_key
+                if new_key and new_key != (row["fact_key"] or "").strip():
                     sets.append("fact_key=?")
                     vals.append(new_key)
 
@@ -1049,34 +1091,42 @@ async def _apply_item_updates(db, updates: list[dict]) -> tuple[int, str]:
             sets.append("content=?")
             vals.append(_build_fact_content(title, old_value, is_sim))
 
+        cat_changed = False
+        new_cat = ""
         if u.get("category"):
             new_cat = str(u["category"]).strip()
-            # ✅ BUG 修复（2026-09-29 · 改分类后九大章节归属过期）：
-            #    chapter / fact_attr 由 category 派生，而两条读路径
-            #    （list_facts 的 _fact_dimension_fields、正文注入的
-            #    _load_facts_rows）都是「库值优先」—— 旧实现只写 category 列，
-            #    于是改了分类后九大章节归属永远停在旧值，直到下一次重新提取。
-            #    后果：界面按新分类分组，章节视图 / 正文按章精选却仍按旧章节
-            #    命中（隐蔽错配，且只能靠重新提取才能纠正）。
-            #    口径与提取管线 apply_fact_dimensions 一致（确定性规则）。
-            if new_cat and new_cat != (row["category"] or "").strip():
-                _name_now = (title or (row["title"] or "")).strip()
-                _val_now = (str(u["value"]).strip() if u.get("value") is not None
-                            else str(old_value).strip())
-                # ⚠️ row 是 sqlite3.Row（无 .get），必须按键取值
-                _ft = (row["fact_type"] or "").strip()
-                # 与 facts_classification.classify_fact_dimensions 同口径：
-                # chapter 用 (name, value, category, fact_type, fact_key)，
-                # fact_attr 只用 (name, value) —— 属性判定与 category 正交
-                # （classify_fact_attr 已清理死参数，不接受 category）。
-                sets.append("chapter=?")
-                vals.append(classify_chapter_from_text(
-                    _name_now, _val_now, new_cat, _ft,
-                    (row["fact_key"] or "").strip()))
-                sets.append("fact_attr=?")
-                vals.append(classify_fact_attr(_name_now, _val_now))
+            cat_changed = bool(new_cat) and new_cat != (row["category"] or "").strip()
             sets.append("category=?")
             vals.append(new_cat)
+        # ✅ BUG 修复（2026-09-29 · 改分类后九大章节归属过期）+
+        #    ✅ BUG 修复（2026-10-01 · 改名后九大章节归属过期）：
+        #    chapter / fact_attr 的派生输入是
+        #    (name, value, category, fact_type, fact_key)，而读路径
+        #    （list_facts 的 _fact_dimension_fields、正文注入的
+        #    _load_facts_rows）都是「库值优先」—— 派生输入变了但列不跟着
+        #    重算，九大章节视图 / 正文按章精选就永远停在旧值，
+        #    直到下一次重新提取才能纠正。
+        #    2026-09-29 只堵住了「改分类」这一路；【改名】同样改变了派生
+        #    输入（文本规则与归一化键都会变），却是漏改点：把「混凝土
+        #    强度等级」改成「混凝土浇筑工艺」后，chapter 仍停在 technique。
+        #    重派生必须独立于「是否提交了 category」—— 否则只改名不改类的
+        #    单条编辑依旧不重算。
+        if cat_changed or title_changed:
+            _name_now = (title or (row["title"] or "")).strip()
+            _val_now = (str(u["value"]).strip() if u.get("value") is not None
+                        else str(old_value).strip())
+            # ⚠️ row 是 sqlite3.Row（无 .get），必须按键取值
+            _ft = (row["fact_type"] or "").strip()
+            _cat_now = new_cat if cat_changed else (row["category"] or "")
+            # 与 facts_classification.classify_fact_dimensions 同口径：
+            # chapter 用 (name, value, category, fact_type, fact_key)，
+            # fact_attr 只用 (name, value) —— 属性判定与 category 正交
+            # （classify_fact_attr 已清理死参数，不接受 category）。
+            sets.append("chapter=?")
+            vals.append(classify_chapter_from_text(
+                _name_now, _val_now, _cat_now, _ft, new_key))
+            sets.append("fact_attr=?")
+            vals.append(classify_fact_attr(_name_now, _val_now))
 
         if u.get("confidence") is not None:
             sets.append("confidence=?")
@@ -1316,14 +1366,24 @@ async def update_fact(
         )
 
     def _carry_dimensions(old: dict | None, nm: str, val: str) -> tuple:
-        """重建后携带九大章节四维标注；分组类别变化时重派生 chapter/fact_attr。
+        """重建后携带九大章节四维标注；派生输入变化时重派生 chapter/fact_attr。
 
-        口径与提取管线 apply_fact_dimensions 一致（确定性规则）；类别未变时
-        原样保留库值（尊重提取期标注），避免重新提取才能刷新章节归属。
+        口径与提取管线 apply_fact_dimensions 一致（确定性规则）；派生输入
+        **全部未变**时原样保留库值（尊重提取期标注），避免重新提取才能刷新章节归属。
+
+        ✅ BUG 修复（2026-10-01 · 改名后九大章节归属过期）：旧实现只比较
+        **分类**是否变化——分组内某条事实改名（如「混凝土强度等级」→「混凝土
+        浇筑工艺」）而分类未变时，chapter / fact_attr 原样保留旧值，而读路径
+        「库值优先」会把旧值当权威 → 九大章节视图 / 正文按章精选永久错配，
+        直到下一次重新提取才能纠正。与条目级更新（_apply_item_updates）同口径：
+        name 变化同样是派生输入变化，必须重派生。
         """
         if not old:
             return ("", "", "", 0)
-        if ((old.get("category") or "").strip() or "other") == category:
+        old_cat = ((old.get("category") or "").strip() or "other")
+        old_name = str(old.get("title") or old.get("name") or "").strip()
+        if old_cat == ((category or "").strip() or "other") \
+                and old_name == str(nm or "").strip():
             return (old.get("chapter") or "", old.get("fact_attr") or "",
                     old.get("source_kind") or "",
                     int(old.get("is_shared") or 0))
@@ -1876,16 +1936,23 @@ async def adjust_facts(data: dict, db=Depends(get_db)):
                 applied["deleted"] += 1
             else:  # add
                 content = _build_fact_content(op["name"], op["value"], False)
+                # ✅ BUG 修复（2026-10-01）：列清单改走 MANUAL_FACT_INSERT_SQL 单一
+                #    出口（原为手写 15 列，与 create_fact 的两条分支各自维护）。
                 await db.execute(
-                    "INSERT INTO global_facts (id, project_id, scheme_id, group_id, group_title,"
-                    " title, content, category, source_ref, is_simulated, confidence,"
-                    " is_resolved, has_conflict, conflict_keys, fact_key)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (str(uuid.uuid4()), real_pid, scheme_scope, str(uuid.uuid4()),
-                     CATEGORY_TITLES.get(op["category"], ""),
-                     op["name"], content, op["category"],
-                     json.dumps([{"file": "AI调整", "quote": ""}], ensure_ascii=False),
-                     0, 1.0, 1, 0, "", normalize_key(op["name"])))
+                    MANUAL_FACT_INSERT_SQL,
+                    _manual_fact_row(
+                        fid=str(uuid.uuid4()), pid=real_pid, sid=scheme_scope,
+                        group_id=str(uuid.uuid4()),
+                        group_title=CATEGORY_TITLES.get(op["category"], ""),
+                        name=op["name"], content=content,
+                        category=op["category"],
+                        # 溯源标记为 AI 调整：_is_protected 据此区分人工与 AI 来源，
+                        # 避免 AI 新增的事实在下次提取时被当人工录入保护下来。
+                        source_file="AI调整",
+                        is_simulated=False,
+                        confidence=1.0,
+                        is_resolved=True,
+                    ))
                 applied["added"] += 1
         await db.commit()
         # ✅ 2026-09-29：项目级（scheme_scope 为空）调整此前不失效任何缓存，
