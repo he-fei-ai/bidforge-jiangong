@@ -13,12 +13,9 @@
 import json
 
 import pytest
-
-from app.services.scheme_scope import (extract_construction_scope,
-                                       render_scope_for_prompt)
 from app.services import input_coverage as ic
-from app.services.ai.prompts._registry import (get_default_prompt,
-                                               extract_variables)
+from app.services.ai.prompts._registry import extract_variables, get_default_prompt
+from app.services.scheme_scope import extract_construction_scope, render_scope_for_prompt
 
 
 # ===========================================================================
@@ -258,6 +255,7 @@ def test_site_trunc_extra_uses_actual_budget():
 async def test_audit_accepts_callable_and_warns_on_failure(db_conn, caplog):
     """m1+m2：审计接受 callable 样本；样本求值抛错时吞异常并打 WARNING（不阻断、生产可见）。"""
     import logging
+
     from app.routers.sse_handlers import _run_input_coverage_audit
     await _seed_inputs(db_conn)
     # callable 正常路径：不抛
@@ -315,6 +313,7 @@ def test_audit_degraded_logs_warning_not_green(caplog):
 def test_build_structured_brief_uses_boundary_truncation():
     """m4：结构化摘要改用边界感知截断，不再硬切小节/围栏，并去除 no-op 外层切片。"""
     import inspect
+
     from app.routers.sse_handlers import _build_structured_brief
     src = inspect.getsource(_build_structured_brief)
     assert "truncate_to_boundary(structured, max_chars)" in src

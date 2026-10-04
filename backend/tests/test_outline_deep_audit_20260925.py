@@ -16,7 +16,6 @@ import copy
 import inspect
 
 import pytest
-
 from app.routers import sse_handlers as sh
 from app.services.outline_utils import MAX_OUTLINE_DEPTH, normalize_outline
 
@@ -346,6 +345,7 @@ class TestE3StripNumberingParity:
         """
         import re as _re
         from pathlib import Path
+
         from app.services.numbering import _PURE_NUMBER_TITLE_RE
         page = (Path(__file__).resolve().parents[1].parent
                 / "frontend" / "src" / "pages" / "SchemeWorkbenchPage.tsx")

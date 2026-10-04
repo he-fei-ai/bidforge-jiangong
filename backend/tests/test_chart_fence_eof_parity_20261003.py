@@ -19,14 +19,12 @@
 import ast
 
 import pytest
-
 from app.routers._chart_pipeline import (
     _apply_chart_fence_edits,
     _scan_chart_fences_full,
     iter_inline_chart_fences,
 )
 from app.services.content_blocks import _parse_content_blocks
-
 
 # ---------------------------------------------------------------------------
 # 测试素材：三类图表围栏的「闭合」与「EOF 未闭合」形态
@@ -156,7 +154,7 @@ class TestLeadInReclaimedOnParseSkip:
 
     def test_heading_before_skipped_fence_not_popped(self):
         """前一块是标题（结构元素）时不回收其后任何内容。"""
-        content = f"# 第三章 施工工艺\n```mermaid\nflowchart TD\n  A{{"
+        content = "# 第三章 施工工艺\n```mermaid\nflowchart TD\n  A{"
         blocks = _parse_content_blocks(content)
         assert any(b.get("type") == "heading" for b in blocks)
 
@@ -213,7 +211,7 @@ class TestThreeSideParity:
             f"```chart-json\n{CHART_JSON_OK}\n```",
             _mermaid_eof(),
             _chart_json_eof(),
-            f"```mermaid\nunknownDiagram TD\n  A --> B\n```",
+            "```mermaid\nunknownDiagram TD\n  A --> B\n```",
         ]
         for content in samples:
             registered = {ct for ct, _c, _o in _scan_chart_fences_full(content)}
@@ -230,6 +228,7 @@ class TestStaticGuards:
     @staticmethod
     def _source(rel_path: str) -> str:
         import pathlib
+
         import app
         base = pathlib.Path(str(app.__file__)).parent
         return (base / rel_path).read_text(encoding="utf-8")

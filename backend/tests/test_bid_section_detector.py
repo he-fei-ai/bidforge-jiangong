@@ -6,15 +6,13 @@
 （全仓 grep 0 命中），属高风险盲区，现补齐回归基线。
 """
 import pytest
-
 from app.services.bid_section_detector import (
-    normalize_chinese_number,
-    detect_total_section_count,
-    count_definition_sections,
     count_bracket_sections,
+    count_definition_sections,
     detect_bid_sections,
+    detect_total_section_count,
+    normalize_chinese_number,
 )
-
 
 # ---------------------------------------------------------------------------
 # 中文数字归一

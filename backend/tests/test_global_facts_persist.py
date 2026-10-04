@@ -8,13 +8,15 @@
 import asyncio
 import uuid
 
-import pytest
-
 import app.db as _appdb
-from app.db import init_db, get_conn
 import app.services.facts_extractor as fe
+import pytest
+from app.db import get_conn, init_db
 from app.services.facts_extractor import (
-    persist_extraction, FactItem, FactGroup, ExtractionResult,
+    ExtractionResult,
+    FactGroup,
+    FactItem,
+    persist_extraction,
 )
 
 

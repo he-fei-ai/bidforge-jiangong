@@ -19,11 +19,12 @@
  *   触发 act 警告与状态更新）。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, cleanup, act } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import React from "react";
 import { App as AntdApp } from "antd";
 import SchemeWorkbenchPage from "../pages/SchemeWorkbenchPage";
+import { getActivityItems, clearActivity } from "../utils/activityCenter";
 
 // ---------- ../api 自动假实现 ----------
 // ⚠️ vi.mock 会被提升到文件顶部，工厂里不能引用普通顶层变量（TDZ）。
@@ -41,6 +42,10 @@ const apiMock = vi.hoisted(() => {
     const fn: any = (...args: any[]) => {
       (calls[key] ||= []).push(args);
       const d = defaults[key];
+      // 约定：__reject__ 标记的默认值返回 rejected Promise（用于模拟接口失败）
+      if (d && typeof d === "object" && "__reject__" in d) {
+        return Promise.reject(new Error(String((d as any).__reject__)));
+      }
       return Promise.resolve(d !== undefined ? d : { data: {} });
     };
     const proxy = new Proxy(fn, {
@@ -179,6 +184,7 @@ async function gotoOutlineTab() {
 
 beforeEach(() => {
   for (const k of Object.keys(apiCalls)) delete apiCalls[k];
+  clearActivity();
   setupDefaults();
 });
 
@@ -596,6 +602,171 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     expect(Array.isArray(calls[0][1].outline)).toBe(true);
     expect(calls[0][1].outline.length).toBe(2);
   });
+});
+
+// =====================================================================
+// ✅ 2026-10-04：四层管线动作 + 删除文档 · 页面级交互测试
+//    此前 handlePipelineAction 的 4 个分支（重新解析 / 物化提取层 /
+//    交叉校验 / 刷新质量）与 handleDeleteDocument 在页面级**零覆盖**。
+//    其中「刷新质量」存在真实 BUG：refreshPipelineQuality 内部吞掉异常，
+//    调用方却无条件 msg.success("质量分已刷新") —— 接口失败时用户仍看到
+//    「已刷新」。本组测试钉住：失败必须报错、成功才提示成功；
+//    其余三个分支的请求参数/成功反馈；删除确认→请求→列表刷新链路。
+// =====================================================================
+describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互）", () => {
+  const DOC = { id: "d1", file_name: "招标文件.pdf", parse_status: "success" };
+
+  function seedDoc() {
+    apiDefaults["factsApi.listDocuments"] = { data: { documents: [DOC] } };
+    apiDefaults["factsApi.previewDocument"] = {
+      data: { is_parsed: true, preview: "第一章 工程概况", text_len: 30, parse_warnings: [] },
+    };
+    apiDefaults["docPipelineApi.status"] = {
+      data: { doc_id: "d1", parse_status: "success", layers: {} },
+    };
+  }
+
+  async function openPreview() {
+    const importLabel = await screen.findByText("解析提取");
+    fireEvent.click(importLabel.closest('[role="tab"]') || importLabel);
+    const previewBtn = await screen.findByRole("button", { name: /预览/ });
+    fireEvent.click(previewBtn);
+    // 等待管线摘要渲染出操作按钮（加载完成后才出现）
+    await waitFor(() => expect(screen.getByRole("button", { name: /刷新质量/ })).toBeTruthy());
+  }
+
+  /**
+   * 在「可见的」预览弹窗内按精确文案找按钮。
+   * 页面常驻多个 Modal（含隐藏残留），document.querySelector 会命中第一个隐藏 body，
+   * 因此必须排除 display:none 的 wrap，再在可见 body 内匹配。
+   */
+  function modalActionButton(label: string): HTMLButtonElement {
+    const wraps = Array.from(document.querySelectorAll<HTMLElement>(".ant-modal-wrap"));
+    const visibleWrap =
+      wraps.find((w) => w.style.display !== "none") ||
+      wraps.find((w) => !w.style.display);
+    const scope = visibleWrap?.querySelector(".ant-modal-body") || document;
+    const btn = Array.from(scope.querySelectorAll("button")).find(
+      (b) => (b.textContent || "").replace(/\s+/g, "").includes(label));
+    if (!btn) throw new Error(`弹窗内未找到按钮：${label}`);
+    return btn as HTMLButtonElement;
+  }
+
+  /** 等待消息中心出现满足断言的记录（提示统一进消息中心，不弹原生 toast） */
+  async function waitForActivity(assertFn: (texts: string[]) => boolean) {
+    await waitFor(() => {
+      const texts = getActivityItems().map((a) => a.text);
+      expect(assertFn(texts)).toBe(true);
+    });
+  }
+
+  function lastCall(key: string): any[] {
+    const calls = apiCalls[key] || [];
+    return calls[calls.length - 1];
+  }
+
+  it("刷新质量：接口失败时不得提示成功，必须给出失败反馈（BUG 回归）", async () => {
+    seedDoc();
+    apiDefaults["docPipelineApi.completeness"] = { __reject__: "网络异常" };
+    renderPage();
+    await openPreview();
+    fireEvent.click(modalActionButton("刷新质量"));
+
+    // 关键回归断言：失败时出现错误提示，且绝不出现「质量分已刷新」
+    await waitForActivity(
+      (t) => t.some((x) => /质量分刷新失败/.test(x)) && !t.some((x) => /质量分已刷新/.test(x)));
+    // 确实发起过请求（refresh=true）
+    expect(lastCall("docPipelineApi.completeness")[1]).toBe(true);
+  }, 30000);
+
+  it("刷新质量：接口成功时回填并提示「质量分已刷新」", async () => {
+    seedDoc();
+    apiDefaults["docPipelineApi.completeness"] = {
+      data: { quality_score: 0.85, completeness: {} },
+    };
+    renderPage();
+    await openPreview();
+    fireEvent.click(modalActionButton("刷新质量"));
+
+    await waitForActivity(
+      (t) => t.some((x) => /质量分已刷新/.test(x)) && !t.some((x) => /质量分刷新失败/.test(x)));
+  }, 30000);
+
+  it("重新解析：调用 reparse(force) 并按返回内容反馈，随后重拉权威状态", async () => {
+    seedDoc();
+    apiDefaults["docPipelineApi.reparse"] = { data: { skipped: false } };
+    renderPage();
+    await openPreview();
+    fireEvent.click(modalActionButton("重新解析"));
+
+    await waitForActivity((t) => t.some((x) => /已重新解析并刷新四层产物/.test(x)));
+    expect(lastCall("docPipelineApi.reparse")).toEqual(["d1", "force"]);
+    // 非 refreshQuality 分支动作后必须重拉状态（loadPipelineStatus → status）
+    await waitFor(() => expect((apiCalls["docPipelineApi.status"] || []).length).toBeGreaterThan(1));
+  }, 30000);
+
+  it("物化提取层：反馈物化类别数", async () => {
+    seedDoc();
+    apiDefaults["docPipelineApi.syncExtractions"] = {
+      data: { written_types: ["人员", "资质", "业绩"] },
+    };
+    renderPage();
+    await openPreview();
+    fireEvent.click(modalActionButton("物化提取层"));
+
+    await waitForActivity((t) => t.some((x) => /提取层已物化（3 类）/.test(x)));
+  }, 30000);
+
+  it("交叉校验：反馈冲突数", async () => {
+    seedDoc();
+    apiDefaults["docPipelineApi.crossCheck"] = { data: { stored_conflicts: 2 } };
+    renderPage();
+    await openPreview();
+    fireEvent.click(modalActionButton("交叉校验"));
+
+    await waitForActivity((t) => t.some((x) => /交叉校验完成（冲突 2）/.test(x)));
+  }, 30000);
+
+  it("管线动作失败：reparse 抛错时提示错误且不残留 loading", async () => {
+    seedDoc();
+    apiDefaults["docPipelineApi.reparse"] = { __reject__: "解析服务不可用" };
+    renderPage();
+    await openPreview();
+    fireEvent.click(modalActionButton("重新解析"));
+
+    await waitForActivity((t) => t.some((x) => /解析服务不可用/.test(x)));
+    // 动作结束（finally）后按钮恢复可点
+    await waitFor(() =>
+      expect(modalActionButton("重新解析").hasAttribute("disabled")).toBe(false));
+  }, 30000);
+
+  it("删除文档：确认后发起删除请求、提示成功并重拉文档列表", async () => {
+    seedDoc();
+    renderPage();
+    const importLabel = await screen.findByText("解析提取");
+    fireEvent.click(importLabel.closest('[role="tab"]') || importLabel);
+    // 用文本匹配删除按钮（文档列表 actions 区，type=link），避免图标干扰 accessible name
+    const delBtn = await waitFor(() => {
+      const btn = Array.from(document.querySelectorAll("button")).find(
+        (b) => (b.textContent || "").trim() === "删除");
+      expect(btn).toBeTruthy();
+      return btn as HTMLButtonElement;
+    });
+    await act(async () => {
+      fireEvent.click(delBtn);
+    });
+
+    // 出现确认框并确认（antd Modal.confirm 默认 OK 按钮文案为 OK；okButtonProps.danger）
+    const okBtn = await screen.findByRole("button", { name: /OK/ });
+    await act(async () => {
+      fireEvent.click(okBtn);
+    });
+
+    await waitForActivity((t) => t.some((x) => /文件已删除/.test(x)));
+    expect(lastCall("factsApi.deleteDocument")[0]).toBe("d1");
+    // 删除成功后重新加载文档列表
+    await waitFor(() => expect((apiCalls["factsApi.listDocuments"] || []).length).toBeGreaterThan(1));
+  }, 30000);
 });
 
 // =====================================================================

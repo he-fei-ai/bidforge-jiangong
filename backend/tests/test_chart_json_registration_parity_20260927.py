@@ -17,7 +17,6 @@ import json
 import os
 
 import pytest
-
 from app.routers._chart_pipeline import (
     _ALL_CHART_TYPES,
     _scan_chart_fences_full,
@@ -156,6 +155,7 @@ class TestFenceConstantsSingleSource:
     def test_read_fenced_block_uses_same_threshold(self):
         """read_fenced_block 的默认 max_lines 必须就是那个唯一常量。"""
         import inspect
+
         from app.services import content_blocks
         default = inspect.signature(
             content_blocks.read_fenced_block).parameters["max_lines"].default

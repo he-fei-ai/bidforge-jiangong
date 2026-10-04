@@ -24,6 +24,7 @@ import {
 sectionsApi, schemesApi, factsApi, exportApi, complianceApi,
 sseFetch, sseGetStream, tasksApi, uploadOutlineApi, outlineLibraryApi,
 chartsApi, consistencyRepairApi, bidAnalysisApi, docPipelineApi,
+systemApi,
 } from "../api";
 import MarkdownRenderer from "../components/MarkdownRenderer";
 import UploadParseTab from "../components/UploadParseTab";
@@ -65,7 +66,7 @@ import {
   type GenerationStandardChoice,
 } from "../utils/contentStandard";
 import { useSchemeLiveTask } from "../hooks/useSchemeLiveTask";
-import { hookAntdMessage } from "../utils/activityCenter";
+import { useAntdMessageHub } from "../utils/activityCenter";
 // ✅ 2026-09-25：SSE 批量器抽到 utils/sseBatcher.ts（TaskStatusBar 也要复用，
 //  工具函数不再寄生在 9000+ 行的页面文件里）
 import { createSseBatcher } from "../utils/sseBatcher";
@@ -2225,15 +2226,29 @@ const statusText: Record<string, string> = {
   expanded: "已扩写", reviewed: "已审核",
 };
 
-/** 导出预检问题类型 → 中文标签（后端 export_check 会返回多种类型，需分别展示） */
+/** 导出预检问题类型 → 中文标签（后端 export_check 会返回多种类型，需分别展示）
+ *  ⚠️ 必须覆盖后端 `routers/export.py::_EXPORT_ISSUE_RULE_MAP` 的**全部 16 类** ——
+ *  缺标签时界面会回退显示英文 type（`EXPORT_ISSUE_LABEL[iss.type] || iss.type`），
+ *  用户看到 `global_facts_blocked：…` 之类裸代号。parity 由后端
+ *  `tests/test_charts_r13_and_types_parity_20261004.py::TestExportIssueLabelParity`
+ *  读本文件锁定（后端新增类型而漏改此处即失败）。 */
 const EXPORT_ISSUE_LABEL: Record<string, string> = {
   empty_section: "空章节",
   orphan_node: "孤立节点",
   status_inconsistent: "状态不一致",
   low_word_count: "字数偏少",
   chart_failed: "图表异常",
+  chart_ungenerated: "图表未生成",
   duplicate_section_number: "章节编号重复",
   duplicate_section_title: "章节标题重复",
+  section_number_mismatch: "章节编号漂移",
+  bid_analysis_incomplete: "项目提取未完成",
+  review_pending: "章节待审核",
+  review_rejected: "章节审核未通过",
+  review_missing: "缺少章节审核记录",
+  global_facts_blocked: "全局事实待确认",
+  stale_cross_reference: "交叉引用已失效",
+  body_subheading_namespace_conflict: "正文子标题撞号",
 };
 
 /** 预检问题的一句话描述（title 缺失时回退 detail / chart_type） */
@@ -2765,7 +2780,7 @@ export const FactsGroupList = memo(function FactsGroupList({
                                 <Tag
                                   color="volcano"
                                   style={{ margin: 0, cursor: "pointer" }}
-                                  onClick={() => onAckStaleOne?.(it.id, it.title)}
+                                  onClick={() => onAckStaleOne?.(it.fact_id || it.id, it.name || it.title)}
                                 >
                                   来源已变化 ✓
                                 </Tag>
@@ -2909,7 +2924,7 @@ export default function SchemeWorkbenchPage() {
   const { message: _antdMsg, modal } = App.useApp();
   // ✅ 消息中心：页面所有 msg.* 弹出消息（目录/正文生成、审核与预检、导出文档等）
   //    自动同步进全局活动记录，标题栏中部 ActivityHint 可实时查看
-  const msg = hookAntdMessage(_antdMsg, "方案工作台");
+  const msg = useAntdMessageHub(_antdMsg, "方案工作台");
   const [scheme, setScheme] = useState<any>(null);
   const [tree, setTree] = useState<TreeNode[]>([]);
   // 长方案分步目录生成时，子目录生成失败的章节标题列表（用于高亮提示）
@@ -3037,6 +3052,14 @@ export default function SchemeWorkbenchPage() {
   const presetListAbortRef = useRef<AbortController | null>(null);
   const exportCheckAbortRef = useRef<AbortController | null>(null);
   const cacheAbortRef = useRef<AbortController | null>(null);
+  // ✅ BUG 修复（R-1，2026-10-04）：预设列表 4 个操作按钮（刷新 / 保存 / 设为默认 / 删除）
+  //    之前完全无 loading 状态，快速双击会并发 POST 造成数据竞态（例如两次保存同名预设）。
+  //    用一个"当前进行中的预设操作键"统一标记 —— 任一操作进行中，其他 3 个按钮全部 disabled，
+  //    操作结束（成功/失败/取消）后清空。这样比 4 个独立 boolean 少一半状态，也不易漏置位。
+  const [presetOpLoading, setPresetOpLoading] = useState<string | null>(null);
+  // ✅ BUG 修复（R-3，2026-10-04）：handleExportCheck 只有 abort ref、无同步锁；
+  //    React 状态更新异步批处理，同一帧双击仍会并发进入（与 handleExport 的 exportingRef 同病）。
+  const checkingExportRef = useRef(false);
   const fetchExportPresets = useCallback(async (sid: string) => {
     presetListAbortRef.current?.abort();
     const controller = new AbortController();
@@ -3063,6 +3086,18 @@ export default function SchemeWorkbenchPage() {
       if (presetListAbortRef.current === controller) presetListAbortRef.current = null;
     }
   }, [exportForm]);
+  // ✅ R-1：手动刷新预设（点"刷新"按钮）— 与保存/删除/设默认后的自动刷新区分，
+  //    否则自动刷新会把 presetOpLoading 从 "save" 覆盖成 "refresh" 造成按钮状态跳变。
+  const handleRefreshPresets = async () => {
+    if (!id || presetOpLoading) return;
+    const sid = id;
+    setPresetOpLoading("refresh");
+    try {
+      await fetchExportPresets(sid);
+    } finally {
+      setPresetOpLoading(null);
+    }
+  };
   useEffect(() => {
     exportForm.resetFields();
     setExportPresets([]);
@@ -3078,23 +3113,65 @@ export default function SchemeWorkbenchPage() {
   const handleSavePreset = async () => {
     // ✅ BUG 修复：id 来自 useParams（string | undefined），旧实现未判空，
     //    直接把 undefined 传给 API（类型报错 + 请求 /schemes/undefined/...）
-    if (!id) return;
+    if (!id || presetOpLoading) return;
     const sid = id;
     const config = exportForm.getFieldsValue(true);
-    const name = (window.prompt("请输入格式预设名称：") || "").trim();
-    if (!name) return;
-    try {
-      await exportApi.presets.create(sid, name, config);
-      if (currentSchemeIdRef.current !== sid) return;
-      msg.success("已保存为格式预设");
-      await fetchExportPresets(sid);
-    } catch (e: any) {
-      if (currentSchemeIdRef.current === sid) msg.error(e?.message || "保存预设失败");
-    }
+    // ✅ R-2：弃用 window.prompt —— 浏览器原生弹窗既不受 AntD 主题影响、
+    //    也不能通过 onOk 受控取消，且测试环境里 jsdom 无 prompt API 会失败。
+    //    改用 Modal.confirm + 内联 Input，与项目其他确认弹窗风格一致。
+    //    okButtonProps.disabled 在 modal.confirm 中是静态快照（不会因 Input 变化重渲染），
+    //    所以按钮保持启用、在 onOk 内做空名称校验：拒绝提交并让弹窗保持打开。
+    //    注意：modal.confirm 返回值在部分 AntD 版本不是 Promise，
+    //    因此 loading 清理放在 onOk / onCancel 的 finally 中（不依赖返回值）。
+    let nameRef: { current: string } = { current: "" };
+    setPresetOpLoading("save");
+    modal.confirm({
+      title: "保存为格式预设",
+      content: (
+        <Input
+          size="small"
+          autoFocus
+          placeholder="请输入格式预设名称"
+          maxLength={40}
+          style={{ marginTop: 8 }}
+          onChange={(e) => { nameRef.current = (e.target.value || "").trim(); }}
+          onPressEnter={() => {
+            // Enter 键直接确认；onOk 内会做空名称校验
+            const box = document.querySelector(".ant-modal-confirm-btns .ant-btn-primary");
+            (box as HTMLButtonElement | null)?.click();
+          }}
+        />
+      ),
+      okText: "保存",
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          const name = nameRef.current;
+          if (!name) {
+            // 空名称：throw 让 modal.confirm 保持打开（AntD 特性）
+            msg.warning("请输入格式预设名称");
+            return Promise.reject(new Error("empty name"));
+          }
+          await exportApi.presets.create(sid, name, config);
+          if (currentSchemeIdRef.current === sid) {
+            msg.success("已保存为格式预设");
+            await fetchExportPresets(sid);
+          }
+        } catch (e: any) {
+          if (currentSchemeIdRef.current === sid) msg.error(e?.message || "保存预设失败");
+          // 让弹窗保持打开，方便用户重试
+          return Promise.reject(e);
+        } finally {
+          setPresetOpLoading(null);
+        }
+      },
+      onCancel: () => setPresetOpLoading(null),
+    });
   };
   const handleSetDefaultPreset = async (pid: string) => {
-    if (!id) return;
+    if (!id || presetOpLoading) return;
     const sid = id;
+    setPresetOpLoading("setDefault");
     try {
       await exportApi.presets.setDefault(sid, pid);
       if (currentSchemeIdRef.current !== sid) return;
@@ -3102,25 +3179,40 @@ export default function SchemeWorkbenchPage() {
       await fetchExportPresets(sid);
     } catch (e: any) {
       if (currentSchemeIdRef.current === sid) msg.error(e?.message || "操作失败");
+    } finally {
+      setPresetOpLoading(null);
     }
   };
   const handleDeletePreset = (pid: string) => {
+    if (!id || presetOpLoading) return;
+    const sid = id;
+    setPresetOpLoading("delete");
+    // ✅ BUG 修复（2026-10-04）：AntD v5 的 modal.confirm() 不返回 Promise，
+    //   不能在返回值上 .finally()（会 TypeError: ... is not a function）。
+    //   loading 清理放 onOk / onCancel 的 finally，失败重试时也能清掉 loading
+    //   —— 否则接口 reject 后弹窗留着、按钮却永远转圈。
     modal.confirm({
       title: "确认删除该格式预设？",
       okText: "删除", okButtonProps: { danger: true },
+      cancelText: "取消",
       onOk: async () => {
-        if (!id) return;
-        const sid = id;
         try {
-          await exportApi.presets.remove(sid, pid);
-          if (currentSchemeIdRef.current !== sid) return;
-          msg.success("已删除预设");
-          if (selectedPresetId === pid) setSelectedPresetId("");
-          await fetchExportPresets(sid);
-        } catch (e: any) {
-          if (currentSchemeIdRef.current === sid) msg.error(e?.message || "删除失败");
+          try {
+            await exportApi.presets.remove(sid, pid);
+            if (currentSchemeIdRef.current !== sid) return;
+            msg.success("已删除预设");
+            if (selectedPresetId === pid) setSelectedPresetId("");
+            await fetchExportPresets(sid);
+          } catch (e: any) {
+            if (currentSchemeIdRef.current === sid) msg.error(e?.message || "删除失败");
+            // 让弹窗保持打开，方便用户重试
+            return Promise.reject(e);
+          }
+        } finally {
+          setPresetOpLoading(null);
         }
       },
+      onCancel: () => setPresetOpLoading(null),
     });
   };
   // ===== ✅ 接线 sectionsApi.quality（正文质量自检：口语化/AI 腔残留 + 废止标准）=====
@@ -3184,6 +3276,10 @@ export default function SchemeWorkbenchPage() {
   const [parsingDocs, setParsingDocs] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<string[]>([]);
   // =====「上传解析」Tab（import）页面态 =====
+  // 单文件大小上限（字节）：挂载时从后端 /system/upload-limits 动态下发取得。
+  // 未到达 / 请求失败时保持 undefined，由 UploadParseTab 回落内置兜底默认（30MB），
+  // 前端不再把 30MB 常量当作权威上限，避免与后端配置漂移。
+  const [maxUploadBytes, setMaxUploadBytes] = useState<number | undefined>(undefined);
   // 正在解析的单份文档 id（列表行内按钮 loading / 全列表禁用依据）
   const [parsingDocId, setParsingDocId] = useState<string | null>(null);
   // 文件分类下拉选项（后端 /global-facts/documents/category-options）
@@ -3418,19 +3514,20 @@ const draftKey = selectedSection && id
     }
   }, [id]);
 
-  const loadFactsDiagnostics = useCallback(async () => {
+  const loadFactsDiagnostics = useCallback(async (options?: { signal?: AbortSignal }) => {
     if (!id) return;
     const requestedSchemeId = id;
     setFactsDiagnosticsLoading(true);
     try {
       const [chapters, danger] = await Promise.all([
-        factsApi.chapters(requestedSchemeId),
-        factsApi.dangerCheck({}, requestedSchemeId),
+        factsApi.chapters(requestedSchemeId, { signal: options?.signal }),
+        factsApi.dangerCheck({}, requestedSchemeId, { signal: options?.signal }),
       ]);
       if (requestedSchemeId !== currentSchemeIdRef.current) return;
       setFactsChapterReport(chapters.data);
       setFactsDangerReport(danger.data);
     } catch (e: any) {
+      if (e?.name === "AbortError" || options?.signal?.aborted) return;
       if (requestedSchemeId === currentSchemeIdRef.current) {
         msg.warning(e?.response?.data?.detail || e?.message || "加载事实诊断失败");
       }
@@ -3768,6 +3865,21 @@ const draftKey = selectedSection && id
     loadComplianceHistory();
     complianceApi.expertItems().then(({ data }) => setExpertItems(data.items || [])).catch(() => {});
   }, [id, load, loadFacts, loadComplianceHistory]);
+
+  // 上传配额动态下发：该配置全局通用、与具体方案无关，挂载时拉取一次即可。
+  // 失败静默保留 undefined（组件回落兜底默认）——后端临时不可达不应阻断页面主流程。
+  useEffect(() => {
+    let alive = true;
+    systemApi
+      .uploadLimits()
+      .then(({ data }) => {
+        if (!alive) return;
+        const n = Number(data?.max_upload_bytes);
+        if (Number.isFinite(n) && n > 0) setMaxUploadBytes(n);
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   // ✅ 加载后端审核规则库，用规则标题覆盖前端默认清单（消除与后端/提示词的分叉）。
   //    用户一旦手工编辑过清单（checklistDirty），后续不再覆盖，保留自定义能力。
@@ -5297,7 +5409,7 @@ const draftKey = selectedSection && id
           // ✅ F-CONTENT-STANDARD(2026-09-26 · F4)：生成标准校验汇总提示
           //    （仅在「有问题章数 > 0」时追加，无问题不制造噪音）
           const _stdHint = standardSummaryHint(evt.standard_summary);
-          if (_stdHint) { msg.warning(_stdHint); setProgressMsg(`${doneMsg}　|　${_stdHint}`); }
+          if (_stdHint) { msg.warning(_stdHint); setProgressMsg(`${doneMsg} | ${_stdHint}`); }
           // ✅ 全文一致性 Agent 修复结果摘要（后端随 completed 一并下发）
           if (evt.consistency_summary) {
             const cs = evt.consistency_summary;
@@ -5816,14 +5928,16 @@ const draftKey = selectedSection && id
     }
   };
 
-  /** 刷新完整性校验并回填质量分 */
-  const refreshPipelineQuality = async (docId: string) => {
+  /** 刷新完整性校验并回填质量分；成功返回 true，失败返回 false，由调用方决定提示 */
+  const refreshPipelineQuality = async (docId: string): Promise<boolean> => {
     try {
       const { data } = await docPipelineApi.completeness(docId, true);
       const q = typeof data?.quality_score === "number" ? data.quality_score : undefined;
       setPipelineStatus((prev) => (prev ? { ...prev, quality_score: q, completeness: data?.completeness ?? prev.completeness } : prev));
+      return true;
     } catch {
-      /* 质量刷新失败不额外打扰（正文/状态仍在） */
+      /* 质量刷新失败：正文/状态仍在，提示交由调用方处理，避免"失败却提示成功" */
+      return false;
     }
   };
 
@@ -5843,8 +5957,12 @@ const draftKey = selectedSection && id
         const { data } = await docPipelineApi.crossCheck(docId);
         msg.success(`交叉校验完成（冲突 ${data?.stored_conflicts ?? 0}）`);
       } else if (action === "refreshQuality") {
-        await refreshPipelineQuality(docId);
-        msg.success("质量分已刷新");
+        const ok = await refreshPipelineQuality(docId);
+        if (ok) {
+          msg.success("质量分已刷新");
+        } else {
+          msg.error("质量分刷新失败，请稍后重试");
+        }
       }
       // 动作可能改变四层产物 → 重新拉取权威状态
       if (action !== "refreshQuality") await loadPipelineStatus(docId);
@@ -6213,8 +6331,16 @@ const draftKey = selectedSection && id
    */
   const handleAckStaleOne = async (factId: string, title?: string) => {
     if (!id || !factId) return;
+    const sid = id;
+    // 复用列表加载的中止控制器：切方案时一并取消「补丁请求」和随后的「列表刷新」，
+    // 避免旧方案的 stale 回执在切走后触发对已离开方案的刷新。
+    factsListAbortRef.current?.abort();
+    const ac = new AbortController();
+    factsListAbortRef.current = ac;
     try {
-      const { data } = await factsApi.ackStale(factId, id);
+      const { data } = await factsApi.ackStale(factId, sid, { signal: ac.signal });
+      // 切走方案后不弹提示、不刷新（与 loadFacts 一致）
+      if (sid !== currentSchemeIdRef.current || ac.signal.aborted) return;
       if (data?.blocked_reason) {
         msg.warning(data.blocked_reason as string);
       } else if (data?.changed === false) {
@@ -6224,7 +6350,8 @@ const draftKey = selectedSection && id
       }
       await loadFacts();
     } catch (e: any) {
-      msg.error(e.message || "解除失败");
+      if (e?.name === "AbortError" || ac.signal.aborted) return;
+      if (sid === currentSchemeIdRef.current) msg.error(e.message || "解除失败");
     }
   };
 
@@ -7381,6 +7508,9 @@ const draftKey = selectedSection && id
       } catch (e) {
         if (controller.signal.aborted) throw e;
         chartImages = []; // 前端渲染失败不阻塞导出，图表走后端渲染轨兜底
+        // ✅ R-4（2026-10-04）：此前静默吞错，用户无从判断"图表渲染轨未启用"。
+        //    现在至少给一条 info 提示，便于用户排查图表缺失原因。
+        msg.info("图表前端渲染轨未启用（网络/浏览器异常），图表将由后端兜底渲染", 4);
       }
       // ✅ 收尾前把图表渲染进度的最后一帧刷下去，保证用户看到最终进度文本
       exportBatcherRef.current?.flushNow();
@@ -7416,7 +7546,12 @@ const draftKey = selectedSection && id
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      // ✅ R-5（2026-10-04）：延迟从 2s 提到 10s。
+      //    大文件（数十 MB 的方案 PDF/DOCX）在弱网 / 移动热点 / 云盘同步下，
+      //    浏览器下载器可能超过 2s 才真正从 blob 读取字节。此时如果 URL 已被
+      //    revoke，Safari / Firefox 会静默失败（点按钮没反应）。10s 兼顾
+      //    兼容性（不永久占内存）与稳定性。
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
       msg.success(format === "pdf" ? "PDF 导出成功" : "导出成功");
       if (currentSchemeIdRef.current === sid) await loadCacheStatus();
       if (
@@ -7457,8 +7592,12 @@ const draftKey = selectedSection && id
   };
 
   const handleExportCheck = async () => {
-    if (!id) return;
+    // ✅ R-3（2026-10-04）：同步锁，与 handleExport 的 exportingRef 同型。
+    //    React 状态更新异步批处理，仅靠 exportCheckAbortRef 中止旧请求不够——
+    //    快速双击会在同一帧内并发进入，两次 await 交错 setState 造成 UI 状态撕裂。
+    if (!id || checkingExportRef.current) return;
     const sid = id;
+    checkingExportRef.current = true;
     exportCheckAbortRef.current?.abort();
     const controller = new AbortController();
     exportCheckAbortRef.current = controller;
@@ -7521,6 +7660,8 @@ const draftKey = selectedSection && id
         exportCheckAbortRef.current = null;
         setCheckingExport(false);
       }
+      // R-3：无论成功/失败/取消都释放同步锁，避免死锁
+      checkingExportRef.current = false;
     }
   };
 
@@ -7889,6 +8030,7 @@ const draftKey = selectedSection && id
                       {/* 上传解析主体（含上传区、资料与解析列表、下一步等） */}
                       <UploadParseTab
                         docs={docList}
+                        maxUploadBytes={maxUploadBytes}
                         categoryOptions={categoryOptions}
                         generating={generating}
                         uploadingFacts={uploadingFacts}
@@ -9418,12 +9560,36 @@ const draftKey = selectedSection && id
                 }}
                 options={exportPresets.map((p) => ({ value: p.id, label: (p.is_default ? "★ " : "") + p.name }))}
               />
-              <Button size="small" onClick={() => { if (id) fetchExportPresets(id); }}>刷新</Button>
-              <Button size="small" type="primary" onClick={handleSavePreset}>保存当前为预设</Button>
+              {/* ✅ R-1（2026-10-04）：4 个预设操作按钮统一由 presetOpLoading 单键控制
+                  loading + disabled。此前无 loading，快速双击会并发 POST（尤其保存预设）。 */}
+              <Button
+                size="small"
+                loading={presetOpLoading === "refresh"}
+                disabled={!!presetOpLoading}
+                onClick={handleRefreshPresets}
+              >刷新</Button>
+              <Button
+                size="small"
+                type="primary"
+                loading={presetOpLoading === "save"}
+                disabled={!!presetOpLoading}
+                onClick={handleSavePreset}
+              >保存当前为预设</Button>
               {selectedPresetId && (
                 <>
-                  <Button size="small" onClick={() => handleSetDefaultPreset(selectedPresetId)}>设为默认</Button>
-                  <Button size="small" danger onClick={() => handleDeletePreset(selectedPresetId)}>删除</Button>
+                  <Button
+                    size="small"
+                    loading={presetOpLoading === "setDefault"}
+                    disabled={!!presetOpLoading}
+                    onClick={() => handleSetDefaultPreset(selectedPresetId)}
+                  >设为默认</Button>
+                  <Button
+                    size="small"
+                    danger
+                    loading={presetOpLoading === "delete"}
+                    disabled={!!presetOpLoading}
+                    onClick={() => handleDeletePreset(selectedPresetId)}
+                  >删除</Button>
                 </>
               )}
             </Space>

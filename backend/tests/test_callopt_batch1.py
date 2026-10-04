@@ -7,10 +7,9 @@
   O9  确定性错误不重试：402/403/404 等章节级重试循环直接放弃
 """
 import aiosqlite
-import pytest
-
-import app.services.ai.provider_factory as pf
 import app.routers.sse_handlers as sh
+import app.services.ai.provider_factory as pf
+import pytest
 from app.db import _migrate
 
 LEGACY_AUDIT_DDL = (
@@ -122,7 +121,7 @@ class TestMigrateBackfill:
 def _patch_outline_runtime(monkeypatch, fake_collect):
     monkeypatch.setattr(sh, "collect_json_response", fake_collect)
 
-    async def fake_aws(coro, push_stats):
+    async def fake_aws(coro, push_stats, *a, **k):
         return await coro
 
     async def noop(*a, **k):

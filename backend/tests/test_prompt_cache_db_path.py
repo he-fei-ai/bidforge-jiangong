@@ -7,9 +7,8 @@
 """
 import sqlite3
 
-import pytest
-
 import app.db as _appdb
+import pytest
 from app.services.ai.prompts import _cache
 
 # 探针 key：不进 _ALL_PROMPTS 注册表，get_prompt 命中 DB 缓存时原样返回，
@@ -131,8 +130,8 @@ class TestPromptGovernance:
             logs = await app_main.prompt_audit_logs(key=key, db=db_conn)
             assert logs["total"] == 2
         finally:
-            from app.services.ai.prompts._registry import reset_prompt
             from app.services.ai.prompts._cache import reload_prompt_cache
+            from app.services.ai.prompts._registry import reset_prompt
             reset_prompt(key)
             reload_prompt_cache()
 

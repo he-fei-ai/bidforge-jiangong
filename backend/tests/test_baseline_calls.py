@@ -21,15 +21,14 @@
 import asyncio
 import json
 import os
-import time
 import random
+import time
 from collections import Counter
 
-import pytest
-
+import app.routers.sse_handlers as sh
 import app.services.consistency_scanner as cs
 import app.services.repair_agent as ra
-import app.routers.sse_handlers as sh
+import pytest
 
 # ---------- 固定语料（同一批测试用例） ----------
 N_LEAF = 12          # 正文叶子章节数 / 目录一级章数
@@ -115,7 +114,7 @@ async def drive_outline(merge_k, conc, fail_every=0, fail_batches=False,
                if is_batch else {"outline": []})
         return obj, json.dumps(obj, ensure_ascii=False)
 
-    async def fake_aws(coro, push_stats):
+    async def fake_aws(coro, push_stats, *a, **k):
         return await coro
 
     async def noop(*a, **k):

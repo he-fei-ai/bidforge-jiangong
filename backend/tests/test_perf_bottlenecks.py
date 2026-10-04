@@ -8,14 +8,12 @@
 - export 纯函数：内容块解析 / 标题编号剥离 / 中文数字解析 / 代码归一化（导出链路复用缓存 key）
 """
 import json
-from io import BytesIO
 import time
+from io import BytesIO
 
 import pytest
-
 from app.services.ai.mermaid_renderer import ChartCache
 from app.services.crypto import encrypt_api_key
-
 
 # ---------------------------------------------------------------------------
 # ChartCache（对应 P0-2 单飞去重 / P0-1 缓存命中，优化均以此不变量为基座）
@@ -81,6 +79,7 @@ class TestChartCache:
     def test_concurrent_same_key_renders_once(self, monkeypatch, tmp_path):
         """并发相同 key（P0-2 单飞去重）：4 线程同时渲染只触发 1 次渲染"""
         import threading
+
         import app.services.ai.mermaid_renderer as mr
         calls = {"n": 0}
         calls_lock = threading.Lock()
@@ -375,6 +374,7 @@ class TestChartTypeIndex:
     def test_index_equivalent_to_old_linear_scan(self):
         """倒排索引与旧全表扫描在所有输入下结果一致（等价替换回归保护）"""
         import random
+
         from app.routers.export import _build_chart_type_index, _find_fallback_code
         types = ["flowchart", "gantt", "architecture", "labor",
                  "comparison", "layout", "timeline"]
@@ -445,6 +445,7 @@ class TestAuditBatching:
     async def test_periodic_loop_flushes_single_row_without_next_call(self, db_conn, monkeypatch):
         """单条审计后即使没有下一次调用，周期任务也必须按时落库。"""
         import asyncio
+
         import app.services.ai.provider_factory as pf
         pf._audit_buffer.clear()
         monkeypatch.setattr(pf, "_AUDIT_FLUSH_INTERVAL", 0.01)

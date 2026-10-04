@@ -48,9 +48,8 @@ import re
 import uuid
 from pathlib import Path
 
-import pytest
-
 import app as _app_pkg
+import pytest
 from app.db import get_conn, init_db
 from app.services import facts_extractor, placeholder_inventory
 

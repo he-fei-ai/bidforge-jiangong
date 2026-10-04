@@ -11,7 +11,6 @@
 4. collect_export_issues 附带 placeholder_report 精简键（additive，向后兼容）。
 """
 import pytest
-
 from app.services.placeholder_inventory import (
     build_placeholder_report,
     build_report_for_scheme,

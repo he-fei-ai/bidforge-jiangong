@@ -10,9 +10,8 @@ import io
 import json
 
 import pytest
-from starlette.datastructures import UploadFile
-
 from app.routers import upload_outline as uo
+from starlette.datastructures import UploadFile
 
 #: 6 个顶层章节（用「第X章」编号 ⇒ 规则法解析为同级顶层节点；
 #: 节点数 >= 5 ⇒ 视为有效识别，不会触发 AI 兜底调用）

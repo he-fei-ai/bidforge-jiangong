@@ -4,8 +4,11 @@ from fastapi import APIRouter, Depends
 from app.db import read_db
 from app.models import AIConfigTest
 from app.services.ai.provider_factory import (
-    normalize_base_url, PROVIDER_PRESETS,
-    normalize_request_mode, request_mode_label, clamp_config_numbers,
+    PROVIDER_PRESETS,
+    clamp_config_numbers,
+    normalize_base_url,
+    normalize_request_mode,
+    request_mode_label,
 )
 from app.services.crypto import decrypt_api_key
 
@@ -317,8 +320,11 @@ async def ai_health(db=Depends(read_db)):
       只能靠翻库。现一次性给出运行时可观测信息。
     """
     from app.services.ai.provider_factory import (
-        _build_provider, _fallback_chain, resolve_active_env, resolve_disabled_providers,
+        _build_provider,
+        _fallback_chain,
         _load_active_config,
+        resolve_active_env,
+        resolve_disabled_providers,
     )
     from app.services.ai.workflows_base import circuit_breaker, concurrency_controller
 

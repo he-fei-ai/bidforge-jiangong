@@ -10,7 +10,6 @@
 import time
 
 import pytest
-
 from app.routers.system import activity
 
 
@@ -159,3 +158,44 @@ async def test_activity_stream_initial_snapshot_and_task_update(db_conn, monkeyp
         assert second["data"]["tasks"]["running"][0]["progress"] == 0.88
     finally:
         tr._tasks.pop("t1", None)
+
+
+@pytest.mark.asyncio
+async def test_upload_limits_defaults():
+    """默认（测试 settings 未显式覆盖时）返回三项正整数配额。"""
+    from app.routers.system import upload_limits
+
+    data = await upload_limits()
+    assert set(data.keys()) == {
+        "max_upload_bytes", "max_files_per_request", "max_total_bytes"}
+    assert data["max_upload_bytes"] == 30 * 1024 * 1024
+    assert data["max_files_per_request"] == 20
+    assert data["max_total_bytes"] == 200 * 1024 * 1024
+    for v in data.values():
+        assert isinstance(v, int) and v > 0
+
+
+@pytest.mark.asyncio
+async def test_upload_limits_reflect_settings(monkeypatch):
+    """请求时实时读取 settings：改配置即生效，无需重启（动态下发的核心）。"""
+    from app.routers import system as sys_mod
+
+    monkeypatch.setattr(sys_mod.settings, "upload_max_bytes", 50 * 1024 * 1024)
+    monkeypatch.setattr(sys_mod.settings, "upload_max_files_per_request", 7)
+    monkeypatch.setattr(sys_mod.settings, "upload_max_total_bytes", 99 * 1024 * 1024)
+
+    data = await sys_mod.upload_limits()
+    assert data["max_upload_bytes"] == 50 * 1024 * 1024
+    assert data["max_files_per_request"] == 7
+    assert data["max_total_bytes"] == 99 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [0, -1, "abc", None])
+async def test_upload_limits_invalid_falls_back(monkeypatch, bad):
+    """非法（非正数/非数值）配置回落到安全默认，绝不因误配关闭守卫。"""
+    from app.routers import system as sys_mod
+
+    monkeypatch.setattr(sys_mod.settings, "upload_max_bytes", bad)
+    data = await sys_mod.upload_limits()
+    assert data["max_upload_bytes"] == 30 * 1024 * 1024

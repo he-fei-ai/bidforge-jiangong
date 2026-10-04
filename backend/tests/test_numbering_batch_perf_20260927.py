@@ -130,8 +130,7 @@ class TestNumberingBatchQueryCount:
 
     async def test_index_path_does_zero_queries(self, db_conn):
         """传入 index 且命中该章时，规范化本身零查库。"""
-        from app.services.numbering import (
-            load_scheme_section_index, normalize_section_content_subheadings)
+        from app.services.numbering import load_scheme_section_index, normalize_section_content_subheadings
         await _seed(db_conn, _mixed_rows(3))
         index = await load_scheme_section_index(db_conn, "s1")
         st = _count_executes(db_conn)

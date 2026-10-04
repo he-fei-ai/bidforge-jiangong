@@ -12,9 +12,8 @@ B. 持久化密钥文件（落盘 / 复用 / 空文件 / 只读盘降级）；
 C. 加解密与格式判定（encrypt / decrypt / is_encrypted 的边界与不抛异常承诺）。
 """
 import pytest
-from cryptography.fernet import Fernet
-
 from app.services import crypto
+from cryptography.fernet import Fernet
 
 
 @pytest.fixture(autouse=True)

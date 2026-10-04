@@ -16,12 +16,13 @@
  *  11. 重解析确认框取消不回调；空列表下下一步全禁用但刷新可用。
  */
 import { describe, it, expect, vi } from "vitest";
-import { render, fireEvent, waitFor } from "@testing-library/react";
+import { render, fireEvent, waitFor, act } from "@testing-library/react";
 import React from "react";
 import { App as AntdApp } from "antd";
 import UploadParseTab from "../components/UploadParseTab";
 import type { DocumentParseItem } from "../components/DocumentParseList";
 import type { BaGroup, BaStoredItem } from "../utils/bidAnalysis";
+import { MAX_UPLOAD_BYTES } from "../utils/uploadAccept";
 
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
@@ -114,6 +115,120 @@ describe("UploadParseTab", () => {
     const files = onUploadFiles.mock.calls[0][0] as File[];
     expect(files.map((f) => f.name)).toEqual(["a.pdf", "b.pdf"]);
   });
+
+  /** 等待 antd message 提示（App 上下文 holder 渲染在 document.body） */
+  async function expectToast(text: string): Promise<void> {
+    await waitFor(() => expect(document.body.textContent || "").toContain(text));
+  }
+
+  function withSize(file: File, size: number): File {
+    Object.defineProperty(file, "size", { value: size, configurable: true });
+    return file;
+  }
+
+  it("上传校验：不支持的类型（.exe）被剔除、不调回调，并给出错误提示", async () => {
+    const { container, onUploadFiles } = setup();
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [new File(["x"], "evil.exe", { type: "application/octet-stream" })] },
+    });
+    await expectToast("不支持的文件类型，已忽略：evil.exe");
+    // 给 setTimeout 0 留触发机会，确认回调始终未被调用
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(onUploadFiles).not.toHaveBeenCalled();
+  });
+
+  it("上传校验：无扩展名文件按类型非法剔除", async () => {
+    const { container, onUploadFiles } = setup();
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [new File(["x"], "README", { type: "text/plain" })] },
+    });
+    await expectToast("不支持的文件类型，已忽略：README");
+    expect(onUploadFiles).not.toHaveBeenCalled();
+  });
+
+  it("上传校验：超过 30MB 的文件被剔除并提示大小限制", async () => {
+    const { container, onUploadFiles } = setup();
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const big = withSize(
+      new File(["x"], "big.pdf", { type: "application/pdf" }),
+      MAX_UPLOAD_BYTES + 1
+    );
+    fireEvent.change(input, { target: { files: [big] } });
+    await expectToast("单个文件不能超过 30MB，已忽略：big.pdf");
+    expect(onUploadFiles).not.toHaveBeenCalled();
+  });
+
+  it("上传校验：混合批次只上传合法文件，两类拒绝原因分别提示", async () => {
+    const { container, onUploadFiles } = setup();
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const good = new File(["g"], "good.pdf", { type: "application/pdf" });
+    const badType = new File(["b"], "bad.exe", { type: "application/octet-stream" });
+    const big = withSize(new File(["z"], "big.docx"), MAX_UPLOAD_BYTES + 1);
+    fireEvent.change(input, { target: { files: [good, badType, big] } });
+
+    await waitFor(() => expect(onUploadFiles).toHaveBeenCalledTimes(1));
+    const files = onUploadFiles.mock.calls[0][0] as File[];
+    expect(files.map((f) => f.name)).toEqual(["good.pdf"]);
+    await expectToast("不支持的文件类型，已忽略：bad.exe");
+    await expectToast("单个文件不能超过 30MB，已忽略：big.docx");
+  });
+
+  it("上传校验：扩展名大小写不敏感；恰好 30MB 边界值仍允许上传", async () => {
+    const { container, onUploadFiles } = setup();
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const upper = new File(["a"], "A.PDF", { type: "application/pdf" });
+    const boundary = withSize(new File(["b"], "edge.txt", { type: "text/plain" }), MAX_UPLOAD_BYTES);
+    fireEvent.change(input, { target: { files: [upper, boundary] } });
+    await waitFor(() => expect(onUploadFiles).toHaveBeenCalledTimes(1));
+    const files = onUploadFiles.mock.calls[0][0] as File[];
+    expect(files.map((f) => f.name)).toEqual(["A.PDF", "edge.txt"]);
+  });
+
+  it("动态上限：下发自定义上限后，超过该上限（但低于30MB）的文件被剔除", async () => {
+    const customLimit = 1024 * 1024;
+    const { container, onUploadFiles } = setup({ maxUploadBytes: customLimit });
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const big = withSize(
+      new File(["x"], "mid.pdf", { type: "application/pdf" }),
+      customLimit + 1
+    );
+    fireEvent.change(input, { target: { files: [big] } });
+    await expectToast("单个文件不能超过 1MB，已忽略：mid.pdf");
+    expect(onUploadFiles).not.toHaveBeenCalled();
+  });
+
+  it("动态上限：恰好等于下发上限的边界文件允许上传", async () => {
+    const customLimit = 2 * 1024 * 1024;
+    const { container, onUploadFiles } = setup({ maxUploadBytes: customLimit });
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const boundary = withSize(
+      new File(["b"], "edge.pdf", { type: "application/pdf" }),
+      customLimit
+    );
+    fireEvent.change(input, { target: { files: [boundary] } });
+    await waitFor(() => expect(onUploadFiles).toHaveBeenCalledTimes(1));
+    const files = onUploadFiles.mock.calls[0][0] as File[];
+    expect(files.map((f) => f.name)).toEqual(["edge.pdf"]);
+  });
+
+  it.each([0, -1024, NaN])(
+    "动态上限：下发非法值（%p）时回落兜底默认，不被当作无上限放行",
+    async (bad) => {
+      const { container, onUploadFiles } = setup({ maxUploadBytes: bad });
+      const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+      const big = withSize(
+        new File(["x"], "big.pdf", { type: "application/pdf" }),
+        MAX_UPLOAD_BYTES + 1
+      );
+      fireEvent.change(input, { target: { files: [big] } });
+      await expectToast("单个文件不能超过 30MB，已忽略：big.pdf");
+      expect(onUploadFiles).not.toHaveBeenCalled();
+    }
+  );
 
   it("上传进度卡：uploadingFacts 时出现并展示文件名 Tag", () => {
     const { container } = setup({ uploadingFacts: true, uploadedFiles: ["x.pdf", "y.docx"] });

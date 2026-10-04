@@ -26,7 +26,6 @@ from ._registry import (
     validate_prompt_variables,
 )
 
-
 logger = logging.getLogger(__name__)
 
 _prompt_cache: dict[str, str] | None = None

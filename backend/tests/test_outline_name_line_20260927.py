@@ -13,12 +13,14 @@
 3. 要求四（全面性）：``analyze_name_coverage`` / ``find_redundant_titles``，
    且缺口能并入 ``_check_requirements_coverage`` 的 missing → 复用外科式补齐。
 """
-import pytest
-
 import app.routers.sse_handlers as sh
+import pytest
 from app.services.outline_quality import (
-    analyze_name_coverage, check_outline_continuity, find_redundant_titles,
-    render_continuity_notice, render_coverage_notice,
+    analyze_name_coverage,
+    check_outline_continuity,
+    find_redundant_titles,
+    render_continuity_notice,
+    render_coverage_notice,
 )
 from app.services.scheme_basis import parse_scheme_basis
 

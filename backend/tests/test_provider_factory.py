@@ -8,13 +8,12 @@
 - 验证 DB 修改后缓存未过期时返回旧值（缓存生效）
 - 验证缓存过期后返回新值（重新查库）
 """
-import pytest
-
 import app.services.ai.provider_factory as pf
+import pytest
 from app.services.ai.provider_factory import (
-    _load_active_config,
     _config_cache,
     _config_cache_ttl,
+    _load_active_config,
 )
 
 

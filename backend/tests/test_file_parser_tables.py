@@ -10,21 +10,19 @@
 import io
 import zipfile
 
+import app.services.mineru_client as mineru_client
 import pytest
-
 from app.services.file_parser import (
     ParseError,
+    _compact_dedup_probe,
+    _line_covered_by_tables,
     find_table_header,
     has_informative_text,
     normalize_pdf_text,
     parse_file_content_ex,
     remove_lines_covered_by_tables,
     render_table_with_header,
-    _line_covered_by_tables,
-    _compact_dedup_probe,
 )
-import app.services.mineru_client as mineru_client
-
 
 # ---------------------------------------------------------------------------
 # 文本归一化

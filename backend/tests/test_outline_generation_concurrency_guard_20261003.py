@@ -11,9 +11,8 @@ outline_generation_in_progress / content_generation_in_progress），自身从�
 现与下游写库端点同口径：同型任务在跑（running/paused）即 409 拒绝重入。
 """
 import pytest
+from app.routers.sse_handlers import generate_content, generate_outline
 from fastapi import HTTPException
-
-from app.routers.sse_handlers import generate_outline, generate_content
 
 
 class _FakeReq:

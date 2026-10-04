@@ -25,13 +25,12 @@ import pathlib
 import re
 import uuid
 
-import pytest
-from fastapi import HTTPException
-
 import app.db as _appdb
+import pytest
 from app.db import close_db, get_conn, init_db
 from app.routers import review_autofix as ra
 from app.routers.compliance import _readiness_overview_compute
+from fastapi import HTTPException
 
 pytestmark = pytest.mark.asyncio
 

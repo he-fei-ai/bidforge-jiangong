@@ -154,7 +154,7 @@ export function useContentGeneration(opts: UseContentGenerationOpts): ContentGen
           // ✅ F-CONTENT-STANDARD(2026-09-26 · F4)：生成标准校验汇总提示。
           //    仅在「有问题章数 > 0」时追加（无问题返回空串 → 不制造噪音）。
           const _stdHint = standardSummaryHint(evt.standard_summary);
-          if (_stdHint) { msg.warning(_stdHint); setProgressMsg(dm + `　|　${_stdHint}`); }
+          if (_stdHint) { msg.warning(_stdHint); setProgressMsg(dm + ` | ${_stdHint}`); }
           await load(); break;
         } else if (evt.event === "stopped") {
           if (typeof evt.progress === "number") setProgress(evt.progress);

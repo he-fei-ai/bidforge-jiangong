@@ -6,12 +6,11 @@ import time
 from collections import OrderedDict
 from typing import Any, Callable
 
-# ✅ R38 D6：随死函数一并移除 `from .prompts import get_prompt`（本模块已无
-#    消费点；模板消费链保留在 charts.py / prompts.illustration）
-from .providers.base import AIMessage
 # ✅ 移植适配：源项目为 from .workflows import collect_json_response（provider 直连签名），
 # 本项目在 json_response.py 提供了签名兼容的 provider 直连版本
-from .json_response import collect_json_response_with_provider as collect_json_response
+
+# ✅ R38 D6：随死函数一并移除 `from .prompts import get_prompt`（本模块已无
+#    消费点；模板消费链保留在 charts.py / prompts.illustration）
 
 logger = logging.getLogger(__name__)
 

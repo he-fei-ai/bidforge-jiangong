@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import re
 
-
 logger = logging.getLogger(__name__)
 
 _ALL_PROMPTS: dict[str, dict] = {}
@@ -484,7 +483,9 @@ def list_prompts(category: str | None = None) -> list[dict]:
     return items
 
 
-def update_prompt(key: str, content: str) -> bool:
+def update_prompt(
+    key: str, content: str  # noqa: F811  content 与文件尾导入的 content 模块同名（刻意，见文件尾）
+) -> bool:
     """更新提示词内容（仅内存，持久化由路由层处理）。
 
     BUG-FIX：仅改写 "content"，保留不可变的 "default_content"。
@@ -844,7 +845,9 @@ PROMPT_ISSUE_LABELS = {
 }
 
 
-def validate_prompt_content(key: str, content: str) -> list[dict]:
+def validate_prompt_content(
+    key: str, content: str  # noqa: F811  content 与文件尾导入的 content 模块同名（刻意，见文件尾）
+) -> list[dict]:
     """保存提示词前的**静态体检**，返回问题清单（空列表 = 通过）。
 
     ✅ 2026-09-27（BUG-P1-C · 保存时零校验，坏模板一路跑到模型面前）：
@@ -972,13 +975,16 @@ def validate_prompt_content(key: str, content: str) -> list[dict]:
     return issues
 
 
-from app.services.ai.prompts import outline  # noqa: E402,F401
-from app.services.ai.prompts import content  # noqa: E402,F401
-from app.services.ai.prompts import charts  # noqa: E402,F401
-from app.services.ai.prompts import analysis  # noqa: E402,F401
-from app.services.ai.prompts import illustration  # noqa: E402,F401  （自招投标平台移植：配图编排/方案）
-from app.services.ai.prompts import consistency_repair  # noqa: E402,F401  （全文一致性 Agent 修复：扫描/仲裁/修复）
-from app.services.ai.prompts import review_autofix  # noqa: E402,F401  （审核预检问题定向修复）
+from app.services.ai.prompts import (
+    analysis,  # noqa: E402,F401
+    charts,  # noqa: E402,F401
+    consistency_repair,  # noqa: E402,F401  （全文一致性 Agent 修复：扫描/仲裁/修复）
+    content,  # noqa: E402,F401,F811  （content 模块与上方函数参数同名，刻意导入以触发注册）
+    illustration,  # noqa: E402,F401  （自招投标平台移植：配图编排/方案）
+    outline,  # noqa: E402,F401
+    review_autofix,  # noqa: E402,F401  （审核预检问题定向修复）
+)
+
 # ✅ G4 变量契约：模板全部注册后再套用契约表（见上方 PROMPT_VARIABLE_CONTRACTS）
 _apply_variable_contracts()
 

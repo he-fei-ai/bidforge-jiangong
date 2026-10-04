@@ -38,15 +38,19 @@ import re
 import uuid
 from pathlib import Path
 
-import pytest
-
 import app.routers.bid_analysis as ba
+import pytest
 from app.services.ai.task_registry import (
-    finish_task, register_task, request_control,
+    finish_task,
+    register_task,
+    request_control,
 )
 from app.services.bid_analysis_service import (
-    ANALYSIS_ITEMS, REQUIRED_ITEM_IDS, MARKDOWN_MISSING_RESULT,
-    get_item_def, is_missing_result,
+    ANALYSIS_ITEMS,
+    MARKDOWN_MISSING_RESULT,
+    REQUIRED_ITEM_IDS,
+    get_item_def,
+    is_missing_result,
 )
 
 _BID_ANALYSIS_SRC = Path(ba.__file__).resolve()

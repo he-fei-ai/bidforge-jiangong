@@ -3,7 +3,6 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-
 from app.routers.export import (
     _content_fingerprint,
     _download_remote_image,

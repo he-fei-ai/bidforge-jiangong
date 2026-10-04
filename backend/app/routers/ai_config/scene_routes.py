@@ -26,7 +26,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from app.db import get_db, read_db
 from app.models import SceneRouteUpdate
 from app.services.ai.provider_factory import (
-    KNOWN_SCENES, invalidate_config_cache, resolve_active_env,
+    KNOWN_SCENES,
+    invalidate_config_cache,
+    resolve_active_env,
 )
 from app.services.crypto import decrypt_api_key
 

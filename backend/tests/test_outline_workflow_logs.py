@@ -18,7 +18,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from app.routers import sse_handlers as sh
 from app.services.ai import json_response as jr
 

@@ -44,19 +44,31 @@ import re
 import uuid
 from pathlib import Path
 
-import pytest
-
 import app.routers.bid_analysis as ba
+import pytest
 from app.services import bid_analysis_service as svc
 from app.services.bid_analysis_service import (
-    ANALYSIS_ITEMS, BID_RESPONSE_ITEMS, REQUIRED_ITEM_IDS,
-    MARKDOWN_MISSING_RESULT, PARTIAL_MISSING_TEXT,
-    TECH_SCORE_ITEMS_HEADING, EXTRACTION_DOMAINS,
-    get_item_def, get_item_domain, get_items_by_domain, get_groups_by_domain,
-    get_item_fields, build_json_template, build_task_prompt,
-    is_missing_result, is_missing_technical_score_items,
-    build_item_pk, parse_item_pk, split_for_analysis, AnalysisConfig,
+    ANALYSIS_ITEMS,
+    BID_RESPONSE_ITEMS,
+    EXTRACTION_DOMAINS,
+    MARKDOWN_MISSING_RESULT,
+    PARTIAL_MISSING_TEXT,
+    REQUIRED_ITEM_IDS,
+    TECH_SCORE_ITEMS_HEADING,
+    AnalysisConfig,
+    build_item_pk,
+    build_json_template,
+    build_task_prompt,
     fetch_success_item_ids,
+    get_groups_by_domain,
+    get_item_def,
+    get_item_domain,
+    get_item_fields,
+    get_items_by_domain,
+    is_missing_result,
+    is_missing_technical_score_items,
+    parse_item_pk,
+    split_for_analysis,
 )
 
 _BA_SRC = Path(ba.__file__).resolve()

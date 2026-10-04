@@ -27,22 +27,29 @@ import logging
 import re
 
 import pytest
-from fastapi import HTTPException
-
 from app.routers import prompts as pr
 from app.routers.prompts import (
-    PROMPT_MAX_CHARS, list_prompts, rollback_prompt, update_prompt,
-)
-from app.services.audit_service import (
-    PROMPT_MAX_CHARS as AUDIT_MAX_CHARS,
-    prompt_snapshot_is_rollbackable,
+    PROMPT_MAX_CHARS,
+    list_prompts,
+    rollback_prompt,
+    update_prompt,
 )
 from app.services.ai.prompts import _cache
 from app.services.ai.prompts._registry import (
-    _ALL_PROMPTS, _is_optional_block_var,
-    extract_user_variables, get_default_prompt, render_prompt,
+    _ALL_PROMPTS,
+    _is_optional_block_var,
+    extract_user_variables,
+    get_default_prompt,
+    render_prompt,
     validate_prompt_content,
 )
+from app.services.audit_service import (
+    PROMPT_MAX_CHARS as AUDIT_MAX_CHARS,
+)
+from app.services.audit_service import (
+    prompt_snapshot_is_rollbackable,
+)
+from fastapi import HTTPException
 
 REAL_KEY = "outline_short_system"
 
@@ -387,6 +394,7 @@ class TestRollbackableParity:
         渲染出可点的「回滚」按钮，用户一点必 400 —— 本用例锁死该行为。
         """
         import json
+
         from app.services.audit_service import list_prompt_audit_logs
         key = "outline_level1_system"
         await db_conn.execute(
@@ -409,6 +417,7 @@ class TestRollbackableParity:
     @pytest.mark.asyncio
     async def test_oversized_row_is_not_offered_as_clickable(self, db_conn):
         import json
+
         from app.services.audit_service import list_prompt_audit_logs
         key = "outline_sublevel_system"
         await db_conn.execute(
@@ -434,6 +443,7 @@ class TestRollbackableParity:
         渲染出可点的「回滚」按钮，用户一点必 400 —— 本用例锁死该行为。
         """
         import json
+
         from app.services.audit_service import list_prompt_audit_logs
         key = "outline_level1_system"
         await db_conn.execute(
@@ -458,6 +468,7 @@ class TestRollbackableParity:
     @pytest.mark.asyncio
     async def test_oversized_row_is_not_offered_as_clickable(self, db_conn):
         import json
+
         from app.services.audit_service import list_prompt_audit_logs
         key = "outline_sublevel_system"
         await db_conn.execute(
@@ -537,7 +548,9 @@ class TestContractIntegrity:
         """
         from app.services.ai.prompts import PROMPT_VARIABLE_CONTRACTS
         from app.services.ai.prompts._registry import (
-            _is_false_positive, extract_variables, has_residual_placeholders,
+            _is_false_positive,
+            extract_variables,
+            has_residual_placeholders,
         )
         for key, requires in PROMPT_VARIABLE_CONTRACTS.items():
             tpl = get_default_prompt(key)

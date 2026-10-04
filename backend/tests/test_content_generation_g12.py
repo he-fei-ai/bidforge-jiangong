@@ -31,12 +31,11 @@ import asyncio
 import inspect
 import re
 
-import pytest
-from fastapi import HTTPException
-
 import app.routers.sections as sec
 import app.routers.sse_handlers as sh
 import app.services.ai.task_registry as tr
+import pytest
+from fastapi import HTTPException
 
 
 # ---------------------------------------------------------------------------
@@ -65,11 +64,21 @@ class TestStopIsNotFailure:
             "停止语义修复被回退：该事件会让被停止打断的章节在前端显示「失败」")
 
     def test_cancelled_branch_gated_by_is_stopped(self):
-        """except CancelledError 分支必须以 is_stopped 为闸门（停止时静默退出）。"""
+        """except CancelledError 分支必须以 is_stopped 为闸门（停止时静默退出）。
+
+        ✅ 2026-10-04（陈旧断言修复）：gen_one 内现在有两处
+        `except asyncio.CancelledError:` —— 前一处是"落库已成功但推送事件失败"的
+        **内层**捕获（直接 raise，不标记 failed），后一处才是"顶层取消语义"的
+        **外层**捕获（按 is_stopped 闸门决定是否标 failed）。旧断言用
+        `src.index(...)` 命中第一处内层捕获，永远找不到
+        `if not db_written and not is_stopped(task_id):`。现改为扫描到第二处
+        外层捕获（`raise` 后接外层语义判断）为止。
+        """
         src = inspect.getsource(sh.generate_content)
         i = src.index("async def gen_one(")
-        j = src.index("except asyncio.CancelledError:", i)
-        tail = src[j:j + 500]
+        j1 = src.index("except asyncio.CancelledError:", i)
+        j = src.index("except asyncio.CancelledError:", j1 + 1)
+        tail = src[j:j + 1200]
         assert "if not db_written and not is_stopped(task_id):" in tail, (
             "停止时不得发 section_error、不得标记章节 failed（会污染质量统计，"
             "并使 missing 模式误选这些章节重新生成）")

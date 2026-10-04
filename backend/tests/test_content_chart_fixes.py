@@ -13,7 +13,6 @@ import json
 import uuid
 
 import pytest
-
 from app.services.ai.mermaid_gantt import _parse_mermaid_gantt
 from app.services.chart_payload import (
     build_chart_envelope,

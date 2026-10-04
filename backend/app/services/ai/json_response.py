@@ -12,8 +12,8 @@ import json
 import logging
 import re
 
-from app.services.ai.provider_factory import chat_with_fallback
 from app.services.ai.prompts._registry import render
+from app.services.ai.provider_factory import chat_with_fallback
 
 logger = logging.getLogger("json_response")
 
@@ -298,7 +298,8 @@ async def collect_json_response(messages: list, validate_fn=None,
                                 json_mode: bool = False,
                                 timeout: int | None = None,
                                 repair_key: str = GENERIC_REPAIR_KEY,
-                                scene: str = ""):
+                                scene: str = "",
+                                max_tokens: int | None = None):
     """统一 JSON 收集入口：生成 → 解析 → 校验 → 定向修复 → 重试
 
     ✅ 新增透传参数（供结构化提取使用）：
@@ -306,6 +307,10 @@ async def collect_json_response(messages: list, validate_fn=None,
     - repair_key：修复轮次使用的提示词。**目录族调用点必须显式传**
       ``OUTLINE_REPAIR_KEY``（默认值已改为 Schema 自适应的通用提示词，见
       :data:`GENERIC_REPAIR_KEY`）。
+    - max_tokens：显式输出上限（2026-10-04）。目录合并修复 fixed_outline 需要
+      回吐完整三级目录，长方案下可能触发 provider 默认上限（8192）被截断；
+      调用方按场景传一个合理上限（如 OUTLINE_FIX_MAX_TOKENS）。None 表示沿用
+      provider 默认（`max_tokens or ...` 语义，向后兼容）。
 
     ✅ 2026-09-21 新增：scene 业务场景标记，透传至 chat_with_fallback 写入
     ai_audit_logs.scene，/ai/stats 可按场景聚合调用次数。
@@ -326,7 +331,7 @@ async def collect_json_response(messages: list, validate_fn=None,
     messages = _ensure_user_message(messages)
     raw = await chat_with_fallback(messages, temperature=temperature,
                                    json_mode=json_mode, timeout=timeout,
-                                   scene=scene)
+                                   scene=scene, max_tokens=max_tokens)
     # 修复目标恒定为模型**最初**的输出（见 docstring 修复点 1）
     first_raw = raw
     obj, issues = parse_and_validate(raw, validate_fn)
@@ -343,7 +348,7 @@ async def collect_json_response(messages: list, validate_fn=None,
         try:
             raw = await chat_with_fallback(repair_msgs, temperature=temperature,
                                            json_mode=json_mode, timeout=timeout,
-                                           scene=scene)
+                                           scene=scene, max_tokens=max_tokens)
         except Exception as e:  # noqa: BLE001
             # 瞬时故障不应丢弃首轮已产出的内容：记录后继续下一轮修复预算
             repair_errors.append("第%d次修复调用异常: %s" % (attempt + 1, e))

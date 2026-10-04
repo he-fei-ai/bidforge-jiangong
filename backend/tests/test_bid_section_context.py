@@ -16,14 +16,14 @@
 """
 import uuid
 
-import pytest
-
 import app.routers.bid_analysis as ba
 import app.services.bid_section_context as bsc
+import pytest
 from app.services.bid_analysis_service import (
-    STABLE_SYSTEM_PROMPT, build_system_prompt, get_item_def,
+    STABLE_SYSTEM_PROMPT,
+    build_system_prompt,
+    get_item_def,
 )
-
 
 # ---------------------------------------------------------------------------
 # 公共夹具

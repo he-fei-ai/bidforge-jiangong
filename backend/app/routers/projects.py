@@ -1,7 +1,7 @@
 """项目管理路由"""
 import asyncio
-import uuid
 import logging
+import uuid
 from datetime import datetime
 from pathlib import Path
 

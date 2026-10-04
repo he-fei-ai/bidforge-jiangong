@@ -96,10 +96,20 @@ def test_c3_all_stopped_events_carry_failed_count():
 
 
 def test_c3_stopped_count_matches_frontend_expectation():
-    """前端读取的是 number 类型，后端必须以 len(_failed_reasons) 下发（int）。"""
+    """前端读取的是 number 类型，后端必须下发 int。
+
+    ✅ P1 修复（2026-10-04 · failed_count 口径统一）：旧断言要求
+    ``failed_count = len(_failed_reasons)``，但 _failed_reasons 只包含
+    "本次进入失败分支并写入 dict 的章"——不包含"被取消/被停止但从未进入
+    失败分支的章"，与前端「失败 N 章 / 共 M 章」的直观语义不符。
+    现统一为 `max(total - len(done_ids), 0)`——覆盖所有未成功完成的章节，
+    与 completed / stopped / cancelled 三条终态口径一致。此处断言改为
+    检查统一公式仍在（int 类型），旧正则作废。
+    """
     src = _src(SSE_PATH)
-    assert re.search(r"'failed_count'\s*:\s*len\(_failed_reasons\)", src), (
-        "failed_count 应以 len(_failed_reasons) 下发（int 类型）")
+    assert re.search(r"max\(total\s*-\s*len\(done_ids\),\s*0\)", src), (
+        "failed_count 应以 max(total - len(done_ids), 0) 下发（int 类型，"
+        "统一 completed/stopped/cancelled 三条终态口径）")
 
 
 def test_c3_stopped_payload_json_parsable():

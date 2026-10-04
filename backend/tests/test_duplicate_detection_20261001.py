@@ -82,11 +82,17 @@ def _assigned(path: str, target: str) -> str:
 
 from app.services import duplicate_detection as dd  # noqa: E402
 from app.services.audit_rules import (  # noqa: E402
-    _PROGRAM_EMITTED_RULE_IDS, RULE_VERSION, get_rule, validate_rule_registry,
+    _PROGRAM_EMITTED_RULE_IDS,
+    RULE_VERSION,
+    get_rule,
+    validate_rule_registry,
 )
 from app.services.outline_quality import check_outline_continuity  # noqa: E402
 from app.services.preflight_engine import (  # noqa: E402
-    PreflightContext, _find_duplicates, check_duplication, run_preflight,
+    PreflightContext,
+    _find_duplicates,
+    check_duplication,
+    run_preflight,
 )
 
 

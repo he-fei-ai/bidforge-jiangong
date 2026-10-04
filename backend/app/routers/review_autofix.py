@@ -13,13 +13,17 @@
 findings 再取那一条，保证「用户点的那条」与「系统判的那条」逐字一致。
 """
 from __future__ import annotations
+
 import logging
 from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
+
 from app.db import get_db
 from app.routers.review import reset_review_on_content_change
 from app.services import review_autofix
 from app.services.audit_rules import active_rules
+
 logger = logging.getLogger("review_autofix")
 router = APIRouter(
     prefix="/api/v1/schemes/{scheme_id}/review/autofix",
@@ -167,8 +171,7 @@ async def apply(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     facts = ""
     standards_text = ""
     try:
-        from app.services.consistency_scanner import (
-            build_global_facts_text, build_standards_text)
+        from app.services.consistency_scanner import build_global_facts_text, build_standards_text
         facts = await build_global_facts_text(db, scheme_id, limit=3000)
         standards_text = build_standards_text(scheme.get("name") or "",
                                               scheme.get("type") or "")
@@ -258,8 +261,7 @@ async def _build_facts(db, scheme: dict) -> tuple[str, str]:
     facts = ""
     standards_text = ""
     try:
-        from app.services.consistency_scanner import (
-            build_global_facts_text, build_standards_text)
+        from app.services.consistency_scanner import build_global_facts_text, build_standards_text
         facts = await build_global_facts_text(db, scheme.get("id") or "", limit=3000)
         standards_text = build_standards_text(
             scheme.get("name") or "", scheme.get("type") or "")

@@ -12,7 +12,6 @@
 - 章自身内容的子标题与其子孙章节的编号碰撞（修复范围外）→ 如实报出。
 """
 import pytest
-
 from app.routers.export import _detect_duplicate_sections
 
 

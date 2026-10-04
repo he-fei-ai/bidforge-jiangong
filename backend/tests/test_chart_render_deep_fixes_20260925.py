@@ -80,7 +80,14 @@ def _docx_drawing_extents(path: str) -> list[tuple[float, float]]:
 
 
 class FakeDb:
-    """最小异步 db mock（与 test_inline_charts 同款，仅记录调用）。"""
+    """最小异步 db mock（与 test_inline_charts 同款，仅记录调用）。
+
+    ✅ F-3 修复配套（2026-10-05）：真实 aiosqlite 上
+      · SELECT 成功返回 Cursor（有 .fetchall()）；异常时才返回 None
+      · INSERT 成功返回 Cursor（有 .rowcount）；异常时才返回 None
+    测试桩必须与真实语义一致，否则 F-3 修复（INSERT 返回 None →
+    降级为 skipped → 正文被裁剪）会让历史断言误判为「图块被删」。
+    """
 
     def __init__(self):
         self.rows = []
@@ -88,7 +95,17 @@ class FakeDb:
 
     async def execute(self, sql, params=None):
         self.rows.append((sql, tuple(params or ())))
-        return None
+        head = sql.lstrip().upper()
+        if head.startswith("SELECT"):
+            class _C:
+                async def fetchall(self):
+                    return []
+            return _C()
+        # INSERT / DELETE 均返回 Cursor 语义
+        class _FakeCur:
+            rowcount = 1
+            lastrowid = 1
+        return _FakeCur()
 
     async def commit(self):
         self.commits += 1
@@ -360,7 +377,9 @@ def test_docx_does_not_drop_prose_when_chart_skipped(tmp_path):
 def test_chart_payload_envelope_roundtrip_untouched():
     """回归：本次修复不改变图表载荷信封契约（唯一构造器/解析器互逆）。"""
     from app.services.chart_payload import (
-        build_chart_envelope, extract_chart_payload, is_canonical_chart_payload,
+        build_chart_envelope,
+        extract_chart_payload,
+        is_canonical_chart_payload,
     )
     env = build_chart_envelope(code="graph TD; A-->B", title="施工流程")
     assert json.loads(env)["mermaid_code"] == "graph TD; A-->B"

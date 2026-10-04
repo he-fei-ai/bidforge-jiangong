@@ -4,18 +4,24 @@ import logging
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 
 from app.db import get_db
 from app.services.ai.json_response import (
-    OUTLINE_REPAIR_KEY, collect_json_response,
+    OUTLINE_REPAIR_KEY,
+    collect_json_response,
 )
 from app.services.ai.prompts._registry import render
-from app.services.file_parser import (
-    parse_file_content_ex, signature_valid, simple_parse_outline,
-    SUPPORTED_EXTENSIONS, ParseError, dump_parse_warnings, MAX_UPLOAD_BYTES,
-)
 from app.services.bid_section_detector import detect_bid_sections
+from app.services.file_parser import (
+    MAX_UPLOAD_BYTES,
+    SUPPORTED_EXTENSIONS,
+    ParseError,
+    dump_parse_warnings,
+    parse_file_content_ex,
+    signature_valid,
+    simple_parse_outline,
+)
 
 logger = logging.getLogger("upload_outline")
 
@@ -318,8 +324,7 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     #    与后台正文/目录生成任务并发时丢失更新的后果不可恢复
     #    （正文被删、刚生成的目录被覆盖）。旧实现完全无守卫，
     #    前端 disabled 只挡主路径，接口层必须兜底直连调用 / 多标签页并发。
-    from app.routers.sections import (
-        content_generation_in_progress, outline_generation_in_progress)
+    from app.routers.sections import content_generation_in_progress, outline_generation_in_progress
     if content_generation_in_progress(scheme_id):
         raise HTTPException(
             409, "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再保存目录——"
@@ -349,15 +354,77 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
         " FROM sections WHERE scheme_id=? ORDER BY sort_order, created_at",
         (scheme_id,))
     existing_rows = [dict(r) for r in await cur.fetchall()]
-    # ✅ BUG 修复：同名章节是合法存在的（如各章都有的"施工准备""安全保证措施"）。
-    # 旧实现每个标题只保留第一条，导致第 2 个同名节点又匹配到同一条 section：
-    # 同一 id 被多次 UPDATE（后者覆盖前者）+ 前一条正文被张冠李戴。
-    # 现改为"待消费队列"：每个已有章节最多被一个节点匹配一次。
+    # ✅ BUG 修复（2026-10-04 · 跨父级正文错配）：同名子标题（"施工准备""安全保证
+    #    措施"）在不同父章节下合法存在。旧实现用「不分父级、不分层级」的全局队列
+    #    queue.pop(0)，重新上传后同名子标题的排列/归属一旦变化，正文就跨父级张冠李戴
+    #    （第 1 章正文挂到第 2 章同名节上），而 preserved_count 照算、前端无感知。
+    #    现构建三层索引（完整标题路径 / 同父同层 / 同层）+ 全局兜底，按优先级取号，
+    #    每个旧章节至多被消费一次；路径由「归一化标题」元组表示，与编号无关
+    #    （重传时编号可能整体顺移，路径才是稳定身份）。
     existing_by_title: dict[str, list[dict]] = {}
+    existing_by_parent_level: dict[tuple, list[dict]] = {}
+    existing_by_level: dict[int, list[dict]] = {}
     for er in existing_rows:
         nt = _norm_title(er.get("title", ""))
-        if nt:
-            existing_by_title.setdefault(nt, []).append(er)
+        if not nt:
+            continue
+        existing_by_title.setdefault(nt, []).append(er)
+        existing_by_parent_level.setdefault(
+            (er.get("parent_id") or "", int(er.get("level") or 1)), []).append(er)
+        existing_by_level.setdefault(int(er.get("level") or 1), []).append(er)
+
+    # 旧章节的标题路径索引（id -> 归一化标题元组），由旧树 parent 关系一次性构建
+    old_by_id: dict[str, dict] = {er["id"]: er for er in existing_rows}
+
+    def _old_title_path(er: dict) -> tuple:
+        parts: list[str] = []
+        seen: set[str] = set()
+        cur_id = er["id"]
+        guard = 0
+        while cur_id and cur_id not in seen and guard < 50:
+            seen.add(cur_id)
+            node = old_by_id.get(cur_id)
+            if node is None:
+                break
+            t = _norm_title(node.get("title", ""))
+            if t:
+                parts.append(t)
+            cur_id = node.get("parent_id") or ""
+            guard += 1
+        return tuple(reversed(parts))
+
+    existing_by_path: dict[tuple, list[dict]] = {}
+    for er in existing_rows:
+        if _norm_title(er.get("title", "")):
+            existing_by_path.setdefault(_old_title_path(er), []).append(er)
+
+    consumed: set[str] = set()
+
+    def _take_from(candidates: list[dict] | None, expected_nt: str) -> dict | None:
+        """从候选桶中取一个未消费且「归一化标题等于 expected_nt」的旧章节。
+
+        ✅ BUG 修复（2026-10-04 · 跨标题错配保留）：旧实现在 by_parent_level /
+        by_level 桶取候选时**不校验标题**，导致新标题（如「第一章」「全新章节」）
+        会「保留」掉一个**不同标题**的旧章节（如「施工准备」「旧章」）。后果：
+          - 「第一章」被误匹配到 a1（施工准备），preserved_content 虚高；
+          - 未匹配的旧父章节（"old"）因被误保留而留在 to_delete 之外，
+            其子章节（"oldc"）成为孤儿未被级联删除；
+          - 用户看到的正文是错的章节内容，前端毫无感知。
+        现：所有桶（含 by_path）都强制「归一化标题相等」，
+        结构桶（by_parent_level / by_level）仅在标题相等时才消费，
+        保持「结构优先」的兜底逻辑不劣于旧版。
+        """
+        if not candidates:
+            return None
+        while candidates:
+            cand = candidates.pop(0)
+            if cand["id"] in consumed:
+                continue
+            if _norm_title(cand.get("title", "")) != expected_nt:
+                continue
+            consumed.add(cand["id"])
+            return cand
+        return None
 
     preserved_count = 0
     final_section_ids: set[str] = set()
@@ -365,7 +432,7 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     new_inserts: list[tuple] = []
     counter = {"n": 0}
 
-    def collect_rows(nodes: list, parent_id: str):
+    def collect_rows(nodes: list, parent_id: str, path_parts: tuple):
         nonlocal preserved_count
         for i, node in enumerate(nodes):
             if not isinstance(node, dict):
@@ -374,13 +441,25 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
             nt = _norm_title(title)
             matched = None
             if nt:
-                queue = existing_by_title.get(nt)
-                if queue:
-                    matched = queue.pop(0)
+                cur_path = path_parts + (nt,)
+                # 1) 完整标题路径精确匹配（跨层级重构时最稳）
+                # 2) 同父 + 同层级
+                # 3) 仅同层级
+                # 4) 全局同名兜底（行为不劣于旧版）
+                # 所有桶统一按「归一化标题相等」过滤（见 _take_from），
+                # 避免新标题「保留」不同标题的旧章节导致误保留 + 孤儿漏删。
+                parent_key = (parent_id, int(node.get("level", 1)))
+                for bucket in (existing_by_path.get(cur_path),
+                               existing_by_parent_level.get(parent_key),
+                               existing_by_level.get(int(node.get("level", 1))),
+                               existing_by_title.get(nt)):
+                    matched = _take_from(bucket, nt)
+                    if matched is not None:
+                        break
             # ✅ 统一形态（2026-09-22）：与 _save_outline_to_db / 重排函数同口径
             #    写 id/level/confidence 三键；旧实现 confidence 可能为 None
             #    且缺 level，消费方（前端树/重排回写）需逐处容错。
-            #    normalize_outline 已在上游统一重排并回写 id/level。
+            # normalize_outline 已在上游统一重排并回写 id/level。
             confidence = node.get("confidence")
             if confidence is None:
                 confidence = 1.0
@@ -399,6 +478,11 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
             if matched:
                 # 标题匹配已有章节：保留正文，只更新结构字段
                 sid = matched["id"]
+                old_path = _old_title_path(matched)
+                if old_path and old_path != (path_parts + (nt,)):
+                    logger.info(
+                        "上传目录保存：同名章节跨路径匹配 title=%s old=%s new=%s（按层级兜底）",
+                        title, " > ".join(old_path), " > ".join(path_parts + (nt,)))
                 preserved_count += 1
                 final_section_ids.add(sid)
                 updates.append((
@@ -416,9 +500,9 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
             counter["n"] += 1
             children = node.get("children")
             if isinstance(children, list) and children:
-                collect_rows(children, sid)
+                collect_rows(children, sid, path_parts + ((nt,) if nt else ()))
 
-    collect_rows(outline, "")
+    collect_rows(outline, "", ())
 
     # 删除不再存在的旧章节（级联清理图表预测）
     old_ids = {er["id"] for er in existing_rows}
@@ -496,6 +580,13 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     from app.routers.sections import _renormalize_all_section_contents
     await _renormalize_all_section_contents(db, scheme_id)
     await db.commit()
+    # ✅ BUG 修复（2026-10-04 · 缓存漏失效）：整表重建改变章节树与编号，
+    #    旧 export_cache 行与磁盘产物成为孤儿，口径与 /save-outline 一致。
+    try:
+        from app.services.facts_extractor import invalidate_export_cache
+        await invalidate_export_cache(db, scheme_id)
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("上传目录保存：导出缓存失效失败（不影响保存结果）: %s", _e)
     result = {"ok": True, "count": counter["n"], "outline": outline}
     if preserved_count:
         result["preserved_content"] = preserved_count

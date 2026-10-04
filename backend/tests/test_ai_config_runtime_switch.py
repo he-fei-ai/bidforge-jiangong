@@ -17,11 +17,10 @@
 import contextlib
 import json
 
-import pytest
-
 import app.services.ai.provider_factory as pf
-from app.routers import ai_config as ai_router
+import pytest
 from app.models import DisabledProvidersIn
+from app.routers import ai_config as ai_router
 from app.services.crypto import encrypt_api_key
 
 

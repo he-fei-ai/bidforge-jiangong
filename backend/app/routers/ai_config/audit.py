@@ -13,18 +13,20 @@
 """
 import json
 import logging
-import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from app.config import settings
+from app.config import settings  # noqa: F401  模块公共面：测试经 audit.settings monkeypatch trusted_proxy_ips
 from app.db import get_db, read_db
 from app.models import ConfigRollbackIn
-from app.services.crypto import decrypt_api_key
 from app.services.ai.provider_factory import (
-    apply_config_concurrency, clamp_config_numbers, invalidate_config_cache,
-    normalize_env, normalize_plan, normalize_request_mode,
+    apply_config_concurrency,
+    clamp_config_numbers,
+    invalidate_config_cache,
+    normalize_env,
+    normalize_plan,
+    normalize_request_mode,
 )
 
 logger = logging.getLogger("ai_config")
@@ -35,9 +37,11 @@ router = APIRouter(tags=["ai_config"])
 # Audit implementation moved to app.services.audit_service.
 # Keep re-exports for backward compatibility.
 from app.services.audit_service import (
-    CONFIG_ACTIONS, SNAPSHOT_FIELDS, FIELD_LABELS,
-    sanitize_config_snapshot, diff_snapshots, client_ip_of,
+    CONFIG_ACTIONS,
+    client_ip_of,  # noqa: F401  兼容再导出：测试与路由经 audit.client_ip_of 调用
+    diff_snapshots,
     record_config_audit,
+    sanitize_config_snapshot,
 )
 
 

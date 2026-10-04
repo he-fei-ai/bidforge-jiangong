@@ -10,16 +10,18 @@ renumber_sections_after_reorder 构成同表写写竞态。
 """
 import uuid
 
-import pytest
-from fastapi import HTTPException
-
 import app.db as _appdb
-from app.db import init_db, get_conn, close_db
+import pytest
+from app.db import close_db, get_conn, init_db
 from app.models import SectionCreate, SectionUpdate
 from app.routers.sections import (
-    create_section, delete_section, reorder_sections, update_section,
+    create_section,
+    delete_section,
+    reorder_sections,
+    update_section,
 )
 from app.services.ai.task_registry import finish_task, register_task
+from fastapi import HTTPException
 
 
 @pytest.fixture

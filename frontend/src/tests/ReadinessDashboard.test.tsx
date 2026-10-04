@@ -403,4 +403,76 @@ describe("ReadinessDashboard · 自动修复入口接线", () => {
     await waitFor(() => expect(reviewAutoFixApi.collect).toHaveBeenCalledWith(
       "s1", { scope: "all_blocking" }));
   });
+
+  // =========================================================================
+  // 组件级交互补漏（2026-10-04 · 用户任务 步骤 4）：
+  // 「批量修复成功 → 父组件 runOverview(true) 强制重算」这条接线此前无人锁。
+  // 场景背景：服务端总检有内容指纹缓存，正文被 BatchFixModal 改写后不 force
+  // 会命中旧缓存 → 用户看到的评分是"修复前"的旧分。此测试是这条契约的护栏。
+  // =========================================================================
+  it("BatchFixModal onFixed → 父组件强制 runOverview(true) 重算", async () => {
+    // 让批量链路走通到底：collect 有 1 项、stage 有 1 项、confirm 返回 snapshot_id
+    (reviewAutoFixApi.collect as any).mockResolvedValue({
+      data: {
+        scheme_id: "s1", scope: "all_blocking", total: 1,
+        items: [{
+          rule_id: "DLV-05", dimension: "deliverability", severity: "block",
+          title: "控制字符", detail: "含控制字符", evidence: [],
+          section_id: "", section_title: "", suggestion: "", basis: "", mode: "program",
+          autofix: { fixable: true, mode: "auto", reason: "" },
+          targets: [{ section_id: "sec-a", section_title: "工程概况", value: "x07",
+                      line: 3, sentence_idx: 1, sentence_total: 2, matched: "x07",
+                      context: "正常内容", why: "命中" }],
+        }],
+      },
+    });
+    (reviewAutoFixApi.stage as any).mockResolvedValue({
+      data: {
+        batch_id: "b-1", status: "pending_confirm",
+        items: [{
+          rule_id: "DLV-05", section_id: "sec-a", section_title: "工程概况",
+          mode: "auto", status: "repaired", reason: "", targets: [],
+          before: "正常x07内容", after: "正常内容", problems: [],
+          chain_index: 0, sentence_idx: 0, sentence_total: 0,
+        }],
+        stats: { repaired: 1, failed: 0, skipped: 0 },
+      },
+    });
+    (reviewAutoFixApi.confirm as any).mockResolvedValue({
+      data: { status: "confirmed", accepted: 1, repaired_sections: 1,
+              snapshot_id: "ver-b", batch_id: "b-1" },
+    });
+    const onContentFixed = vi.fn();
+    (complianceApi.overview as any).mockResolvedValue({
+      data: withAutofix({ fixable: true, mode: "auto", reason: "" }),
+    });
+
+    const { container } = render(
+      <App><ReadinessDashboard schemeId="s1" onContentFixed={onContentFixed} /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    fireEvent.click(btnByText(container, "一键总检")!);
+    await waitFor(() => expect(container.textContent || "").toContain("82"));
+
+    // 打开批量弹窗
+    fireEvent.click(btnByText(container, "一键修复全部阻断项（1）")!);
+    await waitFor(() => expect(reviewAutoFixApi.collect).toHaveBeenCalled());
+    // 生成预览
+    await waitFor(() =>
+      expect(btnByText(document.body as HTMLElement, "生成修复预览")!.disabled).toBe(false));
+    fireEvent.click(btnByText(document.body as HTMLElement, "生成修复预览")!);
+    await waitFor(() =>
+      expect(reviewAutoFixApi.stage).toHaveBeenCalledWith("s1", { scope: "all_blocking" }));
+    // 确认修复 → BatchFixModal 触发 onFixed(snapshot_id)
+    fireEvent.click(btnByText(document.body as HTMLElement, "确认修复")!);
+    await waitFor(() =>
+      expect(reviewAutoFixApi.confirm).toHaveBeenCalledWith("s1", {
+        batch_id: "b-1", accept_all: true,
+      }));
+
+    // 核心契约：宿主页 onContentFixed 被通知，且 overview 以 force=true 重算
+    await waitFor(() => expect(onContentFixed).toHaveBeenCalled());
+    const overviewCalls = (complianceApi.overview as any).mock.calls as any[];
+    expect(overviewCalls.some((c) => c[0] === "s1" && c[1] === true)).toBe(true),
+      "BatchFixModal 修复完成后必须 force=true 重算，避免命中旧缓存（拿到修复前旧分）";
+  });
 });

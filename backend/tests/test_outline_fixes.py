@@ -20,7 +20,6 @@ import json
 import uuid
 
 import pytest
-
 from fastapi import HTTPException
 
 
@@ -420,8 +419,8 @@ class TestSimpleParseOutlineYearGuard:
 @pytest.mark.asyncio
 class TestOutlineLibrary:
     async def test_update_missing_library_returns_404(self, db_conn):
-        from app.routers.outline_library import update_library
         from app.models import OutlineLibraryUpdate
+        from app.routers.outline_library import update_library
         with pytest.raises(HTTPException) as ei:
             await update_library(str(uuid.uuid4()), OutlineLibraryUpdate(name="x"), db_conn)
         assert ei.value.status_code == 404

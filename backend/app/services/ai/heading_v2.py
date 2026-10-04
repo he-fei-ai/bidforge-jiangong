@@ -7,6 +7,7 @@ HeadingNumberingGeneratorV2：实例化版，维护计数器+父级ID状态，�
 from __future__ import annotations
 
 from app.services.ai.heading_templates import HEADING_MANAGED_LEVELS, HEADING_STYLE_CONFIG
+
 # ✅ 编号统一（2026-09-25）：编号字符表唯一事实源收敛到 services/numbering.py，
 #    类属性保留同名别名兼容既有引用（tests / 外部脚本按类属性访问）。
 from app.services.numbering import ALPHABET as _NUMBERING_ALPHABET

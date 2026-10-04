@@ -1,6 +1,7 @@
 """F-CONTENT-STANDARD：生成标准校验报告 REST 端点测试。"""
-import pytest
 import json
+
+import pytest
 
 
 async def _setup_scheme_and_section(db):
@@ -73,8 +74,8 @@ class TestReportEndpoint:
         assert rep["report"]["error_count"] == 0
 
     async def test_section_report_404(self, db_conn):
-        from fastapi import HTTPException
         from app.routers.sections import section_generation_report
+        from fastapi import HTTPException
         try:
             await section_generation_report("s1", "nonexistent", db=db_conn)
             pytest.fail("should raise HTTPException")

@@ -12,7 +12,6 @@ import aiohttp
 from ....utils.proxy_config import aiohttp_session_kwargs
 from .base import ImageProviderAdapter, build_endpoint, normalize_size
 
-
 logger = logging.getLogger(__name__)
 
 

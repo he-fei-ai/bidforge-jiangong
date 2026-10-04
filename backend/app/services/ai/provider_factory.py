@@ -10,15 +10,15 @@ import uuid
 from datetime import datetime
 from urllib.parse import urlparse
 
-from app.db import get_conn, write_tx_conn, retry_db_op
-from app.services.crypto import decrypt_api_key, encrypt_api_key
+from app.config import settings
+from app.db import get_conn, retry_db_op, write_tx_conn
 from app.services import activity_broadcaster as _ab
+from app.services.ai.json_mode_compat import json_mode_unsupported
+from app.services.ai.providers.anthropic_compatible import AnthropicCompatibleProvider
 from app.services.ai.providers.base import BaseProvider
 from app.services.ai.providers.openai_compatible import OpenAICompatibleProvider
-from app.services.ai.providers.anthropic_compatible import AnthropicCompatibleProvider
-from app.services.ai.json_mode_compat import json_mode_unsupported
 from app.services.ai.workflows_base import circuit_breaker, concurrency_controller
-from app.config import settings
+from app.services.crypto import decrypt_api_key, encrypt_api_key
 
 logger = logging.getLogger("provider_factory")
 

@@ -16,11 +16,9 @@
 import json
 import uuid
 
-import pytest
-
 import app.routers.bid_analysis as ba
 import app.services.bid_section_extraction as bse
-
+import pytest
 
 # ---------------------------------------------------------------------------
 # 1. 行号与标题归一化

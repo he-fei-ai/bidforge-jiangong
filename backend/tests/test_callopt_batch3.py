@@ -5,9 +5,8 @@
 3/12 的高危冲突留在交付文档里 —— 错误参数/标号直接进文档，质量代价远大于
 省下的调用。O8：组内含 high 级冲突时校验不过仍重试一次；medium/low 维持不重试。
 """
-import pytest
-
 import app.services.repair_agent as ra
+import pytest
 
 
 def _conflict(cid, sid="s0", severity="high"):
@@ -16,7 +15,7 @@ def _conflict(cid, sid="s0", severity="high"):
         "topic": "檐口高度", "authoritative_value": "42.5m",
         "authoritative_source": "全局事实", "status": "pending",
         "occurrences": [{"section_id": sid, "section_title": f"章节{sid}",
-                         "value": "18.5m", "text": f"檐口高度 18.5m"}],
+                         "value": "18.5m", "text": "檐口高度 18.5m"}],
     }
 
 

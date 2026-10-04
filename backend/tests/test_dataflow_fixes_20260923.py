@@ -11,7 +11,7 @@
 import inspect
 
 import pytest
-
+from app.routers.sse_handlers import _render_facts_text
 from app.services.bid_analysis_service import ANALYSIS_ITEMS, format_downstream_context
 from app.services.facts_extractor import (
     FACTS_GT_COLUMN,
@@ -23,7 +23,6 @@ from app.services.facts_extractor import (
     build_injectable_facts_query,
     persist_extraction,
 )
-from app.routers.sse_handlers import _render_facts_text
 
 
 def _item(item_id, label, content, output_type="markdown", status="success"):

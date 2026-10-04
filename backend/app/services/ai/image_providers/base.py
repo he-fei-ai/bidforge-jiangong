@@ -3,8 +3,8 @@
 实现 ImageProviderAdapter 抽象基类，为所有图像生成平台提供统一接口。
 """
 
-from abc import ABC, abstractmethod
 import re
+from abc import ABC, abstractmethod
 from typing import Any
 
 

@@ -6,7 +6,7 @@ import {
 } from "@ant-design/icons";
 
 import { promptsApi } from "../api";
-import { hookAntdMessage } from "../utils/activityCenter";
+import { useAntdMessageHub } from "../utils/activityCenter";
 
 import { PageHero, StatCards, StatItem } from '../utils/ui';
 import type { PromptAuditLog, PromptItem } from "../types/prompt";
@@ -61,7 +61,7 @@ const PROMPT_MAX_CHARS = 200000;
 
 export default function PromptEditorPage() {
   const { message: _antdMsg, modal } = App.useApp();
-  const msg = hookAntdMessage(_antdMsg, "提示词管理");
+  const msg = useAntdMessageHub(_antdMsg, "提示词管理");
   const [prompts, setPrompts] = useState<PromptItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingKey, setEditingKey] = useState<string | null>(null);

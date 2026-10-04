@@ -13,9 +13,8 @@
 """
 from __future__ import annotations
 
-import pytest
-
 import app.services.ai.provider_factory as pf
+import pytest
 
 
 class _FakeProvider:

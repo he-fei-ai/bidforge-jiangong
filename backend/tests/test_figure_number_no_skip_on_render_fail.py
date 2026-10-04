@@ -19,14 +19,14 @@ import sys
 import tempfile
 
 import pytest
-from PIL import Image
 from docx import Document
+from PIL import Image
 
 sys.path.insert(0, r"J:\编程\专项方案工具箱\backend")
 
 from app.routers.export import (  # noqa: E402
-    _build_docx_sync,
     _DEFAULT_HEADING_STYLES,
+    _build_docx_sync,
     _content_fingerprint,
     _parse_content_blocks,
 )

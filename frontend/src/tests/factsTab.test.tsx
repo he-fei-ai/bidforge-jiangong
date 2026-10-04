@@ -126,6 +126,7 @@ function baseProps(over: Partial<React.ComponentProps<typeof FactsGroupList>> = 
     onEditItem: vi.fn(),
     onResolveItem: vi.fn(),
     onResolveConflict: vi.fn(),
+    onAckStaleOne: vi.fn(),
     ...over,
   } as any;
 }
@@ -209,6 +210,25 @@ describe("FactsGroupList（全局事实分组列表）", () => {
     expandFirstPanel(utils);
     expect(utils.getByText("工程名称")).toBeTruthy(); // f1 模拟，保留
     expect(utils.queryByText("合同工期")).toBeNull();   // f2 非模拟，被过滤
+  });
+
+  it("过期条目：点击「来源已变化」Tag 上抛 fact_id（锁 BUG2 修复：不能用已删除的 it.id）", () => {
+    const groups: any = [{
+      id: "g-stale", title: "编制依据",
+      items: [{
+        fact_id: "f-stale", name: "工程所在地", value: "北京",
+        is_stale: true, is_resolved: false, is_simulated: false, has_conflict: false,
+      }],
+    }];
+    const props = baseProps({ groups });
+    const utils = render(<FactsGroupList {...props} />);
+    expandFirstPanel(utils);
+    fireEvent.click(utils.getByText(/来源已变化/));
+    expect(props.onAckStaleOne).toHaveBeenCalledTimes(1);
+    const [factId, title] = props.onAckStaleOne.mock.calls[0];
+    // BUG 修复前：it.id 是 undefined → 此处收到 undefined，handleAckStaleOne 静默 return
+    expect(factId).toBe("f-stale");
+    expect(title).toBe("工程所在地");
   });
 
   it("无结构化条目时回退整段 Markdown", () => {

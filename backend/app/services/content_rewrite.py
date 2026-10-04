@@ -33,28 +33,53 @@ import re
 # ```python 等代码块内容不被破坏（否则英文替换会改坏 JSON 键名、导致渲染失败）。
 # ---------------------------------------------------------------------------
 
-_FENCE_MARK = "```"
+# ✅ 2026-10-04 修复（BUG-2）：旧实现 `_FENCE_MARK = "```"` 只认反引号，
+# 导致 `~~~mermaid` / `~~~html` / `~~~python` 等波浪线围栏在三个改写路径
+# （html_table_to_gfm / fix_english_leak / collapse_duplicate_blocks）中
+# 被误判为普通正文，产生两类破坏：
+#   · `~~~html` 块内的 `<table><tr><td>` 被 html_table_to_gfm 转成 GFM 表格，
+#     波浪围栏包裹的 HTML 源文本被"拍平"，导出时不再当作代码块渲染；
+#   · `~~~mermaid` 块内的重复节点行（AI 偶发重复输出 `A[基础]-->B[结构]`）
+#     被 collapse_duplicate_blocks 折叠删除，破坏 Mermaid 语义或触发渲染失败。
+# 现改为逐行状态机、同时识别 ``` 与 ~~~（口径与 content_blocks.parse_fence_line
+# / content_utils._FENCE_LINE_RE 一致），两种围栏统一受保护。
+_FENCE_LINE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})([^`~\n]*)$")
 
 
 def _split_fences(text: str) -> list[tuple[bool, str]]:
-    """把文本切成 (是否在代码围栏内, 片段) 序列，围栏分隔行本身归入围栏侧。"""
+    """把文本切成 (是否在代码围栏内, 片段) 序列，围栏分隔行本身归入围栏侧。
+
+    识别两种围栏：反引号（``` / ```` …）与波浪线（~~~ / ~~~~ …），语义与
+    ``content_blocks.parse_fence_line`` 一致（**宽松**：同种字符即可视为闭合，
+    不要求长度 ≥ 开围栏）。未闭合的围栏到文末视为仍在围栏内。
+    """
     lines = text.split("\n")
     segs: list[tuple[bool, list[str]]] = []
     buf: list[str] = []
     in_fence = False
+    fence_char: str = ""
     for ln in lines:
-        if ln.lstrip().startswith(_FENCE_MARK):
+        m = _FENCE_LINE_RE.match(ln)
+        if m is not None:
+            mark_char = m.group(1)[0]
             if not in_fence:
+                # 开围栏：先落笔围栏外片段
                 if buf:
                     segs.append((False, buf))
                     buf = []
                 in_fence = True
+                fence_char = mark_char
                 buf.append(ln)
-            else:
+            elif mark_char == fence_char:
+                # 闭合围栏（同种字符即可，宽松）
                 buf.append(ln)
                 segs.append((True, buf))
                 buf = []
                 in_fence = False
+                fence_char = ""
+            else:
+                # 跨字符种类的围栏（``` 未闭合时出现 ~~~）→ 视为代码内容
+                buf.append(ln)
             continue
         buf.append(ln)
     if buf:

@@ -15,17 +15,8 @@ import logging
 import re
 import uuid
 
-from app.services.ai.image_engine import validate_mermaid, repair_mermaid
+from app.services.ai.image_engine import repair_mermaid, validate_mermaid
 from app.services.chart_payload import build_chart_envelope
-# ✅ 2026-09-27（T-2）：围栏工具已下沉到 services.content_blocks，
-#    此处转出以保持本模块命名空间（内部上百处引用 + 既有测试 import 不变）。
-#    连同下方两个常量一起**从唯一实现转发**，杜绝"下沉后残留第二份副本"的分叉。
-from app.services.content_blocks import (  # noqa: E402
-    parse_fence_line,
-    read_fenced_block,
-    MAX_INLINE_CODE_BLOCK_LINES as _CONTENT_BLOCKS_MAX_INLINE_CODE_BLOCK_LINES,
-    INLINE_CHART_FENCE_LANGS as _CONTENT_BLOCKS_INLINE_CHART_FENCE_LANGS,
-)
 from app.services.chart_validators import (
     MERMAID_KEYWORD_TO_CHART_TYPE,
     detect_mermaid_chart_type,
@@ -39,6 +30,20 @@ from app.services.chart_validators import (
     validate_labor_data,
     validate_layout_data,
     validate_timeline_data,
+)
+from app.services.content_blocks import (
+    INLINE_CHART_FENCE_LANGS as _CONTENT_BLOCKS_INLINE_CHART_FENCE_LANGS,
+)
+from app.services.content_blocks import (
+    MAX_INLINE_CODE_BLOCK_LINES as _CONTENT_BLOCKS_MAX_INLINE_CODE_BLOCK_LINES,
+)
+
+# ✅ 2026-09-27（T-2）：围栏工具已下沉到 services.content_blocks，
+#    此处转出以保持本模块命名空间（内部上百处引用 + 既有测试 import 不变）。
+#    连同下方两个常量一起**从唯一实现转发**，杜绝"下沉后残留第二份副本"的分叉。
+from app.services.content_blocks import (  # noqa: E402
+    parse_fence_line,
+    read_fenced_block,
 )
 
 logger = logging.getLogger("chart_pipeline")
@@ -793,10 +798,31 @@ async def apply_inline_chart_plan(db, section_id: str, rows: list[tuple],
                         section_id[:8], ct, _limit)
             skipped_types.add(ct)
             continue
-        await db.execute(
-            "INSERT INTO chart_predictions "
-            "(id, section_id, scheme_id, chart_type, needed, purpose, "
-            "priority, status, data_json) VALUES (?,?,?,?,1,?,?,?,?)", row)
+        # ✅ BUG 修复（2026-10-05 · F-3，R13 同构）：aiosqlite 在事务冲突 / 连接
+        #    异常时 `await db.execute(...)` 可能返回 None（SELECT 早已在同一函数内
+        #    做过 None 兜底），INSERT 却**静默吞掉**——chart_predictions 里缺一条，
+        #    但正文里那张图仍在（`_apply_chart_fence_edits` 只在 skipped_types 里
+        #    删，本条不属 skipped）。→ **幽灵图**：导出照渲、清单看不见。
+        #    现对返回值 + 异常都显式判定，任一失败都补进 skipped_types：
+        #    下一轮正文裁剪会精确定位并删除该块，保持落库与正文两侧一致。
+        try:
+            _res = await db.execute(
+                "INSERT INTO chart_predictions "
+                "(id, section_id, scheme_id, chart_type, needed, purpose, "
+                "priority, status, data_json) VALUES (?,?,?,?,1,?,?,?,?)", row)
+        except Exception as _e:
+            logger.warning(
+                "章节 %s 图表 [%s] 事务内 INSERT 失败，已降级为跳过登记（正文将同步裁剪）: %s",
+                section_id[:8], ct, _e)
+            skipped_types.add(ct)
+            continue
+        if _res is None:
+            logger.warning(
+                "章节 %s 图表 [%s] INSERT 返回 None（连接/事务异常），"
+                "已降级为跳过登记（正文将同步裁剪）",
+                section_id[:8], ct)
+            skipped_types.add(ct)
+            continue
         running[ct] = running.get(ct, 0) + 1
     if content is not None and skipped_types:
         # ✅ BUG 修复（2026-09-24）：改为按围栏序号精确删除（_apply_chart_fence_edits）。

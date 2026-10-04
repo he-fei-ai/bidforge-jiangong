@@ -10,18 +10,22 @@ import io
 import json
 import uuid
 
-import pytest
-from fastapi import UploadFile
-
 import app.db as _appdb
 import app.routers.global_facts as gf
 import app.services.facts_extractor as fe
+import pytest
 from app.db import get_conn, init_db
 from app.services.facts_extractor import (
-    ExtractionResult, FactGroup, FactItem,
-    run_extraction_pipeline, persist_extraction,
-    load_completed_chunks, save_extracted_chunks, _chunk_hash,
+    ExtractionResult,
+    FactGroup,
+    FactItem,
+    _chunk_hash,
+    load_completed_chunks,
+    persist_extraction,
+    run_extraction_pipeline,
+    save_extracted_chunks,
 )
+from fastapi import UploadFile
 
 
 @pytest.fixture

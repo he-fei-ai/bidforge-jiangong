@@ -7,11 +7,10 @@
 - sections.save_outline（空 outline 拒绝）
 """
 import json
+
 import pytest
 import pytest_asyncio
-
-from app.routers.sse_handlers import _validate_outline, _count_nodes
-
+from app.routers.sse_handlers import _count_nodes, _validate_outline
 
 # ============================================================
 # _validate_outline
@@ -146,8 +145,9 @@ class TestCountNodes:
 @pytest.mark.asyncio
 class TestBuildTree:
     async def test_tree_structure(self, db_conn):
-        from app.routers.sections import _build_tree
         import uuid
+
+        from app.routers.sections import _build_tree
 
         scheme_id = str(uuid.uuid4())
         project_id = str(uuid.uuid4())
@@ -177,8 +177,9 @@ class TestBuildTree:
         assert tree[0]["children"][1]["title"] == "1.1"
 
     async def test_empty_tree(self, db_conn):
-        from app.routers.sections import _build_tree
         import uuid
+
+        from app.routers.sections import _build_tree
 
         scheme_id = str(uuid.uuid4())
         project_id = str(uuid.uuid4())
@@ -198,9 +199,10 @@ class TestBuildTree:
 @pytest.mark.asyncio
 class TestSaveOutline:
     async def test_reject_empty_outline(self, db_conn):
+        import uuid
+
         from app.routers.sections import save_outline
         from fastapi import HTTPException
-        import uuid
 
         scheme_id = str(uuid.uuid4())
         project_id = str(uuid.uuid4())
@@ -216,9 +218,10 @@ class TestSaveOutline:
         assert (await cur.fetchone())[0] == 0
 
     async def test_reject_non_list_outline(self, db_conn):
+        import uuid
+
         from app.routers.sections import save_outline
         from fastapi import HTTPException
-        import uuid
 
         scheme_id = str(uuid.uuid4())
         project_id = str(uuid.uuid4())
@@ -362,6 +365,7 @@ class TestOutlineSkeletonEnhancement:
 
     def test_skeleton_still_legal_json(self):
         import json as _json
+
         from app.routers.sse_handlers import _outline_skeleton
         sk = _outline_skeleton([{"title": "a", "children": [{"title": "b"}]}], max_nodes=1)
         # 预算耗尽也应输出合法 JSON（可序列化、结构完整）

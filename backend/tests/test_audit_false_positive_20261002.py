@@ -21,18 +21,17 @@ P1-1 ``consistency_scanner._PERSON_RE`` 把岗位后的**谓语**当成人名
 from __future__ import annotations
 
 import pytest
-
+from app.services.consistency_scanner import (
+    _PERSON_RE,
+    _looks_like_person_name,
+    program_prescan,
+)
 from app.services.preflight_engine import (
     PreflightContext,
     build_section_tree_index,
     check_completeness,
     check_deliverability,
     preflight_stats,
-)
-from app.services.consistency_scanner import (
-    _looks_like_person_name,
-    _PERSON_RE,
-    program_prescan,
 )
 
 BODY = "本节依据现行标准与设计文件编制，明确施工工艺参数、质量控制要点与安全技术措施。" * 10
@@ -273,17 +272,20 @@ class TestProgramPrescanNoPredicateConflicts:
 class TestNoCriteriaFork:
     def test_completeness_uses_tree_index(self):
         import inspect
+
         from app.services import preflight_engine as pe
         src = inspect.getsource(pe.check_completeness)
         assert "build_section_tree_index" in src
 
     def test_stats_uses_tree_index(self):
         import inspect
+
         from app.services import preflight_engine as pe
         assert "build_section_tree_index" in inspect.getsource(pe.preflight_stats)
 
     def test_person_scan_uses_name_guard(self):
         import inspect
+
         from app.services import consistency_scanner as cs
         assert "_looks_like_person_name" in inspect.getsource(cs.program_prescan)
 

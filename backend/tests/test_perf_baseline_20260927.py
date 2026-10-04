@@ -15,7 +15,6 @@
 """
 import time
 
-
 # 宽松预算（秒）。见各用例注释。
 _BUDGET = {
     "renumber": 5.0,
@@ -211,15 +210,17 @@ def test_chart_cache_key_perf():
 
 def test_fact_dimension_derivation_is_not_n_plus_one():
     """反例：事实行级派生不得逐行查库（N 条事实 = N 次往返）。"""
-    from app.routers import global_facts as gf
     import inspect
+
+    from app.routers import global_facts as gf
     assert "await db.execute" not in inspect.getsource(gf._fact_dimension_fields)
 
 
 def test_render_facts_text_allocates_once():
     """分配器只能在循环外调用一次（循环内调用 = O(n^2)）。"""
-    from app.routers import sse_handlers as sh
     import inspect
+
+    from app.routers import sse_handlers as sh
     assert inspect.getsource(sh._render_facts_text).count(
         "_allocate_char_budgets(") == 1
 

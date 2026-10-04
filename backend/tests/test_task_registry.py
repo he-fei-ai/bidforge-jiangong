@@ -4,26 +4,26 @@
 
 测试策略：
 - 直接调用函数，验证 DB 持久化 + 内存状态 + SSE 广播
-- 订阅任务事件，验证 broadcast 实际推送
-- 验证 finish_task 清理内存订阅者
+- monkeypatch ``broadcast`` 捕获实际推送载荷（2026-10-04 起 broadcast 已降级为
+  no-op，生产代码不再依赖 ``_subscribers`` 队列；旧测试里的
+  ``_subscribers[tid] = [q]`` 直接改队列的写法已一并去除）
+- 验证 finish_task 清理内存态 ``_tasks``
 """
 import asyncio
 import json
 
-import pytest
-
 import app.services.ai.task_registry as tr
+import pytest
 from app.services.ai.task_registry import (
-    register_task,
-    update_progress,
-    finish_task,
-    set_task_status,
-    broadcast,
-    request_control,
-    is_stopped,
-    wait_resume,
-    _subscribers,
     _tasks,
+    broadcast,
+    finish_task,
+    is_stopped,
+    register_task,
+    request_control,
+    set_task_status,
+    update_progress,
+    wait_resume,
 )
 
 
@@ -120,48 +120,47 @@ class TestUpdateProgress:
         await update_progress(tid, 0.75)
         assert _tasks[tid]["progress"] == 0.75
 
-    async def test_broadcasts_progress_event(self, db_conn):
-        """订阅者收到 progress 事件"""
+    async def test_broadcasts_progress_event(self, db_conn, monkeypatch):
+        """进度更新时 broadcast 收到 progress 事件载荷"""
+        captured = []
+
+        async def _fake_broadcast(tid, payload):
+            captured.append((tid, payload))
+
+        monkeypatch.setattr(tr, "broadcast", _fake_broadcast)
         tid = await register_task("generate_content")
-        q = asyncio.Queue()
-        _subscribers[tid] = [q]
 
         await update_progress(tid, 0.3, message="进度更新")
 
-        event = q.get_nowait()
+        assert len(captured) == 1
+        event_tid, event = captured[0]
+        assert event_tid == tid
         assert event["event"] == "progress"
         assert event["task_id"] == tid
         assert event["progress"] == 0.3
         assert event["message"] == "进度更新"
 
-    async def test_custom_event_name(self, db_conn):
+    async def test_custom_event_name(self, db_conn, monkeypatch):
         """自定义 event 名称"""
+        captured = []
+
+        async def _fake_broadcast(tid, payload):
+            captured.append(payload)
+
+        monkeypatch.setattr(tr, "broadcast", _fake_broadcast)
         tid = await register_task("generate_content")
-        q = asyncio.Queue()
-        _subscribers[tid] = [q]
 
         await update_progress(tid, 0.5, event="section_done")
 
-        event = q.get_nowait()
-        assert event["event"] == "section_done"
+        assert len(captured) == 1
+        assert captured[0]["event"] == "section_done"
 
     async def test_no_subscriber_no_error(self, db_conn):
-        """无订阅者时不报错"""
+        """无订阅者时不报错（broadcast 现为 no-op）"""
         tid = await register_task("generate_content")
-        # 不注册任何订阅者
+        # 生产代码调用 broadcast 时不再依赖任何订阅队列
         await update_progress(tid, 0.5)
         # 无异常即通过
-
-    async def test_multiple_subscribers_all_receive(self, db_conn):
-        """多客户端订阅：全部收到事件"""
-        tid = await register_task("generate_content")
-        q1, q2 = asyncio.Queue(), asyncio.Queue()
-        _subscribers[tid] = [q1, q2]
-
-        await update_progress(tid, 0.6, message="广播")
-
-        assert q1.get_nowait()["progress"] == 0.6
-        assert q2.get_nowait()["progress"] == 0.6
 
 
 # ============================================================
@@ -187,50 +186,62 @@ class TestFinishTask:
         cur = await db_conn.execute("SELECT status FROM task_registry WHERE id=?", (tid,))
         assert (await cur.fetchone())[0] == "completed"
 
-    async def test_broadcasts_completed_event(self, db_conn):
+    async def test_broadcasts_completed_event(self, db_conn, monkeypatch):
         """完成时广播 completed 事件"""
+        captured = []
+
+        async def _fake_broadcast(tid, payload):
+            captured.append((tid, payload))
+
+        monkeypatch.setattr(tr, "broadcast", _fake_broadcast)
         tid = await register_task("generate_content")
-        q = asyncio.Queue()
-        _subscribers[tid] = [q]
 
         await finish_task(tid, status="completed", message="done")
 
-        event = q.get_nowait()
+        assert len(captured) == 1
+        event_tid, event = captured[0]
+        assert event_tid == tid
         assert event["event"] == "completed"
         assert event["task_id"] == tid
         assert event["message"] == "done"
 
-    async def test_failed_status_broadcasts_failed_event(self, db_conn):
+    async def test_failed_status_broadcasts_failed_event(self, db_conn, monkeypatch):
         """status=failed → 广播 failed 事件"""
+        captured = []
+
+        async def _fake_broadcast(tid, payload):
+            captured.append(payload)
+
+        monkeypatch.setattr(tr, "broadcast", _fake_broadcast)
         tid = await register_task("generate_content")
-        q = asyncio.Queue()
-        _subscribers[tid] = [q]
 
         await finish_task(tid, status="failed", message="出错了")
 
-        event = q.get_nowait()
-        assert event["event"] == "failed"
+        assert len(captured) == 1
+        assert captured[0]["event"] == "failed"
 
-    async def test_stopped_status_broadcasts_stopped_event(self, db_conn):
+    async def test_stopped_status_broadcasts_stopped_event(self, db_conn, monkeypatch):
         """status=stopped → 广播 stopped 事件"""
+        captured = []
+
+        async def _fake_broadcast(tid, payload):
+            captured.append(payload)
+
+        monkeypatch.setattr(tr, "broadcast", _fake_broadcast)
         tid = await register_task("generate_content")
-        q = asyncio.Queue()
-        _subscribers[tid] = [q]
 
         await finish_task(tid, status="stopped")
 
-        event = q.get_nowait()
-        assert event["event"] == "stopped"
+        assert len(captured) == 1
+        assert captured[0]["event"] == "stopped"
 
     async def test_cleans_up_memory_state(self, db_conn):
-        """完成后清理 _tasks 和 _subscribers"""
+        """完成后清理 _tasks 内存态"""
         tid = await register_task("generate_content")
-        _subscribers[tid] = [asyncio.Queue()]
 
         await finish_task(tid)
 
         assert tid not in _tasks
-        assert tid not in _subscribers
 
     async def test_memory_status_updated_before_cleanup(self, db_conn):
         """finish 前内存 status 被更新（在清理之前）"""
@@ -315,23 +326,23 @@ class TestTaskControl:
 
 
 # ============================================================
-# broadcast 测试
+# broadcast 测试（2026-10-04 起：broadcast 已降级为 no-op）
 # ============================================================
 class TestBroadcast:
-    """broadcast 直接测试"""
+    """broadcast 现为空操作；仅验证存在性、可调用性与向后兼容的签名。
 
-    async def test_broadcast_to_subscribers(self, db_conn):
+    旧测试里 `_subscribers[tid] = [q]` + `q.get_nowait()` 的语义已随
+    死链路清理一并去除（生产代码从未注册过 Queue，行为等价于空转）。
+    """
+
+    async def test_broadcast_is_noop(self):
         tid = "test-task-id"
-        q1, q2 = asyncio.Queue(), asyncio.Queue()
-        _subscribers[tid] = [q1, q2]
+        # 无异常即通过；no-op 不产生副作用
+        result = await broadcast(tid, {"event": "test", "data": 42})
+        assert result is None
 
-        await broadcast(tid, {"event": "test", "data": 42})
-
-        assert q1.get_nowait() == {"event": "test", "data": 42}
-        assert q2.get_nowait() == {"event": "test", "data": 42}
-
-    async def test_broadcast_no_subscribers(self, db_conn):
-        """无订阅者时不报错"""
+    async def test_broadcast_no_subscribers(self):
+        """无订阅者时不报错（历史行为保留）"""
         await broadcast("no-subs", {"event": "test"})
         # 无异常即通过
 

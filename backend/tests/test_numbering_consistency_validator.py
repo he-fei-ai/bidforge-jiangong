@@ -87,8 +87,7 @@ class TestNumberingConsistencyValidator:
 
     async def test_repair_endpoint(self, db_conn):
         """POST /numbering-consistency/repair 修复后内容更新且变为一致。"""
-        from app.routers.sections import (
-            get_numbering_consistency, repair_numbering_consistency)
+        from app.routers.sections import get_numbering_consistency, repair_numbering_consistency
         from app.services.numbering import validate_scheme_numbering_consistency
         await _seed_scheme(db_conn)
         await db_conn.execute(
@@ -231,8 +230,7 @@ class TestNumberingVersioning:
 
     async def test_rollback_restores_and_is_undoable(self, db_conn):
         """回滚恢复修复前正文；回滚产生的 undo 快照可再次回滚（撤销回滚）。"""
-        from app.routers.sections import (
-            repair_numbering_consistency, rollback_numbering_version)
+        from app.routers.sections import repair_numbering_consistency, rollback_numbering_version
         from app.services.numbering import validate_scheme_numbering_consistency
         await self._seed_drifted(db_conn)
         res = await repair_numbering_consistency("s1", db=db_conn)
@@ -256,8 +254,10 @@ class TestNumberingVersioning:
     async def test_versions_list(self, db_conn):
         """版本列表按新→旧返回，type 隔离且只含 numbering_* 快照。"""
         from app.routers.sections import (
-            repair_numbering_consistency, rollback_numbering_version,
-            list_numbering_versions)
+            list_numbering_versions,
+            repair_numbering_consistency,
+            rollback_numbering_version,
+        )
         await self._seed_drifted(db_conn)
         res = await repair_numbering_consistency("s1", db=db_conn)
         rb = await rollback_numbering_version("s1", res["snapshot_id"], db=db_conn)
@@ -269,9 +269,9 @@ class TestNumberingVersioning:
 
     async def test_rollback_guards(self, db_conn):
         """回滚安全约束：不存在→404；跨方案/非 numbering 类型→400。"""
-        from fastapi import HTTPException
         from app.routers.sections import rollback_numbering_version
         from app.services.repair_record import create_snapshot
+        from fastapi import HTTPException
         await self._seed_drifted(db_conn)
 
         with pytest.raises(HTTPException) as e404:

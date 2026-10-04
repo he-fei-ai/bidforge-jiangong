@@ -191,7 +191,7 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
             return `<span class="math-ph" data-marker="${marker}"></span>`;
           })
           // 行内公式 $...$（内容非空、两端不紧邻空格、不含 $）
-          .replace(/(^|[^\$\\])\$([^$\n]+?)\$(?!\d)/g, (m, pre: string, tex: string) => {
+          .replace(/(^|[^$\\])\$([^$\n]+?)\$(?!\d)/g, (m, pre: string, tex: string) => {
             const trimmed = tex.trim();
             if (!trimmed || trimmed.startsWith(" ") || trimmed.endsWith(" ")) return m;
             const marker = `${markerPrefix}m${counter++}__`;

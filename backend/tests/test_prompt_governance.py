@@ -12,13 +12,13 @@
 from __future__ import annotations
 
 import pytest
-
 from app.services import prompt_governance as pg
 from app.services.ai.prompts import PROMPT_VARIABLE_CONTRACTS
 from app.services.ai.prompts._registry import (
-    _ALL_PROMPTS, _reg, check_prompt_variables,
+    _ALL_PROMPTS,
+    _reg,
+    check_prompt_variables,
 )
-
 
 # ✅ 2026-09-26（测试隔离修复）：TestVariableContracts 用 _reg 注册的
 #   contract_test_* 临时模板会**永久残留**在进程级 _ALL_PROMPTS 里，

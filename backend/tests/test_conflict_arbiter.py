@@ -1,7 +1,6 @@
 """冲突仲裁器 单元测试：AI 分批仲裁与失败隔离、批量回写。"""
-import pytest
-
 import app.services.conflict_arbiter as ca
+import pytest
 
 
 def _conflict(cid: str, topic: str = "项目总工期") -> dict:

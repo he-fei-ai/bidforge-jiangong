@@ -14,11 +14,12 @@
 import json
 import uuid
 
-import pytest
-
 import app.routers.bid_analysis as ba
+import pytest
 from app.services.bid_analysis_service import (
-    build_evidence, build_evidence_json, is_missing_result,
+    build_evidence,
+    build_evidence_json,
+    is_missing_result,
 )
 
 # 与 _combine_doc_texts 的产物格式一致：`# 文档：xxx（分类：yyy）` 头分隔文档

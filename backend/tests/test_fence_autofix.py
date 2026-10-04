@@ -7,12 +7,12 @@
   · 集成：修复后 DLV-07 判据清零；不干扰 text_word_count 与 word_status
 """
 from app.services.content_utils import (
+    DEFAULT_WORD_BUDGET,
     auto_fix_unclosed_fences,
     count_fences,
     find_unclosed_fences,
     text_word_count,
     word_status_for,
-    DEFAULT_WORD_BUDGET,
 )
 
 
@@ -218,4 +218,75 @@ class TestIntegration:
         assert fixed == short
         assert log == []
         assert word_status_for(text_word_count(short), DEFAULT_WORD_BUDGET) == "under"
+
+
+# =============================================================================
+# BUG-3 回归：AI 常见「4-backtick-open + 3-backtick-close」被误判未闭合
+# =============================================================================
+class TestAutoFixLenientFences:
+    """auto_fix_unclosed_fences 使用宽松语义（同种字符即闭合）；
+    而 find_unclosed_fences 保持严格 CommonMark（长度≥开围栏且无标签）。
+    两者口径的差异是有意为之，分别满足落库防线与展示一致性的诉求。
+    """
+
+    def test_bug_3_lenient_auto_fix_does_not_append_close(self):
+        """BUG-3：4-开 3-关的 AI 模式 → auto_fix 不应补闭合（视为已闭合）。"""
+        src = "````mermaid\ngraph TD; A-->B\n```\n尾段"
+        fixed, log = auto_fix_unclosed_fences(src)
+        assert fixed == src, f"未被误判为未闭合，原文保留；实际：{fixed!r}"
+        assert log == [], "不应产生修复日志"
+
+    def test_bug_3_strict_still_reports_unclosed(self):
+        """严格版 find_unclosed_fences 依然把 4-开 3-关 视为未闭合（向后兼容）。"""
+        src = "````mermaid\ngraph TD; A-->B\n```"
+        result = find_unclosed_fences(src)
+        assert len(result) == 1
+        assert result[0]["line"] == 1
+        assert result[0]["char"] == "`"
+        assert result[0]["length"] == 4
+
+    def test_bug_3_lenient_matches_content_blocks_parser(self):
+        """与 content_blocks.parse_fence_line/read_fenced_block 的宽松口径对齐：
+        3 反引号即可闭合 4-反引号开围栏（同一模块内两套解析器结论一致）。"""
+        from app.services.content_blocks import parse_fence_line, read_fenced_block
+
+        src = "````mermaid\ngraph TD; A-->B\n```"
+        lines = src.split("\n")
+        # 第 0 行是 4-反引号开围栏
+        open_pf = parse_fence_line(lines[0])
+        assert open_pf is not None
+        assert open_pf[0] == "`"
+        # 第 2 行是 3-反引号，被宽松语义视为可闭合（同种字符即闭合）
+        close_pf = parse_fence_line(lines[2])
+        assert close_pf is not None
+        assert close_pf[0] == "`"
+        # read_fenced_block 从 body_start=1 起读，应在行 2 停止（返回 next_index=3）
+        code_lines, state, next_idx = read_fenced_block(lines, body_start=1)
+        assert state == "closed"
+        assert next_idx == 3
+        assert code_lines == ["graph TD; A-->B"]
+
+    def test_bug_3_true_unclosed_still_repaired(self):
+        """真未闭合仍会被 auto_fix 补上闭合围栏。"""
+        src = "````mermaid\ngraph TD; A-->B"
+        fixed, log = auto_fix_unclosed_fences(src)
+        assert fixed != src
+        assert fixed.rstrip().endswith("````") or fixed.rstrip().endswith("```")
+        assert len(log) == 1
+        assert log[0]["char"] == "`"
+
+    def test_bug_3_idempotent_after_fix(self):
+        """修复后再次 auto_fix 应无变化（幂等）。"""
+        src = "````mermaid\ngraph TD; A-->B"
+        fixed1, _ = auto_fix_unclosed_fences(src)
+        fixed2, log2 = auto_fix_unclosed_fences(fixed1)
+        assert fixed2 == fixed1
+        assert log2 == []
+
+    def test_bug_3_tilde_lenient_same_char_kind(self):
+        """宽松语义对 ~~~ 围栏同样生效：3 波浪闭合 4 波浪开。"""
+        src = "~~~~python\ndef f(): pass\n~~~\n尾段"
+        fixed, log = auto_fix_unclosed_fences(src)
+        assert fixed == src
+        assert log == []
 

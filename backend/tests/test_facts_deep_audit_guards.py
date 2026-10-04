@@ -10,9 +10,8 @@
 import inspect
 
 from app.routers import sse_handlers as sh
-from app.services.facts_extractor import _split_table_rows, Chunk, FactItem
 from app.services.facts_cross_validators import run_cross_validations
-
+from app.services.facts_extractor import Chunk, FactItem, _split_table_rows
 
 # ---------------------------------------------------------------------------
 # 1. 进度不可回退护栏

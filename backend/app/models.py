@@ -1,5 +1,6 @@
 """Pydantic 数据模型"""
-from typing import Optional, List, Union
+from typing import List, Optional, Union
+
 from pydantic import BaseModel, Field, field_validator
 
 #: ✅ 2026-09-26（F-CONTENT-STANDARD）：正文生成标准合法值域

@@ -17,7 +17,6 @@ import shutil
 from pathlib import Path
 
 import pytest
-
 from app.services.file_parser import ParseError, parse_file_content_ex
 from app.services.ocr import ocr_bytes_sync
 
@@ -222,8 +221,9 @@ def test_ocr_tesseract_engine_real():
 @pytest.mark.skipif(docx_lib is None, reason="python-docx 未安装")
 def test_docx_parse_leaves_no_temp_files(tmp_path, monkeypatch):
     """DOCX 解析走临时文件 → 解析结束必须清理（防句柄泄漏/临时目录膨胀）。"""
-    import docx as docx_mod
     import tempfile as tempfile_mod
+
+    import docx as docx_mod
 
     real_mkdtemp = tempfile_mod.mkdtemp
     created_dirs: list[Path] = []

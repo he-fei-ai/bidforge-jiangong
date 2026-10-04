@@ -4,7 +4,7 @@
  * 把散落在各功能的弹出消息（antd message）、后台任务事件统一汇聚：
  * - pushActivity(kind, text, source)：写入一条记录（内存态，最多保留 50 条）；
  * - subscribeActivity(fn)：订阅变更（标题栏 ActivityHint 据此实时刷新）；
- * - hookAntdMessage(instance, source)：包装 App.useApp() 的 message 实例，
+ * - useAntdMessageHub(instance, source)：Hook，包装 App.useApp() 的 message 实例，
  *   页面所有 msg.success/error/... 调用**自动**同步进消息中心，无需改任何调用点。
  *
  * 消费方：SchemeWorkbenchPage 顶部标题栏中部的 ActivityHint（最新一条 + 历史浮层）。
@@ -108,9 +108,9 @@ export function getActivityTime(ts: number): string {
  * ✅ 契约（2026-09-16）：所有功能的提示消息统一集中到标题栏「消息中心」展示，
  * 消除「toast 弹一次 + 消息中心记一次」的重复展示。错误/警告在气泡中停留
  * 更久（15s），且历史记录始终可查，不会因 toast 消失而丢失反馈。
- * 用法：`const msg = hookAntdMessage(_msg, "方案工作台");`，页面其余代码零改动。
+ * 用法：`const msg = useAntdMessageHub(_msg, "方案工作台");`，页面其余代码零改动。
  */
-export function hookAntdMessage(_message: MessageInstance, source: string): MessageInstance {
+export function useAntdMessageHub(_message: MessageInstance, source: string): MessageInstance {
   // ✅ 必须返回稳定引用：否则依赖 msg 的 useCallback（如 ReviewWorkflowPanel.load）
   // 每次渲染都会获得新身份，导致 useEffect([load]) 无限重渲染（Maximum update depth）。
   return useMemo(() => {

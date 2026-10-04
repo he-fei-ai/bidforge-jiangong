@@ -20,7 +20,6 @@ import asyncio
 import inspect
 
 import pytest
-
 from app.config import settings
 from app.routers import sse_handlers as sh
 from app.services import file_parser as fp

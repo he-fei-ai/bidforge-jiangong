@@ -16,11 +16,10 @@ import io
 import json
 
 import pytest
-from fastapi import HTTPException
-from starlette.datastructures import UploadFile
-
 from app.routers import upload_outline as uo
 from app.services import file_parser as fp
+from fastapi import HTTPException
+from starlette.datastructures import UploadFile
 
 
 def _upload(name: str, data: bytes) -> UploadFile:

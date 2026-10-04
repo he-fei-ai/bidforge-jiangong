@@ -17,15 +17,14 @@ import ast
 import inspect
 import uuid
 
-import pytest
-from fastapi import HTTPException
-
 import app.db as _appdb
-from app.db import get_conn, init_db
 import app.routers.global_facts as gf
 import app.routers.sections as sections_mod
-from app.routers.sse_handlers import generate_content
+import pytest
+from app.db import get_conn, init_db
 from app.models import FactGroupUpdate
+from app.routers.sse_handlers import generate_content
+from fastapi import HTTPException
 
 
 @pytest.fixture

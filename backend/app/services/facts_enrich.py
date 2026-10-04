@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional, Sequence
+from typing import Any, Sequence
 
 from app.services.ai.json_response import collect_json_response
 from app.services.ai.prompts._registry import render

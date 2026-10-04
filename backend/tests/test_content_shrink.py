@@ -6,7 +6,6 @@
 - 操作应用（逐字唯一校验、保护区间命中拒绝、delete / replace、倒序应用偏移正确）
 """
 import pytest
-
 from app.services.content_shrink import (
     apply_shrink_operations,
     collect_protected_ranges,

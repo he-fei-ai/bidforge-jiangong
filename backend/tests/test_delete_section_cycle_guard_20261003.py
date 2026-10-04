@@ -18,13 +18,12 @@ pending，永不相交于空 → all_ids / pending 无限增长，请求永久�
 import asyncio
 import uuid
 
-import pytest
 import aiosqlite
-
 import app.db as _appdb
-from app.schema_sql import SCHEMA_SQL
+import pytest
 from app.db import _migrate
 from app.routers.sections import delete_section
+from app.schema_sql import SCHEMA_SQL
 
 
 @pytest.fixture

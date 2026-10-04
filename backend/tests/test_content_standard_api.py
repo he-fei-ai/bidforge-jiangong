@@ -5,14 +5,13 @@
 - 方案 / 章节 PATCH 合法值落库与回读、章节 '' 清空覆盖、非法值 422（Pydantic 校验）；
 - 章节树轻量列表与方案快照携带 generation_standard。
 """
-import pytest
 import aiosqlite
-from pydantic import ValidationError
-
+import pytest
 from app.db import _migrate
 from app.models import SchemeUpdate, SectionUpdate
 from app.routers.schemes import get_scheme, update_scheme
-from app.routers.sections import update_section, list_sections
+from app.routers.sections import list_sections, update_section
+from pydantic import ValidationError
 
 
 async def _insert_project_scheme(db, pid="p1", sid="s1"):

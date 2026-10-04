@@ -8,8 +8,12 @@ from __future__ import annotations
 import re
 
 from app.services.ai.heading_templates import (
-    HEADING_MANAGED_LEVELS, CHINESE_NUMBERS, HEADING_STYLE_CONFIG,
-    HEADING_REGEX_PATTERNS, format_heading_by_id, format_outline_number_by_template,
+    CHINESE_NUMBERS,
+    HEADING_MANAGED_LEVELS,
+    HEADING_REGEX_PATTERNS,
+    HEADING_STYLE_CONFIG,
+    format_heading_by_id,
+    format_outline_number_by_template,
     get_heading_template,
 )
 

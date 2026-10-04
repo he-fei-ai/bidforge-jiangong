@@ -26,11 +26,10 @@ import io
 import json
 
 import pytest
+from app.routers import bid_analysis as ba
+from app.routers import upload_outline as uo
 from fastapi import HTTPException
 from starlette.datastructures import UploadFile
-
-from app.routers import upload_outline as uo
-from app.routers import bid_analysis as ba
 
 
 def _upload(name: str, data: bytes) -> UploadFile:

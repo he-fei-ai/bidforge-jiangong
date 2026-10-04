@@ -17,12 +17,10 @@ BUG：sse_handlers._load_facts_rows 与 global_facts._load_fact_rows 在
 import re
 import uuid
 
-import pytest
-
 import app.db as _appdb
+import pytest
 from app.db import get_conn, init_db
 from app.services import facts_extractor
-
 
 LEGACY_LOOSE_GATE = "has_conflict=0 AND is_resolved=1"
 
@@ -64,6 +62,7 @@ class TestCallSitesNoLongerHardcodeLooseGate:
     def test_no_hardcoded_loose_gate(self, rel):
         """源码中不得再出现被当作门控使用的旧宽松条件（注释中提及允许）"""
         from pathlib import Path
+
         import app as _app
         p = Path(_app.__file__).parent.parent / rel
         src = p.read_text(encoding="utf-8")

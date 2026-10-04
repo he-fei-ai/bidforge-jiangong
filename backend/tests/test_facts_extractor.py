@@ -10,7 +10,6 @@ import asyncio
 
 import app.services.facts_extractor as fe
 
-
 # ============================================================
 # 调用参数（低温 / JSON 模式 / 超时 / 修复提示词）
 # ============================================================
@@ -182,8 +181,9 @@ class TestReextractGroupDedup:
 
     async def _seed(self, tmp_path, monkeypatch):
         import uuid as _uuid
+
         import app.db as _appdb
-        from app.db import init_db, get_conn
+        from app.db import get_conn, init_db
 
         # 隔离：指向临时库，避免与线上 server 争用同一 WAL，导致提交/读取异常
         _appdb.DB_PATH = tmp_path / "test_dedup.sqlite"

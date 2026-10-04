@@ -18,8 +18,8 @@
     `test_export_docx_optin_placeholder_keeps_v70_contract`。
 """
 import os
-import pytest
 
+import pytest
 from app.routers.export import export_docx
 
 
@@ -206,8 +206,8 @@ async def test_export_docx_optin_placeholder_keeps_v70_contract(db_conn):
 import zipfile
 from io import BytesIO
 
-from docx import Document
 from app.routers.export import _build_docx_sync, _load_heading_styles, _parse_content_blocks
+from docx import Document
 
 _CHART_CODE = "graph TD\n A-->B"
 _CHAPTER1_CONTENT = (

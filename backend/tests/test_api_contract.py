@@ -24,7 +24,6 @@ import re
 from pathlib import Path
 
 import pytest
-
 from app.main import app
 
 # --------------------------------------------------------------------------
@@ -57,7 +56,7 @@ _CONST_DEF_RE = re.compile(rf"\bconst\s+({_IDENT})\s*=\s*({_LIT})")
 # helper 自身的定义（如 `export async function* sseGetStream(url: string, ...)`）——
 # 其形参列表与调用语法无法用正则区分，必须先剔除，否则定义会被当成一次调用
 _DECL_RE = re.compile(
-    rf"\b(?:function\s*\*?\s*|const\s+)(?:sseFetch|sseGetStream)\s*\([^)]*\)"
+    r"\b(?:function\s*\*?\s*|const\s+)(?:sseFetch|sseGetStream)\s*\([^)]*\)"
 )
 
 # 已知的非路由字面量（前端内部标识，不是后端端点）——如需新增请写明原因

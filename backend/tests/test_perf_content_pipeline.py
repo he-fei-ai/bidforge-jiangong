@@ -17,17 +17,19 @@ import json
 import time
 import uuid
 
-import pytest
-
 import app.services.ai.provider_factory as pf
+import pytest
 from app.config import settings
+from app.routers._chart_pipeline import (
+    apply_inline_chart_plan,
+    build_inline_chart_plan,
+)
 from app.services.ai import http_pool
 from app.services.ai.workflows_base import AdaptiveConcurrencyController
 from app.services.content_utils import (
-    DEFAULT_WORD_BUDGET, MAX_TOKENS_FLOOR, max_tokens_for_budget,
-)
-from app.routers._chart_pipeline import (
-    apply_inline_chart_plan, build_inline_chart_plan,
+    DEFAULT_WORD_BUDGET,
+    MAX_TOKENS_FLOOR,
+    max_tokens_for_budget,
 )
 
 VALID_FLOWCHART = (

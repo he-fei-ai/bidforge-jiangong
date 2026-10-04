@@ -111,8 +111,8 @@ async def list_standard_templates():
 @router.get("/templates/{key}")
 async def get_standard_template(key: str):
     """取某个行业标准模板的完整目录树 + 编制依据 / 适用条件"""
-    from app.services.outline_templates import BUILDERS, TEMPLATE_META
     from app.services.ai.json_response import renumber_outline
+    from app.services.outline_templates import BUILDERS, TEMPLATE_META
     if key not in BUILDERS:
         raise HTTPException(404, "模板不存在")
     meta = TEMPLATE_META.get(key, {})
@@ -624,8 +624,7 @@ async def apply_library_and_save(library_id: str, body: dict, db=Depends(get_db)
     # ✅ 竞态守卫（2026-09-21）：套用目录库是「整表重建 sections」的第二个入口，
     # 与 /save-outline 同样会级联 DELETE 正在被正文生成写的章节。前端虽已用
     # disabled={generating} 挡主路径，但接口层必须兜底（直连调用 / 多标签页）。
-    from app.routers.sections import (
-        content_generation_in_progress, outline_generation_in_progress)
+    from app.routers.sections import content_generation_in_progress, outline_generation_in_progress
     if content_generation_in_progress(scheme_id):
         raise HTTPException(
             409, "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再套用目录库——"

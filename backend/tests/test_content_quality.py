@@ -5,14 +5,18 @@
 2. 正文落库清洗（content_polish）：口语化/AI 腔清除、图表代码块不被破坏；
 3. 提示词渲染（content_generation_system）：新增变量正确注入，无残留占位符。
 """
+from app.services.ai.prompts._registry import render
 from app.services.content_polish import (
-    find_colloquial_hits, quality_issues, sanitize_ai_content,
+    find_colloquial_hits,
+    quality_issues,
+    sanitize_ai_content,
 )
 from app.services.standards_registry import (
-    find_abolished_codes, get_standards_text, is_known_standard,
+    find_abolished_codes,
+    get_standards_text,
+    is_known_standard,
     match_categories,
 )
-from app.services.ai.prompts._registry import render
 
 
 # ---------------------------------------------------------------------------

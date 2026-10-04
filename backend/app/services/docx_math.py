@@ -170,7 +170,7 @@ _OPS = {
     "in": "∈", "notin": "∉", "subset": "⊂", "supset": "⊃",
     "subseteq": "⊆", "supseteq": "⊇", "cup": "∪", "cap": "∩",
     "emptyset": "∅", "angle": "∠", "perp": "⊥", "parallel": "∥",
-    "prime": "′", "ldots": "…", "cdots": "⋯", "dots": "…", "cdots": "⋯",
+    "prime": "′", "ldots": "…", "cdots": "⋯", "dots": "…",
     "degree": "°", "circ": "°",
 }
 
@@ -437,8 +437,6 @@ class _LatexParser:
 
         # 第二遍：真正附着。重新扫描，遇到 script 标记时合并。
         result: list = []
-        pending_script = None  # (marker, content_node)
-        i = 0
         # 简化实现：先按"标记+内容"成对合并为 attach 节点
         merged: list = []
         j = 0

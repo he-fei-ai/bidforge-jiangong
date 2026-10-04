@@ -1,8 +1,7 @@
 """全局事实路由：resolve_fact 对不存在的 id 返回 404。"""
 import pytest
-from fastapi import HTTPException
-
 from app.routers.global_facts import resolve_fact
+from fastapi import HTTPException
 
 
 async def test_resolve_nonexistent_fact_raises_404(db_conn):

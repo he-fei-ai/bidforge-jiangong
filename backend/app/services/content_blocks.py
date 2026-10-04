@@ -31,14 +31,12 @@ import json
 import logging
 import re
 
-from app.config import settings
 from app.services.ai.heading_templates import HEADING_STYLE_CONFIG
 from app.services.chart_validators import (
     PIL_RENDERABLE_CHART_TYPES,
     detect_mermaid_chart_type,
     infer_chart_type_from_payload,
 )
-from app.services.numbering import ALPHABET
 
 logger = logging.getLogger("content_blocks")
 # 围栏工具沿用原 logger 名，日志来源保持不变（不改变运维检索习惯）
@@ -775,7 +773,6 @@ def _heading_punct(level: int) -> str:
     用于正文子标题编号：L2~L4 用空格、L5~L7 用顿号，与导出行级标题（format_heading）
     严格同口径，杜绝「L5 顿号缺失」「L6/L7 缺顿号或右括号」等格式漂移。
     """
-    from app.services.ai.heading_templates import HEADING_STYLE_CONFIG
     return HEADING_STYLE_CONFIG.get(level, HEADING_STYLE_CONFIG[3]).get("punctuation", " ")
 
 

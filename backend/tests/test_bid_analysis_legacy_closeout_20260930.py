@@ -25,7 +25,6 @@ import inspect
 import sqlite3
 
 import pytest
-
 from app.routers import bid_analysis as ba
 from app.routers import global_facts as gf
 from app.routers import sse_handlers as sh
@@ -323,6 +322,7 @@ class TestInvalidationCascade:
         这个列名，纯文本匹配会把正确的说明当成违规（假失败）。
         """
         import ast
+
         from app import schema_sql
         block = schema_sql.SCHEMA_SQL
         i = block.index("CREATE TABLE IF NOT EXISTS doc_extractions")

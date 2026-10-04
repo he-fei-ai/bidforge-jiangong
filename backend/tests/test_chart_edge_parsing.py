@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 import pytest
 
-
 # ---------- 流程图边解析：中段标签 / 虚线 / 粗线 / 分号 ----------
 
 def _parse(code):
@@ -175,8 +174,8 @@ def test_gantt_alias_validator_and_renderer_agree(payload):
     校验放行而渲染 None 会让坏图以「校验已过」的名义进入正文与导出，
     既不会被删块也不会被修复 —— 这是 `_chart_shape_audit` 判定的真实错配。
     """
-    from app.services.ai import mermaid_renderer as MR
     from app.routers._chart_pipeline import _validate_inline_chart
+    from app.services.ai import mermaid_renderer as MR
 
     code = json.dumps(payload, ensure_ascii=False)
     ok, _fixed = _validate_inline_chart("gantt", code)

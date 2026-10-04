@@ -17,7 +17,9 @@ from datetime import datetime
 
 from app.db import get_conn  # noqa: F401  — 兼容旧调用（历史模块级引用）
 from app.services.content_utils import (
-    text_word_count, word_status_for, DEFAULT_WORD_BUDGET,
+    DEFAULT_WORD_BUDGET,
+    text_word_count,
+    word_status_for,
 )
 
 logger = logging.getLogger("repair_record")

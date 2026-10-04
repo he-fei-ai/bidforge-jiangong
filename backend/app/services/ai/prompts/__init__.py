@@ -11,34 +11,33 @@
 
 from __future__ import annotations
 
+from . import _shared
+from ._cache import (
+    get_prompt,
+    get_prompt_with_validation,
+    reload_prompt_cache,
+)
 from ._registry import (
     _ALL_PROMPTS,
+    PROMPT_VARIABLE_CONTRACTS,
+    PromptContractError,
     _apply_variable_contracts,
     _reg,
     check_prompt_variables,
     clean_prompt_text,
-    extract_variables,
     extract_user_variables,
+    extract_variables,
     get_default_prompt,
-    get_prompt as _registry_get_prompt,
     get_prompt_variables,
     has_residual_placeholders,
     is_prompt_modified,
     list_prompts,
-    PROMPT_VARIABLE_CONTRACTS,
-    PromptContractError,
     render,
     render_prompt,
     reset_prompt,
     update_prompt,
     validate_prompt_variables,
 )
-from ._cache import (
-    get_prompt,
-    get_prompt_with_validation,
-    reload_prompt_cache,
-)
-from . import _shared
 
 _reg("SHARED_FORBIDDEN_WORDS", "共享规则", "标题禁用词列表", _shared.SHARED_FORBIDDEN_WORDS)
 _reg("SHARED_OUTPUT_SPEC", "共享规则", "输出格式规范", _shared.SHARED_OUTPUT_SPEC)

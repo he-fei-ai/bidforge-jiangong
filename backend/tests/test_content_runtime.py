@@ -10,8 +10,8 @@
 正文生成提示词与续写请求链路的既有测试（test_content_*）也应同时暴露。
 """
 from app.services.content_runtime import (
-    build_continuation_messages,
     build_chapter_user_content,
+    build_continuation_messages,
     continue_max_tokens,
     should_continue_round,
 )

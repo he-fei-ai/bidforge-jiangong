@@ -19,15 +19,14 @@ import io
 import uuid
 import zipfile
 
-import pytest
-from fastapi import HTTPException
-from starlette.datastructures import UploadFile
-
 import app.db as _appdb
 import app.routers.global_facts as gf
 import app.routers.upload_outline as uo
 import app.services.file_parser as fp
+import pytest
 from app.db import get_conn, init_db
+from fastapi import HTTPException
+from starlette.datastructures import UploadFile
 
 
 def _upload(name: str, data: bytes) -> UploadFile:
@@ -149,9 +148,8 @@ def test_unique_numbering_ids_are_preserved():
 
 def test_multi_frame_tiff_ocrs_every_frame(monkeypatch):
     pytest.importorskip("PIL")
-    from PIL import Image
-
     import app.services.ocr as ocr_mod
+    from PIL import Image
 
     frames = [Image.new("RGB", (12, 12), c) for c in ("white", "black", "gray")]
     buf = io.BytesIO()
@@ -178,9 +176,8 @@ def test_multi_frame_tiff_ocrs_every_frame(monkeypatch):
 def test_single_page_image_uses_single_call(monkeypatch):
     """单帧图片不得被拆帧逻辑影响（仍只调用一次 OCR）。"""
     pytest.importorskip("PIL")
-    from PIL import Image
-
     import app.services.ocr as ocr_mod
+    from PIL import Image
 
     buf = io.BytesIO()
     Image.new("RGB", (12, 12), "white").save(buf, format="PNG")

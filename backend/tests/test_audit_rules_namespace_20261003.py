@@ -24,8 +24,14 @@ import pathlib
 import re
 
 from app.services.audit_rules import (
-    _PROGRAM_EMITTED_RULE_IDS, RULE_VERSION, CHECK_MODE_AI, CHECK_MODE_PROGRAM,
-    ai_rules, get_rule, program_rules, validate_rule_registry,
+    _PROGRAM_EMITTED_RULE_IDS,
+    CHECK_MODE_AI,
+    CHECK_MODE_PROGRAM,
+    RULE_VERSION,
+    ai_rules,
+    get_rule,
+    program_rules,
+    validate_rule_registry,
 )
 
 _ENGINE_SRC = (
@@ -194,7 +200,7 @@ class TestFamilyPrefixAlias:
 
     def test_alias_targets_must_be_registered(self):
         """别名表每个目标必须真实存在于注册表（防指向幽灵规则）。"""
-        from app.services.audit_rules import RULE_MAP, _RULE_ID_ALIASES
+        from app.services.audit_rules import _RULE_ID_ALIASES, RULE_MAP
 
         for fam, target in _RULE_ID_ALIASES.items():
             assert target in RULE_MAP, f"别名 {fam} 指向未注册规则 {target}"
@@ -204,8 +210,7 @@ class TestFamilyPrefixAlias:
         """autofix 能力归一：CON-SCAN-<n> 解析到 CON-07 后仍无修复能力，
         兑底文案与归一前同为 CON 族 —— 用户可见行为零变化是本轮收口的
         硬性前提，若未来给 CON-07 登记真实能力，本例会定向失败提醒同步。"""
-        from app.services.review_autofix import capability_of
-        from app.services.review_autofix import FIX_MODE_MANUAL
+        from app.services.review_autofix import FIX_MODE_MANUAL, capability_of
 
         cap = capability_of("CON-SCAN-1")
         assert cap.mode == FIX_MODE_MANUAL, cap
@@ -214,10 +219,10 @@ class TestFamilyPrefixAlias:
     def test_emitted_family_strings_have_alias_or_registration(self):
         """静态锁：生成侧（routers/compliance.py）新造的非 XXX-NN 族串
         必须同步登记别名，否则「规则说明」反查再次落空（本缺陷复发预防爆）。"""
-        import re
         import pathlib
+        import re
 
-        from app.services.audit_rules import RULE_MAP, _RULE_ID_ALIASES
+        from app.services.audit_rules import _RULE_ID_ALIASES, RULE_MAP
 
         src = (pathlib.Path(__file__).resolve().parents[1] / "app" /
                "routers" / "compliance.py").read_text(encoding="utf-8")

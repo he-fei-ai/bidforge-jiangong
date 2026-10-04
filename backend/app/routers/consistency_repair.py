@@ -19,12 +19,13 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.db import get_db
 from app.routers.review import reset_review_on_content_change  # ✅ G9：修复改写正文→退回待审核
-from app.services import consistency_scanner as scanner
 from app.services import conflict_arbiter as arbiter
-from app.services import repair_agent
-from app.services import repair_record
+from app.services import consistency_scanner as scanner
+from app.services import repair_agent, repair_record
 from app.services.content_utils import (
-    DEFAULT_WORD_BUDGET, text_word_count, word_status_for,
+    DEFAULT_WORD_BUDGET,
+    text_word_count,
+    word_status_for,
 )
 
 logger = logging.getLogger("consistency_repair")

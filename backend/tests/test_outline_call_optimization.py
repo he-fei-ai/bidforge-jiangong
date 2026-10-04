@@ -21,9 +21,8 @@ import inspect
 import json
 
 import pytest
-
-from app.routers import sse_handlers as sh
 from app.config import Settings
+from app.routers import sse_handlers as sh
 
 
 async def _push_stats():

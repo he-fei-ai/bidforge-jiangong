@@ -26,14 +26,27 @@ import {
 import DocumentParseList, { type DocumentParseItem } from "./DocumentParseList";
 import ParseResultCategoryPanel, { type ParsePanelSharedState } from "./ParseResultCategoryPanel";
 import { computeDocStats, type WorkflowTabKey } from "../utils/workflowDerived";
-import { UPLOAD_FILE_ACCEPT } from "../utils/uploadAccept";
+import {
+  MAX_UPLOAD_BYTES,
+  UPLOAD_FILE_ACCEPT,
+  partitionUploadFiles,
+} from "../utils/uploadAccept";
 import type { BaGroup, BaStoredItem } from "../utils/bidAnalysis";
 
 const { Text } = Typography;
 
+function formatMb(bytes: number): number {
+  return Math.round(bytes / (1024 * 1024));
+}
+
 export type UploadParseTabProps = {
   docs: DocumentParseItem[];
   categoryOptions: string[];
+  /**
+   * 单文件大小上限（字节），由宿主页面从后端 /system/upload-limits 取得后下发。
+   * 不传时用内置兜底默认（30MB）；组件不自取网络配置，保持受控可测。
+   */
+  maxUploadBytes?: number;
   /** 目录/正文等生成任务进行中（用于禁用上传与解析入口） */
   generating: boolean;
   uploadingFacts: boolean;
@@ -92,6 +105,7 @@ export type UploadParseTabProps = {
 export default function UploadParseTab({
   docs,
   categoryOptions,
+  maxUploadBytes,
   generating,
   uploadingFacts,
   uploadedFiles,
@@ -119,7 +133,7 @@ export default function UploadParseTab({
   sharedState,
   parseRunning,
 }: UploadParseTabProps) {
-  const { modal } = App.useApp();
+  const { modal, message } = App.useApp();
   // 「下一步」按钮文案动态生成：解析项数取后端 /items 的分组定义（旧实现硬编码
   // 「18 项」，后端增减项后文案失真）；定义未加载时不报数，只说「全表」。
   const baNextLabel = (() => {
@@ -145,6 +159,12 @@ export default function UploadParseTab({
         : "解析全部待解析";
   const busy =
     generating || uploadingFacts || parsingDocs || !!parsingDocId;
+  // 实际生效上限：非法（非正数）下发值回落兜底默认，避免误关闭守卫。
+  const effectiveMaxBytes =
+    typeof maxUploadBytes === "number" && maxUploadBytes > 0
+      ? maxUploadBytes
+      : MAX_UPLOAD_BYTES;
+  const maxMb = formatMb(effectiveMaxBytes);
 
   return (
     <div className="scroll-area" style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
@@ -159,7 +179,25 @@ export default function UploadParseTab({
             beforeUpload={(file, fileList) => {
               if (fileList[0] === file) {
                 const files = fileList.map((f) => (f as any).originFileObj || f) as File[];
-                setTimeout(() => onUploadFiles(files), 0);
+                // ✅ 硬校验：accept 只过滤文件选择框，拖拽可绕过，故这里再按
+                //    扩展名白名单 + 后端下发的大小上限剔除非法文件；合法文件照常
+                //    上传，避免「整批被后端拒绝」或「白等大文件上传」。
+                const { accepted, rejected } = partitionUploadFiles(files, effectiveMaxBytes);
+                const typeRejected = rejected.filter((r) => r.reason === "type");
+                const sizeRejected = rejected.filter((r) => r.reason === "size");
+                if (typeRejected.length > 0) {
+                  message.error(
+                    `不支持的文件类型，已忽略：${typeRejected.map((r) => r.file.name).join("、")}`
+                  );
+                }
+                if (sizeRejected.length > 0) {
+                  message.error(
+                    `单个文件不能超过 ${maxMb}MB，已忽略：${sizeRejected.map((r) => r.file.name).join("、")}`
+                  );
+                }
+                if (accepted.length > 0) {
+                  setTimeout(() => onUploadFiles(accepted), 0);
+                }
               }
               return false;
             }}
@@ -174,7 +212,7 @@ export default function UploadParseTab({
             </Button>
           </Upload>
           <Text type="secondary" style={{ fontSize: 12, flex: 1, minWidth: 240 }}>
-            支持 Word / PDF / Markdown / 文本 / Excel / 图片（扫描件走 OCR）。
+            支持 Word / PDF / Markdown / 文本 / Excel / 图片（扫描件走 OCR），单个文件不超过 {maxMb}MB。
             上传保存后在本页下方列表中<b>逐个或批量解析</b>为纯文本。
           </Text>
         </div>

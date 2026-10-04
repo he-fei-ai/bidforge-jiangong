@@ -23,7 +23,6 @@ import json
 import logging
 import re
 import shutil
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,7 +31,8 @@ from typing import Any
 from app.services.doc_pipeline import doc_storage as store
 from app.services.doc_pipeline.doc_chunker import chunk_document, chunk_row_of
 from app.services.doc_pipeline.md_structured import (
-    parse_markdown_structured, wrap_parsed_markdown,
+    parse_markdown_structured,
+    wrap_parsed_markdown,
 )
 
 logger = logging.getLogger("doc_pipeline")
@@ -219,14 +219,28 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
         old_rows = {r["chunk_id"]: (r["hash"], r["created_at"] or "")
                     for r in await cur.fetchall()}
     old_hashes = {cid: h for cid, (h, _t) in old_rows.items()}
-    new_ids = {c["chunk_id"] for c in chunks}
     changed = [c for c in chunks
                if old_hashes.get(c["chunk_id"]) != c["hash"]]
     # 删除已不存在的块（文件变更后旧块自然失配）
-    await db.execute(
+    # ✅ P1（R13 写路径漏改 · 2026-10-05）：本函数的读路径（上方 SELECT）已在
+    #    R39 补过判空，但**写路径**两处至今裸取返回值。此处置于「全删全插」的
+    #    DELETE 上：返回 None 时旧块一行没删，而 chunk_id 是「doc_id + 块位置」
+    #    确定性生成（doc_id 固定 → 同位置必同 id），随后的 INSERT 直接撞主键，
+    #    抛 IntegrityError → 被 _ingest_parsed_doc 的 `except Exception: return {}`
+    #    整段吞掉：doc_chunks 整批丢失、响应里 layers 字段消失、日志只有「解析成功」。
+    #    处置：跳过本次重建并告警 —— 保留陈旧旧块（仍可被下游读到）比
+    #    「旧块残留 + 新块主键冲突」更安全，且与读路径「按无历史块降级」不同，
+    #    这里降级方向必须是**不写**（写了才会冲突）。
+    del_cur = await db.execute(
         "DELETE FROM doc_chunks WHERE doc_id=?", (doc_id,))
+    chunks_rebuilt = True
+    if del_cur is None:
+        chunks_rebuilt = False
+        logger.warning(
+            "分块全量重建的 DELETE 未生效（db.execute 返回 None，R13），"
+            "跳过本次分块写入以避免主键冲突：%s", doc_id)
     created = _now()
-    if chunks:
+    if chunks and chunks_rebuilt:
         await db.executemany(
             "INSERT INTO doc_chunks (chunk_id, doc_id, chunk_type, title, level,"
             " page_num, text, source_ref, parent_chunk_id, prev_chunk_id,"
@@ -285,7 +299,14 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
     #    当 meta 丢失/写入失败（_safe_io 降级返回 None）时，会把上传阶段已
     #    落在 project_documents 的 MD5/SHA256 清空，时效性判定（file_changed /
     #    增量跳过）从此永久失真且无法自愈。现改为「新值非空才覆盖」。
-    await db.execute(
+    # ✅ P1（R13 写路径漏改 · 2026-10-05）：本 UPDATE 是「解析代次 / 时效列 /
+    #    completeness_json」的唯一回写点，返回 None 时静默丢失（无异常无日志），
+    #    表现为「重解析后 parse_version 不递增、页面数与完整性快照停在旧值」。
+    #    ⚠️ 不得照搬 freshness 的「跳过 commit」（doc_pipeline.py:322）：上方的
+    #    分块 DELETE/INSERT 还在本事务里排队，跳过 commit 会把已成功的分块
+    #    写入一并悬空，交给下一个请求的 commit 去提交（幽灵事务）。故此处
+    #    告警后**照常 commit**，只让元数据这一笔降级。
+    meta_cur = await db.execute(
         "UPDATE project_documents SET parse_status='success',"
         " parse_duration_ms=?,"
         " parse_version=COALESCE(NULLIF(?, ''), parse_version),"
@@ -299,6 +320,10 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
          meta.get("file_hash_md5", ""), meta.get("file_hash_sha256", ""),
          structured["page_count"], f"{parse_engine}+{PARSER_VERSION}",
          _jdump(_completeness_snapshot(structured, chunks, None)), doc_id))
+    if meta_cur is None:
+        logger.warning(
+            "回写 project_documents 解析元数据未生效（db.execute 返回 None，R13），"
+            "分块与解析层照常提交：%s", doc_id)
     await db.commit()
     return {
         "parse_version": parse_version,
@@ -308,6 +333,9 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
         "image_count": structured["image_count"],
         "formula_count": structured.get("formula_count", 0),
         "page_count": structured["page_count"],
+        # ✅ R13 写路径降级标记（加法式，2026-10-05）：True = 本次分块重建或
+        #    元数据回写至少有一笔未生效，供调用方与护栏区分「真写成功」。
+        "db_write_degraded": (del_cur is None) or (meta_cur is None),
     }
 
 

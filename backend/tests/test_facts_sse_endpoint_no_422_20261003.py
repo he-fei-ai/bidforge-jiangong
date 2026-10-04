@@ -17,10 +17,9 @@
 """
 import uuid
 
+import app.db as _appdb
 import httpx
 import pytest
-
-import app.db as _appdb
 from app.db import close_db, get_conn, init_db
 from app.main import app
 

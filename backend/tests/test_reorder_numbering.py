@@ -8,11 +8,10 @@ import asyncio
 import json
 import uuid
 
-import pytest
-
 import app.db as _appdb
-from app.db import init_db, get_conn, close_db
-from app.routers.sections import reorder_sections, renumber_sections_after_reorder
+import pytest
+from app.db import close_db, get_conn, init_db
+from app.routers.sections import renumber_sections_after_reorder, reorder_sections
 
 
 @pytest.fixture

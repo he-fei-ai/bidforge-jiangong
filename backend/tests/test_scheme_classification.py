@@ -3,7 +3,6 @@
 覆盖：方案名称解析、危大/超规模阈值判定、九大章节字段映射、完整性校验。
 """
 import pytest
-
 from app.services.scheme_classification import (
     HAZARD_CATEGORIES,
     NINE_CHAPTERS,
@@ -289,6 +288,7 @@ def test_build_chapter_extraction_text():
 
 async def test_build_category_reference_outline():
     import json as _json
+
     from app.services.outline_reference import build_category_reference_outline
 
     outline = [{"title": "1 工程概况", "children": [{"title": "1.1 开挖深度"}]}]

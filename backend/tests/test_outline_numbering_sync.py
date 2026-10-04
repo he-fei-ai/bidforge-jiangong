@@ -14,12 +14,10 @@
 import json
 
 import pytest
-
 from app.models import SectionCreate, SectionUpdate
-from app.routers.sections import (
-    create_section, update_section, delete_section, _save_outline_to_db)
-from app.routers import upload_outline as _uo
 from app.routers import outline_library as _ol
+from app.routers import upload_outline as _uo
+from app.routers.sections import _save_outline_to_db, create_section, delete_section, update_section
 
 
 # ============================================================

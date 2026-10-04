@@ -20,9 +20,7 @@
    （正文出现成段复述）。新实现精确求最长重叠（先接缝对齐，再兜底全尾搜索）。
 """
 import pytest
-
 from app.routers.sse_handlers import _dedup_continuation, _safe_tail
-
 
 # ---------------------------------------------------------------- _safe_tail
 

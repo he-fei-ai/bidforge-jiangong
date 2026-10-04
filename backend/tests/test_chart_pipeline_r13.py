@@ -38,8 +38,9 @@ class _FakeCursor:
 
 @pytest.mark.asyncio
 async def test_load_scheme_type_counts_survives_none_execute(monkeypatch):
-    from app.routers import _chart_pipeline
     from unittest.mock import AsyncMock
+
+    from app.routers import _chart_pipeline
 
     db = _BrokenExecuteDB()
     # 覆盖：函数体第一次 execute 返回 None

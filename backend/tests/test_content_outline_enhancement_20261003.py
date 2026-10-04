@@ -22,7 +22,6 @@ import io
 from pathlib import Path
 
 import pytest
-
 from app.services import content_checkpoint as cc
 from app.services import content_fuzzy as cf
 from app.services import outline_checkpoint as ocp

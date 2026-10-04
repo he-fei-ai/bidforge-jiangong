@@ -12,19 +12,25 @@ from app.db import get_db
 from app.models import SectionCreate, SectionUpdate
 from app.routers.review import reset_review_on_content_change  # ✅ G9：正文变更→退回待审核
 from app.services.ai.json_response import (
-    OUTLINE_REPAIR_KEY, collect_json_response,
-    renumber_outline, strip_outline_numbering,
+    OUTLINE_REPAIR_KEY,
+    collect_json_response,
+    renumber_outline,
+    strip_outline_numbering,
+)
+from app.services.ai.prompts._registry import render
+from app.services.ai.provider_factory import chat_with_fallback
+from app.services.numbering import (
+    list_numbering_versions as _list_numbering_versions,  # ✅ 编号版本管理
 )
 from app.services.numbering import (
     normalize_section_content_subheadings,  # ✅ 正文子标题编号落库前规范化（唯一实现）
     renumber_section_outline_ids,  # ✅ 编号统一：DB 重排唯一实现
-    validate_scheme_numbering_consistency,  # ✅ 编号统一：显式跨校验器
     repair_scheme_numbering_consistency,  # ✅ 编号统一：显式跨校验器（修复漂移）
-    list_numbering_versions as _list_numbering_versions,  # ✅ 编号版本管理
+    validate_scheme_numbering_consistency,  # ✅ 编号统一：显式跨校验器
+)
+from app.services.numbering import (
     rollback_numbering_version as _rollback_numbering_version,  # ✅ 编号版本管理
 )
-from app.services.ai.provider_factory import chat_with_fallback
-from app.services.ai.prompts._registry import render
 from app.services.outline_utils import MAX_OUTLINE_DEPTH, normalize_outline
 
 # ✅ 2026-09-30 深度上限文案单一来源：create_section 与 update_section（移动路径）
@@ -32,18 +38,22 @@ from app.services.outline_utils import MAX_OUTLINE_DEPTH, normalize_outline
 _DEPTH_EXCEEDED_MSG = (
     f"目录最多支持 {MAX_OUTLINE_DEPTH} 级，请在上一级章节内编写正文小节"
 )
+from app.routers._chart_pipeline import register_inline_charts  # ✅ B31：手动保存同步图表登记
 from app.services.content_polish import quality_issues
 from app.services.content_shrink import (
-    shrink_content_rounds, SHRINK_MAX_ROUNDS,
+    SHRINK_MAX_ROUNDS,
     SHRINK_SETTLE_RATIO,  # noqa: F401  — 兼容再导出（单测断言路由与服务同源）
+    shrink_content_rounds,
 )
 from app.services.content_utils import (
-    word_status_for, text_word_count, WORD_OVER_RATIO,
+    WORD_OVER_RATIO,
     auto_fix_unclosed_fences,
+    text_word_count,
+    word_status_for,
 )
-from app.routers._chart_pipeline import register_inline_charts  # ✅ B31：手动保存同步图表登记
 from app.services.standards_registry import (
-    STANDARD_DB_CHECKED_AT, STANDARD_DB_VERSION,
+    STANDARD_DB_CHECKED_AT,
+    STANDARD_DB_VERSION,
 )
 
 logger = logging.getLogger("sections")
@@ -342,6 +352,7 @@ async def section_generation_report(scheme_id: str, section_id: str, db=Depends(
                 若无历史记录则返回空结构 {passed: true, error_count: 0, ...}
     """
     import json as _json
+
     from app.services.content_standard import _empty_report
 
     cur = await db.execute(
@@ -385,6 +396,7 @@ async def scheme_report_summary(scheme_id: str, db=Depends(get_db)):
     """
     import json as _json
     from collections import Counter
+
     from app.services.content_standard import _empty_report
 
     cur = await db.execute(
@@ -477,7 +489,16 @@ async def create_section(scheme_id: str, data: SectionCreate, db=Depends(get_db)
     #    运行中新增章节，会在 AI 确认闸门落库时被整表重建覆盖，且新章参与
     #    renumber 会与生成中的编号重排竞态。补齐守卫（只拦 running/paused）。
     if outline_generation_in_progress(scheme_id):
+        logger.warning("create_section 409 冲突：scheme_id=%s 目录正在生成中", scheme_id)
         raise HTTPException(409, "本方案目录正在后台生成中，请等待生成完成（或先停止任务）后再新增章节")
+    # ✅ P0 修复（2026-10-04 · 跨类型守卫缺口）：正文生成在跑时禁止结构性修改
+    #    sections 表——正文 _persist_section 走 UPDATE，若目标章节已被本端点插入
+    #    / 删除 / 重排并导致 sort_order / parent_id 与生成中的内存快照不同，
+    #    会出现章节错乱、图表登记错位。与 update_section(content) / save-outline /
+    #    reset-content 同一口径，只拦 running/paused。
+    if content_generation_in_progress(scheme_id):
+        logger.warning("create_section 409 冲突：scheme_id=%s 正文正在生成中", scheme_id)
+        raise HTTPException(409, "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再新增章节")
     cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
     row = await cur.fetchone()
     if not row:
@@ -550,6 +571,7 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
     #    已有 outline_generation_in_progress 守卫，唯独此路径漏接 —— 现补齐，
     #    口径与 content_generation_in_progress 一致（只拦 running/paused）。
     if outline_generation_in_progress(scheme_id):
+        logger.warning("update_section 409 冲突：scheme_id=%s 目录正在生成中", scheme_id)
         raise HTTPException(409, "本方案目录正在后台生成中，请等待生成完成（或先停止任务）后再编辑章节")
     # ✅ 修复：校验章节归属该方案（防止跨方案篡改）
     cur = await db.execute("SELECT id FROM sections WHERE id=? AND scheme_id=?", (section_id, scheme_id))
@@ -626,6 +648,7 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
         # ✅ G12-4：状态感知守卫（只拦 running/paused）—— 见
         # content_generation_in_progress 的说明，终态残留条目不再永久阻塞保存
         if content_generation_in_progress(scheme_id):
+            logger.warning("update_section(content) 409 冲突：scheme_id=%s 正文正在生成中", scheme_id)
             raise HTTPException(409, "本方案正文正在后台生成中，手动保存会与生成结果互相覆盖，请等待生成完成后再编辑")
         # ✅ 遗留收口（2026-10-03 · R38）：手动保存路径接入未闭合围栏补齐 ——
         #    与生成链路 _persist_section（sse_handlers）用**同一函数**同口径。
@@ -714,7 +737,12 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
         fields["updated_at"] = datetime.now().isoformat()
         sets = ", ".join(f"{k}=?" for k in fields)
         await db.execute(f"UPDATE sections SET {sets} WHERE id=?", (*fields.values(), section_id))
-        await db.commit()
+    # ✅ BUG 修复（2026-10-04 · 原子性窗口）：旧实现在此处立即 commit，而编号重算 /
+    #    正文重规范化 / 缓存失效在其后才执行、由函数末尾第二次 commit 提交。
+    #    崩溃或异常会留下「结构已移动、outline_json.id 仍旧号」的撕裂态（编号漂移、
+    #    正文引用错章），两次提交之间的并发读取也会观察到半成品。现移除提前提交，
+    #    UPDATE / renumber / 重规范化 / 缓存失效在末尾同一事务原子提交；同连接事务内
+    #    后续 _build_tree 等读取同样能看到未提交的改写，语义不变。
     # ✅ BUG 修复（2026-09-22 · 层级迁移编号不同步）：结构字段（parent_id / level /
     #    sort_order）变更后必须整树重算编号。旧实现只挪了父指针、不刷新
     #    outline_json.id —— 移动章节后其自身与全部子孙的编号与实际位置漂移，
@@ -763,6 +791,15 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
     if _struct_changed or "title" in fields:
         await invalidate_consistency_scan_cache(db, scheme_id)
     await db.commit()
+    # ✅ BUG 修复（2026-10-04 · 缓存漏失效）：结构移动 / 改名改变章节树与编号，
+    #    旧 export_cache 行与磁盘产物成为孤儿，口径与 save-outline / reorder / delete 一致。
+    #    仅改正文（含子标题规范化）不改章节树，content_fingerprint 已自然变化，无需失效。
+    if _struct_changed or "title" in fields:
+        try:
+            from app.services.facts_extractor import invalidate_export_cache
+            await invalidate_export_cache(db, scheme_id)
+        except Exception as _e:  # noqa: BLE001
+            logger.warning("章节更新：导出缓存失效失败（不影响更新结果）: %s", _e)
     # ✅ G9/G10：前端据此提示「审核结论已失效」并刷新审核工作台
     # （此前 update 只回 {"ok": true}，连 word_count 都不带，
     #  前端 `data.word_count` 恒为 undefined → 成功提示里显示「已保存，当前 0 字」）
@@ -776,7 +813,15 @@ async def delete_section(scheme_id: str, section_id: str, db=Depends(get_db)):
     #    的整表重建直接写写竞态（删了又被重建回来，或闸门落库时章节已消失）。
     #    补齐守卫，与 save-outline 同口径。
     if outline_generation_in_progress(scheme_id):
+        logger.warning("delete_section 409 冲突：scheme_id=%s 目录正在生成中", scheme_id)
         raise HTTPException(409, "本方案目录正在后台生成中，请等待生成完成（或先停止任务）后再删除章节")
+    # ✅ P0 修复（2026-10-04 · 跨类型守卫缺口）：正文生成在跑时禁止删章——
+    #    _persist_section 用 UPDATE 写该章节正文，若此处级联 DELETE 已把它删掉，
+    #    UPDATE 命中 0 行、静默丢失整章正文；反向亦然。与 update_section(content)
+    #    / save-outline / reset-content 同口径，只拦 running/paused。
+    if content_generation_in_progress(scheme_id):
+        logger.warning("delete_section 409 冲突：scheme_id=%s 正文正在生成中", scheme_id)
+        raise HTTPException(409, "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再删除章节")
     # ✅ 修复：校验章节归属该方案（防止跨方案删除）
     cur = await db.execute(
         "SELECT id FROM sections WHERE id=? AND scheme_id=?", (section_id, scheme_id))
@@ -829,6 +874,13 @@ async def delete_section(scheme_id: str, section_id: str, db=Depends(get_db)):
     # ✅ 删章后作废扫描缓存：剩余章节编号顺移 + 被删章节的孤儿缓存行一并清理
     await invalidate_consistency_scan_cache(db, scheme_id)
     await db.commit()
+    # ✅ BUG 修复（2026-10-04 · 缓存漏失效）：删除使章节树收缩、剩余编号顺移，
+    #    旧 export_cache 行与磁盘产物成为孤儿，口径与 reorder / save-outline 一致。
+    try:
+        from app.services.facts_extractor import invalidate_export_cache
+        await invalidate_export_cache(db, scheme_id)
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("删除章节：导出缓存失效失败（不影响删除结果）: %s", _e)
     return {"ok": True}
 
 
@@ -852,6 +904,7 @@ async def reset_content(scheme_id: str, db=Depends(get_db)):
     #    用户看到"重置了但又有正文出现"的诡异现象）
     # ✅ G12-4：状态感知守卫（只拦 running/paused），与 update_section 同一入口
     if content_generation_in_progress(scheme_id):
+        logger.warning("reset_content 409 冲突：scheme_id=%s 正文正在生成中", scheme_id)
         raise HTTPException(409, "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再重置")
     # 先统计本次将清除正文的章节数（UPDATE rowcount 统计的是命中行，
     # 重复重置时也会等于全量章节数，无法表达"清了几章"）
@@ -1399,8 +1452,7 @@ async def _renormalize_all_section_contents(db, scheme_id: str) -> None:
     except Exception:
         pass
     try:
-        from app.services.numbering import (
-            load_scheme_section_index, normalize_section_content_subheadings)
+        from app.services.numbering import load_scheme_section_index, normalize_section_content_subheadings
         cur = await db.execute(
             "SELECT id, content FROM sections "
             "WHERE scheme_id=? AND COALESCE(content,'')!=''",
@@ -1496,7 +1548,16 @@ async def reorder_sections(scheme_id: str, body: dict, db=Depends(get_db)):
     #    与 AI 确认闸门的整表重建 + 编号重排交叉执行会互相覆盖（编号双轨漂移）。
     #    补齐守卫，与 create/delete/update/save-outline 四处收口一致。
     if outline_generation_in_progress(scheme_id):
+        logger.warning("reorder_sections 409 冲突：scheme_id=%s 目录正在生成中", scheme_id)
         raise HTTPException(409, "本方案目录正在后台生成中，请等待生成完成（或先停止任务）后再调整顺序")
+    # ✅ P0 修复（2026-10-04 · 跨类型守卫缺口）：正文生成在跑时禁止重排——
+    #    正文 _persist_section 的编号/顺序口径来自生成开始时的内存快照，此处改
+    #    sort_order 后 _renumber 会重排，正文写入按 section_id 精确匹配虽不丢
+    #    正文，但展示顺序与生成中"章节序号"错位（前端看到"第二章写的是第四章
+    #    的正文"）。与 create/delete/update_section(content)/save-outline 同口径。
+    if content_generation_in_progress(scheme_id):
+        logger.warning("reorder_sections 409 冲突：scheme_id=%s 正文正在生成中", scheme_id)
+        raise HTTPException(409, "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再调整顺序")
     order = body.get("order", [])
     # ✅ 防御（2026-09-20）：旧实现对 body 类型零校验 —— order 传字符串/字典时
     #    enumerate 会逐字符/逐键值写入 sort_order（脏数据），非字符串元素则直接
@@ -1504,10 +1565,26 @@ async def reorder_sections(scheme_id: str, body: dict, db=Depends(get_db)):
     if not isinstance(order, list):
         raise HTTPException(400, "order 必须是章节 id 数组")
     order = [sid for sid in order if isinstance(sid, str) and sid]
-    # ✅ 性能优化：executemany 批量更新，替代逐条 await
+    # ✅ BUG 修复（2026-10-04 · sort_order 语义分叉）：旧实现直接把全量 DFS 扁平顺序
+    #    的全局下标写进 sort_order（根 0、子 1、孙 2……），而 _save_outline_to_db /
+    #    _process_nodes 的事实口径是「每个父级下从 0 开始的局部序号」。
+    #    兄弟排序虽不依赖具体数值只比较相对大小（_build_tree 的 (sort_order,id)），
+    #    但两种口径混存会让后续按 sort_order 数值做判断的消费方（统计、外部脚本、
+    #    部分顺序更新）读到错误含义。现按当前 parent_id 关系把扁平顺序折算为
+    #    「同父局部序号」后再写；未列入 order 的章节保留原值（前端恒发全量）。
+    cur = await db.execute(
+        "SELECT id, parent_id FROM sections WHERE scheme_id=?", (scheme_id,))
+    parent_of = {r["id"]: (r["parent_id"] or "") for r in await cur.fetchall()}
+    local_counters: dict[str, int] = {}
+    order_rows: list[tuple] = []
+    for sid in order:
+        pid = parent_of.get(sid, "")
+        local_i = local_counters.get(pid, 0)
+        local_counters[pid] = local_i + 1
+        order_rows.append((local_i, sid, scheme_id))
     await db.executemany(
         "UPDATE sections SET sort_order=? WHERE id=? AND scheme_id=?",
-        [(i, sid, scheme_id) for i, sid in enumerate(order)])
+        order_rows)
 
     # ✅ BUG 修复：旧实现只更新 sort_order，未重算 outline_json.id（章节编号）。
     #    前端树按 sort_order 重新计算编号展示，但后端 sections.outline_json.id
@@ -1521,6 +1598,16 @@ async def reorder_sections(scheme_id: str, body: dict, db=Depends(get_db)):
     # ✅ 拖拽后作废扫描缓存（缓存键不含结构指纹，旧扫描行仍会命中）
     await invalidate_consistency_scan_cache(db, scheme_id)
     await db.commit()
+    # ✅ BUG 修复（2026-10-04 · 缓存漏失效）：拖拽重排改变章节树与编号，
+    #    旧 export_cache 行及磁盘 .docx 成为孤儿（只能等 _prune_export_cache
+    #    按 5 份/方案慢慢挤出），缓存状态 UI 也仍显示可复用的旧产物。
+    #    _save_outline_to_db 已有同口径失效，reorder 此前只清了一致性缓存。
+    #    该函数幂等且内部自 commit，失败仅告警不阻断结果。
+    try:
+        from app.services.facts_extractor import invalidate_export_cache
+        await invalidate_export_cache(db, scheme_id)
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("拖拽重排：导出缓存失效失败（不影响重排结果）: %s", _e)
     tree = await _build_tree(db, scheme_id)
     return {"ok": True, "tree": tree}
 
@@ -1529,13 +1616,16 @@ async def reorder_sections(scheme_id: str, body: dict, db=Depends(get_db)):
 async def export_tree(scheme_id: str, db=Depends(get_db)):
     """导出目录树 JSON（程序重排编号）"""
     tree = await _build_tree(db, scheme_id)
+    # ✅ 性能修复（2026-10-04）：旧实现在每层递归出口都调用 renumber_outline，
+    #    总计 O(n·depth) 次重排（深度 3 时每个三级节点被重复处理 3 次）。
+    #    编号只依赖树中位置，先递归建好结构、整树重排一次即可，结果幂等等价。
     def to_outline(nodes):
         out = []
         for n in nodes:
             out.append({"id": n["id"], "title": n["title"], "description": n["description"],
                         "level": n["level"], "children": to_outline(n["children"])})
-        return renumber_outline(out)
-    return {"outline": to_outline(tree)}
+        return out
+    return {"outline": renumber_outline(to_outline(tree))}
 
 
 # ---------- 字数压缩（对齐 OpenBidKit buildWordAdjustmentMessages） ----------

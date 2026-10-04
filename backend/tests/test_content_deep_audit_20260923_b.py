@@ -469,7 +469,8 @@ class TestCacheMissingVariablesNoFalsePositive:
         """传全变量时不得误报；且 JSON 示例 {"max": ...} 不计入 missing。"""
         import app.services.ai.prompts._cache as c
         from app.services.ai.prompts._registry import (
-            PROMPT_VARIABLE_CONTRACTS, extract_user_variables,
+            PROMPT_VARIABLE_CONTRACTS,
+            extract_user_variables,
         )
         cap = _WarnCapture()
         c.logger.addHandler(cap)

@@ -19,7 +19,6 @@ import json
 import time
 
 import pytest
-
 from app.routers import sse_handlers as sh
 
 

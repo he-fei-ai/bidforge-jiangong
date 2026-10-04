@@ -14,12 +14,11 @@
 """
 import uuid
 
-import pytest
-
 import app.db as _appdb
 import app.routers.global_facts as gf
-from app.db import get_conn, init_db
 import app.services.facts_extractor as fe
+import pytest
+from app.db import get_conn, init_db
 
 
 @pytest.fixture

@@ -688,8 +688,8 @@ def _parse_docx(content: bytes) -> str:
     - 解析失败自动回退 docx2python
     """
     import io as _io
-    import zipfile
     import xml.etree.ElementTree as ET
+    import zipfile
 
     try:
         with zipfile.ZipFile(_io.BytesIO(content)) as z:
@@ -1242,7 +1242,7 @@ def _pdf_ocr_fallback(content: bytes, max_pages: int | None = None,
     「页数 > 50」）。现按模块既有的「截断必须留痕」契约记录告警。
     """
     from app.config import settings
-    from app.services.ocr import ocr_bytes_sync, OcrUnavailableError
+    from app.services.ocr import OcrUnavailableError, ocr_bytes_sync
 
     max_pages = max_pages or getattr(settings, "ocr_pdf_max_pages", 20)
     dpi = getattr(settings, "ocr_pdf_dpi", 200)
@@ -1543,7 +1543,7 @@ def _parse_image_ocr(content: bytes, ftype: str,
     ✅ 增强（2026-09-22）：本地 OCR 不可用 / 无有效结果时，配置了
     MINERU_PROVIDER 则走 MinerU 云端兜底（与 PDF 口径一致）。
     """
-    from app.services.ocr import ocr_bytes_sync, OcrUnavailableError
+    from app.services.ocr import OcrUnavailableError, ocr_bytes_sync
 
     if ftype == "tiff":
         frames = _split_tiff_frames(content)

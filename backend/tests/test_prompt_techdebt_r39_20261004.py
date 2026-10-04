@@ -77,8 +77,7 @@ def _ensure_registered():
 # =====================================================================
 class TestGlobalCoverage:
     def test_every_registered_prompt_has_contract(self):
-        from app.services.ai.prompts._registry import (
-            _ALL_PROMPTS, PROMPT_VARIABLE_CONTRACTS)
+        from app.services.ai.prompts._registry import _ALL_PROMPTS, PROMPT_VARIABLE_CONTRACTS
         missing = sorted(set(_ALL_PROMPTS) - set(PROMPT_VARIABLE_CONTRACTS))
         assert not missing, "已注册但无契约的模板：%s" % missing
 
@@ -90,8 +89,7 @@ class TestGlobalCoverage:
         assert not undeclared, "requires 未声明（跳过契约校验）的模板：%s" % undeclared
 
     def test_contract_has_no_orphan_keys(self):
-        from app.services.ai.prompts._registry import (
-            _ALL_PROMPTS, PROMPT_VARIABLE_CONTRACTS)
+        from app.services.ai.prompts._registry import _ALL_PROMPTS, PROMPT_VARIABLE_CONTRACTS
         orphan = sorted(set(PROMPT_VARIABLE_CONTRACTS) - set(_ALL_PROMPTS))
         assert not orphan, "契约里有、注册表里没有的键：%s" % orphan
 
@@ -107,8 +105,7 @@ class TestGlobalCoverage:
         ``__CONTEXT__`` 是**真实占位符**（由 ``build_item`` 用 ``.replace``
         注入、不经 render），如实登记才能让启动期漂移校验归零。
         """
-        from app.services.ai.prompts._registry import (
-            _ALL_PROMPTS, extract_user_variables)
+        from app.services.ai.prompts._registry import _ALL_PROMPTS, extract_user_variables
         zero = [k for k, v in _ALL_PROMPTS.items() if v.get("requires") == []]
         assert SYSTEM_KEY in zero, "通用 system 提示词未显式声明零变量"
         assert len(zero) >= 10, "显式零声明的模板数异常偏少：%d" % len(zero)

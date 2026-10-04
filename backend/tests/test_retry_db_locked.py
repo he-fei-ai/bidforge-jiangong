@@ -1,8 +1,8 @@
 """测试 _retry_db_locked 重试辅助函数（2026-09-23 目录生成模块修复）"""
 import asyncio
 import sqlite3
-import pytest
 
+import pytest
 from app.routers.sse_handlers import _retry_db_locked
 
 

@@ -4,7 +4,6 @@ import time
 from collections import deque
 from contextvars import ContextVar
 
-
 #: 当前 AI 调用所属的后台任务。ContextVar 会随 asyncio Task 上下文自动复制，
 #: 避免用全局变量把并发方案的 task_id 串台。默认空串保持旧调用行为。
 current_ai_task_id: ContextVar[str] = ContextVar(

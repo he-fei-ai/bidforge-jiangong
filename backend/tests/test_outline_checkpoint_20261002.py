@@ -37,7 +37,6 @@ import re
 from pathlib import Path
 
 import pytest
-
 from app.config import settings
 from app.services import outline_checkpoint as ocp
 from app.services.audit_rules import RULE_MAP, get_rule
@@ -357,8 +356,8 @@ class TestWiring:
                     f"占位符未独占一行，回退时会留下孤行：{line!r}")
 
     def test_prompt_renders_and_block_absent_when_off(self, monkeypatch):
-        from app.services.ai.prompts import render
         from app.routers import sse_handlers as sh
+        from app.services.ai.prompts import render
         base = dict(scheme_name="深基坑支护专项施工方案", scheme_type="深基坑",
                     construction_scope="", scheme_basis="", standards_text="",
                     project_facts="")
@@ -376,8 +375,8 @@ class TestWiring:
 
     def test_review_prompt_shares_same_block(self):
         """目录审核提示词与生成提示词共用同一份清单（同一词表）。"""
-        from app.services.ai.prompts import render
         from app.routers import sse_handlers as sh
+        from app.services.ai.prompts import render
         kw = sh._outline_checkpoint_kwargs("深基坑支护专项施工方案", "深基坑", True)
         p = render("outline_review_system", scheme_name="深基坑支护专项施工方案",
                    scheme_type="深基坑", construction_scope="", scheme_basis="",

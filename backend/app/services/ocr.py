@@ -181,8 +181,9 @@ def _preprocess(data: bytes):
 # ---------------------------------------------------------------------------
 
 def _ocr_tesseract(data: bytes, lang: str) -> str:
-    from app.config import settings
     import pytesseract
+
+    from app.config import settings
     if getattr(settings, "tesseract_path", ""):
         pytesseract.pytesseract.tesseract_cmd = settings.tesseract_path
     cfg = getattr(settings, "tesseract_data_path", "")
@@ -192,6 +193,7 @@ def _ocr_tesseract(data: bytes, lang: str) -> str:
         with _OCR_CALL_LOCK:
             return pytesseract.image_to_string(img, lang=lang, config=config) or ""
     import io as _io
+
     from PIL import Image
     with _OCR_CALL_LOCK:
         return pytesseract.image_to_string(Image.open(_io.BytesIO(data)),

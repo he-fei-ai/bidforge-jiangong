@@ -15,22 +15,12 @@ from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
 import httpx
-
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
 from app.config import EXPORTS_DIR
 from app.db import get_db, read_db
-from app.services import docx_math
-from app.services.ai.json_response import strip_outline_numbering
-# ✅ 图表关键字→内部类型映射统一取自 chart_validators（唯一事实来源），
-#    避免本模块与 _chart_pipeline 的映射继续分叉（曾三份互不一致）。
-from app.services.chart_validators import (
-    MERMAID_KEYWORD_TO_CHART_TYPE,
-    PIL_RENDERABLE_CHART_TYPES,
-    detect_mermaid_chart_type,
-    infer_chart_type_from_payload,
-)
+
 # ✅ 围栏保护阈值与图表围栏家族统一取自登记侧（_chart_pipeline），
 #    两端必须同口径：旧实现登记侧按「500 行」判未闭合、导出侧按「8000 字符」判，
 #    单位与阈值都不同，导致一份"登记侧判未闭合跳过、导出侧照常渲染"的幽灵图。
@@ -39,8 +29,16 @@ from app.services.chart_validators import (
 from app.routers._chart_pipeline import (
     INLINE_CHART_FENCE_LANGS,
     parse_fence_line,
-    read_fenced_block,
 )
+from app.services import docx_math
+from app.services.ai.json_response import strip_outline_numbering
+
+# ✅ 图表关键字→内部类型映射统一取自 chart_validators（唯一事实来源），
+#    避免本模块与 _chart_pipeline 的映射继续分叉（曾三份互不一致）。
+from app.services.chart_validators import (
+    MERMAID_KEYWORD_TO_CHART_TYPE,
+)
+
 # ✅ 《待补充清单》（2026-09-24，治 F 层人工补录兜底）：逐条扫描章节正文中的
 #    占位符（规范字段占位 / 裸标记 / 模糊 ××），按字段与章节聚合，支持前端跳转定位。
 from app.services.placeholder_inventory import (
@@ -496,7 +494,6 @@ def _detect_body_subheading_namespace_conflict(sections: list[dict]) -> list[dic
     _HEADING_WITH_DOTTED_NUM_RE = re.compile(
         r"^\s*(?:#{1,6}\s+|\*\*?)?\d+(?:\.\d+)+(?:\.{1,})?\s+")
 
-    from app.services.numbering import stored_outline_id, stored_id_to_prefix
     # 构建 parent_ids 倒排索引
     parent_ids = {s.get("parent_id") for s in sections if s.get("parent_id")}
     # 用 config
@@ -517,7 +514,6 @@ def _detect_body_subheading_namespace_conflict(sections: list[dict]) -> list[dic
         content = sec.get("content") or ""
         if not content.strip():
             continue
-        prefix = stored_id_to_prefix(stored_outline_id(sec))
         # 扫逐行，检测正文里的点分子标题
         conflicts: list[str] = []
         for line in content.split("\n"):
@@ -1262,10 +1258,13 @@ async def update_export_preset(scheme_id: str, preset_id: str, body: dict, db=De
     name = (body.get("name") or "").strip()
     sets, params = [], []
     if name:
-        sets.append("name=?"); params.append(name)
+        sets.append("name=?")
+        params.append(name)
     if "config" in body:
-        sets.append("config_json=?"); params.append(json.dumps(_normalize_config(body["config"]), ensure_ascii=False))
-    sets.append("updated_at=?"); params.append(datetime.now().isoformat())
+        sets.append("config_json=?")
+        params.append(json.dumps(_normalize_config(body["config"]), ensure_ascii=False))
+    sets.append("updated_at=?")
+    params.append(datetime.now().isoformat())
     params += [preset_id, pid]
     await db.execute(f"UPDATE export_presets SET {','.join(sets)} WHERE id=? AND project_id=?", params)
     await db.commit()
@@ -1303,26 +1302,13 @@ _MERMAID_TYPE_MAP = MERMAID_KEYWORD_TO_CHART_TYPE
 
 
 from app.services.content_blocks import (
-    _detect_plain_heading,
-    _is_reasonable_heading_number,
-    _match_ordered_item,
-    _looks_like_table_title,
-    _extract_table_caption,
-    _clean_chart_title,
-    _title_candidate,
-    _mermaid_directive_title,
-    _lead_in_title,
+    _cn_pure_to_int,
+    _compute_subheading,
+    _detect_plain_heading,  # noqa: F401  兼容再导出：测试与诊断脚本经 app.routers.export 引用
     _parse_content_blocks,
-    _norm_heading_text,
     _strip_duplicate_leading_title,
     _strip_title_number,
-    _cn_pure_to_int,
-    _heading_punct,
-    _compute_subheading,
 )
-
-
-
 
 # ---------------------------------------------------------------------------
 # ✅ 优化：有序列表标记样式识别（保留作者枚举符外观 + 导出时自动连续编号）
@@ -1633,8 +1619,8 @@ def _add_table_caption(doc, text: str, font_name: str = "宋体", font_size: flo
     ✅ 新增：与图题（位于图下方）配套，使表格也有规范编号，满足交付评审要求。
     ``keep_with_next`` 保证表题不与其表格被分页拆散。
     """
-    from docx.shared import Cm, Pt
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Cm, Pt
 
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1653,11 +1639,11 @@ def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体")
     表头：`font_name` 五号加粗、居中、暗板岩蓝浅色 60% 底纹（B6B1D1）；
     表体：`font_name` 五号居中；整表居中、单元格垂直居中、表头跨页重复。
     """
-    from docx.shared import Pt
+    from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
-    from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Pt
 
     def _split_row(raw: str) -> list[str]:
         # 先保护转义竖线 \| ，再按竖线切分，最后还原为普通 |
@@ -1715,9 +1701,9 @@ def _assign_table_column_widths(table, rows: list[list[str]], ncols: int) -> Non
     同时声明固定布局（tblLayout=fixed）+ 表格总宽（tblW），否则 Word 会按内容
     重新折列宽，自适应列宽不生效。
     """
-    from docx.shared import Cm
-    from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Cm
 
     def _w(text: str) -> float:
         s = (text or "").replace("\n", " ")
@@ -1757,11 +1743,11 @@ def _add_cover_info_table(doc, info: dict, font_name: str) -> None:
     仅当 info 含非空值时渲染；空值条目自动跳过，避免封面出现空白行。
     标签列右对齐加粗、值列左对齐，整体 14cm 宽、浅灰底纹。
     """
-    from docx.shared import Cm
+    from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
-    from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Cm
 
     if not isinstance(info, dict):
         return
@@ -1846,11 +1832,11 @@ def _add_form_table(doc, rows: list[tuple[str, str]], font_name: str = "宋体",
       把它当空值过滤掉，等于把整张审批表 / 论证报告表的签字栏抹平，
       文档看起来"干净"却彻底失去法律效力。
     """
-    from docx.shared import Cm
+    from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
-    from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Cm
 
     pairs = [(str(k), str(v or "").strip()) for k, v in rows
              if keep_empty or str(v or "").strip()]
@@ -1893,8 +1879,8 @@ def _add_form_table(doc, rows: list[tuple[str, str]], font_name: str = "宋体",
 def _add_prelim_page_title(doc, title: str, font_name: str,
                            basis: str = "") -> None:
     """前置页页题（居中加粗 + 编制依据注），并为其后留白。"""
-    from docx.shared import Pt
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Pt
 
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -2303,8 +2289,8 @@ def _add_inline_chart_from_bytes(doc, chart_type: str, img_bytes, figure_num: st
     · ``placeholder=True``：仍写红字「图 X-Y — 渲染失败 / 插入失败」
       （图号已被调用方占用，属可见错误，用于排查哪张图没出来）。
     """
-    from docx.shared import Cm, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Cm, RGBColor
     caption_text = f"图 {figure_num} {default_title}".strip()
     try:
         if not (img_bytes and len(img_bytes.getvalue()) > 100):
@@ -2368,8 +2354,8 @@ def _add_illustration_from_bytes(doc, img_bytes, figure_num: str, alt: str = "",
     由调用方回退图号 + 回收孤儿引导语，与 chart 分支同口径；
     ``placeholder`` 形参保留仅为签名一致（AI 配图分支当前无占位模式）。
     """
-    from docx.shared import Cm
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Cm
 
     caption_text = f"图 {figure_num} {alt or '配图'}".strip()
     try:
@@ -2412,8 +2398,8 @@ def _add_word_field(paragraph, instr: str, placeholder: str = "1"):
     ✅ BUG 修复：旧实现缺少 `separate` 与占位结果，Word 在域未刷新时该处渲染为
     空白（页码"消失"），而带 separate 的域即使未刷新也会显示合理占位值。
     """
-    from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
     run = paragraph.add_run()
     fld_begin = OxmlElement("w:fldChar")
     fld_begin.set(qn("w:fldCharType"), "begin")
@@ -2448,8 +2434,8 @@ def _add_toc_field(paragraph, depth: int = 3):
     Word 打开后自动扫描 Heading 1/2/3 样式生成目录。
     用户可按 F9 或右键"更新域"刷新目录。
     """
-    from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
     run = paragraph.add_run()
     fld_begin = OxmlElement("w:fldChar")
     fld_begin.set(qn("w:fldCharType"), "begin")
@@ -2493,8 +2479,8 @@ _PPR_AFTER_PBDR = (
 
 def _set_paragraph_shading(paragraph, fill: str):
     """给段落加底纹（代码块 / 引用块共用）。"""
-    from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
     ppr = paragraph._p.get_or_add_pPr()
     if ppr.find(qn("w:shd")) is not None:
         return
@@ -2511,8 +2497,8 @@ def _set_paragraph_borders(paragraph, **sides):
     参数为 (线型, 线宽/八分之一磅, 颜色)。CT_PPr 序列要求 w:pBdr 在 w:shd 之前，
     w:pBdr 自身的子元素序列为 top → left → bottom → right → between → bar。
     """
-    from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
     ppr = paragraph._p.get_or_add_pPr()
     pbd = ppr.find(qn("w:pBdr"))
     if pbd is None:
@@ -2537,7 +2523,7 @@ def _add_code_block(doc, lines: list[str]):
     ✅ 增强：旧实现把代码块每一行当作独立正文段落输出（无底纹、无边框、
     行首缩进被 Word 折叠、还带 0.74cm 首行缩进），命令行示例会被排成散文。
     """
-    from docx.shared import Pt, Cm
+    from docx.shared import Cm, Pt
     p = doc.add_paragraph()
     pf = p.paragraph_format
     pf.left_indent = Cm(0.5)
@@ -2573,8 +2559,8 @@ def _enable_update_fields_on_open(doc) -> None:
     `w:hdrShapeDefaults` / `w:compat` / `w:rsids` 等元素之前，否则 Word 打开时会
     报「文件内容有问题，是否恢复」。
     """
-    from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
     try:
         settings_el = doc.settings.element
     except Exception:  # pragma: no cover - 极旧版本 python-docx 无 settings
@@ -2792,9 +2778,6 @@ def _cn_numeral_to_int(cn: str) -> str:
     # 纯阿拉伯数字
     if cn.isdigit():
         return cn
-    # 中英混杂（含阿拉伯数字），逐字符扫
-    digit_map = {"零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4,
-                 "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
     # 若串中同时出现阿拉伯数字，用正则切分后逐段解析再拼接
     if re.search(r"\d", cn):
         parts = re.split(r"([0-9]+)", cn)
@@ -2910,9 +2893,10 @@ def _build_docx_sync(
     会阻塞事件循环 3-10 秒，期间其他请求无法响应。现整体移到线程池。
     """
     from docx import Document
-    from docx.shared import Pt, Cm, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
+    from docx.shared import Cm, Pt, RGBColor
+
     from app.services.ai.heading_standard import HeadingNumberingGeneratorV2
 
     doc = Document()
@@ -3640,8 +3624,8 @@ async def _auto_generate_ai_image_blocks(
     """
     if not bool(config.get("ai_image_auto_generate", True)):
         return 0
-    from app.services.ai.image_engine import generate_illustration_image
     from app.config import settings as _settings
+    from app.services.ai.image_engine import generate_illustration_image
 
     _img_cfg = {
         "image_enabled": _settings.image_enabled,
@@ -3754,7 +3738,9 @@ async def _query_global_facts(
     """
     try:
         from app.services.facts_extractor import (
-            FACTS_GT_COLUMN, build_injectable_facts_query, resolve_scheme_project_id,
+            FACTS_GT_COLUMN,
+            build_injectable_facts_query,
+            resolve_scheme_project_id,
         )
         project_id = await resolve_scheme_project_id(db, scheme_id)
         columns = f"{FACTS_GT_COLUMN}, title, content"
@@ -4643,8 +4629,8 @@ def _convert_docx_to_pdf(docx_path: str, pdf_path: str) -> str:
     #       Python 引用持有（word/doc 未释放），下一次 Dispatch 与垂死的 RPC
     #       服务器竞态。正确顺序必须是「Quit → del 引用 → gc.collect() →
     #       CoUninitialize」；配合 3 次重试兜底，把瞬态失败转为重试成功。
-    import time as _time
     import gc as _gc
+    import time as _time
     try:
         import pythoncom
         import win32com.client
@@ -4823,10 +4809,20 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
                 or prep.get("ai_image_download_pending", 0) > 0)
 
     if not degraded:
+        import os as _os
         # 落盘到 EXPORTS_DIR（缓存行只记路径，与 DOCX 一致；临时目录会被清理）
         out_path = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{pdf_content_hash[:8]}.pdf"
+        # ✅ BUG 修复（2026-10-05 · F-1，交付物损坏）：旧实现
+        #    `out_path.write_bytes(pdf_bytes)` **非原子**——并发同指纹 PDF 导出、
+        #    或写盘中途崩溃/磁盘满时，都会残留**半截 PDF** 在目标路径。
+        #    下一次同指纹导出会命中缓存（size>0 守卫拦不住 >0 字节的半截文件），
+        #    直接 FileResponse 返回给用户 → 交付文档损坏。DOCX 分支早已用
+        #    `os.replace` 原子替换 + tmp 文件（见 export_docx），PDF 分支漏做。
+        #    现改为「先写唯一 tmp → DB INSERT 落盘路径 → os.replace 原子替换」。
+        #    失败一律清理 tmp，不留孤儿。
+        _tmp_pdf = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{pdf_content_hash[:8]}.{uuid.uuid4().hex}.tmp.pdf"
         try:
-            out_path.write_bytes(pdf_bytes)
+            _tmp_pdf.write_bytes(pdf_bytes)
             await db.execute(
                 "INSERT OR IGNORE INTO export_cache (id, project_id, scheme_id, config_hash,"
                 " content_fingerprint, cache_key, result_path) VALUES (?,?,?,?,?,?,?)",
@@ -4843,6 +4839,30 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
                  #    三元组，cache_key 不参与命中判定 → 本次改名不影响任何命中。
                  f"{scheme_id}_{config_hash[:8]}|pdf", str(out_path)))
             await db.commit()
+            # ✅ F-1：缓存行 INSERT + commit 成功后再做原子替换。
+            #    DB 已指向 out_path，但 out_path 此刻可能不存在或仍是旧文件——
+            #    下一次同指纹导出的缓存守卫有 `Path.exists() and size>0` 双检，
+            #    命中不到就重走全链路（用刚生成的 pdf_bytes 或重新构建）；
+            #    即使用户下次立刻下载，也会拿到完整的 pdf_bytes（本次响应体）。
+            # ✅ 与 DOCX 分支同款循环重试：Windows 上 out_path 可能被 Word/
+            #    预览窗口占用（WinError 32）；3 次退避重试，仍失败则清理 tmp
+            #    并 warn——本次响应体仍是完整 pdf_bytes，用户拿到的是好文件。
+            for _attempt in range(3):
+                try:
+                    _os.replace(_tmp_pdf, out_path)
+                    break
+                except PermissionError:
+                    if _attempt == 2:
+                        logger.warning(
+                            "PDF 缓存原子替换 3 次重试均失败（scheme=%s, out=%s），"
+                            "清理 tmp；本次响应体仍为完整 PDF",
+                            scheme_id[:8], out_path.name)
+                        try:
+                            _tmp_pdf.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    else:
+                        await asyncio.sleep(0.3 * (_attempt + 1))
             # ✅ T1（2026-10-03）：PDF 分支此前只 INSERT 从不裁剪 → export_cache 行
             #    与 EXPORTS_DIR 磁盘文件随导出次数无限增长。接入与 DOCX 同一保留
             #    策略（跨格式合计 5 份/方案）；置于既有 fail-soft try 内，裁剪失败
@@ -4850,6 +4870,10 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
             await _prune_export_cache(db, scheme_id, protect_path=out_path)
         except Exception as e:
             # 缓存写入失败不得影响本次交付（用户仍拿到完整 PDF）
+            try:
+                _tmp_pdf.unlink(missing_ok=True)
+            except Exception:
+                pass
             logger.warning("PDF 导出缓存写入失败（不影响本次交付）: %s", e, exc_info=True)
 
     from fastapi.responses import Response

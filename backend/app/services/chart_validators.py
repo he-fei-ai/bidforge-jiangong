@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
 
-
 """图表数据校验模块 - 遵循 v3.1 规范
 
 实现各类图表的结构验证规则，确保生成内容符合工程标准。
@@ -11,7 +10,6 @@ import json
 import logging
 import re
 from typing import Any
-
 
 logger = logging.getLogger(__name__)
 

@@ -8,10 +8,8 @@
 - file_parser.ParseError（图片无 OCR 引擎、.xls 缺依赖时抛异常而非返回错误字符串）
 """
 import pytest
-
 from app.services import ocr as ocr_mod
-from app.services.file_parser import parse_file_content, ParseError
-
+from app.services.file_parser import ParseError, parse_file_content
 
 # ============================================================
 # 能力探测

@@ -35,9 +35,8 @@ import inspect
 import json
 import os
 
-import pytest
-
 import app.routers.sse_handlers as sh
+import pytest
 from app.services.content_utils import (
     auto_fix_unclosed_fences,
     find_unclosed_fences,

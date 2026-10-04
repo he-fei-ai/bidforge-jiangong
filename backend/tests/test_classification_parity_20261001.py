@@ -43,7 +43,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from app.routers.sse_handlers import _DANGEROUS_REQUIRED_KEYWORDS  # noqa: E402
 from app.services.scheme_classification import (  # noqa: E402
-    HAZARD_CATEGORIES, HAZARD_THRESHOLDS, NINE_CHAPTERS,
+    HAZARD_CATEGORIES,
+    HAZARD_THRESHOLDS,
+    NINE_CHAPTERS,
 )
 
 # ---------------------------------------------------------------------------

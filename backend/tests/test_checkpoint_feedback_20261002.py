@@ -26,7 +26,6 @@ import re
 from pathlib import Path
 
 import pytest
-
 from app.services import content_checkpoint as cc
 from app.services import duplicate_detection as dd
 from app.services import preflight_engine as pe
@@ -536,8 +535,11 @@ class TestStd03BaseNumberExemption:
 
     def test_db_read_has_none_guard(self):
         """R13：``db.execute()`` 可能返回 None，必须判空后再 fetchall。"""
+        # P2 修复（2026-10-04）：跨章搬运检测已改为内存 snapshot 增量对比，
+        # sentinel 从旧的 `_dup_secs.append` 更新为 `_dup_secs = list(...)`；
+        # 但 None-guard 语义完全不变：`_dup_cur` 为 None 时仍回退到空列表。
         seg = self.sse[self.sse.find("_dup_cur"):
-                       self.sse.find("_dup_secs.append")]
+                       self.sse.find("_dup_secs = list")]
         assert "if _dup_cur is not None else []" in seg
 
     def test_fail_soft_guarded(self):
@@ -548,11 +550,21 @@ class TestStd03BaseNumberExemption:
         assert "exc_info=True" in seg
 
     def test_current_section_content_overridden(self):
-        """本章尚未落库，必须用内存最终正文参与比对（否则本章正文为空）。"""
+        """本章尚未落库，必须用内存最终正文参与比对（否则本章正文为空）。
+
+        ✅ P2 修复（2026-10-04 · O(N²) 性能）：跨章搬运检测改为按 section_id
+        对 snapshot 直接赋值 —— `_crossdup_snapshot[section_id] = {..., "content": content, ...}`
+        —— 语义等价于旧的 `_d["content"] = content`（当前章节的最终正文
+        会覆盖/写入到快照里参与比对）。这里改断言为新的快照赋值形式。
+        """
         seg = self.sse[self.sse.find("_dup_rows"):
                        self.sse.find("if _ck_findings:")]
-        assert "_d[\"content\"] = content" in seg
-        assert "_d.get(\"id\") == section_id" in seg
+        assert "_crossdup_snapshot[section_id]" in seg
+        # 快照字典里必须包含 content / id / title 三键，且 content 用当前最终正文
+        _snap_idx = seg.find("_crossdup_snapshot[section_id]")
+        _snap_block = seg[_snap_idx:_snap_idx + 400]
+        assert '"content": content' in _snap_block
+        assert '"id": section_id' in _snap_block
 
     def test_run_outside_write_lock(self):
         """必须在锁**外**做（锁外只读）—— 置于 ``async with _db_write_lock`` 之前。"""

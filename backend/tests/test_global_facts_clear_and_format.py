@@ -12,14 +12,13 @@
 import asyncio
 import uuid
 
-import pytest
-
 import app.db as _appdb
-from app.db import init_db, get_conn
+import app.services.facts_extractor as fe
+import pytest
+from app.db import get_conn, init_db
 from app.routers import global_facts as gf
 from app.services import facts_classification as fc
-import app.services.facts_extractor as fe
-from app.services.facts_extractor import FactItem, FactGroup, ExtractionResult
+from app.services.facts_extractor import ExtractionResult, FactGroup, FactItem
 
 # 前后端约定的九大章节键（与前端 FACT_CHAPTER_TITLES / 建办质〔2018〕31号 对齐）
 CANONICAL_CHAPTER_KEYS = [

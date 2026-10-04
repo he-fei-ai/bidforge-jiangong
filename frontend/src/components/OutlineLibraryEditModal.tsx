@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+﻿import { useState, useEffect, useCallback } from "react";
 import {App, Modal, Form, Input, Select, Tree, Button, Space, message,
   Card, Tag, Empty, Tooltip, Upload, Typography, Tabs, Alert, Popconfirm,} from "antd";
 import {
@@ -6,7 +6,7 @@ import {
   SaveOutlined, PlusOutlined, ArrowUpOutlined, ArrowDownOutlined,
 } from "@ant-design/icons";
 import { outlineLibraryApi, uploadOutlineApi } from "../api";
-import { hookAntdMessage } from "../utils/activityCenter";
+import { useAntdMessageHub } from "../utils/activityCenter";
 import { UPLOAD_FILE_ACCEPT } from "../utils/uploadAccept";
 
 const { Text } = Typography;
@@ -40,7 +40,7 @@ type Props = {
 
 export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSaved }: Props) {
   const { message: _antdMsg, modal } = App.useApp();
-  const msg = hookAntdMessage(_antdMsg, "目录库");
+  const msg = useAntdMessageHub(_antdMsg, "目录库");
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);

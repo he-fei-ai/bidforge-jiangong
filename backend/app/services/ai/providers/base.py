@@ -1,7 +1,6 @@
 """Provider 基类"""
-from typing import AsyncIterator, Any
 from dataclasses import dataclass
-
+from typing import Any, AsyncIterator
 
 # 已知支持图片/视觉能力的模型名（小写匹配）
 _VISION_KEYWORDS = (

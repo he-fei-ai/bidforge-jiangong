@@ -9,61 +9,109 @@
 """
 
 import asyncio
-from contextlib import asynccontextmanager
 import json
 import logging
 import re
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 
-from app.config import DATA_DIR, FACT_UPLOADS_DIR, settings
+from app.config import FACT_UPLOADS_DIR, settings
 from app.db import get_db, safe_rowcount
 from app.models import FactGroupIn, FactGroupUpdate
-from app.services.ai.json_response import collect_json_response
-from app.services.ai.prompts._registry import render
-from app.services.file_parser import (
-    SUPPORTED_EXTENSIONS, ParseError, parse_file_content_ex, signature_valid,
-    dump_parse_warnings,
-)
-from app.services.facts_extractor import (
-    invalidate_export_cache, extract_value_from_markdown_line, normalize_key,
-    CATEGORY_TITLES, CATEGORY_TO_FACT_TYPE, is_safety_critical_name,
-    _safe_confidence, strip_simulated_marker, append_simulated_marker,
-    is_simulated_marked, _clip_excerpt, MAX_SOURCE_EXCERPT,
-)
-from app.services.doc_pipeline import pipeline as doc_pipeline
-# ✅ 2026-09-25：文档分类唯一事实源（分类清单 / 自动分类规则 / 提取优先级）
-from app.services.doc_categories import (
-    AUTO_CLASSIFY_RULES, auto_classify_document, category_options,
-)
-# ✅ 2026-09-24：全局事实「九大章节分类体系」四维标注（纯函数、零 AI、零 DB 依赖）
-from app.services.facts_classification import (
-    CHAPTER_ORDER, CHAPTER_TITLES, chapter_of_row,
-    chapter_field_completeness, classify_chapter_from_text, classify_fact_attr,
-    dimensions_for_row, extract_danger_params, FACT_ATTR_TITLES,
-    nine_chapter_summary, SOURCE_KIND_TITLES, category_map_payload,
-    shared_chapters_for,
-)
+
 # 提取项目模块的分类与阈值判定核心（本仓「分类单一事实源」，不重复维护阈值表）
 from app.services import scheme_classification as scheme_clf
+from app.services.ai.json_response import collect_json_response
+from app.services.ai.prompts._registry import render
+
+# ✅ 2026-09-25：文档分类唯一事实源（分类清单 / 自动分类规则 / 提取优先级）
+from app.services.doc_categories import (
+    AUTO_CLASSIFY_RULES,
+    auto_classify_document,
+    category_options,
+)
+from app.services.doc_pipeline import pipeline as doc_pipeline
+
+# ✅ 2026-09-24：全局事实「九大章节分类体系」四维标注（纯函数、零 AI、零 DB 依赖）
+from app.services.facts_classification import (
+    CHAPTER_ORDER,
+    CHAPTER_TITLES,
+    FACT_ATTR_TITLES,
+    SOURCE_KIND_TITLES,
+    category_map_payload,
+    chapter_field_completeness,
+    classify_chapter_from_text,
+    classify_fact_attr,
+    dimensions_for_row,
+    extract_danger_params,
+    nine_chapter_summary,
+)
+from app.services.facts_extractor import (
+    CATEGORY_TITLES,
+    CATEGORY_TO_FACT_TYPE,
+    MAX_SOURCE_EXCERPT,
+    _clip_excerpt,
+    _safe_confidence,
+    append_simulated_marker,
+    extract_value_from_markdown_line,
+    invalidate_export_cache,
+    is_safety_critical_name,
+    is_simulated_marked,
+    normalize_key,
+    strip_simulated_marker,
+)
+from app.services.file_parser import (
+    SUPPORTED_EXTENSIONS,
+    ParseError,
+    dump_parse_warnings,
+    parse_file_content_ex,
+    signature_valid,
+)
 from app.utils.log_context import new_trace_id, set_context
 
 logger = logging.getLogger("global_facts")
 router = APIRouter(prefix="/api/v1/global-facts", tags=["global_facts"])
 
-MAX_UPLOAD_BYTES = 30 * 1024 * 1024  # 单文件上传上限 30MB
+# ✅ 单一事实源（2026-10-04）：上传配额不再在本模块各写一份字面量，
+#    统一从 settings（可被 .env 覆盖）派生，并经
+#    GET /api/v1/system/upload-limits 动态下发给前端。
+#    保留模块级名字：既有用法与 monkeypatch.setattr(gf, "MAX_UPLOAD_BYTES", N)
+#    的单测全部照常生效。
+_DEFAULT_UPLOAD_BYTES = 30 * 1024 * 1024
+_DEFAULT_UPLOAD_FILES = 20
+_DEFAULT_UPLOAD_TOTAL_BYTES = 200 * 1024 * 1024
+
+
+def _positive_int_setting(name: str, default: int) -> int:
+    """读取正整数配置；配置缺失/非法/非正数时回落默认。
+
+    非正数不能直接放行：files 数与累计体积若按 0 处理，等价于关闭配额守卫，
+    比保守默认更危险，故一律回落。
+    """
+    try:
+        n = int(getattr(settings, name, default))
+    except (TypeError, ValueError):
+        return default
+    return n if n > 0 else default
+
+
+#: 单文件上传上限（字节）
+MAX_UPLOAD_BYTES = _positive_int_setting("upload_max_bytes", _DEFAULT_UPLOAD_BYTES)
 # ✅ 完整性：解析结果落库上限。旧值 80000 会让长篇招标文件在解析阶段就被截断，
 #    后续无论提取多少段都拿不到后半部分内容。SQLite TEXT 可容纳，放宽到 40 万字
 #    （≈ 300~400 页），配合 MAX_CHUNKS=60 基本覆盖常规招标文件全文。
 MAX_PARSED_CHARS = 400_000
 
 # ✅ 资源配额：单次上传请求的文件数与累计体积上限。
-#    单文件 30MB 的限制挡不住"一个请求塞进大量文件"——落盘与随后的解析
+#    单文件上限挡不住"一个请求塞进大量文件"——落盘与随后的解析
 #    会线性放大磁盘/内存占用，且解析是串行阻塞在服务进程内的。
-MAX_UPLOAD_FILES_PER_REQUEST = 20
-MAX_UPLOAD_TOTAL_BYTES = 200 * 1024 * 1024
+MAX_UPLOAD_FILES_PER_REQUEST = _positive_int_setting(
+    "upload_max_files_per_request", _DEFAULT_UPLOAD_FILES)
+MAX_UPLOAD_TOTAL_BYTES = _positive_int_setting(
+    "upload_max_total_bytes", _DEFAULT_UPLOAD_TOTAL_BYTES)
 
 
 # ---------------------------------------------------------------------------
@@ -287,11 +335,13 @@ async def _assert_fact_in_scheme_scope(db, fact_id: str, scheme_id: str) -> dict
     target_sid = str(row["scheme_id"] or "")
     if target_sid:
         if target_sid != scheme_id:
+            logger.warning("global_facts 409 归属校验：target_sid=%s 与 scheme_id=%s 不一致", target_sid, scheme_id)
             raise HTTPException(409, "事实不属于当前方案，请刷新后重试")
     else:
         cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
         current = await cur.fetchone()
         if not current or str(current[0] or "") != target_pid:
+            logger.warning("global_facts 409 项目共享校验：scheme_id=%s 未关联 project_id=%s", scheme_id, target_pid)
             raise HTTPException(409, "项目共享事实不属于当前方案，请刷新后重试")
     return dict(row)
 
@@ -897,66 +947,21 @@ async def create_fact(
     #    用户输入的分组标题优先，其次类别中文名。
     group_title = (data.title or "").strip() or CATEGORY_TITLES.get(category, "")
 
-    # 如果传了结构化 items，逐条持久化
-    if data.items:
-        insert_buf = []
-        for it in data.items:
-            fid = str(uuid.uuid4())
-            content = _build_fact_content(it.name, it.value, it.is_simulated)
-            # ✅ BUG 修复（2026-09-21）：模拟值闸门是**不变式**而非冗余标记。
-            #    注入 / 导出门控是 `has_conflict=0 AND is_resolved=1`（不含
-            #    is_simulated 列），全靠 `is_simulated=1 ⟹ is_resolved=0` 维持。
-            #    旧实现按模型默认值 is_resolved=True 直落库，客户端只传
-            #    is_simulated 不传 is_resolved 时（模型默认 True），编造值会
-            #    带着 is_resolved=1 直接越过闸门注入正文与导出。与
-            #    _apply_item_updates 的既有口径对齐。
-            item_resolved = 1 if (it.is_resolved and not it.is_simulated) else 0
-            item_cat = it.category or category
-            # ✅ BUG 修复：无来源时也必须写入"手动录入"标记——persist_extraction
-            #    的 _is_protected 靠 source_ref 识别手动来源保护未确认事实，
-            #    旧实现 source/source_ref 皆空时留空 → 手动新增但未确认的事实
-            #    会在「重新提取」时被当旧 AI 数据删除。
-            #    （quote 的超长截断口径见 _manual_fact_row → _clip_excerpt）
-            # ✅ BUG 修复（2026-10-01）：列清单与取值改走 _manual_fact_row
-            #    单一出口（原为手写 15 列 INSERT，与另两处新增路径各自维护）。
-            insert_buf.append(_manual_fact_row(
-                fid=fid, pid=real_pid, sid=scheme_scope,
-                group_id=gid, group_title=group_title,
-                name=it.name, content=content, category=item_cat,
-                source_file=it.source or "手动录入",
-                source_quote=it.source_ref or "",
-                is_simulated=it.is_simulated,
-                confidence=it.confidence,
-                is_resolved=bool(item_resolved),
-                fact_key=it.key or "",
-            ))
-        if insert_buf:
-            await db.executemany(MANUAL_FACT_INSERT_SQL, insert_buf)
-    else:
-        # 旧版单条：title + content
-        # ✅ 修复：content 常为多行 Markdown 列表（前端「手动新增」弹窗多行输入），
-        #    原实现整块存为一行 → 列表接口只解析出第一行，其余行"凭空消失"。
-        #    现与分组编辑（PATCH）一致，逐行拆开入库。
-        rows_buf = []
-        for nm, val, is_sim in _split_fact_lines(data.title, data.content):
-            rows_buf.append(_manual_fact_row(
-                fid=str(uuid.uuid4()), pid=real_pid, sid=scheme_scope,
-                group_id=gid, group_title=group_title,
-                name=nm, content=_build_fact_content(nm, val, is_sim),
-                category=category,
-                # ✅ BUG 修复：旧版单条路径同样必须写入"手动录入"来源标记，
-                # 否则未确认的手动事实会被「重新提取」误删（同上）
-                source_file="手动录入",
-                is_simulated=is_sim,
-                confidence=1.0,
-                # ✅ BUG 修复（2026-09-21）：is_simulated ⟹ is_resolved=0（模拟值闸门
-                #    是不变式，门控 SQL 只判 is_resolved）。旧实现恒写 is_resolved=1，
-                #    粘贴了模拟值标记的手工分组会立刻被当确定性事实注入正文。
-                is_resolved=(not is_sim),
-            ))
-        await db.executemany(MANUAL_FACT_INSERT_SQL, rows_buf)
-
-    await db.commit()
+    # ✅ G-04 修复（2026-10-04）：executemany + commit 是**多语句**写入路径。
+    #    executemany 分批下推时若中途失败（某行占位符列数不匹配、DB 锁超时、
+    #    JSON 序列化异常），已下推的部分行留在悬空事务里；连接归还池后会被
+    #    下个请求的 commit 连带提交，形成「部分事实入库 + 前端拿到 500」的脏状态。
+    #    与 update_fact(:1562)、clear_all_facts(:1857) 同口径显式回滚，避免脏状态。
+    try:
+        rows_buf = _build_create_fact_rows(
+            data=data, gid=gid, group_title=group_title, category=category,
+            pid=real_pid, sid=scheme_scope)
+        if rows_buf:
+            await db.executemany(MANUAL_FACT_INSERT_SQL, rows_buf)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
     # ✅ BUG 修复（2026-09-29 · 项目级新事实不失效导出缓存）：
     # 旧实现只在 scheme_scope 非空时失效单个方案缓存 —— 项目级事实
     # （scheme_id 为空，供项目下全部方案共用）落库后**一个缓存都不失效**，
@@ -984,10 +989,23 @@ def _build_fact_content(name: str, value: str, is_simulated: bool) -> str:
 #: is_safety_critical…）都容易只改一处、漏两处，新增路径写进去的行就永远
 #: 是默认值，而读路径靠惰性派生「看起来正常」，问题难以发现。
 #: 现把列清单收敛为单一事实源，占位符由列数派生（不再手写）。
+#: ✅ G-05 修复（2026-10-04 · 列清单漂移单一事实源）：
+#: 旧实现里 MANUAL_FACT_INSERT_COLS（15 列）与 _GROUP_REBUILD_COLS（28 列）
+#: 各自硬编码前 15 列 + 溯源/四维的追加列 —— 任何一次 schema 加列都必须
+#: 同步改两处，一处漏改即「分组重建写入的字段在手工/AI 新增路径永远回落到
+#: 默认值」，静默漂移、难以发现。现把 28 列全部收敛到 MANUAL_FACT_INSERT_COLS，
+#: _GROUP_REBUILD_COLS 直接引用它作为别名，两条 INSERT 路径共用同一事实源。
+#: 新增路径对额外 13 列（溯源/单位/九大章节四维）显式写默认值，等价于旧的
+#: 「不写入该列 → 走表默认值」，schema 中每列都自带 DEFAULT，行为完全一致。
 MANUAL_FACT_INSERT_COLS = (
     "id", "project_id", "scheme_id", "group_id", "group_title", "title", "content",
     "category", "source_ref", "is_simulated", "confidence", "is_resolved",
     "has_conflict", "conflict_keys", "fact_key",
+    # 溯源/单位列（提取管线写入；手工新增走默认值）
+    "chunk_hash", "value_unit", "fact_type", "evidence_kind", "page_ref",
+    "zone_type", "is_safety_critical", "norm_group", "is_stale",
+    # 九大章节四维标注（apply_fact_dimensions 派生；手工新增走默认值）
+    "chapter", "fact_attr", "source_kind", "is_shared",
 )
 MANUAL_FACT_INSERT_SQL = "INSERT INTO global_facts (%s) VALUES (%s)" % (
     ", ".join(MANUAL_FACT_INSERT_COLS),
@@ -1002,8 +1020,8 @@ def _manual_fact_row(*, fid: str, pid: str, sid: str, group_id: str,
     """构造「手工 / AI 调整新增」事实行（列顺序与 MANUAL_FACT_INSERT_COLS 严格对齐）。
 
     三处新增路径共用，杜绝「列名与占位符数量错位」与「漏写某一列」。
-    溯源/九大章节四维列（value_unit、fact_type、chapter、fact_attr…）不在
-    本清单内，落库取表默认值，由读路径惰性派生兜底（与历史行为一致）。
+    追加的 13 列（溯源/单位/九大章节四维）显式写默认值，与旧行为完全一致
+    （schema 中每列都带 DEFAULT，读路径的惰性派生兜底不受影响）。
 
     ``fact_key`` 允许调用方显式指定（客户端传入的归一化键优先），
     缺省按事实名归一化生成去重键。
@@ -1022,7 +1040,79 @@ def _manual_fact_row(*, fid: str, pid: str, sid: str, group_id: str,
         int(is_resolved),
         0, "",  # has_conflict / conflict_keys：新增事实无矛盾候选
         (str(fact_key or "").strip() or normalize_key(name)),
+        # 溯源/单位列默认值（手工/AI 新增无 chunk 指纹、无页码、非安全关键、非过期）
+        "", "", "", "", None, "", 0, "", 0,
+        # 九大章节四维默认值（读路径 apply_fact_dimensions 惰性派生兜底）
+        "", "", "", 0,
     )
+
+
+def _build_create_fact_rows(*, data, gid: str, group_title: str,
+                            category: str, pid: str, sid: str) -> list[tuple]:
+    """把 FactGroupIn 展开为待 INSERT 的行元组列表（列顺序与 MANUAL_FACT_INSERT_COLS 对齐）。
+
+    ✅ G-04 重构（2026-10-04）：从 create_fact 内联抽出，使 create_fact 的主
+    写入路径整体包在 try/except 事务守卫里 —— 行构造阶段的任何异常（含
+    _manual_fact_row 内的 JSON 序列化）与 executemany/commit 的异常走同一回滚
+    口径，避免「行缓冲构造失败 + commit 已被调用」或反之的脏状态。
+    两条分支保留原有语义：结构化 items 逐条入库；旧版单条按多行 Markdown 拆开。
+    """
+    if data.items:
+        rows_buf: list[tuple] = []
+        for it in data.items:
+            fid = str(uuid.uuid4())
+            content = _build_fact_content(it.name, it.value, it.is_simulated)
+            # ✅ BUG 修复（2026-09-21）：模拟值闸门是**不变式**而非冗余标记。
+            #    注入 / 导出门控是 `has_conflict=0 AND is_resolved=1`（不含
+            #    is_simulated 列），全靠 `is_simulated=1 ⟹ is_resolved=0` 维持。
+            #    旧实现按模型默认值 is_resolved=True 直落库，客户端只传
+            #    is_simulated 不传 is_resolved 时（模型默认 True），编造值会
+            #    带着 is_resolved=1 直接越过闸门注入正文与导出。与
+            #    _apply_item_updates 的既有口径对齐。
+            item_resolved = 1 if (it.is_resolved and not it.is_simulated) else 0
+            item_cat = it.category or category
+            # ✅ BUG 修复：无来源时也必须写入"手动录入"标记——persist_extraction
+            #    的 _is_protected 靠 source_ref 识别手动来源保护未确认事实，
+            #    旧实现 source/source_ref 皆空时留空 → 手动新增但未确认的事实
+            #    会在「重新提取」时被当旧 AI 数据删除。
+            #    （quote 的超长截断口径见 _manual_fact_row → _clip_excerpt）
+            # ✅ BUG 修复（2026-10-01）：列清单与取值改走 _manual_fact_row
+            #    单一出口（原为手写 15 列 INSERT，与另两处新增路径各自维护）。
+            rows_buf.append(_manual_fact_row(
+                fid=fid, pid=pid, sid=sid,
+                group_id=gid, group_title=group_title,
+                name=it.name, content=content, category=item_cat,
+                source_file=it.source or "手动录入",
+                source_quote=it.source_ref or "",
+                is_simulated=it.is_simulated,
+                confidence=it.confidence,
+                is_resolved=bool(item_resolved),
+                fact_key=it.key or "",
+            ))
+        return rows_buf
+
+    # 旧版单条：title + content
+    # ✅ 修复：content 常为多行 Markdown 列表（前端「手动新增」弹窗多行输入），
+    #    原实现整块存为一行 → 列表接口只解析出第一行，其余行"凭空消失"。
+    #    现与分组编辑（PATCH）一致，逐行拆开入库。
+    rows_buf = []
+    for nm, val, is_sim in _split_fact_lines(data.title, data.content):
+        rows_buf.append(_manual_fact_row(
+            fid=str(uuid.uuid4()), pid=pid, sid=sid,
+            group_id=gid, group_title=group_title,
+            name=nm, content=_build_fact_content(nm, val, is_sim),
+            category=category,
+            # ✅ BUG 修复：旧版单条路径同样必须写入"手动录入"来源标记，
+            # 否则未确认的手动事实会被「重新提取」误删（同上）
+            source_file="手动录入",
+            is_simulated=is_sim,
+            confidence=1.0,
+            # ✅ BUG 修复（2026-09-21）：is_simulated ⟹ is_resolved=0（模拟值闸门
+            #    是不变式，门控 SQL 只判 is_resolved）。旧实现恒写 is_resolved=1，
+            #    粘贴了模拟值标记的手工分组会立刻被当确定性事实注入正文。
+            is_resolved=(not is_sim),
+        ))
+    return rows_buf
 
 
 async def _invalidate_item_update_caches(db, updates: list[dict]) -> None:
@@ -1209,21 +1299,12 @@ def _value_signature(value: str) -> str:
     return m.group(0) if m else ""
 
 
-_GROUP_REBUILD_COLS = (
-    "id", "project_id", "scheme_id", "group_id", "group_title", "title",
-    "content", "category", "source_ref", "is_simulated", "confidence",
-    "is_resolved", "has_conflict", "conflict_keys", "fact_key",
-    # ✅ 2026-09-29：溯源/单位列与九大章节四维标注一并回写，
-    #    使「分组编辑」不再是溯源信息的黑洞。
-    "chunk_hash", "value_unit", "fact_type", "evidence_kind", "page_ref",
-    "zone_type", "is_safety_critical", "norm_group", "is_stale",
-    "chapter", "fact_attr", "source_kind", "is_shared",
-)
-_GROUP_REBUILD_SQL = (
-    "INSERT INTO global_facts (%s) VALUES (%s)"
-    % (", ".join(_GROUP_REBUILD_COLS),
-       ",".join("?" for _ in _GROUP_REBUILD_COLS))
-)
+#: ✅ G-05 修复（2026-10-04）：分组重建路径与手工/AI 新增路径共用
+#: MANUAL_FACT_INSERT_COLS 单一事实源，杜绝两侧漂移。_GROUP_REBUILD_SQL 与
+#: MANUAL_FACT_INSERT_SQL 完全等价 —— 保留此别名仅为语义清晰（分组重建的
+#: 调用点可读性更好），后续若两处再次分叉会由测试兜住。
+_GROUP_REBUILD_COLS = MANUAL_FACT_INSERT_COLS
+_GROUP_REBUILD_SQL = MANUAL_FACT_INSERT_SQL
 
 
 @router.patch("/{fact_id}")
@@ -1544,10 +1625,13 @@ async def resolve_fact(
     # 模拟值必须先改成有真实依据的取值；未裁决冲突必须先走 resolve-conflict。
     # 409 保留原状态，前端据此引导用户完成对应操作，避免绕过安全闸门。
     if bool(row["is_simulated"]):
+        logger.warning("global_facts 409 闸门：fact_id=%s 是模拟值", fact_id)
         raise HTTPException(409, "模拟值不能直接确认，请先核对并修改为真实值")
     if bool(row["has_conflict"]):
+        logger.warning("global_facts 409 闸门：fact_id=%s 存在多来源矛盾", fact_id)
         raise HTTPException(409, "事实存在多来源矛盾，请先选择正确的候选值")
     if bool(row["is_stale"]):
+        logger.warning("global_facts 409 闸门：fact_id=%s 来源已变化", fact_id)
         raise HTTPException(409, "事实来源资料已变化，请重新提取或先编辑核对")
 
     await db.execute(
@@ -1616,22 +1700,31 @@ async def ack_fact_stale(
         return {"ok": True, "changed": False,
                 "is_resolved": bool(row["is_resolved"]), "blocked_reason": ""}
 
-    is_sim = bool(row["is_simulated"])
-    has_conflict = bool(row["has_conflict"])
-    if is_sim or has_conflict:
-        await db.execute(
-            "UPDATE global_facts SET is_stale=0, "
-            "updated_at=datetime('now','localtime') WHERE id=?", (fact_id,))
-        blocked = ("模拟值仍需先核对并改为真实取值，本次仅解除过期标记"
-                   if is_sim else "多来源矛盾仍需先裁决取值，本次仅解除过期标记")
-        new_resolved = bool(row["is_resolved"])
-    else:
-        await db.execute(
-            "UPDATE global_facts SET is_stale=0, is_resolved=1, "
-            "updated_at=datetime('now','localtime') WHERE id=?", (fact_id,))
-        blocked = ""
-        new_resolved = True
-    await db.commit()
+    # ✅ G-04 修复（2026-10-04）：SELECT 判门槛 → UPDATE → commit 的三步路径
+    #    需要显式事务守卫。UPDATE 已下推但 commit 前抛异常（DB 锁、连接中断）
+    #    时，行仍处于悬空事务里；连接归还池后会被下一个请求的 commit 连带
+    #    提交，形成"响应 500 但 is_stale 已被静默清除"的脏状态。与 create_fact
+    #    / update_fact / clear_all_facts 同口径显式回滚。
+    try:
+        is_sim = bool(row["is_simulated"])
+        has_conflict = bool(row["has_conflict"])
+        if is_sim or has_conflict:
+            await db.execute(
+                "UPDATE global_facts SET is_stale=0, "
+                "updated_at=datetime('now','localtime') WHERE id=?", (fact_id,))
+            blocked = ("模拟值仍需先核对并改为真实取值，本次仅解除过期标记"
+                       if is_sim else "多来源矛盾仍需先裁决取值，本次仅解除过期标记")
+            new_resolved = bool(row["is_resolved"])
+        else:
+            await db.execute(
+                "UPDATE global_facts SET is_stale=0, is_resolved=1, "
+                "updated_at=datetime('now','localtime') WHERE id=?", (fact_id,))
+            blocked = ""
+            new_resolved = True
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
 
     if row["scheme_id"]:
         await invalidate_export_cache(db, row["scheme_id"], facts_touched=True)
@@ -1684,22 +1777,31 @@ async def batch_ack_stale(data: dict, db=Depends(get_db)):
     #    （首版把 id_sql 拼在 scope_sql 之后、参数却把 fact_ids 放前面 →
     #     SQL 把 scheme_id 的值当 fact_id 比对，UPDATE 恒 0 行、零报错，
     #     属"静默不生效"——正是 safe_rowcount 也救不了的绑定错位。）
-    gated = 0
-    cur = await db.execute(
-        "SELECT COUNT(*) AS n FROM global_facts WHERE is_stale=1"
-        + id_sql + scope_sql +
-        " AND (COALESCE(is_simulated,0)=1 OR COALESCE(has_conflict,0)=1)",
-        scope_params)
-    grow = await cur.fetchone()
-    if grow:
-        gated = int(grow[0] or 0)
+    # ✅ G-04 修复（2026-10-04）：COUNT + UPDATE + commit 是多语句写路径。
+    #    UPDATE 已下推但 commit 前抛异常（DB 锁、连接中断、safe_rowcount 内
+    #    rowcount 读取异常），几十到几百行仍留在悬空事务里；连接归还池后会被
+    #    下一个请求的 commit 连带提交，形成"响应 500 但整批过期标记已解除"的
+    #    脏状态。与单条 ack-stale / create_fact / update_fact 同口径显式回滚。
+    try:
+        gated = 0
+        cur = await db.execute(
+            "SELECT COUNT(*) AS n FROM global_facts WHERE is_stale=1"
+            + id_sql + scope_sql +
+            " AND (COALESCE(is_simulated,0)=1 OR COALESCE(has_conflict,0)=1)",
+            scope_params)
+        grow = await cur.fetchone()
+        if grow:
+            gated = int(grow[0] or 0)
 
-    cur = await db.execute(
-        "UPDATE global_facts SET is_stale=0, " + _ACK_STALE_RESOLVE_CASE +
-        ", updated_at=datetime('now','localtime')"
-        " WHERE is_stale=1" + id_sql + scope_sql, scope_params)
-    changed = safe_rowcount(cur, what="批量解除事实过期标记")
-    await db.commit()
+        cur = await db.execute(
+            "UPDATE global_facts SET is_stale=0, " + _ACK_STALE_RESOLVE_CASE +
+            ", updated_at=datetime('now','localtime')"
+            " WHERE is_stale=1" + id_sql + scope_sql, scope_params)
+        changed = safe_rowcount(cur, what="批量解除事实过期标记")
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
 
     # 事实集合变化 → 失效项目下所有方案缓存（可能改动了项目共享事实）
     await _invalidate_fact_scope_cache(db, "", real_pid)
@@ -1954,16 +2056,24 @@ async def batch_resolve(data: dict, db=Depends(get_db)):
         else:
             changed_ids.append(row["id"])
 
-    # 执行更新（仅安全条目的）
-    if changed_ids:
-        ph = ",".join("?" * len(changed_ids))
-        await db.execute(
-            f"UPDATE global_facts SET is_resolved=1, "
-            f"updated_at=datetime('now','localtime') "
-            f"WHERE id IN ({ph})",
-            changed_ids)
-
-    await db.commit()
+    # ✅ G-04 修复（2026-10-04）：先 SELECT 判门槛、再 UPDATE 落库、再 commit 是
+    #    **多语句**写路径。UPDATE 后 commit 前若抛异常（连接中断、DB 锁），
+    #    已更新行仍在悬空事务里；连接归还池后会被下一个请求的 commit 连带提交，
+    #    让「批量确认」在返回 500 后仍部分生效。与 create_fact / update_fact
+    #    同口径显式回滚。
+    try:
+        # 执行更新（仅安全条目的）
+        if changed_ids:
+            ph = ",".join("?" * len(changed_ids))
+            await db.execute(
+                f"UPDATE global_facts SET is_resolved=1, "
+                f"updated_at=datetime('now','localtime') "
+                f"WHERE id IN ({ph})",
+                changed_ids)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
 
     if scheme_id:
         # 批量确认可能同时改变项目共享事实，失效项目下所有方案缓存。
@@ -2122,39 +2232,49 @@ async def adjust_facts(data: dict, db=Depends(get_db)):
 
     applied = {"updated": 0, "added": 0, "deleted": 0}
     if do_apply and ops:
-        for op in ops:
-            if op["op"] == "update":
-                n, _sid = await _apply_item_updates(db, [{
-                    "fact_id": op["fact_id"],
-                    "value": op.get("value"),
-                    "name": op.get("name"),
-                    "category": op.get("category"),
-                }])
-                applied["updated"] += n
-            elif op["op"] == "delete":
-                await db.execute("DELETE FROM global_facts WHERE id=?", (op["fact_id"],))
-                applied["deleted"] += 1
-            else:  # add
-                content = _build_fact_content(op["name"], op["value"], False)
-                # ✅ BUG 修复（2026-10-01）：列清单改走 MANUAL_FACT_INSERT_SQL 单一
-                #    出口（原为手写 15 列，与 create_fact 的两条分支各自维护）。
-                await db.execute(
-                    MANUAL_FACT_INSERT_SQL,
-                    _manual_fact_row(
-                        fid=str(uuid.uuid4()), pid=real_pid, sid=scheme_scope,
-                        group_id=str(uuid.uuid4()),
-                        group_title=CATEGORY_TITLES.get(op["category"], ""),
-                        name=op["name"], content=content,
-                        category=op["category"],
-                        # 溯源标记为 AI 调整：_is_protected 据此区分人工与 AI 来源，
-                        # 避免 AI 新增的事实在下次提取时被当人工录入保护下来。
-                        source_file="AI调整",
-                        is_simulated=False,
-                        confidence=1.0,
-                        is_resolved=True,
-                    ))
-                applied["added"] += 1
-        await db.commit()
+        # ✅ G-04 修复（2026-10-04）：AI 调整可能下发多条 update/delete/add，
+        #    循环中**每条都会写库但不 commit**（末尾统一提交）。中间任何一条
+        #    抛异常（例如 op["fact_id"] 在并发删除下消失、SQLite 锁），前 N-1
+        #    条已经下推的写仍留在悬空事务里；连接归还池后会被下一个请求的
+        #    commit 连带提交，形成"部分调整生效但前端拿到 500"的脏状态。
+        #    与 create_fact / update_fact / clear_all_facts 同口径显式回滚。
+        try:
+            for op in ops:
+                if op["op"] == "update":
+                    n, _sid = await _apply_item_updates(db, [{
+                        "fact_id": op["fact_id"],
+                        "value": op.get("value"),
+                        "name": op.get("name"),
+                        "category": op.get("category"),
+                    }])
+                    applied["updated"] += n
+                elif op["op"] == "delete":
+                    await db.execute("DELETE FROM global_facts WHERE id=?", (op["fact_id"],))
+                    applied["deleted"] += 1
+                else:  # add
+                    content = _build_fact_content(op["name"], op["value"], False)
+                    # ✅ BUG 修复（2026-10-01）：列清单改走 MANUAL_FACT_INSERT_SQL 单一
+                    #    出口（原为手写 15 列，与 create_fact 的两条分支各自维护）。
+                    await db.execute(
+                        MANUAL_FACT_INSERT_SQL,
+                        _manual_fact_row(
+                            fid=str(uuid.uuid4()), pid=real_pid, sid=scheme_scope,
+                            group_id=str(uuid.uuid4()),
+                            group_title=CATEGORY_TITLES.get(op["category"], ""),
+                            name=op["name"], content=content,
+                            category=op["category"],
+                            # 溯源标记为 AI 调整：_is_protected 据此区分人工与 AI 来源，
+                            # 避免 AI 新增的事实在下次提取时被当人工录入保护下来。
+                            source_file="AI调整",
+                            is_simulated=False,
+                            confidence=1.0,
+                            is_resolved=True,
+                        ))
+                    applied["added"] += 1
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
         # ✅ 2026-09-29：项目级（scheme_scope 为空）调整此前不失效任何缓存，
         #    与 create_fact / update_fact / delete_fact 口径对齐。
         await _invalidate_fact_scope_cache(db, scheme_scope, str(real_pid))
@@ -2241,6 +2361,13 @@ async def list_documents(
     sql += " WHERE project_id=?"
     sql += " ORDER BY created_at DESC"
     cur = await db.execute(sql, params)
+    # ✅ P1（R13 漏改 · 2026-10-05）：读路径判空。此前直接 `await cur.fetchall()`
+    #    → AttributeError → 500。**不得**降级成空列表 —— 前端会把「数据库瞬时
+    #    故障」显示成「项目下没有资料」，用户据此重新上传或去查为什么文件丢了，
+    #    而文件其实完好在库。503 语义 = 可重试的暂不可用（同 _load_doc 口径）。
+    if cur is None:
+        logger.warning("查询文档列表失败（db.execute 返回 None），project=%s", real_pid)
+        raise HTTPException(503, "文档服务暂时不可用，请稍后重试")
     rows = [dict(r) for r in await cur.fetchall()]
     # ✅ 增强：解析器诊断告警（JSON 列 → 数组回传，畸形数据容错为空数组）
     for r in rows:
@@ -2453,16 +2580,33 @@ def _is_truncated(text_len) -> bool:
     return n >= MAX_PARSED_CHARS or n in _LEGACY_PARSE_LIMITS
 
 
+# Windows 保留设备名：不区分大小写，且「主名命中即保留」，带任意扩展名
+# （CON.txt / NUL.doc）在 Windows 上仍指向设备，落盘会失败或写入错误位置。
+_WINDOWS_RESERVED_STEMS = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
 def _safe_filename(raw: str) -> str:
-    """清洗上传文件名：剥离路径（防目录穿越）、去除非法字符与控制字符。
+    """清洗上传文件名：剥离路径（防目录穿越）、去除非法字符与控制字符、
+    规避 Windows 保留设备名。
 
     ✅ BUG 修复：旧实现直接用客户端提供的 filename 参与路径拼接与落盘。
     部分客户端（旧版 IE/某些 HTTP 库）会携带完整路径（如 "C:\\a\\b.docx"），
     在 Windows 上会导致落盘路径被篡改；控制字符与通配符亦会造成写盘失败。
+    ✅ 加固：CON/NUL/PRN/AUX/COM1-9/LPT1-9（含带扩展名形式）此前漏网，
+    在 Windows 落盘时会命中设备名（如 NUL）导致文件静默丢失；统一加下划线前缀。
     """
     name = (raw or "").replace("\\", "/").split("/")[-1]
     name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip().strip(".")
-    return name or "uploaded_file"
+    if not name:
+        return "uploaded_file"
+    stem = name.split(".", 1)[0].strip().upper()
+    if stem in _WINDOWS_RESERVED_STEMS:
+        name = f"_{name}"
+    return name
 
 
 def _signature_valid(ftype: str, prefix: bytes) -> bool:
@@ -2593,7 +2737,7 @@ async def upload_documents(
     quota_files: list[str] = []
 
     try:
-        for f in files:
+        for _idx, f in enumerate(files):
             raw_name = f.filename or "uploaded_file"
             fname = _safe_filename(raw_name)
             ftype = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
@@ -2638,6 +2782,17 @@ async def upload_documents(
                     pass
                 quota_files.append(raw_name)
                 quota_exceeded = True
+                # ✅ P2（2026-10-05 · 静默丢文件名）：`break` 不只停掉本文件，
+                #    还会跳过**排在触发文件之后的全部剩余文件** —— 它们既不在
+                #    too_many / oversize / unsupported 里，也不在 quota_files 里。
+                #    实测：一次上传 10 个文件、第 3 个触顶时，响应里只点名 1 个，
+                #    其余 6 个在任何字段里都不出现（用户以为传上去了，刷新后也
+                #    找不到，且没有任何提示说明它们没被保存）。
+                #    这些文件与触发文件同因（累计配额触顶后停止处理）未保存，
+                #    一并登记进 quota_files —— 既有的提示文案「超出部分未保存
+                #    （…）」无需改动即可覆盖，前端 `quota_files` 消费逻辑不变。
+                quota_files.extend((x.filename or "uploaded_file")
+                                   for x in files[_idx + 1:])
                 break
             total_bytes += size
             written.append(fpath)
@@ -2648,6 +2803,14 @@ async def upload_documents(
                 "SELECT id, file_path FROM project_documents "
                 "WHERE project_id=? AND file_name=?",
                 (real_pid, fname))
+            # ✅ P1（R13 漏改 · 2026-10-05）：返回 None 时下方 `cur.fetchall()`
+            #    抛 AttributeError，被外层 except 接住 → rollback + 原样上抛 →
+            #    用户拿到 500 且只有一句「上传保存失败」，看不出是数据库瞬时
+            #    故障（可重试）还是自己的文件有问题。改抛 503（可重试）。
+            #    外层 except 的回滚 + 已落盘文件清理仍会执行，不会留孤儿。
+            if cur is None:
+                logger.warning("同名文档查询失败（db.execute 返回 None），project=%s", real_pid)
+                raise HTTPException(503, "文档服务暂时不可用，请稍后重试")
             for old in await cur.fetchall():
                 old_path = old["file_path"] if "file_path" in old.keys() else ""
                 safe_old = _managed_upload_path(old_path)
@@ -2907,6 +3070,53 @@ async def _mark_parse_failed(db, doc_id: str, reason: str) -> None:
         logger.exception("标记文档 %s 解析失败状态失败（可忽略）", doc_id)
 
 
+async def _persist_parse_result(
+    db,
+    doc_id: str,
+    stored: str,
+    elapsed: float,
+    warnings: list,
+    diag: dict,
+    truncated: bool,
+) -> bool:
+    """✅ 解析成功结果的唯一落库口径（重构 2026-10-04）。
+
+    单文档解析与「解析全部」此前各写了一份字段完全相同的 UPDATE，历史上二者
+    已多次发生口径漂移（parse_time / parse_truncated / 截断判定都曾不一致，
+    对应「解析用时为空」「截断静默漏报」等已修复缺陷）。抽到此处后，写库字段
+    只此一份，两条链路天然保持一致：
+      - parsed_markdown：已按 MAX_PARSED_CHARS 截断的文本；
+      - parse_time：解析耗时；parse_warnings：诊断告警（含截断说明）；
+      - file_type：解析器按文件头嗅探的真实类型，空值不覆盖原值；
+      - parse_status='success'：独立于四层入库成败，杜绝状态矛盾；
+      - parse_truncated：字数截断或解析器级截断（PDF 截页/表格行数截断）。
+
+    ✅ P1（R13 写路径漏改 · 2026-10-05）：本函数是**解析正文唯一的落库点**，
+       返回值此前被丢弃 —— `db.execute()` 返回 None（R13）时 UPDATE 没执行，
+       调用方照样往下走 `_ingest_parsed_doc`（它从库里读到空 parsed_markdown
+       → 四层落空）、照样回 `{"ok": True, "text_len": N}`，**用户看着「解析
+       成功、N 字」，刷新后列表里该文档仍是「待解析」、正文为 0 字**，且日志
+       无任何痕迹。现改为显式返回是否写入成功，由调用方决定失败语义：
+       单份解析 → 503（明确告知重试）；批量解析 → 计入 failed 并落
+       parse_status='failed'（与其它失败原因同口径）。
+    """
+    cur = await db.execute(
+        "UPDATE project_documents SET parsed_markdown=?, parse_time=?, parse_warnings=?,"
+        " file_type=COALESCE(NULLIF(?, ''), file_type), parse_status='success',"
+        " parse_truncated=? WHERE id=?",
+        (stored, elapsed, dump_parse_warnings(warnings),
+         str((diag or {}).get("file_type") or "").strip().lower(),
+         int(bool(truncated)), doc_id))
+    if cur is None:
+        logger.warning(
+            "解析结果落库未生效（db.execute 返回 None，R13），正文未写入：%s", doc_id)
+        # ⚠️ 不 commit：没有成功的语句要提交，提交只会把上一次语句的残留
+        #    事务上下文固化（见 doc_pipeline.py:322 同款告警的理由）。
+        return False
+    await db.commit()
+    return True
+
+
 async def _mark_project_facts_stale(db, project_id: str) -> int:
     """资料来源发生变化后，保守标记项目下全部事实为 stale。
 
@@ -2975,6 +3185,12 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
     async with _doc_parse_guard(doc_id):
         cur = await db.execute(
             "SELECT parsed_markdown FROM project_documents WHERE id=?", (doc_id,))
+        # ✅ P1（R13 漏改 · 2026-10-05）：读路径判空。直接 fetchone →
+        #    AttributeError → 500（且用户只看到「解析失败」的裸错误，看不出是
+        #    数据库瞬时故障还是文件问题）。503 = 可重试，与 _load_doc 同口径。
+        if cur is None:
+            logger.warning("读取解析状态失败（db.execute 返回 None），doc=%s", doc_id)
+            raise HTTPException(503, "文档服务暂时不可用，请稍后重试")
         _cur = await cur.fetchone()
         if _cur and _cur["parsed_markdown"] and not force:
             # ✅ BUG 修复（2026-09-25）：短路返回前先自修复陈旧的 parse_status
@@ -3039,17 +3255,14 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
         # ✅ F2（2026-09-26）：字数截断与解析器级截断（PDF 截页/表格截行）一并
         #    持久化到 parse_truncated，使列表接口能直接读取、刷新后不漏报。
         truncated = char_truncated or bool(diag.get("truncated"))
-        await db.execute(
-            "UPDATE project_documents SET parsed_markdown=?, parse_time=?, parse_warnings=?,"
-            " file_type=COALESCE(NULLIF(?, ''), file_type), parse_status='success',"
-            " parse_truncated=? WHERE id=?",
-            (stored, _elapsed, dump_parse_warnings(parser_warnings),
-             # ✅ 修复（2026-09-18）：回写解析器嗅探出的真实类型（无扩展名/被改名的
-             #    PDF/图片按文件头识别）—— 旧实现只用文件后缀推导值落库，列表展示
-             #    的格式与实际解析类型不一致。
-             str(diag.get("file_type") or "").strip().lower(),
-             int(truncated), doc_id))
-        await db.commit()
+        # ✅ 重构：成功结果统一走 _persist_parse_result，与「解析全部」同口径
+        # ✅ P1（R13 写路径 · 2026-10-05）：落库未生效时**不能**继续 —— 后面的
+        #    _ingest_parsed_doc 会从库里读到空正文、result 也会回 ok=True+text_len，
+        #    用户看到「解析成功 N 字」而刷新后是 0 字。503 让用户明确重试。
+        if not await _persist_parse_result(
+                db, doc_id, stored, _elapsed, parser_warnings, diag, truncated):
+            raise HTTPException(
+                503, "解析结果保存失败（数据库暂时不可用），请稍后重试")
         # ✅ 四层存储（阶段2+3）：解析层产物落盘 + 分块入库（失败不阻断解析主结果）
         layer_info = await _ingest_parsed_doc(
             db, doc_id, row["project_id"], fname, _elapsed, diag,
@@ -3109,6 +3322,12 @@ async def parse_all_documents(
     # ✅ 顺序固定：批量解析进度与失败列表按上传先后给出，避免 SQLite 返回顺序漂移
     sql += " ORDER BY created_at, id"
     cur = await db.execute(sql, (real_pid,))
+    # ✅ P1（R13 漏改 · 2026-10-05）：读路径判空。降级成空 pending 列表会回
+    #    「所有文档均已解析」—— 对着一个根本没读到的库宣布全解析完毕，是比
+    #    500 更糟的假结论。503 让前端可重试。
+    if cur is None:
+        logger.warning("查询待解析文档失败（db.execute 返回 None），project=%s", real_pid)
+        raise HTTPException(503, "文档服务暂时不可用，请稍后重试")
     pending = [dict(r) for r in await cur.fetchall()]
     for _p in pending:
         _p["force_reparse"] = bool(force)
@@ -3196,15 +3415,17 @@ async def parse_all_documents(
                 #    消除四层入库失败导致 parse_status 陈旧、下游误判"未解析"。
                 # ✅ F2（2026-09-26）：与单文档解析一致，持久化截断标记
                 doc_truncated = char_truncated or bool(diag.get("truncated"))
-                await db.execute(
-                    "UPDATE project_documents SET parsed_markdown=?, parse_time=?,"
-                    " parse_warnings=?,"
-                    " file_type=COALESCE(NULLIF(?, ''), file_type), parse_status='success',"
-                    " parse_truncated=? WHERE id=?",
-                    (stored, _elapsed, dump_parse_warnings(all_warnings),
-                     str(diag.get("file_type") or "").strip().lower(),
-                     int(doc_truncated), doc["id"]))
-                await db.commit()
+                # ✅ 重构：成功结果统一走 _persist_parse_result，与单文档解析同口径
+                # ✅ P1（R13 写路径 · 2026-10-05）：落库未生效时不得计入 parsed ——
+                #    否则响应报「成功 N 份」而库里正文是空的（假成功）。归入 failed
+                #    并落 parse_status='failed'，与其它失败原因同口径、可重试。
+                if not await _persist_parse_result(
+                        db, doc["id"], stored, _elapsed, all_warnings, diag,
+                        doc_truncated):
+                    _reason = "解析结果保存失败（数据库暂时不可用），请重试"
+                    await _mark_parse_failed(db, doc["id"], _reason)
+                    failed.append({"file_name": doc["file_name"], "reason": _reason})
+                    continue
                 # ✅ 四层存储（阶段2+3）：逐文档落盘解析层 + 分块（失败不阻断批量）
                 await _ingest_parsed_doc(
                     db, doc["id"], doc["project_id"], doc["file_name"],

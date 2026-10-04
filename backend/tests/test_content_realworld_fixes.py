@@ -14,7 +14,6 @@
 import inspect
 
 import pytest
-
 from app.routers import sse_handlers as sh
 from app.services import content_runtime as crt
 from app.services.ai.prompts._registry import render

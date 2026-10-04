@@ -8,13 +8,12 @@
 """
 import uuid
 
-import pytest
-
 import app.db as _appdb
-from app.db import get_conn, init_db, close_db
+import pytest
+from app.db import close_db, get_conn, init_db
 from app.models import SchemeReviewIn
 from app.routers.compliance import readiness_overview
-from app.routers.review import submit_scheme_review, review_summary
+from app.routers.review import review_summary, submit_scheme_review
 
 
 @pytest.fixture

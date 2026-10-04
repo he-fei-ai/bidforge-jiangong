@@ -15,16 +15,16 @@
 from __future__ import annotations
 
 import pytest
-
 from app.services.ai.prompts._registry import (
     _ALL_PROMPTS,
-    extract_variables,
     extract_user_variables,
+    extract_variables,
     get_prompt_variables,
-    list_prompts as _list_prompts,
     validate_prompt_variables,
 )
-
+from app.services.ai.prompts._registry import (
+    list_prompts as _list_prompts,
+)
 
 # 含 SHARED_* 的真实注册模板（outline_short_system 引用了 3 个共享片段）
 SHARED_KEYS = {
@@ -125,7 +125,7 @@ class TestAuditDiffExcludesShared:
             assert res["added_variables"] == []
             assert res["removed_variables"] == []
         finally:
-            from app.services.ai.prompts._registry import reset_prompt
             from app.services.ai.prompts._cache import reload_prompt_cache
+            from app.services.ai.prompts._registry import reset_prompt
             reset_prompt(key)
             reload_prompt_cache()

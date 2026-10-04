@@ -9,7 +9,6 @@ import json
 import uuid
 
 import pytest
-
 from app.services.outline_utils import normalize_outline_json
 
 
@@ -86,8 +85,8 @@ class TestSaveAsLibraryNormalizes:
 
     async def test_empty_outline_rejected(self, db_conn):
         """PRD 9.2：空目录不得沉淀为目录库。"""
-        from fastapi import HTTPException
         from app.routers.upload_outline import save_as_library
+        from fastapi import HTTPException
         await db_conn.execute(
             "INSERT INTO uploaded_outlines (id, file_name, status) VALUES ('u10','z.docx','parsed')")
         await db_conn.commit()
@@ -96,8 +95,8 @@ class TestSaveAsLibraryNormalizes:
         assert ei.value.status_code == 400
 
     async def test_all_invalid_nodes_rejected(self, db_conn):
-        from fastapi import HTTPException
         from app.routers.upload_outline import save_as_library
+        from fastapi import HTTPException
         await db_conn.execute(
             "INSERT INTO uploaded_outlines (id, file_name, status) VALUES ('u11','z.docx','parsed')")
         await db_conn.commit()
@@ -112,8 +111,8 @@ class TestSaveAsLibraryNormalizes:
 @pytest.mark.asyncio
 class TestCreateLibraryNormalizes:
     async def test_create_normalizes_outline_json(self, db_conn):
-        from app.routers.outline_library import create_library
         from app.models import OutlineLibraryCreate
+        from app.routers.outline_library import create_library
         data = OutlineLibraryCreate(
             name="库A", outline_json=json.dumps(_deep5(), ensure_ascii=False))
         created = await create_library(data, db_conn)
@@ -127,8 +126,8 @@ class TestCreateLibraryNormalizes:
         旧实现 normalize 后拿到 "[]" 也照样 INSERT —— 目录库列表出现"看似正常、
         点进去空白"的库，套用后把方案目录清空且无任何提示。
         """
-        from app.routers.outline_library import create_library
         from app.models import OutlineLibraryCreate
+        from app.routers.outline_library import create_library
         from fastapi import HTTPException
         for bad in ("[]", "not-json", '{"foo": 1}', '["bad", 1]'):
             with pytest.raises(HTTPException) as ei:

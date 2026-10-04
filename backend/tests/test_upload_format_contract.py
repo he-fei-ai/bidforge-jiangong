@@ -23,7 +23,6 @@ import re
 from pathlib import Path
 
 import pytest
-
 from app.services import file_parser as fp
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]

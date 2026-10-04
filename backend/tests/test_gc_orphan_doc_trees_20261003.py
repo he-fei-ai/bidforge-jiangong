@@ -9,7 +9,6 @@ import uuid
 from pathlib import Path
 
 import pytest
-
 from tools import gc_orphan_doc_trees as gc
 
 # ---------------------------------------------------------------- classify

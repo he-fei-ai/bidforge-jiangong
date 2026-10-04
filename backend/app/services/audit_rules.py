@@ -51,7 +51,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
 # 规则集版本：规则增删改后 +1（前端据此提示"规则已更新，建议重新预检"）

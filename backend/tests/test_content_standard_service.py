@@ -9,13 +9,18 @@
 - 型号冲突（两模式）、占位符计数、降级不抛异常。
 """
 import pytest
-
 from app.services.content_standard import (
-    PRECISE, FUZZY,
-    normalize_standard, resolve_effective_standard,
-    build_system_block, build_user_block, build_continue_hint,
-    strip_code_blocks, extract_number_tokens, extract_model_tokens,
+    FUZZY,
+    PRECISE,
+    build_continue_hint,
+    build_system_block,
+    build_user_block,
+    extract_model_tokens,
+    extract_number_tokens,
+    normalize_standard,
+    resolve_effective_standard,
     standard_report,
+    strip_code_blocks,
 )
 
 

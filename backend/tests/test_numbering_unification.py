@@ -15,7 +15,6 @@
 import json
 
 import pytest
-
 from app.services import numbering as nb
 from app.services.ai import json_response as jr
 from app.services.ai.heading_templates import ALPHABET as HT_ALPHABET
@@ -292,9 +291,9 @@ class TestSrcLine:
 # ============================================================
 class TestAppendixStyle:
     def test_style_outline_level_9_and_idempotent(self):
+        from app.routers.export import _get_or_add_appendix_heading_style
         from docx import Document
         from docx.oxml.ns import qn
-        from app.routers.export import _get_or_add_appendix_heading_style
         doc = Document()
         style = _get_or_add_appendix_heading_style(doc)
         ol = style.element.get_or_add_pPr().find(qn("w:outlineLvl"))

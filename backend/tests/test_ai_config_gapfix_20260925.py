@@ -15,12 +15,11 @@ B7 ``scene`` 筛选缺前导列索引 → 补 ``idx_ai_audit_scene_created`` 并
 """
 import contextlib
 
-import pytest
-
-import app.services.ai.provider_factory as pf
 import app.routers.ai_config.config as cfg_module
-from app.routers import ai_config as ai_router
+import app.services.ai.provider_factory as pf
+import pytest
 from app.models import ActiveEnvIn, ConfigImportIn, SceneRouteUpdate
+from app.routers import ai_config as ai_router
 from app.services.crypto import encrypt_api_key
 
 

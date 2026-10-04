@@ -8,24 +8,17 @@ from __future__ import annotations
 import copy
 import logging
 import math
+import re
 from io import BytesIO
 
 from PIL import Image, ImageDraw
 
 from .mermaid_common import (
-    _build_gantt_marks,
     _draw_text_center,
-    _fit_text_with_ellipsis,
     _image_font,
     _image_to_stream,
     _render_hq,
-    _text_height,
-    _text_width,
-    _wrap_text,
 )
-
-
-import re
 
 logger = logging.getLogger(__name__)
 

@@ -25,15 +25,14 @@ from __future__ import annotations
 import inspect
 
 import pytest
-
-from app.services.chart_validators import (
-    detect_mermaid_chart_type,
-)
-from app.services.content_blocks import _parse_content_blocks
 from app.routers._chart_pipeline import (
     _scan_chart_fences_full,
     build_inline_chart_plan,
 )
+from app.services.chart_validators import (
+    detect_mermaid_chart_type,
+)
+from app.services.content_blocks import _parse_content_blocks
 
 
 def _export_chart_types(content: str) -> list[str]:
@@ -123,7 +122,8 @@ class TestSharedSelfReferenceFirstSave:
     ])
     def test_first_save_self_reference_is_error(self, key):
         from app.services.ai.prompts._registry import (
-            _ALL_PROMPTS, validate_prompt_content,
+            _ALL_PROMPTS,
+            validate_prompt_content,
         )
         assert key in _ALL_PROMPTS
         issues = validate_prompt_content(key, f"见 {{{key}}} 的要求")
@@ -168,7 +168,8 @@ class TestSharedSelfReferenceFirstSave:
     def test_factory_defaults_have_no_self_reference_error(self):
         """出厂默认不得含自引用 error（否则每次保存都弹无意义告警）。"""
         from app.services.ai.prompts._registry import (
-            _ALL_PROMPTS, validate_prompt_content,
+            _ALL_PROMPTS,
+            validate_prompt_content,
         )
 
         for key, meta in _ALL_PROMPTS.items():
@@ -190,7 +191,8 @@ class TestContractCheckFalsePositiveParity:
         """出厂默认逐个模板断言「零问题」——修复前 `content_generation_system`
         会因 `$p_{max}$`（LaTeX 下标示例）报出 `contract_var_added`。"""
         from app.services.ai.prompts._registry import (
-            _ALL_PROMPTS, validate_prompt_content,
+            _ALL_PROMPTS,
+            validate_prompt_content,
         )
 
         offenders = {}
@@ -204,7 +206,8 @@ class TestContractCheckFalsePositiveParity:
     def test_latex_and_json_examples_are_not_contract_drift(self):
         """`$p_{max}$` / `{"min": 1}` 属示例，不得报成契约漂移。"""
         from app.services.ai.prompts._registry import (
-            _ALL_PROMPTS, validate_prompt_content,
+            _ALL_PROMPTS,
+            validate_prompt_content,
         )
 
         default = _ALL_PROMPTS["content_generation_system"]["default_content"]
@@ -220,7 +223,8 @@ class TestContractCheckFalsePositiveParity:
     def test_real_contract_drift_still_reported(self, mutate, expect):
         """反向：真实契约漂移必须仍然报出（过滤不得掩盖真问题）。"""
         from app.services.ai.prompts._registry import (
-            _ALL_PROMPTS, validate_prompt_content,
+            _ALL_PROMPTS,
+            validate_prompt_content,
         )
 
         default = _ALL_PROMPTS["content_generation_system"]["default_content"]

@@ -15,7 +15,6 @@ AI 正常返回但校验不合格即直接判 failed。本轮按 ``repair_agent`
 5. **不变量：最多 2 次调用** —— 无论开关怎么开都不许出现第 3 次。
 """
 import pytest
-
 from app.services import review_autofix
 from app.services.content_utils import text_word_count, word_status_for
 

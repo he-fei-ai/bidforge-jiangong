@@ -15,9 +15,18 @@ import re
 #        超长章节误判 over / 续写触发阈值失真；
 #      · `````` 4 反引号围栏只有前 3 个反引号参与匹配，闭合后残留 1 个反引号
 #        字符被计入字数。
-#   现改为逐行有穷状态机（与 find_unclosed_fences 同一套 `_FENCE_LINE_RE`，
-#   闭合要求同种字符且长度 ≥ 开围栏），两种围栏统一剔除；未闭合围栏按
-#   「从开围栏处截断」处理（与旧口径一致，regression 见 test_content_utils）。
+# ✅ 2026-10-04 修复（BUG-3 · 与 content_blocks.parse_fence_line 语义统一）：
+#   旧实现按 CommonMark §4.7 严格判闭合（同种字符 + 长度 ≥ 开围栏 + 无标签），
+#   与 `content_blocks.parse_fence_line` / `read_fenced_block` 的**宽松**语义
+#   （同种字符即可闭合，不要求长度、允许带标签）不一致，导致 AI 输出高频的
+#   「4 反引号开 + 3 反引号闭」模式：
+#     · `content_blocks` 侧判为已闭合 → 图表正常登记、正常导出；
+#     · 本模块 `find_unclosed_fences` 侧判为未闭合 → `auto_fix_unclosed_fences`
+#       在 `_persist_section`（`sse_handlers.py:5314`）追加一个假闭合围栏，
+#       落库后出现两个相邻闭围栏、图号虚跳、渲染失败占号。
+#   现统一为宽松语义（与 content_blocks 一致），从根上消除两侧分歧。
+#   注：宽松语义下同种字符的短围栏会被视为闭合，未闭合围栏扫描时不再向后
+#   解析——这与 `read_fenced_block` 完全一致，是本模块设计取舍。
 _FENCE_RE = None  # deprecated：请用 strip_fenced_code_blocks
 
 # ---------- 字数口径常量（全项目唯一口径，避免魔法数字分散） ----------
@@ -152,6 +161,10 @@ def fence_spans(content: str | None) -> list[tuple[int, int]]:
     （CommonMark §4.7）：反引号（```）与波浪线（~~~）分别处理、闭合需同种字符
     且长度 ≥ 开围栏、围栏内不解析新围栏、未闭合的围栏**不产出区间**。
 
+    注：本函数与 ``strip_fenced_code_blocks`` / ``find_unclosed_fences`` 保持
+    **严格** CommonMark 语义。宽松闭合（AI「4 反引号开 + 3 反引号闭」错配）
+    只在 ``auto_fix_unclosed_fences`` 落库防线中生效，详见其 docstring。
+
     用途：需要**按字符区间**保护代码围栏的调用方（如
     ``content_shrink.collect_protected_ranges`` —— "压缩禁区"必须知道围栏的
     确切起止位置，而非只剔除文本）。
@@ -213,6 +226,9 @@ def strip_fenced_code_blocks(content: str | None) -> str:
       · 围栏内部不再解析新围栏；
       · 到达末尾仍未闭合时，从该开围栏起「截断」（其后内容均视为代码）。
 
+    注：本函数保持**严格** CommonMark 语义；宽松闭合（AI「4 反引号开 + 3 反引号
+    闭」错配）只在 ``auto_fix_unclosed_fences`` 落库防线中生效。
+
     结果按换行拼接，围栏外正文的换行结构整体保留（不吞行、不折叠）。
     注意：紧邻围栏行的空行/正文换行会因围栏整段移除而小幅变化 —— 这是
     有意为之（代码不参与正文字数口径），回归见 ``test_content_utils``。
@@ -268,6 +284,9 @@ def find_unclosed_fences(content: str) -> list[dict]:
         其它字符围栏均视为**代码内容**，只有匹配的开围栏闭合算数（CommonMark §4.7）；
       · 多个围栏按线性扫描处理，未闭合状态在到达文档末尾时结束。
 
+    注：本函数保持**严格** CommonMark 语义；宽松闭合（AI「4 反引号开 + 3 反引号
+    闭」错配）只在 ``auto_fix_unclosed_fences`` 落库防线中生效。
+
     Args:
         content: Markdown 正文。
 
@@ -319,6 +338,57 @@ def find_unclosed_fences(content: str) -> list[dict]:
     return unclosed
 
 
+def _find_unclosed_fences_lenient(content: str) -> list[dict]:
+    """宽松扫描未闭合围栏（仅用于 ``auto_fix_unclosed_fences`` 落库防线）。
+
+    语义与 ``content_blocks.parse_fence_line`` / ``read_fenced_block`` 完全
+    一致：**同种字符即可视为闭合**（不要求长度 ≥ 开围栏、也不排除带标签）。
+
+    用途：AI 输出高频出现「4 反引号开 + 3 反引号闭」错配。严格 CommonMark
+    语义下这被判为未闭合，但图表登记/导出侧（``read_fenced_block``）判为已
+    闭合、图表正常渲染。若 ``auto_fix_unclosed_fences`` 沿用严格判据，会在此
+    类块尾追加一个假闭合围栏，落库后出现「两个相邻闭围栏、图号虚跳、渲染
+    失败占号」。用宽松语义扫描即从根源消除这一分歧。
+
+    注：只在本函数内部使用，不改变 ``find_unclosed_fences``（对外仍提供严格
+    CommonMark 语义，用于字数/区间/内容保护等场景，那些场景需要严格语义
+    把「4 反引号开 + 3 反引号闭 + 4 反引号」正确识别为「内容 + 闭合」）。
+    """
+    if not content:
+        return []
+    lines = content.split("\n")
+    unclosed: list[dict] = []
+    i = 0
+    n_lines = len(lines)
+    while i < n_lines:
+        m = _FENCE_LINE_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        open_marker = m.group(1)
+        rest = m.group(2).strip()
+        ch = open_marker[0]
+        n = len(open_marker)
+        lang = rest.split()[0].lower() if rest else ""
+        open_line = i + 1
+        close_idx = -1
+        j = i + 1
+        while j < n_lines:
+            cm = _FENCE_LINE_RE.match(lines[j])
+            if cm is not None and cm.group(1)[0] == ch:
+                close_idx = j
+                break
+            j += 1
+        if close_idx < 0:
+            unclosed.append({
+                "line": open_line, "char": ch, "length": n,
+                "lang": lang, "marker": open_marker,
+            })
+            break  # 后面的行都在围栏内，不再是新围栏
+        i = close_idx + 1
+    return unclosed
+
+
 def auto_fix_unclosed_fences(
     content: str,
     *,
@@ -326,13 +396,26 @@ def auto_fix_unclosed_fences(
 ) -> tuple[str, list[dict]]:
     """在文档末尾补齐所有未闭合的 Markdown 代码围栏。
 
-    与 ``find_unclosed_fences`` 语义严格对应；仅「追加」操作，不改动已有正文
-    与已闭合块，保证：
+    仅「追加」操作，不改动已有正文与已闭合块，保证：
 
       · 幂等：修复后的正文再跑一次返回空日志与不变内容；
       · 确定性：结果只由输入决定，不依赖随机/时间；
       · 无损：不改字、不改标点、不改已闭合块内部；
       · 兼容：闭合标记用与开围栏**同种**字符（``` vs ~~~），长度对齐开围栏。
+
+    ✅ 2026-10-04 修复（BUG-3）：本函数改用**宽松**闭合扫描
+    （``_find_unclosed_fences_lenient``），与图表登记/导出/预检侧的
+    ``content_blocks.parse_fence_line`` / ``read_fenced_block`` 口径一致。
+    原因：AI 输出高频出现「4 反引号开 + 3 反引号闭」错配，图表三侧判为已
+    闭合、正常渲染，但本函数若沿用严格 CommonMark（要求闭围栏长度 ≥ 开围栏）
+    会将其误判为未闭合、追加一个假闭合围栏，落库后出现「两个相邻闭围栏、
+    图号虚跳、渲染失败占号」。放宽到「同种字符即可闭合」即从根源消除两侧
+    分歧。
+
+    其它扫描函数（``fence_spans`` / ``strip_fenced_code_blocks`` /
+    ``find_unclosed_fences``）仍保持严格 CommonMark 语义，因为它们的用途
+    （压缩禁区定位、字数口径、内容保护）需要严格识别「4 反引号开 + 3 反引号
+    短围栏行 + 4 反引号闭」里的短围栏行为代码内容。
 
     Args:
         content: 原始 Markdown 正文。
@@ -348,7 +431,7 @@ def auto_fix_unclosed_fences(
     """
     if not content:
         return content, []
-    unclosed = find_unclosed_fences(content)
+    unclosed = _find_unclosed_fences_lenient(content)
     if not unclosed:
         return content, []
     # 从原始内容剥离末尾空白，避免 ``` 与正文粘连

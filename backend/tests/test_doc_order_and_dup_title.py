@@ -14,13 +14,11 @@ import inspect
 import uuid
 from datetime import datetime
 
-import pytest
-
 import app.db as _appdb
+import pytest
 from app.db import get_conn, init_db
 from app.services.audit_rules import rule_catalog
 from app.services.preflight_engine import PreflightContext, check_completeness
-
 
 # ---------------------------------------------------------------------------
 # 夹具与工具

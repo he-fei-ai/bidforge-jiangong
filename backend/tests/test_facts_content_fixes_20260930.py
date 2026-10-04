@@ -39,9 +39,8 @@ import re
 import uuid
 from types import SimpleNamespace
 
-import pytest
-
 import app.db as _appdb
+import pytest
 from app.db import get_conn, init_db, safe_rowcount
 from app.routers import global_facts as gf
 from app.routers import sections as sec

@@ -8,11 +8,10 @@ P7：run_cross_check 的程序交叉校验冲突应**回写 global_facts.has_con
 import json
 import uuid
 
-import pytest
-
 import app.db as _appdb
-from app.db import get_conn, init_db
 import app.services.doc_pipeline.pipeline as pl
+import pytest
+from app.db import get_conn, init_db
 
 
 @pytest.fixture

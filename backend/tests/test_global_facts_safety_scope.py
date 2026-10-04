@@ -8,11 +8,10 @@
 import json
 import uuid
 
-import pytest
-from fastapi import HTTPException
-
 import app.routers.global_facts as gf
+import pytest
 from app.services.facts_extractor import build_injectable_facts_query
+from fastapi import HTTPException
 
 
 async def _seed_scope(db):

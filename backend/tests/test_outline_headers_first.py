@@ -18,10 +18,9 @@ import inspect
 import json
 import uuid
 
+import app.routers.sse_handlers as sh
 import pytest
 from fastapi import HTTPException
-
-import app.routers.sse_handlers as sh
 
 
 def _src_before_assemble() -> str:

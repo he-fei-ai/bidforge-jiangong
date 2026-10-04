@@ -12,11 +12,10 @@
 - CORS 预检 OPTIONS 不得被鉴权拦成 401（否则浏览器跨域调用整体失效）
 """
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
 from app.config import settings
 from app.middleware import setup_middleware
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 TOKEN = "s3cret-token-for-tests"
 

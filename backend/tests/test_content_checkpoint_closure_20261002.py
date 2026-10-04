@@ -31,7 +31,6 @@ import re
 from pathlib import Path
 
 import pytest
-
 from app.config import settings
 from app.services.audit_rules import RULE_MAP
 from app.services.content_checkpoint import (
@@ -498,7 +497,7 @@ class TestRewritePlaceholderMarks:
     def test_trailing_unit_kept_as_bracket_note(self):
         """紧随其后的单位保留为括号注记（避免遗留孤立单位）。"""
         out, _ = rewrite_placeholder_marks("基坑深度【待定】m")
-        assert out.endswith(f"（m）"), out
+        assert out.endswith("（m）"), out
         out2, _ = rewrite_placeholder_marks("宽度【待补充：宽度】mm")
         assert out2.endswith("（mm）"), out2
 
@@ -675,6 +674,7 @@ class TestCheckpointsEndpoint:
 
     def test_endpoint_payload(self):
         import asyncio
+
         from app.routers.compliance import list_checkpoint_constraints
         data = asyncio.run(list_checkpoint_constraints())
         assert set(data) >= {"rule_version", "groups", "channels", "items",

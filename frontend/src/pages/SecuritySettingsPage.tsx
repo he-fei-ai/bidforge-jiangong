@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+﻿import { useCallback, useEffect, useState } from "react";
 import {
   Alert, App, Button, Card, Divider, Input, Space, Tag, Typography,
 } from "antd";
@@ -8,7 +8,7 @@ import {
 } from "@ant-design/icons";
 
 import { systemApi, clearAuthShortCircuit } from "../api";
-import { hookAntdMessage } from "../utils/activityCenter";
+import { useAntdMessageHub } from "../utils/activityCenter";
 import { PageHero } from "../utils/ui";
 
 const { Title, Text, Paragraph } = Typography;
@@ -48,7 +48,7 @@ function maskToken(t: string): string {
 
 export default function SecuritySettingsPage() {
   const { message: _antdMsg } = App.useApp();
-  const msg = hookAntdMessage(_antdMsg, "访问凭据");
+  const msg = useAntdMessageHub(_antdMsg, "访问凭据");
 
   const [token, setToken] = useState<string>(() => readStoredToken());
   const [testing, setTesting] = useState(false);

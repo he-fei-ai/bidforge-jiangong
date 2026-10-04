@@ -13,11 +13,12 @@ import asyncio
 import re
 
 import pytest
-
 from app.services import repair_agent
 from app.services.ai.prompts import _registry as R
 from app.services.ai.prompts._registry import (
-    PROMPT_VARIABLE_CONTRACTS, _ALL_PROMPTS, check_prompt_variables,
+    _ALL_PROMPTS,
+    PROMPT_VARIABLE_CONTRACTS,
+    check_prompt_variables,
 )
 from app.services.ai.prompts.illustration import ILLUSTRATION_PROMPT_OPTIMIZE  # noqa: F401
 
@@ -103,6 +104,7 @@ class TestProjectFactsBudgetSingleSource:
     def test_no_magic_number_slice_on_project_facts(self):
         """project_facts 的切片必须走常量，仓内不得残留字面量切片。"""
         import pathlib
+
         import app as app_pkg
         src = (pathlib.Path(app_pkg.__file__).parent
                / "routers" / "sse_handlers.py").read_text(encoding="utf-8")
@@ -116,6 +118,7 @@ class TestProjectFactsBudgetSingleSource:
     def test_constants_actually_consumed(self):
         """两个常量真的被消费（防空断言：只定义不使用等于没接线）。"""
         import pathlib
+
         import app as app_pkg
         src = (pathlib.Path(app_pkg.__file__).parent
                / "routers" / "sse_handlers.py").read_text(encoding="utf-8")
@@ -147,6 +150,7 @@ class TestDeadIllustrationRemoved:
         """
         import ast
         import pathlib
+
         import app as app_pkg
         root = pathlib.Path(app_pkg.__file__).parent
         syms = {"ILLUSTRATION_PLAN_SYSTEM", "ILLUSTRATION_ARRANGE_SYSTEM",

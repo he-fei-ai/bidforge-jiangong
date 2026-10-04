@@ -80,9 +80,8 @@ class TestBodySubheadingFormatAlignment:
 class TestHeadingNonItalic:
     def test_finalize_kills_inline_italic(self):
         """标题内嵌 *斜体* 经行内渲染后局部倾斜，_finalize_heading_runs 必须全部复位。"""
+        from app.routers.export import _add_runs_with_inline_format, _finalize_heading_runs
         from docx import Document
-        from app.routers.export import (_add_runs_with_inline_format,
-                                        _finalize_heading_runs)
         p = Document().add_paragraph()
         _add_runs_with_inline_format(p, "第一章 *编制* 说明")
         # 前置：内联斜体确已被行内渲染设为 italic
@@ -93,8 +92,8 @@ class TestHeadingNonItalic:
 
     def test_finalize_on_explicit_italic_runs(self):
         """直接构造倾斜 run 也应被强制复位（验证兜底逻辑本身）。"""
-        from docx import Document
         from app.routers.export import _finalize_heading_runs
+        from docx import Document
         p = Document().add_paragraph()
         r = p.add_run("第一章 编制综合说明")
         r.italic = True

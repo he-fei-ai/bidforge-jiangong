@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 
 import pytest
-
 from app.services.ai import mermaid_renderer
 
 

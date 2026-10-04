@@ -23,7 +23,6 @@ import ast
 import pathlib
 
 import pytest
-
 from app.services import bid_analysis_service as basvc
 from app.services import scheme_classification as sc
 
@@ -492,12 +491,12 @@ class TestAntiRebidRedlines:
         断言**渲染后**的模板而不是源码：占位符替换发生在注册期，只看源码
         会把「常量引用了但替换漏了」这种最危险的情况漏放过去。
         """
-        from app.services.ai.prompts._shared import SHARED_SCOPE_RULES_BRIEF
         # ✅ R38：必须用**运行时**出口（_cache.get_prompt，DB 优先 + 共享片段
         #    解析），不能用 _registry.get_prompt —— 后者只返回注册表里的裸模板，
         #    不解析 {SHARED_*}，对 outline 侧本来就不展开（{SHARED_SCOPE_RULES}
         #    一直是原样返回）。生产代码一律走前者（render() 即转发到 _cache）。
         from app.services.ai.prompts._cache import get_prompt
+        from app.services.ai.prompts._shared import SHARED_SCOPE_RULES_BRIEF
         text = get_prompt(key) or ""
         assert "<<SCOPE_RULES>>" not in text, f"{key} 的占位符未被替换"
         assert "{SHARED_SCOPE_RULES_BRIEF}" not in text, \
@@ -517,7 +516,8 @@ class TestAntiRebidRedlines:
         这里锁住「同一术语集合」，措辞可以各自优化。
         """
         from app.services.ai.prompts._shared import (
-            SHARED_SCOPE_RULES, SHARED_SCOPE_RULES_BRIEF,
+            SHARED_SCOPE_RULES,
+            SHARED_SCOPE_RULES_BRIEF,
         )
         terms = ("招标文件", "投标文件", "评标办法", "评分标准",
                  "废标条件", "投标须知", "商务条款")

@@ -9,11 +9,10 @@ P1-3：方案复制必须携带扩展列（page_ref/chapter 等溯源与四维�
 import json
 import uuid
 
-import pytest
-
 import app.db as _appdb
-from app.db import get_conn, init_db
 import app.services.doc_pipeline.pipeline as pl
+import pytest
+from app.db import get_conn, init_db
 from app.routers.schemes import duplicate_scheme
 
 

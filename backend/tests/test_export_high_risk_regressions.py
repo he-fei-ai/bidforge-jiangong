@@ -12,14 +12,13 @@ import re
 from io import BytesIO
 from pathlib import Path
 
+import app.routers.export as export_mod
 import pytest
+from app.config import settings as _unused_settings  # noqa: F401  # 保持测试导入路径与导出模块一致
+from app.routers.export import _DEFAULT_HEADING_STYLES  # noqa: F401  # _prep 内构造 heading_styles 使用
 from docx import Document
 from fastapi.responses import FileResponse
 from PIL import Image
-
-import app.routers.export as export_mod
-from app.config import settings as _unused_settings  # noqa: F401  # 保持测试导入路径与导出模块一致
-
 
 _CODE = "graph TD\n  A[开始] --> B[完成]"
 

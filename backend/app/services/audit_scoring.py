@@ -28,7 +28,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.services.audit_rules import (
-    DIMENSIONS, DIMENSION_MAP, RULE_VERSION, SEVERITY_ORDER, SEVERITY_PENALTY,
+    DIMENSIONS,
+    RULE_VERSION,
+    SEVERITY_ORDER,
+    SEVERITY_PENALTY,
     grade_of,
 )
 

@@ -14,15 +14,13 @@ import io
 import sys
 import zipfile
 
-import pytest
-
 import app.services.file_parser as fp
+import pytest
 from app.services.file_parser import (
     ParseError,
     parse_file_content,
     parse_file_content_ex,
 )
-
 
 # ---------------------------------------------------------------------------
 # 压缩炸弹闸门

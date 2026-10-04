@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 后台任务运行状态栏（左侧菜单栏底部，健康状态条上方）
  *
  * 数据源：优先 SSE /system/activity/stream，失败/断线后回退到 GET /api/v1/system/activity（3s 轮询）
@@ -30,7 +30,7 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { systemApi, tasksApi } from "../api";
-import { hookAntdMessage } from "../utils/activityCenter";
+import { useAntdMessageHub } from "../utils/activityCenter";
 import { createSseBatcher, type SseBatcher } from "../utils/sseBatcher";
 
 type TaskItem = {
@@ -280,7 +280,7 @@ function TaskRow({
 
 function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
   const { message: _antdMsg } = App.useApp();
-  const message = hookAntdMessage(_antdMsg, "后台任务");
+  const message = useAntdMessageHub(_antdMsg, "后台任务");
   const [activity, setActivity] = useState<Activity | null>(null);
   const [expanded, setExpanded] = useState(false);
   /** task_id -> 正在下发的控制动作，用于按钮 loading 与防重复点击 */

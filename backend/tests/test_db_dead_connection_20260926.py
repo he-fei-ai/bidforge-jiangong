@@ -19,9 +19,8 @@
 import asyncio
 
 import aiosqlite
-import pytest
-
 import app.db as db
+import pytest
 
 
 class TestDeadConnDetection:

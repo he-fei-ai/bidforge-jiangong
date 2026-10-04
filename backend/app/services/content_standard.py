@@ -26,8 +26,6 @@ from app.services.content_fuzzy import (
     HEDGE_PREFIX_RE,
     HEDGE_SUFFIX_RE,
     LIMIT_PHRASES,
-    build_fuzzy_rules_for_standard,
-    build_no_placeholder_block,
     detect_fuzzy_expressions,
     scan_fabricated_dates,
     scan_missing_reveal,

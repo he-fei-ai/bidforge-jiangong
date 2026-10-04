@@ -27,27 +27,43 @@ import sqlite3
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
+from app.config import settings
 from app.db import get_db, safe_rowcount, settle_global_conn
+from app.services import scheme_classification as sc
 from app.services.ai.provider_factory import chat_with_fallback
-from app.services.ai.task_registry import (
-    register_task, update_progress, finish_task,
-    request_control, wait_resume, is_stopped, has_active_task,
-)
 from app.services.ai.sse_utils import with_heartbeat
-from app.services.bid_analysis_service import (
-    ANALYSIS_ITEMS, REQUIRED_ITEM_IDS, MARKDOWN_MISSING_RESULT,
-    get_item_def, get_item_prompt, build_item, build_system_prompt,
-    build_system_messages,
-    split_for_analysis, is_missing_result,
-    AnalysisConfig, get_all_items, get_groups,
-    DEFAULT_CHUNK_SIZE, build_evidence_json,
-    # ✅ 2026-09-30（第十一轮 · 招标响应域 + 断点续跑）：域注册表与主键唯一出口
-    EXTRACTION_DOMAINS, BID_RESPONSE_GROUPS,
-    build_item_pk, parse_item_pk, get_items_by_domain,
-    get_groups_by_domain, get_item_domain, get_item_fields, build_json_template,
-    is_missing_technical_score_items, build_task_prompt,
+from app.services.ai.task_registry import (
+    finish_task,
+    has_active_task,
+    is_stopped,
+    register_task,
+    update_progress,
+    wait_resume,
 )
-from app.services.bid_section_detector import detect_bid_sections
+from app.services.bid_analysis_service import (
+    ANALYSIS_ITEMS,
+    DEFAULT_CHUNK_SIZE,
+    # ✅ 2026-09-30（第十一轮 · 招标响应域 + 断点续跑）：域注册表与主键唯一出口
+    EXTRACTION_DOMAINS,
+    MARKDOWN_MISSING_RESULT,
+    REQUIRED_ITEM_IDS,
+    AnalysisConfig,
+    build_evidence_json,
+    build_item,
+    build_item_pk,
+    build_system_messages,
+    get_all_items,
+    get_groups,
+    get_groups_by_domain,
+    get_item_def,
+    get_item_domain,
+    get_item_fields,
+    get_item_prompt,
+    get_items_by_domain,
+    is_missing_result,
+    split_for_analysis,
+)
+
 # ✅ 2026-09-22 新增（对齐 OpenBidKit bidSectionContext.cjs）：
 #    多标段项目「当前投标范围」上下文注入 + 下游缓存失效。
 from app.services.bid_section_context import (
@@ -56,11 +72,11 @@ from app.services.bid_section_context import (
     resolve_section_hint,
     selected_section_from_row,
 )
-from app.services.facts_extractor import invalidate_export_cache
+from app.services.bid_section_detector import detect_bid_sections
+
 # ✅ 2026-09-25：文档分类唯一事实源（提取合并优先级口径与 global_facts 对齐）
 from app.services.doc_categories import extract_priority
-from app.services import scheme_classification as sc
-from app.config import settings
+from app.services.facts_extractor import invalidate_export_cache
 
 logger = logging.getLogger("bid_analysis")
 router = APIRouter(prefix="/api/v1/bid-analysis", tags=["bid_analysis"])
@@ -1621,8 +1637,9 @@ async def _run_single_item(db, project_id: str, scheme_id: str,
                 result_text = MARKDOWN_MISSING_RESULT
             else:
                 # JSON 空结果模板
-                from app.services.bid_analysis_service import _ITEM_PROMPTS
                 import re
+
+                from app.services.bid_analysis_service import _ITEM_PROMPTS
                 result_text = re.search(
                     r"```json\s*(\{[^}]+\})",
                     _ITEM_PROMPTS.get(item_id, "{}"), re.DOTALL)

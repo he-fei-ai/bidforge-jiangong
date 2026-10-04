@@ -15,13 +15,12 @@ import re
 import time
 from pathlib import Path
 
-import pytest
 import aiosqlite
-
+import pytest
 from app.config import settings
 from app.routers.system import (
-    _today_local_prefix,
     _build_activity_snapshot,
+    _today_local_prefix,
     activity,
     reset_today_prefix_cache,
 )

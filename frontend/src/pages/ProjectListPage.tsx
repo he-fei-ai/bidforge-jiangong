@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import {
   App, Card, Table, Button, Modal, Form, Input, Select, Space,
   Tag, Typography,
@@ -7,7 +7,7 @@ import { PlusOutlined, DeleteOutlined, EditOutlined,
   FolderOutlined, FileTextOutlined, RocketOutlined,
   ArrowUpOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
-import { hookAntdMessage } from "../utils/activityCenter";
+import { useAntdMessageHub } from "../utils/activityCenter";
 import { projectsApi } from "../api";
 
 const { Title, Text } = Typography;
@@ -19,7 +19,7 @@ const ENGINEERING_TYPES = [
 
 export default function ProjectListPage() {
   const { message: _antdMsg, modal } = App.useApp();
-  const msg = hookAntdMessage(_antdMsg, "项目列表");
+  const msg = useAntdMessageHub(_antdMsg, "项目列表");
   const navigate = useNavigate();
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);

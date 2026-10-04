@@ -14,7 +14,6 @@ import os
 import uuid
 
 import pytest
-
 from app.utils.safe_log_handler import SafeRotatingFileHandler
 
 

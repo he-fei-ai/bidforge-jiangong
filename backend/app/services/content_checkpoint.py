@@ -41,7 +41,9 @@ from app.services.content_fuzzy import (
     placeholder_rewritable_patterns,
 )
 from app.services.scheme_classification import (
-    is_hazardous_by_keywords, match_category_keywords, required_fields_for_chapter,
+    is_hazardous_by_keywords,
+    match_category_keywords,
+    required_fields_for_chapter,
 )
 
 logger = logging.getLogger("content_checkpoint")
@@ -486,7 +488,9 @@ def _basis_standard_findings(text: str, *, scheme_name: str = "",
     try:
         from app.services import preflight_engine as _pf
         from app.services.standards_registry import (
-            CATEGORY_STANDARDS, match_categories, normalize_standard_code,
+            CATEGORY_STANDARDS,
+            match_categories,
+            normalize_standard_code,
         )
         norm = normalize_standard_code(text)
         # ✅ 单一事实源：与 check_standards 完全相同的编号提取正则

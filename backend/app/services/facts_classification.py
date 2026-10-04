@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Iterable, Optional
+from typing import Any
 
 from app.services import scheme_classification as sc
 

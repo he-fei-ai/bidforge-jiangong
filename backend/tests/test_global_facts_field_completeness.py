@@ -7,10 +7,9 @@ value_unit / evidence_kind / page_ref / zone_type / norm_group / chunk_hash。
 """
 import uuid
 
-import pytest
-
 import app.db as _appdb
 import app.routers.global_facts as gf
+import pytest
 from app.db import get_conn, init_db
 
 

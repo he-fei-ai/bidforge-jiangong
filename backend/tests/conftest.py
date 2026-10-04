@@ -5,10 +5,9 @@
 - monkeypatch app.db.get_conn 及所有已导入的引用，使被测代码拿到测试连接
 - autouse fixture 在每个测试前重置模块级全局状态（缓存、订阅者）
 """
+import aiosqlite
 import pytest
 import pytest_asyncio
-import aiosqlite
-
 from app.schema_sql import SCHEMA_SQL
 
 
@@ -138,9 +137,8 @@ def reset_provider_config_cache():
 def reset_task_registry_state():
     """每个测试前重置 task_registry 的内存全局状态
 
-    _subscribers / _tasks 是模块级全局，跨测试会残留订阅者和任务状态，
-    导致 broadcast 误发、is_stopped 误判。
+    _tasks 是模块级全局，跨测试会残留任务状态，导致 is_stopped 误判。
+    （2026-10-04 起 `_subscribers` 死链路已清理，此处同步删除。）
     """
     import app.services.ai.task_registry as tr
-    tr._subscribers.clear()
     tr._tasks.clear()

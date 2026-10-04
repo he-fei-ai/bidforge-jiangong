@@ -12,18 +12,26 @@ from __future__ import annotations
 
 import json
 
-import pytest
-from fastapi import HTTPException
-
 import app.config as _cfg
-from app.services.ai.prompts._cache import reload_prompt_cache
-from app.services.ai.prompts._registry import (
-    _ALL_PROMPTS, get_default_prompt, reset_prompt as _reset,
+import pytest
+from app.routers.prompts import (
+    reset_prompt as _reset_route,
 )
 from app.routers.prompts import (
-    rollback_prompt, update_prompt as _update, reset_prompt as _reset_route,
+    rollback_prompt,
 )
-
+from app.routers.prompts import (
+    update_prompt as _update,
+)
+from app.services.ai.prompts._cache import reload_prompt_cache
+from app.services.ai.prompts._registry import (
+    _ALL_PROMPTS,
+    get_default_prompt,
+)
+from app.services.ai.prompts._registry import (
+    reset_prompt as _reset,
+)
+from fastapi import HTTPException
 
 KEY = "outline_short_system"
 
@@ -284,7 +292,7 @@ class TestGovernanceDefaultOff:
              该段会被最先削减。
         """
         from app.services.content_runtime import build_chapter_user_content
-        from app.services.prompt_governance import segment_priority_of, _DEFAULT_PRIORITY
+        from app.services.prompt_governance import _DEFAULT_PRIORITY, segment_priority_of
         user_content = build_chapter_user_content(
             scheme={"name": "基坑支护专项方案", "type": "危大工程专项方案"},
             project_brief="（项目概述摘要）",

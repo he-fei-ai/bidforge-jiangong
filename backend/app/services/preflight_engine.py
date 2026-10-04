@@ -46,19 +46,28 @@ import unicodedata
 from dataclasses import dataclass, field
 
 from app.services.audit_rules import (
-    RULE_VERSION, SEVERITY_ORDER, get_rule, _resolve_base_rule,
+    RULE_VERSION,
+    SEVERITY_ORDER,
+    _resolve_base_rule,
+    get_rule,
 )
 from app.services.content_polish import find_colloquial_hits
 from app.services.content_utils import find_unclosed_fences
 from app.services.duplicate_detection import find_cross_section_copies
+
 # ✅ 2026-10-03（全局事实桥接 · 判据同源）：SAF-08 事实反哺危大判定与
 #    /global-facts/danger-check 共用同一两步判定出口（extract_danger_params +
 #    classify_scheme），不在预检侧重抄阈值表。
 from app.services.facts_classification import danger_check as facts_danger_check
 from app.services.scheme_classification import is_hazardous_by_keywords
 from app.services.standards_registry import (
-    ABOLISHED_STANDARDS, CATEGORY_STANDARDS, find_abolished_codes,
-    is_known_base_number, is_known_standard, match_categories, normalize_standard_code,
+    ABOLISHED_STANDARDS,
+    CATEGORY_STANDARDS,
+    find_abolished_codes,
+    is_known_base_number,
+    is_known_standard,
+    match_categories,
+    normalize_standard_code,
 )
 
 logger = logging.getLogger("preflight_engine")

@@ -8,7 +8,6 @@
 """
 import aiosqlite
 import pytest
-
 from app.db import _migrate
 from app.schema_sql import SCHEMA_SQL
 

@@ -26,10 +26,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-import pytest
-
 import app.db as _appdb
-from app.db import get_conn, init_db, close_db
+import pytest
+from app.db import close_db, get_conn, init_db
 from app.routers.export import (
     _count_undownloaded_image_blocks,
     cache_status,

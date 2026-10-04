@@ -36,6 +36,14 @@
 
 
 
+> **最近校准：2026-10-04（登记遗留项收口复核 · R40）** —— **【AGENTS 登记清单逐项复核：代码级债已归零，唯一可执行遗留为生产对比测量 + 运维】本轮零生产代码改动，纯复核与运维执行**：
+> ① **代码级遗留盘点**：R38-D 五项债（D2/D4/D6/D7/契约全覆盖）与 R39 孤儿数据清零均已在盘闭合（R39 磁盘复核 + 本轮全量复验）；R32 ⚠️仍未落地三项中 ①历史孤儿数据 已随 R39 清零、③磁盘孤儿目录 GC 已 --apply，仅剩 ②`review_records.section_id` 删章残留为**刻意设计保留**（评审留痕可追溯性硬要求，非待修项）。结论：**登记在案的代码级技术债全部归零，无新的建议下一轮清单**。
+> ② **生产库判据探针复核（`_r40_db_probe.py`，mode=ro 只读）**：`sections` 实测 88 章 / with_content=**0** / total_chars=**0** → R29/R30/R39 挂起的「修复前后对比测量」**仍阻塞**（判据 `with_content>0 且 total_chars>0` 需用户在 UI 重新生成正文后方可执行，非代理可代做——生成正文依赖真实 AI 调用与额度）；连带核实：`uploaded_outlines` 孤儿 **0**（R39 结论维持）、`preflight_runs` 仅 2 行 10-01 真实总检（无污染行；其 `content_fingerprint` 与当前空正文不一致 → `/submit` 将判「结论已过期」，属 stale 判据正确行为非缺陷）、`global_facts` 2 行、在役项目 5 个。
+> ③ **运维**：端口 8000 无监听 → 下次 `start_all.bat` 即加载 R38-D/R39 全部新代码；捕获并清理 **2 个挂死 12~15h 的僵尸 pytest 进程**（PID 6168 跑 charts 专组 / PID 25232 跑 consistency_repair+audit 组，12s 窗口 CPU 增量均 **0s** 确认僵死，R38-L ⑤ 同类先例；僵死进程占用测试临时目录句柄，会干扰后续并行会话的 .pt_* 清理与复跑）。
+> **基线对比**：本轮零代码改动 → 全量即收口复验：**5508 passed / 16 skipped / 3 xfailed / 0 failed（208.30s，退出码正常）**（R39 终态 5495 后并行会话新增 13 例全绿，零回归）。探针 `_r40_db_probe.py` / 输出 `_r40_probe_out.txt` / 全量日志 `_r40_full*.txt` 按仓库惯例留存。
+
+>
+
 > **最近校准：2026-10-04（遗留技术债核实与孤儿数据收口 · R39）** —— **【R38-D 五项债磁盘复核已闭合 + 生产实测孤儿数据清零】本轮零代码改动，纯验证与运维执行**：
 
 > **基线对比**：R39 前 **5447 passed / 16 skipped / 3 xfailed / 0 failed（203.88s）** → 终态 **5495 passed / 16 skipped / 3 xfailed / 0 failed（209.69s，退出码 0）**，**+48 例全绿、零回归**；关联回归（`-k "bid or prompt or outline or facts or repair or consistency"`）**2368 passed / 11 skipped / 0 failed**；提示词专组 7 文件 **272 passed / 0 failed**；审核自动修复域 6 文件 **99 passed**。

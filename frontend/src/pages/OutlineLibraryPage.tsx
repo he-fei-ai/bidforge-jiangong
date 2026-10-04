@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+﻿import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import {
   App, Card, Table, Button, Tag, Space, Typography, Modal, Form, Input,
@@ -11,7 +11,7 @@ import {
   StopOutlined, PlayCircleOutlined, DeleteOutlined,
 } from "@ant-design/icons";
 import { outlineLibraryApi } from "../api";
-import { hookAntdMessage } from "../utils/activityCenter";
+import { useAntdMessageHub } from "../utils/activityCenter";
 
 import OutlineLibraryEditModal from "../components/OutlineLibraryEditModal";
 
@@ -109,7 +109,7 @@ function downloadFile(fileName: string, content: string) {
 
 export default function OutlineLibraryPage() {
   const { message: _antdMsg, modal } = App.useApp();
-  const msg = hookAntdMessage(_antdMsg, "目录库");
+  const msg = useAntdMessageHub(_antdMsg, "目录库");
   const [items, setItems] = useState<any[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);

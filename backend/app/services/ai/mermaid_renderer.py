@@ -21,17 +21,16 @@
 from __future__ import annotations
 
 import asyncio
-from io import BytesIO
 import hashlib
 import json
 import logging
 import os
-from pathlib import Path
 import threading
 import time
+from io import BytesIO
+from pathlib import Path
 
 from .mermaid_service import MermaidRenderError, get_mermaid_service_client
-
 
 logger = logging.getLogger(__name__)
 
@@ -886,7 +885,6 @@ class ChartCache:
         Returns:
             缓存文件路径
         """
-        import time
 
         # ✅ key 规则统一到 _cache_key（get / set / get_or_render 三者必须一致，
         # 否则写入路径与读取路径对不上，缓存永远 miss）
@@ -1114,7 +1112,6 @@ class ChartCache:
         Returns:
             清理的文件数量
         """
-        import time
 
         cutoff = time.time() - max_age_days * 86400
         count = 0
@@ -1150,6 +1147,10 @@ def render_mermaid(mermaid_code: str, chart_type: str = "flowchart") -> str:
 # ============================================================
 # 向后兼容 re-export（拆分前可用的所有内部符号）
 # ============================================================
+from .mermaid_architecture import (  # noqa: F401
+    _layout_architecture_tree,
+    _render_architecture_image_v2,
+)
 from .mermaid_common import (  # noqa: F401
     _build_gantt_marks,
     _draw_text_center,
@@ -1160,6 +1161,11 @@ from .mermaid_common import (  # noqa: F401
     _text_height,
     _text_width,
     _wrap_text,
+)
+from .mermaid_comparison import (  # noqa: F401
+    _parse_mermaid_pie,
+    _parse_mermaid_xychart,
+    _render_comparison_image_v2,
 )
 from .mermaid_flowchart import (  # noqa: F401
     _DECISION_KEYWORDS,
@@ -1179,15 +1185,6 @@ from .mermaid_gantt import (  # noqa: F401
     _render_gantt_image_v2,
     _render_gantt_with_dependencies,
     gantt_json_to_mermaid,
-)
-from .mermaid_architecture import (  # noqa: F401
-    _layout_architecture_tree,
-    _render_architecture_image_v2,
-)
-from .mermaid_comparison import (  # noqa: F401
-    _parse_mermaid_pie,
-    _parse_mermaid_xychart,
-    _render_comparison_image_v2,
 )
 from .mermaid_labor import (  # noqa: F401
     _render_labor_image_v2,

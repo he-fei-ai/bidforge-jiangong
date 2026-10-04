@@ -13,6 +13,10 @@
   · content_chart_place_system   —— 图表插入位置判断（Phase 4 遗留）
 """
 from app.services.ai.prompts._registry import _reg
+
+# ✅ 2026-10-02（检查点前置）：审核与预检规则中可在生成侧预防的检查点，
+#    由 services/content_checkpoint（唯一事实源，判据指向 audit_rules 注册表）
+#    派生为生成约束，经 {content_checkpoint_block} 占位符注入首轮与续写提示词。
 # ✅ 2026-10-01（第二十一轮）：文件性质红线改引共享常量，不再内联副本。
 #    此前本文件有两份内联措辞（首轮生成第 7 条 / 续写「数据真实性红线」），
 #    与 _shared.SHARED_SCOPE_RULES 并列共三份 → 改一处漏两处。
@@ -26,7 +30,6 @@ from app.services.ai.prompts._registry import _reg
 #    现改为 {SHARED_SCOPE_RULES_BRIEF} 占位符，由 _cache._resolve_shared_keys()
 #    在 get_prompt() 时按 DB 优先解析，与 outline 侧的 {SHARED_SCOPE_RULES}
 #    走同一条出口。出厂默认渲染结果逐字不变。
-
 # ✅ 2026-10-01（模糊生成改造）：无明确数据时「按规则补齐完整正文、不留占位标记」的
 # 文案唯一实现在 app.services.content_fuzzy —— 首轮生成、续写、压缩，以及生成后的
 # 确定性校验（content_standard）共用同一份文案与判据，避免「提示词一处、校验器一处」
@@ -35,12 +38,6 @@ from app.services.content_fuzzy import (
     build_fuzzy_rules_block,
     build_generation_strategy_block,
     build_no_placeholder_block,
-)
-# ✅ 2026-10-02（检查点前置）：审核与预检规则中可在生成侧预防的检查点，
-#    由 services/content_checkpoint（唯一事实源，判据指向 audit_rules 注册表）
-#    派生为生成约束，经 {content_checkpoint_block} 占位符注入首轮与续写提示词。
-from app.services.content_checkpoint import (
-    build_content_system_checkpoint_block,
 )
 
 #: 注入正文提示词的三段：模糊生成规则 → 分级生成策略 → 禁止占位标记与空话

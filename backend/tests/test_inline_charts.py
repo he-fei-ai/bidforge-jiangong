@@ -8,10 +8,10 @@ import asyncio
 import json
 
 from app.routers._chart_pipeline import (
-    extract_inline_charts,
-    has_inline_charts,
     _rewrite_code_block,
     _validate_inline_chart,
+    extract_inline_charts,
+    has_inline_charts,
     register_inline_charts,
 )
 
@@ -26,7 +26,14 @@ class FakeDb:
 
     async def execute(self, sql, params=None):
         self.rows.append((sql, tuple(params or ())))
-        return None
+        # 真实 aiosqlite INSERT 成功时返回 Cursor（有 rowcount 属性），
+        # 只有异常/事务冲突才返回 None。测试桩必须与真实语义一致，
+        # 否则 F-3 修复（INSERT 返回 None → 视为失败降级 skipped）会让本文件
+        # 的历史断言误判为「图块被删」。
+        class _FakeCur:
+            rowcount = 1
+            lastrowid = 1
+        return _FakeCur()
 
     async def commit(self):
         self.commits += 1

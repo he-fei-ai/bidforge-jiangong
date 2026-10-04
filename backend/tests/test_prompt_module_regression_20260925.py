@@ -18,26 +18,28 @@ from __future__ import annotations
 import io
 import logging
 
-import pytest
-
 import app.config as _cfg
+import pytest
 from app.routers.prompts import update_prompt as _update_route
 from app.services import prompt_governance as pg
-from app.services.audit_service import diff_prompt_snapshot
 from app.services.ai.prompts import (
-    PromptContractError,
     _ALL_PROMPTS,
+    PromptContractError,
     _reg,
     check_prompt_variables,
+)
+from app.services.ai.prompts import (
     update_prompt as _update,
 )
 from app.services.ai.prompts._cache import reload_prompt_cache
 from app.services.ai.prompts._registry import (
     extract_user_variables,
     get_default_prompt,
+)
+from app.services.ai.prompts._registry import (
     reset_prompt as _reset,
 )
-
+from app.services.audit_service import diff_prompt_snapshot
 
 TEST_KEY = "_test_prompt_contract_20260925"
 

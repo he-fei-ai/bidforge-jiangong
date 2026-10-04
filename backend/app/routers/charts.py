@@ -7,12 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.db import get_db
-from app.services.ai.provider_factory import chat_with_fallback
-from app.services.ai.prompts._registry import render
-# 图表类型标签统一共享自 chart_validators（别名保持原引用点不变）
-from app.services.chart_validators import CHART_TYPE_LABELS as _CHART_LABELS
-from app.services.chart_validators import infer_chart_type_from_payload
-from app.services.chart_payload import build_chart_envelope, extract_chart_payload
+
 # ✅ BUG 修复（2026-09-16 · ruff F821）：`fix-mermaid` 里在 `if row:` 分支**内部**
 #    才 import `_rewrite_code_block`，而该名字在第 380 行（更早的
 #    「同步重写章节正文内联代码块」分支）就被引用 —— Python 视其为函数局部名，
@@ -20,6 +15,13 @@ from app.services.chart_payload import build_chart_envelope, extract_chart_paylo
 #    表现为「预览已修复、导出仍是坏图」的旧问题**始终存在**（该修复从未生效）。
 #    这里提到模块顶部，两处引用都能拿到。
 from app.routers._chart_pipeline import _rewrite_code_block  # noqa: E402
+from app.services.ai.prompts._registry import render
+from app.services.ai.provider_factory import chat_with_fallback
+from app.services.chart_payload import build_chart_envelope, extract_chart_payload
+
+# 图表类型标签统一共享自 chart_validators（别名保持原引用点不变）
+from app.services.chart_validators import CHART_TYPE_LABELS as _CHART_LABELS
+from app.services.chart_validators import infer_chart_type_from_payload
 
 logger = logging.getLogger("charts")
 router = APIRouter(prefix="/api/v1/charts", tags=["charts"])
@@ -124,6 +126,13 @@ async def list_chart_types():
 
 async def _load_section(db, section_id: str) -> dict | None:
     cur = await db.execute("SELECT * FROM sections WHERE id=?", (section_id,))
+    # ✅ R13 守卫（2026-10-04）：全局单连接 + aiosqlite 下 execute() 可能返回 None，
+    #    直接 .fetchone() 会 AttributeError → 500。读路径按仓库口径 **503**（见
+    #    routers/prompts.py::_fetch_content_row 与 doc_pipeline 的同款处理），
+    #    绝不返回「章节不存在」——那会把数据库瞬时故障伪装成业务空数据。
+    if cur is None:
+        logger.warning("读取章节失败：db.execute 返回 None（R13，section=%s）", section_id[:8])
+        raise HTTPException(503, "数据库连接暂时不可用，请稍后重试")
     row = await cur.fetchone()
     return dict(row) if row else None
 
@@ -143,6 +152,12 @@ async def list_charts(scheme_id: str, db=Depends(get_db)):
         " labor_json, comparison_json, layout_json, timeline_json"
         " FROM sections WHERE scheme_id=?",
         (scheme_id,))
+    # ✅ R13 守卫（2026-10-04）：charts.py 此前**零个**判空，清单端点在 DB 异常态直接 500。
+    #    走 503 而非返回空清单 —— 空清单会让用户以为「本方案没有图表」（同 R39 ① 教训：
+    #    把数据库故障伪装成业务空数据，用户看到「尚未扫描/没有图表」却无从排查）。
+    if cur is None:
+        logger.warning("图表清单查询失败：db.execute 返回 None（R13，scheme=%s）", scheme_id[:8])
+        raise HTTPException(503, "数据库连接暂时不可用，请稍后重试")
     _section_rows = [dict(r) for r in await cur.fetchall()]
     sec_map = {r["id"]: r for r in _section_rows}
 
@@ -167,6 +182,9 @@ async def list_charts(scheme_id: str, db=Depends(get_db)):
     cur = await db.execute(
         "SELECT * FROM chart_predictions WHERE scheme_id=? AND needed=1 ORDER BY priority DESC",
         (scheme_id,))
+    if cur is None:
+        logger.warning("图表清单查询失败：db.execute 返回 None（R13，scheme=%s）", scheme_id[:8])
+        raise HTTPException(503, "数据库连接暂时不可用，请稍后重试")
     seen_pairs: set[tuple[str, str]] = set()
     for r in await cur.fetchall():
         p = dict(r)
@@ -432,12 +450,22 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
                     #    而导出仍用旧代码）。补上 id 列。
                     "SELECT id, data_json FROM chart_predictions WHERE id=?",
                     (prediction_id,))
+                if cur is None:
+                    # ✅ R13 守卫（2026-10-04）：写回是**单事务**语义（任一失败整体
+                    #    rollback + written_back=false）。此处抛错会被下方 except 接住，
+                    #    按既定 fail-soft 契约返回 200 + written_back=false + WARNING，
+                    #    而不是让 AttributeError 冒出去变成 500（也会丢掉 fixed 预览）。
+                    raise RuntimeError(
+                        "R13：db.execute 返回 None（chart_predictions 按 id 回写查询）")
                 row = await cur.fetchone()
             else:
                 cur = await db.execute(
                     "SELECT id, data_json FROM chart_predictions "
                     "WHERE section_id=? AND chart_type=? LIMIT 1",
                     (section_id, chart_type))
+                if cur is None:
+                    raise RuntimeError(
+                        "R13：db.execute 返回 None（chart_predictions 按章节回写查询）")
                 row = await cur.fetchone()
 
             patched = ""
@@ -449,6 +477,9 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
             if row and section_id:
                 cur = await db.execute(
                     "SELECT content, word_budget FROM sections WHERE id=?", (section_id,))
+                if cur is None:
+                    raise RuntimeError(
+                        "R13：db.execute 返回 None（sections 正文回写查询）")
                 srow = await cur.fetchone()
                 old_content = (srow["content"] or "") if srow else ""
                 if old_content:
@@ -487,22 +518,30 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
                     new_payload = build_chart_envelope(data=fixed_data, title=title, reason=reason)
                 else:
                     new_payload = build_chart_envelope(code=fixed, title=title, reason=reason)
-                await db.execute(
+                cur = await db.execute(
                     "UPDATE chart_predictions SET data_json=?, status='generated' WHERE id=?",
                     (new_payload, row["id"]))
+                # ✅ R13 守卫（2026-10-04）：写操作返回 None = 语句未执行，但旧行为
+                #    照样置 wrote_back=True → 响应谎报「已写回」而库中仍是坏代码
+                #    （前端显示已修复、下次打开又变回坏图）。走同一 rollback 语义。
+                if cur is None:
+                    raise RuntimeError(
+                        "R13：db.execute 返回 None（chart_predictions 写回 UPDATE）")
                 wrote_back = True
 
                 if patched and patched != (srow["content"] or ""):
-                    from app.services.content_utils import (
-                        word_status_for, text_word_count, DEFAULT_WORD_BUDGET)
+                    from app.services.content_utils import DEFAULT_WORD_BUDGET, text_word_count, word_status_for
                     wb = (srow["word_budget"] if srow else None) or DEFAULT_WORD_BUDGET
                     # ✅ 与正文生成/手工保存同一字数口径（剔除图表代码块）
                     wc = text_word_count(patched)
-                    await db.execute(
+                    cur = await db.execute(
                         "UPDATE sections SET content=?, word_count=?, word_status=?,"
                         " updated_at=? WHERE id=?",
                         (patched, wc, word_status_for(wc, wb),
                          datetime.now().isoformat(), section_id))
+                    if cur is None:
+                        raise RuntimeError(
+                            "R13：db.execute 返回 None（sections 正文写回 UPDATE）")
                     content_updated = True
                     new_content = patched
                     logger.info("章节 %s 内联图表代码已随修复同步更新", section_id[:8])
@@ -557,6 +596,12 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
             "无需人工触发。如需脚本/手动重试，请设置 AI_IMAGE_MANUAL_ENABLED=true。")
     cur = await db.execute(
         "SELECT id, content, word_budget FROM sections WHERE id=?", (section_id,))
+    # ✅ R13 守卫（2026-10-04）：读路径 fail-closed 503，绝不把 DB 异常伪装成 404
+    #    「章节不存在」（否则用户会去重建/找章节，排障方向被带偏）。
+    if cur is None:
+        logger.warning("AI 配图章节读取失败：db.execute 返回 None（R13，section=%s）",
+                       section_id[:8])
+        raise HTTPException(503, "数据库连接暂时不可用，请稍后重试")
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "章节不存在")
@@ -567,7 +612,7 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
     #    回归守卫见 tests/test_e2e_chain_hardening.py（源码级断言）。
     word_budget = row["word_budget"] or 1500
 
-    from app.routers._chart_pipeline import extract_inline_charts, _rewrite_code_block
+    from app.routers._chart_pipeline import _rewrite_code_block, extract_inline_charts
     _blocks = [(ct, c) for ct, c in extract_inline_charts(content) if ct == "ai_image"]
     if not _blocks:
         raise HTTPException(404, "本章节正文无 AI 配图（ai_image）块")
@@ -630,13 +675,16 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
         new_content = _rewrite_code_block(new_content, _code, f"![{_title}]({_url})")
         generated += 1
         try:
-            await db.execute(
+            _c = await db.execute(
                 # ✅ 状态口径统一：全表唯一的完成态是 'generated'（登记/修复同口径，
                 # 统计侧 CHART_DONE_STATUSES 双值兼容仅为历史脏数据）。此处旧写
                 # 'done' 使新生成的配图在严格按 'generated' 过滤的链路上漏统。
                 "UPDATE chart_predictions SET status='generated', data_json=? "
                 "WHERE section_id=? AND chart_type='ai_image' AND status='pending'",
                 (build_chart_envelope(code=_code, title=_title, reason=_url), section_id))
+            if _c is None:
+                # R13：写入未执行（状态仍 pending），走既有 fail-soft → WARNING
+                raise RuntimeError("R13：db.execute 返回 None（ai_image 状态 UPDATE）")
         except Exception as e:
             logger.warning("ai_image chart_predictions 更新失败: %s", e)
 
@@ -644,11 +692,17 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
         raise HTTPException(502, "所有 AI 配图生成失败（请检查图像模型配置或网络）")
 
     # ✅ 与 fix-mermaid 一致：同步刷新 word_count/word_status，避免正文与统计不一致
-    from app.services.content_utils import word_status_for, text_word_count
+    from app.services.content_utils import text_word_count, word_status_for
     _wc = text_word_count(new_content)
-    await db.execute(
+    _cur = await db.execute(
         "UPDATE sections SET content=?, word_count=?, word_status=?, updated_at=? WHERE id=?",
         (new_content, _wc, word_status_for(_wc, word_budget),
          datetime.now().isoformat(), section_id))
+    # ✅ R13 守卫（2026-10-04）：写入未执行时旧行为照样返回 content_updated=True
+    #    （响应谎报，正文下次读仍是旧的）。fail-closed 503。
+    if _cur is None:
+        logger.warning("AI 配图正文回写失败：db.execute 返回 None（R13，section=%s）",
+                       section_id[:8])
+        raise HTTPException(503, "配图已生成但正文回写失败，请稍后重试")
     await db.commit()
     return {"generated": generated, "content_updated": True, "new_content": new_content}

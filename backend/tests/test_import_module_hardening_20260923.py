@@ -24,14 +24,15 @@
 """
 import uuid
 
-import pytest
-from fastapi import HTTPException
-
 import app.routers.bid_analysis as ba
+import pytest
 from app.main import app
 from app.services.bid_analysis_service import (
-    REQUIRED_ITEM_IDS, AnalysisConfig, get_item_def,
+    REQUIRED_ITEM_IDS,
+    AnalysisConfig,
+    get_item_def,
 )
+from fastapi import HTTPException
 
 # 多标段文本：显式声明总数 + 两个标段定义，规则检测必命中
 MULTI_SECTION_TEXT = (

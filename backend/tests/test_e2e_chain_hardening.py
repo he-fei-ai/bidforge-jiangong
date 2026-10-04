@@ -20,8 +20,6 @@ import json
 import sys
 import uuid
 
-import pytest
-
 import app.db as _appdb
 import app.routers.charts as charts_mod
 import app.routers.global_facts as gf
@@ -30,9 +28,13 @@ import app.services.facts_extractor as fe
 import app.services.file_parser as fp
 import app.services.preflight_engine as pf
 import app.services.standards_registry as sr
+import pytest
 from app.db import get_conn, init_db
 from app.services.facts_extractor import (
-    ExtractionResult, FactGroup, FactItem, persist_extraction,
+    ExtractionResult,
+    FactGroup,
+    FactItem,
+    persist_extraction,
 )
 
 
@@ -279,7 +281,9 @@ VALID_FLOWCHART = (
 async def test_apply_plan_clips_content_when_limit_exceeded(ctx):
     db, pid, sid = ctx
     from app.routers._chart_pipeline import (
-        _scan_inline_charts, apply_inline_chart_plan, build_inline_chart_plan,
+        _scan_inline_charts,
+        apply_inline_chart_plan,
+        build_inline_chart_plan,
     )
     content = "前文\n```mermaid\n" + VALID_FLOWCHART + "\n```\n后文"
     ct = _scan_inline_charts(content)[0][0]

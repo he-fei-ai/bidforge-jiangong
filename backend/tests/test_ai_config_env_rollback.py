@@ -19,13 +19,15 @@ B. 配置版本 / 回滚
 import contextlib
 import json
 
-import pytest
-
 import app.services.ai.provider_factory as pf
-from app.routers import ai_config as ai_router
+import pytest
 from app.models import (
-    AIConfigIn, ActiveEnvIn, ConfigRollbackIn, SceneRouteUpdate,
+    ActiveEnvIn,
+    AIConfigIn,
+    ConfigRollbackIn,
+    SceneRouteUpdate,
 )
+from app.routers import ai_config as ai_router
 from app.services.crypto import encrypt_api_key
 
 

@@ -17,9 +17,8 @@
 import asyncio
 import inspect
 
-import pytest
-
 import app.routers.sse_handlers as sh
+import pytest
 from app.routers.sse_handlers import _continue_failed_flag
 from app.services.content_utils import WORD_UNDER_RATIO
 

@@ -17,8 +17,12 @@ from pathlib import Path
 
 from app.config import Settings
 from app.services.content_fuzzy import (
-    FUZZY_CATEGORIES, FUZZY_CATEGORY_ORDER, FUZZY_UNDETECTABLE,
-    build_fuzzy_rules_block, build_fuzzy_rules_for_standard, detect_fuzzy_expressions,
+    FUZZY_CATEGORIES,
+    FUZZY_CATEGORY_ORDER,
+    FUZZY_UNDETECTABLE,
+    build_fuzzy_rules_block,
+    build_fuzzy_rules_for_standard,
+    detect_fuzzy_expressions,
 )
 from app.services.content_trace import GENERATION_FUZZY, build_trace
 

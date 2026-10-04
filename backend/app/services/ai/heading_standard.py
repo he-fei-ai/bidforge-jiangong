@@ -8,22 +8,22 @@
 原有 import 路径 `from app.services.ai.heading_standard import ...` 继续有效。
 """
 from app.services.ai.heading_templates import (
-    HEADING_MANAGED_LEVELS,
-    CHINESE_NUMBERS,
     ALPHABET,
-    HEADING_STYLE_CONFIG,
-    HEADING_REGEX_PATTERNS,
+    CHINESE_NUMBERS,
     CIRCLED_NUMBERS,
+    DEFAULT_NUMBERING_TEMPLATES,
+    HEADING_MANAGED_LEVELS,
+    HEADING_REGEX_PATTERNS,
+    HEADING_STYLE_CONFIG,
     ROMAN_NUMBERS,
     ROMAN_NUMBERS_UPPER,
-    DEFAULT_NUMBERING_TEMPLATES,
-    outline_number_parts,
-    format_outline_number_by_template,
-    get_heading_template,
-    format_heading_by_id,
-    should_insert_space_after_number,
-    format_outline_title,
     build_heading_spec_prompt,
+    format_heading_by_id,
+    format_outline_number_by_template,
+    format_outline_title,
+    get_heading_template,
+    outline_number_parts,
+    should_insert_space_after_number,
 )
 from app.services.ai.heading_v1 import HeadingNumberingGenerator
 from app.services.ai.heading_v2 import HeadingNumberingGeneratorV2

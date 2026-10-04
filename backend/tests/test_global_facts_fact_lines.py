@@ -18,9 +18,10 @@
 """
 import json
 
-from app.models import FactGroupIn, FactItem as PydFactItem
 import app.routers.global_facts as gf
 import app.services.facts_extractor as fe
+from app.models import FactGroupIn
+from app.models import FactItem as PydFactItem
 
 #: FactItem 有两个同名类型：app.models 是 Pydantic 入参模型，
 #: facts_extractor 是 dataclass（落库 / 合并去重的实体）。本文件两者都要用。

@@ -14,9 +14,8 @@ import os
 import sqlite3
 import time
 
-import pytest
-
 import app.db as _appdb
+import pytest
 from app.services.ai.prompts import _cache
 
 PROBE_KEY = "test_external_write_probe"

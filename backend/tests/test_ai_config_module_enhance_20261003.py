@@ -9,13 +9,12 @@
 4. 入参长度约束（AIConfigIn / AIConfigTest / ProviderModelsIn）与
    探测 max_tokens 钳制（与保存链路同口径）。
 """
-import pytest
-from pydantic import ValidationError
-
 import app.services.ai.provider_factory as pf
+import pytest
 from app.config import settings
 from app.models import AIConfigIn, AIConfigTest, ProviderModelsIn
 from app.services.crypto import encrypt_api_key
+from pydantic import ValidationError
 
 
 # ===========================================================================
@@ -234,6 +233,7 @@ class TestProbeMaxTokensClamp:
     def test_connectivity_wiring_locked(self):
         """接线静态锁：test_config 的探测参数必须经 clamp_config_numbers。"""
         import inspect
+
         from app.routers.ai_config import connectivity
         src = inspect.getsource(connectivity.test_config)
         assert "clamp_config_numbers" in src

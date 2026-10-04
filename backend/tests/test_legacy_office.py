@@ -16,9 +16,8 @@
 import io
 import zipfile
 
-import pytest
-
 import app.services.legacy_office as legacy_office
+import pytest
 from app.services.file_parser import (
     ParseError,
     parse_file_content_ex,

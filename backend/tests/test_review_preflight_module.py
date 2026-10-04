@@ -30,13 +30,14 @@ import json
 import uuid
 from datetime import datetime
 
-import pytest
-from fastapi import HTTPException
-
 import app.db as _appdb
-from app.db import get_conn, init_db, close_db
+import pytest
+from app.db import close_db, get_conn, init_db
 from app.models import (
-    ComplianceCheckIn, ExpertReviewIn, SchemeReviewIn, SectionReviewIn,
+    ComplianceCheckIn,
+    ExpertReviewIn,
+    SchemeReviewIn,
+    SectionReviewIn,
 )
 from app.routers.compliance import (
     _persist_run,
@@ -55,6 +56,7 @@ from app.routers.review import (
 from app.services.audit_rules import RULE_VERSION, get_rule, rule_catalog
 from app.services.audit_scoring import score_findings
 from app.services.preflight_engine import PreflightContext, run_preflight
+from fastapi import HTTPException
 
 
 @pytest.fixture

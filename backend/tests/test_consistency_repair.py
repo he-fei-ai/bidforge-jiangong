@@ -3,11 +3,10 @@
 覆盖扫描合并去重、修复校验（空白归一化）、冲突仲裁规则、修复过滤与分组。
 """
 import pytest
-
+from app.services.conflict_arbiter import majority_value, match_global_facts
 from app.services.consistency_scanner import merge_conflicts
-from app.services.repair_validator import validate_repair
-from app.services.conflict_arbiter import match_global_facts, majority_value
 from app.services.repair_agent import filter_conflicts, group_by_section
+from app.services.repair_validator import validate_repair
 
 
 # ---------------- 合并去重 ----------------

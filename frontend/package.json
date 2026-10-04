@@ -7,6 +7,8 @@
     "dev": "vite --port 5175 --host",
     "build": "tsc && vite build",
     "preview": "vite preview --port 5175",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "test": "vitest run",
     "test:facts": "vitest run factsTab factsApi",
     "test:content": "vitest run contentTab contentEvents contentStandard SectionContentCard",
@@ -30,13 +32,18 @@
     "react-router-dom": "^7.18.3"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.3",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.7.0",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.7",
     "jsdom": "^30.0.1",
     "typescript": "^5.9.0",
+    "typescript-eslint": "^8.71.0",
     "vite": "^6.0.0",
     "vitest": "^3.2.4"
   }

@@ -2,11 +2,10 @@
 import json
 
 import pytest
-
 from app.services.outline_reorganize import (
-    reorganize_to_standard,
-    _strip_number,
     _group_of,
+    _strip_number,
+    reorganize_to_standard,
 )
 
 

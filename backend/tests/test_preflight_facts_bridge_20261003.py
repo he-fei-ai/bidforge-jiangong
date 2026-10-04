@@ -10,16 +10,17 @@
 import inspect
 import uuid
 
-import pytest
-
 import app.db as _appdb
-from app.db import close_db, get_conn, init_db
 import app.routers.compliance as compliance
+import pytest
+from app.db import close_db, get_conn, init_db
 from app.routers.compliance import _build_preflight_context, _facts_signature
 from app.services import audit_rules as ar
 from app.services.facts_classification import danger_check, extract_danger_params
 from app.services.preflight_engine import (
-    PreflightContext, check_hazard_params, run_preflight,
+    PreflightContext,
+    check_hazard_params,
+    run_preflight,
 )
 from app.services.scheme_classification import is_hazardous_by_keywords
 

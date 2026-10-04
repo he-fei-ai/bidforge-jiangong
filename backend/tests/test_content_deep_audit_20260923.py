@@ -25,15 +25,18 @@ import json
 import re
 
 import pytest
-
 from app.models import SectionUpdate
 from app.routers import sse_handlers
 from app.routers.sections import update_section
 from app.routers.sse_handlers import (
-    _section_partial, _section_number_for_prompt, _STAGE_MODEL, _STAGE_FILL_MAX,
+    _STAGE_FILL_MAX,
+    _STAGE_MODEL,
+    _section_number_for_prompt,
+    _section_partial,
 )
 from app.services.content_utils import (
-    normalize_word_budget_override, text_word_count,
+    normalize_word_budget_override,
+    text_word_count,
 )
 
 # generate_content 全量源码（含嵌套的 event_stream / gen_one / _persist_section）

@@ -12,8 +12,6 @@ Mermaid HTTP Service Client
 from __future__ import annotations
 
 import asyncio
-from enum import Enum
-from io import BytesIO
 import json
 import logging
 import os
@@ -22,6 +20,8 @@ import sys
 import tempfile
 import threading
 import time
+from enum import Enum
+from io import BytesIO
 
 import httpx
 
@@ -70,8 +70,8 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
                 timeout=5,
             )
         else:
-            import signal
             import os as _os
+            import signal
             try:
                 _os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError, AttributeError):

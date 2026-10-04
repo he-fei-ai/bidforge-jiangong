@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from typing import Callable
 
-
 # ------------------------------------------------------------------ 结构辅助
 
 def _n(title: str, desc: str = "") -> dict:

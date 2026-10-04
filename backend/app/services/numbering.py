@@ -37,6 +37,9 @@ ALPHABET: list[str] = [
     chr(ord("a") + i) if i < 26 else f"a{chr(ord('a') + i - 26)}" for i in range(52)
 ]
 
+# 目录树递归最大深度（环引用 / 异常深嵌套防护，全模块唯一口径）
+_MAX_TREE_DEPTH = 20
+
 
 # ------------------------------------------------------------
 # 标题内嵌编号清洗（修复双重编号）
@@ -107,7 +110,11 @@ def strip_outline_numbering(title: str) -> str:
       否则 "." 同时属于分隔符字符类，会只剥半截（"1.1" → "1"），
       违反「标题本身即编号 → 返回原标题」的契约。
     """
-    if not title:
+    if title is None:
+        return title
+    if not isinstance(title, str):
+        title = str(title)
+    if not title.strip():
         return title
     trimmed = title.strip()
     if _PURE_NUMBER_TITLE_RE.fullmatch(trimmed):
@@ -137,7 +144,7 @@ def renumber_outline_nodes(nodes: list, *, strip_titles: bool = True,
         prefix: 父节点编号前缀（递归内部使用）。
         _depth: 递归深度（循环引用防护）。
     """
-    if _depth > 20 or not isinstance(nodes, list):
+    if _depth > _MAX_TREE_DEPTH or not isinstance(nodes, list):
         return nodes
     # 编号按"有效节点"连续递增：非法节点（非 dict）被跳过时不应占用编号，
     # 避免出现 "1 / 2 / 4" 这样的断号。
@@ -176,16 +183,51 @@ def renumber_section_outline_ids(tree: list) -> list[tuple[str, int, str]]:
     - DB 标题已是裸标题，不剥编号（strip_titles=False 语义）；
     - outline_json 为 JSON 字符串，需解析后仅刷新编号相关字段（id / level），
       保留 confidence 等既有内容；
-    - 同级全部节点连续计数（无非法节点跳过逻辑——DB 行都是合法 dict）。
+    - 同级全部节点连续计数（非法节点被跳过且不占号）。
 
     本函数为纯计算（无 IO），调用方拿到元组后自行 executemany 写库。
+
+    ✅ BUG 修复（2026-10-04 · 边界与环防护）：旧实现 _walk 无任何防御——
+      tree 为 None / 非 list 时迭代抛 TypeError；节点非 dict 时 n.get 抛
+      AttributeError；节点缺 id 时 n["id"] 抛 KeyError；环引用 / 超深嵌套导致
+      RecursionError 使整次重算失败（调用方事务回滚）。现：
+      - 入参非法返回空列表；非 dict / 缺 id 节点跳过并告警，不占编号；
+      - visited 集合检测环引用（DB 主键本应唯一，重复出现即异常结构）；
+      - 深度上限 _MAX_TREE_DEPTH 截断，超限子树跳过并告警；
+      - outline_json 不可序列化时跳过该节点，不拖垮整树。
     """
     updates: list[tuple[str, int, str]] = []
+    if not isinstance(tree, list):
+        logger.warning("章节编号重算：入参 tree 非 list（实际 %s），跳过重算",
+                       type(tree).__name__)
+        return updates
 
-    def _walk(ns: list, prefix: str = ""):
+    def _walk(ns: list, prefix: str = "", depth: int = 0,
+              visited: set[str] | None = None):
+        if not isinstance(ns, list):
+            return
+        if depth > _MAX_TREE_DEPTH:
+            logger.warning("章节编号重算：嵌套深度超过 %s，截断子树（prefix=%s）",
+                           _MAX_TREE_DEPTH, prefix)
+            return
+        if visited is None:
+            visited = set()
         idx = 0
         for n in ns:
+            if not isinstance(n, dict):
+                logger.warning("章节编号重算：跳过非 dict 节点（实际 %s）",
+                               type(n).__name__)
+                continue
+            sid = n.get("id")
+            if not isinstance(sid, str) or not sid:
+                logger.warning("章节编号重算：跳过缺少合法 id 的节点")
+                continue
+            if sid in visited:
+                logger.warning("章节编号重算：检测到重复/环引用节点 %s，不重复展开",
+                               sid[:8])
+                continue
             idx += 1
+            visited.add(sid)
             new_id = f"{prefix}.{idx}" if prefix else str(idx)
             try:
                 oj = json.loads(n.get("outline_json") or "{}")
@@ -201,9 +243,16 @@ def renumber_section_outline_ids(tree: list) -> list[tuple[str, int, str]]:
             #    旧实现只改 outline_json、不改 sections.level —— 一旦层级发生变化
             #    （编号深度变化），level 列与编号漂移，凡是按 level 过滤/统计的
             #    消费方（如锁一级目录、按层级导出）都会拿到旧值。
-            updates.append((json.dumps(oj, ensure_ascii=False), level, n["id"]))
-            if n.get("children"):
-                _walk(n["children"], new_id)
+            try:
+                payload = json.dumps(oj, ensure_ascii=False)
+            except (TypeError, ValueError) as e:
+                logger.warning("章节编号重算：节点 %s 的 outline_json 不可序列化，"
+                               "跳过该节点: %s", sid[:8], e)
+                continue
+            updates.append((payload, level, sid))
+            children = n.get("children")
+            if isinstance(children, list) and children:
+                _walk(children, new_id, depth + 1, visited)
 
     _walk(tree)
     return updates

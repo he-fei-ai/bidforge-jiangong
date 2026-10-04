@@ -30,12 +30,12 @@ async def _seed_scheme(db, sid="s1", pid="p1"):
 class TestTruncationDetection:
     def test_doc_at_current_limit_is_truncated(self):
         """落库正文长度 == MAX_PARSED_CHARS 即视为已截断（写入侧 stored=text[:MAX]）。"""
-        from app.routers.global_facts import _is_truncated, MAX_PARSED_CHARS
+        from app.routers.global_facts import MAX_PARSED_CHARS, _is_truncated
         assert _is_truncated(MAX_PARSED_CHARS) is True
         assert _is_truncated(MAX_PARSED_CHARS + 1) is True
 
     def test_doc_below_limit_not_truncated(self):
-        from app.routers.global_facts import _is_truncated, MAX_PARSED_CHARS
+        from app.routers.global_facts import MAX_PARSED_CHARS, _is_truncated
         assert _is_truncated(MAX_PARSED_CHARS - 1) is False
         assert _is_truncated(12345) is False
 
@@ -46,7 +46,7 @@ class TestTruncationDetection:
 
     def test_generate_facts_side_predicate(self):
         """复刻 generate-facts 侧的筛选谓词：只挑出被截断文档的文件名。"""
-        from app.routers.global_facts import _is_truncated, MAX_PARSED_CHARS
+        from app.routers.global_facts import MAX_PARSED_CHARS, _is_truncated
         parsed_docs = [
             ("完整资料.docx", "x" * 1000),
             ("超长招标.pdf", "y" * MAX_PARSED_CHARS),

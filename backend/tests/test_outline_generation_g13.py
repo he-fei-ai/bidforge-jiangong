@@ -32,12 +32,11 @@ import asyncio
 import inspect
 import json
 
-import pytest
-from fastapi import HTTPException
-
 import app.routers.sections as sec
 import app.routers.sse_handlers as sh
 import app.services.ai.task_registry as tr
+import pytest
+from fastapi import HTTPException
 
 
 # ---------------------------------------------------------------------------

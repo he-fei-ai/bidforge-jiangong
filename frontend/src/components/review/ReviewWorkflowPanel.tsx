@@ -23,7 +23,7 @@ import {
   HistoryOutlined, UserOutlined,
 } from "@ant-design/icons";
 import { reviewApi } from "../../api";
-import { hookAntdMessage } from "../../utils/activityCenter";
+import { useAntdMessageHub } from "../../utils/activityCenter";
 import {
   REVIEW_STATUS_COLOR,
   type ReviewChecklistItem, type ReviewRecord, type ReviewStatus, type ReviewSummary,
@@ -66,7 +66,7 @@ function ReviewWorkflowPanel({
   onChanged,
 }: ReviewWorkflowPanelProps) {
   const { message: _antdMsg, modal } = App.useApp();
-  const msg = hookAntdMessage(_antdMsg, "审核流程");
+  const msg = useAntdMessageHub(_antdMsg, "审核流程");
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<ReviewChecklistItem[]>([]);
   const [summary, setSummary] = useState<ReviewSummary | null>(null);
@@ -180,14 +180,13 @@ function ReviewWorkflowPanel({
       // antd 非 await（命令式）模式下，confirm.onOk 的 rejected 会被其内部
       // 再 Promise.reject 一次（ant-design/ant-design#6183），调用方未 await
       // 该派生 Promise → 落成 unhandled rejection（生产控制台/测试都会报）。
-      let inst: { update?: (cfg: Record<string, unknown>) => void } | undefined;
-      inst = modal.confirm({
+      const inst: { update?: (cfg: Record<string, unknown>) => void } | undefined = modal.confirm({
         title: `确认${label}：${row.title}`,
         width: 520,
         content: (
           <div style={{ marginTop: 8 }}>
             <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
-              评审人：{reviewer}　—　评审意见将留痕，可在「评审轨迹」中回溯。
+              评审人：{reviewer} — 评审意见将留痕，可在「评审轨迹」中回溯。
             </Paragraph>
             <Input.TextArea
               rows={3}

@@ -11,19 +11,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-
 from datetime import datetime
 
 from app.config import settings
-from app.services.ai.provider_factory import chat_with_fallback
+
+# ✅ 2026-09-30 第十五轮：定点编辑（old_text/new_text，对齐参考软件 §三.4/§五.1）
+from app.services import consistency_edits, repair_record
 from app.services.ai.prompts._registry import render
+from app.services.ai.provider_factory import chat_with_fallback
 from app.services.content_utils import (
-    text_word_count, word_status_for, DEFAULT_WORD_BUDGET,
+    DEFAULT_WORD_BUDGET,
+    text_word_count,
+    word_status_for,
 )
 from app.services.repair_validator import validate_repair
-from app.services import repair_record
-# ✅ 2026-09-30 第十五轮：定点编辑（old_text/new_text，对齐参考软件 §三.4/§五.1）
-from app.services import consistency_edits
 
 logger = logging.getLogger("repair_agent")
 

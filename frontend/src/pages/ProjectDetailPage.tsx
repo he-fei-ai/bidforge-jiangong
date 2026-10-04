@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+﻿import { useEffect, useRef, useState } from "react";
 import {App, Card, Button, List, Tag, Modal, Form, Input, Select, Space,
   message, Descriptions, Tabs, Typography, Empty, Tree, Spin,
   Drawer, Table, Popconfirm, Tooltip, Alert,} from "antd";
 import { PlusOutlined, CopyOutlined, InboxOutlined, SearchOutlined, DeleteOutlined, EditOutlined, BookOutlined, ProjectOutlined, FileTextOutlined, ApiOutlined } from "@ant-design/icons";
 import { useParams, useNavigate } from "react-router-dom";
 import { projectsApi, schemesApi, schemeCatalogApi, knowledgeApi } from "../api";
-import { hookAntdMessage } from "../utils/activityCenter";
+import { useAntdMessageHub } from "../utils/activityCenter";
 
 import { PageHero, StatCards, StatItem } from "../utils/ui";
 
@@ -21,7 +21,7 @@ const SCHEME_TYPES = [
 export default function ProjectDetailPage() {
   const { id } = useParams();
   const { message: _antdMsg, modal } = App.useApp();
-  const msg = hookAntdMessage(_antdMsg, "项目详情");
+  const msg = useAntdMessageHub(_antdMsg, "项目详情");
   const navigate = useNavigate();
   const [project, setProject] = useState<any>(null);
   const [schemes, setSchemes] = useState<any[]>([]);

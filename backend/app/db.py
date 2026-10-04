@@ -1,14 +1,15 @@
 """数据库连接（aiosqlite，含死线程检测与自动建表）"""
 import asyncio
-from contextlib import asynccontextmanager
 import datetime as _dt
 import logging
 import os
 import shutil
 import sqlite3
 import time
-import aiosqlite
+from contextlib import asynccontextmanager
 from pathlib import Path
+
+import aiosqlite
 
 from app.config import DATA_DIR, settings
 from app.schema_sql import SCHEMA_SQL
@@ -838,7 +839,7 @@ async def _migrate(conn: aiosqlite.Connection):
     # word_count/word_status 是**派生列**，重算不会丢失任何原始信息，故可安全自愈：
     # 只处理「文本含代码围栏」的行（口径差异只可能出现在这些行），幂等可重复执行。
     try:
-        from app.services.content_utils import text_word_count, word_status_for, DEFAULT_WORD_BUDGET
+        from app.services.content_utils import DEFAULT_WORD_BUDGET, text_word_count, word_status_for
         cur = await conn.execute(
             "SELECT id, content, word_count, word_status, word_budget FROM sections"
             " WHERE content LIKE '%```%'")

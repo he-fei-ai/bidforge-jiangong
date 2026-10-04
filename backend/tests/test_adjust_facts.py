@@ -17,11 +17,10 @@ CRUD 或全量重提取。
 import json
 import uuid
 
-import pytest
-from fastapi import HTTPException
-
 import app.routers.global_facts as gf
+import pytest
 from app.services.facts_extractor import extract_value_from_markdown_line
+from fastapi import HTTPException
 
 
 async def _seed_scheme(db) -> tuple[str, str]:

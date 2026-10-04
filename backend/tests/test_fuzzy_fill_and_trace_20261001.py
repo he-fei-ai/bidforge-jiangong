@@ -9,26 +9,50 @@
 import json
 
 import pytest
-
 from app.services.content_fuzzy import (
-    BARE_PLACEHOLDER_PHRASES, FUZZY_CATEGORIES, FUZZY_CATEGORY_ORDER,
-    HEDGE_PREFIX_RE, HEDGE_SUFFIX_RE, LIMIT_PHRASES,
-    MISSING_REVEAL_PHRASES, VAGUE_STATEMENT_RULES,
-    build_data_availability_block, build_fuzzy_rules_block,
-    build_fuzzy_rules_for_standard, build_generation_strategy_block,
-    build_no_placeholder_block, detect_fuzzy_expressions,
-    scan_fabricated_dates, scan_missing_reveal, scan_placeholder_marks,
+    BARE_PLACEHOLDER_PHRASES,
+    FUZZY_CATEGORIES,
+    FUZZY_CATEGORY_ORDER,
+    HEDGE_PREFIX_RE,
+    HEDGE_SUFFIX_RE,
+    LIMIT_PHRASES,
+    MISSING_REVEAL_PHRASES,
+    VAGUE_STATEMENT_RULES,
+    build_data_availability_block,
+    build_fuzzy_rules_block,
+    build_fuzzy_rules_for_standard,
+    build_generation_strategy_block,
+    build_no_placeholder_block,
+    detect_fuzzy_expressions,
+    scan_fabricated_dates,
+    scan_missing_reveal,
+    scan_placeholder_marks,
     scan_vague_statements,
 )
 from app.services.content_standard import (
-    FUZZY, PRECISE, _BARE_PHRASES, _HEDGE_PREFIX_RE, _HEDGE_SUFFIX_RE,
-    _LIMIT_PHRASES, _empty_report, build_continue_hint, build_facts_header,
-    build_system_block, build_user_block, extract_model_tokens,
-    extract_number_tokens, strip_code_blocks, standard_report,
+    _BARE_PHRASES,
+    _HEDGE_PREFIX_RE,
+    _HEDGE_SUFFIX_RE,
+    _LIMIT_PHRASES,
+    FUZZY,
+    PRECISE,
+    _empty_report,
+    build_continue_hint,
+    build_facts_header,
+    build_system_block,
+    build_user_block,
+    extract_model_tokens,
+    extract_number_tokens,
+    standard_report,
+    strip_code_blocks,
 )
 from app.services.content_trace import (
-    GENERATION_FUZZY, GENERATION_PLACEHOLDER, GENERATION_PRECISE,
-    TRACE_ITEM_KEYS, build_trace, collect_scheme_trace,
+    GENERATION_FUZZY,
+    GENERATION_PLACEHOLDER,
+    GENERATION_PRECISE,
+    TRACE_ITEM_KEYS,
+    build_trace,
+    collect_scheme_trace,
 )
 
 
@@ -543,6 +567,7 @@ class TestTraceNeverLeaksIntoContent:
     def test_report_trace_endpoint_is_read_only(self):
         """新增端点只读 last_generation_report，不写正文。"""
         import inspect
+
         from app.routers import sections as sec
         src = inspect.getsource(sec.scheme_report_trace)
         assert "SELECT" in src

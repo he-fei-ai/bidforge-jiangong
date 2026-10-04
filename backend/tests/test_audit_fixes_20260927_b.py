@@ -133,8 +133,7 @@ class TestFactsBudgetProportional:
         assert "### 工程概况\n" in out
 
     def test_low_confidence_annotation_preserved(self):
-        from app.routers.sse_handlers import (
-            _render_facts_text, LOW_CONFIDENCE_THRESHOLD)
+        from app.routers.sse_handlers import LOW_CONFIDENCE_THRESHOLD, _render_facts_text
         rows = [("工程概况", "t", "基坑深度 12.5m",
                  LOW_CONFIDENCE_THRESHOLD - 0.1)]
         assert "低置信度" in _render_facts_text(rows, max_total=6000, per_fact=300)
@@ -246,8 +245,8 @@ class TestRenderCacheVersion:
     def test_lru_roundtrip_still_works(self):
         from io import BytesIO
 
-        from PIL import Image
         from app.services.ai import mermaid_renderer as mr
+        from PIL import Image
         mr.clear_render_cache()
         key = mr._render_cache_key("graph TD\n A-->B", "flowchart",
                                    90, "天", 5, False, True)

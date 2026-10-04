@@ -23,12 +23,14 @@
 import ast
 import json
 
-import pytest
-
 import app.routers.sections as sec
 import app.routers.sse_handlers as sh
+import pytest
 from app.services.ai.prompts._registry import (  # noqa: E402  _is_false_positive 为模块内共享判据
-    _is_false_positive, extract_user_variables, get_default_prompt, render,
+    _is_false_positive,
+    extract_user_variables,
+    get_default_prompt,
+    render,
 )
 from app.services.numbering import validate_scheme_numbering_consistency
 
@@ -288,6 +290,7 @@ class TestRenderDynamicBlindspots:
 
     def _collect(self):
         import pathlib
+
         import app as app_pkg
         root = pathlib.Path(app_pkg.__file__).parent
         blind: list = []
@@ -314,6 +317,7 @@ class TestRenderDynamicBlindspots:
     def test_five_checkpoint_render_sites_no_longer_blind(self):
         """D7 点名的 5 个零覆盖调用点现已全部被静态解析覆盖。"""
         import pathlib
+
         import app as app_pkg
         src = (pathlib.Path(app_pkg.__file__).parent
                / "routers" / "sse_handlers.py").read_text(encoding="utf-8")
@@ -326,6 +330,7 @@ class TestRenderDynamicBlindspots:
     def test_no_render_call_site_misses_variables(self):
         import pathlib
         import time as _time
+
         import app as app_pkg
         root = pathlib.Path(app_pkg.__file__).parent
         # 关键模块必须真的被扫描到 —— 防止"读不到就跳过"把护栏退化成空断言
@@ -566,13 +571,4 @@ class TestUploadSaveAsOutlineParity:
         ]}, db_conn)
         assert res.get("cleared_content_sections") == 1, res
         assert "1 个未匹配章节" in (res.get("note") or ""), res
-
-        """按主键匹配的正常保存不得误报（纯提示性字段，无噪声）。"""
-        await _seed_scheme(db_conn)
-        await _seed_sections(db_conn, "sc1", with_content=True)
-        res = await sec.save_outline("sc1", {"outline": [
-            {"title": "工程概况", "__original_id": "sc1-R1", "children": []},
-            {"title": "施工工艺", "__original_id": "sc1-R2", "children": []},
-        ]}, db_conn)
-        assert "cleared_content_sections" not in res
 

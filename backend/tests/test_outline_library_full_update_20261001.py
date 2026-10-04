@@ -22,14 +22,18 @@ import inspect
 import json
 import uuid
 
-import pytest
-
 import app.seed_data as seed_data
+import pytest
 from app.seed_data import CATEGORY_PROFILE, SCHEME_CATALOG, SEED_VERSION
 from app.services import outline_reference as oref
 from app.services.outline_templates import (
-    BUILDERS, RULES, TEMPLATE_META, _TEMPLATE_NAMES,
-    build_outline, get_meta, match_template,
+    _TEMPLATE_NAMES,
+    BUILDERS,
+    RULES,
+    TEMPLATE_META,
+    build_outline,
+    get_meta,
+    match_template,
 )
 from app.services.scheme_classification import HAZARD_CATEGORIES
 

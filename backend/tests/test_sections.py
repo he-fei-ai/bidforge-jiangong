@@ -10,8 +10,7 @@
 - 验证 DB 实际状态而非仅返回值，确保 SQL 真正执行
 """
 import pytest
-
-from app.routers.sections import reorder_sections, delete_section
+from app.routers.sections import delete_section, reorder_sections
 
 
 # ============================================================

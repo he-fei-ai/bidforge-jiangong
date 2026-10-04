@@ -44,17 +44,17 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
 
 from app.config import settings
 from app.services.ai.prompts._registry import render
 from app.services.ai.provider_factory import chat_with_fallback
+from app.services.audit_rules import SEVERITY_ORDER
 from app.services.content_polish import find_colloquial_hits, sanitize_ai_content
 from app.services.content_utils import (
-    DEFAULT_WORD_BUDGET, auto_fix_unclosed_fences, find_unclosed_fences,
-    strip_fenced_code_blocks, text_word_count, word_status_for,
+    auto_fix_unclosed_fences,
+    find_unclosed_fences,
+    strip_fenced_code_blocks,
 )
-from app.services.audit_rules import SEVERITY_ORDER
 from app.services.repair_record import save_repair
 from app.services.repair_validator import validate_repair
 from app.services.standards_registry import ABOLISHED_STANDARDS
@@ -702,7 +702,6 @@ def validate_fixed(before: str, after: str, cap: Capability) -> tuple[bool, list
     if cap.anchor == "section":
         lb = len(before or "")
         if lb:
-            ratio = len(after) / lb
             # 先摘出「篇幅」类问题：补充类允许增长，只保留「超过上限」这一条硬伤
             length_problems = [p for p in problems if "篇幅" in p]
             problems = [p for p in problems if "篇幅" not in p]

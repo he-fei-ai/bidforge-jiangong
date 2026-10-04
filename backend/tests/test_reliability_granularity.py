@@ -12,9 +12,8 @@
 """
 import uuid
 
-import pytest
-
 import app.services.ai.provider_factory as pf
+import pytest
 from app.routers import ai_config as ai_router
 from app.services.crypto import encrypt_api_key
 

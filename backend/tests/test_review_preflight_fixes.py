@@ -23,15 +23,18 @@ import json
 import uuid
 from datetime import datetime
 
-import pytest
-
 import app.db as _appdb
+import pytest
 from app.db import close_db, get_conn, init_db
 from app.models import ComplianceCheckIn
 from app.routers import compliance as _compliance_mod
 from app.routers.compliance import (
-    _PREFLIGHT_RECENT, get_results, list_preflight_runs,
-    readiness_overview, readiness_report, run_preflight_check,
+    _PREFLIGHT_RECENT,
+    get_results,
+    list_preflight_runs,
+    readiness_overview,
+    readiness_report,
+    run_preflight_check,
 )
 from app.services.audit_rules import RULE_VERSION, ai_rules, get_rule
 from app.services.audit_scoring import score_findings

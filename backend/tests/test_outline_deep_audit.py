@@ -19,7 +19,6 @@ import json
 import time
 
 import pytest
-
 from app.routers import sse_handlers as sh
 
 
@@ -312,7 +311,7 @@ class TestPartialCheckpoint:
         await _appdb.close_db()
 
     async def test_partial_outline_is_recoverable(self, ctx):
-        from app.services.ai.task_registry import register_task, finish_task
+        from app.services.ai.task_registry import finish_task, register_task
         tid = await register_task("outline_generation", "p", "s")
         outline = [{"title": "工程概况",
                     "children": [{"title": "现场条件", "children": []}]}]
@@ -325,7 +324,7 @@ class TestPartialCheckpoint:
         await finish_task(tid, "stopped", "客户端断开")
 
     async def test_empty_results_write_nothing(self, ctx):
-        from app.services.ai.task_registry import register_task, finish_task
+        from app.services.ai.task_registry import finish_task, register_task
         tid = await register_task("outline_generation", "p", "s")
         assert await sh._checkpoint_partial_outline(tid, [], []) is False
         assert await sh._load_outline_checkpoint(tid) is None
@@ -333,7 +332,7 @@ class TestPartialCheckpoint:
 
     async def test_failed_chapters_alone_are_still_saved(self, ctx):
         """只有失败清单、没有目录时也要落库（前端可提示"哪几章失败"）。"""
-        from app.services.ai.task_registry import register_task, finish_task
+        from app.services.ai.task_registry import finish_task, register_task
         tid = await register_task("outline_generation", "p", "s")
         assert await sh._checkpoint_partial_outline(tid, [], ["第1章"]) is True
         ckpt = await sh._load_outline_checkpoint(tid)

@@ -46,7 +46,7 @@ describe("computeDocStats", () => {
   it("null / undefined / 非数组：同空数组返回", () => {
     // @ts-expect-error 故意传入非数组验证防御性
     expect(computeDocStats(null)).toEqual({ parsedCount: 0, pendingCount: 0, truncatedCount: 0, failedCount: 0, actionableCount: 0, allParsed: false });
-    // @ts-expect-error
+    // @ts-expect-error 故意传入 undefined 验证防御性
     expect(computeDocStats(undefined)).toEqual({ parsedCount: 0, pendingCount: 0, truncatedCount: 0, failedCount: 0, actionableCount: 0, allParsed: false });
   });
 

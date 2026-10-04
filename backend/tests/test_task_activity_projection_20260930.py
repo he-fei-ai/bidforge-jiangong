@@ -36,9 +36,8 @@ BUG（P0 ·「AI 明明在跑却说后台空闲」）：`routers/system.py::_bui
 import time
 import uuid
 
-import pytest
-
 import app.db as _appdb
+import pytest
 from app.db import get_conn, init_db
 from app.routers.system import _build_activity_snapshot
 

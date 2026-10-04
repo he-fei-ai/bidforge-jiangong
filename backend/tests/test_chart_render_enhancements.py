@@ -15,11 +15,23 @@
 """
 import json
 import os
-
 from io import BytesIO
 
-from PIL import Image
-
+from app.services.ai.mermaid_architecture import (
+    _layout_architecture_tree,
+    _render_architecture_image_v2,
+)
+from app.services.ai.mermaid_common import _FONT_PATH_CACHE, _image_font
+from app.services.ai.mermaid_comparison import _render_comparison_image_v2
+from app.services.ai.mermaid_flowchart import (
+    _parse_flowchart_structure,
+    _render_flowchart_image_v2,
+    flowchart_json_to_mermaid,
+)
+from app.services.ai.mermaid_gantt import _render_gantt_image_v2
+from app.services.ai.mermaid_labor import _render_labor_image_v2
+from app.services.ai.mermaid_layout import _render_layout_image_v2
+from app.services.ai.mermaid_timeline import _render_timeline_image_v2
 from app.services.chart_validators import (
     count_all_nodes,
     normalize_architecture_tree,
@@ -35,21 +47,7 @@ from app.services.chart_validators import (
     validate_layout_data,
     validate_timeline_data,
 )
-from app.services.ai.mermaid_architecture import (
-    _layout_architecture_tree,
-    _render_architecture_image_v2,
-)
-from app.services.ai.mermaid_common import _FONT_PATH_CACHE, _image_font
-from app.services.ai.mermaid_flowchart import _render_flowchart_image_v2
-from app.services.ai.mermaid_comparison import _render_comparison_image_v2
-from app.services.ai.mermaid_flowchart import (
-    _parse_flowchart_structure,
-    flowchart_json_to_mermaid,
-)
-from app.services.ai.mermaid_gantt import _render_gantt_image_v2
-from app.services.ai.mermaid_labor import _render_labor_image_v2
-from app.services.ai.mermaid_layout import _render_layout_image_v2
-from app.services.ai.mermaid_timeline import _render_timeline_image_v2
+from PIL import Image
 
 # 甘特图备注文字专用色（mermaid_gantt 中仅备注使用）
 _NOTE_RGB = (55, 65, 81)

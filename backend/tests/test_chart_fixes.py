@@ -190,12 +190,12 @@ def test_flowchart_arrow_scaled_with_supersample():
 def test_mermaid_keyword_map_is_single_source_of_truth():
     """回归：映射表曾在 3 处各维护一份（8/20/6 条）且互相不一致。
     现必须全部指向 chart_validators 的唯一表。"""
+    from app.routers._chart_pipeline import _MERMAID_TYPE_MAP as pipeline_map
+    from app.routers.export import _MERMAID_TYPE_MAP as export_map
     from app.services.chart_validators import (
         MERMAID_KEYWORD_TO_CHART_TYPE,
         detect_mermaid_chart_type,
     )
-    from app.routers.export import _MERMAID_TYPE_MAP as export_map
-    from app.routers._chart_pipeline import _MERMAID_TYPE_MAP as pipeline_map
 
     assert export_map is MERMAID_KEYWORD_TO_CHART_TYPE
     assert pipeline_map is MERMAID_KEYWORD_TO_CHART_TYPE
@@ -420,8 +420,7 @@ def test_architecture_root_node_gets_root_style():
     """回归：布局为后序遍历（子节点先 append），nodes_pos[0] 是最左侧叶子而非根，
     旧实现据此判定根节点 → 根样式被画到第一个叶子上，真正的根显示为普通节点。
     2026-09-18 样张改版：根样式 = 深藏青 #1F3864（不再是金色双框）。"""
-    from app.services.ai.mermaid_architecture import (
-        _layout_architecture_tree, _render_architecture_image_v2)
+    from app.services.ai.mermaid_architecture import _layout_architecture_tree, _render_architecture_image_v2
     from PIL import Image
 
     tree = {"label": "项目部", "children": [
@@ -527,6 +526,7 @@ def test_gantt_after_dependency_resolved():
 def test_gantt_after_dependency_renders_valid_png():
     """回归：含 `after` 依赖的甘特图应能经完整渲染管线上屏为合法 PNG。"""
     import io
+
     from app.services.ai.mermaid_renderer import render_mermaid_to_bytes
 
     code = (

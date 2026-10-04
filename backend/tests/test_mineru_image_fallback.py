@@ -14,11 +14,10 @@
 5. 本地引擎异常（非「不可用」）→ 同样走云端兜底；
 6. 云端返回空内容 → 不冒充成功（回落原错误/空结果）。
 """
-import pytest
-
-import app.services.ocr as ocr_mod
-from app.services.file_parser import ParseError, parse_file_content_ex
 import app.services.mineru_client as mineru_client
+import app.services.ocr as ocr_mod
+import pytest
+from app.services.file_parser import ParseError, parse_file_content_ex
 
 _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 

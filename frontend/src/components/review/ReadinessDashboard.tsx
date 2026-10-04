@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 就绪度总览仪表盘（审核与预检模块的"总入口"）
  *
  * 解决的问题
@@ -30,7 +30,7 @@ import {
 import { complianceApi } from "../../api";
 import AutoFixModal from "./AutoFixModal";
 import BatchFixModal from "./BatchFixModal";
-import { hookAntdMessage } from "../../utils/activityCenter";
+import { useAntdMessageHub } from "../../utils/activityCenter";
 import {
   GRADE_COLOR, SCORE_COLOR, SEVERITY_COLOR, SEVERITY_LABEL, SEVERITY_WEIGHT,
   type AuditDimension, type AuditRule, type PreflightFinding,
@@ -75,7 +75,7 @@ function ReadinessDashboard({
   onContentFixed,
 }: ReadinessDashboardProps) {
   const { message: _antdMsg } = App.useApp();
-  const msg = hookAntdMessage(_antdMsg, "审核预检");
+  const msg = useAntdMessageHub(_antdMsg, "审核预检");
   const [loading, setLoading] = useState(false);
   const [overview, setOverview] = useState<ReadinessOverview | null>(null);
   const [runs, setRuns] = useState<PreflightRunItem[]>([]);

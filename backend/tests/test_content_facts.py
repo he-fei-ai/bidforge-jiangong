@@ -23,7 +23,6 @@ from app.routers.sse_handlers import (
     _render_facts_text,
 )
 
-
 # ---------- 工具 ----------
 
 class FakeDb:

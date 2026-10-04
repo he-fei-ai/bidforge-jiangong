@@ -17,10 +17,8 @@ import json
 import uuid
 
 import pytest
-
 from app.services.ai import provider_factory as pf
 from app.services.doc_pipeline import pipeline
-
 
 # ---------------------------------------------------------------------------
 # 1. 完整性报告：project_info 字段覆盖率口径

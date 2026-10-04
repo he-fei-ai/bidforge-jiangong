@@ -8,21 +8,20 @@
 - heading_standard.HeadingNumberingGeneratorV2（level 8不越界、完整流程）
 """
 import json
-import pytest
 
-from app.services.file_parser import (
-    simple_parse_outline,
-    parse_file_content,
-    parse_file_content_ex,
-    _mineru_image_fallback,
-)
-from app.services.ai.json_response import extract_json, renumber_outline, _extract_balanced
+import pytest
 from app.services.ai.heading_standard import (
-    HeadingNumberingGeneratorV2,
     HeadingNumberingGenerator,
+    HeadingNumberingGeneratorV2,
     format_heading_by_id,
 )
-
+from app.services.ai.json_response import _extract_balanced, extract_json, renumber_outline
+from app.services.file_parser import (
+    _mineru_image_fallback,
+    parse_file_content,
+    parse_file_content_ex,
+    simple_parse_outline,
+)
 
 # ============================================================
 # simple_parse_outline
@@ -292,6 +291,7 @@ class TestStructuredTableExport:
 
     def test_xlsx_becomes_markdown_table_with_sheet_name(self):
         import io as _io
+
         from openpyxl import Workbook
         wb = Workbook()
         ws = wb.active

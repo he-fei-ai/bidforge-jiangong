@@ -18,23 +18,27 @@ import json
 import logging
 import re
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from typing import Any
 
+from app.config import settings
 from app.services.ai.json_response import collect_json_response
+from app.services.ai.prompts._norm_dicts import (
+    normalize_machinery_name,
+    normalize_material_spec,
+    normalize_unit,
+)
 from app.services.ai.prompts._registry import render
 from app.services.ai.prompts.analysis import SAFETY_CRITICAL_FACT_KEYS
-from app.services.ai.prompts._norm_dicts import (
-    normalize_machinery_name, normalize_material_spec, normalize_unit,
-)
-from app.services.facts_cross_validators import run_cross_validations
+
 # ✅ 2026-09-24：九大章节分类体系（纯函数、零 AI、零 DB 依赖，无循环引用）
 from app.services.facts_classification import apply_fact_dimensions
+from app.services.facts_cross_validators import run_cross_validations
+
 # ✅ 2026-09-30 第十三轮：缺值模式值域的单一出口（对齐参考软件 globalFactsMode）
 from app.services.facts_patches import normalize_missing_value_mode
-from app.config import settings
 
 logger = logging.getLogger("facts_extractor")
 
@@ -1015,8 +1019,12 @@ def _build_norm_dict_block() -> str:
     字符串构建）；现进程内缓存一次，直接复用。
     """
     from app.services.ai.prompts._norm_dicts import (
-        NORM_DICT_MATERIAL, NORM_DICT_MACHINERY, NORM_DICT_PROCESS,
-        NORM_DICT_SCHEDULE, MACH_HEADER_MAP, UNIT_ALIASES,
+        MACH_HEADER_MAP,
+        NORM_DICT_MACHINERY,
+        NORM_DICT_MATERIAL,
+        NORM_DICT_PROCESS,
+        NORM_DICT_SCHEDULE,
+        UNIT_ALIASES,
     )
 
     def _fmt_dict(name: str, d: dict) -> str:

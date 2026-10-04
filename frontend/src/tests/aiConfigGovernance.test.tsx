@@ -83,7 +83,7 @@ vi.mock("../api", () => ({
 }));
 
 import AIConfigPage from "../pages/AIConfigPage";
-// 注意：页面用 hookAntdMessage 包装了 message —— 提示**不弹原生 toast**，
+// 注意：页面用 useAntdMessageHub 包装了 message —— 提示**不弹原生 toast**，
 // 而是写入全局消息中心，因此断言读消息中心而不是 DOM 文本。
 import { getActivityItems, clearActivity } from "../utils/activityCenter";
 

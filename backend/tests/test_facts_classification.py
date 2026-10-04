@@ -13,12 +13,10 @@
 """
 import json
 
+import app.services.facts_extractor as fe
 import pytest
-
 from app.services import facts_classification as fc
 from app.services import scheme_classification as sc
-import app.services.facts_extractor as fe
-
 
 # ---------------------------------------------------------------------------
 # 1. 分类体系完整性

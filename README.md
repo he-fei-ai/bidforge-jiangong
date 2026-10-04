@@ -154,12 +154,9 @@ npm run dev    # Vite dev server at :5175
 │   │   └── tests/                  # 46 个 vitest 文件
 │   └── package.json
 ├── chart-gap-filler/               # 独立图表补全子项目
-├── docs/                           # 迁移方案与变更记录
+├── docs/                           # 核心文档（产品需求/技术架构/编译计划书）与专项报告
 ├── 平台智能体设计/                  # 产品与技术设计文档 + 模块探索报告
 ├── AGENTS.md                       # AI Agent 工作边界（重要！）
-├── 产品需求文档.MD
-├── 技术架构文档.MD
-├── 软件编译计划书.MD
 ├── start_all.bat                   # Windows 一键启动（GBK 编码，勿改）
 ├── start_backend.ps1               # PowerShell 单独启动后端
 ├── stop_backend.ps1
@@ -357,7 +354,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File kill_port.ps1 -Ports 8000,51
 ### 开发前
 
 1. **必读**：`AGENTS.md` —— 定义了 AI Agent 工作边界、禁止事项、常见坑
-2. **必读**：`技术架构文档.MD`、`产品需求文档.MD`
+2. **必读**：`docs/技术架构文档.MD`、`docs/产品需求文档.MD`
 3. 参考 `平台智能体设计/` 下的模块探索报告理解各模块设计意图
 
 ### 提交规范
@@ -395,8 +392,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File kill_port.ps1 -Ports 8000,51
 ## 关联资源
 
 - [AGENTS.md](./AGENTS.md) —— AI Agent 工作边界
-- [产品需求文档.MD](./产品需求文档.MD)
-- [技术架构文档.MD](./技术架构文档.MD)
-- [软件编译计划书.MD](./软件编译计划书.MD)
+- [docs/产品需求文档.MD](./docs/产品需求文档.MD)
+- [docs/技术架构文档.MD](./docs/技术架构文档.MD)
+- [docs/软件编译计划书.MD](./docs/软件编译计划书.MD)
 - [docs/](./docs/) —— 迁移方案与变更记录
 - [平台智能体设计/](./平台智能体设计/) —— 产品与技术设计文档

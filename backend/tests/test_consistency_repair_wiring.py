@@ -15,7 +15,6 @@ import inspect
 import json
 
 import pytest
-
 from app.services import repair_agent, repair_record
 from app.services.content_utils import text_word_count, word_status_for
 

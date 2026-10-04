@@ -34,7 +34,6 @@ import re
 from pathlib import Path
 
 import pytest
-
 from app.services import facts_patches as fp
 from app.services import scheme_classification as sc
 from app.services.facts_patches import (
@@ -609,8 +608,7 @@ class TestStaticGuards:
         ``CATEGORY_TO_CHAPTER`` / ``FACT_TYPE_TO_CHAPTER`` 两层判据）。
         对英文键强求中文章节归属会把「各层判据各司其职」误判为缺陷。
         """
-        from app.services.facts_classification import (
-            DANGER_PARAM_RULES, classify_chapter_from_text)
+        from app.services.facts_classification import DANGER_PARAM_RULES, classify_chapter_from_text
         unclassified = [
             kw for keywords, _param in DANGER_PARAM_RULES
             for kw in keywords

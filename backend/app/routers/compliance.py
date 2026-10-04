@@ -23,33 +23,45 @@ import time
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.db import get_db
 from app.models import ComplianceCheckIn, ExpertReviewIn
+from app.services import review_autofix
 from app.services.ai.json_response import collect_json_response
 from app.services.ai.prompts._registry import render
 from app.services.audit_rules import (
-    EXPERT_CHECK_ITEMS, RULE_VERSION, ai_rules, dimension_catalog,
-    expert_items, get_rule, rule_catalog,
+    EXPERT_CHECK_ITEMS,
+    RULE_VERSION,
+    ai_rules,
+    dimension_catalog,
+    expert_items,
+    get_rule,
+    rule_catalog,
 )
 from app.services.audit_scoring import (
-    ai_results_to_findings, expert_result_to_findings, merge_findings,
+    ai_results_to_findings,
+    expert_result_to_findings,
+    merge_findings,
     score_findings,
 )
-from app.services.preflight_engine import (
-    PreflightContext, preflight_stats, run_preflight,
-)
+from app.services.content_utils import order_sections_dfs
+
 # ✅ 2026-10-03（全局事实桥接）：预检消费「已确认全局事实」（SAF-08 事实反哺）。
 #    门控/作用域口径一律取 facts_extractor 唯一出口，不在本文件重写 SQL。
 from app.services.facts_extractor import (
-    get_facts_inject_where, load_resolved_facts_for_scope,
+    get_facts_inject_where,
+    load_resolved_facts_for_scope,
     resolve_scheme_project_id,
 )
-from app.services import review_autofix
-from app.services.content_utils import order_sections_dfs
+from app.services.preflight_engine import (
+    PreflightContext,
+    preflight_stats,
+    run_preflight,
+)
 from app.services.standards_registry import (
-    STANDARD_DB_CHECKED_AT, STANDARD_DB_VERSION,
+    STANDARD_DB_CHECKED_AT,
+    STANDARD_DB_VERSION,
 )
 
 router = APIRouter(prefix="/api/v1/compliance", tags=["compliance"])
@@ -114,7 +126,9 @@ async def list_checkpoint_constraints():
       （审核规则废弃或编号漂移），前端应据此告警而非静默展示。
     """
     from app.services.content_checkpoint import (
-        CHECKPOINT_CHANNELS, CHECKPOINT_GROUPS, checkpoint_constraint_map,
+        CHECKPOINT_CHANNELS,
+        CHECKPOINT_GROUPS,
+        checkpoint_constraint_map,
         validate_constraint_map,
     )
     items = checkpoint_constraint_map()
@@ -134,10 +148,42 @@ async def list_checkpoint_constraints():
     }
 
 
+def _apply_deprecation_headers(
+    response: Response | None,
+    *,
+    replacement: str,
+    sunset: str = "2026-12-31T00:00:00Z",
+    deprecation: str = "true",
+) -> None:
+    """给 deprecated 端点统一注入标准弃用信号（向后兼容：不改变响应体）。
+
+    - ``Deprecation``：``true`` 或 RFC 8594 风格的时间戳，客户端可判断弃用起始。
+    - ``Sunset``：预计下线日期（RFC 8594），便于客户端排期。
+    - ``Link: <…>; rel="deprecation"``：指向替代端点，前端/脚本可据此迁移。
+
+    默认行为向后兼容：老客户端不识别这些头仍然能拿到原响应体；新客户端
+    （SDK / CI / 日志采集器）可据此告警。
+
+    容错：既有单测常把 router 函数**当作普通 async 函数**直接调用（无
+    FastAPI 依赖注入），此时可能不传 Response 或误传其他对象（如 sqlite
+    Connection）。此处以 ``hasattr(..., "headers")`` 判定，只写入真正
+    可用的响应对象，其他情况静默返回，不改变业务返回体。
+    """
+    if response is None or not hasattr(response, "headers"):
+        return
+    response.headers["Deprecation"] = deprecation
+    response.headers["Sunset"] = sunset
+    response.headers["Link"] = f'<{replacement}>; rel="deprecation"'
+
+
 # @deprecated 孤儿 API：本前端无调用方（UI 已改用 /overview 的 dimensions）；
 # 按向后兼容原则保留，大版本评估清理。
 @router.get("/dimensions", deprecated=True)
-async def list_dimensions():
+async def list_dimensions(response: Response):
+    _apply_deprecation_headers(
+        response,
+        replacement="/api/v1/compliance/overview/{scheme_id}",
+    )
     return {"items": dimension_catalog(), "rule_version": RULE_VERSION}
 
 
@@ -711,7 +757,13 @@ async def latest_consistency_audit(scheme_id: str, db=Depends(get_db)):
 
 # @deprecated 孤儿 API：本前端无调用方；按向后兼容原则保留，大版本评估清理。
 @router.get("/consistency-audit/{scheme_id}/history", deprecated=True)
-async def consistency_audit_history(scheme_id: str, limit: int = 10, db=Depends(get_db)):
+async def consistency_audit_history(
+        scheme_id: str, db=Depends(get_db), limit: int = 10,
+        response: Response = None):
+    _apply_deprecation_headers(
+        response,
+        replacement=f"/api/v1/compliance/runs/{scheme_id}",
+    )
     limit = max(1, min(limit, 50))
     cur = await db.execute(
         "SELECT id, score, issues, created_at FROM consistency_audit "
@@ -886,8 +938,9 @@ async def _run_is_stale(db, scheme_id: str, row,
 # @deprecated 孤儿 API：本前端走 /overview（内部已含同一预检引擎且带落库+缓存）；
 # 端点保留供脚本/手工诊断（已补幂等锁+缓存），大版本评估清理。
 @router.post("/preflight/{scheme_id}", deprecated=True)
-async def run_preflight_check(scheme_id: str, db=Depends(get_db),
-                              force: bool = False):
+async def run_preflight_check(
+        scheme_id: str, db=Depends(get_db), force: bool = False,
+        response: Response = None):
     """程序化预检：确定性规则，无需 AI，秒级返回。
 
     覆盖空章节 / 孤立节点 / 字数 / 图表完成率 / 控制字符 / 废止标准 /
@@ -898,6 +951,10 @@ async def run_preflight_check(scheme_id: str, db=Depends(get_db),
        向后兼容：``force`` 默认 False（新参数，不传的老调用方首次仍全量计算，
        仅命中缓存时行为不同，且返回体新增 ``cached`` 字段供调用方感知）。
     """
+    _apply_deprecation_headers(
+        response,
+        replacement=f"/api/v1/compliance/overview/{scheme_id}",
+    )
     async with _overview_lock(scheme_id):
         fingerprint = await _content_fingerprint(db, scheme_id)
         # ✅ 2026-10-03：进程内缓存键并入「已确认事实签名」，事实确认后
@@ -1310,7 +1367,7 @@ async def readiness_report(scheme_id: str, fmt: str = "markdown", db=Depends(get
                   "- 时效状态：有效（正文 / 图表与本次预检一致）")
 
     lines = [
-        f"# 专项方案审核预检报告",
+        "# 专项方案审核预检报告",
         "",
         f"- 方案名称：{name}",
         f"- 方案类型：{sc_row['type'] if sc_row else ''}",

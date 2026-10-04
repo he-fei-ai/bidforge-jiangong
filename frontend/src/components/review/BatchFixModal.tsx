@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 审核预检 · 批量「一键修复全部阻断项」弹窗（2026-10-01）
  *
  * 在现有单条 AutoFixModal 之上做加法，对应后端三端点：
@@ -26,7 +26,7 @@ import {
   CheckCircleOutlined, CloseCircleOutlined, ThunderboltOutlined,
 } from "@ant-design/icons";
 import { reviewAutoFixApi } from "../../api";
-import { hookAntdMessage } from "../../utils/activityCenter";
+import { useAntdMessageHub } from "../../utils/activityCenter";
 import type {
   AutoFixCollectResult, AutoFixStageItem, AutoFixStageResult,
 } from "../../types/audit";
@@ -47,7 +47,7 @@ type Phase = "collecting" | "reviewing" | "done";
 
 function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps) {
   const { message: _antdMsg } = App.useApp();
-  const msg = hookAntdMessage(_antdMsg, "审核预检");
+  const msg = useAntdMessageHub(_antdMsg, "审核预检");
   const [collectData, setCollectData] = useState<AutoFixCollectResult | null>(null);
   const [stageData, setStageData] = useState<AutoFixStageResult | null>(null);
   const [phase, setPhase] = useState<Phase>("collecting");

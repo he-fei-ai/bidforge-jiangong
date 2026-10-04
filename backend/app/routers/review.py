@@ -15,7 +15,6 @@
 - 评审记录：每次状态流转落一条 ``review_records``，可回溯完整评审轨迹；
 - 与预检联动：存在交付阻断项时提交审核会被拒绝（带阻断项的方案不应进入审核）。
 """
-import json
 import logging
 import uuid
 from datetime import datetime

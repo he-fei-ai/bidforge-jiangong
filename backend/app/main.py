@@ -1,20 +1,35 @@
 """FastAPI 应用入口"""
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, Depends, HTTPException
-from contextlib import asynccontextmanager
+from fastapi import FastAPI
 
 from app.config import APP_VERSION, settings
-from app.db import init_db, close_db, get_conn, get_db, read_db
+from app.db import close_db, init_db
 from app.middleware import setup_middleware
 from app.routers import (
-    projects, schemes, sections, sse_handlers,
-    outline_library, upload_outline, global_facts,
-    compliance, export, ai_config, charts, scheme_catalog,
-    knowledge, consistency_repair, review, review_autofix, system,
-    bid_analysis, doc_pipeline, prompts,
+    ai_config,
+    bid_analysis,
+    charts,
+    compliance,
+    consistency_repair,
+    doc_pipeline,
+    export,
+    global_facts,
+    knowledge,
+    outline_library,
+    projects,
+    prompts,
+    review,
+    review_autofix,
+    scheme_catalog,
+    schemes,
+    sections,
+    sse_handlers,
+    system,
+    upload_outline,
 )
 
 logging.basicConfig(
@@ -121,8 +136,8 @@ async def lifespan(app: FastAPI):
         #    否则这些项会永久停在 running —— UI 永远显示「运行中」、summary.running>0、
         #    Tab 徽标永远不是绿色、必选项永远判为缺失（表现为「20 项未完成」），
         #    且进程已重启、没有任何任务能驱动它们进入终态。
-        from app.routers.bid_analysis import clear_interrupted_items as _clear_ba_items
         from app.db import get_conn as _get_conn
+        from app.routers.bid_analysis import clear_interrupted_items as _clear_ba_items
         n_items = await _clear_ba_items(await _get_conn())
         if n_items:
             logger.warning("启动恢复：清理了 %d 个中断遗留的「提取项目」解析项", n_items)
@@ -229,8 +244,8 @@ async def lifespan(app: FastAPI):
     # ✅ 关闭即时清理：回收应用自有的临时转换脚本 / 锁文件（best-effort，失败仅告警）。
     #    数据库已关，此时不会误删在用文件；atexit 钩子作为未执行到本行的兵补。
     try:
-        from app.utils.process_cleanup import sweep_temp
         from app.config import DATA_DIR, EXPORTS_DIR, FACT_UPLOADS_DIR
+        from app.utils.process_cleanup import sweep_temp
         sweep_temp(
             [DATA_DIR, FACT_UPLOADS_DIR, EXPORTS_DIR],
             patterns=("office-convert-*.ps1", "*.lock", "~$*"),
@@ -311,7 +326,11 @@ async def capabilities():
 
 # 提示词路由已拆到 app.routers.prompts；为兼容旧调用与现有测试仍保留 re-export。
 from app.routers.prompts import (
-    list_prompts, prompt_audit_logs, reset_prompt, rollback_prompt, update_prompt,
+    list_prompts,
+    prompt_audit_logs,
+    reset_prompt,
+    rollback_prompt,
+    update_prompt,
 )
 
 __all__ = [

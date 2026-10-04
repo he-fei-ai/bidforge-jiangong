@@ -14,10 +14,9 @@
 """
 import uuid
 
-import pytest_asyncio
-
 import app.routers.global_facts as gf
 import app.services.doc_pipeline.pipeline as pipeline
+import pytest_asyncio
 
 
 @pytest_asyncio.fixture

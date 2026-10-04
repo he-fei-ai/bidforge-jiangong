@@ -12,7 +12,7 @@ import sys
 from io import BytesIO
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageFont
 except ImportError:
     raise ImportError(
         "PIL/Pillow 未安装，Mermaid图表渲染功能不可用。"
@@ -212,7 +212,6 @@ def _render_hq(func):
     注意：v2 渲染器自身应使用 2.5x 缩放渲染以获得超采样抗锯齿效果，
     此装饰器仅负责最终输出质量标准化。
     """
-    import functools
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):

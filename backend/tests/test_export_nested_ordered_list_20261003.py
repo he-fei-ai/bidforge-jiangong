@@ -15,16 +15,15 @@ ordered_marker），导致嵌套有序列表的子项被拍平成一条贯穿所
   标记样式变化本层从 1 重计、缩进层级缩进保留。
 - 反向锁定：旧的「拍平连续序列」形态不得出现。
 """
-import tempfile
 import os
-
-from docx import Document
+import tempfile
 
 from app.routers.export import (
     _build_docx_sync,
     _load_heading_styles,
     _parse_content_blocks,
 )
+from docx import Document
 
 
 def _build_single(content: str) -> list[str]:

@@ -13,9 +13,8 @@ POST /schemes/{id}/sections/reset-content 的核心不变量：
 import uuid
 
 import pytest
-from fastapi import HTTPException
-
 from app.routers import sections as sec
+from fastapi import HTTPException
 
 
 async def _seed_scheme(db, scheme_id: str, *, with_content: bool = True):

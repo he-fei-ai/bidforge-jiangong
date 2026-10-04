@@ -7,13 +7,12 @@
 """
 import uuid
 
-import pytest
-
 import app.db as _appdb
-from app.db import get_conn, init_db
 import app.routers.global_facts as gf
-import app.services.facts_extractor as fe
 import app.services.facts_cross_validators as xv
+import app.services.facts_extractor as fe
+import pytest
+from app.db import get_conn, init_db
 from app.services.facts_extractor import FactItem
 
 

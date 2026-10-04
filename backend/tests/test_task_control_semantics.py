@@ -22,13 +22,18 @@
 """
 import asyncio
 
-import pytest
-
 import app.routers.sse_handlers as sh
+import pytest
 from app.services.ai import task_registry as tr
 from app.services.ai.task_registry import (
-    get_task_elapsed_ms, get_task_paused_ms, is_stopped, register_child_task,
-    register_task, request_control, set_task_status, wait_resume,
+    get_task_elapsed_ms,
+    get_task_paused_ms,
+    is_stopped,
+    register_child_task,
+    register_task,
+    request_control,
+    set_task_status,
+    wait_resume,
 )
 
 _AI_SLEEP = 0.15

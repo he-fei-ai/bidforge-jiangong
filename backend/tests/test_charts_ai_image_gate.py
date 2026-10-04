@@ -6,13 +6,12 @@ v17 产品约束：图表全自动生成、无人工生图入口。/charts/gener
 """
 import uuid
 
-import pytest
-from fastapi import HTTPException
-
 import app.config as _cfg
 import app.db as _appdb
-from app.db import close_db, get_conn, init_db
 import app.routers.charts as charts
+import pytest
+from app.db import close_db, get_conn, init_db
+from fastapi import HTTPException
 
 
 @pytest.fixture

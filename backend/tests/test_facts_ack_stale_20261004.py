@@ -14,10 +14,9 @@
 """
 import uuid
 
+import app.db as _appdb
 import httpx
 import pytest
-
-import app.db as _appdb
 from app.db import close_db, get_conn, init_db
 from app.main import app
 
@@ -107,9 +106,8 @@ class TestAckSingle:
         assert row["is_stale"] == 0 and row["is_resolved"] == 0
 
     async def test_missing_fact_is_404(self, db_conn):
-        from fastapi import HTTPException
-
         from app.routers.global_facts import ack_fact_stale
+        from fastapi import HTTPException
 
         await _seed(db_conn)
         with pytest.raises(HTTPException) as ei:
@@ -171,9 +169,8 @@ class TestAckBatch:
         assert (await _get(db_conn, b))["is_stale"] == 1
 
     async def test_requires_scheme_scope(self, db_conn):
-        from fastapi import HTTPException
-
         from app.routers.global_facts import batch_ack_stale
+        from fastapi import HTTPException
 
         await _seed(db_conn)
         with pytest.raises(HTTPException) as ei:
@@ -181,9 +178,8 @@ class TestAckBatch:
         assert ei.value.status_code == 400, "缺 scheme_id 必须拒绝（越域写防护）"
 
     async def test_unknown_scheme_is_404(self, db_conn):
-        from fastapi import HTTPException
-
         from app.routers.global_facts import batch_ack_stale
+        from fastapi import HTTPException
 
         with pytest.raises(HTTPException) as ei:
             await batch_ack_stale({"scheme_id": "nope"}, db_conn)
@@ -194,30 +190,45 @@ class TestAckBatch:
 # 三、HTTP 层：路由确实挂上了（"函数对但没接线"是最常见的假修复）
 # ===========================================================================
 class TestAckStaleHttpWiring:
+    """HTTP 层接线与响应契约测试。
+
+    每个测试通过 ``seed_rows`` 独立播种自己需要的行，避免 fixture 里的
+    默认 stale fact 与其它测试的断言互相干扰（例如批量 gated 计数）。
+    """
+
     @pytest.fixture
-    async def wired(self, tmp_path, monkeypatch):
+    async def db_path_only(self, tmp_path, monkeypatch):
         original = _appdb.DB_PATH
         _appdb.DB_PATH = tmp_path / "ack-stale-20261004.sqlite"
         await init_db()
         db = await get_conn()
         await _seed(db)
-        fid = await _fact(db, stale=1, resolved=0)
-        yield fid
+        await db.close()
+        yield
         await close_db()
         _appdb.DB_PATH = original
 
-    async def test_single_endpoint_over_http(self, wired):
+    @staticmethod
+    async def _seed_rows(*rows):
+        db = await get_conn()
+        ids = [await _fact(db, **kw) for kw in rows]
+        await db.close()
+        return ids
+
+    async def test_single_endpoint_over_http(self, db_path_only):
+        [fid] = await self._seed_rows({"stale": 1, "resolved": 0})
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
                 transport=transport, base_url="http://testserver",
                 timeout=30.0) as client:
             resp = await client.patch(
-                f"/api/v1/global-facts/{wired}/ack-stale",
+                f"/api/v1/global-facts/{fid}/ack-stale",
                 params={"scheme_id": MAIN_SID})
         assert resp.status_code == 200, f"{resp.status_code}: {resp.text[:200]}"
         assert resp.json().get("changed") is True
 
-    async def test_batch_endpoint_over_http(self, wired):
+    async def test_batch_endpoint_over_http(self, db_path_only):
+        [fid] = await self._seed_rows({"stale": 1, "resolved": 0})
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
                 transport=transport, base_url="http://testserver",
@@ -227,10 +238,141 @@ class TestAckStaleHttpWiring:
         assert resp.status_code == 200, f"{resp.status_code}: {resp.text[:200]}"
         assert resp.json().get("changed") == 1
 
-    async def test_batch_without_scope_is_400_over_http(self, wired):
+    async def test_batch_without_scope_is_400_over_http(self, db_path_only):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
                 transport=transport, base_url="http://testserver",
                 timeout=30.0) as client:
             resp = await client.post("/api/v1/global-facts/ack-stale", json={})
         assert resp.status_code == 400, f"缺作用域应 400，实际 {resp.status_code}"
+
+    # --- 单条：多场景经 HTTP 走一遍（函数级护栏已在 TestAckSingle 覆盖，
+    #     这里补路由接线 + 404/幂等/闸门回传字段经 HTTP 的实际表现） ---
+    async def test_single_missing_fact_is_404_over_http(self, db_path_only):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver",
+                timeout=30.0) as client:
+            resp = await client.patch(
+                "/api/v1/global-facts/f-not-exist/ack-stale",
+                params={"scheme_id": MAIN_SID})
+        assert resp.status_code == 404, f"不存在的 fact 应 404，实际 {resp.status_code}"
+
+    async def test_single_idempotent_unchanged_over_http(self, db_path_only):
+        """已过期=0 的行再次点确认：HTTP 层返回 200 + changed=False，不抛错。"""
+        [fid] = await self._seed_rows({"stale": 0, "resolved": 1})
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver",
+                timeout=30.0) as client:
+            resp = await client.patch(
+                f"/api/v1/global-facts/{fid}/ack-stale",
+                params={"scheme_id": MAIN_SID})
+        assert resp.status_code == 200, resp.text[:200]
+        body = resp.json()
+        assert body.get("changed") is False, f"幂等场景 changed 必须为 False，实际 {body}"
+        assert body.get("ok") is True
+
+    async def test_single_simulated_returns_blocked_reason_over_http(self, db_path_only):
+        """HTTP 层也必须把 blocked_reason 透给前端（模拟值闸门）。"""
+        [fid] = await self._seed_rows({"stale": 1, "resolved": 0, "simulated": 1})
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver",
+                timeout=30.0) as client:
+            resp = await client.patch(
+                f"/api/v1/global-facts/{fid}/ack-stale",
+                params={"scheme_id": MAIN_SID})
+        assert resp.status_code == 200, resp.text[:200]
+        body = resp.json()
+        assert body.get("changed") is True
+        assert body.get("is_resolved") is False, "模拟值闸门不能被 ack 顺带打开"
+        assert body.get("blocked_reason"), "必须回传 blocked_reason 供前端提示"
+
+    async def test_single_conflict_returns_blocked_reason_over_http(self, db_path_only):
+        [fid] = await self._seed_rows({"stale": 1, "resolved": 0, "conflict": 1})
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver",
+                timeout=30.0) as client:
+            resp = await client.patch(
+                f"/api/v1/global-facts/{fid}/ack-stale",
+                params={"scheme_id": MAIN_SID})
+        assert resp.status_code == 200, resp.text[:200]
+        body = resp.json()
+        assert body.get("changed") is True
+        assert body.get("is_resolved") is False
+        assert body.get("blocked_reason")
+
+    # --- 批量：多场景经 HTTP 走一遍 ---
+    async def test_batch_unknown_scheme_is_404_over_http(self, db_path_only):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver",
+                timeout=30.0) as client:
+            resp = await client.post("/api/v1/global-facts/ack-stale",
+                                     json={"scheme_id": "nope"})
+        assert resp.status_code == 404, f"未知 scheme 应 404，实际 {resp.status_code}"
+
+    async def test_batch_fact_ids_narrows_over_http(self, db_path_only):
+        """HTTP 层 fact_ids 收窄与函数层一致：只处理显式点名的行。"""
+        [a, b] = await self._seed_rows(
+            {"stale": 1, "resolved": 0}, {"stale": 1, "resolved": 0})
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver",
+                timeout=30.0) as client:
+            resp = await client.post("/api/v1/global-facts/ack-stale",
+                                     json={"scheme_id": MAIN_SID,
+                                           "fact_ids": [a]})
+        assert resp.status_code == 200, resp.text[:200]
+        body = resp.json()
+        assert body.get("changed") == 1, f"应只解 1 条，实际 {body}"
+        # 校验 b 未受影响
+        db = await get_conn()
+        row_b = await _get(db, b)
+        await db.close()
+        assert row_b["is_stale"] == 1, "未被 fact_ids 点名的行不得被越界处理"
+
+    async def test_batch_gated_rows_reported_over_http(self, db_path_only):
+        """gated 计数与逐行 is_resolved 状态经 HTTP 完整回传。"""
+        await self._seed_rows(
+            {"stale": 1, "resolved": 0, "simulated": 1},
+            {"stale": 1, "resolved": 0, "conflict": 1},
+            {"stale": 1, "resolved": 0},
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver",
+                timeout=30.0) as client:
+            resp = await client.post("/api/v1/global-facts/ack-stale",
+                                     json={"scheme_id": MAIN_SID})
+        assert resp.status_code == 200, resp.text[:200]
+        body = resp.json()
+        assert body.get("changed") == 3, f"3 行 stale 全部解除，实际 {body}"
+        assert body.get("gated") == 2, f"应回传 gated=2，实际 {body}"
+
+    async def test_batch_with_project_shared_over_http(self, db_path_only):
+        """scheme 私有 + 项目共享都要清；他项目不动。"""
+        [own, shared, foreign] = await self._seed_rows(
+            {"stale": 1, "resolved": 0},
+            {"sid": "", "stale": 1, "resolved": 0},
+            {"pid": OTHER_PID, "sid": OTHER_SID, "stale": 1, "resolved": 0},
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver",
+                timeout=30.0) as client:
+            resp = await client.post("/api/v1/global-facts/ack-stale",
+                                     json={"scheme_id": MAIN_SID})
+        assert resp.status_code == 200, resp.text[:200]
+        body = resp.json()
+        assert body.get("changed") == 2, f"本方案可见范围 2 条，实际 {body}"
+        db = await get_conn()
+        r_own = await _get(db, own)
+        r_shared = await _get(db, shared)
+        r_foreign = await _get(db, foreign)
+        await db.close()
+        assert r_own["is_stale"] == 0
+        assert r_shared["is_stale"] == 0
+        assert r_foreign["is_stale"] == 1, "他项目事实不得被越域修改"

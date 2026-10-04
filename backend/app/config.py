@@ -1,5 +1,6 @@
 """配置管理（pydantic-settings）"""
 from pathlib import Path
+
 from pydantic import ConfigDict, field_validator
 from pydantic_settings import BaseSettings
 
@@ -39,6 +40,15 @@ class Settings(BaseSettings):
     # 解析路由 upload_outline.parse_outline 通过 file_parser.MAX_UPLOAD_BYTES
     # 读取本值，单测可 monkeypatch 该模块常量验证 413 守卫。
     upload_max_bytes: int = 30 * 1024 * 1024
+
+    # ---------- 批量上传配额（解析提取模块 · 项目资料上传） ----------
+    # 单文件上限挡不住「一个请求塞进大量文件」：落盘与随后解析会线性放大
+    # 磁盘/内存占用（解析串行阻塞在服务进程内）。这两项与 upload_max_bytes
+    # 同源可配置，并经 GET /api/v1/system/upload-limits 动态下发给前端，
+    # 前端不再各写一份 30MB/20 个/200MB 常量（消除前后端硬编码漂移）。
+    # 非法（非正数）配置在消费侧回落到内置默认，避免误配为「放行任意数量」。
+    upload_max_files_per_request: int = 20
+    upload_max_total_bytes: int = 200 * 1024 * 1024
 
     # ---------- PDF 文本层解析页数上限（2026-09-30 第十四轮） ----------
     # ⚠️ 此前 MAX_PDF_PAGES 是 file_parser 里的**硬编码 50**，不可配置：
@@ -261,6 +271,13 @@ class Settings(BaseSettings):
     # 目录审核修复（按建议重写整份目录）单次调用超时（秒）；
     # 超时按「保留原目录」降级——宁可未修复，不可丢目录。
     outline_fix_timeout: int = 120
+    # 目录审核/修复调用显式输出上限（token）：合并修复 fast-path 需要在一次
+    # 审核调用中同时回吐「完整三级目录数组 fixed_outline」，长方案下可能
+    # 触发 provider 默认上限（8192）被截断 → 修复轮解析失败 → 回退完整
+    # 修复调用（多烧 120s 超时预算）。显式拉高到 16384 覆盖 500 节点场景。
+    # 0 = 沿用 provider 默认（向后兼容，用户可在 AI 面板按模型下调）。
+    outline_review_max_tokens: int = 16384
+    outline_fix_max_tokens: int = 16384
     # 分步生成阈值：字数预算 > 此值走「一级目录 → 逐章二三级 → 审核」分步链路，
     # 否则一次性直出。调小 => 更多方案走分步（更稳但调用次数更多）；
     # 调大 => 更多方案一次性直出（更快但弱模型下更易截断）。

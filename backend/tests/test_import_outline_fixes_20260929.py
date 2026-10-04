@@ -44,15 +44,14 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from fastapi import HTTPException
-
+from app.routers.sse_handlers import _merge_unit_results, _sublevel_validate_fn
 from app.services.bid_analysis_service import (
     MARKDOWN_MISSING_RESULT,
     format_downstream_context,
     is_missing_result,
 )
-from app.routers.sse_handlers import _merge_unit_results, _sublevel_validate_fn
 from app.services.outline_utils import MAX_OUTLINE_DEPTH, clamp_outline_depth
+from fastapi import HTTPException
 
 
 # ============================================================
@@ -511,6 +510,7 @@ class TestMoveSectionDepthGuard:
     async def test_depth_guard_message_single_sourced(self, scheme_ctx):
         """静态护栏：两条路径共用同一文案常量，防止再次分叉。"""
         import inspect
+
         from app.routers import sections as _sec
         assert inspect.getsource(_sec).count("_DEPTH_EXCEEDED_MSG") >= 3
         assert inspect.getsource(_sec.update_section).count(
@@ -773,8 +773,8 @@ class TestStaleExtractionMarking:
 
     async def test_reserved_type_never_marked_stale(self, extract_ctx):
         """回归：预留类别（boq）历史行不得被陈旧化语义波及。"""
-        from app.services.doc_pipeline import pipeline
         from app.services.doc_pipeline import doc_storage as ds
+        from app.services.doc_pipeline import pipeline
         c = extract_ctx
         assert "boq" in ds.RESERVED_EXTRACT_TYPES
         await c["db"].execute(

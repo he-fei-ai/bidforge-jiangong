@@ -13,12 +13,11 @@
 import io
 import uuid
 
-import pytest
-from fastapi import HTTPException, UploadFile
-
 import app.db as _appdb
 import app.routers.global_facts as gf
+import pytest
 from app.db import get_conn, init_db
+from fastapi import HTTPException, UploadFile
 
 
 def _upload(name: str, data: bytes, size: int | None = None) -> UploadFile:

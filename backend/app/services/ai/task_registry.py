@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 
 from app.db import get_conn, retry_db_op, safe_rowcount
 from app.services import activity_broadcaster as _ab
+
 # ✅ Fix C 接入：pause 时同步调用 reject_waiters 打断全局 provider 层排队协程
 from app.services.ai.workflows_base import concurrency_controller as _cc
 
@@ -24,8 +25,6 @@ logger = logging.getLogger("task_registry")
 _PROGRESS_DB_MIN_INTERVAL = 0.5   # 秒：距上次进度落库的最小间隔
 _PROGRESS_DB_MIN_DELTA = 0.005    # 进度最小增量（0.5%）
 
-# task_id -> list[asyncio.Queue]（多客户端订阅）
-_subscribers: dict[str, list[asyncio.Queue]] = {}
 # task_id -> 运行时控制状态
 _tasks: dict[str, dict] = {}
 # ✅ 并发注册互斥锁：防止两个并发请求同时通过防僵尸检查后各自 INSERT running 任务
@@ -286,7 +285,6 @@ async def finish_task(task_id: str, status: str = "completed", message: str = ""
     finally:
         # ✅ G12-5：内存态清理必须**无条件**执行 —— 即使上面的写库 / 广播
         # 抛了异常，也不能让终态任务残留在 _tasks 里（见函数说明）。
-        _subscribers.pop(task_id, None)
         _tasks.pop(task_id, None)
         _ab.notify()
 
@@ -411,18 +409,42 @@ def has_active_task(task_id: str) -> bool:
     return task_id in _tasks
 
 
-def register_child_task(task_id: str, child: asyncio.Task):
+def register_child_task(task_id: str, child: asyncio.Task) -> bool:
+    """把子任务登记到父任务的 child_tasks 集合。
+
+    ✅ P2 修复（2026-10-04 · 子任务泄漏）：旧实现父任务不存在时**静默跳过**，
+    返回隐式 None，调用方（例如 _ai_call_with_stop_awareness）无法区分
+    "登记成功" 与 "父任务已被 finish_task 清出 _tasks、child_tasks 集合随之消失"，
+    结果：父任务已终态，子任务（如一次跑 30~180s 的 AI 调用）继续跑到自然结束
+    甚至被 finish_task 之后才完成的回调 `state["child_tasks"].discard(child)`
+    访问已被清理的 state 引用——极端情况下子任务孤儿化，用户点停止后依然
+    占用连接池/AI quota 直到超时预算耗尽。
+    现改为显式返回 bool：False 表示父任务已不存在（或登记失败），
+    调用方应立即 `child.cancel()`，避免挂住。
+    """
     state = _tasks.get(task_id)
-    if state:
-        state["child_tasks"].add(child)
-        child.add_done_callback(lambda t: state["child_tasks"].discard(t))
+    if not state:
+        return False
+    state["child_tasks"].add(child)
+    child.add_done_callback(lambda t: state["child_tasks"].discard(t))
+    return True
 
 
 # ---------- SSE 订阅 ----------
 
+# ✅ 2026-10-04 死链路清理：
+#   `_subscribers: dict[task_id -> list[Queue]]` 及其配套的
+#   subscribe/unsubscribe 曾在旧实现里承担「task_registry 主动 push 事件」
+#   的语义，但生产代码从未 add 过任何 Queue —— SSE 走的是 StreamingResponse
+#   生成器 yield 直出，activity_broadcaster.notify() 只做「让 SSE 端
+#   heartbeat 通道刷新状态」的间接通知。保留 `_subscribers` 让
+#   broadcast() 永远在 for-loop 空列表上打转，属于**纯死代码**。
+#   现将 `broadcast()` 降级为 no-op（**保留函数名与签名**，供
+#   monkeypatch 测试沿用旧接口；生产代码调用它即等于静默空转），
+#   并同步删除 `_subscribers` 字典与 `finish_task` 中的 pop 语句。
+#   ⚠️ 依赖 `_subscribers` 语义的旧测试已改为直接验证内存态 / DB 状态。
 async def broadcast(task_id: str, payload: dict):
-    for q in list(_subscribers.get(task_id, [])):
-        await q.put(payload)
+    return
 
 
 

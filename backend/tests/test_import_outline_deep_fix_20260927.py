@@ -27,7 +27,6 @@ import re
 from pathlib import Path
 
 import pytest
-
 from app.services.ai.json_response import strip_outline_numbering as jr_strip
 from app.services.doc_pipeline.doc_chunker import chunk_document
 from app.services.doc_pipeline.md_structured import parse_markdown_structured
@@ -316,8 +315,7 @@ class TestRenormalizeAllSectionContentsPerf:
 
     async def test_behaviour_unchanged_with_index(self, db_conn):
         """批量路径与「不传 index」逐章路径产出逐字节一致（优化不改语义）。"""
-        from app.services.numbering import (
-            load_scheme_section_index, normalize_section_content_subheadings)
+        from app.services.numbering import load_scheme_section_index, normalize_section_content_subheadings
 
         await self._seed(db_conn, 3)
         a, ca = await normalize_section_content_subheadings(
@@ -433,7 +431,7 @@ class TestLeadingNumberRegexFrontendParity:
             pytest.skip("前端源文件缺失，跳过跨语言 parity")
         ts = _FRONTEND_PAGE_TS.read_text(encoding="utf-8")
         sep, cjk, _ = self._extract(ts)
-        from app.services.numbering import _SEP_CLASS, _CJK_BOUNDARY
+        from app.services.numbering import _CJK_BOUNDARY, _SEP_CLASS
         assert sep == _SEP_CLASS, f"前端 SEP={sep!r} ≠ 后端 _SEP_CLASS={_SEP_CLASS!r}"
         assert self._decode(cjk) == self._decode(_CJK_BOUNDARY), \
             f"前端 CJK={cjk!r} ≠ 后端 _CJK_BOUNDARY={_CJK_BOUNDARY!r}"

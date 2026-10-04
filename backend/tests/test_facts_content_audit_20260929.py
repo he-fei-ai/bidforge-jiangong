@@ -37,15 +37,13 @@ F. 【P2 · 向后兼容】``_load_facts_rows`` 改用统一查询后只按 ``di
 """
 import uuid
 
-import pytest
-
 import app.db as _appdb
 import app.routers.global_facts as gf
 import app.routers.sse_handlers as sh
+import pytest
 from app.db import get_conn, init_db
 from app.models import FactItem
 from app.services import facts_classification as fc
-
 
 pytestmark = pytest.mark.filterwarnings("ignore")
 

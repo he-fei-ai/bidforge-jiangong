@@ -12,7 +12,6 @@ OPTIMIZE 一条（前端列表动态背靠 API，零硬引用，前端/测试 gr
 # 提示词注册到全局 _ALL_PROMPTS 注册表
 from ._registry import _reg
 
-
 # ===== 配图提示词优化（图像生成前扩写，消费方：routers/charts.py::generate_ai_image）=====
 
 ILLUSTRATION_PROMPT_OPTIMIZE = """# AI 配图提示词优化（系统提示词）

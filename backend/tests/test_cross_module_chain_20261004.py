@@ -19,10 +19,9 @@ import re
 import uuid
 from pathlib import Path
 
+import app.db as _appdb
 import httpx
 import pytest
-
-import app.db as _appdb
 from app.db import close_db, get_conn, init_db
 from app.main import app
 
@@ -49,8 +48,7 @@ class TestConflictIdSchemeScoped:
         assert len(a1) == 7 and a1.endswith("-"), f"前缀形态异常: {a1!r}"
 
     def test_empty_scheme_id_keeps_legacy_format(self):
-        from app.services.consistency_scanner import (
-            _conflict_id_prefix, merge_conflicts)
+        from app.services.consistency_scanner import _conflict_id_prefix, merge_conflicts
 
         assert _conflict_id_prefix("") == ""
         rows = [{
@@ -65,8 +63,7 @@ class TestConflictIdSchemeScoped:
             f"不传 scheme_id 时必须仍是 C001，实际 {out[0]['id']}")
 
     def test_merge_conflicts_with_scheme_id_is_scoped(self):
-        from app.services.consistency_scanner import (
-            _conflict_id_prefix, merge_conflicts)
+        from app.services.consistency_scanner import _conflict_id_prefix, merge_conflicts
 
         def _row(sid):
             return [{
@@ -173,8 +170,8 @@ class TestComplianceCheckDefaultChecklist:
 # ===========================================================================
 class TestFactsGenerationReentrancyGuard:
     def test_helper_detects_running_and_ignores_terminal(self):
-        from app.routers.sections import facts_generation_in_progress
         import app.services.ai.task_registry as tr
+        from app.routers.sections import facts_generation_in_progress
 
         sid = "scheme-X"
         tr._tasks.clear()

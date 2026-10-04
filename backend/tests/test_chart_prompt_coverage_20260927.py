@@ -18,12 +18,15 @@
 from __future__ import annotations
 
 import pytest
-
 from app.services.ai.prompts._registry import (
-    PROMPT_VARIABLE_CONTRACTS, _ALL_PROMPTS, get_default_prompt, render_prompt,
+    _ALL_PROMPTS,
+    PROMPT_VARIABLE_CONTRACTS,
+    get_default_prompt,
+    render_prompt,
 )
 from app.services.chart_validators import (
-    MERMAID_KEYWORD_TO_CHART_TYPE, PIL_RENDERABLE_CHART_TYPES,
+    MERMAID_KEYWORD_TO_CHART_TYPE,
+    PIL_RENDERABLE_CHART_TYPES,
 )
 
 #: 7 类值域 —— 直接取校验器，不在此处复写（单一事实源）
@@ -78,7 +81,8 @@ class TestFixPromptCoverageMatrix:
     def test_every_fix_prompt_renders_without_residue(self, chart_type):
         """按契约传满变量后不得残留占位符（否则修复链路会注入字面量）。"""
         from app.services.ai.prompts._registry import (
-            _is_false_positive, extract_variables,
+            _is_false_positive,
+            extract_variables,
         )
         for is_json in (True, False):
             key = _select_key(chart_type, is_json)

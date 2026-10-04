@@ -10,10 +10,9 @@
 """
 import uuid
 
-import pytest
-
 import app.db as _appdb
-from app.db import init_db, get_conn
+import pytest
+from app.db import get_conn, init_db
 from app.routers import global_facts
 
 

@@ -15,11 +15,10 @@ import inspect
 import json
 import uuid
 
-import pytest
-
 import app.db as _appdb
-from app.db import close_db, get_conn, init_db
 import app.routers.compliance as compliance
+import pytest
+from app.db import close_db, get_conn, init_db
 from app.models import ComplianceCheckIn, ExpertReviewIn
 from app.routers import review_autofix as review_autofix_router
 from app.services.ai.prompts._registry import render

@@ -19,10 +19,8 @@ import time
 from pathlib import Path
 
 import pytest
-
 from app.routers import sse_handlers as sh
 from app.services import content_shrink as cs
-
 
 
 # ============================================================
@@ -89,7 +87,8 @@ class TestTerminalOrdering:
         防止手工漂移（G13-5 / G12-6 同根因）：白名单变更但未重新生成 TS 文件。
         """
         from app.services.checkpoint_schema import (
-            CHECKPOINT_KINDS, generate_typescript_schema,
+            CHECKPOINT_KINDS,
+            generate_typescript_schema,
         )
         ts = generate_typescript_schema()
         ts_path = (Path(__file__).resolve().parents[2] / "frontend"
@@ -139,7 +138,7 @@ class TestContentCheckpoint:
             _appdb.DB_PATH = _prev_path
 
     async def test_roundtrip_and_kind_isolation(self, ctx):
-        from app.services.ai.task_registry import register_task, finish_task
+        from app.services.ai.task_registry import finish_task, register_task
         tid = await register_task("content_generation", "p", "s")
         payload = {
             "event": "stopped", "message": "用户已停止",
@@ -159,7 +158,7 @@ class TestContentCheckpoint:
 
     async def test_outline_loader_still_works(self, ctx):
         """回归：泛化 checkpoint 读取后，目录成果读取语义不变。"""
-        from app.services.ai.task_registry import register_task, finish_task
+        from app.services.ai.task_registry import finish_task, register_task
         tid = await register_task("outline_generation", "p", "s")
         await sh._save_outline_checkpoint(tid, {"event": "completed",
                                                 "outline": [{"title": "工程概况"}]})

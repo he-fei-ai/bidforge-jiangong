@@ -1,6 +1,7 @@
 import json
-from PIL import Image
+
 from app.services.ai.mermaid_renderer import render_mermaid_to_bytes
+from PIL import Image
 
 
 def test_gantt_duration_header_not_truncated():

@@ -16,9 +16,8 @@
 """
 import contextlib
 
-import pytest
-
 import app.services.ai.provider_factory as pf
+import pytest
 from app.models import DisabledProvidersIn
 from app.routers.ai_config import runtime as runtime_router
 from app.services.crypto import encrypt_api_key

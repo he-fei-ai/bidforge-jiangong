@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 审核预检 · 单条问题「一键自动修复」弹窗（2026-09-30）
  *
  * 交互分两步，与后端 `/autofix/plan` + `/autofix/apply` 一一对应：
@@ -22,7 +22,7 @@ import {
   CheckCircleOutlined, CloseCircleOutlined, RollbackOutlined, ThunderboltOutlined,
 } from "@ant-design/icons";
 import { reviewAutoFixApi } from "../../api";
-import { hookAntdMessage } from "../../utils/activityCenter";
+import { useAntdMessageHub } from "../../utils/activityCenter";
 import type { AutoFixPlanResult, AutoFixResult, PreflightFinding } from "../../types/audit";
 
 const { Text, Paragraph } = Typography;
@@ -38,7 +38,7 @@ export interface AutoFixModalProps {
 
 function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModalProps) {
   const { message: _antdMsg } = App.useApp();
-  const msg = hookAntdMessage(_antdMsg, "审核预检");
+  const msg = useAntdMessageHub(_antdMsg, "审核预检");
   const [plan, setPlan] = useState<AutoFixPlanResult | null>(null);
   const [result, setResult] = useState<AutoFixResult | null>(null);
   const [loading, setLoading] = useState(false);

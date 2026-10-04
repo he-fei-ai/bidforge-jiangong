@@ -21,7 +21,6 @@ import re
 from pathlib import Path
 
 import pytest
-
 from app.services import standards_registry as sr
 from app.services.content_checkpoint import (
     BASE_CODE_INDEX,

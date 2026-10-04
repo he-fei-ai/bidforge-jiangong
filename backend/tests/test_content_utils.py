@@ -5,12 +5,18 @@
   而不仅是 status=='generated' —— reviewed/expanded 等已人工处理章节
   一旦有正文，绝不能被默认生成覆盖。
 """
-from app.services.content_utils import (
-    select_target_leaves, build_sibling_context, word_status_for, text_word_count,
-    normalize_word_budget_override, resolve_concurrency,
-    find_unclosed_fences, strip_fenced_code_blocks, fence_spans,
-)
 from app.routers.sse_handlers import _apply_word_budget_allocations
+from app.services.content_utils import (
+    build_sibling_context,
+    fence_spans,
+    find_unclosed_fences,
+    normalize_word_budget_override,
+    resolve_concurrency,
+    select_target_leaves,
+    strip_fenced_code_blocks,
+    text_word_count,
+    word_status_for,
+)
 
 
 def _s(sid, title, parent="", level=1, status="empty",
@@ -375,6 +381,7 @@ def test_module_source_compile_without_invalid_escape_warning():
     import ast
     import pathlib
     import warnings
+
     import app.services.content_utils as cu
 
     src = pathlib.Path(cu.__file__).read_text(encoding="utf-8")

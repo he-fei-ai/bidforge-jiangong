@@ -11,14 +11,16 @@
 """
 import contextlib
 
-import pytest
-
 import app.services.ai.provider_factory as pf
+import pytest
+from app.models import (
+    AIConfigIn,
+    FallbackChainUpdate,
+    ProviderModelsIn,
+    SceneRouteUpdate,
+)
 from app.routers import ai_config as ai_router
 from app.routers.ai_config import audit
-from app.models import (
-    AIConfigIn, ProviderModelsIn, SceneRouteUpdate, FallbackChainUpdate,
-)
 from app.services.crypto import encrypt_api_key
 
 

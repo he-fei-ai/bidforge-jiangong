@@ -21,9 +21,8 @@ import json
 import sqlite3
 import uuid
 
-import pytest
-
 import app.db as _appdb
+import pytest
 from app.db import close_db, get_conn, init_db
 from app.models import ComplianceCheckIn
 from app.routers import compliance as _compliance_mod

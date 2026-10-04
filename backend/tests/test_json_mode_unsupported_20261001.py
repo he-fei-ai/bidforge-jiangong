@@ -35,8 +35,11 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.services.ai.json_mode_compat import (  # noqa: E402
-    JSON_MODE_HINT_TOKENS, JSON_MODE_NEGATION_TOKENS, JSON_MODE_TOKENS,
-    json_mode_unsupported, response_format_rejected,
+    JSON_MODE_HINT_TOKENS,
+    JSON_MODE_NEGATION_TOKENS,
+    JSON_MODE_TOKENS,
+    json_mode_unsupported,
+    response_format_rejected,
 )
 from app.services.ai.provider_factory import _json_mode_unsupported  # noqa: E402
 from app.services.ai.providers.openai_compatible import (  # noqa: E402

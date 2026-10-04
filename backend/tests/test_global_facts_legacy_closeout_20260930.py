@@ -28,7 +28,6 @@ import inspect
 from pathlib import Path
 
 import pytest
-
 from app.config import settings
 from app.services import facts_classification as fc
 from app.services import facts_enrich as fe

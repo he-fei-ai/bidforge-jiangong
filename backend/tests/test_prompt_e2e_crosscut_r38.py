@@ -29,10 +29,9 @@ import sys
 import uuid
 import zlib
 
-import pytest
-
 import app.db as _appdb
 import app.routers.sse_handlers as sh
+import pytest
 from app.db import get_conn, init_db
 
 #: 全链路收集到的「实际下发给模型的提示词」，供横切断言消费。
@@ -46,7 +45,9 @@ def _capture(stage: str, prompt: str) -> None:
 def _all_registered_variables() -> set[str]:
     """注册表里出现过的全部用户变量名（跨全部模板）。"""
     from app.services.ai.prompts._registry import (
-        PROMPT_VARIABLE_CONTRACTS, extract_user_variables, get_default_prompt,
+        PROMPT_VARIABLE_CONTRACTS,
+        extract_user_variables,
+        get_default_prompt,
         list_prompts,
     )
     names: set[str] = set()
@@ -86,7 +87,10 @@ async def ctx(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_stage1_parse_extract_persists_facts(ctx):
     from app.services.facts_extractor import (
-        ExtractionResult, FactGroup, FactItem, persist_extraction,
+        ExtractionResult,
+        FactGroup,
+        FactItem,
+        persist_extraction,
     )
     db, pid, sid = ctx
     result = ExtractionResult(
@@ -131,7 +135,9 @@ def test_stage2_global_facts_reach_prompt_without_head_truncation():
 def test_stage2_facts_block_is_declared_in_prompt_contract(key, var):
     """事实段必须真的进这些 AI 链路的提示词契约。"""
     from app.services.ai.prompts._registry import (
-        PROMPT_VARIABLE_CONTRACTS, extract_user_variables, get_default_prompt,
+        PROMPT_VARIABLE_CONTRACTS,
+        extract_user_variables,
+        get_default_prompt,
     )
     assert var in PROMPT_VARIABLE_CONTRACTS.get(key, []), (
         f"{key} 契约里没有 {var} —— 事实不进提示词")
@@ -260,7 +266,8 @@ class TestStage4ContentPrompts:
 # ===========================================================================
 def test_stage5_chart_fence_language_is_shared_with_pipeline():
     from app.routers._chart_pipeline import (
-        INLINE_CHART_FENCE_LANGS, is_chart_fence_lang,
+        INLINE_CHART_FENCE_LANGS,
+        is_chart_fence_lang,
     )
     assert "mermaid" in INLINE_CHART_FENCE_LANGS
     assert is_chart_fence_lang("mermaid"), "mermaid 围栏未被识别为图表围栏"
@@ -269,7 +276,9 @@ def test_stage5_chart_fence_language_is_shared_with_pipeline():
 
 def test_stage5_inline_chart_is_extracted_with_type():
     from app.routers._chart_pipeline import (
-        detect_mermaid_chart_type, extract_inline_charts, has_inline_charts,
+        detect_mermaid_chart_type,
+        extract_inline_charts,
+        has_inline_charts,
     )
     md = ("正文。\n\n```mermaid\nflowchart TD\n  A[开挖] --> B[支护]\n```\n\n"
           "如图所示。\n")
@@ -328,7 +337,8 @@ def test_stage6_preflight_findings_use_registered_rule_ids():
 def test_stage6_validators_cover_consumed_fields():
     """/check 与一致性审计：校验字段集必须覆盖消费字段集。"""
     from app.routers.compliance import (
-        _validate_check_results, _validate_consistency_audit,
+        _validate_check_results,
+        _validate_consistency_audit,
     )
     assert _validate_consistency_audit({"score": 88, "issues": []}) == []
     assert _validate_consistency_audit({"score": 100}), (

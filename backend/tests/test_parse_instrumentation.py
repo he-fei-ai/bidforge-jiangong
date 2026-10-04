@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import logging
 
-from app.utils.log_context import (
-    new_trace_id, set_context, context_suffix, TraceContextFilter, install_filter,
-    clear_context,
-)
 from app.services.facts_extractor import FactItem, resolve_fact_is_resolved
-
+from app.utils.log_context import (
+    TraceContextFilter,
+    clear_context,
+    context_suffix,
+    install_filter,
+    new_trace_id,
+    set_context,
+)
 
 # ---------------------------------------------------------------------------
 # 1. 全链路日志埋点

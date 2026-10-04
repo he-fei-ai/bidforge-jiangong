@@ -11,10 +11,9 @@ import ast
 import uuid
 from pathlib import Path
 
-import pytest
-
 import app.db as _appdb
 import app.routers.export as export_mod
+import pytest
 from app.db import close_db, get_conn, init_db
 
 EXPORT_PY = Path(export_mod.__file__)

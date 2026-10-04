@@ -12,7 +12,6 @@ F1 遗留缺口修复：batch_resolve 不得以「用户显式确认」为由越
 import uuid
 
 import pytest
-
 from app.routers.global_facts import batch_resolve
 
 

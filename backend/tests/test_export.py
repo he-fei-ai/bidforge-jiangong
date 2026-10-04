@@ -8,8 +8,7 @@
 - 边界用例：空行跳过、表格缺分隔行降级为段落、mermaid 识别为 chart
 """
 import pytest
-
-from app.routers.export import _parse_content_blocks, _detect_duplicate_sections
+from app.routers.export import _detect_duplicate_sections, _parse_content_blocks
 
 
 # ============================================================
@@ -531,7 +530,7 @@ class TestParseContentBlocksMixed:
 # ============================================================
 # 章节编号前缀提取 + 正文内子标题嵌套编号
 # ============================================================
-from app.routers.export import _section_number_prefix, _compute_subheading
+from app.routers.export import _compute_subheading, _section_number_prefix
 
 
 class TestSectionNumberPrefix:

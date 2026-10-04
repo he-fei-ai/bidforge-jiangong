@@ -23,7 +23,6 @@ from app.services.ai.mermaid_renderer import (
     clear_render_cache,
 )
 
-
 # ---------------------------------------------------------------------------
 # ① 幽灵图口径：超长但已闭合的块正常登记；真未闭合块仍被拒
 # ---------------------------------------------------------------------------
@@ -61,7 +60,7 @@ def test_overlong_but_closed_chart_json_block_is_registered():
 def test_truly_unclosed_overlong_block_is_still_rejected():
     """真未闭合（闭合围栏在前视窗口之外）的块仍判未闭合：不登记、不无限吞内存。"""
     lines = ["flowchart TD"] + [f'A{i}["x"] --> B{i}["y"]' for i in range(1200)]
-    content = f"```mermaid\n" + "\n".join(lines) + "\n"  # 无闭合围栏
+    content = "```mermaid\n" + "\n".join(lines) + "\n"  # 无闭合围栏
     assert _scan_inline_charts(content) == []
 
 

@@ -21,7 +21,6 @@
 import json
 
 import pytest
-
 from app.models import SectionUpdate
 from app.routers.sections import update_section
 

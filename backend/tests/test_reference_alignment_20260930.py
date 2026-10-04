@@ -24,7 +24,6 @@ import inspect
 import json
 
 import pytest
-
 from app.services import bid_analysis_service as svc
 from app.services import consistency_edits as ce
 

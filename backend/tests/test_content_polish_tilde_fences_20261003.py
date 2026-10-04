@@ -13,10 +13,10 @@ app.services.content_polish 此前只识别 ``` 围栏（_FENCE_SPLIT_RE / has_p
 - _protected_ranges：波浪号围栏区间被正确纳入保护范围。
 """
 from app.services.content_polish import (
-    sanitize_ai_content,
-    quality_issues,
-    find_colloquial_hits,
     _protected_ranges,
+    find_colloquial_hits,
+    quality_issues,
+    sanitize_ai_content,
 )
 
 

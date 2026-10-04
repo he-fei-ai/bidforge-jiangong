@@ -10,7 +10,6 @@
 import asyncio
 
 import pytest
-
 from app.services.ai.sse_utils import with_heartbeat
 
 

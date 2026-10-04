@@ -25,7 +25,6 @@ import json
 import time
 
 import pytest
-
 from app.routers.sse_handlers import (
     _SECTION_PHASE_MAX,
     _STAGE_EXPECT_MAX,
@@ -42,7 +41,6 @@ from app.routers.sse_handlers import (
 )
 from app.services.ai import task_registry as tr
 from app.services.ai.sse_utils import with_heartbeat
-
 
 # ---------------------------------------------------------------- 1. 加权进度
 
@@ -560,3 +558,37 @@ async def test_await_with_stats_cancels_inner_on_cancel():
     with pytest.raises(asyncio.CancelledError):
         await t
     assert cancelled["inner"], "内部协程未被取消，存在悬挂任务"
+
+
+# ---------------------------------------------------------------------------
+# BUG-02 回归：push_stats 异常不得取消内部 AI 任务
+# ---------------------------------------------------------------------------
+async def test_await_with_stats_push_exception_does_not_cancel_inner():
+    """BUG-02：push_stats 抛异常（如 DB 短暂抖动）时，内部 AI 任务必须继续跑完。
+    统计推送属于「辅助展示」，不应影响生成主流程。"""
+    push_calls = {"n": 0}
+
+    async def _push_boom():
+        push_calls["n"] += 1
+        raise RuntimeError("stats_db_timeout")
+
+    async def _slow_ai():
+        await asyncio.sleep(0.3)
+        return "ai-ok"
+
+    r = await _await_with_stats(_slow_ai(), _push_boom, interval=0.05)
+    assert r == "ai-ok", "AI 结果必须原样返回，不受 push_stats 异常影响"
+    assert push_calls["n"] >= 2, f"慢协程期间应多次尝试推送，实际 {push_calls['n']} 次"
+
+
+async def test_await_with_stats_push_cancelled_error_still_propagates():
+    """push_stats 抛 CancelledError 时，必须原样向上传播（保保留外层取消语义）。"""
+    async def _push_cancel():
+        raise asyncio.CancelledError()
+
+    async def _slow_ai():
+        await asyncio.sleep(0.3)
+        return "should-not-reach"
+
+    with pytest.raises(asyncio.CancelledError):
+        await _await_with_stats(_slow_ai(), _push_cancel, interval=0.05)

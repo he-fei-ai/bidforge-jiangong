@@ -56,11 +56,13 @@ import logging
 from app.services import preflight_engine as _pf
 from app.services.audit_rules import get_rule
 from app.services.content_checkpoint import (
-    chapter_required_elements, is_hazardous_scheme,
+    chapter_required_elements,
+    is_hazardous_scheme,
 )
 from app.services.outline_quality import collect_titles
 from app.services.scheme_classification import (
-    NINE_CHAPTERS, is_hazardous_by_keywords,
+    NINE_CHAPTERS,
+    is_hazardous_by_keywords,
 )
 
 logger = logging.getLogger("outline_checkpoint")

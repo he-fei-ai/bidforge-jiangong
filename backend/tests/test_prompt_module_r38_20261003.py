@@ -221,7 +221,8 @@ class TestRepairKeyRouting:
 
     def test_generic_prompt_is_in_variable_contract(self):
         from app.services.ai.prompts._registry import (
-            PROMPT_VARIABLE_CONTRACTS, _ALL_PROMPTS,
+            _ALL_PROMPTS,
+            PROMPT_VARIABLE_CONTRACTS,
         )
         want = {"issues", "target_description", "invalid_content"}
         assert set(PROMPT_VARIABLE_CONTRACTS["json_schema_fix_system"]) == want
@@ -495,6 +496,7 @@ class TestContextInjectionIntegrity:
     def test_no_prompt_key_references_unknown_shared(self):
         """出厂模板里不得引用未注册的 SHARED_* 片段。"""
         import re
+
         from app.services.ai.prompts._registry import _ALL_PROMPTS
         rx = re.compile(r"\{(SHARED_[A-Z0-9_]+)\}")
         missing = set()
@@ -529,8 +531,8 @@ class TestReviewAuditHintTracksBlock:
         sh.settings.outline_checkpoint_check = old
 
     def _render(self, *, hazardous=True):
-        from app.services.ai.prompts import render
         from app.routers import sse_handlers as sh
+        from app.services.ai.prompts import render
         return render("outline_review_system", **self.BASE,
                       **sh._outline_review_checkpoint_kwargs(
                           self.BASE["scheme_name"], self.BASE["scheme_type"],
@@ -553,8 +555,8 @@ class TestReviewAuditHintTracksBlock:
 
     def test_generation_prompt_never_carries_audit_instruction(self):
         """生成链路不得携带审核语义（它说「判 passed=false」）。"""
-        from app.services.ai.prompts import render
         from app.routers import sse_handlers as sh
+        from app.services.ai.prompts import render
         gen = render("outline_short_system", scheme_name="S", scheme_type="T",
                      construction_scope="", scheme_basis="", standards_text="",
                      project_facts="",
@@ -591,6 +593,7 @@ class TestReviewAuditHintTracksBlock:
         实测「退回共享 kwargs 后用例照过」。
         """
         import json as _json
+
         from app.routers import sse_handlers as sh
 
         seen = {}
@@ -615,6 +618,7 @@ class TestReviewAuditHintTracksBlock:
     async def test_review_prompt_has_no_dangling_reference_when_off(self, monkeypatch):
         """关闭态：清单与指令必须一起消失（悬空引用会让模型臆造缺失章节）。"""
         import json as _json
+
         from app.routers import sse_handlers as sh
 
         seen = {}

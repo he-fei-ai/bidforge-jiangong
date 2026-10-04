@@ -339,11 +339,12 @@ export const factsApi = {
   //    就可能让上百条事实同时过期；而解除入口此前只有「改值」与「裁决矛盾」
   //    两条（都要求值必须先变），resolve / batch-resolve 对 stale 行还直接跳过 ——
   //    用户核对过但值未变时无任何出路。这两个端点表达「我已核对，值仍然有效」。
-  ackStale: (factId: string, schemeId?: string) =>
+  ackStale: (factId: string, schemeId?: string, options?: { signal?: AbortSignal }) =>
     api.patch(`/global-facts/${factId}/ack-stale`, {},
-      { params: { scheme_id: schemeId || "" } }),
-  batchAckStale: (schemeId: string, factIds?: string[]) =>
-    api.post("/global-facts/ack-stale", { scheme_id: schemeId, fact_ids: factIds }),
+      { params: { scheme_id: schemeId || "" }, signal: options?.signal }),
+  batchAckStale: (schemeId: string, factIds?: string[], options?: { signal?: AbortSignal }) =>
+    api.post("/global-facts/ack-stale", { scheme_id: schemeId, fact_ids: factIds },
+      { signal: options?.signal }),
   delete: (id: string, schemeId?: string) =>
     api.delete(`/global-facts/${id}`, { params: { scheme_id: schemeId || "" } }),
   // ✅ 一键清除全部已提取的项目信息（含增量提取进度重置，2026-09-17）
@@ -947,8 +948,20 @@ export const tasksApi = {
     api.get("/sse/tasks", { params: { scheme_id: schemeId, limit } }),
 };
 
+/**
+ * 上传配额（后端 GET /system/upload-limits 动态下发）。
+ * 前端文件大小/数量校验以此为唯一口径，不再各写一份 30MB 常量。
+ */
+export type UploadLimits = {
+  max_upload_bytes: number;
+  max_files_per_request: number;
+  max_total_bytes: number;
+};
+
 // 系统活动聚合（侧边栏「后台任务运行状态栏」轮询：任务 + AI 调用 + 服务态）
 export const systemApi = {
+  /** 上传配额动态下发（启动时读取一次；只读、带重试，后端临时不可达不致命） */
+  uploadLimits: () => withRetry(() => api.get<UploadLimits>("/system/upload-limits")),
   activity: (limit = 8) => api.get("/system/activity", { params: { limit } }),
   /** SSE 实时流：任务 / AI 状态变更时立即推送快照 */
   activityStream: (

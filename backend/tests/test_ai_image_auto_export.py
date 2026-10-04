@@ -8,7 +8,6 @@
 import json
 
 import pytest
-
 from app.routers.export import _auto_generate_ai_image_blocks
 
 

@@ -6,9 +6,8 @@
 """
 import uuid
 
-import pytest
-
 import app.db as _appdb
+import pytest
 from app.db import close_db, get_conn, init_db
 
 

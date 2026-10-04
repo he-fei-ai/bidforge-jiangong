@@ -9,9 +9,8 @@
 """
 import time
 
-import pytest
-
 import app.services.ai.provider_factory as pf
+import pytest
 from app.config import settings
 
 

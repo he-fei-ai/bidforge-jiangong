@@ -17,7 +17,6 @@ import zipfile
 from io import BytesIO
 
 import pytest
-
 from app.services.docx_math import clean_text, strip_table_markup
 
 
@@ -283,9 +282,9 @@ class TestImageFormatDocxCompatibility:
 
     def test_rejection_matches_docx_actual_capability(self):
         """核心护栏：判定口径必须与 python-docx 的真实能力一致，而非拍脑袋白名单。"""
+        from app.routers.export import _chart_ok
         from docx import Document
         from docx.shared import Inches
-        from app.routers.export import _chart_ok
         for fmt in ("WEBP", "PNG", "JPEG", "GIF", "BMP"):
             img = self._img(fmt)
             payload = img.getvalue()
@@ -306,6 +305,7 @@ class TestImageFormatDocxCompatibility:
     def test_illustration_path_also_guarded(self):
         """AI 配图插入路径须复用同一格式守卫（否则配图分支仍会占号丢图）。"""
         import inspect
+
         from app.routers import export
         src = inspect.getsource(export._add_illustration_from_bytes)
         assert "_image_format_supported" in src, \
@@ -313,8 +313,8 @@ class TestImageFormatDocxCompatibility:
 
     def test_undersized_still_rejected(self):
         """极小 PNG（< 100 字节）沿用旧的长度门槛。"""
-        from PIL import Image
         from app.routers.export import _chart_ok
+        from PIL import Image
         buf = BytesIO()
         Image.new("RGB", (2, 2), "white").save(buf, format="PNG")
         small = buf.getvalue()
@@ -571,8 +571,8 @@ class TestNumberingSpecConformance:
     ]
 
     def test_every_level_matches_spec(self):
-        from app.services.ai.heading_v2 import HeadingNumberingGeneratorV2
         from app.services.ai.heading_templates import HEADING_STYLE_CONFIG
+        from app.services.ai.heading_v2 import HeadingNumberingGeneratorV2
         got = {}
         for level, _expected, _p in self._SPEC:
             gen = HeadingNumberingGeneratorV2()
@@ -608,8 +608,7 @@ class TestNumberingSpecConformance:
         模板表里每层的占位符家族与 HEADING_STYLE_CONFIG 的分隔符必须与
         标准一致，从而即使有人改表也不会偏离验收标准。
         """
-        from app.services.ai.heading_templates import (
-            DEFAULT_NUMBERING_TEMPLATES, HEADING_STYLE_CONFIG)
+        from app.services.ai.heading_templates import DEFAULT_NUMBERING_TEMPLATES, HEADING_STYLE_CONFIG
         expected_placeholders = {
             1: "第{zh}章", 2: "{num}", 3: "{last2}", 4: "{last3}",
             5: "{last4}", 6: "{num}）", 7: "{alpha}",
@@ -649,8 +648,7 @@ class TestNumberingSpecConformance:
 
     def test_display_conversion_roundtrip(self):
         """存储态编号 → 展示态编号（目录生成/正文/导出三模块的公共口径）。"""
-        from app.services.numbering import (
-            stored_id_to_display, stored_id_to_prefix)
+        from app.services.numbering import stored_id_to_display, stored_id_to_prefix
         cases = [("3", "第三章", "3"), ("3.2", "2", "2"),
                  ("3.2.4", "2.4", "2.4"), ("3.2.4.5", "2.4.5", "2.4.5")]
         wrong = {sid: (stored_id_to_display(sid), stored_id_to_prefix(sid))
@@ -668,6 +666,7 @@ class TestNumberingSpecConformance:
         先把非法 id 判死 —— 本用例锁定这个先后顺序不被调换。
         """
         import json
+
         from app.services.numbering import stored_outline_id
         assert stored_outline_id(
             {"outline_json": json.dumps({"id": "1.2"})}) == "1.2"

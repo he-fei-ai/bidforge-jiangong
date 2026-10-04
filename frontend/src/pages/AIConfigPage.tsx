@@ -13,7 +13,7 @@ import {
 } from "@ant-design/icons";
 
 import { aiApi } from "../api";
-import { hookAntdMessage } from "../utils/activityCenter";
+import { useAntdMessageHub } from "../utils/activityCenter";
 import { TtlCache } from "../utils/ttlCache";
 import { useAiConfigGovernance } from "../hooks/useAiConfigGovernance";
 // ✅ D7（2026-09-23）：页面直接引用后端契约类型（见 types/aiConfig.ts）
@@ -67,7 +67,7 @@ type ProviderInfo = AIProviderPreset;
 
 export default function AIConfigPage() {
   const { message: _antdMsg, modal } = App.useApp();
-  const msg = hookAntdMessage(_antdMsg, "文本模型配置");
+  const msg = useAntdMessageHub(_antdMsg, "文本模型配置");
   // ✅ D7 收敛（2026-09-23）：全部改为后端契约类型（types/aiConfig.ts），
   //    细节字段拼错/读取不存在的字段从此在 tsc 阶段暴露。
   const [configs, setConfigs] = useState<AIConfigItem[]>([]);
@@ -2086,7 +2086,9 @@ export default function AIConfigPage() {
                           await tryFetchCustomModels(baseUrl, "", editingId);
                           return;
                         }
-                      } catch {}
+                      } catch {
+                        // 凭据探测失败：忽略，走下面带显式 apiKey 的常规拉取
+                      }
                     }
                     await tryFetchCustomModels(baseUrl, apiKey, cfgId);
                   }}

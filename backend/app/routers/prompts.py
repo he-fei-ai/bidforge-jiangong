@@ -29,13 +29,16 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.db import get_db, read_db
+from app.services.ai.prompts._registry import (
+    clean_prompt_text,
+    extract_user_variables,
+    validate_prompt_content,
+)
 from app.services.audit_service import (
     PROMPT_MAX_CHARS,
-    list_prompt_audit_logs, prompt_content_hash, record_prompt_audit,
-)
-from app.services.ai.prompts._registry import (
-    clean_prompt_text, extract_user_variables,
-    validate_prompt_content,
+    list_prompt_audit_logs,
+    prompt_content_hash,
+    record_prompt_audit,
 )
 
 router = APIRouter(prefix="/api/v1/prompts", tags=["prompts"])
@@ -122,7 +125,11 @@ async def _write_with_before(db, key: str, before: str, after: str,
 async def list_prompts(category: str = "", db=Depends(read_db)):
     """列出全部提示词，并合并 DB 生效内容、修改时间与审计计数。"""
     from app.services.ai.prompts._registry import (
-        list_prompts as _lp, extract_user_variables, clean_prompt_text,
+        clean_prompt_text,
+        extract_user_variables,
+    )
+    from app.services.ai.prompts._registry import (
+        list_prompts as _lp,
     )
     items = _lp(category) if category else _lp()
     cur = await db.execute("SELECT key, content, updated_at FROM prompt_templates")
@@ -167,11 +174,17 @@ async def prompt_audit_logs(key: str, limit: int = 50, offset: int = 0,
 async def update_prompt(key: str, body: dict, db=Depends(get_db),
                         request: Request = None):
     """保存提示词编辑；空内容按“恢复默认”处理。"""
+    from app.services.ai.prompts._cache import reload_prompt_cache
     from app.services.ai.prompts._registry import (
-        update_prompt as _up, _ALL_PROMPTS, reset_prompt as _reset,
+        _ALL_PROMPTS,
         get_default_prompt,
     )
-    from app.services.ai.prompts._cache import reload_prompt_cache
+    from app.services.ai.prompts._registry import (
+        reset_prompt as _reset,
+    )
+    from app.services.ai.prompts._registry import (
+        update_prompt as _up,
+    )
 
     if key not in _ALL_PROMPTS:
         raise HTTPException(404, "提示词不存在")
@@ -230,10 +243,14 @@ async def update_prompt(key: str, body: dict, db=Depends(get_db),
 @router.post("/{key}/reset")
 async def reset_prompt(key: str, db=Depends(get_db), request: Request = None):
     """恢复出厂默认提示词。"""
-    from app.services.ai.prompts._registry import (
-        _ALL_PROMPTS, reset_prompt as _reset, get_default_prompt,
-    )
     from app.services.ai.prompts._cache import reload_prompt_cache
+    from app.services.ai.prompts._registry import (
+        _ALL_PROMPTS,
+        get_default_prompt,
+    )
+    from app.services.ai.prompts._registry import (
+        reset_prompt as _reset,
+    )
     default = get_default_prompt(key) if key in _ALL_PROMPTS else None
     if default is None:
         raise HTTPException(404, "提示词不存在")
@@ -275,11 +292,14 @@ async def rollback_prompt(key: str, body: dict, db=Depends(get_db),
 
     请求体：``{"audit_id": "<审计行 id>"}``
     """
+    from app.services.ai.prompts._cache import reload_prompt_cache
     from app.services.ai.prompts._registry import (
-        _ALL_PROMPTS, update_prompt as _up,
+        _ALL_PROMPTS,
         get_default_prompt,
     )
-    from app.services.ai.prompts._cache import reload_prompt_cache
+    from app.services.ai.prompts._registry import (
+        update_prompt as _up,
+    )
     from app.services.audit_service import prompt_snapshot_is_rollbackable
 
     if key not in _ALL_PROMPTS:

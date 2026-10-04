@@ -20,9 +20,15 @@ import logging
 import re
 from pathlib import Path
 
+# 触发正文模板注册（_reg 在 import 期执行）
+import app.services.ai.prompts.content  # noqa: F401
 import pytest
-
 from app.config import Settings
+from app.services.ai.prompts._registry import (
+    PROMPT_VARIABLE_CONTRACTS,
+    get_prompt,
+    render,
+)
 from app.services.audit_rules import RULE_MAP
 from app.services.content_checkpoint import (
     CHAPTER_CHECKPOINT_REQUIREMENTS,
@@ -33,13 +39,6 @@ from app.services.content_checkpoint import (
     validate_rule_anchoring,
 )
 from app.services.scheme_classification import NINE_CHAPTERS
-
-# 触发正文模板注册（_reg 在 import 期执行）
-import app.services.ai.prompts.content  # noqa: F401
-from app.services.ai.prompts._registry import (
-    PROMPT_VARIABLE_CONTRACTS, get_prompt, render,
-)
-
 
 # ---------------------------------------------------------------------------
 # A. 判据同源

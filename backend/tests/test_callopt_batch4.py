@@ -5,12 +5,11 @@
   O7  正文链路并发默认 3 → 2（config 默认值 + 模块常量绑定一致）
   O6  批处理按 provider 成功率防御性降批（默认关闭 = 零行为变化）
 """
-import pytest
-
+import app.routers.sse_handlers as sh
 import app.services.ai.provider_factory as pf
 import app.services.consistency_scanner as cs
-import app.routers.sse_handlers as sh
 import app.services.repair_agent as ra
+import pytest
 from app.config import Settings, settings
 from app.services.crypto import encrypt_api_key
 

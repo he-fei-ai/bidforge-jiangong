@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass
 from datetime import date
 
 from app.services.ai.prompts._norm_dicts import (
-    grade_rank, is_range_value, normalize_material_spec,
-    normalize_machinery_name, normalize_process_name,
+    grade_rank,
+    is_range_value,
+    normalize_machinery_name,
+    normalize_material_spec,
+    normalize_process_name,
 )
 
 logger = logging.getLogger("facts_cross_validators")

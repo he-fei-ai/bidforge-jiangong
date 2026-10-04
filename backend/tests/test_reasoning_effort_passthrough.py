@@ -4,9 +4,8 @@
 验证 chat_with_fallback 在 reasoning_effort 非空时，将 reasoning_effort 作为
 extra_body["reasoning_effort"] 透传至 provider；为空时（默认）不透传，完全向后兼容。
 """
-import pytest
-
 import app.services.ai.provider_factory as pf
+import pytest
 
 
 class _RecProvider:

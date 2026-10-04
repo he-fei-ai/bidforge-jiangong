@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends
 
 from app.db import read_db
 from app.models import ProviderModelsIn
-from app.services.ai.provider_factory import normalize_base_url, PROVIDER_PRESETS
+from app.services.ai.provider_factory import PROVIDER_PRESETS, normalize_base_url
 from app.services.crypto import decrypt_api_key
 
 from ._common import _classify_error, _dns_precheck_async, _same_base_url

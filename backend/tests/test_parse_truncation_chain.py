@@ -29,12 +29,10 @@ from __future__ import annotations
 import json
 import uuid
 
-import pytest
-
 import app.routers.bid_analysis as ba
 import app.routers.global_facts as gf
+import pytest
 from app.services.file_parser import MAX_PARSE_WARNINGS, dump_parse_warnings
-
 
 # ---------------------------------------------------------------------------
 # 不变量 1：_doc_is_truncated 四层判定

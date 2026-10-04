@@ -12,10 +12,9 @@
 """
 import uuid
 
+import app.routers.sections as sec
 import pytest
 from fastapi import HTTPException
-
-import app.routers.sections as sec
 
 
 async def _seed_scheme(db) -> str:

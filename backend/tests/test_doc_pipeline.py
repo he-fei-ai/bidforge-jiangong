@@ -13,16 +13,15 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import pytest
-import pytest_asyncio
-from starlette.datastructures import UploadFile
-
-import app.routers.global_facts as gf
 import app.routers.doc_pipeline as dp_api
+import app.routers.global_facts as gf
 import app.services.doc_pipeline.doc_storage as store
 import app.services.doc_pipeline.pipeline as pipeline
-from app.services.doc_pipeline.doc_chunker import chunk_document, SEMANTIC_CHUNK_SIZE
+import pytest
+import pytest_asyncio
+from app.services.doc_pipeline.doc_chunker import SEMANTIC_CHUNK_SIZE, chunk_document
 from app.services.doc_pipeline.md_structured import parse_markdown_structured
+from starlette.datastructures import UploadFile
 
 
 def _upload(name: str, data: bytes) -> UploadFile:

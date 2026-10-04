@@ -212,8 +212,8 @@ async def test_delete_project_does_not_touch_other_projects(db_conn):
 
 
 async def test_delete_project_missing_returns_404(db_conn):
-    from fastapi import HTTPException
     from app.routers.projects import delete_project
+    from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as ei:
         await delete_project("不存在的项目", db=db_conn)
@@ -345,6 +345,7 @@ def _migrate_tables_with_column(col: str) -> set:
     若只看 schema_sql 会漏掉它们 —— 这正是「登记表漏一张表」的典型盲区。
     """
     import inspect
+
     import app.db as _db
     src = inspect.getsource(_db)
     return set(re.findall(r'"\s*(\w+)"\s*,\s*"' + col + r'"\s*,', src))
@@ -357,8 +358,8 @@ def test_all_project_id_tables_are_cleaned_by_delete_project():
     而忘了登记，本用例会立刻失败。
     （本用例已实际抓出 `uploaded_outlines` 长期漏删。）
     """
-    from app.schema_sql import SCHEMA_SQL
     from app.routers import projects as P
+    from app.schema_sql import SCHEMA_SQL
 
     tables = _tables_with_column(SCHEMA_SQL, "project_id") | \
         _migrate_tables_with_column("project_id")
@@ -370,8 +371,8 @@ def test_all_project_id_tables_are_cleaned_by_delete_project():
 
 def test_all_scheme_id_tables_are_cleaned_by_delete_project():
     """schema + 迁移里每张带 scheme_id 的表都必须被 delete_project 清理。"""
-    from app.schema_sql import SCHEMA_SQL
     from app.routers import projects as P
+    from app.schema_sql import SCHEMA_SQL
 
     tables = _tables_with_column(SCHEMA_SQL, "scheme_id") | \
         _migrate_tables_with_column("scheme_id")
@@ -436,8 +437,8 @@ async def test_single_table_failure_does_not_block_project_delete(db_conn):
 
 async def test_deleted_project_cannot_be_deleted_twice(db_conn):
     """重复删除同一项目返回 404（幂等语义：第二次视为不存在）。"""
-    from fastapi import HTTPException
     from app.routers.projects import delete_project
+    from fastapi import HTTPException
 
     pid = await _mk(db_conn, pid="pid-twice")
     assert (await delete_project(pid, db=db_conn))["ok"] is True

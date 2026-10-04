@@ -27,10 +27,14 @@ import re
 from pathlib import Path
 
 import pytest
-
 from app.services.content_standard import (
-    PRECISE, FUZZY, DEFAULT_STANDARD,
-    build_facts_header, build_system_block, build_user_block, build_continue_hint,
+    DEFAULT_STANDARD,
+    FUZZY,
+    PRECISE,
+    build_continue_hint,
+    build_facts_header,
+    build_system_block,
+    build_user_block,
     standard_report,
 )
 

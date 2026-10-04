@@ -18,12 +18,11 @@ import sqlite3
 import uuid
 
 import pytest
-from starlette.datastructures import UploadFile
-
-from app.db import init_db, get_conn
-from app.routers import global_facts as gf
+from app.db import get_conn, init_db
 from app.routers import bid_analysis as ba
+from app.routers import global_facts as gf
 from app.services import doc_categories as dc
+from starlette.datastructures import UploadFile
 
 
 def _upload(name: str, data: bytes) -> UploadFile:

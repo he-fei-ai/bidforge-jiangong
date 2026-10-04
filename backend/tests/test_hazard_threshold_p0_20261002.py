@@ -34,10 +34,12 @@ BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CLS_PATH = os.path.join(BACKEND, "app", "services", "scheme_classification.py")
 
 from app.services.scheme_classification import (  # noqa: E402
-    HAZARD_CATEGORIES, HAZARD_THRESHOLDS, classify_scheme, evaluate_hazard_level,
+    HAZARD_CATEGORIES,
+    HAZARD_THRESHOLDS,
+    classify_scheme,
+    evaluate_hazard_level,
     resolve_threshold_key,
 )
-
 
 # ---------------------------------------------------------------------------
 # 1. 阈值复用解析出口

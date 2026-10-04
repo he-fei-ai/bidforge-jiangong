@@ -14,7 +14,6 @@ from app.services.numbering import (
     strip_outline_numbering,
 )
 
-
 # 数量型标题：单段数字直接接中文（无量词分隔符），必须原样保留
 QUANTITY_TITLES = [
     "2层作业平台",

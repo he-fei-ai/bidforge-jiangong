@@ -2,21 +2,32 @@
 
 路由聚合见 ``ai_config/__init__.py``；本模块只负责与「单条配置 CRUD」相关的端点。
 """
-from datetime import datetime
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.db import get_db, read_db
 from app.models import (
-    AIConfigIn, ActiveEnvIn, FallbackChainUpdate, ConfigImportIn,
+    ActiveEnvIn,
+    AIConfigIn,
+    ConfigImportIn,
+    FallbackChainUpdate,
 )
 from app.services.ai.provider_factory import (
-    save_ai_config, PROVIDER_PRESETS, invalidate_config_cache,
-    normalize_base_url, clamp_config_numbers, clamp_warnings, normalize_plan,
-    normalize_request_mode, normalize_env, resolve_active_env,
-    RUNTIME_ACTIVE_ENV_KEY, upsert_runtime_setting,
+    PROVIDER_PRESETS,
+    RUNTIME_ACTIVE_ENV_KEY,
     apply_config_concurrency,
+    clamp_config_numbers,
+    clamp_warnings,
+    invalidate_config_cache,
+    normalize_base_url,
+    normalize_env,
+    normalize_plan,
+    normalize_request_mode,
+    resolve_active_env,
+    save_ai_config,
+    upsert_runtime_setting,
 )
 from app.services.crypto import decrypt_api_key
 

@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 import pytest
 
-
 # ---------- BUG-A: charts.py skip_http 参数传递 ----------
 
 def test_skip_http_passed_to_get_or_render():
@@ -383,13 +382,13 @@ def test_flowchart_chain_not_superwide():
     形态，旧逻辑会把边端点规范化为带标签串、而节点 id 为纯 ID，导致邻接表对不上、
     所有节点被排到层级 0、画布被拉成 6550×710 超宽细条。修复后应纵向布局（宽高比<=3）。"""
     from io import BytesIO
-    from PIL import Image
 
     from app.services.ai.mermaid_flowchart import (
         _parse_flowchart_structure,
         _render_flowchart_image_v2,
         flowchart_json_to_mermaid,
     )
+    from PIL import Image
 
     chain_data = {
         "nodes": ["施工准备", "测量放线", "基础施工", "主体施工", "装饰装修", "竣工验收"],

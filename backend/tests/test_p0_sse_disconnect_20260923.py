@@ -14,9 +14,8 @@ test_sse_utils.py::TestWithHeartbeatDisconnectSafety）：
 """
 from datetime import datetime, timedelta
 
-import pytest
-
 import app.db as db_mod
+import pytest
 from app.services.ai import task_registry as _tr
 
 

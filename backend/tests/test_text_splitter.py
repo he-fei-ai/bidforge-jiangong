@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """边界感知长文本截断单测（对齐 OpenBidKit userTextSplitter 思路，2026-09-22）"""
 import pytest
-
 from app.utils.text_splitter import truncate_to_boundary
 
 

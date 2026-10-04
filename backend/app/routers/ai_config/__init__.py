@@ -14,7 +14,7 @@
 """
 from fastapi import APIRouter
 
-from . import config, connectivity, models, usage, audit, scene_routes, runtime
+from . import audit, config, connectivity, models, runtime, scene_routes, usage
 
 router = APIRouter(prefix="/api/v1/ai", tags=["ai_config"])
 router.include_router(config.router)
@@ -28,25 +28,45 @@ router.include_router(runtime.router)
 # 兼容历史直接导入（如 _diagnostics/_fallback_chain_test.py 的
 # ``from app.routers.ai_config import update_fallback_chain``）
 from ._common import (
-    _http_status_of, _classify_error, _dns_precheck, _dns_precheck_async,
+    _classify_error,
+    _dns_precheck,
+    _dns_precheck_async,
+    _http_status_of,
+)
+from .audit import (
+    CONFIG_ACTIONS,
+    config_audit_logs,
+    diff_snapshots,
+    record_config_audit,
+    rollback_config,
+    sanitize_config_snapshot,
 )
 from .config import (
-    get_config, save_config, delete_config, toggle_config, clear_config_key,
-    update_fallback_chain, export_config, import_config,
-    get_active_env, set_active_env,
+    clear_config_key,
+    delete_config,
+    export_config,
+    get_active_env,
+    get_config,
+    import_config,
+    save_config,
+    set_active_env,
+    toggle_config,
+    update_fallback_chain,
 )
-from .connectivity import (test_config, precheck_config, precheck_all, ai_health)
+from .connectivity import ai_health, precheck_all, precheck_config, test_config
 from .models import (
-    fetch_provider_models, list_models, fetch_custom_models,
-    _resolve_conn_credentials, _MODEL_LIST_MAX, _ctx_tokens, _fmt_context, _fetch_models_list,
+    _MODEL_LIST_MAX,
+    _ctx_tokens,
+    _fetch_models_list,
+    _fmt_context,
+    _resolve_conn_credentials,
+    fetch_custom_models,
+    fetch_provider_models,
+    list_models,
 )
-from .usage import (ai_stats, audit_logs, cleanup_audit_logs)
-from .audit import (
-    record_config_audit, config_audit_logs, CONFIG_ACTIONS, rollback_config,
-    sanitize_config_snapshot, diff_snapshots,
-)
-from .scene_routes import (list_scene_routes, update_scene_route)
-from .runtime import (get_runtime, set_disabled_providers)
+from .runtime import get_runtime, set_disabled_providers
+from .scene_routes import list_scene_routes, update_scene_route
+from .usage import ai_stats, audit_logs, cleanup_audit_logs
 
 __all__ = [
     "router",

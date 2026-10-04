@@ -8,7 +8,6 @@
 3. 监控基线（六层方案第 6 层）：预检落库快照、历史端点、export_check 接线。
 """
 import pytest
-
 from app.services.facts_extractor import (
     apply_heuristic_fallback,
     run_post_extract_normalize,

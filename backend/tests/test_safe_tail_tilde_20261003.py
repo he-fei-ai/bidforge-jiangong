@@ -12,7 +12,6 @@
 - 切点落在代码块「之前」（围栏数为偶数）→ 块作为「前文结尾」保留，不得误删。
 """
 import pytest
-
 from app.routers.sse_handlers import _safe_tail
 
 OPEN_BT = "```mermaid"

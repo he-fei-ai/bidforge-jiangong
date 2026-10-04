@@ -43,16 +43,17 @@ vi.mock("../utils/bidAnalysis", async (importOriginal) => {
 // TaskStatusBar → 计数桩（真实组件会在 jsdom 下开 SSE，不可用）
 vi.mock("../components/TaskStatusBar", async () => {
   const R = await import("react");
+  const MockTaskStatusBar = () => {
+    R.useEffect(() => {
+      counters.sidebarMounted += 1;
+      return () => {
+        counters.sidebarMounted -= 1;
+      };
+    }, []);
+    return R.createElement("div", { "data-testid": "task-status-bar" });
+  };
   return {
-    default: () => {
-      R.useEffect(() => {
-        counters.sidebarMounted += 1;
-        return () => {
-          counters.sidebarMounted -= 1;
-        };
-      }, []);
-      return R.createElement("div", { "data-testid": "task-status-bar" });
-    },
+    default: MockTaskStatusBar,
   };
 });
 
