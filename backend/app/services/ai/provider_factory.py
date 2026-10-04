@@ -410,11 +410,27 @@ def _build_provider(preset_name: str, api_key: str, base_url: str, model: str, *
 # 允许的 API 地址协议（白名单，避免 file:// / ftp:// 等被写入配置后由 httpx 发起）
 _ALLOWED_URL_SCHEMES = ("http", "https")
 # 数值字段合法区间（超界静默收敛，避免前端绕过 / 旧数据导致运行时异常）
+# ✅ 并发上限改为读取 settings.max_concurrency（默认 5，与既有硬编码一致）：
+#    此前 `_RANGE["concurrency"]` 与 apply_config_concurrency 的 `1<=c<=5`
+#    两处各自硬编码，放宽上限需要同步改两处（漏改即静默钳制）。默认零变化。
+_MAX_CONCURRENCY = max(1, int(getattr(settings, "max_concurrency", 5) or 5))
 _RANGE = {
     "max_tokens": (256, 200000),
     "temperature": (0.0, 2.0),
     "timeout": (10, 3600),
-    "concurrency": (1, 5),  # ✅ P0 修复 2026-09-17：全局并发上限 ≤5
+    "concurrency": (1, _MAX_CONCURRENCY),
+}
+
+# ✅ 数值字段缺省值单一出口：schema_sql 表默认 / AIConfigIn 默认 / 前端表单默认
+#    与运行时候选 fallback（_build_candidates / _fallback_chain /
+#    _candidate_timeout / _attempt_candidate）此前各写一份，
+#    timeout 曾出现「声明 900、运行时兜底 60」的口径漂移（配置行缺该字段或
+#    为 0 时，主候选超时静默缩水到 60s，长正文生成必超时）。现统一引用本表。
+DEFAULT_CONFIG_NUMBERS: dict = {
+    "max_tokens": 8192,
+    "temperature": 0.7,
+    "timeout": 900,
+    "concurrency": 4,
 }
 
 
@@ -466,10 +482,14 @@ def clamp_config_numbers(raw: dict) -> dict:
     绕过界面的脏数据进入运行链路（超界值会在 provider 请求里被厂商拒绝）。
     """
     return {
-        "max_tokens": int(_clamp(raw.get("max_tokens"), *_RANGE["max_tokens"], 8192)),
-        "temperature": round(_clamp(raw.get("temperature"), *_RANGE["temperature"], 0.7), 3),
-        "timeout": int(_clamp(raw.get("timeout"), *_RANGE["timeout"], 900)),
-        "concurrency": int(_clamp(raw.get("concurrency"), *_RANGE["concurrency"], 4)),
+        "max_tokens": int(_clamp(raw.get("max_tokens"), *_RANGE["max_tokens"],
+                                 DEFAULT_CONFIG_NUMBERS["max_tokens"])),
+        "temperature": round(_clamp(raw.get("temperature"), *_RANGE["temperature"],
+                                    DEFAULT_CONFIG_NUMBERS["temperature"]), 3),
+        "timeout": int(_clamp(raw.get("timeout"), *_RANGE["timeout"],
+                              DEFAULT_CONFIG_NUMBERS["timeout"])),
+        "concurrency": int(_clamp(raw.get("concurrency"), *_RANGE["concurrency"],
+                                  DEFAULT_CONFIG_NUMBERS["concurrency"])),
     }
 
 
@@ -654,15 +674,17 @@ async def apply_config_concurrency() -> int | None:
         row = await cur.fetchone()
         if row and row[0]:
             c = int(row[0])
-            # ✅ 全局并发上限严格 ≤5（P0 修复 2026-09-17）
-            if 1 <= c <= 5:
+            # ✅ 全局并发上限统一走 settings.max_concurrency（默认 5，与既有
+            #    硬编码一致；P0 修复 2026-09-17 引入的约束保持不变）
+            if 1 <= c <= _MAX_CONCURRENCY:
                 concurrency_controller.set_concurrency(c)
                 logger.info("已应用活跃 AI 配置并发数: %d", c)
                 return c
-            elif c > 5:
-                concurrency_controller.set_concurrency(5)
-                logger.warning("AI 配置并发数 %d 超过全局上限 5，已钳到 5", c)
-                return 5
+            elif c > _MAX_CONCURRENCY:
+                concurrency_controller.set_concurrency(_MAX_CONCURRENCY)
+                logger.warning("AI 配置并发数 %d 超过全局上限 %d，已钳到 %d",
+                               c, _MAX_CONCURRENCY, _MAX_CONCURRENCY)
+                return _MAX_CONCURRENCY
     except Exception as e:
         logger.debug("应用配置并发失败（不影响服务）: %s", e)
     return None
@@ -1080,6 +1102,13 @@ async def _fallback_chain() -> list[dict]:
                 continue
             key = decrypt_api_key(row.get("api_key_encrypted", "") or "")
             if not key:
+                # ✅ 增强：密文存在但解不开（换过 FERNET_KEY / 删过密钥文件）的
+                #    候选此前与「未填 Key」同义静默跳过，排查无从下手 —— 现显式告警。
+                if row.get("api_key_encrypted"):
+                    logger.warning(
+                        "降级候选 %s/%s 已保存的密钥无法解密（常见于更换过 FERNET_KEY"
+                        " 或删除过 data/secret_key.key），已跳过",
+                        row.get("provider_name", "?"), row.get("model", "?"))
                 continue
             chain.append({
                 "config_id": row.get("id", ""),
@@ -1087,9 +1116,9 @@ async def _fallback_chain() -> list[dict]:
                 "api_key": key,
                 "base_url": row.get("base_url", ""),
                 "model": row.get("model", ""),
-                "max_tokens": row.get("max_tokens", 8192),
-                "temperature": row.get("temperature", 0.7),
-                "timeout": row.get("timeout", 60),
+                "max_tokens": row.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"]),
+                "temperature": row.get("temperature", DEFAULT_CONFIG_NUMBERS["temperature"]),
+                "timeout": row.get("timeout", DEFAULT_CONFIG_NUMBERS["timeout"]),
                 # ✅ 每条降级候选各自携带请求方式：主配置配了流式，
                 #    不代表降级候选的平台也支持流式，必须逐条生效。
                 "request_mode": normalize_request_mode(row.get("request_mode")),
@@ -1316,9 +1345,9 @@ async def get_vision_providers() -> list[BaseProvider]:
             "api_key": primary_key,
             "base_url": cfg.get("base_url", ""),
             "model": cfg.get("model", ""),
-            "max_tokens": cfg.get("max_tokens", 8192),
+            "max_tokens": cfg.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"]),
             "temperature": 0.0,
-            "timeout": cfg.get("timeout", 60),
+            "timeout": cfg.get("timeout", DEFAULT_CONFIG_NUMBERS["timeout"]),
         })
     for c in await _fallback_chain():
         if c.get("api_key") and c not in candidates:
@@ -1329,9 +1358,9 @@ async def get_vision_providers() -> list[BaseProvider]:
         try:
             provider = _build_provider(
                 c["provider_name"], c["api_key"], c["base_url"], c["model"],
-                max_tokens=c.get("max_tokens", 8192),
+                max_tokens=c.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"]),
                 temperature=0.0,
-                timeout=c.get("timeout", 60),
+                timeout=c.get("timeout", DEFAULT_CONFIG_NUMBERS["timeout"]),
             )
         except Exception:
             continue
@@ -1886,7 +1915,7 @@ def _candidate_timeout(c: dict, req_timeout: int | None) -> int:
     不再把 300s 下发到每一个降级候选造成"超时叠乘"。
     """
     base = int(req_timeout if req_timeout is not None
-               else (c.get("timeout") or 60))
+               else (c.get("timeout") or DEFAULT_CONFIG_NUMBERS["timeout"]))
     if not c.get("_is_primary"):
         cap = int(getattr(settings, "ai_fallback_attempt_timeout", 120) or 120)
         base = min(base, cap)
@@ -2075,14 +2104,15 @@ async def _attempt_candidate(c: dict, messages: list, *,
       （``_call_provider``），流式只影响厂商间传输方式，不影响上层语义。
     """
     pname = c.get("provider_name", "?")
-    base_mt = max_tokens or c.get("max_tokens", 8192)
+    base_mt = max_tokens or c.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"])
 
     def _build(mt: int):
         """按本次尝试的 max_tokens 构建 Provider（O3 思考吞噬重试需要翻倍）。"""
         return _build_provider(pname, c["api_key"], c["base_url"], c["model"],
                                max_tokens=mt,
                                temperature=(temperature if temperature is not None
-                                            else c.get("temperature", 0.7)),
+                                            else c.get("temperature",
+                                                       DEFAULT_CONFIG_NUMBERS["temperature"])),
                                timeout=_candidate_timeout(c, req_timeout))
 
     last_err: Exception | None = None
@@ -2211,15 +2241,22 @@ async def _build_candidates(cfg: dict | None) -> list[dict]:
     candidates: list[dict] = []
     is_primary_set = False
     if cfg:
+        _pk = _primary_api_key(cfg)
+        # ✅ 增强：密文存在但解不开（换过 FERNET_KEY / 删过密钥文件）时，
+        #    旧实现与「未填 Key」不可区分，_gate_candidates 全跳过后报
+        #    「没有配置任何有 API Key 的 Provider」，把用户指向完全错误的
+        #    排查方向。现打 key_broken 标记，门控处分开计数并如实归因。
+        _enc = str(cfg.get("api_key_encrypted") or "")
         candidates.append({
             "config_id": cfg.get("id", ""),
             "provider_name": cfg.get("provider_name", "openai"),
-            "api_key": _primary_api_key(cfg),
+            "api_key": _pk,
             "base_url": cfg.get("base_url", ""), "model": cfg.get("model", ""),
-            "max_tokens": cfg.get("max_tokens", 8192),
-            "temperature": cfg.get("temperature", 0.7),
-            "timeout": cfg.get("timeout", 60),
+            "max_tokens": cfg.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"]),
+            "temperature": cfg.get("temperature", DEFAULT_CONFIG_NUMBERS["temperature"]),
+            "timeout": cfg.get("timeout", DEFAULT_CONFIG_NUMBERS["timeout"]),
             "request_mode": normalize_request_mode(cfg.get("request_mode")),
+            "key_broken": bool(_enc) and not _pk,
             "_is_primary": True,
         })
         is_primary_set = True
@@ -2259,6 +2296,7 @@ async def _gate_candidates(candidates: list[dict],
     usable: list[dict] = []
     cb_skipped: list[dict] = []
     skipped_no_key = 0
+    skipped_key_broken = 0
     skipped_cb = 0
     skipped_disabled = 0
     _disabled = await resolve_disabled_providers()
@@ -2267,7 +2305,13 @@ async def _gate_candidates(candidates: list[dict],
     for c in candidates:
         pname = c.get("provider_name", "?")
         if not c.get("api_key"):
-            skipped_no_key += 1
+            # ✅ 增强：「密文存在但解不开」与「未填 Key」分开计数 ——
+            #    两者的修法完全不同（重填 Key vs 检查加密密钥），混报会误导排查。
+            if c.get("key_broken"):
+                skipped_key_broken += 1
+                logger.warning("候选 %s 已保存的密钥无法解密，跳过本次调用", pname)
+            else:
+                skipped_no_key += 1
             continue
         if pname in _disabled:
             skipped_disabled += 1
@@ -2336,8 +2380,16 @@ async def _gate_candidates(candidates: list[dict],
         raise RuntimeError(
             "所有候选 Provider 均被熔断器跳过，请等待冷却重试 "
             f"(skipped_no_key={skipped_no_key}, skipped_cb={skipped_cb})")
-    if skipped_no_key > 0:
-        raise RuntimeError("没有配置任何有 API Key 的 Provider")
+    if skipped_key_broken and not skipped_no_key:
+        raise RuntimeError(
+            "候选 Provider 已保存的 API Key 无法解密（常见于更换过加密密钥 "
+            "FERNET_KEY 或删除过 data/secret_key.key），"
+            "请在「文本模型配置」重新填写并保存 Key")
+    if skipped_no_key > 0 or skipped_key_broken > 0:
+        raise RuntimeError(
+            "没有配置任何有 API Key 的 Provider"
+            + (f"（其中 {skipped_key_broken} 条已保存的密钥无法解密，"
+               "请重新填写或删除该配置）" if skipped_key_broken else ""))
     raise RuntimeError(f"所有 AI 提供商调用失败：{last_err}")
 
 

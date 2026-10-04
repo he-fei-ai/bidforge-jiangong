@@ -1,0 +1,1210 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mJ:/编程/专项方案工具箱/frontend[39m
+
+(node:28236) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:24916) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:29044) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1112) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:30868) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:30172) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:3128) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:8864) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+[90mstderr[2m | src/tests/OutlineLibraryPage.test.tsx[2m > [22m[2mOutlineLibraryPage（目录库页面）[2m > [22m[2m首屏：统计卡 + 列表渲染（名称/版本/审核状态/来源），列表参数带排序与分页
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReviewWorkflowPanel.test.tsx[2m > [22m[2mReviewWorkflowPanel · 章节审核工作流[2m > [22m[2m评审人填写 + 通过章节 → reviewApi.reviewSection(schemeId, secId, {to_status:'approved', reviewer})
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/OutlineLibraryPage.test.tsx[2m > [22m[2mOutlineLibraryPage（目录库页面）[2m > [22m[2m审核状态决定操作按钮：待审核行出现「审核通过」，点击直接调 review 已通过
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReviewWorkflowPanel.test.tsx[2m > [22m[2mReviewWorkflowPanel · 章节审核工作流[2m > [22m[2m驳回未填理由 → OK 禁用、校验拦截，reviewApi.reviewSection 不被调用；填写理由后可提交
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGapfix20260925.test.tsx[2m > [22m[2m文本模型配置 · 缺口修复（2026-09-25）[2m > [22m[2m环境值损坏：给出可读原因与「恢复为通用环境」入口，点击后写回空环境
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigRequestMode.test.tsx[2m > [22m[2m文本模型配置 · 请求方式[2m > [22m[2m列表展示每条配置的请求方式（流式配置显示「流式请求」）
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGovernance.test.tsx[2m > [22m[2m文本模型配置 · 配置治理增强[2m > [22m[2m切换供应商会清空上一供应商的 API Key，避免误保存和误发送
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReviewWorkflowPanel.test.tsx[2m > [22m[2mReviewWorkflowPanel · 章节审核工作流[2m > [22m[2m评审轨迹抽屉 → 调用 reviewApi.records 并渲染时间线
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/OutlineLibraryPage.test.tsx[2m > [22m[2mOutlineLibraryPage（目录库页面）[2m > [22m[2m批量审核：勾选全部行 → 批量操作条出现 → 确认后调 batchReview 并清空选择
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGovernance.test.tsx[2m > [22m[2m文本模型配置 · 配置治理增强[2m > [22m[2m切换供应商会清空上一供应商的 API Key，避免误保存和误发送
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReviewWorkflowPanel.test.tsx[2m > [22m[2mReviewWorkflowPanel · 章节审核工作流[2m > [22m[2m批量通过：勾选多行 → 弹窗批量审核，调用 reviewApi.batch
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/OutlineLibraryPage.test.tsx[2m > [22m[2mOutlineLibraryPage（目录库页面）[2m > [22m[2m批量审核：勾选全部行 → 批量操作条出现 → 确认后调 batchReview 并清空选择
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigRequestMode.test.tsx[2m > [22m[2m文本模型配置 · 请求方式[2m > [22m[2m运行时信息卡片回显当前使用配置的请求方式
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReviewWorkflowPanel.test.tsx[2m > [22m[2mReviewWorkflowPanel · 章节审核工作流[2m > [22m[2m方案级提交（未全部审核）→ 弹窗内显示 warning；确认后调用 submit
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/OutlineLibraryPage.test.tsx[2m > [22m[2mOutlineLibraryPage（目录库页面）[2m > [22m[2m删除：点删除图标 → 确认弹窗 → 调 api.delete
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGapfix20260925.test.tsx[2m > [22m[2m文本模型配置 · 缺口修复（2026-09-25）[2m > [22m[2m健康状态标签把 env_corrupt 显示为「环境值异常」而不是「未配置」
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/OutlineLibraryPage.test.tsx[2m > [22m[2mOutlineLibraryPage（目录库页面）[2m > [22m[2m删除：点删除图标 → 确认弹窗 → 调 api.delete
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigRequestMode.test.tsx[2m > [22m[2m文本模型配置 · 请求方式[2m > [22m[2m编辑配置时表单回显已保存的流式请求方式
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReviewWorkflowPanel.test.tsx[2m > [22m[2mReviewWorkflowPanel · 章节审核工作流[2m > [22m[2mreviewApi.submit 抛 422 → catch 提示错误，提交按钮复位
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigRequestMode.test.tsx[2m > [22m[2m文本模型配置 · 请求方式[2m > [22m[2m编辑配置时表单回显已保存的流式请求方式
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/OutlineLibraryPage.test.tsx[2m > [22m[2mOutlineLibraryPage（目录库页面）[2m > [22m[2m复制：点复制图标 → 无确认弹窗直接调 api.duplicate
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGovernance.test.tsx[2m > [22m[2m文本模型配置 · 配置治理增强[2m > [22m[2m并发数输入框上限与后端一致（≤5），避免「填了 8 实际生效 5」
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGapfix20260925.test.tsx[2m > [22m[2m文本模型配置 · 缺口修复（2026-09-25）[2m > [22m[2m跨环境的场景路由标注「跨环境·暂不生效」
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGovernance.test.tsx[2m > [22m[2m文本模型配置 · 配置治理增强[2m > [22m[2m并发数输入框上限与后端一致（≤5），避免「填了 8 实际生效 5」
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/OutlineLibraryPage.test.tsx[2m > [22m[2mOutlineLibraryPage（目录库页面）[2m > [22m[2m预览抽屉：点「编辑本目录」→ 关预览 + 打开编辑弹窗（libraryId 正确传递）
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigRequestMode.test.tsx[2m > [22m[2m文本模型配置 · 请求方式[2m > [22m[2m「测试连接」把表单里的请求方式传给后端（探测口径必须与真实链路一致）
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReviewWorkflowPanel.test.tsx[2m > [22m[2mReviewWorkflowPanel · 章节审核工作流[2m > [22m[2monChanged 回调：审核操作后触发，供父组件刷新目录树
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigRequestMode.test.tsx[2m > [22m[2m文本模型配置 · 请求方式[2m > [22m[2m「测试连接」把表单里的请求方式传给后端（探测口径必须与真实链路一致）
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/OutlineLibraryPage.test.tsx[2m > [22m[2mOutlineLibraryPage（目录库页面）[2m > [22m[2m预览抽屉：点「编辑本目录」→ 关预览 + 打开编辑弹窗（libraryId 正确传递）
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/OutlineLibraryPage.test.tsx[2m > [22m[2mOutlineLibraryPage（目录库页面）[2m > [22m[2m表格宽度与列宽声明保持一致（防止 scroll.x 大于列宽之和、列被等比放大）
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGapfix20260925.test.tsx[2m > [22m[2m文本模型配置 · 缺口修复（2026-09-25）[2m > [22m[2m同环境的路由不标红（避免误报）
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGovernance.test.tsx[2m > [22m[2m文本模型配置 · 配置治理增强[2m > [22m[2m保存时把后端「参数被自动收敛」的 warnings 提示给用户
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+ [32m✓[39m src/tests/OutlineLibraryPage.test.tsx [2m([22m[2m7 tests[22m[2m)[22m[33m 7599[2mms[22m[39m
+   [33m[2m✓[22m[39m OutlineLibraryPage（目录库页面）[2m > [22m首屏：统计卡 + 列表渲染（名称/版本/审核状态/来源），列表参数带排序与分页 [33m 2268[2mms[22m[39m
+   [33m[2m✓[22m[39m OutlineLibraryPage（目录库页面）[2m > [22m审核状态决定操作按钮：待审核行出现「审核通过」，点击直接调 review 已通过 [33m 865[2mms[22m[39m
+   [33m[2m✓[22m[39m OutlineLibraryPage（目录库页面）[2m > [22m批量审核：勾选全部行 → 批量操作条出现 → 确认后调 batchReview 并清空选择 [33m 1066[2mms[22m[39m
+   [33m[2m✓[22m[39m OutlineLibraryPage（目录库页面）[2m > [22m删除：点删除图标 → 确认弹窗 → 调 api.delete [33m 926[2mms[22m[39m
+   [33m[2m✓[22m[39m OutlineLibraryPage（目录库页面）[2m > [22m复制：点复制图标 → 无确认弹窗直接调 api.duplicate [33m 844[2mms[22m[39m
+   [33m[2m✓[22m[39m OutlineLibraryPage（目录库页面）[2m > [22m预览抽屉：点「编辑本目录」→ 关预览 + 打开编辑弹窗（libraryId 正确传递） [33m 945[2mms[22m[39m
+   [33m[2m✓[22m[39m OutlineLibraryPage（目录库页面）[2m > [22m表格宽度与列宽声明保持一致（防止 scroll.x 大于列宽之和、列被等比放大） [33m 683[2mms[22m[39m
+[90mstderr[2m | src/tests/ReviewWorkflowPanel.test.tsx[2m > [22m[2mReviewWorkflowPanel · 章节审核工作流[2m > [22m[2m开始审核（reviewing）消息 → 显示「审核中」而非驳回
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGovernance.test.tsx[2m > [22m[2m文本模型配置 · 配置治理增强[2m > [22m[2m保存时把后端「参数被自动收敛」的 warnings 提示给用户
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+ [32m✓[39m src/tests/contentTab.test.tsx [2m([22m[2m31 tests[22m[2m)[22m[33m 7973[2mms[22m[39m
+   [33m[2m✓[22m[39m ContentGenerationTab · 主操作按钮[2m > [22m渲染 5 个主操作按钮 + 下一步按钮 [33m 1288[2mms[22m[39m
+   [33m[2m✓[22m[39m ContentGenerationTab · 主操作按钮[2m > [22m未选章节时生成当前章节禁用；选中且可压缩时压缩本章可用并上抛 [33m 358[2mms[22m[39m
+   [33m[2m✓[22m[39m ContentGenerationTab · 主操作按钮[2m > [22m重置正文：无已生成正文或生成中禁用；可用时点击上抛 onReset [33m 514[2mms[22m[39m
+   [33m[2m✓[22m[39m ContentGenerationTab · 导航与设置[2m > [22m字数自定义态才显示「字 / 章节」输入单位 [33m 360[2mms[22m[39m
+   [33m[2m✓[22m[39m ContentGenerationTab · 主操作按钮（补全）[2m > [22mhasTree 控制右下提示文案：有目录树显示引导，无目录树不渲染 [33m 322[2mms[22m[39m
+   [33m[2m✓[22m[39m ContentGenerationTab · 主操作按钮（补全）[2m > [22m字数非默认档时显示「按二级章节总字数控制」说明 Tag [33m 340[2mms[22m[39m
+   [33m[2m✓[22m[39m ContentGenerationTab · 生成参数设置回调[2m > [22m字数档位选择器渲染 6 个预设项 + 自定义项 [33m 425[2mms[22m[39m
+[90mstderr[2m | src/tests/aiConfigRequestMode.test.tsx[2m > [22m[2m文本模型配置 · 请求方式[2m > [22m[2m新增配置默认「普通请求」，并随表单一起提交（不被隐式切成流式）
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReviewWorkflowPanel.test.tsx[2m > [22m[2mReviewWorkflowPanel · 章节审核工作流[2m > [22m[2m批量通过部分被状态机拦截 → 降级 warning 并带明细，不再静默吞掉
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigRequestMode.test.tsx[2m > [22m[2m文本模型配置 · 请求方式[2m > [22m[2m新增配置默认「普通请求」，并随表单一起提交（不被隐式切成流式）
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGapfix20260925.test.tsx[2m > [22m[2m文本模型配置 · 缺口修复（2026-09-25）[2m > [22m[2m保存场景路由后返回 warning 时，提示的是 warning 而不是「已指定」
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReviewWorkflowPanel.test.tsx[2m > [22m[2mReviewWorkflowPanel · 章节审核工作流[2m > [22m[2m批量操作全部无变更 → warning 提示而非成功假象
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+ [32m✓[39m src/tests/ReviewWorkflowPanel.test.tsx [2m([22m[2m20 tests[22m[2m)[22m[33m 8805[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkflowPanel · 章节审核工作流[2m > [22m加载并渲染章节审核清单与进度 [33m 1487[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkflowPanel · 章节审核工作流[2m > [22m评审人填写 + 通过章节 → reviewApi.reviewSection(schemeId, secId, {to_status:'approved', reviewer}) [33m 659[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkflowPanel · 章节审核工作流[2m > [22m驳回未填理由 → OK 禁用、校验拦截，reviewApi.reviewSection 不被调用；填写理由后可提交 [33m 475[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkflowPanel · 章节审核工作流[2m > [22m评审轨迹抽屉 → 调用 reviewApi.records 并渲染时间线 [33m 342[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkflowPanel · 章节审核工作流[2m > [22m批量通过：勾选多行 → 弹窗批量审核，调用 reviewApi.batch [33m 540[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkflowPanel · 章节审核工作流[2m > [22m方案级提交（未全部审核）→ 弹窗内显示 warning；确认后调用 submit [33m 484[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkflowPanel · 章节审核工作流[2m > [22mreviewApi.submit 抛 422 → catch 提示错误，提交按钮复位 [33m 361[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkflowPanel · 章节审核工作流[2m > [22m评审人姓名持久化到 localStorage；下次渲染自动带入 [33m 466[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkflowPanel · 章节审核工作流[2m > [22m重置按钮：已审核章节可回到 pending [33m 341[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkflowPanel · 章节审核工作流[2m > [22monChanged 回调：审核操作后触发，供父组件刷新目录树 [33m 464[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkflowPanel · 章节审核工作流[2m > [22m多选勾选 → selected 数量展示，取消选择可清空 [33m 339[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkflowPanel · 章节审核工作流[2m > [22m重置操作消息 → 「已标记为待审核」而非误报驳回 [33m 359[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkflowPanel · 章节审核工作流[2m > [22m开始审核（reviewing）消息 → 显示「审核中」而非驳回 [33m 410[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkflowPanel · 章节审核工作流[2m > [22m批量通过部分被状态机拦截 → 降级 warning 并带明细，不再静默吞掉 [33m 517[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkflowPanel · 章节审核工作流[2m > [22m批量操作全部无变更 → warning 提示而非成功假象 [33m 464[2mms[22m[39m
+ [32m✓[39m src/tests/aiConfigRequestMode.test.tsx [2m([22m[2m5 tests[22m[2m)[22m[33m 8591[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 请求方式[2m > [22m列表展示每条配置的请求方式（流式配置显示「流式请求」） [33m 2766[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 请求方式[2m > [22m运行时信息卡片回显当前使用配置的请求方式 [33m 1067[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 请求方式[2m > [22m编辑配置时表单回显已保存的流式请求方式 [33m 1240[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 请求方式[2m > [22m「测试连接」把表单里的请求方式传给后端（探测口径必须与真实链路一致） [33m 1651[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 请求方式[2m > [22m新增配置默认「普通请求」，并随表单一起提交（不被隐式切成流式） [33m 1865[2mms[22m[39m
+[90mstderr[2m | src/tests/aiConfigGovernance.test.tsx[2m > [22m[2m文本模型配置 · 配置治理增强[2m > [22m[2m配置列表提供「清除密钥」并能调用后端收回 API Key
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+(node:4528) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+[90mstderr[2m | src/tests/aiConfigGovernance.test.tsx[2m > [22m[2m文本模型配置 · 配置治理增强[2m > [22m[2m配置列表提供「清除密钥」并能调用后端收回 API Key
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+(node:5764) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+[90mstderr[2m | src/tests/aiConfigGapfix20260925.test.tsx[2m > [22m[2m文本模型配置 · 缺口修复（2026-09-25）[2m > [22m[2m删除配置后提示连带解除的场景路由条数
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGapfix20260925.test.tsx[2m > [22m[2m文本模型配置 · 缺口修复（2026-09-25）[2m > [22m[2m删除配置后提示连带解除的场景路由条数
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+(node:28980) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/bidAnalysisTab.test.tsx [2m([22m[2m42 tests[22m[2m)[22m[33m 7349[2mms[22m[39m
+   [33m[2m✓[22m[39m BidAnalysisTab[2m > [22m前置条件未满足：警示 + 开始提取禁用 + 可跳解析提取 [33m 1017[2mms[22m[39m
+   [33m[2m✓[22m[39m BidAnalysisTab[2m > [22m人工校正入口：选中项有内容时出现并回调；运行中禁用；未提供回调则不渲染 [33m 396[2mms[22m[39m
+(node:13964) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+[90mstderr[2m | src/tests/aiConfigGovernance.test.tsx[2m > [22m[2m文本模型配置 · 配置治理增强[2m > [22m[2m场景模型路由：可为一个场景指定专属配置，并把选择提交给后端
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGapfix20260925.test.tsx[2m > [22m[2m文本模型配置 · 缺口修复（2026-09-25）[2m > [22m[2m用量日志显示场景列（中文名，历史无埋点显示「未标记」）
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGapfix20260925.test.tsx[2m > [22m[2m文本模型配置 · 缺口修复（2026-09-25）[2m > [22m[2m用量日志显示场景列（中文名，历史无埋点显示「未标记」）
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+(node:10608) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+[90mstderr[2m | src/tests/aiConfigGovernance.test.tsx[2m > [22m[2m文本模型配置 · 配置治理增强[2m > [22m[2m展示配置变更记录（审计留痕），且不含明文密钥
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出不受预检门禁限制：未预检时按钮仍可用且点击发起导出请求
+[22m[39mNot implemented: navigation to another Document
+
+[90mstderr[2m | src/tests/aiConfigGapfix20260925.test.tsx[2m > [22m[2m文本模型配置 · 缺口修复（2026-09-25）[2m > [22m[2m选择「场景」筛选后按 scene 重新请求审计明细
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGapfix20260925.test.tsx[2m > [22m[2m文本模型配置 · 缺口修复（2026-09-25）[2m > [22m[2m选择「场景」筛选后按 scene 重新请求审计明细
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGovernance.test.tsx[2m > [22m[2m文本模型配置 · 配置治理增强[2m > [22m[2m审计记录展示结构化变更 diff（字段名 + 前后值）
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGapfix20260925.test.tsx[2m > [22m[2m文本模型配置 · 缺口修复（2026-09-25）[2m > [22m[2m「按业务场景」聚合标签可点击下钻到该场景明细
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGovernance.test.tsx[2m > [22m[2m文本模型配置 · 配置治理增强[2m > [22m[2m可回滚的变更记录提供「回滚」按钮，并调用后端回滚端点
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGovernance.test.tsx[2m > [22m[2m文本模型配置 · 配置治理增强[2m > [22m[2m可回滚的变更记录提供「回滚」按钮，并调用后端回滚端点
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/aiConfigGapfix20260925.test.tsx[2m > [22m[2m文本模型配置 · 缺口修复（2026-09-25）[2m > [22m[2m「按业务场景」聚合标签可点击下钻到该场景明细
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+ [32m✓[39m src/tests/aiConfigGapfix20260925.test.tsx [2m([22m[2m9 tests[22m[2m)[22m[33m 17482[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 缺口修复（2026-09-25）[2m > [22m环境值损坏：给出可读原因与「恢复为通用环境」入口，点击后写回空环境 [33m 3569[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 缺口修复（2026-09-25）[2m > [22m健康状态标签把 env_corrupt 显示为「环境值异常」而不是「未配置」 [33m 1389[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 缺口修复（2026-09-25）[2m > [22m跨环境的场景路由标注「跨环境·暂不生效」 [33m 1271[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 缺口修复（2026-09-25）[2m > [22m同环境的路由不标红（避免误报） [33m 1252[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 缺口修复（2026-09-25）[2m > [22m保存场景路由后返回 warning 时，提示的是 warning 而不是「已指定」 [33m 2135[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 缺口修复（2026-09-25）[2m > [22m删除配置后提示连带解除的场景路由条数 [33m 1698[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 缺口修复（2026-09-25）[2m > [22m用量日志显示场景列（中文名，历史无埋点显示「未标记」） [33m 1902[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 缺口修复（2026-09-25）[2m > [22m选择「场景」筛选后按 scene 重新请求审计明细 [33m 2266[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 缺口修复（2026-09-25）[2m > [22m「按业务场景」聚合标签可点击下钻到该场景明细 [33m 1995[2mms[22m[39m
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/aiConfigGovernance.test.tsx[2m > [22m[2m文本模型配置 · 配置治理增强[2m > [22m[2m运行时厂商开关：可临时禁用某厂商并提交给后端
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m空态：runs 无历史 → 显示「尚未总检」且导出按钮禁用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m空态：runs 无历史 → 显示「尚未总检」且导出按钮禁用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检 → 渲染综合评分 / 等级 / 放行结论 / 来源标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检 → 渲染综合评分 / 等级 / 放行结论 / 来源标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检 → 渲染综合评分 / 等级 / 放行结论 / 来源标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求
+[22m[39mNot implemented: navigation to another Document
+
+(node:28176) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检 → 渲染综合评分 / 等级 / 放行结论 / 来源标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/OutlineLibraryEditModal.test.tsx[2m > [22m[2mOutlineLibraryEditModal · 打开与关闭[2m > [22m[2mopen=true：渲染标题与两个 Tab
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检后阻断项 Alert + 六维得分卡 + 客观统计齐全
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检后阻断项 Alert + 六维得分卡 + 客观统计齐全
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检后阻断项 Alert + 六维得分卡 + 客观统计齐全
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检后阻断项 Alert + 六维得分卡 + 客观统计齐全
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m严重度筛选：默认显示「阻断」置顶（sorter 语义正确）；切「提示」/「阻断+严重」过滤
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m严重度筛选：默认显示「阻断」置顶（sorter 语义正确）；切「提示」/「阻断+严重」过滤
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m严重度筛选：默认显示「阻断」置顶（sorter 语义正确）；切「提示」/「阻断+严重」过滤
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/OutlineLibraryEditModal.test.tsx[2m > [22m[2mOutlineLibraryEditModal · 打开与关闭[2m > [22m[2m取消按钮：上抛 onClose
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m严重度筛选：默认显示「阻断」置顶（sorter 语义正确）；切「提示」/「阻断+严重」过滤
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m严重度筛选：默认显示「阻断」置顶（sorter 语义正确）；切「提示」/「阻断+严重」过滤
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m严重度筛选：默认显示「阻断」置顶（sorter 语义正确）；切「提示」/「阻断+严重」过滤
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/SectionContentCard.test.tsx[2m > [22m[2mSectionContentCard · 进入编辑（受控契约）[2m > [22m[2m点击手动编辑（有草稿）：弹「恢复草稿」确认框
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/OutlineLibraryEditModal.test.tsx[2m > [22m[2mOutlineLibraryEditModal · 保存校验与链路[2m > [22m[2m空树保存：拦截，不调用 api.create / onSaved，并提示章节为空
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m问题行展开 → 显示证据 / 整改建议 / 行业依据
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/aiConfigGovernance.test.tsx[2m > [22m[2m文本模型配置 · 配置治理增强[2m > [22m[2m多环境：顶部切换器可切换当前生效环境
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m问题行展开 → 显示证据 / 整改建议 / 行业依据
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m问题行展开 → 显示证据 / 整改建议 / 行业依据
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m问题行展开 → 显示证据 / 整改建议 / 行业依据
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m规则说明 → 打开抽屉并展示维度 + 权重
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m规则说明 → 打开抽屉并展示维度 + 权重
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/uploadParseTab.test.tsx[2m > [22m[2mUploadParseTab[2m > [22m[2m全部重解析：弹确认框，确认后才回调 onReparseAll
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m规则说明 → 打开抽屉并展示维度 + 权重
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m规则说明 → 打开抽屉并展示维度 + 权重
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/SectionContentCard.test.tsx[2m > [22m[2mSectionContentCard · 编辑态 UI（isEditing=true）[2m > [22m[2m取消（dirty）：弹确认，确认后上抛 onCancel
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/OutlineLibraryEditModal.test.tsx[2m > [22m[2mOutlineLibraryEditModal · 保存校验与链路[2m > [22m[2m新增一级章节：树出现「新章节」且计数 +1
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m导出整改清单 → 调用 report + 触发下载
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m导出整改清单 → 调用 report + 触发下载
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m导出整改清单 → 调用 report + 触发下载
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/uploadParseTab.test.tsx[2m > [22m[2mUploadParseTab[2m > [22m[2m重解析确认框点「取消」：不回调 onReparseAll
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+ [32m✓[39m src/tests/aiConfigGovernance.test.tsx [2m([22m[2m10 tests[22m[2m)[22m[33m 22039[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 配置治理增强[2m > [22m切换供应商会清空上一供应商的 API Key，避免误保存和误发送 [33m 3845[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 配置治理增强[2m > [22m并发数输入框上限与后端一致（≤5），避免「填了 8 实际生效 5」 [33m 2025[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 配置治理增强[2m > [22m保存时把后端「参数被自动收敛」的 warnings 提示给用户 [33m 2622[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 配置治理增强[2m > [22m配置列表提供「清除密钥」并能调用后端收回 API Key [33m 1829[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 配置治理增强[2m > [22m场景模型路由：可为一个场景指定专属配置，并把选择提交给后端 [33m 2184[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 配置治理增强[2m > [22m展示配置变更记录（审计留痕），且不含明文密钥 [33m 1448[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 配置治理增强[2m > [22m审计记录展示结构化变更 diff（字段名 + 前后值） [33m 1413[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 配置治理增强[2m > [22m可回滚的变更记录提供「回滚」按钮，并调用后端回滚端点 [33m 1939[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 配置治理增强[2m > [22m运行时厂商开关：可临时禁用某厂商并提交给后端 [33m 2435[2mms[22m[39m
+   [33m[2m✓[22m[39m 文本模型配置 · 配置治理增强[2m > [22m多环境：顶部切换器可切换当前生效环境 [33m 2296[2mms[22m[39m
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m导出整改清单 → 调用 report + 触发下载
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m导出整改清单 → 调用 report + 触发下载
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m导出整改清单 → 调用 report + 触发下载
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m历史趋势：runs ≥ 2 → 显示「本次」与历史分数标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m历史趋势：runs ≥ 2 → 显示「本次」与历史分数标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m历史趋势：runs ≥ 2 → 显示「本次」与历史分数标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/OutlineLibraryEditModal.test.tsx[2m > [22m[2mOutlineLibraryEditModal · 保存校验与链路[2m > [22m[2m填写名称 + 有章节后保存：调用 api.create 并上抛 onSaved
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m历史趋势：runs ≥ 2 → 显示「本次」与历史分数标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mSTALE 提示：runs 出现比 overview 更新的记录 → warning + 重新总检按钮
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mSTALE 提示：runs 出现比 overview 更新的记录 → warning + 重新总检按钮
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mSTALE 提示：runs 出现比 overview 更新的记录 → warning + 重新总检按钮
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mSTALE 提示：runs 出现比 overview 更新的记录 → warning + 重新总检按钮
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m总检接口失败 → 不进入结果态（catch 兜底，页面仍显示空态）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m总检接口失败 → 不进入结果态（catch 兜底，页面仍显示空态）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-高风险：预检存在 high 问题 → 仅提示问题数，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m总检接口失败 → 不进入结果态（catch 兜底，页面仍显示空态）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-高风险：预检存在 high 问题 → 仅提示问题数，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m总检接口失败 → 不进入结果态（catch 兜底，页面仍显示空态）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/OutlineLibraryEditModal.test.tsx[2m > [22m[2mOutlineLibraryEditModal · 三级深度拦截[2m > [22m[2m逐级加子章节直至三级；继续加第四级被拦截（告警，计数不增长）
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId → 重新拉取 runs（schemeId 依赖）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId → 重新拉取 runs（schemeId 依赖）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId → 重新拉取 runs（schemeId 依赖）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId → 重新拉取 runs（schemeId 依赖）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-高风险：预检存在 high 问题 → 仅提示问题数，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m刷新键递增 → 重新拉取 runs
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m刷新键递增 → 重新拉取 runs
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m刷新键递增 → 重新拉取 runs
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/SectionContentCard.test.tsx[2m > [22m[2mSectionContentCard · 边界场景[2m > [22m[2mdirty 状态下切换章节前需确认放弃（dirty 触发 modal.confirm）
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+ [32m✓[39m src/tests/SectionContentCard.test.tsx [2m([22m[2m22 tests[22m[2m)[22m[33m 3502[2mms[22m[39m
+   [33m[2m✓[22m[39m SectionContentCard · 空态与查看态[2m > [22m查看态：渲染标题 / 状态 Tag / 字数统计 [33m 606[2mms[22m[39m
+   [33m[2m✓[22m[39m SectionContentCard · 草稿自动保存[2m > [22m编辑中 dirty 后 ~800ms 自动写入 localStorage 草稿 [33m 927[2mms[22m[39m
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m后端明确标记最新运行 stale=true → 主结论立即进入过期态
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m后端明确标记最新运行 stale=true → 主结论立即进入过期态
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/OutlineLibraryEditModal.test.tsx[2m > [22m[2mOutlineLibraryEditModal · 编辑保存（目录名称修改 + 清空字段生效）[2m > [22m[2m编辑模式：保存调用 api.update 且上抛 onSaved；改名与空串清空随 payload 落库
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m后端明确标记最新运行 stale=true → 主结论立即进入过期态
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-高风险：预检存在 high 问题 → 仅提示问题数，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m后端明确标记最新运行 stale=true → 主结论立即进入过期态
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+ [32m✓[39m src/tests/OutlineLibraryEditModal.test.tsx [2m([22m[2m8 tests[22m[2m)[22m[33m 4907[2mms[22m[39m
+   [33m[2m✓[22m[39m OutlineLibraryEditModal · 打开与关闭[2m > [22mopen=true：渲染标题与两个 Tab [33m 1498[2mms[22m[39m
+   [33m[2m✓[22m[39m OutlineLibraryEditModal · 打开与关闭[2m > [22m取消按钮：上抛 onClose [33m 321[2mms[22m[39m
+   [33m[2m✓[22m[39m OutlineLibraryEditModal · 保存校验与链路[2m > [22m空树保存：拦截，不调用 api.create / onSaved，并提示章节为空 [33m 585[2mms[22m[39m
+   [33m[2m✓[22m[39m OutlineLibraryEditModal · 保存校验与链路[2m > [22m新增一级章节：树出现「新章节」且计数 +1 [33m 671[2mms[22m[39m
+   [33m[2m✓[22m[39m OutlineLibraryEditModal · 保存校验与链路[2m > [22m填写名称 + 有章节后保存：调用 api.create 并上抛 onSaved [33m 527[2mms[22m[39m
+   [33m[2m✓[22m[39m OutlineLibraryEditModal · 三级深度拦截[2m > [22m逐级加子章节直至三级；继续加第四级被拦截（告警，计数不增长） [33m 613[2mms[22m[39m
+   [33m[2m✓[22m[39m OutlineLibraryEditModal · 编辑保存（目录名称修改 + 清空字段生效）[2m > [22m编辑模式：保存调用 api.update 且上抛 onSaved；改名与空串清空随 payload 落库 [33m 443[2mms[22m[39m
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-高风险：预检存在 high 问题 → 仅提示问题数，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId：旧方案迟到的 runs 响应不得覆盖新方案
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId：旧方案迟到的 runs 响应不得覆盖新方案
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId：旧方案迟到的 runs 响应不得覆盖新方案
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId：旧方案迟到的 runs 响应不得覆盖新方案
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId：旧方案迟到的 runs 响应不得覆盖新方案
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-高风险：预检存在 high 问题 → 仅提示问题数，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mruns 只有 1 条 → 不显示历史趋势区（边界）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mruns 只有 1 条 → 不显示历史趋势区（边界）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mruns 只有 1 条 → 不显示历史趋势区（边界）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+ [32m✓[39m src/tests/uploadParseTab.test.tsx [2m([22m[2m37 tests[22m[2m)[22m[33m 4376[2mms[22m[39m
+   [33m[2m✓[22m[39m UploadParseTab[2m > [22m上传区：多选文件只触发一次 onUploadFiles，且携带全部文件 [33m 988[2mms[22m[39m
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mruns 只有 1 条 → 不显示历史趋势区（边界）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-高风险：预检存在 high 问题 → 仅提示问题数，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-高风险：预检存在 high 问题 → 仅提示问题数，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+(node:20456) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-高风险：预检存在 high 问题 → 仅提示问题数，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m不可修项显示「需人工」且无行内按钮；无 block+fixable 项时批量按钮不出现
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m不可修项显示「需人工」且无行内按钮；无 block+fixable 项时批量按钮不出现
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m不可修项显示「需人工」且无行内按钮；无 block+fixable 项时批量按钮不出现
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-高风险：预检存在 high 问题 → 仅提示问题数，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m不可修项显示「需人工」且无行内按钮；无 block+fixable 项时批量按钮不出现
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-高风险：预检存在 high 问题 → 仅提示问题数，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-高风险：预检存在 high 问题 → 仅提示问题数，按钮仍可用
+[22m[39mNot implemented: navigation to another Document
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m存在 block+fixable 项 → 批量按钮带计数，点击后 BatchFixModal 发起 collect
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m存在 block+fixable 项 → 批量按钮带计数，点击后 BatchFixModal 发起 collect
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m存在 block+fixable 项 → 批量按钮带计数，点击后 BatchFixModal 发起 collect
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m存在 block+fixable 项 → 批量按钮带计数，点击后 BatchFixModal 发起 collect
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m存在 block+fixable 项 → 批量按钮带计数，点击后 BatchFixModal 发起 collect
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m存在 block+fixable 项 → 批量按钮带计数，点击后 BatchFixModal 发起 collect
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+ [32m✓[39m src/tests/ReadinessDashboard.test.tsx [2m([22m[2m18 tests[22m[2m)[22m[33m 7097[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22m空态：runs 无历史 → 显示「尚未总检」且导出按钮禁用 [33m 986[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22m一键总检 → 渲染综合评分 / 等级 / 放行结论 / 来源标签 [33m 826[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22m一键总检后阻断项 Alert + 六维得分卡 + 客观统计齐全 [33m 399[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22m严重度筛选：默认显示「阻断」置顶（sorter 语义正确）；切「提示」/「阻断+严重」过滤 [33m 537[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22m问题行展开 → 显示证据 / 整改建议 / 行业依据 [33m 437[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22m规则说明 → 打开抽屉并展示维度 + 权重 [33m 375[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22m导出整改清单 → 调用 report + 触发下载 [33m 422[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22m历史趋势：runs ≥ 2 → 显示「本次」与历史分数标签 [33m 302[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22mSTALE 提示：runs 出现比 overview 更新的记录 → warning + 重新总检按钮 [33m 304[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22m后端明确标记最新运行 stale=true → 主结论立即进入过期态 [33m 301[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22m切换 schemeId：旧方案迟到的 runs 响应不得覆盖新方案 [33m 344[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22mruns 只有 1 条 → 不显示历史趋势区（边界） [33m 313[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 自动修复入口接线[2m > [22m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan [33m 442[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 自动修复入口接线[2m > [22m不可修项显示「需人工」且无行内按钮；无 block+fixable 项时批量按钮不出现 [33m 318[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 自动修复入口接线[2m > [22m存在 block+fixable 项 → 批量按钮带计数，点击后 BatchFixModal 发起 collect [33m 411[2mms[22m[39m
+ [32m✓[39m src/tests/outlineTab.test.tsx [2m([22m[2m57 tests[22m[2m)[22m[33m 2966[2mms[22m[39m
+   [33m[2m✓[22m[39m GenerationProgressCard（生成进度卡）[2m > [22m性能优化：日志渲染行数封顶，超量历史不再全部渲染为 DOM [33m 958[2mms[22m[39m
+   [33m[2m✓[22m[39m OutlineTreeActions（目录树操作区）[2m > [22m未选中章节：新增子章节/上移/下移/删除全部禁用，点击不上抛 [33m 321[2mms[22m[39m
+(node:30772) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:29184) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:12928) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:30496) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:23772) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-未放行：预检无 high 但就绪度未放行 → 按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-未放行：预检无 high 但就绪度未放行 → 按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-未放行：预检无 high 但就绪度未放行 → 按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-未放行：预检无 high 但就绪度未放行 → 按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-未放行：预检无 high 但就绪度未放行 → 按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m打开即收集阻断项，展示定位与句子级信息
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m打开即收集阻断项，展示定位与句子级信息
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m生成预览 → 确认修复：stage 后 confirm(accept_all) 落库
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m生成预览 → 确认修复：stage 后 confirm(accept_all) 落库
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m生成预览 → 确认修复：stage 后 confirm(accept_all) 落库
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-未放行：预检无 high 但就绪度未放行 → 按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m生成预览 → 确认修复：stage 后 confirm(accept_all) 落库
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m生成预览 → 确认修复：stage 后 confirm(accept_all) 落库
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m生成预览 → 确认修复：stage 后 confirm(accept_all) 落库
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m拒绝全部：confirm(reject) 丢弃批次，正文不动
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m拒绝全部：confirm(reject) 丢弃批次，正文不动
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-未放行：预检无 high 但就绪度未放行 → 按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m拒绝全部：confirm(reject) 丢弃批次，正文不动
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m拒绝全部：confirm(reject) 丢弃批次，正文不动
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m拒绝全部：confirm(reject) 丢弃批次，正文不动
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m空暂存：后端返回 empty 不进入预览、不调用 confirm
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m空暂存：后端返回 empty 不进入预览、不调用 confirm
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m空暂存：后端返回 empty 不进入预览、不调用 confirm
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m空暂存：后端返回 empty 不进入预览、不调用 confirm
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-未放行：预检无 high 但就绪度未放行 → 按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m多项暂存：默认全勾选已修复项；失败项展示原因且无勾选框
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m多项暂存：默认全勾选已修复项；失败项展示原因且无勾选框
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m多项暂存：默认全勾选已修复项；失败项展示原因且无勾选框
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m多项暂存：默认全勾选已修复项；失败项展示原因且无勾选框
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m取消勾选一条 → confirm 走 accept 数组（非 accept_all，前缀链式语义）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m取消勾选一条 → confirm 走 accept 数组（非 accept_all，前缀链式语义）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-未放行：预检无 high 但就绪度未放行 → 按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m取消勾选一条 → confirm 走 accept 数组（非 accept_all，前缀链式语义）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m取消勾选一条 → confirm 走 accept 数组（非 accept_all，前缀链式语义）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m取消勾选一条 → confirm 走 accept 数组（非 accept_all，前缀链式语义）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m取消勾选一条 → confirm 走 accept 数组（非 accept_all，前缀链式语义）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m取消勾选一条 → confirm 走 accept 数组（非 accept_all，前缀链式语义）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m全不选 → 确认按钮禁用（空接受集不得发 confirm）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m全不选 → 确认按钮禁用（空接受集不得发 confirm）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-未放行：预检无 high 但就绪度未放行 → 按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m全不选 → 确认按钮禁用（空接受集不得发 confirm）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m全不选 → 确认按钮禁用（空接受集不得发 confirm）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m全不选 → 确认按钮禁用（空接受集不得发 confirm）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m「全不选/全选」切换钮：一键反选全部已修复项
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m「全不选/全选」切换钮：一键反选全部已修复项
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-未放行：预检无 high 但就绪度未放行 → 按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m「全不选/全选」切换钮：一键反选全部已修复项
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-未放行：预检无 high 但就绪度未放行 → 按钮仍可用
+[22m[39mNot implemented: navigation to another Document
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m「全不选/全选」切换钮：一键反选全部已修复项
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m「全不选/全选」切换钮：一键反选全部已修复项
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m「全不选/全选」切换钮：一键反选全部已修复项
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m收集失败（接口异常）：停留在收集态，预览按钮禁用且不可达 stage
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m收集失败（接口异常）：停留在收集态，预览按钮禁用且不可达 stage
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m同章两条已修复项：各自独立勾选，全选时仍走 accept_all
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m同章两条已修复项：各自独立勾选，全选时仍走 accept_all
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m同章两条已修复项：各自独立勾选，全选时仍走 accept_all
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m同章两条已修复项：各自独立勾选，全选时仍走 accept_all
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m同章两条已修复项：各自独立勾选，全选时仍走 accept_all
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m同章两条已修复项：各自独立勾选，全选时仍走 accept_all
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m同章两条取消其一 → accept 数组只带另一条 rule_id（链式语义可拆）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m同章两条取消其一 → accept 数组只带另一条 rule_id（链式语义可拆）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m同章两条取消其一 → accept 数组只带另一条 rule_id（链式语义可拆）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m同章两条取消其一 → accept 数组只带另一条 rule_id（链式语义可拆）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m同章两条取消其一 → accept 数组只带另一条 rule_id（链式语义可拆）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m同章两条取消其一 → accept 数组只带另一条 rule_id（链式语义可拆）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/BatchFixModal.test.tsx[2m > [22m[2mBatchFixModal · 一键修复全部阻断项[2m > [22m[2m同章两条取消其一 → accept 数组只带另一条 rule_id（链式语义可拆）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+ [32m✓[39m src/tests/BatchFixModal.test.tsx [2m([22m[2m11 tests[22m[2m)[22m[33m 2710[2mms[22m[39m
+   [33m[2m✓[22m[39m BatchFixModal · 一键修复全部阻断项[2m > [22m打开即收集阻断项，展示定位与句子级信息 [33m 960[2mms[22m[39m
+(node:31588) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-结论过期：就绪度 stale=true → 不影响导出，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-结论过期：就绪度 stale=true → 不影响导出，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-结论过期：就绪度 stale=true → 不影响导出，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-结论过期：就绪度 stale=true → 不影响导出，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-结论过期：就绪度 stale=true → 不影响导出，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-结论过期：就绪度 stale=true → 不影响导出，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-结论过期：就绪度 stale=true → 不影响导出，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2mai 模式：未定位前不允许直接修复（必须先定位确认）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-结论过期：就绪度 stale=true → 不影响导出，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m定位后回显矛盾位置（章节 + 行号 + 原文），才放开修复按钮
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-结论过期：就绪度 stale=true → 不影响导出，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m定位后回显矛盾位置（章节 + 行号 + 原文），才放开修复按钮
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m定位失败：提示原因且修复按钮保持禁用（不盲改）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m定位失败：提示原因且修复按钮保持禁用（不盲改）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2mmanual 模式：不提供定位/修复入口，并展示替代路径
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-结论过期：就绪度 stale=true → 不影响导出，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2mauto 模式：按钮文案为「执行修复」且明确不调用 AI
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m修复成功：展示前后对比 + 审核失效提示 + 出现回滚按钮
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m修复成功：展示前后对比 + 审核失效提示 + 出现回滚按钮
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m修复成功：展示前后对比 + 审核失效提示 + 出现回滚按钮
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m修复成功：展示前后对比 + 审核失效提示 + 出现回滚按钮
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-结论过期：就绪度 stale=true → 不影响导出，按钮仍可用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m导出-结论过期：就绪度 stale=true → 不影响导出，按钮仍可用
+[22m[39mNot implemented: navigation to another Document
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m回滚：调用 rollback 并清空结果
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m回滚：调用 rollback 并清空结果
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m回滚：调用 rollback 并清空结果
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m回滚：调用 rollback 并清空结果
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m回滚：调用 rollback 并清空结果
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m回滚：调用 rollback 并清空结果
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m修复失败（校验未通过）：展示原因且不出现回滚入口
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m修复失败（校验未通过）：展示原因且不出现回滚入口
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+ [32m✓[39m src/tests/contentStandard20260926.test.tsx [2m([22m[2m29 tests[22m[2m)[22m[33m 2967[2mms[22m[39m
+   [33m[2m✓[22m[39m ContentGenerationTab 生成标准入口[2m > [22m三选项点击分别上抛正确值 [33m 1248[2mms[22m[39m
+   [33m[2m✓[22m[39m SectionContentCard 章节级生成标准[2m > [22m渲染三选项且沿用项文案翻译出方案默认 [33m 357[2mms[22m[39m
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m修复失败（校验未通过）：展示原因且不出现回滚入口
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2m修复失败（校验未通过）：展示原因且不出现回滚入口
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/reviewAutoFix.test.tsx[2m > [22m[2mAutoFixModal · 审核预检问题自动修复[2m > [22m[2mautofix 字段缺失（后端未标注）：不提供定位入口，提示重新总检
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+ [32m✓[39m src/tests/reviewAutoFix.test.tsx [2m([22m[2m9 tests[22m[2m)[22m[33m 2179[2mms[22m[39m
+   [33m[2m✓[22m[39m AutoFixModal · 审核预检问题自动修复[2m > [22mai 模式：未定位前不允许直接修复（必须先定位确认） [33m 1065[2mms[22m[39m
+[90mstderr[2m | src/tests/parseResultCategoryPanel.test.tsx[2m > [22m[2mParseResultCategoryPanel · 窄屏抽屉[2m > [22m[2m窄屏：桌面左栏隐藏，点击「解析分类」打开抽屉展示分类
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+ [32m✓[39m src/tests/parseResultCategoryPanel.test.tsx [2m([22m[2m21 tests[22m[2m)[22m[33m 1841[2mms[22m[39m
+   [33m[2m✓[22m[39m ParseResultCategoryPanel · 分类栏与数量角标[2m > [22m渲染分类名称与「已完成/总数」数量角标 [33m 409[2mms[22m[39m
+   [33m[2m✓[22m[39m ParseResultCategoryPanel · 选中详情与操作[2m > [22m选中项：右侧显示详情与 复制 / 人工校正 / 查看完整 操作 [33m 539[2mms[22m[39m
+ [32m✓[39m src/tests/securitySettings.test.tsx [2m([22m[2m5 tests[22m[2m)[22m[33m 1746[2mms[22m[39m
+   [33m[2m✓[22m[39m 访问凭据页面[2m > [22m保存后写入 localStorage 的键与 api 层读取的键一致 [33m 1290[2mms[22m[39m
+ [32m✓[39m src/tests/documentParseList.test.tsx [2m([22m[2m18 tests[22m[2m)[22m[33m 1434[2mms[22m[39m
+   [33m[2m✓[22m[39m DocumentParseList[2m > [22m待解析文档：点击「解析」回调 onParse(id, name) [33m 666[2mms[22m[39m
+ [32m✓[39m src/tests/perfOptimizations.test.tsx [2m([22m[2m6 tests[22m[2m)[22m[33m 1602[2mms[22m[39m
+   [33m[2m✓[22m[39m BidAnalysisTab 渲染性能[2m > [22m无关 props 变化不重算分组/扁平行（派生数据已 useMemo 化） [33m 901[2mms[22m[39m
+   [33m[2m✓[22m[39m Layout 侧栏单挂载（常驻 SSE / 轮询不翻倍）[2m > [22m桌面端：只挂载一份固定侧栏 [33m 302[2mms[22m[39m
+(node:3096) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:8136) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:30860) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:19568) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:24260) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:31076) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/DocumentPipelineSummary.test.tsx [2m([22m[2m18 tests[22m[2m)[22m[33m 1431[2mms[22m[39m
+   [33m[2m✓[22m[39m DocumentPipelineSummary[2m > [22mloading 态：显示读取中提示，不渲染质量数据 [33m 369[2mms[22m[39m
+   [33m[2m✓[22m[39m DocumentPipelineSummary 管线操作[2m > [22m传入 onAction 且解析成功：四个动作按钮齐全，点击回传对应 key [33m 382[2mms[22m[39m
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m解析内容预览：文档内容不完整时显示 warning，且不被「仅预览截取」覆盖
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+ [32m✓[39m src/tests/baItemFlatList.test.tsx [2m([22m[2m11 tests[22m[2m)[22m[33m 945[2mms[22m[39m
+   [33m[2m✓[22m[39m BaItemFlatList[2m > [22m无记录（idle）：序号+标签+必选角标+灰色 · 状态标 [33m 596[2mms[22m[39m
+(node:30392) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/importSubTabBar.test.tsx [2m([22m[2m6 tests[22m[2m)[22m[33m 733[2mms[22m[39m
+   [33m[2m✓[22m[39m ImportSubTabBar[2m > [22m渲染两个子标签：文档解析 / 项目提取 [33m 435[2mms[22m[39m
+(node:31232) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/TaskStatusBar.test.tsx [2m([22m[2m2 tests[22m[2m)[22m[33m 1095[2mms[22m[39m
+   [33m[2m✓[22m[39m TaskStatusBar · 运行态渲染与任务控制[2m > [22m拉取快照后渲染运行态概览（状态条） [33m 395[2mms[22m[39m
+   [33m[2m✓[22m[39m TaskStatusBar · 运行态渲染与任务控制[2m > [22m展开详情面板并暂停任务 → tasksApi.control(taskId, 'pause') [33m 697[2mms[22m[39m
+ [32m✓[39m src/tests/MarkdownRenderer.test.tsx [2m([22m[2m7 tests[22m[2m)[22m[33m 329[2mms[22m[39m
+ [32m✓[39m src/tests/ActivityHint.test.tsx [2m([22m[2m6 tests[22m[2m)[22m[33m 1356[2mms[22m[39m
+   [33m[2m✓[22m[39m ActivityHint · 空态与最新消息[2m > [22m无消息：渲染铃铛图标，无最新气泡 [33m 352[2mms[22m[39m
+   [33m[2m✓[22m[39m ActivityHint · 空态与最新消息[2m > [22m最新消息：彩色 chip 展示文本；点击打开历史浮层含该条 [33m 602[2mms[22m[39m
+ [32m✓[39m src/tests/factsTab.test.tsx [2m([22m[2m52 tests[22m[2m)[22m[33m 1737[2mms[22m[39m
+   [33m[2m✓[22m[39m FactsGroupList（全局事实分组列表）[2m > [22m渲染分组标题与头部徽标计数（总/模拟/矛盾/待审） [33m 790[2mms[22m[39m
+(node:28444) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/perfOptimizations0925.test.tsx [2m([22m[2m16 tests[22m[2m)[22m[33m 909[2mms[22m[39m
+   [33m[2m✓[22m[39m FactsGroupList / BaItemFlatList memo 化[2m > [22mFactsGroupList 是 memo 组件，且单次遍历统计口径正确（防优化时改错语义） [33m 713[2mms[22m[39m
+ [32m✓[39m src/tests/chartTypesParity.test.tsx [2m([22m[2m8 tests[22m[2m)[22m[32m 196[2mms[22m[39m
+(node:24060) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:11804) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:29336) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/factsApi.test.ts [2m([22m[2m33 tests[22m[2m)[22m[32m 28[2mms[22m[39m
+ [32m✓[39m src/tests/authGuard.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 18[2mms[22m[39m
+ [32m✓[39m src/tests/uploadOutlineApi.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 12[2mms[22m[39m
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m解析内容预览：解析完整但被预览截取 → info 提示总字数，不报「不完整」
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+(node:14952) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:2868) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:28976) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:5192) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/bidAnalysisApi.test.ts [2m([22m[2m11 tests[22m[2m)[22m[32m 10[2mms[22m[39m
+ [32m✓[39m src/tests/parseSourceNotice.test.ts [2m([22m[2m14 tests[22m[2m)[22m[32m 39[2mms[22m[39m
+ [32m✓[39m src/tests/exportCharts.test.ts [2m([22m[2m19 tests[22m[2m)[22m[32m 81[2mms[22m[39m
+ [32m✓[39m src/tests/sseFetch.test.ts [2m([22m[2m12 tests[22m[2m)[22m[32m 191[2mms[22m[39m
+(node:31592) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:7904) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/mermaidRuntime.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 35[2mms[22m[39m
+(node:30768) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/promptVariables.test.ts [2m([22m[2m13 tests[22m[2m)[22m[32m 33[2mms[22m[39m
+(node:29232) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:29700) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/workflowDerived.test.ts [2m([22m[2m46 tests[22m[2m)[22m[32m 21[2mms[22m[39m
+ [32m✓[39m src/tests/reviewApiContract.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 7[2mms[22m[39m
+(node:30664) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:22608) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:28876) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:920) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/uploadAccept.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+ [32m✓[39m src/tests/contentEvents.test.ts [2m([22m[2m28 tests[22m[2m)[22m[32m 15[2mms[22m[39m
+(node:16948) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/placeholderReport.test.ts [2m([22m[2m12 tests[22m[2m)[22m[32m 10[2mms[22m[39m
+(node:18032) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:30168) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:7228) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/exportResponse.test.ts [2m([22m[2m11 tests[22m[2m)[22m[32m 8[2mms[22m[39m
+ [32m✓[39m src/tests/workflowTabsGuard.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 13[2mms[22m[39m
+ [32m✓[39m src/tests/exportGateParity20260927.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 5[2mms[22m[39m
+[90mstderr[2m | src/tests/outlinePollRecovery.test.ts[2m > [22m[2mpollTaskUntilTerminalImpl（断线重挂轮询）[2m > [22m[2mBUG C 回归：stuckAtFull 兜底判定 completed 必须保留 outline_result 等全量字段
+[22m[39mpollTaskUntilTerminal: task t3 stuck at progress=100% for 3 polls, treating as completed
+
+(node:28020) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:11240) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/outlineStoppedCkptGuard.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+(node:17316) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+[90mstderr[2m | src/tests/outlinePollRecovery.test.ts[2m > [22m[2mpollTaskUntilTerminalImpl（断线重挂轮询）[2m > [22m[2m连续网络失败达容错上限（默认 5 次）放弃重挂
+[22m[39mpollTaskUntilTerminal: task t7 连续 5 次网络失败，放弃重挂
+
+ [32m✓[39m src/tests/outlinePollRecovery.test.ts [2m([22m[2m8 tests[22m[2m)[22m[33m 378[2mms[22m[39m
+ [32m✓[39m src/tests/ttlCache.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+(node:28836) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/auditTypesContract.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 7[2mms[22m[39m
+(node:26928) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m src/tests/useSchemeLiveTask.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 5[2mms[22m[39m
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m解析内容预览：解析告警（编码降级）必须知情可见
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+ [32m✓[39m src/tests/bidAnalysis.test.ts [2m([22m[2m21 tests[22m[2m)[22m[32m 11[2mms[22m[39m
+ [32m✓[39m src/tests/outlineQuality.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 7[2mms[22m[39m
+ [32m✓[39m src/tests/outlineTreeLogic.test.ts [2m([22m[2m39 tests[22m[2m)[22m[32m 15[2mms[22m[39m
+ [32m✓[39m src/tests/outlineTaskReattach.test.ts [2m([22m[2m8 tests[22m[2m)[22m[32m 5[2mms[22m[39m
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m[2m删除章节：确认弹窗后 DELETE /sections/{id}/{key}
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 导出成功路径（组件级交互）[2m > [22m[2m导出 DOCX 成功：解码后端文件名作下载名 + 刷新缓存状态 + 解析统计头
+[22m[39mNot implemented: navigation to another Document
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 导出成功路径（组件级交互）[2m > [22m[2m导出 PDF 成功：同样解码文件名 + 刷新缓存状态（与 DOCX 共用命名轨）
+[22m[39mNot implemented: navigation to another Document
+
+[90mstderr[2m | src/tests/schemeWorkbench.test.tsx[2m > [22m[2mSchemeWorkbenchPage · 导出成功路径（组件级交互）[2m > [22m[2m导出成功：统计头包含失败图也不抛异常（failed>0 走 warning 分支）
+[22m[39mNot implemented: navigation to another Document
+
+ [32m✓[39m src/tests/schemeWorkbench.test.tsx [2m([22m[2m21 tests[22m[2m)[22m[33m 89025[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m渲染冒烟：加载目录树并渲染章节节点 [33m 5129[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m渲染冒烟：六个工作流 Tab 全部存在，点击可切换 [33m 3933[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m导出不受预检门禁限制：未预检时按钮仍可用且点击发起导出请求 [33m 4235[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m导出-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求 [33m 5630[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m导出-高风险：预检存在 high 问题 → 仅提示问题数，按钮仍可用 [33m 5320[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m导出-未放行：预检无 high 但就绪度未放行 → 按钮仍可用 [33m 5001[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m导出-结论过期：就绪度 stale=true → 不影响导出，按钮仍可用 [33m 5476[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22mimport 子 Tab：文档解析 / 项目提取 切换均渲染且不崩溃（2026-09-25 补充） [33m 3176[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m解析内容预览：文档内容不完整时显示 warning，且不被「仅预览截取」覆盖 [33m 6238[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m解析内容预览：解析完整但被预览截取 → info 提示总字数，不报「不完整」 [33m 6455[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m解析内容预览：解析告警（编码降级）必须知情可见 [33m 5203[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m新增子章节：树中出现「新章节」节点（本地新增，不发写库请求） [33m 3244[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m新增同级章节：树中新增一个「新章节」 [33m 3212[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m重命名：回车后 PATCH /sections/{id} 且携带新标题 [33m 3410[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m重命名（未改即提交）：标题未变直接回车/失焦不发 PATCH [33m 3191[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m删除章节：确认弹窗后 DELETE /sections/{id}/{key} [33m 3076[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m下移章节：调用 /reorder 并带上整树顺序 [33m 3532[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 组件级冒烟与目录树编辑[2m > [22m保存目录：调用 saveOutline 且带上分级后的目录 [33m 3391[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 导出成功路径（组件级交互）[2m > [22m导出 DOCX 成功：解码后端文件名作下载名 + 刷新缓存状态 + 解析统计头 [33m 3530[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 导出成功路径（组件级交互）[2m > [22m导出 PDF 成功：同样解码文件名 + 刷新缓存状态（与 DOCX 共用命名轨） [33m 3304[2mms[22m[39m
+   [33m[2m✓[22m[39m SchemeWorkbenchPage · 导出成功路径（组件级交互）[2m > [22m导出成功：统计头包含失败图也不抛异常（failed>0 走 warning 分支） [33m 3334[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m55 passed[39m[22m[90m (55)[39m
+[2m      Tests [22m [1m[32m843 passed[39m[22m[90m (843)[39m
+[2m   Start at [22m 01:53:49
+[2m   Duration [22m 101.23s[2m (transform 5.14s, setup 1.11s, collect 264.35s, tests 215.89s, environment 67.40s, prepare 9.81s)[22m
+

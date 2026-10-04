@@ -776,3 +776,29 @@ async def test_danger_check_requires_name(ctx):
     with pytest.raises(HTTPException) as ei:
         await gf.check_danger_scheme({}, scheme_id=sid, project_id="", db=ctx)
     assert ei.value.status_code == 400
+
+async def test_danger_check_scheme_id_only_loads_name_from_db(ctx):
+    """前端主路径（body 空对象 + 仅 query scheme_id）：从库中取方案名正常判定。
+
+    ✅ 2026-10-01 P0 回归锁：400 检查此前位于「从库中取方案名」**之前**，
+    只传 scheme_id 的调用恒 400（生产 backend_err.log 多次实证：
+    同方案同时段 /chapters 为 200、/danger-check 恒 400）；
+    且注释声明「前端只传 scheme_id 时从库中取方案名」与实现矛盾、分支不可达。
+    """
+    import app.routers.global_facts as gf
+    sid, pid = "s1", "p1"
+    await ctx.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
+    await _insert_scheme(ctx, sid, pid, "基坑支护专项施工方案")
+    await ctx.execute(
+        "INSERT INTO global_facts "
+        "(id,project_id,scheme_id,group_id,title,content,category,is_resolved,"
+        "value_unit,fact_key) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("d3", pid, sid, "g1", "基坑深度", "- **基坑深度**: 4.5",
+         "tech_param", 1, "m", "foundation_depth"))
+    await ctx.commit()
+
+    # body 为空对象（与前端 factsApi.dangerCheck({}, schemeId) 逐字一致）
+    res = await gf.check_danger_scheme({}, scheme_id=sid, project_id="", db=ctx)
+    assert res["category_id"] == "foundation_pit"
+    assert res["threshold_params"] == {"depth": 4.5}
+    assert res["classification"]["is_hazardous"] is True

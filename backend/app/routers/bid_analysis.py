@@ -504,11 +504,11 @@ async def select_bid_section(body: dict,
              row.get("status") or "idle", row.get("error") or ""))
         await db.commit()
     except Exception as e:
-        logger.exception("保存投标范围选择失败")
-        raise HTTPException(500, f"保存投标范围失败：{e}")
+        logger.exception("保存施工范围选择失败")
+        raise HTTPException(500, f"保存施工范围失败：{e}")
 
     hint = build_bid_section_context_hint(section, has_selected_section=bool(section))
-    logger.info("项目 %s 投标范围更新为：%s（提示注入：%s）",
+    logger.info("项目 %s 施工范围更新为：%s（提示注入：%s）",
                 real_pid, section.get("title") or "<未选择>",
                 "是" if hint else "否")
     return {
@@ -585,7 +585,7 @@ async def extract_bid_sections_api(
 
     selected = selected_section_from_row(row)
     msg = (f"已识别 {len(sections)} 个标段（{result['segment_count']} 段，"
-           f"约 {result['estimated_calls']} 次模型调用），请确认本次投标范围")
+           f"约 {result['estimated_calls']} 次模型调用），请确认本次施工范围")
     logger.info("项目 %s AI 标段识别完成：%d 个标段", real_pid, len(sections))
     return {
         "ok": True,
@@ -799,18 +799,52 @@ async def update_single_result(
         if isinstance(parsed, str):
             raise HTTPException(422, "JSON 解析项必须是对象或数组，不能是裸字符串")
 
-    pk = f"{real_pid}_{item_id}"
+    # ✅ 主键经 build_item_pk 唯一出口构造（scheme 域返回历史的
+    #    {project_id}_{item_id} 格式，字节不变）——旧实现在此手写 f-string
+    #    副本，与写入侧其他 6 处调用点口径并存，属本仓反复出现的判据分叉。
+    resolved_domain = get_item_domain(item_id) or "scheme"
+    pk = build_item_pk(real_pid, item_id, resolved_domain)
     try:
         if scheme_id:
             await db.execute(
                 "UPDATE schemes SET project_id=? WHERE id=?", (real_pid, scheme_id))
-        await db.execute(
+        cur = await db.execute(
             "UPDATE bid_analysis_items SET content=?, status='success', error='', "
             "source='manual', evidence='', "
             "updated_at=datetime('now','localtime') WHERE id=?",
             (content, pk))
+        changed = safe_rowcount(cur, what="人工校正 UPDATE bid_analysis_items")
+        if not changed:
+            # ✅ BUG 修复（静默丢失）：从未提取过的项在库中没有行（行由首次
+            #    提取/force_rerun 时才补齐），UPDATE 命中 0 行后接口仍返回
+            #    {"item": null, "summary": ...} 且无任何错误 —— 用户提交的校正
+            #    内容静默丢弃，刷新后全部丢失。现补 INSERT（与
+            #    _update_item_status 的兼容旧库缺 domain 列同口径降级）。
+            cur_cols = await _bid_analysis_item_cols(db)
+            if "domain" in cur_cols:
+                await db.execute(
+                    "INSERT INTO bid_analysis_items "
+                    "(id, project_id, scheme_id, item_id, label, output_type, required, "
+                    "status, content, error, sort_order, source, evidence, domain) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (pk, real_pid, scheme_id or "", item_id, def_.get("label", item_id),
+                     def_.get("output_type", "markdown"), def_.get("required", 0),
+                     "success", content, "", def_.get("sort_order", 0),
+                     "manual", "", resolved_domain))
+            else:
+                await db.execute(
+                    "INSERT INTO bid_analysis_items "
+                    "(id, project_id, scheme_id, item_id, label, output_type, required, "
+                    "status, content, error, sort_order, source, evidence) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (pk, real_pid, scheme_id or "", item_id, def_.get("label", item_id),
+                     def_.get("output_type", "markdown"), def_.get("required", 0),
+                     "success", content, "", def_.get("sort_order", 0),
+                     "manual", ""))
         await db.commit()
-        logger.info("人工校正解析项 %s.%s（%d 字符）", real_pid, item_id, len(content))
+        logger.info("人工校正解析项 %s.%s（%d 字符，%s）",
+                    real_pid, item_id, len(content),
+                    "更新既有行" if changed else "补齐缺失行")
     except Exception as e:
         logger.error("人工校正解析项失败: %s", e)
         raise HTTPException(500, f"更新失败: {e}")
@@ -841,7 +875,8 @@ async def clear_single_result(
     if not real_pid:
         raise HTTPException(400, "需要 scheme_id 或 project_id")
 
-    pk = f"{real_pid}_{item_id}"
+    # ✅ 主键唯一出口（与 update_single_result 同口径，scheme 域字节不变）
+    pk = build_item_pk(real_pid, item_id, get_item_domain(item_id) or "scheme")
     await db.execute(
         "UPDATE bid_analysis_items SET content='', error='', status='idle', "
         "source='ai', evidence='', "
@@ -1296,6 +1331,11 @@ async def _run_bid_analysis_sync(db, project_id: str, scheme_id: str,
     # 必选项校验
     missing = await _get_missing_required(db, project_id, results)
 
+    # ✅ P1（2026-10-04）：非强制重跑同样必须失效下游缓存（此前只有 force_rerun
+    #    路径会调 `_invalidate_downstream_cache`）。放在任务终态写入**之前**：
+    #    失效是幂等读改写，失败也不得影响「提取已完成」的结论（见函数内注释）。
+    await _safe_invalidate_downstream(db, project_id, scheme_id)
+
     # ✅ BUG 修复（P0）：finish_task 的签名是 (task_id, status, message)，**没有**
     #    progress 参数（全库其余 32 处调用均只传这三个）。此处多传 progress=100
     #    会在**全部解析项跑完之后**的收尾处抛
@@ -1450,6 +1490,11 @@ async def _run_bid_analysis_with_progress(db, project_id: str, scheme_id: str,
     ])
 
     missing = await _get_missing_required(db, project_id, results)
+
+    # ✅ P1（2026-10-04）：与同步入口同口径 —— 非强制重跑也失效下游缓存。
+    #    ⚠️ 停止场景同样生效：**已完成的那部分**提取结果已经写库，下游缓存同样
+    #    可能陈旧，失效是幂等安全操作，不会把「部分完成」说成「全部完成」。
+    await _safe_invalidate_downstream(db, project_id, scheme_id)
 
     # ✅ 停止语义（2026-09-20 BUG 修复）：is_stopped 必须在 finish_task **之前**
     #    判定 —— finish_task 会把任务从 task_registry._tasks 弹出，此后 is_stopped
@@ -2183,6 +2228,33 @@ async def _invalidate_extraction_derived(db, project_id: str, sids: list[str]) -
         await db.commit()
     except Exception as e:
         logger.warning("作废提取层快照失败（不影响提取结果）: %s", e)
+
+
+async def _safe_invalidate_downstream(db, project_id: str, scheme_id: str = "") -> None:
+    """**收尾专用**的下游缓存失效包装（fail-soft 到极致，绝不改变任务终态）。
+
+    ✅ BUG 修复（P1 · 2026-10-04）：`_invalidate_downstream_cache` 的 docstring
+    自称「提取结果变化后失效下游缓存」，但它**只在 force_rerun 的路径上被调用**
+    （`_reset_items_for_rerun`，见 :func:`start_bid_analysis` 与 SSE 入口的
+    `if force_rerun:` 分支）。而真实的高频路径恰恰是**非强制重跑**：用户在
+    BidAnalysisTab 点「重新提取（全部/单项）」时若不勾 force，任务照样跑完 18 项
+    并把新结果写进 `bid_analysis_items`，收尾分支却一行失效都不做 →
+    `export_cache` / `consistency_scan_cache` / `schemes.facts_updated_at` /
+    `doc_extractions` 全部停留在旧值：
+      · 导出 docx 用的是上一轮提取结果（界面显示「已重新提取」，导出内容却是旧的）；
+      · 一致性面板仍显示旧冲突清单；
+      · 目录树收不到「事实已变更」提示。
+    这是纯粹的静默数据不一致，且用户极难自查。
+
+    现在两条收尾路径（同步 / SSE）的**任务终态写入之前**统一调用本函数。
+    为什么再包一层 try：`_invalidate_downstream_cache` 内部虽已逐表 fail-soft，
+    但它是「提取已完成」之后的新增动作，任何未预料的异常都不应让一个已成功的
+    任务变成异常（与 `_get_missing_required` 之类收尾动作的容错口径一致）。
+    """
+    try:
+        await _invalidate_downstream_cache(db, project_id, scheme_id)
+    except Exception as e:  # noqa: BLE001 - 收尾动作不得改变任务终态
+        logger.warning("提取收尾：下游缓存失效失败（不影响提取结果）: %s", e)
 
 
 async def _reset_items_for_rerun(db, project_id: str,

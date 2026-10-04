@@ -238,6 +238,16 @@ def get_prompt(key: str, **kwargs) -> str:
     else:
         meta = _ALL_PROMPTS.get(key)
         if not meta:
+            # ✅ R39 T1：先惰性补注册「定义在包外」的提示词（投标分析域 19 条），
+            #   再判定是否真的未知键。否则提示词管理页会列不出
+            #   这批模板，而提取侧也拿不到 DB 覆盖。
+            try:
+                from app.services.ai.prompts._registry import register_lazy_prompts
+                register_lazy_prompts()
+            except Exception as e:  # noqa: BLE001 - 补注册失败不得影响读取
+                logger.warning("惰性补注册失败: %s", e)
+            meta = _ALL_PROMPTS.get(key)
+        if not meta:
             logger.warning("Prompt key '%s' not found in registry or cache", key)
             return ""
         if cached is not None and not cached.strip():

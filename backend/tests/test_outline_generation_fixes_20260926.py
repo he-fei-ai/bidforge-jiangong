@@ -122,33 +122,129 @@ class TestSchemeBasisInjection:
 
 
 
-# ===========================================================================
+# =========================================================================
 # 2. render 调用点 ↔ 模板变量契约 的漂移护栏（系统性防复发）
-# ===========================================================================
-def _scan_missing_render_kwargs(source: str, filename: str) -> list[str]:
-    """AST 扫描：render("key", ...) 调用点是否漏传模板声明的用户变量。"""
+# =========================================================================
+def _resolve_star_expr(expr, tree, visiting: frozenset, depth: int = 0):
+    """✅ R38 D7：静态解析 ``render(..., **expr)`` 展开的键集合。
+
+    旧实现（R38 报告 D7）把所有 ``**`` 展开调用点**整体跳过**，造成 5 个
+    真实调用点（检查点 kwargs helper / 条件字典字面量）零覆盖。本函数按
+    三种在仓形态解析（均为**过近似**：宁可多认键不误报，不可漏报真漏传）：
+      · Dict 字面量 / 三元表达式两分支 Dict
+      · 同模块函数调用（收集函数体内全部 Dict 字面量键 + 下标赋值键，
+        并递归展开其体内调用的已知函数，防环 visited，深度上限 4）
+      · 局部变量（收集同文件内该变量的 ``var["k"] =`` 下标赋值键与
+        Dict 初始值键 —— 文件级过近似，同名变量宁多勿少）
+    无法解析（函数参数 Name / 未知来源）返回 None，由调用方计入盲区快照。
+    """
+    if depth > 4:
+        return None
+    if isinstance(expr, ast.Dict):
+        return {k.value for k in expr.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+    if isinstance(expr, ast.IfExp):
+        a = _resolve_star_expr(expr.body, tree, visiting, depth + 1)
+        b = _resolve_star_expr(expr.orelse, tree, visiting, depth + 1)
+        return None if (a is None or b is None) else (a | b)
+    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name):
+        fname = expr.func.id
+        fn = next((n for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and n.name == fname), None)
+        if fn is None or fname in visiting:
+            return set() if fname in visiting else None
+        keys: set = set()
+        for sub in ast.walk(fn):
+            if isinstance(sub, ast.Dict):
+                keys |= {k.value for k in sub.keys
+                         if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+            elif isinstance(sub, ast.Assign):
+                for t in sub.targets:
+                    if (isinstance(t, ast.Subscript)
+                            and isinstance(t.slice, ast.Constant)
+                            and isinstance(t.slice.value, str)):
+                        keys.add(t.slice.value)
+        for sub in ast.walk(fn):
+            if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+                    and sub.func.id not in visiting
+                    and sub.func.id != fname):
+                # 只展开**同模块有定义**的嵌套调用；getattr/bool 等内建或
+                # 外部调用不产生 kwargs 键，直接跳过（否则 helper 内部任何
+                # 普通函数调用都会把整条解析误判为盲区）
+                if not any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                           and n.name == sub.func.id for n in ast.walk(tree)):
+                    continue
+                inner = _resolve_star_expr(sub, tree,
+                                           visiting | {fname}, depth + 1)
+                if inner is None:
+                    return None
+                keys |= inner
+        return keys
+    if isinstance(expr, ast.Name):
+        var = expr.id
+        keys = set()
+        found = False
+        for sub in ast.walk(tree):
+            if isinstance(sub, ast.Assign):
+                for t in sub.targets:
+                    if (isinstance(t, ast.Subscript)
+                            and isinstance(t.value, ast.Name)
+                            and t.value.id == var
+                            and isinstance(t.slice, ast.Constant)
+                            and isinstance(t.slice.value, str)):
+                        keys.add(t.slice.value)
+                        found = True
+            if isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name) \
+                    and sub.target.id == var and isinstance(sub.value, ast.Dict):
+                keys |= {k.value for k in sub.value.keys
+                         if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+                found = True
+        return keys if found else None
+    return None
+
+
+def _scan_missing_render_kwargs(source: str, filename: str,
+                                blindspots: list | None = None) -> list[str]:
+    """AST 扫描：render("key", ...) 调用点是否漏传模板声明的用户变量。
+
+    ✅ R38 D7：``**`` 展开不再整体跳过 —— 先走 :func:`_resolve_star_expr`
+    静态解析合并进 supplied；真正解不了的才记入 blindspots（由快照护栏
+    ``test_dynamic_blindspots_frozen`` 锁死，新增盲区即红）。
+    """
     out: list[str] = []
-    for node in ast.walk(ast.parse(source)):
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id == "render"):
             continue
         if not node.args or not isinstance(node.args[0], ast.Constant):
+            if blindspots is not None:
+                blindspots.append(f"{filename} render(<non-literal-key>)")
             continue
         key = node.args[0].value
         if not isinstance(key, str):
             continue
         supplied, dynamic = set(), False
+        dynamic_keys: set = set()
         for kw in node.keywords:
             if kw.arg is None:
-                dynamic = True          # **kwargs 展开，静态无法判定 → 跳过
+                resolved = _resolve_star_expr(kw.value, tree, frozenset())
+                if resolved is None:
+                    dynamic = True      # 确实无法静态判定 → 跳过并登记
+                    if blindspots is not None:
+                        blindspots.append(f"{filename} render({key}) **<unresolved>")
+                else:
+                    dynamic_keys |= resolved
             else:
                 supplied.add(kw.arg)
         need = set(extract_user_variables(get_default_prompt(key)))
         # 与运行时告警同一判据：JSON 示例误报（{max: ...}）不算漏传
         tpl = get_default_prompt(key)
         need = {v for v in need if not _is_false_positive("", v, tpl)}
-        if not dynamic and need - supplied:
-            out.append(f"{filename}:{node.lineno} render({key}) 缺 {sorted(need - supplied)}")
+        if not dynamic and need - (supplied | dynamic_keys):
+            out.append(f"{filename}:{node.lineno} render({key}) "
+                       f"缺 {sorted(need - (supplied | dynamic_keys))}")
     return out
 
 
@@ -162,6 +258,70 @@ class TestRenderCallSiteContract:
     def test_guard_ignores_dynamic_kwargs(self):
         src = 'def f(kw):\n    return render("outline_short_system", **kw)\n'
         assert _scan_missing_render_kwargs(src, "snippet.py") == []
+
+    def test_guard_resolves_helper_kwargs_and_detects_miss(self):
+        """✅ R38 D7：helper 展开的调用点不再被整体跳过 —— 漏传能被发现。"""
+        src = (
+            'def _mk():\n    return {"a_var": "x"}\n'
+            'def f():\n    return render("outline_short_system", '
+            'scheme_name="n", scheme_type="t", construction_scope="c", '
+            'scheme_basis="b", standards_text="s", project_facts="p", **_mk())\n'
+        )
+        # 模板需要的真实变量没给全 → 必须报（旧实现遇 ** 展开直接跳过，零覆盖）
+        assert _scan_missing_render_kwargs(src, "snippet.py")
+
+
+class TestRenderDynamicBlindspots:
+    """✅ R38 D7：动态展开盲区快照锁 —— 存量无法静态判定的 render 调用点
+    必须与登记名单完全一致；新增盲区（任意新 ``**`` 展开/动态 key）即红，
+    迫使作者把新调用点写成可静态解析的形态或显式登记豁免理由。"""
+
+    #: 存量盲区（rel → 条数）。均为「键本身动态」而非「kwargs 动态」：
+    #: · charts.py —— render(_fix_key, ...) 图表修复变体族选择（已有
+    #:   test_json_repair_key_routing / 契约表逐 variant 登记双重兑付）；
+    #: · json_response.py —— render(repair_key, ...) 默认/目录族参数，
+    #:   取值范围由路由护栏锁死。
+    SNAPSHOT: dict = {
+        "routers/charts.py render(<non-literal-key>)": 2,
+        "services/ai/json_response.py render(<non-literal-key>)": 1,
+    }
+
+    def _collect(self):
+        import pathlib
+        import app as app_pkg
+        root = pathlib.Path(app_pkg.__file__).parent
+        blind: list = []
+        for p in sorted(root.rglob("*.py")):
+            rel = str(p.relative_to(root)).replace("\\", "/")
+            try:
+                src = p.read_text(encoding="utf-8")
+            except (FileNotFoundError, OSError):
+                continue
+            try:
+                _scan_missing_render_kwargs(src, rel, blindspots=blind)
+            except SyntaxError:
+                continue
+        return blind
+
+    def test_dynamic_blindspots_frozen(self):
+        from collections import Counter
+        got = Counter(self._collect())
+        assert dict(got) == self.SNAPSHOT, (
+            "render 动态盲区与登记快照不一致（新增盲区需改造为可静态解析"
+            "形态，或同步登记并说明理由）：\n"
+            + "\n".join(f"{k} ×{v}" for k, v in sorted(got.items())))
+
+    def test_five_checkpoint_render_sites_no_longer_blind(self):
+        """D7 点名的 5 个零覆盖调用点现已全部被静态解析覆盖。"""
+        import pathlib
+        import app as app_pkg
+        src = (pathlib.Path(app_pkg.__file__).parent
+               / "routers" / "sse_handlers.py").read_text(encoding="utf-8")
+        blind: list = []
+        _scan_missing_render_kwargs(src, "routers/sse_handlers.py",
+                                    blindspots=blind)
+        assert blind == [], (
+            "sse_handlers 的 5 个检查点 render 调用点不应再有盲区：" + str(blind))
 
     def test_no_render_call_site_misses_variables(self):
         import pathlib

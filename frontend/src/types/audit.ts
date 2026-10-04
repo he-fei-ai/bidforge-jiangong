@@ -184,6 +184,7 @@ export interface AutoFixConfirmResult {
   repaired_sections: number;
   snapshot_id: string;
   batch_id: string;
+  skipped?: Array<{ rule_id: string; status: number; detail: string }>;
 }
 
 /** 维度得分 */

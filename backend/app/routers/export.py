@@ -135,7 +135,12 @@ def _find_fallback_code(chart_type_index: dict[str, list[str]], chart_type: str)
 #        16×93cm 溢出页面、AI 竖版配图同样溢出）；② 图表被跳过（渲染失败 / 去重 /
 #        无代码 / AI 配图未生成）时同步移除其孤儿引导语（修复"见下图"却无图）。
 #        版式变化烤进导出缓存，必须整体失效。
-_EXPORTER_VERSION = "20"
+#    v21：未闭合围栏三侧口径收口（2026-10-03 · 未闭合=不是图）：chart-json / ai_image
+#        解析分支补齐闭合检查（旧实现只看 JSON 可解析+类型白名单，EOF 截断残片
+#        照样渲染占号）；登记侧 _scan_chart_fences_full 同步跳 eof（消除幽灵登记/
+#        绕过配图上限）；解析期跳过的图表围栏同步回收孤儿引导语（与 v20 渲染期
+#        回收同口径）。版式变化烤进导出缓存，必须整体失效。
+_EXPORTER_VERSION = "21"
 
 
 _CHART_TYPE_MAP = {
@@ -1805,6 +1810,274 @@ def _add_cover_info_table(doc, info: dict, font_name: str) -> None:
         c1._tc.get_or_add_tcPr().append(shd1)
 
 
+# ---------------------------------------------------------------------------
+# 专项施工方案法定前置表单（2026-10-02 · 第二十三轮）
+# ---------------------------------------------------------------------------
+# 依据（均为部文原文，不凭记忆编写）：
+# · 住建部令第37号 第十一条：专项施工方案应当由施工单位技术负责人审核签字、
+#   加盖单位公章，并由总监理工程师审查签字、加盖执业印章后方可实施；
+#   危大工程实行分包并由分包单位编制的，应当由总承包单位技术负责人及分包
+#   单位技术负责人**共同**审核签字并加盖单位公章。
+# · 住建部令第37号 第十二条：专家应当从专家库中选取，符合专业要求且
+#   **人数不得少于 5 名**；与本工程有利利害关系的人员不得以专家身份参加。
+# · 住建部令第37号 第十三条：专家论证会后应当形成**论证报告**，对专项
+#   施工方案提出**通过、修改后通过或者不通过**的一致意见，专家签字确认。
+# · 建办质〔2018〕31号 三、参会人员五类；四、专家论证主要内容三项。
+# · 建办质〔2018〕31号 二、第(九)项：计算书**及相关施工图纸** → 图纸附件清单。
+#
+# 红线：与正文同一口径 —— **不编造**人名、证书编号、单位名称与日期，
+# 签字栏一律留空由各方手签（表单本就是待签状态，留空才是正确产物）。
+# 空值行不渲染，避免交付文档出现「XXX：」这类空栏。
+
+
+def _add_form_table(doc, rows: list[tuple[str, str]], font_name: str = "宋体",
+                    col1_cm: float = 4.0, col2_cm: float = 10.0,
+                    keep_empty: bool = False) -> None:
+    """插入「标签 / 值」两列表单（审批表、论证报告表共用）。
+
+    与 :func:`_add_cover_info_table` 同款固定布局（14cm 宽、灰底纹），
+    区别是不强制换页 —— 供正文前的法定表单复用。
+
+    ``keep_empty`` 区分两类行（⚠️ 缺了它会静默吞掉整张签字表）：
+    · False（默认）：值列为空的行**跳过** —— 用于「工程名称 / 方案编号」
+      这类抬头行，没填就不该在交付文档里留「工程名称：」的空栏；
+    · True：值列为空也**保留** —— 用于签字栏。签字栏的「空」不是缺失，
+      恰恰是正确产物（表单交付态即「待签」，由各方线下手签）；
+      把它当空值过滤掉，等于把整张审批表 / 论证报告表的签字栏抹平，
+      文档看起来"干净"却彻底失去法律效力。
+    """
+    from docx.shared import Cm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    pairs = [(str(k), str(v or "").strip()) for k, v in rows
+             if keep_empty or str(v or "").strip()]
+    if not pairs:
+        return
+    table = doc.add_table(rows=len(pairs), cols=2)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.style = "Table Grid"
+    table.autofit = False
+    tbl_pr = table._tbl.tblPr
+    layout = tbl_pr.find(qn("w:tblLayout"))
+    if layout is None:
+        layout = OxmlElement("w:tblLayout")
+        tbl_pr.append(layout)
+    layout.set(qn("w:type"), "fixed")
+    tbl_w = tbl_pr.find(qn("w:tblW"))
+    if tbl_w is None:
+        tbl_w = OxmlElement("w:tblW")
+        tbl_pr.append(tbl_w)
+    tbl_w.set(qn("w:w"), str(int(14 * 567)))
+    tbl_w.set(qn("w:type"), "dxa")
+    for i, (k, v) in enumerate(pairs):
+        c0, c1 = table.rows[i].cells
+        for cell in (c0, c1):
+            cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+            cell.width = Cm(col1_cm if cell is c0 else col2_cm)
+            shd = OxmlElement("w:shd")
+            shd.set(qn("w:val"), "clear")
+            shd.set(qn("w:color"), "auto")
+            shd.set(qn("w:fill"), "F2F2F2")
+            cell._tc.get_or_add_tcPr().append(shd)
+        p0 = c0.paragraphs[0]
+        p0.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        _set_run_font(p0.add_run(k), font_name, 10.5, bold=True)
+        p1 = c1.paragraphs[0]
+        p1.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        _add_runs_with_inline_format(p1, v)
+
+
+def _add_prelim_page_title(doc, title: str, font_name: str,
+                           basis: str = "") -> None:
+    """前置页页题（居中加粗 + 编制依据注），并为其后留白。"""
+    from docx.shared import Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.space_after = Pt(12)
+    _set_run_font(p.add_run(title), font_name, 16, bold=True)
+    if basis:
+        b = doc.add_paragraph()
+        b.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        b.paragraph_format.space_after = Pt(10)
+        _set_run_font(b.add_run(basis), font_name, 9)
+
+
+def _scheme_form_header(scheme: dict, cover_info: dict | None) -> list[tuple[str, str]]:
+    """四张前置表共用的「工程 / 方案」抬头行（空值自动过滤）。"""
+    info = cover_info if isinstance(cover_info, dict) else {}
+    return [
+        ("工程名称", info.get("工程名称", "")),
+        ("方案名称", (scheme or {}).get("name", "")),
+        ("方案编号", info.get("方案编号", "")),
+        ("编制单位", info.get("编制单位", "")),
+    ]
+
+
+def _add_compilation_note_page(doc, scheme: dict, cover_info: dict | None,
+                               font_name: str) -> None:
+    """编制说明（专项施工方案标准组成，说明编制背景与执行要求）。
+
+    仅陈述可从方案自身与封面信息确定的内容；不从事实库取未经确认的数值，
+    不出现「待补充」类占位（与正文「数据真实性红线」同款要求）。
+    """
+    info = cover_info if isinstance(cover_info, dict) else {}
+    project_name = str(info.get("工程名称", "") or "").strip()
+    scheme_name = str((scheme or {}).get("name", "") or "").strip()
+    parts = [
+        f"本方案为{project_name}的{scheme_name}，"
+        f"由施工单位技术负责人组织工程技术人员编制，"
+        f"经施工单位技术负责人审核签字并加盖单位公章、"
+        f"总监理工程师审查签字后方可实施。"
+        if project_name and scheme_name else
+        "本方案由施工单位组织工程技术人员编制，"
+        "经施工单位技术负责人审核签字并加盖单位公章、"
+        "总监理工程师审查签字后方可实施。",
+        "本方案依据国家、行业及地方现行法律法规、部门规章、"
+        "强制性工程建设规范和本专业技术标准，并结合本工程设计文件、"
+        "施工组织设计与现场实际条件编制，编制依据详见「编制依据」章节。",
+        "本方案是指导本专项工程施工的作业文件，"
+        "施工现场应严格执行；因设计变更、规划调整等原因确需调整的，"
+        "修改后的专项施工方案应当重新履行审核（及论证）程序。",
+        "本方案的技术参数与施工做法已结合现场条件核定，"
+        "现场实际条件与本方案不一致时，应及时反馈编制单位核实，"
+        "不得擅自修改后直接实施。",
+    ]
+    for text in parts:
+        p = doc.add_paragraph()
+        p.paragraph_format.first_line_indent = None
+        _add_runs_with_inline_format(p, text)
+
+
+def _add_scheme_approval_table(doc, scheme: dict, cover_info: dict | None,
+                               font_name: str) -> None:
+    """专项施工方案审批表（住建部令第37号 第十一条）。
+
+    签字栏留空 —— 表单交付态即「待签」，由各方线下手签，
+    严禁预填人名 / 证书编号（AGENTS.md 数据真实性红线）。
+    """
+    from docx.shared import Pt
+
+    _add_prelim_page_title(doc, "专项施工方案审批表", font_name,
+                           "依据《危险性较大的分部分项工程安全管理规定》"
+                           "（住建部令第37号）第十一条")
+    _add_form_table(doc, _scheme_form_header(scheme, cover_info), font_name)
+    doc.add_paragraph()
+    _add_form_table(doc, [
+        ("编制人（签字）", ""),
+        ("编制日期", ""),
+        ("施工单位技术负责人（审核签字）", ""),
+        ("审核日期", ""),
+        ("总承包单位技术负责人（分包工程共同审核）", ""),
+        ("专业分包单位技术负责人（分包工程共同审核）", ""),
+        ("总监理工程师（审查签字）", ""),
+        ("审查日期", ""),
+    ], font_name, col1_cm=6.0, col2_cm=8.0, keep_empty=True)
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(10)
+    _add_runs_with_inline_format(
+        p, "注：本表签字并加盖单位公章（总监理工程师加盖执业印章）齐全后方可实施；"
+           "实行分包的专项施工方案，由总承包单位与分包单位技术负责人共同审核签字。")
+
+
+def _add_expert_review_form(doc, scheme: dict, cover_info: dict | None,
+                            font_name: str) -> None:
+    """专家论证会论证报告（住建部令第37号 第十二/十三条 + 建办质〔2018〕31号 三/四）。
+
+    论证结论固定三选一（通过 / 修改后通过 / 不通过），专家栏按
+    「人数不得少于 5 名」给出 5 行空栏；论证内容三项照 31 号文原文逐字列出。
+    """
+    from docx.shared import Pt
+
+    _add_prelim_page_title(doc, "专项施工方案专家论证报告", font_name,
+                           "依据《危险性较大的分部分项工程安全管理规定》"
+                           "（住建部令第37号）第十二条、第十三条，"
+                           "建办质〔2018〕31号第三条、第四条")
+    _add_form_table(doc, _scheme_form_header(scheme, cover_info), font_name)
+    doc.add_paragraph()
+
+    p = doc.add_paragraph()
+    _set_run_font(p.add_run("一、专家论证主要内容（建办质〔2018〕31号 第四条）"),
+                  font_name, 12, bold=True)
+    for item in (
+        "（一）专项施工方案内容是否完整、可行；",
+        "（二）专项施工方案计算书和验算依据、施工图是否符合有关标准规范；",
+        "（三）专项施工方案是否满足现场实际情况，并能够确保施工安全。",
+    ):
+        q = doc.add_paragraph()
+        _add_runs_with_inline_format(q, item)
+
+    doc.add_paragraph()
+    p = doc.add_paragraph()
+    _set_run_font(p.add_run("二、论证结论（住建部令第37号 第十三条，三选一）"),
+                  font_name, 12, bold=True)
+    _add_form_table(doc, [("论证结论", "□ 通过    □ 修改后通过    □ 不通过"),
+                          ("论证意见（修改后通过时须写明具体修改内容）", "")],
+                    font_name, col1_cm=6.0, col2_cm=8.0)
+
+    doc.add_paragraph()
+    p = doc.add_paragraph()
+    _set_run_font(p.add_run("三、参会人员（建办质〔2018〕31号 第三条）"),
+                  font_name, 12, bold=True)
+    _add_form_table(doc, [
+        ("专家（不得少于 5 名）", ""),
+        ("建设单位项目负责人", ""),
+        ("勘察、设计单位项目技术负责人及相关人员", ""),
+        ("施工总承包 / 分包单位项目负责人、项目技术负责人、"
+         "专项施工方案编制人员、项目专职安全生产管理人员", ""),
+        ("监理单位项目总监理工程师及专业监理工程师", ""),
+    ], font_name, col1_cm=6.0, col2_cm=8.0, keep_empty=True)
+
+    doc.add_paragraph()
+    p = doc.add_paragraph()
+    _set_run_font(p.add_run("四、专家签字确认（专家对论证报告负责并签字确认）"),
+                  font_name, 12, bold=True)
+    # 住建部令第37号 第十二条：专家人数不得少于 5 名 —— 固定 5 行空栏
+    _add_form_table(doc, [(f"专家 {i}（签字）", "") for i in range(1, 6)],
+                    font_name, col1_cm=6.0, col2_cm=8.0, keep_empty=True)
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(10)
+    _add_runs_with_inline_format(
+        p, "注：专家应当从地方人民政府住房城乡建设主管部门建立的专家库中选取，"
+           "符合专业要求且人数不得少于 5 名；与本工程有利害关系的人员"
+           "不得以专家身份参加专家论证会。结论为「修改后通过」的，"
+           "应当按论证意见修改完善后重新履行审核程序后方可实施。")
+
+
+def _add_drawing_appendix_page(doc, scheme: dict, font_name: str) -> None:
+    """施工图纸附件清单（建办质〔2018〕31号 第(九)项「计算书及相关施工图纸」）。
+
+    随文附图逐项登记；无图纸时给出编号栏 + 名称栏空表由现场填写，
+    不预填图号（图号由导出器统一编排，正文不得自写 —— 与正文图号纪律一致）。
+    """
+    from docx.shared import Pt
+
+    _add_prelim_page_title(doc, "施工图纸附件清单", font_name,
+                           "依据建办质〔2018〕31号 专项施工方案内容 第（九）项")
+    _add_form_table(doc, _scheme_form_header(scheme, None), font_name)
+    doc.add_paragraph()
+    p = doc.add_paragraph()
+    _set_run_font(p.add_run("随本方案附以下施工图纸，图纸应与正文「计算书及相关施工图纸」"
+                            "章节相互对应、编号连续："), font_name, 10.5)
+    doc.add_paragraph()
+    rows = [("图号", "图纸名称", "比例 / 说明")]
+    rows += [(str(i), "", "") for i in range(1, 9)]
+    _add_table_from_markup(doc, [
+        "| " + " | ".join(rows[0]) + " |",
+        "| " + " | ".join(["---"] * 3) + " |",
+        *["| " + " | ".join(r) + " |" for r in rows[1:]],
+    ], font_name)
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(10)
+    _add_runs_with_inline_format(
+        p, "注：图号由导出器统一编排并与正文图题连续；本清单仅登记图名与内容，"
+           "不预填图号。危大工程涉及第三方监测的，监测点布置图一并列入本清单。")
+
+
 def _set_margins(section, margins: dict) -> None:
     """设置页面边距（单位 cm，缺省 2.5）。"""
     from docx.shared import Cm
@@ -2013,7 +2286,8 @@ def _pop_orphan_lead_in(doc) -> bool:
 
 def _add_inline_chart_from_bytes(doc, chart_type: str, img_bytes, figure_num: str,
                                  default_title: str = "",
-                                 font_name: str = "宋体", font_size: float = 10.5):
+                                 font_name: str = "宋体", font_size: float = 10.5,
+                                 placeholder: bool = False):
     """在 DOCX 中插入已渲染的图表图片（预渲染字节流）+ 规范图题。
 
     图题遵循规范「图 {章号}-{序号} {图名}」，居中加粗，字号取正文字号。
@@ -2021,91 +2295,114 @@ def _add_inline_chart_from_bytes(doc, chart_type: str, img_bytes, figure_num: st
     图名与图号顺序颠倒，不符合图题惯例。
     ✅ 增强：图题字体/字号跟随导出配置（旧实现硬编码"宋体 / 10.5pt"，
     当用户把正文设为微软雅黑或四号时，图题会与正文明显不一致）。
+
+    ✅ 图号虚跳收口（2026-10-03）：插入成功返回 ``True``、失败返回 ``False``，
+    **不直接占用图号**（图号由调用方在成功后才递增）。失败处理：
+    · ``placeholder=False``（默认）：静默返回 ``False``，调用方回退图号 +
+      回收孤儿引导语，避免「占号却无图」的错号 / 虚跳；
+    · ``placeholder=True``：仍写红字「图 X-Y — 渲染失败 / 插入失败」
+      （图号已被调用方占用，属可见错误，用于排查哪张图没出来）。
     """
     from docx.shared import Cm, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     caption_text = f"图 {figure_num} {default_title}".strip()
     try:
-        if img_bytes and len(img_bytes.getvalue()) > 100:
-            from PIL import Image as PILImage
-            _img_stream = BytesIO(img_bytes.getvalue())
-            try:
-                _im = PILImage.open(_img_stream)
-                _iw_px, _ih_px = _im.size
-                _dpi = _read_image_dpi(_im.info.get("dpi"))
-            except Exception:
-                _iw_px = _ih_px = 0
-                _dpi = 0.0
-            # ✅ 2026-09-25 修复：按 PNG 自带 DPI 换算真实物理尺寸，并同时受
-            #    「正文栏宽 16cm」与「单图最大高度 22cm」约束等比缩放。
-            #    旧实现只按 96dpi 估宽 + 仅宽度封顶，纵向长图（700×4070px）
-            #    会被撑到 16×93cm，远超页面高度（Letter 22.94cm / A4 24.7cm）。
-            _w_cm, _h_cm = _fit_image_cm(_iw_px, _ih_px, _dpi)
-            if _h_cm >= _CHART_MAX_HEIGHT_CM:
-                logger.info(
-                    "图表 %s 按高度上限缩放至 %.2f×%.2fcm（页面可用高度约 %.1fcm，"
-                    "原图 %dx%dpx dpi=%s）",
-                    chart_type, _w_cm, _h_cm, _CHART_MAX_HEIGHT_CM,
-                    _iw_px, _ih_px, _dpi or _CHART_DPI_FALLBACK)
-            _img_stream.seek(0)
-            doc.add_picture(_img_stream, width=Cm(_w_cm))
-            doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            caption = doc.add_paragraph()
-            caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            caption.paragraph_format.first_line_indent = Cm(0)
-            _set_run_font(caption.add_run(caption_text), font_name, font_size, bold=True)
-        else:
-            p = doc.add_paragraph()
-            p.paragraph_format.first_line_indent = Cm(0)
-            run = p.add_run(f"[{caption_text} — 渲染失败]")
-            run.font.color.rgb = RGBColor(0xFF, 0x00, 0x00)
+        if not (img_bytes and len(img_bytes.getvalue()) > 100):
+            # 字节缺失/过小：占位模式写红字、否则静默（调用方回退图号）
+            if placeholder:
+                p = doc.add_paragraph()
+                p.paragraph_format.first_line_indent = Cm(0)
+                run = p.add_run(f"[{caption_text} — 渲染失败]")
+                run.font.color.rgb = RGBColor(0xFF, 0x00, 0x00)
+            return False
+        from PIL import Image as PILImage
+        _img_stream = BytesIO(img_bytes.getvalue())
+        try:
+            _im = PILImage.open(_img_stream)
+            _iw_px, _ih_px = _im.size
+            _dpi = _read_image_dpi(_im.info.get("dpi"))
+        except Exception:
+            _iw_px = _ih_px = 0
+            _dpi = 0.0
+        # ✅ 2026-09-25 修复：按 PNG 自带 DPI 换算真实物理尺寸，并同时受
+        #    「正文栏宽 16cm」与「单图最大高度 22cm」约束等比缩放。
+        #    旧实现只按 96dpi 估宽 + 仅宽度封顶，纵向长图（700×4070px）
+        #    会被撑到 16×93cm，远超页面高度（Letter 22.94cm / A4 24.7cm）。
+        _w_cm, _h_cm = _fit_image_cm(_iw_px, _ih_px, _dpi)
+        if _h_cm >= _CHART_MAX_HEIGHT_CM:
+            logger.info(
+                "图表 %s 按高度上限缩放至 %.2f×%.2fcm（页面可用高度约 %.1fcm，"
+                "原图 %dx%dpx dpi=%s）",
+                chart_type, _w_cm, _h_cm, _CHART_MAX_HEIGHT_CM,
+                _iw_px, _ih_px, _dpi or _CHART_DPI_FALLBACK)
+        _img_stream.seek(0)
+        doc.add_picture(_img_stream, width=Cm(_w_cm))
+        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        caption = doc.add_paragraph()
+        caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        caption.paragraph_format.first_line_indent = Cm(0)
+        _set_run_font(caption.add_run(caption_text), font_name, font_size, bold=True)
+        return True
     except Exception as e:
         logger.warning("图表插入失败 (%s): %s", chart_type, e)
-        p = doc.add_paragraph()
-        p.paragraph_format.first_line_indent = Cm(0)
-        run = p.add_run(f"[{caption_text} — 插入失败]")
-        run.font.color.rgb = RGBColor(0xFF, 0x00, 0x00)
+        if placeholder:
+            p = doc.add_paragraph()
+            p.paragraph_format.first_line_indent = Cm(0)
+            run = p.add_run(f"[{caption_text} — 插入失败]")
+            run.font.color.rgb = RGBColor(0xFF, 0x00, 0x00)
+        return False
 
 
 def _add_illustration_from_bytes(doc, img_bytes, figure_num: str, alt: str = "",
-                                 font_name: str = "宋体", font_size: float = 10.5):
+                                 font_name: str = "宋体", font_size: float = 10.5,
+                                 placeholder: bool = False):
     """在 DOCX 中插入 AI 配图（文生图，已下载的位图字节流）+ 规范图题。
 
     与 `_add_inline_chart_from_bytes` 的区别：
     - 图表是"代码 → 渲染"，配图是"远端 URL → 下载 → 插入"；
     - 配图下载/插入失败时**只保留图题**，不写红色"渲染失败"提示 ——
       交付文档里出现报错文本比少一张图更糟。
+
+    ✅ 图号虚跳收口（2026-10-03）：插入成功返回 ``True``、失败返回 ``False``，
+    不直接占用图号。失败（含格式不安全 / 文件损坏）静默返回 ``False``，
+    由调用方回退图号 + 回收孤儿引导语，与 chart 分支同口径；
+    ``placeholder`` 形参保留仅为签名一致（AI 配图分支当前无占位模式）。
     """
     from docx.shared import Cm
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
     caption_text = f"图 {figure_num} {alt or '配图'}".strip()
     try:
-        if img_bytes and len(img_bytes.getvalue()) > 100 and _image_format_supported(img_bytes):
-            from PIL import Image as PILImage
-            stream = BytesIO(img_bytes.getvalue())
-            try:
-                _im = PILImage.open(stream)
-                _iw_px, _ih_px = _im.size
-                _dpi = _read_image_dpi(_im.info.get("dpi"))
-            except Exception:
-                _iw_px = _ih_px = 0
-                _dpi = 0.0
-            # ✅ 2026-09-25：AI 配图同样按「栏宽 16cm × 高度 22cm」双上限等比缩放
-            #    （文生图偶发返回竖版大图，旧实现只封宽度 → 必然溢出页面）。
-            _w_cm, _h_cm = _fit_image_cm(_iw_px, _ih_px, _dpi)
-            stream.seek(0)
-            doc.add_picture(stream, width=Cm(_w_cm))
-            doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if not (img_bytes and len(img_bytes.getvalue()) > 100
+                and _image_format_supported(img_bytes)):
+            return False
+        from PIL import Image as PILImage
+        stream = BytesIO(img_bytes.getvalue())
+        try:
+            _im = PILImage.open(stream)
+            _iw_px, _ih_px = _im.size
+            _dpi = _read_image_dpi(_im.info.get("dpi"))
+        except Exception:
+            _iw_px = _ih_px = 0
+            _dpi = 0.0
+        # ✅ 2026-09-25：AI 配图同样按「栏宽 16cm × 高度 22cm」双上限等比缩放
+        #    （文生图偶发返回竖版大图，旧实现只封宽度 → 必然溢出页面）。
+        _w_cm, _h_cm = _fit_image_cm(_iw_px, _ih_px, _dpi)
+        stream.seek(0)
+        doc.add_picture(stream, width=Cm(_w_cm))
+        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
         caption = doc.add_paragraph()
         caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
         caption.paragraph_format.first_line_indent = Cm(0)
         _set_run_font(caption.add_run(caption_text), font_name, font_size, bold=True)
+        return True
     except Exception as e:
         logger.warning("AI 配图插入失败 (%s): %s", caption_text, e)
-        p = doc.add_paragraph()
-        p.paragraph_format.first_line_indent = Cm(0)
-        _set_run_font(p.add_run(caption_text), font_name, font_size, bold=True)
+        if placeholder:
+            p = doc.add_paragraph()
+            p.paragraph_format.first_line_indent = Cm(0)
+            _set_run_font(p.add_run(caption_text), font_name, font_size, bold=True)
+        return False
 
 
 def _add_word_field(paragraph, instr: str, placeholder: str = "1"):
@@ -2600,6 +2897,11 @@ def _build_docx_sync(
     #    默认 None → 不渲染任何补充附录（向后兼容，与旧产物逐字一致）。
     #    数据来源由 `export_appendix_sources` 开关控制（默认 False）。
     appendix_sources: list | None = None,
+    # ✅ 2026-10-02（第二十三轮）：专项施工方案法定前置表单。
+    #    dict 承载 4 个独立开关（编制说明 / 审批表 / 专家论证报告 / 图纸附件清单），
+    #    合并为单参数而非 4 个位置参数：保持签名尾部稳定、便于同批扩展。
+    #    缺省 None 或全 False → 不渲染任何前置表单，产物与旧版逐字一致。
+    scheme_forms: dict | None = None,
 ) -> None:
     """同步构建 DOCX 并保存（在 asyncio.to_thread 中调用，避免阻塞事件循环）。
 
@@ -2695,6 +2997,35 @@ def _build_docx_sync(
         # ✅ BUG 修复：旧实现目录后不分页（正文接排在目录页），
         #    而在没有封面时会先 add_page_break —— 首页是一张空白页。
         doc.add_page_break()
+
+    # ✅ 2026-10-02（第二十三轮）：专项施工方案法定前置表单。
+    #    顺序放在封面 / 目录之后、正文之前 —— 与实际报审件形态一致
+    #    （封面 → 目录 → 编制说明 → 审批表 → 专家论证报告 → 图纸清单 → 正文）。
+    #    全部默认关闭；每张表独立分页，关闭任一开关不影响其他。
+    _forms = scheme_forms if isinstance(scheme_forms, dict) else {}
+    if _forms:
+        for _key, _fn in (
+            ("compilation_note", _add_compilation_note_page),
+            ("approval", _add_scheme_approval_table),
+            ("expert_review", _add_expert_review_form),
+        ):
+            if not _forms.get(_key):
+                continue
+            try:
+                if _key == "compilation_note":
+                    _add_prelim_page_title(doc, "编制说明", font_name)
+                    _add_compilation_note_page(doc, scheme, cover_info, font_name)
+                else:
+                    _fn(doc, scheme, cover_info, font_name)
+            except Exception:  # fail-soft：前置表单失败不阻断导出正文
+                logger.warning("导出前置表单失败（已跳过）: %s", _key, exc_info=True)
+            doc.add_page_break()
+        if _forms.get("drawing_appendix"):
+            try:
+                _add_drawing_appendix_page(doc, scheme, font_name)
+            except Exception:
+                logger.warning("导出图纸附件清单失败（已跳过）", exc_info=True)
+            doc.add_page_break()
 
     sec = doc.sections[0]
     # ✅ 增强 v7：页边距可配置（单位 cm，缺省 2.5）
@@ -2797,12 +3128,18 @@ def _build_docx_sync(
             # ✅ 优化 v9：① 有序序号与标记样式绑定 —— 样式变化（（一）→ 1、）视为
             #    新序列从 1 重新计数；② 无序子项不再清零序号 ——
             #    "1. 顶层一 / - 子项 / 2. 顶层二" 曾把第二个顶层项重排成 "1."。
-            ordered_seq = 0
-            ordered_marker = ""
+            # ✅ 修复（2026-10-03 · 列表样式被拍平）：有序列表序号改为**按缩进层级
+            #    分层独立计数**（`ordered_stack`，每层 [marker, seq]）。旧实现用单一全局
+            #    计数器，导致嵌套有序列表子项被拍平成一条贯穿所有层级的连续序列
+            #    （"1. 顶层 / 2. 子项 / 3. 子项 / 4. 顶层二"），子项未在父级内重新从 1。
+            #    契约全部沿用：① 遇非列表块整栈清空（重置序列）；② 标记样式变化该层从
+            #    1 重计；③ 无序子项不碰栈（父级序号续接）；④ 重复/跳号自动连续编号；
+            #    ⑤ 中文枚举符外观保留。零新增依赖 / 零数据迁移 / 零配置项。
+            ordered_stack: list[list] = []   # [[marker, seq], ...]，下标 = indent_lvl
             for block in blocks:
                 if block["type"] != "list_item":
-                    ordered_seq = 0
-                    ordered_marker = ""
+                    # ✅ 遇非列表块 → 重置整条有序序列（沿用既有契约）
+                    ordered_stack = []
                 if block["type"] == "table":
                     # ✅ 新增：表格题注「表 {章号}-{序号} 表名」（表题在表格上方）
                     caption = (block.get("caption") or "").strip()
@@ -2866,9 +3203,16 @@ def _build_docx_sync(
                     fig_key = f"ch{chapter_num}"
                     figure_counters[fig_key] = figure_counters.get(fig_key, 0) + 1
                     fig_num = f"{chapter_num}-{figure_counters[fig_key]}"
-                    _add_inline_chart_from_bytes(
+                    # ✅ 图号虚跳收口（2026-10-03）：插入成功才保留图号；
+                    #    插入失败（格式合法但文件损坏等）→ 回退图号 + 回收孤儿引导语，
+                    #    避免「占号却无图」的错号（placeholder 模式保留红字、图号照占）。
+                    _ok = _add_inline_chart_from_bytes(
                         doc, chart_type, _chart_bytes,
-                        fig_num, fig_title, font_name, font_size)
+                        fig_num, fig_title, font_name, font_size,
+                        placeholder=chart_fail_placeholder)
+                    if not _ok and not chart_fail_placeholder:
+                        figure_counters[fig_key] = figure_counters.get(fig_key, 0) - 1
+                        _pop_orphan_lead_in(doc)
                 elif block["type"] == "ai_image":
                     # ✅ AI 配图（文生图）**未生成**占位：导出时整块跳过。
                     #    v17 起占位块已先经 _auto_generate_ai_image_blocks 自动生成并
@@ -2907,30 +3251,41 @@ def _build_docx_sync(
                     chapter_num = _figure_chapter_num(heading_gen)
                     fig_key = f"ch{chapter_num}"
                     figure_counters[fig_key] = figure_counters.get(fig_key, 0) + 1
-                    _add_illustration_from_bytes(
+                    # ✅ 图号虚跳收口（2026-10-03）：插入成功才保留图号；
+                    #    插入失败（格式合法但文件损坏）→ 回退图号 + 回收孤儿引导语。
+                    _ok = _add_illustration_from_bytes(
                         doc, _img_bytes,
                         f"{chapter_num}-{figure_counters[fig_key]}",
                         (block.get("alt") or "").strip(), font_name, font_size)
+                    if not _ok:
+                        figure_counters[fig_key] = figure_counters.get(fig_key, 0) - 1
+                        _pop_orphan_lead_in(doc)
                 elif block["type"] == "heading":
                     h_lv = min(block.get("_heading_style", min(level + block.get("level", 1), 7)), 7)
                     h = doc.add_paragraph(style=f"Heading {h_lv}")
                     _add_runs_with_inline_format(h, block.get("_fixed_text", block.get("text", "")))
                     _finalize_heading_runs(h)
                 elif block["type"] == "list_item":
+                    indent_lvl = block.get("indent", 0) // 2
                     if block.get("ordered"):
                         marker = block.get("marker", "ascii")
-                        if marker != ordered_marker:
-                            # 标记样式变化 → 视为新的枚举序列，从 1 重新计数
-                            ordered_seq = 0
-                            ordered_marker = marker
-                        ordered_seq += 1
-                        # ✅ 优化：按原标记样式渲染（（一）/（1）/ 1、不再被拍平成 "1. "）
-                        prefix = _ordered_prefix(ordered_seq, marker)
+                        # ✅ 分层栈维护：裁剪到当前层、补齐缺失层级（容忍跳级）；
+                        #    当前层标记样式变化 → 该层 seq 归 0（视为新序列从 1）
+                        if indent_lvl < len(ordered_stack):
+                            ordered_stack = ordered_stack[:indent_lvl + 1]
+                        while len(ordered_stack) <= indent_lvl:
+                            ordered_stack.append([marker, 0])
+                        entry = ordered_stack[indent_lvl]
+                        if entry[0] != marker:
+                            entry[0] = marker
+                            entry[1] = 0
+                        entry[1] += 1
+                        # ✅ 按原标记样式渲染（（一）/（1）/ 1、不再被拍平成 "1. "）
+                        prefix = _ordered_prefix(entry[1], marker)
                     else:
                         prefix = "• "
                     p = doc.add_paragraph()
                     _add_runs_with_inline_format(p, prefix + block["text"])
-                    indent_lvl = block.get("indent", 0) // 2
                     lpf = p.paragraph_format
                     lpf.left_indent = Cm(0.74 * (indent_lvl + 1))
                     # ✅ 增强：悬挂缩进，折行后与首行文字对齐（旧实现折行顶到行首）
@@ -3807,6 +4162,16 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
             "chart_fail_placeholder": bool(config.get("chart_fail_placeholder", False)),
             # ✅ 2026-09-22 引入：一级章节标题底部边框（章框），默认关闭向后兼容
             "heading_border": bool(config.get("heading_border", False)),
+            # ✅ 2026-10-02（第二十三轮）：专项施工方案法定前置表单四开关。
+            #    逐项 bool 化 + 只保留为真的键 → 全关时得到空 dict，
+            #    空 dict 在 _build_docx_sync 内等价于「不渲染」，与旧产物逐字一致。
+            #    类型防御：非 dict 的脏预设静默忽略，避免构建期 500。
+            "scheme_forms": {
+                k: True for k in ("compilation_note", "approval",
+                                  "expert_review", "drawing_appendix")
+                if bool((config.get("scheme_forms") or {}).get(k)
+                        if isinstance(config.get("scheme_forms"), dict) else False)
+            },
         },
     }
 
@@ -3888,6 +4253,8 @@ def _build_docx_task(out_path: str, prep: dict) -> tuple:
         o.get("heading_border", False),
         # ✅ D-3：末尾追加，既有位置参数顺序不变（与 _build_docx_sync 签名同序）
         prep.get("appendix_sources") or [],
+        # ✅ 2026-10-02：专项施工方案法定前置表单开关（默认全关 → 产物逐字不变）
+        prep["docx_options"].get("scheme_forms") or {},
     )
 
 
@@ -3905,6 +4272,10 @@ _EXPORT_CONFIG_KEYS = frozenset({
     "auto_fix_unclosed_fences",
     # ✅ v17：AI 配图导出期自动生成开关（默认 True，影响产物内容，纳入指纹）
     "ai_image_auto_generate",
+    # ✅ 2026-10-02：专项施工方案法定前置表单（编制说明/审批表/专家论证报告/
+    #    图纸附件清单）—— 影响产物内容，必须纳入指纹，否则切换开关后
+    #    config_hash 不变 → 命中旧缓存 → 用户看不到刚打开的表单。
+    "scheme_forms",
 })
 
 
@@ -4075,6 +4446,52 @@ async def _guard_numbering_consistency(db, scheme_id: str) -> None:
             logger.debug("编号一致性预检失败（不影响导出）: %s", _e)
 
 
+async def _prune_export_cache(db, scheme_id: str, protect_path: Path) -> None:
+    """✅ 缓存保留策略（最多 5 份/方案，与前端 tooltip 说明对齐）——
+    删除陈旧/僵尸行并连带清理磁盘文件。2026-10-03（T1）：从 DOCX 分支内联逻辑
+    提取为共享 helper —— PDF 分支此前只 INSERT 从不裁剪，DB 行与 EXPORTS_DIR
+    磁盘文件随导出次数无限增长；现两分支共用同一保留策略（跨格式合计 5 份）。
+
+    ✅ BUG 修复（保留策略误删新产物）：created_at 精度只到秒，同一秒内插入多行时
+    `ORDER BY created_at DESC` 次序不稳定 —— 刚插入的本行可能被排到第 5 位之后，
+    其磁盘文件随即被当作"陈旧缓存"删除，紧接着的 FileResponse 就会 404/500。
+    故增加 rowid 次序兜底（rowid 单调递增，等价于插入顺序），并显式保护当前产物。
+    R13 守卫：db.execute 返回 None（连接/事务异常）时 fail-soft 跳过裁剪。
+    """
+    cur = await db.execute(
+        "SELECT id, result_path FROM export_cache WHERE scheme_id=?"
+        " ORDER BY created_at DESC, rowid DESC",
+        (scheme_id,))
+    if cur is None:
+        logger.warning("_prune_export_cache: db.execute 返回 None（scheme=%s），跳过裁剪",
+                       scheme_id[:8])
+        return
+    cache_rows = [dict(r) for r in await cur.fetchall()]
+    keep_paths = {str(protect_path)}
+    for cr in cache_rows[:5]:
+        if cr["result_path"] and Path(cr["result_path"]).exists():
+            keep_paths.add(cr["result_path"])
+    stale_ids: list[str] = []
+    for i, cr in enumerate(cache_rows):
+        # ✅ BUG 修复（2026-09-20）：result_path 为 NULL 时 Path(None) 抛 TypeError；
+        #    为空串时 Path("") 等价 Path(".") 恒存在 → 僵尸行被当成「有效缓存」。
+        rp = cr.get("result_path") or ""
+        if i >= 5 or not (rp and Path(rp).exists()):
+            stale_ids.append(cr["id"])
+    if stale_ids:
+        # 删除记录前把磁盘文件一并清理（保留下来的 5 份 + 当前产物不删）
+        for cr in cache_rows:
+            rp = cr.get("result_path") or ""
+            if cr["id"] in stale_ids and rp and rp not in keep_paths:
+                try:
+                    Path(rp).unlink(missing_ok=True)
+                except OSError:
+                    pass
+        placeholders = ",".join("?" * len(stale_ids))
+        await db.execute(f"DELETE FROM export_cache WHERE id IN ({placeholders})", stale_ids)
+    await db.commit()
+
+
 @router.post("/docx")
 async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
     """导出 DOCX（封面 / 目录 / 标题编号 / 图表 / 页眉页脚页码）。"""
@@ -4172,42 +4589,9 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         (cache_id, scheme.get("project_id", ""), scheme_id, config_hash, content_hash,
          f"{scheme_id}_{config_hash[:8]}", str(out_path)))
 
-    # ✅ 修复：缓存保留策略（最多 5 份/方案，与前端 tooltip 说明对齐）——
-    # 旧实现无任何清理，表与 _exports 目录无限增长；且文件丢失的僵尸行永不清理。
-    # ✅ BUG 修复（保留策略误删新产物）：created_at 精度只到秒，同一秒内插入多行时
-    #    `ORDER BY created_at DESC` 次序不稳定 —— 刚插入的本行可能被排到第 5 位之后，
-    #    其磁盘文件随即被当作"陈旧缓存"删除，紧接着的 FileResponse 就会 404/500。
-    #    故增加 rowid 次序兜底（rowid 单调递增，等价于插入顺序），并显式保护当前产物。
-    cur = await db.execute(
-        "SELECT id, result_path FROM export_cache WHERE scheme_id=?"
-        " ORDER BY created_at DESC, rowid DESC",
-        (scheme_id,))
-    cache_rows = [dict(r) for r in await cur.fetchall()]
-    keep_paths = {str(out_path)}
-    for cr in cache_rows[:5]:
-        if cr["result_path"] and Path(cr["result_path"]).exists():
-            keep_paths.add(cr["result_path"])
-    stale_ids: list[str] = []
-    for i, cr in enumerate(cache_rows):
-        # ✅ BUG 修复（2026-09-20）：旧写法 `not Path(cr["result_path"]).exists()`
-        # 有两处隐患：① result_path 为 NULL 时 Path(None) 直接抛 TypeError，导出在
-        # 构建成功后 500（用户看不到任何文件）；② 为空串时 Path("") 等价 Path(".")
-        # 恒存在 → 僵尸行被当成「有效缓存」长期占位，保留策略永远留不干净。
-        rp = cr.get("result_path") or ""
-        if i >= 5 or not (rp and Path(rp).exists()):
-            stale_ids.append(cr["id"])
-    if stale_ids:
-        # 删除记录前把磁盘文件一并清理（保留下来的 5 份 + 本次产物不删）
-        for cr in cache_rows:
-            rp = cr.get("result_path") or ""
-            if cr["id"] in stale_ids and rp and rp not in keep_paths:
-                try:
-                    Path(rp).unlink(missing_ok=True)
-                except OSError:
-                    pass
-        placeholders = ",".join("?" * len(stale_ids))
-        await db.execute(f"DELETE FROM export_cache WHERE id IN ({placeholders})", stale_ids)
-    await db.commit()
+    # ✅ 缓存保留策略（最多 5 份/方案）：2026-10-03（T1）提取为共享 helper，
+    #    与 PDF 分支共用（原内联逻辑逐字迁移，见 _prune_export_cache 注释）。
+    await _prune_export_cache(db, scheme_id, protect_path=out_path)
 
     headers = {"X-Chart-Render-Stats": json.dumps(render_stats, ensure_ascii=False),
                "X-Cache-Status": "miss", **name_headers}
@@ -4448,8 +4832,22 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
                 " content_fingerprint, cache_key, result_path) VALUES (?,?,?,?,?,?,?)",
                 (str(uuid.uuid4()), scheme.get("project_id", ""), scheme_id,
                  config_hash, pdf_content_hash,
-                 f"{scheme_id}_{config_hash[:8]}", str(out_path)))
+                 # ✅ P1（2026-10-04）：cache_key 补格式后缀。
+                 #    旧实现 DOCX 与 PDF 写入**逐字相同**的 cache_key
+                 #    （export.py:4590 与此处），而 cache_key 是 `/cache-status`
+                 #    与运维排查按格式辨识缓存行的唯一人读标识 —— 同一方案同一
+                 #    指纹下两行完全同名，无法区分哪个是 docx、哪个是 pdf，
+                 #    清理/核对时极易误删。只改 PDF 侧：DOCX 现有键逐字不变 →
+                 #    既有缓存行零失效（与 D-2 的「最小改动」取舍一致）。
+                 #    注意：查缓存走 (scheme_id, config_hash, content_fingerprint)
+                 #    三元组，cache_key 不参与命中判定 → 本次改名不影响任何命中。
+                 f"{scheme_id}_{config_hash[:8]}|pdf", str(out_path)))
             await db.commit()
+            # ✅ T1（2026-10-03）：PDF 分支此前只 INSERT 从不裁剪 → export_cache 行
+            #    与 EXPORTS_DIR 磁盘文件随导出次数无限增长。接入与 DOCX 同一保留
+            #    策略（跨格式合计 5 份/方案）；置于既有 fail-soft try 内，裁剪失败
+            #    不得影响本次交付（用户仍拿到完整 PDF）。
+            await _prune_export_cache(db, scheme_id, protect_path=out_path)
         except Exception as e:
             # 缓存写入失败不得影响本次交付（用户仍拿到完整 PDF）
             logger.warning("PDF 导出缓存写入失败（不影响本次交付）: %s", e, exc_info=True)

@@ -366,28 +366,167 @@ class TestAntiRebidRedlines:
                        "严禁引用投标术语", "严禁照抄投标件内容"):
             assert phrase in src, f"红线缺失：{phrase}"
 
+    def test_shared_redline_content_is_intact(self):
+        """共享红线常量本身的四要素不得被删（唯一事实源本身要有人守）。"""
+        from app.services.ai.prompts._shared import SHARED_SCOPE_RULES
+        for phrase in ("专项施工方案", "不是投标", "严禁设置投标场景章节",
+                       "严禁引用投标术语", "严禁照抄投标件内容", "设计文件"):
+            assert phrase in SHARED_SCOPE_RULES, f"红线缺失：{phrase}"
+
     @pytest.mark.parametrize("rel", [
         "app/services/ai/prompts/outline.py",
         "app/services/ai/prompts/content.py",
     ])
-    def test_outline_and_content_prompts_carry_redline(self, rel):
-        """目录生成与正文生成的提示词都必须带「专项方案不是投标文件」红线。
+    def test_prompt_modules_document_the_redline(self, rel):
+        """两个提示词模块都必须**引用**红线（代码或常量二选一）。
 
-        判据用**语义短语**而非符号引用：实测 ``outline.py`` 引用共享常量
-        ``SHARED_SCOPE_RULES``，而 ``content.py`` 是**内联两份副本**
-        （见遗留项 L-1）。若护栏写成「必须引用共享常量」，只会逼着改测试
-        而掩盖真实缺陷；判语义才能真正拦住红线被删。
+        旧版这里断言「源码里出现 招标文件/投标文件」——那条判据在正文侧
+        改成引用常量后必然失败（源码里只有常量名）。判「是否引用」才是稳定
+        不变量：无论最终以哪种形式落地，红线都不能从这条链路上消失。
         """
         src = self._read(rel)
-        assert "投标" in src, f"{rel} 完全没提投标语境"
-        assert "招标文件" in src and "投标文件" in src, (
-            f"{rel} 缺少具体禁止项：{rel}")
-        assert "设计文件" in src, f"{rel} 缺少替代写法（说明外部约束该写什么）"
+        assert "SHARED_SCOPE_RULES" in src, f"{rel} 未引用共享红线"
 
-    def test_outline_prompt_uses_shared_constant(self):
-        """outline.py 必须引用共享常量（而非内联复制）。"""
-        src = self._read("app/services/ai/prompts/outline.py")
-        assert "SHARED_SCOPE_RULES" in src
+    # ---- 正文侧：三份措辞 → 单一来源（L-1 收口）--------------------------
+    #: 正文两个模板里必须都注入红线
+    _CONTENT_KEYS = ("content_generation_system", "content_continue_system")
+
+    def test_content_prompt_imports_shared_constant(self):
+        """content.py 必须以**运行时占位符**引用共享红线，且不得再导入期值拷贝。
+
+        ✅ R38（2026-10-03）改写断言方向：原断言锁的是
+        ``from ..._shared import SHARED_SCOPE_RULES_BRIEF`` + ``<<SCOPE_RULES>>``，
+        即「导入期把出厂值拷进模板」这一实现形态 —— 而该形态本身就是 R38
+        修掉的缺陷（用户在提示词编辑器改共享规则时，目录侧 6 个模板生效、
+        正文侧 2 个模板完全不变且无告警）。锁实现形态的护栏会阻止修复，
+        故改为锁**不变量**。
+
+        ⚠️ 判据一律走 **AST**，不对源码做文本匹配：说明性注释里必然要写
+        ``<<SCOPE_RULES>>`` 来记录这段历史，纯文本匹配会被注释自身误伤
+        （AGENTS.md §5.7「注释含关键词误伤字面量判定」同构陷阱）。
+        """
+        import ast
+        path = APP / "services" / "ai" / "prompts" / "content.py"
+        tree = ast.parse(path.read_text("utf-8"))
+
+        # (1) 不得再 import 红线常量（注册表是唯一事实源）
+        imported = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module \
+                    and node.module.endswith("prompts._shared"):
+                imported += [a.name for a in node.names]
+        assert "SHARED_SCOPE_RULES_BRIEF" not in imported, (
+            "正文侧不得再 import 红线常量（导入期值拷贝 = 用户改不动）")
+
+        # (2) 不得再有把红线常量 replace 进模板的调用
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "replace"):
+                continue
+            args = [a for a in node.args if isinstance(a, ast.Constant)]
+            names = [n for n in ast.walk(node) if isinstance(n, ast.Name)]
+            assert not ({"SHARED_SCOPE_RULES_BRIEF"} <= {n.id for n in names}), (
+                "line %d：不得在导入期把出厂红线值拷贝进模板"
+                "（DB 覆盖将永不生效）" % node.lineno)
+
+        # (3) 注册进模板的正文必须保留运行时占位符
+        templates = [n.args[3] for n in ast.walk(tree)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                     and n.func.id == "_reg" and len(n.args) >= 4]
+        assert templates, "未解析到任何 _reg 模板（AST 结构变了？）"
+        inline_brief = [
+            t.lineno for t in templates
+            if isinstance(t, ast.Constant) and isinstance(t.value, str)
+            and "专项施工方案是**指导现场施工的技术文件**" in t.value
+        ]
+        assert not inline_brief, (
+            "content.py 的模板里又内联了红线正文，行号：%s" % inline_brief)
+
+    def test_scope_rules_brief_is_registered_prompt(self):
+        """红线简档必须注册为可编辑提示词（否则编辑器里根本看不到它）。"""
+        from app.services.ai.prompts._registry import _ALL_PROMPTS
+        assert "SHARED_SCOPE_RULES_BRIEF" in _ALL_PROMPTS, \
+            "简档未注册 → 用户无法在提示词编辑器看到/修改正文侧红线"
+        meta = _ALL_PROMPTS["SHARED_SCOPE_RULES_BRIEF"]
+        assert meta.get("category") == "共享规则"
+
+    def test_content_prompt_has_no_inline_copy(self):
+        """静态护栏：content.py 的**字符串常量**里不得再内联红线正文。
+
+        ⚠️ 必须用 AST 只取 Constant 节点，不能对源码做文本匹配：本文件顶部
+        的说明注释里就写着「文件性质红线」这几个字，纯文本匹配会把注释当成
+        内联副本而恒失败（AGENTS.md §5.7 记录的「注释含关键词误伤字面量
+        判定」同构陷阱）。内联副本一定是**注册进模板的字符串**，注释不是。
+        """
+        import ast
+        path = APP / "services" / "ai" / "prompts" / "content.py"
+        tree = ast.parse(path.read_text("utf-8"))
+
+        # 只取「真正会下发给模型的文本」= _reg(key, category, label, template)
+        # 的第 4 个位置参数。
+        # ⚠️ 不能简单取全部 ast.Constant —— docstring 与注释同样落在这个节点
+        #   类型里（本文件的 _wrap_fuzzy_fill docstring 就写着「文件性质红线
+        #   简档」），会把说明文字误判成内联副本而恒失败。
+        templates = []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "_reg"):
+                continue
+            if len(node.args) >= 4:
+                templates.append(node.args[3])
+        assert templates, "未解析到任何 _reg 模板（AST 结构变了？）"
+
+        inline = [
+            t.lineno for t in templates
+            if isinstance(t, ast.Constant) and isinstance(t.value, str)
+            and ("文件性质红线" in t.value or "本方案是指导" in t.value)
+        ]
+        assert not inline, (
+            "content.py 的注册模板里又内联了红线正文，行号：%s" % inline)
+
+    @pytest.mark.parametrize("key", _CONTENT_KEYS)
+    def test_rendered_content_prompt_carries_redline(self, key):
+        """注册后的模板必须真的带上红线，且占位符已被替换干净。
+
+        断言**渲染后**的模板而不是源码：占位符替换发生在注册期，只看源码
+        会把「常量引用了但替换漏了」这种最危险的情况漏放过去。
+        """
+        from app.services.ai.prompts._shared import SHARED_SCOPE_RULES_BRIEF
+        # ✅ R38：必须用**运行时**出口（_cache.get_prompt，DB 优先 + 共享片段
+        #    解析），不能用 _registry.get_prompt —— 后者只返回注册表里的裸模板，
+        #    不解析 {SHARED_*}，对 outline 侧本来就不展开（{SHARED_SCOPE_RULES}
+        #    一直是原样返回）。生产代码一律走前者（render() 即转发到 _cache）。
+        from app.services.ai.prompts._cache import get_prompt
+        text = get_prompt(key) or ""
+        assert "<<SCOPE_RULES>>" not in text, f"{key} 的占位符未被替换"
+        assert "{SHARED_SCOPE_RULES_BRIEF}" not in text, \
+            f"{key} 的运行时共享占位符未解析（正文会收到裸占位符）"
+        assert "SHARED_SCOPE_RULES_BRIEF"[:20] in text or \
+            "文件性质红线" in text, f"{key} 渲染后没有红线内容"
+        assert SHARED_SCOPE_RULES_BRIEF in text, \
+            f"{key} 渲染后红线内容与出厂简档不一致"
+        for term in ("招标文件", "投标文件", "设计文件"):
+            assert term in text, f"{key} 渲染后缺少红线要素：{term}"
+
+    def test_scope_rules_cover_same_banned_terms(self):
+        """完整版与简档的**禁用术语集合必须一致**。
+
+        拆成两档（正文每章下发一次，完整版纯 token 成本）后最大的风险是
+        改一档忘另一档 → 弱模型看到两份不同的禁用清单会挑宽松的执行。
+        这里锁住「同一术语集合」，措辞可以各自优化。
+        """
+        from app.services.ai.prompts._shared import (
+            SHARED_SCOPE_RULES, SHARED_SCOPE_RULES_BRIEF,
+        )
+        terms = ("招标文件", "投标文件", "评标办法", "评分标准",
+                 "废标条件", "投标须知", "商务条款")
+        for t in terms:
+            assert t in SHARED_SCOPE_RULES, f"完整版红线缺术语：{t}"
+            assert t in SHARED_SCOPE_RULES_BRIEF, f"简档红线缺术语：{t}"
+        for t in ("设计文件与合同依据", "经审批的施工组织设计", "施工合同约定"):
+            assert t in SHARED_SCOPE_RULES and t in SHARED_SCOPE_RULES_BRIEF, (
+                f"替代写法不一致：{t}")
 
     def test_export_blocks_bidding_terms(self):
         """导出体检必须继续拦截投标场景用语（否则 AI 幻觉混进出稿）。"""

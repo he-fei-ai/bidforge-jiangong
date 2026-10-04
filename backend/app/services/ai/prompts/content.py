@@ -13,6 +13,19 @@
   · content_chart_place_system   —— 图表插入位置判断（Phase 4 遗留）
 """
 from app.services.ai.prompts._registry import _reg
+# ✅ 2026-10-01（第二十一轮）：文件性质红线改引共享常量，不再内联副本。
+#    此前本文件有两份内联措辞（首轮生成第 7 条 / 续写「数据真实性红线」），
+#    与 _shared.SHARED_SCOPE_RULES 并列共三份 → 改一处漏两处。
+#    正文侧用简档而非完整版：正文提示词每章下发一次（38 章 = 38 次），
+#    完整版的 3 条编号细则不改变约束强度，只增加 token 成本。
+#
+# ✅ 2026-10-03（R38 · P1-a）：正文侧**不再导入该常量**。旧实现在本模块
+#    导入期用 ``.replace("<<SCOPE_RULES>>", SHARED_SCOPE_RULES_BRIEF)`` 把
+#    值拷贝进模板，等价于「把出厂默认值焊死」—— 用户在提示词编辑器改
+#    SHARED_SCOPE_RULES（或本简档）后，目录侧生效、正文侧不生效，且无告警。
+#    现改为 {SHARED_SCOPE_RULES_BRIEF} 占位符，由 _cache._resolve_shared_keys()
+#    在 get_prompt() 时按 DB 优先解析，与 outline 侧的 {SHARED_SCOPE_RULES}
+#    走同一条出口。出厂默认渲染结果逐字不变。
 
 # ✅ 2026-10-01（模糊生成改造）：无明确数据时「按规则补齐完整正文、不留占位标记」的
 # 文案唯一实现在 app.services.content_fuzzy —— 首轮生成、续写、压缩，以及生成后的
@@ -22,6 +35,12 @@ from app.services.content_fuzzy import (
     build_fuzzy_rules_block,
     build_generation_strategy_block,
     build_no_placeholder_block,
+)
+# ✅ 2026-10-02（检查点前置）：审核与预检规则中可在生成侧预防的检查点，
+#    由 services/content_checkpoint（唯一事实源，判据指向 audit_rules 注册表）
+#    派生为生成约束，经 {content_checkpoint_block} 占位符注入首轮与续写提示词。
+from app.services.content_checkpoint import (
+    build_content_system_checkpoint_block,
 )
 
 #: 注入正文提示词的三段：模糊生成规则 → 分级生成策略 → 禁止占位标记与空话
@@ -40,6 +59,10 @@ def _wrap_fuzzy_fill(template: str) -> str:
 
     替换发生在**注册时**，因此 render_prompt 与提示词缓存里看不到任何标记；
     模板不含占位符时原样返回（防御，便于其它提示词复用本函数）。
+
+    ⚠️ 文件性质红线**刻意不走本函数**（R38 · P1-a）：它必须以
+    ``{SHARED_SCOPE_RULES_BRIEF}`` 形式留在模板里，由运行时按 DB 优先解析，
+    才不会退化成「出厂值焊死、用户改不动」。新增注入点时切勿把它加回来。
     """
     return (template
             .replace("<<FUZZY_FILL>>", _FUZZY_FILL_SECTION)
@@ -90,7 +113,8 @@ _reg("content_generation_system", "content", "章节正文生成", _wrap_fuzzy_f
 4. **禁止编造文件编号**：合同编号、图纸编号、会议纪要与批复文号一律不得虚构；确需引用时以"相关设计文件""经审批的施工组织设计"等通用指代表述。
 5. **数值自洽**：同一参数在本节内不得出现两个不同取值；与全局事实冲突时以全局事实为准。
 6. **计算类内容**：公式、符号、单位必须规范（如 $f_{cu,k}$、$N/mm^2$ 采用规范记号），给出计算公式与参数取值来源；未掌握参数时按第 2 条处理，不得给出无依据的计算结果。行内公式必须**成对闭合且不留空参数**：给出"公式 → 参数取值 → 代入 → 结果 → 结论"完整链条，严禁 `\\frac{}{}`、`\\square`、`$x = $` 等空值形态（导出时会渲染成空框或源码残留）。
-7. **文件性质**：本方案是指导现场施工的**技术文件**，不是投标文件 —— 严禁引用或设置招标文件、投标文件、评标办法、评分标准、废标条件、投标须知、商务条款等相关章节与表述；需要说明外部约束时写"设计文件与合同依据""经审批的施工组织设计""施工合同约定"。
+
+{SHARED_SCOPE_RULES_BRIEF}
 
 <<FUZZY_FILL>>
 
@@ -137,6 +161,7 @@ _reg("content_generation_system", "content", "章节正文生成", _wrap_fuzzy_f
 - 安全保证类章节：组织保障 → 技术措施 → 监控方案 → 验收要求
 - 应急处置类章节：应急组织 → 响应分级 → 处置流程 → 资源保障
 - 计算书类章节：计算参数 → 计算公式 → 计算过程 → 结论
+{chapter_checkpoint_block}
 
 ## 图表同步生成规范（与正文一体产出）
 
@@ -263,7 +288,8 @@ _reg("content_generation_system", "content", "章节正文生成", _wrap_fuzzy_f
 - 同一章节一旦选择某类型，严禁再输出第二种图表块
 
 ## 编制依据（现行有效标准）
-{standards_text}"""))
+{standards_text}
+{content_checkpoint_block}"""))
 
 _reg("content_continue_system", "content", "正文续写", _wrap_fuzzy_fill("""你是资深的工程项目专项方案编制工程师。以下是某章节已生成的正文，但字数未达到要求。请在已有内容基础上自然续写。
 
@@ -291,8 +317,8 @@ _reg("content_continue_system", "content", "正文续写", _wrap_fuzzy_fill("""�
   岗位称谓），**严禁写"【待补充：参数名】"等占位标记**（口径与首轮生成一致）；
   **严禁**使用 `××`、`xx`、`X`、`*`、`[数值]` 等无法检索的模糊占位符。
 - 不得生成人员姓名、单位名称、文件编号、证书编号等可追溯标识。
-- 本方案是指导施工的技术文件，**不是投标文件**：不得引用招标文件、投标文件、评标办法、
-  评分标准、废标条件、商务条款等投标场景内容。
+
+{SHARED_SCOPE_RULES_BRIEF}
 
 <<NO_PLACEHOLDER>>
 
@@ -300,7 +326,8 @@ _reg("content_continue_system", "content", "正文续写", _wrap_fuzzy_fill("""�
 - 仅引用【编制依据 · 现行有效标准参考清单】所列现行标准，格式"《标准名称》（编号）"；禁止引用已废止版本（清单中已列明），禁止编造标准编号与条文号。
 - 禁止口语化、宣传用语与 AI 表述（详见首轮生成的"语言规范"要求），保持与前文一致的书面技术文体。
 
-{standards_text}"""))
+{standards_text}
+{content_checkpoint_block}"""))
 
 _reg("content_shrink_system", "content", "正文字数压缩", """你是专项方案正文字数压缩专家。当前章节正文超出目标字数，请在不破坏结构与事实的前提下输出压缩操作。
 

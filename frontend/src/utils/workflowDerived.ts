@@ -319,3 +319,28 @@ export const PREV_TAB: Record<WorkflowTabKey, WorkflowTabKey | null> = {
   review: "content",
   export: "review",
 };
+
+/**
+ * ✅ 超字数阈值（与后端 `app/services/content_utils.py::WORD_OVER_RATIO` 同口径 = 1.3）。
+ *
+ * 前后端必须共用同一判据：`word_status` 的 over 判定（后端 content_utils.py:398）、
+ * 「本章可压缩」按钮的可用性（本文件）、以及后端压缩端点的准入校验
+ * （routers/sections.py:1558 `before_wc <= word_budget * WORD_OVER_RATIO` → 400）
+ * 是**同一业务事实的三个表达面**。
+ *
+ * ⚠️ 2026-10-04 修复：前端此前按 `word_count > word_budget` 判可压缩 —— 100%~130%
+ * 区间按钮可点，但后端必返回 400「未超出目标 130%」，用户点一次得到一次报错弹窗。
+ */
+export const WORD_OVER_RATIO = 1.3;
+
+/**
+ * 本章是否允许「压缩字数」（与后端压缩端点准入阈值对齐）。
+ */
+export function canShrinkSection(
+  s: { content?: string | null; word_count?: number | null; word_budget?: number | null } | null | undefined,
+): boolean {
+  if (!s || !(s.content || "").trim()) return false;
+  const wc = Number(s.word_count) || 0;
+  const wb = Number(s.word_budget) || 1500;
+  return wc > wb * WORD_OVER_RATIO;
+}

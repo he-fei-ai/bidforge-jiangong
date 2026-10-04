@@ -1,4 +1,4 @@
-"""标段（投标范围）上下文提示 —— 移植自 OpenBidKit。
+"""标段（施工范围）上下文提示 —— 移植自 OpenBidKit。
 
 参考实现：`client/electron/utils/bidSectionContext.cjs::buildBidSectionContextHint`
 配套实现：`client/electron/services/bidAnalysisTask.cjs` 把该提示作为**独立
@@ -23,14 +23,21 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-#: 基础提示（与参考实现逐字对齐）
+#: 基础提示
+# ⚠️ 2026-10-01（定位切换）：原文写「当前**招标文件**已按用户选择的**投标范围**处理」。
+#    这段是作为 **system 消息注入每一次 AI 调用**的（单项提取与分段合并都注入），
+#    等于把招投标语境直接灌进模型输入 —— 与「专项施工方案不是投标文件」红线
+#    正面冲突，模型很可能顺着 system 消息的措辞把「投标」写进提取结果/正文。
+#    改为中性的「项目资料 / 施工范围」，语义不变（限定当前范围），措辞无歧义。
+#    ⚠️ 只改**措辞**，不改语义与触发条件：``build_bid_section_context_hint``
+#    「只有用户确实选定过范围才返回非空」的向后兼容约定保持不变。
 _BASE_HINT = (
-    "本项目为多标段，当前招标文件已按用户选择的投标范围处理。"
+    "本项目包含多个标段，当前资料已按用户选择的施工范围处理。"
     "请仅关注当前选择标段和当前输入内容，不要主动扩展到其他标段。"
 )
 #: 没有标段明细时的提示（仅「已选定范围」这一事实可告知）
 _NO_DETAIL_HINT = (
-    "本项目为多标段，当前招标文件已按用户选择的投标范围处理。"
+    "本项目包含多个标段，当前资料已按用户选择的施工范围处理。"
     "请以当前输入内容为准，不要主动扩展到其他标段。"
 )
 
@@ -57,7 +64,7 @@ def build_bid_section_context_hint(selected_section: Optional[dict] = None,
     Args:
         selected_section: 选中的标段对象，允许字段：
             id / title / headLine(或 head_line) / description / evidence
-        has_selected_section: 是否「已选定投标范围」但标段明细缺失。
+        has_selected_section: 是否「已选定施工范围」但标段明细缺失。
             为 True 时至少给出「请以当前输入内容为准」的兜底提示。
 
     Returns:
@@ -143,7 +150,7 @@ async def resolve_section_hint(db, project_id: str,
                                scheme_id: str = "") -> tuple[str, dict]:
     """读取当前选中标段并生成提示（唯一注入入口）。
 
-    ✅ 向后兼容约定：**只有用户确实选定过投标范围时**才返回非空提示。
+    ✅ 向后兼容约定：**只有用户确实选定过施工范围时**才返回非空提示。
     多标段项目但未选择时返回空串 —— 旧行为的 system prompt 逐字不变，
     避免「升级后提取结果悄悄变化」。未选择这一事实由路由层通过
     `multi_section_unselected` 字段回传给前端提示用户去选择。

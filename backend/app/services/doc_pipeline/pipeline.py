@@ -203,8 +203,21 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
     #    幂等；不做真正的跳插（prev/next 链会随内容变更整体重建，见 docstring）。
     cur = await db.execute("SELECT chunk_id, hash, created_at FROM doc_chunks"
                            " WHERE doc_id=?", (doc_id,))
-    old_rows = {r["chunk_id"]: (r["hash"], r["created_at"] or "")
-                for r in await cur.fetchall()}
+    # ✅ P1（R13 漏改点 · 2026-10-04）：同模块路由层 doc_pipeline.py 的 5 处
+    #    （_load_doc / get_extractions / get_chunks / completeness / sync）均已对
+    #    `db.execute()` 返回 None 加守卫，唯独本服务层函数漏改 —— 而它正是
+    #    「解析 → 分块落库」的唯一入口（global_facts.parse_document →
+    #    _ingest_parsed_doc → ingest_parse_result）。命中即 AttributeError，
+    #    再被 _ingest_parsed_doc 的 `except Exception: return {}` 整段吞掉：
+    #    doc_chunks 全丢、响应里 layers 字段消失，用户与日志都只能看到「解析成功」。
+    #    语义选择：按「无历史块」处理（全量重建，old_rows 为空 → 全部计为 changed，
+    #    created_at 全部取当前时刻），与「缓存是加速而非唯一来源」的既有降级口径一致。
+    if cur is None:
+        logger.warning("查询历史分块失败（db.execute 返回 None），按无历史块处理：%s", doc_id)
+        old_rows = {}
+    else:
+        old_rows = {r["chunk_id"]: (r["hash"], r["created_at"] or "")
+                    for r in await cur.fetchall()}
     old_hashes = {cid: h for cid, (h, _t) in old_rows.items()}
     new_ids = {c["chunk_id"] for c in chunks}
     changed = [c for c in chunks
@@ -764,12 +777,15 @@ def _norm_fact_name(name: str) -> str:
 
 async def detect_cross_source_conflicts(
     db, *, project_id: str,
-) -> tuple[list[dict], set[str]]:
+) -> tuple[list[dict], set[str], set[str]]:
     """P2（2026-09-23）：比对「AI 解析项目」(bid_analysis_items) 与「全局事实」
     (global_facts) 两套真值源，找出同名但取值冲突的事实。
 
     此前两套数据各自落库/触发/面板，互不交叉校验，导致重复/口径不一。
-    返回 (冲突列表, 需标记 has_conflict 的 global_facts id 集合)。
+    返回 (冲突列表, 需标记 has_conflict 的 global_facts id 集合,
+    取值已与解析项一致的 global_facts id 集合)。第三项用于消解「此前由双源
+    冲突置位、解析项现已改一致」的残留标记（fail-closed 口径下不能无证据清零，
+    取值一致的同名解析项即消解证据）。
     仅程序判定、零 LLM；裁决权在人工（auto_resolvable=False）。
     """
     cur = await db.execute(
@@ -801,6 +817,7 @@ async def detect_cross_source_conflicts(
 
     conflicts: list[dict] = []
     flagged: set[str] = set()
+    resolved: set[str] = set()
     for nm, entries in by_name.items():
         bid_vals = {e[2] for e in entries if e[0] == "bid_analysis"}
         gf_entries = [e for e in entries if e[0] == "global_facts"]
@@ -821,7 +838,10 @@ async def detect_cross_source_conflicts(
                     "auto_resolvable": False,
                 })
                 flagged.add(ge[3])
-    return conflicts, flagged
+            elif all(bv == ge[2] for bv in bid_vals):
+                # 全部解析项取值与该事实一致 → 若此前由双源冲突置位，现可消解。
+                resolved.add(ge[3])
+    return conflicts, flagged, resolved
 
 
 async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
@@ -847,6 +867,7 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
 
     class _Item:
         def __init__(self, row: dict):
+            self.id = row.get("id")
             self.key = row.get("fact_key") or ""
             self.name = row.get("title") or ""
             self.category = row.get("category") or ""
@@ -871,48 +892,88 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
                         self.conflict_values = parsed
             except ValueError:
                 pass
+            # ✅ 记录进入校验前是否携带结构化冲突候选。run_cross_validations
+            #    对「范围值兼容」项会就地清空 conflict_values 并撤销标记，借此
+            #    区分「经程序判定消解」与「XV 规则盲区（普通文本值冲突，
+            #    非材料/流程/机械时序）」两类候选。
+            self.had_candidate = bool(self.conflict_values)
 
     merged = [_Item(r) for r in rows]
     conflicts = run_cross_validations(merged) if merged else []
 
-    # ✅ P7：把程序交叉校验冲突按「事实名」映射回 global_facts 行，收集需标记 id
-    name_to_ids: dict[str, list[str]] = {}
-    for r in rows:
-        name_to_ids.setdefault(r.get("title") or "", []).append(r["id"])
-
-    flagged_ids: set[str] = set()
-    for c in conflicts:
-        for side in (c.get("side_a"), c.get("side_b")):
-            nm = (side or {}).get("name") or ""
-            for fid in name_to_ids.get(nm, []):
-                flagged_ids.add(fid)
+    # ✅ 冲突标记以校验器判定后的内存条目状态为唯一事实源，不再按「事实名」
+    #    二次映射 —— 旧按名映射依赖 side.name 与 DB title 全文相等，会漏标。
 
     # ✅ P2：双源交叉校验
-    cross_src_conflicts, cross_src_flagged = await detect_cross_source_conflicts(
-        db, project_id=project_id)
-    flagged_ids |= cross_src_flagged
+    cross_src_conflicts, cross_src_flagged, cross_src_resolved = \
+        await detect_cross_source_conflicts(db, project_id=project_id)
 
-    # ✅ 修复（2026-09-26）：先把本项目全部 has_conflict 清零，再按「当前」校验结果
-    #    置 1，使标记严格反映最新交叉校验状态。旧实现只置 1 不清零，导致已消解的
-    #    冲突（如 bid_analysis_items 取值被改一致、或人工裁决后）永久残留
-    #    has_conflict=1，前端矛盾徽标误报、且下游注入门槛（has_conflict=0）误杀事实。
-    await db.execute(
-        "UPDATE global_facts SET has_conflict=0 WHERE project_id=?", (project_id,))
+    # 计算「全局事实内部同名取值分歧」的名称集合：这些名称即便解析项与其中
+    # 一个取值一致，gf 内部仍有真实冲突，双源一致不构成消解（安全侧保守）。
+    from app.services.facts_cross_validators import _norm_text_value
+    name_vals: dict[str, set] = {}
+    for it in merged:
+        nm = (it.name or "").strip()
+        if nm:
+            v = _norm_text_value(it.value)
+            if v:
+                name_vals.setdefault(nm, set()).add(v)
+    gf_disputed_names = {nm for nm, vs in name_vals.items() if len(vs) >= 2}
 
-    if flagged_ids:
-        ph = ",".join("?" * len(flagged_ids))
+    def _cross_resolvable(it) -> bool:
+        # 双源一致且 gf 内部无分歧，才允许据此消解标记。
+        return (it.id in cross_src_resolved
+                and (it.name or "").strip() not in gf_disputed_names)
+
+    # 最终保留集合按 fail-closed（安全侧保守）口径逐行判定：
+    # ① 有候选且经 XV 判定仍冲突：保留（盲区候选 XV 不处理，标记天然在）；
+    # ② 无候选但被 XV-SAME-NAME 新判冲突：保留 —— 旧条件误加 had_candidate
+    #    限制，把同名文本值冲突行排除后清0，漏报真实冲突；
+    # ③ 无候选的初始标记残留：默认保守保留（test_cross_check_persists），
+    #    仅当存在「取值已一致且 gf 无分歧」的解析项时才允许消解；
+    # ④ 本轮双源命中：一律保留。
+    final_keep = set(cross_src_flagged)
+    for it in merged:
+        if not it.id:
+            continue
+        if it.has_conflict and not _cross_resolvable(it):
+            final_keep.add(it.id)
+
+    # 应消解集合（reset 恒为最终裁决）：
+    # ① 范围值兼容：携带候选进入、判定后标记与候选皆被 XV 清空；
+    # ② 双源一致消解：取值与解析项一致且 gf 内部无分歧；
+    # ③ 有候选但经 XV 判定无冲突且无候选残留（兼容合并同类）。
+    reset_ids: set[str] = set()
+    for it in merged:
+        if not it.id or it.id in final_keep:
+            continue
+        if it.had_candidate and not it.has_conflict and not it.conflict_values:
+            reset_ids.add(it.id)
+        elif _cross_resolvable(it):
+            reset_ids.add(it.id)
+
+    # 先置 1 再清 0，reset 恒为最终裁决。
+    if final_keep:
+        ph = ",".join("?" * len(final_keep))
         await db.execute(
             f"UPDATE global_facts SET has_conflict=1 "
-            f"WHERE id IN ({ph})", list(flagged_ids))
+            f"WHERE id IN ({ph})", list(final_keep))
+
+    if reset_ids:
+        ph = ",".join("?" * len(reset_ids))
+        await db.execute(
+            f"UPDATE global_facts SET has_conflict=0 "
+            f"WHERE id IN ({ph})", list(reset_ids))
+
 
     report = {
         "project_id": project_id,
         "doc_id": doc_id,
         "fact_count": len(rows),
-        "stored_conflicts": sum(1 for r in rows if r.get("has_conflict")),
+        "stored_conflicts": len(final_keep),
         "cross_conflicts": conflicts,
         "cross_source_conflicts": cross_src_conflicts,
-        "flagged_fact_ids": sorted(flagged_ids),
+        "flagged_fact_ids": sorted(i for i in final_keep if i),
         "checked_at": _now(),
     }
     await db.execute(

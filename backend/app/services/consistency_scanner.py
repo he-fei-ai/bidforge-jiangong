@@ -63,6 +63,45 @@ _NUM_TOPICS = [
 #  否则「塔吊 2 台 + 施工电梯 2 台」「柱 C40 + 梁 C30」会被当作跨章节数值矛盾，
 #  对正常方案产生必然的误报（与 preflight_engine 的 CON-01 同一口径）。
 _NUM_TOPIC_OBJECT_GROUP = {"设备数量": 1, "混凝土强度": 1}
+#: 岗位简称与全称等价（避免同一岗位被拆成两桶而产生假冲突）
+_ROLE_ALIASES = {"技术负责人": "项目技术负责人"}
+#: 岗位后常见的「动词 / 连接词」开头片段 —— 这些不是人名，是谓语。
+#:
+#: ✅ BUG 修复（2026-10-02，生产数据实证）
+#: -------------------------------------------
+#: 旧正则第 2 个捕获组是「岗位后任意 2~4 个汉字」，于是
+#: 「技术负责人**组织各专**业」「项目技术负责人**签发**」
+#: 「现场负责人**接到报告**」里的谓语全被当成「人名」，
+#: 再因「同一岗位出现多个不同人名」被判为跨章节矛盾。
+#: 生产实证（consistency_conflicts C004/C005/C006 = CON-SCAN-4/5/6）：
+#: 3 条 medium 冲突**全部**由本缺陷产生，捕获值是
+#: 「组织各专 / 审核后归 / 批准后 / 签发 / 重排对应 / 接到报告 / 或专职安」。
+#: 现按「谓语前缀」拦截；真正的中文人名不会以这些字开头。
+_PERSON_NAME_STOP_PREFIX = (
+    "组织", "审核", "审", "批准", "审批", "签发", "签字", "签署", "确认", "核实",
+    "重排", "调整", "安排", "部署", "负责", "担任", "会同", "参加",
+    "接到", "接报", "巡查", "检查", "监督", "验收", "复核", "报", "上报", "提交",
+    "编制", "起草", "拟", "制定", "责令", "要求", "督促", "协调",
+    "或", "和", "与", "及", "等", "该", "各", "本", "其", "并", "同时", "立即",
+    "应当", "应", "必须", "须", "要", "将", "把", "对", "向", "由", "从",
+)
+#: 谓语的「兜底」判定：捕获值若整体落在常见公文动词集合内，同样不是人名。
+_PERSON_NAME_STOP_EXACT = frozenset({
+    "负责", "担任", "组织", "审核", "批准", "审批", "签发", "确认", "检查",
+    "监督", "验收", "复核", "上报", "提交", "编制", "起草", "制定", "协调",
+    "安排", "部署", "巡查", "参加", "会同", "接报", "接到", "责令", "要求",
+})
+
+
+def _looks_like_person_name(name: str) -> bool:
+    """判定捕获到的片段是否像「人名」（用于剔除谓语短语造成的误报）。"""
+    if not name:
+        return False
+    if name in _PERSON_NAME_STOP_EXACT:
+        return False
+    return not name.startswith(_PERSON_NAME_STOP_PREFIX)
+
+
 _PERSON_RE = re.compile(
     r"(项目经理|项目技术负责人|技术负责人|现场负责人|安全负责人|总监理工程师)"
     r"\s*[:：为是]?\s*([\u4e00-\u9fa5]{2,4})(?![a-zA-Z0-9])")
@@ -180,7 +219,12 @@ def program_prescan(sections: list[dict]) -> list[dict]:
                 _add_bucket(buckets, bucket_key, value, sid, title, m.group(0))
         for m in _PERSON_RE.finditer(content):
             role, name = m.group(1), m.group(2)
-            if name in ("负责", "担任"):
+            # ✅ BUG 修复（2026-10-02）：岗位简称/全称归一（见 _ROLE_ALIASES）。
+            #    「技术负责人」与「项目技术负责人」是同一岗位，旧实现分成两个桶，
+            #    各自因谓语被误当成不同「人名」而各报一条冲突。
+            role = _ROLE_ALIASES.get(role, role)
+            # 谓语短语不是人名（见 _looks_like_person_name 的生产实证）
+            if not _looks_like_person_name(name):
                 continue
             _add_bucket(buckets, role, name, sid, title, m.group(0))
         for m in _MODEL_RE.finditer(content):
@@ -445,14 +489,48 @@ def _better_topic(a: str, b: str) -> str:
     return b if len(b) > len(a) else a
 
 
-def merge_conflicts(ai_rows: list[dict], prescan_rows: list[dict]) -> list[dict]:
+def _conflict_id_prefix(scheme_id: str) -> str:
+    """冲突 ID 的**方案作用域前缀**（P0 跨方案碰撞修复，2026-10-04）。
+
+    ✅ BUG 修复（P0）：冲突 ID 此前是全局流水号 ``C{idx:03d}``，每次扫描都从
+    C001 重新编号，而 ``consistency_conflicts.id`` 是**全局主键**（不含 scheme_id）。
+    后果（实测可推导、与 :func:`persist_conflicts` 的 upsert 语义共同放大）：
+
+      ① 方案 A 扫描写入 C001（scheme_id=A）；方案 B 扫描同样生成 C001 →
+         ``ON CONFLICT(id) DO UPDATE`` 命中 A 的行，把 **B 的 scan_id / severity /
+         occurrences** 写进 **A 的行**，而旧实现 DO UPDATE **不更新 scheme_id**；
+      ② 于是 ``GET /consistency/conflicts?scheme_id=B`` 查不到任何行（返回
+         exists=false，用户看到「尚未扫描」）；
+      ③ 而 ``GET .../conflicts?scheme_id=A`` 取「最新 scan_id」时取到的是 **B 的
+         scan_id**，把 B 方案正文里的冲突原文与章节 ID **展示在 A 方案下** ——
+         跨方案数据泄漏 + 冲突清单错乱，且无任何报错。
+
+    修法：ID 内嵌方案作用域（短哈希，确定性、可读、长度可控），不同方案的流水号
+    从此不可能互撞。``scheme_id`` 为空时返回空前缀 → **ID 格式与历史完全一致**，
+    既有的纯函数单测（不传 scheme_id）与任何不感知方案作用域的调用方零影响。
+
+    ⚠️ 历史落库行（无前缀的 C001…）不做迁移：``get_conflicts`` 按 **最新
+    scan_id** 取数（见 consistency_repair.py:124），新扫描必然带新 scan_id，
+    旧行自然被隔离，不会出现在结果里；真正需要的是「不再新增碰撞」。
+    """
+    if not scheme_id:
+        return ""
+    return f"{hashlib.md5(str(scheme_id).encode('utf-8')).hexdigest()[:6]}-"
+
+
+def merge_conflicts(ai_rows: list[dict], prescan_rows: list[dict],
+                    scheme_id: str = "") -> list[dict]:
     """合并去重：
 
     1. 同规范化主题归并，occurrences 按「章节 + 取值」去重合并；
     2. 二次去重：若两处冲突「涉及章节 + 取值集合」完全一致，视为同一处不一致
        （消除 AI 命名为「项目总工期」、预扫描命名为「工期」造成的重复）；
     3. 结构/安全类参数（强度/型号/基坑深度…）至少按 high 定级。
+
+    ``scheme_id`` 用于给冲突 ID 加方案作用域前缀（见 :func:`_conflict_id_prefix`），
+    **默认空串 = 不加前缀**（向后兼容，ID 形态与改造前逐字一致）。
     """
+    _cid_prefix = _conflict_id_prefix(scheme_id)
     merged: dict[str, dict] = {}
     order: list[str] = []
 
@@ -514,7 +592,7 @@ def merge_conflicts(ai_rows: list[dict], prescan_rows: list[dict]) -> list[dict]
         occs = item["occurrences"]
         if not occs:
             continue
-        cid = f"C{idx:03d}"
+        cid = f"{_cid_prefix}C{idx:03d}"
         for o in occs:
             o["conflict_id"] = cid
         values = sorted({o.get("value") for o in occs if o.get("value")})
@@ -542,13 +620,18 @@ async def persist_conflicts(db, scheme_id: str, scan_id: str,
     #    「全文一致性扫描静默失效」）。现改为 upsert：
     #      · 刷新 scan_id / occurrences / severity（以最新一次扫描为准）；
     #      · **保留** status 与仲裁结果（已确认/已修复/已驳回的结论不被重置）。
+    #     ✅ P0 补充（2026-10-04）：DO UPDATE 补 `scheme_id=excluded.scheme_id`。
+    #     这是**兜底层** —— 即便上游因故仍生成了全局流水号（历史数据 / 自定义
+    #     调用方不传 scheme_id），命中他人行时也把它收回本方案，而不是把本方案的
+    #     scan_id 与冲突原文写进别人的行（跨方案数据泄漏的放大环节）。
     for c in conflicts:
         await db.execute(
             "INSERT INTO consistency_conflicts "
             "(id, scheme_id, scan_id, conflict_type, severity, topic, occurrences,"
             " status, created_at) VALUES (?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(id) DO UPDATE SET"
-            " scan_id=excluded.scan_id, severity=excluded.severity,"
+            " scheme_id=excluded.scheme_id, scan_id=excluded.scan_id,"
+            " severity=excluded.severity,"
             " occurrences=excluded.occurrences, created_at=excluded.created_at",
             (c["id"], scheme_id, scan_id, c["conflict_type"], c["severity"],
              c["topic"], json.dumps(c["occurrences"], ensure_ascii=False),
@@ -658,7 +741,9 @@ async def run_scan(db, *, scheme_id: str, project_id: str, scheme_name: str,
     elif progress_cb:
         await progress_cb(total, total, f"全部 {total} 章命中缓存，无需重复扫描")
 
-    conflicts = merge_conflicts(ai_rows, prescan_rows)
+    # ✅ P0（2026-10-04）：传 scheme_id 让冲突 ID 带方案作用域前缀，杜绝跨方案
+    #    主键碰撞（详见 _conflict_id_prefix 的 docstring）。
+    conflicts = merge_conflicts(ai_rows, prescan_rows, scheme_id=scheme_id)
     scan_id = new_scan_id()
     await persist_conflicts(db, scheme_id, scan_id, conflicts)
     logger.info("一致性扫描完成：%d 章（缓存 %d）→ %d 个冲突",

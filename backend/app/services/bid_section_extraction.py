@@ -283,7 +283,7 @@ async def extract_bid_sections(ai_collect=None, markdown: str = "",
     collector = ai_collect or collect_json_response
     clean = str(markdown or "").strip()
     if not clean:
-        raise ValueError("没有可识别的招标文件正文，请先上传并解析文件")
+        raise ValueError("没有可识别的项目资料正文，请先上传并解析文件")
 
     total_lines = clean.count("\n") + 1
     numbered = number_markdown_lines(clean)

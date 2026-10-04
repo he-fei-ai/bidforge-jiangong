@@ -263,14 +263,22 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
             "INSERT INTO global_facts "
             "(id, project_id, scheme_id, group_id, group_title, title, content, "
             "category, source_ref, is_simulated, confidence, is_resolved, "
-            "has_conflict, conflict_keys, fact_key, chunk_hash) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "has_conflict, conflict_keys, fact_key, chunk_hash, value_unit, "
+            "fact_type, evidence_kind, page_ref, zone_type, is_safety_critical, "
+            "norm_group, chapter, fact_attr, source_kind, is_shared, is_stale) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (str(uuid.uuid4()), project_id, new_id, new_group, s.get("group_title", ""),
              s["title"], s["content"], s.get("category", ""), s.get("source_ref", ""),
              s.get("is_simulated", 0), s.get("confidence", 1.0),
              s.get("is_resolved", 1), s.get("has_conflict", 0),
              s.get("conflict_keys", ""), s.get("fact_key", ""),
-             s.get("chunk_hash", "")))
+             s.get("chunk_hash", ""), s.get("value_unit", ""),
+             s.get("fact_type", ""), s.get("evidence_kind", ""),
+             s.get("page_ref", ""), s.get("zone_type", ""),
+             s.get("is_safety_critical", 0), s.get("norm_group", ""),
+             s.get("chapter", ""), s.get("fact_attr", ""),
+             s.get("source_kind", ""), s.get("is_shared", 0),
+             s.get("is_stale", 0)))
     await db.commit()
     return {"id": new_id}
 

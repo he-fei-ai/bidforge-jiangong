@@ -43,7 +43,7 @@ type BaItemDef, type BaStoredItem, type BaTextStats,
 } from "../utils/bidAnalysis";
 import {
   buildUploadNotice, computeDocStats, isDocParsed, isDocFailed, NEXT_TAB, pickInitialTab,
-  selectPlacedExportCharts, findDefaultExportPreset,
+  selectPlacedExportCharts, findDefaultExportPreset, canShrinkSection,
   type WorkflowTabKey,
 } from "../utils/workflowDerived";
 import { UPLOAD_FILE_ACCEPT } from "../utils/uploadAccept";
@@ -54,6 +54,7 @@ import ContentGenerationTab from "../components/ContentGenerationTab";
 import {
   upsertSectionLog, finalizeRunningLogsIn, mergeFailedSectionsInto,
   contentResultFailedSections, contentResultSummary,
+  normalizeQualityIssues,
   type SectionLogItem, type GenStats,
 } from "../utils/contentEvents";
 // F-CONTENT-STANDARD(2026-09-26): 生成标准纯函数层（请求体映射 / 标签 / 报告判定）
@@ -68,6 +69,13 @@ import { hookAntdMessage } from "../utils/activityCenter";
 // ✅ 2026-09-25：SSE 批量器抽到 utils/sseBatcher.ts（TaskStatusBar 也要复用，
 //  工具函数不再寄生在 9000+ 行的页面文件里）
 import { createSseBatcher } from "../utils/sseBatcher";
+import {
+  chartRenderStatsParts,
+  fixStatsParts,
+  parseChartRenderStats,
+  parseFixStats,
+  resolveExportFilename,
+} from "../utils/exportResponse";
 import SectionContentCard, { countPlainTextWords } from "../components/SectionContentCard";
 import ReadinessDashboard from "../components/review/ReadinessDashboard";
 // ✅ 《待补充清单》面板（2026-09-24，人工补录兜底层）：占位符按字段/按章节聚合
@@ -127,6 +135,13 @@ const CN_NUMBERS: string[] = [
 // 现改为「前瞻捕获最长路径 + 反向引用整条吃满」（正则没有原子组语法，但前瞻
 // 是原子的、反向引用不可回退），路径后要求紧跟分隔符或 CJK/全角字符。
 // 分隔符与 CJK 边界字符类必须与后端 _SEP_CLASS / _CJK_BOUNDARY 逐字符一致。
+//
+// ✅ BUG 修复（2026-10-03 · 数量型标题丢首字，与后端 numbering.py 同步修改）：
+// 点分编号分支的捕获原用 `[0-9]+(?:\.[0-9]+)*`（星号），于是「单段数字直接接
+// 中文」（无分隔符）也被当编号剥离："2层作业平台" → "层作业平台"、"10个人" →
+// "个人"。此 CJK 无分隔符剥离本就只为多段点分路径（"2.4.1钢筋工程"）设计，
+// 现限定为至少一个点段 `(?:\.[0-9]+)+`，单段数字剥离仍由下方「[0-9]+分隔符+
+// (?![0-9])」分支负责。必须与后端 _STRIP_NUMBER_RE 逐字符一致（parity 测试锁定）。
 const LEADING_NUMBER_SEP = "[、.．，,：: \\-—]";
 const LEADING_NUMBER_CJK = "[\\u3000-\\u303f\\u4e00-\\u9fff\\uff00-\\uffef]";
 const LEADING_NUMBER_RE = new RegExp(
@@ -134,7 +149,7 @@ const LEADING_NUMBER_RE = new RegExp(
     "第\\s*[一二三四五六七八九十百千零0-9]+\\s*[章节]" +   // 第X章 / 第 1 章
     "|[（(][一二三四五六七八九十0-9]+[)）]" +               // （三） / (3)
     "|[0-9]+[)）]" +                                        // 1） / 2）
-    "|(?=([0-9]+(?:\\.[0-9]+)*))\\1(?:" +
+    "|(?=([0-9]+(?:\\.[0-9]+)+))\\1(?:" +
       LEADING_NUMBER_SEP + "+|(?=" + LEADING_NUMBER_CJK + "))" +
     "|[0-9]+" + LEADING_NUMBER_SEP + "+(?![0-9])" +          // 单段编号（"1 施工准备"）
     "|[一二三四五六七八九十百千零]+" + LEADING_NUMBER_SEP + "+" +
@@ -2612,6 +2627,7 @@ export const FactsGroupList = memo(function FactsGroupList({
   onEditItem,
   onResolveItem,
   onResolveConflict,
+  onAckStaleOne,
 }: {
   groups: any[];
   filter: string;
@@ -2620,6 +2636,7 @@ export const FactsGroupList = memo(function FactsGroupList({
   onEditItem: (group: any, item: any) => void;
   onResolveItem: (item: any) => void;
   onResolveConflict: (item: any, value: string) => void;
+  onAckStaleOne?: (itemId: string, title?: string) => void;
 }) {
   // ✅ 性能优化：按输入记忆化过滤结果（原实现每次渲染无条件重算）
   const visible = useMemo(() => applyFactsFilter(groups, filter), [groups, filter]);
@@ -2744,8 +2761,14 @@ export const FactsGroupList = memo(function FactsGroupList({
                               </span>
                             )}
                             {it.is_stale && (
-                              <Tooltip title="来源资料已重新解析或删除，本条旧事实已停止注入正文与导出；请重新提取或编辑核对">
-                                <Tag color="volcano" style={{ margin: 0 }}>来源已变化</Tag>
+                              <Tooltip title="来源资料已重新解析或删除，本条旧事实已停止注入正文与导出；点击可确认「该值仍有效」并解除标记">
+                                <Tag
+                                  color="volcano"
+                                  style={{ margin: 0, cursor: "pointer" }}
+                                  onClick={() => onAckStaleOne?.(it.id, it.title)}
+                                >
+                                  来源已变化 ✓
+                                </Tag>
                               </Tooltip>
                             )}
                             {it.is_simulated && (
@@ -5139,10 +5162,13 @@ const draftKey = selectedSection && id
             word_status: evt.word_status,
             // ✅ 续写失败信号（后端 section_done 下发）：区别于「要点不足写不满」
             continue_failed: !!evt.continue_failed,
-            // ✅ 缺口修复（2026-09-24）：后端 section_done 一并下发本章程序化
-            //    质检问题（quality_issues），此前前端完全丢弃 —— 只有重新拉整篇
+            // ✅ 缺口修复（2026-09-24 / 2026-10-04 修正）：后端 section_done 一并下发
+            //    本章程序化质检问题（quality_issues），此前前端完全丢弃 —— 只有重新拉整篇
             //    正文才可能发现。现落到日志项，日志区直接提示。
-            quality_issues: Array.isArray(evt.quality_issues) ? evt.quality_issues : undefined,
+            //    ⚠️ 2026-10-04：后端载荷是**对象**
+            //    （{colloquial_hits:[], abolished_standards:[]}），旧实现按
+            //    Array.isArray 判定 → 恒 undefined → 告警从未展示。统一走归一出口。
+            quality_issues: normalizeQualityIssues(evt.quality_issues),
             // ✅ F-CONTENT-STANDARD(2026-09-26 · F4)：本章生效标准 + 校验报告
             //    （字段存在却丢弃 = 用户完全看不到生成标准的执行结果）
             generation_standard: evt.generation_standard,
@@ -6122,6 +6148,86 @@ const draftKey = selectedSection && id
     });
   };
 
+  /**
+   * ✅ G3（2026-10-04）：批量解除「来源已变化」过期标记。
+   *
+   * 背景：后端 `_mark_project_facts_stale` 在项目资料重新解析/删除时会把**整个
+   * 项目**的事实一次性置 is_stale=1，而解除入口此前只有「改值」和「裁决矛盾」
+   * 两条（都要求值必须先变），`resolve` / `batch-resolve` 对 stale 行还直接跳过。
+   * 结果是：用户核对过、取值并未变化，却被永久排除在正文注入与导出之外，红色
+   * 「来源过期 N」Tag 也消不掉 —— 只能逐条把值改成别的再改回来，或重跑一次
+   * AI 提取（真实计费）。
+   *
+   * 语义只表达「我已核对，这些值仍然有效」；模拟值/矛盾值由后端闸门继续拦住
+   * （只清 stale、不置已确认），故响应里的 `gated` 需要显式提示。
+   */
+  const handleAckStaleAll = async () => {
+    if (!id) return;
+    const stale = factsSummary?.stale || 0;
+    if (stale === 0) {
+      msg.info("没有来源过期的事实");
+      return;
+    }
+    modal.confirm({
+      title: "确认这些事实仍然有效",
+      content: (
+        <div>
+          <div>
+            将把当前方案可见范围内 <strong>{stale}</strong> 条「来源已变化」的事实
+            标记为<strong>已人工核对、仍然有效</strong>，恢复其注入正文与导出。
+          </div>
+          <div style={{ marginTop: 6, color: "#d46b08" }}>
+            仅在你已核对原始资料、确认取值未变时使用；若资料确已更新，请改为重新提取。
+          </div>
+          <div style={{ marginTop: 6, color: "#888" }}>
+            模拟值与存在矛盾的事实仍会保持未确认，需逐条处理。
+          </div>
+        </div>
+      ),
+      okText: "确认仍有效",
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          const { data } = await factsApi.batchAckStale(id);
+          const changed = Number(data?.changed) || 0;
+          const gated = Number(data?.gated) || 0;
+          if (changed === 0) {
+            msg.info("没有需要解除的过期标记");
+          } else if (gated > 0) {
+            msg.warning(`已解除 ${changed} 条；其中 ${gated} 条为模拟值/矛盾值，仍需逐条处理`);
+          } else {
+            msg.success(`已解除 ${changed} 条过期标记`);
+          }
+          await loadFacts();
+        } catch (e: any) {
+          msg.error(e.message || "解除失败");
+        }
+      },
+    });
+  };
+
+  /**
+   * ✅ G3（2026-10-04）：单条解除「来源已变化」。供用户逐条核对后确认，
+   * 避免只能「一次性全确认」而跳过复核。后端对模拟值/矛盾值仍保留闸门
+   * （只清 stale、不置已确认），返回的 blocked_reason 原样提示。
+   */
+  const handleAckStaleOne = async (factId: string, title?: string) => {
+    if (!id || !factId) return;
+    try {
+      const { data } = await factsApi.ackStale(factId, id);
+      if (data?.blocked_reason) {
+        msg.warning(data.blocked_reason as string);
+      } else if (data?.changed === false) {
+        msg.info("该事实未被标记为过期");
+      } else {
+        msg.success(`已确认「${title || "该事实"}」仍有效`);
+      }
+      await loadFacts();
+    } catch (e: any) {
+      msg.error(e.message || "解除失败");
+    }
+  };
+
   /** 删除已上传的项目资料文档 */
   const handleDeleteDocument = async (docId: string, fileName: string) => {
     modal.confirm({
@@ -6640,9 +6746,12 @@ const draftKey = selectedSection && id
     try {
       // ✅ 补齐调用链路：把「整理为标准结构」开关与方案名透传后端
       //    （后端 match_template / reorganize_to_standard 依赖 scheme_name）
+      // ✅ 链路修复（2026-10-03）：补传 project_id，使 uploaded_outlines 记录
+      //    建立项目归属链（删项目时才能级联清理；无项目上下文时为空、行为不变）
       const { data } = await uploadOutlineApi.parse(file, {
         scheme_name: scheme?.name || "",
         reorganize: outlineImportReorganize,
+        project_id: scheme?.project_id || "",
       });
       // ✅ 多标段提示（对齐 OpenBidKit bidSectionDetector）
       if (data.multi_section_hint?.has_multiple) {
@@ -7294,15 +7403,11 @@ const draftKey = selectedSection && id
       a.href = url;
       // ✅ 导出文件名统一走后端规则「专项方案名称 + 导出日期 + 导出轮次」：
       //    blob 下载时 a.download 会覆盖响应头 Content-Disposition，故必须显式取用
-      //    后端回传的 X-Export-Filename（百分号编码，这里解码还原）。
-      const nameRaw = (resp.headers?.["x-export-filename"]
-        || resp.headers?.["X-Export-Filename"]) as string | undefined;
-      let downloadName = `${scheme?.name || "方案"}.${format}`;
-      if (nameRaw) {
-        try {
-          downloadName = decodeURIComponent(nameRaw);
-        } catch { /* 解码异常时沿用兜底名，不阻断下载 */ }
-      }
+      //    后端回传的 X-Export-Filename（百分号编码，解码还原）。
+      //    T3：解析逻辑提取为纯函数 resolveExportFilename（可单测），头缺失/解码
+      //    异常时沿用兜底名，不阻断下载（与原行为一致）。
+      const downloadName = resolveExportFilename(
+        resp.headers, `${scheme?.name || "方案"}.${format}`);
       a.download = downloadName;
       // ✅ 修复：① Firefox 要求 <a> 挂在文档中才会触发下载；
       //          ② click() 后同步 revokeObjectURL 会撤销尚未开始的下载
@@ -7320,37 +7425,21 @@ const draftKey = selectedSection && id
         || currentSchemeIdRef.current !== sid
       ) return;
       // 展示图表渲染轨统计（前端 mermaid.js / 后端 mermaid 原生 / 失败）
-      const statsRaw = (resp.headers?.["x-chart-render-stats"] || resp.headers?.["X-Chart-Render-Stats"]) as string | undefined;
-      if (statsRaw) {
-        try {
-          const stats = JSON.parse(statsRaw) as { fe?: number; backend_ok?: number; failed?: number };
-          const parts: string[] = [];
-          if (stats.fe) parts.push(`前端图 ${stats.fe} 张`);
-          if (stats.backend_ok) parts.push(`后端原生 ${stats.backend_ok} 张`);
-          if (stats.failed) parts.push(`失败 ${stats.failed} 张`);
-          if (parts.length) msg.info(`图表渲染：${parts.join(" / ")}`, 5);
-          if (stats.failed && stats.failed > 0) {
-            msg.warning(`${stats.failed} 张图表渲染失败，建议检查图表代码或开启「允许 PIL 兜底」后重试`);
-          }
-        } catch { /* 统计头解析失败不影响导出结果展示 */ }
+      // T3：头部解析与文案拼装提取为纯函数（parseChartRenderStats / chartRenderStatsParts）
+      const stats = parseChartRenderStats(resp.headers);
+      if (stats) {
+        const parts = chartRenderStatsParts(stats);
+        if (parts.length) msg.info(`图表渲染：${parts.join(" / ")}`, 5);
+        if (stats.failed && stats.failed > 0) {
+          msg.warning(`${stats.failed} 张图表渲染失败，建议检查图表代码或开启「允许 PIL 兜底」后重试`);
+        }
       }
       // 展示公式/乱码自动修复统计（导出时后端已内建修复：公式转 Word 数学排版、清理乱码符号）
-      const fixRaw = (resp.headers?.["x-fix-stats"] || resp.headers?.["X-Fix-Stats"]) as string | undefined;
-      if (fixRaw) {
-        try {
-          const fs = JSON.parse(fixRaw) as {
-            formulas?: number; block_formulas?: number; replacement_chars?: number;
-            control_chars?: number; gbk_mojibake?: number; latin1_mojibake?: number; cyrillic?: number;
-          };
-          const parts: string[] = [];
-          if (fs.formulas) parts.push(`公式 ${fs.formulas} 处`);
-          if (fs.replacement_chars) parts.push(`替换字符 ${fs.replacement_chars} 处`);
-          if (fs.control_chars) parts.push(`控制字符 ${fs.control_chars} 处`);
-          if (fs.gbk_mojibake) parts.push(`GBK 乱码 ${fs.gbk_mojibake} 处`);
-          if (fs.latin1_mojibake) parts.push(`编码乱码 ${fs.latin1_mojibake} 处`);
-          if (fs.cyrillic) parts.push(`西里尔误植 ${fs.cyrillic} 处`);
-          if (parts.length) msg.success(`导出前已自动修复：${parts.join(" / ")}`, 6);
-        } catch { /* 统计头解析失败不影响导出结果展示 */ }
+      // T3：头部解析与文案拼装提取为纯函数（parseFixStats / fixStatsParts）
+      const fs = parseFixStats(resp.headers);
+      if (fs) {
+        const parts = fixStatsParts(fs);
+        if (parts.length) msg.success(`导出前已自动修复：${parts.join(" / ")}`, 6);
       }
     } catch (e: any) {
       const canceled = e?.name === "AbortError" || e?.code === "ERR_CANCELED";
@@ -7928,8 +8017,8 @@ const draftKey = selectedSection && id
               type="warning"
               showIcon
               style={{ marginBottom: 12 }}
-              message={`检测到疑似多标段招标文件（约 ${multiSectionHint.total_declared || multiSectionHint.detected_count} 个标段）`}
-              description="当前导入的招标文件可能包含多个标段 / 标包。建议按标段拆分后分别生成方案，避免目录与正文互相混淆。"
+              message={`检测到疑似多标段项目资料（约 ${multiSectionHint.total_declared || multiSectionHint.detected_count} 个标段）`}
+              description="当前导入的项目资料可能包含多个标段 / 标包。建议按标段拆分后分别生成方案，避免目录与正文互相混淆。"
             />
           )}
           {/* 顶部操作区 */}
@@ -8131,11 +8220,19 @@ const draftKey = selectedSection && id
                 )}
                 {/* ✅ BUG 修复（2026-09-27）：过期事实此前既不计入 has_warnings
                     也不展示，用户无法得知「为什么事实没进正文」。资料变更/重新提取
-                    会把旧值标记 is_stale=1 并被注入门控排除，必须显式可见。 */}
+                    会把旧值标记 is_stale=1 并被注入门控排除，必须显式可见。
+                    ✅ G3（2026-10-04）：补「确认仍有效」入口 —— 此前一旦被打上
+                    is_stale=1 就没有任何解除手段（改值/裁决之外），用户核对过
+                    但值未变时只能重跑 AI 提取。 */}
                 {factsSummary.stale > 0 && (
                   <Tooltip title="来源资料已变化或已被重新提取取代，这些事实不会注入正文；请重新提取或人工核对">
                     <Tag color="volcano">🕒 来源过期 {factsSummary.stale}</Tag>
                   </Tooltip>
+                )}
+                {factsSummary.stale > 0 && (
+                  <Button size="small" onClick={handleAckStaleAll}>
+                    我已核对，仍有效
+                  </Button>
                 )}
                 {factsSummary.has_warnings && (
                   <Button size="small" type="primary" danger onClick={handleBatchResolve}>
@@ -8558,6 +8655,7 @@ const draftKey = selectedSection && id
                 onEditItem={openFactItemEdit}
                 onResolveItem={handleResolveFactItem}
                 onResolveConflict={handleResolveConflictItem}
+                onAckStaleOne={handleAckStaleOne}
               />
             </>
           ) : facts.length > 0 ? (
@@ -8569,6 +8667,7 @@ const draftKey = selectedSection && id
               onEditItem={openFactItemEdit}
               onResolveItem={handleResolveFactItem}
               onResolveConflict={handleResolveConflictItem}
+              onAckStaleOne={handleAckStaleOne}
             />
           ) : (
             // ✅ 优化：工具栏（AI 提取/上传/手动新增）始终渲染于列表上方，
@@ -8604,8 +8703,9 @@ const draftKey = selectedSection && id
           shrinking={shrinking}
           hasTree={tree.length > 0}
           hasSelectedSection={!!selectedSection}
-          canShrink={!!selectedSection && !!selectedSection.content &&
-            (selectedSection.word_count || 0) > (selectedSection.word_budget || 1500)}
+          // ✅ 2026-10-04：改走与后端压缩端点同口径的判据（>预算 130%）。
+          //    旧实现按 >预算 判定 → 100%~130% 区间按钮可点、后端必 400。
+          canShrink={canShrinkSection(selectedSection)}
           wordBudgetOption={wordBudgetOption}
           customWordBudget={customWordBudget}
           concurrencyOption={concurrencyOption}
@@ -9290,6 +9390,15 @@ const draftKey = selectedSection && id
           // ✅ 容错与增强开关：默认值与后端 export.py 的 config.get 默认逐项一致
           //    （ai_image_auto_generate=True，其余 False），未改动任何既有行为。
           ai_image_auto_generate: true,
+    // ✅ 2026-10-02（第二十三轮）：专项施工方案法定前置表单四开关。
+    //    默认全 false —— 不传时后端 scheme_forms 规范化为空 dict，
+    //    产物与本轮之前逐字一致（向后兼容）。
+    scheme_forms: {
+      compilation_note: false,
+      approval: false,
+      expert_review: false,
+      drawing_appendix: false,
+    },
           chart_fail_placeholder: false,
           auto_rewrite_content: false,
           auto_fix_unclosed_fences: false,
@@ -9353,7 +9462,13 @@ const draftKey = selectedSection && id
                       </Form.Item>
                     </Col>
                     <Col span={12}>
-                      <Form.Item name="bidder_name" label="投标单位" style={{ marginBottom: 8 }}>
+                      <Form.Item name="bidder_name" label="编制单位" style={{ marginBottom: 8 }}>
+                        {/* ⚠️ 2026-10-01 定位切换：label 由「投标单位」改为「编制单位」——
+                            专项施工方案的封面主体是编制/施工单位，不是投标人。
+                            字段名 bidder_name 保持不变 —— 它是导出 config 的
+                            历史契约（export.py 参数名 + 已存配置），改名字段会
+                            让老方案的封面单位变成空白（AGENTS.md §3.2 禁止破坏契约）。
+                            真正该补的是「编制/审核/批准人」三个岗位字段（见遗留项 L-0）。 */}
                         <Input size="small" placeholder="如：XX建设有限公司" />
                       </Form.Item>
                     </Col>
@@ -9368,7 +9483,7 @@ const draftKey = selectedSection && id
                         label="PIL兜底渲染"
                         valuePropName="checked"
                         style={{ marginBottom: 8 }}
-                        tooltip="默认关闭：图表仅用 mermaid 原生引擎渲染（前端预览同款/后端高清服务），失败时文档中以红字占位提示重新导出，保证渲染质量不降级。开启后失败图表改用内置 PIL 渲染器兜底（版式与预览略有差异）。总平面布置图/里程碑时间线始终使用内置渲染器，不受此开关影响。"
+                        tooltip="默认关闭：图表仅用 mermaid 原生引擎渲染（前端预览同款/后端高清服务），失败图表默认整张跳过且不占图号（成稿不会出现红字报错段，可配合「渲染失败占位」开关定位失败图）。开启后失败图表改用内置 PIL 渲染器兜底（版式与预览略有差异）。总平面布置图/里程碑时间线始终使用内置渲染器，不受此开关影响。"
                       >
                         <Switch size="small" />
                       </Form.Item>
@@ -9440,7 +9555,7 @@ const draftKey = selectedSection && id
                         label="渲染失败占位"
                         valuePropName="checked"
                         style={{ marginBottom: 8 }}
-                        tooltip="开启后图表渲染失败的章节会插入占位段（含图表代码）而非整段跳过，便于人工补图。默认关闭。"
+                        tooltip="开启后渲染失败的图表保留占位（红字图题「图 X-Y — 渲染失败」，图号照占）便于排查定位；默认关闭时失败图表整张跳过且图号回收，交付文档不出现红字。仅影响渲染失败降级方式，不影响正常图表。"
                       >
                         <Switch size="small" />
                       </Form.Item>
@@ -9530,6 +9645,61 @@ const draftKey = selectedSection && id
                       <Col span={12}>
                         <Form.Item name={["cover_info", "版本"]} label="版本" style={{ marginBottom: 8 }}>
                           <Input size="small" placeholder="如：A版 / V1.0" />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    {/* ✅ 2026-10-02（第二十三轮 · L-0）：专项施工方案法定前置表单。
+                        依据住建部令第37号第十一条（审核/审查签字盖章）、
+                        第十二条（专家不得少于 5 名）、第十三条（论证报告三选一结论），
+                        以及建办质〔2018〕31号 第九条（计算书及相关施工图纸）。
+                        全部默认关闭（向后兼容，开启后产物新增对应前置页）。 */}
+                    <Divider orientation="left" style={{ margin: "4px 0 8px" }}>专项施工方案法定前置表单</Divider>
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginBottom: 8, fontSize: 12 }}
+                      message="签字栏一律留空，由各方线下手签；系统不预填人名与证书编号。"
+                      description="审批表依据住建部令第37号第十一条；专家论证报告仅在「超过一定规模的危大工程」时需要，论证结论为通过 / 修改后通过 / 不通过三选一。"
+                    />
+                    <Row gutter={[12, 0]}>
+                      <Col span={12}>
+                        <Form.Item
+                          name={["scheme_forms", "compilation_note"]}
+                          label="编制说明"
+                          valuePropName="checked"
+                          style={{ marginBottom: 8 }}
+                        >
+                          <Switch size="small" />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item
+                          name={["scheme_forms", "approval"]}
+                          label="专项施工方案审批表"
+                          valuePropName="checked"
+                          style={{ marginBottom: 8 }}
+                        >
+                          <Switch size="small" />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item
+                          name={["scheme_forms", "expert_review"]}
+                          label="专家论证报告"
+                          valuePropName="checked"
+                          style={{ marginBottom: 8 }}
+                        >
+                          <Switch size="small" />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item
+                          name={["scheme_forms", "drawing_appendix"]}
+                          label="施工图纸附件清单"
+                          valuePropName="checked"
+                          style={{ marginBottom: 8 }}
+                        >
+                          <Switch size="small" />
                         </Form.Item>
                       </Col>
                     </Row>

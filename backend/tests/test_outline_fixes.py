@@ -614,6 +614,16 @@ class TestReviewAndFixOutline:
 
         monkeypatch.setattr(sh, "render", lambda *a, **k: "PROMPT")
         monkeypatch.setattr(sh, "collect_json_response", fake_collect)
+        # ✅ 2026-10-02（第二十五轮）：本组用例测的是**审核结果容错 / 自动修复**
+        #   链路（AI 审核 → 修复 → 建议归一化），必须走到 AI 审核那一步。
+        #   但本轮把程序化覆盖预检的门控改为「恒定参与」（不再要求填写编制要求），
+        #   单章目录会先被正确判为缺九章而走外科补齐 → 测不到目标链路。
+        #   故：① 关闭 outline_checkpoint_check（= 回到本轮前的门控，
+        #   即「未填编制要求 → 跳过程序化预检 → 走 AI 审核」），
+        #   ② 保留 requirements="" / basis=None 与之配对。
+        #   ⚠️ 这是**测试范围界定**，不是掩盖缺陷：九章覆盖由
+        #   tests/test_outline_checkpoint_20261002.py 单独、显式地测。
+        monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False)
         outline = [{"title": "工程概况", "description": "", "children": []}]
         return await sh._review_and_fix_outline(
             outline, "深基坑", True, "摘要", scheme_name="方案",

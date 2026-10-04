@@ -59,6 +59,22 @@ describe("stripOutlineNumbering（剥离标题内嵌编号）", () => {
     expect(stripOutlineNumbering("3D打印技术")).toBe("3D打印技术");
   });
 
+  // ✅ BUG 修复（2026-10-03 · 数量型标题丢首字，与后端 numbering.py 同步）：
+  //    点分编号分支捕获回退成 `*`（星号）时会把「单段数字紧邻中文（无分隔符）」
+  //    当编号剥离，剥掉数量："2层作业平台" → "层作业平台"。限定为至少一个点段
+  //    后原样保留；多段点分路径紧邻 CJK（"2.4.1钢筋工程"）仍整条剥离。
+  it("数量型标题（单段数字紧邻中文）不被误剥首字", () => {
+    expect(stripOutlineNumbering("2层作业平台")).toBe("2层作业平台");
+    expect(stripOutlineNumbering("2台塔吊")).toBe("2台塔吊");
+    expect(stripOutlineNumbering("10个人")).toBe("10个人");
+    expect(stripOutlineNumbering("1级配电")).toBe("1级配电");
+  });
+
+  it("多段点分路径紧邻中文（无空格）仍整条剥离", () => {
+    expect(stripOutlineNumbering("2.4.1钢筋工程")).toBe("钢筋工程");
+    expect(stripOutlineNumbering("3.2.4.5钢筋")).toBe("钢筋");
+  });
+
   it("整条标题就是编号时回退原文（避免清空）", () => {
     expect(stripOutlineNumbering("第一章")).toBe("第一章");
   });

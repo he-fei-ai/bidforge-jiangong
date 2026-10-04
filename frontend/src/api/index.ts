@@ -229,6 +229,21 @@ export const sectionsApi = {
   /** 重置正文：清空目录树中所有章节已生成正文（目录结构保留，不可恢复） */
   resetContent: (schemeId: string) =>
     api.post(`/schemes/${schemeId}/sections/reset-content`),
+  /** 目录 AI 自然语言调整：**不落库**，返回待确认新树 + 变更总结，确认后仍走 saveOutline */
+  adjustOutline: (schemeId: string, instruction: string) =>
+    api.post(`/schemes/${schemeId}/sections/adjust-outline`, { instruction }),
+  // ✅ 编号一致性（2026-10-04 接线）：后端 4 个端点早已实现（校验 / 修复 /
+  //    版本列表 / 回滚），此前前端零封装 —— 用户无从发现「落库正文子标题编号
+  //    与当前目录编号漂移」（D4 类问题），导出前也没有自救入口。
+  numberingConsistency: (schemeId: string) =>
+    api.get(`/schemes/${schemeId}/sections/numbering-consistency`),
+  repairNumbering: (schemeId: string) =>
+    api.post(`/schemes/${schemeId}/sections/numbering-consistency/repair`),
+  numberingVersions: (schemeId: string, limit = 20) =>
+    api.get(`/schemes/${schemeId}/sections/numbering-consistency/versions`,
+      { params: { limit } }),
+  rollbackNumbering: (schemeId: string, snapshotId: string) =>
+    api.post(`/schemes/${schemeId}/sections/numbering-consistency/rollback/${snapshotId}`),
   /** F-CONTENT-STANDARD(2026-09-26)：单个章节最近一次生成标准校验报告 */
   report: (schemeId: string, sectionId: string) =>
     api.get(`/schemes/${schemeId}/sections/report/${sectionId}`),
@@ -270,7 +285,7 @@ export const outlineLibraryApi = {
 
 // 上传目录识别
 export const uploadOutlineApi = {
-  parse: (file: File, params?: { scheme_name?: string; reorganize?: boolean }) => {
+  parse: (file: File, params?: { scheme_name?: string; reorganize?: boolean; project_id?: string }) => {
     const form = new FormData();
     form.append("file", file);
     const qs: string[] = [];
@@ -280,6 +295,10 @@ export const uploadOutlineApi = {
     //    这个能力（后端已实现 + 有单测）在真实前端链路上**永不生效**。
     //    现按「是否显式传入」透传，true/false 均如实发送。
     if (params?.reorganize !== undefined) qs.push(`reorganize=${params.reorganize}`);
+    // ✅ 链路修复（2026-10-03）：透传 project_id 建立上传记录 ↔ 项目的归属链
+    //    （后端据此落库，删项目时才能级联清理 uploaded_outlines）；
+    //    仅在显式传入且非空时发送，目录库弹窗等无项目上下文入口行为不变。
+    if (params?.project_id) qs.push(`project_id=${encodeURIComponent(params.project_id)}`);
     const url = "/upload-outline/parse" + (qs.length ? `?${qs.join("&")}` : "");
     return api.post(url, form, {
       headers: { "Content-Type": "multipart/form-data" },
@@ -315,6 +334,16 @@ export const factsApi = {
       { params: { scheme_id: schemeId || "" } }),
   batchResolve: (schemeId: string, factIds?: string[]) =>
     api.post("/global-facts/batch-resolve", { scheme_id: schemeId, fact_ids: factIds }),
+  // ✅ G3（2026-10-04）：解除「来源已变化」过期标记。
+  //    后端 `_mark_project_facts_stale` 是**项目级**批量打标的，一次资料重传
+  //    就可能让上百条事实同时过期；而解除入口此前只有「改值」与「裁决矛盾」
+  //    两条（都要求值必须先变），resolve / batch-resolve 对 stale 行还直接跳过 ——
+  //    用户核对过但值未变时无任何出路。这两个端点表达「我已核对，值仍然有效」。
+  ackStale: (factId: string, schemeId?: string) =>
+    api.patch(`/global-facts/${factId}/ack-stale`, {},
+      { params: { scheme_id: schemeId || "" } }),
+  batchAckStale: (schemeId: string, factIds?: string[]) =>
+    api.post("/global-facts/ack-stale", { scheme_id: schemeId, fact_ids: factIds }),
   delete: (id: string, schemeId?: string) =>
     api.delete(`/global-facts/${id}`, { params: { scheme_id: schemeId || "" } }),
   // ✅ 一键清除全部已提取的项目信息（含增量提取进度重置，2026-09-17）
@@ -477,7 +506,7 @@ export const bidAnalysisApi = {
       params: { scheme_id: schemeId, project_id: projectId },
     }),
   /**
-   * 查询多标段检测结果与当前选中的投标范围。
+   * 查询多标段检测结果与当前选中的施工范围。
    *
    * 返回 needs_selection（多标段但未选择 → 前端应提示用户选择）与
    * context_hint（该选择会被注入 AI 的原文，便于向用户解释影响）。
@@ -612,27 +641,11 @@ export const complianceApi = {
     api.post(`/compliance/consistency-audit/${schemeId}`, null, { timeout: 300000 }),
   consistencyLatest: (schemeId: string) =>
     api.get(`/compliance/consistency-audit/${schemeId}/latest`),
-  /**
-   * 一致性审计历史趋势。
-   * @deprecated 孤儿 API：本前端无调用方（后端保留兼容）；大版本评估清理。
-   */
-  consistencyHistory: (schemeId: string) =>
-    api.get(`/compliance/consistency-audit/${schemeId}/history`),
+  // 一致性审计历史趋势端点（/history）的前端消费已下线（2026-10-03 孤儿 API
+  // 清理：全仓零调用方；后端端点保留，脚本/手工诊断可直接请求）。
   // ===== 商业级增强：规则目录 / 程序化预检 / 就绪度总览 / 整改报告 =====
   /** 全量审核规则目录（含行业依据），用于「规则说明」抽屉与用户自查 */
   rules: () => api.get("/compliance/rules"),
-  /**
-   * 维度目录。
-   * @deprecated 孤儿 API：本前端无调用方（UI 已改用 /overview 的 dimensions）；大版本评估清理。
-   */
-  dimensions: () => api.get("/compliance/dimensions"),
-  /**
-   * 程序化预检：确定性规则，无需 AI，秒级返回。
-   * @deprecated 孤儿 API：本前端走 /overview（内部已含程序化预检且带落库+缓存）；
-   * 端点保留供脚本/手工诊断，后端已补幂等锁+缓存；大版本评估清理。
-   */
-  preflight: (schemeId: string) =>
-    api.post(`/compliance/preflight/${schemeId}`, null, { timeout: 120000 }),
   /** 就绪度总览：聚合程序化预检 + 导出预检 + AI 检查 + 一致性审计 + 专家预检，给出总分与放行结论。
    *  ✅ G2：force=true 时后端强制重算（否则同内容指纹下会命中服务端缓存） */
   overview: (schemeId: string, force = false) =>
@@ -649,11 +662,8 @@ export const complianceApi = {
 
 /** 方案 / 章节审核工作流（PRD §3.12.5） */
 export const reviewApi = {
-  /**
-   * 审核状态值域与合法流转表。
-   * @deprecated 孤儿 API：本前端无调用方（状态机常量已镜像在 types/audit.ts）；大版本评估清理。
-   */
-  statuses: (schemeId: string) => api.get(`/schemes/${schemeId}/review/statuses`),
+  // 审核状态值域端点（/statuses）的前端消费已下线（2026-10-03 孤儿 API
+  // 清理：状态机常量已镜像在 types/audit.ts，全仓零调用方）。
   summary: (schemeId: string) => api.get(`/schemes/${schemeId}/review/summary`),
   checklist: (schemeId: string) => api.get(`/schemes/${schemeId}/review/checklist`),
   reviewSection: (
@@ -976,6 +986,66 @@ export function parseSseEventBlock(block: string): { data?: string; heartbeat: b
   return { data: data.length ? data.join("\n") : undefined, heartbeat };
 }
 
+/** 把 SSE 端点的 HTTP 错误响应体解析为人类可读的错误消息。
+ *
+ * FastAPI 的校验失败（422）返回 `{"detail": [{loc, msg, type}, ...]}` ——
+ * 是**数组**而非字符串；普通业务错误（404/409/400…）才返回
+ * `{"detail": "中文消息"}`。旧实现只认后者，于是 422 时用户只会看到
+ * 「SSE 请求失败: 422」，无法定位是缺哪个参数（历史事故：装饰器错位让
+ * generate-facts 恒 422，前端零线索，全靠翻后端日志）。
+ * 本助手把 422 明细逐条翻译成中文，其余形态保持原样兜底。
+ */
+function describeSseHttpError(status: number, data: any): string {
+  const base = `SSE 请求失败 (${status})`;
+  if (!data || typeof data !== "object") return base;
+  const detail = data.detail;
+  if (typeof detail === "string" && detail.trim()) {
+    return `${base}: ${detail.trim()}`;
+  }
+  if (Array.isArray(detail)) {
+    const scopeCn: Record<string, string> = {
+      path: "路径参数",
+      query: "查询参数",
+      body: "请求体字段",
+    };
+    const parts: string[] = [];
+    for (const item of detail) {
+      if (!item || typeof item !== "object") continue;
+      const locParts = Array.isArray(item.loc)
+        ? item.loc.map(String).filter(Boolean)
+        : [];
+      const field = locParts.length > 1 ? locParts[locParts.length - 1] : "";
+      const scopeLabel = locParts[0] ? scopeCn[locParts[0]] : "";
+      const msg = typeof item.msg === "string" ? item.msg : "";
+      let desc: string;
+      if (msg.toLowerCase() === "field required") {
+        desc = scopeLabel && field ? `缺少必填${scopeLabel} “${field}”` : "缺少必填参数";
+      } else if (msg) {
+        desc = scopeLabel && field ? `${scopeLabel} “${field}” 校验失败：${msg}` : msg;
+      } else {
+        desc = "参数校验失败";
+      }
+      parts.push(desc);
+    }
+    if (parts.length) {
+      return `${base}: ${parts.join("；")}`;
+    }
+  }
+  return base;
+}
+
+/** 读取错误响应体并生成可读消息（响应体非 JSON 时保持默认信息） */
+async function readSseHttpError(resp: Response): Promise<string> {
+  const fallback = `SSE 请求失败: ${resp.status}`;
+  try {
+    const data = await resp.json();
+    const detail = describeSseHttpError(resp.status, data);
+    return detail || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export async function* sseFetch(
   url: string,
   body?: any,
@@ -1029,14 +1099,9 @@ export async function* sseFetch(
     options?.signal?.removeEventListener("abort", onOuterAbort);
   }
   if (!resp.ok) {
-    let detail = `SSE 请求失败: ${resp.status}`;
-    try {
-      const data = await resp.json();
-      if (data?.detail && typeof data.detail === "string") detail = data.detail;
-    } catch {
-      // 响应体非 JSON，保持默认信息
-    }
-    throw new Error(detail);
+    // ✅ 2026-10-03：422 校验明细（detail 为数组）此前被丢弃，用户只看到
+    //    「SSE 请求失败: 422」无从定位 —— 统一走 describeSseHttpError 翻译。
+    throw new Error(await readSseHttpError(resp));
   }
   if (!resp.body) {
     throw new Error("SSE 响应体为空");
@@ -1157,7 +1222,9 @@ export async function* sseGetStream(
     if (options?.signal) options.signal.removeEventListener("abort", onOuterAbort);
   }
   if (!resp.ok) {
-    throw new Error(`SSE 请求失败: ${resp.status}`);
+    // ✅ 2026-10-03：与 sseFetch 同口径 —— 422 校验明细（detail 数组）翻译成
+    //    可读消息，避免只看到裸状态码（此前 sseGetStream 连 detail 字符串都不解析）。
+    throw new Error(await readSseHttpError(resp));
   }
   if (!resp.body) {
     throw new Error("SSE 响应体为空");

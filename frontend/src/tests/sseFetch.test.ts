@@ -124,6 +124,51 @@ describe("sseFetch", () => {
     ).rejects.toThrow("方案不存在");
   });
 
+  // ✅ 2026-10-03 事故回归（全局事实提取恒 422）：FastAPI 校验失败的
+  //    detail 是**数组**，旧实现只认字符串 → 用户只看到「SSE 请求失败: 422」，
+  //    无法定位缺哪个参数。现在必须把明细翻译成可读消息。
+  it("422 校验明细（detail 数组）翻译成可读消息而非裸状态码", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            detail: [
+              { loc: ["query", "db"], msg: "field required", type: "missing" },
+              { loc: ["path", "scheme_id"], msg: "string to strict", type: "string_type" },
+            ],
+          }),
+          { status: 422 }
+        )
+      )
+    );
+
+    await expect(
+      (async () => {
+        for await (const _ of sseFetch("/sse/generate-facts/x")) {
+          // noop
+        }
+      })()
+    ).rejects.toThrow(/缺少必填查询参数 “db”/);
+  });
+
+  it("422 明细缺失/响应体非 JSON 时回退默认消息", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("not json", { status: 422, headers: { "Content-Type": "text/plain" } })
+      )
+    );
+
+    await expect(
+      (async () => {
+        for await (const _ of sseFetch("/t")) {
+          // noop
+        }
+      })()
+    ).rejects.toThrow("SSE 请求失败");
+  });
+
   // ✅ 2026-09-23 事故回归：后端进程挂死时 TCP 可连上但响应头永不到达，
   //    旧实现 fetch 无限悬挂 → 用户点「生成目录」停在「正在连接...」无任何报错。
   it("后端无响应（响应头超时）时抛出明确的连接超时错误", async () => {

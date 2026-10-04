@@ -10,7 +10,11 @@
 设计约束
 --------
 - 清洗只作用于 **AI 生成的正文**，不改动用户手工编辑内容（调用方控制）。
-- 清洗**跳过 ``` 围栏内的图表代码块**（Mermaid / chart-json），避免破坏图表语法。
+- 清洗**跳过 ``` 与 ~~~ 围栏内的图表代码块**（Mermaid / chart-json / ai_image），
+  避免破坏图表语法。两种围栏均与正文生成 / 登记 / 导出三侧的唯一围栏口径
+  （content_utils._FENCE_LINE_RE）保持一致 —— 模型可能输出 ``~~~mermaid`` 围栏，
+  旧实现只识别 ``` 围栏，会把 ~~~ 围栏里的图表代码当散文清洗（"咱们"→"施工项目部"
+  等），直接破坏成稿图表。
 - 规则均为"保守替换"：不改变技术含义，不删减数据，不做整句重写。
 
 使用方式：
@@ -90,8 +94,11 @@ AI_TONE_RULES: list[tuple[str, str]] = [
 # 句末语气助词（位于句读标点之后，口语残留）
 _TAIL_PARTICLE_RE = re.compile(r"(?<=[。！？])[哦啦呀嘛呗呢喽]+(?=[，。！？\s]|$)")
 
-# 围栏代码块（Mermaid / chart-json）保护：split 后奇数位为代码
-_FENCE_SPLIT_RE = re.compile(r"(```[\s\S]*?```)")
+# 围栏代码块（Mermaid / chart-json / ai_image）保护：反引号与波浪号两种围栏
+# ✅ 2026-10-03 修复（正文生成·图表清洗口径分叉）：旧正则只认 ``` 围栏，
+#    模型输出的 ~~~mermaid 围栏会被当普通文本清洗，破坏成稿图表语法。
+#    两种围栏同口径受保护（与 sse_handlers / chart_pipeline / export 三侧一致）。
+_FENCE_SPLIT_RE = re.compile(r"(```[\s\S]*?```|~~~[\s\S]*?~~~)")
 # GFM 表格行（行首可选空白 + |）：表格单元格内的专业数据/造价词
 # （估算/概算/预算/估计值等）是结构化数据，清洗规则不得改写。
 # 兼容 CRLF（split("\n") 后行尾残留 \r）。
@@ -122,7 +129,7 @@ def _table_ranges(text: str) -> list[tuple[int, int]]:
     if tbl_start >= 0:
         ranges.append((tbl_start, tbl_end))
 
-    if "```" not in text:
+    if not _FENCE_SPLIT_RE.search(text):
         return ranges
     # 排除落在围栏代码块内的区间（代码块里以 | 开头的行不是 Markdown 表格）
     fences = [(m.start(), m.end()) for m in _FENCE_SPLIT_RE.finditer(text)]
@@ -197,7 +204,7 @@ def sanitize_ai_content(text: str) -> str:
     if not text or not text.strip():
         return text
 
-    has_protected = "```" in text or any(
+    has_protected = bool(_FENCE_SPLIT_RE.search(text)) or any(
         _TABLE_LINE_RE.match(ln) for ln in text.split("\n"))
     if not has_protected:
         return _apply_rules(text)
@@ -207,7 +214,7 @@ def sanitize_ai_content(text: str) -> str:
 
 def _strip_fences(text: str) -> str:
     """剔除围栏代码块与表格（其中的英文拼音/注释/专业数据会被误判口语化）。"""
-    if "```" not in text and not any(
+    if not _FENCE_SPLIT_RE.search(text) and not any(
         _TABLE_LINE_RE.match(ln) for ln in text.split("\n")):
         return text
     ranges = _protected_ranges(text)

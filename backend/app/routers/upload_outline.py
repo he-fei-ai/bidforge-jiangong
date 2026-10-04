@@ -7,11 +7,13 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 
 from app.db import get_db
-from app.services.ai.json_response import collect_json_response
+from app.services.ai.json_response import (
+    OUTLINE_REPAIR_KEY, collect_json_response,
+)
 from app.services.ai.prompts._registry import render
 from app.services.file_parser import (
     parse_file_content_ex, signature_valid, simple_parse_outline,
-    SUPPORTED_EXTENSIONS, ParseError, dump_parse_warnings,
+    SUPPORTED_EXTENSIONS, ParseError, dump_parse_warnings, MAX_UPLOAD_BYTES,
 )
 from app.services.bid_section_detector import detect_bid_sections
 
@@ -71,6 +73,7 @@ def _outline_seems_valid(outline: list) -> bool:
 async def parse_outline(file: UploadFile = File(...),
                         scheme_name: str = Query(""),
                         reorganize: bool = Query(False),
+                        project_id: str = Query(""),
                         db=Depends(get_db)):
     """上传文件并识别目录结构。
 
@@ -83,14 +86,35 @@ async def parse_outline(file: UploadFile = File(...),
       - `reorganize=False`（默认）：保持既有行为（识别结果 = 上传文档结构的镜像）；
       - `reorganize=True`：识别结果先经 reorganize_to_standard 归位到标准章节骨架，
         再把报告随响应返回（report/template 供前端提示"已整理为标准结构"）。
-    默认值取 False 以保持向后兼容，避免未显式要求时改变既有识别结果。
+        默认值取 False 以保持向后兼容，避免未显式要求时改变既有识别结果。
+
+    ✅ 链路断裂修复（2026-10-03）：``uploaded_outlines.project_id`` 列自建表起
+    就存在，且 R32 已把该表登记进 ``projects._PROJECT_SCOPED_TABLES``（按
+    project_id 级联清理）—— 但写入侧从未给它赋值：本路由 INSERT 不含该列、
+    save-as-outline 只回写 scheme_id，导致所有新记录 project_id 恒为空串，
+    「删项目清掉上传识别记录」对真实链路**形同虚设**（DELETE 匹配 0 行）。
+    现接线：
+      - ``project_id``（默认空，向后兼容）：传入时校验存在性并随识别记录
+        落库，建立「上传记录 ↔ 项目」的归属链；未传（如目录库编辑弹窗的
+        无项目上下文入口）保持历史空值行为不变。
+      - save-as-outline 另补 scheme 反查回写（见该函数），覆盖历史无链记录
+        被保存时机的自愈。
     """
-    # ✅ BUG 修复：旧实现一次性 await file.read() 无任何大小上限，超大文件会把
-    #    整个内容读进内存（OOM 风险），且 UploadFile 从不显式 close。
-    #    现分块读取，超过 30MB 直接 413 拒绝，并在 finally 中关闭文件句柄。
-    # ✅ 性能：累加改为「先收集分块、最后一次 join」——旧实现 `content += chunk`
-    #    对 bytes 是不可变拼接，30MB 文件会反复整体拷贝（O(n²)）。
-    MAX_UPLOAD_BYTES = 30 * 1024 * 1024
+    # ✅ 非字符串默认值守卫：与 _resolve_project_id 同因 —— 直接以函数方式
+    #    调用路由（既有单测风格）时 Query("") 会以对象形式落入默认位，
+    #    str() 化得到假值，非字符串一律按「未提供」处理。
+    _pid = project_id.strip() if isinstance(project_id, str) else ""
+    if _pid:
+        _cur = await db.execute("SELECT id FROM projects WHERE id=?", (_pid,))
+        if not await _cur.fetchone():
+            raise HTTPException(404, "项目不存在，无法建立上传记录归属链")
+    # ✅ BUG 修复（历史）：旧实现一次性 await file.read() 无任何大小上限，
+    #    超大文件会把整个内容读进内存（OOM 风险），且 UploadFile 从不显式
+    #    close。现分块读取，超过上限直接 413 拒绝，并在 finally 中关闭文件
+    #    句柄；上限读 settings.upload_max_bytes（默认 30MB，见
+    #    file_parser.MAX_UPLOAD_BYTES）。累加采用「先收集分块、最后一次 join」
+    #    ——旧实现 `content += chunk` 对 bytes 是不可变拼接，30MB 文件会反复
+    #    整体拷贝（O(n²)）。
     chunks: list[bytes] = []
     total = 0
     try:
@@ -100,7 +124,11 @@ async def parse_outline(file: UploadFile = File(...),
                 break
             total += len(chunk)
             if total > MAX_UPLOAD_BYTES:
-                raise HTTPException(413, "文件过大，请上传 30MB 以内的文件")
+                _mb = MAX_UPLOAD_BYTES // (1024 * 1024)
+                raise HTTPException(
+                    413,
+                    f"文件过大，请上传 {_mb}MB 以内的文件"
+                    if _mb else "文件过大，请上传更小的文件")
             chunks.append(chunk)
     finally:
         await file.close()
@@ -166,7 +194,8 @@ async def parse_outline(file: UploadFile = File(...),
             obj, _ = await collect_json_response(
                 [{"role": "system", "content": sys_prompt}],
                 lambda o: [] if o.get("outline") else ["缺少 outline"],
-                scene="outline_recognition")
+                scene="outline_recognition",
+                repair_key=OUTLINE_REPAIR_KEY)
             ai_outline = obj.get("outline", [])
             if _outline_seems_valid(ai_outline):
                 outline = ai_outline
@@ -222,9 +251,9 @@ async def parse_outline(file: UploadFile = File(...),
     rid = str(uuid.uuid4())
     raw_truncated = len(raw_text) > 5000
     await db.execute(
-        "INSERT INTO uploaded_outlines (id, file_name, file_type, raw_text, parsed_json, confidence, status, parse_warnings)"
-        " VALUES (?,?,?,?,?,?,?,?)",
-        (rid, fname, ftype, raw_text[:5000], json.dumps({"outline": outline}, ensure_ascii=False),
+        "INSERT INTO uploaded_outlines (id, project_id, file_name, file_type, raw_text, parsed_json, confidence, status, parse_warnings)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
+        (rid, _pid, fname, ftype, raw_text[:5000], json.dumps({"outline": outline}, ensure_ascii=False),
          confidence, "parsed", dump_parse_warnings(parse_warnings)))
     await db.commit()
 
@@ -452,7 +481,12 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     await db.execute(
         "UPDATE schemes SET outline_source='上传识别', status='目录已确认', updated_at=? WHERE id=?",
         (datetime.now().isoformat(), scheme_id))
-    await db.execute("UPDATE uploaded_outlines SET scheme_id=?, status='saved' WHERE id=?", (scheme_id, upload_id))
+    # ✅ 链路断裂修复（2026-10-03）：同步回写 project_id（取自方案反查）——
+    #    否则历史/无项目上下文入口产生的空 project_id 记录在方案保存后
+    #    仍不被删项目级联覆盖（R32 的显式 DELETE 按 project_id 匹配 0 行）。
+    await db.execute(
+        "UPDATE uploaded_outlines SET scheme_id=?, project_id=?, status='saved' WHERE id=?",
+        (scheme_id, project_id or "", upload_id))
     # ✅ 整表重建后作废一致性扫描缓存（与 /save-outline 同口径，2026-09-23）
     from app.routers.sections import invalidate_consistency_scan_cache
     await invalidate_consistency_scan_cache(db, scheme_id)
@@ -490,6 +524,14 @@ async def save_as_library(upload_id: str, body: dict, db=Depends(get_db)):
         normalized_nodes = []
     if not isinstance(normalized_nodes, list) or not normalized_nodes:
         raise HTTPException(400, "识别结果为空或节点格式非法，无法存入目录库")
+    # ✅ BUG 修复（2026-10-03 · 跨模块契约一致性）：旧实现从不校验 upload_id 是否
+    #    存在，伪造/过期的 id 会静默命中 `UPDATE ... WHERE id=?`（0 行受影响）并
+    #    返回 {"ok": True} —— 调用方误以为保存成功，实则未关联任何上传记录。
+    #    与 save_as_outline（先查 uploaded_outlines 再查 schemes，均 404）同口径：
+    #    空 outline 的 400 优先级更高，故放到该检查之后。
+    cur = await db.execute("SELECT id FROM uploaded_outlines WHERE id=?", (upload_id,))
+    if not await cur.fetchone():
+        raise HTTPException(404, "上传记录不存在")
     lid = str(uuid.uuid4())
     await db.execute(
         "INSERT INTO outline_library (id, name, source, outline_json, review_status)"

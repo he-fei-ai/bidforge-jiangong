@@ -190,6 +190,31 @@ def _resolve_pdf_max_pages(default: int = 50) -> int:
     return n if n > 0 else default
 
 
+def _resolve_upload_max_bytes(default: int = 30 * 1024 * 1024) -> int:
+    """读取上传文件大小上限（``settings.upload_max_bytes``）。
+
+    与 ``_resolve_pdf_max_pages`` 同口径：配置不可用时回落默认，
+    非正数一律回落默认（0/负数会让「超过即拒绝」永远不触发，等价于放行
+    任意大小文件，反而更危险）。
+    """
+    try:
+        from app.config import settings
+        raw = getattr(settings, "upload_max_bytes", default)
+    except Exception:  # pragma: no cover - 配置不可用时保持旧行为
+        return default
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return n if n > 0 else default
+
+
+#: 上传单文件大小上限（目录识别上传路由 upload_outline.parse_outline 读取）。
+#: 模块级常量：全部调用点按模块全局读取，故既有
+#: ``monkeypatch.setattr(fp, "MAX_UPLOAD_BYTES", N)`` 的单测全部照常生效。
+MAX_UPLOAD_BYTES = _resolve_upload_max_bytes()
+
+
 # ⚠️ 修复（2026-09-30 第十四轮 · P0 数据丢失）：旧值是**硬编码 50**且不可配置。
 #    招标文件 / 施工组织设计常见 100~400 页 —— 一份 300 页的招标文件只提取前
 #    50 页，**后面 250 页的工程参数、清单、图纸说明全部丢失**，且不会进入

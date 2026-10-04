@@ -28,6 +28,8 @@ _reg("outline_short_system", "outline", "三级目录一次性生成（短方案
 7. 返回标准 JSON 格式，结构为：{"outline": [{"title": "...", "description": "...", "children": [{"title": "...", "description": "...", "children": [{"title": "...", "description": "...", "children": []}]}]}]}
 8. 除了 JSON 结果外，不要输出任何其他内容
 
+{outline_checkpoint_block}
+
 {SHARED_SCOPE_RULES}
 
 {SHARED_FORBIDDEN_WORDS}
@@ -56,6 +58,8 @@ _reg("outline_level1_system", "outline", "一级目录生成（长方案分步�
 5. 返回标准 JSON 格式：{"outline": [{"title": "...", "description": "...", "children": []}]}
 6. 除了 JSON 结果外，不要输出任何其他内容
 
+{outline_checkpoint_block}
+
 {SHARED_SCOPE_RULES}
 
 {SHARED_FORBIDDEN_WORDS}
@@ -72,11 +76,13 @@ _reg("outline_sublevel_system", "outline", "二三级目录补全（长方案分
 【其他章节标题（避免重复）】：{other_outline}
 【已生成的前序章节小节（严禁与之重复）】：{prior_chapters}
 【编制要求（本章二三级目录须覆盖与本章相关的条目）】：{requirements}
+【编制依据规范（按本方案类别匹配，仅可引用，禁杜撰编号与已废止版本）】：{standards_text}
 
 要求：
 1. 只针对本章内容设计二级、三级目录，**严禁生成第四级及更深层级**
 2. 二级标题编号必须以当前一级目录编号 {chapter_id} 为前缀，例如 {chapter_id}.1、{chapter_id}.2；三级以此类推（程序最终会统一重排，你只需保证层级正确）
 2.1 本章若承载【方案名称主要施工内容】中的某项内容，二三级小节必须落实到该项内容的具体工序/部位/参数，不得用通用小节充数
+2.2 【编制依据规范】中与本章相关的标准章节，宜作为该章骨架依据；若本章需要落到具体标准条文（如监测、验算、验收），只可引用清单内编号
 3. 章节之间不得重复，注意避开"其他章节标题"与"已生成的前序章节小节"中已有的内容（编制依据、施工准备、安全保证措施等同名小节若确需保留，标题应体现本章差异化内容）
 4. 每个节点包含 title、description（30字以内）
 5. 返回标准 JSON 格式：{"outline": [{"title": "...", "description": "...", "children": [...]}]}
@@ -98,6 +104,8 @@ _reg("outline_review_system", "outline", "目录审核", """你是专项方案�
 【项目关键事实】：{project_facts}
 【目录】：{outline_json}
 
+{outline_checkpoint_block}
+
 审核要点：
 0. 一级章节是否完整对应【方案名称主要施工内容】：任何一项施工内容在目录中没有落点，即判 passed=false 并建议补充对应章节（仅当目录确实脱离方案范围时判不合格，通用必要章节不得要求删除）
 0.1 若提供了【方案名称解析】：其中列出的每一项**施工工序 / 施工工艺**是否都有对应的二/三级章节落点？三级标题是否具体到【施工对象】（部位/构件）而非笼统通用标题？任一项缺失即判 passed=false 并列出缺失项
@@ -110,6 +118,7 @@ _reg("outline_review_system", "outline", "目录审核", """你是专项方案�
 6. 层级是否超限：目录最多三级，若出现第四级及更深层级应判为不合格并建议收敛
 7. 标题质量：是否存在命中禁用词的空泛笼统标题（如“主要内容”“安全保证措施”类二级/三级通用标题）、同级重复或跨章重复标题
 8. 文件性质：专项施工方案不是投标文件，若出现“招标文件与技术标准要求”“投标文件与评分办法”“商务条款与报价”等投标场景章节，应判为不合格并建议删除或改写为“设计文件与合同依据”等技术性表述
+{outline_checkpoint_audit_hint}
 9. 只返回 JSON，格式为：{"passed": true, "suggestions": ["建议1", "建议2"]}
 10. 【合并修复输出】若结论为 passed=false，且调用方在追加指令中要求合并修复，则必须在同一 JSON 中额外输出 "fixed_outline" 字段：按 suggestions 修正后的**完整三级目录数组**（与输入目录同结构，含全部原有章节及修正结果，不得只返回新增/修改部分，节点 description 保持原文不要改写）；passed=true 时不要输出 fixed_outline""")
 
@@ -258,12 +267,14 @@ _reg("outline_sublevel_batch_system", "outline", "二三级目录批量补全（
 【其他章节标题（避免重复）】：{other_outline}
 【已生成的前序章节小节（严禁与之重复）】：{prior_chapters}
 【编制要求（各章二三级目录须覆盖与本章相关的条目）】：{requirements}
+【编制依据规范（按本方案类别匹配，仅可引用，禁杜撰编号与已废止版本）】：{standards_text}
 
 【待生成章节列表】：
 {chapters_text}
 
 要求：
 1. 逐章设计：每章 2-3 个二级目录，每个二级目录 1-3 个三级目录；**严禁生成第四级及更深层级**；章节承载【方案名称主要施工内容】中某项内容的，小节必须落实到该项的具体工序/部位/参数
+1.1 【编制依据规范】中与该章相关的标准章节，宜作为该章骨架依据；需落到具体标准条文的，只可引用清单内编号
 2. 章节之间不得重复，注意避开"其他章节标题"与"已生成的前序章节小节"中已有的内容（同名小节若确需保留，标题应体现本章差异化内容）
 3. 每个节点包含 title、description（30字以内）
 4. 返回标准 JSON 格式：{"chapters": [{"chapter_id": "3", "outline": [{"title": "...", "description": "...", "children": [...]}]}]}
@@ -273,3 +284,4 @@ _reg("outline_sublevel_batch_system", "outline", "二三级目录批量补全（
 {SHARED_SCOPE_RULES}
 
 {SHARED_FORBIDDEN_WORDS}""")
+

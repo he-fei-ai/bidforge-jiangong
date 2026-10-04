@@ -154,12 +154,16 @@ class FactGroupUpdate(BaseModel):
 
 # ---------- AI 配置 ----------
 class AIConfigIn(BaseModel):
-    id: str = ""
-    provider_name: str
-    plan: str = "pay_as_you_go"  # 计费方式：pay_as_you_go（按量计费）/ coding_plan（包月套餐）
-    api_key: str = ""
-    base_url: str = ""
-    model: str = ""
+    # ✅ 长度约束（本轮增强）：此前所有字符串字段无上限，超长脏值（如误把
+    #    整段 JSON 粘进 model）会原样入库并一路带到厂商请求头/请求体。
+    #    上限取宽松工程值，既有合法数据均在限内（向后兼容）。
+    id: str = Field("", max_length=64)
+    provider_name: str = Field(max_length=100)
+    plan: str = Field("pay_as_you_go", max_length=32)
+    # 计费方式：pay_as_you_go（按量计费）/ coding_plan（包月套餐）
+    api_key: str = Field("", max_length=4096)
+    base_url: str = Field("", max_length=2048)
+    model: str = Field("", max_length=200)
     max_tokens: int = 8192
     temperature: float = 0.7
     timeout: int = 900
@@ -167,38 +171,43 @@ class AIConfigIn(BaseModel):
     # 请求方式：normal（普通请求）/ stream（流式请求）。
     # ✅ 注意：流式只改变**后端与厂商之间**的调用方式（后端边收边拼），
     #    应用侧（章节生成、事实提取等）仍等待完整结果后继续流程，对外行为不变。
-    request_mode: str = "normal"
+    request_mode: str = Field("normal", max_length=16)
     is_active: bool = True
     # None = 本次保存不改动降级顺序（降级链由 /fallback-chain 独立维护）；
     # 若给成默认 0，每次「保存配置」都会把用户拖好的 priority 顺序清零。
     priority: Optional[int] = None
+    # remark 不做长度硬约束：既有约定是 save_ai_config 截断到 2000（超长不拒绝），
+    # 若在此加 max_length 会把「截断」变成 422，破坏向后兼容（测试锁定该语义）。
     remark: str = ""
     # ✅ 2026-09-23（多环境）：环境标签（dev / test / prod …），空串 = 通用。
     # 默认空串 → 未启用多环境时行为与引入前完全一致。
-    env: str = ""
+    # （normalize_env 运行时还会做 32 字符 + 字符集归一，这里是入库前的粗约束）
+    env: str = Field("", max_length=64)
 
 
 class AIConfigTest(BaseModel):
-    provider_name: str = ""
-    plan: str = "pay_as_you_go"   # 计费方式（仅用于前端回显/后续扩展，测试连接不依赖）
-    api_key: str = ""
-    base_url: str = ""
-    model: str = ""
-    config_id: str = ""   # 可选：已有配置的 id，用来从 DB 读 key
+    provider_name: str = Field("", max_length=100)
+    plan: str = Field("pay_as_you_go", max_length=32)
+    # 计费方式（仅用于前端回显/后续扩展，测试连接不依赖）
+    api_key: str = Field("", max_length=4096)
+    base_url: str = Field("", max_length=2048)
+    model: str = Field("", max_length=200)
+    config_id: str = Field("", max_length=64)
+    # 可选：已有配置的 id，用来从 DB 读 key
     # ✅ 探测请求使用的 max_tokens（默认与 Provider 一致的 8192）。
     #    原实现恒定用 8192，而部分平台单次上限更低（如 4096），
     #    用户填对了 Key/地址/模型却因探测参数越界拿到 400。现随表单下发。
     max_tokens: int = 8192
     # 期望的请求方式（normal / stream；空 = 未指定，沿用配置值或默认策略）。
     # 探测时优先用该方式，失败后用另一种方式兜底再探一次，并把实际方式回传。
-    request_mode: str = ""
+    request_mode: str = Field("", max_length=16)
 
 
 class ProviderModelsIn(BaseModel):
     """拉取模型列表入参（原为裸 dict，无任何校验）。"""
-    base_url: str = ""
-    api_key: str = ""
-    config_id: str = ""
+    base_url: str = Field("", max_length=2048)
+    api_key: str = Field("", max_length=4096)
+    config_id: str = Field("", max_length=64)
 
 
 class FallbackChainUpdate(BaseModel):

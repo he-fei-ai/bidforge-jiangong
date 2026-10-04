@@ -597,3 +597,129 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     expect(calls[0][1].outline.length).toBe(2);
   });
 });
+
+// =====================================================================
+// ✅ 2026-10-03：导出「成功路径」组件级交互测试（此前仅覆盖门禁/按钮可用，
+//    **实际下载链路**从未组件级验证）。后端已对 X-Export-Filename / X-Cache-Status
+//    / X-Chart-Render-Stats / X-Fix-Stats 等响应头做了完整处理（export.py 7244-7363），
+//    但前端这些「拿头 → 解文件名 → 触发下载 → 刷新缓存状态 → 解析统计」逻辑
+//    只在 SchemeWorkbenchPage.handleExport 里消费，缺组件级回归网，改错只能靠手点。
+//    本组测试把这条链路钉住：① 后端百分号编码的文件名被 decodeURIComponent 还原
+//    并用作 a.download；② 成功路径触发 URL.createObjectURL（下载副作用）；
+//    ③ 成功后调用 exportApi.cacheStatus 刷新缓存状态；④ 统计头被安全解析不抛异常。
+// =====================================================================
+describe("SchemeWorkbenchPage · 导出成功路径（组件级交互）", () => {
+  function findExportButton(label: string): HTMLButtonElement | undefined {
+    return Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+      (b) => (b.textContent || "").includes(label)
+    );
+  }
+
+  async function gotoExportTab() {
+    const tabLabel = await screen.findByText("导出文档");
+    const tab = tabLabel.closest('[role="tab"]') || tabLabel;
+    fireEvent.click(tab);
+    await waitFor(() => expect(findExportButton("导出 DOCX")).toBeTruthy());
+  }
+
+  /** 捕获下载锚点 + createObjectURL 调用，验证成功路径的「下载副作用」。 */
+  function installDownloadProbes(): {
+    anchors: HTMLAnchorElement[];
+    // ✅ vi.spyOn 在静态方法上的精确类型较繁琐，测试辅助函数用 any 收口足矣。
+    createObjUrl: any;
+    restore: () => void;
+  } {
+    const anchors: HTMLAnchorElement[] = [];
+    const origCreate = document.createElement.bind(document);
+    const createSpy = vi.spyOn(document, "createElement").mockImplementation((tag: string) => {
+      const el = origCreate(tag as any);
+      if (tag === "a") anchors.push(el as HTMLAnchorElement);
+      return el;
+    });
+    const createObjUrl = vi.spyOn(URL, "createObjectURL");
+    return {
+      anchors,
+      createObjUrl,
+      restore: () => {
+        createSpy.mockRestore();
+        createObjUrl.mockRestore();
+      },
+    };
+  }
+
+  it("导出 DOCX 成功：解码后端文件名作下载名 + 刷新缓存状态 + 解析统计头", async () => {
+    const expectedName = "测试方案 2026-10-03 第1轮.docx";
+    apiDefaults["exportApi.docx"] = {
+      // ✅ 伪造 docx 字节（PK 头），Blob 构造不抛
+      data: new Uint8Array([80, 75, 3, 4]).buffer,
+      headers: {
+        "x-export-filename": encodeURIComponent(expectedName),
+        "x-chart-render-stats": JSON.stringify({ fe: 2, backend_ok: 1, failed: 0 }),
+        "x-fix-stats": JSON.stringify({ formulas: 1, replacement_chars: 0, control_chars: 0 }),
+      },
+    };
+    const probe = installDownloadProbes();
+
+    renderPage();
+    await gotoExportTab();
+    fireEvent.click(findExportButton("导出 DOCX")!);
+
+    // ① 真正发起了 DOCX 导出请求
+    await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
+    // ③ 成功后刷新缓存状态（exportApi.cacheStatus 被调）
+    await waitFor(() =>
+      expect(apiCalls["exportApi.cacheStatus"]?.length).toBeGreaterThanOrEqual(1)
+    );
+    // ① 后端百分号编码文件名被解码并用作 a.download（而非兜底 `方案.docx`）
+    expect(probe.anchors.some((a) => a.download === expectedName)).toBe(true);
+    // ② 触发了下载副作用（Blob → URL.createObjectURL）
+    expect(probe.createObjUrl).toHaveBeenCalled();
+    probe.restore();
+  });
+
+  it("导出 PDF 成功：同样解码文件名 + 刷新缓存状态（与 DOCX 共用命名轨）", async () => {
+    const expectedName = "测试方案 2026-10-03 第1轮.pdf";
+    apiDefaults["exportApi.pdf"] = {
+      data: new Uint8Array([37, 80, 68, 70]).buffer, // %PDF 头
+      headers: {
+        "x-export-filename": encodeURIComponent(expectedName),
+        "x-chart-render-stats": JSON.stringify({ fe: 0, backend_ok: 3, failed: 0 }),
+      },
+    };
+    const probe = installDownloadProbes();
+
+    renderPage();
+    await gotoExportTab();
+    fireEvent.click(findExportButton("导出 PDF")!);
+
+    await waitFor(() => expect(apiCalls["exportApi.pdf"]?.length).toBe(1));
+    await waitFor(() =>
+      expect(apiCalls["exportApi.cacheStatus"]?.length).toBeGreaterThanOrEqual(1)
+    );
+    expect(probe.anchors.some((a) => a.download === expectedName)).toBe(true);
+    expect(probe.createObjUrl).toHaveBeenCalled();
+    probe.restore();
+  });
+
+  it("导出成功：统计头包含失败图也不抛异常（failed>0 走 warning 分支）", async () => {
+    apiDefaults["exportApi.docx"] = {
+      data: new Uint8Array([80, 75, 3, 4]).buffer,
+      headers: {
+        "x-export-filename": encodeURIComponent("测试方案 2026-10-03 第1轮.docx"),
+        // ✅ failed>0：前端应解析成功并调用 msg.warning，而非抛错中断下载
+        "x-chart-render-stats": JSON.stringify({ fe: 1, backend_ok: 2, failed: 3 }),
+      },
+    };
+    const probe = installDownloadProbes();
+    renderPage();
+    await gotoExportTab();
+    fireEvent.click(findExportButton("导出 DOCX")!);
+    await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
+    // 失败图分支不应阻断下载：仍刷新缓存状态 + 触发下载
+    await waitFor(() =>
+      expect(apiCalls["exportApi.cacheStatus"]?.length).toBeGreaterThanOrEqual(1)
+    );
+    expect(probe.anchors.length).toBeGreaterThan(0);
+    probe.restore();
+  });
+});

@@ -56,9 +56,17 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 # 规则集版本：规则增删改后 +1（前端据此提示"规则已更新，建议重新预检"）
 # ---------------------------------------------------------------------------
-RULE_VERSION = "1.7.0"  # 2026-10-01：新增 CON-06 跨章节段落搬运检测（骨架归一 + 双阈值 Dice）；
+RULE_VERSION = "1.9.0"  # 2026-10-03：注册 CON-07（一致性扫描跨章数值冲突）并为
+                        #             族前缀编号 CON-SCAN-<n> 建别名回退——此前该串在
+                        #             注册表查不到（剥离末位数字后剩 "CON-SCAN" 无此键），
+                        #             「规则说明」反查与 capability 归一均落空
+# 2026-10-03：1.8.0 —— STD-05 改判 program 通道（preflight_engine.check_standards
+                        #             自始程序化产出该规则，注册为 ai 会把已判规则再送 AI ——
+                        #             违背 ai_checklist「程序已判不送 AI」的自身声明，浪费 token
+                        #             且可能给出矛盾结论）；同步修正 _PROGRAM_EMITTED_RULE_IDS
+                        #             （补 SAF-08、摘除非引擎产出的 SAF-01/02/07）
+# 2026-10-01：1.7.0 —— 新增 CON-06 跨章节段落搬运检测（骨架归一 + 双阈值 Dice）；
                         #             并修正 CON-05 的行业依据引用（§3.12.4 → §3.12.3）
-                       #             导致 high 级问题无标题/无依据/无修复建议）
 # 2026-09-27：1.6.0 —— 补登记 DLV-13/DLV-14（此前由 export.py 产出但注册表缺失，
                         #             导致 high 级问题无标题/无依据/无修复建议）
 # 2026-09-25：1.5.0 —— 新增 DLV-15 全局事实门控（未确认/模拟/冲突/来源过期）
@@ -240,9 +248,14 @@ _COMPLIANCE_RULES: tuple[AuditRule, ...] = (
               "危大工程方案应引用住建部令第37号、建办质〔2018〕31号等法定依据",
               "medium", CHECK_MODE_PROGRAM,
               _BASIS_37 + "；" + _BASIS_31),
+    # ✅ 2026-10-03（命名空间收口）：此前注册为 ai，但 preflight_engine.check_standards
+    #    一直在程序化产出它（按 CATEGORY_STANDARDS 命中类别后归一化比对编号，零 AI），
+    #    content_checkpoint 也在生成侧程序化自检 —— 三条通道里两条是程序判据，
+    #    注册表却是 ai，导致 /check fallback 清单把已判规则再送一遍 AI（矛盾结论风险）。
+    #    改判 program 与 STD-01~04 同口径，判定行为零变化（只改声明，不改实现）。
     AuditRule("STD-05", "compliance", "编制依据覆盖本工程专业类别",
               "基坑 / 模板 / 脚手架 / 起重机械等应按专业引用对应的现行专业技术标准",
-              "high", CHECK_MODE_AI,
+              "high", CHECK_MODE_PROGRAM,
               "现行标准库 CATEGORY_STANDARDS（按方案类型命中）"),
 )
 
@@ -256,14 +269,23 @@ _SAFETY_RULES: tuple[AuditRule, ...] = (
     AuditRule("SAF-02", "safety", "安全技术措施有针对性",
               "措施应针对识别出的风险源逐项对应，而非通用模板套话",
               "high", CHECK_MODE_AI, _BASIS_37 + "第十七条第（五）项"),
+    # ✅ 2026-10-02（第二十五轮 · 判据同源）：SAF-03~06 的 keywords 此前与
+    # ``preflight_engine.check_safety`` 内联的元组字面量**双向不一致**
+    # （本表多「职责/应急物资/救援器材/预警值」，引擎多「领导小组/器材/储备/
+    # 变形/沉降」）。keywords 是「程序化判定用的关键词」—— 引擎实际判什么，
+    # 本表就须登记什么，否则下游（目录侧检查点 / 导出映射）按本表推导会与
+    # 预检实际结论分叉。此处按**引擎的实际谓词**取并集登记（只增不减，
+    # 对引擎判定零影响：引擎读的是自己的常量，不读本表）。
     AuditRule("SAF-03", "safety", "应急预案含组织机构与职责",
               "应明确应急组织机构组成与各岗位职责",
               "high", CHECK_MODE_PROGRAM,
-              _BASIS_GB_T_29639, ("组织机构", "应急组织", "指挥", "职责")),
+              _BASIS_GB_T_29639,
+              ("组织机构", "应急组织", "领导小组", "指挥", "职责")),
     AuditRule("SAF-04", "safety", "应急预案含物资装备保障",
               "应列出应急物资与装备清单（种类、数量、存放位置）",
               "high", CHECK_MODE_PROGRAM,
-              _BASIS_GB_T_29639, ("物资", "装备", "应急物资", "救援器材")),
+              _BASIS_GB_T_29639,
+              ("物资", "装备", "器材", "储备", "应急物资", "救援器材")),
     AuditRule("SAF-05", "safety", "应急预案含演练要求",
               "应明确演练频次、组织方式与记录要求",
               "medium", CHECK_MODE_PROGRAM,
@@ -272,11 +294,22 @@ _SAFETY_RULES: tuple[AuditRule, ...] = (
               "需监测的危大工程应明确监测项目、点位、频次与预警值",
               "high", CHECK_MODE_PROGRAM,
               _BASIS_37 + "第十七条第（五）项监测监控措施",
-              ("监测", "监控", "变形监测", "预警值")),
+              ("监测", "监控", "变形", "沉降", "变形监测", "预警值")),
     AuditRule("SAF-07", "safety", "特种作业人员持证要求明确",
               "涉及特种作业的应明确持证上岗要求",
               "medium", CHECK_MODE_AI,
               "《建筑施工特种作业人员管理规定》（建质〔2008〕75号）"),
+    # ✅ 2026-10-03（全局事实桥接 · 事实反哺危大判定）：方案名/类型未含危大
+    #    关键词、但「已确认全局事实」的定量参数达到部文危大阈值时命中。
+    #    判据同源：与 /global-facts/danger-check 共用 facts_classification.
+    #    danger_check（内部走 scheme_classification 单一阈值事实源），
+    #    不在预检侧重抄阈值表；缺参保守分支不计入（只报真实阈值命中）。
+    AuditRule("SAF-08", "safety", "事实参数达到危大阈值但方案未按危大判定",
+              "已确认的全局事实中存在达到《建办质〔2018〕31号》危大阈值的定量参数"
+              "（如开挖深度/搭设高度/起重量），而方案名称与类型未体现危大工程特征，"
+              "请核对方案定位、名称表述与编制口径",
+              "high", CHECK_MODE_PROGRAM,
+              _BASIS_37 + "；" + _BASIS_31),
 )
 
 # ---------------------------------------------------------------------------
@@ -312,6 +345,17 @@ _CONSISTENCY_RULES: tuple[AuditRule, ...] = (
               "含仅改数字 / 日期的变形）",
               "medium", CHECK_MODE_PROGRAM,
               "《产品需求文档》§3.12.3 程序化预检（含相似度查重）"),
+    # ✅ 新增（2026-10-03，遗留收口）：全文一致性扫描（规则+仲裁）产出的
+    #    未解决冲突在总检聚合里以派生编号 ``CON-SCAN-<n>`` 下发
+    #    （routers/compliance.py，mode=program）。此前该族编号在注册表
+    #    查无此键（``_resolve_base_rule`` 剥掉末位数字后剩 "CON-SCAN"），
+    #    「规则说明」抽屉反不到规则详情、autofix 能力归一直接落空。
+    #    现登记基规则 CON-07，并用 _RULE_ID_ALIASES 把族前缀接回落退链
+    #    ——生成侧字符串不变（历史行/前端契约零破坏）。
+    AuditRule("CON-07", "consistency", "跨章节数值冲突（一致性扫描）",
+              "同一事实在不同章节的数值表述不应矛盾（以权威值为准修复）",
+              "medium", CHECK_MODE_PROGRAM,
+              "《产品需求文档》§3.12.3 程序化预检（全文一致性扫描：规则+仲裁）"),
 )
 
 # ---------------------------------------------------------------------------
@@ -325,11 +369,13 @@ _TRACEABILITY_RULES: tuple[AuditRule, ...] = (
     AuditRule("TRC-02", "traceability", "计算参数取值有依据",
               "计算书应注明参数取值来源（勘察报告 / 设计文件 / 规范取值）",
               "high", CHECK_MODE_AI, _BASIS_31 + "论证要点②"),
+    # ✅ 2026-10-02（第二十五轮 · 判据同源）：keywords 补「图纸」—— 引擎
+    # ``check_traceability`` 的实际谓词含该项，本表此前漏登记。
     AuditRule("TRC-03", "traceability", "附图纸或附表齐全",
               "引用的附图（平面布置、节点详图、监测点布置等）应齐全并在正文中被引出",
               "medium", CHECK_MODE_PROGRAM,
               _BASIS_37 + "第十七条第（九）项计算书及相关图纸",
-              ("附图", "详图", "平面布置", "节点图")),
+              ("附图", "详图", "平面布置", "节点图", "图纸")),
     AuditRule("TRC-04", "traceability", "材料与构配件规格可追溯",
               "材料规格、强度等级、进场验收要求应明确，可对应到检验与复试要求",
               "medium", CHECK_MODE_AI, _BASIS_GB55032),
@@ -506,16 +552,30 @@ def expert_items() -> list[dict]:
 #: 程序化引擎（preflight_engine）实际会产出的 rule_id 基编号全集。
 #: 维护约定：引擎内新增 ``_finding("XXX-NN")`` 时必须同步登记到本集合，
 #: 否则自检无法覆盖该规则。派生编号（``CON-05-1``）以基编号登记即可（可回退解析）。
+#: ⚠️ 2026-10-03（命名空间收口）：本集合必须**如实反映引擎产出** ——
+#:   - 摘除 SAF-01/02/07：三条为 AI 语义通道规则，引擎**从不产出**，
+#:     混在「引擎产出全集」里会让 mode 一致性自检失去判据（虚登 = 谎言登记）；
+#:   - 补登 SAF-08：``check_hazard_params``（2026-10-03 事实反哺危大判定）实际
+#:     产出却漏登记，违背上方维护约定（护栏：
+#:     tests/test_audit_rules_namespace_20261003.py 静态扫引擎源码双向锁相等）。
 _PROGRAM_EMITTED_RULE_IDS: frozenset[str] = frozenset({
     "CMP-01", "CMP-02", "CMP-03", "CMP-04", "CMP-05", "CMP-06", "CMP-07",
     "CMP-08", "CMP-09",
     "STD-01", "STD-02", "STD-03", "STD-04", "STD-05",
-    "SAF-01", "SAF-02", "SAF-03", "SAF-04", "SAF-05", "SAF-06", "SAF-07",
+    "SAF-03", "SAF-04", "SAF-05", "SAF-06", "SAF-08",
     "CON-01", "CON-05", "CON-06",
     "TRC-01", "TRC-03",
     "DLV-01", "DLV-02", "DLV-03", "DLV-04", "DLV-05", "DLV-06", "DLV-07",
     "DLV-08",
 })
+
+
+#: 族前缀别名表：非 ``XXX-NN`` 形态的族串 → 正式基规则。
+#: 背景（2026-10-03 遗留收口）：一致性扫描产出的派生编号形如
+#: ``CON-SCAN-1``，剥离末位数字后剩 ``CON-SCAN`` —— 不符合注册表的
+#: ``XXX-NN`` 格式红线，不能直接作为 rule_id 登记；用别名接回落退链，
+#: 生成侧字符串与历史落库行零改动。
+_RULE_ID_ALIASES: dict[str, str] = {"CON-SCAN": "CON-07"}
 
 
 def _resolve_base_rule(rule_id: str):
@@ -541,6 +601,11 @@ def _resolve_base_rule(rule_id: str):
         rule = get_rule(rid)
         if rule is not None:
             return rule
+        # 族前缀别名（CON-SCAN → CON-07）：剥离链经过非数字后缀的族串时归一
+        alias = _RULE_ID_ALIASES.get(rid)
+        if alias is not None:
+            rid = alias
+            continue
         # 仅剥离「-<数字>」形态的序号后缀，避免误伤 CON-05 这类基编号本身
         head, sep, tail = rid.rpartition("-")
         if not sep or not tail.isdigit() or not head:
@@ -608,8 +673,20 @@ def validate_rule_registry(*, mapping: dict | None = None,
     # 程序化引擎产出的 rule_id 必须能解析（容忍 CON-05-1 这类派生编号）。
     # 同样只接收传入的产出集合，不反向 import（引擎 import 注册表才是正确方向）。
     for rid in sorted(emitted_rule_ids or ()):
-        if _resolve_base_rule(rid) is None:
+        base = _resolve_base_rule(rid)
+        if base is None:
             problems.append(
                 f"程序化引擎产出 {rid}，但注册表中查不到（含基编号回退）")
+            continue
+        # ✅ 2026-10-03（命名空间收口）新增不变量：引擎产出的规则必须登记为
+        #    program。此前只验「可解析」不验「模式一致」，STD-05 这类
+        #    「程序已判、注册为 ai」的分叉不可检测 —— 后果是 ai_checklist()
+        #    （/check 默认清单来源）把已判规则再送 AI：浪费 token + 可能矛盾
+        #    结论 + 双通道各报一份由 merge_findings 去重掩盖，用户无从感知。
+        if base.mode != CHECK_MODE_PROGRAM:
+            problems.append(
+                f"程序化引擎产出 {rid}，但注册表中 mode={base.mode}——"
+                f"引擎已程序化判定的规则必须登记为 {CHECK_MODE_PROGRAM}，"
+                "否则会被 ai_checklist 重复送 AI")
 
     return problems

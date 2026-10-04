@@ -95,6 +95,45 @@ export type GenStats = {
  * 按 section_id 插入或替换一条章节日志，替换项保持在数组尾部
  * （与旧实现的 `[...filter, item]` 语义逐字节一致，日志列表倒序渲染 → 尾部 = 最上面）。
  */
+/**
+ * ✅ 缺口修复（2026-10-04 · 前后端契约）：`section_done.quality_issues` 的
+ * **真实载荷是对象**，不是数组。
+ *
+ * 后端 `app/services/content_polish.py::quality_issues` 返回
+ * `{ "colloquial_hits": string[], "abolished_standards": string[] }`
+ * （sse_handlers.py:6063 与 sections.py 手工保存路径同构）。
+ * 而前端三处消费点（SchemeWorkbenchPage.tsx:5159 / useContentGeneration.ts:92 /
+ * 展示层 :1576）一律用 `Array.isArray(evt.quality_issues)` 判定 → 恒为 false →
+ * 该字段被整体丢弃，日志区的「质量告警 N」Tag **从未出现过**——后端一直在下发、
+ * 前端一直在丢，属典型的静默断链。
+ *
+ * 现收敛为单一归一出口：对象按值展平为扁平字符串数组（去重、去空），
+ * 已是数组的形态原样保留（向后兼容历史/未来可能改为数组的载荷）。
+ */
+export function normalizeQualityIssues(raw: unknown): string[] | undefined {
+  const out: string[] = [];
+  if (Array.isArray(raw)) {
+    for (const it of raw) {
+      if (it === null || it === undefined) continue;
+      // 兼容对象形态的历史载荷（{message} / {detail}）
+      const v = (it as any)?.message ?? (it as any)?.detail ?? it;
+      if (v !== null && v !== undefined) out.push(String(v));
+    }
+  } else if (raw && typeof raw === "object") {
+    for (const v of Object.values(raw as Record<string, unknown>)) {
+      if (Array.isArray(v)) {
+        for (const x of v) if (x !== null && x !== undefined) out.push(String(x));
+      } else if (v !== null && v !== undefined) {
+        out.push(String(v));
+      }
+    }
+  }
+  const uniq = Array.from(
+    new Set(out.map((s) => String(s).trim()).filter(Boolean)),
+  );
+  return uniq.length ? uniq : undefined;
+}
+
 export function upsertSectionLog(
   list: SectionLogItem[],
   item: SectionLogItem

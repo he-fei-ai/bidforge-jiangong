@@ -26,6 +26,18 @@ import uuid
 from typing import Optional
 from dataclasses import dataclass, field
 
+# ✅ R39 · T1：提示词统一出口（DB 优先 → 出厂默认回退）+ 注册入口。
+#
+# ⚠️ 必须从**叶子模块**直取、不能从包顶层 `app.services.ai.prompts` 取：
+#    本模块是「投标分析域提示词字面量」的唯一事实源，注册钩子
+#    （_registry.register_lazy_prompts）要在读注册表时反向 import 本模块；
+#    若本模块又从包顶层 import，包 __init__ 初始化未完成时 `_reg` 尚未导出
+#    → 「cannot import name _reg from partially initialized module」，
+#    且钩子的幂等锁已被置位 → 注册**永久缺失**（关联回归 8 处 KeyError）。
+#    `_registry` / `_cache` 都不反向依赖本模块，环在此被打断。
+from app.services.ai.prompts._cache import get_prompt
+from app.services.ai.prompts._registry import _reg
+
 logger = logging.getLogger("bid_analysis")
 
 # =========================================================================
@@ -353,7 +365,7 @@ _JSON_TASK_TEMPLATE = """任务：{title}
 约束：
 1. 输出格式必须为 JSON。
 2. 严格按照以下 JSON 格式输出，只修改 value，禁止修改 key 和结构。
-3. 招标文件中没有的字段填充「{partial}」。
+3. 项目资料中没有的字段填充「{partial}」。
 
 JSON 格式：
 {template}
@@ -805,9 +817,148 @@ __CONTEXT__""",
 }
 
 
+# =========================================================================
+# R39 · T1：提示词接入统一注册表（用户可在提示词后台编辑/重置/审计）
+# =========================================================================
+# ✅ 2026-10-04：此前 18 条解析项 user 提示词与通用 system 提示词硬编码在本
+#   模块，用户在「提示词管理」页**看不到也改不到**它们（仓库其余 50 条模板
+#   均已接入，享有编辑/重置/版本管理）。改一处漏一处的同构陷阱在本文件
+#   335-343 行已自记过一次。现统一登记进 _ALL_PROMPTS。
+#
+# ⚠️ 零行为变化的前置验证：18 条正文内嵌**带引号** JSON 模板，
+#   extract_user_variables 的 ``(?!\s*:)`` 排除式对带引号键不适用，
+#   实测误抽 0 个（键名 ``project_name`` 等在正文中以 ``"key":`` 形态出现，
+#   其 ``{`` 前是引号而非独立占位符），且 render_prompt 走 re.sub 单遍替换、
+#   **不走** str.format —— 见 _r39_t1_probe.py 的实测输出。
+#
+# requires=[] 是**显式零变量声明**（R38 D6 语义）：user 模板的唯一占位符
+#   ``__CONTEXT__`` 由 build_item 用 .replace 注入，不经 render，故调用方
+#   无需向 render 传任何变量。写成 None 会被「未声明=跳过校验」掩盖。
+
+#: 解析项 item_id → 注册表键（DB 优先，用户可在提示词后台编辑/重置）
+_ITEM_PROMPT_KEYS: dict[str, str] = {
+    "projectBasicInfo": "bid_item_projectBasicInfo",
+    "schemeBasicInfo": "bid_item_schemeBasicInfo",
+    "overviewParams": "bid_item_overviewParams",
+    "compilationBasis": "bid_item_compilationBasis",
+    "siteConditions": "bid_item_siteConditions",
+    "deploymentSchedule": "bid_item_deploymentSchedule",
+    "constructionTechnique": "bid_item_constructionTechnique",
+    "resourceAllocation": "bid_item_resourceAllocation",
+    "safetyMeasures": "bid_item_safetyMeasures",
+    "qualityAcceptance": "bid_item_qualityAcceptance",
+    "emergencyResponse": "bid_item_emergencyResponse",
+    "calcAndDrawings": "bid_item_calcAndDrawings",
+    "materialManagement": "bid_item_materialManagement",
+    "equipmentManagement": "bid_item_equipmentManagement",
+    "constructionDeployment": "bid_item_constructionDeployment",
+    "constructionProcess": "bid_item_constructionProcess",
+    "workInterfaceDivision": "bid_item_workInterfaceDivision",
+    "engineeringMethods": "bid_item_engineeringMethods",
+}
+
+
+#: 投标分析域提示词是否已完成注册（幂等锁）。
+#:
+#: ✅ R39 · T1：本模块 import 时注册一次；`_registry.register_lazy_prompts()`
+#:    在「只跑提示词护栏、没导入本模块」的场景下会再触发一次，幂等锁保证
+#:    不重复注册（重复注册会重置用户对 DB 之外内容的内存编辑，语义上应无变化，
+#:    但依赖它做正确性判断会让护栏失去意义）。
+_BID_PROMPTS_REGISTERED = False
+
+
+def _reg_bid_prompts() -> None:
+    """把投标分析域提示词登记进统一注册表（R39 · T1）。
+
+    仅注册，不改渲染路径：读取仍由 :func:`get_prompt`（DB 优先）承担，
+    user 模板的 ``__CONTEXT__`` 仍由 :func:`build_item` 自行 replace 注入。
+    """
+    global _BID_PROMPTS_REGISTERED
+    if _BID_PROMPTS_REGISTERED:
+        return
+    _reg("bid_analysis_system", "bid_analysis", "投标资料提取 · 通用约束", STABLE_SYSTEM_PROMPT,
+           requires=[])
+    _reg("bid_item_projectBasicInfo", "bid_analysis", "投标资料提取 · projectBasicInfo", _ITEM_PROMPTS["projectBasicInfo"],
+           requires=[])
+    _reg("bid_item_schemeBasicInfo", "bid_analysis", "投标资料提取 · schemeBasicInfo", _ITEM_PROMPTS["schemeBasicInfo"],
+           requires=[])
+    _reg("bid_item_overviewParams", "bid_analysis", "投标资料提取 · overviewParams", _ITEM_PROMPTS["overviewParams"],
+           requires=[])
+    _reg("bid_item_compilationBasis", "bid_analysis", "投标资料提取 · compilationBasis", _ITEM_PROMPTS["compilationBasis"],
+           requires=[])
+    _reg("bid_item_siteConditions", "bid_analysis", "投标资料提取 · siteConditions", _ITEM_PROMPTS["siteConditions"],
+           requires=[])
+    _reg("bid_item_deploymentSchedule", "bid_analysis", "投标资料提取 · deploymentSchedule", _ITEM_PROMPTS["deploymentSchedule"],
+           requires=[])
+    _reg("bid_item_constructionTechnique", "bid_analysis", "投标资料提取 · constructionTechnique", _ITEM_PROMPTS["constructionTechnique"],
+           requires=[])
+    _reg("bid_item_resourceAllocation", "bid_analysis", "投标资料提取 · resourceAllocation", _ITEM_PROMPTS["resourceAllocation"],
+           requires=[])
+    _reg("bid_item_safetyMeasures", "bid_analysis", "投标资料提取 · safetyMeasures", _ITEM_PROMPTS["safetyMeasures"],
+           requires=[])
+    _reg("bid_item_qualityAcceptance", "bid_analysis", "投标资料提取 · qualityAcceptance", _ITEM_PROMPTS["qualityAcceptance"],
+           requires=[])
+    _reg("bid_item_emergencyResponse", "bid_analysis", "投标资料提取 · emergencyResponse", _ITEM_PROMPTS["emergencyResponse"],
+           requires=[])
+    _reg("bid_item_calcAndDrawings", "bid_analysis", "投标资料提取 · calcAndDrawings", _ITEM_PROMPTS["calcAndDrawings"],
+           requires=[])
+    _reg("bid_item_materialManagement", "bid_analysis", "投标资料提取 · materialManagement", _ITEM_PROMPTS["materialManagement"],
+           requires=[])
+    _reg("bid_item_equipmentManagement", "bid_analysis", "投标资料提取 · equipmentManagement", _ITEM_PROMPTS["equipmentManagement"],
+           requires=[])
+    _reg("bid_item_constructionDeployment", "bid_analysis", "投标资料提取 · constructionDeployment", _ITEM_PROMPTS["constructionDeployment"],
+           requires=[])
+    _reg("bid_item_constructionProcess", "bid_analysis", "投标资料提取 · constructionProcess", _ITEM_PROMPTS["constructionProcess"],
+           requires=[])
+    _reg("bid_item_workInterfaceDivision", "bid_analysis", "投标资料提取 · workInterfaceDivision", _ITEM_PROMPTS["workInterfaceDivision"],
+           requires=[])
+    _reg("bid_item_engineeringMethods", "bid_analysis", "投标资料提取 · engineeringMethods", _ITEM_PROMPTS["engineeringMethods"],
+           requires=[])
+    _BID_PROMPTS_REGISTERED = True
+
+
+#: 投标分析域提示词在本模块 import 时完成注册。
+_reg_bid_prompts()
+
+# ✅ R39 · T1：注册完成后幂等补套一次变量契约校验。
+#   注册发生在本模块 import 时（晚于 _registry.py 尾部的首次
+#   _apply_variable_contracts()），若不补套，则 requires=[] 的显式空声明
+#   不会下发 meta → 合约表不能监督到本批模板。
+try:  # pragma: no cover - 幂等补套，失败不影响注册结果
+    from app.services.ai.prompts._registry import _apply_variable_contracts
+    _apply_variable_contracts()
+except Exception as _e:  # noqa: BLE001
+    logger.warning("补套变量契约校验失败（不影响提示词注册）: %s", _e)
+
+
+def get_bid_system_prompt() -> str:
+    """通用约束 system 提示词（DB 优先 → 出厂字面量回退）。
+
+    ✅ R39 · T1：接入统一注册表后，用户在提示词后台的编辑即时生效。
+    """
+    try:
+        prompt = get_prompt("bid_analysis_system")
+    except Exception:  # noqa: BLE001 - 注册表不可用不得阻断提取
+        logger.warning("投标分析通用约束提示词读取失败，回退出厂字面量")
+        return STABLE_SYSTEM_PROMPT
+    return prompt or STABLE_SYSTEM_PROMPT
+
+
 def get_item_prompt(item_id: str) -> str | None:
-    """获取指定解析项的 Prompt 模板（user 消息内容）。"""
-    return _ITEM_PROMPTS.get(item_id)
+    """获取指定解析项的 Prompt 模板（user 消息内容）。
+
+    ✅ R39 · T1：改为经统一注册表读取（DB 优先 → 出厂默认回退），
+    用户在提示词后台的编辑即时生效；未注册项仍回退模块内出厂字面量。
+    """
+    key = _ITEM_PROMPT_KEYS.get(item_id)
+    if not key:
+        return _ITEM_PROMPTS.get(item_id)
+    try:
+        prompt = get_prompt(key)
+    except Exception:  # noqa: BLE001 - 注册表不可用不得阻断提取
+        logger.warning("解析项 %s 的提示词读取失败，回退出厂字面量", item_id)
+        return _ITEM_PROMPTS.get(item_id)
+    return prompt or _ITEM_PROMPTS.get(item_id)
 
 
 def get_item_domain(item_id: str) -> str:
@@ -943,7 +1094,7 @@ def build_task_prompt(item_id: str, *, template_body: str = "", goals: str = "")
         else:
             template_text = build_json_template(item_id)
         if not template_text:
-            return f"任务：{label}\n\n请从招标文件中提取相关 JSON 信息。"
+            return f"任务：{label}\n\n请从项目资料中提取相关 JSON 信息。"
         return _JSON_TASK_TEMPLATE.format(
             title=label, goals=goals_text or f"提取{label}信息。",
             partial=PARTIAL_MISSING_TEXT, template=template_text,
@@ -981,7 +1132,7 @@ def get_groups() -> list[dict]:
 
 def build_item(content: str, item: dict) -> str:
     """组装完整的 user 消息内容：Prompt 模板 + 替换 __CONTEXT__ 占位符。"""
-    prompt_template = _ITEM_PROMPTS.get(item["item_id"])
+    prompt_template = get_item_prompt(item["item_id"])
     if not prompt_template:
         # 无专属 Prompt，返回通用 Prompt（极端兜底）
         return f"请从以下项目资料文本中提取「{item['label']}」相关信息。\n\n项目资料文本：\n{content}"
@@ -1001,7 +1152,7 @@ def build_system_prompt(section_hint: str = "", classification_hint: str = "") -
     锁定）。标段上下文要作为**独立第二条 system 消息**下发时，请改用
     :func:`build_system_messages`（对齐易标 ``buildTenderContextMessages``）。
     """
-    prompt = STABLE_SYSTEM_PROMPT
+    prompt = get_bid_system_prompt()
     if section_hint:
         prompt += f"\n\n【当前处理标段上下文】{section_hint}"
     if classification_hint:
@@ -1031,7 +1182,7 @@ def build_system_messages(section_hint: str = "",
     Returns:
         ``[{"role": "system", "content": ...}, ...]``，可直接前置到 messages。
     """
-    system = STABLE_SYSTEM_PROMPT
+    system = get_bid_system_prompt()
     if classification_hint:
         system += (f"\n\n【本方案危大工程分类结论（提取重点参考）】"
                    f"{classification_hint}")

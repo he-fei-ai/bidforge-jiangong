@@ -316,6 +316,34 @@ def _lead_in_title(blocks: list[dict]) -> str:
     return _title_candidate(_LEAD_IN_TAIL_RE.sub("", _LEAD_IN_HINT_RE.sub("", text)))
 
 
+def _pop_orphan_lead_in_block(blocks: list[dict]) -> bool:
+    """图表块在**解析期**被跳过时，回收紧邻其上方的孤儿引导语段落。
+
+    ✅ 修复（2026-10-03 · 未闭合=不是图 · 三侧引导语回收口径补齐）：
+    导出侧 ``export._pop_orphan_lead_in`` 只在「chart 块已产出、但渲染/插入被
+    跳过」的分支触发回收；而围栏因**未闭合 / 类型不可识别 / JSON 不可渲染**
+    在解析期就被 `continue` 跳过的，chart 块从未产出，write_section 无从得知
+    它上方那句专为引出该图而写的引导语（"施工工艺流程如下图所示："）——
+    成稿出现"见下图"却无图的悬空引用。此处按同一判据在解析期回收：
+      · 末块是普通段落（标题/列表/表格/引用前的引导语绝不触碰）；
+      · 文本 ≤60 字且以"如下图/见下图/如图所示"类引导语收尾。
+    与 ``export._pop_orphan_lead_in``、``_chart_pipeline._drop_dangling_lead_in``
+    同口径、同一目的：删图必须删引导语。
+    """
+    if not blocks:
+        return False
+    prev = blocks[-1]
+    if prev.get("type") != "paragraph":
+        return False
+    text = _RE_BOLD_WRAP.sub(r"\1",
+                            str(prev.get("text") or "").strip()).strip()
+    if not text or len(text) > 60 or not _LEAD_IN_HINT_RE.search(text):
+        return False
+    blocks.pop()
+    logger.info("图表围栏被跳过：已同步移除其孤儿引导语「%s」", text[:30])
+    return True
+
+
 def _parse_content_blocks(content: str) -> list[dict]:
     """解析正文内容为 block 列表。
 
@@ -424,6 +452,7 @@ def _parse_content_blocks(content: str) -> list[dict]:
                     logger.warning(
                         "章节代码块未闭合（lang=mermaid，已消费 %d 行），"
                         "疑似生成被截断，已跳过（不渲染、不落代码）", len(code_lines))
+                    _pop_orphan_lead_in_block(blocks)
                     continue
                 code_text = "\n".join(code_lines).strip()
                 # ✅ 修复 P0：首行为空行时 "".split() 为空列表，[0] 抛 IndexError 导致导出 500
@@ -451,6 +480,7 @@ def _parse_content_blocks(content: str) -> list[dict]:
                     logger.info(
                         "导出跳过不可渲染的 mermaid 块（首关键字不在映射表内），"
                         "与登记侧同口径，避免幽灵图绕过配图上限")
+                    _pop_orphan_lead_in_block(blocks)
                     continue
                 # ✅ 图表同步生成：内联块自带代码，直接携带（不再依赖 chart_predictions 查码）
                 # ✅ 图题优先级（v16，对齐图表需求规格「载荷 title > Mermaid title >
@@ -476,6 +506,17 @@ def _parse_content_blocks(content: str) -> list[dict]:
                 #    失败，跳过』的下游后果）。现与登记侧同用渲染类型白名单收口：
                 #    载荷不是合法 JSON 对象、或类型不属于 7 类可渲染图表 → 整块跳过
                 #    （不占图号、不写红字，与 ai_image 未生成的跳过语义一致）。
+                # ✅ 未闭合=不是图（2026-10-03 · 三侧口径收口）：本分支此前只看
+                #    「JSON 可解析 + 类型白名单」而**不检查闭合状态**——EOF 截断残片
+                #    若恰好是完整 JSON（闭合围栏行缺失不参与解析）照样被产出渲染、
+                #    占用图号，与 mermaid 分支「未闭合一律跳过」及 read_fenced_block
+                #    文档承诺「eof/truncated 走未闭合降级」相悖（登记侧现已同口径跳 eof）。
+                if not _fence_closed:
+                    logger.warning(
+                        "章节代码块未闭合（lang=chart-json，state=%s），"
+                        "疑似生成被截断，已跳过（不渲染、不落代码）", _fence_state)
+                    _pop_orphan_lead_in_block(blocks)
+                    continue
                 code_text = "\n".join(code_lines).strip()
                 _cj_obj = None
                 _cj_type = ""
@@ -502,6 +543,7 @@ def _parse_content_blocks(content: str) -> list[dict]:
                     logger.info(
                         "导出跳过不可渲染的 chart-json 块（type=%r），避免渲染失败占位",
                         _cj_type or "(非JSON对象)")
+                    _pop_orphan_lead_in_block(blocks)
                     continue
                 blocks.append({"type": "chart", "chart_type": _cj_type,
                                "code": code_text, "inline": True,
@@ -514,6 +556,14 @@ def _parse_content_blocks(content: str) -> list[dict]:
                 #    原样印进交付文档（AI 的绘图提示词泄漏到成稿，且观感极差）。
                 #    该围栏是「待生成态」（生成成功后正文会被改写为 ![title](url) → image 块），
                 #    此处单独成块，由 write_section 决定降级方式（当前：跳过 + 告警）。
+                # ✅ 未闭合=不是图（2026-10-03 · 与 mermaid/chart-json 同口径）：
+                #    未闭合的占位块说明生成被截断，提示词 JSON 大概率残缺，跳过。
+                if not _fence_closed:
+                    logger.warning(
+                        "章节代码块未闭合（lang=ai_image，state=%s），"
+                        "疑似生成被截断，已跳过（不占图号）", _fence_state)
+                    _pop_orphan_lead_in_block(blocks)
+                    continue
                 ai_title = ""
                 try:
                     _ai_obj = json.loads("\n".join(code_lines).strip())

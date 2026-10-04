@@ -70,6 +70,8 @@ backend/*.out
 # backend 根目录下所有一次性调试脚本 / 临时文件
 backend/check_db.py
 backend/_*
+# pytest 自定义临时根目录（.t 前缀，生成测试夹具数据，不入库）
+backend/.t*
 # backend/tests/ 下调试输出（保留 test_*.py / conftest.py / TEST_REPORT.md / .bak-*）
 backend/tests/_*.txt
 backend/tests/_*.log
@@ -105,6 +107,8 @@ frontend/_swap*
 frontend/_s_*
 frontend/_tsc*
 frontend/_vitest*
+# vitest 基准输出
+frontend/.vitest_bf.json
 frontend/_swap_*
 vitest_result.json
 

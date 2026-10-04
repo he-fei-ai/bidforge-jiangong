@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     ocr_pdf_dpi: int = 200             # PDF 渲染 DPI（越高越准、越慢）
     ocr_min_chars_per_page: int = 30   # 平均每页字符数低于该值 → 判定为扫描件
 
+    # ---------- 上传文件大小上限（解析提取模块 · 目录识别上传） ----------
+    # 单文件最大字节数：超过即 413 拒绝，避免超大文件一次性读入内存（OOM）。
+    # 默认 30MB，与「项目资料上传」口径对齐；设为更大的值即可放宽限制，
+    # 设为 0 表示不限制（不推荐，解析阶段仍有归档膨胀闸门兜底）。
+    # 解析路由 upload_outline.parse_outline 通过 file_parser.MAX_UPLOAD_BYTES
+    # 读取本值，单测可 monkeypatch 该模块常量验证 413 守卫。
+    upload_max_bytes: int = 30 * 1024 * 1024
+
     # ---------- PDF 文本层解析页数上限（2026-09-30 第十四轮） ----------
     # ⚠️ 此前 MAX_PDF_PAGES 是 file_parser 里的**硬编码 50**，不可配置：
     #    而招标文件 / 施工组织设计常见 100~400 页 —— 一份 300 页的招标文件
@@ -378,6 +386,63 @@ class Settings(BaseSettings):
     #    完全向后兼容）；>0 时若单章 user 上下文超过该值，按自然边界（段落→句→逗号）截断，
     #    避免极端超长知识库/事实把提示词撑爆导致 400/超时。截断只在超长时触发，正常长度不受影响。
     context_length_limit: int = 0
+
+    # ---------- 审核检查点前置与生成后自检（2026-10-02 · 第二十三轮） ----------
+    # 核心逻辑：把审核与预检（audit_rules / preflight_engine）中**可在生成侧预防**
+    # 的检查点前置为正文约束（services/content_checkpoint 唯一事实源，判据指向
+    # rule_id 不复制阈值），形成「检查点 → 生成约束 → 生成后自检 → 审核兜底」闭环。
+    # 检查点前置总开关：True（默认）= 首轮与续写提示词注入 system 级「审核检查点
+    # 前置要求」与九大章节「本章审核检查点要求」；False = 不传两个变量，独占行
+    # 占位符整行丢弃 → 提示词与该功能引入前逐字一致（可回退）。
+    content_checkpoint_prepend: bool = True
+    # 生成后程序化自检（纯程序、零 AI 成本、fail-soft）：默认**开启**
+    # （2026-10-02 · 第二十六轮，需求目标一「生成即完整」硬性要求）。True = 每章
+    # 落库前按检查点跑 checkpoint_selfcheck，findings（与预检 rule_id 同词表）写入
+    # last_generation_report.checkpoint_findings，不改既有 error/warning 口径。
+    # 设 False 完整回退到观察期行为（只改配置，不删代码）。
+    content_selfcheck: bool = True
+    # 仅在 content_selfcheck=True 时有意义：默认**开启**（同上轮校准）——
+    # True = ① 自检 findings 并入报告 issues 视图（计入 issue_sections 汇总，
+    # 供前端/审核消费）；② 落库前执行两个**确定性**自动修复
+    # （fix_bare_standard_codes 裸编号补年号 / rewrite_placeholder_marks
+    # 占位标记改写为条件式表述），纯函数、零 AI 成本、幂等，确保正文
+    # 不残留【待补充】等占位标记、无需用户二次补数据。设 False 逐字回退。
+    content_selfcheck_autofix: bool = True
+    # ✅ R29（2026-10-02 · 检查点反哺）：CON-06 跨章节段落搬运的**生成后**自检。
+    #
+    # 为什么单独一个开关：CON-06 是唯一**跨章节**判据 —— 生成单章时模型看不到
+    # 其他章节的正文，system 级「禁止成段雷同」的约束**结构上无法预防**它
+    # （生产库实证 3 条 CON-06 全部是「骨架归一后相似度 100%」，整段照抄）。
+    # 该判据只能在「本章已生成、其余章节已在库」时判定，故挂生成后自检而非提示词。
+    # 代价与既有自检不同：每章需多读一次同方案章节（锁外只读），故给独立开关。
+    # 仅当 content_selfcheck=True 时生效；关闭完整回退到引入前行为（可回退）。
+    # 判据直接复用 duplicate_detection.find_cross_section_copies（预检 CON-06
+    # 的同一实现），不复制阈值。
+    content_crosscheck_duplicate: bool = True
+
+    # ---------- 目录侧检查点前置（2026-10-02 · 第二十五轮） ----------
+    # 与上面正文侧三开关配套：审核预检里有一整类问题**只能在目录阶段预防**
+    # （CMP-01~09 按标题关键词判定九大法定章节是否存在）。本开关开启后：
+    # ① 目录生成 system 提示词注入「审核检查点前置要求」（含必备章节清单与
+    #    标题关键词，由 services/outline_checkpoint 单一出口派生）；
+    # ② 目录生成后的程序化覆盖预检**不再要求用户填写「编制要求」才执行**，
+    #    九大法定章节对**任何**专项方案恒定参与检查（与预检无条件检查对齐）。
+    # 关闭（False）= 完全回到本项引入前的门控与判据（可回退，不删代码）。
+    outline_checkpoint_check: bool = True
+
+    # 九大章节「本章必含要素清单」注入（2026-10-03 · 目录与正文生成增强）：
+    # True（默认）= 在正文提示词的【本章审核检查点要求】之后，追加该章的
+    # **完整**必含要素清单（scheme_classification.NINE_CHAPTERS.base_fields
+    # 通用要素 + 命中的危大类别 category_fields 追加要素，逐项点名）。
+    #
+    # 为什么单独一个开关：此前生成侧只看到 CHAPTER_CHECKPOINT_REQUIREMENTS
+    # 里每条要求的一两个主题词（如 overview 只给「地质/水文/周边环境」），
+    # 而 NINE_CHAPTERS 的完整清单（overview 实为 7 项、plan 实为 6 项、
+    # emergency 实为 5 项…）从未进入正文提示词 —— 模型无从得知「本章还应写
+    # 哪些内容」，于是产出「必含要素缺失」的高频缺陷。两表同属
+    # scheme_classification，本项只做「把同一清单搬进提示词」，不复制清单。
+    # 关闭（False）= 提示词与本项引入前逐字一致（可回退，不删代码）。
+    content_chapter_elements_inject: bool = True
 
     # ---------- 提示词治理（2026-09-24 · 遗留问题闭环） ----------
     # G2 版本回滚：把变更前后完整提示词正文写入 prompt_audit_logs.snapshot_json，

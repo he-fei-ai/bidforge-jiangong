@@ -188,9 +188,58 @@ def _reg(key: str, category: str, label: str, value: str,
         #   check_prompt_variables 只以出厂基线为准，契约漂移检测才能真正可靠。
         "default_variables": list(variables),
         # 变量契约白名单：声明 = 强制校验；未声明（None）= 不校验
-        "requires": sorted(requires) if requires else None,
+        # ✅ R39（2026-10-04 · D6 根因收口）：旧实现是
+        #   ``sorted(requires) if requires else None`` —— 空列表 `[]`
+        #   （显式声明「本模板零变量」）与 `None`（未声明）在 Python 里同为假值，
+        #   于是**注册时就已把显式空声明压成 None**，下游 `requires is None`
+        #   的「跳过校验」判据仍会把零占位模板脱管。R38 只把判据侧改成
+        #   `requires is None`，注册侧这处压扁一直没动 —— 属同一根因的另一半。
+        #   现按 `requires is None` 判别：空列表原样落库为 `[]`。
+        #   行为影响：零占位模板的 `requires` 由 None 变 []，**只影响
+        #   check_prompt_variables 的「是否校验」判据**（这正是显式声明的意图），
+        #   渲染、变量提取、DB 覆盖语义逐字不变。
+        "requires": None if requires is None else sorted(requires),
     }
     return value
+
+
+#: 惰性注册幂等锁（R39 · T1）。False = 尚未触发过注册钩子。
+#:
+#: ✅ 必须**先于**任何出口函数定义存在：钩子被挂在 ``_apply_variable_contracts``、
+#: ``check_prompt_variables``、``list_prompts`` 等 6 个公共出口上，而
+#: ``prompts/__init__.py`` 在本模块 import 完成后立刻调用
+#: ``_apply_variable_contracts()`` —— 声明晚于首次调用会直接 NameError
+#: （首版正是删旧块时把这条声明一起带走，3 个测试文件在收集期就 NameError）。
+_LAZY_REGISTERED = False
+
+
+def register_lazy_prompts() -> None:
+    """幂等地注册「字面量定义在本包之外」的提示词。
+
+    ✅ R39 · T1（2026-10-04）：投标分析域的 19 条提示词（18 条解析项 user +
+    1 条通用 system）字面量在 ``services/bid_analysis_service.py``（唯一事实源，
+    未搬家），而那个模块**不被每条读提示词的路径导入**。改在
+    ``prompts/__init__.py`` 反向 import 它会与「service 又 import prompts」
+    形成循环依赖，故用本钩子：``_registry`` 的所有公共出口在读注册表前
+    先触发一次，幂等锁保证只注册一次。
+
+    关联回归实测：只挂在 ``_cache.get_prompt`` 未命中分支时，启动期校验
+    （``check_prompt_variables``）与管理接口（``list_prompts``）共 9 处护栏
+    因「契约指向未注册的模板」失败 —— 读注册表的路径不会走 get_prompt。
+
+    异常策略：任何失败仅记一次 WARNING、不重试、不抛 —— 注册失败不得阻断
+    读取（调用侧自带的出厂字面量回退仍然有效）。
+    """
+    global _LAZY_REGISTERED
+    if _LAZY_REGISTERED:
+        return
+    _LAZY_REGISTERED = True
+    try:
+        from app.services import bid_analysis_service  # noqa: F401
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger("prompts_registry").warning(
+            "惰性注册投标分析提示词失败（不影响其它模板读取）: %s", e)
 
 
 def get_default_prompt(key: str) -> str:
@@ -198,6 +247,7 @@ def get_default_prompt(key: str) -> str:
 
     用于「恢复默认」与「默认/当前是否被修改」判断。
     """
+    register_lazy_prompts()
     meta = _ALL_PROMPTS.get(key)
     if not meta:
         return ""
@@ -206,6 +256,7 @@ def get_default_prompt(key: str) -> str:
 
 def is_prompt_modified(key: str) -> bool:
     """判断提示词是否被用户修改过（与出厂默认比较）。"""
+    register_lazy_prompts()
     meta = _ALL_PROMPTS.get(key)
     if not meta:
         return False
@@ -214,6 +265,7 @@ def is_prompt_modified(key: str) -> bool:
 
 def get_prompt_variables(key: str) -> list[str]:
     """获取指定提示词所需的变量列表。"""
+    register_lazy_prompts()
     meta = _ALL_PROMPTS.get(key)
     if meta:
         return meta.get("variables", [])
@@ -389,7 +441,11 @@ def render_prompt(template: str, **kwargs) -> str:
         #    噪音会淹没真实的 scheme_name/section_number 漏传信号
         #    （AGENTS.md §5.3 已登记该遗留项）。现与 validate 路径共用同一判据。
         unresolved = [v for v in unresolved
-                      if not _is_false_positive("", v, template)]
+                      if not _is_false_positive("", v, template)
+                      # ✅ 2026-10-02（检查点前置）：与 validate_prompt_variables
+                      #    同一口径 —— 整行独占的可选区块（未传即整行丢弃）不是
+                      #    「未解析」，否则开关型注入点每次关闭都刷一条 WARNING。
+                      if not _is_optional_block_var(v, template)]
         if unresolved:
             logger.warning("Prompt template has unresolved placeholders: %s", unresolved)
 
@@ -419,6 +475,7 @@ def list_prompts(category: str | None = None) -> list[dict]:
     附带 default_content / modified 字段，便于前端展示"已修改"标记
     与提供"恢复默认"预览。
     """
+    register_lazy_prompts()
     items = [dict(p) for p in _ALL_PROMPTS.values()]
     for p in items:
         p["modified"] = p.get("content", "") != p.get("default_content", "")
@@ -474,9 +531,15 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
         # ✅ E3（2026-09-25 · 提示词条件注入）：根据本章是否有 DB 子章节、
         #    body_subheading_demote_with_children 配置，动态生成正文子标题编号规则片段。
         "subheading_rule",
+        # ✅ 2026-10-02（检查点前置）：审核检查点 → 生成约束（唯一事实源
+        #    services/content_checkpoint）；两变量未传时独占行占位符整行丢弃，
+        #    其余调用点（DB 定制模板渲染等）行为不变。
+        "chapter_checkpoint_block", "content_checkpoint_block",
     ],
     "content_continue_system": [
         "scheme_name", "scheme_type", "standards_text",
+        # ✅ 2026-10-02：续写轮同样携带检查点硬约束（与首轮同一实现）。
+        "content_checkpoint_block",
     ],
     "outline_short_system": [
         "scheme_name", "scheme_type", "construction_scope", "project_facts",
@@ -485,16 +548,23 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
         #   {standards_text} = standards_registry 匹配到的编制依据规范。
         #   两者均「无法匹配时渲染为空串 = 不注入」，故不传时模板仍可正常渲染。
         "scheme_basis", "standards_text",
+        # ✅ 2026-10-02（第二十五轮 · 目录侧检查点前置）：{outline_checkpoint_block}
+        #   = services/outline_checkpoint 派生的必备法定章节清单（唯一事实源，
+        #   判据指向 audit_rules + preflight_engine 谓词）。未传时独占行整行丢弃。
+        "outline_checkpoint_block",
     ],
     "outline_level1_system": [
         "scheme_name", "scheme_type", "construction_scope",
         "project_brief", "reference_outline", "project_facts",
-        "scheme_basis", "standards_text",
+        "scheme_basis", "standards_text", "outline_checkpoint_block",
     ],
     "outline_review_system": [
         "scheme_name", "scheme_type", "construction_scope",
         "is_dangerous", "outline_json", "project_facts",
-        "scheme_basis",
+        "scheme_basis", "outline_checkpoint_block",
+        # R38 D5: the "8.1 audit against the checklist" instruction
+        # shares the block's fate (absent when outline_checkpoint_check is off).
+        "outline_checkpoint_audit_hint",
     ],
     "outline_patch_system": [
         "scheme_name", "scheme_type", "project_brief",
@@ -510,6 +580,12 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
         "zone_hint", "material", "chunk_index", "NORM_DICT_BLOCK", "summary",
     ],
     "facts_json_fix_system": ["issues", "target_description", "invalid_content"],
+    # ✅ R38（2026-10-03 · P1-c）：通用 Schema 自适应修复提示词。
+    #   非目录任务（符合性检查 / 一致性审计 / 冲突仲裁 / 事实补全 / 章节识别 …）
+    #   此前一律复用 outline_json_fix_system，而那份提示词通篇在讲目录结构
+    #   （child→children、补二级目录、description 推导），会主动诱导模型
+    #   把 `{"conflicts": …}` 这类结果改成目录形状的占位 JSON。
+    "json_schema_fix_system": ["issues", "target_description", "invalid_content"],
     "global_facts_adjust_system": ["current_facts", "instruction"],
     # ✅ 2026-09-26（T9 · 契约表覆盖率扩展）：以下 25 个模板由「模板实际占位符
     #    自动提取（同 check_prompt_variables 口径过滤误报）+ 高价值模板调用方
@@ -522,11 +598,20 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
         "chapter_desc", "chapter_id", "chapter_title", "construction_scope",
         "other_outline", "prior_chapters", "project_brief", "project_facts",
         "requirements", "scheme_name", "scheme_type",
+        # ✅ R38（2026-10-03 · P1-d）：调用点 sse_handlers.py:4306 一直在传
+        #   standards_text，但本模板**没有**该占位符 → render_prompt 静默丢弃。
+        #   结果：一级目录阶段（outline_short/level1 都注入本方案类别匹配的
+        #   现行标准清单）看得到编制依据规范，二三级子目录阶段完全看不到，
+        #   「规范章节宜作为该章骨架依据」这条要求在子层落不了地。
+        #   现补占位符（措辞与 outline_short_system / outline_level1_system
+        #   逐字一致）+ 契约登记。纯增量：调用方早已传参，无调用点改动。
+        "standards_text",
     ],
     "outline_sublevel_batch_system": [
         "chapter_count", "chapters_text", "construction_scope", "other_outline",
         "prior_chapters", "project_brief", "project_facts", "requirements",
         "scheme_name", "scheme_type",
+        "standards_text",  # ✅ R38：同上，见 outline_sublevel_system 注释
     ],
     "outline_adjust_system": [
         "current_outline", "instruction", "scheme_name", "scheme_type",
@@ -562,12 +647,15 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
         "content", "facts", "scheme_name", "scheme_type",
     ],
     # --- 审核与预检域 ---
+    # ✅ 2026-10-03（AI 语义检查侧消费事实）：两条 AI 链路经跨模块只读桥接
+    #    load_resolved_facts_for_scope 装配 {global_facts}（与预检/正文/导出
+    #    同一 fail-closed 门控），无事实时由路由层降级为「（无）」。
     "expert_review_system": [
-        "attachments", "check_items", "outline_tree", "scheme_name",
-        "scheme_type",
+        "attachments", "check_items", "global_facts", "outline_tree",
+        "scheme_name", "scheme_type",
     ],
     "compliance_check_system": [
-        "checklist", "content", "scheme_name", "scheme_type",
+        "checklist", "content", "global_facts", "scheme_name", "scheme_type",
     ],
     # --- 审核预检 · 问题定向自动修复（services/review_autofix.py） ---
     "review_autofix_user": [
@@ -591,6 +679,58 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     "chart_mermaid_fix_gantt": ["code", "error", "scheme_type"],
     # --- 配图域 ---
     "ILLUSTRATION_PROMPT_OPTIMIZE": ["section_title", "style"],
+    # --- ✅ R38 收口（2026-10-03）：剩余未登记模板全部接入契约表 ---
+    # 一致性修复·定点编辑 user（消费方 consistency_edits.build_edits_prompt，
+    # 5/5 全传；章节原文由调用方在 render 结果后追加，不走占位符）
+    "consistency_repair_edits_user": [
+        "authoritative_sources", "conflicts_in_section", "global_facts",
+        "section_id", "section_title",
+    ],
+    # 事实整理域（services/facts_enrich.py，调用点逐项核过：全传）
+    "facts_finalize_system": ["current_facts"],
+    "facts_knowledge_patch_system": ["current_facts", "knowledge_text"],
+    # --- ✅ R38 D6：**空列表 = 显式声明「零占位符」**（区别于未声明 None）---
+    #   启动期校验这些模板出厂确实无占位符；若日后有人往模板里加了 {x}
+    #   而未同步契约，check_prompt_variables 会报 used_not_declared 漂移，
+    #   用户在前端编辑时也会收到「新增了未在契约表中声明的变量」告警。
+    #   共享片段（被拼接进宿主模板，自身不得含待填变量）：
+    "SHARED_FORBIDDEN_WORDS": [],
+    "SHARED_OUTPUT_SPEC": [],
+    "SHARED_SCOPE_RULES": [],
+    "SHARED_SCOPE_RULES_BRIEF": [],
+    #   纯指令型 system 模板（变量全部在对应 *_user 侧，system 零占位）：
+    "consistency_scan_system": [],
+    "consistency_scan_batch_system": [],
+    "consistency_arbitrate_system": [],
+    "consistency_repair_system": [],
+    "consistency_repair_edits_system": [],
+    "review_autofix_system": [],
+    # --- ✅ R39 T1（2026-10-04）：投标分析域 19 条提示词接入契约表 ---
+    # system：通用约束纯指令，零占位。
+    "bid_analysis_system": [],
+    # user：唯一占位符是 ``__CONTEXT__``，由 ``build_item`` 用 ``.replace``
+    # 注入（刻意避开 ``.format``，见该函数注释）—— 注入方就是调用方，故如实
+    # 登记为 ``["CONTEXT"]``：既让启动期漂移校验归零，也让前端编辑器如实显示
+    # 「这个模板需要一个项目资料文本变量」。不登记会报 used_not_declared
+    # （实测 18 处漂移），给它加全局豁免则等于掩盖其它模板里的同类误用。
+    "bid_item_projectBasicInfo": ["CONTEXT"],
+    "bid_item_schemeBasicInfo": ["CONTEXT"],
+    "bid_item_overviewParams": ["CONTEXT"],
+    "bid_item_compilationBasis": ["CONTEXT"],
+    "bid_item_siteConditions": ["CONTEXT"],
+    "bid_item_deploymentSchedule": ["CONTEXT"],
+    "bid_item_constructionTechnique": ["CONTEXT"],
+    "bid_item_resourceAllocation": ["CONTEXT"],
+    "bid_item_safetyMeasures": ["CONTEXT"],
+    "bid_item_qualityAcceptance": ["CONTEXT"],
+    "bid_item_emergencyResponse": ["CONTEXT"],
+    "bid_item_calcAndDrawings": ["CONTEXT"],
+    "bid_item_constructionDeployment": ["CONTEXT"],
+    "bid_item_constructionProcess": ["CONTEXT"],
+    "bid_item_workInterfaceDivision": ["CONTEXT"],
+    "bid_item_materialManagement": ["CONTEXT"],
+    "bid_item_equipmentManagement": ["CONTEXT"],
+    "bid_item_engineeringMethods": ["CONTEXT"],
 }
 
 
@@ -599,6 +739,7 @@ def _apply_variable_contracts() -> None:
 
     幂等：重复调用只会重写同样的值。未知 key 跳过（模板可能已被动态删除）。
     """
+    register_lazy_prompts()
     for key, requires in PROMPT_VARIABLE_CONTRACTS.items():
         meta = _ALL_PROMPTS.get(key)
         if meta is None:
@@ -641,10 +782,14 @@ def check_prompt_variables(verbose: bool = False,
     说明：默认路径只做**校验与告警**，绝不修改模板内容、不阻断服务启动；
     未声明 ``requires`` 的模板（绝大多数）完全跳过，保证零副作用。
     """
+    register_lazy_prompts()
     issues: list[dict] = []
     for key, meta in sorted(_ALL_PROMPTS.items()):
         requires = meta.get("requires")
-        if not requires:
+        # ✅ R38 D6：区分「未声明」(None=跳过) 与「显式声明零变量」([]=校验)
+        #    —— 旧判据 `if not requires` 把两者混为一谈，导致契约表里的空
+        #    声明恒不生效（R38 报告 D6 的根因）。
+        if requires is None:
             continue
         # ✅ 2026-09-25（BUG-A · 契约漂移基线污染）：以出厂默认基线比对
         #   （meta["content"]/["variables"] 会被 update_prompt 原地改写，用它
@@ -778,8 +923,11 @@ def validate_prompt_content(key: str, content: str) -> list[dict]:
     #    但 ③ 分支未过滤 → 用户**原样保存出厂模板也会弹一条**
     #    「新增了未在契约表中声明的变量 max」的假告警。
     meta = _ALL_PROMPTS.get(key) or {}
-    requires = meta.get("requires") or []
-    if requires:
+    # ✅ R38 D6：`or []` 会把「未声明(None)」与「显式零声明([])」压扁成同一
+    #    语义，现保留区分：显式声明的模板（含空声明）都进入增删占位符告警
+    #    —— 用户往零占位模板里加 {x} 时会收到「新增了未在契约表中声明的变量」。
+    requires = meta.get("requires")
+    if requires is not None:
 
         def _user_vars(tpl: str) -> set[str]:
             """提取「调用方需提供的变量」，并套用与运行期告警**同一套**误报/豁免判据。
@@ -833,4 +981,5 @@ from app.services.ai.prompts import consistency_repair  # noqa: E402,F401  （�
 from app.services.ai.prompts import review_autofix  # noqa: E402,F401  （审核预检问题定向修复）
 # ✅ G4 变量契约：模板全部注册后再套用契约表（见上方 PROMPT_VARIABLE_CONTRACTS）
 _apply_variable_contracts()
+
 

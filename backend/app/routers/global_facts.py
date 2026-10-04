@@ -372,13 +372,36 @@ async def _load_fact_rows(db, scheme_id: str, project_id: str,
 async def list_facts(
     scheme_id: str = Query(""),
     project_id: str = Query(""),
+    limit: int = Query(0, ge=0, description="分页大小，0=返回全部（向后兼容）"),
+    offset: int = Query(0, ge=0, description="分页偏移"),
     db=Depends(get_db),
 ):
     """查询全局事实（支持按 scheme_id 或 project_id 过滤）
 
     返回增强版数据，包含 category/source_ref/is_simulated/confidence/
     is_resolved/has_conflict 等字段。
+
+    ✅ 增强（2026-10-03）：超大方案事实分组可能数百条，一次性全量返回既浪费
+    带宽也拖慢首屏。新增 limit/offset 分页（默认 limit=0 即不限制，完全
+    向后兼容）；统计信息 stats 始终基于全量分组计算，分页只裁剪返回的
+    groups 列表，前端可据 pagination.total_groups 做分页控件。
+
+    ✅ BUG 修复（P2 · 2026-10-04）：本 docstring 此前被写在**函数体内**
+    （int() 归一之后），是一段无副作用的字符串表达式 —— 结果
+    `list_facts.__doc__` 恒为 None：FastAPI 取不到描述、OpenAPI 文档里该端点
+    没有说明、help()/自省工具同样看不到。现移到函数体首行（正确的 docstring 位置）。
     """
+    # ✅ 容错（2026-10-03）：经 HTTP 调用时 limit 为解析后的 int；但单测或内部
+    #    直接调用路由函数时，缺省值是 Query(0) 对象，直接 `limit > 0` 会抛
+    #    TypeError。统一在此归一为 int，`Query` 对象无法 int() 时回落 0（不限）。
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 0
+    try:
+        offset = int(offset)
+    except (TypeError, ValueError):
+        offset = 0
     sql = "SELECT * FROM global_facts WHERE 1=1"
     params: list = []
     if scheme_id:
@@ -533,6 +556,13 @@ async def list_facts(
     group_list.sort(key=lambda g: (_cat_order.get(g.get("category") or "", 999),
                                    g.get("title") or ""))
 
+    # ✅ 增强（2026-10-03）：分页裁剪（仅影响返回的 groups，统计仍基于全量）
+    total_groups = len(group_list)
+    if limit > 0:
+        page_groups = group_list[offset:offset + limit]
+    else:
+        page_groups = group_list
+
     # 计算统计信息
     all_items = [it for g in group_list for it in g["items"]]
     stats: dict = {
@@ -580,7 +610,16 @@ async def list_facts(
     #    直接消费这里，不必再自己把事实重新分章（口径统一在后端）。
     stats["by_chapter"] = _chapter_stats_for_items(all_items)
 
-    return {"groups": group_list, "stats": stats}
+    return {
+        "groups": page_groups,
+        "stats": stats,
+        "pagination": {
+            "limit": limit,
+            "offset": offset,
+            "total_groups": total_groups,
+            "returned": len(page_groups),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -785,14 +824,21 @@ async def check_danger_scheme(
     """
     name = str((data or {}).get("scheme_name") or "").strip()
     extra = str((data or {}).get("extra_text") or "").strip()
-    if not name and not extra:
-        raise HTTPException(400, "需要 scheme_name 或 extra_text")
-    # 方案名称为空但前端只传了 scheme_id 时，从库中取方案名（不要求 extra_text）
+    # ✅ P0 修复（2026-10-01）：400 检查此前位于「从库中取方案名」**之前** ——
+    #    前端工作台「事实诊断」面板只传 query 的 scheme_id（body 为空对象），
+    #    name/extra 均为空 → 恒 400「需要 scheme_name 或 extra_text」，
+    #    下方「从库中取方案名」的分支永远不可达（注释与实现矛盾）。
+    #    生产实证：backend_err.log 多次 400，同方案同时段 /chapters 为 200、
+    #    /danger-check 恒 400。现把「取方案名」提前；400 仅在
+    #    「scheme_name/extra_text 均空 且 scheme_id 也取不到方案名」时拒绝
+    #    （全空调用方仍合理 400，不做无依据判定）。
     if not name and scheme_id:
         cur = await db.execute("SELECT name FROM schemes WHERE id=?", (scheme_id,))
         row = await cur.fetchone()
         if row:
             name = row["name"] or ""
+    if not name and not extra:
+        raise HTTPException(400, "需要 scheme_name 或 extra_text")
     # ✅ P0 修复（2026-09-27 · 危大阈值判定用编造值/过期值算）：
     #    「超过一定规模」是给监管看的**确定性结论**，绝不能用 AI 编造的模拟值
     #    （is_simulated=1，待确认）或已被重新提取取代的过期值（is_stale=1）
@@ -1285,8 +1331,20 @@ async def update_fact(
 
     # ---- 模式 2：分组重建 ----
     group_id = (row["group_id"] if row else None) or fact_id
-    cur = await db.execute(
-        "SELECT * FROM global_facts WHERE group_id=?", (group_id,))
+    # ✅ BUG 修复（2026-10-03 · 作用域不对称）：group_id 不是全局唯一约束
+    #    （delete_fact :2030 已明确此风险并用作用域限定修复），但本路径查旧行
+    #    从未限定 —— 历史数据/旧版复制方案残留的跨方案重复 group_id 场景下，
+    #    `grow = old_rows[0]` 可能取到**其它方案**的行：新行插到错误作用域、
+    #    DELETE 按错误作用域执行 → 本分组旧行未删（悬空重复）+ 改动越域。
+    #    与 delete_fact 同口径：fact_id 命中真实行时，按其 project/scheme 限定。
+    if row:
+        cur = await db.execute(
+            "SELECT * FROM global_facts WHERE group_id=? AND project_id=? "
+            "AND COALESCE(scheme_id,'')=?",
+            (group_id, str(row["project_id"] or ""), str(row["scheme_id"] or "")))
+    else:
+        cur = await db.execute(
+            "SELECT * FROM global_facts WHERE group_id=?", (group_id,))
     old_rows = [dict(r) for r in await cur.fetchall()]
     if not old_rows:
         raise HTTPException(404, "事实不存在")
@@ -1504,6 +1562,148 @@ async def resolve_fact(
         prow = await cur.fetchone()
         await _invalidate_fact_scope_cache(db, "", str(prow[0] or "") if prow else "")
     return {"ok": True}
+
+
+# ✅ 写侧不变量（G3 · 2026-10-04）：解除过期标记时**不得**破坏既有安全闸门。
+#    保持不变式 `is_simulated=1 ⟹ is_resolved=0` 与「矛盾未裁决 ⟹ 不可确认」，
+#    否则「确认资料仍有效」会被当成绕过「模拟值/矛盾值」审核闸门的捷径。
+_ACK_STALE_RESOLVE_CASE = (
+    "is_resolved=CASE WHEN COALESCE(is_simulated,0)=0 AND COALESCE(has_conflict,0)=0"
+    " THEN 1 ELSE is_resolved END")
+
+
+@router.patch("/{fact_id}/ack-stale")
+async def ack_fact_stale(
+    fact_id: str,
+    scheme_id: str = Query(""),
+    db=Depends(get_db),
+):
+    """人工核对确认「该取值仍然有效」，解除本条的 ``is_stale`` 过期标记。
+
+    ✅ 缺口修复（G3 · 2026-10-04）：``is_stale=1`` 此前**没有解除入口**，构成死锁：
+
+      · 打标记的路径是**批量**的 —— ``_mark_project_facts_stale``（本文件 :2777）
+        在项目资料重新解析/删除时把**整个项目**的事实一次性置 ``is_stale=1``；
+      · 解除标记的路径却只有两条，且都要求「值必须先变」：
+        PATCH 事实（``value_changed`` 为真才 ``is_stale=0``，见 :1185）与
+        ``resolve-conflict`` 裁决取值；
+      · 而 ``resolve``（:1550）对 stale 行直接 409「请重新提取或先编辑核对」，
+        ``batch-resolve``（:1801）同样把 stale 行整批跳过。
+
+    于是：用户明明核对过、取值并未变化（资料重传/补传是常见操作，绝大多数事实
+    并不会因此失效），却被永久排除在正文注入与导出门控之外（``_FACTS_INJECT_WHERE``
+    含 ``is_stale=0``），而「来源过期 N」的红色 Tag 又无法消除 —— 只能逐条把值
+    改成另一个值再改回来，或对数十上百条事实重新跑一次 AI 提取（真实计费）。
+
+    语义：本端点只表达「我已核对，这个值仍然有效」，因此**只清 is_stale**；
+    是否顺带置 ``is_resolved=1`` 由既有闸门决定（模拟值/矛盾值保持不确认，
+    不变量见 :data:`_ACK_STALE_RESOLVE_CASE`），并在 ``blocked_reason`` 回传原因
+    供前端继续引导。
+
+    幂等：本条未处于过期状态时返回 ``changed=False``（不报错），前端可安全重复调用。
+    """
+    scheme_scope = scheme_id.strip() if isinstance(scheme_id, str) else ""
+    if scheme_scope:
+        await _assert_fact_in_scheme_scope(db, fact_id, scheme_scope)
+    cur = await db.execute(
+        "SELECT scheme_id, project_id, is_simulated, has_conflict, is_stale, is_resolved"
+        " FROM global_facts WHERE id=?", (fact_id,))
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "事实不存在")
+
+    if not bool(row["is_stale"]):
+        return {"ok": True, "changed": False,
+                "is_resolved": bool(row["is_resolved"]), "blocked_reason": ""}
+
+    is_sim = bool(row["is_simulated"])
+    has_conflict = bool(row["has_conflict"])
+    if is_sim or has_conflict:
+        await db.execute(
+            "UPDATE global_facts SET is_stale=0, "
+            "updated_at=datetime('now','localtime') WHERE id=?", (fact_id,))
+        blocked = ("模拟值仍需先核对并改为真实取值，本次仅解除过期标记"
+                   if is_sim else "多来源矛盾仍需先裁决取值，本次仅解除过期标记")
+        new_resolved = bool(row["is_resolved"])
+    else:
+        await db.execute(
+            "UPDATE global_facts SET is_stale=0, is_resolved=1, "
+            "updated_at=datetime('now','localtime') WHERE id=?", (fact_id,))
+        blocked = ""
+        new_resolved = True
+    await db.commit()
+
+    if row["scheme_id"]:
+        await invalidate_export_cache(db, row["scheme_id"], facts_touched=True)
+    else:
+        await _invalidate_fact_scope_cache(db, "", str(row["project_id"] or ""))
+    return {"ok": True, "changed": True,
+            "is_resolved": new_resolved, "blocked_reason": blocked}
+
+
+@router.post("/ack-stale")
+async def batch_ack_stale(data: dict, db=Depends(get_db)):
+    """批量解除过期标记（"这些值我都核对过，仍然有效"）。
+
+    ✅ 为什么必须批量：`_mark_project_facts_stale` 是**项目级**批量打标的，
+    一次资料重传就可能让数十上百条事实同时过期 —— 只有单条入口等于没有入口。
+
+    ✅ 作用域与安全（与 ``batch-resolve`` 同口径）：
+      · 必须传 ``scheme_id`` 限定作用域，防止 ``WHERE id IN (...)`` 越域改他方案数据；
+      · 单条的安全闸门由 SQL 的 CASE 表达式保证（见 :data:`_ACK_STALE_RESOLVE_CASE`）：
+        模拟值/矛盾值**只清 is_stale，不被顺带确认为已审核**，并在 ``gated`` 里
+        回传条数，前端据此提示"N 条仍需逐条处理"。
+    """
+    if not isinstance(data, dict):
+        raise HTTPException(400, "请求体必须是对象")
+    fact_ids = data.get("fact_ids") or []
+    scheme_id = str(data.get("scheme_id", "") or "").strip()
+    if not isinstance(fact_ids, list):
+        raise HTTPException(400, "fact_ids 必须是数组")
+    if len(fact_ids) > 500:
+        raise HTTPException(400, "单次最多处理 500 条事实")
+    if not scheme_id:
+        raise HTTPException(400, "需要提供 scheme_id 以限定作用域")
+    cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
+    srow = await cur.fetchone()
+    if not srow:
+        raise HTTPException(404, "方案不存在")
+    real_pid = str(srow[0] or "")
+
+    fact_ids = [str(f).strip() for f in fact_ids if str(f).strip()]
+    scope_sql = (" AND (scheme_id=? OR (project_id=? AND "
+                 "(scheme_id='' OR scheme_id IS NULL)))")
+    scope_params: list = [scheme_id, real_pid]
+    id_sql = ""
+    if fact_ids:
+        id_sql = f" AND id IN ({','.join('?' * len(fact_ids))})"
+        scope_params = [*fact_ids, *scope_params]
+
+    # ⚠️ 占位符顺序必须与 params 顺序逐位对应：`id IN (...)` 写在 scope 条件
+    #    **之前**，与下面的 [*fact_ids, scheme_id, real_pid] 一致。
+    #    （首版把 id_sql 拼在 scope_sql 之后、参数却把 fact_ids 放前面 →
+    #     SQL 把 scheme_id 的值当 fact_id 比对，UPDATE 恒 0 行、零报错，
+    #     属"静默不生效"——正是 safe_rowcount 也救不了的绑定错位。）
+    gated = 0
+    cur = await db.execute(
+        "SELECT COUNT(*) AS n FROM global_facts WHERE is_stale=1"
+        + id_sql + scope_sql +
+        " AND (COALESCE(is_simulated,0)=1 OR COALESCE(has_conflict,0)=1)",
+        scope_params)
+    grow = await cur.fetchone()
+    if grow:
+        gated = int(grow[0] or 0)
+
+    cur = await db.execute(
+        "UPDATE global_facts SET is_stale=0, " + _ACK_STALE_RESOLVE_CASE +
+        ", updated_at=datetime('now','localtime')"
+        " WHERE is_stale=1" + id_sql + scope_sql, scope_params)
+    changed = safe_rowcount(cur, what="批量解除事实过期标记")
+    await db.commit()
+
+    # 事实集合变化 → 失效项目下所有方案缓存（可能改动了项目共享事实）
+    await _invalidate_fact_scope_cache(db, "", real_pid)
+    return {"ok": True, "changed": changed, "gated": gated}
 
 
 @router.patch("/{fact_id}/resolve-conflict")

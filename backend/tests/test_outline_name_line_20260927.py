@@ -210,7 +210,10 @@ class TestCoverageWiredIntoRequirementsCheck:
         assert covered is False
         assert any("施工工序" in m for m in missing)
 
-    def test_fully_covered_skips_review(self):
+    def test_fully_covered_skips_review(self, monkeypatch):
+        # ⚠️ 2026-10-02（第二十五轮）：见 TestAllLevelRelaxedMatching 的说明 ——
+        #    本组用例测「方案名称维度覆盖」，故隔离九大法定章节检查。
+        monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False)
         covered, missing = sh._check_requirements_coverage(
             "", [{"title": "工程概况", "children": []},
                  {"title": "基坑支护施工", "children": [
@@ -226,6 +229,7 @@ class TestCoverageWiredIntoRequirementsCheck:
     def test_switch_off_disables_name_check(self, monkeypatch):
         monkeypatch.setattr(sh.settings, "outline_name_coverage_check", False,
                             raising=False)
+        monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False)
         covered, missing = sh._check_requirements_coverage(
             "", [{"title": "工程概况", "children": []}], False, basis=BASIS)
         assert covered is True and missing == []
@@ -266,6 +270,7 @@ routers → services。
 """
 import ast
 import pathlib
+import re
 
 import app
 
@@ -274,9 +279,16 @@ SERVICES = ROOT / "services"
 
 #: 已知的遗留层级倒置（services → routers）。**逐条登记，不做静默豁免**：
 #: 新增同类 import 必须先修既有项或显式登记，避免护栏被"再加一条"架空。
+#:
+#: ✅ 修正（2026-10-02）：旧登记把行号写进值里（``L92``），而匹配只取
+#:    ``split()[0]``（即 ``L92``）与 ``hit`` 做 ``in`` 子串比较 —— 于是该行
+#:    **一旦因任何编辑而位移，登记立即失效**，把已登记的遗留项重新报成
+#:    "新增泄漏"，且改的人完全无从下手（consistency_scanner.py 仅在本轮
+#:    插入一段注释 + 人名守卫就从 L92 移到 L131 即触发）。
+#:    改为登记**模块路径**（稳定不随行号变化）；行号只作为注释信息保留。
 KNOWN_LAYER_LEAKS: dict[str, str] = {
-    "consistency_scanner.py": "L92 from app.routers.sse_handlers import _build_facts_text"
-                              "（全局事实文本构建函数住在 sse_handlers；与本轮已修的"
+    "consistency_scanner.py": "app.routers.sse_handlers._build_facts_text"
+                              "（全局事实文本构建函数住在 sse_handlers；与已修的"
                               " numbering→export 同族，待独立批次下沉到 services）",
 }
 
@@ -300,6 +312,21 @@ def _router_imports(path: pathlib.Path) -> list[str]:
     return hits
 
 
+def _leak_key(hit: str) -> str:
+    """从一条 import 命中里抽出**与行号无关**的稳定标识。
+
+    ✅ 修正（2026-10-02）：旧实现拿 ``KNOWN_LAYER_LEAKS[rel].split()[0]``
+    （即硬编码的 ``L92``）去 ``in`` 命中串里做子串比较 —— 只要该 import
+    因任何编辑而位移，登记就静默失效，已登记的遗留项被重新报成「新增泄漏」。
+    改为比对 ``模块路径 + 符号名``，行号不再参与判定。
+    """
+    m = re.search(r"from (app\.routers[\w.]*) import ([\w, ]+)", hit)
+    if m:
+        return f"{m.group(1)}.{m.group(2).strip()}"
+    m = re.search(r"import (app\.routers[\w.]*)", hit)
+    return m.group(1) if m else hit
+
+
 def test_services_never_import_routers():
     """services 层不得依赖 routers 层（层级倒置护栏，P2-1）。
 
@@ -311,7 +338,7 @@ def test_services_never_import_routers():
     for p in sorted(SERVICES.rglob("*.py")):
         rel = p.name
         for hit in _router_imports(p):
-            if rel in KNOWN_LAYER_LEAKS and KNOWN_LAYER_LEAKS[rel].split()[0] in hit:
+            if rel in KNOWN_LAYER_LEAKS and _leak_key(hit) in KNOWN_LAYER_LEAKS[rel]:
                 known.append(f"{rel} {hit}")
             else:
                 leaks.append(f"{p.relative_to(ROOT)} {hit}")
@@ -389,10 +416,20 @@ class TestTemplateInjection:
 
 
 class TestAllLevelRelaxedMatching:
-    """P1-4：宽松规则（≥4 字公共子串）扩展到全层级；严格规则仍只看一级。"""
+    """P1-4：宽松规则（≥4 字公共子串）扩展到全层级；严格规则仍只看一级。
 
-    def test_deep_title_satisfies_requirement(self):
-        covered, missing = sh._check_requirements_coverage(
+    ⚠️ 2026-10-02（第二十五轮）：`_check_requirements_coverage` 现**恒定**并入
+    「九大法定章节」检查（对齐预检 `check_completeness` 的无条件检查），
+    因此最小夹具（只有 1 个章节）必然 covered=False。本组用例测的是
+    **编制要求的匹配规则**，故显式关闭该检查（`outline_checkpoint_check=False`）
+    把它隔离出去 —— 九章覆盖由 `tests/test_outline_checkpoint_20261002.py`
+    单独、显式地测。这是**测试范围界定**，不是掩盖缺陷。
+    """
+
+    def test_deep_title_satisfies_requirement(self, monkeypatch):
+        from app.routers import sse_handlers as _sh
+        monkeypatch.setattr(_sh.settings, "outline_checkpoint_check", False)
+        covered, missing = _sh._check_requirements_coverage(
             "深基坑开挖支护专项方案", [{"title": "工程概况", "children": [
                 {"title": "深基坑开挖支护要点", "children": []}]}])
         assert covered is True, missing
@@ -405,8 +442,10 @@ class TestAllLevelRelaxedMatching:
         assert covered is False
         assert any("监测方案" in m for m in missing), missing
 
-    def test_l1_hit_still_covers(self):
-        covered, _ = sh._check_requirements_coverage(
+    def test_l1_hit_still_covers(self, monkeypatch):
+        from app.routers import sse_handlers as _sh
+        monkeypatch.setattr(_sh.settings, "outline_checkpoint_check", False)
+        covered, _ = _sh._check_requirements_coverage(
             "必须包含计算书及图纸", [{"title": "计算书及相关图纸", "children": []}])
         assert covered is True
 

@@ -288,3 +288,39 @@ class TestManualSaveChartSync:
         assert await _chart_rows(db_conn) == []
         row = await _section_row(db_conn)
         assert row["content"] == "普通正文。"
+
+    # ---------------- R38 遗留收口：手动保存接入未闭合围栏补齐 ----------------
+
+    async def test_save_unclosed_fence_completed_before_persist(self, db_conn):
+        """未闭合围栏（粘贴截断）→ 落库前补齐闭合，与生成链路同函数同口径。
+
+        旧行为：手动保存不做 auto_fix，未闭合 ```mermaid 原样落库，
+        导出/预览时其后正文被整段吞进代码块。新行为：保存前用
+        content_utils.auto_fix_unclosed_fences（与 _persist_section 同一实现）
+        幂等追加收尾围栏，补齐后成为合法图表 → 正常登记（而非删块）。
+        """
+        await _seed_section(db_conn)
+        content = f"总体流程如下：\n```mermaid\n{VALID_FLOWCHART}"
+        r = await update_section("s1", "c1", SectionUpdate(content=content),
+                                 db=db_conn)
+        assert r["ok"] is True
+        row = await _section_row(db_conn)
+        assert row["content"].rstrip().endswith("```")
+        # 补齐后是闭合合法图 → 按登记侧同一判据正常入清单
+        assert await _chart_rows(db_conn) == ["flowchart"]
+        # 字数口径基于补齐后正文（闭合块内文字同样被剔除）
+        assert row["word_count"] == text_word_count(row["content"])
+
+    async def test_save_closed_content_untouched_by_fence_fix(self, db_conn):
+        """已闭合正文一字不动：补齐仅针对未闭合围栏，幂等无损（护栏）。
+
+        A/B 承重反向：若接线退化为无条件重写/重复追加，本用例即失败。
+        """
+        await _seed_section(db_conn)
+        content = (f"总体流程如下：\n```mermaid\n{VALID_FLOWCHART}\n```\n"
+                   "后续说明不得被吞进代码块。")
+        await update_section("s1", "c1", SectionUpdate(content=content),
+                             db=db_conn)
+        row = await _section_row(db_conn)
+        assert row["content"] == content
+        assert await _chart_rows(db_conn) == ["flowchart"]

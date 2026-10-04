@@ -12,7 +12,8 @@ from app.db import get_db
 from app.models import SectionCreate, SectionUpdate
 from app.routers.review import reset_review_on_content_change  # ✅ G9：正文变更→退回待审核
 from app.services.ai.json_response import (
-    collect_json_response, renumber_outline, strip_outline_numbering,
+    OUTLINE_REPAIR_KEY, collect_json_response,
+    renumber_outline, strip_outline_numbering,
 )
 from app.services.numbering import (
     normalize_section_content_subheadings,  # ✅ 正文子标题编号落库前规范化（唯一实现）
@@ -38,6 +39,7 @@ from app.services.content_shrink import (
 )
 from app.services.content_utils import (
     word_status_for, text_word_count, WORD_OVER_RATIO,
+    auto_fix_unclosed_fences,
 )
 from app.routers._chart_pipeline import register_inline_charts  # ✅ B31：手动保存同步图表登记
 from app.services.standards_registry import (
@@ -205,6 +207,31 @@ def outline_generation_in_progress(scheme_id: str) -> str | None:
     renumber_sections_after_reorder 构成同表写写竞态。现补齐同口径守卫。
     """
     return _scheme_task_status_in_progress(scheme_id, "outline_generation")
+
+
+def facts_generation_in_progress(scheme_id: str) -> str | None:
+    """本方案是否有**仍在跑**的事实提取任务（generate-facts 409 守卫的唯一入口）。
+
+    返回命中的任务状态（running / paused），无在跑任务返回 None。
+
+    ✅ BUG 修复（P1 · 2026-10-04）：`POST /sse/generate-facts/{scheme_id}` 此前是
+    目录/正文/事实三条 SSE 链路里**唯一没有自我重入守卫**的 —— generate-outline
+    （sse_handlers.py:3867）与 generate-content 都有「同型任务在跑即 409」的防护，
+    事实提取只做了一句 `SELECT * FROM schemes` 存在性校验。后果（连点两次「提取
+    事实」或双标签页并发）：
+
+      ① 两路并发跑 `run_extraction_pipeline`，各自持有独立的 protected/insert_buf；
+      ② `persist_extraction`（facts_extractor.py:2342）是「同事务 DELETE + INSERT」，
+         后提交的那路按自己的快照覆盖先完成那路的全部事实行 —— **用户看到的事实
+         集合取决于谁最后提交**，且与两路各自的 AI 结果都不一致；
+      ③ 两路 `save_extracted_chunks` 各自写 `facts_extracted_chunks` 指纹，互相
+         污染增量跳过判据（下次「增量提取」会跳过本该重提的分段）；
+      ④ 两路都调 `invalidate_export_cache`，导出缓存失效顺序不确定。
+
+    现与目录/正文同口径：只拦 running/paused（僵尸终态条目不误拦，见
+    `_scheme_task_status_in_progress` 的 docstring），拒绝重入并给出可操作提示。
+    """
+    return _scheme_task_status_in_progress(scheme_id, "facts_generation")
 
 
 async def invalidate_consistency_scan_cache(db, scheme_id: str) -> None:
@@ -600,6 +627,21 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
         # content_generation_in_progress 的说明，终态残留条目不再永久阻塞保存
         if content_generation_in_progress(scheme_id):
             raise HTTPException(409, "本方案正文正在后台生成中，手动保存会与生成结果互相覆盖，请等待生成完成后再编辑")
+        # ✅ 遗留收口（2026-10-03 · R38）：手动保存路径接入未闭合围栏补齐 ——
+        #    与生成链路 _persist_section（sse_handlers）用**同一函数**同口径。
+        #    用户粘贴中途截断的正文（如未闭合 ```mermaid 会吞掉其后全部内容）
+        #    此前原样落库：预览/导出整段变代码块。auto_fix_unclosed_fences 是
+        #    幂等、仅追加、不改动已闭合内容的确定性修复；失败降级不阻断保存。
+        #    必须放在 word_count 计算与图表登记**之前**，后续口径基于补齐后正文。
+        try:
+            fields["content"], _fence_fixes = auto_fix_unclosed_fences(
+                fields["content"] or "")
+            if _fence_fixes:
+                logger.info("章节 %s 手动保存：补齐未闭合围栏 %d 处",
+                            section_id[:8], len(_fence_fixes))
+        except Exception as e:
+            logger.warning("章节 %s 手动保存围栏补齐失败（使用原文）: %s",
+                           section_id[:8], e)
         # ✅ 口径与正文生成落库统一：只数正文文字，不含内嵌图表代码块
         fields["word_count"] = text_word_count(fields["content"])
         # ✅ BUG 修复：旧实现无条件把 status 置 generated（即使客户端没传），
@@ -741,7 +783,18 @@ async def delete_section(scheme_id: str, section_id: str, db=Depends(get_db)):
     if not await cur.fetchone():
         raise HTTPException(404, "章节不存在")
     # 批量收集所有后代 ID 后一次性删除
+    # ✅ BUG 修复（2026-10-03 · 环形脏数据 → 无限循环挂起）：旧实现的后代遍历
+    #    `while pending` 没有 visited 去重 —— 库内若存在环形 parent_id 脏数据
+    #    （A.parent=B 且 B.parent=A：update_section 的环检测 2026-09-18 才加，
+    #    此前遗留的历史数据、外部脚本直改库、库复制后 id 碰撞都可能造成 —— 同文件
+    #    _build_tree 注释即明确把「外部脚本直改库」列为环形脏数据来源），则每弹出一个
+    #    节点都会把它的父/子再收回 pending，**永不相交于空** → all_ids 与 pending 无限
+    #    增长，请求永久挂起并占住连接池（用户表现为「删这一章整个后端卡死，只能重启」）。
+    #    现补 visited 集合去重（与 update_section 环检测里 `if r["id"] not in descendants`
+    #    同一口径 —— 两处后代遍历此前一份有守卫一份没有，属判据分叉）：环形数据下每个
+    #    节点只入队一次，遍历必然收敛；被删章节仍会连同其（可达的）后代全部删除。
     all_ids = [section_id]
+    _visited = {section_id}
     pending = [section_id]
     while pending:
         pid = pending.pop(0)
@@ -754,7 +807,9 @@ async def delete_section(scheme_id: str, section_id: str, db=Depends(get_db)):
         cur = await db.execute(
             "SELECT id FROM sections WHERE parent_id=? AND scheme_id=?",
             (pid, scheme_id))
-        children = [r[0] for r in await cur.fetchall()]
+        children = [r[0] for r in await cur.fetchall() if r[0] not in _visited]
+        for cid in children:
+            _visited.add(cid)
         all_ids.extend(children)
         pending.extend(children)
     placeholders = ",".join("?" * len(all_ids))
@@ -933,6 +988,15 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
     node_counter = {"n": 0}
     new_inserts: list[tuple] = []
     updates: list[tuple] = []
+    # ✅ BUG 修复（2026-10-03 · 静默丢章）：同一 DB 主键被两个节点携带时
+    #    （前端树复制粘贴异常 / 绕过 UI 的直连脚本 / 历史缺陷回传脏 id），
+    #    旧实现会对同一行发两次 UPDATE：后一次覆盖前一次的 title/parent/
+    #    sort_order，两个节点坍缩成一行 —— 目录树**静默少一章**，且第二个
+    #    节点的全部子章节 parent 挂到同一行，结构错乱却返回 ok。与本函数
+    #    「非空数组但节点全非法 → 400」同一拒错口径：重复主键必为异常输入，
+    #    显式拒绝好过将就落库（正常客户端永远不会产生重复 __original_id，
+    #    故本防御对既有合法调用零影响，向后兼容）。
+    matched_db_ids: set[str] = set()
 
     async def _process_nodes(nodes: list, parent_db_id: str):
         for sort_order, node in enumerate(nodes):
@@ -970,6 +1034,12 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
             else:
                 word_budget = 1500
             if not is_new:
+                if original_id in matched_db_ids:
+                    raise HTTPException(
+                        400,
+                        f"目录中存在重复的章节主键 {original_id}（__original_id），"
+                        f"同一章节不得对应两个节点，请检查后重新保存")
+                matched_db_ids.add(original_id)
                 db_id = original_id
                 final_section_ids.add(db_id)
                 updates.append((title, description, level, parent_db_id,
@@ -1061,6 +1131,21 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
     await _renormalize_all_section_contents(db, scheme_id)
     # ✅ 整表重建（save-outline / 目录库套用共用此入口）→ 作废扫描缓存
     await invalidate_consistency_scan_cache(db, scheme_id)
+    # ✅ P2（2026-10-04）：补导出缓存失效。
+    #    export.py 的写侧失效此前只来自事实链路（global_facts.py 5 处）与提取链路
+    #    （bid_analysis._invalidate_downstream_cache），**目录结构变更一条都没有** ——
+    #    而 `_content_fingerprint` 虽含章节树、能保证正确性（不会导出旧文档），
+    #    失效缺失仍带来两个真实代价：
+    #      ① 旧指纹的 export_cache 行与 EXPORTS_DIR 磁盘产物成为孤儿，只能等
+    #         `_prune_export_cache`（5 份/方案）慢慢挤出，期间磁盘与表内堆积；
+    #      ② 目录重建后 `/export/cache-status` 仍显示旧行的 stale 计数，运维与
+    #         「缓存状态」UI 给出的信息与实际可复用性不符（用户以为还能秒开）。
+    #    失效是幂等 DELETE，失败不得阻断目录保存（与一致性缓存同口径）。
+    try:
+        from app.services.facts_extractor import invalidate_export_cache
+        await invalidate_export_cache(db, scheme_id)
+    except Exception as _e:  # noqa: BLE001 - 缓存失效不得阻断目录保存
+        logger.warning("目录重建：导出缓存失效失败（不影响保存结果）: %s", _e)
     await db.commit()
     # ✅ 正文丢失量化（见上方 content_ids 说明）：以提交后的实际留存内容为准，
     #    不用「预期集合差集」估算 —— 级联删除/新增/复用同一条形都会影响结果。
@@ -1251,7 +1336,8 @@ async def adjust_outline(scheme_id: str, body: dict, db=Depends(get_db)):
             collect_json_response(
                 [{"role": "system", "content": prompt}],
                 _adjust_outline_validate_fn,
-                json_mode=True, temperature=0.2, scene="outline_adjust"),
+                json_mode=True, temperature=0.2, scene="outline_adjust",
+                repair_key=OUTLINE_REPAIR_KEY),
             timeout=settings.ai_adjust_timeout)
     except asyncio.TimeoutError:
         raise HTTPException(504, "目录调整超时，请缩小调整范围后重试")

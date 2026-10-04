@@ -5,7 +5,7 @@ from app.db import read_db
 from app.models import AIConfigTest
 from app.services.ai.provider_factory import (
     normalize_base_url, PROVIDER_PRESETS,
-    normalize_request_mode, request_mode_label,
+    normalize_request_mode, request_mode_label, clamp_config_numbers,
 )
 from app.services.crypto import decrypt_api_key
 
@@ -111,7 +111,12 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
     # auto（未指定）沿用历史策略：流式优先（首字节快），错误归因按 chat 口径。
     prefer_stream = probe_mode != "normal"
 
-    probe_max_tokens = int(getattr(data, "max_tokens", 0) or 0) or 8192
+    # ✅ 增强：探测 max_tokens 与保存链路同一口径钳制（256..200000）。
+    #    原实现只做 `int(...) or 8192`，手工请求可把 10^9 一路发给厂商拿 400，
+    #    错误被归因为「Key/模型不对」。前端表单已限 min/max，这里补 API 层兜底。
+    probe_max_tokens = clamp_config_numbers(
+        {"max_tokens": int(getattr(data, "max_tokens", 0) or 0) or 8192}
+    )["max_tokens"]
     try:
         provider = _build_provider(data.provider_name, api_key, base_url, model,
                                    max_tokens=probe_max_tokens, timeout=120)

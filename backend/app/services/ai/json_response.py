@@ -19,9 +19,25 @@ logger = logging.getLogger("json_response")
 
 MAX_REPAIR_RETRIES = 2
 
+#: ✅ R38（2026-10-03 · P1-c）：非目录任务的**默认**修复提示词。
+#: 旧默认值是 ``outline_json_fix_system`` —— 全仓只有 facts_extractor 一个
+#: 调用点覆盖过 repair_key，其余 10 余个非目录调用点（符合性检查 / 一致性审计 /
+#: 冲突仲裁 / 全局事实确认 / 事实补全 / 上传章节识别 …）都在用目录修复提示词，
+#: 而那份提示词通篇讲目录结构（``child → children``、「为每个一级目录补 2-3 个
+#: 二级目录」、``description`` 推导），会**主动诱导**模型把 ``{"conflicts": …}``
+#: 改成目录形状的占位 JSON —— 修复轮预算被确定性浪费。
+#:
+#: 目录族调用点**必须显式**传 ``repair_key="outline_json_fix_system"``，
+#: 由此新增调用点即自带正确提示词；配套 AST 护栏
+#: （tests/test_json_repair_key_routing_20261003.py）锁死该约定。
+GENERIC_REPAIR_KEY = "json_schema_fix_system"
+
+#: 目录族专用的修复提示词（唯一真正需要「目录」语义的场景）
+OUTLINE_REPAIR_KEY = "outline_json_fix_system"
+
 
 def _build_repair_user_prompt(issues: list, raw: str,
-                             repair_key: str = "outline_json_fix_system") -> str:
+                             repair_key: str = GENERIC_REPAIR_KEY) -> str:
     """构造 JSON 修复 user 提示词。
 
     ✅ 统一提示词源：消费注册条目（DB 优先，可在前端编辑生效），
@@ -30,6 +46,9 @@ def _build_repair_user_prompt(issues: list, raw: str,
     ✅ 修复：新增 repair_key —— 旧实现硬编码 outline_json_fix_system，
     事实提取等任务复用它时，修复提示仍在讲"目录/outline"结构，
     与事实 Schema 不符，导致修复轮次大量无效。现在各任务可用专属修复提示词。
+
+    ✅ R38：默认值由 ``outline_json_fix_system`` 改为 ``json_schema_fix_system``
+    （理由见 :data:`GENERIC_REPAIR_KEY`）。
     """
     try:
         return render(repair_key,
@@ -278,50 +297,94 @@ async def collect_json_response(messages: list, validate_fn=None,
                                 *, temperature: float | None = None,
                                 json_mode: bool = False,
                                 timeout: int | None = None,
-                                repair_key: str = "outline_json_fix_system",
+                                repair_key: str = GENERIC_REPAIR_KEY,
                                 scene: str = ""):
     """统一 JSON 收集入口：生成 → 解析 → 校验 → 定向修复 → 重试
 
     ✅ 新增透传参数（供结构化提取使用）：
     - temperature/json_mode/timeout：低温 + JSON 模式 + 更长超时，降低非法 JSON 与超时；
-    - repair_key：修复轮次使用的提示词（事实提取用 facts_json_fix_system）。
+    - repair_key：修复轮次使用的提示词。**目录族调用点必须显式传**
+      ``OUTLINE_REPAIR_KEY``（默认值已改为 Schema 自适应的通用提示词，见
+      :data:`GENERIC_REPAIR_KEY`）。
 
     ✅ 2026-09-21 新增：scene 业务场景标记，透传至 chat_with_fallback 写入
     ai_audit_logs.scene，/ai/stats 可按场景聚合调用次数。
 
     ✅ 兼容性兜底：消息列表只有 system 时自动补一条最小 user 指令
     （见 _ensure_user_message），避免在要求 user 消息的 provider 上整类任务失败。
+
+    ✅ R38（2026-10-03）修复三处修复轮缺陷：
+    1. ``first_raw``：修复目标恒为**模型最初的输出**，不再被上一轮修复结果覆盖
+       （旧实现第 2 轮拿到的是「基于我上次修错的东西再修」，与
+       ``outline_json_fix_system``「保留原有结构、最小必要修改」的要求相悖，
+       且破坏不可逆 —— 第 1 轮把结构改坏后，第 2 轮已无从恢复）；
+    2. 修复轮 ``chat_with_fallback`` 包 try/except：首轮已产出内容、仅业务校验
+       未过时，修复轮的瞬时网络/限流故障不再把整次调用炸掉（首轮调用仍照旧
+       向上抛，由调用方决定是否整体重来）；
+    3. 修复轮失败信息并入最终异常文本，避免「修复失败」与「生成失败」混淆。
     """
     messages = _ensure_user_message(messages)
     raw = await chat_with_fallback(messages, temperature=temperature,
                                    json_mode=json_mode, timeout=timeout,
                                    scene=scene)
+    # 修复目标恒定为模型**最初**的输出（见 docstring 修复点 1）
+    first_raw = raw
     obj, issues = parse_and_validate(raw, validate_fn)
     if obj is not None and not issues:
         return obj, raw
 
+    repair_errors: list[str] = []
     for attempt in range(max_retries):
         repair_msgs = list(messages) + [
             {"role": "assistant", "content": raw or ""},
-            {"role": "user", "content": _build_repair_user_prompt(issues, raw or "", repair_key)},
+            {"role": "user", "content": _build_repair_user_prompt(
+                issues, first_raw or "", repair_key)},
         ]
-        raw = await chat_with_fallback(repair_msgs, temperature=temperature,
-                                       json_mode=json_mode, timeout=timeout,
-                                       scene=scene)
+        try:
+            raw = await chat_with_fallback(repair_msgs, temperature=temperature,
+                                           json_mode=json_mode, timeout=timeout,
+                                           scene=scene)
+        except Exception as e:  # noqa: BLE001
+            # 瞬时故障不应丢弃首轮已产出的内容：记录后继续下一轮修复预算
+            repair_errors.append("第%d次修复调用异常: %s" % (attempt + 1, e))
+            logger.warning("JSON 修复第 %d 次调用异常（继续使用剩余修复预算）：%s",
+                           attempt + 1, e)
+            continue
         obj, issues = parse_and_validate(raw, validate_fn)
         if obj is not None and not issues:
             return obj, raw
         logger.warning("JSON 修复第 %d 次仍未通过：%s", attempt + 1, issues[:3])
 
+    if repair_errors:
+        raise ValueError("JSON 生成/修复失败：%s；修复轮异常：%s"
+                         % (issues[:5], " | ".join(repair_errors)))
     raise ValueError(f"JSON 生成/修复失败：{issues[:5]}")
 
 
-async def _provider_chat_safe(provider, messages: list, temperature: float = 0.7) -> str:
-    """调用 provider.chat，兼容不支持 temperature kwarg 的旧实现"""
-    try:
-        return await provider.chat(messages, temperature=temperature)
-    except TypeError:
-        return await provider.chat(messages)
+async def _provider_chat_safe(provider, messages: list, temperature: float = 0.7,
+                              max_tokens: int | None = None,
+                              extra_body: dict | None = None) -> str:
+    """调用 provider.chat，兼容不支持 temperature / max_tokens kwarg 的旧实现。
+
+    ✅ R38（2026-10-03）：此前本函数只接受 3 个参数，导致
+    ``collect_json_response_with_provider`` 签名上声明的 ``max_tokens`` /
+    ``extra_body`` **从未被传给 provider**（静默失效）；而
+    ``providers/base.py`` 的 ``chat()`` 明确支持这两个 kwarg。
+    现按「逐个降级」透传：先全参数，TypeError 则逐个去掉再试，保证旧实现
+    （只认 messages / 只认 temperature）仍可工作。
+    """
+    kwargs: dict = {"temperature": temperature}
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
+    for trial in (kwargs, {"temperature": temperature}, {}):
+        try:
+            return await provider.chat(messages, **trial)
+        except TypeError:
+            if trial == {}:
+                raise
+    raise TypeError("provider.chat 签名不兼容")
 
 
 async def collect_json_response_with_provider(
@@ -333,6 +396,7 @@ async def collect_json_response_with_provider(
     max_retries: int = 1,
     max_tokens: int | None = None,
     extra_body: dict | None = None,
+    repair_key: str = GENERIC_REPAIR_KEY,
 ):
     """provider 直连版 JSON 收集（自招投标方案平台移植，签名兼容源项目）
 
@@ -346,9 +410,15 @@ async def collect_json_response_with_provider(
 
     ✅ 兼容性兜底：消息列表只有 system 时自动补一条最小 user 指令
     （见 _ensure_user_message），避免在要求 user 消息的 provider 上整类任务失败。
+
+    ✅ R38（2026-10-03）：``max_tokens`` / ``extra_body`` 现真正透传给 provider
+    （此前声明即失效）；新增 ``repair_key``，插图编排等非目录任务不再拿目录
+    修复提示词。
     """
     messages = _ensure_user_message(messages)
-    raw = await _provider_chat_safe(provider, messages, temperature)
+    raw = await _provider_chat_safe(provider, messages, temperature,
+                                    max_tokens, extra_body)
+    first_raw = raw
     obj, issues = parse_and_validate(raw, None)
     if obj is not None and not issues and validator is not None:
         issues = _run_validator(validator, obj)
@@ -363,12 +433,21 @@ async def collect_json_response_with_provider(
         if obj is not None:
             return obj
 
+    repair_errors: list[str] = []
     for attempt in range(max_retries):
         repair_msgs = list(messages) + [
             {"role": "assistant", "content": raw or ""},
-            {"role": "user", "content": _build_repair_user_prompt(issues, raw or "")},
+            {"role": "user", "content": _build_repair_user_prompt(
+                issues, first_raw or "", repair_key)},
         ]
-        raw = await _provider_chat_safe(provider, repair_msgs, temperature)
+        try:
+            raw = await _provider_chat_safe(provider, repair_msgs, temperature,
+                                            max_tokens, extra_body)
+        except Exception as e:  # noqa: BLE001
+            repair_errors.append("第%d次修复调用异常: %s" % (attempt + 1, e))
+            logger.warning("JSON 修复第 %d 次调用异常（继续使用剩余修复预算）：%s",
+                           attempt + 1, e)
+            continue
         obj, issues = parse_and_validate(raw, None)
         if obj is not None and not issues and validator is not None:
             issues = _run_validator(validator, obj)
@@ -383,6 +462,9 @@ async def collect_json_response_with_provider(
                 return obj
         logger.warning("JSON 修复第 %d 次仍未通过：%s", attempt + 1, issues[:3])
 
+    if repair_errors:
+        raise ValueError("JSON 生成/修复失败：%s；修复轮异常：%s"
+                         % (issues[:5], " | ".join(repair_errors)))
     raise ValueError(f"JSON 生成/修复失败：{issues[:5]}")
 
 

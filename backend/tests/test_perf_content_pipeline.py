@@ -185,7 +185,11 @@ class TestCandidateTimeout:
 
     def test_config_timeout_used_when_no_override(self):
         assert pf._candidate_timeout({"_is_primary": True, "timeout": 45}, None) == 45
-        assert pf._candidate_timeout({"_is_primary": True}, None) == 60
+        # ✅ 2026-10-03（缺省值单一出口）：缺 timeout 的主候选按声明默认 900s
+        # （schema / AIConfigIn / 前端表单一致），不再回落旧硬编码 60s ——
+        # 配置行缺该字段或为 0 时，长正文生成曾因主候选超时静默缩水到 60s 必超时。
+        assert pf._candidate_timeout({"_is_primary": True}, None) == \
+            pf.DEFAULT_CONFIG_NUMBERS["timeout"]
 
 
 # ---------------------------------------------------------------------------

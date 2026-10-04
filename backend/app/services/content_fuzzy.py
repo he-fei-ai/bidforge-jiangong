@@ -10,7 +10,7 @@
    正文空洞、句式模板化，读起来像 AI 凑的。
 
 现统一改为**模糊生成**：正文完整生成、不留占位标记、不写空话；
-无明确数据时按六类规则做**合理概括 / 归纳 / 泛化**，严禁编造关键数据。
+无明确数据时按八类规则做**合理概括 / 归纳 / 泛化**，严禁编造关键数据。
 
 本模块是四条链路的**唯一事实源**，禁止在别处复制该表或这些正则：
 
@@ -37,7 +37,7 @@ import re
 from app.services.placeholder_inventory import RE_BARE, RE_FORMATTED, RE_FUZZY
 
 # ---------------------------------------------------------------------------
-# 一、模糊生成规则对照表（六类，唯一事实源）
+# 一、模糊生成规则对照表（八类，唯一事实源）
 # ---------------------------------------------------------------------------
 
 #: 类别标识 → 规则条目。
@@ -89,7 +89,7 @@ FUZZY_CATEGORIES: dict[str, dict] = {
     },
     "promise": {
         "label": "承诺类",
-        "precise": "有明确承诺直接使用（原样引用合同与招标文件中的承诺口径）",
+        "precise": "有明确承诺直接使用（原样引用合同与设计文件中的承诺口径）",
         "fuzzy": "无明确承诺用行业通用承诺表述（如“确保施工质量满足设计与合同要求”"
                  "“确保各项检验批一次验收合格”）",
         "forbid": "禁止编造超出常规的承诺（工期承诺、质量奖、免责条款等）",
@@ -105,14 +105,35 @@ FUZZY_CATEGORIES: dict[str, dict] = {
         "data_source": "技术原则与标准要求",
         "reason": "事实未给出具体参数",
     },
+    "material": {
+        "label": "材料规格类",
+        "precise": "有明确规格直接使用（混凝土强度等级、钢筋牌号、防水材料品种等"
+                   "原样引用事实，如“HRB400 钢筋”“C30 混凝土”）",
+        "fuzzy": "无明确规格用符合规范要求的通用表述（如“材料品种、规格符合设计文件"
+                 "与现行规范要求，进场后按批次检验复验合格后使用”）",
+        "forbid": "禁止编造具体牌号、品牌与型号",
+        "data_source": "规范符合性通用表述",
+        "reason": "事实未给出材料规格",
+    },
+    "process": {
+        "label": "工序流程类",
+        "precise": "有明确工序直接按事实顺序编排（含节点顺序与做法细节）",
+        "fuzzy": "无明确工序按标准施工工艺表述（沿本工种常规工序顺序展开，"
+                 "写明各环节控制点，如“测量放线→支架搭设→预压→底模安装”）",
+        "forbid": "禁止编造不存在的工序",
+        "data_source": "标准施工工艺顺序",
+        "reason": "事实未给出工序安排",
+    },
 }
 
 #: 类别遍历与重叠去重的优先级（前面的类别优先占用区间）。
-#: number/time/quantity/name 语义更具体，放在前面避免被 tech 的原则性表述吞掉。
+#: number/time/quantity/name 语义更具体，放在前面避免被 tech 的原则性表述吞掉；
+#: material/process（2026-10-02 补齐）带材料/工序名词前缀，比 tech 的泛化措辞更具体，
+#: 排在 tech 之前，避免「材料符合设计要求」被 tech 抢先归类。
 FUZZY_CATEGORY_ORDER: tuple[str, ...] = (
-    "number", "time", "quantity", "name", "tech", "promise")
+    "number", "time", "quantity", "name", "material", "process", "tech", "promise")
 
-#: 六类中**无法确定性判定**的类别，仅用于文档与报告说明（不产生误报）。
+#: 八类中**无法确定性判定**的类别，仅用于文档与报告说明（不产生误报）。
 #: promise 的“确保 / 保证”在方案正文中极常见，强行判定会把正常表述全标成模糊。
 FUZZY_UNDETECTABLE: tuple[str, ...] = ("promise",)
 
@@ -175,6 +196,25 @@ _TECH_PRINCIPLE_RE = re.compile(
     r"按设计(?:文件)?(?:要求)?(?:确定|执行)|符合(?:现行)?(?:国家)?规范(?:要求)?|"
     r"满足设计要求|以设计文件为准|以专项计算为准"
 )
+#: 材料规格类：规范符合性通用表述（2026-10-02 补齐）。
+#: 刻意要求**材料名词前缀**（材料/构配件/钢筋…），否则会与 tech 的
+#: 「符合规范要求」全线重叠、把无材料语境的技术表述也抢归材料类。
+#: 两段短桥各 ≤12 字：名词→「符合」（如「品种、规格」「的强度应」），
+#: 「符合」→「要求/规定」（如「设计文件」「与现行规范」）；
+#: 超桥即不认，防止长距离误拼。
+_MAT_PRINCIPLE_RE = re.compile(
+    r"(?:材料|构配件|配件|钢筋|混凝土|水泥|砂石|防水材料|钢管|扣件|焊条)"
+    r"[^。；\n]{0,12}?符合[^。；\n]{0,12}?(?:要求|规定)"
+    r"|选用符合(?:设计文件|现行)?(?:规范|标准)要求的"
+)
+#: 工序流程类：标准施工工艺顺序表述（2026-10-02 补齐）。
+#: 只认显式的「按…施工工艺/工序流程」与「先…后…」顺序句式，
+#: 保守判定避免把普通叙述刷成模糊工序。
+_PROC_PRINCIPLE_RE = re.compile(
+    r"(?:按|依照|遵循|参照)(?:标准|常规|成熟|通行)(?:施工工艺|工序|流程|做法)"
+    r"|按(?:同类工程|标准)(?:经验|工艺)(?:组织施工|执行|实施)"
+    r"|先[^。；\n]{1,24}，后[^。；\n]{1,24}(?:施工|作业|进行)"
+)
 #: 承诺类：行业通用承诺口径（刻意保守：不含单独的「确保」「保证」，避免满篇误标）
 _PROMISE_PRINCIPLE_RE = re.compile(
     r"满足(?:合同|业主|设计)(?:约定|要求)|按(?:合同|业主)(?:约定|要求)执行|"
@@ -187,6 +227,8 @@ _DETECTORS: dict[str, tuple[re.Pattern, ...]] = {
     "name": (_ROLE_TERM_RE,),
     "time": (_RELATIVE_TIME_RE,),
     "quantity": (_QUANTITY_PRINCIPLE_RE,),
+    "material": (_MAT_PRINCIPLE_RE,),
+    "process": (_PROC_PRINCIPLE_RE,),
     "tech": (_TECH_PRINCIPLE_RE, _LIMIT_PHRASE_RE),
     "promise": (_PROMISE_PRINCIPLE_RE,),
 }
@@ -209,7 +251,11 @@ def detect_fuzzy_expressions(text: str) -> list[dict]:
                     s, e = m.span()
                     if e <= s:
                         continue
-                    if any(s < ae and e > as_ for as_, ae, _ in accepted):
+                    # ✅ BUG 修复（2026-10-02 第二十六轮）：旧写法 `for as_, ae, _ in
+                    # accepted` 对 4 键字典解包必抛 ValueError → 被外层 except 吞掉，
+                    # 导致「正文有 ≥2 处模糊表述时整体丢失标记」。改为显式取键。
+                    if any(s < h["char_end"] and e > h["char_start"]
+                           for h in accepted):
                         continue  # 已被优先级更高的类别占用
                     accepted.append({
                         "category": cat,
@@ -227,13 +273,71 @@ def detect_fuzzy_expressions(text: str) -> list[dict]:
 # 四、占位标记 / 空话 / 暴露缺失 / 编造日期 检测
 # ---------------------------------------------------------------------------
 
-#: 额外占位标记（三类基础占位符沿用 placeholder_inventory 的正则，口径不分叉）
-_EXTRA_MARK_RE = re.compile(
-    r"【\s*(?:待完善|待确定|待补|待定|待补录|略)\s*(?:[:：][^】]{0,60})?\s*】"
-    r"|\[\s*(?:数值|参数|待定|待补|待完善|TBD)\s*\]"
+#: 额外占位标记 · **可确定性改写**子集（【…】/ [ … ] 包裹形态，语义明确）。
+#:
+#: ⚠️ 2026-10-03 拆分原因（生产缺陷驱动）：占位标记的**检测**与**自动改写**
+#: 原先在 ``content_checkpoint`` 里另写了一份**更窄**的副本，只收
+#: ``【待(补充|定|确认)`` + ``[待补充]`` + ``××``。结果是
+#: ``【待完善】【待补录】【略】【】[TBD]`` 等形态被 :func:`scan_placeholder_marks`
+#: **检出**，但 CON-04 自检漏报、``rewrite_placeholder_marks`` 也**改不动** ——
+#: 「检出却修不掉」。现把检测与改写共用同一份正则表，处置差异用
+#: ``rewritable`` 标记表达，不再靠两份副本区分。
+#: 刻意要求**括号包裹**：括号形态是明确的「此处应填值」语义，可安全改写为
+#: 条件式表述；裸词形态（下条）上下文不明，改错比不改更糟，只报不改。
+_EXTRA_MARK_BRACKETED_RE = re.compile(
+    r"【\s*(?:待完善|待确定|待确认|待补录|待补|待定|略)\s*(?:[:：][^】]{0,60})?\s*】"
+    r"|\[\s*(?:待补充|待完善|待确定|待确认|待补录|待补|待定|数值|参数|TBD)"
+    r"\s*(?:[:：][^\]]{0,60})?\s*\]"
     r"|【\s*】|\[\s*\]"
-    r"|(?<![A-Za-z])(?:TBD|t\.b\.d|N/?A)(?![A-Za-z])"
 )
+
+#: 额外占位标记 · **只报不改**子集（裸词形态，上下文不明）。
+#: 边界守卫与旧版一致：前后不得是英文字母，避免命中 CNA / TBDX 一类词内片段。
+_EXTRA_MARK_BARE_RE = re.compile(r"(?<![A-Za-z])(?:TBD|t\.b\.d|N/?A)(?![A-Za-z])")
+
+#: 额外占位标记全集（兼容既有口径：检测用；由上两条**派生**，不再另写字面量）
+_EXTRA_MARK_RE = re.compile(
+    "(?:" + _EXTRA_MARK_BRACKETED_RE.pattern + ")|(?:" + _EXTRA_MARK_BARE_RE.pattern + ")"
+)
+
+#: 占位标记检测 · **唯一事实源**（三类基础 + 扩展，附「可否确定性改写」标记）。
+#:
+#: 元素形态 ``(正则, kind, rewritable)``：
+#: - ``kind`` 与既有口径完全一致（formatted / bare / fuzzy / extended），
+#:   纯**加法式**新增 ``rewritable``，不改动任何既有取值；
+#: - ``rewritable=True`` → 可被 ``rewrite_placeholder_marks`` 改写为条件式表述；
+#: - ``rewritable=False`` → 只报出待人工复核（``××`` 与裸 ``TBD``/``N/A``
+#:   上下文不明，自动改写极易误伤正常正文）。
+#:
+#: ⚠️ 新增占位标记形态时**只改这一处**：检测（:func:`scan_placeholder_marks`）
+#: 与改写（``content_checkpoint.rewrite_placeholder_marks``）都从此表取用。
+PLACEHOLDER_MARK_PATTERNS: tuple[tuple[re.Pattern, str, bool], ...] = (
+    (RE_FORMATTED, "formatted", True),
+    (RE_BARE, "bare", True),
+    (RE_FUZZY, "fuzzy", False),
+    (_EXTRA_MARK_BRACKETED_RE, "extended", True),
+    (_EXTRA_MARK_BARE_RE, "extended", False),
+)
+
+
+def placeholder_rewritable_patterns() -> tuple[re.Pattern, ...]:
+    """返回「可确定性改写」的占位标记正则集合（改写侧的唯一出口）。
+
+    为什么单独给一个函数而不是让调用方自己过滤：改写侧**绝不能**误用检测侧
+    的全量表 —— 把 ``××`` / 裸 ``TBD`` 也送进改写会破坏正常正文（乘号、
+    单位缩写）。集中在一处过滤，调用点无机会选错。
+    """
+    return tuple(rx for rx, _k, rw in PLACEHOLDER_MARK_PATTERNS if rw)
+
+
+def placeholder_nonrewritable_patterns() -> tuple[re.Pattern, ...]:
+    """返回「只报不改」的占位标记正则集合（改写侧报 pending 的唯一出口）。
+
+    与上条互补：这两条合起来**恒等于** ``PLACEHOLDER_MARK_PATTERNS`` 的全集，
+    因此收敛判据后不会丢失任何可观测性 —— 上下文不明的形态（``××``、
+    裸 ``TBD``/``N/A``）自动改写会误伤正文，但仍必须**报出**待人工复核。
+    """
+    return tuple(rx for rx, _k, rw in PLACEHOLDER_MARK_PATTERNS if not rw)
 
 #: 空话句式（明确禁止，无条件报错）。
 #: 刻意**不含**「以现场实际情况调整」这类真实工程免责表述 —— 它是有实质约束的
@@ -283,11 +387,14 @@ def scan_placeholder_marks(text: str) -> list[dict]:
     if not isinstance(text, str) or not text:
         return []
     hits: list[dict] = []
-    for rx, kind in ((RE_FORMATTED, "formatted"), (RE_BARE, "bare"),
-                     (RE_FUZZY, "fuzzy"), (_EXTRA_MARK_RE, "extended")):
+    # ⚠️ 判据只从 PLACEHOLDER_MARK_PATTERNS 取用 —— 检测与改写共用同一份表，
+    # 不再在此处手抄正则（本仓反复踩过的「同一判据两处实现」分叉病根）。
+    for rx, kind, rewritable in PLACEHOLDER_MARK_PATTERNS:
         for m in rx.finditer(text):
             hits.append({
                 "kind": kind,
+                # 加法式字段：改写侧按此筛选，不影响只读 kind 的既有消费方
+                "rewritable": rewritable,
                 "mark": m.group(0),
                 "char_start": m.start(),
                 "char_end": m.end(),
@@ -403,7 +510,7 @@ def scan_missing_reveal(text: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def build_fuzzy_rules_block() -> str:
-    """生成「模糊生成规则」提示词段落（六类对照表 + 质量要求）。"""
+    """生成「模糊生成规则」提示词段落（八类对照表 + 质量要求）。"""
     lines = [
         "## 模糊生成规则（无明确数据时的唯一写法，必须遵守）",
         "",
@@ -414,8 +521,9 @@ def build_fuzzy_rules_block() -> str:
         "| 类别 | 有明确数据时 | 无明确数据时（模糊生成） | 严禁编造 |",
         "| --- | --- | --- | --- |",
     ]
-    for key in ("number", "name", "time", "quantity", "promise", "tech"):
-        c = FUZZY_CATEGORIES[key]
+    # 直接遍历规则表（插入顺序即展示顺序）：不再另写一份硬编码元组，
+    # 避免「新增类别后提示词漏渲染」的表/文案分叉。
+    for key, c in FUZZY_CATEGORIES.items():
         lines.append(f"| {c['label']} | {c['precise']} | {c['fuzzy']} | {c['forbid']} |")
     lines += [
         "",
@@ -485,7 +593,7 @@ GENERATION_STRATEGY_LINES: tuple[str, ...] = (
     "人员、工期、参数必须原样使用，不得改写；",
     "- **有部分数据** → 精准 + 模糊组合：已知部分原样使用，缺口部分"
     "按「模糊生成规则」补齐，两者在同一句或同一段里自然衔接；",
-    "- **无明确数据** → 全部模糊生成：按六类规则做合理概括，"
+    "- **无明确数据** → 全部模糊生成：按八类规则做合理概括，"
     "仍须落在具体工艺与工序上，不得编造关键数据；",
     "- 无论哪种情况，都返回**完整正文**，不留空、不写占位标记、不写空话。",
 )

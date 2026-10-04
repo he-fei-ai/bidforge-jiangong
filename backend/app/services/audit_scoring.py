@@ -194,10 +194,52 @@ def _sort_by_severity(findings: list) -> list:
                        f.get("rule_id") or "zzz"))
 
 
+def _merge_dropped_evidence(target: dict, dropped: dict) -> None:
+    """把**被去重丢弃**那条 finding 的证据并入保留者（P1 · 2026-10-04）。
+
+    ✅ BUG 修复：`merge_findings` 此前对同 rule_id 只做「保留严重度更高者」，
+    被丢弃那条的 `evidence` / `section_ids` / `source` **整条消失**。真实影响面
+    （生产可复现）：`export_issues_to_findings`（export.py:1128，source=export_check，
+    携带逐章节清单）与 `check_deliverability`（preflight_engine.py:834）都会产出
+    DLV-01/02/03/04 —— 两者同严重度时程序侧胜出（先出现者被后出现的同严重度替换？
+    实际是保留先到者），导出侧那 20 个章节的清单被静默丢弃，用户在就绪度面板
+    看到的「N 处」只有程序侧口径，导出的具体问题无处可查。
+
+    ⚠️ **不影响评分**：`score_findings` 只按 severity 扣分、不读 count
+    （audit_scoring.py:138），因此本次合并是纯证据补全，分数/等级/放行结论零变化。
+
+    只做并集去重合并，不做计数相加 —— 两条链路可能命中同一处，相加会虚增数量。
+    """
+    ev = list(target.get("evidence") or [])
+    for e in dropped.get("evidence") or []:
+        if e and e not in ev:
+            ev.append(e)
+    if ev:
+        target["evidence"] = ev
+    sids = list(target.get("section_ids") or [])
+    for sid in dropped.get("section_ids") or []:
+        if sid and sid not in sids:
+            sids.append(sid)
+    # 兼容「只带单个 section_id」形态的产出方
+    _sid = dropped.get("section_id") or ""
+    if _sid and not sids and _sid not in sids:
+        sids.append(_sid)
+    if sids:
+        target["section_ids"] = sids
+    src = dropped.get("source") or ""
+    if src:
+        srcs = list(target.get("sources") or [])
+        if src not in srcs:
+            srcs.append(src)
+            target["sources"] = srcs
+
+
 def merge_findings(*groups: list) -> list:
     """合并多来源发现（程序化预检 + AI 判定），按规则 ID 去重。
 
     同一规则被两条链路同时命中时保留严重度更高的一条，避免同一问题重复扣分。
+    **被丢弃那条的证据会并入保留者**（见 :func:`_merge_dropped_evidence`），
+    不再整条消失。
 
     ✅ 契约更新（2026-09-21）：本函数按 ``rule_id`` 去重，因此**产出方**必须
     保证 ``rule_id`` 在同一份 findings 内唯一。此前 preflight_engine 的 CON-05
@@ -217,9 +259,17 @@ def merge_findings(*groups: list) -> list:
                 merged[f"__anon_{len(merged)}"] = f
                 continue
             prev = merged.get(key)
-            if prev is None or SEVERITY_ORDER.get(
-                    f.get("severity"), 0) > SEVERITY_ORDER.get(prev.get("severity"), 0):
+            if prev is None:
                 merged[key] = f
+                continue
+            if SEVERITY_ORDER.get(f.get("severity"), 0) > SEVERITY_ORDER.get(
+                    prev.get("severity"), 0):
+                # 新者胜出：把旧者的证据并入新者
+                _merge_dropped_evidence(f, prev)
+                merged[key] = f
+            else:
+                # 旧者胜出：把新者的证据并入旧者（此前是**整条丢弃**）
+                _merge_dropped_evidence(prev, f)
     return _sort_by_severity(list(merged.values()))
 
 

@@ -206,6 +206,10 @@ async def collect_repair_edits(*, section_id: str, section_title: str,
                               facts, sources)
     # 章节原文放在最后（与《标书智能体（四）》§四.4「任务差异后置」一致），
     # 模型据此逐字抄写 old_text。
+    # ✅ R38 D2 纪律（勿改成截断）：此处**有意不截断**正文 —— 模型抄写的
+    #    old_text 必须能在完整原文里唯一命中，截断输入会让超长章后文段落
+    #    永远无法被编辑命中（且被截段落仍含冲突时静默漏修）。超长成本
+    #    由扫描侧分片（consistency_scanner）控制，不在此层重复把关。
     user += f"\n\n【待编辑章节原文】\n{section_content}"
     system = render("consistency_repair_edits_system")
     try:

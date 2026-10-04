@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from ._registry import (
     _ALL_PROMPTS,
+    _apply_variable_contracts,
     _reg,
     check_prompt_variables,
     clean_prompt_text,
@@ -42,6 +43,24 @@ from . import _shared
 _reg("SHARED_FORBIDDEN_WORDS", "共享规则", "标题禁用词列表", _shared.SHARED_FORBIDDEN_WORDS)
 _reg("SHARED_OUTPUT_SPEC", "共享规则", "输出格式规范", _shared.SHARED_OUTPUT_SPEC)
 _reg("SHARED_SCOPE_RULES", "共享规则", "文件性质红线（禁投标内容）", _shared.SHARED_SCOPE_RULES)
+# ✅ 2026-10-03（R38 · 提示词模块 P1-a）：正文侧红线简档此前在 content.py
+#    **导入期**被 .replace() 拷贝进模板（`<<SCOPE_RULES>>`），既没注册也不走
+#    _cache._resolve_shared_keys() 的运行时 DB 覆盖 → 用户在提示词编辑器改
+#    「SHARED_SCOPE_RULES」时，目录侧 6 个模板全部生效、**正文侧 2 个模板
+#    （每章下发一次、38 章即 38 次）完全不变**，且无任何告警。
+#    这正是 _cache.py 2026-09-23 修过的老问题（outline 侧的导入期值拷贝）在
+#    2026-10-01 重构正文红线时被重新引入。
+#    修法：注册为可编辑提示词 + 模板改用 {SHARED_SCOPE_RULES_BRIEF} 占位符，
+#    由运行时统一解析。出厂默认内容**逐字不变**（仍取同一常量），
+#    故未定制用户的行为零变化。
+_reg("SHARED_SCOPE_RULES_BRIEF", "共享规则", "文件性质红线·正文简版（禁投标内容）",
+     _shared.SHARED_SCOPE_RULES_BRIEF)
+
+# ✅ R38 D6（2026-10-03）：SHARED_* 在本包 __init__ 里注册，晚于 _registry 尾部
+#    的首次 _apply_variable_contracts() —— 旧时序下契约表里的 SHARED_* 条目
+#    （含显式空声明）对 meta 永远不生效。注册完成后幂等补套一次（同名重套
+#    只写同样的值，零副作用）。
+_apply_variable_contracts()
 
 
 __all__ = [

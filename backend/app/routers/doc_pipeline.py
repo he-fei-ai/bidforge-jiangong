@@ -312,8 +312,18 @@ async def document_freshness(doc_id: str, db=Depends(get_db)):
     fresh = pipeline.compute_freshness(meta, current_md5=current_md5)
     # 状态漂移回写（file_changed / expired 提示下游任务需重跑）
     if fresh["status"] not in ("valid",) and (doc.get("status") or "valid") != fresh["status"]:
-        await db.execute("UPDATE project_documents SET status=? WHERE id=?",
-                         (fresh["status"], doc_id))
+        # ✅ P1（R13 漏改点 · 2026-10-04）：本文件 6 处 `db.execute` 中唯一一处
+        #    **写路径**未判空 —— 命中时 `await db.execute(...)` 返回 None，随后
+        #    的 `db.commit()` 提交的是「上一次成功语句」的残留事务上下文，
+        #    而状态漂移回写**静默丢失**（无异常、无日志），表现为
+        #    「/freshness 说过期，project_documents.status 却一直是 valid」。
+        #    写路径不能像读路径那样 fail-soft 继续，只能明确告警后跳过 commit。
+        _fcur = await db.execute("UPDATE project_documents SET status=? WHERE id=?",
+                                 (fresh["status"], doc_id))
+        if _fcur is None:
+            logger.warning("文档状态漂移回写失败（db.execute 返回 None），跳过 commit：%s",
+                           doc_id)
+            return fresh
         await db.commit()
     return fresh
 

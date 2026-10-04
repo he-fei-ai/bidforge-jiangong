@@ -27,7 +27,7 @@
     char_end        结束字符偏移
     excerpt         上下文片段（人工定位主键，跨行空白已折叠）
     generation_type precise | fuzzy | placeholder_residue
-    category        数值/名称/时间/数量/承诺/技术参数 类别（无则空串）
+    category        数值/名称/时间/数量/承诺/技术参数/材料规格/工序流程 类别（无则空串）
     data_source     数据来源表述（精准=具体事实标题；模糊=规则表口径）
     fuzzy_reason    模糊原因（精准内容为空串）
     severity        info | warn | error（复核优先级，不影响生成）
@@ -291,7 +291,7 @@ def trace_summary(items: list | None, *, truncated: bool = False) -> dict:
     }
 
 
-#: 六类中无法确定性判定的类别（供报告 / 文档说明，不产生误报）
+#: 八类中无法确定性判定的类别（供报告 / 文档说明，不产生误报）
 UNDETECTABLE_CATEGORIES: tuple[str, ...] = FUZZY_UNDETECTABLE
 
 

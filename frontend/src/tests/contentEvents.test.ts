@@ -12,6 +12,7 @@ import {
   mergeFailedSectionsInto,
   contentResultFailedSections,
   contentResultSummary,
+  normalizeQualityIssues,
   type SectionLogItem,
 } from "../utils/contentEvents";
 
@@ -262,5 +263,38 @@ describe("stopped 事件 / section_done 质检告警（2026-09-24 缺口修复�
     expect(item[0].quality_issues).toEqual(issues);
     // 非数组脏数据不得污染日志（页面按 Array.isArray 判定）
     expect(Array.isArray(log({ section_id: "b" }).quality_issues)).toBe(false);
+  });
+});
+
+// ============================================================
+// normalizeQualityIssues —— 后端真实载荷是**对象**，旧实现按数组判定恒丢弃
+//   后端 app/services/content_polish.py::quality_issues 返回
+//   { colloquial_hits: string[], abolished_standards: string[] }
+// ============================================================
+describe("normalizeQualityIssues", () => {
+  it("对象载荷（后端真实形态）展平为扁平数组", () => {
+    const raw = {
+      colloquial_hits: ["大概", "可能会"],
+      abolished_standards: ["GB 50209-2010"],
+    };
+    expect(normalizeQualityIssues(raw)).toEqual(["大概", "可能会", "GB 50209-2010"]);
+  });
+
+  it("数组载荷原样保留（向后兼容 / 未来改为数组时不回归）", () => {
+    expect(normalizeQualityIssues(["未闭合代码块"])).toEqual(["未闭合代码块"]);
+    // 对象数组：取 message / detail 兜底
+    expect(
+      normalizeQualityIssues([{ message: "m1" }, { detail: "d2" }]),
+    ).toEqual(["m1", "d2"]);
+  });
+
+  it("空载荷一律 undefined（不产生空数组 Tag）", () => {
+    for (const bad of [undefined, null, {}, { a: [] }, [], [null], "x", 0]) {
+      expect(normalizeQualityIssues(bad)).toBeUndefined();
+    }
+  });
+
+  it("去重去空：同一命中在两组里重复出现只算一条", () => {
+    expect(normalizeQualityIssues({ a: ["x", "x"], b: ["  ", "y"] })).toEqual(["x", "y"]);
   });
 });

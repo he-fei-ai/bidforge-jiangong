@@ -198,8 +198,15 @@ def _scan_chart_fences_full(content: str) -> list[tuple[str, str, int]]:
     """
     results: list[tuple[str, str, int]] = []
     for lang, code_raw, state, ordinal in iter_inline_chart_fences(content):
-        if state == "truncated":
+        if state in ("truncated", "eof"):
             # 未闭合块：不提取（含后续正文的坏块不应被当作合法图表）
+            # ✅ 修复（2026-10-03 · 未闭合=不是图 · 幽灵登记收口）：旧实现只跳
+            #    truncated —— 直到文档末尾仍无闭合围栏的残片（其后没有正文，
+            #    truncated 从不触发，state 恒为 eof）照样被登记进 chart_predictions，
+            #    而导出侧对未闭合 mermaid 块一律跳过 → 「清单里有、成稿里没有、
+            #    绕过每章≤1/同类型≤3 配图上限」的幽灵登记。导出侧 chart-json/
+            #    ai_image 的 eof 漏检也已同批收口（content_blocks._parse_content_blocks），
+            #    登记/导出/改写三侧统一为「未闭合 = 不是图」。
             continue
         code = code_raw.strip()
         if not code:
@@ -285,8 +292,16 @@ def has_inline_charts(content: str) -> bool:
         也会返回 True，而登记侧根本不会把它当图表 → 调用方误判"本章有图"；
       · 子串匹配无法区分"真图表围栏"与"嵌套在长围栏内的示意文本"。
     现改为经由唯一事实来源 iter_inline_chart_fences，与登记/导出侧必然一致。
+
+    ✅ 口径收紧（2026-10-03 · R38 遗留收口）：「未闭合 = 不是图」的第四处统一。
+    登记侧 _scan_chart_fences_full / 导出解析侧 _parse_content_blocks /
+    改写侧 _apply_chart_fence_edits 均已跳过 eof/truncated，本函数此前仍按
+    「围栏存在」计数 —— 若未来被用于「本章是否已有图 → 是否补生成」的粗判，
+    未闭合残片会被误计为已有图。现仅**闭合且可判定**的图表围栏返回 True；
+    当前生产零消费点（仅护栏测试引用），收紧不改变任何现有行为。
     """
-    return bool(iter_inline_chart_fences(content))
+    return any(state not in ("truncated", "eof")
+               for _lang, _code, state, _ord in iter_inline_chart_fences(content))
 
 
 def _rewrite_code_block(content: str, old_code: str,
@@ -450,8 +465,11 @@ def _apply_chart_fence_edits(content: str, edits: dict[int, str | None]) -> str:
             _emit_block()
             continue
         fence_ord += 1          # 与 iter_inline_chart_fences 同口径：未闭合块也占号
-        if state == "truncated":
-            # 真正未闭合块：原样保留，不做任何改写
+        if state in ("truncated", "eof"):
+            # 未闭合块（含 EOF 残片）：原样保留，不做任何改写
+            # ✅ 2026-10-03：与登记侧「未闭合=不是图」同口径 —— 扫描不再产出
+            #    eof 序号，此处防御兼做护栏：即使调用方误传 eof 序号，也不能
+            #    借修复/删块之名给它补写闭合围栏，把截断残片洗白成合法图表。
             _emit_block()
             continue
         if fence_ord not in edits:

@@ -30,6 +30,18 @@ logger = logging.getLogger("repair_agent")
 REPAIR_TIMEOUT = 120
 SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}
 
+# ✅ R38 D2 收口（2026-10-03）：整章重写兜底的正文长度硬上限（字符）。
+#   背景：扫描侧 consistency_scanner 按 PER_SECTION_LIMIT=6000 截断喂提示词，
+#   而**修复侧绝不截断正文**是刻意纪律 —— 定点编辑要逐字抄写 old_text、
+#   整章重写会拿模型输出整列覆盖 sections.content，截断输入即截断输出，
+#   等于「用半截内容覆盖整章」（validate_repair 的 MIN_LEN_RATIO 只能事后
+#   拦截，拦不住就白烧一次调用）。超长章的真正问题是**必然失败的重写**：
+#   正文超过模型单轮输出上限时，重写结果一定被截短 → 校验必不过 → 每次
+#   修复都白花一次大调用还占用并发额度。故在调用前设门槛直接放弃重写
+#   （状态仍为 failed，与旧行为「重写被校验拦下」对用户可见结果完全一致，
+#   只是省下必败的调用）。阈值对齐扫描侧分片上限 SECTION_CHUNK_LIMIT。
+REPAIR_REWRITE_MAX_CHARS = 12000
+
 # ---------- 修复阶段降本（2026-09-22） ----------
 # 实测：扫描优化后，定向修复成为新大头（12 章方案占 42.9%，= 涉及章节数 × 1~2 次）。
 #   ① 并发：逐章串行 → Semaphore 并发（只降墙钟，调用数不变）；
@@ -162,6 +174,15 @@ async def repair_section(*, section_id: str, section_title: str, section_content
                        section_id, e)
 
     # ② 整章重写兜底（既有行为，保持不变）
+    # ✅ R38 D2：超长章直接放弃重写（见 REPAIR_REWRITE_MAX_CHARS 注释）——
+    #    返回原文 = 「本轮未修复」，由调用方 validate_repair 判 failed，
+    #    与旧行为「重写必被长度校验拦下」结果一致，省一次必败的大调用。
+    if len(section_content or "") > REPAIR_REWRITE_MAX_CHARS:
+        logger.warning("[一致性修复] 第 %s 章正文 %d 字超过整章重写上限 %d，"
+                       "放弃重写兜底（定点编辑已尝试），建议人工处理",
+                       section_id, len(section_content or ""),
+                       REPAIR_REWRITE_MAX_CHARS)
+        return section_content or ""
     user = render(
         "consistency_repair_user",
         global_facts=facts or "（无）",

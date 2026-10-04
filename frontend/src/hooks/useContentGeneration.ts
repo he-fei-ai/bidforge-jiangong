@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import {
   upsertSectionLog, finalizeRunningLogsIn, mergeFailedSectionsInto,
   contentResultFailedSections, contentResultSummary,
+  normalizeQualityIssues,
   type SectionLogItem, type GenStats,
 } from "../utils/contentEvents";
 import { tasksApi, sectionsApi } from "../api";
@@ -89,7 +90,7 @@ export function useContentGeneration(opts: UseContentGenerationOpts): ContentGen
   //    quality_issues（本章程序化质检问题），前端此前**两个字段都没消费** ——
   //    用户只能在生成结束后重新拉取整篇正文才知道有没有问题。现把质检问题
   //    落到章节日志项，日志区即可直接看到「哪章有质量告警」。
-  const handleSectionDone = (evt: any) => { const ex = sectionLogsRef.current.find((x) => x.section_id === evt.section_id); sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { section_id: evt.section_id, title: evt.title, status: "success", word_count: evt.word_count, word_budget: evt.word_budget, word_status: evt.word_status, continue_failed: !!evt.continue_failed, quality_issues: Array.isArray(evt.quality_issues) ? evt.quality_issues : undefined, generation_standard: evt.generation_standard, standard_report: evt.standard_report ?? undefined, index: ex?.index, total: ex?.total, time: Date.now(), duration: ex ? Date.now() - ex.time : undefined }); setSectionLogs([...sectionLogsRef.current]); };
+  const handleSectionDone = (evt: any) => { const ex = sectionLogsRef.current.find((x) => x.section_id === evt.section_id); sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { section_id: evt.section_id, title: evt.title, status: "success", word_count: evt.word_count, word_budget: evt.word_budget, word_status: evt.word_status, continue_failed: !!evt.continue_failed, quality_issues: normalizeQualityIssues(evt.quality_issues), generation_standard: evt.generation_standard, standard_report: evt.standard_report ?? undefined, index: ex?.index, total: ex?.total, time: Date.now(), duration: ex ? Date.now() - ex.time : undefined }); setSectionLogs([...sectionLogsRef.current]); };
   const handleSectionError = (evt: any) => { const ex = sectionLogsRef.current.find((x) => x.section_id === evt.section_id); sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { section_id: evt.section_id, title: evt.title, status: "failed", reason: evt.reason, index: ex?.index, total: ex?.total, time: Date.now(), duration: ex ? Date.now() - ex.time : undefined, stage: ex?.stage, stage_label: ex?.stage_label }); setSectionLogs([...sectionLogsRef.current]); };
   const handleSectionStage = (evt: any) => { const ex = sectionLogsRef.current.find((x) => x.section_id === evt.section_id); if (ex) { sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { ...ex, stage: evt.stage, stage_label: evt.stage_label }); setSectionLogs([...sectionLogsRef.current]); } };
   const generate = useCallback(async (extra?: any) => {

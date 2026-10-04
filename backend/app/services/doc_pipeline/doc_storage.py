@@ -366,3 +366,29 @@ def delete_doc_tree(project_id: str, doc_id: str) -> bool:
     import shutil
     shutil.rmtree(target, ignore_errors=True)
     return True
+
+
+def delete_project_docs_root(project_id: str) -> bool:
+    """删除整个项目的文档存储根目录（`DOCS_ROOT/{project_id}`）。
+
+    目录布局只有两层内容：`documents/{doc_id}/` 四层产物 + `documents_index.json`
+    （见本模块 docstring 与 :102 / :110），故整棵目录树随项目删除一起清理是安全的，
+    无需逐个 doc_id 遍历。
+
+    路径安全与 delete_doc_tree 同口径：resolve 后必须位于 DOCS_ROOT 之下，
+    历史脏数据里的 ../ 或符号链接不得绕过词法检查而误删管理层外文件。
+    幂等：目录不存在返回 False（不视为失败）。
+    """
+    d = DOCS_ROOT / _safe_id(project_id)
+    try:
+        root = DOCS_ROOT.resolve()
+        target = d.resolve()
+        target.relative_to(root)
+    except (OSError, ValueError):
+        logger.warning("拒绝删除管理层外的项目文档目录: %s", d)
+        return False
+    if not target.exists():
+        return False
+    import shutil
+    shutil.rmtree(target, ignore_errors=True)
+    return True

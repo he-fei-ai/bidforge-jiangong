@@ -25,6 +25,22 @@ from app.services.ai.prompts._norm_dicts import (
 
 logger = logging.getLogger("facts_cross_validators")
 
+
+def _safe_confidence(v, default: float = 1.0) -> float:
+    """置信度容错：脏值/None/NaN 回落默认，避免落库 float() 抛异常。
+
+    ✅ 本地定义（不 import facts_extractor）：facts_extractor 反向 import 本模块
+    （pipeline 调用 run_cross_validations），在此再 import 会形成循环依赖。
+    """
+    try:
+        f = float(v)
+        if f != f:  # NaN
+            return default
+        return f
+    except (TypeError, ValueError):
+        return default
+
+
 # 时序越界 severity 分档（天）
 _DAY_BANDS = [(3, "low"), (30, "medium")]  # ≤3 low；3~30 medium；>30 high
 # 塔吊退场不得早于主体封顶节点（C5 安全相关约束）
@@ -377,14 +393,208 @@ def _check_flow_sequence(merged) -> list[CrossConflict]:
 
 
 # ---------------------------------------------------------------------------
+# 规则 XV-SAME-NAME：同名条目取值不一致（通用兜底，覆盖普通文本值）
+# ---------------------------------------------------------------------------
+def _check_same_name_conflicts(merged, initial_had_candidate: dict) -> list[CrossConflict]:
+    """按事实名归组，同组存在多个不同取值 → 判冲突并标记相关条目。
+
+    XV-MAT-DESIGN 仅处理材料等级候选、XV-MACH-SCHED 处理机械时序，普通文本值
+    （如总工期/人名）或双方均不带候选的同名冲突此前无规则可判，run_cross_check
+    无法按当前校验重标初始 has_conflict。本规则作通用兜底，纯程序零 LLM。
+
+    ⚠️ 身份口径（防误伤范围兼容撤销）：只标记「进入校验时**无候选**」的条目。
+    携带候选的条目的冲突判定归 XV-MAT-DESIGN（其范围值兼容会就地撤销标记、
+    清空 conflict_values）；若此处再按当时状态无候选就重标，会把已正确撤销
+    的「不低于C30 ↔ C35」重新打回冲突。故判据用进入时快照
+    initial_had_candidate，而非规则执行中的实时状态。
+    """
+    conflicts: list[CrossConflict] = []
+    by_name: dict[str, list] = {}
+    for it in merged:
+        nm = (it.name or "").strip()
+        if nm:
+            by_name.setdefault(nm, []).append(it)
+
+    for nm, items in by_name.items():
+        valued = [(it, _norm_text_value(it.value)) for it in items]
+        valued = [(it, v) for it, v in valued if v]
+        distinct = []
+        for _, v in valued:
+            if v not in distinct:
+                distinct.append(v)
+        if len(distinct) < 2:
+            continue
+        # 仅给初始无候选的同名条目打标：它们不经 XV-MAT-DESIGN 的候选分支，
+        # 靠本规则按组内取值分歧兜底。携带候选的条目交给 material 规则裁决，
+        # 这里绝不触碰，防止误标已撤销的范围兼容条目。
+        reps = []
+        for d in distinct:
+            rep = next(it for it, v in valued if v == d)
+            reps.append((rep, d))
+        for it, _ in valued:
+            if not initial_had_candidate.get(id(it)):
+                it.has_conflict = True
+        for i in range(len(reps)):
+            for j in range(i + 1, len(reps)):
+                a, _ = reps[i]
+                b, _ = reps[j]
+                conflicts.append(CrossConflict(
+                    rule_id="XV-SAME-NAME", severity="medium",
+                    conflict_type="same_name_value_mismatch",
+                    side_a=_side(a), side_b=_side(b),
+                    resolution_hint="同名事实存在多个不同取值，需人工核对权威来源"))
+    return conflicts
+
+
+def _norm_text_value(v) -> str:
+    if isinstance(v, (list, tuple)):
+        return "|".join(str(x).strip() for x in v if str(x).strip())
+    return normalize_material_spec(str(v or ""))
+
+
+# ---------------------------------------------------------------------------
+# 规则 XV-NUM-UNIT：数值/单位一致性（同名称事实的量纲一致性）
+# ---------------------------------------------------------------------------
+# ✅ 增强（2026-10-03）：XV-SAME-NAME 只按「归一化文本值不同」判同名冲突，
+# 对「同一物理量但单位写法不同」的情形缺乏专门口径：
+#   · "开挖深度 12.5m" vs "开挖深度 1250cm" —— 数值等价、仅单位不同，
+#     XV-SAME-NAME 已按 generic mismatch 报 medium，但无「统一单位」的可执行提示；
+#   · "开挖深度 12.5m" vs "开挖深度 0.125m" —— 量级差恰为 100 倍（cm↔m 换算比），
+#     实为「把 cm 当 m 写」的笔误，XV-SAME-NAME 只能报泛化矛盾，无法点出根因。
+# 本规则在 XV-SAME-NAME 之上补「量纲一致性」视角，产出低/中危的可执行提示，
+# 全部人工裁决（auto_resolvable=False），不改变既有冲突的判定结果。
+_UNIT_TO_BASE = {
+    # 长度（基准 m）
+    "m": 1.0, "米": 1.0, "dm": 0.1, "分米": 0.1,
+    "cm": 0.01, "厘米": 0.01, "mm": 0.001, "毫米": 0.001,
+    "km": 1000.0, "千米": 1000.0,
+    # 质量（基准 kg）
+    "kg": 1.0, "千克": 1.0, "公斤": 1.0, "g": 0.001, "克": 0.001,
+    "mg": 1e-6, "毫克": 1e-6, "t": 1000.0, "吨": 1000.0,
+}
+_UNIT_DIM = {u: "length" for u in ("m", "米", "dm", "分米", "cm", "厘米",
+                                   "mm", "毫米", "km", "千米")}
+_UNIT_DIM.update({u: "mass" for u in ("kg", "千克", "公斤", "g", "克",
+                                      "mg", "毫克", "t", "吨")})
+# 疑似单位换算错误的量级倍数（cm↔m=100、mm↔m=1000 及其倒数）
+_SUSPECT_FACTORS = (100.0, 1000.0, 0.01, 0.001)
+_QUANTITY_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*([A-Za-z\u4e00-\u9fff°%]+)")
+
+
+def _extract_quantity(value) -> tuple[float, str, str] | None:
+    """从事实值中提取 (数值, 单位, 量纲)；无已知单位返回 None。
+
+    仅识别带【已知单位】的数值（m/kg/cm/吨…），避免把纯数字（工期天数、
+    人数）误判为量纲冲突。值含多个数值时取首个匹配的已知单位。
+    """
+    if value is None or isinstance(value, (list, tuple)):
+        return None
+    m = _QUANTITY_RE.search(str(value))
+    if not m:
+        return None
+    unit = m.group(2)
+    if unit not in _UNIT_TO_BASE:
+        return None
+    try:
+        return float(m.group(1)), unit, _UNIT_DIM[unit]
+    except ValueError:
+        return None
+
+
+def _add_num_candidate(it, other_val: str, other_source: str,
+                       other_conf: float) -> None:
+    """把对侧数值登记为矛盾候选（去重），并保持 has_conflict 标记。"""
+    it.has_conflict = True
+    for c in it.conflict_values:
+        if str(c.get("value", "")) == other_val:
+            return
+    it.conflict_values.append({
+        "value": other_val,
+        "source": other_source,
+        "confidence": _safe_confidence(other_conf, 1.0),
+    })
+
+
+def _check_numeric_unit_consistency(merged) -> list[CrossConflict]:
+    """同名事实的量纲一致性：单位不一致 / 疑似单位换算错误。
+
+    仅处理「带已知单位」的数值（长度/质量），纯文本（人名/工期天数）不进入；
+    规则与 XV-SAME-NAME 正交互补：XV-SAME-NAME 报「值不同」，本规则补「量纲根因」。
+    """
+    conflicts: list[CrossConflict] = []
+    by_name: dict[str, list] = {}
+    for it in merged:
+        if isinstance(it.value, (list, tuple)):
+            continue
+        q = _extract_quantity(it.value)
+        if not q:
+            continue
+        by_name.setdefault((it.name or "").strip(), []).append((it, q))
+
+    for nm, items in by_name.items():
+        if not nm:
+            continue
+        by_dim: dict[str, list] = {}
+        for it, q in items:
+            by_dim.setdefault(q[2], []).append((it, q))
+        for _dim, pairlist in by_dim.items():
+            if len(pairlist) < 2:
+                continue
+            for i in range(len(pairlist)):
+                for j in range(i + 1, len(pairlist)):
+                    it_a, qa = pairlist[i]
+                    it_b, qb = pairlist[j]
+                    if qa[1] == qb[1]:
+                        continue  # 同单位 → 交给 XV-SAME-NAME 判值不同
+                    base_a = qa[0] * _UNIT_TO_BASE[qa[1]]
+                    base_b = qb[0] * _UNIT_TO_BASE[qb[1]]
+                    if base_a == 0 or base_b == 0:
+                        continue
+                    rel = abs(base_a - base_b) / max(abs(base_a), abs(base_b))
+                    if rel <= 1e-6:
+                        # 数值等价、仅单位不同
+                        conflicts.append(CrossConflict(
+                            rule_id="XV-NUM-UNIT", severity="low",
+                            conflict_type="numeric_unit_inconsistent",
+                            side_a=_side(it_a), side_b=_side(it_b),
+                            resolution_hint="两值数值等价但单位写法不一致"
+                                            "（如 12.5m 与 1250cm），建议统一单位"))
+                        _add_num_candidate(it_a, str(it_b.value),
+                                           it_b.source, it_b.confidence)
+                        _add_num_candidate(it_b, str(it_a.value),
+                                           it_a.source, it_a.confidence)
+                    else:
+                        ratio = base_a / base_b
+                        if any(abs(ratio - f) <= 1e-3 for f in _SUSPECT_FACTORS) \
+                                or any(abs(1.0 / ratio - f) <= 1e-3
+                                       for f in _SUSPECT_FACTORS):
+                            conflicts.append(CrossConflict(
+                                rule_id="XV-NUM-UNIT", severity="medium",
+                                conflict_type="numeric_scale_suspect",
+                                side_a=_side(it_a), side_b=_side(it_b),
+                                resolution_hint="两值量级差恰为常见单位换算比"
+                                                "（100/1000），疑似单位换算错误"))
+                            _add_num_candidate(it_a, str(it_b.value),
+                                               it_b.source, it_b.confidence)
+                            _add_num_candidate(it_b, str(it_a.value),
+                                               it_a.source, it_a.confidence)
+    return conflicts
+
+
+# ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
 def run_cross_validations(merged) -> list[dict]:
-    """对合并去重后的事实池执行三组交叉校验，返回统一冲突记录列表。
+    """对合并去重后的事实池执行交叉校验，返回统一冲突记录列表。
 
     副作用：range 值兼容的合并项撤销 has_conflict 标记。
     """
     conflicts: list[CrossConflict] = []
+
+    # 进入校验前快照每个条目是否携带候选。XV-SAME-NAME 据此识别「初始无候选」
+    # 条目，必须在 material 规则可能清空 conflict_values（范围兼容撤销）之前记录。
+    initial_had_candidate = {
+        id(it): bool(it.conflict_values) for it in merged}
 
     mat_conflicts, range_merged = _check_material_vs_design(merged)
     conflicts.extend(mat_conflicts)
@@ -397,6 +607,8 @@ def run_cross_validations(merged) -> list[dict]:
 
     conflicts.extend(_check_machinery_vs_schedule(merged))
     conflicts.extend(_check_flow_sequence(merged))
+    conflicts.extend(_check_same_name_conflicts(merged, initial_had_candidate))
+    conflicts.extend(_check_numeric_unit_consistency(merged))
 
     # 跨条目冲突（机械↔工期）回写两侧事实的冲突标记，供前端并排展示裁决
     _mark_cross_conflicts_on_items(merged, conflicts)

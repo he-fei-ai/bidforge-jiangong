@@ -287,16 +287,21 @@ HAZARD_CATEGORIES: list[dict] = [
             #    缺失后果：方案名写「人工挖孔桩专项方案」时 is_dangerous 判为
             #    False，九大必要章节约束与应急章节不触发 —— 这正是本项目最不应
             #    出现的安全判定漏洞（人工挖孔桩致死事故率远高于普通桩基）。
-            #    ⚠️ threshold 设为 None：不凭记忆写「开挖深度 ≥16m 属超过一定
-            #    规模」这类数值 —— 无部文原文可核时不编造阈值，先保证「出现即
-            #    判危大」这一保守方向正确；数值阈值需引 建办质〔2018〕31号
-            #    附件一/二 原文核对后再补。
+            #    ⚠️ threshold 由 None 改为 "ot_bored_pile"（2026-10-02 第二十三轮
+            #    · L-2 收口）：此前注释写「无部文原文可核时不编造阈值」。现已核对
+            #    建办质〔2018〕31号**原文**（住建部官网 2018-05-17 印发件）：
+            #      · 附件一 七(三)：人工挖孔桩工程 → 危大工程，**无深度门槛**
+            #        （故 hazard_always=True，与原「出现即危大」方向一致）；
+            #      · 附件二 七(三)：**开挖深度 16m 及以上**的人工挖孔桩工程
+            #        → 超过一定规模的危大工程（闭区间口径）。
+            #    旧行为（threshold=None）把人工挖孔桩**一律**判为超规模，
+            #    10m 挖孔桩也被要求专家论证 —— 与部文不符（属过判）。
             {
                 "id": "ot_bored_pile", "name": "人工挖孔桩工程",
                 "keywords": ("人工挖孔桩", "人工挖孔", "挖孔桩", "干作业挖孔",
                             "混凝土护壁"),
                 "standards": ["桩基"],
-                "threshold": None,
+                "threshold": "ot_bored_pile",
             },
         ],
     },
@@ -429,6 +434,24 @@ HAZARD_THRESHOLDS: dict[str, dict] = {
         "params": ("slope_height",),
         "hazard_when": [("slope_height", ">=", 6)],
         "oversize_when": [("slope_height", ">=", 6)],
+        "any_match": True,
+    },
+    # 人工挖孔桩：建办质〔2018〕31号 附件一 七(三) —— 人工挖孔桩工程本身即危大
+    # （无深度门槛），故 hazard_always；附件二 七(三) —— 开挖深度 **16m 及以上**
+    # 才属「超过一定规模的危大工程」（部文「及以上」为闭区间，与本文件此前对
+    # 基坑 3m/5m、脚手架 24m/50m 的闭区间修正同源）。
+    # ✅ 2026-10-02（第二十三轮 · L-2 收口）：此前 threshold=None →
+    #    evaluate_hazard_level 的「非参数型」分支把人工挖孔桩**一律**判为超规模，
+    #    10m 挖孔桩也被要求组织专家论证，与部文附件二口径不符（属过判）。
+    "ot_bored_pile": {
+        "params": ("pile_depth",),
+        "hazard_always": True,
+        "hazard_when": [],
+        "oversize_when": [("pile_depth", ">=", 16)],
+        # ⚠️ 缺参时**不得**判非超规模。hazard_always 分支默认「缺参即不超规模」，
+        #    对本类会漏判一个真正 16m+ 的深孔（不漏判才是安全红线），
+        #    故显式要求缺参时按超规模保守判定并记入 missing_params 供上游补全。
+        "oversize_conservative_missing": True,
         "any_match": True,
     },
 }
@@ -577,6 +600,20 @@ def match_category_keywords(text: str) -> list[dict]:
     return hits
 
 
+def is_hazardous_by_keywords(text: str = "") -> bool:
+    """方案文本（名称/类型拼接）是否命中危大工程（确定性关键词反查，零 AI）。
+
+    ✅ 新增（2026-10-02）：危大判定的**单一事实源**出口 —— 正文生成侧
+    （content_checkpoint / 自检）与审核预检侧（STD-04 危大法规门控）共用，
+    避免「生成按危大约束写、预检按非危大判」的判据分叉。
+    异常降级为非危大（与历史行为一致，绝不让判定异常打断主流程）。
+    """
+    try:
+        return bool(match_category_keywords(text))
+    except Exception:
+        return False
+
+
 def classify_scheme_name(scheme_name: str) -> list[dict]:
     """从专项方案名称解析施工内容并自动归类（别名，语义更明确）。
 
@@ -613,6 +650,37 @@ def _check_oversize(rule: dict, params: dict) -> list[str]:
     return reasons
 
 
+def resolve_threshold_key(sub_id: Optional[str]) -> Optional[str]:
+    """子类 id → HAZARD_THRESHOLDS 键（阈值复用的唯一解析出口）。
+
+    子类表里 ``"threshold"`` 允许指向**另一个**子类的阈值键 —— 这是有意复用：
+    盘扣 / 碗扣脚手架与落地式同为 24m/50m（部文口径相同），塔机 / 施工升降机
+    与起重机械安装拆卸同为 300kN/200m，盘扣式模板支撑与模板支撑体系同为
+    8m/18m/15/20。复用的是**部文口径**，不是实现细节。
+
+    ⚠️ 本函数是**唯一**出口：任何要按子类做阈值判定的地方都必须先过它。
+    直接把 sub_id 当阈值键用是本仓踩过的 P0 坑 —— ``HAZARD_THRESHOLDS``
+    里没有复用子类的键，``evaluate_hazard_level`` 会落进「非参数型」分支，
+    把"没有阈值记录"误读成"本身即危大即超规模"，于是 30m 碗扣脚手架
+    （部文口径 50m 才超规模）被要求组织专家论证。
+
+    Args:
+        sub_id: 子类 id。
+
+    Returns:
+        可用于 ``HAZARD_THRESHOLDS`` 查表的键；子类未声明阈值时返回
+        ``sub_id`` 本身（交由 evaluate_hazard_level 走「非参数型」兜底，
+        与旧行为一致，不改变无阈值子类的语义）。
+    """
+    if not sub_id:
+        return None
+    for cat in HAZARD_CATEGORIES:
+        for s in cat.get("subs", ()):
+            if s.get("id") == sub_id:
+                return s.get("threshold") or sub_id
+    return sub_id
+
+
 def evaluate_hazard_level(threshold_key: Optional[str],
                           params: Optional[dict] = None) -> dict:
     """依据阈值记录判定危大 / 超规模。
@@ -636,12 +704,29 @@ def evaluate_hazard_level(threshold_key: Optional[str],
     #    凡涉及该子类即危大（起重机械安装拆卸等）。缺参不再计入 missing_params，
     #    避免上游误以为「参数齐全」。
     if rule is not None and rule.get("hazard_always"):
+        oversize_reasons = _check_oversize(rule, params)
+        missing_oversize = [
+            p for p in rule.get("params", ())
+            if p not in params
+        ]
+        # ✅ 2026-10-02：超规模判定的**缺参方向必须显式声明**。
+        #    本分支默认「缺参 → 不判超规模」（参数型危大如基坑 3m 未给深度时
+        #    不该断言超规模）。但人工挖孔桩不同：它**本身即危大**、超规模与否
+        #    只差一个深度门槛，缺参时若按默认判「非超规模」，一个真正的 16m+
+        #    深孔会被漏掉专家论证 —— 漏判是安全红线，过判只是多花成本。
+        #    故由 oversize_conservative_missing 显式开启「缺参按超规模」。
+        conservative = bool(rule.get("oversize_conservative_missing"))
+        if conservative and missing_oversize:
+            oversize_reasons = oversize_reasons + [
+                f"缺少 {'、'.join(missing_oversize)}，按保守口径暂判为超过一定规模"
+                "（部文附件二阈值待补全后复核）"
+            ]
         return {
             "is_hazardous": True,
-            "is_oversize": bool(_check_oversize(rule, params)),
+            "is_oversize": bool(oversize_reasons),
             "hazard_reasons": ["该子类工程本身即属危大（部文附件一）"],
-            "oversize_reasons": _check_oversize(rule, params),
-            "missing_params": [],
+            "oversize_reasons": oversize_reasons,
+            "missing_params": missing_oversize if conservative else [],
         }
 
     # 非参数型子类（拆除/暗挖/四新/附着式/悬挑/门型等）：出现即危大
@@ -766,7 +851,15 @@ def classify_scheme(scheme_name: str, params: Optional[dict] = None,
         sub_names.append(h["sub_name"])
         for k in CATEGORY_STANDARDS_KEYS.get(h["category_id"], []):
             standards_keys.add(k)
-        lvl = evaluate_hazard_level(h["sub_id"], params)
+        # ✅ P0 修复（2026-10-02 · 第二十三轮）：阈值键必须**解析**后再判定。
+        #    子类表声明了阈值复用（sc_cuplock/sc_disc → sc_ground、
+        #    ho_tower_crane/ho_construction_hoist → ho_crane、fw_disc → fw_support），
+        #    但此处一直直接传 sub_id：HAZARD_THRESHOLDS 里没有这些复用子类的键，
+        #    evaluate_hazard_level 便落进「非参数型」分支 → **无条件判超规模**。
+        #    后果（实测）：30m 碗扣式/盘扣式脚手架（<50m 不需专家论证）被误判
+        #    超规模；50kN 塔机（<300kN）被误判超规模。
+        #    数据声明了复用却没人在判定侧读它 —— 典型「判据分叉」。
+        lvl = evaluate_hazard_level(resolve_threshold_key(h["sub_id"]), params)
         any_hazard = any_hazard or lvl["is_hazardous"]
         any_oversize = any_oversize or lvl["is_oversize"]
         hazards.append({

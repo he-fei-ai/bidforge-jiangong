@@ -175,7 +175,9 @@ class TestConfirmFlowRouter:
         """
         from app.routers import review_autofix as ra
 
-        async def fake_overview(db, scheme_id):
+        async def fake_overview(db, scheme_id, **_kw):
+            # _kw 容纳 persist=False（2026-10-03 数据链收口：修复链路重算
+            # 不得落 preflight_runs）；本锁兼防旧式两参调用回退。
             return {"findings": [_dlv05_finding()], "content_fingerprint": "fp",
                     "stale": False}
 
@@ -221,7 +223,7 @@ class TestConfirmFlowRouter:
         """同章两条可修问题，accept 子集恰为前缀 → 直接取末条 after（不重调 AI）。"""
         from app.routers import review_autofix as ra
 
-        async def fake_overview(db, scheme_id):
+        async def fake_overview(db, scheme_id, **_kw):
             return {"findings": [_dlv05_finding(), _dlv07_finding()],
                     "content_fingerprint": "fp", "stale": False}
 

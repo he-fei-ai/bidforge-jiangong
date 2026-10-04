@@ -112,6 +112,19 @@ def test_has_inline_charts_includes_ai_image():
     assert has_inline_charts(content) is True
 
 
+def test_has_inline_charts_unclosed_fence_not_counted():
+    """口径收紧（2026-10-03 · R38）：未闭合围栏不算有图。
+
+    「未闭合 = 不是图」在登记/导出/改写三侧收口后的第四处统一：
+    eof/truncated 残片不产生任何图表登记、导出也不渲染，若本函数仍按
+    「围栏存在」返回 True，未来被用于补生成粗判时会把坏块误计为已有图。
+    """
+    assert has_inline_charts("前文\n```mermaid\nflowchart TD\n    A --> B") is False
+    assert has_inline_charts('```chart-json\n{"type": "gantt"') is False
+    # 闭合对照：同样内容补齐收尾围栏即为 True（判据只取决于闭合态）
+    assert has_inline_charts("前文\n```mermaid\nflowchart TD\n    A --> B\n```") is True
+
+
 # ---------- _rewrite_code_block ----------
 
 def test_rewrite_replaces_and_deletes():

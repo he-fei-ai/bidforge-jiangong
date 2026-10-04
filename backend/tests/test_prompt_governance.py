@@ -336,17 +336,31 @@ class TestVariableContracts:
         assert len(PROMPT_VARIABLE_CONTRACTS) >= 7
         for key, requires in PROMPT_VARIABLE_CONTRACTS.items():
             assert key in _ALL_PROMPTS, f"契约指向未注册的模板：{key}"
-            assert requires, f"模板 {key} 的契约为空"
+            # ✅ R38 D6（2026-10-03）：空列表 = **显式声明零占位符**（合法登记
+            #    形态，启动期校验该模板确实无占位），区别于未声明（None）。
+            #    非空声明仍照常要求有变量。
+            assert isinstance(requires, list), f"模板 {key} 的契约必须是列表"
+            assert requires or not _ALL_PROMPTS[key].get("default_variables"), \
+                f"模板 {key} 契约为空但出厂含占位符"
 
     def test_requires_stored_in_registry(self):
         meta = _ALL_PROMPTS["content_generation_system"]
         # ✅ E3（2026-09-25 · 提示词条件注入）：新增 subheading_rule 变量
+        # ✅ 检查点前置（2026-10-02）：新增 chapter/content_checkpoint_block 两个
+        #    可选区块变量（独占行占位符，未传即整行丢弃，零干扰）。
         assert meta["requires"] == sorted(["scheme_name", "scheme_type",
                                            "section_number", "standards_text",
-                                           "subheading_rule"])
+                                           "subheading_rule",
+                                           "chapter_checkpoint_block",
+                                           "content_checkpoint_block"])
 
     def test_templates_without_contract_stay_unchecked(self):
-        assert _ALL_PROMPTS["SHARED_FORBIDDEN_WORDS"].get("requires") is None
+        # ✅ R38 D6（2026-10-03）语义更新：SHARED_* 已接入契约表（显式空
+        #    声明），不再是 None。「未声明模板照旧跳过」的兼容红线由
+        #    tests/test_prompt_techdebt_r38_20261003.py::
+        #    test_undeclared_template_still_skipped（临时伪模板）担守；
+        #    本例改锁新口径：空声明已真实套用到 meta（apply 时序修复）。
+        assert _ALL_PROMPTS["SHARED_FORBIDDEN_WORDS"].get("requires") == []
 
     def test_check_reports_declared_not_used(self):
         """反例：声明了模板没用的变量 → 必须被检出。"""

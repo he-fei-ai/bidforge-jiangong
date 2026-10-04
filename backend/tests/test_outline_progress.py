@@ -324,6 +324,16 @@ class TestSublevelValidateFn:
 # _review_and_fix_outline（审核语义收紧 + 阶段回调）
 # ============================================================
 class TestReviewSemantics:
+    @pytest.fixture(autouse=True)
+    def _isolate_nine_chapter_check(self, monkeypatch):
+        """⚠️ 2026-10-02（第二十六轮补救，承接第二十五轮门控放宽）：
+        程序化覆盖预检现**恒定参与**（`outline_checkpoint_check` 默认开），
+        本组用例测的是**AI 审核/修复链路语义**（passed 缺省/字符串、阶段回调、
+        放宽校验器），用最小目录夹具时会被九章检查先行触发外科补齐调用。
+        九章覆盖已由 tests/test_outline_checkpoint_20261002.py 单独钉住，
+        此处显式关闭属**测试范围界定**，不是掩盖缺陷。"""
+        monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False)
+
     async def _run(self, monkeypatch, review_obj, fix_obj=None, phase_cb=None,
                    phase_cb_raises=False):
         calls = []

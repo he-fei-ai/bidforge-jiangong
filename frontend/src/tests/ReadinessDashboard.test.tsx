@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, waitFor, act, cleanup } from "@testing-library/react";
 import { App } from "antd";
 import ReadinessDashboard from "../components/review/ReadinessDashboard";
-import { complianceApi } from "../api";
+import { complianceApi, reviewAutoFixApi } from "../api";
 
 // ✅ 与全项目测试约定的内联 mock：避免 jsdom 缺 matchMedia / ResizeObserver 导致渲染报错
 if (!(window as any).matchMedia) {
@@ -76,6 +76,13 @@ vi.mock("../api", () => ({
     apply: vi.fn(async () => ({ data: { ok: true, status: "repaired", mode: "ai", rule_id: "", targets: [], items: [], snapshot_id: "ver-1" } })),
     rollback: vi.fn(async () => ({ data: { status: "rolled_back" } })),
     capabilities: vi.fn(async () => ({ data: { items: [], total: 0 } })),
+    // ✅ 2026-10-03 遗留收口：Dashboard 级入口测试需要批量链路三端点在位
+    //（BatchFixModal 挂载即 collect；stage/confirm 仅防未调用期报错）
+    collect: vi.fn(async () => ({ data: { scheme_id: "s1", scope: "all_blocking", total: 0, items: [] } })),
+    stage: vi.fn(async () => ({ data: { batch_id: "", status: "empty", items: [],
+      stats: { repaired: 0, failed: 0, skipped: 0 } } })),
+    confirm: vi.fn(async () => ({ data: { status: "confirmed", accepted: 0,
+      repaired_sections: 0, snapshot_id: "", batch_id: "" } })),
   },
 }));
 
@@ -87,6 +94,11 @@ beforeEach(() => {
   (complianceApi.report as any).mockReset().mockResolvedValue({
     data: { content: "# 整改清单", filename: "报告.md" },
   });
+  // ✅ 2026-10-03：Dashboard 级入口用例逐项断言调用参数，每例重置防串扰
+  (reviewAutoFixApi.plan as any).mockReset().mockResolvedValue({
+    data: { ok: true, fixable: true, mode: "ai", reason: "", finding: {}, targets: [] } });
+  (reviewAutoFixApi.collect as any).mockReset().mockResolvedValue({
+    data: { scheme_id: "s1", scope: "all_blocking", total: 0, items: [] } });
 });
 afterEach(() => { cleanup(); localStorage.clear(); });
 
@@ -323,5 +335,72 @@ describe("ReadinessDashboard · 交付就绪度总检", () => {
     fireEvent.click(btnByText(container, "一键总检")!);
     await waitFor(() => expect(container.textContent || "").toContain("82"));
     expect(container.textContent || "").not.toContain("历史总检（最近");
+  });
+});
+
+// =========================================================================
+// Dashboard 级「自动修复」入口交互（2026-10-03 遗留收口）：
+//   此前组件契约由 AutoFixModal / BatchFixModal 各自的独立测试锁定，但
+//   「问题行的按钮能否打开弹窗、弹窗参数是否取自该行 finding」这层
+//   宿主接线无人锁 —— 接线断了（如 setFixTarget 拿错行、批量按钮门控
+//   条件变宽）两个子组件测试全绿也不会红。
+// =========================================================================
+describe("ReadinessDashboard · 自动修复入口接线", () => {
+  /** 带 autofix 能力标注的总检结果（能力字段由后端 capability_summary 补充） */
+  const withAutofix = (first: any) => ({
+    ...mocks.OVERVIEW,
+    findings: mocks.OVERVIEW.findings.map((f: any, i: number) =>
+      (i === 0 ? { ...f, autofix: first } : f)),
+  });
+
+  it("可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan", async () => {
+    (complianceApi.overview as any).mockResolvedValue({
+      data: withAutofix({ fixable: true, mode: "auto", reason: "" }),
+    });
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    fireEvent.click(btnByText(container, "一键总检")!);
+    await waitFor(() => expect(container.textContent || "").toContain("82"));
+    const fixBtn = btnByText(container, "自动修复");
+    expect(fixBtn).toBeTruthy();
+    fireEvent.click(fixBtn!);
+    // Modal 挂 body：标题取自被点行的 finding.title，并展示「先定位再修复」入口
+    const body = document.body as HTMLElement;
+    await waitFor(() =>
+      expect((body.textContent || "").includes("自动修复：引用废止标准")).toBe(true));
+    const locateBtn = btnByText(body, "定位矛盾位置");
+    expect(locateBtn).toBeTruthy();
+    fireEvent.click(locateBtn!);
+    await waitFor(() => expect(reviewAutoFixApi.plan).toHaveBeenCalledWith(
+      "s1", { rule_id: "REF-001", section_id: undefined }));
+  });
+
+  it("不可修项显示「需人工」且无行内按钮；无 block+fixable 项时批量按钮不出现", async () => {
+    (complianceApi.overview as any).mockResolvedValue({
+      data: withAutofix({ fixable: false, mode: "manual", reason: "需人工核对引用" }),
+    });
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    fireEvent.click(btnByText(container, "一键总检")!);
+    await waitFor(() => expect(container.textContent || "").toContain("82"));
+    expect(container.textContent || "").toContain("需人工");
+    expect(btnByText(container, "自动修复")).toBeNull();
+    // 唯一 block 项不可修 → blockingFixable 为空 → 批量入口门控生效
+    expect(btnByText(container, "一键修复全部阻断项")).toBeNull();
+  });
+
+  it("存在 block+fixable 项 → 批量按钮带计数，点击后 BatchFixModal 发起 collect", async () => {
+    (complianceApi.overview as any).mockResolvedValue({
+      data: withAutofix({ fixable: true, mode: "auto", reason: "" }),
+    });
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    fireEvent.click(btnByText(container, "一键总检")!);
+    await waitFor(() => expect(container.textContent || "").toContain("82"));
+    const batchBtn = btnByText(container, "一键修复全部阻断项（1）");
+    expect(batchBtn).toBeTruthy();
+    fireEvent.click(batchBtn!);
+    await waitFor(() => expect(reviewAutoFixApi.collect).toHaveBeenCalledWith(
+      "s1", { scope: "all_blocking" }));
   });
 });

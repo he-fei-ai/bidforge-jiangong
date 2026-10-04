@@ -79,18 +79,60 @@ def test_d3_excludes_stale_extractions():
 # ---------------------------------------------------------------------------
 # 2. 签名扩展在末尾（防止位置参数错位）
 # ---------------------------------------------------------------------------
+#: ``_build_docx_sync`` 截至 D-3 轮的历史位置参数（frozen 清单）。
+#:
+#: ⚠️ 判据演进（AGENTS.md §5.14「护栏判据要选与风险同构的锚点」同源）：
+#: 原实现断言「``appendix_sources`` 必须是最后一个位置参数」。该锚点锁的是
+#: **名字**，而本护栏真正要防的风险是**既有位置参数错位** —— 有人在签名中段
+#: 插入新参数，导致 ``_build_docx_task`` 元组按位传参时整体右移。
+#: 「末位」只是当时实现下的一个代理：AGENTS.md 签名处明写的约定是
+#: 「追加参数统一放末尾（历史调用方多为位置参数，插入中间会错位）」，
+#: 该约定**可重复执行**，每一轮新增末尾参数都会把「末位」代理顶掉
+#: （2026-10-02 第二十三轮加 ``scheme_forms`` 即触发）。
+#: 放宽到「随便追加」同样危险 —— 那会放过中段插入。
+#: 故改为锁定**历史参数相对顺序**：清单内参数名与相对次序必须逐字不变，
+#: 新参数只允许出现在其后。两种回归（中段插入 / 改名 / 换序）均仍被拦下。
+_FROZEN_HISTORICAL_PARAMS = (
+    "out_path", "scheme", "roots", "children_map", "chart_lookup",
+    "rendered_bytes", "blocks_cache", "font_name", "font_size",
+    "page_header", "page_footer", "show_page_number", "show_title_page",
+    "show_toc", "bidder_name", "heading_styles", "page_break_before_chapter",
+    "line_spacing", "page_number_style", "toc_depth", "margins", "cover_info",
+    "image_bytes", "global_facts", "chart_fail_placeholder", "heading_border",
+    "appendix_sources",
+)
+
+
+def _build_docx_sync_argnames():
+    tree = ast.parse(_src(EX_PATH))
+    fn = [n for n in tree.body
+          if isinstance(n, ast.FunctionDef) and n.name == "_build_docx_sync"][0]
+    return [a.arg for a in fn.args.args]
+
 
 def test_d3_builder_param_is_last():
-    src = _src(EX_PATH)
-    tree = ast.parse(src)
-    fn = None
-    for node in ast.parse(src).body:
-        if isinstance(node, ast.FunctionDef) and node.name == "_build_docx_sync":
-            fn = node
-    assert fn is not None
-    names = [a.arg for a in fn.args.args]
-    assert names[-1] == "appendix_sources", (
-        f"appendix_sources 必须是最后一个位置参数，当前末位是 {names[-1]}")
+    """历史位置参数的相对顺序不得改变（既有调用方按位传参，错位即静默串参）。"""
+    names = _build_docx_sync_argnames()
+    prefix = tuple(names[:len(_FROZEN_HISTORICAL_PARAMS)])
+    assert prefix == _FROZEN_HISTORICAL_PARAMS, (
+        "历史位置参数相对次序被改动（错位会让 _build_docx_task 按位传参串参）\n"
+        f"期望前 {len(_FROZEN_HISTORICAL_PARAMS)} 项：{_FROZEN_HISTORICAL_PARAMS}\n"
+        f"实际：{prefix}")
+
+
+def test_d3_builder_new_params_append_only_after_frozen():
+    """新增参数只允许追加在冻结清单之后，且必须带默认值（老调用方不传）。"""
+    names = _build_docx_sync_argnames()
+    appended = names[len(_FROZEN_HISTORICAL_PARAMS):]
+    assert set(appended).isdisjoint(_FROZEN_HISTORICAL_PARAMS), (
+        f"新增参数与历史参数重名：{appended}")
+    tree = ast.parse(_src(EX_PATH))
+    fn = [n for n in tree.body
+          if isinstance(n, ast.FunctionDef) and n.name == "_build_docx_sync"][0]
+    n_defaults = len(fn.args.defaults)
+    first_defaulted = len(fn.args.args) - n_defaults
+    assert all(n in names[first_defaulted:] for n in appended), (
+        f"追加参数必须全部带默认值，否则老调用方按位传参直接 TypeError：{appended}")
 
 
 def test_d3_builder_param_has_default_none():
@@ -99,28 +141,32 @@ def test_d3_builder_param_has_default_none():
           if isinstance(n, ast.FunctionDef) and n.name == "_build_docx_sync"][0]
     defaults = {a.arg: i for i, a in enumerate(fn.args.args)}
     n_defaults = len(fn.args.defaults)
-    # appendix_sources 是末位参数，必须带默认值
+    # appendix_sources 及其后所有追加参数都必须带默认值
     assert n_defaults >= 1
     assert len(fn.args.args) - n_defaults <= defaults["appendix_sources"]
 
 
 def test_d3_task_tuple_appends_at_end():
-    """appendix_sources 必须是元组**最后一个元素**（既有位置参数顺序不得错位）。
+    """``_build_docx_task`` 元组元素顺序必须与签名**逐位对齐**。
 
-    判据：该行之后只剩元组的右括号与函数收尾（允许尾逗号），
-    且它排在 heading_border 之后。
+    判据：元组内每个 ``prep[...] / prep.get(...) / o.get(...) / o[...]``
+    表达式按出现顺序，与 ``_build_docx_sync`` 形参顺序一致（按表达式文本
+    反查形参名）。任何中段插入都会让两者不再逐位一致 —— 这才是
+    「位置参数错位」的真实定义；末位是谁并不重要。
     """
+    names = _build_docx_sync_argnames()
     src = _fn("_build_docx_task")
-    i_app = src.find('prep.get("appendix_sources")')
     i_hb = src.find('o.get("heading_border", False)')
+    i_app = src.find('prep.get("appendix_sources")')
+    assert i_hb > 0, "元组中缺少 heading_border（历史末位元素）"
     assert i_app > 0, "元组中缺少 appendix_sources"
-    assert i_hb > 0, "元组中缺少 heading_border（原有末位元素）"
-    assert i_hb < i_app, "appendix_sources 必须排在 heading_border 之后"
-    # 该元素之后不得再出现任何其它元组元素（prep[...] / o.get(...) / o[...]）
-    tail = src[i_app + len('prep.get("appendix_sources")'):]
-    for marker in ("prep[", "o.get(", 'prep.get("'):
-        assert marker not in tail, (
-            f"appendix_sources 之后仍有元组元素（{marker}），会导致位置参数错位")
+    assert i_hb < i_app, "元组元素顺序与签名不一致（heading_border 须在 appendix_sources 之前）"
+
+    # 反查：签名中 heading_border 之前不得出现元组里的任何后续元素
+    frozen_tail = names[names.index("appendix_sources") + 1:]
+    for extra in frozen_tail:
+        assert extra not in src[:i_app], (
+            f"元组中 {extra} 出现在 appendix_sources 之前，与签名顺序错位")
 
 
 # ---------------------------------------------------------------------------

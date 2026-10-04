@@ -1,7 +1,7 @@
 """F-CONTENT-STANDARD · 模糊生成改造 + 内部标记（2026-10-01）
 
 两条主线：
-一、正文必须完整生成 —— 不留占位标记、不留空（六类规则表为唯一事实源，
+一、正文必须完整生成 —— 不留占位标记、不留空（八类规则表为唯一事实源，
    提示词与校验共用同一份文案与判据）。
 二、内部标记（可追溯性）—— 只落库、不落正文：标记在 ``trace`` 键里，
    ``sections.content`` 与导出 DOCX 均查不到。
@@ -64,10 +64,14 @@ def _trace_row(section_id="a", section_title="第一章",
 
 
 class TestFuzzyCategoryTable:
-    """模糊生成规则表（六类）是文案与标记的唯一事实源。"""
+    """模糊生成规则表（八类）是文案与标记的唯一事实源。
 
-    def test_six_categories_with_all_fields(self):
-        assert len(FUZZY_CATEGORIES) == 6
+    2026-10-02（第二十六轮）：按需求文档「模糊生成规则」补齐材料规格类/工序流程类，
+    六类 → 八类（数值/名称/时间/数量/承诺/技术参数/材料规格/工序流程）。
+    """
+
+    def test_eight_categories_with_all_fields(self):
+        assert len(FUZZY_CATEGORIES) == 8
         assert set(FUZZY_CATEGORY_ORDER) == set(FUZZY_CATEGORIES)
         for key, c in FUZZY_CATEGORIES.items():
             assert c["label"], key
@@ -77,8 +81,8 @@ class TestFuzzyCategoryTable:
             assert c["reason"], f"{key} 缺 reason"
 
     def test_category_keys_are_stable_vocabulary(self):
-        assert set(FUZZY_CATEGORIES) == {"number", "name", "time",
-                                          "quantity", "promise", "tech"}
+        assert set(FUZZY_CATEGORIES) == {"number", "name", "time", "quantity",
+                                          "promise", "tech", "material", "process"}
 
     def test_every_category_forbids_fabrication(self):
         for c in FUZZY_CATEGORIES.values():

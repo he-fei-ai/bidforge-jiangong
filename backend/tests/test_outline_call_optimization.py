@@ -68,6 +68,16 @@ class TestJsonModeCallSites:
 # ============================================================
 @pytest.mark.asyncio
 class TestMergedReviewFix:
+    @pytest.fixture(autouse=True)
+    def _isolate_nine_chapter_check(self, monkeypatch):
+        """⚠️ 2026-10-02（第二十六轮补救，承接第二十五轮门控放宽）：
+        程序化覆盖预检现**恒定参与**（`outline_checkpoint_check` 默认开），
+        本组用例测的是 **AI 审核轮合并修复（fixed_outline）** 链路，最小目录
+        夹具会被九章检查先行触发外科补齐调用。九章覆盖已由
+        tests/test_outline_checkpoint_20261002.py 单独钉住，此处显式关闭属
+        **测试范围界定**，不是掩盖缺陷。"""
+        monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False)
+
     def _mk(self, monkeypatch, review_obj, fix_obj=None):
         calls = []
 
@@ -153,6 +163,13 @@ class TestMergedReviewFix:
 # C：程序化覆盖预检 + 外科式补齐
 # ============================================================
 class TestRequirementsCoverage:
+    @pytest.fixture(autouse=True)
+    def _isolate_nine_chapter_check(self, monkeypatch):
+        """⚠️ 2026-10-02（第二十六轮补救）：本组用例测**编制要求条目匹配规则**
+        （双向子串/片段/公共子串），需隔离第二十五轮新增的恒定九章检查
+        （已由 tests/test_outline_checkpoint_20261002.py 单独钉住）。"""
+        monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False)
+
     def test_split_items_strips_numbering(self):
         items = sh._split_requirement_items(
             "1. 工程概况及特点\n2）施工部署与进度计划\n- 安全保证措施\n短\n")

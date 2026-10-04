@@ -17,6 +17,8 @@ import {
   PREV_TAB,
   selectPlacedExportCharts,
   findDefaultExportPreset,
+  canShrinkSection,
+  WORD_OVER_RATIO,
   type DocRecord,
 } from "../utils/workflowDerived";
 import { isDocParsed, isDocFailed } from "../utils/workflowDerived";
@@ -453,6 +455,39 @@ describe("解析状态：统计条与列表标签同口径（回归护栏）", (
   it("actionableCount 等于待解析 + 失败（与后端 parse-all 选取口径一致）", () => {
     const stats = computeDocStats(cases);
     expect(stats.actionableCount).toBe(stats.pendingCount + stats.failedCount);
+  });
+});
+
+// ============================================================
+// canShrinkSection —— 阈值必须与后端压缩端点准入一致（> 预算 130%）
+//   后端：routers/sections.py:1558 `before_wc <= word_budget * WORD_OVER_RATIO` → 400
+//   旧前端：word_count > word_budget → 100%~130% 区间按钮可点、后端必 400
+// ============================================================
+describe("canShrinkSection", () => {
+  it("阈值常量与后端同口径（1.3）", () => {
+    expect(WORD_OVER_RATIO).toBe(1.3);
+  });
+
+  it("130% 以内不可压缩（旧实现会误判为可点，后端必 400）", () => {
+    expect(canShrinkSection({ content: "x", word_count: 1300, word_budget: 1000 })).toBe(false);
+    expect(canShrinkSection({ content: "x", word_count: 1000, word_budget: 1000 })).toBe(false);
+    expect(canShrinkSection({ content: "x", word_count: 1001, word_budget: 1000 })).toBe(false);
+  });
+
+  it("超过 130% 才可压缩", () => {
+    expect(canShrinkSection({ content: "x", word_count: 1301, word_budget: 1000 })).toBe(true);
+    expect(canShrinkSection({ content: "x", word_count: 3000, word_budget: 1000 })).toBe(true);
+  });
+
+  it("无正文 / 空对象一律不可压缩（脏数据防御）", () => {
+    for (const bad of [null, undefined, {}, { content: "" }, { content: "   ", word_count: 99999 }]) {
+      expect(canShrinkSection(bad as any)).toBe(false);
+    }
+  });
+
+  it("word_budget 缺失时按默认 1500 计（与后端 row['word_budget'] or 1500 对齐）", () => {
+    expect(canShrinkSection({ content: "x", word_count: 1951 })).toBe(true);
+    expect(canShrinkSection({ content: "x", word_count: 1950 })).toBe(false);
   });
 });
 

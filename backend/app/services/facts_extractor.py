@@ -1923,9 +1923,11 @@ def apply_heuristic_fallback(
     中提取最关键的基本事实（项目名称、地点、工期、质量要求）。
 
     ✅ 修复（2026-09-24，治 A 类供给噪音）：正则也一无所获时**不再伪造
-    「项目名称=待补充」**——空事实库是合法状态（上游管线已有显式告警，
-    正文侧按三级策略自行标注【待补充：字段名】），伪造的模拟值只会随
-    事实文本流回提示词、诱导 AI 原样照抄「待补充」。
+    「项目名称=待补充」**——空事实库是合法状态（上游管线已有显式告警）。
+    ✅ 2026-10-03 措辞更正：原注释写「正文侧按三级策略自行标注
+    【待补充：字段名】」，那是**已废弃**的占位符模式；2026-10-01 起的现行
+    策略是正文按模糊生成规则（content_fuzzy）把话说完、不留任何占位标记。
+    伪造的模拟值只会随事实文本流回提示词、诱导 AI 原样照抄占位符。
     """
     if all_items:
         return all_items  # AI 有结果时不兜底
@@ -1972,7 +1974,8 @@ def apply_heuristic_fallback(
         #    此处静默返回即可，绝不编造。
         logger.warning(
             "启发式规则未从资料文本中提取到任何基本事实，返回空清单"
-            "（不再注入模拟占位值，正文侧将按三级策略标注【待补充】）")
+            "（不再注入模拟占位值；正文侧按模糊生成规则把话说完，"
+            "不留任何占位标记）")
 
     return default_items
 
@@ -2574,3 +2577,75 @@ def build_injectable_facts_query(scheme_id: str, project_id: str,
         f"WHERE scheme_id=? AND {_FACTS_INJECT_WHERE} ORDER BY gt, title"
     )
     return sql, (scheme_id,)
+
+
+# ---------------------------------------------------------------------------
+# 跨模块只读桥接：供预检/审核/合规/一致性修复等模块消费已确认事实
+# ---------------------------------------------------------------------------
+#: ✅ 增强（2026-10-03 · 跨模块数据传递）：目录/正文/导出三处已通过
+#: build_injectable_facts_query 共用注入门控；但预检(preflight_engine)、审核
+#: (review_autofix/consistency_repair)、合规(compliance) 此前**完全不读取**
+#: global_facts 表，导致「已确认的事实数值」无法反哺这些判定（如危大阈值判定
+#: 不依赖真实事实值、审核规则无法引用统一事实）。本函数作为**唯一只读桥接出口**：
+#: 返回当前作用域内「可注入」的事实（受同一 fail-closed 门控约束），下游模块
+#: 直接 import 调用即可拿到干净的(name/value/category/chapter…)结构，无需感知
+#: 门控细节、不写库、失败仅返回空（fail-soft），不改变任何既有注入行为。
+_BRIDGE_COLUMNS = (
+    FACTS_GT_COLUMN + ", id, title, content, category, chapter, fact_attr, "
+    "source_ref, is_safety_critical, fact_key, group_title, value_unit"
+)
+
+
+async def load_resolved_facts_for_scope(db, scheme_id: str = "",
+                                         project_id: str = "") -> list[dict]:
+    """跨模块只读桥接：返回作用域内「已确认可注入」的事实清单（fail-soft）。
+
+    用途：预检/审核/合规/一致性修复等模块需要基于「用户已确认的全局事实」
+    做判定时调用本函数，而非各自直查 global_facts（避免门控口径再次分叉）。
+
+    返回字段（统一结构，下游按需取用）：
+        fact_id, name, value, category, chapter, fact_attr,
+        source, is_safety_critical, fact_key, group_title
+
+    失败（DB 异常/作用域缺失）返回空列表，绝不向上抛 —— 下游把「无事实」
+    当作「不增强」处理即可，保证主流程不受全局事实模块可用性影响。
+    """
+    try:
+        pid = project_id or (await resolve_scheme_project_id(db, scheme_id)
+                             if scheme_id else "")
+        sql, params = build_injectable_facts_query(
+            scheme_id, pid, _BRIDGE_COLUMNS)
+        cur = await db.execute(sql, params)
+        out: list[dict] = []
+        for raw in await cur.fetchall():
+            r = dict(raw)  # ✅ 转为 dict：aiosqlite/sqlite3.Row 无 .get 方法，
+            #    list_facts 等读取路径均先 dict(r) 再访问，此处保持一致避免
+            #    'sqlite3.Row' object has no attribute 'get'。
+            nm, val = extract_value_from_markdown_line(r.get("content") or "")
+            src = ""
+            try:
+                refs = json.loads(r.get("source_ref") or "[]")
+                if isinstance(refs, list) and refs:
+                    src = str((refs[0] or {}).get("file", "") or "")
+            except Exception:
+                src = ""
+            out.append({
+                "fact_id": r["id"],
+                "name": nm or (r.get("title") or ""),
+                "value": val or (r.get("content") or ""),
+                "category": r.get("category") or "other",
+                "chapter": r.get("chapter") or "",
+                "fact_attr": r.get("fact_attr") or "",
+                "source": src,
+                "is_safety_critical": bool(r.get("is_safety_critical") or 0),
+                "fact_key": r.get("fact_key") or "",
+                "group_title": r.get("group_title") or "",
+                # ✅ 2026-10-03：计量单位一并下发 —— 下游 extract_danger_params
+                #    等按「value 内单位优先、value_unit 兜底」解析（危大阈值
+                #    长度类需换算为米），value 为裸数字时不丢单位。
+                "value_unit": r.get("value_unit") or "",
+            })
+        return out
+    except Exception as e:  # pragma: no cover - 只读桥接失败不影响主流程
+        logger.warning("load_resolved_facts_for_scope 失败（返回空）: %s", e)
+        return []

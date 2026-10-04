@@ -6,7 +6,8 @@ import time
 from collections import OrderedDict
 from typing import Any, Callable
 
-from .prompts import get_prompt
+# ✅ R38 D6：随死函数一并移除 `from .prompts import get_prompt`（本模块已无
+#    消费点；模板消费链保留在 charts.py / prompts.illustration）
 from .providers.base import AIMessage
 # ✅ 移植适配：源项目为 from .workflows import collect_json_response（provider 直连签名），
 # 本项目在 json_response.py 提供了签名兼容的 provider 直连版本
@@ -529,84 +530,13 @@ def repair_mermaid(code: str) -> str:
     return code
 
 
-async def generate_illustration_prompt(
-    provider: Any,
-    *,
-    section_title: str,
-    section_content: str,
-    section_path: str,
-    industry_profile: str,
-) -> dict:
-    """AI 生成配图描述（图片生成提示词）
-
-    Returns { "prompt": "...", "style": "...", "description": "..." }
-    """
-    logger.info("[配图方案] 开始: title=%s, path=%s", section_title, section_path)
-    ill_sys = get_prompt("ILLUSTRATION_PLAN_SYSTEM")
-    logger.info("[配图方案] 提示词加载: SYSTEM=%d字", len(ill_sys))
-    ill_user = (
-        f"请为以下章节规划一张配图方案：\n\n"
-        f"## 章节路径\n{section_path}\n\n"
-        f"## 章节标题\n{section_title}\n\n"
-        f"## 章节正文（摘要）\n{section_content[:2000] if section_content else '（暂无正文）'}\n\n"
-        f"## 行业背景\n{industry_profile or '通用工程'}\n\n"
-        f"请严格按照系统提示词中的 JSON 格式输出。"
-    )
-
-    messages = [
-        AIMessage(role="system", content=ill_sys),
-        AIMessage(role="user", content=ill_user),
-    ]
-
-    result = await collect_json_response(provider, messages, max_retries=3)
-    return result
-
-
-async def generate_illustration_arrange(
-    provider: Any,
-    *,
-    section_title: str,
-    section_content: str,
-    project_overview: str = "",
-    scoring_standard: str = "",
-    industry_profile: str = "",
-) -> dict:
-    """AI 编排判断 — 该章节是否需要配图及图像风格偏好
-
-    返回包含 {"needed": bool, "style": string, "reason": string} 的判断结果
-    """
-    logger.info("[配图编排] 插图: title=%s, content_len=%d", section_title, len(section_content))
-    arr_sys = get_prompt("ILLUSTRATION_ARRANGE_SYSTEM")
-    logger.info("[配图编排] 插图 提示词加载: %d字", len(arr_sys))
-
-    user_prompt = f"""章节标题：{section_title}
-
-章节内容：
-{section_content}
-
-项目概述：
-{project_overview or "未提供项目概述"}
-
-评分标准：
-{scoring_standard or "未提供评分标准"}
-
-行业背景：
-{industry_profile or "未提供行业背景"}
-
-请根据以上信息判断该章节是否需要配图插图，如果需要，建议使用的图像风格（engineering_diagram/realistic_photo/technical_drawing/custom），并说明理由。返回JSON格式的判断结果。"""
-
-    messages = [
-        AIMessage(role="system", content=arr_sys),
-        AIMessage(role="user", content=user_prompt),
-    ]
-
-    result = await collect_json_response(provider, messages, max_retries=3)
-    # 确保返回必要的字段
-    if result and isinstance(result, dict):
-        result.setdefault("needed", False)
-        result.setdefault("style", "engineering_diagram")
-        result.setdefault("reason", "")
-    return result
+# ✅ R38 D6 收口（2026-10-03）：删除零调用死函数 generate_illustration_prompt /
+#    generate_illustration_arrange（全仓 grep 仅命中 def 本体，从未接入任何链路）
+#    及其专属模板 ILLUSTRATION_PLAN_SYSTEM / ILLUSTRATION_ARRANGE_SYSTEM（见
+#    prompts/illustration.py 同位注释）。产品配图已全部由图表流水线自动出图
+#    （charts.py / export 自动链路，消费 ILLUSTRATION_PROMPT_OPTIMIZE），
+#    旧「编排规划」方案已被取代。删除前已核实：前端零硬引用（列表动态背
+#    靠 /prompts API），collect_json_response / AIMessage 仍由存留函数消费。
 
 
 async def generate_illustration_image(
@@ -731,15 +661,15 @@ async def generate_illustration_image(
     if style != "custom":
         _style_prefix = {
             "engineering_diagram": (
-                "画面采用工程项目图示风格，结构清晰、专业克制、适合投标技术方案插图。"
+                "画面采用工程项目图示风格，结构清晰、专业克制、适合专项施工方案插图。"
                 "避免出现品牌标识、水印、夸张营销元素和无关文字。"
             ),
             "realistic_photo": (
-                "画面采用专业实景照片风格，真实、克制、适合投标技术方案插图。"
+                "画面采用专业实景照片风格，真实、克制、适合专项施工方案插图。"
                 "避免出现品牌标识、水印、夸张营销元素和无关文字。"
             ),
             "technical_drawing": (
-                "画面采用工程技术图纸风格，线条清晰、标注规范、适合投标技术方案。"
+                "画面采用工程技术图纸风格，线条清晰、标注规范、适合专项施工方案。"
                 "避免出现品牌标识、水印、夸张营销元素和无关文字。"
             ),
         }.get(style, "")

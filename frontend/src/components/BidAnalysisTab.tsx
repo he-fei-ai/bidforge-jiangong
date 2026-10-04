@@ -715,7 +715,7 @@ function BidAnalysisTab({
             配置
           </Button>
           {/* 多标段检测：确定性规则秒级返回，不消耗 AI 额度 */}
-          <Tooltip title="对已解析纯文本运行规则检测，判断招标文件是否疑似包含多个标段">
+          <Tooltip title="对已解析纯文本运行规则检测，判断项目资料是否疑似包含多个标段">
             <Button
               icon={<AimOutlined />}
               loading={sectionChecking}
@@ -776,7 +776,7 @@ function BidAnalysisTab({
                   识别到的标段标识：{(sectionCheckResult.sections || []).join("、")}
                 </div>
               )}
-              建议按标段拆分招标文件后分别建方案；继续生成将把多个标段内容混淆进同一份方案。
+              建议按标段拆分项目资料后分别建方案；继续生成将把多个标段内容混淆进同一份方案。
             </div>
           }
         />

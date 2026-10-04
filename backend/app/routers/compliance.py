@@ -40,6 +40,12 @@ from app.services.audit_scoring import (
 from app.services.preflight_engine import (
     PreflightContext, preflight_stats, run_preflight,
 )
+# ✅ 2026-10-03（全局事实桥接）：预检消费「已确认全局事实」（SAF-08 事实反哺）。
+#    门控/作用域口径一律取 facts_extractor 唯一出口，不在本文件重写 SQL。
+from app.services.facts_extractor import (
+    get_facts_inject_where, load_resolved_facts_for_scope,
+    resolve_scheme_project_id,
+)
 from app.services import review_autofix
 from app.services.content_utils import order_sections_dfs
 from app.services.standards_registry import (
@@ -91,6 +97,43 @@ async def list_rules():
     }
 
 
+@router.get("/checkpoints")
+async def list_checkpoint_constraints():
+    """「检查点 → 生成约束 → 实现方式」映射表（唯一事实源）。
+
+    ✅ 2026-10-02（检查点前置）：审核与预检检查点不再只是**事后**判据 ——
+    本表把它们逐条映射为正文生成侧的约束与实现方式，供前端展示
+    「这条审核要求是怎么在生成时被满足的」，让质量门槛可见、可追溯。
+
+    返回体：
+    - ``items``：映射条目（group/checkpoint/rule_ids/constraint/implementation/
+      channel/chapter_key）；
+    - ``groups`` / ``channels``：分组与通道的封闭枚举（前端下拉用）；
+    - ``by_group`` / ``by_channel``：各分组 / 通道的条目数；
+    - ``anchor_problems``：**非空即说明映射表与审核规则注册表已分叉**
+      （审核规则废弃或编号漂移），前端应据此告警而非静默展示。
+    """
+    from app.services.content_checkpoint import (
+        CHECKPOINT_CHANNELS, CHECKPOINT_GROUPS, checkpoint_constraint_map,
+        validate_constraint_map,
+    )
+    items = checkpoint_constraint_map()
+    by_group: dict = {}
+    by_channel: dict = {}
+    for it in items:
+        by_group[it["group"]] = by_group.get(it["group"], 0) + 1
+        by_channel[it["channel"]] = by_channel.get(it["channel"], 0) + 1
+    return {
+        "rule_version": RULE_VERSION,
+        "groups": [{"key": k, "label": v} for k, v in CHECKPOINT_GROUPS],
+        "channels": list(CHECKPOINT_CHANNELS),
+        "items": items,
+        "by_group": by_group,
+        "by_channel": by_channel,
+        "anchor_problems": validate_constraint_map(),
+    }
+
+
 # @deprecated 孤儿 API：本前端无调用方（UI 已改用 /overview 的 dimensions）；
 # 按向后兼容原则保留，大版本评估清理。
 @router.get("/dimensions", deprecated=True)
@@ -105,6 +148,143 @@ async def get_expert_items():
     ``items`` 保持原有的字符串数组形态，兼容既有前端调用。
     """
     return {"items": EXPERT_CHECK_ITEMS, "detail": expert_items()}
+
+
+# ---------------------------------------------------------------------------
+# ✅ 2026-10-03（AI 语义检查侧消费事实）：/check 与 /expert-review 两条 AI 链路
+#    此前完全不读 global_facts（预检/一致性审计已有事实通道，唯此二条断链）。
+#    现统一经跨模块只读桥接 load_resolved_facts_for_scope 装配（与预检/正文/
+#    导出同一 fail-closed 门控，不在本文件重写 SQL），格式化为提示词文本注入
+#    {global_facts}；无事实/桥接失败一律降级为「（无）」，不阻断 AI 检查。
+# ---------------------------------------------------------------------------
+#: 事实文本总量上限（token 保护，与 SECTION_CONTENT_CAP 同思路）
+FACTS_PROMPT_CAP = 3000
+#: 单条事实值的截断长度（value 兜底取整段 content 时防长文本撑爆）
+_FACT_PROMPT_VALUE_CAP = 120
+#: 安全关键标记：预算截断下也必须**完整**保留（见 _join_with_budget）
+SAFETY_MARK = "（安全关键）"
+
+
+def _join_with_budget(lines: list[str], budget: int,
+                       suffixes: list[str] | None = None) -> str:
+    """按**长度比例**分配预算后逐条截断（**不丢条**），而非头部优先切片。
+
+    ✅ R38（2026-10-03 · P1-e）：本模块原实现是 ``"\\n".join(lines)[:budget]``
+    —— 头部优先硬切片。事实条数一多，第 N 条之后**整条消失**，模型看到的是
+    「只有关键前半段事实」的错觉，进而在正文里补出并不存在的【待补充】。
+    仓库自己在 ``sse_handlers._allocate_char_budgets`` 的注释里记录过同一个
+    教训（「20 个提取项里第 6 项之后整段消失 → 后面的项目参数对目录生成完全
+    不可见」），且 ``_render_facts_text`` 早已改用按比例分配。本函数是
+    2026-10-03 新加的，复制了**已被否决**的旧写法 —— 于是同名变量
+    ``{global_facts}`` 在一致性链走按比例分配、在 ``/check`` 与
+    ``/expert-review`` 走头部切片，方向相反。现统一到同一实现。
+
+    ``suffixes``：每条**必须完整保留**的尾部标记（如「（安全关键）」）。
+    按比例分配会把这截后缀切碎（实测切成 ``（安``）—— 模型既读不到"安全关键"三个字、
+    还会读到半个括号。故截断后若后缀未完整保留则整段补回，允许极小的总量超支。
+    传 ``None`` 时行为与引入该参数前**逐字一致**（既有调用方零影响）。
+
+    降级口径：``_allocate_char_budgets`` 导入失败时退回旧的头部切片（与修复前
+    逐字一致），保证本模块在任何加载顺序下都不会因此抛异常。
+    """
+    total = sum(len(x) for x in lines) + max(0, len(lines) - 1)  # 含换行
+    if total <= budget:
+        return "\n".join(lines)
+    try:
+        from app.routers.sse_handlers import _allocate_char_budgets
+    except Exception:  # noqa: BLE001 - 加载顺序异常不得阻断 AI 检查
+        logger.warning("事实预算分配器不可用，退回头部截断（可能丢失尾部事实）")
+        return _keep_suffixes("\n".join(lines)[:budget],
+                                suffixes)
+    quotas = _allocate_char_budgets([len(x) for x in lines], budget)
+    # ✅ 遗留收口（2026-10-03 · R38）：消费侧超支纠偏。分配器的「每项保底
+    #    min_chars」面向少量小节（n≈20）设计，保底量是等比份额的 2 倍 ——
+    #    事实条数一大（n×保底 > budget）quotas 总和可达 2×budget，旧实现
+    #    逐条按 quota 截完后总长 6199 > CAP 3000，「总量封顶」承诺被破坏。
+    #    本函数的语义是「不丢条 且 总量 ≤ budget」：仅当按 quota 截完后
+    #    仍超支才介入（均匀硬上限，扣除换行后按条数等分），正常少量条目
+    #    场景保留分配器的不等比份额不受影响；quota=0 也至少留 1 字代表内容。
+    kept_lens = [min(int(q or 0), len(x)) for q, x in zip(quotas, lines)]
+    if sum(kept_lens) + len(lines) - 1 > budget:
+        cap = max(1, (budget - (len(lines) - 1)) // len(lines))
+        kept_lens = [max(1, min(k, cap)) for k in kept_lens]
+    out: list[str] = []
+    for i, (line, q) in enumerate(zip(lines, kept_lens)):
+        kept = line[:q] if 0 < q < len(line) else line
+        mark = suffixes[i] if suffixes and i < len(suffixes) else ""
+        if mark and mark not in kept:
+            kept = _drop_partial_suffix(kept, mark) + mark
+        out.append(kept)
+    return "\n".join(out)
+
+
+
+def _drop_partial_suffix(text: str, mark: str) -> str:
+    """去掉末尾那段「被切碎的标记前缀」。
+
+    按比例分配把 ``（安全关键）`` 切成 ``（安`` 时，只 ``rstrip("（(")``
+    不够 —— 括号后面还跟着「安」。这里按「末尾与 mark 前缀重合的最长长度」
+    精确裁掉残段，避免拼出 ``（安（安全关键）`` 这种双截断。
+    """
+    if not mark:
+        return text
+    for n in range(min(len(text), len(mark) - 1), 0, -1):
+        if text.endswith(mark[:n]):
+            return text[:len(text) - n]
+    return text
+
+
+def _keep_suffixes(text: str, suffixes: "list[str] | None") -> str:
+    """头部切片降级路径的后缀抢救（供 :func:`_join_with_budget` 的 except 分支用）。
+
+    切片可能把 ``（安全关键）`` 切成 ``（安``；这里把残缺后缀整体补回，
+    并清掉切片残留的半截，避免模型读到半个词。
+    """
+    if not suffixes:
+        return text
+    out = text
+    for mark in {s for s in suffixes if s}:
+        if mark not in out:
+            out = _drop_partial_suffix(out, mark) + mark
+    return out
+
+
+def _facts_prompt_text(facts: list[dict] | None) -> str:
+    """把桥接返回的事实清单格式化为提示词文本（空 → 「（无）」）。"""
+    if not facts:
+        return "（无）"
+    lines: list[str] = []
+    suffixes: list[str] = []
+    for f in facts:
+        name = str((f or {}).get("name") or "").strip()
+        if not name:
+            continue
+        val = str((f or {}).get("value") or "").strip()
+        if len(val) > _FACT_PROMPT_VALUE_CAP:
+            val = val[:_FACT_PROMPT_VALUE_CAP] + "…"
+        unit = str((f or {}).get("value_unit") or "").strip()
+        line = f"- {name}：{val or '（值缺失）'}"
+        if unit and unit not in val:
+            line += f" {unit}"
+        mark = ""
+        if f.get("is_safety_critical"):
+            line += SAFETY_MARK
+            mark = SAFETY_MARK
+        lines.append(line)
+        suffixes.append(mark)
+    if not lines:
+        return "（无）"
+    return _join_with_budget(lines, FACTS_PROMPT_CAP, suffixes)
+
+
+async def _load_facts_prompt_text(db, scheme_id: str) -> str:
+    """装配已确认事实文本（fail-soft：任何异常降级为「（无）」）。"""
+    try:
+        facts = await load_resolved_facts_for_scope(db, scheme_id=scheme_id)
+        return _facts_prompt_text(facts)
+    except Exception as e:  # 事实缺失只降级，不阻断 AI 检查
+        logger.warning("装配 AI 检查事实文本失败（降级为无）: %s", e)
+        return "（无）"
 
 
 @router.post("/check")
@@ -138,7 +318,16 @@ async def compliance_check(body: ComplianceCheckIn, db=Depends(get_db)):
             logger.warning("compliance_check: rule_ids %r 均不在规则注册表，"
                            "已回退为默认清单（scheme=%s）", body.rule_ids, scheme_id)
     else:
-        checklist = body.checklist
+        # ✅ BUG 修复（P1 · 2026-10-04）：`ComplianceCheckIn.checklist` 的默认工厂
+        #    是 `list`（models.py:302），因此**前端不传清单、也不传 rule_ids** 时
+        #    checklist 为 `[]` → 提示词里是「逐项检查：[]」，AI 只能自行编造检查项，
+        #    结论与规则注册表完全脱钩（正是上面 310-313 注释要根治的现象，但旧实现
+        #    只在 `rule_ids` 非空分支做了兜底，`else` 分支漏了）。
+        #    真实触发面：前端 `useRules` 判据为 `checklist.length === aiRules.length`
+        #    （SchemeWorkbenchPage.tsx:7041），而 `DEFAULT_COMPLIANCE_CHECKLIST`
+        #    是 10 条自由文本、`ai_rules()` 现为 8 条 → 判据恒 false → 永远走
+        #    「不传 rule_ids」这条路径。现补同一兜底：自由清单为空时回退 AI 规则全集。
+        checklist = body.checklist or [r.title for r in ai_rules()]
     cur = await db.execute(
         # ✅ 遗留修复（2026-09-22）：sort_order 是「同级内序号」而非全局文档序，
         #    ORDER BY sort_order 会把不同层级的同序号节点排在一起（按"列"展开），
@@ -170,6 +359,7 @@ async def compliance_check(body: ComplianceCheckIn, db=Depends(get_db)):
     sys_prompt = render("compliance_check_system",
                         scheme_name=scheme_name,
                         scheme_type=scheme_type,
+                        global_facts=await _load_facts_prompt_text(db, scheme_id),
                         checklist=json.dumps(checklist, ensure_ascii=False),
                         content=content[:AI_CONTENT_HARD_CAP])
     # ✅ 修复（2026-09-24）：旧实现未传 scene —— 该调用在 ai_audit_logs 里
@@ -177,7 +367,11 @@ async def compliance_check(body: ComplianceCheckIn, db=Depends(get_db)):
     #    为其单独配置模型（场景路由按 scene 精确匹配）。
     obj, _ = await collect_json_response(
         [{"role": "system", "content": sys_prompt}],
-        lambda o: [] if o.get("results") else ["缺少 results"],
+        _validate_check_results,
+        # ✅ R38：补 json_mode —— 本模块此前三个 JSON 端点是全链路唯一未开
+        #    结构化输出模式的（同族 facts/consistency/global_facts 均已开），
+        #    与 json_response 模块「弱模型稳定 JSON 工作流」的前提相悖。
+        json_mode=True, temperature=0.2,
         scene="compliance_check")
 
     results = _normalize_ai_results(obj.get("results", []), checklist, body.rule_ids)
@@ -196,6 +390,35 @@ async def compliance_check(body: ComplianceCheckIn, db=Depends(get_db)):
              json.dumps(r, ensure_ascii=False), r.get("suggestion", ""), batch_id))
     await db.commit()
     return {"results": results, "batch_id": batch_id}
+
+
+def _validate_check_results(o) -> list[str]:
+    """/check 的元素级校验：``results`` 每一项都必须有可展示的 ``item`` 与 ``hit``。
+
+    ✅ R38（2026-10-03 · P1-b）：旧实现只有 ``lambda o: [] if o.get("results")``
+    —— 列表 truthy 即通过。随后 ``_normalize_ai_results`` 逐项 ``dict(r)``、
+    改写 ``rule_id`` 后**无条件 append**（不做任何过滤），于是模型返回
+    ``{"results": [{}]}`` 时：``rule_id`` 被回退成规则表第 0 项（语义错配），
+    ``item``/``severity`` 以空串落库，UI 上多出一条空行 —— 用户看到的是
+    「有一条规则命中」但没有任何内容。提示词 analysis.py:377 明确声明了
+    6 个字段，校验器一个都不查。
+    """
+    rows = o.get("results")
+    if not rows:
+        return ["缺少 results"]
+    if not isinstance(rows, list):
+        return ["results 不是数组"]
+    issues: list[str] = []
+    for idx, r in enumerate(rows):
+        if not isinstance(r, dict):
+            issues.append("results[%d] 不是对象" % idx)
+            continue
+        if not str(r.get("item") or "").strip():
+            issues.append("results[%d] 缺少 item（清单项名称）" % idx)
+        hit = r.get("hit")
+        if not isinstance(hit, bool) and str(hit).strip().lower() not in ("true", "false"):
+            issues.append("results[%d] 的 hit 不是布尔值" % idx)
+    return issues
 
 
 def _normalize_ai_results(results: list, checklist: list, rule_ids: list) -> list:
@@ -284,6 +507,7 @@ async def expert_review(body: ExpertReviewIn, db=Depends(get_db)):
     sys_prompt = render("expert_review_system",
                         scheme_name=scheme_name,
                         scheme_type=scheme_type,
+                        global_facts=await _load_facts_prompt_text(db, scheme_id),
                         outline_tree=json.dumps(outline_tree, ensure_ascii=False),
                         attachments=json.dumps(attachments, ensure_ascii=False),
                         check_items=check_items)
@@ -291,9 +515,10 @@ async def expert_review(body: ExpertReviewIn, db=Depends(get_db)):
     obj, _ = await collect_json_response(
         [{"role": "system", "content": sys_prompt}],
         lambda o: [] if "score" in o else ["缺少 score"],
+        json_mode=True, temperature=0.2,
         scene="expert_review")
 
-    result = obj
+    result = _normalize_expert_review_result(obj)
     cid = str(uuid.uuid4())
     # ✅ 单行也是一批：补 batch_id（与 /check 同口径，历史行空串不影响读取回退）。
     await db.execute(
@@ -302,6 +527,39 @@ async def expert_review(body: ExpertReviewIn, db=Depends(get_db)):
         (cid, scheme_id, project_id, "expert_review",
          json.dumps(result, ensure_ascii=False), uuid.uuid4().hex))
     await db.commit()
+    return result
+
+
+def _normalize_expert_review_result(obj: dict) -> dict:
+    """显式补齐 ``expert_review_system``（analysis.py:399）声明的 4 个字段。
+
+    ✅ R38（2026-10-03 · P1-b）：旧实现 ``result = obj`` 直接把模型返回体透给
+    前端 —— 模型漏掉 ready/missing/suggestions 时，前端拿到的是 **undefined**
+    （不是空数组），渲染分支各自兜底，行为不确定且日志无痕。这里把缺失字段
+    归一成空数组、非数组字段降级为空数组，并在两者发生时各记一条 WARNING，
+    使「模型漏字段」从静默变成可观测事件。
+
+    刻意**不**加硬校验：expert_review 的评分语义容错（字符串评分按 0 处理）
+    是既有行为，改成硬失败会把「降级返回」变成 500，属越界的行为变更。
+    """
+    result = dict(obj or {})
+    for f in ("ready", "missing", "suggestions"):
+        if f not in result:
+            logger.warning("expert_review 输出缺少 %s 字段，按空列表补齐（score=%r）",
+                           f, result.get("score"))
+            result[f] = []
+        elif not isinstance(result[f], list):
+            # 模型可能返回单字符串（如 missing="工程概况"），直接丢弃会丢失信息
+            # 转为单元素数组保留内容，并记 WARNING 供运维审计
+            raw = result[f]
+            if isinstance(raw, str) and raw.strip():
+                logger.warning("expert_review 的 %s 是字符串（%r），转为单元素数组保留",
+                               f, raw[:120])
+                result[f] = [raw.strip()]
+            else:
+                logger.warning("expert_review 的 %s 不是数组（%r），按空列表补齐",
+                               f, type(raw).__name__)
+                result[f] = []
     return result
 
 
@@ -340,6 +598,29 @@ async def get_results(scheme_id: str, check_type: str = "", limit: int = RESULTS
 #    现补齐实现：AI 将「项目关键事实」（global_facts 唯一可信数据源）与正文
 #    逐项比对 → 0-100 评分 + 不一致项清单，持久化到 consistency_audit 表。
 # ---------------------------------------------------------------------------
+def _validate_consistency_audit(o) -> list[str]:
+    """一致性审计的字段校验：**必须同时**有 ``score`` 与 ``issues`` 数组。
+
+    ✅ R38（2026-10-03 · P1-b）：旧校验器只有 ``"score" in o``，而调用方
+    消费的是 ``obj.get("issues", []) or []``、落库的也是 ``issues``。
+    校验字段与消费字段**完全不重叠** → 模型返回 ``{"score": 100}``（漏 issues）
+    时校验通过、接口 200、``issues="[]"`` 落库，用户看到「一致性 0 处问题、
+    100 分」—— 用**缺字段**换来了**看起来最好的结论**。
+    提示词 analysis.py:419 明确声明了 ``{"score", "issues"}`` 两个字段。
+
+    注意 ``issues`` 允许是**空数组**（真的没有不一致），因此不能用 truthy 判断；
+    判据是「键存在且是 list」。``score`` 同理允许 0，但必须是可转数值的。
+    """
+    issues: list[str] = []
+    if not isinstance(o.get("issues"), list):
+        issues.append("缺少 issues 数组（不一致项清单；没有不一致时也要给 []）")
+    try:
+        float(o.get("score"))
+    except (TypeError, ValueError):
+        issues.append("score 不是数值")
+    return issues
+
+
 @router.post("/consistency-audit/{scheme_id}")
 async def run_consistency_audit(scheme_id: str, db=Depends(get_db)):
     from app.routers.sse_handlers import _build_facts_text
@@ -388,10 +669,11 @@ async def run_consistency_audit(scheme_id: str, db=Depends(get_db)):
     # ✅ 修复（2026-09-24）：补 scene（原为空 → 统计归空场景、场景路由配不上）
     obj, _ = await collect_json_response(
         [{"role": "system", "content": sys_prompt}],
-        lambda o: [] if "score" in o else ["缺少 score"],
+        _validate_consistency_audit,
+        json_mode=True, temperature=0.2,
         scene="consistency_audit")
 
-    issues = obj.get("issues", []) or []
+    issues = obj["issues"]
     audit_id = str(uuid.uuid4())
     # 评分容错：AI 可能返回字符串（如"良好"）或缺失，强制转为 float 失败则记 0
     score_raw = obj.get("score", 0)
@@ -449,8 +731,34 @@ async def consistency_audit_history(scheme_id: str, limit: int = 10, db=Depends(
 # ---------------------------------------------------------------------------
 # ✅ 程序化预检（离线、秒级）
 # ---------------------------------------------------------------------------
+async def _facts_signature(db, scheme_id: str) -> str:
+    """已确认全局事实的轻量签名（条数 + 最新更新时间），进预检进程内缓存键。
+
+    ✅ 2026-10-03（全局事实桥接）：预检缓存键此前只含正文内容指纹，
+    事实确认/新增后 TTL 内仍返回旧结论（SAF-08 永远不出现）。现把
+    「可注入事实」的条数+最新 updated_at 并入**进程内**缓存键；
+    ⚠️ 落库的 content_fingerprint（G3 时效语义）保持不变 —— 若把事实并进
+    指纹，历史 preflight_runs 会因旧签名缺事实项被全量判 stale，
+    正是 2026-09-23 明确避免过的「旧记录全标红条」问题。
+    """
+    try:
+        pid = await resolve_scheme_project_id(db, scheme_id)
+        scope = "scheme_id=?"
+        params: list = [scheme_id]
+        if pid:
+            scope += " OR (project_id=? AND (scheme_id='' OR scheme_id IS NULL))"
+            params.append(pid)
+        cur = await db.execute(
+            f"SELECT COUNT(*), COALESCE(MAX(updated_at),'') FROM global_facts "
+            f"WHERE ({scope}) AND {get_facts_inject_where()}", params)
+        row = await cur.fetchone()
+        return f"{row[0] or 0}:{row[1] or ''}"
+    except Exception:  # 签名失败仅视为「无事实」，不阻断预检
+        return ""
+
+
 async def _build_preflight_context(scheme_id: str, db) -> PreflightContext:
-    """从 DB 装配预检上下文（章节 + 图表 + 方案元信息）。"""
+    """从 DB 装配预检上下文（章节 + 图表 + 方案元信息 + 已确认全局事实）。"""
     sc_cur = await db.execute(
         "SELECT name, type, word_budget FROM schemes WHERE id=?", (scheme_id,))
     sc_row = await sc_cur.fetchone()
@@ -468,6 +776,10 @@ async def _build_preflight_context(scheme_id: str, db) -> PreflightContext:
         "SELECT chart_type, status FROM chart_predictions WHERE scheme_id=?", (scheme_id,))
     charts = [dict(r) for r in await cur.fetchall()]
 
+    # ✅ 2026-10-03（全局事实桥接）：装配「已确认可注入」事实（桥接自身
+    #    fail-soft，异常返回空 → check_hazard_params 跳过，预检可用性不受影响）。
+    facts = await load_resolved_facts_for_scope(db, scheme_id=scheme_id)
+
     return PreflightContext(
         scheme_id=scheme_id,
         scheme_name=sc_row["name"] or "",
@@ -475,6 +787,7 @@ async def _build_preflight_context(scheme_id: str, db) -> PreflightContext:
         word_budget=int(sc_row["word_budget"] or 0),
         sections=sections,
         charts=charts,
+        facts=facts,
     )
 
 
@@ -587,8 +900,11 @@ async def run_preflight_check(scheme_id: str, db=Depends(get_db),
     """
     async with _overview_lock(scheme_id):
         fingerprint = await _content_fingerprint(db, scheme_id)
+        # ✅ 2026-10-03：进程内缓存键并入「已确认事实签名」，事实确认后
+        #    TTL 内不再返回旧结论（SAF-08 能及时出现）；落库指纹语义不变。
+        cache_key = (fingerprint, await _facts_signature(db, scheme_id))
         hit = _PREFLIGHT_RECENT.get(scheme_id)
-        if (not force and hit and hit[0] == fingerprint
+        if (not force and hit and hit[0] == cache_key
                 and time.monotonic() - hit[1] < OVERVIEW_CACHE_TTL):
             cached = dict(hit[2])
             cached["cached"] = True
@@ -613,7 +929,7 @@ async def run_preflight_check(scheme_id: str, db=Depends(get_db),
             "cached": False,
         })
         await _persist_run(db, scheme_id, payload, stats)
-        _PREFLIGHT_RECENT[scheme_id] = (fingerprint, time.monotonic(), payload)
+        _PREFLIGHT_RECENT[scheme_id] = (cache_key, time.monotonic(), payload)
         return payload
 
 
@@ -640,8 +956,11 @@ async def readiness_overview(scheme_id: str, db=Depends(get_db), force: bool = F
     """
     async with _overview_lock(scheme_id):
         fingerprint = await _content_fingerprint(db, scheme_id)
+        # ✅ 2026-10-03：进程内缓存键并入「已确认事实签名」（同 /preflight）；
+        #    落库 content_fingerprint（G3 时效语义）保持不变。
+        cache_key = (fingerprint, await _facts_signature(db, scheme_id))
         hit = _OVERVIEW_RECENT.get(scheme_id)
-        if not force and hit and hit[0] == fingerprint:
+        if not force and hit and hit[0] == cache_key:
             if time.monotonic() - hit[1] < OVERVIEW_CACHE_TTL:
                 cached = dict(hit[2])
                 cached["cached"] = True
@@ -652,13 +971,21 @@ async def readiness_overview(scheme_id: str, db=Depends(get_db), force: bool = F
         payload["stale"] = False
         if not payload.get("content_fingerprint"):
             payload["content_fingerprint"] = fingerprint
-        _OVERVIEW_RECENT[scheme_id] = (payload["content_fingerprint"],
-                                       time.monotonic(), payload)
+        _OVERVIEW_RECENT[scheme_id] = (cache_key, time.monotonic(), payload)
         return payload
 
 
-async def _readiness_overview_compute(db, scheme_id: str) -> dict:
-    """总检的实际计算（由 readiness_overview 的并发锁与幂等缓存包着）。"""
+async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = True) -> dict:
+    """总检的实际计算（由 readiness_overview 的并发锁与幂等缓存包着）。
+
+    ✅ 2026-10-03（数据链收口）：新增 ``persist`` 形参。**默认 True，既有端点
+    调用逐字不变**（向后兼容）。自动修复链路（routers/review_autofix.py 的
+    plan/apply/collect/stage）此前直接调本函数重算 findings，而本函数末尾
+    无条件 ``_persist_run`` 落 preflight_runs —— 用户每点一次「定位/修复/
+    收集/暂存」就往分数趋势里灌一条总检历史（污染 G2 要保护的趋势线），
+    且不持 ``_overview_lock`` 存在并发写竞态。内部重算只需读 findings，
+    传 ``persist=False`` 跳过落库，两个问题同时消除且不改任何判定口径。
+    """
     ctx = await _build_preflight_context(scheme_id, db)
     program_findings = run_preflight(ctx)
     sources = ["program"]
@@ -839,7 +1166,8 @@ async def _readiness_overview_compute(db, scheme_id: str) -> dict:
         # ✅ G3：落库后供 /runs /report / 导出页判定「结论是否已过期」
         "content_fingerprint": await _content_fingerprint(db, scheme_id),
     })
-    await _persist_run(db, scheme_id, payload, stats)
+    if persist:
+        await _persist_run(db, scheme_id, payload, stats)
     return payload
 
 
