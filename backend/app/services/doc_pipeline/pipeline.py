@@ -240,13 +240,24 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
             "分块全量重建的 DELETE 未生效（db.execute 返回 None，R13），"
             "跳过本次分块写入以避免主键冲突：%s", doc_id)
     created = _now()
+    ins_cur = None
     if chunks and chunks_rebuilt:
-        await db.executemany(
+        ins_cur = await db.executemany(
             "INSERT INTO doc_chunks (chunk_id, doc_id, chunk_type, title, level,"
             " page_num, text, source_ref, parent_chunk_id, prev_chunk_id,"
             " next_chunk_id, tables_json, images_json, hash, meta_json, created_at)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [_patched_row(c, created, old_rows) for c in chunks])
+        # ✅ P1（R13 写路径 · 2026-10-05）：executemany 同样可能返回 None 而不抛。
+        #    此时上方 DELETE 已经生效、新块一行没插 —— doc_chunks 会整批清空。
+        #    没有可回滚的余地（旧块已删），但必须留痕：静默丢分块会让下游
+        #    （AI 检索 / 四层完整性报告）读到「有解析正文却零分块」而无从解释。
+        if ins_cur is None:
+            logger.warning(
+                "分块 INSERT 未生效（db.executemany 返回 None，R13），"
+                "本次分块可能缺失：%s", doc_id)
+    # 仅当「本该插却没插」才计降级（DELETE 已失败时另计，空正文本就不插不算）
+    chunks_insert_degraded = bool(chunks) and chunks_rebuilt and ins_cur is None
 
     # ---- 解析层文件 ----
     pages_payload = {
@@ -335,7 +346,8 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
         "page_count": structured["page_count"],
         # ✅ R13 写路径降级标记（加法式，2026-10-05）：True = 本次分块重建或
         #    元数据回写至少有一笔未生效，供调用方与护栏区分「真写成功」。
-        "db_write_degraded": (del_cur is None) or (meta_cur is None),
+        "db_write_degraded": ((del_cur is None) or chunks_insert_degraded
+                              or (meta_cur is None)),
     }
 
 

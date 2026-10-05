@@ -60,7 +60,7 @@ MAX_CHUNKS = 60
 #    429（"inference exceeds tpm/rpm limit"），强行提高只会放大限流、
 #    拖慢整体并造成分段失败。本地排队上限与全局硬上限统一为 5，避免一次资料
 #    制造 12 个等待协程；实际网络并发仍由 provider_factory 全局信号量最终钳制。
-FACTS_MAX_CONCURRENCY = 5
+FACTS_MAX_CONCURRENCY = max(1, int(getattr(settings, "max_concurrency", 5) or 5))
 # ✅ 容错：单段提取失败后的重试次数与指数退避基数（应对 429 限流/瞬时网络错误）
 FACTS_CHUNK_RETRIES = 2
 FACTS_RETRY_BACKOFF = 5.0

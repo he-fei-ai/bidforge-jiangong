@@ -2818,20 +2818,37 @@ async def upload_documents(
                     old_paths_to_delete.append(safe_old)
                 elif old_path:
                     logger.warning("跳过上传目录外旧文件清理: %s", old_path)
-                await db.execute(
+                # ✅ P1（R13 写路径 · 2026-10-05）：DELETE 未生效就继续往下走，
+                #    会让同名旧档案行与新 INSERT 并存 → 列表里出现两条同名文档、
+                #    下游按 file_name 去重/取数的结果不确定。整批拒绝并回滚。
+                del_cur = await db.execute(
                     "DELETE FROM project_documents WHERE id=?", (old["id"],))
+                if del_cur is None:
+                    logger.warning("同名替换删除旧档案未生效（db.execute 返回 None，R13），"
+                                   "old=%s", old["id"])
+                    raise HTTPException(503, "文档服务暂时不可用，请稍后重试")
                 purged_old_doc_ids.append((str(old["id"]), real_pid))
                 replaced += 1
             # 落库（parsed_markdown 留空 = 待解析）
             # ✅ 增强：自动文件分类 + 文件大小记录（供前端「文件导入」Tab 展示）
             doc_category = _auto_classify_document(fname, ftype)
-            await db.execute(
+            ins_cur = await db.execute(
                 "INSERT INTO project_documents "
                 "(id, project_id, file_name, file_type, doc_type, parsed_markdown, file_path, "
                 "doc_category, file_size) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 (doc_id, real_pid, fname, ftype, "全局事实上传", "", str(fpath),
                  doc_category, size))
+            # ✅ P1（R13 写路径 · 2026-10-05）：INSERT 返回 None = 档案行没写进去，
+            #    而本函数的返回值是靠 `saved.append(...)` 在内存里攒的 —— 不拦就会
+            #    回 `{"saved_count": N}`（前端显示「已保存 N 个」）而库里一行没有，
+            #    文件躺在磁盘上成了永远查不到、删不掉的孤儿。这是本模块 R13 唯一
+            #    一处「假成功」出口，必须在 append 之前拦。503 让用户整批重试
+            #    （外层 except 回滚 + 清理已落盘文件，不留半截状态）。
+            if ins_cur is None:
+                logger.warning("上传档案 INSERT 未生效（db.execute 返回 None，R13），"
+                               "project=%s file=%s", real_pid, fname)
+                raise HTTPException(503, "文档服务暂时不可用，请稍后重试")
             # ✅ 四层存储（阶段1 原文层）：指纹入库 + meta 落盘 + 文档索引。
             #    失败只降级告警，不阻断既有上传主链路（DB 档案已建）。
             try:
@@ -2840,11 +2857,18 @@ async def upload_documents(
                     file_type=ftype, saved_path=fpath, size=size,
                     doc_category=doc_category)
                 if meta:
-                    await db.execute(
+                    hash_cur = await db.execute(
                         "UPDATE project_documents SET file_hash_md5=?,"
                         " file_hash_sha256=?, parse_status='pending' WHERE id=?",
                         (meta.get("file_hash_md5", ""),
                          meta.get("file_hash_sha256", ""), doc_id))
+                    # ✅ P1（R13 写路径 · 2026-10-05）：返回 None 时指纹回写静默
+                    #    丢失 → 时效性判定（file_changed / 增量跳过）从此失真且
+                    #    无法自愈。落库已成功，故只告警不阻断上传主链路。
+                    if hash_cur is None:
+                        logger.warning(
+                            "上传后回写文件指纹未生效（db.execute 返回 None，R13）"
+                            "，时效性判定将停留在旧值：%s", doc_id)
             except Exception:
                 logger.exception("文档 %s 原文层入库失败（不影响上传）", fname)
             saved.append({"id": doc_id, "file_name": fname, "size": size})

@@ -228,17 +228,30 @@ def register_lazy_prompts() -> None:
 
     异常策略：任何失败仅记一次 WARNING、不重试、不抛 —— 注册失败不得阻断
     读取（调用侧自带的出厂字面量回退仍然有效）。
+
+    ✅ R39 BUGFIX（2026-10-05）：幂等锁必须在 **import 成功之后**才置位，
+    而不是在 try 之前无条件置位。原因：本模块尾部首次调用
+    ``_apply_variable_contracts()`` 触发本钩子时，``bid_analysis_service``
+    顶部的 ``from app.services.ai.prompts._cache import get_prompt`` 会遇到
+    ``_cache`` 尚未完成加载的循环导入 —— 抛 ``ImportError`` 被本钩子的
+    ``except`` 吞掉。若此时 ``_LAZY_REGISTERED`` 已被置 True，后续所有 6 处
+    调用点（``get_prompt`` / ``list_prompts`` / ``update_prompt`` /
+    ``_apply_variable_contracts`` …）都会短路 return，19 条 bid_ 键**永久缺失**
+    （R39 T1 的 6 项护栏因此全线失败）。修复后异常路径下锁保持 False，
+    后续任一次读注册表都会重试一次；递归安全 —— 失败后不再进入 try，
+    成功路径只置位一次。
     """
     global _LAZY_REGISTERED
     if _LAZY_REGISTERED:
         return
-    _LAZY_REGISTERED = True
     try:
         from app.services import bid_analysis_service  # noqa: F401
     except Exception as e:  # noqa: BLE001
         import logging
         logging.getLogger("prompts_registry").warning(
-            "惰性注册投标分析提示词失败（不影响其它模板读取）: %s", e)
+            "惰性注册投标分析提示词失败（可重试）: %s", e)
+    else:
+        _LAZY_REGISTERED = True
 
 
 def get_default_prompt(key: str) -> str:
