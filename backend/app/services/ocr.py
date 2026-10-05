@@ -115,12 +115,19 @@ async def vision_available(force: bool = False) -> bool:
     if not force and _VISION_CACHE["value"] is not None \
             and now - _VISION_CACHE["ts"] < _VISION_TTL:
         return bool(_VISION_CACHE["value"])
-    value = False
     try:
         from app.services.ai.provider_factory import get_vision_providers
         value = bool(await get_vision_providers())
     except Exception as e:
-        logger.debug("视觉模型可用性探测失败（忽略）: %s", e)
+        # ✅ P1（B4 · 2026-10-05）：探测异常是**瞬时故障**（DB/配置读抖动），与
+        #    「确实没配视觉模型」是两回事。旧实现把 False 一并写进 TTL 缓存，
+        #    一次抖动就会让扫描件/图片型资料**连续 5 分钟**静默跳过 OCR ——
+        #    解析结果直接缺页且没有任何告警。故异常路径不推进缓存：
+        #    有旧结论就沿用旧结论，否则本次降级为 False、下次重试。
+        logger.debug("视觉模型可用性探测失败（不缓存失败结论）: %s", e)
+        if _VISION_CACHE["value"] is not None:
+            return bool(_VISION_CACHE["value"])
+        return False
     _VISION_CACHE["value"] = value
     _VISION_CACHE["ts"] = now
     return value

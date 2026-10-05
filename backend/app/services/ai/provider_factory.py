@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -704,6 +705,23 @@ _disabled_cache: dict = {"data": None, "ts": 0.0}
 #: 只增不减，读侧比对「读库前 vs 写缓存前」是否发生变化。
 _cache_generation = 0
 
+#: ✅ 2026-10-05（A4 静默告警）：未登记场景首次命中时打一次 warning。
+#: 用 set 记录已告警场景，避免高频调用刷屏（每进程生命周期内只告一次）。
+#: 重启即清空，配合 KNOWN_SCENES 双向漂移护栏（TestKnownScenesDrift）双保险。
+_scene_unregistered_warned_scenes: set[str] = set()
+
+
+def _scene_unregistered_warned(scene: str) -> bool:
+    """标记/查询某场景是否已发过"未在 KNOWN_SCENES 登记"告警。
+
+    返回 True 表示此前已告警过，调用方应跳过本次重复告警；
+    返回 False 表示本次调用完成标记，是首次告警。
+    """
+    if scene in _scene_unregistered_warned_scenes:
+        return True
+    _scene_unregistered_warned_scenes.add(scene)
+    return False
+
 
 #: 配置缓存 TTL 的历史硬编码兜底值（秒）。settings.ai_config_cache_ttl 非法时的回退。
 _DEFAULT_CONFIG_CACHE_TTL = 300.0
@@ -728,13 +746,22 @@ def _config_cache_ttl() -> float:
 
 
 # P0-4 性能优化：AI 审计日志攒批（满 50 条或 10s 定时批量落库，替代每次调用一次 fsync commit）
-
-# P0-4 性能优化：AI 审计日志攒批（满 50 条或 10s 定时批量落库，替代每次调用一次 fsync commit）
 _audit_buffer: list[tuple] = []
 _audit_lock = threading.Lock()
 _AUDIT_BATCH_SIZE = 50
 _AUDIT_FLUSH_INTERVAL = 10.0
 _audit_last_flush: dict = {"ts": time.time()}  # 模块加载起计时，避免首条即刷
+
+# A1（2026-10-05）审计溢出队列：审计批量落库重试耗尽后不再丢失，
+# 而是移入本队列，等待后续 flush 优先落库。容量与滞留时长双限，防止
+# 长时间 DB 故障导致内存无界增长。
+# - 单条记录 tuple 长度固定（13 字段，见 _audit_buffer.append），5 万条 ≈ 50MB 上限。
+# - 单批 flush 尝试时优先消费 overflow（旧数据优先），再处理新缓冲。
+# - 队列条目超过 max_age 秒仍未落库则丢弃并告警（比无告警静默丢失更明确）。
+_audit_overflow: deque = deque()  # deque[(ts, rows)]，FIFO
+AUDIT_OVERFLOW_MAX_BATCHES = 500   # 最多 500 批 × 每批 50 条 = 25k 条上限
+AUDIT_OVERFLOW_MAX_AGE = 86400.0   # 单日未落库条目过期
+_audit_overflow_evicted = 0        # 累计被 max_age / 容量驱逐的批次数（观测）
 
 # ✅ 2026-09-16 新增：进程内实时可靠性统计（滑动窗口 50 次调用）
 # 用于 _fallback_chain 自动过滤历史成功率过低的 provider（<50% 的直接排除）
@@ -1296,10 +1323,21 @@ async def resolve_scene_config(scene: str) -> dict | None:
        「当前使用」配置（``scene`` 只写审计、不参与选模型），无法做到
        「正文生成用长文模型、事实提取用快模型」。现支持按场景指定配置，
        **未配置的场景行为完全不变**。
+
+    ✅ 2026-10-05（A4 静默告警）：未登记的 scene 仍可正常调用（保持向后兼容），
+       但会在首次命中时打 warning，避免"配了路由却静默失效"这类难以归因的问题。
+       仅日志，无行为变化。
     """
     scene = (scene or "").strip()
     if not scene:
         return None
+    # 未登记场景：仍然按既有语义返回 None 走主配置，但打印一次告警便于排查
+    if scene not in KNOWN_SCENES and not _scene_unregistered_warned(scene):
+        logger.warning(
+            "场景 %r 未在 KNOWN_SCENES 登记，场景路由不会生效（回落主配置）。"
+            "若是新增 AI 调用点，请同步登记到 provider_factory.KNOWN_SCENES；"
+            "详见 tests/test_ai_config_security_routing.py::TestKnownScenesDrift",
+            scene)
     try:
         routes = await load_scene_routes()
     except Exception:
@@ -1453,19 +1491,94 @@ async def _flush_audit_buffer() -> None:
        外层 except 直接吞掉，审计记录**永久丢失**且不可追补
        （/ai/stats 的调用量/成功率/token 用量从此少算）。接入共享重试：
        只重试瞬态锁错误，业务错误（如缺列）仍走上方 legacy 降级路径。
+
+    ✅ A1（2026-10-05 · 审计溢出队列）：即使 ``retry_db_op`` 三次重试全部
+       失败，也不再直接丢失审计记录 —— 该行进入内存溢出队列
+       ``_audit_overflow``，等待下一次 flush 优先落库（旧数据优先）。
+       队列带双重护栏：
+       - 容量上限 ``AUDIT_OVERFLOW_MAX_BATCHES``，超限时驱逐最旧批次并告警
+       - 滞留时长上限 ``AUDIT_OVERFLOW_MAX_AGE``，超期批次直接丢弃并告警
+       这两条护栏确保长时间 DB 故障不会拖垮内存，且每一次丢失都留下可
+       检索的告警（对齐 AGENTS.md「静默丢失零容忍」原则）。
     """
     global _audit_legacy_warned
     with _audit_lock:
-        if not _audit_buffer:
-            return
-        rows = list(_audit_buffer)
-        _audit_buffer.clear()
-        _audit_last_flush["ts"] = time.time()
-    try:
-        await retry_db_op(lambda: _flush_audit_rows_once(rows))
-    except Exception as e:
-        # ✅ 审计日志不应静默丢失：落库失败至少留下告警（含条数与原因）
-        logger.warning("AI 审计日志批量落库失败（丢失 %d 条）: %s", len(rows), e)
+        rows = list(_audit_buffer) if _audit_buffer else None
+        if rows:
+            _audit_buffer.clear()
+            _audit_last_flush["ts"] = time.time()
+
+    if rows:
+        try:
+            await retry_db_op(lambda: _flush_audit_rows_once(rows))
+        except Exception as e:
+            # 主缓冲重试耗尽 → 转溢出队列，等待后续 flush 落库
+            _enqueue_audit_overflow(rows, str(e))
+
+    # 顺带尝试消费溢出队列（旧数据优先）：即使本次主缓冲为空也尝试旧批次，
+    # 避免溢出队列被"新数据"堵死，且在无新审计条目时仍能恢复历史滞留数据。
+    await _drain_audit_overflow()
+
+
+async def _drain_audit_overflow() -> None:
+    """从溢出队列头部逐批落库；任一批次失败即返回（下一轮继续）。"""
+    if not _audit_overflow:
+        return
+    _expire_audit_overflow()
+    while _audit_overflow:
+        _entry_ts, _rows = _audit_overflow.popleft()
+        try:
+            await retry_db_op(lambda r=_rows: _flush_audit_rows_once(r))
+        except Exception as e2:
+            _enqueue_audit_overflow(_rows, str(e2), _entry_ts)
+            break
+
+
+def _enqueue_audit_overflow(rows: list, reason: str, original_ts: float | None = None) -> None:
+    """把未落库的审计行移入溢出队列（受容量/时长护栏约束）。
+
+    调用者必须在 ``_audit_buffer`` 已经清空之后调用本函数，否则会与新到达的
+    审计条目竞争。溢出队列条目为 ``(ts, rows)`` 元组，``ts`` 记录该批首次入队
+    的时间戳，用于超期驱逐判定。
+    """
+    global _audit_overflow_evicted
+    now = time.time()
+    if original_ts is None:
+        original_ts = now
+    with _audit_lock:
+        # 1) 容量护栏：超过上限则从队首驱逐最旧批次
+        while len(_audit_overflow) >= AUDIT_OVERFLOW_MAX_BATCHES:
+            dropped_ts, dropped_rows = _audit_overflow.popleft()
+            _audit_overflow_evicted += 1
+            logger.warning(
+                "AI 审计溢出队列已满（%d 批），驱逐最旧批次（%d 条，滞留 %.1fs）；"
+                "累计驱逐 %d 批",
+                AUDIT_OVERFLOW_MAX_BATCHES, len(dropped_rows),
+                now - dropped_ts, _audit_overflow_evicted)
+        _audit_overflow.append((original_ts, list(rows)))
+        logger.warning(
+            "AI 审计批量落库重试耗尽，%d 条转入溢出队列等待下轮落库（队列 %d 批）：%s",
+            len(rows), len(_audit_overflow), reason)
+
+
+def _expire_audit_overflow() -> None:
+    """从溢出队列头部丢弃滞留时间超过 ``AUDIT_OVERFLOW_MAX_AGE`` 的批次。
+
+    与容量护栏配合，防止长时间 DB 故障下溢出队列无限堆积。每次驱逐都会
+    记录累计条数，便于运维观测审计丢失规模。
+    """
+    global _audit_overflow_evicted
+    now = time.time()
+    dropped_rows_total = 0
+    while _audit_overflow and (now - _audit_overflow[0][0]) > AUDIT_OVERFLOW_MAX_AGE:
+        _ts, _rows = _audit_overflow.popleft()
+        _audit_overflow_evicted += 1
+        dropped_rows_total += len(_rows)
+    if dropped_rows_total:
+        logger.warning(
+            "AI 审计溢出队列驱逐滞留超过 %.0fs 的 %d 条记录（累计驱逐 %d 批）；"
+            "如需追补请检查 DB 状态",
+            AUDIT_OVERFLOW_MAX_AGE, dropped_rows_total, _audit_overflow_evicted)
 
 
 def is_non_retryable_error(err) -> bool:
@@ -1817,6 +1930,175 @@ async def warmup_reliability_from_db() -> None:
             loaded, "" if has_identity else "，旧库按 provider+model 聚合")
     except Exception as e:
         logger.debug("预热 Provider 可靠性统计失败（不影响服务）: %s", e)
+
+
+# ---------- A2：Provider 运行时状态持久化（2026-10-05）----------
+# 目的：`_quota_cool_until` / `_quota_last_probe` 与 `circuit_breaker._per_provider`
+#      是进程内 dict，重启即清零。若重启发生在冷却窗口或熔断窗口内，冷却/熔断
+#      「蒸发」→ 下一次调用又白烧一次 429 或一次死配置网络往返。
+# 写入策略：不修改 `record_failure` / `record_success` / `_note_quota_failure`
+#      等热路径同步方法，改为由 lifespan 的周期任务（10s）flush 快照。
+#      代价：最坏延迟 10s；收益：零热路径耦合、零调用签名变更、失败绝不影响主流程。
+# 读取策略：启动时 warmup（表缺失/无数据 → 静默降级为旧行为）。
+# 清理策略：flush 时删掉超过 24h 未更新的陈旧行（长期不活跃 provider 的残留）。
+
+# 持久化的两类 kind（kind 列取值）
+_STATE_KIND_QUOTA = "quota_cooldown"
+_STATE_KIND_CB = "circuit_breaker"
+
+
+def _now_iso() -> str:
+    """与 ai_audit_logs.created_at 同一时间口径（localtime ISO8601，秒级）。"""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _snapshot_quota_state() -> dict:
+    """当前配额冷却状态的快照（只拷贝 dict，不修改原结构）。"""
+    with _quota_lock:
+        return {
+            "cool_until": dict(_quota_cool_until),
+            "last_probe": dict(_quota_last_probe),
+        }
+
+
+async def flush_provider_state_to_db() -> None:
+    """把当前 Provider 运行时状态快照写入 ai_provider_state（幂等 UPSERT）。
+
+    写入两类：
+      * quota_cooldown：``{pname: {cool_until, last_probe}}``
+      * circuit_breaker：``{pname: {state, failures, opened_at,
+                          effective_cooldown, last_failure_at}}``
+
+    仅在**非默认**状态下写入（配额：cool_until 剩余 >0；熔断：state!=CLOSED），
+    避免把全 0 默认态刷入产生大量噪音行。失败仅告警，不影响主流程；
+    顺手清理 updated_at 超过 24h 的陈旧行。
+    """
+    now_iso = _now_iso()
+    state_snapshot = _snapshot_quota_state()
+    cb_snapshot = circuit_breaker.snapshot_state()
+    writes: list[tuple[str, str, str]] = []
+    for pname, payload in state_snapshot.get("cool_until", {}).items():
+        until = float(payload or 0.0)
+        if until <= 0:
+            continue
+        last_probe = float(state_snapshot.get("last_probe", {}).get(pname, 0.0))
+        writes.append((pname, _STATE_KIND_QUOTA, json.dumps(
+            {"cool_until": until, "last_probe": last_probe})))
+    for pname, entry in cb_snapshot.items():
+        if str(entry.get("state") or "CLOSED") == "CLOSED":
+            continue
+        writes.append((pname, _STATE_KIND_CB, json.dumps(entry)))
+    if not writes:
+        return
+    try:
+        async with write_tx_conn() as conn:
+            for pname, kind, payload in writes:
+                await conn.execute(
+                    "INSERT INTO ai_provider_state(provider_name, kind, payload_json, updated_at) "
+                    "VALUES(?,?,?,?) "
+                    "ON CONFLICT(provider_name, kind) DO UPDATE SET "
+                    "  payload_json=excluded.payload_json, updated_at=excluded.updated_at",
+                    (pname, kind, payload, now_iso),
+                )
+            await conn.execute(
+                "DELETE FROM ai_provider_state "
+                "WHERE datetime(updated_at, '+24 hours') < datetime('now','localtime')")
+        logger.debug("Provider 状态快照写入 ai_provider_state（%d 行）", len(writes))
+    except Exception as e:
+        logger.warning("Provider 状态快照写入失败（不影响主流程）: %s", e)
+
+
+async def warmup_provider_state_from_db() -> None:
+    """进程启动时从 ai_provider_state 恢复配额冷却与熔断状态。
+
+    与 warmup_reliability_from_db 分工：
+      * warmup_reliability_from_db：从 ai_audit_logs 24h 聚合成功率（**结果型**）；
+      * warmup_provider_state_from_db：从 ai_provider_state 恢复当前**状态型**字段
+        （冷却时刻、熔断窗口、探测时刻）。
+
+    过滤：
+      * quota_cooldown：``cool_until`` 已过 → 跳过（等价于「冷却已自然过期」）；
+      * circuit_breaker：``state=CLOSED`` 或 OPEN 且已过期 → 跳过
+        （restore_state 也会自动降级为 HALF_OPEN）。
+
+    表缺失 / 数据异常 → 静默降级为旧行为（DEBUG 日志，不影响启动）。
+    """
+    try:
+        conn = await get_conn()
+        try:
+            cur = await conn.execute(
+                "SELECT provider_name, kind, payload_json FROM ai_provider_state")
+            rows = await cur.fetchall()
+        except Exception as e:
+            logger.debug("预热 Provider 状态失败（表缺失或读取失败，忽略）: %s", e)
+            return
+    except Exception as e:
+        logger.debug("预热 Provider 状态失败（连接不可用）: %s", e)
+        return
+
+    now = time.time()
+    restored_quota = 0
+    cb_entries: dict[str, dict] = {}
+    for r in rows:
+        pname = str(r[0] or "")
+        kind = str(r[1] or "")
+        payload_text = str(r[2] or "")
+        if not pname or not kind or not payload_text:
+            continue
+        try:
+            payload = json.loads(payload_text)
+            if not isinstance(payload, dict):
+                continue
+        except Exception:
+            continue
+
+        if kind == _STATE_KIND_QUOTA:
+            until = float(payload.get("cool_until") or 0.0)
+            last_probe = float(payload.get("last_probe") or 0.0)
+            if until <= now:
+                continue
+            with _quota_lock:
+                _quota_cool_until[pname] = until
+                if last_probe:
+                    _quota_last_probe[pname] = last_probe
+            restored_quota += 1
+        elif kind == _STATE_KIND_CB:
+            state = str(payload.get("state") or "CLOSED")
+            if state == "CLOSED":
+                continue
+            opened_at = float(payload.get("opened_at") or 0.0)
+            cooldown = float(payload.get("effective_cooldown") or 0.0)
+            if state == "OPEN" and opened_at and (now - opened_at) >= cooldown:
+                payload["state"] = "HALF_OPEN"
+            cb_entries[pname] = payload
+
+    restored_cb = circuit_breaker.restore_state(cb_entries) if cb_entries else 0
+
+    if restored_quota or restored_cb:
+        logger.info(
+            "已从 ai_provider_state 预热 Provider 状态（配额冷却 %d 个、熔断 %d 个）",
+            restored_quota, restored_cb)
+
+
+async def _persist_provider_state_loop(stop_event: asyncio.Event,
+                                       interval: float = 10.0) -> None:
+    """周期落库 Provider 状态（默认 10s）。失败仅告警，下一周期重试。
+
+    调用点在 main.py lifespan：
+        task = asyncio.create_task(_persist_provider_state_loop(stop))
+    """
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            try:
+                await flush_provider_state_to_db()
+            except Exception as e:
+                logger.warning("Provider 状态周期落库失败（下一周期重试）: %s", e)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("Provider 状态周期落库任务异常（下一周期重试）: %s", e)
 
 
 def _ai_live_record(provider_name: str, model: str, ok: bool, duration: float):

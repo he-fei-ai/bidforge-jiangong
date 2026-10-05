@@ -607,6 +607,30 @@ CREATE TABLE IF NOT EXISTS ai_runtime_settings (
     updated_at TEXT DEFAULT (datetime('now','localtime'))
 );
 
+-- ✅ 2026-10-05 新增：AI Provider 运行时状态持久化（补齐「重启即遗忘」缺口）
+-- 背景：`_quota_cool_until` / `_quota_last_probe` 与
+--   ``AnalysisCircuitBreaker._per_provider`` 是**进程内 dict**，重启即清零 ——
+--   实测生产环境一次配额冷却期（默认 120s）内的进程重启会让冷却「蒸发」，
+--   下一次调用直接又烧一次 429；熔断器状态同理（刚被熔断的 provider 重启即变
+--   CLOSED，导致死配置在第一次调用前没被降级链剔除）。
+--   可靠性统计已有 warmup_reliability_from_db（从 ai_audit_logs 24h 聚合），
+--   但「当前状态」类字段（冷却时刻、熔断窗口、探测时刻）无法从审计反推。
+-- 约定：
+--   * kind='quota_cooldown'   payload_json={"cool_until": <ts>, "last_probe": <ts>}
+--   * kind='circuit_breaker'  payload_json={"state","failures","opened_at",
+--                            "effective_cooldown","last_failure_at"}
+--   * updated_at 用于清理长期未更新的陈旧行（flush 时 DELETE WHERE updated_at < now - 24h）。
+--   * 表缺失时读写路径全部静默降级（DEBUG 日志），绝不影响服务启动。
+CREATE TABLE IF NOT EXISTS ai_provider_state (
+    provider_name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (provider_name, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_provider_state_kind
+    ON ai_provider_state(kind, updated_at);
+
 CREATE TABLE IF NOT EXISTS prompt_templates (
     key TEXT PRIMARY KEY,
     -- 以下三列为**遗留冗余，已停止写入**（2026-09-14）：全库无任何读取方 ——

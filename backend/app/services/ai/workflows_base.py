@@ -224,6 +224,51 @@ class AnalysisCircuitBreaker:
                 e["state"] = "OPEN"
                 e["opened_at"] = now
 
+    def snapshot_state(self) -> dict:
+        """快照 per-provider 熔断状态（供进程重启前的持久化 / 测试替身）。
+
+        ✅ 2026-10-05 新增：`_per_provider` 是纯内存态，进程重启即清零 ——
+        刚被熔断的 provider 重启后变 CLOSED，第一次调用前无法被降级链剔除。
+        本方法**只拷贝**（深拷贝 entry dict），不改原状态；返回结构：
+        ``{provider_name: {state, failures, opened_at, effective_cooldown,
+        last_failure_at}}``。
+        """
+        return {pname: dict(entry) for pname, entry in self._per_provider.items()}
+
+    def restore_state(self, snapshot: dict) -> int:
+        """从快照恢复 per-provider 熔断状态（供进程重启后的预热）。
+
+        仅接受形如 ``snapshot_state()`` 返回的结构；每个 provider 覆盖写入
+        `_per_provider`（缺失字段用当前默认值补齐，保持向后兼容）。
+        返回成功写入的 provider 数。
+
+        注意：**不校验时间戳是否仍新鲜**——预热调用方负责只恢复
+        「OPEN 且 opened_at+effective_cooldown 尚未过期」的 entry，CLOSED 与
+        已过期的 OPEN 由本方法内部按剩余时间重新判定并降级为 CLOSED/HALF_OPEN。
+        """
+        if not isinstance(snapshot, dict):
+            return 0
+        restored = 0
+        now = time.time()
+        for pname, entry in snapshot.items():
+            if not isinstance(entry, dict):
+                continue
+            state = str(entry.get("state") or "CLOSED")
+            opened_at = float(entry.get("opened_at") or 0.0)
+            cooldown = float(entry.get("effective_cooldown") or self.cooldown_seconds)
+            # OPEN 且冷却已过期 → 直接降级为 HALF_OPEN（下次 allow_request 也会走同路径）
+            if state == "OPEN" and opened_at and (now - opened_at) >= cooldown:
+                state = "HALF_OPEN"
+            self._per_provider[pname] = {
+                "state": state,
+                "failures": int(entry.get("failures") or 0),
+                "opened_at": opened_at,
+                "effective_cooldown": cooldown,
+                "last_failure_at": float(entry.get("last_failure_at") or 0.0),
+            }
+            restored += 1
+        return restored
+
 
 class AdaptiveConcurrencyController:
     """根据 AI 失败率 / 限流动态调整并发数（滑动窗口 20）。
@@ -253,7 +298,13 @@ class AdaptiveConcurrencyController:
     # 相对目标档位最多下调的档数（防止一次抖动把并发打到 1）
     MAX_DOWNGRADE_FROM_TARGET = 2
 
-    def __init__(self, initial: int = 3, min_c: int = 1, max_c: int = 5):
+    def __init__(self, initial: int = 3, min_c: int = 1, max_c: int | None = None):
+        # ✅ A5（2026-10-05）：max_c 单一源来自 settings.max_concurrency（默认 5）。
+        #    避免与 provider_factory._MAX_CONCURRENCY / facts_extractor.FACTS_MAX_CONCURRENCY
+        #    出现「三处 5 各说各话」的漂移；调用方显式传 max_c 仍然优先。
+        if max_c is None:
+            from app.config import settings as _settings
+            max_c = max(1, int(getattr(_settings, "max_concurrency", 5) or 5))
         self._sem = ResizableSemaphore(initial)
         self.current = initial
         self.target = initial      # 目标档位（配置值 / 用户档位），自适应围绕它波动

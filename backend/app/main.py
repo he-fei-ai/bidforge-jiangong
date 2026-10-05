@@ -178,6 +178,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("预热 Provider 可靠性统计失败（不影响服务）: %s", e)
 
+    # ✅ 2026-10-05：Provider 运行时状态预热（配额冷却 / 熔断）——
+    #    补齐「重启即遗忘」缺口：cool_until 与 circuit breaker state 是
+    #    进程内 dict，重启发生在冷却/熔断窗口内时会「蒸发」；启动时
+    #    从 ai_provider_state 恢复仍在窗口内的行，避免下次调用又白烧一次 429。
+    try:
+        from app.services.ai.provider_factory import warmup_provider_state_from_db
+        await warmup_provider_state_from_db()
+    except Exception as e:
+        logger.warning("预热 Provider 运行时状态失败（不影响服务）: %s", e)
+
     # ✅ P0 断连修复（2026-09-23）· 运行期僵尸任务周期回收：启动清理只覆盖
     #    「进程重启」场景；SSE 断连/流异常残留的「DB running、内存无态」僵尸
     #    若不重启进程会永远转圈（任务栏清不掉）。每 5 分钟扫一次，把超过
@@ -203,11 +213,35 @@ async def lifespan(app: FastAPI):
     audit_stop = asyncio.Event()
     audit_flush_task = asyncio.create_task(audit_flush_loop(audit_stop))
 
+    # ✅ 2026-10-05：Provider 运行时状态周期落库（配额冷却 / 熔断）。
+    #    与 warmup_provider_state_from_db 配对——启动读、周期写，
+    #    重启时能把仍在冷却/熔断窗口内的行原样恢复（避免「蒸发」）。
+    #    失败仅告警，下一周期重试；不影响审计 flush / 主流程。
+    from app.services.ai.provider_factory import _persist_provider_state_loop
+    state_stop = asyncio.Event()
+    state_flush_task = asyncio.create_task(_persist_provider_state_loop(state_stop))
+
     yield
 
     # 关闭周期任务（先停审计 flush，再做最终冲刷；均须早于 close_db）。
     audit_stop.set()
     audit_flush_task.cancel()
+
+    # 关闭 Provider 状态周期落库任务；先停循环再做一次最终快照写入
+    # （避免最后一次状态变更在周期任务停止后才发生）。
+    state_stop.set()
+    state_flush_task.cancel()
+    try:
+        await state_flush_task
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.warning("停止 Provider 状态周期落库任务失败（不影响关闭）: %s", e)
+    try:
+        from app.services.ai.provider_factory import flush_provider_state_to_db
+        await flush_provider_state_to_db()
+    except Exception as e:
+        logger.warning("关闭前 Provider 状态最终落库失败（不影响关闭）: %s", e)
 
     # 关闭周期回收任务（必须先于 close_db，避免回收写入撞上已关闭的连接）
     reaper_task.cancel()
