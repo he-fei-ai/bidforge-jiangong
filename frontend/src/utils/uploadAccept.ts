@@ -71,3 +71,54 @@ export function partitionUploadFiles(
   }
   return { accepted, rejected };
 }
+
+export type SplitByTotalQuota = {
+  /** 本次可以安全上传的文件（累计体积 ≤ 上限） */
+  accepted: File[];
+  /** 因累计体积触顶而被扣下的文件（含触顶那一份及其后全部） */
+  held: File[];
+};
+
+/**
+ * 上传前的**累计体积配额**预检：与后端 `global_facts.upload_documents` 的
+ * 「单次请求累计体积上限」（`upload_max_total_bytes`，默认 200MB）同口径。
+ *
+ * 后端判据（global_facts.py）：按请求顺序逐份落盘，`累计已保存 + 本份 > 上限`
+ * 时**立即停止**处理，并把触顶文件与排在其后的全部剩余文件一并记入
+ * `quota_files`（2026-10-05 修复「静默丢文件名」）。本函数逐字复刻该顺序语义，
+ * 使前端能在**发起请求之前**就告知用户哪些文件不会被保存 —— 否则用户要白等
+ * 整批上传完成，才从响应里得知"后面几个其实没存"。
+ *
+ * ⚠️ 非法（非正数）入参等价于"无上限"会比保守默认更危险，故回落内置兜底值
+ *    `MAX_UPLOAD_TOTAL_FALLBACK`（与后端 config.upload_max_total_bytes 默认值一致）。
+ *    正常口径以 `GET /api/v1/system/upload-limits` 的 `max_total_bytes` 为准。
+ */
+export const MAX_UPLOAD_TOTAL_FALLBACK: number = 200 * 1024 * 1024;
+
+export function splitByUploadTotalQuota(
+  files: File[],
+  maxTotalBytes: number = MAX_UPLOAD_TOTAL_FALLBACK,
+): SplitByTotalQuota {
+  const limit =
+    Number(maxTotalBytes) > 0 ? Number(maxTotalBytes) : MAX_UPLOAD_TOTAL_FALLBACK;
+  const accepted: File[] = [];
+  const held: File[] = [];
+  let used = 0;
+  let tripped = false;
+  for (const file of files || []) {
+    const size = Number(file?.size) || 0;
+    // 触顶后剩余文件与触顶文件同因（配额耗尽）不会被保存，全部记为 held。
+    if (tripped) {
+      held.push(file);
+      continue;
+    }
+    if (used + size > limit) {
+      held.push(file);
+      tripped = true;
+      continue;
+    }
+    used += size;
+    accepted.push(file);
+  }
+  return { accepted, held };
+}

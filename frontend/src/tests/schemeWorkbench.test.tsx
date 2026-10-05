@@ -349,6 +349,19 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
   });
 
   it("import 子 Tab：文档解析 / 项目提取 切换均渲染且不崩溃（2026-09-25 补充）", async () => {
+    // ✅ 2026-10-05：左面板标题按已加载的提取项定义**实报条数**（旧实现写死
+    //    「18 项结构化提取」，后端增减项后标题即失真）。此处给 3 项定义，
+    //    断言渲染出「3 项…」= 证明口径是动态的，而不是碰巧等于 18。
+    apiDefaults["bidAnalysisApi.items"] = {
+      data: {
+        items: [
+          { item_id: "schemeType", label: "方案类型", required: 1, output_type: "json" },
+          { item_id: "orgStructure", label: "组织机构", required: 1, output_type: "json" },
+          { item_id: "others", label: "其他说明", required: 0, output_type: "markdown" },
+        ],
+        groups: [{ key: "basic", label: "基本信息", item_ids: ["schemeType", "orgStructure", "others"] }],
+      },
+    };
     renderPage();
     // 起点应在「解析提取」Tab（pickInitialTab 默认 import），否则先切过去
     const importLabel = await screen.findByText("解析提取");
@@ -356,11 +369,13 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     fireEvent.click(importTab);
     // docs 子 Tab：上传解析主体 + 经 props 接入的「信息显示窗口」详情面板
     await waitFor(() => expect(screen.getByText("信息显示窗口")).toBeTruthy());
-    // 切到 extract 子 Tab：左栏「18 项结构化提取」标题 + 右侧 BidAnalysisTab
+    // 切到 extract 子 Tab：左栏标题（按定义条数动态） + 右侧 BidAnalysisTab
     const extractLabel = screen.getByText("项目提取");
     const extractTab = extractLabel.closest('[role="tab"]') || extractLabel;
     fireEvent.click(extractTab);
-    await waitFor(() => expect(screen.getByText("18 项结构化提取")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("3 项结构化提取")).toBeTruthy());
+    // 回归锁：不得再出现写死的「18 项」（定义只有 3 条时任何 18 都是硬编码）
+    expect(screen.queryByText("18 项结构化提取")).toBeNull();
   });
 
   it("解析内容预览：文档内容不完整时显示 warning，且不被「仅预览截取」覆盖", async () => {

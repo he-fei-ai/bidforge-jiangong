@@ -12,7 +12,12 @@
  *   - frontend: src/utils/uploadAccept.ts :: UPLOAD_FILE_EXTENSIONS
  */
 import { describe, it, expect } from "vitest";
-import { UPLOAD_FILE_ACCEPT, UPLOAD_FILE_EXTENSIONS } from "../utils/uploadAccept";
+import {
+  UPLOAD_FILE_ACCEPT,
+  UPLOAD_FILE_EXTENSIONS,
+  MAX_UPLOAD_TOTAL_FALLBACK,
+  splitByUploadTotalQuota,
+} from "../utils/uploadAccept";
 
 /** 镜像后端 file_parser.SUPPORTED_EXTENSIONS（2026-09-23） */
 const BACKEND_SUPPORTED_EXTENSIONS = [
@@ -44,5 +49,64 @@ describe("UPLOAD_FILE_ACCEPT", () => {
   it("含旧版 Word 格式（.doc/.wps），对齐招投标场景", () => {
     expect(UPLOAD_FILE_EXTENSIONS).toContain("doc");
     expect(UPLOAD_FILE_EXTENSIONS).toContain("wps");
+  });
+});
+
+/** 仅用到 name/size 的桩对象（本函数不触碰 File 的其它成员） */
+function fakeFile(name: string, size: number) {
+  return { name, size } as unknown as File;
+}
+
+describe("splitByUploadTotalQuota（累计体积配额预检）", () => {
+  it("全部文件累计未超上限：原样放行、顺序不变", () => {
+    const files = [fakeFile("a.pdf", 30), fakeFile("b.docx", 40), fakeFile("c.txt", 30)];
+    const r = splitByUploadTotalQuota(files, 100);
+    expect(r.accepted.map((f) => f.name)).toEqual(["a.pdf", "b.docx", "c.txt"]);
+    expect(r.held).toEqual([]);
+  });
+
+  it("恰好等于上限仍放行（后端判据是 `累计 + 本份 > 上限`，闭区间）", () => {
+    const r = splitByUploadTotalQuota([fakeFile("a", 60), fakeFile("b", 40)], 100);
+    expect(r.accepted).toHaveLength(2);
+    expect(r.held).toEqual([]);
+  });
+
+  it("触顶文件与其后的**全部**剩余文件一并记为 held（对齐后端 quota_files）", () => {
+    // 后端 global_facts.upload_documents：触顶即 break，并把 files[_idx+1:]
+    // 一并 extend 进 quota_files —— 修复「静默丢文件名」（2026-10-05）。
+    // 旧的前端缺口：这批文件要等整批上传完成才被扣下，用户事前毫无预期。
+    const files = [
+      fakeFile("a", 50),
+      fakeFile("b", 40),
+      fakeFile("c", 30), // 50+40+30 = 120 > 100 → 触顶
+      fakeFile("d", 1),
+      fakeFile("e", 1),
+    ];
+    const r = splitByUploadTotalQuota(files, 100);
+    expect(r.accepted.map((f) => f.name)).toEqual(["a", "b"]);
+    expect(r.held.map((f) => f.name)).toEqual(["c", "d", "e"]);
+  });
+
+  it("单份即超上限：整批全部 held、accepted 为空（调用方据此直接早退）", () => {
+    const r = splitByUploadTotalQuota([fakeFile("big", 200)], 100);
+    expect(r.accepted).toEqual([]);
+    expect(r.held.map((f) => f.name)).toEqual(["big"]);
+  });
+
+  it("非正数/非法上限回落内置兜底 200MB（不得等价于「无上限」）", () => {
+    expect(MAX_UPLOAD_TOTAL_FALLBACK).toBe(200 * 1024 * 1024);
+    const r = splitByUploadTotalQuota([fakeFile("a", 200 * 1024 * 1024 + 1)], 0);
+    expect(r.accepted).toEqual([]);
+    expect(r.held).toHaveLength(1);
+    // 200MB 以内仍放行
+    const ok = splitByUploadTotalQuota([fakeFile("a", 200 * 1024 * 1024)], -5);
+    expect(ok.accepted).toHaveLength(1);
+    expect(ok.held).toEqual([]);
+  });
+
+  it("空批次 / 缺 size 的入参不抛异常（fail-soft，纯函数）", () => {
+    expect(splitByUploadTotalQuota([], 100)).toEqual({ accepted: [], held: [] });
+    const r = splitByUploadTotalQuota([fakeFile("a", NaN)], 100);
+    expect(r.accepted).toHaveLength(1);
   });
 });

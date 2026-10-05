@@ -47,7 +47,7 @@ import {
   selectPlacedExportCharts, findDefaultExportPreset, canShrinkSection,
   type WorkflowTabKey,
 } from "../utils/workflowDerived";
-import { UPLOAD_FILE_ACCEPT } from "../utils/uploadAccept";
+import { UPLOAD_FILE_ACCEPT, splitByUploadTotalQuota } from "../utils/uploadAccept";
 // ✅ 2026-09-26 解析可信度提示：把后端的「文档被截断 / 预算耗尽被跳过 / 编码降级」
 //    翻译成用户可见的告警。集中在 utils 的纯函数里，避免页面各处拼文案而漂移。
 import { sourceNotice, previewNotices } from "../utils/parseSourceNotice";
@@ -3280,6 +3280,9 @@ export default function SchemeWorkbenchPage() {
   // 未到达 / 请求失败时保持 undefined，由 UploadParseTab 回落内置兜底默认（30MB），
   // 前端不再把 30MB 常量当作权威上限，避免与后端配置漂移。
   const [maxUploadBytes, setMaxUploadBytes] = useState<number | undefined>(undefined);
+  // 单次请求累计体积上限（字节）：与单文件上限同源（/system/upload-limits）。
+  // 未到达 / 请求失败时保持 undefined，预检回落内置兜底（200MB），与后端一致。
+  const [maxUploadTotalBytes, setMaxUploadTotalBytes] = useState<number | undefined>(undefined);
   // 正在解析的单份文档 id（列表行内按钮 loading / 全列表禁用依据）
   const [parsingDocId, setParsingDocId] = useState<string | null>(null);
   // 文件分类下拉选项（后端 /global-facts/documents/category-options）
@@ -3876,6 +3879,8 @@ const draftKey = selectedSection && id
         if (!alive) return;
         const n = Number(data?.max_upload_bytes);
         if (Number.isFinite(n) && n > 0) setMaxUploadBytes(n);
+        const t = Number(data?.max_total_bytes);
+        if (Number.isFinite(t) && t > 0) setMaxUploadTotalBytes(t);
       })
       .catch(() => {});
     return () => { alive = false; };
@@ -3992,6 +3997,11 @@ const draftKey = selectedSection && id
     setFactModalOpen(false);
     setFactItemModalOpen(false);
     setSelectedFactCategory("");
+    // ✅ 切换方案时重置「提取项目」的选中态：/scheme/:id 是同一路由组件，
+    //    不重置则右侧面板继续显示上一个方案的提取项详情与多标段检测结果
+    //    （与上方 facts 瞬态残留同因：旧实现只在进入 extract 子 Tab 时判定一次）。
+    setSelectedBaItem(null);
+    setSectionCheckResult(null);
   }, [id]);
 
   // ✅ 起始 Tab 判定：统一收敛到 utils/workflowDerived 的 pickInitialTab
@@ -4050,6 +4060,12 @@ const draftKey = selectedSection && id
       //    后端 generator 继续存活；提取结束时的 finally 还会在已卸载组件上
       //    setBaRunning(false) + loadBaResults()（多发一次请求 + setState）。
       baSseAbortRef.current?.abort();
+      // ✅ BUG 修复（2026-10-05）：「全局事实」两路列表请求的 AbortController
+      //    此前只在**切换方案**（[id] effect）时中止，卸载清单里独缺它们 ——
+      //    而 [id] effect 没有返回 cleanup，卸载时那段中止逻辑根本不会执行。
+      //    与上方 baSseAbortRef 同类：请求继续跑完 + 在已卸载组件上 setState。
+      factsListAbortRef.current?.abort();
+      factsDocsListAbortRef.current?.abort();
       // ✅ 性能优化：卸载时清掉 SSE 批量器所有未刷任务 + cancel 已排的 rAF，
       //    防止"组件已卸载后 setState"警告与内存泄漏。
       sseBatcherRef.current?.stop();
@@ -5739,14 +5755,31 @@ const draftKey = selectedSection && id
   const handleUploadDocuments = async (files: File[]) => {
     if (!id || files.length === 0) return;
     if (uploadingFacts) return;
+    // ✅ 上传前累计体积配额预检（与后端 upload_max_total_bytes 同口径）。
+    //    不做这一步的话，超出 200MB 的那批文件要等整批上传完成才被后端扣下，
+    //    用户白等一轮、且事前对"哪些不会被保存"毫无预期。
+    //    本页面有两条上传入口（UploadParseTab + 「① 上传文件保存」按钮），
+    //    收敛在此处 = 两个入口一次覆盖。
+    const quota = splitByUploadTotalQuota(files, maxUploadTotalBytes);
+    let toUpload = files;
+    if (quota.held.length > 0) {
+      const mb = Math.round(
+        (Number(maxUploadTotalBytes) > 0 ? Number(maxUploadTotalBytes) : 200 * 1024 * 1024) / (1024 * 1024),
+      );
+      const names = quota.held.map((f) => f.name).slice(0, 10).join("、");
+      const more = quota.held.length > 10 ? ` 等 ${quota.held.length} 个` : "";
+      msg.warning(`单次上传累计不能超过 ${mb}MB，以下文件未上传：${names}${more}`);
+      if (quota.accepted.length === 0) return;
+      toUpload = quota.accepted;
+    }
     uploadAbortRef.current?.abort();
     const ac = new AbortController();
     uploadAbortRef.current = ac;
 
     setUploadingFacts(true);
-    setUploadedFiles(files.map((f) => f.name));
+    setUploadedFiles(toUpload.map((f) => f.name));
     try {
-      const { data } = await factsApi.uploadDocuments(files, id, { signal: ac.signal });
+      const { data } = await factsApi.uploadDocuments(toUpload, id, { signal: ac.signal });
       if (ac.signal.aborted) return;
       const savedCount = data.saved_count ?? 0;
       // ✅ 统一口径（2026-09-21）：提示文案唯一入口收敛到
@@ -7986,7 +8019,17 @@ const draftKey = selectedSection && id
             title={
               <Space size={4}>
                 <AppstoreOutlined />
-                <Text strong>{importSubTab === "docs" ? "解析信息分类" : "18 项结构化提取"}</Text>
+                <Text strong>
+                  {importSubTab === "docs"
+                    ? "解析信息分类"
+                    // ✅ 口径与右侧面板（baScopeText）同源：按已加载的提取项定义实报条数。
+                    //    旧实现写死「18 项结构化提取」，后端增减项后标题即失真
+                    //    （同 UploadParseTab:138 与 BidAnalysisTab:61 已修过的硬编码）。
+                    //    定义未加载时不报数，只说「结构化提取」。
+                    : baDefs.length
+                      ? `${baDefs.length} 项结构化提取`
+                      : "结构化提取"}
+                </Text>
                 <Tag color="blue">{(baGroups || []).length} 分类</Tag>
               </Space>
             }
