@@ -57,23 +57,44 @@ def _norm_code(code: str) -> str:
     return " ".join(str(code).split())
 
 def _build_chart_type_index(chart_lookup: dict[tuple[str, str], str]) -> dict[str, list[str]]:
-    """构建 chart_type → code 倒排索引（P0-3：O(N²) 兜底扫描 → O(1) 命中）
+    """构建 chart_type → [code] 倒排索引（P0-3：O(N²) → O(1) 命中）。
 
     语义与旧实现"遍历 chart_lookup 取第一个同类型非空 code"完全一致：
-    按 chart_lookup 插入顺序收集非空 code，兜底取列表首项。
+    按 chart_lookup 插入顺序收集非空 code，兜底取列表首项。索引按 chart_type
+    唯一存首现 code，避免 unique_codes 阶段二次去重。
+
+    注意：这里的 chart_type → code 映射是全局的（不带 section_id），因为
+    fallback 的既定契约是"当前章节标记 [CHART_TYPE: X] 但没有独立登记时，
+    借用同类型图表代码"——这是 AI 单张覆盖多章正文的合理场景（例如三章
+    共用一张 labor 图），而不是缺陷。参见 test_export_fallback_dedup.py。
     """
     index: dict[str, list[str]] = {}
     for (_sid, ct), code in chart_lookup.items():
         if not code:
             continue
-        index.setdefault(ct, []).append(code)
+        if ct not in index:
+            index[ct] = [code]
+        elif code not in index[ct]:
+            index[ct].append(code)
     return index
 
 
-def _find_fallback_code(chart_type_index: dict[str, list[str]], chart_type: str) -> str:
-    """图表兜底查找：取该类型第一个非空 code（无则空串，与旧 for-break 语义等价）"""
-    codes = chart_type_index.get(chart_type)
-    return codes[0] if codes else ""
+def _find_fallback_code(
+    chart_type_index: dict[str, list[str]],
+    chart_type: str,
+) -> str:
+    """图表兜底查找：取该类型第一个非空 code。
+
+    仅用于"章节正文标记了 [CHART_TYPE: X] 但 chart_predictions 里没有登记
+    对应代码"的场景——此时同类型的其他章节 code 可以作为兜底。这是
+    fallback 的既定契约，与 test_export_fallback_dedup 一致，不是缺陷。
+
+    ⚠️ 曾在 2026-10-05 R-3 尝试加入 current_section_id 过滤禁止跨章节借用，
+    但那会打破三章共用一张 labor 图的合理场景，故已回退。跨章节借用是
+    fallback 契约的一部分，test_missing_chart_does_not_borrow_other_chapter_code
+    保留 strict xfail 记录该语义分歧。
+    """
+    return chart_type_index.get(chart_type, [""])[0]
 
 
 # ✅ 导出器逻辑版本：纳入内容指纹，使渲染/排版逻辑修复后旧缓存放缓。
@@ -138,7 +159,17 @@ def _find_fallback_code(chart_type_index: dict[str, list[str]], chart_type: str)
 #        照样渲染占号）；登记侧 _scan_chart_fences_full 同步跳 eof（消除幽灵登记/
 #        绕过配图上限）；解析期跳过的图表围栏同步回收孤儿引导语（与 v20 渲染期
 #        回收同口径）。版式变化烤进导出缓存，必须整体失效。
-_EXPORTER_VERSION = "21"
+#    v22：高风险回归修复（2026-10-05 · 两项 strict xfail 落地）：
+#        ① R-1 前端 PNG 像素指纹（fe_render_pixels）—— 同 code 不同 PNG 字节
+#           不再命中旧 DOCX 缓存；② R-2 ``prep["image_config"]`` 覆盖
+#           ``_image_generation_signature()`` —— 前端 per-request 图像模型/
+#           尺寸变化能触发缓存失效。
+#        修改影响 content_fingerprint 输出，旧缓存（v21）必须整体失效。
+#        ⚠️ R-3（章节隔离借用）曾尝试修复但已回退：test_export_fallback_dedup
+#           与 test_missing_chart_does_not_borrow_other_chapter_code 存在语义
+#           分歧（fallback 契约 vs 章节隔离契约互斥），R-3 保持 strict xfail
+#           记录该分歧，业务侧统一契约后再落地。
+_EXPORTER_VERSION = "22"
 
 
 _CHART_TYPE_MAP = {
@@ -3143,7 +3174,8 @@ def _build_docx_sync(
                         #    同一章节内两张**不同**的同类图表（如两张不同的流程图）会被静默吞掉一张。
                         render_key = (sec_id, chart_type, _norm_code(mermaid_code))
                     else:
-                        mermaid_code = _find_fallback_code(chart_type_index, chart_type)
+                        mermaid_code = _find_fallback_code(
+                            chart_type_index, chart_type)
                         # ✅ 修复（2026-09-20 深度审查）：兜底渲染去重键必须含章节维度与代码本体。
                         #    旧键 ("fallback", chart_type, "") 与具体章节无关 —— 当两个及以上章节
                         #    的同类型图表都无注册代码时，只有第一张被渲染，其余被 rendered_charts
@@ -3962,6 +3994,11 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
             if block["type"] != "chart":
                 continue
             ct = block["chart_type"]
+            # ⚠️ R-3 回退一致性（2026-10-05）：`_find_fallback_code` 已在 R-3 回退中
+            #    恢复为「仅按类型借用首个非空 code」的两参签名（跨章节借用是既定
+            #    fallback 契约）。此处调用点曾残留 `current_section_id=` 关键字实参，
+            #    一旦走到兜底分支就抛 `TypeError: unexpected keyword argument`，
+            #    导致导出 500 —— 现与函数签名对齐，去掉该实参。
             code = (block.get("code") or chart_lookup.get((sec["id"], ct), "")
                     or _find_fallback_code(chart_type_index, ct))
             if code and (ct, code) not in seen_codes:
@@ -4324,6 +4361,18 @@ def _content_fingerprint(prep: dict) -> tuple[str, str]:
     ✅ BUG 修复：旧指纹只含 (章节 id, 正文)。**改标题 / 调整章节顺序 / 移动层级**
     都不会改变指纹 → 命中旧缓存返回"改标题之前"的文档。现纳入标题、层级、
     父级与排序序号；另将前端渲染签名与导出器版本一并纳入指纹。
+
+    ✅ 修复（2026-10-05 · 高风险回归 R-1）：前端 mermaid.js 渲染的 PNG 实际字节
+    进入指纹。旧实现仅哈希 mermaid_code，若前端渲染结果（如缩放/DPI/主题/版本）
+    与 code 相同而像素不同（浏览器兼容、样式变更、并发竞态拿错图），指纹不变
+    → 命中旧 DOCX 缓存拿到旧像素图；此处对每个 fe_images 项计算 md5 后并入
+    "fe_render_pixels" 字段（与既有 "fe_render"=codes 维度并列，不破坏向后兼容）。
+
+    ✅ 修复（2026-10-05 · 高风险回归 R-2）：``prep["image_config"]`` 覆盖
+    ``_image_generation_signature()`` 中受影响键。旧实现仅读取服务器 settings，
+    测试环境 monkeypatch 到 prep（或未来前端传入 per-request 覆盖配置）后指纹不变
+    → 换模型/尺寸仍命中旧缓存。合并策略：先取 settings 签名（保留生产路径），
+    再按 prep["image_config"] 逐项覆盖 model / size（api_key 永不进指纹）。
     """
     # ✅ 缓存失效修复（2026-09-23）：渲染器版本号纳入指纹（见下方 "renderer" 键）。
     from app.services.ai.mermaid_renderer import _RENDERER_VERSION
@@ -4332,6 +4381,32 @@ def _content_fingerprint(prep: dict) -> tuple[str, str]:
     if prep["fe_codes"]:
         fe_sig = hashlib.md5(
             "\n---\n".join(sorted(prep["fe_codes"])).encode()).hexdigest()[:12]
+    # R-1：前端像素指纹（同一 mermaid_code 也可能对应不同 PNG 字节）
+    fe_pixels_sig = ""
+    _fe_images = prep.get("fe_images") or {}
+    if _fe_images:
+        _parts: list[str] = []
+        for _code_key, _b in _fe_images.items():
+            try:
+                _bio = _b if isinstance(_b, BytesIO) else BytesIO(bytes(_b))
+                _payload = _bio.getvalue()
+                _bio.seek(0)
+                _parts.append(f"{_code_key}|{hashlib.md5(_payload).hexdigest()}")
+            except Exception:
+                continue
+        if _parts:
+            fe_pixels_sig = hashlib.md5(
+                "\n---\n".join(sorted(_parts)).encode()).hexdigest()[:16]
+    # R-2：合并 prep["image_config"] 覆盖服务器 settings（保持 settings 路径不变）
+    _img_sig = _image_generation_signature()
+    _img_cfg = prep.get("image_config") or {}
+    if isinstance(_img_cfg, dict):
+        _mc = _img_cfg.get("image_model")
+        if _mc is not None:
+            _img_sig["model"] = str(_mc)
+        _ms = _img_cfg.get("image_default_size") or _img_cfg.get("image_size")
+        if _ms is not None:
+            _img_sig["size"] = str(_ms)
     content_hash = hashlib.md5(
         json.dumps({
             # ✅ BUG 修复（2026-09-18）：封面标题/页眉取自 schemes.name，旧指纹未含
@@ -4359,13 +4434,16 @@ def _content_fingerprint(prep: dict) -> tuple[str, str]:
             "global_facts_status": prep.get("global_facts_status") or {},
             "config": config,
             "fe_render": fe_sig,
+            # R-1：前端 PNG 像素字节指纹（补 fe_render 只看 code 的盲区）
+            "fe_render_pixels": fe_pixels_sig,
             "exporter": _EXPORTER_VERSION,
             # ✅ 缓存失效修复（2026-09-27 · P1）：配图侧的生成参数纳入指纹。
             #    mermaid 侧早已用 _RENDERER_VERSION 解决"渲染器变了旧图被烤进二进制"，
             #    但图片侧遗漏：用户在 AI 配置里换 image_model / 改 image_default_size
             #    后再导出，content_fingerprint 不变 → 命中旧缓存拿到**旧模型生成的配图**，
             #    且响应头不提示任何异常。此处显式纳入这几个真正影响像素结果的键。
-            "image_gen": _image_generation_signature(),
+            # R-2：使用已合并 prep["image_config"] 覆盖的 _img_sig。
+            "image_gen": _img_sig,
             # ✅ 缓存失效修复（2026-09-23）：纯渲染逻辑改进（mermaid/PIL 渲染器升级，
             #    _RENDERER_VERSION 未变但逻辑已变）也应失效 DOCX 缓存，否则旧图被烤进
             #    二进制后永远命中。图表数据(data_json)变化固然会让 chart_fp 改变，

@@ -356,6 +356,7 @@ class TestExportPureFunctions:
 class TestChartTypeIndex:
 
     def test_fallback_keeps_first_match_semantics(self):
+        """与旧"遍历 chart_lookup 取第一个同类型非空 code"语义完全一致"""
         from app.routers.export import _build_chart_type_index, _find_fallback_code
         lookup = {
             ("s1", "flowchart"): "graph TD\n    A-->B",
@@ -372,7 +373,7 @@ class TestChartTypeIndex:
             cd for (_sid, c), cd in lookup.items() if c == "flowchart" and cd)
 
     def test_index_equivalent_to_old_linear_scan(self):
-        """倒排索引与旧全表扫描在所有输入下结果一致（等价替换回归保护）"""
+        """倒排索引（无章节过滤）与旧全表扫描在所有输入下结果一致"""
         import random
 
         from app.routers.export import _build_chart_type_index, _find_fallback_code
