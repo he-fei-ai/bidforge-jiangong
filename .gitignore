@@ -130,6 +130,12 @@ patch_preview_pipeline_summary.py
 patch_preview_pipeline_summary.py.bak*
 kill_port_selftest.ps1.log
 *.lock
+# AI Agent 批量回归临时产物（_rNN_*.log/.err）
+_r[0-9]*_*.log
+_r[0-9]*_*.err
+# pytest 自定义 cache_dir 产物
+.pytest_cache_verify/
+backend/.pytest_cache_verify/
 ~$*
 ~$xport*
 
