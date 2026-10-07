@@ -439,15 +439,11 @@ async def test_insert_and_lazy_derive_roundtrip(ctx):
                      key="foundation_depth", source="招标文件.pdf")
     fc.apply_fact_dimensions(items := [it])
     row = items[0].to_db_row("g1", "p1", "s1", "技术参数")
-    await ctx.execute(
-        "INSERT INTO global_facts "
-        "(id, project_id, scheme_id, group_id, group_title, title, content, category, "
-        "source_ref, is_simulated, confidence, is_resolved, has_conflict, "
-        "conflict_keys, fact_key, chunk_hash, value_unit, fact_type, evidence_kind, "
-        "page_ref, zone_type, is_safety_critical, norm_group, "
-        "chapter, fact_attr, source_kind, is_shared) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        row)
+    # ✅ 2026-10-06：改走 GLOBAL_FACTS_INSERT_SQL 单一事实源。
+    #   本测试此前内联一份 27 列 INSERT 字面量 + 27 个手写占位符 ——
+    #   to_db_row 补 is_stale（28 列）后立即 "Incorrect number of bindings"。
+    #   这正是本轮要消灭的「同一列清单多份副本」：测试里的副本同样是漂移源。
+    await ctx.execute(fe.GLOBAL_FACTS_INSERT_SQL, row)
 
     # 历史行：仅有 name/content/category（模拟 2026-09-24 之前的旧数据）
     await ctx.execute(

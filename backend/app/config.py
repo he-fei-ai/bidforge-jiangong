@@ -206,6 +206,13 @@ class Settings(BaseSettings):
     #    （上限 ai_reasoning_max_tokens）。仅「正文为空」触发，不影响正常响应。
     ai_reasoning_max_tokens: int = 4096
     ai_retry_on_thinking_exhausted: bool = True
+    # ✅ 2026-10-07（正文截断收口 · 生产库实证）：正文**非空**但
+    #    finish_reason=length/max_tokens = 被 max_tokens 截断的半截正文。
+    #    旧实现直接返回且零日志 —— 生产方案 5 个章节句尾停在半句，
+    #    用户无从得知，审核与导出仍照常使用。现与 O3 同构：先记 WARNING
+    #    让截断可观测，再按 ai_reasoning_max_tokens 上限翻倍重试一次。
+    #    False = 仅告警不重试（完全回到旧行为）。
+    ai_retry_on_partial_truncation: bool = True
     # ✅ 2026-09-22（对齐 OpenBidKit reasoning_effort 能力）：推理类模型
     #    （DeepSeek-R1 / o1 / QwQ 等）的「思考力度」透传。空串（默认）= 不发送该参数，
     #    沿用各 provider 默认（完全向后兼容，不改变任何现有调用行为）；非空前将作为
@@ -437,6 +444,15 @@ class Settings(BaseSettings):
     # 的同一实现），不复制阈值。
     content_crosscheck_duplicate: bool = True
 
+    # ✅ F3（2026-10-07 · 待补充清单漏检）：扫描半角方括号中文占位
+    # （如 ``[就近综合医院]`` / ``[邻近专科医院/门诊部]``）。生产文档 T21 实证：
+    # AI 在缺具体名称时用半角 ``[中文]`` 占位，而旧扫描只认【待补充】/××/xx，
+    # 这类占位既不进《待补充清单》也不触发审核，用户无感知即交付。
+    # True（默认）= 在三类既有口径之外，额外把半角方括号包裹的中文短语计为
+    # bracket 类占位；False = 完全回到旧口径（可回退，不删代码）。
+    # 仅要求括号内含中文，故不会误报 [注]、公式下标或英文引用。
+    placeholder_scan_bracket: bool = True
+
     # ---------- 目录侧检查点前置（2026-10-02 · 第二十五轮） ----------
     # 与上面正文侧三开关配套：审核预检里有一整类问题**只能在目录阶段预防**
     # （CMP-01~09 按标题关键词判定九大法定章节是否存在）。本开关开启后：
@@ -446,6 +462,16 @@ class Settings(BaseSettings):
     #    九大法定章节对**任何**专项方案恒定参与检查（与预检无条件检查对齐）。
     # 关闭（False）= 完全回到本项引入前的门控与判据（可回退，不删代码）。
     outline_checkpoint_check: bool = True
+
+    # ✅ F4/F5（2026-10-07 · 目录标题格式健壮性）：连续性校验额外检查
+    # ① F4 破折号长尾标题：标题中含 ``—`` / ``──`` / ``——``，用破折号把
+    #    描述性长尾拼进标题（生产文档实证 H3「门窗安装工程 — 成品门窗安装…」
+    #    「施工现场消防安全 —— 动火审批…」），长尾应落到正文而非标题；
+    # ② F5 空标题节点：title 为空白的 dict 节点。旧遍历直接 ``if title:`` 跳过，
+    #    空节点既不计数也不报错，AI 一旦返回空标题即静默通过。
+    # True（默认）= 两类问题计入连续性 issues（影响 ok）；False = 回到旧口径
+    # （空节点仍跳过、破折号不查），可回退，不删代码。
+    outline_check_title_format: bool = True
 
     # 九大章节「本章必含要素清单」注入（2026-10-03 · 目录与正文生成增强）：
     # True（默认）= 在正文提示词的【本章审核检查点要求】之后，追加该章的
@@ -460,6 +486,33 @@ class Settings(BaseSettings):
     # scheme_classification，本项只做「把同一清单搬进提示词」，不复制清单。
     # 关闭（False）= 提示词与本项引入前逐字一致（可回退，不删代码）。
     content_chapter_elements_inject: bool = True
+
+    # F6 应急章「专项应急预案按事故类型分组」结构要素注入（2026-10-07）：
+    # 文档实证：第4轮成稿应急章 H3 从 2.1 平铺到 2.12，把高处坠落/物体打击、
+    # 火灾、触电、中毒窒息四类事故的处置步骤混在同一层（2.1~2.3、2.4~2.6、
+    # 2.7~2.9、2.10~2.12），读者无法按事故类型定位预案。根因：
+    # NINE_CHAPTERS.emergency.base_fields 只有「应急组织/联系人/物资/线路/医院」，
+    # 从未要求「专项应急预案须按事故类型分组」这一结构要素。
+    # True（默认）= 在**提示词注入层**（content_checkpoint.chapter_required_elements）
+    # 为 emergency 章追加该结构要素，目录侧与正文侧同步生效；
+    # False = 回退旧口径（不追加）。刻意不改 NINE_CHAPTERS.base_fields —— 该表还被
+    # validate_chapter_fields 的字段级差分校验消费，长句要素进去会制造覆盖率误报。
+    emergency_group_by_accident_type: bool = True
+
+    # F8 同章节内部数值矛盾检测（2026-10-07 · 第4轮成稿实证）：
+    # 文档实证：进度章同一段落区间，段331「总工期约184日历天」与段346
+    # 「总工期约195日历天」直接矛盾（日期同为 2026-05-08 至 11-18）。
+    # 根因：consistency_scanner.program_prescan 只在 **叶子节点之间** 收集
+    # 「同主题不同值」（load_leaf_sections + 桶需 ≥2 值），单个章节正文内部
+    # 出现两个不同值时桶虽有 2 值、却因 occurrences 同属一个 section 而无法体现，
+    # 且非叶子章节根本不进扫描。
+    # True（默认）= 预扫描追加「同一 section 内同主题出现多个不同取值」候选冲突；
+    # False = 回退旧口径（只报跨章节）。
+    consistency_detect_intra_section: bool = True
+    # F8 受检主题白名单：仅对这几类「全书应唯一」的强一致性主题做章内矛盾检测，
+    # 刻意不放开到全部 _NUM_TOPICS —— 混凝土强度/设备数量本就按对象多值，
+    # 章内多值属正常，放开必然误报。
+    consistency_intra_section_topics: tuple = ("工期", "质保期", "响应时间")
 
     # ---------- 提示词治理（2026-09-24 · 遗留问题闭环） ----------
     # G2 版本回滚：把变更前后完整提示词正文写入 prompt_audit_logs.snapshot_json，
@@ -578,10 +631,20 @@ class Settings(BaseSettings):
     facts_finalize_enabled: bool = False
 
     # ③ 上下文预算分段（对齐易标 getGlobalFactsSegmentLimit，:363-377）：
-    #    设 True 后分段上限改由「模型上下文窗口 × 0.8 - 固定消息」动态计算，
-    #    取不到配置时回落到本仓等价的 CHUNK_SIZE 基准（8000），下限 1000。
+    #    设 True 后分段上限改由「模型上下文窗口 × 0.8 - 固定消息」动态计算。
     #    ⚠️ 关闭时 split_into_chunks 的切分行为与引入前完全一致。
     facts_context_budget_split: bool = False
+
+    # ③-2 事实链路上下文窗口（字符）。0 = 自动。
+    #    ✅ 2026-10-06 新增：旧实现「自动」等价于硬编码 400_000
+    #    （facts_patches.DEFAULT_CONTEXT_LENGTH_LIMIT），实测开关一开段长
+    #    从 8000 直跳到 307_930 —— 而本仓 ai_config 表**不持久化**每个模型的
+    #    上下文窗口，400k 纯属乐观假设，对 32k 窗口模型是致命的。
+    #    现改为：>0 时按本值；否则读全局 context_length_limit；都未配置时用
+    #    facts_extractor.FACTS_AUTO_CONTEXT_CHARS（128000，保守）。
+    #    无论怎么配，单段都夹到 FACTS_SEGMENT_HARD_CEILING（60000）。
+    #    生效前提：facts_context_budget_split=True（默认关 → 本项无任何影响）。
+    facts_context_length_limit: int = 0
 
     # 事实链路两次新增 AI 调用的超时（秒）。沿用 facts_extractor.FACTS_REQUEST_TIMEOUT
     # 的量级（240s），单独可配以便长资料场景下调。

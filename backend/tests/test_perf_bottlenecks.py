@@ -356,7 +356,14 @@ class TestExportPureFunctions:
 class TestChartTypeIndex:
 
     def test_fallback_keeps_first_match_semantics(self):
-        """与旧"遍历 chart_lookup 取第一个同类型非空 code"语义完全一致"""
+        """与旧"遍历 chart_lookup 取第一个同类型非空 code"语义一致。
+
+        ✅ 2026-10-06（D1 加固）：`_find_fallback_code` 现返回
+        `(code, borrowed_from_section_id)` 二元组，且可选传
+        `current_section_id` / `order_rank` 以确定性地借"文档顺序上最近的
+        前一张"。**不传**这两个参数时，行为与旧实现逐字一致 ——
+        本用例锁的正是这条"未传参 ⇒ 旧语义不变"的向后兼容红线。
+        """
         from app.routers.export import _build_chart_type_index, _find_fallback_code
         lookup = {
             ("s1", "flowchart"): "graph TD\n    A-->B",
@@ -366,14 +373,16 @@ class TestChartTypeIndex:
         }
         idx = _build_chart_type_index(lookup)
         # 与旧 for-break 语义一致：取该类型第一个非空 code
-        assert _find_fallback_code(idx, "flowchart") == "graph TD\n    A-->B"
-        assert _find_fallback_code(idx, "gantt") == "gantt\n    title x"
-        assert _find_fallback_code(idx, "timeline") == ""
-        assert _find_fallback_code(idx, "flowchart") == next(
+        assert _find_fallback_code(idx, "flowchart")[0] == "graph TD\n    A-->B"
+        assert _find_fallback_code(idx, "gantt")[0] == "gantt\n    title x"
+        assert _find_fallback_code(idx, "timeline") == ("", "")
+        assert _find_fallback_code(idx, "flowchart")[0] == next(
             cd for (_sid, c), cd in lookup.items() if c == "flowchart" and cd)
+        # 来源章节一并回传（D1 可观测性的前提）
+        assert _find_fallback_code(idx, "flowchart")[1] == "s1"
 
     def test_index_equivalent_to_old_linear_scan(self):
-        """倒排索引（无章节过滤）与旧全表扫描在所有输入下结果一致"""
+        """倒排索引（无章节过滤、无 order_rank）与旧全表扫描在所有输入下一致"""
         import random
 
         from app.routers.export import _build_chart_type_index, _find_fallback_code
@@ -394,7 +403,7 @@ class TestChartTypeIndex:
 
         idx = _build_chart_type_index(lookup)
         for ct in types:
-            assert _find_fallback_code(idx, ct) == old_scan(lookup, ct)
+            assert _find_fallback_code(idx, ct)[0] == old_scan(lookup, ct)
 
     def test_index_ignores_empty_codes(self):
         from app.routers.export import _build_chart_type_index

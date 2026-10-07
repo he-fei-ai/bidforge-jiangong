@@ -50,13 +50,20 @@ const apiMock = vi.hoisted(() => ({
     batchReview: vi.fn(),
     export: vi.fn(),
   },
+  systemApi: {
+    // 上传配额下发（页面启动读取一次；缺失会让宿主回落 30MB 兜底）
+    uploadLimits: vi.fn(),
+  },
 }));
 
 vi.mock("../api", () => apiMock);
 // 编辑弹窗为独立组件（已有专门测试文件），此处 mock 为探针以隔离并断言接线
 vi.mock("../components/OutlineLibraryEditModal", () => ({
-  default: ({ open, libraryId }: any) =>
-    open ? <div data-testid="edit-modal" data-library-id={libraryId ?? ""} /> : null,
+  default: ({ open, libraryId, maxUploadBytes }: any) =>
+    open
+      ? <div data-testid="edit-modal" data-library-id={libraryId ?? ""}
+             data-max-upload-bytes={String(maxUploadBytes ?? "")} />
+      : null,
 }));
 
 import OutlineLibraryPage from "../pages/OutlineLibraryPage";
@@ -84,6 +91,9 @@ beforeEach(() => {
   apiMock.outlineLibraryApi.batchReview.mockResolvedValue({ data: { affected: 2 } });
   apiMock.outlineLibraryApi.delete.mockResolvedValue({ data: { ok: true } });
   apiMock.outlineLibraryApi.duplicate.mockResolvedValue({ data: { id: "lib-3", name: "副本" } });
+  apiMock.systemApi.uploadLimits.mockResolvedValue({
+    data: { max_upload_bytes: 50 * 1024 * 1024, max_files_per_request: 20, max_total_bytes: 200 * 1024 * 1024 },
+  });
 });
 
 afterEach(cleanup);
@@ -222,6 +232,26 @@ describe("OutlineLibraryPage（目录库页面）", () => {
     const probe = document.body.querySelector('[data-testid="edit-modal"]');
     expect(probe).toBeTruthy();
     expect(probe!.getAttribute("data-library-id")).toBe("lib-1");
+  });
+
+  /**
+   * 上传上限接线（2026-10-05 D3 收敛）：目录库编辑弹窗的「导入目录」不再硬编码 30MB，
+   * 由本页从 /system/upload-limits 取到 max_upload_bytes 后下传（缺失则弹窗回落 30MB）。
+   */
+  it("上传上限：把 /system/upload-limits 的 max_upload_bytes 下传给编辑弹窗", async () => {
+    apiMock.outlineLibraryApi.get.mockResolvedValue({
+      data: { ...ITEMS[0], outline_json: "[]", versions: [] },
+    });
+    setup();
+    await waitFor(() => expect(bodyText()).toContain("深基坑标准目录"));
+    fireEvent.click(linkBtn("深基坑标准目录")!);
+    await waitFor(() => expect(bodyText()).toContain("目录预览"));
+    fireEvent.click(bodyBtn("编辑本目录")!);
+    const probe = document.body.querySelector('[data-testid="edit-modal"]');
+    expect(probe).toBeTruthy();
+    await waitFor(() =>
+      expect(probe!.getAttribute("data-max-upload-bytes")).toBe(String(50 * 1024 * 1024)),
+    );
   });
 
   /**

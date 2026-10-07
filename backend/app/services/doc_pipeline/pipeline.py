@@ -388,6 +388,14 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str,
         "SELECT file_name, page_count, parsed_markdown, parse_status,"
         " parse_warnings, completeness_json FROM project_documents WHERE id=?",
         (doc_id,))
+    # ✅ R13 补全（2026-10-06）：本函数 5 处 db.execute 此前均未判空。
+    #    路由层 _load_doc 虽已做过一次查询验证，但本函数内部是**独立的**后续
+    #    查询——连接在两次查询之间断开时，cur=None → fetchone() AttributeError → 500。
+    #    读路径语义：按「文档不存在 / 无数据」降级，与 _load_doc 的 503 不同口径
+    #    （这里是服务层函数，返回结构化错误比抛 HTTPException 更合适）。
+    if cur is None:
+        logger.warning("完整性报告查询文档元数据失败（db.execute 返回 None）：%s", doc_id)
+        return {"doc_id": doc_id, "errors": ["文档服务暂时不可用，请稍后重试"]}
     row = await cur.fetchone()
     if not row:
         return {"doc_id": doc_id, "errors": ["文档不存在"]}
@@ -408,9 +416,15 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str,
         "SELECT COUNT(*) AS n, "
         "SUM(CASE WHEN source_ref != '' THEN 1 ELSE 0 END) AS traced "
         "FROM doc_chunks WHERE doc_id=?", (doc_id,))
-    r = await cur.fetchone()
-    chunk_count = int((r["n"] if r else 0) or 0)
-    traced_chunks = int((r["traced"] if r else 0) or 0)
+    # ✅ R13 补全（2026-10-06）：同上，读路径降级为 0 块。
+    if cur is None:
+        logger.warning("完整性报告查询分块统计失败（db.execute 返回 None）：%s", doc_id)
+        chunk_count = 0
+        traced_chunks = 0
+    else:
+        r = await cur.fetchone()
+        chunk_count = int((r["n"] if r else 0) or 0)
+        traced_chunks = int((r["traced"] if r else 0) or 0)
 
     cur = await db.execute(
         # ✅ BUG 修复（2026-09-29 · 陈旧行虚高覆盖率）：sync_extract_layer 会把
@@ -420,7 +434,12 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str,
         "SELECT extract_type, extract_data FROM doc_extractions"
         " WHERE doc_id=? AND COALESCE(status,'') != 'stale'",
         (doc_id,))
-    ext_rows = {r2["extract_type"]: r2["extract_data"] for r2 in await cur.fetchall()}
+    # ✅ R13 补全（2026-10-06）：读路径降级为空提取集。
+    if cur is None:
+        logger.warning("完整性报告查询提取结果失败（db.execute 返回 None）：%s", doc_id)
+        ext_rows = {}
+    else:
+        ext_rows = {r2["extract_type"]: r2["extract_data"] for r2 in await cur.fetchall()}
 
     # 字段覆盖率：project_info 必备字段是否有值
     extracted_fields = required_fields = 0
@@ -498,19 +517,25 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str,
         "generated_at": _now(),
     }
     # 落库（doc_validation_reports）+ meta 回写质量分
-    await db.execute(
+    # ✅ R13 补全（2026-10-06）：写路径判空 —— INSERT 失败时跳过（不阻断返回报告），
+    #    UPDATE 同理。本函数的报告已在内存中算好，落库失败不影响本次返回给前端的结果。
+    _rep_cur = await db.execute(
         "INSERT INTO doc_validation_reports (id, doc_id, project_id, kind,"
         " report_json, created_at) VALUES (?,?,?,?,?,?)",
         (str(uuid.uuid4()), doc_id, project_id, "completeness",
          _jdump(report), _now()))
+    if _rep_cur is None:
+        logger.warning("完整性报告落库 doc_validation_reports 失败（db.execute 返回 None）：%s", doc_id)
     # ✅ BUG 修复（质量分永远为空的根因）：project_documents.quality_score 列
     #    默认 -1（未评估哨兵），旧实现完整性报告只把质量分写进【磁盘 meta】，
     #    从不回写该 DB 列。而 GET /documents/{id}/status 读的正是 DB 列 —— 于是
     #    即便已执行完整性校验，状态接口的 quality_score 恒为 -1（前端显示「未评估」），
     #    四层质量能力等于白做。现随报告一并回写 DB 列，打通「校验→状态」数据链。
-    await db.execute(
+    _qs_cur = await db.execute(
         "UPDATE project_documents SET quality_score=? WHERE id=?",
         (quality, doc_id))
+    if _qs_cur is None:
+        logger.warning("完整性报告回写 quality_score 失败（db.execute 返回 None）：%s", doc_id)
     await db.commit()
 
     # ✅ BUG 修复（事件循环卫生，2026-09-20）：下方 meta 读写此前是【同步】磁盘 IO
@@ -582,7 +607,12 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
         "SELECT item_id, label, output_type, content, status, updated_at "
         "FROM bid_analysis_items WHERE project_id=? AND status='success'",
         (project_id,))
-    items = [dict(r) for r in await cur.fetchall()]
+    # ✅ R13 补全（2026-10-06）：读路径降级为空列表。
+    if cur is None:
+        logger.warning("提取层物化查询解析项失败（db.execute 返回 None），按空集处理：%s", project_id)
+        items = []
+    else:
+        items = [dict(r) for r in await cur.fetchall()]
     # ✅ BUG 修复（2026-09-29 · 失败哨兵被物化）：旧实现只按 status='success' 过滤，
     #    而 bid_analysis 在「全部分段无有效结果」时写入 status='success' + content='{}'
     #    的失败哨兵（见 routers/bid_analysis.py 的 _run_single_item / _repair_json）。
@@ -608,7 +638,12 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
         "SELECT group_id, group_title, title, content, category, source_ref,"
         " confidence, is_simulated, is_resolved, has_conflict "
         "FROM global_facts WHERE project_id=?", (project_id,))
-    fact_rows = [dict(r) for r in await cur.fetchall()]
+    # ✅ R13 补全（2026-10-06）：读路径降级为空列表。
+    if cur is None:
+        logger.warning("提取层物化查询全局事实失败（db.execute 返回 None），按空集处理：%s", project_id)
+        fact_rows = []
+    else:
+        fact_rows = [dict(r) for r in await cur.fetchall()]
     facts_payload = {
         "doc_id": doc_id,
         "extract_time": _now(),
@@ -653,8 +688,9 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
             }
         await _safe_io(store.write_extraction, project_id, doc_id, ext_type, payload)
         # 入 doc_extractions（INSERT OR REPLACE 以 (doc_id, extract_type) 唯一）
+        # ✅ R13 补全（2026-10-06）：写路径判空 —— 失败时告警但不阻断后续类型写入
         conf = _avg_confidence(payload)
-        await db.execute(
+        _ecur = await db.execute(
             "INSERT INTO doc_extractions (extraction_id, doc_id, project_id,"
             " extract_type, extract_data, confidence, source_refs,"
             " extract_time, extract_engine, status, created_at)"
@@ -670,6 +706,9 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
              _jdump(payload), conf,
              _jdump(_collect_source_refs(payload)), now,
              "ai-extractor-v1", "success", now))
+        if _ecur is None:
+            logger.warning("提取层物化落库 doc_extractions 失败（db.execute 返回 None，R13）：type=%s doc=%s",
+                           ext_type, doc_id)
         written_types.append(ext_type)
     await db.commit()
 
@@ -828,18 +867,42 @@ async def detect_cross_source_conflicts(
     取值一致的同名解析项即消解证据）。
     仅程序判定、零 LLM；裁决权在人工（auto_resolvable=False）。
     """
+    # ✅ 2026-10-06：name/value 切分统一走 facts_extractor 单一出口
+    from app.services.facts_extractor import extract_value_from_markdown_line
+
     cur = await db.execute(
         "SELECT id, label, content FROM bid_analysis_items "
         "WHERE project_id=? AND status='success'", (project_id,))
-    bid_rows = [dict(r) for r in await cur.fetchall()]
+    # ✅ R13 补全（2026-10-06）：读路径降级为空列表。
+    if cur is None:
+        logger.warning("跨源冲突检测查询解析项失败（db.execute 返回 None）：%s", project_id)
+        bid_rows = []
+    else:
+        bid_rows = [dict(r) for r in await cur.fetchall()]
 
     cur = await db.execute(
         "SELECT id, title, content FROM global_facts WHERE project_id=?", (project_id,))
-    gf_rows = [dict(r) for r in await cur.fetchall()]
+    # ✅ R13 补全（2026-10-06）：读路径降级为空列表。
+    if cur is None:
+        logger.warning("跨源冲突检测查询全局事实失败（db.execute 返回 None）：%s", project_id)
+        gf_rows = []
+    else:
+        gf_rows = [dict(r) for r in await cur.fetchall()]
 
     def _value(content: str) -> str:
+        """事实行取值 —— 复用 facts_extractor 单一出口。
+
+        ✅ 2026-10-06 修复：旧实现 `c.split(":", 1)[-1].strip().lstrip("- ")`
+        是本文件内第三套 name/value 切分，两个缺陷会让跨来源冲突检测**误报**：
+          ① 只认半角冒号 —— 全角分隔的行（`- 名称：值`）走 else 分支，
+             取值变成整行（含名称本身）→ 与另一来源的同名事实比对必然不等
+             → 凭空产出一条「跨来源取值冲突」；
+          ② `lstrip("- ")` 把值开头的负号吃掉（`-5℃` → `5℃`）。
+        """
         c = (content or "")
-        return c.split(":", 1)[-1].strip().lstrip("- ").strip() if ":" in c else c.strip()
+        if ":" in c or "：" in c:
+            return extract_value_from_markdown_line(c)[1]
+        return c.strip()
 
     # norm_name -> [ (source, raw_name, value, gf_id|None) ]
     by_name: dict[str, list[tuple[str, str, str, str | None]]] = {}
@@ -901,9 +964,25 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
 
     cur = await db.execute(
         "SELECT id, group_id, title, content, category, fact_key, source_ref,"
-        " confidence, is_simulated, has_conflict, conflict_keys "
+        " confidence, is_simulated, is_stale, has_conflict, conflict_keys "
         "FROM global_facts WHERE project_id=?", (project_id,))
-    rows = [dict(r) for r in await cur.fetchall()]
+    # ✅ R13 补全（2026-10-06）：读路径降级为空列表 —— 无事实则无冲突可检。
+    if cur is None:
+        logger.warning("交叉校验查询全局事实失败（db.execute 返回 None），按空集处理：%s", project_id)
+        rows = []
+    else:
+        rows = [dict(r) for r in await cur.fetchall()]
+
+    # ✅ 2026-10-06：value 回解改走 facts_extractor 单一出口。
+    #    旧实现是本文件内第二套 name/value 切分：`c.split(":", 1)`。
+    #    两个缺陷：
+    #      ① 只认半角冒号 —— `- 名称：值`（全角）走 else 分支，value 变成
+    #         整行 `- 名称：值`（**把名称也吞进取值**）；
+    #      ② `c.split(":", 1)[-1].strip().lstrip("- ")` 会把值开头的
+    #         负号/连字符一起吃掉（`-5℃` → `5℃`）。
+    #    facts_extractor.extract_value_from_markdown_line 已在 2026-10-06
+    #    修好「全角冒号优先导致错位」的同类缺陷，此处复用避免二次实现分叉。
+    from app.services.facts_extractor import extract_value_from_markdown_line
 
     class _Item:
         def __init__(self, row: dict):
@@ -912,7 +991,7 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
             self.name = row.get("title") or ""
             self.category = row.get("category") or ""
             c = (row.get("content") or "")
-            self.value = c.split(":", 1)[-1].strip().lstrip("- ").strip() if ":" in c else c
+            _, self.value = extract_value_from_markdown_line(c)
             self.source = row.get("source_ref") or ""
             # ✅ 修复（P7，2026-09-23）：旧 _Item 缺 confidence 属性，而
             #    facts_cross_validators._side 会读 item.confidence —— 项目存在材料/设计
@@ -923,6 +1002,12 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
             except (TypeError, ValueError):
                 self.confidence = 1.0
             self.has_conflict = bool(row.get("has_conflict"))
+            # ✅ 2026-10-06：补齐两个门控维度。facts_cross_validators 的
+            #    _is_adjudicable 会读它们（缺属性按可裁决处理 → 旧行为）。
+            #    此前 shim 不暴露 → 模拟值 / 过期事实也会被判冲突并回写
+            #    has_conflict，与「注入门控已排除它们」自相矛盾。
+            self.is_simulated = bool(row.get("is_simulated"))
+            self.is_stale = bool(row.get("is_stale"))
             self.conflict_values = []
             try:
                 raw = row.get("conflict_keys")
@@ -993,17 +1078,25 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
             reset_ids.add(it.id)
 
     # 先置 1 再清 0，reset 恒为最终裁决。
+    # ✅ R13 补全（2026-10-06）：写路径判空 —— UPDATE 失败时告警但仍 commit
+    #    （报告 INSERT 在后面，不应被前面的 UPDATE 失败拖累）。
     if final_keep:
         ph = ",".join("?" * len(final_keep))
-        await db.execute(
+        _kcur = await db.execute(
             f"UPDATE global_facts SET has_conflict=1 "
             f"WHERE id IN ({ph})", list(final_keep))
+        if _kcur is None:
+            logger.warning("交叉校验置位 has_conflict=1 失败（db.execute 返回 None，R13）：%s",
+                           project_id)
 
     if reset_ids:
         ph = ",".join("?" * len(reset_ids))
-        await db.execute(
+        _rcur = await db.execute(
             f"UPDATE global_facts SET has_conflict=0 "
             f"WHERE id IN ({ph})", list(reset_ids))
+        if _rcur is None:
+            logger.warning("交叉校验消解 has_conflict=0 失败（db.execute 返回 None，R13）：%s",
+                           project_id)
 
 
     report = {
@@ -1016,11 +1109,14 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
         "flagged_fact_ids": sorted(i for i in final_keep if i),
         "checked_at": _now(),
     }
-    await db.execute(
+    _rcur2 = await db.execute(
         "INSERT INTO doc_validation_reports (id, doc_id, project_id, kind,"
         " report_json, created_at) VALUES (?,?,?,?,?,?)",
         (str(uuid.uuid4()), doc_id, project_id, "cross_check", _jdump(report),
          _now()))
+    if _rcur2 is None:
+        logger.warning("交叉校验报告落库 doc_validation_reports 失败（db.execute 返回 None，R13）：%s",
+                       project_id)
     await db.commit()
     return report
 
@@ -1030,9 +1126,18 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
 # ---------------------------------------------------------------------------
 
 async def purge_document(db, *, doc_id: str, project_id: str) -> None:
-    await db.execute("DELETE FROM doc_chunks WHERE doc_id=?", (doc_id,))
-    await db.execute("DELETE FROM doc_extractions WHERE doc_id=?", (doc_id,))
-    await db.execute("DELETE FROM doc_validation_reports WHERE doc_id=?", (doc_id,))
+    # ✅ R13 补全（2026-10-06）：删除是清理操作，失败时告警但不中断后续删除
+    #    （尽力清理，部分清理优于完全不清理）。
+    delete_sqls = (
+        "DELETE FROM doc_chunks WHERE doc_id=?",
+        "DELETE FROM doc_extractions WHERE doc_id=?",
+        "DELETE FROM doc_validation_reports WHERE doc_id=?",
+    )
+    for idx, sql in enumerate(delete_sqls):
+        _cur = await db.execute(sql, (doc_id,))
+        if _cur is None:
+            logger.warning("文档清理 DELETE#%d 未生效（db.execute 返回 None，R13）：%s",
+                           idx, doc_id)
     await db.commit()
     await _safe_io(store.remove_from_index, project_id, doc_id)
     await _safe_io(store.delete_doc_tree, project_id, doc_id)
@@ -1060,7 +1165,12 @@ async def backfill_document(db, *, doc_id: str, project_id: str,
     result: dict = {"ok": True, "doc_id": doc_id}
     cur = await db.execute(
         "SELECT COUNT(*) AS n FROM doc_chunks WHERE doc_id=?", (doc_id,))
-    has_chunks = int(((await cur.fetchone()) or ["0"])[0] or 0) > 0
+    # ✅ R13 补全（2026-10-06）：读路径降级为「无分块」→ 若有 parsed_markdown 则回填。
+    if cur is None:
+        logger.warning("回填查询分块计数失败（db.execute 返回 None），按无分块处理：%s", doc_id)
+        has_chunks = False
+    else:
+        has_chunks = int(((await cur.fetchone()) or ["0"])[0] or 0) > 0
     if parsed_markdown and not has_chunks:
         info = await ingest_parse_result(
             db, doc_id=doc_id, project_id=project_id, file_name=file_name,

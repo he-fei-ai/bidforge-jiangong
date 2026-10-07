@@ -443,6 +443,37 @@ def _clamp(value, lo, hi, fallback):
     return max(lo, min(hi, v))
 
 
+def _setting_num(name: str, default: float, *, lo: float | None = None,
+                 hi: float | None = None) -> float:
+    """读取数值型 ``settings`` 的**单一出口**。
+
+    ⚠️ 2026-10-06（B-6）：禁用 ``getattr(settings, name, default) or default``
+       这一写法 —— 它把用户**显式配置的 0** 当成「未配置」而静默回落到默认值。
+       本仓已在 ``bid_analysis`` 修过同一类问题（AGENTS §4.15.10），
+       本模块当时只改了一处、其余仍留旧写法。语义改为：
+         * 未配置 / 配置为 ``None`` / 配置为空串 → 用 ``default``；
+         * 显式配置 ``0`` → **尊重用户意图**（再按 ``lo``/``hi`` 做安全钳制）；
+         * 配成非数值 → 记 WARNING 后回落 ``default``（不静默）。
+
+    调用方仍可用 ``max(1.0, ...)`` 等下游守卫把 0 抬到安全值；
+    本函数只保证「不把显式 0 当成未配置」这一件事。
+    """
+    raw = getattr(settings, name, None)
+    if raw is None or raw == "":
+        val = float(default)
+    else:
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            logger.warning("配置项 %s 取值非法（%r），已按默认 %s 处理", name, raw, default)
+            val = float(default)
+    if lo is not None:
+        val = max(lo, val)
+    if hi is not None:
+        val = min(hi, val)
+    return val
+
+
 #: 合法计费方式（白名单）。脏值（拼错/旧版本导入数据）此前会原样入库，
 #: 前端计费方式列只能显示原始字符串，且「包月必须手填地址」的联动校验也会被绕过。
 _VALID_PLANS = ("pay_as_you_go", "coding_plan")
@@ -473,6 +504,15 @@ def normalize_request_mode(raw) -> str:
 def request_mode_label(raw) -> str:
     """请求方式的中文标签（供接口回传/日志使用）。"""
     return "流式请求" if normalize_request_mode(raw) == "stream" else "普通请求"
+
+
+#: 探测/校验侧可直接使用的请求方式值域（单一出口）。
+#: ⚠️ 2026-10-06（B-9）：``routers/ai_config/connectivity.py::test_config`` 此前
+#:    自行写了一份 ``raw_mode in ("normal", "stream")`` 判定（还额外引入了一个
+#:    不在白名单里的第三值 ``auto``）。同一个值域两份实现 → 白名单一旦扩展
+#:    （如新增 ``sse``），探测侧会静默把新值当 ``auto`` 处理，与运行时口径分叉。
+#:    现统一从本模块取白名单，``auto`` 语义（未指定=按既有策略）仍留在调用方。
+VALID_REQUEST_MODES: tuple[str, ...] = tuple(_VALID_REQUEST_MODES)
 
 
 def clamp_config_numbers(raw: dict) -> dict:
@@ -526,6 +566,46 @@ _NUMBER_LABELS = {
 }
 
 
+#: 自定义供应商的哨兵名（不在 ``PROVIDER_PRESETS`` 中，必须自带 Base URL）。
+CUSTOM_PROVIDER_NAME = "custom"
+
+
+def resolve_config_base_url(provider_name: str, plan: str, raw_base_url: str) -> str:
+    """「计费方式 ↔ Base URL」联动校验与回填的**唯一出口**。
+
+    规则（与前端表单联动校验同口径）：
+      - 自定义供应商：必须手填 Base URL；
+      - 包月套餐（``coding_plan``）：必须手填 Base URL（各平台包月接入点
+        不同于按量计费，落到按量地址会按错误的价格体系扣费/直接 402）；
+      - 按量计费（``pay_as_you_go``）：未填地址时自动回填平台预设地址。
+
+    ⚠️ 2026-10-06（B-1）：此前这段逻辑只内嵌在 ``save_ai_config`` 里，
+      ``/ai/config/import``（外部导入文件）完全绕过 —— 导入一条
+      ``plan=coding_plan`` 且 ``base_url`` 为空的配置会落库成功，而运行时
+      ``_build_provider`` 对「已知预设 + 空地址」一律回退到**按量计费**地址，
+      于是「包月配置实际按量调用」（静默的计费方式错配，且界面看不出异常）。
+      现收敛为单一出口，保存与导入共用。
+
+    :raises ValueError: 违反上述任一联动规则时抛出（调用方决定是 400 还是跳过）。
+    """
+    base_url = normalize_base_url(raw_base_url or "")
+    if provider_name == CUSTOM_PROVIDER_NAME:
+        if not base_url:
+            raise ValueError("自定义供应商必须填写 Base URL")
+    elif plan == "coding_plan":
+        if not base_url:
+            raise ValueError("包月套餐（Coding Plan）必须手动填写 API 地址，"
+                             "包月接入点不同于按量计费")
+    elif plan == "pay_as_you_go":
+        if not base_url:
+            preset = PROVIDER_PRESETS.get(provider_name)
+            if preset:
+                base_url = preset.get("base_url", "")
+    if not base_url:
+        raise ValueError("Base URL 不能为空（按量计费请选择已知供应商或手动填写地址）")
+    return base_url
+
+
 def clamp_warnings(raw: dict) -> list[str]:
     """返回「数值字段被静默收敛」的提示文案列表（未越界/未传时为空）。
 
@@ -556,7 +636,6 @@ async def save_ai_config(data: dict) -> str:
     enc = encrypt_api_key(data.get("api_key", ""))
     plan = normalize_plan(data.get("plan"))
     provider_name = (data.get("provider_name") or "").strip()
-    base_url = normalize_base_url(data.get("base_url") or "")
     model = (data.get("model") or "").strip()
     remark = (data.get("remark") or "").strip()[:2000]
 
@@ -565,23 +644,8 @@ async def save_ai_config(data: dict) -> str:
     if not model:
         raise ValueError("模型名称不能为空")
 
-    # 计费方式与 Base URL 联动校验：
-    # - 自定义供应商：必须手填 Base URL
-    # - 包月套餐（Coding Plan）：必须手填 API 地址（各平台包月接入点不同于按量计费）
-    # - 按量计费：未填地址时自动回填平台预设地址
-    if provider_name == "custom":
-        if not base_url:
-            raise ValueError("自定义供应商必须填写 Base URL")
-    elif plan == "coding_plan":
-        if not base_url:
-            raise ValueError("包月套餐（Coding Plan）必须手动填写 API 地址，包月接入点不同于按量计费")
-    elif plan == "pay_as_you_go":
-        if not base_url:
-            preset = PROVIDER_PRESETS.get(provider_name)
-            if preset:
-                base_url = preset.get("base_url", "")
-    if not base_url:
-        raise ValueError("Base URL 不能为空（按量计费请选择已知供应商或手动填写地址）")
+    # 计费方式与 Base URL 的联动校验/回填（统一出口，与 /ai/config/import 同口径）
+    base_url = resolve_config_base_url(provider_name, plan, data.get("base_url") or "")
 
     nums = clamp_config_numbers(data)
     max_tokens = nums["max_tokens"]
@@ -687,7 +751,11 @@ async def apply_config_concurrency() -> int | None:
                                c, _MAX_CONCURRENCY, _MAX_CONCURRENCY)
                 return _MAX_CONCURRENCY
     except Exception as e:
-        logger.debug("应用配置并发失败（不影响服务）: %s", e)
+        # ✅ 2026-10-06（B-8 · 级别对称性）：成功路径记 INFO、失败路径记
+        #    DEBUG —— DEBUG 在默认日志级别下不落盘，于是「并发数没生效」
+        #    这类静默失效在日志里完全不可见（与 AGENTS §3.1.6「可恢复异常用
+        #    WARNING」相悖）。降级仍不阻断服务，但必须可观测。
+        logger.warning("应用配置并发失败（不影响服务，本次沿用上一次生效值）: %s", e)
     return None
 
 
@@ -773,18 +841,23 @@ _PROVIDER_RELIABILITY_WINDOW = 50            # 每个 provider 统计最近 N �
 #    旧实现硬编码 0.50 与 _order_candidates 使用的 ai_provider_dead_success_rate(0.20)
 #    冲突，导致 20%~50% 成功率的候选被 _fallback_chain 静默剔除（即便 _order_candidates
 #    认为"未死"保留），降级覆盖被悄悄收窄，违反"配置化优先、不隐式钳制"约束。
-_PROVIDER_MIN_SUCCESS_RATE = float(
-    getattr(settings, "ai_provider_dead_success_rate", 0.20) or 0.20)
+_PROVIDER_DEAD_SUCCESS_RATE = _setting_num("ai_provider_dead_success_rate", 0.20)
+# ✅ 2026-10-06（B-6 · 阈值单一源）：此前同一个 setting
+#    ``ai_provider_dead_success_rate`` 被**读成两个模块常量**
+#    （``_PROVIDER_MIN_SUCCESS_RATE`` 与 ``_PROVIDER_DEAD_SUCCESS_RATE``，
+#    同一个 ``getattr(...) or 0.20`` 写了两遍），两处各自演进 → 一旦只改一处，
+#    「降级链成功率过滤」与「死配置剔除」会静默用不同门限（同一个 provider
+#    在两条链路上一个被剔除、一个被保留）。现统一为同一常量派生。
+_PROVIDER_MIN_SUCCESS_RATE = _PROVIDER_DEAD_SUCCESS_RATE
 _PROVIDER_MIN_SAMPLES = 5                    # 成功率统计生效的最小样本数
 # ✅ P0-1（2026-09-17）：死配置剔除 / 主配置后置门限
 #    实测 volcengine 21 次调用 100% 失败、spark 78.6% 失败 —— 留在候选链上
 #    只会白等一轮网络往返；主配置（sensetime）44% 失败却因"无条件首位"让
 #    成功率仅 3.5% 的兜底 agnes 永远排在最后。
+#    注意：样本门槛两侧不同（过滤 5 / 死配置 10）是**有意**的 ——
+#    过滤只影响降级链排序，死配置会被直接移除，故要求更多样本。
 _PROVIDER_DEAD_MIN_SAMPLES = 10
-_PROVIDER_DEAD_SUCCESS_RATE = float(
-    getattr(settings, "ai_provider_dead_success_rate", 0.20) or 0.20)
-_PROVIDER_DEMOTE_SUCCESS_RATE = float(
-    getattr(settings, "ai_provider_demote_success_rate", 0.60) or 0.60)
+_PROVIDER_DEMOTE_SUCCESS_RATE = _setting_num("ai_provider_demote_success_rate", 0.60)
 
 # ---------- AI 调用实时状态（「后台任务状态栏」轮询读取，进程内存态） ----------
 # 记录正在进行的调用数、本次会话累计成败数与最近一次调用结果 ——
@@ -1340,7 +1413,13 @@ async def resolve_scene_config(scene: str) -> dict | None:
             scene)
     try:
         routes = await load_scene_routes()
-    except Exception:
+    except Exception as e:
+        # ✅ 2026-10-06（B-3 · 零日志静默失效）：本分支此前是裸
+        #    ``except Exception: return None``（同文件 :1352 的等价分支有日志），
+        #    于是「场景路由表读不出来 / 缓存层抛错」时场景路由静默停摆，
+        #    用户在界面上仍看到路由配置完好、AI 却一直用主配置 —— 无任何线索。
+        #    回落主配置的行为不变（fail-soft），但必须留下可观测记录。
+        logger.warning("读取场景路由失败，场景 %r 本次回落主配置: %s", scene, e)
         return None
     cid = routes.get(scene)
     if not cid:
@@ -1453,10 +1532,20 @@ async def _flush_audit_rows_once(rows: list) -> None:
         try:
             await conn.executemany(_AUDIT_INSERT_FULL, rows)
         except Exception:
+            # ✅ 2026-10-06（B-5 · 降级写入的长度守卫）：降级 INSERT 依赖
+            #    **元组按位切片**（13 列 → r[:11] → r[:10]）与各自的列数严格
+            #    对齐。一旦将来在元组**中间**插入新字段（例如在 error 之前
+            #    插一列），切片不会报错，而是把「错位的值」静默写进降级表 ——
+            #    比直接抛异常糟糕得多（数据看似正常、实则全错）。
+            #    故每级降级前先断言行宽足够，不足则跳过该级并记 ERROR。
             try:
-                # 旧库缺 config_id/base_url：丢弃配置身份，保留 scene
-                await conn.executemany(_AUDIT_INSERT_NO_IDENTITY,
-                                       [r[:11] for r in rows])
+                if all(len(r) >= 11 for r in rows):
+                    await conn.executemany(_AUDIT_INSERT_NO_IDENTITY,
+                                           [r[:11] for r in rows])
+                else:
+                    raise ValueError(
+                        f"审计行宽 {min(len(r) for r in rows)} < 11，无法按"
+                        "「含 scene、不含配置身份」降级写入（可能已变更审计元组结构）")
                 if not _audit_legacy_warned:
                     _audit_legacy_warned = True
                     logger.error(
@@ -1465,8 +1554,16 @@ async def _flush_audit_rows_once(rows: list) -> None:
                         "否则可靠性统计无法按配置身份隔离")
             except Exception:
                 # 更旧库缺 scene：再降一级，审计行不丢
-                await conn.executemany(_AUDIT_INSERT_LEGACY,
-                                       [r[:10] for r in rows])
+                if all(len(r) >= 10 for r in rows):
+                    await conn.executemany(_AUDIT_INSERT_LEGACY,
+                                           [r[:10] for r in rows])
+                else:
+                    logger.error(
+                        "审计行宽 %d < 10，无法降级写入（可能已变更审计元组结构），"
+                        "本批 %d 条审计记录丢弃",
+                        min(len(r) for r in rows), len(rows))
+                    await conn.commit()
+                    return
                 if not _audit_legacy_warned:
                     _audit_legacy_warned = True
                     logger.error(
@@ -1752,6 +1849,15 @@ async def _log_audit(provider_name: str, model: str, action: str,
                     stats["ok"] += 1
                 else:
                     stats["fail"] += 1
+    except Exception as e:
+        # ✅ 2026-10-06（B-4 · 裸 pass 吞掉可观测性）：可靠性统计异常此前
+        #    与审计写入共用一个 ``except Exception: pass``，既不留日志，
+        #    又让「统计没更新」与「审计没落库」两种后果无法区分。
+        #    统计失真会**直接影响候选排序**（死配置剔除 / 主配置后置 /
+        #    降级链分档），静默失真 = 排序依据悄悄错。故单独告警。
+        logger.warning("更新 Provider 实时可靠性统计失败（%s/%s action=%s）: %s",
+                       provider_name, model, action, e)
+    try:
         # 原有审计缓冲逻辑
         with _audit_lock:
             _audit_buffer.append((
@@ -1764,8 +1870,11 @@ async def _log_audit(provider_name: str, model: str, action: str,
             due = time.time() - _audit_last_flush["ts"] >= _AUDIT_FLUSH_INTERVAL
         if buf_len >= _AUDIT_BATCH_SIZE or (buf_len and due):
             await _flush_audit_buffer()
-    except Exception:
-        pass
+    except Exception as e:
+        # 审计是「尽力而为」，写入失败绝不能中断 AI 调用主流程（保持原语义）；
+        # 但必须留痕 —— 否则「用量统计/审计日志」整块功能静默为空而无人知晓。
+        logger.warning("写入 AI 调用审计缓冲失败（%s/%s action=%s，本次审计记录丢失）: %s",
+                       provider_name, model, action, e)
 
 
 def _reliability_key(provider_name: str, model: str = "",
@@ -2402,6 +2511,9 @@ async def _attempt_candidate(c: dict, messages: list, *,
     # ✅ 2026-09-22（调用次数优化 O3）：思考吞噬重试的开关与上限
     _retry_thinking = bool(getattr(settings, "ai_retry_on_thinking_exhausted", True))
     _reasoning_cap = max(0, int(getattr(settings, "ai_reasoning_max_tokens", 4096) or 0))
+    # ✅ 2026-10-07：非空正文被 max_tokens 截断时的重试（与 O3 同构，严格一次）
+    _retry_partial = bool(getattr(settings, "ai_retry_on_partial_truncation", True))
+    _best_partial: str | None = None
     # JSON 模式优先：支持则用，被厂商拒绝则同 Provider 立即回退普通模式
     for use_json in ([True, False] if json_mode else [False]):
         mt = base_mt
@@ -2443,6 +2555,27 @@ async def _attempt_candidate(c: dict, messages: list, *,
                                      cached_tokens=u["cached_tokens"], scene=scene,
                                      config_id=c.get("config_id", ""),
                                      base_url=c.get("base_url", ""))
+                    # ✅ 2026-10-07（生产库实证）：非空正文 + finish_reason=length/max_tokens
+                    #    = 被 max_tokens 截断的半截正文。旧实现直接返回且不留痕 ——
+                    #    生产方案 5 个章节句尾停在半句，用户无从得知，审核/导出照常用。
+                    #    现：先记 WARNING 让截断可观测；开关开启时按 ai_reasoning_max_tokens
+                    #    上限翻倍 max_tokens 重试一次（严格一次），仍截断则返回当前结果。
+                    _finish = str(getattr(provider, "last_finish_reason", "") or "").lower()
+                    if _finish in ("length", "max_tokens"):
+                        logger.warning(
+                            "Provider %s 正文疑似被 max_tokens 截断"
+                            "（finish_reason=%s，%d 字）", pname, _finish, len(result or ""))
+                        if _retry_partial:
+                            _retry_partial = False   # 严格重试一次，避免连锁翻倍
+                            _best_partial = result   # 重试后失败时用它兜底
+                            _nxt = (min(mt * 2, _reasoning_cap)
+                                    if _reasoning_cap > 0 else mt * 2)
+                            if _nxt > mt:
+                                logger.warning(
+                                    "Provider %s 正文被截断，max_tokens 由 %d 翻倍至 %d 重试一次",
+                                    pname, mt, _nxt)
+                                mt = _nxt
+                                continue
                     return result, None
                 except asyncio.CancelledError:
                     # ✅ 对冲/停止被取消：只登记实时状态（保证 in_flight 不泄漏），
@@ -2499,6 +2632,13 @@ async def _attempt_candidate(c: dict, messages: list, *,
                         _note_quota_failure(pname, e)
                     circuit_breaker.record_failure(pname, is_429=(status == 429))
                     logger.error("Provider %s 调用失败: %s", pname, e)
+                    if _best_partial:
+                        # 截断重试后失败：返回已拿到的半截正文，而不是丢弃它再降级到
+                        # 下一候选（本候选已产出可用内容：半截 > 拿不到）。
+                        logger.warning(
+                            "Provider %s 截断重试后失败，返回已获取的部分正文: %s",
+                            pname, _error_summary(e))
+                        return _best_partial, None
                     return "", e
     return "", last_err
 
@@ -2633,7 +2773,8 @@ async def _gate_candidates(candidates: list[dict],
     if usable:
         return usable, last_err
 
-    if skipped_disabled > 0 and skipped_cb == 0 and skipped_no_key == 0:
+    if (skipped_disabled > 0 and skipped_cb == 0 and skipped_no_key == 0
+            and skipped_key_broken == 0):
         raise RuntimeError(
             "所有候选 Provider 均被运行时开关禁用（disabled_providers="
             f"{sorted(_disabled)}），请在「文本模型配置 → 运行时厂商开关」恢复后再试")
@@ -2663,10 +2804,17 @@ async def _gate_candidates(candidates: list[dict],
             "所有候选 Provider 均被熔断器跳过，请等待冷却重试 "
             f"(skipped_no_key={skipped_no_key}, skipped_cb={skipped_cb})")
     if skipped_key_broken and not skipped_no_key:
+        # ✅ 2026-10-06（B-2 · 归因准确）：此前「全部候选均被禁用」的判定
+        #    只看 skipped_no_key，**漏掉 skipped_key_broken** —— 当候选里同时
+        #    有一条「密文解不开」和一条「被禁用」时，错误文案归因成
+        #    「都被禁用了，请去恢复开关」，用户去恢复开关后问题依旧（真因是密钥）。
+        #    现把 key_broken 纳入判据，并在两类原因并存时同时如实报出。
+        _extra = (f"（另有 {skipped_disabled} 条候选被运行时开关禁用）"
+                  if skipped_disabled else "")
         raise RuntimeError(
             "候选 Provider 已保存的 API Key 无法解密（常见于更换过加密密钥 "
             "FERNET_KEY 或删除过 data/secret_key.key），"
-            "请在「文本模型配置」重新填写并保存 Key")
+            f"请在「文本模型配置」重新填写并保存 Key{_extra}")
     if skipped_no_key > 0 or skipped_key_broken > 0:
         raise RuntimeError(
             "没有配置任何有 API Key 的 Provider"

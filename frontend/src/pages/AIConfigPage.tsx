@@ -10,15 +10,18 @@ import {
   ArrowUpOutlined, ArrowDownOutlined, SortAscendingOutlined,
   ExportOutlined, ImportOutlined, ReloadOutlined, ClearOutlined,
   WarningOutlined, KeyOutlined, HistoryOutlined, NodeIndexOutlined,
+  HeartOutlined,
 } from "@ant-design/icons";
 
-import { aiApi } from "../api";
+import { aiApi, systemApi } from "../api";
+import type { GovernanceSettings } from "../api";
 import { useAntdMessageHub } from "../utils/activityCenter";
 import { TtlCache } from "../utils/ttlCache";
 import { useAiConfigGovernance } from "../hooks/useAiConfigGovernance";
 // ✅ D7（2026-09-23）：页面直接引用后端契约类型（见 types/aiConfig.ts）
 import type {
   AIAuditLogItem, AIConfigAuditChange, AIConfigAuditItem, AIConfigItem,
+  AIConfigsHealthResponse,
   AIConfigPrecheckResponse, AIConfigPresetRaw, AIDynamicModel, AIHealth,
   AINetworkProbe, AIProviderPlan, AIProviderPreset, AIRuntimeResponse,
   AISceneRouteItem, AIUsageStats,
@@ -58,6 +61,25 @@ const HEALTH_LABELS: Record<string, string> = {
   not_configured: "未配置",
   env_corrupt: "环境值异常",
 };
+
+/**
+ * 并发数输入框上限的**兜底值**（= 后端 settings.max_concurrency 默认 5）。
+ *
+ * 真实上限以 GET /ai/health 的 `max_concurrency` 为唯一口径 —— 后端该值同源于
+ * `settings.max_concurrency`（可由环境变量 MAX_CONCURRENCY 配置；见
+ * provider_factory._MAX_CONCURRENCY 与 AdaptiveConcurrencyController.max_c 的单一源收敛）。
+ * 界面若写死 5，管理员上调上限后用户在界面上「填不上去」；下调时又会「填了被静默收敛」
+ * （历史缺陷：界面可填 8 / 后端上限 5）。故此处只保留兜底，不参与正常口径。
+ */
+export const AI_CONCURRENCY_MAX_FALLBACK = 5;
+
+/** 解析并发上限：health 未就绪或值非法时回落兜底，**绝不当作无上限放行**。 */
+export function resolveConcurrencyMax(
+  health: { max_concurrency?: number | null } | null | undefined,
+): number {
+  const v = Number(health?.max_concurrency);
+  return Number.isFinite(v) && v > 0 ? v : AI_CONCURRENCY_MAX_FALLBACK;
+}
 
 // ✅ D7（2026-09-23）：供应商预设与动态模型列表直接复用后端契约类型，
 //    不再各写一份「长得像但字段可选性不同」的本地接口（此前 tsc 因二者不兼容报错，
@@ -130,6 +152,12 @@ export default function AIConfigPage() {
     handleSceneRouteChange, handleSaveRuntime, handleEnvChange,
     setRuntimeDraft, setRollingBack, setRefresh,
   } = governance;
+
+  // ===== F2：提示词治理运行时开关（GET/PUT /system/governance）=====
+  const [govDefense, setGovDefense] = useState(false);
+  const [govBudget, setGovBudget] = useState<number>(0);
+  const [govLoading, setGovLoading] = useState(false);
+  const [govSaving, setGovSaving] = useState(false);
 
   // configs 变化时按 priority ASC 同步可排序的降级链（后端 priority 越小越先尝试）
   useEffect(() => {
@@ -255,7 +283,41 @@ export default function AIConfigPage() {
     }
   };
 
+  // 治理开关：初次挂载拉取回填；onChange 立即写回（内存态）
+  const loadGovernance = async () => {
+    setGovLoading(true);
+    try {
+      const { data } = await systemApi.getGovernance();
+      setGovDefense(!!data.prompt_injection_defense);
+      setGovBudget(data.prompt_context_budget ?? 0);
+    } catch {
+      // 治理面板独立加载失败不阻断主配置页
+    } finally {
+      setGovLoading(false);
+    }
+  };
+
+  const saveGovernance = async (patch: Partial<GovernanceSettings>) => {
+    setGovSaving(true);
+    try {
+      const body: GovernanceSettings = {
+        prompt_context_budget: govBudget,
+        prompt_injection_defense: govDefense,
+        ...patch,
+      };
+      const { data } = await systemApi.updateGovernance(body);
+      setGovDefense(!!data.prompt_injection_defense);
+      setGovBudget(data.prompt_context_budget ?? 0);
+      msg.success("提示词治理开关已更新（内存态，重启后回 .env 默认）");
+    } catch (e: any) {
+      msg.error(e?.message || "保存提示词治理开关失败");
+    } finally {
+      setGovSaving(false);
+    }
+  };
+
   useEffect(() => { load(); setRefresh(load); }, []);
+  useEffect(() => { void loadGovernance(); }, []);
 
   const handleSave = async () => {
     try {
@@ -423,8 +485,24 @@ export default function AIConfigPage() {
           const { data } = await aiApi.rollbackConfig(
             record.config_id, record.id, opt.includeActive);
           if (data?.warning) msg.warning(data.warning);
+          // ✅ 2026-10-06（G6）：回滚结果如实回显。旧实现只说「已回滚（N 个字段）」，
+          // 用户既不知道**哪些字段**被还原，也不知道「当前使用」标记是否被还原 ——
+          // 而后者会直接改变主配置身份，是本次操作最需要确认的部分。
+          const restored: Record<string, any> = data?.restored || {};
+          const restoredFields = Object.entries(restored)
+            .filter(([, v]) => v !== undefined && v !== null && v !== "")
+            .map(([k, v]) => `${k}=${v}`)
+            .join("、");
+          const activeNote = data?.active_restored === true
+            ? "（已还原「当前使用」标记）"
+            : data?.active_restored === false
+              ? "（已解除「当前使用」标记）"
+              : "";
           const n = (data.changes || []).length;
-          msg.success(`已回滚${n ? `（${n} 个字段）` : ""}`);
+          msg.success(
+            `已回滚${n ? `（${n} 个字段）` : ""}${restoredFields ? `：${restoredFields}` : ""}${activeNote}`,
+            6,
+          );
           await load();
         } catch (e: any) {
           msg.error(e.response?.data?.detail || e.message || "回滚失败");
@@ -470,8 +548,14 @@ export default function AIConfigPage() {
       const map: Record<string, any> = {};
       (data.items || []).forEach((it: any) => { map[it.id] = it; });
       setPrecheckAllResult(map);
+      // ✅ 2026-10-06（G3）：后端把「未填地址 → 已跳过」单列回传（skipped_no_url），
+      // 旧版只报 ok/fail 两条计数，用户会误以为跳过的配置「不存在」。
+      const skippedNoUrl = data.skipped_no_url || 0;
+      const skipNote = skippedNoUrl > 0 ? `，${skippedNoUrl} 条未填地址已跳过` : "";
       if (data.fail_count > 0) {
-        msg.warning(`${data.ok_count}/${data.total} 个配置网络可达，${data.fail_count} 个不可达`);
+        msg.warning(`${data.ok_count}/${data.total} 个配置网络可达，${data.fail_count} 个不可达${skipNote}`, 6);
+      } else if (skippedNoUrl > 0) {
+        msg.warning(`可达 ${data.ok_count}/${data.total} 个配置${skipNote}`, 6);
       } else {
         msg.success(`全部 ${data.total} 个配置网络可达`);
       }
@@ -479,6 +563,36 @@ export default function AIConfigPage() {
       msg.error(e.message || "批量预检失败");
     } finally {
       setPrecheckAllLoading(false);
+    }
+  };
+
+  // ✅ 2026-10-06（G3）：全部配置的可用性体检 —— 一眼看出哪些配置在当前环境下真能用。
+  // 单条「测试连接」只查网络；体检额外查 Key 是否填/可解密、缺地址、环境归属、厂商开关，
+  // 对应后端 GET /ai/configs/health（一次拿到全部配置，不需要逐条点测试）。
+  const [configsHealthLoading, setConfigsHealthLoading] = useState(false);
+  const [configsHealthResult, setConfigsHealthResult] = useState<AIConfigsHealthResponse | null>(null);
+  const handleConfigsHealth = async () => {
+    setConfigsHealthLoading(true);
+    try {
+      const { data } = await aiApi.configsHealth();
+      setConfigsHealthResult(data);
+      const s = data.summary;
+      const issues: string[] = [];
+      if (s.no_key > 0) issues.push(`${s.no_key} 条缺 Key`);
+      if (s.key_broken > 0) issues.push(`${s.key_broken} 条 Key 无法解密`);
+      if (s.no_url > 0) issues.push(`${s.no_url} 条缺地址`);
+      if (s.out_of_env > 0) issues.push(`${s.out_of_env} 条属于其它环境`);
+      if (s.disabled > 0) issues.push(`${s.disabled} 条厂商被禁用`);
+      if (s.network_unreachable > 0) issues.push(`${s.network_unreachable} 条网络不可达`);
+      if (issues.length) {
+        msg.warning(`体检完成：${s.usable}/${s.total} 条可用；${issues.join("、")}`, 6);
+      } else {
+        msg.success(`全部 ${s.total} 条配置在当前环境下均可用`);
+      }
+    } catch (e: any) {
+      msg.error(e.message || "配置体检失败");
+    } finally {
+      setConfigsHealthLoading(false);
     }
   };
 
@@ -497,14 +611,77 @@ export default function AIConfigPage() {
       a.download = `ai-config-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(url);
-      msg.success(`已导出 ${data.count} 条配置（不含 API Key，导入后需重新填写）`);
+      // ✅ 2026-10-06（G1）：导出文件现已附带场景路由与运行时设置，提示用户它们
+      // 也一起备份了（否则换机器导入后仍需逐场景重配）。
+      const extras: string[] = [];
+      if ((data.scene_route_count || 0) > 0) extras.push(`场景路由 ${data.scene_route_count} 条`);
+      // runtime_keys 为可选（旧版导出文件无此键）；先收窄成局部数组，
+      // 块内外均使用同一常量（旧代码块内裸用 data.runtime_keys.length 触发 TS18048）
+      const runtimeKeys = data.runtime_keys || [];
+      if (runtimeKeys.length) extras.push(`运行时设置 ${runtimeKeys.length} 项`);
+      msg.success(
+        `已导出 ${data.count} 条配置（不含 API Key，导入后需重新填写）`
+        + (extras.length ? `，附${extras.join("、")}` : ""),
+      );
     } catch (e: any) {
       msg.error(e.message || "导出失败");
     }
   };
 
   // ✅ 新增：配置导入（覆盖同名或新增，Key 需重新填写）
-  const handleImport = async (file: File) => {
+  //
+  // ✅ 2026-10-06（F-2 · 后端能力未接线）：后端 ``ConfigImportIn`` 一直支持
+  //   ``overwrite``（同名配置覆盖）与 ``set_first_active``（导入后把第一条设为
+  //   「当前使用」），而本页此前**写死 false, false** —— 于是：
+  //     ① 同一条 (provider, model, base_url) 重复导入只能被跳过，用户无法更新参数；
+  //     ② 新机器上导入配置后库里没有任何 is_active=1，只能看到后端那句
+  //        「导入完成，但当前没有任何配置处于『当前使用』状态」的 warning，
+  //        必须手动去列表里逐条点一次「设为当前使用」。
+  //   后端返回的 ``activated_id`` / ``invalid_plan_items`` / ``skip_reasons``
+  //   此前也无任何消费方。现把两个开关接到 UI。
+  const openImportFilePicker = (overwrite: boolean, setFirstActive: boolean) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json,application/json";
+    input.onchange = () => {
+      const f = input.files?.[0];
+      if (f) handleImport(f, overwrite, setFirstActive);
+    };
+    input.click();
+  };
+
+  const handleImportClick = () => {
+    let overwrite = false;
+    let setFirstActive = false;
+    modal.confirm({
+      title: "导入配置",
+      width: 520,
+      content: (
+        <Space direction="vertical" style={{ width: "100%" }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            导入文件需为本系统「导出配置」产生的 JSON（不含 API Key，导入后需逐条补齐）。
+          </Text>
+          <Space>
+            <Switch size="small" onChange={(v) => { overwrite = v; }} />
+            <Text style={{ fontSize: 12 }}>
+              覆盖同名配置（同供应商 + 同模型 + 同地址时更新参数，否则跳过）
+            </Text>
+          </Space>
+          <Space>
+            <Switch size="small" onChange={(v) => { setFirstActive = v; }} />
+            <Text style={{ fontSize: 12 }}>
+              导入后把第一条新配置设为「当前使用」
+            </Text>
+          </Space>
+        </Space>
+      ),
+      okText: "选择文件",
+      cancelText: "取消",
+      onOk: () => openImportFilePicker(overwrite, setFirstActive),
+    });
+  };
+
+  const handleImport = async (file: File, overwrite = false, setFirstActive = false) => {
     setImporting(true);
     try {
       // ✅ 编码修复：剥离文件可能携带的 UTF-8 BOM（\uFEFF），否则 JSON.parse 会报错，
@@ -516,7 +693,34 @@ export default function AIConfigPage() {
         msg.warning("文件中没有可导入的配置");
         return;
       }
-      const { data } = await aiApi.importConfig(items, false, false);
+      // ✅ 2026-10-06（G1）：导出文件可能附带场景路由与运行时设置（active_env /
+      // disabled_providers）—— 随配置一并带走，否则换机器后还要逐场景重配。
+      // 旧版导出文件不含这两个键，两个变量均为 undefined，行为与旧版完全一致。
+      const sceneRoutes = Array.isArray(parsed.scene_routes) ? parsed.scene_routes : undefined;
+      const runtime = parsed.runtime && typeof parsed.runtime === "object" && !Array.isArray(parsed.runtime)
+        ? parsed.runtime as Record<string, string>
+        : undefined;
+      // ✅ 2026-10-06（G1）：真导入前跑一次预演，把「跳过几条 + 为什么跳」提前告知。
+      // 预演不落库、与真导入同一校验口径；预演失败不阻断导入（它只是辅助信息）。
+      try {
+        const { data: dry } = await aiApi.importConfigDryRun(
+          items, overwrite, setFirstActive, sceneRoutes, runtime);
+        if (dry.skipped > 0) {
+          msg.info(
+            `导入预演：将写入 ${dry.would_import} 条，跳过 ${dry.skipped} 条`
+            + (dry.skip_reasons.length ? `（${dry.skip_reasons.join("；")}）` : ""),
+            5,
+          );
+        }
+        const extras: string[] = [];
+        if (dry.scene_routes.planned > 0) extras.push(`场景路由 ${dry.scene_routes.planned} 条`);
+        if (dry.runtime.planned.length) extras.push(`运行时设置 ${dry.runtime.planned.join("、")}`);
+        if (extras.length) msg.info(`导入预演：将同时写入 ${extras.join("、")}`, 5);
+      } catch {
+        // 预演接口不可用（例如后端未重启）时静默跳过，不影响导入本身
+      }
+      const { data } = await aiApi.importConfig(
+        items, overwrite, setFirstActive, sceneRoutes, runtime);
       // ✅ 修复：导入后若系统仍无「当前使用」配置，后端回传 warning（原本只有成功提示，
       //    用户以为导入即可用，实际依旧一个都生成不了）。
       if (data.warning) msg.warning(data.warning);
@@ -524,6 +728,27 @@ export default function AIConfigPage() {
       // ✅ 2026-09-23：导入文件里的越界数值会被后端静默收敛，如实提示条目数
       if (data.clamped_items > 0) {
         msg.warning(`其中 ${data.clamped_items} 条配置的参数超出合法范围（如并发数 > 5、温度 > 2），已按合法区间保存`);
+      }
+      // ✅ 2026-10-06（B-1）：因「计费方式 ↔ Base URL」联动校验被跳过的条目必须
+      //    如实告知原因，否则用户只会看到「跳过 M 条」而不知道该改哪里。
+      if ((data.invalid_plan_items || 0) > 0) {
+        msg.warning(
+          `其中 ${data.invalid_plan_items} 条因配置不完整被跳过：`
+          + (data.skip_reasons || []).join("；"),
+        );
+      }
+      // ✅ 2026-10-06（G1）：随配置一并迁移的场景路由 / 运行时设置必须回显 ——
+      // 迁移完成后场景路由若指向刚导入的配置，用户需要知道它已经生效了。
+      if ((data.migrated_scene_routes || 0) > 0) {
+        msg.success(`场景模型路由已迁移 ${data.migrated_scene_routes} 条`, 6);
+        loadSceneRoutes();
+      }
+      // migrated_runtime_keys 为可选；先收窄成局部数组，避免块内裸用 join
+      // 触发 TS18048（旧代码 if 条件用 ||[] 兜底，模板里却直接 data.xxx.join）
+      const migratedRuntimeKeys = data.migrated_runtime_keys || [];
+      if (migratedRuntimeKeys.length) {
+        msg.success(`运行时设置已迁移：${migratedRuntimeKeys.join("、")}`, 6);
+        loadRuntime();
       }
       load();
     } catch (e: any) {
@@ -956,6 +1181,9 @@ export default function AIConfigPage() {
     },
   ];
 
+  // 并发上限以 /ai/health 下发的 max_concurrency 为准（health 未就绪时回落兜底 5）。
+  const concurrencyMax = resolveConcurrencyMax(health);
+
   return (
     <div className="scroll-area" style={{ overflowY: "auto", overflowX: "hidden" }}>
       {/* 顶部状态卡片 */}
@@ -1259,6 +1487,41 @@ export default function AIConfigPage() {
               </Space>
             </div>
           )}
+          {/* ✅ 2026-10-06（G5）：调用趋势。后端 stats.daily 早就在算，但界面一直
+              没有消费它 —— 用户看不见「哪几天用量高 / 是不是某天之后断崖式归零」。
+              纯 CSS 条形图（零新依赖，符合 AGENTS §3.1.5），失败日单独标红。 */}
+          {(stats.daily?.length || 0) > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontWeight: 600, marginBottom: 8 }}>
+                每日调用趋势
+                <Text type="secondary" style={{ fontSize: 11, marginLeft: 8 }}>
+                  {stats.daily.length} 天 · 条高 = 当日调用次数，红色含失败
+                </Text>
+              </div>
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 64 }}>
+                {stats.daily.map((d: any) => {
+                  const max = Math.max(1, ...stats.daily.map((x: any) => x.calls || 0));
+                  const calls = d.calls || 0;
+                  const fail = calls - (d.success_count || 0);
+                  const h = Math.max(3, Math.round((calls / max) * 56));
+                  return (
+                    <Tooltip
+                      key={d.date}
+                      title={`${d.date}：${calls} 次${fail > 0 ? `（失败 ${fail}）` : ""}${(d.tokens || 0) > 0 ? ` / ${d.tokens} tokens` : ""}`}
+                    >
+                      <div
+                        style={{
+                          width: 10, height: h, borderRadius: 2, flex: "0 0 auto",
+                          background: fail > 0 ? "#ff7875" : "#597ef7",
+                          opacity: calls ? 1 : 0.35,
+                        }}
+                      />
+                    </Tooltip>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {/* ✅ 2026-09-17 新增：失败原因 TOP 分布（配合审计 error 列） */}
           {stats.by_error?.length > 0 && (
             <div style={{ marginTop: 12 }}>
@@ -1314,26 +1577,29 @@ export default function AIConfigPage() {
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
                   <Title level={5} style={{ margin: 0 }}>已配置的供应商（{configs.length}）</Title>
                   <Space wrap>
+                    {/* ✅ 2026-10-06（G3）：全部配置体检 —— 一次性看出「当前环境下哪几条真能用」，
+                        覆盖 Key 缺失/解密失败/缺地址/环境不符/厂商禁用/网络不可达。 */}
+                    <Tooltip title="逐条检查全部配置的可用性（Key、地址、环境、厂商开关、网络）">
+                      <Button
+                        icon={<HeartOutlined />}
+                        loading={configsHealthLoading}
+                        onClick={handleConfigsHealth}
+                        disabled={!configs.length}
+                      >
+                        全部配置体检
+                      </Button>
+                    </Tooltip>
                     {/* ✅ 新增：配置备份 / 迁移（导出不含 API Key） */}
                     <Tooltip title="导出配置 JSON（不含 API Key，可用于备份或迁移到其他机器）">
                       <Button icon={<ExportOutlined />} onClick={handleExport} disabled={!configs.length}>
                         导出配置
                       </Button>
                     </Tooltip>
-                    <Tooltip title="导入配置 JSON（导入后需重新填写 API Key）">
+                    <Tooltip title="导入配置 JSON（可选择覆盖同名配置 / 导入后设为当前使用；导入后需重新填写 API Key）">
                       <Button
                         icon={<ImportOutlined />}
                         loading={importing}
-                        onClick={() => {
-                          const input = document.createElement("input");
-                          input.type = "file";
-                          input.accept = ".json,application/json";
-                          input.onchange = () => {
-                            const f = input.files?.[0];
-                            if (f) handleImport(f);
-                          };
-                          input.click();
-                        }}
+                        onClick={handleImportClick}
                       >
                         导入配置
                       </Button>
@@ -1884,6 +2150,56 @@ export default function AIConfigPage() {
         ]}
       />
 
+      {/* ===== F2：提示词治理（实验性）运行时开关 ===== */}
+      <Card
+        size="small"
+        title={<span><SafetyCertificateOutlined /> 提示词治理（实验性）</span>}
+        style={{ marginTop: 16 }}
+        loading={govLoading}
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="默认关闭。开启后上传文件内容会经过凭据脱敏与注入检测，可能轻微改变模型可见文本。"
+        />
+        <Space direction="vertical" size={12}>
+          <Space align="center">
+            <Switch
+              checked={govDefense}
+              loading={govSaving}
+              onChange={(checked) =>
+                saveGovernance({ prompt_injection_defense: checked })
+              }
+            />
+            <Text strong>注入防护</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              对外部资料加围栏 / 凭据脱敏，防止提示词注入
+            </Text>
+          </Space>
+          <Space align="center">
+            <Text strong>上下文预算（Token 上限）</Text>
+            <InputNumber
+              min={0}
+              step={1000}
+              value={govBudget}
+              disabled={govSaving}
+              style={{ width: 180 }}
+              onChange={(v) => {
+                const next = typeof v === "number" && Number.isFinite(v) ? v : 0;
+                setGovBudget(next);
+              }}
+              onBlur={() =>
+                saveGovernance({ prompt_context_budget: govBudget })
+              }
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              ≤0 关闭；&gt;0 时超出预算的外部资料会被截断
+            </Text>
+          </Space>
+        </Space>
+      </Card>
+
       {/* 添加/编辑供应商弹窗 */}
       <Modal
         title={editingId ? "编辑供应商配置" : "添加供应商配置"}
@@ -2187,7 +2503,10 @@ export default function AIConfigPage() {
           {/* 参数调节
               ✅ 2026-09-23：区间与后端 provider_factory._RANGE 严格对齐 ——
               此前并发允许填到 8（后端上限 5）、Max Tokens 上限 32768（后端 200000），
-              界面校验得住、提交后被静默收敛，用户以为填的值生效了。 */}
+              界面校验得住、提交后被静默收敛，用户以为填的值生效了。
+              ✅ 2026-10-05：并发上限进一步改为**动态口径** —— 取 /ai/health 的
+              max_concurrency（后端 settings.max_concurrency 可配置），不再写死 5，
+              避免管理员上调/下调上限后界面与后端再次脱钩。 */}
           <Row gutter={16}>
             <Col span={8}>
               <Form.Item name="max_tokens" label="Max Tokens">
@@ -2203,9 +2522,9 @@ export default function AIConfigPage() {
               <Form.Item name="concurrency" label="并发数">
                 <InputNumber
                   min={1}
-                  max={5}
+                  max={concurrencyMax}
                   style={{ width: "100%" }}
-                  title="全局并发硬上限为 5（超过部分后端会自动收敛到 5）"
+                  title={`全局并发硬上限为 ${concurrencyMax}（超过部分后端会自动收敛到 ${concurrencyMax}）`}
                 />
               </Form.Item>
             </Col>
@@ -2285,6 +2604,131 @@ export default function AIConfigPage() {
             )}
           </Space>
         </Form>
+      </Modal>
+      {/* ✅ 2026-10-06（G3）：全部配置体检结果。此前只能逐条点「测试连接」（且只测网络），
+          用户看不出「哪几条配置在当前环境下真能用」。后端一次算完
+          Key（填没填/能否解密）·环境归属·地址·厂商开关·网络五维，这里逐条展开。 */}
+      <Modal
+        title="全部配置体检"
+        open={!!configsHealthResult}
+        onCancel={() => setConfigsHealthResult(null)}
+        footer={<Button type="primary" onClick={() => setConfigsHealthResult(null)}>关闭</Button>}
+        width={960}
+      >
+        {configsHealthResult && (
+          <Space direction="vertical" size="small" style={{ width: "100%" }}>
+            <Space wrap size="small">
+              <Tag color="blue">共 {configsHealthResult.summary.total} 条</Tag>
+              <Tag color="green">当前可用 {configsHealthResult.summary.usable}</Tag>
+              <Tag color={configsHealthResult.summary.no_key ? "orange" : "default"}>
+                缺 Key {configsHealthResult.summary.no_key}
+              </Tag>
+              <Tag color={configsHealthResult.summary.key_broken ? "red" : "default"}>
+                Key 解密失败 {configsHealthResult.summary.key_broken}
+              </Tag>
+              <Tag color={configsHealthResult.summary.no_url ? "orange" : "default"}>
+                未填地址 {configsHealthResult.summary.no_url}
+              </Tag>
+              <Tag color={configsHealthResult.summary.out_of_env ? "orange" : "default"}>
+                环境不符 {configsHealthResult.summary.out_of_env}
+              </Tag>
+              <Tag color={configsHealthResult.summary.disabled ? "red" : "default"}>
+                厂商禁用 {configsHealthResult.summary.disabled}
+              </Tag>
+              <Tag color={configsHealthResult.summary.network_unreachable ? "red" : "default"}>
+                网络不可达 {configsHealthResult.summary.network_unreachable}
+              </Tag>
+            </Space>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              当前生效环境：<Text strong>{configsHealthResult.active_env || "通用（不过滤）"}</Text>
+              {configsHealthResult.disabled_providers.length
+                ? `；已禁用厂商：${configsHealthResult.disabled_providers.join("、")}`
+                : ""}
+            </Text>
+            <Table
+              size="small"
+              pagination={{ pageSize: 10, size: "small" }}
+              dataSource={configsHealthResult.items as any[]}
+              rowKey="id"
+              columns={[
+                {
+                  title: "配置",
+                  dataIndex: "provider_name",
+                  render: (v: string, r: any) => (
+                    <Space direction="vertical" size={0}>
+                      <Text strong>{providers[v]?.label || v}</Text>
+                      <Text type="secondary" style={{ fontSize: 11 }}>{r.model || "-"}</Text>
+                    </Space>
+                  ),
+                },
+                {
+                  title: "当前使用",
+                  dataIndex: "is_active",
+                  width: 88,
+                  render: (v: boolean) => (v ? <Tag color="green">当前使用</Tag> : <Tag>未启用</Tag>),
+                },
+                {
+                  title: "环境",
+                  dataIndex: "env",
+                  width: 112,
+                  render: (v: string, r: any) => (
+                    r.in_current_env
+                      ? <Tag>{v || "通用"}</Tag>
+                      : <Tooltip title="不属于当前生效环境，运行时会被跳过">
+                          <Tag color="orange">{v || "通用"}（不符）</Tag>
+                        </Tooltip>
+                  ),
+                },
+                {
+                  title: "Key",
+                  dataIndex: "has_key",
+                  width: 104,
+                  render: (v: boolean, r: any) => (
+                    !v
+                      ? <Tag color="red">未填</Tag>
+                      : r.key_broken
+                        ? <Tag color="red">解密失败</Tag>
+                        : <Tag color="green">已填</Tag>
+                  ),
+                },
+                {
+                  title: "地址",
+                  dataIndex: "no_url",
+                  width: 78,
+                  render: (v: boolean) => (v ? <Tag color="orange">未填</Tag> : "已填"),
+                },
+                {
+                  title: "厂商开关",
+                  dataIndex: "disabled",
+                  width: 88,
+                  render: (v: boolean) => (v ? <Tag color="red">已禁用</Tag> : <Tag>启用</Tag>),
+                },
+                {
+                  title: "网络",
+                  dataIndex: "network_ok",
+                  width: 150,
+                  render: (v: boolean, r: any) => (
+                    r.no_url
+                      ? <Text type="secondary" style={{ fontSize: 11 }}>未测（无地址）</Text>
+                      : v
+                        ? <Tooltip title={r.network_message || "网络可达"}>
+                            <Tag color="green">{r.network_ip ? `可达 ${r.network_ip}` : "可达"}</Tag>
+                          </Tooltip>
+                        : <Tooltip title={r.network_message || "网络不可达"}>
+                            <Tag color="red">{r.network_step ? `${r.network_step} 不可达` : "不可达"}</Tag>
+                          </Tooltip>
+                  ),
+                },
+                {
+                  title: "结论",
+                  dataIndex: "usable",
+                  width: 88,
+                  render: (v: boolean) => (v ? <Tag color="green">可用</Tag> : <Tag color="red">不可用</Tag>),
+                },
+              ]}
+            />
+          </Space>
+        )}
       </Modal>
     </div>
   );

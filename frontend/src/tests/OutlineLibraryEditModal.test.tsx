@@ -75,17 +75,78 @@ beforeEach(() => {
 let mounted: ReturnType<typeof render> | null = null;
 afterEach(() => { mounted?.unmount(); mounted = null; });
 
-function setup(open: boolean, libraryId?: string | null) {
+function setup(open: boolean, libraryId?: string | null, maxUploadBytes?: number) {
   const onClose = vi.fn();
   const onSaved = vi.fn();
   const utils = render(
     <App>
-      <OutlineLibraryEditModal open={open} libraryId={libraryId} onClose={onClose} onSaved={onSaved} />
+      <OutlineLibraryEditModal open={open} libraryId={libraryId} onClose={onClose} onSaved={onSaved}
+        maxUploadBytes={maxUploadBytes} />
     </App>,
   );
   mounted = utils;
   return { ...utils, onClose, onSaved };
 }
+
+/**
+ * 导入目录 · 上传上限（2026-10-05 D3 收敛）。
+ *
+ * 历史缺陷：「导入目录（智能识别）」入口硬编码 30MB 阈值与文案，与后端可配置的
+ * `upload_max_bytes`（经 /system/upload-limits 下发）漂移 —— 管理员上调/下调上限后，
+ * 入口仍在 30MB 处拦截并提示"30MB"，与本模块「以上限下发音为唯一口径」相矛盾。
+ * 现将上限改由 `maxUploadBytes` 受控传入（缺省回落 30MB 兜底）。
+ */
+describe("OutlineLibraryEditModal · 导入目录上传上限（D3 收敛）", () => {
+  function withSize(file: File, size: number): File {
+    Object.defineProperty(file, "size", { value: size, configurable: true });
+    return file;
+  }
+  function fileInput(): HTMLInputElement {
+    return document.querySelector('input[type="file"]') as HTMLInputElement;
+  }
+
+  it("未传 maxUploadBytes：超 30MB 被拦截并提示 30MB（兜底口径，向后兼容）", async () => {
+    setup(true);
+    clickTab("目录章节");
+    apiMock.uploadOutlineApi.parse.mockClear();
+    fireEvent.change(fileInput(), {
+      target: {
+        files: [withSize(new File(["x"], "big.pdf", { type: "application/pdf" }), 30 * 1024 * 1024 + 1)],
+      },
+    });
+    await waitFor(() =>
+      expect(getActivityItems().some((i) => i.text.includes("文件过大，请上传 30MB 以内的文件"))).toBe(true),
+    );
+    expect(apiMock.uploadOutlineApi.parse).not.toHaveBeenCalled();
+  });
+
+  it("下发 50MB：40MB 文件放行（阈值随下发值放大，不再写死 30MB）", async () => {
+    setup(true, null, 50 * 1024 * 1024);
+    clickTab("目录章节");
+    apiMock.uploadOutlineApi.parse.mockClear();
+    fireEvent.change(fileInput(), {
+      target: {
+        files: [withSize(new File(["x"], "mid.pdf", { type: "application/pdf" }), 40 * 1024 * 1024)],
+      },
+    });
+    await waitFor(() => expect(apiMock.uploadOutlineApi.parse).toHaveBeenCalled());
+  });
+
+  it("下发 10MB：11MB 文件被拦截且提示 10MB（提示随下发值收敛）", async () => {
+    setup(true, null, 10 * 1024 * 1024);
+    clickTab("目录章节");
+    apiMock.uploadOutlineApi.parse.mockClear();
+    fireEvent.change(fileInput(), {
+      target: {
+        files: [withSize(new File(["x"], "mid.pdf", { type: "application/pdf" }), 11 * 1024 * 1024)],
+      },
+    });
+    await waitFor(() =>
+      expect(getActivityItems().some((i) => i.text.includes("文件过大，请上传 10MB 以内的文件"))).toBe(true),
+    );
+    expect(apiMock.uploadOutlineApi.parse).not.toHaveBeenCalled();
+  });
+});
 
 describe("OutlineLibraryEditModal · 打开与关闭", () => {
   it("open=true：渲染标题与两个 Tab", () => {
@@ -206,5 +267,61 @@ describe("OutlineLibraryEditModal · 编辑保存（目录名称修改 + 清空�
     const nodes = JSON.parse(payload.outline_json);
     expect(nodes.length).toBe(1);
     expect(nodes[0].title).toBe("第一章 工程概况");
+  });
+});
+
+/**
+ * 导入目录 · fallback id 唯一性（2026-10-05 · D2，与方案工作台 BUG-15 同类）。
+ *
+ * 后端 normalize 后一般会给出 id（位置路径），但 importToTree 的兜底分支旧实现为
+ * `import_${Date.now()}_${i}`，`i` 只是同父内序号 —— 整棵树在同一毫秒内构造完时，
+ * 「第1章的第1个子节」与「第2章的第1个子节」得到完全相同的 id。该 id 被
+ * collectAllKeys / findNode / moveFlags / removeNode / updateNode 消费，
+ * 冲突会让选中、改名、删除、上移下移作用到错误节点。
+ * 现改用位置路径（1 / 1.1 / …）保证全局唯一。
+ */
+describe("OutlineLibraryEditModal · 导入目录 fallback id 唯一性（D2）", () => {
+  function fileInput(): HTMLInputElement {
+    return document.querySelector('input[type="file"]') as HTMLInputElement;
+  }
+
+  it("导入无 id 目录：跨父级同序号子节 id 不冲突，选中后编辑面板显示正确节点", async () => {
+    // 构造两个不同父级、各有 1 个子节（同父序号均为 0）且都**没有 id** 的识别结果
+    apiMock.uploadOutlineApi.parse.mockResolvedValueOnce({
+      data: {
+        outline: [
+          { title: "第一章", level: 1, children: [
+            { title: "甲子节", level: 2, children: [] },
+          ] },
+          { title: "第二章", level: 1, children: [
+            { title: "乙子节", level: 2, children: [] },
+          ] },
+        ],
+        file_name: "x.pdf",
+      },
+    } as any);
+    setup(true);
+    clickTab("目录章节");
+    fireEvent.change(fileInput(), {
+      target: { files: [new File(["x"], "x.pdf", { type: "application/pdf" })] },
+    });
+    // 等待导入完成：4 个章节（2 个一级 + 2 个二级）
+    await waitFor(() => expect(bodyText()).toContain("共 4 个章节"));
+
+    // 选中「乙子节」（第二个父级的第 1 个子节）
+    const titleEls = Array.from(document.querySelectorAll<HTMLElement>(".ant-tree-title"));
+    const target = titleEls.find((el) => (el.textContent || "").includes("乙子节"));
+    expect(target).toBeTruthy();
+    fireEvent.click(target!);
+
+    // 章节编辑面板必须显示「乙子节」，而不是 id 冲突时被 findNode 命中的「甲子节」
+    await waitFor(() => {
+      const input = Array.from(document.querySelectorAll<HTMLInputElement>("input"))
+        .find((i) => i.value === "乙子节");
+      expect(input).toBeTruthy();
+    });
+    const wrong = Array.from(document.querySelectorAll<HTMLInputElement>("input"))
+      .find((i) => i.value === "甲子节");
+    expect(wrong).toBeFalsy();
   });
 });

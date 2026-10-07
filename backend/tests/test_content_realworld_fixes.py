@@ -85,8 +85,18 @@ class TestTerminalSemantics:
         assert i_all < i_payload, "全章失败分支必须早于 completed 载荷构建"
         tail = src[i_all:i_payload]
         assert 'await finish_task(task_id, "failed"' in tail
-        assert "'event': 'error'" in tail
-        assert "failed_sections" in tail      # 明细随 error 事件下发
+        # ✅ R3（2026-10-05）：error 载荷改由 `_error_payload` 单一拼装点产出，
+        #    「event: error」与「failed_sections 明细」两条断言随之改锚到拼装点，
+        #    比旧断言更强 —— 旧写法只锁「分支内出现这两个字符串」，
+        #    无法发现拼装点本身把字段删掉。
+        assert "_error_payload(_all_msg)" in tail, (
+            "全章失败必须经 _error_payload 单一拼装点产出 error 事件")
+        i_helper = src.index("def _error_payload(")
+        j_end = src.index("_db_write_lock = asyncio.Lock()", i_helper)
+        helper = src[i_helper:j_end]
+        assert "'event': 'error'" in helper
+        assert "failed_sections" in helper      # 明细随 error 事件下发
+        assert "'standard_summary': _std_sum" in helper
 
     def test_completed_message_distinguishes_run_and_total(self):
         src = self._src()

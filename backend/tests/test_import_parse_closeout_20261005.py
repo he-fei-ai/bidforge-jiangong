@@ -9,6 +9,7 @@
 | B6 | 切换方案时 `selectedBaItem` / `sectionCheckResult` 不重置 | `[id]` effect 补两行 reset |
 | B7 | 左面板标题写死「18 项结构化提取」 | 按 `baDefs.length` 动态，未加载则不报数 |
 | B8 | 无累计体积前端预检（200MB 才在后端被扣） | `splitByUploadTotalQuota` + 接线 |
+| B10 | 「① 上传文件保存」入口绕过单文件硬校验（accept 可被拖拽绕过） | `partitionUploadFiles` 收敛到 `handleUploadDocuments` |
 
 B9（启动按钮双击）经代码核实为**非缺陷**，不在此护栏内（记录以免重复排查：
 `BidAnalysisTab.tsx` 只在 `!running` 时渲染启动按钮，且 `runBaSse` 同步设置
@@ -247,3 +248,192 @@ def test_page_abort_refs_all_covered_by_unmount_cleanup():
     missing = [r for r in missing if r not in allowlist]
     assert not missing, (
         f"以下 AbortController 在请求中被赋值，但卸载 cleanup 未 abort：{missing}")
+
+
+# --------------------------------------------------------------------------- #
+# B10 · 单文件硬校验收敛到唯一入口（两条上传入口一次覆盖）
+# --------------------------------------------------------------------------- #
+def _upload_block(span: int = 5000) -> str:
+    src = _page_src()
+    block = _slice_after(src, "const handleUploadDocuments = async", span)
+    end = block.find("const handleParseDocuments")
+    return block[:end] if end > 0 else block
+
+
+def test_b10_partition_helper_is_wired_into_upload_handler():
+    """入口 2「① 上传文件保存」此前把原始文件直传后端 → 超限/非法类型整批后端拒。
+
+    `accept` 属性只过滤文件选择框，拖拽可绕过（`UploadParseTab` 早有硬校验，
+    页面按钮入口没有），故硬校验必须收敛到两条入口的**共同上游**
+    `handleUploadDocuments`，与 B8 的配额预检同构。
+    """
+    block = _upload_block()
+    assert "partitionUploadFiles(" in block, (
+        "handleUploadDocuments 未做单文件硬校验 —— 「① 上传文件保存」入口仍会"
+        "把超限/非法扩展名文件发给后端（B10 回归）")
+    assert "msg.error(" in block, "被拒文件未提示用户（B10 回归：静默丢弃）"
+    # 顺序：单文件过滤 → 累计配额 → 开始上传
+    i_part = block.find("partitionUploadFiles(")
+    i_quota = block.find("splitByUploadTotalQuota(")
+    i_start = block.find("setUploadingFacts(true)")
+    assert 0 <= i_part < i_quota < i_start, (
+        "预检顺序错位：应为 单文件过滤 → 累计配额 → setUploadingFacts")
+    # 实际上传用的是过滤后的文件
+    assert "factsApi.uploadDocuments(toUpload" in block, "过滤结果未被使用（B10 回归）"
+
+
+def test_b10_single_choke_point_for_upload_requests():
+    """页面内 `factsApi.uploadDocuments` 只能有 1 处调用（唯一出口）。"""
+    src = _page_src()
+    assert src.count("factsApi.uploadDocuments(") == 1, (
+        "页面出现多处 factsApi.uploadDocuments —— 预检必然绕过其中一条入口")
+    # 两条入口都汇入同一 handler
+    assert "onUploadFiles={handleUploadDocuments}" in src, "import Tab 入口未接 handler"
+    assert "handleUploadDocuments(files)" in src, "「① 上传文件保存」入口未接 handler"
+
+
+def test_b10_import_tab_keeps_its_own_preflight():
+    """入口 1 的先验过滤不得被摘除（否则两处提示文案分叉、且整批先发后端）。"""
+    tab = _REPO / "frontend" / "src" / "components" / "UploadParseTab.tsx"
+    src = tab.read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert "partitionUploadFiles(files, effectiveMaxBytes)" in src, (
+        "UploadParseTab 摘掉了自身预检 —— 拖拽入口的「先拦后发」退化为先发后端")
+
+
+def test_b10_reject_wording_is_consistent_across_both_entries():
+    """两条入口的拒绝文案必须同口径（同一判据两处措辞 → 用户看到两套说法）。"""
+    page = _page_src()
+    tab = (_REPO / "frontend" / "src" / "components" / "UploadParseTab.tsx").read_text(
+        encoding="utf-8").replace("\r\n", "\n")
+    for phrase in ("\u4e0d\u652f\u6301\u7684\u6587\u4ef6\u7c7b\u578b\uff0c\u5df2\u5ffd\u7565\uff1a",
+                   "\uff0c\u5df2\u5ffd\u7565\uff1a"):
+        assert phrase in page and phrase in tab, f"两条入口的拒绝文案不一致：{phrase!r}"
+
+
+def test_b10_helper_default_matches_import_tab_default():
+    """硬校验上限必须回落到同一个 30MB 常量（否则两条入口判定不同）。"""
+    page = _page_src()
+    assert "MAX_UPLOAD_BYTES" in page, "页面未回落 MAX_UPLOAD_BYTES"
+    up = _upload_src()
+    m = re.search(r"MAX_UPLOAD_BYTES:\s*number\s*=\s*(\d+)\s*\*\s*1024\s*\*\s*1024", up)
+    assert m and int(m.group(1)) == 30, "MAX_UPLOAD_BYTES 不是 30MB"
+    assert re.search(r"export function partitionUploadFiles", up), "partitionUploadFiles 未导出"
+
+
+# --------------------------------------------------------------------------- #
+# D1/D2 · 上传上限文案与文件数预检（2026-10-05 第二轮：前后端口径漂移）
+# --------------------------------------------------------------------------- #
+_WORKFLOW_DERIVED_TS = _REPO / "frontend" / "src" / "utils" / "workflowDerived.ts"
+
+
+def _workflow_src() -> str:
+    assert _WORKFLOW_DERIVED_TS.exists(), f"缺少 {_WORKFLOW_DERIVED_TS}"
+    return _WORKFLOW_DERIVED_TS.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
+def test_d1_notice_text_is_parameterized_not_hardcoded():
+    """拒绝文案里的 30MB / 200MB / 20 必须来自下发上限，不得写死。
+
+    D1（前后端接口不一致）：后端 `upload_max_bytes` / `upload_max_total_bytes` /
+    `upload_max_files_per_request` 均可配置并经 /system/upload-limits 下发；若文案
+    写死，管理员改成 100MB 后用户仍被提示"超过 30MB"，据此调整文件却继续失败。
+    """
+    src = _workflow_src()
+    code = _strip_comments(src)
+    # 逐字硬编码旧文案不得再出现在**代码**（注释里的历史说明不算）
+    for literal in ("\u4e2a\u8d85\u8fc7 30MB", "\u5355\u6b21 20 \u4e2a\u4e0a\u9650",
+                    "200MB \u4e0a\u9650"):
+        assert literal not in code, (
+            f"workflowDerived.ts 仍硬编码上限文案 {literal!r} —— 与后端可配置上限漂移（D1 回归）")
+    # 必须存在按入参渲染的形参（limits）与 MB 格式化辅助
+    assert re.search(r"export function summarizeUploadResult\(\s*[\s\S]{0,120}?limits\?:\s*UploadLimitHints", src), (
+        "summarizeUploadResult 未接收 limits 入参（D1 回归）")
+    assert re.search(r"export function buildUploadNotice\(\s*[\s\S]{0,120}?limits\?:\s*UploadLimitHints", src), (
+        "buildUploadNotice 未接收 limits 入参（D1 回归）")
+    assert "export type UploadLimitHints" in src, "缺少 UploadLimitHints 类型导出"
+
+
+def test_d1_page_passes_delivered_limits_into_notice():
+    """页面必须把 /system/upload-limits 的三个上限透传给 buildUploadNotice。"""
+    src = _page_src()
+    assert "buildUploadNotice(data, {" in src, (
+        "页面未向上传提示透传 limits —— 文案又退回硬编码默认值（D1 回归）")
+    block = _slice_after(src, "buildUploadNotice(data, {", 300)
+    for field in ("maxBytes:", "maxTotalBytes:", "maxFiles:"):
+        assert field in block, f"buildUploadNotice 缺少上限字段 {field}（D1 回归）"
+
+
+def test_d2_file_count_helper_exported_and_default_matches_backend():
+    up = _upload_src()
+    assert re.search(r"export function splitByUploadFileCount", up), (
+        "uploadAccept.ts 未导出 splitByUploadFileCount（D2 未实现）")
+    m = re.search(r"MAX_UPLOAD_FILES_FALLBACK:\s*number\s*=\s*(\d+)", up)
+    assert m, "缺少 MAX_UPLOAD_FILES_FALLBACK 常量导出"
+    # 与后端三处默认值同值（config 默认 = global_facts 兜底 = 前端兜底）
+    from app.config import Settings
+    from app.routers import global_facts
+    cfg_default = Settings.model_fields["upload_max_files_per_request"].default
+    assert int(m.group(1)) == cfg_default == global_facts._DEFAULT_UPLOAD_FILES, (
+        "前端兜底文件数上限与后端默认值不一致 → 预检口径漂移")
+
+
+def test_d2_file_count_preflight_wired_into_upload_handler():
+    block = _upload_block()
+    assert "splitByUploadFileCount(" in block, (
+        "handleUploadDocuments 未做单次文件数预检 —— 超量文件要等整批传完才被发现（D2 回归）")
+    # 顺序：单文件过滤 → 累计体积 → 文件数 → 开始上传
+    i_part = block.find("partitionUploadFiles(")
+    i_quota = block.find("splitByUploadTotalQuota(")
+    i_count = block.find("splitByUploadFileCount(")
+    i_start = block.find("setUploadingFacts(true)")
+    assert 0 <= i_part < i_quota < i_count < i_start, (
+        "预检顺序错位：应为 单文件过滤 → 累计体积 → 文件数 → setUploadingFacts")
+    assert "factsApi.uploadDocuments(toUpload" in block, "文件数分流结果未被使用（D2 回归）"
+
+
+def test_d2_page_reads_max_files_per_request_from_limits():
+    src = _page_src()
+    assert re.search(r"const \[maxUploadFiles, setMaxUploadFiles\]", src), (
+        "maxUploadFiles 状态缺失（D2 回归）")
+    block = _slice_after(src, "max_upload_bytes", 900)
+    assert "max_files_per_request" in block, (
+        "页面未读取 /system/upload-limits 的 max_files_per_request（D2 回归：上限恒为兜底值）")
+    assert "setMaxUploadFiles" in block, "读取到 max_files_per_request 后未写入状态（D2 回归）"
+
+
+# --------------------------------------------------------------------------- #
+# D3 · 目录「导入目录」入口收敛到动态上限（2026-10-05）
+# --------------------------------------------------------------------------- #
+_MODAL_TS = _REPO / "frontend" / "src" / "components" / "OutlineLibraryEditModal.tsx"
+_OUTLINE_PAGE_TS = _REPO / "frontend" / "src" / "pages" / "OutlineLibraryPage.tsx"
+
+
+def test_d3_outline_import_entries_use_dynamic_upload_limit():
+    """D3：两处「导入目录」入口不得再硬编码 30MB，须走动态上限（缺省回落兜底）。
+
+    D3（前后端接口不一致）：方案工作台与目录库编辑弹窗的「导入目录（智能识别）」
+    入口此前各自写死 `30 * 1024 * 1024` 阈值与"30MB"文案，与后端可配置的
+    `upload_max_bytes`（经 /system/upload-limits 下发）漂移 —— 管理员调上限后
+    入口仍在 30MB 处拦截并误报"30MB"。
+    """
+    page = _page_src()
+    modal = _MODAL_TS.read_text(encoding="utf-8").replace("\r\n", "\n")
+    outline_page = _OUTLINE_PAGE_TS.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+    for name, src in (("SchemeWorkbenchPage.tsx", page),
+                      ("OutlineLibraryEditModal.tsx", modal)):
+        code = _strip_comments(src)
+        assert "30 * 1024 * 1024" not in code, (
+            f"{name} 仍硬编码 30MB 上传上限 —— 与后端可配置上限漂移（D3 回归）")
+        assert "resolveMaxUploadBytes(" in code, f"{name} 未用动态上限解析（D3 回归）"
+        assert "formatUploadLimitMb(" in code, f"{name} 未用动态上限文案（D3 回归）"
+
+    # 受控组件约定：弹窗不自取网络配置，由宿主页下传。
+    assert re.search(r"maxUploadBytes\?:\s*number", modal), (
+        "OutlineLibraryEditModal 未接收 maxUploadBytes 受控入参（D3 回归）")
+    assert "systemApi.uploadLimits()" in outline_page, (
+        "目录库页未从 /system/upload-limits 读取上限（D3 回归）")
+    assert re.search(r"const \[maxUploadBytes, setMaxUploadBytes\]", outline_page), (
+        "目录库页未持有 maxUploadBytes 状态（D3 回归）")
+    assert "maxUploadBytes={maxUploadBytes}" in outline_page, (
+        "目录库页未把 maxUploadBytes 下传编辑弹窗（D3 回归）")

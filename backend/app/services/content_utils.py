@@ -32,7 +32,9 @@ _FENCE_RE = None  # deprecated：请用 strip_fenced_code_blocks
 # ---------- 字数口径常量（全项目唯一口径，避免魔法数字分散） ----------
 DEFAULT_WORD_BUDGET = 1500   # 未设置预算时的默认目标字数
 WORD_UNDER_RATIO = 0.8       # 低于预算 80% → under（同时是"是否需要续写"的门槛）
-WORD_OVER_RATIO = 1.3        # 高于预算 130% → over
+# ✅ 2026-10-06（R47 债-1）：WORD_OVER_RATIO 数值搬入
+#    ``services/ai/prompts/_limits.py`` 单一事实源，本模块仍以同名可读。
+from app.services.ai.prompts._limits import WORD_OVER_RATIO  # noqa: E402
 
 # ---------- 输出 token 上限折算（P1-2 · 2026-09-17） ----------
 # 背景：章节生成此前**不传 max_tokens**，落到配置值（实测 32768）—— 无输出上限

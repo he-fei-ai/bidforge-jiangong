@@ -1,11 +1,12 @@
 ﻿import { useEffect, useState, useRef, useMemo, useCallback } from "react";
-import { App, Button, Typography, Tabs, List, Spin, Modal, Input, Tag, Space, Tooltip, Alert, Drawer,} from "antd";
+import { App, Button, Typography, Tabs, List, Spin, Modal, Input, Tag, Space, Tooltip, Alert, Drawer, Table,} from "antd";
 import {
   EditOutlined, RollbackOutlined, SaveOutlined, CodeOutlined,
-  HistoryOutlined,
+  HistoryOutlined, SyncOutlined,
 } from "@ant-design/icons";
 
 import { promptsApi } from "../api";
+import type { PromptSyncResult } from "../api";
 import { useAntdMessageHub } from "../utils/activityCenter";
 
 import { PageHero, StatCards, StatItem } from '../utils/ui';
@@ -72,6 +73,10 @@ export default function PromptEditorPage() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // ===== F3：从代码同步（硬编码模板 → DB）=====
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<PromptSyncResult | null>(null);
+  const [syncModalOpen, setSyncModalOpen] = useState(false);
   const isMountedRef = useRef(true);
   const promptsRef = useRef(prompts);
 
@@ -244,6 +249,36 @@ export default function PromptEditorPage() {
     });
   }, [modal, msg, editingKey, openHistory]);
 
+  const handleSyncFromCode = useCallback((force: boolean) => {
+    modal.confirm({
+      title: force ? "强制覆盖所有漂移行？" : "从代码同步提示词？",
+      content: force
+        ? "将用硬编码出厂模板覆盖所有「漂移」行（你在后台改过的内容会丢失）。是否继续？"
+        : "将对比硬编码模板与 DB 现有行。DB 缺失的会插入，用户已修改的不会被覆盖（标记为漂移）。是否继续？",
+      okText: force ? "强制覆盖" : "开始同步",
+      okButtonProps: force ? { danger: true } : undefined,
+      cancelText: "取消",
+      onOk: async () => {
+        setSyncing(true);
+        try {
+          const { data } = await promptsApi.syncFromCode(force);
+          setSyncResult(data);
+          setSyncModalOpen(true);
+          msg.success(
+            `同步完成：新增 ${data.summary.inserted} · 一致 ${data.summary.in_sync} · 漂移 ${data.summary.drift} · 覆盖 ${data.summary.overwritten} · 错误 ${data.summary.errors}`,
+          );
+          promptsApi.list()
+            .then(({ data: ld }) => { if (isMountedRef.current) setPrompts(ld.items || []); })
+            .catch(() => {});
+        } catch (e) {
+          msg.error(promptErrorText(e, "从代码同步失败"));
+        } finally {
+          setSyncing(false);
+        }
+      },
+    });
+  }, [modal, msg]);
+
   if (loading) return <Spin size="large" style={{ display: "block", marginTop: 80, textAlign: "center" }} />;
 
   const categoryPrompts = (cat: string) =>
@@ -352,6 +387,12 @@ export default function PromptEditorPage() {
         自由编辑各模块调用的 AI 提示词内容。修改后保存将立即生效，无需重启服务。
       </Typography.Paragraph>
 
+      <Space style={{ marginBottom: 12 }}>
+        <Button icon={<SyncOutlined />} loading={syncing} onClick={() => handleSyncFromCode(false)}>
+          从代码同步
+        </Button>
+      </Space>
+
       <Tabs items={tabItems} />
 
       <Modal
@@ -442,6 +483,69 @@ export default function PromptEditorPage() {
           maxLength={PROMPT_MAX_CHARS}
           style={{ fontFamily: "monospace", fontSize: 13 }}
         />
+      </Modal>
+
+      {/* F3：从代码同步结果（汇总 + 漂移明细 + 强制覆盖入口） */}
+      <Modal
+        title={<Space><SyncOutlined /><span>从代码同步结果</span></Space>}
+        open={syncModalOpen}
+        onCancel={() => setSyncModalOpen(false)}
+        width={760}
+        footer={
+          <Space>
+            {syncResult && syncResult.summary.drift > 0 && (
+              <Button
+                danger
+                icon={<SyncOutlined />}
+                loading={syncing}
+                onClick={() => handleSyncFromCode(true)}
+              >
+                强制覆盖所有漂移（{syncResult.summary.drift}）
+              </Button>
+            )}
+            <Button type="primary" onClick={() => setSyncModalOpen(false)}>关闭</Button>
+          </Space>
+        }
+      >
+        {syncResult ? (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Space wrap>
+              <Tag color="green">一致 {syncResult.summary.in_sync}</Tag>
+              <Tag color="blue">新增 {syncResult.summary.inserted}</Tag>
+              <Tag color="orange">漂移 {syncResult.summary.drift}</Tag>
+              <Tag color="purple">已覆盖 {syncResult.summary.overwritten}</Tag>
+              {syncResult.summary.errors > 0 && (
+                <Tag color="red">错误 {syncResult.summary.errors}</Tag>
+              )}
+            </Space>
+            {syncResult.details.filter(
+              (d) => d.status === "drift" || d.status === "error",
+            ).length > 0 ? (
+              <Table
+                size="small"
+                rowKey="key"
+                pagination={false}
+                dataSource={syncResult.details.filter(
+                  (d) => d.status === "drift" || d.status === "error",
+                )}
+                columns={[
+                  { title: "Key", dataIndex: "key",
+                    render: (k: string) => <Typography.Text code style={{ fontSize: 12 }}>{k}</Typography.Text> },
+                  { title: "状态", dataIndex: "status",
+                    render: (s: string) => <Tag color={s === "drift" ? "orange" : "red"}>{s}</Tag> },
+                  { title: "代码指纹", dataIndex: "code_hash",
+                    render: (h?: string) => <Typography.Text style={{ fontSize: 11 }}>{(h || "").slice(0, 12)}</Typography.Text> },
+                  { title: "库内指纹", dataIndex: "db_hash",
+                    render: (h?: string) => <Typography.Text style={{ fontSize: 11 }}>{(h || "").slice(0, 12)}</Typography.Text> },
+                ]}
+              />
+            ) : (
+              <Typography.Text type="secondary">无漂移行，所有模板与硬编码一致。</Typography.Text>
+            )}
+          </Space>
+        ) : (
+          <Spin />
+        )}
       </Modal>
 
       {/* ✅ G2 版本回滚（2026-09-24）：变更历史与回滚 */}

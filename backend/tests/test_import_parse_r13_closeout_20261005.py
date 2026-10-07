@@ -486,3 +486,104 @@ def test_upload_write_statements_are_guarded():
     assert "del_cur = await db.execute" in body, "同名替换 DELETE 未接返回值"
     assert "if ins_cur is None" in body and "if del_cur is None" in body
     assert _bare_execute_calls(node) == []
+
+
+# ===========================================================================
+# H · 续轮补漏（2026-10-05）：preview / 改分类 / 删除 三处 R13 漏改
+# ===========================================================================
+class TestRemainingCursorGuards:
+    """R41 的 C/D 覆盖了 list_documents / parse_document / parse_all_documents /
+    upload_documents，但**漏了**同一模块另外三条 SQL 路径 —— 命中断言时分别
+    表现为 500（读路径）与「假成功」（写路径）。本组按同款代理连接手法补齐。
+    """
+
+    async def test_preview_none_cursor_returns_503(self, ctx):
+        db, pid, _sid, _up = ctx
+        doc_id = uuid.uuid4().hex
+        await db.execute(
+            "INSERT INTO project_documents(id,project_id,file_name,file_type,"
+            "parsed_markdown,parse_status) VALUES(?,?,?,?,?,?)",
+            (doc_id, pid, "a.txt", "txt", "正文", "success"))
+        await db.commit()
+        proxy = _NullDb(db, lambda s: s.lstrip().startswith(
+            "SELECT id, file_name, file_type, parsed_markdown"))
+        with pytest.raises(HTTPException) as e:
+            await gf.preview_document(doc_id, max_chars=100, db=proxy)
+        assert e.value.status_code == 503
+        assert proxy.hits >= 1, "变异守卫：必须真的命中 None 分支"
+
+    async def test_update_category_select_none_returns_503(self, ctx):
+        db, pid, _sid, _up = ctx
+        doc_id = uuid.uuid4().hex
+        await db.execute(
+            "INSERT INTO project_documents(id,project_id,file_name,file_type,"
+            "parsed_markdown) VALUES(?,?,?,?,?)",
+            (doc_id, pid, "a.txt", "txt", "正文"))
+        await db.commit()
+        proxy = _NullDb(db, lambda s: s.lstrip().startswith(
+            "SELECT id FROM project_documents WHERE id=?"))
+        with pytest.raises(HTTPException) as e:
+            await gf.update_document_category(doc_id, {"doc_category": "其他"}, db=proxy)
+        assert e.value.status_code == 503
+        assert proxy.hits >= 1, "变异守卫：必须真的命中 None 分支"
+
+    async def test_update_category_write_none_returns_503(self, ctx):
+        db, pid, _sid, _up = ctx
+        doc_id = uuid.uuid4().hex
+        await db.execute(
+            "INSERT INTO project_documents(id,project_id,file_name,file_type,"
+            "parsed_markdown,doc_category) VALUES(?,?,?,?,?,?)",
+            (doc_id, pid, "a.txt", "txt", "正文", "其他"))
+        await db.commit()
+        proxy = _NullDb(db, lambda s: s.lstrip().upper().startswith(
+            "UPDATE PROJECT_DOCUMENTS SET DOC_CATEGORY"))
+        with pytest.raises(HTTPException) as e:
+            await gf.update_document_category(doc_id, {"doc_category": "招标文件"}, db=proxy)
+        assert e.value.status_code == 503
+        assert proxy.hits >= 1, "变异守卫：必须真的命中 None 分支"
+        # 未生效的写入不得落库（不得假成功）
+        cur = await db.execute(
+            "SELECT doc_category FROM project_documents WHERE id=?", (doc_id,))
+        assert (await cur.fetchone())["doc_category"] == "其他"
+
+    async def test_delete_select_none_returns_503(self, ctx):
+        db, pid, _sid, _up = ctx
+        doc_id = uuid.uuid4().hex
+        await db.execute(
+            "INSERT INTO project_documents(id,project_id,file_name,file_type,"
+            "parsed_markdown) VALUES(?,?,?,?,?)",
+            (doc_id, pid, "a.txt", "txt", "正文"))
+        await db.commit()
+        proxy = _NullDb(db, lambda s: s.lstrip().startswith(
+            "SELECT file_path, project_id FROM project_documents WHERE id=?"))
+        with pytest.raises(HTTPException) as e:
+            await gf.delete_document(doc_id, db=proxy)
+        assert e.value.status_code == 503
+        assert proxy.hits >= 1, "变异守卫：必须真的命中 None 分支"
+
+    async def test_delete_write_none_returns_503_and_keeps_row(self, ctx):
+        db, pid, _sid, _up = ctx
+        doc_id = uuid.uuid4().hex
+        await db.execute(
+            "INSERT INTO project_documents(id,project_id,file_name,file_type,"
+            "parsed_markdown) VALUES(?,?,?,?,?)",
+            (doc_id, pid, "a.txt", "txt", "正文"))
+        await db.commit()
+        proxy = _NullDb(db, lambda s: s.lstrip().upper().startswith(
+            "DELETE FROM PROJECT_DOCUMENTS WHERE ID=?"))
+        with pytest.raises(HTTPException) as e:
+            await gf.delete_document(doc_id, db=proxy)
+        assert e.value.status_code == 503
+        assert proxy.hits >= 1, "变异守卫：必须真的命中 None 分支"
+        cur = await db.execute(
+            "SELECT COUNT(*) AS n FROM project_documents WHERE id=?", (doc_id,))
+        assert (await cur.fetchone())["n"] == 1, "未生效的删除不得报告已删除"
+
+
+def test_remaining_paths_have_no_bare_execute():
+    """三条补漏路径均不得再出现语句级裸 execute（防回退，同 section G 手法）。"""
+    src = Path(gf.__file__).read_text(encoding="utf-8")
+    for name in ("delete_document", "update_document_category", "preview_document"):
+        node = _find_func(src, name)
+        assert _bare_execute_calls(node) == [], (
+            f"{name} 内出现裸 await db.execute —— R13 返回值又会被丢弃")

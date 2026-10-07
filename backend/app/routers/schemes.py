@@ -11,6 +11,32 @@ from app.models import SchemeCreate, SchemeUpdate
 router = APIRouter(prefix="/api/v1/projects/{project_id}/schemes", tags=["schemes"])
 
 
+def require_project_id(project_id: str | None) -> str:
+    """校验并归一 ``schemes.project_id`` —— **唯一入口**。
+
+    ⚠️ G3 根因加固（R45 · 2026-10-06）：``schemes.project_id`` 是
+    ``NOT NULL`` 但**允许空串**（无 CHECK 约束）。空串会让按项目维度的
+    缓存失效退化成「双空作用域」的静默 no-op ——
+    ``global_facts._invalidate_fact_scope_cache(db, "", "")`` 直接 return：
+    已确认的事实改动**一个缓存都不失效**、``schemes.facts_updated_at``
+    不推进，「事实已变更」标记永久停在旧值。
+
+    旧实现里三条写路径各用一套防空手段（404 / 404 / 400），语义分散且
+    错误文案对不上（空 project_id 会报「项目不存在」而非「参数为空」）。
+    现收敛为单一入口：全部写 ``schemes.project_id`` 的路径都必须过本函数。
+
+    已知写路径（护栏 test_schemes_project_id_guard_20261006.py 扫描锁定）：
+
+    - ``create_scheme``（新建方案）
+    - ``duplicate_scheme``（复制方案）
+    - ``bid_analysis.correct_item``（人工校正时回填归属项目）
+    """
+    pid = (project_id or "").strip()
+    if not pid:
+        raise HTTPException(422, "project_id 不能为空")
+    return pid
+
+
 async def _refresh_word_count(db, scheme_id: str):
     cur = await db.execute("SELECT COALESCE(SUM(word_count),0) FROM sections WHERE scheme_id=?", (scheme_id,))
     total = (await cur.fetchone())[0]
@@ -37,6 +63,8 @@ async def list_schemes(project_id: str, db=Depends(read_db)):
 
 @router.post("")
 async def create_scheme(project_id: str, data: SchemeCreate, db=Depends(get_db)):
+    # ⚠️ G3 根因加固（R45）：空 project_id 不得落库（唯一入口，见函数 docstring）
+    project_id = require_project_id(project_id)
     cur = await db.execute("SELECT id FROM projects WHERE id=?", (project_id,))
     if not await cur.fetchone():
         raise HTTPException(404, "项目不存在")
@@ -186,6 +214,16 @@ async def delete_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
     await db.execute("DELETE FROM schemes WHERE id=?", (scheme_id,))
     await db.commit()
 
+    # ✅ 2026-10-06（缓存有界化）：方案已删，回收进程内总检/预检幂等缓存的死键。
+    #    正文/事实变更会因缓存键含内容指纹而自然失效，**只有删除**需要显式清理
+    #    （条目指向已不存在的方案，留着只会占用内存且永不命中）。
+    try:
+        from app.routers.compliance import invalidate_overview_cache
+        invalidate_overview_cache(scheme_id)
+    except Exception as e:  # fail-soft：缓存清理失败不影响删除结果
+        import logging
+        logging.getLogger("schemes").warning("清理总检缓存失败: %s", e)
+
     # 清理磁盘导出文件（命名含 scheme_id 前缀）
     removed_files = 0
     try:
@@ -202,6 +240,8 @@ async def delete_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
 
 @router.post("/{scheme_id}/duplicate")
 async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
+    # ⚠️ G3 根因加固（R45）：空 project_id 不得落库（唯一入口，见函数 docstring）
+    project_id = require_project_id(project_id)
     # ✅ BUG 修复：source 校验时同时限定 project_id，避免跨项目误复制
     cur = await db.execute(
         "SELECT * FROM schemes WHERE id=? AND project_id=?", (scheme_id, project_id))

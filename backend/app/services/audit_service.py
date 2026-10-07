@@ -45,9 +45,17 @@ CONFIG_ACTIONS: dict[str, str] = {
 _DETAIL_MAX = 500
 
 #: 允许进快照的字段白名单 —— **不含任何密钥相关列**。
+#:
+#: ⚠️ 「进快照」≠「可回滚」：``is_active`` 与 ``priority`` 都在快照里，但都不在
+#:   ``ROLLBACK_FIELDS``（见 routers/ai_config/audit.py）—— 两者由**独立端点**维护
+#:   （toggle 切换当前使用 / PUT /fallback-chain 调整降级链顺序），回滚时恢复旧值
+#:   会破坏全局不变量：主配置唯一性、降级链 priority 0..n-1 连续（_resequence_priority
+#:   在增删配置后重排，恢复一个过期序号会留下空洞或重复）。快照留存它们只为**审计
+#:   可追溯**（「这次改动发生时该配置排在降级链第几」），不参与回滚写入。
 SNAPSHOT_FIELDS: tuple[str, ...] = (
     "provider_name", "plan", "base_url", "model", "max_tokens", "temperature",
     "timeout", "concurrency", "request_mode", "env", "remark", "is_active",
+    "priority",
 )
 
 #: 快照字段 → 中文名（生成结构化 diff 用）。
@@ -64,6 +72,7 @@ FIELD_LABELS: dict[str, str] = {
     "env": "环境",
     "remark": "备注",
     "is_active": "当前使用",
+    "priority": "降级链顺序",
 }
 
 #: 字符串字段限长：避免单条超长备注/地址把审计快照撑大。数值字段不转字符串。

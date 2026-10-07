@@ -32,6 +32,7 @@ import logging
 import re
 
 from app.services.ai.heading_templates import HEADING_STYLE_CONFIG
+from app.services.numbering import strip_outline_numbering
 from app.services.chart_validators import (
     PIL_RENDERABLE_CHART_TYPES,
     detect_mermaid_chart_type,
@@ -60,7 +61,30 @@ _HEADING_NUM_PREFIX_RES = (
     re.compile(r"^[a-zA-Z]{1,2}[、.\s]+"),
 )
 _IMAGE_LINE_RE = re.compile(r"^!\[(?P<alt>[^\]\n]*)\]\((?P<url>https?://[^)\s]+)\)$")
-_LEAD_IN_HINT_RE = re.compile(r"(?:如下图|见下图|如下图示|如图|图示)\s*(?:所示)?\s*[:：。]?$")
+# ---------- 图表引导语判据（**唯一事实来源**，2026-10-06 · R48 收敛） ----------
+# 引导语 = 图表块上方那句「专为引出该图而写」的短段落（"施工工艺流程如下图所示："）。
+# 删除/跳过图表时必须同步回收它，否则成稿出现"见下图"却无图的悬空引用。
+#
+# ⚠️ 历史分叉（本次收口根因）：本判据曾有**三份副本**——
+#   · 本模块 `_LEAD_IN_HINT_RE`（5 个备选）：导出侧 `export._pop_orphan_lead_in` 经
+#     import 共用；
+#   · `_chart_pipeline._ORPHAN_LEAD_IN_RE`（8 个备选：多出 如下图所示|见下图所示|详见下图）
+#     与 `_chart_pipeline._LEAD_IN_MAX_CHARS`；
+#   · 长度上限 `60` 另有 3 处裸字面量（本模块 2 处 + `export.py` 1 处）。
+# 实测两份正则**判定完全等价**（8 个备选全部被 5 个备选经子串匹配覆盖：
+# `详见下图`⊃`见下图`、`如下图所示`⊃`如下图`、`见下图所示`⊃`见下图`），但按 AGENTS.md
+# 反复记录的「同一判据多处字面量」教训，任一侧被单独修改都会让「删图删不删引导语」
+# 在登记侧与导出侧再次分叉（一处删、一处留 → 正文出现新的悬空引用）。
+# 现收敛：正则与上限各只有一份，全部消费方 import，不再有本地副本。
+LEAD_IN_MAX_CHARS = 60
+# 对外公开别名：判定「一行文本是否是图表引导语」。
+LEAD_IN_HINT_RE = re.compile(r"(?:如下图|见下图|如下图示|如图|图示)\s*(?:所示)?\s*[:：。]?$")
+# 保留私有名（既有本模块内 2 处消费 + 既有测试 import 零改动）。
+_LEAD_IN_HINT_RE = LEAD_IN_HINT_RE
+# 登记侧（_chart_pipeline）删除代码块时回收引导语的判据别名。
+ORPHAN_LEAD_IN_RE = LEAD_IN_HINT_RE
+# 私有常量别名（_chart_pipeline 既有 import 名保持不变）。
+_LEAD_IN_MAX_CHARS = LEAD_IN_MAX_CHARS
 _LEAD_IN_TAIL_RE = re.compile(
     r"(?:如下|如后|见下)?\s*(?:图|表)?\s*(?:所示|如下)?\s*[:：。]?\s*$")
 _MERMAID_TITLE_RES = (
@@ -86,19 +110,19 @@ _TABLE_CAPTION_RE = re.compile(
     r"^表\s*(?:[:：]\s*"
     r"|[0-9一二三四五六七八九十][0-9.\-–—]*[\s、.：:]+)"
     r"(\S.*)$")
-_TITLE_NUM_STRIP_RES = (
-    re.compile(r"^第[一二三四五六七八九十百千零\d]+[章节][、\s]*"),   # 第一章 / 第一节
-    re.compile(r"^[（(][一二三四五六七八九十百]+[)）][、\s]*"),      # （一） / (一)
-    re.compile(r"^\d+(?:\.\d+)*[、.\s]+"),                           # 1.1.1 / 1.1 / 1 / 1、
-    re.compile(r"^\d+[）)][、\s]*"),                                # 1） / 1)
-    re.compile(r"^[a-zA-Z]{1,2}[、.\s]+"),                          # a. / 1、
-)
+# ✅ 2026-10-05（D4 · 编号剥离分叉收口）：`_TITLE_NUM_STRIP_RES` 已删除 ——
+#    标题编号剥离的唯一实现是 numbering.strip_outline_numbering（见 _strip_title_number）。
 
 
 _RE_BOLD_WRAP = re.compile(r"^\*\*(.*?)\*\*$")
 _RE_SENTENCE_TAIL_FULL = re.compile(r"[。！？.!?；;，,、]\s*$")
 _RE_SENTENCE_TAIL = re.compile(r"[。！？；;，,]\s*$")
 _RE_HEADING_NNN = re.compile(r"^(\d+\.\d+\.\d+)\s+([\u4e00-\u9fa5A-Za-z].*)$")
+# ✅ 深层点分编号（≥4 段，2026-10-07）：AI 在正文里写 4~7 段点分伪标题
+#    （如 7.3.3.1.1 材料计划）时旧实现只识别到 3 段 —— 更深的行被当普通段落，
+#    既不参与编号规范化（父章节重排后前缀错位残留成稿）也不按标题样式渲染。
+#    现按「段数 + 1」映射层级（N.N→3、N.N.N→4、N.N.N.N→5…，封顶 7）。
+_RE_HEADING_DEEP = re.compile(r"^(\d+(?:\.\d+){3,6})\s+([\u4e00-\u9fa5A-Za-z].*)$")
 _RE_HEADING_NN = re.compile(r"^(\d+\.\d+)\s+([\u4e00-\u9fa5A-Za-z].*)$")
 _RE_HEADING_N = re.compile(r"^(\d+)\s+([\u4e00-\u9fa5A-Za-z].*)$")
 _RE_MD_HEADING = re.compile(r"^(#{1,6})\s+(.*)")
@@ -171,6 +195,12 @@ def _detect_plain_heading(line: str) -> tuple[int, str] | None:
     m = _RE_HEADING_NNN.match(s_inside)
     if m and _is_reasonable_heading_number(m.group(1)):
         return 4, m.group(2).strip()
+
+    # N.N.N.N(.N…) 深层标题（≥4 段）：层级 = 段数 + 1，封顶 7
+    m = _RE_HEADING_DEEP.match(s_inside)
+    if m and _is_reasonable_heading_number(m.group(1)):
+        return min(m.group(1).count(".") + 2, 7), m.group(2).strip()
+
 
     # N.N 标题
     m = _RE_HEADING_NN.match(s_inside)
@@ -309,7 +339,7 @@ def _lead_in_title(blocks: list[dict]) -> str:
         return ""
     text = _RE_BOLD_WRAP.sub(r"\1",
                             str(prev.get("text") or "").strip()).strip()
-    if not text or len(text) > 60 or not _LEAD_IN_HINT_RE.search(text):
+    if not text or len(text) > LEAD_IN_MAX_CHARS or not _LEAD_IN_HINT_RE.search(text):
         return ""
     return _title_candidate(_LEAD_IN_TAIL_RE.sub("", _LEAD_IN_HINT_RE.sub("", text)))
 
@@ -335,7 +365,7 @@ def _pop_orphan_lead_in_block(blocks: list[dict]) -> bool:
         return False
     text = _RE_BOLD_WRAP.sub(r"\1",
                             str(prev.get("text") or "").strip()).strip()
-    if not text or len(text) > 60 or not _LEAD_IN_HINT_RE.search(text):
+    if not text or len(text) > LEAD_IN_MAX_CHARS or not _LEAD_IN_HINT_RE.search(text):
         return False
     blocks.pop()
     logger.info("图表围栏被跳过：已同步移除其孤儿引导语「%s」", text[:30])
@@ -718,22 +748,27 @@ def _strip_duplicate_leading_title(blocks: list[dict], *titles: str) -> list[dic
 
 
 def _strip_title_number(title: str) -> str:
-    """从章节标题中剥离编号前缀。
+    """从章节标题中剥离编号前缀（唯一实现 = numbering.strip_outline_numbering）。
 
     DB 中的 title 可能已经带了 AI 生成的编号（如 "第一章 工程概况"、"1.1 项目基本信息"），
     而 export.py 又会用 heading_gen 重新生成标准编号 —— 必须先剥离再生成，
     否则会出现 "第一章 第一章 工程概况" / "1 1.1 项目基本信息" 等双重编号。
+
+    ✅ 2026-10-05（D4 · 编号剥离分叉收口）：旧实现自带 `_TITLE_NUM_STRIP_RES`
+    （5 条正则、循环剥离），与 `services/numbering.py` 的 `strip_outline_numbering`
+    分叉，实测差异（更差）：
+        "1.2.3钢筋工程" → 旧 "3钢筋工程"（点分未吃满整条路径） / 规范 "钢筋工程"
+        "1.1"           → 旧 "1"（纯编号标题被误剥半截）      / 规范 "1.1"
+    现改为委托 numbering 的唯一实现 + **有界循环**（兼容 "第1章 1.1 工程概况"
+    这类多重前缀；numbering 内部已保证年份/纯编号/正常标题不被误剥），
+    并删除本地 `_TITLE_NUM_STRIP_RES`。
     """
     s = str(title or "").strip()
-    changed = True
-    while changed:
-        changed = False
-        for rx in _TITLE_NUM_STRIP_RES:
-            new = rx.sub("", s, count=1)
-            new = new.strip()
-            if new != s:
-                s = new
-                changed = True
+    for _ in range(8):  # 多重前缀最多 8 轮即可收敛；有界避免异常输入死循环
+        new = strip_outline_numbering(s).strip()
+        if new == s:
+            break
+        s = new
     return s
 
 

@@ -52,38 +52,148 @@ logger = logging.getLogger("export")
 router = APIRouter(prefix="/api/v1/schemes/{scheme_id}/export", tags=["export"])
 
 
+# ---------------------------------------------------------------------------
+# ✅ R13 判空单一出口（2026-10-06）
+# ---------------------------------------------------------------------------
+# 背景（AGENTS.md §5.5 R13）：全局单连接 + aiosqlite 下 ``db.execute()`` 可能
+# 返回 ``None``（连接/事务异常），此时 ``cur.fetchone()`` / ``cur.fetchall()``
+# 抛 ``AttributeError``。
+# 本模块此前**只有 2 处**做了判空（``cache_status`` 与 ``_prune_export_cache``），
+# 其余 20+ 处全部裸调 —— AST 扫仓实测「后续 8 行内无 is-None 守卫」的
+# ``db.execute`` 点位共 31 个，其中包含两条**导出主干**：
+#   · ``export_docx`` 的缓存查询 → 缓存查询失败 ⇒ **整次导出 500**，
+#     用户连"重新生成一次"的机会都没有；
+#   · ``export_pdf`` 的缓存查询（:5023）→ 同上；
+#   · ``_prepare_export`` 的 schemes / sections / chart_predictions 三次查询
+#     → 同样 500。
+# 本仓历史上已两次因 R13 漏改点被逐个排查（§4.11.6 / §4.17.3），本次直接
+# 收敛为**三个 helper 单一出口**，杜绝"改一处漏一处"。
+#
+# 语义选择（全 fail-soft，理由同仓库既有口径：诊断/旁路不得阻断交付）：
+#   · 读：无行 / 异常 → 空结果集并记 WARNING（调用方按"查不到"继续）；
+#     方案不存在仍由 ``_prepare_export`` 显式 404，不靠这里判别。
+#   · 写：返回 False 并记 WARNING（**绝不静默**），调用方据此决定是否降级。
+class DBReadError(Exception):
+    """严格读（``strict=True``）下读取失败的信号。
+
+    绝大多数读点都是**旁路/诊断**性质，读不到就按「无数据」继续是正确的。
+    但**破坏性**调用方不同：若它把「读失败」当成「确实无行」，后续判据就会
+    从「无缓存行引用」变成真话 → 现存产物被误判为孤儿并被删除。
+    这类调用方必须显式声明 ``strict=True``，读失败一律抛本异常 → 保守中止。
+    """
+
+
+async def _db_fetch_all(cur, *, what: str, strict: bool = False) -> list:
+    """R13 + 容错读：``fetchall`` 的唯一出口。
+
+    默认（``strict=False``）fail-soft：cur 为 None / 读取异常 → ``[]``。
+    ``strict=True`` 时改为抛 :class:`DBReadError`，供破坏性调用方区分
+    「查询失败」与「确实无行」—— 这是两条完全不同的语义，
+    混在一起等于把磁盘上的成稿判成孤儿（见 ``_gc_orphan_exports``）。
+    """
+    if cur is None:
+        msg = f"db.execute 返回 None（{what}）"
+        if strict:
+            logger.warning("导出：%s，严格读模式 → 抛 DBReadError", msg)
+            raise DBReadError(msg)
+        logger.warning("导出：%s，降级为空结果集", msg)
+        return []
+    try:
+        return list(await cur.fetchall())
+    except Exception as e:  # pragma: no cover - 连接层异常
+        if strict:
+            logger.warning("导出：读取 %s 失败（严格读模式 → 抛 DBReadError）: %s",
+                           what, e)
+            raise DBReadError(str(e)) from e
+        logger.warning("导出：读取 %s 失败（降级为空结果集）: %s", what, e)
+        return []
+
+
+async def _db_fetch_one(cur, *, what: str):
+    """R13 + 容错读：``fetchone`` 的唯一出口。cur 为 None / 读取异常 → None。"""
+    if cur is None:
+        logger.warning("导出：db.execute 返回 None（%s），降级为无行", what)
+        return None
+    try:
+        return await cur.fetchone()
+    except Exception as e:  # pragma: no cover - 连接层异常
+        logger.warning("导出：读取 %s 失败（降级为无行）: %s", what, e)
+        return None
+
+
+def _merge_borrowed_stats(render_stats: dict, fix_stats: dict | None) -> dict:
+    """把构建期统计的「跨章借图」并入渲染统计（单一出口，DOCX / PDF 共用）。
+
+    ✅ 加固（2026-10-06 · D1）：跨章借图的真实发生地是 `_build_docx_sync`
+    （渲染期才知道借给了谁），而响应头 `X-Chart-Render-Stats` 来自
+    `_prepare_export` 的 ``render_stats``。此 helper 是两者之间**唯一的桥**，
+    避免"两条导出链路各写一遍合并逻辑"的分叉。
+    """
+    if not isinstance(render_stats, dict):
+        return {}
+    n = int((fix_stats or {}).get("chart_fallback_borrowed") or 0)
+    render_stats["fallback_borrowed"] = n
+    details = (fix_stats or {}).get("chart_fallback_borrowed_details")
+    if details:
+        render_stats["fallback_borrowed_details"] = details
+    return render_stats
+
+
+async def _db_exec(db, sql: str, params=(), *, what: str) -> bool:
+    """R13 + 写路径可观测：``execute`` 的唯一出口。返回 False = 本次写入未生效。"""
+    cur = await db.execute(sql, params)
+    if cur is None:
+        logger.warning("导出：写操作 %s 未生效（db.execute 返回 None）", what)
+        return False
+    return True
+
+
 def _norm_code(code: str) -> str:
     """规范化 mermaid 代码用于前后端匹配（折叠空白差异）"""
     return " ".join(str(code).split())
 
-def _build_chart_type_index(chart_lookup: dict[tuple[str, str], str]) -> dict[str, list[str]]:
-    """构建 chart_type → [code] 倒排索引（P0-3：O(N²) → O(1) 命中）。
+def _build_chart_type_index(chart_lookup: dict[tuple[str, str], str],
+                            order_rank: dict[str, int] | None = None,
+                            ) -> dict[str, list[tuple[str, str]]]:
+    """构建 chart_type → [(section_id, code)] 倒排索引（P0-3：O(N²) → O(1) 命中）。
 
-    语义与旧实现"遍历 chart_lookup 取第一个同类型非空 code"完全一致：
-    按 chart_lookup 插入顺序收集非空 code，兜底取列表首项。索引按 chart_type
-    唯一存首现 code，避免 unique_codes 阶段二次去重。
+    语义与旧实现"遍历 chart_lookup 取第一个同类型非空 code"一致，但**补齐了
+    来源章节**并在提供 ``order_rank`` 时按**文档顺序**排序。
+
+    ⚠️ 加固（2026-10-06 · D1）：旧实现的候选顺序 = ``chart_predictions`` 的
+    **行插入顺序**（同 scan 逻辑下不可控），于是"借用谁的图"随数据装载顺序
+    漂移 —— 同一份方案在两次导出/两台机器上可能借到不同章节的图。现按渲染
+    文档顺序（``order_rank``）排序：借**最近的、在自己之前**的那张同类图。
+    ``order_rank`` 缺省时保持原插入顺序（向后兼容，旧调用方零影响）。
 
     注意：这里的 chart_type → code 映射是全局的（不带 section_id），因为
     fallback 的既定契约是"当前章节标记 [CHART_TYPE: X] 但没有独立登记时，
     借用同类型图表代码"——这是 AI 单张覆盖多章正文的合理场景（例如三章
     共用一张 labor 图），而不是缺陷。参见 test_export_fallback_dedup.py。
+    跨章借用的**可观测性**（计数 / 响应头 / 前端提示）由 ``_resolve_chart_code``
+    统一产出，见其 docstring。
     """
-    index: dict[str, list[str]] = {}
-    for (_sid, ct), code in chart_lookup.items():
+    index: dict[str, list[tuple[str, str]]] = {}
+    items = list(chart_lookup.items())
+    if order_rank:
+        # 稳定排序：rank 相同的（理论上不会出现）保持原插入顺序
+        items.sort(key=lambda kv: order_rank.get(kv[0][0], 1 << 30))
+    for (sid, ct), code in items:
         if not code:
             continue
-        if ct not in index:
-            index[ct] = [code]
-        elif code not in index[ct]:
-            index[ct].append(code)
+        bucket = index.setdefault(ct, [])
+        if not any(s == sid and c == code for s, c in bucket):
+            bucket.append((sid, code))
     return index
 
 
 def _find_fallback_code(
-    chart_type_index: dict[str, list[str]],
+    chart_type_index: dict[str, list[tuple[str, str]]],
     chart_type: str,
-) -> str:
-    """图表兜底查找：取该类型第一个非空 code。
+    current_section_id: str = "",
+    order_rank: dict[str, int] | None = None,
+) -> tuple[str, str]:
+    """图表兜底查找：返回 ``(code, borrowed_from_section_id)``。
 
     仅用于"章节正文标记了 [CHART_TYPE: X] 但 chart_predictions 里没有登记
     对应代码"的场景——此时同类型的其他章节 code 可以作为兜底。这是
@@ -93,8 +203,52 @@ def _find_fallback_code(
     但那会打破三章共用一张 labor 图的合理场景，故已回退。跨章节借用是
     fallback 契约的一部分，test_missing_chart_does_not_borrow_other_chapter_code
     保留 strict xfail 记录该语义分歧。
+
+    ⚠️ 加固（2026-10-06 · D1）：**不改变借用语义**（仍会借），但改为**确定
+    性地借"文档顺序上最近的前一张同类图"**（旧实现依赖 DB 行插入顺序，不可控），
+    并**回传来源章节**让调用方能计数与上报 —— 此前跨章借图是**零信号**的
+    （成稿里 B 章可能出现 A 章的流程图，图文不符却无任何提示）。
     """
-    return chart_type_index.get(chart_type, [""])[0]
+    bucket = chart_type_index.get(chart_type) or []
+    if not bucket:
+        return "", ""
+    if current_section_id:
+        for sid, code in bucket:
+            if sid == current_section_id:
+                return code, sid
+        if order_rank:
+            me = order_rank.get(current_section_id)
+            if me is not None:
+                # 优先取「排在自己之前且距离最近」的同类图；都排在自己之后时
+                # 取全局第一张（保持"有图总比没图好"的兜底语义）
+                before = [(abs(me - order_rank.get(sid, me)), i, code)
+                          for i, (sid, code) in enumerate(bucket)
+                          if order_rank.get(sid) is not None and order_rank[sid] < me]
+                if before:
+                    before.sort()
+                    return before[0][2], bucket[before[0][1]][0]
+    return bucket[0][1], bucket[0][0]
+
+
+def _resolve_chart_code(block: dict, sec_id: str, chart_type: str,
+                        chart_lookup: dict[tuple[str, str], str],
+                        chart_type_index: dict[str, list[tuple[str, str]]],
+                        order_rank: dict[str, int] | None = None,
+                        ) -> tuple[str, str]:
+    """图表取码的**唯一出口**：``(code, borrowed_from_section_id)``。
+
+    优先级：块自带内联码 > 本章节 chart_predictions 登记 > 同类型兜底借用。
+
+    ⚠️ 加固（2026-10-06 · D1）：`_prepare_export`（预渲染收集）与
+    `write_section`（落图渲染）此前**各自实现了一遍同样的三级取码逻辑**，
+    既重复又没有任何一方能观测到"这张图是借来的"。现收敛为单一出口，
+    兜底命中的来源章节由返回值给出，供渲染统计（X-Chart-Render-Stats）
+    与导出日志如实上报。
+    """
+    code = block.get("code") or chart_lookup.get((sec_id, chart_type), "")
+    if code:
+        return code, ""
+    return _find_fallback_code(chart_type_index, chart_type, sec_id, order_rank)
 
 
 # ✅ 导出器逻辑版本：纳入内容指纹，使渲染/排版逻辑修复后旧缓存放缓。
@@ -202,6 +356,11 @@ _AUDIT_RULES: tuple[tuple[str, str, str, re.Pattern], ...] = (
     ("latex_square", "LaTeX 空参数占位 \\square", "error", re.compile(r"\\square")),
     ("bidding_terms", "投标场景用语（专项方案不应引用）", "warn",
      re.compile(r"招标文件|投标文件|评标办法|评分标准|废标条件|投标须知")),
+    # ✅ R50 新增（2026-10-07）：中英混杂 —— 中文句子里夹连续两个小写英文单词
+    #    （如"签署 material acceptance records 后方可"）。规范编号（GB/JGJ 大写）、
+    #    化学式（HCHO）、单个英文术语不会误伤。命中即提示用户改回中文。
+    ("mixed_language", "中英混杂（中文段落中夹英文短语）", "warn",
+     re.compile(r"[\u4e00-\u9fa5]\s*[a-z]{4,}(?:\s+[a-z]{3,})+\s*[\u4e00-\u9fa5]")),
 )
 # 图表家族围栏（未闭合即视为生成被截断，残片渲染必失败）——
 # 统一定义在 _chart_pipeline.INLINE_CHART_FENCE_LANGS，避免两端分叉。
@@ -403,6 +562,23 @@ def _detect_duplicate_sections(sections: list[dict]) -> list[dict]:
             # 与 write_section 同口径：剥离正文开头与本节标题重复的块
             # （AI 常在正文首行自引用本节标题；渲染端会剥掉，检测器不剥会假阳性）
             blocks = _strip_duplicate_leading_title(blocks, pure, f"{num} {pure}".strip())
+            # ✅ 加固（2026-10-06 · D4）：`_compute_subheading` 的 `has_children`
+            #    必须与渲染端同口径。渲染端在「本节有 DB 子章节 **且**
+            #    body_subheading_demote_with_children 开启」时把正文子标题降级为
+            #    节内 body 命名空间（1）/ a）、…）—— 这些编号**不占 X.N**。
+            #    旧实现不传该参数（默认 False）⇒ 预检按降级前的口径把它们算成
+            #    "1.1/1.2"，于是**默认配置（降级开启）下预检报出渲染结果里根本
+            #    不存在的重复编号**（实测：渲染为 `1）、项目概况 / 2）、建筑概况 /
+            #    1 工程规模 / 1.1 规模描述`，零重复；预检却报「1.1 重复」）。
+            #    这类「预检说有、成稿没有」的假阳性会直接把用户引向错误的整改方向
+            #    （与 §4.23 已收口的 CMP-01 父节点误报同型）。
+            _demote = True
+            try:
+                from app.config import settings as _s
+                _demote = bool(_s.body_subheading_demote_with_children)
+            except Exception:  # pragma: no cover - 配置不可用时沿用 fail-safe 默认
+                _demote = True
+            has_children_demoted = bool(children_map.get(sec.get("id"))) and _demote
             sub_counters: dict[int, int] = {}
             for block in blocks:
                 if block.get("type") != "heading":
@@ -411,7 +587,7 @@ def _detect_duplicate_sections(sections: list[dict]) -> list[dict]:
                 bpure = _strip_title_number(block.get("text", ""))
                 text, _style = _compute_subheading(
                     section_prefix, level, md_lv, sub_counters, bpure,
-                    sec.get("id") or "")
+                    sec.get("id") or "", has_children=has_children_demoted)
                 block["_fixed_text"] = text
             n_child_ns = _count_child_namespace_subheadings(blocks, section_prefix)
             for block in blocks:
@@ -809,14 +985,11 @@ async def placeholder_history(scheme_id: str, limit: int = 20, db=Depends(get_db
         " field_count, section_count, created_at FROM placeholder_baselines"
         " WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?",
         (scheme_id, limit))
-    # ✅ R13 守卫（2026-09-30）：全局单连接下 db.execute 可能返回 None（连接/事务
-    #    异常）。本端点是只读监控旁路，降级为空历史即可，不应 500。
-    if cur is None:
-        logger.warning("placeholder_history: db.execute 返回 None（scheme=%s），降级返回空历史",
-                       scheme_id)
-        rows: list = []
-    else:
-        rows = [dict(r) for r in (await cur.fetchall() or [])]
+    # ✅ R13 守卫（2026-09-30 引入，2026-10-06 收敛到 _db_fetch_all 单一出口）：
+    #    全局单连接下 db.execute 可能返回 None（连接/事务异常）。本端点是只读
+    #    监控旁路，降级为空历史即可，不应 500。
+    rows = [dict(r) for r in await _db_fetch_all(
+        cur, what="placeholder_history")]
     return {"scheme_id": scheme_id, "history": rows, "keep": _PLACEHOLDER_BASELINE_KEEP}
 
 
@@ -840,7 +1013,8 @@ async def collect_export_issues(scheme_id: str, db) -> dict:
         "SELECT id, parent_id, level, sort_order, title, status, review_status, "
         "word_count, content, outline_json FROM sections"
         " WHERE scheme_id=? ORDER BY sort_order, level, id", (scheme_id,))
-    sections = [dict(r) for r in await cur.fetchall()]
+    sections = [dict(r) for r in await _db_fetch_all(
+        cur, what="collect_export_issues:sections")]
     section_ids = {s["id"] for s in sections}
     parent_ids = {s["parent_id"] for s in sections if s.get("parent_id")}
     issues = []
@@ -871,7 +1045,8 @@ async def collect_export_issues(scheme_id: str, db) -> dict:
     # 图表未生成检查
     cur = await db.execute(
         "SELECT chart_type, status FROM chart_predictions WHERE scheme_id=?", (scheme_id,))
-    chart_rows = await cur.fetchall()
+    chart_rows = await _db_fetch_all(
+        cur, what="collect_export_issues:chart_predictions")
     chart_total = len(chart_rows)
     # ✅ 状态口径兼容："generated" 是正文同步图表与 fix-mermaid 的历史写法，
     #    语义上同样是"代码已生成完毕"，必须与 "done" 一并视为已完成，
@@ -929,7 +1104,8 @@ async def collect_export_issues(scheme_id: str, db) -> dict:
     #    如果 17 个必选项中有大量失败，导出的文档可能信息不全。
     cur = await db.execute(
         "SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
-    scheme_row = await cur.fetchone()
+    scheme_row = await _db_fetch_one(
+        cur, what="collect_export_issues:schemes.project_id")
     _ba_summary = None
     if scheme_row and scheme_row["project_id"]:
         ba_pid = scheme_row["project_id"]
@@ -937,7 +1113,8 @@ async def collect_export_issues(scheme_id: str, db) -> dict:
             "SELECT item_id, label, status, required FROM bid_analysis_items "
             "WHERE project_id=? AND COALESCE(required,0)=1",
             (ba_pid,))
-        ba_required = [dict(r) for r in await cur2.fetchall()]
+        ba_required = [dict(r) for r in await _db_fetch_all(
+            cur2, what="collect_export_issues:bid_analysis_items")]
         ba_total = len(ba_required)
         ba_success = sum(1 for r in ba_required if r["status"] == "success")
         ba_failed = [r for r in ba_required if r["status"] not in ("success", "idle")]
@@ -982,7 +1159,8 @@ async def collect_export_issues(scheme_id: str, db) -> dict:
                 "FROM global_facts WHERE scheme_id=? OR (project_id=? AND "
                 "(scheme_id='' OR scheme_id IS NULL))",
                 (scheme_id, scheme_row["project_id"]))
-            frow = await cur.fetchone()
+            frow = await _db_fetch_one(
+                cur, what="collect_export_issues:global_facts 统计")
             if frow:
                 _facts_summary = {k: int(frow[k] or 0) for k in _facts_summary}
                 _facts_status = {"ok": True, "code": "ok"}
@@ -1041,6 +1219,7 @@ async def collect_export_issues(scheme_id: str, db) -> dict:
         _ph_full = build_placeholder_report(sections)
         placeholder_report = {k: _ph_full[k] for k in (
             "total", "formatted_total", "bare_total", "fuzzy_total",
+            "bracket_total",
             "field_count", "section_count", "by_field", "by_section")}
     except Exception:  # 清单属旁路审计：失败不阻断预检主流程
         placeholder_report = build_placeholder_report([])
@@ -1185,7 +1364,7 @@ async def _readiness_preflight_summary(scheme_id: str, db) -> dict:
             " content_fingerprint, created_at"
             " FROM preflight_runs WHERE scheme_id=?"
             " ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,))
-        row = await cur.fetchone()
+        row = await _db_fetch_one(cur, what="_readiness_preflight_summary")
         if not row:
             return {"has_run": False}
         return {
@@ -1222,7 +1401,7 @@ async def _record_export_review_trace(db, scheme_id: str, fmt: str,
     try:
         cur = await db.execute(
             "SELECT name, review_status FROM schemes WHERE id=?", (scheme_id,))
-        row = await cur.fetchone()
+        row = await _db_fetch_one(cur, what="_record_export_review_trace:schemes")
         status = (row["review_status"] or "") if row else ""
         name = (row["name"] or "") if row else scheme_id
         await _write_record(
@@ -1242,7 +1421,7 @@ async def _record_export_review_trace(db, scheme_id: str, fmt: str,
 async def _preset_project_id(db, scheme_id: str) -> str:
     """预设按项目维度共享：从方案反查其 project_id。"""
     cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
-    row = await cur.fetchone()
+    row = await _db_fetch_one(cur, what="_preset_project_id")
     return row["project_id"] if row else ""
 
 
@@ -1253,7 +1432,7 @@ async def list_export_presets(scheme_id: str, db=Depends(get_db)):
     cur = await db.execute(
         "SELECT id, name, config_json, is_default, updated_at FROM export_presets "
         "WHERE project_id=? ORDER BY is_default DESC, updated_at DESC", (pid,))
-    rows = await cur.fetchall()
+    rows = await _db_fetch_all(cur, what="list_export_presets")
     return {"presets": [{
         "id": r["id"], "name": r["name"],
         "config": json.loads(r["config_json"] or "{}"),
@@ -1272,9 +1451,11 @@ async def create_export_preset(scheme_id: str, body: dict, db=Depends(get_db)):
     pid = await _preset_project_id(db, scheme_id)
     preset_id = str(uuid.uuid4())
     now = datetime.now().isoformat()
-    await db.execute(
+    await _db_exec(
+        db,
         "INSERT INTO export_presets (id, project_id, name, config_json, is_default, created_at, updated_at) "
-        "VALUES (?,?,?,?,0,?,?)", (preset_id, pid, name, json.dumps(config, ensure_ascii=False), now, now))
+        "VALUES (?,?,?,?,0,?,?)", (preset_id, pid, name, json.dumps(config, ensure_ascii=False), now, now),
+        what="create_export_preset")
     await db.commit()
     return {"id": preset_id, "name": name, "config": config}
 
@@ -1283,8 +1464,9 @@ async def create_export_preset(scheme_id: str, body: dict, db=Depends(get_db)):
 async def update_export_preset(scheme_id: str, preset_id: str, body: dict, db=Depends(get_db)):
     """更新预设（名称 / 配置）。"""
     pid = await _preset_project_id(db, scheme_id)
-    cur = await db.execute("SELECT id FROM export_presets WHERE id=? AND project_id=?", (preset_id, pid))
-    if not await cur.fetchone():
+    cur = await db.execute(
+        "SELECT id FROM export_presets WHERE id=? AND project_id=?", (preset_id, pid))
+    if not await _db_fetch_one(cur, what="update_export_preset 存在性"):
         raise HTTPException(404, "预设不存在")
     name = (body.get("name") or "").strip()
     sets, params = [], []
@@ -1297,7 +1479,8 @@ async def update_export_preset(scheme_id: str, preset_id: str, body: dict, db=De
     sets.append("updated_at=?")
     params.append(datetime.now().isoformat())
     params += [preset_id, pid]
-    await db.execute(f"UPDATE export_presets SET {','.join(sets)} WHERE id=? AND project_id=?", params)
+    await _db_exec(db, f"UPDATE export_presets SET {','.join(sets)} WHERE id=? AND project_id=?",
+                   params, what="update_export_preset")
     await db.commit()
     return {"ok": True}
 
@@ -1306,11 +1489,14 @@ async def update_export_preset(scheme_id: str, preset_id: str, body: dict, db=De
 async def set_default_export_preset(scheme_id: str, preset_id: str, db=Depends(get_db)):
     """将某预设设为项目默认（同项目其它预设取消默认）。"""
     pid = await _preset_project_id(db, scheme_id)
-    cur = await db.execute("SELECT id FROM export_presets WHERE id=? AND project_id=?", (preset_id, pid))
-    if not await cur.fetchone():
+    cur = await db.execute(
+        "SELECT id FROM export_presets WHERE id=? AND project_id=?", (preset_id, pid))
+    if not await _db_fetch_one(cur, what="set_default_export_preset 存在性"):
         raise HTTPException(404, "预设不存在")
-    await db.execute("UPDATE export_presets SET is_default=0 WHERE project_id=?", (pid,))
-    await db.execute("UPDATE export_presets SET is_default=1 WHERE id=? AND project_id=?", (preset_id, pid))
+    await _db_exec(db, "UPDATE export_presets SET is_default=0 WHERE project_id=?",
+                   (pid,), what="set_default_export_preset 清默认")
+    await _db_exec(db, "UPDATE export_presets SET is_default=1 WHERE id=? AND project_id=?",
+                   (preset_id, pid), what="set_default_export_preset 设默认")
     await db.commit()
     return {"ok": True}
 
@@ -1319,7 +1505,8 @@ async def set_default_export_preset(scheme_id: str, preset_id: str, db=Depends(g
 async def delete_export_preset(scheme_id: str, preset_id: str, db=Depends(get_db)):
     """删除预设。"""
     pid = await _preset_project_id(db, scheme_id)
-    await db.execute("DELETE FROM export_presets WHERE id=? AND project_id=?", (preset_id, pid))
+    await _db_exec(db, "DELETE FROM export_presets WHERE id=? AND project_id=?",
+                   (preset_id, pid), what="delete_export_preset")
     await db.commit()
     return {"ok": True}
 
@@ -1333,37 +1520,26 @@ _MERMAID_TYPE_MAP = MERMAID_KEYWORD_TO_CHART_TYPE
 
 
 from app.services.content_blocks import (
+    _LEAD_IN_HINT_RE,  # ✅ 2026-10-05（D4）：引导语识别正则收敛到唯一实现，删除本地副本
+    LEAD_IN_MAX_CHARS,  # ✅ R48（2026-10-06）：引导语长度上限收敛到唯一实现，
     _cn_pure_to_int,
     _compute_subheading,
     _detect_plain_heading,  # noqa: F401  兼容再导出：测试与诊断脚本经 app.routers.export 引用
+    #                          消除本模块此前的裸 `60` 字面量（同一判据第 3 份副本）。
     _parse_content_blocks,
     _strip_duplicate_leading_title,
     _strip_title_number,
 )
 
 # ---------------------------------------------------------------------------
-# ✅ 优化：有序列表标记样式识别（保留作者枚举符外观 + 导出时自动连续编号）
+# ✅ 优化：有序列表标记样式**渲染**（保留作者枚举符外观 + 导出时自动连续编号）
 # ---------------------------------------------------------------------------
-# 工程文档常见的多级枚举：一、→（一）→ 1. →（1）；AI 输出时往往混用，且中文
-# 序号后普遍不写空格。旧实现只认 ASCII 的 "1. " / "1) "，其余一律退化成正文
-# 段落（丢失列表缩进，也拿不到"自动修复跳号/重复编号"的能力）。
-# 现统一识别并**记录原标记样式**，导出时按样式重新渲染连续序号 ——
-# 既保留原始层级观感（（一）/（1）/ 1、不会被拍平成 1.），又能修正 AI 的编号错误。
-_ORDERED_MARKER_RES: tuple = (
-    # （一） / (一) —— 中文括号数字（与「第X章 / 1.1」并列的层级标记）
-    (re.compile(r"^[（(]([一二三四五六七八九十]+)[)）]\s*(\S.*)$"), "cn_num_paren"),
-    # （1） / (1)
-    (re.compile(r"^[（(](\d+)[)）]\s*(\S.*)$"), "num_paren_lr"),
-    # 1、 —— 顿号（中文文档最常用）
-    (re.compile(r"^(\d+)\s*、\s*(\S.*)$"), "num_dun"),
-    # 1） —— 中文右括号
-    (re.compile(r"^(\d+)\s*）\s*(\S.*)$"), "num_paren_r"),
-    # 1) —— ASCII 右括号（无空格也识别）
-    (re.compile(r"^(\d+)\s*\)\s*(\S.*)$"), "paren_ascii"),
-    # 1. / 1) —— ASCII 且必须跟空格，避免 "3.14 是圆周率" 被误切成列表项
-    (re.compile(r"^(\d+)\s*[.)]\s+(.+)$"), "ascii"),
-)
-
+# 工程文档常见的多级枚举：一、→（一）→ 1. →（1）。**识别**（含原标记样式记录）
+# 已随 `_parse_content_blocks` 下沉到 services/content_blocks.py 的
+# `_ORDERED_MARKER_RES`，解析结果带出 marker 风格；本模块只保留**渲染**侧
+# （marker → 连续序号前缀，见下方 _ordered_prefix）。
+# ✅ 2026-10-05（D4 · 死副本清理）：此处原先残留一份 `_ORDERED_MARKER_RES` 副本，
+#    T-2 下沉后已无任何引用（导出侧一律消费 content_blocks 解析出的 marker），删除。
 _CN_ORDINAL_DIGITS = "零一二三四五六七八九"
 
 
@@ -1398,22 +1574,59 @@ def _ordered_prefix(seq: int, marker: str) -> str:
     return f"{seq}. "  # ascii：与既有版式保持一致（"1. "）
 
 
+def _estimate_prefix_width(prefix: str) -> float:
+    """估算前缀文本宽度（cm），用于悬挂缩进计算。
+
+    10.5pt 字体下：ASCII 字符 ≈ 0.20 cm/字，中文/全角 ≈ 0.37 cm/字。
+    取整到 0.05 cm 精度，避免 Word 渲染时出现亚像素错位。
+    """
+    w = 0.0
+    for ch in prefix:
+        if ord(ch) > 0x7F:
+            w += 0.37  # 中文/全角字符
+        else:
+            w += 0.20  # ASCII 字符
+    # 至少 0.5 cm，确保悬挂缩进可见
+    return max(0.5, round(w, 2))
 
 
-# 「表 X-Y 表名」形态：编号后**必须有分隔符**（空格 / 顿号 / 冒号），
-# 否则 "表1和表2的参数" 这类正文指代会被误吞成表题。
-_TABLE_CAPTION_RE = re.compile(
-    r"^表\s*(?:[:：]\s*"
-    r"|[0-9一二三四五六七八九十][0-9.\-–—]*[\s、.：:]+)"
-    r"(\S.*)$")
+def _ensure_list_paragraph_style(doc) -> str:
+    """获取或创建 "List Paragraph" 段落样式，返回列表段落样式名。
+
+    "List Paragraph" 是 Word 内置的列表段落样式，使段落被识别为列表项
+    （带缩进、可被 Word 列表功能操作）。若文档未包含该样式则自动创建。
+    """
+    from docx.enum.style import WD_STYLE_TYPE
+    from docx.oxml.ns import qn
+
+    name = "List Paragraph"
+    for st in doc.styles:
+        if st.type == WD_STYLE_TYPE.PARAGRAPH and st.name == name:
+            return name
+    # 创建新样式（基于 Normal，添加基础缩进设置）
+    style = doc.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    style.base_style = doc.styles["Normal"]
+    ppr = style.element.get_or_add_pPr()
+    # 清除继承的大纲级别（列表段落不属于大纲层级）
+    for ol in ppr.findall(qn("w:outlineLvl")):
+        ppr.remove(ol)
+    return name
+
+
+
+
+# ✅ 2026-10-05（D4 · 死副本清理）：`_TABLE_CAPTION_RE` / `_IMAGE_LINE_RE` /
+# `_MERMAID_TITLE_RES` / `_LEAD_IN_TAIL_RE` 在 T-2 下沉后本模块内**已无任何引用**，
+# 唯一实现均在 services/content_blocks.py（导出侧只消费其解析结果）。
+# 为杜绝「改一处、另一处漂移」，此处本地副本全部删除。
 
 
 
 
 
 
-# ✅ AI 配图：正文内嵌的 Markdown 图片行（导出前会下载并作为真实位图插入）
-_IMAGE_LINE_RE = re.compile(r"^!\[(?P<alt>[^\]\n]*)\]\((?P<url>https?://[^)\s]+)\)$")
+# ✅ AI 配图：正文内嵌的 Markdown 图片行识别（`_IMAGE_LINE_RE`）已随
+# _parse_content_blocks 下沉到 services/content_blocks.py（导出前会下载并作为真实位图插入）。
 
 
 # ---------------------------------------------------------------------------
@@ -1427,15 +1640,9 @@ _IMAGE_LINE_RE = re.compile(r"^!\[(?P<alt>[^\]\n]*)\]\((?P<url>https?://[^)\s]+)
 #   ② Mermaid 的 `title` 指令（仅 gantt/pie/timeline 有）
 #   ③ 图表块上方引导语（「…如下图所示：」剥尾后的名词短语）
 #   ④ 类型通用名（_CHART_TYPE_MAP，最终兜底）
-_MERMAID_TITLE_RES = (
-    re.compile(r"^\s*%%\s*(?:图题|标题|title)\s*[:：]\s*(.+?)\s*$", re.M),
-    re.compile(r"^\s*(?:title|图题)\s*[:：]?\s*(.+?)\s*$", re.M),
-    re.compile(r"^\s*pie\s+title\s+(.+?)\s*$", re.M),
-)
-# 引导语尾部特征（"如下图所示：" / "如图 1 所示" / "见下图。" 等）
-_LEAD_IN_TAIL_RE = re.compile(
-    r"(?:如下|如后|见下)?\s*(?:图|表)?\s*(?:所示|如下)?\s*[:：。]?\s*$")
-_LEAD_IN_HINT_RE = re.compile(r"(?:如下图|见下图|如下图示|如图|图示)\s*(?:所示)?\s*[:：。]?$")
+# ✅ 2026-10-05（D4）：`_MERMAID_TITLE_RES` / `_LEAD_IN_TAIL_RE` / `_LEAD_IN_HINT_RE`
+#    的唯一实现均在 services/content_blocks.py；本模块已删除同名本地副本
+#    （`_LEAD_IN_HINT_RE` 改为从 content_blocks 导入）。
 
 
 
@@ -1451,15 +1658,10 @@ _LEAD_IN_HINT_RE = re.compile(r"(?:如下图|见下图|如下图示|如图|图�
 # ---------------------------------------------------------------------------
 # ✅ BUG 修复：正文开头重复章节标题（导出后出现 "1 XXX" + "XXX" 两行）
 # ---------------------------------------------------------------------------
-# 标题编号前缀（Markdown 井号 / 第X章 / （一） / 1.1.1 / 1） / a ）逐层剥离
-_HEADING_NUM_PREFIX_RES = (
-    re.compile(r"^#{1,6}\s*"),
-    re.compile(r"^第[一二三四五六七八九十百千零\d]+[章节][、\s]*"),
-    re.compile(r"^[（(][一二三四五六七八九十百]+[)）][、\s]*"),
-    re.compile(r"^\d+(?:\.\d+)*[、.\s]+"),
-    re.compile(r"^\d+[）)][、\s]*"),
-    re.compile(r"^[a-zA-Z]{1,2}[、.\s]+"),
-)
+# 标题编号前缀剥离（Markdown 井号 / 第X章 / （一） / 1.1.1 / 1） / a ）：
+# ✅ 2026-10-05（D4）：唯一实现为 services/content_blocks.py 的
+#    `_HEADING_NUM_PREFIX_RES`（`_strip_duplicate_leading_title` 消费）；
+#    本模块的同名本地副本已无引用，删除。
 
 
 
@@ -1564,6 +1766,19 @@ def _add_omml_formula(paragraph, latex: str, display: bool, whole_para: bool):
         paragraph.add_run(("$$" if display else "$") + latex + ("$$" if display else "$"))
 
 
+def _collapse_redundant_spaces(text: str) -> str:
+    """保守压缩纯文本片段中的冗余空白。
+
+    ✅ F2 修复：dangling 残式（如 ``$N = $``）右值位置为空，公式节点前后
+    残留的空格会在成稿里形成连续双空格。这里仅把 **2 个及以上连续的
+    空格/制表符** 归一为单个空格，不触碰单个空格、换行与中文，避免误伤
+    正常排版与中英文混排间距。
+    """
+    if not text:
+        return text
+    return re.sub(r"[ \t]{2,}", " ", text)
+
+
 def _add_runs_with_inline_format(paragraph, text: str):
     """按公式 + 行内标记混合流写入段落。
 
@@ -1578,12 +1793,12 @@ def _add_runs_with_inline_format(paragraph, text: str):
     pos = 0
     for disp, latex, m in docx_math.iter_formulas(text):
         if m.start() > pos:
-            _add_markdown_runs(paragraph, text[pos:m.start()])
+            _add_markdown_runs(paragraph, _collapse_redundant_spaces(text[pos:m.start()]))
         whole = text.strip() == m.group(0).strip()
         _add_omml_formula(paragraph, latex, disp, whole)
         pos = m.end()
     if pos < len(text):
-        _add_markdown_runs(paragraph, text[pos:])
+        _add_markdown_runs(paragraph, _collapse_redundant_spaces(text[pos:]))
 
 
 # 本次导出会话的修复统计（导出完成时输出日志并清零）。
@@ -1595,7 +1810,17 @@ def _add_runs_with_inline_format(paragraph, text: str):
 #    即可天然隔离各次导出，无需加锁。
 _FIX_STATS_KEYS = ("formulas", "block_formulas", "replacement_chars",
                    "control_chars", "gbk_mojibake", "latin1_mojibake",
-                   "cyrillic")
+                   "cyrillic",
+                   # ✅ 新增（2026-10-06 · P0 逐块 fail-soft 可观测性）：
+                   #   write_section 内单个内容块渲染抛异常时降级为纯文本/跳过，
+                   #   绝不让一份文档因一个坏块整体 500。降级次数必须可观测
+                   #   （日志 + X-Fix-Stats 响应头），否则「成稿少了一块」变成
+                   #   与「静默丢数据」同级的不可见缺陷。
+                   #   加法式扩展：既有 7 个键的语义与取值一字未动。
+                   "block_render_failed",
+                   # ✅ 新增（2026-10-06 · P1 表格尺寸上限）：
+                   #   GFM 表格行列/单元格数超限时截断的次数（正常表格恒为 0）。
+                   "table_truncated")
 _FIX_STATS_LOCAL = threading.local()
 
 
@@ -1638,10 +1863,53 @@ def _log_fix_stats() -> dict:
         parts.append(f"编码乱码 {st['latin1_mojibake']} 处")
     if st["cyrillic"]:
         parts.append(f"西里尔误植 {st['cyrillic']} 处")
+    if st["block_render_failed"]:
+        parts.append(f"内容块降级为纯文本 {st['block_render_failed']} 处"
+                     "（成稿已保留文字，版式降级）")
+    if st["table_truncated"]:
+        parts.append(f"超宽/超长表格截断 {st['table_truncated']} 处")
     stats = dict(st)
+    if st["block_render_failed"] or st["table_truncated"]:
+        logger.warning(
+            "DOCX 导出存在降级：%d 处内容块渲染失败（已降级为纯文本）、"
+            "%d 处表格超尺寸（已截断）—— 成稿可交付但版式不完整，"
+            "请回查源文对应章节", st["block_render_failed"], st["table_truncated"])
     logger.info("DOCX 导出自动修复: %s", "、".join(parts))
     st.update({k: 0 for k in st})
     return stats
+
+
+#: 附录事实单元格行首的 Markdown 列表符号（``- `` / ``* `` / ``+ ``）。
+_APPENDIX_LIST_LEAD_RE = re.compile(r"^\s*[-*+]\s+")
+
+
+def _appendix_cell_paragraph(cell, text: str, font_name: str,
+                             font_size: float = 10.5, *, first: bool = False):
+    """向附录事实表单元格写入一行内容：剥离开头列表符号并解析行内 Markdown。
+
+    旧实现直接 ``add_run`` 写入全局事实原文，``- **名称**: 内容`` 等列表 +
+    加粗语法会以源码形式残留在成稿单元格内（实测附录 14 张表全部中招）。
+    本函数：① 剥离行首 ``- ``/``* `` 列表符号；② 复用
+    ``_add_runs_with_inline_format`` 解析 ``**加粗**`` / 公式 / 链接等行内标记；
+    ③ 统一中文字体。仅改变附录事实单元格的渲染，正文与其他表格不受影响。
+    """
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Pt
+
+    lines = [ln for ln in (text or "").split("\n")]
+    p = cell.paragraphs[0] if first else cell.add_paragraph()
+    started = False
+    for raw in lines:
+        cleaned = _APPENDIX_LIST_LEAD_RE.sub("", raw.strip())
+        target = p if not started else cell.add_paragraph()
+        target.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        target.paragraph_format.first_line_indent = Pt(0)
+        _add_runs_with_inline_format(target, cleaned)
+        for run in target.runs:
+            _set_run_font(run, font_name, font_size)
+        p = target
+        started = True
+    return p
 
 
 def _add_table_caption(doc, text: str, font_name: str = "宋体", font_size: float = 10.5):
@@ -1664,11 +1932,26 @@ def _add_table_caption(doc, text: str, font_name: str = "宋体", font_size: flo
     return p
 
 
+#: GFM 表格尺寸上限（2026-10-06 · P1 性能/稳定性）。
+#: 实测无上限时单表耗时随行列乘积急剧上升：60 列×20 行 = 2.4s、
+#: 200 列×40 行 = **39.5s**、400 列×60 行 > 110s 未完成（建单元格 XML 是
+#: O(rows×cols) 次 OXML 节点构造）。而 `_build_docx_sync` 全程在
+#: `asyncio.to_thread` 的**单个工作线程**里跑、无内部超时 → 一张畸形宽表
+#: 就能把导出线程长期占死，用户侧表现为"导出卡住不动"。
+#: 正常工程表格（列 ≲ 20、行 ≲ 100）远低于下列阈值，产物逐字节不变。
+_TABLE_MAX_COLS = 63     # Word 表格硬上限即 63 列
+_TABLE_MAX_ROWS = 400
+_TABLE_MAX_CELLS = 12000
+
+
 def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体"):
     """将 GFM 表格行转为 Word 表格。
 
     表头：`font_name` 五号加粗、居中、暗板岩蓝浅色 60% 底纹（B6B1D1）；
     表体：`font_name` 五号居中；整表居中、单元格垂直居中、表头跨页重复。
+
+    ✅ 2026-10-06（P1）：行列/单元格数设上限并**留痕**（`table_truncated`
+    计入 X-Fix-Stats），超限时按「行 → 列」顺序截断而非让导出线程被占死。
     """
     from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -1686,6 +1969,27 @@ def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体")
     if not rows:
         return
     ncols = max(len(r) for r in rows)
+    # ---- 尺寸上限（先列后行，保证表头行永远保留）----
+    raw_cols, raw_rows = ncols, len(rows)
+    truncated = False
+    if ncols > _TABLE_MAX_COLS:
+        ncols = _TABLE_MAX_COLS
+        truncated = True
+    if len(rows) > _TABLE_MAX_ROWS:
+        rows = rows[:_TABLE_MAX_ROWS]
+        truncated = True
+    if len(rows) * ncols > _TABLE_MAX_CELLS:
+        keep = max(1, _TABLE_MAX_CELLS // max(1, ncols))
+        if keep < len(rows):
+            rows = rows[:keep]
+            truncated = True
+    if truncated:
+        _fix_stats()["table_truncated"] = _fix_stats().get("table_truncated", 0) + 1
+        logger.warning(
+            "导出：表格超尺寸已截断（原始 %d 列 × %d 行 → %d 列 × %d 行，"
+            "上限 %d 列 / %d 行 / %d 单元格）—— 成稿可交付但该表内容不完整，"
+            "请回查源文", raw_cols, raw_rows, ncols, len(rows),
+            _TABLE_MAX_COLS, _TABLE_MAX_ROWS, _TABLE_MAX_CELLS)
     table = doc.add_table(rows=len(rows), cols=ncols)
     table.style = "Table Grid"
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -2256,6 +2560,59 @@ def _chart_ok(img_bytes) -> bool:
     return _image_format_supported(img_bytes)
 
 
+# ---------------------------------------------------------------------------
+# ✅ BUG 修复（2026-10-06 · P0 逐块 fail-soft）：单个内容块渲染抛异常 → 整份导出 500
+# ---------------------------------------------------------------------------
+# 现象：write_section 的块分发里，**只有图表 / 配图两条分支**做了 fail-soft
+#    （渲染失败即跳过并回退图号）。table / code / heading / list_item / quote /
+#    普通段落这 6 类分支**完全没有保护**：任何一个块渲染抛异常都会冒到
+#    `_build_docx_sync` 之外 → export_docx / export_pdf 返回 500，
+#    用户**一分钱都拿不到**（连"降级产物"都没有）。
+#    实测（monkeypatch `_add_table_from_markup` 抛异常）：PROPAGATED RuntimeError。
+#    对交付类文档而言，"少一个表格的版式"远好于"整份方案导不出来"。
+# 修法：把**整个块分发**包成一次事务 ——
+#    ① 记录 body 元素快照 + 图号/表号/去重集合快照；
+#    ② 异常时回滚文档元素与全部计数器（不留半截表格、不留已占图号）；
+#    ③ 降级为**纯文本段落**保留内容（文字绝不丢），并累加
+#       `block_render_failed` 供日志 + X-Fix-Stats 响应头观测。
+
+
+def _block_plain_text(block: dict) -> str:
+    """把内容块降级为可读的纯文本（表格/代码块保留原始行）。"""
+    bt = block.get("type")
+    if bt == "table":
+        return "\n".join(str(x) for x in (block.get("lines") or []))
+    if bt == "code":
+        return "\n".join(str(x) for x in (block.get("lines") or []))
+    for key in ("_fixed_text", "text"):
+        v = block.get(key)
+        if v:
+            return str(v)
+    return ""
+
+
+def _degrade_block_to_text(doc, block: dict, font_name: str, font_size: float) -> bool:
+    """块渲染失败后的降级出口：纯文本段落兜底 + 统计累加。返回是否成功降级。"""
+    from docx.shared import Cm, Pt
+
+    st = _fix_stats()
+    st["block_render_failed"] = st.get("block_render_failed", 0) + 1
+    logger.warning("导出：内容块（type=%s）渲染失败，已降级为纯文本保留：%s",
+                   block.get("type"), str(block.get("text") or "")[:40])
+    txt = _block_plain_text(block)
+    if not txt.strip():
+        return False
+    try:
+        p = doc.add_paragraph()
+        _add_runs_with_inline_format(p, txt)
+        p.paragraph_format.first_line_indent = Cm(0)
+        p.paragraph_format.space_after = Pt(3)
+        return True
+    except Exception as e:  # pragma: no cover - 连纯文本都失败则放弃该块
+        logger.warning("导出：内容块降级为纯文本仍失败（该块内容缺失）: %s", e)
+        return False
+
+
 def _pop_orphan_lead_in(doc) -> bool:
     """删除文末"孤儿引导语"段落（图表被跳过时留下的"如下图所示："）。
 
@@ -2289,7 +2646,7 @@ def _pop_orphan_lead_in(doc) -> bool:
         except Exception:
             pass
         text = (last.text or "").strip()
-        if not text or len(text) > 60:
+        if not text or len(text) > LEAD_IN_MAX_CHARS:
             return False
         if not _LEAD_IN_HINT_RE.search(text):
             return False
@@ -2298,6 +2655,119 @@ def _pop_orphan_lead_in(doc) -> bool:
         return True
     except Exception as e:  # pragma: no cover - 版式清理失败不应阻断导出
         logger.debug("孤儿引导语清理失败（忽略）: %s", e)
+        return False
+
+
+class _DocxBodyRollback:
+    """记录 ``doc.element.body`` 的子元素数，用于**失败时回滚本次新增元素**。
+
+    ✅ BUG 修复（2026-10-06 · P0 图号重号，确定性复现）：
+      ``_add_inline_chart_from_bytes`` / ``_add_illustration_from_bytes`` 的
+      ``doc.add_picture()`` 与图题段落是**两次独立写入**。若图片已写入成功、
+      随后图题步骤抛异常（字体名非法 / runs 被外部改写 / docx 内部异常），
+      函数 ``return False`` 而**图片仍留在文档里**；调用方按契约回退图号
+      （``figure_counters -= 1``）→ 下一张图重新拿到**同一个图号**，
+      成稿出现**两张图都标注「图 1-1」**的重号。
+      实测（``_exp_probe3``）：两张不同流程图，第一张图题阶段抛错 →
+      ``pics=2 captions=['图 1-1 施工流程图', '图 1-1 施工流程图']``。
+      修复：把「插入」变成**原子操作** —— 失败时删除本次新增的 body 子元素，
+      使「返回 False」严格等价于「本次未向文档写入任何元素」，
+      调用方的图号回退才是安全的。
+
+    ⚠️ 实现要点（踩过一次坑）：**不能**用「记录 ``len(body)`` 再删尾部切片」
+    的方式。``python-docx`` 的 ``add_picture`` / ``add_paragraph`` 把新元素
+    插入在**节属性 ``w:sectPr`` 之前**，于是新元素的下标 < 快照下标，
+    尾部切片只切得到 sectPr（还要跳过）→ 一个元素都删不掉，实测
+    ``ins2(fail)=False`` 但 ``pics=1``、body 仍是 ``['p','sectPr']``。
+    正确做法是**快照已有元素的对象身份**（lxml 在持有强引用期间对同一元素
+    恒返回同一代理对象，故 ``is`` 比较可靠）。
+    """
+
+    __slots__ = ("_body", "_seen")
+
+    def __init__(self, doc):
+        self._body = doc.element.body
+        # 持有强引用：lxml 只在无引用时重建代理对象，持有后 ``is`` 比较才稳定
+        self._seen = list(self._body)
+
+    def rollback(self) -> int:
+        """删除本次调用新增的 body 子元素（跳过节属性 sectPr），返回删除数。"""
+        from docx.oxml.ns import qn
+
+        removed = 0
+        try:
+            for el in list(self._body):
+                if any(el is s for s in self._seen):
+                    continue  # 调用前就存在的元素，绝不动
+                if el.tag == qn("w:sectPr"):
+                    continue  # 节属性是文档骨架，绝不可删
+                self._body.remove(el)
+                removed += 1
+        except Exception as e:  # pragma: no cover - 回滚失败不应掩盖原异常
+            logger.warning("导出：图片插入失败后回滚文档元素失败（可能有残留元素）: %s", e)
+        return removed
+
+
+def _write_chart_placeholder_line(doc, caption_text: str, reason: str) -> None:
+    """写红字占位行「[图 X-Y 图名 — 渲染失败/插入失败]」（仅占位模式）。"""
+    from docx.shared import Cm, RGBColor
+
+    p = doc.add_paragraph()
+    p.paragraph_format.first_line_indent = Cm(0)
+    run = p.add_run(f"[{caption_text} — {reason}]")
+    run.font.color.rgb = RGBColor(0xFF, 0x00, 0x00)
+
+
+def _insert_image_with_caption(doc, img_bytes, caption_text: str, *,
+                               font_name: str = "宋体", font_size: float = 10.5,
+                               log_label: str = "图片",
+                               log_height_scale: bool = False) -> bool:
+    """DOCX 位图插入的**唯一实现**：尺寸换算 → 居中插图 → 居中图题。
+
+    ✅ 重构（2026-10-06 · D3）：`_add_inline_chart_from_bytes` 与
+    `_add_illustration_from_bytes` 此前是两份**逐行平行**的实现（差异只有图题
+    来源、可用性判据、占位文案三处），任何版式修复都必须改两遍 —— 本仓反复踩的
+    「同一业务判据在 2~3 处各自实现」同构陷阱（v20 的 DPI 修复就改过两次）。
+    现抽为单一实现，两个入口只保留**各自的差异**（可用性判据 + 占位形态），
+    使「返回 False ⇒ 未写入任何元素」这一图号回退契约也只有一份。
+
+    失败时用 ``_DocxBodyRollback`` 删除本次写入的元素，保证调用方可以安全回退图号。
+    """
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Cm
+
+    _rb = _DocxBodyRollback(doc)
+    try:
+        from PIL import Image as PILImage
+        stream = BytesIO(img_bytes.getvalue())
+        try:
+            _im = PILImage.open(stream)
+            _iw_px, _ih_px = _im.size
+            _dpi = _read_image_dpi(_im.info.get("dpi"))
+        except Exception:
+            _iw_px = _ih_px = 0
+            _dpi = 0.0
+        # ✅ 2026-09-25：按「栏宽 16cm × 高度 22cm」双上限等比缩放。
+        #    旧实现只按 96dpi 估宽 + 仅宽度封顶，纵向长图（700×4070px）
+        #    会被撑到 16×93cm，远超页面高度（Letter 22.94cm / A4 24.7cm）。
+        _w_cm, _h_cm = _fit_image_cm(_iw_px, _ih_px, _dpi)
+        if log_height_scale and _h_cm >= _CHART_MAX_HEIGHT_CM:
+            logger.info(
+                "%s 按高度上限缩放至 %.2f×%.2fcm（页面可用高度约 %.1fcm，"
+                "原图 %dx%dpx dpi=%s）",
+                log_label, _w_cm, _h_cm, _CHART_MAX_HEIGHT_CM,
+                _iw_px, _ih_px, _dpi or _CHART_DPI_FALLBACK)
+        stream.seek(0)
+        doc.add_picture(stream, width=Cm(_w_cm))
+        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        caption = doc.add_paragraph()
+        caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        caption.paragraph_format.first_line_indent = Cm(0)
+        _set_run_font(caption.add_run(caption_text), font_name, font_size, bold=True)
+        return True
+    except Exception as e:
+        logger.warning("%s 插入失败: %s", log_label, e)
+        _rb.rollback()
         return False
 
 
@@ -2315,59 +2785,33 @@ def _add_inline_chart_from_bytes(doc, chart_type: str, img_bytes, figure_num: st
 
     ✅ 图号虚跳收口（2026-10-03）：插入成功返回 ``True``、失败返回 ``False``，
     **不直接占用图号**（图号由调用方在成功后才递增）。失败处理：
-    · ``placeholder=False``（默认）：静默返回 ``False``，调用方回退图号 +
-      回收孤儿引导语，避免「占号却无图」的错号 / 虚跳；
+    · ``placeholder=False``（默认）：**先回滚本次写入的文档元素**再返回
+      ``False``，调用方回退图号 + 回收孤儿引导语，避免「占号却无图」的错号 /
+      虚跳，**以及「图已插入却回退图号」导致的重号**（见 _DocxBodyRollback）；
     · ``placeholder=True``：仍写红字「图 X-Y — 渲染失败 / 插入失败」
-      （图号已被调用方占用，属可见错误，用于排查哪张图没出来）。
+      （图号已被调用方占用，属可见错误，用于排查哪张图没出来）；同样先回滚，
+      保证「红字占位」与「真实图片」不同时出现在同一图号上。
+
+    ✅ D3 重构（2026-10-06）：版式实现下沉到 ``_insert_image_with_caption``
+    （与 AI 配图共用），本函数只保留图表侧**特有**的差异：字节量判据、
+    占位红字形态、以及按图表类型的缩放日志。
     """
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.shared import Cm, RGBColor
     caption_text = f"图 {figure_num} {default_title}".strip()
-    try:
-        if not (img_bytes and len(img_bytes.getvalue()) > 100):
-            # 字节缺失/过小：占位模式写红字、否则静默（调用方回退图号）
-            if placeholder:
-                p = doc.add_paragraph()
-                p.paragraph_format.first_line_indent = Cm(0)
-                run = p.add_run(f"[{caption_text} — 渲染失败]")
-                run.font.color.rgb = RGBColor(0xFF, 0x00, 0x00)
-            return False
-        from PIL import Image as PILImage
-        _img_stream = BytesIO(img_bytes.getvalue())
-        try:
-            _im = PILImage.open(_img_stream)
-            _iw_px, _ih_px = _im.size
-            _dpi = _read_image_dpi(_im.info.get("dpi"))
-        except Exception:
-            _iw_px = _ih_px = 0
-            _dpi = 0.0
-        # ✅ 2026-09-25 修复：按 PNG 自带 DPI 换算真实物理尺寸，并同时受
-        #    「正文栏宽 16cm」与「单图最大高度 22cm」约束等比缩放。
-        #    旧实现只按 96dpi 估宽 + 仅宽度封顶，纵向长图（700×4070px）
-        #    会被撑到 16×93cm，远超页面高度（Letter 22.94cm / A4 24.7cm）。
-        _w_cm, _h_cm = _fit_image_cm(_iw_px, _ih_px, _dpi)
-        if _h_cm >= _CHART_MAX_HEIGHT_CM:
-            logger.info(
-                "图表 %s 按高度上限缩放至 %.2f×%.2fcm（页面可用高度约 %.1fcm，"
-                "原图 %dx%dpx dpi=%s）",
-                chart_type, _w_cm, _h_cm, _CHART_MAX_HEIGHT_CM,
-                _iw_px, _ih_px, _dpi or _CHART_DPI_FALLBACK)
-        _img_stream.seek(0)
-        doc.add_picture(_img_stream, width=Cm(_w_cm))
-        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        caption = doc.add_paragraph()
-        caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        caption.paragraph_format.first_line_indent = Cm(0)
-        _set_run_font(caption.add_run(caption_text), font_name, font_size, bold=True)
-        return True
-    except Exception as e:
-        logger.warning("图表插入失败 (%s): %s", chart_type, e)
+    # 可用性判据：字节缺失/过小。此处**不**重复校验格式白名单 —— 调用方
+    # （write_section）已用 _chart_ok（= 长度 + 格式）先行判定，避免重复 IO；
+    # 若调用方绕过 _chart_ok，格式问题会在 add_picture 抛错并被回滚。
+    if not (img_bytes and len(img_bytes.getvalue()) > 100):
         if placeholder:
-            p = doc.add_paragraph()
-            p.paragraph_format.first_line_indent = Cm(0)
-            run = p.add_run(f"[{caption_text} — 插入失败]")
-            run.font.color.rgb = RGBColor(0xFF, 0x00, 0x00)
+            _write_chart_placeholder_line(doc, caption_text, "渲染失败")
         return False
+    if _insert_image_with_caption(
+            doc, img_bytes, caption_text, font_name=font_name,
+            font_size=font_size, log_label=f"图表({chart_type})",
+            log_height_scale=True):
+        return True
+    if placeholder:
+        _write_chart_placeholder_line(doc, caption_text, "插入失败")
+    return False
 
 
 def _add_illustration_from_bytes(doc, img_bytes, figure_num: str, alt: str = "",
@@ -2375,51 +2819,33 @@ def _add_illustration_from_bytes(doc, img_bytes, figure_num: str, alt: str = "",
                                  placeholder: bool = False):
     """在 DOCX 中插入 AI 配图（文生图，已下载的位图字节流）+ 规范图题。
 
-    与 `_add_inline_chart_from_bytes` 的区别：
-    - 图表是"代码 → 渲染"，配图是"远端 URL → 下载 → 插入"；
-    - 配图下载/插入失败时**只保留图题**，不写红色"渲染失败"提示 ——
-      交付文档里出现报错文本比少一张图更糟。
+    与图表版的区别（**仅此两点**，版式实现共用 `_insert_image_with_caption`）：
+    - 可用性判据多一道格式白名单（``_image_format_supported``）—— 配图来自
+      远端 URL，格式不受控（WEBP/AVIF 会被 PIL 解码但 docx 拒收）；
+    - 失败时**不写红字报错**（占位模式下只留图题）—— 交付文档里出现报错文本
+      比少一张图更糟。
 
     ✅ 图号虚跳收口（2026-10-03）：插入成功返回 ``True``、失败返回 ``False``，
-    不直接占用图号。失败（含格式不安全 / 文件损坏）静默返回 ``False``，
-    由调用方回退图号 + 回收孤儿引导语，与 chart 分支同口径；
+    不直接占用图号。失败（含格式不安全 / 文件损坏 / 图题阶段异常）时**先回滚
+    本次写入的文档元素**再返回 ``False``，由调用方回退图号 + 回收孤儿引导语，
+    与 chart 分支同口径；否则会出现「图片已在文档里、图号却回退」的重号。
     ``placeholder`` 形参保留仅为签名一致（AI 配图分支当前无占位模式）。
     """
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Cm
 
     caption_text = f"图 {figure_num} {alt or '配图'}".strip()
-    try:
-        if not (img_bytes and len(img_bytes.getvalue()) > 100
-                and _image_format_supported(img_bytes)):
-            return False
-        from PIL import Image as PILImage
-        stream = BytesIO(img_bytes.getvalue())
-        try:
-            _im = PILImage.open(stream)
-            _iw_px, _ih_px = _im.size
-            _dpi = _read_image_dpi(_im.info.get("dpi"))
-        except Exception:
-            _iw_px = _ih_px = 0
-            _dpi = 0.0
-        # ✅ 2026-09-25：AI 配图同样按「栏宽 16cm × 高度 22cm」双上限等比缩放
-        #    （文生图偶发返回竖版大图，旧实现只封宽度 → 必然溢出页面）。
-        _w_cm, _h_cm = _fit_image_cm(_iw_px, _ih_px, _dpi)
-        stream.seek(0)
-        doc.add_picture(stream, width=Cm(_w_cm))
-        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        caption = doc.add_paragraph()
-        caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        caption.paragraph_format.first_line_indent = Cm(0)
-        _set_run_font(caption.add_run(caption_text), font_name, font_size, bold=True)
-        return True
-    except Exception as e:
-        logger.warning("AI 配图插入失败 (%s): %s", caption_text, e)
-        if placeholder:
-            p = doc.add_paragraph()
-            p.paragraph_format.first_line_indent = Cm(0)
-            _set_run_font(p.add_run(caption_text), font_name, font_size, bold=True)
+    if not (img_bytes and len(img_bytes.getvalue()) > 100
+            and _image_format_supported(img_bytes)):
         return False
+    if _insert_image_with_caption(
+            doc, img_bytes, caption_text, font_name=font_name,
+            font_size=font_size, log_label=f"AI 配图({caption_text})"):
+        return True
+    if placeholder:
+        p = doc.add_paragraph()
+        p.paragraph_format.first_line_indent = Cm(0)
+        _set_run_font(p.add_run(caption_text), font_name, font_size, bold=True)
+    return False
 
 
 def _add_word_field(paragraph, instr: str, placeholder: str = "1"):
@@ -2696,11 +3122,11 @@ async def _bump_export_round(db, scheme_id: str) -> int:
     失败时回退为第 1 轮，绝不阻塞导出主流程。
     """
     try:
-        await db.execute(
+        await _db_exec(db,
             "UPDATE schemes SET export_round = COALESCE(export_round, 0) + 1 WHERE id=?",
-            (scheme_id,))
+            (scheme_id,), what="_bump_export_round")
         cur = await db.execute("SELECT export_round FROM schemes WHERE id=?", (scheme_id,))
-        row = await cur.fetchone()
+        row = await _db_fetch_one(cur, what="_bump_export_round 回读")
         await db.commit()
         if row and row[0]:
             return int(row[0])
@@ -2755,13 +3181,9 @@ def _export_audit_headers(audit: dict) -> dict:
 # ---------------------------------------------------------------------------
 # ✅ BUG 修复：从章节标题中剥离已有的编号前缀（防止与 heading_gen 双重编号）
 # ---------------------------------------------------------------------------
-_TITLE_NUM_STRIP_RES = (
-    re.compile(r"^第[一二三四五六七八九十百千零\d]+[章节][、\s]*"),   # 第一章 / 第一节
-    re.compile(r"^[（(][一二三四五六七八九十百]+[)）][、\s]*"),      # （一） / (一)
-    re.compile(r"^\d+(?:\.\d+)*[、.\s]+"),                           # 1.1.1 / 1.1 / 1 / 1、
-    re.compile(r"^\d+[）)][、\s]*"),                                # 1） / 1)
-    re.compile(r"^[a-zA-Z]{1,2}[、.\s]+"),                          # a. / 1、
-)
+# ✅ 2026-10-05（D4 · 死副本清理）：唯一实现为 services/content_blocks.py 的
+#    `_strip_title_number`（已从 content_blocks 导入），其内部委托 numbering 的
+#    `strip_outline_numbering`；本模块此前的 `_TITLE_NUM_STRIP_RES` 副本无任何引用，删除。
 
 
 
@@ -3080,8 +3502,22 @@ def _build_docx_sync(
     figure_counters: dict[str, int] = {}
     table_counters: dict[str, int] = {}
     rendered_charts: set[tuple] = set()
+    # ✅ 加固（2026-10-06 · D1）：按**实际渲染顺序**给每个章节编号（roots 排序 +
+    # 深度优先），用于「兜底借图」时确定性地选**文档顺序上最近的前一张同类图**
+    # （旧实现依赖 chart_predictions 行插入顺序，借谁不可控）。
+    order_rank: dict[str, int] = {}
+    # ✅ 加固（D1）：本次构建期间「跨章借图」的 (章节, 类型, 借自) 去重集合
+    _BORROWED_CHARTS: set[tuple] = set()
+
+    def _rank_order(secs: list):
+        for _s in sorted(secs, key=_section_sort_key):
+            if _s["id"] not in order_rank:
+                order_rank[_s["id"]] = len(order_rank)
+            _rank_order(children_map.get(_s["id"], []))
+
+    _rank_order(roots)
     # P0-3 性能优化：倒排索引一次构建，write_section 兜底查找从 O(N) 降为 O(1)
-    chart_type_index = _build_chart_type_index(chart_lookup)
+    chart_type_index = _build_chart_type_index(chart_lookup, order_rank)
     # 正文首个标题之前不允许分页，否则封面/目录之后会多出一张空白页
     body_state = {"started": False}
     # 中文正文首行缩进 2 字符（随正文字号缩放，旧实现固定 0.74cm）
@@ -3155,184 +3591,247 @@ def _build_docx_sync(
                 if block["type"] != "list_item":
                     # ✅ 遇非列表块 → 重置整条有序序列（沿用既有契约）
                     ordered_stack = []
-                if block["type"] == "table":
-                    # ✅ 新增：表格题注「表 {章号}-{序号} 表名」（表题在表格上方）
-                    caption = (block.get("caption") or "").strip()
-                    if caption:
+                # ✅ P0 逐块 fail-soft（2026-10-06）：把「渲染一个内容块」做成事务。
+                #    快照 = 文档 body 元素集合 + 图号/表号/去重集合；块渲染抛异常时
+                #    全部回滚（不留半截表格、不留已占图号），再降级为纯文本。
+                _blk_rb = _DocxBodyRollback(doc)
+                _fig_snap = dict(figure_counters)
+                _tbl_snap = dict(table_counters)
+                _dedup_snap = set(rendered_charts)
+                try:
+                    if block["type"] == "table":
+                        # ✅ 新增：表格题注「表 {章号}-{序号} 表名」（表题在表格上方）
+                        caption = (block.get("caption") or "").strip()
                         chapter_num = _figure_chapter_num(heading_gen)
                         t_key = f"ch{chapter_num}"
                         table_counters[t_key] = table_counters.get(t_key, 0) + 1
                         table_num = f"{chapter_num}-{table_counters[t_key]}"
-                        _add_table_caption(doc, f"表 {table_num} {caption}",
-                                           font_name, font_size)
-                    _add_table_from_markup(doc, block["lines"], font_name)
-                elif block["type"] == "chart":
-                    chart_type = block["chart_type"]
-                    mermaid_code = block.get("code") or chart_lookup.get((sec_id, chart_type), "")
-                    if mermaid_code:
-                        # ✅ BUG 修复：去重键必须包含代码本体 —— 旧实现按 (章节, 类型) 去重，
-                        #    同一章节内两张**不同**的同类图表（如两张不同的流程图）会被静默吞掉一张。
-                        render_key = (sec_id, chart_type, _norm_code(mermaid_code))
-                    else:
-                        mermaid_code = _find_fallback_code(
-                            chart_type_index, chart_type)
-                        # ✅ 修复（2026-09-20 深度审查）：兜底渲染去重键必须含章节维度与代码本体。
-                        #    旧键 ("fallback", chart_type, "") 与具体章节无关 —— 当两个及以上章节
-                        #    的同类型图表都无注册代码时，只有第一张被渲染，其余被 rendered_charts
-                        #    静默丢弃（图号直接缺失、无任何系统侧信号）。加 sec_id 后每章各自渲染；
-                        #    加代码本体避免同章节两张不同代码的兜底图互相吞并。
-                        render_key = (sec_id, "fallback", chart_type, _norm_code(mermaid_code))
-                    if not mermaid_code:
-                        # ✅ 2026-09-25：图表被跳过时同步回收其孤儿引导语
-                        #    （"如下图所示："留在成稿里却无图 = 图文不连贯）。
-                        _pop_orphan_lead_in(doc)
-                        continue
-                    if render_key in rendered_charts:
-                        # ✅ 2026-09-25：同代码第二次出现（去重跳过）→ 该处引导语
-                        #    同样指向一张不会出现的图，一并回收。
-                        _pop_orphan_lead_in(doc)
-                        continue
-                    rendered_charts.add(render_key)
-                    _, default_title = _CHART_TYPE_MAP.get(chart_type, (None, chart_type))
-                    # ✅ 图题优先用块自带业务标题（载荷 title / 引导语 / Mermaid title 指令），
-                    #    仅在其缺失时退回类型通用名 —— 旧实现一律用通用名，导致
-                    #    「图 4-1 劳动力配置计划」挂在本章实为流程图的正文之下。
-                    fig_title = (block.get("title") or "").strip() or default_title
-                    # ✅ 契约变更（2026-09-19，配置开关 chart_fail_placeholder）：
-                    #    默认**跳过渲染失败的图表**且不占用图号 —— 交付文档里出现
-                    #    「[图 X-Y … — 渲染失败]」红字报错比少一张图更糟（实测取证：
-                    #    第 4 章 4 处占位，评审观感极差）。"不静默"承诺并不因此失效，
-                    #    而是转移到系统侧信号：X-Chart-Render-Stats / X-Content-Audit
-                    #    响应头、导出日志、/export/check 预检与坏缓存守卫全部保留。
-                    #    传 chart_fail_placeholder=True 可恢复 V7.0 的红字占位形态
-                    #    （排查"到底是哪张图没出来"时使用）。
-                    _chart_bytes = rendered_bytes.get((chart_type, mermaid_code))
-                    if not _chart_ok(_chart_bytes) and not chart_fail_placeholder:
+                        if caption:
+                            _add_table_caption(doc, f"表 {table_num} {caption}",
+                                               font_name, font_size)
+                        else:
+                            # ✅ R51（2026-10-07）：表格无表名行 → 成稿表格裸奔无表题。
+                            #    R50 仅补 WARNING 供排障，但用户成稿里 38 张表零编号零表题。
+                            #    现从表格首行（GFM header）自动生成表题：取前 3 列名拼接，
+                            #    确保每张表都有编号与标题。计数器始终递增（修复编号断裂）。
+                            _tbl_lines = block.get("lines") or []
+                            _first = (_tbl_lines[0] if _tbl_lines else "").strip()
+                            _auto_caption = ""
+                            if _first and "|" in _first and not re.match(r'^[\|\s\-:]+$', _first):
+                                cells = [c.strip() for c in _first.split("|") if c.strip()]
+                                if len(cells) >= 2:
+                                    _auto_caption = "、".join(cells[:3])
+                                elif cells:
+                                    _auto_caption = cells[0]
+                            if not _auto_caption:
+                                _auto_caption = "相关数据"
+                            _add_table_caption(doc, f"表 {table_num} {_auto_caption}",
+                                               font_name, font_size)
+                            logger.warning(
+                                "导出：章节 %s 表格无表名行，自动生成表题: 表 %s %s（首行: %s）",
+                                str(sec_id)[:8], table_num, _auto_caption,
+                                _first[:80])
+                        _add_table_from_markup(doc, block["lines"], font_name)
+                    elif block["type"] == "chart":
+                        chart_type = block["chart_type"]
+                        # ✅ 加固（2026-10-06 · D1）：取码收敛到唯一出口
+                        #    _resolve_chart_code，并回传「是否跨章借图 + 借自谁」。
+                        mermaid_code, borrowed_from = _resolve_chart_code(
+                            block, sec_id, chart_type, chart_lookup,
+                            chart_type_index, order_rank)
+                        if mermaid_code:
+                            # ✅ BUG 修复：去重键必须包含代码本体 —— 旧实现按 (章节, 类型) 去重，
+                            #    同一章节内两张**不同**的同类图表（如两张不同的流程图）会被静默吞掉一张。
+                            render_key = (sec_id, chart_type, _norm_code(mermaid_code))
+                        else:
+                            # ✅ 修复（2026-09-20 深度审查）：兜底渲染去重键必须含章节维度与代码本体。
+                            #    旧键 ("fallback", chart_type, "") 与具体章节无关 —— 当两个及以上章节
+                            #    的同类型图表都无注册代码时，只有第一张被渲染，其余被 rendered_charts
+                            #    静默丢弃（图号直接缺失、无任何系统侧信号）。加 sec_id 后每章各自渲染；
+                            #    加代码本体避免同章节两张不同代码的兜底图互相吞并。
+                            render_key = (sec_id, "fallback", chart_type, _norm_code(mermaid_code))
+                        if borrowed_from:
+                            # 跨章借图此前**零信号**（成稿里 B 章可能出现 A 章的流程图）。
+                            # 此处按「每 (章节,类型) 只记一次」累加，供
+                            # X-Chart-Render-Stats / 前端提示 / 导出日志如实上报。
+                            _BORROWED_CHARTS.add((sec_id, chart_type, borrowed_from))
+                            logger.info(
+                                "导出：章节 %s 的 %s 图无本章节登记，兜底借用第 %s 章的同类图"
+                                "（跨章借图会在 X-Chart-Render-Stats 中计入 fallback_borrowed）",
+                                sec_id[:8], chart_type, borrowed_from[:8])
+                        if not mermaid_code:
+                            # ✅ 2026-09-25：图表被跳过时同步回收其孤儿引导语
+                            #    （"如下图所示："留在成稿里却无图 = 图文不连贯）。
+                            _pop_orphan_lead_in(doc)
+                            continue
+                        if render_key in rendered_charts:
+                            # ✅ 2026-09-25：同代码第二次出现（去重跳过）→ 该处引导语
+                            #    同样指向一张不会出现的图，一并回收。
+                            _pop_orphan_lead_in(doc)
+                            continue
+                        rendered_charts.add(render_key)
+                        _, default_title = _CHART_TYPE_MAP.get(chart_type, (None, chart_type))
+                        # ✅ 图题优先用块自带业务标题（载荷 title / 引导语 / Mermaid title 指令），
+                        #    仅在其缺失时退回类型通用名 —— 旧实现一律用通用名，导致
+                        #    「图 4-1 劳动力配置计划」挂在本章实为流程图的正文之下。
+                        fig_title = (block.get("title") or "").strip() or default_title
+                        # ✅ 契约变更（2026-09-19，配置开关 chart_fail_placeholder）：
+                        #    默认**跳过渲染失败的图表**且不占用图号 —— 交付文档里出现
+                        #    「[图 X-Y … — 渲染失败]」红字报错比少一张图更糟（实测取证：
+                        #    第 4 章 4 处占位，评审观感极差）。"不静默"承诺并不因此失效，
+                        #    而是转移到系统侧信号：X-Chart-Render-Stats / X-Content-Audit
+                        #    响应头、导出日志、/export/check 预检与坏缓存守卫全部保留。
+                        #    传 chart_fail_placeholder=True 可恢复 V7.0 的红字占位形态
+                        #    （排查"到底是哪张图没出来"时使用）。
+                        _chart_bytes = rendered_bytes.get((chart_type, mermaid_code))
+                        if not _chart_ok(_chart_bytes) and not chart_fail_placeholder:
+                            logger.warning(
+                                "章节 %s 图表渲染失败（type=%s），已跳过且不占用图号"
+                                "（交付文档不写红字占位；传 chart_fail_placeholder=true 可恢复占位）",
+                                sec_id[:8], chart_type)
+                            # ✅ 2026-09-25：跳过该图 → 回收其孤儿引导语（图文连贯）
+                            _pop_orphan_lead_in(doc)
+                            continue
+                        chapter_num = _figure_chapter_num(heading_gen)
+                        fig_key = f"ch{chapter_num}"
+                        figure_counters[fig_key] = figure_counters.get(fig_key, 0) + 1
+                        fig_num = f"{chapter_num}-{figure_counters[fig_key]}"
+                        # ✅ 图号虚跳收口（2026-10-03）：插入成功才保留图号；
+                        #    插入失败（格式合法但文件损坏等）→ 回退图号 + 回收孤儿引导语，
+                        #    避免「占号却无图」的错号（placeholder 模式保留红字、图号照占）。
+                        _ok = _add_inline_chart_from_bytes(
+                            doc, chart_type, _chart_bytes,
+                            fig_num, fig_title, font_name, font_size,
+                            placeholder=chart_fail_placeholder)
+                        if not _ok and not chart_fail_placeholder:
+                            figure_counters[fig_key] = figure_counters.get(fig_key, 0) - 1
+                            _pop_orphan_lead_in(doc)
+                    elif block["type"] == "ai_image":
+                        # ✅ AI 配图（文生图）**未生成**占位：导出时整块跳过。
+                        #    v17 起占位块已先经 _auto_generate_ai_image_blocks 自动生成并
+                        #    改写为 image 块 —— 走到本分支说明自动生成失败（或开关关闭）。
+                        #    设计依据（对齐「宁缺毋滥」与交付质量）：
+                        #    · 绝不写裸 JSON（旧实现把它当 code 块 → 提示词泄漏进成稿）；
+                        #    · 不做红字占位（AI 配图失败/缺失时只保留图题的既有语义）；
+                        #    · 不占用图号（否则出现「图 1-2」却无图，编号虚跳）。
                         logger.warning(
-                            "章节 %s 图表渲染失败（type=%s），已跳过且不占用图号"
-                            "（交付文档不写红字占位；传 chart_fail_placeholder=true 可恢复占位）",
-                            sec_id[:8], chart_type)
-                        # ✅ 2026-09-25：跳过该图 → 回收其孤儿引导语（图文连贯）
+                            "章节 %s 存在未生成的 AI 配图占位（%s），本次导出已跳过且不占图号；"
+                            "请检查图像模型配置（导出期自动生成失败）",
+                            sec_id[:8], block.get("title") or "未命名")
+                        # ✅ 2026-09-25：AI 配图未生成 → 同样回收孤儿引导语
                         _pop_orphan_lead_in(doc)
+                    elif block["type"] == "image":
+                        # ✅ AI 配图（文生图）：正文里的 ![说明](url)，导出时插入真实位图
+                        #
+                        # ✅ BUG 修复（2026-09-26 · 图号虚跳）：旧实现**先占图号、
+                        #    后插图**，与同文件 `_chart_ok` docstring 写明的原则
+                        #    （"跳过 vs 占位的决策必须发生在**占用图号之前**"）
+                        #    自相矛盾 —— 配图字节缺失（``image_bytes`` 未命中 url，
+                        #    例如导出期自动生成失败 / 缓存失效）时，
+                        #    ``_add_illustration_from_bytes`` 只写图题、不写位图，
+                        #    但计数器已 +1 → 交付文档出现「图 1-1」缺失、编号却从
+                        #    「图 1-2」起跳的**图号虚跳**。
+                        #    现与图表分支同口径：先判可用性；不可用则不占图号、
+                        #    不留孤立图题，并回收孤儿引导语（图文连贯）。
+                        _img_bytes = (image_bytes or {}).get((block.get("url") or "").strip())
+                        if not _chart_ok(_img_bytes):
+                            logger.warning(
+                                "章节 %s 存在无位图的 AI 配图引用（%s），本次导出已跳过"
+                                "且不占用图号（避免图号虚跳）",
+                                sec_id[:8], (block.get("alt") or "").strip() or "未命名")
+                            _pop_orphan_lead_in(doc)
+                            continue
+                        chapter_num = _figure_chapter_num(heading_gen)
+                        fig_key = f"ch{chapter_num}"
+                        figure_counters[fig_key] = figure_counters.get(fig_key, 0) + 1
+                        # ✅ 图号虚跳收口（2026-10-03）：插入成功才保留图号；
+                        #    插入失败（格式合法但文件损坏）→ 回退图号 + 回收孤儿引导语。
+                        _ok = _add_illustration_from_bytes(
+                            doc, _img_bytes,
+                            f"{chapter_num}-{figure_counters[fig_key]}",
+                            (block.get("alt") or "").strip(), font_name, font_size)
+                        if not _ok:
+                            figure_counters[fig_key] = figure_counters.get(fig_key, 0) - 1
+                            _pop_orphan_lead_in(doc)
+                    elif block["type"] == "heading":
+                        h_lv = min(block.get("_heading_style", min(level + block.get("level", 1), 7)), 7)
+                        h = doc.add_paragraph(style=f"Heading {h_lv}")
+                        _add_runs_with_inline_format(h, block.get("_fixed_text", block.get("text", "")))
+                        _finalize_heading_runs(h)
+                    elif block["type"] == "list_item":
+                        # ✅ P1-1 修复（2026-10-07 · 列表样式拍平）：
+                        #    旧实现将列表项渲染为普通段落（Normal 样式），无缩进、
+                        #    无悬挂缩进，Word 不识别为列表项。现改为：
+                        #    ① 使用 "List Paragraph" 样式（Word 识别为列表项）
+                        #    ② 动态计算悬挂缩进（基于前缀宽度，不再硬编码 -0.6cm）
+                        #    ③ indent_lvl 口径统一（ordered_stack 与 left_indent 共用）
+                        #    向后兼容：不传 indent 参数时默认 0 级缩进（与旧行为一致）。
+                        indent_lvl = block.get("indent", 0) // 2
+                        if block.get("ordered"):
+                            marker = block.get("marker", "ascii")
+                            # ✅ 分层栈维护：裁剪到当前层、补齐缺失层级（容忍跳级）；
+                            #    当前层标记样式变化 → 该层 seq 归 0（视为新序列从 1）
+                            if indent_lvl < len(ordered_stack):
+                                ordered_stack = ordered_stack[:indent_lvl + 1]
+                            while len(ordered_stack) <= indent_lvl:
+                                ordered_stack.append([marker, 0])
+                            entry = ordered_stack[indent_lvl]
+                            if entry[0] != marker:
+                                entry[0] = marker
+                                entry[1] = 0
+                            entry[1] += 1
+                            # ✅ 按原标记样式渲染（（一）/（1）/ 1、不再被拍平成 "1. "）
+                            prefix = _ordered_prefix(entry[1], marker)
+                        else:
+                            prefix = "• "
+                        # ✅ 使用 "List Paragraph" 样式（Word 识别为列表项）
+                        _lp_style = _ensure_list_paragraph_style(doc)
+                        p = doc.add_paragraph(style=_lp_style)
+                        _add_runs_with_inline_format(p, prefix + block["text"])
+                        lpf = p.paragraph_format
+                        # ✅ 左缩进：每级 0.74 cm（基础缩进 + 嵌套层级）
+                        lpf.left_indent = Cm(0.74 * (indent_lvl + 1))
+                        # ✅ 动态悬挂缩进：基于前缀实际宽度（不再硬编码 -0.6cm）
+                        _hang_w = _estimate_prefix_width(prefix)
+                        lpf.first_line_indent = Cm(-_hang_w)
+                        lpf.space_after = Pt(2)
+                    elif block["type"] == "code":
+                        _add_code_block(doc, block.get("lines", []))
+                    elif block["type"] == "quote":
+                        for qline in (block.get("text") or "").split("\n"):
+                            qp = doc.add_paragraph()
+                            _add_runs_with_inline_format(qp, qline)
+                            qpf = qp.paragraph_format
+                            qpf.left_indent = Cm(0.74)
+                            qpf.right_indent = Cm(0.5)
+                            for r in qp.runs:
+                                if not r.font.name:
+                                    _set_run_font(r, "楷体", 10.5)
+                                r.font.color.rgb = RGBColor(0x44, 0x44, 0x44)
+                            _set_paragraph_shading(qp, "F7F7F7")
+                            _set_paragraph_borders(qp, left=("single", 12, "A6A6A6"))
+                    elif block["type"] == "hr":
+                        # ✅ 修复（2026-09-20）：AI 生成正文常以 --- 作为章节分隔符，
+                        # 旧实现将其画成一条下边框横线，正式交付文档中观感突兀。
+                        # 工程方案文档不应含装饰性分隔线 → 直接跳过（解析仍识别 hr，
+                        # 仅渲染侧丢弃；前端预览 <hr> 不受影响）。
                         continue
-                    chapter_num = _figure_chapter_num(heading_gen)
-                    fig_key = f"ch{chapter_num}"
-                    figure_counters[fig_key] = figure_counters.get(fig_key, 0) + 1
-                    fig_num = f"{chapter_num}-{figure_counters[fig_key]}"
-                    # ✅ 图号虚跳收口（2026-10-03）：插入成功才保留图号；
-                    #    插入失败（格式合法但文件损坏等）→ 回退图号 + 回收孤儿引导语，
-                    #    避免「占号却无图」的错号（placeholder 模式保留红字、图号照占）。
-                    _ok = _add_inline_chart_from_bytes(
-                        doc, chart_type, _chart_bytes,
-                        fig_num, fig_title, font_name, font_size,
-                        placeholder=chart_fail_placeholder)
-                    if not _ok and not chart_fail_placeholder:
-                        figure_counters[fig_key] = figure_counters.get(fig_key, 0) - 1
-                        _pop_orphan_lead_in(doc)
-                elif block["type"] == "ai_image":
-                    # ✅ AI 配图（文生图）**未生成**占位：导出时整块跳过。
-                    #    v17 起占位块已先经 _auto_generate_ai_image_blocks 自动生成并
-                    #    改写为 image 块 —— 走到本分支说明自动生成失败（或开关关闭）。
-                    #    设计依据（对齐「宁缺毋滥」与交付质量）：
-                    #    · 绝不写裸 JSON（旧实现把它当 code 块 → 提示词泄漏进成稿）；
-                    #    · 不做红字占位（AI 配图失败/缺失时只保留图题的既有语义）；
-                    #    · 不占用图号（否则出现「图 1-2」却无图，编号虚跳）。
-                    logger.warning(
-                        "章节 %s 存在未生成的 AI 配图占位（%s），本次导出已跳过且不占图号；"
-                        "请检查图像模型配置（导出期自动生成失败）",
-                        sec_id[:8], block.get("title") or "未命名")
-                    # ✅ 2026-09-25：AI 配图未生成 → 同样回收孤儿引导语
-                    _pop_orphan_lead_in(doc)
-                elif block["type"] == "image":
-                    # ✅ AI 配图（文生图）：正文里的 ![说明](url)，导出时插入真实位图
-                    #
-                    # ✅ BUG 修复（2026-09-26 · 图号虚跳）：旧实现**先占图号、
-                    #    后插图**，与同文件 `_chart_ok` docstring 写明的原则
-                    #    （"跳过 vs 占位的决策必须发生在**占用图号之前**"）
-                    #    自相矛盾 —— 配图字节缺失（``image_bytes`` 未命中 url，
-                    #    例如导出期自动生成失败 / 缓存失效）时，
-                    #    ``_add_illustration_from_bytes`` 只写图题、不写位图，
-                    #    但计数器已 +1 → 交付文档出现「图 1-1」缺失、编号却从
-                    #    「图 1-2」起跳的**图号虚跳**。
-                    #    现与图表分支同口径：先判可用性；不可用则不占图号、
-                    #    不留孤立图题，并回收孤儿引导语（图文连贯）。
-                    _img_bytes = (image_bytes or {}).get((block.get("url") or "").strip())
-                    if not _chart_ok(_img_bytes):
-                        logger.warning(
-                            "章节 %s 存在无位图的 AI 配图引用（%s），本次导出已跳过"
-                            "且不占用图号（避免图号虚跳）",
-                            sec_id[:8], (block.get("alt") or "").strip() or "未命名")
-                        _pop_orphan_lead_in(doc)
-                        continue
-                    chapter_num = _figure_chapter_num(heading_gen)
-                    fig_key = f"ch{chapter_num}"
-                    figure_counters[fig_key] = figure_counters.get(fig_key, 0) + 1
-                    # ✅ 图号虚跳收口（2026-10-03）：插入成功才保留图号；
-                    #    插入失败（格式合法但文件损坏）→ 回退图号 + 回收孤儿引导语。
-                    _ok = _add_illustration_from_bytes(
-                        doc, _img_bytes,
-                        f"{chapter_num}-{figure_counters[fig_key]}",
-                        (block.get("alt") or "").strip(), font_name, font_size)
-                    if not _ok:
-                        figure_counters[fig_key] = figure_counters.get(fig_key, 0) - 1
-                        _pop_orphan_lead_in(doc)
-                elif block["type"] == "heading":
-                    h_lv = min(block.get("_heading_style", min(level + block.get("level", 1), 7)), 7)
-                    h = doc.add_paragraph(style=f"Heading {h_lv}")
-                    _add_runs_with_inline_format(h, block.get("_fixed_text", block.get("text", "")))
-                    _finalize_heading_runs(h)
-                elif block["type"] == "list_item":
-                    indent_lvl = block.get("indent", 0) // 2
-                    if block.get("ordered"):
-                        marker = block.get("marker", "ascii")
-                        # ✅ 分层栈维护：裁剪到当前层、补齐缺失层级（容忍跳级）；
-                        #    当前层标记样式变化 → 该层 seq 归 0（视为新序列从 1）
-                        if indent_lvl < len(ordered_stack):
-                            ordered_stack = ordered_stack[:indent_lvl + 1]
-                        while len(ordered_stack) <= indent_lvl:
-                            ordered_stack.append([marker, 0])
-                        entry = ordered_stack[indent_lvl]
-                        if entry[0] != marker:
-                            entry[0] = marker
-                            entry[1] = 0
-                        entry[1] += 1
-                        # ✅ 按原标记样式渲染（（一）/（1）/ 1、不再被拍平成 "1. "）
-                        prefix = _ordered_prefix(entry[1], marker)
                     else:
-                        prefix = "• "
-                    p = doc.add_paragraph()
-                    _add_runs_with_inline_format(p, prefix + block["text"])
-                    lpf = p.paragraph_format
-                    lpf.left_indent = Cm(0.74 * (indent_lvl + 1))
-                    # ✅ 增强：悬挂缩进，折行后与首行文字对齐（旧实现折行顶到行首）
-                    lpf.first_line_indent = Cm(-0.6)
-                    lpf.space_after = Pt(2)
-                elif block["type"] == "code":
-                    _add_code_block(doc, block.get("lines", []))
-                elif block["type"] == "quote":
-                    for qline in (block.get("text") or "").split("\n"):
-                        qp = doc.add_paragraph()
-                        _add_runs_with_inline_format(qp, qline)
-                        qpf = qp.paragraph_format
-                        qpf.left_indent = Cm(0.74)
-                        qpf.right_indent = Cm(0.5)
-                        for r in qp.runs:
-                            if not r.font.name:
-                                _set_run_font(r, "楷体", 10.5)
-                            r.font.color.rgb = RGBColor(0x44, 0x44, 0x44)
-                        _set_paragraph_shading(qp, "F7F7F7")
-                        _set_paragraph_borders(qp, left=("single", 12, "A6A6A6"))
-                elif block["type"] == "hr":
-                    # ✅ 修复（2026-09-20）：AI 生成正文常以 --- 作为章节分隔符，
-                    # 旧实现将其画成一条下边框横线，正式交付文档中观感突兀。
-                    # 工程方案文档不应含装饰性分隔线 → 直接跳过（解析仍识别 hr，
-                    # 仅渲染侧丢弃；前端预览 <hr> 不受影响）。
-                    continue
-                else:
-                    p = doc.add_paragraph()
-                    _add_runs_with_inline_format(p, block.get("text", ""))
-                    p.paragraph_format.first_line_indent = body_first_line_indent
-                    p.paragraph_format.space_after = Pt(3)
+                        p = doc.add_paragraph()
+                        _add_runs_with_inline_format(p, block.get("text", ""))
+                        p.paragraph_format.first_line_indent = body_first_line_indent
+                        p.paragraph_format.space_after = Pt(3)
+                except Exception as _blk_err:
+                    # ⚠️ P0 逐块 fail-soft（2026-10-06）：块渲染器抛异常时
+                    #    图号/表号/去重集合全部回滚（不留半截表格、不留已占图号），
+                    #    文档元素回滚后降级为纯文本，整份导出继续。
+                    _blk_rb.rollback()
+                    figure_counters.clear()
+                    figure_counters.update(_fig_snap)
+                    table_counters.clear()
+                    table_counters.update(_tbl_snap)
+                    rendered_charts.difference_update(rendered_charts - _dedup_snap)
+                    _degrade_block_to_text(doc, block, font_name, font_size)
 
             # ✅ 修复（2026-09-20，第 8 轮交付文档取证）：内容子标题与 DB 子章节编号碰撞。
             # 现象：本节**内容**含 "## 项目概况 / ## 建筑概况" → 渲染为
@@ -3363,10 +3862,27 @@ def _build_docx_sync(
 
         children = sorted(children_map.get(sec_id, []), key=_section_sort_key)
         for child in children:
-            write_section(child, sec_id)
+            _write_section_safe(child, sec_id)
+
+    def _write_section_safe(sec: dict, parent_id: str = ""):
+        """章节级 fail-soft（块级之外的第二道防线）。
+
+        ✅ 2026-10-06：块级 fail-soft 只覆盖**内容块**；章节标题渲染与子章节
+        递归仍在块循环之外。此处再包一层，使「一章渲染失败」只丢该章，
+        其余章节、正文后续内容与两个附录照常产出（此前任一异常即整份导出 500，
+        用户拿不到任何产物）。
+        """
+        try:
+            return write_section(sec, parent_id)
+        except Exception as e:
+            st = _fix_stats()
+            st["block_render_failed"] = st.get("block_render_failed", 0) + 1
+            logger.error("导出：章节「%s」渲染失败（已跳过该章，其余内容不受影响）: %s",
+                         str(sec.get("title") or "")[:40], e, exc_info=True)
+            return None
 
     for root in sorted(roots, key=_section_sort_key):
-        write_section(root)
+        _write_section_safe(root)
 
     # ✅ 修复（2026-09-17）：导出「项目关键事实」附录（全局事实维度）。
     #    此前交付文档完全不含事实维度（工程量/材料设备/规范依据/模拟值待确认项等），
@@ -3404,8 +3920,8 @@ def _build_docx_sync(
                     rc = tbl.add_row().cells
                     _set_run_font(rc[0].paragraphs[0].add_run(str(f.get("title") or "")),
                                   font_name, 10.5)
-                    _set_run_font(rc[1].paragraphs[0].add_run(str(f.get("content") or "")),
-                                  font_name, 10.5)
+                    _appendix_cell_paragraph(rc[1], str(f.get("content") or ""),
+                                             font_name, first=True)
         except TypeError as e:
             # ✅ P0 修复（2026-09-27）：TypeError 是**编程错误**（如把 bold 当位置参数
             #    传给 keyword-only 形参），不是"附录渲染不出来"的可恢复异常。
@@ -3453,8 +3969,8 @@ def _build_docx_sync(
                     rc = tbl.add_row().cells
                     _set_run_font(rc[0].paragraphs[0].add_run(str(it.get("name") or "")),
                                   font_name, 10.5)
-                    _set_run_font(rc[1].paragraphs[0].add_run(str(it.get("value") or "")),
-                                  font_name, 10.5)
+                    _appendix_cell_paragraph(rc[1], str(it.get("value") or ""),
+                                             font_name, first=True)
         except TypeError as e:
             # 与事实附录同口径：TypeError 是编程错误，按 ERROR 上报（否则附录
             # 静默消失而导出报成功，是最隐蔽的一类缺陷）。
@@ -3466,7 +3982,36 @@ def _build_docx_sync(
 
     # 注意：局部变量勿命名为 `_fix_stats`，否则会遮蔽同名模块级函数
     fix_stats = _log_fix_stats()
+    # ✅ 加固（D1）：把「本次构建跨章借图」的明细回传给调用方，写进
+    #    X-Chart-Render-Stats（前端提示 + 审计）。加法式：dict 里多一个键，
+    #    既有渲染统计键语义一字未动。
+    borrowed = [
+        {"section_id": sid, "chart_type": ct, "borrowed_from": src}
+        for (sid, ct, src) in sorted(_BORROWED_CHARTS)
+    ]
+    if borrowed:
+        logger.warning(
+            "导出：本次有 %d 处图表使用了**跨章借图**（该章节没有自己的图表登记，"
+            "借用了同类图）—— 成稿图文可能与章节内容不符，请回查对应章节的图表登记",
+            len(borrowed))
     doc.save(out_path)
+    # ✅ P2-1 修复（2026-10-07）：导出落盘日志缺失。旧实现 doc.save() 后无任何
+    #    日志记录，用户从日志中无法追溯成稿何时落盘、落在何处。现补 INFO 日志，
+    #    含文件路径、大小与章节数，供运维与排障使用。
+    try:
+        _fsize = out_path.stat().st_size if out_path.exists() else 0
+        logger.info(
+            "导出：DOCX 已落盘（路径=%s · 大小=%d bytes · 章节数=%d · 表=%d · 图=%d）",
+            out_path, _fsize,
+            fix_stats.get("sections", 0) if isinstance(fix_stats, dict) else 0,
+            fix_stats.get("tables", 0) if isinstance(fix_stats, dict) else 0,
+            fix_stats.get("figures", 0) if isinstance(fix_stats, dict) else 0)
+    except Exception:
+        logger.info("导出：DOCX 已落盘（路径=%s）", out_path)
+    if borrowed:
+        fix_stats = dict(fix_stats or {})
+        fix_stats["chart_fallback_borrowed"] = len(borrowed)
+        fix_stats["chart_fallback_borrowed_details"] = borrowed[:20]
     return fix_stats
 
 
@@ -3778,7 +4323,7 @@ async def _query_global_facts(
         columns = f"{FACTS_GT_COLUMN}, title, content"
         sql, params = build_injectable_facts_query(scheme_id, project_id, columns)
         cur = await db.execute(sql, params)
-        facts = [dict(r) for r in await cur.fetchall()]
+        facts = [dict(r) for r in await _db_fetch_all(cur, what="_query_global_facts")]
         if status is not None:
             status.update({"ok": True, "code": "ok" if facts else "empty",
                            "count": len(facts)})
@@ -3862,9 +4407,14 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
     fe_images, fe_codes = _parse_frontend_images(body)
     # 渲染轨统计（写入响应头 X-Chart-Render-Stats，前端展示给用户）
     render_stats = {"fe": 0, "backend_ok": 0, "failed": 0}
+    # ✅ 加固（D1 · 2026-10-06）：跨章借图此前**零信号** —— 该章节没有自己的
+    #    图表登记时，导出会借一张同类图填进去，成稿图文可能不符而系统侧
+    #    （响应头 / 预检 / 日志）无任何提示。现随渲染统计一并回传
+    #    `fallback_borrowed`（由 _build_docx_sync 的 fix_stats 合流后写入）。
+    render_stats["fallback_borrowed"] = 0
 
     cur = await db.execute("SELECT * FROM schemes WHERE id=?", (scheme_id,))
-    scheme = await cur.fetchone()
+    scheme = await _db_fetch_one(cur, what="_prepare_export:schemes")
     if not scheme:
         raise HTTPException(404, "方案不存在")
     scheme = dict(scheme)
@@ -3876,7 +4426,8 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
         # （缓存永远 miss、重复渲染）。统一加 level、id 作确定性兜底。
         "SELECT * FROM sections WHERE scheme_id=? ORDER BY sort_order, level, id",
         (scheme_id,))
-    sections = [dict(r) for r in await cur.fetchall()]
+    sections = [dict(r) for r in await _db_fetch_all(
+        cur, what="_prepare_export:sections")]
 
     # ✅ v15 内容自动改写（默认关闭，需显式 config.auto_rewrite_content=true）：
     #    把「只体检不改写」升级为「可选自动改写」——仅做无损/低风险的格式与词汇修复：
@@ -3934,7 +4485,7 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
         "SELECT section_id, chart_type, data_json FROM chart_predictions WHERE scheme_id=?",
         (scheme_id,))
     chart_fp = [(r["section_id"], r["chart_type"], r["data_json"] or "")
-                for r in await cur.fetchall()]
+                for r in await _db_fetch_all(cur, what="_prepare_export:chart_predictions")]
 
     # ✅ BUG 修复：读取侧统一走 chart_payload.extract_chart_payload（唯一规范解析器）。
     #    只认 mermaid_code 键的旧写法会让 JSON 数据型图表（architecture/labor/
@@ -3986,7 +4537,9 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
     # 预收集需要渲染的图表代码（去重）
     # ✅ 图表同步生成：内联块自带代码优先；无内联码的标记块仍走 chart_predictions
     # P0-3 性能优化：倒排索引一次构建，避免每块 O(N) 兜底扫描（O(N²) → O(N)）
-    chart_type_index = _build_chart_type_index(chart_lookup)
+    # ✅ 加固（D1）：传入文档顺序 rank，使跨章借图的选择确定化
+    order_rank = {s["id"]: i for i, s in enumerate(sections)}
+    chart_type_index = _build_chart_type_index(chart_lookup, order_rank)
     seen_codes: set[tuple[str, str]] = set()
     unique_codes: list[tuple[str, str]] = []
     for sec in sections:
@@ -3994,13 +4547,13 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
             if block["type"] != "chart":
                 continue
             ct = block["chart_type"]
-            # ⚠️ R-3 回退一致性（2026-10-05）：`_find_fallback_code` 已在 R-3 回退中
-            #    恢复为「仅按类型借用首个非空 code」的两参签名（跨章节借用是既定
-            #    fallback 契约）。此处调用点曾残留 `current_section_id=` 关键字实参，
-            #    一旦走到兜底分支就抛 `TypeError: unexpected keyword argument`，
-            #    导致导出 500 —— 现与函数签名对齐，去掉该实参。
-            code = (block.get("code") or chart_lookup.get((sec["id"], ct), "")
-                    or _find_fallback_code(chart_type_index, ct))
+            # ✅ 加固（D1）：取码收敛到唯一出口 `_resolve_chart_code`，与
+            #    write_section 的落图路径**逐字同口径**（旧实现两处各写一遍
+            #    三级取码逻辑，既重复又无法观测跨章借图）。
+            #    章节顺序即 SQL 的 `ORDER BY sort_order, level, id`，
+            #    与渲染端的 `_rank_order`（同键排序 + 深度优先）一致。
+            code, _borrowed = _resolve_chart_code(
+                block, sec["id"], ct, chart_lookup, chart_type_index, order_rank)
             if code and (ct, code) not in seen_codes:
                 seen_codes.add((ct, code))
                 unique_codes.append((ct, code))
@@ -4229,7 +4782,7 @@ async def _load_appendix_sources(db, scheme_id: str, project_id: str) -> list[di
             "SELECT title, usage_text, content FROM knowledge_base "
             "WHERE project_id=? ORDER BY id LIMIT 200", (project_id,))
         items = []
-        for r in await cur.fetchall():
+        for r in await _db_fetch_all(cur, what="_load_appendix_sources:knowledge_base"):
             d = dict(r)
             val = str(d.get("content") or d.get("usage_text") or "")
             items.append({"name": str(d.get("title") or ""),
@@ -4246,7 +4799,7 @@ async def _load_appendix_sources(db, scheme_id: str, project_id: str) -> list[di
             "WHERE project_id=? AND status != 'stale' ORDER BY id LIMIT 200",
             (project_id,))
         items = []
-        for r in await cur.fetchall():
+        for r in await _db_fetch_all(cur, what="_load_appendix_sources:doc_extractions"):
             d = dict(r)
             items.append({"name": str(d.get("extract_type") or ""),
                           "value": str(d.get("extract_data") or "")[:500]})
@@ -4526,11 +5079,11 @@ async def _prune_export_cache(db, scheme_id: str, protect_path: Path) -> None:
         "SELECT id, result_path FROM export_cache WHERE scheme_id=?"
         " ORDER BY created_at DESC, rowid DESC",
         (scheme_id,))
-    if cur is None:
-        logger.warning("_prune_export_cache: db.execute 返回 None（scheme=%s），跳过裁剪",
-                       scheme_id[:8])
+    cache_rows = [dict(r) for r in await _db_fetch_all(
+        cur, what="_prune_export_cache")]
+    if not cache_rows:
+        # 无行 = 查询失败或本方案确无缓存；两种情况都无需裁剪（fail-soft）
         return
-    cache_rows = [dict(r) for r in await cur.fetchall()]
     keep_paths = {str(protect_path)}
     for cr in cache_rows[:5]:
         if cr["result_path"] and Path(cr["result_path"]).exists():
@@ -4552,8 +5105,102 @@ async def _prune_export_cache(db, scheme_id: str, protect_path: Path) -> None:
                 except OSError:
                     pass
         placeholders = ",".join("?" * len(stale_ids))
-        await db.execute(f"DELETE FROM export_cache WHERE id IN ({placeholders})", stale_ids)
-    await db.commit()
+        await _db_exec(db, f"DELETE FROM export_cache WHERE id IN ({placeholders})", stale_ids,
+                    what="_prune_export_cache 清理")
+
+
+#: 孤儿临时产物的宽限期（秒）。DOCX 原子替换失败会降级为「本次不写缓存」，
+#: 返回给用户的产物仍是那个 ``.tmp.docx`` —— 而 FileResponse 在 handler
+#: 返回**之后**才开始流式读取该文件，因此临时产物必须留一个宽限期，否则
+#: 下一次导出就会把正在被读取的临时产物顺手清掉。正常交付产物
+#: （``.docx`` / ``.pdf``）不需要宽限：它们要么被现存缓存行引用（不会命中
+#: 孤儿判定），要么本身就是孤儿（可以立即清理）。
+_ORPHAN_TMP_TTL_SECONDS = 600
+
+
+async def _gc_orphan_exports(db, scheme_id: str,
+                             protect: set[Path] | None = None) -> int:
+    """✅ 孤儿导出产物回收（2026-10-06）。
+
+    背景：``_prune_export_cache`` 只能清理「DB 有行但已陈旧」的文件，而下面
+    两类产物**在 DB 里根本没有行**，于是永久留在 ``EXPORTS_DIR``，随导出
+    次数累积且零告警：
+
+      · DOCX 原子替换 3 次重试均失败 → 降级为「本次不写缓存」，
+        ``out_path = tmp_out_path``（``.tmp.docx``）直接返回给用户，之后再无人清理；
+      · PDF 分支 ``os.replace`` 成功、但随后的 INSERT 抛异常 → ``out_path``
+        已在盘上，DB 里没有对应行（``/cache-status`` 也不会显示它）。
+
+    一份 DOCX 可达数十 MB，每失败一次就永久泄漏一份。
+
+    判定三重收窄（宁可少删，绝不误删）：
+
+      ① 只扫 ``EXPORTS_DIR`` 的**顶层文件**，子目录整体跳过 ——
+         图表 PNG 缓存目录 ``charts/`` 绝不受影响；
+      ② 只处理文件名以 ``{scheme_id}_`` 起头的文件 —— 导出器只创建这种
+         命名，其它方案的产物天然不在范围内（跨方案误删在结构上不可能）；
+      ③ 排除本方案**现存缓存行**指向的路径，以及调用方传入的 ``protect``
+         （本次导出仍在被响应读取的产物）。
+
+    ``.tmp.*`` 额外要求年龄超过 :data:`_ORPHAN_TMP_TTL_SECONDS`（见其注释）；
+    非临时产物只要没有缓存行引用即为孤儿，直接清理。
+
+    全程 fail-soft：任何异常只记 WARNING 并返回已删除数，**绝不**影响本次
+    导出交付。返回删除的文件数（0 = 无孤儿、或全部被判定为受保护）。
+
+    ⚠️ **缓存行读取失败时整体跳过，而不是按「无缓存行」继续**：本函数是
+    唯一的**破坏性**清理路径。若 DB 短暂不可用（R13：``db.execute`` 返回
+    None）而 ``live`` 恰好为空集，孤儿判定就会把本方案**所有**现存产物判成
+    孤儿 —— 用户下次导出秒级缓存全部作废，数十 MB 的成稿被静默删掉。
+    因此这里用 :func:`_db_fetch_all` 的 ``strict=True`` 模式（唯一出口不变，
+    但读失败抛 :class:`DBReadError` 而非降级为空集），只有成功读到结果集
+    才允许删除。
+    """
+    import os
+    import time
+
+    deleted = 0
+    try:
+        # 先确认「哪些产物仍被缓存行引用」；读不到就整体跳过（保守不删）。
+        try:
+            rows = await _db_fetch_all(
+                await db.execute(
+                    "SELECT result_path FROM export_cache WHERE scheme_id=?",
+                    (scheme_id,)),
+                what="_gc_orphan_exports 缓存行", strict=True)
+        except DBReadError as e:
+            logger.warning(
+                "导出：孤儿回收跳过（无法确认哪些产物仍被缓存行引用，"
+                "保守不动任何文件；scheme=%s）: %s", scheme_id[:8], e)
+            return deleted
+        live = {os.path.normcase(str(dict(r).get("result_path") or ""))
+                for r in rows if dict(r).get("result_path")}
+        protected = {os.path.normcase(str(p)) for p in (protect or set())}
+        now = time.time()
+        prefix = f"{scheme_id}_"
+        try:
+            entries = list(EXPORTS_DIR.iterdir())
+        except OSError:
+            return deleted
+        for f in entries:
+            try:
+                if not f.is_file() or not f.name.startswith(prefix):
+                    continue
+                key = os.path.normcase(str(f))
+                if key in live or key in protected:
+                    continue
+                if ".tmp." in f.name and (now - f.stat().st_mtime) < _ORPHAN_TMP_TTL_SECONDS:
+                    continue  # 宽限期内：可能是刚降级返回、仍在流式读取的产物
+                f.unlink(missing_ok=True)
+                deleted += 1
+            except OSError:
+                continue
+    except Exception as e:  # noqa: BLE001
+        logger.warning("孤儿导出产物回收失败（不影响本次导出）: %s", e)
+    if deleted:
+        logger.info("导出：已回收 %d 个孤儿导出产物（scheme=%s, dir=%s）",
+                    deleted, scheme_id[:8], EXPORTS_DIR.name)
+    return deleted
 
 
 @router.post("/docx")
@@ -4584,7 +5231,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
     cur = await db.execute(
         "SELECT result_path FROM export_cache WHERE scheme_id=? AND config_hash=? AND content_fingerprint=?",
         (scheme_id, config_hash, content_hash))
-    cached = await cur.fetchone()
+    cached = await _db_fetch_one(cur, what="export_docx 缓存查询")
     if cached and cached[0] and Path(cached[0]).exists() and Path(cached[0]).stat().st_size > 0:
         # ✅ G12：缓存命中同样是「用户拿到了一份文档」，同样落审核留痕
         await _record_export_review_trace(db, scheme_id, "docx", round_no, export_filename)
@@ -4614,6 +5261,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
     # ✅ Windows 竞争窗口：并发同指纹导出时 FileResponse 懒打开目标文件，
     # os.replace 可能抛 WinError 32；重试 3 次后退化为直接使用本次临时产物。
     replaced = False
+    cacheable = True
     for _attempt in range(3):
         try:
             os.replace(tmp_out_path, out_path)
@@ -4622,13 +5270,27 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         except PermissionError:
             await asyncio.sleep(0.3 * (_attempt + 1))
     if not replaced:
+        # ✅ BUG 修复（2026-10-06 · P1 交付物/缓存路径治理）：旧实现把
+        #    ``out_path = tmp_out_path`` 之后**继续写缓存**，于是 export_cache
+        #    的 result_path 永久指向一个 ``.tmp.docx`` 文件：文件名带 uuid 与
+        #    .tmp 后缀（运维按名字辨识产物时极具误导），且该行命中即返回，
+        #    后续导出即便成功 replace 到规范路径也不会更新该行
+        #    （INSERT OR IGNORE 不覆盖已存在行）→ 磁盘与 DB 双双留下孤儿。
+        #    现降级为「本次不写缓存」：本次响应体仍是完整产物（tmp 文件
+        #    保留给 FileResponse 读取），下次导出重走全链路并落到规范路径。
         out_path = tmp_out_path
+        cacheable = False
+        logger.warning(
+            "DOCX 缓存原子替换 3 次重试均失败（scheme=%s, out=%s），"
+            "本次不写入导出缓存（响应体仍为完整产物）",
+            scheme_id[:8], EXPORTS_DIR.name)
 
     # ✅ 坏缓存守卫：存在图表渲染失败 / AI 配图未生成 / 配图位图下载失败时产物含缺图，
     #    不写入缓存——否则 AI 渲染服务恢复后，因内容指纹不变永远命中残缺文档。
     if (render_stats.get("failed", 0) > 0
             or prep.get("ai_image_pending", 0) > 0
             or prep.get("ai_image_download_pending", 0) > 0):
+        _merge_borrowed_stats(render_stats, fix_stats)
         headers = {"X-Chart-Render-Stats": json.dumps(
                        {**render_stats,
                         "ai_image_pending": prep.get("ai_image_pending", 0),
@@ -4638,6 +5300,10 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         if fix_stats:
             headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
         await _record_export_review_trace(db, scheme_id, "docx", round_no, export_filename)
+        # ✅ 孤儿产物回收（2026-10-06）：cacheable=False 时本次返回的是
+        #    .tmp.docx（降级、未写缓存行）→ 无 DB 行可清理，只能由这里回收。
+        #    protect 传入 out_path：该文件即将被流式返回，不得在本次回收。
+        await _gc_orphan_exports(db, scheme_id, protect={out_path})
         return FileResponse(
             str(out_path), filename=export_filename,
             headers=headers, media_type=_DOCX_MIME)
@@ -4646,23 +5312,35 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
     # ✅ B5（2026-09-23）：INSERT OR IGNORE + (scheme_id, content_fingerprint) 唯一约束，
     #    使同指纹并发导出只持久化一行（另一并发请求虽仍各自构建 docx，但 os.replace 保证
     #    out_path 不坏，且缓存行不重复），实现严格原子。
-    cache_id = str(uuid.uuid4())
-    await db.execute(
-        "INSERT OR IGNORE INTO export_cache (id, project_id, scheme_id, config_hash, content_fingerprint, cache_key, result_path)"
-        " VALUES (?,?,?,?,?,?,?)",
-        (cache_id, scheme.get("project_id", ""), scheme_id, config_hash, content_hash,
-         f"{scheme_id}_{config_hash[:8]}", str(out_path)))
+    # ✅ 2026-10-06：原子替换失败（``cacheable=False``）时**跳过**缓存写入，
+    #    避免 result_path 永久指向 ``.tmp.docx`` 孤儿文件（见上方 warning）。
+    if cacheable:
+        cache_id = str(uuid.uuid4())
+        await _db_exec(
+            db,
+            "INSERT OR IGNORE INTO export_cache (id, project_id, scheme_id, config_hash, content_fingerprint, cache_key, result_path)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (cache_id, scheme.get("project_id", ""), scheme_id, config_hash, content_hash,
+             f"{scheme_id}_{config_hash[:8]}", str(out_path)),
+            what="export_cache 写入(DOCX)")
 
-    # ✅ 缓存保留策略（最多 5 份/方案）：2026-10-03（T1）提取为共享 helper，
-    #    与 PDF 分支共用（原内联逻辑逐字迁移，见 _prune_export_cache 注释）。
-    await _prune_export_cache(db, scheme_id, protect_path=out_path)
+        # ✅ 缓存保留策略（最多 5 份/方案）：2026-10-03（T1）提取为共享 helper，
+        #    与 PDF 分支共用（原内联逻辑逐字迁移，见 _prune_export_cache 注释）。
+        await _prune_export_cache(db, scheme_id, protect_path=out_path)
 
+    # ✅ 加固（D1）：把构建期统计到的「跨章借图」并入渲染统计，一并回传
+    #    X-Chart-Render-Stats（前端展示 + 用户知情）。加法式合并，既有键不变。
+    _merge_borrowed_stats(render_stats, fix_stats)
     headers = {"X-Chart-Render-Stats": json.dumps(render_stats, ensure_ascii=False),
                "X-Cache-Status": "miss", **name_headers}
     if fix_stats:
         headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
     # ✅ G12：导出成稿落一条审核留痕（from_status = to_status，只留痕不改状态机）
     await _record_export_review_trace(db, scheme_id, "docx", round_no, export_filename)
+    # ✅ 孤儿产物回收（2026-10-06）：顺带清理本方案历史遗留的孤儿产物
+    #    （缓存行已陈旧删除 / 上次原子替换失败的 .tmp.docx）。protect 传入
+    #    本次产物，避免把它当成孤儿删掉。
+    await _gc_orphan_exports(db, scheme_id, protect={out_path})
     return FileResponse(
         str(out_path),
         filename=export_filename,
@@ -4855,7 +5533,7 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
     cur = await db.execute(
         "SELECT result_path FROM export_cache WHERE scheme_id=? AND config_hash=? AND content_fingerprint=?",
         (scheme_id, config_hash, pdf_content_hash))
-    cached = await cur.fetchone()
+    cached = await _db_fetch_one(cur, what="export_pdf 缓存查询")
     if cached and cached[0] and Path(cached[0]).exists() and Path(cached[0]).stat().st_size > 0:
         await _record_export_review_trace(db, scheme_id, "pdf", round_no, export_filename)
         return FileResponse(
@@ -4901,51 +5579,52 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
         _tmp_pdf = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{pdf_content_hash[:8]}.{uuid.uuid4().hex}.tmp.pdf"
         try:
             _tmp_pdf.write_bytes(pdf_bytes)
-            await db.execute(
-                "INSERT OR IGNORE INTO export_cache (id, project_id, scheme_id, config_hash,"
-                " content_fingerprint, cache_key, result_path) VALUES (?,?,?,?,?,?,?)",
-                (str(uuid.uuid4()), scheme.get("project_id", ""), scheme_id,
-                 config_hash, pdf_content_hash,
-                 # ✅ P1（2026-10-04）：cache_key 补格式后缀。
-                 #    旧实现 DOCX 与 PDF 写入**逐字相同**的 cache_key
-                 #    （export.py:4590 与此处），而 cache_key 是 `/cache-status`
-                 #    与运维排查按格式辨识缓存行的唯一人读标识 —— 同一方案同一
-                 #    指纹下两行完全同名，无法区分哪个是 docx、哪个是 pdf，
-                 #    清理/核对时极易误删。只改 PDF 侧：DOCX 现有键逐字不变 →
-                 #    既有缓存行零失效（与 D-2 的「最小改动」取舍一致）。
-                 #    注意：查缓存走 (scheme_id, config_hash, content_fingerprint)
-                 #    三元组，cache_key 不参与命中判定 → 本次改名不影响任何命中。
-                 f"{scheme_id}_{config_hash[:8]}|pdf", str(out_path)))
-            await db.commit()
-            # ✅ F-1：缓存行 INSERT + commit 成功后再做原子替换。
-            #    DB 已指向 out_path，但 out_path 此刻可能不存在或仍是旧文件——
-            #    下一次同指纹导出的缓存守卫有 `Path.exists() and size>0` 双检，
-            #    命中不到就重走全链路（用刚生成的 pdf_bytes 或重新构建）；
-            #    即使用户下次立刻下载，也会拿到完整的 pdf_bytes（本次响应体）。
+            # ✅ 2026-10-06：顺序治理 —— **先原子替换落盘、再写缓存行**（与 DOCX
+            #    分支同序）。旧实现是「INSERT + commit → os.replace」，替换失败时
+            #    DB 已指向一个**并不存在**的 out_path → 留下一行僵尸缓存
+            #    （/cache-status 记为 stale、prune 才清），且下一次同指纹导出会
+            #    先走一次「exists() 失败 → 全量重建」的无效往返。
             # ✅ 与 DOCX 分支同款循环重试：Windows 上 out_path 可能被 Word/
-            #    预览窗口占用（WinError 32）；3 次退避重试，仍失败则清理 tmp
-            #    并 warn——本次响应体仍是完整 pdf_bytes，用户拿到的是好文件。
+            #    预览窗口占用（WinError 32）；3 次退避重试。
+            _replaced = False
             for _attempt in range(3):
                 try:
                     _os.replace(_tmp_pdf, out_path)
+                    _replaced = True
                     break
                 except PermissionError:
-                    if _attempt == 2:
-                        logger.warning(
-                            "PDF 缓存原子替换 3 次重试均失败（scheme=%s, out=%s），"
-                            "清理 tmp；本次响应体仍为完整 PDF",
-                            scheme_id[:8], out_path.name)
-                        try:
-                            _tmp_pdf.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                    else:
+                    if _attempt < 2:
                         await asyncio.sleep(0.3 * (_attempt + 1))
-            # ✅ T1（2026-10-03）：PDF 分支此前只 INSERT 从不裁剪 → export_cache 行
-            #    与 EXPORTS_DIR 磁盘文件随导出次数无限增长。接入与 DOCX 同一保留
-            #    策略（跨格式合计 5 份/方案）；置于既有 fail-soft try 内，裁剪失败
-            #    不得影响本次交付（用户仍拿到完整 PDF）。
-            await _prune_export_cache(db, scheme_id, protect_path=out_path)
+            if not _replaced:
+                logger.warning(
+                    "PDF 缓存原子替换 3 次重试均失败（scheme=%s, out=%s），"
+                    "本次不写入导出缓存（响应体仍为完整 PDF）",
+                    scheme_id[:8], out_path.name)
+                _tmp_pdf.unlink(missing_ok=True)
+            else:
+                await _db_exec(
+                    db,
+                    "INSERT OR IGNORE INTO export_cache (id, project_id, scheme_id, config_hash,"
+                    " content_fingerprint, cache_key, result_path) VALUES (?,?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), scheme.get("project_id", ""), scheme_id,
+                     config_hash, pdf_content_hash,
+                     # ✅ P1（2026-10-04）：cache_key 补格式后缀。
+                     #    旧实现 DOCX 与 PDF 写入**逐字相同**的 cache_key
+                     #    （export.py:4590 与此处），而 cache_key 是 `/cache-status`
+                     #    与运维排查按格式辨识缓存行的唯一人读标识 —— 同一方案同一
+                     #    指纹下两行完全同名，无法区分哪个是 docx、哪个是 pdf，
+                     #    清理/核对时极易误删。只改 PDF 侧：DOCX 现有键逐字不变 →
+                     #    既有缓存行零失效（与 D-2 的「最小改动」取舍一致）。
+                     #    注意：查缓存走 (scheme_id, config_hash, content_fingerprint)
+                     #    三元组，cache_key 不参与命中判定 → 本次改名不影响任何命中。
+                     f"{scheme_id}_{config_hash[:8]}|pdf", str(out_path)),
+                    what="export_cache 写入(PDF)")
+                await db.commit()
+                # ✅ T1（2026-10-03）：PDF 分支此前只 INSERT 从不裁剪 → export_cache 行
+                #    与 EXPORTS_DIR 磁盘文件随导出次数无限增长。接入与 DOCX 同一保留
+                #    策略（跨格式合计 5 份/方案）；置于既有 fail-soft try 内，裁剪失败
+                #    不得影响本次交付（用户仍拿到完整 PDF）。
+                await _prune_export_cache(db, scheme_id, protect_path=out_path)
         except Exception as e:
             # 缓存写入失败不得影响本次交付（用户仍拿到完整 PDF）
             try:
@@ -4955,6 +5634,8 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
             logger.warning("PDF 导出缓存写入失败（不影响本次交付）: %s", e, exc_info=True)
 
     from fastapi.responses import Response
+    # ✅ 加固（D1）：PDF 链路同样合流跨章借图计数（与 DOCX 同口径）
+    _merge_borrowed_stats(render_stats, fix_stats)
     headers = {
         "Content-Disposition": _attachment_disposition(export_filename),
         "X-Chart-Render-Stats": json.dumps(render_stats, ensure_ascii=False),
@@ -4966,6 +5647,12 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
         headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
     # ✅ G12：PDF 成稿同样落一条审核留痕
     await _record_export_review_trace(db, scheme_id, "pdf", round_no, export_filename)
+    # ✅ 孤儿产物回收（2026-10-06）：PDF 响应体是**内存字节**，本次产物不再
+    #    依赖磁盘文件，因此这里无需 protect。覆盖三类残留：
+    #      · os.replace 成功但 INSERT 抛异常 → out_path 在盘上、DB 无行（永久孤儿）；
+    #      · 缓存行已陈旧被 _prune_export_cache 删除的文件；
+    #      · 历史遗留的 .tmp.* 临时产物（超过宽限期）。
+    await _gc_orphan_exports(db, scheme_id)
     return Response(
         content=pdf_bytes,
         media_type=_PDF_MIME,
@@ -4977,22 +5664,20 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
 async def cache_status(scheme_id: str, db=Depends(read_db)):
     """✅ 修复：补齐前端消费的 total/stale 字段，并过滤文件已丢失的僵尸行
     （旧实现只返回 {items}，前端 cacheStatus.total/stale 恒为 undefined）"""
+    # ✅ BUG 修复（2026-10-06 · R46）：created_at 秒级精度，同一秒内多次导出时
+    #    ORDER BY created_at DESC 次序不稳定 —— 本方案「最近的 5 份缓存」可能取
+    #    成任意 5 行（刚导出的那份反而被挤掉），前端把「最旧产物」显示为「当前
+    #    可复用成果」。与 _prune_export_cache 同口径补 rowid 次序兜底。
     cur = await db.execute(
-        "SELECT * FROM export_cache WHERE scheme_id=? ORDER BY created_at DESC LIMIT 5",
+        "SELECT * FROM export_cache WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT 5",
         (scheme_id,))
     items = []
-    # ✅ R13 守卫（2026-09-30）：db.execute 可能返回 None（连接/事务异常）。
-    #    本端点是只读诊断旁路，降级为空列表即可，不应 500。
-    if cur is None:
-        logger.warning("cache_status: db.execute 返回 None（scheme=%s），降级返回空列表",
-                       scheme_id)
-    else:
-        for r in await cur.fetchall():
-            item = dict(r)
-            # ✅ BUG 修复：Path("") 等价 Path(".") 恒存在 → result_path 为空的僵尸行
-            #    会被计为「有效缓存」，total/stale 口径失真。空路径直接判为不存在。
-            _p = item.get("result_path") or ""
-            item["exists"] = bool(_p) and Path(_p).exists()
-            items.append(item)
+    for r in await _db_fetch_all(cur, what="cache_status"):
+        item = dict(r)
+        # ✅ BUG 修复：Path("") 等价 Path(".") 恒存在 → result_path 为空的僵尸行
+        #    会被计为「有效缓存」，total/stale 口径失真。空路径直接判为不存在。
+        _p = item.get("result_path") or ""
+        item["exists"] = bool(_p) and Path(_p).exists()
+        items.append(item)
     valid = [i for i in items if i["exists"]]
     return {"items": items, "total": len(valid), "stale": len(items) - len(valid)}

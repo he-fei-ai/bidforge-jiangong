@@ -62,6 +62,42 @@ const mocks = vi.hoisted(() => {
   return { OVERVIEW, RUNS_FRESH, RULES };
 });
 
+// ✅ 2026-10-06：组件的 msg 来自项目自封装 useAntdMessageHub（同时推 ActivityCenter）。
+//    此前本仓无任何用例断言告警文案 —— stale 提醒 / cached 提示 / 维度漂移告警
+//    三条「静默失效」链路因此完全无锁。mock 该 hook 即可精确断言，不必依赖
+//    antd message 的 DOM portal（jsdom 下不稳定）。
+const msgSpy = vi.hoisted(() => ({
+  success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(),
+  // ⚠️ hub 代理缓存必须与 msgSpy 同处 vi.hoisted —— vi.mock 工厂被提升到文件顶部，
+  //    引用外层 const 会在初始化时命中 TDZ。
+  hubCache: new Map<string, any>(),
+}));
+vi.mock("../utils/activityCenter", async (orig) => {
+  const real = await orig<any>();
+  // 包裹真实 hub：既记录文案，又保留 pushActivity（ActivityCenter 仍能收到告警）
+  return {
+    ...real,
+    // ⚠️ 必须返回**同一对象**：组件的 useCallback/effect 以 msg 为依赖，
+    //    每次渲染都造新对象会导致依赖永变 → 无限重渲染（本轮实测卡死）。
+    //    真实 hub 每次仍调用（保持 hook 顺序），但包装后的代理按 source 缓存。
+    useAntdMessageHub: (m: any, source: string) => {
+      const hub = real.useAntdMessageHub(m, source);
+      let w = msgSpy.hubCache.get(source);
+      if (!w) {
+        w = {
+          success: (...a: any[]) => { msgSpy.success(...a); return hub.success(...a); },
+          error: (...a: any[]) => { msgSpy.error(...a); return hub.error(...a); },
+          warning: (...a: any[]) => { msgSpy.warning(...a); return hub.warning(...a); },
+          info: (...a: any[]) => { msgSpy.info(...a); return hub.info(...a); },
+          loading: (...a: any[]) => { msgSpy.loading(...a); return hub.loading(...a); },
+        };
+        msgSpy.hubCache.set(source, w);
+      }
+      return w;
+    },
+  };
+});
+
 vi.mock("../api", () => ({
   complianceApi: {
     runs: vi.fn(async () => ({ data: { items: mocks.RUNS_FRESH } })),
@@ -100,7 +136,18 @@ beforeEach(() => {
   (reviewAutoFixApi.collect as any).mockReset().mockResolvedValue({
     data: { scheme_id: "s1", scope: "all_blocking", total: 0, items: [] } });
 });
-afterEach(() => { cleanup(); localStorage.clear(); });
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+  msgSpy.success.mockClear(); msgSpy.error.mockClear();
+  msgSpy.warning.mockClear(); msgSpy.info.mockClear();
+});
+
+/** 断言某条告警文案确实推给用户（任一级别） */
+function expectMsg(fn: ReturnType<typeof vi.fn>, frag: string) {
+  const hit = fn.mock.calls.some((c: any[]) => String(c[0] ?? "").includes(frag));
+  expect(hit, `未捕获到含「${frag}」的告警；实际调用：${JSON.stringify(fn.mock.calls)}`).toBe(true);
+}
 
 /** ✅ 中文按钮含空格/换行 → 归一化后匹配，避免 antd Button 渲染差异 */
 function btnByText(container: HTMLElement, text: string): HTMLButtonElement | null {
@@ -474,5 +521,248 @@ describe("ReadinessDashboard · 自动修复入口接线", () => {
     const overviewCalls = (complianceApi.overview as any).mock.calls as any[];
     expect(overviewCalls.some((c) => c[0] === "s1" && c[1] === true)).toBe(true),
       "BatchFixModal 修复完成后必须 force=true 重算，避免命中旧缓存（拿到修复前旧分）";
+  });
+});
+
+// ===========================================================================
+// ✅ 2026-10-06 缺口收口：审核与预检前端组件级交互补齐
+//
+// 本组用例锁的是三条「静默失效」链路 —— 每条都在旧实现下**只丢一条断言**
+// 就能让用户按过期结论继续整改：
+//   ① 过期恢复：stale → 「重新总检」必须 force=true；单条修复 onFixed 也必须
+//      force=true（此前只锁了批量那半条，单条那半条无人看守）；
+//   ② 报告时效：report.stale=true 时必须额外告警（报告会被抄进评审意见）；
+//   ③ 数据质量信号：cached / unknown_dimension_count / 零发现三条分支此前
+//      完全无断言 —— 规则库与后端 DIMENSIONS 漂移会静默发生。
+// ===========================================================================
+describe("ReadinessDashboard · 过期恢复与告警链路", () => {
+  /** 带 autofix 能力的一条 finding（供单条修复入口用）。 */
+  function withAutofix(cap: Record<string, unknown> | null) {
+    return {
+      ...mocks.OVERVIEW,
+      findings: mocks.OVERVIEW.findings.map((f: any, i: number) =>
+        i === 0 ? { ...f, autofix: cap } : f),
+    };
+  }
+
+  async function renderAndRunOverview(container: HTMLElement) {
+    fireEvent.click(btnByText(container, "一键总检")!);
+    await waitFor(() => expect(complianceApi.overview).toHaveBeenCalled());
+  }
+
+  it("过期告警里的「重新总检」以 force=true 重算（不得复用旧缓存）", async () => {
+    // runs[0].stale=true → 组件渲染 stale Alert
+    (complianceApi.runs as any).mockResolvedValue({
+      data: { items: [{ ...mocks.RUNS_FRESH[0], stale: true }] },
+    });
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    await renderAndRunOverview(container);
+    await waitFor(() =>
+      expect(container.textContent || "").toContain("重新总检"));
+
+    const btn = btnByText(container, "重新总检");
+    expect(btn).toBeTruthy();
+    fireEvent.click(btn!);
+
+    await waitFor(() => {
+      const calls = (complianceApi.overview as any).mock.calls as any[];
+      expect(calls.some((c) => c[0] === "s1" && c[1] === true)).toBe(true);
+    });
+  });
+
+  it("单条自动修复 onFixed → 同样 force=true 重算（与批量同口径）", async () => {
+    (complianceApi.overview as any).mockResolvedValue({
+      data: withAutofix({ fixable: true, mode: "ai", reason: "" }),
+    });
+    (reviewAutoFixApi.plan as any).mockResolvedValue({
+      data: {
+        ok: true, fixable: true, mode: "ai", reason: "",
+        finding: mocks.OVERVIEW.findings[0],
+        targets: [{ section_id: "sec-a", section_title: "第1章", value: "x07",
+                    line: 3, sentence_idx: 1, sentence_total: 2, matched: "x07",
+                    context: "上下文", why: "命中控制字符" }],
+        max_sections: 10,
+      },
+    });
+    (reviewAutoFixApi.apply as any).mockResolvedValue({
+      data: { ok: true, status: "repaired", mode: "ai", rule_id: "REF-001",
+              targets: [], snapshot_id: "ver-single",
+              items: [{ section_id: "sec-a", section_title: "第1章", status: "repaired",
+                        before: "含\x07内容", after: "含内容", problems: [] }] },
+    });
+    const onContentFixed = vi.fn();
+    const body = document.body as HTMLElement;
+    const { container } = render(
+      <App><ReadinessDashboard schemeId="s1" onContentFixed={onContentFixed} /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    await renderAndRunOverview(container);
+    await waitFor(() => expect(container.textContent || "").toContain("82"));
+
+    // 打开单条修复弹窗 → 定位 → 执行修复
+    const fixBtn = (Array.from(container.querySelectorAll("button")).find(
+      (b) => (b.textContent || "").includes("自动修复")) as HTMLButtonElement | undefined);
+    expect(fixBtn).toBeTruthy();
+    fireEvent.click(fixBtn!);
+    await waitFor(() =>
+      expect(btnByText(body, "定位矛盾位置")).toBeTruthy());
+    fireEvent.click(btnByText(body, "定位矛盾位置")!);
+    await waitFor(() =>
+      expect(reviewAutoFixApi.plan).toHaveBeenCalledWith("s1", {
+        rule_id: "REF-001", section_id: undefined,
+      }));
+    await waitFor(() => expect(btnByText(body, "调用 AI 修复此处")!.disabled).toBe(false));
+    fireEvent.click(btnByText(body, "调用 AI 修复此处")!);
+    await waitFor(() => expect(reviewAutoFixApi.apply).toHaveBeenCalled());
+
+    await waitFor(() => expect(onContentFixed).toHaveBeenCalled());
+    await waitFor(() => {
+      const calls = (complianceApi.overview as any).mock.calls as any[];
+      expect(calls.some((c) => c[0] === "s1" && c[1] === true)).toBe(true);
+    });
+  });
+
+  it("导出报告 stale=true 时额外告警（报告会被抄进评审意见）", async () => {
+    (complianceApi.runs as any).mockResolvedValue({ data: { items: mocks.RUNS_FRESH } });
+    (complianceApi.report as any).mockResolvedValue({
+      data: { content: "# 整改清单", filename: "报告.md", stale: true },
+    });
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+
+    const btn = btnByText(container, "导出整改清单")!;
+    expect(btn.disabled).toBe(false);
+    fireEvent.click(btn);
+    await waitFor(() => expect(complianceApi.report).toHaveBeenCalledWith("s1"));
+    await waitFor(() => expectMsg(msgSpy.warning, "结论可能已过期"));
+  });
+
+  it("报告导出失败 → 报错且按钮恢复可点（不得卡在 loading）", async () => {
+    (complianceApi.runs as any).mockResolvedValue({ data: { items: mocks.RUNS_FRESH } });
+    (complianceApi.report as any).mockRejectedValue(new Error("报告服务不可用"));
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+
+    const exportBtn = btnByText(container, "导出整改清单")!;
+    expect(exportBtn.disabled).toBe(false);
+    fireEvent.click(exportBtn);
+    await waitFor(() => expect(complianceApi.report).toHaveBeenCalled());
+    await waitFor(() => expectMsg(msgSpy.error, "报告服务不可用"));
+    await waitFor(() => expect(exportBtn.disabled).toBe(false));
+  });
+
+  it("零发现 → 绿色「未检出任何问题」成功态", async () => {
+    (complianceApi.overview as any).mockResolvedValue({
+      data: {
+        ...mocks.OVERVIEW,
+        findings: [], counts: { block: 0, high: 0, medium: 0, low: 0, total: 0 },
+        blocked: false, released: true, blockers: [],
+      },
+    });
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    await renderAndRunOverview(container);
+    await waitFor(() =>
+      expect(container.textContent || "").toContain("未检出任何问题"));
+  });
+
+  it("规则目录加载失败 → 报错（不得静默给一个空抽屉）", async () => {
+    (complianceApi.rules as any).mockRejectedValue(new Error("规则目录接口异常"));
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    fireEvent.click(btnByText(container, "规则说明")!);
+    await waitFor(() => expect(complianceApi.rules).toHaveBeenCalled());
+    await waitFor(() => expectMsg(msgSpy.error, "规则目录接口异常"));
+  });
+
+  it("规则目录缓存命中：二次打开不再重复请求", async () => {
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    fireEvent.click(btnByText(container, "规则说明")!);
+    await waitFor(() => expect(complianceApi.rules).toHaveBeenCalledTimes(1));
+    const closeBtn = Array.from((document.body as HTMLElement).querySelectorAll(
+      ".ant-drawer-close")).pop() as HTMLButtonElement | undefined;
+    if (closeBtn) fireEvent.click(closeBtn);
+    fireEvent.click(btnByText(container, "规则说明")!);
+    await new Promise((r) => setTimeout(r, 30));
+    expect((complianceApi.rules as any).mock.calls.length).toBe(1);
+  });
+
+  it("严重度筛选：全部 / 一般 两档均可用（此前只锁了提示与阻断+严重）", async () => {
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    await renderAndRunOverview(container);
+    await waitFor(() => expect(container.textContent || "").toContain("82"));
+    expect(container.textContent || "").toContain("缺少安全措施描述");
+    expect(container.textContent || "").toContain("图表缺单位");
+
+    const seg = (label: string) => (Array.from(container.querySelectorAll(
+      ".ant-segmented-item-label")).find(
+      (n) => (n.textContent || "").trim() === label) as HTMLElement | undefined);
+    expect(seg("一般")).toBeTruthy();
+    fireEvent.click(seg("一般")!);
+    // 「一般」= medium：保留 MED-1、过滤 LOW-1
+    await waitFor(() =>
+      expect(container.textContent || "").not.toContain("图表缺单位"));
+    expect(container.textContent || "").toContain("缺少安全措施描述");
+    fireEvent.click(seg("全部")!);
+    await waitFor(() => expect(container.textContent || "").toContain("图表缺单位"));
+  });
+
+  it("切换方案后旧方案的迟到总检响应不得覆盖新方案结论", async () => {
+    let resolveOld: any;
+    (complianceApi.overview as any)
+      .mockImplementationOnce(() => new Promise((r) => { resolveOld = r; }))
+      .mockResolvedValueOnce({ data: { ...mocks.OVERVIEW, total: 66 } });
+    (complianceApi.runs as any).mockResolvedValue({ data: { items: mocks.RUNS_FRESH } });
+
+    const { container, rerender } = render(
+      <App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    fireEvent.click(btnByText(container, "一键总检")!);
+    await waitFor(() => expect(complianceApi.overview).toHaveBeenCalledTimes(1));
+
+    // 切到方案 s2 并完成一次总检（66 分）
+    rerender(<App><ReadinessDashboard schemeId="s2" /></App>);
+    await waitFor(() =>
+      expect((complianceApi.runs as any).mock.calls.some((c: any[]) => c[0] === "s2")).toBe(true));
+
+    // 旧方案 s1 的迟到响应此刻才回来 —— 必须被丢弃，不得渲染 82 分
+    resolveOld?.({ data: { ...mocks.OVERVIEW, total: 82 } });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(container.textContent || "").not.toContain("82 分");
+  });
+
+  it("cached=true 且非 force → 告知用户「未重复计入历史趋势」", async () => {
+    (complianceApi.overview as any).mockResolvedValue({
+      data: { ...mocks.OVERVIEW, cached: true },
+    });
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    await renderAndRunOverview(container);
+    await waitFor(() => expectMsg(msgSpy.info, "未重复计入历史趋势"));
+  });
+
+  it("unknown_dimension_count > 0 → 提示核对规则库与后端维度口径", async () => {
+    (complianceApi.overview as any).mockResolvedValue({
+      data: { ...mocks.OVERVIEW, unknown_dimension_count: 3 },
+    });
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    await renderAndRunOverview(container);
+    await waitFor(() => expectMsg(msgSpy.warning, "未登记的评分维度"));
+  });
+
+  it("总检失败 → 报错，且保留上一轮结论（不得清空面板）", async () => {
+    (complianceApi.overview as any).mockResolvedValueOnce({ data: mocks.OVERVIEW });
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    await renderAndRunOverview(container);
+    await waitFor(() => expect(container.textContent || "").toContain("82 分"));
+
+    (complianceApi.overview as any).mockRejectedValueOnce(new Error("预检引擎异常"));
+    fireEvent.click(btnByText(container, "一键总检")!);
+    await waitFor(() => expectMsg(msgSpy.error, "预检引擎异常"));
+    expect(container.textContent || "").toContain("82 分");
   });
 });

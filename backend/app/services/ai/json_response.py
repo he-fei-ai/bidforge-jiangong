@@ -12,6 +12,10 @@ import json
 import logging
 import re
 
+from app.services.ai.prompts._metrics import (
+    record_ai_failure,
+    record_repair_triggered,
+)
 from app.services.ai.prompts._registry import render
 from app.services.ai.provider_factory import chat_with_fallback
 
@@ -34,6 +38,12 @@ GENERIC_REPAIR_KEY = "json_schema_fix_system"
 
 #: 目录族专用的修复提示词（唯一真正需要「目录」语义的场景）
 OUTLINE_REPAIR_KEY = "outline_json_fix_system"
+
+#: 事实提取族专用的修复提示词（facts_extractor 分块提取消费）。
+#: R38-P1-c 后默认已是 GENERIC，本常量仅为把 facts_extractor 那处裸字符串字面量
+#: 收成与 OUTLINE_REPAIR_KEY 同型的具名常量，避免「拼字符串 / 硬编码其他 key」
+#: 漂移；值与 prompts/analysis.py:286 注册条目逐字一致。
+FACTS_REPAIR_KEY = "facts_json_fix_system"
 
 
 def _build_repair_user_prompt(issues: list, raw: str,
@@ -329,15 +339,24 @@ async def collect_json_response(messages: list, validate_fn=None,
     3. 修复轮失败信息并入最终异常文本，避免「修复失败」与「生成失败」混淆。
     """
     messages = _ensure_user_message(messages)
-    raw = await chat_with_fallback(messages, temperature=temperature,
-                                   json_mode=json_mode, timeout=timeout,
-                                   scene=scene, max_tokens=max_tokens)
+    try:
+        raw = await chat_with_fallback(messages, temperature=temperature,
+                                       json_mode=json_mode, timeout=timeout,
+                                       scene=scene, max_tokens=max_tokens)
+    except Exception:
+        # ✅ R48（2026-10-06 · 运行时指标）：首轮 AI 调用失败/降级 → 记一次场景失败。
+        #    观测指标，不改变「原样 re-raise」的抛错语义。
+        record_ai_failure(scene)
+        raise
     # 修复目标恒定为模型**最初**的输出（见 docstring 修复点 1）
     first_raw = raw
     obj, issues = parse_and_validate(raw, validate_fn)
     if obj is not None and not issues:
         return obj, raw
 
+    # ✅ R48（2026-10-06 · 运行时指标）：首轮输出未过校验、进入修复循环 →
+    #    按 repair_key 维度记一次修复触发。
+    record_repair_triggered(repair_key)
     repair_errors: list[str] = []
     for attempt in range(max_retries):
         repair_msgs = list(messages) + [

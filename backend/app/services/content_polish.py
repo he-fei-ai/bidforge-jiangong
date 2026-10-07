@@ -137,10 +137,16 @@ def _table_ranges(text: str) -> list[tuple[int, int]]:
             if not any(s >= fs and e <= fe for fs, fe in fences)]
 
 
-def _protected_ranges(text: str) -> list[tuple[int, int]]:
-    """全部受保护区间：围栏代码块 + GFM 表格（合并排序、不重叠）。"""
+def _protected_ranges(text: str, *, include_tables: bool = True) -> list[tuple[int, int]]:
+    """全部受保护区间：围栏代码块 + GFM 表格（合并排序、不重叠）。
+
+    ``include_tables=False`` 时只保护围栏代码块 —— 供「编号类审计」使用：
+    代码块（chart-json / mermaid）里的编号是图表数据，正文并未引用；
+    而表格单元格里的编号是交付件本身的内容（编制依据表等），仍需审计。
+    """
     ranges = [(m.start(), m.end()) for m in _FENCE_SPLIT_RE.finditer(text)]
-    ranges.extend(_table_ranges(text))
+    if include_tables:
+        ranges.extend(_table_ranges(text))
     ranges.sort()
     merged: list[tuple[int, int]] = []
     for s, e in ranges:
@@ -212,12 +218,16 @@ def sanitize_ai_content(text: str) -> str:
     return _apply_rules_outside_ranges(text, _protected_ranges(text))
 
 
-def _strip_fences(text: str) -> str:
-    """剔除围栏代码块与表格（其中的英文拼音/注释/专业数据会被误判口语化）。"""
-    if not _FENCE_SPLIT_RE.search(text) and not any(
-        _TABLE_LINE_RE.match(ln) for ln in text.split("\n")):
+def _strip_fences(text: str, *, include_tables: bool = True) -> str:
+    """剔除围栏代码块与表格（其中的英文拼音/注释/专业数据会被误判口语化）。
+
+    ``include_tables=False``：只剔除围栏代码块、保留表格行（编号类审计用）。
+    """
+    has_fence = bool(_FENCE_SPLIT_RE.search(text))
+    has_table = any(_TABLE_LINE_RE.match(ln) for ln in text.split("\n"))
+    if not has_fence and (not include_tables or not has_table):
         return text
-    ranges = _protected_ranges(text)
+    ranges = _protected_ranges(text, include_tables=include_tables)
     out: list[str] = []
     cursor = 0
     for s, e in ranges:
@@ -265,7 +275,19 @@ def quality_issues(text: str) -> dict:
           "abolished_standards": [...]  # 命中的已废止标准编号
         }
     """
+    # ✅ 2026-10-06 修复（正文生成·质量审计口径分叉）：废止标准扫描此前直接
+    #    扫**原文**，而同文件的口语化判据走 _strip_fences —— 两条判据对同一份
+    #    正文的保护范围不一致，违背本模块设计约束第 2 条「跳过围栏内的图表
+    #    代码块」。实测后果：AI 生成的 ```chart-json 对比图（common 形态是
+    #    「规范版本对比」，data 里必然出现被替代的旧编号）与 ~~~mermaid 围栏
+    #    会让章节被误报「引用了已废止标准」，而该编号在正文里根本不存在 ——
+    #    用户按告警逐段排查却找不到，质量面板失去可信度。该告警随 section_done
+    #    与手工保存两条路径下发到前端日志区，是用户可见的假告警。
+    #    现与口语化判据共用 _strip_fences 单一出口；include_tables=False 让
+    #    **表格单元格里的编号仍可审计**（编制依据表引用废止编号是交付件缺陷，
+    #    不能被豁免），只豁免代码块这一种「正文并未引用」的形态。
     return {
         "colloquial_hits": find_colloquial_hits(text),
-        "abolished_standards": find_abolished_codes(text or ""),
+        "abolished_standards": find_abolished_codes(
+            _strip_fences(text or "", include_tables=False)),
     }

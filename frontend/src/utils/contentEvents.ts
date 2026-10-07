@@ -28,6 +28,85 @@ export type StandardReport = {
   stats?: { placeholders?: number; fuzzy_hits?: number; checked_facts?: number };
 };
 
+/**
+ * R49：本章被系统删除/裁剪的单个图表块明细（后端 section_done 实时下发）。
+ *
+ * 后端 `_record_chart_drop` 写入的键名是 `type`（不是 chart_type），reason 是
+ * 封闭枚举：per_section_limit / scheme_type_limit / validation_failed /
+ * missing_prompt / empty_envelope / invalid_json / insert_failed / insert_none。
+ */
+export type ChartDropItem = {
+  type?: string;
+  chart_type?: string;
+  reason?: string;
+};
+
+/**
+ * R49：图表产出闭环口径（后端 section_done 实时下发，与 last_generation_report
+ * 同名同值 —— 断线重挂后与库内真相一致）：
+ * - chart_count        = 最终正文里真实存活的图表块数（"留下的"）
+ * - charts_dropped_count = 被删除/裁剪的图表块数（"被删的"）
+ * 两者相加即 AI 的本节提名量，可区分「本应配图但 AI 零产出」（提示词/模型问题）
+ * 与「产出了但被删」（限流/校验问题）。
+ */
+export type ChartYield = {
+  chart_count: number;
+  charts_dropped_count: number;
+  charts_dropped: ChartDropItem[];
+};
+
+/**
+ * R49：把后端下发的图表产出字段归一为稳定形态（全为 0 / 空数组，绝不返回 undefined）。
+ *
+ * 防御式解析：后端缺键、类型不符、旧版后端未下发时一律回退 0 / []，绝不抛异常
+ * —— 事件循环里任何异常都会中断整个正文生成会话的日志更新。
+ */
+export function normalizeChartYield(raw: unknown): ChartYield {
+  const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const count = Number(obj.chart_count);
+  const droppedCount = Number(obj.charts_dropped_count);
+  const dropped = Array.isArray(obj.charts_dropped)
+    ? (obj.charts_dropped as ChartDropItem[]).filter(
+        (x): x is ChartDropItem => !!x && typeof x === "object",
+      )
+    : [];
+  return {
+    chart_count: Number.isFinite(count) && count > 0 ? Math.floor(count) : 0,
+    charts_dropped_count: Number.isFinite(droppedCount) && droppedCount > 0
+      ? Math.floor(droppedCount)
+      : dropped.length,
+    charts_dropped: dropped,
+  };
+}
+
+/**
+ * R49：后端删图理由（封闭枚举）→ 用户可读中文。
+ *
+ * 说明：这是**展示层映射**，不是判据副本 —— 后端 reason 是稳定的机器标识，
+ * 中文文案归前端所有（与生成标准的 STANDARD_LABELS 同性质）。新增枚举值时
+ * chartDropTexts 会回退显示原始 reason，属 fail-soft 而非静默丢失。
+ */
+export const CHART_DROP_REASON_LABELS: Record<string, string> = {
+  per_section_limit: "本节图表数已达上限（每节 1 个）",
+  scheme_type_limit: "全方案该类型图表数已达上限",
+  validation_failed: "图表语法校验修复失败",
+  missing_prompt: "AI 配图缺少画面描述",
+  empty_envelope: "图表数据为空壳（无有效数值）",
+  invalid_json: "图表 JSON 解析失败",
+  insert_failed: "图表登记写入失败",
+  insert_none: "图表登记写入返回空",
+};
+
+/** R49：把删图明细渲染成 Tooltip 文本（空清单返回空串，调用方据此不渲染提示） */
+export function chartDropTexts(items: ChartDropItem[]): string[] {
+  return items.map((d) => {
+    const t = d.type || d.chart_type || "图表";
+    const reason = d.reason || "";
+    const label = CHART_DROP_REASON_LABELS[reason] || reason || "未知理由";
+    return `${t}：${label}`;
+  });
+}
+
 export type SectionLogItem = {
   section_id: string;
   title: string;
@@ -39,6 +118,12 @@ export type SectionLogItem = {
   continue_failed?: boolean;
   /** ✅ 质量告警（后端 section_done 下发 quality_issues）：本章正文的程序化质检问题 */
   quality_issues?: unknown[];
+  /**
+   * R49：本章图表产出闭环（后端 section_done 实时下发，归一后的稳定形态）。
+   * 日志区据此提示「配图 N 张」/「配图 N 张（已删 M）」，用户生成过程中即可见，
+   * 不必等整批结束翻报告。
+   */
+  chart_yield?: ChartYield;
   /**
    * F-CONTENT-STANDARD(2026-09-26)：本章实际生效的生成标准
    * （section_start / section_done 均下发，用于日志行的模式徽标）。

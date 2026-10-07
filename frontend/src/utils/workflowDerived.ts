@@ -135,6 +135,41 @@ export type UploadFeedback = {
 };
 
 /**
+ * 上传上限提示（可选入参）。
+ *
+ * ✅ 2026-10-05 修复（前后端接口不一致 / 文案漂移）：后端三个上限
+ *   `upload_max_bytes` / `upload_max_total_bytes` / `upload_max_files_per_request`
+ *   均可配置，并经 `GET /api/v1/system/upload-limits` 下发给前端；但本模块的
+ *   拒绝文案此前**硬编码** 30MB / 200MB / 20，与真实生效上限不一致 ——
+ *   管理员把单文件上限改成 100MB 后，被拒绝时的提示仍写"超过 30MB"，
+ *   用户据此调整文件却仍失败。
+ *
+ * 传入后按实际上限渲染；不传（undefined）时回落内置默认值，与历史文案逐字一致，
+ * 保证向后兼容（旧调用方 / 旧单测无需改动）。
+ */
+export type UploadLimitHints = {
+  /** 单文件体积上限（字节），缺省文案 30MB */
+  maxBytes?: number;
+  /** 单次累计体积上限（字节），缺省文案 200MB */
+  maxTotalBytes?: number;
+  /** 单次文件数上限，缺省 20 */
+  maxFiles?: number;
+};
+
+/** 字节上限 → 整数 MB 文案；非法 / 非正数回落默认 MB（向后兼容旧文案）。 */
+function formatMbText(bytes: number | undefined, fallbackMb: number): string {
+  const v = Number(bytes);
+  if (!Number.isFinite(v) || v <= 0) return `${fallbackMb}MB`;
+  return `${Math.round(v / (1024 * 1024))}MB`;
+}
+
+/** 文件数上限 → 正整数；非法 / 非正数回落默认值。 */
+function normalizeFileCount(value: number | undefined, fallback: number): number {
+  const v = Number(value);
+  return Number.isFinite(v) && v > 0 ? Math.round(v) : fallback;
+}
+
+/**
  * 归一化「上传保存」接口的响应，产出用户可读的反馈。
  *
  * 为什么需要它？后端 upload-documents 会分门别类地回报未保存的文件：
@@ -148,29 +183,35 @@ export type UploadFeedback = {
  *   - 入参 null/undefined → savedCount=0，rejected=[]，details=[]
  *   - 数组字段非数组 / 计数缺失 → 按 0 处理，不抛异常
  *   - details 取后端 warnings（逐文件、含文件名），过滤空串
+ *   - limits 缺失 → 文案回落 30MB / 200MB / 20（与历史一致）
  */
 export function summarizeUploadResult(
-  data: UploadResultLike | null | undefined
+  data: UploadResultLike | null | undefined,
+  limits?: UploadLimitHints
 ): UploadFeedback {
   const d = data || {};
   const savedCount = Number(d.saved_count || 0);
   const replaced = Number(d.replaced || 0);
   const n = (v: unknown[] | undefined) => (Array.isArray(v) ? v.length : 0);
+  // ✅ 按后端下发的实际生效上限渲染（缺省回落历史默认值，向后兼容）
+  const maxBytesText = formatMbText(limits?.maxBytes, 30);
+  const maxTotalText = formatMbText(limits?.maxTotalBytes, 200);
+  const maxFilesText = normalizeFileCount(limits?.maxFiles, 20);
 
   const rejected: string[] = [];
   if (n(d.unsupported)) rejected.push(`${n(d.unsupported)} 个格式不支持`);
-  if (n(d.oversize)) rejected.push(`${n(d.oversize)} 个超过 30MB`);
+  if (n(d.oversize)) rejected.push(`${n(d.oversize)} 个超过 ${maxBytesText}`);
   if (n(d.signature_invalid))
     rejected.push(`${n(d.signature_invalid)} 个文件头校验不通过（扩展名与实际内容不符）`);
   if (n(d.empty)) rejected.push(`${n(d.empty)} 个空文件`);
-  if (n(d.too_many)) rejected.push(`${n(d.too_many)} 个超出单次 20 个上限`);
+  if (n(d.too_many)) rejected.push(`${n(d.too_many)} 个超出单次 ${maxFilesText} 个上限`);
   if (d.quota_exceeded) {
     // ✅ 后端 quota_files 给出被累计体积上限拒绝的具体文件数（2026-09-21 起
     //    不再混进 oversize），有则带上数量，让用户知道"少了几个"。
     const qn = n(d.quota_files);
     rejected.push(qn
-      ? `累计体积超过 200MB 上限（${qn} 个文件未保存）`
-      : "累计体积超过 200MB 上限");
+      ? `累计体积超过 ${maxTotalText} 上限（${qn} 个文件未保存）`
+      : `累计体积超过 ${maxTotalText} 上限`);
   }
   const details = Array.isArray(d.warnings)
     ? d.warnings.filter((w) => !!w).map(String)
@@ -203,11 +244,13 @@ export type UploadNotice = {
  *   - savedCount === 0 → tone="error"，文案为「没有文件被保存：<原因>」
  *   - savedCount > 0   → tone="success"，文案含成功数/替换数/拒绝摘要
  *   - 入参 null/脏数据 → 走 summarizeUploadResult 的防御分支，不抛异常
+ *   - limits 透传给 summarizeUploadResult（按实际生效上限渲染文案）
  */
 export function buildUploadNotice(
-  data: UploadResultLike | null | undefined
+  data: UploadResultLike | null | undefined,
+  limits?: UploadLimitHints
 ): UploadNotice {
-  const fb = summarizeUploadResult(data);
+  const fb = summarizeUploadResult(data, limits);
   if (fb.savedCount === 0) {
     return {
       tone: "error",

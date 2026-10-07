@@ -372,7 +372,8 @@ class TestStandardsRegistryDecorationCoverage:
             assert code in current
 
     def test_registry_version_bumped(self):
-        assert sr.STANDARD_DB_VERSION == "2026.10.2"
+        # ✅ 2026-10-07（R51）：openstd 实证补入装饰装修材料限量 4 条 + 废止 2 条。
+        assert sr.STANDARD_DB_VERSION == "2026.10.7"
 
     def test_get_standards_text_mentions_decoration_standards(self):
         """注入正文的编制依据清单必须包含补入的 3 个规范。"""

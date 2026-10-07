@@ -4,7 +4,7 @@ import {
   Radio, Checkbox,
   Empty, Tag, Modal, Form, Select, Typography, Descriptions,
   Collapse, Upload, Divider, Tooltip, List, Switch, Alert, Spin, Table,
-  Row, Col, Drawer, Popover,
+  Row, Col, Drawer, Popover, Pagination,
 } from "antd";
 import {
   PlayCircleOutlined, PauseOutlined, StopOutlined,
@@ -18,6 +18,7 @@ import {
   MinusCircleOutlined, FileSearchOutlined, SyncOutlined,
   ClockCircleOutlined, HourglassOutlined, ThunderboltOutlined,
   PauseCircleOutlined,
+  BarChartOutlined,
 } from "@ant-design/icons";
 import { useParams } from "react-router-dom";
 import {
@@ -47,7 +48,14 @@ import {
   selectPlacedExportCharts, findDefaultExportPreset, canShrinkSection,
   type WorkflowTabKey,
 } from "../utils/workflowDerived";
-import { UPLOAD_FILE_ACCEPT, splitByUploadTotalQuota } from "../utils/uploadAccept";
+import {
+  UPLOAD_FILE_ACCEPT, splitByUploadTotalQuota, splitByUploadFileCount,
+  partitionUploadFiles, MAX_UPLOAD_BYTES, MAX_UPLOAD_FILES_FALLBACK,
+  resolveMaxUploadBytes, formatUploadLimitMb,
+} from "../utils/uploadAccept";
+// ✅ 2026-10-05（D5 · 前端常量收敛）：目录层级上限统一取 utils/outlineConstants，
+//    与目录库编辑弹窗共用同一事实源（此前两处各自内联，易漂移）。
+import { MAX_OUTLINE_DEPTH } from "../utils/outlineConstants";
 // ✅ 2026-09-26 解析可信度提示：把后端的「文档被截断 / 预算耗尽被跳过 / 编码降级」
 //    翻译成用户可见的告警。集中在 utils 的纯函数里，避免页面各处拼文案而漂移。
 import { sourceNotice, previewNotices } from "../utils/parseSourceNotice";
@@ -55,7 +63,7 @@ import ContentGenerationTab from "../components/ContentGenerationTab";
 import {
   upsertSectionLog, finalizeRunningLogsIn, mergeFailedSectionsInto,
   contentResultFailedSections, contentResultSummary,
-  normalizeQualityIssues,
+  normalizeQualityIssues, normalizeChartYield, chartDropTexts,
   type SectionLogItem, type GenStats,
 } from "../utils/contentEvents";
 // F-CONTENT-STANDARD(2026-09-26): 生成标准纯函数层（请求体映射 / 标签 / 报告判定）
@@ -72,6 +80,8 @@ import { useAntdMessageHub } from "../utils/activityCenter";
 import { createSseBatcher } from "../utils/sseBatcher";
 import {
   chartRenderStatsParts,
+  // ✅ D1 加固（2026-10-06）：跨章借图告警文案（此前跨章借图零信号）
+  fallbackBorrowWarning,
   fixStatsParts,
   parseChartRenderStats,
   parseFixStats,
@@ -116,9 +126,6 @@ const ElapsedTimer = memo(function ElapsedTimer({ startTime }: { startTime: numb
 // 与后端 renumber_outline / HeadingNumberingGeneratorV2 保持一致，
 // 保证目录树与正文/导出编号始终同步。展示时套用、存储仍保留裸标题。
 // ============================================================
-/** 目录系统硬性上限：三级（与后端 outline_utils.MAX_OUTLINE_DEPTH 对齐） */
-const MAX_OUTLINE_DEPTH = 3;
-
 const CN_NUMBERS: string[] = [
   "", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
   "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
@@ -561,19 +568,36 @@ export function isCurrentSchemeRequest(
 export function buildBatchResolveResultCopy(result: any | null | undefined): {
   tone: "success" | "warning";
   text: string;
+  /** ✅ 2026-10-06：被安全闸门拦下的事实**名称**列表。
+   *  后端 `batch-resolve` 一直逐条回传 `skipped_safety[]`，但前端只读计数
+   *  `skipped_safety_count` —— 用户看到「5 项未放行」却不知道是哪 5 项，
+   *  只能自己逐条翻找。返回名称列表供结果提示直接列出（前 6 条 + 省略号）。 */
+  blockedNames: string[];
 } {
   const changed = Number(result?.changed) || 0;
   const skipped = Number(result?.skipped) || 0;
   const safety = Number(result?.skipped_safety_count) || 0;
+  const blockedNames: string[] = Array.isArray(result?.skipped_safety)
+    ? result.skipped_safety
+      .map((it: any) => String(it?.name || it?.title || "").trim())
+      .filter(Boolean)
+    : [];
   if (safety > 0) {
+    const shown = blockedNames.slice(0, 6);
+    const detail = shown.length
+      ? `（${shown.join("、")}${blockedNames.length > shown.length
+        ? ` 等 ${blockedNames.length} 条` : ""}）`
+      : "";
     return {
       tone: "warning",
-      text: `已确认 ${changed} 项；${safety} 项模拟值或安全关键事实未放行，请逐条核对裁决`,
+      text: `已确认 ${changed} 项；${safety} 项模拟值或安全关键事实未放行${detail}，请逐条核对裁决`,
+      blockedNames,
     };
   }
   return {
     tone: "success",
     text: `已确认 ${changed} 项${skipped ? `，${skipped} 项原本已确认` : ""}，可注入事实已就绪`,
+    blockedNames: [],
   };
 }
 
@@ -677,6 +701,219 @@ export function FactsExtractProgressCard({ progress, progressMsg, logs }: {
   );
 }
 
+/**
+ * 全局事实 · AI 调整面板（R45 · D5 · 组件级可测）
+ *
+ * 把「自然语言描述 → 预览待确认计划 → 二次确认 → 一次性应用」这条状态机
+ * 从页面里抽成独立子组件，对齐 FactsExtractProgressCard 的抽法。
+ *
+ * 设计要点
+ * --------
+ * 1. **纯接线、不持有后端契约**：预览/应用分别注入 `preview` / `apply`
+ *    两个异步函数，组件只负责收集输入、渲染计划、发起二次确认。
+ *    页面保留「请求 payload 怎么拼」的单一出口，避免两处漂移。
+ * 2. **切方案即丢弃**：方案切换时清空计划与弹层 —— 否则方案 A 的计划
+ *    会被应用到方案 B（页面此前的 `setFactsAdjustPlan(null)` 已在此归位）。
+ * 3. **空输入不收**：OK 按钮与 Enter 提交都做 `trim()` 判空，
+ *    空白指令不下发（后端会当「无要求」返回空计划，浪费一次 AI 调用）。
+ * 4. **计划最多列 20 条**：与确认弹窗同口径，超长时截断展示。
+ *
+ * ⚠️ 历史（R45 · G4）：调整要求原先用 `window.prompt` 收集 —— 阻塞式原生
+ * 对话框会卡住整个渲染线程、无法排版说明，且在部分容器/隐私模式下被直接
+ * 禁用（用户点了按钮「什么也没发生」）。全仓其余 57 处交互均走 antd
+ * `modal.confirm`，本组件即那次收口的形态，现进一步抽成可测组件。
+ */
+export interface FactsAdjustOperation {
+  op: string;
+  fact_id?: string;
+  name?: string;
+  value?: string;
+  // 后端回传字段是开放的（不同 op 带不同载荷），保留索引签名以兼容
+  // api/index.ts 里 factsApi.adjust 的 Array<Record<string, unknown>> 契约。
+  [key: string]: unknown;
+}
+
+export interface FactsAdjustPlanShape {
+  summary?: string;
+  operations: FactsAdjustOperation[];
+}
+
+/** 确认弹窗与「应用」按钮展示的操作明细上限（两处同口径） */
+export const FACTS_ADJUST_PREVIEW_LIMIT = 20;
+
+/** 操作明细的单行渲染：`op · 名称 值` */
+export function formatFactsAdjustOperation(op: FactsAdjustOperation, i: number): string {
+  const label = op.name || op.fact_id || `第 ${i + 1} 条`;
+  const value = op.value ? ` ${op.value}` : "";
+  return `${op.op} · ${label}${value}`;
+}
+
+export function FactsAdjustPanel({
+  schemeId,
+  disabled,
+  busy,
+  preview,
+  apply,
+  onError,
+  confirmDialog = Modal.confirm,
+}: {
+  /** 当前方案 id；为空时面板完全禁用（避免向空方案发起请求） */
+  schemeId?: string;
+  /** 外部置灰（如正在提取事实 / 上传资料 / 方案尚无事实） */
+  disabled?: boolean;
+  /** 外部忙碌（与自身 adjusting 合并，防双击重复提交） */
+  busy?: boolean;
+  /** 预览：只生成待确认计划，不落库（后端 apply=false） */
+  preview: (instruction: string) => Promise<Partial<FactsAdjustPlanShape>>;
+  /** 应用：把用户刚确认的计划一次性写入（后端 apply=true + operations） */
+  apply: (operations: FactsAdjustOperation[], instruction: string) => Promise<void>;
+  /** 业务失败回调（透传后端 detail），缺省时静默降级 */
+  onError?: (fallback: string, e: unknown) => void;
+  /**
+   * 确认弹窗工厂。默认用 antd 静态 `Modal.confirm`；
+   * 页面可注入 `App.useApp().modal` 以继承 ConfigProvider 主题。
+   * ⚠️ 注入是为了组件级可测 —— 静态方法在测试里也可用，但注入后
+   * 用例可以用 mock 直接断言「确认了什么、调用了什么」，无需触碰 DOM。
+   */
+  confirmDialog?: (
+    options: Parameters<typeof Modal.confirm>[0],
+  ) => void;
+}) {
+  const [ask, setAsk] = useState(false);
+  const [text, setText] = useState("");
+  const [adjusting, setAdjusting] = useState(false);
+  const [plan, setPlan] = useState<FactsAdjustPlanShape | null>(null);
+  // 请求期间若已切换方案，丢弃结果（防止旧方案的计划落到新方案上）
+  const schemeRef = useRef(schemeId);
+  schemeRef.current = schemeId;
+
+  // ⚠️ 切换方案 → 丢弃旧方案的全部中间态。与页面此前的
+  // setFactsAdjustPlan(null) 同口径，只是归属从页面挪到了组件内。
+  useEffect(() => {
+    setPlan(null);
+    setAsk(false);
+    setAdjusting(false);
+    setText("");
+  }, [schemeId]);
+
+  const busyNow = Boolean(busy) || adjusting;
+  const ready = Boolean(schemeId) && !disabled && !busyNow;
+  const operations = Array.isArray(plan?.operations) ? plan.operations : [];
+
+  const submitError = (fallback: string, e: unknown) => {
+    onError?.(fallback, e);
+  };
+
+  const confirmAsk = async () => {
+    const instruction = text.trim();
+    setAsk(false);
+    if (!schemeId || !instruction) return;   // 空指令不下发
+    setAdjusting(true);
+    try {
+      const data = await preview(instruction);
+      if (schemeRef.current !== schemeId) return;   // 已切方案 → 丢弃
+      setPlan({
+        summary: data.summary,
+        operations: Array.isArray(data.operations) ? data.operations : [],
+      });
+    } catch (e) {
+      submitError("生成调整计划失败", e);
+    } finally {
+      setAdjusting(false);
+    }
+  };
+
+  const requestApply = () => {
+    if (!ready || operations.length === 0) return;
+    confirmDialog({
+      title: "确认应用事实调整",
+      content: (
+        <div>
+          <div>{plan?.summary || `将执行 ${operations.length} 项调整`}</div>
+          <ul>
+            {operations.slice(0, FACTS_ADJUST_PREVIEW_LIMIT).map((op, i) => (
+              <li key={`${op.op}-${op.fact_id || i}`}>
+                {formatFactsAdjustOperation(op, i)}
+              </li>
+            ))}
+          </ul>
+          {operations.length > FACTS_ADJUST_PREVIEW_LIMIT && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              其余 {operations.length - FACTS_ADJUST_PREVIEW_LIMIT} 项未列出
+            </Text>
+          )}
+        </div>
+      ),
+      okText: "确认应用",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          await apply(
+            operations,
+            plan?.summary || `按已确认计划调整（${operations.length} 项）`,
+          );
+          setPlan(null);
+        } catch (e) {
+          submitError("应用调整失败", e);
+          throw e;   // 抛出 → 弹窗保持打开，用户可重试或取消
+        }
+      },
+    });
+  };
+
+  return (
+    <>
+      <Button
+        icon={<ThunderboltOutlined />}
+        onClick={() => { setText(""); setAsk(true); }}
+        loading={adjusting}
+        disabled={!ready}
+      >
+        AI 调整事实
+      </Button>
+      {operations.length > 0 && (
+        <Button danger onClick={requestApply} disabled={!ready}>
+          应用调整计划{operations.length > FACTS_ADJUST_PREVIEW_LIMIT
+            ? `（${operations.length} 项）` : ""}
+        </Button>
+      )}
+      <Modal
+        title="AI 调整事实"
+        open={ask}
+        okText="生成调整计划"
+        cancelText="取消"
+        onOk={confirmAsk}
+        onCancel={() => setAsk(false)}
+        okButtonProps={{ disabled: !text.trim() || busyNow, loading: adjusting }}
+        maskClosable={false}
+        destroyOnClose
+      >
+        <div style={{ marginBottom: 10, color: "#666", lineHeight: 1.7 }}>
+          用一句自然语言描述调整要求。仅生成<b>待确认</b>的调整计划，
+          不会直接修改事实；确认后再一次性应用。
+        </div>
+        <Input.TextArea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="例如：新增一条「项目经理=张伟」；把开挖深度统一改为 8.5m"
+          rows={4}
+          maxLength={500}
+          showCount
+          autoFocus
+          onPressEnter={(e) => {
+            // Shift+Enter 换行；单独 Enter 才提交（与输入习惯一致）
+            if (!e.shiftKey && text.trim()) {
+              e.preventDefault();
+              confirmAsk();
+            }
+          }}
+        />
+      </Modal>
+    </>
+  );
+}
+
 /** 分段失败告警：部分失败 warning / 全部失败 error，明细最多 6 条 */
 export function FactsSegmentFailuresAlert({ stats }: {
   stats: { ok?: number; failed?: number; total?: number; failed_details?: Array<{ index?: number; heading?: string; reason?: string }> } | null;
@@ -745,6 +982,117 @@ export function buildFactsSummary(stats: any): any {
     total: Number(stats.total) || 0,
     has_warnings: simulated > 0 || unresolved > 0 || conflicts > 0 || stale > 0,
   };
+}
+
+/**
+ * 逐章事实统计（消费后端 `stats.by_chapter`）。
+ *
+ * ✅ 2026-10-06 新增消费：后端每次 `GET /global-facts` 都下发
+ * `stats.by_chapter`（九章各自的事实条数 + 字段覆盖率 + 缺失字段 +
+ * by_fact_attr / by_source_kind 分布），此前前端**整体丢弃**。
+ * 这类信息是「哪些章节事实不足」的**唯一**量化依据 —— 用户只能靠
+ * `FactsDiagnosticsPanel` 的字段覆盖率（口径不同：那个查章节必填字段，
+ * 这个查实际落了多少条事实），无法回答「我这套方案的九章事实均衡吗」。
+ *
+ * 返回按 `order` 升序的渲染就绪列表；`count === 0` 的章节也保留
+ * （「这一章一条事实都没有」本身就是要展示的结论）。
+ */
+export type FactChapterStatRow = {
+  order: number;
+  key: string;
+  title: string;
+  count: number;
+  coverage: number;
+  missingCount: number;
+  missingFields: string[];
+  shared: number;
+};
+
+export function buildFactChapterStats(stats: any, titles?: Record<string, string>): FactChapterStatRow[] {
+  const rows = Array.isArray(stats?.by_chapter) ? stats.by_chapter : [];
+  return rows
+    .map((c: any) => {
+      const key = String(c?.key || "");
+      const missing = Array.isArray(c?.missing_fields) ? c.missing_fields : [];
+      return {
+        order: Number(c?.order) || 0,
+        key,
+        title: String(c?.title || "") || factChapterTitle(key, titles),
+        count: Number(c?.count) || 0,
+        coverage: Number(c?.coverage) || 0,
+        missingCount: missing.length,
+        missingFields: missing.map((f: unknown) => String(f)),
+        shared: Number((c as any)?.shared_count) || 0,
+      };
+    })
+    .sort((a: FactChapterStatRow, b: FactChapterStatRow) => a.order - b.order);
+}
+
+/** 分页参数归一（消费后端 `pagination`）。total_groups 为 0 时不渲染分页控件。 */
+export function buildFactsPagination(pagination: any, pageSize: number): {
+  page: number; pageSize: number; total: number; totalPages: number; show: boolean;
+} {
+  const total = Number(pagination?.total_groups) || 0;
+  const limit = Math.max(1, Number(pageSize) || 20);
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const page = Math.min(Math.max(1, (Number(pagination?.offset) || 0) / limit + 1), totalPages);
+  return { page, pageSize: limit, total, totalPages, show: total > limit };
+}
+
+/** 每页分组数（可由设置覆盖；后端 limit=0 表示不分页） */
+export const FACTS_PAGE_SIZE = 20;
+
+/**
+ * 九章事实分布（消费 `stats.by_chapter`）—— 只读面板。
+ *
+ * ✅ 2026-10-06 新增：后端每次列表请求都下发 by_chapter，此前整体丢弃。
+ * 与 :func:`FactsDiagnosticsPanel` 的区别（两者不可互相替代）：
+ *   · DiagnosticsPanel 查「章节**必填字段**覆盖率」（该抽到什么字段）
+ *   · 本面板查「章节**实际落了多少条事实**」（抽得够不够、均衡吗）
+ */
+export function FactsChapterCoveragePanel({ stats, titles }: {
+  stats: any | null; titles?: Record<string, string>;
+}) {
+  const rows = buildFactChapterStats(stats, titles);
+  if (rows.length === 0) {
+    return (
+      <Card size="small" style={{ marginBottom: 8 }}
+        title={<span><BarChartOutlined /> 九章事实分布</span>}>
+        <Text type="secondary">暂无章节统计</Text>
+      </Card>
+    );
+  }
+  const totalFacts = rows.reduce((s, r) => s + r.count, 0);
+  return (
+    <Card size="small" style={{ marginBottom: 8 }}
+      title={<span><BarChartOutlined /> 九章事实分布（共 {totalFacts} 条）</span>}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        {rows.map((r) => (
+          <div key={r.key || r.order}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+              <span>{r.order}. {r.title || r.key}</span>
+              <span style={{ color: r.count === 0 ? "#ff4d4f" : "#888" }}>
+                {r.count === 0 ? "无事实" : `${r.count} 条`}
+                {r.shared > 0 ? ` · 共性 ${r.shared}` : ""}
+              </span>
+            </div>
+            <Progress
+              percent={totalFacts ? Math.round((r.count / totalFacts) * 100) : 0}
+              size="small"
+              status={r.count === 0 ? "exception" : "normal"}
+            />
+            {r.missingCount > 0 && (
+              <div style={{ fontSize: 11, color: "#999" }}>
+                缺字段（{r.missingCount}）：
+                {r.missingFields.slice(0, 4).join("、")}
+                {r.missingFields.length > 4 ? "…" : ""}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
 }
 
 /**
@@ -1582,6 +1930,28 @@ const SectionLogList = memo(function SectionLogList({ items }: { items: SectionL
                   </Tag>
                 </Tooltip>
               )}
+              {/* ✅ R49：本章图表产出闭环（后端 section_done 实时下发）。
+                  「配图 N」回答本章配了几张图；出现删图时改为「配图 N（已删 M）」并挂
+                  Tooltip 列出每张图的删除理由 —— 用户在生成过程中即可解释
+                  「为什么正文里少了几张图」，不必等整批结束翻报告或去 grep 后端日志。
+                  零图表且无删图的普通章节不占位（那是最常见的正常情况）。 */}
+              {item.status === "success" && item.chart_yield &&
+                (item.chart_yield.chart_count > 0 || item.chart_yield.charts_dropped_count > 0) &&
+                (() => {
+                  const cy = item.chart_yield!;
+                  const texts = chartDropTexts(cy.charts_dropped);
+                  return texts.length > 0 ? (
+                    <Tooltip title={texts.join("；")}>
+                      <Tag color="warning" style={{ margin: 0, fontSize: 11, flexShrink: 0 }}>
+                        配图 {cy.chart_count}（已删 {cy.charts_dropped_count}）
+                      </Tag>
+                    </Tooltip>
+                  ) : (
+                    <Tag color="blue" style={{ margin: 0, fontSize: 11, flexShrink: 0 }}>
+                      配图 {cy.chart_count}
+                    </Tag>
+                  );
+                })()}
               {/* ✅ F-CONTENT-STANDARD(2026-09-26)：模式徽标 + 校验告警。
                   模式徽标回答「这章是按哪种标准写的」，告警 Popover 回答
                   「哪里不符合、怎么改」—— 两问缺一，用户就只能靠通读正文自查。 */}
@@ -2259,6 +2629,52 @@ function describeExportIssue(iss: any): string {
   return "—";
 }
 
+/**
+ * 导出阶段标签（D2 加固 · 2026-10-06）。
+ *
+ * 独立成模块级常量（而非内联三元）：既让 `exportStage` 有真实消费点
+ * （避免「声明了 state 却没人读」的死状态债），也便于单测直接断言
+ * 「阶段 → 用户可读文案 + 序号」的映射不会漂移。
+ */
+export const EXPORT_STAGE_LABEL: Record<"idle" | "charts" | "docx" | "pdf", string> = {
+  idle: "空闲",
+  charts: "渲染图表",
+  docx: "生成文档",
+  pdf: "生成 PDF",
+};
+
+/** 阶段在总流程中的序号（1 起，idle 不参与）。 */
+export const EXPORT_STAGE_ORDER: Record<string, number> = { charts: 1, docx: 2, pdf: 3 };
+
+/** 导出配置深合并（2026-10-06 · P0「折叠面板配置被静默丢弃」修复的配套纯函数）。
+ *
+ * `validateFields()` 只返回**已挂载**表单项的值，而导出配置表单的「封面与
+ * 页面」面板默认折叠（defaultActiveKey=["basic","body","headings"]），其中
+ * 12 项 —— `margins`(4) / `cover_info`(4) / `scheme_forms`(4)，即**页边距、
+ * 封面项目信息表、专项施工方案四张法定前置表单**—— 未挂载即不进返回值，
+ * 后端静默回落到自己的默认值（"界面拨了开关、导出毫无变化"）。
+ *
+ * 本函数把整份 form store（`getFieldsValue(true)`，antd `preserve` 默认 true
+ * 保证折叠不丢值）与校验结果深合并：**只让 `validated` 覆盖同名叶子值**，
+ * 既保留 `validateFields` 的校验语义，又不丢折叠面板里的配置。
+ *
+ * 独立成模块级纯函数（而非内联在 handleExport）便于单测直接断言嵌套语义。
+ */
+export function deepMergeExportConfig(store: any, validated: any): any {
+  const base = store && typeof store === "object" ? store : {};
+  const patch = validated && typeof validated === "object" ? validated : {};
+  const out: any = Array.isArray(base) ? [...base] : { ...base };
+  for (const key of Object.keys(patch)) {
+    const pv = patch[key];
+    if (pv && typeof pv === "object" && !Array.isArray(pv)) {
+      out[key] = deepMergeExportConfig(out[key], pv);
+    } else if (pv !== undefined) {
+      out[key] = pv;
+    }
+  }
+  return out;
+}
+
 /** 后台任务类型中文标签（断线重挂接提示用） */
 const TASK_TYPE_LABEL: Record<string, string> = {
   outline_generation: "目录生成",
@@ -2414,9 +2830,15 @@ const FACT_CATEGORY_OPTIONS: { value: string; label: string }[] = [
   { value: "other", label: "其他事实" },
 ];
 
-/** ✅ 2026-09-24：九大章节中文名（建办质〔2018〕31号）—— 与后端 category-map
- * 端点返回一致；前端以此给每条事实展示「章节徽标」，并支持按章节筛选。
- * 仅在 /categories 拉取的本地回退：后端 chapters 数据仍是权威来源。 */
+/** ✅ 2026-09-24：九大章节中文名（建办质〔2018〕31号）。
+ *
+ * ✅ 2026-10-06 降级为**离线兜底**：权威来源是 `GET /global-facts/category-map`
+ * （后端 `facts_classification.category_map_payload()`，源自
+ * `scheme_classification.NINE_CHAPTERS`）。此前本表是唯一来源 ——
+ * 也就是后端增删章节后前端会静默显示旧标题。后端端点虽早已存在，
+ * 前端却从未调用（`factsApi.categoryMap` 只被自己的单测引用）。
+ * 现由 `loadFactCategoryMap` 在运行时覆盖；本表仅在端点不可用时兜底。
+ * parity 护栏：backend/tests/test_global_facts_closeout_20261006.py。 */
 export const FACT_CHAPTER_TITLES: Record<string, string> = {
   overview: "工程概况",
   basis: "编制依据",
@@ -2429,9 +2851,51 @@ export const FACT_CHAPTER_TITLES: Record<string, string> = {
   calc_drawings: "计算书及相关施工图纸",
 };
 
-/** 由后端事实条目的 chapter 键取中文标题；空值/未识别的键返回空串（不渲染徽标） */
-export function factChapterTitle(chapter?: string | null): string {
-  return (chapter && FACT_CHAPTER_TITLES[chapter]) || "";
+/** ✅ 2026-10-06：事实属性中文名。权威来源同为 /category-map 的 fact_attr_titles；
+ *  下方 FALLBACK_FACT_ATTR_TITLES 仅在端点不可用时兜底（此前是 4 个内联三元）。 */
+export const FALLBACK_FACT_ATTR_TITLES: Record<string, string> = {
+  quantitative: "定量事实",
+  qualitative: "定性事实",
+  relation: "关系事实",
+  norm: "规范事实",
+};
+
+/** ✅ 2026-10-06：数据来源类型中文名。此前后端逐条下发 source_kind、
+ *  统计里也有 by_source_kind，但**界面零展示** —— 用户无法分辨一条事实
+ *  来自招标文件 / 图纸 / 现场勘察 / 总体方案 / 人工手册，而这正是判断
+ *  「AI 编造 vs 资料原文」的关键依据。 */
+export const FALLBACK_SOURCE_KIND_TITLES: Record<string, string> = {
+  bid_doc: "项目文件解析提取",
+  drawing: "施工图设计文件提取",
+  survey: "勘察报告提取",
+  overall_plan: "施工组织设计提取",
+  manual: "用户补充录入",
+};
+
+/** 由后端事实条目的 chapter 键取中文标题；空值/未识别的键返回空串（不渲染徽标）。
+ *  titles 缺省时用离线兜底表；运行时由 /category-map 覆盖。 */
+export function factChapterTitle(chapter?: string | null, titles?: Record<string, string>): string {
+  const table = titles && Object.keys(titles).length ? titles : FACT_CHAPTER_TITLES;
+  return (chapter && table[chapter]) || "";
+}
+
+/** 事实属性键 → 中文名。
+ *
+ * ✅ 2026-10-06 未识别键**返回空串**（与 factChapterTitle 同口径）。
+ * 最初实现回落原键（便于排障），实测会在条目卡上渲染出「🗂 nope」这类噪声 ——
+ * 三套枚举里只有属性/来源会这样显示，行为不一致反而更难判断是数据问题还是
+ * 界面问题。统一为「不渲染」后，未识别值只会在原始 JSON 里出现。 */
+export function factAttrTitle(attr?: string | null, titles?: Record<string, string>): string {
+  if (!attr) return "";
+  const table = titles && Object.keys(titles).length ? titles : FALLBACK_FACT_ATTR_TITLES;
+  return table[attr] || "";
+}
+
+/** 数据来源类型键 → 中文名；未识别键同 factChapterTitle 返回空串。 */
+export function factSourceKindTitle(kind?: string | null, titles?: Record<string, string>): string {
+  if (!kind) return "";
+  const table = titles && Object.keys(titles).length ? titles : FALLBACK_SOURCE_KIND_TITLES;
+  return table[kind] || "";
 }
 
 // ============================================================
@@ -2643,6 +3107,11 @@ export const FactsGroupList = memo(function FactsGroupList({
   onResolveItem,
   onResolveConflict,
   onAckStaleOne,
+  // ✅ 2026-10-06：三套枚举的可选注入（来自 /global-facts/category-map）。
+  //    设为可选以兼容既有渲染点与测试替身；缺省时各标题函数用本地兜底表。
+  chapterTitles,
+  factAttrTitles,
+  sourceKindTitles,
 }: {
   groups: any[];
   filter: string;
@@ -2652,6 +3121,9 @@ export const FactsGroupList = memo(function FactsGroupList({
   onResolveItem: (item: any) => void;
   onResolveConflict: (item: any, value: string) => void;
   onAckStaleOne?: (itemId: string, title?: string) => void;
+  chapterTitles?: Record<string, string>;
+  factAttrTitles?: Record<string, string>;
+  sourceKindTitles?: Record<string, string>;
 }) {
   // ✅ 性能优化：按输入记忆化过滤结果（原实现每次渲染无条件重算）
   const visible = useMemo(() => applyFactsFilter(groups, filter), [groups, filter]);
@@ -2753,10 +3225,10 @@ export const FactsGroupList = memo(function FactsGroupList({
                                 <Tag color="cyan" style={{ margin: 0 }}>项目共享</Tag>
                               </Tooltip>
                             )}
-                            {factChapterTitle(it.chapter) && (
-                              <Tooltip title={`九大章节归属：${factChapterTitle(it.chapter)}`}>
+                            {factChapterTitle(it.chapter, chapterTitles) && (
+                              <Tooltip title={`九大章节归属：${factChapterTitle(it.chapter, chapterTitles)}`}>
                                 <Tag color="geekblue" style={{ margin: 0 }}>
-                                  📖 {factChapterTitle(it.chapter)}
+                                  📖 {factChapterTitle(it.chapter, chapterTitles)}
                                 </Tag>
                               </Tooltip>
                             )}
@@ -2767,13 +3239,22 @@ export const FactsGroupList = memo(function FactsGroupList({
                                 </Tag>
                               </Tooltip>
                             )}
-                            {it.fact_attr && (
+                            {factAttrTitle(it.fact_attr, factAttrTitles) && (
                               <span style={{ fontSize: 11, color: "#888" }}>
-                                {it.fact_attr === "quantitative" && "定量"}
-                                {it.fact_attr === "qualitative" && "定性"}
-                                {it.fact_attr === "relation" && "关系"}
-                                {it.fact_attr === "norm" && "规范"}
+                                {factAttrTitle(it.fact_attr, factAttrTitles)}
                               </span>
+                            )}
+                            {/* ✅ 2026-10-06 新增展示：数据来源类型。
+                                此前后端逐条下发 source_kind、统计里也有
+                                by_source_kind，但界面零展示 —— 用户无法分辨
+                                一条事实来自项目资料 / 图纸 / 现场勘察 / 总体方案 /
+                                人工手册，而这正是判断「资料原文 vs AI 编造」的关键依据。 */}
+                            {factSourceKindTitle(it.source_kind, sourceKindTitles) && (
+                              <Tooltip title={`数据来源：${factSourceKindTitle(it.source_kind, sourceKindTitles)}`}>
+                                <Tag color="default" style={{ margin: 0, fontSize: 11 }}>
+                                  🗂 {factSourceKindTitle(it.source_kind, sourceKindTitles)}
+                                </Tag>
+                              </Tooltip>
                             )}
                             {it.is_stale && (
                               <Tooltip title="来源资料已重新解析或删除，本条旧事实已停止注入正文与导出；点击可确认「该值仍有效」并解除标记">
@@ -2996,6 +3477,15 @@ export default function SchemeWorkbenchPage() {
   const [factsCrossConflicts, setFactsCrossConflicts] = useState<any[]>([]);
   // ✅ 事实分类白名单：初始为本地 FACT_CATEGORY_OPTIONS，挂载后由 GET /global-facts/categories 覆盖
   const [factCategoryOptions, setFactCategoryOptions] = useState<{ value: string; label: string }[]>(FACT_CATEGORY_OPTIONS);
+  // ✅ 2026-10-06：九大章节标题 / 事实属性名 / 来源类型名 —— 权威来源是
+  //    GET /global-facts/category-map（此前该端点从未被调用，三套枚举各自
+  //    硬编码或干脆不展示）。初值为本地兜底表，拉取成功后覆盖。
+  const [factChapterTitles, setFactChapterTitles] = useState<Record<string, string>>(FACT_CHAPTER_TITLES);
+  const [factAttrTitles, setFactAttrTitles] = useState<Record<string, string>>(FALLBACK_FACT_ATTR_TITLES);
+  const [factSourceKindTitles, setFactSourceKindTitles] = useState<Record<string, string>>(FALLBACK_SOURCE_KIND_TITLES);
+  // ✅ 2026-10-06：分页状态（消费后端 pagination；此前从不下发 limit/offset）
+  const [factsPage, setFactsPage] = useState(1);
+  const [factsPagination, setFactsPagination] = useState<any>(null);
   // ✅ 左侧分类面板（2026-09-23）：全局事实 Tab 选中分类（悬空时由
   //    resolveSelectedFactCategory 回退）+ 项目资料卡片折叠态（默认收起）
   const [selectedFactCategory, setSelectedFactCategory] = useState<string>("");
@@ -3004,9 +3494,8 @@ export default function SchemeWorkbenchPage() {
   const [factsChapterReport, setFactsChapterReport] = useState<any>(null);
   const [factsDangerReport, setFactsDangerReport] = useState<any>(null);
   const [factsDiagnosticsLoading, setFactsDiagnosticsLoading] = useState(false);
-  // 自然语言调整：先预览操作计划，用户二次确认后才 apply=true。
-  const [factsAdjusting, setFactsAdjusting] = useState(false);
-  const [factsAdjustPlan, setFactsAdjustPlan] = useState<any>(null);
+  // ✅ R45 · D5：自然语言调整（预览 → 二次确认 → 应用）的状态机已抽到
+  // 模块级 FactsAdjustPanel，页面上不再持有这组瞬态。
   // 分类聚合：左侧分类面板数据源（label 取分类白名单中文名，缺失回退原文）
   const factCategoryEntries = useMemo(
     () => buildFactsCategoryEntries(
@@ -3026,6 +3515,12 @@ export default function SchemeWorkbenchPage() {
 
   const [exportForm] = Form.useForm();
   const [exporting, setExporting] = useState(false);
+  // ✅ D2 加固（2026-10-06）：导出阶段枚举 + 真实进度百分比。
+  //    旧实现只有一个文本 phase 字符串，文档生成/转 PDF 阶段
+  //    （真正耗时数十秒）只有一句静态文字，用户无从判断是否卡死。
+  //    现在由 stage + pct 驱动真实进度条（各阶段权重加权）。
+  const [exportStage, setExportStage] = useState<"idle" | "charts" | "docx" | "pdf">("idle");
+  const [exportPct, setExportPct] = useState(0);
   // ✅ 导出预检独立 loading（旧实现复用 exporting，点预检不显示加载态、还会误亮导出按钮）
   const [checkingExport, setCheckingExport] = useState(false);
   const [exportIssues, setExportIssues] = useState<any[]>([]);
@@ -3283,6 +3778,9 @@ export default function SchemeWorkbenchPage() {
   // 单次请求累计体积上限（字节）：与单文件上限同源（/system/upload-limits）。
   // 未到达 / 请求失败时保持 undefined，预检回落内置兜底（200MB），与后端一致。
   const [maxUploadTotalBytes, setMaxUploadTotalBytes] = useState<number | undefined>(undefined);
+  // 单次请求文件数上限（个）：与单文件上限同源（/system/upload-limits）。
+  // 未到达 / 请求失败时保持 undefined，预检回落内置兜底（20），与后端一致。
+  const [maxUploadFiles, setMaxUploadFiles] = useState<number | undefined>(undefined);
   // 正在解析的单份文档 id（列表行内按钮 loading / 全列表禁用依据）
   const [parsingDocId, setParsingDocId] = useState<string | null>(null);
   // 文件分类下拉选项（后端 /global-facts/documents/category-options）
@@ -3374,6 +3872,19 @@ export default function SchemeWorkbenchPage() {
   // 章节级生成日志（滚动显示）
   const [sectionLogs, setSectionLogs] = useState<SectionLogItem[]>([]);
   const sectionLogsRef = useRef<SectionLogItem[]>([]);
+  /**
+   * ✅ 合并后端下发的失败章节明细（completed / stopped / **error** 三类终态共用）。
+   *   提到此处（`onSseEvent` 之上）是因为 `onSseEvent` 是 `useCallback([])`：
+   *   它捕获的是**首帧闭包**，只能安全引用同样只依赖 ref + 稳定 setter 的函数。
+   *   本函数只写 `sectionLogsRef` 与 `setSectionLogs`（后者是稳定引用），
+   *   因此跨渲染恒定安全。纯函数在无明细时原样返回同一引用 → 跳过 setState。
+   */
+  const mergeFailedSectionsIntoRef = useCallback((list: any) => {
+    const next = mergeFailedSectionsInto(sectionLogsRef.current, list);
+    if (next === sectionLogsRef.current) return;
+    sectionLogsRef.current = next;
+    setSectionLogs([...next]);
+  }, []);
   // ✅ 进度增强：正文生成运行统计（后端 stats / ping 事件下发）
   const [genStats, setGenStats] = useState<GenStats>({});
   // 1 秒心跳：用于"生成中"条目的实时耗时显示
@@ -3539,17 +4050,25 @@ const draftKey = selectedSection && id
     }
   }, [id, msg]);
 
-  const loadFacts = useCallback(async () => {
+  const loadFacts = useCallback(async (pageOverride?: number) => {
     if (!id) return;
     const requestedSchemeId = id;
     factsListAbortRef.current?.abort();
     const ac = new AbortController();
     factsListAbortRef.current = ac;
+    // ✅ 2026-10-06：真正使用后端分页（此前从不传 limit/offset，
+    //   pagination 每次下发却被丢弃 —— 分组一多就整屏渲染，且首屏白等全量）。
+    const wantPage = Math.max(1, Number(pageOverride) || factsPage);
+    const offset = (wantPage - 1) * FACTS_PAGE_SIZE;
     try {
-      const { data } = await factsApi.list(requestedSchemeId, { signal: ac.signal });
+      const { data } = await factsApi.list(requestedSchemeId, {
+        signal: ac.signal, limit: FACTS_PAGE_SIZE, offset,
+      });
       if (!isCurrentSchemeRequest(requestedSchemeId, currentSchemeIdRef.current, ac.signal)) return;
       setFacts(data.groups || []);
       setFactsSummary(buildFactsSummary(data.stats));
+      setFactsPagination(data.pagination || null);
+      setFactsPage(wantPage);
       void loadFactsDiagnostics();
     } catch (e: any) {
       if (e?.name === "AbortError" || ac.signal.aborted) return;
@@ -3562,58 +4081,12 @@ const draftKey = selectedSection && id
       }
       if (factsListAbortRef.current === ac) factsListAbortRef.current = null;
     }
-  }, [id, msg, loadFactsDiagnostics]);
+  }, [id, msg, loadFactsDiagnostics, factsPage]);
 
   loadFactsRef.current = loadFacts;
 
-  const handlePreviewFactsAdjust = async () => {
-    if (!id || factsAdjusting) return;
-    const instruction = (window.prompt("请输入事实调整要求（仅生成预览，不会立即修改）：") || "").trim();
-    if (!instruction) return;
-    setFactsAdjusting(true);
-    try {
-      const { data } = await factsApi.adjust({ instruction, scheme_id: id, apply: false });
-      if (id !== currentSchemeIdRef.current) return;
-      setFactsAdjustPlan({ ...data, instruction });
-    } catch (e: any) {
-      msg.error(e?.response?.data?.detail || e?.message || "生成调整计划失败");
-    } finally {
-      setFactsAdjusting(false);
-    }
-  };
-
-  const applyFactsAdjustPlan = () => {
-    if (!id || !factsAdjustPlan?.operations?.length) return;
-    modal.confirm({
-      title: "确认应用事实调整",
-      content: (
-        <div>
-          <div>{factsAdjustPlan.summary || `将执行 ${factsAdjustPlan.operations.length} 项调整`}</div>
-          <ul>{factsAdjustPlan.operations.slice(0, 20).map((op: any, i: number) => (
-            <li key={`${op.op}-${op.fact_id || i}`}>{op.op} · {op.name || op.fact_id} {op.value || ""}</li>
-          ))}</ul>
-        </div>
-      ),
-      okText: "确认应用", cancelText: "取消", okButtonProps: { danger: true },
-      onOk: async () => {
-        try {
-          await factsApi.adjust({
-            instruction: factsAdjustPlan.instruction || factsAdjustPlan.summary || "按已确认计划调整",
-            scheme_id: id,
-            apply: true,
-            // 应用用户刚确认的预览计划，禁止后端再次调用 AI 生成另一份计划。
-            operations: factsAdjustPlan.operations,
-          });
-          setFactsAdjustPlan(null);
-          msg.success("事实调整已应用");
-          await loadFacts();
-        } catch (e: any) {
-          msg.error(e?.response?.data?.detail || e?.message || "应用调整失败");
-          throw e;
-        }
-      },
-    });
-  };
+  // ✅ R45 · D5：AI 调整事实的状态机已抽到模块级 FactsAdjustPanel，
+  // 页面只保留后端契约接线（见下方 <FactsAdjustPanel /> 处的 preview/apply）。
 
   // ✅ 加固：以 scheme id 为主查询（后端反查 project_id），
   //    不再依赖 scheme.project_id —— 该字段缺失时旧实现会静默 return，导致列表恒空
@@ -3881,6 +4354,8 @@ const draftKey = selectedSection && id
         if (Number.isFinite(n) && n > 0) setMaxUploadBytes(n);
         const t = Number(data?.max_total_bytes);
         if (Number.isFinite(t) && t > 0) setMaxUploadTotalBytes(t);
+        const f = Number(data?.max_files_per_request);
+        if (Number.isFinite(f) && f > 0) setMaxUploadFiles(f);
       })
       .catch(() => {});
     return () => { alive = false; };
@@ -3932,6 +4407,29 @@ const draftKey = selectedSection && id
     factsApi.categories()
       .then(({ data }) => { if (alive && Array.isArray(data.categories) && data.categories.length) setFactCategoryOptions(data.categories); })
       .catch(() => { /* 拉取失败时沿用 FACT_CATEGORY_OPTIONS */ });
+    // ✅ 2026-10-06：消费此前**从未被调用**的 /global-facts/category-map。
+    //    该端点由后端 facts_classification.category_map_payload() 生成，
+    //    是九大章节标题 / 事实属性名 / 来源类型名的唯一权威来源；前端此前
+    //    各自硬编码（章节标题 2 份副本 + 事实属性 4 个内联三元 + 来源类型
+    //    干脆不展示）→ 后端增删枚举后界面静默失真。
+    //    失败时静默沿用本地兜底表（不阻断页面）。
+    factsApi.categoryMap()
+      .then(({ data }) => {
+        if (!alive) return;
+        const chapters = Array.isArray(data?.chapters) ? data.chapters : [];
+        if (chapters.length) {
+          const m: Record<string, string> = {};
+          chapters.forEach((c: any) => { if (c?.key && c?.title) m[c.key] = c.title; });
+          if (Object.keys(m).length) setFactChapterTitles(m);
+        }
+        if (data?.fact_attr_titles && Object.keys(data.fact_attr_titles).length) {
+          setFactAttrTitles(data.fact_attr_titles);
+        }
+        if (data?.source_kind_titles && Object.keys(data.source_kind_titles).length) {
+          setFactSourceKindTitles(data.source_kind_titles);
+        }
+      })
+      .catch(() => { /* 拉取失败时沿用本地兜底表 */ });
     loadBaMeta();
     return () => { alive = false; };
   }, [id, loadBaMeta]);
@@ -3993,7 +4491,6 @@ const draftKey = selectedSection && id
     setFactsCrossConflicts([]);
     setFactsChapterReport(null);
     setFactsDangerReport(null);
-    setFactsAdjustPlan(null);
     setFactModalOpen(false);
     setFactItemModalOpen(false);
     setSelectedFactCategory("");
@@ -4278,6 +4775,17 @@ const draftKey = selectedSection && id
     if (evt.task_id) activeTaskIdRef.current = evt.task_id;
     if (evt.event === "error") {
       msg.error(evt.message || "生成失败");
+      // ✅ 修复（2026-10-05 · 正文生成 R-4）：error 事件**也带失败明细**，
+      //    旧实现只弹一句 message 就 abort，`failed_sections` 被整个丢弃。
+      //    而 error 恰恰是最需要明细的终态 —— 整批异常可能发生在任何章节
+      //    进入生成循环**之前**（例如章节树查询失败），此时一条
+      //    `section_error` 都没下发过，用户只看到病因文案、
+      //    逐章失败原因彻底丢失，章节日志区拿不到「哪几章失败」。
+      //    与 completed / stopped 分支走同一合并入口（mergeFailedSectionsInto
+      //    是纯函数 + ref 写入，useCallback([]) 捕获首帧闭包安全）。
+      if (Array.isArray(evt.failed_sections) && evt.failed_sections.length > 0) {
+        mergeFailedSectionsIntoRef(evt.failed_sections);
+      }
       // ✅ 修复：error 后中断 SSE 连接（旧实现仅 break 未 abort，后端任务继续运行，
       // 用户此时再次点生成会造成新旧两个任务并发写同一方案）
       abortControllerRef.current?.abort();
@@ -5177,15 +5685,15 @@ const draftKey = selectedSection && id
   };
 
   /**
-   * ✅ 二次增强：合并后端 completed 事件下发的失败章节明细（failed_sections）。
+   * ✅ 二次增强：合并后端 completed / stopped 事件下发的失败章节明细。
    *   失败章节可能压根没进日志（异常路径 / 保留旧正文未改状态），
    *   只有后端知道"是哪几章、为什么失败"，这里补进日志供用户定位与重试。
+   *   实现直接委托给 `mergeFailedSectionsIntoRef`（R-4 新增，供
+   *   `useCallback([])` 的 `onSseEvent` 安全引用）—— **单一实现**，
+   *   避免三处终态各写一份合并逻辑而行为漂移。
    */
   const mergeFailedSections = (list: any) => {
-    const next = mergeFailedSectionsInto(sectionLogsRef.current, list);
-    if (next === sectionLogsRef.current) return; // 无失败明细时纯函数原样返回 → 跳过 setState
-    sectionLogsRef.current = next;
-    setSectionLogs([...next]);
+    mergeFailedSectionsIntoRef(list);
   };
 
   const handleGenerateContent = async (extra?: {
@@ -5297,6 +5805,14 @@ const draftKey = selectedSection && id
             //    （{colloquial_hits:[], abolished_standards:[]}），旧实现按
             //    Array.isArray 判定 → 恒 undefined → 告警从未展示。统一走归一出口。
             quality_issues: normalizeQualityIssues(evt.quality_issues),
+            // ✅ R49：本章图表产出闭环（配图 N 张 / 已删 M 张）—— 后端 section_done
+            //    实时下发，日志区即时可见，用户不必等整批结束再翻报告才知道「少了几张图」。
+            //    经 normalizeChartYield 归一（缺键/类型不符一律回退 0 与 []，不抛异常）。
+            chart_yield: normalizeChartYield({
+              chart_count: evt.chart_count,
+              charts_dropped_count: evt.charts_dropped_count,
+              charts_dropped: evt.charts_dropped,
+            }),
             // ✅ F-CONTENT-STANDARD(2026-09-26 · F4)：本章生效标准 + 校验报告
             //    （字段存在却丢弃 = 用户完全看不到生成标准的执行结果）
             generation_standard: evt.generation_standard,
@@ -5755,13 +6271,37 @@ const draftKey = selectedSection && id
   const handleUploadDocuments = async (files: File[]) => {
     if (!id || files.length === 0) return;
     if (uploadingFacts) return;
+    // ✅ 单文件硬校验（2026-10-05）：`accept` 属性只过滤文件选择框，拖拽与
+    //    「① 上传文件保存」按钮这条入口可绕过。不做这一步的话，超限 / 非法
+    //    扩展名的文件会被整批发给后端再逐个拒绝 —— 用户白等一轮上传，
+    //    且与 import Tab 的提示口径分叉（那边是先拦、根本不发）。
+    //    收敛在此处 = 两个入口一次覆盖（import Tab 已先过滤，进来 rejected 为空）。
+    const perFileMax =
+      typeof maxUploadBytes === "number" && maxUploadBytes > 0 ? maxUploadBytes : MAX_UPLOAD_BYTES;
+    let toUpload = files;
+    const partition = partitionUploadFiles(files, perFileMax);
+    if (partition.rejected.length > 0) {
+      const typeRejected = partition.rejected.filter((r) => r.reason === "type");
+      const sizeRejected = partition.rejected.filter((r) => r.reason === "size");
+      if (typeRejected.length > 0) {
+        msg.error(`不支持的文件类型，已忽略：${typeRejected.map((r) => r.file.name).join("、")}`);
+      }
+      if (sizeRejected.length > 0) {
+        msg.error(
+          `单个文件不能超过 ${Math.round(perFileMax / (1024 * 1024))}MB，已忽略：${sizeRejected
+            .map((r) => r.file.name)
+            .join("、")}`,
+        );
+      }
+      if (partition.accepted.length === 0) return;
+      toUpload = partition.accepted;
+    }
     // ✅ 上传前累计体积配额预检（与后端 upload_max_total_bytes 同口径）。
     //    不做这一步的话，超出 200MB 的那批文件要等整批上传完成才被后端扣下，
     //    用户白等一轮、且事前对"哪些不会被保存"毫无预期。
     //    本页面有两条上传入口（UploadParseTab + 「① 上传文件保存」按钮），
     //    收敛在此处 = 两个入口一次覆盖。
-    const quota = splitByUploadTotalQuota(files, maxUploadTotalBytes);
-    let toUpload = files;
+    const quota = splitByUploadTotalQuota(toUpload, maxUploadTotalBytes);
     if (quota.held.length > 0) {
       const mb = Math.round(
         (Number(maxUploadTotalBytes) > 0 ? Number(maxUploadTotalBytes) : 200 * 1024 * 1024) / (1024 * 1024),
@@ -5771,6 +6311,22 @@ const draftKey = selectedSection && id
       msg.warning(`单次上传累计不能超过 ${mb}MB，以下文件未上传：${names}${more}`);
       if (quota.accepted.length === 0) return;
       toUpload = quota.accepted;
+    }
+    // ✅ 上传前「单次文件数」预检（与后端 upload_max_files_per_request 同口径，2026-10-05 补齐）。
+    //    与上面两项预检构成完整三段：单文件体积 / 累计体积 / 文件数。缺了这一段时，
+    //    超量文件要等整批传完才从响应里得知"未保存"，与另两项体验割裂。
+    //    后端语义是「保留前 N 个、其余记入 too_many」，本预检逐字复刻，故不会有
+    //    文件被"前端悄悄丢弃" —— 只是提前告知并少传多余部分。
+    const byCount = splitByUploadFileCount(toUpload, maxUploadFiles);
+    if (byCount.held.length > 0) {
+      const cap = Math.floor(
+        Number(maxUploadFiles) > 0 ? Number(maxUploadFiles) : MAX_UPLOAD_FILES_FALLBACK,
+      );
+      const names = byCount.held.map((f) => f.name).slice(0, 10).join("、");
+      const more = byCount.held.length > 10 ? ` 等 ${byCount.held.length} 个` : "";
+      msg.warning(`单次最多上传 ${cap} 个文件，以下文件未上传：${names}${more}`);
+      if (byCount.accepted.length === 0) return;
+      toUpload = byCount.accepted;
     }
     uploadAbortRef.current?.abort();
     const ac = new AbortController();
@@ -5787,7 +6343,11 @@ const draftKey = selectedSection && id
       //    unsupported/oversize/empty/signature_invalid/too_many/quota_exceeded）。
       //    旧实现在此手写拼装，漏掉累计体积超限（quota_exceeded/quota_files）——
       //    「已保存 3 个文件，其余为什么没了」在界面上完全无解释。
-      const notice = buildUploadNotice(data);
+      const notice = buildUploadNotice(data, {
+        maxBytes: maxUploadBytes,
+        maxTotalBytes: maxUploadTotalBytes,
+        maxFiles: maxUploadFiles,
+      });
       if (savedCount === 0 && notice.details.length > 0) {
         console.warn("上传被拒明细:", notice.details);
       }
@@ -6376,7 +6936,11 @@ const draftKey = selectedSection && id
       if (sid !== currentSchemeIdRef.current || ac.signal.aborted) return;
       if (data?.blocked_reason) {
         msg.warning(data.blocked_reason as string);
-      } else if (data?.changed === false) {
+      } else if (data?.idempotent) {
+        // ✅ 2026-10-06：后端把 changed 由 bool 统一为影响行数 int（与
+        //    batch_ack_stale / batch_resolve 同形），并加法式补 idempotent。
+        //    旧写法 `data?.changed === false` 是严格布尔比较，后端一改形状就
+        //    静默失效（tsc 在接入 types/facts.ts 后当场报出）。
         msg.info("该事实未被标记为过期");
       } else {
         msg.success(`已确认「${title || "该事实"}」仍有效`);
@@ -6436,13 +7000,23 @@ const draftKey = selectedSection && id
       word_budget: 1500,
       children: [],
     };
+    // ✅ BUG 修复（2026-10-07 · 新增节点编号不同步）：新增节点本身不带 outlineId
+    //    （渲染时无编号），追加为子节点还会使同父后续兄弟的相对位置变化。旧实现
+    //    直接 setTree 不重算，与 moveNode / onOutlineTreeDrop「结构变更即本地
+    //    renumberTreeLocally」的口径不一致，用户在点「保存目录」前看到的编号是
+    //    缺失/陈旧的。现统一按位置即时重算（仅展示字段，不动 key/正文关联）。
     if (!parentKey) {
-      setTree([...curTree, newNode]);
+      setTree(renumberTreeLocally([...curTree, newNode]));
     } else {
-      setTree(curTree.map((n) => insertIntoNode(n, parentKey, newNode)));
+      setTree(renumberTreeLocally(curTree.map((n) => insertIntoNode(n, parentKey, newNode))));
     }
     // 自动选中新节点
     setSelectedSection(newNode);
+    // ✅ 工作流增强（2026-10-07）：新增节点默认标题「新章节」必然要改，
+    //    直接进入内联重命名态（Input autoFocus，回车/失焦即提交），省去
+    //    「新增 → 再双击/点编辑」的一次往返；直接失焦则保留默认名，无害。
+    setRenamingKey(newId);
+    setRenamingValue("新章节");
     // 自动展开父节点
     if (parentKey && !curExpanded.includes(parentKey)) {
       setExpandedKeys([...curExpanded, parentKey]);
@@ -6483,8 +7057,15 @@ const draftKey = selectedSection && id
       }
       return out;
     };
-    setTree(insertAfter(curTree));
+    // ✅ BUG 修复（2026-10-07 · 中间插入兄弟编号错位）：新节点插在参照节点之后，
+    //    其后所有兄弟的相对序号 +1。旧实现不本地重算，界面短暂呈现
+    //    「第一章 / 新章节(无编号) / 第二章 / 第三章」的错位编号，直到保存后
+    //    load 才纠正。与 moveNode / 拖拽 / 新增子章同口径即时重算。
+    setTree(renumberTreeLocally(insertAfter(curTree)));
     setSelectedSection(newNode);
+    // ✅ 工作流增强（2026-10-07）：与 addChildNode 同口径，新增后立即内联重命名
+    setRenamingKey(newId);
+    setRenamingValue("新章节");
     // 自动展开父节点（确保新同级节点可见）
     const parentKey = findParentKey(curTree, key);
     if (parentKey && !curExpanded.includes(parentKey)) {
@@ -6533,18 +7114,28 @@ const draftKey = selectedSection && id
           // 旧实现只认 local_，「导入目录」替换后的 upload_ 节点会被当成已落库
           // 章节，误调 DELETE /sections/{upload_...} → 后端 404，异常抛出后
           // setTree(removeNode(...)) 执行不到 → **本地节点永远删不掉**。
+          let persisted = false;
           if (cur && !isUnsavedLocalKey(cur.key) && id) {
             await sectionsApi.delete(id, cur.key);
+            persisted = true;
           }
-          setTree(removeNode(treeRef.current, key));
+          // ✅ BUG 修复（2026-10-07 · 删除章节后编号未重算）：删除中间章节后，
+          //    其后所有兄弟的相对序号 -1。旧实现只 removeNode 不重算，且已落库
+          //    删除成功后不 load() —— 后端 renumber_sections_after_reorder 已把
+          //    DB 的 outline_json.id 与正文子标题全部重写，前端却仍显示旧编号
+          //    （如删掉第2章后原第3章仍显示「第三章」），前后端短暂不一致。
+          //    现本地即时重算（仅改展示字段），已落库场景再 load() 拉回权威树，
+          //    与 moveNode 的「本地重算 + 服务端同步」口径完全一致。
+          setTree(renumberTreeLocally(removeNode(treeRef.current, key)));
           setSelectedSection(null);
           msg.success("已删除");
+          if (persisted) load();
         } catch (e: any) {
           msg.error(e.message || "删除失败");
         }
       },
     });
-  }, [modal, id, msg]);
+  }, [modal, id, msg, load]);
 
   function removeNode(nodes: TreeNode[], key: string): TreeNode[] {
     return nodes
@@ -7510,9 +8101,25 @@ const draftKey = selectedSection && id
     exportingRef.current = true;
     exportPctRef.current = -1;
     setExporting(true);
+    setExportStage("charts");
+    setExportPct(0);
     setExportPhase("正在渲染图表...");
     try {
-      const config = await exportForm.validateFields();
+      // ✅ P0 修复（2026-10-06 · 折叠面板配置被静默丢弃）：`validateFields()` **只返回
+      //    当前已挂载的表单项**。导出配置表单的「封面与页面」面板默认折叠
+      //    （defaultActiveKey=["basic","body","headings"]），其中的 12 个配置项
+      //    —— margins(4) / cover_info(4) / scheme_forms(4)，即**页边距、封面项目
+      //    信息表、专项施工方案四张法定前置表单**—— 未挂载即不进返回值。
+      //    实测（schemeWorkbenchExportTab20261006）请求体里 `config.scheme_forms`
+      //    恒为 undefined：用户把表单开关打开过、面板收起后再导出，开关被无声
+      //    丢弃，后端回落自己的默认值 → "界面拨了开关、导出毫无变化"。
+      //    修法：`getFieldsValue(true)` 取整份 store（含未挂载项，antd 的
+      //    `preserve` 默认 true 保证折叠不丢值），与校验结果**深合并**，
+      //    既保留 validateFields 的校验语义，又不丢折叠面板里的配置。
+      //    ⚠️ 后端 config_hash 会随之变化（原本缺键、现在带默认值）→ 既有导出
+      //    缓存一次性失效，属"让真实设置首次生效"的必要代价。
+      const validated = await exportForm.validateFields();
+      const config = deepMergeExportConfig(exportForm.getFieldsValue(true), validated);
       // ✅ 统一渲染轨：用与预览一致的 mermaid.js 把图表渲染成 PNG 随导出提交，
       // 后端优先采用（未命中/失败的图表由后端渲染轨兜底），导出与预览所见即所得
       let chartImages: ExportChartImage[] = [];
@@ -7531,8 +8138,12 @@ const draftKey = selectedSection && id
             const pct = Math.floor((doneCount / totalCount) * 100);
             const text = `正在渲染图表...（${doneCount}/${totalCount}）`;
             if (pct === exportPctRef.current) return;
-            exportPctRef.current = pct;
-            exportBatcherRef.current?.schedule("phase", () => setExportPhase(text));
+exportPctRef.current = pct;
+          // ✅ D2：图表阶段占总量 0~70%（文档生成可能更耗时）
+          exportBatcherRef.current?.schedule("phase", () => {
+            setExportPhase(text);
+            setExportPct(Math.round(pct * 0.7));
+          });
           }
         }, controller.signal);
         if (chartImages.length > 0) {
@@ -7548,6 +8159,9 @@ const draftKey = selectedSection && id
       // ✅ 收尾前把图表渲染进度的最后一帧刷下去，保证用户看到最终进度文本
       exportBatcherRef.current?.flushNow();
       if (controller.signal.aborted || currentSchemeIdRef.current !== sid) return;
+      // ✅ D2：文档生成阶段显式置位；PDF 走「DOCX(70%) → 转换(→100%)」两段
+      setExportStage(format === "pdf" ? "pdf" : "docx");
+      setExportPct(70);
       setExportPhase(format === "pdf" ? "正在生成文档并转换PDF..." : "正在生成文档...");
       const resp = format === "pdf"
         ? await exportApi.pdf(sid, config, chartImages, controller.signal)
@@ -7601,6 +8215,11 @@ const draftKey = selectedSection && id
         if (stats.failed && stats.failed > 0) {
           msg.warning(`${stats.failed} 张图表渲染失败，建议检查图表代码或开启「允许 PIL 兜底」后重试`);
         }
+        // ✅ D1 加固（2026-10-06）：跨章借图此前零信号 —— 成稿里 B 章可能出现
+        //    A 章的流程图而用户毫不知情。此处按 warning 单独提示（不阻断导出），
+        //    并指向"回查该章节的图表登记"这一可执行动作。
+        const fbWarn = fallbackBorrowWarning(stats);
+        if (fbWarn) msg.warning(fbWarn, 8);
       }
       // 展示公式/乱码自动修复统计（导出时后端已内建修复：公式转 Word 数学排版、清理乱码符号）
       // T3：头部解析与文案拼装提取为纯函数（parseFixStats / fixStatsParts）
@@ -7620,8 +8239,25 @@ const draftKey = selectedSection && id
         exportingRef.current = false;
         setExporting(false);
         setExportPhase("");
+        // ✅ D2：阶段与进度随导出一并回 0（否则下次导出会残留上一次的进度条）
+        setExportStage("idle");
+        setExportPct(0);
       }
     }
+  };
+
+  /**
+   * ✅ D2 加固（2026-10-06）：取消导出。
+   *
+   * 此前导出只能被「意外」中断（切换方案 / 卸载页面 / 发起一次新导出覆盖上一次），
+   * 用户盯着「正在生成文档...」无法主动退出。`exportAbortRef` 里的
+   * AbortController 本就存在，这里只补一个入口：abort → 前端 catch 识别
+   * AbortError/ERR_CANCELED → 不弹错误提示 → finally 释放同步锁。
+   * 注：后端已封装好的临时文件与缓存行不会因此留下冗余（取消后下次导出走全链路）。
+   */
+  const handleCancelExport = () => {
+    if (!exportingRef.current) return;
+    exportAbortRef.current?.abort();
   };
 
   const handleExportCheck = async () => {
@@ -8220,8 +8856,8 @@ const draftKey = selectedSection && id
             <Upload
               accept={UPLOAD_FILE_ACCEPT}
               beforeUpload={(file) => {
-                if (file.size > 30 * 1024 * 1024) {
-                  msg.error("文件过大，请上传 30MB 以内的文件");
+                if (file.size > resolveMaxUploadBytes(maxUploadBytes)) {
+                  msg.error(`文件过大，请上传 ${formatUploadLimitMb(maxUploadBytes)} 以内的文件`);
                   return false;
                 }
                 handleUploadParseOutline(file);
@@ -8551,17 +9187,40 @@ const draftKey = selectedSection && id
                 <Radio.Button value="placeholder">📝 留待填写</Radio.Button>
               </Radio.Group>
             </Tooltip>
-            <Button
-              icon={<ThunderboltOutlined />}
-              onClick={handlePreviewFactsAdjust}
-              loading={factsAdjusting}
-              disabled={generating || uploadingFacts || parsingDocs || (factsSummary?.total || 0) === 0}
-            >
-              AI 调整事实
-            </Button>
-            {factsAdjustPlan?.operations?.length > 0 && (
-              <Button danger onClick={applyFactsAdjustPlan}>应用调整计划</Button>
-            )}
+            {/* ✅ R45 · D5：AI 调整事实抽为独立子组件（FactsAdjustPanel）。
+                状态机 / 竞态守卫 / 二次确认全部归位到组件内，交互行为由
+                factsAdjust.test.tsx 钉住；页面只保留后端契约接线。 */}
+            <FactsAdjustPanel
+              schemeId={id}
+              busy={generating || uploadingFacts || parsingDocs}
+              disabled={(factsSummary?.total || 0) === 0}
+              confirmDialog={(opts) => modal.confirm(opts)}
+              preview={async (instruction) => {
+                const { data } = await factsApi.adjust({
+                  instruction,
+                  scheme_id: id!,
+                  apply: false,
+                });
+                return data as any;
+              }}
+              apply={async (operations, instruction) => {
+                // 应用用户刚确认的预览计划，禁止后端再次调用 AI 生成另一份计划
+                await factsApi.adjust({
+                  instruction,
+                  scheme_id: id!,
+                  apply: true,
+                  operations,
+                });
+                await loadFacts();
+                msg.success("事实调整已应用");
+              }}
+              onError={(fallback, e) =>
+                msg.error(
+                  (e as any)?.response?.data?.detail
+                  || (e as any)?.message
+                  || fallback,
+                )}
+            />
             <Button
               icon={<CaretRightOutlined />}
               onClick={openFactCreate}
@@ -8582,6 +9241,7 @@ const draftKey = selectedSection && id
             )}
           </Space>
 
+
           {/* ===== 全局事实提取进度（阶段 + 分段级实时日志）===== */}
           {/* ✅ 组件级可测（2026-09-21）：渲染抽到模块级 FactsExtractProgressCard，
                行为由 factsTab.test.tsx 钉住 */}
@@ -8599,6 +9259,11 @@ const draftKey = selectedSection && id
             dangerReport={factsDangerReport}
             onRefresh={loadFactsDiagnostics}
           />
+
+          {/* ✅ 2026-10-06：消费此前被整体丢弃的 stats.by_chapter。
+              与上方 DiagnosticsPanel 口径不同（那个查必填字段覆盖率，
+              这个查各章实际落了多少条事实 + 缺哪些字段）。 */}
+          <FactsChapterCoveragePanel stats={factsSummary} titles={factChapterTitles} />
 
           {/* ===== 上次提取的分段失败详情（部分未完成时可见）===== */}
           {/* ✅ 组件级可测（2026-09-21）：渲染抽到模块级 FactsSegmentFailuresAlert */}
@@ -8841,19 +9506,45 @@ const draftKey = selectedSection && id
                 onResolveItem={handleResolveFactItem}
                 onResolveConflict={handleResolveConflictItem}
                 onAckStaleOne={handleAckStaleOne}
+                chapterTitles={factChapterTitles}
+                factAttrTitles={factAttrTitles}
+                sourceKindTitles={factSourceKindTitles}
               />
             </>
           ) : facts.length > 0 ? (
-            <FactsGroupList
-              groups={facts}
-              filter={factsFilter}
-              onEditGroup={openFactEdit}
-              onDeleteGroup={handleDeleteFactGroup}
-              onEditItem={openFactItemEdit}
-              onResolveItem={handleResolveFactItem}
-              onResolveConflict={handleResolveConflictItem}
-              onAckStaleOne={handleAckStaleOne}
-            />
+            <>
+              <FactsGroupList
+                groups={facts}
+                filter={factsFilter}
+                onEditGroup={openFactEdit}
+                onDeleteGroup={handleDeleteFactGroup}
+                onEditItem={openFactItemEdit}
+                onResolveItem={handleResolveFactItem}
+                onResolveConflict={handleResolveConflictItem}
+                onAckStaleOne={handleAckStaleOne}
+                chapterTitles={factChapterTitles}
+                factAttrTitles={factAttrTitles}
+                sourceKindTitles={factSourceKindTitles}
+              />
+              {/* ✅ 2026-10-06：消费后端 pagination（此前从不下发 limit/offset，
+                  分组一多就整屏渲染）。总数不足一页时不渲染控件。 */}
+              {(() => {
+                const pg = buildFactsPagination(factsPagination, FACTS_PAGE_SIZE);
+                if (!pg.show) return null;
+                return (
+                  <div style={{ marginTop: 12, textAlign: "center" }}>
+                    <Pagination
+                      current={pg.page}
+                      pageSize={pg.pageSize}
+                      total={pg.total}
+                      size="small"
+                      showSizeChanger={false}
+                      onChange={(p: number) => { void loadFacts(p); }}
+                    />
+                  </div>
+                );
+              })()}
+            </>
           ) : (
             // ✅ 优化：工具栏（AI 提取/上传/手动新增）始终渲染于列表上方，
             // 空状态内不再重复渲染同一组按钮
@@ -10012,7 +10703,30 @@ const draftKey = selectedSection && id
               type="info"
               showIcon
               message={exportPhase}
-              description="大文档导出可能需要 10-30 秒，图表渲染和文档构建在后台进行，请耐心等待。"
+              // ✅ D2：真实进度条 + 取消入口。
+              //    旧实现只有一句静态文案，文档生成阶段（可达数十秒）零进度反馈。
+              description={
+                <div>
+                  <Progress
+                    percent={exportPct}
+                    size="small"
+                    status="active"
+                    style={{ marginBottom: 6 }}
+                  />
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span>
+                      <Tag color="processing">
+                        阶段 {EXPORT_STAGE_ORDER[exportStage] ?? 1}/3 ·{" "}
+                        {EXPORT_STAGE_LABEL[exportStage]}
+                      </Tag>
+                      大文档导出可能需要 10-30 秒，图表渲染和文档构建在后台进行，请耐心等待。
+                    </span>
+                    <Button size="small" onClick={handleCancelExport}>
+                      取消导出
+                    </Button>
+                  </div>
+                </div>
+              }
               style={{ marginBottom: 12 }}
             />
           )}
@@ -10099,7 +10813,7 @@ const draftKey = selectedSection && id
                     有效缓存 {cacheStatus.total} 条
                   </Tag>
                   {cacheStatus.stale > 0 && (
-                    <Tooltip title="结果文件已被保留策略（最多 5 份）清理，或磁盘文件已丢失。下次导出会自动清理这些记录。">
+                    <Tooltip title="结果文件已被保留策略（最多 5 份）清理、磁盘文件已丢失，或为导出失败遗留的孤儿产物。下次导出会自动清理这些记录，无需手工处理。">
                       <Tag color="orange">失效 {cacheStatus.stale} 条</Tag>
                     </Tooltip>
                   )}
@@ -10114,6 +10828,12 @@ const draftKey = selectedSection && id
                     pagination={false}
                     dataSource={cacheStatus.items}
                     columns={[
+                      { title: "状态", dataIndex: "exists", width: 72,
+                        render: (ok: boolean) =>
+                          // ✅ 逐行标注有效/失效：失效行（文件已被保留策略清理或
+                          //    为导出失败遗留的孤儿产物）与有效行不再长得一样，
+                          //    避免用户误以为任何一行都能秒级复用。
+                          <Tag color={ok ? "green" : "default"}>{ok ? "有效" : "失效"}</Tag> },
                       { title: "生成时间", dataIndex: "created_at", width: 170,
                         render: (v: string) => (v || "").replace("T", " ").slice(0, 19) },
                       { title: "指纹", dataIndex: "content_fingerprint", width: 140,

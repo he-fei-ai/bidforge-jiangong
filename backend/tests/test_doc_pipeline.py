@@ -203,6 +203,50 @@ async def test_parse_populates_four_layers(ctx):
     assert (await cur.fetchone())["parse_version"] == "v2"
 
 
+async def test_single_column_table_and_block_math_e2e(ctx):
+    """D5/E1 全链路回归：单列表格 + 跨行块公式，经 上传→解析→结构化落盘→分块。
+
+    旧 _SEP_ROW_RE 因列分组量词 `+` 与 `-{2,}` 过严，单列分隔行 ``| :-- |``
+    整表漏抽；旧公式路径只做行内单条 search，跨行/多条公式漏入 formulas。
+    """
+    db, pid, docs_root, uploads = ctx
+    md = (
+        "正文说明：本跨中弯矩按下式计算。\n\n"
+        "$$\nM = \\\\frac{qL^2}{8}\n$$\n\n"
+        "| 工程材料 |\n| :------ |\n| 钢筋 HRB400 |\n| 混凝土 C30 |\n"
+    ).encode("utf-8")
+    f = _upload("设计说明.md", md)
+    res = await gf.upload_documents(scheme_id="", project_id=pid, files=[f], db=db)
+    doc_id = res["saved"][0]["id"]
+    parsed = await gf.parse_document(doc_id, db=db)
+    assert parsed["ok"]
+
+    # 解析层 _tables.json：单列表格落盘且两行数据齐全（此前整表丢失）
+    pdir = store.layer_dir(pid, doc_id, store.LAYER_PARSED)
+    tables_env = store.read_json(pdir / f"{doc_id}_tables.json")
+    assert tables_env and tables_env.get("table_count") == 1
+    table = tables_env["tables"][0]
+    flat = json.dumps(table, ensure_ascii=False)
+    assert "钢筋 HRB400" in flat and "混凝土 C30" in flat
+    assert table["source_ref"] == f"{doc_id}#page:1#table:t1"
+    # 块公式行不得污染表格标题（E1 联动缺陷）
+    assert table["title"] != "$$"
+
+    # 完整性快照：跨行公式计入 total_formulas（旧实现为 0）
+    cur = await db.execute(
+        "SELECT completeness_json FROM project_documents WHERE id=?", (doc_id,))
+    snap = json.loads((await cur.fetchone())["completeness_json"])
+    assert snap["total_formulas"] == 1
+
+    # 分块层：存在 table 型语义块，文本含单列表内容
+    cur = await db.execute(
+        "SELECT text, source_ref FROM doc_chunks "
+        "WHERE doc_id=? AND chunk_type='table'", (doc_id,))
+    rows = [dict(r) for r in await cur.fetchall()]
+    assert rows and any("钢筋" in r["text"] for r in rows)
+    assert all(r["source_ref"].startswith(f"{doc_id}#page:") for r in rows)
+
+
 async def test_incremental_reparse_skips_unchanged(ctx):
     db, pid, docs_root, uploads = ctx
     doc_id = await _upload_and_parse(ctx)

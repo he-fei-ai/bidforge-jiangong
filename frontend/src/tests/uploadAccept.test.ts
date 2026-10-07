@@ -15,8 +15,13 @@ import { describe, it, expect } from "vitest";
 import {
   UPLOAD_FILE_ACCEPT,
   UPLOAD_FILE_EXTENSIONS,
+  MAX_UPLOAD_BYTES,
   MAX_UPLOAD_TOTAL_FALLBACK,
+  MAX_UPLOAD_FILES_FALLBACK,
   splitByUploadTotalQuota,
+  splitByUploadFileCount,
+  resolveMaxUploadBytes,
+  formatUploadLimitMb,
 } from "../utils/uploadAccept";
 
 /** 镜像后端 file_parser.SUPPORTED_EXTENSIONS（2026-09-23） */
@@ -108,5 +113,77 @@ describe("splitByUploadTotalQuota（累计体积配额预检）", () => {
     expect(splitByUploadTotalQuota([], 100)).toEqual({ accepted: [], held: [] });
     const r = splitByUploadTotalQuota([fakeFile("a", NaN)], 100);
     expect(r.accepted).toHaveLength(1);
+  });
+});
+
+describe("splitByUploadFileCount（单次文件数预检，2026-10-05 补齐）", () => {
+  it("兜底常量与后端 upload_max_files_per_request 默认值一致（20）", () => {
+    expect(MAX_UPLOAD_FILES_FALLBACK).toBe(20);
+  });
+
+  it("未超上限：原样放行、顺序不变", () => {
+    const files = [fakeFile("a", 1), fakeFile("b", 1), fakeFile("c", 1)];
+    const r = splitByUploadFileCount(files, 3);
+    expect(r.accepted.map((f) => f.name)).toEqual(["a", "b", "c"]);
+    expect(r.held).toEqual([]);
+  });
+
+  it("恰好等于上限仍全部放行（闭区间）", () => {
+    const files = Array.from({ length: 5 }, (_, i) => fakeFile(`f${i}`, 1));
+    const r = splitByUploadFileCount(files, 5);
+    expect(r.accepted).toHaveLength(5);
+    expect(r.held).toEqual([]);
+  });
+
+  it("超上限：保留**前 N 个**（对齐后端 files[:N]），其余 held 顺序不变", () => {
+    // 后端 global_facts.upload_documents：len(files) > N 时取前 N 个，
+    // 其余记入 too_many（不回滚前 N 个）。前端预检须同序，否则提示的文件
+    // 与实际未保存的不是同一批。
+    const files = Array.from({ length: 7 }, (_, i) => fakeFile(`f${i}`, 1));
+    const r = splitByUploadFileCount(files, 5);
+    expect(r.accepted.map((f) => f.name)).toEqual(["f0", "f1", "f2", "f3", "f4"]);
+    expect(r.held.map((f) => f.name)).toEqual(["f5", "f6"]);
+  });
+
+  it("上限为 1：仅首份放行", () => {
+    const r = splitByUploadFileCount([fakeFile("a", 1), fakeFile("b", 1)], 1);
+    expect(r.accepted.map((f) => f.name)).toEqual(["a"]);
+    expect(r.held.map((f) => f.name)).toEqual(["b"]);
+  });
+
+  it("非正数 / NaN / 非法上限 → 回落兜底 20（不得等价于「无上限」）", () => {
+    const files = Array.from({ length: 25 }, (_, i) => fakeFile(`f${i}`, 1));
+    for (const bad of [0, -3, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const r = splitByUploadFileCount(files, bad as number);
+      expect(r.accepted).toHaveLength(20);
+      expect(r.held).toHaveLength(5);
+    }
+  });
+
+  it("空批次 / undefined 入参不抛异常（fail-soft，纯函数）", () => {
+    expect(splitByUploadFileCount([], 5)).toEqual({ accepted: [], held: [] });
+    expect(splitByUploadFileCount(undefined as unknown as File[], 5)).toEqual({
+      accepted: [],
+      held: [],
+    });
+  });
+});
+
+describe("resolveMaxUploadBytes / formatUploadLimitMb（单文件上限唯一口径，2026-10-05 D3）", () => {
+  it("下发有效值：原样返回，文案为整 MB", () => {
+    expect(resolveMaxUploadBytes(50 * 1024 * 1024)).toBe(50 * 1024 * 1024);
+    expect(formatUploadLimitMb(50 * 1024 * 1024)).toBe("50MB");
+  });
+
+  it("缺失 / 非法（0 / 负数 / NaN / Infinity）：回落 30MB 兜底，文案 30MB", () => {
+    for (const bad of [undefined, 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(resolveMaxUploadBytes(bad as number)).toBe(MAX_UPLOAD_BYTES);
+      expect(formatUploadLimitMb(bad as number)).toBe("30MB");
+    }
+  });
+
+  it("非整 MB：四舍五入为整数 MB（提示不出现小数）", () => {
+    expect(formatUploadLimitMb(10.4 * 1024 * 1024)).toBe("10MB");
+    expect(formatUploadLimitMb(10.6 * 1024 * 1024)).toBe("11MB");
   });
 });

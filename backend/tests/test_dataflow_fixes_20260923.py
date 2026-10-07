@@ -146,9 +146,12 @@ def test_to_db_row_carries_extended_fields():
         norm_group="machinery",
     )
     row = it.to_db_row("g1", "p1", "s1", "机械设备")
-    # ✅ 2026-09-24：九大章节四维标注（chapter/fact_attr/source_kind/is_shared）
-    #    追加在元组尾部，23 → 27 列（顺序须与 persist INSERT 列一致）。
-    assert len(row) == 27
+    # ✅ 2026-09-24：九大章节四维标注追加在元组尾部，23 → 27 列。
+    # ✅ 2026-10-06：is_stale 补入（GLOBAL_FACTS_INSERT_COLS 单一事实源），
+    #    位置在四维**之前** → 27 → 28 列，尾部 4 列仍是四维。
+    #    列数与顺序不再写死，统一由 GLOBAL_FACTS_INSERT_COLS 校验。
+    from app.services.facts_extractor import GLOBAL_FACTS_INSERT_COLS
+    assert len(row) == len(GLOBAL_FACTS_INSERT_COLS) == 28
     assert row[16] == "台"
     assert row[17] == "machinery"
     assert row[18] == "table"
@@ -156,11 +159,14 @@ def test_to_db_row_carries_extended_fields():
     assert row[20] == "machinery_stat"
     assert row[21] == 1
     assert row[22] == "machinery"
+    # is_stale：提取管线产出的事实恒为「未过期」（过期只由资料重传/删除触发）
+    assert GLOBAL_FACTS_INSERT_COLS[23] == "is_stale"
+    assert row[23] == 0
     # 尾部 4 列：未显式标注的 FactItem 取默认值（章节/属性/来源为空、非共享）
-    assert row[23] == ""
     assert row[24] == ""
     assert row[25] == ""
-    assert row[26] == 0
+    assert row[26] == ""
+    assert row[27] == 0
 
 
 @pytest.mark.asyncio

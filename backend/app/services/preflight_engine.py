@@ -592,6 +592,10 @@ _UNIT_CANON: list[tuple[str, str]] = [
     ("km", "千米"), ("cm", "厘米"), ("mm", "毫米"),
     ("m²", "平方米"), ("m2", "平方米"), ("m", "米"),
     ("平方米", "平方米"),
+    # 「个月」必须排在「小时/h」之前，且早于任何可能吃掉它的规则；
+    # 不加这条则「24 个月」与「24 月」被当成两个不同取值（生产事实里
+    # 「缺陷责任期 24 个月」与「缺陷责任期最长期限 24 月」并存，实测会误判冲突）。
+    ("个月", "月"),
     ("小时", "时"), ("h", "时"),
 ]
 def _norm_unit(text: str) -> str:
@@ -600,14 +604,39 @@ def _norm_unit(text: str) -> str:
         s = s.replace(a, b)
     return s
 
+# 公开别名：跨模块复用同一份单位归一口径（与 has_calc_process 同模式 ——
+# 保留私有实现、只额外暴露别名，模块内既有调用点零改动）。
+normalize_unit_text = _norm_unit
 
-def check_consistency(ctx: PreflightContext) -> list:
-    """数值 / 术语一致性 + 章节查重。"""
+
+def numeric_consistency_findings(sections: list, *, limit: int = 1) -> list:
+    """数值主题跨章节一致性判定（CON-01）—— **唯一实现**。
+
+    供两处消费，判据不得各写一份：
+
+    - 预检 ``check_consistency``（全文口径，``limit=1`` 只报首个主题，保持
+      既有「同一批次只报一个主题，避免刷屏」行为）；
+    - 生成侧 ``content_checkpoint.cross_section_value_findings``（本章相关
+      口径，逐章落库前跑）。
+
+    为什么必须单点实现：这正是 TRC-01（``has_calc_process``）、CON-06
+    （``find_cross_section_copies``）已收敛过的同一类分叉 —— 若生成侧重抄
+    主题正则与单位归一，「生成侧自检全绿、预检照报 CON-01 high」必然复现，
+    用户按自检结论交付却被审核打回。
+
+    Args:
+        sections: ``[{id, title, content}, ...]``（内容非空即可，多余键忽略）。
+        limit: 最多产出的结论条数（1 = 预检既有行为「同一批次只报一个
+            主题」；<=0 = 不限条数，供生成侧自检消费全部主题）。
+
+    Returns:
+        CON-01 findings 列表；脏输入 / 内部异常返回已收集结论，绝不抛出。
+    """
     findings: list = []
     for topic, rx, val_groups, obj_group in _NUM_TOPICS:
         values: dict = {}
         by_object: dict = {}
-        for s in ctx.sections:
+        for s in sections:
             for m in rx.finditer(s.get("content") or ""):
                 # 只拼接「取值」捕获组（对象标识组除外），避免 group 越界；
                 # 归一化单位后再作为一致性判定的 key，避免单位写法差异造成误报。
@@ -640,7 +669,16 @@ def check_consistency(ctx: PreflightContext) -> list:
                 evidence=[f"{k}（{v}）"
                           for k, v in list(conflict_values.items())[:6]],
                 suggestion=f"请统一{topic}口径；以全局事实 / 设计文件为准"))
-            break  # 同一批次只报一个主题，避免刷屏
+            if limit > 0 and len(findings) >= limit:
+                break  # 同一批次只报一个主题，避免刷屏
+    return findings
+
+
+def check_consistency(ctx: PreflightContext) -> list:
+    """数值 / 术语一致性 + 章节查重。"""
+    findings: list = []
+    # 数值主题一致性走唯一实现（生成侧自检复用同一判据，见函数 docstring）。
+    findings.extend(numeric_consistency_findings(ctx.sections))
 
     # ✅ BUG 修复（2026-09-21）：旧实现所有重复章节对共用 rule_id="CON-05"，
     #    audit_scoring.merge_findings 按 rule_id 去重后只保留严重度最高的一条，
@@ -719,11 +757,21 @@ def check_duplication(ctx: PreflightContext) -> list:
         logger.warning("跨章节段落搬运检测异常: %s", exc, exc_info=True)
         return []
 
-    if res.get("truncated"):
-        logger.info("跨章节段落搬运检测触顶截断（pairwise=%d），"
-                    "结论可能不完整", res.get("pairwise_compared", 0))
-
     findings: list = []
+    if res.get("truncated"):
+        # ✅ P1-4 修复（2026-10-07）：跨章搬运检测触顶截断时旧实现仅记 INFO，
+        #    预检结论"可能不完整"但用户无任何信号。现升级为 WARNING 并注入一条
+        #    合成 finding（CON-06-TRUNC），让预检面板/前端可见。
+        logger.warning(
+            "跨章节段落搬运检测触顶截断（pairwise=%d），"
+            "结论可能不完整——部分搬运组可能漏报",
+            res.get("pairwise_compared", 0))
+        findings.append(_finding(
+            "CON-06-TRUNC",
+            f"跨章节段落搬运检测因两两比对量过大（{res.get('pairwise_compared', 0)} 对）"
+            "已截断，结论可能不完整，部分搬运组可能漏报",
+            severity="low"))
+
     for idx, g in enumerate(res.get("groups") or [], 1):
         pairs = g.get("section_pairs") or []
         if not pairs:
@@ -763,6 +811,13 @@ def check_traceability(ctx: PreflightContext) -> list:
     findings: list = []
     titles = [(s.get("title") or "") for s in ctx.sections]
 
+    # ✅ 修复（2026-10-07 · 预检假 block，生产库实证）：计算书章节经常是**父节点**
+    #    （正文由二级子节承载，见 build_section_tree_index 的实证），而本函数此前
+    #    只看章节自身 content → 父节点恒空被报「未见计算公式或参数代入过程」（block，
+    #    直接阻断交付），实际公式在子节里。现与 check_completeness / preflight_stats
+    #    统一到 build_section_tree_index 的「有效正文」（自身 + 全部子孙）。
+    _parent_ids, effective = build_section_tree_index(ctx.sections)
+
     calc_secs = [s for s in ctx.sections
                  if any(k in (s.get("title") or "") for k in CALC_TITLE_KEYWORDS)]
     if not calc_secs:
@@ -771,14 +826,15 @@ def check_traceability(ctx: PreflightContext) -> list:
         #    本条只负责"个别章节缺计算过程"这一独立缺陷面。
         pass
     else:
-        no_calc = [s for s in calc_secs if not _has_calc_process(s.get("content") or "")]
+        no_calc = [s for s in calc_secs
+                   if not _has_calc_process(effective.get(s.get("id")) or "")]
         # ✅ 跨维度双扣修复（2026-09-23）：当**全部**计算书章节都无计算过程时，
         #    CMP-09 已按「聚合口径」以 block 级报同一缺陷（-40），此处再逐章报
         #    high（-20）即同一缺陷双扣 60。TRC-01 改为只在"整体有过程、个别章节
         #    缺失"时报告（与 CMP-09 严格互斥：聚合文本集与 CMP-09 追加条款同源，
         #    均为标题命中 CALC_TITLE_KEYWORDS 的全部章节，「聚合无过程 ⇔ CMP-09 必报」）。
         if no_calc and _has_calc_process(
-                "\n\n".join(s.get("content") or "" for s in calc_secs)):
+                "\n\n".join(effective.get(s.get("id")) or "" for s in calc_secs)):
             findings.append(_finding(
                 "TRC-01", f"「{no_calc[0].get('title')}」未见计算公式或参数代入过程",
                 section_title=no_calc[0].get("title") or "",

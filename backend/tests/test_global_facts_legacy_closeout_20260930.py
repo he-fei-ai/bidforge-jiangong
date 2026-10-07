@@ -290,11 +290,50 @@ class TestEnglishFactKeyChapter:
             assert chapter in fc.CHAPTER_ORDER, key
 
     def test_english_danger_keys_classified(self):
-        """上一轮遗留：foundation_depth / span / total_load 等英文键全落空串。"""
-        for key in ("foundation_depth", "excavation_depth", "span", "total_load",
-                    "line_load", "crane_capacity", "slope_height",
-                    "install_height"):
+        """上一轮遗留：英文 fact_key 全落空串 → 现应判到 overview。
+
+        ✅ 2026-10-06 更正用例的**前提**：原用例断言
+        ``excavation_depth`` / ``span`` / ``total_load`` / ``line_load`` /
+        ``crane_capacity`` / ``slope_height`` / ``install_height`` 可用，
+        但它们是 ``HAZARD_THRESHOLDS[*].params`` 的**危大阈值参数字汇**，
+        与 ``normalize_key`` 的 **fact_key 命名空间不是一套词表**。实测
+        ``normalize_key("跨度") -> fact_1dfc5843``（未登记别名 → md5 兜底），
+        这些键**根本产不出来**，是永不生效的死条目。
+        本用例改为断言**实测可产出**的键；死键清理由
+        ``test_every_fact_key_is_producible`` 锁定。
+        """
+        for key in ("foundation_depth", "support_type", "water_table",
+                    "bearing_capacity", "slope_ratio", "structure_type",
+                    "scaffold_type", "formwork_type", "tower_crane_model",
+                    "excavator_model", "max_lift_weight"):
             assert fc.classify_chapter_from_text("x", "", "", "", key) == "overview", key
+
+    def test_every_fact_key_is_producible(self):
+        """反向用例：表内每个键都必须是 ``normalize_key`` 真实产出的 fact_key。
+
+        死条目（产不出来的键）会让「英文键分支」形同虚设，且后人无法从
+        表本身看出它无效 —— 旧表 24 键里就有 10 个这种死条目。
+        """
+        from app.services.facts_extractor import _NAME_KEY_INDEX
+        producible = {key for _frag, key in _NAME_KEY_INDEX}
+        dead = sorted(k for k in fc.FACT_KEY_TO_CHAPTER if k not in producible)
+        assert dead == [], f"FACT_KEY_TO_CHAPTER 含产不出的死键：{dead}"
+
+    def test_danger_param_vocabulary_is_separate_namespace(self):
+        """危大阈值参数字汇**不得**混入 fact_key 命名空间（范畴错误防护）。
+
+        两套词表服务于不同环节：``DANGER_PARAM_RULES`` 供
+        ``extract_danger_params`` → ``HAZARD_THRESHOLDS`` 判定；
+        ``FACT_KEY_TO_CHAPTER`` 供章节归属。混用会让「阈值参数名」被当成
+        「事实键」，而后者压根不会被产出。
+        """
+        danger_params = {p for _kws, p in fc.DANGER_PARAM_RULES}
+        assert danger_params, "DANGER_PARAM_RULES 为空"
+        # 阈值参数仍必须齐备（其自身完整性由 test_every_threshold_param_is_producible 把关）
+        assert "depth" in danger_params and "span" in danger_params
+        # 反过来：它们不得出现在 fact_key 表里
+        overlap = danger_params & set(fc.FACT_KEY_TO_CHAPTER)
+        assert overlap == set(), f"危大阈值参数混入了 fact_key 表：{sorted(overlap)}"
 
     def test_four_arg_call_still_works_unchanged(self):
         """新增可选参数不得改变既有 4 参调用的行为（向后兼容）。"""
@@ -313,7 +352,9 @@ class TestEnglishFactKeyChapter:
     def test_fact_key_only_used_when_text_rules_miss(self):
         """中文文本规则未命中时才轮到 fact_key。"""
         # 「未知参数名」不命中任何中文规则 → 走 fact_key → overview
-        assert fc.classify_chapter_from_text("未知参数名", "", "", "", "span") == "overview"
+        # ✅ 2026-10-06：用实测可产出的键（原用 span，属阈值参数字汇的死键）
+        assert fc.classify_chapter_from_text(
+            "未知参数名", "", "", "", "foundation_depth") == "overview"
         # fact_key 缺失 → 落空串（未分类），而不是回退到某个默认章节
         assert fc.classify_chapter_from_text("未知参数名", "") == ""
 

@@ -33,6 +33,11 @@ from app.services.chart_validators import (
 )
 from app.services.content_blocks import (
     INLINE_CHART_FENCE_LANGS as _CONTENT_BLOCKS_INLINE_CHART_FENCE_LANGS,
+    # ✅ R48（2026-10-06）：引导语判据与长度上限的**唯一事实来源**下沉到 content_blocks，
+    #    消除本模块此前的本地副本（`_ORPHAN_LEAD_IN_RE` 8 备选 vs content_blocks 5 备选、
+    #    `_LEAD_IN_MAX_CHARS` vs 3 处裸 60）——详见 content_blocks 该常量的分叉说明。
+    ORPHAN_LEAD_IN_RE,
+    LEAD_IN_MAX_CHARS,
 )
 from app.services.content_blocks import (
     MAX_INLINE_CODE_BLOCK_LINES as _CONTENT_BLOCKS_MAX_INLINE_CODE_BLOCK_LINES,
@@ -93,7 +98,12 @@ _MERMAID_TYPE_MAP = MERMAID_KEYWORD_TO_CHART_TYPE
 # ✅ 程序级配图上限（对齐 OpenBidKit 编排 Agent 的"程序拍板"原则：
 # AI 只负责提名，程序负责全局上限）。仅在正文生成链路启用（enforce_limits=True），
 # 单测/手工链路默认关闭以保持既有行为：
-# - 每章最多 1 个图表（提示词"每章最多 1 个"的程序级兜底）；
+# - **每个 section_id（叶子小节）**最多 1 个图表（提示词"本节合计最多 1 个图表块"
+#   的程序级兜底）。⚠️ 计数单位是**叶子 section_id**、不是一级章：一个一级章挂 N 个
+#   二级小节时，每个小节各可合法产出 1 张，该一级章最多 N 张。要按一级章计数需解析
+#   sections.parent_id 的树根祖先，而 build_inline_chart_plan 是**无 DB 访问的纯计算**
+#   （锁外执行）；且收紧会删掉当前合法的图表（属行为变更），故本轮不落地 —— 口径已写进
+#   提示词与 tests/test_chart_drop_observability_r48_20261006.py 的口径锁，勿再误改。
 # - 同类型全方案不超过限额（提示词"同一类型全方案不超过 3 次"；ai_image 放宽到 6，
 #   对齐 OpenBidKit 的 ai limit=6）。
 _CHART_PER_SECTION_LIMIT = 1
@@ -285,8 +295,33 @@ def extract_inline_charts(content: str) -> list[tuple[str, str]]:
     return deduped
 
 
+def count_inline_charts(content: str) -> int:
+    """最终正文中真实存活的**内联图表块数量**（未闭合残片不计）。
+
+    ✅ R49（图表产出闭环 · 2026-10-06）：`has_inline_charts` 是布尔出口，无法回答
+    「保留了几张」；`extract_inline_charts` 按 chart_type **去重**（历史语义，登记侧
+    依赖），也不能当计数用。本函数是**计数**的唯一出口，供正文生成的
+    `last_generation_report.chart_count` 消费。
+
+    与 `has_inline_charts` 共用同一事实来源 `iter_inline_chart_fences` 与同一
+    「未闭合 = 不是图」口径（state ∈ {"truncated", "eof"} 一律不计），故
+    `has_inline_charts(c) ⟺ count_inline_charts(c) > 0`，两个出口不可能分叉。
+
+    口径意义：与 `charts_dropped_count`（被删的）配对，可还原完整链路
+    「AI 提名 ≈ chart_count + charts_dropped_count（保留 + 删除）」。此前 report 只有
+    「被删的」没有「留下的」，用户无法区分「本应配图但 AI 零产出」与「产出了但被删」
+    这两种截然不同的情况 —— 前者是提示词/模型问题，后者是限流/校验问题。
+    """
+    return sum(
+        1 for _lang, _code, state, _ord in iter_inline_chart_fences(content)
+        if state not in ("truncated", "eof"))
+
+
 def has_inline_charts(content: str) -> bool:
     """正文是否已含内联图表块（三种围栏：mermaid / chart-json / ai_image）。
+
+    ✅ R49（2026-10-06）：改为 `count_inline_charts(content) > 0` 的薄包装 ——
+    布尔与计数共用唯一事实来源，语义必然一致（此前两个出口各自遍历，存在分叉风险）。
 
     ✅ 修复：原实现漏判 ```ai_image —— 该围栏同样会被 `_scan_inline_charts`
     识别并登记为 chart_predictions(chart_type='ai_image')，是**一等图表类型**，
@@ -302,11 +337,13 @@ def has_inline_charts(content: str) -> bool:
     登记侧 _scan_chart_fences_full / 导出解析侧 _parse_content_blocks /
     改写侧 _apply_chart_fence_edits 均已跳过 eof/truncated，本函数此前仍按
     「围栏存在」计数 —— 若未来被用于「本章是否已有图 → 是否补生成」的粗判，
-    未闭合残片会被误计为已有图。现仅**闭合且可判定**的图表围栏返回 True；
-    当前生产零消费点（仅护栏测试引用），收紧不改变任何现有行为。
+    未闭合残片会被误计为已有图。现仅**闭合且可判定**的图表围栏返回 True。
+
+    生产消费点（R49 起）：`count_inline_charts` 被 sse_handlers 正文落库链路消费
+    （落 `last_generation_report.chart_count` 并随 section_done 下发）；本布尔出口
+    目前仍仅由护栏测试引用。
     """
-    return any(state not in ("truncated", "eof")
-               for _lang, _code, state, _ord in iter_inline_chart_fences(content))
+    return count_inline_charts(content) > 0
 
 
 def _rewrite_code_block(content: str, old_code: str,
@@ -364,14 +401,19 @@ def _rewrite_code_block(content: str, old_code: str,
 
 
 # 引导语尾部特征（"施工工艺流程如下图所示：" / "各阶段人数见下图。" 等）——
-# 与 export._LEAD_IN_HINT_RE 同口径，用于"删块 → 同步回收孤儿引导语"。
-# 收紧为「必须以 图/表 类引导词收尾」，避免误删"各阶段投入如下："这类正常的
-# 列表/表格引导句。
-_ORPHAN_LEAD_IN_RE = re.compile(
-    r"(?:如下图|见下图|如下图示|如下图所示|见下图所示|如图|图示|详见下图)"
-    r"\s*(?:所示)?\s*[:：。]?\s*$")
-# 引导语行长度上限（超过即视为正文长句，不删）
-_LEAD_IN_MAX_CHARS = 60
+# 用于"删块 → 同步回收孤儿引导语"。收紧为「必须以 图/表 类引导词收尾」，
+# 避免误删"各阶段投入如下："这类正常的列表/表格引导句。
+# ✅ R48（2026-10-06 · 判据收敛）：本判据**不再在本地定义**。
+#    旧实现在此处自带一份 8 备选的 `_ORPHAN_LEAD_IN_RE` + 本地 `_LEAD_IN_MAX_CHARS=60`，
+#    而导出侧 `export._pop_orphan_lead_in` 用的是 `content_blocks.LEAD_IN_HINT_RE`
+#    （5 备选）—— 两份正则在实测中判定**完全等价**（8 个备选全部被 5 个经子串匹配
+#    覆盖：详见下图⊃见下图、如下图所示⊃如下图、见下图所示⊃见下图），但按 AGENTS.md
+#    反复记录的「同一判据多处字面量」教训，任一侧被单独修改都会让「删图删不删引导语」
+#    在登记侧与导出侧分叉（一处删、一处留 → 正文出现新的悬空引用）。
+#    现统一从 content_blocks 引入；`_LEAD_IN_NOT_PARA_RE` 仍为本地常量——它是
+#    content_blocks 侧「`type != paragraph` 结构判据」的行级近似，二者判据不同，不合并。
+_ORPHAN_LEAD_IN_RE = ORPHAN_LEAD_IN_RE
+_LEAD_IN_MAX_CHARS = LEAD_IN_MAX_CHARS
 # 显然不是"独立引导语段落"的行首标记（标题 / 列表 / 引用 / 表格 / 围栏 / 编号）
 # —— 这些行即使以"如下图所示"收尾也不能删（它们是结构元素，删了会破坏层级）。
 _LEAD_IN_NOT_PARA_RE = re.compile(
@@ -581,9 +623,47 @@ async def _load_scheme_type_counts(db, scheme_id: str,
         return {}
 
 
+def _record_chart_drop(dropped_out: list | None, chart_type: str, reason: str) -> None:
+    """把「图表块被系统删除/裁剪」记入观测清单（可观测性唯一出口）。
+
+    ✅ R48（P1 · 删图零可观测）：旧实现每一次删除只打日志，**不进任何对用户可见的通道**
+    —— 不进 SSE 事件、不进正文生成 report、不进导出预检。后果是用户看到的是一份
+    「少了几张图却毫无理由」的正文：正文里那句「施工工艺流程如下图所示：」的引导语
+    已被回收（或残留），但**没有任何地方告诉他这张图被系统删掉了、为什么删**。
+    而删图有 4 条理由（每章≤1 超限 / 同类型全方案超限 / 语法校验修复失败 /
+    ai_image 缺 prompt），全部只写进 backend.log，需要排障者去 grep 才找得到。
+
+    本函数是登记侧全部删图出口的唯一记录点：调用方传 ``dropped_out`` 列表即开启采集，
+    不传则行为与旧版**完全一致**（纯日志、零开销），属**加法式**改动。
+    """
+    if dropped_out is None:
+        return
+    dropped_out.append({"type": chart_type, "reason": reason})
+
+
+def chart_drop_label(drop: dict | None) -> str:
+    """把一条删图记录格式化为 ``类型/理由`` 的可读串（日志与展示共用）。
+
+    ✅ R49（修 R48 遗留缺陷）：`_record_chart_drop` 写入的键是 **"type"**，
+    而 sse_handlers 的删图日志此前用 `d.get("chart_type", "?")` 读取 —— 键名不匹配，
+    图表类型**恒打印 "?"**，只剩理由。日志本是删图可观测性的兜底通道（report 与
+    section_done 之外的最后一道），类型静默丢失会让排障者无法判断「到底是哪类图被删」
+    —— 而这正是删图排查最需要的信息。现收敛为唯一读出口：读侧与写侧同源，
+    键名不可能再分叉（与此前「同一判据多处各自实现」的反复踩坑同族）。
+
+    兼容两种历史键名（``type`` / ``chart_type``），未知形态回退 "?" 而非抛异常
+    （日志路径上任何异常都会让整条删图记录消失）。
+    """
+    d = drop or {}
+    ct = str(d.get("type") or d.get("chart_type") or "?").strip() or "?"
+    rs = str(d.get("reason") or "?").strip() or "?"
+    return f"{ct}/{rs}"
+
+
 def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
                             enforce_limits: bool = False,
                             scheme_type_counts: dict[str, int] | None = None,
+                            dropped_out: list | None = None,
                             ) -> tuple[str, list[tuple]]:
     """**纯计算**：扫描 → 校验/修复 → 限额裁剪，产出修正后的正文与待写入行。
 
@@ -594,7 +674,7 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
     - 每一块都过校验（mermaid 语法 / chart-json 专用校验器）；
     - 校验失败走修复（mermaid 正则修复）；修复成功用修复后代码替换正文并登记；
     - 修复失败则从正文删除该代码块（宁缺勿滥，避免导出坏图）；
-    - enforce_limits=True 时启用程序级配图上限（每章≤1、同类型全方案限额）。
+    - enforce_limits=True 时启用程序级配图上限（每个 section_id ≤1、同类型全方案限额）。
 
     Returns:
         ``(修正后的正文, rows)``；rows 每项为 ``INSERT INTO chart_predictions``
@@ -641,11 +721,19 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
     #    去重只作用于"写入 chart_predictions"这一步。
     registered_types: set[str] = set()
     for ct, code, ordinal in charts:
-        # ✅ 配图上限：每章最多 1 个；同类型全方案不超过限额。
+        # ✅ 配图上限：**每个 section_id（叶子小节）最多 1 个**；同类型全方案不超过限额。
+        #    ⚠️ 口径说明（R48 记录，刻意不改行为）：提示词里说的是「每章≤1 个图表」，
+        #    而此处按**正在处理的 section_id**（正文生成的最小单位 = 叶子小节）计数。
+        #    一个一级章下挂 N 个二级小节时，各自合法产出 1 张 ⇒ 该章最多 N 张。
+        #    按「一级章」计数需要先解析章节树根祖先（`sections.parent_id`），
+        #    而本函数是**无 DB 访问的纯计算**（P1-3：锁外执行），且收紧限额会删除
+        #    目前合法的图表 —— 属行为变更，按「默认关闭 + 单列开关」原则本轮不落地。
+        #    收紧方向若落地，判据应与下方「同类型全方案限额」同源（都读 chart_predictions）。
         #    超限块直接从正文移除（与"校验失败删块"同一宁缺勿滥语义）。
         if enforce_limits:
             if section_chart_count >= _CHART_PER_SECTION_LIMIT:
                 edits[ordinal] = None
+                _record_chart_drop(dropped_out, ct, "per_section_limit")
                 logger.info("章节 %s 图表 [%s] 超出每章 %d 个上限，已移除",
                             section_id[:8], ct, _CHART_PER_SECTION_LIMIT)
                 continue
@@ -654,6 +742,7 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
             _used = counts.get(ct, 0) + batch_type_counts.get(ct, 0)
             if _used >= _limit:
                 edits[ordinal] = None
+                _record_chart_drop(dropped_out, ct, "scheme_type_limit")
                 logger.info("章节 %s 图表 [%s] 全方案已达 %d 个上限，已移除",
                             section_id[:8], ct, _limit)
                 continue
@@ -671,11 +760,19 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
                 _prompt, _title = "", "AI 配图"
             if not _prompt:
                 edits[ordinal] = None
+                _record_chart_drop(dropped_out, "ai_image", "missing_prompt")
                 logger.warning("章节 %s 内联 ai_image 缺少 prompt，已从正文删除",
                                section_id[:8])
                 continue
             _payload = build_chart_envelope(code=code, title=_title, reason="ai_image")
             if not _payload:
+                # ✅ R48（不变式加固）：本分支含义是「本块不会登记」，必须同步删块。
+                #    旧实现直接 continue —— 块留在正文里却无 chart_predictions 登记，
+                #    导出照渲、图表清单查不到（幽灵图）。当前调用图下该分支不可达
+                #    （_scan_chart_fences_full 已跳过空块），但「continue 即不登记」
+                #    必须与「删块」成对，否则日后任何新增上游都会静默造出幽灵图。
+                edits[ordinal] = None
+                _record_chart_drop(dropped_out, "ai_image", "empty_envelope")
                 continue
             if "ai_image" in registered_types:
                 # 同类型第 2 块：已通过校验，但不重复登记（清单口径）
@@ -689,6 +786,7 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
         ok, fixed = _validate_inline_chart(ct, code)
         if not ok:
             edits[ordinal] = None
+            _record_chart_drop(dropped_out, ct, "validation_failed")
             logger.warning("章节 %s 内联图表 [%s] 校验修复失败，已从正文删除",
                            section_id[:8], ct)
             continue
@@ -708,12 +806,22 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
                 payload_json = build_chart_envelope(
                     data=json.loads(code), title="正文同步生成")
             except (json.JSONDecodeError, TypeError):
-                logger.warning("章节 %s 的图表数据块不是合法 JSON，跳过登记",
+                # ✅ R48（不变式加固）：校验已通过、信封构造却失败 —— 该块无法登记，
+                #    必须从正文删除。旧实现直接 continue 留下未登记的块（幽灵图）。
+                #    当前调用图下不可达（_validate_inline_chart 已对 JSON 形态做过
+                #    json.loads 且原样返回 code），此处是「continue 即不登记 ⇒ 必删块」
+                #    这条不变式的结构性兜底。
+                edits[ordinal] = None
+                _record_chart_drop(dropped_out, ct, "invalid_json")
+                logger.warning("章节 %s 的图表数据块不是合法 JSON，已从正文删除",
                                section_id[:8])
                 continue
         else:
             payload_json = build_chart_envelope(code=code, title="正文同步生成")
         if not payload_json:
+            # 同上：信封为空 ⇒ 无法登记 ⇒ 必须删块（旧实现漏删）。
+            edits[ordinal] = None
+            _record_chart_drop(dropped_out, ct, "empty_envelope")
             continue
         # ✅ 配图上限计数：**所有通过校验的图表块**都要计入（含同类型的第 2 块），
         #    否则"每章最多 1 个"对同类型重复块失效。
@@ -735,7 +843,8 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
 
 
 async def apply_inline_chart_plan(db, section_id: str, rows: list[tuple],
-                                  content: str | None = None) -> str | None:
+                                  content: str | None = None,
+                                  dropped_out: list | None = None) -> str | None:
     """在调用方事务内写入图表登记（**不 commit**）。
 
     ✅ 全量同步：无论本次是否含图，都先清理该章节的历史登记，避免"正文里没有的图"
@@ -760,6 +869,9 @@ async def apply_inline_chart_plan(db, section_id: str, rows: list[tuple],
         section_id: 章节 id。
         rows: `build_inline_chart_plan` 产出的 INSERT 参数元组列表。
         content: 可选，当前章节正文；传入时返回裁剪后的正文。
+        dropped_out: 可选，观测清单 —— 锁内复核跳过登记的图表类型逐条记入
+            （reason 为 scheme_type_limit / insert_failed / insert_none）。
+            不传则行为与旧版完全一致，属加法式改动。
 
     Returns:
         传入 content 时返回裁剪后的正文；否则返回 None。
@@ -790,6 +902,21 @@ async def apply_inline_chart_plan(db, section_id: str, rows: list[tuple],
         live = {}
     running: dict[str, int] = {}
     skipped_types: set[str] = set()
+    _drop_seen: set[tuple[str, str]] = set()
+
+    def _note_drop(chart_type: str, reason: str) -> None:
+        """记录一次「跳过登记」（同一 类型+理由 只记一次）。
+
+        本函数的去重是刻意的：`skipped_types` 本身就是按类型去重的，若此处为
+        同一类型重复追加，report 里的 ``charts_dropped`` 计数会虚高，用户会以为
+        系统删了比实际更多的图。
+        """
+        key = (chart_type, reason)
+        if key in _drop_seen:
+            return
+        _drop_seen.add(key)
+        _record_chart_drop(dropped_out, chart_type, reason)
+
     for row in rows:
         ct = row[3] if len(row) > 3 else ""
         _limit = _CHART_SCHEME_TYPE_LIMITS.get(ct, _CHART_SCHEME_TYPE_DEFAULT_LIMIT)
@@ -797,6 +924,7 @@ async def apply_inline_chart_plan(db, section_id: str, rows: list[tuple],
             logger.info("章节 %s 图表 [%s] 全方案已达 %d 个上限（事务内复核），跳过登记",
                         section_id[:8], ct, _limit)
             skipped_types.add(ct)
+            _note_drop(ct, "scheme_type_limit")
             continue
         # ✅ BUG 修复（2026-10-05 · F-3，R13 同构）：aiosqlite 在事务冲突 / 连接
         #    异常时 `await db.execute(...)` 可能返回 None（SELECT 早已在同一函数内
@@ -815,6 +943,7 @@ async def apply_inline_chart_plan(db, section_id: str, rows: list[tuple],
                 "章节 %s 图表 [%s] 事务内 INSERT 失败，已降级为跳过登记（正文将同步裁剪）: %s",
                 section_id[:8], ct, _e)
             skipped_types.add(ct)
+            _note_drop(ct, "insert_failed")
             continue
         if _res is None:
             logger.warning(
@@ -822,6 +951,7 @@ async def apply_inline_chart_plan(db, section_id: str, rows: list[tuple],
                 "已降级为跳过登记（正文将同步裁剪）",
                 section_id[:8], ct)
             skipped_types.add(ct)
+            _note_drop(ct, "insert_none")
             continue
         running[ct] = running.get(ct, 0) + 1
     if content is not None and skipped_types:
@@ -847,7 +977,8 @@ async def register_inline_charts(db, scheme_id: str, section_id: str,
     - 每块先校验（mermaid 语法 / chart-json 专用校验器）；
     - 校验失败走修复（mermaid 正则修复）；修复成功用修复后代码替换正文并登记；
     - 修复失败则从正文删除该代码块（宁缺勿滥，避免导出坏图）；
-    - enforce_limits=True 时启用程序级配图上限（每章≤1、同类型全方案限额）；
+    - enforce_limits=True 时启用程序级配图上限（每个 section_id（叶子小节）≤1、同类型全方案限额；
+      计数单位口径见 _CHART_PER_SECTION_LIMIT 注释）；
     - 返回 (登记数量, 修正后的正文)；不 commit，由调用方与正文更新同事务提交。
 
     ✅ BUG 修复（同类型第 2 个块脱离管线）：本函数消费 `_scan_inline_charts`

@@ -25,6 +25,11 @@ from ._registry import (
     render_prompt,
     validate_prompt_variables,
 )
+# ✅ R48（2026-10-06 · prompts 运行时指标）：热路径渲染计数。
+#    _metrics 顶层只依赖 stdlib（collections.Counter），不反向 import _cache/_registry，
+#    故此处顶层 import 无循环依赖风险；每个埋点内部已 try/except 兜底，计数失败
+#    绝不影响 prompt 渲染主流程。
+from ._metrics import record_render, record_render_error
 
 logger = logging.getLogger(__name__)
 
@@ -229,58 +234,68 @@ def get_prompt(key: str, **kwargs) -> str:
       生成质量静默劣化且无任何报错。现在空/纯空白一律视为未配置，
       回退到注册表的出厂默认。
     """
-    with _cache_lock:
-        cached = _get_prompt_cache().get(key)
-    # 关键：仅当缓存内容包含有效字符时才采用 DB 版本
-    if cached is not None and cached.strip():
-        prompt = cached
-    else:
-        meta = _ALL_PROMPTS.get(key)
-        if not meta:
-            # ✅ R39 T1：先惰性补注册「定义在包外」的提示词（投标分析域 19 条），
-            #   再判定是否真的未知键。否则提示词管理页会列不出
-            #   这批模板，而提取侧也拿不到 DB 覆盖。
-            try:
-                from app.services.ai.prompts._registry import register_lazy_prompts
-                register_lazy_prompts()
-            except Exception as e:  # noqa: BLE001 - 补注册失败不得影响读取
-                logger.warning("惰性补注册失败: %s", e)
+    # ✅ R48（2026-10-06 · 运行时指标）：成功返回记 render_total、异常路径记
+    #    render_errors。整段包 try/except —— 计数本身在 _metrics 内 fail-soft，
+    #    这里的 except 只兜「渲染本身抛错」这一真实事件，记完原样 re-raise，
+    #    绝不吞异常。未知 key 的 ``return ""`` 在 try 内直接退出（不计入渲染，
+    #    因为它不是任何已注册模板的渲染）。
+    try:
+        with _cache_lock:
+            cached = _get_prompt_cache().get(key)
+        # 关键：仅当缓存内容包含有效字符时才采用 DB 版本
+        if cached is not None and cached.strip():
+            prompt = cached
+        else:
             meta = _ALL_PROMPTS.get(key)
-        if not meta:
-            logger.warning("Prompt key '%s' not found in registry or cache", key)
-            return ""
-        if cached is not None and not cached.strip():
-            logger.warning(
-                "Prompt '%s' 在数据库中内容为空，已回退到出厂默认（避免下发空提示词）", key
-            )
-        prompt = meta.get("default_content") or meta.get("content", "")
+            if not meta:
+                # ✅ R39 T1：先惰性补注册「定义在包外」的提示词（投标分析域 19 条），
+                #   再判定是否真的未知键。否则提示词管理页会列不出
+                #   这批模板，而提取侧也拿不到 DB 覆盖。
+                try:
+                    from app.services.ai.prompts._registry import register_lazy_prompts
+                    register_lazy_prompts()
+                except Exception as e:  # noqa: BLE001 - 补注册失败不得影响读取
+                    logger.warning("惰性补注册失败: %s", e)
+                meta = _ALL_PROMPTS.get(key)
+            if not meta:
+                logger.warning("Prompt key '%s' not found in registry or cache", key)
+                return ""
+            if cached is not None and not cached.strip():
+                logger.warning(
+                    "Prompt '%s' 在数据库中内容为空，已回退到出厂默认（避免下发空提示词）", key
+                )
+            prompt = meta.get("default_content") or meta.get("content", "")
 
-    # ✅ 先动态解析 {SHARED_*} 占位符（避免其被误报为 missing 变量）
-    prompt = _resolve_shared_keys(prompt)
+        # ✅ 先动态解析 {SHARED_*} 占位符（避免其被误报为 missing 变量）
+        prompt = _resolve_shared_keys(prompt)
 
-    # BUG-FIX（2026-09-23 · 正文生成深度审计 · P0 日志噪音）：
-    #   旧实现把缺失变量校验放在 `if kwargs:` 之外，导致任何"取原始模板"的合法
-    #   调用 get_prompt("key")（无 kwargs，例如提示词编辑器预览、/prompts 列表
-    #   接口、只读模板的内部用法）都会把**全部**变量当成缺失上报。真实日志里
-    #   因此每次正文生成都刷出：
-    #       2026-09-23 20:33:57,539 _cache: Prompt 'content_generation_system'
-    #           has missing variables: ['scheme_name', 'scheme_type',
-    #                                   'section_number', 'standards_text']
-    #   而 scheme_name / scheme_type 实际是传了的。"没传参数"根本无从判断
-    #   "缺了什么"，所以校验只在 kwargs 非空时有意义 —— 这也让告警语义与
-    #   validate_prompt_variables() 自身一致（后者同样只在有 kwargs 时才有意义）。
-    if kwargs:
-        missing = [
-            v for v in validate_prompt_variables(key, **kwargs)
-            if not v.startswith("SHARED_")
-        ]
-        if missing:
-            logger.warning(
-                "Prompt '%s' has missing variables (not passed in call): %s",
-                key, missing,
-            )
-        prompt = render_prompt(prompt, **kwargs)
+        # BUG-FIX（2026-09-23 · 正文生成深度审计 · P0 日志噪音）：
+        #   旧实现把缺失变量校验放在 `if kwargs:` 之外，导致任何"取原始模板"的合法
+        #   调用 get_prompt("key")（无 kwargs，例如提示词编辑器预览、/prompts 列表
+        #   接口、只读模板的内部用法）都会把**全部**变量当成缺失上报。真实日志里
+        #   因此每次正文生成都刷出：
+        #       2026-09-23 20:33:57,539 _cache: Prompt 'content_generation_system'
+        #           has missing variables: ['scheme_name', 'scheme_type',
+        #                                   'section_number', 'standards_text']
+        #   而 scheme_name / scheme_type 实际是传了的。"没传参数"根本无从判断
+        #   "缺了什么"，所以校验只在 kwargs 非空时有意义 —— 这也让告警语义与
+        #   validate_prompt_variables() 自身一致（后者同样只在有 kwargs 时才有意义）。
+        if kwargs:
+            missing = [
+                v for v in validate_prompt_variables(key, **kwargs)
+                if not v.startswith("SHARED_")
+            ]
+            if missing:
+                logger.warning(
+                    "Prompt '%s' has missing variables (not passed in call): %s",
+                    key, missing,
+                )
+            prompt = render_prompt(prompt, **kwargs)
+    except Exception:
+        record_render_error(key)
+        raise
 
+    record_render(key)
     return prompt
 
 

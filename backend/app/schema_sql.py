@@ -386,6 +386,10 @@ CREATE TABLE IF NOT EXISTS compliance_check (
     --   跨秒交错时 rowid 段会错切（多读的批次被截头/混批）。历史行空串，
     --   读取端遇空回退 rowid 锚定（向后兼容，无需数据迁移）。由 db.py::_migrate 补列。
     batch_id TEXT DEFAULT '',
+    -- ✅ 2026-10-07（陈旧结论排除）：本行结论对应的正文指纹。总检聚合时与
+    --   当前正文指纹比对，正文已变即跳过该行（不计分），避免旧结论计入评分。
+    --   空串 = 本功能上线前的历史行 → 视为不过期（fail-open）。
+    content_fingerprint TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_compliance_scheme ON compliance_check(scheme_id);
@@ -402,6 +406,8 @@ CREATE TABLE IF NOT EXISTS consistency_audit (
     scheme_id TEXT DEFAULT '',
     score REAL DEFAULT 0,
     issues TEXT DEFAULT '[]',
+    -- ✅ 2026-10-07：与 compliance_check 同口径的正文指纹（空串 = 历史行，fail-open）
+    content_fingerprint TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 -- ✅ 性能优化（2026-09-24 · 遗留项 #3）：一致性审计「最近一次」与历史列表
@@ -425,6 +431,9 @@ CREATE TABLE IF NOT EXISTS consistency_conflicts (
     repair_instruction TEXT,
     reason TEXT,
     status TEXT DEFAULT 'pending',
+    -- ✅ 2026-10-07（陈旧结论排除）：本批扫描对应的正文指纹。总检聚合时与
+    --   当前正文指纹比对，正文已变即跳过本批冲突（不计分）。空串 = 历史行，fail-open。
+    content_fingerprint TEXT DEFAULT '',
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_cc_scheme_scan ON consistency_conflicts(scheme_id, scan_id);

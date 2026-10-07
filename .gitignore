@@ -126,6 +126,10 @@ _tmp_*.ps1
 _tmp_*.py
 _tmp_*.txt
 _find_copy.log
+# AI Agent 批量回归的 stdout/stderr 重定向（2026-10-07 加固，如 _ab_aibase.*）
+_ab_*
+# 各专项过程产物（基线日志/报告/源码备份，仅本地留存，不入库；2026-10-07）
+artifacts/
 patch_preview_pipeline_summary.py
 patch_preview_pipeline_summary.py.bak*
 kill_port_selftest.ps1.log

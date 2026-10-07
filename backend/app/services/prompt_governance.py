@@ -106,16 +106,35 @@ def split_labeled_segments(text: str) -> tuple[str, list[dict], str]:
         if m:
             label = m.group(1).strip()
             first = m.group(2)
+            # ✅ 2026-10-07（BUG-D2 · leading 恒为空）：正则以 `^\s*` 开头，
+            #   缩进被正则本身吃掉，而 `m.start(0)` 对 `.match()` 恒为 0
+            #   ⇒ 本字段**永远取到空串**，段头前的缩进在往返中被静默丢弃
+            #   （`  【A】：内容` → `【A】：内容`），且 `_render_segment` /
+            #   `_overhead_of` 一直在消费这个死字段，看起来像有生效。
+            #   现按「行首空白长度」取真实缩进。
+            lead = line[:len(line) - len(line.lstrip())]
             # 标签行 : 后没有正文（正文从下一行开始）→ 分隔符是换行
             head_sep = "" if first.strip() else "\n"
             body = [first] if first.strip() else []
             segs.append({
                 "label": label,
                 "priority": segment_priority_of(label),
-                "head": f"【{label}】：",
+                # ✅ 2026-10-07（BUG-D1 · 段头不再重写）：原实现 `f"【{label}】："`
+                #   把原始段头整段重写，导致 4 种形态往返后**静默失真**（实测）：
+                #     ① 半角冒号 `【A】:内容` → `【A】：内容`
+                #     ② 冒号后多空格 `【A】：  内容` → `【A】： 内容`（丢 1 个空格）
+                #     ③ 标签内空格 `【 A 】：内容` → `【A】：内容`（label.strip() 吞掉）
+                #     ④ 全角/半角混排的段头一律被强制全角化
+                #   现直接截取「段头原文」= 行首到正文首字符之前的全部字符，
+                #   分隔符、间隔空白、标签内空格一律按原样保留。
+                #   注意必须跳过 `leading` 前缀 —— `m.start(2)` 是相对**行首**的
+                #   绝对偏移，而缩进已单独记在 `leading` 字段里，不跳一次会
+                #   把缩进重复输出（`  【A】：内容` → `    【A】：内容`）。
+                "head": line[len(lead):m.start(2)],
                 "head_sep": head_sep,
                 "body": body,
-                "leading": line[:m.start(0)],
+                # BUG-D2：见函数开头的 lead 计算说明（缩进曾被恒空吞掉）。
+                "leading": lead,
             })
         elif segs:
             segs[-1]["body"].append(line)
@@ -129,12 +148,36 @@ def split_labeled_segments(text: str) -> tuple[str, list[dict], str]:
     trailing = "\n" if text.endswith("\n") else ""
     if trailing and prefix_parts and prefix_parts[-1] == "":
         prefix_parts.pop()  # 末尾空串属于换行符本身，不当前缀内容
+    # ✅ 2026-10-07（BUG-D3 · 段尾换行重复计）：上一段的 pop 只对 `prefix_parts`
+    #   生效，而文本以 `\n` 结尾时多出的空串尾巴会被归到**最后一个段**的
+    #   body（`segs[-1]["body"].append("")`）—— 同一个换行符被记了两次：
+    #   一次在 body 尾部空串、一次在 `trailing`。旧版靠 `_render_segment` 的
+    #   `.rstrip("\n")` 把这个重复换行裁掉才「看起来」无损，代价是**段间空行**
+    #   和**3 个以上尾随换行**一并被裁（`【A】：内容\n\n` 往返后变 `内容\n`）。
+    #   现在在拆分侧只 pop 掉这一个由 split("\n") 制造的尾巴，`_render_segment`
+    #   不再裁换行，段间空行与尾随换行都能逐字节还原。
+    if trailing and segs and segs[-1]["body"] and segs[-1]["body"][-1] == "":
+        segs[-1]["body"].pop()
     return "\n".join(prefix_parts), segs, trailing
 
 
 def _render_segment(seg: dict) -> str:
+    """还原单段文本。
+
+    ✅ 2026-10-07（BUG-D3/D4 · 往返不再丢字）两处修正：
+
+    ① 原先对正文做 ``.rstrip("\\n")``，把段尾的空行整段裁掉：
+       `【A】：内容\\n\\n【B】：内容2` 往返后变成 `【A】：内容\\n【B】：内容2`，
+       段间的空行（原文的分节信号）静默消失。现在保留段内所有换行原样输出。
+
+    ② 段头独占一行且无正文时（`head_sep == "\\n"`、`body == []`）原先会输出
+       一个**多余**的换行 —— 段间换行由 ``assemble_segments`` 统一提供，
+       此处再加一次就多出一行空行。现在这种情形直接返回段头。
+    """
+    if not seg["body"]:
+        return seg["leading"] + seg["head"]
     return (seg["leading"] + seg["head"] + seg.get("head_sep", "")
-            + "\n".join(seg["body"]).rstrip("\n"))
+            + "\n".join(seg["body"]))
 
 
 def _segment_body(seg: dict) -> str:
@@ -251,6 +294,21 @@ def allocate_context_budget(text: str, budget: int,
             detail.append({"label": seg["label"], "priority": seg["priority"],
                            "from": len(body), "to": len(body), "cut": False})
         out_segs.append(seg)
+
+    # ✅ 2026-10-07（BUG-D6 · 已公开却从未接线的埋点）：
+    #   `_metrics.token_budget_truncated` 是运维端点对外暴露的 5 个计数器之一，
+    #   但全仓**零调用方** —— 永远是空 dict。运维看到 `token_budget_truncated: {}`
+    #   无法区分「本次没截断」与「从未埋点」，是典型的假绿灯信号。
+    #   本函数是唯一真正执行「上下文超预算被切」的地方，key 取段标签
+    #   （`全局事实` / `知识库` / `资料摘要`……），便于按资料类型定位削减来源。
+    #   `record_*` 自身 fail-soft（_inc 吞掉一切异常），观测指标不得阻断主流程。
+    try:
+        from app.services.ai.prompts import _metrics as _pm
+        for _d in detail:
+            if _d.get("cut"):
+                _pm.record_token_budget_truncated(_d.get("label", ""))
+    except Exception:  # noqa: BLE001
+        logger.debug("上下文预算截断埋点失败（忽略）", exc_info=True)
 
     result = assemble_segments(prefix, out_segs, trailing)
     info = {
@@ -421,11 +479,23 @@ def guard_external_segments(text: str, *, labels: tuple[str, ...] = MATERIAL_LAB
         return text
     prefix, segs, trailing = split_labeled_segments(text)
     if not segs:
-        # ✅ 2026-09-25（BUG-C 兼容语义）：文本中不含任何「【标签】：」段头时，
-        #   整份内容即视为外部资料原文，直接整体加围栏（与旧版
-        #   guard_material 行为一致，保持向后兼容）。
-        if not prefix:
-            return guard_material("", text, warn=warn) if text.strip() else text
+        # ✅ 2026-10-07（BUG-D5 · 死分支 + 注释与行为相反）：原实现是
+        #     if not prefix:
+        #         return guard_material("", text, warn=warn) if text.strip() else text
+        #     return text
+        # 并配一条注释声称「不含段头时整份内容视为外部资料，整体加围栏」。
+        # 但 `split_labeled_segments` 把所有不匹配的行都归入 `prefix`，所以
+        # `segs == []` 且 `text` 非空时 `prefix` **必然非空** —— 那个加围栏的
+        # 分支**永远不可达**，实际走的永远是 `return text`（原样返回）。
+        # 更糟的是注释与 docstring 底部的契约「无匹配段原样返回」**直接矛盾**，
+        # 后人照注释「修好」它会把整份上下文（含系统自建的可信指令段）
+        # 包进「以下为外部资料原文」围栏，等于把 2026-09-25 的 BUG-C
+        # 原样带回（见本函数开头注释：会**反向降低**防护效果）。
+        # 现删除死分支，注释按真实契约改写。行为逐字节不变。
+        #   · 无匹配段 = 全篇都不是资料段（通常是纯指令文本），原样返回
+        #     才是正确选择：围栏只该包住「外部不可信资料」，不能包住可信指令。
+        #   · 需要「无标签整段也加围栏」的场景请显式走 `guard_material()`，
+        #     由调用方自己判断该文本是否确实来自外部。
         return text
     # 单段且无前缀 = 整份上下文只有 1 段外部资料：段头 + 正文整体入围栏
     # （与旧版 guard_material 的整体围栏语义一致，向后兼容单段资料场景）。
@@ -509,5 +579,58 @@ def redact_sensitive(text: str) -> tuple[str, int]:
             return "[已脱敏凭据]"
         out = pat.sub(_sub, out)
     return out, count
+
+
+# ==========================================================================
+# 二、字符预算分配器（原 sse_handlers._allocate_char_budgets · R47 债-2 下沉）
+# ==========================================================================
+#: 每个小节的保底字符数：低于此值该小节等于没保留
+MIN_SECTION_CHARS = 150
+#: 单个小节最多占用总预算的比例（巨节不得吃掉全部预算）
+MAX_SINGLE_SECTION_RATIO = 0.35
+
+
+def allocate_char_budgets(lengths: list[int], budget: int) -> list[int]:
+    """按各小节长度**按比例**分配字符预算，带保底与封顶（总和 ≤ budget）。
+
+    背景（2026-09-23）：旧实现对整份文本做「头部优先切片」（`text[:budget]`），
+    20 个提取项里第 6 项之后**整段消失** —— 后面的项目参数（监测、验收等）
+    对目录生成完全不可见。现改为按小节比例分配，每个小节都保留代表内容。
+
+    规则：
+    - 每项保底 ``min_section_chars``（小节太短就完全没信息）；
+    - 单项封顶 ``budget * max_single_ratio``（巨节不得吃掉全部预算）；
+    - 未超预算时等比即恒等（原样返回，不会无谓截断）。
+
+    ✅ 2026-10-06（R47 债-2）：本函数从 ``app.routers.sse_handlers`` 下沉到本模块。
+    业务路由器 ``compliance`` 此前反向 import 超大路由器 sse_handlers 的私有函数
+    ``_allocate_char_budgets``，分层上是反向耦合；现统一到 ``prompt_governance``
+    （预算本就归它管），``sse_handlers`` 内以
+    ``allocate_char_budgets as _allocate_char_budgets`` 保留旧名字绑定，内部
+    所有调用一行不改；``compliance`` 改 import 新路径。**函数行为逐字不变**。
+    """
+    if not lengths:
+        return []
+    n = len(lengths)
+    total = int(sum(lengths) or 0)
+    budget = int(budget or 0)
+    if budget <= 0:
+        return [0] * n
+    if total <= budget:
+        return [int(x) for x in lengths]
+    min_chars = min(MIN_SECTION_CHARS, max(1, budget // max(n, 1) * 2))
+    cap = max(1, int(budget * MAX_SINGLE_SECTION_RATIO))
+    # 保底先占位，剩余按长度比例分配
+    base = [min(min_chars, int(x)) for x in lengths]
+    remaining = budget - sum(base)
+    if remaining <= 0:
+        return base
+    flexible = [max(0, int(lengths[i]) - base[i]) for i in range(n)]
+    flex_total = sum(flexible)
+    if flex_total <= 0:
+        return base
+    extra = [min(cap - base[i], int(remaining * flexible[i] / flex_total))
+             for i in range(n)]
+    return [base[i] + extra[i] for i in range(n)]
 
 

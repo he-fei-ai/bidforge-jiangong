@@ -349,6 +349,78 @@ describe("buildUploadNotice", () => {
   });
 });
 
+// -------------- 上传上限文案按后端下发值渲染（2026-10-05 D1） --------------
+describe("上传反馈文案按实际生效上限渲染", () => {
+  const LIMITS = {
+    maxBytes: 100 * 1024 * 1024, // 100MB
+    maxTotalBytes: 500 * 1024 * 1024, // 500MB
+    maxFiles: 5,
+  };
+
+  it("传入 limits：oversize/too_many/quota 文案使用下发的实际上限（非硬编码 30/20/200）", () => {
+    const fb = summarizeUploadResult(
+      {
+        saved_count: 1,
+        oversize: ["a.zip"],
+        too_many: ["b.docx", "c.docx"],
+        quota_exceeded: true,
+        quota_files: ["d.txt"],
+      },
+      LIMITS,
+    );
+    const joined = fb.rejected.join("|");
+    expect(joined).toContain("1 个超过 100MB");
+    expect(joined).toContain("2 个超出单次 5 个上限");
+    expect(joined).toContain("累计体积超过 500MB 上限（1 个文件未保存）");
+    // 不得残留硬编码旧文案
+    expect(joined).not.toContain("30MB");
+    expect(joined).not.toContain("200MB");
+    expect(joined).not.toContain("单次 20 个");
+  });
+
+  it("buildUploadNotice 同样透传 limits（toast 文案与预检口径一致）", () => {
+    const n = buildUploadNotice(
+      { saved_count: 0, oversize: ["a.zip"] },
+      LIMITS,
+    );
+    expect(n.tone).toBe("error");
+    expect(n.text).toContain("1 个超过 100MB");
+    expect(n.text).not.toContain("30MB");
+  });
+
+  it("不传 limits → 回落历史默认文案（向后兼容，逐字一致）", () => {
+    const fb = summarizeUploadResult({
+      saved_count: 0,
+      oversize: ["a.zip"],
+      too_many: ["b.docx"],
+      quota_exceeded: true,
+    });
+    const joined = fb.rejected.join("|");
+    expect(joined).toContain("1 个超过 30MB");
+    expect(joined).toContain("1 个超出单次 20 个上限");
+    expect(joined).toContain("累计体积超过 200MB 上限");
+  });
+
+  it("limits 字段缺失 / 非法 → 该项回落默认值，其余项仍按下发值", () => {
+    const fb = summarizeUploadResult(
+      { saved_count: 0, oversize: ["a.zip"], too_many: ["b.docx"] },
+      { maxBytes: 0, maxFiles: Number.NaN },
+    );
+    const joined = fb.rejected.join("|");
+    // 非法值不得等价于「无上限」，回落默认
+    expect(joined).toContain("1 个超过 30MB");
+    expect(joined).toContain("1 个超出单次 20 个上限");
+  });
+
+  it("字节上限非整 MB → 四舍五入为整数 MB 文案", () => {
+    const fb = summarizeUploadResult(
+      { saved_count: 0, oversize: ["a.zip"] },
+      { maxBytes: 50.6 * 1024 * 1024 },
+    );
+    expect(fb.rejected.join("|")).toContain("1 个超过 51MB");
+  });
+});
+
 describe("导出派生逻辑", () => {
   it("只保留有代码且正文已放置的图表，兼容旧数据缺少 placed 字段", () => {
     const items = [

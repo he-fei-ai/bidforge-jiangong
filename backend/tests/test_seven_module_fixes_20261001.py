@@ -84,15 +84,30 @@ def _stopped_payloads():
 
 
 def test_c3_all_stopped_events_carry_failed_count():
-    """每一处 stopped 载荷都必须含 failed_count（前端按该字段读取）。"""
+    """每一处 stopped 载荷都必须含 failed_count（前端按该字段读取）。
+
+    ✅ 2026-10-05 更新锚点：正文生成的两条 stopped 路径已改由嵌套的
+    `_stopped_payload` 单一拼装点产出，文件里不再有
+    `json.dumps({'event':'stopped', ...})` 内联字面量 —— 旧正则因此扫不到
+    任何块（`assert blocks` 恒失败）。这不是回归，而是**断言锚点失效**：
+    真正要守的不变式是「stopped 载荷必含 failed_count」，故改为锁定
+    拼装点本体 + 两条调用点，覆盖面比旧正则更强（旧正则只保证"某处字面量里
+    有这个字段"，无法发现拼装点本体把字段删掉）。
+    """
     src = _src(SSE_PATH)
-    # 定位所有 stopped 事件构造
-    blocks = re.findall(
-        r"json\.dumps\(\{[^{}]*?'event'\s*:\s*'stopped'[^{}]*?\}", src)
-    assert blocks, "未找到 stopped 事件构造"
-    for b in blocks:
-        assert "failed_count" in b, (
-            f"stopped 载荷缺 failed_count，前端将恒读 0：{b[:120]}")
+    gen = src[src.index("async def generate_content("):]
+    i = gen.index("def _stopped_payload(")
+    block = gen[i:gen.index("\n        def ", i + 10)]
+    assert "'event': 'stopped'" in block
+    assert "failed_count" in block, (
+        f"stopped 载荷拼装点必须含 failed_count: {block[:200]}")
+    assert "max(total - len(done_ids), 0)" in block, (
+        "failed_count 必须用 done_ids 口径（与 completed / error 三条终态统一）")
+    # 两条 stopped 路径都必须走该拼装点（不得再有内联手拼）
+    assert "_stopped_payload('用户已停止', stop_progress)" in gen
+    assert "_stopped_payload('任务已取消')" in gen
+    assert "'event':'stopped'" not in gen, (
+        "正文生成路径不得再内联手拼 stopped 载荷")
 
 
 def test_c3_stopped_count_matches_frontend_expectation():

@@ -252,7 +252,15 @@ export function BidAnalysisEvidenceList({ item }: { item: any }) {
   );
 }
 
-/** 九大章节 key → 中文标题（key 取自 chapter_completeness.chapters 的键，即 NINE_CHAPTERS[].key） */
+/**
+ * 九大章节 key → 中文标题（**兜底**用）。
+ *
+ * ✅ 2026-10-06：本表曾被 ClassificationPanel 当作唯一标题来源，而它是
+ * backend `scheme_classification.NINE_CHAPTERS` 的一份手抄副本。现改为兜底：
+ * 优先读响应自带的 `ch.title`（backend 已随每一章下发），本表仅在
+ * `title` 缺失时兜底，避免 backend 增删章节后前端标题静默失真。
+ * parity 护栏见 backend/tests/test_classification_parity_20261001.py。
+ */
 const CHAPTER_LABELS: Record<string, string> = {
   overview: "工程概况",
   basis: "编制依据",
@@ -264,6 +272,31 @@ const CHAPTER_LABELS: Record<string, string> = {
   emergency: "应急处置措施",
   calc_drawings: "计算书及相关施工图纸",
 };
+
+/**
+ * 单章字段覆盖率（0~1）。
+ *
+ * ✅ BUG 修复（2026-10-06）：原实现读 `ch.completeness`，而 backend
+ * `validate_chapter_fields` 逐章下发的键是 **`field_coverage`**
+ * （`completeness` 只存在于顶层汇总）。取值恒为 undefined →
+ * `Math.round(undefined * 100)` = NaN → **九大章节每一条进度条恒显示 0%**，
+ * 且 `status="active"` 永不转 success —— 字段完整性面板整体失效、
+ * 零测试覆盖（此前只有顶层「总体 X%」是对的，因为它读顶层同名键）。
+ *
+ * 兼容：若响应确实带 `completeness`（旧缓存 / 未来契约变更）仍按其取值，
+ * 两键都缺失才回落 0。
+ */
+export function chapterFieldCoverage(ch: any): number {
+  const raw = ch?.field_coverage ?? ch?.completeness;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(1, Math.max(0, n));
+}
+
+/** 章节中文标题：优先响应自带 title，其次兜底表，最后退回 key。 */
+export function chapterTitleOf(ch: any, key: string): string {
+  return ch?.title || CHAPTER_LABELS[key] || key;
+}
 
 /**
  * 危大工程自动分类 + 九大章节字段完整性面板（#11）。
@@ -319,12 +352,12 @@ export function ClassificationPanel({ data }: { data: any }) {
         </div>
         {chapterKeys.map((key) => {
           const ch = chapters[key] || {};
-          const pct = Math.round((ch.completeness || 0) * 100);
+          const pct = Math.round(chapterFieldCoverage(ch) * 100);
           const missing = ch.missing_fields || [];
           return (
             <div key={key}>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
-                <span>{CHAPTER_LABELS[key] || key}</span>
+                <span>{chapterTitleOf(ch, key)}</span>
                 <span style={{ color: pct >= 100 ? "#52c41a" : "#fa8c16" }}>{pct}%</span>
               </div>
               <Progress percent={pct} size="small" status={pct >= 100 ? "success" : "active"} />

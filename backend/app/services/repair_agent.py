@@ -41,7 +41,9 @@ SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}
 #   修复都白花一次大调用还占用并发额度。故在调用前设门槛直接放弃重写
 #   （状态仍为 failed，与旧行为「重写被校验拦下」对用户可见结果完全一致，
 #   只是省下必败的调用）。阈值对齐扫描侧分片上限 SECTION_CHUNK_LIMIT。
-REPAIR_REWRITE_MAX_CHARS = 12000
+# ✅ 2026-10-06（R47 债-1）：数值搬入 ``services/ai/prompts/_limits.py`` 单一事实源，
+#    本模块仍以同名可读，下游消费代码零改动。
+from app.services.ai.prompts._limits import REPAIR_REWRITE_MAX_CHARS  # noqa: E402
 
 # ---------- 修复阶段降本（2026-09-22） ----------
 # 实测：扫描优化后，定向修复成为新大头（12 章方案占 42.9%，= 涉及章节数 × 1~2 次）。

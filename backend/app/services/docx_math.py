@@ -536,10 +536,43 @@ def _node_to_omml(node) -> str:
     return ""
 
 
+#: 悬空运算符结尾判据：``=`` / ``≤`` / ``≥`` / ``<`` / ``>`` 等（允许尾随空格）。
+#: 命中表示「等式右端取值待定」的残式，旧实现只渲染运算符、右值位置空无一物，
+#: 成稿在该处出现语义空洞（配合外层残留空格表现为双空格）。
+_DANGLING_OP_RE = re.compile(r"(?:=|≤|≥|<|>|≈|le|geq?|leq?|ne)\s*$")
+
+#: 悬空右值的可见占位文本（虚线方框由 OMML 边框呈现）。
+_DANGLING_PLACEHOLDER = "待填"
+
+
+def _dangling_placeholder_omml() -> str:
+    """构造悬空右值占位框 OMML：带虚线边框的「待填」文字（直立样式）。"""
+    return (
+        "<m:box><m:boxPr><m:opEmu m:val=\"0\"/>"
+        "<m:noBreak m:val=\"1\"/>"
+        "<m:diff m:val=\"0\"/><m:brk m:val=\"0\"/>"
+        "<m:alignment m:val=\"center\"/>"
+        "<m:border><m:borderHide m:val=\"0\"/>"
+        "<m:borderTop m:val=\"dashed\" smtHide=\"0\"/>"
+        "<m:borderBot m:val=\"dashed\" smtHide=\"0\"/>"
+        "<m:borderLeft m:val=\"dashed\" smtHide=\"0\"/>"
+        "<m:borderRight m:val=\"dashed\" smtHide=\"0\"/>"
+        "</m:border></m:boxPr>"
+        f"<m:e>{_r(_DANGLING_PLACEHOLDER, sty_p=True)}</m:e></m:box>"
+    )
+
+
 def latex_to_omml(latex: str) -> str:
-    """将 LaTeX 数学表达式转为 OMML 内联公式 XML（``<m:oMath>...</m:oMath>``）。"""
+    """将 LaTeX 数学表达式转为 OMML 内联公式 XML（``<m:oMath>...</m:oMath>``）。
+
+    若表达式以悬空关系运算符结尾（右值待定，如 ``N =``），自动在运算符后补一个
+    虚线「待填」占位框：既明确提示此处需补数值，又避免成稿在该处出现语义空洞。
+    仅作用于本就不完整的残式，完整公式产物逐字节不变。
+    """
     nodes = _LatexParser().parse(latex)
     inner = "".join(_node_to_omml(n) for n in nodes)
+    if _DANGLING_OP_RE.search(latex.strip()):
+        inner += _dangling_placeholder_omml()
     return f"<m:oMath xmlns:m='{M_NS}'>{inner}</m:oMath>"
 
 

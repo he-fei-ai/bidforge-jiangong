@@ -1,10 +1,13 @@
 """AI 配置路由 · 连通性 / 健康（测试连接、预检、健康快照）。"""
+from datetime import datetime
+
 from fastapi import APIRouter, Depends
 
 from app.db import read_db
 from app.models import AIConfigTest
 from app.services.ai.provider_factory import (
     PROVIDER_PRESETS,
+    VALID_REQUEST_MODES,
     clamp_config_numbers,
     normalize_base_url,
     normalize_request_mode,
@@ -110,7 +113,10 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
     # 并把**实际生效的方式**如实回传 —— 用户 Key/地址/模型都对时，
     # 不该因为探测方式与平台支持不一致而报「模型名称不存在」。
     raw_mode = (data.request_mode or "").strip().lower() or db_request_mode
-    probe_mode = raw_mode if raw_mode in ("normal", "stream") else "auto"
+    # ⚠️ 值域取自 provider_factory 单一出口（不再自带一份字面量白名单）。
+    #    ``auto`` 不是落库值域，只是「未指定 → 沿用既有策略（流式优先）」的
+    #    探测侧内部标记，故仍保留在此处而不并入白名单。
+    probe_mode = raw_mode if raw_mode in VALID_REQUEST_MODES else "auto"
     # auto（未指定）沿用历史策略：流式优先（首字节快），错误归因按 chat 口径。
     prefer_stream = probe_mode != "normal"
 
@@ -311,6 +317,121 @@ async def precheck_all(db=Depends(read_db)):
     }
 
 
+@router.get("/configs/health")
+async def configs_health(db=Depends(read_db)):
+    """全部配置的可用性体检（✅ 2026-10-06 G3）：密钥 / 环境 / 地址 / 网络四道关。
+
+    背景：此前只有 ``GET /ai/health``（**只看当前使用那一条**）与
+    ``POST /ai/config/precheck-all``（**只看网络**）两个端点，且分属两路 ——
+    「这条备选到底还能不能用上」要靠用户人工把两边的结果在脑子里合并。
+    本端点一次性给出每条配置的四类判定与汇总；**只读、不发任何认证请求、
+    不消耗额度、秒级返回**。
+
+    判定口径全部复用运行时同源实现（不在本端点重抄）：
+      - ``has_key`` / ``key_broken`` —— 与 ``GET /ai/config`` 同一判据
+        （密文存在但解不开 = key_broken，用户须重新填 Key）；
+      - ``in_current_env`` —— 与 ``resolve_active_env`` 同口径
+        （env 为空 = 通用配置，任何环境可用；否则须等于当前生效环境）；
+      - ``network_ok`` —— 复用 ``_dns_precheck_async``（与 precheck-all
+        **同一函数**，不重抄 DNS/TCP 逻辑）；
+      - ``disabled`` —— ``resolve_disabled_providers``（运行时厂商开关）。
+
+    ⚠️ 刻意不做密钥定期巡检：没有后台任务、不消耗配额；这是用户主动触发的一次性体检。
+    """
+    import asyncio
+    from app.services.ai.provider_factory import (
+        resolve_active_env,
+        resolve_disabled_providers,
+    )
+
+    try:
+        active_env = await resolve_active_env()
+    except Exception:
+        active_env = ""
+    try:
+        disabled = await resolve_disabled_providers()
+    except Exception:
+        disabled = set()
+
+    cur = await db.execute(
+        "SELECT id, provider_name, plan, api_key_encrypted, base_url, model,"
+        " env, is_active, priority, request_mode FROM ai_config"
+        " ORDER BY is_active DESC, priority ASC, updated_at DESC")
+    rows = [dict(r) for r in await cur.fetchall()]
+
+    async def _net(url: str) -> dict:
+        if not url:
+            return {"ok": False, "step": "no_url", "message": "未填写 API 地址"}
+        try:
+            return await _dns_precheck_async(normalize_base_url(url))
+        except Exception as e:
+            # 地址格式非法 / 预检自身异常都不能让整份体检失败
+            return {"ok": False, "step": "url", "message": str(e)}
+
+    nets = await asyncio.gather(*[_net((r.get("base_url") or "").strip())
+                                  for r in rows])
+
+    items: list[dict] = []
+    for r, net in zip(rows, nets):
+        enc = r.get("api_key_encrypted") or ""
+        api_key = decrypt_api_key(enc) if enc else ""
+        has_key = bool(api_key)
+        key_broken = bool(enc and not api_key)
+        url = (r.get("base_url") or "").strip()
+        env = str(r.get("env") or "")
+        in_env = (env == "") or (env == active_env)
+        provider = str(r.get("provider_name") or "")
+        items.append({
+            "id": r["id"],
+            "provider_name": provider,
+            "model": str(r.get("model") or ""),
+            "base_url": url,
+            "plan": str(r.get("plan") or "pay_as_you_go"),
+            "is_active": bool(r.get("is_active")),
+            "priority": r.get("priority"),
+            "env": env,
+            "in_current_env": in_env,
+            "request_mode": normalize_request_mode(r.get("request_mode")),
+            "request_mode_label": request_mode_label(r.get("request_mode")),
+            # 密钥三态（与 GET /ai/config 同口径）
+            "has_key": has_key,
+            "key_broken": key_broken,
+            "key_hint": api_key[-4:] if has_key else "",
+            "no_url": not bool(url),
+            # 厂商是否被运行时开关禁用（与运行时选模同一来源）
+            "disabled": provider in disabled,
+            # 网络（只 DNS + TCP，不发认证请求、不消耗额度）
+            "network_ok": bool(net.get("ok")),
+            "network_step": str(net.get("step") or ""),
+            "network_ip": str(net.get("ip") or ""),
+            "network_message": str(net.get("message") or ""),
+            # 综合：这条配置在当前环境下是否真的能用上
+            "usable": bool(has_key and not key_broken and url and in_env
+                           and provider not in disabled),
+        })
+
+    summary = {
+        "total": len(items),
+        "active": sum(1 for i in items if i["is_active"]),
+        "usable": sum(1 for i in items if i["usable"]),
+        "no_key": sum(1 for i in items if not i["has_key"] and not i["key_broken"]),
+        "key_broken": sum(1 for i in items if i["key_broken"]),
+        "no_url": sum(1 for i in items if i["no_url"]),
+        "out_of_env": sum(1 for i in items if not i["in_current_env"]),
+        "disabled": sum(1 for i in items if i["disabled"]),
+        "network_ok": sum(1 for i in items if i["network_ok"]),
+        "network_unreachable": sum(1 for i in items
+                                   if i["base_url"] and not i["network_ok"]),
+    }
+    return {
+        "items": items,
+        "summary": summary,
+        "active_env": active_env,
+        "disabled_providers": sorted(disabled),
+        "checked_at": datetime.now().isoformat(),
+    }
+
+
 @router.get("/health")
 async def ai_health(db=Depends(read_db)):
     """当前 AI 配置健康快照。
@@ -381,9 +502,26 @@ async def ai_health(db=Depends(read_db)):
                          "hint": f"{env_error}；请在「运行时设置」把当前生效环境清空"
                                  "（恢复通用环境）后重试"})
         else:
+            # ✅ 2026-10-06（B-7 · 多环境下的误导性提示）：多环境开启后，
+            #    ``is_active=1`` 是**全局唯一**的（save/toggle 都会先把其它行清 0），
+            #    于是「切到环境 B」而唯一的主配置属于环境 A 时，_load_active_config
+            #    返回 None —— 状态确实是 not_configured，但旧提示恒写
+            #    「尚未启用任何文本模型配置」，把用户指向「去新增一条配置」，
+            #    而真因是「当前环境没有主配置 / 主配置属于别的环境」。
+            #    这里按「库里是否还有配置」分流，保持 status 契约不变。
+            hint = "尚未启用任何文本模型配置，所有 AI 生成能力将不可用"
+            if _env:
+                cur_any = await db.execute("SELECT COUNT(*) FROM ai_config")
+                total_cfg = int((await cur_any.fetchone())[0] or 0)
+                if total_cfg:
+                    hint = (
+                        f"当前生效环境「{_env}」下没有可用的「当前使用」配置"
+                        "（该标记全局唯一，当前它属于其它环境或通用环境），"
+                        "所有 AI 生成能力将不可用：请在列表中把目标环境的配置"
+                        "点「设为当前使用」，或把生效环境切回通用（清空）")
             base.update({"status": "not_configured",
                          "fallback_count": 0,
-                         "hint": "尚未启用任何文本模型配置，所有 AI 生成能力将不可用"})
+                         "hint": hint})
         return base
 
     d = row

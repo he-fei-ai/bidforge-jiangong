@@ -28,6 +28,10 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from app.db import get_db
 from app.models import ComplianceCheckIn, ExpertReviewIn
 from app.services import review_autofix
+# ✅ R13 判空单一出口（2026-10-06）：本模块所有 db.execute 走 review_db，
+#    读失败 503 / 写没生效 503。静态护栏
+#    tests/test_review_r13_closeout_20261006.py 禁止退回裸调用。
+from app.services import review_db
 from app.services.ai.json_response import collect_json_response
 from app.services.ai.prompts._registry import render
 from app.services.audit_rules import (
@@ -204,9 +208,13 @@ async def get_expert_items():
 #    {global_facts}；无事实/桥接失败一律降级为「（无）」，不阻断 AI 检查。
 # ---------------------------------------------------------------------------
 #: 事实文本总量上限（token 保护，与 SECTION_CONTENT_CAP 同思路）
-FACTS_PROMPT_CAP = 3000
+#: ✅ 2026-10-06（R47 债-1）：数值搬入 ``services/ai/prompts/_limits.py`` 单一事实源，
+#:    本模块仍以同名可读，下游消费代码零改动。
+from app.services.ai.prompts._limits import FACTS_PROMPT_CAP  # noqa: E402
 #: 单条事实值的截断长度（value 兜底取整段 content 时防长文本撑爆）
-_FACT_PROMPT_VALUE_CAP = 120
+from app.services.ai.prompts._limits import (  # noqa: E402
+    FACT_PROMPT_VALUE_CAP as _FACT_PROMPT_VALUE_CAP,
+)
 #: 安全关键标记：预算截断下也必须**完整**保留（见 _join_with_budget）
 SAFETY_MARK = "（安全关键）"
 
@@ -237,12 +245,14 @@ def _join_with_budget(lines: list[str], budget: int,
     if total <= budget:
         return "\n".join(lines)
     try:
-        from app.routers.sse_handlers import _allocate_char_budgets
+        # ✅ 2026-10-06（R47 债-2）：分配器下沉到 ``prompt_governance``，
+        #    本路由器不再反向 import ``sse_handlers`` 的私有函数。
+        from app.services.prompt_governance import allocate_char_budgets
     except Exception:  # noqa: BLE001 - 加载顺序异常不得阻断 AI 检查
         logger.warning("事实预算分配器不可用，退回头部截断（可能丢失尾部事实）")
         return _keep_suffixes("\n".join(lines)[:budget],
                                 suffixes)
-    quotas = _allocate_char_budgets([len(x) for x in lines], budget)
+    quotas = allocate_char_budgets([len(x) for x in lines], budget)
     # ✅ 遗留收口（2026-10-03 · R38）：消费侧超支纠偏。分配器的「每项保底
     #    min_chars」面向少量小节（n≈20）设计，保底量是等比份额的 2 倍 ——
     #    事实条数一大（n×保底 > budget）quotas 总和可达 2×budget，旧实现
@@ -339,9 +349,9 @@ async def compliance_check(body: ComplianceCheckIn, db=Depends(get_db)):
     # ✅ BUG 修复（2026-09-21）：旧实现无方案存在性校验，不存在的 scheme_id 会
     #    走完整次 AI 调用（空内容 + 空方案名），既浪费额度又返回看似正常的响应，
     #    前端无从判断是「方案不存在」还是「正文恰好都没命中」。现补 404。
-    sc_cur = await db.execute("SELECT name, type, project_id FROM schemes WHERE id=?",
-                              (scheme_id,))
-    sc_row = await sc_cur.fetchone()
+    sc_row = await review_db.fetch_one(
+        db, "SELECT name, type, project_id FROM schemes WHERE id=?", (scheme_id,),
+        what="规范符合性检查：读取方案")
     if not sc_row:
         raise HTTPException(404, "方案不存在")
     scheme_name = sc_row["name"]
@@ -374,15 +384,16 @@ async def compliance_check(body: ComplianceCheckIn, db=Depends(get_db)):
         #    是 10 条自由文本、`ai_rules()` 现为 8 条 → 判据恒 false → 永远走
         #    「不传 rule_ids」这条路径。现补同一兜底：自由清单为空时回退 AI 规则全集。
         checklist = body.checklist or [r.title for r in ai_rules()]
-    cur = await db.execute(
-        # ✅ 遗留修复（2026-09-22）：sort_order 是「同级内序号」而非全局文档序，
-        #    ORDER BY sort_order 会把不同层级的同序号节点排在一起（按"列"展开），
-        #    超长方案被 AI_CONTENT_HARD_CAP 截断时，送审的可能不是前几章而是
-        #    错乱的碎片。现取 parent_id/sort_order 重排为目录树前序 DFS。
-        "SELECT id, parent_id, title, content, sort_order FROM sections"
-        " WHERE scheme_id=? AND content!='' ORDER BY sort_order", (scheme_id,))
-    sections = [(r["title"], r["content"])
-                for r in order_sections_dfs([dict(r) for r in await cur.fetchall()])]
+    # ✅ 遗留修复（2026-09-22）：sort_order 是「同级内序号」而非全局文档序，
+    #    ORDER BY sort_order 会把不同层级的同序号节点排在一起（按"列"展开），
+    #    超长方案被 AI_CONTENT_HARD_CAP 截断时，送审的可能不是前几章而是
+    #    错乱的碎片。现取 parent_id/sort_order 重排为目录树前序 DFS。
+    sections = [(r["title"], r["content"]) for r in order_sections_dfs(
+        await review_db.fetch_all(
+            db,
+            "SELECT id, parent_id, title, content, sort_order FROM sections"
+            " WHERE scheme_id=? AND content!='' ORDER BY sort_order", (scheme_id,),
+            what="规范符合性检查：读取章节正文"))]
     # ✅ BUG 修复（2026-09-21）：旧实现 c[:2000] 单章节截断，长章节后半段
     #    永远不被 AI 看到；同时总长 [:6000] 也是硬截断，超长方案只能送前几章。
     #    现提升单章节上限至 SECTION_CONTENT_CAP（覆盖绝大多数危大工程章节），
@@ -425,15 +436,25 @@ async def compliance_check(body: ComplianceCheckIn, db=Depends(get_db)):
     #    总检聚合按 batch_id 取「最近一批」，不再依赖 rowid 连续段推断
     #    （两次 /check 跨秒交错时 rowid 段会错切，首批被截头/混批）。
     batch_id = uuid.uuid4().hex
+    # ✅ 2026-10-07：本批结论的正文指纹（整批共用，供总检判定「该批是否已过期」）
+    _batch_fp = await _content_fingerprint(db, scheme_id)
     for r in results:
         cid = str(uuid.uuid4())
-        await db.execute(
+        # ✅ R13（2026-10-06）：写路径经 exec_write。旧实现丢弃返回值 ——
+        #    INSERT 返回 None 时 commit 照常成功、接口返回 batch_id，前端
+        #    「清除本次结果」后端查无此批，「最近一批合规结果」永远取不到，
+        #    而用户以为已经跑过了（静默丢数据，AGENTS.md 零容忍项）。
+        await review_db.exec_write(
+            db,
             "INSERT INTO compliance_check (id, scheme_id, project_id, check_type,"
-            " rule_id, item, severity, result, suggestion, batch_id)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " rule_id, item, severity, result, suggestion, batch_id,"
+            " content_fingerprint)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (cid, scheme_id, project_id, "compliance", r.get("rule_id", ""),
              r.get("item", ""), r.get("severity", ""),
-             json.dumps(r, ensure_ascii=False), r.get("suggestion", ""), batch_id))
+             json.dumps(r, ensure_ascii=False), r.get("suggestion", ""), batch_id,
+             _batch_fp),
+            what="规范符合性检查：写入结果行")
     await db.commit()
     return {"results": results, "batch_id": batch_id}
 
@@ -511,21 +532,21 @@ async def expert_review(body: ExpertReviewIn, db=Depends(get_db)):
     # ✅ BUG 修复（2026-09-21）：旧实现无方案存在性校验；不存在的 scheme_id 会
     #    走一次 AI 调用（空 outline + 空方案名），返回看似合理的评分，前端无从
     #    区分"方案不存在"与"章节全部通过论证"。现补 404。
-    sc_cur = await db.execute("SELECT name, type, project_id FROM schemes WHERE id=?",
-                              (scheme_id,))
-    sc_row = await sc_cur.fetchone()
+    sc_row = await review_db.fetch_one(
+        db, "SELECT name, type, project_id FROM schemes WHERE id=?", (scheme_id,),
+        what="专家论证预检：读取方案")
     if not sc_row:
         raise HTTPException(404, "方案不存在")
     scheme_name = sc_row["name"]
     scheme_type = sc_row["type"]
     project_id = sc_row["project_id"] or ""
 
-    cur = await db.execute(
-        # ✅ 遗留修复（2026-09-22）：目录树按前序 DFS 送 AI，避免扁平序层级错乱
+    # ✅ 遗留修复（2026-09-22）：目录树按前序 DFS 送 AI，避免扁平序层级错乱
+    outline_rows = order_sections_dfs(await review_db.fetch_all(
+        db,
         "SELECT id, parent_id, title, level, sort_order FROM sections"
-        " WHERE scheme_id=? ORDER BY sort_order", (scheme_id,))
-    outline_rows = order_sections_dfs([
-        dict(r) for r in await cur.fetchall()])
+        " WHERE scheme_id=? ORDER BY sort_order", (scheme_id,),
+        what="专家论证预检：读取章节目录"))
     # ✅ BUG 修复（2026-09-21）：旧实现 outline_tree 无节点上限，方案章节多时
     #    JSON 序列化后的提示词可轻易突破模型上下文；现引入 EXPERT_OUTLINE_MAX_NODES
     #    显式 400，避免静默打爆 token。附件同理：既限数量也限单条长度。
@@ -567,11 +588,16 @@ async def expert_review(body: ExpertReviewIn, db=Depends(get_db)):
     result = _normalize_expert_review_result(obj)
     cid = str(uuid.uuid4())
     # ✅ 单行也是一批：补 batch_id（与 /check 同口径，历史行空串不影响读取回退）。
-    await db.execute(
+    #    ✅ R13（2026-10-06）：写路径经 exec_write —— 旧实现 INSERT 未生效时
+    #    commit 照常成功、接口返回评分，总检的「专家论证预检」来源永远取不到本次。
+    await review_db.exec_write(
+        db,
         "INSERT INTO compliance_check (id, scheme_id, project_id, check_type,"
-        " result, batch_id) VALUES (?,?,?,?,?,?)",
+        " result, batch_id, content_fingerprint) VALUES (?,?,?,?,?,?,?)",
         (cid, scheme_id, project_id, "expert_review",
-         json.dumps(result, ensure_ascii=False), uuid.uuid4().hex))
+         json.dumps(result, ensure_ascii=False), uuid.uuid4().hex,
+         await _content_fingerprint(db, scheme_id)),
+        what="专家论证预检：写入结果行")
     await db.commit()
     return result
 
@@ -626,14 +652,14 @@ async def get_results(scheme_id: str, check_type: str = "", limit: int = RESULTS
     if check_type:
         where += " AND check_type=?"
         params.append(check_type)
-    cur = await db.execute(
-        f"SELECT COUNT(*) AS n FROM compliance_check WHERE {where}", params)
-    total = (await cur.fetchone())["n"]
-    cur = await db.execute(
+    total = int(await review_db.fetch_scalar(
+        db, f"SELECT COUNT(*) AS n FROM compliance_check WHERE {where}", params, 0,
+        what="合规历史：统计总数") or 0)
+    items = await review_db.fetch_all(
+        db,
         f"SELECT * FROM compliance_check WHERE {where}"
         " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
-        params + [limit, offset])
-    items = [dict(r) for r in await cur.fetchall()]
+        params + [limit, offset], what="合规历史：读取结果行")
     return {"items": items, "total": total,
             "limit": limit, "offset": offset}
 
@@ -669,21 +695,21 @@ def _validate_consistency_audit(o) -> list[str]:
 
 @router.post("/consistency-audit/{scheme_id}")
 async def run_consistency_audit(scheme_id: str, db=Depends(get_db)):
-    from app.routers.sse_handlers import _build_facts_text
-
-    sc_cur = await db.execute("SELECT name, type, project_id FROM schemes WHERE id=?", (scheme_id,))
-    sc_row = await sc_cur.fetchone()
+    from app.services.facts_builder import build_facts_text as _build_facts_text
+    sc_row = await review_db.fetch_one(
+        db, "SELECT name, type, project_id FROM schemes WHERE id=?", (scheme_id,),
+        what="一致性审计：读取方案")
     if not sc_row:
         raise HTTPException(404, "方案不存在")
 
-    cur = await db.execute(
-        # ✅ 遗留修复（2026-09-22）：审计上下文同样按目录树前序 DFS 送 AI，
-        #    保证截断与审阅顺序与文档实序一致
-        "SELECT id, parent_id, title, content, sort_order FROM sections"
-        " WHERE scheme_id=? AND content!='' ORDER BY sort_order",
-        (scheme_id,))
-    sections = [(r["title"], r["content"])
-                for r in order_sections_dfs([dict(r) for r in await cur.fetchall()])]
+    # ✅ 遗留修复（2026-09-22）：审计上下文同样按目录树前序 DFS 送 AI，
+    #    保证截断与审阅顺序与文档实序一致
+    sections = [(r["title"], r["content"]) for r in order_sections_dfs(
+        await review_db.fetch_all(
+            db,
+            "SELECT id, parent_id, title, content, sort_order FROM sections"
+            " WHERE scheme_id=? AND content!='' ORDER BY sort_order",
+            (scheme_id,), what="一致性审计：读取章节正文"))]
     if not sections:
         raise HTTPException(422, "方案尚无正文内容，无法审计")
     # ✅ BUG 修复（2026-09-21）：旧实现 c[:1500] 单章节 + 总长 [:30000] 双重硬
@@ -728,25 +754,30 @@ async def run_consistency_audit(scheme_id: str, db=Depends(get_db)):
     except (TypeError, ValueError):
         logger.warning("一致性审计评分非数值，按 0 处理: %r", score_raw)
         score_float = 0.0
-    await db.execute(
-        "INSERT INTO consistency_audit (id, project_id, scheme_id, score, issues)"
-        " VALUES (?,?,?,?,?)",
+    # ✅ R13（2026-10-06）：写路径经 exec_write。旧实现 INSERT 未生效时
+    #    commit 照常成功、接口返回评分与 issues —— 而 /latest 与总检的
+    #    「一致性审计」来源永远取不到本次，用户以为已审计。
+    await review_db.exec_write(
+        db,
+        "INSERT INTO consistency_audit (id, project_id, scheme_id, score,"
+        " content_fingerprint, issues) VALUES (?,?,?,?,?,?)",
         (audit_id, sc_row["project_id"], scheme_id,
-         score_float, json.dumps(issues, ensure_ascii=False)))
+         await _content_fingerprint(db, scheme_id),
+         score_float, json.dumps(issues, ensure_ascii=False)),
+        what="一致性审计：写入审计结果")
     await db.commit()
     return {"id": audit_id, "score": score_float, "issues": issues}
 
 
 @router.get("/consistency-audit/{scheme_id}/latest")
 async def latest_consistency_audit(scheme_id: str, db=Depends(get_db)):
-    cur = await db.execute(
+    item = await review_db.fetch_one(
+        db,
         "SELECT id, score, issues, created_at FROM consistency_audit "
         "WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-        (scheme_id,))
-    row = await cur.fetchone()
-    if not row:
+        (scheme_id,), what="一致性审计：读取最近一次结果")
+    if not item:
         return {"exists": False}
-    item = dict(row)
     try:
         item["issues"] = json.loads(item.get("issues") or "[]")
     except json.JSONDecodeError:
@@ -765,13 +796,13 @@ async def consistency_audit_history(
         replacement=f"/api/v1/compliance/runs/{scheme_id}",
     )
     limit = max(1, min(limit, 50))
-    cur = await db.execute(
-        "SELECT id, score, issues, created_at FROM consistency_audit "
-        "WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?",
-        (scheme_id, limit))
     items = []
-    for r in await cur.fetchall():
-        item = dict(r)
+    for r in await review_db.fetch_all(
+            db,
+            "SELECT id, score, issues, created_at FROM consistency_audit "
+            "WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (scheme_id, limit), what="一致性审计历史：读取记录"):
+        item = r
         try:
             item["issues"] = json.loads(item.get("issues") or "[]")
         except json.JSONDecodeError:
@@ -800,33 +831,45 @@ async def _facts_signature(db, scheme_id: str) -> str:
         if pid:
             scope += " OR (project_id=? AND (scheme_id='' OR scheme_id IS NULL))"
             params.append(pid)
-        cur = await db.execute(
-            f"SELECT COUNT(*), COALESCE(MAX(updated_at),'') FROM global_facts "
-            f"WHERE ({scope}) AND {get_facts_inject_where()}", params)
-        row = await cur.fetchone()
-        return f"{row[0] or 0}:{row[1] or ''}"
+        row = await review_db.fetch_one(
+            db,
+            f"SELECT COUNT(*) AS n, COALESCE(MAX(updated_at),'') AS latest FROM global_facts "
+            f"WHERE ({scope}) AND {get_facts_inject_where()}", params,
+            what="预检缓存键：统计可注入事实")
+        # ⚠️ 必须按列名取值：review_db.fetch_one 返回 dict（sqlite3.Row 迭代出的是
+        #    值、dict 迭代出的是键）。旧实现写 `row[0] / row[1]`，换成 dict 后
+        #    恒 KeyError → 被本函数的 except 吞掉恒返回 ""，等于**事实签名永久失效**：
+        #    事实确认/新增后 TTL 内仍命中旧缓存，SAF-08 永远不出现（2026-10-03 修复复发）。
+        return f"{row['n'] or 0}:{row['latest'] or ''}" if row else "0:"
     except Exception:  # 签名失败仅视为「无事实」，不阻断预检
         return ""
 
 
 async def _build_preflight_context(scheme_id: str, db) -> PreflightContext:
-    """从 DB 装配预检上下文（章节 + 图表 + 方案元信息 + 已确认全局事实）。"""
-    sc_cur = await db.execute(
-        "SELECT name, type, word_budget FROM schemes WHERE id=?", (scheme_id,))
-    sc_row = await sc_cur.fetchone()
+    """从 DB 装配预检上下文（章节 + 图表 + 方案元信息 + 已确认全局事实）。
+
+    ✅ R13（2026-10-06）：三处读全部走 ``review_db``。本函数是 /preflight、
+    /overview 与自动修复三端重算的**共同入口**，且不在任何 try 内 ——
+    旧实现命中 R13 即 ``AttributeError`` → 500，用户既拿不到预检结论
+    也看不到原因。
+    """
+    sc_row = await review_db.fetch_one(
+        db, "SELECT name, type, word_budget FROM schemes WHERE id=?", (scheme_id,),
+        what="预检上下文：读取方案")
     if not sc_row:
         raise HTTPException(404, "方案不存在")
 
-    cur = await db.execute(
-        "SELECT id, parent_id, title, content, word_count, level, status, sort_order FROM sections"
-        " WHERE scheme_id=? ORDER BY sort_order", (scheme_id,))
     # ✅ 遗留修复（2026-09-22）：预检上下文按目录树前序 DFS 装配，
     #    使重复内容检测（两两配对）之外的序敏感检查与导出链路同口径。
-    sections = order_sections_dfs([dict(r) for r in await cur.fetchall()])
+    sections = order_sections_dfs(await review_db.fetch_all(
+        db,
+        "SELECT id, parent_id, title, content, word_count, level, status, sort_order FROM sections"
+        " WHERE scheme_id=? ORDER BY sort_order", (scheme_id,),
+        what="预检上下文：读取章节"))
 
-    cur = await db.execute(
-        "SELECT chart_type, status FROM chart_predictions WHERE scheme_id=?", (scheme_id,))
-    charts = [dict(r) for r in await cur.fetchall()]
+    charts = await review_db.fetch_all(
+        db, "SELECT chart_type, status FROM chart_predictions WHERE scheme_id=?", (scheme_id,),
+        what="预检上下文：读取图表登记")
 
     # ✅ 2026-10-03（全局事实桥接）：装配「已确认可注入」事实（桥接自身
     #    fail-soft，异常返回空 → check_hazard_params 跳过，预检可用性不受影响）。
@@ -858,6 +901,57 @@ OVERVIEW_CACHE_TTL = 120.0
 #: （scheme_id → (content_fingerprint, monotonic 时间, payload)）。此前 /preflight
 #: 既无锁也无缓存，连点会往 preflight_runs 灌入多条几乎相同的记录，污染分数趋势。
 _PREFLIGHT_RECENT: dict[str, tuple[str, float, dict]] = {}
+#: ✅ 2026-10-06（缓存有界化）：上面两份幂等缓存的条目上限。
+#: TTL 只保证「过期后不再命中」，不回收内存 —— 每条缓存存的是**整份 payload**
+#: （findings + dimensions + stats 全量），且删除方案时无人清理（条目按 scheme_id
+#: 索引、永不过期的残条会一直挂着）。长跑进程里按「用过的方案数」无界增长。
+#: 取 128：单机方案数在几十~几百量级，TTL 120s 内活跃方案远小于此值，
+#: 上限只是兜底防泄漏，正常负载下**永不触碰**（不改变任何命中行为）。
+RECENT_CACHE_MAX_ENTRIES = 128
+
+
+def _evict_recent_cache(store: dict) -> None:
+    """给幂等缓存做内存回收：先清过期项，再把仍在的项压到上限内。
+
+    语义保持不变：过期项本就不可能命中（``_PREFLIGHT_RECENT`` / ``_OVERVIEW_RECENT``
+    的读侧都判 TTL），提前删除与留着等过期对调用方**完全等价**；未到上限时零淘汰。
+    超上限时按落缓存时间淘汰最旧 —— 保留最新一次真实计算的结论。
+    """
+    if not store:
+        return
+    now = time.monotonic()
+    for key in [k for k, v in store.items() if now - v[1] >= OVERVIEW_CACHE_TTL]:
+        store.pop(key, None)
+    while len(store) > RECENT_CACHE_MAX_ENTRIES:
+        oldest = min(store, key=lambda k: store[k][1])
+        store.pop(oldest, None)
+
+
+def _cache_put(store: dict, scheme_id: str, value: tuple) -> None:
+    """写入幂等缓存并立即回收（唯一写入口，保证上限恒成立）。"""
+    store[scheme_id] = value
+    _evict_recent_cache(store)
+
+
+def invalidate_overview_cache(scheme_id: str | None = None) -> int:
+    """方案（或全部）删除后清理进程内总检/预检幂等缓存，返回清理条数。
+
+    调用方：``routers/schemes.py::delete_scheme`` 与 ``routers/projects.py::delete_project``。
+    正文/目录/事实变更**不需要**这里插手 —— 缓存键含内容指纹与事实签名，
+    变更后自然不命中；只有「条目指向已不存在的方案」这种死键需要显式回收。
+
+    ⚠️ 刻意**不碰** ``_OVERVIEW_LOCKS``：锁若在协程持有时被删，另一个协程会
+    另取一把新锁，两把锁串行化失效（见 ``_overview_lock`` docstring）。
+    锁对象只有几十字节且与方案数同阶，不是泄漏面。
+    """
+    if scheme_id is None:
+        n = len(_OVERVIEW_RECENT) + len(_PREFLIGHT_RECENT)
+        _OVERVIEW_RECENT.clear()
+        _PREFLIGHT_RECENT.clear()
+        return n
+    n = (1 if _OVERVIEW_RECENT.pop(scheme_id, None) is not None else 0)
+    n += 1 if _PREFLIGHT_RECENT.pop(scheme_id, None) is not None else 0
+    return n
 
 
 def _overview_lock(scheme_id: str) -> asyncio.Lock:
@@ -882,32 +976,11 @@ async def _content_fingerprint(db, scheme_id: str) -> str:
     （export.py 有自己那份更细的 _content_fingerprint）。
     计算失败返回空串（空指纹 = 无法判定 = 视为不过期，不误导用户）。
     """
-    parts: list[str] = []
-    try:
-        cur = await db.execute(
-            "SELECT sort_order, level, title, word_count, content FROM sections"
-            " WHERE scheme_id=? ORDER BY sort_order, level, id", (scheme_id,))
-        parts.extend("|".join(str(v) for v in row) for row in await cur.fetchall())
-        cur = await db.execute(
-            "SELECT chart_type, status FROM chart_predictions WHERE scheme_id=?"
-            " ORDER BY rowid", (scheme_id,))
-        parts.extend("|".join(str(v) for v in row) for row in await cur.fetchall())
-        # 全局事实状态进入总检缓存指纹：事实确认/裁决/重解析后旧总检必须过期。
-        cur = await db.execute(
-            "SELECT is_simulated,is_resolved,has_conflict,is_stale,updated_at "
-            "FROM global_facts WHERE scheme_id=? OR (project_id="
-            "(SELECT project_id FROM schemes WHERE id=?) AND "
-            "(scheme_id='' OR scheme_id IS NULL)) ORDER BY rowid",
-            (scheme_id, scheme_id))
-        parts.extend("|".join(str(v) for v in row) for row in await cur.fetchall())
-        sc = await db.execute("SELECT word_budget FROM schemes WHERE id=?", (scheme_id,))
-        row = await sc.fetchone()
-        budget = int(row["word_budget"]) if row and row["word_budget"] else 0
-        parts.append(f"budget={budget}")
-    except Exception as e:
-        logger.warning("内容指纹计算失败（按空指纹处理）: scheme=%s err=%s", scheme_id, e)
-        return ""
-    return hashlib.md5("\x1f".join(parts).encode("utf-8", "replace")).hexdigest()
+    # ✅ 2026-10-07（单一事实源收口）：实现下沉到 services/scheme_fingerprint。
+    #    一致性扫描侧（consistency_scanner）按同一算法落冲突指纹，聚合两侧
+    #    才能可靠比较（同一判据两处实现必然再次分叉）。
+    from app.services.scheme_fingerprint import content_fingerprint as _fp
+    return await _fp(db, scheme_id)
 
 
 async def _run_is_stale(db, scheme_id: str, row,
@@ -986,7 +1059,7 @@ async def run_preflight_check(
             "cached": False,
         })
         await _persist_run(db, scheme_id, payload, stats)
-        _PREFLIGHT_RECENT[scheme_id] = (cache_key, time.monotonic(), payload)
+        _cache_put(_PREFLIGHT_RECENT, scheme_id, (cache_key, time.monotonic(), payload))
         return payload
 
 
@@ -1028,8 +1101,21 @@ async def readiness_overview(scheme_id: str, db=Depends(get_db), force: bool = F
         payload["stale"] = False
         if not payload.get("content_fingerprint"):
             payload["content_fingerprint"] = fingerprint
-        _OVERVIEW_RECENT[scheme_id] = (cache_key, time.monotonic(), payload)
+        _cache_put(_OVERVIEW_RECENT, scheme_id, (cache_key, time.monotonic(), payload))
         return payload
+
+
+def _ai_row_is_stale(row: dict, current_fingerprint: str) -> bool:
+    """AI 结论行是否已过期（其正文指纹与当前正文不一致）。
+
+    历史行无指纹（本功能上线前写入）→ 视为**不过期**（fail-open）：无法判定
+    就不打扰用户，与 :func:`_run_is_stale` 对 preflight_runs 历史行的约定一致。
+    当前指纹算不出来（空串）同样 fail-open，避免把整库旧行全判成过期。
+    """
+    fp = str(row.get("content_fingerprint") or "")
+    if not fp or not current_fingerprint:
+        return False
+    return fp != current_fingerprint
 
 
 async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = True) -> dict:
@@ -1046,6 +1132,13 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
     ctx = await _build_preflight_context(scheme_id, db)
     program_findings = run_preflight(ctx)
     sources = ["program"]
+    # ✅ 修复（2026-10-07 · 陈旧 AI 结论计入评分，生产库实证）：
+    #    生产方案 10-01 的 AI 合规/一致性结论，在正文已多次修改的 10-07
+    #    仍被计入总检评分（CON-04 / SAF-* 指向已不存在的章节），用户据此
+    #    「整改」实际不存在的缺陷。AI 各源写入时已记正文指纹，此处比对后
+    #    跳过过期行，并把跳过的来源名放进 stale_ai_sources 供前端提示重跑。
+    fingerprint = await _content_fingerprint(db, scheme_id)
+    stale_ai_sources: list[str] = []
 
     # --- ✅ G1：导出预检问题并入评分（与程序化预检共用同一套规则词表）---
     # 此前导出预检是独立体系，其问题既不进 preflight_runs 也不进本聚合，
@@ -1068,38 +1161,52 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
         #    一次 /check 一个批号，跨秒/交错都不受影响）。历史行无批号时回退旧口径：
         #    「同一 created_at 视为一批」+ rowid 连续段锚定（created_at 仅秒级精度，
         #    同秒两批会误聚合；rowid 严格递增只能保证单次调用内连续）。
-        cur = await db.execute(
+        _brow = await review_db.fetch_one(
+            db,
             "SELECT batch_id FROM compliance_check WHERE scheme_id=?"
             " AND check_type='compliance' AND batch_id != ''"
-            " ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,))
-        _brow = await cur.fetchone()
+            " ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,),
+            what="总检聚合：定位最近一批合规结果")
         _batch = (_brow["batch_id"] if _brow else "") or ""
         if _batch:
-            cur = await db.execute(
-                "SELECT result FROM compliance_check WHERE scheme_id=?"
+            _rows_raw = await review_db.fetch_all(
+                db,
+                "SELECT result, content_fingerprint FROM compliance_check WHERE scheme_id=?"
                 " AND check_type='compliance' AND batch_id=? ORDER BY rowid",
-                (scheme_id, _batch))
+                (scheme_id, _batch), what="总检聚合：读取该批合规结果")
         else:
-            cur = await db.execute(
+            last = await review_db.fetch_one(
+                db,
                 "SELECT MIN(rowid) AS min_rowid, created_at"
                 " FROM compliance_check WHERE scheme_id=? AND check_type='compliance' "
                 "GROUP BY created_at ORDER BY created_at DESC LIMIT 1",
-                (scheme_id,))
-            last = await cur.fetchone()
-            if last:
-                cur = await db.execute(
-                    "SELECT result FROM compliance_check WHERE scheme_id=? AND check_type='compliance'"
-                    " AND rowid >= ? ORDER BY rowid",
-                    (scheme_id, last["min_rowid"]))
-            else:
-                cur = None
-        if cur is not None:
+                (scheme_id,), what="总检聚合：定位历史行连续段锚点")
+            _rows_raw = await review_db.fetch_all(
+                db,
+                "SELECT result, content_fingerprint FROM compliance_check WHERE scheme_id=? AND check_type='compliance'"
+                " AND rowid >= ? ORDER BY rowid",
+                (scheme_id, last["min_rowid"]),
+                what="总检聚合：读取历史行连续段") if last else []
+        # ✅ R13（2026-10-06）：旧实现把游标本身当判据（`if cur is not None`），
+        #    而 `db.execute` 返回 None 时恰好命中「跳过」分支 —— 表面无害，
+        #    但同段的 `cur.fetchone()` 会先抛 AttributeError，整段降级；
+        #    现统一走 review_db，读失败由本段 except 降级为「跳过该来源」。
+        if _rows_raw:
             rows = []
-            for r in await cur.fetchall():
+            _stale_n = 0
+            for r in _rows_raw:
+                if _ai_row_is_stale(r, fingerprint):
+                    _stale_n += 1   # 正文已变：该结论不再计入评分
+                    continue
                 try:
                     rows.append(json.loads(r["result"] or "{}"))
                 except json.JSONDecodeError:
                     continue
+            if _stale_n:
+                stale_ai_sources.append("compliance")
+                logger.warning(
+                    "overview: %d 条 AI 合规结论正文指纹不一致（已跳过不计分）scheme=%s",
+                    _stale_n, scheme_id)
             ai_findings = ai_results_to_findings(rows)
             if rows:
                 sources.append("compliance")
@@ -1108,11 +1215,16 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
 
     # --- 最近一次一致性审计（作为一致性维度的补充证据）---
     try:
-        cur = await db.execute(
-            "SELECT score, issues FROM consistency_audit WHERE scheme_id=?"
-            " ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,))
-        row = await cur.fetchone()
-        if row:
+        row = await review_db.fetch_one(
+            db, "SELECT score, issues, content_fingerprint FROM consistency_audit "
+            "WHERE scheme_id=?" " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (scheme_id,), what="总检聚合：读取最近一次一致性审计")
+        _audit_stale = bool(row) and _ai_row_is_stale(row, fingerprint)
+        if _audit_stale:
+            stale_ai_sources.append("consistency")
+            logger.warning("overview: 一致性审计结论正文指纹不一致（已跳过）scheme=%s",
+                           scheme_id)
+        if row and not _audit_stale:
             try:
                 issues = json.loads(row["issues"] or "[]")
             except json.JSONDecodeError:
@@ -1147,18 +1259,25 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
     # 只统计最近一批扫描中 status IN ('pending','failed') 的未解决项；
     # repaired/accepted（已解决）与 skipped（用户明确不处理）不计分。
     try:
-        cur = await db.execute(
-            "SELECT scan_id FROM consistency_conflicts WHERE scheme_id=?"
-            " ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,))
-        last_scan = await cur.fetchone()
-        if last_scan:
-            cur = await db.execute(
+        last_scan = await review_db.fetch_one(
+            db, "SELECT scan_id, content_fingerprint FROM consistency_conflicts "
+            "WHERE scheme_id=?" " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (scheme_id,), what="总检聚合：定位最近一批一致性扫描")
+        _scan_stale = bool(last_scan) and _ai_row_is_stale(last_scan, fingerprint)
+        if _scan_stale:
+            stale_ai_sources.append("consistency_scan")
+            logger.warning(
+                "overview: 一致性扫描结论正文指纹不一致（已跳过）scheme=%s",
+                scheme_id)
+        if last_scan and not _scan_stale:
+            scan_conflicts = await review_db.fetch_all(
+                db,
                 "SELECT conflict_type, severity, topic, occurrences,"
                 " authoritative_value, repair_instruction, status"
                 " FROM consistency_conflicts WHERE scheme_id=? AND scan_id=?"
                 " ORDER BY created_at, rowid",
-                (scheme_id, last_scan["scan_id"]))
-            scan_conflicts = [dict(r) for r in await cur.fetchall()]
+                (scheme_id, last_scan["scan_id"]),
+                what="总检聚合：读取一致性扫描冲突")
             unresolved = [c for c in scan_conflicts
                           if c.get("status") in ("pending", "failed")]
             for idx, c in enumerate(unresolved):
@@ -1187,11 +1306,17 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
 
     # --- 最近一次专家论证预检 ---
     try:
-        cur = await db.execute(
-            "SELECT result FROM compliance_check WHERE scheme_id=? AND check_type='expert_review'"
-            " ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,))
-        row = await cur.fetchone()
-        if row:
+        row = await review_db.fetch_one(
+            db, "SELECT result, content_fingerprint FROM compliance_check "
+            "WHERE scheme_id=? AND check_type='expert_review'"
+            " ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,),
+            what="总检聚合：读取最近一次专家论证预检")
+        _expert_stale = bool(row) and _ai_row_is_stale(row, fingerprint)
+        if _expert_stale:
+            stale_ai_sources.append("expert_review")
+            logger.warning("overview: 专家论证预检结论正文指纹不一致（已跳过）scheme=%s",
+                           scheme_id)
+        if row and not _expert_stale:
             try:
                 expert = json.loads(row["result"] or "{}")
             except json.JSONDecodeError:
@@ -1219,6 +1344,8 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
         "scheme_name": ctx.scheme_name,
         "stats": stats,
         "sources": sources,
+        # ✅ 2026-10-07：因正文已变而跳过的 AI 来源（提示用户重跑对应 AI 检查）
+        "stale_ai_sources": stale_ai_sources,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         # ✅ G3：落库后供 /runs /report / 导出页判定「结论是否已过期」
         "content_fingerprint": await _content_fingerprint(db, scheme_id),
@@ -1233,13 +1360,21 @@ async def _persist_run(db, scheme_id: str, payload: dict, stats: dict):
 
     落库失败不影响返回结果 —— 评分结论是用户此刻要的东西，
     不能因为历史表写入异常就让用户拿不到结论。
+
+    ✅ R13（2026-10-06）：INSERT 走 ``review_db.exec_write``。旧实现丢弃
+    返回值，``db.execute`` 返回 None **不是异常** → commit 照常成功、
+    无任何日志 → 分数趋势**静默丢一条记录**。这正是本函数 2026-09-21 建立
+    日志时想根治的那类问题，但只覆盖了「抛异常」分支，R13 这条静默路径
+    依然无观测。exec_write 会打 WARNING，且 rowcount==0 时抛 503 被本函数的
+    ``except`` 降级为「记录一条 warning + rollback」—— 结论照常返回。
     """
     try:
         # ✅ G5（2026-09-21）：preflight_runs 补齐 project_id（此前无此列），
         # 与 compliance_check / consistency_audit 的项目维度口径对齐；
         # ✅ G3：内容指纹随运行落库，展示层据此判定结论是否已过期。
         from app.routers.review import _scheme_project_id
-        await db.execute(
+        await review_db.exec_write(
+            db,
             "INSERT INTO preflight_runs (id, scheme_id, project_id, content_fingerprint,"
             " rule_version, total, grade, verdict, released, blocked,"
             " counts, dimensions, findings, stats)"
@@ -1252,7 +1387,8 @@ async def _persist_run(db, scheme_id: str, payload: dict, stats: dict):
              json.dumps(payload.get("counts") or {}, ensure_ascii=False),
              json.dumps(payload.get("dimensions") or [], ensure_ascii=False),
              json.dumps(payload.get("findings") or [], ensure_ascii=False),
-             json.dumps(stats or {}, ensure_ascii=False)))
+             json.dumps(stats or {}, ensure_ascii=False)),
+            what=f"写入预检运行记录（scheme={scheme_id[:8]}）")
         await db.commit()
     except Exception as e:
         # ✅ BUG 修复（2026-09-21）：旧实现 `except Exception: pass` 静默吞错，
@@ -1280,11 +1416,12 @@ async def list_preflight_runs(scheme_id: str, limit: int = 10, db=Depends(get_db
     # ✅ BUG 修复（2026-09-23）：① SELECT 补上 content_fingerprint 列
     #    （旧实现未取该列 → _run_is_stale 永远判不出过期，stale 恒为 False）；
     #    ② 当前指纹一次算好传给逐行判定，消除 N+1 全表扫描。
-    cur = await db.execute(
+    rows = await review_db.fetch_all(
+        db,
         "SELECT id, total, grade, verdict, released, blocked, counts, rule_version,"
         " content_fingerprint, created_at FROM preflight_runs WHERE scheme_id=?"
-        " ORDER BY created_at DESC, rowid DESC LIMIT ?", (scheme_id, limit))
-    rows = [dict(r) for r in await cur.fetchall()]
+        " ORDER BY created_at DESC, rowid DESC LIMIT ?", (scheme_id, limit),
+        what="预检历史：读取运行记录")
     current_fp: str | None = None
     items = []
     for r in rows:
@@ -1307,11 +1444,12 @@ async def readiness_report(scheme_id: str, fmt: str = "markdown", db=Depends(get
 
     商业级审查工具的标配：结论不能只留在软件里，必须能带走。
     """
-    cur = await db.execute(
+    row = await review_db.fetch_one(
+        db,
         "SELECT total, grade, verdict, released, blocked, dimensions, findings,"
         " stats, content_fingerprint, created_at FROM preflight_runs WHERE scheme_id=?"
-        " ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,))
-    row = await cur.fetchone()
+        " ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,),
+        what="整改清单报告：读取最近一次预检记录")
     if not row:
         raise HTTPException(404, "尚无预检记录，请先执行「一键总检」")
     # ✅ BUG 修复（NameError → 500）：旧实现只写了 isinstance 守卫，却**从未从 row
@@ -1354,8 +1492,9 @@ async def readiness_report(scheme_id: str, fmt: str = "markdown", db=Depends(get
     except (TypeError, ValueError):
         total_value = 0.0
 
-    sc = await db.execute("SELECT name, type FROM schemes WHERE id=?", (scheme_id,))
-    sc_row = await sc.fetchone()
+    sc_row = await review_db.fetch_one(
+        db, "SELECT name, type FROM schemes WHERE id=?", (scheme_id,),
+        what="整改清单报告：读取方案名")
     name = sc_row["name"] if sc_row else ""
 
     # ✅ G3（2026-09-21）：报告可能基于旧正文 —— 整改清单被抄进评审意见后，

@@ -27,6 +27,8 @@ from app.routers.sse_handlers import (
 from app.services.facts_classification import (
     classify_chapter_from_text,
     classify_fact_attr,
+    # ✅ 2026-10-06（R45 · D1）：派生输入变更判据的唯一事实源
+    derivation_inputs_changed,
 )
 from app.services.facts_extractor import normalize_key
 
@@ -292,14 +294,41 @@ class TestRenameRefreshesChapter:
         assert row["fact_attr"] == classify_fact_attr(self.NEW_NAME, "C30")
 
     async def test_item_update_same_name_keeps_stored_values(self, db_conn):
-        """派生输入全部未变时必须尊重库值，不得顺手重算覆盖历史标注。"""
-        fid = await self._seed_fact(db_conn, chapter="technique")  # 库内专属标注
+        """派生输入（分类/名称/**值**）全部未变时必须尊重库值，不得顺手重算。
+
+        ⚠️ R45 修订：旧断言用「只改 value」来验证「输入未变」，
+        但那恰好是 G1 缺陷——value 本身就是 classify_fact_attr 的输入，
+        改值即派生输入变化。真正的「全未变」必须把值写成与库中一致的 C30。
+        """
+        fid = await self._seed_fact(db_conn, chapter="technique")
+        n, _ = await gf._apply_item_updates(
+            db_conn, [{"fact_id": fid, "value": "C30"}])
+        assert n == 1
+        row = await self._get_row(db_conn, fid)
+        assert row["content"] == "- **混凝土强度等级**: C30"
+        assert row["chapter"] == "technique", "输入未变却重算了章节归属"
+        assert row["fact_attr"] == "qualitative", "输入未变却重算了事实属性"
+        assert row["fact_key"] == normalize_key(self.OLD_NAME)
+
+    async def test_item_update_value_change_reclassifies(self, db_conn):
+        """⚠️ G1 收口（R45）：value 同样是派生输入——改值必须重算章节与属性。
+
+        库里存着与派生结果不一致的历史标注（chapter="technique" /
+        fact_attr="qualitative"）；把值从 C30 改成 C35 后，两者都必须
+        回到派生值，否则会带着历史错标一直用到下一次重新提取。
+        """
+        fid = await self._seed_fact(db_conn, chapter="technique")
         n, _ = await gf._apply_item_updates(
             db_conn, [{"fact_id": fid, "value": "C35"}])
         assert n == 1
         row = await self._get_row(db_conn, fid)
         assert row["content"] == "- **混凝土强度等级**: C35"
-        assert row["chapter"] == "technique", "输入未变却重算了章节归属"
+        expected = classify_chapter_from_text(
+            self.OLD_NAME, "C35", "tech_param", "parameter",
+            normalize_key(self.OLD_NAME))
+        assert row["chapter"] == expected, "改值后章节归属停在旧值"
+        assert row["fact_attr"] == classify_fact_attr(self.OLD_NAME, "C35"), (
+            "改值后事实属性停在旧值")
         assert row["fact_key"] == normalize_key(self.OLD_NAME)
 
     async def test_item_update_category_only_also_reclassifies(self, db_conn):
@@ -363,14 +392,29 @@ class TestRenameRefreshesChapter:
         assert row["fact_key"] == normalize_key(self.OLD_NAME)
         assert json.loads(row["source_ref"]) == [{"file": "手动录入", "quote": ""}]
 
-    def test_carry_dimensions_requires_both_name_and_category(self):
-        """静态护栏：分组重建的重派生判据必须同时比较 name 与 category。"""
+    def test_carry_dimensions_requires_all_three_inputs(self):
+        """静态护栏：分组重建的「是否重派生」门控必须走单一事实源。
+
+        ⚠️ R45 · D1 加固：旧锁断言的是「本函数内必须出现 category / name /
+        value 三维字面量比较」—— 该断言本身固化了「门控写在本地」这一错误
+        形态，正是三次漏改（2026-09-29 改分类 / 2026-10-01 改名 /
+        2026-10-06 改值）的根因。现收敛为
+        ``facts_classification.derivation_inputs_changed``，本锁改为断言
+        「本函数必须调用单一出口」；三维完整性与「不得再写字面量比较」由
+        test_facts_deep_audit_r45_20261006.py::TestDerivationGateSingleSource
+        统一负责。
+        """
         src = inspect.getsource(gf.update_fact)
-        anchor = "if old_cat == (("
-        assert anchor in src, "找不到分组重建的重派生判据"
-        block = src[src.index(anchor):src.index("return (", src.index(anchor))]
-        # 缺 name 判据就是本轮修的缺陷（改名不改类时不重算）
-        assert "and old_name == str(nm or \"\").strip():" in block
+        assert "derivation_inputs_changed(" in src, (
+            "分组重建未调用派生输入变更判据的唯一事实源 —— D1 分叉回流")
+        # 判据本身必须覆盖三维（唯一出口只有一处，锁这一处即可全仓生效）
+        gate_src = inspect.getsource(derivation_inputs_changed)
+        for dim in ("old_category", "new_category", "old_name", "new_name",
+                    "old_value", "new_value"):
+            assert dim in gate_src, f"判据缺 {dim} 维度"
+        # 旧值必须从库行 content 回解，而不是拿新值自比
+        assert "extract_value_from_markdown_line(" in src, (
+            "分组重建未按旧行 content 回解出旧值")
 
 
 # =============================================================================

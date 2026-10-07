@@ -12,6 +12,7 @@ import {
   ApiOutlined,
   CodeOutlined,
   SafetyCertificateOutlined,
+  DashboardOutlined,
 } from "@ant-design/icons";
 import { useNavigate, useLocation } from "react-router-dom";
 import { projectsApi, schemesApi } from "../api";
@@ -270,6 +271,7 @@ function ProjectTreeMenu({
     { key: "/outline-library", icon: <BookOutlined />, label: "目录库" },
     { key: "/settings/ai", icon: <SettingOutlined />, label: "文本模型配置" },
     { key: "/settings/prompts", icon: <CodeOutlined />, label: "提示词管理" },
+    { key: "/settings/prompt-metrics", icon: <DashboardOutlined />, label: "提示词指标" },
     { key: "/settings/security", icon: <SafetyCertificateOutlined />, label: "访问凭据" },
   ];
 
@@ -433,6 +435,7 @@ function Sidebar({
               { key: "/outline-library", icon: <BookOutlined /> },
               { key: "/settings/ai", icon: <SettingOutlined /> },
               { key: "/settings/prompts", icon: <CodeOutlined /> },
+              { key: "/settings/prompt-metrics", icon: <DashboardOutlined /> },
               { key: "/settings/security", icon: <SafetyCertificateOutlined /> },
             ]}
             onClick={({ key }) => navigate(key)}
@@ -514,6 +517,8 @@ function MainArea({
     crumbs.push({ label: "文本模型配置" });
   } else if (pathname.startsWith("/settings/prompts")) {
     crumbs.push({ label: "提示词管理" });
+  } else if (pathname.startsWith("/settings/prompt-metrics")) {
+    crumbs.push({ label: "提示词指标" });
   } else if (pathname.startsWith("/settings/security")) {
     crumbs.push({ label: "访问凭据" });
   } else if (pathname === "/") {
@@ -603,6 +608,7 @@ export function Layout({ children }: { children: ReactNode }) {
     if (location.pathname.startsWith("/outline-library")) return "/outline-library";
     if (location.pathname.startsWith("/settings/ai")) return "/settings/ai";
     if (location.pathname.startsWith("/settings/prompts")) return "/settings/prompts";
+    if (location.pathname.startsWith("/settings/prompt-metrics")) return "/settings/prompt-metrics";
     if (location.pathname.startsWith("/settings/security")) return "/settings/security";
     return "/";
   })();

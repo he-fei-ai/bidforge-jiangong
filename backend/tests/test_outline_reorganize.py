@@ -17,6 +17,53 @@ def test_strip_number():
     assert _strip_number("五、安全保障") == "安全保障"
 
 
+def test_strip_number_not_destructive():
+    """✅ BUG 修复（2026-10-05 · D1）：剥离编号时不得误伤正文标题。
+
+    旧实现自带一份 `_NUM_RE` 正则（与 numbering.py 分叉），中文编号与点分
+    编号两个分支过度激进，把正常标题切碎，且剥离结果经 _strip_tree 写入
+    description / 补充章节标题后随 outline_json 落库（用户可见的数据损坏）。
+    下列用例锁定修复后的行为。
+    """
+    # 中文数字开头但并非编号：必须原样保留
+    assert _strip_number("十二层平面布置") == "十二层平面布置"
+    assert _strip_number("三层梁板施工") == "三层梁板施工"
+    assert _strip_number("十个人") == "十个人"
+    # 点分编号必须一次吃满整条路径，不得回退成 "3钢筋工程"
+    assert _strip_number("1.2.3钢筋工程") == "钢筋工程"
+    # 单段数字 + 单位（非编号）：保留
+    assert _strip_number("2层作业平台") == "2层作业平台"
+    # 年份前缀：保留
+    assert _strip_number("2024年度计划") == "2024年度计划"
+    # 标题本身即纯编号：原样返回
+    assert _strip_number("1.2.3") == "1.2.3"
+
+
+def test_strip_number_matches_canonical():
+    """✅ D1 收口：本模块剥离必须与 numbering 的唯一实现逐字一致，
+    防止后续再次分叉出第三份正则副本。"""
+    from app.services.numbering import strip_outline_numbering
+
+    cases = [
+        "十二层平面布置", "三层梁板施工", "十个人", "2层作业平台",
+        "一、编制依据", "第五章 施工计划", "1.2.3钢筋工程", "2024年度计划",
+        "（一）编制说明", "五、安全保障", "1.1 项目概况", "第3章 施工工艺",
+        "1.2.3", "", "   ", "钻孔灌注桩",
+    ]
+    for c in cases:
+        assert _strip_number(c) == strip_outline_numbering(c), f"剥离口径分叉: {c!r}"
+
+
+def test_max_outline_depth_is_canonical():
+    """✅ D3 收口：本模块的深度上限必须引用唯一事实源 outline_utils.MAX_OUTLINE_DEPTH，
+    不得再自定义第二份常量（否则调整目录上限时本模块仍按旧值裁剪、静默截断）。"""
+    import app.services.outline_reorganize as mod
+    from app.services.outline_utils import MAX_OUTLINE_DEPTH as CANONICAL
+
+    assert mod.MAX_OUTLINE_DEPTH == CANONICAL
+    assert mod.MAX_OUTLINE_DEPTH is CANONICAL
+
+
 def test_group_of():
     assert _group_of("工程概况") == "工程概况"
     assert _group_of("一、工程简介") == "工程概况"

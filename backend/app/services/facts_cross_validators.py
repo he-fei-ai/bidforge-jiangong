@@ -412,13 +412,34 @@ def _check_same_name_conflicts(merged, initial_had_candidate: dict) -> list[Cros
     initial_had_candidate，而非规则执行中的实时状态。
     """
     conflicts: list[CrossConflict] = []
+    # ✅ 2026-10-06 改按 **fact_key** 分组（名称仅作兜底）。
+    #
+    # 旧实现 `by_name[(it.name or "").strip()]` 只按**显示名精确相等**分组，
+    # 而 ``it.key`` 才是本仓事实的稳定身份标识（extract 的 normalize_key 产物、
+    # persist 的 fact_key 列、merge_and_deduplicate 的聚类键、前端展示的 key）。
+    # 后果：**同一个物理量只要中文名不同就永不被比对** ——
+    #   「总工期 90日历天」vs「施工总工期 90日历天」→ 不报
+    #   「基坑深度 12.5m」vs「基坑开挖深度 12.5m」→ 不报
+    # 而这恰恰是跨来源抽取最常见的形态（不同文件对同一参数用了不同措辞）。
+    #
+    # 口径：key 非空 → 只按 key 分组（**不再**用 name 二次分裂，
+    # 否则「总工期」与「施工总工期」若恰好共用一个 key 仍会被拆开）；
+    # key 缺失（历史 shim / 手工替身）→ 回落按 name 分组，行为与旧版一致。
+    by_key: dict[str, list] = {}
     by_name: dict[str, list] = {}
     for it in merged:
+        key = str(getattr(it, "key", "") or "").strip()
+        if key:
+            by_key.setdefault(key, []).append(it)
+            continue
         nm = (it.name or "").strip()
         if nm:
             by_name.setdefault(nm, []).append(it)
+    # key 组在前、name 组在后：两者互不相交（key 非空的不进 name 组），
+    # 合并成同一轮判定即可，无需两套循环。
+    groups = list(by_key.values()) + list(by_name.values())
 
-    for nm, items in by_name.items():
+    for items in groups:
         valued = [(it, _norm_text_value(it.value)) for it in items]
         valued = [(it, v) for it, v in valued if v]
         distinct = []
@@ -462,46 +483,144 @@ def _norm_text_value(v) -> str:
 # 对「同一物理量但单位写法不同」的情形缺乏专门口径：
 #   · "开挖深度 12.5m" vs "开挖深度 1250cm" —— 数值等价、仅单位不同，
 #     XV-SAME-NAME 已按 generic mismatch 报 medium，但无「统一单位」的可执行提示；
-#   · "开挖深度 12.5m" vs "开挖深度 0.125m" —— 量级差恰为 100 倍（cm↔m 换算比），
-#     实为「把 cm 当 m 写」的笔误，XV-SAME-NAME 只能报泛化矛盾，无法点出根因。
+#   · "开挖深度 12.5m" vs "开挖深度 12.5cm" —— 换算到基准后量级差恰为 100 倍
+#     （cm↔m 换算比），实为「把 cm 当 m 写」的笔误，XV-SAME-NAME 只能报
+#     泛化矛盾，无法点出根因。
+#     ⚠️ 口径边界：**只比不同单位**的同量纲取值（同单位直接 continue，交给
+#     XV-SAME-NAME 判「值不同」）。这是刻意的 —— 同单位的 100 倍差更像
+#     「参数写错/取自不同工况」，按「单位换算错误」提示会把用户引向错误方向。
 # 本规则在 XV-SAME-NAME 之上补「量纲一致性」视角，产出低/中危的可执行提示，
 # 全部人工裁决（auto_resolvable=False），不改变既有冲突的判定结果。
-_UNIT_TO_BASE = {
-    # 长度（基准 m）
-    "m": 1.0, "米": 1.0, "dm": 0.1, "分米": 0.1,
-    "cm": 0.01, "厘米": 0.01, "mm": 0.001, "毫米": 0.001,
-    "km": 1000.0, "千米": 1000.0,
-    # 质量（基准 kg）
-    "kg": 1.0, "千克": 1.0, "公斤": 1.0, "g": 0.001, "克": 0.001,
-    "mg": 1e-6, "毫克": 1e-6, "t": 1000.0, "吨": 1000.0,
+#: ✅ 2026-10-06 单位模型从「长度+质量」两维扩到 9 维。
+#:
+#: 旧表只有 20 个长度/质量单位，其余工程量纲一律 ``_extract_quantity → None``
+#: **静默跳过** —— 实测「施工总荷载 12.5kN」与「125kN」这类最典型的量级笔误
+#: 完全不报（只剩泛化的 XV-SAME-NAME medium，用户看不出根因是单位）。
+#: 本表以 ``单位 → (量纲, 基准换算系数)`` 单一结构同时驱动三件事：
+#:   ① ``_UNIT_TO_BASE`` 基准换算（值等价判定）
+#:   ② ``_UNIT_DIM`` 量纲分组（只与同量纲比对，不跨量纲乱比）
+#:   ③ ``LENGTH_UNITS`` 长度单位集（供 facts_classification._UNIT_TO_METER 做 parity）
+#: 拆成三个派生视图而不是三份手写清单 —— 否则又是一组「同判据多副本」。
+#:
+#: ⚠️ **仿射量纲**（temperature）有零点偏移，比值换算无意义（30℃ 与 86℉
+#: 比值 0.35，不构成任何换算关系），故列入 :data:`_AFFINE_DIMS` 并在
+#: 比对时**只判「同数值不同单位」**（30℃/30℉ 必是单位写错），不参与
+#: 等价与量级比判定。
+_UNIT_SPEC: dict[str, tuple[str, float]] = {
+    # ---- 长度（基准 m）----
+    "m": ("length", 1.0), "米": ("length", 1.0),
+    "dm": ("length", 0.1), "分米": ("length", 0.1),
+    "cm": ("length", 0.01), "厘米": ("length", 0.01),
+    "mm": ("length", 0.001), "毫米": ("length", 0.001),
+    "km": ("length", 1000.0), "千米": ("length", 1000.0),
+    # ---- 质量（基准 kg）----
+    "kg": ("mass", 1.0), "千克": ("mass", 1.0), "公斤": ("mass", 1.0),
+    "g": ("mass", 0.001), "克": ("mass", 0.001),
+    "mg": ("mass", 1e-6), "毫克": ("mass", 1e-6),
+    "t": ("mass", 1000.0), "吨": ("mass", 1000.0),
+    # ---- 力（基准 N）----
+    "n": ("force", 1.0), "牛": ("force", 1.0),
+    "kn": ("force", 1000.0), "千牛": ("force", 1000.0),
+    "mn": ("force", 1e-3),
+    # ---- 线荷载（基准 N/m）----
+    "n/m": ("line_load", 1.0), "kn/m": ("line_load", 1000.0),
+    # ---- 面荷载 / 压强（基准 Pa）----
+    "pa": ("pressure", 1.0), "帕": ("pressure", 1.0),
+    "kpa": ("pressure", 1000.0), "千帕": ("pressure", 1000.0),
+    "mpa": ("pressure", 1e6), "兆帕": ("pressure", 1e6),
+    "n/m2": ("pressure", 1.0), "kn/m2": ("pressure", 1000.0),
+    # ---- 面积（基准 m²）----
+    "m2": ("area", 1.0), "平方米": ("area", 1.0),
+    "cm2": ("area", 1e-4), "平方厘米": ("area", 1e-4),
+    "mm2": ("area", 1e-6), "平方毫米": ("area", 1e-6),
+    # ---- 体积（基准 m³）----
+    "m3": ("volume", 1.0), "立方米": ("volume", 1.0),
+    "cm3": ("volume", 1e-6), "立方厘米": ("volume", 1e-6),
+    "l": ("volume", 1e-3), "升": ("volume", 1e-3),
+    # ---- 时间（基准 天）----
+    "d": ("duration", 1.0), "天": ("duration", 1.0),
+    "日历天": ("duration", 1.0),
+    "月": ("duration", 30.0), "个月": ("duration", 30.0),
+    # ---- 温度（仿射，仅判「同数值不同单位」）----
+    "℃": ("temperature", 1.0), "°c": ("temperature", 1.0),
+    "℉": ("temperature", 1.0), "°f": ("temperature", 1.0),
+    # ---- 百分比 ----
+    "%": ("ratio", 1.0), "％": ("ratio", 1.0),
 }
-_UNIT_DIM = {u: "length" for u in ("m", "米", "dm", "分米", "cm", "厘米",
-                                   "mm", "毫米", "km", "千米")}
-_UNIT_DIM.update({u: "mass" for u in ("kg", "千克", "公斤", "g", "克",
-                                      "mg", "毫克", "t", "吨")})
-# 疑似单位换算错误的量级倍数（cm↔m=100、mm↔m=1000 及其倒数）
+_UNIT_TO_BASE = {u: b for u, (_d, b) in _UNIT_SPEC.items()}
+_UNIT_DIM = {u: d for u, (d, _b) in _UNIT_SPEC.items()}
+#: 长度单位集（供 facts_classification._UNIT_TO_METER 做跨模块 parity）
+LENGTH_UNITS: tuple[str, ...] = tuple(
+    u for u, (d, _b) in _UNIT_SPEC.items() if d == "length")
+#: 仿射量纲：比值换算无意义，不参与「等价 / 量级比」判定
+_AFFINE_DIMS: frozenset[str] = frozenset({"temperature"})
+
+# 疑似单位换算错误的量级倍数（cm↔m=100、mm↔m=1000、kN↔N=1000 及其倒数）
 _SUSPECT_FACTORS = (100.0, 1000.0, 0.01, 0.001)
-_QUANTITY_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*([A-Za-z\u4e00-\u9fff°%]+)")
+
+#: ✅ 2026-10-06 单位字符类补 `/`、`²`、`³`、`㎡`、**数字**。
+#: 旧类 `[A-Za-z\u4e00-\u9fff°%]+` 三处缺失，各自带一条真实漏检：
+#:   ① 不含 `/`   → ``12.5kN/m²`` 只取到 ``kN``，线/面荷载永远解析不全；
+#:   ② 不含 `²`   → ``120m²`` 只取到 ``m``，被误判成长度；
+#:   ③ **不含数字** → ``2.0m3`` 只取到 ``m``，体积被误判成长度（最隐蔽，
+#:      因为 ``m`` 恰好是合法单位，解析「成功」但量纲全错）。
+_QUANTITY_RE = re.compile(
+    r"(-?\d+(?:\.\d+)?)\s*"
+    r"([A-Za-z\u4e00-\u9fff°%℃℉㎡/²³0-9]+)")
+
+#: 单位写法归一（全角/上标/空白 → 表内键）
+_UNIT_ALIASES: dict[str, str] = {
+    "㎡": "m2", "m²": "m2", "M2": "m2", "M²": "m2",
+    "㎥": "m3", "m³": "m3", "M3": "m3", "M³": "m3",
+    "KN": "kn", "Kn": "kn", "kN": "kn",
+    "KN/M2": "kn/m2", "KN/M²": "kn/m2", "kN/m²": "kn/m2",
+    "％": "%",
+}
+
+
+def _normalize_unit(raw: str) -> str:
+    """单位写法归一（去空白 → 别名 → 上标转数字 → 小写）。
+
+    ⚠️ 上标必须在查表**前**转数字：表内键一律用 ASCII ``m2``/``m3``/
+    ``kn/m2``，而中文工程文本常写 ``m²``/``kN/m²``。
+    """
+    u = str(raw or "").strip().replace(" ", "").replace("　", "")
+    hit = _UNIT_ALIASES.get(u)
+    if hit is not None:
+        return hit
+    # 上标 → ASCII 数字（未登记别名的写法也走这一步，如 ``cm²``）
+    u = u.replace("²", "2").replace("³", "3")
+    return u.lower()
 
 
 def _extract_quantity(value) -> tuple[float, str, str] | None:
     """从事实值中提取 (数值, 单位, 量纲)；无已知单位返回 None。
 
-    仅识别带【已知单位】的数值（m/kg/cm/吨…），避免把纯数字（工期天数、
-    人数）误判为量纲冲突。值含多个数值时取首个匹配的已知单位。
+    仅识别带【已知单位】的数值，避免把纯数字（人数、楼层数）误判为量纲冲突。
+    值含多个数值时取首个匹配的已知单位。
+    ✅ 2026-10-06：单位先经 :func:`_normalize_unit` 归一（``kN/m²``→``kn/m2``、
+    ``㎡``→``m2``、``KN``→``kn``），且**跳过更长（复合）单位优先** ——
+    否则 ``12.5kN/m²`` 会先匹配到 ``kN``，把面荷载误判成力。
     """
     if value is None or isinstance(value, (list, tuple)):
         return None
-    m = _QUANTITY_RE.search(str(value))
-    if not m:
-        return None
-    unit = m.group(2)
-    if unit not in _UNIT_TO_BASE:
-        return None
-    try:
-        return float(m.group(1)), unit, _UNIT_DIM[unit]
-    except ValueError:
-        return None
+    text = str(value)
+    best: tuple[float, str, str] | None = None
+    for m in _QUANTITY_RE.finditer(text):
+        unit = _normalize_unit(m.group(2))
+        if unit not in _UNIT_TO_BASE:
+            continue
+        dim = _UNIT_DIM[unit]
+        try:
+            num = float(m.group(1))
+        except ValueError:
+            continue
+        # 复合单位（面荷载/线荷载）优先于其前缀量纲（力）
+        if best is None or len(unit) > len(best[1]):
+            best = (num, unit, dim)
+        if best is not None and "/" in unit:
+            break
+    return best
 
 
 def _add_num_candidate(it, other_val: str, other_source: str,
@@ -521,8 +640,15 @@ def _add_num_candidate(it, other_val: str, other_source: str,
 def _check_numeric_unit_consistency(merged) -> list[CrossConflict]:
     """同名事实的量纲一致性：单位不一致 / 疑似单位换算错误。
 
-    仅处理「带已知单位」的数值（长度/质量），纯文本（人名/工期天数）不进入；
-    规则与 XV-SAME-NAME 正交互补：XV-SAME-NAME 报「值不同」，本规则补「量纲根因」。
+    ✅ 2026-10-06 覆盖 9 个量纲（长度/质量/力/线荷载/面荷载/面积/体积/
+    时间/温度/百分比），此前只有长度+质量，``kN``、``kN/m²``、``㎡``、
+    ``天``、``℃`` 一律静默跳过 —— 最典型的量级笔误（12.5kN vs 125kN）不报。
+
+    与 XV-SAME-NAME 正交互补：XV-SAME-NAME 报「值不同」，本规则补「量纲根因」。
+
+    ⚠️ 仿射量纲（温度）不参与比值换算（见 :data:`_AFFINE_DIMS`）：
+    只在「数值相同、单位不同」时报错（30℃ 与 30℉ 必有一处写错），
+    绝不按 base 比值判「等价」或「量级差」。
     """
     conflicts: list[CrossConflict] = []
     by_name: dict[str, list] = {}
@@ -543,12 +669,28 @@ def _check_numeric_unit_consistency(merged) -> list[CrossConflict]:
         for _dim, pairlist in by_dim.items():
             if len(pairlist) < 2:
                 continue
+            affine = _dim in _AFFINE_DIMS
             for i in range(len(pairlist)):
                 for j in range(i + 1, len(pairlist)):
                     it_a, qa = pairlist[i]
                     it_b, qb = pairlist[j]
                     if qa[1] == qb[1]:
                         continue  # 同单位 → 交给 XV-SAME-NAME 判值不同
+                    if affine:
+                        # 只判「同数值不同单位」；不同数值无法据单位判断对错
+                        if abs(qa[0] - qb[0]) <= 1e-9:
+                            conflicts.append(CrossConflict(
+                                rule_id="XV-NUM-UNIT", severity="medium",
+                                conflict_type="numeric_unit_inconsistent",
+                                side_a=_side(it_a), side_b=_side(it_b),
+                                resolution_hint="两值数值相同但温度单位不同"
+                                                "（如 30℃ 与 30℉），"
+                                                "至少有一处写错，需人工核对"))
+                            _add_num_candidate(it_a, str(it_b.value),
+                                               it_b.source, it_b.confidence)
+                            _add_num_candidate(it_b, str(it_a.value),
+                                               it_a.source, it_a.confidence)
+                        continue
                     base_a = qa[0] * _UNIT_TO_BASE[qa[1]]
                     base_b = qb[0] * _UNIT_TO_BASE[qb[1]]
                     if base_a == 0 or base_b == 0:
@@ -568,9 +710,17 @@ def _check_numeric_unit_consistency(merged) -> list[CrossConflict]:
                                            it_a.source, it_a.confidence)
                     else:
                         ratio = base_a / base_b
-                        if any(abs(ratio - f) <= 1e-3 for f in _SUSPECT_FACTORS) \
-                                or any(abs(1.0 / ratio - f) <= 1e-3
-                                       for f in _SUSPECT_FACTORS):
+                        # ⚠️ 相对容差，**不得**用减法容差。
+                        # 旧实现 ``abs(1/ratio - f) <= 1e-3`` 是加法容差：
+                        # ``1/ratio = 1e-9`` 时 ``|1e-9 - 0.001| = 0.000999 ≤ 1e-3``
+                        # 也会命中 —— 即任意 ratio ≥ 1e6 都会被误判成
+                        # 「恰好 1000 倍的单位换算错误」。本轮把单位表扩到
+                        # mN/MPa/㎥ 后该误报从「理论可能」变成「随手可触发」。
+                        # 改为相对判据 ``|x/f - 1| <= 1e-3``。
+                        if (any(abs(ratio / f - 1.0) <= 1e-3
+                                for f in _SUSPECT_FACTORS)
+                                or any(abs((1.0 / ratio) / f - 1.0) <= 1e-3
+                                       for f in _SUSPECT_FACTORS)):
                             conflicts.append(CrossConflict(
                                 rule_id="XV-NUM-UNIT", severity="medium",
                                 conflict_type="numeric_scale_suspect",
@@ -587,19 +737,58 @@ def _check_numeric_unit_consistency(merged) -> list[CrossConflict]:
 # ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
+def _is_adjudicable(item) -> bool:
+    """该条目是否值得参与「冲突判定 + has_conflict 回写」。
+
+    ✅ 2026-10-06 新增。判据与事实注入门控
+    （facts_extractor.get_facts_inject_where，四条件 fail-closed）**同源**：
+    ``is_simulated=1``（AI 编造值）或 ``is_stale=1``（来源资料已变化）的事实在
+    注入门控里恒被排除 —— 也就是说**无论裁决结果如何，它都不会进入
+    目录/正文/导出**。让这类条目参与冲突判定会产生两类纯负收益：
+
+      ① 假冲突：AI 编造值与真实值「不一致」被判冲突，逼用户裁决噪声；
+      ② 假闸门：has_conflict=1 会把该行锁在「未确认」态（前端 Tag、批量确认
+      跳过、safety 门控），而它本来就不可能被注入 —— 用户做再多次裁决
+      也无法让它进入交付物，却看不出为什么。
+
+    同时也避免 `_mark_cross_conflicts_on_items` 按 name 回写时把
+    ``has_conflict`` 打到真实条目上（它按 name 匹配，模拟值同名即命中）。
+
+    缺属性（历史 shim / 测试替身）按**可裁决**处理（fail-open 到旧行为），
+    保证既有调用方零行为变化。
+    """
+    return not (bool(getattr(item, "is_simulated", False))
+                or bool(getattr(item, "is_stale", False)))
+
+
 def run_cross_validations(merged) -> list[dict]:
     """对合并去重后的事实池执行交叉校验，返回统一冲突记录列表。
 
     副作用：range 值兼容的合并项撤销 has_conflict 标记。
+
+    ✅ 2026-10-06：进入校验前先按 ``_is_adjudicable`` 过滤 —— 模拟值
+    （is_simulated=1）与过期事实（is_stale=1）不参与冲突判定，也不接收
+    has_conflict 回写。口径与注入门控同源（理由见 _is_adjudicable docstring）。
     """
+    eligible = [it for it in merged if _is_adjudicable(it)]
+    skipped = len(merged) - len(eligible)
+    if skipped:
+        logger.info(
+            "交叉校验跳过 %d/%d 条非可裁决事实（is_simulated / is_stale，"
+            "与注入门控同口径：这类事实本就不会进入生成链路）",
+            skipped, len(merged))
+    if not eligible:
+        # 全池不可裁决 → 无可产出冲突，也不得回写任何 has_conflict
+        return []
+
     conflicts: list[CrossConflict] = []
 
     # 进入校验前快照每个条目是否携带候选。XV-SAME-NAME 据此识别「初始无候选」
     # 条目，必须在 material 规则可能清空 conflict_values（范围兼容撤销）之前记录。
     initial_had_candidate = {
-        id(it): bool(it.conflict_values) for it in merged}
+        id(it): bool(it.conflict_values) for it in eligible}
 
-    mat_conflicts, range_merged = _check_material_vs_design(merged)
+    mat_conflicts, range_merged = _check_material_vs_design(eligible)
     conflicts.extend(mat_conflicts)
     # ✅ 加固：按条目身份撤销（旧实现按 name 全文匹配，同名不同 key
     #    的无关条目会被误撤销矛盾标记）。
@@ -608,13 +797,13 @@ def run_cross_validations(merged) -> list[dict]:
         merged_it.conflict_values = []
         logger.info("范围值兼容合并：%s（撤销冲突标记）", merged_it.name)
 
-    conflicts.extend(_check_machinery_vs_schedule(merged))
-    conflicts.extend(_check_flow_sequence(merged))
-    conflicts.extend(_check_same_name_conflicts(merged, initial_had_candidate))
-    conflicts.extend(_check_numeric_unit_consistency(merged))
+    conflicts.extend(_check_machinery_vs_schedule(eligible))
+    conflicts.extend(_check_flow_sequence(eligible))
+    conflicts.extend(_check_same_name_conflicts(eligible, initial_had_candidate))
+    conflicts.extend(_check_numeric_unit_consistency(eligible))
 
     # 跨条目冲突（机械↔工期）回写两侧事实的冲突标记，供前端并排展示裁决
-    _mark_cross_conflicts_on_items(merged, conflicts)
+    _mark_cross_conflicts_on_items(eligible, conflicts)
 
     logger.info("交叉校验完成：%d 处（high=%d）", len(conflicts),
                 sum(1 for c in conflicts if c.severity == "high"))

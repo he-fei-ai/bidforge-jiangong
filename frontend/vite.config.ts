@@ -61,6 +61,10 @@ export default defineConfig({
     port: 5175,
     host: true,
     proxy: {
+      // 前端 F-功能：提示词指标 / 硬编码同步挂根前缀（/system、/admin/prompts），
+      // 不在 /api/v1 命名空间，需单独代理到后端 8000。
+      "/system": { target: "http://localhost:8000", changeOrigin: true },
+      "/admin": { target: "http://localhost:8000", changeOrigin: true },
       "/api": {
         target: "http://localhost:8000",
         changeOrigin: true,

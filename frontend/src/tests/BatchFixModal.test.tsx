@@ -104,6 +104,33 @@ const STAGE_SAME_SEC: AutoFixStageResult = {
   stats: { repaired: 2, failed: 0, skipped: 0 },
 };
 
+// ✅ 2026-10-06：弹窗 msg 来自项目自封装 useAntdMessageHub；代理按 source 缓存（否则无限重渲染）。
+const msgSpy = vi.hoisted(() => ({
+  success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(),
+  hubCache: new Map<string, any>(),
+}));
+vi.mock("../utils/activityCenter", async (orig) => {
+  const real = await orig<any>();
+  return {
+    ...real,
+    useAntdMessageHub: (m: any, source: string) => {
+      const hub = real.useAntdMessageHub(m, source);
+      let w = msgSpy.hubCache.get(source);
+      if (!w) {
+        w = {
+          success: (...a: any[]) => { msgSpy.success(...a); return hub.success(...a); },
+          error: (...a: any[]) => { msgSpy.error(...a); return hub.error(...a); },
+          warning: (...a: any[]) => { msgSpy.warning(...a); return hub.warning(...a); },
+          info: (...a: any[]) => { msgSpy.info(...a); return hub.info(...a); },
+          loading: (...a: any[]) => { msgSpy.loading(...a); return hub.loading(...a); },
+        };
+        msgSpy.hubCache.set(source, w);
+      }
+      return w;
+    },
+  };
+});
+
 vi.mock("../api", () => ({
   reviewAutoFixApi: {
     collect: vi.fn(), stage: vi.fn(), confirm: vi.fn(),
@@ -128,7 +155,17 @@ beforeEach(() => {
   api.stage.mockReset().mockResolvedValue({ data: STAGE });
   api.confirm.mockReset().mockResolvedValue({ data: CONFIRM });
 });
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  msgSpy.success.mockClear(); msgSpy.error.mockClear();
+  msgSpy.warning.mockClear(); msgSpy.info.mockClear();
+});
+
+/** 断言某条告警文案确实推给用户 */
+function expectMsg(fn: any, frag: string) {
+  const hit = fn.mock.calls.some((c: any[]) => String(c[0] ?? "").includes(frag));
+  expect(hit, `未捕获到含「${frag}」的告警；实际：${JSON.stringify(fn.mock.calls)}`).toBe(true);
+}
 
 describe("BatchFixModal · 一键修复全部阻断项", () => {
   it("打开即收集阻断项，展示定位与句子级信息", async () => {
@@ -287,5 +324,149 @@ describe("BatchFixModal · 一键修复全部阻断项", () => {
     await waitFor(() => expect(api.confirm).toHaveBeenCalledWith("s1", {
       batch_id: "batch-3", accept: ["DLV-05"],
     }));
+  });
+});
+
+// ===========================================================================
+// ✅ 2026-10-06 缺口收口：BatchFixModal 确认阶段与失败反馈补齐
+//
+// 三步链路「收集 → 暂存 → 确认」旧覆盖只走了主干成功路径与「拒绝全部」，
+// 以下均零覆盖：① stage/confirm 失败反馈；② confirm 返回 rejected 自动关闭；
+// ③ done 阶段的结果渲染与底部「关闭」按钮；④ 采集为空的空态；
+// ⑤ 重开弹窗的 reset；⑥ unsupported / not_located 项的标签与原因。
+// 注：confirm 是**落库**链路，失败无法自动恢复——必须可见。
+// ===========================================================================
+describe("BatchFixModal · 确认阶段与失败反馈", () => {
+  const mount = (onClose = vi.fn()) => {
+    const r = render(<App><BatchFixModal schemeId="s1" open onClose={onClose} /></App>);
+    return { ...r, onClose };
+  };
+  const stage2 = async () => {
+    await waitFor(() => expect(api.collect).toHaveBeenCalled());
+    await waitFor(() => expect(btn(view(), "生成修复预览")!.disabled).toBe(false));
+    fireEvent.click(btn(view(), "生成修复预览")!);
+    await waitFor(() => expect(api.stage).toHaveBeenCalled());
+  };
+
+  it("stage 失败 → 报错且停在收集阶段（不自动确认）", async () => {
+    api.stage.mockRejectedValue(new Error("暂存服务不可用"));
+    mount();
+    await waitFor(() => expect(api.collect).toHaveBeenCalled());
+    await waitFor(() => expect(btn(view(), "生成修复预览")!.disabled).toBe(false));
+    fireEvent.click(btn(view(), "生成修复预览")!);
+    await waitFor(() => expectMsg(msgSpy.error, "暂存服务不可用"));
+    expect(api.confirm).not.toHaveBeenCalled();
+  });
+
+  it("confirm 失败 → 报错且不进入 done（正文未落库，用户必须知道）", async () => {
+    api.confirm.mockRejectedValue(new Error("落库失败：数据库不可用"));
+    mount();
+    await stage2();
+    fireEvent.click(btn(view(), "确认修复")!);
+    await waitFor(() => expect(api.confirm).toHaveBeenCalled());
+    await waitFor(() => expectMsg(msgSpy.error, "数据库不可用"));
+    expect(txt(view())).not.toContain("已接受");
+  });
+
+  it("confirm 返回 rejected → 提示已拒绝并自动关闭", async () => {
+    api.confirm.mockResolvedValue({ data: {
+      status: "rejected", accepted: 0, repaired_sections: 0,
+      snapshot_id: "", batch_id: "batch-1",
+    } });
+    const { onClose } = mount();
+    await stage2();
+    fireEvent.click(btn(view(), "拒绝全部")!);
+    await waitFor(() => expect(api.confirm).toHaveBeenCalledWith("s1", {
+      batch_id: "batch-1", reject: ["DLV-05"],
+    }));
+    await waitFor(() => expectMsg(msgSpy.info, "已拒绝"));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it("done 阶段：正文已落库的结果与回滚提示均可见，底部按钮切为「关闭」", async () => {
+    const { onClose } = mount();
+    await stage2();
+    fireEvent.click(btn(view(), "确认修复")!);
+    await waitFor(() => expect(api.confirm).toHaveBeenCalledWith("s1", {
+      batch_id: "batch-1", accept_all: true,
+    }));
+    await waitFor(() => expect(txt(view())).toContain("已修复 1 项问题"));
+    // done 阶段必须告知正文已变更（导出缓存与审核结论失效）
+    expect(txt(view())).toContain("正文已变更");
+    const close = btn(view(), "关闭")!;
+    expect(close).toBeTruthy();
+    expect(btn(view(), "取消")).toBeFalsy();
+    fireEvent.click(close);
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it("采集为空 → 空态提示且「生成修复预览」禁用", async () => {
+    api.collect.mockResolvedValue({ data: { ...COLLECT, total: 0, items: [] } });
+    mount();
+    await waitFor(() => expect(api.collect).toHaveBeenCalled());
+    await waitFor(() => expect(txt(view())).toContain("没有可自动修复"));
+    expect(btn(view(), "生成修复预览")!.disabled).toBe(true);
+    expect(api.stage).not.toHaveBeenCalled();
+  });
+
+  it("重开弹窗 → reset 并重新采集（不残留上一次的暂存结果）", async () => {
+    const { rerender, onClose } = mount();
+    await stage2();
+    await waitFor(() => expect(api.confirm).not.toHaveBeenCalled());
+    // 关闭后重开
+    rerender(<App><BatchFixModal schemeId="s1" open={false} onClose={onClose} /></App>);
+    rerender(<App><BatchFixModal schemeId="s1" open onClose={onClose} /></App>);
+    // 重开后回到「收集」阶段：应重新获取 collect 并不再残留暂存项
+    await waitFor(() =>
+      expect((reviewAutoFixApi.collect as any).mock.calls.length).toBeGreaterThan(1));
+    expect(btn(view(), "生成修复预览")!.disabled).toBe(false);
+    const confirmBtn = btn(view(), "确认修复（接受选中");
+    if (confirmBtn) expect(confirmBtn.disabled).toBe(true);
+  });
+
+  it("stage 返回 unsupported / not_located 项 → 标签与原因可见且不可勾选", async () => {
+    api.stage.mockResolvedValue({ data: {
+      batch_id: "batch-x", status: "pending_confirm",
+      items: [
+        { rule_id: "DLV-05", section_id: "sec-a", section_title: "工程概况",
+          mode: "auto", status: "repaired", reason: "", targets: [],
+          before: "a", after: "b", problems: [], chain_index: 0,
+          sentence_idx: 0, sentence_total: 0 },
+        { rule_id: "CON-02", section_id: "sec-b", section_title: "施工组织",
+          mode: "manual", status: "unsupported", reason: "该规则需人工判断",
+          targets: [], before: "c", after: "c", problems: [], chain_index: 0,
+          sentence_idx: 0, sentence_total: 0 },
+        { rule_id: "CON-03", section_id: "sec-c", section_title: "应急预案",
+          mode: "ai", status: "not_located", reason: "未定位到冲突位置",
+          targets: [], before: "d", after: "d", problems: [], chain_index: 0,
+          sentence_idx: 0, sentence_total: 0 },
+      ],
+      stats: { repaired: 1, failed: 0, skipped: 2 },
+    } });
+    mount();
+    await stage2();
+    await waitFor(() => expect(txt(view())).toContain("需人工"));
+    expect(txt(view())).toContain("未定位到冲突位置");
+    // 只有 repaired 项可勾选（默认勾中 1 项）
+    expect(btn(view(), "确认修复（接受选中 1）")).toBeTruthy();
+  });
+
+  it("采集回调失败 → 报错且不进入 stage", async () => {
+    api.collect.mockRejectedValue(new Error("收集服务不可用"));
+    mount();
+    await waitFor(() => expectMsg(msgSpy.error, "收集服务不可用"));
+    expect(api.stage).not.toHaveBeenCalled();
+  });
+
+  it("取消未选项时确认按钮禁用（不发空批次序）", async () => {
+    api.stage.mockResolvedValue({ data: STAGE_MULTI });
+    mount();
+    await stage2();
+    // 全不选
+    await waitFor(() => expect(btn(view(), "全不选")).toBeTruthy());
+    fireEvent.click(btn(view(), "全不选")!);
+    await waitFor(() =>
+      expect(btn(view(), "确认修复（接受选中 0）")!.disabled).toBe(true));
+    expect(api.confirm).not.toHaveBeenCalled();
   });
 });

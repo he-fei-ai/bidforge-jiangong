@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 from app.services import prompt_governance as pg
 from app.services.ai.prompts import PROMPT_VARIABLE_CONTRACTS
+from app.services.ai.prompts import _metrics
 from app.services.ai.prompts._registry import (
     _ALL_PROMPTS,
     _reg,
@@ -94,6 +95,76 @@ class TestSegmentParsing:
         prefix, segs, _trailing = pg.split_labeled_segments(text)
         assert prefix == "前言文字"
         assert pg.assemble_segments(prefix, segs, _trailing) == text
+
+    # ✅ 2026-10-07（BUG-D1~D4 回归护栏）：旧实现只测了「标准全角段头 + 同行正文」
+    #   一种形态，其余 7 种真实形态往返后**静默丢字**（实测），
+    #   而 `assemble_segments` 的 docstring 白纸黑字写着「无损」。
+    #   下列形态都是**真实会出现**的（半角冒号 / 段头缩进 / 段间空行 /
+    #   段头独占一行 / 尾随换行），任一回退都会立刻被这条护栏抓住。
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "【A】：内容",                                  # 标准全角
+            "【A】:内容",                                    # 半角冒号
+            "  【A】：内容",                                 # 段头缩进
+            "\t【A】：内容",                                  # 制表符缩进
+            "【A】：内容\n\n【B】：内容2",                    # 段间空行
+            "【A】：一行\n续行\n【B】：二",                   # 段内多行
+            "【A】：内容\n",                                 # 尾随一个换行
+            "【A】：内容\n\n",                               # 尾随两个换行
+            "【A】：内容\n\n\n",                             # 尾随三个换行
+            "【A】：  内容",                                 # 冒号后多空格
+            "【 A 】：内容",                                 # 标签内空格
+            "【A】：\n正文第一行\n【B】：二",                 # 段头独占一行
+            "【A】：\n正文第一行\n",                          # 段头独占一行 + 尾换行
+            "【A】：\n",                                     # 段头独占一行且无正文
+            "【A】：\n【B】：内容",                          # 空正文段后紧跟下一段
+            "前置说明\n【A】：内容",                          # 前缀
+            "前置\n【A】：内容\n",                            # 前缀 + 尾换行
+            "前置\n\n【A】：内容",                            # 前缀 + 空行
+            "  【A】：内容\n\n  【B】：二",                   # 缩进 + 段间空行组合
+        ],
+        ids=None,
+    )
+    def test_roundtrip_is_lossless_across_real_shapes(self, text):
+        """全形态往返必须逐字节一致（此前仅标准全角形态通过）。"""
+        prefix, segs, trailing = pg.split_labeled_segments(text)
+        assert pg.assemble_segments(prefix, segs, trailing) == text, (
+            f"往返丢字：\n  原文 {text!r}\n  还原 "
+            f"{pg.assemble_segments(prefix, segs, trailing)!r}")
+
+    def test_head_field_keeps_original_delimiter(self):
+        """段头不再被重写：分隔符 / 间隔空白 / 标签内空格按原样保留。"""
+        _, segs, _ = pg.split_labeled_segments("【A】:内容")
+        assert segs[0]["head"] == "【A】:"
+        _, segs, _ = pg.split_labeled_segments("【A】：  内容")
+        assert segs[0]["head"] == "【A】： "
+        _, segs, _ = pg.split_labeled_segments("【 A 】：内容")
+        assert segs[0]["head"] == "【 A 】："
+
+    def test_leading_field_is_actually_populated(self):
+        """`leading` 字段曾恒为空串（死字段），现必须取到真实缩进。"""
+        _, segs, _ = pg.split_labeled_segments("  【A】：内容")
+        assert segs[0]["leading"] == "  "
+        _, segs, _ = pg.split_labeled_segments("\t【A】：内容")
+        assert segs[0]["leading"] == "\t"
+        # 无缩进时仍必须是空串（不能把段头字符并进 leading）
+        _, segs, _ = pg.split_labeled_segments("【A】：内容")
+        assert segs[0]["leading"] == ""
+
+    def test_leading_not_doubled_by_head(self):
+        """缩进只记一次：`head` 必须跳过 `leading` 前缀。"""
+        _, segs, _ = pg.split_labeled_segments("  【A】：内容")
+        assert segs[0]["head"] == "【A】："
+        assert "【" in segs[0]["head"] and segs[0]["head"].startswith("【")
+
+    def test_overhead_of_counts_lead_and_head_once(self):
+        """`_overhead_of` 必须与「head + leading」的实际字符数一致。"""
+        text = "  【A】：内容\n\n  【B】：二"
+        prefix, segs, _ = pg.split_labeled_segments(text)
+        real_overhead = sum(len(s["head"]) + len(s["leading"]) for s in segs)
+        real_overhead += max(0, len(segs) - 1)
+        assert pg._overhead_of(prefix, segs) == real_overhead
 
 
 # ---------------------------------------------------------------------------
@@ -390,3 +461,59 @@ class TestVariableContracts:
         _ALL_PROMPTS["contract_test_d"]["requires"] = ["real_var"]
         issues = {i["key"]: i for i in check_prompt_variables()}
         assert "contract_test_d" not in issues
+
+
+# ---------------------------------------------------------------------------
+# 四、预算截断埋点接线（2026-10-07 · BUG-D6）
+# ---------------------------------------------------------------------------
+class TestBudgetTruncationMetricWired:
+    """`token_budget_truncated` 曾全仓零调用方，运维端点永远回空 dict ——
+    无法区分「本次没截断」与「从未埋点」。现接线到唯一真正执行截断的地方。"""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_counters(self):
+        _metrics.reset()
+        yield
+        _metrics.reset()
+
+    def test_truncation_records_metric_by_segment_label(self):
+        from app.services import prompt_governance as _pg
+        text = ("【全局事实】：" + "\n".join("第%03d行 施工参数与要求" % i
+                                            for i in range(40))
+                + "\n【知识库】：" + "\n".join("资料第%02d行" % i
+                                              for i in range(10)))
+        _out, info = _pg.allocate_context_budget(text, 120)
+        assert info["applied"] is True, "测试前提：预算必须真正生效"
+        assert info["cut"] >= 2, "测试前提：至少两段被削减"
+        snap = _metrics.get_snapshot()
+        assert snap["token_budget_truncated"].get("全局事实", 0) == 1
+        assert snap["token_budget_truncated"].get("知识库", 0) == 1
+
+    def test_no_truncation_no_metric(self):
+        from app.services import prompt_governance as _pg
+        _out, info = _pg.allocate_context_budget("【全局事实】：短文本", 10000)
+        assert info["applied"] is False
+        assert _metrics.get_snapshot()["token_budget_truncated"] == {}
+
+    def test_metric_does_not_block_allocation(self):
+        """埋点自身抛错不得影响分配结果（观测指标 fail-soft 纪律）。"""
+        import app.services.ai.prompts._metrics as _m
+        from app.services import prompt_governance as _pg
+
+        text = ("【全局事实】：" + "\n".join("第%03d行 施工参数与要求" % i
+                                            for i in range(40))
+                + "\n【知识库】：" + "\n".join("资料第%02d行" % i
+                                              for i in range(10)))
+        expected_out, expected_info = _pg.allocate_context_budget(text, 120)
+        orig = _m.record_token_budget_truncated
+
+        def _boom(key):
+            raise RuntimeError("metrics down")
+
+        _m.record_token_budget_truncated = _boom
+        try:
+            out, info = _pg.allocate_context_budget(text, 120)
+        finally:
+            _m.record_token_budget_truncated = orig
+        assert out == expected_out, "埋点异常不得改变分配结果"
+        assert info["result_chars"] == expected_info["result_chars"]

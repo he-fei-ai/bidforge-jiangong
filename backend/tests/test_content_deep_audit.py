@@ -43,39 +43,66 @@ class TestTerminalOrdering:
         # ✅ G12-3（2026-09-20）：checkpoint 载荷已收口到 _content_ckpt_payload 单一
         # 拼装点（旧锚点是 `_save_content_checkpoint(task_id, {` 的手拼形态），
         # 顺序不变量保持：checkpoint → finish_task → yield。
-        i_ckpt = src.index('_content_ckpt_payload("completed"')
-        i_finish = src.index('await finish_task(task_id, "completed", _done_msg)')
+        # ✅ degraded（2026-10-07）：终态字面量改为变量 _terminal_status
+        #    （"degraded" if 一致性修复有失败 else "completed"），三处调用同步使用
+        #    该变量，锚点随之更新；顺序不变量本身不变。
+        i_ckpt = src.index('_content_ckpt_payload(_terminal_status, _done_msg)')
+        i_finish = src.index('await finish_task(task_id, _terminal_status, _done_msg)')
         i_yield = src.index("yield f\"data: {json.dumps(completed_payload",
                             src.index("completed_payload = {"))
         assert i_ckpt < i_finish < i_yield, "顺序必须为 checkpoint → finish_task → yield"
 
     def test_stopped_writes_checkpoint_before_finish_and_yield(self):
         src = self._src()
-        # ✅ G12-3：同上，锚点改为 _content_ckpt_payload("stopped", "用户已停止")
+        # ✅ G12-3：同口径。锚点改为 _content_ckpt_payload("stopped", "用户已停止")
         i_stop = src.index('_content_ckpt_payload("stopped", "用户已停止")')
         i_finish = src.index('await finish_task(task_id, "stopped", "用户已停止")')
-        # ✅ 锚点改空白容错（2026-09-24）：sse_handlers 重构时 dict 键值加了空格
-        # （'progress': stop_progress），硬编码无空格串会误报；顺序语义不变。
-        m_progress = re.search(r"'progress':\s*stop_progress", src)
-        assert m_progress is not None, "stopped 事件载荷必须携带 stop_progress"
-        i_yield = m_progress.start()
-        assert i_stop < i_finish < i_yield
+        # ✅ R2（2026-10-05）：载荷改由 `_stopped_payload(...)` 单一拼装点产出，
+        #    故「progress 携带 stop_progress」这条断言改锚到**调用点**——
+        #    它比旧正则更强：同时锁住「必须走单一拼装点」与「必须传 stop_progress」
+        #    两件事（旧实现只锁后者，且两条 stopped 路径字段并不一致）。
+        m_payload = re.search(
+            r"_stopped_payload\(\s*'用户已停止'\s*,\s*stop_progress\s*\)", src)
+        assert m_payload is not None, (
+            "用户停止路径的 stopped 事件必须由 _stopped_payload('用户已停止', "
+            "stop_progress) 产出")
+        assert i_stop < i_finish < m_payload.start()
 
+    def test_stopped_payload_carries_progress_and_summary(self):
+        """✅ R2：单一拼装点内必须真的带上 progress / standard_summary。
+
+        旧实现两条 stopped 路径字段不一致（取消路径缺 progress 与
+        standard_summary，注释却写「已补齐」）。本用例锁住拼装点本体，
+        防止有人把字段从 helper 里删掉而调用点看不出问题。
+        """
+        src = self._src()
+        i_def = src.index("def _stopped_payload(")
+        # ⚠️ 窗口尺寸必须覆盖 helper **完整体**（含 return 字典）。
+        #    首版取 1200 字符恰好在 'standard_summary' 被截断处切掉 →
+        #    护栏恒失败，逼着后人改窗口而不是改实现（§5.14 判据锚点）。
+        #    这里改用「到下一个顶层 def 为止」的边界，与实现长度解耦。
+        i_end = src.index("\n        def ", i_def + 10)
+        block = src[i_def:i_end]
+        assert "'progress': _p" in block, "stopped 载荷必须带 progress"
+        assert "'standard_summary': _std_sum" in block, (
+            "stopped 载荷必须带 standard_summary")
+        assert "'failed_count': max(total - len(done_ids), 0)" in block
 
     def test_cancelled_writes_checkpoint_before_finish_and_yield(self):
-        """✅ BUG 修复（2026-09-21）：except CancelledError 路径也必须保存 checkpoint。
+        """✅ BUG 修复（2026-09-21）：except CancelledError 也必须保护 checkpoint。
 
-        旧实现直接 finish_task + yield，不写 checkpoint —— 服务端取消时已生成
-        章节的成果清单永久丢失。现与停止/断线路径同口径。
+        旧实现直接 finish_task + yield，成果清单在刷出终态的同一瞬间丢失。
+        2026-10-05 起本路径的 stopped 载荷也改走 `_stopped_payload` 单一拼装点，
+        故锚点同步更新（更强：同时锁住"走单一拼装点"）。
         """
         src = self._src()
         i_ckpt = src.index('_content_ckpt_payload("stopped", "任务已取消")')
         i_finish = src.index('await finish_task(task_id, "stopped", "任务已取消")')
-        i_yield = src.index("'event':'stopped','task_id':task_id", i_ckpt)
-        assert i_ckpt < i_finish < i_yield, "取消路径顺序必须为 checkpoint → finish_task → yield"
+        i_yield = src.index("_stopped_payload('任务已取消')", i_ckpt)
+        assert i_ckpt < i_finish < i_yield, "取消路径顺序也必须是 checkpoint → finish_task → yield"
 
     def test_cancelled_checkpoint_uses_stopped_event(self):
-        """取消路径的 checkpoint 事件类型必须是 'stopped'（而非 'failed'）。"""
+        """取消路径的 checkpoint 事件类型是 'stopped'（不是 'failed'）"""
         src = self._src()
         i = src.index('_content_ckpt_payload("stopped", "任务已取消")')
         block = src[i:i + 200]

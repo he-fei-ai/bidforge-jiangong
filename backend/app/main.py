@@ -45,13 +45,23 @@ logging.basicConfig(
 try:
     from app.config import LOGS_DIR as _LOGS_DIR
     from app.utils.safe_log_handler import SafeRotatingFileHandler
-    _LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    _file_handler = SafeRotatingFileHandler(
-        _LOGS_DIR / "backend.log",
-        maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
-    _file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-    logging.getLogger().addHandler(_file_handler)
+    # ✅ 2026-10-07：pytest 进程不挂生产文件 handler。
+    #    大量 API 测试会 import app.main，此前测试噪声被写进 logs/backend.log
+    #    —— 生产日志与测试日志混在一起，P95/P99、ERROR Top、HTTP 端点延迟等
+    #    排障口径全部失真（唯一日志源被污染，且轮转配额被测试日志消耗）。
+    #    生产进程不受影响（无 pytest 模块、无 PYTEST_CURRENT_TEST）。
+    import os as _os
+    import sys as _sys
+    if _os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in _sys.modules:
+        pass   # 测试进程：日志走 caplog / 控制台，不写生产文件
+    else:
+        _LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        _file_handler = SafeRotatingFileHandler(
+            _LOGS_DIR / "backend.log",
+            maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+        _file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        logging.getLogger().addHandler(_file_handler)
 except Exception:  # noqa: BLE001 - 日志落盘失败绝不影响服务启动
     pass
 
@@ -64,6 +74,30 @@ try:
 except Exception:  # noqa: BLE001
     pass
 logger = logging.getLogger("main")
+
+
+async def _run_startup_orphan_export_gc() -> None:
+    """启动期：对每个在 export_cache 里有行的 scheme 跑一次孤儿导出产物 GC。
+
+    R47 债-A3：``_gc_orphan_exports`` 只在导出时跑；长期不导出的方案其
+    孤儿产物（.tmp.docx / PDF INSERT 失败的成稿）永不被清。启动时一次性
+    扫全表兜底。fail-soft：单方案失败仅告警，整体异常由 lifespan 外层
+    try/except 兜住，绝不阻断启动。
+    """
+    from app.db import get_conn as _gc_get_conn
+    from app.routers.export import _gc_orphan_exports as _gc_orphans
+    _gc_db = await _gc_get_conn()
+    _rows = await _gc_db.execute(
+        "SELECT DISTINCT scheme_id FROM export_cache")
+    _schemes = [r[0] for r in await _rows.fetchall()]
+    for _sid in _schemes:
+        if not _sid:
+            continue
+        try:
+            await _gc_orphans(_gc_db, _sid, protect=None)
+        except Exception as _e:  # 单方案失败不影响其它方案与启动
+            logger.warning("启动期孤儿导出 GC 失败（scheme=%s）: %s",
+                           str(_sid)[:8], _e)
 
 
 @asynccontextmanager
@@ -143,6 +177,16 @@ async def lifespan(app: FastAPI):
             logger.warning("启动恢复：清理了 %d 个中断遗留的「提取项目」解析项", n_items)
     except Exception as e:
         logger.warning("启动恢复清理失败（不影响服务）: %s", e)
+
+    # ✅ R47 债-A3（2026-10-06）：启动期孤儿导出产物 GC。
+    #    _gc_orphan_exports 只在导出时跑；长期不导出的方案其孤儿产物
+    #    （.tmp.docx / PDF INSERT 失败的成稿）永不被清。启动时对每个在
+    #    export_cache 里有行的 scheme 跑一次孤儿回收。fail-soft：任何异常
+    #    只记 WARNING，绝不阻断启动。
+    try:
+        await _run_startup_orphan_export_gc()
+    except Exception as e:
+        logger.warning("启动期孤儿导出 GC 跳过（不影响服务）: %s", e)
 
     # ✅ 统一并发体系：启动时应用活跃 AI 配置的并发数作为全局默认并发
     try:
@@ -302,6 +346,12 @@ for r in (projects, schemes, sections, sse_handlers,
           knowledge, consistency_repair, review, review_autofix, system,
           bid_analysis, doc_pipeline, prompts):
     app.include_router(r.router)
+
+# ✅ R48（2026-10-06）：prompts 运行时指标 + 硬编码→DB 一键同步。
+#    这两个路由挂在独立前缀（/system、/admin/prompts），不在上面的
+#    /api/v1/prompts 命名空间下，故在此单独注册。
+app.include_router(prompts.system_metrics_router)
+app.include_router(prompts.admin_prompts_router)
 
 
 @app.get("/api/v1/health")

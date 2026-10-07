@@ -24,7 +24,7 @@ from functools import lru_cache
 from typing import Any
 
 from app.config import settings
-from app.services.ai.json_response import collect_json_response
+from app.services.ai.json_response import FACTS_REPAIR_KEY, collect_json_response
 from app.services.ai.prompts._norm_dicts import (
     normalize_machinery_name,
     normalize_material_spec,
@@ -213,12 +213,64 @@ class FactItem:
             self.zone_type or "",
             1 if self.is_safety_critical else 0,
             self.norm_group or "",
+            # ✅ 2026-10-06：is_stale 补进 to_db_row（见 GLOBAL_FACTS_INSERT_COLS）。
+            #   旧实现 persist INSERT 用 27 列、路由侧列清单用 28 列，两份漂移 →
+            #   提取落库的事实 is_stale 走表默认值。提取管线产出的事实**恒为
+            #   未过期**（过期只由资料重传/删除触发），显式写 0 与走 DEFAULT 0
+            #   行为一致，但两份清单不再漂移。
+            #   ⚠️ 位置必须在九大章节四维**之前**：既有契约是
+            #   ``to_db_row()[-4:] == (chapter, fact_attr, source_kind, is_shared)``。
+            0,  # is_stale
             # ✅ 2026-09-24：九大章节四维标注落库（顺序须与 persist INSERT 列一致）
+            #    且必须是**最后四列**（见上）。
             self.chapter or "",
             self.fact_attr or "",
             self.source_kind or "",
             1 if self.is_shared else 0,
         )
+
+
+# ---------------------------------------------------------------------------
+# 全局事实落库列清单（**唯一事实源**，2026-10-06）
+# ---------------------------------------------------------------------------
+#: ``global_facts`` 的完整落库列清单。
+#:
+#: ✅ 2026-10-06 收敛：此前本模块 :func:`persist_extraction` 内联一份 **27 列**
+#: 字面量 + 手写 27 个占位符，而 ``routers/global_facts.py`` 另有一份
+#: **28 列** 的 ``MANUAL_FACT_INSERT_COLS``（多 ``is_stale``）。两份清单漂移
+#: 的后果与 2026-09-29「27 个 ? vs 28 列」静默错位同类：任何一次 schema 加列
+#: 都要改两处，漏一处则该写入路径永远回落表默认值，而读路径靠惰性派生
+#: 「看起来正常」，极难发现。
+#:
+#: 放在 services 而非 routers 的原因：本模块（提取管线）与路由（手工/AI 调整/
+#: 分组重建）**都要**用它，定义在任一上层都会产生反向 import。
+#: 路由侧保留 ``MANUAL_FACT_INSERT_COLS`` / ``_MANUAL_FACT_INSERT_SQL`` 别名
+#: 以兼容既有引用点与测试。
+#:
+#: ⚠️ 顺序即落库顺序，:meth:`FactItem.to_db_row` 与路由侧 ``_manual_fact_row``
+#: 的返回值必须与之**逐一对应**（护栏 ``test_insert_column_lists_single_source``
+#: 锁定列数与逐列名一致）。
+GLOBAL_FACTS_INSERT_COLS: tuple[str, ...] = (
+    "id", "project_id", "scheme_id", "group_id", "group_title", "title", "content",
+    "category", "source_ref", "is_simulated", "confidence", "is_resolved",
+    "has_conflict", "conflict_keys", "fact_key",
+    # 溯源/单位列（提取管线写入；手工新增走默认值）
+    "chunk_hash", "value_unit", "fact_type", "evidence_kind", "page_ref",
+    "zone_type", "is_safety_critical", "norm_group", "is_stale",
+    # 九大章节四维标注（apply_fact_dimensions 派生；手工新增走默认值）
+    "chapter", "fact_attr", "source_kind", "is_shared",
+)
+
+#: INSERT 语句（占位符**由列数派生**，不再手写 —— 手写占位符是历史错位主因）
+#: ⚠️ 占位符拼接用 ``","``（无空格）以与既有路由侧 SQL **逐字节一致**：
+#:   既有护栏 ``test_placeholder_count_derived_from_columns`` 断言
+#:   ``SQL.endswith(",".join("?" for _ in cols))``；格式不一致会让该护栏假失败，
+#:   久而久之就会有人把它改松（AGENTS.md §5.14「锚点过宽比不写护栏更糟」）。
+GLOBAL_FACTS_INSERT_SQL = (
+    "INSERT INTO global_facts (%s) VALUES (%s)"
+    % (", ".join(GLOBAL_FACTS_INSERT_COLS),
+       ",".join("?" for _ in GLOBAL_FACTS_INSERT_COLS))
+)
 
 
 @dataclass
@@ -264,6 +316,17 @@ class ExtractionResult:
     chunk_hashes_run: set = field(default_factory=set)
     skipped_chunks: int = 0
     all_skipped: bool = False
+    # ✅ 2026-10-06：模型**主动声明**未能提取的段（模型回 ``segment_failed=true``）。
+    #    该标志此前只在 _validate 里被读一次就丢弃，导致三处静默失真：
+    #      ① 不进 segment_stats.failed / failed_details → 前端「N 段失败」永不提示；
+    #      ② 不进 warnings → 用户以为「提取完成」；
+    #      ③ 该段指纹仍写入 chunk_hashes_ok → 下次增量提取**永久跳过**，
+    #         只有「重新提取」(force) 才能恢复。
+    #    注意语义边界：封面/目录等「合法无事实段」模型同样回 segment_failed=true，
+    #    故**不得**把它们计为 failed（会让 60 段里 40 段虚报失败），
+    #    只做独立计数 + 告警 + 给出「重新提取」恢复入口。
+    declared_failed_chunks: int = 0
+    declared_failed_details: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +498,33 @@ def append_simulated_marker(value: str, is_simulated: bool) -> str:
     return f"{clean}{SIMULATED_MARKER}" if is_simulated else clean
 
 
+#: 事实行 name/value 分隔符（全角 + 半角冒号）。✅ 2026-10-06 收敛为单一常量：
+#: 旧实现按 ``["：", ":"]`` 顺序 **先试全角再试半角** 并在「首个命中即返回」，
+#: 于是「值内部含全角冒号」的行会在错位处切分 —— 中文工程文本里
+#: 「地点：三层」「备注：见附件」「范围：室内」极常见，实测
+#: ``- **时间**: 9:00，地点：北京`` 被切成 ``('时间: 9:00，地点', '北京')``。
+#: 该函数是 load_resolved_facts_for_scope（审核 / 预检 / 符合性 / 修复四条链路的
+#: 唯一 name/value 回解出口）→ 错位会一路污染下游提示词。
+_FACT_LINE_SEPARATORS: tuple[str, ...] = ("：", ":")
+
+
+def _split_fact_line(line: str) -> tuple[str, str]:
+    """按 **最早出现** 的分隔符切分 name/value（半角与全角一视同仁）。
+
+    旧实现「先全角后半角」等价于「全文任意位置存在全角冒号就用全角」，
+    与书写者「name 后紧跟的那个冒号才是分隔符」的意图相反。
+    """
+    best_idx = -1
+    best_sep = ""
+    for sep in _FACT_LINE_SEPARATORS:
+        idx = line.find(sep)
+        if idx >= 0 and (best_idx < 0 or idx < best_idx):
+            best_idx, best_sep = idx, sep
+    if best_idx < 0:
+        return line.strip(), ""
+    return line[:best_idx].strip(), line[best_idx + len(best_sep):].strip()
+
+
 def extract_value_from_markdown_line(line: str) -> tuple[str, str]:
 
     """从旧版 Markdown 格式中提取 name 和 value
@@ -451,12 +541,8 @@ def extract_value_from_markdown_line(line: str) -> tuple[str, str]:
     line = re.sub(r'\*\*(.+?)\*\*', r'\1', line)
     # 去掉 *(...)* 括号注释
     line = re.sub(r'\s*\*[^*]*\*\s*', '', line).strip()
-    # 按冒号分割
-    for sep in ["：", ":"]:
-        if sep in line:
-            name, _, value = line.partition(sep)
-            return name.strip(), value.strip()
-    return line, ""
+    # ✅ 2026-10-06：按最早出现的冒号切分（半角/全角同等对待）
+    return _split_fact_line(line)
 
 
 
@@ -685,6 +771,77 @@ def resolve_chunk_size(chunk_size: int = CHUNK_SIZE) -> int:
     Returns:
         生效的分段上限；动态计算失败时回落到 ``chunk_size``（fail-soft）。
     """
+#: ✅ 2026-10-06：事实链路的**自动**上下文窗口（字符）。
+#:
+#: 为什么不再沿用 ``facts_patches.DEFAULT_CONTEXT_LENGTH_LIMIT``（400_000）：
+#: 那个常量是**乐观**默认（对齐参考软件），而本仓 ``ai_config`` 表**不持久化**
+#: 每个模型的上下文窗口（``context_tokens`` 只在 ``GET /models`` 拉取瞬间存在于
+#: ``routers/ai_config/models.py`` 的响应里，不落库）。于是「自动」= 假设用户
+#: 配的是 128k-token 级长文模型。对 32k 窗口的模型，单段 30 万字会直接
+#: 触发上下文超限 —— 而这正是「按窗口动态分段」想解决的问题本身。
+#:
+#: 现改为**保守**自动默认：按中文约 1.5~2 字/token 折算，128_000 字符约合
+#: 64k~85k token，覆盖绝大多数在用模型且留足输出余量；确实用长文模型的用户
+#: 显式配 ``facts_context_length_limit`` 即可放宽。
+FACTS_AUTO_CONTEXT_CHARS = 128_000
+
+#: 单段字符**硬天花板**。无论配置多大，单段不超过此值 ——
+#: 超长单段会让「段数变少」这个优化目标反过来变成单请求超时/限流风险，
+#: 且失败时整轮重试成本极高。
+FACTS_SEGMENT_HARD_CEILING = 60_000
+
+
+def resolve_fact_context_chars() -> int:
+    """解析事实链路生效的上下文窗口（字符），带硬天花板。
+
+    解析顺序（前者优先）：
+      1. ``settings.facts_context_length_limit``（>0 时生效，事实专属）
+      2. ``settings.context_length_limit``（>0 时生效，全局；0 = 未配置）
+      3. :data:`FACTS_AUTO_CONTEXT_CHARS`（保守自动默认）
+
+    无论哪一路，最终都夹到 ``[MIN, FACTS_SEGMENT_HARD_CEILING]``。
+    全程 fail-soft：任何异常都回落自动默认，绝不抛给分段链路。
+    """
+    raw = 0
+    try:
+        raw = int(getattr(settings, "facts_context_length_limit", 0) or 0)
+        if raw <= 0:
+            raw = int(getattr(settings, "context_length_limit", 0) or 0)
+    except (TypeError, ValueError):
+        raw = 0
+    if raw <= 0:
+        raw = FACTS_AUTO_CONTEXT_CHARS
+    if raw > FACTS_SEGMENT_HARD_CEILING:
+        logger.info(
+            "事实提取上下文窗口 %d 超过单段硬天花板 %d，已夹到天花板"
+            "（可调 facts_context_length_limit，但单段过大会显著提高超时/限流风险）",
+            raw, FACTS_SEGMENT_HARD_CEILING)
+        raw = FACTS_SEGMENT_HARD_CEILING
+    return raw
+
+
+def resolve_chunk_size(chunk_size: int = CHUNK_SIZE) -> int:
+    """按模型上下文窗口动态决定分段上限（受 ``facts_context_budget_split`` 门控）。
+
+    （资料被切成大量小段 → AI 调用次数与 429 限流风险成倍上升）；而对
+    上下文只有 32k 的模型，8000 字 + 归一化字典 + 规则块又可能撑爆。
+    按易标口径动态计算可同时解决两端。
+
+    ✅ 2026-10-06 修复「函数实为 no-op」：旧实现调
+    ``get_segment_limit(None, fixed)`` —— 第一个参数恒为 ``None``，
+    于是 ``normalize_positive_int`` 永远回落 ``DEFAULT_CONTEXT_LENGTH_LIMIT
+    = 400_000``，实测 ``facts_context_budget_split=True`` 时段长从 8000
+    直跳到 **307_930**（38.5 倍）。该模型的整个存在意义（「按模型上下文窗口
+    × 0.8 − 固定消息」动态决定）**从未真正生效**，且对 32k 窗口模型是致命的。
+    现改走 :func:`resolve_fact_context_chars`（配置 > 全局 > 保守自动默认，
+    并夹到硬天花板）。
+
+    Args:
+        chunk_size: 调用方显式指定的上限（默认 ``CHUNK_SIZE``）。
+
+    Returns:
+        生效的分段上限；动态计算失败时回落到 ``chunk_size``（fail-soft）。
+    """
     try:
         if not settings.facts_context_budget_split:
             return chunk_size
@@ -695,11 +852,18 @@ def resolve_chunk_size(chunk_size: int = CHUNK_SIZE) -> int:
         # 固定消息 = system 提示词骨架 + 归一化字典块（两者都与资料长度无关），
         # 与易标 getMessagesContentLength 的口径一致（每条额外计 64 字符开销）。
         fixed = [{"role": "system", "content": _FIXED_PROMPT_SKELETON}]
-        limit = get_segment_limit(None, fixed)
+        limit = get_segment_limit(resolve_fact_context_chars(), fixed)
         # 动态值不得小于历史基线的下限保护：过小的窗口配上过小的段会让长资料
         # 段数爆炸（调用次数/限流风险反而上升），故取 max(limit, CHUNK_SIZE)
         # 在「窗口够大时放宽、窗口很小时不更激进」之间取得平衡。
-        return max(limit, CHUNK_SIZE)
+        resolved = max(limit, CHUNK_SIZE)
+        if resolved <= CHUNK_SIZE:
+            logger.info(
+                "上下文预算分段：窗口=%d 扣固定消息后可用=%d，"
+                "低于历史基线 CHUNK_SIZE=%d → 沿用基线（配置过小，"
+                "长资料会切出较多段）",
+                resolve_fact_context_chars(), limit, CHUNK_SIZE)
+        return resolved
     except Exception:  # noqa: BLE001 - 任何异常都退回旧行为
         logger.warning("上下文预算分段计算失败，回落到 CHUNK_SIZE=%d", chunk_size,
                        exc_info=True)
@@ -955,7 +1119,7 @@ async def extract_from_single_chunk(text: str, context_summary: str = "",
                 temperature=0.0,
                 json_mode=True,
                 timeout=FACTS_REQUEST_TIMEOUT,
-                repair_key="facts_json_fix_system",
+                repair_key=FACTS_REPAIR_KEY,
                 scene="facts_extract",
             )
             last_err = None
@@ -993,6 +1157,12 @@ async def extract_from_single_chunk(text: str, context_summary: str = "",
         return []
 
     items: list[FactItem] = []
+    # ✅ 2026-10-06：把模型主动声明的「本段未能提取」回传给编排层。
+    #    _validate 早已接受 segment_failed=true（视为合法输出），但该标志从未
+    #    传出本函数 → 编排层无法区分「合法空段」与「模型没读懂这段」，
+    #    后者会被永久记为已完成（见 ExtractionResult.declared_failed_chunks）。
+    #    只在「一个事实都没解析出来」时登记，避免与真实产出重复计数。
+    _segment_declared_failed = obj.get("segment_failed") is True
     # ✅ 新格式：{"facts": [...]}
     for f in obj.get("facts", []) or []:
         parsed = _parse_fact_dict(f, default_source=f"第{chunk_index + 1}段:{heading[:30]}")
@@ -1008,6 +1178,8 @@ async def extract_from_single_chunk(text: str, context_summary: str = "",
 
     # 安全关键事实过滤：禁止保留模拟值（is_simulated 恒 false 但仍保留此防线）
     items = _filter_safety_sensitive(items)
+    if _segment_declared_failed and not items and error_out is not None:
+        error_out["segment_failed"] = True
     return items
 
 
@@ -1309,9 +1481,26 @@ def apply_norm_dicts(all_items: list[FactItem]) -> None:
 
 def merge_and_deduplicate(all_items: list[FactItem]) -> list[FactItem]:
     """合并去重：同 key 聚类，选最优值；同 key 多值标记矛盾"""
+    # ✅ 2026-10-06：空 key 守卫 —— 空 key 绝不能进聚类。
+    #   旧实现 `by_key.setdefault(it.key, []).append(it)` 会把**所有** key=""
+    #   的条目塌缩进同一个簇：该簇内任意两条不同取值都会被判为「多来源矛盾」，
+    #   于是 N 条互不相关的事实变成 1 条事实 + N-1 个「备选值」——
+    #   数据被静默压缩且制造出根本不存在的矛盾（前端还会让用户去裁决它）。
+    #   key 为空说明名称无法归一（normalize_key 只对非空名产出非空 key），
+    #   此时**按名称兜底聚类**；名称也为空则各自独立成条（绝不合并）。
+    _UNKEYED = "\x00__unkeyed__"
     by_key: dict[str, list[FactItem]] = {}
     for it in all_items:
-        by_key.setdefault(it.key, []).append(it)
+        k = (it.key or "").strip()
+        if not k:
+            k = f"{_UNKEYED}:{(it.name or '').strip()}" if (it.name or "").strip() else ""
+        if not k:
+            # 无 key 且无名称：无法判定同一性，原样保留（不进聚类）
+            continue
+        by_key.setdefault(k, []).append(it)
+    # 无 key 且无名称的条目：保持原顺序追加在末尾
+    orphans = [it for it in all_items
+               if not (it.key or "").strip() and not (it.name or "").strip()]
 
     resolved: list[FactItem] = []
     for key, group in by_key.items():
@@ -1351,6 +1540,11 @@ def merge_and_deduplicate(all_items: list[FactItem]) -> list[FactItem]:
             best.has_conflict = True
             best.conflict_values = conflict_vals
             resolved.append(best)
+    # 无 key 且无名称的孤儿条目：原样保留，不参与任何聚类判定
+    for it in orphans:
+        it.has_conflict = False
+        it.conflict_values = []
+        resolved.append(it)
     return resolved
 
 
@@ -1424,9 +1618,19 @@ def _chunk_hash(text: str) -> str:
 
     指纹基于分段正文本身——文档重解析导致内容变化时指纹自然失配，
     对应段会被重新提取；文档删除后残留指纹由进度表清理逻辑移除。
+
+    ✅ 2026-10-06 修复代理对静默丢字导致的指纹碰撞：
+    旧实现 ``encode("utf-8", errors="ignore")`` 会在遇到**孤立代理字符**
+    （lone surrogate，某些 PDF/OCR/遗留 GBK 解码路径会产出）时**直接丢弃
+    整个字符**。实测 ``_chunk_hash('a\\udce9b') == _chunk_hash('ab')`` ——
+    两者同为 ``da23614e02469a0d``。而该指纹正是增量提取的跳过键
+    （completed_chunks）与 persist_extraction 的删除范围键 →
+    源文档该段被改过却因碰撞被判「已提取过」，**事实永不刷新**（不可见的数据
+    陈旧）。现改用 ``surrogatepass``：孤立代理原样编入，指纹必然区分。
     """
     import hashlib
-    return hashlib.sha1((text or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
+    raw = (text or "").encode("utf-8", errors="surrogatepass")
+    return hashlib.sha1(raw).hexdigest()[:16]
 
 
 async def run_extraction_pipeline(
@@ -1572,6 +1776,8 @@ async def run_extraction_pipeline(
     fail_count = 0
     acc_count = 0
     failed_details: list[dict] = []
+    # ✅ 2026-10-06：模型主动声明未能提取的段（与 failed 语义不同，见 ExtractionResult）
+    declared_failed: list[dict] = []
     ok_idx: set[int] = set()
     _lock = asyncio.Lock()
 
@@ -1624,6 +1830,17 @@ async def run_extraction_pipeline(
                         "preview": (chunk.text or "")[:60].replace("\n", " "),
                     })
                 else:
+                    # ✅ 2026-10-06：模型声明未能提取的段**不计入 failed**
+                    #    （与「合法无事实段」不可区分，计入会虚报失败），
+                    #    改为独立登记，供 segment_stats / warnings 可见，
+                    #    并在告警中给出「重新提取」恢复入口。
+                    if err.get("segment_failed"):
+                        declared_failed.append({
+                            "index": idx + 1,
+                            "heading": (chunk.heading or "")[:60],
+                            "zone_type": chunk.zone_type,
+                            "preview": (chunk.text or "")[:60].replace("\n", " "),
+                        })
                     # ✅ 增量提取：成功段（含合法空段）记为已完成，下次跳过
                     ok_idx.add(idx)
                 acc_count += len(items)
@@ -1657,7 +1874,12 @@ async def run_extraction_pipeline(
         "skipped": len(skipped_idx),
         "failed": fail_count,
         "failed_details": failed_details[:10],
+        # ✅ 2026-10-06 加法式字段：模型声明未能提取的段（不计入 failed）
+        "declared_failed": len(declared_failed),
+        "declared_failed_details": declared_failed[:10],
     }
+    result.declared_failed_chunks = len(declared_failed)
+    result.declared_failed_details = declared_failed[:10]
     _fail_reasons = "；".join(
         dict.fromkeys(d["reason"] for d in failed_details[:3]))  # 去重保序
 
@@ -1688,6 +1910,19 @@ async def run_extraction_pipeline(
                 f"{fail_count}/{total_chunks} 段提取失败，结果可能不完整："
                 f"{_fail_reasons or '多为限流或超时'}"
                 f"（建议稍后重新提取）")
+
+    # ✅ 2026-10-06：模型声明未能提取的段必须可见（否则用户误以为「提取完成」）。
+    #    口径说明：这类段**已记入增量进度表**，下次普通提取会跳过 → 必须显式
+    #    告知「重新提取」才是恢复入口，否则用户永远无法补齐这批事实。
+    if declared_failed:
+        result.warnings.append(
+            f"另有 {len(declared_failed)}/{total_chunks} 段模型未能提取到事实"
+            f"（可能是封面/目录/纯图段落，也可能是模型未读懂）。"
+            f"这些段落已记为完成，普通重跑不会重试；"
+            f"如需补齐请点「重新提取」（强制全量重跑）。")
+        logger.info(
+            "模型声明未提取段：%d/%d（已记入进度表，需「重新提取」才会重跑）",
+            len(declared_failed), total_chunks)
 
     # 4. 归一化（报告补充①：与 Prompt 共用 _norm_dicts 单一事实源）
     await _emit(_P_END + 0.02, "正在归一化名称与规格...")
@@ -2354,18 +2589,9 @@ async def persist_extraction(
                 f"DELETE FROM global_facts WHERE id IN ({ph})",
                 non_protected_ids)
         if insert_buf:
-            await db.executemany(
-                "INSERT INTO global_facts "
-                "(id, project_id, scheme_id, group_id, group_title, title, content, "
-                "category, source_ref, is_simulated, confidence, "
-                "is_resolved, has_conflict, conflict_keys, fact_key, chunk_hash, "
-                "value_unit, fact_type, evidence_kind, page_ref, zone_type, "
-                "is_safety_critical, norm_group, "
-                # ✅ 2026-09-24：九大章节四维标注（正交于 category）
-                "chapter, fact_attr, source_kind, is_shared) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                insert_buf,
-            )
+            # ✅ 2026-10-06：列清单与占位符改走 GLOBAL_FACTS_INSERT_SQL 单一事实源
+            #    （此前内联 27 列字面量 + 手写 27 个占位符，与路由侧 28 列清单漂移）。
+            await db.executemany(GLOBAL_FACTS_INSERT_SQL, insert_buf)
         await db.commit()
     except Exception:
         await db.rollback()
@@ -2531,10 +2757,14 @@ _FACTS_INJECT_WHERE = "has_conflict=0 AND is_resolved=1 AND is_simulated=0 AND i
 #   把门控放宽，方向完全反了（降级必须 fail-closed，不能 fail-open）。
 #   修法：兜底常量与主口径**逐字相同**并集中在此导出，调用方不再各自硬编码，
 #   从结构上消除「主口径改了、兜底忘了改」的分叉。
-#: 降级兜底门控（与 _FACTS_INJECT_WHERE 逐字一致，故意不写成更宽松的旧口径）
-FACTS_INJECT_WHERE_FALLBACK = (
-    "has_conflict=0 AND is_resolved=1 AND is_simulated=0 AND is_stale=0"
-)
+#: 降级兜底门控 —— **别名**而非第二份字面量。
+#: ✅ 2026-10-06 收敛：此前它与 :data:`_FACTS_INJECT_WHERE` 是两份**逐字重复**的
+#: 字符串常量，且 :func:`get_facts_inject_where` 返回的是**兜底**那一份、
+#: :func:`build_injectable_facts_query` 内联的却是**主口径**那一份 ——
+#: 模块内部就有两条互不相干的自消费路径。改主口径时漏改另一份，
+#: 门控会在「同一模块内」静默分叉（比跨模块分叉更难发现）。
+#: 现改为直接引用主口径：**结构上不可能分叉**。
+FACTS_INJECT_WHERE_FALLBACK = _FACTS_INJECT_WHERE
 
 
 def get_facts_inject_where() -> str:
@@ -2544,7 +2774,7 @@ def get_facts_inject_where() -> str:
     下划线前缀的内部常量跨模块 import 属于技术债，且一旦 import 失败就会静默
     回落到各自硬编码的旧口径（见 FACTS_INJECT_WHERE_FALLBACK 注释）。
     """
-    return FACTS_INJECT_WHERE_FALLBACK
+    return _FACTS_INJECT_WHERE
 
 
 # gt 列表达式：空分组标题降级为「其他事实」，且供 ORDER BY gt 引用别名。
@@ -2552,12 +2782,40 @@ FACTS_GT_COLUMN = "COALESCE(NULLIF(group_title,''), '其他事实') AS gt"
 
 
 async def resolve_scheme_project_id(db, scheme_id: str) -> str:
-    """由 scheme_id 反查 project_id；失败返回空串（安全回退为仅方案级查询）。"""
+    """由 scheme_id 反查 project_id；失败返回空串（安全回退为仅方案级查询）。
+
+    ✅ 2026-10-06 补日志：本函数此前是**全模块唯一**一处
+    ``except Exception: return ""`` 且**一行日志都不打**的裸吞。失败时
+    :func:`load_resolved_facts_for_scope` / :func:`build_injectable_facts_query`
+    会静默把作用域收窄成「仅方案级」→ **项目共享事实（scheme_id 为空）从
+    所有消费方（正文注入 / 目录生成 / 导出附录 / 预检 / 审核）视野中整体消失**，
+    而服务端日志里没有任何线索可查。
+    方向保持 fail-soft（不抛、不阻断生成），但必须**可观测**：
+      · scheme_id 为空 → 调用方本就没传，DEBUG 即可（避免刷屏）；
+      · 传了却查不到 → WARNING（数据不一致或库故障，属真问题）。
+    """
+    if not scheme_id:
+        logger.debug("resolve_scheme_project_id：未传 scheme_id，跳过反查")
+        return ""
     try:
         pcur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
+        # R13：execute() 可能返回 None（AGENTS.md §5.5）
+        if pcur is None:
+            logger.warning(
+                "反查方案所属项目失败（游标为空 · R13）· scheme_id=%s · "
+                "本次仅按方案级查询（项目共享事实将不参与注入）", scheme_id)
+            return ""
         prow = await pcur.fetchone()
+        if prow is None:
+            logger.warning(
+                "方案不存在或未绑定项目 · scheme_id=%s · "
+                "本次仅按方案级查询（项目共享事实将不参与注入）", scheme_id)
+            return ""
         return str((prow[0] if prow else "") or "")
-    except Exception:
+    except Exception as e:  # noqa: BLE001 - fail-soft，但必须留痕
+        logger.warning(
+            "反查方案所属项目异常（降级为仅方案级查询）· scheme_id=%s: %s",
+            scheme_id, e, exc_info=True)
         return ""
 
 

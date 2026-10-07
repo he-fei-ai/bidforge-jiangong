@@ -17,12 +17,16 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.db import get_db
 from app.routers.review import reset_review_on_content_change
 from app.services import review_autofix
 from app.services.audit_rules import active_rules
+# ✅ R13 判空单一出口（2026-10-06）：静态护栏 tests/test_review_r13_closeout_20261006.py
+#    禁止本文件重新出现裸 db.execute。最关键的一处是 _persist_fixed 的正文 UPDATE ——
+#    旧实现丢弃返回值，写没生效时仍返回快照 id，界面报「已修复」而正文未变。
+from app.services import review_db
 
 logger = logging.getLogger("review_autofix")
 router = APIRouter(
@@ -30,20 +34,22 @@ router = APIRouter(
     tags=["review"])
 
 async def _load_scheme(db, scheme_id: str) -> dict:
-    cur = await db.execute(
-        "SELECT id, project_id, name, type FROM schemes WHERE id=?", (scheme_id,))
-    row = await cur.fetchone()
+    row = await review_db.fetch_one(
+        db, "SELECT id, project_id, name, type FROM schemes WHERE id=?", (scheme_id,),
+        what="自动修复：读取方案")
     if not row:
         raise HTTPException(404, "方案不存在")
-    return dict(row)
+    return row
 
 async def _load_sections(db, scheme_id: str) -> list[dict]:
     """载入章节（id/title/content），按目录树前序 DFS 排序（与预检同口径）。"""
     from app.services.content_utils import order_sections_dfs
-    cur = await db.execute(
+    rows = await review_db.fetch_all(
+        db,
         "SELECT id, parent_id, title, content, word_count, level, status, sort_order"
-        " FROM sections WHERE scheme_id=? ORDER BY sort_order", (scheme_id,))
-    return order_sections_dfs([dict(r) for r in await cur.fetchall()])
+        " FROM sections WHERE scheme_id=? ORDER BY sort_order", (scheme_id,),
+        what="自动修复：读取章节")
+    return order_sections_dfs(rows)
 
 async def _resolve_finding(db, scheme_id: str, rule_id: str,
                            section_id: str = "") -> dict:
@@ -68,9 +74,20 @@ async def _resolve_finding(db, scheme_id: str, rule_id: str,
                  + "，请先重新执行「一键总检」")
     return hits[0]
 
-@router.get("/capabilities")
-async def capabilities(scheme_id: str = "", db=Depends(get_db)):
-    """全部规则的自动修复能力表（前端按钮的唯一判据）。"""
+# @deprecated 孤儿 API（2026-10-06 核实）：前端**零消费** —— 可修复性是随
+# /overview 的 findings[].autofix 逐条下发的（同一 capability_of 单一来源，
+# 不存在与本表分叉的可能），AutoFixModal 读的是 finding.autofix 而非本端点。
+# 端点保留供脚本/CI 直接读全量能力表（48 条规则 × mode/reason），
+# 数据被 /overview 覆盖，故按仓库惯例挂 deprecated（同 compliance /preflight）。
+@router.get("/capabilities", deprecated=True)
+async def capabilities(scheme_id: str = "", db=Depends(get_db),
+                       response: Response = None):
+    """全部规则的自动修复能力表（脚本/诊断用；UI 判据走 findings[].autofix）。"""
+    from app.routers.compliance import _apply_deprecation_headers
+    _apply_deprecation_headers(
+        response,
+        replacement="/api/v1/compliance/overview/{scheme_id}（findings[].autofix）",
+    )
     items = []
     for rule in active_rules():
         cap = review_autofix.capability_of(rule.rule_id)
@@ -131,15 +148,22 @@ async def _persist_fixed(db, *, scheme_id: str, rule_id: str,
         [{"section_id": sid, "content_before": before} for sid, before, _ in pending],
         snapshot_type="review_autofix")
     for sid, _before, after in pending:
-        cur = await db.execute("SELECT word_budget FROM sections WHERE id=?", (sid,))
-        row = await cur.fetchone()
+        row = await review_db.fetch_one(
+            db, "SELECT word_budget FROM sections WHERE id=?", (sid,),
+            what=f"自动修复落库：读取章节字数预算（section={sid[:8]}）")
         budget = (row["word_budget"] if row else None) or 1500
         wc = text_word_count(after)
-        await db.execute(
+        # ✅ R13（2026-10-06）：旧实现丢弃返回值 —— 正文 UPDATE 返回 None 时
+        #    循环照常走完、commit 成功、函数返回快照 id，端点据此返回 ok=True。
+        #    用户看到「已修复」+「章节审核结论已自动退回待审核」，而**正文一字未改**，
+        #    且审核状态被真的退回了（半生效比不生效更糟：结论与正文彻底脱节）。
+        await review_db.exec_write(
+            db,
             "UPDATE sections SET content=?, word_count=?, word_status=?,"
             " updated_at=? WHERE id=?",
             (after, wc, word_status_for(wc, budget),
-             datetime.now().isoformat(), sid))
+             datetime.now().isoformat(), sid),
+            what=f"自动修复落库：写入正文（section={sid[:8]}）")
         await reset_review_on_content_change(
             db, scheme_id, sid, actor="审核预检自动修复",
             comment=f"按问题 {rule_id} 自动修复正文，原审核结论失效，请重新送审")
@@ -147,10 +171,17 @@ async def _persist_fixed(db, *, scheme_id: str, rule_id: str,
     # 内容变化，按结构变更口径再清一次更保险（按 scheme 隔离，不误清其它方案）
     await invalidate_consistency_scan_cache(db, scheme_id)
     if repair_id:
-        # 回填快照 id 到留痕行（回滚端点据此定位批次）
-        await db.execute(
+        # 回填快照 id 到留痕行（回滚端点据此定位批次）。
+        # ⚠️ 刻意用 require_rows=False（与同函数正文 UPDATE 的严格模式不同）：
+        #    这一笔是**记账回填**，不是修复本体。若留痕行恰好不存在，此时抛 503
+        #    会把已写入的正文一并回滚（get_db 的 finally 会 rollback）—— 用一个
+        #    记账问题否掉一次真实修复，比留一行待补的快照更糟。此处只记 WARNING，
+        #    运维可据此发现「修复成功但无法回滚」的批次。
+        await review_db.exec_write(
+            db,
             "UPDATE consistency_repairs SET snapshot_id=? WHERE id=?",
-            (snapshot_id, repair_id))
+            (snapshot_id, repair_id), what="自动修复：回填快照 id 到留痕行",
+            require_rows=False)
     await db.commit()
     logger.info("审核预检自动修复 rule=%s：已落库 %d 章（快照 %s）",
                 rule_id, len(pending), snapshot_id)
@@ -211,16 +242,22 @@ async def rollback(scheme_id: str, body: dict | None = None, db=Depends(get_db))
             comment="已回滚自动修复内容，恢复修复前正文，请重新送审")
     await db.commit()
     # 修复批次状态同步（与一致性修复的 rollback 同口径）
-    cur = await db.execute(
-        "SELECT id FROM consistency_repairs WHERE snapshot_id=? AND scheme_id=?",
-        (snapshot_id, scheme_id))
-    for r in await cur.fetchall():
+    rows = await review_db.fetch_all(
+        db, "SELECT id FROM consistency_repairs WHERE snapshot_id=? AND scheme_id=?",
+        (snapshot_id, scheme_id), what="自动修复回滚：定位待标记的修复批次")
+    for r in rows:
         await repair_record.mark_repair_status(db, r["id"], "rolled_back")
     return {"status": "rolled_back", **result}
 
 @router.get("/repairs")
 async def list_repairs(scheme_id: str, limit: int = 20, db=Depends(get_db)):
-    """自动修复批次历史（复用一致性修复的记录表，按 mode 过滤）。"""
+    """自动修复批次历史（复用一致性修复的记录表，按 mode 过滤）。
+
+    ⚠️ 前端**零消费**（2026-10-06 核实）：BatchFixModal 展示的是 confirm
+    响应里的逐条 status，不回读历史。本端点是修复历史的**唯一**数据出口
+    （/overview 不含批次列表），故**不挂 deprecated**，保留给脚本 / 诊断 /
+    未来的「修复历史」面板直接使用。
+    """
     from app.services import repair_record
     await _load_scheme(db, scheme_id)
     items = await repair_record.list_repairs(db, scheme_id, limit)

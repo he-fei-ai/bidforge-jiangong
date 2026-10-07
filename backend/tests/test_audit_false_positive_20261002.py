@@ -31,6 +31,7 @@ from app.services.preflight_engine import (
     build_section_tree_index,
     check_completeness,
     check_deliverability,
+    check_traceability,
     preflight_stats,
 )
 
@@ -301,3 +302,93 @@ class TestNoCriteriaFork:
             f for f in check_deliverability(ctx) if "空章节" in (f.get("title") or "")
         ]
         assert st["empty_ratio"] == 0.0 and not dlv_empty
+
+# ---------------------------------------------------------------------------
+# R49 P0 TRC-01 必须按「有效正文」判定（2026-10-07 · 生产库实证）
+# ---------------------------------------------------------------------------
+# 生产方案「六、计算书及相关图纸」是**父节点**（正文只落叶子），公式全在二级
+# 子节「6.1 受力计算」里。check_traceability 只看章节自身 content → 父节点
+# 恒空被报 TRC-01（**block**，直接阻断交付），与 CMP-* / preflight_stats 的
+# 正确口径分叉。这是本文件 P0-1 同一根因的**第 4 处残留**（同构陷阱）。
+FORMULA = "承载力验算：K = 1.35，不小于规范值，满足要求。"
+
+
+class TestTrc01UsesEffectiveContent:
+    def test_parent_calc_section_not_reported_when_child_has_formula(self):
+        """父节点计算书正文为空、公式在子节：不得报假 block。"""
+        sections = [
+            _mk("P6", "六、计算书及相关图纸"),
+            _mk("L1", "6.1 受力计算", "P6", FORMULA, 100),
+        ]
+        ctx = PreflightContext(scheme_id="s", sections=sections)
+        trc01 = [f for f in check_traceability(ctx) if f["rule_id"] == "TRC-01"]
+        assert trc01 == [], f"父章节正文由子节承载，不应报 TRC-01：{trc01}"
+
+    def test_three_level_rollup_counts_grandchild_formula(self):
+        """三层目录：公式在三级子节时，一级/二级计算书章节都不得报。"""
+        sections = [
+            _mk("P6", "六、计算书及相关图纸"),
+            _mk("M1", "6.1 受力计算", "P6"),
+            _mk("N1", "6.1.1 桩基承载力验算", "M1", FORMULA, 100),
+        ]
+        ctx = PreflightContext(scheme_id="s", sections=sections)
+        assert not [f for f in check_traceability(ctx) if f["rule_id"] == "TRC-01"]
+
+    def test_parent_own_formula_still_counts(self):
+        """自身正文有公式、子节无：不得报（自身正文始终参与）。"""
+        sections = [
+            _mk("P6", "六、计算书及相关图纸", "", FORMULA, 100),
+            _mk("L1", "6.1 附图", "P6", BODY, 600),
+        ]
+        ctx = PreflightContext(scheme_id="s", sections=sections)
+        assert not [f for f in check_traceability(ctx) if f["rule_id"] == "TRC-01"]
+
+    def test_genuinely_empty_calc_section_still_reported(self):
+        """反向断言（防「改宽松了」）：整体有过程、个别验算章节真缺过程仍报。"""
+        sections = [
+            _mk("P6", "六、计算书及相关图纸"),
+            _mk("L1", "6.1 受力计算", "P6", FORMULA, 100),
+            _mk("P7", "七、稳定性验算"),          # 整体有过程、此章节真缺过程
+        ]
+        ctx = PreflightContext(scheme_id="s", sections=sections)
+        fs = [f for f in check_traceability(ctx) if f["rule_id"] == "TRC-01"]
+        assert len(fs) == 1, fs
+        assert "稳定性验算" in fs[0]["section_title"]
+
+    def test_all_calc_sections_empty_still_no_trc01(self):
+        """全部计算书章节都无过程时不报 TRC-01（CMP-09 职责，防跨维度双扣）。"""
+        sections = [_mk("P6", "六、计算书及相关图纸"),
+                    _mk("L1", "6.1 受力计算", "P6")]
+        ctx = PreflightContext(scheme_id="s", sections=sections)
+        assert not [f for f in check_traceability(ctx) if f["rule_id"] == "TRC-01"]
+
+    def test_production_shape_no_trc01(self):
+        """生产目录形态（6 个 L1 父节点 + 12 个叶子）不得出 TRC-01 假 block。"""
+        sections, _ = _production_shape()
+        # 把「六、计算书及相关图纸」的子节正文换成真正的计算过程
+        # （父节点 P6 正文为空是结构必然，公式全在叶子）
+        for s in sections:
+            if s["title"] == "6.1 受力计算":
+                s["content"] = FORMULA
+                s["word_count"] = 100
+        ctx = PreflightContext(scheme_id="s", sections=sections)
+        assert not [f for f in check_traceability(ctx) if f["rule_id"] == "TRC-01"]
+
+    def test_own_content_only_logic_would_false_positive(self, monkeypatch):
+        """A/B 反向验证：判据退回「只看章节自身 content」→ 本场景立刻误报。
+
+        证明上面的通过型用例不是空断言（护栏自身判别力）。R49 已做真实 A/B：
+        还原旧实现后 4 failed / 2 passed，还原后 sha256 字节一致。
+        """
+        import app.services.preflight_engine as pe
+        sections = [_mk("P6", "六、计算书及相关图纸"),
+                    _mk("L1", "6.1 受力计算", "P6", FORMULA, 100)]
+        # 旧口径：effective = 章节自身 content（不向上卷子节）
+        monkeypatch.setattr(
+            pe, "build_section_tree_index",
+            lambda secs: ({}, {s["id"]: s.get("content") or "" for s in secs}))
+        fs = [f for f in pe.check_traceability(
+            PreflightContext(scheme_id="s", sections=sections))
+            if f["rule_id"] == "TRC-01"]
+        assert len(fs) == 1, fs
+

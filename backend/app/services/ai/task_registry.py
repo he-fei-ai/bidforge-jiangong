@@ -31,8 +31,36 @@ _tasks: dict[str, dict] = {}
 _register_lock = asyncio.Lock()
 
 
+class TaskTypeConflict(RuntimeError):
+    """跨类型任务互斥冲突（目录生成 ⇄ 正文生成）。
+
+    ✅ BUG 修复（2026-10-05 · F5 · 跨类型 TOCTOU）：目录/正文各自的入口函数在
+    **路由体**里做跨类型 409 判定（generate_outline :3982 / generate_content :4862），
+    而 `register_task` 要等路由返回、ASGI 送出响应头、生成器首次被 next() 才执行
+    （:4183 / :4902）—— 中间必然 `await`，另一路请求完全可能在窗口内通过自己的
+    pre-guard 并先注册，于是两路同时 running：目录整表重建 sections 与正文逐章
+    UPDATE 并发 → 正文被 wipe / 图表登记挂到已删除章节 id。
+
+    修法：互斥判定放进 `_register_lock`（与既有同型防僵尸判定同一把锁），
+    且**放在本任务 INSERT 之后** —— 锁把两路注册串行化，先注册者判定无冲突放行、
+    后注册者判定命中先注册者而抛本异常，**结构上不可能"双双 abort"**。
+    """
+
+    def __init__(self, task_id: str, message: str, conflicts: list[str]):
+        self.task_id = task_id
+        self.conflicts = list(conflicts)
+        super().__init__(message)
+
+
 async def register_task(task_type: str, project_id: str = "", scheme_id: str = "",
-                        checkpoint: dict | None = None) -> str:
+                        checkpoint: dict | None = None,
+                        conflict_types=()) -> str:
+    """注册任务。`conflict_types` 为空时行为与历史逐字一致（零影响面）。
+
+    传入 `conflict_types` 时：本任务 INSERT 成功后，若同 scheme 下存在这些类型的
+    running/paused 任务，则把**本任务**置 failed 并抛 :class:`TaskTypeConflict`
+    （返回的 `task_id` 仍在，调用方可以直接把它带进 error 事件下发给前端）。
+    """
     # ✅ 防僵尸：同一 scheme + 同一类型，不允许并存多个 running 任务
     # （用户重复点"生成"时，旧 SSE 连接可能还没收到 stop 事件，新任务就已经 register 了）
     # ✅ 并发修复：防僵尸 SELECT + INSERT 必须原子完成。原实现两个并发协程都在
@@ -69,6 +97,28 @@ async def register_task(task_type: str, project_id: str = "", scheme_id: str = "
             (tid, task_type, project_id, scheme_id, "running", 0.0,
              json.dumps(checkpoint or {}, ensure_ascii=False)))
         await conn.commit()
+        # ✅ 跨类型互斥（F5）：判定必须在**本任务 INSERT 之后**、仍在锁内（见类 docstring）。
+        if conflict_types:
+            _ctypes = tuple(conflict_types)
+            marks = ",".join("?" * len(_ctypes))
+            _ccur = await conn.execute(
+                "SELECT DISTINCT task_type FROM task_registry WHERE scheme_id=?"
+                f" AND status IN ('running','paused') AND task_type IN ({marks})",
+                [scheme_id, *_ctypes])
+            # R13：execute() 可能返回 None（此处刚成功 INSERT，实为不可达，
+            # 仍守卫以免 AttributeError 把一次合法注册变成 500）。
+            _crows = (await _ccur.fetchall()) if _ccur is not None else []
+            rows = [r[0] for r in _crows]
+            if rows:
+                _msg = f"与正在运行的 {'、'.join(rows)} 任务互斥，本任务已放弃"
+                await conn.execute(
+                    "UPDATE task_registry SET status='failed', message=?, updated_at=? WHERE id=?",
+                    (_msg, datetime.now().isoformat(), tid))
+                await conn.commit()
+                logger.warning(
+                    "register_task: 跨类型互斥拒绝 %s（scheme=%s，冲突类型=%s，task=%s）",
+                    task_type, scheme_id, rows, tid)
+                raise TaskTypeConflict(tid, _msg, rows)
     pause_event = asyncio.Event()
     pause_event.set()  # 默认为运行中（未暂停）
     stop_event = asyncio.Event()
@@ -119,7 +169,7 @@ async def update_progress(task_id: str, progress: float, message: str = "",
     """
     # ✅ 终态事件必须强制落库：进度节流会让 DB 落后于内存态，而
     #    completed/stopped/failed/error 是轮询回退（task_status）读取的最终值。
-    if event in ("completed", "stopped", "failed", "error"):
+    if event in ("completed", "degraded", "stopped", "failed", "error"):
         force = True
     state = _tasks.get(task_id)
     now = time.monotonic()
@@ -246,6 +296,7 @@ async def finish_task(task_id: str, status: str = "completed", message: str = ""
     保证内存态绝不泄漏。
     """
     state = _tasks.get(task_id)
+    _terminal_db_ok = False
     try:
         # ✅ 2026-09-23（正文生成深度审计 · P0 最高优先级）：终态落库此前零重试。
         #    运行库实测 2026-09-23 20:48:27（logs/backend.log，trace=9fe4498339da）：
@@ -259,11 +310,34 @@ async def finish_task(task_id: str, status: str = "completed", message: str = ""
         #    重试只补「DB 可见性」这一环，语义与并发安全性不变。
         await retry_db_op(lambda: _write_task_terminal_db(
             task_id, status, message))
+        _terminal_db_ok = True
     except Exception as e:
         # 终态写库失败必须显式记录（否则用户看到「任务还在跑」却查不到原因），
         # 但绝不能阻断下面的内存清理 —— 那是防泄漏的关键一步。
         logger.error("finish_task 终态落库失败（task=%s status=%s）: %s",
                      task_id, status, e, exc_info=True)
+
+    # ✅ F6（2026-10-05 · 日志准确性）：任务生命周期的**成功路径此前零日志** ——
+    #    finish_task 是所有任务类型（目录/正文/事实/一致性/…）唯一的终态收口点，
+    #    正常完成后 logs/backend.log 里查不到任何一行，排障时无法区分
+    #    「任务没跑」与「跑完了但没记录」。此处补状态迁移记录（INFO = 正常追踪，
+    #    见 AGENTS.md §3.1.6）；业务级失败/异常仍由各自调用点按 ERROR/WARNING
+    #    落盘，不在此重复报错。仅在终态**成功落库**时记录 —— 落库失败时上一行
+    #    已按 ERROR 落盘，避免同一事件出现「一条失败 + 一条完成」的矛盾日志。
+    if _terminal_db_ok:
+        _st = state or {}
+        _type = _st.get("type", "?")
+        _scheme = _st.get("scheme_id", "?") or "?"
+        if status == "completed":
+            logger.info("任务完成（type=%s · scheme=%s · task=%s）",
+                        _type, _scheme, task_id)
+        elif status == "degraded":
+            logger.info("任务降级完成（type=%s · scheme=%s · task=%s）: %s",
+                        _type, _scheme, task_id, (message or "")[:120])
+        else:
+            logger.info("任务终止 %s（type=%s · scheme=%s · task=%s）: %s",
+                        status, _type, _scheme, task_id,
+                        (message or "")[:120])
 
     if state:
         state["status"] = status

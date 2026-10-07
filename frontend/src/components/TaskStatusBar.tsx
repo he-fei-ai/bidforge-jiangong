@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 后台任务运行状态栏（左侧菜单栏底部，健康状态条上方）
  *
  * 数据源：优先 SSE /system/activity/stream，失败/断线后回退到 GET /api/v1/system/activity（3s 轮询）
@@ -66,6 +66,15 @@ type Activity = {
     last_duration?: number;
     last_at?: number;
   };
+  /** 文档解析统计（2026-10-06 新增，加法字段；旧后端不下发时整段不渲染） */
+  documents?: {
+    total?: number;
+    parsed?: number;
+    failed?: number;
+    pending?: number;
+    last_upload_at?: string;
+    failure_rate?: number | null;
+  };
 };
 
 const POLL_MS = 3000;
@@ -96,6 +105,7 @@ export function activityFingerprint(a: Activity | null | undefined): string {
       `${x.id}:${x.status}:${Math.round((x.progress || 0) * 100)}:${Math.floor(x.elapsed || 0)}`
     ).join(",");
   const ai = a.ai || {};
+  const docs = a.documents || {};
   return [
     part(a.tasks?.running),
     part(a.tasks?.recent),
@@ -105,6 +115,8 @@ export function activityFingerprint(a: Activity | null | undefined): string {
     ai.success_rate ?? "",
     ai.last_at ?? "",
     ai.last_ok ?? "",
+    // 文档解析计数参与指纹：解析状态变化（如 failed→success）必须触发重渲
+    `${docs.total ?? ""}:${docs.parsed ?? ""}:${docs.failed ?? ""}`,
     a.server?.version ?? "",
   ].join("|");
 }
@@ -479,6 +491,7 @@ function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
     .filter((t) => t.status !== "running" && t.status !== "paused")
     .slice(0, 5);
   const ai = activity?.ai;
+  const docStats = activity?.documents;
   const aiBusy = (ai?.in_flight ?? 0) > 0;
   const busy = running.length > 0;
   const topTask = running[0];
@@ -598,6 +611,28 @@ function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
             )}
           </div>
         </div>
+
+        {/* ---- 文档解析统计（2026-10-06 新增；无文档时整段不显示，避免空噪） ---- */}
+        {docStats && (docStats.total ?? 0) > 0 && (
+          <>
+            <div className="bp-task-panel-section" style={{ marginTop: 6 }}>
+              文档解析
+            </div>
+            <div style={{ fontSize: 11, color: "rgba(255,255,255,0.65)", lineHeight: 1.9 }}>
+              <div>
+                共 {docStats.total} 份 · 已解析 {docStats.parsed ?? 0}
+                {(docStats.pending ?? 0) > 0 && ` · 待解析 ${docStats.pending}`}
+              </div>
+              {(docStats.failed ?? 0) > 0 ? (
+                <div style={{ color: "#FF4D4F" }}>
+                  失败 {docStats.failed} 份 · 失败率 {docStats.failure_rate ?? "-"}%
+                </div>
+              ) : (
+                <div style={{ color: "rgba(82,196,66,0.85)" }}>无解析失败</div>
+              )}
+            </div>
+          </>
+        )}
 
         {/* ---- 服务态 ---- */}
         {activity?.server && (

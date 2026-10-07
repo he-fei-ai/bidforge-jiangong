@@ -2,6 +2,7 @@
 
 路由聚合见 ``ai_config/__init__.py``；本模块只负责与「单条配置 CRUD」相关的端点。
 """
+import json
 import uuid
 from datetime import datetime
 
@@ -15,17 +16,20 @@ from app.models import (
     FallbackChainUpdate,
 )
 from app.services.ai.provider_factory import (
+    KNOWN_SCENES,
     PROVIDER_PRESETS,
     RUNTIME_ACTIVE_ENV_KEY,
+    RUNTIME_DISABLED_PROVIDERS_KEY,
     apply_config_concurrency,
     clamp_config_numbers,
     clamp_warnings,
     invalidate_config_cache,
-    normalize_base_url,
     normalize_env,
     normalize_plan,
+    normalize_provider_name,
     normalize_request_mode,
     resolve_active_env,
+    resolve_config_base_url,
     save_ai_config,
     upsert_runtime_setting,
 )
@@ -357,12 +361,114 @@ async def update_fallback_chain(body: FallbackChainUpdate, request: Request = No
     return {"ok": True, "count": len(ids)}
 
 
+def _classify_import_item(raw, existing: set, overwrite: bool) -> dict:
+    """校验并归一化一条导入条目（纯函数，不落库）。
+
+    「导入校验」的**单一出口**：``import_config``（真导入）与
+    ``import_config_dry_run``（导入预演）共用同一判据 —— 否则会出现
+    「预演说会通过、真导入却跳过」的静默错配。
+
+    返回::
+
+        {"action": "skip" | "new" | "overwrite",  该行将如何处理
+         "reason": str,                           action=="skip" 时的原因（非空）
+         "invalid_plan": bool,                    因「计费方式 ↔ Base URL」联动被拒
+         "clamped": bool,                         数值字段被静默收敛
+         "provider_name" / "model" / "plan" / "base_url" / "nums" /
+         "request_mode" / "env" / "remark"}
+    """
+    out: dict = {
+        "action": "new", "reason": "", "invalid_plan": False, "clamped": False,
+        "provider_name": "", "model": "", "plan": "pay_as_you_go", "base_url": "",
+        "nums": {}, "request_mode": "normal", "env": "", "remark": "",
+    }
+    if not isinstance(raw, dict):
+        out.update({"action": "skip", "reason": "条目格式非法（不是对象）"})
+        return out
+    provider_name = (raw.get("provider_name") or "").strip()
+    model = (raw.get("model") or "").strip()
+    out["provider_name"], out["model"] = provider_name, model
+    if not provider_name or not model:
+        out.update({"action": "skip",
+                    "reason": f"{provider_name or '(空)'}：供应商或模型名称为空"})
+        return out
+    plan = normalize_plan(raw.get("plan"))
+    out["plan"] = plan
+    # 「计费方式 ↔ Base URL」联动校验与保存路径共用 resolve_config_base_url：
+    # 包月套餐 / 自定义供应商必须手填地址，违规条目按既有语义跳过并如实回传原因
+    # （不静默写脏数据 —— 否则「包月配置实际按量调用」）。
+    try:
+        base_url = resolve_config_base_url(provider_name, plan, raw.get("base_url") or "")
+    except ValueError as e:
+        out.update({"action": "skip", "invalid_plan": True,
+                    "reason": f"{provider_name}/{model}：{e}"})
+        return out
+    out["base_url"] = base_url
+    nums = clamp_config_numbers(raw)
+    out["nums"] = nums
+    out["clamped"] = bool(clamp_warnings(raw))
+    out["request_mode"] = normalize_request_mode(raw.get("request_mode"))
+    try:
+        out["env"] = normalize_env(raw.get("env"))
+    except ValueError:
+        out.update({"action": "skip",
+                    "reason": f"{provider_name}/{model}：环境标签非法"})
+        return out
+    out["remark"] = str(raw.get("remark") or "").strip()[:2000]
+    if (provider_name, model, base_url) in existing:
+        if overwrite:
+            out["action"] = "overwrite"
+        else:
+            out.update({"action": "skip",
+                        "reason": f"{provider_name}/{model}：已存在同名配置（未开启覆盖）"})
+    return out
+
+
+async def _export_scene_routes(db) -> list:
+    """导出场景路由（scene → config_id；不含任何敏感字段）。"""
+    try:
+        cur = await db.execute(
+            "SELECT scene, config_id, updated_at FROM ai_scene_routes"
+            " WHERE config_id != '' ORDER BY scene")
+        return [dict(r) for r in await cur.fetchall()]
+    except Exception:
+        # 表未创建等异常按「无路由」处理，不影响配置主流程导出。
+        return []
+
+
+async def _export_runtime(db) -> dict:
+    """导出运行时设置（当前生效环境 / 运行时禁用厂商清单）。
+
+    只导出**表中确实存在**的键，不导出「从未设置过」的键 —— 保持
+    「显式设置为空」与「从未设置」两种语义可区分（与 load_runtime_setting
+    返回 None 的约定同口径）。
+    """
+    out: dict = {}
+    try:
+        for key in (RUNTIME_ACTIVE_ENV_KEY, RUNTIME_DISABLED_PROVIDERS_KEY):
+            cur = await db.execute(
+                "SELECT value FROM ai_runtime_settings WHERE key=?", (key,))
+            row = await cur.fetchone()
+            if row is not None:
+                out[key] = str(row["value"] or "")
+    except Exception:
+        pass
+    return out
+
+
 @router.get("/config/export")
 async def export_config(db=Depends(read_db)):
     """导出全部配置（✅ 新增：备份/迁移）。
 
     安全约定：**绝不导出 API Key**（含密文），导入后需重新填写 Key，
     避免密钥随配置文件在邮件/聊天工具中流转。
+
+    ✅ 2026-10-06（G1 · 迁移完整性）：此前只导出 ``ai_config`` 单表，跨机器
+      迁移后 ``ai_scene_routes``（24 个场景的模型路由）与
+      ``ai_runtime_settings``（当前生效环境 / 运行时厂商开关）全部丢失 ——
+      用户须在界面逐场景重配，且运行时开关丢失后无法追溯「当时禁用了哪些厂商」。
+      现加法式导出这两个顶层可选键（不含任何密钥）；``version`` 保持 1
+      （新键为可选，旧版导入逻辑忽略未知键即兼容）。
     """
     cur = await db.execute("SELECT * FROM ai_config ORDER BY priority ASC, updated_at DESC")
     items = []
@@ -370,12 +476,19 @@ async def export_config(db=Depends(read_db)):
         d = dict(r)
         d.pop("api_key_encrypted", None)
         items.append(d)
+    scene_routes = await _export_scene_routes(db)
+    runtime = await _export_runtime(db)
     return {
         "version": 1,
         "exported_at": datetime.now().isoformat(),
         "count": len(items),
         "api_key_included": False,
         "items": items,
+        # ✅ 场景路由与运行时设置（可选键；旧调用方忽略即可）
+        "scene_routes": scene_routes,
+        "runtime": runtime,
+        "scene_route_count": len(scene_routes),
+        "runtime_keys": sorted(runtime),
     }
 
 
@@ -401,38 +514,33 @@ async def import_config(body: ConfigImportIn, request: Request = None, db=Depend
 
     imported, skipped = 0, 0
     clamped_items = 0   # 数值被收敛的条目数（导入文件可能来自旧版本/被手工改过）
+    invalid_plan_items = 0  # 因「计费方式 ↔ Base URL」联动校验不合规而跳过的条目数
+    import_skip_reasons: list[str] = []   # 跳过原因（最多回传前若干条，避免载荷膨胀）
     first_new_id = ""
     import_changes: list[tuple[str, str, str, str, dict | None, dict | None]] = []
+    # ✅ 2026-10-06（G1 · 迁移完整性）：导出源机器上的配置 id → 本次导入落库的 id。
+    #    导出文件的 items 携带原始 id，用它把场景路由的 config_id 映射到新 id，
+    #    否则迁移后场景路由指向不存在的配置（与 delete_config 清理僵尸路由是
+    #    同一类数据链断裂问题）。
+    key_to_new_id: dict[str, str] = {}
     for raw in body.items:
-        if not isinstance(raw, dict):
-            continue
-        provider_name = (raw.get("provider_name") or "").strip()
-        model = (raw.get("model") or "").strip()
-        if not provider_name or not model:
+        # 真导入与「导入预演」共用 _classify_import_item（导入校验的单一出口）：
+        # 两条路径若各写一份判据，会出现「预演说会通过、真导入却跳过」的静默错配。
+        c = _classify_import_item(raw, existing, body.overwrite)
+        if c["action"] == "skip":
             skipped += 1
+            if c["invalid_plan"]:
+                invalid_plan_items += 1
+            if c["reason"]:
+                import_skip_reasons.append(c["reason"])
             continue
-        try:
-            base_url = normalize_base_url(raw.get("base_url") or "")
-        except ValueError:
-            skipped += 1
-            continue
-        nums = clamp_config_numbers(raw)
-        if clamp_warnings(raw):
+        if c["clamped"]:
             clamped_items += 1
-        plan = normalize_plan(raw.get("plan"))
-        # 请求方式同样走白名单归一：导入文件可能来自旧版本（无该字段）或手改过
-        request_mode = normalize_request_mode(raw.get("request_mode"))
-        # ✅ 2026-09-23（多环境）：环境标签归一；非法值跳过该条而不是静默写空
-        try:
-            env = normalize_env(raw.get("env"))
-        except ValueError:
-            skipped += 1
-            continue
-        remark = str(raw.get("remark") or "").strip()[:2000]
-        if (provider_name, model, base_url) in existing and not body.overwrite:
-            skipped += 1
-            continue
-        if (provider_name, model, base_url) in existing and body.overwrite:
+        provider_name, model = c["provider_name"], c["model"]
+        plan, base_url, nums = c["plan"], c["base_url"], c["nums"]
+        request_mode, env, remark = c["request_mode"], c["env"], c["remark"]
+        old_id = str((raw or {}).get("id") or "")
+        if c["action"] == "overwrite":
             # 历史库可能存在同一三元组的重复行；逐行留快照，避免 UPDATE 多行却只审计一行。
             before_rows = [
                 dict(r) for r in await (await db.execute(
@@ -447,6 +555,7 @@ async def import_config(body: ConfigImportIn, request: Request = None, db=Depend
                  nums["concurrency"], request_mode, env, remark,
                  datetime.now().isoformat(), provider_name, model, base_url))
             for before_row in before_rows:
+                key_to_new_id[str(before_row.get("id") or "")] = str(before_row["id"])
                 after_cur = await db.execute(
                     "SELECT * FROM ai_config WHERE id=?", (before_row["id"],))
                 after_row = await after_cur.fetchone()
@@ -470,6 +579,8 @@ async def import_config(body: ConfigImportIn, request: Request = None, db=Depend
              nums["timeout"], nums["concurrency"], request_mode, env,
              int(pr) if pr is not None else 0, remark))
         existing.add((provider_name, model, base_url))
+        if old_id:
+            key_to_new_id[old_id] = new_id
         if not first_new_id:
             first_new_id = new_id
         new_cur = await db.execute("SELECT * FROM ai_config WHERE id=?", (new_id,))
@@ -496,10 +607,24 @@ async def import_config(body: ConfigImportIn, request: Request = None, db=Depend
             snapshot={"before": sanitize_config_snapshot(before_row),
                       "after": sanitize_config_snapshot(
                           dict(final_row) if final_row else None)})
+    # ✅ 2026-10-06（G1 · 迁移完整性）：迁移场景路由与运行时设置。
+    #    两者均为可选（默认 None = 不迁移），旧版导出文件不含这些键时行为不变。
+    migrated_scene_routes = 0
+    migrated_runtime_keys: list[str] = []
+    if body.scene_routes is not None:
+        migrated_scene_routes = await _import_scene_routes(
+            db, body.scene_routes, key_to_new_id, import_skip_reasons)
+    if body.runtime is not None:
+        migrated_runtime_keys = await _import_runtime(db, body.runtime)
+
+    route_note = ""
+    if body.scene_routes is not None or body.runtime is not None:
+        route_note = (f"；场景路由迁移 {migrated_scene_routes} 条"
+                      f"，运行时设置迁移 {len(migrated_runtime_keys)} 项")
     await record_config_audit(
         db, "import", detail=f"导入配置汇总：新增/覆盖 {imported} 条、跳过 {skipped} 条"
                              f"（overwrite={bool(body.overwrite)}，"
-                             f"set_first_active={bool(body.set_first_active)}）",
+                             f"set_first_active={bool(body.set_first_active)}）{route_note}",
         request=request, commit=False)
     await db.commit()
     invalidate_config_cache()
@@ -522,8 +647,205 @@ async def import_config(body: ConfigImportIn, request: Request = None, db=Depend
         "warning": warning,
         # ✅ 2026-09-23：导入文件里的越界数值会被静默收敛，如实回传条目数
         "clamped_items": clamped_items,
+        # ✅ 2026-10-06（B-1）：因联动校验被跳过的条目数与原因（前 5 条）。
+        #    不回传的话用户只会看到「导入 N 条、跳过 M 条」，不知道 M 条为何被跳。
+        "invalid_plan_items": invalid_plan_items,
+        "skip_reasons": import_skip_reasons[:5],
+        # ✅ 2026-10-06（G1 · 迁移完整性）：随配置一并迁移的派生数据数量。
+        #    迁移不完整的场景路由（原配置未包含在本次导入中）同样计入 skip_reasons。
+        "migrated_scene_routes": migrated_scene_routes,
+        "migrated_runtime_keys": migrated_runtime_keys,
         "hint": "导入的配置不含 API Key，请在列表中逐条补齐 Key 后再启用",
     }
+
+
+@router.post("/config/import/dry-run")
+async def import_config_dry_run(body: ConfigImportIn, db=Depends(read_db)):
+    """导入预演（✅ 2026-10-06 G1）：只校验不落库。
+
+    导入是**整批**操作，用户看不到「这批文件里哪些会新增、哪些会覆盖、哪些会被
+    跳过、跳过原因是什么」就只能盲点导入。本端点复用 ``_classify_import_item``
+    （与真导入**同一判据**）返回逐条处置计划与汇总，**不产生任何写入、不写审计**。
+
+    ⚠️ 判据单一出口：本端点绝不允许另写一份校验逻辑 —— 否则会出现
+    「预演说会通过、真导入却跳过」的静默错配（本仓已多次踩同类陷阱）。
+    """
+    cur = await db.execute(
+        "SELECT provider_name, model, base_url FROM ai_config")
+    # 批内去重与真导入同口径：前一条新增的三元组会挡住后一条同名单元
+    existing = {(r[0], r[1], r[2]) for r in await cur.fetchall()}
+
+    planned: list[dict] = []
+    skipped = clamped_items = invalid_plan_items = 0
+    skip_reasons: list[str] = []
+    key_to_new_id: dict[str, str] = {}
+    for raw in body.items:
+        c = _classify_import_item(raw, existing, body.overwrite)
+        if c["action"] == "skip":
+            skipped += 1
+            if c["invalid_plan"]:
+                invalid_plan_items += 1
+            if c["reason"]:
+                skip_reasons.append(c["reason"])
+            planned.append({"action": "skip", "reason": c["reason"],
+                            "provider_name": c["provider_name"], "model": c["model"]})
+            continue
+        if c["clamped"]:
+            clamped_items += 1
+        old_id = str((raw or {}).get("id") or "")
+        if c["action"] == "overwrite":
+            key_to_new_id[old_id] = old_id
+        else:
+            existing.add((c["provider_name"], c["model"], c["base_url"]))
+            key_to_new_id[old_id] = "__new__"
+        planned.append({
+            "action": c["action"], "provider_name": c["provider_name"],
+            "model": c["model"], "plan": c["plan"], "env": c["env"],
+            "request_mode": c["request_mode"], "clamped": c["clamped"],
+        })
+
+    # 场景路由预演：能否映射到本次导入会落库的配置 id（与真导入同一批跳过原因）
+    route_planned = route_skipped = 0
+    route_reasons: list[str] = []
+    if body.scene_routes is not None:
+        for raw in (body.scene_routes if isinstance(body.scene_routes, list) else []):
+            if not isinstance(raw, dict):
+                continue
+            scene = str(raw.get("scene") or "").strip()
+            old_cfg_id = str(raw.get("config_id") or "").strip()
+            if not scene or not old_cfg_id:
+                continue
+            if scene not in KNOWN_SCENES:
+                route_skipped += 1
+                route_reasons.append(f"场景路由「{scene}」：未在场景白名单登记，已跳过")
+                continue
+            if old_cfg_id not in key_to_new_id:
+                route_skipped += 1
+                route_reasons.append(
+                    f"场景路由「{scene}」：原配置未包含在本次导入中，已跳过")
+                continue
+            route_planned += 1
+
+    runtime_planned: list[str] = []
+    runtime_skipped: list[str] = []
+    if body.runtime is not None and isinstance(body.runtime, dict):
+        for key, value in body.runtime.items():
+            if key == RUNTIME_ACTIVE_ENV_KEY:
+                try:
+                    normalize_env(value)
+                    runtime_planned.append(key)
+                except ValueError:
+                    runtime_skipped.append(key)
+            elif key == RUNTIME_DISABLED_PROVIDERS_KEY:
+                try:
+                    names = json.loads(value) if isinstance(value, str) and value else []
+                except Exception:
+                    names = None
+                if isinstance(names, list):
+                    runtime_planned.append(key)
+                else:
+                    runtime_skipped.append(key)
+            else:
+                runtime_skipped.append(key)
+
+    return {
+        "ok": True,
+        "planned": planned,
+        "total": len(body.items),
+        "would_import": len(planned) - skipped,
+        "skipped": skipped,
+        "clamped_items": clamped_items,
+        "invalid_plan_items": invalid_plan_items,
+        "skip_reasons": skip_reasons[:5],
+        "scene_routes": {"planned": route_planned, "skipped": route_skipped,
+                         "skip_reasons": route_reasons[:5]},
+        "runtime": {"planned": runtime_planned, "skipped": runtime_skipped},
+        "hint": "预演不产生任何写入；确认无误后再点「导入」",
+    }
+
+
+# ---------------------------------------------------------------------------
+# ✅ 2026-10-06 新增：配置迁移完整性 —— 场景路由 / 运行时设置随配置一并迁移
+# ---------------------------------------------------------------------------
+async def _import_scene_routes(db, raw_routes, key_to_new_id, reasons) -> int:
+    """迁移场景路由（scene → 本次导入落库的新 config_id）。
+
+    导出源机器上的 config_id 在新机器上不存在，必须按「导出文件 items 携带的
+    原始 id → 本次导入生成的新 id」映射；映射不到（原配置被跳过或未包含在本次
+    导入中）的场景按跳过处理并如实回传原因 —— 绝不写成指向不存在配置的僵尸行
+    （与 delete_config 清理僵尸路由是同一类数据链断裂问题：界面会永久显示
+    「配置已删除」而运行时只能回落，数据与展示永远对不上）。
+
+    非法值一律跳过而非抛出：导入文件来自外部（邮件/聊天/手工改过），单个场景
+    写错不该让整份迁移失败；scene 白名单判据与 PUT /ai/scene-routes 同源。
+    """
+    migrated = 0
+    if not isinstance(raw_routes, list):
+        return migrated
+    for raw in raw_routes:
+        if not isinstance(raw, dict):
+            continue
+        scene = str(raw.get("scene") or "").strip()
+        old_cfg_id = str(raw.get("config_id") or "").strip()
+        if not scene or not old_cfg_id:
+            continue
+        if scene not in KNOWN_SCENES:
+            reasons.append(f"场景路由「{scene}」：未在场景白名单登记，已跳过")
+            continue
+        new_id = key_to_new_id.get(old_cfg_id, "")
+        if not new_id:
+            reasons.append(f"场景路由「{scene}」：原配置未包含在本次导入中，已跳过")
+            continue
+        await db.execute(
+            "INSERT INTO ai_scene_routes (scene, config_id, updated_at) VALUES (?,?,?)"
+            " ON CONFLICT(scene) DO UPDATE SET config_id=excluded.config_id,"
+            " updated_at=excluded.updated_at",
+            (scene, new_id, datetime.now().isoformat()))
+        migrated += 1
+    return migrated
+
+
+async def _import_runtime(db, raw_runtime) -> list[str]:
+    """迁移运行时设置（当前生效环境 / 运行时禁用厂商清单）。
+
+    两个键都走与运行时端点**同一套**归一化 —— 导入文件来自任何来源，脏值
+    不能绕过 PUT /env 与 PUT /runtime/disabled-providers 的校验：
+      - 环境名走 normalize_env（非法抛 ValueError → 跳过该键）；
+      - 厂商名走 normalize_provider_name（非法/空值逐条剔除）。
+
+    只写入白名单内的两个键，未知键忽略（前向兼容未来新增的运行时设置）。
+    返回实际写入的键名列表。
+    """
+    migrated: list[str] = []
+    if not isinstance(raw_runtime, dict):
+        return migrated
+    for key, value in raw_runtime.items():
+        try:
+            if key == RUNTIME_ACTIVE_ENV_KEY:
+                await upsert_runtime_setting(db, key, normalize_env(value))
+            elif key == RUNTIME_DISABLED_PROVIDERS_KEY:
+                names = json.loads(value) if isinstance(value, str) and value else []
+                if not isinstance(names, list):
+                    continue
+                clean = []
+                for n in names:
+                    if not isinstance(n, str) or not n.strip():
+                        continue
+                    try:
+                        nm = normalize_provider_name(n)
+                    except ValueError:
+                        continue
+                    if nm:
+                        clean.append(nm)
+                await upsert_runtime_setting(
+                    db, key, json.dumps(sorted(set(clean)), ensure_ascii=False))
+            else:
+                continue
+            migrated.append(key)
+        except ValueError:
+            # 非法环境名等：跳过该键，不影响其它键与配置主体的导入。
+            continue
+    return migrated
 
 
 # ---------------------------------------------------------------------------

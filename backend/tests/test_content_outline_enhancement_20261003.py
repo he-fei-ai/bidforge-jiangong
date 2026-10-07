@@ -223,10 +223,25 @@ class TestChapterRequiredElements:
     """要素清单必须**完全等于** NINE_CHAPTERS，本模块不得复制清单。"""
 
     def test_equals_base_fields_when_no_category_hit(self):
-        """无危大类别命中时：要素 == base_fields（逐字、同序）。"""
+        """无危大类别命中时：要素 == base_fields（逐字、同序）。
+
+        ⚠️ F6（2026-10-07）例外：``emergency`` 章在**注入层**追加
+        「专项应急预案按事故类型分组展开」结构要素（默认开启、可回退，
+        开关 ``emergency_group_by_accident_type``）。该追加刻意不回写
+        ``NINE_CHAPTERS.base_fields``（后者还被字段覆盖率校验消费）。
+        """
         from app.services.scheme_classification import required_fields_for_chapter
         for ch in NINE_CHAPTERS:
             key = ch["key"]
+            if key == "emergency":
+                elems = cc.chapter_required_elements(key)
+                assert elems[:5] == list(ch["base_fields"]), (
+                    "emergency 章前 5 项必须仍是原 base_fields")
+                assert len(elems) == 6 and "事故类型分组" in elems[5], (
+                    "F6 开启时应在 base_fields 之后追加 1 条分组结构要素")
+                assert required_fields_for_chapter(key) == list(ch["base_fields"]), (
+                    "校验层口径不得被 F6 注入污染")
+                continue
             assert cc.chapter_required_elements(key) == required_fields_for_chapter(key)
             assert cc.chapter_required_elements(key) == list(ch["base_fields"]), (
                 f"章节 {key} 的要素清单应与 base_fields 完全一致")

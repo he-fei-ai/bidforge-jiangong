@@ -334,6 +334,65 @@ describe("目录树纯逻辑（模块级导出）", () => {
     expect(out[1].outlineId).toBe("2");
     expect(out.map((n) => n.key)).toEqual(["x", "z"]);
   });
+
+  // ✅ 回归锁定（2026-10-07 · 新增/删除节点编号不同步）：
+  // addChildNode / addSiblingNode / deleteNode 三个结构变更入口旧实现漏调
+  // renumberTreeLocally（moveNode / 拖拽已有），导致保存前界面编号缺失或错位。
+  // 下列用例按三个处理函数对树的真实结构变换（插入/追加/移除）构造输入，
+  // 再走与接线点同一的 renumberTreeLocally，断言点分编号与最终展示文案。
+  it("addSiblingNode：中间插入同级后，新节点与后续兄弟编号按位置连续重算", () => {
+    // 模拟 insertAfter：在第 1 章之后插入 local_ 新章
+    const tree = [mkNode("s1", "工程概况"), mkNode("s2", "编制依据"), mkNode("s3", "施工计划")];
+    const inserted = [tree[0], mkNode("local_new", "新章节"), tree[1], tree[2]];
+    const out = renumberTreeLocally(inserted);
+    expect(out.map((n) => n.outlineId)).toEqual(["1", "2", "3", "4"]);
+    expect(out.map((n) => n.key)).toEqual(["s1", "local_new", "s2", "s3"]);
+    // 用户可见展示编号：新节点立即拿到「第二章」，原 2/3 章顺延为三/四章
+    expect(formatOutlineTitle(out[1].outlineId, out[1].level, out[1].title)).toBe("第二章 新章节");
+    expect(formatOutlineTitle(out[2].outlineId, out[2].level, out[2].title)).toBe("第三章 编制依据");
+    expect(formatOutlineTitle(out[3].outlineId, out[3].level, out[3].title)).toBe("第四章 施工计划");
+  });
+
+  it("addChildNode：根级追加的无 outlineId 新节点立即获得连续编号（不再无编号显示）", () => {
+    const tree = [
+      { ...mkNode("s1", "工程概况"), outlineId: "1", level: 1 },
+      { ...mkNode("s2", "编制依据"), outlineId: "2", level: 1 },
+    ];
+    // addChildNode 无 parentKey：[...curTree, newNode]，新节点无 outlineId
+    const appended = [...tree, mkNode("local_new", "新章节")];
+    const out = renumberTreeLocally(appended);
+    expect(out[2].outlineId).toBe("3");
+    expect(out[2].level).toBe(1);
+    expect(formatOutlineTitle(out[2].outlineId, out[2].level, out[2].title)).toBe("第三章 新章节");
+  });
+
+  it("addChildNode：作为子节点追加后，新子节点获得同父连续子编号", () => {
+    const tree = [mkNode("s1", "工程概况", [mkNode("s1-1", "项目简介")])];
+    // insertIntoNode：在唯一子节点后再追加一个子节点
+    tree[0].children!.push(mkNode("local_kid", "建设条件"));
+    const out = renumberTreeLocally(tree);
+    expect(out[0].children!.map((n) => n.outlineId)).toEqual(["1.1", "1.2"]);
+    expect(formatOutlineTitle(out[0].children![1].outlineId, 2, "建设条件")).toBe("2 建设条件");
+  });
+
+  it("deleteNode：删除中间章节后后续兄弟编号前移，嵌套子树前缀整体迁移", () => {
+    const tree = [
+      mkNode("s1", "工程概况"),
+      mkNode("s2", "编制依据", [mkNode("s2-1", "法规"), mkNode("s2-2", "标准")]),
+      mkNode("s3", "施工计划", [mkNode("s3-1", "进度")]),
+    ];
+    // removeNode(tree, "s2")
+    const remove = (ns: TreeNode[], key: string): TreeNode[] =>
+      ns.filter((n) => n.key !== key)
+        .map((n) => ({ ...n, children: n.children ? remove(n.children, key) : [] }));
+    const out = renumberTreeLocally(remove(tree, "s2"));
+    expect(out.map((n) => n.outlineId)).toEqual(["1", "2"]);
+    expect(out.map((n) => n.key)).toEqual(["s1", "s3"]);
+    // 原第三章（含子节）整体迁移为第二章，子编号 3.1 → 2.1
+    expect(out[1].children![0].outlineId).toBe("2.1");
+    expect(formatOutlineTitle(out[1].outlineId, 1, "施工计划")).toBe("第二章 施工计划");
+    expect(formatOutlineTitle(out[1].children![0].outlineId, 2, "进度")).toBe("1 进度");
+  });
 });
 
 // ============================================================

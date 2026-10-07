@@ -20,7 +20,15 @@ _PAGE_MARK_RE = re.compile(r"<!--\s*page\s*:?\s*(\d+)\s*-->", re.I)
 # 表格标题候选：表格块前最近的一行非空普通文本（如 "工程规模表"、"表 2-1 xxx"）
 _TABLE_TITLE_RE = re.compile(r"^(?:[【表]\s*(?:表格|表)\s*[\d\-—\.]*[】]?\s*)?(.+)$")
 # Markdown 分隔行（| --- | :--: |）
-_SEP_ROW_RE = re.compile(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?$")
+# ✅ D5 修复（2026-10-06 · 单列 GFM 表整体漏抽）：旧正则两处过严——
+#   ① 列分组量词为 +，要求「首列之后至少再出现一列」，合法单列分隔行
+#      ``| --- |`` / ``|:---:|`` 全部不匹配，单列表既不进 tables 结构化数据，
+#      【表格】锚点也救不了（锚点后仍按本正则校验）；
+#   ② 每列要求 ``-{2,}``，而 GFM 规范允许「一个或多个」短横线，``|:-:|``
+#      这类单横线分隔行同样漏判。
+# 现对齐 GFM：强制行首管道（无首管道的行不可能与 startswith("|") 的表头配对，
+# 天然防住裸 ``---`` 主题分隔线被误判），短横线放宽为 -+，后续列允许零列。
+_SEP_ROW_RE = re.compile(r"^\|\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$")
 # 图片标记：![](src) / [IMAGE: file, page:N] / 图N-M 题注行
 _MD_IMG_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)[^)]*\)")
 _BRACKET_IMG_RE = re.compile(
@@ -48,6 +56,18 @@ def _extract_title(candidate: str) -> str:
     m = _TABLE_TITLE_RE.match(t)
     title = (m.group(1) if m else t).strip()
     return title[:60] if 0 < len(title) <= 60 else ""
+
+
+# ✅ D6 修复（2026-10-06 · 表格标题被标记行污染）：解析链路输出的行常是纯标记
+#    （``<!-- page:2 -->`` 页标记、``[IMAGE: x, page:1]`` OCR 占位）或「图片标记
+#    +文字」混排（``![](x.png)工程量汇总表``）。旧实现把整行原样当标题候选，
+#    表格 title 字段随之出现标记文本。这里剥掉 HTML 注释与两类图片标记后再看
+#    剩余可见文本；无可见文本返回 ""，调用方据此**保留**更早的真实候选。
+def _plain_text_of(line: str) -> str:
+    s = _BRACKET_IMG_RE.sub("", line or "")
+    s = _MD_IMG_RE.sub("", s)
+    s = re.sub(r"<!--.*?-->", "", s, flags=re.S)
+    return s.strip()
 
 
 def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, Any]:
@@ -85,10 +105,33 @@ def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, A
             continue
         _page_entry(page_of_line[i])["line_idx"].append(i)
 
+    # ---- 1.5 公式预扫（块级 $$...$$ 可跨多行；旧实现只在单行内 search，
+    #        跨行公式全部漏抽，一行多公式也只取首个）。全篇非贪婪成对匹配，
+    #        按起始行的页归属页码；span 行号供第 3 步页文本装配时去重 ----
+    formulas: list[dict] = []
+    _math_line_spans: list[tuple[int, int]] = []
+    for m in _BLOCK_MATH_RE.finditer(text):
+        start_line = text.count("\n", 0, m.start())
+        end_line = text.count("\n", 0, max(m.start(), m.end() - 1))
+        pnum = page_of_line[start_line]
+        f_id = f"f{len(formulas) + 1}"
+        formulas.append({
+            "formula_id": f_id, "page_num": pnum,
+            "latex": m.group(1).strip(),
+            "source_ref": f"{doc_id}#page:{pnum}#formula:{f_id}",
+        })
+        _page_entry(pnum)["formulas"].append(f_id)
+        _math_line_spans.append((start_line, end_line))
+
     # ---- 2. 表格抽取（全篇顺序扫描，保证跨页表格也归位起始页）----
     tables: list[dict] = []
     consumed: set[int] = set()   # 已被表格消费的行的全局行号
     last_plain = ""              # 表格前最近的普通文本行（标题候选）
+
+    def _in_math_span(idx: int) -> bool:
+        # E1：块公式的分隔行/内部 LaTeX 行不是正文，不能污染表格标题候选
+        return any(a <= idx <= b for a, b in _math_line_spans)
+
     i = 0
     while i < len(lines):
         stripped = lines[i].strip()
@@ -96,8 +139,12 @@ def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, A
             stripped.startswith("|") and i + 1 < len(lines)
             and _SEP_ROW_RE.match(lines[i + 1].strip() or ""))
         if not is_table_anchor:
-            if stripped and not stripped.startswith("#"):
-                last_plain = stripped
+            if stripped and not stripped.startswith("#") and not _in_math_span(i):
+                # D6：纯标记行（页注释 / 图片占位）不覆盖标题候选；
+                # 混排行只保留可见文本
+                cand = _plain_text_of(stripped)
+                if cand:
+                    last_plain = cand
             i += 1
             continue
         start = i
@@ -152,9 +199,8 @@ def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, A
         last_plain = ""
         i = j
 
-    # ---- 3. 图片与公式抽取 + 页文本组装 ----
+    # ---- 3. 图片抽取 + 页文本组装（公式已在 1.5 预扫完成）----
     images: list[dict] = []
-    formulas: list[dict] = []
     for num in sorted(pages):
         entry = pages[num]
         body_lines: list[str] = []
@@ -164,6 +210,13 @@ def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, A
                 # 表格行不重复入页文本（内容已结构化入 tables），留占位标记
                 if not _SEP_ROW_RE.match(ln.strip()):
                     body_lines.append("> 〔表格见 tables 结构化数据〕")
+                continue
+            # 公式行不重复入页文本（已在 formulas 结构化），整块只在起始行留占位
+            math_span = next((sp for sp in _math_line_spans
+                             if sp[0] <= g_idx <= sp[1]), None)
+            if math_span is not None:
+                if g_idx == math_span[0]:
+                    body_lines.append("> 〔公式见 formulas 结构化数据〕")
                 continue
             for m in _MD_IMG_RE.finditer(ln):
                 img_id = f"img_{len(images) + 1:03d}"
@@ -219,15 +272,6 @@ def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, A
                     if not img["caption"]:
                         img["caption"] = cap.group(1).strip()[:80]
                         break
-            fm = _BLOCK_MATH_RE.search(ln)
-            if fm:
-                f_id = f"f{len(formulas) + 1}"
-                formulas.append({
-                    "formula_id": f_id, "page_num": num,
-                    "latex": fm.group(1).strip(),
-                    "source_ref": f"{doc_id}#page:{num}#formula:{f_id}",
-                })
-                entry["formulas"].append(f_id)
             body_lines.append(ln)
         entry["text"] = "\n".join(body_lines).strip()
 

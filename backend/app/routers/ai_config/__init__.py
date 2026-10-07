@@ -48,12 +48,13 @@ from .config import (
     get_active_env,
     get_config,
     import_config,
+    import_config_dry_run,
     save_config,
     set_active_env,
     toggle_config,
     update_fallback_chain,
 )
-from .connectivity import ai_health, precheck_all, precheck_config, test_config
+from .connectivity import ai_health, configs_health, precheck_all, precheck_config, test_config
 from .models import (
     _MODEL_LIST_MAX,
     _ctx_tokens,
@@ -65,7 +66,7 @@ from .models import (
     list_models,
 )
 from .runtime import get_runtime, set_disabled_providers
-from .scene_routes import list_scene_routes, update_scene_route
+from .scene_routes import batch_update_scene_routes, list_scene_routes, update_scene_route
 from .usage import ai_stats, audit_logs, cleanup_audit_logs
 
 __all__ = [
@@ -73,13 +74,13 @@ __all__ = [
     "_http_status_of", "_classify_error", "_dns_precheck", "_dns_precheck_async",
     "_resolve_conn_credentials", "_MODEL_LIST_MAX", "_ctx_tokens", "_fmt_context", "_fetch_models_list",
     "get_config", "save_config", "delete_config", "toggle_config", "clear_config_key",
-    "update_fallback_chain", "export_config", "import_config",
+    "update_fallback_chain", "export_config", "import_config", "import_config_dry_run",
     "get_active_env", "set_active_env",
-    "test_config", "precheck_config", "precheck_all", "ai_health",
+    "test_config", "precheck_config", "precheck_all", "ai_health", "configs_health",
     "fetch_provider_models", "list_models", "fetch_custom_models",
     "ai_stats", "audit_logs", "cleanup_audit_logs",
     "record_config_audit", "config_audit_logs", "CONFIG_ACTIONS",
     "rollback_config", "sanitize_config_snapshot", "diff_snapshots",
-    "list_scene_routes", "update_scene_route",
+    "list_scene_routes", "update_scene_route", "batch_update_scene_routes",
     "get_runtime", "set_disabled_providers",
 ]

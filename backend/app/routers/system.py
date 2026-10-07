@@ -203,6 +203,41 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
     ok = ai.get("ok_calls") or 0
     ai["success_rate"] = round(ok / ai["calls_today"] * 100, 1) if ai["calls_today"] else None
 
+    # ---- 3. 文档解析统计（监控缺口补齐 2026-10-06）：此前解析失败率/积压量
+    #        在活动快照里完全不可见，用户批量上传后只能逐行翻文档列表。
+    #        fail-soft：查询失败不阻断常驻状态栏，缺省给零值 ----
+    docs_stats: dict = {}
+    conn = None
+    try:
+        conn = await get_read_conn()
+        cur = await conn.execute(
+            "SELECT COUNT(*) AS total,"
+            " COALESCE(SUM(CASE WHEN parse_status='success' THEN 1 ELSE 0 END), 0) AS parsed,"
+            " COALESCE(SUM(CASE WHEN parse_status='failed' THEN 1 ELSE 0 END), 0) AS failed,"
+            " COALESCE(SUM(CASE WHEN parse_status='pending' THEN 1 ELSE 0 END), 0) AS pending,"
+            " MAX(created_at) AS last_upload_at"
+            " FROM project_documents")
+        row = await cur.fetchone()
+        if row:
+            docs_stats = dict(row)
+    except Exception as e:
+        logger.warning("activity: 读取文档解析统计失败: %s", e)
+    finally:
+        if conn is not None:
+            await release_read_conn(conn)
+
+    total_docs = int(docs_stats.get("total") or 0)
+    failed_docs = int(docs_stats.get("failed") or 0)
+    documents = {
+        "total": total_docs,
+        "parsed": int(docs_stats.get("parsed") or 0),
+        "failed": failed_docs,
+        "pending": int(docs_stats.get("pending") or 0),
+        "last_upload_at": docs_stats.get("last_upload_at") or "",
+        # 与 ai.success_rate 同口径的服务端派生指标；无文档时为 None（不误报 0）
+        "failure_rate": round(failed_docs / total_docs * 100, 1) if total_docs else None,
+    }
+
     return {
         "server": {
             "version": APP_VERSION,
@@ -210,6 +245,7 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
         },
         "tasks": {"running": running, "recent": recent},
         "ai": ai,
+        "documents": documents,
     }
 
 
@@ -312,4 +348,62 @@ async def upload_limits():
             "upload_max_files_per_request", _UPLOAD_LIMIT_DEFAULTS["max_files_per_request"]),
         "max_total_bytes": _positive_setting(
             "upload_max_total_bytes", _UPLOAD_LIMIT_DEFAULTS["max_total_bytes"]),
+    }
+
+
+# --------------------------------------------------------------------------
+# 提示词治理运行时开关（R47 债-3 · 2026-10-06）
+#
+# 能力在库但此前只能通过环境变量开启：
+#   - ``prompt_context_budget``（``sse_handlers._apply_prompt_context_budget``，
+#     ≤0 关闭；>0 时按预算削减外部资料上下文长度）；
+#   - ``prompt_injection_defense``（``sse_handlers._apply_prompt_injection_defense``，
+#     False 关闭；True 时对外部资料加「只读数据」围栏并脱敏疑似凭据）。
+#
+# 本端点只做进程内存态读写（重启即回 .env 默认），不写 DB——这是运行时
+# 旋钮，不是持久化配置。默认值逐字沿用 settings 现值（0 / False），不开启
+# 时行为与现状完全一致。
+# --------------------------------------------------------------------------
+from pydantic import BaseModel  # noqa: E402
+
+
+class GovernanceSettings(BaseModel):
+    """``PUT /system/governance`` 请求体；两个字段均为运行时旋钮。"""
+    prompt_context_budget: int = 0
+    prompt_injection_defense: bool = False
+
+
+@router.get("/governance")
+async def governance_get():
+    """读取提示词治理开关的当前进程内现值。
+
+    返回字段：
+      - prompt_context_budget: int（≤0 = 关闭上下文预算削减；>0 = 最大字节数）
+      - prompt_injection_defense: bool（False = 不对外部资料加围栏/脱敏）
+    """
+    return {
+        "prompt_context_budget": int(
+            getattr(settings, "prompt_context_budget", 0) or 0),
+        "prompt_injection_defense": bool(
+            getattr(settings, "prompt_injection_defense", False)),
+    }
+
+
+@router.put("/governance")
+async def governance_put(body: GovernanceSettings):
+    """写回提示词治理开关到进程内 settings（内存态，重启回 .env 默认）。
+
+    返回写回后的现值（与 GET 同构）。非法值由 Pydantic 校验拒绝（422）。
+    """
+    try:
+        settings.prompt_context_budget = int(body.prompt_context_budget)
+    except (TypeError, ValueError):
+        settings.prompt_context_budget = 0
+    settings.prompt_injection_defense = bool(body.prompt_injection_defense)
+    logger.info(
+        "提示词治理开关已更新（内存态）: context_budget=%d, injection_defense=%s",
+        settings.prompt_context_budget, settings.prompt_injection_defense)
+    return {
+        "prompt_context_budget": int(settings.prompt_context_budget or 0),
+        "prompt_injection_defense": bool(settings.prompt_injection_defense),
     }

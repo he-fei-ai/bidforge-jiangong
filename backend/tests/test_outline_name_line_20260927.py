@@ -288,11 +288,10 @@ SERVICES = ROOT / "services"
 #:    "新增泄漏"，且改的人完全无从下手（consistency_scanner.py 仅在本轮
 #:    插入一段注释 + 人名守卫就从 L92 移到 L131 即触发）。
 #:    改为登记**模块路径**（稳定不随行号变化）；行号只作为注释信息保留。
-KNOWN_LAYER_LEAKS: dict[str, str] = {
-    "consistency_scanner.py": "app.routers.sse_handlers._build_facts_text"
-                              "（全局事实文本构建函数住在 sse_handlers；与已修的"
-                              " numbering→export 同族，待独立批次下沉到 services）",
-}
+# R48（2026-10-06）：原登记的 consistency_scanner.py → sse_handlers._build_facts_text
+# 已整组下沉到 services/facts_builder.py（与 R47 fix_log §5.1 对齐），本仓 services→routers
+# 层级倒置归零。保留空 dict 结构与下方"登记数==实际数"断言，未来新泄漏仍会被抓。
+KNOWN_LAYER_LEAKS: dict[str, str] = {}
 
 
 def _router_imports(path: pathlib.Path) -> list[str]:

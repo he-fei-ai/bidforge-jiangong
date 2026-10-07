@@ -176,11 +176,52 @@ CHAPTER_TEXT_RULES: list[tuple[tuple[str, ...], str]] = [
       "线荷载", "起升高度", "起重量", "起吊重量", "单件起吊重量",
       "边坡高度", "边坡开挖高度", "安装高度", "承载力", "立杆间距",
       "立杆步距", "连墙件", "降水方式", "起重机高度", "起重设备高度",
+      # ✅ 2026-10-06：随 DANGER_PARAM_RULES 新增 pile_depth 一并补齐。
+      #    两表**必须同步**——test_danger_param_names_all_classified_to_a_chapter
+      #    静态护栏就是为此存在（只加 DANGER_PARAM_RULES 会让这批事实落空串
+      #    =「未分类」，九大章节视图不显示、且用户看不到它其实已提取）。
+      "挖孔桩深度", "人工挖孔桩深度", "孔深", "桩孔深度",
       "结构形式", "建设规模",
       "工程名称", "项目名称", "工程地点", "项目地点", "参建", "建设单位",
       "设计单位", "监理单位", "施工单位", "施工要求"), "overview"),
 ]
 
+
+# =========================================================================
+# HAZARD_THRESHOLDS 的判定参数键（depth / height / span / total_load / line_load /
+# single_weight / crane_capacity / slope_height / install_height）与全局事实的
+# 事实名并非一一对应（事实名是中文长句），本表给出「事实名/归一化键 → 参数键」
+# 的映射，供 evaluate_hazard_level 使用。
+#: (匹配关键词元组, 阈值参数键)
+#:
+#: ✅ 2026-10-06 补 pile_depth：`HAZARD_THRESHOLDS["ot_bored_pile"]["params"]`
+#:    声明的判定参数是 ``pile_depth``，但本表**没有任何规则能产出它** →
+#:    `extract_danger_params` 永远返回 `{}` → 人工挖孔桩恒走
+#:    `oversize_conservative_missing` 保守分支（10m 的桩也被判超规模）。
+#:    补齐后 16m 及以上（闭区间）走正常判定。
+#: ✅ 2026-10-06 移除「立杆步距」→ height：立杆步距是脚手架**间距**参数
+#:    （典型 1.5~1.8m），不是搭设高度。映射到 height 会让只报了步距的方案
+#:    抽出 `height=1.8` 并与 24m/50m 部文阈值比较 → 恒判「远低于阈值」，
+#:    是**漏判**（安全红线方向）。步距与高度是两个独立量，不做映射。
+DANGER_PARAM_RULES: list[tuple[tuple[str, ...], str]] = [
+    (("开挖深度", "基坑深度", "坑深", "foundation_depth", "excavation_depth"), "depth"),
+    (("边坡高度", "边坡开挖高度", "slope_height"), "slope_height"),
+    (("支撑高度", "搭设高度", "架体高度", "支撑架高度"), "height"),
+    (("安装高度", "幕墙安装高度", "install_height"), "install_height"),
+    (("跨度", "跨距", "span"), "span"),
+    (("施工总荷载", "总荷载", "total_load"), "total_load"),
+    (("集中线荷载", "线荷载", "line_load"), "line_load"),
+    (("单件起吊重量", "最大起吊重量", "起吊重量"), "single_weight"),
+    (("起重量", "额定起重量", "起重设备起重量", "crane_capacity"), "crane_capacity"),
+    (("起重机高度", "起重设备高度"), "crane_height"),
+    # ✅ 2026-10-06 新增：人工挖孔桩开挖深度（部文附件二七(三) 16m 及以上超规模）
+    (("挖孔桩深度", "人工挖孔桩深度", "孔深", "桩孔深度", "pile_depth"), "pile_depth"),
+]
+
+#: ✅ 2026-10-06 反向完整性：HAZARD_THRESHOLDS 里出现过的每个 params 键
+#:    都必须能被 DANGER_PARAM_RULES 产出（否则该规则恒走缺参保守分支，
+#:    且用户看到的 missing_params 永远无法消除）。由测试扫
+#:    HAZARD_THRESHOLDS 全表锁定。
 
 #: 英文归一化键（fact_key）→ 九大章节。
 #: ✅ 修复（2026-09-30 第十三轮 · 英文键从未参与章节判定）：
@@ -190,33 +231,47 @@ CHAPTER_TEXT_RULES: list[tuple[tuple[str, ...], str]] = [
 #: 等英文归一化键只对「共性事实」判定生效、对「章节归属」完全无效。
 #: 真实后果：模型若把事实名写成英文（或人工录入用英文键），该事实在九大章节
 #: 视图里落空串 =「未分类」，不显示、不计入 ``chapter_field_completeness``。
-#: 本表从 ``DANGER_PARAM_RULES`` 派生（危大参数一律属第一章「工程概况」的
-#: 专项工程特征），与中文规则共用同一结论，不会出现两套口径。
+#:
+#: ✅✅ 2026-10-06 彻底更正：旧注释声称「本表从 ``DANGER_PARAM_RULES`` 派生」——
+#:   实现却是 24 键手写字面量，**无任何派生代码**，注释与实现不符。
+#:   本轮先按注释改成「从 DANGER_PARAM_RULES 派生」，随即被既有用例打回，
+#:   实测才发现**那是个范畴错误**：
+#:
+#:   ``DANGER_PARAM_RULES`` 的键是**危大阈值参数字汇**
+#:   （``HAZARD_THRESHOLDS[*].params``：depth / height / span / total_load …），
+#:   而本表要收的是 **facts_extractor.normalize_key 的产物**（fact_key 命名空间）。
+#:   两者**不是同一套词表**。实测（``_probe_keys``）：
+#:     normalize_key("边坡高度")  → ``fact_931b1aa5``   （不是 slope_height）
+#:     normalize_key("跨度")      → ``fact_1dfc5843``   （不是 span）
+#:     normalize_key("基坑深度")  → ``foundation_depth`` ✅ 命中
+#:   即 11 个危大参数键里 **10 个 normalize_key 根本产不出来**（未登记别名时
+#:   一律回落 ``fact_<md5>``）→ 旧表里它们是**永不生效的死条目**。
+#:
+#:   现按下述原则重建：
+#:     ① 只收 ``normalize_key`` **实测可产出**的键（护栏逐键验证）；
+#:     ② 全部映射到 ``overview``（工程概况的专项工程特征）；
+#:     ③ 危大阈值参数字汇由 ``DANGER_PARAM_RULES`` 独立承载，两套词表
+#:        **显式分离**，不再互相冒充。
+_FACT_KEY_CHAPTER_VERIFIED: tuple[str, ...] = (
+    # —— normalize_key 别名表实测可产出（每键都经护栏验证）——
+    "foundation_depth",    # 基坑深度 / 开挖深度
+    "support_type",        # 支护形式 / 支护类型
+    "water_table",         # 地下水位 / 地下水位标高
+    "bearing_capacity",    # 地基承载力
+    "slope_ratio",         # 边坡坡度
+    "structure_type",      # 结构形式
+    "scaffold_type",       # 脚手架类型
+    "formwork_type",       # 模板类型
+    "tower_crane_model",   # 塔吊型号 / 塔吊
+    "excavator_model",     # 挖掘机型号
+    "max_lift_weight",     # 最大吊装重量
+    "building_area",       # 建筑面积
+    "building_height",     # 建筑高度
+    "site_area",           # 占地面积
+)
+
 FACT_KEY_TO_CHAPTER: dict[str, str] = {
-    "foundation_depth": "overview",
-    "excavation_depth": "overview",
-    "slope_height": "overview",
-    "install_height": "overview",
-    "support_type": "overview",
-    "height": "overview",
-    "span": "overview",
-    "total_load": "overview",
-    "line_load": "overview",
-    "single_weight": "overview",
-    "max_lift_weight": "overview",
-    "crane_capacity": "overview",
-    "crane_height": "overview",
-    "tower_crane_model": "overview",
-    "excavator_model": "overview",
-    "scaffold_type": "overview",
-    "formwork_type": "overview",
-    "water_table": "overview",
-    "bearing_capacity": "overview",
-    "slope_ratio": "overview",
-    "structure_type": "overview",
-    "building_area": "overview",
-    "building_height": "overview",
-    "site_area": "overview",
+    k: "overview" for k in _FACT_KEY_CHAPTER_VERIFIED
 }
 
 
@@ -452,31 +507,20 @@ def _chapter_order(key: str) -> int:
 
 # =========================================================================
 # 七、危大工程阈值判定参数抽取（事实 → HAZARD_THRESHOLDS 参数）
-# =========================================================================
-# HAZARD_THRESHOLDS 的判定参数键（depth / height / span / total_load / line_load /
-# single_weight / crane_capacity / slope_height / install_height）与全局事实的
-# 事实名并非一一对应（事实名是中文长句），本表给出「事实名/归一化键 → 参数键」
-# 的映射，供 evaluate_hazard_level 使用。
-#: (匹配关键词元组, 阈值参数键)
-DANGER_PARAM_RULES: list[tuple[tuple[str, ...], str]] = [
-    (("开挖深度", "基坑深度", "坑深", "foundation_depth", "excavation_depth"), "depth"),
-    (("边坡高度", "边坡开挖高度", "slope_height"), "slope_height"),
-    (("支撑高度", "搭设高度", "架体高度", "支撑架高度", "立杆步距"), "height"),
-    (("安装高度", "幕墙安装高度", "install_height"), "install_height"),
-    (("跨度", "跨距", "span"), "span"),
-    (("施工总荷载", "总荷载", "total_load"), "total_load"),
-    (("集中线荷载", "线荷载", "line_load"), "line_load"),
-    (("单件起吊重量", "最大起吊重量", "起吊重量"), "single_weight"),
-    (("起重量", "额定起重量", "起重设备起重量", "crane_capacity"), "crane_capacity"),
-    (("起重机高度", "起重设备高度"), "crane_height"),
-]
-
 #: 长度单位 → 米 的换算系数（HAZARD_THRESHOLDS 长度类阈值全部以 m 为单位）
+#: ✅ 2026-10-06 补 dm / km：与 facts_cross_validators._UNIT_TO_BASE 的
+#:    长度单位集**取齐**。此前本表只有 6 个单位，而交叉校验器支持
+#:    dm/km —— 同一条「0.5km」事实，冲突检测会做单位归一（认为与 500m 一致），
+#:    危大阈值抽取却取不到数（`pile_depth` 恒缺参）→ **相反的失败方向**。
 _UNIT_TO_METER = {"mm": 0.001, "毫米": 0.001, "cm": 0.01, "厘米": 0.01,
-                  "m": 1.0, "米": 1.0}
+                  "dm": 0.1, "分米": 0.1,
+                  "m": 1.0, "米": 1.0, "km": 1000.0, "千米": 1000.0}
 #: 长度类参数键（其余为荷载/重量类，保持原单位 kN/m²、kN/m）
+#: ✅ 2026-10-06 补 pile_depth：人工挖孔桩深度是部文以「m」表述的长度阈值
+#:    （附件二七(三)「开挖深度 16m 及以上」）。漏登记会让 16.5m 原样通过
+#:    而 16500mm 被换算成 16.5m —— 同一条事实因单位写法不同得到相反判定。
 _LENGTH_PARAMS = {"depth", "height", "span", "slope_height",
-                  "install_height", "crane_height"}
+                  "install_height", "crane_height", "pile_depth"}
 _NUM_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*([a-zA-Z\u4e00-\u9fff/²³]*)")
 
 
@@ -503,12 +547,28 @@ def _to_meter(num: float, unit: str):
     return None
 
 
+def _fact_field(f, key: str) -> str:
+    """兼容 dict 行与对象行（FactItem / 任意带同名属性的替身）取字段。
+
+    ✅ 2026-10-06：旧实现 `if not isinstance(f, dict): continue` —— 传入
+    ``FactItem`` 对象时**整批静默跳过**，返回 ``{}``。调用方
+    （router /danger-check、preflight_engine.check_hazard_params）会把
+    ``{}`` 读成「没有任何危大参数」→ **少判甚至不判超规模**（安全红线方向）。
+    本模块自己的 FactItem dataclass 就是最自然的调用形态，静默跳过不可接受。
+    """
+    if isinstance(f, dict):
+        return _as_text(f.get(key))
+    return _as_text(getattr(f, key, ""))
+
+
 def extract_danger_params(facts) -> dict:
     """从全局事实中抽取危大工程阈值判定参数。
 
     Args:
-        facts: 事实行序列，元素需含 name / value / value_unit / fact_key 等字段
-            （``global_facts`` 表的 dict 行或 FactItem 的 asdict 均可）。
+        facts: 事实行序列，元素需含 name / value / value_unit / fact_key 等字段。
+            兼容两种形态：``global_facts`` 表的 dict 行、``FactItem`` 等带同名
+            属性的对象行（✅ 2026-10-06 起；此前只认 dict，传对象会被整批
+            静默跳过 → 危大参数恒空 → 漏判超规模）。
 
     Returns:
         ``{参数键: 数值}``，如 ``{"depth": 6.5, "span": 18.0}``。
@@ -517,11 +577,11 @@ def extract_danger_params(facts) -> dict:
     """
     out = {}
     for f in facts or []:
-        if not isinstance(f, dict):
+        if f is None:
             continue
-        name = f"{_as_text(f.get('name'))} {_as_text(f.get('fact_key'))}"
-        value = _as_text(f.get("value"))
-        unit = _as_text(f.get("value_unit")) or ""
+        name = f"{_fact_field(f, 'name')} {_fact_field(f, 'fact_key')}"
+        value = _fact_field(f, "value")
+        unit = _fact_field(f, "value_unit") or ""
         matched = None
         for keywords, param in DANGER_PARAM_RULES:
             for kw in keywords:
@@ -564,8 +624,12 @@ def danger_check(scheme_name: str, facts=None, extra_text: str = "") -> dict:
         classification 结构同 ``SchemeClassification.to_dict()``，含
         category_ids / sub_ids / is_hazardous / is_oversize / thresholds 等字段。
     """
-    facts_list = [f for f in (facts or []) if isinstance(f, dict)]
-    params = extract_danger_params(facts_list)
+    # ✅ 2026-10-06：不再按 isinstance(dict) 预筛。旧实现
+    # `facts_list = [f for f in (facts or []) if isinstance(f, dict)]`
+    # 会在**进入 extract_danger_params 之前**把对象行（FactItem 等）整批丢掉，
+    # 令该函数的「兼容对象行」修复形同虚设 —— 危大参数恒空 → 漏判超规模
+    # （安全红线方向）。过滤职责已下沉到 extract_danger_params 内部。
+    params = extract_danger_params(facts or [])
     cls = sc.classify_scheme(scheme_name, params, extra_text)
     return {"classification": cls.to_dict(), "threshold_params": params}
 
@@ -579,13 +643,83 @@ DIMENSION_COLUMNS = ("chapter", "fact_attr", "source_kind", "is_shared")
 
 
 def _content_value(content) -> str:
-    """从落库 content（Markdown 行）中取事实值文本，供维度派生兜底使用。"""
+    """从落库 content（Markdown 行）中取事实值文本，供维度派生兜底使用。
+
+    ✅ 2026-10-06：改为「半角/全角中**最早出现者**胜」。
+    旧实现「先试半角、整行没有半角冒号才试全角」在
+    ``- 名称：值 with 9:00`` 这类行上会在**值内部**的 ``9:00`` 处切开
+    （切出 value=``00``），与 facts_extractor.extract_value_from_markdown_line
+    是同一族缺陷的第四份实现。
+    切分语义统一走 facts_extractor 的 _split_fact_line 单一出口；
+    本函数**保留**既有的 ``**`` / 标记不剥离行为（维度派生只需要值文本，
+    剥离会改变文本规则命中，属另一件事）。
+    """
     text = _as_text(content)
-    if ":" in text:
-        return text.split(":", 1)[1].strip()
-    if "：" in text:
-        return text.split("：", 1)[1].strip()
-    return text
+    from app.services.facts_extractor import _split_fact_line
+    return _split_fact_line(text)[1]
+
+
+# =========================================================================
+# 八之二、派生输入变更判据（唯一事实源）
+# =========================================================================
+
+#: 分类的空值兜底键（CATEGORY_TO_CHAPTER 的末位键，语义=「未分类」）。
+DEFAULT_CATEGORY = "other"
+
+
+def _norm_fact_category(v: Any) -> str:
+    """分类归一：剥首尾空白，空值统一为 ``DEFAULT_CATEGORY``。"""
+    return str(v or "").strip() or DEFAULT_CATEGORY
+
+
+def _norm_fact_text(v: Any) -> str:
+    """名称/值归一：仅剥首尾空白，不改内容（值内部空格是有意义信息）。"""
+    return str(v or "").strip()
+
+
+def derivation_inputs_changed(*, old_category: Any = "", new_category: Any = "",
+                              old_name: Any = "", new_name: Any = "",
+                              old_value: Any = "", new_value: Any = "") -> bool:
+    """判断九大章节的**派生输入**（分类 / 名称 / 值）是否发生变化。
+
+    **唯一事实源** —— 两条写路径共用：
+
+    - 条目级更新 ``global_facts._apply_item_updates``
+    - 分组重建 ``global_facts.update_fact._carry_dimensions``
+
+    背景：``chapter`` 由 ``(name, value, category, fact_type, fact_key)`` 派生，
+    ``fact_attr`` 由 ``(name, value)`` 派生，而读路径（本模块
+    ``dimensions_for_row`` / ``chapter_of_row``、正文注入的
+    ``sse_handlers._load_facts_rows``）都是**库值优先**。派生输入变了但列不
+    跟着重算，九大章节视图 / 正文按章精选就永远停在旧值，直到下一次重新
+    提取才能纠正。
+
+    Returns:
+        ``True``  —— 至少一个派生输入变化，调用方**必须**重派生
+                     ``chapter`` / ``fact_attr``；
+        ``False`` —— 三要素全部未变，原样保留库里的四维标注（尊重提取期
+                     标注，避免重新提取才能刷新章节归属）。
+
+    值比较用 **strip 直比**（不用 ``normalize_key``）：分类器消费的就是原始
+    值文本，normalize 后的键相等而原文本不同时，重派生仍是正确且幂等的。
+
+    ⚠️ 本仓反复出现的「同一判据两处各自实现」陷阱的第三次复现：
+
+    - 2026-09-29 漏了「改分类」；
+    - 2026-10-01 补了「改名」（改名不改类时不重算）；
+    - 2026-10-06（R45）又漏了「改值」（定性描述改成具体参数时
+      ``fact_attr`` 停在 ``qualitative``，而 ``classify_fact_attr`` 的输入
+      正是 ``(name, value)``）。
+
+    三次都是「只修了一份、另一份的缺陷继续存活」。现收敛为单一出口，护栏
+    ``test_facts_deep_audit_r45_20261006.py::TestDerivationGateSingleSource``
+    锁定两条路径都必须调用本函数、且不得再写各自的字面量比较。
+    """
+    return not (
+        _norm_fact_category(old_category) == _norm_fact_category(new_category)
+        and _norm_fact_text(old_name) == _norm_fact_text(new_name)
+        and _norm_fact_text(old_value) == _norm_fact_text(new_value)
+    )
 
 
 def classify_fact_dimensions(name: str, value: str = "", category: str = "",

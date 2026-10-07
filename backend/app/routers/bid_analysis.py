@@ -29,6 +29,7 @@ from fastapi.responses import StreamingResponse
 
 from app.config import settings
 from app.db import get_db, safe_rowcount, settle_global_conn
+from app.routers.schemes import require_project_id  # ✅ G3 根因加固（R45）
 from app.services import scheme_classification as sc
 from app.services.ai.provider_factory import chat_with_fallback
 from app.services.ai.sse_utils import with_heartbeat
@@ -820,6 +821,13 @@ async def update_single_result(
     #    副本，与写入侧其他 6 处调用点口径并存，属本仓反复出现的判据分叉。
     resolved_domain = get_item_domain(item_id) or "scheme"
     pk = build_item_pk(real_pid, item_id, resolved_domain)
+    # ⚠️ G3 根因加固（R45）：schemes.project_id 的唯一写入守卫。在 try **之外**
+    # 计算 —— 本函数的 except 会把 HTTPException 也吞成 500（HTTPException 是
+    # Exception 子类），必须避免 422 被降级。
+    # _resolve_pid 已 strip 且防空（空则 404），此处显式再过一遍，让「写
+    # schemes.project_id 必须过 require_project_id」的不变量在每个写点可见 ——
+    # 护栏 test_schemes_project_id_guard_20261006.py 按此扫描全仓写路径。
+    real_pid = require_project_id(real_pid)
     try:
         if scheme_id:
             await db.execute(

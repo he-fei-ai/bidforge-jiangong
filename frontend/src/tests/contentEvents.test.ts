@@ -13,6 +13,9 @@ import {
   contentResultFailedSections,
   contentResultSummary,
   normalizeQualityIssues,
+  normalizeChartYield,
+  chartDropTexts,
+  CHART_DROP_REASON_LABELS,
   type SectionLogItem,
 } from "../utils/contentEvents";
 
@@ -296,5 +299,137 @@ describe("normalizeQualityIssues", () => {
 
   it("去重去空：同一命中在两组里重复出现只算一条", () => {
     expect(normalizeQualityIssues({ a: ["x", "x"], b: ["  ", "y"] })).toEqual(["x", "y"]);
+  });
+});
+
+// ============================================================
+// normalizeChartYield —— R49 图表产出闭环（section_done 实时下发）
+//   口径：chart_count = 留下的图表块数；charts_dropped_count/charts_dropped = 被删的
+//   后端 app/routers/sse_handlers.py::_persist_section 落 last_generation_report
+//   并随 section_done 下发同名同值键（断线重挂后与库内真相一致）。
+// ============================================================
+describe("normalizeChartYield", () => {
+  it("正常载荷：三键原样归一为稳定形态", () => {
+    const raw = {
+      chart_count: 1,
+      charts_dropped_count: 2,
+      charts_dropped: [
+        { type: "flowchart", reason: "per_section_limit" },
+        { type: "gantt", reason: "scheme_type_limit" },
+      ],
+    };
+    expect(normalizeChartYield(raw)).toEqual({
+      chart_count: 1,
+      charts_dropped_count: 2,
+      charts_dropped: raw.charts_dropped,
+    });
+  });
+
+  it("旧版后端 / 缺键一律回退 0 与 []（绝不返回 undefined，绝不抛异常）", () => {
+    for (const bad of [undefined, null, {}, { chart_count: undefined }, [], "x", 0]) {
+      expect(normalizeChartYield(bad)).toEqual({
+        chart_count: 0,
+        charts_dropped_count: 0,
+        charts_dropped: [],
+      });
+    }
+  });
+
+  it("脏数值 fail-soft：负数 / 小数 / NaN / Infinity 一律归零或取整", () => {
+    expect(normalizeChartYield({ chart_count: -3 })).toMatchObject({ chart_count: 0 });
+    expect(normalizeChartYield({ chart_count: 2.9 })).toMatchObject({ chart_count: 2 });
+    expect(normalizeChartYield({ chart_count: NaN })).toMatchObject({ chart_count: 0 });
+    expect(
+      normalizeChartYield({ chart_count: 1, charts_dropped_count: Infinity }),
+    ).toMatchObject({ chart_count: 1 });
+  });
+
+  it("charts_dropped_count 缺省/为 0 时以明细条数兜底（后端漏计不得静默归零）", () => {
+    const dropped = [{ type: "ai_image", reason: "missing_prompt" }];
+    expect(normalizeChartYield({ charts_dropped: dropped })).toMatchObject({
+      chart_count: 0,
+      charts_dropped_count: 1,
+    });
+    expect(
+      normalizeChartYield({ charts_dropped_count: 0, charts_dropped: dropped }),
+    ).toMatchObject({ charts_dropped_count: 1 });
+  });
+
+  it("charts_dropped 非数组 / 含脏元素：只保留对象元素，数组型恒为数组", () => {
+    expect(normalizeChartYield({ charts_dropped: "x" })).toMatchObject({ charts_dropped: [] });
+    expect(
+      normalizeChartYield({
+        charts_dropped: [null, "x", 0, { type: "gantt" }, { reason: "invalid_json" }],
+      }).charts_dropped,
+    ).toEqual([{ type: "gantt" }, { reason: "invalid_json" }]);
+  });
+
+  it("章节日志项可承载 chart_yield（section_done 实时下发的配图闭环）", () => {
+    const cy = normalizeChartYield({ chart_count: 2 });
+    const item = upsertSectionLog(
+      [],
+      log({ section_id: "a", status: "success", chart_yield: cy }),
+    );
+    expect(item[0].chart_yield).toEqual(cy);
+    // 未下发的旧日志项保持 undefined（页面按 truthy 判定，不渲染 Tag）
+    expect(log({ section_id: "b" }).chart_yield).toBeUndefined();
+  });
+});
+
+// ============================================================
+// chartDropTexts / CHART_DROP_REASON_LABELS —— 删图理由的展示层映射
+// ============================================================
+describe("chartDropTexts", () => {
+  it("空清单返回空数组（页面据此不渲染 Tooltip）", () => {
+    expect(chartDropTexts([])).toEqual([]);
+  });
+
+  it("逐条渲染为「类型：中文理由」，不丢条、不改序", () => {
+    expect(
+      chartDropTexts([
+        { type: "flowchart", reason: "per_section_limit" },
+        { type: "gantt", reason: "scheme_type_limit" },
+      ]),
+    ).toEqual([
+      "flowchart：本节图表数已达上限（每节 1 个）",
+      "gantt：全方案该类型图表数已达上限",
+    ]);
+  });
+
+  it("兼容后端两种类型键名（type 优先，chart_type 兜底，都缺则显示「图表」）", () => {
+    expect(chartDropTexts([{ type: "mermaid", reason: "invalid_json" }])).toEqual([
+      "mermaid：图表 JSON 解析失败",
+    ]);
+    expect(chartDropTexts([{ chart_type: "layout", reason: "insert_failed" }])).toEqual([
+      "layout：图表登记写入失败",
+    ]);
+    expect(chartDropTexts([{ reason: "empty_envelope" }])).toEqual([
+      "图表：图表数据为空壳（无有效数值）",
+    ]);
+  });
+
+  it("未知/缺失 reason fail-soft 回退（不静默丢条，也不抛异常）", () => {
+    expect(chartDropTexts([{ type: "timeline" }] as any)).toEqual(["timeline：未知理由"]);
+    expect(chartDropTexts([{ type: "timeline", reason: "future_reason" }])).toEqual([
+      "timeline：future_reason",
+    ]);
+  });
+
+  it("reason 枚举与后端封闭枚举逐项一致（新增枚举值必补中文标签）", () => {
+    // 后端 app/routers/_chart_pipeline.py::_record_chart_drop 的 reason 封闭枚举
+    const BACKEND_REASONS = [
+      "per_section_limit",
+      "scheme_type_limit",
+      "validation_failed",
+      "missing_prompt",
+      "empty_envelope",
+      "invalid_json",
+      "insert_failed",
+      "insert_none",
+    ];
+    for (const r of BACKEND_REASONS) {
+      expect(CHART_DROP_REASON_LABELS[r], `后端枚举 ${r} 缺中文标签`).toBeTruthy();
+    }
+    expect(Object.keys(CHART_DROP_REASON_LABELS)).toHaveLength(BACKEND_REASONS.length);
   });
 });

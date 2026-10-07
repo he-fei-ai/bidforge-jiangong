@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, waitFor, act, cleanup } from "@testing-library/react";
 import { App } from "antd";
-import TaskStatusBar from "../components/TaskStatusBar";
+import TaskStatusBar, { activityFingerprint } from "../components/TaskStatusBar";
 import { systemApi, tasksApi } from "../api";
 
 // jsdom 缺 matchMedia / ResizeObserver，antd 会用到
@@ -98,5 +98,76 @@ describe("TaskStatusBar · 运行态渲染与任务控制", () => {
     await act(async () => { fireEvent.click(pauseBtn); });
 
     expect(tasksApi.control).toHaveBeenCalledWith("t-1", "pause");
+  });
+});
+
+// =========================================================================
+// 文档解析统计段（2026-10-06 新增，对应后端 documents 加法字段）
+// =========================================================================
+function useSnapshot(patch: Record<string, any>) {
+  const snap = { ...structuredClone(h.SNAPSHOT), ...patch };
+  vi.mocked(systemApi.activityStream).mockImplementation(async function* () {
+    yield { event: "snapshot", data: snap };
+  });
+  vi.mocked(systemApi.activity).mockImplementation(
+    async () => ({ data: snap }) as any);
+  return snap;
+}
+
+async function renderAndExpand() {
+  const { container } = render(
+    <App><TaskStatusBar collapsed={false} /></App>,
+  );
+  await waitFor(() => expect(container.textContent || "").toContain("正文生成"));
+  fireEvent.click(container.querySelector(".bp-task-bar")!);
+  await waitFor(() => expect(document.querySelector(".bp-task-panel")).toBeTruthy());
+}
+
+describe("TaskStatusBar · 文档解析统计", () => {
+  it("有失败：展示计数、待解析与失败率", async () => {
+    useSnapshot({
+      documents: {
+        total: 4, parsed: 2, failed: 1, pending: 1, failure_rate: 25.0,
+      },
+    });
+    await renderAndExpand();
+    const text = document.body.textContent || "";
+    expect(text).toContain("文档解析");
+    expect(text).toContain("共 4 份");
+    expect(text).toContain("已解析 2");
+    expect(text).toContain("待解析 1");
+    expect(text).toContain("失败 1 份");
+    expect(text).toContain("失败率 25%");
+  });
+
+  it("无失败：显绿色「无解析失败」，不出现失败率", async () => {
+    useSnapshot({
+      documents: { total: 3, parsed: 3, failed: 0, pending: 0, failure_rate: 0.0 },
+    });
+    await renderAndExpand();
+    const text = document.body.textContent || "";
+    expect(text).toContain("无解析失败");
+    expect(text).not.toContain("失败率");
+  });
+
+  it("旧后端不带 documents / total=0：整段不渲染（向后兼容）", async () => {
+    useSnapshot({ documents: undefined });
+    await renderAndExpand();
+    expect(document.body.textContent || "").not.toContain("文档解析");
+
+    useSnapshot({ documents: { total: 0, failure_rate: null } });
+    await cleanup();
+    await renderAndExpand();
+    const panels = document.querySelectorAll(".bp-task-panel");
+    const last = panels[panels.length - 1];
+    expect(last.textContent || "").not.toContain("文档解析");
+  });
+
+  it("文档计数参与指纹：计数变化产生不同指纹（否则新快照被去重丢弃）", () => {
+    const snap: any = structuredClone(h.SNAPSHOT);
+    snap.documents = { total: 4, parsed: 2, failed: 1, pending: 1 };
+    const fp1 = activityFingerprint(snap);
+    snap.documents = { total: 4, parsed: 3, failed: 0, pending: 1 };
+    expect(activityFingerprint(snap)).not.toBe(fp1);
   });
 });

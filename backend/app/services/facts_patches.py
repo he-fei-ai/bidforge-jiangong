@@ -214,8 +214,15 @@ DEFAULT_PATCH_MODE = "append"
 _PATCH_LIST_KEYS: tuple[str, ...] = (
     "patches", "supplements", "additions", "items", "facts", "groups",
 )
+#: ✅ 2026-10-06 补 "text"：facts_enrich._build_patches 收敛到
+#:    normalize_patches_response 后，本表成为内容别名的**唯一**权威。
+#:    收敛前 _build_patches 自带一份 `value / content / text` 三别名实现，
+#:    其中 "text" 只存在于那份副本里 —— 若不在此处补齐，知识库补充阶段
+#:    就会**静默丢失** AI 用 text 字段返回的补丁（形状合法、内容被丢，
+#:    最终一条补丁都不产出）。方向必须是「补进权威表」而非「恢复副本」。
 _PATCH_CONTENT_KEYS: tuple[str, ...] = (
-    "content", "markdown", "facts", "items", "details", "description", "value",
+    "content", "markdown", "facts", "items", "details", "description",
+    "value", "text",
 )
 _PATCH_TITLE_KEYS: tuple[str, ...] = ("title", "group_title", "target_group_title", "name")
 _PATCH_TARGET_KEYS: tuple[str, ...] = (

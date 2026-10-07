@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import {
   App, Card, Table, Button, Tag, Space, Typography, Modal, Form, Input,
@@ -10,7 +10,7 @@ import {
   FileTextOutlined, FileMarkdownOutlined, CodeOutlined, CheckCircleOutlined,
   StopOutlined, PlayCircleOutlined, DeleteOutlined,
 } from "@ant-design/icons";
-import { outlineLibraryApi } from "../api";
+import { outlineLibraryApi, systemApi } from "../api";
 import { useAntdMessageHub } from "../utils/activityCenter";
 
 import OutlineLibraryEditModal from "../components/OutlineLibraryEditModal";
@@ -132,6 +132,22 @@ export default function OutlineLibraryPage() {
 
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // 单文件体积上限（字节）：与方案工作台同源（/system/upload-limits）。
+  // 未到达 / 请求失败时保持 undefined，由弹窗回落内置兜底（30MB），避免与后端配置漂移。
+  const [maxUploadBytes, setMaxUploadBytes] = useState<number | undefined>(undefined);
+
+  // 启动时读取一次上传配额（只读、带重试；后端临时不可达不致命）
+  useEffect(() => {
+    let alive = true;
+    systemApi.uploadLimits()
+      .then(({ data }) => {
+        if (!alive) return;
+        const b = Number(data?.max_upload_bytes);
+        if (Number.isFinite(b) && b > 0) setMaxUploadBytes(b);
+      })
+      .catch(() => { /* 回落兜底 */ });
+    return () => { alive = false; };
+  }, []);
 
   // 预览抽屉
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -580,6 +596,7 @@ export default function OutlineLibraryPage() {
       <OutlineLibraryEditModal
         open={editModalOpen}
         libraryId={editingId}
+        maxUploadBytes={maxUploadBytes}
         onClose={() => { setEditModalOpen(false); setEditingId(null); }}
         onSaved={refresh}
       />

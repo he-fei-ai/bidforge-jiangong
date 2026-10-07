@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from typing import Any, Sequence
 
 from app.services.ai.json_response import collect_json_response
@@ -45,6 +46,7 @@ from app.services.ai.prompts._registry import render
 from app.services.facts_patches import (
     FactPatch,
     apply_patches_to_fact_items,
+    normalize_patches_response,
     value_to_markdown,
 )
 
@@ -151,38 +153,41 @@ async def apply_knowledge_patches(items: list, knowledge_text: str) -> tuple[lis
 
 
 def _build_patches(obj: Any, items: Sequence) -> list[FactPatch]:
-    """把 AI 返回的 patches 归一化为 :class:`FactPatch`（复用唯一出口的语义）。
+    """把 AI 返回的 patches 归一化为 :class:`FactPatch`。
 
-    这里只做**形状**转换；空 content 丢弃 / mode 白名单的口径与
-    ``facts_patches.normalize_patches_response`` 保持一致，避免第二套实现。
+    ✅ 2026-10-06 收敛为**单一形状出口**：直接复用
+    ``facts_patches.normalize_patches_response``（它持有 content 别名表、
+    mode 白名单 PATCH_MODES、new_fact_id 归一 ``normalize_fact_id`` 与
+    ``patch_{n}`` 前缀约定）。本函数此前**自带一份形状实现**：
+    content 只认 3 个别名、mode 内联 ``("append","prepend","replace")``
+    字面量、新事实 id 用第三套前缀 ``kb_{n}`` —— 正是本模块 docstring
+    「避免第二套实现」明令禁止的形态（新增第 4 种 mode / 别名时
+    知识库补充阶段会静默跟不上）。
+
+    本函数只保留 normalize_patches_response **不做**的那一步：
+    **幻觉锚点降级**（target 既不在 fact_key 也不在事实名中 → 视为新增）。
+    挂到不存在的锚点上会让补丁被静默丢弃、用户却以为已补充。
     """
-    if not isinstance(obj, dict) or not isinstance(obj.get("patches"), list):
+    patches = list(normalize_patches_response(obj).get("patches") or [])
+    if not patches:
         return []
     valid_keys = {str(getattr(it, "key", "") or getattr(it, "fact_key", "") or "")
                   for it in items}
     valid_names = {str(getattr(it, "name", "") or "") for it in items}
     out: list[FactPatch] = []
-    for idx, raw in enumerate(obj["patches"]):
-        if not isinstance(raw, dict):
-            continue
-        content = value_to_markdown(
-            raw.get("value") or raw.get("content") or raw.get("text"))
-        if not content.strip():
-            continue
-        target = str(raw.get("target_fact_id") or raw.get("fact_key") or "").strip()
-        name = str(raw.get("name") or raw.get("title") or "").strip()
-        # target 既不在 fact_key 也不在事实名中 → 视为新增（防止 AI 幻觉锚点
-        # 把补丁挂到不存在的事实上，那条补丁会被静默丢弃、用户以为已补充）
-        is_new = not (target in valid_keys or name in valid_names)
-        raw_mode = str(raw.get("mode") or "append").strip().lower()
-        out.append(FactPatch(
-            content=content,
-            target_fact_id="" if is_new else target,
-            new_fact_id=str(raw.get("fact_key") or "").strip() or f"kb_{idx + 1}",
-            title=name,
-            mode=raw_mode if raw_mode in ("append", "prepend", "replace") else "append",
-            create=is_new,
-        ))
+    for p in patches:
+        is_new = not (p.target_fact_id in valid_keys
+                      or (p.title and p.title in valid_names))
+        if is_new and (p.target_fact_id or p.title):
+            # 幻觉锚点降级：清空 target 并标记 create。
+            # ⚠️ 必须**清空** target_fact_id（而不只是置 create=True）——
+            #    下游 apply_patches_to_fact_items 正是按 target 定位待补事实，
+            #    保留幽灵锚点会让补丁挂到「恰好同名的另一条」上，
+            #    或在无匹配时静默丢弃（用户以为已补充）。
+            p = replace(p, target_fact_id="", create=True)
+        elif is_new:
+            p = replace(p, create=True)
+        out.append(p)
     return out
 
 

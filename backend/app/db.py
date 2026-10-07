@@ -595,6 +595,11 @@ async def _migrate(conn: aiosqlite.Connection):
         #     完全不变；bid_response 域行主键为 {project_id}__bid_response__{item_id}。
         #     空串视同 'scheme'（读侧 fail-closed 兜底），旧数据零迁移。
         ("bid_analysis_items", "domain", "TEXT DEFAULT 'scheme'"),
+        # ✅ 2026-10-07：AI 结论行的正文指纹（陈旧结论不再计入总检评分，
+        #   见 routers/compliance.py::_ai_row_is_stale）。历史行空串 = fail-open。
+        ("compliance_check", "content_fingerprint", "TEXT DEFAULT ''"),
+        ("consistency_audit", "content_fingerprint", "TEXT DEFAULT ''"),
+        ("consistency_conflicts", "content_fingerprint", "TEXT DEFAULT ''"),
     ]
     for table, column, definition in migrations:
         try:

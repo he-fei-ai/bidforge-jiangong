@@ -20,6 +20,9 @@ import uuid
 from datetime import datetime
 
 from app.config import settings
+
+# ✅ 2026-10-07（陈旧结论排除）：本批扫描的正文指纹与总检聚合侧同一算法
+from app.services import scheme_fingerprint
 from app.services.ai.json_response import collect_json_response
 from app.services.ai.prompts._registry import render
 from app.services.ai.provider_factory import effective_batch_size
@@ -29,9 +32,16 @@ from app.services.standards_registry import get_standards_text
 logger = logging.getLogger("consistency_scanner")
 
 # 单片章节正文总量上限（字符），超出则切多片
-SECTION_CHUNK_LIMIT = 12000
+# ✅ 2026-10-06（R47 债-1）：数值搬入 ``services/ai/prompts/_limits.py`` 单一事实源，
+#    本模块仍以同名可读，下游消费代码零改动。
 # 单章截断上限
-PER_SECTION_LIMIT = 6000
+# SECTION_CHUNK_LIMIT 在本模块内不被引用，但下沉约定要求保留同名模块绑定
+# （R47 债-1 护栏 test_consumers_rebind_original_names），故按 sse_handlers
+# 同款写法以 noqa:F401 显式再导出。
+from app.services.ai.prompts._limits import (  # noqa: E402
+    PER_SECTION_LIMIT,
+    SECTION_CHUNK_LIMIT,  # noqa: F401
+)
 
 # ---------- P0-1（2026-09-22）：扫描批处理 / 并发 / 增量缓存 ----------
 # 实测（mock 驱动 12 章全量正文生成）：收尾的全文一致性阶段占总调用 67.6%，
@@ -126,10 +136,10 @@ def _clip(text: str, limit: int) -> str:
 
 
 async def build_global_facts_text(db, scheme_id: str, limit: int = 5000) -> str:
-    """全局事实文本（复用 sse_handlers 的过滤口径：剔除矛盾值/未确认模拟值）。"""
+    """全局事实文本（复用 facts_builder 的过滤口径：剔除矛盾值/未确认模拟值）。"""
     try:
-        from app.routers.sse_handlers import _build_facts_text
-        return await _build_facts_text(db, scheme_id, max_total=limit)
+        from app.services.facts_builder import build_facts_text
+        return await build_facts_text(db, scheme_id, max_total=limit)
     except Exception as e:
         logger.warning("构建全局事实文本失败（降级为空）: %s", e)
         return ""
@@ -246,7 +256,62 @@ def program_prescan(sections: list[dict]) -> list[dict]:
             "section_occurrences": occurrences,
             "source": "program_prescan",
         })
+    candidates.extend(_intra_section_candidates(buckets))
     return candidates
+
+
+def _intra_section_candidates(buckets: dict[str, dict[str, list[dict]]]) -> list[dict]:
+    """F8：检出「同一章节内，强一致主题出现多个不同取值」的候选冲突。
+
+    文档实证：进度章同章出现 184 / 195 日历天两个互相矛盾的总工期。
+    旧 ``program_prescan`` 只比 **跨章节** 桶，章内多值被折叠进同一桶后不再单列。
+
+    口径（保守，防误报）：
+      - 仅检查 ``settings.consistency_intra_section_topics`` 白名单主题
+        （工期/质保期/响应时间 —— 全书应唯一）；
+      - ``bucket_key`` 形如 ``工期``（按对象分组的主题 key 带 ``｜对象``，
+        白名单主题均无对象分组，故直接以白名单词精确匹配桶键）；
+      - 同一 section_id 下出现 ≥2 个不同 value 才报。
+    开关关闭 / 读取失败 → 返回空列表，与旧行为一致。
+    """
+    try:
+        on = bool(getattr(settings, "consistency_detect_intra_section", True))
+        allow = tuple(getattr(settings, "consistency_intra_section_topics",
+                              ("工期", "质保期", "响应时间")) or ())
+    except Exception:
+        return []
+    if not on or not allow:
+        return []
+    out: list[dict] = []
+    for bucket_key, values in buckets.items():
+        # 白名单主题无对象分组，桶键即主题名；带「｜」的对象分组桶直接排除。
+        if "｜" in bucket_key or bucket_key not in allow:
+            continue
+        if len(values) < 2:
+            continue
+        # section_id -> {value: occ}
+        per_sec: dict[str, dict[str, dict]] = {}
+        for value, occs in values.items():
+            for o in occs:
+                sid = o.get("section_id")
+                if sid is None:
+                    continue
+                per_sec.setdefault(sid, {})[value] = o
+        for sid, value_map in per_sec.items():
+            if len(value_map) < 2:
+                continue
+            distinct = list(value_map.keys())
+            occurrences = [{**value_map[v], "value": v} for v in distinct]
+            out.append({
+                "conflict_type": "numeric",
+                "topic": f"{bucket_key}（同章节内数值不一致）",
+                "value": " / ".join(distinct),
+                "text": "；".join(o["text"] for o in occurrences[:6]),
+                "position": 0,
+                "section_occurrences": occurrences,
+                "source": "program_prescan_intra",
+            })
+    return out
 
 
 def _add_bucket(buckets: dict, topic: str, value: str, sid: str, title: str, text: str):
@@ -612,7 +677,8 @@ def merge_conflicts(ai_rows: list[dict], prescan_rows: list[dict],
 
 
 async def persist_conflicts(db, scheme_id: str, scan_id: str,
-                            conflicts: list[dict]) -> None:
+                            conflicts: list[dict], *,
+                            content_fingerprint: str = "") -> None:
     now = datetime.now().isoformat()
     # ✅ BUG 修复（2026-09-22）：冲突 id 每次扫描都从 C001 重新编号，同一方案
     #    第二次扫描（重新生成正文 → 收尾一致性扫描必再跑一次）插入 C001 时
@@ -628,14 +694,16 @@ async def persist_conflicts(db, scheme_id: str, scan_id: str,
         await db.execute(
             "INSERT INTO consistency_conflicts "
             "(id, scheme_id, scan_id, conflict_type, severity, topic, occurrences,"
-            " status, created_at) VALUES (?,?,?,?,?,?,?,?,?)"
+            " status, content_fingerprint, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(id) DO UPDATE SET"
             " scheme_id=excluded.scheme_id, scan_id=excluded.scan_id,"
             " severity=excluded.severity,"
-            " occurrences=excluded.occurrences, created_at=excluded.created_at",
+            " occurrences=excluded.occurrences,"
+            " content_fingerprint=excluded.content_fingerprint,"
+            " created_at=excluded.created_at",
             (c["id"], scheme_id, scan_id, c["conflict_type"], c["severity"],
              c["topic"], json.dumps(c["occurrences"], ensure_ascii=False),
-             "pending", now))
+             "pending", content_fingerprint, now))
     await db.commit()
 
 
@@ -745,7 +813,11 @@ async def run_scan(db, *, scheme_id: str, project_id: str, scheme_name: str,
     #    主键碰撞（详见 _conflict_id_prefix 的 docstring）。
     conflicts = merge_conflicts(ai_rows, prescan_rows, scheme_id=scheme_id)
     scan_id = new_scan_id()
-    await persist_conflicts(db, scheme_id, scan_id, conflicts)
+    # ✅ 2026-10-07（陈旧结论排除）：本批扫描落当前正文指纹（与总检聚合
+    #    同一算法）。正文在扫描后被修改 → 本批冲突不再计入就绪度评分。
+    _scan_fp = await scheme_fingerprint.content_fingerprint(db, scheme_id)
+    await persist_conflicts(db, scheme_id, scan_id, conflicts,
+                            content_fingerprint=_scan_fp)
     logger.info("一致性扫描完成：%d 章（缓存 %d）→ %d 个冲突",
                 total, len(cached_rows), len(conflicts))
     return {

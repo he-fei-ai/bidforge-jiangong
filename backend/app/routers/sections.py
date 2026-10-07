@@ -561,6 +561,15 @@ async def create_section(scheme_id: str, data: SectionCreate, db=Depends(get_db)
     # ✅ 新增章节同样是结构变更（后续章节编号顺移）→ 作废扫描缓存
     await invalidate_consistency_scan_cache(db, scheme_id)
     await db.commit()
+    # ✅ BUG 修复（2026-10-05 · R41 F2）：新增章节使后续章节编号顺移、章节树变化，
+    #    旧 export_cache 行与磁盘产物成为孤儿 —— update / delete / reorder /
+    #    save-outline 四条结构变更路径都已失效导出缓存，唯独 create 漏接。
+    #    口径与其余入口一致；失效是幂等 DELETE，失败不得阻断新增结果。
+    try:
+        from app.services.facts_extractor import invalidate_export_cache
+        await invalidate_export_cache(db, scheme_id)
+    except Exception as _e:  # noqa: BLE001 - 缓存失效不得阻断新增结果
+        logger.warning("新增章节：导出缓存失效失败（不影响新增结果）: %s", _e)
     return {"id": sid}
 
 
@@ -900,6 +909,13 @@ async def reset_content(scheme_id: str, db=Depends(get_db)):
     cur = await db.execute("SELECT id FROM schemes WHERE id=?", (scheme_id,))
     if not await cur.fetchone():
         raise HTTPException(404, "方案不存在")
+    # ✅ BUG 修复（2026-10-05 · R41 F4）：reset_content 只有正文生成守卫，缺**目录生成**
+    #    守卫 —— 目录生成在跑时重置正文，AI 确认闸门的整表重建与本端点构成
+    #    sections 表同表写写竞态（互相覆盖落库结果）。与 create_section /
+    #    update_section 同口径：只拦 running/paused。
+    if outline_generation_in_progress(scheme_id):
+        logger.warning("reset_content 409 冲突：scheme_id=%s 目录正在生成中", scheme_id)
+        raise HTTPException(409, "本方案目录正在后台生成中，请等待生成完成（或先停止任务）后再重置")
     # ✅ 竞态守卫：后台生成任务运行中拒绝重置（否则清空后生成继续落库，
     #    用户看到"重置了但又有正文出现"的诡异现象）
     # ✅ G12-4：状态感知守卫（只拦 running/paused），与 update_section 同一入口
@@ -922,6 +938,19 @@ async def reset_content(scheme_id: str, db=Depends(get_db)):
     # 内联图表已清 → chart_predictions 一并清理（否则导出 fallback 仍会引用旧图）
     await db.execute("DELETE FROM chart_predictions WHERE scheme_id=?", (scheme_id,))
     await db.commit()
+    # ✅ BUG 修复（2026-10-06 · R46）：重置清空正文 → 内容指纹必然变化，旧的
+    #    export_cache 行从此永远不会再被命中（正文为空、指纹对不上）。旧实现既不
+    #    失效也不裁剪，只能等 _prune_export_cache 按「每方案 5 份」把它们挤出——
+    #    在此之前 /cache-status 仍把这些行报告为 exists=true 的「有效缓存」，
+    #    界面显示「可复用上次成果」，与「正文已全部重置」的用户认知矛盾；
+    #    磁盘上的 .docx/.pdf 也随之残留。本文件其余正文写路径（create/update/
+    #    delete/save-outline/reorder/shrink）均按同口径失效，此处是漏接点；
+    #    失效失败不得阻断重置本身（正文已清、结果已算出），故 fail-soft。
+    try:
+        from app.services.facts_extractor import invalidate_export_cache
+        await invalidate_export_cache(db, scheme_id)
+    except Exception as _e:  # noqa: BLE001 - 缓存失效不得阻断重置结果
+        logger.warning("重置正文：导出缓存失效失败（不影响重置结果）: %s", _e)
     logger.info("方案 %s 重置正文：清除 %d 个章节", scheme_id[:8], cleared)
     return {"ok": True, "cleared": cleared}
 
@@ -1004,6 +1033,15 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
         #    把早已不存在的章节报成「仍有冲突」。与其它结构变更入口同口径补齐。
         await invalidate_consistency_scan_cache(db, scheme_id)
         await db.commit()
+        # ✅ BUG 修复（2026-10-05 · R41 F3）：清空目录删掉了全部章节与图表登记，
+        #    旧 export_cache 行与磁盘产物同样作废 —— 非空分支末尾已失效导出缓存，
+        #    唯独空分支只清了一致性扫描缓存，此处漏接。口径与非空分支一致；
+        #    失效是幂等 DELETE，失败不得阻断清空结果。
+        try:
+            from app.services.facts_extractor import invalidate_export_cache
+            await invalidate_export_cache(db, scheme_id)
+        except Exception as _e:  # noqa: BLE001 - 缓存失效不得阻断清空结果
+            logger.warning("清空目录：导出缓存失效失败（不影响清空结果）: %s", _e)
         _empty_result: dict = {"ok": True, "count": 0, "tree": []}
         if _cleared:
             _empty_result["cleared_content_sections"] = _cleared
@@ -1711,6 +1749,17 @@ async def shrink_section(scheme_id: str, section_id: str, db=Depends(get_db)):
          datetime.now().isoformat(), section_id))
     # ✅ G9（2026-09-21）：压缩改写了正文 → 原审核结论失效，退回「待审核」并留痕
     await reset_review_on_content_change(db, scheme_id, section_id, actor="字数压缩")
+    # ✅ BUG 修复（2026-10-06 · R46）：压缩同样改写了正文（UPDATE sections SET
+    #    content=?），属正文写路径，须与本文件 create/update/delete/save-outline/
+    #    reorder/reset_content 同口径失效导出缓存（失效理由见 reset_content 处）——
+    #    否则旧指纹的缓存行与磁盘产物成为孤儿，只能等 _prune_export_cache 慢慢
+    #    挤出，期间 /cache-status 仍显示为可复用的「有效缓存」。
+    #    失效是幂等 DELETE，失败不得阻断压缩结果返回。
+    try:
+        from app.services.facts_extractor import invalidate_export_cache
+        await invalidate_export_cache(db, scheme_id)
+    except Exception as _e:  # noqa: BLE001 - 缓存失效不得阻断压缩结果
+        logger.warning("压缩正文：导出缓存失效失败（不影响压缩结果）: %s", _e)
     await db.commit()
     logger.info("章节 %s 压缩完成：%d → %d 字（%d 轮，%s）",
                 section_id[:8], before_wc, final_wc, rounds_used, stop_reason)

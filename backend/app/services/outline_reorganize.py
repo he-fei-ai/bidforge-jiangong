@@ -20,9 +20,16 @@ import copy
 import logging
 import re
 
+from app.services.numbering import strip_outline_numbering
+from app.services.outline_utils import MAX_OUTLINE_DEPTH
+
 logger = logging.getLogger("outline_reorganize")
 
-MAX_OUTLINE_DEPTH = 3
+# ✅ BUG 修复（2026-10-05 · D3 深度上限分叉）：旧实现在此**重新定义**
+#    `MAX_OUTLINE_DEPTH = 3`，与唯一事实源 `outline_utils.MAX_OUTLINE_DEPTH`
+#    形成第二份副本 —— 一旦把目录上限调整为 4，本模块仍按 3 裁剪（归位结果被
+#    静默截断），与本仓「目录深度唯一事实源」的约定相矛盾。
+#    现改为从 outline_utils 导入（`_reorg_children` 的 depth 判定随之同源）。
 
 
 # ---------------------------------------------------------------------------
@@ -107,20 +114,24 @@ def _group_of(title: str) -> str | None:
     return None
 
 
-# 去除标题前缀的章节编号（"一、""1.1 ""（一）""第1章 ""X、" 等），
-# 仅用于匹配评分，避免编号干扰章节归位（如「一、工程简介」应归到「工程概况」）
-_NUM_RE = re.compile(
-    r"^\s*(?:"
-    r"第[一二三四五六七八九十百千0-9]+[章节目条]?"      # 第1章 / 第X条
-    r"|[0-9]+(?:\.[0-9]+)*[.\s．]+"                    # 1. / 1.1. / 1.2 (须带分隔符)
-    r"|[（(]?[一二三四五六七八九十]+[）)]?[、．]?\s*"    # （一） / 一、 / 一． (中文编号)
-    r"|[一二三四五六七八九十0-9]+[、．]\s*"            # 一、 / 1、
-    r")"
-)
-
-
 def _strip_number(title: str) -> str:
-    return _NUM_RE.sub("", title or "").strip()
+    """去除标题前缀的章节编号，仅用于匹配评分与落库前剥离。
+
+    ✅ BUG 修复（2026-10-05 · D1 编号剥离第三份分叉副本）：
+    旧实现自带一份 `_NUM_RE` 正则（与 numbering.py 分叉），其中
+    「中文编号」「点分编号」两个分支过度激进，实测产生用户可见的标题损坏：
+
+        _strip_number("十二层平面布置")  → "层平面布置"
+        _strip_number("三层梁板施工")    → "层梁板施工"
+        _strip_number("十个人")          → "个人"
+        _strip_number("1.2.3钢筋工程")   → "3钢筋工程"   # 点分只剥单段
+
+    而 _strip_tree 的剥离结果会被写入 description（"（含：…）"）与
+    补充/附录章节标题，最终随 outline_json 落库 —— 属数据损坏级缺陷。
+    现统一委托 `numbering.strip_outline_numbering`（编号剥离的唯一实现），
+    删除本地 `_NUM_RE`，杜绝「改一处、另一处漂移」的第三份副本。
+    """
+    return strip_outline_numbering(title or "")
 
 
 def _strip_tree(nodes: list) -> list:

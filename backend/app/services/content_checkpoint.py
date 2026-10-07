@@ -295,6 +295,19 @@ def chapter_required_elements(chapter_key: str, scheme_name: str = "",
         return []
     out: list[str] = list(base)
     seen: set = set(out)
+    # F6：应急章追加「专项应急预案按事故类型分组」结构要素（默认开启，可回退）。
+    # 只在本注入层追加，不回写 NINE_CHAPTERS.base_fields，避免污染
+    # validate_chapter_fields 的字段级覆盖率差分校验。
+    if chapter_key == "emergency":
+        try:
+            from app.config import settings
+            group_on = bool(getattr(settings, "emergency_group_by_accident_type", True))
+        except Exception:
+            group_on = True
+        if group_on:
+            out.append("专项应急预案按事故类型分组展开：按本工程主要事故风险"
+                       "（如高处坠落、物体打击、火灾、触电、中毒窒息等）各设一组，"
+                       "组内再写该类事故的处置流程，不得把各类事故的处置步骤平铺在同一层级")
     try:
         hits = match_category_keywords(f"{scheme_name} {scheme_type}")
     except Exception:

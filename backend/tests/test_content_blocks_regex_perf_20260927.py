@@ -73,6 +73,8 @@ _REVERSE_MAP = [
      're.search(r"[。！？.!?；;，,、]\\s*$", s_inside)'),
     ("_RE_HEADING_NNN.match(s_inside)",
      're.match(r"^(\\d+\\.\\d+\\.\\d+)\\s+([\\u4e00-\\u9fa5A-Za-z].*)$", s_inside)'),
+    ("_RE_HEADING_DEEP.match(s_inside)",
+     're.match(r"^(\\d+(?:\\.\\d+){3,6})\\s+([\\u4e00-\\u9fa5A-Za-z].*)$", s_inside)'),
     ("_RE_HEADING_NN.match(s_inside)",
      're.match(r"^(\\d+\\.\\d+)\\s+([\\u4e00-\\u9fa5A-Za-z].*)$", s_inside)'),
     ("_RE_HEADING_N.match(s_inside)",

@@ -35,6 +35,40 @@ const DATA = vi.hoisted(() => ({
   },
 }));
 
+// ✅ 2026-10-06：组件 msg 来自项目自封装 useAntdMessageHub。mock 掉即可精确
+//    断言告警文案，不依赖 antd message 的 DOM portal。
+const msgSpy = vi.hoisted(() => ({
+  success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(),
+  // ⚠️ hub 代理缓存必须与 msgSpy 同处 vi.hoisted —— vi.mock 工厂被提升到文件顶部，
+  //    引用外层 const 会在初始化时命中 TDZ。
+  hubCache: new Map<string, any>(),
+}));
+vi.mock("../utils/activityCenter", async (orig) => {
+  const real = await orig<any>();
+  // 包裹真实 hub：既记录文案，又保留 pushActivity（既有用例靠 getActivityItems 断言）
+  return {
+    ...real,
+    // ⚠️ 必须返回**同一对象**：组件的 useCallback/effect 以 msg 为依赖，
+    //    每次渲染都造新对象会导致依赖永变 → 无限重渲染（本轮实测卡死）。
+    //    真实 hub 每次仍调用（保持 hook 顺序），但包装后的代理按 source 缓存。
+    useAntdMessageHub: (m: any, source: string) => {
+      const hub = real.useAntdMessageHub(m, source);
+      let w = msgSpy.hubCache.get(source);
+      if (!w) {
+        w = {
+          success: (...a: any[]) => { msgSpy.success(...a); return hub.success(...a); },
+          error: (...a: any[]) => { msgSpy.error(...a); return hub.error(...a); },
+          warning: (...a: any[]) => { msgSpy.warning(...a); return hub.warning(...a); },
+          info: (...a: any[]) => { msgSpy.info(...a); return hub.info(...a); },
+          loading: (...a: any[]) => { msgSpy.loading(...a); return hub.loading(...a); },
+        };
+        msgSpy.hubCache.set(source, w);
+      }
+      return w;
+    },
+  };
+});
+
 vi.mock("../api", () => ({
   reviewApi: {
     checklist: vi.fn(async () => ({ data: DATA.CHECKLIST })),
@@ -55,7 +89,17 @@ beforeEach(() => {
   (reviewApi.batch as any).mockReset().mockResolvedValue({ data: { changed: 2 } });
   (reviewApi.submit as any).mockReset().mockResolvedValue({ data: { ok: true } });
 });
-afterEach(() => { cleanup(); localStorage.clear(); });
+afterEach(() => {
+  cleanup(); localStorage.clear();
+  msgSpy.success.mockClear(); msgSpy.error.mockClear();
+  msgSpy.warning.mockClear(); msgSpy.info.mockClear();
+});
+
+/** 断言某条告警文案确实推给用户（任一级别） */
+function expectMsg(fn: ReturnType<typeof vi.fn>, frag: string) {
+  const hit = fn.mock.calls.some((c: any[]) => String(c[0] ?? "").includes(frag));
+  expect(hit, `未捕获到含「${frag}」的告警；实际调用：${JSON.stringify(fn.mock.calls)}`).toBe(true);
+}
 
 const norm = (s: string) => (s || "").replace(/\s+/g, "");
 function btnByText(container: HTMLElement, text: string): HTMLButtonElement | null {
@@ -429,5 +473,305 @@ describe("ReviewWorkflowPanel · 章节审核工作流", () => {
     expect(latest.kind).toBe("warning");
     expect(latest.text).toContain("没有章节发生状态变更");
     expect(latest.text).toContain("2 个已是目标状态");
+  });
+});
+
+// ===========================================================================
+// ✅ 2026-10-06 缺口收口：ReviewWorkflowPanel 组件级交互补齐
+//
+// 本组锁的是三条「数据被静默吞掉 / 门禁被静默绕过」的链路：
+//   ① G8 游标分页：has_more / offset 累计此前零断言 —— 断掉则早期轨迹永久不可见；
+//   ② G6 严格开关：require_all_sections_reviewed 只断言了「默认勾选」，
+//      「用户主动取消 → false」这条能让后端放行的路径无人看守；
+//   ③ 批量反馈：truncated（超 500 静默丢弃）与 not_found 此前无断言。
+// ===========================================================================
+describe("ReviewWorkflowPanel · 分页 / 门禁 / 失败反馈", () => {
+  // ⚠️ 本仓 antd 版本的数据行不带 <tr>（只有表头是 tr），
+  //    故必须按 .ant-table-row 定位，否则找不到任何行。
+  async function rowOf(container: HTMLElement, title: string): Promise<Element> {
+    let row: Element | undefined;
+    await waitFor(() => {
+      row = Array.from(container.querySelectorAll(".ant-table-row")).find(
+        (r) => (r.textContent || "").includes(title));
+      expect(row, `未找到章节行：${title}`).toBeTruthy();
+    });
+    return row as Element;
+  }
+  async function renderPanel() {
+    const utils = render(<App><ReviewWorkflowPanel schemeId={SCHEME} /></App>);
+    await waitFor(() =>
+      expect(utils.container.textContent || "").toContain("第3章 基坑支护"));
+    return utils;
+  }
+
+  // ---------------------------------------------------------------- ① G8 分页
+  it("评审轨迹 has_more=true → 「加载更多」按 offset 翻页并追加", async () => {
+    (reviewApi.records as any)
+      .mockResolvedValueOnce({ data: { items: DATA.RECORDS.items, has_more: true } })
+      .mockResolvedValueOnce({ data: { items: [
+        { ...DATA.RECORDS.items[0], id: "rec-2", comment: "第 51 条" },
+      ], has_more: false } });
+    const { container } = await renderPanel();
+
+    fireEvent.click(btnByText(container, "评审轨迹")!);
+    await waitFor(() => expect(reviewApi.records).toHaveBeenCalledWith(SCHEME, "", 50, 0));
+
+    const more = btnByText(document.body as HTMLElement, "加载更多")!;
+    expect(more).toBeTruthy();
+    expect(more.disabled).toBe(false);
+    fireEvent.click(more);
+
+    // 第二页必须带 offset=50 —— 缺 offset 就永远是第一页，早期轨迹不可达
+    await waitFor(() =>
+      expect(reviewApi.records).toHaveBeenCalledWith(SCHEME, "", 50, 50));
+    await waitFor(() =>
+      expect((document.body as HTMLElement).textContent || "").toContain("第 51 条"));
+    // has_more=false 后按钮禁用并改文案
+    await waitFor(() => {
+      const b = btnByText(document.body as HTMLElement, "已全部显示");
+      expect(b).toBeTruthy();
+      expect(b!.disabled).toBe(true);
+    });
+  });
+
+  it("has_more=false → 「加载更多」禁用，不发多余请求", async () => {
+    (reviewApi.records as any).mockResolvedValue({
+      data: { items: DATA.RECORDS.items, has_more: false },
+    });
+    const { container } = await renderPanel();
+    fireEvent.click(btnByText(container, "评审轨迹")!);
+    await waitFor(() => expect(reviewApi.records).toHaveBeenCalled());
+    const more = btnByText(document.body as HTMLElement, "加载更多")!
+      ?? btnByText(document.body as HTMLElement, "已全部显示")!;
+    expect(more.disabled).toBe(true);
+    const calls = (reviewApi.records as any).mock.calls.length;
+    fireEvent.click(more);
+    await new Promise((r) => setTimeout(r, 30));
+    expect((reviewApi.records as any).mock.calls.length).toBe(calls);
+  });
+
+  it("评审轨迹加载失败 → 报错（不得静默空白时间线）", async () => {
+    (reviewApi.records as any).mockRejectedValue(new Error("轨迹服务不可用"));
+    const { container } = await renderPanel();
+    fireEvent.click(btnByText(container, "评审轨迹")!);
+    await waitFor(() => expectMsg(msgSpy.error, "轨迹服务不可用"));
+  });
+
+  // ------------------------------------------------------------ ② G6 门禁开关
+  it("取消勾选严格开关 → submit 传 require_all_sections_reviewed=false", async () => {
+    const { container } = await renderPanel();
+    setReviewer(container, "张三");
+    fireEvent.click(btnByText(container, "提交审核通过")!);
+    await waitFor(() => expect(confirmOk()).toBeTruthy());
+
+    // 取消勾选「要求所有章节已通过审核后才允许提交」
+    const box = document.querySelector(
+      ".ant-modal-confirm .ant-checkbox-input") as HTMLInputElement;
+    expect(box).toBeTruthy();
+    expect(box.checked).toBe(true);
+    fireEvent.click(box);
+    await waitFor(() => expect((box as HTMLInputElement).checked).toBe(false));
+
+    fireEvent.click(confirmOk()!);
+    await waitFor(() => expect(reviewApi.submit).toHaveBeenCalled());
+    expect((reviewApi.submit as any).mock.calls[0][1])
+      .toMatchObject({ to_status: "approved", require_all_sections_reviewed: false });
+  });
+
+  it("保持勾选严格开关 → submit 传 true（默认值不得被静默改成 false）", async () => {
+    const { container } = await renderPanel();
+    setReviewer(container, "张三");
+    fireEvent.click(btnByText(container, "提交审核通过")!);
+    await waitFor(() => expect(confirmOk()).toBeTruthy());
+    fireEvent.click(confirmOk()!);
+    await waitFor(() => expect(reviewApi.submit).toHaveBeenCalled());
+    expect((reviewApi.submit as any).mock.calls[0][1])
+      .toMatchObject({ require_all_sections_reviewed: true });
+  });
+
+  it("提交「非通过」态 → 不渲染严格开关（该开关只对 approved 有意义）", async () => {
+    const { container } = await renderPanel();
+    setReviewer(container, "张三");
+    const rejectBtn = btnByText(container, "驳回");
+    expect(rejectBtn).toBeTruthy();
+    fireEvent.click(rejectBtn!);
+    await waitFor(() => expect(confirmOk()).toBeTruthy());
+    expect(document.querySelector(".ant-modal-confirm .ant-checkbox-input")).toBeFalsy();
+    // 驳回必须填理由
+    expect(confirmOk()!.disabled).toBe(true);
+  });
+
+  // ------------------------------------------------------- ③ 批量失败反馈
+  it("批量 truncated=true → 明确告知超出单次上限未处理的条数", async () => {
+    (reviewApi.batch as any).mockResolvedValue({
+      data: { ok: true, changed: 500, changed_ids: [], skipped: [], not_found: [],
+              nochange: [], total_ids: 620, truncated: true },
+    });
+    const { container } = await renderPanel();
+    setReviewer(container, "张三");
+    const rowCbs = Array.from(container.querySelectorAll(".ant-table-tbody .ant-table-row"))
+      .map((row) => row.querySelector("input[type='checkbox']") as HTMLInputElement);
+    expect(rowCbs.length).toBe(2);
+    fireEvent.click(rowCbs[0]!);
+    await waitFor(() => expect(container.textContent || "").toContain("已选 1 个章节"));
+    fireEvent.click(btnByText(container, "批量通过")!);
+    await waitFor(() => expect(confirmOk()).toBeTruthy());
+    await act(async () => { fireEvent.click(confirmOk()!); });
+    await waitFor(() => expect(reviewApi.batch).toHaveBeenCalled());
+    await waitFor(() => expectMsg(msgSpy.warning, "120"));
+  });
+
+  it("批量 not_found → 区分「不存在」与「状态机拦截」", async () => {
+    (reviewApi.batch as any).mockResolvedValue({
+      data: { ok: true, changed: 1, changed_ids: ["sec-1"], skipped: ["sec-2"],
+              not_found: ["sec-x"], nochange: [], total_ids: 2, truncated: false },
+    });
+    const { container } = await renderPanel();
+    setReviewer(container, "张三");
+    const rowCbs = Array.from(container.querySelectorAll(".ant-table-tbody .ant-table-row"))
+      .map((row) => row.querySelector("input[type='checkbox']") as HTMLInputElement);
+    expect(rowCbs.length).toBe(2);
+    fireEvent.click(rowCbs[0]!);
+    fireEvent.click(btnByText(container, "批量通过")!);
+    await waitFor(() => expect(confirmOk()).toBeTruthy());
+    await act(async () => { fireEvent.click(confirmOk()!); });
+    await waitFor(() => expect(reviewApi.batch).toHaveBeenCalled());
+    await waitFor(() => expectMsg(msgSpy.warning, "章节不存在"));
+  });
+
+  it("批量 changed=0 → 提示「没有章节发生状态变更」", async () => {
+    (reviewApi.batch as any).mockResolvedValue({
+      data: { ok: true, changed: 0, changed_ids: [], skipped: [], not_found: [],
+              nochange: ["sec-1"], total_ids: 1, truncated: false },
+    });
+    const { container } = await renderPanel();
+    setReviewer(container, "张三");
+    const rowCbs = Array.from(container.querySelectorAll(".ant-table-tbody .ant-table-row"))
+      .map((row) => row.querySelector("input[type='checkbox']") as HTMLInputElement);
+    expect(rowCbs.length).toBe(2);
+    fireEvent.click(rowCbs[0]!);
+    fireEvent.click(btnByText(container, "批量通过")!);
+    await waitFor(() => expect(confirmOk()).toBeTruthy());
+    await act(async () => { fireEvent.click(confirmOk()!); });
+    await waitFor(() => expect(reviewApi.batch).toHaveBeenCalled());
+    await waitFor(() => expectMsg(msgSpy.warning, "没有章节发生状态变更"));
+  });
+
+  // ------------------------------------------------------------ ④ 失败路径
+  it("单章审核失败 → 报错且不清空清单", async () => {
+    (reviewApi.reviewSection as any).mockRejectedValue(new Error("状态机不允许该流转"));
+    const { container } = await renderPanel();
+    setReviewer(container, "张三");
+    fireEvent.click(rowBtn(await rowOf(container, "第3章 基坑支护"), "审核")!);
+    await waitFor(() => expect(confirmOk()).toBeTruthy());
+    fireEvent.click(confirmOk()!);
+    await waitFor(() => expectMsg(msgSpy.error, "状态机不允许该流转"));
+    expect(container.textContent || "").toContain("第3章 基坑支护");
+  });
+
+  it("批量审核失败 → 报错", async () => {
+    (reviewApi.batch as any).mockRejectedValue(new Error("批量接口异常"));
+    const { container } = await renderPanel();
+    setReviewer(container, "张三");
+    const rowCbs = Array.from(container.querySelectorAll(".ant-table-tbody .ant-table-row"))
+      .map((row) => row.querySelector("input[type='checkbox']") as HTMLInputElement);
+    expect(rowCbs.length).toBe(2);
+    fireEvent.click(rowCbs[0]!);
+    fireEvent.click(btnByText(container, "批量通过")!);
+    await waitFor(() => expect(confirmOk()).toBeTruthy());
+    fireEvent.click(confirmOk()!);
+    await waitFor(() => expectMsg(msgSpy.error, "批量接口异常"));
+  });
+
+  it("checklist 加载失败 → 报错（此前只锁了 summary 失败）", async () => {
+    (reviewApi.checklist as any).mockRejectedValue(new Error("清单接口异常"));
+    render(<App><ReviewWorkflowPanel schemeId={SCHEME} /></App>);
+    await waitFor(() => expectMsg(msgSpy.error, "清单接口异常"));
+  });
+
+  it("提交方案失败 → 报错且按钮恢复可点", async () => {
+    (reviewApi.submit as any).mockRejectedValue(new Error("存在交付阻断项"));
+    const { container } = await renderPanel();
+    setReviewer(container, "张三");
+    fireEvent.click(btnByText(container, "提交审核通过")!);
+    await waitFor(() => expect(confirmOk()).toBeTruthy());
+    fireEvent.click(confirmOk()!);
+    await waitFor(() => expectMsg(msgSpy.error, "存在交付阻断项"));
+    await waitFor(() =>
+      expect(btnByText(container, "提交审核通过")!.disabled).toBe(false));
+  });
+
+  it("章节被删除后，已勾选的鬼灵 id 被自动剔除（不得对不存在的 id 提交）", async () => {
+    const { container, rerender } = await renderPanel();
+    const rowCbs = Array.from(container.querySelectorAll(".ant-table-tbody .ant-table-row"))
+      .map((row) => row.querySelector("input[type='checkbox']") as HTMLInputElement);
+    expect(rowCbs.length).toBe(2);
+    fireEvent.click(rowCbs[0]!);
+    await waitFor(() =>
+      expect((container.textContent || "").includes("已选 1 个章节")).toBe(true));
+
+    // refreshKey 变化 + 清单里该章已被删除
+    (reviewApi.checklist as any).mockResolvedValue({ data: { items: [
+      DATA.CHECKLIST.items[1],
+    ] } });
+    rerender(<App><ReviewWorkflowPanel schemeId={SCHEME} refreshKey={1} /></App>);
+    await waitFor(() =>
+      expect((container.textContent || "").includes("已选 1 个章节")).toBe(false));
+  });
+
+  it("「刷新」按钮重新拉取清单与概览", async () => {
+    const { container } = await renderPanel();
+    const before = (reviewApi.checklist as any).mock.calls.length;
+    const refresh = btnByText(container, "刷新");
+    expect(refresh).toBeTruthy();
+    fireEvent.click(refresh!);
+    await waitFor(() =>
+      expect((reviewApi.checklist as any).mock.calls.length).toBeGreaterThan(before));
+  });
+
+  // ---------------------------------------------------------------- ④ 状态→操作映射
+  // ✅ 2026-10-06 R46：NEXT_ACTIONS 是本表唯一的「状态 → 可执行操作」事实源，
+  //    此前只有结构级断言（本仓 pytest 侧 test_review_export_closeout_r46 的跨语言
+  //    parity），没有任何**组件级**用例验证「已通过的章节不再出现通过/驳回按钮」。
+  //    一旦映射漂移，用户会对已通过章节重复提交审核（后端按状态机拦截 → 误报失败）。
+  it("各行操作按钮严格按 review_status 渲染：approved 不再出现「通过/驳回」，rejected 只能重提", async () => {
+    (reviewApi.checklist as any).mockResolvedValue({ data: { items: [
+      { id: "sec-p", title: "待审章节", word_count: 1000, review_status: "pending", review_status_label: "待审核", level: 1, last_reviewer: null, last_comment: "", last_reviewed_at: "" },
+      { id: "sec-a", title: "已通章节", word_count: 1000, review_status: "approved", review_status_label: "已通过", level: 1, last_reviewer: "张三", last_comment: "同意", last_reviewed_at: "2026-10-06T10:00:00" },
+      { id: "sec-r", title: "被驳章节", word_count: 1000, review_status: "rejected", review_status_label: "已驳回", level: 1, last_reviewer: "张三", last_comment: "不合格", last_reviewed_at: "2026-10-06T10:00:00" },
+      { id: "sec-s", title: "已跳章节", word_count: 1000, review_status: "skipped", review_status_label: "已跳过", level: 1, last_reviewer: null, last_comment: "", last_reviewed_at: "" },
+    ] } });
+    const { container } = render(<App><ReviewWorkflowPanel schemeId={SCHEME} /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("待审章节"));
+
+    const rowLabels = async (title: string): Promise<string[]> => {
+      let row: Element | undefined;
+      await waitFor(() => {
+        row = Array.from(container.querySelectorAll(".ant-table-row"))
+          .find((r) => (r.textContent || "").includes(title));
+        expect(row, `未找到章节行：${title}`).toBeTruthy();
+      });
+      return Array.from((row as Element).querySelectorAll("button"))
+        .map((b) => norm(b.textContent)).filter(Boolean);
+    };
+
+    const pending = await rowLabels("待审章节");
+    const approved = await rowLabels("已通章节");
+    const rejected = await rowLabels("被驳章节");
+    const skipped = await rowLabels("已跳章节");
+
+    // pending：可首次审核（通过 / 驳回）
+    expect(pending.some((t) => t.includes("通过"))).toBe(true);
+    expect(pending.some((t) => t.includes("驳回"))).toBe(true);
+    // approved：已通过 → 只能「复审」，绝不能再提交一次通过/驳回
+    expect(approved.some((t) => t.includes("复审"))).toBe(true);
+    expect(approved.some((t) => t.includes("通过"))).toBe(false);
+    expect(approved.some((t) => t.includes("驳回"))).toBe(false);
+    // rejected：已驳回 → 只能「重提」（回到 pending）
+    expect(rejected.some((t) => t.includes("重提"))).toBe(true);
+    expect(rejected.some((t) => t.includes("通过"))).toBe(false);
+    expect(rejected.some((t) => t.includes("驳回"))).toBe(false);
+    // skipped：已跳过 → 需「复审」才能进入审核
+    expect(skipped.some((t) => t.includes("复审"))).toBe(true);
   });
 });

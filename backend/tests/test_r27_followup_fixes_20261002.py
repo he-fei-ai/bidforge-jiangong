@@ -176,7 +176,9 @@ class TestRegistryAdditions:
     def test_db_version_bumped_with_additions(self):
         """维护约定第 4 条：标准更新必须同步 bump 版本。
 
-        R27 = 2026.10.1；R29（检查点反哺补入装饰装修类 3 条）= 2026.10.2。
+        R27 = 2026.10.1；R29（检查点反哺补入装饰装修类 3 条）= 2026.10.2；
+        R51（2026-10-07，openstd.samr.gov.cn 实证装饰装修材料有害物质限量系列
+        现行/废止状态）= 2026.10.7。
         """
-        assert sr.STANDARD_DB_VERSION == "2026.10.2"
-        assert sr.STANDARD_DB_CHECKED_AT == "2026-10-02"
+        assert sr.STANDARD_DB_VERSION == "2026.10.7"
+        assert sr.STANDARD_DB_CHECKED_AT == "2026-10-07"

@@ -173,6 +173,17 @@ async def delete_project(project_id: str, db=Depends(get_db)):
     await db.execute("DELETE FROM projects WHERE id=?", (project_id,))
     await db.commit()
 
+    # ✅ 2026-10-06（缓存有界化）：项目连带删除了 scheme_ids，回收这些方案在
+    #    进程内总检/预检幂等缓存中的死键（理由同 schemes.delete_scheme）。
+    if scheme_ids:
+        try:
+            from app.routers.compliance import invalidate_overview_cache
+            for sid in scheme_ids:
+                invalidate_overview_cache(sid)
+        except Exception as e:  # fail-soft：缓存清理失败不影响删除结果
+            logger.warning("删除项目 %s 时清理总检缓存失败（不影响删除结果）: %s",
+                           project_id[:8], e)
+
     # ✅ BUG 修复（四层存储磁盘泄漏）：doc_storage 的四层目录树
     # （data/projects/{pid}/documents/ + documents_index.json）此前无人清理 ——
     # purge_document 只负责单文档删除，项目级入口从未调用它，

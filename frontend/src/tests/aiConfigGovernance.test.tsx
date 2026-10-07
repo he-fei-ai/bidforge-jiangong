@@ -82,7 +82,7 @@ vi.mock("../api", () => ({
   },
 }));
 
-import AIConfigPage from "../pages/AIConfigPage";
+import AIConfigPage, { resolveConcurrencyMax, AI_CONCURRENCY_MAX_FALLBACK } from "../pages/AIConfigPage";
 // 注意：页面用 useAntdMessageHub 包装了 message —— 提示**不弹原生 toast**，
 // 而是写入全局消息中心，因此断言读消息中心而不是 DOM 文本。
 import { getActivityItems, clearActivity } from "../utils/activityCenter";
@@ -246,7 +246,7 @@ describe("文本模型配置 · 配置治理增强", () => {
     await waitFor(() => expect((pwd as HTMLInputElement).value).toBe(""));
   });
 
-  it("并发数输入框上限与后端一致（≤5），避免「填了 8 实际生效 5」", async () => {
+  it("并发数上限兜底：/ai/health 未下发 max_concurrency 时回落 5（不写死、也不放开）", async () => {
     const { container } = renderPage();
     await waitLoaded(container);
 
@@ -259,10 +259,35 @@ describe("文本模型配置 · 配置治理增强", () => {
       document.querySelectorAll('input[role="spinbutton"]'),
     ) as HTMLInputElement[];
     expect(spinButtons.length).toBeGreaterThan(0);
-    // 并发数是唯一上限为 5 的数值字段；若上限回到 8 说明又与后端脱钩了
+    // health 未带 max_concurrency → 兜底 5（与后端 settings.max_concurrency 默认一致）
     expect(spinButtons.some((el) => el.getAttribute("aria-valuemax") === "5")).toBe(true);
-    // 同时确认没有任何字段还允许 >5 的并发（旧值 8）
+    // 不允许出现未接线的旧值 8
     expect(spinButtons.some((el) => el.getAttribute("aria-valuemax") === "8")).toBe(false);
+  });
+
+  it("并发数上限动态下发：/ai/health 报 max_concurrency=8 时界面即可填 8（不再写死 5）", async () => {
+    // ✅ 2026-10-05：上限唯一口径为 GET /ai/health 的 max_concurrency（后端可配置）。
+    //    管理员上调后界面必须跟随，否则用户「填不上去」（历史缺陷的反向形态）。
+    h.health.mockResolvedValueOnce({
+      data: {
+        status: "configured", base_url: "https://api.deepseek.com/v1",
+        fallback_count: 1, concurrency: 4, live_concurrency: 4,
+        max_concurrency: 8,
+        degraded_providers: {}, request_mode: "normal", request_mode_label: "普通请求",
+      },
+    });
+    const { container } = renderPage();
+    await waitLoaded(container);
+
+    fireEvent.click(btnByText(container, "添加供应商")!);
+    await waitFor(() => {
+      expect(document.body.textContent || "").toContain("添加供应商配置");
+    });
+
+    const spinButtons = Array.from(
+      document.querySelectorAll('input[role="spinbutton"]'),
+    ) as HTMLInputElement[];
+    expect(spinButtons.some((el) => el.getAttribute("aria-valuemax") === "8")).toBe(true);
   });
 
   it("保存时把后端「参数被自动收敛」的 warnings 提示给用户", async () => {
@@ -462,4 +487,25 @@ describe("文本模型配置 · 配置治理增强", () => {
       expect(h.setEnv).toHaveBeenCalledWith("prod");
     });
   });
+});
+
+describe("resolveConcurrencyMax · 并发上限解析（唯一口径，2026-10-05）", () => {
+  it("health.max_concurrency 有效 → 原样返回（后端上调/下调均跟随）", () => {
+    expect(resolveConcurrencyMax({ max_concurrency: 8 })).toBe(8);
+    expect(resolveConcurrencyMax({ max_concurrency: 3 })).toBe(3);
+  });
+
+  it("health 未就绪 / 缺字段 → 回落兜底 5", () => {
+    expect(resolveConcurrencyMax(null)).toBe(AI_CONCURRENCY_MAX_FALLBACK);
+    expect(resolveConcurrencyMax(undefined)).toBe(AI_CONCURRENCY_MAX_FALLBACK);
+    expect(resolveConcurrencyMax({})).toBe(AI_CONCURRENCY_MAX_FALLBACK);
+    expect(resolveConcurrencyMax({ max_concurrency: null })).toBe(AI_CONCURRENCY_MAX_FALLBACK);
+  });
+
+  it.each([0, -1, NaN])(
+    "非法值（%p）→ 回落兜底 5，绝不当作无上限放行",
+    (bad) => {
+      expect(resolveConcurrencyMax({ max_concurrency: bad })).toBe(AI_CONCURRENCY_MAX_FALLBACK);
+    },
+  );
 });

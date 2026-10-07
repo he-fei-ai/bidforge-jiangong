@@ -24,7 +24,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.db import get_db, read_db
-from app.models import SceneRouteUpdate
+from app.models import SceneRouteBatchIn, SceneRouteUpdate
 from app.services.ai.provider_factory import (
     KNOWN_SCENES,
     invalidate_config_cache,
@@ -113,27 +113,35 @@ async def list_scene_routes(db=Depends(read_db)):
     }
 
 
-@router.put("/scene-routes")
-async def update_scene_route(body: SceneRouteUpdate, request: Request = None,
-                             db=Depends(get_db)):
-    """设置 / 清除某个场景的专属配置。
+async def _apply_scene_route(db, scene: str, config_id: str) -> dict:
+    """校验并写入单个场景路由（单条与批量共用的**唯一**实现）。
 
-    - ``scene`` 必须在 ``KNOWN_SCENES`` 白名单内（否则 400，避免拼错静默失效）；
-    - ``config_id`` 为空串 → 清除该场景路由（恢复共用主配置）；
-    - ``config_id`` 非空 → 必须是已存在的配置 id（否则 400）；
-    - ✅ 2026-09-25：返回 ``warning`` —— 跨环境 / 目标配置无可用 Key 时明确
-      告知「该路由暂不生效，运行时自动回落」。路由**仍会保存**（用户可能
-      先配好路由、稍后再切环境），与 ``resolve_scene_config`` 运行时语义一致。
+    返回::
+
+        {"scene", "config_id", "provider_name", "model", "detail",
+         "warning", "error"}
+
+    - ``error`` 非空 = 该项未写入（调用方决定是 400 还是记入批量结果）；
+    - ``warning`` 非空 = 已写入但运行时暂不生效（跨环境 / 目标无可用 Key）；
+    - **不 commit、不写审计** —— 由调用方统一负责（单条自己提交，批量整批提交）。
+
+    ⚠️ 判据单一出口：``PUT /scene-routes``（单条）与 ``POST /scene-routes/batch``
+    （批量）都只能经由此函数写库。此处一旦各自复制一份判据，就会出现
+    「批量能过、单条不过」的静默分叉（本仓已多次踩同类陷阱）。
     """
-    scene = (body.scene or "").strip()
+    out = {"scene": "", "config_id": "", "provider_name": "", "model": "",
+           "detail": "", "warning": "", "error": ""}
+    scene = (scene or "").strip()
+    out["scene"] = scene
     if not scene:
-        raise HTTPException(400, "场景不能为空")
+        out["error"] = "场景不能为空"
+        return out
     if scene not in KNOWN_SCENES:
-        raise HTTPException(
-            400, f"未知场景：{scene}（可选：{', '.join(KNOWN_SCENES.keys())}）")
+        out["error"] = f"未知场景：{scene}（可选：{', '.join(KNOWN_SCENES.keys())}）"
+        return out
 
-    config_id = (body.config_id or "").strip()
-    provider_name = model = ""
+    config_id = (config_id or "").strip()
+    out["config_id"] = config_id
     warnings: list[str] = []
     if config_id:
         cur = await db.execute(
@@ -141,9 +149,11 @@ async def update_scene_route(body: SceneRouteUpdate, request: Request = None,
             " FROM ai_config WHERE id=?", (config_id,))
         row = await cur.fetchone()
         if not row:
-            raise HTTPException(400, "指定的配置不存在（可能已被删除），请刷新后重试")
+            out["error"] = "指定的配置不存在（可能已被删除），请刷新后重试"
+            return out
         provider_name = row["provider_name"] or ""
         model = row["model"] or ""
+        out["provider_name"], out["model"] = provider_name, model
         # ✅ 2026-09-25：设置时即告知「配了也不生效」的两种情形，不再静默
         cfg_env = str(row["env"] or "").strip()
         active_env = await _safe_active_env()
@@ -160,17 +170,92 @@ async def update_scene_route(body: SceneRouteUpdate, request: Request = None,
             " ON CONFLICT(scene) DO UPDATE SET config_id=excluded.config_id,"
             " updated_at=excluded.updated_at",
             (scene, config_id, datetime.now().isoformat()))
-        detail = f"场景 {scene} → {provider_name}/{model}"
+        out["detail"] = f"场景 {scene} → {provider_name}/{model}"
     else:
         await db.execute("DELETE FROM ai_scene_routes WHERE scene=?", (scene,))
-        detail = f"场景 {scene} → 恢复共用主配置"
+        out["detail"] = f"场景 {scene} → 恢复共用主配置"
     if warnings:
-        detail += f"；⚠ {'；'.join(warnings)}"
+        out["detail"] += f"；⚠ {'；'.join(warnings)}"
+    out["warning"] = "；".join(warnings)
+    return out
 
+
+@router.put("/scene-routes")
+async def update_scene_route(body: SceneRouteUpdate, request: Request = None,
+                             db=Depends(get_db)):
+    """设置 / 清除某个场景的专属配置。
+
+    - ``scene`` 必须在 ``KNOWN_SCENES`` 白名单内（否则 400，避免拼错静默失效）；
+    - ``config_id`` 为空串 → 清除该场景路由（恢复共用主配置）；
+    - ``config_id`` 非空 → 必须是已存在的配置 id（否则 400）；
+    - ✅ 2026-09-25：返回 ``warning`` —— 跨环境 / 目标配置无可用 Key 时明确
+      告知「该路由暂不生效，运行时自动回落」。路由**仍会保存**（用户可能
+      先配好路由、稍后再切环境），与 ``resolve_scene_config`` 运行时语义一致。
+
+    校验与写库委托 ``_apply_scene_route``（与批量端点共用同一实现）。
+    """
+    r = await _apply_scene_route(db, body.scene, body.config_id)
+    if r["error"]:
+        raise HTTPException(400, r["error"])
     await record_config_audit(
-        db, "scene_route", config_id=config_id, provider_name=provider_name,
-        model=model, detail=detail, request=request, commit=False)
+        db, "scene_route", config_id=r["config_id"], provider_name=r["provider_name"],
+        model=r["model"], detail=r["detail"], request=request, commit=False)
     await db.commit()
     invalidate_config_cache()
-    return {"ok": True, "scene": scene, "config_id": config_id,
-            "warning": "；".join(warnings)}
+    return {"ok": True, "scene": r["scene"], "config_id": r["config_id"],
+            "warning": r["warning"]}
+
+
+#: 批量条目上限：场景白名单只有 20+ 项，超大载荷只会放大单次事务时长与审计行数
+_BATCH_MAX_ITEMS = 200
+
+
+@router.post("/scene-routes/batch")
+async def batch_update_scene_routes(body: SceneRouteBatchIn, request: Request = None,
+                                    db=Depends(get_db)):
+    """批量设置 / 清除场景路由（✅ 2026-10-06 G14）。
+
+    背景：``PUT /scene-routes`` 一次只处理一个场景，而场景白名单有 20+ 项 ——
+    用户想「正文 / 事实 / 一致性三条链路统一切到快模型」得逐条点二十多次。
+
+    - 判据与单条端点**完全同源**（共用 ``_apply_scene_route``），不另写一份；
+    - 单条失败**不中断整批**，失败项如实回传 ``error`` 供逐条修正；
+    - 成功项逐条写审计（保留「每次变更一行」的可追溯性），
+      但**整批只 commit 一次、只失效一次缓存**。
+    """
+    items = list(body.items or [])
+    if not items:
+        raise HTTPException(400, "批量内容为空")
+    if len(items) > _BATCH_MAX_ITEMS:
+        raise HTTPException(400, f"批量条目过多（最多 {_BATCH_MAX_ITEMS} 条）")
+
+    results: list[dict] = []
+    failed_scenes: list[str] = []
+    for it in items:
+        r = await _apply_scene_route(db, it.scene, it.config_id)
+        ok = not r["error"]
+        if ok:
+            await record_config_audit(
+                db, "scene_route", config_id=r["config_id"],
+                provider_name=r["provider_name"], model=r["model"],
+                detail=r["detail"], request=request, commit=False)
+        else:
+            failed_scenes.append(r["scene"] or "（空）")
+        results.append({"scene": r["scene"], "config_id": r["config_id"],
+                        "ok": ok, "error": r["error"], "warning": r["warning"]})
+
+    await db.commit()
+    invalidate_config_cache()
+    warning = ""
+    if failed_scenes:
+        warning = (f"{len(failed_scenes)} 条未生效："
+                   + "、".join(failed_scenes[:5])
+                   + (f" 等 {len(failed_scenes)} 条" if len(failed_scenes) > 5 else ""))
+    return {
+        "ok": True,
+        "total": len(results),
+        "applied": sum(1 for r in results if r["ok"]),
+        "failed": sum(1 for r in results if not r["ok"]),
+        "items": results,
+        "warning": warning,
+    }

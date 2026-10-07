@@ -213,6 +213,14 @@ export interface AIHealth {
   key_broken?: boolean;
   request_mode?: RequestMode | string;
   request_mode_label?: string;
+  /**
+   * ✅ 2026-10-06（F-3）：后端 ``GET /ai/health`` 已回传这两个字段
+   * （排查「配了却不用它」时与「运行时设置」页并排可见），
+   * 但本类型此前未声明，导致该端点不是自身响应的准确镜像
+   * （违反本文件头部「后端新增字段必须同步」的约定）。
+   */
+  disabled_providers?: string[];
+  active_env?: string;
   /** provider → {state, failures} */
   degraded_providers: Record<string, { state?: string; failures?: number }>;
 }
@@ -242,6 +250,21 @@ export interface AIConfigTestResponse {
   /** 实际使用的探测方式，如 stream_probe */
   mode?: string;
   network?: AINetworkProbe;
+  /**
+   * ✅ 2026-10-06（F-4）：以下字段后端一直在回传、本类型此前未声明 ——
+   * 其中 ``latency_ms``（探测耗时）与 ``request_mode``（实际生效的请求方式）
+   * 正是「同一份配置、为什么首字节慢 / 长正文易断」的关键证据，
+   * ``raw`` 是错误分类的原始信息。缺声明 = 契约不是端点的准确镜像。
+   */
+  provider?: string;
+  model?: string;
+  base_url?: string;
+  /** 探测总耗时（毫秒） */
+  latency_ms?: number;
+  /** 实际生效的请求方式（normal / stream） */
+  request_mode?: RequestMode | string;
+  /** 失败时的原始错误信息（双路探测时含两条） */
+  raw?: string;
 }
 
 /** POST /ai/config/precheck 响应 */
@@ -252,6 +275,8 @@ export interface AIConfigPrecheckResponse {
   port?: number;
   step?: string;
   message?: string;
+  /** ✅ 2026-10-06（F-4）：后端回传归一化后的 Base URL，此前未声明 */
+  base_url?: string;
 }
 
 /** POST /ai/config/precheck-all 的单条结果 */
@@ -468,6 +493,12 @@ export interface AIConfigExport {
   count: number;
   api_key_included: false;
   items: AIConfigExportItem[];
+  /** ✅ 2026-10-06（G1）：场景模型路由（迁移时随配置一并带走；旧版导出无此键） */
+  scene_routes?: AIConfigSceneRouteExport[];
+  /** ✅ 2026-10-06（G1）：运行时设置（active_env / disabled_providers；从未设置过时为 {}） */
+  runtime?: Record<string, string>;
+  scene_route_count?: number;
+  runtime_keys?: string[];
 }
 
 /** POST /ai/config/import 响应 */
@@ -479,7 +510,94 @@ export interface AIConfigImportResponse {
   warning: string;
   /** 数值被收敛的条目数 */
   clamped_items: number;
+  /**
+   * ✅ 2026-10-06（B-1）：因「计费方式 ↔ Base URL」联动校验不合规而跳过的条目数
+   * （典型：导入的包月套餐配置没有 Base URL）。不回传的话用户只看到
+   * 「导入 N 条、跳过 M 条」，无从知道 M 条为何被跳。
+   */
+  invalid_plan_items?: number;
+  /** 跳过原因明细（后端最多回传前 5 条） */
+  skip_reasons?: string[];
+  /** ✅ 2026-10-06（G1）：随配置一并迁移的场景路由条数 / 运行时设置键数 */
+  migrated_scene_routes?: number;
+  migrated_runtime_keys?: string[];
   hint: string;
+}
+
+/** ✅ 2026-10-06（G1）：导出文件中随配置一并带走的场景路由条目 */
+export interface AIConfigSceneRouteExport {
+  scene: string;
+  config_id: string;
+  updated_at?: string;
+}
+
+/** POST /ai/config/import/dry-run 响应（只校验不落库，与真导入同一判据） */
+export interface AIConfigImportDryRunResponse {
+  ok: boolean;
+  planned: {
+    action: "new" | "overwrite" | "skip";
+    provider_name: string;
+    model: string;
+    reason?: string;
+    plan?: string;
+    env?: string;
+    request_mode?: string;
+    clamped?: boolean;
+  }[];
+  total: number;
+  would_import: number;
+  skipped: number;
+  clamped_items: number;
+  invalid_plan_items: number;
+  skip_reasons: string[];
+  scene_routes: { planned: number; skipped: number; skip_reasons: string[] };
+  runtime: { planned: string[]; skipped: string[] };
+  hint: string;
+}
+
+/** ✅ 2026-10-06（G3）：GET /ai/configs/health 的单条体检结果 */
+export interface AIConfigsHealthItem {
+  id: string;
+  provider_name: string;
+  model: string;
+  base_url: string;
+  plan: string;
+  is_active: boolean;
+  priority: number | null;
+  env: string;
+  in_current_env: boolean;
+  request_mode: string;
+  request_mode_label: string;
+  has_key: boolean;
+  key_broken: boolean;
+  key_hint: string;
+  no_url: boolean;
+  disabled: boolean;
+  network_ok: boolean;
+  network_step: string;
+  network_ip: string;
+  network_message: string;
+  usable: boolean;
+}
+
+/** ✅ 2026-10-06（G3）：GET /ai/configs/health 响应 */
+export interface AIConfigsHealthResponse {
+  items: AIConfigsHealthItem[];
+  summary: {
+    total: number;
+    active: number;
+    usable: number;
+    no_key: number;
+    key_broken: number;
+    no_url: number;
+    out_of_env: number;
+    disabled: number;
+    network_ok: number;
+    network_unreachable: number;
+  };
+  active_env: string;
+  disabled_providers: string[];
+  checked_at: string;
 }
 
 /** POST /ai/config/test 请求体（= 后端 AIConfigTest） */
@@ -536,7 +654,15 @@ export interface AIAuditLogsResponse {
  */
 export interface AIConfigDeleteResponse {
   ok: boolean;
-  warning: string;
+  /**
+   * ⚠️ 2026-10-06（F-1）：本字段此前声明为**必填** `warning: string`，
+   * 但后端 ``DELETE /ai/config/{id}`` 恒只返回
+   * ``{ok, cleared_scene_routes}``（删除主配置会直接 400，其余情况无警告）。
+   * 声明为必填让 tsc 无法发现契约分叉，页面上的
+   * ``data?.warning`` 分支属于**永不可达的死代码**。
+   * 现改为可选，与后端实际返回一致。
+   */
+  warning?: string;
   cleared_scene_routes: number;
 }
 
@@ -597,4 +723,6 @@ export interface AIAuditCleanupResponse {
   ok: boolean;
   deleted: number;
   keep_days: number;
+  /** ✅ 2026-10-06（F-5）：后端一直回传「是否只清失败记录」，此前未声明 */
+  only_failed?: boolean;
 }

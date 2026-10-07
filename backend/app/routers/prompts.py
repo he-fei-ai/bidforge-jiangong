@@ -25,10 +25,15 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.db import get_db, read_db
+from app.services.ai.prompts._metrics import (
+    get_snapshot as _get_metrics_snapshot,
+    reset as _reset_metrics_counters,
+)
 from app.services.ai.prompts._registry import (
     clean_prompt_text,
     extract_user_variables,
@@ -47,6 +52,15 @@ router = APIRouter(prefix="/api/v1/prompts", tags=["prompts"])
 #: ✅ 2026-09-27（BUG-P1-F）：直接 re-export `audit_service.PROMPT_MAX_CHARS`
 #:   （同一常量），消除「写入上限」与「回滚/快照长度校验」两份字面量漂移。
 __all__ = ["router", "PROMPT_MAX_CHARS"]
+
+logger = logging.getLogger(__name__)
+
+#: ✅ R48（2026-10-06 · prompts 运行时指标 + 硬编码→DB 一键同步）：
+#:   两个**独立前缀**的新路由，刻意不挂在 ``/api/v1/prompts`` 下 ——
+#:   指标与 admin 同步是运维/管理面操作，路径按任务要求落在 ``/system`` 与
+#:   ``/admin/prompts``。在 ``main.py`` 的 include 循环之后单独注册。
+system_metrics_router = APIRouter(prefix="/system", tags=["prompts-metrics"])
+admin_prompts_router = APIRouter(prefix="/admin/prompts", tags=["prompts-admin"])
 
 
 async def _fetch_content_row(db, key: str):
@@ -355,4 +369,126 @@ async def rollback_prompt(key: str, body: dict, db=Depends(get_db),
         "warnings": [i["message"] for i in validate_prompt_content(key, before)
                      if i["level"] == "warning"],
     }
+
+
+# ---------------------------------------------------------------------------
+# ✅ R48（2026-10-06）：prompts 运行时指标（进程内内存计数器，重启清零）
+# ---------------------------------------------------------------------------
+@system_metrics_router.get("/prompt-metrics")
+async def get_prompt_metrics():
+    """提示词运行时指标快照（进程内内存计数器，不持久化、重启清零）。
+
+    顶层固定 6 个键：``render_total`` / ``render_errors`` /
+    ``token_budget_truncated`` / ``repair_triggered`` / ``ai_failure_by_scene``
+    五个维度 dict，外加 ``registered_keys``（注册表全部 key，供运维对照
+    「哪些模板从无人渲染过」）。
+    """
+    return _get_metrics_snapshot()
+
+
+@system_metrics_router.post("/prompt-metrics/reset")
+async def reset_prompt_metrics():
+    """清零提示词运行时内存计数器（运维调试 / 测试隔离用）。"""
+    _reset_metrics_counters()
+    return {"ok": True, "message": "prompt metrics counters reset"}
+
+
+# ---------------------------------------------------------------------------
+# ✅ R48（2026-10-06）：硬编码 → DB 一键同步（seed 新模板 / 报告漂移）
+# ---------------------------------------------------------------------------
+@admin_prompts_router.post("/sync-from-code")
+async def sync_prompts_from_code(force: bool = False, db=Depends(get_db)):
+    """遍历注册表全部模板 key，对比硬编码出厂值 vs DB 现有行并同步。
+
+    逐 key 语义：
+      * DB 无行 → 用硬编码出厂值**插入**，``status="inserted"``；
+      * DB 行与硬编码逐字一致 → 不动，``status="in_sync"``；
+      * DB 行与硬编码不一致（用户在后台改过）→ **默认不覆盖**，
+        ``status="drift"`` 并回传 ``code_hash``/``db_hash``/``db_modified_at``；
+        仅当 query ``force=true`` 时才用硬编码覆盖（会丢失用户后台编辑成果，
+        故默认 false），``status="overwritten"``。
+
+    幂等：第二次调用 inserted=0、in_sync=绝大多数、drift 反映真实漂移。
+    fail-soft：单个 key 出错记 error 并跳过，不阻断其他 key。
+    """
+    from app.services.ai.prompts._cache import reload_prompt_cache
+    from app.services.ai.prompts._registry import (
+        _ALL_PROMPTS,
+        get_default_prompt,
+        register_lazy_prompts,
+    )
+    from app.services.ai.prompts._registry import (
+        update_prompt as _up,
+    )
+
+    register_lazy_prompts()
+    summary = {"inserted": 0, "in_sync": 0, "drift": 0,
+               "overwritten": 0, "errors": 0}
+    details: list[dict] = []
+    for key in sorted(_ALL_PROMPTS.keys()):
+        try:
+            # 对比基准 = 硬编码出厂值（统一清洗，与 DB 落库口径一致）
+            code_content = clean_prompt_text(get_default_prompt(key))
+            cur = await db.execute(
+                "SELECT content, updated_at FROM prompt_templates WHERE key=?",
+                (key,))
+            row = await cur.fetchone() if cur is not None else None
+            if row is None:
+                # DB 无行 → 插入硬编码出厂值
+                await db.execute(
+                    "INSERT INTO prompt_templates (key, content) VALUES (?, ?)",
+                    (key, code_content))
+                summary["inserted"] += 1
+                details.append({
+                    "key": key, "status": "inserted",
+                    "code_hash": prompt_content_hash(code_content),
+                })
+                continue
+            db_content = clean_prompt_text(row["content"] or "")
+            if db_content == code_content:
+                summary["in_sync"] += 1
+                details.append({
+                    "key": key, "status": "in_sync",
+                    "code_hash": prompt_content_hash(code_content),
+                    "db_hash": prompt_content_hash(db_content),
+                    "db_modified_at": row["updated_at"] or "",
+                })
+                continue
+            # 不一致：默认 drift（不覆盖用户编辑）；force=true 才覆盖
+            if force:
+                await db.execute(
+                    "INSERT INTO prompt_templates (key, content) VALUES (?, ?)"
+                    " ON CONFLICT(key) DO UPDATE SET content=excluded.content,"
+                    " updated_at=datetime('now','localtime')",
+                    (key, code_content))
+                _up(key, code_content)
+                summary["overwritten"] += 1
+                details.append({
+                    "key": key, "status": "overwritten",
+                    "code_hash": prompt_content_hash(code_content),
+                    "db_hash": prompt_content_hash(db_content),
+                    "db_modified_at": row["updated_at"] or "",
+                })
+            else:
+                summary["drift"] += 1
+                details.append({
+                    "key": key, "status": "drift",
+                    "code_hash": prompt_content_hash(code_content),
+                    "db_hash": prompt_content_hash(db_content),
+                    "db_modified_at": row["updated_at"] or "",
+                })
+        except Exception as e:  # noqa: BLE001 - 单 key 失败不阻断其他 key
+            summary["errors"] += 1
+            logger.warning("sync-from-code 处理 key=%s 失败（跳过，不阻断）: %s",
+                           key, e)
+            details.append({"key": key, "status": "error", "error": str(e)})
+
+    try:
+        await db.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("sync-from-code commit 失败: %s", e)
+        await db.rollback()
+        raise HTTPException(500, "硬编码→DB 同步提交失败")
+    reload_prompt_cache()
+    return {"summary": summary, "details": details, "force": force}
 

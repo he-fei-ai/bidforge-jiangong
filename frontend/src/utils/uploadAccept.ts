@@ -34,6 +34,27 @@ export const UPLOAD_FILE_ACCEPT: string = UPLOAD_FILE_EXTENSIONS
 // 此常量不再作为"权威上限"，仅保证后端不可用时前端仍有保守拦截。
 export const MAX_UPLOAD_BYTES: number = 30 * 1024 * 1024;
 
+/**
+ * 解析「单文件体积上限」的生效值：优先后端下发（configured），缺失 / 非法回落
+ * `MAX_UPLOAD_BYTES`（30MB）。
+ *
+ * ✅ 2026-10-05 收敛：此前方案工作台、目录库编辑弹窗等多处入口各写一份
+ *    `x > 0 ? x : 30MB` 判定，一旦有的入口用了动态值、有的仍写死，就出现
+ *    "同一次上传两处提示上限不同"的口径漂移。现统一走本函数（唯一口径）。
+ */
+export function resolveMaxUploadBytes(configured?: number): number {
+  const v = Number(configured);
+  return Number.isFinite(v) && v > 0 ? v : MAX_UPLOAD_BYTES;
+}
+
+/**
+ * 单文件体积上限（字节）→ 整 MB 文案，用于「请上传 N MB 以内」类提示。
+ * 入参缺失 / 非法时随 `resolveMaxUploadBytes` 回落 30MB（与历史文案逐字一致）。
+ */
+export function formatUploadLimitMb(configured?: number): string {
+  return `${Math.round(resolveMaxUploadBytes(configured) / (1024 * 1024))}MB`;
+}
+
 export type RejectedUploadReason = "type" | "size";
 export type RejectedUpload = { file: File; reason: RejectedUploadReason };
 export type PartitionedUploadFiles = {
@@ -59,7 +80,7 @@ export function partitionUploadFiles(
   const accepted: File[] = [];
   const rejected: RejectedUpload[] = [];
   // 非法（非正数）入参等价于"无上限"，比保守默认更危险，故回落兜底值。
-  const limit = Number(maxBytes) > 0 ? Number(maxBytes) : MAX_UPLOAD_BYTES;
+  const limit = resolveMaxUploadBytes(maxBytes);
   for (const file of files || []) {
     if (!allowed.has(fileExtension(file.name))) {
       rejected.push({ file, reason: "type" });
@@ -78,6 +99,46 @@ export type SplitByTotalQuota = {
   /** 因累计体积触顶而被扣下的文件（含触顶那一份及其后全部） */
   held: File[];
 };
+
+/**
+ * 单次请求文件数上限兜底（后端 config.upload_max_files_per_request 默认值）。
+ *
+ * ⚠️ 与 `upload_max_total_bytes` 同源：正常口径以
+ *    `GET /api/v1/system/upload-limits` 的 `max_files_per_request` 为准；
+ *    该值缺失 / 请求失败时用此兜底，避免前端退回「无数量上限」。
+ */
+export const MAX_UPLOAD_FILES_FALLBACK: number = 20;
+
+/**
+ * 上传前的**单次文件数**预检：与后端 `global_facts.upload_documents` 的
+ * `MAX_UPLOAD_FILES_PER_REQUEST`（`upload_max_files_per_request`）同口径。
+ *
+ * ✅ 2026-10-05 补齐功能缺口：此前前端只预检了「单文件体积」与「累计体积」，
+ *    唯独漏了「文件数」—— 用户一次性选 25 个文件（上限 20）时，前面 20 个照常
+ *    上传、后 5 个要等整批传完才从响应里得知"没保存"，与另两项预检的体验割裂。
+ *
+ * 后端判据（global_facts.py）：按请求顺序取**前 N 个**，超出的记入 `too_many`
+ * 且不回滚前 N 个。本函数逐字复刻该顺序语义（保前 N、其余 held），使前端能在
+ * 发起请求前就告知用户哪些文件不会被保存。
+ *
+ * ⚠️ 非法（非正数 / NaN）入参等价于"无上限"比保守默认更危险，故回落兜底值。
+ */
+export function splitByUploadFileCount(
+  files: File[],
+  maxFiles: number = MAX_UPLOAD_FILES_FALLBACK,
+): SplitByTotalQuota {
+  const parsed = Number(maxFiles);
+  const limit = Number.isFinite(parsed) && parsed > 0
+    ? Math.floor(parsed)
+    : MAX_UPLOAD_FILES_FALLBACK;
+  const accepted: File[] = [];
+  const held: File[] = [];
+  (files || []).forEach((file, index) => {
+    if (index < limit) accepted.push(file);
+    else held.push(file);
+  });
+  return { accepted, held };
+}
 
 /**
  * 上传前的**累计体积配额**预检：与后端 `global_facts.upload_documents` 的

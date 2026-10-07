@@ -13,6 +13,7 @@ const SchemeWorkbenchPage = lazy(() => import("./pages/SchemeWorkbenchPage"));
 const OutlineLibraryPage = lazy(() => import("./pages/OutlineLibraryPage"));
 const AIConfigPage = lazy(() => import("./pages/AIConfigPage"));
 const PromptEditorPage = lazy(() => import("./pages/PromptEditorPage"));
+const PromptMetricsPage = lazy(() => import("./pages/PromptMetricsPage"));
 const SecuritySettingsPage = lazy(() => import("./pages/SecuritySettingsPage"));
 
 /** 路由切换时的占位骨架（antd 5 要求 Spin 有包裹子元素才能显示 tip） */
@@ -45,6 +46,7 @@ export default function App() {
             <Route path="/outline-library" element={<OutlineLibraryPage />} />
             <Route path="/settings/ai" element={<AIConfigPage />} />
             <Route path="/settings/prompts" element={<PromptEditorPage />} />
+            <Route path="/settings/prompt-metrics" element={<PromptMetricsPage />} />
             <Route path="/settings/security" element={<SecuritySettingsPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

@@ -47,10 +47,17 @@ from app.services.audit_service import (
 
 @router.get("/config/audit-logs")
 async def config_audit_logs(limit: int = 50, offset: int = 0, days: int = 30,
-                            action: str = "", db=Depends(read_db)):
+                            action: str = "", config_id: str = "",
+                            db=Depends(read_db)):
     """配置变更审计列表（最新在前）。
 
     参数与 ``/ai/audit-logs`` 保持同口径：limit 钳到 1..200、days 钳到 1..3650。
+
+    ✅ 2026-10-06（G2）：新增可选 ``config_id`` 筛选，并回传 ``config_ids``
+      （该时间窗内出现过的配置清单）。此前只有 ``action`` 一个维度，
+      「这条配置一共被改过几次 / 最近一次是谁改的」只能靠翻页肉眼翻，
+      且无法回答「主配置最近一次变更是哪个动作」。
+      不传 ``config_id`` 时行为与引入前逐字一致（加法式变更）。
     """
     limit = max(1, min(200, int(limit or 50)))
     offset = max(0, int(offset or 0))
@@ -61,6 +68,9 @@ async def config_audit_logs(limit: int = 50, offset: int = 0, days: int = 30,
     if action:
         where.append("action = ?")
         params.append(action)
+    if config_id:
+        where.append("config_id = ?")
+        params.append(config_id)
     clause = " AND ".join(where)
 
     cur = await db.execute(
@@ -88,12 +98,35 @@ async def config_audit_logs(limit: int = 50, offset: int = 0, days: int = 30,
         it["rollbackable"] = bool(isinstance(snap, dict) and snap.get("before"))
         # 快照仅用于服务端生成 diff / 回滚，原始 JSON 不必回传前端（减小载荷）
         it.pop("snapshot_json", None)
+    # ✅ 2026-10-06（G2）：该时间窗内出现过的配置清单（供前端下拉筛选 + 变更次数）。
+    #    标签取「供应商 / 模型」，两者都缺失（老行 / 导入汇总行）时回落到 id 前 8 位。
+    #    ⚠️ 配置可能已被删除，故不从 ai_config 联表取名，只用审计行里留存的字段。
+    config_ids: list[dict] = []
+    try:
+        cur = await db.execute(
+            f"SELECT config_id, COUNT(*) AS n, "
+            f"GROUP_CONCAT(DISTINCT provider_name || '/' || model) AS labels "
+            f"FROM ai_config_audit_logs WHERE {clause} GROUP BY config_id "
+            "ORDER BY MAX(created_at) DESC", tuple(params))
+        for r in await cur.fetchall():
+            cid = str(r["config_id"] or "")
+            label = str(r["labels"] or "").split(",")[0].strip()
+            if not label or label == "/":
+                label = cid[:8] if cid else "（汇总记录）"
+            config_ids.append({"value": cid, "label": label,
+                               "count": int(r["n"]) or 0})
+    except Exception:
+        # 审计查询的附加能力失败不应影响主列表（与表缺失时只记 debug 的约定一致）
+        config_ids = []
+
     return {
         "items": items,
         "total": total,
         "limit": limit,
         "offset": offset,
         "actions": [{"value": k, "label": v} for k, v in CONFIG_ACTIONS.items()],
+        "config_ids": config_ids,
+        "config_id": config_id,
     }
 
 
@@ -101,6 +134,16 @@ async def config_audit_logs(limit: int = 50, offset: int = 0, days: int = 30,
 # ✅ 2026-09-23 新增：配置版本回滚（G6）
 # ---------------------------------------------------------------------------
 #: 可回滚的字段 = 快照白名单去掉只读派生项
+#:
+#: ⚠️ ``is_active`` 与 ``priority`` 刻意**不在**本表（两者都在 SNAPSHOT_FIELDS 里）：
+#:   1. ``is_active`` 由下方 ``include_active`` 分支单独处理，带主配置唯一性守卫；
+#:   2. ``priority`` 是**表级排序属性**而非单条配置的独立取值 —— 降级链顺序由
+#:      ``PUT /fallback-chain`` 整体维护，``_resequence_priority`` 在增删配置后会把
+#:      全表重排为 0..n-1。回滚时把某条配置的 priority 写回一个**过期序号**，会在
+#:      降级链里留下空洞（0,2,3,5）或重复（两条同为 2），候选链顺序即失真，而用户
+#:      无从察觉（``/fallback-chain`` 只按相对顺序取前 N 条）。宁可快照只记录、
+#:      回滚不触碰 —— 与 models.ConfigSave.priority 的「None = 本次不改动降级顺序」
+#:      同口径。
 ROLLBACK_FIELDS: tuple[str, ...] = (
     "provider_name", "plan", "base_url", "model", "max_tokens", "temperature",
     "timeout", "concurrency", "request_mode", "env", "remark",

@@ -606,7 +606,11 @@ describe("事实安全与诊断交互", () => {
   it("批量确认安全跳过时返回告警，不误报注入就绪", () => {
     expect(buildBatchResolveResultCopy({ changed: 2, skipped: 1, skipped_safety_count: 3 })).toEqual({
       tone: "warning",
+      // ✅ 2026-10-06 加法式：blockedNames 列出被拦下的事实名（后端 skipped_safety
+      //    一直逐条回传，此前只读计数 —— 用户不知「是哪 3 项」）。
+      //    本例未传 skipped_safety，故为空数组；传了则见 factsInteraction20261006。
       text: "已确认 2 项；3 项模拟值或安全关键事实未放行，请逐条核对裁决",
+      blockedNames: [],
     });
     expect(buildBatchResolveResultCopy({ changed: 2, skipped: 1, skipped_safety_count: 0 }).tone)
       .toBe("success");

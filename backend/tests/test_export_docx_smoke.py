@@ -638,12 +638,13 @@ def test_docx_table_caption_sequence_per_chapter(tmp_path):
     assert "表 1-2 材料表" in texts, texts
 
 
-def test_docx_table_without_title_has_no_caption(tmp_path):
-    """无表名行时不应插入空题注（避免出现光秃秃的「表 1-1」）"""
+def test_docx_table_without_title_auto_generates_caption(tmp_path):
+    """无表名行时自动生成表题（R51 修复：38 张表零编号零表题的成稿缺陷）"""
     content = "| A | B |\n|---|---|\n| 1 | 2 |\n"
     out = _build_single(tmp_path, content)
     texts = [p.text for p in Document(out).paragraphs]
-    assert not any(t.startswith("表 1-") for t in texts), texts
+    # 自动生成表题「表 1-1 A、B」（取首行前 3 列名拼接）
+    assert any(t.startswith("表 1-1 A、B") for t in texts), texts
 
 
 # ===========================================================================

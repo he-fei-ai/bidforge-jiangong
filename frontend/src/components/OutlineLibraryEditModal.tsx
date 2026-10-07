@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {App, Modal, Form, Input, Select, Tree, Button, Space, message,
   Card, Tag, Empty, Tooltip, Upload, Typography, Tabs, Alert, Popconfirm,} from "antd";
 import {
@@ -7,12 +7,10 @@ import {
 } from "@ant-design/icons";
 import { outlineLibraryApi, uploadOutlineApi } from "../api";
 import { useAntdMessageHub } from "../utils/activityCenter";
-import { UPLOAD_FILE_ACCEPT } from "../utils/uploadAccept";
+import { UPLOAD_FILE_ACCEPT, resolveMaxUploadBytes, formatUploadLimitMb } from "../utils/uploadAccept";
+import { MAX_OUTLINE_DEPTH } from "../utils/outlineConstants";
 
 const { Text } = Typography;
-
-/** 目录系统硬性上限：三级（与后端 outline_utils.MAX_OUTLINE_DEPTH 对齐） */
-const MAX_OUTLINE_DEPTH = 3;
 
 /** 方案分类兜底候选（实际还会并入库内已有分类） */
 const DEFAULT_TYPES = [
@@ -36,9 +34,14 @@ type Props = {
   libraryId?: string | null;
   onClose: () => void;
   onSaved: () => void;
+  /**
+   * 单文件体积上限（字节），由宿主页面从 /system/upload-limits 下发。
+   * 不传 → 回落内置兜底（30MB），与历史行为逐字一致（组件不自取网络配置，保持受控可测）。
+   */
+  maxUploadBytes?: number;
 };
 
-export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSaved }: Props) {
+export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSaved, maxUploadBytes }: Props) {
   const { message: _antdMsg, modal } = App.useApp();
   const msg = useAntdMessageHub(_antdMsg, "目录库");
   const [form] = Form.useForm();
@@ -493,15 +496,25 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
   };
 
   /** ✅ 导入 / 套用模板时保留 description（旧实现丢弃，会把编写要点清空） */
-  function importToTree(outline: any[], parentLevel = 0): OutlineNode[] {
+  function importToTree(outline: any[], parentLevel = 0, parentPath = ""): OutlineNode[] {
     return outline.map((n, i) => {
       const level = n.level || parentLevel + 1;
+      // ✅ BUG 修复（2026-10-05 · D2，与方案工作台 BUG-15 同类）：
+      //    旧 fallback id 为 `import_${Date.now()}_${i}`，`i` 只是**同父内序号** ——
+      //    整棵树在同一毫秒内构造完（几十节点很常见），于是「第1章的第1个子节」
+      //    与「第2章的第1个子节」得到**完全相同的 id**（如 `import_1767..._0`）。
+      //    该 id 被 collectAllKeys / findNode / moveFlags / removeNode /
+      //    insertIntoNode / updateNode 消费 —— 冲突会让展开态、选中、改名、
+      //    删除、上移下移作用到错误节点。
+      //    改用**位置路径**（1 / 1.1 / 1.1.2 …）保证全局唯一且稳定
+      //    （同一棵树重复构造得到同一批 id，便于 diff 与测试锁定）。
+      const posId = parentPath ? `${parentPath}.${i + 1}` : String(i + 1);
       return {
-        id: n.id || `import_${Date.now()}_${i}`,
+        id: n.id || `import_${posId}`,
         title: n.title || "未命名章节",
         description: n.description || "",
         level,
-        children: n.children ? importToTree(n.children, level) : [],
+        children: n.children ? importToTree(n.children, level, posId) : [],
       };
     });
   }
@@ -618,8 +631,8 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
             <Upload
               accept={UPLOAD_FILE_ACCEPT}
               beforeUpload={(file) => {
-                if (file.size > 30 * 1024 * 1024) {
-                  msg.error("文件过大，请上传 30MB 以内的文件");
+                if (file.size > resolveMaxUploadBytes(maxUploadBytes)) {
+                  msg.error(`文件过大，请上传 ${formatUploadLimitMb(maxUploadBytes)} 以内的文件`);
                   return false;
                 }
                 handleImportOutline(file);

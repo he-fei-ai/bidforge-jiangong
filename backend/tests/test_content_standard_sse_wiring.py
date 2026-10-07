@@ -178,9 +178,22 @@ class TestEventPayloads:
     def test_terminal_payloads_carry_standard_summary(self):
         assert re.search(
             r"completed_payload\['standard_summary'\]\s*=\s*_std_sum", _SRC)
-        # stopped 也下发（用户在标准校验上同样需要看到已完成部分的汇总）
-        assert re.search(
-            r"'event':'stopped'.*?'standard_summary':_std_sum", _SRC, re.S)
+        # ✅ R2（2026-10-05）：stopped 也下发（用户在标准校验上同样需要看到
+        #    已完成部分的汇总）。载荷改由 `_stopped_payload` 单一拼装点产出，
+        #    故断言改锚到该 helper —— 比旧的「路径 A 后面跟着字段」正则更强：
+        #    旧正则只保证**某一条** stopped 路径带汇总（另一条不带也照样通过，
+        #    这正是本轮修掉的缺陷），现在锁住拼装点本体，两条路径同时受约束。
+        # ⚠️ 必须先切到 generate_content 段：目录生成路径里**也有**一个同名
+        #    `_stopped_payload(task_id, message, *, progress=None)`（模块级），
+        #    全文件 index 会先命中它 —— 锚点选错即恒失败（§5.14）。
+        _c = _SRC[_SRC.index("async def generate_content("):]
+        i = _c.index("def _stopped_payload(")
+        block = _c[i:_c.index("\n        def ", i + 10)]
+        assert "'event': 'stopped'" in block
+        assert "'standard_summary': _std_sum" in block
+        # 两条 stopped 路径都必须走拼装点
+        assert "_stopped_payload('用户已停止', stop_progress)" in _c
+        assert "_stopped_payload('任务已取消')" in _c
 
     def test_summary_accumulator_init_outside_loop(self):
         """累加器必须提升到闭包外层（早期失败路径可读，不能 NameError）。"""

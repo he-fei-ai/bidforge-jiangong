@@ -11,8 +11,8 @@
  *   6. 分类：有 categoryOptions 时渲染 Select，无时降级只读 Tag；
  *   7. 纯函数：getCategoryColor / formatFileSize / formatUploadTime 边界。
  */
-import { describe, it, expect, vi } from "vitest";
-import { render, fireEvent } from "@testing-library/react";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { render, fireEvent, cleanup, waitFor } from "@testing-library/react";
 import React from "react";
 import DocumentParseList, {
   getCategoryColor,
@@ -61,6 +61,15 @@ function setup(over: Overrides = {}) {
 function btn(root: HTMLElement | Document, text: string): HTMLButtonElement | null {
   return (Array.from(root.querySelectorAll("button")).find(
     (x) => (x.textContent || "").trim() === text) as HTMLButtonElement) || null;
+}
+
+afterEach(cleanup);
+
+/** 在 antd Select 下拉层（挂到 document.body）里按文本找选项 */
+function dropdownOption(text: string): HTMLElement | null {
+  return (Array.from(
+    document.body.querySelectorAll(".ant-select-item-option")).find(
+    (el) => (el.textContent || "").trim() === text) as HTMLElement) || null;
 }
 
 describe("DocumentParseList", () => {
@@ -230,5 +239,67 @@ describe("DocumentParseList 纯函数", () => {
     expect(formatUploadTime("2026-13-05 10:00:00")).toBe("");
     // ISO 带 T
     expect(formatUploadTime("2026-03-05T14:30:00")).toBe("03-05 14:30");
+  });
+});
+
+// =========================================================================
+// 组件级交互补盲（2026-10-06）：分类 Select 改判 + compact 展开/收起
+// 此前分类用例只断言「Select 存在」，改判回调链路（onChange →
+// onCategoryChange → 页面 updateDocumentCategory）零交互覆盖
+// =========================================================================
+describe("DocumentParseList · 分类改判交互", () => {
+  it("打开下拉选「合同文件」→ 回调 onCategoryChange(docId, value)", async () => {
+    const { container, onCategoryChange } = setup({
+      docs: [doc({ id: "d1", file_name: "a.pdf", doc_category: "招标文件" })],
+      categoryOptions: ["招标文件", "合同文件", "其他"],
+    });
+    const selector = container.querySelector(".ant-select-selector");
+    expect(selector).toBeTruthy();
+    // rc-select 在 mousedown 时展开下拉
+    fireEvent.mouseDown(selector as HTMLElement);
+    await waitFor(() => expect(dropdownOption("合同文件")).toBeTruthy());
+    fireEvent.click(dropdownOption("合同文件")!);
+    expect(onCategoryChange).toHaveBeenCalledWith("d1", "合同文件");
+    expect(onCategoryChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("历史未登记分类：Select 兜底显示「其他」且仍可改判", async () => {
+    const { container, onCategoryChange } = setup({
+      docs: [doc({ id: "d9", doc_category: "某旧分类" })],
+      categoryOptions: ["招标文件", "其他"],
+    });
+    expect(container.textContent || "").toContain("其他");
+    fireEvent.mouseDown(
+      container.querySelector(".ant-select-selector") as HTMLElement);
+    await waitFor(() => expect(dropdownOption("招标文件")).toBeTruthy());
+    fireEvent.click(dropdownOption("招标文件")!);
+    expect(onCategoryChange).toHaveBeenCalledWith("d9", "招标文件");
+  });
+});
+
+describe("DocumentParseList · compact 展开/收起", () => {
+  const manyDocs = Array.from({ length: 4 }, (_, i) =>
+    doc({ id: `d${i}`, file_name: `f${i}.pdf` }));
+
+  it("默认只显示前 3 行，点「展开全部」显示全部，再点「收起」恢复", () => {
+    const { container } = setup({
+      docs: manyDocs, compact: true, defaultVisibleCount: 3,
+    });
+    const countItems = () => container.querySelectorAll(".ant-list-item").length;
+    expect(countItems()).toBe(3);
+    const expandBtn = btn(container, "展开全部（共 4 项，当前显示 3）");
+    expect(expandBtn).toBeTruthy();
+    fireEvent.click(expandBtn!);
+    expect(countItems()).toBe(4);
+    fireEvent.click(btn(container, "收起（仅显示前 3 项）")!);
+    expect(countItems()).toBe(3);
+  });
+
+  it("文件数不超过 defaultVisibleCount 时不出现展开按钮", () => {
+    const { container } = setup({
+      docs: manyDocs.slice(0, 3), compact: true, defaultVisibleCount: 3,
+    });
+    expect(btn(container, "展开全部（共 3 项，当前显示 3）")).toBeNull();
+    expect(container.querySelectorAll(".ant-list-item").length).toBe(3);
   });
 });

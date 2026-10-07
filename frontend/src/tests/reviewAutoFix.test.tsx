@@ -19,6 +19,35 @@ if (!(globalThis as any).ResizeObserver) {
   };
 }
 
+// ✅ 2026-10-06：弹窗 msg 来自项目自封装 useAntdMessageHub。mock 它即可精确断言告文案。
+//    ⚠️ 代理必须按 source 缓存后返回同一对象，否则组件的 useCallback/effect
+//    以 msg 为依赖永变 → 无限重渲染（本轮实测卡死）。
+const msgSpy = vi.hoisted(() => ({
+  success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(),
+  hubCache: new Map<string, any>(),
+}));
+vi.mock("../utils/activityCenter", async (orig) => {
+  const real = await orig<any>();
+  return {
+    ...real,
+    useAntdMessageHub: (m: any, source: string) => {
+      const hub = real.useAntdMessageHub(m, source);
+      let w = msgSpy.hubCache.get(source);
+      if (!w) {
+        w = {
+          success: (...a: any[]) => { msgSpy.success(...a); return hub.success(...a); },
+          error: (...a: any[]) => { msgSpy.error(...a); return hub.error(...a); },
+          warning: (...a: any[]) => { msgSpy.warning(...a); return hub.warning(...a); },
+          info: (...a: any[]) => { msgSpy.info(...a); return hub.info(...a); },
+          loading: (...a: any[]) => { msgSpy.loading(...a); return hub.loading(...a); },
+        };
+        msgSpy.hubCache.set(source, w);
+      }
+      return w;
+    },
+  };
+});
+
 vi.mock("../api", () => ({
   reviewAutoFixApi: {
     plan: vi.fn(), apply: vi.fn(), rollback: vi.fn(), capabilities: vi.fn(),
@@ -75,7 +104,17 @@ beforeEach(() => {
   (reviewAutoFixApi.rollback as any).mockReset()
     .mockResolvedValue({ data: { status: "rolled_back" } });
 });
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  msgSpy.success.mockClear(); msgSpy.error.mockClear();
+  msgSpy.warning.mockClear(); msgSpy.info.mockClear();
+});
+
+/** 断言某条告警文案确实推给用户（任一级别） */
+function expectMsg(fn: ReturnType<typeof vi.fn>, frag: string) {
+  const hit = fn.mock.calls.some((c: any[]) => String(c[0] ?? "").includes(frag));
+  expect(hit, `未捕获到含「${frag}」的告警；实际调用：${JSON.stringify(fn.mock.calls)}`).toBe(true);
+}
 
 describe("AutoFixModal · 审核预检问题自动修复", () => {
   it("ai 模式：未定位前不允许直接修复（必须先定位确认）", async () => {
@@ -194,5 +233,131 @@ describe("AutoFixModal · 审核预检问题自动修复", () => {
     expect(btn(view(), "定位矛盾位置")).toBeFalsy();
     expect(btn(view(), "执行修复")!.disabled).toBe(true);
     expect((view().textContent || "")).toContain("该问题未提供自动修复");
+  });
+});
+
+// ===========================================================================
+// ✅ 2026-10-06 缺口收口：AutoFixModal 失败 / 取消 / 状态分支补齐
+//
+// 旧覆盖只走了「定位成功 → 修复成功 → 回滚」一条主干路径，以下四类交互零覆盖：
+//   ① 三个接口的失败分支（plan/apply/rollback）—— 特别是 rollback 失败，
+//      用户正需要它恢复数据，却只看到一口错误提示。
+//   ② apply 的 not_located / unsupported 状态分支—— 与「repaired/failed」部分很差异。
+//   ③ 弹窗关闭 → reset()（之前完全未验证，重开时会残留上一次的计划与结果）。
+//   ④ items 为空但有 reason → Empty 分支。
+// ===========================================================================
+describe("AutoFixModal · 失败与状态分支", () => {
+  function mount(f: PreflightFinding | null, onFixed = vi.fn(), onClose = vi.fn()) {
+    const r = render(<App><AutoFixModal schemeId="s1" finding={f} open
+      onClose={onClose} onFixed={onFixed} /></App>);
+    return { ...r, onFixed, onClose, body: () => document.body as HTMLElement };
+  }
+
+  it("plan 失败 → 报错且可重试（定位按钮仍可点）", async () => {
+    (reviewAutoFixApi.plan as any).mockRejectedValue(new Error("定位服务不可用"));
+    const { body } = mount(finding(ai));
+    fireEvent.click(btn(body(), "定位矛盾位置")!);
+    await waitFor(() => expectMsg(msgSpy.error, "定位服务不可用"));
+    // 失败后不得调 apply（未定位就修改 = 盲改），且定位按钮仍可重试
+    expect(reviewAutoFixApi.apply).not.toHaveBeenCalled();
+    expect(btn(body(), "定位矛盾位置")).toBeTruthy();
+  });
+
+  it("apply 失败 → 报错且不出现回滚按钮", async () => {
+    (reviewAutoFixApi.apply as any).mockRejectedValue(new Error("AI 模型超时"));
+    const { body } = mount(finding(ai));
+    fireEvent.click(btn(body(), "定位矛盾位置")!);
+    await waitFor(() => expect(btn(body(), "调用 AI 修复此处")!.disabled).toBe(false));
+    fireEvent.click(btn(body(), "调用 AI 修复此处")!);
+    await waitFor(() => expectMsg(msgSpy.error, "AI 模型超时"));
+    // 无快照 ⇒ 不得提供「回滚本次修复」（无从回滚）
+    expect(btn(body(), "回滚本次修复")).toBeFalsy();
+  });
+
+  it("rollback 失败 → 报错且结果不被清空", async () => {
+    (reviewAutoFixApi.rollback as any).mockRejectedValue(new Error("回滚服务不可用"));
+    const { body } = mount(finding(ai));
+    fireEvent.click(btn(body(), "定位矛盾位置")!);
+    await waitFor(() => expect(btn(body(), "调用 AI 修复此处")!.disabled).toBe(false));
+    fireEvent.click(btn(body(), "调用 AI 修复此处")!);
+    await waitFor(() => expect(btn(body(), "回滚本次修复")).toBeTruthy());
+    fireEvent.click(btn(body(), "回滚本次修复")!);
+    await waitFor(() => expectMsg(msgSpy.error, "回滚服务不可用"));
+    // 修复结果仍在 → 用户仍能再次尝试回滚
+    expect(btn(body(), "回滚本次修复")).toBeTruthy();
+  });
+
+  it("apply 返回 not_located → 告知未定位，不得显示回滚按钮", async () => {
+    (reviewAutoFixApi.apply as any).mockResolvedValue({ data: {
+      ...APPLIED, ok: false, status: "not_located", reason: "未能在正文中定位到取值",
+      items: [], snapshot_id: "",
+    } });
+    const { body } = mount(finding(ai));
+    fireEvent.click(btn(body(), "定位矛盾位置")!);
+    await waitFor(() => expect(btn(body(), "调用 AI 修复此处")!.disabled).toBe(false));
+    fireEvent.click(btn(body(), "调用 AI 修复此处")!);
+    await waitFor(() => expectMsg(msgSpy.warning, "未能在正文中定位到取值"));
+    expect(btn(body(), "回滚本次修复")).toBeFalsy();
+  });
+
+  it("apply 返回 unsupported → info 告知需人工处理", async () => {
+    (reviewAutoFixApi.apply as any).mockResolvedValue({ data: {
+      ...APPLIED, ok: false, status: "unsupported", reason: "该规则需人工判断",
+      items: [], snapshot_id: "",
+    } });
+    const { body } = mount(finding(ai));
+    fireEvent.click(btn(body(), "定位矛盾位置")!);
+    await waitFor(() => expect(btn(body(), "调用 AI 修复此处")!.disabled).toBe(false));
+    fireEvent.click(btn(body(), "调用 AI 修复此处")!);
+    await waitFor(() => expectMsg(msgSpy.info, "该规则需人工判断"));
+  });
+
+  it("stats.skipped > 0 → 成功提示说明跳过章数", async () => {
+    (reviewAutoFixApi.apply as any).mockResolvedValue({ data: {
+      ...APPLIED, stats: { repaired: 1, failed: 0, skipped: 3 },
+    } });
+    const { body } = mount(finding(ai));
+    fireEvent.click(btn(body(), "定位矛盾位置")!);
+    await waitFor(() => expect(btn(body(), "调用 AI 修复此处")!.disabled).toBe(false));
+    fireEvent.click(btn(body(), "调用 AI 修复此处")!);
+    await waitFor(() => expectMsg(msgSpy.success, "3"));
+  });
+
+  it("关闭弹窗 → reset 生效（重开不残留上一次的计划与结果）", async () => {
+    const onClose = vi.fn();
+    const r = render(<App><AutoFixModal schemeId="s1" finding={finding(ai)} open
+      onClose={onClose} /></App>);
+    const body = () => document.body as HTMLElement;
+    fireEvent.click(btn(body(), "定位矛盾位置")!);
+    await waitFor(() => expect(body().textContent || "").toContain("已定位到"));
+    // 点底部关闭
+    fireEvent.click(btn(body(), "关闭")!);
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+
+    // 重开：必须回到未定位的首帯（不得残留旧计划 / 旧结果）
+    r.rerender(<App><AutoFixModal schemeId="s1" finding={finding(ai)} open={false}
+      onClose={onClose} /></App>);
+    r.rerender(<App><AutoFixModal schemeId="s1" finding={finding(ai)} open
+      onClose={onClose} /></App>);
+    expect(body().textContent || "").not.toContain("已定位到");
+    expect(btn(body(), "调用 AI 修复此处")!.disabled).toBe(true);
+  });
+
+  it("items 为空但带 reason → Empty 分支", async () => {
+    (reviewAutoFixApi.apply as any).mockResolvedValue({ data: {
+      ...APPLIED, ok: false, status: "failed", reason: "校验未通过，已保留原文",
+      items: [], snapshot_id: "",
+    } });
+    const { body } = mount(finding(ai));
+    fireEvent.click(btn(body(), "定位矛盾位置")!);
+    await waitFor(() => expect(btn(body(), "调用 AI 修复此处")!.disabled).toBe(false));
+    fireEvent.click(btn(body(), "调用 AI 修复此处")!);
+    await waitFor(() => expectMsg(msgSpy.warning, "修复未通过校验"));
+    expect(body().textContent || "").toContain("已保留原文");
+  });
+
+  it("finding 为 null → 不渲染任何内容", () => {
+    mount(null);
+    expect((document.body.textContent || "").includes("定位矛盾位置")).toBe(false);
   });
 });

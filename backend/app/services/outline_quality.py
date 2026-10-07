@@ -47,6 +47,14 @@ DIMENSION_LABELS: dict[str, str] = {
 
 _DOT_ID_RE = re.compile(r"\d+(?:\.\d+)*")
 _STRIP_RE = re.compile(r"[\s、，,。；;：:（）()【】\[\]]+")
+#: F4 标题中的破折号长尾分隔符（单/双 em dash、双连字符、双 en dash）。
+#: 命中即说明把描述性长尾拼进了标题（如「门窗安装工程 — 成品门窗安装…」）。
+_DASH_TITLE_RE = re.compile(r"\s(?:—{1,2}|──|–{2}|--)\s")
+
+
+def _has_dash_title(title: str) -> bool:
+    """判断标题是否用破折号拼接了描述性长尾（F4）。"""
+    return bool(_DASH_TITLE_RE.search(str(title or "")))
 
 
 def _norm(text: str) -> str:
@@ -180,14 +188,19 @@ def find_redundant_titles(basis, outline: list) -> list[dict]:
 # 要求三：目录连续性
 # ---------------------------------------------------------------------------
 def check_outline_continuity(outline: list) -> dict:
-    """目录连续性校验（层级 / 编号 / 重复章节 / 空壳），返回结构化报告。
+    """目录连续性校验（层级 / 编号 / 重复章节 / 空壳 / 标题格式），返回结构化报告。
 
     检查项：
     - ``level_gaps``：子节点声明的 ``level`` ≠ 父层级 + 1（跳级）；
     - ``empty_parents``：children 非空但其下无任何有效标题（有父无子壳）；
     - ``duplicate_titles``：同名标题（跨层也记，附首次出现路径便于定位）；
     - ``numbering_mismatch``：节点 id 为点分路径却与位置编号不一致（编号错位）；
+    - ``dash_titles``（F4）：标题用破折号拼接描述性长尾；
+    - ``empty_titles``（F5）：title 为空白的 dict 节点（旧逻辑静默跳过）；
     - ``max_level`` / ``nodes``：规模指标。
+
+    F4/F5 受配置 ``outline_check_title_format``（默认 True）门控；关闭时空节点
+    仍跳过、破折号不查，逐字回到旧口径。
 
     附加项（不进 ``issues``、不影响 ``ok``）：
     - ``similar_titles``：**近似**雷同标题对（2-gram Dice ≥ 0.70 且不完全同名，
@@ -195,8 +208,16 @@ def check_outline_continuity(outline: list) -> dict:
       而非结构缺陷 —— 真正的同名章节由 ``duplicate_titles`` 判为缺陷，
       此处若也计入 ``issues`` 会让 ``ok`` 误变 False、进而误判目录不合格。
     """
-    issues: dict[str, list] = {"level_gaps": [], "empty_parents": [],
-                               "duplicate_titles": [], "numbering_mismatch": []}
+    try:
+        from app.config import settings
+        check_fmt = bool(settings.outline_check_title_format)
+    except Exception:  # 配置不可用时按开启处理（补齐漏检）
+        check_fmt = True
+    issues: dict[str, list] = {
+        "level_gaps": [], "empty_parents": [],
+        "duplicate_titles": [], "numbering_mismatch": [],
+        "dash_titles": [], "empty_titles": [],
+    }
     seen: dict[str, str] = {}
     counter = {"nodes": 0, "max_level": 0}
     # ✅ 新增（2026-10-01）：收集 (path, title) 供标题近似雷同检测使用
@@ -204,20 +225,29 @@ def check_outline_continuity(outline: list) -> dict:
 
     def _visit(node: dict, level: int, path: str) -> None:
         title = str(node.get("title") or "").strip()
-        if title:
-            counter["nodes"] += 1
-            counter["max_level"] = max(counter["max_level"], level)
-            titles.append({"path": path, "title": title})
-            key = _norm(title)
-            if key and key not in seen:
-                seen[key] = path
-            elif key:
-                issues["duplicate_titles"].append(
-                    {"path": path, "title": title, "first": seen[key]})
-            nid = str(node.get("id") or "").strip()
-            if nid and _DOT_ID_RE.fullmatch(nid) and nid != path:
-                issues["numbering_mismatch"].append(
-                    {"path": path, "id": nid, "expected": path, "title": title})
+        if not title:
+            # F5：空标题 dict 节点。旧逻辑直接静默跳过，现按配置登记。
+            if check_fmt:
+                issues["empty_titles"].append({"path": path})
+            children = node.get("children")
+            if isinstance(children, list) and children:
+                _visit_children(children, level + 1, path, title)
+            return
+        counter["nodes"] += 1
+        counter["max_level"] = max(counter["max_level"], level)
+        titles.append({"path": path, "title": title})
+        if check_fmt and _has_dash_title(title):
+            issues["dash_titles"].append({"path": path, "title": title})
+        key = _norm(title)
+        if key and key not in seen:
+            seen[key] = path
+        elif key:
+            issues["duplicate_titles"].append(
+                {"path": path, "title": title, "first": seen[key]})
+        nid = str(node.get("id") or "").strip()
+        if nid and _DOT_ID_RE.fullmatch(nid) and nid != path:
+            issues["numbering_mismatch"].append(
+                {"path": path, "id": nid, "expected": path, "title": title})
         children = node.get("children")
         if isinstance(children, list) and children:
             _visit_children(children, level + 1, path, title)
@@ -225,10 +255,20 @@ def check_outline_continuity(outline: list) -> dict:
     def _visit_children(children: list, level: int, parent_path: str,
                         parent_title: str) -> None:
         valid = 0
-        for j, c in enumerate(children):
+        # ✅ BUG 修复（2026-10-07 · 编号错位误报）：位置路径必须与
+        #    numbering.renumber_outline_nodes 的占号口径一致 —— 后者只对
+        #    isinstance(node, dict) 的项连续编号，**非 dict 项跳过且不占号**。
+        #    旧实现用 enumerate 的原始下标 j+1 拼路径，非 dict 项也占了一个位置，
+        #    于是 normalize（renumber 不删除非 dict 项、只跳过）后再做连续性校验时，
+        #    脏数据数组（如 [dict, "字符串残片", dict]）里后续合法节点的真实 id
+        #    （"2"）与路径（"3"）永久不等，被误报 numbering_mismatch，进而把一份
+        #    编号完全正确的目录判成 ok=False。现按 dict 项连续计数。
+        dict_idx = 0
+        for c in children:
             if not isinstance(c, dict):
                 continue
-            cpath = f"{parent_path}.{j + 1}" if parent_path else str(j + 1)
+            dict_idx += 1
+            cpath = f"{parent_path}.{dict_idx}" if parent_path else str(dict_idx)
             ctitle = str(c.get("title") or "").strip()
             if ctitle:
                 valid += 1
@@ -242,9 +282,12 @@ def check_outline_continuity(outline: list) -> dict:
             issues["empty_parents"].append(
                 {"path": parent_path, "count": len(children)})
 
-    for i, n in enumerate(outline or []):
+    # 顶层同样按 dict 项连续计数（旧实现 str(i+1) 含非 dict 位置，与 renumber 漂移）
+    top_idx = 0
+    for n in outline or []:
         if isinstance(n, dict):
-            _visit(n, 1, str(i + 1))
+            top_idx += 1
+            _visit(n, 1, str(top_idx))
 
     # ✅ 新增（2026-10-01）：标题近似雷同（2-gram Dice）。
     # 加法式 —— 只作为顶层附加键返回，**不进入 issues**：近似标题属于
@@ -281,7 +324,8 @@ def render_continuity_notice(report: dict) -> str:
     if not report or report.get("ok"):
         return ""
     labels = {"level_gaps": "层级跳级", "empty_parents": "有父无子",
-              "duplicate_titles": "同名章节", "numbering_mismatch": "编号错位"}
+              "duplicate_titles": "同名章节", "numbering_mismatch": "编号错位",
+              "dash_titles": "破折号长尾标题", "empty_titles": "空标题节点"}
     parts = [f"{label} {len(report.get(key) or [])} 处"
              for key, label in labels.items() if report.get(key)]
     return "目录连续性问题：" + "、".join(parts) if parts else ""

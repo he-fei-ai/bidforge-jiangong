@@ -233,10 +233,25 @@ class AuditLogCleanup(BaseModel):
 
 
 class ConfigImportIn(BaseModel):
-    """配置导入（备份迁移）：items 为导出的配置文件数组。"""
+    """配置导入（备份迁移）：items 为导出的配置文件数组。
+
+    ✅ 2026-10-06（G1 · 迁移完整性）：新增 ``scene_routes`` / ``runtime`` 两个
+      **可选**字段，把「场景→配置的模型路由」与「当前生效环境 / 运行时厂商开关」
+      随配置一并迁移。此前导出只含 ``ai_config`` 单表，跨机器迁移后 24 个场景路由
+      与运行时开关全部丢失，用户须在界面逐场景重配。
+
+      两个字段默认 ``None`` = **不迁移**，旧版导出文件不含这两个键、旧调用方不传
+      参数时行为与引入前逐字一致（向后兼容）。
+    """
     items: List[dict] = Field(default_factory=list)
     overwrite: bool = False   # 同名（同 provider + model + base_url）是否覆盖
     set_first_active: bool = False  # 是否把第一条设为当前使用配置
+    # [{scene, config_id}]：config_id 为**导出源机器**上的配置 id（本次导入会生成新 id，
+    # 由导入侧按原始 id 映射到新 id）；映射不到的场景按跳过处理并如实回传原因。
+    scene_routes: Optional[List[dict]] = None
+    # {active_env, disabled_providers}：键名与 ai_runtime_settings 表内键名一致；
+    # 未知键被忽略（前向兼容未来新增的运行时设置），非法值按跳过处理。
+    runtime: Optional[dict] = None
 
 
 class SceneRouteUpdate(BaseModel):
@@ -246,6 +261,17 @@ class SceneRouteUpdate(BaseModel):
     """
     scene: str = ""
     config_id: str = ""
+
+
+class SceneRouteBatchIn(BaseModel):
+    """场景路由**批量**设置入参（✅ 2026-10-06 G14）。
+
+    背景：``PUT /ai/scene-routes`` 一次只处理一个场景，而场景白名单有 20+ 项，
+    用户想「正文/事实/一致性三条链路统一切到快模型」时得逐条点 20 多次。
+    批量的判据与单条**完全同源**（共用 ``_apply_scene_route``），
+    单条失败不中断整批，失败项如实回传原因。
+    """
+    items: List[SceneRouteUpdate] = Field(default_factory=list)
 
 
 class ActiveEnvIn(BaseModel):

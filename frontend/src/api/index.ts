@@ -5,9 +5,12 @@ import type {
   AIActiveEnvResponse, AIAuditCleanupResponse, AIAuditLogsResponse,
   AIConfigAuditLogsResponse, AIConfigClearKeyResponse, AIConfigDeleteResponse,
   AIConfigExport,
-  AIConfigExportItem, AIConfigImportResponse, AIConfigListResponse,
+  AIConfigExportItem, AIConfigImportDryRunResponse, AIConfigImportResponse,
+  AIConfigListResponse,
   AIConfigPayload, AIConfigPrecheckResponse, AIConfigRollbackResponse,
-  AIConfigSaveResponse, AIConfigTestRequest, AIConfigTestResponse,
+  AIConfigsHealthResponse,
+  AIConfigSaveResponse, AIConfigSceneRouteExport, AIConfigTestRequest,
+  AIConfigTestResponse,
   AIConfigToggleResponse, AIFallbackChainResponse, AIFetchModelsResponse,
   AIHealth, AIModelsResponse, AIPrecheckAllResponse, AIRuntimeResponse,
   AISceneRouteUpdateResponse, AISceneRoutesResponse,
@@ -18,6 +21,11 @@ import type {
   PromptAuditLogsResponse, PromptListResponse, PromptMutationResponse,
   PromptRollbackResponse,
 } from "../types/prompt";
+// ✅ 2026-10-06：全局事实模块的前后端契约类型（替代此处的 any）
+import type {
+  FactCategoryMap, FactChaptersResponse, FactDangerResponse, FactListResponse,
+  FactResolveResponse,
+} from "../types/facts";
 
 /**
  * ✅ R14 修复（2026-09-22）：全局 401 短路保护。
@@ -319,43 +327,61 @@ export const uploadOutlineApi = {
 //   - list 已返回 stats（含 has_warnings 由前端计算），无需单独 summary 请求
 //   - uploadFilesAndExtract 天然兼容单文件，无需单文件专用接口
 //   - 「从项目资料提取」统一走 SSE /sse/generate-facts（带进度与断线重挂接）
+// ✅ 2026-10-06：为**读路径**补上返回泛型（此前 23 个方法全是 AxiosResponse<any>，
+//   整个特性在 TS 眼里是 any —— ClassificationPanel 读错字段名
+//   ch.completeness / 后端 field_coverage 长期无法在编译期发现）。
+//   写路径的 data 暂留 any：客户端提交体字段随 UI 演进，收紧会牵连大量渲染点。
 export const factsApi = {
-  list: (schemeId: string, options?: { signal?: AbortSignal }) =>
-    api.get("/global-facts", { params: { scheme_id: schemeId }, signal: options?.signal }),
+  // ✅ 2026-10-06：真正使用后端分页。`limit=0`（不传）时后端返回全量，
+  //   行为与引入前一致；传 limit/offset 时按分组分页。
+  list: (schemeId: string, options?: {
+    signal?: AbortSignal; limit?: number; offset?: number;
+  }) =>
+    api.get<FactListResponse>("/global-facts", {
+      params: {
+        scheme_id: schemeId,
+        ...(options?.limit ? { limit: options.limit } : {}),
+        ...(options?.offset ? { offset: options.offset } : {}),
+      },
+      signal: options?.signal,
+    }),
   create: (data: any, schemeId: string) =>
     api.post("/global-facts", data, { params: { scheme_id: schemeId } }),
   update: (id: string, data: any, schemeId?: string) =>
-    api.patch(`/global-facts/${id}`, data, { params: { scheme_id: schemeId || "" } }),
+    api.patch<FactResolveResponse>(`/global-facts/${id}`, data, { params: { scheme_id: schemeId || "" } }),
   resolve: (factId: string, schemeId?: string) =>
-    api.patch(`/global-facts/${factId}/resolve`, {}, { params: { scheme_id: schemeId || "" } }),
+    api.patch<FactResolveResponse>(`/global-facts/${factId}/resolve`, {}, { params: { scheme_id: schemeId || "" } }),
   // 选择一个候选值解决矛盾（前端候选值列表「选此值」）
   resolveConflict: (factId: string, value: string, schemeId?: string) =>
-    api.patch(`/global-facts/${factId}/resolve-conflict`, { value },
+    api.patch<FactResolveResponse>(`/global-facts/${factId}/resolve-conflict`, { value },
       { params: { scheme_id: schemeId || "" } }),
   batchResolve: (schemeId: string, factIds?: string[]) =>
-    api.post("/global-facts/batch-resolve", { scheme_id: schemeId, fact_ids: factIds }),
+    api.post<FactResolveResponse>("/global-facts/batch-resolve", { scheme_id: schemeId, fact_ids: factIds }),
   // ✅ G3（2026-10-04）：解除「来源已变化」过期标记。
   //    后端 `_mark_project_facts_stale` 是**项目级**批量打标的，一次资料重传
   //    就可能让上百条事实同时过期；而解除入口此前只有「改值」与「裁决矛盾」
   //    两条（都要求值必须先变），resolve / batch-resolve 对 stale 行还直接跳过 ——
   //    用户核对过但值未变时无任何出路。这两个端点表达「我已核对，值仍然有效」。
   ackStale: (factId: string, schemeId?: string, options?: { signal?: AbortSignal }) =>
-    api.patch(`/global-facts/${factId}/ack-stale`, {},
+    api.patch<FactResolveResponse>(`/global-facts/${factId}/ack-stale`, {},
       { params: { scheme_id: schemeId || "" }, signal: options?.signal }),
   batchAckStale: (schemeId: string, factIds?: string[], options?: { signal?: AbortSignal }) =>
-    api.post("/global-facts/ack-stale", { scheme_id: schemeId, fact_ids: factIds },
+    api.post<FactResolveResponse>("/global-facts/ack-stale", { scheme_id: schemeId, fact_ids: factIds },
       { signal: options?.signal }),
   delete: (id: string, schemeId?: string) =>
     api.delete(`/global-facts/${id}`, { params: { scheme_id: schemeId || "" } }),
   // ✅ 一键清除全部已提取的项目信息（含增量提取进度重置，2026-09-17）
   clearAll: (schemeId: string) =>
-    api.post("/global-facts/clear", { scheme_id: schemeId }, { timeout: 60000 }),
+    api.post<FactResolveResponse>("/global-facts/clear", { scheme_id: schemeId }, { timeout: 60000 }),
   // ✅ 事实分类白名单（后端 CATEGORY_TITLES 单一事实源，消三侧口径债 2026-09-20）
   //    注意与 categoryOptions（文档分类 /documents/category-options）是两套不同分类
   categories: () => api.get("/global-facts/categories"),
-  categoryMap: () => api.get("/global-facts/category-map"),
+  // ✅ 2026-10-06：九大章节标题 / 事实属性名 / 来源类型名的**唯一权威来源**
+  //    （后端 facts_classification.category_map_payload）。此前该方法从未被
+  //    页面调用 —— 三套枚举各自硬编码，其中 source_kind 干脆零展示。
+  categoryMap: () => api.get<FactCategoryMap>("/global-facts/category-map"),
   chapters: (schemeId: string, options?: { signal?: AbortSignal }) =>
-    api.get("/global-facts/chapters", {
+    api.get<FactChaptersResponse>("/global-facts/chapters", {
       params: { scheme_id: schemeId },
       signal: options?.signal,
     }),
@@ -363,7 +389,7 @@ export const factsApi = {
     data: { scheme_name?: string; extra_text?: string },
     schemeId: string,
     options?: { signal?: AbortSignal },
-  ) => api.post("/global-facts/danger-check", data, {
+  ) => api.post<FactDangerResponse>("/global-facts/danger-check", data, {
     params: { scheme_id: schemeId },
     signal: options?.signal,
   }),
@@ -725,7 +751,13 @@ export const consistencyRepairApi = {
 // 审核与预检 · 问题定向自动修复（定位矛盾位置 → AI 改写 → 落库/回滚）
 // apply 会真实调用 AI 改写正文并落库，超时放宽到 3 分钟
 export const reviewAutoFixApi = {
-  /** 全部规则的修复能力表（按钮可用性的唯一判据） */
+  /**
+   * 全部规则的修复能力表（脚本/诊断用）。
+   * ⚠️ 组件零消费（2026-10-06 核实）：UI 的可修复性判据是 /overview 下发的
+   * `findings[].autofix`（同一 `capability_of` 单一来源），AutoFixModal 读的是
+   * finding.autofix。后端已挂 deprecated，保留仅因契约测试锁定。
+   * @deprecated 见上；新增功能请用 `finding.autofix`。
+   */
   capabilities: (schemeId: string) =>
     api.get(`/schemes/${schemeId}/review/autofix/capabilities`),
   /** 定位矛盾位置（只读预览，不调 AI、不落库） */
@@ -737,7 +769,11 @@ export const reviewAutoFixApi = {
   /** 按快照回滚 */
   rollback: (schemeId: string, data: { snapshot_id: string }) =>
     api.post(`/schemes/${schemeId}/review/autofix/rollback`, data),
-  /** 修复批次历史 */
+  /**
+   * 修复批次历史。⚠️ 组件零消费（2026-10-06 核实）：BatchFixModal 展示的是
+   * confirm 响应里的逐条 status，不回读历史。它是修复历史的唯一数据出口，
+   * 后端未 deprecated —— 保留给未来的「修复历史」面板 / 脚本诊断直接使用。
+   */
   repairs: (schemeId: string, limit = 20) =>
     api.get(`/schemes/${schemeId}/review/autofix/repairs`, { params: { limit } }),
   /** 只读收集当前总检问题，标注自动修复能力 + 定位预览 */
@@ -881,11 +917,27 @@ export const aiApi = {
   /** 批量连通性预检（全部配置，仅 DNS/TCP，不消耗额度） */
   precheckAll: () =>
     api.post<AIPrecheckAllResponse>("/ai/config/precheck-all", null, { timeout: 120000 }),
-  /** 导出全部配置（不含 API Key，用于备份/迁移） */
+  /** 导出全部配置（不含 API Key；✅ 2026-10-06 起附带场景路由与运行时设置） */
   exportConfig: () => api.get<AIConfigExport>("/ai/config/export"),
-  /** 导入配置（API Key 需重新填写） */
-  importConfig: (items: AIConfigExportItem[], overwrite = false, set_first_active = false) =>
-    api.post<AIConfigImportResponse>("/ai/config/import", { items, overwrite, set_first_active }),
+  /** 导入配置（API Key 需重新填写；✅ 2026-10-06 起可随配置迁移场景路由/运行时设置） */
+  importConfig: (items: AIConfigExportItem[], overwrite = false,
+    set_first_active = false, sceneRoutes?: AIConfigSceneRouteExport[],
+    runtime?: Record<string, string>) =>
+    api.post<AIConfigImportResponse>("/ai/config/import", {
+      items, overwrite, set_first_active,
+      scene_routes: sceneRoutes, runtime,
+    }),
+  /** ✅ 2026-10-06（G1）：导入预演 —— 只校验不落库，先看处置计划再确认导入 */
+  importConfigDryRun: (items: AIConfigExportItem[], overwrite = false,
+    set_first_active = false, sceneRoutes?: AIConfigSceneRouteExport[],
+    runtime?: Record<string, string>) =>
+    api.post<AIConfigImportDryRunResponse>("/ai/config/import/dry-run", {
+      items, overwrite, set_first_active,
+      scene_routes: sceneRoutes, runtime,
+    }),
+  /** ✅ 2026-10-06（G3）：全部配置的可用性体检（密钥/环境/地址/网络/厂商开关） */
+  configsHealth: () =>
+    api.get<AIConfigsHealthResponse>("/ai/configs/health", { timeout: 30000 }),
   /**
    * ✅ 2026-09-23 新增：清除某条配置已保存的 API Key（收回密钥）。
    * 背景：此前只能整体删除配置才能移除 Key，而「当前使用」的配置**不允许删除**，
@@ -935,6 +987,13 @@ export const promptsApi = {
   /** ✅ G2 版本回滚：把提示词恢复到某条审计记录「变更前」的版本 */
   rollback: (key: string, auditId: string) =>
     api.post<PromptRollbackResponse>(`/prompts/${key}/rollback`, { audit_id: auditId }),
+  /** 硬编码模板→DB 一键同步。⚠️ 端点挂根前缀 /admin/prompts（不在 /api/v1），
+   *  逐请求覆盖 baseURL 为空串走源站相对路径，由 Vite 代理转发到后端。 */
+  syncFromCode: (force = false) =>
+    api.post<PromptSyncResult>("/admin/prompts/sync-from-code", null, {
+      baseURL: "",
+      params: { force },
+    }),
 };
 
 // 任务
@@ -958,10 +1017,47 @@ export type UploadLimits = {
   max_total_bytes: number;
 };
 
+/** 提示词治理运行时开关（GET/PUT /api/v1/system/governance；内存态，重启回 .env 默认） */
+export interface GovernanceSettings {
+  prompt_context_budget: number;
+  prompt_injection_defense: boolean;
+}
+
+/** 提示词运行时指标快照（GET /system/prompt-metrics；进程内存计数，重启清零） */
+export interface PromptMetricsSnapshot {
+  render_total: Record<string, number>;
+  render_errors: Record<string, number>;
+  token_budget_truncated: Record<string, number>;
+  repair_triggered: Record<string, number>;
+  ai_failure_by_scene: Record<string, number>;
+  registered_keys: string[];
+}
+
+/** 硬编码模板→DB 一键同步结果（POST /admin/prompts/sync-from-code） */
+export interface PromptSyncResult {
+  summary: {
+    inserted: number; in_sync: number; drift: number;
+    overwritten: number; errors: number;
+  };
+  details: Array<{
+    key: string;
+    status: string;
+    code_hash?: string;
+    db_hash?: string;
+    db_modified_at?: string;
+    error?: string;
+  }>;
+  force: boolean;
+}
+
 // 系统活动聚合（侧边栏「后台任务运行状态栏」轮询：任务 + AI 调用 + 服务态）
 export const systemApi = {
   /** 上传配额动态下发（启动时读取一次；只读、带重试，后端临时不可达不致命） */
   uploadLimits: () => withRetry(() => api.get<UploadLimits>("/system/upload-limits")),
+  /** 提示词治理运行时开关（内存态旋钮） */
+  getGovernance: () => api.get<GovernanceSettings>("/system/governance"),
+  updateGovernance: (body: GovernanceSettings) =>
+    api.put<GovernanceSettings>("/system/governance", body),
   activity: (limit = 8) => api.get("/system/activity", { params: { limit } }),
   /** SSE 实时流：任务 / AI 状态变更时立即推送快照 */
   activityStream: (
@@ -969,6 +1065,16 @@ export const systemApi = {
     signal?: AbortSignal,
     softStop?: Promise<void>
   ) => sseGetStream("/system/activity/stream", { params: { limit }, signal, softStop }),
+};
+
+/** 提示词运行时指标（进程内存计数器，重启清零）。
+ *  ⚠️ 端点挂根前缀 /system（不在 /api/v1 命名空间），逐请求覆盖 baseURL 为空串。 */
+export const promptMetricsApi = {
+  get: () => api.get<PromptMetricsSnapshot>("/system/prompt-metrics", { baseURL: "" }),
+  reset: () =>
+    api.post<{ ok: boolean; message: string }>("/system/prompt-metrics/reset", null, {
+      baseURL: "",
+    }),
 };
 
 // SSE 流式请求辅助

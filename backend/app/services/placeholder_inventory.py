@@ -35,6 +35,10 @@ RE_FORMATTED = re.compile(r"【待补充\s*[:：]\s*([^】]{1,60}?)\s*】")
 RE_BARE = re.compile(r"【(?:待补充|待填写)】")
 # ③ 模糊占位：×× / xx / XX（提示词明令禁止的写法，必须回改为规范格式）
 RE_FUZZY = re.compile(r"××+|(?<![A-Za-z0-9])[xX]{2}(?![A-Za-z0-9])")
+# ④ 半角方括号中文占位（F3）：[就近综合医院] / [邻近专科医院/门诊部]
+#    —— AI 缺具体名称时的又一种写法。要求括号内至少含 1 个中文字符且以中文
+#    开头，避免误报英文引用、公式下标与纯符号；长度 ≤30，容忍内部 / 、空格。
+RE_BRACKET = re.compile(r"\[(?=[^\]]*[\u4e00-\u9fff])[\u4e00-\u9fff][^\]\n]{0,29}?\]")
 
 # 上下文片段：匹配点前后各取的字符数（供清单里预览，辅助人工定位）
 _SNIPPET_RADIUS = 18
@@ -46,6 +50,7 @@ KIND_LABELS = {
     "formatted": "规范字段占位【待补充：字段名】",
     "bare": "裸占位标记（缺少字段名，无法定位到具体参数）",
     "fuzzy": "模糊占位符 ××/xx（提示词禁止写法，应改为【待补充：字段名】）",
+    "bracket": "方括号中文占位 [中文]（缺具体名称，应落实为真实信息或改规范占位）",
 }
 
 
@@ -57,14 +62,23 @@ def _make_snippet(content: str, start: int, end: int) -> str:
     return re.sub(r"\s+", " ", raw).strip()
 
 
-def scan_occurrences(content: str) -> list[dict]:
+def scan_occurrences(content: str, include_bracket: bool | None = None) -> list[dict]:
     """扫描单章正文，返回逐条占位符出现记录（纯函数，非法输入返回空表）。
 
-    每条记录：{"kind": formatted|bare|fuzzy, "field": 字段名或空串,
+    每条记录：{"kind": formatted|bare|fuzzy|bracket, "field": 字段名或空串,
     "snippet": 上下文片段}
+
+    ``include_bracket``：是否扫描半角方括号中文占位（F3）。None 时读取配置
+    ``placeholder_scan_bracket``（默认 True）；显式传 False 可回退旧口径。
     """
     if not isinstance(content, str) or not content:
         return []
+    if include_bracket is None:
+        try:
+            from app.config import settings
+            include_bracket = bool(settings.placeholder_scan_bracket)
+        except Exception:  # 配置不可用时按开启处理（补齐漏检，不静默放过）
+            include_bracket = True
     hits: list[dict] = []
     for m in RE_FORMATTED.finditer(content):
         hits.append({
@@ -78,23 +92,33 @@ def scan_occurrences(content: str) -> list[dict]:
     for m in RE_FUZZY.finditer(content):
         hits.append({"kind": "fuzzy", "field": "",
                      "snippet": _make_snippet(content, m.start(), m.end())})
+    if include_bracket:
+        for m in RE_BRACKET.finditer(content):
+            inner = m.group(0)[1:-1].strip()
+            hits.append({"kind": "bracket", "field": inner,
+                         "snippet": _make_snippet(content, m.start(), m.end())})
     return hits
 
 
 def build_placeholder_report(sections: list[dict],
-                             occurrence_cap: int = DEFAULT_OCCURRENCE_CAP) -> dict:
+                             occurrence_cap: int = DEFAULT_OCCURRENCE_CAP,
+                             include_bracket: bool | None = None) -> dict:
     """把多章扫描结果聚合成《待补充清单》（纯函数）。
 
     sections 每项至少含 id / title（可选 content / sort_order）。
     返回结构：
-      total / formatted_total / bare_total / fuzzy_total / field_count / section_count
+      total / formatted_total / bare_total / fuzzy_total / bracket_total /
+      field_count / section_count
       by_field:    [{field, count, section_ids, section_titles}]（按出现次数降序）
-      by_section:  [{section_id, title, count, fields}]（按出现次数降序）
+      by_section:  [{section_id, title, count, fields}]（按次数降序）
       occurrences: [{section_id, section_title, kind, field, snippet}]（截断至 cap）
       truncated:   bool（逐条记录是否被 cap 截断）
+
+    ``include_bracket``：是否统计半角方括号中文占位（F3），None 时跟随配置。
     """
     report: dict = {
         "total": 0, "formatted_total": 0, "bare_total": 0, "fuzzy_total": 0,
+        "bracket_total": 0,
         "field_count": 0, "section_count": 0,
         "by_field": [], "by_section": [], "occurrences": [],
         "truncated": False,
@@ -112,7 +136,7 @@ def build_placeholder_report(sections: list[dict],
             continue
         sid = str(sec.get("id") or "")
         title = str(sec.get("title") or "")
-        hits = scan_occurrences(sec.get("content"))
+        hits = scan_occurrences(sec.get("content"), include_bracket)
         if not hits:
             continue
         sec_fields: list[str] = []
@@ -124,8 +148,10 @@ def build_placeholder_report(sections: list[dict],
                 report["formatted_total"] += 1
             elif kind == "bare":
                 report["bare_total"] += 1
-            else:
+            elif kind == "fuzzy":
                 report["fuzzy_total"] += 1
+            elif kind == "bracket":
+                report["bracket_total"] += 1
             rec = {"section_id": sid, "section_title": title,
                    "kind": kind, "field": h.get("field") or "",
                    "snippet": h.get("snippet") or ""}
@@ -253,14 +279,30 @@ def build_rerun_plan_from_report(report: dict, sections: list[dict],
     return plan
 
 
+async def _resolve_project_id_for_scope(db, scheme_id: str) -> str:
+    """反查方案所属 project_id（供事实作用域查询用）；失败返回空串。
+
+    ✅ 2026-10-06：直接复用 ``facts_extractor.resolve_scheme_project_id``
+    （本模块不再自带一份反查）。该函数已带 R13 判空与分级日志
+    （未传 scheme_id → DEBUG；查不到 / 异常 → WARNING）。
+    """
+    try:
+        from app.services.facts_extractor import resolve_scheme_project_id
+        return await resolve_scheme_project_id(db, scheme_id)
+    except Exception as e:  # pragma: no cover - 降级为仅方案级
+        logger.warning("反查方案所属项目失败（全局事实仅按方案级读取）: %s", e)
+        return ""
+
+
 async def build_rerun_plan(scheme_id: str, db) -> dict:
     """重跑计划（DB 封装）：清单扫描 + 可注入语料读取 + 纯函数判定。
 
     可注入语料与生成侧同口径：
-    - 全局事实：复用 ``facts_extractor.get_facts_inject_where()``（唯一出口，
-      四条件 fail-closed：has_conflict=0 AND is_resolved=1 AND is_simulated=0
-      AND is_stale=0）——与 _render_facts_text / build_injectable_facts_query
-      逐字同源（被过滤的事实不参与生成，也不算"已补齐"）；
+    - 全局事实：复用 ``facts_extractor.build_injectable_facts_query()``（唯一出口），
+      **同时**约束门控（四条件 fail-closed：has_conflict=0 AND is_resolved=1
+      AND is_simulated=0 AND is_stale=0）与作用域（方案级 + 项目共享级）——
+      与 _render_facts_text / _load_facts_rows / export 附录逐字同源
+      （被过滤的事实不参与生成，也不算"已补齐"）；
     - 解析提取：``bid_analysis_items.status='success'`` 的成果全文。
     查询失败降级为"无语料"（所有字段不可补齐，只给清单不给重跑建议），
     绝不阻断调用方。
@@ -289,19 +331,37 @@ async def build_rerun_plan(scheme_id: str, db) -> dict:
 
     report = build_placeholder_report(sections)
     corpus: list[str] = []
-    # 门控走唯一出口（fail-closed），禁止本地硬编码，避免与生成侧分叉
+    # ✅ 2026-10-06 作用域对齐：本查询此前只按 `scheme_id=?` 取事实，
+    # **不含项目共享级**（global_facts.scheme_id 为空、由 project_id 归属的那批）。
+    # 其余 6 个消费方（正文注入 sse_handlers / 目录生成 / 导出附录 export /
+    # 预检 compliance / 覆盖度台账 input_coverage / 跨模块桥接）都经
+    # ``build_injectable_facts_query`` 取「方案级 + 项目共享级」。
+    # 口径分叉的实际后果：项目共享事实里若含占位标记，本报告**看不到** →
+    # 「占位符可被重跑清除」的结论偏乐观，章节被标 rerunnable 但重跑也不消除。
+    # 现改为复用同一出口（含门控 + 作用域），不再本地拼 WHERE。
     try:
-        from app.services.facts_extractor import get_facts_inject_where
-        inject_where = get_facts_inject_where()
-    except Exception:  # pragma: no cover - 兜底仍 fail-closed，绝不 fail-open
-        logger.warning("取全局事实注入门控失败（按保守口径过滤该源）")
-        inject_where = (
-            "has_conflict=0 AND is_resolved=1 AND is_simulated=0 AND is_stale=0")
+        from app.services.facts_extractor import FACTS_GT_COLUMN, build_injectable_facts_query
+        # ⚠️ columns **必须**含 FACTS_GT_COLUMN（带 AS gt）：该出口的 SQL 末尾
+        #   固定 ``ORDER BY gt, title``，缺别名会报 "no such column: gt"，
+        #   而异常被下面的 except 吞掉 → 语料整体为空 → 所有字段判不可补齐
+        #   （「假不可重跑」，与本模块要修的「假可重跑」同族，只是方向相反）。
+        sql, params = build_injectable_facts_query(
+            scheme_id, await _resolve_project_id_for_scope(db, scheme_id),
+            f"{FACTS_GT_COLUMN}, group_title, title, content")
+    except Exception as e:  # pragma: no cover - 降级为方案级（fail-soft）
+        logger.warning("构造全局事实查询失败（降级为仅方案级）: %s", e, exc_info=True)
+        try:
+            from app.services.facts_extractor import get_facts_inject_where
+            inject_where = get_facts_inject_where()
+        except Exception:  # pragma: no cover - 兜底仍 fail-closed，绝不 fail-open
+            logger.warning("取全局事实注入门控失败（按保守口径过滤该源）")
+            inject_where = (
+                "has_conflict=0 AND is_resolved=1 AND is_simulated=0 AND is_stale=0")
+        sql = ("SELECT group_title, title, content FROM global_facts"
+               f" WHERE scheme_id=? AND {inject_where}")
+        params = (scheme_id,)
     try:
-        cur = await db.execute(
-            "SELECT group_title, title, content FROM global_facts"
-            f" WHERE scheme_id=? AND {inject_where}",
-            (scheme_id,))
+        cur = await db.execute(sql, params)
         for r in (await cur.fetchall() or []):
             corpus.append(" ".join(str(r[k] or "") for k in
                                    ("group_title", "title", "content")))
