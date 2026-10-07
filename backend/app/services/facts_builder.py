@@ -21,6 +21,10 @@ from __future__ import annotations
 import logging
 
 from app.config import settings
+from app.services.content_data_contract import (
+    build_global_data_dictionary,
+    render_data_dictionary_block,
+)
 from app.services.prompt_governance import allocate_char_budgets as _allocate_char_budgets
 
 logger = logging.getLogger("facts_builder")
@@ -392,5 +396,17 @@ async def build_facts_text(
     """
     rows = await _load_facts_rows(db, scheme_id)
     rows, _hit = _rank_facts_by_basis(rows, basis)
-    return _render_facts_text(
+    facts_text = _render_facts_text(
         rows, relevant_to=relevant_to, max_total=max_total, per_fact=per_fact)
+    # ✅ R52（2026-10-07）：数据字典注入 — 将全局事实的权威取值表
+    #    拼到 facts 文本最前面，供正文/目录提示词消费。
+    #    开关 content_data_dictionary 默认 True；关闭时提示词逐字回到引入前。
+    if settings.content_data_dictionary:
+        try:
+            _dd = build_global_data_dictionary(rows)
+            _dd_block = render_data_dictionary_block(_dd)
+            if _dd_block:
+                facts_text = _dd_block + "\n" + facts_text
+        except Exception:
+            logger.warning("数据字典注入失败（忽略，不影响生成）", exc_info=True)
+    return facts_text

@@ -76,6 +76,7 @@ from app.services.content_checkpoint import (
     is_hazardous_scheme,
     rewrite_placeholder_marks,
 )
+from app.services.content_data_contract import cross_section_value_findings
 from app.services.content_polish import quality_issues, sanitize_ai_content
 
 # ✅ 2026-09-28（T-1 收口）：章节运行时纯函数（user 上下文 / 续写 messages /
@@ -5401,6 +5402,21 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                             logger.warning(
                                 "章节 %s 跨章搬运检测失败（忽略，不影响落库）",
                                 section_id[:8], exc_info=True)
+                        # ✅ R52（2026-10-07）：CON-01 跨章节数值一致性自检。
+                        # 复用 _crossdup_snapshot（与 CON-06 同形），
+                        # 调用 content_data_contract.cross_section_value_findings
+                        # （与预检 numeric_consistency_findings 同源判据实现），
+                        # 只报涉及本章的冲突。开关 content_crosscheck_values
+                        # 默认 True；关闭则回退到预检 CON-01 仅跨章报告。
+                        if settings.content_crosscheck_values:
+                            try:
+                                _ck_findings.extend(
+                                    cross_section_value_findings(
+                                        _dup_secs, new_section_id=section_id))
+                            except Exception:
+                                logger.warning(
+                                    "章节 %s 数值一致性自检失败（忽略，不影响落库）",
+                                    section_id[:8], exc_info=True)
                     if _ck_findings:
                         report = dict(report or {})
                         report["checkpoint_findings"] = _ck_findings

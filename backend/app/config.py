@@ -514,6 +514,16 @@ class Settings(BaseSettings):
     # 章内多值属正常，放开必然误报。
     consistency_intra_section_topics: tuple = ("工期", "质保期", "响应时间")
 
+    # ---------- 数据合同模块（2026-10-07 · R52） ----------
+    # 跨章节数值一致性自检（CON-01）：生成后自检块消费
+    # content_data_contract.cross_section_value_findings，按章节标题过滤
+    # 仅报涉及本章的冲突。默认 True —— 与 content_crosscheck_duplicate
+    # 同口径独立开关；关闭则回退到预检 CON-01 仅跨章报告。
+    content_crosscheck_values: bool = True
+    # 数据字典注入：将全局事实的权威取值表注入 facts 文本（唯一取值源，
+    # 避免 AI 编造数值）。默认 True；关闭时提示词逐字回到引入前。
+    content_data_dictionary: bool = True
+
     # ---------- 提示词治理（2026-09-24 · 遗留问题闭环） ----------
     # G2 版本回滚：把变更前后完整提示词正文写入 prompt_audit_logs.snapshot_json，
     #   这是 POST /api/v1/prompts/{key}/rollback 的数据基础。默认 True —— 新增列、

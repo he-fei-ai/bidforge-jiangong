@@ -472,7 +472,12 @@ NINE_CHAPTERS: list[dict] = [
         "chapter": 1, "key": "overview", "title": "工程概况",
         "source_items": ["projectBasicInfo", "overviewParams"],
         "base_fields": ["工程名称", "工程地点", "建设规模", "结构形式",
-                        "参建各方责任主体单位", "风险辨识与分级", "气候特征"],
+                        "参建各方责任主体单位", "风险辨识与分级", "气候特征",
+                        # R52（2026-10-07）：一致性主题键对齐 —— 「总工期」是
+                        # CONSISTENCY_KEY_RULES 的数据字典权威键，此前九大章节
+                        # 无落点（数据字典有值但要素清单不要求）。追加到尾部，
+                        # 与 content_data_contract 判据同源（parity 护栏锁定）。
+                        "总工期"],
         "category_fields": {
             "foundation_pit": ["基坑周长/面积/深度", "支护形式", "降水方式", "监测要求"],
             "formwork": ["模板类型", "支撑高度", "跨度", "荷载", "混凝土等级"],
@@ -528,14 +533,20 @@ NINE_CHAPTERS: list[dict] = [
         "chapter": 7, "key": "acceptance", "title": "验收要求",
         "source_items": ["qualityAcceptance"],
         "base_fields": ["验收标准编号", "验收程序步骤", "验收内容清单",
-                        "验收人员组成"],
+                        "验收人员组成",
+                        # R52：一致性主题键对齐 —— 「保修期与缺陷责任期」
+                        # （CONSISTENCY_KEY_RULES 权威键）此前无落点。
+                        "保修期与缺陷责任期"],
         "category_fields": {},
     },
     {
         "chapter": 8, "key": "emergency", "title": "应急处置措施",
         "source_items": ["emergencyResponse"],
         "base_fields": ["应急组织架构", "应急联系人及电话", "应急物资清单",
-                        "救援线路", "附近医院信息"],
+                        "救援线路", "附近医院信息",
+                        # R52：一致性主题键对齐 —— 「响应时限」
+                        # （CONSISTENCY_KEY_RULES 权威键）此前无落点。
+                        "响应时限"],
         "category_fields": {},
     },
     {
