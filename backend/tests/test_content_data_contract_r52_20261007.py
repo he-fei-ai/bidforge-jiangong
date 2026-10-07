@@ -28,8 +28,13 @@
 导致护栏恒失败、后人被迫把它改松或删掉。本文件的断言一律锚定**函数输出**或
 **AST 节点结构**。
 
-⚠️ **模块目前是零导入的孤儿**（全仓无任何 importer，见 ``TestWiringGap``）——
-以上修复在代码层面正确但尚未进入生产路径。该模块被接线时本文件即为回归基线。
+✅ **接线（R52 同日收口）**：模块已进入生产路径（不再是孤儿）——
+``sse_handlers._persist_section`` 的生成后自检消费
+``cross_section_value_findings``（CON-01 逐章口径，与
+``content_crosscheck_duplicate`` **互相独立**的开关
+``content_crosscheck_values``）；``facts_builder.build_facts_text``
+消费 ``build_global_data_dictionary`` + ``render_data_dictionary_block``
+（数据字典注入，开关 ``content_data_dictionary``）。见 ``TestWiring``。
 """
 import ast
 import re
@@ -506,14 +511,36 @@ class TestFailSoft:
 # ---------------------------------------------------------------------------
 # 文档化缺口
 # ---------------------------------------------------------------------------
-class TestWiringGap:
-    @pytest.mark.xfail(
-        reason=("已知缺口（R52）：content_data_contract 目前**零导入** —— 全仓 app/ "
-                "下无任何 importer，本轮 6 项修复在代码层面正确但尚未进入生产路径。"
-                "接线完成即自动通过（strict=False）。"),
-        strict=False)
+class TestWiring:
+    """接线锁（R52 同日收口）：本模块的能力必须真的被生产路径消费。
+
+    ⚠️ 判据纪律：AST 扫真实调用节点，不匹配「源码含字符串」——
+    后者会被注释里的函数名误伤（本仓 §5.14 同族教训）。
+    """
+
+    @staticmethod
+    def _call_names(tree, pred):
+        out = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and pred(node):
+                out.append(node)
+        return out
+
+    @staticmethod
+    def _name_of(call):
+        f = call.func
+        if isinstance(f, ast.Name):
+            return f.id
+        if isinstance(f, ast.Attribute):
+            return f.attr
+        return ""
+
+    def _app_tree(self, rel):
+        p = Path(c.__file__).resolve().parent.parent / rel
+        return ast.parse(p.read_text(encoding="utf-8")), p
+
     def test_module_is_imported_by_production_code(self):
-        """本模块的能力必须真的被生产路径消费（否则修复等于没修）。"""
+        """生产代码至少一处真实 import（接线最低门槛）。"""
         app_dir = Path(c.__file__).resolve().parent.parent
         self_name = Path(c.__file__).name
         for py in app_dir.rglob("*.py"):
@@ -523,6 +550,105 @@ class TestWiringGap:
                                                         errors="replace"):
                 return
         raise AssertionError("全仓 app/ 下无任何文件引用 content_data_contract")
+
+    def test_sse_handlers_calls_value_findings_with_new_section_id(self):
+        """CON-01 逐章自检必须传 new_section_id —— 不传则 new_title 恒空、
+        函数恒返回 []（自检静默空转，等于没接线）。"""
+        tree, _ = self._app_tree(Path("routers") / "sse_handlers.py")
+        calls = self._call_names(
+            tree, lambda n: self._name_of(n) == "cross_section_value_findings")
+        assert calls, "sse_handlers 未调用 cross_section_value_findings"
+        ok = any(
+            any(k.arg == "new_section_id" for k in call.keywords)
+            for call in calls)
+        assert ok, "cross_section_value_findings 调用缺 new_section_id 实参"
+
+    def test_value_check_switch_is_independent_of_duplicate_switch(self):
+        """两个开关必须互相独立：CON-01 自检不得嵌在
+        `if _crosscheck_dup_on:` 块内（否则关掉搬运检测连带关掉数值自检）。
+        AST 判定：value-findings 调用节点的**祖先 If 链**上不得出现
+        `_crosscheck_dup_on` 单独作门控的节点。"""
+        tree, _ = self._app_tree(Path("routers") / "sse_handlers.py")
+        # 收集每个 Call 所在的最内层 If 测试源码链
+        calls = self._call_names(
+            tree, lambda n: self._name_of(n) == "cross_section_value_findings")
+        assert calls
+        parent = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parent[child] = node
+        for call in calls:
+            gates = []
+            node = call
+            while node in parent:
+                node = parent[node]
+                if isinstance(node, ast.If):
+                    gates.append(ast.unparse(node.test))
+            dup_only = [g for g in gates
+                        if "_crosscheck_dup_on" in g
+                        and "_crosscheck_values_on" not in g]
+            assert not dup_only, (
+                f"CON-01 调用被搬运开关单独门控: {dup_only}")
+
+    def test_facts_builder_injects_data_dictionary(self):
+        """数据字典必须真的注入 facts 文本（build + render + 前置拼接）。"""
+        tree, _ = self._app_tree(Path("services") / "facts_builder.py")
+        for fn in ("build_global_data_dictionary", "render_data_dictionary_block"):
+            calls = self._call_names(tree, lambda n, fn=fn: self._name_of(n) == fn)
+            assert calls, f"facts_builder 未调用 {fn}"
+
+    def test_config_flags_exist_and_default_true(self):
+        """两个新开关必须在 config 中登记且默认 True（向后兼容 = 默认生效）。"""
+        import app.config as cfg
+        assert getattr(cfg.settings, "content_crosscheck_values") is True
+        assert getattr(cfg.settings, "content_data_dictionary") is True
+
+
+class TestKeyRulesChapterAlignment:
+    """一致性主题键 ⇔ 九大章节必含要素 对齐（R52 收口）。
+
+    「章节 → 所需字段」映射与提示词要素清单的唯一事实源是
+    ``NINE_CHAPTERS.base_fields``；若 ``CONSISTENCY_KEY_RULES`` 的数据
+    字典权威键在九大章节无落点，会出现「数据字典有值、要素清单不要求、
+    提示词不提示」的断链。本护栏锁定逐键落点（语义别名在测试内显式声明，
+    后人改名/移除任一侧即红）。
+    """
+
+    def _fields(self, key):
+        from app.services.scheme_classification import required_fields_for_chapter
+        return set(required_fields_for_chapter(key))
+
+    def test_exact_keys_have_chapter_home(self):
+        assert "总工期" in self._fields("overview")
+        assert "计划开工日期" in self._fields("plan")
+        assert "计划竣工日期" in self._fields("plan")
+        assert "保修期与缺陷责任期" in self._fields("acceptance")
+        assert "响应时限" in self._fields("emergency")
+
+    def test_aliased_keys_have_semantic_home(self):
+        """无逐字同名字段的键，其语义落点字段必须存在（显式别名表）。"""
+        aliases = {
+            "项目全称": ("overview", ("工程名称",)),
+            "人员数量": ("plan", ("劳动力配置表", "作业人员配置")),
+            "设备型号": ("plan", ("设备配置清单",)),
+        }
+        for rule_key, (chapter, names) in aliases.items():
+            fields = self._fields(chapter)
+            hit = [n for n in names if n in fields]
+            assert hit, f"一致性键「{rule_key}」在 {chapter} 章无语义落点 {names}"
+
+    def test_appended_fields_do_not_reorder_existing_fields(self):
+        """R52 追加必须在尾部 —— 不得改动既有要素顺序（历史契约）。"""
+        from app.services.scheme_classification import NINE_CHAPTERS
+        for ch in NINE_CHAPTERS:
+            base = ch["base_fields"]
+            for tail, anchor in (("总工期", "气候特征"),
+                                 ("保修期与缺陷责任期", "验收人员组成"),
+                                 ("响应时限", "附近医院信息")):
+                if tail in base:
+                    assert base.index(tail) > base.index(anchor), (
+                        f"{ch['key']}: {tail} 必须在 {anchor} 之后")
+
 
 
 

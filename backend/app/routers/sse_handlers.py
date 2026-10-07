@@ -4908,6 +4908,7 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
             # ✅ R29（2026-10-02 · 检查点反哺）：CON-06 跨章节段落搬运的生成后自检。
             # 仅当 _selfcheck_on 时生效；关闭完整回退到引入前行为。
             _crosscheck_dup_on = bool(getattr(settings, "content_crosscheck_duplicate", True))
+            _crosscheck_values_on = bool(getattr(settings, "content_crosscheck_values", True))  # ✅ R52：CON-01 跨章节数值一致性自检开关 —— 与 content_crosscheck_duplicate **互相独立**（关掉搬运检测不得连带关掉数值一致性自检），默认 True。
             # ✅ P2 修复（2026-10-04 · O(N²) 性能）：跨章搬运检测的内存快照。
             #    正文生成过程中，库内 sections 表只会「增量增加已成功落库的章节」
             #    （章节 id 稳定，正文只在首次落库后不再变）。首次进入 _persist_section
@@ -5351,72 +5352,52 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     #    - 锁外只读、fail-soft：查询异常只打 WARNING，
                     #      绝不影响正文落库（正文已在锁内事务里保证原子）；
                     #    - 只报涉及本章的搬运组，避免把历史搬运重复报出。
-                    if _crosscheck_dup_on:
+                    if _crosscheck_dup_on or _crosscheck_values_on:
+                        _dup_secs: list = []
                         try:
-                            # ✅ P2 修复（2026-10-04 · O(N²) 性能）：
-                            #    旧实现**每章**都发起一次 `SELECT * FROM sections`
-                            #    全表拉取并喂给 cross_section_copy_findings ——
-                            #    对 50 章方案即 50 × 全表扫描 + 50 × 全库交叉分析。
-                            #    库内数据在整个正文生成流程中只有"落库章节增多"
-                            #    这一种变化，因此改成：
-                            #      · 首次调用 → 从 DB 加载完整 sections 快照；
-                            #      · 后续调用 → 直接复用内存快照，把新落库的
-                            #        章节 append 进去（幂等：按 id 去重）。
-                            #    本章（section_id）在内存里的最终正文参与比对。
-                            #    ⚠️ 语义不变：cross_section_copy_findings 只看
-                            #    「本章 vs 库内既有」，快照里包含本章的最新正文
-                            #    与所有已成功落库的其它章节，行为与旧实现等价。
-                            #    ⚠️ 若 content 过短（骨架归一后 < 20 字）不可能
-                            #    构成「大段照抄」——直接跳过，减少无效调用。
-                            #    注意 COPY_GROUP_LARGE_CHARS=60 是升级"large"
-                            #    严重度的阈值，不是判定"存在搬运"的门槛；这里
-                            #    的 20 字门槛仅用于性能护栏，低于它的正文
-                            #    即便完全重复也不会被用户察觉为「大段搬运」。
-                            _content_len = len(content or "")
-                            if _content_len < 20:
-                                pass
-                            else:
-                                if _crossdup_snapshot is None:
-                                    _dup_cur = await db.execute(
+                            if _crossdup_snapshot is None:
+                                _dup_cur = await db.execute(
                                         "SELECT id, title, content FROM sections"
                                         " WHERE scheme_id=? AND content IS NOT NULL"
                                         " AND content != ''", (scheme_id,))
-                                    _dup_rows = (await _dup_cur.fetchall()
-                                                 if _dup_cur is not None else [])
-                                    _crossdup_snapshot = {
-                                        _r["id"]: {
-                                            "id": _r["id"],
-                                            "title": _r["title"],
-                                            "content": _r["content"],
-                                        } for _r in _dup_rows
-                                    }
+                                _dup_rows = (await _dup_cur.fetchall()
+                                    if _dup_cur is not None else [])
+                                _crossdup_snapshot = {
+                                    _r["id"]: {
+                                        "id": _r["id"],
+                                        "title": _r["title"],
+                                        "content": _r["content"],
+                                    } for _r in _dup_rows
+                                }
                                 _crossdup_snapshot[section_id] = {
                                     "id": section_id,
                                     "title": _ck_title,
                                     "content": content,
                                 }
                                 _dup_secs = list(_crossdup_snapshot.values())
-                                _ck_findings.extend(cross_section_copy_findings(
-                                    _dup_secs, new_section_id=section_id))
+                                # ⚠️ 20 字门槛只用于跳过「搬运」判定（性能护栏），数值一致性自检不受它约束 ——
+                                # 短正文同样可能写出与其它章节矛盾的工期/人数取值。
+                                if _crosscheck_dup_on and len(content or "") >= 20:
+                                    _ck_findings.extend(cross_section_copy_findings(
+                                        _dup_secs, new_section_id=section_id))
                         except Exception:
                             logger.warning(
                                 "章节 %s 跨章搬运检测失败（忽略，不影响落库）",
                                 section_id[:8], exc_info=True)
-                        # ✅ R52（2026-10-07）：CON-01 跨章节数值一致性自检。
-                        # 复用 _crossdup_snapshot（与 CON-06 同形），
-                        # 调用 content_data_contract.cross_section_value_findings
-                        # （与预检 numeric_consistency_findings 同源判据实现），
-                        # 只报涉及本章的冲突。开关 content_crosscheck_values
-                        # 默认 True；关闭则回退到预检 CON-01 仅跨章报告。
-                        if settings.content_crosscheck_values:
-                            try:
-                                _ck_findings.extend(
-                                    cross_section_value_findings(
+                    # ✅ R52（2026-10-07）：CON-01 跨章节数值一致性自检。
+                    # 复用 _crossdup_snapshot（与 CON-06 同形），调用 content_data_contract.
+                    # cross_section_value_findings（与预检 numeric_consistency_findings 同源
+                    # 判据实现），只报涉及本章的冲突。与搬运开关互相独立；_dup_secs 预初始化，
+                    # 快照构建失败时退化为空列表（自检空转，绝不阻断落库）。
+                    if _crosscheck_values_on:
+                        try:
+                            _ck_findings.extend(
+                                cross_section_value_findings(
                                         _dup_secs, new_section_id=section_id))
-                            except Exception:
-                                logger.warning(
-                                    "章节 %s 数值一致性自检失败（忽略，不影响落库）",
-                                    section_id[:8], exc_info=True)
+                        except Exception:
+                            logger.warning(
+                                "章节 %s 数值一致性自检失败（忽略，不影响落库）",
+                                section_id[:8], exc_info=True)
                     if _ck_findings:
                         report = dict(report or {})
                         report["checkpoint_findings"] = _ck_findings
