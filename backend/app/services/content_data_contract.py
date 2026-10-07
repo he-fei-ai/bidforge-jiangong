@@ -320,7 +320,17 @@ def _row_chapter(row) -> str:
 
 
 def _row_source_ref(row) -> str:
-    """取事实行来源引用（dict 的 source_ref；元组行无此列 → 空串）。"""
+    """取事实行来源引用（dict 的 source_ref；元组行无此列 → 空串）。
+
+    ⚠️ 历史事故：本函数体曾被错插到 ``audit_call_matrix`` 末尾，成为一段
+    **不可达**代码，而这里只剩 docstring —— 于是全仓每个事实的 ``source_ref``
+    都静默返回 ``None``（溯源引用字段整体失效，且零日志零报错）。新增行时务必
+    确认落在本函数体内。
+    """
+    try:
+        return str(row.get("source_ref") or "") if isinstance(row, dict) else ""
+    except (TypeError, ValueError):
+        return ""
 def iter_consistency_values(facts_rows) -> list:
     """从全局事实行抽取全部一致性主题取值（不截断、不去重）。
 
@@ -350,8 +360,12 @@ def iter_consistency_values(facts_rows) -> list:
             for _key, name_pattern, rx, obj_hints in CONSISTENCY_KEY_RULES:
                 for m, value_text in _iter_value_matches(
                         text, rx, name_value_stopwords=_stopwords_for(_key)):
+                    # 对象限定词只在**匹配附近**找（±40 字窗口）。⚠️ 这里绝不能传整行
+                    # 文本：一条事实里对象词可能出现在与取值毫无关系的段落中，全篇扫描
+                    # 会把无关词误当前缀（与 :func:`build_cross_section_digest` 同口径）。
+                    win = text[max(0, m.start() - 40):m.start() + max(len(value_text), 12)]
                     out.append({
-                        "key": _qualify_key(value_text, obj_hints, text),
+                        "key": _qualify_key(value_text, obj_hints, win),
                         "rule_key": _key,
                         "name": m.group("name") or "",
                         "value": value_text,
@@ -870,6 +884,3 @@ def audit_call_matrix(*, extraction_items, facts_rows, sections,
         "gaps": gaps,
         "generated_report": dict(generated_report or {}),
     }
-
-
-    return str(row.get("source_ref") or "") if isinstance(row, dict) else ""
