@@ -3438,6 +3438,14 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
     cur = await db.execute(
         "SELECT file_name, file_path, parsed_markdown, project_id, parse_version "
         "FROM project_documents WHERE id=?", (doc_id,))
+    # ✅ R13 读路径补漏（2026-10-08）：2026-10-05 收口时本函数只给【锁内二次
+    #    复核】查询补了判空（见下方），首查一直是漏改点 —— None 游标直接
+    #    fetchone → AttributeError → 500。同一端点两次「按 id 读文档」语义
+    #    分叉（首查 500 / 复查 503）；且 _load_doc、delete/preview/category
+    #    各兄弟端点对同类查询全部回 503。补齐同口径：503 = 可重试。
+    if cur is None:
+        logger.warning("读取文档失败（db.execute 返回 None，R13），doc=%s", doc_id)
+        raise HTTPException(503, "文档服务暂时不可用，请稍后重试")
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "文档不存在")

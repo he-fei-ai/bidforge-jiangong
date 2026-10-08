@@ -169,10 +169,10 @@ _reg("content_generation_system", "content", "章节正文生成", _wrap_fuzzy_f
   计算书章节的**每个验算小节**必须包含完整的计算链条，示例结构：
   > 1.1.1 立杆稳定性验算
   > 立杆轴向压力设计值 $N = 1.2g_k + 1.4Q_k$，其中 $g_k = 0.35$ kN/m（查表），$Q_k = 2.0$ kN/m（规范取值）。
-  > $$N = 1.2 \times 0.35 + 1.4 \times 2.0 = 3.22 \text{ kN/m}$$
-  > 立杆计算长度 $l_0 = 1.5$ m，长细比 $\lambda = l_0 / i = 1500 / 15.9 = 94.3$，
-  > 查表得 $\varphi = 0.578$。稳定性验算：
-  > $$\frac{N}{\varphi A} = \frac{3220}{0.578 \times 489} = 11.4 \text{ N/mm}^2 \leq f = 205 \text{ N/mm}^2$$
+  > $$N = 1.2 \\times 0.35 + 1.4 \\times 2.0 = 3.22 \\text{ kN/m}$$
+  > 立杆计算长度 $l_0 = 1.5$ m，长细比 $\\lambda = l_0 / i = 1500 / 15.9 = 94.3$，
+  > 查表得 $\\varphi = 0.578$。稳定性验算：
+  > $$\\frac{N}{\\varphi A} = \\frac{3220}{0.578 \\times 489} = 11.4 \\text{ N/mm}^2 \\leq f = 205 \\text{ N/mm}^2$$
   > 满足要求。
   ⚠️ 公式必须用 `$...$` 包裹，严禁写"计算公式为："后留空行。
 {chapter_checkpoint_block}

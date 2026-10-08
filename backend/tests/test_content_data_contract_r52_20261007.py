@@ -591,11 +591,31 @@ class TestWiring:
                 f"CON-01 调用被搬运开关单独门控: {dup_only}")
 
     def test_facts_builder_injects_data_dictionary(self):
-        """数据字典必须真的注入 facts 文本（build + render + 前置拼接）。"""
+        """数据字典必须真的注入 facts 文本，且受开关门控。
+
+        ⚠️ 只断言「调用存在」会被 `if False:` 这类死分支变异逃逸
+        （A/B 实证）—— 必须同时断言 render 调用位于引用
+        ``content_data_dictionary`` 的 If 门控之下。
+        """
         tree, _ = self._app_tree(Path("services") / "facts_builder.py")
         for fn in ("build_global_data_dictionary", "render_data_dictionary_block"):
             calls = self._call_names(tree, lambda n, fn=fn: self._name_of(n) == fn)
             assert calls, f"facts_builder 未调用 {fn}"
+        parent = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parent[child] = node
+        render_calls = self._call_names(
+            tree, lambda n: self._name_of(n) == "render_data_dictionary_block")
+        gated = False
+        for call in render_calls:
+            node = call
+            while node in parent:
+                node = parent[node]
+                if isinstance(node, ast.If) and \
+                        "content_data_dictionary" in ast.unparse(node.test):
+                    gated = True
+        assert gated, "数据字典注入必须受 content_data_dictionary 开关门控"
 
     def test_config_flags_exist_and_default_true(self):
         """两个新开关必须在 config 中登记且默认 True（向后兼容 = 默认生效）。"""

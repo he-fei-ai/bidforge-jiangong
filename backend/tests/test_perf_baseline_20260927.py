@@ -53,7 +53,7 @@ def _mk_tree(depth, width, prefix=""):
 def test_renumber_outline_nodes_perf():
     """8000+ 节点（约 200 章）的递归重排必须秒级。
 
-    关键性质：`_depth > 20` 守卫使递归**有界**，整体 O(节点数)；
+    关键性质：`_path` 环引用守卫与 `_MAX_TREE_DEPTH=200` 失控兜底使递归**有界**，整体 O(节点数)；
     若守卫被去掉，遇到环形 children 会直接爆栈。
     """
     from app.services.numbering import renumber_outline_nodes
@@ -64,7 +64,7 @@ def test_renumber_outline_nodes_perf():
 
 
 def test_renumber_guards_against_cycles():
-    """反例：自引用 / 超深链必须被 _depth 守卫截断，不得 RecursionError。"""
+    """反例：自引用须被 _path 环守卫终止（不得 RecursionError）；60 级合法深链在 _MAX_TREE_DEPTH=200 内**完整编号**（2026-10-08 D-1：旧上限 20 会静默截断 → 现不截断）。"""
     from app.services.numbering import renumber_outline_nodes
     node = {"id": "1", "title": "A"}
     node["children"] = [node]
@@ -76,6 +76,11 @@ def test_renumber_guards_against_cycles():
         cur["children"] = [nxt]
         cur = nxt
     renumber_outline_nodes([deep])
+    # D-1 回归锁：60 级合法深链末端必须被**重排**成规范编号（构造期预置的是
+    # 垃圾 "1.59"，只有 renumber 真正下探到第 60 层才会覆写为 60 段 "1.1…1"）；
+    # 旧上限 20 会在 _depth>20 提前 return，末端残留 "1.59" 且无 level → 本断言即红。
+    assert cur["id"] == "1." * 59 + "1", f"末端未完整重排: {cur.get('id')!r}"
+    assert cur["level"] == 60, f"末端 level 与深度不对齐: {cur.get('level')!r}"
 
 
 # ============================================================

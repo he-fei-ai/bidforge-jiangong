@@ -342,6 +342,17 @@ async def settle_global_conn(tag: str = "") -> None:
         logger.warning("收敛全局连接悬挂事务失败（tag=%s）: %s", tag, e)
 
 
+def _as_path(raw) -> Path:
+    """把 DB_PATH 的任意可转字符串形态归一为 pathlib.Path（类型韧性）。
+
+    DB_PATH 在测试/诊断脚本里可能被覆写为 ``str``；统一在此归一，
+    避免 ``.exists()/.parent/with_name`` 等 Path 专属方法对 str 抛 AttributeError。
+    """
+    if isinstance(raw, Path):
+        return raw
+    return Path(str(raw))
+
+
 def _self_heal_corrupt_wal() -> bool:
     """启动自愈：当「主库本身完好，但 -wal/-shm 损坏」导致整库被 SQLite 判定为
     ``database disk image is malformed`` 时，备份并丢弃损坏的 WAL/SHM，使主库以
@@ -355,17 +366,23 @@ def _self_heal_corrupt_wal() -> bool:
     - 若丢弃后主库仍不通过 ``PRAGMA integrity_check`` 自检，则把备份**还原**，
       保持原状、让应用以原始错误暴露根因，绝不雪上加霜。
     返回 True 表示本次确实丢弃了损坏的 WAL 并完成自愈。
+
+    ✅ 加固（2026-10-08 · 类型韧性）：DB_PATH 允许在测试/脚本里被覆写为 ``str``，
+    本函数此前直接 ``DB_PATH.exists()`` → ``AttributeError`` 把整个 init_db 打崩
+    （E2E 探测实测复现）。现在统一 ``_as_path(DB_PATH)`` 归一为 pathlib.Path 后再
+    使用，任何调用方只要给的是「可转字符串的路径」都不会在此崩溃。
     """
-    if not DB_PATH.exists():
+    db_path = _as_path(DB_PATH)
+    if not db_path.exists():
         return False
-    wal = DB_PATH.with_name(DB_PATH.name + "-wal")
-    shm = DB_PATH.with_name(DB_PATH.name + "-shm")
+    wal = db_path.with_name(db_path.name + "-wal")
+    shm = db_path.with_name(db_path.name + "-shm")
     if not wal.exists():
         return False
 
     # 1) 只读自检：主库 + 当前 WAL 是否真的损坏
     try:
-        _probe = sqlite3.connect(str(DB_PATH))
+        _probe = sqlite3.connect(str(db_path))
         try:
             _row = _probe.execute("PRAGMA integrity_check(1)").fetchone()
         finally:
@@ -377,10 +394,10 @@ def _self_heal_corrupt_wal() -> bool:
 
     # 2) 备份（连同主库，便于事后追查/恢复 WAL 中未提交事务）
     ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    bak_dir = DB_PATH.parent / f"recov_bak_{ts}"
+    bak_dir = db_path.parent / f"recov_bak_{ts}"
     try:
         bak_dir.mkdir(parents=True, exist_ok=True)
-        for _f in (DB_PATH, wal, shm):
+        for _f in (db_path, wal, shm):
             if _f.exists():
                 shutil.copyfile(_f, bak_dir / _f.name)
     except OSError as e:
@@ -399,7 +416,7 @@ def _self_heal_corrupt_wal() -> bool:
 
     # 4) 自愈后自检：主库应能正常打开；若仍损坏则还原备份
     try:
-        _probe2 = sqlite3.connect(str(DB_PATH))
+        _probe2 = sqlite3.connect(str(db_path))
         try:
             _row2 = _probe2.execute("PRAGMA integrity_check(1)").fetchone()
         finally:
@@ -408,7 +425,7 @@ def _self_heal_corrupt_wal() -> bool:
             raise sqlite3.DatabaseError(f"自愈后完整性仍异常: {_row2}")
     except sqlite3.DatabaseError as e:
         logger.warning("WAL 自愈：丢弃 WAL 后主库仍损坏，还原备份: %s", e)
-        for _f in (DB_PATH, wal, shm):
+        for _f in (db_path, wal, shm):
             _bak = bak_dir / _f.name
             if _bak.exists():
                 try:

@@ -207,15 +207,15 @@ def test_build_system_prompt_includes_classification_hint():
 
 def test_validate_all_filled():
     extraction = {
-        "projectBasicInfo": "工程名称：某项目 工程地点：某市 建设规模：10万 结构形式：框架 参建各方责任主体单位：建设/设计/施工 风险辨识与分级：高 气候特征：多雨",  # noqa: E501
+        "projectBasicInfo": "工程名称：某项目 工程地点：某市 建设规模：10万 结构形式：框架 参建各方责任主体单位：建设/设计/施工 风险辨识与分级：高 气候特征：多雨 总工期：540日历天",  # noqa: E501
         "overviewParams": "基坑周长 200m 面积 3000 深度 6m 支护形式 排桩 降水方式 管井 监测要求 沉降",  # noqa: E501
         "compilationBasis": "适用法规清单 适用标准清单 JGJ120 GB50497 GB50202 施工图编号 施工组织设计编号 施工合同编号",  # noqa: E501
         "deploymentSchedule": "计划开工日期 计划竣工日期 分项进度节点 材料需求清单 设备配置清单 劳动力配置表",  # noqa: E501
         "resourceAllocation": "管理人员名单及岗位 安全员名单 特种作业人员及证书编号 作业人员配置",  # noqa: E501
         "constructionTechnique": "材料选型 规格 技术参数 工艺流程步骤 施工方法描述 操作要求 质量检查标准",  # noqa: E501
         "safetyMeasures": "安全组织机构 安全职责分工 技术措施清单 监测方案参数 预警值",  # noqa: E501
-        "qualityAcceptance": "验收标准编号 验收程序步骤 验收内容清单 验收人员组成",  # noqa: E501
-        "emergencyResponse": "应急组织架构 应急联系人及电话 应急物资清单 救援线路 附近医院信息",  # noqa: E501
+        "qualityAcceptance": "验收标准编号 验收程序步骤 验收内容清单 验收人员组成 保修期与缺陷责任期",  # noqa: E501
+        "emergencyResponse": "应急组织架构 应急联系人及电话 应急物资清单 救援线路 附近医院信息 响应时限",  # noqa: E501
         "calcAndDrawings": "计算书类型 计算参数 图纸清单 图纸编号",
     }
     res = validate_chapter_fields(extraction, "foundation_pit")

@@ -235,9 +235,13 @@ class TestChapterRequiredElements:
             key = ch["key"]
             if key == "emergency":
                 elems = cc.chapter_required_elements(key)
-                assert elems[:5] == list(ch["base_fields"]), (
-                    "emergency 章前 5 项必须仍是原 base_fields")
-                assert len(elems) == 6 and "事故类型分组" in elems[5], (
+                base = list(ch["base_fields"])
+                # R52（2026-10-07）：base_fields 尾部追加了「响应时限」
+                # （一致性主题键对齐），切片与长度断言改为**动态**，
+                # 杜绝「写死元素个数」的锚点在要素扩充时误红。
+                assert elems[:len(base)] == base, (
+                    "emergency 章前 N 项必须仍是原 base_fields")
+                assert len(elems) == len(base) + 1 and "事故类型分组" in elems[-1], (
                     "F6 开启时应在 base_fields 之后追加 1 条分组结构要素")
                 assert required_fields_for_chapter(key) == list(ch["base_fields"]), (
                     "校验层口径不得被 F6 注入污染")

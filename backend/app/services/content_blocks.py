@@ -389,6 +389,14 @@ def _parse_content_blocks(content: str) -> list[dict]:
     while i < len(lines):
         line = lines[i]
         stripped = line.strip()
+        # ✅ D-8c 修复（2026-10-08 · BOM 不再阻塞首行标题）：Windows 记事本 /
+        #    部分 OCR 输出常在文首带 U+FEFF，它**不属于空白字符**（str.strip()
+        #    不剥），黏在 "#" 前会让首行标题被解析成普通段落 —— 后果：
+        #    导出少渲染一级标题、正文子标题编号整体错位一格。BOM 是零宽标记、
+        #    绝不是内容，故在**唯一解析入口**统一剥除行首 BOM（仅剥行首，
+        #    不触碰行内数据），导出 / 预览 / 编号规范化三条链路同时受益。
+        if stripped.startswith("\ufeff"):
+            stripped = stripped.lstrip("\ufeff").strip()
         if not stripped:
             i += 1
             continue

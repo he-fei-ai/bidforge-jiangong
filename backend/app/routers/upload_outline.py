@@ -6,7 +6,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 
-from app.db import get_db
+from app.db import get_db, safe_rowcount
 from app.services.ai.json_response import (
     OUTLINE_REPAIR_KEY,
     collect_json_response,
@@ -75,6 +75,58 @@ def _outline_seems_valid(outline: list) -> bool:
     return _outline_has_branch(outline) or _outline_node_count(outline) >= 5
 
 
+async def _r13(cur, what: str):
+    """R13 判空守卫（2026-10-08 收口）：db.execute/executemany 可能返回 None。
+
+    全局单写连接 + aiosqlite 下连接/事务瞬时异常时游标为 None（AGENTS §5.5，
+    同 db.safe_rowcount 说明）。本路由此前是解析提取模块**唯一**整条链路未防护
+    的路由：读路径命中即 AttributeError → 500（前端只看到裸错误、无从重试）；
+    写路径命中则语句根本没执行，却照常回 ok=True / id —— 「假成功」：
+    识别记录未落库前端却拿到 id（后续保存必 404）、目录库没写进去却回
+    {"ok": True}、save-as-outline 半套语句生效后被 get_db 归还时回滚成
+    「什么都没改」但响应已成功返回。
+
+    语义与已收口的兄弟路由一致（global_facts / doc_pipeline 同场景均 503）：
+    这类失败调用方无法解读，唯一正确处置是中止并让客户端整批重试。事务
+    中途抛出时未提交语句由 get_db 归还连接统一 rollback（db.py finally），
+    不会留下半截状态。
+    """
+    if cur is None:
+        logger.warning("db.execute 返回 None（R13），%s 未生效", what)
+        raise HTTPException(503, "服务暂时不可用，请稍后重试")
+    return cur
+
+
+def _r13_write(cur, what: str, *, expected: int = 1, status: int = 503,
+               message: str = "服务暂时不可用，请稍后重试") -> int:
+    """R13 写生效性第二层（2026-10-08 深化）：游标非 None 但影响行数 ≠ 预期。
+
+    `_r13` 只拦「语句根本没执行」（None 游标 → 503）；本函数拦「执行了、但一行
+    没落到 / 少落几行」—— 典型场景是预取与写链之间目标记录被并发删除（多标签页
+    同时保存、删方案 / 清上传记录接口插队）。旧实现全部静默提交：整表重建基于
+    过期快照半套落库（重复目录 / 孤儿章节 / 正文错挂）、状态回写丢失、响应却回
+    ok=True —— 与 global_facts 事实写路径 `_assert_fact_write_applied`（2026-10-06
+    收口）同族缺陷，该处已确立「① None → 503；② 行数不足 → 409/404」口径，
+    本路由对齐同一标准。
+
+    口径（安全前提已实测：aiosqlite executemany 的 rowcount 为累计影响行数，
+    0 行写报 0；safe_rowcount 把负值归一为 0，不会漏放也不会误拦）：
+      · None 游标：与 `_r13` 完全一致（503「服务暂时不可用」，整批可重试）；
+      · 行数不足：按调用点语义回 404（目标记录已被删）/ 409（结构被并发修改）/
+        503（写未完整生效），一律在任何提交前抛出 —— 未提交语句由 get_db
+        归还连接时统一 rollback（db.py finally），不留半套状态。
+    """
+    if cur is None:
+        logger.warning("db.execute 返回 None（R13），%s 未生效", what)
+        raise HTTPException(503, "服务暂时不可用，请稍后重试")
+    affected = safe_rowcount(cur, what=what)
+    if affected != expected:
+        logger.warning("%s：预期影响 %d 行，实际 %d 行（并发变更或写未生效），本次请求中止",
+                       what, expected, affected)
+        raise HTTPException(status, message)
+    return affected
+
+
 @router.post("/parse")
 async def parse_outline(file: UploadFile = File(...),
                         scheme_name: str = Query(""),
@@ -111,7 +163,9 @@ async def parse_outline(file: UploadFile = File(...),
     #    str() 化得到假值，非字符串一律按「未提供」处理。
     _pid = project_id.strip() if isinstance(project_id, str) else ""
     if _pid:
-        _cur = await db.execute("SELECT id FROM projects WHERE id=?", (_pid,))
+        _cur = await _r13(
+            await db.execute("SELECT id FROM projects WHERE id=?", (_pid,)),
+            "目录识别：项目存在性检查")
         if not await _cur.fetchone():
             raise HTTPException(404, "项目不存在，无法建立上传记录归属链")
     # ✅ BUG 修复（历史）：旧实现一次性 await file.read() 无任何大小上限，
@@ -256,11 +310,20 @@ async def parse_outline(file: UploadFile = File(...),
     # 保存记录（raw_text 限 5000 字符，超长时记录截断标记）
     rid = str(uuid.uuid4())
     raw_truncated = len(raw_text) > 5000
-    await db.execute(
-        "INSERT INTO uploaded_outlines (id, project_id, file_name, file_type, raw_text, parsed_json, confidence, status, parse_warnings)"
-        " VALUES (?,?,?,?,?,?,?,?,?)",
-        (rid, _pid, fname, ftype, raw_text[:5000], json.dumps({"outline": outline}, ensure_ascii=False),
-         confidence, "parsed", dump_parse_warnings(parse_warnings)))
+    # ✅ R13 写路径（2026-10-08）：INSERT 返回 None = 识别记录根本没落库，
+    #    而响应照常回 {"id": rid} —— 前端拿着这个不存在的 id 去
+    #    save-as-outline / save-as-library 一律 404「上传记录不存在」，
+    #    且识别消耗的 AI 调用彻底白费（与 global_facts 上传档案 INSERT
+    #    同类的「假成功」出口，必须 commit 前拦下）。
+    # ✅ 深化（2026-10-08 · 零行写）：游标非 None 但 rowcount=0 同属「没落库」，
+    #    仅判 None 拦不住 —— 统一交给 _r13_write 校验预期 1 行。
+    _r13_write(
+        await db.execute(
+            "INSERT INTO uploaded_outlines (id, project_id, file_name, file_type, raw_text, parsed_json, confidence, status, parse_warnings)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (rid, _pid, fname, ftype, raw_text[:5000], json.dumps({"outline": outline}, ensure_ascii=False),
+             confidence, "parsed", dump_parse_warnings(parse_warnings))),
+        "目录识别保存上传记录")
     await db.commit()
 
     result = {"id": rid, "outline": outline, "confidence": confidence, "file_name": fname}
@@ -310,10 +373,17 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
         raise HTTPException(400, "缺少 outline 数据")
 
     # 先查上传记录是否存在，再查方案是否存在（避免 JOIN 列名歧义）
-    cur = await db.execute("SELECT id FROM uploaded_outlines WHERE id=?", (upload_id,))
+    # ✅ R13 读路径（2026-10-08）：None 游标不得降级成 404 —— 那会把数据库
+    #    瞬时故障误报成「记录已丢失」，用户以为上传白做（与 global_facts
+    #    list_documents / _load_doc 同口径：503 = 可重试）。
+    cur = await _r13(
+        await db.execute("SELECT id FROM uploaded_outlines WHERE id=?", (upload_id,)),
+        "save-as-outline：上传记录存在性检查")
     if not await cur.fetchone():
         raise HTTPException(404, "上传记录不存在")
-    cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
+    cur = await _r13(
+        await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,)),
+        "save-as-outline：方案存在性检查")
     srow = await cur.fetchone()
     if not srow:
         raise HTTPException(404, "方案不存在")
@@ -349,10 +419,21 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     def _norm_title(t: str) -> str:
         return _re.sub(r'\s+', '', str(t or '')).strip()
 
-    cur = await db.execute(
-        "SELECT id, title, content, word_count, status, word_budget, parent_id"
-        " FROM sections WHERE scheme_id=? ORDER BY sort_order, created_at",
-        (scheme_id,))
+    cur = await _r13(
+        await db.execute(
+            # ✅ BUG 修复（字段错位，2026-10-08）：SELECT 此前漏取 level ——
+            #    下方三层索引按 `er.get("level")` 读层级，漏列使其恒为 None→1，
+            #    by_parent_level / by_level 两个结构桶把所有旧章节当作一级节
+            #    （2026-10-04 三层索引修复的层级维度实际失效，仅剩路径/标题桶
+            #    在真实兜底）。补入该列使结构桶按声明语义生效。
+            "SELECT id, title, content, word_count, status, word_budget, parent_id, level"
+            " FROM sections WHERE scheme_id=? ORDER BY sort_order, created_at",
+            (scheme_id,)),
+        "save-as-outline：既有章节预取")
+    # ✅ R13（2026-10-08）：**不得** fail-soft 成空列表 —— existing_rows 为空时
+    #    下方标题匹配全部落空：所有旧章节按「新章节」INSERT（同 scheme 出现
+    #    两套重复目录）、旧行又因不在 old_ids 里而不会被删除/保留，
+    #    已生成正文整批丢失且无级联清理。读失败只能 503 中止。
     existing_rows = [dict(r) for r in await cur.fetchall()]
     # ✅ BUG 修复（2026-10-04 · 跨父级正文错配）：同名子标题（"施工准备""安全保证
     #    措施"）在不同父章节下合法存在。旧实现用「不分父级、不分层级」的全局队列
@@ -540,37 +621,84 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
             1 for er in existing_rows
             if er["id"] in full_delete_ids and str(er.get("content") or "").strip())
         placeholders = ",".join("?" * len(full_delete_ids))
-        await db.execute(
-            f"DELETE FROM chart_predictions WHERE section_id IN ({placeholders})",
-            list(full_delete_ids))
-        await db.execute(
-            f"DELETE FROM sections WHERE id IN ({placeholders})",
-            list(full_delete_ids))
+        # ✅ R13 写路径（2026-10-08）：DELETE 未生效却继续 commit → 被删章节
+        #    （含已生成正文）原样留在库里，与新 INSERT 的章节叠加成两套重复
+        #    目录；chart_predictions 同理残留悬空预测。整批中止（get_db 归还
+        #    时回滚本事务），不交付半套结构。
+        # ⚠️ 图表预测的 DELETE **不做行数校验**：多数章节本就没有 chart_predictions
+        #    行，命中 0 行是正常情况，预期行数在这里不可知（只保留 None 判空）。
+        await _r13(
+            await db.execute(
+                f"DELETE FROM chart_predictions WHERE section_id IN ({placeholders})",
+                list(full_delete_ids)),
+            "save-as-outline：级联清理图表预测")
+        # ✅ 深化（2026-10-08 · 零行/少行写）：sections 的 ID 全部来自本事务
+        #    稍早的预取，DELETE 命中数 < 预期 = 期间被并发删除 —— 预取快照已过期，
+        #    标题匹配/保留判定不再可信，继续重建会把基于旧结构的半套结果提交。
+        _r13_write(
+            await db.execute(
+                f"DELETE FROM sections WHERE id IN ({placeholders})",
+                list(full_delete_ids)),
+            "save-as-outline：删除未复用旧章节",
+            expected=len(full_delete_ids),
+            status=409,
+            message="目录章节在保存期间被并发修改，本次保存已中止，请刷新后重试")
 
     # 批量更新匹配章节（结构字段，保留正文）
     if updates:
-        await db.executemany(
-            "UPDATE sections SET title=?, description=?, level=?, parent_id=?,"
-            " word_budget=?, outline_json=?, sort_order=?, updated_at=? WHERE id=?",
-            updates)
+        # ✅ 深化（2026-10-08 · 少行写）：updates 的每个 sid 唯一（consumed 集合
+        #    保证旧章节至多消费一次），预期影响 = len(updates)。命中数不足 = 部分
+        #    匹配章节在预取后被并发删除：这些节点既没被 UPDATE 也没在 new_inserts
+        #    里，提交后目录会静默缺章节（preserved_content 虚报、父挂子断链）。
+        _r13_write(
+            await db.executemany(
+                "UPDATE sections SET title=?, description=?, level=?, parent_id=?,"
+                " word_budget=?, outline_json=?, sort_order=?, updated_at=? WHERE id=?",
+                updates),
+            "save-as-outline：更新匹配章节结构字段",
+            expected=len(updates),
+            status=409,
+            message="目录章节在保存期间被并发修改，本次保存已中止，请刷新后重试")
 
     # 批量插入新章节
     if new_inserts:
-        await db.executemany(
-            "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
-            " description, level, sort_order, status, outline_json, word_budget)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            new_inserts)
+        # ✅ 深化（2026-10-08 · 少行写）：INSERT 少落行只可能是语句未完整执行
+        #    （连接/事务瞬时异常），属可重试故障 → 503 中止，绝不提交「缺几节
+        #    但响应回 count=全量」的半套目录。
+        _r13_write(
+            await db.executemany(
+                "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
+                " description, level, sort_order, status, outline_json, word_budget)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                new_inserts),
+            "save-as-outline：插入新章节",
+            expected=len(new_inserts),
+            status=503,
+            message="服务暂时不可用，章节写入未完整生效，请稍后重试")
 
-    await db.execute(
-        "UPDATE schemes SET outline_source='上传识别', status='目录已确认', updated_at=? WHERE id=?",
-        (datetime.now().isoformat(), scheme_id))
+    # ✅ 深化（2026-10-08 · 零行写）：方案在存在性检查后被并发删除时，
+    #    UPDATE 命中 0 行 —— 章节已重建却无人认领（孤儿目录）。中止回滚。
+    _r13_write(
+        await db.execute(
+            "UPDATE schemes SET outline_source='上传识别', status='目录已确认', updated_at=? WHERE id=?",
+            (datetime.now().isoformat(), scheme_id)),
+        "save-as-outline：回写方案目录来源/状态",
+        expected=1,
+        status=404,
+        message="方案不存在（可能已被删除），本次保存已中止")
     # ✅ 链路断裂修复（2026-10-03）：同步回写 project_id（取自方案反查）——
     #    否则历史/无项目上下文入口产生的空 project_id 记录在方案保存后
     #    仍不被删项目级联覆盖（R32 的显式 DELETE 按 project_id 匹配 0 行）。
-    await db.execute(
-        "UPDATE uploaded_outlines SET scheme_id=?, project_id=?, status='saved' WHERE id=?",
-        (scheme_id, project_id or "", upload_id))
+    # ✅ 深化（2026-10-08 · 零行写）：上传记录被并发删除时中止整事务 ——
+    #    目录来源记录已消失，保留重建结果只会造成「无主目录」无从追溯。
+    _r13_write(
+        await db.execute(
+            "UPDATE uploaded_outlines SET scheme_id=?, project_id=?, status='saved' WHERE id=?",
+            (scheme_id, project_id or "", upload_id)),
+        "save-as-outline：回写上传记录归属链",
+        expected=1,
+        status=404,
+        message="上传记录不存在（可能已被删除），本次保存已中止")
     # ✅ 整表重建后作废一致性扫描缓存（与 /save-outline 同口径，2026-09-23）
     from app.routers.sections import invalidate_consistency_scan_cache
     await invalidate_consistency_scan_cache(db, scheme_id)
@@ -620,14 +748,34 @@ async def save_as_library(upload_id: str, body: dict, db=Depends(get_db)):
     #    返回 {"ok": True} —— 调用方误以为保存成功，实则未关联任何上传记录。
     #    与 save_as_outline（先查 uploaded_outlines 再查 schemes，均 404）同口径：
     #    空 outline 的 400 优先级更高，故放到该检查之后。
-    cur = await db.execute("SELECT id FROM uploaded_outlines WHERE id=?", (upload_id,))
+    cur = await _r13(
+        await db.execute("SELECT id FROM uploaded_outlines WHERE id=?", (upload_id,)),
+        "save-as-library：上传记录存在性检查")
     if not await cur.fetchone():
         raise HTTPException(404, "上传记录不存在")
     lid = str(uuid.uuid4())
-    await db.execute(
-        "INSERT INTO outline_library (id, name, source, outline_json, review_status)"
-        " VALUES (?,?,?,?,?)",
-        (lid, name, "上传识别", outline_json, "待审核"))
-    await db.execute("UPDATE uploaded_outlines SET status='library_saved' WHERE id=?", (upload_id,))
+    # ✅ R13 写路径（2026-10-08）：INSERT 未生效仍回 {"id": lid, "ok": True}
+    #    是「假成功」—— 目录库列表里没有新条目，前端提示已保存但刷新即消失；
+    #    UPDATE 未生效则上传记录停留旧 status。均 503 中止（未提交语句由
+    #    get_db 归还时回滚）。
+    # ✅ 深化（2026-10-08 · 零行写）：None 之外补行数校验 —— rowcount=0 同样是
+    #    「没写进去」；status 回写命中 0 行 = 上传记录在存在性检查后被并发删除，
+    #    此时必须连目录库 INSERT 一起回滚，否则产生与任何上传记录脱钩的孤儿条目
+    #    （目录库列表出现无法追溯来源的「上传识别」条目）。
+    _r13_write(
+        await db.execute(
+            "INSERT INTO outline_library (id, name, source, outline_json, review_status)"
+            " VALUES (?,?,?,?,?)",
+            (lid, name, "上传识别", outline_json, "待审核")),
+        "save-as-library：写入目录库",
+        expected=1,
+        status=503,
+        message="服务暂时不可用，目录库写入未生效，请稍后重试")
+    _r13_write(
+        await db.execute("UPDATE uploaded_outlines SET status='library_saved' WHERE id=?", (upload_id,)),
+        "save-as-library：回写上传记录状态",
+        expected=1,
+        status=404,
+        message="上传记录不存在（可能已被删除），本次保存已中止")
     await db.commit()
     return {"id": lid, "ok": True}

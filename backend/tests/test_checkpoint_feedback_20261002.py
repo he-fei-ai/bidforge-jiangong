@@ -519,8 +519,16 @@ class TestStd03BaseNumberExemption:
         assert '"content_crosscheck_duplicate", True' in self.sse
 
     def test_gated_by_selfcheck_and_switch(self):
-        """必须双重门控：总自检开关 AND 本项独立开关（关闭完整回退）。"""
-        assert 'if _crosscheck_dup_on:' in self.sse
+        """必须双重门控：总自检开关 AND 本项独立开关（关闭完整回退）。
+
+        R52（2026-10-07）：CON-01 数值一致性自检与搬运检测**共享快照构建**，
+        外层门控为合取 ``if _crosscheck_dup_on or _crosscheck_values_on:``；
+        搬运调用仍由 ``_crosscheck_dup_on``（+ 20 字性能门槛）**单独**门控 ——
+        两个独立开关互不连带。
+        """
+        assert 'if _crosscheck_dup_on or _crosscheck_values_on:' in self.sse
+        assert ('if _crosscheck_dup_on and len(content or "") >= 20:'
+                in self.sse), "搬运调用必须仍由 _crosscheck_dup_on 单独门控"
 
     def test_called_after_checkpoint_selfcheck(self):
         """顺序锁：CON-06 必须在 checkpoint_selfcheck 之后执行

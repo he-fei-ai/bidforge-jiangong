@@ -37,8 +37,14 @@ ALPHABET: list[str] = [
     chr(ord("a") + i) if i < 26 else f"a{chr(ord('a') + i - 26)}" for i in range(52)
 ]
 
-# 目录树递归最大深度（环引用 / 异常深嵌套防护，全模块唯一口径）
-_MAX_TREE_DEPTH = 20
+# 目录树编号递归最大深度（失控兜底 · 编号域唯一口径；sse_handlers 校验/计数的
+# depth 止损阈值（10/12）语义不同，刻意不并入本常量，强行统一会改变异常输入行为）。
+# ✅ 2026-10-08（D-1 加固）：环引用防护已由 renumber_outline_nodes 的
+#    路径身份守卫（_path，按 id(node) 回溯）承担 —— 深度上限不再承担防环
+#    职责，只作「异常输入失控」的最后兜底。合法深嵌套（长方案个别达 8 级、
+#    压力边界 120+ 级）必须**完整**完成编号：旧上限 20 会让超限子树被静默
+#    跳过、节点无 id，调用方 KeyError（实测 120 级链即复现）。
+_MAX_TREE_DEPTH = 200
 
 
 # ------------------------------------------------------------
@@ -127,7 +133,8 @@ def strip_outline_numbering(title: str) -> str:
 
 
 def renumber_outline_nodes(nodes: list, *, strip_titles: bool = True,
-                           prefix: str = "", _depth: int = 0) -> list:
+                           prefix: str = "", _depth: int = 0,
+                           _path: set | None = None) -> list:
     """程序统一重排目录树编号（不信任模型编号）——目录树编号的唯一实现。
 
     同时修复：
@@ -135,17 +142,22 @@ def renumber_outline_nodes(nodes: list, *, strip_titles: bool = True,
     - 缺少 children 字段的节点 → 添加 children=[]
     - children=None → 转为 []
     - children 不是列表 → 转为 []
-    - 循环引用防护：最大深度 20
+    - 环引用防护：当前递归路径上的节点对象（按 id(node) 身份）不得再次进入，
+      回溯式守卫，DAG 共享子树不受影响
+    - 失控兜底：递归深度上限 _MAX_TREE_DEPTH（合法深嵌套在限内完整编号）
 
     Args:
         nodes: 目录树节点列表（就地修改并返回）。
         strip_titles: 是否剥离标题内嵌编号。目录树（标题为 AI 原文）用 True；
             DB 行标题已是裸标题的路径用 False。
         prefix: 父节点编号前缀（递归内部使用）。
-        _depth: 递归深度（循环引用防护）。
+        _depth: 递归深度（失控兜底）。
+        _path: 当前递归路径上的节点对象 id 集合（环引用防护，递归内部使用）。
     """
     if _depth > _MAX_TREE_DEPTH or not isinstance(nodes, list):
         return nodes
+    if _path is None:
+        _path = set()
     # 编号按"有效节点"连续递增：非法节点（非 dict）被跳过时不应占用编号，
     # 避免出现 "1 / 2 / 4" 这样的断号。
     valid_idx = 0
@@ -154,6 +166,17 @@ def renumber_outline_nodes(nodes: list, *, strip_titles: bool = True,
             # ✅ 健壮性修复：旧实现直接 node["id"]=... → 传入手工编辑/第三方
             #    上传的畸形目录（含字符串项）时抛 AttributeError/TypeError，
             #    save-outline 接口直接 500。
+            continue
+        # ✅ D-1 加固（2026-10-08）：环引用按「当前路径上的节点对象」拦截
+        #    （回溯式：进入子树前登记、退出后移除）。旧实现只靠深度上限 20
+        #    防环，而合法深嵌套（>20 级）会被静默截断、节点无 id → 调用方
+        #    KeyError（120 级链实测复现）。现在合法深树完整编号，
+        #    环引用在第二次相遇处即终止且不占号。
+        _key = id(node)
+        if _key in _path:
+            logger.warning(
+                "目录树编号：检测到环引用（节点对象重复出现在当前路径），"
+                "跳过该子树（prefix=%s）", prefix or "root")
             continue
         valid_idx += 1
         node_id = f"{prefix}.{valid_idx}" if prefix else str(valid_idx)
@@ -168,8 +191,11 @@ def renumber_outline_nodes(nodes: list, *, strip_titles: bool = True,
             node["children"] = []
             children = node["children"]
         if children:
+            _path.add(_key)
             renumber_outline_nodes(children, strip_titles=strip_titles,
-                                   prefix=node_id, _depth=_depth + 1)
+                                   prefix=node_id, _depth=_depth + 1,
+                                   _path=_path)
+            _path.discard(_key)
     return nodes
 
 
@@ -282,6 +308,31 @@ def stored_outline_id(sec: dict) -> str:
     return ""
 
 
+def _stored_id_parts(stored_id) -> list[str]:
+    """存储编号 → 合法点分数字段列表（全模块**唯一判据**，非法返回 ``[]``）。
+
+    ✅ D-8a 修复（2026-10-08）：存储编号合法性此前在本模块有**两份实现**——
+    ``get_stored_section_id`` 用 canonical 的 ``_DOT_PATH_RE.fullmatch``
+    （注释明写「合法编号只能是点分路径；UUID 主键等一律视为无效」），而
+    ``stored_id_to_display`` / ``stored_id_to_prefix`` 各自用
+    ``str(...).split(".") + isdigit`` 松过滤，会把垃圾编号**抢救**成看似合法的
+    值：float ``3.5`` → ``"3.5"`` → ["3","5"] → 前缀 "5" / 展示 "5"；
+    ``"abc1.2"`` → "2"。正文子标题编号属数据完整性红线，松过滤等于让非法章节号
+    静默改写落库正文（且导出与前端口径随之错位）。现收敛到唯一判据：
+    仅接受 str / int 且整体匹配点分数字路径；类型不符、形态不符、含 0 号段
+    （编号从 1 起，脏数据 0 号不存在）一律非法。
+    """
+    if isinstance(stored_id, bool) or not isinstance(stored_id, (str, int)):
+        return []
+    s = str(stored_id).strip()
+    if not _DOT_PATH_RE.fullmatch(s):
+        return []
+    parts = s.split(".")
+    if any(p == "0" for p in parts):
+        return []
+    return parts
+
+
 def stored_id_to_display(stored_id: str) -> str:
     """存储态编号 → 展示态编号（导出 V2 口径）。
 
@@ -289,9 +340,9 @@ def stored_id_to_display(stored_id: str) -> str:
     二级及以下展示编号 = 存储编号去掉首段章号后的相对路径（与
     heading_v2 计数器、DEFAULT_NUMBERING_TEMPLATES 的 {lastN} 口径一致）；
     一级为「第X章」（中文数字，超出字表范围回退阿拉伯数字）。
-    非法编号返回 ""。
+    非法编号返回 ""（合法性判据唯一出口：``_stored_id_parts``）。
     """
-    parts = [p for p in str(stored_id or "").split(".") if p.isdigit()]
+    parts = _stored_id_parts(stored_id)
     if not parts:
         return ""
     if len(parts) == 1:
@@ -305,12 +356,13 @@ def stored_id_to_display(stored_id: str) -> str:
 def stored_id_to_prefix(stored_id: str) -> str:
     """存储态编号 → 正文子标题编号前缀（与导出 _section_number_prefix(展示标题) 同口径）。
 
-    "3" → "3"（第三章 → 3）；"3.2" → "2"；"3.2.4" → "2.4"。非法返回 ""。
+    "3" → "3"（第三章 → 3）；"3.2" → "2"；"3.2.4" → "2.4"。非法返回 ""
+    （合法性判据唯一出口：``_stored_id_parts``）。
 
     导出端正文子标题的前缀取自展示标题（第X章/X/X.X）中的数字路径，
     本函数直接由存储编号折算，两侧对 canonical 目录树天然一致。
     """
-    parts = [p for p in str(stored_id or "").split(".") if p.isdigit()]
+    parts = _stored_id_parts(stored_id)
     if not parts:
         return ""
     return ".".join(parts[1:]) if len(parts) > 1 else parts[0]
@@ -423,7 +475,10 @@ def renumber_section_body_subheadings(
             continue
         line = lines[src]
         indent = line[:len(line) - len(line.lstrip())]
-        m_hash = re.match(r"^(#{1,6})\s+", line.lstrip())
+        # ✅ D-8c（2026-10-08）：与 content_blocks 解析入口同口径 —— 行首 BOM
+        #    不参与 #-标题形态判定（否则 BOM 行会误走纯文本分支重写）。
+        _body = line.lstrip().lstrip("\ufeff").lstrip()
+        m_hash = re.match(r"^(#{1,6})\s+", _body)
         if m_hash:
             # Markdown 井号标题：保留原井号数量，规范化编号与标题文本
             new_line = f"{indent}{m_hash.group(1)} {fixed}"
