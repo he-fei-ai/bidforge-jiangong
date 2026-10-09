@@ -1,0 +1,180 @@
+{
+  "generated_at": "2026-10-08 12:15:40",
+  "cwd": "J:\\编程\\专项方案工具箱\\backend",
+  "python": "3.14.4",
+  "phases": {
+    "A_acl_survey": {
+      "status": "OK",
+      "readable_count": 4,
+      "readable_files": [
+        "tests/test_numbering_unification.py",
+        "tests/test_numbering_batch_perf_20260927.py",
+        "tests/test_content_generation_g12.py",
+        "tests/test_outline_generation_gaps_20261008.py"
+      ],
+      "unreadable_count": 25,
+      "outline_source_readable": false,
+      "outline_services_readable": [],
+      "routers_readable": [],
+      "conftest_readable": false,
+      "pytest_ini_readable": false,
+      "gap_test_readable": true,
+      "bytecode_probe": [
+        {
+          "file": "app/__pycache__/numbering.cpython-314.pyc",
+          "status": "unavailable"
+        },
+        {
+          "file": "app/services/__pycache__/numbering.cpython-314.pyc",
+          "status": "unavailable"
+        }
+      ],
+      "unreadable_detail": [
+        {
+          "file": "app/__init__.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/__init__.py'"
+        },
+        {
+          "file": "app/config.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/config.py'"
+        },
+        {
+          "file": "app/db.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/db.py'"
+        },
+        {
+          "file": "app/schema_sql.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/schema_sql.py'"
+        },
+        {
+          "file": "app/main.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/main.py'"
+        },
+        {
+          "file": "app/models.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/models.py'"
+        },
+        {
+          "file": "app/services/numbering.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/services/numbering.py'"
+        },
+        {
+          "file": "app/services/outline_checkpoint.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/services/outline_checkpoint.py'"
+        },
+        {
+          "file": "app/services/outline_templates.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/services/outline_templates.py'"
+        },
+        {
+          "file": "app/services/outline_quality.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/services/outline_quality.py'"
+        },
+        {
+          "file": "app/services/outline_reorganize.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/services/outline_reorganize.py'"
+        },
+        {
+          "file": "app/services/outline_reference.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/services/outline_reference.py'"
+        },
+        {
+          "file": "app/services/outline_utils.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/services/outline_utils.py'"
+        },
+        {
+          "file": "app/services/content_checkpoint.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/services/content_checkpoint.py'"
+        },
+        {
+          "file": "app/routers/export.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/routers/export.py'"
+        },
+        {
+          "file": "app/routers/schemes.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/routers/schemes.py'"
+        },
+        {
+          "file": "app/routers/sections.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/routers/sections.py'"
+        },
+        {
+          "file": "app/routers/sse_handlers.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/routers/sse_handlers.py'"
+        },
+        {
+          "file": "app/routers/upload_outline.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/routers/upload_outline.py'"
+        },
+        {
+          "file": "app/routers/doc_pipeline.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/routers/doc_pipeline.py'"
+        },
+        {
+          "file": "app/services/ai/json_response.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/services/ai/json_response.py'"
+        },
+        {
+          "file": "app/services/ai/task_registry.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/services/ai/task_registry.py'"
+        },
+        {
+          "file": "app/services/ai/heading_v2.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'app/services/ai/heading_v2.py'"
+        },
+        {
+          "file": "tests/conftest.py",
+          "error": "PermissionError: [Errno 13] Permission denied: 'tests/conftest.py'"
+        },
+        {
+          "file": "pytest.ini",
+          "error": "PermissionError: [Errno 13] Permission denied: 'pytest.ini'"
+        }
+      ]
+    },
+    "C_numbering_oracle": {
+      "status": "BLOCKED"
+    },
+    "B_pytest": {
+      "status": "BLOCKED",
+      "suites": [],
+      "returncode": 1,
+      "duration_sec": 0.36,
+      "passed": 0,
+      "failed": 0,
+      "error": 0,
+      "skipped": 0,
+      "total": 0,
+      "pass_rate": "N/A",
+      "tail": [
+        "    return iniconfig.IniConfig(str(path))",
+        "           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^",
+        "  File \"C:\\Users\\HEFEI\\AppData\\Roaming\\Python\\Python314\\site-packages\\iniconfig\\__init__.py\", line 113, in __init__",
+        "    with open(self.path, encoding=encoding) as fp:",
+        "         ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+        "PermissionError: [Errno 13] Permission denied: 'J:\\\\���\\\\ר���������\\\\backend\\\\pytest.ini'"
+      ]
+    },
+    "D_step_and_handoff": {
+      "status": "DEFINED",
+      "gap_test_file": "tests/test_outline_generation_gaps_20261008.py",
+      "gap_test_size_bytes": 27945,
+      "step_generation_cases": 4,
+      "cross_module_handoff_cases": 3,
+      "note": "两类的 4 + 3 例已定义并通过语法校验；实际执行需源码可读 环境（本环境 import app 被 ACL 拒绝）。"
+    },
+    "E_static_audit": {
+      "status": "OK",
+      "duration_sec": 0.12,
+      "returncode": 0,
+      "key_lines": [
+        "  Test 类: 6  用例: 22  （async 3 / sync 19）",
+        "  SyntaxWarning/DeprecationWarning: 0",
+        "  缺 docstring 的用例: 无",
+        "  声明但无用例覆盖: 无",
+        "  assert 总数: 38，带失败消息的: 24 (63%)",
+        "  pytest.fail/skip 调用: 1 / 3"
+      ]
+    }
+  }
+}

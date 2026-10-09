@@ -1,0 +1,50 @@
+== 1) 语法校验 ==
+文件: tests/test_outline_generation_gaps_20261008.py (27945 B, 578 行)
+compile OK / ast.parse OK
+SyntaxWarning/DeprecationWarning: 0
+
+== 2) 用例统计 ==
+Test 类: 6  用例: 22  （async 3 / sync 19）
+  TestOutlineTreeDepthAndSync            3 例
+      - test_deep_legit_tree_does_not_recurse_over_limit
+      - test_five_level_tree_level_equals_id_depth
+      - test_confidence_preserved_through_five_levels
+  TestRenumbrAfterTitleEdit              5 例
+      - test_insert_at_front_cascades_all_numbers
+      - test_delete_middle_cascades_remainder
+      - test_child_reparent_resyncs_level_and_number
+      - test_invalid_section_number_is_noop_not_crash
+      - test_empty_tree_and_all_empty_titles
+  TestNumberingNamespaceIsolation        2 例
+      - test_no_dot_numbering_when_demoting
+      - test_demote_toggle_is_the_single_switch
+  TestOutlineStepGenerationState         4 例
+      - test_outline_generation_task_popped_when_db_write_fails
+      - test_outline_generation_task_popped_when_broadcast_fails
+      - test_terminal_persistence_failure_is_idempotent
+      - test_update_progress_entrypoint_exists_and_fails_soft
+  TestCrossModuleOutlineHandoff          3 例
+      - test_valid_outline_result_is_attached
+      - test_handoff_preserves_titles_and_numbering
+      - test_corrupt_checkpoint_json_is_swallowed
+  TestEncodingAndLargePayload            5 例
+      - test_bom_does_not_block_first_heading
+      - test_crlf_line_endings_keep_changes_line_accurate
+      - test_fullwidth_digit_heading_is_numbered
+      - test_large_single_section_body_is_idempotent
+      - test_heading_inside_code_fence_with_unicode_is_untouched
+缺 docstring 的用例: 无
+
+== 3) API 引用与可读参考测试的一致性 ==
+参考文件可读: 8/8
+引用的模块属性符号: 4 个
+✓ 全部引用符号均可在既有可读测试中找到依据
+
+== 4) 缺口覆盖矩阵（D-* 声明 vs 实际用例） ==
+文件头声明的缺口: D-1, D-2, D-3, D-4, D-5, D-6, D-7, D-8
+用例 docstring 声明的缺口: D-1, D-2, D-3a, D-3b, D-3c, D-4, D-5, D-6, D-7a, D-7b, D-8a, D-8b, D-8c, D-8d, D-8e, D-8f, D-8g
+声明但无用例覆盖: 无
+
+== 5) 关键断言形态 ==
+assert 总数: 38，带失败消息的: 24 (63%)
+pytest.fail/skip 调用: 1 / 3

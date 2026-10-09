@@ -1,0 +1,18 @@
+python = 3.14.4
+MISSING  app/__pycache__/numbering.cpython-314.pyc
+MISSING  app/__pycache__/outline_checkpoint.cpython-314.pyc
+MISSING  app/__pycache__/outline_templates.cpython-314.pyc
+MISSING  app/__pycache__/outline_quality.cpython-314.pyc
+MISSING  app/__pycache__/content_checkpoint.cpython-314.pyc
+MISSING  app/services/__pycache__/numbering.cpython-314.pyc
+MISSING  app/services/__pycache__/outline_checkpoint.cpython-314.pyc
+MISSING  app/services/__pycache__/outline_templates.cpython-314.pyc
+MISSING  app/services/__pycache__/outline_reorganize.cpython-314.pyc
+MISSING  app/services/__pycache__/content_checkpoint.cpython-314.pyc
+MISSING  app/services/__pycache__/content_blocks.cpython-314.pyc
+MISSING  app/services/__pycache__/file_parser.cpython-314.pyc
+MISSING  app/services/__pycache__/numbering.cpython-313.pyc
+
+尝试用 importlib.util 反编译一个候选模块:
+FAIL     反编译失败: PermissionError: [Errno 13] Permission denied: 'J:\\编程\\专项方案工具箱\\backend\\app/services/__pycache__/numbering.cpython-314.pyc'
+PermissionError: [Errno 13] Permission denied: 'J:\\编程\\专项方案工具箱\\backend\\app/services/__pycache__/numbering.cpython-314.pyc'

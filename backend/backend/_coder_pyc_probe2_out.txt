@@ -1,0 +1,6 @@
+ERR app/__pycache__: PermissionError: [WinError 5] 拒绝访问。: 'app/__pycache__'
+ERR app/services/__pycache__: PermissionError: [WinError 5] 拒绝访问。: 'app/services/__pycache__'
+ERR app/services/doc_pipeline/__pycache__: PermissionError: [WinError 5] 拒绝访问。: 'app/services/doc_pipeline/__pycache__'
+READ-OK app/services/facts_patches.py (27994 B)
+READ-OK app/services/doc_pipeline/doc_storage.py (16432 B)
+READ-OK app/services/doc_pipeline/md_structured.py (14990 B)

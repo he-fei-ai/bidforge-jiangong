@@ -1,0 +1,17 @@
+# ===== 可选：离线 OCR 引擎（扫描件 / 图片型资料提取）=====
+# 安装：cd backend && pip install -r requirements-ocr.txt
+#
+# 说明：
+# - 安装后无需任何系统级软件（不需 Tesseract/CUDA），Windows 开箱即用。
+# - 未安装时，系统会依次尝试：
+#     ① 本地 Tesseract（若已安装）
+#     ② 本地 RapidOCR（本文件）
+#     ③ AI 配置中的视觉大模型
+#   三者都不可用时，上传扫描件会返回明确的启用指引（不会再静默失败）。
+# - 依赖体积较大（onnxruntime + opencv，约 100~200MB），故与主依赖分离。
+
+# numpy 被 ocr.py 的 RapidOCR 路径直接 import（import numpy as np），
+# 单独声明以避免仅依赖 rapidocr 的传递解析导致缺失。
+numpy>=1.24
+
+rapidocr-onnxruntime==1.4.4

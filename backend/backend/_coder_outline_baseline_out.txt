@@ -1,0 +1,101 @@
+
+========================================================================
+目录生成模块 · 基线度量
+========================================================================
+工作区: J:\编程\专项方案工具箱\backend
+
+========================================================================
+Phase A · 环境与 ACL 测绘
+========================================================================
+目标文件 29 个：可读 4 / 不可读 25
+  [x] app/__init__.py                                PermissionError: [Errno 13] Permission denied: 'app/__init
+  [x] app/config.py                                  PermissionError: [Errno 13] Permission denied: 'app/config
+  [x] app/db.py                                      PermissionError: [Errno 13] Permission denied: 'app/db.py'
+  [x] app/schema_sql.py                              PermissionError: [Errno 13] Permission denied: 'app/schema
+  [x] app/main.py                                    PermissionError: [Errno 13] Permission denied: 'app/main.p
+  [x] app/models.py                                  PermissionError: [Errno 13] Permission denied: 'app/models
+  [x] app/services/numbering.py                      PermissionError: [Errno 13] Permission denied: 'app/servic
+  [x] app/services/outline_checkpoint.py             PermissionError: [Errno 13] Permission denied: 'app/servic
+  [x] app/services/outline_templates.py              PermissionError: [Errno 13] Permission denied: 'app/servic
+  [x] app/services/outline_quality.py                PermissionError: [Errno 13] Permission denied: 'app/servic
+  [x] app/services/outline_reorganize.py             PermissionError: [Errno 13] Permission denied: 'app/servic
+  [x] app/services/outline_reference.py              PermissionError: [Errno 13] Permission denied: 'app/servic
+  [x] app/services/outline_utils.py                  PermissionError: [Errno 13] Permission denied: 'app/servic
+  [x] app/services/content_checkpoint.py             PermissionError: [Errno 13] Permission denied: 'app/servic
+  [x] app/routers/export.py                          PermissionError: [Errno 13] Permission denied: 'app/router
+  [x] app/routers/schemes.py                         PermissionError: [Errno 13] Permission denied: 'app/router
+  [x] app/routers/sections.py                        PermissionError: [Errno 13] Permission denied: 'app/router
+  [x] app/routers/sse_handlers.py                    PermissionError: [Errno 13] Permission denied: 'app/router
+  [x] app/routers/upload_outline.py                  PermissionError: [Errno 13] Permission denied: 'app/router
+  [x] app/routers/doc_pipeline.py                    PermissionError: [Errno 13] Permission denied: 'app/router
+  [x] app/services/ai/json_response.py               PermissionError: [Errno 13] Permission denied: 'app/servic
+  [x] app/services/ai/task_registry.py               PermissionError: [Errno 13] Permission denied: 'app/servic
+  [x] app/services/ai/heading_v2.py                  PermissionError: [Errno 13] Permission denied: 'app/servic
+  [x] tests/conftest.py                              PermissionError: [Errno 13] Permission denied: 'tests/conf
+  [x] pytest.ini                                     PermissionError: [Errno 13] Permission denied: 'pytest.ini
+
+字节码探针:
+  源码可读路径数: 0 / 字节码可读路径数: 0
+  app/__pycache__/numbering.cpython-314.pyc      UNAVAILABLE / DENIED
+  app/services/__pycache__/numbering.cpython-314.pyc UNAVAILABLE / DENIED
+
+可运行性结论：
+  status                         OK
+  readable_count                 4
+  unreadable_count               25
+  outline_source_readable        False
+  outline_services_readable      []
+  routers_readable               []
+  conftest_readable              False
+  pytest_ini_readable            False
+  gap_test_readable              True
+  bytecode_probe                 [{'file': 'app/__pycache__/numbering.cpython-314.pyc', 'status': 'unavailable'}, {'file': 'app/services/__pycache__/numbering.cpython-314.pyc', 'status': 'unavailable'}]
+
+  [!] 结论：目录生成模块源码在本环境完全不可读。
+      → 深度探查只能基于「既有回归测试编码的契约」重建（间接证据）。
+      → pytest 无法 collect（app/__init__.py 与 conftest 均不可读）。
+      → Phase B/C/D 输出 BLOCKED，绝不产出伪指标。
+      → 字节码（.pyc）途径亦不可用，无法做反编译级探查。
+
+========================================================================
+Phase C · 编号正确率 / 层级完整率（独立参照实现比对）
+========================================================================
+  [!] BLOCKED：app.services.numbering 不可读（见 Phase A）。
+      参照实现可用，但无法与被测实现比对；不产出伪指标。
+
+========================================================================
+Phase B · pytest 基线（通过率 / 耗时）
+========================================================================
+存在的相关套件: 8/8
+命令: C:\Python314\python.exe -m pytest tests/test_numbering_unification.py tests/test_numbering_batch_perf_20260927.py tests/test_outline_generation_gaps_20261008.py tests/test_content_generation_g12.py tests/test_export_atomicity_r1_20261005.py tests/test_import_module_linkage_fixes_20261003.py tests/test_import_module_crosscut_20261008.py tests/test_chart_pipeline_r13.py -q --no-header -p no:cacheprovider --tb=line
+  结果: 0 passed / 0 failed / 0 error / 0 skipped
+  通过率: N/A   耗时: 0.36s   rc=1
+  [!] 未解析到任何测试结果（可能全部 collection error），输出尾部：
+            return iniconfig.IniConfig(str(path))
+                   ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+          File "C:\Users\HEFEI\AppData\Roaming\Python\Python314\site-packages\iniconfig\__init__.py", line 113, in __init__
+            with open(self.path, encoding=encoding) as fp:
+                 ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        PermissionError: [Errno 13] Permission denied: 'J:\\���\\ר���������\\backend\\pytest.ini'
+
+========================================================================
+Phase D · 分步生成状态 / 跨模块传递（结构性核查）
+========================================================================
+  分步生成状态用例: 4 例
+  跨模块传递用例:   3 例
+  状态: DEFINED —— 已定义，执行依赖源码可读环境。
+
+========================================================================
+Phase E · 新增缺口测试静态审计（语法/覆盖矩阵/API 依据）
+========================================================================
+
+========================================================================
+汇总结论
+========================================================================
+  阶段数: 5，BLOCKED: ['C_numbering_oracle', 'B_pytest']
+  A_acl_survey                 OK
+  C_numbering_oracle           BLOCKED
+  B_pytest                     BLOCKED
+  D_step_and_handoff           DEFINED
+  E_static_audit               OK
+  输出: _coder_outline_baseline_out.txt / _coder_outline_baseline.json

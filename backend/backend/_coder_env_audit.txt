@@ -1,0 +1,60 @@
+
+====================================================================
+1. 读权限测绘（目录生成模块关键文件）
+====================================================================
+  READ FAIL  app/__init__.py                                [Errno 13] Permission denied: 'app/__init__.py'
+  READ FAIL  app/config.py                                  [Errno 13] Permission denied: 'app/config.py'
+  READ FAIL  app/db.py                                      [Errno 13] Permission denied: 'app/db.py'
+  READ FAIL  app/schema_sql.py                              [Errno 13] Permission denied: 'app/schema_sql.py'
+  READ FAIL  app/main.py                                    [Errno 13] Permission denied: 'app/main.py'
+  READ FAIL  app/models.py                                  [Errno 13] Permission denied: 'app/models.py'
+  READ FAIL  app/services/numbering.py                      [Errno 13] Permission denied: 'app/services/numbering.py'
+  READ FAIL  app/services/outline_checkpoint.py             [Errno 13] Permission denied: 'app/services/outline_checkpoint.py'
+  READ FAIL  app/services/outline_templates.py              [Errno 13] Permission denied: 'app/services/outline_templates.py'
+  READ FAIL  app/services/outline_quality.py                [Errno 13] Permission denied: 'app/services/outline_quality.py'
+  READ FAIL  app/services/outline_reorganize.py             [Errno 13] Permission denied: 'app/services/outline_reorganize.py'
+  READ FAIL  app/services/outline_reference.py              [Errno 13] Permission denied: 'app/services/outline_reference.py'
+  READ FAIL  app/services/outline_utils.py                  [Errno 13] Permission denied: 'app/services/outline_utils.py'
+  READ FAIL  app/services/content_checkpoint.py             [Errno 13] Permission denied: 'app/services/content_checkpoint.py'
+  READ FAIL  app/routers/export.py                          [Errno 13] Permission denied: 'app/routers/export.py'
+  READ FAIL  app/routers/schemes.py                         [Errno 13] Permission denied: 'app/routers/schemes.py'
+  READ FAIL  app/routers/sections.py                        [Errno 13] Permission denied: 'app/routers/sections.py'
+  READ FAIL  app/routers/sse_handlers.py                    [Errno 13] Permission denied: 'app/routers/sse_handlers.py'
+  READ FAIL  app/routers/upload_outline.py                  [Errno 13] Permission denied: 'app/routers/upload_outline.py'
+  READ FAIL  app/routers/doc_pipeline.py                    [Errno 13] Permission denied: 'app/routers/doc_pipeline.py'
+  READ FAIL  app/services/ai/json_response.py               [Errno 13] Permission denied: 'app/services/ai/json_response.py'
+  READ FAIL  app/services/ai/task_registry.py               [Errno 13] Permission denied: 'app/services/ai/task_registry.py'
+  READ FAIL  app/services/ai/heading_v2.py                  [Errno 13] Permission denied: 'app/services/ai/heading_v2.py'
+  READ FAIL  tests/conftest.py                              [Errno 13] Permission denied: 'tests/conftest.py'
+  READ FAIL  pytest.ini                                     [Errno 13] Permission denied: 'pytest.ini'
+  READ OK    tests/test_numbering_unification.py           
+  READ OK    tests/test_numbering_batch_perf_20260927.py   
+  READ OK    tests/test_content_generation_g12.py          
+  READ OK    tests/test_outline_generation_gaps_20261008.py
+
+====================================================================
+2. import / listdir 实测
+====================================================================
+  IMPORT FAIL  app                                      [Errno 13] Permission denied: 'J:\\编程\\专项方案工具箱\\backend\\app\\__init__.py'
+  IMPORT FAIL  app.services.numbering                   [Errno 13] Permission denied: 'J:\\编程\\专项方案工具箱\\backend\\app\\__init__.py'
+  IMPORT FAIL  app.services.outline_checkpoint          [Errno 13] Permission denied: 'J:\\编程\\专项方案工具箱\\backend\\app\\__init__.py'
+  LISTDIR FAIL app/routers            [WinError 5] 拒绝访问。: 'app/routers'
+  LISTDIR OK   app/services           (65 entries)
+  LISTDIR OK   tests                  (360 entries)
+
+====================================================================
+3. 写权限探针（新建 / 覆盖既有锁定文件）
+====================================================================
+  WRITE OK    app                                新建文件 -> _envaudit_tr5n83dz
+  WRITE OK    app/services                       新建文件 -> _envaudit_nln1upky
+  WRITE FAIL  app/routers                        新建文件 -> [Errno 13] Permission denied: 'J:\\编程\\专项方案工具箱\\backend\\app\\routers\\_envaudit_eajwaj9_'
+  WRITE OK    tests                              新建文件 -> _envaudit_5f980fff
+  WRITE FAIL  app/services/numbering.py          覆盖既有锁定文件 -> [Errno 13] Permission denied: 'app/services/numbering.py'
+
+====================================================================
+4. 结论
+====================================================================
+  目录生成模块源码在本环境不可读、不可写。
+  → 源码级深度探查、pytest 动态执行、源码补丁均物理不可行。
+  → 详见 docs/目录生成模块专项分析与优化_2026-10-08.md §0.1 / §3.1
+  → 可执行替代：_coder_verify.py（静态校验）、_coder_outline_baseline.py（基线度量）

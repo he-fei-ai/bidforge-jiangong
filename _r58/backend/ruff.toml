@@ -1,0 +1,40 @@
+# Ruff 配置（后端静态检查）
+#
+# 门禁策略（2026-10-04 首次接入）：
+#   存量代码库体量大、历史写法多，首个门禁只保留"高信噪比、能抓真实缺陷"
+#   的两类规则，先达成全绿基线，后续再按文件/按目录逐步加严，避免一上来
+#   产生上千条风格类噪音而使门禁形同虚设：
+#     - E/F (pyflakes)：未用变量/导入、重定义、语法层未定义名等真实缺陷
+#     - I (isort)：import 分组排序，可安全自动修复
+#
+# 加严方式：后续把需要的规则组加入 select，并对暂不达标目录用
+#   [tool.ruff.per-file-ignores] 或显式 ignore 收敛。
+
+target-version = "py312"
+line-length = 120
+src = ["app", "tests"]
+
+extend-exclude = [
+    "data",
+    "logs",
+    "_diagnostics",
+    "tools",
+    "__pycache__",
+]
+
+[lint]
+select = [
+    "E4", "E7", "E9",   # pycodestyle：导入错误 / 语句错误 / 语法错误（不含 E5 行长类风格项）
+    "F",                # pyflakes：真实缺陷（未用导入/变量、重定义、未定义名等）
+    "I",                # isort：import 排序（可自动修复）
+]
+# 项目内多处刻意保留的兼容写法，不作为门禁噪音：
+ignore = [
+    "E402",  # 允许文件尾/条件导入：路由聚合(ai_config)、模块注册(prompts)、兼容垫片刻意为之，挪动有循环导入风险
+    "E731",  # 允许 lambda 赋值（部分回调/兼容垫片刻意使用）
+    "E741",  # 允许 l/b/I 等单字母变量（数学/坐标场景常见）
+]
+
+# 测试目录放宽：fixture 与用例常保留未用参数、通配导入等
+[lint.per-file-ignores]
+"tests/**/*.py" = ["F401", "F811", "F841"]

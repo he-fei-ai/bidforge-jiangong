@@ -1,0 +1,17 @@
+# ===== Windows 专用：DOCX → PDF 高质量导出控件 =====
+# 安装：cd backend && pip install -r requirements-windows.txt
+#
+# 说明：
+# - 仅 Windows 平台需要；pywin32 / docx2pdf 无对应平台 wheel，
+#   切勿加入跨平台的 requirements.txt（会导致 Linux / macOS 安装失败）。
+# - 安装后，导出模块（routers/export.py）的 PDF 转换策略 1(win32com)、
+#   策略 2(docx2pdf) 可用，优先调用本机 Microsoft Word 生成最保真的 PDF。
+# - 未安装或本机无 Word 时，自动回退到策略 3：LibreOffice / soffice
+#   （需另行安装，属系统级控件，非 pip 包）。
+# - 三者均不可用时，导出 DOCX 仍正常，仅 PDF 预览不可用。
+
+# Windows COM 支持（win32com / pythoncom），导出 PDF 的核心依赖
+pywin32==312
+
+# 封装 Word COM 的便捷库（策略 2）；不强制安装，策略1(win32com) 已可独立完成
+docx2pdf>=0.1.8
