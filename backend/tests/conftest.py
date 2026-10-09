@@ -111,7 +111,8 @@ async def db_conn(monkeypatch):
     #    （checkpoint_json 读回仍是 "{}"，断言 ckpt["kind"] 抛 KeyError）；
     #    单独跑该文件却全绿。这里把所有存在模块级绑定的模块一并 patch。
     import importlib
-    for _mod_name in ("app.routers.sse_handlers", "app.services.repair_record",
+    for _mod_name in ("app.routers.sse_handlers", "app.routers.sse_checkpoint",
+                      "app.services.repair_record",
                       "app.routers.system", "app.routers.outline_library"):
         try:
             _mod = importlib.import_module(_mod_name)

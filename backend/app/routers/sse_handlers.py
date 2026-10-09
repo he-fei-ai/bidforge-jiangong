@@ -12,7 +12,6 @@ import copy
 import json
 import logging
 import re
-import sqlite3
 import time
 from datetime import datetime
 
@@ -152,14 +151,8 @@ from app.services.standards_registry import get_standards_text
 # 公开入口改名后保留旧私有名别名，防止 sse_handlers 内部漏改调用点。
 _build_facts_text = build_facts_text  # noqa: E402
 
-from app.routers.sse_utils import (
-    _cn_number,
-    _coerce_bool,
-    _coerce_suggestions,
-    _dedup_continuation,
-    _safe_tail,
-)
-from app.routers.sse_checkpoint import (
+from app.routers.sse_checkpoint import (  # noqa: F401 — 测试直接从 sse_handlers monkeypatch/re-export
+    _FACTS_CHECKPOINT_FIELDS,
     _checkpoint_partial_outline,
     _facts_checkpoint_payload,
     _load_outline_checkpoint,
@@ -169,6 +162,14 @@ from app.routers.sse_checkpoint import (
     _save_facts_checkpoint,
     _save_outline_checkpoint,
     _save_task_checkpoint,
+    _write_task_checkpoint_db,
+)
+from app.routers.sse_utils import (
+    _cn_number,
+    _coerce_bool,
+    _coerce_suggestions,
+    _dedup_continuation,
+    _safe_tail,
 )
 
 logger = logging.getLogger("sse")
@@ -945,149 +946,6 @@ def _snapshot_outline_stats(st: dict) -> dict:
         return {}
 
 
-# ---------- 任务成果 checkpoint（SSE 断线/刷新后可恢复） ----------
-# 说明：目录生成与正文生成都**只走 SSE**（成果需用户确认/落库后才持久化），
-# 断线期间任务在后台跑完时，没有 checkpoint 即确定性丢失。
-async def _save_task_checkpoint(task_id: str, kind: str, payload: dict):
-    """把任务终态成果写入 task_registry.checkpoint_json（kind 区分任务类型）。
-
-    payload 统一带 `event` 字段（completed/stopped/error），便于前端判断来源。
-
-    ✅ 瞬态写失败自动重试（2026-09-23）：checkpoint 是断线重挂接的**唯一**
-    数据源，一次 "database is locked" 就让用户刷新后拿不到任何成果。
-    通过 _retry_db_locked 对 locked / disk I/O 退避重试（确定性错误不重试）。
-    """
-    await _retry_db_locked(
-        lambda: _write_task_checkpoint_db(task_id, kind, payload),
-        max_retries=CHECKPOINT_WRITE_RETRIES,
-        base_delay=CHECKPOINT_WRITE_BASE_DELAY)
-
-
-async def _write_task_checkpoint_db(task_id: str, kind: str,
-                                   payload: dict) -> None:
-    """把 checkpoint 真正写入 task_registry.checkpoint_json。
-
-    独立成函数是为了让 `_save_task_checkpoint` 能整体重试（单测可 monkeypatch
-    本函数注入"首次 locked、次次成功"来验证重试链路）。
-
-    ✅ 重试理由（2026-09-23）：checkpoint 是**断线重挂接的唯一数据源**。
-    正文生成并发写（多章并行落库 + task_registry 进度写）下，
-    busy_timeout 耗尽会抛瞬态的 "database is locked"；一次写失败就意味着
-    用户刷新页面后拿不到任何已生成成果（跑了几分钟白跑）。
-    确定性错误（no such table 等）由 _retry_db_locked 直接抛出，不重试。
-    """
-    conn = await get_conn()
-    await conn.execute(
-        "UPDATE task_registry SET checkpoint_json=?, updated_at=? WHERE id=?",
-        (json.dumps({"kind": kind, **(payload or {})}, ensure_ascii=False),
-         datetime.now().isoformat(), task_id))
-    await conn.commit()
-
-
-async def _save_outline_checkpoint(task_id: str, payload: dict):
-    """把目录生成终态成果（outline/review/failed_chapters）写入 checkpoint_json。"""
-    await _save_task_checkpoint(task_id, "outline_result", payload)
-
-
-async def _save_content_checkpoint(task_id: str, payload: dict):
-    """把正文生成成果清单（done/failed_sections/word_count）写入 checkpoint_json。
-
-    ✅ 增强（2026-09-16 · 承接上一轮报告遗留建议 #2）：正文内容本身已逐章落库
-    （sections.content），但「本次任务生成了哪几章、哪几章失败、为什么失败」只在
-    SSE 事件里出现过 —— 用户刷新页面 / 网络抖动 / 关标签页后，前端重挂接只能拿到
-    `stopped` + failed_count，**无法告诉用户是哪几章失败**，用户只能逐章翻目录树。
-    这里把清单落库，`GET /sse/task/{id}`（task_status）会以 `content_result` 回传。
-    """
-    await _save_task_checkpoint(task_id, "content_result", payload)
-
-
-#: facts checkpoint 回传字段白名单（与在线 completed 事件消费的键保持一致）。
-#: 刻意**不含** groups/facts 明细：成果本身已落 global_facts 表，前端重挂接后
-#: 会走 loadFacts() 重新拉取；把明细塞进 checkpoint 只会让 task_registry 行膨胀。
-_FACTS_CHECKPOINT_FIELDS = (
-    "segment_stats", "cross_conflicts", "warnings", "group_count", "total_items",
-)
-
-
-def _facts_checkpoint_payload(frontend_data: dict) -> dict:
-    """从 format_for_frontend 载荷中筛出可安全落 checkpoint 的字段。
-
-    ✅ 单一事实源：白名单与 `_CHECKPOINT_KINDS["facts_generation"]` 逐字一致，
-    前者决定「写什么」，后者决定「回传什么」—— 两侧同源于此，避免再次分叉
-    （这正是本模块历史上反复出现问题的根因模式）。
-    """
-    if not isinstance(frontend_data, dict):
-        return {}
-    return {k: v for k, v in frontend_data.items() if k in _FACTS_CHECKPOINT_FIELDS}
-
-
-async def _save_facts_checkpoint(task_id: str, payload: dict):
-    """把全局事实提取终态成果写入 checkpoint_json。
-
-    ✅ P0 修复（2026-09-27）：facts_generation 此前**完全没有** checkpoint 通道
-    —— 既无写入点，也不在 `_CHECKPOINT_KINDS` 白名单里。后果：断线/刷新后
-    `GET /sse/task/{id}` 只能回传 status + message，**segment_stats /
-    cross_conflicts / warnings 全部丢失**。前端 SchemeWorkbenchPage.tsx:5434
-    的重挂接分支拿不到失败段数，于是只弹一句「全局事实提取已在后台完成」，
-    用户既不知道哪几段失败、也不知道是否存在跨段矛盾 —— 而这些恰好是
-    facts_extractor 专门计算出来给人看的（在线路径靠 completed 事件回传）。
-    目录/正文两条链路早已有 checkpoint，本条是唯一缺口。
-    """
-    await _save_task_checkpoint(task_id, "facts_result", payload)
-
-
-async def _load_task_checkpoint(task_id: str, kind: str) -> dict | None:
-    """读取指定类型的任务成果 checkpoint（不匹配的 kind 返回 None）。"""
-    conn = await get_read_conn()
-    try:
-        cur = await conn.execute(
-            "SELECT checkpoint_json FROM task_registry WHERE id=?", (task_id,))
-        row = await cur.fetchone()
-    finally:
-        await release_read_conn(conn)
-    if not row or not row[0]:
-        return None
-    try:
-        data = json.loads(row[0])
-    except (TypeError, ValueError):
-        return None
-    if isinstance(data, dict) and data.get("kind") == kind:
-        return data
-    return None
-
-
-async def _checkpoint_partial_outline(task_id: str, outline, failed_chapters,
-                                      *, event: str = "stopped") -> bool:
-    """落库「部分成果」checkpoint（客户端断开/用户停止时的兜底）。
-
-    ✅ 修复（2026-09-16）：长方案分步链路要跑数分钟，成果只走 SSE、用户确认后
-    才入库。此前只有**显式 stopped 分支**会写 checkpoint —— 客户端断开（刷新
-    页面/关标签/网络抖动）走的是 `finally` 兜底路径：任务被标记 stopped，但已
-    生成的 N 章目录确定性丢失（前端 pollTaskUntilTerminal 读到 stopped 却拿不到
-    outline_result，只能提示"后台任务已停止"）。
-
-    返回是否成功落库（失败静默，绝不影响收尾流程）。
-    """
-    outline = outline or []
-    if not outline and not failed_chapters:
-        return False
-    payload = {"event": event, "task_id": task_id, "outline": outline}
-    if failed_chapters:
-        payload["failed_chapters"] = list(failed_chapters)
-        payload["failed_count"] = len(failed_chapters)
-    try:
-        await _save_outline_checkpoint(task_id, payload)
-        return True
-    except Exception:
-        logger.warning("检查点写入失败（task=%s · 目录生成 · 部分成果）", task_id, exc_info=True)
-        return False
-
-
-async def _load_outline_checkpoint(task_id: str) -> dict | None:
-    """读取目录生成成果 checkpoint（薄封装，语义与 kind 校验见 _load_task_checkpoint）。"""
-    return await _load_task_checkpoint(task_id, "outline_result")
-
-
 def _rank_sections_by_basis(text: str, basis) -> tuple[str, int]:
     """把解析提取结果的 Markdown 小节按「与方案名称的相关性」**前置**（不删除）。
 
@@ -1410,43 +1268,6 @@ def _continue_failed_flag(continue_failed: bool,
         # 此时报 continue_failed 才能提示用户去手工补。
         wc = 0
     return wc < int(wb * WORD_UNDER_RATIO)
-
-
-async def _retry_db_locked(factory, max_retries: int = 3,
-                           base_delay: float = 0.2):
-    """对「database is locked / disk I/O error」做有限重试，其余异常原样抛出。
-
-    背景（2026-09-23）：SQLite 在并发写 + busy_timeout 耗尽时会抛
-    OperationalError("database is locked")。这类错误是**瞬态**的，退避后
-    重试通常即成功；而把它与「no such table」这类确定性错误混在一起
-    直接抛出，会让并发写场景出现难以复现的随机失败。
-
-    只重试两类**瞬态**错误：
-      · "database is locked"
-      · "disk I/O error"
-    其余 sqlite3.OperationalError（如 no such table）与非 sqlite3 异常
-    一律原样抛出 —— 重试它们只是浪费时间并掩盖真实缺陷。
-
-    退避为指数递增（base_delay × 2^尝试次数），总尝试次数 = 1 + max_retries。
-    max_retries=0 即不重试。
-    """
-    attempts = max(0, int(max_retries))
-    last_exc: Exception | None = None
-    for i in range(attempts + 1):
-        try:
-            return await factory()
-        except sqlite3.OperationalError as e:
-            msg = str(e).lower()
-            transient = ("database is locked" in msg or "disk i/o error" in msg)
-            if not transient:
-                raise
-            last_exc = e
-            if i >= attempts:
-                break
-            await asyncio.sleep(base_delay * (2 ** i))
-    if last_exc is not None:
-        raise last_exc
-    return await factory()
 
 
 def chapter_key_of_title(title: str) -> str:

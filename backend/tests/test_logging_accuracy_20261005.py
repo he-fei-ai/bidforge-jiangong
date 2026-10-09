@@ -32,6 +32,10 @@ import pytest
 from app.services.ai.task_registry import finish_task, register_task
 
 SSE_SRC = inspect.getsource(sh)
+# 2026-10-09 拆分：checkpoint 相关函数下沉到 sse_checkpoint.py，
+# 日志告警统计需覆盖两个文件，否则拆走的那处告警会被漏数。
+from app.routers import sse_checkpoint as _sc
+SSE_SRC += "\n" + inspect.getsource(_sc)
 TR_SRC = inspect.getsource(tr)
 # 折叠空白/换行后做「同一语句」级断言（多行调用会被拆行，见 F6 各处排版）
 SSE_FLAT = re.sub(r"\s+", " ", SSE_SRC)
