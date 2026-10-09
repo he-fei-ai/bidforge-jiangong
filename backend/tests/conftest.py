@@ -6,9 +6,39 @@
 - autouse fixture 在每个测试前重置模块级全局状态（缓存、订阅者）
 """
 import aiosqlite
+import os
 import pytest
 import pytest_asyncio
+import tempfile
+from pathlib import Path
 from app.schema_sql import SCHEMA_SQL
+
+# ✅ 图表缓存目录隔离（2026-10-09 · NTFS 共享冲突根治）：
+#    默认图表渲染缓存位于 `data/_exports/charts`，与常驻后端服务(uvicorn)共享。
+#    同一目录下 PNG 缓存文件被并发读写/替换时，Windows 会报共享冲突，被 Python
+#    映射成 `[Errno 13] Permission denied`（而非真实的 ACL 拒绝）。将测试进程的
+#    图表缓存重定向到独立临时目录，彻底消除与常驻服务/跨机器遗留缓存文件的争用。
+#    仅在未显式指定时设置，CI/手动可仍用 BIDFORGE_CHART_CACHE_DIR 覆盖。
+_TEST_CHART_CACHE = os.path.join(tempfile.gettempdir(), "bidforge_test_chart_cache")
+os.environ.setdefault("BIDFORGE_CHART_CACHE_DIR", _TEST_CHART_CACHE)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_chart_cache_dir():
+    """双保险：确保图表缓存单例命中隔离目录。
+
+    部分模块以 `from app.config import CHARTS_DIR` 在导入期绑定取值，
+    本 fixture 在 session 起点强制对齐 config.CHARTS_DIR 并重建 ChartCache
+    单例，避免个别导入期绑定的引用仍指向生产目录。
+    """
+    import app.config as _cfg
+    _cfg.CHARTS_DIR = Path(os.environ["BIDFORGE_CHART_CACHE_DIR"]).resolve()
+    try:
+        import app.services.ai.mermaid_renderer as _mr
+        _mr._chart_cache = _mr.ChartCache()
+    except Exception:
+        pass
+    yield
 
 
 @pytest_asyncio.fixture

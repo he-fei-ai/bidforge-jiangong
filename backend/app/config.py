@@ -1,4 +1,5 @@
 """配置管理（pydantic-settings）"""
+import os
 from pathlib import Path
 
 from pydantic import ConfigDict, field_validator
@@ -8,7 +9,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 LOGS_DIR = BASE_DIR.parent / "logs"
 EXPORTS_DIR = DATA_DIR / "_exports"
-CHARTS_DIR = EXPORTS_DIR / "charts"
+# ✅ 图表渲染缓存目录（2026-10-09 · 隔离修复）：默认指向生产目录
+#    `data/_exports/charts`。新增环境变量 `BIDFORGE_CHART_CACHE_DIR` 覆盖点——
+#    测试套件/独立进程可将其重定向到独立目录，避免与常驻后端服务(uvicorn)
+#    或跨机器遗留缓存文件争用同一目录下的 PNG 缓存文件（Windows 下表现为
+#    os.replace/write_bytes 抛出 [Errno 13] Permission denied 的共享冲突）。
+#    默认值不变，对生产行为零影响（加法式配置）。
+_CHART_CACHE_OVERRIDE = os.environ.get("BIDFORGE_CHART_CACHE_DIR")
+CHARTS_DIR = Path(_CHART_CACHE_OVERRIDE).resolve() if _CHART_CACHE_OVERRIDE else (EXPORTS_DIR / "charts")
 FACT_UPLOADS_DIR = DATA_DIR / "uploads" / "facts"
 
 # 版本唯一来源（FastAPI version + /health 接口共用）
