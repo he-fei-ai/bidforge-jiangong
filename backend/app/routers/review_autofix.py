@@ -21,12 +21,13 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.db import get_db
 from app.routers.review import reset_review_on_content_change
-from app.services import review_autofix
-from app.services.audit_rules import active_rules
+
 # ✅ R13 判空单一出口（2026-10-06）：静态护栏 tests/test_review_r13_closeout_20261006.py
 #    禁止本文件重新出现裸 db.execute。最关键的一处是 _persist_fixed 的正文 UPDATE ——
 #    旧实现丢弃返回值，写没生效时仍返回快照 id，界面报「已修复」而正文未变。
-from app.services import review_db
+from app.services import review_db  # noqa: I001 —— R13 契约：必须单独一行，护栏 test_review_db_is_imported 锁
+from app.services import review_autofix
+from app.services.audit_rules import active_rules
 
 logger = logging.getLogger("review_autofix")
 router = APIRouter(

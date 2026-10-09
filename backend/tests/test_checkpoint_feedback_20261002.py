@@ -570,7 +570,11 @@ class TestStd03BaseNumberExemption:
                        self.sse.find("if _ck_findings:")]
         assert "_crossdup_snapshot[section_id]" in seg
         # 快照字典里必须包含 content / id / title 三键，且 content 用当前最终正文
-        _snap_idx = seg.find("_crossdup_snapshot[section_id]")
+        # 🔧 R58 修复：注释里也出现了 `_crossdup_snapshot[section_id]` 字样，
+        #    str.find 会命中注释块导致 400 字符窗口落在注释里、看不到赋值。
+        #    精确匹配 `= {` 赋值语句，跳过注释干扰。
+        _snap_idx = seg.find("_crossdup_snapshot[section_id] = {")
+        assert _snap_idx >= 0, "未找到 _crossdup_snapshot[section_id] 赋值语句"
         _snap_block = seg[_snap_idx:_snap_idx + 400]
         assert '"content": content' in _snap_block
         assert '"id": section_id' in _snap_block

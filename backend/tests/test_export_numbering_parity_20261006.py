@@ -39,10 +39,9 @@ import inspect
 import re
 
 import pytest
-from docx import Document
-
 from app.config import settings
 from app.routers import export as E
+from docx import Document
 
 
 def _sec(sid, pid, level, order, title, content=""):

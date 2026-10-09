@@ -254,10 +254,12 @@ class TestRenumbrAfterTitleEdit:
         落库正文（`## 总体安排` 被写成 `## 5.1 总体安排`）。已收敛为唯一判据
         ``_stored_id_parts``。
         """
-        from app.services.numbering import (renumber_section_body_subheadings,
-                                           _stored_id_parts,
-                                           stored_id_to_display,
-                                           stored_id_to_prefix)
+        from app.services.numbering import (
+            _stored_id_parts,
+            renumber_section_body_subheadings,
+            stored_id_to_display,
+            stored_id_to_prefix,
+        )
 
         content = "## 总体安排\n"
         for bad in ("", None, "6fa8-uuid", "abc", -1, 3.5):
@@ -291,8 +293,7 @@ class TestRenumbrAfterTitleEdit:
 
     def test_empty_tree_and_all_empty_titles(self):
         """D-8b：空树 / 全空标题节点返回空结果且不抛错。"""
-        from app.services.numbering import (renumber_outline_nodes,
-                                            renumber_section_outline_ids)
+        from app.services.numbering import renumber_outline_nodes, renumber_section_outline_ids
 
         assert renumber_outline_nodes([]) == []
         nodes = [{"title": "", "children": None}, {"title": None}, None]

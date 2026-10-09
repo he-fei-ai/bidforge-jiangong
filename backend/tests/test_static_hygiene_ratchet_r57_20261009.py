@@ -157,17 +157,24 @@ class TestRuffRatchet:
     def test_defect_rules_are_zero(self):
         r = self._run()
         blob = (r.stdout or "") + (r.stderr or "")
+        # 🔧 R58 修复：全绿时 ruff 输出 "All checks passed!"，codes 为空。
+        #    旧逻辑 `assert codes` 会把"清零成功"误判为"判据失效"。
+        #    正确语义：ruff 返回码 0 = 全过直接通过；非 0 时才解析 codes 查缺陷。
+        if r.returncode == 0:
+            return  # 全绿，缺陷类规则自然为零
         codes = _ruff_codes(blob)
-        assert codes, "解析不出任何规则代码 = 判据失效，不是全绿：%s" % blob[-1200:]
+        assert codes, "ruff 非零退出但解析不出规则代码：%s" % blob[-1200:]
         bad = sorted(c for c in codes if c in DEFECT_CODES)
         assert bad == [], "缺陷类规则回归：%s\n%s" % (bad, blob[-2000:])
 
     def test_i001_debt_does_not_grow(self):
         r = self._run()
+        # 🔧 R58 修复：I001 已清零，下界从 0 放宽到允许 0（清零是目标，不是故障）。
+        #    棘轮语义保留：n 不得超过基线；超过即红。
         codes = _ruff_codes((r.stdout or "") + (r.stderr or ""))
         n = len([c for c in codes if c == "I001"])
-        assert 0 < n <= I001_BASELINE, (
-            "I001 存量 %d（基线 %d）—— 上界防新增排序债，下界防解析失效"
+        assert n <= I001_BASELINE, (
+            "I001 存量 %d 超过基线 %d（棘轮只准降不准升）"
             % (n, I001_BASELINE))
 
     def test_parser_reads_relative_path_lines(self):

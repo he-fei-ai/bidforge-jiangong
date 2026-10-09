@@ -30,7 +30,6 @@ import re
 from pathlib import Path
 
 import pytest
-
 from app.routers import sse_handlers as sh
 
 _FRONTEND_PAGE = (Path(__file__).resolve().parents[2] / "frontend"

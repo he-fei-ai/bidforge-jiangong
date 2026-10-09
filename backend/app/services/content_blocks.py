@@ -32,12 +32,12 @@ import logging
 import re
 
 from app.services.ai.heading_templates import HEADING_STYLE_CONFIG
-from app.services.numbering import strip_outline_numbering
 from app.services.chart_validators import (
     PIL_RENDERABLE_CHART_TYPES,
     detect_mermaid_chart_type,
     infer_chart_type_from_payload,
 )
+from app.services.numbering import strip_outline_numbering
 
 logger = logging.getLogger("content_blocks")
 # 围栏工具沿用原 logger 名，日志来源保持不变（不改变运维检索习惯）

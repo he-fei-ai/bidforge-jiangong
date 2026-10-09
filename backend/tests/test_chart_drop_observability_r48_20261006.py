@@ -438,8 +438,8 @@ def test_lead_in_constants_have_single_source():
     旧实现散着 3 处裸 `60` + 两份长度常量 + 两份正则；此处锁定
     content_blocks 是唯一真值，_chart_pipeline / export 均为别名或 import。
     """
-    import app.services.content_blocks as CB
     import app.routers.export as EX
+    import app.services.content_blocks as CB
     assert CB.LEAD_IN_MAX_CHARS == 60
     assert CP.LEAD_IN_MAX_CHARS is CB.LEAD_IN_MAX_CHARS
     assert CB._LEAD_IN_MAX_CHARS is CB.LEAD_IN_MAX_CHARS

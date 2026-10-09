@@ -25,11 +25,9 @@ import contextlib
 import inspect
 import json
 
-import pytest
-from fastapi import HTTPException
-
 import app.routers.ai_config.connectivity as conn_module
 import app.services.ai.provider_factory as pf
+import pytest
 from app.models import (
     AIConfigIn,
     ConfigImportIn,
@@ -38,6 +36,7 @@ from app.models import (
 )
 from app.routers import ai_config as ai_router
 from app.routers.ai_config.scene_routes import _apply_scene_route
+from fastapi import HTTPException
 
 
 @pytest.fixture(autouse=True)

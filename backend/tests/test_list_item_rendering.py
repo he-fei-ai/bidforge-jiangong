@@ -10,8 +10,7 @@
    测试直接验证块解析与渲染逻辑（非完整导出流程）。
 """
 import pytest
-from app.routers.export import _estimate_prefix_width, _ensure_list_paragraph_style, _ordered_prefix
-
+from app.routers.export import _ensure_list_paragraph_style, _estimate_prefix_width, _ordered_prefix
 
 # ---------------------------------------------------------------------------
 # _estimate_prefix_width 单元测试

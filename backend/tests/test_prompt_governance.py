@@ -13,8 +13,7 @@ from __future__ import annotations
 
 import pytest
 from app.services import prompt_governance as pg
-from app.services.ai.prompts import PROMPT_VARIABLE_CONTRACTS
-from app.services.ai.prompts import _metrics
+from app.services.ai.prompts import PROMPT_VARIABLE_CONTRACTS, _metrics
 from app.services.ai.prompts._registry import (
     _ALL_PROMPTS,
     _reg,

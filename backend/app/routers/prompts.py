@@ -32,6 +32,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from app.db import get_db, read_db
 from app.services.ai.prompts._metrics import (
     get_snapshot as _get_metrics_snapshot,
+)
+from app.services.ai.prompts._metrics import (
     reset as _reset_metrics_counters,
 )
 from app.services.ai.prompts._registry import (

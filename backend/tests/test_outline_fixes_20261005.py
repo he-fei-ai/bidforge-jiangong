@@ -347,6 +347,7 @@ class TestCrossTypeMutexAtRegister:
         读源码断言：conflict 分支出现在 ``async with _register_lock`` 块内部。
         """
         import os
+
         import app.services.ai.task_registry as tr
         path = tr.__file__
         with open(path, encoding="utf-8") as f:

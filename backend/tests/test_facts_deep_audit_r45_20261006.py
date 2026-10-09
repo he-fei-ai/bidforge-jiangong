@@ -140,8 +140,7 @@ class TestValueChangeRerendersItemUpdate:
 
     async def test_value_change_reevaluates_dimensions(self, db_conn):
         from app.routers import global_facts as gf
-        from app.services.facts_classification import (
-            classify_chapter_from_text, classify_fact_attr)
+        from app.services.facts_classification import classify_chapter_from_text, classify_fact_attr
 
         fid = await _insert_fact(db_conn)
 
@@ -256,8 +255,7 @@ class TestDerivationGateSingleSource:
 
     def test_normalization_is_stable(self):
         """判据的归一化语义：strip + 分类空值兜底 other + None 安全。"""
-        from app.services.facts_classification import (
-            derivation_inputs_changed, _norm_fact_category, _norm_fact_text)
+        from app.services.facts_classification import _norm_fact_category, _norm_fact_text, derivation_inputs_changed
         assert _norm_fact_category("") == "other"
         assert _norm_fact_category(None) == "other"
         assert _norm_fact_category("  tech_param  ") == "tech_param"

@@ -25,11 +25,10 @@
 """
 import re
 
-import pytest
-
 import app.routers._chart_pipeline as CP
 import app.routers.sse_handlers as SH
 import app.services.ai.prompts.content as CONTENT_PROMPTS
+import pytest
 from app.routers._chart_pipeline import (
     _CHART_PER_SECTION_LIMIT,
     chart_drop_label,

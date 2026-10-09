@@ -27,8 +27,8 @@ from app.db import close_db, get_conn, init_db
 from app.routers import compliance as _cc_mod
 from app.routers.compliance import (
     _OVERVIEW_RECENT,
-    readiness_overview,
     _readiness_overview_compute,
+    readiness_overview,
 )
 from app.services.audit_scoring import score_findings
 

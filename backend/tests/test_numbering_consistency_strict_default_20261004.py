@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from app.config import Settings, settings
 from app.routers.export import _guard_numbering_consistency
 

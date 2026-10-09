@@ -17,6 +17,11 @@ import re
 import threading
 from pathlib import Path
 
+# ✅ R48（2026-10-06 · prompts 运行时指标）：热路径渲染计数。
+#    _metrics 顶层只依赖 stdlib（collections.Counter），不反向 import _cache/_registry，
+#    故此处顶层 import 无循环依赖风险；每个埋点内部已 try/except 兜底，计数失败
+#    绝不影响 prompt 渲染主流程。
+from ._metrics import record_render, record_render_error
 from ._registry import (
     _ALL_PROMPTS,
     clean_prompt_text,
@@ -25,11 +30,6 @@ from ._registry import (
     render_prompt,
     validate_prompt_variables,
 )
-# ✅ R48（2026-10-06 · prompts 运行时指标）：热路径渲染计数。
-#    _metrics 顶层只依赖 stdlib（collections.Counter），不反向 import _cache/_registry，
-#    故此处顶层 import 无循环依赖风险；每个埋点内部已 try/except 兜底，计数失败
-#    绝不影响 prompt 渲染主流程。
-from ._metrics import record_render, record_render_error
 
 logger = logging.getLogger(__name__)
 

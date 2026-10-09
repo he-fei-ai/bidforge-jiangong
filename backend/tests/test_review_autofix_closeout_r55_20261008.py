@@ -36,7 +36,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
 from app.services import repair_record, review_autofix
 from app.services.content_utils import text_word_count, word_status_for
 

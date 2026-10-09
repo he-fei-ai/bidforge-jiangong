@@ -33,22 +33,22 @@ from app.services.chart_validators import (
 )
 from app.services.content_blocks import (
     INLINE_CHART_FENCE_LANGS as _CONTENT_BLOCKS_INLINE_CHART_FENCE_LANGS,
-    # ✅ R48（2026-10-06）：引导语判据与长度上限的**唯一事实来源**下沉到 content_blocks，
-    #    消除本模块此前的本地副本（`_ORPHAN_LEAD_IN_RE` 8 备选 vs content_blocks 5 备选、
-    #    `_LEAD_IN_MAX_CHARS` vs 3 处裸 60）——详见 content_blocks 该常量的分叉说明。
-    ORPHAN_LEAD_IN_RE,
-    LEAD_IN_MAX_CHARS,
-)
-from app.services.content_blocks import (
-    MAX_INLINE_CODE_BLOCK_LINES as _CONTENT_BLOCKS_MAX_INLINE_CODE_BLOCK_LINES,
 )
 
 # ✅ 2026-09-27（T-2）：围栏工具已下沉到 services.content_blocks，
 #    此处转出以保持本模块命名空间（内部上百处引用 + 既有测试 import 不变）。
 #    连同下方两个常量一起**从唯一实现转发**，杜绝"下沉后残留第二份副本"的分叉。
 from app.services.content_blocks import (  # noqa: E402
+    LEAD_IN_MAX_CHARS,
+    # ✅ R48（2026-10-06）：引导语判据与长度上限的**唯一事实来源**下沉到 content_blocks，
+    #    消除本模块此前的本地副本（`_ORPHAN_LEAD_IN_RE` 8 备选 vs content_blocks 5 备选、
+    #    `_LEAD_IN_MAX_CHARS` vs 3 处裸 60）——详见 content_blocks 该常量的分叉说明。
+    ORPHAN_LEAD_IN_RE,
     parse_fence_line,
     read_fenced_block,
+)
+from app.services.content_blocks import (
+    MAX_INLINE_CODE_BLOCK_LINES as _CONTENT_BLOCKS_MAX_INLINE_CODE_BLOCK_LINES,
 )
 
 logger = logging.getLogger("chart_pipeline")

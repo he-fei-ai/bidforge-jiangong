@@ -37,11 +37,10 @@ import json
 import logging
 import re
 
-import pytest
-
 import app.routers.ai_config.config as config_module
 import app.routers.ai_config.connectivity as conn_module
 import app.services.ai.provider_factory as pf
+import pytest
 from app.models import ConfigImportIn, SceneRouteUpdate
 from app.routers import ai_config as ai_router
 from app.services import audit_service

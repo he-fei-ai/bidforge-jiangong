@@ -211,6 +211,7 @@ async def test_pipeline_guards_are_present_static():
     辅助函数的守卫不被回退。
     """
     import inspect
+
     from app.services.doc_pipeline import pipeline
 
     src = inspect.getsource(pipeline)

@@ -21,12 +21,11 @@ import json
 import zipfile
 
 import pytest
-from app.services import file_parser as fp
-from app.services import doc_categories as dc
 from app.routers import upload_outline as uo
+from app.services import doc_categories as dc
+from app.services import file_parser as fp
 from fastapi import HTTPException
 from starlette.datastructures import UploadFile
-
 
 # ---------------------------------------------------------------------------
 # 1. 解析告警序列化（dump_parse_warnings）数值边界

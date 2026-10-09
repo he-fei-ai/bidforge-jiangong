@@ -26,9 +26,8 @@ import inspect
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
-
 from app.services import review_db
+from fastapi import HTTPException
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 ROUTERS_DIR = APP_DIR / "routers"
@@ -243,7 +242,7 @@ async def _assert_write_endpoints_raise_503(scheme_id="s-13"):
                               "pending", "approved", "张三", "ok")
     assert e.value.status_code == 503, "评审留痕 INSERT 未生效必须抛出，不得静默"
 
-    from app.models import SectionReviewIn, SchemeReviewIn
+    from app.models import SchemeReviewIn, SectionReviewIn
 
     class _OKConn(_ZeroRowConn):
         """方案/章节查询返回真行，让流程走到 UPDATE 那一步再失败。"""

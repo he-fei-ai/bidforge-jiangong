@@ -14,9 +14,10 @@
    且缺口能并入 ``_check_requirements_coverage`` 的 missing → 复用外科式补齐。
 """
 import app.routers.sse_handlers as sh
+import pytest
+
 # ✅ R57：_rank_facts_by_basis 已从 sse_handlers 移至 facts_builder
 from app.services.facts_builder import _rank_facts_by_basis
-import pytest
 from app.services.outline_quality import (
     analyze_name_coverage,
     check_outline_continuity,

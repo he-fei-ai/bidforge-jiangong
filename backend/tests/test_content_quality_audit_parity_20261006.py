@@ -23,8 +23,8 @@
 from app.services.content_polish import (
     _protected_ranges,
     _strip_fences,
-    find_colloquial_hits,
     find_abolished_codes,
+    find_colloquial_hits,
     quality_issues,
     sanitize_ai_content,
 )

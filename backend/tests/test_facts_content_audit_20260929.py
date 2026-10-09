@@ -40,12 +40,13 @@ import uuid
 import app.db as _appdb
 import app.routers.global_facts as gf
 import app.routers.sse_handlers as sh
-# ✅ R57：_row_chapter 已从 sse_handlers 移至 facts_builder，不再 re-export
-from app.services.facts_builder import _row_chapter
 import pytest
 from app.db import get_conn, init_db
 from app.models import FactItem
 from app.services import facts_classification as fc
+
+# ✅ R57：_row_chapter 已从 sse_handlers 移至 facts_builder，不再 re-export
+from app.services.facts_builder import _row_chapter
 
 pytestmark = pytest.mark.filterwarnings("ignore")
 

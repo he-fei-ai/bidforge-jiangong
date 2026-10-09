@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.db import get_db
 from app.models import REVIEW_STATUSES, SchemeReviewIn, SectionReviewIn
+
 # ✅ R13 判空单一出口（2026-10-06）：本模块所有 db.execute 走 review_db，
 #    读失败 503 / 写没生效 503，绝不 AttributeError 500、更绝不汇报假成功。
 #    静态护栏 tests/test_review_r13_closeout_20261006.py 禁止退回裸调用。

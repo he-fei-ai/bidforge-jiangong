@@ -38,6 +38,7 @@ from app.db import get_conn, init_db
 from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
+
 # 与 test_import_parse_r13_closeout_20261005._NullDb 同款代理（测试文件间
 # 不互相 import，避免夹具耦合；本文件自带一份）。
 class _NullDb:

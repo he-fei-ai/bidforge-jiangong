@@ -40,9 +40,7 @@ import re
 import time
 
 import pytest
-
 from app.routers import export as E
-
 
 REPO_BACKEND = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(E.__file__))))

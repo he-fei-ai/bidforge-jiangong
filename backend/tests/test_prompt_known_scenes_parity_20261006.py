@@ -20,9 +20,7 @@ import ast
 from pathlib import Path
 
 import pytest
-
 from app.services.ai import provider_factory as pf
-
 
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 _APP_DIR = _BACKEND_DIR / "app"

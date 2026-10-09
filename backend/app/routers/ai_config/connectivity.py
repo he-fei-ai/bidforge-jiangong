@@ -339,6 +339,7 @@ async def configs_health(db=Depends(read_db)):
     ⚠️ 刻意不做密钥定期巡检：没有后台任务、不消耗配额；这是用户主动触发的一次性体检。
     """
     import asyncio
+
     from app.services.ai.provider_factory import (
         resolve_active_env,
         resolve_disabled_providers,

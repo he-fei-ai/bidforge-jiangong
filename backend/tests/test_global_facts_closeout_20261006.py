@@ -91,8 +91,7 @@ class TestFactLineSplit:
 
     def test_simulated_marker_still_stripped_first(self):
         """P0-1 修复不得回归 2026-09-21 的模拟值标记剥离顺序。"""
-        from app.services.facts_extractor import (
-            extract_value_from_markdown_line, SIMULATED_MARKER)
+        from app.services.facts_extractor import SIMULATED_MARKER, extract_value_from_markdown_line
         name, value = extract_value_from_markdown_line(
             f"- **基坑深度**: 12.5m{SIMULATED_MARKER}")
         assert name == "基坑深度"
@@ -270,18 +269,15 @@ class TestFactWriteR13:
         assert callable(gf._assert_fact_write_applied)
 
     def test_none_cursor_raises_503(self):
+        from app.routers.global_facts import _assert_fact_write_applied, _require_fact_write_cursor
         from fastapi import HTTPException
-
-        from app.routers.global_facts import (
-            _require_fact_write_cursor, _assert_fact_write_applied)
         with pytest.raises(HTTPException) as ei:
             _require_fact_write_cursor(None, "测试写")
         assert ei.value.status_code == 503
 
     def test_zero_rowcount_raises_409(self):
-        from fastapi import HTTPException
-
         from app.routers.global_facts import _assert_fact_write_applied
+        from fastapi import HTTPException
 
         class _Cur:
             rowcount = 0
@@ -489,8 +485,7 @@ class TestDangerParamReachability:
 
     def test_lidar_pitch_not_mapped_to_height(self):
         """反向用例：立杆步距是「间距」，映射到 height 会漏判脚手架超规模。"""
-        from app.services.facts_classification import (
-            DANGER_PARAM_RULES, extract_danger_params)
+        from app.services.facts_classification import DANGER_PARAM_RULES, extract_danger_params
 
         targets = {p for kws, p in DANGER_PARAM_RULES for k in kws
                    if k == "立杆步距"}
@@ -508,8 +503,7 @@ class TestDangerParamReachability:
 
         （两表语义耦合但结构独立；只改其一会让事实落「未分类」空串。）
         """
-        from app.services.facts_classification import (
-            DANGER_PARAM_RULES, classify_chapter_from_text)
+        from app.services.facts_classification import DANGER_PARAM_RULES, classify_chapter_from_text
         unclassified = []
         for kws, _p in DANGER_PARAM_RULES:
             for kw in kws:
@@ -537,6 +531,7 @@ class TestDangerParamReachability:
     def test_validator_unit_table_is_single_source(self):
         """单位表必须由 ``_UNIT_SPEC`` 单一结构派生，不得再手写三份视图。"""
         import ast as _ast
+
         from app.services import facts_cross_validators as fv
         assert set(fv._UNIT_TO_BASE) == set(fv._UNIT_SPEC)
         assert set(fv._UNIT_DIM) == set(fv._UNIT_SPEC)
@@ -805,6 +800,7 @@ class TestChunkHashNoCollision:
 
     def test_lone_surrogate_does_not_collide(self):
         import hashlib
+
         from app.services.facts_extractor import _chunk_hash
         a, b = "a\udce9b", "ab"
         old = hashlib.sha1(a.encode("utf-8", errors="ignore")).hexdigest()[:16]
@@ -814,6 +810,7 @@ class TestChunkHashNoCollision:
     def test_normal_text_hash_unchanged(self):
         """零 churn 保证：不含孤立代理的文本，指纹与旧口径逐字一致。"""
         import hashlib
+
         from app.services.facts_extractor import _chunk_hash
         for s in ["", "普通中文段落", "基坑深度 12.5m\nC30 混凝土",
                   "工期 90 日历天\n| 项目 | 值 |", "⚠️(模拟值) 标记"]:
@@ -1235,23 +1232,22 @@ class TestInsertColumnsSingleSource:
     """L4：INSERT 列清单曾是两份（服务 27 列 / 路由 28 列）。"""
 
     def test_columns_defined_once(self):
-        from app.services import facts_extractor as fx
         from app.routers import global_facts as gf
+        from app.services import facts_extractor as fx
         assert gf.MANUAL_FACT_INSERT_COLS is fx.GLOBAL_FACTS_INSERT_COLS, \
             "路由侧必须是服务层列清单的**别名**，不得本地维护"
         assert gf.MANUAL_FACT_INSERT_SQL is fx.GLOBAL_FACTS_INSERT_SQL
 
     def test_row_width_matches_columns(self):
         """to_db_row / _manual_fact_row 的返回值个数必须等于列数。"""
-        from app.services.facts_extractor import FactItem, GLOBAL_FACTS_INSERT_COLS
+        from app.services.facts_extractor import GLOBAL_FACTS_INSERT_COLS, FactItem
         it = FactItem(name="x", value="y")
         row = it.to_db_row("g", "p", "s", "T")
         assert len(row) == len(GLOBAL_FACTS_INSERT_COLS), \
             f"to_db_row {len(row)} 值 vs {len(GLOBAL_FACTS_INSERT_COLS)} 列"
 
     def test_placeholder_count_derived(self):
-        from app.services.facts_extractor import (
-            GLOBAL_FACTS_INSERT_COLS, GLOBAL_FACTS_INSERT_SQL)
+        from app.services.facts_extractor import GLOBAL_FACTS_INSERT_COLS, GLOBAL_FACTS_INSERT_SQL
         sql = GLOBAL_FACTS_INSERT_SQL
         assert sql.count("?") == len(GLOBAL_FACTS_INSERT_COLS)
         # 断言 VALUES 段（SQL 以 ")" 结尾，不能用 endswith 整串）
@@ -1374,16 +1370,15 @@ class TestFactKeyChapterNoDeadKeys:
     """
 
     def test_every_key_producible(self):
-        from app.services.facts_extractor import _NAME_KEY_INDEX
         from app.services.facts_classification import FACT_KEY_TO_CHAPTER
+        from app.services.facts_extractor import _NAME_KEY_INDEX
         producible = {k for _frag, k in _NAME_KEY_INDEX}
         dead = sorted(k for k in FACT_KEY_TO_CHAPTER if k not in producible)
         assert dead == [], f"含产不出的死键：{dead}"
 
     def test_no_threshold_param_leakage(self):
         """危大阈值参数不得混入 fact_key 表（范畴错误）。"""
-        from app.services.facts_classification import (
-            DANGER_PARAM_RULES, FACT_KEY_TO_CHAPTER)
+        from app.services.facts_classification import DANGER_PARAM_RULES, FACT_KEY_TO_CHAPTER
         params = {p for _kws, p in DANGER_PARAM_RULES}
         overlap = params & set(FACT_KEY_TO_CHAPTER)
         assert overlap == set(), f"阈值参数混入 fact_key 表：{sorted(overlap)}"
@@ -1513,6 +1508,7 @@ class TestEnrichSingleSource:
         正是 AGENTS.md §5.7/§5.14 记录的「锚点过宽比不写护栏更糟」。
         """
         import ast as _ast
+
         from app.services import facts_enrich as fe
         tree = _ast.parse(inspect.getsource(fe))
         read_attrs = set()

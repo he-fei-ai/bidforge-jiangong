@@ -18,7 +18,6 @@ B2（任务 4 · ``POST /admin/prompts/sync-from-code``）：
 from __future__ import annotations
 
 import pytest
-
 from app.routers.prompts import (
     get_prompt_metrics,
     reset_prompt_metrics,

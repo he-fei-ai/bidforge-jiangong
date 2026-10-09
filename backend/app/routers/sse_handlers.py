@@ -116,6 +116,21 @@ from app.services.content_utils import (
     word_status_for,
 )
 
+# ✅ R47 债-5（2026-10-06）：项目关键事实构建整组下沉到 services/facts_builder。
+#    消除 compliance.py / consistency_scanner.py 对本路由器私有符号的反向 import；
+#    本模块实际使用下方 5 个符号；LOW_CONFIDENCE_THRESHOLD 是被 tests 经
+#    sse_handlers re-export 取用的对外别名（故显式 noqa，不是漏改）。
+#    R57 清理：其余 4 个别名（_chapter_inject_enabled / _FACTS_GENERIC_GROUP_HINTS /
+#    _rank_facts_by_basis / _row_chapter）在全库零消费者，已删除。
+from app.services.facts_builder import (  # noqa: E402
+    LOW_CONFIDENCE_THRESHOLD,  # noqa: F401 - 对外 re-export，tests 经此名取阈值
+    _facts_keywords,
+    _filter_facts_rows,
+    _load_facts_rows,
+    _render_facts_text,
+    build_facts_text,
+)
+
 # ✅ 编号统一（2026-09-25）：收敛到 services/numbering —— 目录编号的唯一事实源。
 # 导入三件套：
 #   stored_outline_id     存储态编号读取（UUID 永不泄漏进提示词）
@@ -134,22 +149,27 @@ from app.services.outline_utils import (
 )
 from app.services.standards_registry import get_standards_text
 
-# ✅ R47 债-5（2026-10-06）：项目关键事实构建整组下沉到 services/facts_builder。
-#    消除 compliance.py / consistency_scanner.py 对本路由器私有符号的反向 import；
-#    本模块实际使用下方 5 个符号；LOW_CONFIDENCE_THRESHOLD 是被 tests 经
-#    sse_handlers re-export 取用的对外别名（故显式 noqa，不是漏改）。
-#    R57 清理：其余 4 个别名（_chapter_inject_enabled / _FACTS_GENERIC_GROUP_HINTS /
-#    _rank_facts_by_basis / _row_chapter）在全库零消费者，已删除。
-from app.services.facts_builder import (  # noqa: E402
-    LOW_CONFIDENCE_THRESHOLD,  # noqa: F401 - 对外 re-export，tests 经此名取阈值
-    _facts_keywords,
-    _filter_facts_rows,
-    _load_facts_rows,
-    _render_facts_text,
-    build_facts_text,
-)
 # 公开入口改名后保留旧私有名别名，防止 sse_handlers 内部漏改调用点。
 _build_facts_text = build_facts_text  # noqa: E402
+
+from app.routers.sse_utils import (
+    _cn_number,
+    _coerce_bool,
+    _coerce_suggestions,
+    _dedup_continuation,
+    _safe_tail,
+)
+from app.routers.sse_checkpoint import (
+    _checkpoint_partial_outline,
+    _facts_checkpoint_payload,
+    _load_outline_checkpoint,
+    _load_task_checkpoint,
+    _retry_db_locked,
+    _save_content_checkpoint,
+    _save_facts_checkpoint,
+    _save_outline_checkpoint,
+    _save_task_checkpoint,
+)
 
 logger = logging.getLogger("sse")
 router = APIRouter(prefix="/api/v1/sse", tags=["sse"])
@@ -208,9 +228,7 @@ OUTLINE_CHAPTER_EXPECT = max(1.0, float(settings.outline_chapter_expect_seconds)
 from app.services.prompt_governance import (  # noqa: E402,F401
     allocate_char_budgets as _allocate_char_budgets,
 )
-#: checkpoint 写库瞬态失败的重试次数 / 退避基数（秒）
-CHECKPOINT_WRITE_RETRIES = 2
-CHECKPOINT_WRITE_BASE_DELAY = 0.2
+
 #: 配额/认证类错误（402/403/404/429）是否仍重试。
 #: O8（2026-09-21）：默认 **False** —— 这类错误重试几乎必然再失败
 #: （余额不足、密钥失效、模型不存在），白白多烧一次配额与一轮超时；
@@ -1142,124 +1160,6 @@ def _budgeted_truncate_sections(text: str, budget: int) -> tuple[str, dict]:
     return out, {"sections": len(sections), "truncated_sections": truncated}
 
 
-# ---------- 续写辅助：安全尾部截断 + 段落级去重 ----------
-# 续写上下文裁剪的围栏奇偶判定：反引号 ``` 与波浪号 ~~~ 两类围栏**各自独立**按子串
-# 奇偶处理，与正文生成 / 登记 / 导出三侧唯一围栏口径 content_utils._FENCE_LINE_RE 一致。
-# ✅ 2026-10-03 修复（正文生成·续写围栏口径分叉）：旧实现只数 "```" 子串，对
-#    ~~~mermaid 围栏完全失效（误把图表代码当散文喂给模型 / 留下半截代码块）。
-#    修复方式：两类围栏独立计数 —— 反引号围栏行为与历史逐字一致
-#    （既有 test_safe_tail_never_leaves_unbalanced_fence 契约不变），波浪号围栏补齐。
-def _next_fence_open(tail: str) -> int:
-    """tail 中首个围栏开/闭标记的位置（反引号或波浪号，取较早者）。"""
-    a = tail.find("```")
-    b = tail.find("~~~")
-    cands = [x for x in (a, b) if x >= 0]
-    return min(cands) if cands else -1
-
-
-def _safe_tail(text: str, limit: int = 2000) -> str:
-    """取正文尾部最多 limit 字（续写提示词的「前文结尾」上下文）。
-
-    两层围栏保护（反引号 ``` 与波浪号 ~~~ 同口径、各自独立）：
-      · 用**整篇正文**判断切点奇偶（切点前某类围栏数为奇数 ⇒ 切点在对应代码块内）
-        → 前移跳过该块剩余部分与闭合围栏，使上下文从散文开始；
-      · 再对尾部做「文末未闭合块」裁剪 —— 某类围栏数为奇数说明最后一个块未闭合，
-        整块丢弃（宁缺勿滥），两类围栏独立裁剪、互不干扰。
-
-    行边界：非围栏场景下回退到最近换行，避免以半行开头。
-    """
-    if not text:
-        return ""
-    if len(text) <= limit:
-        tail = text
-    else:
-        cut = len(text) - limit
-        bt_before = text[:cut].count("```")
-        tl_before = text[:cut].count("~~~")
-        if bt_before % 2 == 1 or tl_before % 2 == 1:
-            # 切点落在某类代码块内部：跳过该块剩余内容与其闭合围栏
-            tail = text[cut:]
-            nxt = _next_fence_open(tail)
-            if nxt < 0:
-                return ""            # 该块一直未闭合到结尾 → 无可用散文尾部
-            # 跳过完整围栏标记（支持 4+ 反引号/波浪号围栏；旧实现只跳 3 字符，
-            # 对 ````/~~~~ 围栏会残留 1 个标记字符，污染续写上下文）。
-            i = nxt
-            while i < len(tail) and tail[i] in ("`", "~"):
-                i += 1
-            tail = tail[i:]
-            if tail.startswith("\n"):
-                tail = tail[1:]
-        else:
-            # 回退到最近换行边界（首行过长时保留，避免上下文过短）
-            tail = text[cut:]
-            nl = tail.find("\n")
-            if 0 <= nl < 200:
-                tail = tail[nl + 1:]
-    # 文末未闭合块裁剪：两类围栏各自独立裁剪（反引号行为保持与历史一致）
-    if tail.count("```") % 2 == 1:
-        last = tail.rfind("```")
-        tail = tail[:last] if last > 0 else ""
-    if tail.count("~~~") % 2 == 1:
-        last = tail.rfind("~~~")
-        tail = tail[:last] if last > 0 else ""
-    return tail.strip()
-
-
-def _dedup_continuation(prev: str, cont: str, min_overlap: int = 40) -> str:
-    """检测续写内容与前文尾部的段落级重复，返回去除重复前缀后的续写文本。
-
-    弱模型高频把最后一段原样重写一遍。按续写文本的段落前缀与前文尾部匹配，
-    整段已在前文出现（≥min_overlap 字）即剥离；再处理续写开头与前文结尾
-    的字符级重叠（模型从某句中间接续的场景）。
-
-    ✅ BUG 修复（2026-09-16）：字符级重叠原实现用
-    `for probe_len in range(min(300, len(b)), 40, -20)`（步长 20）试探
-    「b 的前缀在 tail 中出现」——只有重叠长度恰好落在 len(b) − 20k 这一串
-    离散点上才会命中，其余情况全部漏检（命题：真实文本的重复长度是任意的）。
-    漏检的后果是续写把前文最后一段/句子原样复述一遍，正文出现成段重复。
-    现改为**精确求最长重叠**（两层，均为 O(300×n) 的可忽略开销）：
-      ① 接缝对齐（主路径）：b 的前缀恰好是 tail 的后缀 —— 模型重抄了刚看到的
-         结尾再往下写，这是最常见的重复形态；
-      ② 兜底：b 的长前缀在 tail 任意位置原文出现（弱模型跨段复述）。
-    命中即剥离重叠部分（并去掉句首残留标点），无需再依赖步长运气。
-    """
-    if not cont:
-        return cont
-    # ✅ 健壮性：prev 可能为 None（调用方漏传/章节正文缺失），
-    #    旧实现直接 prev[-3000:] 会抛 TypeError 并中断续写链路。
-    tail = (prev or "")[-3000:]
-    rest = cont.strip()
-    # 逐段剥离：只要 cont 开头的整段已在前文尾部出现
-    for _ in range(8):
-        if not rest:
-            break
-        first_nl = rest.find("\n")
-        head = rest if first_nl < 0 else rest[:first_nl]
-        head_s = head.strip()
-        if len(head_s) >= min_overlap and head_s in tail:
-            rest = rest[first_nl + 1:].lstrip("\n") if first_nl >= 0 else ""
-            continue
-        break
-    # 字符级：续写开头恰是前文结尾的延续重复（求最长重叠前缀）
-    b = rest.lstrip()
-    if len(b) >= min_overlap:
-        max_probe = min(300, len(b))
-        cut = 0
-        for n in range(max_probe, min_overlap - 1, -1):
-            if tail.endswith(b[:n]):
-                cut = n
-                break
-        if not cut:
-            for n in range(max_probe, min_overlap - 1, -1):
-                if b[:n] in tail:
-                    cut = n
-                    break
-        if cut:
-            b = b[cut:].lstrip("，。；、\n ")
-    return b or cont.strip()
-
-
 async def _load_knowledge_rows(db, scheme_id: str) -> list[dict]:
     """加载方案可用的知识库条目行（专属 + 项目共享），一次查询供逐章内存过滤。"""
     try:
@@ -1315,29 +1215,6 @@ async def _build_knowledge_text(db, scheme_id: str,
 
 
 # ---------- 辅助：递归构建 parent_chain ----------
-
-# 中文数字映射（用于 level_tag 生成）
-_CN_NUMBERS = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
-               "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十"]
-_CN_DIGITS = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
-
-
-def _cn_number(n: int) -> str:
-    """1-99 的序数 → 中文数字（章节号用）。
-
-    ✅ 增强：旧实现只有到「二十」的静态表，超过 20 章的一级章节号会退化为
-    阿拉伯数字（"第21章"），与文档其它位置的中文编号风格不一致。
-    现 1-99 全量支持（21 → 二十一、30 → 三十、35 → 三十五），
-    100 及以上仍回退阿拉伯数字（专项方案目录极少出现）。
-    """
-    if n <= 0:
-        return str(n)
-    if n < len(_CN_NUMBERS):
-        return _CN_NUMBERS[n]
-    if n >= 100:
-        return str(n)
-    tens, ones = divmod(n, 10)
-    return _CN_DIGITS[tens] + "十" + (_CN_DIGITS[ones] if ones else "")
 
 
 def _build_parent_chain(
@@ -1953,65 +1830,6 @@ def _outline_skeleton(nodes: list, max_nodes: int = OUTLINE_REVIEW_MAX_NODES) ->
                 item["children"] = kids
         out.append(item)
     return out
-
-
-def _coerce_bool(value, default: bool = False) -> bool:
-    """把模型返回的"布尔"值稳健归一化为 bool。
-
-    ✅ BUG 修复：旧实现用 `not review_obj.get("passed", True)` 直接判定审核结果，
-    而弱模型常把 passed 写成字符串（"false" / "no" / "0"）。Python 中非空字符串
-    恒为真 → "审核不通过"被误判为通过，"审核-自动修复"链路被整轮静默跳过，
-    用户以为目录已按审核建议修正，实际原样返回。
-    """
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value).strip().lower()
-    if text in ("true", "yes", "y", "1", "通过", "是", "pass", "passed", "ok"):
-        return True
-    if text in ("false", "no", "n", "0", "不通过", "否", "fail", "failed"):
-        return False
-    return default
-
-
-def _coerce_suggestions(value) -> list[str]:
-    """把模型返回的 suggestions 稳健归一化为 list[str]。
-
-    ✅ BUG 修复：旧实现直接对 suggestions 做 `"; ".join(...)` 与
-    `suggestions + [...]`：
-      1) 模型把 suggestions 写成字符串时（很常见），`"; ".join("补监测方案")`
-         会按"单个字符"拆分 → 修复提示词退化为 "补; 充; 监; 测; 方; 案"；
-      2) 异常分支里的 `"字符串" + ["..."]` 抛 TypeError，且该语句位于 except
-         块内，异常会逃逸出 _review_and_fix_outline，把整次目录生成打成失败。
-    """
-    if value is None:
-        return []
-    if isinstance(value, str):
-        text = value.strip()
-        return [text] if text else []
-    if isinstance(value, (list, tuple, set)):
-        out: list[str] = []
-        for item in value:
-            if isinstance(item, str):
-                t = item.strip()
-                if t:
-                    out.append(t)
-            elif isinstance(item, dict):
-                for key in ("suggestion", "text", "item", "content", "value"):
-                    v = item.get(key)
-                    if v is not None and str(v).strip():
-                        out.append(str(v).strip())
-                        break
-            elif item is not None:
-                t = str(item).strip()
-                if t:
-                    out.append(t)
-        return out
-    text = str(value).strip()
-    return [text] if text else []
 
 
 def _build_partial_preview(full_outline: list) -> list:
@@ -3636,8 +3454,8 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
     #    若此时正文正在写 content/word_count/图表，重建会把正文 wipe 掉，
     #    或反过来正文落库时章节 id 已被替换，图表登记挂到旧 id。
     from app.routers.sections import (
-        outline_generation_in_progress,
         content_generation_in_progress,
+        outline_generation_in_progress,
     )
     _og = outline_generation_in_progress(scheme_id)
     if _og:

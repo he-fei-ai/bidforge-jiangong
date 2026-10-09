@@ -40,9 +40,8 @@ import ast
 import re
 from pathlib import Path
 
-import pytest
-
 import app.services.preflight_engine as pf
+import pytest
 from app.services import content_data_contract as c
 
 

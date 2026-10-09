@@ -18,13 +18,11 @@
 from __future__ import annotations
 
 import pytest
-
+from app.routers import upload_outline as uo
+from app.services import file_parser as fp
 from app.services.doc_pipeline import doc_chunker as dc
 from app.services.doc_pipeline import pipeline as dpl
 from app.services.doc_pipeline.md_structured import parse_markdown_structured
-from app.services import file_parser as fp
-from app.routers import upload_outline as uo
-
 
 # ---------------------------------------------------------------------------
 # 1. doc_chunker：语义硬切与重叠连续性

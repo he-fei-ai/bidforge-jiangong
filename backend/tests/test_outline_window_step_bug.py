@@ -51,9 +51,8 @@ import json
 import re
 import uuid
 
-import pytest
-
 import app.routers.sse_handlers as sh
+import pytest
 
 
 async def _seed_long_scheme(db_conn, name="长方案-桩", word_budget=10000) -> str:

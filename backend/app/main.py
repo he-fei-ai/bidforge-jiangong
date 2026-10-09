@@ -43,8 +43,6 @@ logging.basicConfig(
 #    dev server 运行期间跑的 pytest 进程占用）时会**丢弃所有后续日志记录**，
 #    实测日志冻结 7 小时。改用 SafeRotatingFileHandler：轮转失败降级为追加写。
 try:
-    from app.config import LOGS_DIR as _LOGS_DIR
-    from app.utils.safe_log_handler import SafeRotatingFileHandler
     # ✅ 2026-10-07：pytest 进程不挂生产文件 handler。
     #    大量 API 测试会 import app.main，此前测试噪声被写进 logs/backend.log
     #    —— 生产日志与测试日志混在一起，P95/P99、ERROR Top、HTTP 端点延迟等
@@ -52,6 +50,9 @@ try:
     #    生产进程不受影响（无 pytest 模块、无 PYTEST_CURRENT_TEST）。
     import os as _os
     import sys as _sys
+
+    from app.config import LOGS_DIR as _LOGS_DIR
+    from app.utils.safe_log_handler import SafeRotatingFileHandler
     if _os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in _sys.modules:
         pass   # 测试进程：日志走 caplog / 控制台，不写生产文件
     else:

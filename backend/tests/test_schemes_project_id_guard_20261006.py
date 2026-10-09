@@ -92,8 +92,8 @@ class TestRequireProjectIdSemantics:
 
     @pytest.mark.parametrize("bad", ["", "   ", "\t\n", None])
     def test_empty_rejected_with_422(self, bad):
-        from fastapi import HTTPException
         from app.routers.schemes import require_project_id
+        from fastapi import HTTPException
         with pytest.raises(HTTPException) as ei:
             require_project_id(bad)
         assert ei.value.status_code == 422, (
@@ -265,9 +265,9 @@ class TestGuardIsActuallyWired:
     """
 
     async def test_create_scheme_rejects_empty_project_id(self, db_conn):
-        from fastapi import HTTPException
         from app.models import SchemeCreate
         from app.routers.schemes import create_scheme
+        from fastapi import HTTPException
         with pytest.raises(HTTPException) as ei:
             await create_scheme("", SchemeCreate(name="测试方案"), db=db_conn)
         assert ei.value.status_code == 422
@@ -276,8 +276,8 @@ class TestGuardIsActuallyWired:
             "空 project_id 已落库 —— G3 根因回流")
 
     async def test_duplicate_scheme_rejects_empty_project_id(self, db_conn):
-        from fastapi import HTTPException
         from app.routers.schemes import duplicate_scheme
+        from fastapi import HTTPException
         with pytest.raises(HTTPException) as ei:
             await duplicate_scheme("", "s-does-not-exist", db=db_conn)
         assert ei.value.status_code == 422
@@ -304,8 +304,8 @@ class TestGuardIsActuallyWired:
         await db_conn.execute(
             "INSERT INTO projects (id, name) VALUES (?, ?)", ("p1", "项目"))
         await db_conn.commit()
-        from fastapi import HTTPException
         from app.models import SchemeCreate
+        from fastapi import HTTPException
         with pytest.raises(HTTPException) as ei:
             await sr.create_scheme("", SchemeCreate(name="s"), db=db_conn)
         assert ei.value.status_code == 422

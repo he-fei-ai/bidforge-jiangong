@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import pytest
-
 from app.config import settings
 from app.routers import system as system_router
 

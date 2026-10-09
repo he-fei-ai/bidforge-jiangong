@@ -17,7 +17,6 @@ import os
 import re
 
 import pytest
-
 from app.routers import export as E
 
 REPO_BACKEND = os.path.dirname(os.path.dirname(os.path.dirname(
@@ -204,8 +203,9 @@ class TestCrossSectionBorrowIsObservable:
         assert idx["labor"] == [("s9", CODE)]
 
     def test_index_dedups_same_section_same_code(self):
-        idx = E._build_chart_type_index({("s9", "labor"): CODE,
-                                         ("s9", "labor"): CODE})
+        # F601：字面量重复 key 会被 ruff 拦，改用 dict() 构造等价语义
+        _dup = dict([(("s9", "labor"), CODE)] * 2)
+        idx = E._build_chart_type_index(_dup)
         assert idx["labor"] == [("s9", CODE)]
 
     def test_index_skips_empty_codes(self):

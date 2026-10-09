@@ -26,11 +26,12 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.db import get_db
 from app.models import ComplianceCheckIn, ExpertReviewIn
-from app.services import review_autofix
+
 # ✅ R13 判空单一出口（2026-10-06）：本模块所有 db.execute 走 review_db，
 #    读失败 503 / 写没生效 503。静态护栏
 #    tests/test_review_r13_closeout_20261006.py 禁止退回裸调用。
-from app.services import review_db
+from app.services import review_db  # noqa: I001 —— R13 契约：必须单独一行，护栏 test_review_db_is_imported 锁
+from app.services import review_autofix
 from app.services.ai.json_response import collect_json_response
 from app.services.ai.prompts._registry import render
 from app.services.audit_rules import (
@@ -209,11 +210,12 @@ async def get_expert_items():
 #: 事实文本总量上限（token 保护，与 SECTION_CONTENT_CAP 同思路）
 #: ✅ 2026-10-06（R47 债-1）：数值搬入 ``services/ai/prompts/_limits.py`` 单一事实源，
 #:    本模块仍以同名可读，下游消费代码零改动。
-from app.services.ai.prompts._limits import FACTS_PROMPT_CAP  # noqa: E402
 #: 单条事实值的截断长度（value 兜底取整段 content 时防长文本撑爆）
 from app.services.ai.prompts._limits import (  # noqa: E402
     FACT_PROMPT_VALUE_CAP as _FACT_PROMPT_VALUE_CAP,
 )
+from app.services.ai.prompts._limits import FACTS_PROMPT_CAP  # noqa: E402
+
 #: 安全关键标记：预算截断下也必须**完整**保留（见 _join_with_budget）
 SAFETY_MARK = "（安全关键）"
 

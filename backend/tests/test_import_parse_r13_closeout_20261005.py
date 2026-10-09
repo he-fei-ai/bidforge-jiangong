@@ -29,7 +29,6 @@ import pytest
 from app.db import get_conn, init_db
 from fastapi import HTTPException, UploadFile
 
-
 # ---------------------------------------------------------------------------
 # 代理连接：按谓词把匹配的 execute / executemany 重定向到 None
 # ---------------------------------------------------------------------------

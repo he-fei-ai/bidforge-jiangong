@@ -201,6 +201,7 @@ def test_upload_total_limit_default_is_consistent_across_four_sources():
 def test_upload_limits_endpoint_exposes_max_total_bytes():
     """/system/upload-limits 必须回传 max_total_bytes（B8 的数据源）。"""
     import inspect
+
     from app.routers import system
 
     src = inspect.getsource(system)

@@ -12,10 +12,9 @@ from __future__ import annotations
 
 import inspect
 
-import pytest
-
 import app.db as db_mod
 import app.main as main_mod
+import pytest
 from app.routers import export as E
 
 

@@ -29,15 +29,14 @@ import tokenize
 import uuid
 from pathlib import Path
 
-import pytest
-from fastapi import HTTPException
-
 import app.db as _appdb
+import pytest
 from app.db import close_db, get_conn, init_db
 from app.models import SchemeReviewIn
 from app.routers.export import cache_status
 from app.routers.review import _ALLOWED_TRANSITIONS, review_records, review_summary, submit_scheme_review
 from app.routers.sections import reset_content
+from fastapi import HTTPException
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 ROUTERS_DIR = APP_DIR / "routers"
