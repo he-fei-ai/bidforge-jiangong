@@ -567,6 +567,7 @@ def test_render_facts_text_chapter_never_drops_facts():
 def test_render_facts_text_legacy_rows_ignored_but_kept():
     """历史 3/4 元组行（无 chapter 列）不参与章节分区，但仍完整保留。"""
     from app.routers import sse_handlers as sh
+    from app.services.facts_builder import _row_chapter
     rows = [
         ("旧组", "旧事实", "- **旧事实**: 保留"),
         ("旧组2", "旧事实2", "- **旧事实2**: 保留", 0.8),
@@ -575,7 +576,7 @@ def test_render_facts_text_legacy_rows_ignored_but_kept():
     text = sh._render_facts_text(rows, chapter="plan", max_total=2000)
     assert "新事实" in text and "旧事实" in text and "旧事实2" in text
     assert text.index("新事实") < text.index("旧事实")
-    assert sh._row_chapter(("旧组", "旧事实", "- **旧事实**: 保留")) == ""
+    assert _row_chapter(("旧组", "旧事实", "- **旧事实**: 保留")) == ""
 
 
 async def test_load_facts_rows_returns_chapter_column(ctx):

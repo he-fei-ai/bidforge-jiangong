@@ -736,6 +736,77 @@ export interface FactsAdjustOperation {
 export interface FactsAdjustPlanShape {
   summary?: string;
   operations: FactsAdjustOperation[];
+  /**
+   * ✅ 2026-10-08（全局事实模块收口 · F3 前端接线）：后端 `POST /global-facts/adjust`
+   * 新增加法式字段 —— 被安全校验丢弃的操作及理由。旧后端不返回该键，
+   * `normalizeFactsAdjustPlan` 一律归一为 `[]`，界面行为与收口前逐字一致。
+   */
+  ignored?: FactsAdjustIgnoredItem[];
+}
+
+/** 被丢弃操作的单条记录（与后端 `_validate_adjust_ops._ignore` 的记录形状对齐） */
+export interface FactsAdjustIgnoredItem {
+  op?: string;
+  reason?: string;
+  fact_id?: string;
+  name?: string;
+}
+
+/**
+ * 丢弃理由的**封闭枚举**（必须与后端 `global_facts._validate_adjust_ops` 逐项一致）。
+ *
+ * ✅ 2026-10-08：这是「展示层映射」而非「判据副本」—— 判定发生在后端，前端只把
+ * 已知 reason 翻成中文；未知 reason 原样回显（后端将来加枚举值时，前端不会
+ * 静默显示空白，而是显示英文键名，能立刻被发现）。parity 由
+ * `frontend/src/tests/factsAdjust.test.tsx` 与后端护栏双向锁死。
+ */
+export const FACTS_ADJUST_IGNORE_REASONS = [
+  "op_not_object",
+  "unknown_fact_id",
+  "no_effective_change",
+  "missing_name_or_value",
+  "duplicate_fact_key",
+  "unknown_op",
+] as const;
+
+export const FACTS_ADJUST_IGNORE_REASON_LABELS: Record<string, string> = {
+  op_not_object: "返回项不是合法操作对象",
+  unknown_fact_id: "该事实不在当前方案可见范围（可能属于其它方案或已删除）",
+  no_effective_change: "这一条没有任何实际变更",
+  missing_name_or_value: "缺少名称或取值",
+  duplicate_fact_key: "同名事实已存在，未重复新增",
+  unknown_op: "未知的操作类型",
+};
+
+/** 丢弃理由 → 中文标签；未知/缺失一律回退原文，绝不返回空串 */
+export function factsAdjustIgnoreText(item: FactsAdjustIgnoredItem): string {
+  const reason = String(item?.reason || "").trim();
+  const label = FACTS_ADJUST_IGNORE_REASON_LABELS[reason] || reason || "未知原因";
+  const who = String(item?.name || "").trim() || String(item?.fact_id || "").trim();
+  const op = String(item?.op || "").trim() || "unknown";
+  return who ? `${op} · ${who}：${label}` : `${op}：${label}`;
+}
+
+/**
+ * 防御式归一后端调整计划响应。
+ *
+ * ⚠️ 事件循环里的任何异常都会中断整个交互（本函数在 setState 路径上），
+ * 因此缺键 / 类型不符 / 旧版后端一律回退空数组与空串，绝不抛异常。
+ */
+export function normalizeFactsAdjustPlan(data: unknown): FactsAdjustPlanShape {
+  const d = (data && typeof data === "object" ? data : {}) as Record<string, unknown>;
+  const ops = Array.isArray(d.operations) ? d.operations : [];
+  const ign = Array.isArray(d.ignored) ? d.ignored : [];
+  return {
+    summary: typeof d.summary === "string" ? d.summary : "",
+    operations: ops.filter((o) => o && typeof o === "object") as FactsAdjustOperation[],
+    ignored: ign.filter((i) => i && typeof i === "object") as FactsAdjustIgnoredItem[],
+  };
+}
+
+/** 未纳入计划的操作数（后端 `ignored_count` 的前端兜底口径） */
+export function factsAdjustIgnoredCount(plan?: { ignored?: FactsAdjustIgnoredItem[] } | null): number {
+  return Array.isArray(plan?.ignored) ? plan!.ignored.length : 0;
 }
 
 /** 确认弹窗与「应用」按钮展示的操作明细上限（两处同口径） */
@@ -765,8 +836,14 @@ export function FactsAdjustPanel({
   busy?: boolean;
   /** 预览：只生成待确认计划，不落库（后端 apply=false） */
   preview: (instruction: string) => Promise<Partial<FactsAdjustPlanShape>>;
-  /** 应用：把用户刚确认的计划一次性写入（后端 apply=true + operations） */
-  apply: (operations: FactsAdjustOperation[], instruction: string) => Promise<void>;
+  /** 应用：把用户刚确认的计划一次性写入（后端 apply=true + operations）
+   *
+   * ✅ 2026-10-08：返回类型放宽为「可回传后端响应」。页面原先返回 void，
+   * 组件拿不到 `ignored` —— 而「要求改 3 条只落 2 条」恰恰只在应用后才知道。
+   * 返回 void 仍然合法（旧接线零改动），此时按「无丢弃」处理。
+   */
+  apply: (operations: FactsAdjustOperation[], instruction: string) =>
+    Promise<Partial<FactsAdjustPlanShape> | void>;
   /** 业务失败回调（透传后端 detail），缺省时静默降级 */
   onError?: (fallback: string, e: unknown) => void;
   /**
@@ -783,6 +860,8 @@ export function FactsAdjustPanel({
   const [text, setText] = useState("");
   const [adjusting, setAdjusting] = useState(false);
   const [plan, setPlan] = useState<FactsAdjustPlanShape | null>(null);
+  // ✅ 2026-10-08（F3 前端接线）：应用后才知道的丢弃明细（计划已清空，故独立持有）
+  const [applyNotice, setApplyNotice] = useState<FactsAdjustIgnoredItem[] | null>(null);
   // 请求期间若已切换方案，丢弃结果（防止旧方案的计划落到新方案上）
   const schemeRef = useRef(schemeId);
   schemeRef.current = schemeId;
@@ -791,6 +870,7 @@ export function FactsAdjustPanel({
   // setFactsAdjustPlan(null) 同口径，只是归属从页面挪到了组件内。
   useEffect(() => {
     setPlan(null);
+    setApplyNotice(null);
     setAsk(false);
     setAdjusting(false);
     setText("");
@@ -799,6 +879,13 @@ export function FactsAdjustPanel({
   const busyNow = Boolean(busy) || adjusting;
   const ready = Boolean(schemeId) && !disabled && !busyNow;
   const operations = Array.isArray(plan?.operations) ? plan.operations : [];
+  // ⚠️ 先绑定再判数组：`Array.isArray(plan?.ignored)` 不会把 `plan` 收窄成非空，
+  //    直接写 `plan.ignored` 在 strict 下报「possibly undefined」。
+  const _ignoredRaw = plan?.ignored;
+  const _applyRaw = applyNotice;
+  const ignoredPlan: FactsAdjustIgnoredItem[] = Array.isArray(_ignoredRaw) ? _ignoredRaw : [];
+  const ignoredApply: FactsAdjustIgnoredItem[] = Array.isArray(_applyRaw) ? _applyRaw : [];
+  const ignoredShown = ignoredApply.length > 0 ? ignoredApply : ignoredPlan;
 
   const submitError = (fallback: string, e: unknown) => {
     onError?.(fallback, e);
@@ -812,10 +899,8 @@ export function FactsAdjustPanel({
     try {
       const data = await preview(instruction);
       if (schemeRef.current !== schemeId) return;   // 已切方案 → 丢弃
-      setPlan({
-        summary: data.summary,
-        operations: Array.isArray(data.operations) ? data.operations : [],
-      });
+      setPlan(normalizeFactsAdjustPlan(data));
+      setApplyNotice(null);
     } catch (e) {
       submitError("生成调整计划失败", e);
     } finally {
@@ -842,6 +927,11 @@ export function FactsAdjustPanel({
               其余 {operations.length - FACTS_ADJUST_PREVIEW_LIMIT} 项未列出
             </Text>
           )}
+          {ignoredPlan.length > 0 && (
+            <Text type="danger" style={{ fontSize: 12 }}>
+              另有 {ignoredPlan.length} 项因安全校验未纳入计划（见下方提示）
+            </Text>
+          )}
         </div>
       ),
       okText: "确认应用",
@@ -849,10 +939,14 @@ export function FactsAdjustPanel({
       okButtonProps: { danger: true },
       onOk: async () => {
         try {
-          await apply(
+          const res = await apply(
             operations,
             plan?.summary || `按已确认计划调整（${operations.length} 项）`,
           );
+          // 应用后后端才回传「哪些操作被安全校验丢弃」；返回 void 的旧接线
+          // 归一为空数组 → 与收口前逐字一致（不弹提示）。
+          const norm = normalizeFactsAdjustPlan(res);
+          setApplyNotice(norm.ignored && norm.ignored.length ? norm.ignored : null);
           setPlan(null);
         } catch (e) {
           submitError("应用调整失败", e);
@@ -877,6 +971,31 @@ export function FactsAdjustPanel({
           应用调整计划{operations.length > FACTS_ADJUST_PREVIEW_LIMIT
             ? `（${operations.length} 项）` : ""}
         </Button>
+      )}
+      {/*
+        ✅ 2026-10-08（全局事实模块收口 · F3 前端接线）：被安全校验丢弃的操作必须可见。
+        后端旧实现「AI 给了 3 条、实际只落 2 条」完全静默（响应只回 applied 计数），
+        用户无法区分「AI 没产出」与「产出了但被拦下」—— 与 R48 图表删除可观测性同族。
+        预览阶段的丢弃来自 `plan.ignored`，应用阶段的丢弃来自 `applyNotice`；
+        旧版后端两个都没有 → 本块整体不渲染，界面与收口前逐字一致。
+      */}
+      {ignoredShown.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginTop: 8 }}
+          message={`${ignoredShown.length} 项调整未纳入（${ignoredApply.length > 0 ? "应用时" : "预览时"}被安全校验丢弃）`}
+          description={(
+            <div style={{ fontSize: 12 }}>
+              {ignoredShown.slice(0, 6).map((it, i) => (
+                <div key={i}>· {factsAdjustIgnoreText(it)}</div>
+              ))}
+              {ignoredShown.length > 6 && (
+                <div>· ……其余 {ignoredShown.length - 6} 条明细略</div>
+              )}
+            </div>
+          )}
+        />
       )}
       <Modal
         title="AI 调整事实"
@@ -3618,7 +3737,8 @@ export default function SchemeWorkbenchPage() {
     //    所以按钮保持启用、在 onOk 内做空名称校验：拒绝提交并让弹窗保持打开。
     //    注意：modal.confirm 返回值在部分 AntD 版本不是 Promise，
     //    因此 loading 清理放在 onOk / onCancel 的 finally 中（不依赖返回值）。
-    let nameRef: { current: string } = { current: "" };
+    // 只改 nameRef.current，绑定本身从不重新赋值 → const（eslint prefer-const）
+    const nameRef: { current: string } = { current: "" };
     setPresetOpLoading("save");
     modal.confirm({
       title: "保存为格式预设",
@@ -9205,14 +9325,22 @@ exportPctRef.current = pct;
               }}
               apply={async (operations, instruction) => {
                 // 应用用户刚确认的预览计划，禁止后端再次调用 AI 生成另一份计划
-                await factsApi.adjust({
+                const { data } = await factsApi.adjust({
                   instruction,
                   scheme_id: id!,
                   apply: true,
                   operations,
                 });
                 await loadFacts();
-                msg.success("事实调整已应用");
+                // ✅ 2026-10-08（F3 前端接线）：被丢弃的操作要在成功提示里也说清楚，
+                //    否则「改了 3 条只落 2 条」在 toast 上仍是一个「已应用」。
+                const ignoredCount = Array.isArray(data?.ignored)
+                  ? data.ignored.length : 0;
+                msg.success(ignoredCount > 0
+                  ? `事实调整已应用，${ignoredCount} 项未纳入（详见面板提示）`
+                  : "事实调整已应用");
+                // 回传给面板渲染丢弃明细（组件把 void 当「无丢弃」）
+                return { ignored: data?.ignored } as any;
               }}
               onError={(fallback, e) =>
                 msg.error(

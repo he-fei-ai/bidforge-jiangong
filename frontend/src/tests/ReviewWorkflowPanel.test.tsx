@@ -734,7 +734,7 @@ describe("ReviewWorkflowPanel · 分页 / 门禁 / 失败反馈", () => {
   //    此前只有结构级断言（本仓 pytest 侧 test_review_export_closeout_r46 的跨语言
   //    parity），没有任何**组件级**用例验证「已通过的章节不再出现通过/驳回按钮」。
   //    一旦映射漂移，用户会对已通过章节重复提交审核（后端按状态机拦截 → 误报失败）。
-  it("各行操作按钮严格按 review_status 渲染：approved 不再出现「通过/驳回」，rejected 只能重提", async () => {
+  it("各行操作按钮严格按 review_status 渲染：approved 只剩「复审驳回」、rejected 只剩「整改后通过」，未知状态只给「重置」", async () => {
     (reviewApi.checklist as any).mockResolvedValue({ data: { items: [
       { id: "sec-p", title: "待审章节", word_count: 1000, review_status: "pending", review_status_label: "待审核", level: 1, last_reviewer: null, last_comment: "", last_reviewed_at: "" },
       { id: "sec-a", title: "已通章节", word_count: 1000, review_status: "approved", review_status_label: "已通过", level: 1, last_reviewer: "张三", last_comment: "同意", last_reviewed_at: "2026-10-06T10:00:00" },
@@ -760,18 +760,30 @@ describe("ReviewWorkflowPanel · 分页 / 门禁 / 失败反馈", () => {
     const rejected = await rowLabels("被驳章节");
     const skipped = await rowLabels("已跳章节");
 
-    // pending：可首次审核（通过 / 驳回）
-    expect(pending.some((t) => t.includes("通过"))).toBe(true);
-    expect(pending.some((t) => t.includes("驳回"))).toBe(true);
-    // approved：已通过 → 只能「复审」，绝不能再提交一次通过/驳回
-    expect(approved.some((t) => t.includes("复审"))).toBe(true);
-    expect(approved.some((t) => t.includes("通过"))).toBe(false);
-    expect(approved.some((t) => t.includes("驳回"))).toBe(false);
-    // rejected：已驳回 → 只能「重提」（回到 pending）
-    expect(rejected.some((t) => t.includes("重提"))).toBe(true);
-    expect(rejected.some((t) => t.includes("通过"))).toBe(false);
-    expect(rejected.some((t) => t.includes("驳回"))).toBe(false);
-    // skipped：已跳过 → 需「复审」才能进入审核
-    expect(skipped.some((t) => t.includes("复审"))).toBe(true);
+    // 断言按 NEXT_ACTIONS 的**精确标签**，绝不能用 includes 子串：approved 的合法
+    // 去向标签是「复审驳回」、rejected 是「整改后通过」，两者本身就含「驳回/通过」
+    // 子串 —— 旧用例把合法按钮判成违规（且 rejected 根本没有「重提」这个标签）。
+    // 本组用例 R46 写下后因本机无 Node 从未执行过，R57 首跑即在 approved 的
+    // 「驳回」断言处红；改精确匹配后四条状态映射各自锁死，标签漂移立刻可见。
+    const ACTION_LABELS: string[] = ["开始审核", "通过", "驳回", "复审驳回", "整改后通过"];
+    // pending：可首次审核（裸「通过 / 驳回」）并能进入审核中
+    expect(pending).toContain("通过");
+    expect(pending).toContain("驳回");
+    expect(pending).toContain("开始审核");
+    // approved：已通过 → 只允许「复审驳回」，不得再出现裸「通过 / 驳回」
+    expect(approved).toContain("复审驳回");
+    expect(approved.filter((t) => t === "通过" || t === "驳回")).toEqual([]);
+    // rejected：已驳回 → 只允许「整改后通过」，同样不得出现裸「通过 / 驳回」
+    expect(rejected).toContain("整改后通过");
+    expect(rejected.filter((t) => t === "通过" || t === "驳回")).toEqual([]);
+    // skipped 不在 ReviewStatus 契约内（后端状态机只有 pending/reviewing/approved/
+    // rejected）→ 未知状态必须**降级**为只给「重置」，绝不能误给任何审核动作按钮，
+    // 否则等于允许用户对无法识别的状态提交审核（后端按状态机拦截 → 报错误导）。
+    expect(skipped.filter((t) => ACTION_LABELS.includes(t))).toEqual([]);
+    // 凡 review_status 非空的行都必须带「重置」（回到 pending），四处一个不能少
+    expect(pending).toContain("重置");
+    expect(approved).toContain("重置");
+    expect(rejected).toContain("重置");
+    expect(skipped).toContain("重置");
   });
 });

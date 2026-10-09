@@ -16,7 +16,6 @@
 不再在本文件内联清单（原 ``EXPERT_CHECK_ITEMS`` 与提示词文案重复维护，存在分叉）。
 """
 import asyncio
-import hashlib
 import json
 import logging
 import time

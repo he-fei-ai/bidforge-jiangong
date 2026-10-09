@@ -28,7 +28,7 @@ import {
 import { reviewAutoFixApi } from "../../api";
 import { useAntdMessageHub } from "../../utils/activityCenter";
 import type {
-  AutoFixCollectResult, AutoFixStageItem, AutoFixStageResult,
+  AutoFixCollectResult, AutoFixConfirmResult, AutoFixStageItem, AutoFixStageResult,
 } from "../../types/audit";
 
 const { Text, Paragraph } = Typography;
@@ -55,6 +55,8 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [doneInfo, setDoneInfo] = useState<{
     accepted: number; sections: number; snapshotId: string;
+    // ✅ R55 F3：/confirm 回传的失效跳过明细（R39 起后端就有，此前前端整段丢弃）
+    skipped: NonNullable<AutoFixConfirmResult["skipped"]>;
   } | null>(null);
 
   const reset = useCallback(() => {
@@ -104,6 +106,12 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
       const init: Record<string, boolean> = {};
       for (const it of s.items) if (it.status === "repaired") init[itemKey(it)] = true;
       setSelected(init);
+      // ✅ R55 F3：批量暂存受单次章节上限截断时，此前完全静默（用户以为
+      //    「一键修复全部阻断项」把所有章节都处理了）。上限本身是护栏，
+      //    不可见才是缺陷 —— 现 toast + 清单上方 Alert 双层提示。
+      if ((s.skipped_sections?.length ?? 0) > 0) {
+        msg.warning(`${s.skipped_sections!.length} 个章节因单次修复上限本轮未处理，可再次点击「一键修复」处理剩余章节`);
+      }
       setPhase("reviewing");
     } catch (e: any) {
       msg.error(`暂存失败：${e?.message || e}`);
@@ -117,10 +125,14 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
     [stageData],
   );
 
-  const acceptedRuleIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const it of repairedItems) if (selected[itemKey(it)]) ids.add(it.rule_id);
-    return Array.from(ids);
+  // ✅ R55 F3（2026-10-08）：部分接受改用 `rule_id|section_id` 复合键 —— 与勾选框
+  //    逐项粒度一致（后端 /confirm 同轮支持该粒度）。旧实现塌缩成 rule_id：同一
+  //    规则落在多个章节时（CON-01 等无 section_id 的 finding 按定位结果分发），
+  //    勾任意一章 = 接受该规则**全部章节**，UI 与协议分叉、无法只接受一项。
+  const acceptedKeys = useMemo(() => {
+    const keys: string[] = [];
+    for (const it of repairedItems) if (selected[itemKey(it)]) keys.push(itemKey(it));
+    return keys;
   }, [repairedItems, selected]);
 
   const allAccepted = repairedItems.length > 0 && repairedItems.every((i) => selected[itemKey(i)]);
@@ -143,16 +155,16 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
         batch_id: string; accept_all?: boolean; accept?: string[]; reject?: string[];
       } = { batch_id: stageData.batch_id };
       if (accept) {
-        if (acceptedRuleIds.length === 0) {
+        if (acceptedKeys.length === 0) {
           msg.warning("请至少勾选一项要接受修复的问题");
           setBusy(false);
           return;
         }
         // 接受全部已勾选 → 若全选则走 accept_all（后端直接取末条合并，零额外 AI）
         if (allAccepted) payload.accept_all = true;
-        else payload.accept = acceptedRuleIds;
+        else payload.accept = acceptedKeys;
       } else {
-        payload.reject = repairedItems.map((i) => i.rule_id);
+        payload.reject = repairedItems.map((i) => itemKey(i));
       }
       const { data } = await reviewAutoFixApi.confirm(schemeId, payload);
       if (data.status === "rejected") {
@@ -160,19 +172,28 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
         close();
         return;
       }
+      // ✅ R55 F3：失效跳过的条目必须可见 —— 后端 R39 起回传 skipped（链式重算时
+      //    finding 已不在当前总检结果 → 被丢弃未修），旧前端整段丢弃 → 「以为修了、
+      //    实际没修」的静默在 UI 层复发。
+      const skippedList: NonNullable<AutoFixConfirmResult["skipped"]> =
+        Array.isArray(data.skipped) ? data.skipped : [];
       setDoneInfo({
         accepted: data.accepted, sections: data.repaired_sections,
         snapshotId: data.snapshot_id || "",
+        skipped: skippedList,
       });
       setPhase("done");
       msg.success(`已修复 ${data.accepted} 项问题，涉及 ${data.repaired_sections} 个章节`);
+      if (skippedList.length > 0) {
+        msg.warning(`其中 ${skippedList.length} 项在确认时已失效被跳过（未修复），详见结果提示`);
+      }
       onFixed?.(data.snapshot_id || "");
     } catch (e: any) {
       msg.error(`确认失败：${e?.message || e}`);
     } finally {
       setBusy(false);
     }
-  }, [schemeId, stageData, acceptedRuleIds, allAccepted, repairedItems, msg, onFixed, close]);
+  }, [schemeId, stageData, acceptedKeys, allAccepted, repairedItems, msg, onFixed, close]);
 
   const collectFixable = collectData?.items || [];
   const unsupportedCount = collectFixable.filter(
@@ -217,9 +238,9 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
           <Button
             key="confirm" type="primary" icon={<CheckCircleOutlined />}
             loading={busy} onClick={() => doConfirm(true)}
-            disabled={acceptedRuleIds.length === 0}
+            disabled={acceptedKeys.length === 0}
           >
-            确认修复（接受选中 {acceptedRuleIds.length}）
+            确认修复（接受选中 {acceptedKeys.length}）
           </Button>
         ),
       ]}
@@ -291,6 +312,17 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
               共 {stageData.items.length} 条结果，其中 {repairedItems.length} 条可修复
             </Text>
           </Space>
+          {(stageData.skipped_sections?.length ?? 0) > 0 && (
+            <Alert
+              type="warning" showIcon style={{ marginBottom: 6 }}
+              message={`受单次修复章节上限${stageData.max_sections ? `（${stageData.max_sections} 章）` : ""}约束，${stageData.skipped_sections!.length} 个章节本轮未处理`}
+              description={
+                stageData.skipped_sections!.map((x) =>
+                  `「${x.section_title || x.section_id.slice(0, 8)}」${x.finding_count} 项`).join("；") +
+                  " —— 确认本批后可再次点击「一键修复」处理剩余章节。"
+              }
+            />
+          )}
           <div style={{ maxHeight: 360, overflowY: "auto" }}>
             {stageData.items.map((it, i) => {
               const key = itemKey(it);
@@ -361,6 +393,23 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
             message={"已修复 " + doneInfo.accepted + " 项问题，涉及 " + doneInfo.sections + " 个章节"}
             description="正文已变更：相关章节审核结论已自动退回「待审核」，请复核后重新送审；导出缓存与总检结论亦已失效。"
           />
+          {doneInfo.skipped.length > 0 && (
+            <Alert
+              type="warning" showIcon style={{ marginTop: 8 }}
+              message={`${doneInfo.skipped.length} 项问题在确认时已失效，本轮未修复`}
+              description={
+                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
+                  {doneInfo.skipped.map((sk, i) => (
+                    <li key={`${sk.rule_id}-${sk.section_id || ""}-${i}`}>
+                      {sk.rule_id}
+                      {sk.section_id ? `（章节 ${sk.section_id.slice(0, 8)}）` : ""}
+                      ：{sk.detail || "该问题已不在当前检查结果中，请重新总检"}
+                    </li>
+                  ))}
+                </ul>
+              }
+            />
+          )}
           <Alert
             type="warning" showIcon style={{ marginTop: 8 }}
             message="如修复结果不理想，可在「审核与预检」页对该问题使用单条「自动修复」弹窗的回滚，或重新总检后再次修复。"

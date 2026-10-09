@@ -381,7 +381,10 @@ async def stage(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     if not findings:
         return {"batch_id": "", "items": [],
                 "stats": {"repaired": 0, "failed": 0, "skipped": 0},
-                "status": "empty", "reason": "当前范围内没有可自动修复的问题"}
+                "status": "empty", "reason": "当前范围内没有可自动修复的问题",
+                # 与 stage_fixes 正常返回的契约字段对齐（加法式，旧前端零影响）
+                "max_sections": review_autofix.AUTOFIX_MAX_SECTIONS,
+                "skipped_sections": []}
     sections = await _load_sections(db, scheme_id)
     facts, standards_text = await _build_facts(db, scheme)
     res = await review_autofix.stage_fixes(
@@ -394,9 +397,14 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     """逐条/批量 接受（落库 + 审核退回 + 缓存失效）或 拒绝（丢弃/回滚）。
     入参：``batch_id``（/stage 返回）+ 下列之一：
     - ``accept_all=true``：接受全部已修复项（默认，未给 accept/reject 时同此）；
-    - ``accept=[rule_id...]``：仅接受指定项；
-    - ``reject=[rule_id...]``：拒绝指定项（其余已修复项接受）。
-    同章多条问题时，非前缀式「拒绝中间某条」会重新链式改写以保证合并正确。
+    - ``accept=[...]``：仅接受指定项。条目两种粒度（✅ R55 F2a）：
+      ``rule_id`` 命中该规则全部条目（旧调用方逐字不变）；
+      ``"rule_id|section_id"`` 复合键仅命中单条（前端逐项勾选用）。
+    - ``reject=[...]``：拒绝指定项（条目粒度同上，其余已修复项接受）。
+    同章多条问题时，非前缀式「拒绝中间某条」会重新链式改写以保证合并正确；
+    重算解析按**章节精确**（跨章同规则不互相改写，整篇型 finding 回退规则级）。
+    返回 ``skipped``：链式重算时已失效 finding 的跳过明细
+    （``rule_id``/``section_id``/``status``/``detail``，供前端提示「哪几条没修」）。
     """
     from app.services import repair_record, review_autofix
     body = body or {}
@@ -408,24 +416,50 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
             or batch.get("mode") != "review_autofix_batch":
         raise HTTPException(404, "暂存批次不存在")
     items = batch.get("items") or []
-    repaired_ids = {it.get("rule_id") for it in items if it.get("status") == "repaired"}
+
+    # ✅ F2a（R55 · 2026-10-08）：accept/reject 条目支持两种粒度 ——
+    #   ``rule_id``（命中该规则全部条目，**旧前端语义逐字不变**）与复合键
+    #   ``"rule_id|section_id"``（命中单条）。旧实现只按 rule_id 集合匹配：
+    #   stage 会把无 section_id 的 finding（如 CON-01 数值冲突）按定位结果归到
+    #   **多个章节**、产生多条同 rule_id 的 items；前端勾选框按 rule|section
+    #   逐项渲染，勾任意一章 = 接受该规则全部章节 —— UI 粒度与后端判定粒度
+    #   分叉，「只接受这一章」在协议上根本无法表达。
+    def _item_key(it: dict) -> str:
+        return f"{it.get('rule_id') or ''}|{it.get('section_id') or ''}"
+
+    repaired = [it for it in items if it.get("status") == "repaired"]
     accept = body.get("accept")
     reject = body.get("reject")
     accept_all = bool(body.get("accept_all"))
-    if accept_all or (not accept and not reject):
-        accepted_ids = set(repaired_ids)
+    if accept_all or (accept is None and not reject):
+        accepted_items = list(repaired)
     elif accept is not None:
-        accepted_ids = set(accept) & repaired_ids
+        want = {str(x) for x in (accept or [])}
+        accepted_items = [it for it in repaired
+                          if it.get("rule_id") in want or _item_key(it) in want]
     else:  # 仅给了 reject
-        accepted_ids = set(repaired_ids) - set(reject or [])
-    if not accepted_ids:
+        drop = {str(x) for x in (reject or [])}
+        accepted_items = [it for it in repaired
+                          if it.get("rule_id") not in drop
+                          and _item_key(it) not in drop]
+    if not accepted_items:
         await repair_record.mark_repair_status(db, batch_id, "rejected")
         return {"status": "rejected", "accepted": 0, "repaired_sections": 0,
                 "snapshot_id": "", "batch_id": batch_id}
+    accepted_keys = {_item_key(it) for it in accepted_items}
+    #: ✅ F2b（R55 · 2026-10-08）：前缀判定必须喂该章**完整链**（含未被接受的
+    #:   已修复项）。旧实现先把 by_section 过滤成「只剩被接受项」再交给
+    #:   ``_merged_after_if_prefix`` —— 「未接受项出现在被接受项之后」的分支
+    #:   永不出现（未接受项已被滤掉），非前缀检测在生产路径**整体失效**，
+    #:   下方「重新链式改写」分支沦为死代码。后果：对链 [A,B,C] 接受 {A,C}
+    #:   时直接取 C.after —— 而 C 的 after 是链式累积、含被用户拒绝的 B 的
+    #:   改写，正是 R39 想根治的「用户没接受却被静默写入」的越权写入。
+    #:   现按章分组完整 repaired 链，前缀集合由**本章**被接受项的 rule_id
+    #:   构成（同一规则在单章内至多一条 item，findings 已按 rule_id 去重，
+    #:   章内集合不会把别章的接受状态泄漏进来）。
     by_section: dict[str, list[dict]] = {}
-    for it in items:
-        if it.get("rule_id") in accepted_ids and it.get("status") == "repaired":
-            by_section.setdefault(it.get("section_id"), []).append(it)
+    for it in repaired:
+        by_section.setdefault(it.get("section_id") or "", []).append(it)
     #: 失效 finding 的跳过明细（供运维审计与前端提示）。
     #:
     #: ✅ BUG 修复（2026-10-04 · R39 顺带收口）：旧实现在**循环体内**才
@@ -447,23 +481,44 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
         section = sec_by_id.get(sid)
         if not section:
             continue
-        merged = _merged_after_if_prefix(its, accepted_ids)
+        sec_accepted = [it for it in its if _item_key(it) in accepted_keys]
+        if not sec_accepted:
+            continue
+        merged = _merged_after_if_prefix(
+            its, {it.get("rule_id") for it in sec_accepted})
         if merged is not None:
             pending.append((sid, section.get("content") or "", merged))
             continue
-        rule_ids = [it.get("rule_id") for it in its
-                    if it.get("rule_id") in accepted_ids]
+        rule_ids = [it.get("rule_id") for it in sec_accepted]
         resolved = []
         for rid in rule_ids:
             try:
-                resolved.append(await _resolve_finding(db, scheme_id, rid))
+                # ✅ F2c（R56 · 收口 R55 遗留②）：先按**本章**精确解析 —— 旧实现
+                #   只传 rule_id，同规则跨章时会把他章的 finding 拿来重算本章
+                #   （拿别的章的证据改本章）。精确不到才回退规则级（整篇型
+                #   finding 如 CON-01 不带 section_id，保持历史行为可用），且
+                #   回退命中仍属别章 → 拒绝越章改写，记 skipped 留理由。
+                try:
+                    resolved.append(await _resolve_finding(db, scheme_id, rid, sid))
+                except HTTPException as first_err:
+                    if first_err.status_code != 404:
+                        raise
+                    fb = await _resolve_finding(db, scheme_id, rid)
+                    fb_sid = str(fb.get("section_id") or "")
+                    if fb_sid and fb_sid != sid:
+                        raise HTTPException(
+                            404, f"{rid} 在当前检查结果中不属于本章（实际属于章节"
+                                 f" {fb_sid}），已跳过本章以防跨章改写")
+                    resolved.append(fb)
             except HTTPException as e:
                 # 失效 finding 静默跳过会丢失可观测性：用户以为修了、实际没修
                 # 记 WARNING 含 rule_id 与错误码，供运维审计与前端提示
                 logger.warning(
                     "confirm 链式重算跳过失效 finding（rule_id=%s, status=%s, detail=%s）",
                     rid, e.status_code, str(e.detail)[:200])
-                skipped.append({"rule_id": rid, "status": e.status_code, "detail": str(e.detail)[:200]})
+                skipped.append({"rule_id": rid, "section_id": sid,
+                                "status": e.status_code,
+                                "detail": str(e.detail)[:200]})
         if not resolved:
             continue
         resolved = sorted(resolved, key=lambda x: _severity_rank(x.get("severity")))
@@ -479,7 +534,7 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
             repair_id=batch_id)
     await repair_record.mark_repair_status(db, batch_id, "confirmed")
     return {
-        "status": "confirmed", "accepted": len(accepted_ids),
+        "status": "confirmed", "accepted": len(accepted_items),
         "repaired_sections": len(pending), "snapshot_id": snapshot_id,
         "batch_id": batch_id,
         "skipped": skipped,

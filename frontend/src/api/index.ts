@@ -178,7 +178,14 @@ api.interceptors.response.use(
         data = undefined;
       }
     }
-    const detail = data?.detail || data?.message || error?.message;
+    const rawDetail = data?.detail ?? data?.message;
+    // ✅ R55 F5（2026-10-08）：FastAPI 422 校验失败的 detail 是**数组**形
+    //    （[{loc, msg, type}, ...]），旧实现只认字符串 → 数组整个被丢弃，
+    //    用户看到 axios 默认的 "Request failed with status code 422"，
+    //    缺哪个参数全在响应体里却看不到（SSE 侧 describeSseHttpError 早已
+    //    处理同一形态，REST 侧是最后一处漏网）。判据与 SSE 侧共用
+    //    detailArrayToText 单一出口，不再另写一份。
+    const detail = Array.isArray(rawDetail) ? detailArrayToText(rawDetail) : rawDetail;
     if (detail && typeof detail === "string") {
       error.message = detail;
     }
@@ -1105,6 +1112,41 @@ export function parseSseEventBlock(block: string): { data?: string; heartbeat: b
   return { data: data.length ? data.join("\n") : undefined, heartbeat };
 }
 
+/** 把 FastAPI 校验失败的 detail（数组形）转为可读中文文本。
+ *
+ * ✅ R55（2026-10-08）判据单一出口：REST 响应拦截器与 SSE 侧
+ * describeSseHttpError 共用本函数 —— 此前只有 SSE 侧认数组形，
+ * REST 侧 422 落回 "Request failed with status code 422"，
+ * 缺哪个参数全在响应体里却看不到（同 generate-facts 恒 422 的历史事故）。
+ */
+function detailArrayToText(detail: unknown[]): string {
+  const scopeCn: Record<string, string> = {
+    path: "路径参数",
+    query: "查询参数",
+    body: "请求体字段",
+  };
+  const parts: string[] = [];
+  for (const item of detail) {
+    if (!item || typeof item !== "object") continue;
+    const locParts = Array.isArray((item as any).loc)
+      ? (item as any).loc.map(String).filter(Boolean)
+      : [];
+    const field = locParts.length > 1 ? locParts[locParts.length - 1] : "";
+    const scopeLabel = locParts[0] ? scopeCn[locParts[0]] : "";
+    const msg = typeof (item as any).msg === "string" ? (item as any).msg : "";
+    let desc: string;
+    if (msg.toLowerCase() === "field required") {
+      desc = scopeLabel && field ? `缺少必填${scopeLabel} “${field}”` : "缺少必填参数";
+    } else if (msg) {
+      desc = scopeLabel && field ? `${scopeLabel} “${field}” 校验失败：${msg}` : msg;
+    } else {
+      desc = "参数校验失败";
+    }
+    parts.push(desc);
+  }
+  return parts.join("；");
+}
+
 /** 把 SSE 端点的 HTTP 错误响应体解析为人类可读的错误消息。
  *
  * FastAPI 的校验失败（422）返回 `{"detail": [{loc, msg, type}, ...]}` ——
@@ -1122,32 +1164,9 @@ function describeSseHttpError(status: number, data: any): string {
     return `${base}: ${detail.trim()}`;
   }
   if (Array.isArray(detail)) {
-    const scopeCn: Record<string, string> = {
-      path: "路径参数",
-      query: "查询参数",
-      body: "请求体字段",
-    };
-    const parts: string[] = [];
-    for (const item of detail) {
-      if (!item || typeof item !== "object") continue;
-      const locParts = Array.isArray(item.loc)
-        ? item.loc.map(String).filter(Boolean)
-        : [];
-      const field = locParts.length > 1 ? locParts[locParts.length - 1] : "";
-      const scopeLabel = locParts[0] ? scopeCn[locParts[0]] : "";
-      const msg = typeof item.msg === "string" ? item.msg : "";
-      let desc: string;
-      if (msg.toLowerCase() === "field required") {
-        desc = scopeLabel && field ? `缺少必填${scopeLabel} “${field}”` : "缺少必填参数";
-      } else if (msg) {
-        desc = scopeLabel && field ? `${scopeLabel} “${field}” 校验失败：${msg}` : msg;
-      } else {
-        desc = "参数校验失败";
-      }
-      parts.push(desc);
-    }
-    if (parts.length) {
-      return `${base}: ${parts.join("；")}`;
+    const text = detailArrayToText(detail);
+    if (text) {
+      return `${base}: ${text}`;
     }
   }
   return base;

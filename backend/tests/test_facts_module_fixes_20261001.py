@@ -21,9 +21,9 @@ from app.config import settings
 from app.models import FactGroupIn, FactGroupUpdate, FactItem
 from app.routers import global_facts as gf
 from app.routers.sse_handlers import (
-    _chapter_inject_enabled,
     _render_facts_text,
 )
+from app.services.facts_builder import _chapter_inject_enabled
 from app.services.facts_classification import (
     classify_chapter_from_text,
     classify_fact_attr,
@@ -404,17 +404,23 @@ class TestRenameRefreshesChapter:
         test_facts_deep_audit_r45_20261006.py::TestDerivationGateSingleSource
         统一负责。
         """
-        src = inspect.getsource(gf.update_fact)
+        # ✅ R57：update_fact 不再直接调用 derivation_inputs_changed，
+        #    判据 + 应用收敛到 _rederive_dimension_columns 单一出口。
+        src = inspect.getsource(gf._rederive_dimension_columns)
         assert "derivation_inputs_changed(" in src, (
-            "分组重建未调用派生输入变更判据的唯一事实源 —— D1 分叉回流")
+            "派生维度重算未调用唯一事实源 —— D1 分叉回流")
         # 判据本身必须覆盖三维（唯一出口只有一处，锁这一处即可全仓生效）
         gate_src = inspect.getsource(derivation_inputs_changed)
         for dim in ("old_category", "new_category", "old_name", "new_name",
                     "old_value", "new_value"):
             assert dim in gate_src, f"判据缺 {dim} 维度"
         # 旧值必须从库行 content 回解，而不是拿新值自比
-        assert "extract_value_from_markdown_line(" in src, (
-            "分组重建未按旧行 content 回解出旧值")
+        # ✅ R57：extract_value_from_markdown_line 调用在 _rederive_dimension_columns
+        #    的调用方（update_fact / _apply_item_updates / resolve_conflict），
+        #    而非 _rederive_dimension_columns 本身（它只接收 old_value 参数）。
+        update_src = inspect.getsource(gf.update_fact)
+        assert "extract_value_from_markdown_line(" in update_src, (
+            "update_fact 未按旧行 content 回解出旧值")
 
 
 # =============================================================================

@@ -141,6 +141,13 @@ def text_word_count(content: str) -> int:
     """
     if not content:
         return 0
+    # ✅ 修复（2026-10-09 · CRLF 行尾 \r 被计入字数）：
+    #    strip_fenced_code_blocks 按 \n split/join，CRLF 输入的每行尾随 \r
+    #    会保留在剔除后的输出里并被 len() 计入。对 50 行章节约多计 50 字
+    #    （~3% 偏差），在 under(0.8×budget) / over(1.3×budget) 边界条件下
+    #    可能把 under 误判为 normal（不续写）或 normal 误判为 over（触发
+    #    不必要的压缩）。正文字数应只计用户实际阅读到的文字量，\r 不可见。
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
     return len(strip_fenced_code_blocks(content))
 
 

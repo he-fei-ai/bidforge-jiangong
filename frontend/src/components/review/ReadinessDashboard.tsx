@@ -555,6 +555,23 @@ function ReadinessDashboard({
               }
             />
           )}
+          {/* ✅ R55 F4（2026-10-08 · 收口 R50 未落地③）：因正文已变而被跳过的
+              AI 结论此前无任何呈现 —— 旧 AI 合规/一致性/专家结论在正文变更后
+              不计分也不进清单（compliance.py 已回传 stale_ai_sources），用户不
+              知道「要重跑哪个 AI 检查」，这些维度下的问题就**永远静默漏报**。
+              来源名复用 SOURCE_LABEL 单一映射，不另写一份中文表。 */}
+          {(overview.stale_ai_sources?.length ?? 0) > 0 && (
+            <Alert
+              type="warning"
+              showIcon
+              icon={<ExclamationCircleOutlined />}
+              style={{ marginTop: 12 }}
+              message={`以下 AI 检查结论对应的正文已变更，本次总检未采用：${(overview.stale_ai_sources || [])
+                .map((s) => SOURCE_LABEL[s] || s)
+                .join("、")}`}
+              description="请到对应功能页重新执行一次该 AI 检查，否则这些维度下的问题不会出现在清单里（当前评分可能因此偏高）。"
+            />
+          )}
           {(overview.findings || []).length > 0 && (
             <div style={{ marginTop: 12 }}>
               <Space style={{ marginBottom: 6 }} wrap>

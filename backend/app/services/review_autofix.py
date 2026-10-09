@@ -939,7 +939,10 @@ async def stage_fixes(db, *, scheme_id: str, findings: list[dict],
     """批量「定位 → 改写 → 校验」，**只暂存不落库**（落库由 ``/confirm`` 完成）。
 
     同章多条 finding 走 :func:`_chain_section_fixes` 链式合并；跨章各自独立。
-    返回 ``{batch_id, items, stats, status}``，``status="pending_confirm"``。
+    受 ``AUTOFIX_MAX_SECTIONS`` 上限约束（与单条 ``_fix_each_section`` 同判据，
+    问题最多的章节优先，超出章节记入 ``skipped_sections`` 并计入 ``stats.skipped``）。
+    返回 ``{batch_id, items, stats, status, max_sections, skipped_sections}``，
+    ``status="pending_confirm"``。
 
     ⚠️ 分层约束（``test_outline_name_line_20260927.py::test_services_never_import_routers``
     静态守护）：**services 不得 import routers**。故本函数**不写 sections.content**，
@@ -961,6 +964,31 @@ async def stage_fixes(db, *, scheme_id: str, findings: list[dict],
             if t.get("section_id"):
                 by_section.setdefault(t["section_id"], []).append(f)
 
+    # ✅ F1（R55 · 2026-10-08）：批量路径同样受 AUTOFIX_MAX_SECTIONS 约束。
+    #   旧实现只在上游注释里宣称「防止点了修复把整方案重写一遍」，单条
+    #   ``_fix_each_section`` 有截断门，本函数（恰是触达章节最多的入口）却
+    #   没有 —— 30 章有问题就是 30 次 AI 调用，配置护栏在批量路径整体失效；
+    #   且下方 stats 硬编码 "skipped": 0，把「没截断」伪装成「截断后无跳过」。
+    #   排序判据与 ``_fix_each_section`` 一致：问题最多的章节优先。
+    max_sections = AUTOFIX_MAX_SECTIONS  # 读模块属性（测试可 monkeypatch）
+    skipped_sections: list[dict] = []
+    if max_sections and len(by_section) > max_sections:
+        ranked = sorted(by_section.items(), key=lambda kv: len(kv[1]),
+                        reverse=True)
+        for sid, fs in ranked[max_sections:]:
+            sec = sec_by_id.get(sid) or {}
+            skipped_sections.append({
+                "section_id": sid,
+                "section_title": sec.get("title") or "",
+                "finding_count": len(fs),
+                "rule_ids": sorted({str(f.get("rule_id") or "") for f in fs}),
+            })
+        by_section = dict(ranked[:max_sections])
+        logger.warning(
+            "批量修复：命中章节数上限 %d（配置 review_autofix_max_sections），"
+            "%d 个章节本轮未处理 scheme=%s",
+            max_sections, len(skipped_sections), scheme_id)
+
     all_items: list[dict] = []
     for sid, fs in by_section.items():
         section = sec_by_id.get(sid)
@@ -975,13 +1003,17 @@ async def stage_fixes(db, *, scheme_id: str, findings: list[dict],
         all_items.extend(items)
 
     repaired = sum(1 for i in all_items if i["status"] == "repaired")
-    stats = {"repaired": repaired, "failed": len(all_items) - repaired, "skipped": 0}
+    stats = {"repaired": repaired, "failed": len(all_items) - repaired,
+             "skipped": len(skipped_sections)}
     result = await save_repair(
         db, scheme_id=scheme_id, scan_id="", mode="review_autofix_batch",
         items=all_items, snapshot_id="", total_conflicts=len(all_items), stats=stats)
     return {
         "batch_id": result["repair_id"], "items": all_items,
         "stats": stats, "status": "pending_confirm",
+        # ✅ 加法式契约（R54 同族约定）：旧前端不消费也不报错
+        "max_sections": max_sections,
+        "skipped_sections": skipped_sections,
     }
 
 

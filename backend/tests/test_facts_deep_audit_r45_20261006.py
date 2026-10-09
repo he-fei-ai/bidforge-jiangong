@@ -295,9 +295,11 @@ class TestDerivationGateSingleSource:
         return {"_apply_item_updates": item, "_carry_dimensions": group}
 
     def test_both_paths_call_single_source(self):
+        # ✅ R57：两条写路径改为调用 _rederive_dimension_columns 单一出口，
+        #    derivation_inputs_changed 的调用收敛到该函数内部。
         for fn_name, src in self._call_site_sources().items():
-            assert "derivation_inputs_changed(" in src, (
-                f"{fn_name} 未调用单一事实源 —— D1 分叉回流")
+            assert "_rederive_dimension_columns(" in src, (
+                f"{fn_name} 未调用单一出口 _rederive_dimension_columns —— D1 分叉回流")
 
     def test_no_local_literal_gate_remains(self):
         """两条路径不得再写各自的字面量门控（这是三次漏改的根因形态）。"""

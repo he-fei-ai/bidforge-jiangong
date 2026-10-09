@@ -519,8 +519,12 @@ describe("ReadinessDashboard · 自动修复入口接线", () => {
     // 核心契约：宿主页 onContentFixed 被通知，且 overview 以 force=true 重算
     await waitFor(() => expect(onContentFixed).toHaveBeenCalled());
     const overviewCalls = (complianceApi.overview as any).mock.calls as any[];
-    expect(overviewCalls.some((c) => c[0] === "s1" && c[1] === true)).toBe(true),
-      "BatchFixModal 修复完成后必须 force=true 重算，避免命中旧缓存（拿到修复前旧分）";
+    // 契约：BatchFixModal 修复完成后必须 force=true 重算，避免命中旧缓存
+    //（否则用户拿到修复前的旧分继续整改）。旧写法把这句说明挂在**逗号运算符**
+    // 右侧（`expect(...).toBe(true), "文字";`）：断言仍会执行，但 eslint
+    // no-unused-expressions 判 error（CI 的 npm run lint 因此退出 1），且失败时
+    // 这句提示完全不会显示 —— 属「看着像消息、其实是死代码」。
+    expect(overviewCalls.some((c) => c[0] === "s1" && c[1] === true)).toBe(true);
   });
 });
 
@@ -764,5 +768,36 @@ describe("ReadinessDashboard · 过期恢复与告警链路", () => {
     fireEvent.click(btnByText(container, "一键总检")!);
     await waitFor(() => expectMsg(msgSpy.error, "预检引擎异常"));
     expect(container.textContent || "").toContain("82 分");
+  });
+});
+
+// ===========================================================================
+// ✅ R55 F4（收口 R50 未落地③）：后端总检在「AI 结论对应正文已变更」时跳过过期行
+//    并回传 stale_ai_sources，此前前端零消费 —— 用户不知道「要重跑哪个 AI 检查」，
+//    这些维度下的问题永久静默漏报。锁两例：有陈旧源必出告警（中文标签走
+//    SOURCE_LABEL 单一映射，不另写一份表）；无陈旧源不得出现告警。
+// ===========================================================================
+describe("ReadinessDashboard · R55 陈旧 AI 结论告警", () => {
+  it("stale_ai_sources 非空 → 告警列出未采用的 AI 来源（中文名映射）", async () => {
+    (complianceApi.overview as any).mockResolvedValue({
+      data: { ...mocks.OVERVIEW, stale_ai_sources: ["compliance", "expert_review"] },
+    });
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    fireEvent.click(btnByText(container, "一键总检")!);
+    await waitFor(() =>
+      expect(container.textContent || "").toContain("本次总检未采用"));
+    const t = container.textContent || "";
+    expect(t).toContain("规范符合性（AI）");
+    expect(t).toContain("专家论证预检（AI）");
+    expect(t).toContain("请到对应功能页重新执行一次该 AI 检查");
+  });
+
+  it("无 stale_ai_sources（正常/旧后端）→ 不渲染该告警", async () => {
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    fireEvent.click(btnByText(container, "一键总检")!);
+    await waitFor(() => expect(container.textContent || "").toContain("引用废止标准"));
+    expect(container.textContent || "").not.toContain("本次总检未采用");
   });
 });

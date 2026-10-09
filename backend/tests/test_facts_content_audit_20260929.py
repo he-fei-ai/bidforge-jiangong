@@ -40,6 +40,8 @@ import uuid
 import app.db as _appdb
 import app.routers.global_facts as gf
 import app.routers.sse_handlers as sh
+# ✅ R57：_row_chapter 已从 sse_handlers 移至 facts_builder，不再 re-export
+from app.services.facts_builder import _row_chapter
 import pytest
 from app.db import get_conn, init_db
 from app.models import FactItem
@@ -348,7 +350,7 @@ async def test_load_facts_rows_keeps_five_column_row_contract(ctx):
     await _seed_fully_populated_fact(db, pid, sid, gid="g7", is_stale=0)
     rows = await sh._load_facts_rows(db, sid)
     assert rows and all(len(r) == 5 for r in rows)
-    assert sh._row_chapter(rows[0]) == "overview"
+    assert _row_chapter(rows[0]) == "overview"
 
 
 # ---------------------------------------------------------------------------
@@ -494,8 +496,8 @@ async def test_load_facts_rows_accepts_positional_row_shape(ctx):
     # 位置序列原样透传（既有行契约），_row_chapter 按长度自适应取 chapter
     assert rows[0] == ("项目概况", "工程名称", "某某产业园项目")
     assert rows[1][4] == "overview"
-    assert sh._row_chapter(rows[0]) == ""
-    assert sh._row_chapter(rows[1]) == "overview"
+    assert _row_chapter(rows[0]) == ""
+    assert _row_chapter(rows[1]) == "overview"
 
 
 def test_load_facts_rows_shares_inject_query_builder():

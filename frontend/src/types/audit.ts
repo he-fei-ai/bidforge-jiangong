@@ -172,9 +172,21 @@ export interface AutoFixCollectResult {
 export interface AutoFixStageResult {
   batch_id: string;
   items: AutoFixStageItem[];
+  /** skipped = 因单次修复章节上限（AUTOFIX_MAX_SECTIONS）本轮未处理的章节数 */
   stats: { repaired: number; failed: number; skipped: number };
   status: "pending_confirm" | "empty";
   reason?: string;
+  // ✅ R55 F3（2026-10-08）：后端 /stage 起回传上限与「哪些章节因上限没处理」，
+  //    旧前端零消费 → 上限截断对用户不可见（以为「一键修复全部阻断项」修完了）。
+  /** 单次修复章节上限（0 = 不限），与后端 review_autofix_max_sections 同源 */
+  max_sections?: number;
+  /** 因上限被跳过的章节明细（加法式字段，旧后端不返回时按空处理） */
+  skipped_sections?: Array<{
+    section_id: string;
+    section_title: string;
+    finding_count: number;
+    rule_ids: string[];
+  }>;
 }
 
 /** 确认结果（POST /autofix/confirm） */
@@ -184,7 +196,10 @@ export interface AutoFixConfirmResult {
   repaired_sections: number;
   snapshot_id: string;
   batch_id: string;
-  skipped?: Array<{ rule_id: string; status: number; detail: string }>;
+  // ✅ R55 F3：条目补 section_id（后端 confirm 的跳过明细带章节，逐项可定位）
+  skipped?: Array<{
+    rule_id: string; section_id?: string; status: number; detail: string;
+  }>;
 }
 
 /** 维度得分 */
@@ -263,6 +278,10 @@ export interface ReadinessOverview {
   //    一律计入 deliverability）。>0 说明规则库与评分口径已漂移，属必须暴露的
   //    数据质量信号，此前前端类型未声明、UI 也无从提示。
   unknown_dimension_count?: number;
+  // ✅ R55 F4（2026-10-08 · 收口 R50 未落地③）：因正文已变而**未采用**的 AI 来源
+  //    （compliance / consistency / consistency_scan / expert_review）。旧 AI 结论
+  //    被跳过后不计分也不进清单 —— 不回显则该维度的问题**永远静默漏报**且无提示。
+  stale_ai_sources?: string[];
 }
 
 /** 预检历史（分数趋势） */

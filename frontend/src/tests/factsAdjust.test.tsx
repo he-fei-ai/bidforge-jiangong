@@ -31,8 +31,13 @@ import {
   FactsAdjustPanel,
   formatFactsAdjustOperation,
   FACTS_ADJUST_PREVIEW_LIMIT,
+  FACTS_ADJUST_IGNORE_REASONS,
+  FACTS_ADJUST_IGNORE_REASON_LABELS,
+  factsAdjustIgnoreText,
+  factsAdjustIgnoredCount,
+  normalizeFactsAdjustPlan,
 } from "../pages/SchemeWorkbenchPage";
-import type { FactsAdjustOperation } from "../pages/SchemeWorkbenchPage";
+import type { FactsAdjustOperation, FactsAdjustIgnoredItem } from "../pages/SchemeWorkbenchPage";
 
 // vitest 未开 globals，RTL 自动清理不生效 —— 显式清理，避免跨用例 DOM 累积
 afterEach(cleanup);
@@ -372,3 +377,191 @@ const OPS = (n: number): FactsAdjustOperation[] =>
     name: `开挖深度${i + 1}`,
     value: "8.5m",
   }));
+
+// ================================================================
+// 五、被安全校验丢弃的操作必须可见（2026-10-08 · 全局事实模块收口 F3 前端接线）
+// ----------------------------------------------------------------
+// 后端 `POST /global-facts/adjust` 原先「AI 给了 3 条、实际只落 2 条」完全静默 ——
+// 响应只有 applied 计数，用户无法区分「AI 没产出」与「产出了但被拦下」。
+// 现新增加法式字段 ignored / ignored_count，本组锁定：
+//   15. normalizeFactsAdjustPlan 防御式归一（旧后端 / 脏数据 / 非对象项）；
+//   16. factsAdjustIgnoreText 已知理由出中文、未知理由回显原文、绝不空白；
+//   17. 前端理由枚举与标签表键**完全一致**（跨侧与后端的一致性由
+//       backend/tests/test_facts_derivation_closeout_r54_20261008.py 双向锁）；
+//   18. 预览阶段 ignored → 面板出警示 + 确认弹窗预告；
+//   19. 旧版后端（无 ignored 键）→ 警示整块不渲染，界面与收口前一致；
+//   20. 应用阶段 ignored（apply 回传响应）→ 计划清空后仍显示「应用时」被丢弃；
+//   21. apply 返回 void 的旧接线 → 按「无丢弃」处理，且切方案不残留提示。
+// ================================================================
+
+const IGN = (n: number, reason = "unknown_fact_id"): FactsAdjustIgnoredItem[] =>
+  Array.from({ length: n }, (_, i) => ({
+    op: "update",
+    reason,
+    fact_id: `x${i + 1}`,
+  }));
+
+describe("normalizeFactsAdjustPlan（后端响应归一）", () => {
+  it("正常载荷：operations / ignored 原样保留", () => {
+    const p = normalizeFactsAdjustPlan({
+      summary: "共 2 项", operations: OPS(2), ignored: IGN(1, "duplicate_fact_key"),
+    });
+    expect(p.summary).toBe("共 2 项");
+    expect(p.operations).toHaveLength(2);
+    expect(factsAdjustIgnoredCount(p)).toBe(1);
+  });
+
+  it("旧版后端（无 ignored 键）→ 一律回退空数组，绝不 undefined", () => {
+    const p = normalizeFactsAdjustPlan({ operations: OPS(1) });
+    expect(p.ignored).toEqual([]);
+    expect(factsAdjustIgnoredCount(p)).toBe(0);
+  });
+
+  it("脏载荷（null / 非数组 / 非字符串 summary）全部兜底且不抛异常", () => {
+    expect(normalizeFactsAdjustPlan(null).operations).toEqual([]);
+    expect(normalizeFactsAdjustPlan(undefined).ignored).toEqual([]);
+    const dirty = normalizeFactsAdjustPlan({
+      summary: 123, operations: "nope", ignored: { a: 1 },
+    });
+    expect(dirty.summary).toBe("");
+    expect(dirty.operations).toEqual([]);
+    expect(dirty.ignored).toEqual([]);
+  });
+
+  it("数组里的非对象项被剔除（渲染层拿到的一定是可读对象）", () => {
+    const p = normalizeFactsAdjustPlan({
+      operations: [{ op: "add", name: "A", value: "1" }, "bad", null],
+      ignored: [{ op: "add", reason: "duplicate_fact_key" }, 7],
+    });
+    expect(p.operations).toHaveLength(1);
+    expect(p.ignored).toHaveLength(1);
+  });
+
+  it("factsAdjustIgnoredCount 对 null / 缺键都不抛", () => {
+    expect(factsAdjustIgnoredCount(null)).toBe(0);
+    expect(factsAdjustIgnoredCount({})).toBe(0);
+    expect(factsAdjustIgnoredCount({ ignored: [] })).toBe(0);
+  });
+});
+
+describe("factsAdjustIgnoreText（丢弃理由中文化）", () => {
+  it("已知理由 → 中文标签，并带上 op 与名称/ID", () => {
+    expect(factsAdjustIgnoreText({ op: "add", name: "基坑深度", reason: "duplicate_fact_key" }))
+      .toBe(`add · 基坑深度：${FACTS_ADJUST_IGNORE_REASON_LABELS.duplicate_fact_key}`);
+    expect(factsAdjustIgnoreText({ op: "delete", fact_id: "f-9", reason: "unknown_fact_id" }))
+      .toContain("f-9");
+  });
+
+  it("未知理由 → 原样回显英文键名（后端加枚举值时能立刻被发现，而不是显示空白）", () => {
+    expect(factsAdjustIgnoreText({ op: "update", reason: "brand_new_reason" }))
+      .toContain("brand_new_reason");
+  });
+
+  it("缺 op / 缺 reason 都有兜底文案，绝不返回空串", () => {
+    expect(factsAdjustIgnoreText({})).toBe(`unknown：未知原因`);
+    expect(factsAdjustIgnoreText({ reason: "unknown_op" })).toContain("unknown：");
+  });
+
+  it("前端理由枚举与标签表键完全一致（漏一项就会静默显示英文）", () => {
+    expect(Object.keys(FACTS_ADJUST_IGNORE_REASON_LABELS).sort())
+      .toEqual([...FACTS_ADJUST_IGNORE_REASONS].sort());
+    expect(FACTS_ADJUST_IGNORE_REASONS).toHaveLength(6);
+  });
+});
+
+describe("FactsAdjustPanel · 丢弃操作可观测", () => {
+  it("预览返回 ignored → 面板渲染警示（预览时）+ 确认弹窗预告条数", async () => {
+    const { confirmDialog } = renderPanel({
+      preview: vi.fn(async () => ({
+        summary: "共 2 项", operations: OPS(2), ignored: IGN(2, "unknown_fact_id"),
+      })),
+    });
+    await openAsk("统一改为 8.5m");
+    clickOk();
+    await waitFor(() => expect(screen.getByRole("button", { name: /应用调整计划/ })));
+
+    expect(screen.getByText(/2 项调整未纳入（预览时被安全校验丢弃）/)).toBeTruthy();
+    // 明细用中文标签，不是裸英文键；两条同理由的丢弃项必须**逐条列出**
+    // （合并成一条就丢掉「到底是哪两个操作被丢弃」）—— 用 getAllByText 锁条数：
+    // getByText 遇多重命中直接抛 TestingLibrary 错，本用例 R54 写入后因本机无
+    // Node 从未执行，R57 首跑即在此红。
+    expect(screen.getAllByText(new RegExp(FACTS_ADJUST_IGNORE_REASON_LABELS.unknown_fact_id)))
+      .toHaveLength(2);
+
+    fireEvent.click(screen.getByRole("button", { name: /应用调整计划/ }));
+    const opts = (confirmDialog as any).mock.calls[0][0] as ConfirmOptions;
+    expect(flatContent(opts.content)).toContain("另有 2 项因安全校验未纳入计划");
+  });
+
+  it("旧版后端不返回 ignored → 警示整块不渲染（与收口前逐字一致）", async () => {
+    renderPanel({ preview: vi.fn(async () => ({ summary: "共 1 项", operations: OPS(1) })) });
+    await openAsk("改深度");
+    clickOk();
+    await waitFor(() => expect(screen.getByRole("button", { name: /应用调整计划/ })));
+    expect(screen.queryByText(/项调整未纳入/)).toBeNull();
+  });
+
+  it("应用回传 ignored → 计划清空后仍显示「应用时」被丢弃的明细", async () => {
+    const apply = vi.fn(async () => ({ ignored: IGN(1, "duplicate_fact_key") }));
+    const { confirmDialog } = renderPanel({
+      preview: vi.fn(async () => ({ operations: OPS(1) })),
+      apply: apply as any,
+    });
+    await openAsk("新增同名事实");
+    clickOk();
+    await waitFor(() => expect(screen.getByRole("button", { name: /应用调整计划/ })));
+    fireEvent.click(screen.getByRole("button", { name: /应用调整计划/ }));
+    const opts = (confirmDialog as any).mock.calls[0][0] as ConfirmOptions;
+
+    await opts.onOk();
+
+    await waitFor(() =>
+      expect(screen.getByText(/1 项调整未纳入（应用时被安全校验丢弃）/)));
+    expect(screen.getByText(new RegExp(FACTS_ADJUST_IGNORE_REASON_LABELS.duplicate_fact_key)))
+      .toBeTruthy();
+    // 计划已清空 → 「应用调整计划」按钮消失，但提示留在原位
+    expect(screen.queryByRole("button", { name: /应用调整计划/ })).toBeNull();
+  });
+
+  it("apply 返回 void（页面旧接线）→ 视为无丢弃，不出提示", async () => {
+    const apply = vi.fn(async () => {});
+    const { confirmDialog } = renderPanel({
+      preview: vi.fn(async () => ({ operations: OPS(1) })),
+      apply: apply as any,
+    });
+    await openAsk("改深度");
+    clickOk();
+    await waitFor(() => expect(screen.getByRole("button", { name: /应用调整计划/ })));
+    fireEvent.click(screen.getByRole("button", { name: /应用调整计划/ }));
+    const opts = (confirmDialog as any).mock.calls[0][0] as ConfirmOptions;
+
+    await opts.onOk();
+
+    await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(/项调整未纳入/)).toBeNull();
+  });
+
+  it("切换方案 → 应用阶段的丢弃提示一并清空（不留跨方案残影）", async () => {
+    const apply = vi.fn(async () => ({ ignored: IGN(1, "unknown_op") }));
+    const preview = vi.fn(async () => ({ operations: OPS(1) }));
+    const { view, confirmDialog } = renderPanel({ preview: preview as any, apply: apply as any });
+    await openAsk("改深度");
+    clickOk();
+    await waitFor(() => expect(screen.getByRole("button", { name: /应用调整计划/ })));
+    fireEvent.click(screen.getByRole("button", { name: /应用调整计划/ }));
+    const opts = (confirmDialog as any).mock.calls[0][0] as ConfirmOptions;
+    await opts.onOk();
+    await waitFor(() => expect(screen.getByText(/项调整未纳入/)).toBeTruthy());
+
+    view.rerender(
+      <FactsAdjustPanel
+        schemeId="scheme-2"
+        preview={preview as any}
+        apply={apply as any}
+        onError={vi.fn() as any}
+        confirmDialog={confirmDialog as any}
+      />,
+    );
+    expect(screen.queryByText(/项调整未纳入/)).toBeNull();
+  });
+});

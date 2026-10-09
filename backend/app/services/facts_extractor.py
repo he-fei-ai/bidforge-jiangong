@@ -754,23 +754,6 @@ def _split_table_rows(sec: str, chunk_size: int, chunks: list, heading: str,
     _flush()
 
 
-def resolve_chunk_size(chunk_size: int = CHUNK_SIZE) -> int:
-    """按「模型上下文窗口 × 0.8 − 固定消息」动态决定分段上限（对齐易标 :363-377）。
-
-    默认关闭（``settings.facts_context_budget_split=False``）→ 原样返回调用方传入的
-    ``chunk_size``（本仓历史基线 8000），切分行为与引入前逐字节一致。
-
-    开启后的意义：本仓 8000 字是**固定值**，对上下文窗口 128k 的模型过于保守
-    （资料被切成大量小段 → AI 调用次数与 429 限流风险成倍上升）；而对
-    上下文只有 32k 的模型，8000 字 + 归一化字典 + 规则块又可能撑爆。
-    按易标口径动态计算可同时解决两端。
-
-    Args:
-        chunk_size: 调用方显式指定的上限（默认 ``CHUNK_SIZE``）。
-
-    Returns:
-        生效的分段上限；动态计算失败时回落到 ``chunk_size``（fail-soft）。
-    """
 #: ✅ 2026-10-06：事实链路的**自动**上下文窗口（字符）。
 #:
 #: 为什么不再沿用 ``facts_patches.DEFAULT_CONTEXT_LENGTH_LIMIT``（400_000）：
@@ -823,6 +806,10 @@ def resolve_fact_context_chars() -> int:
 def resolve_chunk_size(chunk_size: int = CHUNK_SIZE) -> int:
     """按模型上下文窗口动态决定分段上限（受 ``facts_context_budget_split`` 门控）。
 
+    默认关闭（``settings.facts_context_budget_split=False``）→ 原样返回调用方传入的
+    ``chunk_size``（本仓历史基线 8000），切分行为与引入前逐字节一致。
+
+    开启后的意义：本仓 8000 字是**固定值**，对上下文窗口 128k 的模型过于保守
     （资料被切成大量小段 → AI 调用次数与 429 限流风险成倍上升）；而对
     上下文只有 32k 的模型，8000 字 + 归一化字典 + 规则块又可能撑爆。
     按易标口径动态计算可同时解决两端。
@@ -2434,6 +2421,33 @@ async def persist_extraction(
         if r.get("fact_key") and r.get("is_resolved")
     }
 
+    # ✅ BUG 修复（2026-10-08 · 全局事实模块收口 F5）：方案级提取**只看方案私有行**
+    #   （上方 scope_sql），项目共享层（scheme_id=''）里用户已确认的同名事实不在
+    #   `existing` 中 → 不参与去重。后果：项目层已有「项目经理=张伟（已确认）」，
+    #   本方案重新提取出「项目经理=李强」时，AI 事实被当全新事实**插入方案私有行**，
+    #   于是同一个 fact_key 有两份取值并存；两份都满足注入门控
+    #   （has_conflict=0 AND is_resolved=1 AND is_simulated=0 AND is_stale=0，
+    #   尤其在 auto_resolve_extracted_facts=True 时新行直接是已确认）→
+    #   同一事实的两个不同取值同时被注入正文，全文自相矛盾且界面显示重复事实。
+    #   而界面读取口径（_load_fact_rows / list_facts）与注入口径
+    #   （build_injectable_facts_query）**都是双 namespace 并集** —— 只有落库去重
+    #   这一处是单 namespace，属「同一判据两处实现」的分叉。
+    #   ⚠️ 关键约束：共享行只参与**去重/冲突登记**，绝不进入下方的删除候选
+    #   （`non_protected_ids` 仍只从方案私有的 `existing` 计算）—— 否则一次单方案
+    #   重新提取就会删掉项目共享事实，影响同项目其它方案。
+    shared_protected_by_key: dict[str, dict] = {}
+    shared_hits = 0
+    if scheme_id and project_id:
+        cur = await db.execute(
+            "SELECT * FROM global_facts WHERE project_id=? "
+            "AND (scheme_id='' OR scheme_id IS NULL)", (project_id,))
+        for r in [dict(x) for x in await cur.fetchall()]:
+            if not _is_protected(r):
+                continue
+            k = r.get("fact_key") or ""
+            if k and k not in shared_protected_by_key:
+                shared_protected_by_key[k] = r
+
     # ✅ BUG 修复：同一分类只应有一个分组卡片。旧实现对每个新 AI 分组都生成
     #    全新的 group_id，而已确认/手动事实保留了上一次提取的 group_id——
     #     「重新提取」后，同一分类会同时存在「旧 group_id（已确认子集）」与
@@ -2470,8 +2484,14 @@ async def persist_extraction(
         # （前端拿 completed 事件数据编辑分组时按此 id 匹配，不再 404）
         grp.persisted_group_id = group_id
         for it in grp.items:
-            if it.key and it.key in protected_by_key:
-                prior = protected_by_key[it.key]
+            prior = protected_by_key.get(it.key) if it.key else None
+            _hit_shared = False
+            if prior is None and it.key:
+                prior = shared_protected_by_key.get(it.key)
+                _hit_shared = prior is not None
+            if it.key and prior is not None:
+                if _hit_shared:
+                    shared_hits += 1
                 # 同一键但值不同：不要静默丢弃新证据，回写到已确认行的冲突候选。
                 # 当前值仍以用户已确认值为准，待用户在界面人工裁决。
                 prior_content = str(prior.get("content") or "")
@@ -2600,7 +2620,9 @@ async def persist_extraction(
         "持久化完成：新增 %d 条 AI 事实，保留 %d 条已确认/手动事实%s"
         "（作用域方案=%s）",
         len(insert_buf), len(protected),
-        f"，跳过 {skipped_dup} 条与已确认事实重复" if skipped_dup else "",
+        f"，跳过 {skipped_dup} 条与已确认事实重复"
+        + (f"（其中 {shared_hits} 条命中项目共享事实）" if shared_hits else "")
+        if skipped_dup else "",
         scheme_id or f"项目={project_id}",
     )
 
@@ -2781,6 +2803,53 @@ def get_facts_inject_where() -> str:
 FACTS_GT_COLUMN = "COALESCE(NULLIF(group_title,''), '其他事实') AS gt"
 
 
+def row_field(row, key: str, index: int = 0) -> str:
+    """行形态无关地取一个字段值（``str``，缺失/None 一律回空串）。
+
+    ✅ 2026-10-08 收敛（全局事实模块收口 F7）：本模块与
+    :mod:`app.routers.global_facts` 此前对「一行里的某一列」有**两套取值写法**——
+    事实行用键访问 ``row["scheme_id"]``，作用域/反查行用位置索引 ``prow[0]``。
+    生产连接是 ``aiosqlite.Row``（两种写法都成立），所以**线上不报错**；
+    但只要行形态换成 Mapping（``sqlite3.Row`` 之外的 dict 行工厂、
+    测试桩里最常见的 dict 列表、以及任何把行转成 dict 的中间层），
+    ``prow[0]`` 就抛 ``KeyError: 0``。
+
+    危险的不是异常本身，而是**它落在哪**：这些反查全在 fail-soft 分支里，
+    异常被 ``except`` 吞成空串 →
+      · :func:`resolve_scheme_project_id` 返回 "" → 项目共享事实
+        （``scheme_id=''``）从正文注入 / 目录 / 导出 / 预检的作用域里整体消失；
+      · ``_invalidate_fact_scope_cache(db, "", "")`` 因 ``not project_id`` **静默 return**
+        → 方案级 ``facts_updated_at`` 不推进，「事实已变更」标记永久停在旧值，
+        用户看到过期正文却得不到任何提示。
+    实证：``tests/test_content_terminal_payload_20261005.py`` 的桩库里
+    ``FROM schemes`` 返回 dict 行，日志里就是这条
+    ``反查方案所属项目异常（降级为仅方案级查询）· KeyError: 0``。
+
+    取值优先级：**Mapping 按键名**（键名是语义，位置是巧合）；
+    序列按 ``index``；两者都不成立回空串（绝不抛，调用方语义不变）。
+    """
+    if row is None:
+        return ""
+    try:
+        if isinstance(row, dict):
+            return str(row.get(key) or "")
+        # aiosqlite.Row / sqlite3.Row 支持键访问，优先键名而非位置
+        try:
+            return str(row[key] or "")
+        except (KeyError, IndexError, TypeError):
+            return str(row[index] or "")
+    except Exception:  # noqa: BLE001 - 取值失败回空串，与既有 fail-soft 语义一致
+        return ""
+
+
+#: 「方案 → 所属项目」反查 SQL 的**唯一字面量**（F6 续 · 2026-10-08）。
+#: 此前 ``SELECT project_id FROM schemes WHERE id=?`` 在 global_facts.py 里
+#: 逐字重复 9 次、在其它模块另有 10+ 次，取值清一色用位置索引 ``row[0]``。
+#: 判据本身没分叉（同一条 SQL），但**取值的行形态约定**分叉了 —— 见
+#: :func:`row_field` 的说明。改列名/加兜底时只需动这一处。
+SCHEME_PROJECT_ID_SQL = "SELECT project_id FROM schemes WHERE id=?"
+
+
 async def resolve_scheme_project_id(db, scheme_id: str) -> str:
     """由 scheme_id 反查 project_id；失败返回空串（安全回退为仅方案级查询）。
 
@@ -2798,7 +2867,7 @@ async def resolve_scheme_project_id(db, scheme_id: str) -> str:
         logger.debug("resolve_scheme_project_id：未传 scheme_id，跳过反查")
         return ""
     try:
-        pcur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
+        pcur = await db.execute(SCHEME_PROJECT_ID_SQL, (scheme_id,))
         # R13：execute() 可能返回 None（AGENTS.md §5.5）
         if pcur is None:
             logger.warning(
@@ -2811,7 +2880,10 @@ async def resolve_scheme_project_id(db, scheme_id: str) -> str:
                 "方案不存在或未绑定项目 · scheme_id=%s · "
                 "本次仅按方案级查询（项目共享事实将不参与注入）", scheme_id)
             return ""
-        return str((prow[0] if prow else "") or "")
+        # ✅ F7（2026-10-08）：旧实现是 ``prow[0]`` —— 只认序列行。行工厂换成
+        #   Mapping 时抛 KeyError，被下方 except 吞成 "" → 项目共享事实静默退出作用域。
+        #   现走 row_field 单一出口（键名优先，序列兜底）。
+        return row_field(prow, "project_id")
     except Exception as e:  # noqa: BLE001 - fail-soft，但必须留痕
         logger.warning(
             "反查方案所属项目异常（降级为仅方案级查询）· scheme_id=%s: %s",

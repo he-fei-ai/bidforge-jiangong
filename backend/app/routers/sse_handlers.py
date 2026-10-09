@@ -136,17 +136,16 @@ from app.services.standards_registry import get_standards_text
 
 # ✅ R47 债-5（2026-10-06）：项目关键事实构建整组下沉到 services/facts_builder。
 #    消除 compliance.py / consistency_scanner.py 对本路由器私有符号的反向 import；
-#    sse_handlers 内部旧调用点（4121/5234/5921/6002/1636）经下方别名零改动。
+#    本模块实际使用下方 5 个符号；LOW_CONFIDENCE_THRESHOLD 是被 tests 经
+#    sse_handlers re-export 取用的对外别名（故显式 noqa，不是漏改）。
+#    R57 清理：其余 4 个别名（_chapter_inject_enabled / _FACTS_GENERIC_GROUP_HINTS /
+#    _rank_facts_by_basis / _row_chapter）在全库零消费者，已删除。
 from app.services.facts_builder import (  # noqa: E402
-    LOW_CONFIDENCE_THRESHOLD,
-    _chapter_inject_enabled,
-    _FACTS_GENERIC_GROUP_HINTS,
+    LOW_CONFIDENCE_THRESHOLD,  # noqa: F401 - 对外 re-export，tests 经此名取阈值
     _facts_keywords,
     _filter_facts_rows,
     _load_facts_rows,
-    _rank_facts_by_basis,
     _render_facts_text,
-    _row_chapter,
     build_facts_text,
 )
 # 公开入口改名后保留旧私有名别名，防止 sse_handlers 内部漏改调用点。
@@ -2937,11 +2936,22 @@ def _restore_descriptions(original: list, target: list) -> None:
     键用「(路径, 标题)」而非 id：模型回传的 id 可能是编号而非原 id。
     仅当目标描述为空、或短于原描述（典型截断特征）时才回填，
     模型新写的更长描述予以保留。
+
+    ✅ 改进（2026-10-09 · P1-8 收口）：审核修复轮可能增删 / 重排章节，
+    导致 fixed_outline 的位置路径与原目录不再对齐 —— 旧实现此时完全无法
+    回填 description，用户看到全篇 60 字截断描述（而原描述可能数百字）。
+    现增加**标题回退匹配**：(path, title) 精确匹配失败后，按标题查找原目录；
+    多个同名章节时取**位置路径最近**者（避免错误回填到不相关章节的描述）。
+    回退命中时记 DEBUG 日志（可观测但不打扰正常流程）。
     """
     if not isinstance(original, list) or not isinstance(target, list):
         return
 
-    def _collect(nodes: list, prefix: str, acc: dict) -> None:
+    # (path, title) -> description（精确匹配）+ title -> [(path, desc)]（回退匹配）
+    orig_desc: dict = {}
+    title_index: dict[str, list[tuple[str, str]]] = {}
+
+    def _collect(nodes: list, prefix: str) -> None:
         idx = 0
         for n in nodes or []:
             if not isinstance(n, dict):
@@ -2949,16 +2959,29 @@ def _restore_descriptions(original: list, target: list) -> None:
             idx += 1
             path = f"{prefix}.{idx}" if prefix else str(idx)
             title = str(n.get("title") or "").strip()
+            desc = str(n.get("description") or "")
             if title:
-                acc[(path, title)] = str(n.get("description") or "")
+                orig_desc[(path, title)] = desc
+                title_index.setdefault(title, []).append((path, desc))
             children = n.get("children")
             if isinstance(children, list) and children:
-                _collect(children, path, acc)
+                _collect(children, path)
 
-    orig_desc: dict = {}
-    _collect(original, "", orig_desc)
+    _collect(original, "")
     if not orig_desc:
         return
+
+    def _path_distance(a: str, b: str) -> int:
+        """位置路径距离：段数差 + 逐段不等计数（用于多同名时选最近者）。"""
+        ap = a.split(".")
+        bp = b.split(".")
+        dist = abs(len(ap) - len(bp))
+        for x, y in zip(ap, bp):
+            if x != y:
+                dist += 1
+        return dist
+
+    _fallback_count = [0]
 
     def _restore(nodes: list, prefix: str = "") -> None:
         idx = 0
@@ -2968,7 +2991,19 @@ def _restore_descriptions(original: list, target: list) -> None:
             idx += 1
             path = f"{prefix}.{idx}" if prefix else str(idx)
             title = str(n.get("title") or "").strip()
+            # ① 精确匹配：(path, title)
             src = orig_desc.get((path, title))
+            # ② 回退匹配：标题查找（修复轮增删/重排章节导致路径偏移时）
+            if src is None and title:
+                candidates = title_index.get(title)
+                if candidates:
+                    if len(candidates) == 1:
+                        src = candidates[0][1]
+                    else:
+                        # 多同名：取位置路径最近者
+                        best = min(candidates, key=lambda c: _path_distance(c[0], path))
+                        src = best[1]
+                    _fallback_count[0] += 1
             if src:
                 cur = str(n.get("description") or "")
                 if not cur.strip() or len(cur) <= len(src):
@@ -2978,6 +3013,9 @@ def _restore_descriptions(original: list, target: list) -> None:
                 _restore(children, path)
 
     _restore(target)
+    if _fallback_count[0]:
+        logger.debug("description 回填使用了标题回退匹配（%d 处路径偏移）",
+                     _fallback_count[0])
 
 
 def _merge_patch_chapters(outline: list, new_chapters: list) -> list:
@@ -5369,17 +5407,23 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                         "content": _r["content"],
                                     } for _r in _dup_rows
                                 }
-                                _crossdup_snapshot[section_id] = {
-                                    "id": section_id,
-                                    "title": _ck_title,
-                                    "content": content,
-                                }
-                                _dup_secs = list(_crossdup_snapshot.values())
-                                # ⚠️ 20 字门槛只用于跳过「搬运」判定（性能护栏），数值一致性自检不受它约束 ——
-                                # 短正文同样可能写出与其它章节矛盾的工期/人数取值。
-                                if _crosscheck_dup_on and len(content or "") >= 20:
-                                    _ck_findings.extend(cross_section_copy_findings(
-                                        _dup_secs, new_section_id=section_id))
+                            # ✅ BUG 修复（R58）：快照更新与搬运检测必须在**每章**执行，
+                            #    不得只在「首次加载」分支内。旧结构把 _crossdup_snapshot[section_id]
+                            #    赋值与 cross_section_copy_findings 调用都嵌在
+                            #    `if _crossdup_snapshot is None:` 内 → 第二章起快照已非 None，
+                            #    整块被跳过 → CON-06 只在第一章运行（无对 比 章 可 比 较 → 恒无 finding），
+                            #    生产中跨章搬运从第二章起 100% 漏检。
+                            _crossdup_snapshot[section_id] = {
+                                "id": section_id,
+                                "title": _ck_title,
+                                "content": content,
+                            }
+                            _dup_secs = list(_crossdup_snapshot.values())
+                            # ⚠️ 20 字门槛只用于跳过「搬运」判定（性能护栏），数值一致性自检不受它约束 ——
+                            # 短正文同样可能写出与其它章节矛盾的工期/人数取值。
+                            if _crosscheck_dup_on and len(content or "") >= 20:
+                                _ck_findings.extend(cross_section_copy_findings(
+                                    _dup_secs, new_section_id=section_id))
                         except Exception:
                             logger.warning(
                                 "章节 %s 跨章搬运检测失败（忽略，不影响落库）",

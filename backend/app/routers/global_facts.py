@@ -59,6 +59,7 @@ from app.services.facts_extractor import (
     GLOBAL_FACTS_INSERT_COLS,
     GLOBAL_FACTS_INSERT_SQL,
     MAX_SOURCE_EXCERPT,
+    SCHEME_PROJECT_ID_SQL,
     _clip_excerpt,
     _safe_confidence,
     append_simulated_marker,
@@ -67,6 +68,7 @@ from app.services.facts_extractor import (
     is_safety_critical_name,
     is_simulated_marked,
     normalize_key,
+    row_field,
     strip_simulated_marker,
 )
 from app.services.file_parser import (
@@ -245,6 +247,45 @@ def _parse_source_ref(raw: str) -> list[dict]:
     return out
 
 
+#: 「**名称**: 值」形态的事实行（list_facts / /chapters 共用，见 _fact_name_value）
+_RE_BOLD_FACT_LINE = re.compile(r'^-?\s*\*\*(.+?)\*\*\s*[:：]\s*(.*)')
+
+
+def _fact_name_value(row: dict) -> tuple[str, str]:
+    """从落库行解析 ``(事实名, 取值)`` —— 读路径的**唯一出口**。
+
+    ✅ 2026-10-08（全局事实模块收口 · F1/F6）：此前「名称/取值怎么解」在两处各写
+    一份：``list_facts`` 用本函数的加粗行正则 + ``extract_value_from_markdown_line``
+    兜底，``/chapters`` 却直接把 ``title`` 同时当名称**和取值**喂给维度派生 ——
+    而 ``dimensions_for_row`` 的兜底是「value 为空才回解 content」，非空的 title
+    会把真正的取值挡掉，于是 ``- **基坑开挖深度**: 12.5m`` 在 ``GET /global-facts``
+    里是 ``fact_attr=quantitative``、在 ``GET /chapters`` 里是 ``qualitative``
+    （同一份数据两个口径，前端两个面板数字对不上）。
+    现两条读路径共用本函数，解析规则只有一份。
+
+    ✅ 兼容旧数据：``source_ref`` 可能是 JSON 数组，也可能是早期写入的纯文件名；
+    ``content`` 可能不带 Markdown 粗体、甚至是一整段文本。
+
+    ⚠️ 模拟值标记必须先于 ``**粗体**`` / ``*(注释)*`` 被整段移除（2026-09-21 修复）：
+      旧顺序只删掉 ``*(模拟值)*`` 这一半，⚠️ 前缀被留在 value 里
+      （"15.0m ⚠️*(模拟值)*" → value="15.0m ⚠️"）。该脏值随后被
+      ``_apply_item_updates`` / ``persist_extraction`` 当作「真实取值」参与
+      「值是否变化」比较，导致模拟值事实恒被判为已改值 —— 2026-09-20 修的
+      「只改分类/改名静默清矛盾」漏洞实际未堵住。
+    """
+    content = row.get("content", "") or ""
+    name = row.get("title", "") or ""
+    m = _RE_BOLD_FACT_LINE.match((content or "").strip())
+    if m:
+        return m.group(1), strip_simulated_marker(m.group(2))
+    if (content or "").strip():
+        # 非列表行（整段文本、或没写减号的 "**名称**: 值"）：按统一出口回解取值，
+        # 但不要把整块原文当名称 —— 名称仍以 title 列为准。
+        _, value = extract_value_from_markdown_line(content)
+        return name, value
+    return name, ""
+
+
 def _fact_dimension_fields(row: dict, name: str, value: str, fact_key: str,
                            source_list: list, fact_type: str | None = None) -> dict:
     """派生/回读九大章节四维标注（读路径惰性兜底，纯函数、不写库）。
@@ -337,6 +378,39 @@ def _chapter_stats_for_items(items: list[dict]) -> dict:
     return out
 
 
+async def _scheme_project_id(db, scheme_id: str) -> str | None:
+    """读取「方案所属 project_id」的**唯一出口**（F6 续 · 2026-10-08）。
+
+    此前同一条 SQL 在本文件逐字重复 9 次，取值清一色用位置索引 ``row[0]``。
+    三态返回值让调用方分清两件**完全不同**的事（旧写法把后两者混成「方案不存在」）：
+
+      · ``None`` —— schemes 里没有这条方案 → 调用方按既有口径报 404「方案不存在」；
+      · ``""``   —— 方案存在但**未绑定项目**（``schemes.project_id`` NOT NULL 允许空串）
+        → 作用域退化为「仅方案级」，不是错误；
+      · 其它     —— 真实 project_id。
+
+    两点收口理由：
+      ① **SQL 单一事实源**：字面量落 :data:`facts_extractor.SCHEME_PROJECT_ID_SQL`，
+         服务层 :func:`facts_extractor.resolve_scheme_project_id` 与路由层共用一条查询，
+         改列名不会再漏掉某一份副本；
+      ② **行形态无关取值**：走 :func:`facts_extractor.row_field`（键名优先、序列兜底）。
+         位置索引在 Mapping 行下抛 ``KeyError``，而落在 fail-soft 分支里的那些副本
+         会把异常吞成空 pid → 项目共享事实从作用域整体消失、
+         ``_invalidate_fact_scope_cache(db, "", "")`` 静默 return、
+         ``facts_updated_at`` 不推进（用户看不到「事实已变更」标记）。
+      ③ ``db.execute`` 返回 None（R13）时回 503，与本文件
+         :func:`_resolve_project_id` 的既有口径一致，不降级成 404。
+    """
+    cur = await db.execute(SCHEME_PROJECT_ID_SQL, (scheme_id,))
+    if cur is None:
+        logger.warning("反查方案所属项目失败（db.execute 返回 None · R13）· scheme_id=%s", scheme_id)
+        raise HTTPException(503, "数据服务暂时不可用，请稍后重试")
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    return row_field(row, "project_id")
+
+
 async def _validate_fact_scope(db, scheme_id: str, project_id: str) -> tuple[str, str]:
     """校验事实读取作用域，返回 ``(有效 scheme_id, 有效 project_id)``。
 
@@ -347,11 +421,10 @@ async def _validate_fact_scope(db, scheme_id: str, project_id: str) -> tuple[str
     sid = scheme_id.strip() if isinstance(scheme_id, str) else ""
     pid = project_id.strip() if isinstance(project_id, str) else ""
     if sid:
-        cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (sid,))
-        row = await cur.fetchone()
-        if not row:
+        # ✅ F6 续（2026-10-08）：反查走 _scheme_project_id 单一出口
+        real_pid = await _scheme_project_id(db, sid)
+        if real_pid is None:
             raise HTTPException(404, "方案不存在")
-        real_pid = str(row[0] or "")
         if pid and pid != real_pid:
             raise HTTPException(400, "scheme_id 与 project_id 不匹配")
         return sid, real_pid
@@ -384,9 +457,11 @@ async def _assert_fact_in_scheme_scope(db, fact_id: str, scheme_id: str) -> dict
             logger.warning("global_facts 409 归属校验：target_sid=%s 与 scheme_id=%s 不一致", target_sid, scheme_id)
             raise HTTPException(409, "事实不属于当前方案，请刷新后重试")
     else:
-        cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
-        current = await cur.fetchone()
-        if not current or str(current[0] or "") != target_pid:
+        # ✅ F6 续（2026-10-08）：同口径走单一出口。旧写法 `not current or
+        #   str(current[0])` 把「方案不存在」与「方案未绑定项目」都归为 409，
+        #   这里保持完全一致的判定（两者都不该放行共享事实）。
+        current_pid = await _scheme_project_id(db, scheme_id)
+        if not current_pid or current_pid != target_pid:
             logger.warning("global_facts 409 项目共享校验：scheme_id=%s 未关联 project_id=%s", scheme_id, target_pid)
             raise HTTPException(409, "项目共享事实不属于当前方案，请刷新后重试")
     return dict(row)
@@ -416,6 +491,36 @@ async def _invalidate_fact_scope_cache(db, scheme_id: str, project_id: str = "")
         await invalidate_export_cache(db, sid, facts_touched=True)
 
 
+#: 「方案私有 + 同项目共享」作用域谓词的字面量（双 namespace 读取口径）。
+_FACT_SCOPE_PREDICATE = (
+    "(scheme_id=? OR (project_id=? AND (scheme_id='' OR scheme_id IS NULL)))")
+
+
+def _fact_scope_where(sid: str, pid: str) -> tuple[str, list]:
+    """事实读取作用域谓词的**唯一出口**，返回 ``(以空格起始的 WHERE 片段, 参数)``。
+
+    ✅ 2026-10-08（全局事实模块收口 · F3/F6）：同一份谓词此前在 **三处**各写一遍
+    （``_load_fact_rows``、``list_facts``、``adjust_facts``）。前两处副本内容相同、
+    纯属侥幸一致；第三处 ``adjust_facts`` 的那份**少了「OR 项目共享」半句**
+    （``WHERE project_id=? AND scheme_id=?``），于是 AI 调整能看到的事实集合
+    严格小于用户在界面里看到的集合 —— 共享事实既改不了也删不掉（被
+    ``_validate_adjust_ops`` 当「幻觉 id」静默丢弃），还能被 ``add`` 重复插一份
+    方案私有的同名事实，两份同时通过注入门控进正文（数据真实性红线）。
+    R45-G2 曾把「valid_ids 必须与读给 AI 的 rows 同源」修好，但那锁的是
+    *两处同源*，没有锁 *与全模块读取口径同源* —— 本出口把后者也收进来。
+
+    语义（保持各调用方既有分支逐字不变）：
+    - ``sid`` + ``pid``  → 本方案私有 **或** 同项目共享（``scheme_id`` 为空）；
+    - 仅 ``sid``          → 只按方案（项目未绑定时的历史退化分支）；
+    - 仅 ``pid``          → 该项目全部事实（含各方案私有行，历史语义）。
+    """
+    if sid and pid:
+        return f" WHERE {_FACT_SCOPE_PREDICATE}", [sid, pid]
+    if sid:
+        return " WHERE scheme_id=?", [sid]
+    return " WHERE project_id=?", [pid]
+
+
 async def _load_fact_rows(db, scheme_id: str, project_id: str,
                          *, injectable_only: bool = False) -> list[dict]:
     """按统一作用域取全局事实：方案私有 + 同项目共享事实。
@@ -434,17 +539,10 @@ async def _load_fact_rows(db, scheme_id: str, project_id: str,
       （含模拟值/过期值）供人工裁决，行为与旧版一致。
     """
     sid, pid = await _validate_fact_scope(db, scheme_id, project_id)
-    scope_sql, params = "", []
-    if sid and pid:
-        scope_sql = (
-            " WHERE (scheme_id=? OR (project_id=? AND "
-            "(scheme_id='' OR scheme_id IS NULL)))"
-        )
-        params = [sid, pid]
-    elif sid:
-        scope_sql, params = " WHERE scheme_id=?", [sid]
-    else:
-        scope_sql, params = " WHERE project_id=?", [pid]
+    # ✅ 2026-10-08（F6）：作用域谓词改走 _fact_scope_where 唯一出口（片段内容
+    #    与旧的内联字面量逐字一致，行为零变化；收口的目的是让 adjust_facts
+    #    那份「少了共享半句」的副本无从再分叉）。
+    scope_sql, params = _fact_scope_where(sid, pid)
     if injectable_only:
         # ✅ BUG 修复（2026-09-27）：与 sse_handlers._load_facts_rows 同源同修 ——
         #   旧实现在 import 失败时回落到「has_conflict=0 AND is_resolved=1」，
@@ -500,32 +598,27 @@ async def list_facts(
         offset = int(offset)
     except (TypeError, ValueError):
         offset = 0
-    sql = "SELECT * FROM global_facts WHERE 1=1"
-    params: list = []
+    if not scheme_id and not project_id:
+        raise HTTPException(400, "需要 scheme_id 或 project_id")
+    # ✅ 2026-10-08（F6）：作用域谓词走 _fact_scope_where 唯一出口 —— 生成的
+    #    SQL 片段与参数与旧的内联字面量逐字等价（含「WHERE 1=1 + AND」的退化
+    #    分支），行为零变化；本端点仍保留自己的作用域解析与错误语义
+    #    （不做 project 存在性校验），避免改动既有 404/400 口径。
+    real_pid = ""
     if scheme_id:
         # 与目录/正文/导出一致：方案页必须同时看到本方案事实和同项目共享事实，
         # 否则会出现「页面看不见，但生成链路实际会注入」的隐蔽数据断链。
-        real_pid = ""
         if project_id:
             real_pid = project_id.strip()
         else:
-            cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
-            scheme_row = await cur.fetchone()
-            if not scheme_row:
+            # ✅ F6 续（2026-10-08）：反查走 _scheme_project_id 单一出口
+            _rp = await _scheme_project_id(db, scheme_id)
+            if _rp is None:
                 raise HTTPException(404, "方案不存在")
-            real_pid = str(scheme_row[0] or "")
-        if real_pid:
-            sql += (" AND (scheme_id=? OR (project_id=? AND "
-                    "(scheme_id='' OR scheme_id IS NULL)))")
-            params.extend([scheme_id, real_pid])
-        else:
-            sql += " AND scheme_id=?"
-            params.append(scheme_id)
-    elif project_id:
-        sql += " AND project_id=?"
-        params.append(project_id)
-    if not scheme_id and not project_id:
-        raise HTTPException(400, "需要 scheme_id 或 project_id")
+            real_pid = _rp
+    scope_sql, params = _fact_scope_where(scheme_id, real_pid or (project_id or ""))
+    sql = "SELECT * FROM global_facts" + scope_sql
+    params = list(params)
     # ✅ 稳定排序：末尾追加 id 兜底，避免 updated_at 相同（批量插入时常见）
     #    导致同一分组内事实顺序每次刷新都抖动，用户编辑时难以定位。
     sql += " ORDER BY category, group_id, updated_at, id"
@@ -570,27 +663,11 @@ async def list_facts(
         conflict_values = _coerce_conflict_values(r.get("conflict_keys", "") or "")
 
         # 从 content 中提取结构化 name/value（兼容旧数据）
-        name = r.get("title", "")
-        content = r.get("content", "")
-        value = ""
-        m = re.match(r'^-?\s*\*\*(.+?)\*\*\s*[:：]\s*(.*)', (content or "").strip())
-        if m:
-            name = m.group(1)
-            # ✅ BUG 修复（2026-09-21）：旧正则 `\s*\*\(?\s*(?:⚠️?\s*)?模拟值\s*\)?\*\s*$`
-            #    只能从 `*` 开始匹配，而 `⚠️` 前缀写在 `*` 之前 → **残留半个标记**：
-            #      "15.0m ⚠️*(模拟值)*"  → value = "15.0m ⚠️"（悬空 emoji 当正文展示）
-            #      "12.5m  *(⚠ 模拟值)*" → value = "12.5m"（to_db_row 写法恰好干净）
-            #    两种落库写法结果不一致，且脏值 "15.0m ⚠️" 被 _apply_item_updates /
-            #    persist_extraction 当作真实取值参与「值是否变化」比较 → 凡走过
-            #    PATCH（分组重建 / 单条编辑 / 矛盾裁决）或手工新增的模拟值事实，
-            #    其值恒被判为「已变化」，2026-09-20 修的「只改分类/改名静默清矛盾」
-            #    漏洞实际未堵住（详见 facts_extractor.SIMULATED_MARKER_RE 说明）。
-            value = strip_simulated_marker(m.group(2))
-        elif (content or "").strip():
-            # ✅ BUG 修复：旧实现仅在 content 以 "-" 开头时才解析 name/value，
-            #    非列表行（整段文本、或没写减号的 "**名称**: 值"）会把整块原文
-            #    （含 Markdown 标记前缀）当作 value 回传 → 前端原样显示 "**x**: y"。
-            _, value = extract_value_from_markdown_line(content)
+        # ✅ 2026-10-08（F1/F6）：解析规则上移为 _fact_name_value 唯一出口，
+        #    与 /chapters 共用（旧实现在此内联一份加粗行正则，/chapters 又各自
+        #    另一套 → 同一份数据两条读路径的 fact_attr / chapter 口径分叉）。
+        content = r.get("content", "") or ""
+        name, value = _fact_name_value(r)
 
         item = {
             "fact_id": r["id"],
@@ -836,30 +913,52 @@ async def list_facts_by_chapters(
                          "missing_fields","items":[...]}], "totals": {...}}``
     """
     rows = await _load_fact_rows(db, scheme_id, project_id)
+    # ✅ BUG 修复（2026-10-08 · 全局事实模块收口 F1）：旧实现把 ``title`` 同时当
+    #    「事实名」和「取值」喂给维度派生：
+    #        dims = _fact_dimension_fields(r, title, title, ...)
+    #    而 ``dimensions_for_row`` 的兜底是「value 为空才回解 content」，非空的
+    #    title 会把真正的取值挡掉 —— ``- **基坑开挖深度**: 12.5m`` 在
+    #    ``GET /global-facts`` 里 fact_attr=quantitative，在本端点里却是
+    #    qualitative（``classify_fact_attr`` 的输入正是 (name, value)，值没了就
+    #    只能判定性）。更糟的是 ``r.update(dims)`` 会把派生结果**先烘焙**进行，
+    #    后续 ``chapter_of_row`` / ``dimensions_for_row`` 一律「库值优先」，
+    #    于是错误值直接参与分章，直到下一次重新提取才可能纠正。
+    #    另两处同族缺陷：① 行内没有 ``name``/``value`` 键，而
+    #    ``chapter_field_completeness`` 正是按 ``name`` + 取值拼文本判定字段覆盖，
+    #    事实名只落在 ``title`` 列 → 只写在名称里的字段（如「基坑深度」）永远
+    #    匹配不上，``covered_fields`` 偏低、``missing_fields`` 虚高（本端点最核心
+    #    的产出）；② ``_chapter_stats_for_items(enriched)`` 被调用两次，
+    #    内部还会各自再跑一遍 ``nine_chapter_summary`` → 全量扫描 4 次。
+    #    现与 ``list_facts`` 共用 _fact_name_value 唯一出口，两个口径必然一致。
     enriched = []
     for r in rows:
         r = dict(r)
-        # ✅ 字段完整性判定需要「事实名」，而落库的 title 列即事实名；
-        #    content 列是 Markdown 行（"- **名**: 值"），拿它匹配字段名会全不命中。
+        content = r.get("content") or ""
+        _n, _v = _fact_name_value(r)
+        r["name"] = _n or r.get("title") or ""
+        r["value"] = _v or content
         dims = _fact_dimension_fields(
-            r, r.get("title") or "", r.get("title") or "",
+            r, r["name"], r["value"],
             r.get("fact_key") or "",
-            _parse_source_ref(r.get("source_ref", "") or ""))
+            _parse_source_ref(r.get("source_ref", "") or ""),
+            fact_type=(r.get("fact_type") or "")
+            or CATEGORY_TO_FACT_TYPE.get(r.get("category", ""), ""))
         r.update(dims)
         enriched.append(r)
-    summary = nine_chapter_summary(enriched)
+    # 九大章节统计（含 by_fact_attr / by_source_kind）只算一次，
+    # 字段完整性差集复用同一批已归一的行。
+    stats = _chapter_stats_for_items(enriched)
+    summary = {"chapters": stats["chapters"], "totals": stats["totals"]}
     comp = chapter_field_completeness(enriched)
 
     # 把每条事实挂回它的章节（未分类的归入 __uncategorized，便于发现遗漏）
     by_chapter: dict[str, list[dict]] = {k: [] for k in CHAPTER_ORDER}
     uncategorized: list[dict] = []
     for r in enriched:
-        # content 是 Markdown 行（"- **名**: 值"），此处解出干净的名称与取值
-        _n, _v = extract_value_from_markdown_line(r.get("content") or "")
         item = {
             "fact_id": r["id"],
-            "name": _n or r.get("title") or "",
-            "value": _v or "",
+            "name": r["name"],
+            "value": r["value"],
             "category": r.get("category") or "",
             "chapter": r.get("chapter") or "",
             "chapter_title": r.get("chapter_title") or "",
@@ -892,8 +991,8 @@ async def list_facts_by_chapters(
         "chapters": chapters_out,
         "uncategorized": uncategorized,
         "totals": summary["totals"],
-        "by_fact_attr": _chapter_stats_for_items(enriched)["by_fact_attr"],
-        "by_source_kind": _chapter_stats_for_items(enriched)["by_source_kind"],
+        "by_fact_attr": stats["by_fact_attr"],
+        "by_source_kind": stats["by_source_kind"],
     }
 
 
@@ -1199,12 +1298,59 @@ async def _invalidate_item_update_caches(db, updates: list[dict]) -> None:
             db, str(r["scheme_id"] or ""), str(r["project_id"] or ""))
 
 
-async def _apply_item_updates(db, updates: list[dict]) -> tuple[int, str]:
+def _rederive_dimension_columns(*, old_name: str, new_name: str,
+                                old_value: str, new_value: str,
+                                old_category: str, new_category: str,
+                                fact_type: str = "",
+                                fact_key: str = "") -> list[tuple[str, object]]:
+    """派生输入变更时返回需重算的维度列赋值 ``(列名, 值)``；三要素全未变返回 ``[]``。
+
+    ✅ 2026-10-08（全局事实模块收口）：**「改值/改名/改类后重派生 chapter·fact_attr」
+    这一动作**的单一出口。判据本身早已收敛为
+    ``facts_classification.derivation_inputs_changed``（R45 · D1），但**应用**它
+    的 6 行代码在三条写路径各写了一份 —— 而第四条写路径
+    ``PATCH /{fact_id}/resolve-conflict``（人工裁决冲突换值）根本没写，
+    于是 R45 修过的同类缺陷在第四条路径上原样存活：裁决换了值，
+    ``chapter`` / ``fact_attr`` 停在提取期的旧值，读路径「库值优先」把旧值
+    当权威，九大章节视图 / 按章精选 / 属性统计永久错配，直到重新提取才纠正。
+
+    现三条路径（条目级更新 / 分组重建 / 冲突裁决）全部只调用本函数，
+    「判据 + 应用」都只有一处；新增写路径只要换值就必须过这道出口。
+
+    Returns:
+        ``[]`` —— 派生输入全部未变（调用方原样保留库值，尊重人工归类）；
+        否则 ``[("chapter", …), ("fact_attr", …)]`` —— 与 UPDATE 的 SET 片段一一对应。
+    """
+    if not derivation_inputs_changed(
+            old_category=old_category, new_category=new_category,
+            old_name=old_name, new_name=new_name,
+            old_value=old_value, new_value=new_value):
+        return []
+    # 与 facts_classification.classify_fact_dimensions 同口径：
+    # chapter 用 (name, value, category, fact_type, fact_key)，
+    # fact_attr 只用 (name, value) —— 属性判定与 category 正交
+    # （classify_fact_attr 已清理死参数，不接受 category）。
+    return [
+        ("chapter", classify_chapter_from_text(
+            new_name, new_value, new_category, fact_type, fact_key)),
+        ("fact_attr", classify_fact_attr(new_name, new_value)),
+    ]
+
+
+async def _apply_item_updates(db, updates: list[dict],
+                              *, commit: bool = True) -> tuple[int, str]:
     """按 fact_id 逐条更新单条事实（name/value/category/is_simulated/confidence）。
 
     ✅ 修复（死字段 + 能力缺失）：FactGroupUpdate.item_updates 在模型中早已
     声明，后端却从未读取 —— 前端只能「整组重建」来改一条事实，代价是
     组内其它行的溯源/矛盾标记被一并重置。现提供真正的条目级更新。
+
+    Args:
+        commit: 是否在返回前提交。默认 ``True`` 保持既有独立调用方行为；
+            ``POST /adjust`` 传 ``False`` —— 一次 AI 调整含多条 update/delete/add，
+            必须**整批原子提交**（此前每条 update 各自 commit，末尾的回滚
+            只能撤销未提交的部分，注释宣称的「循环内不 commit、末尾统一提交」
+            与实际不符，500 后会留下「部分调整生效」的脏状态）。
 
     返回 (更新条数, scheme_id)。
     """
@@ -1334,28 +1480,24 @@ async def _apply_item_updates(db, updates: list[dict]) -> tuple[int, str]:
         _val_now = (str(u["value"]).strip() if u.get("value") is not None
                     else str(old_value).strip())
         _cat_now = new_cat if cat_changed else (row["category"] or "")
-        # ⚠️ 门控走 derivation_inputs_changed **唯一事实源**（R45 · D1 加固）。
+        # ⚠️ 门控与应用都走 _rederive_dimension_columns 单一出口。
         # 旧实现此处写 `cat_changed or title_changed or value_changed`，与分组
         # 重建的 _carry_dimensions 各写一份字面量比较 —— 三次漏改（2026-09-29
         # 改分类 / 2026-10-01 改名 / 2026-10-06 改值）全都是「只修了一份」造成的。
-        # 现收敛为单一出口，护栏
-        # test_facts_deep_audit_r45_20261006.py::TestDerivationGateSingleSource
-        # 锁定两条路径都必须调用本函数、且不得再写各自字面量比较。
-        if derivation_inputs_changed(
-                old_category=row["category"] or "", new_category=_cat_now,
+        # 2026-10-08 进一步把「判据 + 重派生赋值」合并为一个出口：判据本身
+        # （derivation_inputs_changed）早已单一，但应用它的 6 行仍各处一份，
+        # 于是第四条写路径 resolve_conflict 一份都没写 —— 同类缺陷继续存活。
+        # 护栏 test_facts_derivation_closeout_r54_20261008.py 锁定三条写路径
+        # 全部只经该出口，且出口是全仓唯一调用 derivation_inputs_changed 的位置。
+        # ⚠️ row 是 sqlite3.Row（无 .get），必须按键取值
+        for _col, _dim_val in _rederive_dimension_columns(
                 old_name=row["title"] or "", new_name=_name_now,
-                old_value=old_value, new_value=_val_now):
-            # ⚠️ row 是 sqlite3.Row（无 .get），必须按键取值
-            _ft = (row["fact_type"] or "").strip()
-            # 与 facts_classification.classify_fact_dimensions 同口径：
-            # chapter 用 (name, value, category, fact_type, fact_key)，
-            # fact_attr 只用 (name, value) —— 属性判定与 category 正交
-            # （classify_fact_attr 已清理死参数，不接受 category）。
-            sets.append("chapter=?")
-            vals.append(classify_chapter_from_text(
-                _name_now, _val_now, _cat_now, _ft, new_key))
-            sets.append("fact_attr=?")
-            vals.append(classify_fact_attr(_name_now, _val_now))
+                old_value=old_value, new_value=_val_now,
+                old_category=row["category"] or "", new_category=_cat_now,
+                fact_type=(row["fact_type"] or "").strip(),
+                fact_key=new_key):
+            sets.append(f"{_col}=?")
+            vals.append(_dim_val)
 
         if u.get("confidence") is not None:
             sets.append("confidence=?")
@@ -1377,7 +1519,7 @@ async def _apply_item_updates(db, updates: list[dict]) -> tuple[int, str]:
         _assert_fact_write_applied(cur, f"条目级更新事实 {fid}")
         updated += 1
 
-    if updated:
+    if updated and commit:
         await db.commit()
     return updated, scheme_id
 
@@ -1636,21 +1778,21 @@ async def update_fact(
         # 旧值从库行 content 回解（不是拿新值自比）；归一在判据内部完成
         old_val = str(extract_value_from_markdown_line(
             old.get("content") or "")[1] or "")
-        if not derivation_inputs_changed(
-                old_category=old.get("category") or "",
-                new_category=category,
-                old_name=old_name,
-                new_name=nm,
-                old_value=old_val,
-                new_value=val):
-            return (old.get("chapter") or "", old.get("fact_attr") or "",
-                    old.get("source_kind") or "",
-                    int(old.get("is_shared") or 0))
+        # ⚠️ 门控 + 重派生赋值统一走 _rederive_dimension_columns 单一出口
+        # （与 _apply_item_updates / resolve_conflict 同源，判据本身仍是
+        #  derivation_inputs_changed）。旧实现在此另写一份「判据 + 两个
+        #  classify_* 调用」，与条目级更新各改各的，是三次漏改的根因形态。
+        rederived = dict(_rederive_dimension_columns(
+            old_name=old_name, new_name=nm,
+            old_value=old_val, new_value=val,
+            old_category=old.get("category") or "", new_category=category,
+            fact_type=old.get("fact_type") or "",
+            fact_key=(old.get("fact_key") or "").strip()))
+        # source_kind / is_shared 的派生输入是「来源文件 / 共享标记」，不随
+        # 名称/值/分类变化，重建时原样携带库值。
         return (
-            classify_chapter_from_text(nm, val, category,
-                                       old.get("fact_type") or "",
-                                       (old.get("fact_key") or "").strip()),
-            classify_fact_attr(nm, val),
+            rederived.get("chapter", old.get("chapter") or ""),
+            rederived.get("fact_attr", old.get("fact_attr") or ""),
             old.get("source_kind") or "",
             int(old.get("is_shared") or 0),
         )
@@ -1740,7 +1882,7 @@ async def resolve_fact(
     if scheme_scope:
         await _assert_fact_in_scheme_scope(db, fact_id, scheme_scope)
     cur = await db.execute(
-        "SELECT scheme_id, is_simulated, has_conflict, is_stale FROM global_facts WHERE id=?",
+        "SELECT scheme_id, project_id, is_simulated, has_conflict, is_stale FROM global_facts WHERE id=?",
         (fact_id,))
     row = await cur.fetchone()
     if not row:
@@ -1768,9 +1910,13 @@ async def resolve_fact(
     if row["scheme_id"]:
         await invalidate_export_cache(db, row["scheme_id"], facts_touched=True)
     else:
-        cur = await db.execute("SELECT project_id FROM global_facts WHERE id=?", (fact_id,))
-        prow = await cur.fetchone()
-        await _invalidate_fact_scope_cache(db, "", str(prow[0] or "") if prow else "")
+        # ✅ F7（2026-10-08）：取消「为取 project_id 再查一次」的第二条 SELECT。
+        #   旧写法两处隐患：① 同一行数据两次读取，中间若有并发写会读到不一致值；
+        #   ② 取值用位置索引 ``prow[0]``，行形态为 Mapping 时抛 KeyError →
+        #     传空 pid → ``_invalidate_fact_scope_cache`` 因 ``not project_id`` 静默
+        #     return，项目下**全部**方案的 facts_updated_at 都不推进（用户看不到
+        #     「事实已变更」标记）。现直接复用已在手的行。
+        await _invalidate_fact_scope_cache(db, "", str(row["project_id"] or ""))
     return {"ok": True}
 
 
@@ -1897,15 +2043,13 @@ async def batch_ack_stale(data: dict, db=Depends(get_db)):
         raise HTTPException(400, "单次最多处理 500 条事实")
     if not scheme_id:
         raise HTTPException(400, "需要提供 scheme_id 以限定作用域")
-    cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
-    srow = await cur.fetchone()
-    if not srow:
+    # ✅ F6 续（2026-10-08）：反查走 _scheme_project_id 单一出口
+    real_pid = await _scheme_project_id(db, scheme_id)
+    if real_pid is None:
         raise HTTPException(404, "方案不存在")
-    real_pid = str(srow[0] or "")
 
     fact_ids = [str(f).strip() for f in fact_ids if str(f).strip()]
-    scope_sql = (" AND (scheme_id=? OR (project_id=? AND "
-                 "(scheme_id='' OR scheme_id IS NULL)))")
+    scope_sql = f" AND {_FACT_SCOPE_PREDICATE}"
     scope_params: list = [scheme_id, real_pid]
     id_sql = ""
     if fact_ids:
@@ -1978,8 +2122,8 @@ async def resolve_conflict(
     if scheme_scope:
         await _assert_fact_in_scheme_scope(db, fact_id, scheme_scope)
     cur = await db.execute(
-        "SELECT id, title, content, is_simulated, conflict_keys, scheme_id "
-        "FROM global_facts WHERE id=?", (fact_id,))
+        "SELECT id, title, content, is_simulated, conflict_keys, scheme_id, "
+        "project_id, category, fact_type, fact_key FROM global_facts WHERE id=?", (fact_id,))
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "事实不存在")
@@ -1998,11 +2142,35 @@ async def resolve_conflict(
     # 前端仍显示"低置信度"标签，与"已人工确认"的语义冲突。
     # 人工选择模拟候选只完成「冲突裁决」，不等于确认了真实值；保持未审核闸门。
     resolved_flag = 0 if is_sim else 1
+    # ✅ BUG 修复（2026-10-08 · 全局事实模块收口）：**裁决换值必须重派生九大章节维度**。
+    #    本端点是全仓第 4 条「改事实值」的写路径，R45 把「改值后重算
+    #    chapter / fact_attr」补到了条目级更新与分组重建两条路径上，却漏了这里
+    #    —— 裁决恰恰是最容易换出不同属性/章节的写操作（候选值「按设计要求」
+    #    vs「GB 55003-2021 第 3.1.2 条」分别是 qualitative 与 norm；
+    #    「基坑深度 12.5m」与「放坡开挖」分属 overview 与 technique）。
+    #    而读路径（list_facts / /chapters / 正文注入的 _load_facts_rows）一律
+    #    「库值优先」，旧维度会被当权威一直带进章节视图与按章精选，
+    #    直到下一次重新提取才纠正 —— 界面上返回 200 且零异常提示。
+    #    门控与应用统一走 _rederive_dimension_columns 单一出口；名称与分类在
+    #    裁决中不变（只换值），故 old/new 同名同类，判据实际只看值。
+    _title_raw = str(row["title"] or "")
+    _dim_assigns = _rederive_dimension_columns(
+        old_name=_title_raw, new_name=_title_raw,
+        old_value=prior_value, new_value=new_value,
+        old_category=row["category"] or "", new_category=row["category"] or "",
+        fact_type=row["fact_type"] or "", fact_key=row["fact_key"] or "")
+    sets = ["content=?", "is_simulated=?", "has_conflict=0", "conflict_keys=''",
+            "confidence=1.0", "is_resolved=?", "is_stale=0"]
+    params: list = [content, 1 if is_sim else 0, resolved_flag]
+    # ⚠️ SET 片段与占位符必须同源生成（本模块历史上出现过「N 个 ? vs M 列」
+    #    静默错位）：先追加维度列的赋值，再补 WHERE 的 fact_id。
+    for _col, _dim_val in _dim_assigns:
+        sets.append(f"{_col}=?")
+        params.append(_dim_val)
+    sets.append("updated_at=datetime('now','localtime')")
+    params.append(fact_id)
     cur = await db.execute(
-        "UPDATE global_facts SET content=?, is_simulated=?, has_conflict=0, "
-        "conflict_keys='', confidence=1.0, is_resolved=?, is_stale=0, "
-        "updated_at=datetime('now','localtime') WHERE id=?",
-        (content, 1 if is_sim else 0, resolved_flag, fact_id))
+        f"UPDATE global_facts SET {', '.join(sets)} WHERE id=?", params)
     # ✅ R13 收口（2026-10-06）：人工裁决是「冲突消解」的唯一凭据，
     #    写入未生效却回 ok=True 会让冲突标记与实际取值永久不一致
     _assert_fact_write_applied(cur, f"人工裁决冲突 fact_id={fact_id}")
@@ -2011,9 +2179,9 @@ async def resolve_conflict(
     if row["scheme_id"]:
         await invalidate_export_cache(db, row["scheme_id"], facts_touched=True)
     else:
-        cur = await db.execute("SELECT project_id FROM global_facts WHERE id=?", (fact_id,))
-        prow = await cur.fetchone()
-        await _invalidate_fact_scope_cache(db, "", str(prow[0] or "") if prow else "")
+        # ✅ F7（2026-10-08）：与 confirm_fact 同口径 —— 复用已在手的首查行，
+        #   不再二次 SELECT + 位置索引取值（Mapping 行下会静默丢项目作用域失效）。
+        await _invalidate_fact_scope_cache(db, "", str(row["project_id"] or ""))
     return {"ok": True}
 
 
@@ -2031,22 +2199,18 @@ async def clear_all_facts(data: dict, db=Depends(get_db)):
     scheme_id = str(data.get("scheme_id", "") or "").strip()
     if not scheme_id:
         raise HTTPException(400, "需要 scheme_id")
-    cur = await db.execute(
-        "SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
-    row = await cur.fetchone()
-    if not row:
+    # ✅ F6 续（2026-10-08）：反查走 _scheme_project_id 单一出口
+    project_id = await _scheme_project_id(db, scheme_id)
+    if project_id is None:
         raise HTTPException(404, "方案不存在")
-    project_id = str(row[0] or "")
 
     try:
         cur = await db.execute(
-            "SELECT count(*) FROM global_facts WHERE scheme_id=? OR "
-            "(project_id=? AND (scheme_id='' OR scheme_id IS NULL))",
+            "SELECT count(*) FROM global_facts WHERE " + _FACT_SCOPE_PREDICATE,
             (scheme_id, project_id))
         total = int((await cur.fetchone())[0] or 0)
         cur = await db.execute(
-            "DELETE FROM global_facts WHERE scheme_id=? OR "
-            "(project_id=? AND (scheme_id='' OR scheme_id IS NULL))",
+            "DELETE FROM global_facts WHERE " + _FACT_SCOPE_PREDICATE,
             (scheme_id, project_id))
         # ✅ R13 收口（2026-10-06）：游标为空时下方 total 已算出，
         #    若继续删增量指纹并回 ok=True，用户会以为事实已清空而实际未删
@@ -2110,15 +2274,14 @@ async def batch_resolve(data: dict, db=Depends(get_db)):
                     "safety_blocked": False}
         placeholders = ",".join("?" * len(fact_ids))
         if scheme_id:
-            cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
-            scheme_row = await cur.fetchone()
-            if not scheme_row:
+            # ✅ F6 续（2026-10-08）：反查走 _scheme_project_id 单一出口
+            _rp = await _scheme_project_id(db, scheme_id)
+            if _rp is None:
                 raise HTTPException(404, "方案不存在")
-            real_pid = str(scheme_row[0] or "")
-            scope = (
-                " AND (scheme_id=? OR (project_id=? AND "
-                "(scheme_id='' OR scheme_id IS NULL)))"
-            )
+            real_pid = _rp
+            # ✅ 2026-10-08（F6）：作用域谓词走 _FACT_SCOPE_PREDICATE 单一出口
+            #    （片段内容与旧内联字面量逐字一致，行为零变化）。
+            scope = f" AND {_FACT_SCOPE_PREDICATE}"
             params = [*fact_ids, scheme_id, real_pid]
         else:
             scope, params = "", fact_ids
@@ -2131,15 +2294,14 @@ async def batch_resolve(data: dict, db=Depends(get_db)):
         rows = [dict(r) for r in await cur.fetchall()]
 
     elif scheme_id:
-        cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
-        scheme_row = await cur.fetchone()
-        if not scheme_row:
+        # ✅ F6 续（2026-10-08）：反查走 _scheme_project_id 单一出口
+        _rp2 = await _scheme_project_id(db, scheme_id)
+        if _rp2 is None:
             raise HTTPException(404, "方案不存在")
-        real_pid = str(scheme_row[0] or "")
+        real_pid = _rp2
         cur = await db.execute(
             "SELECT id, title, fact_key, is_simulated, is_resolved, has_conflict, is_stale "
-            "FROM global_facts WHERE scheme_id=? OR (project_id=? AND "
-            "(scheme_id='' OR scheme_id IS NULL))",
+            "FROM global_facts WHERE " + _FACT_SCOPE_PREDICATE,
             (scheme_id, real_pid))
         rows = [dict(r) for r in await cur.fetchall()]
     else:
@@ -2237,9 +2399,7 @@ async def batch_resolve(data: dict, db=Depends(get_db)):
         # 「事实已变更」标记永久停在旧值，用户看到过期正文却得不到任何提示。
         # 与 batch_ack_stale（同文件）同口径：scheme_id 在上方已强校验存在，
         # 直接按项目作用域失效；项目作用域为空时退化为按方案失效，绝不静默跳过。
-        cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
-        prow = await cur.fetchone()
-        real_pid = str(prow[0] or "") if prow else ""
+        real_pid = await _scheme_project_id(db, scheme_id) or ""
         if real_pid:
             await _invalidate_fact_scope_cache(db, "", real_pid)
         else:
@@ -2284,23 +2444,42 @@ def _facts_for_adjust_prompt(rows: list) -> list:
     return out
 
 
-def _validate_adjust_ops(obj, valid_ids: set) -> tuple:
+def _validate_adjust_ops(obj, valid_ids: set, *,
+                         existing_keys: set | None = None,
+                         ignored_out: list | None = None) -> tuple:
     """校验 AI 操作计划，返回 (合法操作列表, summary)。非法项一律丢弃（绝不将就）。
 
     核心防线：update/delete 的 fact_id 必须命中现有真实行（AI 幻觉 id → 丢弃，
     避免误删/误改别的方案）；add 必须有 name+value；category 非法→ other。
+
+    Args:
+        existing_keys: 作用域内既有事实的归一化键集合。传入时 ``add`` 命中同名键
+            会被丢弃并登记理由 —— 旧实现不比对同名键，AI「看不到就新增」会插出
+            第二份同名事实（与项目共享事实同 key 并存，两份同时通过注入门控进正文）。
+            默认 ``None`` = 不做同名去重，**既有调用方与单测行为逐字不变**。
+        ignored_out: 可选累加器，登记每条被丢弃操作的理由
+            ``{"op","reason",...}``。丢弃此前完全静默（响应只回 applied 计数），
+            用户看不出「要求改 3 条只落 2 条」是被哪一层拦下的。
     """
     raw = obj.get("operations") if isinstance(obj, dict) else None
     if not isinstance(raw, list):
         raw = []
+
+    def _ignore(kind: str, reason: str, **extra) -> None:
+        if ignored_out is None:
+            return
+        ignored_out.append({"op": kind, "reason": reason, **extra})
+
     clean = []
     for op in raw:
         if not isinstance(op, dict):
+            _ignore("unknown", "op_not_object")
             continue
         kind = str(op.get("op") or "").strip().lower()
         if kind == "update":
             fid = str(op.get("fact_id") or "").strip()
             if fid not in valid_ids:
+                _ignore("update", "unknown_fact_id", fact_id=fid)
                 continue
             upd = {"op": "update", "fact_id": fid}
             if op.get("value") is not None and str(op.get("value")).strip():
@@ -2311,19 +2490,31 @@ def _validate_adjust_ops(obj, valid_ids: set) -> tuple:
                 upd["category"] = _normalize_fact_category(op["category"])
             if len(upd) > 2:  # 除 op+fact_id 外至少有一个实质变更
                 clean.append(upd)
+            else:
+                _ignore("update", "no_effective_change", fact_id=fid)
         elif kind == "delete":
             fid = str(op.get("fact_id") or "").strip()
             if fid in valid_ids:
                 clean.append({"op": "delete", "fact_id": fid,
                               "reason": str(op.get("reason") or "")[:200]})
+            else:
+                _ignore("delete", "unknown_fact_id", fact_id=fid)
         elif kind == "add":
             nm = str(op.get("name") or "").strip()
             val = "" if op.get("value") is None else str(op.get("value")).strip()
             if not nm or not val:
+                _ignore("add", "missing_name_or_value", name=nm)
+                continue
+            # ✅ 同名事实守卫（仅在调用方提供既有键索引时生效）
+            ak = normalize_key(nm)
+            if existing_keys is not None and ak and ak in existing_keys:
+                _ignore("add", "duplicate_fact_key", name=nm)
                 continue
             cat = str(op.get("category") or "").strip()
             clean.append({"op": "add", "name": nm, "value": val,
                           "category": _normalize_fact_category(cat)})
+        else:
+            _ignore(kind or "unknown", "unknown_op")
     return clean, str(obj.get("summary") or "").strip()
 
 
@@ -2353,23 +2544,52 @@ async def adjust_facts(data: dict, db=Depends(get_db)):
         raise HTTPException(400, "需要 scheme_id 或 project_id")
     scheme_scope = scheme_id.strip() if isinstance(scheme_id, str) else ""
 
-    # 载入当前事实（有 scheme 限定本方案，否则整个项目）
-    sql = "SELECT id, title, content, category FROM global_facts WHERE project_id=?"
-    params = [real_pid]
-    if scheme_scope:
-        sql += " AND scheme_id=?"
-        params.append(scheme_scope)
+    # 载入当前事实：作用域必须与「用户在界面里看到的事实」**完全一致**
+    # （方案私有 + 同项目共享），走 _fact_scope_where 唯一出口。
+    # ✅ BUG 修复（2026-10-08 · 全局事实模块收口 F3）：旧实现在本端点内联了
+    #    第三份作用域谓词，且**少了「OR 项目共享」半句**
+    #    （`WHERE project_id=? AND scheme_id=?`）：
+    #      · 项目共享事实（scheme_id=''）不进 `current_facts` → AI 看不到用户在
+    #        界面上看到的行，「把所有年份统一改成 2026」这类指令会漏改共享事实；
+    #      · AI 若引用共享事实的 fact_id（上一轮预览计划、或从指令里推断），
+    #        会被 `_validate_adjust_ops` 当「幻觉 id」**静默丢弃** —— 响应里的
+    #        applied.updated 比用户要求的少，却没有任何一处说明为什么少；
+    #      · AI 更常见的是「看不到就新增」→ `add` 插一份方案私有的同名事实，
+    #        与项目共享那份**同 key 并存**，两份都满足注入门控
+    #        （has_conflict=0 AND is_resolved=1 AND is_simulated=0 AND is_stale=0）
+    #        → 同一事实的两个取值同时进正文（数据真实性红线）。
+    #    R45-G2 当年修的是「valid_ids 必须与读给 AI 的 rows 同源」，两处同源但
+    #    仍与全模块读取口径不同源；本次把三份副本收敛为一个出口，从结构上
+    #    杜绝再次分叉。
+    scope_sql, params = _fact_scope_where(scheme_scope, real_pid)
+    sql = ("SELECT id, title, content, category, fact_key, scheme_id"
+           " FROM global_facts" + scope_sql +
+           " ORDER BY category, group_id, updated_at, id")
     cur = await db.execute(sql, params)
     rows = [dict(r) for r in await cur.fetchall()]
     if not rows:
         raise HTTPException(400, "当前作用域还没有任何全局事实，请先提取或新增")
 
     valid_ids = {r["id"] for r in rows}
+    # 既有事实名（归一化键）索引：供 add 的重复守卫（同名事实不得插第二份）。
+    # 与 persist_extraction 的去重同用 normalize_key 单一出口，两侧口径一致。
+    existing_keys: set[str] = set()
+    for r in rows:
+        k = (r.get("fact_key") or "").strip() or normalize_key(r.get("title") or "")
+        if k:
+            existing_keys.add(k)
     confirmed_ops = data.get("operations")
+    # ✅ 可观测性补齐（2026-10-08 · F3）：被丢弃的操作不再只进日志。
+    #    「AI 给了 3 条、实际只落 2 条」必须有理由回传，否则用户与前端都无法
+    #    区分「AI 没产出」与「产出了但被安全校验拦下」—— 与 R48 图表删除
+    #    可观测性同族的判据（静默丢弃 = 最贵的缺陷）。
+    ignored_ops: list[dict] = []
     if do_apply and isinstance(confirmed_ops, list):
         # 用户已在 UI 预览并二次确认具体操作；直接校验这份计划，禁止再次调用 AI
         # 生成另一份可能不同的计划（否则“确认内容”与“实际落库内容”存在漂移）。
-        ops, summary = _validate_adjust_ops({"operations": confirmed_ops}, valid_ids)
+        ops, summary = _validate_adjust_ops(
+            {"operations": confirmed_ops}, valid_ids,
+            existing_keys=existing_keys, ignored_out=ignored_ops)
     else:
         prompt = render(
             "global_facts_adjust_system",
@@ -2391,16 +2611,21 @@ async def adjust_facts(data: dict, db=Depends(get_db)):
         except Exception as e:
             logger.warning("全局事实 AI 调整失败: %s", e)
             raise HTTPException(502, f"事实调整失败：{e}")
-        ops, summary = _validate_adjust_ops(obj, valid_ids)
+        ops, summary = _validate_adjust_ops(
+            obj, valid_ids, existing_keys=existing_keys,
+            ignored_out=ignored_ops)
 
     applied = {"updated": 0, "added": 0, "deleted": 0}
     if do_apply and ops:
-        # ✅ G-04 修复（2026-10-04）：AI 调整可能下发多条 update/delete/add，
-        #    循环中**每条都会写库但不 commit**（末尾统一提交）。中间任何一条
-        #    抛异常（例如 op["fact_id"] 在并发删除下消失、SQLite 锁），前 N-1
-        #    条已经下推的写仍留在悬空事务里；连接归还池后会被下一个请求的
-        #    commit 连带提交，形成"部分调整生效但前端拿到 500"的脏状态。
-        #    与 create_fact / update_fact / clear_all_facts 同口径显式回滚。
+        # ✅ G-04 修复（2026-10-04）+ ✅ 收口（2026-10-08 · F4）：AI 调整可能下发
+        #    多条 update/delete/add，必须**整批原子提交**。
+        #    G-04 当时的注释宣称「循环中每条都写库但不 commit（末尾统一提交）」，
+        #    与实际不符：`_apply_item_updates` 内部 `if updated: await db.commit()`
+        #    —— 每条 update 各自落盘一次。于是第 N 条抛异常时，前 N-1 条 update
+        #    **已经 commit，外层 rollback() 撤不掉**，用户拿到 500 却已部分生效
+        #    （「把年份统一改成 2026」改了一半），且没有任何一处说明改到哪条断了。
+        #    现给 _apply_item_updates 加 `commit=False`（默认 True，既有独立调用方
+        #    行为逐字不变），本批全部写完再统一 commit，异常统一 rollback。
         try:
             for op in ops:
                 if op["op"] == "update":
@@ -2409,8 +2634,13 @@ async def adjust_facts(data: dict, db=Depends(get_db)):
                         "value": op.get("value"),
                         "name": op.get("name"),
                         "category": op.get("category"),
-                    }])
+                    }], commit=False)
                     applied["updated"] += n
+                    if n:
+                        # 同批内后续 add 不得再插同名事实副本（键索引实时更新）
+                        _nk = normalize_key(op.get("name") or "")
+                        if _nk:
+                            existing_keys.add(_nk)
                 elif op["op"] == "delete":
                     cur = await db.execute(
                         "DELETE FROM global_facts WHERE id=?", (op["fact_id"],))
@@ -2438,6 +2668,9 @@ async def adjust_facts(data: dict, db=Depends(get_db)):
                             is_resolved=True,
                         ))
                     applied["added"] += 1
+                    _ak = normalize_key(op["name"])
+                    if _ak:
+                        existing_keys.add(_ak)
             await db.commit()
         except Exception:
             await db.rollback()
@@ -2445,11 +2678,22 @@ async def adjust_facts(data: dict, db=Depends(get_db)):
         # ✅ 2026-09-29：项目级（scheme_scope 为空）调整此前不失效任何缓存，
         #    与 create_fact / update_fact / delete_fact 口径对齐。
         await _invalidate_fact_scope_cache(db, scheme_scope, str(real_pid))
+    if ignored_ops:
+        # 丢弃必须有痕迹：日志留全量理由，响应体回传摘要（前端 FactsAdjustPanel
+        # 可提示「N 条操作未生效」）。旧实现只有 `if fid not in valid_ids: continue`
+        # 一句，既无日志也无回执，用户与排障者都无从判断计划为何缩水。
+        logger.warning(
+            "全局事实 AI 调整丢弃 %d 条操作：scheme=%s 摘要=%s",
+            len(ignored_ops), scheme_scope or f"项目={real_pid}",
+            json.dumps(ignored_ops, ensure_ascii=False)[:800])
     return {
         "ok": True,
         "operations": ops,
         "summary": summary,
         "applied": applied if do_apply else None,
+        # ✅ 加法式新字段（旧前端不消费也不报错）：被安全校验丢弃的操作及理由。
+        "ignored": ignored_ops,
+        "ignored_count": len(ignored_ops),
     }
 
 
@@ -2894,7 +3138,7 @@ async def _resolve_project_id(db, scheme_id: str, project_id: str) -> str:
     pid = project_id.strip() if isinstance(project_id, str) else ""
     if sid:
         cur = await db.execute(
-            "SELECT project_id FROM schemes WHERE id=?", (sid,))
+            SCHEME_PROJECT_ID_SQL, (sid,))
         # ✅ R13 读路径补漏（2026-10-05）：本函数是所有 documents 接口的
         #    作用域入口，cursor 为 None 时 fetchone 抛 AttributeError → 500；
         #    也不得降级成「方案不存在」（会把 DB 瞬时故障误报为 404）。
@@ -2902,9 +3146,11 @@ async def _resolve_project_id(db, scheme_id: str, project_id: str) -> str:
             logger.warning("解析 scheme 作用域失败（db.execute 返回 None），sid=%s", sid)
             raise HTTPException(503, "文档服务暂时不可用，请稍后重试")
         row = await cur.fetchone()
-        if not row or not row[0]:
+        # ✅ F6 续（2026-10-08）：取值走 row_field（键名优先、序列兜底），
+        #   Mapping 行不再抛 KeyError；判定口径与旧 `not row or not row[0]` 逐字一致。
+        real_pid = row_field(row, "project_id")
+        if not real_pid:
             raise HTTPException(404, "方案不存在")
-        real_pid = str(row[0])
         if pid and pid != real_pid:
             raise HTTPException(400, "scheme_id 与 project_id 不匹配")
         return real_pid

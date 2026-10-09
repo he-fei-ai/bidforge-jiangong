@@ -14,6 +14,8 @@
    且缺口能并入 ``_check_requirements_coverage`` 的 missing → 复用外科式补齐。
 """
 import app.routers.sse_handlers as sh
+# ✅ R57：_rank_facts_by_basis 已从 sse_handlers 移至 facts_builder
+from app.services.facts_builder import _rank_facts_by_basis
 import pytest
 from app.services.outline_quality import (
     analyze_name_coverage,
@@ -97,7 +99,7 @@ class TestRelevanceFrontLoad:
             ("技术参数", "开挖深度", "6.5 m"),
             ("商务信息", "工期", "180 天"),
         ]
-        out, hit = sh._rank_facts_by_basis(rows, BASIS)
+        out, hit = _rank_facts_by_basis(rows, BASIS)
         assert hit >= 1
         groups = [r[0] for r in out]
         assert groups[0] == "技术参数"

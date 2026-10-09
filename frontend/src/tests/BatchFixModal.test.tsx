@@ -207,7 +207,7 @@ describe("BatchFixModal · 一键修复全部阻断项", () => {
     await waitFor(() => expect(btn(view(), "拒绝全部")).toBeTruthy());
     await act(async () => { fireEvent.click(btn(view(), "拒绝全部")!); });
     await waitFor(() => expect(api.confirm).toHaveBeenCalledWith("s1", {
-      batch_id: "batch-1", reject: ["DLV-05"],
+      batch_id: "batch-1", reject: ["DLV-05|sec-a"],
     }));
   });
 
@@ -256,7 +256,7 @@ describe("BatchFixModal · 一键修复全部阻断项", () => {
       expect(txt(view())).toContain("确认修复（接受选中 1）"));
     fireEvent.click(btn(view(), "确认修复")!);
     await waitFor(() => expect(api.confirm).toHaveBeenCalledWith("s1", {
-      batch_id: "batch-2", accept: ["CON-01"],
+      batch_id: "batch-2", accept: ["CON-01|sec-b"],
     }));
   });
 
@@ -322,7 +322,7 @@ describe("BatchFixModal · 一键修复全部阻断项", () => {
       expect(txt(view())).toContain("确认修复（接受选中 1）"));
     fireEvent.click(btn(view(), "确认修复")!);
     await waitFor(() => expect(api.confirm).toHaveBeenCalledWith("s1", {
-      batch_id: "batch-3", accept: ["DLV-05"],
+      batch_id: "batch-3", accept: ["DLV-05|sec-a"],
     }));
   });
 });
@@ -377,7 +377,7 @@ describe("BatchFixModal · 确认阶段与失败反馈", () => {
     await stage2();
     fireEvent.click(btn(view(), "拒绝全部")!);
     await waitFor(() => expect(api.confirm).toHaveBeenCalledWith("s1", {
-      batch_id: "batch-1", reject: ["DLV-05"],
+      batch_id: "batch-1", reject: ["DLV-05|sec-a"],
     }));
     await waitFor(() => expectMsg(msgSpy.info, "已拒绝"));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
@@ -468,5 +468,80 @@ describe("BatchFixModal · 确认阶段与失败反馈", () => {
     await waitFor(() =>
       expect(btn(view(), "确认修复（接受选中 0）")!.disabled).toBe(true));
     expect(api.confirm).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
+// ✅ R55 F3（2026-10-08）：批量契约中「前端不可见」的三条链路补齐
+//  ① /stage 命中章节上限截断 → skipped_sections + max_sections 必须可见
+//    （toast + 清单上方 Alert）—— 上限是护栏，不可见才是缺陷；
+//  ② /confirm 回传 skipped（链式重算时 finding 已失效被丢弃）→ 此前整段丢弃，
+//    「以为修了、实际没修」在 UI 层复发；现 toast + done 阶段逐项明细；
+//  ③ accept/reject 按 rule_id|section_id 复合键下发 —— 同规则跨章时勾选一项
+//    ≠ 接受全部（旧实现按裸 rule_id，UI 勾选粒度与协议粒度分叉）。
+// ===========================================================================
+describe("BatchFixModal · R55 上限截断与失效跳过可见性", () => {
+  const openStage = async (stageRes: AutoFixStageResult) => {
+    api.stage.mockResolvedValue({ data: stageRes });
+    render(<App><BatchFixModal schemeId="s1" open onClose={() => {}} /></App>);
+    await waitFor(() => expect(btn(view(), "生成修复预览")?.disabled).toBe(false));
+    fireEvent.click(btn(view(), "生成修复预览")!);
+    await waitFor(() => expect(txt(view())).toContain("确认修复"));
+  };
+
+  it("stage 命中章节上限 → 告警 toast + 未处理章节清单 Alert（含上限值）", async () => {
+    await openStage({
+      ...STAGE,
+      max_sections: 1,
+      skipped_sections: [{
+        section_id: "sec-z", section_title: "冬雨期施工", finding_count: 2,
+        rule_ids: ["DLV-05", "CON-01"],
+      }],
+    } as AutoFixStageResult);
+    expectMsg(msgSpy.warning, "因单次修复上限本轮未处理");
+    const t = txt(view());
+    expect(t).toContain("个章节本轮未处理");
+    expect(t).toContain("（1 章）");
+    expect(t).toContain("冬雨期施工");
+    expect(t).toContain("2 项");
+  });
+
+  it("confirm 返回 skipped → toast 提醒 + done 阶段逐项明细可见（rule/章节/理由）", async () => {
+    api.confirm.mockResolvedValue({ data: {
+      status: "confirmed", accepted: 1, repaired_sections: 1,
+      snapshot_id: "ver-batch", batch_id: "batch-1",
+      skipped: [{
+        rule_id: "CON-01", section_id: "sec-b", status: 404,
+        detail: "该问题已不在当前总检结果中",
+      }],
+    } });
+    await openStage(STAGE);
+    fireEvent.click(btn(view(), "确认修复")!);
+    await waitFor(() => expectMsg(msgSpy.warning, "已失效被跳过"));
+    await waitFor(() =>
+      expect(txt(view())).toContain("1 项问题在确认时已失效，本轮未修复"));
+    const t = txt(view());
+    expect(t).toContain("CON-01");
+    expect(t).toContain("该问题已不在当前总检结果中");
+  });
+
+  it("同规则跨两章：只勾一章 → accept 为该章复合键（旧裸 rule_id 会两章全接受）", async () => {
+    await openStage({
+      ...STAGE,
+      items: [
+        { ...STAGE.items[0], section_id: "sec-a", chain_index: 0 },
+        { ...STAGE.items[0], section_id: "sec-b", section_title: "施工部署",
+          chain_index: 0 },
+      ],
+      stats: { repaired: 2, failed: 0, skipped: 0 },
+    } as AutoFixStageResult);
+    const boxes = Array.from(view().querySelectorAll("input[type=checkbox]"));
+    expect(boxes.length).toBe(2);
+    fireEvent.click(boxes[1]); // 取消 sec-b，仅保留 sec-a
+    await waitFor(() => expect(txt(view())).toContain("确认修复（接受选中 1）"));
+    fireEvent.click(btn(view(), "确认修复")!);
+    await waitFor(() => expect(api.confirm).toHaveBeenCalledWith("s1", {
+      batch_id: "batch-1", accept: ["DLV-05|sec-a"],
+    }));
   });
 });
