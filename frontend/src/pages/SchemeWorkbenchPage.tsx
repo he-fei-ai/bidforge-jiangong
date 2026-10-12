@@ -64,6 +64,7 @@ import {
   upsertSectionLog, finalizeRunningLogsIn, mergeFailedSectionsInto,
   contentResultFailedSections, contentResultSummary,
   normalizeQualityIssues, normalizeChartYield, chartDropTexts,
+  isTerminalTaskStatus, isTerminalContentEvent, degradedConsistencyHint,
   type SectionLogItem, type GenStats,
 } from "../utils/contentEvents";
 // F-CONTENT-STANDARD(2026-09-26): 生成标准纯函数层（请求体映射 / 标签 / 报告判定）
@@ -1421,7 +1422,7 @@ export function outlineToTreeNode(outline: any[], parentPath = "", parentLevel =
       level,
       status: "empty",
       word_count: 0,
-      word_budget: n.word_budget || 1500,
+      word_budget: n.word_budget || 1200,
       description: n.description || "",
       outlineId,
       children: hasChildren ? outlineToTreeNode(n.children, outlineId, level) : [],
@@ -1586,7 +1587,7 @@ export const OutlineNodeBudgetPanel = memo(function OutlineNodeBudgetPanel({
   node: TreeNode;
   onBudgetChange: (key: string, budget: number) => void;
 }) {
-  const current = node.word_budget || 1500;
+  const current = node.word_budget || 1200;
   const [draft, setDraft] = useState<number>(current);
   // 选中章节切换 / 预算被外部改动（如 load 刷新）时同步草稿
   useEffect(() => {
@@ -1812,10 +1813,14 @@ export async function pollTaskUntilTerminalImpl(
     try {
       const data = await fetchStatus(taskId);
       netFailCount = 0; // ✅ 成功一次即重置，瞬时网络抖动不应终止重挂
-      if (["completed", "failed", "stopped"].includes(data.status)) return data;
+      // ✅ 2026-10-10：终态集合改由 isTerminalTaskStatus 单一事实源判定。
+      //    旧实现内联 `completed/failed/stopped`，把后端 2026-10-07 引入的
+      //    加法式终态 degraded 漏掉 ⇒ 降级完成时既不匹配终态、也不匹配下方
+      //    「progress 满但 running」兜底，页面卡在「正在重新挂接…」200×3s。
+      if (isTerminalTaskStatus(data.status)) return data;
       onPending?.(data);
       // ✅ 进度已满但 status 没更新：连续达阈值就兜底为 completed
-      if ((data.progress || 0) >= 0.99 && data.status === "running") {
+      if ((data.progress || 0) >= 0.99 && !isTerminalTaskStatus(data.status)) {
         stuckAtFull++;
         if (stuckAtFull >= stuckThreshold) {
           console.warn(`pollTaskUntilTerminal: task ${taskId} stuck at progress=100% for ${stuckAtFull} polls, treating as completed`);
@@ -3846,7 +3851,10 @@ export default function SchemeWorkbenchPage() {
   const [forceFullRepair, setForceFullRepair] = useState(false);
   // ✅ 超字数自动压缩：接通后端早已支持、但前端从未暴露的 auto_shrink_over 能力
   //   （开启后正文生成结束对超目标 130% 的章节自动跑 AI 压缩，只删不改）。
-  const [autoShrinkOver, setAutoShrinkOver] = useState(false);
+  // ✅ R66（2026-10-11）默认改为开：偏差量化证实生成结果系统性超纲
+  //   （均值 137%、57.6% 超 1.3X、零偏低），「偏高永不纠正」是主根因之一；
+  //   与后端「给了档位/覆盖即默认开压缩」的新语义对齐。用户可手动关掉。
+  const [autoShrinkOver, setAutoShrinkOver] = useState(true);
   // F-CONTENT-STANDARD(2026-09-26): 任务级生成标准选择（"inherit" 表示沿用方案/章节默认）
   // 初始值恒为 "inherit"（= 逐章回落），**不**直接选方案默认：若初始就选中
   // precise，会让「按章节设置」在有章节级覆盖的方案里被静默忽略且用户看不出来。
@@ -4763,7 +4771,9 @@ const draftKey = selectedSection && id
             const { data: st } = await tasksApi.status(active.id);
             // ✅ F3：接管期间同步暂停态（后台可能被其他入口暂停/恢复）
             if (takenOver) setTaskPaused(st.status === "paused");
-            if (["completed", "failed", "stopped"].includes(st.status)) {
+            // ✅ 2026-10-10：终态判定改用单一事实源 —— 旧白名单漏了 degraded，
+            //    降级完成的后台任务在这里会被一直判为「仍在跑」。
+            if (isTerminalTaskStatus(st.status)) {
               resetTakeover();
               const ckpt = (st as any).outline_result;
               if (active.task_type === "outline_generation"
@@ -4779,6 +4789,10 @@ const draftKey = selectedSection && id
                 openOutlineGate(ckpt.outline);
               } else if (st.status === "completed") {
                 msg.success("后台任务已完成，正在刷新");
+                load();
+              } else if (st.status === "degraded") {
+                // ✅ 2026-10-10：降级完成同样要刷新（正文已落库），但必须告警
+                msg.warning("后台任务降级完成：一致性修复有失败项，成稿含未修复缺陷");
                 load();
               } else if (st.status === "failed") {
                 msg.error(`后台任务失败：${st.message || ""}`);
@@ -4893,6 +4907,16 @@ const draftKey = selectedSection && id
   //    此函数只依赖 ref 与 msg，可安全 useCallback([])
   const onSseEvent = useCallback((evt: any): boolean => {
     if (evt.task_id) activeTaskIdRef.current = evt.task_id;
+    // ✅ R72（2026-10-12）解析提取链 warning 事件统一消费点。
+    //    目录生成链（§generate_outline）与正文生成链（§generate_content）共用本函数，
+    //    旧实现只认 error：后端为「文档解析被截断、本次生成仅基于已解析部分」下发的
+    //    `event:'warning'` 在此被静默丢弃 → 用户看不见依据不完整（事实链早已本地 pushLog
+    //    消费，目录/正文两链却没有）。与 error 分支对称：warning 不中断流、只 toast 告知，
+    //    故 return false。单点接线覆盖两链，与事实链既有「日志行 + toast」双通道形态一致。
+    if (evt.event === "warning") {
+      msg.warning(evt.message || "存在需人工核对的提示");
+      return false;
+    }
     if (evt.event === "error") {
       msg.error(evt.message || "生成失败");
       // ✅ 修复（2026-10-05 · 正文生成 R-4）：error 事件**也带失败明细**，
@@ -5374,11 +5398,23 @@ const draftKey = selectedSection && id
     await doGenerateOutline();
   };
 
-  /** 计算实际传递给后端的字数预算覆盖值（未选则不覆盖） */
+  /**
+   * ✅ R66（2026-10-11）四档字数控制：档位数值表（与后端真源
+   * content_utils.WORD_BUDGET_TIERS 一致，前端仅用于预估展示）。
+   */
+  const WORD_BUDGET_TIER_VALUES: Record<string, number> = { brief: 800, standard: 1200, detailed: 2000, ultra: 2500 };
+
+  /** 选中档位（brief/standard/detailed/ultra）→ word_budget_tier；其余返回 undefined */
+  function resolveWordBudgetTier(): string | undefined {
+    return ["brief", "standard", "detailed", "ultra"].includes(wordBudgetOption)
+      ? wordBudgetOption
+      : undefined;
+  }
+
+  /** 计算实际传递给后端的字数预算覆盖值（R66 起仅「自定义」走二级总量分配口径；未选则不覆盖） */
   function resolveWordBudgetOverride(): number | undefined {
-    if (wordBudgetOption === "default") return undefined;
     if (wordBudgetOption === "custom") return customWordBudget;
-    return parseInt(wordBudgetOption, 10);
+    return undefined;
   }
 
   /** 收集目标章节的叶子节点信息（用于预估弹窗） */
@@ -5406,6 +5442,9 @@ const draftKey = selectedSection && id
     dfs(nodes);
 
     const wbOverride = resolveWordBudgetOverride();
+    // ✅ R66：档位模式下每个叶子按档位字数预估（与后端 tier 分支同口径）
+    const wbTierValue = resolveWordBudgetTier();
+    const wbTier = wbTierValue ? WORD_BUDGET_TIER_VALUES[wbTierValue] : 0;
     let totalBudget = 0;
     let willOverwrite = 0;
     let missingCount = 0;
@@ -5423,7 +5462,7 @@ const draftKey = selectedSection && id
     // forceRewrite=true 时不过滤
 
     filtered.forEach((l) => {
-      const budget = wbOverride || l.word_budget || 1500;
+      const budget = wbTier || wbOverride || l.word_budget || 1200;
       totalBudget += budget;
       if (hasContent(l)) willOverwrite++;
       missingCount++;
@@ -5459,7 +5498,7 @@ const draftKey = selectedSection && id
       const updatedSection = {
         ...selectedSection,
         content: content,
-        word_count: data.word_count || content.length,
+        word_count: data.word_count ?? 0,
         status: content.trim() ? "generated" : "empty",
       };
       setSelectedSection(updatedSection);
@@ -5467,7 +5506,7 @@ const draftKey = selectedSection && id
       const updateTreeNode = (nodes: TreeNode[]): TreeNode[] =>
         nodes.map((n) =>
           n.key === selectedSection.key
-            ? { ...n, content: content, word_count: data.word_count || content.length,
+            ? { ...n, content: content, word_count: data.word_count ?? 0,
                 status: content.trim() ? "generated" : "empty" }
             : { ...n, children: n.children ? updateTreeNode(n.children) : undefined }
         );
@@ -5574,7 +5613,7 @@ const draftKey = selectedSection && id
   function handleShrinkCurrentSection() {
     if (!id || !selectedSection) return;
     const wc = selectedSection.word_count || 0;
-    const budget = selectedSection.word_budget || 1500;
+    const budget = selectedSection.word_budget || 1200;
     if (wc <= budget) {
       msg.info(`当前字数 ${wc} 未超出目标 ${budget}，无需压缩`);
       return;
@@ -5851,8 +5890,11 @@ const draftKey = selectedSection && id
 
     // 构造请求体
     const body: any = {};
+    // ✅ R66：档位与总量覆盖互斥，档位优先（与后端 if/elif 分支同口径）
+    const wbTier = resolveWordBudgetTier();
+    if (wbTier) body.word_budget_tier = wbTier;
     const wbOverride = resolveWordBudgetOverride();
-    if (wbOverride) body.word_budget_override = wbOverride;
+    if (wbOverride && !wbTier) body.word_budget_override = wbOverride;
     if (extra?.section_id) body.section_id = extra.section_id;
     if (extra?.mode) body.mode = extra.mode;
     body.concurrency = concurrencyOption;
@@ -6039,7 +6081,11 @@ const draftKey = selectedSection && id
           );
         }
 
-        if (evt.event === "completed") {
+        // ✅ 2026-10-10：`degraded` 必须一并收口 —— 后端一致性修复有失败项时
+        //   终态事件名就是 degraded（同语义的加法式终态）。旧实现只认 completed
+        //   ⇒ 降级完成时不 break / 不 load() / 不给任何提示，正文停留在旧内容，
+        //   且成稿含未修复缺陷而用户完全无感（P0-3 的下半截没接到前端）。
+        if (isTerminalContentEvent(evt)) {
           // ✅ 性能优化：终态事件立即 flush，确保 UI 与后续 load() 前的最后一次渲染一致
           batcher.flushNow();
           setProgress(1);
@@ -6051,7 +6097,13 @@ const draftKey = selectedSection && id
           mergeFailedSections(evt.failed_sections);
           finalizeRunningLogs("未完成（生成已结束）", "failed");
           const doneMsg = evt.message || `正文生成完成，总字数 ${evt.word_count || 0}`;
-          if (failedCount > 0) {
+          // ✅ 2026-10-10：降级完成优先于「成功」—— 一致性修复有失败项时，
+          //   成稿可导出但含未修复缺陷，报 success 会让用户误以为一切就绪。
+          const _degradedHint = degradedConsistencyHint(evt);
+          if (_degradedHint) {
+            msg.warning(_degradedHint);
+            setProgressMsg(`${doneMsg} | ${_degradedHint}`);
+          } else if (failedCount > 0) {
             msg.warning(doneMsg + `（${failedCount} 章失败）`);
             setProgressMsg(doneMsg + `（${failedCount} 章失败）`);
           } else {
@@ -6145,6 +6197,10 @@ const draftKey = selectedSection && id
           }
           if (fin?.status === "completed") {
             msg.success("正文生成已在后台完成，正在刷新");
+            load();
+          } else if (fin?.status === "degraded") {
+            // ✅ 2026-10-10：降级完成（一致性修复有失败）也要刷新 + 告警
+            msg.warning("正文生成已在后台降级完成：一致性修复有失败项，成稿含未修复缺陷");
             load();
           } else if (fin?.status === "failed") {
             msg.error(fin.message || "后台任务失败");
@@ -6273,7 +6329,7 @@ const draftKey = selectedSection && id
           setProgress(lastProgress);
           setProgressMsg(evt.message || "");
           pushLog(lastProgress, evt.message || "");
-        } else if (evt.event === "ping") {
+        } else if (evt.event === "stats" || evt.event === "ping") {
           // ✅ P1 修复（2026-09-27 · 心跳统计消费）：后端 facts 链路已接入
           //    stats_provider（sse_handlers.py generate_facts），单段 AI 调用期间
           //    event_stream 挂起无法 yield progress，靠心跳周期推 ping 携带
@@ -6281,6 +6337,15 @@ const draftKey = selectedSection && id
           //    注意：ping **不得**推进 lastProgress 的语义之外的东西，也不写日志
           //    （否则日志行会被心跳刷屏）；仅按单调口径更新进度条与耗时提示。
           //    未知/未来事件一律落到此分支之外被静默忽略，保持向前兼容。
+          //
+          // ✅ 2026-10-12（技术债 P2-11 · 事件名口径对齐）：
+          //    本分支原只认 "ping"，而同一文件的目录生成分支（:5200）与正文生成
+          //    分支（:6022）都是 `"stats" || "ping"` 双认；且后端
+          //    `services/ai/task_registry.py` 的 broadcast 确实会推
+          //    `{"event": "stats", ...}` —— 三处消费同一套 SSE 协议却有两种
+          //    白名单，stats 到达本链路时被静默丢弃（进度条不更新、已用时不动），
+          //    且症状只在这一个入口出现，极易被误判成「后端没推」。
+          //    现与其它两处同口径（纯加法：原本被忽略的事件现在被消费）。
           const p = typeof evt.progress === "number" ? evt.progress : null;
           if (p !== null && p > lastProgress) {
             lastProgress = p;
@@ -7117,7 +7182,7 @@ const draftKey = selectedSection && id
       level: newLevel,
       status: "empty",
       word_count: 0,
-      word_budget: 1500,
+      word_budget: 1200,
       children: [],
     };
     // ✅ BUG 修复（2026-10-07 · 新增节点编号不同步）：新增节点本身不带 outlineId
@@ -7161,7 +7226,7 @@ const draftKey = selectedSection && id
       level: newLevel,
       status: "empty",
       word_count: 0,
-      word_budget: 1500,
+      word_budget: 1200,
       children: [],
     };
     // 插入到参照节点之后（同父层级），保留其余结构
@@ -8131,8 +8196,10 @@ const draftKey = selectedSection && id
         const hit = (data.items || []).find(
           (x: any) => x.section_id === curKey && x.status === "repaired" && x.after);
         if (hit?.after) {
+          // ✅ F2（R71）：不再用 hit.after.length 伪造字符口径当「字」；
+          //    保留章节原 word_count，下方 load() 随即回拉后端权威字数（一帧自纠）。
           setSelectedSection((prev: any) => (prev && prev.key === curKey
-            ? { ...prev, content: hit.after, word_count: hit.after.length, status: "generated" }
+            ? { ...prev, content: hit.after, status: "generated" }
             : prev));
         }
       }
@@ -8696,18 +8763,22 @@ exportPctRef.current = pct;
   }, []);
   // 图表 AI 修复回写：用 selectedSectionRef 读最新选中章节，避免闭包捕获旧值
   // （与文件内既有 selectedSectionRef / treeRef 镜像模式一致）
-  const sectionChartFixed = useCallback((newContent: string) => {
+  const sectionChartFixed = useCallback((newContent: string, wordCount?: number) => {
     const sec = selectedSectionRef.current;
     if (!sec) return;
-    const wc = newContent.length;
+    // ✅ F2（R71）：图表修复后端已重写正文并回带权威 word_count（fix-mermaid 响应），
+    //    优先用后端值；老后端未回带时保留章节原字数，绝不用 newContent.length 伪造字符口径。
+    const hasWc = typeof wordCount === "number";
     const patchNode = (nodes: TreeNode[]): TreeNode[] =>
       nodes.map((n) =>
         n.key === sec.key
-          ? { ...n, content: newContent, word_count: wc }
+          ? { ...n, content: newContent, ...(hasWc ? { word_count: wordCount } : {}) }
           : { ...n, children: n.children ? patchNode(n.children) : undefined }
       );
     setSelectedSection((prev: any) =>
-      prev && prev.key === sec.key ? { ...prev, content: newContent, word_count: wc } : prev
+      prev && prev.key === sec.key
+        ? { ...prev, content: newContent, ...(hasWc ? { word_count: wordCount } : {}) }
+        : prev
     );
     setTree((prev) => patchNode(prev));
   }, []);
@@ -8976,11 +9047,25 @@ exportPctRef.current = pct;
             <Upload
               accept={UPLOAD_FILE_ACCEPT}
               beforeUpload={(file) => {
-                if (file.size > resolveMaxUploadBytes(maxUploadBytes)) {
-                  msg.error(`文件过大，请上传 ${formatUploadLimitMb(maxUploadBytes)} 以内的文件`);
+                // ✅ 2026-10-10（FIX-2 类型预检）：accept 只过滤文件选择框，拖拽可
+                //    绕过。与链① UploadParseTab 同口径，先按扩展名白名单 + 大小
+                //    上限拦截，避免非法文件整份传完才被后端 400 拒绝。
+                const { accepted, rejected } = partitionUploadFiles(
+                  [file], resolveMaxUploadBytes(maxUploadBytes));
+                if (rejected.length > 0) {
+                  const byType = rejected.filter((r) => r.reason === "type");
+                  const bySize = rejected.filter((r) => r.reason === "size");
+                  if (byType.length > 0) {
+                    msg.error(
+                      `不支持的文件类型，已忽略：${byType.map((r) => r.file.name).join("、")}`
+                    );
+                  }
+                  if (bySize.length > 0) {
+                    msg.error(`文件过大，请上传 ${formatUploadLimitMb(maxUploadBytes)} 以内的文件`);
+                  }
                   return false;
                 }
-                handleUploadParseOutline(file);
+                handleUploadParseOutline(accepted[0]);
                 return false; // 阻止自动上传
               }}
               showUploadList={false}
@@ -10407,6 +10492,9 @@ exportPctRef.current = pct;
           auto_rewrite_content: false,
           auto_fix_unclosed_fences: false,
           heading_border: false,
+          // ✅ 2026-10-11（《文档生成规则》4.2 导出标准）：版式预设，
+          //    缺省 "" = 不启用，产物与本轮之前逐字一致（向后兼容）。
+          layout_preset: "",
         }}>
           {/* ✅ 导出格式预设库：同项目排版格式一键复用（对标 OpenBidKit exportFormatPresets） */}
           <Card size="small" style={{ marginBottom: 8 }} title="格式预设">
@@ -10773,6 +10861,22 @@ exportPctRef.current = pct;
                           { label: "1.5 倍（推荐）", value: 1.5 },
                           { label: "1.75 倍", value: 1.75 },
                           { label: "双倍 (2.0)", value: 2 },
+                        ]} />
+                      </Form.Item>
+                    </Col>
+                    {/* ✅ 新增（2026-10-11 · 《文档生成规则》4.2 导出标准）：版式预设，
+                        一键整体切换行距 + 四边距；已在「正文样式」里手动细调的
+                        边距值不被预设强改（后端 _resolve_layout_preset 补缺不覆盖）。 */}
+                    <Col span={12}>
+                      <Form.Item
+                        name="layout_preset"
+                        label="版式预设"
+                        style={{ marginBottom: 8 }}
+                        tooltip="选择后整体应用配套的正文行距与页边距（如工程公文：上下 2.54cm / 左右 3.18cm / 1.5 倍行距）。默认「不启用」，产物版式与既往完全一致；你在「页边距」里显式改过的数值不会被预设覆盖。"
+                      >
+                        <Select size="small" allowClear options={[
+                          { label: "不启用（保持标准版式）", value: "" },
+                          { label: "工程公文（上下2.54 / 左右3.18 / 1.5倍）", value: "engineering" },
                         ]} />
                       </Form.Item>
                     </Col>

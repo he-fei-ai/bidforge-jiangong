@@ -6,8 +6,15 @@ import {
   SaveOutlined, PlusOutlined, ArrowUpOutlined, ArrowDownOutlined,
 } from "@ant-design/icons";
 import { outlineLibraryApi, uploadOutlineApi } from "../api";
+// ✅ R72（2026-10-12）：复用工作台导出的「识别结果诊断」纯函数（单一事实口径）。
+//    旧弹窗自己只读 data.outline / data.file_name，空识别结果（扫描件无 OCR）
+//    会无条件 setTree([]) 覆盖用户当前目录树并谎报「识别完成：0 个章节」，
+//    与工作台 summarizeUploadOutlineResult 早已确立的「空结果不替换树 + 如实
+//    回传原因」口径割裂。现两处共用同一折算，不再各写一份。
+//    （SchemeWorkbenchPage 不 import 本弹窗 → 无循环依赖；测试也从同一页面取该函数）
+import { summarizeUploadOutlineResult } from "../pages/SchemeWorkbenchPage";
 import { useAntdMessageHub } from "../utils/activityCenter";
-import { UPLOAD_FILE_ACCEPT, resolveMaxUploadBytes, formatUploadLimitMb } from "../utils/uploadAccept";
+import { UPLOAD_FILE_ACCEPT, partitionUploadFiles, resolveMaxUploadBytes, formatUploadLimitMb } from "../utils/uploadAccept";
 import { MAX_OUTLINE_DEPTH } from "../utils/outlineConstants";
 
 const { Text } = Typography;
@@ -470,23 +477,23 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
     const hide = msg.loading("正在解析文件并识别目录...", 0);
     try {
       const { data } = await uploadOutlineApi.parse(file);
-      const outline = data.outline || [];
-      const imported = importToTree(outline);
+      // ✅ R72（2026-10-12）：结果诊断收口为纯函数，与工作台同一口径。
+      //    空识别结果（nodeCount===0）：ok=false，绝不清空用户当前目录树，
+      //    只如实回传后端给出的原因（扫描件缺 OCR / 格式不支持 / 文件损坏）。
+      const summary = summarizeUploadOutlineResult(data);
+      if (!summary.ok) {
+        for (const n of summary.notices) msg.warning(String(n));
+        msg.warning(summary.message);
+        return;
+      }
+      const imported = importToTree(summary.outline);
       setTree(imported);
       setExpandedKeys(collectAllKeys(imported));
       setSelectedKey(null);
       setActiveTab("outline");
-      msg.success(`识别完成：${data.file_name}，共 ${countNodes(imported)} 个章节`);
-      // ✅ 修复（2026-09-18）：解析诊断必须回显。旧实现只取 data.outline / data.file_name，
-      //    对后端已回传的 parse_warnings / empty_text / raw_text_truncated 全部忽略 ——
-      //    从目录库导入扫描件或超长文件时，用户看到「识别完成」却收不到
-      //    「内容可能不完整 / 未解析到文本」提示，与工作台内上传路径体验割裂。
-      if (data.empty_text) {
-        msg.warning("未从文件中解析到有效文本（可能是空白文件、扫描件或已损坏），识别结果可能为空");
-      } else if (data.raw_text_truncated) {
-        msg.warning("原文过长，保存记录时已截断（不影响目录识别结果）");
-      }
-      for (const w of (data.parse_warnings || [])) msg.warning(String(w));
+      // 非空但内容不完整（截断 / 解析告警 / 归位统计）：逐条如实告知，不阻断
+      for (const n of summary.notices) msg.info(String(n));
+      msg.success(summary.message);
     } catch (e: any) {
       msg.error(e.message || "文件识别失败");
     } finally {
@@ -631,11 +638,25 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
             <Upload
               accept={UPLOAD_FILE_ACCEPT}
               beforeUpload={(file) => {
-                if (file.size > resolveMaxUploadBytes(maxUploadBytes)) {
-                  msg.error(`文件过大，请上传 ${formatUploadLimitMb(maxUploadBytes)} 以内的文件`);
+                // ✅ 2026-10-10（FIX-2 类型预检）：accept 只过滤文件选择框，拖拽可
+                //    绕过。与工作台上传入口同口径，先按扩展名白名单 + 大小上限
+                //    拦截，避免非法文件整份传完才被后端 400 拒绝。
+                const { accepted, rejected } = partitionUploadFiles(
+                  [file], resolveMaxUploadBytes(maxUploadBytes));
+                if (rejected.length > 0) {
+                  const byType = rejected.filter((r) => r.reason === "type");
+                  const bySize = rejected.filter((r) => r.reason === "size");
+                  if (byType.length > 0) {
+                    msg.error(
+                      `不支持的文件类型，已忽略：${byType.map((r) => r.file.name).join("、")}`
+                    );
+                  }
+                  if (bySize.length > 0) {
+                    msg.error(`文件过大，请上传 ${formatUploadLimitMb(maxUploadBytes)} 以内的文件`);
+                  }
                   return false;
                 }
-                handleImportOutline(file);
+                handleImportOutline(accepted[0]);
                 return false;
               }}
               showUploadList={false}

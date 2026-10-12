@@ -19,10 +19,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.config import settings
+from app.services.content_plan import plan_section_content, render_content_plan_guidance
+from app.services import facts_extractor as _fe
 from app.db import get_conn, get_db, get_read_conn, release_read_conn, safe_rowcount, settle_global_conn
 from app.routers._chart_pipeline import (
     _load_scheme_type_counts,
     apply_inline_chart_plan,
+    build_chart_quota_hint,
     build_inline_chart_plan,
     chart_drop_label,
     count_inline_charts,
@@ -81,9 +84,12 @@ from app.services.content_polish import quality_issues, sanitize_ai_content
 # ✅ 2026-09-28（T-1 收口）：章节运行时纯函数（user 上下文 / 续写 messages /
 #    轮次判定 / token 折算），原 generate_content 内联实现逐字搬迁至此。
 from app.services.content_runtime import (
+    build_chapter_extras_block,
+    build_chapter_layered_messages,
     build_chapter_user_content,
     build_continuation_messages,
     continue_max_tokens,
+    resolve_system_variables,
     should_continue_round,
 )
 from app.services.content_shrink import (
@@ -96,11 +102,13 @@ from app.services.content_standard import (
     PRECISE,
     build_system_block,
     normalize_standard,
+    paragraph_structure_report,
     resolve_effective_standard,
     standard_report,
 )
 from app.services.content_utils import (
     DEFAULT_WORD_BUDGET,
+    LEAF_MIN_WORD_BUDGET,
     WORD_OVER_RATIO,
     WORD_UNDER_RATIO,
     auto_fix_unclosed_fences,
@@ -110,8 +118,12 @@ from app.services.content_utils import (
     normalize_word_budget_override,
     order_sections_dfs,
     resolve_concurrency,
+    resolve_word_budget_tier,
     select_target_leaves,
     text_word_count,
+    word_audit_summary,
+    word_closeout_notice,
+    word_deviation_of,
     word_status_for,
 )
 
@@ -128,6 +140,8 @@ from app.services.facts_builder import (  # noqa: E402
     _load_facts_rows,
     _render_facts_text,
     build_facts_text,
+    core_facts_rows,
+    exclude_rows,
 )
 
 # ✅ 编号统一（2026-09-25）：收敛到 services/numbering —— 目录编号的唯一事实源。
@@ -202,6 +216,12 @@ OUTLINE_FIX_MAX_TOKENS = int(settings.outline_fix_max_tokens) or None
 #    「一级 → 逐章二三级 → 审核」分步链路。一次性直出 5 万字以上方案的
 #    完整三级目录，输出体量过大、弱模型下极易被截断或超时。
 OUTLINE_STEPWISE_MIN_WORDS = max(1, int(settings.outline_stepwise_min_words))
+
+# ✅ R58（2026-10-10）：短方案一次性直出失败时是否切换分步链路（见上方配置项）。
+#    与 OUTLINE_STEPWISE_MIN_WORDS 一样在 import 期固化 —— 测试请 monkeypatch
+#    本常量（改 settings 实例对已导入的模块无效）。
+OUTLINE_ONESHOT_FALLBACK = bool(
+    getattr(settings, "outline_oneshot_fallback_stepwise", True))
 # ✅ 审核提示词的节点预算：超出部分不送入审核（避免 token 爆炸）。
 #    按前序优先保留，一级/二级轮廓始终完整。
 OUTLINE_REVIEW_MAX_NODES = 150
@@ -314,30 +334,25 @@ CONTENT_TEMPERATURE = settings.content_temperature
 #    2) 按阶段权重折算的**平滑总进度**（进行中章节也贡献部分进度）；
 #    3) 心跳通道周期性推送 stats（已耗时 / 进行中章节 / 累计字数 / ETA）。
 # 章节生成阶段的进度上限：其余区间留给全文一致性扫描与定向修复。
-_SECTION_PHASE_MAX = 0.95
-# 章节内阶段进度模型（折算「进行中章节」贡献的部分进度）：
-#   base   进入该阶段时「本章已完成」的比例 —— 累积值，保证阶段间单调递增
-#   span   该阶段自身占本章的比例（各 span 合计 = 1.0）
-#   expect 该阶段的预期耗时（秒），用于阶段内按已耗时做渐近填充
-# ✅ 为什么需要 base/span/expect 三件套：只给「阶段权重」无法保证单调
-#    （continue 0.30 < draft 0.55 会让进度倒退）；只给累积基准值又会让耗时最长
-#    的 draft 阶段整段纹丝不动。base + span + 按时间渐近填充同时解决这两点。
-_STAGE_MODEL = {
-    "context":  {"base": 0.00, "span": 0.05, "expect": 3.0},
-    "draft":    {"base": 0.05, "span": 0.55, "expect": 90.0},
-    "continue": {"base": 0.60, "span": 0.30, "expect": 60.0},
-    "persist":  {"base": 0.90, "span": 0.10, "expect": 12.0},
-}
-# 阶段内渐近填充上限：只填到 span 的 85%，给「阶段完成」留出可见的跳变
-_STAGE_FILL_MAX = 0.85
-_STAGE_LABELS = {
-    "context": "构建上下文",
-    "draft": "AI 生成中",
-    "continue": "续写扩充中",
-    "persist": "清洗与落库",
-}
-# AI 长调用期间推送运行统计的间隔（秒）
-_STATS_PUSH_INTERVAL = 3.0
+# ✅ 收敛（2026-10-12 · 技术债清单 P0-1 · 进度模型常量单一事实源）：
+#    进度模型 2026-09-21 已从本文件抽到 ``services/content_progress.py``，但
+#    ``_STAGE_MODEL`` / ``_STAGE_FILL_MAX`` / ``_STAGE_LABELS`` /
+#    ``_SECTION_PHASE_MAX`` / ``_STATS_PUSH_INTERVAL`` 五个常量在**抽离后又各
+#    自重新定义了一份**（数值此刻仍逐字相同，属「已漂移但尚未分叉」的中间态）。
+#    风险正是本仓反复记录的：调 progress 的人改 content_progress、调 SSE 的人
+#    改本文件，两边都「看起来生效」，实际只有一半链路生效。
+#    现改为 import 别名 —— 保留 ``_`` 前缀名（既有调用点与单测
+#    ``tests/test_content_progress.py`` / ``test_content_deep_audit_20260923.py``
+#    均按此名导入，故兼容不变），值由 content_progress 单一持有。
+#    ⚠️ 注意：monkeypatch 本模块的 ``_STAGE_MODEL`` 只会影响本模块引用；
+#    要改全局应 patch ``app.services.content_progress.STAGE_MODEL``。
+from app.services.content_progress import (  # noqa: E402
+    SECTION_PHASE_MAX as _SECTION_PHASE_MAX,
+    STAGE_FILL_MAX as _STAGE_FILL_MAX,
+    STAGE_LABELS as _STAGE_LABELS,
+    STAGE_MODEL as _STAGE_MODEL,
+    STATS_PUSH_INTERVAL as _STATS_PUSH_INTERVAL,
+)
 
 # ✅ 阶段耗时在线校准（2026-09-15 增强 · 承接上一轮报告遗留建议 #1+#3）：
 #    _STAGE_MODEL.expect 是出厂经验值（draft 90s / continue 60s），与具体模型、
@@ -592,8 +607,18 @@ def _word_budget_hint(word_budget: int) -> str:
         b = 0
     if b <= 0:
         return ""
-    return (f"{b}字（可接受 0.9~1.1 倍即 {int(b * 0.9)}~{int(b * 1.1)} 字；"
-            f"硬上限 {int(b * 1.2)} 字，超出即视为不合格）")
+    # ✅ R66（2026-10-11）：容差带由 settings.word_budget_tolerance 驱动。
+    #    默认 0.1 时 1-0.1==0.9 / 1+0.1==1.1 / 1+2*0.1==1.2（IEEE754 逐位相等），
+    #    文案与历史硬编码「0.9~1.1 倍 … 硬上限 1.2X」逐字节一致。
+    try:
+        tol = abs(float(getattr(settings, "word_budget_tolerance", 0.1)))
+    except (TypeError, ValueError):
+        tol = 0.1
+    lo = 1.0 - tol
+    hi = 1.0 + tol
+    hard = 1.0 + 2.0 * tol
+    return (f"{b}字（可接受 {lo:.1f}~{hi:.1f} 倍即 {int(b * lo)}~{int(b * hi)} 字；"
+            f"硬上限 {int(b * hard)} 字，超出即视为不合格）")
 
 
 def _should_auto_shrink(content: str, word_budget: int,
@@ -1021,7 +1046,7 @@ def _budgeted_truncate_sections(text: str, budget: int) -> tuple[str, dict]:
 async def _load_knowledge_rows(db, scheme_id: str) -> list[dict]:
     """加载方案可用的知识库条目行（专属 + 项目共享），一次查询供逐章内存过滤。"""
     try:
-        cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
+        cur = await db.execute(_fe.SCHEME_PROJECT_ID_SQL, (scheme_id,))
         row = await cur.fetchone()
         project_id = row["project_id"] if row else ""
         if not project_id:
@@ -2153,17 +2178,26 @@ def _attach_quality_report(outline: list, basis, review_obj: dict) -> dict:
         from app.services.outline_quality import (
             analyze_name_coverage,
             check_outline_continuity,
+            check_structure_standards,
             find_redundant_titles,
             render_continuity_notice,
             render_coverage_notice,
+            render_structure_notice,
         )
         cont = check_outline_continuity(outline)
         cov = analyze_name_coverage(basis, outline)
         redundant = find_redundant_titles(basis, outline) if cov.get("evaluated") else []
+        # ✅ 2026-10-11（引入《文档生成规则分析与软件标准建立》目录结构规范）：
+        #    章数 5-10 / 每章二级节数 2-15 / 深度 ≤4 的**建议性**核对。
+        #    只进 quality 报告与本行日志，不进 issues、不改 cont["ok"]、
+        #    不塞 suggestions（微型方案章数少于 5 属合法形态，阻断即误伤）。
+        struct = check_structure_standards(outline)
         report = {
             "continuity": {"ok": cont.get("ok"), "nodes": cont.get("nodes"),
                            "max_level": cont.get("max_level"),
-                           "issue_counts": cont.get("issue_counts")},
+                           "issue_counts": cont.get("issue_counts"),
+                           "generic_titles": cont.get("generic_titles") or []},
+            "structure": struct,
             "name_coverage": {
                 "evaluated": cov.get("evaluated"), "covered": cov.get("covered"),
                 "total_items": cov.get("total_items"),
@@ -2173,6 +2207,9 @@ def _attach_quality_report(outline: list, basis, review_obj: dict) -> dict:
         }
         if not cont.get("ok"):
             logger.warning("目录连续性校验未通过：%s", render_continuity_notice(cont))
+        _struct_notice = render_structure_notice(struct)
+        if _struct_notice:
+            logger.info("%s（仅建议，不阻断）", _struct_notice)
         if cov.get("evaluated") and cov.get("missing"):
             logger.warning("目录全面性校验：%s", render_coverage_notice(cov["missing"]))
         if redundant:
@@ -2895,6 +2932,27 @@ async def _review_and_fix_outline(
     # ✅ BUG 修复：统一把 passed / suggestions 归一化为 bool / list[str]
     #（字符串 "false" 不再被当作通过；字符串 suggestions 不再被按字符拆分）
     suggestions = _coerce_suggestions(review_obj.get("suggestions"))
+    # ✅ 2026-10-10（目录占位/泛化标题收口）：AI 审核可能漏报泛化占位标题与
+    #    「（N）」编号冲突后缀（生产实证「专项6」「总体实施策划（2）」）。
+    #    此处程序化兜底：检出即追加针对性修复建议并强制进入修复链路，让
+    #    outline_feedback_system 重写为具体到施工对象/部位/工序的真实标题。
+    _generic_hits = []
+    if getattr(settings, "outline_check_generic_titles", True):
+        try:
+            from app.services.outline_quality import detect_generic_titles
+            _generic_hits = detect_generic_titles(outline)
+        except Exception as _ge:  # 防御：检测异常绝不阻断修复主流程
+            logger.warning("目录泛化标题检测异常（忽略）: %s", _ge, exc_info=True)
+    if _generic_hits:
+        _generic_sugg = [
+            f"标题「{g['title']}」（路径{g['path']}，类型{g['kind']}）为泛化/占位名称"
+            f"或带（N）编号冲突后缀，请改为具体到施工对象/部位/工序的真实标题，"
+            f"并去除（N）类后缀"
+            for g in _generic_hits[:12]
+        ]
+        suggestions = suggestions + _generic_sugg
+        review_obj["passed"] = False
+        logger.info("目录检出 %d 处泛化/占位标题，强制进入修复链路", len(_generic_hits))
     # ✅ 审核判定收紧（原实现 default=True 语义过宽）：
     #    模型漏填 passed 时，旧逻辑一律「视为通过」→ 审核形同虚设。
     #    现区分三种情形：
@@ -3481,6 +3539,11 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
             "basis_obj": _scheme_basis_obj(scheme),
             "standards_text": _outline_standards_text(scheme),
             "_audit_outline_inputs": await _outline_input_audit(db, project_id),
+            # ✅ 断链修复（R72 · 2026-10-12）：上方 L3426 已把「用了被截断的文档」
+            #    采集进 _truncated_docs，注释承诺「把清单带到事件流」，但装配重构
+            #    （移入 _assemble_context）时把 yield 点丢了 —— 清单只落日志不进
+            #    SSE。现补进装配产物，由 event_stream 解包后以 warning 事件显式告知。
+            "truncated_docs": list(_truncated_docs),
         }
 
     async def event_stream():
@@ -3518,6 +3581,9 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
         standards_text = _assembled.get("standards_text", "")
         _audit_outline_inputs = _assembled.get("_audit_outline_inputs", "")
         is_dangerous = bool(_assembled.get("is_dangerous"))
+        # ✅ 断链修复（R72）：装配阶段采集的被截断文档清单，解包后由下方
+        #    warning 事件显式告知用户（依据不完整 → 目录可能漏后段章节）。
+        _trunc_docs = _assembled.get("truncated_docs", [])
         # ✅ 修复内存泄漏：事件直接 yield，不再 subscribe 未消费的队列
         try:
             async def _push_stats():
@@ -3555,6 +3621,17 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
             yield f"data: {json.dumps({'event':'connecting','task_id':task_id,'progress':0.05,'message':'正在连接 AI...'}, ensure_ascii=False)}\n\n"
             _prog["last_p"] = 0.05
 
+            # ✅ 断链修复（R72 · 2026-10-12）：依据不完整必须显式告知（与
+            #    generate_facts 截断 warning 同一口径）。旧实现在装配阶段采集了
+            #    被截断文档清单，却从未进事件流，用户看不到「目录可能漏后段章节」。
+            if _trunc_docs:
+                _td_msg = (f"⚠️ {len(_trunc_docs)} 份文档解析不完整"
+                           f"（内容被截断）：{'、'.join(_trunc_docs[:5])}"
+                           + ("等" if len(_trunc_docs) > 5 else "")
+                           + "；本次目录生成仅基于已解析到的部分，"
+                             "可能漏掉后段章节，建议拆分文件后重新上传并解析")
+                yield f"data: {json.dumps({'event':'warning','task_id':task_id,'message':_td_msg}, ensure_ascii=False)}\n\n"
+
             # ✅ 防御（2026-09-19 · 目录生成深度审查）：schemes.word_budget 虽有
             #    DEFAULT 30000，但历史行 / 直接改库 / 副本导入等场景下仍可能为
             #    NULL 或字符串。旧实现 `scheme.get("word_budget", 30000)` 在键存在
@@ -3568,6 +3645,10 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
             use_stepwise = word_budget > OUTLINE_STEPWISE_MIN_WORDS
             _prog["stepwise"] = use_stepwise
 
+            # ✅ R58（2026-10-10）：一次性直出的**结果标志**。
+            #    True = 拿到可用目录，走原收尾；False = 失败且不值得硬失败，
+            #    落到下方分步块（该块变量在入口就地初始化，天然可重入）。
+            _one_shot_ok = True
             if not use_stepwise:
                 await wait_resume(task_id)
                 if is_stopped(task_id):
@@ -3608,87 +3689,130 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
 
                 # ✅ 进度增强：目录 AI 调用最长 180s，期间用 _await_with_stats
                 #    每 3s 推送一次 stats（已耗时 / ETA / 当前阶段），进度条不再静止。
-                obj, raw = await _await_with_stats(
-                    collect_json_response(
-                        messages, _outline_validate_fn,
-                        timeout=OUTLINE_REQUEST_TIMEOUT,
-                        json_mode=True, temperature=0.2, scene="outline_draft",
-                        repair_key=OUTLINE_REPAIR_KEY),
-                    _push_stats, task_id=task_id)
-                outline = obj.get("outline", [])
-                if not outline:
-                    await finish_task(task_id, "failed", "AI 返回空目录")
-                    yield f"data: {json.dumps({'event':'error','task_id':task_id,'message':'AI 返回空目录，请重试'}, ensure_ascii=False)}\n\n"
-                    return
-                # ✅ 目录限三级：硬性裁剪 + 统一重排编号/补全 children（提示词约束外的兜底保障）
-                # ✅ 清理：此处原有函数内的 `from app.services.outline_utils import
-                #    normalize_outline`（与模块顶部导入重复，徒增阅读干扰）
-                outline = normalize_outline(outline)
-                # ✅ 防御：模型返回的节点全非法（字符串/数字等）时裁剪后为空树，
-                #    旧实现会把空目录带进审核（"目录为空，无法审核"）并 completed，
-                #    前端只能显示"AI 返回空目录"。这里显式 failed，错误归因更准确。
-                if not outline:
-                    await finish_task(task_id, "failed", "AI 返回目录节点格式非法（裁剪后为空）")
-                    yield f"data: {json.dumps({'event':'error','task_id':task_id,'message':'AI 返回目录节点格式非法，请重试'}, ensure_ascii=False)}\n\n"
-                    return
-
-                _prog["nodes"] = _count_nodes(outline)
-                _partial_holder["outline"] = outline   # 断线兜底：短方案成果同样可恢复
-                # ✅ 短方案一次性直出也实时推送 outline，保证「目录树」在生成阶段即同步更新
-                #    （长方案分步路径已在每章 progress 事件中携带 outline，此处补齐短方案的一致性）
-                yield await _set_phase("draft", "目录已生成，正在构建目录树...",
-                                       force=0.55, extra={"outline": outline})
-
-                await wait_resume(task_id)
-                if is_stopped(task_id):
-                    yield await _finish_stopped_with_partial(task_id, _partial_holder)
-                    return
-
-                yield await _set_phase("review", "目录生成完成，正在审核...")
-
-                await wait_resume(task_id)
-                if is_stopped(task_id):
-                    yield await _finish_stopped_with_partial(task_id, _partial_holder)
-                    return
-
-                outline, review_obj = await _review_and_fix_outline(
-                    outline, scheme.get("type", ""), is_dangerous, project_brief,
-                    scheme_name=scheme.get("name", ""),
-                    project_facts=project_facts,
-                    requirements=requirements_text,
-                    construction_scope=construction_scope,
-                    scheme_basis=scheme_basis,
-                    basis=basis,
-                    phase_cb=_outline_phase_cb)
-                # ✅ 生成后自动校验（要求三/四）：连续性 + 全面性 + 冗余，
-                #    结果进日志与 review 载荷，前端"审核结论"可见。
-                _attach_quality_report(outline, basis, review_obj)
-                # ✅ 断线兜底用「修复后」的成果（审核补齐的章节不应在断线恢复时丢掉）
-                _partial_holder["outline"] = outline
-
-                await update_progress(task_id, 1.0, "目录生成完成", event="completed")
-                _short_payload = {'event': 'completed', 'task_id': task_id,
-                                  'outline': outline, 'review': review_obj}
-                # ✅ 收尾顺序统一（2026-09-16）：先落 checkpoint → 再置终态 → 最后
-                #    yield 事件。旧实现是 yield 完才 finish_task —— 前端收到
-                #    completed 后立即 break/断开连接时，生成器被 aclose，
-                #    finally 兜底会把**已成功完成**的任务标记成 "stopped"
-                #   （活动中心/任务列表显示"客户端断开，任务已终止"），与真实结果矛盾。
                 try:
-                    await _save_outline_checkpoint(task_id, _short_payload)
-                except Exception:
-                    logger.warning("检查点写入失败（task=%s · 目录生成 · 终态成果）", task_id, exc_info=True)
-                await finish_task(task_id, "completed", "目录生成完成")
-                # ✅ BUG 修复（2026-09-16 · 依据运行库最近一次任务记录）：
-                #    此处曾误写旧变量名 `_partial`（本轮改名 _partial_holder 时漏改），
-                #    短方案链路生成成功后在收尾处抛
-                #      NameError: name '_partial' is not defined
-                #    → 被外层 except 捕获并把任务置为 failed，前端收到 error 事件而
-                #    **拿不到一级目录确认闸门**（目录其实已生成、checkpoint 也已落库）。
-                #    实测：task_registry 最新一条 outline_generation 即为此故障。
-                _partial_holder["outline"] = []
-                yield f"data: {json.dumps(_short_payload, ensure_ascii=False)}\n\n"
-            else:
+                    obj, raw = await _await_with_stats(
+                        collect_json_response(
+                            messages, _outline_validate_fn,
+                            timeout=OUTLINE_REQUEST_TIMEOUT,
+                            json_mode=True, temperature=0.2, scene="outline_draft",
+                            repair_key=OUTLINE_REPAIR_KEY),
+                        _push_stats, task_id=task_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    # ✅ R58：一次性直出失败（ValueError / 超时 / 连接错误等）
+                    #    → 不硬失败，转分步链路。
+                    #    ⚠️ 配额/限流/认证/模型不存在类错误**不切**分步 ——
+                    #    分步会按「一级 + 逐章」发起十几次调用，在注定失败的错误
+                    #    上全白烧；与 _fetch_chapter_children 的既有判据同口径。
+                    if OUTLINE_ONESHOT_FALLBACK and not _is_quota_error(e):
+                        logger.warning(
+                            "目录一次性生成失败（task=%s），切换分步链路：%s",
+                            task_id, e)
+                        await update_progress(
+                            task_id, _prog["last_p"],
+                            "一次性生成未完成，正在切换分步生成")
+                        _one_shot_ok = False
+                    else:
+                        raise
+                # ✅ R58（2026-10-10）：while + break 结构 —— 任一失败点
+                #    直接跳出，落到下方「分步」块，而不是 finish_task failed。
+                #    成功路径末尾 return，与原来 if/else 互斥语义一致。
+                while _one_shot_ok:
+                    outline = obj.get("outline", [])
+                    if not outline:
+                        logger.warning("目录一次性直出返回空目录（task=%s），切换分步链路", task_id)
+                        await update_progress(
+                            task_id, _prog["last_p"],
+                            "一次性生成未完成，正在切换分步生成")
+                        _one_shot_ok = False
+                        break
+                    # ✅ 目录限三级：硬性裁剪 + 统一重排编号/补全 children（提示词约束外的兜底保障）
+                    # ✅ 清理：此处原有函数内的 `from app.services.outline_utils import
+                    #    normalize_outline`（与模块顶部导入重复，徒增阅读干扰）
+                    outline = normalize_outline(outline)
+                    # ✅ 防御：模型返回的节点全非法（字符串/数字等）时裁剪后为空树，
+                    #    旧实现会把空目录带进审核（"目录为空，无法审核"）并 completed，
+                    #    前端只能显示"AI 返回空目录"。这里显式 failed，错误归因更准确。
+                    if not outline:
+                        logger.warning("目录一次性直出节点全非法（task=%s），切换分步链路", task_id)
+                        await update_progress(
+                            task_id, _prog["last_p"],
+                            "一次性生成未完成，正在切换分步生成")
+                        _one_shot_ok = False
+                        break
+
+                    _prog["nodes"] = _count_nodes(outline)
+                    _partial_holder["outline"] = outline   # 断线兜底：短方案成果同样可恢复
+                    # ✅ 短方案一次性直出也实时推送 outline，保证「目录树」在生成阶段即同步更新
+                    #    （长方案分步路径已在每章 progress 事件中携带 outline，此处补齐短方案的一致性）
+                    yield await _set_phase("draft", "目录已生成，正在构建目录树...",
+                                           force=0.55, extra={"outline": outline})
+
+                    await wait_resume(task_id)
+                    if is_stopped(task_id):
+                        yield await _finish_stopped_with_partial(task_id, _partial_holder)
+                        return
+
+                    yield await _set_phase("review", "目录生成完成，正在审核...")
+
+                    await wait_resume(task_id)
+                    if is_stopped(task_id):
+                        yield await _finish_stopped_with_partial(task_id, _partial_holder)
+                        return
+
+                    outline, review_obj = await _review_and_fix_outline(
+                        outline, scheme.get("type", ""), is_dangerous, project_brief,
+                        scheme_name=scheme.get("name", ""),
+                        project_facts=project_facts,
+                        requirements=requirements_text,
+                        construction_scope=construction_scope,
+                        scheme_basis=scheme_basis,
+                        basis=basis,
+                        phase_cb=_outline_phase_cb)
+                    # ✅ 生成后自动校验（要求三/四）：连续性 + 全面性 + 冗余，
+                    #    结果进日志与 review 载荷，前端"审核结论"可见。
+                    _attach_quality_report(outline, basis, review_obj)
+                    # ✅ 断线兜底用「修复后」的成果（审核补齐的章节不应在断线恢复时丢掉）
+                    _partial_holder["outline"] = outline
+
+                    await update_progress(task_id, 1.0, "目录生成完成", event="completed")
+                    _short_payload = {'event': 'completed', 'task_id': task_id,
+                                      'outline': outline, 'review': review_obj}
+                    # ✅ 收尾顺序统一（2026-09-16）：先落 checkpoint → 再置终态 → 最后
+                    #    yield 事件。旧实现是 yield 完才 finish_task —— 前端收到
+                    #    completed 后立即 break/断开连接时，生成器被 aclose，
+                    #    finally 兜底会把**已成功完成**的任务标记成 "stopped"
+                    #   （活动中心/任务列表显示"客户端断开，任务已终止"），与真实结果矛盾。
+                    try:
+                        await _save_outline_checkpoint(task_id, _short_payload)
+                    except Exception:
+                        logger.warning("检查点写入失败（task=%s · 目录生成 · 终态成果）", task_id, exc_info=True)
+                    await finish_task(task_id, "completed", "目录生成完成")
+                    # ✅ BUG 修复（2026-09-16 · 依据运行库最近一次任务记录）：
+                    #    此处曾误写旧变量名 `_partial`（本轮改名 _partial_holder 时漏改），
+                    #    短方案链路生成成功后在收尾处抛
+                    #      NameError: name '_partial' is not defined
+                    #    → 被外层 except 捕获并把任务置为 failed，前端收到 error 事件而
+                    #    **拿不到一级目录确认闸门**（目录其实已生成、checkpoint 也已落库）。
+                    #    实测：task_registry 最新一条 outline_generation 即为此故障。
+                    _partial_holder["outline"] = []
+                    yield f"data: {json.dumps(_short_payload, ensure_ascii=False)}\n\n"
+                    return
+            if use_stepwise or not _one_shot_ok:
+                if not _one_shot_ok:
+                    # ✅ 切档准备（仅一次性失败时才需要）：
+                    #    ① 进度不倒退 —— 短路径已把 last_p 推到 0.55，而分步的
+                    #       level1 是 force=0.1，会被 max(p, last_p) 顶住，
+                    #       进度条从此静止。这里把 last_p 退回起点。
+                    #    ② 清空短路径可能写入的脏成果，避免 finally 落库。
+                    #    ③ stepwise 标记置真：前端 stats 与断线恢复都读它。
+                    _prog["stepwise"] = True
+                    _prog["last_p"] = 0.05
+                    _prog["nodes"] = 0
+                    _prog["sub_done"] = 0
+                    _prog["sub_total"] = 0
+                    _partial_holder["outline"] = []
                 # 长方案分步生成（clamp_outline_depth / normalize_outline /
                 # MAX_OUTLINE_DEPTH 已在模块顶部导入）
                 await wait_resume(task_id)
@@ -4137,6 +4261,11 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
     #    归一规则保持向后兼容：None/缺省/非法 → None（沿用各章自身预算）。
     word_budget_override = normalize_word_budget_override(
         body.get("word_budget_override"))  # 覆盖字数预算（正整数或 None）
+    # ✅ R66（2026-10-11）四档字数控制：word_budget_tier ∈ {brief, standard,
+    #    detailed, ultra}（或档位数值 800/1200/2000/2500）。命中档位时**每个叶子
+    #    章节**的目标字数 = max(档位值, LEAF_MIN_WORD_BUDGET=300)，跳过旧的
+    #    「按二级章节总量 AI 分配」链路；未传/非法 → None，行为与旧版逐字一致。
+    word_budget_tier = resolve_word_budget_tier(body.get("word_budget_tier"))
     concurrency = body.get("concurrency")        # 并发档位：slow/balanced/fast 或整数
     # ✅ P0 修复（2026-09-19）：本次任务的有效并发 = 用户档位（归一为 1~5 整数）；
     #    未传档位时回退 AI 配置的目标档位（controller.target），而不是被自适应
@@ -4151,13 +4280,26 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
     #    直接返回原值，前端若传 "false"（字符串）会被 Python 真值判为 True ——
     #    用户明明关了"超字数自动压缩"，却被白跑一轮 AI 压缩调用。
     force_rewrite = _coerce_bool(body.get("force_rewrite"), default=False)
-    # ✅ 超字数自动压缩（可选，**默认关**）：生成后对「超过目标 130%（over）」的
+    # ✅ 超字数自动压缩（可选）：生成后对「超过目标 130%（over）」的
     #    章节自动跑「AI 局部 replace/delete 压缩」，与手动「压缩本章」同一套实现
     #    （services/content_shrink.shrink_content_rounds）。
-    #    默认关的原因：每章会额外产生最多 SHRINK_MAX_ROUNDS 次 AI 调用（费用），
-    #    属产品决策项，必须由调用方显式开启。
+    #    未显式传值时的默认（✅ R66 2026-10-11 调整）：
+    #      · 传了 word_budget_tier 或 word_budget_override → **默认开**——
+    #        用户明确设定了全局字数标准，超写章节却从不纠偏正是本轮要修的缺陷；
+    #      · 两者都没传 → 维持旧默认**关**（每章额外压缩调用有费用，
+    #        逐章自定义预算的既有场景行为不变）。显式 true/false 永远优先。
+    #    ⚠️ R70（2026-10-12）体检订正依据：**默认值本轮保持不动**，但 R66 当年
+    #    写在这里的「实测均值 136.9% 系统性超写」是**含标点字符口径**
+    #    （text_word_count 把中文标点、| - # * >、URL、空白换行全计入），不等于
+    #    「用户多读了三成文字」。同批 33 章语料按可读口径重算：mean 136.9% →
+    #    106.5%，触发 >1.3× 的章节 19/33 → 4/33（对照读数已接进 preflight
+    #    DLV-16 明细，函数见 services/content_utils.readable_word_count）。
+    #    ⇒ 默认开仍保留（4/33 是真实超写，且翻默认会重排每章 AI 调用成本），
+    #    但不再以「系统性超写」为论据；若要切口径，800/1200/2000/2500 这几档
+    #    预算必须同轮下调（÷1.285），否则真实目标被隐形放大近三成。
+    _shrink_default = word_budget_tier is not None or word_budget_override is not None
     auto_shrink_over = _coerce_bool(
-        body.get("auto_shrink_over"), default=False)
+        body.get("auto_shrink_over"), default=_shrink_default)
 
     # ✅ 自动流程：正文生成后自动执行全文一致性 Agent 修复
     #    （扫描 → 仲裁 → 定向修复 → 待用户在质量管理界面确认/回滚），默认开启。
@@ -4258,11 +4400,10 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
         #    任何 except），只有 finally 能收尾；而 finally 看不到 try 内部定义的
         #    done_ids / _failed_reasons。把清单提升到闭包外层容器，逐章维护，
         #    finally 才能把「本次生成了几章、哪几章失败」写进 checkpoint。
-        _ckpt: dict = {"done": 0, "total": 0, "failed_sections": [], "words": 0}
         # ✅ 本次运行的质量计数（超字数章节数）：依据运行库日志，超字数是最高频的
         #    质量缺陷（96 章中 72% 判 over、均值 1.69 倍）——完成消息里必须让用户
         #    看到"本次有多少章超字数"，否则无从得知可以压缩。
-        _stat: dict = {"over": 0}
+        _stat: dict = {"over": 0, "audit_rows": []}
         # F-CONTENT-STANDARD(2026-09-26 · B2): 生成标准校验汇总累加器。
         # 与 _stat 同级提升到闭包外层容器（早期失败路径也必须可读，不能 NameError），
         # 逐章在落库后累加，completed/stopped 终态一次性下发。
@@ -4314,6 +4455,14 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
             _ckpt["words"] = int(_prog.get("words", 0) or 0)
             _ckpt["run_words"] = _ckpt["words"]
             _ckpt["over_count"] = int(_stat.get("over", 0) or 0)
+            # ✅ R66（2026-10-11）字数可追溯：汇总随所有终态载荷一并回填
+            #    （与 words/over_count 同一"唯一拼装点"纪律，五条收尾路径全覆盖）。
+            #    统计只服务于展示与审计，任何异常不得影响 checkpoint 落盘。
+            try:
+                _ckpt["word_audit"] = word_audit_summary(
+                    _stat.get("audit_rows") or [], tolerance=_word_tol)
+            except Exception:
+                _ckpt["word_audit"] = {}
             return {
                 'event': event,
                 'message': message,
@@ -4326,6 +4475,9 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 #    run_words = 本次实际生成字数；over_count = 超字数章节数。
                 'run_words': _ckpt.get("run_words", 0),
                 'over_count': _ckpt.get("over_count", 0),
+                # ✅ R66（2026-10-11）：逐章目标/实际/偏差明细 + 达标统计
+                #    （word_audit_summary 结构，断线重挂与审核预检同读本键）。
+                'word_audit': _ckpt.get("word_audit", {}),
             }
 
         def _stopped_payload(message: str,
@@ -4384,6 +4536,14 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
         _db_write_lock = asyncio.Lock()
         _update_progress_safe = _locked_progress_updater(_db_write_lock, task_id)
         try:
+            # ✅ R66（2026-10-11）字数可追溯：audit_rows 逐章累积
+            #    {section_id,title,level,word_budget,word_count}，终态由
+            #    word_audit_summary 汇总进 checkpoint / completed 载荷（审核预检可读）；
+            #    _word_tol 为容差带半宽（默认 0.1 = 提示词承诺的 0.9~1.1 倍）。
+            try:
+                _word_tol = abs(float(getattr(settings, "word_budget_tolerance", 0.1)))
+            except (TypeError, ValueError):
+                _word_tol = 0.1
             _prog["phase"], _prog["phase_label"] = "prepare", "准备中"
             _prog["progress_max"] = _monotonic_progress(_prog["progress_max"], 0.02)
             # ✅ 写锁口径统一：建立写锁之后的所有进度写入一律走
@@ -4433,7 +4593,26 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
             #    - 二级章节（level<=2）为预算单元，其总字数严格受控
             #    - 单元内各叶子（三级等）由 AI 智能分配；AI 失败降级为均分
             #    - 不属于任何二级单元的叶子（自身即单元）直接使用 override
-            if word_budget_override and word_budget_override > 0:
+            # ✅ R66（2026-10-11）四档字数控制（word_budget_tier）：与上面的
+            #    「按二级单元总量分配」语义**互斥**——档位是「每个叶子（三级目录）
+            #    各自的目标字数」，直接绑定叶子、不做单元分配，且不低于
+            #    LEAF_MIN_WORD_BUDGET=300（三级目录 300 字左右正文要求）。
+            #    未传档位时本分支整体跳过，override/默认路径行为逐字不变。
+            if word_budget_tier is not None:
+                _tier_budget = max(int(word_budget_tier), LEAF_MIN_WORD_BUDGET)
+                for lf in leaves:
+                    lf["word_budget"] = _tier_budget
+                try:
+                    await db.executemany(
+                        "UPDATE sections SET word_budget=? WHERE id=?",
+                        [(_tier_budget, lf["id"]) for lf in leaves])
+                    await db.commit()
+                except Exception as e:
+                    logger.warning("档位字数持久化失败（不影响生成）: %s", e)
+                logger.info("字数预算：档位=%s（每叶子 %d 字，下限 %d 字），%d 个叶子",
+                            body.get("word_budget_tier"), _tier_budget,
+                            LEAF_MIN_WORD_BUDGET, len(leaves))
+            elif word_budget_override and word_budget_override > 0:
                 by_id = {s["id"]: s for s in all_sections}
 
                 def _find_unit(sec: dict):
@@ -4520,8 +4699,15 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 # 现无论 AI 分配成功还是降级均分，也无论是否有单叶子单元，都统一持久化。
                 for u in units.values():
                     for lf in u["leaves"]:
-                        lf["word_budget"] = u["alloc"].get(lf["id"],
-                                                           word_budget_override)
+                        # ✅ R66（2026-10-11）：叶子预算下限 300 字（三级目录
+                        #    正文要求）。刻意放在 sse 应用循环而非
+                        #    _apply_word_budget_allocations 内部——后者被性能用例
+                        #    以 total_budget=100 直接调用并断言守恒，floor 入内会
+                        #    打挂既有契约。override 极小且叶子极多的旧场景下，
+                        #    单元总量从此可能超过 override（300 字要求优先）。
+                        lf["word_budget"] = max(
+                            u["alloc"].get(lf["id"], word_budget_override),
+                            LEAF_MIN_WORD_BUDGET)
                 try:
                     # ✅ P1-1 性能优化：逐条 UPDATE → executemany 单次提交
                     await db.executemany(
@@ -4628,7 +4814,12 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
             # ✅ BUG 修复（与目录生成同一处缺陷）：LIMIT 必须先过滤空值，
             #    否则未解析文档占满名额 → 已解析资料对正文生成不可见。
             from app.routers.global_facts import load_parsed_texts
-            docs = await load_parsed_texts(db, project_id, limit=3)
+            # ✅ R72（2026-10-12）：与目录生成链对齐采集被截断文档清单。
+            #    旧实现不传 truncated_out（目录链传了），正文生成对「依据
+            #    不完整」不告知，三条消费链（目录/正文/事实提取）口径不一致。
+            _content_trunc_docs: list[str] = []
+            docs = await load_parsed_texts(db, project_id, limit=3,
+                                          truncated_out=_content_trunc_docs)
             # ✅ 跨模块接线（2026-09-17 / 2026-09-23）：与目录生成对齐，优先消费
             #    bid_analysis 结构化提取成果（format_downstream_context 此前是
             #    死代码），提取失败/无成果时自动回退原文档摘录。
@@ -4638,6 +4829,17 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
             raw_brief = "\n".join(docs)[:4000] if docs else ""
             project_brief = await _build_structured_brief(
                 db, project_id, raw_brief, max_chars=4000)
+
+            # ✅ R72（2026-10-12）：依据不完整必须显式告知（与目录生成链
+            #    同一口径）。被截断文档参与正文生成时，后半段依据不可见，
+            #    用户需在事件流看到提示，而非只能翻日志。
+            if _content_trunc_docs:
+                _ctd_msg = (f"⚠️ {len(_content_trunc_docs)} 份文档解析不完整"
+                            f"（内容被截断）：{'、'.join(_content_trunc_docs[:5])}"
+                            + ("等" if len(_content_trunc_docs) > 5 else "")
+                            + "；本次正文生成仅基于已解析到的部分，"
+                              "后段参数可能不可见，建议拆分文件后重新上传并解析")
+                yield f"data: {json.dumps({'event':'warning','task_id':task_id,'message':_ctd_msg}, ensure_ascii=False)}\n\n"
 
             # ✅ 图表与正文一体生成：不再注入"预编排配图规划"。
             #    旧实现预查 chart_predictions(needed=1) 注入 {chart_plan}，是已删除的
@@ -4755,6 +4957,7 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                         eff_standard: str = "",
                                         fact_rows_for_section=None,
                                         section_title: str = "",
+                                        plan_json: str = "",
                                         ) -> tuple[str, int, str, dict]:
                 """章节完成后立即持久化到数据库（不复用 buffer，避免崩溃全丢）。
 
@@ -4983,6 +5186,47 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         report = {}
                         report_json = ""
 
+                # ✅ 2026-10-11（引入《文档生成规则分析与软件标准建立》正文生成标准 2.1）：
+                #    段落长度 / 日期写法 / 工期单位口径的**咨询性**校验。加法式落地：
+                #    只写报告新键 structure，不改 error/warning 计数、不进修复链路、
+                #    不动正文；standard_report 未触发（无事实/未设标准）时也会补一份，
+                #    并负责重建 report_json（否则本块成果无法序列化落库）。
+                try:
+                    _struct_rep = paragraph_structure_report(content)
+                    report = dict(report or {})
+                    report["structure"] = _struct_rep
+                    report_json = json.dumps(report, ensure_ascii=False)
+                    if _struct_rep.get("warnings"):
+                        logger.info(
+                            "章节 %s 段落结构建议 %d 条（仅咨询，不阻断）: %s",
+                            section_id[:8], len(_struct_rep["warnings"]),
+                            "；".join(str(w.get("message", ""))
+                                      for w in _struct_rep["warnings"][:3]))
+                except Exception:
+                    logger.warning("章节 %s 段落结构校验失败（忽略，不影响落库）",
+                                   section_id[:8], exc_info=True)
+
+                # ✅ R71（2026-10-12，引入易标 R12「失败不硬裁 → 人工核对透明警告」）：
+                #    正文收尾时，若最终字数仍落在 word_status 正常带之外（under/over），
+                #    说明续写/压缩没能把本章拉回预算，而系统按红线「宁可超字数不可损坏
+                #    正文」刻意不强行裁剪 —— 把这一事实**透明告知**用户，而非静默放行。
+                #    加法式落地：只写报告新键 word（advisory），不改 error/warning 计数、
+                #    不进修复链路、不动正文与 word_count/word_status 落库；判定口径仍
+                #    唯一走 text_word_count，护栏 test_word_caliber_transparency_r71 锁定。
+                #    wc / word_budget 复用上方落库同口径读数（structure 块不改正文）。
+                try:
+                    _word_rep = word_closeout_notice(wc, word_budget)
+                    report = dict(report or {})
+                    report["word"] = _word_rep
+                    report_json = json.dumps(report, ensure_ascii=False)
+                    if _word_rep.get("advisory"):
+                        logger.info(
+                            "章节 %s 字数收尾提示（仅建议，不阻断）：%s",
+                            section_id[:8], _word_rep.get("message", ""))
+                except Exception:
+                    logger.warning("章节 %s 字数收尾提示失败（忽略，不影响落库）",
+                                   section_id[:8], exc_info=True)
+
                 # ✅ 2026-10-02（检查点前置 · 生成后自检，**锁外**）：按检查点对
                 #    本章正文做程序化体检（纯函数零 AI，fail-soft）。
                 #    - 默认开（content_selfcheck=True，2026-10-02 第二十六轮），设 False
@@ -5192,15 +5436,26 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                     "章节 %s 图表登记清理失败（正文仍按原计划落库，"
                                     "本章可能残留上一轮的旧图表登记）: %s",
                                     section_id[:8], _clean_e)
+                        # ✅ BUG 修复（2026-10-11 · 跨模块数据链 R70 · plan_json 静默抹除）：
+                        #    D1 离散编排默认关闭（content_plan_stage_enabled=False），
+                        #    _plan_json 恒为 ""；而续写分支（mode=continue）更是显式以
+                        #    _plan_enabled=False 构建上下文（:6129），同样拿到 ""。
+                        #    旧实现无条件 `SET plan_json=?` ⇒ **任何一轮生成/续写都会把
+                        #    上一轮真实落库的编排决策抹成空串**，D1 的编排成果无法跨轮存活
+                        #    （开关打开→跑一轮→关掉或续写一章即全丢），且无任何日志。
+                        #    修法：空串时保留原列（CASE WHEN），非空才覆盖。
+                        #    向后兼容：plan_json 非空时 SQL 语义与旧实现逐字一致。
                         await db.execute(
                             "UPDATE sections SET content=?, word_count=?, word_status=?, "
                             "status='generated', updated_at=?, "
-                            "last_generation_standard=?, last_generation_report=? "
+                            "last_generation_standard=?, last_generation_report=?, "
+                            "plan_json = CASE WHEN ? <> '' THEN ? ELSE plan_json END "
                             "WHERE id=?",
                             (content, wc, ws, datetime.now().isoformat(),
                              # F-CONTENT-STANDARD: persist generation standard + report
                              eff_standard or "",
                              report_json,
+                             plan_json or "", plan_json or "",
                              section_id))
                         await db.commit()
                     except Exception:
@@ -5283,8 +5538,9 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     await db.commit()
 
             async def _build_generation_context(leaf: dict,
-                                                eff_standard: str = ""
-                                                ) -> tuple[str, list, list, str]:
+                                                eff_standard: str = "",
+                                                _plan_enabled: bool = False
+                                                ) -> tuple[str, list, list, str, str]:
                 """子函数1：构建章节生成的 AI 上下文（system prompt + user content）。
                 返回 (生效标准, 本章相关事实行, messages, user_content)，
                 user_content 供续写阶段复用。
@@ -5325,6 +5581,13 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     children_by_parent=by_parent)
 
                 word_budget = leaf_word_budget(leaf)
+                # ✅ R58（2026-10-10）：三个逐章量**前置**到事实注入之前 ——
+                #    事实分段注入需要读 _stable_prefix（决定走稳定段还是单条 user）。
+                _stable_prefix = bool(getattr(
+                    settings, "content_stable_prefix_enabled", True))
+                _sec_no = _section_outline_number(leaf)
+                _sub_rule = build_subheading_rule(
+                    has_db_children=str(leaf.get("id") or "") in _parent_ids)
                 # ✅ 逐章精选：按本章标题/描述从已加载事实行中预筛相关事实
                 #    （旧实现只在生成循环外算一次，导致所有章节共享同一份事实）
                 # ✅ P1 修复（2026-09-27 · 九大章节分类对正文零影响）：
@@ -5334,9 +5597,25 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 #   正文生成（需求「九大章节分类」的核心价值未兑现）。
                 #   现补传 chapter（命中不到返回空串 → 行为与旧实现完全一致，
                 #   零回归风险），并按章事实优先消费预算。
-                facts_text = _render_facts_text(
-                    facts_rows, relevant_to=leaf,
-                    chapter=chapter_key_of_title(str(leaf.get("title") or "")))
+                # ✅ R58（2026-10-10）：事实**分段注入**。
+                #    旧实现把「按章预筛后的事实」整块放进 R57 的「整案稳定上下文」
+                #    段 —— 可预筛结果本来逐章不同，于是所谓稳定段每章都在变，
+                #    Prompt Cache 前缀失效（F1 的收益被这一处抵消）。
+                #    现拆为：通用组（整案恒定 → 稳定段）+ 其余（按章命中 → 任务段）。
+                #    开关关闭时逐字保持旧行为。
+                if _stable_prefix and bool(getattr(
+                        settings, "content_facts_split_inject", True)):
+                    _core_facts_rows = core_facts_rows(facts_rows)
+                    _rest_facts_rows = exclude_rows(facts_rows, _core_facts_rows)
+                    facts_text = _render_facts_text(_core_facts_rows)
+                    _chapter_facts_text = _render_facts_text(
+                        _rest_facts_rows, relevant_to=leaf,
+                        chapter=chapter_key_of_title(str(leaf.get("title") or "")))
+                else:
+                    facts_text = _render_facts_text(
+                        facts_rows, relevant_to=leaf,
+                        chapter=chapter_key_of_title(str(leaf.get("title") or "")))
+                    _chapter_facts_text = ""
                 # ✅ 编制依据注入：按方案类型 + 本章标题命中现行有效标准清单，
                 #    禁止 AI 引用已废止版本或杜撰标准编号（见 standards_registry）
                 standards_text = get_standards_text(
@@ -5369,12 +5648,41 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     _ck_kwargs["content_checkpoint_block"] = _checkpoint_block
                 if _chapter_ck:
                     _ck_kwargs["chapter_checkpoint_block"] = _chapter_ck
+                # ✅ R57（2026-10-09 · 提示词前缀稳定化，开关 content_stable_prefix_enabled）：
+                #    依据《标书智能体（四）——提示词顺序优化，让缓存命中，输入成本直降10倍》
+                #    §五：各厂商 Prompt Cache 命中的是**请求前缀**，而不是「某段内容看起来
+                #    一样」。旧实现 system 自首字符起即逐章变化 —— section_number /
+                #    standards_text / subheading_rule / 本章检查点块全是逐章量，于是同一
+                #    方案每换一章，前缀整体失效：项目概述、施工内容、全局事实、知识库这些
+                #    真正的大块内容被反复全价计费。
+                #    开启时逐章变量注入**空串**（变量照传，模板占位符既不残留也不被整行
+                #    丢弃），其真实值原样落到最后一条 user 消息的【本章编写定位】段，
+                #    信息零丢失；整案常量的检查点块（外层只算一次）仍留在 system。
+                # ✅ 决策下沉（services/content_runtime.resolve_system_variables）：
+                #    纯函数、可单测、可被 A/B 反向验证覆盖。
+                _sys_vars = resolve_system_variables(
+                    stable=_stable_prefix, section_number=_sec_no,
+                    standards_text=standards_text, subheading_rule=_sub_rule)
+                # ✅ 保持**静态可解析**形态（护栏 TestRenderDynamicBlindspots）：
+                #    用字典推导生成 render 的 kwargs 会把该调用点降级为
+                #    「动态盲区」，此后漏传模板变量再也测不出来；故逐条显式赋值，
+                #    与原 _ck_kwargs 同句型。
+                _ck_sys_kwargs: dict = {}
+                if _checkpoint_block:
+                    _ck_sys_kwargs["content_checkpoint_block"] = _checkpoint_block
+                if _chapter_ck and not _stable_prefix:
+                    # 本章检查点块同样是逐章量 → 稳定化模式下移出 system，
+                    # 其真实值由 build_chapter_extras_block 补给模型。
+                    _ck_sys_kwargs["chapter_checkpoint_block"] = _chapter_ck
                 sys_prompt = render("content_generation_system",
-                    section_number=_section_outline_number(leaf),
-                    standards_text=standards_text,
                     scheme_name=scheme.get("name", ""),
                     scheme_type=scheme.get("type", ""),
-                    **_ck_kwargs,
+                    # ✅ R57：逐章变量虽已由 resolve_system_variables 决策，
+                    #    仍必须**逐个显式**书写 —— 若写成 **_sys_vars 展开，
+                    #    该调用点会被 RenderDynamicBlindspots 判为动态盲区，
+                    #    从此漏传模板变量也测不出来（静态护栏退化）。
+                    section_number=_sys_vars["section_number"],
+                    standards_text=_sys_vars["standards_text"],
                     # ✅ BUG 修复（2026-09-26）：补齐 {subheading_rule} 的生成方。
                     #    该占位符自登记进 PROMPT_VARIABLE_CONTRACTS 起就**无人注入**，
                     #    render 时被丢弃 → 发给模型的「章节内部小标题编号规范」整段为空，
@@ -5382,8 +5690,9 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     #    命名空间判定与正文落库规范化
                     #    （numbering.normalize_section_content_subheadings）、
                     #    导出渲染（export._compute_subheading）三处同口径。
-                    subheading_rule=build_subheading_rule(
-                        has_db_children=str(leaf.get("id") or "") in _parent_ids))
+                    subheading_rule=_sys_vars["subheading_rule"],
+                    **_ck_sys_kwargs,
+                )
 
                 # F-CONTENT-STANDARD: 生成标准段落已由调用方解析（eff_standard），
                 # 此处只负责渲染（DB 定制模板无占位符时也能生效）。
@@ -5396,37 +5705,136 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 #    - knowledge_text ← _knowledge_text_for（知识库素材，闭包内 DB 读取）
                 #    - word_budget_hint ← _word_budget_hint（空串回报 "N字"，同旧实现）
                 knowledge_text = _knowledge_text_for(leaf)
-                user_content = build_chapter_user_content(
-                    scheme=scheme,
-                    project_brief=project_brief,
-                    content_scope=_outline_construction_scope(scheme),
-                    parent_chain=parent_chain,
-                    parent_points=parent_points,
-                    sibling_lines=sibling_lines,
-                    section_number=_section_outline_number(leaf),
-                    leaf=leaf,
-                    word_budget_hint=_word_budget_hint(word_budget),
-                    word_budget=word_budget,
-                    prev_sibling_summary=prev_sibling_summary,
-                    facts_text=facts_text,
-                    eff_standard=eff_standard,
-                    knowledge_text=knowledge_text,
-                )
+                # ✅ R58（2026-10-10）：图表配额感知 —— 让 AI 在**配额内**提名，
+                #    避免「画了又被程序按上限删掉」。纯读一次全方案已用计数
+                #    （已排除本章），失败不阻断生成（软提示）。
+                _chart_hint = ""
+                if _stable_prefix and bool(getattr(
+                        settings, "content_chart_quota_hint_enabled", True)):
+                    try:
+                        _chart_hint = build_chart_quota_hint(
+                            await _load_scheme_type_counts(
+                                db, scheme_id, str(leaf.get("id") or "")),
+                            word_budget=word_budget)
+                    except Exception:  # noqa: BLE001 - 软提示，绝不阻断生成
+                        logger.warning("图表配额统计失败（按无提示继续）",
+                                       exc_info=True)
+                # system 中被清空的逐章变量，在这里**原样**补给模型（保证零信息丢失）：
+                # 两个标量 + 子标题规范 + 本章检查点块，作为「任务差异」的最后一段。
+                _chapter_extras = ""
+                if _stable_prefix:
+                    _chapter_extras = build_chapter_extras_block(
+                        section_number=_sec_no,
+                        standards_text=standards_text,
+                        subheading_rule=_sub_rule,
+                        chapter_checkpoint_block=str(
+                            _ck_kwargs.get("chapter_checkpoint_block") or ""))
 
-                messages = [{"role": "system", "content": sys_prompt},
-                            {"role": "user", "content": user_content}]
+                # ✅ D1（2026-10-11 · 离散正文编排阶段，默认关闭）：在组装生成消息前，
+                #    先由独立 LLM 步为当前章产出结构化编排决策（写作聚焦 / 建议素材 /
+                #    建议事实 / 是否表格），作为**软建议**注入「本章任务差异段」，并随
+                #    正文落库。开关关闭或编排失败时 _plan_json 恒为 "" 且不触发任何额外
+                #    LLM 调用 —— 缺省路径与本项引入前逐字一致。本步刻意只给建议、不硬
+                #    限制模型可用素材范围，回避 R57 论证的「预编排=陈旧结论陷阱」风险。
+                _plan_json = ""
+                if _plan_enabled and bool(getattr(settings, "content_plan_stage_enabled", False)):
+                    try:
+                        _k_pool = [str(r.get("name") or "") for r in knowledge_rows]
+                        # ⚠️ facts_rows 的行契约是 5 元组 (gt, title, content,
+                        #    confidence, chapter)（facts_builder._load_facts_rows 明写
+                        #    「必须投影回 5 元组，不得直接外泄」），不是 dict —— 用
+                        #    .get() 会 AttributeError，被下方 fail-soft 吞掉后 D1 编排
+                        #    阶段在每一章都静默空转（功能全灭、日志只有一条 WARNING）。
+                        #    按 _row_chapter / _render_facts_text 同口径按下标取 title。
+                        _f_pool = [
+                            str(r[1] or "")
+                            for r in facts_rows
+                            if isinstance(r, (tuple, list)) and len(r) > 1
+                        ]
+                        _plan = await plan_section_content(
+                            chat_with_fallback,
+                            leaf=leaf,
+                            word_budget=word_budget,
+                            parent_chain=parent_chain,
+                            sibling_lines=sibling_lines,
+                            project_brief=project_brief,
+                            knowledge_names=_k_pool,
+                            fact_titles=_f_pool,
+                            scheme_name=str(scheme.get("name") or ""),
+                            scheme_type=str(scheme.get("type")
+                                            or scheme.get("engineering_type") or ""),
+                        )
+                        _plan_json = _plan.to_json()
+                        _plan_guidance = render_content_plan_guidance(_plan)
+                        if _plan_guidance:
+                            _chapter_extras = (_chapter_extras + "\n" + _plan_guidance) \
+                                if _chapter_extras else _plan_guidance
+                    except Exception:  # noqa: BLE001 - 编排失败绝不阻断正文生成
+                        logger.warning(
+                            "章节 %s 离散编排阶段失败（回退为无编排）",
+                            str(leaf.get("title") or ""), exc_info=True)
+                        _plan_json = ""
+
+                if _stable_prefix:
+                    messages, user_content = build_chapter_layered_messages(
+                        sys_prompt=sys_prompt,
+                        scheme=scheme,
+                        project_brief=project_brief,
+                        content_scope=_outline_construction_scope(scheme),
+                        parent_chain=parent_chain,
+                        parent_points=parent_points,
+                        sibling_lines=sibling_lines,
+                        section_number=_sec_no,
+                        leaf=leaf,
+                        word_budget_hint=_word_budget_hint(word_budget),
+                        word_budget=word_budget,
+                        prev_sibling_summary=prev_sibling_summary,
+                        facts_text=facts_text,
+                        eff_standard=eff_standard,
+                        knowledge_text=knowledge_text,
+                        chapter_extras=_chapter_extras,
+                        chart_quota_hint=_chart_hint,
+                        chapter_facts_text=_chapter_facts_text,
+                    )
+                else:
+                    user_content = build_chapter_user_content(
+                        scheme=scheme,
+                        project_brief=project_brief,
+                        content_scope=_outline_construction_scope(scheme),
+                        parent_chain=parent_chain,
+                        parent_points=parent_points,
+                        sibling_lines=sibling_lines,
+                        section_number=_sec_no,
+                        leaf=leaf,
+                        word_budget_hint=_word_budget_hint(word_budget),
+                        word_budget=word_budget,
+                        prev_sibling_summary=prev_sibling_summary,
+                        facts_text=facts_text,
+                        eff_standard=eff_standard,
+                        knowledge_text=knowledge_text,
+                    )
+                    messages = [{"role": "system", "content": sys_prompt},
+                                {"role": "user", "content": user_content}]
                 _sec_facts = _filter_facts_rows(facts_rows, leaf)
                 # ✅ 提示词治理（G5 预算 / G6 注入防护，默认关闭）：
                 #    两个封装在配置未开启时**逐字返回原文**，故此处接入
                 #    不改变任何既有行为；开启后才削减超长上下文 / 加资料围栏。
                 #    必须在 messages 组装**之后**做 —— 治理对象是最终 user 文本。
-                user_content = _guard_external_material(user_content)
-                user_content = _apply_prompt_context_budget(user_content)
-                if messages:
-                    _last = messages[-1]
-                    if _last.get("role") == "user":
-                        messages[-1] = {**_last, "content": user_content}
-                return eff_standard, _sec_facts, messages, user_content
+                # ✅ R57：分层后改为对**每条** user 消息逐一治理 —— G5 本就按
+                #    「【标签】：」独立切片预算，分段裁剪与整串裁剪同判据；
+                #    开关关闭时只有一条 user，与旧实现逐字节一致。
+                _user_idx = [i for i, m in enumerate(messages)
+                             if isinstance(m, dict) and m.get("role") == "user"]
+                for _mi in _user_idx:
+                    _msg = messages[_mi]
+                    _txt = _guard_external_material(_msg.get("content") or "")
+                    _txt = _apply_prompt_context_budget(_txt)
+                    messages[_mi] = {**_msg, "content": _txt}
+                if _user_idx:
+                    # user_content 供续写轮复用，必须与治理后的 messages 同步
+                    user_content = "".join(
+                        str(messages[i].get("content") or "") for i in _user_idx)
+                return eff_standard, _sec_facts, messages, user_content, _plan_json
 
             async def _generate_first_draft(messages: list[dict], title: str,
                                             stage_cb=None,
@@ -5511,10 +5919,20 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     f"【当前章节】：{leaf.get('title','')} — {leaf.get('description','')}\n")
                 continue_count = 0
                 cont_failed = False
+                # ✅ R66（2026-10-11）：续写触发线取 max(0.8×预算, 300 字叶子下限)；
+                #    下限被钉在**不超过该章预算本身**（min(300, budget)）：用户显式
+                #    设了 <300 的小预算时，若下限仍取 300 会与续写总字数上限
+                #    （1.1×预算）互相矛盾 —— 触发线永远够不着，白烧 max_rounds 轮。
+                #    续写后总字数上限系数 = 1 + 容差（默认 0.1 → 1.1，与旧硬编码逐字一致）。
+                try:
+                    _cont_tol = abs(float(getattr(settings, "word_budget_tolerance", 0.1)))
+                except (TypeError, ValueError):
+                    _cont_tol = 0.1
                 while should_continue_round(
                         wc=wc, word_budget=word_budget,
                         continue_count=continue_count, min_passes=min_passes,
-                        max_rounds=CONTENT_CONTINUE_MAX_ROUNDS):
+                        max_rounds=CONTENT_CONTINUE_MAX_ROUNDS,
+                        min_floor_chars=min(LEAF_MIN_WORD_BUDGET, int(word_budget or 0))):
                     await wait_resume(task_id)
                     if is_stopped(task_id):
                         break
@@ -5551,6 +5969,7 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         word_budget=word_budget,
                         cont_prompt=cont_prompt,
                         eff_standard=eff_standard,
+                        total_cap_factor=1.0 + _cont_tol,
                     )
                     cont = None
                     cont_last_err: Exception | None = None
@@ -5598,6 +6017,7 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                           leaf: dict,
                                           eff_standard: str = "",
                                           fact_rows_for_section=None,
+                                          plan_json: str = "",
                                           ) -> tuple[str, int, int, str, dict]:
                 """子函数4：持久化到 DB（含内联图表清洗），
                 返回 (最终正文, word_count, word_budget, word_status, 生成标准校验报告)。"""
@@ -5606,7 +6026,31 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     leaf_id, result, wb,
                     eff_standard=eff_standard,
                     fact_rows_for_section=fact_rows_for_section,
-                    section_title=str(leaf.get("title") or ""))
+                    section_title=str(leaf.get("title") or ""),
+                    plan_json=plan_json)
+                # ✅ R66（2026-10-11）字数校验可追溯：每章落库后记一条结构化
+                #    「目标|实际|偏差|偏差率|判定」日志，并累积进 _stat["audit_rows"]
+                #    （终态 checkpoint / completed 事件的 word_audit 键即由它汇总，
+                #    审核预检模块可读取做字数审计）。纯观测，不影响任何返回值；
+                #    统计异常绝不允许打断生成主流程。
+                try:
+                    _dev = word_deviation_of(wc, wb, tolerance=_word_tol)
+                    _stat.setdefault("audit_rows", []).append({
+                        "section_id": leaf_id,
+                        "title": str(leaf.get("title") or ""),
+                        "level": int(leaf.get("level") or 0),
+                        "word_budget": wb,
+                        "word_count": wc,
+                    })
+                    logger.info(
+                        "字数校验|节=%s|目标=%d字|实际=%d字|偏差=%+d字|偏差率=%.1f%%|"
+                        "判定=%s（%s容差带）",
+                        str(leaf.get("title") or leaf_id)[:8], wb, wc,
+                        _dev["deviation"], _dev["ratio"] * 100, ws,
+                        "落在" if _dev["within_band"] else "超出")
+                except Exception:
+                    logger.debug("字数审计记录失败（忽略）: %s", leaf_id,
+                                 exc_info=True)
                 return content, wc, wb, ws, report
 
             async def _auto_shrink_if_over(result: str, leaf: dict,
@@ -5751,15 +6195,15 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         #    逐章精选事实/标准清单/目标字数）。旧实现传空 user_content，
                         #    续写消息里出现空 user 消息（部分 provider 直接 400 报错），
                         #    且续写缺少事实与同级信息，易与全文口径不一致。
-                        _eff_std_c, _sec_facts, _, user_content = await _build_generation_context(
-                            leaf, _eff_std)
+                        _eff_std_c, _sec_facts, _, user_content, _ = await _build_generation_context(
+                            leaf, _eff_std, _plan_enabled=False)
                         result, cont_failed = await _continue_if_needed(
                             result, leaf, user_content, title, min_passes=1,
                             stage_cb=_stage_cb, eff_standard=_eff_std_c)
                     else:
                         # 子函数1：构建上下文
-                        _eff_std2, _sec_facts, messages, user_content = await _build_generation_context(
-                            leaf, _eff_std)
+                        _eff_std2, _sec_facts, messages, user_content, _plan_json = await _build_generation_context(
+                            leaf, _eff_std, _plan_enabled=True)
 
                         # ✅ P1-2（2026-09-17）：按本章目标字数折算输出上限，
                         #    避免落到配置值（实测 32768）导致模型无上限扩写。
@@ -5830,7 +6274,8 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     content, wc, wb, ws, _std_report = await _persist_and_notify(
                         leaf_id, result, leaf,
                         eff_standard=_eff_std,
-                        fact_rows_for_section=_sec_facts)
+                        fact_rows_for_section=_sec_facts,
+                        plan_json=_plan_json)
                     db_written = True
 
                     # ✅ P1 修复（2026-10-04 · DB 写失败静默）：落库已提交成功后，
@@ -5881,6 +6326,8 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         #    「续写失败但字数已达标」不报，「未达标且补写失败」才报。
                         word_budget = wb
                         cont_failed = _continue_failed_flag(cont_failed, wc, word_budget)
+                        # ✅ R66（2026-10-11）：偏差随事件下发（可追溯 + 前端实时展示）
+                        _wdev_done = word_deviation_of(wc, wb, tolerance=_word_tol)
                         yield json.dumps({
                             "event": "section_done", "section_id": leaf_id,
                             "title": title, "word_count": wc, "word_budget": wb,
@@ -5888,6 +6335,10 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                             # ✅ BUG-4：续写失败信号随事件下发，前端日志区据此标注
                             #    "补写失败"，用户不必自己比对字数去猜。
                             "continue_failed": cont_failed,
+                            # ✅ R66：目标/实际偏差、偏差率、是否落在容差带
+                            "word_deviation": _wdev_done["deviation"],
+                            "word_ratio": _wdev_done["ratio"],
+                            "word_within_band": _wdev_done["within_band"],
                             # ✅ 增强：携带最终正文，前端可即时刷新"当前选中章节"预览，
                             #    无需等整批生成结束后的全量 load()（旧实现预览长时间停留在旧内容）
                             "content": content,
@@ -6381,7 +6832,7 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     _pid = ""
                     try:
                         _pc = await db.execute(
-                            "SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
+                            _fe.SCHEME_PROJECT_ID_SQL, (scheme_id,))
                         _pr = await _pc.fetchone() if _pc is not None else None
                         if _pr:
                             _pid = str(_pr[0] or "")
@@ -6493,7 +6944,13 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 # ✅ 终态进度与计数必须随 completed 一起下发：前端断线重挂
                 #    读到的最后一个 completed 事件若缺 progress/done/total，
                 #    进度条会停在最后一章的中间值、章节计数也对不上总数。
-                'progress': 1.0, 'done': total, 'total': total,
+                # ✅ BUG 修复（2026-10-11 · 跨模块数据链 R70 · 终态 done 口径分裂）：
+                #    旧实现硬写 `done=total`，而有失败章节时 checkpoint 侧
+                #    `_ckpt["done"]` 只在**成功落库**时自增（:5423），是真实成功数。
+                #    于是同一份「已完成 N/M」在在线终态读到 total、断线重挂读到
+                #    成功数 —— 刷新页面后数字突然变小，与失败章节数也对不上。
+                #    统一为成功数（与 _content_ckpt_payload 同口径）。
+                'progress': 1.0, 'done': len(done_ids), 'total': total,
                 'word_count': total_wc, 'failed_count': failed_count,
                 'run_words': _run_words, 'over_count': _over_n,
                 'message': _done_msg,
@@ -6510,6 +6967,13 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 completed_payload['consistency_summary'] = consistency_summary
             # F-CONTENT-STANDARD(2026-09-26 · B2): 生成标准校验汇总下发
             completed_payload['standard_summary'] = _std_sum
+            # ✅ R66（2026-10-11）字数可追溯：逐章目标/实际/偏差明细 + 达标统计。
+            #    与 _content_ckpt_payload 里的同名键同构（审核预检两处都可读）。
+            try:
+                completed_payload['word_audit'] = word_audit_summary(
+                    _stat.get("audit_rows") or [], tolerance=_word_tol)
+            except Exception:
+                completed_payload['word_audit'] = {}
             # ✅ 收尾顺序（2026-09-16 修复）：先落 checkpoint → 再置终态 → 最后 yield。
             #    旧实现 `yield completed` 之后才 finish_task：前端收到 completed 立即
             #    break（SSE 生成器被 aclose），`finally` 兜底就把**已成功完成**的任务
@@ -7152,7 +7616,10 @@ _CHECKPOINT_KINDS = {
                            #    缺这两项时重挂页面上的统计全为 0，与在线看到的不一致。
                            ("event", "message", "done", "total", "failed_count",
                             "failed_sections", "words", "run_words",
-                            "over_count", "word_count")),
+                            "over_count", "word_count",
+                            # ✅ R66（2026-10-11）：字数审计汇总入白名单，
+                            #    断线重挂/审核预检才能读到逐章偏差明细。
+                            "word_audit")),
     # ✅ P0 修复（2026-09-27）：facts_generation 此前缺席，导致全局事实提取
     #    断线/刷新后成果全丢（前端重挂接拿不到 segment_stats / cross_conflicts）。
     #    字段集与写入侧的 `_FACTS_CHECKPOINT_FIELDS` 同源，两侧不会分叉。

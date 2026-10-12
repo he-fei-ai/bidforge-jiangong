@@ -85,11 +85,12 @@ def signature_valid(ftype: str, prefix: bytes) -> bool:
 
 
 #: 支持的扩展名全集（解析路由据此分流；图片按扩展名路由到 OCR）。
-_SUPPORTED_EXTENSIONS = {
-    "docx", "pdf", "md", "txt", "csv", "xlsx", "xls",
-    "png", "jpg", "jpeg", "bmp", "tiff",
-    "doc", "wps",   # 旧版 Word（需本地 Office 组件转换，见 legacy_office.py）
-}
+# ✅ T-A 单一事实源收敛（R72·2026-10-12）：旧实现与本文件顶部
+#    SUPPORTED_EXTENSIONS 手拄两份相同字面量（14 项），历史上多次造成两
+#    侧漂移（前端放行但路由不到解析器）。现直接引用对外声明作为唯一
+#    源，不再另拟一份。两者从此不可能背离（test_upload_format_contract
+#    的 declared == dispatch 护栏仍作为回归锁保持，只是变为同对象恒等）。
+_SUPPORTED_EXTENSIONS = SUPPORTED_EXTENSIONS
 
 
 def _sniff_type(content: bytes) -> str:

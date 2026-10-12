@@ -325,3 +325,107 @@ describe("OutlineLibraryEditModal · 导入目录 fallback id 唯一性（D2）"
     expect(wrong).toBeFalsy();
   });
 });
+
+/**
+ * 导入目录 · 类型预检（2026-10-10 FIX-2）。
+ *
+ * accept 只过滤文件选择框，拖拽可绕过；旧实现 beforeUpload 只校验大小，
+ * 非法类型文件（如 .exe）要整份传完才被后端 400 拒绝（浪费带宽 + 等待）。
+ * 现与链① UploadParseTab 同口径：beforeUpload 内经 partitionUploadFiles
+ * 按扩展名白名单 + 大小上限双段拦截，非法文件零网络开销直接拒绝。
+ */
+describe("OutlineLibraryEditModal · 导入目录类型预检（FIX-2）", () => {
+  function fileInput(): HTMLInputElement {
+    return document.querySelector('input[type="file"]') as HTMLInputElement;
+  }
+
+  it("非法类型（.exe）：beforeUpload 拦截，不调用 parse，并提示不支持类型", async () => {
+    setup(true);
+    clickTab("目录章节");
+    apiMock.uploadOutlineApi.parse.mockClear();
+    fireEvent.change(fileInput(), {
+      target: {
+        files: [new File(["MZ"], "virus.exe", { type: "application/x-msdownload" })],
+      },
+    });
+    await waitFor(() =>
+      expect(getActivityItems().some((i) => i.text.includes("不支持的文件类型"))).toBe(true),
+    );
+    expect(apiMock.uploadOutlineApi.parse).not.toHaveBeenCalled();
+  });
+
+  it("合法类型（.pdf）：放行进入解析链路（不误伤）", async () => {
+    apiMock.uploadOutlineApi.parse.mockResolvedValueOnce({
+      data: {
+        outline: [{ title: "第一章 工程概况", level: 1, children: [] }],
+        file_name: "ok.pdf",
+      },
+    } as any);
+    setup(true);
+    clickTab("目录章节");
+    fireEvent.change(fileInput(), {
+      target: { files: [new File(["x"], "ok.pdf", { type: "application/pdf" })] },
+    });
+    await waitFor(() => expect(apiMock.uploadOutlineApi.parse).toHaveBeenCalledTimes(1));
+  });
+});
+
+/**
+ * 导入目录 · 空结果不覆盖当前树（2026-10-12 R72 · C）。
+ *
+ * 旧弹窗 handleImportOutline 只读 data.outline / data.file_name，识别结果为空
+ * （扫描件无 OCR / 格式不支持 / 文件损坏）时仍无条件 setTree([]) 清空用户
+ * 当前目录树并谎报「识别完成：0 个章节」，与工作台 summarizeUploadOutlineResult
+ * 早已确立的「空结果不替换树 + 如实回传原因」口径割裂。现两处复用同一纯函数。
+ */
+describe("OutlineLibraryEditModal · 导入空结果不覆盖当前树（R72 · C）", () => {
+  function fileInput(): HTMLInputElement {
+    return document.querySelector('input[type="file"]') as HTMLInputElement;
+  }
+
+  it("先手工新增一节→导入识别为空：保留原树（不清空）+ 如实警告，不谎报识别完成", async () => {
+    setup(true);
+    clickTab("目录章节");
+    // 先造一个非空当前树（手工新增一级章节）
+    fireEvent.click(bodyBtn("新增一级章节")!);
+    expect(bodyText()).toContain("共 1 个章节");
+    // 后端返回空目录 + empty_text + warning（扫描件缺 OCR 形态）
+    apiMock.uploadOutlineApi.parse.mockResolvedValueOnce({
+      data: {
+        outline: [],
+        file_name: "scan.pdf",
+        empty_text: true,
+        warning: "未从文件中解析到有效文本（可能是空白文件、扫描件或已损坏）",
+      },
+    } as any);
+    fireEvent.change(fileInput(), {
+      target: { files: [new File(["x"], "scan.pdf", { type: "application/pdf" })] },
+    });
+    // 如实回传后端原因（进 activity 警告）
+    await waitFor(() =>
+      expect(getActivityItems().some((i) => i.text.includes("未从文件中解析到有效文本"))).toBe(true),
+    );
+    // 关键：当前树未被清空（仍「共 1 个章节」，不是「共 0」也不是「暂无目录」）
+    expect(bodyText()).toContain("共 1 个章节");
+    // 绝不谎报「识别完成」
+    expect(getActivityItems().some((i) => i.text.includes("识别完成"))).toBe(false);
+  });
+
+  it("非空识别结果：正常替换树并提示识别完成（合法路径不被误伤）", async () => {
+    apiMock.uploadOutlineApi.parse.mockResolvedValueOnce({
+      data: {
+        outline: [
+          { title: "第一章", level: 1, children: [{ title: "一节", level: 2, children: [] }] },
+        ],
+        file_name: "good.pdf",
+      },
+    } as any);
+    setup(true);
+    clickTab("目录章节");
+    fireEvent.change(fileInput(), {
+      target: { files: [new File(["x"], "good.pdf", { type: "application/pdf" })] },
+    });
+    await waitFor(() => expect(bodyText()).toContain("共 2 个章节"));
+    expect(getActivityItems().some((i) => i.text.includes("识别完成"))).toBe(true);
+  });
+});
