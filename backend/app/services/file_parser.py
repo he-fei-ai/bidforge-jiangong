@@ -334,24 +334,48 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
         _guard_zip_archive(content, ftype)
 
     raw_text = ""
-    if ftype == "docx":
-        raw_text = _parse_docx(content)
-    elif ftype == "pdf":
-        raw_text = _parse_pdf(content, diag, fname=fname)
-    elif ftype in ("md", "txt"):
-        raw_text, _dec_w = _decode_text_ex(content)
-        diag["warnings"].extend(_dec_w)
-    elif ftype == "csv":
-        raw_text = _parse_csv(content, diag)
-    elif ftype in ("xlsx", "xls"):
-        raw_text = _parse_excel(content, ftype, diag)
-    elif ftype in ("png", "jpg", "jpeg", "bmp", "tiff"):
-        raw_text = _parse_image_ocr(content, ftype, diag)
-    elif ftype in ("doc", "wps"):
-        raw_text = _parse_legacy_word(content, fname, diag)
-    else:
-        raw_text, _dec_w = _decode_text_ex(content)
-        diag["warnings"].extend(_dec_w)
+    try:
+        # ✅ R73 契约归一（2026-10-12）：本节是全部 14 格式的分派点。此前各
+        #    解析器把各自的库异常直接外泄（实测 4 条逃逸路径：xlrd CompDocError、
+        #    openpyxl KeyError/OSError ——「OLE 头合法但结构损坏的 .xls」「把 .docx
+        #    改名成 .xlsx」「sheet XML 损坏」都会命中），违反本函数文档契约
+        #    「不可恢复的解析失败只抛 ParseError」：调用方按契约只接 ParseError
+        #    时这些文件会冒成 500；两个既有路由靠各自的泛化 except 兜底，用户
+        #    只看到无差别的「文件无法识别或已损坏」。现统一收敛 —— 库异常 → 
+        #    ParseError（可读文案），ParseError 原样透传（压缩炸弹/加密/缺依赖
+        #    等既有语义与文案一字不改）。
+        if ftype == "docx":
+            raw_text = _parse_docx(content)
+        elif ftype == "pdf":
+            raw_text = _parse_pdf(content, diag, fname=fname)
+        elif ftype in ("md", "txt"):
+            raw_text, _dec_w = _decode_text_ex(content)
+            diag["warnings"].extend(_dec_w)
+        elif ftype == "csv":
+            raw_text = _parse_csv(content, diag)
+        elif ftype in ("xlsx", "xls"):
+            raw_text = _parse_excel(content, ftype, diag)
+        elif ftype in ("png", "jpg", "jpeg", "bmp", "tiff"):
+            raw_text = _parse_image_ocr(content, ftype, diag)
+        elif ftype in ("doc", "wps"):
+            raw_text = _parse_legacy_word(content, fname, diag)
+        else:
+            raw_text, _dec_w = _decode_text_ex(content)
+            diag["warnings"].extend(_dec_w)
+    except ParseError:
+        raise
+    except Exception as _e:
+        # ⚠️ 只记日志、不回传底层细节（避免泄露路径/内部符号；用户侧给出
+        #    可操作的方向即可）。exceptions 属于「普通用户传了个坏文件」，
+        #    降为 WARNING 而非 ERROR（ERROR 语义=业务阻断，见 AGENTS §3.1.6）。
+        #    不带 exc_info：坏文件是常规输入而非隐伏缺陷，堆栈只会刷日志；
+        #    原因串已含库错误信息（如 xlrd「Expected ... marker」）足够定位，
+        #    真需要完整堆栈时由路由层泛化 except 再打。
+        logger.warning("解析文件 %r（类型 %s）失败: %s",
+                       fname, (ftype or "").upper() or "未知", _e)
+        label = (ftype or "").upper() or "文件"
+        raise ParseError(
+            f"{label} 文件已损坏或不是有效的文件，请确认真实格式后重新上传") from _e
 
     text = raw_text or ""
     diag["text_len"] = len(text)

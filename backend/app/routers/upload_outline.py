@@ -13,6 +13,8 @@ from app.services.ai.json_response import (
 )
 from app.services.ai.prompts._registry import render
 from app.services.bid_section_detector import detect_bid_sections
+from app.services import facts_extractor as _fe
+from app.services.content_utils import DEFAULT_WORD_BUDGET
 from app.services.file_parser import (
     MAX_UPLOAD_BYTES,
     SUPPORTED_EXTENSIONS,
@@ -382,7 +384,7 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     if not await cur.fetchone():
         raise HTTPException(404, "上传记录不存在")
     cur = await _r13(
-        await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,)),
+        await db.execute(_fe.SCHEME_PROJECT_ID_SQL, (scheme_id,)),
         "save-as-outline：方案存在性检查")
     srow = await cur.fetchone()
     if not srow:
@@ -555,7 +557,7 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
             elif matched and matched.get("word_budget"):
                 word_budget = matched["word_budget"]
             else:
-                word_budget = 1500
+                word_budget = DEFAULT_WORD_BUDGET
             if matched:
                 # 标题匹配已有章节：保留正文，只更新结构字段
                 sid = matched["id"]

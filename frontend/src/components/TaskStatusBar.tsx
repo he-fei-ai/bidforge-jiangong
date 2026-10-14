@@ -132,14 +132,28 @@ const TASK_TYPE_LABELS: Record<string, string> = {
 };
 const taskTypeLabel = (t: string) => TASK_TYPE_LABELS[t] || t || "后台任务";
 
-const STATUS_META: Record<string, { label: string; color: string }> = {
+/**
+ * 任务状态 → 展示元数据。
+ *
+ * ✅ 2026-10-11 起导出：状态栏此前对未知状态直接吐英文原文（`statusMeta` 的兜底
+ * 分支），degraded 因此显示成英文字面量。导出后由
+ * `src/tests/contentTerminalParity20261011.test.ts` 的 E 组锁定「所有终态都必须
+ * 有中文名」，新增后端状态时会立刻红，而不是悄悄显示在用户面前。
+ */
+export const STATUS_META: Record<string, { label: string; color: string }> = {
   running: { label: "运行中", color: "#00D4FF" },
   paused: { label: "已暂停", color: "#FAAD14" },
   completed: { label: "已完成", color: "#52C41A" },
+  // ✅ 2026-10-11：补后端 2026-10-07 引入的加法式终态 degraded。
+  //    旧 STATUS_META 没有这一档 ⇒ 降级完成的任务在状态栏显示**原始英文**
+  //    "degraded"（被 statusMeta 的兜底分支原样吐出），且在下方「最近完成/失败」
+  //    列表里配红色 ✕ 图标（`done` 只认 completed），语义与"已完成但含未修复
+  //    缺陷"完全相反。用琥珀色以区别于绿色（完全成功）与红色（失败）。
+  degraded: { label: "降级完成", color: "#FA8C16" },
   failed: { label: "失败", color: "#FF4D4F" },
   stopped: { label: "已停止", color: "#8C8C8C" },
 };
-const statusMeta = (s: string) => STATUS_META[s] || { label: s || "未知", color: "#8C8C8C" };
+export const statusMeta = (s: string) => STATUS_META[s] || { label: s || "未知", color: "#8C8C8C" };
 
 function fmtDuration(sec?: number | null): string {
   const s = Math.max(0, Math.floor(sec || 0));
@@ -555,12 +569,17 @@ function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
             </div>
             {finishedRecent.map((t) => {
               const meta = statusMeta(t.status);
-              const done = t.status === "completed";
+              // ✅ 2026-10-11：degraded 不能再用「非 completed 就是 ✕」的二分
+              //    —— 它已完成（可导出、可继续），只是含未修复缺陷。
+              //    用 MinusCircleOutlined 而非 CloseCircleOutlined 表达"部分达成"，
+              //    避免用户误以为整次生成失败去重跑。
               return (
                 <Tooltip key={t.id} title={t.message || undefined} placement="left">
                   <div className="bp-task-recent-row">
-                    {done ? (
+                    {t.status === "completed" ? (
                       <CheckCircleOutlined style={{ color: meta.color }} />
+                    ) : t.status === "degraded" ? (
+                      <MinusCircleOutlined style={{ color: meta.color }} />
                     ) : (
                       <CloseCircleOutlined style={{ color: meta.color }} />
                     )}

@@ -51,7 +51,9 @@ class TestWordBudgetHint:
         cr_src = inspect.getsource(crt)
         # 续写：给出「补充后总字数上限」
         assert "补充后总字数上限" in cr_src
-        assert "int(word_budget * 1.1)" in cr_src
+        # ✅ R66（2026-10-11）：1.1 系数参数化为 total_cap_factor（默认 1.1），
+        #    锚点同步为参数名形态（语义不变：续写必须给出总字数上限折算）。
+        assert "int(word_budget * total_cap_factor)" in cr_src
 
 
 class TestPromptWordCountControl:

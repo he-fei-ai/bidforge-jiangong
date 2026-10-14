@@ -17,6 +17,7 @@ from .mermaid_common import (
     _image_font,
     _image_to_stream,
     _render_hq,
+    paper_floor_note,
 )
 
 logger = logging.getLogger(__name__)
@@ -272,7 +273,7 @@ def _render_comparison_image_v2(data: dict) -> BytesIO | None:
     title_h = int(56 * scale)
     padding = int(30 * scale)
     pie_size = int(340 * scale)
-    bar_chart_w = int(480 * scale)
+    bar_chart_w = int(540 * scale)
     bar_chart_h = int(320 * scale)
     bar_row_h = int(38 * scale)
 
@@ -405,7 +406,7 @@ def _render_comparison_image_v2(data: dict) -> BytesIO | None:
         _max_val_text_w = max(_max_val_text_w, _vb[2] - _vb[0])
     bar_max_w = max(
         int(160 * scale),
-        bar_chart_w - int(120 * scale) - int(20 * scale) - _max_val_text_w,
+        bar_chart_w - int(160 * scale) - int(20 * scale) - _max_val_text_w,
     )
 
     max_value = max(r["value"] for r in parsed_rows)
@@ -413,7 +414,7 @@ def _render_comparison_image_v2(data: dict) -> BytesIO | None:
     row_height = (chart_h - int(20 * scale)) / max(n_rows, 1)
 
     # 标签区宽度不足时截断加省略号，避免与柱子/数值互相重叠
-    _label_max_w = int(112 * scale)
+    _label_max_w = int(152 * scale)
     for i, row in enumerate(parsed_rows):
         color = palette[i % len(palette)]
         cy = bar_y + int(20 * scale) + i * row_height
@@ -425,9 +426,9 @@ def _render_comparison_image_v2(data: dict) -> BytesIO | None:
         # 阴影
         draw.rounded_rectangle(
             [
-                bar_x + int(120 * scale) + int(2 * scale),
+                bar_x + int(160 * scale) + int(2 * scale),
                 cy - int(4 * scale),
-                bar_x + int(120 * scale) + bar_w + int(2 * scale),
+                bar_x + int(160 * scale) + bar_w + int(2 * scale),
                 cy + int(16 * scale),
             ],
             radius=int(4 * scale),
@@ -436,9 +437,9 @@ def _render_comparison_image_v2(data: dict) -> BytesIO | None:
         # 主体
         draw.rounded_rectangle(
             [
-                bar_x + int(120 * scale),
+                bar_x + int(160 * scale),
                 cy - int(6 * scale),
-                bar_x + int(120 * scale) + bar_w,
+                bar_x + int(160 * scale) + bar_w,
                 cy + int(14 * scale),
             ],
             radius=int(4 * scale),
@@ -449,7 +450,7 @@ def _render_comparison_image_v2(data: dict) -> BytesIO | None:
             bbox = draw.textbbox((0, 0), f"{row['value']:.0f}", font=font_bar_value)
             tw_v = bbox[2] - bbox[0]
             draw.text(
-                (bar_x + int(120 * scale) + bar_w / 2 - tw_v / 2, cy - int(4 * scale)),
+                (bar_x + int(160 * scale) + bar_w / 2 - tw_v / 2, cy - int(4 * scale)),
                 f"{row['value']:.0f}",
                 fill="white",
                 font=font_bar_value,
@@ -459,7 +460,7 @@ def _render_comparison_image_v2(data: dict) -> BytesIO | None:
         pct = (row["value"] / total) * 100
         value_text = f"{row['value']:.1f} ({pct:.1f}%)"
         draw.text(
-            (bar_x + int(120 * scale) + bar_w + int(8 * scale), cy - int(7 * scale)),
+            (bar_x + int(160 * scale) + bar_w + int(8 * scale), cy - int(7 * scale)),
             value_text,
             fill="#374151",
             font=font_value,
@@ -475,6 +476,13 @@ def _render_comparison_image_v2(data: dict) -> BytesIO | None:
         font=font_caption,
     )
 
+    paper_floor_note(
+        "对比图",
+        [font_title, font_label, font_value, font_pct, font_caption, font_bar_value],
+        img.size[0], img.size[1],
+        primary=[font_label],
+        suggest="（行标签是主文字，饼/条共用一张画布）",
+    )
     result_stream = _image_to_stream(img)
     size_kb = len(result_stream.getvalue()) // 1024
     logger.info(

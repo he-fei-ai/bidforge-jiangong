@@ -44,6 +44,9 @@ CHECKPOINT_KINDS: dict[str, tuple[str, tuple[str, ...]]] = {
             "word_count",
             "run_words",
             "over_count",
+            # ✅ R66（2026-10-11）字数可追溯：逐章目标/实际/偏差汇总
+            #    （word_audit_summary 结构；审核预检与断线重挂共用）。
+            "word_audit",
         ),
     ),
 }
@@ -69,6 +72,7 @@ CHECKPOINT_FIELD_TYPES: dict[str, dict[str, str]] = {
         "word_count": "int",
         "run_words": "int",
         "over_count": "int",
+        "word_audit": "dict",
     },
 }
 

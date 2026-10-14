@@ -206,14 +206,31 @@ class TestEventPayloads:
 
         统计前先剔除注释行：缺口说明注释里会引用 `standard_report()` 字面量，
         直接对全文件计数会把注释误判成第二次调用。
+
+        ✅ R77（2026-10-14）：调用点从 1 放宽到**恰好 2**，但第二次是**条件性
+        重算**且位置被钉死 —— 事实冲突定点修复（content_fact_autofix）生效后，
+        报告必须按**修复后正文**重算，否则 error_count/issues 与落库正文对不上
+        号（用户按报告里的证据 excerpt 在正文里找不到，重蹈 2026-09-25「编号
+        规范化在 standard_report 之后」的口径分叉）。该重算受
+        `if _fa_res.get("applied"):` 门控：无冲突章节、冲突未修复章节都不重扫
+        （原护栏「每章白跑一遍正则」的成本缺陷不会回归）。
+        ⚠️ 若未来需要第三个调用点，必须先在这里显式登记并说明门控条件，
+        不允许静默增加。
         """
         code_only = "\n".join(
             ln for ln in _SRC.splitlines() if not ln.lstrip().startswith("#"))
         calls = re.findall(r"standard_report\(", code_only)
-        # 1 处导入 + 1 处调用（导入行是 `standard_report,` 不带括号，故此处应为 1）
-        assert len(calls) == 1, (
-            f"standard_report 应只在落库处调用一次，实际 {len(calls)} 次"
-            "（事件侧重复扫描 = 每章白跑一遍正则）")
+        assert len(calls) == 2, (
+            f"standard_report 应只在落库处调用一次 + 事实修复后条件性重算一次，"
+            f"实际 {len(calls)} 次（事件侧重复扫描 = 每章白跑一遍正则）")
+        # 第二次调用必须位于事实冲突定点修复块内（条件性重算，不是无脑双扫）
+        autofix_at = code_only.index("autofix_section_fact_conflicts(")
+        second_at = code_only.index("report = standard_report(", autofix_at)
+        assert second_at > autofix_at, (
+            "条件性重算被移出事实冲突修复块了（失去 applied 门控即退化为"
+            "每章双扫）")
+        # 重算必须发生在写锁之前（与原护栏同一纪律：CPU 扫描不进锁）
+        assert second_at < code_only.index("async with _db_write_lock:")
 
 
 # ============================================================

@@ -14,7 +14,7 @@ B. **【P2 口径不对称】正文生成链截断告知**
    事实提取链（``generate_facts``）早已发 warning。现三链对齐。
 
 C. **【P2 前端交互】目录库弹窗导入空结果覆盖树** —— 见前端
-   ``outlineLibraryImport.test.ts``（本文件不覆盖）。
+   ``OutlineLibraryEditModal.test.tsx``（本文件不覆盖）。
 
 D. **【P2 假成功】写路径 rowcount 校验缺口**
    ``delete_document`` / ``update_document_category`` 只判游标 None（503），

@@ -38,6 +38,17 @@ from app.services.chart_validators import (
     infer_chart_type_from_payload,
 )
 from app.services.numbering import strip_outline_numbering
+# ✅ R76（2026-10-13）：围栏闭合判据唯一事实源。本模块的 parse_fence_line
+#    保留历史签名与 lang 语义（图表三侧的上百处引用 + 既有测试的导入名不动），
+#    但「这一行是不是闭合行」的判定一律下沉 fence_common —— 旧实现只比对围栏
+#    字符，把「反引号后带语言标签」的行当作闭合，实测在块内提前闭合后让下一个
+#    裸围栏行变成新开围栏、把其后正文整段吞进代码块（state=eof），而前端 marked
+#    （CommonMark）判该行为正文保留 —— 预览与导出反向分叉（BUG-F2）。
+from app.services.fence_common import (  # noqa: E402
+    is_fence_close as _fence_is_close,
+    looks_like_prose as _looks_like_prose,
+    parse_fence_line as _fence_parse_line,
+)
 
 logger = logging.getLogger("content_blocks")
 # 围栏工具沿用原 logger 名，日志来源保持不变（不改变运维检索习惯）
@@ -110,6 +121,19 @@ _TABLE_CAPTION_RE = re.compile(
     r"^表\s*(?:[:：]\s*"
     r"|[0-9一二三四五六七八九十][0-9.\-–—]*[\s、.：:]+)"
     r"(\S.*)$")
+# ✅ 2026-10-10（文档质量报告 修复6 · 格式问题7）：AI 常返回 HTML `<table>` 而非
+#    GFM 表格，旧实现无法识别，整张表以裸文本（含 <table>/<tr>/<td> 标签）印进交付
+#    DOCX。现把 HTML 表格解析为 GFM 行、复用既有 `type: table` 块与
+#    `export._add_table_from_markup` 渲染路径（逐字节无损、不引入新依赖）：
+#    源正文里仍是 HTML（审计侧 html_tag 仍会提示用户改源文），但成稿已是真实表格。
+_HTML_TABLE_OPEN_RE = re.compile(r"^\s*<table\b", re.I)
+_HTML_TABLE_CLOSE_RE = re.compile(r"</table\s*>", re.I)
+_HTML_TR_RE = re.compile(r"<tr\b.*?</tr>", re.I | re.S)
+_HTML_TD_RE = re.compile(r"<t[hd]\b[^>]*>(.*?)</t[hd]>", re.I | re.S)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_HTML_NBSP_RE = re.compile(r"&nbsp;|&#160;", re.I)
+_HTML_DEC_NUM_RE = re.compile(r"&#(\d+);")
+_HTML_DEC_HEX_RE = re.compile(r"&#x([0-9a-fA-F]+);")
 # ✅ 2026-10-05（D4 · 编号剥离分叉收口）：`_TITLE_NUM_STRIP_RES` 已删除 ——
 #    标题编号剥离的唯一实现是 numbering.strip_outline_numbering（见 _strip_title_number）。
 
@@ -301,6 +325,59 @@ def _extract_table_caption(blocks: list[dict]) -> str:
     return title
 
 
+def _html_unescape(text: str) -> str:
+    """还原常见 HTML 实体（不引入 html 库，覆盖表格单元格实际会出现的形态）。"""
+    t = _HTML_NBSP_RE.sub(" ", text)
+    t = (t.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+           .replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'"))
+
+    def _num(m: "re.Match") -> str:
+        try:
+            return chr(int(m.group(1)))
+        except (ValueError, OverflowError):
+            return m.group(0)
+
+    t = _HTML_DEC_NUM_RE.sub(_num, t)
+    t = _HTML_DEC_HEX_RE.sub(
+        lambda m: (chr(int(m.group(1), 16))
+                   if len(m.group(1)) <= 6 else m.group(0)),
+        t)
+    return t
+
+
+def _html_cell_text(raw: str) -> str:
+    """单元格原文 → 纯文本（去标签、还原实体、折叠空白）。"""
+    t = _HTML_TAG_RE.sub("", raw)
+    t = _html_unescape(t)
+    return _RE_WS_RUN.sub(" ", t).strip()
+
+
+def _html_table_to_gfm(html_text: str) -> list[str] | None:
+    """把一段 HTML `<table>…</table>` 解析为 GFM 表格行列表。
+
+    无法解析（无 `<tr>`/无单元格）返回 None，由调用方降级为纯文本段落。
+    首行视为表头（与 GFM 表格语义、导出端首行加粗一致）；列数取各行最大值，
+    短行右侧补空，保证 `_add_table_from_markup` 不越界。
+    """
+    trs = _HTML_TR_RE.findall(html_text)
+    if not trs:
+        return None
+    rows: list[list[str]] = []
+    for tr in trs:
+        cells = _HTML_TD_RE.findall(tr)
+        if not cells:
+            continue
+        rows.append([_html_cell_text(c) for c in cells])
+    if not rows:
+        return None
+    ncols = max(len(r) for r in rows)
+    norm = [r + [""] * (ncols - len(r)) for r in rows]
+    gfm = ["| " + " | ".join(norm[0]) + " |",
+           "| " + " | ".join(["---"] * ncols) + " |"]
+    gfm.extend("| " + " | ".join(r) + " |" for r in norm[1:])
+    return gfm
+
+
 def _clean_chart_title(raw, limit: int = 40) -> str:
     """图题清洗：折叠空白、限长（载荷 title 原样保留语义，不做激进裁剪）。"""
     return _RE_WS_RUN.sub("", str(raw or "").strip())[:limit]
@@ -478,6 +555,22 @@ def _parse_content_blocks(content: str) -> list[dict]:
                     if lang.lower() not in _CHART_FENCE_LANGS:
                         code_lines = code_lines[:_cut]
                     i -= _give_back
+                elif lang.lower() not in _CHART_FENCE_LANGS:
+                    # ✅ BUG 修复（2026-10-14 · P1 未闭合围栏吞噬正文）：
+                    #    旧实现只在**找到**句读行时才回退 code_lines；找不到时
+                    #    （截断点之后是项目符号列表 / 表格 / 英文 / 无标点内容——
+                    #    AI 生成被 max_tokens 截断时非常常见）code_lines 保持
+                    #    "消费至文件末尾"的整段，随后落入通用 code 分支被**当成
+                    #    代码块原样印进交付 DOCX**：正文以等宽字体输出、失去段落
+                    #    缩进与标题层级，而用户端只有一条 logger.warning，
+                    #    完全无从得知正文已被吞。
+                    #    图表家族围栏本来就走"未闭合 → 跳过"（不产出图），普通围栏
+                    #    无可渲染的代码语义；宁可不输出，也不把正文当代码印。
+                    logger.warning(
+                        "围栏未闭合（lang=%s）且其后无中文句读行，无法定位正文起点："
+                        "已整块跳过 %d 行，避免把正文当代码块输出", lang, len(code_lines))
+                    _pop_orphan_lead_in_block(blocks)
+                    continue
             if lang.lower() == "mermaid":
                 # ✅ 修复（2026-09-19）：未闭合围栏（实测由 max_tokens 截断产生，
                 #    如 `flowchart LR` 只写到 `B --> C{`）不得产出图表块 ——
@@ -649,6 +742,40 @@ def _parse_content_blocks(content: str) -> list[dict]:
             else:
                 for tl in tbl_lines:
                     blocks.append({"type": "paragraph", "text": tl})
+            continue
+        # ✅ 修复6（文档质量报告 · 格式问题7）：AI 常返回 HTML `<table>` 而非 GFM 表格。
+        #    旧实现无法识别 → 整张表（含 <table>/<tr>/<td> 标签）以裸文本印进交付 DOCX。
+        #    现把 HTML 表格解析为 GFM 行、产出与上方同款的 `type: table` 块，复用
+        #    `export._add_table_from_markup` 渲染为真实 Word 表格（源正文仍保留 HTML，
+        #    审计侧 html_tag 仍提示用户改源文，渲染侧则已无损转化）。
+        if _HTML_TABLE_OPEN_RE.match(stripped):
+            _html_lines = [line]
+            _close_idx = None
+            _k = i + 1
+            while _k < len(lines):
+                _html_lines.append(lines[_k])
+                if _HTML_TABLE_CLOSE_RE.search(lines[_k]):
+                    _close_idx = _k
+                    break
+                _k += 1
+            if _close_idx is not None:
+                _gfm = _html_table_to_gfm("\n".join(_html_lines))
+                if _gfm:
+                    _tbl = {"type": "table", "lines": _gfm}
+                    # ✅ 与 GFM 表格同口径：吸收紧邻上方的「表 X-Y 表名」行作表题
+                    _cap = _extract_table_caption(blocks)
+                    if _cap:
+                        _tbl["caption"] = _cap
+                    blocks.append(_tbl)
+                else:
+                    # 解析失败（无 <tr>/无单元格）→ 降级为纯文本段落，不静默丢表
+                    for _hl in _html_lines:
+                        blocks.append({"type": "paragraph", "text": _hl})
+                i = _close_idx + 1
+                continue
+            # 未找到闭合标签 → 仅当前行当普通段落，继续推进（避免死循环/重复消费）
+            blocks.append({"type": "paragraph", "text": line})
+            i += 1
             continue
         # ✅ AI 配图（文生图，正文里的 Markdown 图片）：独占一行时按"图"渲染。
         #    与图表（mermaid/chart-json 代码）属不同模态：这里消费的是真实位图。
@@ -930,8 +1057,10 @@ def _compute_subheading(section_prefix: str, section_level: int,
     return text, style
 
 
-_FENCE_LINE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})([^`~\n]*)$")
-_CJK_TAIL_RE = re.compile(r"[，。；：！？…]\s*$")
+# ✅ R76（2026-10-13）：_FENCE_LINE_RE / _CJK_TAIL_RE 两份本地副本已删除，
+#    闭合判据与「疑似正文」判据改由顶部 app.services.fence_common 提供（别名
+#    _fence_is_close 与 _looks_like_prose）。留下本地字面量不仅重复，还会**遮蔽**
+#    同名导入（导入在前、赋值在后 → 委托失效），属本仓「同一判据两份取值」高危形态。
 
 
 def parse_fence_line(line: str) -> tuple[str, int, str] | None:
@@ -956,17 +1085,12 @@ def parse_fence_line(line: str) -> tuple[str, int, str] | None:
     改写代码块时若把开围栏统一写回 3 个反引号，4 反引号围栏会被降级 →
     正文出现新的未闭合围栏、其后正文被整段吞进代码块。
 
-    语义上有意**比 CommonMark 宽松**：闭围栏只看同种字符、不要求长度 ≥ 开围栏、
-    也不排除带标签（见 read_fenced_block）。原因：AI 输出高频出现
-    ``4 反引号开 + 3 反引号闭`` 的错配，严格判未闭合会让整块图表被丢弃；
-    而 content_utils.find_unclosed_fences 的严格实现只用于"文档末尾悬着半块围栏"
-    的落库前自动补齐，两者用途不同、互不冲突。
+    长度容错（不要求 ≥ 开围栏）不在本函数、而在闭合判定
+    ``fence_common.is_fence_close``；信息串维度的口径已于 R76 收紧 —— 带标签的
+    围栏行是**内容**，不得当闭合（旧实现把带标签行当闭合，实测在块内提前闭合后
+    让下一个裸围栏行变成新开围栏、把其后正文整段吞进代码块，见 BUG-F2）。
     """
-    m = _FENCE_LINE_RE.match(line)
-    if not m:
-        return None
-    marker = m.group(1)
-    return marker[0], len(marker), m.group(2).strip()
+    return _fence_parse_line(line)
 
 
 def read_fenced_block(lines: list[str], body_start: int,
@@ -996,9 +1120,8 @@ def read_fenced_block(lines: list[str], body_start: int,
     code_lines: list[str] = []
     i = body_start
     while i < len(lines):
-        pf = parse_fence_line(lines[i])
-        if pf is not None and pf[0] == open_char:
-            # 命中闭合围栏（同种字符；长度判据见 parse_fence_line 的宽松语义说明）
+        if _fence_is_close(lines[i], open_char, open_len, tolerant_length=True):
+            # 命中闭合围栏：同种字符 + **信息串必须为空**（R76 BUG-F2）+ 长度容错
             break
         code_lines.append(lines[i])
         i += 1
@@ -1007,25 +1130,26 @@ def read_fenced_block(lines: list[str], body_start: int,
             _j = i
             _extra = 0
             while (_j < len(lines)
-                   and not (parse_fence_line(lines[_j]) is not None
-                            and parse_fence_line(lines[_j])[0] == open_char)
+                   and not _fence_is_close(lines[_j], open_char, open_len,
+                                           tolerant_length=True)
                    and _extra <= max_lines):
                 _j += 1
                 _extra += 1
-            if _j < len(lines) and parse_fence_line(lines[_j]) is not None \
-                    and parse_fence_line(lines[_j])[0] == open_char:
+            if _j < len(lines) and _fence_is_close(lines[_j], open_char, open_len,
+                                                   tolerant_length=True):
                 _extended = code_lines + lines[i:_j]
                 # 防误吞守卫：图表代码行（Mermaid 语句 / JSON）不会以中文句读收尾；
                 # 围栏内混入句读行 = "未闭合块吞正文"，仍按未闭合处理。
-                if not any(_CJK_TAIL_RE.search(ln) for ln in _extended):
+                # ✅ R76：判据下沉 fence_common.looks_like_prose，与落库补齐告警
+                #    （auto_fix 的 swallowed_prose）同一实现，不再两份字面量。
+                if not any(_looks_like_prose(ln) for ln in _extended):
                     return _extended, "recovered", _j + 1
             _pipe_logger.warning(
                 "内联代码块超过 %d 行且窗口内无干净闭合，判为未闭合（截断点行号=%d）",
                 max_lines, i)
             return code_lines, "truncated", i
     # 循环正常结束：要么命中结束围栏（break 退出），要么到达 EOF。
-    if i < len(lines):
-        _pf_end = parse_fence_line(lines[i])
-        if _pf_end is not None and _pf_end[0] == open_char:
-            return code_lines, "closed", i + 1
+    if i < len(lines) and _fence_is_close(lines[i], open_char, open_len,
+                                          tolerant_length=True):
+        return code_lines, "closed", i + 1
     return code_lines, "eof", len(lines)

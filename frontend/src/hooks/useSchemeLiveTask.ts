@@ -13,6 +13,8 @@
 import { useEffect, useRef, useState } from "react";
 import { tasksApi } from "../api";
 import { pushActivity, setLiveTask as setStoreLiveTask } from "../utils/activityCenter";
+// ✅ 2026-10-11：终态集合统一取 utils/contentEvents 的单一事实源，杜绝再次内联三态
+import { isTerminalTaskStatus } from "../utils/contentEvents";
 
 export type LiveTask = {
   id: string;
@@ -30,6 +32,37 @@ export type LiveTask = {
 // 轮询量直接 ↓80%，缓解「前端轮询风暴」对后端连接池/审计查询的压力。
 export const ACTIVE_POLL_MS = 3000;
 export const IDLE_POLL_MS = 15000;
+
+/**
+ * ✅ 遗留项 #1 加固（2026-10-11 · degraded 孤儿终态第 5 处）：
+ * 后台任务终态文案（纯函数，可单测）。
+ *
+ * 旧实现把「终态」内联写成三态 `completed/failed/stopped`，漏掉后端
+ * 2026-10-07 引入的加法式终态 `degraded`（一致性修复有失败项时的正文终态）。
+ * 后果与其余四处同源：`degraded` 既不满足终态判定，`onFinished()` 就永远不触发
+ * ⇒ 后台跑完的降级任务不自动刷新页面、消息中心也不留痕，用户以为还在跑。
+ *
+ * @returns null 表示不是终态（调用方不得据此做任何收尾动作）
+ */
+export function liveTaskFinishMessage(
+  status: string, label: string, message?: string,
+): { level: "success" | "warning" | "info"; text: string } | null {
+  if (!isTerminalTaskStatus(status)) return null;
+  const suffix = message && status !== "completed" ? `：${message}` : "";
+  if (status === "completed") {
+    return { level: "success", text: `后台「${label}」任务已完成，数据已刷新` };
+  }
+  if (status === "degraded") {
+    return {
+      level: "warning",
+      text: `后台「${label}」任务降级完成：一致性修复有失败项，成稿含未修复缺陷${suffix}`,
+    };
+  }
+  if (status === "failed") {
+    return { level: "warning", text: `后台「${label}」任务失败，请检查后重试${suffix}` };
+  }
+  return { level: "info", text: `后台「${label}」任务已停止${suffix}` };
+}
 
 /** 依据「当前是否有运行/暂停任务」决定下一次轮询间隔（纯函数，供单测）。 */
 export function liveTaskPollIntervalMs(hasActiveTask: boolean): number {
@@ -124,17 +157,12 @@ export function useSchemeLiveTask(
             continue;
           }
           if (t.status === before) continue;
-          if (t.status === "completed" || t.status === "failed" || t.status === "stopped") {
-            // ✅ 后台消息只进消息中心（全局 Header 气泡展示），不再弹重复 toast
-            if (!suppress) {
-              pushActivity(
-                t.status === "completed" ? "success" : t.status === "failed" ? "warning" : "info",
-                `后台「${label}」任务${
-                  t.status === "completed" ? "已完成，数据已刷新" : t.status === "failed" ? "失败，请检查后重试" : "已停止"
-                }${t.message && t.status !== "completed" ? `：${t.message}` : ""}`,
-                "后台任务"
-              );
-            }
+          // ✅ 2026-10-11：终态判定改用单一事实源（补 degraded），文案改由纯函数产出。
+          //    旧实现内联三态 ⇒ 降级完成的后台任务**不会被判为终态**：
+          //    onFinished() 不触发（页面不自动刷新）、消息中心不留痕。
+          const fin = liveTaskFinishMessage(t.status, label, t.message);
+          if (fin) {
+            if (!suppress) pushActivity(fin.level, fin.text, "后台任务");
             optsRef.current?.onFinished?.();
           }
         }

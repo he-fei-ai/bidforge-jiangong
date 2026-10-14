@@ -357,20 +357,36 @@ class TestDbReadStrictMode:
             "宽限期过短会删掉刚降级返回、仍在流式读取的产物"
 
     def test_docx_calls_gc_in_both_return_paths(self):
-        """DOCX 有两条交付路径（degraded 提前返回 + 正常返回），两条都必须回收。"""
+        """DOCX 有两条交付路径（degraded 提前返回 + 正常返回），两条都必须走统一收尾。
+
+        ✅ 2026-10-14 收口后：GC + protect 透传在 _finalize_export_delivery 内，
+        路由两条路径各调一次且都带 gc_protect={out_path}。
+        """
         src = inspect.getsource(E.export_docx)
-        calls = re.findall(r"_gc_orphan_exports\(db,\s*scheme_id,\s*protect=\{out_path\}\)", src)
+        calls = re.findall(r"_finalize_export_delivery\(", src)
         assert len(calls) == 2, \
-            "degraded 分支与正常分支必须各调用一次（均带 protect）"
+            "degraded 分支与正常分支必须各调用一次统一收尾"
+        assert src.count("gc_protect={out_path}") == 2, \
+            "两条路径都必须 protect 本次产物（避免被 GC 当孤儿删）"
+        # helper 内部确实调用 GC（防未来把 GC 从收尾里摘掉）
+        assert "_gc_orphan_exports(" in inspect.getsource(E._finalize_export_delivery)
 
     def test_pdf_calls_gc_before_returning_in_memory_bytes(self):
-        """PDF 响应体是内存字节 → 调用点必须在 return Response 之前且不保护任何文件。"""
+        """PDF 响应体是内存字节 → 收尾调用必须在 return Response 之前且不 protect。
+
+        ✅ 2026-10-14 收口后：PDF 走 _finalize_export_delivery，不传 gc_protect
+        （内存字节无需 protect 磁盘产物）；inflight_path 用条件表达式承担旧
+        `if not degraded` 守卫。
+        """
         src = inspect.getsource(E.export_pdf)
-        i_gc = src.index("await _gc_orphan_exports(db, scheme_id)")
+        i_fin = src.index("_finalize_export_delivery(")
         i_ret = src.index("return Response(")
-        assert i_gc < i_ret
-        assert "protect" not in src[i_gc:i_gc + 90], \
+        assert i_fin < i_ret, "收尾必须在返回之前"
+        call_seg = src[i_fin:i_ret]
+        assert "gc_protect" not in call_seg, \
             "PDF 返回体已是内存字节，无需也不得 protect 磁盘产物"
+        assert "inflight_path=(out_path if not degraded else None)" in call_seg, \
+            "PDF 注销须用条件表达式承担旧 `if not degraded` 守卫"
 
     def test_degraded_path_is_the_only_tmp_returner_and_it_protects(self):
         """只有 degraded 提前返回 + 正常返回两条路径会交付磁盘产物，均须带 protect。"""

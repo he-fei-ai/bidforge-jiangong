@@ -348,6 +348,11 @@ for r in (projects, schemes, sections, sse_handlers,
           bid_analysis, doc_pipeline, prompts):
     app.include_router(r.router)
 
+# ✅ 2026-10-09 拆分：global_facts_docs 文档管理子路由（同 prefix）
+from app.routers import global_facts_docs as _gfd
+
+app.include_router(_gfd.router)
+
 # ✅ R48（2026-10-06）：prompts 运行时指标 + 硬编码→DB 一键同步。
 #    这两个路由挂在独立前缀（/system、/admin/prompts），不在上面的
 #    /api/v1/prompts 命名空间下，故在此单独注册。

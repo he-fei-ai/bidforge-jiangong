@@ -336,3 +336,71 @@ export function contentResultSummary(
     overCount: typeof cr.over_count === "number" ? cr.over_count : 0,
   };
 }
+
+// ===========================================================================
+// 终态判定单一事实源（2026-10-10 · `degraded` 孤儿终态修复）
+// ===========================================================================
+
+/**
+ * 后台任务的**完整**终态集合。
+ *
+ * ⚠️ ``degraded`` 是后端 2026-10-07（P0-3，一致性修复静默失败）引入的加法式
+ * 终态：正文已落库、可导出，但全文一致性修复有失败项，需提示用户重跑。
+ * 前端三处轮询（页面重挂 / 接管轮询 / hook 断线重挂）与一处 SSE 终态分支此前
+ * 都只认 ``completed/failed/stopped`` —— ``degraded`` 落到这些地方的表现是：
+ *   · 轮询类：既不命中终态、也不命中「progress 满但仍在 running」的兜底
+ *     ⇒ 页面卡在「正在重新挂接后台任务…」直到轮询上限（页面 200×3s≈10min；
+ *     hook 是**无上限** setTimeout 递归 ⇒ 永久挂死）；
+ *   · SSE 类：不 break、不 load()、不提示 ⇒ 正文不刷新、成稿含未修复缺陷
+ *     而用户毫无感知。
+ * 三者都静默发生，是同一批现场的关键偶发问题。故把终态集合下沉为常量，
+ * 各处一律经 ``isTerminalTaskStatus`` / ``isTerminalContentEvent`` 判定。
+ */
+export const TERMINAL_TASK_STATUSES = [
+  "completed", "degraded", "failed", "stopped",
+] as const;
+
+/** SSE 正文生成链路的终态事件名（``completed`` 与 ``degraded`` 同语义需一起收口）。 */
+export const CONTENT_TERMINAL_EVENTS = ["completed", "degraded"] as const;
+
+/**
+ * 任务 status 是否属于终态（GET /sse/task/{id} 的 ``status`` 字段）。
+ *
+ * 防御式：非字符串/空值一律非终态（未知状态宁可继续轮询，也不要提前收尾
+ * 把「仍在跑」误判为结束 —— 方向相反的误判才不可接受）。
+ */
+export function isTerminalTaskStatus(status: unknown): boolean {
+  return typeof status === "string"
+    && (TERMINAL_TASK_STATUSES as readonly string[]).includes(status);
+}
+
+/** SSE 事件是否为正文生成终态事件（``completed`` 或 ``degraded``）。 */
+export function isTerminalContentEvent(evt: unknown): boolean {
+  const name = (evt && typeof evt === "object"
+    ? (evt as Record<string, unknown>).event
+    : undefined);
+  return typeof name === "string"
+    && (CONTENT_TERMINAL_EVENTS as readonly string[]).includes(name);
+}
+
+/**
+ * 降级完成（``degraded``）时的一致性修复失败提示文案。
+ *
+ * 取数按后端优先级：终态事件顶层 ``consistency_failed``（degraded 时后端一定带）
+ * → ``consistency_summary.failed``（兜底）→ 无。
+ *
+ * 非降级 / 无失败信息时返回空串，调用方据此决定是否额外提示（零噪音）。
+ */
+export function degradedConsistencyHint(evt: unknown): string {
+  if (!evt || typeof evt !== "object") return "";
+  const e = evt as Record<string, unknown>;
+  if (e.event !== "degraded") return "";
+  const direct = e.consistency_failed;
+  const nested = (e.consistency_summary && typeof e.consistency_summary === "object"
+    ? (e.consistency_summary as Record<string, unknown>).failed
+    : undefined);
+  const n = typeof direct === "number" ? direct
+    : (typeof nested === "number" ? nested : 0);
+  if (n <= 0) return "";
+  return `⚠️ 降级完成：一致性修复 ${n} 处失败，成稿含未修复缺陷，建议重跑一致性修复`;
+}

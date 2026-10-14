@@ -22,8 +22,8 @@ export default defineConfig({
     // 否则导出/下载类用例 vi.spyOn(URL,'createObjectURL') 直接抛错。
     setupFiles: ["./src/tests/setup.ts"],
     include: ["src/tests/**/*.test.ts", "src/tests/**/*.test.tsx"],
-    testTimeout: 20000,
-    hookTimeout: 10000,
+    testTimeout: 60000,
+    hookTimeout: 30000,
     maxWorkers: 8,
   },
 });

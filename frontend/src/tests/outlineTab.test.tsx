@@ -721,8 +721,8 @@ describe("outlineToTreeNode（导入识别结果 → 本地临时树）", () => 
     expect(isUnsavedLocalKey(tree[1].key)).toBe(true);
     // 有 id 的节点保留 id 作为 key（保存后由后端按 __original_id 匹配）
     expect(tree[0].key).toBe("n1");
-    // 默认预算 1500、初始态；description 不丢
-    expect(tree[1].word_budget).toBe(1500);
+    // 默认预算 1200（R66 标准档）、初始态；description 不丢
+    expect(tree[1].word_budget).toBe(1200);
     expect(tree[1].status).toBe("empty");
     expect(tree[1].word_count).toBe(0);
     expect(tree[0].description).toBe("总体说明");
@@ -1057,9 +1057,9 @@ describe("outlineToTreeNode（导入识别 / AI 调整结果 → 本地树）", 
     expect(inputEl().value).toBe("2600");
   });
 
-  it("word_budget 为 0 / 缺省 → 回退 1500 参与计算", () => {
+  it("word_budget 为 0 / 缺省 → 回退 1200 参与计算（R66 标准档）", () => {
     const { input } = setupBudget(mkNode({ word_budget: 0 }));
-    expect(input().value).toBe("1500");
+    expect(input().value).toBe("1200");
   });
 });
 

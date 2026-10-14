@@ -18,9 +18,9 @@ const { renderMock, ensureMermaidMock, nextMermaidIdMock, chartsRenderMock, char
     ensureMermaidMock: vi.fn(async () => ({ render: renderMock })),
     nextMermaidIdMock: vi.fn(() => "mmd-test-id"),
     chartsRenderMock: vi.fn(async () => ({ data: new Uint8Array([137, 80, 78, 71]) })),
-    // 返回结构与后端 fix-mermaid 响应对齐（code / written_back / content_updated / new_content）
+    // 返回结构与后端 fix-mermaid 响应对齐（code / written_back / content_updated / new_content / word_count）
     chartsFixMock: vi.fn(async (_p?: Record<string, unknown>) => ({
-      data: { code: "", written_back: false, content_updated: false, new_content: "" },
+      data: { code: "", written_back: false, content_updated: false, new_content: "", word_count: 0 },
     })),
   }));
 
@@ -127,7 +127,8 @@ describe("MarkdownRenderer P1-6 优化行为", () => {
     // 第一次 mermaid.render（坏代码）失败，第二次（修复结果）走默认成功实现
     renderMock.mockRejectedValueOnce(new Error("Parse error on line 2"));
     chartsFixMock.mockResolvedValueOnce({
-      data: { code: fixedCode, written_back: true, content_updated: true, new_content: "重写后的正文" },
+      // ✅ F2（R71）：后端正文重写后回带权威 word_count，随 new_content 一并上抛。
+      data: { code: fixedCode, written_back: true, content_updated: true, new_content: "重写后的正文", word_count: 6 },
     });
     const onContentReplaced = vi.fn();
     const { container } = render(
@@ -152,9 +153,9 @@ describe("MarkdownRenderer P1-6 优化行为", () => {
         section_id: "sec-abc",
       });
     });
-    // ✅ 后端已重写正文 → 通知父组件同步预览状态
+    // ✅ 后端已重写正文 → 通知父组件同步预览状态（带后端权威字数，供优先取用）
     await waitFor(() => {
-      expect(onContentReplaced).toHaveBeenCalledWith("重写后的正文");
+      expect(onContentReplaced).toHaveBeenCalledWith("重写后的正文", 6);
     });
   });
 
@@ -162,7 +163,7 @@ describe("MarkdownRenderer P1-6 优化行为", () => {
     const badCode = "sequenceDiagram\n  A->>?B: hi";
     renderMock.mockRejectedValueOnce(new Error("Parse error"));
     chartsFixMock.mockResolvedValueOnce({
-      data: { code: "sequenceDiagram\n  A->>B: hi", written_back: false, content_updated: false, new_content: "" },
+      data: { code: "sequenceDiagram\n  A->>B: hi", written_back: false, content_updated: false, new_content: "", word_count: 0 },
     });
     const onContentReplaced = vi.fn();
     const { container } = render(

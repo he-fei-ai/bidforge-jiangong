@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.db import get_db, read_db
 from app.models import SchemeCreate, SchemeUpdate
+from app.services.content_utils import DEFAULT_WORD_BUDGET
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}/schemes", tags=["schemes"])
 
@@ -276,7 +277,7 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
         inserts.append((
             nid, new_id, project_id, new_parent,
             s["title"], s.get("description", ""), s.get("level", 1),
-            "empty", s.get("word_budget", 1500), s.get("sort_order", 0),
+            "empty", s.get("word_budget", DEFAULT_WORD_BUDGET), s.get("sort_order", 0),
             s.get("outline_json", ""), s.get("locked", 0),
         ))
     if inserts:

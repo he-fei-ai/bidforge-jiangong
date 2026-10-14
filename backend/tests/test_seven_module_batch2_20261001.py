@@ -66,10 +66,38 @@ def test_a1_aggregate_semantics_documented():
 
 
 def test_a1_budget_ge_parsed_chars_cap():
-    """预算不应低于入库上限（MAX_PARSED_CHARS=400000），否则解析成果被二次浪费。"""
-    gf = _src(GF_PATH)
-    assert "MAX_PARSED_CHARS = 400_000" in gf or "MAX_PARSED_CHARS = 400000" in gf
+    """预算不应低于入库上限（MAX_PARSED_CHARS=400000），否则解析成果被二次浪费。
+
+    ✅ 2026-10-11 · R70 判据升级：原断言只检查 ``global_facts.py`` 源码里出现
+    ``MAX_PARSED_CHARS = 400_000`` 字面量 —— 而该常量在这个文件里**从未被生产
+    代码读取**（真正的截断写入在 ``global_facts_docs.py``），等于钉住了一份死副本。
+    R70 已把两份收敛为单一事实源（``global_facts`` 改为 import 别名），
+    故此处改为钉住「上限值真的生效且只有一份定义」。
+    """
+    from app.routers import global_facts as gf_mod
+    from app.routers import global_facts_docs as gfd_mod
     from app.config import Settings
+
+    cap = gf_mod.MAX_PARSED_CHARS
+    assert cap >= 400_000, f"入库上限回退：{cap}"
+    # 单一事实源：两个命名空间必须是同一个值（别名关系，不再是两份字面量）
+    assert gfd_mod.MAX_PARSED_CHARS == cap, (
+        "MAX_PARSED_CHARS 出现两份不同取值（global_facts 未指向写侧单一事实源）")
+    # 字面量只允许出现在写侧一处
+    def _literal_defs(path):
+        out = 0
+        tree = ast.parse(_src(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name) and t.id == "MAX_PARSED_CHARS":
+                        out += 1
+        return out
+
+    assert _literal_defs(GF_PATH) == 0, "global_facts.py 不得再自行定义该上限"
+    assert _literal_defs(os.path.join(BACKEND, "app", "routers",
+                                      "global_facts_docs.py")) == 1, (
+        "global_facts_docs.py 必须是该上限的唯一定义处")
     assert Settings().bid_analysis_segment_budget >= 400000
 
 

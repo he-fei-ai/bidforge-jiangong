@@ -110,6 +110,65 @@ _CHART_PER_SECTION_LIMIT = 1
 _CHART_SCHEME_TYPE_DEFAULT_LIMIT = 3
 _CHART_SCHEME_TYPE_LIMITS = {"ai_image": 6}
 
+#: ✅ R58（2026-10-10）：提示词里「章节字数 ≤ 200 字不配图」的程序侧同口径阈值
+#: （与 prompts/content.py「何时配图」段落一致 —— 同一判据不得两处各写一份）。
+_CHART_MIN_WORDS = 200
+
+#: 配额提示的展示顺序（flowchart/gantt 优先，ai_image 最后）。
+_QUOTA_HINT_TYPES = ("flowchart", "gantt", "architecture", "labor",
+                     "comparison", "layout", "timeline", "ai_image")
+
+
+def build_chart_quota_hint(type_counts: dict | None = None, *,
+                           word_budget: int = 0,
+                           per_section_limit: int = _CHART_PER_SECTION_LIMIT) -> str:
+    """生成「本章图表配额」提示片段（**纯函数、零 DB**）。
+
+    ✅ R58（2026-10-10）：补上《标书智能体（六）》「程序拍板、AI 提名」里缺失的
+    **反向通知**那一半 —— 过去程序只在生成后按上限**删**图（``build_inline_chart_plan``
+    enforce_limits），但 AI 在写正文时**完全不知道**全方案已用掉多少配额，于是
+    前半本把 3 张 gantt 用光、后半本再画 gantt 必被删：既浪费一次生成，又让用户
+    看到「明明写了图却没有」的现象（删图可观测性里体现为 scheme_type_limit）。
+
+    本函数把「已用/剩余」实时算给 AI，让它**在配额内提名**，从源头减少删图。
+
+    ⚠️ 刻意**不**做「预编排」（预先指定本章画什么图）：
+      1. 旧预编排读 ``chart_predictions`` 做规划，重新生成时会读到上一次的
+         **陈旧结论**（见 sse_handlers 正文图表段的实证注释），已刻意删除；
+      2. 本函数只读**计数**（当前真实占用），不读任何「规划」字段；
+      3. 是否配图、配哪种图仍由 AI 自主判定 —— 配额只是约束不是指令。
+    ⚠️ 并发生成时多章可能读到同一份快照（提示偏乐观），硬限额仍是最终兜底；
+       这是**软提示**，偏乐观的代价远小于完全没有提示。
+
+    Args:
+        type_counts: ``{chart_type: 已用数量}``，由 ``_load_scheme_type_counts``
+            提供（已排除本章）。为空表示全方案尚未占用。
+        word_budget: 本章目标字数（< ``_CHART_MIN_WORDS`` 时建议不配图）。
+        per_section_limit: 本章（叶子小节）图表块上限，默认取模块常量。
+
+    Returns:
+        多行提示文本；以换行结尾。
+    """
+    counts = dict(type_counts or {})
+    lines: list[str] = []
+    for ct in _QUOTA_HINT_TYPES:
+        limit = _CHART_SCHEME_TYPE_LIMITS.get(ct, _CHART_SCHEME_TYPE_DEFAULT_LIMIT)
+        used = int(counts.get(ct, 0) or 0)
+        rest = max(0, limit - used)
+        if rest:
+            lines.append(f"- {ct}：剩余 {rest} 个（全方案上限 {limit}，已用 {used}）")
+        else:
+            lines.append(
+                f"- {ct}：已达全方案上限（{used}/{limit}），本章若再配该类型必被删除")
+    out = ("\n【本章图表配额（程序实时核算；超出上限的图表会被程序自动删除，"
+           "请据此决定是否配图、配哪种）】：\n")
+    out += "\n".join(lines) + "\n"
+    out += f"（本章最多 {per_section_limit} 个图表块"
+    if word_budget and word_budget < _CHART_MIN_WORDS:
+        out += f"；本章目标字数仅 {word_budget} 字，量化内容少，建议不配图"
+    out += "）\n"
+    return out
+
 # ✅ BUG 修复（2026-09-22，幽灵图口径分叉）：单代码块最大行数保护阈值。
 #    旧实现本模块内部私有 500 行，而导出侧（export.py）另有一份 8000 **字符**上限，
 #    单位与阈值都不同：一份 500 行 / 约 3000 字符的超长围栏会被**登记侧**判为
@@ -128,14 +187,17 @@ MAX_INLINE_CODE_BLOCK_LINES = _CONTENT_BLOCKS_MAX_INLINE_CODE_BLOCK_LINES
 INLINE_CHART_FENCE_LANGS = _CONTENT_BLOCKS_INLINE_CHART_FENCE_LANGS
 
 # 围栏内行尾出现中文句读 = 该"代码块"实际混入了正文段落（未闭合块吞正文的特征）。
-# 图表代码行（Mermaid 语句 / JSON）不会以句读收尾；与导出侧
-# _parse_content_blocks 的"以句读行还原正文"启发式共用同一判据。
-_CJK_TAIL_RE = re.compile(r"[，。；：！？…]\s*$")
+# ✅ R76（2026-10-13）：本模块曾有 `_CJK_TAIL_RE` / `_FENCE_LINE_RE` **两份零引用
+#    悬空副本**（注释自称"唯一事实来源"，实际全文件没有任何一处使用 —— 正是本仓
+#    最易复发的"第二份副本"陷阱：后续会话照着注释以为改这里就三侧同步）。
+#    判据唯一事实源在 ``app.services.fence_common``（``looks_like_prose`` /
+#    ``FENCE_LINE_RE`` / ``is_fence_close``），由下沉后的 ``content_blocks``
+#    ``read_fenced_block`` 消费，本模块经它间接共享同一口径。
+#    与导出侧 _parse_content_blocks 的"以句读行还原正文"启发式共用同一判据。
 
-# ---------- 围栏行解析（唯一事实来源，2026-09-24） ----------
-# 独立成行的围栏标记：最多 3 个前导空白 + 反引号/波浪号 ≥ 3 个 + 可选语言标签。
-# 与 content_utils._FENCE_LINE_RE 保持同口径，避免"检测侧/登记侧/导出侧"再次分叉。
-_FENCE_LINE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})([^`~\n]*)$")
+# ---------- 围栏行解析（唯一事实来源，2026-09-24 · R76 判据再下沉一层） ----------
+# parse_fence_line / read_fenced_block 由 content_blocks 转发（见文件头 import），
+# 其闭合判据来自 services/fence_common；本模块不再持有任何围栏字面量正则。
 
 
 def is_fence_line(line: str) -> bool:

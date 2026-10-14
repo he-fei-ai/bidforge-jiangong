@@ -337,8 +337,14 @@ async def test_load_parsed_docs_empty_project_id(db_conn):
 
 @pytest.fixture
 async def gf_ctx(tmp_path, monkeypatch):
-    """真实磁盘库 + 隔离上传目录（批量解析需要文件真实落盘）。"""
-    _appdb.DB_PATH = tmp_path / "file-import.sqlite"
+    """真实磁盘库 + 隔离上传目录（批量解析需要文件真实落盘）。
+
+    ⚠️ R74（G4）：DB_PATH 必须经 monkeypatch 切换 —— 旧实现裸赋值
+    `_appdb.DB_PATH = tmp_path/...` **不还原**，同一 pytest 进程里后续
+    所有直接读 DB_PATH 的用例都会看到测试退出后已失效的临时路径
+    （跨用例污染的同族形态）。
+    """
+    monkeypatch.setattr(_appdb, "DB_PATH", tmp_path / "file-import.sqlite")
     await init_db()
     db = await get_conn()
     uploads = tmp_path / "uploads" / "facts"

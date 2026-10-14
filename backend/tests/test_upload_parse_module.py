@@ -214,6 +214,51 @@ async def test_parse_lock_released_after_concurrent_parse(ctx):
     assert doc_id not in gf._doc_parse_locks
 
 
+async def test_parse_guard_reuses_lock_while_waiter_queued():
+    """✅ 并发竞态回归（2026-10-10）：等待者排队期间，新到请求必须复用同一把锁。
+
+    旧实现「退出守卫即从字典删条目」：A 持锁 → B 排队 → A 退出（条目被删，
+    B 已接棒持锁）→ 新请求 C 查不到条目 → 新建一把锁 → C 与 B **并发解析
+    同一文档**，重新打开「重复 OCR / 后写覆盖 / 分块重复写入」窗口。
+    修复后条目带引用计数，仅在最后一个使用者退出时回收。
+    """
+    doc_id = "guard-race-doc"
+    ctx_a = gf._doc_parse_guard(doc_id)
+    await ctx_a.__aenter__()                       # A 持锁
+    entry = gf._doc_parse_locks[doc_id]
+    assert entry.users == 1
+    ctx_b = gf._doc_parse_guard(doc_id)
+    b_enter = asyncio.create_task(ctx_b.__aenter__())  # B 排队
+    await asyncio.sleep(0)                         # 让 B 完成等待者登记
+    assert entry.users == 2                        # A 持有 + B 排队
+    await ctx_a.__aexit__(None, None, None)        # A 退出（旧实现此刻删条目）
+    await b_enter                                  # B 接棒持锁
+    assert gf._doc_parse_locks.get(doc_id) is entry
+    # C 新到：必须复用同一锁条目（旧实现此处是新建 → 竞态）
+    ctx_c = gf._doc_parse_guard(doc_id)
+    c_enter = asyncio.create_task(ctx_c.__aenter__())  # C 排队（B 仍持锁）
+    await asyncio.sleep(0)                         # 让 C 完成等待者登记
+    assert gf._doc_parse_locks.get(doc_id) is entry
+    assert entry.users == 2                        # B 持有 + C 排队
+    await ctx_b.__aexit__(None, None, None)        # B 退出（users 2→1，条目保留）
+    await c_enter                                  # C 接棒持锁
+    assert gf._doc_parse_locks.get(doc_id) is entry
+    assert entry.users == 1
+    await ctx_c.__aexit__(None, None, None)
+    # 全部退出 → 回收
+    assert doc_id not in gf._doc_parse_locks
+
+
+async def test_parse_guard_recovers_entry_after_exception():
+    """守卫体内抛异常：引用计数仍归零、条目回收（异常路径不泄漏）。"""
+    doc_id = "guard-error-doc"
+    with pytest.raises(RuntimeError, match="boom"):
+        async with gf._doc_parse_guard(doc_id):
+            assert gf._doc_parse_locks[doc_id].users == 1
+            raise RuntimeError("boom")
+    assert doc_id not in gf._doc_parse_locks
+
+
 # ---------------------------------------------------------------------------
 # 跨模块可观测性：解析失败状态透传（parse_status='failed' + 原因持久化）
 # ---------------------------------------------------------------------------

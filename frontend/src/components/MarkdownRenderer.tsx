@@ -4,6 +4,13 @@ import DOMPurify from "dompurify";
 import { chartsApi } from "../api";
 import { ensureMermaid, nextMermaidId } from "./mermaidRuntime";
 import { CHART_TITLE_FALLBACK, RENDERABLE_CHART_TYPES } from "../utils/chartTypes";
+// ✅ R76（2026-10-13）：围栏判据唯一事实源（前端侧），与后端
+//   services/fence_common.py 同一语义。行锚定 + 同种字符 + 信息串必须为空 + 长度容错。
+import {
+  normalizeFenceCloses,
+  replaceChartFences,
+  scanFenceBlocks,
+} from "../utils/fencePreprocess";
 
 // ✅ KaTeX 公式渲染：动态加载 katex（模块级缓存，多实例共享一次加载）
 let _katexPromise: Promise<any> | null = null;
@@ -73,8 +80,8 @@ interface MarkdownRendererProps {
   content: string;
   /** 章节 ID：传入后 AI 修复结果会写回 chart_predictions 并同步重写章节正文（导出一致） */
   sectionId?: string;
-  /** 后端重写正文成功后回调（参数为修复后的完整章节正文），父组件据此同步预览状态 */
-  onContentReplaced?: (newContent: string) => void;
+  /** 后端重写正文成功后回调（参数为修复后的完整章节正文 + 后端权威字数），父组件据此同步预览状态 */
+  onContentReplaced?: (newContent: string, wordCount?: number) => void;
 }
 
 // ✅ 性能优化：memo 化组件本体（解析结果另有 useMemo 记忆化），父页任何无关
@@ -105,28 +112,25 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
 
     // ✅ BUG修复：未闭合的 mermaid/chart-json 代码块会让非贪婪正则匹配到
     // 下一个 ```（可能是其他代码块的开始），导致内容错位/吞噬。
-    // 预处理：逐行检测未闭合的图表代码块，在文末补闭合围栏。
-    const _lines = debouncedContent.split("\n");
-    let _inChartBlock = false;
-    let _chartBlockStart = -1;
-    for (let _i = 0; _i < _lines.length; _i++) {
-      const _t = _lines[_i].trim();
-      if (_t.startsWith("```mermaid") || _t.startsWith("```chart-json") || _t.startsWith("```ai_image")) {
-        _inChartBlock = true;
-        _chartBlockStart = _i;
-      } else if (_inChartBlock && _t.startsWith("```")) {
-        _inChartBlock = false;
-      }
-    }
-    let _safeContent = debouncedContent;
-    if (_inChartBlock) {
-      console.warn("MarkdownRenderer: 检测到未闭合的图表代码块（起始行 %d），已自动补闭合", _chartBlockStart + 1);
-      _safeContent = debouncedContent + "\n```\n";
+    // ✅ R76（2026-10-13）：围栏判定从「三条内联 startsWith + 一条全局正则」改为
+    //    共用 utils/fencePreprocess（与后端 services/fence_common 同一语义）：
+    //      · 行锚定扫描、块内不再解析新围栏、首个未闭合处停止；
+    //      · 同种字符 + **信息串必须为空**才算闭合（旧实现里块内的 "```python"
+    //        会被当收尾，把其后正文吞进图块 —— 后端 read_fenced_block 同族 BUG-F2）；
+    //      · 认 4 个及以上反引号与 ~~~ 波浪围栏（旧实现只认恰好 3 个反引号，
+    //        ````mermaid 与 ~~~mermaid 在预览里整块不识别、源码直接印在页面上，
+    //        而后端登记/导出都认 —— 预览与导出反向分叉）；
+    //      · 「4 开 + 3 闭」的闭合行标记补齐到开围栏长度（与落库防线同一个动作）。
+    const _norm = normalizeFenceCloses(debouncedContent);
+    if (_norm.repairs.length > 0) {
+      console.warn(
+        "MarkdownRenderer: 围栏预处理归一 %d 处：%s",
+        _norm.repairs.length,
+        _norm.repairs.map((r) => `${r.action}@第${r.line}行`).join("、"),
+      );
     }
 
-    const processed = _safeContent.replace(
-      /```(mermaid|chart-json|ai_image)\s*\n([\s\S]*?)```/g,
-      (_m, lang: string, code: string) => {
+    const processed = replaceChartFences(_norm.text, (lang, code) => {
         const id = nextMermaidId("mmd");
         const marker = `${markerPrefix}${counter}__`;
         if (lang === "chart-json") {
@@ -165,9 +169,11 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
           placeholders.push({ marker, code: code.trim(), id });
         }
         counter++;
-        return `\n<div class="mmd-ph" data-marker="${marker}"></div>\n`;
-      }
-    );
+        // 占位 div 单独成行：段间**空行**由 replaceChartFences 统一插入（`<div>` 开启的
+        // HTML block 只有空行才结束，单换行会把紧随的正文吸进同一 block、丢掉 `<p>`），
+        // 这里再带 \n 会出现多余空行 → marked 产出空白 <p></p>
+        return `<div class="mmd-ph" data-marker="${marker}"></div>`;
+    }).text;
 
     // ✅ KaTeX 公式提取：在 marked 解析前把 $$...$$ / $...$ 替换为占位符，
     //    避免被 marked 当作普通文本转义。逐行扫描跳过 ``` 代码围栏内的内容，
@@ -175,14 +181,16 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
     let mathContent = processed;
     const _extractMath = (src: string): string => {
       const lines = src.split("\n");
-      let inFence = false;
+      // ✅ R76：围栏保护区改用同一套行锚定扫描（旧实现用 `startsWith("```")` 取反
+      //    切换 inFence —— 波浪围栏完全不认、块内任何以 ``` 开头的行（含带标签的）
+      //    都会错误翻转状态，把代码里的 $ 当公式抽走）。
+      const inFence = new Set<number>();
+      for (const b of scanFenceBlocks(src)) {
+        const end = b.closeLine < 0 ? lines.length - 1 : b.closeLine;
+        for (let k = b.openLine; k <= end; k++) inFence.add(k);
+      }
       for (let i = 0; i < lines.length; i++) {
-        const t = lines[i].trim();
-        if (t.startsWith("```")) {
-          inFence = !inFence;
-          continue;
-        }
-        if (inFence) continue;
+        if (inFence.has(i)) continue;
         lines[i] = lines[i]
           // 块级公式 $$...$$（可跨行不行——按行内非贪婪处理，跨行块级公式罕见）
           .replace(/\$\$([^$\n]+?)\$\$/g, (_m, tex: string) => {
@@ -270,7 +278,10 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
           // ✅ 后端已同步重写章节正文：通知父组件刷新预览状态，
           // 否则切走再切回 / 重渲染后旧坏代码会再次出现，且与导出内容不一致
           if (resp?.data?.content_updated && resp?.data?.new_content) {
-            onContentReplacedRef.current?.(resp.data.new_content as string);
+            // ✅ F2（R71）：后端已重写正文并回带权威 word_count，随正文一并上抛，
+            //    使父组件优先取后端字数，不本地伪造字符口径（老后端无该字段时为 undefined）。
+            const _wc = typeof resp.data.word_count === "number" ? resp.data.word_count : undefined;
+            onContentReplacedRef.current?.(resp.data.new_content as string, _wc);
           }
         } else {
           target.textContent = "修复返回空代码";

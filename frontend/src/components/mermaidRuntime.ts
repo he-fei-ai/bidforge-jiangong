@@ -30,13 +30,16 @@ export async function ensureMermaid(): Promise<any> {
       securityLevel: "loose",
       fontFamily: "'Microsoft YaHei', sans-serif",
       flowchart: { useMaxWidth: true },
+      // ✅ 2026-10-11 R66 流程图统一样式规范（双模式）：淡紫底 #f0edff + 紫边框 #a89aff
+      //    + 深灰文字，与后端 PIL 流程图渲染器（mermaid_flowchart.py）同一套配色，
+      //    预览 / 导出 PNG / 后端兜底三条渲染轨所见一致。
       themeVariables: {
-        primaryColor: "#1677ff",
-        primaryTextColor: "#333",
-        primaryBorderColor: "#1677ff",
-        lineColor: "#666",
-        secondaryColor: "#e6f4ff",
-        tertiaryColor: "#f5f5f5",
+        primaryColor: "#f0edff",
+        primaryTextColor: "#333333",
+        primaryBorderColor: "#a89aff",
+        lineColor: "#333333",
+        secondaryColor: "#F3F0FF",
+        tertiaryColor: "#F7F7FD",
       },
     });
     mermaidMod = m;

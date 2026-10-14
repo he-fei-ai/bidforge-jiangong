@@ -282,6 +282,11 @@ export interface ReadinessOverview {
   //    （compliance / consistency / consistency_scan / expert_review）。旧 AI 结论
   //    被跳过后不计分也不进清单 —— 不回显则该维度的问题**永远静默漏报**且无提示。
   stale_ai_sources?: string[];
+  // ✅ R76（2026-10-13）：**读取失败**而未参与评分的来源（系统故障，区别于上方
+  //    stale_ai_sources 的「结论过期」）。2026-10-12 后端 P1-6 新增该字段，前端
+  //    此前类型未声明、UI 零消费 —— 某一路来源读取失败时总分 / 放行结论可能
+  //    失真且用户毫无感知。为空即表示六路来源全部正常参与。
+  failed_sources?: string[];
 }
 
 /** 预检历史（分数趋势） */

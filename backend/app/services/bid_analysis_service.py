@@ -36,6 +36,10 @@ from typing import Optional
 #    `_registry` / `_cache` 都不反向依赖本模块，环在此被打断。
 from app.services.ai.prompts._cache import get_prompt
 from app.services.ai.prompts._registry import _reg
+# ✅ R76b · G1：围栏保护区间委托全仓唯一事实源。`fence_common` 是仅依赖 `re` 的
+#    叶子模块（不反向引用本模块、也不经 `ai.prompts` 包顶层），因此这里可以安全地
+#    顶层 import —— 与上面「必须从叶子模块直取」的约束不冲突。
+from app.services.fence_common import fence_char_ranges
 
 logger = logging.getLogger("bid_analysis")
 
@@ -1212,8 +1216,10 @@ DEFAULT_CHUNK_OVERLAP = 500
 #     · 多级边界优先级：标题/空行 > 换行 > 句末标点 > 分号 > 逗号/冒号，逐级放宽。
 # ---------------------------------------------------------------------------
 
-#: 围栏起始行（CommonMark：行首 ≤3 空格 + ≥3 个连续 ` 或 ~）
-_FENCE_LINE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+#: ⚠️ R76b · G1：此处原有的行锚定围栏正则副本已删除。它只判「同种字符 + 长度 ≥」
+#: 而**不判闭合行不得带信息串**，于是块内 ```json 这类行会被当成收尾（实测保护区
+#: 被拆成两段、其后的 {"k": 1} 与裸 ``` 落到保护区外），分块断点得以落在围栏中间
+#: —— 正是本模块注释声明要避免的「把代码块从中间切断」。判据现由 fence_common 单一供给。
 
 #: 边界优先级分组（越靠前越优先），在每个分组内挑「离理想断点最近且不在代码块内」者。
 #: 断点取匹配结束位置（分隔符之后），使标点/换行归属当前段。
@@ -1337,30 +1343,22 @@ def _find_natural_cut(text: str, radius: int, state: dict,
 def _collect_fence_ranges(text: str) -> list[tuple[int, int]]:
     """收集 Markdown 代码围栏覆盖的字符区间 ``[start, end)``（含围栏行本身）。
 
-    未闭合的围栏延伸到文末。对齐 OpenBidKit
-    ``userTextSplitter.collectMarkdownFenceRanges``，并遵循 CommonMark：
-    闭合围栏须与开围栏同种字符且长度不小于开围栏长度。
+    ✅ R76b · G1：本函数由「自写状态机」改为**一行委托**全仓唯一事实源
+    ``fence_common.fence_char_ranges``。原实现有两处与 CommonMark / 渲染侧分叉：
+
+      1. **不判闭合行不得带信息串** —— 块内 ```` ```json ```` 被当成收尾，保护区
+         被拆成两段，其间的 ``{"k": 1}`` 与其后的裸 ```` ```` 落到保护区**外**，
+         断点可以合法落在围栏中间（探针实测：``[(1,4), (5,6)]`` 对唯一事实源
+         ``[(1,6)]``）。这正是本模块注释声明要避免的「把代码块从中间切断」。
+      2. 闭合要求 ``len(marker) >= len(opened)``（严格长度）—— 「4 开 + 3 闭」会被
+         判未闭合并把保护区**延伸到文末**，把后面的正常正文也圈进去，反而让
+         ±窗口内找不到任何可用断点而退回硬切。落库正文已由
+         ``content_utils.auto_fix_unclosed_fences`` 在写入前补齐闭合标记长度，
+         故采用渲染侧的容错口径（``tolerant_length=True``）与图表三侧一致。
+
+    未闭合的围栏延伸到文末（由 ``fence_char_ranges`` 保证，语义不变）。
     """
-    ranges: list[tuple[int, int]] = []
-    opened_at = -1
-    opened_marker = ""
-    pos = 0
-    for line in text.split("\n"):
-        m = _FENCE_LINE_RE.match(line)
-        if m:
-            marker = m.group(1)
-            if opened_at < 0:
-                opened_at = pos
-                opened_marker = marker
-            elif (marker[0] == opened_marker[0]
-                  and len(marker) >= len(opened_marker)):
-                ranges.append((opened_at, pos + len(line)))
-                opened_at = -1
-                opened_marker = ""
-        pos += len(line) + 1  # +1 还原被 split 去掉的换行符
-    if opened_at >= 0:
-        ranges.append((opened_at, len(text)))
-    return ranges
+    return fence_char_ranges(text)
 
 
 def _inside_fence(idx: int, ranges: list[tuple[int, int]]) -> bool:

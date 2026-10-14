@@ -144,9 +144,10 @@ def normalize_architecture_tree(data: Any) -> dict | None:
 
 
 # ============================================================================
-# 流程图（施工流程图 / 工艺流程图，横向 chart-json 载荷）
-# 2026-09-18 横向流程图样张改版：与 architecture 同思路——校验侧与渲染侧共用
+# 流程图（施工流程图 / 工艺流程图 chart-json 载荷）
+# 2026-09-18 样张改版：与 architecture 同思路——校验侧与渲染侧共用
 # 同一套归一规则，避免"渲染器能画、校验器判非法 → 删块"。
+# 2026-10-11 统一样张：缺省方向由 LR 改为纵向 TD（自上而下）。
 # ============================================================================
 
 _FLOW_VARIANTS = {"start", "end", "process", "decision", "highlight"}
@@ -157,7 +158,7 @@ def normalize_flowchart_data(data: Any) -> dict | None:
 
     兼容形态：
       · ``{"type":"flowchart","steps":[{"id","label","variant"}],"edges":[{"from","to","label"}]}``
-        —— 施工/工艺横向流程图规范载荷（direction 缺省 LR）
+        —— 施工/工艺流程图规范载荷（direction 缺省 TD，2026-10-11 统一样张）
       · ``{"nodes":[...], "edges":[...]}`` —— 历史 JSON 形态（direction 缺省 TD）
       · nodes 元素可为字符串 / 数字 / 对象；edges 元素可为 dict / [from,to] / "A --> B"
       · 容器别名：steps≡nodes、links≡edges、variant≡type、name≡label
@@ -242,8 +243,9 @@ def normalize_flowchart_data(data: Any) -> dict | None:
     if direction == "TB":
         direction = "TD"
     if direction not in ("TD", "LR", "RL", "BT"):
-        # steps 形态（施工/工艺横向流程图）缺省横向；历史 nodes 形态保持纵向
-        direction = "LR" if ("steps" in data and "direction" not in data) else "TD"
+        # ✅ 2026-10-11 统一样张：所有流程图缺省纵向 TD（自上而下），
+        #    steps 形态不再缺省 LR；载荷显式给出的 direction 原样保留
+        direction = "TD"
 
     return {
         "nodes": nodes,

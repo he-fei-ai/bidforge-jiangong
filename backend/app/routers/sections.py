@@ -11,6 +11,7 @@ from app.config import settings
 from app.db import get_db
 from app.models import SectionCreate, SectionUpdate
 from app.routers.review import reset_review_on_content_change  # ✅ G9：正文变更→退回待审核
+from app.services import facts_extractor as _fe
 from app.services.ai.json_response import (
     OUTLINE_REPAIR_KEY,
     collect_json_response,
@@ -46,6 +47,7 @@ from app.services.content_shrink import (
     shrink_content_rounds,
 )
 from app.services.content_utils import (
+    DEFAULT_WORD_BUDGET,
     WORD_OVER_RATIO,
     auto_fix_unclosed_fences,
     text_word_count,
@@ -499,7 +501,7 @@ async def create_section(scheme_id: str, data: SectionCreate, db=Depends(get_db)
     if content_generation_in_progress(scheme_id):
         logger.warning("create_section 409 冲突：scheme_id=%s 正文正在生成中", scheme_id)
         raise HTTPException(409, "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再新增章节")
-    cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
+    cur = await db.execute(_fe.SCHEME_PROJECT_ID_SQL, (scheme_id,))
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "方案不存在")
@@ -669,8 +671,19 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
             fields["content"], _fence_fixes = auto_fix_unclosed_fences(
                 fields["content"] or "")
             if _fence_fixes:
-                logger.info("章节 %s 手动保存：补齐未闭合围栏 %d 处",
-                            section_id[:8], len(_fence_fixes))
+                # ✅ R76（F4 可观测性）：与生成链路同口径 —— 分「闭合标记长度归一」
+                # 与「文末追加闭合」两类计数，追加类若疑似困住正文则升级 WARNING，
+                # 不再用一句「补齐 N 处」把两种性质不同的动作混为一谈。
+                _n_norm = sum(1 for f in _fence_fixes
+                              if f.get("action") == "normalize_close_length")
+                _n_append = sum(1 for f in _fence_fixes
+                                if f.get("action") == "append_close")
+                _swallowed = sum(int(f.get("swallowed_prose") or 0) for f in _fence_fixes)
+                logger.info("章节 %s 手动保存：围栏闭合标记归一 %d 处、文末追加闭合 %d 处",
+                            section_id[:8], _n_norm, _n_append)
+                if _swallowed:
+                    logger.warning("章节 %s 手动保存：追加闭合前有 %d 行疑似正文困在围栏块内，"
+                                   "请人工核对该章内容", section_id[:8], _swallowed)
         except Exception as e:
             logger.warning("章节 %s 手动保存围栏补齐失败（使用原文）: %s",
                            section_id[:8], e)
@@ -690,12 +703,12 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
                 fields["status"] = "generated"
         # ✅ 修复：本次同时提交新 word_budget 时用新预算计算 word_status（旧实现用 DB 旧值）
         if "word_budget" in fields:
-            wb = fields["word_budget"] or 1500
+            wb = fields["word_budget"] or DEFAULT_WORD_BUDGET
         else:
             cur = await db.execute("SELECT word_budget FROM sections WHERE id=?", (section_id,))
             row = await cur.fetchone()
-            wb = row[0] if row else 1500
-            wb = wb or 1500
+            wb = row[0] if row else DEFAULT_WORD_BUDGET
+            wb = wb or DEFAULT_WORD_BUDGET
         fields["word_status"] = word_status_for(fields["word_count"], wb)
         # ✅ G9（2026-09-21）：手动改写正文 → 原审核结论已失效，退回「待审核」并留痕。
         # 此前全库只有 review 路由写 review_status：用户重写完已通过的章节后
@@ -782,7 +795,7 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
                 _c = await db.execute(
                     "SELECT word_budget FROM sections WHERE id=?", (section_id,))
                 _r = await _c.fetchone()
-                _wb = (_r[0] if _r else 1500) or 1500
+                _wb = (_r[0] if _r else DEFAULT_WORD_BUDGET) or DEFAULT_WORD_BUDGET
             fields["content"] = _new_content
             fields["word_count"] = text_word_count(_new_content)
             fields["word_status"] = word_status_for(fields["word_count"], _wb)
@@ -1005,7 +1018,7 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
         raise HTTPException(400, "outline 节点格式非法（应为对象数组）")
     if not outline:
         # 空数组 = 清空全部目录
-        cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
+        cur = await db.execute(_fe.SCHEME_PROJECT_ID_SQL, (scheme_id,))
         row = await cur.fetchone()
         if not row:
             raise HTTPException(404, "方案不存在")
@@ -1049,7 +1062,7 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
                            scheme_id[:8], _cleared)
         return _empty_result
 
-    cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
+    cur = await db.execute(_fe.SCHEME_PROJECT_ID_SQL, (scheme_id,))
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "方案不存在")
@@ -1123,7 +1136,7 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
             elif existing and existing.get("word_budget"):
                 word_budget = existing["word_budget"]
             else:
-                word_budget = 1500
+                word_budget = DEFAULT_WORD_BUDGET
             if not is_new:
                 if original_id in matched_db_ids:
                     raise HTTPException(
@@ -1685,7 +1698,7 @@ async def shrink_section(scheme_id: str, section_id: str, db=Depends(get_db)):
     if not row:
         raise HTTPException(404, "章节不存在")
     content = row["content"] or ""
-    word_budget = row["word_budget"] or 1500
+    word_budget = row["word_budget"] or DEFAULT_WORD_BUDGET
     cur_scheme = await db.execute(
         "SELECT name, type FROM schemes WHERE id=?", (scheme_id,))
     srow = await cur_scheme.fetchone()

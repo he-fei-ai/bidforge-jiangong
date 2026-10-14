@@ -14,6 +14,7 @@ findings 再取那一条，保证「用户点的那条」与「系统判的那�
 """
 from __future__ import annotations
 
+# ruff: noqa: I001 —— R13 契约：review_db 必须单独一行，护栏 test_review_db_is_imported 锁
 import logging
 from datetime import datetime
 
@@ -25,8 +26,9 @@ from app.routers.review import reset_review_on_content_change
 # ✅ R13 判空单一出口（2026-10-06）：静态护栏 tests/test_review_r13_closeout_20261006.py
 #    禁止本文件重新出现裸 db.execute。最关键的一处是 _persist_fixed 的正文 UPDATE ——
 #    旧实现丢弃返回值，写没生效时仍返回快照 id，界面报「已修复」而正文未变。
-from app.services import review_db  # noqa: I001 —— R13 契约：必须单独一行，护栏 test_review_db_is_imported 锁
+# noqa: I001 —— R13 契约：review_db 必须单独一行，护栏 test_review_db_is_imported 锁
 from app.services import review_autofix
+from app.services import review_db  # noqa: I001
 from app.services.audit_rules import active_rules
 
 logger = logging.getLogger("review_autofix")
@@ -142,7 +144,8 @@ async def _persist_fixed(db, *, scheme_id: str, rule_id: str,
     """
     from app.routers.sections import invalidate_consistency_scan_cache
     from app.services import repair_record
-    from app.services.content_utils import text_word_count, word_status_for
+    from app.services.content_utils import (
+        DEFAULT_WORD_BUDGET, text_word_count, word_status_for)
     # 修复前快照：回滚的唯一凭据（回滚本身也会再存一份撤销快照）
     snapshot_id = await repair_record.create_snapshot(
         db, scheme_id,
@@ -152,7 +155,7 @@ async def _persist_fixed(db, *, scheme_id: str, rule_id: str,
         row = await review_db.fetch_one(
             db, "SELECT word_budget FROM sections WHERE id=?", (sid,),
             what=f"自动修复落库：读取章节字数预算（section={sid[:8]}）")
-        budget = (row["word_budget"] if row else None) or 1500
+        budget = (row["word_budget"] if row else None) or DEFAULT_WORD_BUDGET
         wc = text_word_count(after)
         # ✅ R13（2026-10-06）：旧实现丢弃返回值 —— 正文 UPDATE 返回 None 时
         #    循环照常走完、commit 成功、函数返回快照 id，端点据此返回 ok=True。

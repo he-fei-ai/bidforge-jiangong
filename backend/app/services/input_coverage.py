@@ -156,7 +156,7 @@ async def build_inventory(db, project_id: str, scheme_id: str,
     #   修法：ok_cnt 改走唯一出口；并补两条 filtered_* 台账（additive，
     #   旧调用方读 available/not_injectable 的行为不变）。
     try:
-        from app.services.facts_extractor import FACTS_GT_COLUMN, get_facts_inject_where
+        from app.services.facts_extractor import FACTS_GT_COLUMN, FACT_SCOPE_SHARED_FRAGMENT, get_facts_inject_where
         # FACTS_GT_COLUMN 自带 `AS gt` 别名，不可重复拼接
         inject_where = get_facts_inject_where()
         # 门控是「A AND B AND C」形式，直接嵌入 CASE WHEN ... THEN 即可
@@ -172,7 +172,7 @@ async def build_inventory(db, project_id: str, scheme_id: str,
             "SUM(CASE WHEN COALESCE(is_simulated,0)=1 THEN 1 ELSE 0 END) AS simulated_cnt, "
             "SUM(LENGTH(COALESCE(content,''))) AS chars "
             "FROM global_facts "
-            "WHERE scheme_id=? OR (project_id=? AND (scheme_id='' OR scheme_id IS NULL)) "
+            "WHERE scheme_id=? OR " + FACT_SCOPE_SHARED_FRAGMENT + " "
             "GROUP BY gt ORDER BY gt", (scheme_id, project_id or ""))
         for r in (await cur.fetchall() or []):
             gt = r["gt"] or "其他事实"

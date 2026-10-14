@@ -23,12 +23,13 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import struct
 import subprocess
 import tempfile
 from pathlib import Path
 
 from app.config import settings
-from app.services.file_parser import ParseError
+from app.services.file_parser import OLE_COMPOUND_HEADERS, ParseError
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,104 @@ _POWERSHELL_OFFICE_CONVERT_SCRIPT = "\n".join([
 def legacy_word_enabled() -> bool:
     """旧版 Word 解析是否启用（配置关闭时按「不支持的格式」处理）。"""
     return bool(getattr(settings, "legacy_office_enabled", True))
+
+
+# ---------- G4（2026-10-12）：OLE 复合文档头结构预检 ----------
+# 损坏 / 被截断的 .doc 若直接送 LibreOffice，会白等一次「单后端转换超时」
+# （默认 120s/后端、最多两后端 ≈ 4 分钟）并占住一个线程池 worker，最终仍只能
+# 得到「转换失败」。这里用纯字节判定在毫秒级早退。
+#
+# ⚠️ 判定只覆盖「合法 CFB 文件的**必要条件**」（头字段值域 + 扇区算术 +
+# 保留索引），绝不做内容语义解析 —— 因此不可能把正常的老版 .doc 误判成
+# 损坏；非 CFB 容器（WPS 新格式 / ZIP）也明确不在本函数职责内，保持旧行为。
+#: CFB 固定头部尺寸（MS-CFB 2.2）
+_CFB_HEADER_SIZE = 512
+#: 保留的扇区索引值下界：0xFFFFFFFB=XSECT / 0xFFFFFFFC=FREESECT /
+#: 0xFFFFFFFE=ENDOFCHAIN / 0xFFFFFFFF=FATSECT（MS-CFB 2.1），均不是真实扇区
+_CFB_RESERVED_SECTORS = 0xFFFFFFFB
+
+
+def validate_ole_compound_header(content: bytes) -> str | None:
+    """校验字节流是否为结构合法的 CFB（OLE 复合文档）。
+
+    Returns:
+        ``None`` = 结构合法，或**不在本函数职责内**（文件太短、不是 CFB
+        容器）—— 交由后续转换后端自行报错，保持旧行为；
+        否则返回可直接展示给用户的失败原因。
+
+    判据（全部是合法 CFB 的必要条件，逐条可证伪）：
+    ① 至少一个完整头部；② 小版本 = 0x3E、大版本 ∈ {3,4}、字节序 = 0xFFFE、
+    扇区位移 ∈ [7,12]、迷你扇区位移 = 6；③ **仅 v4** 必须有 FAT / 目录扇区
+    （v3 允许 FAT 内联在 DIFAT 数组中且规范要求目录扇区数为 0）；④ 头部声明的
+    扇区总数 ≤ 文件实际扇区数（**截断**文件的判据）；⑤ 目录扇区索引必须落在
+    文件内且不是保留值。
+    """
+    if len(content) < _CFB_HEADER_SIZE:
+        return None  # 连一个头都不够，转换后端会快速失败，无需本函数判定
+    if content[:8] not in OLE_COMPOUND_HEADERS:
+        return None  # 非 CFB 容器：保持旧行为，交后端判定
+    # 字段偏移严格对照 MS-CFB 2.2（v3 / v4 同布局）：
+    #   0x18 小版本 · 0x1A 大版本 · 0x1C 字节序 · 0x1E 扇区位移 · 0x20 迷你位移
+    #   0x28 目录扇区数 · 0x2C FAT 扇区数 · 0x30 首个目录扇区
+    #   0x40 迷你 FAT 扇区数 · 0x48 DIFAT 扇区数
+    # ⚠️ 0x34~0x3C 是「事务签名 / 迷你扇区上限 / 首个迷你 FAT 扇区」，不是扇区
+    #    计数：早期版本从这里连读 4 个计数，把真实的 Excel 97 .xls 误判成「截断」。
+    try:
+        minor, major, byte_order, sec_shift, mini_shift = struct.unpack_from(
+            "<HHHHH", content, 0x18)
+        n_dir, n_fat, first_dir = struct.unpack_from("<III", content, 0x28)
+        n_mini = struct.unpack_from("<I", content, 0x40)[0]
+        n_difat = struct.unpack_from("<I", content, 0x48)[0]
+    except Exception:  # pragma: no cover - 偏移量已受头部尺寸约束，纯防御
+        return "OLE 头字段无法解析"
+    if minor != 0x003E:
+        return "OLE 头小版本号非法"
+    if major not in (3, 4):
+        return f"OLE 头大版本号非法（{major}，规范要求 3 或 4）"
+    if byte_order != 0xFFFE:
+        return "OLE 头字节序非法"
+    if not 7 <= sec_shift <= 12:
+        return "OLE 头扇区大小非法"
+    if mini_shift != 6:
+        return "OLE 头迷你扇区大小非法"
+    # ⚠️ 只对 v4 要求「必须有 FAT / 目录扇区」：CFB v3 允许 FAT 内联在 DIFAT
+    #    数组里（num_fat=0），且规范要求 v3 的目录扇区数写 0 —— 真实的
+    #    Excel 97-2003 .xls 就是这种形态，据此判定会误拒正常文件。
+    if major == 4 and n_fat < 1:
+        return "OLE 头声明 FAT 扇区数为 0"
+    if major == 4 and n_dir < 1:
+        return "OLE 头声明目录扇区数为 0"
+    sector = 1 << sec_shift
+    total = (len(content) - _CFB_HEADER_SIZE) // sector
+    declared = n_fat + n_dir + n_mini + n_difat
+    if total < declared:
+        return (f"OLE 头声明的扇区数（{declared}）超出文件实际容量"
+                f"（{total} 个扇区），文件已被截断")
+    # 只校验目录扇区索引 —— 它是整份文件的入口。首个 FAT 扇区索引在 v3 里
+    # 可能合法地指向内联位置，多校验一条只增加误拒风险、收益极小。
+    if first_dir >= _CFB_RESERVED_SECTORS or first_dir >= total:
+        return "OLE 头目录扇区索引越界（文件已损坏）"
+    return None
+
+
+def legacy_ole_preflight_enabled() -> bool:
+    """OLE 头结构预检是否启用（关闭时完全回到旧行为：直接进转换后端）。"""
+    return bool(getattr(settings, "legacy_ole_preflight", True))
+
+
+def ole_preflight_reason(content: bytes) -> str | None:
+    """G4 预检唯一出口：合法 / 非 CFB → ``None``；损坏 → 可读原因。
+
+    ⚠️ 预检自身的任何异常都 **fail-open** 为 ``None``：预检只是加速用的辅助
+    判定，绝不能因为预检自己出错而阻断原本可以成功的老版 Word 解析。
+    """
+    if not legacy_ole_preflight_enabled():
+        return None
+    try:
+        return validate_ole_compound_header(content)
+    except Exception as _e:
+        logger.warning("OLE 头预检自身异常，已跳过预检（fail-open）：%s", _e)
+        return None
 
 
 def find_libreoffice_command() -> str:
@@ -247,6 +346,17 @@ def convert_legacy_word_to_docx(content: bytes, file_name: str) -> tuple[bytes, 
             "请改用 .docx 格式上传")
     if not content:
         raise ParseError("文件内容为空，无法转换")
+
+    # ✅ G4（2026-10-12）：转换前先做廉价的 OLE 头结构校验。损坏 / 被截断的
+    #    上传件在此毫秒级早退，不再白等「单后端转换超时」（默认 120s/后端）。
+    #    放在 `detect_office_backends` 之前：连组件探测的开销都省掉。
+    _ole_reason = ole_preflight_reason(content)
+    if _ole_reason:
+        logger.warning("旧版 Word 文件 OLE 结构异常，跳过转换后端：%s（%s）",
+                       _ole_reason, file_name)
+        raise ParseError(
+            f"旧版 Word 文件已损坏（{_ole_reason}）："
+            "请用 Word/WPS 重新打开并另存为标准 .docx 后重新上传")
 
     ext = (file_name.rsplit(".", 1)[-1].lower()
            if "." in (file_name or "") else "doc")

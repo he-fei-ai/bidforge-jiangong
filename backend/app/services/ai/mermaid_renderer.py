@@ -121,7 +121,23 @@ def _code_cache_ident(mermaid_code) -> str:
 #      直到进程重启才恢复。clear_render_cache 在生产链路零调用，加剧该问题。
 #    修复：把版本号提升为**内存键的第一段**，使内存与磁盘两道缓存同时失效。
 #    （常量上移到此处仅为让 _render_cache_key 可见；定义位置不影响取值。）
-_RENDERER_VERSION = 1
+# R61（2026-10-10）：架构图超宽自动拆图 + 对比表/时间轴/平面布置标签加宽
+#   渲染产物尺寸/形态已变，旧缓存 PNG 必须失效，故版本号 1 -> 2
+# R62（2026-10-10）：拆图**份数**改由纸面毫米决定（16cm 宽 / 22cm 高 双上限）
+#   同一份源码现在会产出尺寸不同的 PNG；不升版本号，历史方案会继续从缓存端拿
+#   R61 那批「越拆越小」的旧图，等于修复在生产上从未生效。故版本号 2 -> 3
+# ✅ R64 再升一版（3 -> 4）：时间轴按纸面毫米折行，同样改变 PNG 尺寸。
+# ✅ R65（2026-10-11）流程图统一样张：配色改淡紫底紫边框、steps 缺省方向 LR -> TD，
+#   同一份流程图源码会产出外观/尺寸都不同的 PNG；不升版本则历史方案继续从缓存拿
+#   旧蓝/琥珀横向图 = 改版从未生效。故版本号 4 -> 5。
+# ✅ R66（2026-10-11 流程图统一样式规范 · 双模式）：配色改浅紫（#f0edff/#a89aff）、
+#   单链几何按方向改 280×80（竖）/200×80（横）+ 间距 40，产物外观与尺寸再次变化；
+#   不升版本则历史方案继续从缓存拿 R65 旧图 = 改版从未生效。故版本号 5 -> 6。
+# ✅ R67（2026-10-11 流程图渲染可读性）：菱形铺满形状盒 + 文字内接自适应 +
+#   连线分道（间隙按边数加高），菱形版式、连线走向与画布尺寸都变；
+#   不升版本则历史方案继续从缓存拿 R66 旧图（小方块菱形 + 共线长轨）。
+#   故版本号 6 -> 7。
+_RENDERER_VERSION = 7
 
 
 def _render_cache_key(mermaid_code: str, chart_type: str,
@@ -1154,12 +1170,14 @@ from .mermaid_architecture import (  # noqa: F401
 from .mermaid_common import (  # noqa: F401
     _build_gantt_marks,
     _draw_text_center,
+    _draw_text_vertical_center,
     _fit_text_with_ellipsis,
     _image_font,
     _image_to_stream,
     _render_hq,
     _text_height,
     _text_width,
+    _vertical_text_capacity,
     _wrap_text,
 )
 from .mermaid_comparison import (  # noqa: F401

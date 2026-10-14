@@ -15,6 +15,7 @@
 规则定义统一取自 ``services/audit_rules.py``（唯一事实源），
 不再在本文件内联清单（原 ``EXPERT_CHECK_ITEMS`` 与提示词文案重复维护，存在分叉）。
 """
+# ruff: noqa: I001 —— R13 契约：review_db 必须单独一行，护栏 test_review_db_is_imported 锁
 import asyncio
 import json
 import logging
@@ -30,8 +31,9 @@ from app.models import ComplianceCheckIn, ExpertReviewIn
 # ✅ R13 判空单一出口（2026-10-06）：本模块所有 db.execute 走 review_db，
 #    读失败 503 / 写没生效 503。静态护栏
 #    tests/test_review_r13_closeout_20261006.py 禁止退回裸调用。
-from app.services import review_db  # noqa: I001 —— R13 契约：必须单独一行，护栏 test_review_db_is_imported 锁
+# noqa: I001 —— R13 契约：review_db 必须单独一行，护栏 test_review_db_is_imported 锁
 from app.services import review_autofix
+from app.services import review_db  # noqa: I001
 from app.services.ai.json_response import collect_json_response
 from app.services.ai.prompts._registry import render
 from app.services.audit_rules import (
@@ -54,6 +56,7 @@ from app.services.content_utils import order_sections_dfs
 # ✅ 2026-10-03（全局事实桥接）：预检消费「已确认全局事实」（SAF-08 事实反哺）。
 #    门控/作用域口径一律取 facts_extractor 唯一出口，不在本文件重写 SQL。
 from app.services.facts_extractor import (
+    FACT_SCOPE_SHARED_FRAGMENT,
     get_facts_inject_where,
     load_resolved_facts_for_scope,
     resolve_scheme_project_id,
@@ -758,13 +761,23 @@ async def run_consistency_audit(scheme_id: str, db=Depends(get_db)):
     # ✅ R13（2026-10-06）：写路径经 exec_write。旧实现 INSERT 未生效时
     #    commit 照常成功、接口返回评分与 issues —— 而 /latest 与总检的
     #    「一致性审计」来源永远取不到本次，用户以为已审计。
+    # ✅ BUG 修复（2026-10-14 · R77 F-1）：列序与参数序必须逐位对应 ——
+    #    旧实现在 2026-10-07（05e1380）给 INSERT 加 content_fingerprint 列时
+    #    把指纹参数插到了 score_float **之前**，导致 score 列落指纹字符串、
+    #    content_fingerprint 列落分值。连带三处后果（详见护栏
+    #    tests/test_review_preflight_closeout_r77_20261014.py）：
+    #      ① _ai_row_is_stale 读到 content_fingerprint="90.0" 与当前 hex 指纹
+    #         恒不等 → 一致性审计来源在总检中**永远判 stale 被跳过**；
+    #      ② /latest 把指纹串当 score 返回，前端刷新后分数面板坏；
+    #      ③ /history 同污染。
     await review_db.exec_write(
         db,
         "INSERT INTO consistency_audit (id, project_id, scheme_id, score,"
         " content_fingerprint, issues) VALUES (?,?,?,?,?,?)",
         (audit_id, sc_row["project_id"], scheme_id,
+         score_float,
          await _content_fingerprint(db, scheme_id),
-         score_float, json.dumps(issues, ensure_ascii=False)),
+         json.dumps(issues, ensure_ascii=False)),
         what="一致性审计：写入审计结果")
     await db.commit()
     return {"id": audit_id, "score": score_float, "issues": issues}
@@ -830,7 +843,7 @@ async def _facts_signature(db, scheme_id: str) -> str:
         scope = "scheme_id=?"
         params: list = [scheme_id]
         if pid:
-            scope += " OR (project_id=? AND (scheme_id='' OR scheme_id IS NULL))"
+            scope += " OR " + FACT_SCOPE_SHARED_FRAGMENT
             params.append(pid)
         row = await review_db.fetch_one(
             db,
@@ -864,7 +877,7 @@ async def _build_preflight_context(scheme_id: str, db) -> PreflightContext:
     #    使重复内容检测（两两配对）之外的序敏感检查与导出链路同口径。
     sections = order_sections_dfs(await review_db.fetch_all(
         db,
-        "SELECT id, parent_id, title, content, word_count, level, status, sort_order FROM sections"
+        "SELECT id, parent_id, title, content, word_count, word_budget, level, status, sort_order FROM sections"
         " WHERE scheme_id=? ORDER BY sort_order", (scheme_id,),
         what="预检上下文：读取章节"))
 
@@ -1097,7 +1110,9 @@ async def readiness_overview(scheme_id: str, db=Depends(get_db), force: bool = F
                 cached["cached"] = True
                 cached["stale"] = False
                 return cached
-        payload = await _readiness_overview_compute(db, scheme_id)
+        # ✅ P1-4：复用本函数已算好的指纹，避免同一次请求第二次全表扫描
+        payload = await _readiness_overview_compute(db, scheme_id,
+                                                    fingerprint=fingerprint)
         payload["cached"] = False
         payload["stale"] = False
         if not payload.get("content_fingerprint"):
@@ -1119,11 +1134,18 @@ def _ai_row_is_stale(row: dict, current_fingerprint: str) -> bool:
     return fp != current_fingerprint
 
 
-async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = True) -> dict:
+async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = True,
+                                      fingerprint: str | None = None) -> dict:
     """总检的实际计算（由 readiness_overview 的并发锁与幂等缓存包着）。
 
     ✅ 2026-10-03（数据链收口）：新增 ``persist`` 形参。**默认 True，既有端点
     调用逐字不变**（向后兼容）。自动修复链路（routers/review_autofix.py 的
+    ✅ 2026-10-12（技术债 P1-4）：新增 ``fingerprint`` 形参。默认 ``None`` →
+    内部自行计算，既有调用方（review_autofix 三处）行为**逐字不变**。
+    ``readiness_overview`` 为判定缓存命中已经算过一次指纹，现把它传进来复用，
+    避免同一次请求对 ``sections`` / ``chart_predictions`` / ``global_facts``
+    / ``schemes`` 做**两轮全表扫描**；更重要的是杜绝「缓存键用指纹 A、
+    落库用指纹 B」的口径分裂（并发下两次扫描之间内容可能已变）。
     plan/apply/collect/stage）此前直接调本函数重算 findings，而本函数末尾
     无条件 ``_persist_run`` 落 preflight_runs —— 用户每点一次「定位/修复/
     收集/暂存」就往分数趋势里灌一条总检历史（污染 G2 要保护的趋势线），
@@ -1138,8 +1160,22 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
     #    仍被计入总检评分（CON-04 / SAF-* 指向已不存在的章节），用户据此
     #    「整改」实际不存在的缺陷。AI 各源写入时已记正文指纹，此处比对后
     #    跳过过期行，并把跳过的来源名放进 stale_ai_sources 供前端提示重跑。
-    fingerprint = await _content_fingerprint(db, scheme_id)
+    # ✅ BUG 修复（2026-10-14 · R77 F-2）：P1-4（2026-10-12）新增的
+    #    ``fingerprint`` 形参此前被下面这行**无条件重算覆盖**——docstring
+    #    承诺「复用调用方指纹、避免两轮全表扫描与缓存键/落库指纹口径分裂」，
+    #    实际从未兑现（readiness_overview L1104 传入即被丢弃，末尾
+    #    ``if fingerprint is not None`` 回退分支因此永真）。现按契约改为
+    #    仅缺省时计算；不传参的既有调用方（review_autofix 三处）逐字不变。
+    if fingerprint is None:
+        fingerprint = await _content_fingerprint(db, scheme_id)
     stale_ai_sources: list[str] = []
+    # ✅ 2026-10-12（技术债 P1-6）：新增「**读取失败**」来源清单。
+    #    与 ``stale_ai_sources``（正文已变 → 结论过期，用户重跑即可）刻意分开：
+    #    前者是**系统故障**，重跑也不一定好，两类处置方式不同，混在一个键里
+    #    前端只能给一句模棱两可的提示。旧实现这类失败只有一行 warning，
+    #    前端看到的是「分数正常、来源齐全」，实际某一路根本没参与评分 ——
+    #    分数静默偏高且无任何信号。现加法式上报（不改动既有键的语义与取值）。
+    failed_sources: list[str] = []
 
     # --- ✅ G1：导出预检问题并入评分（与程序化预检共用同一套规则词表）---
     # 此前导出预检是独立体系，其问题既不进 preflight_runs 也不进本聚合，
@@ -1153,7 +1189,10 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
         if export_findings:
             sources.append("export_check")
     except Exception as e:
-        logger.warning("overview: 导出预检问题聚合失败（跳过，不阻断总检）: %s", e)
+        # ✅ P1-6：读取失败必须让用户可见（否则该来源静默不参与评分、分数虚高）
+        failed_sources.append("export_check")
+        logger.warning("overview: 导出预检问题聚合失败（跳过，不阻断总检）: %s", e,
+                       exc_info=True)
 
     # --- AI 规范符合性：取最近一批（同一批 = 同一次 /check 调用写入的行）---
     ai_findings: list = []
@@ -1212,7 +1251,9 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
             if rows:
                 sources.append("compliance")
     except Exception as e:
-        logger.warning("overview: 读取 AI 规范符合性结果失败（跳过）: %s", e)
+        failed_sources.append("compliance")
+        logger.warning("overview: 读取 AI 规范符合性结果失败（跳过）: %s", e,
+                       exc_info=True)
 
     # --- 最近一次一致性审计（作为一致性维度的补充证据）---
     try:
@@ -1252,7 +1293,9 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
             if issues or row["score"] is not None:
                 sources.append("consistency")
     except Exception as e:
-        logger.warning("overview: 读取一致性审计结果失败（跳过）: %s", e)
+        failed_sources.append("consistency")
+        logger.warning("overview: 读取一致性审计结果失败（跳过）: %s", e,
+                       exc_info=True)
 
     # --- ✅ 新增（2026-09-17）：最近一次全文一致性扫描（规则 + 仲裁）未解决冲突 ---
     # 此前「一致性扫描 → 修复工作台」产出的冲突清单（consistency_conflicts）完全不参与
@@ -1274,7 +1317,8 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
             scan_conflicts = await review_db.fetch_all(
                 db,
                 "SELECT conflict_type, severity, topic, occurrences,"
-                " authoritative_value, repair_instruction, status"
+                " authoritative_value, authoritative_source, repair_instruction,"
+                " reason, status"
                 " FROM consistency_conflicts WHERE scheme_id=? AND scan_id=?"
                 " ORDER BY created_at, rowid",
                 (scheme_id, last_scan["scan_id"]),
@@ -1291,19 +1335,45 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
                     occ = []
                 if not isinstance(occ, list):
                     occ = []
+                topic = c.get("topic") or ""
+                reason = str(c.get("reason") or "").strip()
+                auth = str(c.get("authoritative_value") or "").strip()
+                auth_src = str(c.get("authoritative_source") or "").strip()
+                # ✅ 修复（2026-10-13 · R76）：detail 权威值与仲裁理由都要露出来。
+                #   旧实现 ``detail = c.get("reason") or c.get("topic")`` —— 但 SQL
+                #   的 SELECT **漏了 reason 列**，``c.get("reason")`` 恒为 None，detail
+                #   永远退化为 topic，与 section_title 逐字重复（用户在总检页和整改
+                #   报告里看到同一句话两遍）；authoritative_value 明明被 SELECT 出来
+                #   却从未用于 finding —— 而 CON-07 的规则描述正是「以权威值为准修复」，
+                #   用户拿到结论却看不到「该改成什么」，整改建议不可执行。
+                detail_parts: list = []
+                if reason and reason != topic:
+                    detail_parts.append(reason)
+                if auth:
+                    detail_parts.append(
+                        f"权威值：{auth}（{auth_src}）" if auth_src else f"权威值：{auth}")
+                detail = "；".join(detail_parts) or topic
                 ai_findings.append({
                     "rule_id": f"CON-SCAN-{idx + 1}", "dimension": "consistency",
                     "severity": sev,
                     "title": f"一致性扫描：{c.get('conflict_type') or '数值冲突'}",
-                    "detail": c.get("reason") or c.get("topic") or "",
+                    "detail": detail,
                     "evidence": [str(o) for o in occ],
-                    "section_id": "", "section_title": c.get("topic") or "",
+                    "section_id": "", "section_title": topic,
+                    # 权威值单独成字段（/report 与前端可各自消费）。刻意不塞进
+                    # suggestion —— suggestion 是「怎么改」的指令（repair_instruction），
+                    # 权威值是「改成什么」的目标，混在一起会让 repair_instruction 缺失时
+                    # 用户看到一句孤立的值当指令。
+                    "authoritative_value": auth,
+                    "authoritative_source": auth_src,
                     "suggestion": c.get("repair_instruction") or "",
                     "basis": "全文一致性扫描（规则+仲裁）", "mode": "program",
                 })
             sources.append("consistency_scan")
     except Exception as e:
-        logger.warning("overview: 读取一致性扫描冲突失败（跳过）: %s", e)
+        failed_sources.append("consistency_scan")
+        logger.warning("overview: 读取一致性扫描冲突失败（跳过）: %s", e,
+                       exc_info=True)
 
     # --- 最近一次专家论证预检 ---
     try:
@@ -1326,7 +1396,9 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
                 ai_findings.extend(expert_result_to_findings(expert))
                 sources.append("expert_review")
     except Exception as e:
-        logger.warning("overview: 读取专家论证预检结果失败（跳过）: %s", e)
+        failed_sources.append("expert_review")
+        logger.warning("overview: 读取专家论证预检结果失败（跳过）: %s", e,
+                       exc_info=True)
 
     findings = merge_findings(program_findings, ai_findings, export_findings)
     # ✅ 自动修复能力标注（services/review_autofix.py）：为每条 finding 补
@@ -1347,9 +1419,16 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
         "sources": sources,
         # ✅ 2026-10-07：因正文已变而跳过的 AI 来源（提示用户重跑对应 AI 检查）
         "stale_ai_sources": stale_ai_sources,
+        # ✅ 2026-10-12（P1-6）：**读取失败**而未参与评分的来源（系统故障，
+        #    与上面「结论过期」是两类问题）。为空即表示六路来源全部正常参与。
+        "failed_sources": failed_sources,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         # ✅ G3：落库后供 /runs /report / 导出页判定「结论是否已过期」
-        "content_fingerprint": await _content_fingerprint(db, scheme_id),
+        # ✅ P1-4：调用方已传入指纹时直接复用（同一请求只扫一次库）；
+        #    未传（review_autofix 等既有调用方）时仍自行计算，行为不变。
+        "content_fingerprint": (fingerprint
+                                if fingerprint is not None
+                                else await _content_fingerprint(db, scheme_id)),
     })
     if persist:
         await _persist_run(db, scheme_id, payload, stats)

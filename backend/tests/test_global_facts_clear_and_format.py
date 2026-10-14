@@ -65,7 +65,7 @@ class TestClearAllFactsChunkReset:
             "VALUES(?,?,?)", (pid, sid, "h1"))
         await db.commit()
         assert await _count_chunks(db, scheme_id=sid) == 1
-        await gf.clear_all_facts({"scheme_id": sid}, db)
+        await gf.clear_all_facts(gf.ClearFactsRequest(scheme_id=sid), db)
         assert await _count_chunks(db, scheme_id=sid) == 0
 
     async def test_project_shared_chunk_cleared(self, ctx):
@@ -78,7 +78,7 @@ class TestClearAllFactsChunkReset:
             "VALUES(?,?,?)", (pid, "", "h2"))
         await db.commit()
         assert await _count_chunks(db, project_id=pid, scheme_id="") == 1
-        await gf.clear_all_facts({"scheme_id": sid}, db)
+        await gf.clear_all_facts(gf.ClearFactsRequest(scheme_id=sid), db)
         assert await _count_chunks(db, project_id=pid, scheme_id="") == 0
 
 
@@ -111,7 +111,7 @@ class TestBatchResolveScopeGuard:
         db, pid, sid = ctx
         from fastapi import HTTPException
         with pytest.raises(HTTPException) as exc:
-            await gf.batch_resolve({"fact_ids": ["x", "y"]}, db)
+            await gf.batch_resolve(gf.BatchResolveRequest(fact_ids=["x", "y"]), db)
         assert exc.value.status_code == 400
 
     async def test_resolve_safe_fact_with_scheme_id(self, ctx):
@@ -126,7 +126,7 @@ class TestBatchResolveScopeGuard:
             (fid, pid, sid, "g", "其他事实", "工程名称", "- **工程名称**: 某项目",
              "other", "[]", 0, 1.0, 0, 0))
         await db.commit()
-        res = await gf.batch_resolve({"scheme_id": sid, "fact_ids": [fid]}, db)
+        res = await gf.batch_resolve(gf.BatchResolveRequest(scheme_id=sid, fact_ids=[fid]), db)
         assert res["changed"] == 1
         cur = await db.execute(
             "SELECT is_resolved FROM global_facts WHERE id=?", (fid,))

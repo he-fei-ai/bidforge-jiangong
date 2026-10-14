@@ -4,7 +4,9 @@
  *
  * 后端 `services/outline_quality` 产出 `review.quality`：
  *   - `name_coverage.missing`：方案名称里解析出的施工内容/工序/工艺/对象，在目录中无落点；
- *   - `continuity.ok === false`：层级跳级 / 有父无子 / 同名章节 / 编号错位；
+ *   - `continuity.ok === false`：七类缺陷计数（层级跳级 / 有父无子 / 同名章节 /
+ *     编号错位 / 破折号长尾 / 空标题 / 占位泛化标题），标签表与后端
+ *     `CONTINUITY_ISSUE_LABELS` 同步（跨语言 parity 由后端 R73b 护栏锁定）；
  *   - `redundant_titles`：与方案名称零关联、且非通用必要章节的标题候选。
  *
  * 这些信号此前**没有任何前端消费方** —— 用户看不到"方案名称里的工序没落到章节"。
@@ -46,6 +48,32 @@ describe("summarizeOutlineQuality（目录生成后校验报告）", () => {
     expect(r.level).toBe("warn");
     expect(r.message).toContain("层级跳级 2 处");
     expect(r.message).toContain("同名章节 1 处");
+  });
+
+  // R73b F5 实证：占位/泛化标题（用户报的「专项6」「总体实施策划（2）」）2026-10-10
+  // 就进了后端 issues，但前端 labels 表停在四类 —— 计数被 Object.keys(labels)
+  // 过滤掉，后端已判 ok=false 而界面零提示。本组用例锁「检出必须呈现」。
+  it("占位/泛化标题等后三类同样必须中文化播报", () => {
+    const r = summarizeOutlineQuality({
+      quality: {
+        continuity: {
+          ok: false,
+          issue_counts: { generic_titles: 3, dash_titles: 1, empty_titles: 2 },
+        },
+      },
+    });
+    expect(r.level).toBe("warn");
+    expect(r.message).toContain("占位/泛化标题 3 处");
+    expect(r.message).toContain("破折号长尾标题 1 处");
+    expect(r.message).toContain("空标题节点 2 处");
+  });
+
+  it("后端新增而未登记标签的问题类，也必须透出来（绝不静默咽掉）", () => {
+    const r = summarizeOutlineQuality({
+      quality: { continuity: { ok: false, issue_counts: { brand_new_kind: 4 } } },
+    });
+    expect(r.level).toBe("warn");
+    expect(r.message).toContain("brand_new_kind 4 处");
   });
 
   it("冗余候选 → info 且措辞明确「未自动删除」", () => {

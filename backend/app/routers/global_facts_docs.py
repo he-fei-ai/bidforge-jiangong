@@ -37,19 +37,16 @@ logger = logging.getLogger("global_facts.docs")
 router = APIRouter(prefix="/api/v1/global-facts", tags=["global_facts"])
 
 
-def _gf_const(name: str, default: int) -> int:
-    """延迟从 global_facts 命名空间读配额常量，兼容 monkeypatch.setattr(gf, name, N)。"""
-    try:
-        from app.routers import global_facts as _gf
-        return getattr(_gf, name, default)
-    except Exception:
-        return default
-
-
-# 模块级占位（实际值在函数调用时从 global_facts 命名空间读取）
-MAX_UPLOAD_BYTES = 30 * 1024 * 1024
-MAX_UPLOAD_FILES_PER_REQUEST = 20
-MAX_UPLOAD_TOTAL_BYTES = 200 * 1024 * 1024
+#: 解析结果落库上限（字数）—— **全仓唯一事实源**（R70 收敛）。
+#: `global_facts.py` 从本文件 import 同名常量（避免两份副本），所有
+#: 「是否已截断 / 截断到多少」的判定都读这一处。
+#:
+#: ⚠️ G2（2026-10-12 收口）：**上传配额不在本文件定义**。此前这里另有三个
+#: `MAX_UPLOAD_BYTES / MAX_UPLOAD_FILES_PER_REQUEST / MAX_UPLOAD_TOTAL_BYTES`
+#: 静态占位（30MB / 20 / 200MB），是权威值在 `global_facts.py` 的**第二份
+#: 字面量副本**（本仓反复踩的「同一判据两份取值」同族），且从未被任何代码/
+#: 测试读取。现整体删除，`upload_documents` 内直接动态读 `gf.MAX_UPLOAD_*`
+#: （权威值由 `settings.upload_*` 解析，支持 monkeypatch）—— 单一事实源。
 MAX_PARSED_CHARS = 400_000
 
 

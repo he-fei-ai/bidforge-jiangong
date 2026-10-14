@@ -105,8 +105,28 @@ class TestRequestAndTerminalContract:
         src = inspect.getsource(sse_handlers.generate_content)
         block = src[src.index("completed_payload = {"):]
         block = block[:block.index("yield f\"data:")]
-        for field in ("'progress': 1.0", "'done': total", "'total': total"):
+        for field in ("'progress': 1.0", "'total': total"):
             assert field in block
+
+    def test_completed_done_is_success_count_not_total(self):
+        """✅ 2026-10-11 · R70：终态 ``done`` 必须是**成功章节数**，不得再写死 total。
+
+        旧实现硬写 ``'done': total``，而有失败章节时断线重挂读到的 checkpoint
+        ``done`` 只在成功落库时自增（真实成功数）⇒ 同一份「已完成 N/M」在线读到
+        total、刷新后读到成功数，且与 ``failed_count`` 自相矛盾。
+        此处钉住「终态 done 取成功计数」，与 ``_content_ckpt_payload`` 同口径。
+        """
+        src = inspect.getsource(sse_handlers.generate_content)
+        block = src[src.index("completed_payload = {"):]
+        block = block[:block.index("yield f\"data:")]
+        assert "'done': len(done_ids)" in block, (
+            "终态 done 必须取成功章节数 len(done_ids)，与 checkpoint 同口径")
+        assert "'done': total" not in block, (
+            "终态 done 不得再写死 total（与 failed_count 自相矛盾）")
+        # checkpoint 侧同样是成功计数（成功落库才自增）
+        ck = inspect.getsource(sse_handlers.generate_content)
+        assert '_ckpt["done"] = _ckpt.get("done", 0) + 1' in ck, (
+            "checkpoint done 必须保持在成功落库路径自增，两处口径才一致")
 
 
 # ============================================================================

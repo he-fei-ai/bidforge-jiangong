@@ -18,6 +18,7 @@ from .mermaid_common import (
     _image_font,
     _image_to_stream,
     _render_hq,
+    paper_floor_note,
 )
 
 logger = logging.getLogger(__name__)
@@ -852,6 +853,13 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
             )
             legend_x += int(200 * scale)
 
+    paper_floor_note(
+        "甘特图",
+        [font_header, font_title, font_body, font_small, font_axis],
+        img.size[0], img.size[1],
+        primary=[font_body],
+        suggest="（任务行文字是主文字；任务数或工期跨度大时整图会被等比缩小）",
+    )
     result_stream = _image_to_stream(img)
     size_kb = len(result_stream.getvalue()) // 1024
     logger.info(

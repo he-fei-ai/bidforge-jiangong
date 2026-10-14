@@ -466,6 +466,8 @@ async def _migrate(conn: aiosqlite.Connection):
         ("sections", "layout_json", "TEXT DEFAULT ''"),
         ("sections", "timeline_json", "TEXT DEFAULT ''"),
         ("sections", "inlined_chart_json", "TEXT DEFAULT ''"),
+        # ✅ D1（2026-10-11）：离散正文编排阶段产出的结构化编排决策（JSON 文本）
+        ("sections", "plan_json", "TEXT DEFAULT ''"),
         # --- global_facts 增强（可行性研究报告建议） ---
         ("global_facts", "category", "TEXT DEFAULT ''"),
         ("global_facts", "source_ref", "TEXT DEFAULT ''"),

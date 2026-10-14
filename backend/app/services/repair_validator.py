@@ -13,23 +13,58 @@ from __future__ import annotations
 
 import re
 
+from app.services.fence_common import fence_char_ranges, find_unclosed, iter_all_blocks
+
 # 修复后正文字数相对原文的允许变化区间（最小必要修改）
 MIN_LEN_RATIO = 0.85
 MAX_LEN_RATIO = 1.15
 
 
 def _strip_code_fences(text: str) -> str:
-    return re.sub(r"```[\s\S]*?```", "", text or "")
+    """剥掉全部围栏块（含围栏行本身），返回「可见正文」。
+
+    ✅ R76b · G3（BUG-F9）：旧实现 ``re.sub(r"```[\\s\\S]*?```", "", text)`` 与唯一
+    事实源有三处口径分叉，方向都是**让冲突值残留在比对不到的地方**：
+      · 非贪婪配对不认「块内带信息串行」—— ```` ```json ```` 会被当成收尾，
+        于是真正的闭合行变成下一块的开头，**其后正文整块被误删**；
+      · 完全不认 ``~~~`` 围栏（波浪号图里的数字/取值不参与比对）；
+      · 未闭合围栏整块不匹配（破损正文反而"全可见"）。
+    现由 ``fence_char_ranges`` 供区间、本地只做切片 —— 判据不在本模块复制。
+    """
+    if not text:
+        return ""
+    ranges = fence_char_ranges(text)
+    if not ranges:
+        return text
+    parts: list[str] = []
+    cursor = 0
+    for start, end in ranges:
+        if start > cursor:
+            parts.append(text[cursor:start])
+        cursor = max(cursor, end)
+    parts.append(text[cursor:])
+    return "".join(parts)
 
 
 def structure_signature(text: str) -> dict:
-    """提取结构指标：标题数、表格行数、列表项数、代码围栏数。"""
+    """提取结构指标：标题数、表格行数、列表项数、代码围栏**块数**与未闭合数。
+
+    ✅ R76b · G3（BUG-F8）：``fences`` 此前是 ``body.count("```")``（出现次数），
+    调用方用 ``% 2 != 0`` 当「未闭合」判据 —— 这是唯一事实源之外的第四套口径，
+    两个方向都错（探针实测）：
+      · 块内含 ```` ```json ```` 行的**正常闭合**正文 count=3 → 误判未闭合 →
+        一致性修复被判 failed、**拒绝写库**（假阳性，该修的被否）；
+      · ``~~~`` 围栏**真的未闭合** count=0 → 判"已闭合" → 破损正文**放行落库**
+        （假阴性，该拦的没拦）。
+    现改为「块数 + 未闭合数」两个由 ``fence_common`` 供给的确定性指标。
+    """
     body = text or ""
     return {
         "headings": len(re.findall(r"^#{1,6}\s", body, flags=re.M)),
         "table_rows": len(re.findall(r"^\s*\|.*\|\s*$", body, flags=re.M)),
         "list_items": len(re.findall(r"^\s*(?:[-*+]|\d+[.)])\s+", body, flags=re.M)),
-        "fences": body.count("```"),
+        "fences": len(iter_all_blocks(body)),
+        "unclosed_fences": len(find_unclosed(body)),
     }
 
 
@@ -64,8 +99,9 @@ def validate_repair(*, before: str, after: str, wrong_values: list[str],
 
     # 2) 结构完整
     sb, sa = structure_signature(before), structure_signature(after)
-    # 代码围栏数必须为偶数且不减少（保留图表/代码块）
-    if sa["fences"] % 2 != 0:
+    # 代码围栏必须闭合、且块数不得减少（保留图表/代码块）
+    # ✅ R76b · G3（BUG-F8）：判据从「``` 出现次数为奇数」改为唯一事实源的未闭合数。
+    if sa["unclosed_fences"]:
         problems.append("修复后 Markdown 代码围栏未闭合")
     if sa["headings"] < sb["headings"]:
         problems.append("修复后标题数量减少，结构可能被破坏")

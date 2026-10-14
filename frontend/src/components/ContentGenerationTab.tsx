@@ -73,12 +73,16 @@ export type ContentGenerationTabProps = {
   children?: ReactNode;
 };
 
+// ✅ R66（2026-10-11）四档字数控制：档位名直传后端 word_budget_tier
+// （真源 backend content_utils.WORD_BUDGET_TIERS = 800/1200/2000/2500），
+// 每个叶子（三级）章节按档位目标生成；「自定义」保留旧的二级单元总量
+// 智能分配口径（word_budget_override）。
 const WORD_BUDGET_OPTIONS = [
   { label: "使用目录默认值", value: "default" },
-  { label: "1000 字", value: "1000" },
-  { label: "1500 字", value: "1500" },
-  { label: "2000 字", value: "2000" },
-  { label: "3000 字", value: "3000" },
+  { label: "简短 800 字", value: "brief" },
+  { label: "标准 1200 字", value: "standard" },
+  { label: "详细 2000 字", value: "detailed" },
+  { label: "超长 2500 字", value: "ultra" },
   { label: "自定义", value: "custom" },
 ];
 
@@ -221,7 +225,7 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <FontSizeOutlined style={{ color: "#1677ff", fontSize: 14 }} />
               <Text strong style={{ fontSize: 13 }}>字数设置</Text>
-              <Tooltip title="二级及以下各章节目标字数；子章节由 AI 按语义智能分配">
+              <Tooltip title="选档位：每个叶子（三级）章节直接按档位字数生成；自定义：按二级章节总字数由 AI 向叶子分配">
                 <InfoCircleOutlined style={{ color: "#999", fontSize: 12, cursor: "help" }} />
               </Tooltip>
             </div>
@@ -245,14 +249,18 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
                 />
               )}
               {p.wordBudgetOption === "custom" && (
-                <Text type="secondary" style={{ fontSize: 12, whiteSpace: "nowrap" }}>字 / 章节</Text>
+                <Text type="secondary" style={{ fontSize: 12, whiteSpace: "nowrap" }}>字 / 二级单元总量</Text>
               )}
             </div>
-            {p.wordBudgetOption !== "default" && (
+            {p.wordBudgetOption === "custom" ? (
               <Tag color="blue" style={{ margin: 0, fontSize: 11, lineHeight: "18px" }}>
                 按二级章节总字数控制
               </Tag>
-            )}
+            ) : p.wordBudgetOption !== "default" ? (
+              <Tag color="purple" style={{ margin: 0, fontSize: 11, lineHeight: "18px" }}>
+                按叶子章节档位字数控制
+              </Tag>
+            ) : null}
           </div>
 
           {/* 列 2：生成模式 */}

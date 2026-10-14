@@ -1665,7 +1665,8 @@ export const OutlineNodeBudgetPanel = memo(function OutlineNodeBudgetPanel({
  * 三类信号（对应需求要求三 / 要求四）：
  * - `name_coverage.missing`：方案名称里解析出的施工内容/工序/工艺/对象，
  *   在目录中**无任何落点**（全面性缺口，后端已尝试外科式补齐）；
- * - `continuity.ok === false`：层级跳级 / 有父无子 / 同名章节 / 编号错位；
+ * - `continuity.ok === false`：层级跳级 / 有父无子 / 同名章节 / 编号错位 /
+ *   破折号长尾标题 / 空标题节点 / 占位泛化标题（七类，与后端标签表同步）；
  * - `redundant_titles`：与方案名称零关联、且不属于通用必要章节的标题候选。
  *
  * ⚠️ 刻意**不自动删除**任何章节：删章是不可逆的用户数据变更，
@@ -1697,15 +1698,29 @@ export function summarizeOutlineQuality(review: unknown): {
   if (cont && cont.ok === false) {
     warn = true;
     const c = cont.issue_counts || {};
+    // ⚠️ 这张表必须与后端 `outline_quality.CONTINUITY_ISSUE_LABELS` **同步**
+    //    （唯一事实源，跨语言 parity 由
+    //    tests/test_outline_title_fix_chain_r73b_20261012.py 锁定）。
+    //    漏一类的后果是**静默的**：下面的 Object.keys(labels) 会把该类计数直接
+    //    过滤掉，后端已判 ok=false 而界面零提示 —— R73b F5 实证 `generic_titles`
+    //    （占位/泛化标题，正是用户报的「专项6」「总体实施策划（2）」）漏了三天。
     const labels: Record<string, string> = {
       level_gaps: "层级跳级",
       empty_parents: "有父无子",
       duplicate_titles: "同名章节",
       numbering_mismatch: "编号错位",
+      dash_titles: "破折号长尾标题",
+      empty_titles: "空标题节点",
+      generic_titles: "占位/泛化标题",
     };
     const parts = Object.keys(labels)
       .filter((k) => (c[k] || 0) > 0)
       .map((k) => `${labels[k]} ${c[k]} 处`);
+    // 兜底：后端新增了问题类而这张表还没跟上时，也必须把计数透出来（宁可显示
+    // 英文裸代号，不可把已检出的问题咽掉）。
+    const unlabeled = Object.keys(c).filter((k) => !(k in labels) && (c[k] || 0) > 0);
+    if (unlabeled.length)
+      parts.push(`其它问题 ${unlabeled.map((k) => `${k} ${c[k]} 处`).join("、")}`);
     if (parts.length) logs.push(`⚠️ 目录连续性问题：${parts.join("、")}`);
   }
 
@@ -1723,6 +1738,58 @@ export function summarizeOutlineQuality(review: unknown): {
 
   if (logs.length === 0) return empty;
   return { level: warn ? "warn" : "info", message: logs.join("；"), logs };
+}
+
+/**
+ * 后端目录审核载荷（`review.review_mode` / `review.suggestions`）→ 面向用户的
+ * 一句审核依据 + 逐条已执行动作（纯函数，可单测）。
+ *
+ * 背景（R73b 遗留 #1 / R74 G1）：`programmatic*` 与 `programmatic+titled/surgical`
+ * 的区分此前只进后端日志，用户在界面看不到「这次结论的程序化程度」；
+ * suggestions（已执行的补救动作说明）前端也一直没有消费方 —— 后端每次
+ * 程序化出口都带了，前端静默丢。
+ * 属呈现增强、不改任何判定：只进生成日志，不弹 toast（避免与 quality
+ * 告警叠加成噪音）。
+ *
+ * review_mode 值域（唯一来源：后端 sse_handlers._review_and_fix_outline）：
+ * - `programmatic`                    覆盖全过，跳过 AI 审核
+ * - `programmatic+titled`             另含占位标题外科式重写
+ * - `programmatic+surgical[+titled]`  另含外科式补齐缺失章节
+ * - 不写 / 非 programmatic 开头        走了完整 AI 审核链路（含审核超时/失败
+ *   回退场景，此时 suggestions 里会有「审核超时已跳过」等如实文案）
+ */
+export function summarizeOutlineReviewBasis(review: unknown): {
+  level: "info" | "none";
+  message: string;
+  logs: string[];
+} {
+  const empty = { level: "none" as const, message: "", logs: [] as string[] };
+  if (!review || typeof review !== "object") return empty;
+  const r = review as { review_mode?: unknown; suggestions?: unknown };
+  const logs: string[] = [];
+  const mode = typeof r.review_mode === "string" ? r.review_mode : "";
+  if (mode.startsWith("programmatic")) {
+    const detailMap: Record<string, string> = {
+      surgical: "外科式补齐缺失章节",
+      titled: "占位标题外科式重写",
+    };
+    // 未登记的模式 token 照原文透出（后端新增细分时前端不得静默咽掉）
+    const tokens = mode.split("+").slice(1).map((t) => detailMap[t] || t);
+    const detail = tokens.length ? `，含${tokens.join("、")}` : "，全部必备项已覆盖";
+    logs.push(`📗 审核依据：程序化预检${detail}（本次结论未经完整 AI 审核）`);
+  } else {
+    logs.push("📘 审核依据：AI 审核链路");
+  }
+  // ⚠️ 脏数据防御：与 summarizeOutlineQuality 同口径 —— suggestions 元素可能
+  //    是 null/非字符串（弱模型回传），逐个过滤，绝不在日志路径上抛。
+  const sugg = Array.isArray(r.suggestions)
+    ? r.suggestions.filter((s): s is string => typeof s === "string" && s.trim() !== "")
+    : [];
+  // ⚠️ 前缀全角空格走普通字符串拼接：模板字符串内的 U+3000 会被 eslint
+  //    no-irregular-whitespace 判红（该规则 skipTemplates 默认 false）。
+  sugg.slice(0, 8).forEach((s) => logs.push("　· " + s));
+  if (sugg.length > 8) logs.push("　· …共 " + sugg.length + " 条");
+  return { level: "info", message: logs.join("\n"), logs };
 }
 
 // ============================================================
@@ -1877,6 +1944,47 @@ export async function findRecentOutlineTaskImpl(
     // 检索失败（后端确实不可达）：静默返回 null，由调用方保持旧行为（仅提示）
   }
   return null;
+}
+
+/**
+ * SSE 断线重挂统一入口（2026-10-14 · 三链收口）。
+ *
+ * 目录 / 正文 / 事实三条 SSE 链在错误分支里做完全相同的三件事：
+ *   ① taskId 为空（30s 建连超时 / 网络抖动 / 网关重连时首个携带 task_id 的事件
+ *      尚未到达）→ 按方案检索最近的同类型在跑任务（后端任务已注册并继续计费，
+ *      成果只躺在 checkpoint）；
+ *   ② 命中 → 先回调 onReattach（UI 提示「正在重新挂接」，必须在轮询开始前，
+ *      否则用户在中断刻度上多等一个轮询周期却无任何反馈）；
+ *   ③ 轮询至终态并返回 { taskId, final }。
+ * 检索不到返回 null，调用方维持旧行为（仅提示，不乱挂）。
+ *
+ * 终态后的成果恢复（outline_result / content_result / facts_result）各链语义
+ * 不同，仍由调用方处理 —— 本 helper 只收敛「检索 → 重挂 → 轮询」三段，
+ * 消除三条链各自手写这三步的双写分叉（正是 P1「断线不重挂」缺陷的温床）。
+ *
+ * 提取为模块级实现（fetchTasks / pollTerminal 注入），可单测。
+ */
+export async function reattachTaskImpl(
+  fetchTasks: () => Promise<{ tasks?: Array<Record<string, any>> }>,
+  pollTerminal: (taskId: string) => Promise<any>,
+  opts: {
+    taskId?: string;
+    typeFilter?: string;
+    nowMs?: number;
+    onReattach?: (taskId: string) => void;
+  } = {},
+): Promise<{ taskId: string; final: any } | null> {
+  let tid = opts.taskId || "";
+  if (!tid) {
+    tid =
+      (await findRecentOutlineTaskImpl(fetchTasks, {
+        typeFilter: opts.typeFilter,
+        nowMs: opts.nowMs,
+      })) || "";
+  }
+  if (!tid) return null;
+  opts.onReattach?.(tid);
+  return { taskId: tid, final: await pollTerminal(tid) };
 }
 
 // ============================================================
@@ -3046,6 +3154,40 @@ export function applyFactsFilter(groups: any[], filter: string): any[] {
 }
 
 // ============================================================
+// ✅ R75 · G-D（2026-10-13）事实诊断「单侧失败不丢另一侧成果」：
+//    loadFactsDiagnostics 旧实现用 Promise.all 拉「章节覆盖度」与「危大阈值」
+//    两个**互相独立**的诊断 —— 任一 reject 即整体 reject，另一侧已到达的
+//    成果连带丢弃、两个面板一起空白。生产实证形态：danger-check 对空方案
+//    会 400（后端 P0 修复注释里记录过），此时 chapters 明明 200 返回，
+//    界面却两个面板都空 + 只有一条「加载事实诊断失败」。
+//    现改 Promise.allSettled 独立落定；合并判定抽成纯函数供组件级测试
+//    （沿用 applyFactsFilter 惯例，API 调用留在页面层）。
+// ============================================================
+export function mergeFactsDiagnosticsSettled(
+  chaptersRes: PromiseSettledResult<any>,
+  dangerRes: PromiseSettledResult<any>,
+): { chapters?: any; danger?: any; warning: string | null; aborted: boolean } {
+  const isAbort = (e: any) => e?.name === "AbortError";
+  const out: { chapters?: any; danger?: any; warning: string | null; aborted: boolean } =
+    { warning: null, aborted: false };
+  const failed: any[] = [];
+  if (chaptersRes.status === "fulfilled") out.chapters = chaptersRes.value?.data;
+  else failed.push(chaptersRes.reason);
+  if (dangerRes.status === "fulfilled") out.danger = dangerRes.value?.data;
+  else failed.push(dangerRes.reason);
+  const realFailures = failed.filter((e) => !isAbort(e));
+  // 双侧皆失败且均/含 AbortError（非真实错误）：整个请求作废，静默返回（与旧行为一致）
+  if (failed.length === 2 && failed.some(isAbort) && realFailures.length === 0) {
+    return { warning: null, aborted: true };
+  }
+  if (realFailures.length > 0) {
+    const e: any = realFailures[0];
+    out.warning = e?.response?.data?.detail || e?.message || "加载事实诊断失败";
+  }
+  return out;
+}
+
+// ============================================================
 // ✅ 全局事实左侧分类面板（2026-09-23）：目录树在事实页不再显示，
 //    左栏改为「提取结果分类」，点击分类 → 右侧「项目资料」下方
 //    仅展示该分类的分组事实。数据结构与交互对齐 ParseResultCategoryPanel。
@@ -4161,17 +4303,19 @@ const draftKey = selectedSection && id
     const requestedSchemeId = id;
     setFactsDiagnosticsLoading(true);
     try {
-      const [chapters, danger] = await Promise.all([
+      // ✅ R75 · G-D：Promise.all → Promise.allSettled，单侧失败只降级
+      //    该侧（成功侧照常落板），不再连带丢弃另一侧成果。
+      const [chaptersRes, dangerRes] = await Promise.allSettled([
         factsApi.chapters(requestedSchemeId, { signal: options?.signal }),
         factsApi.dangerCheck({}, requestedSchemeId, { signal: options?.signal }),
       ]);
       if (requestedSchemeId !== currentSchemeIdRef.current) return;
-      setFactsChapterReport(chapters.data);
-      setFactsDangerReport(danger.data);
-    } catch (e: any) {
-      if (e?.name === "AbortError" || options?.signal?.aborted) return;
-      if (requestedSchemeId === currentSchemeIdRef.current) {
-        msg.warning(e?.response?.data?.detail || e?.message || "加载事实诊断失败");
+      const merged = mergeFactsDiagnosticsSettled(chaptersRes, dangerRes);
+      if (merged.aborted) return;
+      if (merged.chapters !== undefined) setFactsChapterReport(merged.chapters);
+      if (merged.danger !== undefined) setFactsDangerReport(merged.danger);
+      if (merged.warning && requestedSchemeId === currentSchemeIdRef.current) {
+        msg.warning(merged.warning);
       }
     } finally {
       if (requestedSchemeId === currentSchemeIdRef.current) setFactsDiagnosticsLoading(false);
@@ -4786,6 +4930,9 @@ const draftKey = selectedSection && id
                 } else {
                   msg.success("后台目录生成已完成，请确认保存");
                 }
+                // ✅ R74（G1）：接管恢复路径与在线 completed 同口径呈现审核依据
+                //    （checkpoint 白名单含 review，此前无处安放）。
+                summarizeOutlineReviewBasis(ckpt.review).logs.forEach((line) => pushOutlineLog(1, line));
                 openOutlineGate(ckpt.outline);
               } else if (st.status === "completed") {
                 msg.success("后台任务已完成，正在刷新");
@@ -5157,6 +5304,9 @@ const draftKey = selectedSection && id
               _q.logs.forEach((line) => pushOutlineLog(1, line));
               if (_q.level === "warn") msg.warning(_q.message);
             }
+            // ✅ R74（G1）：审核依据与已执行动作同样必须呈现 —— 后端每次
+            //    程序化出口都带了 review_mode/suggestions，此前前端静默丢弃。
+            summarizeOutlineReviewBasis(evt.review).logs.forEach((line) => pushOutlineLog(1, line));
             // 一级目录确认闸门（对齐 OpenBidKit outline-selection）：
             //    旧实现 completed 即自动入库，用户没有确认一级结构的机会；
             //    现改为弹闸门勾选确认后再保存（lock_roots=true 锁定一级章节）。
@@ -5260,16 +5410,21 @@ const draftKey = selectedSection && id
         //    直接跳过重挂 —— 但后端任务可能已注册并继续生成（AI 照常计费），
         //    成果只躺在 checkpoint。此处按方案检索最近仍在运行的
         //    outline_generation 任务重挂（检索不到才维持旧行为：仅提示）。
-        let attachTaskId = taskId;
-        if (!attachTaskId) {
-          attachTaskId =
-            (await findRecentOutlineTaskImpl(async () =>
-              (await tasksApi.list(id)).data,
-            )) || "";
-        }
-        if (attachTaskId) {
-          setProgressMsg("连接中断，正在重新挂接后台任务...");
-          const fin: any = await pollTaskUntilTerminal(attachTaskId);
+        // ✅ 收口（2026-10-14）：检索 → 重挂 → 轮询三段收敛到 reattachTaskImpl
+        //    （与正文/事实同源；目录链默认 typeFilter=outline_generation）。
+        //    终态后的目录成果恢复（outline_result / failed_chapters / review）
+        //    各链语义不同，仍由本块处理。
+        const hit = await reattachTaskImpl(
+          async () => (await tasksApi.list(id)).data,
+          pollTaskUntilTerminal,
+          {
+            taskId,
+            onReattach: () =>
+              setProgressMsg("连接中断，正在重新挂接后台任务..."),
+          },
+        );
+        if (hit) {
+          const fin: any = hit.final;
           if (fin?.status === "completed") {
             // ✅ 成果恢复：后台完成的目录只存在于任务 checkpoint 中，
             // 仅 load() 刷不到任何东西（目录需用户闸门确认才入库）。
@@ -5282,6 +5437,8 @@ const draftKey = selectedSection && id
               } else {
                 msg.success("目录生成已在后台完成，请确认保存");
               }
+              // ✅ R74（G1）：断线重挂路径同样呈现审核依据（与 completed 同口径）
+              summarizeOutlineReviewBasis(ckpt.review).logs.forEach((line) => pushOutlineLog(1, line));
               openOutlineGate(ckpt.outline);
             } else {
               msg.success("目录生成已在后台完成，正在刷新");
@@ -6169,10 +6326,33 @@ const draftKey = selectedSection && id
         // ✅ 二次增强：连接中断时先收尾「进行中」日志项（后台任务可能仍在跑，
         //    但本页已无法再收到 section_stage —— 残留转圈会误导用户）。
         finalizeRunningLogs("连接中断，等待后台任务收尾", "skipped");
-        if (taskId) {
-          setProgressMsg("连接中断，正在重新挂接后台任务...");
-          const fin = await pollTaskUntilTerminal(taskId);
-          // ✅ G12-6（2026-09-20）：消费断线重挂回传的 content_result 失败明细。
+        // ✅ BUG 修复（2026-10-14 · P1 正文生成断线不重挂）：与目录生成同口径。
+        //    旧实现仅当 taskId 非空才 pollTaskUntilTerminal 重挂；但 SSE 在收到
+        //    首个携带 task_id 的事件之前就断连（30s 建连超时 / 网络抖动 / 网关重连）
+        //    时 taskId 恒为空串 → 整个重挂分支被跳过。此时后端任务已注册并继续
+        //    生成（AI 照常计费），成果只落在 task_registry.checkpoint_json，用户
+        //    只看到「SSE 连接中断」，逐章失败明细与已生成字数彻底丢失，必须手动
+        //    刷新才能看到结果。
+        //    后端 GET /sse/tasks 本就是为「按方案检索最近任务」设计的
+        //    （见 sse_handlers.list_tasks 的注释），findRecentOutlineTaskImpl 也已
+        //    支持 typeFilter 参数（目录生成在 :5373 就这么用），此处复用同一机制，
+        //    只把任务类型换成 content_generation。检索不到时维持旧行为：仅提示。
+        // ✅ 收口（2026-10-14）：与目录/事实同源走 reattachTaskImpl
+        //    （typeFilter=content_generation）。终态后的逐章失败明细 / 进度摘要
+        //    恢复仍由本块处理（content_result 各链语义不同）。
+        const hit = await reattachTaskImpl(
+          async () => (await tasksApi.list(id)).data,
+          pollTaskUntilTerminal,
+          {
+            taskId,
+            typeFilter: "content_generation",
+            onReattach: () =>
+              setProgressMsg("连接中断，正在重新挂接后台任务..."),
+          },
+        );
+        if (hit) {
+          taskId = hit.taskId;
+          const fin = hit.final;
           // 后端早已把「失败哪几章、为什么失败」落进 checkpoint（_CHECKPOINT_KINDS
           // 的 content_generation 白名单 + task_status 的 _attach_checkpoint_result），
           // 但前端此前从未读取 fin.content_result —— 断线/刷新后用户只看到
@@ -6360,9 +6540,29 @@ const draftKey = selectedSection && id
     } catch (e: any) {
       if (e.name !== "AbortError") {
         msg.warning(e.message || "SSE 连接中断");
-        if (taskId) {
-          setProgressMsg("连接中断，正在重新挂接后台任务...");
-          const fin = await pollTaskUntilTerminal(taskId);
+        // ✅ BUG 修复（2026-10-14 · P1 事实提取断线不重挂）：与目录/正文生成同口径。
+        //    旧实现仅当 taskId 非空才重挂；建连阶段（首个事件前）断连时 taskId 为空
+        //    → 重挂分支整体跳过，而后端任务已注册并继续跑（AI 照常计费），
+        //    segment_stats / cross_conflicts 只落在 facts_result checkpoint，
+        //    用户只看到「SSE 连接中断」，失败段数与跨段矛盾彻底丢失。
+        //    复用 findRecentOutlineTaskImpl 的 typeFilter 参数（原设计即为此），
+        //    检索不到时维持旧行为：仅提示。
+        // ✅ 收口（2026-10-14）：与目录/正文同源走 reattachTaskImpl
+        //    （typeFilter=facts_generation）。终态后的 segment_stats / cross_conflicts
+        //    恢复仍由本块处理（facts_result 各链语义不同）。
+        const hit = await reattachTaskImpl(
+          async () => (await tasksApi.list(id)).data,
+          pollTaskUntilTerminal,
+          {
+            taskId,
+            typeFilter: "facts_generation",
+            onReattach: () =>
+              setProgressMsg("连接中断，正在重新挂接后台任务..."),
+          },
+        );
+        if (hit) {
+          taskId = hit.taskId;
+          const fin = hit.final;
           if (fin?.status === "completed") {
             // ✅ P0 修复（2026-09-27 · 断线重挂成果恢复）：后端已把 completed 事件的
             //    segment_stats / cross_conflicts 落进 facts_result checkpoint 并由

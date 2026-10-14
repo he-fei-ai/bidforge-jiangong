@@ -101,12 +101,14 @@ async def _insert_consistency_conflicts(db, sid, *, scan_id, rows, created_at):
         await db.execute(
             "INSERT INTO consistency_conflicts (id, scheme_id, scan_id,"
             " conflict_type, severity, topic, occurrences,"
-            " authoritative_value, repair_instruction, reason, status,"
-            " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            " authoritative_value, authoritative_source, repair_instruction,"
+            " reason, status,"
+            " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (c.get("id") or uuid.uuid4().hex, sid, scan_id,
              c["conflict_type"], c["severity"], c["topic"],
              json.dumps(c.get("occurrences", []), ensure_ascii=False),
              c.get("authoritative_value", ""),
+             c.get("authoritative_source", ""),
              c.get("repair_instruction", ""),
              c.get("reason", ""),
              c.get("status", "pending"), created_at))
@@ -464,3 +466,72 @@ async def test_persist_false_does_not_write_history(ov_db):
     after = (await cur.fetchone())["n"]
     assert before == after, (
         f"persist=False 不得写 preflight_runs，实际 {before}→{after}")
+
+
+# ===========================================================================
+# 八、CON-SCAN 聚合的可执行性（R76 修复：reason 补 SELECT + 权威值露脸）
+# ===========================================================================
+async def test_consistency_scan_exposes_reason_and_authoritative_value(ov_db):
+    """一致性扫描 finding 必须携带仲裁理由与权威值（R76 修复）。
+
+    旧实现 SQL 漏选 reason 列 → ``c.get("reason")`` 恒为 None，detail 永远
+    退化为 topic（与 section_title 逐字重复）；authoritative_value 被 SELECT
+    出来却从不进 finding —— 用户拿到 CON-07「以权威值为准修复」的结论，
+    却看不到「该改成什么」，整改建议不可执行。
+    """
+    db, sid = ov_db
+    scan_id = "SC-detail-surfacing"
+    await _insert_consistency_conflicts(
+        db, sid, scan_id=scan_id,
+        rows=[
+            {"id": f"{scan_id}-1", "conflict_type": "numeric",
+             "severity": "high", "topic": "基坑开挖深度", "status": "pending",
+             "occurrences": ["5.6m（工程概况）", "5.8m（施工工艺）"],
+             "authoritative_value": "5.6m", "authoritative_source": "全局事实",
+             "reason": "全局事实已确认 5.6m，施工工艺章节 5.8m 与之矛盾",
+             "repair_instruction": "将施工工艺章节的开挖深度统一为 5.6m"},
+        ],
+        created_at=_now())
+    await db.commit()
+
+    payload = await _readiness_overview_compute(db, sid, persist=False)
+    scan_findings = [f for f in payload["findings"]
+                     if f.get("rule_id", "").startswith("CON-SCAN-")]
+    assert len(scan_findings) == 1
+    f = scan_findings[0]
+    assert f["authoritative_value"] == "5.6m", (
+        f"权威值必须进入 finding，实际 {f.get('authoritative_value')!r}")
+    assert f["authoritative_source"] == "全局事实"
+    assert "5.6m" in f["detail"], (
+        f"detail 必须包含权威值（整改报告只印 title/detail/suggestion），"
+        f"实际 {f['detail']!r}")
+    assert "矛盾" in f["detail"], (
+        f"detail 必须包含仲裁理由，不再与 section_title 逐字重复，"
+        f"实际 {f['detail']!r}")
+    assert f["detail"] != f["section_title"], (
+        "detail 不得再与 section_title 逐字重复")
+    assert f["suggestion"] == "将施工工艺章节的开挖深度统一为 5.6m", (
+        f"repair_instruction 必须透传为整改建议，实际 {f.get('suggestion')!r}")
+
+
+async def test_consistency_scan_detail_falls_back_to_topic_when_no_reason(ov_db):
+    """reason 与权威值均为空时 detail 退化为 topic，且不产「权威值：」残句。"""
+    db, sid = ov_db
+    scan_id = "SC-no-reason"
+    await _insert_consistency_conflicts(
+        db, sid, scan_id=scan_id,
+        rows=[
+            {"id": f"{scan_id}-1", "conflict_type": "numeric",
+             "severity": "medium", "topic": "材料厚度", "status": "pending",
+             "occurrences": [], "authoritative_value": "", "reason": "",
+             "repair_instruction": ""},
+        ],
+        created_at=_now())
+    await db.commit()
+
+    payload = await _readiness_overview_compute(db, sid, persist=False)
+    f = [x for x in payload["findings"]
+         if x.get("rule_id", "").startswith("CON-SCAN-")][0]
+    assert f["detail"] == "材料厚度"
+    assert f["authoritative_value"] == ""
+    assert "权威值" not in f["detail"], "无权威值时不造「权威值：」残句"

@@ -79,7 +79,7 @@ async def test_conflict_resolved_to_real_value_drops_simulated(db_conn):
     r = await _row_of(db_conn, fid)
     assert r["is_simulated"] == 1  # 初始状态：模拟值待确认
 
-    out = await gf.resolve_conflict(fid, {"value": "18.0m"}, db=db_conn)
+    out = await gf.resolve_conflict(fid, gf.ResolveConflictRequest(value="18.0m"), db=db_conn)
     assert out == {"ok": True}
 
     r = await _row_of(db_conn, fid)
@@ -95,7 +95,7 @@ async def test_conflict_resolved_to_simulated_candidate_keeps_gate(db_conn):
         db_conn, value="12.5m",
         candidates=[{"value": "18.0m", "source": "估算",
                      "confidence": 0.3, "is_simulated": True}])
-    await gf.resolve_conflict(fid, {"value": "18.0m"}, db=db_conn)
+    await gf.resolve_conflict(fid, gf.ResolveConflictRequest(value="18.0m"), db=db_conn)
     r = await _row_of(db_conn, fid)
     assert r["is_simulated"] == 1, "候选本身是模拟值时闸门必须保留"
     assert "模拟值" in r["content"]
@@ -106,7 +106,7 @@ async def test_conflict_keep_current_value_preserves_simulated(db_conn):
     """「保留当前值」= 值未变 → 只清矛盾，模拟值语义保持原样。"""
     fid = await _seed_conflicting(db_conn, value="12.5m",
                                   candidates=[{"value": "18.0m"}])
-    await gf.resolve_conflict(fid, {"value": "12.5m"}, db=db_conn)
+    await gf.resolve_conflict(fid, gf.ResolveConflictRequest(value="12.5m"), db=db_conn)
     r = await _row_of(db_conn, fid)
     assert r["is_simulated"] == 1, "值未变时不应改写模拟值语义"
     assert "模拟值" in r["content"]
@@ -118,7 +118,7 @@ async def test_conflict_legacy_candidates_without_flag_treat_as_real(db_conn):
     fid = await _seed_conflicting(
         db_conn, value="12.5m",
         candidates=[{"value": "18.0m", "source": "地质报告.pdf", "confidence": 0.95}])
-    await gf.resolve_conflict(fid, {"value": "18.0m"}, db=db_conn)
+    await gf.resolve_conflict(fid, gf.ResolveConflictRequest(value="18.0m"), db=db_conn)
     r = await _row_of(db_conn, fid)
     assert r["is_simulated"] == 0, "无标记的旧候选按真实证据处理"
 
@@ -129,7 +129,7 @@ async def test_conflict_resolved_value_marker_stripped(db_conn):
     fid = await _seed_conflicting(
         db_conn, value="12.5m",
         candidates=[{"value": "18.0m", "is_simulated": False}])
-    await gf.resolve_conflict(fid, {"value": f"18.0m{SIMULATED_MARKER}"}, db=db_conn)
+    await gf.resolve_conflict(fid, gf.ResolveConflictRequest(value=f"18.0m{SIMULATED_MARKER}"), db=db_conn)
     r = await _row_of(db_conn, fid)
     assert r["content"] == "- **基坑深度**: 18.0m"
     assert r["is_simulated"] == 0
@@ -137,11 +137,11 @@ async def test_conflict_resolved_value_marker_stripped(db_conn):
 
 async def test_conflict_empty_value_raises_400(db_conn):
     with pytest.raises(HTTPException) as ei:
-        await gf.resolve_conflict("f1", {"value": "   "}, db=db_conn)
+        await gf.resolve_conflict("f1", gf.ResolveConflictRequest(value="   "), db=db_conn)
     assert ei.value.status_code == 400
 
 
 async def test_conflict_nonexistent_raises_404(db_conn):
     with pytest.raises(HTTPException) as ei:
-        await gf.resolve_conflict("not-exists-id", {"value": "x"}, db=db_conn)
+        await gf.resolve_conflict("not-exists-id", gf.ResolveConflictRequest(value="x"), db=db_conn)
     assert ei.value.status_code == 404

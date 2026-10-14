@@ -251,8 +251,10 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
     不改正文则导出仍是旧坏代码）。chart_type 缺省时按代码本体推断。
 
     Returns:
-        {code, written_back, content_updated, new_content, validated, attempts}
+        {code, written_back, content_updated, new_content, word_count, validated, attempts}
         validated=True 表示修复结果已通过确定性语法校验（修复闭环）。
+        word_count 仅在 content_updated=True 时非 None（= text_word_count(new_content)，
+        供前端图表修复回写时优先取后端权威字数，不本地伪造字符口径）。
     """
     code = body.get("code", "")
     error = body.get("error", "渲染失败")
@@ -440,6 +442,7 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
     wrote_back = False
     content_updated = False
     new_content = ""
+    section_word_count = None  # F2（R71）：正文重写后的权威字数，仅 content_updated 时非 None
     if validated and (prediction_id or (section_id and chart_type)):
         try:
             if prediction_id:
@@ -544,6 +547,7 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
                             "R13：db.execute 返回 None（sections 正文写回 UPDATE）")
                     content_updated = True
                     new_content = patched
+                    section_word_count = wc
                     logger.info("章节 %s 内联图表代码已随修复同步更新", section_id[:8])
 
             await db.commit()
@@ -556,9 +560,11 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
             wrote_back = False
             content_updated = False
             new_content = ""
+            section_word_count = None
 
     return {"code": fixed, "written_back": wrote_back,
             "content_updated": content_updated, "new_content": new_content,
+            "word_count": section_word_count,
             "validated": validated, "attempts": fix_attempts}
 
 
@@ -610,7 +616,8 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
     #    方法；旧实现用字典式取值读取 word_budget 必抛 AttributeError → 该端点恒 500，
     #    「生成配图」全链路不可用。与上一行的下标取值保持一致。
     #    回归守卫见 tests/test_e2e_chain_hardening.py（源码级断言）。
-    word_budget = row["word_budget"] or 1500
+    from app.services.content_utils import DEFAULT_WORD_BUDGET
+    word_budget = row["word_budget"] or DEFAULT_WORD_BUDGET
 
     from app.routers._chart_pipeline import _rewrite_code_block, extract_inline_charts
     _blocks = [(ct, c) for ct, c in extract_inline_charts(content) if ct == "ai_image"]

@@ -3,6 +3,7 @@ import {
   upsertSectionLog, finalizeRunningLogsIn, mergeFailedSectionsInto,
   contentResultFailedSections, contentResultSummary,
   normalizeQualityIssues,
+  isTerminalTaskStatus, isTerminalContentEvent, degradedConsistencyHint,
   type SectionLogItem, type GenStats,
 } from "../utils/contentEvents";
 import { tasksApi, sectionsApi } from "../api";
@@ -47,6 +48,12 @@ export interface UseContentGenerationOpts {
   schemeId: string | null;
   concurrencyOption: string;
   resolveWordBudgetOverride: () => number | undefined;
+  /**
+   * ✅ R66（2026-10-11）四档字数控制：返回 brief/standard/detailed/ultra 时
+   * 以 word_budget_tier 下发（每个叶子章节按档位字数生成）；返回 undefined
+   * 时回落旧的 word_budget_override 总量分配口径。两者互斥，档位优先。
+   */
+  resolveWordBudgetTier?: () => string | undefined;
   autoConsistencyRepair: boolean;
   consistencySeverity: string;
   autoShrinkOver: boolean;
@@ -67,7 +74,7 @@ export interface UseContentGenerationOpts {
 }
 
 export function useContentGeneration(opts: UseContentGenerationOpts): ContentGenerationState & ContentGenerationActions {
-  const { schemeId, concurrencyOption, resolveWordBudgetOverride, autoConsistencyRepair, consistencySeverity, autoShrinkOver, forceFullRepair, generationStandard, load, getActiveTaskId, setActiveTab, onSseEvent, msg, sseFetch } = opts;
+  const { schemeId, concurrencyOption, resolveWordBudgetOverride, resolveWordBudgetTier, autoConsistencyRepair, consistencySeverity, autoShrinkOver, forceFullRepair, generationStandard, load, getActiveTaskId, setActiveTab, onSseEvent, msg, sseFetch } = opts;
   const [generating, setGenerating] = useState(false);
   const [genType, setGenType] = useState("");
   const [taskPaused, setTaskPaused] = useState(false);
@@ -103,8 +110,11 @@ export function useContentGeneration(opts: UseContentGenerationOpts): ContentGen
     setProgress(0); setProgressMsg("正在连接..."); setActiveTab("content");
     setSectionLogs([]); sectionLogsRef.current = []; setGenStats({});
     const body: Record<string, unknown> = {};
+    // ✅ R66：档位与总量覆盖互斥，档位优先（与后端 if/elif 分支同口径）
+    const wbTier = resolveWordBudgetTier?.();
+    if (wbTier) body.word_budget_tier = wbTier;
     const wbOverride = resolveWordBudgetOverride();
-    if (wbOverride) body.word_budget_override = wbOverride;
+    if (wbOverride && !wbTier) body.word_budget_override = wbOverride;
     if (extra?.section_id) body.section_id = extra.section_id;
     if (extra?.mode) body.mode = extra.mode;
     body.concurrency = concurrencyOption;
@@ -143,12 +153,16 @@ export function useContentGeneration(opts: UseContentGenerationOpts): ContentGen
         else if (evt.event === "consistency_repair_done") { setProgress(1); setProgressMsg(`一致性修复完成：已修复 ${evt.repaired ?? 0} 处`); }
         else if (evt.event === "consistency_skipped") { setProgress(1); setProgressMsg(evt.reason || "方案尚无正文"); }
         else if (evt.event === "consistency_failed") { setProgressMsg(`全文一致性处理失败：${evt.reason || ""}`); }
-        if (evt.event === "completed") {
+        // ✅ 2026-10-10：`degraded` 与 `completed` 同为终态（后端一致性修复有失败项
+        //   时的加法式终态）。旧实现只认 completed ⇒ 降级完成时不提示、不 load()。
+        if (isTerminalContentEvent(evt)) {
           setProgress(1);
           const fc = (typeof evt.failed_count === "number") ? evt.failed_count : sectionLogsRef.current.filter((l) => l.status === "failed").length;
           mergeFailed(evt.failed_sections); finalizeRunning("未完成（生成已结束）", "failed");
           const dm = evt.message || `正文生成完成，总字数 ${evt.word_count || 0}`;
-          if (fc > 0) { msg.warning(dm + `（${fc} 章失败）`); setProgressMsg(dm + `（${fc} 章失败）`); }
+          const _degradedHint = degradedConsistencyHint(evt);
+          if (_degradedHint) { msg.warning(_degradedHint); setProgressMsg(`${dm} | ${_degradedHint}`); }
+          else if (fc > 0) { msg.warning(dm + `（${fc} 章失败）`); setProgressMsg(dm + `（${fc} 章失败）`); }
           else { msg.success(dm); setProgressMsg(dm); }
           if (evt.consistency_summary) { setCrSummary(evt.consistency_summary); if (evt.consistency_summary.scan_id) setCrScanId(evt.consistency_summary.scan_id); }
           // ✅ F-CONTENT-STANDARD(2026-09-26 · F4)：生成标准校验汇总提示。
@@ -178,12 +192,17 @@ export function useContentGeneration(opts: UseContentGenerationOpts): ContentGen
         if (taskId) {
           setProgressMsg("连接中断，正在重新挂接后台任务...");
           try {
-            const fin = await new Promise<any>((resolve) => { const poll = async () => { try { const { data } = await tasksApi.status(taskId); if (data && ["completed","failed","stopped"].includes(data.status)) resolve(data); else setTimeout(poll, 3000); } catch { setTimeout(poll, 3000); } }; poll(); });
+            // ✅ 2026-10-10：终态集合改用单一事实源，补上 degraded。
+            //    旧实现内联三态白名单 + 无上限递归 ⇒ 降级完成的后台任务会让
+            //    这里的 await **永不返回**（页面版的 pollTaskUntilTerminal 至少有
+            //    maxPolls 兜底，本 hook 版完全没有）。
+            const fin = await new Promise<any>((resolve) => { const poll = async () => { try { const { data } = await tasksApi.status(taskId); if (data && isTerminalTaskStatus(data.status)) resolve(data); else setTimeout(poll, 3000); } catch { setTimeout(poll, 3000); } }; poll(); });
             const ck = contentResultFailedSections(fin?.content_result);
             if (ck.sections.length) { mergeFailed(ck.sections); msg.warning(`后台正文生成有 ${ck.failedCount} 章失败`); }
             const sm = contentResultSummary(fin?.content_result);
             if (sm.total > 0) { msg.info(`后台正文生成：已完成 ${sm.done}/${sm.total} 章，共 ${sm.words} 字`); }
             if (fin?.status === "completed") { msg.success("正文生成已在后台完成"); await load(); }
+            else if (fin?.status === "degraded") { msg.warning("正文生成已在后台降级完成：一致性修复有失败项，成稿含未修复缺陷"); await load(); }
             else if (fin?.status === "failed") { msg.error(fin.message || "后台任务失败"); }
             else if (fin?.status === "stopped") { msg.info("后台任务已停止"); await load(); }
           } catch { /* 轮询失败静默 */ }
@@ -193,7 +212,7 @@ export function useContentGeneration(opts: UseContentGenerationOpts): ContentGen
       if (abortRef.current === ac) abortRef.current = null;
     }
     if (seqRef.current === mySeq) { setGenerating(false); setGenType(""); setTaskPaused(false); }
-  }, [schemeId, concurrencyOption, resolveWordBudgetOverride, autoConsistencyRepair, consistencySeverity, autoShrinkOver, forceFullRepair, generationStandard, load, setActiveTab, onSseEvent, msg, sseFetch, finalizeRunning, mergeFailed, handleSectionStart, handleSectionDone, handleSectionError, handleSectionStage]);
+  }, [schemeId, concurrencyOption, resolveWordBudgetOverride, resolveWordBudgetTier, autoConsistencyRepair, consistencySeverity, autoShrinkOver, forceFullRepair, generationStandard, load, setActiveTab, onSseEvent, msg, sseFetch, finalizeRunning, mergeFailed, handleSectionStart, handleSectionDone, handleSectionError, handleSectionStage]);
 
   return {
     generating, genType, taskPaused, progress, progressMsg, sectionLogs, genStats, crSummary, crScanId,

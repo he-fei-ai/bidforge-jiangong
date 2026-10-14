@@ -248,8 +248,14 @@ class TestQualityReportAttached:
         rep = sh._attach_quality_report(
             [{"title": "工程概况", "level": 1, "children": [
                 {"title": "概况", "level": 3, "children": []}]}], BASIS, review)
-        assert set(rep) == {"continuity", "name_coverage", "redundant_titles"}
+        # ✅ 2026-10-11（引入目录结构规范）：报告新增 structure 建议键。
+        #    契约同步扩展为四键；结构建议**不得**翻转 continuity.ok（本例
+        #    continuity 因层级跳级仍为 False，与 structure 无关）。
+        assert set(rep) == {"continuity", "structure", "name_coverage",
+                            "redundant_titles"}
         assert rep["continuity"]["ok"] is False
+        assert rep["structure"]["evaluated"] is True
+        assert "chapter_count" in {w["kind"] for w in rep["structure"]["warnings"]}
         assert review["quality"] is rep
         assert review["suggestions"] == ["原建议"], "校验告警不得污染修复建议"
 

@@ -727,7 +727,7 @@ async def test_danger_check_endpoint_uses_fact_params(ctx):
     await ctx.commit()
 
     res = await gf.check_danger_scheme(
-        {"scheme_name": "深基坑支护与降水工程专项施工方案"},
+        gf.DangerCheckRequest(scheme_name="深基坑支护与降水工程专项施工方案"),
         scheme_id=sid, project_id="", db=ctx)
     assert res["category_id"] == "foundation_pit"
     assert res["threshold_params"] == {"depth": 4.5}
@@ -752,7 +752,7 @@ async def test_danger_check_unit_conversion_to_meter(ctx):
     await ctx.commit()
 
     res = await gf.check_danger_scheme(
-        {"scheme_name": "基坑支护专项施工方案"},
+        gf.DangerCheckRequest(scheme_name="基坑支护专项施工方案"),
         scheme_id=sid, project_id="", db=ctx)
     assert res["threshold_params"] == {"depth": 4.2}
     assert res["classification"]["is_hazardous"] is True
@@ -769,7 +769,7 @@ async def test_danger_check_requires_name(ctx):
 
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as ei:
-        await gf.check_danger_scheme({}, scheme_id=sid, project_id="", db=ctx)
+        await gf.check_danger_scheme(gf.DangerCheckRequest(), scheme_id=sid, project_id="", db=ctx)
     assert ei.value.status_code == 400
 
 async def test_danger_check_scheme_id_only_loads_name_from_db(ctx):
@@ -793,7 +793,7 @@ async def test_danger_check_scheme_id_only_loads_name_from_db(ctx):
     await ctx.commit()
 
     # body 为空对象（与前端 factsApi.dangerCheck({}, schemeId) 逐字一致）
-    res = await gf.check_danger_scheme({}, scheme_id=sid, project_id="", db=ctx)
+    res = await gf.check_danger_scheme(gf.DangerCheckRequest(), scheme_id=sid, project_id="", db=ctx)
     assert res["category_id"] == "foundation_pit"
     assert res["threshold_params"] == {"depth": 4.5}
     assert res["classification"]["is_hazardous"] is True

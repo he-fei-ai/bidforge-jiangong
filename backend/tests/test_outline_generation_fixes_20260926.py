@@ -285,6 +285,12 @@ class TestRenderDynamicBlindspots:
     #:   取值范围由路由护栏锁死。
     SNAPSHOT: dict = {
         "routers/charts.py render(<non-literal-key>)": 2,
+        # ✅ R57（2026-10-09）已消除，故从快照中注销：
+        #   "routers/sse_handlers.py render(content_generation_system) **<unresolved>" x2
+        # 原形态：逐章变量先装进 _ck_kwargs / _sys_vars 再统一 ** 展开，
+        #   静态解析器无法判定 → 该调用点漏传模板变量时**测不出来**。
+        # 现形态：三个逐章变量改为显式关键字书写，检查点变量保留逐条
+        #   Subscript 赋值的可解析形态 → blindspot 归零。
         "services/ai/json_response.py render(<non-literal-key>)": 1,
     }
 
@@ -319,11 +325,12 @@ class TestRenderDynamicBlindspots:
         import pathlib
 
         import app as app_pkg
-        src = (pathlib.Path(app_pkg.__file__).parent
-               / "routers" / "sse_handlers.py").read_text(encoding="utf-8")
         blind: list = []
-        _scan_missing_render_kwargs(src, "routers/sse_handlers.py",
-                                    blindspots=blind)
+        for fname in ("sse_handlers.py", "sse_checkpoint.py"):
+            src = (pathlib.Path(app_pkg.__file__).parent
+                   / "routers" / fname).read_text(encoding="utf-8")
+            _scan_missing_render_kwargs(src, f"routers/{fname}",
+                                        blindspots=blind)
         assert blind == [], (
             "sse_handlers 的 5 个检查点 render 调用点不应再有盲区：" + str(blind))
 

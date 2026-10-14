@@ -341,21 +341,35 @@ class TestTableSizeCaps:
 
 # =========================================================================
 # D. 原子替换失败不写缓存（E5 · P1）
+#
+# ✅ 锚点同步（2026-10-15 · R77 §9.1 收口）：并行会话把 DOCX/PDF 的
+#    「INSERT → commit → prune → commit」序列收敛为共享 helper
+#    `_persist_export_cache_row`（export.py:5546，双提交口径）。缓存 INSERT
+#    不再位于 `export_docx`/`export_pdf` 函数体内 —— 旧护栏直接
+#    `src.index("INSERT OR IGNORE...")` 失去锚点而恒红（R77 全量那 4 个
+#    failed 的根因）。护栏语义不变，改锁**调用形态**：
+#      · 写入调用必须被门控（DOCX `if cacheable:` / PDF `else:` 成功分支）；
+#      · 失败分支不得出现写入调用；
+#      · tmp 路径不得作为 out_path 实参进入写入调用；
+#      · 新增 INSERT 单一事实源锁（原子串判据在收敛后结构性失效的形态）。
 # =========================================================================
+_PERSIST_CALL = "_persist_export_cache_row("
+
+
 class TestAtomicReplaceCacheGovernance:
     def test_docx_skips_cache_when_replace_fails(self):
         """`cacheable` 标志必须真正门控缓存写入（静态接线锁）。"""
         src = inspect.getsource(E.export_docx)
         assert "cacheable = True" in src
         assert "cacheable = False" in src
-        assert re.search(r"if cacheable:\s*\n\s*cache_id", src), \
-            "缓存 INSERT 必须被 cacheable 门控"
+        assert re.search(r"if cacheable:\s*\n\s*await _persist_export_cache_row\(", src), \
+            "缓存写入调用必须被 cacheable 门控"
 
     def test_pdf_replaces_before_cache_row(self):
-        """PDF 分支顺序治理：先 os.replace 落盘，再 INSERT 缓存行。"""
+        """PDF 分支顺序治理：先 os.replace 落盘，再写缓存行。"""
         src = inspect.getsource(E.export_pdf)
         i_replace = src.index("_os.replace(_tmp_pdf, out_path)")
-        i_insert = src.index("INSERT OR IGNORE INTO export_cache")
+        i_insert = src.index(_PERSIST_CALL)
         assert i_replace < i_insert, "缓存行必须晚于原子替换写入（否则留僵尸行）"
 
     @staticmethod
@@ -375,25 +389,42 @@ class TestAtomicReplaceCacheGovernance:
         return "\n".join(out)
 
     def test_pdf_cache_row_not_written_when_replace_fails(self):
-        """替换失败分支里不得出现缓存 INSERT（旧实现正是"先写缓存再替换"）。
+        """替换失败分支里不得出现缓存写入（旧实现正是"先写缓存再替换"）。
 
         ⚠️ 只用"字符串先后顺序"断言不够：A/B 实测存在「保留 else: pass、
         把 INSERT 挪到 else 之后的无条件块」这种形态仍能骗过顺序断言 ——
-        必须按缩进**取出分支体**再判成员。
+        必须按缩进**取出分支体**再判成员（收敛后判据随迁为写入调用）。
         """
         src = inspect.getsource(E.export_pdf)
+        # 锚点唯一性前提：失败分支/成功分支各只有一个锚（多锚会让
+        # _block_after 取到第一个而静默错锁）
+        assert src.count("if not _replaced:") == 1
+        assert src.count("else:") == 1
         fail_branch = self._block_after(src, "if not _replaced:")
         ok_branch = self._block_after(src, "else:")
         assert "unlink" in fail_branch, "替换失败必须清理 tmp"
-        assert "INSERT OR IGNORE" not in fail_branch, "替换失败分支不得写缓存行"
-        assert "INSERT OR IGNORE" in ok_branch, "缓存 INSERT 必须位于替换成功分支内"
+        assert _PERSIST_CALL not in fail_branch, "替换失败分支不得写缓存行"
+        assert _PERSIST_CALL in ok_branch, "缓存写入调用必须位于替换成功分支内"
 
     def test_docx_tmp_path_never_persisted(self):
         """tmp 路径不得写入 export_cache（否则 DB 永久指向 .tmp 孤儿文件）。"""
         src = inspect.getsource(E.export_docx)
-        i_insert = src.index("INSERT OR IGNORE INTO export_cache")
-        seg = src[i_insert:i_insert + 700]
+        i_call = src.index(_PERSIST_CALL)
+        seg = src[i_call:i_call + 700]
         assert "tmp_out_path" not in seg
+
+    def test_cache_insert_single_source_after_refactor(self):
+        """INSERT 单一事实源（2026-10-14 收敛加法式护栏）：helper 承载
+        INSERT+双提交；两分支不得回流自持裸 INSERT（否则第二份副本）。
+        """
+        helper = inspect.getsource(E._persist_export_cache_row)
+        assert "INSERT OR IGNORE INTO export_cache" in helper
+        assert helper.count("await db.commit()") == 2, \
+            "双提交口径（INSERT→commit→prune→commit）不得退化"
+        assert "_prune_export_cache" in helper, "写入必须同序列执行保留裁剪"
+        for fn in (E.export_docx, E.export_pdf):
+            assert "INSERT OR IGNORE INTO export_cache" not in inspect.getsource(fn), \
+                "缓存 INSERT 只允许存在于 _persist_export_cache_row 一处"
 
 
 # =========================================================================

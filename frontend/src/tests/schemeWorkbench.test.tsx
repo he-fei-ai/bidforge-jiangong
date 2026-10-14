@@ -19,6 +19,9 @@
  *   触发 act 警告与状态更新）。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+// ✅ 页面级重渲染测试：jsdom + 完整 React 树 + 大量 waitFor，单跑最长 ~30s
+//    全量并发下 worker 争用 CPU，30s 全局 timeout 不够。此处提到 60s。
+vi.setConfig({ testTimeout: 60000 });
 import { render, screen, fireEvent, waitFor, cleanup, act } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import React from "react";
@@ -692,7 +695,7 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
       (t) => t.some((x) => /质量分刷新失败/.test(x)) && !t.some((x) => /质量分已刷新/.test(x)));
     // 确实发起过请求（refresh=true）
     expect(lastCall("docPipelineApi.completeness")[1]).toBe(true);
-  }, 30000);
+  }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 
   it("刷新质量：接口成功时回填并提示「质量分已刷新」", async () => {
     seedDoc();
@@ -705,7 +708,7 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
 
     await waitForActivity(
       (t) => t.some((x) => /质量分已刷新/.test(x)) && !t.some((x) => /质量分刷新失败/.test(x)));
-  }, 30000);
+  }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 
   it("重新解析：调用 reparse(force) 并按返回内容反馈，随后重拉权威状态", async () => {
     seedDoc();
@@ -718,7 +721,7 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
     expect(lastCall("docPipelineApi.reparse")).toEqual(["d1", "force"]);
     // 非 refreshQuality 分支动作后必须重拉状态（loadPipelineStatus → status）
     await waitFor(() => expect((apiCalls["docPipelineApi.status"] || []).length).toBeGreaterThan(1));
-  }, 30000);
+  }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 
   it("物化提取层：反馈物化类别数", async () => {
     seedDoc();
@@ -730,7 +733,7 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
     fireEvent.click(modalActionButton("物化提取层"));
 
     await waitForActivity((t) => t.some((x) => /提取层已物化（3 类）/.test(x)));
-  }, 30000);
+  }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 
   it("交叉校验：反馈冲突数", async () => {
     seedDoc();
@@ -740,7 +743,7 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
     fireEvent.click(modalActionButton("交叉校验"));
 
     await waitForActivity((t) => t.some((x) => /交叉校验完成（冲突 2）/.test(x)));
-  }, 30000);
+  }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 
   it("管线动作失败：reparse 抛错时提示错误且不残留 loading", async () => {
     seedDoc();
@@ -753,7 +756,7 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
     // 动作结束（finally）后按钮恢复可点
     await waitFor(() =>
       expect(modalActionButton("重新解析").hasAttribute("disabled")).toBe(false));
-  }, 30000);
+  }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 
   it("删除文档：确认后发起删除请求、提示成功并重拉文档列表", async () => {
     seedDoc();
@@ -781,7 +784,7 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
     expect(lastCall("factsApi.deleteDocument")[0]).toBe("d1");
     // 删除成功后重新加载文档列表
     await waitFor(() => expect((apiCalls["factsApi.listDocuments"] || []).length).toBeGreaterThan(1));
-  }, 30000);
+  }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 });
 
 // =====================================================================

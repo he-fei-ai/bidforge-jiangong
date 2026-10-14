@@ -310,11 +310,22 @@ class TestDerivationGateSingleSource:
                 f"{fn_name} 仍保留本地 `old_val ==` 字面量比较")
 
     def test_group_rebuild_still_reads_old_value_from_stored_content(self):
-        """分组重建的旧值必须从库行 content 回解（不能拿新值自比）。"""
+        """分组重建的旧值必须从库行 content 回解（不能拿新值自比）。
+
+        ✅ R75（2026-10-13 · 读路径唯一出口统一）：回解出口从内联
+        extract_value_from_markdown_line(old.get("content")…) 迁到
+        _fact_name_value(old)（该出口内部同样按行 content 回解，且与
+        显示值同口径）。本护栏改为锁「经读路径唯一出口回解」，
+        并补上原意图锁：不得拿新值自比（旧实现只锁字面量，
+        迁移即恒红，属「护栏失去锚点」形态）。
+        """
         body = self._call_site_sources()["_carry_dimensions"]
-        assert re.search(
+        assert re.search(r"_fact_name_value\(\s*old\b", body) or re.search(
             r"extract_value_from_markdown_line\(\s*old\.get\(\"content\"\)",
-            body), "分组重建未按旧行 content 回解出旧值"
+            body), "分组重建未按旧行 content 回解出旧值（读路径唯一出口）"
+        # 意图锁：old_val 的赋值右侧不得直接取新值 val（拿新值自比 = 门控失效）
+        assert not re.search(r"old_val\s*=\s*[^\n]*\bval\b(?![_,]\s*\n)", body), \
+            "分组重建用新值自比旧值，派生输入门控失效"
 
 
 

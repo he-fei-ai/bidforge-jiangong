@@ -435,6 +435,55 @@ def _build_name_key_index() -> list[tuple[str, str]]:
 _NAME_KEY_INDEX: list[tuple[str, str]] = _build_name_key_index()
 
 
+#: fact_key 兜底保留字符集：数字 / 拉丁字母 / CJK 统一表意文字（一 … 鿿）
+_KEY_RUN_RE = re.compile("[^0-9A-Za-z一-鿿]+")
+#: 「分隔符类」字符集合：仍按历史口径折叠成一个 ``_``（保证既有 key 逐字不变）。
+#: 其余非保留字符（希腊字母、带圈数字、度符号 …）按 Unicode 码点转义，保留区分度。
+_KEY_FOLD_CHARS = "-_"
+
+
+def _fact_key_seed(name: str) -> str:
+    """把事实名称压成哈希种子（**区分度无损**，且与旧行为逐字兼容）。
+
+    ✅ BUG 修复（2026-10-10 · fact_key 命名空间碰撞 → 事实被静默合并）：
+
+    旧实现把名称里所有「非字母数字、非 CJK」的字符**一律压成一个下划线**，
+    于是名称中这类字符的信息被完全丢掉：
+
+      · 实测 ``normalize_key('坡角α') == normalize_key('坡角β')`` 同为
+        ``fact_f6122c97``；``深度①`` 与 ``深度②``、``温度°C`` 与 ``温度℃`` 同理；
+      · ``merge_and_deduplicate`` 按 fact_key 聚类 ⇒ 两条**互不相同的事实**落进同一簇：
+        一条成为事实值，另一条沦为它的「矛盾候选值」且**原名整条消失**。
+        端到端后果 = ① 静默丢事实 ② 凭空造出一条假矛盾让用户去裁决
+        ③ 后续派生（chapter / fact_attr）按幸存者的 name 计算。三者均无报错。
+
+    ⚠️ 为什么不直接对原名做哈希（最省事的写法）：那会让「仅标点/空白不同」的
+      名称（``开挖深度`` vs ``开挖深度（m）``）不再收敛到同一 key，把原本被正确
+      归并的同一概念拆成两条互相矛盾的事实 —— 用一种数据错换另一种。
+
+    采用的口径（双策略）：
+      · **分隔符类字符**（空白 / ``-`` / ``_``）仍折叠成一个 ``_`` —— 名称只含
+        「CJK + 字母数字 + 分隔符」时种子与旧实现**逐字节相同**，既有库里的
+        fact_key 无需迁移，也不影响 ``persist_extraction`` 的 ``_protected_by_key``；
+      · **其它符号**按 Unicode 码点转义进种子（``α`` → ``x03b1``），使「抹掉符号后
+        同形、实际不同」的名称产出不同 key。
+    """
+    def _repl(m):
+        parts = []
+        for ch in m.group():
+            if ch.isspace() or ch in _KEY_FOLD_CHARS:
+                tok = "_"
+            else:
+                tok = "x%04x" % ord(ch)
+            # 连续分隔符仍只保留一个 ``_``（与旧行为对齐）
+            if tok == "_" and parts and parts[-1] == "_":
+                continue
+            parts.append(tok)
+        return "".join(parts)
+
+    return _KEY_RUN_RE.sub(_repl, name.strip()).strip("_")
+
+
 @lru_cache(maxsize=8192)
 def normalize_key(name: str) -> str:
     """将事实名称归一化为稳定的英文 key（最长匹配 + 结果缓存）"""
@@ -449,7 +498,9 @@ def normalize_key(name: str) -> str:
         return name
     # ✅ 修复：兜底改为名称哈希（旧实现 fact_{len(name)} 会让所有同长度
     # 不同名称的事实共用一个 key，跨段合并时被误判为矛盾/互相覆盖）
-    cleaned = re.sub(r'[^0-9A-Za-z\u4e00-\u9fff]+', '_', name.strip()).strip('_')
+    # 2026-10-10：哈希种子改用 _fact_key_seed（区分度无损），修复「非分隔符类
+    #   符号被抹成同一个 _」导致的跨名碰撞（机理见 _fact_key_seed docstring）。
+    cleaned = _fact_key_seed(name)
     return f"fact_{hashlib.md5(cleaned.encode('utf-8')).hexdigest()[:8]}"
 
 
@@ -529,8 +580,15 @@ def extract_value_from_markdown_line(line: str) -> tuple[str, str]:
 
     """从旧版 Markdown 格式中提取 name 和 value
     旧格式：- **名称**: 值  或  - 名称：值
+
+    ✅ BUG 修复（2026-10-10 · None 输入）： ``content`` 列在库里允许为 NULL
+    （手工 INSERT / 迁移遗留行），此类行会让旧实现 ``None.strip()`` 抛
+    ``AttributeError``。同一调用簇里的其它岔口（``strip_simulated_marker`` /
+    ``is_simulated_marked``）都用 ``text or ""`` 容忍 None，唯独本函数不设防
+    —— 而它是 ``load_resolved_facts_for_scope``（审核 / 预检 / 符合性 / 修复
+    四条链路）的唯一 name/value 回解出口，NULL content 一行即可让整条链路 500。
     """
-    line = line.strip().lstrip("-").strip()
+    line = (line or "").strip().lstrip("-").strip()
     # ✅ BUG 修复（2026-09-21）：模拟值标记必须先于 `**粗体**` / `*(注释)*`
     #    被整段移除。旧顺序只删掉 `*(模拟值)*` 这一半，⚠️ 前缀被留在 value 里
     #    （"- **基坑深度**: 12.5m ⚠️*(模拟值)*" → value="12.5m ⚠️"）。
@@ -543,6 +601,71 @@ def extract_value_from_markdown_line(line: str) -> tuple[str, str]:
     line = re.sub(r'\s*\*[^*]*\*\s*', '', line).strip()
     # ✅ 2026-10-06：按最早出现的冒号切分（半角/全角同等对待）
     return _split_fact_line(line)
+
+
+#: 「**名称**: 值」形态的事实行（读路径唯一出口 fact_name_value 消费，
+#: routers/global_facts.py 的 _fact_name_value 委托本层，R75b 下沉）。
+_RE_BOLD_FACT_LINE = re.compile(r'^-?\s*\*\*(.+?)\*\*\s*[:：]\s*(.*)')
+
+
+def fact_name_value(row: dict) -> tuple[str, str]:
+    """从落库行解析 ``(事实名, 取值)`` —— 读路径的**唯一出口**（权威定义）。
+
+    ✅ R75b（2026-10-13）下沉到 services 层：旧定义在
+    ``routers/global_facts.py::_fact_name_value``，导致跨模块只读桥接
+    ``load_resolved_facts_for_scope``（预检/审核/合规/一致性修复的消费入口）
+    无法正向引用它（routers → services 是唯一合法依赖方向），只能在
+    ``extract_value_from_markdown_line`` 上自建第二份回解：非粗体段落行的
+    name 回解成整段正文顶掉 title 列（R75 G-C 同族）。现桥接与本函数同源，
+    routers 侧保留薄包装委托（既有调用点与护栏锚点不动）。
+
+    口径辨析（与底层原语 ``extract_value_from_markdown_line`` 是**两套既定
+    职责**，不是分叉）：
+    - 本函数 = **显示/审计口径**：粗体行的 ``*(注释)*`` 保留（用户界面所见
+      即此值；喂 AI / 审核判定必须与所见逐字一致，R75 G-A 的根因即
+      拿剥注释值冒充显示值）；模拟标记两口径都剥。
+    - ``extract_value_from_markdown_line`` = **比较/输入解析口径**（剥注释）：
+      仅用于解析用户提交行（_split_fact_lines / PATCH content）与两侧同为
+      剥注释读数的比较场景（persist 冲突登记的 prior_value 对照新提取裸值、
+      doc_pipeline 跨源比对两侧同函数同源）。
+    判据只有一份：「库行回解显示值」一律走本函数，不得直调底层原语。
+
+    ⚠️ 模拟值标记必须先于 ``**粗体**`` / ``*(注释)*`` 被整段移除
+    （2026-09-21 修复，随本函数一并下沉）：旧顺序只删 ``*(模拟值)*`` 一半，
+    ⚠️ 前缀留在 value 里导致模拟值事实恒被判为已改值。
+
+    ✅ 2026-10-14（R75b G8 口径 1b 盘点收口 · 多行容器行不丢内容）：
+    一条库行的 content 若**含换行**（多行列表 / 值续行），下方的粗体行正则
+    取值组 ``(.*)`` **不跨换行**，旧实现只回解首行，第 2..N 行在界面 /
+    正文注入里**静默截断** —— 实测
+    ``content="- **事实A**: 值A\\n- **事实B**: 值B"`` 只回解成
+    ``("事实A", "值A")``，事实B 凭空消失（本仓生产库唯一命中行
+    ``129f36c9``「手动分组」即此形态；正常写路径由 ``_split_fact_lines``
+    拆行，容器行只来自历史 / 手工数据）。现对多例行：**name 取 title 列、
+    value 回退完整 content（原样保留全部子事实）**，不再丢信息。
+    """
+    content = row.get("content", "") or ""
+    name = row.get("title", "") or ""
+    stripped = (content or "").strip()
+    # ✅ 2026-10-14（G8 口径 1b 收口）：多行容器行（content 含换行）——
+    #    下方正则的 `(.*)` 取值组不跨换行，首行匹配成功即返回，第 2..N 行
+    #    被静默丢弃（实测生产库行 `129f36c9` title=手动分组、content 两行）。
+    #    此类行是「一条库行承载多条子事实」的脏形态（正常写路径
+    #    `_split_fact_lines` 会拆行，只来自历史/手工数据），逐字回解首行
+    #    必然丢信息 ⇒ 显示口径回退完整 content：name 用 title 列（分组
+    #    标题），value 为原样全文。单行粗体行照旧走专用粗体行正则
+    #    （128/129 行行为逐字不变）。
+    if "\n" in stripped:
+        return name, content
+    m = _RE_BOLD_FACT_LINE.match(stripped)
+    if m:
+        return m.group(1), strip_simulated_marker(m.group(2))
+    if stripped:
+        # 非列表行（整段文本、或没写减号的 "**名称**: 值"）：按统一出口回解取值，
+        # 但不要把整块原文当名称 —— 名称仍以 title 列为准。
+        _, value = extract_value_from_markdown_line(content)
+        return name, value
+    return name, ""
 
 
 
@@ -2382,8 +2505,8 @@ async def persist_extraction(
         scope_sql = "SELECT * FROM global_facts WHERE scheme_id=?"
         scope_params = (scheme_id,)
     else:
-        scope_sql = ("SELECT * FROM global_facts WHERE project_id=? "
-                     "AND (scheme_id='' OR scheme_id IS NULL)")
+        scope_sql = ("SELECT * FROM global_facts WHERE " +
+                     FACT_SCOPE_SHARED_FRAGMENT)
         scope_params = (project_id,)
     cur = await db.execute(scope_sql, scope_params)
     existing = [dict(r) for r in await cur.fetchall()]
@@ -2439,8 +2562,8 @@ async def persist_extraction(
     shared_hits = 0
     if scheme_id and project_id:
         cur = await db.execute(
-            "SELECT * FROM global_facts WHERE project_id=? "
-            "AND (scheme_id='' OR scheme_id IS NULL)", (project_id,))
+            "SELECT * FROM global_facts WHERE " +
+            FACT_SCOPE_SHARED_FRAGMENT, (project_id,))
         for r in [dict(x) for x in await cur.fetchall()]:
             if not _is_protected(r):
                 continue
@@ -2847,6 +2970,16 @@ def row_field(row, key: str, index: int = 0) -> str:
 #: 逐字重复 9 次、在其它模块另有 10+ 次，取值清一色用位置索引 ``row[0]``。
 #: 判据本身没分叉（同一条 SQL），但**取值的行形态约定**分叉了 —— 见
 #: :func:`row_field` 的说明。改列名/加兜底时只需动这一处。
+#: 「同项目共享事实」作用域半句的唯一字面量。
+#: 去除重复（2026-10-11 · DEBT-2）：此前该片段在 facts_extractor.build_injectable_facts_query、compliance.py、export.py、
+#: input_coverage.py 各写一份……任一改动者改一处必漏其余。现统一到此常量。调用方通过 from app.services.facts_extractor import FACT_SCOPE_SHARED_FRAGMENT 引用。
+FACT_SCOPE_SHARED_FRAGMENT = "(project_id=? AND (scheme_id='' OR scheme_id IS NULL))"
+
+#: 「方案私有 + 同项目共享」全范围作用域谓词（2026-10-11 · DEBT-3 收口：
+#: 组合自 FACT_SCOPE_SHARED_FRAGMENT，不再重复字面量。global_facts._FACT_SCOPE_PREDICATE
+#: 与 export.py 的内联副本均改 import 此常量，三份副本→单一事实源。
+FACT_SCOPE_PREDICATE = f"(scheme_id=? OR {FACT_SCOPE_SHARED_FRAGMENT})"
+
 SCHEME_PROJECT_ID_SQL = "SELECT project_id FROM schemes WHERE id=?"
 
 
@@ -2906,7 +3039,7 @@ def build_injectable_facts_query(scheme_id: str, project_id: str,
     if project_id:
         sql = (
             f"SELECT {columns} FROM global_facts "
-            "WHERE (scheme_id=? OR (project_id=? AND (scheme_id='' OR scheme_id IS NULL))) "
+            f"WHERE {FACT_SCOPE_PREDICATE} "
             f"AND {_FACTS_INJECT_WHERE} ORDER BY gt, title"
         )
         return sql, (scheme_id, project_id)
@@ -2934,6 +3067,28 @@ _BRIDGE_COLUMNS = (
 )
 
 
+def _bridge_safety_critical(row: dict, name: str, value: str) -> bool:
+    """安全关键标记的**统一口径**：启发式（17 类白名单）为权威下限，库列为补充。
+
+    ✅ R70（2026-10-11）：与 ``global_facts.list_facts`` / ``batch_resolve``
+    同口径（``is_safety_critical_name(...) or 列``）。单独抽成函数是为了让
+    「桥接侧漏标」这一缺陷有唯一可测的判据点，避免再出现第三份写法。
+    启发式异常时回退为列值（fail-soft，绝不丢掉已有信号）。
+    """
+    col_val = bool(row.get("is_safety_critical") or 0)
+    try:
+        heuristic = is_safety_critical_name(
+            name or (row.get("title") or ""),
+            value or (row.get("content") or ""),
+            row.get("fact_key") or "")
+    except Exception as e:  # noqa: BLE001 - 判定失败不得丢掉库列信号
+        logger.warning(
+            "桥接安全关键启发式判定失败（回退为库列标记）· fact=%s: %s",
+            str(row.get("id") or "")[:8], e)
+        return col_val
+    return bool(heuristic) or col_val
+
+
 async def load_resolved_facts_for_scope(db, scheme_id: str = "",
                                          project_id: str = "") -> list[dict]:
     """跨模块只读桥接：返回作用域内「已确认可注入」的事实清单（fail-soft）。
@@ -2959,7 +3114,11 @@ async def load_resolved_facts_for_scope(db, scheme_id: str = "",
             r = dict(raw)  # ✅ 转为 dict：aiosqlite/sqlite3.Row 无 .get 方法，
             #    list_facts 等读取路径均先 dict(r) 再访问，此处保持一致避免
             #    'sqlite3.Row' object has no attribute 'get'。
-            nm, val = extract_value_from_markdown_line(r.get("content") or "")
+            # ✅ R75b：改走读路径唯一出口 fact_name_value（与界面显示同源）。
+            #    旧实现直调 extract_value_from_markdown_line 自建第二份回解：
+            #    非粗体段落行的 name 回解成整段正文顶掉 title 列（R75 G-C
+            #    同族），审核/预检拿到的「事实名」与用户所见分叉。
+            nm, val = fact_name_value(r)
             src = ""
             try:
                 refs = json.loads(r.get("source_ref") or "[]")
@@ -2975,7 +3134,20 @@ async def load_resolved_facts_for_scope(db, scheme_id: str = "",
                 "chapter": r.get("chapter") or "",
                 "fact_attr": r.get("fact_attr") or "",
                 "source": src,
-                "is_safety_critical": bool(r.get("is_safety_critical") or 0),
+                # ✅ BUG 修复（2026-10-11 · 跨模块数据链 R70 · 安全关键漏标）：
+                #    旧实现只取库列 ``is_safety_critical``。而该列由 to_db_row
+                #    在提取/编辑落库时写入，**历史行与手工录入行默认 0**；
+                #    本仓其它两处（``global_facts.list_facts``:753 与
+                #    ``batch_resolve``:2390）的口径是
+                #    ``is_safety_critical_name(...) or 列`` —— 启发式（17 类白名单）
+                #    作为**权威下限**、列仅作补充信号，理由正是「只信列会漏拦」。
+                #    唯独本桥接退化为纯列值 ⇒ 预检 / 审核 / 合规 / 一致性修复
+                #    四个下游拿到的安全关键标记**系统性偏少**：白名单内的危大
+                #    参数（开挖深度、支护形式、起重荷载…）若来自历史/手工行，
+                #    在交付门控与审核里被当成普通事实放行，属安全方向漏报。
+                #    修法：与 list_facts 同口径（启发式 OR 列），启发式异常时
+                #    回退列值并留痕，绝不因判定失败而失去原有信号。
+                "is_safety_critical": _bridge_safety_critical(r, nm, val),
                 "fact_key": r.get("fact_key") or "",
                 "group_title": r.get("group_title") or "",
                 # ✅ 2026-10-03：计量单位一并下发 —— 下游 extract_danger_params

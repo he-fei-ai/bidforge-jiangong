@@ -128,6 +128,51 @@ def test_image_config_changes_content_fingerprint():
     assert export_mod._content_fingerprint(first)[1] != export_mod._content_fingerprint(second)[1]
 
 
+# ---------------------------------------------------------------------------
+# 2. §十-2（目录生成模块遗留项）：目录重排/改挂后导出缓存必须失效
+# ---------------------------------------------------------------------------
+
+def test_renumber_sort_order_changes_fingerprint():
+    """§十-2：改章节顺序（编号整体平移）必须使导出缓存失效。
+
+    用户插入「第一节」后原有章节编号整体 +1；编号由 parent_id/level/sort_order
+    派生，这些字段一旦变化，content_fingerprint 必须随之变化，否则会命中重排前
+    的旧 PDF/DOCX（缓存未失效类缺陷）。
+    """
+    base = _prep(sections=[_section("s1", order=0), _section("s2", order=1)])
+    before = export_mod._content_fingerprint(base)[1]
+
+    # 模拟重排：s1/s2 顺序互换（编号 1↔2 平移）
+    reordered = _prep(sections=[_section("s1", order=1), _section("s2", order=0)])
+    after = export_mod._content_fingerprint(reordered)[1]
+
+    assert before != after, "章节顺序变化后缓存指纹未变 → 会命中重排前的旧产物"
+
+
+def test_structure_parent_level_change_changes_fingerprint():
+    """改挂父节点/层级（编号命名空间变化）必须使导出缓存失效。"""
+    flat = _prep(sections=[{
+        "id": "s1", "parent_id": "", "sort_order": 0,
+        "level": 1, "title": "第一章 概述", "content": "A",
+    }])
+    before = export_mod._content_fingerprint(flat)[1]
+
+    nested = _prep(sections=[{
+        "id": "s1", "parent_id": "root", "sort_order": 0,
+        "level": 2, "title": "第一章 概述", "content": "A",
+    }])
+    after = export_mod._content_fingerprint(nested)[1]
+
+    assert before != after, "父节点/层级变化后缓存指纹未变 → 旧产物被复用"
+
+
+def test_fingerprint_deterministic_for_identical_prep():
+    """同一 prep 必须得到同一指纹（否则每次导出都 miss，退化成无缓存）。"""
+    p = _prep(sections=[_section("s1", order=0), _section("s2", order=1)])
+    assert (export_mod._content_fingerprint(p)[1]
+            == export_mod._content_fingerprint(p)[1])
+
+
 @pytest.mark.asyncio
 async def test_auto_image_passes_runtime_image_config(monkeypatch):
     """导出自动生图必须把当前图像配置完整传给 provider 引擎。"""

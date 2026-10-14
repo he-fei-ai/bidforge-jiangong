@@ -33,6 +33,13 @@ from app.services.content_fuzzy import (
     scan_vague_statements,
 )
 from app.services.content_trace import build_trace as _build_trace
+# ✅ R76b · G3：围栏「这块到哪结束」的行口径由唯一事实源供给（`fence_common` 是仅
+#    依赖 `re` 的叶子模块，不构成环）。本模块的 `_FENCE_RE` 只保留**剥离**用途 ——
+#    它刻意维持「非贪婪配对、含行内 ``` 片段」的保守剔除语义（宁可多剔，也不让
+#    代码里的数字参与事实校验），该语义已被 `test_content_standard_service.TestExtractors`
+#    与 2026-09-28 收敛注释钉住，不得改成行锚定严格口径（会把保护面收窄、事实校验
+#    重新看见 Mermaid 数字 → 新误报）。
+from app.services.fence_common import iter_all_blocks
 
 # ---------------------------------------------------------------------------
 # 常量与基础解析
@@ -378,6 +385,10 @@ def standard_report(content: str, standard: str, fact_rows: list,
 
     trace（内部标记，可追溯性）：只落库、**不写入正文**，因此导出 DOCX 的成稿
     里不会出现任何模糊生成标记；审核与预检模块只读消费。
+
+    ℹ️ 落库的报告 JSON 在同级另有一个 ``structure`` 键（由生成链路
+    ``paragraph_structure_report`` 补充，见其 docstring 的分工说明），
+    **不属于**本函数的 error/warning 计数口径。
     """
     std = normalize_standard(standard) or DEFAULT_STANDARD
     issues: list[dict] = []
@@ -668,3 +679,121 @@ def _empty_report(standard: str) -> dict:
                   "trace_fuzzy": 0, "checked_facts": 0,
                   "fact_numbers": 0, "fact_models": 0, "degraded": True},
     }
+
+
+# ---------------------------------------------------------------------------
+# 段落结构校验（《文档生成规则分析与软件标准建立》第二部分 2.1）
+# ---------------------------------------------------------------------------
+
+#: 段落长度规范（字符）：超过 max 的整段文字在纸面是一堵读不动的墙，
+#: 建议按「观点句 → 解释句 → 措施句 → 承诺句」拆段。下限**刻意不判** ——
+#: 工序步骤句、短句承接在工程正文里合法常见，按 50 字下限报短段只会造假红。
+PARA_MIN_CHARS, PARA_MAX_CHARS, PARA_RECOMMENDED_CHARS = 50, 500, 150
+
+#: 非标准日期写法：`2026/1/5`、`2026.1.5`、`2026-1-5`（规范口径为 `XXXX年X月X日`，
+#: 见分析提示词 P13「日期保留原文格式（2027-03-15 / 2027年3月15日）」，
+#: 故 ISO 全写 `2026-01-05` 不判，只判斜杠/点分与缺前导零的连字符形态）。
+#: ⚠️ 本块常量统一 `_PS_` 前缀（段落结构校验专用）—— 首版曾用无前缀名
+#: `_FENCE_RE` 覆盖了上方 181 行的模块级围栏正则，直接把 strip_code_blocks
+#: 与三条既有护栏打挂（同名遮蔽是纯追加式补丁的隐形地雷）。
+_PS_BAD_DATE_SLASH_RE = re.compile(r"\d{4}[/.]\d{1,2}[/.]\d{1,2}")
+_PS_BAD_DATE_HYPHEN_RE = re.compile(r"\d{4}-(?!0)[1-9]-(?!0)[1-9](?![\d-])")
+#: 工期口径：全局事实单位归一表已把「天/日历日」并成「日历天」（facts_extractor），
+#: 正文出现 `N天` 且近旁有工期语义词时提示统一口径。事实原文本身写「天」时
+#: 难以在此还原豁免集合，宁可少报 —— 命中窗内出现「日历天」即不判。
+_PS_DURATION_DAYS_RE = re.compile(r"(\d+)\s*天(?![日历工作日])")
+_PS_DURATION_CTX = ("工期", "历时", "周期", "养护", "总工期")
+_PS_TABLE_ROW_RE = re.compile(r"^\s*\|")
+#: ✅ R76b · G3：此处原有一份 `_PS_FENCE_LINE_RE = re.compile(r"^\s*```")` +
+#: `in_fence = not in_fence` 的**行级翻转状态机**（唯一事实源之外的第五套口径）。
+#: 它把带信息串的行（如 ```` ```json ````）也当成翻转信号 —— 于是「一次误翻转」
+#: 会把其后整片散文当作"仍在围栏内"跳过，或反之把围栏内容当散文统计。
+#: 现由 ``fence_common.iter_all_blocks`` 直接给出保护行区间（判据不在此复制）。
+#: 列表项行首（- / * / 1. / （1） / 一、），段落长度判据跳过结构化条目。
+_PS_LIST_HEAD_RE = re.compile(
+    r"^\s*(?:[-*+]\s|\d+(?:\.\d+)*[.、）)]\s*[^\s]|"
+    r"[（(]\s*\d{1,2}\s*[)）]\s|^[一二三四五六七八九十]+、)")
+
+
+def paragraph_structure_report(content: str) -> dict:
+    """段落长度与数据写法规范的**咨询性**校验（纯函数、零 IO、不改正文）。
+
+    与 ``standard_report`` 的分工：那张报告管「事实引用与模糊表述」（数据真实性），
+    本报告管「可读性与口径规范」（段落长度 / 日期写法 / 工期单位），二者互不重叠。
+    结论只作 advisory 呈现于生成标准报告的新键，**不进 error/warning 计数、
+    不阻断落库、不触发修复链路**（本模块既有承诺：校验只上报，绝不动正文）。
+    """
+    warnings: list[dict] = []
+    try:
+        scanned = strip_code_blocks(content or "")
+        # 剔围栏与表格行：段落统计与建议只针对真正的整段散文。
+        # ✅ R76b · G3：旧实现在此自写 `in_fence = not in_fence` 行级翻转，
+        #    带信息串的行（```json）也会被当成翻转信号 —— 一次误翻转就把其后整片
+        #    散文当"仍在块内"跳过（或反之把块内容当散文统计）。现由唯一事实源
+        #    `fence_common.iter_all_blocks` 给保护行区间；未闭合块保护到文末的语义不变。
+        #    ⚠️ 行口径必须与 iter_all_blocks 内部一致（`split("\n")` 而非 `splitlines()`），
+        #    否则 CRLF 文本的行号会与块行号错位。
+        scanned_lines = scanned.split("\n")
+        protected: set[int] = set()
+        for blk in iter_all_blocks(scanned):
+            stop = blk["close_line"] if blk["close_line"] >= 0 else len(scanned_lines) - 1
+            protected.update(range(blk["open_line"], stop + 1))
+        lines: list[str] = [
+            raw_line for idx, raw_line in enumerate(scanned_lines)
+            if idx not in protected and not _PS_TABLE_ROW_RE.match(raw_line)
+        ]
+        text = "\n".join(lines)
+        paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+
+        long_paras = 0
+        for p in paras:
+            # 标题行 / 列表项不计段落长度（它们天然是短句或结构化条目）
+            if p.startswith("#") or _PS_LIST_HEAD_RE.match(p):
+                continue
+            core = re.sub(r"^[>\s]+", "", p)
+            if len(core) > PARA_MAX_CHARS:
+                long_paras += 1
+                if long_paras <= 3:
+                    warnings.append({
+                        "type": "long_paragraph", "severity": "advisory",
+                        "message": f"单段 {len(core)} 字，超过 {PARA_MAX_CHARS} 字上限，"
+                                   "建议按观点/措施/承诺拆段",
+                        "excerpt": core[:40]})
+
+        # 日期写法规范
+        bad_dates = {m.group(0) for m in _PS_BAD_DATE_SLASH_RE.finditer(text)}
+        bad_dates |= {m.group(0) for m in _PS_BAD_DATE_HYPHEN_RE.finditer(text)}
+        for d in sorted(bad_dates):
+            warnings.append({
+                "type": "date_format", "severity": "advisory",
+                "message": f"日期写法「{d}」建议统一为 XXXX年X月X日",
+                "excerpt": d})
+
+        # 工期单位口径：N天 近旁（±12 字）有工期语义词、且窗口内无「日历天」
+        seen_days: set[str] = set()
+        for m in _PS_DURATION_DAYS_RE.finditer(text):
+            lo, hi = max(0, m.start() - 12), min(len(text), m.end() + 12)
+            window = text[lo:hi]
+            if "日历天" in window:
+                continue
+            if any(k in window for k in _PS_DURATION_CTX):
+                frag = m.group(0)
+                if frag not in seen_days:
+                    seen_days.add(frag)
+                    warnings.append({
+                        "type": "duration_unit", "severity": "advisory",
+                        "message": f"工期表述「{frag}」建议统一为"
+                                   f"「{m.group(1)} 日历天」（与全局事实单位口径一致）",
+                        "excerpt": _excerpt(text, m.start(), radius=10)})
+
+        return {
+            "paragraphs": len(paras),
+            "recommended_range": [PARA_MIN_CHARS, PARA_RECOMMENDED_CHARS,
+                                  PARA_MAX_CHARS],
+            "long_paragraphs": long_paras,
+            "warnings": warnings,
+        }
+    except Exception:  # pragma: no cover - 校验器自身故障绝不外溢
+        return {"paragraphs": 0, "recommended_range":
+                [PARA_MIN_CHARS, PARA_RECOMMENDED_CHARS, PARA_MAX_CHARS],
+                "long_paragraphs": 0, "warnings": []}

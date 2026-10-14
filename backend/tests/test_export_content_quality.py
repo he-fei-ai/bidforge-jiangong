@@ -68,6 +68,66 @@ def test_chart_json_block_uninferable_is_skipped():
     assert [b for b in _blocks(content) if b["type"] == "chart"] == []
 
 
+# ---------------------------------------------------------------------------
+# ✅ 修复6（文档质量报告 · 格式问题7）：AI 返回 HTML <table> → 真实表格
+# ---------------------------------------------------------------------------
+class TestHtmlTableToTableBlock:
+    def test_html_table_parsed_as_table_block_with_caption(self):
+        content = ("表3-1 主要施工机械设备表\n"
+                   "<table>\n"
+                   "<tr><th>设备名称</th><th>数量</th><th>备注</th></tr>\n"
+                   "<tr><td>塔吊</td><td>2</td><td>QTZ80</td></tr>\n"
+                   "<tr><td>汽车吊</td><td>1</td><td>25t</td></tr>\n"
+                   "</table>\n")
+        blocks = _blocks(content)
+        tbls = [b for b in blocks if b["type"] == "table"]
+        assert len(tbls) == 1
+        # 上方「表 X-Y 表名」行被吸收为表题
+        assert tbls[0].get("caption") == "主要施工机械设备表"
+        lines = tbls[0]["lines"]
+        # 首行表头 + 分隔行 + 2 数据行
+        assert len(lines) == 4
+        assert lines[0].startswith("| 设备名称")
+        assert "---" in lines[1]
+
+    def test_html_table_strips_inner_tags_and_entities(self):
+        content = ("<table>\n"
+                   "<tr><th>项目</th><th>说明</th></tr>\n"
+                   "<tr><td>钢筋</td><td>强度 &gt; 400MPa &amp; 验收</td></tr>\n"
+                   "</table>\n")
+        blocks = _blocks(content)
+        tbls = [b for b in blocks if b["type"] == "table"]
+        assert len(tbls) == 1
+        text = "\n".join(tbls[0]["lines"])
+        # HTML 标签与实体已被还原：标签（<td>/<table>）与实体（&gt;/&amp;）
+        # 不应再以原始形态残留；实体应被正确解码为 > 与 &。
+        assert "<td>" not in text and "<table>" not in text
+        assert "&gt;" not in text and "&amp;" not in text
+        assert ">" in text and "&" in text
+        assert "400MPa" in text and "验收" in text
+
+    def test_html_table_pads_short_rows(self):
+        # 某行少一列 → 右侧补空，不越界（_add_table_from_markup 依赖矩形）
+        content = ("<table>\n"
+                   "<tr><th>序号</th><th>名称</th></tr>\n"
+                   "<tr><td>1</td></tr>\n"
+                   "</table>\n")
+        blocks = _blocks(content)
+        tbls = [b for b in blocks if b["type"] == "table"]
+        assert len(tbls) == 1
+        # 两列：首行 2 单元格、分隔 2 单元格、数据行补到 2 单元格
+        assert tbls[0]["lines"][0].count("|") == 3  # 首尾各 1 + 2 列
+
+    def test_html_table_unclosed_degrades_without_loss(self):
+        # 未闭合 → 不产 table 块、不卡死、内容不丢（降级为段落）
+        content = "<table>\n<tr><td>仅一行</td></tr>\n后续正文段落。"
+        blocks = _blocks(content)
+        assert not any(b["type"] == "table" for b in blocks)
+        joined = "".join(b.get("text", "") for b in blocks
+                         if b["type"] == "paragraph")
+        assert "仅一行" in joined and "后续正文段落" in joined
+
+
 def test_mermaid_block_uses_lead_in_title_over_directive():
     content = ('脚手架分段搭设与转换顺序如下图所示：\n\n'
                '```mermaid\n'

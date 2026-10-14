@@ -572,6 +572,24 @@ function ReadinessDashboard({
               description="请到对应功能页重新执行一次该 AI 检查，否则这些维度下的问题不会出现在清单里（当前评分可能因此偏高）。"
             />
           )}
+          {/* ✅ R76（2026-10-13）：来源读取失败（系统故障）提示。与上方
+              stale_ai_sources（结论过期）是两类问题：后者是「数据变了旧结论
+              没用」，前者是「这次想读却没读到」（DB 异常 / 子模块不可用）。
+              这路的问题不会出现在清单里，当前评分可能因此偏高/偏低且用户
+              无从得知 —— 此前类型未声明、UI 零消费（读失败≠内容过期，
+              用户无法区分「需要重跑检查」与「系统出了故障」）。 */}
+          {(overview.failed_sources?.length ?? 0) > 0 && (
+            <Alert
+              type="error"
+              showIcon
+              icon={<ExclamationCircleOutlined />}
+              style={{ marginTop: 12 }}
+              message={`以下数据来源本次总检读取失败，未参与评分：${(overview.failed_sources || [])
+                .map((s) => SOURCE_LABEL[s] || s)
+                .join("、")}`}
+              description="这属于系统故障而非内容问题：请重试「一键总检」；若持续失败请联系运维查看后端日志（该维度下的问题暂不会出现在清单里，评分可能不完整）。"
+            />
+          )}
           {(overview.findings || []).length > 0 && (
             <div style={{ marginTop: 12 }}>
               <Space style={{ marginBottom: 6 }} wrap>

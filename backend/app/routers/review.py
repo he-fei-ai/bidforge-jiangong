@@ -28,6 +28,7 @@ from app.models import REVIEW_STATUSES, SchemeReviewIn, SectionReviewIn
 #    读失败 503 / 写没生效 503，绝不 AttributeError 500、更绝不汇报假成功。
 #    静态护栏 tests/test_review_r13_closeout_20261006.py 禁止退回裸调用。
 from app.services import review_db
+from app.services.facts_extractor import SCHEME_PROJECT_ID_SQL
 
 router = APIRouter(prefix="/api/v1/schemes/{scheme_id}/review", tags=["review"])
 
@@ -127,7 +128,7 @@ async def _scheme_project_id(db, scheme_id: str) -> str:
     """
     try:
         row = await review_db.fetch_one(
-            db, "SELECT project_id FROM schemes WHERE id=?", (scheme_id,),
+            db, SCHEME_PROJECT_ID_SQL, (scheme_id,),
             what="反查方案所属项目")
         if row and row["project_id"]:
             return str(row["project_id"])
@@ -234,6 +235,21 @@ async def review_summary(scheme_id: str, db=Depends(get_db)):
     #    （approved/total，作为「通过率」口径，前端兼容不变）。
     #    reviewed_all 语义收窄为「所有章节都已完成审核（通过或驳回）」，
     #    此前语义是「全部通过」，会掩盖大量已驳回章节。
+    #
+    # ✅ 2026-10-12（技术债 P1-10 · 三个进度字段的语义边界显式化）：
+    #    这里同时返回 progress / reviewed_progress / approved_progress 三个
+    #    百分比，而 **progress 与 approved_progress 的计算式逐字相同**
+    #    （都是 approved/total）—— 它们不是两个指标，而是「同一个指标的
+    #    新旧两个名字」：progress 是历史字段名，前端 `types/audit.ts` 与其
+    #    它调用方早已按 progress 取值，改语义属破坏性变更，故保留为
+    #    approved_progress 的**遗留别名**并在此显式声明，避免后人误以为
+    #    progress = 「评审进度」而拿它当审完率用（那应该用 reviewed_progress）。
+    #    三者的正确用法：
+    #      · progress / approved_progress —— 通过率（approved / total）
+    #      · reviewed_progress            —— 审完率（reviewed / total）
+    #      · reviewed_all                 —— 是否全部审完（含驳回），非「全通过」
+    #    ⚠️ 三者均由下方同一组 counts 派生，改动时必须同步
+    #      tests/test_cross_module_chain_r70_20261011.py::TestReviewProgressSemantics。
     reviewed = total - counts.get("", 0)  # 未纳入审核（空串）不计入已审
     reviewed_all = total > 0 and reviewed == total
     return {

@@ -32,6 +32,11 @@ from app.db import get_db, safe_rowcount, settle_global_conn
 from app.routers.schemes import require_project_id  # ✅ G3 根因加固（R45）
 from app.services import scheme_classification as sc
 from app.services.ai.provider_factory import chat_with_fallback
+# ✅ R58（2026-10-10）：统一 JSON 通道（见下方 _collect_json_str）。
+from app.services.ai.json_response import (
+    GENERIC_REPAIR_KEY,
+    collect_json_response_with_chat,
+)
 from app.services.ai.sse_utils import with_heartbeat
 from app.services.ai.task_registry import (
     finish_task,
@@ -77,7 +82,11 @@ from app.services.bid_section_detector import detect_bid_sections
 
 # ✅ 2026-09-25：文档分类唯一事实源（提取合并优先级口径与 global_facts 对齐）
 from app.services.doc_categories import extract_priority
-from app.services.facts_extractor import invalidate_export_cache
+from app.services.facts_extractor import (
+    FACT_SCOPE_SHARED_FRAGMENT,
+    SCHEME_PROJECT_ID_SQL,
+    invalidate_export_cache,
+)
 
 logger = logging.getLogger("bid_analysis")
 router = APIRouter(prefix="/api/v1/bid-analysis", tags=["bid_analysis"])
@@ -1678,14 +1687,19 @@ async def _run_single_item(db, project_id: str, scheme_id: str,
                 {"role": "user", "content": merge_user},
             ]
             if output_type == "json":
-                result_text = await chat_with_fallback(
-                    messages, json_mode=True, timeout=120,
-                    scene="bid_analysis_merge")
+                # ✅ R58（2026-10-10）：改走统一 JSON 通道（生成 → 解析 → 结构
+                #    校验 → 定向修复）。旧实现只 json.loads 一次、失败再调
+                #    简化版 _repair_json（1 轮 + 贪婪正则兜底）。
+                #    ⚠️ 失败兜底必须是 "{}" —— 这是 _json_all_empty /
+                #    is_missing_result 共同依赖的**失败哨兵**契约，绝不能兜底成
+                #    空串或「未提取到」（那样会被判成「有内容」而假绿）。
                 try:
-                    json.loads(result_text)
-                except json.JSONDecodeError:
-                    result_text = await _repair_json(result_text, messages,
-                                                     scene="bid_analysis_merge")
+                    result_text = await _collect_json_str(
+                        messages, scene="bid_analysis_merge", timeout=120)
+                except Exception as e:  # noqa: BLE001 - 保持「永不抛」契约
+                    logger.warning(
+                        "[bid] 合并项 JSON 生成/修复失败，回落空对象哨兵：%s", e)
+                    result_text = "{}"
             else:
                 result_text = await chat_with_fallback(
                     messages, timeout=120, scene="bid_analysis_merge")
@@ -1720,23 +1734,21 @@ async def _run_single_call(item: dict, text: str, output_type: str,
         # ✅ scene：AGENTS.md §4.4 约定「任何新增 AI 调用点必须显式传 scene」，
         #    /ai/stats 按 scene 聚合。本模块此前 5 处调用均未传（审计缺口），
         #    现统一标记为 bid_analysis，便于区分「提取」与目录/正文/事实的调用量。
-        response = await chat_with_fallback(
-            [*system_msgs, user_msg],
-            temperature=0.2,
-            json_mode=True,
-            timeout=180,
-            scene="bid_analysis",
-        )
-        # 确保是合法 JSON
+        # ✅ R58（2026-10-10）：统一通道承担首轮生成 + 解析 + 校验 + 定向修复。
+        #    首轮参数与旧实现逐一对齐（temperature=0.2 / json_mode=True /
+        #    timeout=180 / scene="bid_analysis"）。
         try:
-            json.loads(response)
-        except json.JSONDecodeError:
-            # ✅ scene 显式传参（2026-09-23）：这里是**单项提取**的 JSON 修复，
-            #    必须归入 bid_analysis 场景，不能沿用 _repair_json 的合并场景默认值，
-            #    否则 /ai/stats 按场景聚合时单项提取量会被错记到「分段合并」。
-            response = await _repair_json(response, [*system_msgs, user_msg],
-                                          scene="bid_analysis")
-        return response
+            return await _collect_json_str(
+                [*system_msgs, user_msg], scene="bid_analysis", timeout=180,
+                temperature=0.2)
+        except Exception as e:  # noqa: BLE001 - 保持「永不抛」语义
+            logger.warning(
+                "[bid] 单项 JSON 生成/修复失败，回落空对象哨兵：%s", e)
+            # ⚠️ 必须在此处兜底 "{}"，不能向上抛 ValueError：上层只捕
+            #    json.JSONDecodeError，抛出去会被 SSE 版放大成「整项重试」
+            #    （_item_retries 默认 2、指数退避 5s/10s），把一次解析失败
+            #    变成整项 3 次重跑。
+            return "{}"
     else:
         # Markdown 项
         return await chat_with_fallback(
@@ -1747,38 +1759,92 @@ async def _run_single_call(item: dict, text: str, output_type: str,
         )
 
 
+#: ✅ R58（2026-10-10）：JSON 项（projectBasicInfo）的**修复轮**预算。
+#: 取 1 —— 与旧 `_repair_json` 的调用次数**完全相等**（1 次生成 + 1 次修复），
+#: 故本项改造零新增成本；全部收益来自「解析更强 + 结构校验 + 指标 + 提示词可编辑」。
+BID_JSON_REPAIR_RETRIES = 1
+
+
+def _validate_json_object(obj) -> list:
+    """JSON 项的结构校验：顶层必须是对象（与 update_single_result 同口径）。
+
+    ⚠️ 刻意**不**用 `is_missing_result` / `_json_all_empty` 当 validate_fn ——
+    它们判的是「内容是否缺失」，会把「全部字段填『没有提及』」这一**合法**结果
+    推进修复轮，白白烧掉修复预算，且模型很可能再吐一份同样的空壳。
+    """
+    if isinstance(obj, dict):
+        return []
+    return ["顶层必须是 JSON 对象"]
+
+
+async def _collect_json_str(messages: list, *, scene: str, timeout: int,
+                            temperature: float | None = None) -> str:
+    """JSON 项的统一收集出口：生成 → 解析 → 校验 → 定向修复 → 有界重试。
+
+    ✅ R58（2026-10-10）：取代本模块自建的劣化版 `_repair_json`。旧实现的缺口：
+      1. 解析用贪婪正则（匹配最外层花括号）—— 字符串值里出现右花括号就会错配；
+      2. 无结构校验（只要能 json.loads 就算过，裸数组/标量也放行）；
+      3. 修复提示词是**硬编码字符串**，不走 `_registry.render` → DB 里改不了；
+      4. 不计 `record_ai_failure` / `record_repair_triggered`（审计缺口）。
+
+    现委托 `services.ai.json_response.collect_json_response_with_chat`。
+
+    chat 来源注入**本模块**的 `chat_with_fallback` —— 既保留 provider 降级链，
+    也让既有测试对 `ba.chat_with_fallback` 的 monkeypatch 继续生效（若直接用
+    `collect_json_response`，它内部引用的是 json_response 自己的导入，桩会失效）。
+
+    Returns:
+        模型的**原始文本**（与旧 `_run_single_call` 返回 `response` 同语义）。
+
+    Raises:
+        ValueError: 生成与修复全部失败 —— 由调用点兜底为 ``"{}"``。
+    """
+    async def _chat(_msgs: list, **kwargs) -> str:
+        return await chat_with_fallback(_msgs, **kwargs)
+
+    _obj, raw = await collect_json_response_with_chat(
+        _chat, messages,
+        validate_fn=_validate_json_object,
+        max_retries=BID_JSON_REPAIR_RETRIES,
+        temperature=temperature, json_mode=True, timeout=timeout,
+        # 提取族（非目录族）→ 走通用修复提示词。**禁止**传 OUTLINE_REPAIR_KEY
+        # （AST 护栏 tests/test_json_repair_key_parity_20261006.py 会判非法）。
+        repair_key=GENERIC_REPAIR_KEY, scene=scene)
+    return raw or json.dumps(_obj, ensure_ascii=False)
+
+
 async def _repair_json(bad_json: str, original_messages: list,
                        scene: str = "bid_analysis_merge") -> str:
-    """定向修复非法 JSON（简化版，完整版用 collect_json_response）。
+    """定向修复非法 JSON —— **兼容薄壳**，本体已下沉到统一通道。
+
+    ✅ R58（2026-10-10）：保留同名函数是因为既有测试直接调用它
+    （tests/test_import_module_hardening_20260923.py），且对外语义不变：
+    「给定一段坏 JSON，返回修好的文本；修不好返回 ``"{}"``」。
+
+    最后一道「正则从原文里抠 JSON」的兜底**刻意保留** —— 它不依赖 AI，
+    是一条形而下的确定性下界（AI 全挂时仍能救回可解析的片段）。
 
     scene 显式传参（AGENTS.md §4.5：每个 AI 调用点必须标注场景，
     /api/v1/ai/stats 按 scene 聚合）。旧实现硬编码 "bid_analysis_merge"：
     `_run_single_call` 的单项提取修复也会被记到「合并」场景，
     单项提取与分段合并的调用量无法区分。现由调用方显式指定。
     """
-    repair_prompt = (
-        f"以下 JSON 字符串有语法错误或包含非 JSON 内容，请修复为合法的纯 JSON（"
-        f"不要解释、不要 markdown 代码块、不要在 JSON 内部再嵌套 JSON）：\n\n"
-        f"```\n{bad_json}\n```"
-    )
-    response = await chat_with_fallback(
-        original_messages + [{"role": "assistant", "content": bad_json},
-                             {"role": "user", "content": repair_prompt}],
-        json_mode=True, timeout=60, scene=scene)
     try:
-        json.loads(response)
-        return response
-    except json.JSONDecodeError:
-        # 最后兜底：尽力从原字符串中提取 JSON
-        import re as _re
-        m = _re.search(r"\{[\s\S]*\}", bad_json)
-        if m:
-            try:
-                json.loads(m.group())
-                return m.group()
-            except json.JSONDecodeError:
-                pass
-        return "{}"
+        return await _collect_json_str(
+            [*original_messages, {"role": "assistant", "content": bad_json}],
+            scene=scene, timeout=60)
+    except Exception as e:  # noqa: BLE001 - 保持「永不抛」契约
+        logger.warning("[bid] JSON 修复失败（scene=%s）：%s", scene, e)
+    # 确定性下界：不依赖 AI，尽力从原字符串里抠出 JSON
+    import re as _re
+    m = _re.search(r"\{[\s\S]*\}", bad_json)
+    if m:
+        try:
+            json.loads(m.group())
+            return m.group()
+        except json.JSONDecodeError:
+            pass
+    return "{}"
 
 
 # =========================================================================
@@ -1798,7 +1864,7 @@ async def _resolve_pid(db, scheme_id: str = "", project_id: str = "") -> str:
     if pid:
         if sid:
             cur = await db.execute(
-                "SELECT project_id FROM schemes WHERE id=?", (sid,))
+                SCHEME_PROJECT_ID_SQL, (sid,))
             row = await cur.fetchone()
             if not row or not row[0]:
                 raise HTTPException(404, "方案不存在")
@@ -1806,7 +1872,7 @@ async def _resolve_pid(db, scheme_id: str = "", project_id: str = "") -> str:
                 raise HTTPException(400, "scheme_id 与 project_id 不匹配")
         return pid
     if sid:
-        cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (sid,))
+        cur = await db.execute(SCHEME_PROJECT_ID_SQL, (sid,))
         row = await cur.fetchone()
         if not row or not row[0]:
             raise HTTPException(404, "方案不存在")
@@ -2439,7 +2505,7 @@ async def _load_extraction_map(db, project_id: str, scheme_id: str) -> dict:
     if not rows:
         cur = await db.execute(
             "SELECT item_id, content, status, output_type FROM bid_analysis_items "
-            "WHERE project_id=? AND (scheme_id='' OR scheme_id IS NULL)",
+            "WHERE " + FACT_SCOPE_SHARED_FRAGMENT + "",
             (project_id,))
         rows = [dict(r) for r in await cur.fetchall()]
     out: dict = {}

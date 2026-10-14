@@ -5,12 +5,14 @@
 - monkeypatch app.db.get_conn 及所有已导入的引用，使被测代码拿到测试连接
 - autouse fixture 在每个测试前重置模块级全局状态（缓存、订阅者）
 """
-import aiosqlite
 import os
-import pytest
-import pytest_asyncio
+import time
 import tempfile
 from pathlib import Path
+
+import aiosqlite
+import pytest
+import pytest_asyncio
 from app.schema_sql import SCHEMA_SQL
 
 # ✅ 图表缓存目录隔离（2026-10-09 · NTFS 共享冲突根治）：
@@ -39,6 +41,24 @@ def _isolate_chart_cache_dir():
     except Exception:
         pass
     yield
+
+
+@pytest.fixture(autouse=True)
+def _restore_app_db_path():
+    """R74（G4）：集中治理 `DB_PATH` 裸赋值泄漏（跨用例污染的同族根因）。
+
+    全仓约 20 个测试文件用 `_appdb.DB_PATH = tmp_path/...` 切隔离库，
+    其中大部分**不还原** —— 同一 pytest 进程里后续所有直接读
+    DB_PATH 的用例都会看到已失效的临时路径。不逐改 20 个文件（跨面风
+    险大），而是在每条用例结束后把模块级 DB_PATH 复位到开局值；
+    app.db.get_conn 已有路径失配重连逻辑（db.py `_conn_path != DB_PATH`），
+    复位变量即自动换回正确连接。
+    """
+    import app.db as _appdb
+    original = _appdb.DB_PATH
+    yield
+    if _appdb.DB_PATH != original:
+        _appdb.DB_PATH = original
 
 
 @pytest_asyncio.fixture
@@ -148,6 +168,21 @@ def reset_provider_config_cache():
     pf._env_cache["data"] = None
     pf._env_cache["ts"] = 0.0
     pf._audit_buffer.clear()
+    # ✅ 遗留项加固（2026-10-11 · 全量跑随机失败治理）：只清了缓冲、没清
+    #    **刷新时间戳**，是 `test_reliability_failure_still_buffers_audit`
+    #    在全量会话里偶发变红的直接成因。
+    #    机理：`_log_audit` 追加一行后立刻看 `due = now - _audit_last_flush["ts"]
+    #    >= _AUDIT_FLUSH_INTERVAL(10s)`，为真就**当场把缓冲刷掉**。该 ts 只在
+    #    真正 flush 时更新。全量跑 9 分钟，中间只要有一段 >10s 没人碰审计路径，
+    #    下一条 `_log_audit` 就会顺带 flush ⇒ 断言 `len(buffer)==before+1`
+    #    必然失败；单跑该文件（几十 ms）时永远绿 —— 典型的"耗时相关"假失败。
+    #    这里把 ts 重置为"刚刚"，让每个用例在时间意义上相互独立。
+    #    ⚠️ 不破坏有意改写 ts 的用例：既有两派写法（`= 0.0` 强制到期、
+    #    `= 1e18` 永久阻止）都写在用例内部，晚于本 fixture 执行，不受影响。
+    # ⚠️ A/B 开关：设 BIDFORGE_TEST_KEEP_AUDIT_TS=1 可临时还原旧行为，
+    #    用于验证本重置确为该随机失败的成因（还原后必红）。
+    if not os.environ.get("BIDFORGE_TEST_KEEP_AUDIT_TS"):
+        pf._audit_last_flush["ts"] = time.time()
     # ✅ 流式能力记忆（provider_factory._stream_unsupported_at）同样是进程级全局：
     #    前一个用例判定的「该 provider 不支持流式」会污染后续用例的调用路径。
     pf.reset_stream_capability()

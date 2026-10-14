@@ -57,8 +57,133 @@ def _has_dash_title(title: str) -> bool:
     return bool(_DASH_TITLE_RE.search(str(title or "")))
 
 
+#: ✅ 2026-10-10（文档质量报告 修复7）：标题尾部「（N）」计数后缀（整组剥除）。
+#: AI 编号歧义把重复章节记成「专项6（3）」（第 3 次出现）——去重必须归一为
+#: 「专项6」才能与本体碰撞；旧实现只剥括号留数字（「专项63」），与本永不
+#: 存在的标题互不碰撞，重复全部漏报。计数上限 3 位（正常章节号 ≤ 99）。
+_TRAILING_COUNTER_SUFFIX_RE = re.compile(r"[（(]\s*\d{1,3}\s*[)）]\s*$")
+
 def _norm(text: str) -> str:
-    return _STRIP_RE.sub("", str(text or ""))
+    return _STRIP_RE.sub("", _TRAILING_COUNTER_SUFFIX_RE.sub("", str(text or "")))
+
+
+#: ✅ 2026-10-10（目录占位/泛化标题收口）：三级标题大量出现占位式泛化名称
+#: （生产实证「专项6」「总体实施策划（2）」「总体实施策划（3）」），且带
+#: 「（N）」编号冲突后缀。这类标题不是合法目录，必须程序化检出并交由修复链路重写。
+#: ✅ 2026-10-13（遗留项①收口）：补全「有关要求」「等等」「若干」等纯语义空话标题
+#: 及英文等价模式（etc/misc/other），覆盖 AGENTS.md 记录的检出率上限缺口。
+#: 判定刻意偏保守（精确锚定，绝不按子串模糊匹配），避免误伤「专项施工方案」
+#: 等合法标题。
+GENERIC_TITLE_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"^专项\d+$"),                       # 专项6 / 专项12
+    re.compile(r"^总体实施策划"),                     # 总体实施策划（2）
+    re.compile(r"^主要内容$"), re.compile(r"^主要内容[（(]"),
+    re.compile(r"^其他$"), re.compile(r"^其他内容$"), re.compile(r"^其他章节$"),
+    re.compile(r"^其它$"), re.compile(r"^其它内容$"),
+    re.compile(r"^通用$"), re.compile(r"^通用要求$"), re.compile(r"^通用内容$"),
+    re.compile(r"^未命名$"), re.compile(r"^无名$"), re.compile(r"^无标题$"),
+    re.compile(r"^空白$"), re.compile(r"^占位$"),
+    re.compile(r"^示例$"), re.compile(r"^样例$"), re.compile(r"^模板$"),
+    re.compile(r"^待定$"), re.compile(r"^暂定$"),
+    re.compile(r"^补充$"), re.compile(r"^补充内容$"), re.compile(r"^相关章节$"),
+    re.compile(r"^未填写$"), re.compile(r"^默认章节?$"), re.compile(r"^临时$"),
+    re.compile(r"^测试章节?$"), re.compile(r"^新建章节?$"), re.compile(r"^新建$"),
+    re.compile(r"^第\d+[章节](?:占位|示例|测试)?$"),
+    re.compile(r"^章节\d+$"), re.compile(r"^小节\d+$"),
+    re.compile(r"^无标题章节?$"),
+    # ✅ 2026-10-13：纯语义空话标题（「有关要求」类）—— AGENTS.md 遗留项①收口。
+    #    这类标题不携带任何具体施工内容信息，AI 用来填充目录结构，命中即视为占位。
+    re.compile(r"^有关要求$"),          # 有关要求 / 有关要求（2）
+    re.compile(r"^要求$"),               # 仅「要求」无修饰（技术要求/安全要求 不算）
+    re.compile(r"^等等$"),               # 等等
+    re.compile(r"^若干"),                # 若干 / 若干要求 / 若干说明
+    re.compile(r"^其他要求$"), re.compile(r"^其他措施$"),
+    re.compile(r"^其他说明$"), re.compile(r"^其他补充$"),
+    re.compile(r"^相关措施$"), re.compile(r"^相关说明$"),
+    re.compile(r"^相关补充$"), re.compile(r"^相关内容$"),
+    re.compile(r"^补充说明$"), re.compile(r"^补充要求$"),
+    re.compile(r"^补充措施$"),
+    # 英文等价（AI 偶发英文占位标题）
+    re.compile(r"^etc", re.IGNORECASE),
+    re.compile(r"^misc", re.IGNORECASE),
+    re.compile(r"^other", re.IGNORECASE),
+)
+
+
+def is_generic_title(title: str) -> bool:
+    """单个标题是否命中「泛化/占位」模式（纯函数，零 IO）。
+
+    与 :func:`detect_generic_titles` 用**同一份** ``GENERIC_TITLE_PATTERNS`` 与
+    同一个 ``_norm``（先剥「（N）」计数后缀再匹配）—— 单一判据事实源，
+    严禁在调用方另抄一套正则。供「标题改写」一类需要**逐条校验新标题**
+    的场景使用：改写结果若仍是泛化名，就地拒绝落回目录。
+    """
+    norm = _norm(str(title or "").strip())
+    if not norm:
+        return False
+    return any(pat.search(norm) for pat in GENERIC_TITLE_PATTERNS)
+
+
+def detect_generic_titles(outline: list) -> list[dict]:
+    """检出目录中的泛化/占位标题与「（N）」编号冲突后缀（纯函数，零 IO）。
+
+    返回 ``[{path, title, kind}]``，``kind`` 为 ``generic``（泛化/占位名称）
+    或 ``conflict_suffix``（带「（N）」类后缀且去后缀基名与其它节点碰撞）。
+    判定偏保守：仅精确锚定，不按子串模糊匹配，避免误伤「专项施工方案」
+    等合法标题；``（N）`` 后缀仅当基名本身泛化、或与其它节点碰撞（即
+    AI 用来消歧的编号冲突后缀）时才报，避免「深基坑支护（2）」这类合法
+    带部位限定标题被误报。
+
+    两处消费：
+    - ``check_outline_continuity`` 计入 ``generic_titles`` issue（影响质量报告 ok）；
+    - ``sse_handlers._review_and_fix_outline`` 据此强制进入修复链路重写。
+    """
+    entries = collect_titles(outline)
+    # 归一化基名频次：用于「（N）编号冲突后缀」的碰撞判定（去后缀后基名出现 ≥2 次）
+    norm_count: dict[str, int] = {}
+    for e in entries:
+        t = _norm(str(e.get("title") or "").strip())
+        if t:
+            norm_count[t] = norm_count.get(t, 0) + 1
+
+    hits: list[dict] = []
+    for e in entries:
+        title = str(e.get("title") or "").strip()
+        if not title:
+            continue
+        norm = _norm(title)  # 已去除（N）后缀
+        kind = None
+        if is_generic_title(title):
+            kind = "generic"
+        if kind is None and _TRAILING_COUNTER_SUFFIX_RE.search(title):
+            # 仅当去后缀基名与其它节点碰撞（编号冲突后缀）才报，
+            # 排除「深基坑支护（2）」这类合法带部位限定标题
+            if norm and norm_count.get(norm, 0) >= 2:
+                kind = "conflict_suffix"
+        if kind:
+            hits.append({"path": e.get("path"), "title": title, "kind": kind})
+    return hits
+
+
+#: 连续性各类问题的中文标签（**唯一事实源**，跨侧共享口径）。
+#: 两处消费必须与此保持一致：
+#:   · 后端日志摘要 :func:`render_continuity_notice`（引用本常量，不再各写副本）；
+#:   · 前端 `SchemeWorkbenchPage.tsx::summarizeOutlineQuality` 的 labels 表
+#:     （跨语言无法共享代码，由 R73b 护栏做键集合 parity 锁定）。
+#: ⚠️ `check_outline_continuity` 的 issues **新增一类必须同步这里**：否则该类计数
+#:    会在后端日志与前端界面**双双被静默丢弃** —— R73b F5 实证 `generic_titles`
+#:    加入 issues 时两处标签表都没跟上，结果占位标题「检出了却谁也没看见」。
+#: ⚠️ 只收录**缺陷类**（进 issues、影响 `ok`）。`similar_titles` 这类**组织建议**
+#:    附录键（不进 issues、不改 ok）**不得**登记于此，否则会被当成缺陷播报。
+CONTINUITY_ISSUE_LABELS: dict[str, str] = {
+    "level_gaps": "层级跳级",
+    "empty_parents": "有父无子",
+    "duplicate_titles": "同名章节",
+    "numbering_mismatch": "编号错位",
+    "dash_titles": "破折号长尾标题",
+    "empty_titles": "空标题节点",
+    "generic_titles": "占位/泛化标题",
+}
 
 
 def collect_titles(outline: list, *, max_level: int | None = None) -> list[dict]:
@@ -208,15 +333,26 @@ def check_outline_continuity(outline: list) -> dict:
       而非结构缺陷 —— 真正的同名章节由 ``duplicate_titles`` 判为缺陷，
       此处若也计入 ``issues`` 会让 ``ok`` 误变 False、进而误判目录不合格。
     """
+    # ✅ BUG 修复（2026-10-11 · 跨模块数据链 R70 · fail-soft 反噬成 NameError）：
+    #    旧实现只在这一段 try 里 import settings，except 分支**仅**设置了
+    #    check_fmt 而没有绑定 settings；而下方（泛化标题检测处）仍在 try 之外
+    #    `getattr(settings, "outline_check_generic_titles", True)` ——
+    #    一旦 `from app.config import settings` 失败（配置模块初始化异常 / 被
+    #    单测隔离替换），这里不抛、下方必抛 NameError，整个目录质量校验崩掉；
+    #    且该 NameError 发生在「防御性 fail-soft」之后，属典型的容错反噬。
+    #    修法：所有配置读取集中在同一 try 内完成并各自给默认值，
+    #    下方只读局部变量，不再引用可能未绑定的模块名。
     try:
         from app.config import settings
         check_fmt = bool(settings.outline_check_title_format)
+        check_generic = bool(getattr(settings, "outline_check_generic_titles", True))
     except Exception:  # 配置不可用时按开启处理（补齐漏检）
         check_fmt = True
+        check_generic = True
     issues: dict[str, list] = {
         "level_gaps": [], "empty_parents": [],
         "duplicate_titles": [], "numbering_mismatch": [],
-        "dash_titles": [], "empty_titles": [],
+        "dash_titles": [], "empty_titles": [], "generic_titles": [],
     }
     seen: dict[str, str] = {}
     counter = {"nodes": 0, "max_level": 0}
@@ -289,6 +425,17 @@ def check_outline_continuity(outline: list) -> dict:
             top_idx += 1
             _visit(n, 1, str(top_idx))
 
+    # ✅ 2026-10-10：泛化/占位标题与「（N）」编号冲突后缀检测（偏保守，默认开启）。
+    #    不进 issues 的其它项：这是独立于层级/编号/重复的「标题内容质量」维度，
+    #    命中即视为目录不合规（影响 ok），交由修复链路重写为具体标题。
+    # ✅ R70：改读上方 try 内已解析好的局部变量（原为直接 getattr(settings, …)，
+    #    配置导入失败时 settings 未绑定 → NameError，见上方注释）。
+    if check_generic:
+        try:
+            issues["generic_titles"].extend(detect_generic_titles(outline))
+        except Exception as exc:  # 防御：检测异常绝不改变连续性结论
+            logger.warning("目录泛化标题检测异常（忽略，不阻断校验）: %s", exc, exc_info=True)
+
     # ✅ 新增（2026-10-01）：标题近似雷同（2-gram Dice）。
     # 加法式 —— 只作为顶层附加键返回，**不进入 issues**：近似标题属于
     # 「建议合并或明确区分」的组织建议，不是结构缺陷，因此不得改变
@@ -320,12 +467,140 @@ def render_coverage_notice(missing: list[str]) -> str:
 
 
 def render_continuity_notice(report: dict) -> str:
-    """连续性问题的一句话摘要（无问题返回空串）。"""
+    """连续性问题的一句话摘要（无问题返回空串）。
+
+    ✅ R73b（2026-10-12 · F5「日志不准确」实证）：标签表此前是本函数内的私有
+    字面量副本，且**停在 6 类旧口径** —— ``generic_titles`` 于 2026-10-10 加入
+    issues 却没进标签表，于是「目录唯一问题就是占位标题」（正是生产实证的场景）
+    时 ``parts`` 为空串，WARNING 渲染成「目录连续性校验未通过：」——后面什么都没有。
+    现改为引用唯一事实源 :data:`CONTINUITY_ISSUE_LABELS`，并以 **`issue_counts`**
+    （由 issues 派生、与前端完整同一份数据）驱动拼接：对**未登记**的问题类追加
+    兜底分句，``ok=False`` 却渲染空摘要这种「静默失败」从此结构上不可能。
+
+    ⚠️ 故意不扫「report 里所有列表键」：`similar_titles` / `redundant_titles` 这类
+    附录键是**组织建议**、不是缺陷（不影响 ok），混进缺陷摘要会误导用户。
+    """
     if not report or report.get("ok"):
         return ""
-    labels = {"level_gaps": "层级跳级", "empty_parents": "有父无子",
-              "duplicate_titles": "同名章节", "numbering_mismatch": "编号错位",
-              "dash_titles": "破折号长尾标题", "empty_titles": "空标题节点"}
-    parts = [f"{label} {len(report.get(key) or [])} 处"
-             for key, label in labels.items() if report.get(key)]
-    return "目录连续性问题：" + "、".join(parts) if parts else ""
+    labels = CONTINUITY_ISSUE_LABELS
+    counts = report.get("issue_counts")
+    if not isinstance(counts, dict):
+        # 兼容手造/旧式报告（只带 issues 列表、不带 issue_counts）
+        counts = {k: len(report.get(k) or []) for k in labels}
+    parts = [f"{labels[k]} {int(counts.get(k) or 0)} 处"
+             for k in labels if counts.get(k)]
+    # 兜底：新增缺陷类若忘了登记标签，绝不等于可以不播报（防「检出却零呈现」）
+    unlabeled = [k for k, v in counts.items() if k not in labels and v]
+    if unlabeled:
+        parts.append("其它问题 " + "、".join(
+            f"{k} {int(counts[k])} 处" for k in unlabeled) + "（标签待补，请反馈）")
+    if not parts:
+        # 理论上不可达（ok=False 必然有非空 issues）；兼做诚实现式，绝不空转
+        return "目录连续性校验未通过（未提供问题明细，请查看完整报告）"
+    return "目录连续性问题：" + "、".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# 要求五：目录结构规范（《文档生成规则分析与软件标准建立》第一部分 1.1）
+# ---------------------------------------------------------------------------
+#: 章节数量规范：危大专项方案法定九章骨架（CMP-01~09）叠加专业章后，
+#: 常见成稿落在 5-10 章；推荐值仅作报告展示，不参与任何判定。
+OUTLINE_CHAPTER_MIN, OUTLINE_CHAPTER_MAX = 5, 10
+OUTLINE_CHAPTER_RECOMMENDED = 7
+#: 每章二级节数规范（文档 3-15；本仓提示词契约「每个一级目录 ≥ 2 个二级」
+#: 取更严的 2 作下限，上限沿用文档 15）。
+OUTLINE_SECTION_MIN, OUTLINE_SECTION_MAX = 2, 15
+#: 层级深度规范：文档标准最多 4 级；本仓提示词契约「严禁第四级」为更严口径，
+#: 此处按文档 4 级做程序化兜底（模型越界输出由这道程序闸门检出）。
+#:
+#: ⚠️ 2026-10-12（技术债 P2-15 · 与硬上限的语义边界显式化）：
+#:   本常量与 ``outline_utils.MAX_OUTLINE_DEPTH``（=3）**不是同一条判据的两份
+#:   副本，而是两条不同语义的线，此前无任何交叉说明，极易被后人「顺手统一」：
+#:     · ``MAX_OUTLINE_DEPTH`` = 3 —— **落库硬上限**。`normalize_outline` /
+#:       `clamp_outline_depth` 会真地把第四级裁掉（标题并入父节点 description），
+#:       `sections.py` 的手工新增/移动两条路径也按它 400 拦截。改它=改数据形状。
+#:     · ``OUTLINE_MAX_DEPTH``  = 4 —— **规范告警线**，只产 advisory warning，
+#:       不进 `issues`、不翻转 `ok`、不拦截任何写入。
+#:   不变式：**告警线必须 ≥ 硬上限**。若把告警线调到 3 以下，规范建议会与
+#:   落库实现直接冲突（合法目录被判违规），属误报；保持 4 则意味着本告警只在
+#:   **裁剪之前的原始目录**上才有意义 —— 在 `normalize_outline` 之后调用时
+#:   `max_depth` 恒 ≤ 3，该告警恒不触发（已知限制，见护栏用例注释）。
+#:   ⚠️ 修改任一常量前请先读 `tests/test_cross_module_chain_r70_20261011.py`
+#:      ::TestOutlineDepthSemantics 里的不变式断言。
+OUTLINE_MAX_DEPTH = 4
+
+
+def check_structure_standards(outline: list) -> dict:
+    """目录结构规范**建议性**校验（纯函数、零 IO、绝不抛）。
+
+    与 ``check_outline_continuity`` 的结构性缺陷（跳级/重名/错位）不同，
+    本函数核对的是「规模是否落在规范区间」：章数 5-10、每章二级节数 2-15、
+    总深度 ≤ 4。这些都是**组织建议**而非硬缺陷 —— 章数少于 5 的微型方案
+    （如单一吊装工程）完全合法 —— 因此 warnings 只作报告呈现，
+    **绝不进 issues、绝不改变连续性 ok 结论**（与 similar_titles 同一口径）。
+    """
+    warnings: list[dict] = []
+    chapters: list = []
+    max_depth = 0
+    try:
+        chapters = [n for n in (outline or []) if isinstance(n, dict)]
+        max_depth = _max_depth(chapters)
+    except Exception:  # pragma: no cover - 防御：脏结构不得炸掉质量报告
+        return {"evaluated": False, "chapters": 0, "max_depth": 0,
+                "recommended_chapters": OUTLINE_CHAPTER_RECOMMENDED,
+                "warnings": []}
+
+    if not chapters:
+        return {"evaluated": False, "chapters": 0, "max_depth": 0,
+                "recommended_chapters": OUTLINE_CHAPTER_RECOMMENDED,
+                "warnings": []}
+
+    n_ch = len(chapters)
+    if not (OUTLINE_CHAPTER_MIN <= n_ch <= OUTLINE_CHAPTER_MAX):
+        warnings.append({
+            "kind": "chapter_count", "count": n_ch,
+            "allowed": [OUTLINE_CHAPTER_MIN, OUTLINE_CHAPTER_MAX],
+            "message": f"一级章节共 {n_ch} 章，超出规范区间 "
+                       f"{OUTLINE_CHAPTER_MIN}-{OUTLINE_CHAPTER_MAX} 章"})
+    if max_depth > OUTLINE_MAX_DEPTH:
+        warnings.append({
+            "kind": "max_depth", "depth": max_depth,
+            "allowed": OUTLINE_MAX_DEPTH,
+            "message": f"目录最深 {max_depth} 级，超出规范上限 "
+                       f"{OUTLINE_MAX_DEPTH} 级"})
+    for idx, ch in enumerate(chapters, 1):
+        children = ch.get("children")
+        n_sec = len(children) if isinstance(children, list) else 0
+        if 0 < n_sec and not (OUTLINE_SECTION_MIN <= n_sec <= OUTLINE_SECTION_MAX):
+            warnings.append({
+                "kind": "section_count", "path": str(idx),
+                "title": str(ch.get("title") or "").strip(),
+                "count": n_sec,
+                "allowed": [OUTLINE_SECTION_MIN, OUTLINE_SECTION_MAX],
+                "message": f"第 {idx} 章二级节数 {n_sec}，超出规范区间 "
+                           f"{OUTLINE_SECTION_MIN}-{OUTLINE_SECTION_MAX} 节"})
+    return {
+        "evaluated": True, "chapters": n_ch, "max_depth": max_depth,
+        "recommended_chapters": OUTLINE_CHAPTER_RECOMMENDED,
+        "warnings": warnings,
+    }
+
+
+def _max_depth(nodes: list, level: int = 1) -> int:
+    """递归求目录最大深度（非 dict 子项跳过，与 renumber 占号口径一致）。"""
+    best = level if nodes else 0
+    for n in nodes or []:
+        if not isinstance(n, dict):
+            continue
+        children = n.get("children")
+        if isinstance(children, list) and any(isinstance(c, dict) for c in children):
+            best = max(best, _max_depth(children, level + 1))
+    return best
+
+
+def render_structure_notice(report: dict) -> str:
+    """结构规范建议的一句话摘要（无建议返回空串）。"""
+    if not report or not report.get("warnings"):
+        return ""
+    return "目录结构规范建议：" + "；".join(
+        str(w.get("message") or "") for w in report["warnings"][:6])

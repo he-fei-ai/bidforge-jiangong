@@ -45,6 +45,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
+from app.config import settings
 from app.services.audit_rules import (
     RULE_VERSION,
     SEVERITY_ORDER,
@@ -52,7 +53,17 @@ from app.services.audit_rules import (
     get_rule,
 )
 from app.services.content_polish import find_colloquial_hits
-from app.services.content_utils import find_unclosed_fences
+from app.services.content_utils import (
+    LEAF_MIN_WORD_BUDGET,
+    has_cjk,
+    readable_word_count,
+    word_audit_summary,
+    word_deviation_of,
+)
+# ✅ R76（2026-10-13）：DLV-07 改用围栏判据唯一事实源的分类出口（严格/容错两口径
+# 的分派不在本模块重做）。content_utils.find_unclosed_fences 在本模块已无其它用途，
+# 不再导入（避免"预检自己持有一份判据入口"的观感，也满足 ruff F401）。
+from app.services.fence_common import classify_fence_defects
 from app.services.duplicate_detection import find_cross_section_copies
 
 # ✅ 2026-10-03（全局事实桥接 · 判据同源）：SAF-08 事实反哺危大判定与
@@ -866,6 +877,19 @@ def check_deliverability(ctx: PreflightContext) -> list:
     colloquial: list = []
     fence_bad: list = []
     total_words = 0
+    # ✅ R66（2026-10-11）三级目录字数偏差可控（DLV-16）：容差带口径与生成侧
+    # 共用 settings.word_budget_tolerance 与 content_utils.word_deviation_of，
+    # 不在预检侧重抄判定公式（避免第二套口径）。仅对「叶子 + 已设预算 + 有正文」
+    # 的章节判定；预算缺省（旧数据/测试上下文未带 word_budget）时整条规则沉默，
+    # 保证既有结论逐字不变。
+    try:
+        _wc_tol = abs(float(getattr(settings, "word_budget_tolerance", 0.1)))
+    except (TypeError, ValueError):
+        _wc_tol = 0.1
+    if not (_wc_tol > 0):
+        _wc_tol = 0.1
+    wc_audit_rows: list = []
+    wc_off_band: list = []
 
     for s in sections:
         title = s.get("title") or ""
@@ -873,6 +897,45 @@ def check_deliverability(ctx: PreflightContext) -> list:
         wc = s.get("word_count") or 0
         total_words += wc
         has_children = s.get("id") in parent_ids
+
+        try:
+            _s_wb = int(s.get("word_budget") or 0)
+        except (TypeError, ValueError):
+            _s_wb = 0
+        if not has_children and _s_wb > 0 and content.strip():
+            wc_audit_rows.append({
+                "section_id": s.get("id", ""), "title": title,
+                "level": s.get("level") or 0,
+                "word_budget": _s_wb, "word_count": wc,
+            })
+            _wc_dev = word_deviation_of(wc, _s_wb, tolerance=_wc_tol)
+            if not _wc_dev["within_band"]:
+                if wc < LEAF_MIN_WORD_BUDGET:
+                    _wc_note = "低于 300 字下限"
+                elif _wc_dev["ratio"] > 1.0:
+                    _wc_note = "超目标"
+                else:
+                    _wc_note = "低于目标"
+                # ✅ R70（2026-10-12）口径对照读数：判定与落库**仍只认**
+                #    text_word_count 口径（上面那个 wc），此处只在明细里
+                #    并列一个「用户实际读到的文字量」，让「字符口径 vs 可读
+                #    口径」的差在用户已经在看的地方可见，为后续「是否切口径、
+                #    预算要不要同时下调」提供对照证据。**不参与任何判定**，
+                #    护栏 test_word_caliber_diagnostic_r70 反向锁死这一点。
+                #    仅当正文含 CJK 且两口径确有差异时追加：纯 ASCII 语料
+                #    （测试 fixture 常见的 "x" * wc）按词合并只剩 1 个 token，
+                #    给它会误导用户；同时保证既有 evidence 串逐字不变。
+                _rw_txt = (
+                    readable_word_count(content)
+                    if has_cjk(content) else None
+                )
+                _rw_note = (
+                    f"，按可读字数约 {_rw_txt} 字"
+                    if _rw_txt is not None and _rw_txt != wc else ""
+                )
+                wc_off_band.append(
+                    f"{title}（实际 {wc}/目标 {_s_wb} 字，{_wc_note} "
+                    f"{_wc_dev['ratio']:.0%}{_rw_note}）")
 
         if not has_children and not content.strip():
             empty.append(title)
@@ -893,8 +956,14 @@ def check_deliverability(ctx: PreflightContext) -> list:
             # 出现的 ```（如"代码 `a` 与 ``` 长串"）误算，导致无围栏章节被错判为未闭合。
             # 现改用 CommonMark 口径的 find_unclosed_fences：逐行扫描、围栏内部不解析
             # 新围栏、闭合标记须同种且长度不小于开围栏，对 ``` 与 ~~~ 一视同仁。
-            if find_unclosed_fences(content):
-                fence_bad.append(title)
+            # ✅ R76（2026-10-13 · BUG-F1）：严格口径报了之后必须**分类**，不能一句
+            # 「请补全结束标记」打包 —— 「闭合标记长度错配」（AI 高频的 4 开 3 闭）
+            # 图表三侧其实能正常渲染，一键修复归一即闭环，叫用户手抄闭合符是错误
+            # 指引；只有**真未闭合**才会吞正文、才需要人工核对。分类判据在
+            # fence_common.classify_fence_defects（唯一事实源），不在这里重做。
+            _fence_defect = classify_fence_defects(content)
+            if _fence_defect["kind"]:
+                fence_bad.append({"title": title, "kind": _fence_defect["kind"]})
 
     if empty:
         findings.append(_finding(
@@ -930,9 +999,29 @@ def check_deliverability(ctx: PreflightContext) -> list:
             evidence=[f"{h['title']}：{'、'.join(h['hits'])}" for h in colloquial],
             suggestion="交付文本应为工程书面语，请改写为规范表述"))
     if fence_bad:
+        # ✅ R76（BUG-F1 文案侧）：两类缺陷的**修复路径不同**，必须分开说，
+        # 否则出现「预检报警 → 用户点一键修复 → 修复答无东西可修 → finding 不闭环」。
+        _hard = [h["title"] for h in fence_bad if h["kind"] == "unclosed"]
+        _mismatch = [h["title"] for h in fence_bad if h["kind"] == "length_mismatch"]
+        _parts = []
+        if _hard:
+            _parts.append(f"{len(_hard)} 处真未闭合（其后正文会被当作代码吞掉）")
+        if _mismatch:
+            _parts.append(f"{len(_mismatch)} 处闭合标记短于开围栏（图表仍可渲染，属格式错配）")
+        _sug = []
+        if _hard:
+            _sug.append("真未闭合请补全与开围栏同种等长的结束标记；「一键修复」只能在文末补齐、"
+                        "无法救回已被吞进的正文，请人工核对")
+        if _mismatch:
+            _sug.append("长度错配可直接「一键修复」自动归一闭合标记，无需手工改动正文")
         findings.append(_finding(
-            "DLV-07", f"{len(fence_bad)} 个章节存在未闭合的 Markdown 代码围栏",
-            evidence=fence_bad, suggestion="未闭合围栏会吞噬后续正文，请补全 ``` 结束标记"))
+            "DLV-07",
+            f"{len(fence_bad)} 个章节存在未闭合的 Markdown 代码围栏：" + "；".join(_parts),
+            evidence=[
+                f"{h['title']}（{'真未闭合' if h['kind'] == 'unclosed' else '闭合标记长度错配'}）"
+                for h in fence_bad
+            ],
+            suggestion="；".join(_sug)))
 
     if ctx.word_budget and total_words < ctx.word_budget * WORD_BUDGET_OK_RATIO:
         findings.append(_finding(
@@ -940,6 +1029,18 @@ def check_deliverability(ctx: PreflightContext) -> list:
             f"方案总字数 {total_words} 字，低于字数预算 {ctx.word_budget} 字的 "
             f"{WORD_BUDGET_OK_RATIO:.0%}",
             suggestion="可使用「补全生成」扩充内容，或调整方案字数预算"))
+
+    # DLV-16：全部偏离章节**聚合成 1 条**发现（审核问题数量不因字数控制而膨胀），
+    # evidence 最多列 10 条明细；达标率来自 word_audit_summary（与生成侧同一真源）。
+    if wc_off_band:
+        _wc_sum = word_audit_summary(wc_audit_rows, tolerance=_wc_tol)
+        findings.append(_finding(
+            "DLV-16",
+            f"{len(wc_off_band)} 个三级目录字数偏离目标容差带"
+            f"（±{_wc_tol:.0%}，达标 {_wc_sum['in_band']}/{_wc_sum['total']}）",
+            evidence=wc_off_band[:10],
+            suggestion="可在正文生成页选择字数档位（简短800/标准1200/详细2000/超长2500）"
+                       "重新生成，或对偏差章节单独重写；偏差不影响其余检查结论"))
     return findings
 
 
@@ -973,13 +1074,30 @@ def run_preflight(ctx: PreflightContext) -> list:
     ):
         try:
             findings.extend(checker(ctx))
-        except Exception as exc:  # pragma: no cover - 防御性兜底
+        except Exception as exc:  # noqa: BLE001 - 防御性兜底
+            # ✅ 2026-10-12（技术债 P1-8 · 假 finding 显式化）：
+            #    旧实现把「检查项本身崩了」伪装成一条普通的 low 级 finding
+            #    （rule_id 空、dimension 空、suggestion 只让"看后端日志"）。
+            #    后果是三重的：① 它**不在任何规则目录里**，规则清单/覆盖率
+            #    统计永远看不到；② 与真实 low 级问题混在一起，前端无法区分
+            #    「有 3 处小瑕疵」与「有 3 个体检项根本没跑」；③ 只有一行
+            #    warning 且**不带堆栈**，线上无法定位是哪个 checker 的哪一行。
+            #    现加法式补 ``engine_error`` / ``checker`` 两个字段并保持
+            #    rule_id 为空（空 rule_id 不参与去重，多个检查项同时异常时
+            #    不会被塌缩成一条 —— 这一点必须保留），severity 仍为 low
+            #    （体检项失败不应阻断交付，语义不变）。
+            logger.warning("预检检查项 %s 执行异常（降级为 engine_error 条目，"
+                           "该项结论缺失）: %s", checker.__name__, exc, exc_info=True)
             findings.append({
                 "rule_id": "", "dimension": "", "severity": "low",
-                "title": f"检查项 {checker.__name__} 执行异常",
+                "title": f"检查项 {checker.__name__} 执行异常（该项未参与本次预检）",
                 "detail": str(exc)[:200], "evidence": [], "section_id": "",
-                "section_title": "", "suggestion": "请查看后端日志", "basis": "",
+                "section_title": "", "suggestion": "该项检查未能完成，请查看后端日志或重跑一键总检",
+                "basis": "",
                 "mode": "program",
+                # ✅ 新增：显式标记为「引擎故障」而非真实问题，供前端/统计区分
+                "engine_error": True,
+                "checker": checker.__name__,
             })
     # ✅ BUG 修复（2026-09-23）：按 rule_id 去重（保留首条，同严重度下信息已足够；
     #    若后续条严重度更高则替换，位置保持首次出现处）。背景：正文为空的计算书

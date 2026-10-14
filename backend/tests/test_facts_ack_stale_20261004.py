@@ -19,6 +19,7 @@ import httpx
 import pytest
 from app.db import close_db, get_conn, init_db
 from app.main import app
+from app.models import AckStaleRequest
 
 MAIN_PID = "proj-main"
 MAIN_SID = "scheme-main"
@@ -128,7 +129,7 @@ class TestAckBatch:
         shared = await _fact(db_conn, sid="", stale=1, resolved=0)
         foreign = await _fact(db_conn, pid=OTHER_PID, sid=OTHER_SID, stale=1, resolved=0)
 
-        res = await batch_ack_stale({"scheme_id": MAIN_SID}, db_conn)
+        res = await batch_ack_stale(AckStaleRequest(scheme_id=MAIN_SID), db_conn)
         assert res["changed"] == 2, f"应只处理本方案可见范围内 2 条，实际 {res['changed']}"
         assert res["gated"] == 0
         assert (await _get(db_conn, own))["is_stale"] == 0
@@ -144,7 +145,7 @@ class TestAckBatch:
         await _fact(db_conn, stale=1, resolved=0, conflict=1)
         await _fact(db_conn, stale=1, resolved=0)
 
-        res = await batch_ack_stale({"scheme_id": MAIN_SID}, db_conn)
+        res = await batch_ack_stale(AckStaleRequest(scheme_id=MAIN_SID), db_conn)
         assert res["changed"] == 3
         assert res["gated"] == 2, f"应回传 2 条仍被闸门挡住，实际 {res['gated']}"
 
@@ -163,7 +164,7 @@ class TestAckBatch:
         await _seed(db_conn)
         a = await _fact(db_conn, stale=1, resolved=0)
         b = await _fact(db_conn, stale=1, resolved=0)
-        res = await batch_ack_stale({"scheme_id": MAIN_SID, "fact_ids": [a]}, db_conn)
+        res = await batch_ack_stale(AckStaleRequest(scheme_id=MAIN_SID, fact_ids=[a]), db_conn)
         assert res["changed"] == 1
         assert (await _get(db_conn, a))["is_stale"] == 0
         assert (await _get(db_conn, b))["is_stale"] == 1
@@ -174,7 +175,7 @@ class TestAckBatch:
 
         await _seed(db_conn)
         with pytest.raises(HTTPException) as ei:
-            await batch_ack_stale({}, db_conn)
+            await batch_ack_stale(AckStaleRequest(), db_conn)
         assert ei.value.status_code == 400, "缺 scheme_id 必须拒绝（越域写防护）"
 
     async def test_unknown_scheme_is_404(self, db_conn):
@@ -182,7 +183,7 @@ class TestAckBatch:
         from fastapi import HTTPException
 
         with pytest.raises(HTTPException) as ei:
-            await batch_ack_stale({"scheme_id": "nope"}, db_conn)
+            await batch_ack_stale(AckStaleRequest(scheme_id="nope"), db_conn)
         assert ei.value.status_code == 404
 
 

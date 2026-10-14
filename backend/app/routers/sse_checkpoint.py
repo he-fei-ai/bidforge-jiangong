@@ -63,7 +63,17 @@ async def _retry_db_locked(factory, max_retries: int = 3,
             await asyncio.sleep(base_delay * (2 ** i))
     if last_exc is not None:
         raise last_exc
-    return await factory()
+    # ✅ 2026-10-12（技术债 P2-13 · 删除不可达的死代码）：
+    #    此处原有一行 ``return await factory()``。它**永远不可达** ——
+    #    ``attempts = max(0, int(max_retries))`` ⇒ 循环至少执行 1 次，每次迭代
+    #    要么 return（成功）、要么 raise（非瞬态错误）、要么 break（重试耗尽且
+    #    last_exc 已置位），退出循环后 last_exc 必不为 None，上面已经 raise。
+    #    危害不在运行期而在**可读性**：读到这行的人会以为「重试耗尽后还会再试
+    #    一次」，从而把真实总尝试次数误算成 1+max_retries+1，与 docstring 的
+    #    「1 + max_retries」相矛盾 —— 属于本仓反复记录的「注释宣称一套、
+    #    实现看起来是另一套」。删掉后 docstring 与实际实现一致。
+    raise AssertionError(  # pragma: no cover - 结构性不可达，仅防未来改坏循环
+        "_retry_db_locked 退出循环时 last_exc 必不为 None")
 
 
 async def _write_task_checkpoint_db(task_id: str, kind: str,

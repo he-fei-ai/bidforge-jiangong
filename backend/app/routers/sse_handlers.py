@@ -106,6 +106,14 @@ from app.services.content_standard import (
     resolve_effective_standard,
     standard_report,
 )
+# ✅ R77（2026-10-14 · 引入易标「生成后事实冲突审计 + 定点替换」）：
+#    standard_report 检出的 error 级事实冲突经本模块接入自动修复闭环。
+from app.services.content_fact_autofix import (
+    accumulate_fact_autofix,
+    autofix_section_fact_conflicts,
+    empty_fact_autofix_summary,
+    select_fact_conflicts,
+)
 from app.services.content_utils import (
     DEFAULT_WORD_BUDGET,
     LEAF_MIN_WORD_BUDGET,
@@ -129,19 +137,23 @@ from app.services.content_utils import (
 
 # ✅ R47 债-5（2026-10-06）：项目关键事实构建整组下沉到 services/facts_builder。
 #    消除 compliance.py / consistency_scanner.py 对本路由器私有符号的反向 import；
-#    本模块实际使用下方 5 个符号；LOW_CONFIDENCE_THRESHOLD 是被 tests 经
+#    本模块实际使用下方多个符号；LOW_CONFIDENCE_THRESHOLD 是被 tests 经
 #    sse_handlers re-export 取用的对外别名（故显式 noqa，不是漏改）。
-#    R57 清理：其余 4 个别名（_chapter_inject_enabled / _FACTS_GENERIC_GROUP_HINTS /
-#    _rank_facts_by_basis / _row_chapter）在全库零消费者，已删除。
+#    R57 清理：彼时 4 个别名（_chapter_inject_enabled / _FACTS_GENERIC_GROUP_HINTS /
+#    _row_chapter / _rank_facts_by_basis）零消费者被删；✅ R77（2026-10-14）
+#    重新引入 _rank_facts_by_basis + render_outline_chapter_facts：目录子目录
+#    按章相关性注入事实（outline_sublevel_facts_relevant）重新消费二者。
 from app.services.facts_builder import (  # noqa: E402
     LOW_CONFIDENCE_THRESHOLD,  # noqa: F401 - 对外 re-export，tests 经此名取阈值
     _facts_keywords,
     _filter_facts_rows,
     _load_facts_rows,
+    _rank_facts_by_basis,
     _render_facts_text,
     build_facts_text,
     core_facts_rows,
     exclude_rows,
+    render_outline_chapter_facts,
 )
 
 # ✅ 编号统一（2026-09-25）：收敛到 services/numbering —— 目录编号的唯一事实源。
@@ -2785,6 +2797,299 @@ async def _try_outline_patch(
     return None
 
 
+# ---------------------------------------------------------------------------
+# R73（2026-10-12）· 目录泛化/占位标题：检出闸门 + 外科式标题重写
+#   用户实测缺陷：TOC 三级标题大量为「专项6」「总体实施策划（2）（3）」这类
+#   占位泛化名（带（N）编号冲突后缀）。2026-10-10 已把 detect_generic_titles 接到
+#   审核之后，但两条**程序化早退**（programmatic / programmatic+surgical）在检测
+#   之前就 return ⇒ 填了编制要求 / 有方案解析时（长方案常态）占位标题从未被检出。
+#   本轮：① 两条早退都加占位标题闸门；② 补一条**只送占位节点**的小调用重写出口
+#   （整份重写受退化护栏约束，长方案极易「保留原目录」）；③ 修复采用后复检，
+#   残留时如实置 passed=False 并给可核对的透明警告（绝不谎报「已自动修复」）。
+# ---------------------------------------------------------------------------
+
+#: 单条标题改写的长度上限（汉字）：超出几乎必然是模型把整句 description 塞进来。
+_TITLE_FIX_MAX_LEN = 60
+
+
+def _detect_generic_titles(outline: list) -> list[dict]:
+    """泛化/占位标题检出（配置门控 + 异常软失败，全链路单一入口）。
+
+    - 受 ``settings.outline_check_generic_titles``（默认 True）控制：置 False 即
+      完整回到本项引入前的行为（不检出、不早退闸门、不强制修复）；
+    - 检测异常**绝不阻断生成主链路**：返回空列表并留 WARNING。
+    """
+    if not getattr(settings, "outline_check_generic_titles", True):
+        return []
+    try:
+        from app.services.outline_quality import detect_generic_titles
+        return detect_generic_titles(outline)
+    except Exception as e:  # noqa: BLE001 - 自检是体检，不是闸门
+        logger.warning("目录泛化标题检测异常（忽略）: %s", e, exc_info=True)
+        return []
+
+
+def _outline_path_index(outline: list) -> dict[str, dict]:
+    """位置路径 → 节点上下文索引 ``{node, parent, siblings}``（只读，不改树）。
+
+    path 口径与 ``outline_quality.collect_titles`` 一致（点分位置路径，1 基），
+    它是**标题重写的唯一定位键**；编号本身也由位置派生，故改写标题
+    不动 path、不触发重编号（位置是编号的唯一事实源）。
+    """
+    idx: dict[str, dict] = {}
+
+    def _walk(nodes: list, prefix: str, parent_title: str) -> None:
+        siblings = [str(n.get("title") or "").strip()
+                    for n in (nodes or []) if isinstance(n, dict)]
+        siblings = [t for t in siblings if t]
+        k = 0
+        for n in (nodes or []):
+            if not isinstance(n, dict):
+                continue
+            k += 1
+            path = f"{prefix}.{k}" if prefix else str(k)
+            idx[path] = {"node": n, "parent": parent_title, "siblings": siblings}
+            kids = n.get("children")
+            if isinstance(kids, list) and kids:
+                _walk(kids, path, str(n.get("title") or "").strip())
+
+    _walk(outline or [], "", "")
+    return idx
+
+
+def _build_title_fix_items(outline: list, hits: list[dict]) -> str:
+    """把占位节点连同上下文（上级章 / 同级兄弟 / 原说明）摊平成提示词清单。"""
+    idx = _outline_path_index(outline)
+    lines: list[str] = []
+    for h in hits[:40]:          # 体量红线：单次调用最多带 40 条
+        path = str(h.get("path") or "")
+        info = idx.get(path)
+        if not info:
+            continue
+        node = info["node"]
+        desc = str(node.get("description") or "").strip()[:60]
+        sib = "、".join(f"「{t}」" for t in info["siblings"] if t != str(node.get("title") or "").strip())[:400]
+        lines.append(
+            f"- path={path}｜层级 L{str(path).count('.') + 1}｜上级章节「{info['parent'] or '（一级）'}」"
+            f"｜当前标题「{h.get('title')}」（类型 {h.get('kind')}）"
+            f"｜同级兄弟：{sib or '（无）'}｜原说明：{desc or '（无）'}")
+    return "\n".join(lines)
+
+
+def _title_fix_validate_fn(o) -> list[str]:
+    """标题重写响应的校验函数：updates 必须是非空数组，每项含 path 与非空 title。
+
+    只判形态，不判语义 —— 语义红线（新标题仍泛化 / 与兄弟重名 / 路径不存在）
+    由 :func:`_apply_title_updates` 逐条把守并计入 rejected。
+    """
+    ups = o.get("updates")
+    if not isinstance(ups, list) or not ups:
+        return ["updates 必须为非空数组"]
+    bad = [u for u in ups
+           if not isinstance(u, dict)
+           or not str(u.get("path") or "").strip()
+           or not str(u.get("title") or "").strip()]
+    return [f"存在 {len(bad)} 个缺 path/title 的非法改写项"] if bad else []
+
+
+def _apply_title_updates(outline: list, updates: list) -> tuple[list, int, list]:
+    """按位置路径把新标题精确回填（**纯函数**：不改入参，返回新树）。
+
+    返回 ``(tree, applied, rejected)``。五条保守红线（宁可不改，不可改坏）：
+    ① **路径不存在** → 丢弃该条（绝不猜「最接近的节点」，猜错就是静默换标题）；
+    ② **新标题自身仍泛化/占位** → 丢弃（否则检出闸门永远关不上）；
+    ③ **与同父下任一兄弟（含本批已改的）归一化重名** → 丢弃（剥（N）后缀会造出
+      完全同名重复，那是比占位更坏的内容损坏）；
+    ④ **只改 title**：description / children / 层级 / 顺序一律原样，节点既不增也不删。
+    ⑤ ✅ R73b F4：**先清洗再判定**——含换行的标题会破坏目录树渲染与导出标题行，
+      整条拒收；内嵌编号（「2.1 …」「第一章 …」）必须经**唯一事实源**
+      `numbering.strip_outline_numbering` 剥离后落地，否则展示层按位置再套一次
+      编号 → 「2.1 2.1 灌注桩支护施工」双重编号。本仓其余每一条标题写入路径
+      （sections PATCH 改名 / save-outline / 上传落库 / 审核整份修复，均经
+      `normalize_outline` 或显式剥离）都做这一步，唯独本出口此前漏写。
+    """
+    tree = copy.deepcopy(outline or [])
+    if not isinstance(updates, list):
+        return tree, 0, []
+    try:
+        from app.services.outline_quality import is_generic_title
+    except Exception:  # pragma: no cover - 判据不可用时不做语义拒绝，只做形态校验
+        def is_generic_title(_t: str) -> bool:
+            return False
+
+    try:
+        # 归一化与检出侧共用同一把尺子（先剥「（N）」计数后缀再去空白/标点）
+        from app.services.outline_quality import _norm as _q_norm
+    except Exception:  # pragma: no cover - 归一化不可用时退化为 strip
+        def _q_norm(t: str) -> str:      # type: ignore[no-redef]
+            return str(t or "").strip()
+
+    try:
+        # ✅ R73b F4：内嵌编号剥离必须复用唯一实现，绝不在此自造正则
+        from app.services.numbering import strip_outline_numbering as _strip_num
+    except Exception:  # pragma: no cover - 唯一实现不可用时退化为原样（不误杀）
+        def _strip_num(t: str) -> str:   # type: ignore[no-redef]
+            return str(t or "")
+
+    def _norm(t: str) -> str:
+        return _q_norm(str(t or "").strip())
+
+    rejected: list[dict] = []
+    applied = 0
+    # 位置路径索引只算一次（改写只动 title、不动结构，快照兄弟列表仍成立；
+    # 同批新标题互撞另由 batch_taken 把守）
+    tree_idx = _outline_path_index(tree)
+    # 本批已落地的标题：按父路径分组，防「同批两条改成同一个名字」互撞
+    batch_taken: dict[str, set[str]] = {}
+
+    for up in updates:
+        if not isinstance(up, dict):
+            rejected.append({"path": "?", "title": "?", "reason": "非法项（非对象）"})
+            continue
+        raw_path = up.get("path")
+        path = str(raw_path or "").strip()
+        new_title = str(up.get("title") or "").strip()
+        if not isinstance(raw_path, str) or not path:
+            rejected.append({"path": path, "title": new_title, "reason": "path 缺失或非字符串"})
+            continue
+        if not new_title:
+            rejected.append({"path": path, "title": new_title, "reason": "新标题为空"})
+            continue
+        # ✅ R73b F4：换行不进标题（目录树/导出标题行/编号折行都会被它打坏）
+        if "\n" in new_title or "\r" in new_title:
+            rejected.append({"path": path, "title": new_title[:20],
+                             "reason": "新标题含换行"})
+            continue
+        # ✅ R73b F4：剥离内嵌编号后再进入后续判定（剥完为空/仍泛化都会被拒）
+        new_title = str(_strip_num(new_title) or "").strip()
+        if not new_title:
+            rejected.append({"path": path, "title": "", "reason": "剥离编号后标题为空"})
+            continue
+        if len(new_title) > _TITLE_FIX_MAX_LEN:
+            rejected.append({"path": path, "title": new_title[:20], "reason": "新标题过长"})
+            continue
+        if is_generic_title(new_title):
+            rejected.append({"path": path, "title": new_title, "reason": "新标题仍是泛化/占位名称"})
+            continue
+        info = tree_idx.get(path)
+        if not info:
+            rejected.append({"path": path, "title": new_title, "reason": "路径不存在"})
+            continue
+        node = info["node"]
+        old_title = str(node.get("title") or "").strip()
+        parent_path = path.rsplit(".", 1)[0] if "." in path else ""
+        taken = batch_taken.setdefault(parent_path, set())
+        cand = _norm(new_title)
+        clash = [_norm(t) for t in info["siblings"]
+                 if _norm(t) and _norm(t) != _norm(old_title)]
+        if cand in taken or cand in clash:
+            rejected.append({"path": path, "title": new_title, "reason": "与同级标题重名"})
+            continue
+        node["title"] = new_title
+        taken.add(cand)
+        applied += 1
+
+    return tree, applied, rejected
+
+
+async def _try_outline_title_fix(
+    outline: list, hits: list[dict], *,
+    scheme_name: str = "", scheme_type: str = "",
+    project_brief: str = "", project_facts: str = "",
+) -> list | None:
+    """外科式标题重写：只把占位节点连同上下文送给模型，换回具体标题。
+
+    与「整份目录重写」的取舍（本轮核心设计判断）：
+    - 体量小（最多 40 条 + 上下文），**不会触发节点覆盖率退化护栏**，长方案下
+      远比 ``outline_feedback_system`` 可靠；
+    - 结构零风险：只回填 title，绝不新增/删除/重排 ⇒ 编号与正文链不受影响；
+    - 失败返回 None，调用方照旧回退完整 AI 审核链路（可回退，不删代码）。
+
+    受 ``settings.outline_title_fix``（默认 True）控制；置 False 即逐字回到
+    本项引入前：不发这次小调用。
+    """
+    if not hits or not getattr(settings, "outline_title_fix", True):
+        return None
+    items = _build_title_fix_items(outline, hits)
+    if not items:
+        return None
+    try:
+        prompt = render(
+            "outline_title_fix_system",
+            scheme_name=scheme_name,
+            scheme_type=scheme_type,
+            project_brief=(project_brief or "")[:1500],
+            project_facts=(project_facts or "")[:PROJECT_FACTS_LIMIT_OUTLINE],
+            broken_items=items,
+        )
+        obj, _raw = await asyncio.wait_for(
+            collect_json_response(
+                [{"role": "system", "content": prompt}],
+                _title_fix_validate_fn,
+                json_mode=True, temperature=0.2, scene="outline_fix",
+                repair_key=OUTLINE_REPAIR_KEY,
+                max_tokens=OUTLINE_FIX_MAX_TOKENS),
+            timeout=OUTLINE_FIX_TIMEOUT)
+        updates = obj.get("updates") if isinstance(obj, dict) else None
+        if not isinstance(updates, list) or not updates:
+            return None
+        tree, applied, rejected = _apply_title_updates(outline, updates)
+        if not applied:
+            logger.info("占位标题重写未生效（%d 条全被保守红线拒绝）：%s",
+                        len(rejected), [r.get("reason") for r in rejected[:3]])
+            return None
+        if rejected:
+            logger.info("占位标题重写部分生效：落地 %d 条，拒绝 %d 条",
+                        applied, len(rejected))
+        return tree
+    except asyncio.TimeoutError:
+        logger.warning("占位标题重写超时（%ds），回退原链路（scheme=%s）",
+                       OUTLINE_FIX_TIMEOUT, scheme_name)
+    except Exception as e:      # noqa: BLE001
+        logger.warning("占位标题重写失败（scheme=%s）: %s，回退原链路", scheme_name, e)
+    return None
+
+
+#: 出口口径名：早退前先做过占位标题重写的标记（前端「审核依据」区可区分）
+_TITLE_FIXED_MODE_SUFFIX = "titled"
+
+
+def _residual_generic_notice(hits: list[dict]) -> list[str]:
+    """残留占位标题的透明警告（参照 R71 收尾警告口径：绝不谎报已修好）。"""
+    if not hits:
+        return []
+    sample = "、".join(f"「{h.get('title')}」" for h in hits[:5])
+    return [
+        f"⚠ 自动修复后目录仍有 {len(hits)} 处泛化/占位标题（{sample}）："
+        f"请人工核对并改写这些标题，或重新生成目录（系统未强行改名，"
+        f"避免把真实章节标题改坏）"]
+
+
+def _coverage_recheck(requirements: str, tree: list, is_dangerous: bool,
+                      basis=None) -> tuple[bool, list[str]]:
+    """程序化出口的**覆盖回归复核**（✅ R73b F6/F7：纯确定性、零 AI 调用、不改树）。
+
+    为何需要：两条程序化早退的「过」字是**在改名/补齐之前**判的，而两个动作都会
+    动标题集：
+      ① F6 占位标题曾以宽松匹配（≥4 字公共子串，规则 3）替某条编制要求「顶」住
+         落点，换成具体标题后该要求反而没了落点；
+      ② F7 外科补齐只要「有产出」就宣告「已补齐 N 项缺失」，从不回头验证补的章
+         是否覆盖缺失项 —— 模型回任意一章都能过关，那是谎报。
+    出口前用**同一把尺子**（`_check_requirements_coverage`，不另造判据）再量一次，
+    不平就不得以 programmatic* 早退。
+
+    复核自身异常按 ``(True, [])`` 处理（fail-soft：复核是加法式护栏，异常时
+    不该比修复前更严，与 `_detect_generic_titles` 同一口径）。
+    """
+    try:
+        return _check_requirements_coverage(requirements, tree, is_dangerous,
+                                           basis=basis)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("程序化出口覆盖复核异常（按不额外阻断处理）: %s", e,
+                       exc_info=True)
+        return True, []
+
+
 async def _review_and_fix_outline(
     outline: list, scheme_type: str, is_dangerous: bool, project_brief: str = "",
     scheme_name: str = "", project_facts: str = "", requirements: str = "",
@@ -2838,28 +3143,105 @@ async def _review_and_fix_outline(
             or getattr(settings, "outline_checkpoint_check", True)):
         _covered, _missing = _check_requirements_coverage(
             requirements, outline, is_dangerous, basis=basis)
+        # ✅ R73 根因 A：占位标题**检出闸门**。旧实现两条程序化早退都在
+        #    detect_generic_titles 之前 return，于是「填了编制要求 / 有方案解析」
+        #    的目录（长方案常态）里的「专项6」「总体实施策划（2）」从未被检出、
+        #    更从未被修，直接落库。现在：检出即**不得以 passed=True 早退**，
+        #    先走一次小调用标题重写；重写后仍脏 → 落回完整 AI 审核 + 修复链路。
+        _hits = _detect_generic_titles(outline)
+        if _hits:
+            logger.info("程序化预检出口检出 %d 处泛化/占位标题，闸门不得早退",
+                        len(_hits))
         # ⚠️ 早退仍**只在用户填了编制要求 / 提供了方案解析**时成立
         #    （见 _check_requirements_coverage 末尾的说明）：否则会连带丢掉
         #    AI 审核对标题质量 / 层级 / 跨章重复 / 投标章节的检查。
         if not _missing and (requirements or basis is not None):
-            logger.info("程序化覆盖预检全过，跳过 AI 审核（省 1~2 次调用）")
-            return outline, {"passed": True, "review_mode": "programmatic",
-                             "suggestions": ["✅ 程序化预检：编制要求与危大必备"
-                                             "章节均已覆盖，跳过 AI 审核"]}
+            if not _hits:
+                logger.info("程序化覆盖预检全过，跳过 AI 审核（省 1~2 次调用）")
+                return outline, {"passed": True, "review_mode": "programmatic",
+                                 "suggestions": ["✅ 程序化预检：编制要求与危大必备"
+                                                 "章节均已覆盖，跳过 AI 审核"]}
+            # 脏目录：先试外科式标题重写（1 次小调用，结构零风险）
+            _titled = await _try_outline_title_fix(
+                outline, _hits, scheme_name=scheme_name, scheme_type=scheme_type,
+                project_brief=project_brief, project_facts=project_facts)
+            if _titled is not None and not _detect_generic_titles(_titled):
+                # ✅ R73b F6：改名后必须回头复检覆盖。旧实现只复检「标题脏不脏」，
+                #    不复检「要求还盖不盖得住」—— 占位标题曾顶住的那条要求会在这
+                #    一步静默失去落点，而出口仍以 passed=True 宣称通过。
+                _covered2, _new_missing = _coverage_recheck(
+                    requirements, _titled, is_dangerous, basis)
+                if not _covered2 and _new_missing:
+                    outline = _titled
+                    _missing = _new_missing
+                    logger.info("占位标题已重写（%d 处），但覆盖出现新缺口 %d 项，"
+                                "不得早退，转入补齐/审核链路：%s",
+                                len(_hits), len(_new_missing), _new_missing[:5])
+                else:
+                    logger.info("占位标题已外科式重写（%d 处），出口干净", len(_hits))
+                    return _titled, {
+                        "passed": True, "review_mode": f"programmatic+{_TITLE_FIXED_MODE_SUFFIX}",
+                        "suggestions": [
+                            f"✅ 程序化预检：必备章节均已覆盖；已将 {len(_hits)} 处"
+                            f"泛化/占位标题重写为具体标题"]}
+            # 重写不可用 / 仍有残留 → 不早退，落回完整 AI 审核链路
         if requirements or is_dangerous or basis is not None or (
                 getattr(settings, "outline_checkpoint_check", True)):
             _notify("fix")
             _patched = await _try_outline_patch(
                 outline, _missing, scheme_name=scheme_name,
                 scheme_type=scheme_type, project_brief=project_brief,
-                project_facts=project_facts)
+                project_facts=project_facts) if _missing else None
             if _patched:
-                logger.info("外科式补齐完成（缺失 %d 项）", len(_missing))
-                return _patched, {
-                    "passed": True, "review_mode": "programmatic+surgical",
-                    "suggestions": [
-                        f"✅ 已按程序化预检外科式补齐 {len(_missing)} 项缺失"
-                        f"（{'；'.join(_missing[:5])}）"]}
+                # ✅ R73 根因 A（第二条早退）：补齐后的目录仍可能带占位标题，
+                #    旧实现直接以 passed=True 返回 → 同样从未被检出。先重写再判出口。
+                _p_hits = _detect_generic_titles(_patched)
+                _p_titled = _patched
+                if not _p_hits:
+                    _p_missing: list[str] = []
+                else:
+                    _titled2 = await _try_outline_title_fix(
+                        _patched, _p_hits, scheme_name=scheme_name,
+                        scheme_type=scheme_type, project_brief=project_brief,
+                        project_facts=project_facts)
+                    if _titled2 is not None and not _detect_generic_titles(_titled2):
+                        _p_titled = _titled2
+                        _p_missing = []
+                    else:
+                        # 仍有残留：带着补齐成果落回完整 AI 审核（不丢已补的章）
+                        outline = _patched
+                        logger.info("外科补齐后仍残留占位标题，转入完整 AI 审核链路")
+                        _p_missing = None
+                if _p_missing is not None:
+                    # ✅ R73b F6/F7：补齐与改名都动过标题集，出口前回头复检。
+                    #    旧实现只看「补齐调用有没有产出」，从不验证产出是否真盖住了
+                    #    missing —— 模型回一章无关内容就能骗到「✅ 已外科式补齐 N 项」。
+                    _cov_ok, _still_missing = _coverage_recheck(
+                        requirements, _p_titled, is_dangerous, basis)
+                    if not _cov_ok and _still_missing:
+                        outline = _p_titled
+                        _missing = _still_missing
+                        logger.info("外科补齐后仍有 %d 项未真正覆盖，不得以程序化"
+                                    "出口宣称通过，转入 AI 审核：%s",
+                                    len(_still_missing), _still_missing[:5])
+                    elif _p_hits:
+                        logger.info("外科补齐 %d 项 + 占位标题重写 %d 处均完成且复检通过",
+                                    len(_missing), len(_p_hits))
+                        return _p_titled, {
+                            "passed": True,
+                            "review_mode": (f"programmatic+surgical"
+                                            f"+{_TITLE_FIXED_MODE_SUFFIX}"),
+                            "suggestions": [
+                                f"✅ 已外科式补齐 {len(_missing)} 项缺失"
+                                f"（{'；'.join(_missing[:5])}），"
+                                f"并将 {len(_p_hits)} 处泛化/占位标题重写为具体标题"]}
+                    else:
+                        logger.info("外科式补齐完成（缺失 %d 项）且复检通过", len(_missing))
+                        return _p_titled, {
+                            "passed": True, "review_mode": "programmatic+surgical",
+                            "suggestions": [
+                                f"✅ 已按程序化预检外科式补齐 {len(_missing)} 项缺失"
+                                f"（{'；'.join(_missing[:5])}）"]}
             # 补齐失败 → 落回完整 AI 审核链路（不写 review_mode，
             # 前端据此判断「审核依据仍是 AI 审核结论」）
     # 说明（✅ 2026-10-02 已更新）：程序化预检的**触发门控**已放宽 ——
@@ -2934,15 +3316,24 @@ async def _review_and_fix_outline(
     suggestions = _coerce_suggestions(review_obj.get("suggestions"))
     # ✅ 2026-10-10（目录占位/泛化标题收口）：AI 审核可能漏报泛化占位标题与
     #    「（N）」编号冲突后缀（生产实证「专项6」「总体实施策划（2）」）。
-    #    此处程序化兜底：检出即追加针对性修复建议并强制进入修复链路，让
-    #    outline_feedback_system 重写为具体到施工对象/部位/工序的真实标题。
-    _generic_hits = []
-    if getattr(settings, "outline_check_generic_titles", True):
-        try:
-            from app.services.outline_quality import detect_generic_titles
-            _generic_hits = detect_generic_titles(outline)
-        except Exception as _ge:  # 防御：检测异常绝不阻断修复主流程
-            logger.warning("目录泛化标题检测异常（忽略）: %s", _ge, exc_info=True)
+    #    ✅ R73 加强：先试**外科式标题重写**（只送占位节点 + 上下文，结构零风险）；
+    #    重写干净则不强迫走「整份重写」（长方案下极易被退化护栏拒绕而「保留原目录」）；
+    #    仍有残留才追加针对性修复建议并强制进入修复链路。
+    _generic_hits = _detect_generic_titles(outline)
+    if _generic_hits:
+        _titled3 = await _try_outline_title_fix(
+            outline, _generic_hits, scheme_name=scheme_name,
+            scheme_type=scheme_type, project_brief=project_brief,
+            project_facts=project_facts)
+        if _titled3 is not None:
+            outline = _titled3
+            _still = _detect_generic_titles(outline)
+            if not _still:
+                logger.info("占位标题已由外科式重写全部修正（%d 处）",
+                            len(_generic_hits))
+                _generic_hits = []
+            else:
+                _generic_hits = _still
     if _generic_hits:
         _generic_sugg = [
             f"标题「{g['title']}」（路径{g['path']}，类型{g['kind']}）为泛化/占位名称"
@@ -2995,9 +3386,20 @@ async def _review_and_fix_outline(
                 # 模型回传的 description 同样是截断的；按 (id, title) 回填原文。
                 _restore_descriptions(outline, _merged_fixed)
                 outline = normalize_outline(_merged_fixed)
-                review_obj["passed"] = True
-                suggestions = (["✅ 已根据审核意见自动修复（审核轮合并输出）"]
-                               + suggestions)
+                # ✅ R73 根因 B：修复采用后**必须复检**。旧实现无条件置 passed=True
+                #    并声称「已自动修复」，而弱模型的 fixed_outline 常照旧把占位标题
+                #    原样回吐 ⇒ 结论与日志都不准。残留时如实置 False + 给可核对警告。
+                _residual = _detect_generic_titles(outline)
+                review_obj["generic_residual"] = len(_residual)
+                review_obj["passed"] = not _residual
+                if _residual:
+                    suggestions = (_residual_generic_notice(_residual)
+                                   + suggestions)
+                    logger.warning("审核轮合并修复后仍残留 %d 处占位标题（不判通过）",
+                                   len(_residual))
+                else:
+                    suggestions = (["✅ 已根据审核意见自动修复（审核轮合并输出）"]
+                                   + suggestions)
                 review_obj["suggestions"] = suggestions
                 return outline, review_obj
             logger.warning("审核轮合并修复结果不可用，回退独立修复调用（scheme=%s）: %s",
@@ -3051,10 +3453,19 @@ async def _review_and_fix_outline(
             else:
                 # 修复结果落库前统一裁剪到三级 + 重排编号，与主链路保持一致
                 outline = normalize_outline(fixed_outline)
-                review_obj["passed"] = True
+                # ✅ R73 根因 B（独立修复轮同样复检）
+                _residual2 = _detect_generic_titles(outline)
+                review_obj["generic_residual"] = len(_residual2)
+                review_obj["passed"] = not _residual2
                 # ✅ 保留原始审核建议（追加而非覆盖）：前端「审核结论」区块要展示
                 #    本轮到底按哪些建议改的，旧实现直接替换成一句话，审核依据丢失。
-                suggestions = ["✅ 已根据审核意见自动修复"] + suggestions
+                if _residual2:
+                    suggestions = (_residual_generic_notice(_residual2)
+                                   + suggestions)
+                    logger.warning("独立修复轮后仍残留 %d 处占位标题（不判通过）",
+                                   len(_residual2))
+                else:
+                    suggestions = ["✅ 已根据审核意见自动修复"] + suggestions
         except asyncio.TimeoutError:
             logger.warning("目录自动修复超时（%ds），跳过修复保留原目录（scheme=%s）",
                            OUTLINE_FIX_TIMEOUT, scheme_name)
@@ -3065,6 +3476,9 @@ async def _review_and_fix_outline(
 
     # 统一回写为 list[str]，保证下游（SSE payload / 前端）拿到的形态稳定
     review_obj["suggestions"] = suggestions
+    # ✅ R73：未走修复采用的出口同样给一个稳定的残留读数（前端/护栏可消费）
+    review_obj.setdefault("generic_residual",
+                          len(_detect_generic_titles(outline)))
     return outline, review_obj
 
 
@@ -3860,6 +4274,65 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                 _prog["sub_total"] = len(level1)
                 _prog["sub_done"] = 0
                 _prog["nodes"] = _count_nodes(level1)
+                # ✅ R77（2026-10-14 · 目录子目录按章相关性注入事实）：
+                #    旧实现对所有章节下发同一份整案事实头部（PROJECT_FACTS_LIMIT_
+                #    SUBLEVEL 预算内的 project_facts 截断）—— 长方案尾部事实
+                #    （监测/验收/应急…）对任何子目录都不可见。现循环外把事实行
+                #    加载一次 + 按方案名称相关性排序 + 数据字典块算一次；
+                #    每章渲染时按本章标题/描述把相关事实**重排**到预算头部
+                #    （relevant_first_rows，只重排不删除；无关键词章节与旧行为
+                #    等价）。开关 outline_sublevel_facts_relevant 设 False 或
+                #    加载失败 → 逐字回退旧行为（整案事实截断）。
+                _outline_facts_rows: list = []
+                _outline_dd_block = ""
+                _sublevel_facts_relevant = bool(getattr(
+                    settings, "outline_sublevel_facts_relevant", True))
+                if _sublevel_facts_relevant:
+                    try:
+                        _outline_facts_rows = await _load_facts_rows(db, scheme_id)
+                        _outline_facts_rows, _ = _rank_facts_by_basis(
+                            _outline_facts_rows, basis)
+                        if bool(getattr(settings, "content_data_dictionary", True)):
+                            from app.services.content_data_contract import (
+                                build_global_data_dictionary,
+                                render_data_dictionary_block,
+                            )
+                            _dd = build_global_data_dictionary(_outline_facts_rows)
+                            _outline_dd_block = render_data_dictionary_block(_dd) or ""
+                    except Exception:
+                        logger.warning(
+                            "子目录事实行加载失败（回退整案事实截断）", exc_info=True)
+                        _outline_facts_rows = []
+                        _outline_dd_block = ""
+
+                def _sublevel_facts_text(unit_idx: list) -> str:
+                    """子目录提示词的【项目关键事实】段（R77 按章相关性重排）。
+
+                    单元内多章（批处理）时按各章标题/描述的**并集**相关性
+                    重排，保证批内每一章的相关事实都有机会进入预算头部；
+                    任何失败都回退旧行为（整案事实截断），绝不因此阻断目录生成。
+                    """
+                    _fallback = (project_facts[:PROJECT_FACTS_LIMIT_SUBLEVEL]
+                                 if project_facts else "")
+                    if not (_outline_facts_rows and _sublevel_facts_relevant):
+                        return _fallback
+                    try:
+                        _leaf = {
+                            "title": " ".join(
+                                str(level1[i].get("title") or "") for i in unit_idx),
+                            "description": " ".join(
+                                str(level1[i].get("description") or "")
+                                for i in unit_idx),
+                        }
+                        return render_outline_chapter_facts(
+                            _outline_facts_rows, _leaf,
+                            max_total=PROJECT_FACTS_LIMIT_SUBLEVEL,
+                            dd_block=_outline_dd_block)[:PROJECT_FACTS_LIMIT_SUBLEVEL]
+                    except Exception:
+                        logger.warning(
+                            "子目录按章事实渲染失败（回退整案截断）", exc_info=True)
+                        return _fallback
+
                 yield await _set_phase("sublevels",
                                        f"一级目录生成完成（{len(level1)}章），正在生成二三级...",
                                        force=0.3)
@@ -3937,8 +4410,9 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                             other_outline=_join_tail_budget(other_titles, 1200),
                             prior_chapters=_join_tail_budget(prior_ctx, 1500) or "无",
                             requirements=requirements_text[:1500] or "无",
-                            project_facts=(project_facts[:PROJECT_FACTS_LIMIT_SUBLEVEL]
-                                            if project_facts else "")))
+                            # ✅ R77：按章相关性重排的事实（无关键词/关闭时
+                            #    与旧行为逐字等价：整案事实截断）。
+                            project_facts=_sublevel_facts_text([i])))
                     batch_prompt = None
                     if len(unit_idx) > 1:
                         chapters_text = "\n".join(
@@ -3960,8 +4434,9 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                                      if j not in unit_idx], 1200),
                                 prior_chapters=_join_tail_budget(prior_ctx, 1500) or "无",
                                 requirements=requirements_text[:1500] or "无",
-                                project_facts=(project_facts[:PROJECT_FACTS_LIMIT_SUBLEVEL]
-                                                if project_facts else ""),
+                                # ✅ R77：批内多章按并集相关性重排（见
+                                #    _sublevel_facts_text docstring）。
+                                project_facts=_sublevel_facts_text(unit_idx),
                                 chapters_text=chapters_text)}]
                     return single_prompts, batch_prompt
 
@@ -4409,6 +4884,11 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
         # 逐章在落库后累加，completed/stopped 终态一次性下发。
         _std_sum: dict = {"precise": 0, "fuzzy": 0, "issue_sections": 0,
                           "total_issues": 0, "errors": 0, "warnings": 0}
+        # ✅ R77b（2026-10-15）：事实冲突定点修复终态汇总。与 _std_sum 同处
+        #    初始化（闭包外层，早期失败路径可读）；无冲突章节不进汇总，
+        #    载荷与功能引入前同构（空汇总全 0）。累加经纯函数
+        #    accumulate_fact_autofix（单一计数口径，勿内联重复实现）。
+        _fa_sum: dict = empty_fact_autofix_summary()
         # ✅ 修复内存泄漏：事件直接 yield，不再 subscribe 未消费的队列
         # ✅ E1 修复（2026-09-25 · 顺序护栏）：进度更新器必须在 try 之前建立。
         #    `if not leaves:`（无待生成章节）是 try 内的早退分支，它要调用
@@ -4505,6 +4985,10 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 'failed_count': max(total - len(done_ids), 0),
                 'failed_sections': list(_failed_reasons.values())[:50],
                 'standard_summary': _std_sum,
+                # ✅ R77b：事实冲突定点修复汇总随 stopped 一并下发 —— 终态
+                #    三处拼装点（stopped / error / completed）字段完全一致
+                #    （R66/R74 同款纪律：用户中途停止也要看得到修复成效）。
+                'fact_autofix_summary': _fa_sum,
             }
 
         def _error_payload(message: str, *, include_sections: bool = True,
@@ -4528,6 +5012,7 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 'progress': _p, 'total': total,
                 'failed_count': max(total - len(done_ids), 0),
                 'standard_summary': _std_sum,
+                'fact_autofix_summary': _fa_sum,
             }
             if include_sections and _failed_reasons:
                 payload['failed_sections'] = list(_failed_reasons.values())[:50]
@@ -4772,6 +5257,12 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
             # 仅当 _selfcheck_on 时生效；关闭完整回退到引入前行为。
             _crosscheck_dup_on = bool(getattr(settings, "content_crosscheck_duplicate", True))
             _crosscheck_values_on = bool(getattr(settings, "content_crosscheck_values", True))  # ✅ R52：CON-01 跨章节数值一致性自检开关 —— 与 content_crosscheck_duplicate **互相独立**（关掉搬运检测不得连带关掉数值一致性自检），默认 True。
+            # ✅ R77（2026-10-14 · 引入易标「生成后事实冲突审计 + 定点替换」）：
+            #    standard_report 检出 error 级事实冲突后是否走「AI 定点编辑 +
+            #    唯一命中才替换」自动修复。默认开（仅在检出冲突的章节触发 AI
+            #    调用，无冲突章节零成本）；设 False 逐字回退引入前行为
+            #    （冲突只进 last_generation_report、不进修复链路）。
+            _fact_autofix_on = bool(getattr(settings, "content_fact_autofix_enabled", True))
             # ✅ P2 修复（2026-10-04 · O(N²) 性能）：跨章搬运检测的内存快照。
             #    正文生成过程中，库内 sections 表只会「增量增加已成功落库的章节」
             #    （章节 id 稳定，正文只在首次落库后不再变）。首次进入 _persist_section
@@ -5050,8 +5541,23 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 try:
                     content, _fence_fixes = auto_fix_unclosed_fences(content)
                     if _fence_fixes:
-                        logger.info("章节 %s 未闭合围栏自动补齐 %d 处",
-                                    section_id[:8], len(_fence_fixes))
+                        # ✅ R76（F4 可观测性）：「补齐 N 处」不能一概而论 —— 两步动作
+                        # 性质不同：normalize_close_length 只把闭合行标记补齐到开围栏
+                        # 长度（不增删行、正文一字不动）；append_close 是在文末追加闭合，
+                        # **救不回已被吞进块里的正文**。旧日志把两者都写成「补齐 N 处」，
+                        # 运维据此以为问题已解决。分动作计数，并在疑似吞正文时升级为
+                        # WARNING 提示人工核对。
+                        _n_norm = sum(1 for f in _fence_fixes if f.get("action") == "normalize_close_length")
+                        _n_append = sum(1 for f in _fence_fixes if f.get("action") == "append_close")
+                        _swallowed = sum(int(f.get("swallowed_prose") or 0) for f in _fence_fixes)
+                        logger.info(
+                            "章节 %s 围栏缺陷自动归一：闭合标记长度补齐 %d 处、文末追加闭合 %d 处",
+                            section_id[:8], _n_norm, _n_append)
+                        if _swallowed:
+                            logger.warning(
+                                "章节 %s 追加闭合前有 %d 行疑似正文困在围栏块内（补齐只能让块"
+                                "合法结束，救不回内容），请人工核对该章导出成稿",
+                                section_id[:8], _swallowed)
                 except Exception as e:
                     logger.warning("章节 %s 未闭合围栏修复失败（使用原文）: %s",
                                    section_id[:8], e, exc_info=True)
@@ -5185,6 +5691,67 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                        section_id[:8], exc_info=True)
                         report = {}
                         report_json = ""
+
+                # ✅ R77（2026-10-14 · 引入易标「生成后事实冲突审计 + 定点替换」）：
+                #    standard_report 检出的 error 级事实冲突（正文数值/型号与本章
+                #    事实矛盾）引入前只写报告、不进修复链路 —— 用户要到审核/预检或
+                #    全文一致性 Agent（需先扫描+仲裁+人工确认）才能处理。现接入
+                #    「AI 定点编辑 + 唯一命中才替换 + 失败回灌重试（上限 2 次）」：
+                #    · 只在**检出冲突**时触发 AI 调用（无冲突章节零成本）；
+                #    · old_text 不唯一/找不到一律拒绝，绝不猜；
+                #    · AI 可返回空 edits（判定并非真实冲突时宁可不改）；
+                #    · 修复后**重算** standard_report（纯函数、零 AI），使
+                #      error_count / issues 口径与落库正文一致，checkpoint_fixes
+                #      留痕按同族做法带进新报告；结果写报告新键 fact_autofix；
+                #    · 任何异常 fail-soft，绝不阻断正文落库。
+                #    开关 content_fact_autofix_enabled 设 False 逐字回退引入前。
+                if _fact_autofix_on and fact_rows_for_section:
+                    try:
+                        _fa_conflicts = select_fact_conflicts(report)
+                        if _fa_conflicts:
+                            content, _fa_res = await autofix_section_fact_conflicts(
+                                content=content,
+                                standard=std_for_report,
+                                fact_rows=fact_rows_for_section or [],
+                                conflicts=_fa_conflicts,
+                                section_id=section_id,
+                                section_title=section_title)
+                            if _fa_res.get("attempted"):
+                                report = dict(report or {})
+                                report["fact_autofix"] = _fa_res
+                            if _fa_res.get("applied"):
+                                # 修复生效：重算标准校验报告 + 字数口径，
+                                # 保证报告 / SSE 载荷 / 落库正文三处一致。
+                                report = standard_report(
+                                    content, std_for_report,
+                                    fact_rows_for_section or [],
+                                    section_id=section_id,
+                                    section_title=section_title)
+                                if _ck_fix_actions:
+                                    report["checkpoint_fixes"] = _ck_fix_actions
+                                report["fact_autofix"] = _fa_res
+                                report_json = json.dumps(report, ensure_ascii=False)
+                                wc = text_word_count(content)
+                                ws = word_status_for(wc, word_budget)
+                                logger.info(
+                                    "章节 %s 事实冲突定点修复 %d 处"
+                                    "（冲突 %d 条，尝试 %d 次）",
+                                    section_id[:8], _fa_res["applied"],
+                                    _fa_res.get("conflicts") or 0,
+                                    _fa_res.get("attempts") or 0)
+                            elif _fa_res.get("attempted"):
+                                # 尝试过但未能修复（AI 判定无冲突 / 定位失败）：
+                                # 透明留痕，转人工核对（对齐 R71「失败不静默」）。
+                                report_json = json.dumps(report, ensure_ascii=False)
+                                logger.info(
+                                    "章节 %s 事实冲突未能自动修复（冲突 %d 条，"
+                                    "拒绝 %d 条），留待人工核对",
+                                    section_id[:8], _fa_res.get("conflicts") or 0,
+                                    len(_fa_res.get("rejected") or []))
+                    except Exception:
+                        logger.warning(
+                            "章节 %s 事实冲突定点修复失败（不影响正文落库）",
+                            section_id[:8], exc_info=True)
 
                 # ✅ 2026-10-11（引入《文档生成规则分析与软件标准建立》正文生成标准 2.1）：
                 #    段落长度 / 日期写法 / 工期单位口径的**咨询性**校验。加法式落地：
@@ -5737,6 +6304,9 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 #    LLM 调用 —— 缺省路径与本项引入前逐字一致。本步刻意只给建议、不硬
                 #    限制模型可用素材范围，回避 R57 论证的「预编排=陈旧结论陷阱」风险。
                 _plan_json = ""
+                # ⚠️ R74（G3）：引导语变量必须在 try 之外初始化 —— 旧实现只在
+                #    try 内赋值，编排中途抛异常时下方 else 分支引用会 NameError。
+                _plan_guidance = ""
                 if _plan_enabled and bool(getattr(settings, "content_plan_stage_enabled", False)):
                     try:
                         _k_pool = [str(r.get("name") or "") for r in knowledge_rows]
@@ -5766,9 +6336,10 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         )
                         _plan_json = _plan.to_json()
                         _plan_guidance = render_content_plan_guidance(_plan)
-                        if _plan_guidance:
-                            _chapter_extras = (_chapter_extras + "\n" + _plan_guidance) \
-                                if _chapter_extras else _plan_guidance
+                        if _plan_guidance and _chapter_extras:
+                            _chapter_extras = _chapter_extras + "\n" + _plan_guidance
+                        elif _plan_guidance:
+                            _chapter_extras = _plan_guidance
                     except Exception:  # noqa: BLE001 - 编排失败绝不阻断正文生成
                         logger.warning(
                             "章节 %s 离散编排阶段失败（回退为无编排）",
@@ -5813,6 +6384,12 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         eff_standard=eff_standard,
                         knowledge_text=knowledge_text,
                     )
+                    # ✅ R74（G3 修复）：stable-prefix 关闭时 _chapter_extras 不会
+                    #    被任何分支消费，编排引导语此前在这条链路**静默丢弃**
+                    #    （D1 开启但分层前缀关闭的组合下，正文模型永远看不到建议）。
+                    #    现直接拼到 user_content 末尾，两种配置下引导语都必达。
+                    if _plan_guidance:
+                        user_content = user_content + "\n\n" + _plan_guidance
                     messages = [{"role": "system", "content": sys_prompt},
                                 {"role": "user", "content": user_content}]
                 _sec_facts = _filter_facts_rows(facts_rows, leaf)
@@ -6320,6 +6897,9 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         _std_sum["errors"] += _se
                         _std_sum["warnings"] += _sw
                         _std_sum["total_issues"] += _se + _sw
+                        # ✅ R77b：事实冲突定点修复累加（纯函数单一计数口径；
+                        #    _std_rep 是落库后同一份报告，fact_autofix 键随附）。
+                        _fa_sum = accumulate_fact_autofix(_fa_sum, _std_rep)
 
                         # ✅ 续写失败信号收口：判定统一走纯函数
                         #    _continue_failed_flag（与 WORD_UNDER_RATIO 同口径）——
@@ -6967,6 +7547,11 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 completed_payload['consistency_summary'] = consistency_summary
             # F-CONTENT-STANDARD(2026-09-26 · B2): 生成标准校验汇总下发
             completed_payload['standard_summary'] = _std_sum
+            # ✅ R77b（2026-10-15）：事实冲突定点修复终态汇总。与
+            #    standard_summary 同处拼装；无冲突时全 0（前端据此不显示，
+            #    不产生"一切正常"式噪音）。stopped / error 两条终态路径
+            #    由各自拼装点同键下发，三处字段完全一致。
+            completed_payload['fact_autofix_summary'] = _fa_sum
             # ✅ R66（2026-10-11）字数可追溯：逐章目标/实际/偏差明细 + 达标统计。
             #    与 _content_ckpt_payload 里的同名键同构（审核预检两处都可读）。
             try:

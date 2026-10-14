@@ -302,6 +302,98 @@ def _ensure_user_message(messages: list, nudge: str = JSON_USER_NUDGE) -> list:
     return [*messages, {"role": "user", "content": nudge}]
 
 
+async def _call_chat_fn(chat_fn, messages: list, **kwargs) -> str:
+    """调用注入式 ``chat_fn``，兼容「只认 messages」的最小签名实现。
+
+    ✅ R57（2026-10-09）：此前统一修复通道 **只能通过 provider_factory 的降级链
+    调用**（``collect_json_response`` 内部硬写 ``chat_with_fallback``），于是凡是
+    需要**注入** chat 实现的地方，就被迫自己再写一份「解析 + 无修复」的劣化版
+    （典型：``consistency_edits.collect_repair_edits`` —— 一次机会，JSON 坏
+    就直接回落到整章重写，丢掉「最小必要修改」的全部收益，与《标书智能体（五）》
+    §四「失败后不是重新问，而是定向修复」相悖）。
+
+    逐层降级：完整 kwargs → 仅 messages。
+    ⚠️ 与 :func:`_provider_chat_safe` 同策略（本仓既有约定）：只对 ``TypeError``
+    降级一次，不无限吞异常。
+    """
+    for trial in (kwargs, {}):
+        try:
+            return await chat_fn(messages, **trial)
+        except TypeError:
+            if trial == {}:
+                raise
+    raise TypeError("chat_fn 签名不兼容")
+
+
+async def collect_json_response_with_chat(chat_fn, messages: list,
+                                          validate_fn=None,
+                                          max_retries: int = MAX_REPAIR_RETRIES,
+                                          *,
+                                          temperature: float | None = None,
+                                          json_mode: bool = False,
+                                          timeout: int | None = None,
+                                          repair_key: str = GENERIC_REPAIR_KEY,
+                                          scene: str = "",
+                                          max_tokens: int | None = None):
+    """统一 JSON 收集**编排本体**：生成 → 解析 → 校验 → 定向修复 → 有界重试。
+
+    ✅ R57（2026-10-09）：从 :func:`collect_json_response` 中抽出，使「AI 调用来源」
+    成为可注入参数 —— ``consistency_edits`` 等需要注入 chat 实现的调用方由此复用
+    完整修复链路，而不是各自再写一份「解析即弃」的劣化版（多副本反模式）。
+
+    Args:
+        chat_fn: 与 ``chat_with_fallback`` 同签名的异步可调用对象
+            （``(messages, *, temperature=None, json_mode=False, timeout=None,
+            scene="", max_tokens=None) -> str``）。
+        其余参数、语义、返回值与 :func:`collect_json_response` 完全一致。
+    """
+    messages = _ensure_user_message(messages)
+    try:
+        raw = await _call_chat_fn(chat_fn, messages, temperature=temperature,
+                                  json_mode=json_mode, timeout=timeout,
+                                  scene=scene, max_tokens=max_tokens)
+    except Exception:
+        # ✅ R48（2026-10-06 · 运行时指标）：首轮 AI 调用失败/降级 → 记一次场景失败。
+        #    观测指标，不改变「原样 re-raise」的抛错语义。
+        record_ai_failure(scene)
+        raise
+    # 修复目标恒定为模型**最初**的输出（见 collect_json_response docstring 修复点 1）
+    first_raw = raw
+    obj, issues = parse_and_validate(raw, validate_fn)
+    if obj is not None and not issues:
+        return obj, raw
+
+    # ✅ R48（2026-10-06 · 运行时指标）：首轮输出未过校验、进入修复循环 →
+    #    按 repair_key 维度记一次修复触发。
+    record_repair_triggered(repair_key)
+    repair_errors: list[str] = []
+    for attempt in range(max_retries):
+        repair_msgs = list(messages) + [
+            {"role": "assistant", "content": raw or ""},
+            {"role": "user", "content": _build_repair_user_prompt(
+                issues, first_raw or "", repair_key)},
+        ]
+        try:
+            raw = await _call_chat_fn(chat_fn, repair_msgs, temperature=temperature,
+                                      json_mode=json_mode, timeout=timeout,
+                                      scene=scene, max_tokens=max_tokens)
+        except Exception as e:  # noqa: BLE001
+            # 瞬时故障不应丢弃首轮已产出的内容：记录后继续下一轮修复预算
+            repair_errors.append("第%d次修复调用异常: %s" % (attempt + 1, e))
+            logger.warning("JSON 修复第 %d 次调用异常（继续使用剩余修复预算）：%s",
+                           attempt + 1, e)
+            continue
+        obj, issues = parse_and_validate(raw, validate_fn)
+        if obj is not None and not issues:
+            return obj, raw
+        logger.warning("JSON 修复第 %d 次仍未通过：%s", attempt + 1, issues[:3])
+
+    if repair_errors:
+        raise ValueError("JSON 生成/修复失败：%s；修复轮异常：%s"
+                         % (issues[:5], " | ".join(repair_errors)))
+    raise ValueError(f"JSON 生成/修复失败：{issues[:5]}")
+
+
 async def collect_json_response(messages: list, validate_fn=None,
                                 max_retries: int = MAX_REPAIR_RETRIES,
                                 *, temperature: float | None = None,
@@ -337,52 +429,18 @@ async def collect_json_response(messages: list, validate_fn=None,
        未过时，修复轮的瞬时网络/限流故障不再把整次调用炸掉（首轮调用仍照旧
        向上抛，由调用方决定是否整体重来）；
     3. 修复轮失败信息并入最终异常文本，避免「修复失败」与「生成失败」混淆。
+
+    ✅ R57（2026-10-09）：函数体整体下沉为 :func:`collect_json_response_with_chat`
+    —— 本函数只剩「把 provider 降级链作为 chat_fn 注入」这一件事，行为逐字不变，
+    但同一链路从此可被其它调用方（含需要注入 chat 实现的测试/服务）复用。
     """
-    messages = _ensure_user_message(messages)
-    try:
-        raw = await chat_with_fallback(messages, temperature=temperature,
-                                       json_mode=json_mode, timeout=timeout,
-                                       scene=scene, max_tokens=max_tokens)
-    except Exception:
-        # ✅ R48（2026-10-06 · 运行时指标）：首轮 AI 调用失败/降级 → 记一次场景失败。
-        #    观测指标，不改变「原样 re-raise」的抛错语义。
-        record_ai_failure(scene)
-        raise
-    # 修复目标恒定为模型**最初**的输出（见 docstring 修复点 1）
-    first_raw = raw
-    obj, issues = parse_and_validate(raw, validate_fn)
-    if obj is not None and not issues:
-        return obj, raw
+    async def _chat(_msgs: list, **kwargs) -> str:
+        return await chat_with_fallback(_msgs, **kwargs)
 
-    # ✅ R48（2026-10-06 · 运行时指标）：首轮输出未过校验、进入修复循环 →
-    #    按 repair_key 维度记一次修复触发。
-    record_repair_triggered(repair_key)
-    repair_errors: list[str] = []
-    for attempt in range(max_retries):
-        repair_msgs = list(messages) + [
-            {"role": "assistant", "content": raw or ""},
-            {"role": "user", "content": _build_repair_user_prompt(
-                issues, first_raw or "", repair_key)},
-        ]
-        try:
-            raw = await chat_with_fallback(repair_msgs, temperature=temperature,
-                                           json_mode=json_mode, timeout=timeout,
-                                           scene=scene, max_tokens=max_tokens)
-        except Exception as e:  # noqa: BLE001
-            # 瞬时故障不应丢弃首轮已产出的内容：记录后继续下一轮修复预算
-            repair_errors.append("第%d次修复调用异常: %s" % (attempt + 1, e))
-            logger.warning("JSON 修复第 %d 次调用异常（继续使用剩余修复预算）：%s",
-                           attempt + 1, e)
-            continue
-        obj, issues = parse_and_validate(raw, validate_fn)
-        if obj is not None and not issues:
-            return obj, raw
-        logger.warning("JSON 修复第 %d 次仍未通过：%s", attempt + 1, issues[:3])
-
-    if repair_errors:
-        raise ValueError("JSON 生成/修复失败：%s；修复轮异常：%s"
-                         % (issues[:5], " | ".join(repair_errors)))
-    raise ValueError(f"JSON 生成/修复失败：{issues[:5]}")
+    return await collect_json_response_with_chat(
+        _chat, messages, validate_fn, max_retries,
+        temperature=temperature, json_mode=json_mode, timeout=timeout,
+        repair_key=repair_key, scene=scene, max_tokens=max_tokens)
 
 
 async def _provider_chat_safe(provider, messages: list, temperature: float = 0.7,

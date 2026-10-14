@@ -1,7 +1,7 @@
 """Pydantic 数据模型"""
 from typing import List, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 #: ✅ 2026-09-26（F-CONTENT-STANDARD）：正文生成标准合法值域
 #: precise=精准内容（强制逐项引用全局事实、禁模糊表述）；fuzzy=模糊内容（方向参考、允许范围表述）。
@@ -71,7 +71,10 @@ class SectionCreate(BaseModel):
     parent_id: str = ""
     level: int = 1
     sort_order: int = 0
-    word_budget: int = 1500
+    # ✅ R66（2026-10-11）：默认字数预算 1500 → 1200（四档之"标准"档，
+    #    与 content_utils.DEFAULT_WORD_BUDGET 同值；刻意不 import services，
+    #    避免 models→services 的提示词缓存循环导入，同值由护栏测试锁死）。
+    word_budget: int = 1200
 
 
 class SectionUpdate(BaseModel):
@@ -151,6 +154,60 @@ class FactGroupUpdate(BaseModel):
     category: Optional[str] = None
     # 单条事实级别更新
     item_updates: Optional[list[dict]] = None
+
+
+# ---------- 全局事实 · 请求体（Item 2 契约改造试点） ----------
+#: ✅ 2026-10-11：将原本裸 ``data: dict`` 收 body 的端点逐步迁移到 Pydantic 模型
+#:    （契约变更，需连同前端 factsApi 错误展示一起做；本处先试点两个最安全的端点）。
+#:    ``extra="allow"`` 保证历史/前端多传的字段不被 422 拒绝，向后兼容；
+#:    字段默认空串，缺少可选字段亦不报错（400 仍由各端点体内显式判定）。
+class DangerCheckRequest(BaseModel):
+    """POST /api/v1/global-facts/danger-check 请求体（只读诊断，不落库）。
+
+    与既有 ``factsApi.dangerCheck({}, schemeId)`` 逐字兼容：body 可为空对象。
+    """
+    model_config = ConfigDict(extra="allow")
+    scheme_name: str = ""
+    extra_text: str = ""
+
+
+class ClearFactsRequest(BaseModel):
+    """POST /api/v1/global-facts/clear 请求体（作用域级清空）。"""
+    model_config = ConfigDict(extra="allow")
+    scheme_id: str = ""
+
+
+class AckStaleRequest(BaseModel):
+    """POST /api/v1/global-facts/ack-stale 请求体（批量解除过期标记）。"""
+    model_config = ConfigDict(extra="allow")
+    #: ✅ 用裸 list 而非 list[str]：历史调用会在 fact_ids 里塞 None / 空串，
+    #:    由端点体内逐条 str(f).strip() 过滤，保持旧行为（含测试中的 [None] 用例）。
+    fact_ids: list = Field(default_factory=list)
+    scheme_id: str = ""
+
+
+class ResolveConflictRequest(BaseModel):
+    """PATCH /api/v1/global-facts/{fact_id}/resolve-conflict 请求体（裁决矛盾取值）。"""
+    model_config = ConfigDict(extra="allow")
+    value: str = ""
+
+
+class BatchResolveRequest(BaseModel):
+    """POST /api/v1/global-facts/batch-resolve 请求体（批量确认事实）。"""
+    model_config = ConfigDict(extra="allow")
+    #: ✅ 同 AckStaleRequest：保留旧 lenient 行为（fact_ids 可含 None / 空串）。
+    fact_ids: list = Field(default_factory=list)
+    scheme_id: str = ""
+
+
+class AdjustRequest(BaseModel):
+    """POST /api/v1/global-facts/adjust 请求体（AI 自然语言调整）。"""
+    model_config = ConfigDict(extra="allow")
+    instruction: str = ""
+    scheme_id: str = ""
+    project_id: str = ""
+    apply: bool = False
+    operations: Optional[list] = None
 
 
 # ---------- AI 配置 ----------

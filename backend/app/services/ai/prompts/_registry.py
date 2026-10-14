@@ -567,6 +567,16 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
         # ✅ 2026-10-02：续写轮同样携带检查点硬约束（与首轮同一实现）。
         "content_checkpoint_block",
     ],
+    # ✅ R77（2026-10-14 · 引入易标「生成后事实冲突审计 + 定点替换」）：
+    #    content_fact_autofix_user ← services/content_fact_autofix
+    #    .autofix_section_fact_conflicts（唯一渲染点，5/5 全传）。
+    #    system 模板零占位符 → 显式空声明（R39 D6：空列表 ≠ None，
+    #    零占位模板也必须纳入契约表，否则被覆盖率测试判为脱管）。
+    "content_fact_autofix_system": [],
+    "content_fact_autofix_user": [
+        "global_facts", "section_id", "section_title",
+        "generation_standard", "conflicts",
+    ],
     "outline_short_system": [
         "scheme_name", "scheme_type", "construction_scope", "project_facts",
         # ✅ 2026-09-26（目录生成三项依据收敛）：{scheme_basis} = 方案名称
@@ -595,6 +605,12 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     "outline_patch_system": [
         "scheme_name", "scheme_type", "project_brief",
         "project_facts", "chapter_titles", "missing_items",
+    ],
+    # R73（2026-10-12）：占位标题外科式重写。已核对唯一渲染点
+    #   · outline_title_fix_system ← sse_handlers._try_outline_title_fix（5/5 全传）
+    "outline_title_fix_system": [
+        "scheme_name", "scheme_type", "project_brief",
+        "project_facts", "broken_items",
     ],
     "outline_feedback_system": [
         "scheme_name", "scheme_type", "project_brief",
@@ -652,6 +668,15 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
         "scheme_type", "section_title", "target_words",
     ],
     "word_budget_allocate_system": ["units_json"],
+    # ✅ D1（2026-10-11 · 离散正文编排）：两个新增提示词同步登记契约 ——
+    #    system 零占位（显式空声明）、user 的 11 个占位符逐字照抄渲染口径。
+    "content_plan_system": [],
+    "content_plan_user": [
+        "fact_titles_text", "knowledge_names_text", "parent_chain",
+        "project_brief", "scheme_name", "scheme_type",
+        "section_description", "section_number", "section_title",
+        "sibling_lines", "word_budget",
+    ],
     # --- 一致性 Agent 域 ---
     "consistency_scan_user": [
         "design_docs_summary", "global_facts", "project_docs_summary",

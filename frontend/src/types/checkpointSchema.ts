@@ -22,6 +22,7 @@ export interface content_result {
   word_count?: number;
   run_words?: number;
   over_count?: number;
+  word_audit?: Record<string, unknown>;
 }
 
 export interface TaskTerminalInfo {

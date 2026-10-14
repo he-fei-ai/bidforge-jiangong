@@ -21,6 +21,7 @@ from app.db import get_read_conn, release_read_conn
 from app.services import activity_broadcaster as _ab
 from app.services.ai import task_registry as _tr
 from app.services.ai.provider_factory import get_ai_live_stats
+from app.routers import global_facts as _gf  # 上传配额运行时权威（R73 续作 · G5 收敛）
 
 logger = logging.getLogger("system")
 
@@ -311,21 +312,14 @@ async def activity_stream(request: Request, limit: int = 8):
     )
 
 
-# 上传配额内置默认（与消费侧 global_facts 的回落值一致；settings 非法时兜底）。
-_UPLOAD_LIMIT_DEFAULTS: dict[str, int] = {
-    "max_upload_bytes": 30 * 1024 * 1024,
-    "max_files_per_request": 20,
-    "max_total_bytes": 200 * 1024 * 1024,
-}
-
-
-def _positive_setting(name: str, default: int) -> int:
-    """读取正整数 settings 字段；缺失/非法/非正数时回落默认（0 不能当作放行）。"""
-    try:
-        n = int(getattr(settings, name, default))
-    except (TypeError, ValueError):
-        return default
-    return n if n > 0 else default
+# ✅ R73 续作 · G5（2026-10-12）：上传配额「第三份字面量副本」已收敛。
+#    此前本模块自带 ``_UPLOAD_LIMIT_DEFAULTS`` + ``_positive_setting`` 读取器，
+#    与 ``global_facts.MAX_UPLOAD_*``（上传路径真正消费的运行时权威）各自读
+#    settings —— 一旦 monkeypatch ``setattr(gf, "MAX_UPLOAD_BYTES", N)``，上传
+#    路径按 N 执行而本端点仍下发旧值，**前端拿到的上限与后端实际执行的上限
+#    不一致**（本仓 R73/G2 同族「同一判据两份取值」的第三处残留）。
+#    现直接读 ``_gf.MAX_UPLOAD_*``：单一事实源，monkeypatch 对两侧同时生效；
+#    非正数配置的回落由 ``global_facts._positive_int_setting`` 统一兜底。
 
 
 @router.get("/upload-limits")
@@ -337,17 +331,14 @@ async def upload_limits():
       - max_files_per_request：单次请求文件数上限
       - max_total_bytes：单次请求累计体积上限（字节）
 
-    此前前后端各硬编码一份 30MB，改后端配置后前端仍按旧值拦截（漂移）。
-    现统一由本端点下发；值在请求时实时读取 settings（.env / 运行时注入），
-    非法（非正数）配置回落到内置安全默认，不会因误配而关闭守卫。
+    值取自 ``global_facts.MAX_UPLOAD_*``（运行时权威，由 ``settings.upload_*``
+    派生、可被 monkeypatch 覆盖）—— 与上传路径 ``upload_documents`` 消费的是
+    **同一对象**，前端拿到的上限与后端实际执行的上限恒一致。
     """
     return {
-        "max_upload_bytes": _positive_setting(
-            "upload_max_bytes", _UPLOAD_LIMIT_DEFAULTS["max_upload_bytes"]),
-        "max_files_per_request": _positive_setting(
-            "upload_max_files_per_request", _UPLOAD_LIMIT_DEFAULTS["max_files_per_request"]),
-        "max_total_bytes": _positive_setting(
-            "upload_max_total_bytes", _UPLOAD_LIMIT_DEFAULTS["max_total_bytes"]),
+        "max_upload_bytes": _gf.MAX_UPLOAD_BYTES,
+        "max_files_per_request": _gf.MAX_UPLOAD_FILES_PER_REQUEST,
+        "max_total_bytes": _gf.MAX_UPLOAD_TOTAL_BYTES,
     }
 
 

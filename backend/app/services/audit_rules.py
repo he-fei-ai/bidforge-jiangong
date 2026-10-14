@@ -56,7 +56,10 @@ from dataclasses import dataclass
 # ---------------------------------------------------------------------------
 # 规则集版本：规则增删改后 +1（前端据此提示"规则已更新，建议重新预检"）
 # ---------------------------------------------------------------------------
-RULE_VERSION = "1.9.0"  # 2026-10-03：注册 CON-07（一致性扫描跨章数值冲突）并为
+RULE_VERSION = "1.10.0"  # 2026-10-11：新增 DLV-16 三级目录字数偏差可控（R66，
+                         #             preflight_engine.check_deliverability 聚合产出；
+                         #             容差带口径与生成侧共用 word_deviation_of）
+# 2026-10-03：1.9.0 —— 注册 CON-07（一致性扫描跨章数值冲突）并为
                         #             族前缀编号 CON-SCAN-<n> 建别名回退——此前该串在
                         #             注册表查不到（剥离末位数字后剩 "CON-SCAN" 无此键），
                         #             「规则说明」反查与 capability 归一均落空
@@ -448,6 +451,14 @@ _DELIVERABILITY_RULES: tuple[AuditRule, ...] = (
               "存在未确认、模拟值、多来源冲突或来源资料已变化的全局事实时，"
               "这些事实不会进入正文/导出，继续交付会造成关键参数缺失或使用过期值",
               "high", CHECK_MODE_PROGRAM, "建办质〔2021〕48号 + 平台全局事实安全门控"),
+    # ✅ R66（2026-10-11）：三级目录字数偏差可控。由 preflight_engine.check_deliverability
+    # 聚合成 1 条产出（问题数不随偏离章节数膨胀），判定口径与生成侧共用
+    # content_utils.word_deviation_of + settings.word_budget_tolerance，不另立标准。
+    AuditRule("DLV-16", "deliverability", "三级目录字数偏差可控",
+              "已设字数预算的叶子章节（三级目录）正文应落在目标 ±容差带内"
+              "（默认 ±10%，即提示词承诺的 0.9X~1.1X），且不低于 300 字下限；"
+              "系统性超纲意味着字数控制失效或模型未遵循目标字数",
+              "medium", CHECK_MODE_PROGRAM, "《产品需求文档》§3.10 字数管理（四档控制）"),
 )
 
 
@@ -566,7 +577,7 @@ _PROGRAM_EMITTED_RULE_IDS: frozenset[str] = frozenset({
     "CON-01", "CON-05", "CON-06",
     "TRC-01", "TRC-03",
     "DLV-01", "DLV-02", "DLV-03", "DLV-04", "DLV-05", "DLV-06", "DLV-07",
-    "DLV-08",
+    "DLV-08", "DLV-16",
 })
 
 

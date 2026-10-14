@@ -239,6 +239,17 @@ class TestLogAuditObservability:
         """统计更新抛错时，审计行仍必须入缓冲（修复前两者被同一个 pass 吞掉）。"""
         monkeypatch.setattr(pf, "_reliability_key",
                             _raise("统计键计算失败"))
+        # ✅ 2026-10-11：全量会话里本用例会随机失败（真实观测：全量时报
+        #    `assert 0 == 0+1`；单独跑该文件、跑 provider/audit 簇均绿）。
+        #    成因是本断言依赖**进程级全局且随时间变化**的量：`_log_audit` 追加后
+        #    一旦 `buf_len >= _AUDIT_BATCH_SIZE` 或距上次 flush 已超
+        #    `_AUDIT_FLUSH_INTERVAL(10s)`，就会**当场把缓冲刷掉**
+        #    （provider_factory.py:1874-1877），`before+1` 于是变成 0。
+        #    全量跑 9 分钟，什么时候出现「>10s 无人 flush」取决于排在前面的用例
+        #    耗时 ⇒ 与被测逻辑无关，属**测试隔离缺陷**而非产品缺陷。
+        #    这里把计时推到未来（与 test_perf_bottlenecks.py:490「避免整会话时长
+        #    误触发 flush」同手法），使断言不再受跑测耗时影响。
+        monkeypatch.setitem(pf._audit_last_flush, "ts", 1e18)
         before = len(pf._audit_buffer)
         with caplog.at_level(logging.WARNING, logger="provider_factory"):
             await pf._log_audit("prov", "model", "chat", 1.0, True, scene="content_draft")

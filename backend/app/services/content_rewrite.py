@@ -28,6 +28,8 @@ from __future__ import annotations
 import html as _html
 import re
 
+from app.services import fence_common as _fence_common
+
 # ---------------------------------------------------------------------------
 # 代码围栏切分：改写只作用于围栏外的正文，保护 ```mermaid / ```chart-json /
 # ```python 等代码块内容不被破坏（否则英文替换会改坏 JSON 键名、导致渲染失败）。
@@ -43,48 +45,36 @@ import re
 #     被 collapse_duplicate_blocks 折叠删除，破坏 Mermaid 语义或触发渲染失败。
 # 现改为逐行状态机、同时识别 ``` 与 ~~~（口径与 content_blocks.parse_fence_line
 # / content_utils._FENCE_LINE_RE 一致），两种围栏统一受保护。
-_FENCE_LINE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})([^`~\n]*)$")
+# ✅ R76（2026-10-13）状态机下沉唯一事实源：本模块曾自带一份与
+#   fence_common.FENCE_LINE_RE **逐字相同**的正则 + 自己的闭合判定（同种字符即闭合、
+#   **不看信息串**）。后果与图表侧 BUG-F2 同族：块内 ```` ```python ```` 这类带标签行
+#   被当成收尾，其后的正文滑出围栏侧 → 被 fix_english_leak / collapse_duplicate_blocks
+#   改写（图表代码没被保护、正文却丢了保护，两头都错）。现直接复用
+#   fence_common.iter_all_blocks，「这块围栏到哪结束」全仓只剩一处实现。
 
 
 def _split_fences(text: str) -> list[tuple[bool, str]]:
     """把文本切成 (是否在代码围栏内, 片段) 序列，围栏分隔行本身归入围栏侧。
 
-    识别两种围栏：反引号（``` / ```` …）与波浪线（~~~ / ~~~~ …），语义与
-    ``content_blocks.parse_fence_line`` 一致（**宽松**：同种字符即可视为闭合，
-    不要求长度 ≥ 开围栏）。未闭合的围栏到文末视为仍在围栏内。
+    识别两种围栏：反引号（``` / ```` …）与波浪线（~~~ / ~~~~ …），闭合判据 =
+    ``fence_common.is_fence_close(tolerant_length=True)``（同种字符 + **信息串必须为空**
+    + 长度容错），与图表登记/改写/导出三侧同一实现。未闭合的围栏到文末视为仍在围栏内。
     """
     lines = text.split("\n")
-    segs: list[tuple[bool, list[str]]] = []
-    buf: list[str] = []
-    in_fence = False
-    fence_char: str = ""
-    for ln in lines:
-        m = _FENCE_LINE_RE.match(ln)
-        if m is not None:
-            mark_char = m.group(1)[0]
-            if not in_fence:
-                # 开围栏：先落笔围栏外片段
-                if buf:
-                    segs.append((False, buf))
-                    buf = []
-                in_fence = True
-                fence_char = mark_char
-                buf.append(ln)
-            elif mark_char == fence_char:
-                # 闭合围栏（同种字符即可，宽松）
-                buf.append(ln)
-                segs.append((True, buf))
-                buf = []
-                in_fence = False
-                fence_char = ""
-            else:
-                # 跨字符种类的围栏（``` 未闭合时出现 ~~~）→ 视为代码内容
-                buf.append(ln)
-            continue
-        buf.append(ln)
-    if buf:
-        segs.append((in_fence, buf))
-    return [(is_fence, "\n".join(ls)) for is_fence, ls in segs]
+    segs: list[tuple[bool, str]] = []
+    cursor = 0
+    for b in _fence_common.iter_all_blocks(text):
+        open_line, close_line = b["open_line"], b["close_line"]
+        end = close_line if close_line >= 0 else len(lines) - 1
+        if open_line > cursor:
+            segs.append((False, "\n".join(lines[cursor:open_line])))
+        segs.append((True, "\n".join(lines[open_line:end + 1])))
+        cursor = end + 1
+    if cursor < len(lines):
+        segs.append((False, "\n".join(lines[cursor:])))
+    if not segs:
+        segs.append((False, text))
+    return segs
 
 
 def _apply_outside_fences(text: str, fn) -> tuple[str, int]:

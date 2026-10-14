@@ -5,6 +5,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import os
 import re
 import socket
 import threading
@@ -41,6 +42,7 @@ from app.services.chart_validators import (
 
 # ✅ 《待补充清单》（2026-09-24，治 F 层人工补录兜底）：逐条扫描章节正文中的
 #    占位符（规范字段占位 / 裸标记 / 模糊 ××），按字段与章节聚合，支持前端跳转定位。
+from app.services.facts_extractor import FACT_SCOPE_PREDICATE, resolve_scheme_project_id
 from app.services.placeholder_inventory import (
     DEFAULT_OCCURRENCE_CAP,
     build_placeholder_report,
@@ -1102,13 +1104,11 @@ async def collect_export_issues(scheme_id: str, db) -> dict:
     # ✅ P0-2：bid_analysis_items 必选项完整性检查
     #    目录生成 / 正文生成都消费 bid_analysis 结构化提取结果作为 project_brief，
     #    如果 17 个必选项中有大量失败，导出的文档可能信息不全。
-    cur = await db.execute(
-        "SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
-    scheme_row = await _db_fetch_one(
-        cur, what="collect_export_issues:schemes.project_id")
+    # ✅ 收敛：委托 facts_extractor.resolve_scheme_project_id（服务层单一出口），
+    #    不再内联 SQL（R54/R68 跨模块 scheme→project 反查收口）。
+    ba_pid = await resolve_scheme_project_id(db, scheme_id)
     _ba_summary = None
-    if scheme_row and scheme_row["project_id"]:
-        ba_pid = scheme_row["project_id"]
+    if ba_pid:
         cur2 = await db.execute(
             "SELECT item_id, label, status, required FROM bid_analysis_items "
             "WHERE project_id=? AND COALESCE(required,0)=1",
@@ -1146,7 +1146,21 @@ async def collect_export_issues(scheme_id: str, db) -> dict:
                       "conflicted": 0, "stale": 0, "blocked": 0}
     _facts_status = {"ok": True, "code": "not_checked"}
     try:
-        if scheme_row and scheme_row["project_id"]:
+        # ✅ BUG 修复（2026-10-11 · 跨模块数据链 R70 · 全局事实交付门控 100% 空转）：
+        #    此处原引用 ``scheme_row`` —— 该名字在本文件/本函数内**从未赋值**
+        #    （ruff F821 已报 ``export.py:1148/1159 Undefined name 'scheme_row'``），
+        #    运行期必然抛 ``NameError``，随即被本 try 的 except 吞成一条 WARNING，
+        #    ``_facts_summary`` 保持全 0、`_facts_status`` 保持 ``not_checked``。
+        #    后果（实测 tests/test_global_facts_safety_scope.py 复现）：
+        #      · 导出预检**永远**报「全局事实 0 项 / blocked 0」→ 未确认、模拟值、
+        #        冲突、过期四类事实**一项都拦不住**，带着编造数值的稿子照样导出；
+        #      · readiness_overview 经 export_issues_to_findings 并入六维评分时
+        #        同样缺这一路，总分虚高；
+        #      · 界面上 ``not_checked`` 与「检查通过、0 项待处理」 indistinguishable。
+        #    修法：项目 ID 本函数已在 :1108 用服务层单一出口
+        #    ``resolve_scheme_project_id`` 取到并存为 ``ba_pid``，直接复用，
+        #    不再引入第二份反查（避免 R54/R68 反复记录的「反查多副本」）。
+        if ba_pid:
             cur = await db.execute(
                 "SELECT COUNT(*) AS total, "
                 "SUM(CASE WHEN COALESCE(is_resolved,0)=0 THEN 1 ELSE 0 END) AS unresolved, "
@@ -1156,9 +1170,8 @@ async def collect_export_issues(scheme_id: str, db) -> dict:
                 "SUM(CASE WHEN COALESCE(is_resolved,0)=0 OR COALESCE(is_simulated,0)=1 "
                 "OR COALESCE(has_conflict,0)=1 OR COALESCE(is_stale,0)=1 THEN 1 ELSE 0 END) "
                 "AS blocked "
-                "FROM global_facts WHERE scheme_id=? OR (project_id=? AND "
-                "(scheme_id='' OR scheme_id IS NULL))",
-                (scheme_id, scheme_row["project_id"]))
+                "FROM global_facts WHERE " + FACT_SCOPE_PREDICATE,
+                (scheme_id, ba_pid))
             frow = await _db_fetch_one(
                 cur, what="collect_export_issues:global_facts 统计")
             if frow:
@@ -1419,10 +1432,12 @@ async def _record_export_review_trace(db, scheme_id: str, fmt: str,
 
 # ===================== 导出格式预设库（对标 OpenBidKit export_templates） =====================
 async def _preset_project_id(db, scheme_id: str) -> str:
-    """预设按项目维度共享：从方案反查其 project_id。"""
-    cur = await db.execute("SELECT project_id FROM schemes WHERE id=?", (scheme_id,))
-    row = await _db_fetch_one(cur, what="_preset_project_id")
-    return row["project_id"] if row else ""
+    """预设按项目维度共享：从方案反查其 project_id。
+
+    ✅ 收敛：委托 facts_extractor.resolve_scheme_project_id（服务层单一出口），
+       不再内联 SQL。行为等价（fail-soft 返回空串），且失败时有 WARNING 日志。
+    """
+    return await resolve_scheme_project_id(db, scheme_id)
 
 
 @router.get("/presets")
@@ -2131,7 +2146,49 @@ def _add_cover_info_table(doc, info: dict, font_name: str) -> None:
         c1._tc.get_or_add_tcPr().append(shd1)
 
 
+
+
 # ---------------------------------------------------------------------------
+# ✅ 2026-10-11（引入《文档生成规则分析与软件标准建立》第四部分 4.2 导出标准）：
+#    可选**版式预设**。既有默认（2.5cm 四边 / 行距 1.15）是历轮锁定的字节契约，
+#    一字不动；预设仅在 config.layout_preset 显式点名时整体覆盖行距与四边距。
+#    "engineering" 取通用 Word「工程公文」档：上下 2.54cm、左右 3.18cm、1.5 倍行距。
+# ---------------------------------------------------------------------------
+LAYOUT_PRESETS: dict[str, dict] = {
+    "engineering": {
+        "line_spacing": 1.5,
+        "margins": {"top": 2.54, "bottom": 2.54, "left": 3.18, "right": 3.18},
+    },
+}
+
+
+def _resolve_layout_preset(config: dict, base_opts: dict) -> dict:
+    """按 config.layout_preset 覆盖版式字段（纯函数，未知/缺省键原样返回）。
+
+    返回**新 dict**（base_opts 不被就地修改）；预设命中时只覆盖
+    line_spacing 与 margins 两项 —— 字体/字号/标题样式等由用户显式配置继续生效。
+    """
+    name = str((config or {}).get("layout_preset", "") or "").strip().lower()
+    preset = LAYOUT_PRESETS.get(name)
+    if not preset:
+        return dict(base_opts)
+    out = dict(base_opts)
+    out["line_spacing"] = max(1.0, min(float(preset["line_spacing"]), 3.0))
+    _mg = dict(preset["margins"])
+    # 用户在 config.margins 里显式给过的键保持原值（预设补缺，不强改细调）
+    _user_margins = (config or {}).get("margins")
+    if isinstance(_user_margins, dict):
+        for _k, _v in _user_margins.items():
+            try:
+                if _v is not None and float(_v) > 0:
+                    _mg[_k] = float(_v)
+            except (TypeError, ValueError):
+                continue
+    out["margins"] = _mg
+    return out
+
+
+# ---------------------------------------------------------------------------# ---------------------------------------------------------------------------
 # 专项施工方案法定前置表单（2026-10-02 · 第二十三轮）
 # ---------------------------------------------------------------------------
 # 依据（均为部文原文，不凭记忆编写）：
@@ -2231,9 +2288,12 @@ def _add_prelim_page_title(doc, title: str, font_name: str,
 def _scheme_form_header(scheme: dict, cover_info: dict | None) -> list[tuple[str, str]]:
     """四张前置表共用的「工程 / 方案」抬头行（空值自动过滤）。"""
     info = cover_info if isinstance(cover_info, dict) else {}
+    # ✅ 2026-10-11（文档质量报告 P0-B）：抬头行同样过模板残留清洗。
+    #    残留串被置空后由 `_add_form_table` 的「空值行跳过」自动隐藏该行，
+    #    表单不会因此变形；此处不做项目名兜底（表头应来自封面信息，不猜）。
     return [
-        ("工程名称", info.get("工程名称", "")),
-        ("方案名称", (scheme or {}).get("name", "")),
+        ("工程名称", _sanitize_template_residue_title(info.get("工程名称", ""))),
+        ("方案名称", _sanitize_template_residue_title((scheme or {}).get("name", ""))),
         ("方案编号", info.get("方案编号", "")),
         ("编制单位", info.get("编制单位", "")),
     ]
@@ -2247,8 +2307,8 @@ def _add_compilation_note_page(doc, scheme: dict, cover_info: dict | None,
     不出现「待补充」类占位（与正文「数据真实性红线」同款要求）。
     """
     info = cover_info if isinstance(cover_info, dict) else {}
-    project_name = str(info.get("工程名称", "") or "").strip()
-    scheme_name = str((scheme or {}).get("name", "") or "").strip()
+    project_name = _sanitize_template_residue_title(info.get("工程名称", "")).strip()
+    scheme_name = _sanitize_template_residue_title((scheme or {}).get("name", "")).strip()
     parts = [
         f"本方案为{project_name}的{scheme_name}，"
         f"由施工单位技术负责人组织工程技术人员编制，"
@@ -3113,6 +3173,128 @@ def _build_export_filename(scheme_name: str, ext: str, round_no: int,
     return _safe_filename(f"{name or '导出文档'}{tail}", ext)
 
 
+# ---------------------------------------------------------------------------
+# ✅ 2026-10-11（文档质量报告 P0-B · 修复1/17）：页眉/封面标题的**模板残留清洗**
+#    + 方案名为空或为残留时的**项目名兜底**。
+#
+# 现象（实证形态）：上游模板 / 定位切换前的占位串原样印进交付件第一页 ——
+#   「招投标项目 2026/10/7 19:56:43」（「招投标」是招投标定位时代的项目名，
+#   后半段是生成工具的时间戳）一旦进入方案名或页眉配置，**每一页页眉**与
+#   **封面大字标题**都会印着它；反之方案名为空时封面是一张空白标题。
+#   两者此前全链路零拦截：导出前体检 `audit_content` 只扫正文，
+#   页眉 / 封面 / 前置表单抬头 / 文件名完全不在其视野内。
+#
+# 取舍（刻意保守 —— 避免误伤合法工程名）：
+#   · 只在**整串都是残留**时判空，绝不逐片段裁剪真实标题。
+#     「XX大桥加固工程专项施工方案」里的「XX」在工程名中是合法编号前缀，
+#     逐片段裁剪会把它吃掉 → 无声的内容损坏，比留一条脏页眉更糟。
+#   · 项目名兜底只取全局事实里**明确**写着「项目名称 / 工程名称」的条目，
+#     绝不猜；取到的值同样过一遍残留清洗（事实库里的项目名本身也可能是占位串）。
+#   · 三个函数均纯函数、fail-soft、不写库、不阻断导出；判不出来一律**原样返回**。
+# ---------------------------------------------------------------------------
+
+#: 上游模板 / 历史定位遗留的项目名占位关键词（替换时按长度降序，最长优先）
+_TEMPLATE_RESIDUE_TOKENS: tuple[str, ...] = (
+    "招投标项目", "投标项目", "投标标书", "招标文件", "标书编制",
+    "项目名称", "工程名称", "项目名", "工程名",
+    "未命名项目", "新建项目", "测试项目", "示例项目", "模板项目",
+    "未命名", "无标题", "未填写", "待填写", "请填写", "占位", "待定", "暂定",
+    # ⚠️ 刻意不含 `示例`/`模板`/`项目`/`工程` 这四个泛词：只由它们拼成的名字
+    #    （如「示例工程」）可能是真实落库工程名，整串置空会静默吃掉用户数据 ——
+    #    残留串要被判掉，靠「招投标/投标/招标」前缀 + 日期时间片段即可。
+)
+
+#: 「没有任何语义」的片段：日期 / 时间 / 年份 / 括号提示 / 占位下划线。
+#: 残留串通常 = 占位关键词 + 这些片段（如「招投标项目 2026/10/7 19:56:43」）。
+_TEMPLATE_RESIDUE_FRAG_RE = re.compile(
+    r"\d{4}\s*[-/年.]\s*\d{1,2}\s*[-/月.]\s*\d{1,2}\s*日?"   # 2026/10/7、2026-10-7
+    r"|\d{4}\s*[-/年.]\s*\d{1,2}\s*[-/月.]"                  # 2026/10
+    r"|\d{1,2}:\d{2}(?::\d{2})?"                             # 19:56:43
+    r"|\d{4}"                                                # 单年份
+    r"|【[^】]{0,16}】|\[[^\]]{0,16}\]|（[^）]{0,16}）|\([^)]{0,16}\)"
+    r"|[_＿]{2,}|X{2,}|x{2,}|×{2,}|＊{2,}"                   # ___、XX、××
+    r'|["\s\u3000\u00a0]+'
+)
+
+#: 残留判定的"实质内容"出口：剥离全部残留片段后仍有任何汉字即视为真实标题
+_TEMPLATE_RESIDUE_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+#: 全局事实里可作为项目名兜底的条目标题（只认明确命名，不按语义猜）
+_PROJECT_NAME_FACT_RE = re.compile(r"项目名称|工程名称|项目名|工程名")
+
+
+def _is_template_residue(text: str) -> bool:
+    """判断整串是否只是上游模板的占位残留（剥离后无任何实质内容）。
+
+    反复剥离占位关键词与日期/时间/括号/下划线等无语义片段，
+    **一个汉字都不剩才算残留** —— 残留任意一处汉字就说明这是真实工程名。
+    """
+    cur = str(text or "").strip()
+    if not cur:
+        return True
+    tokens = sorted(_TEMPLATE_RESIDUE_TOKENS, key=len, reverse=True)
+    while True:
+        nxt = cur
+        for tok in tokens:
+            if tok in nxt:
+                nxt = nxt.replace(tok, " ")
+        nxt = _TEMPLATE_RESIDUE_FRAG_RE.sub(" ", nxt)
+        if nxt == cur:
+            break
+        cur = nxt
+    return not _TEMPLATE_RESIDUE_CJK_RE.search(cur)
+
+
+def _sanitize_template_residue_title(title: str) -> str:
+    """清洗页眉 / 封面 / 抬头的模板残留：**整串是残留才置空，否则逐字原样返回**。
+
+    保守判空是唯一安全方向：留一条脏页眉用户看得见、会去改导出配置；
+    而把真实工程名剪掉一截属于无声的内容损坏，交付件里无从察觉。
+    因此本函数只可能「整串判空」，绝不返回被裁剪过的半截标题。
+    """
+    raw = str(title or "")
+    if not raw.strip():
+        return ""
+    if _is_template_residue(raw):
+        logger.warning("导出：标题/页眉为模板残留，已置空: %r", raw[:60])
+        return ""
+    return raw
+
+
+def _project_name_from_facts(facts: list | None) -> str:
+    """从全局事实取项目名，作为方案名为空 / 为残留时的兜底。
+
+    只认标题明确写着「项目名称 / 工程名称」的条目；取到的值同样过一遍
+    残留清洗（事实库里的项目名本身也可能是占位串）。零命中或无事实返回空串 ——
+    宁可封面留空，也不猜一个项目名（与前置表单「签字栏不预填」同一红线）。
+    """
+    for item in facts or []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("name") or "")
+        if not _PROJECT_NAME_FACT_RE.search(title):
+            continue
+        val = _sanitize_template_residue_title(
+            item.get("content") or item.get("value") or "")
+        if val:
+            return val
+    return ""
+
+
+def _display_scheme_name(scheme: dict | None, global_facts: list | None = None) -> str:
+    """封面标题 / 下载文件名共用的方案名（清洗残留 + 项目名兜底，单一出口）。
+
+    封面大字与下载文件名是同一份"交付件署名"，必须同一口径 —— 此前
+    封面用 `scheme["name"]` 原样、文件名再各自清洗一遍，一旦方案名为残留串，
+    封面印着「招投标项目 2026/10/7 19:56:43」而文件名却是「导出文档_…」，
+    两份署名对不上。此处收敛为唯一出口；无事实可用时保持旧行为（空串）。
+    """
+    clean = _sanitize_template_residue_title((scheme or {}).get("name", ""))
+    if clean:
+        return clean
+    return _project_name_from_facts(global_facts)
+
+
 async def _bump_export_round(db, scheme_id: str) -> int:
     """累加并返回该方案的导出轮次（持久化在 schemes.export_round）。
 
@@ -3410,7 +3592,10 @@ def _build_docx_sync(
             doc.add_paragraph()
         title_p = doc.add_paragraph()
         title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        _set_run_font(title_p.add_run(scheme.get("name", "")), font_name, 28, bold=True)
+        # ✅ 2026-10-11（文档质量报告 P0-B）：封面标题走「清洗残留 + 项目名兜底」
+        #    的单一出口，避免残留串上封面或标题空白。
+        _set_run_font(title_p.add_run(_display_scheme_name(scheme, global_facts)),
+                      font_name, 28, bold=True)
         if bidder_name:
             bidder_p = doc.add_paragraph()
             bidder_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -3473,6 +3658,9 @@ def _build_docx_sync(
         sec.different_first_page_header_footer = True
 
     # 页眉
+    # ✅ 2026-10-11（文档质量报告 P0-B）：页眉过一遍模板残留清洗。
+    #    残留串置空后等价于「未配置页眉」，不编造替代内容（不预填红线）。
+    page_header = _sanitize_template_residue_title(page_header)
     if page_header:
         hp = sec.header.paragraphs[0]
         hp.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -4748,6 +4936,10 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
                 if bool((config.get("scheme_forms") or {}).get(k)
                         if isinstance(config.get("scheme_forms"), dict) else False)
             },
+            # ✅ 2026-10-11（《文档生成规则》4.2 导出标准）：版式预设名在此**读取**，
+            #    实际覆盖发生在 _build_docx_task → _resolve_layout_preset（DOCX/PDF
+            #    两条链路唯一收敛点）。缺省 "" = 不启用，产物与改造前逐字一致。
+            "layout_preset": str(config.get("layout_preset", "") or "").strip().lower(),
         },
     }
 
@@ -4812,8 +5004,14 @@ async def _load_appendix_sources(db, scheme_id: str, project_id: str) -> list[di
 
 
 def _build_docx_task(out_path: str, prep: dict) -> tuple:
-    """组装 `_build_docx_sync` 的调用参数（DOCX / PDF 两条链路共用）。"""
-    o = prep["docx_options"]
+    """组装 `_build_docx_sync` 的调用参数（DOCX / PDF 两条链路共用）。
+
+    ✅ 2026-10-11：本函数是两条链路唯一收敛点，版式预设（layout_preset，
+    引入自《文档生成规则分析与软件标准建立》4.2 导出标准）在这里套用一次
+    即两侧同时生效；未配置预设时 `_resolve_layout_preset` 原样返回，
+    产物与改造前逐字一致。
+    """
+    o = _resolve_layout_preset(prep.get("config") or {}, prep["docx_options"])
     return (
         str(out_path), prep["scheme"], prep["roots"], prep["children_map"],
         prep["chart_lookup"], prep["rendered_bytes"], prep["blocks_cache"],
@@ -4852,6 +5050,8 @@ _EXPORT_CONFIG_KEYS = frozenset({
     #    图纸附件清单）—— 影响产物内容，必须纳入指纹，否则切换开关后
     #    config_hash 不变 → 命中旧缓存 → 用户看不到刚打开的表单。
     "scheme_forms",
+    # ✅ 2026-10-11：版式预设（行距 + 四边距整体切换）影响产物版式，纳入指纹。
+    "layout_preset",
 })
 
 
@@ -4950,6 +5150,21 @@ def _content_fingerprint(prep: dict) -> tuple[str, str]:
         if _parts:
             fe_pixels_sig = hashlib.md5(
                 "\n---\n".join(sorted(_parts)).encode()).hexdigest()[:16]
+    # ✅ BUG 修复（2026-10-11 · 跨模块数据链 R70 · 服务端开关不入指纹）：
+    #    `body_subheading_demote_with_children` 直接决定渲染端的编号口径 ——
+    #    开启时「有 DB 子章节」的正文子标题被降级为节内编号（1）/ a）/ …），
+    #    **产物里的标题层级与编号随之改变**（:579/:710/:3736 三处读取）。
+    #    但它取自服务端 settings，不在 `_EXPORT_CONFIG_KEYS`（那是**请求体**
+    #    白名单，而该键根本不由前端传入）内 ⇒ 运维切换此开关后 config_hash 与
+    #    content_fingerprint 均不变 → 命中旧缓存，用户改了配置却拿到降级前的文档。
+    #    与 `scheme_forms`「切换开关必须失效缓存」同一类缺陷，现显式纳入指纹。
+    #    默认值 True 与渲染端 `except: _demote = True` 的兜底口径保持一致。
+    try:
+        from app.config import settings as _demote_settings
+        _demote_on = bool(
+            getattr(_demote_settings, "body_subheading_demote_with_children", True))
+    except Exception:  # pragma: no cover - 配置不可用时沿用渲染端同款兜底
+        _demote_on = True
     # R-2：合并 prep["image_config"] 覆盖服务器 settings（保持 settings 路径不变）
     _img_sig = _image_generation_signature()
     _img_cfg = prep.get("image_config") or {}
@@ -4997,6 +5212,9 @@ def _content_fingerprint(prep: dict) -> tuple[str, str]:
             #    且响应头不提示任何异常。此处显式纳入这几个真正影响像素结果的键。
             # R-2：使用已合并 prep["image_config"] 覆盖的 _img_sig。
             "image_gen": _img_sig,
+            # ✅ R70（2026-10-11）：正文子标题降级开关（服务端 settings，非请求体）
+            #    —— 直接改变产物编号层级，必须参与指纹，否则切换后命中旧产物。
+            "subheading_demote": _demote_on,
             # ✅ 缓存失效修复（2026-09-23）：纯渲染逻辑改进（mermaid/PIL 渲染器升级，
             #    _RENDERER_VERSION 未变但逻辑已变）也应失效 DOCX 缓存，否则旧图被烤进
             #    二进制后永远命中。图表数据(data_json)变化固然会让 chart_fp 改变，
@@ -5063,6 +5281,26 @@ async def _guard_numbering_consistency(db, scheme_id: str) -> None:
             logger.debug("编号一致性预检失败（不影响导出）: %s", _e)
 
 
+def _cache_row_viable(result_path: str) -> bool:
+    """缓存行是否仍可用：result_path 非空、文件存在且**非空文件**。
+
+    ✅ BUG 修复（2026-10-14 · P2 判据不一致）：命中判据（export_docx / export_pdf）
+    要求 `Path(...).stat().st_size > 0`，而本函数的两处判据只查 `.exists()`：
+      · 一份 0 字节（写盘中断 / 磁盘满）的产物既永远不会被返回给用户（命中判据拦住），
+        又被本函数当成「有效缓存」占用 5 份保留配额；
+      · 于是它会在裁剪时把**更新且可用**的缓存行挤出保留窗口，
+        用户表现为「明明没改内容，缓存却突然失效、重新付一次全量渲染成本」。
+    抽成共享判据，使「可用缓存」在读写两侧同一口径。
+    """
+    if not result_path:
+        return False
+    try:
+        p = Path(result_path)
+        return p.is_file() and p.stat().st_size > 0
+    except OSError:
+        return False
+
+
 async def _prune_export_cache(db, scheme_id: str, protect_path: Path) -> None:
     """✅ 缓存保留策略（最多 5 份/方案，与前端 tooltip 说明对齐）——
     删除陈旧/僵尸行并连带清理磁盘文件。2026-10-03（T1）：从 DOCX 分支内联逻辑
@@ -5086,14 +5324,17 @@ async def _prune_export_cache(db, scheme_id: str, protect_path: Path) -> None:
         return
     keep_paths = {str(protect_path)}
     for cr in cache_rows[:5]:
-        if cr["result_path"] and Path(cr["result_path"]).exists():
+        if _cache_row_viable(cr.get("result_path") or ""):
             keep_paths.add(cr["result_path"])
     stale_ids: list[str] = []
     for i, cr in enumerate(cache_rows):
         # ✅ BUG 修复（2026-09-20）：result_path 为 NULL 时 Path(None) 抛 TypeError；
         #    为空串时 Path("") 等价 Path(".") 恒存在 → 僵尸行被当成「有效缓存」。
+        # ✅ 修复（2026-10-14 · P2）：改用 _cache_row_viable（含 st_size>0），
+        #    与 export_docx / export_pdf 的命中判据同一口径 —— 0 字节僵尸产物
+        #    不再占用 5 份保留配额。
         rp = cr.get("result_path") or ""
-        if i >= 5 or not (rp and Path(rp).exists()):
+        if i >= 5 or not _cache_row_viable(rp):
             stale_ids.append(cr["id"])
     if stale_ids:
         # 删除记录前把磁盘文件一并清理（保留下来的 5 份 + 当前产物不删）
@@ -5176,6 +5417,13 @@ async def _gc_orphan_exports(db, scheme_id: str,
         live = {os.path.normcase(str(dict(r).get("result_path") or ""))
                 for r in rows if dict(r).get("result_path")}
         protected = {os.path.normcase(str(p)) for p in (protect or set())}
+        # ✅ BUG 修复（2026-10-14 · P0）：跳过「在飞产物」。不同配置指纹的并发导出
+        #    持不同的去重锁，可在本函数执行期间正把产物 os.replace 到最终路径、
+        #    但 INSERT+commit 尚未发生 —— 此时它既不在 live（DB 无行）、也不在任何
+        #    调用方的 protect 里，且文件名不含 .tmp. → 会被误判孤儿 unlink，
+        #    导致对端请求 500/404 或缓存行永久指向已删文件。
+        #    见模块内 _EXPORT_INFLIGHT_PATHS 的注释（在同模块下方定义，运行时解析）。
+        inflight = _export_inflight_snapshot()
         now = time.time()
         prefix = f"{scheme_id}_"
         try:
@@ -5187,7 +5435,7 @@ async def _gc_orphan_exports(db, scheme_id: str,
                 if not f.is_file() or not f.name.startswith(prefix):
                     continue
                 key = os.path.normcase(str(f))
-                if key in live or key in protected:
+                if key in live or key in protected or key in inflight:
                     continue
                 if ".tmp." in f.name and (now - f.stat().st_mtime) < _ORPHAN_TMP_TTL_SECONDS:
                     continue  # 宽限期内：可能是刚降级返回、仍在流式读取的产物
@@ -5203,150 +5451,373 @@ async def _gc_orphan_exports(db, scheme_id: str,
     return deleted
 
 
+# ✅ P2 收口（2026-10-13）：同「方案 + 格式 + 配置」并发导出的重复成本。
+#
+# 缺陷：缓存查询发生在 `_prepare_export` **之后** ⇒ 第二个同键请求（双击 /
+# 多标签页）到达时先行请求尚未落盘，必然 miss，于是两者**各自**付一次全量成本：
+#   · `_prepare_export` 内的图表预渲染（有下游缓存，代价较小）；
+#   · `_auto_generate_ai_image_blocks` —— **真实计费**。image_engine 的 MD5 成功
+#     缓存是**运行期**缓存：并发时两个请求同时错过、各自调用一次 provider；
+#   · `_build_docx_sync`（大文档数分钟）；PDF 链再加一次 Word COM 转换。
+# 结果本身正确（uuid temp + 原子 os.replace + INSERT OR IGNORE 唯一约束），
+# 但成本翻倍，且两个重活同时抢线程池与 AI 配额（§4.1 的配额压力来源）。
+#
+# 修法：**进程内** asyncio.Lock，键 = (格式, 方案, 配置指纹)。先行请求独占构建并
+# **提交**缓存行后才释放；等待者拿到锁后重查缓存即命中、直接返回 —— 不重复
+# 构建、不重复计费。配置指纹只取请求体（见 _export_config_hash），可在昂贵的
+# `_prepare_export` 之前算出，故锁能覆盖整个准备阶段而无需先知道内容指纹。
+# 锁键与缓存判据**同源**：config_hash ≡ _content_fingerprint(prep)[0]（有测试锁定），
+# 所以「被串行的是同键请求」与「能命中同一缓存行的请求」永远一致 —— 只会串行
+# 化彼此可复用缓存的请求，不会误串行不同配置的导出。
+# 开关 export_dedup_concurrent（默认 True）：设 False 逐字回退旧行为。
+#
+# 仍未收口（建议独立一轮）：缓存查询在 `_prepare_export` 之后，故一次「缓存
+# 命中」也要先跑一遍准备阶段（其下游缓存使代价很小）。彻底省掉需把
+# `_prepare_export` 拆成「取数 / 渲染」两段并把缓存查询夹在中间，属结构改造。
+_EXPORT_BUILD_LOCKS: dict[tuple, asyncio.Lock] = {}
+_EXPORT_BUILD_LOCKS_GUARD = threading.Lock()
+_EXPORT_BUILD_LOCKS_MAX = 512
+
+# ---------------------------------------------------------------------------
+# ✅ BUG 修复（2026-10-14 · P0 跨配置并发误删最终产物）：
+#
+# 去重锁的键含 config_hash（见 _export_build_lock_for），因此**不同配置指纹**的
+# 两个导出请求持有不同的锁、可以完全并发地执行
+# 「构建 → os.replace → INSERT → commit → _gc_orphan_exports → FileResponse」。
+# 而 _gc_orphan_exports 判孤儿的唯一依据是「DB 里没有缓存行指向它」：
+#
+#   请求 A（config=X）：os.replace 成功（产物已落在最终路径、无 .tmp. 后缀）
+#   请求 B（config=Y）：_gc_orphan_exports 此刻读到 DB，A 的 INSERT 尚未提交
+#                       → A 的产物既不在 live、也不在 B 的 protect、也不是 .tmp.
+#                       → 被 B 当成孤儿 unlink。
+#
+# 后果：
+#   · 若发生在 A 的 FileResponse 之前 → 用户本次导出 500/404（构建成功却拿不到文档）；
+#   · 若发生在 A 的 FileResponse 之后 → export_cache 行永久指向已删除文件
+#     （命中判据 Path.exists() 失败 → 每次必然 miss，且该行占据 5 份保留配额）。
+#
+# 修法：维护进程内「在飞产物路径」集合，覆盖 replace → INSERT → commit → GC 整段
+# 窗口；_gc_orphan_exports 一律跳过在飞路径。集合只在同进程内有效，而 GC 也只在
+# 本进程被调用，语义自洽；进程崩溃时集合随进程消失，残留产物转为普通孤儿，
+# 由既有「无缓存行引用 + .tmp. 宽限期」判定兜底，行为与修复前一致。
+# ---------------------------------------------------------------------------
+_EXPORT_INFLIGHT_PATHS: set[str] = set()
+_EXPORT_INFLIGHT_GUARD = threading.Lock()
+
+
+def _export_inflight_key(path: Path) -> str:
+    """在飞集合的规范化键（Windows 大小写不敏感，需 normcase 后比较）。"""
+    return os.path.normcase(str(path))
+
+
+def _export_inflight_register(path: Path) -> None:
+    """注册本次导出的最终产物路径（fail-soft，绝不阻断导出）。"""
+    try:
+        with _EXPORT_INFLIGHT_GUARD:
+            _EXPORT_INFLIGHT_PATHS.add(_export_inflight_key(path))
+    except Exception:  # pragma: no cover - 注册失败只失去保护，不影响正确性
+        pass
+
+
+def _export_inflight_unregister(path: Path | None) -> None:
+    """注销在飞产物路径（幂等；None 表示本次降级未落盘、无需注销）。"""
+    try:
+        with _EXPORT_INFLIGHT_GUARD:
+            _EXPORT_INFLIGHT_PATHS.discard(_export_inflight_key(path or Path()))
+    except Exception:  # pragma: no cover
+        pass
+
+
+def _export_inflight_snapshot() -> set[str]:
+    """在飞路径快照（供 _gc_orphan_exports 判定），避免持锁期间做 IO。"""
+    with _EXPORT_INFLIGHT_GUARD:
+        return set(_EXPORT_INFLIGHT_PATHS)
+
+
+# ---------------------------------------------------------------------------
+# ✅ 导出终局序列收口（2026-10-14 · 遗留建议执行）：
+#    DOCX / PDF 两分支的「写缓存行 → 裁剪 → 提交」与「留痕 → 回收 → 注销」
+#    序列曾各自手写两份，历史缺陷全部源于双写分叉：
+#      · PDF 长期只 INSERT 不裁剪（T1，行数无限增长）；
+#      · DOCX 的 INSERT/prune 长期无显式 commit（P1，靠旁路 helper 副作用）；
+#      · PDF 的提交顺序修复（2026-10-13）只落在 PDF 侧，DOCX 侧口径不同。
+#    现把两段序列各自收敛为单一 helper，两分支只允许传参不同。
+# ---------------------------------------------------------------------------
+async def _persist_export_cache_row(db, *, scheme: dict, scheme_id: str,
+                                    config_hash: str, content_fingerprint: str,
+                                    cache_key: str, out_path: Path,
+                                    what: str) -> None:
+    """写入导出缓存行并执行保留裁剪（INSERT OR IGNORE → commit → prune → commit）。
+
+    提交顺序采用 PDF 分支 2026-10-13 修复确立的**双提交**口径：
+    新行先落盘，再做保留裁剪 —— 即使 prune 失败/回滚，本次产物下次仍可命中；
+    DOCX 旧的「INSERT → prune → 单次 commit」同事务口径在 commit 抛异常时会把
+    新行与裁剪一并回滚（缓存永不落盘），统一为双提交后该窗口闭合。
+    INSERT OR IGNORE + (scheme_id, content_fingerprint) 唯一约束保证同指纹并发
+    只持久化一行（B5，2026-09-23）。
+    """
+    await _db_exec(
+        db,
+        "INSERT OR IGNORE INTO export_cache (id, project_id, scheme_id, config_hash,"
+        " content_fingerprint, cache_key, result_path) VALUES (?,?,?,?,?,?,?)",
+        (str(uuid.uuid4()), scheme.get("project_id", ""), scheme_id, config_hash,
+         content_fingerprint, cache_key, str(out_path)),
+        what=what)
+    await db.commit()
+    await _prune_export_cache(db, scheme_id, protect_path=out_path)
+    await db.commit()
+
+
+async def _finalize_export_delivery(db, *, scheme_id: str, kind: str,
+                                    round_no: int, export_filename: str,
+                                    gc_protect: set[Path] | None = None,
+                                    inflight_path: Path | None = None) -> None:
+    """导出交付前的统一收尾：审核留痕 → 孤儿回收 → 解除在飞保护。
+
+    三步的顺序是安全契约，不得调换：
+      1. 留痕先行（其内部 commit 顺带把此前未提交的写入落盘）；
+      2. GC 在留痕之后（GC 判定依赖已提交的缓存行）；
+      3. 注销在飞保护必须在 GC 之后（GC 期间本产物仍需受保护）。
+    inflight_path=None 表示本次降级未落盘最终产物、无注册可注销
+    （PDF degraded 分支的 out_path 未绑定场景，旧实现靠 `if not degraded:`
+    守卫，现由 None 判定承担）。
+    """
+    await _record_export_review_trace(db, scheme_id, kind, round_no, export_filename)
+    await _gc_orphan_exports(db, scheme_id, protect=gc_protect)
+    if inflight_path is not None:
+        _export_inflight_unregister(inflight_path)
+
+
+
+def _export_config_hash(body: dict) -> str:
+    """仅由请求体配置算出的配置指纹。
+
+    与 ``_content_fingerprint(prep)[0]`` **同值**（后者同为
+    ``md5(json.dumps(_normalize_config(body["config"]), sort_keys=True))``），
+    但可在昂贵的 ``_prepare_export`` **之前**算出 ⇒ 能用作并发去重锁的键。
+    """
+    return hashlib.md5(json.dumps(
+        _normalize_config((body or {}).get("config", {}) or {}),
+        sort_keys=True).encode()).hexdigest()
+
+
+def _export_dedup_enabled() -> bool:
+    """并发去重开关；配置不可用时按默认（开启）处理，绝不阻断导出。"""
+    try:
+        from app.config import settings as _dedup_settings
+        return bool(getattr(_dedup_settings, "export_dedup_concurrent", True))
+    except Exception:  # pragma: no cover - 配置不可用时保持默认行为
+        return True
+
+
+def _export_build_lock_for(key: tuple) -> asyncio.Lock:
+    """按 (去重键, 事件循环) 取进程内构建锁；懒创建 + 有界整体淘汰。
+
+    键里带事件循环 id：pytest 每个用例新建 loop，复用已绑定的旧锁会让测试
+    互相卡住。锁只增不删，下标数到上限时**整体**清空 —— 最坏只让两个并发
+    导出暂时失去去重（各自构建），**不影响正确性**（唯一约束仍在）。
+    """
+    _lk_key = (key, id(asyncio.get_running_loop()))
+    with _EXPORT_BUILD_LOCKS_GUARD:
+        _lk = _EXPORT_BUILD_LOCKS.get(_lk_key)
+        if _lk is None:
+            if len(_EXPORT_BUILD_LOCKS) >= _EXPORT_BUILD_LOCKS_MAX:
+                _EXPORT_BUILD_LOCKS.clear()
+            _lk = asyncio.Lock()
+            _EXPORT_BUILD_LOCKS[_lk_key] = _lk
+        return _lk
+
+
+async def _export_dedup_acquire(key: tuple) -> asyncio.Lock | None:
+    """获取同键并发去重锁；关闭时返回 None（调用方无需释放）。
+
+    返回的锁**必须**在缓存行提交之后才释放：释放早于提交会让等待者重查
+    缓存漏命中、退化为各自构建（去重形同虚设）。
+    """
+    if not _export_dedup_enabled():
+        return None
+    _lk = _export_build_lock_for(key)
+    _had_peer = _lk.locked()
+    await _lk.acquire()
+    if _had_peer:
+        logger.info("导出并发去重：format=%s scheme=%s 检测到同键导出在飞，"
+                    "等待其提交缓存后再判定", key[0], str(key[1])[:8])
+    return _lk
+
+
+def _export_dedup_release(_lk: asyncio.Lock | None) -> None:
+    """释放去重锁（幂等：None 表示本次未加锁）。"""
+    if _lk is not None:
+        _lk.release()
+
+
 @router.post("/docx")
 async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
-    """导出 DOCX（封面 / 目录 / 标题编号 / 图表 / 页眉页脚页码）。"""
-    # ✅ 编号统一（2026-09-26 · 显式跨校验器）：导出前编号一致性守卫
-    #    （DOCX/PDF 共用实现，见 _guard_numbering_consistency）
-    # ✅ D-1（2026-10-01）：守卫**前置**到 _prepare_export 之前。
-    #    旧顺序是「先 prepare、后守卫」，而 _prepare_export 内部会执行图表渲染
-    #    与 AI 生图（**真实计费**）；严格模式（numbering_consistency_strict=True）
-    #    下守卫抛 409 时，这些成本已经付出且产物全部作废，用户只看到一次失败。
-    #    PDF 链（export_pdf）本来就是「守卫 → prepare」，此处对齐为同一顺序。
-    #    守卫只依赖 (db, scheme_id)，不依赖 prep，前置无副作用。
+    """导出 DOCX（封面 / 目录 / 标题编号 / 图表 / 页眉页脚页码）。
+
+    ✅ 编号统一（2026-09-26 · 显式跨校验器）：导出前编号一致性守卫
+    （DOCX/PDF 共用实现，见 _guard_numbering_consistency）。
+
+    ✅ D-1（2026-10-01）：守卫**前置**到 _prepare_export 之前。
+    旧顺序是「先 prepare、后守卫」，而 _prepare_export 内部会执行图表渲染
+    与 AI 生图（**真实计费**）；严格模式（numbering_consistency_strict=True）
+    下守卫抛 409 时，这些成本已经付出且产物全部作废，用户只看到一次失败。
+    PDF 链（export_pdf）本来就是「守卫 → prepare」，此处对齐为同一顺序。
+    守卫只依赖 (db, scheme_id)，不依赖 prep，前置无副作用。
+
+    ✅ P2（2026-10-13）：同键并发去重。**守卫在锁外** —— 它只读 (db, scheme_id)，
+    放锁内会让注定 409 的请求白等一整个构建周期；而锁本身必须覆盖
+    _prepare_export **之前**的临界区（含计费的 AI 生图），否则并发会双计费。
+    键与判据见 _EXPORT_BUILD_LOCKS 前的模块注释。
+    """
     await _guard_numbering_consistency(db, scheme_id)
-    prep = await _prepare_export(scheme_id, body, db)
-    scheme = prep["scheme"]
-    render_stats = prep["render_stats"]
-    config_hash, content_hash = _content_fingerprint(prep)
-
-    # 导出文件名 = 方案名称 + 导出日期 + 导出轮次（本次导出即一轮，先自增再命名）
-    round_no = await _bump_export_round(db, scheme_id)
-    export_filename = _build_export_filename(scheme.get("name"), "docx", round_no)
-    name_headers = {**_export_name_headers(export_filename, round_no),
-                    **_export_audit_headers(prep.get("content_audit") or {}),
-                    **_global_facts_status_headers(prep.get("global_facts_status"))}
-
-    # 缓存检查：内容与配置未变时直接返回历史产物（秒级响应）
-    cur = await db.execute(
-        "SELECT result_path FROM export_cache WHERE scheme_id=? AND config_hash=? AND content_fingerprint=?",
-        (scheme_id, config_hash, content_hash))
-    cached = await _db_fetch_one(cur, what="export_docx 缓存查询")
-    if cached and cached[0] and Path(cached[0]).exists() and Path(cached[0]).stat().st_size > 0:
-        # ✅ G12：缓存命中同样是「用户拿到了一份文档」，同样落审核留痕
-        await _record_export_review_trace(db, scheme_id, "docx", round_no, export_filename)
-        # ✅ 契约完整：缓存命中也回传统计/缓存标识响应头，前端统计条行为一致
-        return FileResponse(
-            cached[0], filename=export_filename,
-            headers={"X-Chart-Render-Stats": '{"cached":true}',
-                     "X-Cache-Status": "hit", **name_headers},
-            media_type=_DOCX_MIME)
-
-    # ✅ 性能优化：out_path 提前计算（仅依赖 scheme_id/hash，与 DOCX 内容无关）
-    out_path = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{content_hash[:8]}.docx"
-
-    # ✅ 并发修复：相同内容指纹的并发导出（双击/多标签页）会同时对同一个
-    # out_path 各自 doc.save()，可能产出损坏的 DOCX 并被写入 export_cache，
-    # 之后每次缓存命中都返回坏文件。现先写唯一临时文件，完成后原子替换。
-    tmp_out_path = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{content_hash[:8]}.{uuid.uuid4().hex}.tmp.docx"
-
-    # ✅ 性能优化：DOCX 构建（CPU 密集）整体移到线程池，避免阻塞事件循环
-    # ✅ 资源守卫：构建异常时必须清理临时文件，否则数十 MB 的 tmp.docx 永久残留。
+    _lk = await _export_dedup_acquire(("docx", scheme_id, _export_config_hash(body)))
     try:
-        fix_stats = await asyncio.to_thread(_build_docx_sync, *_build_docx_task(tmp_out_path, prep))
-    except Exception:
-        tmp_out_path.unlink(missing_ok=True)
-        raise
-    import os
-    # ✅ Windows 竞争窗口：并发同指纹导出时 FileResponse 懒打开目标文件，
-    # os.replace 可能抛 WinError 32；重试 3 次后退化为直接使用本次临时产物。
-    replaced = False
-    cacheable = True
-    for _attempt in range(3):
-        try:
-            os.replace(tmp_out_path, out_path)
-            replaced = True
-            break
-        except PermissionError:
-            await asyncio.sleep(0.3 * (_attempt + 1))
-    if not replaced:
-        # ✅ BUG 修复（2026-10-06 · P1 交付物/缓存路径治理）：旧实现把
-        #    ``out_path = tmp_out_path`` 之后**继续写缓存**，于是 export_cache
-        #    的 result_path 永久指向一个 ``.tmp.docx`` 文件：文件名带 uuid 与
-        #    .tmp 后缀（运维按名字辨识产物时极具误导），且该行命中即返回，
-        #    后续导出即便成功 replace 到规范路径也不会更新该行
-        #    （INSERT OR IGNORE 不覆盖已存在行）→ 磁盘与 DB 双双留下孤儿。
-        #    现降级为「本次不写缓存」：本次响应体仍是完整产物（tmp 文件
-        #    保留给 FileResponse 读取），下次导出重走全链路并落到规范路径。
-        out_path = tmp_out_path
-        cacheable = False
-        logger.warning(
-            "DOCX 缓存原子替换 3 次重试均失败（scheme=%s, out=%s），"
-            "本次不写入导出缓存（响应体仍为完整产物）",
-            scheme_id[:8], EXPORTS_DIR.name)
+        prep = await _prepare_export(scheme_id, body, db)
+        scheme = prep["scheme"]
+        render_stats = prep["render_stats"]
+        config_hash, content_hash = _content_fingerprint(prep)
 
-    # ✅ 坏缓存守卫：存在图表渲染失败 / AI 配图未生成 / 配图位图下载失败时产物含缺图，
-    #    不写入缓存——否则 AI 渲染服务恢复后，因内容指纹不变永远命中残缺文档。
-    if (render_stats.get("failed", 0) > 0
-            or prep.get("ai_image_pending", 0) > 0
-            or prep.get("ai_image_download_pending", 0) > 0):
+        # 导出文件名 = 方案名称 + 导出日期 + 导出轮次（本次导出即一轮，先自增再命名）
+        round_no = await _bump_export_round(db, scheme_id)
+        # ✅ 2026-10-11（文档质量报告 P0-B）：下载名与封面标题同一出口，避免
+        #    「封面印着模板残留串、下载名却是导出文档」两份署名对不上。
+        export_filename = _build_export_filename(
+            _display_scheme_name(scheme, prep.get("global_facts")), "docx", round_no)
+        name_headers = {**_export_name_headers(export_filename, round_no),
+                        **_export_audit_headers(prep.get("content_audit") or {}),
+                        **_global_facts_status_headers(prep.get("global_facts_status"))}
+
+        # 缓存检查：内容与配置未变时直接返回历史产物（秒级响应）
+        cur = await db.execute(
+            "SELECT result_path FROM export_cache WHERE scheme_id=? AND config_hash=? AND content_fingerprint=?",
+            (scheme_id, config_hash, content_hash))
+        cached = await _db_fetch_one(cur, what="export_docx 缓存查询")
+        # ✅ 修复（2026-10-14 · P2）：可用判据收敛到 _cache_row_viable，与
+        #    _prune_export_cache 的保留判据同一口径，避免「命中判据/保留判据」分叉。
+        if cached and cached[0] and _cache_row_viable(cached[0]):
+            # ✅ G12：缓存命中同样是「用户拿到了一份文档」，同样落审核留痕
+            await _record_export_review_trace(db, scheme_id, "docx", round_no, export_filename)
+            # ✅ 契约完整：缓存命中也回传统计/缓存标识响应头，前端统计条行为一致
+            return FileResponse(
+                cached[0], filename=export_filename,
+                headers={"X-Chart-Render-Stats": '{"cached":true}',
+                         "X-Cache-Status": "hit", **name_headers},
+                media_type=_DOCX_MIME)
+
+        # ✅ 性能优化：out_path 提前计算（仅依赖 scheme_id/hash，与 DOCX 内容无关）
+        out_path = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{content_hash[:8]}.docx"
+        # ✅ BUG 修复（2026-10-14 · P0）：注册为「在飞产物」，覆盖 replace → INSERT →
+        #    commit → 孤儿回收 整段窗口。不同配置指纹的并发导出持不同的去重锁，
+        #    可能在此窗口内触发孤儿回收，把本产物（已落盘、但缓存行未提交）误判为孤儿删除。
+        #    ⚠️ 另存一份 `_inflight_final`：下方降级分支会把 out_path 重绑定为
+        #    tmp_out_path（本次不写缓存），若注销时读 out_path 就会拿错路径，
+        #    导致本条注册永久残留在集合里（虽不致误删，但集合会随失败次数缓慢膨胀）。
+        _inflight_final = out_path
+        _export_inflight_register(out_path)
+
+        # ✅ 并发修复：相同内容指纹的并发导出（双击/多标签页）会同时对同一个
+        # out_path 各自 doc.save()，可能产出损坏的 DOCX 并被写入 export_cache，
+        # 之后每次缓存命中都返回坏文件。现先写唯一临时文件，完成后原子替换。
+        tmp_out_path = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{content_hash[:8]}.{uuid.uuid4().hex}.tmp.docx"
+
+        # ✅ 性能优化：DOCX 构建（CPU 密集）整体移到线程池，避免阻塞事件循环
+        # ✅ 资源守卫：构建异常时必须清理临时文件，否则数十 MB 的 tmp.docx 永久残留。
+        try:
+            fix_stats = await asyncio.to_thread(_build_docx_sync, *_build_docx_task(tmp_out_path, prep))
+        except Exception:
+            tmp_out_path.unlink(missing_ok=True)
+            raise
+        import os
+        # ✅ Windows 竞争窗口：并发同指纹导出时 FileResponse 懒打开目标文件，
+        # os.replace 可能抛 WinError 32；重试 3 次后退化为直接使用本次临时产物。
+        replaced = False
+        cacheable = True
+        for _attempt in range(3):
+            try:
+                os.replace(tmp_out_path, out_path)
+                replaced = True
+                break
+            except PermissionError:
+                await asyncio.sleep(0.3 * (_attempt + 1))
+        if not replaced:
+            # ✅ BUG 修复（2026-10-06 · P1 交付物/缓存路径治理）：旧实现把
+            #    ``out_path = tmp_out_path`` 之后**继续写缓存**，于是 export_cache
+            #    的 result_path 永久指向一个 ``.tmp.docx`` 文件：文件名带 uuid 与
+            #    .tmp 后缀（运维按名字辨识产物时极具误导），且该行命中即返回，
+            #    后续导出即便成功 replace 到规范路径也不会更新该行
+            #    （INSERT OR IGNORE 不覆盖已存在行）→ 磁盘与 DB 双双留下孤儿。
+            #    现降级为「本次不写缓存」：本次响应体仍是完整产物（tmp 文件
+            #    保留给 FileResponse 读取），下次导出重走全链路并落到规范路径。
+            out_path = tmp_out_path
+            cacheable = False
+            logger.warning(
+                "DOCX 缓存原子替换 3 次重试均失败（scheme=%s, out=%s），"
+                "本次不写入导出缓存（响应体仍为完整产物）",
+                scheme_id[:8], EXPORTS_DIR.name)
+
+        # ✅ 坏缓存守卫：存在图表渲染失败 / AI 配图未生成 / 配图位图下载失败时产物含缺图，
+        #    不写入缓存——否则 AI 渲染服务恢复后，因内容指纹不变永远命中残缺文档。
+        if (render_stats.get("failed", 0) > 0
+                or prep.get("ai_image_pending", 0) > 0
+                or prep.get("ai_image_download_pending", 0) > 0):
+            _merge_borrowed_stats(render_stats, fix_stats)
+            headers = {"X-Chart-Render-Stats": json.dumps(
+                           {**render_stats,
+                            "ai_image_pending": prep.get("ai_image_pending", 0),
+                            "ai_image_download_pending": prep.get("ai_image_download_pending", 0)},
+                           ensure_ascii=False),
+                       "X-Cache-Status": "degraded", **name_headers}
+            if fix_stats:
+                headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
+            # ✅ 收口（2026-10-14）：留痕 → 回收 → 注销 统一走 _finalize_export_delivery
+            #    （与 PDF 分支同一实现；GC protect 传 out_path——该文件即将被流式返回，
+            #    不得在本次回收；cacheable=False 时本次无缓存行，只能靠这里回收孤儿）。
+            await _finalize_export_delivery(
+                db, scheme_id=scheme_id, kind="docx", round_no=round_no,
+                export_filename=export_filename, gc_protect={out_path},
+                inflight_path=_inflight_final)
+            return FileResponse(
+                str(out_path), filename=export_filename,
+                headers=headers, media_type=_DOCX_MIME)
+
+        # 缓存记录
+        # ✅ B5（2026-09-23）：INSERT OR IGNORE + (scheme_id, content_fingerprint) 唯一约束，
+        #    使同指纹并发导出只持久化一行（另一并发请求虽仍各自构建 docx，但 os.replace 保证
+        #    out_path 不坏，且缓存行不重复），实现严格原子。
+        # ✅ 2026-10-06：原子替换失败（``cacheable=False``）时**跳过**缓存写入，
+        #    避免 result_path 永久指向 ``.tmp.docx`` 孤儿文件（见上方 warning）。
+        # ✅ 收口（2026-10-14）：INSERT → commit → prune → commit 收敛为
+        #    _persist_export_cache_row（与 PDF 分支同一实现；提交顺序采用 PDF 侧
+        #    2026-10-13 确立的双提交口径，详见 helper docstring）。
+        if cacheable:
+            await _persist_export_cache_row(
+                db, scheme=scheme, scheme_id=scheme_id, config_hash=config_hash,
+                content_fingerprint=content_hash,
+                cache_key=f"{scheme_id}_{config_hash[:8]}",
+                out_path=out_path, what="export_cache 写入(DOCX)")
+
+        # ✅ 加固（D1）：把构建期统计到的「跨章借图」并入渲染统计，一并回传
+        #    X-Chart-Render-Stats（前端展示 + 用户知情）。加法式合并，既有键不变。
         _merge_borrowed_stats(render_stats, fix_stats)
-        headers = {"X-Chart-Render-Stats": json.dumps(
-                       {**render_stats,
-                        "ai_image_pending": prep.get("ai_image_pending", 0),
-                        "ai_image_download_pending": prep.get("ai_image_download_pending", 0)},
-                       ensure_ascii=False),
-                   "X-Cache-Status": "degraded", **name_headers}
+        headers = {"X-Chart-Render-Stats": json.dumps(render_stats, ensure_ascii=False),
+                   "X-Cache-Status": "miss", **name_headers}
         if fix_stats:
             headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
-        await _record_export_review_trace(db, scheme_id, "docx", round_no, export_filename)
-        # ✅ 孤儿产物回收（2026-10-06）：cacheable=False 时本次返回的是
-        #    .tmp.docx（降级、未写缓存行）→ 无 DB 行可清理，只能由这里回收。
-        #    protect 传入 out_path：该文件即将被流式返回，不得在本次回收。
-        await _gc_orphan_exports(db, scheme_id, protect={out_path})
+        # ✅ G12：导出成稿落一条审核留痕（from_status = to_status，只留痕不改状态机）
+        # ✅ 收口（2026-10-14）：留痕 → 回收 → 注销 统一走 _finalize_export_delivery
+        #    （protect 传本次产物，避免被当成孤儿删掉）。
+        await _finalize_export_delivery(
+            db, scheme_id=scheme_id, kind="docx", round_no=round_no,
+            export_filename=export_filename, gc_protect={out_path},
+            inflight_path=_inflight_final)
         return FileResponse(
-            str(out_path), filename=export_filename,
-            headers=headers, media_type=_DOCX_MIME)
-
-    # 缓存记录
-    # ✅ B5（2026-09-23）：INSERT OR IGNORE + (scheme_id, content_fingerprint) 唯一约束，
-    #    使同指纹并发导出只持久化一行（另一并发请求虽仍各自构建 docx，但 os.replace 保证
-    #    out_path 不坏，且缓存行不重复），实现严格原子。
-    # ✅ 2026-10-06：原子替换失败（``cacheable=False``）时**跳过**缓存写入，
-    #    避免 result_path 永久指向 ``.tmp.docx`` 孤儿文件（见上方 warning）。
-    if cacheable:
-        cache_id = str(uuid.uuid4())
-        await _db_exec(
-            db,
-            "INSERT OR IGNORE INTO export_cache (id, project_id, scheme_id, config_hash, content_fingerprint, cache_key, result_path)"
-            " VALUES (?,?,?,?,?,?,?)",
-            (cache_id, scheme.get("project_id", ""), scheme_id, config_hash, content_hash,
-             f"{scheme_id}_{config_hash[:8]}", str(out_path)),
-            what="export_cache 写入(DOCX)")
-
-        # ✅ 缓存保留策略（最多 5 份/方案）：2026-10-03（T1）提取为共享 helper，
-        #    与 PDF 分支共用（原内联逻辑逐字迁移，见 _prune_export_cache 注释）。
-        await _prune_export_cache(db, scheme_id, protect_path=out_path)
-
-    # ✅ 加固（D1）：把构建期统计到的「跨章借图」并入渲染统计，一并回传
-    #    X-Chart-Render-Stats（前端展示 + 用户知情）。加法式合并，既有键不变。
-    _merge_borrowed_stats(render_stats, fix_stats)
-    headers = {"X-Chart-Render-Stats": json.dumps(render_stats, ensure_ascii=False),
-               "X-Cache-Status": "miss", **name_headers}
-    if fix_stats:
-        headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
-    # ✅ G12：导出成稿落一条审核留痕（from_status = to_status，只留痕不改状态机）
-    await _record_export_review_trace(db, scheme_id, "docx", round_no, export_filename)
-    # ✅ 孤儿产物回收（2026-10-06）：顺带清理本方案历史遗留的孤儿产物
-    #    （缓存行已陈旧删除 / 上次原子替换失败的 .tmp.docx）。protect 传入
-    #    本次产物，避免把它当成孤儿删掉。
-    await _gc_orphan_exports(db, scheme_id, protect={out_path})
-    return FileResponse(
-        str(out_path),
-        filename=export_filename,
-        headers=headers,
-        media_type=_DOCX_MIME)
-
+            str(out_path),
+            filename=export_filename,
+            headers=headers,
+            media_type=_DOCX_MIME)
+    finally:
+        _export_dedup_release(_lk)
 
 
 def _convert_docx_to_pdf(docx_path: str, pdf_path: str) -> str:
@@ -5503,161 +5974,174 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
     ✅ 重构：准备逻辑与 DOCX 完全共用（`_prepare_export`），同时修复了旧实现
     （1）只认 `mermaid_code` 键 → JSON 数据型图表在 PDF 中静默消失；
     （2）中文方案名直写 HTTP 头 → 全体 PDF 导出 500。
+
+    ✅ 编号统一（2026-09-26 · 显式跨校验器）：与 DOCX 共用导出前守卫，
+    且与 DOCX 同序（守卫 → prepare）。
+
+    ✅ P2（2026-10-13）：同键并发去重。PDF 链的重复成本尤重 —— 除 DOCX 构建外
+    还有一次 Word COM 转换（秒~分钟级），故同样在去重锁内执行构建与缓存提交；
+    守卫在锁外。键与判据见 _EXPORT_BUILD_LOCKS 前的模块注释。
     """
-    import tempfile
-
-    # ✅ 编号统一（2026-09-26 · 显式跨校验器）：PDF 与 DOCX 共用导出前守卫
     await _guard_numbering_consistency(db, scheme_id)
+    _lk = await _export_dedup_acquire(("pdf", scheme_id, _export_config_hash(body)))
+    try:
+        import tempfile
 
-    prep = await _prepare_export(scheme_id, body, db)
-    scheme = prep["scheme"]
+        prep = await _prepare_export(scheme_id, body, db)
+        scheme = prep["scheme"]
 
-    config_hash, content_hash = _content_fingerprint(prep)
-    # ✅ D-2（2026-10-01）：PDF 与 DOCX **必须区分缓存键**。
-    #    export_cache 的唯一索引是 (scheme_id, config_hash, content_fingerprint)，
-    #    不含格式维度 —— 若两者共用同一 content_hash，DOCX 与 PDF 会互相覆盖
-    #    （后写入者因 INSERT OR IGNORE 被忽略，PDF 永远写不进缓存）。
-    #    这里只给 **PDF** 的指纹加格式后缀：DOCX 现有键逐字不变 → 既有缓存
-    #    **零失效**（无需用户重新导出一遍），是新格式平铺接入的最小改动。
-    pdf_content_hash = content_hash + "|fmt=pdf"
+        config_hash, content_hash = _content_fingerprint(prep)
+        # ✅ D-2（2026-10-01）：PDF 与 DOCX **必须区分缓存键**。
+        #    export_cache 的唯一索引是 (scheme_id, config_hash, content_fingerprint)，
+        #    不含格式维度 —— 若两者共用同一 content_hash，DOCX 与 PDF 会互相覆盖
+        #    （后写入者因 INSERT OR IGNORE 被忽略，PDF 永远写不进缓存）。
+        #    这里只给 **PDF** 的指纹加格式后缀：DOCX 现有键逐字不变 → 既有缓存
+        #    **零失效**（无需用户重新导出一遍），是新格式平铺接入的最小改动。
+        pdf_content_hash = content_hash + "|fmt=pdf"
 
-    # 导出文件名 = 方案名称 + 导出日期 + 导出轮次（PDF 与 DOCX 共用同一轮次计数，
-    # 这里内部的中间 DOCX 不额外计数，避免一次 PDF 导出消耗两轮）
-    round_no = await _bump_export_round(db, scheme_id)
-    export_filename = _build_export_filename(scheme.get("name"), "pdf", round_no)
-    name_headers = {**_export_name_headers(export_filename, round_no),
-                    **_export_audit_headers(prep.get("content_audit") or {}),
-                    **_global_facts_status_headers(prep.get("global_facts_status"))}
+        # 导出文件名 = 方案名称 + 导出日期 + 导出轮次（PDF 与 DOCX 共用同一轮次计数，
+        # 这里内部的中间 DOCX 不额外计数，避免一次 PDF 导出消耗两轮）
+        round_no = await _bump_export_round(db, scheme_id)
+        # ✅ 2026-10-11（文档质量报告 P0-B）：与 DOCX 同一方案名出口（PDF 走这里）。
+        export_filename = _build_export_filename(
+            _display_scheme_name(scheme, prep.get("global_facts")), "pdf", round_no)
+        name_headers = {**_export_name_headers(export_filename, round_no),
+                        **_export_audit_headers(prep.get("content_audit") or {}),
+                        **_global_facts_status_headers(prep.get("global_facts_status"))}
 
-    # 缓存检查（与 DOCX 同口径：命中则秒级返回，跳过最昂贵的 PDF 转换）
-    cur = await db.execute(
-        "SELECT result_path FROM export_cache WHERE scheme_id=? AND config_hash=? AND content_fingerprint=?",
-        (scheme_id, config_hash, pdf_content_hash))
-    cached = await _db_fetch_one(cur, what="export_pdf 缓存查询")
-    if cached and cached[0] and Path(cached[0]).exists() and Path(cached[0]).stat().st_size > 0:
-        await _record_export_review_trace(db, scheme_id, "pdf", round_no, export_filename)
-        return FileResponse(
-            str(cached[0]), filename=export_filename, media_type=_PDF_MIME,
-            headers={"X-Chart-Render-Stats": '{"cached":true}',
-                     "X-Cache-Status": "hit", **name_headers})
+        # 缓存检查（与 DOCX 同口径：命中则秒级返回，跳过最昂贵的 PDF 转换）
+        cur = await db.execute(
+            "SELECT result_path FROM export_cache WHERE scheme_id=? AND config_hash=? AND content_fingerprint=?",
+            (scheme_id, config_hash, pdf_content_hash))
+        cached = await _db_fetch_one(cur, what="export_pdf 缓存查询")
+        # ✅ 修复（2026-10-14 · P2）：同 DOCX，可用判据收敛到 _cache_row_viable。
+        if cached and cached[0] and _cache_row_viable(cached[0]):
+            await _record_export_review_trace(db, scheme_id, "pdf", round_no, export_filename)
+            return FileResponse(
+                str(cached[0]), filename=export_filename, media_type=_PDF_MIME,
+                headers={"X-Chart-Render-Stats": '{"cached":true}',
+                         "X-Cache-Status": "hit", **name_headers})
 
-    # 生成 DOCX 到临时文件
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_docx = str(Path(tmpdir) / f"{scheme_id}.docx")
-        tmp_pdf = str(Path(tmpdir) / f"{scheme_id}.pdf")
-        fix_stats = await asyncio.to_thread(_build_docx_sync, *_build_docx_task(tmp_docx, prep))
-        # 转换为 PDF（CPU 密集，放线程池）
-        try:
-            await asyncio.to_thread(_convert_docx_to_pdf, tmp_docx, tmp_pdf)
-        except RuntimeError as e:
-            raise HTTPException(501, str(e))
-
-        # 读取 PDF 内容返回（临时目录会被清理，所以必须读入内存）
-        with open(tmp_pdf, "rb") as f:
-            pdf_bytes = f.read()
-
-    # ✅ 坏缓存守卫（D-2）：与 DOCX 同口径 —— 图表渲染失败 / AI 配图未生成 /
-    #    配图位图下载失败时产物缺图，**不写缓存**，否则服务恢复后因指纹不变
-    #    永远命中残缺 PDF（旧实现 PDF 链完全没有这道守卫）。
-    render_stats = prep.get("render_stats") or {}
-    degraded = (render_stats.get("failed", 0) > 0
-                or prep.get("ai_image_pending", 0) > 0
-                or prep.get("ai_image_download_pending", 0) > 0)
-
-    if not degraded:
-        import os as _os
-        # 落盘到 EXPORTS_DIR（缓存行只记路径，与 DOCX 一致；临时目录会被清理）
-        out_path = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{pdf_content_hash[:8]}.pdf"
-        # ✅ BUG 修复（2026-10-05 · F-1，交付物损坏）：旧实现
-        #    `out_path.write_bytes(pdf_bytes)` **非原子**——并发同指纹 PDF 导出、
-        #    或写盘中途崩溃/磁盘满时，都会残留**半截 PDF** 在目标路径。
-        #    下一次同指纹导出会命中缓存（size>0 守卫拦不住 >0 字节的半截文件），
-        #    直接 FileResponse 返回给用户 → 交付文档损坏。DOCX 分支早已用
-        #    `os.replace` 原子替换 + tmp 文件（见 export_docx），PDF 分支漏做。
-        #    现改为「先写唯一 tmp → DB INSERT 落盘路径 → os.replace 原子替换」。
-        #    失败一律清理 tmp，不留孤儿。
-        _tmp_pdf = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{pdf_content_hash[:8]}.{uuid.uuid4().hex}.tmp.pdf"
-        try:
-            _tmp_pdf.write_bytes(pdf_bytes)
-            # ✅ 2026-10-06：顺序治理 —— **先原子替换落盘、再写缓存行**（与 DOCX
-            #    分支同序）。旧实现是「INSERT + commit → os.replace」，替换失败时
-            #    DB 已指向一个**并不存在**的 out_path → 留下一行僵尸缓存
-            #    （/cache-status 记为 stale、prune 才清），且下一次同指纹导出会
-            #    先走一次「exists() 失败 → 全量重建」的无效往返。
-            # ✅ 与 DOCX 分支同款循环重试：Windows 上 out_path 可能被 Word/
-            #    预览窗口占用（WinError 32）；3 次退避重试。
-            _replaced = False
-            for _attempt in range(3):
-                try:
-                    _os.replace(_tmp_pdf, out_path)
-                    _replaced = True
-                    break
-                except PermissionError:
-                    if _attempt < 2:
-                        await asyncio.sleep(0.3 * (_attempt + 1))
-            if not _replaced:
-                logger.warning(
-                    "PDF 缓存原子替换 3 次重试均失败（scheme=%s, out=%s），"
-                    "本次不写入导出缓存（响应体仍为完整 PDF）",
-                    scheme_id[:8], out_path.name)
-                _tmp_pdf.unlink(missing_ok=True)
-            else:
-                await _db_exec(
-                    db,
-                    "INSERT OR IGNORE INTO export_cache (id, project_id, scheme_id, config_hash,"
-                    " content_fingerprint, cache_key, result_path) VALUES (?,?,?,?,?,?,?)",
-                    (str(uuid.uuid4()), scheme.get("project_id", ""), scheme_id,
-                     config_hash, pdf_content_hash,
-                     # ✅ P1（2026-10-04）：cache_key 补格式后缀。
-                     #    旧实现 DOCX 与 PDF 写入**逐字相同**的 cache_key
-                     #    （export.py:4590 与此处），而 cache_key 是 `/cache-status`
-                     #    与运维排查按格式辨识缓存行的唯一人读标识 —— 同一方案同一
-                     #    指纹下两行完全同名，无法区分哪个是 docx、哪个是 pdf，
-                     #    清理/核对时极易误删。只改 PDF 侧：DOCX 现有键逐字不变 →
-                     #    既有缓存行零失效（与 D-2 的「最小改动」取舍一致）。
-                     #    注意：查缓存走 (scheme_id, config_hash, content_fingerprint)
-                     #    三元组，cache_key 不参与命中判定 → 本次改名不影响任何命中。
-                     f"{scheme_id}_{config_hash[:8]}|pdf", str(out_path)),
-                    what="export_cache 写入(PDF)")
-                await db.commit()
-                # ✅ T1（2026-10-03）：PDF 分支此前只 INSERT 从不裁剪 → export_cache 行
-                #    与 EXPORTS_DIR 磁盘文件随导出次数无限增长。接入与 DOCX 同一保留
-                #    策略（跨格式合计 5 份/方案）；置于既有 fail-soft try 内，裁剪失败
-                #    不得影响本次交付（用户仍拿到完整 PDF）。
-                await _prune_export_cache(db, scheme_id, protect_path=out_path)
-        except Exception as e:
-            # 缓存写入失败不得影响本次交付（用户仍拿到完整 PDF）
+        # 生成 DOCX 到临时文件
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_docx = str(Path(tmpdir) / f"{scheme_id}.docx")
+            tmp_pdf = str(Path(tmpdir) / f"{scheme_id}.pdf")
+            fix_stats = await asyncio.to_thread(_build_docx_sync, *_build_docx_task(tmp_docx, prep))
+            # 转换为 PDF（CPU 密集，放线程池）
             try:
-                _tmp_pdf.unlink(missing_ok=True)
-            except Exception:
-                pass
-            logger.warning("PDF 导出缓存写入失败（不影响本次交付）: %s", e, exc_info=True)
+                await asyncio.to_thread(_convert_docx_to_pdf, tmp_docx, tmp_pdf)
+            except RuntimeError as e:
+                raise HTTPException(501, str(e))
 
-    from fastapi.responses import Response
-    # ✅ 加固（D1）：PDF 链路同样合流跨章借图计数（与 DOCX 同口径）
-    _merge_borrowed_stats(render_stats, fix_stats)
-    headers = {
-        "Content-Disposition": _attachment_disposition(export_filename),
-        "X-Chart-Render-Stats": json.dumps(render_stats, ensure_ascii=False),
-        # ✅ 与 DOCX 对齐：补 X-Cache-Status，缺图时标记 degraded（旧实现完全没有）
-        "X-Cache-Status": "degraded" if degraded else "miss",
-        **name_headers,
-    }
-    if fix_stats:
-        headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
-    # ✅ G12：PDF 成稿同样落一条审核留痕
-    await _record_export_review_trace(db, scheme_id, "pdf", round_no, export_filename)
-    # ✅ 孤儿产物回收（2026-10-06）：PDF 响应体是**内存字节**，本次产物不再
-    #    依赖磁盘文件，因此这里无需 protect。覆盖三类残留：
-    #      · os.replace 成功但 INSERT 抛异常 → out_path 在盘上、DB 无行（永久孤儿）；
-    #      · 缓存行已陈旧被 _prune_export_cache 删除的文件；
-    #      · 历史遗留的 .tmp.* 临时产物（超过宽限期）。
-    await _gc_orphan_exports(db, scheme_id)
-    return Response(
-        content=pdf_bytes,
-        media_type=_PDF_MIME,
-        headers=headers,
-    )
+            # 读取 PDF 内容返回（临时目录会被清理，所以必须读入内存）
+            with open(tmp_pdf, "rb") as f:
+                pdf_bytes = f.read()
+
+        # ✅ 坏缓存守卫（D-2）：与 DOCX 同口径 —— 图表渲染失败 / AI 配图未生成 /
+        #    配图位图下载失败时产物缺图，**不写缓存**，否则服务恢复后因指纹不变
+        #    永远命中残缺 PDF（旧实现 PDF 链完全没有这道守卫）。
+        render_stats = prep.get("render_stats") or {}
+        degraded = (render_stats.get("failed", 0) > 0
+                    or prep.get("ai_image_pending", 0) > 0
+                    or prep.get("ai_image_download_pending", 0) > 0)
+
+        if not degraded:
+            import os as _os
+            # 落盘到 EXPORTS_DIR（缓存行只记路径，与 DOCX 一致；临时目录会被清理）
+            out_path = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{pdf_content_hash[:8]}.pdf"
+            # ✅ BUG 修复（2026-10-14 · P0）：与 DOCX 同口径注册「在飞产物」。
+            #    PDF 的 out_path 后缀是 .pdf（不含 .tmp.），落在 _gc_orphan_exports
+            #    的扫描范围内；replace 成功到 commit 之间的窗口若被不同配置的并发
+            #    DOCX/PDF 导出触发 GC，会被误判孤儿删除 → 缓存行永久指向已删文件。
+            _export_inflight_register(out_path)
+            # ✅ BUG 修复（2026-10-05 · F-1，交付物损坏）：旧实现
+            #    `out_path.write_bytes(pdf_bytes)` **非原子**——并发同指纹 PDF 导出、
+            #    或写盘中途崩溃/磁盘满时，都会残留**半截 PDF** 在目标路径。
+            #    下一次同指纹导出会命中缓存（size>0 守卫拦不住 >0 字节的半截文件），
+            #    直接 FileResponse 返回给用户 → 交付文档损坏。DOCX 分支早已用
+            #    `os.replace` 原子替换 + tmp 文件（见 export_docx），PDF 分支漏做。
+            #    现改为「先写唯一 tmp → DB INSERT 落盘路径 → os.replace 原子替换」。
+            #    失败一律清理 tmp，不留孤儿。
+            _tmp_pdf = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{pdf_content_hash[:8]}.{uuid.uuid4().hex}.tmp.pdf"
+            try:
+                _tmp_pdf.write_bytes(pdf_bytes)
+                # ✅ 2026-10-06：顺序治理 —— **先原子替换落盘、再写缓存行**（与 DOCX
+                #    分支同序）。旧实现是「INSERT + commit → os.replace」，替换失败时
+                #    DB 已指向一个**并不存在**的 out_path → 留下一行僵尸缓存
+                #    （/cache-status 记为 stale、prune 才清），且下一次同指纹导出会
+                #    先走一次「exists() 失败 → 全量重建」的无效往返。
+                # ✅ 与 DOCX 分支同款循环重试：Windows 上 out_path 可能被 Word/
+                #    预览窗口占用（WinError 32）；3 次退避重试。
+                _replaced = False
+                for _attempt in range(3):
+                    try:
+                        _os.replace(_tmp_pdf, out_path)
+                        _replaced = True
+                        break
+                    except PermissionError:
+                        if _attempt < 2:
+                            await asyncio.sleep(0.3 * (_attempt + 1))
+                if not _replaced:
+                    logger.warning(
+                        "PDF 缓存原子替换 3 次重试均失败（scheme=%s, out=%s），"
+                        "本次不写入导出缓存（响应体仍为完整 PDF）",
+                        scheme_id[:8], out_path.name)
+                    _tmp_pdf.unlink(missing_ok=True)
+                else:
+                    # ✅ 收口（2026-10-14）：INSERT → commit → prune → commit 收敛为
+                    #    _persist_export_cache_row（与 DOCX 分支同一实现）。
+                    # ✅ P1（2026-10-04）：cache_key 补格式后缀。旧实现 DOCX 与 PDF 写入
+                    #    **逐字相同**的 cache_key，而 cache_key 是 `/cache-status` 与运维
+                    #    排查按格式辨识缓存行的唯一人读标识 —— 同一方案同一指纹下两行完全
+                    #    同名，无法区分哪个是 docx、哪个是 pdf，清理/核对时极易误删。
+                    #    只改 PDF 侧：DOCX 现有键逐字不变 → 既有缓存行零失效。
+                    #    注意：查缓存走 (scheme_id, config_hash, content_fingerprint)
+                    #    三元组，cache_key 不参与命中判定 → 本键名不影响任何命中。
+                    await _persist_export_cache_row(
+                        db, scheme=scheme, scheme_id=scheme_id,
+                        config_hash=config_hash,
+                        content_fingerprint=pdf_content_hash,
+                        cache_key=f"{scheme_id}_{config_hash[:8]}|pdf",
+                        out_path=out_path, what="export_cache 写入(PDF)")
+            except Exception as e:
+                # 缓存写入失败不得影响本次交付（用户仍拿到完整 PDF）
+                try:
+                    _tmp_pdf.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                logger.warning("PDF 导出缓存写入失败（不影响本次交付）: %s", e, exc_info=True)
+
+        from fastapi.responses import Response
+        # ✅ 加固（D1）：PDF 链路同样合流跨章借图计数（与 DOCX 同口径）
+        _merge_borrowed_stats(render_stats, fix_stats)
+        headers = {
+            "Content-Disposition": _attachment_disposition(export_filename),
+            "X-Chart-Render-Stats": json.dumps(render_stats, ensure_ascii=False),
+            # ✅ 与 DOCX 对齐：补 X-Cache-Status，缺图时标记 degraded（旧实现完全没有）
+            "X-Cache-Status": "degraded" if degraded else "miss",
+            **name_headers,
+        }
+        if fix_stats:
+            headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
+        # ✅ G12：PDF 成稿同样落一条审核留痕
+        # ✅ 收口（2026-10-14）：留痕 → 回收 → 注销 统一走 _finalize_export_delivery。
+        #    GC 不传 protect：PDF 响应体是**内存字节**，本次产物不再依赖磁盘文件。
+        #    覆盖三类残留：os.replace 成功但 INSERT 抛异常的 out_path（盘上孤儿）、
+        #    陈旧缓存行指向的文件、历史 .tmp.* 临时产物（超过宽限期）。
+        #    ⚠️ inflight_path 用条件表达式：out_path 仅在 `if not degraded:` 分支内
+        #    定义，降级路径（缺图不写缓存）下该变量未绑定，直接引用会抛
+        #    UnboundLocalError；None 表示无注册可注销（helper 内部判定）。
+        await _finalize_export_delivery(
+            db, scheme_id=scheme_id, kind="pdf", round_no=round_no,
+            export_filename=export_filename,
+            inflight_path=(out_path if not degraded else None))
+        return Response(
+            content=pdf_bytes,
+            media_type=_PDF_MIME,
+            headers=headers,
+        )
+    finally:
+        _export_dedup_release(_lk)
 
 
 @router.get("/cache-status")

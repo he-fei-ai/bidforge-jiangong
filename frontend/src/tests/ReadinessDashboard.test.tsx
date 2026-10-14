@@ -801,3 +801,35 @@ describe("ReadinessDashboard · R55 陈旧 AI 结论告警", () => {
     expect(container.textContent || "").not.toContain("本次总检未采用");
   });
 });
+// ===========================================================================
+// ✅ R76（2026-10-13）：后端 2026-10-12 P1-6 新增 failed_sources（读取失败而未
+//    参与评分的来源），前端此前类型未声明、UI 零消费 —— 来源系统故障时总分 /
+//    放行结论可能失真且用户毫无感知。锁两例：有失败源必出告警（错误级，与 stale
+//    的警告级区分）；无失败源不得出现该告警。
+// ===========================================================================
+describe("ReadinessDashboard · R76 来源读取失败告警", () => {
+  it("failed_sources 非空 → 错误级告警列出读取失败的数据来源（中文名映射）", async () => {
+    (complianceApi.overview as any).mockResolvedValue({
+      data: { ...mocks.OVERVIEW, failed_sources: ["consistency", "expert_review"] },
+    });
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    fireEvent.click(btnByText(container, "一键总检")!);
+    await waitFor(() =>
+      expect(container.textContent || "").toContain("本次总检读取失败"));
+    const t = container.textContent || "";
+    expect(t).toContain("一致性审计（AI）");
+    expect(t).toContain("专家论证预检（AI）");
+    expect(t).toContain("系统故障");
+    // 与 stale_ai_sources 的「正文已变更」语义严格区分（两类问题不可混为一谈）
+    expect(t).not.toContain("正文已变更");
+  });
+
+  it("无 failed_sources（正常/旧后端）→ 不渲染该告警", async () => {
+    const { container } = render(<App><ReadinessDashboard schemeId="s1" /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    fireEvent.click(btnByText(container, "一键总检")!);
+    await waitFor(() => expect(container.textContent || "").toContain("引用废止标准"));
+    expect(container.textContent || "").not.toContain("本次总检读取失败");
+  });
+});

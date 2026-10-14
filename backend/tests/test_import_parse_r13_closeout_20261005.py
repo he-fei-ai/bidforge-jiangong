@@ -24,6 +24,7 @@ from pathlib import Path
 
 import app.db as _appdb
 import app.routers.global_facts as gf
+import app.routers.global_facts_docs as gfd
 import app.services.doc_pipeline.pipeline as pipe
 import pytest
 from app.db import get_conn, init_db
@@ -462,9 +463,18 @@ def _find_func(module_src: str, name: str) -> ast.AST:
     raise AssertionError(f"未找到函数 {name}")
 
 
+def _find_func_anywhere(name: str) -> ast.AST:
+    """在 global_facts.py 和 global_facts_docs.py 里找函数（拆分后函数可能在新文件）。"""
+    for mod in (gf, gfd):
+        try:
+            return _find_func(Path(mod.__file__).read_text(encoding="utf-8"), name)
+        except AssertionError:
+            continue
+    raise AssertionError(f"在 global_facts 与 global_facts_docs 中均未找到函数 {name}")
+
+
 def test_persist_parse_result_has_no_bare_execute():
-    src = Path(gf.__file__).read_text(encoding="utf-8")
-    node = _find_func(src, "_persist_parse_result")
+    node = _find_func_anywhere("_persist_parse_result")
     assert _bare_execute_calls(node) == [], (
         "_persist_parse_result 内出现裸 await db.execute —— 返回值又会被丢弃")
 
@@ -478,9 +488,8 @@ def test_ingest_parse_result_has_no_bare_execute():
 
 def test_upload_write_statements_are_guarded():
     """上传链路的 INSERT / 同名替换 DELETE 必须接住返回值并判空。"""
-    src = Path(gf.__file__).read_text(encoding="utf-8")
-    node = _find_func(src, "upload_documents")
-    body = ast.get_source_segment(src, node) or ""
+    node = _find_func_anywhere("upload_documents")
+    body = ast.get_source_segment(Path(gfd.__file__).read_text(encoding="utf-8"), node) or ""
     assert "ins_cur = await db.execute" in body, "上传 INSERT 未接返回值"
     assert "del_cur = await db.execute" in body, "同名替换 DELETE 未接返回值"
     assert "if ins_cur is None" in body and "if del_cur is None" in body
@@ -581,8 +590,7 @@ class TestRemainingCursorGuards:
 
 def test_remaining_paths_have_no_bare_execute():
     """三条补漏路径均不得再出现语句级裸 execute（防回退，同 section G 手法）。"""
-    src = Path(gf.__file__).read_text(encoding="utf-8")
     for name in ("delete_document", "update_document_category", "preview_document"):
-        node = _find_func(src, name)
+        node = _find_func_anywhere(name)
         assert _bare_execute_calls(node) == [], (
             f"{name} 内出现裸 await db.execute —— R13 返回值又会被丢弃")

@@ -101,10 +101,18 @@ def test_f1_pdf_replace_loop_retries_on_permission_error():
 
 def test_f1_pdf_cache_hit_guards_size_gt_zero():
     """缓存命中守卫必须同时校验存在 + size>0（旧实现的 size>0 已拦 >0 半截文件——
-    但 F-1 修好后不再产生半截文件，此守卫保留作纵深）。"""
+    但 F-1 修好后不再产生半截文件，此守卫保留作纵深）。
+
+    ✅ 更新（2026-10-14 · P2）：可用判据已收敛到 `_cache_row_viable`（单一事实源），
+    避免「命中判据 / 保留判据」分叉（0 字节僵尸产物此前会占用 5 份保留配额）。
+    断言改为两点合取：调用点必须走该 helper，且 helper 本体必须含 size>0 检查。
+    """
     src = _fn(EX_PATH, "export_pdf")
-    assert "Path(cached[0]).stat().st_size > 0" in src, (
-        "PDF 缓存命中守卫缺 size>0 检查（纵深防御回退）")
+    assert "_cache_row_viable(cached[0])" in src, (
+        "PDF 缓存命中未走 _cache_row_viable 可用判据（F-1 纵深防御回退）")
+    helper = _fn(EX_PATH, "_cache_row_viable")
+    assert "st_size > 0" in helper, (
+        "_cache_row_viable 缺 size>0 检查（0 字节产物会被当成有效缓存）")
 
 
 # =============================================================================

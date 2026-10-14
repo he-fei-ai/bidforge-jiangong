@@ -76,16 +76,27 @@ def _ensure_registered():
 # ① 全域覆盖不变量
 # =====================================================================
 class TestGlobalCoverage:
+    # ✅ 2026-10-11（测试隔离护栏）：其它测试文件（如 test_prompt_governance
+    #   的 contract_test_*、test_prompt_variables_r6 的 r6_test_*）会注册临时探针
+    #   模板。它们各自有 autouse fixture 清理，但 pytest 全量顺序不可控 ——
+    #   排除探针键前缀防串扰（与 test_prompt_techdebt_r38 的 probe_prefixes 同口径）。
+    _PROBE_PREFIXES = ("contract_test_", "r6_test_", "__probe", "_test_prompt_",
+                       "__r39_probe")
+
     def test_every_registered_prompt_has_contract(self):
         from app.services.ai.prompts._registry import _ALL_PROMPTS, PROMPT_VARIABLE_CONTRACTS
-        missing = sorted(set(_ALL_PROMPTS) - set(PROMPT_VARIABLE_CONTRACTS))
+        missing = sorted(
+            k for k in set(_ALL_PROMPTS) - set(PROMPT_VARIABLE_CONTRACTS)
+            if not k.startswith(self._PROBE_PREFIXES))
         assert not missing, "已注册但无契约的模板：%s" % missing
 
     def test_no_prompt_has_undeclared_requires(self):
         """``requires`` 不得为 None —— 未声明会被「跳过校验」掩盖（R38 D6 语义）。"""
         from app.services.ai.prompts._registry import _ALL_PROMPTS
-        undeclared = sorted(k for k, v in _ALL_PROMPTS.items()
-                            if v.get("requires") is None)
+        undeclared = sorted(
+            k for k, v in _ALL_PROMPTS.items()
+            if v.get("requires") is None
+            and not k.startswith(self._PROBE_PREFIXES))
         assert not undeclared, "requires 未声明（跳过契约校验）的模板：%s" % undeclared
 
     def test_contract_has_no_orphan_keys(self):

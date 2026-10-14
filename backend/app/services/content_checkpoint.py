@@ -40,6 +40,7 @@ from app.services.content_fuzzy import (
     placeholder_nonrewritable_patterns,
     placeholder_rewritable_patterns,
 )
+from app.services.fence_common import fence_char_ranges as _fence_char_ranges
 from app.services.scheme_classification import (
     is_hazardous_by_keywords,
     match_category_keywords,
@@ -922,34 +923,20 @@ def _build_base_code_index() -> tuple:
 
 BASE_CODE_INDEX, AMBIGUOUS_BASES = _build_base_code_index()
 
-#: 围栏行（``` / ~~~，允许 ≤3 前导空格，与 CommonMark 口径一致）
-_FENCE_LINE_RE = re.compile(r"^[ \t]{0,3}(```+|~~~+)", re.MULTILINE)
-
 
 def _fence_ranges(text: str) -> list:
     """返回正文中所有围栏代码块的字符区间 ``[(start, end), ...]``。
 
-    状态机配对：同类围栏标记（``` 与 ~~~ 不混）且长度不小于开围栏时才闭合。
+    ✅ R76（2026-10-13）：本函数与 ``content_rewrite._split_fences``、
+    ``content_polish._FENCE_SPLIT_RE`` 原是「这块围栏到哪结束」的三份独立实现，
+    且**都不排除带信息串的行** —— 于是 Mermaid 源码里出现 ```` ```python ```` 这类
+    行时会被当成收尾，其后的图表代码滑出保护区被 ``fix_bare_standard_codes`` 改写
+    （与图表侧 BUG-F2 同族）。现统一走 ``fence_common.fence_char_ranges``（同种字符
+    + 信息串必须为空 + 长度容错，与登记/改写/导出三侧同一判据）。
     未闭合时区间断到文末（与 ``auto_fix_unclosed_fences`` 的既有兜底兼容）。
     区间外的才是可修改正文 —— 避免改写 Mermaid / chart-json 载荷。
     """
-    hits = list(_FENCE_LINE_RE.finditer(text))
-    ranges: list = []
-    i, n = 0, len(hits)
-    while i < n:
-        opener = hits[i]
-        mark, olen = opener.group(1)[0], len(opener.group(1))
-        close_idx = None
-        for j in range(i + 1, n):
-            if hits[j].group(1)[0] == mark and len(hits[j].group(1)) >= olen:
-                close_idx = j
-                break
-        if close_idx is None:
-            ranges.append((opener.start(), len(text)))
-            break
-        ranges.append((opener.start(), hits[close_idx].end()))
-        i = close_idx + 1
-    return ranges
+    return _fence_char_ranges(text)
 
 
 def fix_bare_standard_codes(text: str) -> tuple:

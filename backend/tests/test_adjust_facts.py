@@ -106,14 +106,14 @@ def test_validate_adjust_ops_non_list():
 @pytest.mark.asyncio
 async def test_adjust_facts_requires_instruction(db_conn):
     with pytest.raises(HTTPException) as ei:
-        await gf.adjust_facts({"instruction": "  "}, db=db_conn)
+        await gf.adjust_facts(gf.AdjustRequest(instruction="  "), db=db_conn)
     assert ei.value.status_code == 400
 
 
 @pytest.mark.asyncio
 async def test_adjust_facts_no_scope_400(db_conn):
     with pytest.raises(HTTPException) as ei:
-        await gf.adjust_facts({"instruction": "改值", "scheme_id": "", "project_id": ""},
+        await gf.adjust_facts(gf.AdjustRequest(instruction="改值", scheme_id="", project_id=""),
                               db=db_conn)
     assert ei.value.status_code == 400
 
@@ -122,7 +122,7 @@ async def test_adjust_facts_no_scope_400(db_conn):
 async def test_adjust_facts_empty_facts_400(db_conn):
     _pid, sid = await _seed_scheme(db_conn)
     with pytest.raises(HTTPException) as ei:
-        await gf.adjust_facts({"instruction": "改值", "scheme_id": sid}, db=db_conn)
+        await gf.adjust_facts(gf.AdjustRequest(instruction="改值", scheme_id=sid), db=db_conn)
     assert ei.value.status_code == 400
 
 
@@ -140,7 +140,7 @@ async def test_adjust_facts_preview_does_not_write(db_conn, monkeypatch):
         "summary": "把基坑深度改为 5.8m",
     })
     res = await gf.adjust_facts(
-        {"instruction": "基坑深度改成5.8m", "scheme_id": sid}, db=db_conn)
+        gf.AdjustRequest(instruction="基坑深度改成5.8m", scheme_id=sid), db=db_conn)
     assert res["applied"] is None
     assert len(res["operations"]) == 1
     # 库中值未变
@@ -165,10 +165,11 @@ async def test_adjust_facts_apply_update(db_conn, monkeypatch):
     async def should_not_call_ai(*args, **kwargs):
         raise AssertionError("已确认操作计划不应再次调用 AI")
     monkeypatch.setattr(gf, "collect_json_response", should_not_call_ai)
-    res = await gf.adjust_facts({
-        "instruction": "基坑深度改成5.8m", "scheme_id": sid, "apply": True,
-        "operations": [{"op": "update", "fact_id": "f1", "value": "5.8m"}],
-    }, db=db_conn)
+    res = await gf.adjust_facts(
+        gf.AdjustRequest(
+            instruction="基坑深度改成5.8m", scheme_id=sid, apply=True,
+            operations=[{"op": "update", "fact_id": "f1", "value": "5.8m"}]),
+        db=db_conn)
     assert res["applied"]["updated"] == 1
     cur = await db_conn.execute("SELECT content FROM global_facts WHERE id='f1'")
     row = await cur.fetchone()
@@ -187,7 +188,7 @@ async def test_adjust_facts_apply_add_and_delete(db_conn, monkeypatch):
         "summary": "删旧增新",
     })
     res = await gf.adjust_facts(
-        {"instruction": "删掉旧事实并新增项目经理", "scheme_id": sid, "apply": True},
+        gf.AdjustRequest(instruction="删掉旧事实并新增项目经理", scheme_id=sid, apply=True),
         db=db_conn)
     assert res["applied"]["deleted"] == 1
     assert res["applied"]["added"] == 1
@@ -213,5 +214,5 @@ async def test_adjust_facts_ai_failure_maps_502(db_conn, monkeypatch):
     monkeypatch.setattr(gf, "collect_json_response", boom)
 
     with pytest.raises(HTTPException) as ei:
-        await gf.adjust_facts({"instruction": "改值", "scheme_id": sid}, db=db_conn)
+        await gf.adjust_facts(gf.AdjustRequest(instruction="改值", scheme_id=sid), db=db_conn)
     assert ei.value.status_code == 502

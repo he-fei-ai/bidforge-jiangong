@@ -1330,6 +1330,11 @@ KNOWN_SCENES: dict[str, str] = {
     "content_continue": "正文续写扩充",
     "content_shrink": "正文压缩",
     "word_budget_alloc": "章节字数预算分配",
+    "content_plan": "正文离散编排",
+    # ✅ R77（2026-10-14）：standard_report 检出 error 级事实冲突后的
+    #    「AI 定点编辑 + 唯一命中才替换」修复调用点（content_fact_autofix）。
+    #    仅在检出冲突的章节触发（无冲突章节零调用），需可单独观测与指定模型。
+    "content_fact_autofix": "正文事实冲突定点修复",
     # —— 事实 / 项目信息 ——
     "facts_extract": "全局事实提取",
     # ✅ 2026-09-30 第十三轮：知识库补充 / 最终整理两个新增 AI 调用点。
@@ -1344,7 +1349,12 @@ KNOWN_SCENES: dict[str, str] = {
     "bid_section_merge": "项目信息分片合并",
     # —— 一致性 ——
     "consistency_scan": "全文一致性扫描",
-    "consistency_repair": "一致性问题修复",
+    # ✅ R57（2026-10-09）：原 "consistency_repair" 同时承载「定点编辑」与
+    #    「整章重写」两条成本/成功率差异极大的路径，无法分别观测与分别
+    #    指定模型。现拆分：consistency_repair_edits = 定点编辑。
+    #    存量 ai_scene_routes 行不受影响（scene_routes 有白名单外兜底分支）。
+    "consistency_repair_edits": "一致性问题修复·定点编辑",
+    "consistency_repair": "一致性问题修复·整章重写",
     "consistency_arbitrate": "冲突裁决",
     # —— 审核 / 预检 ——
     "compliance_check": "规范符合性检查",

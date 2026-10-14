@@ -134,7 +134,7 @@ _reg("chart_json_fix", "charts", "图表JSON数据修复（分类型专项）", 
   · 数据合理性：修复重构人数矩阵时保持"先升后降"峰谷形态（准备少→主体峰值→收尾回落），
     主体施工阶段应为全案峰值；阶段名/工种名必须是具体工程分项与工种，不得写"阶段一""工种A"
 - layout（总平面布置图）：{"type":"layout","title":"...","zones":[{"id":"ASCII标识","name":"区域名","x":0,"y":0,"w":1,"h":1}]}，id 仅 ASCII 字母数字下划线，坐标为非负数，至少 2 个区域且不得大面积重叠
-- flowchart（施工/工艺横向流程图）：{"type":"flowchart","title":"...","direction":"LR","steps":[{"id":"s1","label":"施工准备","variant":"start"},{"id":"s2","label":"主体施工","variant":"process"}],"edges":[{"from":"s1","to":"s2"}]}，steps 3-10 个且 id 唯一（ASCII），variant 仅可取 start/process/highlight/decision/end，edges 的 from/to 必须引用已有 id，分支边必须带 label（如"通过"/"不通过"）
+- flowchart（施工/工艺流程图，横竖双模式：纯线性单链 steps ≤8 用 "LR"、>8 用 "TD"，含 decision 分支用 "TD"）：{"type":"flowchart","title":"...","direction":"TD","steps":[{"id":"s1","label":"施工准备","variant":"start"},{"id":"s2","label":"主体施工","variant":"process"}],"edges":[{"from":"s1","to":"s2"}]}，steps 3-15 个且 id 唯一（ASCII），variant 仅可取 start/process/highlight/decision/end，edges 的 from/to 必须引用已有 id，分支边必须带 label（如"通过"/"不通过"）
 - timeline（时间轴）：{"type":"timeline","title":"...","milestones":[{"name":"事件名","date":"日期标签"}]}，至少 2 个里程碑；date 为 YYYY-MM-DD 或相对日期（如 2026年3月、第30天、T+7）；status 仅可为 completed/in_progress/pending
 - architecture（组织架构图）：{"type":"architecture","title":"...","root":{"label":"名称","children":[...]}}，单一根节点，层级不超过 4 层，同级节点不得重名；可为履约核心的 1 个节点加 "highlight":true（橙色高亮）
 - comparison（对比图 / 占比）：**必须**输出下面两种可渲染结构之一
@@ -187,11 +187,13 @@ _reg("chart_mermaid_fix_flowchart", "charts", "流程图专项修复", """你是
 8. **P2 分支缺语义标签**：菱形节点流出的每条连线都必须带条件（写法：连线中间用竖线包裹条件文字，如 `A1` 竖线 合格 竖线 `B1`）
 9. **P2 分支不汇合 / 孤立节点**：两条判定分支最终汇合到同一后续节点；孤立节点补连线或删除
 10. **P2 样式指令**：classDef、style、class、linkStyle、`%%{init: ...}%%` 主题块 → 全部删除
-11. **P3 节点超限**：节点多于 10 个 → 合并同类工序，保留「准备 → 主体 → 验收」主干
+11. **P3 节点超限**：节点多于 15 个 → 合并同类工序，保留「准备 → 主体 → 验收」主干
 
 ## 二、工程逻辑要求
-- 首行 `flowchart TD`（左右流向更清晰时用 `flowchart LR`）
-- 节点 3-10 个（线性主干 5-9 个），节点文字 ≤12 字且必须是本项目具体工序
+- 方向声明（统一样式规范 · 双模式）：纯线性单链节点 ≤8 用 `flowchart LR`（标签 ≤10 字）、
+  >8 用 `flowchart TD`（标签 ≤20 字），含检验判定菱形分支的一律 `flowchart TD`；
+  修复语境从保守 —— 原图方向声明合法时**不因定向规则翻转**，仅在缺首行声明需补写时按上述规则选
+- 节点 3-15 个（线性主干建议 5-9 个），节点文字必须是本项目具体工序
   （如"土方开挖""支护桩施工""防水层铺设"），严禁"步骤一""阶段二"等空洞标签
 - 检验/验收判定用菱形节点，分支成对出现且带语义标签，最终汇合同一后继
 - 连线方向符合施工顺序，不得出现逆向箭头闭环

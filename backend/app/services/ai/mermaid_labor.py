@@ -6,17 +6,43 @@
 from __future__ import annotations
 
 import logging
+import os
 from io import BytesIO
 
 from PIL import Image, ImageDraw
 
 from .mermaid_common import (
+    _draw_text_vertical_center,
+    _fit_text_with_ellipsis,
     _image_font,
     _image_to_stream,
     _render_hq,
+    paper_floor_note,
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# ✅ 劳动力图标签竖排守卫（2026-10-10 · 收口 R59 §9 遗留项④「其它图表接竖排」安全切片）
+#   评估结论：4 类候选图里仅「劳动力配置图」存在真正窄列长标签瓶颈（左侧工种名列 +
+#   随阶段数变窄的底部工期列），且旧实现用 `[:8]/[:10]` 硬切（比省略号更糟）。
+#   本切片：① 所有硬切升级为省略号感知（`_fit_text_with_ellipsis`）；② 底部折线图
+#   x 轴工期列在**列变窄时竖排**（图表轴标签拥挤即竖排的惯例），列够宽则回退横排省略号；
+#   ③ 顶部堆叠图/左侧列/图例保持横排省略号（几何/语义不匹配竖排，强行竖排会误导阅读）。
+ENV_LABOR_PHASE_VERTICAL = "LABOR_PHASE_VERTICAL"   # 底部工期列窄时竖排（默认开）
+_LABOR_PHASE_VERTICAL_DEFAULT = True
+_LABOR_VERTICAL_THRESHOLD = 120   # 列宽(px@2.5x) 低于此值才竖排，否则横排省略号
+_LABOR_PHASE_LABEL_H = 130       # 竖排工期列预留竖向带高度（px@2.5x，约容 7 字）
+_LABOR_LEGEND_RESERVE = 36       # 图例占用底部高度（px@2.5x）
+
+
+def _labor_phase_vertical() -> bool:
+    """底部工期列是否可竖排（env 显式关才关，非法/缺省回落默认开）。"""
+    raw = str(os.environ.get(ENV_LABOR_PHASE_VERTICAL, "") or "").strip().lower()
+    if raw in ("0", "false", "off", "no"):
+        return False
+    return _LABOR_PHASE_VERTICAL_DEFAULT
 
 
 
@@ -138,7 +164,11 @@ def _render_labor_image_v2(labor_data: dict) -> BytesIO | None:
     right_chart_h = right_chart_h_each * 2 + sub_gap
 
     total_w = padding * 2 + left_w + sub_gap + right_w
-    total_h = title_h + padding * 2 + max(left_chart_h, right_chart_h) + int(40 * scale)
+    # ✅ 竖排工期列：开启时在底部预留竖向带（band），图例下移其下，互不重叠
+    _phase_v = _labor_phase_vertical()
+    _phase_band = int(_LABOR_PHASE_LABEL_H * scale) if _phase_v else 0
+    total_h = (title_h + padding * 2 + max(left_chart_h, right_chart_h)
+               + _phase_band + int(_LABOR_LEGEND_RESERVE * scale))
 
     img = Image.new("RGB", (total_w, total_h), "white")
     draw = ImageDraw.Draw(img)
@@ -168,7 +198,9 @@ def _render_labor_image_v2(labor_data: dict) -> BytesIO | None:
     for i, (cat, val) in enumerate(zip(categories, cat_totals, strict=False)):
         cy = left_y0 + int(36 * scale) + i * cat_row_h
         # 标签
-        draw.text((left_x0, cy - int(4 * scale)), str(cat)[:10], fill="#1E3A5F", font=font_label)
+        # ✅ 硬切 [:10] 升级为省略号感知（列够宽则完整、不够则 `…` 收口）
+        _cat_label = _fit_text_with_ellipsis(draw, str(cat), font_label, label_w - int(8 * scale))
+        draw.text((left_x0, cy - int(4 * scale)), _cat_label, fill="#1E3A5F", font=font_label)
         # 柱
         bar_w = (val / max_cat) * bar_area_w if max_cat > 0 else 0
         color = palette[i % len(palette)]
@@ -248,12 +280,13 @@ def _render_labor_image_v2(labor_data: dict) -> BytesIO | None:
                     fill="white",
                     font=font_value,
                 )
-        # 阶段标签
-        bbox = draw.textbbox((0, 0), str(phases[p]), font=font_value)
+        # 阶段标签（顶部堆叠图：列间间距小，保持横排省略号，不竖排以免挤压）
+        _ph = _fit_text_with_ellipsis(draw, str(phases[p]), font_value, col_w - int(4 * scale))
+        bbox = draw.textbbox((0, 0), _ph, font=font_value)
         tw = bbox[2] - bbox[0]
         draw.text(
             (cx + cw / 2 - tw / 2, sc_y0 + sc_h + int(4 * scale)),
-            str(phases[p])[:8],
+            _ph,
             fill="#374151",
             font=font_value,
         )
@@ -317,18 +350,29 @@ def _render_labor_image_v2(labor_data: dict) -> BytesIO | None:
             fill="#1E3A5F",
             font=font_axis,
         )
-        # X 轴标签
-        bbox2 = draw.textbbox((0, 0), str(phases[i]), font=font_value)
-        tw2 = bbox2[2] - bbox2[0]
-        draw.text(
-            (x - tw2 / 2, lc_y0 + lc_h + int(4 * scale)),
-            str(phases[i])[:8],
-            fill="#374151",
-            font=font_value,
-        )
+        # X 轴标签（底部折线图）：列变窄时竖排，否则横排省略号
+        _col_w_b = lc_w / max(n_phases, 1)
+        _ph_b = str(phases[i])
+        if _phase_v and _col_w_b < _LABOR_VERTICAL_THRESHOLD * scale:
+            _draw_text_vertical_center(
+                draw,
+                (x - _col_w_b / 2, lc_y0 + lc_h + int(4 * scale),
+                 x + _col_w_b / 2, total_h - int(_LABOR_LEGEND_RESERVE * scale) - int(6 * scale)),
+                _ph_b, font_value, "#374151", char_gap=int(4 * scale),
+            )
+        else:
+            _ph_b = _fit_text_with_ellipsis(draw, _ph_b, font_value, _col_w_b - int(4 * scale))
+            bbox2 = draw.textbbox((0, 0), _ph_b, font=font_value)
+            tw2 = bbox2[2] - bbox2[0]
+            draw.text(
+                (x - tw2 / 2, lc_y0 + lc_h + int(4 * scale)),
+                _ph_b,
+                fill="#374151",
+                font=font_value,
+            )
 
     # ============== 图例 ==============
-    legend_y = total_h - int(32 * scale)
+    legend_y = total_h - int(_LABOR_LEGEND_RESERVE * scale) + int(4 * scale)
     legend_x = padding
     for c, cat in enumerate(categories):
         color = palette[c % len(palette)]
@@ -345,7 +389,7 @@ def _render_labor_image_v2(labor_data: dict) -> BytesIO | None:
         )
         draw.text(
             (legend_x + int(18 * scale), legend_y - int(12 * scale)),
-            str(cat)[:8],
+            _fit_text_with_ellipsis(draw, str(cat), font_legend, int(86 * scale)),
             fill="#1E3A5F",
             font=font_legend,
         )
@@ -354,6 +398,13 @@ def _render_labor_image_v2(labor_data: dict) -> BytesIO | None:
             legend_x = padding
             legend_y += int(16 * scale)
 
+    paper_floor_note(
+        "劳动力图",
+        [font_title, font_section, font_label, font_value, font_axis, font_legend],
+        img.size[0], img.size[1],
+        primary=[font_label],
+        suggest="（工种名/工期轴是主文字）",
+    )
     result_stream = _image_to_stream(img)
     size_kb = len(result_stream.getvalue()) // 1024
     logger.info(

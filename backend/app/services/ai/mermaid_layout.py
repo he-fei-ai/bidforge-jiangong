@@ -18,6 +18,7 @@ from .mermaid_common import (
     _image_font,
     _image_to_stream,
     _render_hq,
+    paper_floor_note,
 )
 
 logger = logging.getLogger(__name__)
@@ -130,7 +131,7 @@ def _render_layout_image_v2(data: dict, title: str = "", scale: float = 2.5) -> 
     rows = int(math.ceil(n / cols))
 
     # 区域尺寸（乘以 scale 超采样）
-    zone_w = int(220 * scale)
+    zone_w = int(260 * scale)
     zone_h = int(110 * scale)
     h_gap = int(32 * scale)
     v_gap = int(48 * scale)
@@ -352,6 +353,13 @@ def _render_layout_image_v2(data: dict, title: str = "", scale: float = 2.5) -> 
             legend_x = padding + int(50 * scale)
             legend_y += int(20 * scale)
 
+    paper_floor_note(
+        "布局图",
+        [font_title, font_zone, font_desc, font_legend],
+        img.size[0], img.size[1],
+        primary=[font_zone],
+        suggest="（网格 %d×%d，区域名是主文字）" % (cols, rows),
+    )
     size_kb = (img.size[0] * img.size[1] * 3) // 1024  # RGB = 3 bytes/pixel
     logger.info(
         "[PIL v2渲染] 布局图渲染完成: 区域=%d 网格=%dx%d 尺寸=%dKB DPI=300",

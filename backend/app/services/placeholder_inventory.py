@@ -368,9 +368,10 @@ async def build_rerun_plan(scheme_id: str, db) -> dict:
     except Exception as e:
         logger.warning("重跑计划读取全局事实失败（该源降级跳过）: %s", e)
     try:
+        from app.services.facts_extractor import SCHEME_PROJECT_ID_SQL
         cur = await db.execute(
             "SELECT content FROM bid_analysis_items"
-            " WHERE project_id=(SELECT project_id FROM schemes WHERE id=?)"
+            f" WHERE project_id=({SCHEME_PROJECT_ID_SQL})"
             " AND status='success'", (scheme_id,))
         for r in (await cur.fetchall() or []):
             corpus.append(str(r["content"] or ""))

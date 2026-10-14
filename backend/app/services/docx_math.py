@@ -140,7 +140,57 @@ def clean_text(text: str) -> str:
     # ✅ 新增：剪贴板表格标记 / 残留 HTML 表格标签降级为可读纯文本
     #    （修复交付文档出现「<br><br><table><fcel><nl></table>」式乱码）
     out = strip_table_markup(out)
+    # ✅ 2026-10-10（文档质量报告 格式问题5）：Markdown 转义残留还原
+    #    （字面 ``\n`` 黏行 / ``\*`` ``\_`` ``\~`` 裸反斜杠，高置信才动）
+    out = unescape_markdown_literals(out)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Markdown 转义残留还原（2026-10-10 · 文档质量报告 格式问题5）
+# ---------------------------------------------------------------------------
+# AI 输出 / 上传解析中，Markdown 源码的转义序列会以字面形态漏进成稿：
+#   · ``\n`` / ``\t`` —— 源码换行/制表符未还原，正文印出字面反斜杠并黏行；
+#   · ``\*`` ``\_`` ``\~`` ``\` `` —— Markdown 转义的星号/下划线/波浪线/反引号，
+#     成稿印出裸反斜杠。
+# 处理原则（**高置信才动**，宁可不改，不丢内容 · AGENTS.md §3.1.6）：
+#   1. ``\n``/``\t`` 前面不得是字母/数字/反斜杠、后面不得是字母 ——
+#      避免误伤 LaTeX 命令（``\nabla`` / ``\top``）、Windows 路径（``C:\new``）
+#      与已转义反斜杠（``\\n``）；
+#   2. ``\*`` 等标点转义只剥反斜杠保留原字符（Markdown 转义语义）；
+#   3. ``$...$`` / ``$$...$$`` / ``\(...\)`` / ``\[...\]`` 公式跨度**整段跳过**
+#      —— 内部反斜杠交给公式转换器处理，这里绝不触碰。
+_MD_UNESCAPE_NL_TAB_RE = re.compile(
+    r"(?<![A-Za-z0-9\\])\\(?P<ch>[nt])(?![A-Za-z])")
+_MD_UNESCAPE_PUNCT_RE = re.compile(r"(?<![A-Za-z0-9\\])\\([*_~`])")
+# 公式跨度（外层捕获组供 split 使用：偶数段=普通文本，奇数段=公式原文）
+_FORMULA_SPAN_RE = re.compile(
+    r"(\$\$.*?\$\$|\$[^$\n]*?\$|\\\(.+?\\\)|\\\[.+?\\\])", re.S)
+
+
+def unescape_markdown_literals(text: str) -> str:
+    """还原 Markdown 源码转义残留（高置信修复，公式跨度内逐字不动）。
+
+    ✅ 2026-10-10（文档质量报告 格式问题5）：AI 生成的正文里常见字面
+    ``\\n``（黏行）/ ``\\*`` ``\\_``（裸反斜杠）残留 —— 它们是 Markdown 源码
+    的转义序列，导出成稿时原样印出即成乱码。仅当形态高度可信（前后无字母
+    数字、不在公式跨度内）才还原；正常文本中的反斜杠（LaTeX 源码、Windows
+    路径、已转义反斜杠）一律保留。
+    """
+    if not text or "\\" not in text:
+        return text
+
+    def _fix_seg(seg: str) -> str:
+        seg = _MD_UNESCAPE_NL_TAB_RE.sub(
+            lambda m: "\n" if m.group("ch") == "n" else "\t", seg)
+        seg = _MD_UNESCAPE_PUNCT_RE.sub(r"\1", seg)
+        return seg
+
+    parts = _FORMULA_SPAN_RE.split(text)
+    if len(parts) == 1:
+        return _fix_seg(text)
+    # 偶数索引是公式跨度外的普通文本（可修复），奇数索引是公式原文（保留）
+    return "".join(p if i % 2 else _fix_seg(p) for i, p in enumerate(parts))
 
 
 # ---------------------------------------------------------------------------
@@ -651,7 +701,10 @@ def scan_issues(text: str) -> dict:
     """扫描一段文本中的可修复问题，返回统计（供报告展示）。"""
     stats = {"formulas": 0, "block_formulas": 0, "replacement_chars": 0,
              "control_chars": 0, "gbk_mojibake": 0, "latin1_mojibake": 0,
-             "cyrillic": 0}
+             "cyrillic": 0,
+             # ✅ 2026-10-10（文档质量报告 格式问题5）：字面 ``\n`` / ``\*``
+             #    转义残留数（排除公式跨度后计数，与 unescape 修复口径一致）
+             "escape_residue": 0}
     for disp, _, _ in iter_formulas(text):
         stats["formulas"] += 1
         if disp:
@@ -661,6 +714,11 @@ def scan_issues(text: str) -> dict:
     stats["gbk_mojibake"] = len(_MOJIBUKE_GBK_RE.findall(text))
     stats["latin1_mojibake"] = len(_LATIN1_RE.findall(text))
     stats["cyrillic"] = len(_CYRILLIC_SEG_RE.findall(text))
+    # 转义残留只在公式跨度外的普通文本里统计（跨度内不修也不计）
+    outside = "".join(p for i, p in enumerate(_FORMULA_SPAN_RE.split(text))
+                      if i % 2 == 0)
+    stats["escape_residue"] = (len(_MD_UNESCAPE_NL_TAB_RE.findall(outside))
+                               + len(_MD_UNESCAPE_PUNCT_RE.findall(outside)))
     return stats
 
 
@@ -681,4 +739,6 @@ def summarize(text: str) -> str:
         parts.append(f"编码乱码 {s['latin1_mojibake']} 处")
     if s["cyrillic"]:
         parts.append(f"西里尔误植 {s['cyrillic']} 处")
+    if s["escape_residue"]:
+        parts.append(f"转义残留 {s['escape_residue']} 处")
     return "、".join(parts) if parts else "未发现可修复问题"

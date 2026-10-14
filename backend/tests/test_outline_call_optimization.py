@@ -237,7 +237,17 @@ class TestProgrammaticPrecheck:
         assert review["review_mode"] == "programmatic"
 
     async def test_missing_triggers_surgical_patch(self, monkeypatch):
-        """有缺失 → 仅 1 次外科式小调用，章节按 insert_after 合并。"""
+        """有缺失 → 仅 1 次外科式小调用，章节按 insert_after 合并。
+
+        ⚠️ R73b F7 后本用例必须隔离「九大法定章节」维度（与本文件
+        :165 同一做法）：补齐出口现在要**回头复检覆盖**，而 base 只有 2 章，
+        九章未齐 → 一次补齐不可能盖住全部缺口 → 会诚实地落回 AI 审核（2 次调用）。
+        那不是本用例要测的东西（本用例测「补齐只发 1 次小调用」的调用纪律），
+        故关掉九章检查；「补齐未真正盖住缺失却谎报已补齐」由
+        tests/test_outline_title_fix_chain_r73b_20261012.py::TestProgrammaticExitHonesty
+        专测。
+        """
+        monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False)
         calls = []
 
         async def fake_collect(messages, validate_fn=None, **kwargs):

@@ -344,7 +344,7 @@ async def test_clear_all_facts_resets_everything(ctx):
         (pid, sid, "AAA"))
     await db.commit()
 
-    res = await gf.clear_all_facts({"scheme_id": sid}, db)
+    res = await gf.clear_all_facts(gf.ClearFactsRequest(scheme_id=sid), db)
     assert res["ok"] is True and res["deleted"] == 1
     cur = await db.execute("SELECT count(*) FROM global_facts")
     assert (await cur.fetchone())[0] == 0
@@ -357,7 +357,7 @@ async def test_clear_all_facts_requires_scheme(ctx):
     db, pid, sid = ctx
     from fastapi import HTTPException
     with pytest.raises(HTTPException):
-        await gf.clear_all_facts({}, db)
+        await gf.clear_all_facts(gf.ClearFactsRequest(), db)
 
 
 async def test_batch_resolve_includes_simulated(ctx):
@@ -381,7 +381,7 @@ async def test_batch_resolve_includes_simulated(ctx):
          json.dumps([{"file": "doc.docx", "quote": ""}]),
          1, 0.5, 0, 0, "", "basin_depth", "SIM"))
     await db.commit()
-    res = await gf.batch_resolve({"fact_ids": [fid], "scheme_id": sid}, db)
+    res = await gf.batch_resolve(gf.BatchResolveRequest(fact_ids=[fid], scheme_id=sid), db)
     assert res["ok"] is True
     cur = await db.execute(
         "SELECT is_resolved, is_simulated FROM global_facts WHERE id=?", (fid,))

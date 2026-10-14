@@ -557,9 +557,10 @@ describe("canShrinkSection", () => {
     }
   });
 
-  it("word_budget 缺失时按默认 1500 计（与后端 row['word_budget'] or 1500 对齐）", () => {
-    expect(canShrinkSection({ content: "x", word_count: 1951 })).toBe(true);
-    expect(canShrinkSection({ content: "x", word_count: 1950 })).toBe(false);
+  it("word_budget 缺失时按默认 1200 计（R66 与后端 DEFAULT_WORD_BUDGET=标准档对齐）", () => {
+    // 1200 × 1.3 = 1560.0000000000002（IEEE754 两端同 doubles，边界逐字一致）
+    expect(canShrinkSection({ content: "x", word_count: 1561 })).toBe(true);
+    expect(canShrinkSection({ content: "x", word_count: 1560 })).toBe(false);
   });
 });
 

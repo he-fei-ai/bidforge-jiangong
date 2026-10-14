@@ -23,6 +23,8 @@ import hashlib
 import logging
 
 from app.services import review_db
+from app.services.facts_extractor import (FACT_SCOPE_PREDICATE,
+                                          resolve_scheme_project_id)
 
 logger = logging.getLogger("scheme_fingerprint")
 
@@ -45,11 +47,30 @@ async def content_fingerprint(db, scheme_id: str) -> str:
         parts.extend("|".join(str(v) for v in review_db.row_values(row))
                      for row in await review_db.fetch_all(
             db,
+            # ✅ 收敛（2026-10-11 · 跨模块数据链 R70）：此处原为**第四份**内联的
+            #    「方案私有 + 同项目共享」作用域谓词（用 f-string 把
+            #    `scheme_id=? OR (project_id=(SELECT …)` 拆成 3 段字面量拼接）。
+            #    R69 已把该判据收敛为 facts_extractor.FACT_SCOPE_PREDICATE 单一事实源
+            #    （global_facts / export / compliance / input_coverage 全部引用它），
+            #    唯独本文件遗漏 —— 判据改一处漏一处的安全关键分叉。现改为引用常量。
+            #
+            # ⚠️ 参数语义（2026-10-12 修正 · 上一轮收敛引入的真实缺陷）：
+            #    作用域常量的第二个占位符是**项目 ID 本身**；而这里的旧写法是
+            #    一个「由方案 ID 反查项目 ID」的**标量子查询**，第二个占位符填的
+            #    是**方案 ID**。上一轮只换了 SQL 片段、没换参数元组，于是共享半句
+            #    实际在拿方案 ID 去比对项目 ID，恒不成立 ⇒
+            #    **项目共享事实从指纹里整体消失**：共享事实的确认状态/过期状态
+            #    变化都不会改变指纹，总检与一致性审计的「结论已过期」判定
+            #    对共享事实永久失灵（且无任何报错，极难发现）。
+            #    修法：先用单一出口反查到真实项目 ID，再把「方案 ID + 项目 ID」
+            #    两个值按常量约定的顺序传入（与其在 global_facts / export /
+            #    facts_builder 的用法完全一致）。
+            #    ⚠️ 本注释刻意不写具体的 SQL 与参数元组文本：多处护栏按源码子串
+            #    扫描这些内容，写在注释里会让护栏误报（本仓 §5.14 同族教训）。
             "SELECT is_simulated,is_resolved,has_conflict,is_stale,updated_at "
-            "FROM global_facts WHERE scheme_id=? OR (project_id="
-            "(SELECT project_id FROM schemes WHERE id=?) AND "
-            "(scheme_id='' OR scheme_id IS NULL)) ORDER BY rowid",
-            (scheme_id, scheme_id), what="内容指纹：读取全局事实状态"))
+            "FROM global_facts WHERE " + FACT_SCOPE_PREDICATE + " ORDER BY rowid",
+            (scheme_id, await resolve_scheme_project_id(db, scheme_id)),
+            what="内容指纹：读取全局事实状态"))
         sc = await review_db.fetch_one(
             db, "SELECT word_budget FROM schemes WHERE id=?", (scheme_id,),
             what="内容指纹：读取字数预算")

@@ -176,13 +176,18 @@ async def test_upload_limits_defaults():
 
 
 @pytest.mark.asyncio
-async def test_upload_limits_reflect_settings(monkeypatch):
-    """请求时实时读取 settings：改配置即生效，无需重启（动态下发的核心）。"""
-    from app.routers import system as sys_mod
+async def test_upload_limits_reflect_runtime_authority(monkeypatch):
+    """✅ R73 续作 G5：端点读 ``gf.MAX_UPLOAD_*``（运行时权威），monkeypatch 对两侧同时生效。
 
-    monkeypatch.setattr(sys_mod.settings, "upload_max_bytes", 50 * 1024 * 1024)
-    monkeypatch.setattr(sys_mod.settings, "upload_max_files_per_request", 7)
-    monkeypatch.setattr(sys_mod.settings, "upload_max_total_bytes", 99 * 1024 * 1024)
+    旧行为是端点自带 ``_positive_setting`` 直接读 ``settings.upload_*``，与上传路径
+    各读一份 → ``monkeypatch(gf, "MAX_UPLOAD_BYTES", N)`` 时**前端拿旧值、后端按新值**
+    （漂移）。收敛后端点读 ``gf.MAX_UPLOAD_*``，与上传路径同一对象，不再漂移。
+    """
+    from app.routers import global_facts as gf, system as sys_mod
+
+    monkeypatch.setattr(gf, "MAX_UPLOAD_BYTES", 50 * 1024 * 1024)
+    monkeypatch.setattr(gf, "MAX_UPLOAD_FILES_PER_REQUEST", 7)
+    monkeypatch.setattr(gf, "MAX_UPLOAD_TOTAL_BYTES", 99 * 1024 * 1024)
 
     data = await sys_mod.upload_limits()
     assert data["max_upload_bytes"] == 50 * 1024 * 1024
@@ -191,11 +196,17 @@ async def test_upload_limits_reflect_settings(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad", [0, -1, "abc", None])
-async def test_upload_limits_invalid_falls_back(monkeypatch, bad):
-    """非法（非正数/非数值）配置回落到安全默认，绝不因误配关闭守卫。"""
+async def test_upload_limits_does_not_read_settings_directly(monkeypatch):
+    """✅ R73 续作 G5：端点不得再独立读 ``settings.upload_*``（防第三份副本回流）。
+
+    monkeypatch ``settings`` 后端点**不应**反映该改动 —— 配额的运行时权威是
+    ``gf.MAX_UPLOAD_*``，端点只是透传。回落逻辑由 ``global_facts._positive_int_setting``
+    在模块加载时统一兜底，端点不再自带兜底读取器。
+    """
     from app.routers import system as sys_mod
 
-    monkeypatch.setattr(sys_mod.settings, "upload_max_bytes", bad)
+    monkeypatch.setattr(sys_mod.settings, "upload_max_bytes", 5 * 1024 * 1024)
     data = await sys_mod.upload_limits()
-    assert data["max_upload_bytes"] == 30 * 1024 * 1024
+    # 仍反映 gf.MAX_UPLOAD_BYTES 的当前值（30MB 默认，未被 settings monkeypatch 影响）
+    assert data["max_upload_bytes"] == 30 * 1024 * 1024, (
+        "端点仍在独立读 settings.upload_max_bytes（G5 未收敛：应透传 gf.MAX_UPLOAD_BYTES）")

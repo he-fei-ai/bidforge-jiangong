@@ -12,6 +12,7 @@ F1 遗留缺口修复：batch_resolve 不得以「用户显式确认」为由越
 import uuid
 
 import pytest
+from app.models import BatchResolveRequest
 from app.routers.global_facts import batch_resolve
 
 
@@ -55,7 +56,7 @@ async def test_simulated_fact_skipped_by_batch_resolve(db_conn):
                 is_simulated=1, fact_key="foundation_depth")
 
     res = await batch_resolve(
-        {"fact_ids": [fid], "scheme_id": "s1"}, db_conn)
+        BatchResolveRequest(fact_ids=[fid], scheme_id="s1"), db_conn)
     assert res["ok"] is True
     assert res["safety_blocked"] is True
     assert res["skipped_safety_count"] == 1
@@ -86,7 +87,7 @@ async def test_safety_critical_fact_skipped_by_batch_resolve(db_conn):
                 is_simulated=0, fact_key="foundation_depth")
 
     res = await batch_resolve(
-        {"fact_ids": [fid], "scheme_id": "s1"}, db_conn)
+        BatchResolveRequest(fact_ids=[fid], scheme_id="s1"), db_conn)
     assert res["ok"] is True
     assert res["safety_blocked"] is True
     assert res["skipped_safety_count"] == 1
@@ -117,7 +118,7 @@ async def test_normal_fact_confirmed_by_batch_resolve(db_conn):
                 is_simulated=0, fact_key="project_manager")
 
     res = await batch_resolve(
-        {"fact_ids": [fid], "scheme_id": "s1"}, db_conn)
+        BatchResolveRequest(fact_ids=[fid], scheme_id="s1"), db_conn)
     assert res["ok"] is True
     assert res["safety_blocked"] is False
     assert res["skipped_safety_count"] == 0
@@ -170,7 +171,7 @@ async def test_mixed_batch_count_conservation(db_conn):
 
     fact_ids = [fid1, fid2, fid3, fid4]
     res = await batch_resolve(
-        {"fact_ids": fact_ids, "scheme_id": "s1"}, db_conn)
+        BatchResolveRequest(fact_ids=fact_ids, scheme_id="s1"), db_conn)
     assert res["ok"] is True
 
     # 计数守恒
@@ -220,7 +221,7 @@ async def test_skipped_safety_count_matches_detail_length(db_conn):
                     is_simulated=1, fact_key=f"test_key_{i}")
 
     res = await batch_resolve(
-        {"fact_ids": fids, "scheme_id": "s1"}, db_conn)
+        BatchResolveRequest(fact_ids=fids, scheme_id="s1"), db_conn)
     assert res["ok"] is True
 
     # 响应体一致性
@@ -257,7 +258,7 @@ async def test_scheme_id_mode_also_applies_safety_constraints(db_conn):
                 content="- **项目名称**: 示例项目",
                 is_simulated=0, fact_key="project_name")
 
-    res = await batch_resolve({"scheme_id": "s1"}, db_conn)
+    res = await batch_resolve(BatchResolveRequest(scheme_id="s1"), db_conn)
     assert res["ok"] is True
     assert res["safety_blocked"] is True
     assert res["skipped_safety_count"] == 1
@@ -287,7 +288,7 @@ async def test_batch_resolve_preserves_simulated_gate_invariant(db_conn):
                 content="- **支护形式**: 排桩 ⚠️*(模拟值)*",
                 is_simulated=1, fact_key="support_type")
 
-    await batch_resolve({"fact_ids": [fid], "scheme_id": "s1"}, db_conn)
+    await batch_resolve(BatchResolveRequest(fact_ids=[fid], scheme_id="s1"), db_conn)
 
     cur = await db_conn.execute(
         "SELECT is_simulated, is_resolved FROM global_facts WHERE id=?",
@@ -307,7 +308,7 @@ async def test_empty_fact_ids_returns_safe_response(db_conn):
     await _init_schema(db_conn)
 
     res = await batch_resolve(
-        {"fact_ids": ["", "  ", None], "scheme_id": "s1"}, db_conn)
+        BatchResolveRequest(fact_ids=["", "  ", None], scheme_id="s1"), db_conn)
     assert res["ok"] is True
     assert res["skipped_safety"] == []
     assert res["skipped_safety_count"] == 0
@@ -351,7 +352,7 @@ async def test_full_mixed_batch_complete_conservation(db_conn):
 
     fact_ids = list(facts.values())
     res = await batch_resolve(
-        {"fact_ids": fact_ids, "scheme_id": "s1"}, db_conn)
+        BatchResolveRequest(fact_ids=fact_ids, scheme_id="s1"), db_conn)
 
     # 守恒验证
     total = len(fact_ids)
@@ -381,7 +382,7 @@ async def test_safety_critical_by_title_name_without_fact_key(db_conn):
                 is_simulated=0, fact_key="")
 
     res = await batch_resolve(
-        {"fact_ids": [fid], "scheme_id": "s1"}, db_conn)
+        BatchResolveRequest(fact_ids=[fid], scheme_id="s1"), db_conn)
     assert res["ok"] is True
     assert res["safety_blocked"] is True
     assert res["skipped_safety_count"] == 1

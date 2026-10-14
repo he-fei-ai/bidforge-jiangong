@@ -12,6 +12,8 @@
  * 本文件锁定：这些能力在页面上「真的接上了 API」，而不是仅有后端端点。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+// ✅ AI 配置治理重渲染：同上，提到 60s 防全量并发下超时抖动。
+vi.setConfig({ testTimeout: 60000 });
 import { render, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import React from "react";
 import { App as AntdApp } from "antd";
@@ -50,6 +52,9 @@ const h = vi.hoisted(() => ({
   // ✅ 2026-09-23：运行时厂商开关
   getRuntime: vi.fn(),
   setDisabledProviders: vi.fn(),
+  // ✅ 2026-10-11（治理开关 UI 测试覆盖）：提示词治理 GET/PUT
+  getGovernance: vi.fn(),
+  updateGovernance: vi.fn(),
 }));
 
 vi.mock("../api", () => ({
@@ -79,6 +84,14 @@ vi.mock("../api", () => ({
     importConfig: vi.fn(),
     cleanupAuditLogs: vi.fn(),
     fetchCustomModels: vi.fn(),
+  },
+  // ✅ 2026-10-11：治理开关 UI 测试需要 mock systemApi
+  systemApi: {
+    getGovernance: h.getGovernance,
+    updateGovernance: h.updateGovernance,
+    getPromptMetrics: vi.fn(),
+    resetPromptMetrics: vi.fn(),
+    syncPromptsFromCode: vi.fn(),
   },
 }));
 
@@ -190,6 +203,13 @@ beforeEach(() => {
   h.setDisabledProviders.mockResolvedValue({
     data: { ok: true, disabled_providers: ["zhipu"], count: 1, warning: "" },
   });
+  // ✅ 2026-10-11：治理开关默认返回关闭态
+  h.getGovernance.mockResolvedValue({
+    data: { prompt_context_budget: 0, prompt_injection_defense: false },
+  });
+  h.updateGovernance.mockImplementation(async (body: any) => ({
+    data: { ...body },
+  }));
 });
 
 afterEach(() => {
@@ -508,4 +528,86 @@ describe("resolveConcurrencyMax · 并发上限解析（唯一口径，2026-10-0
       expect(resolveConcurrencyMax({ max_concurrency: bad })).toBe(AI_CONCURRENCY_MAX_FALLBACK);
     },
   );
+});
+
+// ===========================================================================
+// ✅ 2026-10-11：提示词治理开关 UI 测试覆盖
+//   债-3 收口后的加固：验证 governance Card 里的 Switch（注入防护）与
+//   InputNumber（上下文预算）真的接上了 systemApi.getGovernance/updateGovernance。
+//   此前全仓无 governance UI 测试 —— 页面 catch 静默吞了 systemApi 未 mock 的错误，
+//   看着「跑过了」但实际零覆盖。
+// ===========================================================================
+describe("提示词治理开关（GET/PUT /system/governance）", () => {
+  it("页面加载时 GET 拉取治理开关当前值", async () => {
+    h.getGovernance.mockResolvedValue({
+      data: { prompt_context_budget: 4096, prompt_injection_defense: true },
+    });
+    const { container } = renderPage();
+    await waitLoaded(container);
+
+    await waitFor(() => {
+      expect(h.getGovernance).toHaveBeenCalled();
+    });
+  });
+
+  it("注入防护 Switch 开启时调用 updateGovernance({prompt_injection_defense:true})", async () => {
+    const { container } = renderPage();
+    await waitLoaded(container);
+
+    await waitFor(() => {
+      expect(container.textContent || "").toContain("提示词治理");
+    });
+
+    const govCard = Array.from(container.querySelectorAll(".ant-card")).find(
+      (c) => (c.textContent || "").includes("提示词治理"),
+    ) as HTMLElement;
+    expect(govCard).toBeTruthy();
+
+    const sw = govCard.querySelector(".ant-switch") as HTMLElement;
+    expect(sw).toBeTruthy();
+    fireEvent.click(sw);
+
+    await waitFor(() => {
+      const calls = h.updateGovernance.mock.calls;
+      expect(calls.length).toBeGreaterThan(0);
+      const body = calls[calls.length - 1][0];
+      expect(body.prompt_injection_defense).toBe(true);
+    });
+  });
+
+  it("上下文预算 InputNumber 改值后失焦调用 updateGovernance({prompt_context_budget:N})", async () => {
+    const { container } = renderPage();
+    await waitLoaded(container);
+
+    await waitFor(() => {
+      expect(container.textContent || "").toContain("提示词治理");
+    });
+
+    const govCard = Array.from(container.querySelectorAll(".ant-card")).find(
+      (c) => (c.textContent || "").includes("提示词治理"),
+    ) as HTMLElement;
+    expect(govCard).toBeTruthy();
+
+    const input = govCard.querySelector("input.ant-input-number-input") as HTMLInputElement;
+    expect(input).toBeTruthy();
+    fireEvent.change(input, { target: { value: "8192" } });
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      const calls = h.updateGovernance.mock.calls;
+      expect(calls.length).toBeGreaterThan(0);
+      const body = calls[calls.length - 1][0];
+      expect(body.prompt_context_budget).toBe(8192);
+    });
+  });
+
+  it("治理面板加载失败不阻断主配置页（fail-soft）", async () => {
+    h.getGovernance.mockRejectedValue(new Error("network error"));
+    const { container } = renderPage();
+    await waitLoaded(container);
+
+    // 主配置页正常渲染（配置列表可见），治理面板静默降级
+    expect(container.textContent || "").toContain("deepseek");
+    expect(h.getGovernance).toHaveBeenCalled();
+  });
 });

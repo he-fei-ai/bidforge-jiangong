@@ -17,6 +17,8 @@
  *   3) 组件重渲染会替换 DOM 节点，用「查询函数」而不是缓存的引用。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+// ✅ 导出预设重渲染：同上，全局 30s 不够，提到 60s。
+vi.setConfig({ testTimeout: 60000 });
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import React from "react";

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import re
 
+from app.services.fence_common import fence_char_ranges as _fence_ranges
 from app.services.standards_registry import find_abolished_codes
 
 # ---------------------------------------------------------------------------
@@ -98,7 +99,11 @@ _TAIL_PARTICLE_RE = re.compile(r"(?<=[。！？])[哦啦呀嘛呗呢喽]+(?=[，
 # ✅ 2026-10-03 修复（正文生成·图表清洗口径分叉）：旧正则只认 ``` 围栏，
 #    模型输出的 ~~~mermaid 围栏会被当普通文本清洗，破坏成稿图表语法。
 #    两种围栏同口径受保护（与 sse_handlers / chart_pipeline / export 三侧一致）。
-_FENCE_SPLIT_RE = re.compile(r"(```[\s\S]*?```|~~~[\s\S]*?~~~)")
+# ✅ R76（2026-10-13）删掉本模块自持的 `( ```[\s\S]*?``` | ~~~[\s\S]*?~~~ )` 副本：
+#    非贪婪「任意 ``` 收尾」既不看信息串（块内 ```python 被当闭合，其后正文失去保护，
+#    与图表侧 BUG-F2 同族），也完全不认**未闭合**围栏（整块不匹配 → 保护区反而为空，
+#    未闭合块之后的正文会被清洗规则改写）。改由 fence_common.fence_char_ranges 单一
+#    出口：同种字符 + 信息串必须为空 + 长度容错，未闭合区间断到文末。
 # GFM 表格行（行首可选空白 + |）：表格单元格内的专业数据/造价词
 # （估算/概算/预算/估计值等）是结构化数据，清洗规则不得改写。
 # 兼容 CRLF（split("\n") 后行尾残留 \r）。
@@ -129,10 +134,10 @@ def _table_ranges(text: str) -> list[tuple[int, int]]:
     if tbl_start >= 0:
         ranges.append((tbl_start, tbl_end))
 
-    if not _FENCE_SPLIT_RE.search(text):
+    fences = _fence_ranges(text)
+    if not fences:
         return ranges
     # 排除落在围栏代码块内的区间（代码块里以 | 开头的行不是 Markdown 表格）
-    fences = [(m.start(), m.end()) for m in _FENCE_SPLIT_RE.finditer(text)]
     return [(s, e) for s, e in ranges
             if not any(s >= fs and e <= fe for fs, fe in fences)]
 
@@ -144,7 +149,7 @@ def _protected_ranges(text: str, *, include_tables: bool = True) -> list[tuple[i
     代码块（chart-json / mermaid）里的编号是图表数据，正文并未引用；
     而表格单元格里的编号是交付件本身的内容（编制依据表等），仍需审计。
     """
-    ranges = [(m.start(), m.end()) for m in _FENCE_SPLIT_RE.finditer(text)]
+    ranges = _fence_ranges(text)
     if include_tables:
         ranges.extend(_table_ranges(text))
     ranges.sort()
@@ -210,7 +215,7 @@ def sanitize_ai_content(text: str) -> str:
     if not text or not text.strip():
         return text
 
-    has_protected = bool(_FENCE_SPLIT_RE.search(text)) or any(
+    has_protected = bool(_fence_ranges(text)) or any(
         _TABLE_LINE_RE.match(ln) for ln in text.split("\n"))
     if not has_protected:
         return _apply_rules(text)
@@ -223,7 +228,7 @@ def _strip_fences(text: str, *, include_tables: bool = True) -> str:
 
     ``include_tables=False``：只剔除围栏代码块、保留表格行（编号类审计用）。
     """
-    has_fence = bool(_FENCE_SPLIT_RE.search(text))
+    has_fence = bool(_fence_ranges(text))
     has_table = any(_TABLE_LINE_RE.match(ln) for ln in text.split("\n"))
     if not has_fence and (not include_tables or not has_table):
         return text

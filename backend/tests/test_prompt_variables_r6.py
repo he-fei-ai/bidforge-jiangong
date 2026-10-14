@@ -12,14 +12,33 @@
 
 业务语义变量（如 scheme_name / section_number / standards_text）不在白名单，
 即使看起来在 JSON 附近也会正常返回缺失。
+
+✅ 2026-10-11（测试隔离修复）：本文件的 6 个测试函数各自调 _reg() 注册
+``r6_test_*`` 模板，但**从未清理** —— 模板泄漏到全局 ``_ALL_PROMPTS``
+注册表后，``test_prompt_techdebt_r38/r39`` 的「全部注册表必须有契约」
+护栏会判这些测试键未登记而失败（实测 3 failed）。
+现用 autouse fixture 在每个测试结束后自动删除本文件注册的键。
 """
 from __future__ import annotations
 
 import pytest
 
+#: 本文件注册的全部测试键前缀 —— fixture 用它在测试后清理注册表。
+_TEST_KEY_PREFIX = "r6_test_"
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_test_prompts():
+    """自动清理：测试结束后删除本文件注册的 ``r6_test_*`` 键，防止污染全局注册表。"""
+    yield
+    from app.services.ai.prompts._registry import _ALL_PROMPTS
+    leaked = [k for k in list(_ALL_PROMPTS) if k.startswith(_TEST_KEY_PREFIX)]
+    for k in leaked:
+        _ALL_PROMPTS.pop(k, None)
+
 
 def _reg_with_value(key: str, value: str):
-    """注册测试用提示词。"""
+    """注册测试用提示词（由 autouse fixture 负责清理）。"""
     from app.services.ai.prompts._registry import _reg
     return _reg(key, "test", key, value)
 

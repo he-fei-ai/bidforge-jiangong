@@ -69,7 +69,7 @@ async def test_resolve_conflict_to_simulated_candidate_keeps_unresolved(db_conn)
         "conflict_keys=? WHERE id='scheme-fact'",
         (json.dumps([{"value": "估算值", "is_simulated": True}]),))
     await db_conn.commit()
-    await gf.resolve_conflict("scheme-fact", {"value": "估算值"}, db=db_conn)
+    await gf.resolve_conflict("scheme-fact", gf.ResolveConflictRequest(value="估算值"), db=db_conn)
     row = await (await db_conn.execute(
         "SELECT is_simulated,is_resolved,has_conflict FROM global_facts WHERE id='scheme-fact'"
     )).fetchone()
@@ -104,7 +104,7 @@ async def test_chapters_and_danger_reject_missing_or_unknown_scope(db_conn):
     assert exc.value.status_code == 404
     with pytest.raises(HTTPException) as exc:
         await gf.check_danger_scheme(
-            {"scheme_name": "基坑支护专项施工方案"}, scheme_id="", project_id="", db=db_conn)
+            gf.DangerCheckRequest(scheme_name="基坑支护专项施工方案"), scheme_id="", project_id="", db=db_conn)
     assert exc.value.status_code == 400
 
 
@@ -113,7 +113,7 @@ async def test_batch_resolve_includes_project_shared_facts(db_conn):
     await _seed_scope(db_conn)
     await db_conn.execute("UPDATE global_facts SET is_resolved=0 WHERE id='project-fact'")
     await db_conn.commit()
-    res = await gf.batch_resolve({"scheme_id": "s1", "fact_ids": ["project-fact"]}, db=db_conn)
+    res = await gf.batch_resolve(gf.BatchResolveRequest(scheme_id="s1", fact_ids=["project-fact"]), db=db_conn)
     assert res["changed"] == 1
     row = await (await db_conn.execute(
         "SELECT is_resolved FROM global_facts WHERE id='project-fact'")).fetchone()
@@ -162,7 +162,7 @@ async def test_batch_resolve_skips_conflicted_and_stale_facts(db_conn):
     await db_conn.execute(
         "UPDATE global_facts SET is_resolved=0, is_stale=1 WHERE id='project-fact'")
     await db_conn.commit()
-    res = await gf.batch_resolve({"scheme_id": "s1"}, db=db_conn)
+    res = await gf.batch_resolve(gf.BatchResolveRequest(scheme_id="s1"), db=db_conn)
     assert res["changed"] == 0
     assert res["skipped_safety_count"] == 2
     reasons = " ".join(x["reason"] for x in res["skipped_safety"])

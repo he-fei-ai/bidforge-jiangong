@@ -127,10 +127,10 @@ export function baStatusTag(stored: BaStoredItem | undefined, def?: any): React.
   }
   if (status === "success") {
     const absent = isMissingBaResult(content, def?.output_type || "markdown");
-    if (stored?.source === "manual") return <Tag color="purple">✎ 人工 {content.length}字</Tag>;
+    if (stored?.source === "manual") return <Tag color="purple">✎ 人工 {content.length}字符</Tag>;
     return absent
       ? <Tag color="volcano">⚠ 无内容</Tag>
-      : <Tag color="green">✓ {content.length}字</Tag>;
+      : <Tag color="green">✓ {content.length}字符</Tag>;
   }
   return <Tag color="default">待执行</Tag>;
 }

@@ -64,8 +64,8 @@ interface SectionContentCardProps {
   /** ✅ 性能优化：dirty 仅在 false↔true 跳变时上抛（父级守卫/离开页确认需要） */
   onDirtyChange: (dirty: boolean) => void;
   onRegenerate: () => void;
-  /** 图表 AI 修复且后端已重写章节正文后回调（newContent 为修复后完整正文），用于同步预览状态 */
-  onChartFixed?: (newContent: string) => void;
+  /** 图表 AI 修复且后端已重写章节正文后回调（newContent 为修复后完整正文，wordCount 为后端权威字数），用于同步预览状态 */
+  onChartFixed?: (newContent: string, wordCount?: number) => void;
   /**
    * F-CONTENT-STANDARD(2026-09-26)：章节级生成标准覆盖。
    * - `sectionStandard`：`""` 表示沿用方案级（后端落库口径），否则 precise/fuzzy；

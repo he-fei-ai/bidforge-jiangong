@@ -177,25 +177,60 @@ def test_b8_helper_exported_with_sane_contract():
 
 
 # --------------------------------------------------------------------------- #
-# 累计体积上限的「四处同值」parity（config / system / global_facts / 前端）
+# 累计体积上限的「三处同值」parity（config 默认 / global_facts 运行时权威 +
+# 回落 / 前端兜底）。R73 续作 G5 后 system 端点直接读 gf.MAX_UPLOAD_*，
+# 不再自带字面量副本，故 parity 收敛为「三方」。
 # --------------------------------------------------------------------------- #
-def test_upload_total_limit_default_is_consistent_across_four_sources():
+def test_upload_total_limit_default_is_consistent_across_sources():
     from app.config import Settings
     from app.routers import global_facts, system
 
     cfg_default = Settings.model_fields["upload_max_total_bytes"].default
     assert cfg_default == 200 * 1024 * 1024, f"config 默认值漂移：{cfg_default}"
-    assert system._UPLOAD_LIMIT_DEFAULTS["max_total_bytes"] == cfg_default, (
-        "system.py 的 limits 兜底与 config 默认值不一致 → 前端拿到的上限与"
-        "后端实际执行的上限可能不同")
+    # global_facts 的回落默认 + 运行时权威都应与 config 默认一致
     assert global_facts._DEFAULT_UPLOAD_TOTAL_BYTES == cfg_default, (
         "global_facts 的兜底与 config 默认值不一致")
+    assert global_facts.MAX_UPLOAD_TOTAL_BYTES == cfg_default, (
+        "global_facts 运行时权威与 config 默认值不一致（settings 未覆盖时应相等）")
+    # ✅ R73 续作 G5：system 端点不再自带 _UPLOAD_LIMIT_DEFAULTS，直接读 gf 权威
+    assert not hasattr(system, "_UPLOAD_LIMIT_DEFAULTS"), (
+        "system.py 不应再保留 _UPLOAD_LIMIT_DEFAULTS（G5 收敛后已删）")
 
     front = _upload_src()
     m = re.search(r"MAX_UPLOAD_TOTAL_FALLBACK:\s*number\s*=\s*(\d+)\s*\*\s*1024\s*\*\s*1024", front)
     assert m, "前端兜底上限未能解析"
     assert int(m.group(1)) * 1024 * 1024 == cfg_default, (
         "前端 MAX_UPLOAD_TOTAL_FALLBACK 与后端默认值不一致")
+
+
+async def test_upload_limits_endpoint_reads_runtime_authority(monkeypatch):
+    """✅ R73 续作 G5：/system/upload-limits 必须读 gf.MAX_UPLOAD_*（运行时权威）。
+
+    此前 system 自带一份 _positive_setting 读取器，monkeypatch gf 后**前端拿到
+    旧值、后端按新值执行**（漂移）。收敛后 monkeypatch 对两侧同时生效。
+    monkeypatch 在测试 teardown 时自动还原，无需手动 finally。
+    """
+    import inspect
+
+    from app.routers import global_facts as gf, system
+
+    # AST 锁：端点源码引用 _gf.MAX_UPLOAD_*（不是 _positive_setting / settings.upload_*）
+    src = inspect.getsource(system.upload_limits)
+    assert "_gf.MAX_UPLOAD_BYTES" in src, "端点未读 _gf.MAX_UPLOAD_BYTES"
+    assert "_gf.MAX_UPLOAD_FILES_PER_REQUEST" in src, "端点未读 _gf.MAX_UPLOAD_FILES_PER_REQUEST"
+    assert "_gf.MAX_UPLOAD_TOTAL_BYTES" in src, "端点未读 _gf.MAX_UPLOAD_TOTAL_BYTES"
+    assert "_positive_setting" not in src, "端点仍残留 _positive_setting（G5 未收敛）"
+
+    # 行为锁：monkeypatch gf.MAX_UPLOAD_* 后端点必须同步反映（防漂移回归）
+    monkeypatch.setattr(gf, "MAX_UPLOAD_BYTES", 11 * 1024 * 1024)
+    monkeypatch.setattr(gf, "MAX_UPLOAD_FILES_PER_REQUEST", 7)
+    monkeypatch.setattr(gf, "MAX_UPLOAD_TOTAL_BYTES", 99 * 1024 * 1024)
+    result = await system.upload_limits()
+    assert result == {
+        "max_upload_bytes": 11 * 1024 * 1024,
+        "max_files_per_request": 7,
+        "max_total_bytes": 99 * 1024 * 1024,
+    }, f"monkeypatch 后端点未同步反映运行时权威：{result}"
 
 
 def test_upload_limits_endpoint_exposes_max_total_bytes():

@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+# ruff: noqa: I001 —— R13 契约：review_db 必须单独一行，护栏锁（R77 F-3 起本文件纳入收口范围）
 import json
 import logging
 from datetime import datetime
@@ -22,6 +23,15 @@ from app.routers.review import reset_review_on_content_change  # ✅ G9：修复
 from app.services import conflict_arbiter as arbiter
 from app.services import consistency_scanner as scanner
 from app.services import repair_agent, repair_record
+# ✅ R13 判空单一出口（2026-10-14 · R77 F-3）：本模块与 compliance/review/
+#    review_autofix 同属「审核与预检」的两条修复闭环，此前是 R13 收口的漏网之鱼
+#    （护栏 TARGET_FILES 只登记了三个 router）。全局单写连接 + aiosqlite 下
+#    db.execute 可能返回 None：读路径直接 AttributeError 500；写路径（confirm 的
+#    正文恢复 UPDATE / 冲突状态回写）不抛异常照常返回 confirmed —— 用户拒绝冲突
+#    但正文没恢复的**假成功**。现全部改走 review_db 出口，静态护栏
+#    tests/test_review_preflight_closeout_r77_20261014.py 禁止退回裸调用。
+# noqa: I001 —— R13 契约：review_db 必须单独一行
+from app.services import review_db  # noqa: I001
 from app.services.content_utils import (
     DEFAULT_WORD_BUDGET,
     text_word_count,
@@ -36,23 +46,22 @@ router = APIRouter(
 
 
 async def _load_scheme(db, scheme_id: str) -> dict:
-    cur = await db.execute(
-        "SELECT id, project_id, name, type FROM schemes WHERE id=?", (scheme_id,))
-    row = await cur.fetchone()
+    row = await review_db.fetch_one(
+        db, "SELECT id, project_id, name, type FROM schemes WHERE id=?", (scheme_id,),
+        what="一致性修复：读取方案")
     if not row:
         raise HTTPException(404, "方案不存在")
-    return dict(row)
+    return row
 
 
 async def _load_conflicts(db, scheme_id: str, scan_id: str) -> list[dict]:
-    cur = await db.execute(
+    out = []
+    for item in await review_db.fetch_all(
+        db,
         "SELECT id, conflict_type, severity, topic, occurrences, authoritative_value,"
         " authoritative_source, repair_instruction, reason, status "
         "FROM consistency_conflicts WHERE scheme_id=? AND scan_id=? ORDER BY id",
-        (scheme_id, scan_id))
-    out = []
-    for r in await cur.fetchall():
-        item = dict(r)
+        (scheme_id, scan_id), what="一致性修复：读取冲突清单"):
         try:
             item["occurrences"] = json.loads(item.get("occurrences") or "[]")
         except json.JSONDecodeError:
@@ -121,13 +130,13 @@ async def scan(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
 @router.get("/conflicts")
 async def get_conflicts(scheme_id: str, scan_id: str = "", db=Depends(get_db)):
     if not scan_id:
-        cur = await db.execute(
-            "SELECT scan_id FROM consistency_conflicts WHERE scheme_id=? "
-            "ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,))
-        row = await cur.fetchone()
+        row = await review_db.fetch_one(
+            db, "SELECT scan_id FROM consistency_conflicts WHERE scheme_id=? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,),
+            what="一致性冲突：定位最近一次扫描")
         if not row:
             return {"exists": False, "conflicts": [], "summary": _summary([])}
-        scan_id = row[0]
+        scan_id = row["scan_id"]
     conflicts = await _load_conflicts(db, scheme_id, scan_id)
     return {"exists": True, "scan_id": scan_id,
             "summary": _summary(conflicts), "conflicts": conflicts}
@@ -146,13 +155,13 @@ async def repair(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
 
     scheme = await _load_scheme(db, scheme_id)
     if not scan_id:
-        cur = await db.execute(
-            "SELECT scan_id FROM consistency_conflicts WHERE scheme_id=? "
-            "ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,))
-        row = await cur.fetchone()
+        row = await review_db.fetch_one(
+            db, "SELECT scan_id FROM consistency_conflicts WHERE scheme_id=? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,),
+            what="一致性修复：定位最近一次扫描")
         if not row:
             raise HTTPException(422, "尚未扫描，请先执行全文一致性扫描")
-        scan_id = row[0]
+        scan_id = row["scan_id"]
 
     conflicts = await _load_conflicts(db, scheme_id, scan_id)
     if not conflicts:
@@ -247,26 +256,38 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
                     #    （content_utils.text_word_count，剔除 ``` 图表代码块）
                     #    重算，并同步 word_status。
                     restored_content = snap_map[sid]
-                    cur = await db.execute(
-                        "SELECT word_budget FROM sections WHERE id=?", (sid,))
-                    brow = await cur.fetchone()
-                    wb = (brow[0] if brow and brow[0] else None) or DEFAULT_WORD_BUDGET
+                    brow = await review_db.fetch_one(
+                        db, "SELECT word_budget FROM sections WHERE id=?", (sid,),
+                        what=f"一致性修复确认：读取章节字数预算（section={sid[:8]}）")
+                    wb = (brow["word_budget"] if brow and brow["word_budget"] else None) or DEFAULT_WORD_BUDGET
                     _wc = text_word_count(restored_content)
-                    await db.execute(
+                    # ✅ R13（R77 F-3）：正文恢复写经 exec_write（严格模式）——
+                    #    rejected_sections 均来自本批次 items 且章节刚被修复写过，
+                    #    行必然存在，0 行只可能是「本次写没生效」，绝不汇报假成功。
+                    await review_db.exec_write(
+                        db,
                         "UPDATE sections SET content=?, word_count=?, "
                         "word_status=?, updated_at=? WHERE id=?",
                         (restored_content, _wc, word_status_for(_wc, wb),
-                         datetime.now().isoformat(), sid))
+                         datetime.now().isoformat(), sid),
+                        what=f"一致性修复确认：恢复章节快照原文（section={sid[:8]}）")
 
     # 接受/拒绝的冲突项状态回写
+    # ✅ R13（R77 F-3）：cid 来自请求体，未预先校验行存在（历史批次/外部调用
+    #    可能指向已不存在的冲突）→「0 行」是合法结果，require_rows=False，
+    #    与 _persist_fixed 记账回填同口径；rowcount 由日志侧可查。
     for cid in accepted:
-        await db.execute(
+        await review_db.exec_write(
+            db,
             "UPDATE consistency_conflicts SET status='accepted' WHERE id=? AND scheme_id=?",
-            (cid, scheme_id))
+            (cid, scheme_id), what="一致性修复确认：回写 accepted 状态",
+            require_rows=False)
     for cid in rejected:
-        await db.execute(
+        await review_db.exec_write(
+            db,
             "UPDATE consistency_conflicts SET status='pending' WHERE id=? AND scheme_id=?",
-            (cid, scheme_id))
+            (cid, scheme_id), what="一致性修复确认：回写 rejected→pending 状态",
+            require_rows=False)
 
     all_decided = accepted | rejected
 
@@ -315,21 +336,22 @@ async def rollback(scheme_id: str, body: dict | None = None, db=Depends(get_db))
         raise HTTPException(404, "快照不存在")
 
     # 回滚后把相关冲突退回 pending、修复批次标记 rolled_back
-    cur = await db.execute(
-        "SELECT id FROM consistency_repairs WHERE snapshot_id=?", (snapshot_id,))
-    for r in await cur.fetchall():
-        await repair_record.mark_repair_status(db, r[0], "rolled_back")
+    for r in await review_db.fetch_all(
+            db, "SELECT id FROM consistency_repairs WHERE snapshot_id=?",
+            (snapshot_id,), what="一致性修复回滚：定位修复批次"):
+        await repair_record.mark_repair_status(db, r["id"], "rolled_back")
 
     # ✅ 修复（2026-09-17）：回滚只应影响「本快照对应的修复批次所触及的冲突」，
     #    旧实现 UPDATE 全方案所有 repaired/accepted 冲突，会把**其它批次**已确认/已
     #    修复的修复结果一并回退成 pending，造成跨批次污染（误撤回别人已接受的内容）。
     #    现从该快照的修复批次里收集 conflict_id，仅回退这些冲突。
-    cur = await db.execute(
-        "SELECT items FROM consistency_repairs WHERE snapshot_id=?", (snapshot_id,))
+    rows = await review_db.fetch_all(
+        db, "SELECT items FROM consistency_repairs WHERE snapshot_id=?",
+        (snapshot_id,), what="一致性修复回滚：读取批次冲突清单")
     conflict_ids: list[str] = []
-    for r in await cur.fetchall():
+    for r in rows:
         try:
-            items = json.loads(r["items"] or "[]") if isinstance(r, dict) else json.loads(r[0] or "[]")
+            items = json.loads(r["items"] or "[]")
         except Exception:
             items = []
         for it in (items or []):
@@ -339,10 +361,17 @@ async def rollback(scheme_id: str, body: dict | None = None, db=Depends(get_db))
     conflict_ids = list(dict.fromkeys(conflict_ids))  # 去重保序
     if conflict_ids:
         placeholders = ",".join("?" * len(conflict_ids))
-        await db.execute(
+        # ✅ R13 + R77 F-3 加固：补 `AND scheme_id=?` —— P0（2026-10-04）后
+        #    冲突 ID 自带方案作用域前缀、结构上不互撞，但**历史无前缀行**
+        #    （C001…形态）仍可能与其他方案同名；回滚是本模块唯一一条
+        #    不带 scheme 约束的状态写，加上即杜绝跨方案误伤，本方案行零影响。
+        await review_db.exec_write(
+            db,
             f"UPDATE consistency_conflicts SET status='pending' "
-            f"WHERE id IN ({placeholders})",
-            conflict_ids)
+            f"WHERE id IN ({placeholders}) AND scheme_id=?",
+            conflict_ids + [scheme_id],
+            what="一致性修复回滚：冲突退回 pending",
+            require_rows=False)
     await db.commit()
     return {"status": "rolled_back", **result}
 
@@ -356,7 +385,8 @@ async def list_repairs(scheme_id: str, limit: int = 20, db=Depends(get_db)):
 @router.get("/snapshots")
 async def list_snapshots(scheme_id: str, limit: int = 20, db=Depends(get_db)):
     limit = max(1, min(limit, 50))
-    cur = await db.execute(
+    return {"items": await review_db.fetch_all(
+        db,
         "SELECT id, type, created_at FROM scheme_snapshots WHERE scheme_id=? "
-        "ORDER BY created_at DESC, rowid DESC LIMIT ?", (scheme_id, limit))
-    return {"items": [dict(r) for r in await cur.fetchall()]}
+        "ORDER BY created_at DESC, rowid DESC LIMIT ?", (scheme_id, limit),
+        what="一致性修复：读取快照列表")}

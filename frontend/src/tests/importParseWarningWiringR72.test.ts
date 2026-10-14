@@ -60,7 +60,8 @@ describe("R72 · 前端 onSseEvent 必须消费 warning 事件（不静默丢弃
   });
 
   it("反向锚：若摘除 warning 分支，判据必须变红（证明扫描真的在守）", () => {
-    const stripped = PAGE.replace(/if \(evt\.event === "warning"\)[\s\S]*?\n    \}\n/, "");
+    // ⚠️ 四连空格用 {4} 量词书写：字面连续空格会被 eslint no-regex-spaces 判红
+    const stripped = PAGE.replace(/if \(evt\.event === "warning"\)[\s\S]*?\n {4}\}\n/, "");
     const body = onSseEventBody(stripped);
     expect(body).not.toContain('evt.event === "warning"');
   });

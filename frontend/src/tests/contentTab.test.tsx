@@ -182,12 +182,12 @@ describe("ContentGenerationTab · 导航与设置", () => {
     expect(p.onNextStep).toHaveBeenCalledTimes(1);
   });
 
-  it("字数自定义态才显示「字 / 章节」输入单位", () => {
+  it("字数自定义态才显示「字 / 二级单元总量」输入单位（R66 口径改名）", () => {
     const u1 = render(<ContentGenerationTab {...baseProps({ wordBudgetOption: "default" })} />);
-    expect(u1.queryByText("字 / 章节")).toBeNull();
+    expect(u1.queryByText("字 / 二级单元总量")).toBeNull();
     cleanup();
     const u2 = render(<ContentGenerationTab {...baseProps({ wordBudgetOption: "custom" })} />);
-    expect(u2.getByText("字 / 章节")).toBeTruthy();
+    expect(u2.getByText("字 / 二级单元总量")).toBeTruthy();
   });
 
   it("两个开关分别上抛一致性 / 自动压缩变更", () => {
@@ -268,16 +268,24 @@ describe("ContentGenerationTab · 导航与设置", () => {
       expect(u2.queryByText(/左侧点击任意章节可查看\/编辑已生成内容/)).toBeNull();
     });
 
-    it("字数非默认档时显示「按二级章节总字数控制」说明 Tag", () => {
+    it("字数非默认档时显示口径 Tag（R66：档位=叶子目标 / 自定义=二级总量）", () => {
       const u1 = render(
         <ContentGenerationTab {...baseProps({ wordBudgetOption: "default" })} />,
       );
       expect(u1.queryByText(/按二级章节总字数控制/)).toBeNull();
+      expect(u1.queryByText(/按叶子章节档位字数控制/)).toBeNull();
       cleanup();
       const u2 = render(
-        <ContentGenerationTab {...baseProps({ wordBudgetOption: "2000" })} />,
+        <ContentGenerationTab {...baseProps({ wordBudgetOption: "detailed" })} />,
       );
-      expect(u2.getByText(/按二级章节总字数控制/)).toBeTruthy();
+      expect(u2.getByText(/按叶子章节档位字数控制/)).toBeTruthy();
+      expect(u2.queryByText(/按二级章节总字数控制/)).toBeNull();
+      cleanup();
+      const u3 = render(
+        <ContentGenerationTab {...baseProps({ wordBudgetOption: "custom" })} />,
+      );
+      expect(u3.getByText(/按二级章节总字数控制/)).toBeTruthy();
+      expect(u3.queryByText(/按叶子章节档位字数控制/)).toBeNull();
     });
   });
 
@@ -341,10 +349,10 @@ describe("ContentGenerationTab · 导航与设置", () => {
       ).map((i) => (i.textContent || "").trim());
       expect(labels).toEqual([
         "使用目录默认值",
-        "1000 字",
-        "1500 字",
-        "2000 字",
-        "3000 字",
+        "简短 800 字",
+        "标准 1200 字",
+        "详细 2000 字",
+        "超长 2500 字",
         "自定义",
       ]);
     });

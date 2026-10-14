@@ -52,7 +52,10 @@ CREATE TABLE IF NOT EXISTS sections (
     level INTEGER DEFAULT 1,
     status TEXT DEFAULT 'empty',
     word_count INTEGER DEFAULT 0,
-    word_budget INTEGER DEFAULT 1500,
+    -- ✅ R66（2026-10-11）：列默认 1500 → 1200（四档之"标准"档，与
+    --    content_utils.DEFAULT_WORD_BUDGET 同值）。仅影响**新建库**；既有库
+    --    列默认不变（零迁移），且应用侧所有 INSERT 均显式传 word_budget。
+    word_budget INTEGER DEFAULT 1200,
     word_status TEXT DEFAULT 'normal',
     content TEXT DEFAULT '',
     outline_json TEXT DEFAULT '',
@@ -81,6 +84,8 @@ CREATE TABLE IF NOT EXISTS sections (
     layout_json TEXT DEFAULT '',
     timeline_json TEXT DEFAULT '',
     inlined_chart_json TEXT DEFAULT '',
+    -- ✅ D1（2026-10-11）：离散正文编排阶段产出的结构化编排决策（JSON 文本，默认空）。
+    plan_json TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now','localtime')),
     updated_at TEXT DEFAULT (datetime('now','localtime'))
 );

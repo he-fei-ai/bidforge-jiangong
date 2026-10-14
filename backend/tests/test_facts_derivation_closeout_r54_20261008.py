@@ -173,7 +173,7 @@ class TestResolveConflictRederives:
         await _bake_dims(db, fid, STALE_CH, STALE_ATTR)
 
         out = await gf.resolve_conflict(
-            fact_id=fid, data={"value": NEW_Q}, scheme_id=sid, db=db)
+            fact_id=fid, data=gf.ResolveConflictRequest(value=NEW_Q), scheme_id=sid, db=db)
         assert out["ok"] is True
 
         r = await _get(db, fid)
@@ -192,7 +192,7 @@ class TestResolveConflictRederives:
         await _bake_dims(db, fid, STALE_CH, STALE_ATTR)
 
         await gf.resolve_conflict(
-            fact_id=fid, data={"value": OLD_Q}, scheme_id=sid, db=db)
+            fact_id=fid, data=gf.ResolveConflictRequest(value=OLD_Q), scheme_id=sid, db=db)
 
         r = await _get(db, fid)
         assert r["chapter"] == STALE_CH and r["fact_attr"] == STALE_ATTR
@@ -209,7 +209,7 @@ class TestResolveConflictRederives:
         await _bake_dims(db, fid, STALE_CH, STALE_ATTR)
 
         await gf.resolve_conflict(
-            fact_id=fid, data={"value": sim_value}, scheme_id=sid, db=db)
+            fact_id=fid, data=gf.ResolveConflictRequest(value=sim_value), scheme_id=sid, db=db)
 
         r = await _get(db, fid)
         assert r["is_simulated"] == 1 and r["is_resolved"] == 0
@@ -231,7 +231,7 @@ class TestResolveConflictRederives:
         await db.commit()
 
         await gf.resolve_conflict(
-            fact_id=fid, data={"value": NEW_Q}, scheme_id=sid, db=db)
+            fact_id=fid, data=gf.ResolveConflictRequest(value=NEW_Q), scheme_id=sid, db=db)
 
         r = await _get(db, fid)
         assert r["content"] == gf._build_fact_content(NAME, NEW_Q, False)
@@ -246,7 +246,7 @@ class TestResolveConflictRederives:
         await _bake_dims(db, fid, STALE_CH, STALE_ATTR)
 
         await gf.resolve_conflict(
-            fact_id=fid, data={"value": NEW_Q}, scheme_id=sid, db=db)
+            fact_id=fid, data=gf.ResolveConflictRequest(value=NEW_Q), scheme_id=sid, db=db)
 
         r = await _get(db, fid)
         assert r["scheme_id"] == "" and r["fact_attr"] == "quantitative"
@@ -349,11 +349,12 @@ class TestAdjustScopeAndAtomicity:
         db, pid, sid = dbf
         fid = await _ins(db, pid=pid, sid="", value=OLD_Q)   # 项目共享
 
-        out = await gf.adjust_facts({
-            "instruction": "把基坑开挖深度改成 8.5m",
-            "scheme_id": sid, "apply": True,
-            "operations": [{"op": "update", "fact_id": fid, "value": NEW_Q}],
-        }, db=db)
+        out = await gf.adjust_facts(
+            gf.AdjustRequest(
+                instruction="把基坑开挖深度改成 8.5m",
+                scheme_id=sid, apply=True,
+                operations=[{"op": "update", "fact_id": fid, "value": NEW_Q}]),
+            db=db)
 
         assert out["applied"]["updated"] == 1
         assert out["ignored_count"] == 0
@@ -367,12 +368,13 @@ class TestAdjustScopeAndAtomicity:
         db, pid, sid = dbf
         fid = await _ins(db, pid=pid, sid="", value=OLD_Q)   # 共享同名事实
 
-        out = await gf.adjust_facts({
-            "instruction": "新增基坑开挖深度",
-            "scheme_id": sid, "apply": True,
-            "operations": [{"op": "add", "name": NAME, "value": "9.9m",
-                            "category": CAT}],
-        }, db=db)
+        out = await gf.adjust_facts(
+            gf.AdjustRequest(
+                instruction="新增基坑开挖深度",
+                scheme_id=sid, apply=True,
+                operations=[{"op": "add", "name": NAME, "value": "9.9m",
+                             "category": CAT}]),
+            db=db)
 
         assert out["applied"]["added"] == 0
         assert out["ignored_count"] == 1
@@ -388,12 +390,13 @@ class TestAdjustScopeAndAtomicity:
         await _ins(db, pid=pid, sid=sid, value=OLD_Q)
         ghost = uuid.uuid4().hex
 
-        out = await gf.adjust_facts({
-            "instruction": "改一条不存在的事实",
-            "scheme_id": sid, "apply": True,
-            "operations": [{"op": "update", "fact_id": ghost, "value": "3m"},
-                           {"op": "delete", "fact_id": ghost}],
-        }, db=db)
+        out = await gf.adjust_facts(
+            gf.AdjustRequest(
+                instruction="改一条不存在的事实",
+                scheme_id=sid, apply=True,
+                operations=[{"op": "update", "fact_id": ghost, "value": "3m"},
+                            {"op": "delete", "fact_id": ghost}]),
+            db=db)
 
         assert out["applied"] == {"updated": 0, "added": 0, "deleted": 0}
         reasons = [i["reason"] for i in out["ignored"]]
@@ -412,15 +415,16 @@ class TestAdjustScopeAndAtomicity:
 
         monkeypatch.setattr(gf, "_build_fact_content", _boom)
         with pytest.raises(RuntimeError):
-            await gf.adjust_facts({
-                "instruction": "改值并新增",
-                "scheme_id": sid, "apply": True,
-                "operations": [
-                    {"op": "update", "fact_id": fid, "value": NEW_Q},
-                    {"op": "add", "name": "触发异常项", "value": "1",
-                     "category": CAT},
-                ],
-            }, db=db)
+            await gf.adjust_facts(
+                gf.AdjustRequest(
+                    instruction="改值并新增",
+                    scheme_id=sid, apply=True,
+                    operations=[
+                        {"op": "update", "fact_id": fid, "value": NEW_Q},
+                        {"op": "add", "name": "触发异常项", "value": "1",
+                         "category": CAT},
+                    ]),
+                db=db)
 
         r = await _get(db, fid, cols=("content", "chapter", "fact_attr"))
         assert OLD_Q in r["content"]          # update 已回滚
@@ -432,11 +436,12 @@ class TestAdjustScopeAndAtomicity:
     async def test_response_contract_is_additive(self, dbf):
         db, pid, sid = dbf
         fid = await _ins(db, pid=pid, sid=sid, value=OLD_Q)
-        out = await gf.adjust_facts({
-            "instruction": "预览不改库",
-            "scheme_id": sid, "apply": False,
-            "operations": [{"op": "update", "fact_id": fid, "value": NEW_Q}],
-        }, db=db)
+        out = await gf.adjust_facts(
+            gf.AdjustRequest(
+                instruction="预览不改库",
+                scheme_id=sid, apply=False,
+                operations=[{"op": "update", "fact_id": fid, "value": NEW_Q}]),
+            db=db)
         # 旧契约键全部在位（旧前端不消费新键也不报错）
         for k in ("ok", "operations", "summary", "applied"):
             assert k in out
@@ -596,16 +601,29 @@ class TestSingleSourceExits:
         旧的内联字面量，纯文本计数会把「解释缺陷的注释」当成「缺陷本身」。
         """
         blob = "\n".join(_module_code_strings(gf))
-        assert blob.count("scheme_id=? OR (project_id=?") == 1
+        assert blob.count("scheme_id=? OR (project_id=?") == 0  # R69: 字面量已移至 facts_extractor
         assert "WHERE project_id=? AND scheme_id=?" not in blob
         # 出口必须被真实使用（字面量只剩一份 + 多处引用，才叫收口而非删除）
         assert _name_uses(gf, "_fact_scope_where") >= 3
         assert _name_uses(gf, "_FACT_SCOPE_PREDICATE") >= 5
 
     def test_bold_line_regex_used_by_one_parser_only(self):
-        src = inspect.getsource(gf)
-        assert src.count("_RE_BOLD_FACT_LINE") == 2   # 定义 + 唯一引用
-        assert "_RE_BOLD_FACT_LINE" in inspect.getsource(gf._fact_name_value)
+        """✅ R75b 锚点订正：粗体行正则唯一权威随 ``fact_name_value`` 下沉到
+        services/facts_extractor（routers 侧改为薄包装委托，不再持副本）。
+        旧锚（在 global_facts 源码内数 2 次 + 包装体引用）在下沉后必红 ——
+        同 AGENTS 反复记账的「护栏锚点漂移」族。原意图不变：正则只有一份解析器
+        在用 —— 锚改指 services 本体，并**反向锁 routers 代码行不再引用该名字**
+        （副本回流即红；仅排除注释行，源码里「不再持有副本」的说明注释引用了反例）。
+        """
+        from app.services import facts_extractor as _fe
+        fe_src = inspect.getsource(_fe)
+        assert fe_src.count("_RE_BOLD_FACT_LINE") == 2   # 定义 + 唯一引用
+        assert "_RE_BOLD_FACT_LINE" in inspect.getsource(_fe.fact_name_value)
+        gf_code = "\n".join(
+            ln for ln in inspect.getsource(gf).splitlines()
+            if not ln.strip().startswith("#"))
+        assert "_RE_BOLD_FACT_LINE" not in gf_code, (
+            "routers 侧回流了粗体行正则副本 —— 同一判据两份实现复活")
         assert "_fact_name_value(" in inspect.getsource(gf.list_facts)
 
     def test_rederive_exit_is_the_only_applier(self):
@@ -849,7 +867,7 @@ class TestSchemeProjectIdSingleSource:
 
         monkeypatch.setattr(gf, "_invalidate_fact_scope_cache", _spy)
         await gf.resolve_conflict(
-            fact_id=fid, data={"value": NEW_Q}, scheme_id=sid, db=db)
+            fact_id=fid, data=gf.ResolveConflictRequest(value=NEW_Q), scheme_id=sid, db=db)
         assert seen == [("", pid)], seen
 
     async def test_shared_fact_scope_check_still_rejects_other_project(

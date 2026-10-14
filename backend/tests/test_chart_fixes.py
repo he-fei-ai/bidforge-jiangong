@@ -161,7 +161,7 @@ def test_flowchart_arrow_scaled_with_supersample():
     img = Image.open(
         _render_flowchart_image_v2('flowchart TD\n    A["开始"] --> B["结束"]')
     ).convert("RGB")
-    arrow_color = (90, 124, 168)  # #5A7CA8（2026-09-18 样张改版后连线色）
+    arrow_color = (51, 51, 51)  # #333333（2026-10-11 统一样张后连线色）
 
     # 两节点之间的连线段（A 底边 y≈390，B 顶边 y≈530）内，找箭头色最长连续横向宽度
     best = 0

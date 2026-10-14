@@ -158,6 +158,14 @@ def apply_unique_edits(content: str, edits: Sequence) -> EditResult:
 # =========================================================================
 # AI 调用：让模型只产出「编辑」而不是「整章重写」
 # =========================================================================
+#: ✅ R57（2026-10-09）：定点编辑的 JSON 修复轮次数。
+#: 取 1 —— 定点编辑是**比整章重写更优**的路径（只改冲突句、不动其它段落），
+#: 多给它一次「带具体问题的定向修复」预算，换取更少的高成本整章重写；
+#: 但也不希望在一个已经失败两次的环节无限纠缠（后续还有整章重写兜底）。
+CONSISTENCY_EDITS_REPAIR_RETRIES = 1
+
+
+
 def _validate_edits(obj: Any) -> list:
     if not isinstance(obj, dict):
         return ["顶层必须是 JSON 对象"]
@@ -212,26 +220,38 @@ async def collect_repair_edits(*, section_id: str, section_title: str,
     #    由扫描侧分片（consistency_scanner）控制，不在此层重复把关。
     user += f"\n\n【待编辑章节原文】\n{section_content}"
     system = render("consistency_repair_edits_system")
+    # ✅ R57（2026-10-09）：接入统一 JSON 通道（services/ai/json_response），
+    #    取代旧实现「自己 extract_json + json.loads，坏一次就整节放弃」——
+    #    旧路径下模型只要多输出一句解释/代码块包裹/半个逗号，本章全部必然回落
+    #    「整章重写」：冲突虽能被修掉，但 AI 会顺带改写无关段落（而《标书智能体
+    #    （五）》§四明确要求「失败后优先修复已有结果，不要推倒重来」）。
+    #    现在走「解析 → 结构校验 → 带具体问题的定向修复 → 有界重试」整条链路，
+    #    成功路径调用次数不变（仅第一次就成功时零额外调用）。
+    #    chat_fn 可注入（repair_agent 模块级引用）经 _call_chat_fn 逐层降级兼容。
+    from app.services.ai.json_response import (  # 局部导入：避免与上层 import 成环
+        GENERIC_REPAIR_KEY,
+        collect_json_response_with_chat,
+    )
     try:
-        raw = await chat_fn(
+        obj, _raw = await collect_json_response_with_chat(
+            chat_fn,
             [{"role": "system", "content": system},
              {"role": "user", "content": user}],
-            temperature=0.1, timeout=120, scene="consistency_repair")
+            validate_fn=_validate_edits,
+            max_retries=CONSISTENCY_EDITS_REPAIR_RETRIES,
+            # ✅ R57（2026-10-09）：定点编辑使用**独立** scene。
+            #    此前它与「整章重写」共用 consistency_repair，导致
+            #    ① /ai/stats 无法分别观测两条路径的成功率与成本；
+            #    ② 回归护栏只能靠「调用次数」裸计数区分二者（脆弱）。
+            temperature=0.1, timeout=120, scene="consistency_repair_edits",
+            repair_key=GENERIC_REPAIR_KEY,
+        )
     except Exception as e:  # noqa: BLE001 - fail-soft：回落到整章重写
-        logger.warning("[定点编辑] 第 %s 章节 AI 调用失败: %s", section_id, e)
+        logger.warning("[定点编辑] 第 %s 章节 AI 产出不可用（含 %d 轮修复）: %s",
+                       section_id, CONSISTENCY_EDITS_REPAIR_RETRIES, e)
         return EditResult(content=section_content or "")
 
-    try:
-        from app.services.ai.json_response import extract_json
-        raw_json = extract_json(raw)
-        obj = json.loads(raw_json) if raw_json else None
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[定点编辑] 第 %s 章节 JSON 解析失败: %s", section_id, e)
-        return EditResult(content=section_content or "")
-
-    issues = _validate_edits(obj)
-    if issues:
-        logger.info("[定点编辑] 第 %s 章节结果结构不合格: %s", section_id, issues)
+    if not isinstance(obj, dict):
         return EditResult(content=section_content or "")
     res = apply_unique_edits(section_content or "", obj.get("edits") or [])
     if res.rejected:

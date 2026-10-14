@@ -4,6 +4,7 @@ import uuid
 import app.db as _appdb
 import pytest
 from app.db import get_conn, init_db
+from app.models import BatchResolveRequest
 from app.routers.global_facts import (
     _managed_upload_path,
     _persist_parse_result,
@@ -183,7 +184,7 @@ async def test_batch_resolve_is_scoped_to_scheme(db_ctx):
         ("fact-b", pid, other_sid, "b", "b", 0),
     )
     await db.commit()
-    await batch_resolve({"scheme_id": sid, "fact_ids": ["fact-a", "fact-b"]}, db)
+    await batch_resolve(BatchResolveRequest(scheme_id=sid, fact_ids=["fact-a", "fact-b"]), db)
     cur = await db.execute(
         "SELECT id,is_resolved FROM global_facts WHERE id IN ('fact-a','fact-b') ORDER BY id"
     )

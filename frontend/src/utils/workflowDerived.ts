@@ -384,6 +384,9 @@ export function canShrinkSection(
 ): boolean {
   if (!s || !(s.content || "").trim()) return false;
   const wc = Number(s.word_count) || 0;
-  const wb = Number(s.word_budget) || 1500;
+  // ✅ R66（2026-10-11）：缺省预算兜底 1500→1200，与后端 DEFAULT_WORD_BUDGET
+  //    （content_utils，现等于「标准」档）同口径；后端各路由的 `or 1500`
+  //    已全部改为该常量，前端若不同步会造成压缩准入两套数。
+  const wb = Number(s.word_budget) || 1200;
   return wc > wb * WORD_OVER_RATIO;
 }

@@ -9,32 +9,180 @@ import math
 import re
 
 # 围栏代码块（```lang ... ```）：图表（mermaid / chart-json）与普通代码块
-# ✅ 2026-09-28 修复（围栏剔除语义与 find_unclosed_fences 对齐）：
-#   旧 `_FENCE_RE` 只认反引号、且按「最早出现的 ```」非贪婪闭合，导致：
-#      · `````~~~mermaid````` 波浪线围栏完全不剔除 → 图表代码被计入正文字数，
-#        超长章节误判 over / 续写触发阈值失真；
-#      · `````` 4 反引号围栏只有前 3 个反引号参与匹配，闭合后残留 1 个反引号
-#        字符被计入字数。
-# ✅ 2026-10-04 修复（BUG-3 · 与 content_blocks.parse_fence_line 语义统一）：
-#   旧实现按 CommonMark §4.7 严格判闭合（同种字符 + 长度 ≥ 开围栏 + 无标签），
-#   与 `content_blocks.parse_fence_line` / `read_fenced_block` 的**宽松**语义
-#   （同种字符即可闭合，不要求长度、允许带标签）不一致，导致 AI 输出高频的
-#   「4 反引号开 + 3 反引号闭」模式：
-#     · `content_blocks` 侧判为已闭合 → 图表正常登记、正常导出；
-#     · 本模块 `find_unclosed_fences` 侧判为未闭合 → `auto_fix_unclosed_fences`
-#       在 `_persist_section`（`sse_handlers.py:5314`）追加一个假闭合围栏，
-#       落库后出现两个相邻闭围栏、图号虚跳、渲染失败占号。
-#   现统一为宽松语义（与 content_blocks 一致），从根上消除两侧分歧。
-#   注：宽松语义下同种字符的短围栏会被视为闭合，未闭合围栏扫描时不再向后
-#   解析——这与 `read_fenced_block` 完全一致，是本模块设计取舍。
-_FENCE_RE = None  # deprecated：请用 strip_fenced_code_blocks
+# ✅ 判据唯一事实源（R76 · 2026-10-13）：本模块**不再自行判定闭合行**，全部委托
+#   ``services/fence_common``（谓词 ``is_fence_close`` + 扫描 ``find_unclosed``）。
+#   历史演进留档：
+#     · 2026-09-28：旧 ``_FENCE_RE`` 只认反引号、按「最早出现的 ```」非贪婪闭合
+#       → ``~~~mermaid`` 波浪围栏不剔除（图表代码计入字数）、4 反引号围栏闭合后
+#         残留 1 个反引号计入字数。
+#     · 2026-10-04（BUG-3）：与 ``content_blocks.parse_fence_line`` 统一为「同种字符
+#       即可闭合」，消除「4 开 + 3 闭」被判未闭合后在文末追加假闭合 →
+#       两个相邻闭围栏、图号虚跳、渲染失败占号。
+#     · 本轮（R76）：那次统一只统一了**长度**维度，遗漏了**信息串**维度 ——
+#       `read_fenced_block` 允许「反引号后带语言标签」的行当闭合，实测把后续正文吞进
+#       代码块（导出少正文、前端 marked 却保留），并让 ``auto_fix`` 的「文末追加」
+#       把缺陷固化成「事后检查通过」。现闭合判据定稿为
+#       「同种字符 + 信息串必须为空 + 长度容错」，且长度错配在**写入前归一**
+#       （见 ``auto_fix_unclosed_fences``），使严格口径（预检/字数/压缩禁区）与
+#       容错口径（渲染）对落库正文结论恒等。
+#   ⚠️ monkeypatch 提示：测试要替换围栏判定行为请 patch ``fence_common``，
+#      patch 本模块的委托薄包装会被委托链吸收（与本仓 §运维惯例同族）。
+FENCE_RE_DEPRECATED = None  # deprecated：请用 strip_fenced_code_blocks
 
 # ---------- 字数口径常量（全项目唯一口径，避免魔法数字分散） ----------
-DEFAULT_WORD_BUDGET = 1500   # 未设置预算时的默认目标字数
+# ✅ 2026-10-11（R66 字数偏差修复）：默认预算 1500 → 1200（四档之"标准"档）。
+#    历史 1500 是散落在 8 处字面量里的"事实默认"，从未与任何档位对齐；
+#    现统一收口到 DEFAULT_WORD_BUDGET，且其值等于 WORD_BUDGET_DEFAULT_TIER。
+DEFAULT_WORD_BUDGET = 1200   # 未设置预算时的默认目标字数（= 标准档）
 WORD_UNDER_RATIO = 0.8       # 低于预算 80% → under（同时是"是否需要续写"的门槛）
 # ✅ 2026-10-06（R47 债-1）：WORD_OVER_RATIO 数值搬入
 #    ``services/ai/prompts/_limits.py`` 单一事实源，本模块仍以同名可读。
 from app.services.ai.prompts._limits import WORD_OVER_RATIO  # noqa: E402
+# ✅ R76（2026-10-13）：围栏闭合判据唯一事实源。本模块只保留历史签名与用途口径，
+#    「这一行是不是闭合行」的判定一律下沉到 fence_common（见其模块 docstring 的
+#    三套语义分叉取证）。
+from app.services import fence_common as _fence_common
+from app.services.fence_common import (  # noqa: E402
+    append_missing_closes,
+    find_unclosed as _fence_common_find_unclosed,
+    is_fence_close as _fence_common_is_close,
+    normalize_fence_closes,
+    FENCE_LINE_RE as _FENCE_LINE_RE,
+)
+
+# ---------- 四档字数控制（R66 · 2026-10-11） ----------
+# 简短 800 / 标准 1200 / 详细 2000 / 超长 2500。
+# 前端 WORD_BUDGET_OPTIONS 与后端档位解析共用这一组数值（前端只展示，
+# 真源在此处；改档位只改这里，禁止再出现第二套字面量）。
+WORD_BUDGET_TIERS = {"brief": 800, "standard": 1200, "detailed": 2000, "ultra": 2500}
+WORD_BUDGET_DEFAULT_TIER = "standard"
+# 三级目录（叶子节点）正文下限：除下级目录章节外，需生成约 300 字正文。
+# 既是档位分配时的叶子预算下限（max(档位值, 300)），也是续写触发的最低门槛。
+LEAF_MIN_WORD_BUDGET = 300
+
+
+def resolve_word_budget_tier(raw) -> int | None:
+    """把请求体里的 word_budget_tier 归一为目标字数（纯函数，便于单测）。
+
+    接受：档位名（brief/standard/detailed/ultra，大小写/空格宽容）、
+    档位数值本身（800/1200/2000/2500 直传也认，兼容脚本调用）。
+    None / 空串 / 非法值 → None（不启用档位，沿用各章自身预算，行为不变）。
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if not s:
+            return None
+        if s in WORD_BUDGET_TIERS:
+            return WORD_BUDGET_TIERS[s]
+        try:
+            raw = float(s)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(raw, (int, float)):
+        try:
+            v = int(raw)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        # 只认档位数值本身，不做区间吸附（800/1200/2000/2500 之外的值不算档位）
+        if v in WORD_BUDGET_TIERS.values():
+            return v
+    return None
+
+
+def word_deviation_of(
+    word_count: int,
+    word_budget: int,
+    *,
+    tolerance: float = 0.1,
+) -> dict:
+    """单章字数偏差三元组（实际-目标、比率、是否落在容差带内）。
+
+    ``ratio = 实际/目标``（目标≤0 时按 ``DEFAULT_WORD_BUDGET`` 兜底，与
+    ``word_status_for`` 同口径）。``within_band`` 按 ``1±tolerance`` 容差带
+    判定（默认 0.1 即提示词承诺的 ``0.9X ~ 1.1X``），供可追溯记录与达标率统计。
+    """
+    wb = word_budget or DEFAULT_WORD_BUDGET
+    wc = int(word_count or 0)
+    ratio = wc / wb if wb > 0 else 0.0
+    try:
+        tol = abs(float(tolerance))
+    except (TypeError, ValueError):
+        tol = 0.1
+    return {
+        "deviation": wc - wb,
+        "ratio": round(ratio, 4),
+        "within_band": (1.0 - tol) <= ratio <= (1.0 + tol),
+    }
+
+
+def word_audit_summary(rows: list[dict], *, tolerance: float = 0.1) -> dict:
+    """按章节行汇总字数达标情况（纯函数，审核预检与生成完成事件共用）。
+
+    Args:
+        rows: ``[{"section_id","title","level","word_budget","word_count"}, ...]``
+            脏值宽容：缺失字段按 0/缺省处理，绝不抛异常。
+
+    Returns:
+        ``{"total","in_band","under_band","over","under","below_leaf_floor",
+        "mean_ratio","max_ratio","items"}``；items 为逐章偏差明细（可追溯）。
+    """
+    items: list[dict] = []
+    ratios: list[float] = []
+    n_over = n_under = n_in_band = n_below_floor = 0
+    for r in rows or []:
+        try:
+            wb = int(r.get("word_budget") or DEFAULT_WORD_BUDGET)
+        except (TypeError, ValueError):
+            wb = DEFAULT_WORD_BUDGET
+        try:
+            wc = int(r.get("word_count") or 0)
+        except (TypeError, ValueError):
+            wc = 0
+        dev = word_deviation_of(wc, wb, tolerance=tolerance)
+        status = word_status_for(wc, wb)
+        if status == "over":
+            n_over += 1
+        elif status == "under":
+            n_under += 1
+        if dev["within_band"]:
+            n_in_band += 1
+        if wc < LEAF_MIN_WORD_BUDGET:
+            n_below_floor += 1
+        ratios.append(dev["ratio"])
+        items.append({
+            "section_id": r.get("section_id", ""),
+            "title": r.get("title", ""),
+            "level": int(r.get("level") or 0),
+            "word_budget": wb,
+            "word_count": wc,
+            "deviation": dev["deviation"],
+            "ratio": dev["ratio"],
+            "within_band": dev["within_band"],
+            "word_status": status,
+        })
+    total = len(items)
+    # 中位数比率（sorted 取中间值，偶数取平均）；空输入 0.0
+    srt = sorted(ratios)
+    if srt:
+        mid = len(srt) // 2
+        median_ratio = srt[mid] if len(srt) % 2 else (srt[mid - 1] + srt[mid]) / 2
+    else:
+        median_ratio = 0.0
+    return {
+        "total": total,
+        "in_band": n_in_band,
+        "under_band": total - n_in_band,
+        "over": n_over,
+        "under": n_under,
+        "below_leaf_floor": n_below_floor,
+        "mean_ratio": round(sum(ratios) / total, 4) if total else 0.0,
+        "median_ratio": round(median_ratio, 4),
+        "max_ratio": round(max(ratios), 4) if ratios else 0.0,
+        "items": items,
+    }
+
 
 # ---------- 输出 token 上限折算（P1-2 · 2026-09-17） ----------
 # 背景：章节生成此前**不传 max_tokens**，落到配置值（实测 32768）—— 无输出上限
@@ -151,16 +299,180 @@ def text_word_count(content: str) -> int:
     return len(strip_fenced_code_blocks(content))
 
 
+# ---------- 可读字数（R70 · 2026-10-12）**诊断专用，不参与任何判定** ----------
+# ⚠️ 这不是第二把执行尺子。`word_count` 落库、`word_status`、续写门槛
+#    （WORD_UNDER_RATIO）、超字数自动压缩（WORD_OVER_RATIO / _should_auto_shrink）
+#    **全部仍走 text_word_count**。护栏
+#    tests/test_word_caliber_diagnostic_r70_20261012.py 用反向 AST 锁死这一点：
+#    任何判定路径引用本模块这几个函数即测试红 —— 免得「诊断读数」悄悄长成
+#    第二口径（易标报告 §10 薄弱点 1 与本仓 R55/R62 反复警告的同族反例）。
+#
+# 为什么要有一个第二读数（R70 体检 F1）：text_word_count 的口径是
+#    「剔围栏后的**字符数**」，中文标点、Markdown 结构符（| - # * >）、URL、
+#    空白与换行**全部计入**。同一批 33 章真实语料实测：
+#      · 字符口径 mean 偏差 136.9% → 可读口径 106.5%（虚高 30.4 个百分点）
+#      · 缺口 15,050 字里标点占 8,744（58%）；换算系数 1.285
+#      · 触发 >1.3× 自动压缩的章节 19/33 → 4/33
+#    而预算数值（800/1200/2000/2500、DEFAULT_WORD_BUDGET）是按人的「字数」直觉
+#    定的，用字符口径执行 ⇒ 每章真实目标被隐形放大近三成，且「该压的不该压、
+#    该补的没补」两类相反错误同时发生（偏短章节在字符口径下提前满足续写门槛）。
+#    把两个读数并列显示，是为了让「是否切口径、预算要不要同时下调」这个决策
+#    有可对照的证据，而不是继续靠一条注释里的旧均值驱动默认值。
+_RW_IMG_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")             # 图片整体不计（含图题语法）
+_RW_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")           # 链接只留锚文字
+_RW_REF_LINK_RE = re.compile(r"\[([^\]]*)\]\[[^\]]*\]")      # 引用式链接同上
+_RW_URL_RE = re.compile(r"(?:https?|file|yibiao-asset)://\S+")  # 裸 URL 不计
+_RW_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+_RW_HTML_TAG_RE = re.compile(r"<br\s*/?>", re.I)
+_RW_HTML_ANY_RE = re.compile(r"<[^>]{1,200}>")
+_RW_INLINE_CODE_RE = re.compile(r"`[^`]*`")
+_RW_TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]+\|[\s:|-]*$")  # 表格分隔行整行剔除
+_RW_LIST_MARK_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")     # 列表符号
+_RW_MARKERS_RE = re.compile(r"[#>*_{}\\]|~~|\*\*|__|&nbsp;")    # 残留结构标记
+_RW_HEADING_RE = re.compile(r"^\s*#{1,6}\s*")                  # 标题井号
+_RW_QUOTE_RE = re.compile(r"^\s*>\s?")                        # 引用标记
+# CJK 字符（含日文假名）：逐字计
+_RW_CJK_IDEO_RE = re.compile(r"[\u3400-\u9fff\u3040-\u30ff]")
+# 西文/数字 token：按词计（``1:1.2`` / ``GB50007`` 这类带连接符的视为一个词）
+_RW_LATIN_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[-_./][A-Za-z0-9]+)*")
+
+
+def _normalize_for_readable(content: str) -> str:
+    """把正文归一到「用户实际读到的文字」：剔围栏/图片/URL/HTML/结构符。
+
+    围栏剔除**复用** ``strip_fenced_code_blocks``（本模块唯一围栏事实源），
+    不重造正则；行尾归一口径与 ``text_word_count`` 一致（CRLF/CR → LF），
+    保证同一正文在 LF / CRLF 下读数相同。仅供本模块两个诊断函数共用。
+    """
+    t = content.replace("\r\n", "\n").replace("\r", "\n")
+    t = strip_fenced_code_blocks(t)
+    t = _RW_IMG_RE.sub(" ", t)
+    t = _RW_LINK_RE.sub(r"\1", t)
+    t = _RW_REF_LINK_RE.sub(r"\1", t)
+    t = _RW_URL_RE.sub(" ", t)
+    t = _RW_HTML_COMMENT_RE.sub(" ", t)
+    t = _RW_HTML_TAG_RE.sub("\n", t)
+    t = _RW_HTML_ANY_RE.sub(" ", t)
+    t = _RW_INLINE_CODE_RE.sub(" ", t)
+    lines = []
+    for line in t.split("\n"):
+        if _RW_TABLE_SEP_RE.match(line):
+            continue
+        line = _RW_LIST_MARK_RE.sub("", line)
+        line = _RW_HEADING_RE.sub("", line)
+        line = _RW_QUOTE_RE.sub("", line)
+        lines.append(line)
+    t = " ".join(lines).replace("|", " ")
+    return _RW_MARKERS_RE.sub(" ", t)
+
+
+def has_cjk(content: str | None) -> bool:
+    """正文是否含 CJK 字符（可读字数读数的前在条件）。
+
+    纯函数。用途：``readable_word_count`` 只对「人读的中文正文」有意义 ——
+    测试语料与图表数据里常见的纯 ASCII 长串（``"x" * 3000``）按词合并后
+    只有 1 个 token，把它当作「实际字数」显示会误导用户。调用方据此决定
+    是否展示第二读数，**不得**用它改变任何判定结论。
+    """
+    return bool(content) and bool(_RW_CJK_IDEO_RE.search(content))
+
+
+def readable_word_count(content: str | None) -> int:
+    r"""可读字数：CJK 逐字 + 西文按词，剔标点/结构符/围栏/图片/URL（诊断专用）。
+
+    ⚠️ **不参与判定**（详见上方常量块说明与 R70 护栏）。权威口径唯一，
+    仍是 ``text_word_count``；本函数只提供「用户实际读到的文字量」这一对照读数。
+
+    与 ``text_word_count`` 是**包含**关系：先剔围栏（共用同一事实源），再剔
+    结构性噪声，最后按「字/词」而不是「字符」计数。
+
+    Args:
+        content: 章节正文（Markdown）。None / 空串 → 0。
+
+    Returns:
+        可读字数（int）。中文标点**不计**（与 Word 的「字数」不同，Word 计入，
+        Word 档对照见 artifacts/r70_wordcount_audit 探针）。
+    """
+    if not content:
+        return 0
+    t = _normalize_for_readable(content)
+    cjk = len(_RW_CJK_IDEO_RE.findall(t))
+    # 先把 CJK 抠掉，剩下的才是西文/数字区；否则「第3章」里的 3 会与汉字并入同串
+    rest = _RW_CJK_IDEO_RE.sub(" ", t)
+    latin = len(_RW_LATIN_TOKEN_RE.findall(rest))
+    return cjk + latin
+
+
+# ---------- 字数收尾透明警告（R71 · 2026-10-12）**建议性，不参与任何判定** ----------
+# 引入外部《易标文字生成数量控制规则与标准》R12「失败不硬裁 → 输出人工核对透明
+# 警告」。与本仓既有红线天然一致（``content_shrink`` 的「宁可超字数，不可损坏正文」）：
+# 当一章正文收尾时字数仍落在 word_status 的正常带之外（under / over），说明续写 /
+# 压缩未能把它拉回预算，而系统**刻意不强行灌写 / 不强行裁剪**以保护内容 ——
+# 此时应把这一事实透明告知用户，而不是静默放行。与 R70 诊断读数同族反例防控：
+# 护栏 tests/test_word_caliber_transparency_r71_20261012.py 反向 AST 锁死本函数
+# 绝不进入任何判定 / 落库路径（word_count 落库、word_status、续写门槛、压缩门槛
+# 全部仍唯一走 text_word_count）。
+#
+# 复用唯一口径：入参 ``word_count`` 必须是调用方用 ``text_word_count`` 算好的字符
+# 口径读数；本函数只做格式化，**不自算字数、不引入第三把尺子**。
+def word_closeout_notice(
+    word_count: int,
+    word_budget: int,
+    *,
+    tolerance: float = 0.1,
+) -> dict:
+    """正文收尾字数透明警告（纯函数，仅建议）。见上方注释块的设计边界。
+
+    Args:
+        word_count: 调用方用 ``text_word_count`` 算好的正文字数（唯一口径）。
+        word_budget: 本章目标字数（≤0 时按 ``DEFAULT_WORD_BUDGET`` 兜底，同口径）。
+        tolerance: 容差带半宽，透传给 ``word_deviation_of``。
+
+    Returns:
+        ``{"advisory": bool, "kind": "under"|"over"|None, "message": str,
+        "word_status": str, "ratio": float, "within_band": bool,
+        "severity": "advisory"}``。脏值宽容：任何入参异常都不抛，退回 normal 带内、
+        ``advisory=False``。``advisory`` 为真仅代表「建议人工核对」，绝不阻断落库。
+    """
+    wb = word_budget or DEFAULT_WORD_BUDGET
+    try:
+        wc = int(word_count or 0)
+    except (TypeError, ValueError):
+        wc = 0
+    # 复用全项目唯一判定，不自造阈值：word_status_for 用同一组 0.8× / 1.3× 口径
+    status = word_status_for(wc, wb)
+    dev = word_deviation_of(wc, wb, tolerance=tolerance)
+    message = ""
+    if status == "under":
+        message = (
+            f"正文约 {wc} 字，低于目标 {wb} 字（续写未能补齐或已停止，"
+            f"系统不强行灌写）——请人工核对是否需要补充。"
+        )
+    elif status == "over":
+        message = (
+            f"正文约 {wc} 字，超出目标 {wb} 字（系统按「宁可超字数，"
+            f"不可损坏正文」未强行裁剪）——请人工核对是否需要精简。"
+        )
+    return {
+        "advisory": status != "normal",
+        "kind": status if status != "normal" else None,
+        "message": message,
+        "word_status": status,
+        "ratio": dev["ratio"],
+        "within_band": dev["within_band"],
+        "severity": "advisory",
+    }
+
+
 # ---------- 未闭合围栏自动修复（2026-09-22） ----------
 # 背景（DLV-07 缺口）：预检能检出未闭合围栏并提示用户「请补全 ``` 结束标记」，
 # 但导出链路上 Markdown→DOCX 转换器遇到奇数个 ``` 时行为不定（吞掉后续正文 /
 # 红字报错 / 图号虚跳），且用户在几百章正文里手工定位围栏成本极高。
 # 现提供纯函数「在文档末尾补齐所有未闭合围栏」：确定性、幂等、不改动已闭合块，
 # 供 preflight / autofix / 导出前置清洗共用，避免每处重造轮子。
-_FENCE_LINE_RE = re.compile(
-    # 独立成行的围栏标记：至少 3 个反引号或波浪号，后面可选语言标签
-    r"^[ \t]{0,3}(`{3,}|~{3,})([^`~\n]*)$"
-)
+# ✅ R76：正则本体上收到 ``fence_common.FENCE_LINE_RE``（本模块以别名 ``_FENCE_LINE_RE``
+#    继续可用，供 ``count_fences`` 这类「是不是围栏行」的粗判使用）；
+#    **「是不是某围栏的闭合行」一律走 ``_fence_common_is_close``，不得再自写判据**。
 
 
 def fence_spans(content: str | None) -> list[tuple[int, int]]:
@@ -208,10 +520,7 @@ def fence_spans(content: str | None) -> list[tuple[int, int]]:
         j = i + 1
         close_idx = -1
         while j < n:
-            cm = _FENCE_LINE_RE.match(lines[j])
-            if cm is not None and cm.group(1)[0] == ch \
-                    and len(cm.group(1)) >= open_len \
-                    and not cm.group(2).strip():
+            if _fence_common_is_close(lines[j], ch, open_len, tolerant_length=False):
                 close_idx = j
                 break
             j += 1
@@ -266,10 +575,7 @@ def strip_fenced_code_blocks(content: str | None) -> str:
         j = i + 1
         closed_idx = -1
         while j < n:
-            cm = _FENCE_LINE_RE.match(lines[j])
-            if cm is not None and cm.group(1)[0] == ch \
-                    and len(cm.group(1)) >= open_len \
-                    and not cm.group(2).strip():
+            if _fence_common_is_close(lines[j], ch, open_len, tolerant_length=False):
                 closed_idx = j
                 break
             j += 1
@@ -294,7 +600,9 @@ def find_unclosed_fences(content: str) -> list[dict]:
       · 多个围栏按线性扫描处理，未闭合状态在到达文档末尾时结束。
 
     注：本函数保持**严格** CommonMark 语义；宽松闭合（AI「4 反引号开 + 3 反引号
-    闭」错配）只在 ``auto_fix_unclosed_fences`` 落库防线中生效。
+    闭」错配）只在 ``auto_fix_unclosed_fences`` 落库防线中生效，且该错配在写入前
+    已由 ``fence_common.normalize_fence_closes`` 归一 —— 落库正文上严格与宽松恒等
+    （R76 收口，函数本体委托 ``fence_common.find_unclosed(tolerant_length=False)``）。
 
     Args:
         content: Markdown 正文。
@@ -305,97 +613,14 @@ def find_unclosed_fences(content: str) -> list[dict]:
         "length": 围栏长度, "lang": 语言标签(可能为空), "marker": 原文标记}``。
         无未闭合围栏时返回 ``[]``。
     """
-    if not content:
-        return []
-    lines = content.split("\n")
-    unclosed: list[dict] = []
-    i = 0
-    n_lines = len(lines)
-    while i < n_lines:
-        m = _FENCE_LINE_RE.match(lines[i])
-        if not m:
-            i += 1
-            continue
-        open_marker = m.group(1)
-        rest = m.group(2).strip()
-        ch = open_marker[0]
-        n = len(open_marker)
-        lang = rest.split()[0].lower() if rest else ""
-        open_line = i + 1
-        # 向前寻找闭合围栏：同种字符、长度 ≥ n、且不带标签
-        close_idx = -1
-        j = i + 1
-        while j < n_lines:
-            cm = _FENCE_LINE_RE.match(lines[j])
-            if not cm:
-                j += 1
-                continue
-            cm_marker = cm.group(1)
-            cm_rest = cm.group(2).strip()
-            if cm_marker[0] == ch and len(cm_marker) >= n and cm_rest == "":
-                close_idx = j
-                break
-            j += 1
-        if close_idx < 0:
-            # 到达文档末尾仍未闭合
-            unclosed.append({
-                "line": open_line, "char": ch, "length": n,
-                "lang": lang, "marker": open_marker,
-            })
-            break  # 后面的行都在围栏内，不再是新围栏
-        i = close_idx + 1
-    return unclosed
+    return _fence_common_find_unclosed(content, tolerant_length=False)
 
 
-def _find_unclosed_fences_lenient(content: str) -> list[dict]:
-    """宽松扫描未闭合围栏（仅用于 ``auto_fix_unclosed_fences`` 落库防线）。
-
-    语义与 ``content_blocks.parse_fence_line`` / ``read_fenced_block`` 完全
-    一致：**同种字符即可视为闭合**（不要求长度 ≥ 开围栏、也不排除带标签）。
-
-    用途：AI 输出高频出现「4 反引号开 + 3 反引号闭」错配。严格 CommonMark
-    语义下这被判为未闭合，但图表登记/导出侧（``read_fenced_block``）判为已
-    闭合、图表正常渲染。若 ``auto_fix_unclosed_fences`` 沿用严格判据，会在此
-    类块尾追加一个假闭合围栏，落库后出现「两个相邻闭围栏、图号虚跳、渲染
-    失败占号」。用宽松语义扫描即从根源消除这一分歧。
-
-    注：只在本函数内部使用，不改变 ``find_unclosed_fences``（对外仍提供严格
-    CommonMark 语义，用于字数/区间/内容保护等场景，那些场景需要严格语义
-    把「4 反引号开 + 3 反引号闭 + 4 反引号」正确识别为「内容 + 闭合」）。
-    """
-    if not content:
-        return []
-    lines = content.split("\n")
-    unclosed: list[dict] = []
-    i = 0
-    n_lines = len(lines)
-    while i < n_lines:
-        m = _FENCE_LINE_RE.match(lines[i])
-        if not m:
-            i += 1
-            continue
-        open_marker = m.group(1)
-        rest = m.group(2).strip()
-        ch = open_marker[0]
-        n = len(open_marker)
-        lang = rest.split()[0].lower() if rest else ""
-        open_line = i + 1
-        close_idx = -1
-        j = i + 1
-        while j < n_lines:
-            cm = _FENCE_LINE_RE.match(lines[j])
-            if cm is not None and cm.group(1)[0] == ch:
-                close_idx = j
-                break
-            j += 1
-        if close_idx < 0:
-            unclosed.append({
-                "line": open_line, "char": ch, "length": n,
-                "lang": lang, "marker": open_marker,
-            })
-            break  # 后面的行都在围栏内，不再是新围栏
-        i = close_idx + 1
-    return unclosed
+# ✅ R76（2026-10-13）：旧的 `_find_unclosed_fences_lenient`（容错口径自写扫描循环）
+#    已删除 —— 生产路径（auto_fix_unclosed_fences）改为直接消费
+#    ``fence_common`` 的两个出口，容错扫描即 ``fence_common.find_unclosed(
+#    content, tolerant_length=True)``。留着「委托薄包装但零调用方」就是新的
+#    悬空副本（与本轮在 _chart_pipeline 清掉的 :197 同族），故不保留别名。
 
 
 def auto_fix_unclosed_fences(
@@ -403,28 +628,36 @@ def auto_fix_unclosed_fences(
     *,
     separator: str = "\n",
 ) -> tuple[str, list[dict]]:
-    """在文档末尾补齐所有未闭合的 Markdown 代码围栏。
+    """补齐正文中的代码围栏缺陷：**两步**归一 + 追加（落库防线唯一出口）。
 
-    仅「追加」操作，不改动已有正文与已闭合块，保证：
+    ✅ R76（2026-10-13）改造为两步，返回契约 ``(fixed_content, fixes_log)`` 与
+    既有键**逐字不变**（加法式新增 ``action`` 区分两步）：
+
+      1. ``fence_common.normalize_fence_closes`` —— 把「容错判为闭合、但标记长度
+         短于开围栏」的闭合行补齐到开围栏长度（``action="normalize_close_length"``）。
+         受开关 ``settings.content_fence_normalize_close``（默认 True）控制，
+         置 False 逐字回退旧行为。
+      2. ``fence_common.append_missing_closes`` —— 对归一后**仍真未闭合**的围栏，
+         在文档末尾追加同种、等长的闭合标记（``action="append_close"``）。
+
+    为什么必须先归一再追加（本轮最大踩坑，探针实测）：两步只走「文末追加」时，
+    「4 开 + 3 闭」会被容错判为已闭合而**不进第二步日志**，但严格口径（预检
+    DLV-07 / 字数剔除 / 压缩禁区 / 前端 marked）仍判未闭合 —— 于是同一份正文
+    出现「自动修复说没东西修、预检说会吞正文、字数报 0」。归一让两种口径对
+    落库正文**结论恒等**，分歧从文本源头消除，而不是各处各自兜底。
+
+    两步都保持既有纪律：
 
       · 幂等：修复后的正文再跑一次返回空日志与不变内容；
       · 确定性：结果只由输入决定，不依赖随机/时间；
-      · 无损：不改字、不改标点、不改已闭合块内部；
+      · 无损：不改字、不改标点、不改已闭合块内部内容（第 1 步只改闭合行的
+        **标记长度**，不增删行）；
       · 兼容：闭合标记用与开围栏**同种**字符（``` vs ~~~），长度对齐开围栏。
 
-    ✅ 2026-10-04 修复（BUG-3）：本函数改用**宽松**闭合扫描
-    （``_find_unclosed_fences_lenient``），与图表登记/导出/预检侧的
-    ``content_blocks.parse_fence_line`` / ``read_fenced_block`` 口径一致。
-    原因：AI 输出高频出现「4 反引号开 + 3 反引号闭」错配，图表三侧判为已
-    闭合、正常渲染，但本函数若沿用严格 CommonMark（要求闭围栏长度 ≥ 开围栏）
-    会将其误判为未闭合、追加一个假闭合围栏，落库后出现「两个相邻闭围栏、
-    图号虚跳、渲染失败占号」。放宽到「同种字符即可闭合」即从根源消除两侧
-    分歧。
-
-    其它扫描函数（``fence_spans`` / ``strip_fenced_code_blocks`` /
-    ``find_unclosed_fences``）仍保持严格 CommonMark 语义，因为它们的用途
-    （压缩禁区定位、字数口径、内容保护）需要严格识别「4 反引号开 + 3 反引号
-    短围栏行 + 4 反引号闭」里的短围栏行为代码内容。
+    ⚠️ 本函数**救不回**已被吞进块内的正文（未闭合意味着其后所有行都是代码，
+    闭合只能补在末尾）。``append_close`` 日志项带 ``swallowed_prose`` 计数
+    （块内以中文句读结尾的行数）—— 计数 > 0 时调用方**必须**提示人工核对，
+    不得把「补齐 N 处」当成「已修复」（R76 · F4 可观测性）。
 
     Args:
         content: 原始 Markdown 正文。
@@ -434,32 +667,24 @@ def auto_fix_unclosed_fences(
         ``(fixed_content, fixes_log)``
 
         fixes_log 每项结构：
+          ``{"action": "normalize_close_length", "line": 闭合行行号, "lang": ...,
+          "char": "`" 或 "~", "length": 补齐后长度, "old_length": 原长度}``
           ``{"action": "append_close", "line": 起始行号, "lang": 语言标签,
-          "char": "`" 或 "~", "length": 闭合标记长度}``
-        无未闭合围栏时返回 ``(原样, [])``。
+          "char": "`" 或 "~", "length": 闭合标记长度, "swallowed_prose": 疑似被吞正文行数}``
+        无缺陷时返回 ``(原样, [])``。
     """
     if not content:
         return content, []
-    unclosed = _find_unclosed_fences_lenient(content)
-    if not unclosed:
-        return content, []
-    # 从原始内容剥离末尾空白，避免 ``` 与正文粘连
-    stripped = content.rstrip()
-    parts: list[str] = []
     log: list[dict] = []
-    for u in unclosed:
-        marker = u["char"] * u["length"]
-        parts.append(separator + marker)
-        log.append({
-            "action": "append_close",
-            "line": u["line"],
-            "lang": u["lang"],
-            "char": u["char"],
-            "length": u["length"],
-        })
-    # 修复后统一以换行结尾，符合 Markdown 段落约定
-    fixed = stripped + "".join(parts) + "\n"
-    return fixed, log
+    current = content
+    if _fence_common.normalize_close_enabled():
+        current, normalize_log = normalize_fence_closes(current)
+        log.extend(normalize_log)
+    current, append_log = append_missing_closes(current, separator=separator)
+    log.extend(append_log)
+    if not log:
+        return content, []
+    return current, log
 
 
 def count_fences(content: str) -> int:

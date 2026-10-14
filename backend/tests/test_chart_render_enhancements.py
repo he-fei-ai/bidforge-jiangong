@@ -4,8 +4,8 @@
 覆盖：
 - 架构图：环数据不再 RecursionError；字符串子节点/别名键不再被静默丢弃；
   样张配色（深藏青根 + highlight 琥珀橙高亮）
-- 流程图：横向 LR 布局、样张配色（start/end 深藏青、process 中蓝、highlight/decision
-  琥珀）、steps/edges/variant chart-json 载荷校验与渲染闭环
+- 流程图：横向 LR 布局、统一样式配色（R66 双模式：全节点淡紫底 #f0edff + 紫边框
+  #a89aff + 深灰字/连线 #333333）、steps/edges/variant chart-json 载荷校验与渲染闭环
 - 甘特图：`section` 阶段带渲染；关键路径模式下备注不再丢失、不再留白
 - 流程图：字符串形式边（含"下标"端点）不再产生幽灵节点
 - 劳动力图：非法容器（phases/categories 非序列）优雅返回 None
@@ -134,10 +134,9 @@ def test_architecture_highlight_node_amber_and_layout_passthrough():
 
 
 def test_flowchart_horizontal_lr_and_doc_palette():
-    """回归（2026-09-18 横向流程图样张改版）：
-    - LR 线性链必须横排（宽 > 高，旧缺陷是方向被当 TD 处理）；
-    - 样张配色：start/end 深藏青 #1F3A63、process 中蓝 #4A7CC7、
-      decision 琥珀 #F5B800（菱形）、关键词高亮 highlight 琥珀。"""
+    """回归（2026-10-11 R66 流程图统一样式规范 · 双模式）：
+    - 显式 LR 线性链仍横排（宽 > 高，方向声明必须生效）；
+    - 统一配色：所有节点淡紫底 #f0edff + 紫边框 #a89aff + 深灰连线 #333333。"""
     code = (
         "flowchart LR\n"
         '    A["施工准备"] --> B["关键：主体结构施工"]\n'
@@ -152,15 +151,20 @@ def test_flowchart_horizontal_lr_and_doc_palette():
     assert img.size[0] > img.size[1], f"LR 未横向排布（{img.size}）"
     colors = img.convert("RGB").getcolors(maxcolors=1 << 24) or []
     present = {c for _n, c in colors}
-    assert (31, 58, 99) in present, "start/end 深藏青 #1F3A63 未出现"
-    assert (74, 124, 199) in present, "process 中蓝 #4A7CC7 未出现"
-    assert (245, 184, 0) in present, "decision/highlight 琥珀 #F5B800 未出现"
-    assert (90, 124, 168) in present, "连线 #5A7CA8 未出现"
+    assert (240, 237, 255) in present, "节点淡紫底 #f0edff 未出现"
+    assert (168, 154, 255) in present, "节点紫边框 #a89aff 未出现"
+    assert (51, 51, 51) in present, "连线/文字深灰 #333333 未出现"
+    # 旧样张配色（深藏青 / 中蓝 / 琥珀 / R65 淡紫对）不得残留
+    assert (31, 58, 99) not in present, "旧深藏青 #1F3A63 残留"
+    assert (74, 124, 199) not in present, "旧中蓝 #4A7CC7 残留"
+    assert (245, 184, 0) not in present, "旧琥珀 #F5B800 残留"
+    assert (236, 236, 255) not in present, "R65 旧淡紫底 #ECECFF 残留"
+    assert (147, 112, 219) not in present, "R65 旧紫边框 #9370DB 残留"
 
 
 def test_flowchart_steps_payload_validated_and_rendered():
     """回归：施工/工艺流程图 chart-json 载荷（steps/edges/variant）必须通过
-    校验-渲染闭环，显式 variant 经 overrides 生效，direction 缺省 LR。"""
+    校验-渲染闭环，显式 variant 经 overrides 生效，direction 缺省 TD（纵向）。"""
     payload = {
         "type": "flowchart",
         "title": "项目总体施工流程图",
@@ -180,12 +184,12 @@ def test_flowchart_steps_payload_validated_and_rendered():
     assert ok, errs
     norm = normalize_flowchart_data(payload)
     assert norm is not None
-    assert norm["direction"] == "LR", "steps 载荷缺省方向应为 LR"
+    assert norm["direction"] == "TD", "steps 载荷缺省方向应为 TD（纵向）"
     assert [n["type"] for n in norm["nodes"]] == ["start", "process", "highlight", "end"]
     assert [n["id"] for n in norm["nodes"]] == ["s1", "s2", "s3", "s4"], "下标/别名端点应解析"
 
     mermaid_code = flowchart_json_to_mermaid(norm)
-    assert mermaid_code.startswith("flowchart LR")
+    assert mermaid_code.startswith("flowchart TD")
     bio = _render_flowchart_image_v2(
         mermaid_code,
         variant_overrides={
@@ -194,11 +198,11 @@ def test_flowchart_steps_payload_validated_and_rendered():
     )
     assert bio is not None and len(bio.getvalue()) > 100
     img = _open(bio)
-    assert img.size[0] > img.size[1], "steps 载荷未按 LR 横向渲染"
+    assert img.size[1] > img.size[0], "steps 载荷（缺省 TD）未纵向渲染"
     colors = img.convert("RGB").getcolors(maxcolors=1 << 24) or []
     present = {c for _n, c in colors}
-    assert (31, 58, 99) in present, "start/end 深藏青未出现"
-    assert (245, 184, 0) in present, "highlight 琥珀未出现"
+    assert (240, 237, 255) in present, "节点淡紫底未出现（#f0edff）"
+    assert (168, 154, 255) in present, "节点紫边框未出现（#a89aff）"
 
 
 def test_flowchart_validator_rejects_broken_payload():

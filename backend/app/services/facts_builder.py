@@ -54,6 +54,67 @@ def _facts_keywords(text: str) -> set[str]:
 _FACTS_GENERIC_GROUP_HINTS = ("概况", "总体", "通用", "项目信息", "工程概况", "项目概况", "编制依据")
 
 
+def core_facts_rows(rows: list) -> list:
+    """整案「核心事实」子集：通用/总体类事实组（项目名、参建单位、工期、造价…）。
+
+    ✅ R58（2026-10-10）：为 R57 的「前缀稳定化」补上最关键的一块拼图。
+
+    发现的问题：R57 把事实段放进 user 第①段（整案稳定上下文），但事实文本是按
+    ``_filter_facts_rows(rows, leaf)`` **逐章**算出来的 —— 于是「稳定段」每章都
+    不同，前缀根本无法命中，F1 的收益被这一处抵消掉大半。
+
+    拆法是**按相关性是否随章节变化**：
+      · 通用组（``_FACTS_GENERIC_GROUP_HINTS``）—— 与任何章节都相关，按整案
+        注入一次即可 → 进**稳定段**（逐章逐字节相同）；
+      · 其余 —— 按章节语义命中 → 进**任务差异段**（逐章不同）。
+
+    这样既保住前缀稳定，又实现了「按需」（非通用事实只在相关章节出现）。
+
+    ⚠️ 判据复用 ``_FACTS_GENERIC_GROUP_HINTS`` 这一**唯一**常量，不另写一份清单
+    （本仓反复踩过的「同一判据两处实现」反模式）。
+
+    Returns:
+        行结构与入参一致（整行原样保留，不裁列）。
+    """
+    out: list = []
+    for _row in rows:
+        gt = _row[0] if len(_row) > 0 else ""
+        if any(h in (gt or "") for h in _FACTS_GENERIC_GROUP_HINTS):
+            out.append(_row)
+    return out
+
+
+def exclude_rows(rows: list, excluded: list) -> list:
+    """从 ``rows`` 中剔除 ``excluded`` 里的行（按**对象身份**与**元组相等**双重判定）。
+
+    用于在「稳定段已注入核心事实」后，把任务差异段的输入收敛到**剩余**事实，
+    避免同一条事实在提示词里出现两次（纯 token 浪费，且给模型重复约束）。
+
+    ⚠️ 用身份优先：事实行多为 list/tuple，同内容的两个不同行不应被误判为同一行；
+       但同时兼容「重新构造出的等价元组」（如测试里手写两遍同一行）。
+    """
+    if not excluded:
+        return list(rows)
+    ex_ids = {id(r) for r in excluded}
+    ex_vals = set()
+    for r in excluded:
+        try:
+            ex_vals.add(tuple(r))
+        except TypeError:
+            pass
+    out: list = []
+    for _row in rows:
+        if id(_row) in ex_ids:
+            continue
+        try:
+            if tuple(_row) in ex_vals:
+                continue
+        except TypeError:
+            pass
+        out.append(_row)
+    return out
+
+
 def _filter_facts_rows(rows: list, leaf: dict) -> list:
     """按章节标题/描述对事实行做相关性预筛（对齐 OpenBidKit 的逐章精选注入）。
 
@@ -172,7 +233,20 @@ def _render_facts_text(
     prepared: list[tuple[str, str, float | None]] = []
     seen_groups: list[str] = []
     for _row in rows:
-        gt, _title, content = _row[0], _row[1], _row[2]
+        # ✅ 健壮性修复（2026-10-10）：按下标**自适应取值**，与同模块的
+        #    _filter_facts_rows / _row_chapter 同口径。
+        #    旧实现 `gt, _title, content = _row[0], _row[1], _row[2]` 对长度 < 3
+        #    的行抛 `IndexError`；本函数是「事实 → 提示词」的唯一出口
+        #    （consistency_scanner / compliance / build_facts_text 四路共用），
+        #    一行短行会让整段事实构建就地失败，被调用方的章节级 try 吞成
+        #    「生成失败」，日志里没有任何指向本函数的痕迹。
+        try:
+            _cells = list(_row)
+        except TypeError:  # 非序列行（don't care）→ 视为空行跳过
+            continue
+        gt = _cells[0] if len(_cells) > 0 else ""
+        _title = _cells[1] if len(_cells) > 1 else ""
+        content = _cells[2] if len(_cells) > 2 else ""
         if gt not in seen_groups:
             seen_groups.append(gt)
         # confidence 是 4/5 元组行的第 4 项（3 元组历史行无此列 → 不标注）
@@ -410,3 +484,76 @@ async def build_facts_text(
         except Exception:
             logger.warning("数据字典注入失败（忽略，不影响生成）", exc_info=True)
     return facts_text
+
+
+def relevant_first_rows(rows: list, leaf: dict) -> list:
+    """按章节相关性**重排**事实行：命中行前置、其余按原序垫后（绝不丢事实）。
+
+    与 :func:`_filter_facts_rows` 的分工（同族不同用途，勿合并）：
+
+    ============================  ============================================
+    函数                          用途
+    ============================  ============================================
+    ``_filter_facts_rows``        正文生成逐章精选：**筛选**（未命中即剔除，
+                                  命中为空回退全量）—— 省 token、防上下文膨胀
+    ``relevant_first_rows``       目录子目录生成：**只重排不删除** ——
+                                  目录章节是结构性的，每条事实都应仍有机会
+                                  进入某章视野，只是相关的排到预算头部
+    ============================  ============================================
+
+    规则：
+    - 通用/总体类事实组（``_FACTS_GENERIC_GROUP_HINTS``，与
+      ``_filter_facts_rows`` 同一唯一常量）始终在头部；
+    - 其余行按章节标题/描述关键字（2-gram）命中情况分入头部/垫后；
+    - 无关键词或无命中 → 原序返回（与旧行为逐字等价）。
+
+    ✅ R77（2026-10-14）：目录侧引入易标「逐章精选」思路。旧实现对所有
+    子目录章节下发同一份整案事实头部（``project_facts[:1000]``），长方案
+    尾部事实（监测/验收/应急…）对任何子目录都不可见。
+    """
+    title = f"{(leaf.get('title') or '')} {(leaf.get('description') or '')}"
+    kws = _facts_keywords(title)
+    if not kws:
+        return rows
+    hit: list = []
+    rest: list = []
+    for _row in rows:
+        gt = _row[0] if len(_row) > 0 else ""
+        if any(h in (gt or "") for h in _FACTS_GENERIC_GROUP_HINTS):
+            hit.append(_row)
+            continue
+        t = _row[1] if len(_row) > 1 else ""
+        content = _row[2] if len(_row) > 2 else ""
+        hay = f"{gt or ''} {t or ''} {content or ''}"
+        (hit if any(kw in hay for kw in kws) else rest).append(_row)
+    return hit + rest if hit else rows
+
+
+def render_outline_chapter_facts(rows: list, chapter: dict, *,
+                                 max_total: int = 1000,
+                                 dd_block: str = "") -> str:
+    """目录二三级生成专用：按一级章节相关性渲染「项目关键事实」（纯函数）。
+
+    ✅ R77（2026-10-14）：与 :func:`build_facts_text` 的分工 —— 那个是
+    「整案一次」（目录一级 / 外科式补齐用，内部自带 DB 读取与数据字典）；
+    本函数是「逐章一次」的纯渲染（事实行由调用方循环外加载一次后传入，
+    数据字典块 ``dd_block`` 同理算一次），避免 N 章 N 次查库。
+
+    Args:
+        rows: 已按方案名称相关性排序的事实行（``_rank_facts_by_basis`` 产出）。
+        chapter: 一级章节 dict（title/description；批处理可传多章拼接）。
+        max_total: 本章事实段字符预算（含 dd_block）。
+        dd_block: 循环外算一次的数据字典块（空串 = 不注入，与
+            ``content_data_dictionary`` 关闭时同口径）。
+
+    Returns:
+        长度 ≤ ``max_total`` 的事实文本（无行/无预算时可能仅含 dd_block）。
+    """
+    budget = int(max_total)
+    if dd_block:
+        budget = max(0, budget - len(dd_block) - 1)
+    text = _render_facts_text(
+        relevant_first_rows(rows, chapter), max_total=budget) if rows else ""
+    if dd_block:
+        return (dd_block + "\n" + text) if text else dd_block
+    return text

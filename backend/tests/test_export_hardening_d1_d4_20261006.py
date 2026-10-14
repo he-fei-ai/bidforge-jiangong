@@ -340,10 +340,10 @@ class TestExportCancellationContract:
         """取消走客户端断连；两条路由都不得把断连当成业务成功写缓存。"""
         for fn in (E.export_docx, E.export_pdf):
             src = inspect.getsource(fn)
-            assert "_prune_export_cache" in src
-            # 缓存写入在构建完成之后（构建失败即无缓存行）
+            assert "_persist_export_cache_row" in src, "路由未接入统一写存 helper"
+            # 缓存写入在构建完成之后（构建失败即无缓存行；取消发生在构建期则不写缓存）
             assert src.index("_build_docx_sync") < src.index(
-                "INSERT OR IGNORE INTO export_cache")
+                "_persist_export_cache_row")
 
     def test_tmp_file_cleanup_on_build_failure(self):
         """构建异常必须清理临时文件（取消/断连时进程被杀也留 tmp，属已知取舍；

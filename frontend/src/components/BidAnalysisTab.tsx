@@ -562,8 +562,8 @@ function BidAnalysisTab({
       );
     }
     if (status === "success") {
-      if (isManual) return <Tag color="purple">✎ 人工 {content.length}字</Tag>;
-      return absent ? <Tag color="volcano">⚠ 无内容</Tag> : <Tag color="green">✓ {content.length}字</Tag>;
+      if (isManual) return <Tag color="purple">✎ 人工 {content.length}字符</Tag>;
+      return absent ? <Tag color="volcano">⚠ 无内容</Tag> : <Tag color="green">✓ {content.length}字符</Tag>;
     }
     return <Tag color="default">待执行</Tag>;
   };

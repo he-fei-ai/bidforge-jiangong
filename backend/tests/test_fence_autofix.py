@@ -230,11 +230,37 @@ class TestAutoFixLenientFences:
     """
 
     def test_bug_3_lenient_auto_fix_does_not_append_close(self):
-        """BUG-3：4-开 3-关的 AI 模式 → auto_fix 不应补闭合（视为已闭合）。"""
+        """BUG-3：4-开 3-关的 AI 模式 → auto_fix 不得**追加**闭合（视为已闭合）。
+
+        ✅ R76 锚点订正（原断言 `fixed == src` 锁死「原文逐字不变」）：落库防线
+        现在多了一步**长度归一** —— 把闭合行的标记补齐到开围栏长度（3→4），使
+        严格口径（预检 DLV-07 / 字数剔除 / 压缩禁区 / 前端 marked）与容错口径
+        （图表三侧渲染）对同一份落库正文**结论恒等**。本测试要锁的是原意图：
+        **不追加假闭合、不增行、不出现两个相邻闭围栏**，而不是「文本一个字节
+        都不许变」。归一后的正文必须同时通过严格扫描 —— 这正是 R76 修的缺口。
+        """
         src = "````mermaid\ngraph TD; A-->B\n```\n尾段"
         fixed, log = auto_fix_unclosed_fences(src)
-        assert fixed == src, f"未被误判为未闭合，原文保留；实际：{fixed!r}"
-        assert log == [], "不应产生修复日志"
+        # 意图 1：不追加闭合行（行数不变，围栏标记总次数不变）
+        assert len(fixed.split("\n")) == len(src.split("\n")), "归一只改标记长度，不得增删行"
+        assert count_fences(fixed) == count_fences(src), "不得出现追加的假闭合"
+        assert "````\n````" not in fixed, "不得出现两个相邻闭围栏（图号虚跳根因）"
+        # 意图 2：正文与图表代码内容一字不改
+        assert "graph TD; A-->B" in fixed and "尾段" in fixed
+        # 意图 3（R76 新增）：日志只能是长度归一，绝不能有 append_close
+        assert [x["action"] for x in log] == ["normalize_close_length"], log
+        assert log[0]["old_length"] == 3 and log[0]["length"] == 4
+        # 意图 4（R76 核心）：归一后严格口径与容错口径恒等 —— 不再报未闭合
+        assert find_unclosed_fences(fixed) == []
+        assert fixed == "````mermaid\ngraph TD; A-->B\n````\n尾段"
+
+    def test_bug_3_lenient_append_is_idempotent_after_normalize(self):
+        """R76：归一 + 追加两步都是幂等的（再跑一次零日志、原文不变）。"""
+        src = "````mermaid\ngraph TD; A-->B\n```\n尾段"
+        once, _ = auto_fix_unclosed_fences(src)
+        twice, log2 = auto_fix_unclosed_fences(once)
+        assert twice == once
+        assert log2 == []
 
     def test_bug_3_strict_still_reports_unclosed(self):
         """严格版 find_unclosed_fences 依然把 4-开 3-关 视为未闭合（向后兼容）。"""
@@ -284,9 +310,48 @@ class TestAutoFixLenientFences:
         assert log2 == []
 
     def test_bug_3_tilde_lenient_same_char_kind(self):
-        """宽松语义对 ~~~ 围栏同样生效：3 波浪闭合 4 波浪开。"""
+        """宽松语义对 ~~~ 围栏同样生效：3 波浪闭合 4 波浪开，且 R76 归一补齐到 4。
+
+        ✅ R76 锚点订正：与反引号同族 —— 原断言锁「原文不变」，现锁「不追加、
+        不增行、归一后严格口径清零」。
+        """
         src = "~~~~python\ndef f(): pass\n~~~\n尾段"
         fixed, log = auto_fix_unclosed_fences(src)
-        assert fixed == src
-        assert log == []
+        assert len(fixed.split("\n")) == len(src.split("\n"))
+        assert count_fences(fixed) == count_fences(src)
+        assert [x["action"] for x in log] == ["normalize_close_length"], log
+        assert log[0]["char"] == "~"
+        assert log[0]["old_length"] == 3 and log[0]["length"] == 4
+        assert find_unclosed_fences(fixed) == []
+        assert fixed == "~~~~python\ndef f(): pass\n~~~~\n尾段"
+
+    def test_bug_3_normalize_switch_off_falls_back_to_old_behavior(self, monkeypatch):
+        """开关 content_fence_normalize_close=False 时逐字回退旧行为（只做文末追加）。
+
+        向后兼容性验证：4-开 3-关在关闭归一后必须**原文不变、零日志**，
+        与 R76 之前的落库防线行为完全一致。
+
+        ⚠️ patch 面：开关唯一权威在 ``fence_common.normalize_close_enabled``
+        （消费方经模块属性调用），patch content_utils 侧的别名不生效
+        （本仓 monkeypatch 表面迁移同族教训）。
+        """
+        import app.services.fence_common as fc
+
+        src = "````mermaid\ngraph TD; A-->B\n```\n尾段"
+        monkeypatch.setattr(fc, "normalize_close_enabled", lambda: False)
+        fixed, log = auto_fix_unclosed_fences(src)
+        assert fixed == src, "关闭归一后不得改文本"
+        assert log == [], "关闭归一后不得产生任何修复日志"
+
+    def test_normalize_switch_reads_settings_authority(self, monkeypatch):
+        """开关默认开；settings 显式置 False 时归一步退出（配置→行为链路锁）。"""
+        import app.config as cfg
+        import app.services.fence_common as fc
+
+        assert getattr(cfg.settings, "content_fence_normalize_close") is True, \
+            "配置默认必须为开（收口口径），且不得被静默改默认值"
+        monkeypatch.setattr(cfg.settings, "content_fence_normalize_close", False, raising=False)
+        assert fc.normalize_close_enabled() is False
+        monkeypatch.setattr(cfg.settings, "content_fence_normalize_close", True, raising=False)
+        assert fc.normalize_close_enabled() is True
 

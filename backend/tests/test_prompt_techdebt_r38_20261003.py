@@ -49,8 +49,19 @@ class TestRepairRewriteHardCap:
                                    "authoritative_value": "2"}],
             facts="", sources="")
         assert out == content, "超长章应原样返回（本轮未修复）"
-        assert len(calls) == 1, (
-            f"超长章只允许定点编辑一次调用，重写兜底必须被门槛拦下：{calls}")
+        # ✅ R57（2026-10-09）契约升级：定点编辑有了自己的 scene 与修复轮预算，
+        #    因此不再用「调用总次数」这种脆弱判据，而直接断言**核心语义** ——
+        #    无论如何都不得发生整章重写（that is what the hard cap is for）。
+        from app.services.consistency_edits import (
+            CONSISTENCY_EDITS_REPAIR_RETRIES as _R,
+        )
+        _EDITS = "consistency_repair_edits"
+        assert "consistency_repair" not in calls, (
+            f"超长章：整章重写兜底必须被硬上限拦下，实际：{calls}")
+        assert all(c == _EDITS for c in calls), (
+            f"超长章只允许定点编辑（含其自身修复轮），实际：{calls}")
+        assert len(calls) <= 1 + _R, (
+            f"定点编辑调用超过 1+{_R} 次预算：{calls}")
 
     @pytest.mark.asyncio
     async def test_normal_section_still_falls_back_to_rewrite(self, monkeypatch):
@@ -68,7 +79,18 @@ class TestRepairRewriteHardCap:
             conflicts_in_section=[{"topic": "t", "current_value": "1",
                                    "authoritative_value": "2"}],
             facts="", sources="")
-        assert len(calls) == 2, "重写兜底仍应发起（编辑 + 重写各一次）"
+        # ✅ R57（2026-10-09）契约升级：明示「定点编辑（含 1 轮修复）+ 重写兜底」。
+        #    行为变更是有意为之：给定点编辑一次修复机会的成本远低于整章重写
+        #    （后者要重新输出数千字），成功即省掉一次重写。
+        from app.services.consistency_edits import (
+            CONSISTENCY_EDITS_REPAIR_RETRIES as _R,
+        )
+        _EDITS = "consistency_repair_edits"
+        assert calls.count(_EDITS) == 1 + _R, (
+            f"定点编辑应有 1+{_R} 次调用（含修复轮），实际：{calls}")
+        assert calls.count("consistency_repair") == 1, (
+            f"定点编辑失败后重写兜底仍应发起且仅一次，实际：{calls}")
+        assert calls[-1] == "consistency_repair", "重写兜底必须是最后一次调用"
         assert isinstance(out, str)
 
     def test_edits_side_no_truncation_discipline(self):
@@ -271,7 +293,7 @@ class TestNewlyContractedTemplates:
         其他测试文件（如 test_prompt_governance）会用 _reg 造临时探针模板，
         全量套件顺序不可控 —— 排除探针键防串扰。
         """
-        probe_prefixes = ("contract_test_", "__probe")
+        probe_prefixes = ("contract_test_", "r6_test_", "__probe", "_test_prompt_")
         uncovered = [
             k for k, meta in _ALL_PROMPTS.items()
             if k not in PROMPT_VARIABLE_CONTRACTS
