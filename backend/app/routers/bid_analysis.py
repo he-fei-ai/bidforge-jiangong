@@ -105,6 +105,30 @@ def _safe_evidence(content: str, output_type: str, tender_text: str) -> str:
         logger.warning("来源位置反查失败（不影响提取结果）: %s", e)
         return ""
 
+
+async def _execute(db, sql: str, params=()):
+    """R13 统一读写出入口（✅ R79 收口：全模块 37 处调用点零判空）。
+
+    背景：全局单连接 + aiosqlite 下 ``db.execute()`` 可能返回 ``None``
+    （连接/事务瞬时故障）。旧实现两种结局都不合格：
+      · 读路径（``await cur.fetchall()``）→ ``AttributeError`` → **500**；
+        ``/results`` 是 BidAnalysisTab / ParseResultCategoryPanel 的唯一数据源，
+        ``_resolve_pid`` 一倒全模块 500（含 /check-sections、/start-sse、/classify）；
+      · 写路径（INSERT/UPDATE 不接 rowcount）→ **静默不生效**（用户提交的
+        人工校正消失、AI 提取项停在 running、stale 标记丢失）。
+
+    兄弟文件（global_facts_docs / doc_pipeline / pipeline / upload_outline）
+    早已按「None 即 503（可重试）」收口并带静态护栏，本函数补齐最后一处。
+    503 而非静默降级的理由：这些查询的结果直接决定响应内容，降级成空集合
+    等于对用户撒谎（「没有数据」与「查不了」是两件事）。
+    """
+    cur = await db.execute(sql, params)
+    if cur is None:
+        logger.warning("db.execute 返回 None（R13）：%s",
+                       sql.strip().split("\n")[0][:80])
+        raise HTTPException(503, "数据库暂时不可用，请稍后重试")
+    return cur
+
 # 提示词缓存预热等待（OpenBidKit 设为 5000ms）
 PROMPT_CACHE_WARMUP_DELAY_MS = 5000
 
@@ -376,7 +400,7 @@ async def check_bid_sections(
     try:
         row = await load_bid_section_row(db, real_pid, scheme_id)
         sec_id = row.get("id") or f"{real_pid}_default"
-        await db.execute(
+        await _execute(db, 
             "INSERT OR REPLACE INTO bid_sections "
             "(id, project_id, scheme_id, is_multi, total_declared, detected_sections, "
             " selected_section_id, selected_section_title, selected_section_json, "
@@ -516,7 +540,7 @@ async def select_bid_section(body: dict,
     row = await load_bid_section_row(db, real_pid, scheme_id)
     sec_pk = row.get("id") or f"{real_pid}_default"
     try:
-        await db.execute(
+        await _execute(db, 
             "INSERT OR REPLACE INTO bid_sections "
             "(id, project_id, scheme_id, is_multi, total_declared, detected_sections, "
             " selected_section_id, selected_section_title, selected_section_json, "
@@ -592,7 +616,7 @@ async def extract_bid_sections_api(
     row = await load_bid_section_row(db, real_pid, scheme_id)
     sec_pk = row.get("id") or f"{real_pid}_default"
     try:
-        await db.execute(
+        await _execute(db, 
             "INSERT OR REPLACE INTO bid_sections "
             "(id, project_id, scheme_id, is_multi, total_declared, detected_sections, "
             " selected_section_id, selected_section_title, selected_section_json, "
@@ -649,7 +673,7 @@ async def list_analysis_results(
     # ✅ 用 SELECT * 而非显式列清单：bid_analysis_items 的 source 列由
     #    db._migrate 增量补列，若某环境迁移失败（权限/只读库），显式列会直接
     #    抛 "no such column: source" 让整个结果查询 500；SELECT * 对缺列免疫。
-    cur = await db.execute(
+    cur = await _execute(db, 
         "SELECT * FROM bid_analysis_items WHERE project_id=? ORDER BY sort_order",
         (real_pid,))
     known_ids = {it["item_id"] for it in ANALYSIS_ITEMS}
@@ -679,7 +703,7 @@ async def get_single_result(
     if not real_pid:
         raise HTTPException(400, "需要 scheme_id 或 project_id")
 
-    cur = await db.execute(
+    cur = await _execute(db, 
         "SELECT * FROM bid_analysis_items WHERE project_id=? AND item_id=?",
         (real_pid, item_id))
     row = await cur.fetchone()
@@ -752,7 +776,7 @@ def _compute_results_summary(rows: list[dict]) -> dict:
 
 async def _load_results_rows(db, project_id: str) -> list[dict]:
     """按 project_id 读取 bid_analysis_items（仅保留已知解析项），供查询/校验端点复用。"""
-    cur = await db.execute(
+    cur = await _execute(db, 
         "SELECT * FROM bid_analysis_items WHERE project_id=? ORDER BY sort_order",
         (project_id,))
     known_ids = {it["item_id"] for it in ANALYSIS_ITEMS}
@@ -771,7 +795,7 @@ async def _attach_scheme_names(db, rows: list[dict]) -> None:
         return
     try:
         placeholders = ",".join("?" for _ in sids)
-        cur = await db.execute(
+        cur = await _execute(db, 
             f"SELECT id, name FROM schemes WHERE id IN ({placeholders})",
             tuple(sids))
         names = {str(r["id"]): (r["name"] or "") for r in await cur.fetchall()}
@@ -839,9 +863,9 @@ async def update_single_result(
     real_pid = require_project_id(real_pid)
     try:
         if scheme_id:
-            await db.execute(
+            await _execute(db, 
                 "UPDATE schemes SET project_id=? WHERE id=?", (real_pid, scheme_id))
-        cur = await db.execute(
+        cur = await _execute(db, 
             "UPDATE bid_analysis_items SET content=?, status='success', error='', "
             "source='manual', evidence='', "
             "updated_at=datetime('now','localtime') WHERE id=?",
@@ -855,7 +879,7 @@ async def update_single_result(
             #    _update_item_status 的兼容旧库缺 domain 列同口径降级）。
             cur_cols = await _bid_analysis_item_cols(db)
             if "domain" in cur_cols:
-                await db.execute(
+                await _execute(db, 
                     "INSERT INTO bid_analysis_items "
                     "(id, project_id, scheme_id, item_id, label, output_type, required, "
                     "status, content, error, sort_order, source, evidence, domain) "
@@ -865,7 +889,7 @@ async def update_single_result(
                      "success", content, "", def_.get("sort_order", 0),
                      "manual", "", resolved_domain))
             else:
-                await db.execute(
+                await _execute(db, 
                     "INSERT INTO bid_analysis_items "
                     "(id, project_id, scheme_id, item_id, label, output_type, required, "
                     "status, content, error, sort_order, source, evidence) "
@@ -910,7 +934,7 @@ async def clear_single_result(
 
     # ✅ 主键唯一出口（与 update_single_result 同口径，scheme 域字节不变）
     pk = build_item_pk(real_pid, item_id, get_item_domain(item_id) or "scheme")
-    await db.execute(
+    await _execute(db, 
         "UPDATE bid_analysis_items SET content='', error='', status='idle', "
         "source='ai', evidence='', "
         "updated_at=datetime('now','localtime') WHERE id=?",
@@ -1863,7 +1887,7 @@ async def _resolve_pid(db, scheme_id: str = "", project_id: str = "") -> str:
     pid = project_id.strip() if isinstance(project_id, str) else ""
     if pid:
         if sid:
-            cur = await db.execute(
+            cur = await _execute(db, 
                 SCHEME_PROJECT_ID_SQL, (sid,))
             row = await cur.fetchone()
             if not row or not row[0]:
@@ -1872,7 +1896,7 @@ async def _resolve_pid(db, scheme_id: str = "", project_id: str = "") -> str:
                 raise HTTPException(400, "scheme_id 与 project_id 不匹配")
         return pid
     if sid:
-        cur = await db.execute(SCHEME_PROJECT_ID_SQL, (sid,))
+        cur = await _execute(db, SCHEME_PROJECT_ID_SQL, (sid,))
         row = await cur.fetchone()
         if not row or not row[0]:
             raise HTTPException(404, "方案不存在")
@@ -1912,7 +1936,7 @@ async def _project_document_cols(db) -> set[str]:
     :return: 列名集合；表不存在 / 无法探测时返回空集合（调用方按「全缺」处理）。
     """
     try:
-        cur = await db.execute("PRAGMA table_info(project_documents)")
+        cur = await _execute(db, "PRAGMA table_info(project_documents)")
         return {dict(r)["name"] for r in await cur.fetchall()}
     except (sqlite3.OperationalError, Exception):
         return set()
@@ -1926,7 +1950,7 @@ async def _bid_analysis_item_cols(db) -> set[str]:
     带列 INSERT，否则直接 ``OperationalError`` → 500（本仓 §5.2 同构坑）。
     """
     try:
-        cur = await db.execute("PRAGMA table_info(bid_analysis_items)")
+        cur = await _execute(db, "PRAGMA table_info(bid_analysis_items)")
         return {dict(r)["name"] for r in await cur.fetchall()}
     except (sqlite3.OperationalError, Exception):
         return set()
@@ -1956,12 +1980,12 @@ async def _list_parsed_documents(db, project_id: str) -> list[dict]:
     diag_cols = [c for c in ("parse_warnings", "parse_truncated") if c in cols]
     sql = base + ((", " + ", ".join(diag_cols)) if diag_cols else "") + " " + where
     try:
-        cur = await db.execute(sql, (project_id,))
+        cur = await _execute(db, sql, (project_id,))
         return [dict(r) for r in await cur.fetchall()]
     except sqlite3.OperationalError:
         # 极端兜底：PRAGMA 结果与实际表结构不符（外部进程直改库、迁移中断等）
         # → 只选基础列，保证读路径始终可用（诊断信息降级为「未知」）。
-        cur = await db.execute(base + " " + where, (project_id,))
+        cur = await _execute(db, base + " " + where, (project_id,))
         return [dict(r) for r in await cur.fetchall()]
 
 
@@ -2168,7 +2192,7 @@ async def _update_item_status(db, project_id: str, item_id: str, status: str,
     pk = build_item_pk(project_id, item_id, resolved_domain)
     existing = False
     try:
-        cur = await db.execute(
+        cur = await _execute(db, 
             "SELECT 1 FROM bid_analysis_items WHERE id=?", (pk,))
         existing = await cur.fetchone() is not None
     except Exception:
@@ -2193,13 +2217,13 @@ async def _update_item_status(db, project_id: str, item_id: str, status: str,
             fields.append("error=?")
             params.append("")
         params.append(pk)
-        await db.execute(
+        await _execute(db, 
             f"UPDATE bid_analysis_items SET {', '.join(fields)} WHERE id=?",
             tuple(params))
     else:
         cur_cols = await _bid_analysis_item_cols(db)
         if "domain" in cur_cols:
-            await db.execute(
+            await _execute(db, 
                 "INSERT INTO bid_analysis_items "
                 "(id, project_id, item_id, label, output_type, required, status, content, error, sort_order, source, evidence, domain) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -2208,7 +2232,7 @@ async def _update_item_status(db, project_id: str, item_id: str, status: str,
                  def_.get("required", 0), status, content, error,
                  def_.get("sort_order", 0), "ai", evidence or "", resolved_domain))
         else:
-            await db.execute(
+            await _execute(db, 
                 "INSERT INTO bid_analysis_items "
                 "(id, project_id, item_id, label, output_type, required, status, content, error, sort_order, source, evidence) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -2240,7 +2264,7 @@ async def _invalidate_downstream_cache(db, project_id: str,
         sids.append(scheme_id)
     elif project_id:
         try:
-            cur = await db.execute(
+            cur = await _execute(db, 
                 "SELECT id FROM schemes WHERE project_id=?", (project_id,))
             sids = [str(r[0]) for r in await cur.fetchall() if r[0]]
         except Exception as e:
@@ -2287,7 +2311,7 @@ async def _invalidate_extraction_derived(db, project_id: str, sids: list[str]) -
     #    产生一条误导性 WARNING。级联现已对空 sids 也执行（见调用点），故显式跳过。
     if sids:
         try:
-            cur = await db.execute(
+            cur = await _execute(db, 
                 "DELETE FROM consistency_scan_cache WHERE scheme_id IN "
                 f"({','.join('?' * len(sids))})", tuple(sids))
             from app.db import safe_rowcount
@@ -2299,7 +2323,7 @@ async def _invalidate_extraction_derived(db, project_id: str, sids: list[str]) -
     # ② 方案级事实时间戳（目录树据此派生「事实已变更」标记）
     if sids:
         try:
-            cur = await db.execute(
+            cur = await _execute(db, 
                 "UPDATE schemes SET facts_updated_at=datetime('now','localtime') "
                 f"WHERE id IN ({','.join('?' * len(sids))})", tuple(sids))
             from app.db import safe_rowcount
@@ -2313,7 +2337,7 @@ async def _invalidate_extraction_derived(db, project_id: str, sids: list[str]) -
     #    （见 schema_sql.py 的建表语句），带上会整条 SQL 报错、连带这一轮失效全废。
     #    'stale' 正是 §4.11.5 已确立的「物化陈旧」状态值，口径一致。
     try:
-        cur = await db.execute(
+        cur = await _execute(db, 
             "UPDATE doc_extractions SET status='stale' WHERE project_id=?",
             (project_id,))
         from app.db import safe_rowcount
@@ -2374,13 +2398,13 @@ async def _reset_items_for_rerun(db, project_id: str,
         for def_ in defs:
             pk = f"{project_id}_{def_['item_id']}"
             try:
-                cur = await db.execute(
+                cur = await _execute(db, 
                     "SELECT 1 FROM bid_analysis_items WHERE id=?", (pk,))
                 exists = await cur.fetchone() is not None
             except Exception:
                 exists = False
             if not exists:
-                await db.execute(
+                await _execute(db, 
                     "INSERT INTO bid_analysis_items "
                     "(id, project_id, item_id, label, output_type, required, status, content, error, sort_order, source) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -2392,7 +2416,7 @@ async def _reset_items_for_rerun(db, project_id: str,
         # 2) 重置为 idle（仅本次要执行的项）；source 一并复位为 'ai'
         ids = [d["item_id"] for d in defs]
         placeholders = ",".join("?" for _ in ids)
-        await db.execute(
+        await _execute(db, 
             f"UPDATE bid_analysis_items SET status='idle', content='', error='', "
             f"source='ai', evidence='' "
             f"WHERE project_id=? AND item_id IN ({placeholders})",
@@ -2432,7 +2456,7 @@ async def clear_interrupted_items(db, project_id: str = "") -> int:
         if project_id:
             where = "project_id=? AND status='running'"
             params = (project_id,)
-        cur = await db.execute(
+        cur = await _execute(db, 
             "UPDATE bid_analysis_items SET status='error', "
             "error='上次执行被中断（进程重启或任务取消），请重新提取', "
             f"updated_at=datetime('now','localtime') WHERE {where}", params)
@@ -2475,7 +2499,7 @@ async def _get_missing_required(db, project_id: str, results: dict) -> list[str]
         else:
             # 检查数据库中是否有
             try:
-                cur = await db.execute(
+                cur = await _execute(db, 
                     "SELECT status, content FROM bid_analysis_items "
                     "WHERE project_id=? AND item_id=?",
                     (project_id, rid))
@@ -2501,13 +2525,13 @@ async def _load_extraction_map(db, project_id: str, scheme_id: str) -> dict:
     """
     rows: list[dict] = []
     if scheme_id:
-        cur = await db.execute(
+        cur = await _execute(db, 
             "SELECT item_id, content, status, output_type FROM bid_analysis_items "
             "WHERE project_id=? AND scheme_id=?",
             (project_id, scheme_id))
         rows = [dict(r) for r in await cur.fetchall()]
     if not rows:
-        cur = await db.execute(
+        cur = await _execute(db, 
             "SELECT item_id, content, status, output_type FROM bid_analysis_items "
             "WHERE " + FACT_SCOPE_SHARED_FRAGMENT + "",
             (project_id,))
@@ -2523,7 +2547,7 @@ async def _fetch_scheme_name(db, scheme_id: str) -> str:
     if not scheme_id:
         return ""
     try:
-        cur = await db.execute("SELECT name FROM schemes WHERE id=?", (scheme_id,))
+        cur = await _execute(db, "SELECT name FROM schemes WHERE id=?", (scheme_id,))
         row = await cur.fetchone()
         return (row[0] or "") if row else ""
     except Exception:
@@ -2545,7 +2569,7 @@ async def _resolve_classification_hint(db, scheme_id: str) -> str:
     if not settings.scheme_auto_classify or not scheme_id:
         return ""
     try:
-        cur = await db.execute(
+        cur = await _execute(db, 
             "SELECT name, scheme_classification_json FROM schemes WHERE id=?", (scheme_id,))
         row = await cur.fetchone()
         if not row:
@@ -2610,10 +2634,10 @@ async def classify_scheme_api(
     # 写入 schemes 分类列（幂等；旧库缺列时跳过，不阻断返回）
     if scheme_id:
         try:
-            cur = await db.execute("PRAGMA table_info(schemes)")
+            cur = await _execute(db, "PRAGMA table_info(schemes)")
             cols = {r[1] for r in await cur.fetchall()}
             if "scheme_classification_json" in cols:
-                await db.execute(
+                await _execute(db, 
                     "UPDATE schemes SET hazard_category=?, hazard_subcategory=?, "
                     "is_hazardous=?, is_oversize=?, scheme_classification_json=?, "
                     "updated_at=datetime('now','localtime') WHERE id=?",
