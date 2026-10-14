@@ -4943,6 +4943,10 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     _stat.get("audit_rows") or [], tolerance=_word_tol)
             except Exception:
                 _ckpt["word_audit"] = {}
+            # ✅ R77b（2026-10-15）：事实冲突定点修复汇总随所有终态载荷回填
+            #    （与 word_audit 同一"唯一拼装点"纪律，五条收尾路径全覆盖；
+            #    断线重挂/审核预检经白名单同读本键）。纯累加器、零异常面。
+            _ckpt["fact_autofix_summary"] = _fa_sum
             return {
                 'event': event,
                 'message': message,
@@ -4958,6 +4962,9 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 # ✅ R66（2026-10-11）：逐章目标/实际/偏差明细 + 达标统计
                 #    （word_audit_summary 结构，断线重挂与审核预检同读本键）。
                 'word_audit': _ckpt.get("word_audit", {}),
+                # ✅ R77b（2026-10-15）：事实冲突定点修复汇总（sections /
+                #    fixed_sections / conflicts / applied / rejected）。
+                'fact_autofix_summary': _ckpt.get("fact_autofix_summary", {}),
             }
 
         def _stopped_payload(message: str,
@@ -8204,7 +8211,10 @@ _CHECKPOINT_KINDS = {
                             "over_count", "word_count",
                             # ✅ R66（2026-10-11）：字数审计汇总入白名单，
                             #    断线重挂/审核预检才能读到逐章偏差明细。
-                            "word_audit")),
+                            "word_audit",
+                            # ✅ R77b（2026-10-15）：事实冲突定点修复汇总入
+                            #    白名单（断线重挂与在线终态载荷同构）。
+                            "fact_autofix_summary")),
     # ✅ P0 修复（2026-09-27）：facts_generation 此前缺席，导致全局事实提取
     #    断线/刷新后成果全丢（前端重挂接拿不到 segment_stats / cross_conflicts）。
     #    字段集与写入侧的 `_FACTS_CHECKPOINT_FIELDS` 同源，两侧不会分叉。

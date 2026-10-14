@@ -107,6 +107,65 @@ export function chartDropTexts(items: ChartDropItem[]): string[] {
   });
 }
 
+/**
+ * R77b（2026-10-15）：事实冲突定点修复终态汇总（后端 completed / stopped /
+ * error 事件的 `fact_autofix_summary` 键；逐章明细在同事件的
+ * `standard_report.fact_autofix`，两者同源）。
+ *
+ * 后端单一事实源 = `services/content_fact_autofix.py::FACT_AUTOFIX_SUMMARY_KEYS`，
+ * 经 `accumulate_fact_autofix` 累加 —— 前端只做展示映射，不复制计数判据。
+ */
+export type FactAutofixSummary = {
+  /** 检出 error 级事实冲突并送修的章节数（attempted） */
+  sections: number;
+  /** 其中成功应用至少一处修复的章节数 */
+  fixed_sections: number;
+  /** 检出并送修的冲突条数 */
+  conflicts: number;
+  /** 实际替换处数（old_text 唯一命中） */
+  applied: number;
+  /** 被拒 edit 条数（多处命中 / 找不到 / 过短） */
+  rejected: number;
+};
+
+/**
+ * R77b：防御式归一（缺键 / 类型不符 / 旧后端未下发 → 全 0，绝不抛异常）。
+ * 与 normalizeChartYield 同口径：事件循环里任何异常都会中断整个生成会话。
+ */
+export function normalizeFactAutofixSummary(raw: unknown): FactAutofixSummary {
+  const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const num = (k: string): number => {
+    const n = Number(obj[k]);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  };
+  return {
+    sections: num("sections"),
+    fixed_sections: num("fixed_sections"),
+    conflicts: num("conflicts"),
+    applied: num("applied"),
+    rejected: num("rejected"),
+  };
+}
+
+/**
+ * R77b：终态汇总 → 完成消息追加提示语（与 standardSummaryHint 同纪律：
+ * 无冲突返回空串，调用方不追加，避免"一切正常"式噪音）。
+ *
+ * 「attempted 但未修复」也必须说话 —— 转人工核对的信号不静默（后端
+ * 同款纪律：applied=0 时 rejected/attempts 仍落报告）。
+ */
+export function factAutofixHint(summary: any): string {
+  if (!summary || typeof summary !== "object") return "";
+  const s = normalizeFactAutofixSummary(summary);
+  if (s.sections <= 0 || s.conflicts <= 0) return "";
+  const head = `事实一致性：${s.sections} 章检出 ${s.conflicts} 处与全局事实的冲突`;
+  if (s.applied <= 0) {
+    return `${head}，未能自动修复，留待人工核对`;
+  }
+  const tail = s.rejected > 0 ? `，${s.rejected} 处定位失败留待人工核对` : "";
+  return `${head}，已自动修复 ${s.applied} 处${tail}`;
+}
+
 export type SectionLogItem = {
   section_id: string;
   title: string;
