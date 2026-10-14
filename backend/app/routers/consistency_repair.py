@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 
-# ruff: noqa: I001 —— R13 契约：review_db 必须单独一行，护栏锁（R77 F-3 起本文件纳入收口范围）
+# ruff: noqa: I001 —— R13 契约：review_db 必须单独一行，护栏锁（R78 F-3 起本文件纳入收口范围）
 import json
 import logging
 from datetime import datetime
@@ -23,7 +23,7 @@ from app.routers.review import reset_review_on_content_change  # ✅ G9：修复
 from app.services import conflict_arbiter as arbiter
 from app.services import consistency_scanner as scanner
 from app.services import repair_agent, repair_record
-# ✅ R13 判空单一出口（2026-10-14 · R77 F-3）：本模块与 compliance/review/
+# ✅ R13 判空单一出口（2026-10-14 · R78 F-3）：本模块与 compliance/review/
 #    review_autofix 同属「审核与预检」的两条修复闭环，此前是 R13 收口的漏网之鱼
 #    （护栏 TARGET_FILES 只登记了三个 router）。全局单写连接 + aiosqlite 下
 #    db.execute 可能返回 None：读路径直接 AttributeError 500；写路径（confirm 的
@@ -261,7 +261,7 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
                         what=f"一致性修复确认：读取章节字数预算（section={sid[:8]}）")
                     wb = (brow["word_budget"] if brow and brow["word_budget"] else None) or DEFAULT_WORD_BUDGET
                     _wc = text_word_count(restored_content)
-                    # ✅ R13（R77 F-3）：正文恢复写经 exec_write（严格模式）——
+                    # ✅ R13（R78 F-3）：正文恢复写经 exec_write（严格模式）——
                     #    rejected_sections 均来自本批次 items 且章节刚被修复写过，
                     #    行必然存在，0 行只可能是「本次写没生效」，绝不汇报假成功。
                     await review_db.exec_write(
@@ -273,7 +273,7 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
                         what=f"一致性修复确认：恢复章节快照原文（section={sid[:8]}）")
 
     # 接受/拒绝的冲突项状态回写
-    # ✅ R13（R77 F-3）：cid 来自请求体，未预先校验行存在（历史批次/外部调用
+    # ✅ R13（R78 F-3）：cid 来自请求体，未预先校验行存在（历史批次/外部调用
     #    可能指向已不存在的冲突）→「0 行」是合法结果，require_rows=False，
     #    与 _persist_fixed 记账回填同口径；rowcount 由日志侧可查。
     for cid in accepted:
@@ -361,7 +361,7 @@ async def rollback(scheme_id: str, body: dict | None = None, db=Depends(get_db))
     conflict_ids = list(dict.fromkeys(conflict_ids))  # 去重保序
     if conflict_ids:
         placeholders = ",".join("?" * len(conflict_ids))
-        # ✅ R13 + R77 F-3 加固：补 `AND scheme_id=?` —— P0（2026-10-04）后
+        # ✅ R13 + R78 F-3 加固：补 `AND scheme_id=?` —— P0（2026-10-04）后
         #    冲突 ID 自带方案作用域前缀、结构上不互撞，但**历史无前缀行**
         #    （C001…形态）仍可能与其他方案同名；回滚是本模块唯一一条
         #    不带 scheme 约束的状态写，加上即杜绝跨方案误伤，本方案行零影响。

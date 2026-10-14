@@ -761,11 +761,11 @@ async def run_consistency_audit(scheme_id: str, db=Depends(get_db)):
     # ✅ R13（2026-10-06）：写路径经 exec_write。旧实现 INSERT 未生效时
     #    commit 照常成功、接口返回评分与 issues —— 而 /latest 与总检的
     #    「一致性审计」来源永远取不到本次，用户以为已审计。
-    # ✅ BUG 修复（2026-10-14 · R77 F-1）：列序与参数序必须逐位对应 ——
+    # ✅ BUG 修复（2026-10-14 · R78 F-1）：列序与参数序必须逐位对应 ——
     #    旧实现在 2026-10-07（05e1380）给 INSERT 加 content_fingerprint 列时
     #    把指纹参数插到了 score_float **之前**，导致 score 列落指纹字符串、
     #    content_fingerprint 列落分值。连带三处后果（详见护栏
-    #    tests/test_review_preflight_closeout_r77_20261014.py）：
+    #    tests/test_review_preflight_closeout_r78_20261014.py）：
     #      ① _ai_row_is_stale 读到 content_fingerprint="90.0" 与当前 hex 指纹
     #         恒不等 → 一致性审计来源在总检中**永远判 stale 被跳过**；
     #      ② /latest 把指纹串当 score 返回，前端刷新后分数面板坏；
@@ -1160,7 +1160,7 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
     #    仍被计入总检评分（CON-04 / SAF-* 指向已不存在的章节），用户据此
     #    「整改」实际不存在的缺陷。AI 各源写入时已记正文指纹，此处比对后
     #    跳过过期行，并把跳过的来源名放进 stale_ai_sources 供前端提示重跑。
-    # ✅ BUG 修复（2026-10-14 · R77 F-2）：P1-4（2026-10-12）新增的
+    # ✅ BUG 修复（2026-10-14 · R78 F-2）：P1-4（2026-10-12）新增的
     #    ``fingerprint`` 形参此前被下面这行**无条件重算覆盖**——docstring
     #    承诺「复用调用方指纹、避免两轮全表扫描与缓存键/落库指纹口径分裂」，
     #    实际从未兑现（readiness_overview L1104 传入即被丢弃，末尾
