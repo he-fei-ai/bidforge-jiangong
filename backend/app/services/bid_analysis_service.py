@@ -1550,9 +1550,30 @@ def format_downstream_context(items: dict[str, dict]) -> str:
             # JSON 项平铺为键值列表
             try:
                 data = json.loads(content)
-                for k, v in data.items():
-                    if v and v != "没有提及":
-                        lines.append(f"- **{k}**: {v}")
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if v and v != "没有提及":
+                            lines.append(f"- **{k}**: {v}")
+                elif isinstance(data, list):
+                    # ✅ R79 A-2：人工校正端点允许提交 JSON **数组**
+                    #    （PUT /bid-analysis/results/{item_id} 契约为
+                    #    「对象或数组」），旧实现无条件 data.items() →
+                    #    AttributeError → 被 sse_handlers._build_structured_brief
+                    #    的兜底 except 吞掉，**整份结构化摘要静默退化为
+                    #    ≤800 字原始摘录**（目录生成质量下降且零告警可查）。
+                    #    数组展平为条目行（dict 元素转 "k: v"，标量原样），
+                    #    与对象形态同为「平铺键值」语义。
+                    for entry in data:
+                        if isinstance(entry, dict):
+                            kv = "，".join(
+                                f"{k}：{v}" for k, v in entry.items()
+                                if v not in (None, "", "没有提及"))
+                            if kv:
+                                lines.append(f"- {kv}")
+                        elif entry and entry != "没有提及":
+                            lines.append(f"- {entry}")
+                else:
+                    lines.append(content)
             except (json.JSONDecodeError, TypeError):
                 lines.append(content)
         else:

@@ -1892,7 +1892,11 @@ async def _resolve_pid(db, scheme_id: str = "", project_id: str = "") -> str:
 # 显式把 bid_analysis_segment_budget 配回 30000 即恢复旧行为。
 # ⚠️ 模块级求值（import 期）：与 MAX_PDF_PAGES 同口径，运行期改配置需重启，
 #    单测通过 monkeypatch 该常量生效。
-_MAX_DOC_CHARS = max(1000, int(getattr(settings, "bid_analysis_segment_budget", None) or 400000))
+# ✅ R79 S-2：旧写法 `getattr(...) or 400000` 把用户显式配置的 0（想关闭
+#    读取预算、按全文处理）静默改成 400000 —— 与本模块 `_cfg_int` docstring
+#    明写的「不得写成 or default」自相矛盾（R11 同族已修 5 处，这是漏网的一处）。
+_budget_raw = getattr(settings, "bid_analysis_segment_budget", None)
+_MAX_DOC_CHARS = max(1000, 400000 if _budget_raw is None else int(_budget_raw))
 
 
 async def _project_document_cols(db) -> set[str]:

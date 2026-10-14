@@ -4,6 +4,8 @@ import {
   contentResultFailedSections, contentResultSummary,
   normalizeQualityIssues,
   isTerminalTaskStatus, isTerminalContentEvent, degradedConsistencyHint,
+  // ✅ R77b（2026-10-15）：事实冲突定点修复终态提示（与标准校验提示同纪律）
+  factAutofixHint,
   type SectionLogItem, type GenStats,
 } from "../utils/contentEvents";
 import { tasksApi, sectionsApi } from "../api";
@@ -169,6 +171,11 @@ export function useContentGeneration(opts: UseContentGenerationOpts): ContentGen
           //    仅在「有问题章数 > 0」时追加（无问题返回空串 → 不制造噪音）。
           const _stdHint = standardSummaryHint(evt.standard_summary);
           if (_stdHint) { msg.warning(_stdHint); setProgressMsg(dm + ` | ${_stdHint}`); }
+          // ✅ R77b（2026-10-15）：事实冲突定点修复汇总提示。与标准校验
+          //    提示独立成条（两类问题修复路径不同：前者是生成后自动定点
+          //    修复，后者只报告）；无冲突时返回空串 → 不追加。
+          const _faHint = factAutofixHint(evt.fact_autofix_summary);
+          if (_faHint) { msg.info(_faHint); setProgressMsg(dm + ` | ${_faHint}`); }
           await load(); break;
         } else if (evt.event === "stopped") {
           if (typeof evt.progress === "number") setProgress(evt.progress);

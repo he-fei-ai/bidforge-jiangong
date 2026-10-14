@@ -728,11 +728,18 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
     if stale_types:
         ph = ",".join("?" * len(stale_types))
         try:
-            await db.execute(
+            # ✅ R79 A-3：写路径判空（R13）—— db.execute 返回 None 时若不看
+            #    返回值，陈旧标记**静默不生效**：已清空的解析项仍以旧内容计入
+            #    字段覆盖率（与 2026-09-29 修掉的症状同源，那次修的是「只
+            #    upsert 不陈旧化」，这次修的是「陈旧化本身可能不生效」）。
+            _scur = await db.execute(
                 f"UPDATE doc_extractions SET status='stale', extract_time=? "
                 f"WHERE doc_id=? AND extract_type IN ({ph}) "
                 f"AND COALESCE(status,'') != 'stale'",
                 (now, doc_id, *stale_types))
+            if _scur is None:
+                logger.warning("标记陈旧提取层失败（db.execute 返回 None，R13）：doc=%s types=%s",
+                               doc_id, stale_types)
             await db.commit()
         except Exception as e:  # noqa: BLE001 - 陈旧化失败不应阻断物化主流程
             logger.warning("标记陈旧提取层失败（doc=%s，不影响物化结果）: %s",
@@ -753,9 +760,15 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
 
     meta = await _safe_io(store.read_meta, project_id, doc_id)
     await _safe_io(_meta_finish, meta)
-    await db.execute(
+    # ✅ R79 A-3：同上判空。extract_status 回写失败时
+    #    GET /documents/{id}/freshness 的状态漂移自愈会把两者拉回一致，
+    #    但「本次物化成功」与列值短暂不一致期间，运维与前端看到的是旧值。
+    _pcur = await db.execute(
         "UPDATE project_documents SET extract_status=?, extract_time=? WHERE id=?",
         (extract_status, now, doc_id))
+    if _pcur is None:
+        logger.warning("回写 project_documents.extract_status 失败（db.execute 返回 None，R13）：doc=%s",
+                       doc_id)
     await db.commit()
     return {"doc_id": doc_id, "extract_status": extract_status,
             "written_types": written_types,

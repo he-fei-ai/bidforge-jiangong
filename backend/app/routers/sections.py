@@ -1062,6 +1062,23 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
                            scheme_id[:8], _cleared)
         return _empty_result
 
+    # ✅ R79 C3：落库前占位/泛化标题检测（**加法式**：只回传 generic_residual
+    #    供前端提示，绝不阻断保存）。此前 stopped/error 的部分成果、上传目录
+    #    识别、目录库套用、AI 调整目录四类入口都不经
+    #    `_review_and_fix_outline` 的占位闸门 —— 用户报的「三级标题大量
+    #    专项6 / 总体实施策划（2）」正是从这些入口直接落库的。
+    #    检测判据复用 `outline_quality.detect_generic_titles` 单一事实源，
+    #    受既有 `outline_check_generic_titles` 总闸控制（置 False 即逐字
+    #    回到本项引入前的行为：不检测、不回传该键）。
+    generic_hits: list[dict] = []
+    if getattr(settings, "outline_check_generic_titles", True):
+        try:
+            from app.services.outline_quality import detect_generic_titles
+            generic_hits = detect_generic_titles(outline)
+        except Exception:  # noqa: BLE001 - 检测失败不得阻断保存
+            logger.warning("目录占位标题检测失败（不影响保存）: %s", scheme_id[:8],
+                           exc_info=True)
+
     cur = await db.execute(_fe.SCHEME_PROJECT_ID_SQL, (scheme_id,))
     row = await cur.fetchone()
     if not row:
@@ -1271,6 +1288,16 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
                 _strip_internal_fields(n["children"])
     _strip_internal_fields(tree)
     result: dict = {"ok": True, "count": node_counter["n"], "tree": tree}
+    if generic_hits:
+        # 加法式回传：前端「保存已生成部分」后据此提示人工核对（不阻断、
+        # 不静默）。与 _review_and_fix_outline 的 generic_residual 同名不同
+        # 形（那边是计数），此处是明细清单 —— 保存入口不是审核结论，
+        # 给明细才有可操作性。
+        result["generic_residual"] = generic_hits
+        logger.warning(
+            "方案 %s 目录保存：检出 %d 个占位/泛化标题（已保存，建议人工核对）：%s",
+            scheme_id[:8], len(generic_hits),
+            "、".join(str(h.get("title") or "")[:20] for h in generic_hits[:10]))
     if roots_locked:
         result["roots_locked"] = True
     if cleared_content:

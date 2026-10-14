@@ -67,6 +67,23 @@ def _norm(text: str) -> str:
     return _STRIP_RE.sub("", _TRAILING_COUNTER_SUFFIX_RE.sub("", str(text or "")))
 
 
+def has_trailing_counter_suffix(title: str) -> bool:
+    """标题尾部是否带「（N）」/「(N)」类编号冲突后缀（形态判据，单一事实源）。
+
+    ✅ R79 C2：`sse_handlers._apply_title_updates`（外科式标题重写）据此**拒收**
+        AI 回传的新标题。背景：AI 消歧会把重复章节写成「总体实施策划（2）」，
+        而 `detect_generic_titles` 的 `conflict_suffix` 判定要求「去后缀基名与
+        其它节点碰撞」才报（刻意保守，防误伤「深基坑支护（2）」这类合法带部位
+        限定标题）⇒ 单个后缀样本复检恒过 ⇒ 「专项6」被改写成「钢内支撑安装（2）」
+        后一路落库，用户报的症状经外科式重写复发。
+
+    ⚠️ 与 `detect_generic_titles` 的 conflict_suffix 是**两个不同用途的判据**，
+       勿合并：检测侧必须防误报（要看碰撞），回写侧必须防复现（只看形态）。
+       导出的 re-export 文案不参与任何「ok」结论，仅用于回写拒因。
+    """
+    return bool(_TRAILING_COUNTER_SUFFIX_RE.search(str(title or "")))
+
+
 #: ✅ 2026-10-10（目录占位/泛化标题收口）：三级标题大量出现占位式泛化名称
 #: （生产实证「专项6」「总体实施策划（2）」「总体实施策划（3）」），且带
 #: 「（N）」编号冲突后缀。这类标题不是合法目录，必须程序化检出并交由修复链路重写。
@@ -197,10 +214,19 @@ def collect_titles(outline: list, *, max_level: int | None = None) -> list[dict]
     def _walk(nodes: list, level: int, parent_path: str) -> None:
         if not isinstance(nodes, list) or level > 12:
             return
-        for i, n in enumerate(nodes):
+        # ✅ R79：非法项（非 dict）不占用位置编号 —— 与
+        #    `numbering.renumber_outline_nodes`（valid_idx 只数 dict）和
+        #    `sse_handlers._outline_path_index`（k 只数 dict）严格同口径。
+        #    旧实现 enumerate 全项：脏数组 `[dict, "X", dict]` 报出 path '3'，
+        #    而外科式标题重写侧 `_outline_path_index` 只认 '1'/'2' ⇒
+        #    「检出 path 在修复侧不存在」⇒ 占位标题检出了却修不掉
+        #    （detect_generic_titles 的冲突后缀判定同样受影响）。
+        valid_idx = 0
+        for n in nodes:
             if not isinstance(n, dict):
                 continue
-            path = f"{parent_path}.{i + 1}" if parent_path else str(i + 1)
+            valid_idx += 1
+            path = f"{parent_path}.{valid_idx}" if parent_path else str(valid_idx)
             title = str(n.get("title") or "").strip()
             if (max_level is None or level <= max_level) and title:
                 out.append({"level": level, "path": path, "title": title,

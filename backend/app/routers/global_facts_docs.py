@@ -1174,6 +1174,21 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
             result["stale_facts"] = stale_count
             result["note"] = (f"文档已重新解析，{stale_count} 条旧事实已停止注入；"
                               "请重新执行「AI 提取事实」更新全局事实")
+        elif not _was_parsed:
+            # ✅ R79 A-4：**首次**解析成功同样改变了事实/导出的输入全集 ——
+            #    旧实现把 stale 标记与导出缓存失效全关在 `if force:` 里，
+            #    于是「先解析 A → 已提取事实 → B 首次解析成功（如装好 OCR
+            #    后重试，force=False）」这条真实链路上，全局事实与导出缓存
+            #    停留在半残缺输入对应的旧值：用户以为事实已覆盖全部资料，
+            #    实际漏掉整份文档，且响应里没有任何提示。
+            #    首次解析时事实通常尚未提取（本步为空操作）；若已提取过，
+            #    此处按 force 同口径补齐，代价是一次幂等 UPDATE + 一次 DELETE。
+            stale_count = await _mark_project_facts_stale(db, row["project_id"])
+            await db.commit()
+            await _invalidate_project_export_caches(db, row["project_id"])
+            result["stale_facts"] = stale_count
+            result["note"] = ("文档解析成功，已纳入项目资料全集；"
+                              "如已提取过全局事实，请重新执行「AI 提取事实」")
         return result
 
 
@@ -1359,15 +1374,22 @@ async def parse_all_documents(
                     # ✅ 2026-09-25：本轮自修复的陈旧 parse_status 条数（0 表示无）
                     "reconciled_count": reconciled_count + len(reconciled),
                     "reconciled": reconciled}
-    if force and parsed:
+    if parsed:
+        # ✅ R79 A-4：force 与否**只要本轮有新文本落库**，事实与导出缓存的
+        #    输入全集就变了 —— 旧实现只在 `force and parsed` 时处理，
+        #    非强制批量解析（最常规的「上传后点解析全部」）从不刷新下游。
         stale_count = await _mark_project_facts_stale(db, real_pid)
         await db.commit()
-        # ✅ 跨模块链路收敛：强制重解析整批文档 → 失效该项目所有方案导出缓存
+        # ✅ 跨模块链路收敛：重解析整批文档 → 失效该项目所有方案导出缓存
         #    （避免下游导出陈旧 docx；导出缓存默认关闭时为 no-op）。
         await _invalidate_project_export_caches(db, real_pid)
         result["stale_facts"] = stale_count
-        result["note"] = (f"已强制重新解析，{stale_count} 条旧事实已停止注入；"
-                          "请重新执行「③ AI 提取事实」")
+        if force:
+            result["note"] = (f"已强制重新解析，{stale_count} 条旧事实已停止注入；"
+                              "请重新执行「③ AI 提取事实」")
+        else:
+            result["note"] = ("本轮新解析的文档已纳入项目资料全集；"
+                              "如已提取过全局事实，请重新执行「③ AI 提取事实」")
     warnings: list[str] = []
     if failed:
         warnings.append(

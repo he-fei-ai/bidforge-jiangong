@@ -61,7 +61,11 @@ CHECKPOINT_FIELD_TYPES: dict[str, dict[str, str]] = {
         "partial": "bool",
         "outline": "list[dict]",
         "review": "dict",
-        "failed_chapters": "list[dict]",
+        # ✅ R79：实收值是**章标题字符串**（sse_handlers._merge_unit_results 的
+        #    `failed_chapters.append(str(ch.get("title") ...))`），旧声明写成
+        #    list[dict] 属文档失真 —— 前端 `types/checkpointSchema.ts` 由本文件
+        #    生成，声明错误会传导到生成的 TS 类型与所有消费方读法。
+        "failed_chapters": "list[str]",
         "failed_count": "int",
     },
     "content_result": {

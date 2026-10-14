@@ -2931,6 +2931,16 @@ def _apply_title_updates(outline: list, updates: list) -> tuple[list, int, list]
         def _strip_num(t: str) -> str:   # type: ignore[no-redef]
             return str(t or "")
 
+    try:
+        # ✅ R79 C2：编号冲突后缀判据复用唯一事实源；判据不可用时退化为
+        #    「不拒收」（与下方 is_generic_title 导入失败同一降级方向 ——
+        #    语义拒绝全部让位给形态校验，绝不把外科式重写整体关掉）
+        from app.services.outline_quality import (
+            has_trailing_counter_suffix as _counter_suffix)
+    except Exception:  # pragma: no cover - 判据不可用时不新增拒绝
+        def _counter_suffix(_t: str) -> bool:  # type: ignore[no-redef]
+            return False
+
     def _norm(t: str) -> str:
         return _q_norm(str(t or "").strip())
 
@@ -2970,6 +2980,18 @@ def _apply_title_updates(outline: list, updates: list) -> tuple[list, int, list]
             continue
         if is_generic_title(new_title):
             rejected.append({"path": path, "title": new_title, "reason": "新标题仍是泛化/占位名称"})
+            continue
+        # ✅ R79 C2：**第 6 条红线**——「（N）」编号冲突后缀一律拒收。
+        #    检测侧 `detect_generic_titles` 的 conflict_suffix 判定要求
+        #    「去后缀基名与其它节点碰撞」才报（刻意保守：防误伤
+        #    「深基坑支护（2）」这类合法部位限定标题）；回写侧只看形态：
+        #    否则 AI 把「专项6」改写成「钢内支撑安装（2）」后，单样本在
+        #    复检里**恰好不碰撞 ⇒ 恒过**，用户报的症状经外科式重写原样
+        #    落库。宁可不改（复检如实报残留 → 转人工），不可改出一个带
+        #    编号冲突后缀的标题。
+        if _counter_suffix(new_title):
+            rejected.append({"path": path, "title": new_title[:20],
+                             "reason": "新标题带（N）编号冲突后缀"})
             continue
         info = tree_idx.get(path)
         if not info:
@@ -3913,6 +3935,12 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                         _bump_ids.extend(_cat_hits or [])
             if _bump_ids:
                 await bump_ref_count(db, _bump_ids)
+                # ✅ R79 C1：本函数体内零 db.commit，而 db 是池连接、
+                #    请求结束由 get_db 统一 rollback —— 不在此 commit，
+                #    ref_count 递增**确定性丢失**（目录库「AI 参考也计数」
+                #    的承诺对生成链从未生效）。commit 失败被外层 except
+                #    吞为「目录库参考构建失败」降级继续，不阻断生成。
+                await db.commit()
         except Exception:
             logger.warning("目录库参考构建失败（目录生成降级继续）", exc_info=True)
         # ✅ 增强：注入结构化「项目关键事实」（与正文生成共用同一构建函数），
@@ -6711,6 +6739,14 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
 
                 ✅ 进度增强：章节开始即登记为「进行中」，并在各阶段（构建上下文 /
                 AI 生成 / 续写 / 落库）推送 section_stage 事件与加权进度。"""
+                # ✅ R77b：_fa_sum 在闭包外层（generate_content）初始化，而本函数
+                #    的累加是**名字重绑定**（_fa_sum = accumulate(...)，返回新 dict）
+                #    —— 与 _std_sum 的「下标赋值变异」不同，Python 编译期会把重绑定
+                #    名判为 gen_one 局部变量，不声明 nonlocal 即 UnboundLocalError
+                #    （R77b 全量 e2e 实测：section_done 事件下发失败、章节落库成功
+                #    但前端收不到完成事件）。_std_sum/_stat/_prog 均为变异型访问
+                #    （下标/方法），不受此规则影响，勿照抄加 nonlocal。
+                nonlocal _fa_sum
                 leaf_id = leaf["id"]
                 title = leaf["title"]
                 db_written = False

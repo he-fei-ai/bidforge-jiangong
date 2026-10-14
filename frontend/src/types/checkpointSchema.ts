@@ -7,7 +7,7 @@ export interface outline_result {
   partial?: boolean;
   outline?: unknown[];
   review?: Record<string, unknown>;
-  failed_chapters?: unknown[];
+  failed_chapters?: string[];
   failed_count?: number;
 }
 

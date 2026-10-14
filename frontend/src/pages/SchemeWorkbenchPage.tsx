@@ -65,6 +65,8 @@ import {
   contentResultFailedSections, contentResultSummary,
   normalizeQualityIssues, normalizeChartYield, chartDropTexts,
   isTerminalTaskStatus, isTerminalContentEvent, degradedConsistencyHint,
+  // ✅ R77b（2026-10-15）：事实冲突定点修复终态提示（与标准校验提示同纪律）
+  factAutofixHint,
   type SectionLogItem, type GenStats,
 } from "../utils/contentEvents";
 // F-CONTENT-STANDARD(2026-09-26): 生成标准纯函数层（请求体映射 / 标签 / 报告判定）
@@ -1805,7 +1807,11 @@ export interface TaskTerminalInfo {
   progress?: number;
   outline_result?: {
     outline?: unknown[];
-    failed_chapters?: unknown[];
+    // ✅ R79 对齐单一事实源 `backend/app/services/checkpoint_schema.py`
+    //    （原声明 list[dict] 是文档失真，实收值是章标题字符串数组）；
+    //    本文件另有本地副本（未 import 生成的 types/checkpointSchema.ts），
+    //    两处必须同口径，否则前端读法会把字符串当对象遍历。
+    failed_chapters?: string[];
     failed_count?: number;
     /**
      * ✅ 契约补齐（2026-09-21）：后端 `_CHECKPOINT_KINDS.outline_generation`
@@ -6271,6 +6277,10 @@ const draftKey = selectedSection && id
           //    （仅在「有问题章数 > 0」时追加，无问题不制造噪音）
           const _stdHint = standardSummaryHint(evt.standard_summary);
           if (_stdHint) { msg.warning(_stdHint); setProgressMsg(`${doneMsg} | ${_stdHint}`); }
+          // ✅ R77b（2026-10-15）：事实冲突定点修复汇总提示（与标准校验提示
+          //    独立成条；无冲突返回空串 → 不追加，不制造噪音）
+          const _faHint = factAutofixHint(evt.fact_autofix_summary);
+          if (_faHint) { msg.info(_faHint); setProgressMsg(`${doneMsg} | ${_faHint}`); }
           // ✅ 全文一致性 Agent 修复结果摘要（后端随 completed 一并下发）
           if (evt.consistency_summary) {
             const cs = evt.consistency_summary;

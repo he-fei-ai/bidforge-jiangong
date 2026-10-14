@@ -18,6 +18,8 @@
 """
 import inspect
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -30,6 +32,9 @@ from app.services.content_fact_autofix import (
     select_fact_conflicts,
 )
 from app.services.content_standard import standard_report
+
+#: 仓库根（backend/tests/ → 上两级）
+_REPO = Path(__file__).resolve().parents[2]
 
 
 # ---------- 工具 ----------
@@ -354,6 +359,157 @@ def test_outline_wiring_present():
     # 两处子目录提示词注入点必须改走按章渲染（而非整案截断）
     assert "project_facts=_sublevel_facts_text([i])" in src
     assert "project_facts=_sublevel_facts_text(unit_idx)" in src
+
+
+# ---------- E. R77b 终态汇总（accumulate / 载荷 / schema / 前端） ----------
+
+def test_empty_summary_keys_match_contract():
+    """空汇总键集与 FACT_AUTOFIX_SUMMARY_KEYS 逐字一致（防手写副本漂移）。"""
+    from app.services.content_fact_autofix import (
+        FACT_AUTOFIX_SUMMARY_KEYS,
+        empty_fact_autofix_summary,
+    )
+    assert FACT_AUTOFIX_SUMMARY_KEYS == (
+        "sections", "fixed_sections", "conflicts", "applied", "rejected")
+    assert set(empty_fact_autofix_summary()) == set(FACT_AUTOFIX_SUMMARY_KEYS)
+    assert all(v == 0 for v in empty_fact_autofix_summary().values())
+
+
+def test_accumulate_counts_attempted_only():
+    """只有 attempted 的报告进汇总；无冲突章节（无该键）原样返回。"""
+    from app.services.content_fact_autofix import accumulate_fact_autofix
+    base = empty = {"sections": 0, "fixed_sections": 0, "conflicts": 0,
+                    "applied": 0, "rejected": 0}
+    # 无 fact_autofix 键 / 非 dict / None → 一字不加
+    for rep in ({"issues": []}, None, "x", {}):
+        assert accumulate_fact_autofix(base, rep) == empty
+    # attempted=False（无事实文本等早退）也不进汇总
+    out = accumulate_fact_autofix(
+        base, {"fact_autofix": {"attempted": False, "applied": 3}})
+    assert out == empty
+
+
+def test_accumulate_full_and_partial():
+    """修复成功 / 尝试未成 / 部分拒绝三类形态的计数口径。"""
+    from app.services.content_fact_autofix import accumulate_fact_autofix
+    s0 = {"sections": 0, "fixed_sections": 0, "conflicts": 0,
+          "applied": 0, "rejected": 0}
+    s1 = accumulate_fact_autofix(s0, {"fact_autofix": {
+        "attempted": True, "applied": 2, "rejected": [], "conflicts": 3,
+        "attempts": 1}})
+    assert s1 == {"sections": 1, "fixed_sections": 1, "conflicts": 3,
+                  "applied": 2, "rejected": 0}
+    # attempted 但 applied=0（AI 判定无冲突 / 定位失败）：sections+1、
+    # fixed_sections+0、rejected 计入 —— 转人工信号不静默
+    s2 = accumulate_fact_autofix(s1, {"fact_autofix": {
+        "attempted": True, "applied": 0,
+        "rejected": [{"reason": "ambiguous"}], "conflicts": 1, "attempts": 2}})
+    assert s2 == {"sections": 2, "fixed_sections": 1, "conflicts": 4,
+                  "applied": 2, "rejected": 1}
+    # 不改入参（纯函数）
+    assert s0 == {"sections": 0, "fixed_sections": 0, "conflicts": 0,
+                  "applied": 0, "rejected": 0}
+    # 坏形状汇总（None / 非 dict）按空汇总起步
+    assert accumulate_fact_autofix(None, None)["sections"] == 0
+
+
+def test_accumulate_tolerates_dirty_types():
+    """脏值（字符串数字 / rejected 非列表）不得抛，按 0 计。"""
+    from app.services.content_fact_autofix import accumulate_fact_autofix
+    out = accumulate_fact_autofix({}, {"fact_autofix": {
+        "attempted": True, "applied": "2", "conflicts": None,
+        "rejected": "x"}})
+    assert out == {"sections": 1, "fixed_sections": 1, "conflicts": 0,
+                   "applied": 2, "rejected": 0}
+
+
+def test_summary_wiring_in_sse_handlers():
+    """终态汇总接线四要素：初始化 / 累加调用 / completed 载荷 / checkpoint。"""
+    src = _src("app/routers/sse_handlers.py")
+    assert "empty_fact_autofix_summary()" in src
+    assert "accumulate_fact_autofix(_fa_sum, _std_rep)" in src
+    assert "completed_payload['fact_autofix_summary'] = _fa_sum" in src
+    assert "'fact_autofix_summary': _ckpt.get(\"fact_autofix_summary\", {})" in src
+    # 白名单双副本（sse 侧 + schema 侧）必须同步 —— 漏一处则断线重挂丢字段
+    assert '"fact_autofix_summary")),' in src
+    schema = _src("app/services/checkpoint_schema.py")
+    assert '"fact_autofix_summary",' in schema
+    assert '"fact_autofix_summary": "dict",' in schema
+
+
+def test_checkpoint_kinds_parity_and_ts_regenerated():
+    """白名单两副本成员一致 + 前端 TS 已重新生成（R66 同款 parity 锁）。
+
+    ⚠️ 锁**集合相等**而非逐字相等：两副本历史上就存在字段顺序差异
+    （sse 侧 run_words/word_count 次序与 schema 侧相反，实测先于本轮存在），
+    而消费方只做成员判定（过滤），顺序不参与任何判据 —— 逐字锁会把
+    良性重排误判为漂移。新增/漏字段仍会被集合差抓住。
+    """
+    import app.routers.sse_handlers as sh
+    from app.services import checkpoint_schema as cs
+    sse_fields = sh._CHECKPOINT_KINDS["content_generation"][1]
+    schema_fields = cs.CHECKPOINT_KINDS["content_generation"][1]
+    assert "fact_autofix_summary" in sse_fields
+    assert set(sse_fields) == set(schema_fields), "两副本白名单成员漂移"
+    assert cs.CHECKPOINT_FIELD_TYPES["content_result"]["fact_autofix_summary"] == "dict"
+    ts = _REPO / "frontend" / "src" / "types" / "checkpointSchema.ts"
+    assert "fact_autofix_summary" in ts.read_text(encoding="utf-8")
+
+
+def test_frontend_hint_pure_functions_present():
+    """前端纯函数三件套（类型 / 归一 / 提示语）已落地且被两处消费。"""
+    ce = _src(str(_REPO / "frontend" / "src" / "utils" / "contentEvents.ts"))
+    assert "export function normalizeFactAutofixSummary(" in ce
+    assert "export function factAutofixHint(" in ce
+    assert "export type FactAutofixSummary" in ce
+    for rel in ("frontend/src/hooks/useContentGeneration.ts",
+                "frontend/src/pages/SchemeWorkbenchPage.tsx"):
+        src = _src(str(_REPO / rel))
+        assert "factAutofixHint(evt.fact_autofix_summary)" in src, (
+            f"{rel} 未消费事实冲突修复汇总")
+
+
+def test_fa_sum_rebinding_has_nonlocal():
+    """闭包重绑定陷阱锁：gen_one 内重绑定累加器必须声明 nonlocal。
+
+    ✅ R77b 实测缺陷（本轮自引入、全量 e2e 抓出）：`_fa_sum = accumulate(...)`
+    是**名字重绑定**（accumulate 返回新 dict），未声明 nonlocal ⇒ Python 编译期
+    把 `_fa_sum` 判为 `gen_one` 局部变量 ⇒ 每次 section_done 聚合块
+    UnboundLocalError ⇒ section_done 事件下发失败（落库成功但前端收不到
+    完成事件，`test_content_fence_contract` e2e 实测红）。
+    ⚠️ 下标变异（`_std_sum[k] += 1`）不受此规则影响——所以 _std_sum 从来不炸，
+    只有「重绑定型累加」需要本锁。AST 判据：gen_one 内凡 Name-Store 了
+    累加器家族成员，就必须出现在 nonlocal 声明里。
+    """
+    import ast
+    tree = ast.parse(_src("app/routers/sse_handlers.py"))
+
+    def _find_fn(node, name):
+        for n in ast.walk(node):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                    and n.name == name:
+                return n
+        return None
+
+    gen_content = _find_fn(tree, "generate_content")
+    assert gen_content is not None, "未找到 generate_content"
+    gen_one = _find_fn(gen_content, "gen_one")
+    assert gen_one is not None, "未找到 gen_one（嵌套于 generate_content）"
+
+    declared: set[str] = set()
+    for n in ast.walk(gen_one):
+        if isinstance(n, ast.Nonlocal):
+            declared.update(n.names)
+    rebound = {n.id for n in ast.walk(gen_one)
+               if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    # 累加器家族：闭包外层初始化 + 逐章更新。重绑定任一成员都必须 nonlocal。
+    for acc in ("_std_sum", "_fa_sum", "_stat", "_prog", "_ckpt"):
+        if acc in rebound:
+            assert acc in declared, (
+                f"gen_one 重绑定 {acc} 必须声明 nonlocal（闭包重绑定陷阱："
+                "编译期判局部变量 → UnboundLocalError）")
+    assert "_fa_sum" in rebound, "gen_one 内未见 _fa_sum 累加（接线被掏空？）"
+    assert "_fa_sum" in declared
 
 
 def test_outline_functions_importable_and_pure():
