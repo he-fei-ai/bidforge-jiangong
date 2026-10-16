@@ -342,16 +342,27 @@ def test_render_facts_text_never_drops_facts_when_chapter_filter_misses():
 
 
 async def test_load_facts_rows_keeps_five_column_row_contract(ctx):
-    """注入行必须保持 5 元组（gt, title, content, confidence, chapter）。
+    """注入行必须保持「前 5 列固定 + 新增列一律尾部追加」的口径。
 
-    _filter_facts_rows / _row_chapter 依赖该长度自适应口径；
-    任何新增列都必须追加在末尾，不得插入中部。
+    _filter_facts_rows / _row_chapter 依赖长度自适应口径；任何新增列都必须
+    追加在末尾，不得插入中部。
+
+    ✅ R80（2026-10-15）：行契约由 5 元组 (gt, title, content, confidence,
+    chapter) 扩为 **6 元组**（尾部追加 value_kind，用于「要求 vs 事实口径」
+    注入前缀）。本用例的意图是「前 5 列位置不变、新列在末尾」，故改为断言
+    6 元组 + 第 5 位仍是 chapter + 第 6 列是 value_kind（历史 3/4/5 元组的
+    长度自适应 consume 由 facts_builder._row_chapter/_row_value_kind 的
+    独立用例锁定）。原断言写死 `== 5` 在 R80 加列后恒失败（陈旧代理判据）。
     """
     db, pid, sid = ctx
     await _seed_fully_populated_fact(db, pid, sid, gid="g7", is_stale=0)
     rows = await sh._load_facts_rows(db, sid)
-    assert rows and all(len(r) == 5 for r in rows)
+    assert rows and all(len(r) == 6 for r in rows), (
+        "注入行必须是 6 元组（尾部追加 value_kind）")
     assert _row_chapter(rows[0]) == "overview"
+    # 第 5 列仍是 chapter、第 6 列是 value_kind（追加而非中部插入）
+    assert rows[0][4] == "overview"
+    assert isinstance(rows[0][5], str)
 
 
 # ---------------------------------------------------------------------------

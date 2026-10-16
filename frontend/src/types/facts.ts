@@ -102,6 +102,9 @@ export interface FactItem {
   zone_type?: string;
   norm_group?: string;
   chunk_hash?: string;
+  /** ✅ R80：要求 vs 事实口径（''=未区分/fact=本方案口径/requirement=招标
+   *  要求原文口径，正文引用须写「满足/响应要求」）。空值不渲染徽标。 */
+  value_kind?: "" | "fact" | "requirement";
 }
 
 export interface FactGroup {

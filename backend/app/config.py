@@ -609,6 +609,22 @@ class Settings(BaseSettings):
     #    无关键词章节与旧行为等价）；False = 回退旧行为（整案事实截断）。
     outline_sublevel_facts_relevant: bool = True
 
+    # ✅ R82（2026-10-15 · 引入易标「审计用全量事实弥补注入缺口」CG:1686）：
+    #    正文生成后一致性审计（standard_report 的 value_mismatch/value_conflict/
+    #    model_conflict 三类 error 级冲突检出，连带 fact_autofix 修复输入事实）
+    #    此前只喂「本章精选事实」（_filter_facts_rows 2-gram 预筛子集）—— 正文
+    #    若与某条**未注入本章**的已确认事实冲突（各章随机编一套人员/工期/型号
+    #    的典型形态），检不出也修不了。易标审计把**全量已确认事实**与正文一起
+    #    交给审计（CG:1686），正是为弥补「生成时只注入选中事实」的缺口。
+    #    True（默认）= 冲突检出与修复参考面扩到全量已确认事实（_load_facts_rows
+    #    已过 fail-closed 门控）；覆盖率告警（fact_value_missing，warning）仍只
+    #    按本章注入事实（避免全量把每个未引用事实都报缺失、噪音淹没）。
+    #    误报安全阀：冲突仍须「事实标题关键词与正文数值同单位同现」才成立，
+    #    且 fact_autofix 只在 old_text 唯一命中才替换、AI 判定「不同部位不同规格
+    #    的合理差异」可返回空 edits 宁可不改（纪律 7）。
+    #    False = 逐字回退到「仅本章精选事实」口径（引入前行为，默认路径零变化）。
+    content_audit_full_facts: bool = True
+
     # ✅ R58（2026-10-10）：正文注入全局事实时是否**分段** ——
     #    整案核心事实（通用/总体组）进「整案稳定上下文」段（逐章逐字节相同，
     #    可被 Prompt Cache 命中），本章专属事实进「任务差异」段。

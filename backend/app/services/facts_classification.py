@@ -579,6 +579,16 @@ def extract_danger_params(facts) -> dict:
     for f in facts or []:
         if f is None:
             continue
+        # ✅ R81（2026-10-15）：要求口径行不得作为危大参数证据。
+        #    「开挖深度 5m 及以上需组织专家论证」这类要求行的数字是**部文
+        #    阈值**而非项目实际深度，旧实现把它当参数提取 → SAF-08 误报
+        #    「已确认事实参数达到危大阈值」（安全方向误报会让用户为不存在
+        #    的风险补论证材料，还稀释真实预警的信号价值）。要求行仍照常
+        #    参与分类文本（check_hazard_params 的 extra_text 全量拼接），
+        #    只排除**参数通道**；缺 value_kind 字段的历史行/外部调用方
+        #    按 ''（未区分）处理，行为与引入前逐字一致（fail-open）。
+        if _fact_field(f, "value_kind") == "requirement":
+            continue
         name = f"{_fact_field(f, 'name')} {_fact_field(f, 'fact_key')}"
         value = _fact_field(f, "value")
         unit = _fact_field(f, "value_unit") or ""

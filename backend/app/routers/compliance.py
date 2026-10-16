@@ -53,6 +53,13 @@ from app.services.audit_scoring import (
 )
 from app.services.content_utils import order_sections_dfs
 
+# ✅ R81（2026-10-15）：requirement 口径前缀的**单一事实源**在 facts_builder
+#    （正文/目录注入渲染同款）。本文件只 import 不自建副本——「同一判据多处
+#    实现」是本仓最高频反模式（AGENTS.md §4.3/§4.7）。
+#    与正文注入的差异仅在前缀拼入位置（那里拼在 per_fact 截断后的内容尾部，
+#    这里拼在 unit 之后、安全关键标记之前），语义逐字相同。
+from app.services.facts_builder import _REQUIREMENT_KIND_PREFIX
+
 # ✅ 2026-10-03（全局事实桥接）：预检消费「已确认全局事实」（SAF-08 事实反哺）。
 #    门控/作用域口径一律取 facts_extractor 唯一出口，不在本文件重写 SQL。
 from app.services.facts_extractor import (
@@ -310,7 +317,12 @@ def _keep_suffixes(text: str, suffixes: "list[str] | None") -> str:
 
 
 def _facts_prompt_text(facts: list[dict] | None) -> str:
-    """把桥接返回的事实清单格式化为提示词文本（空 → 「（无）」）。"""
+    """把桥接返回的事实清单格式化为提示词文本（空 → 「（无）」）。
+
+    ✅ R81（2026-10-15）：``value_kind='requirement'``（招标/规范要求原文
+    口径）的行附加口径前缀（与正文注入渲染同一常量）。缺该字段的历史
+    行/fact 行/'' 行渲染逐字不变——行为不变性锚由护栏锁定。
+    """
     if not facts:
         return "（无）"
     lines: list[str] = []
@@ -326,6 +338,11 @@ def _facts_prompt_text(facts: list[dict] | None) -> str:
         line = f"- {name}：{val or '（值缺失）'}"
         if unit and unit not in val:
             line += f" {unit}"
+        # ✅ R81：要求口径行显式标注「不得当作本方案既定值」——否则
+        #    /check 第 6 条「以事实为唯一权威值」会把招标要求数字当成
+        #    方案采用值，正文写本方案控制值反被判矛盾（误报 + 错误建议）。
+        if str((f or {}).get("value_kind") or "") == "requirement":
+            line += _REQUIREMENT_KIND_PREFIX
         mark = ""
         if f.get("is_safety_critical"):
             line += SAFETY_MARK

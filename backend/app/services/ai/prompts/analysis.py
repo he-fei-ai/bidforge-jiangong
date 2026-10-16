@@ -40,6 +40,12 @@ _reg("facts_extract_system", "analysis", "全局事实提取（研究报告 v2.0
 - "需提供2年质保"           → name="质保期", value="2", value_unit="年"
 - "建议采用BIM管理"         → name="BIM管理平台", value="采用BIM全过程管理"
 但【禁止】把纯要求原样抄成事实（如"工期不能超过450天"❌、"需提供2年质保"❌）。
+【value_kind 口径标注】每条事实必须标注 value_kind：
+- "fact"        默认值。文档明示实值，或已按上述转写规则转写为本方案承诺口径。
+- "requirement" 仅当该条目是【要求/约束原文】且无法安全转写（转写会丢失
+  约束语义，如"验收标准""执行规范编号""监测报警值限值"这类以要求形态
+  存在的条目）。正文引用时会被提示按「满足/响应招标要求」口径书写。
+拿不准时填 "fact"，不要滥用 "requirement"。
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【禁止模拟总规则——最高优先级】
@@ -71,7 +77,8 @@ _reg("facts_extract_system", "analysis", "全局事实提取（研究报告 v2.0
       "confidence": "number 0~1 自评置信度（明文表格值≥0.9；正文明确陈述 0.8-0.9；模糊 0.6-0.8）",
       "evidence_kind": "string 枚举: table | text | figure_ocr | header_footer",
       "is_simulated": false,
-      "is_safety_critical": "boolean 是否属于 17 类安全关键白名单（上述禁止模拟项）"
+      "is_safety_critical": "boolean 是否属于 17 类安全关键白名单（上述禁止模拟项）",
+      "value_kind": "string 枚举: fact（本方案口径，默认） | requirement（要求原文口径，无法安全转写时）"
     }
   ],
   "segment_failed": false
@@ -298,7 +305,8 @@ _reg("facts_json_fix_system", "analysis", "事实提取 JSON 修复（弱模型�
       "confidence": "number 0~1",
       "evidence_kind": "string 枚举：table/text/figure_ocr/header_footer",
       "is_simulated": false,
-      "is_safety_critical": "boolean"
+      "is_safety_critical": "boolean",
+      "value_kind": "string 枚举：fact | requirement（无法判断时填 fact）"
     }
   ],
   "segment_failed": false
@@ -334,7 +342,8 @@ _reg("global_facts_adjust_system", "analysis", "全局事实自然语言调整�
 5. category 取值必须是以下枚举之一（拿不准填 other）：basic/basis/personnel/labor/schedule/machinery/material/construction_practice/deployment/process_flow/tech_param/design_param/safety/risk/monitoring/emergency/acceptance/temporary/environment/quality/other。
 6. 若调整要求无法基于现有事实落地（如引用了不存在的信息、与约束矛盾），则返回空操作列表并在 summary 说明原因。
 7. 返回标准 JSON：{"operations": [{"op": "update", "fact_id": "...", "value": "新值", "name": "可选改名", "category": "可选"}, {"op": "add", "name": "事实名", "value": "值", "category": "other"}, {"op": "delete", "fact_id": "...", "reason": "为何删"}], "summary": "一句话向用户说明本次改了什么"}
-8. 除 JSON 外不要输出任何解释文字或 markdown 代码块标记。""")
+8. update/add 可带可选字段 value_kind（枚举 fact/requirement）：fact=本方案已采用的确定性口径（默认）；requirement=招标文件/规范的要求原文口径（无法安全转写为本方案承诺时）。与调整要求无关时不要动该字段；拿不准填 fact。
+9. 除 JSON 外不要输出任何解释文字或 markdown 代码块标记。""")
 
 
 # --- 知识库补充（对齐 OpenBidKit 易标 globalFactsTask.cjs:563-588） ---

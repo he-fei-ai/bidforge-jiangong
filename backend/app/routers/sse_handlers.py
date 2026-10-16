@@ -5298,6 +5298,12 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
             #    调用，无冲突章节零成本）；设 False 逐字回退引入前行为
             #    （冲突只进 last_generation_report、不进修复链路）。
             _fact_autofix_on = bool(getattr(settings, "content_fact_autofix_enabled", True))
+            # ✅ R82（2026-10-15 · 引入易标 CG:1686「审计用全量事实」）：生成后一致性
+            #    审计（standard_report 冲突检出 + fact_autofix 修复参考面）是否从
+            #    「本章精选事实」扩到「全量已确认事实」（facts_rows，已过 fail-closed
+            #    门控）。捕获「正文与未注入本章的事实冲突」这一引入前漏检形态。
+            #    默认开；设 False 逐字回退「仅本章精选事实」口径。
+            _audit_full_facts_on = bool(getattr(settings, "content_audit_full_facts", True))
             # ✅ P2 修复（2026-10-04 · O(N²) 性能）：跨章搬运检测的内存快照。
             #    正文生成过程中，库内 sections 表只会「增量增加已成功落库的章节」
             #    （章节 id 稳定，正文只在首次落库后不再变）。首次进入 _persist_section
@@ -5707,11 +5713,19 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         report_json = json.dumps(report, ensure_ascii=False)
                     except Exception:
                         report_json = ""
-                if eff_standard or fact_rows_for_section:
+                # ✅ R82：冲突检出/修复参考面 = 全量已确认事实（含未注入本章的事实，
+                #    对齐易标 CG:1686）；覆盖率/豁免/trace 仍按本章精选事实。
+                #    开关 content_audit_full_facts=False → _conflict_rows=None →
+                #    standard_report 输出与引入前逐字节一致。
+                _conflict_rows = list(facts_rows) if _audit_full_facts_on else None
+                _autofix_rows = (list(facts_rows) if _audit_full_facts_on
+                                 else (fact_rows_for_section or []))
+                if eff_standard or fact_rows_for_section or _conflict_rows:
                     try:
                         report = standard_report(
                             content, std_for_report, fact_rows_for_section or [],
-                            section_id=section_id, section_title=section_title)
+                            section_id=section_id, section_title=section_title,
+                            conflict_fact_rows=_conflict_rows)
                         # ✅ 2026-10-02（第 27 轮收口）：standard_report 整体**重建**
                         #    report，上面已写入的 checkpoint_fixes 留痕会被无条件覆盖
                         #    丢失（生产实证：autofix 改了正文、库里报告却无修复记录，
@@ -5740,14 +5754,14 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 #      留痕按同族做法带进新报告；结果写报告新键 fact_autofix；
                 #    · 任何异常 fail-soft，绝不阻断正文落库。
                 #    开关 content_fact_autofix_enabled 设 False 逐字回退引入前。
-                if _fact_autofix_on and fact_rows_for_section:
+                if _fact_autofix_on and _autofix_rows:
                     try:
                         _fa_conflicts = select_fact_conflicts(report)
                         if _fa_conflicts:
                             content, _fa_res = await autofix_section_fact_conflicts(
                                 content=content,
                                 standard=std_for_report,
-                                fact_rows=fact_rows_for_section or [],
+                                fact_rows=_autofix_rows,
                                 conflicts=_fa_conflicts,
                                 section_id=section_id,
                                 section_title=section_title)
@@ -5761,7 +5775,8 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                     content, std_for_report,
                                     fact_rows_for_section or [],
                                     section_id=section_id,
-                                    section_title=section_title)
+                                    section_title=section_title,
+                                    conflict_fact_rows=_conflict_rows)
                                 if _ck_fix_actions:
                                     report["checkpoint_fixes"] = _ck_fix_actions
                                 report["fact_autofix"] = _fa_res

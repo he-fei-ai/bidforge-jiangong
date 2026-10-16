@@ -60,6 +60,8 @@ from app.services.facts_extractor import (
     # ✅ 2026-10-06：落库列清单/INSERT 语句的**唯一事实源**（本文件不再本地维护）
     GLOBAL_FACTS_INSERT_COLS,
     GLOBAL_FACTS_INSERT_SQL,
+    # ✅ R80（2026-10-15）：value_kind 白名单归一（单一事实源，解析/落库/手工共用）
+    normalize_value_kind,
     MAX_SOURCE_EXCERPT,
     SCHEME_PROJECT_ID_SQL,
     _clip_excerpt,
@@ -746,6 +748,9 @@ async def list_facts(
             "zone_type": r.get("zone_type") or "",
             "norm_group": r.get("norm_group") or "",
             "chunk_hash": r.get("chunk_hash") or "",
+            # ✅ R80（2026-10-15）：要求 vs 事实口径（加法式；''=未区分，
+            # 前端空值不渲染徽标，历史行展示零变化）
+            "value_kind": r.get("value_kind") or "",
             # ✅ 2026-09-24：九大章节四维标注（正交于 22 类 category）。
             #    历史行（2026-09-24 前落库）没有这 4 列的值，读路径做惰性派生
             #    兜底（纯函数、不写库）—— 保证「章节视图/按章节精选」不会因为
@@ -1227,7 +1232,8 @@ def _manual_fact_row(*, fid: str, pid: str, sid: str, group_id: str,
                      group_title: str, name: str, content: str, category: str,
                      source_file: str, source_quote: str = "",
                      is_simulated: bool = False, confidence: float = 1.0,
-                     is_resolved: bool = True, fact_key: str = "") -> tuple:
+                     is_resolved: bool = True, fact_key: str = "",
+                     value_kind: str = "") -> tuple:
     """构造「手工 / AI 调整新增」事实行（列顺序与 MANUAL_FACT_INSERT_COLS 严格对齐）。
 
     三处新增路径共用，杜绝「列名与占位符数量错位」与「漏写某一列」。
@@ -1236,6 +1242,10 @@ def _manual_fact_row(*, fid: str, pid: str, sid: str, group_id: str,
 
     ``fact_key`` 允许调用方显式指定（客户端传入的归一化键优先），
     缺省按事实名归一化生成去重键。
+
+    ✅ R80（2026-10-15）：``value_kind``（要求 vs 事实口径）透传，
+    非法值经 :func:`normalize_value_kind` 归一为 ''；缺省 ''（未区分，
+    读侧按 fact 处理，行为与历史行一致）。
     """
     return (
         fid, pid, sid, group_id, group_title,
@@ -1252,7 +1262,10 @@ def _manual_fact_row(*, fid: str, pid: str, sid: str, group_id: str,
         0, "",  # has_conflict / conflict_keys：新增事实无矛盾候选
         (str(fact_key or "").strip() or normalize_key(name)),
         # 溯源/单位列默认值（手工/AI 新增无 chunk 指纹、无页码、非安全关键、非过期）
-        "", "", "", "", None, "", 0, "", 0,
+        "", "", "", "", None, "", 0, "",
+        # ✅ R80：value_kind（要求 vs 事实口径）——缺省 ''，显式传入经白名单归一
+        normalize_value_kind(value_kind),
+        0,  # is_stale
         # 九大章节四维默认值（读路径 apply_fact_dimensions 惰性派生兜底）
         "", "", "", 0,
     )
@@ -1301,6 +1314,8 @@ def _build_create_fact_rows(*, data, gid: str, group_title: str,
                 confidence=it.confidence,
                 is_resolved=bool(item_resolved),
                 fact_key=it.key or "",
+                # ✅ R80：结构化条目自带口径（''/fact/requirement，非法归一 ''）
+                value_kind=it.value_kind,
             ))
         return rows_buf
 
@@ -1324,6 +1339,7 @@ def _build_create_fact_rows(*, data, gid: str, group_title: str,
             #    是不变式，门控 SQL 只判 is_resolved）。旧实现恒写 is_resolved=1，
             #    粘贴了模拟值标记的手工分组会立刻被当确定性事实注入正文。
             is_resolved=(not is_sim),
+            # ✅ R80：旧版单条走 group 级缺省 ''（该路径无条目级口径输入）
         ))
     return rows_buf
 
@@ -1382,7 +1398,7 @@ def _rederive_dimension_columns(*, old_name: str, new_name: str,
 
 async def _apply_item_updates(db, updates: list[dict],
                               *, commit: bool = True) -> tuple[int, str]:
-    """按 fact_id 逐条更新单条事实（name/value/category/is_simulated/confidence）。
+    """按 fact_id 逐条更新单条事实（name/value/category/is_simulated/confidence/value_kind）。
 
     ✅ 修复（死字段 + 能力缺失）：FactGroupUpdate.item_updates 在模型中早已
     声明，后端却从未读取 —— 前端只能「整组重建」来改一条事实，代价是
@@ -1502,6 +1518,18 @@ async def _apply_item_updates(db, updates: list[dict],
             cat_changed = new_cat != (row["category"] or "").strip()
             sets.append("category=?")
             vals.append(new_cat)
+        # R81: value_kind is manually editable (normalized via the
+        # single whitelist; explicit "" clears the marker).
+        if u.get("value_kind") is not None:
+            sets.append("value_kind=?")
+            vals.append(normalize_value_kind(u.get("value_kind")))
+        # ✅ R81（2026-10-15）：要求 vs 事实口径（value_kind）手工可改。
+        #    归一走 normalize_value_kind 单一白名单（与 _manual_fact_row /
+        #    list_facts 同源）；用 ``is not None`` 而非真值判定 —— 显式传
+        #    '' 是「把误标为 requirement 的行清回未区分」的合法操作，
+        #    不传该键的既有调用方（含未升级的前端）行为逐字不变。
+        #    口径变更不触发维度重派生（value_kind 与 chapter/fact_attr
+        #    派生输入正交），也不清 stale（改口径不等于重新核对过值）。
         # ✅ BUG 修复（2026-09-29 · 改分类后九大章节归属过期）+
         #    ✅ BUG 修复（2026-10-01 · 改名后九大章节归属过期）：
         #    chapter / fact_attr 的派生输入是
@@ -1777,9 +1805,14 @@ async def update_fact(
         安全关键标记(is_safety_critical) 与来源过期标记(is_stale)。
         其中 chunk_hash 丢失还会让 persist_extraction 的「跳过段事实保留」
         判据失效（chunk_hash 为空即视为「无指纹」而纳入删除范围）。
+
+        ✅ R80（2026-10-15）：value_kind（要求 vs 事实口径）随重建保留——
+        一次分组编辑不得抹掉提取期标注的口径（缺失/脏值归一 ''）。
+        ⚠️ 取值位次必须与 GLOBAL_FACTS_INSERT_COLS 对齐：value_kind 在
+        is_stale 之前。
         """
         if not old:
-            return ("", "", "", "", None, "", 0, "", 0)
+            return ("", "", "", "", None, "", 0, "", "", 0)
         return (
             old.get("chunk_hash") or "",
             old.get("value_unit") or "",
@@ -1789,6 +1822,7 @@ async def update_fact(
             old.get("zone_type") or "",
             int(old.get("is_safety_critical") or 0),
             old.get("norm_group") or "",
+            normalize_value_kind(old.get("value_kind")),
             int(old.get("is_stale") or 0),
         )
 
@@ -2554,6 +2588,14 @@ def _validate_adjust_ops(obj, valid_ids: set, *,
                 upd["name"] = str(op.get("name")).strip()
             if op.get("category"):
                 upd["category"] = _normalize_fact_category(op["category"])
+            # R81: pass through value_kind (normalized).
+            if op.get("value_kind") is not None:
+                upd["value_kind"] = normalize_value_kind(op.get("value_kind"))
+            # ✅ R81（2026-10-15）：value_kind 白名单透传。R80 曾在 add 路径
+            #    读 op.get("value_kind")，但本校验器按白名单重建 op dict，
+            #    该键在到达写路径前就被剥掉 → 「AI 调整新增透传口径」实际
+            #    是死接线（恒为 ''）。update/add 两条分支一并补齐；
+            #    归一与 _manual_fact_row / _apply_item_updates 同一出口。
             if len(upd) > 2:  # 除 op+fact_id 外至少有一个实质变更
                 clean.append(upd)
             else:
@@ -2578,7 +2620,12 @@ def _validate_adjust_ops(obj, valid_ids: set, *,
                 continue
             cat = str(op.get("category") or "").strip()
             clean.append({"op": "add", "name": nm, "value": val,
-                          "category": _normalize_fact_category(cat)})
+                          "category": _normalize_fact_category(cat),
+                          # ✅ R81：add 同样透传 value_kind（此前被白名单剥掉，
+                          #    add 路径的 normalize_value_kind(op.get(...))
+                          #    永远读到 None，R80 宣称的透投从未生效）。
+"value_kind": normalize_value_kind(
+                              op.get("value_kind"))})
         else:
             _ignore(kind or "unknown", "unknown_op")
     return clean, str(obj.get("summary") or "").strip()
@@ -2700,6 +2747,9 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
                         "value": op.get("value"),
                         "name": op.get("name"),
                         "category": op.get("category"),
+                        # ✅ R81：口径随 update 透传（校验器已白名单归一；
+                        #    缺键时 None → _apply_item_updates 跳过该列）
+                        "value_kind": op.get("value_kind"),
                     }], commit=False)
                     applied["updated"] += n
                     if n:
@@ -2741,6 +2791,11 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
                             is_simulated=False,
                             confidence=1.0,
                             is_resolved=_add_resolved,
+                            # ✅ R81：AI 调整新增透传口径（op 可带 value_kind）。
+                            #    R80 首版此处已写透传，但 _validate_adjust_ops
+                            #    的白名单把该键剥掉，实际恒为 ''（死接线）；
+                            #    校验器补齐后本行才真正生效（归一幂等）。
+                            value_kind=normalize_value_kind(op.get("value_kind")),
                         ))
                     applied["added"] += 1
                     if _is_safety_new:

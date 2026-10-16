@@ -502,6 +502,10 @@ async def _migrate(conn: aiosqlite.Connection):
         ("global_facts", "is_shared", "INTEGER DEFAULT 0"),
         # 资料来源时效：重解析/删除后旧事实保守标记 stale，下游统一排除。
         ("global_facts", "is_stale", "INTEGER DEFAULT 0"),
+        # ✅ R80（2026-10-15）：要求 vs 事实口径类型（P2-3）。''=未区分（历史行
+        #    读侧按 fact 处理，行为零变化）；'requirement'=要求原文口径，
+        #    注入渲染时附加「须转写为本方案承诺」提示。历史存量不回填。
+        ("global_facts", "value_kind", "TEXT DEFAULT ''"),
         # --- 全局事实分步工作流（上传保存 → 解析 → 提取）---
         ("project_documents", "file_path", "TEXT DEFAULT ''"),
         # --- 文件分类/大小/解析耗时（文件导入/解析模块增强）---

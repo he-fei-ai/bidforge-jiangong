@@ -306,8 +306,9 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
             "category, source_ref, is_simulated, confidence, is_resolved, "
             "has_conflict, conflict_keys, fact_key, chunk_hash, value_unit, "
             "fact_type, evidence_kind, page_ref, zone_type, is_safety_critical, "
-            "norm_group, chapter, fact_attr, source_kind, is_shared, is_stale) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "norm_group, value_kind, chapter, fact_attr, source_kind, "
+            "is_shared, is_stale) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (str(uuid.uuid4()), project_id, new_id, new_group, s.get("group_title", ""),
              s["title"], s["content"], s.get("category", ""), s.get("source_ref", ""),
              s.get("is_simulated", 0), s.get("confidence", 1.0),
@@ -317,6 +318,8 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
              s.get("fact_type", ""), s.get("evidence_kind", ""),
              s.get("page_ref", ""), s.get("zone_type", ""),
              s.get("is_safety_critical", 0), s.get("norm_group", ""),
+             # ✅ R80：value_kind 随方案复制保留口径（副本事实与原方案同语义）
+             s.get("value_kind", ""),
              s.get("chapter", ""), s.get("fact_attr", ""),
              s.get("source_kind", ""), s.get("is_shared", 0),
              s.get("is_stale", 0)))

@@ -154,6 +154,11 @@ class FactItem:
                               #   relation 关系/norm 规范）
     source_kind: str = ""      # 数据来源（bid_doc/drawing/survey/overall_plan/manual）
     is_shared: bool = False    # 跨章节共性事实（多章节复用，避免重复提取）
+    # --- ✅ R80（2026-10-15）：要求 vs 事实口径类型（P2-3 · 正式落地）---
+    # 'fact'=本方案口径（实值或已按要求转写）；'requirement'=要求原文口径
+    # （无法安全转写而保留，正文引用须写"满足/响应要求"口径）；''=未区分
+    # （历史行，读侧按 fact 处理）。非法值在解析入口归一为 ''。
+    value_kind: str = ""
 
     def to_db_row(self, group_id: str, pid: str, sid: str,
                   group_title: str = "") -> tuple:
@@ -213,6 +218,11 @@ class FactItem:
             self.zone_type or "",
             1 if self.is_safety_critical else 0,
             self.norm_group or "",
+            # ✅ R80（2026-10-15）：要求 vs 事实口径（value_kind）。
+            #    ⚠️ 位置必须在 is_stale 与九大章节四维**之前**：既有契约是
+            #    ``to_db_row()[-4:] == (chapter, fact_attr, source_kind, is_shared)``，
+            #    插在 is_stale 前使两个既有契约（[-4:] 四维、is_stale 先于四维）均不被破坏。
+            normalize_value_kind(self.value_kind),
             # ✅ 2026-10-06：is_stale 补进 to_db_row（见 GLOBAL_FACTS_INSERT_COLS）。
             #   旧实现 persist INSERT 用 27 列、路由侧列清单用 28 列，两份漂移 →
             #   提取落库的事实 is_stale 走表默认值。提取管线产出的事实**恒为
@@ -256,7 +266,12 @@ GLOBAL_FACTS_INSERT_COLS: tuple[str, ...] = (
     "has_conflict", "conflict_keys", "fact_key",
     # 溯源/单位列（提取管线写入；手工新增走默认值）
     "chunk_hash", "value_unit", "fact_type", "evidence_kind", "page_ref",
-    "zone_type", "is_safety_critical", "norm_group", "is_stale",
+    "zone_type", "is_safety_critical", "norm_group",
+    # ✅ R80（2026-10-15）：要求 vs 事实口径（须与 to_db_row 取值位一一对应：
+    #    插在 is_stale 之前，保住「[-4:] == 九大章节四维」与「is_stale 先于
+    #    四维」两个既有契约不被破坏）
+    "value_kind",
+    "is_stale",
     # 九大章节四维标注（apply_fact_dimensions 派生；手工新增走默认值）
     "chapter", "fact_attr", "source_kind", "is_shared",
 )
@@ -271,6 +286,22 @@ GLOBAL_FACTS_INSERT_SQL = (
     % (", ".join(GLOBAL_FACTS_INSERT_COLS),
        ",".join("?" for _ in GLOBAL_FACTS_INSERT_COLS))
 )
+
+
+# ---------------------------------------------------------------------------
+# 要求 vs 事实口径（value_kind，R80 · P2-3 正式落地）
+# ---------------------------------------------------------------------------
+#: 值域白名单：''（未区分，历史行缺省，读侧按 fact 处理）/ 'fact'（本方案
+#: 口径：文档明示实值或已按要求转写为承诺值）/ 'requirement'（招标/规范要求
+#: 原文口径——无法安全转写而保留，正文引用须写「满足/响应要求」口径）。
+#: 任何非法输入（含 AI 幻觉值、客户端脏值）一律归一为 ''，绝不抛错阻断提取。
+VALUE_KIND_ALLOWED = ("fact", "requirement")
+
+
+def normalize_value_kind(raw) -> str:
+    """value_kind 白名单归一（单一事实源：解析/落库/手工新增三处共用）。"""
+    v = str(raw or "").strip().lower()
+    return v if v in VALUE_KIND_ALLOWED else ""
 
 
 @dataclass
@@ -1382,6 +1413,9 @@ def _parse_fact_dict(f: dict, default_source: str = "") -> FactItem | None:
         page_ref = None
     zone_type = f.get("zone_type", "")
     is_safety = bool(f.get("is_safety_critical", False))
+    # ✅ R80（2026-10-15）：要求 vs 事实口径——AI 输出 value_kind 透传，
+    #    非法值（幻觉/脏值）由 normalize_value_kind 归一为 ''。
+    value_kind = normalize_value_kind(f.get("value_kind"))
 
     # is_safety_critical 白名单兜底：fact_type 未标但 name/key 命中时补标
     if not is_safety and _is_safety_critical(FactItem(name=name, value=str(value), key=key)):
@@ -1394,6 +1428,7 @@ def _parse_fact_dict(f: dict, default_source: str = "") -> FactItem | None:
         value_unit=value_unit, fact_type=fact_type,
         evidence_kind=evidence_kind, page_ref=page_ref,
         zone_type=zone_type, is_safety_critical=is_safety,
+        value_kind=value_kind,
     )
 
 
@@ -1411,6 +1446,8 @@ def _parse_legacy_fact_dict(it: dict, chunk_index: int = 0) -> FactItem | None:
         source_ref=it.get("source_ref", ""),
         is_simulated=bool(it.get("is_simulated", False)),
         confidence=_safe_confidence(it.get("confidence"), 0.8),
+        # ✅ R80：旧格式同样透传 value_kind（非法值归一 ''）
+        value_kind=normalize_value_kind(it.get("value_kind")),
     )
 
 
@@ -3063,7 +3100,12 @@ def build_injectable_facts_query(scheme_id: str, project_id: str,
 #: 门控细节、不写库、失败仅返回空（fail-soft），不改变任何既有注入行为。
 _BRIDGE_COLUMNS = (
     FACTS_GT_COLUMN + ", id, title, content, category, chapter, fact_attr, "
-    "source_ref, is_safety_critical, fact_key, group_title, value_unit"
+    "source_ref, is_safety_critical, fact_key, group_title, value_unit, "
+    # R81: value_kind (requirement vs fact) carried by the bridge.
+    # R80 only wired it into facts_builder injection rendering; the
+    # audit/preflight/compliance/repair bridge missed it, so tender
+    # requirement text was consumed as the scheme adopted value.
+    "value_kind"
 )
 
 
@@ -3098,7 +3140,8 @@ async def load_resolved_facts_for_scope(db, scheme_id: str = "",
 
     返回字段（统一结构，下游按需取用）：
         fact_id, name, value, category, chapter, fact_attr,
-        source, is_safety_critical, fact_key, group_title
+        source, is_safety_critical, fact_key, group_title, value_unit,
+        value_kind
 
     失败（DB 异常/作用域缺失）返回空列表，绝不向上抛 —— 下游把「无事实」
     当作「不增强」处理即可，保证主流程不受全局事实模块可用性影响。
@@ -3154,6 +3197,11 @@ async def load_resolved_facts_for_scope(db, scheme_id: str = "",
                 #    等按「value 内单位优先、value_unit 兜底」解析（危大阈值
                 #    长度类需换算为米），value 为裸数字时不丢单位。
                 "value_unit": r.get("value_unit") or "",
+                # ✅ R81（2026-10-15）：要求 vs 事实口径如实回传（''=未区分，
+                #    读侧按 fact 处理；'requirement'=招标/规范要求原文口径，
+                #    不得当本方案既定值）。旧库缺列时build_injectable_facts_query
+                #    的 COALESCE 兜底为 ''，历史行行为逐字不变。
+                "value_kind": r.get("value_kind") or "",
             })
         return out
     except Exception as e:  # pragma: no cover - 只读桥接失败不影响主流程

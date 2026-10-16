@@ -3068,6 +3068,28 @@ const FACT_CATEGORY_OPTIONS: { value: string; label: string }[] = [
   { value: "other", label: "其他事实" },
 ];
 
+/** ✅ R81（2026-10-15）：要求 vs 事实口径选项（后端 value_kind 白名单同源）。
+ *
+ *  - `fact`：本方案已采用的确定性口径（默认，正文可直接引用）；
+ *  - `requirement`：招标文件/规范的要求原文口径（无法安全转写时），
+ *    正文引用须写「满足/响应要求」，不得当作本方案既定值；
+ *  - 空串 = 未区分（历史行缺省），不渲染徽标、注入无前缀。
+ *
+ * 与后端 `facts_extractor.VALUE_KIND_ALLOWED` / `normalize_value_kind`
+ * 的值域逐字一致；徽标渲染见条目行的「要求口径」Tag。
+ */
+export const FACT_VALUE_KIND_OPTIONS: { value: string; label: string }[] = [
+  { value: "fact", label: "本方案口径（默认）" },
+  { value: "requirement", label: "要求口径（招标/规范原文）" },
+];
+
+/** 口径徽标文案（空串返回空——与徽标渲染「空值零渲染」纪律一致）。 */
+export function factValueKindLabel(vk?: string | null): string {
+  if (vk === "requirement") return "要求口径";
+  if (vk === "fact") return "本方案口径";
+  return "";
+}
+
 /** ✅ 2026-09-24：九大章节中文名（建办质〔2018〕31号）。
  *
  * ✅ 2026-10-06 降级为**离线兜底**：权威来源是 `GET /global-facts/category-map`
@@ -3543,6 +3565,17 @@ export const FactsGroupList = memo(function FactsGroupList({
                               <Tooltip title="AI 模拟生成，需人工确认">
                                 <Tag color="orange" style={{ margin: 0 }}>
                                   ⚠️ 模拟值
+                                </Tag>
+                              </Tooltip>
+                            )}
+                            {/* ✅ R80（2026-10-15）：要求口径事实 —— 该值是招标/规范
+                                要求原文，正文引用时后端会提示 AI 按「满足/响应要求」
+                                口径书写。空值（未区分/本方案口径）不渲染徽标。 */}
+                            {it.value_kind === "requirement" && (
+                              <Tooltip title="该条目是招标/规范要求原文口径：正文引用时将写为「满足/响应招标要求」，不会当作本方案既定值">
+                                <Tag color="geekblue" style={{ margin: 0 }}>
+                                  {/* ✅ R81：徽标文案走单一导出（与测试同源） */}
+                                  📋 {factValueKindLabel(it.value_kind)}
                                 </Tag>
                               </Tooltip>
                             )}
@@ -4510,6 +4543,8 @@ const draftKey = selectedSection && id
       value: item.value,
       category: item.category || group?.category || undefined,
       is_simulated: !!item.is_simulated,
+      // ✅ R81：要求 vs 事实口径回填（缺省未区分 → 空串）
+      value_kind: item.value_kind || "",
     });
     setFactItemModalOpen(true);
   }
@@ -4527,6 +4562,9 @@ const draftKey = selectedSection && id
           value: values.value,
           category: values.category || undefined,
           is_simulated: !!values.is_simulated,
+          // ✅ R81：口径随保存透传（后端 _apply_item_updates 归一；
+          //    undefined 归一为 '' = 未区分，与旧行为等价）
+          value_kind: values.value_kind ?? "",
         }],
       }, id);
       msg.success("事实已更新");
@@ -11520,6 +11558,18 @@ exportPctRef.current = pct;
             tooltip="标记为模拟值后，该事实会回到「待审核」，未经人工确认不会注入正文"
           >
             <Switch checkedChildren="模拟值" unCheckedChildren="实际值" />
+          </Form.Item>
+          {/* ✅ R81：要求 vs 事实口径（与后端 value_kind 白名单同源） */}
+          <Form.Item
+            name="value_kind"
+            label="事实口径"
+            tooltip="本方案口径：本方案已采用的值，正文可直接引用；要求口径：招标/规范要求原文，正文引用时须写「满足/响应要求」，不得当作既定值"
+          >
+            <Select
+              allowClear
+              placeholder="未区分（历史行默认）"
+              options={FACT_VALUE_KIND_OPTIONS}
+            />
           </Form.Item>
         </Form>
       </Modal>

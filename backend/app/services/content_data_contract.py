@@ -331,6 +331,27 @@ def _row_source_ref(row) -> str:
         return str(row.get("source_ref") or "") if isinstance(row, dict) else ""
     except (TypeError, ValueError):
         return ""
+
+
+def _row_value_kind(row) -> str:
+    """取事实行口径（dict 的 ``value_kind`` / 6 元组第 5 项；缺省 → ''）。
+
+    ✅ R83（2026-10-16，R80 §6-1 收口）：与 ``facts_extractor.normalize_value_kind``
+    同白名单（仅 ``''`` / ``fact`` / ``requirement`` 合法，其余一律归一 ``''``），
+    但本 R52 契约层做**局部判定**不反向依赖 R80 提取层（避免契约层 ↔ 提取层
+    循环依赖）。6 元组为 R80 引入的注入契约
+    ``(group_type,title,content,confidence,chapter,value_kind)``；3/4/5 元组
+    （历史行）无此列 → ''（读侧按 fact 处理，行为零变化，与 R80 口径一致）。
+    """
+    try:
+        if isinstance(row, dict):
+            raw = row.get("value_kind")
+        else:
+            raw = row[5] if len(row) >= 6 else None
+        vk = str(raw or "")
+    except (TypeError, IndexError, ValueError):
+        return ""
+    return vk if vk in ("fact", "requirement") else ""
 def iter_consistency_values(facts_rows) -> list:
     """从全局事实行抽取全部一致性主题取值（不截断、不去重）。
 
@@ -356,6 +377,7 @@ def iter_consistency_values(facts_rows) -> list:
             continue  # 低置信度事实不充当权威值（避免把待裁决值当确定值）
         chapter = _row_chapter(row)
         source_ref = _row_source_ref(row)
+        value_kind = _row_value_kind(row)
         try:
             for _key, name_pattern, rx, obj_hints in CONSISTENCY_KEY_RULES:
                 for m, value_text in _iter_value_matches(
@@ -374,6 +396,7 @@ def iter_consistency_values(facts_rows) -> list:
                         "title": title,
                         "confidence": conf,
                         "source_ref": source_ref,
+                        "value_kind": value_kind,
                         "raw_len": len(content),
                     })
         except Exception:
@@ -399,49 +422,85 @@ def build_global_data_dictionary(facts_rows) -> dict:
 
     Returns:
         ``{key: {name, value, value_text, chapter, source_title, source_ref,
-        confidence, conflicting}}``；无事实 → 空 dict。
+        confidence, conflicting, value_kind, requirements}}``；无事实 → 空 dict。
+        ``value_kind`` 为该键当前权威值的口径（``''``/``fact``/``requirement``）；
+        ``requirements`` 为同键下**招标/规范要求口径**取值列表 —— 与 ``fact`` 口径
+        天然不同维度，**绝不**计入 ``conflicting``（否则「要求≤90 天、本方案 85 天」
+        会被误判为前后矛盾，见 R80 §6-1 / R83）。
+
+    ✅ R83（2026-10-16）value_kind 分流：
+      · ``requirement`` 命中只进 ``requirements`` 桶，绝不抢占采用口径权威值、
+        绝不计入 ``conflicting``；
+      · 某 key **先**见 requirement、**后**见 fact → fact 升级为权威值，原要求值
+        转入 ``requirements``（不丢要求口径）；
+      · fact/fact（含 ``''``）同键不同值 → 仍走原冲突判定（置信度/长度择优 +
+        ``conflicting`` 候选），行为零变化。
     """
     dict_: dict = {}
     for hit in iter_consistency_values(facts_rows):
         conf = hit["confidence"]
         rank = (conf if conf is not None else -1.0, hit["raw_len"])
-        cur = dict_.get(hit["key"])
+        vk = hit["value_kind"]
+        key = hit["key"]
+        cur = dict_.get(key)
         if cur is None:
-            dict_[hit["key"]] = {
+            # 要求口径命中：仍独立建键（绝不并入其它同主题异值键），仅值位留空、
+            # 由渲染层回退标注「要求口径」，避免 AI 把要求值误当本方案采用值引用。
+            dict_[key] = {
                 "name": hit["name"],
                 "rule_key": hit["rule_key"],
-                "value": hit["value"],
-                "value_text": hit["value_text"],
+                "value": "" if vk == "requirement" else hit["value"],
+                "value_text": "" if vk == "requirement" else hit["value_text"],
                 "chapter": hit["chapter"],
                 "source_title": hit["title"],
                 "source_ref": hit["source_ref"],
-                "confidence": conf,
+                "confidence": None if vk == "requirement" else conf,
                 "conflicting": [],
+                "value_kind": vk,
+                "requirements": ([hit["value_text"]]
+                                 if vk == "requirement" and hit["value_text"] else []),
                 "_rank": rank,
             }
         else:
-            if cur["value_text"] != hit["value_text"] and rank > cur["_rank"]:
-                # 更权威的一条整体替换，并把旧值收进候选列表
-                older = cur["value_text"]
-                new_conflicting = [v for v in cur["conflicting"]
-                                   if v not in (hit["value_text"], older)]
-                if older not in new_conflicting:
-                    new_conflicting.append(older)
-                dict_[hit["key"]] = {
-                    "name": hit["name"],
-                    "rule_key": hit["rule_key"],
-                    "value": hit["value"],
-                    "value_text": hit["value_text"],
-                    "chapter": hit["chapter"],
-                    "source_title": hit["title"],
-                    "source_ref": hit["source_ref"],
-                    "confidence": conf,
-                    "conflicting": new_conflicting,
-                    "_rank": rank,
-                }
-            elif cur["value_text"] != hit["value_text"]:
-                if hit["value_text"] not in cur["conflicting"]:
-                    cur["conflicting"].append(hit["value_text"])
+            if vk == "requirement":
+                # 同键（同值）要求源 → 收进 requirements 桶，不抢占采用值/不制造冲突
+                if hit["value_text"] and hit["value_text"] not in cur["requirements"]:
+                    cur["requirements"].append(hit["value_text"])
+            else:
+                # 命中为 fact / ''（采用口径）—— 才是注入权威值
+                if cur["value_kind"] == "requirement":
+                    # 当前键只有要求源 → 采用值升级为权威（要求值 == 本键值已在
+                    # requirements 桶，无需再搬运）
+                    cur["value_kind"] = vk
+                    cur["value"] = hit["value"]
+                    cur["value_text"] = hit["value_text"]
+                    cur["name"] = hit["name"]
+                    cur["rule_key"] = hit["rule_key"]
+                    cur["chapter"] = hit["chapter"]
+                    cur["source_title"] = hit["title"]
+                    cur["source_ref"] = hit["source_ref"]
+                    cur["confidence"] = conf
+                    cur["_rank"] = rank
+                elif cur["value_text"] != hit["value_text"] and rank > cur["_rank"]:
+                    older = cur["value_text"]
+                    new_conflicting = [v for v in cur["conflicting"]
+                                      if v not in (hit["value_text"], older)]
+                    if older not in new_conflicting:
+                        new_conflicting.append(older)
+                    cur["value_kind"] = vk
+                    cur["value"] = hit["value"]
+                    cur["value_text"] = hit["value_text"]
+                    cur["name"] = hit["name"]
+                    cur["rule_key"] = hit["rule_key"]
+                    cur["chapter"] = hit["chapter"]
+                    cur["source_title"] = hit["title"]
+                    cur["source_ref"] = hit["source_ref"]
+                    cur["confidence"] = conf
+                    cur["conflicting"] = new_conflicting
+                    cur["_rank"] = rank
+                elif cur["value_text"] != hit["value_text"]:
+                    if hit["value_text"] not in cur["conflicting"]:
+                        cur["conflicting"].append(hit["value_text"])
     for entry in dict_.values():
         entry.pop("_rank", None)
     return dict_
@@ -488,17 +547,29 @@ def render_data_dictionary_block(data_dict, *, chapter_key: str = "",
     ]
     for _k, v in items:
         conf = v.get("confidence")
+        val = v.get("value") or ""
         suffix = f"（来源：{v.get('source_title') or '全局事实'}"
         if conf is not None:
             suffix += f"，置信度 {conf:.2f}"
         suffix += "）"
-        lines.append(f"- {v.get('name')} = {v.get('value')}　{suffix}")
+        # ✅ R83：无采用口径权威值、但存在招标/规范要求口径时，展示要求值并
+        #    标注口径（仍是约束，不是本方案采用值，绝不编造采用值）。
+        if not val and v.get("requirements"):
+            val = f"{v['requirements'][0]}（招标/规范要求口径，须满足；非本方案采用值）"
+        lines.append(f"- {v.get('name')} = {val}　{suffix}")
         if v.get("conflicting"):
             lines.append(
                 "  · 该主题在事实库中另有候选取值："
                 + "、".join(v["conflicting"][:4])
                 + "。以本表权威值为准；如需改口径，请在「全局事实」中"
                   "完成裁决后重新生成，不要在本章自行取值。")
+        # ✅ R83：要求口径与采用口径同键共存时，单独列出要求约束（与 conflicting
+        #    分流，避免「要求≤90 天、本方案 85 天」被当成矛盾）。
+        if v.get("requirements") and (v.get("value") or "") not in v["requirements"]:
+            lines.append(
+                "  · 该主题另含招标/规范要求口径："
+                + "、".join(v["requirements"][:4])
+                + "。正文须满足要求口径，且前后一致引用本表采用值。")
     lines.append(DICTIONARY_ABSENT_HINT)
     block = "\n".join(lines)
     return block[:max_chars]

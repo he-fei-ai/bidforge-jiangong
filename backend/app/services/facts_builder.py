@@ -163,6 +163,25 @@ def _row_chapter(row) -> str:
         return ""
 
 
+def _row_value_kind(row) -> str:
+    """从事实行取「要求 vs 事实口径」（R80；历史 3/4/5 元组行 → 返回空串）。
+
+    `_load_facts_rows` 自 R80（2026-10-15）起多读一列 value_kind，行结构
+    由 5 元组扩为 6 元组（尾部追加）。历史行/测试构造的短行按 '' 处理
+    （未区分 → 渲染零变化），故按长度自适应而非索引硬取。
+    """
+    try:
+        return str(row[5] or "") if len(row) >= 6 else ""
+    except (TypeError, IndexError, KeyError):
+        return ""
+
+
+#: requirement 口径行的注入前缀（R80）：提示正文模型该值是招标/规范要求
+#: 原文，引用时须写「满足/响应要求」口径，不得当本方案既定值直接抄写。
+#: fact/'' 行不附带任何前缀（渲染逐字不变）。
+_REQUIREMENT_KIND_PREFIX = "（要求口径：正文引用时须写为「满足/响应招标要求」，不得当作本方案既定值）"
+
+
 def _chapter_inject_enabled() -> bool:
     """是否启用「章节内事实前置」（配置 ``facts_chapter_inject``）。
 
@@ -254,7 +273,13 @@ def _render_facts_text(
             _conf = float(_row[3]) if len(_row) >= 4 and _row[3] is not None else None
         except (TypeError, ValueError):
             _conf = None
-        prepared.append((gt, (content or '')[:per_fact], _conf))
+        # ✅ R80（2026-10-15）：requirement 口径行附加「须转写为本方案承诺」提示。
+        #    前缀在 per_fact 截断**之后**拼接（不挤占事实值本身的可视预算）；
+        #    fact/'' 行不拼接（渲染与引入前逐字一致——行为不变性锚）。
+        _body = (content or '')[:per_fact]
+        if _row_value_kind(_row) == "requirement":
+            _body = _REQUIREMENT_KIND_PREFIX + _body
+        prepared.append((gt, _body, _conf))
 
     header_cost = sum(len(f"### {g}\n") for g in seen_groups)
     fact_budget = int(max_total) - header_cost
@@ -348,9 +373,11 @@ async def _load_facts_rows(db, scheme_id: str) -> list:
       真正共用同一段 SQL（此前本函数自维护，而该 helper 的 docstring 声称
       「与 _load_facts_rows 共用」—— 声明与实现不符，改门控一处必漏一处）。
 
-    行结构契约：**5 元组** (gt, title, content, confidence, chapter)。
-    ``_render_facts_text`` / `_filter_facts_rows` / `_row_chapter` 均按此下标消费，
-    故派生所需列取回后必须投影回 5 元组，不得直接外泄。
+    行结构契约：**6 元组** (gt, title, content, confidence, chapter, value_kind)。
+    ``_render_facts_text`` / `_filter_facts_rows` / `_row_chapter` /
+    `_row_value_kind` 均按下标自适应消费，故派生所需列取回后必须投影回
+    6 元组，不得直接外泄。R80（2026-10-15）尾部追加 value_kind —— 历史
+    3/4/5 元组行（测试 mock / 旧调用方）必须继续可用（短行按 '' 处理）。
     """
     try:
         # 函数级 import，避免模块级引入 facts_extractor 的重依赖
@@ -370,6 +397,8 @@ async def _load_facts_rows(db, scheme_id: str) -> list:
         _SELECT = (
             "COALESCE(NULLIF(group_title,''), '其他事实') AS gt, "
             "title, content, confidence, chapter, "
+            # ✅ R80：要求 vs 事实口径（requirement 行渲染时附加转写提示）
+            "COALESCE(value_kind,'') AS value_kind, "
             # 以下列仅供 chapter 惰性派生，不进入返回行
             "COALESCE(category,'') AS category, "
             "COALESCE(fact_type,'') AS fact_type, "
@@ -405,6 +434,8 @@ async def _load_facts_rows(db, scheme_id: str) -> list:
                 str(d.get("content") or ""),
                 d.get("confidence"),
                 chapter,
+                # ✅ R80：要求 vs 事实口径（尾部追加；短行消费方自适应）
+                str(d.get("value_kind") or ""),
             ))
         return out
     except Exception as e:  # 全局事实表缺失/查询异常不应阻断生成

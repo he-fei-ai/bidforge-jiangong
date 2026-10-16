@@ -325,6 +325,16 @@ CREATE TABLE IF NOT EXISTS global_facts (
     is_shared INTEGER DEFAULT 0,
     -- 资料重解析/删除后标记旧事实来源已变化；下游生成必须排除，需重新提取或人工核对。
     is_stale INTEGER DEFAULT 0,
+    -- ✅ R80（2026-10-15）：要求 vs 事实口径类型（P2-3 · 正式落地）。
+    --    'fact'        本方案口径（文档明示实值，或已由「要求→事实转写」
+    --                  转写为承诺值，如"工期不超过450天"→"450 日历天"）
+    --    'requirement' 招标/规范要求原文口径（无法安全转写而保留原文，
+    --                  正文引用时须写成"满足/响应招标要求"口径，不得当
+    --                  本方案既定值直接抄写）
+    --    ''            未区分（历史行/手工行缺省）——读侧按 fact 处理，
+    --                  行为零变化；提交流程对新产出显式标注。
+    --    新增列带默认值向后兼容；历史存量不回填（零迁移惯例：只补列）。
+    value_kind TEXT DEFAULT '',
     updated_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_global_facts_scheme ON global_facts(scheme_id);

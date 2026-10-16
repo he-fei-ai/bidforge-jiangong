@@ -180,7 +180,11 @@ async def autofix_section_fact_conflicts(
     Args:
         content: 章节正文（Markdown）。
         standard: 生效生成标准（precise / fuzzy；驱动事实引导语口径）。
-        fact_rows: 本章**实际注入**的事实行（5 元组，与 standard_report 同源）。
+        fact_rows: 供参考的事实行——与 standard_report 同源。✅ R82：
+            开关 content_audit_full_facts=True 时为**全量已确认事实**（超集，
+            含未注入本章的事实），False 时为本章实际注入子集。修复范围由
+            `conflicts` 清单严格限定（提示词纪律 6：只修列出的冲突），事实文本
+            仅作取值参考，多注入不会诱导重写无关内容。
         conflicts: ``select_fact_conflicts`` 筛出的 error 级事实冲突。
         section_id / section_title: 仅用于提示词定位与日志。
         chat_fn: 可选的 ``chat_with_fallback`` 同签名可调用对象（测试注入）。

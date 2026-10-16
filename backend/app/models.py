@@ -138,6 +138,9 @@ class FactItem(BaseModel):
     confidence: float = 1.0             # 置信度 0-1
     is_resolved: bool = True            # 是否已人工确认
     key: str = ""                       # 归一化键（用于去重/矛盾检测）
+    # ✅ R80（2026-10-15）：要求 vs 事实口径（''=未区分；fact=本方案口径；
+    # requirement=招标/规范要求原文口径）。非法值在路由层归一为 ''。
+    value_kind: str = ""
 
 
 class FactGroupIn(BaseModel):

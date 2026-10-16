@@ -449,7 +449,14 @@ async def test_delete_document_invalidates_export_cache(ctx):
 
 
 async def test_force_reparse_invalidates_export_cache(ctx):
-    """✅ 强制重解析（force）后，所属项目的导出缓存被失效（跨模块链路收敛）。"""
+    """✅ 强制重解析（force）后，所属项目的导出缓存被失效（跨模块链路收敛）。
+
+    ⚠️ R79 A-4 行为变更（生产已提交 ec36398）：**首次**解析成功同样失效
+    导出缓存与旧事实（输入全集变了，见 global_facts_docs.parse_document
+    的 `elif not _was_parsed:` 分支）。故本用例先完成首次解析、再建立
+    缓存行——隔离验证 force 路径本身；「首次解析即失效」由
+    test_import_parse_r79_closeout_20261015.py D 组锁定，此处不重复。
+    """
     db, _pid, sid, _uploads = ctx
     await gf.upload_documents(
         scheme_id=sid, project_id="",
@@ -461,13 +468,14 @@ async def test_force_reparse_invalidates_export_cache(ctx):
     await db.execute(
         "INSERT INTO schemes(id, project_id, name, type) VALUES(?,?,?,?)",
         (scheme_id, _pid, "测试方案", "technical"))
+    await db.commit()
+    # 首次解析（R79 A-4 起即失效缓存/旧事实）→ 之后再建缓存行
+    await gf.parse_document(doc_id, db=db)
     await db.execute(
         "INSERT INTO export_cache(id, project_id, scheme_id, result_path) "
         "VALUES(?,?,?,?)",
         ("ec3", _pid, scheme_id, "data/_exports/zzz.docx"))
     await db.commit()
-    # 首次解析（非 force）不应失效缓存
-    await gf.parse_document(doc_id, db=db)
     cur = await db.execute(
         "SELECT id FROM export_cache WHERE scheme_id=?", (scheme_id,))
     assert len(await cur.fetchall()) == 1
@@ -480,19 +488,25 @@ async def test_force_reparse_invalidates_export_cache(ctx):
 
 
 async def test_force_reparse_marks_old_facts_stale(ctx):
-    """强制重解析后旧事实立即退出注入链路，响应回传 stale 数量。"""
+    """强制重解析后旧事实立即退出注入链路，响应回传 stale 数量。
+
+    ⚠️ R79 A-4 行为变更（ec36398）：首次解析成功也标记 stale。故本用例
+    先完成首次解析、再插入旧事实行——隔离验证 force 路径；首次解析即
+    标记的行为由 test_import_parse_r79_closeout D 组锁定。
+    """
     db, pid, sid, _uploads = ctx
     await gf.upload_documents(
         scheme_id=sid, project_id="",
         files=[_upload("stale.txt", "这是一份用于验证旧事实失效的资料内容。".encode("utf-8"))],
         db=db)
     doc_id = (await _docs(db, pid))[0]["id"]
+    # 首次解析先走完（R79 A-4 起它也会标记 stale）→ 之后再插旧事实
+    await gf.parse_document(doc_id, db=db)
     await db.execute(
         "INSERT INTO global_facts(id,project_id,scheme_id,group_id,title,content,category,is_resolved) "
         "VALUES('old-fact',?,?,'g-old','旧工期','- **旧工期**: 365天','schedule',1)",
         (pid, sid))
     await db.commit()
-    await gf.parse_document(doc_id, db=db)
     res = await gf.parse_document(doc_id, force=True, db=db)
     assert res["stale_facts"] == 1
     row = await (await db.execute("SELECT is_stale FROM global_facts WHERE id='old-fact'")).fetchone()

@@ -361,13 +361,23 @@ def _fact_text(row) -> tuple[str, str]:
 
 
 def standard_report(content: str, standard: str, fact_rows: list,
-                    *, section_id: str = "", section_title: str = "") -> dict:
+                    *, section_id: str = "", section_title: str = "",
+                    conflict_fact_rows: list | None = None) -> dict:
     """对一章已生成正文执行生成标准校验，返回结构化报告（纯函数、不抛业务异常）。
 
     参数：
         content: 最终落库正文（Markdown）
         standard: precise / fuzzy（非法值按 precise 处理）
-        fact_rows: 本章**实际注入**的相关事实行（5 元组 gt,title,content,conf,chapter）
+        fact_rows: 本章**实际注入**的相关事实行（5/6 元组 gt,title,content,conf,chapter[,value_kind]）
+            —— 驱动覆盖率告警（fact_value_missing）、模糊豁免、编造日期比对、
+            trace，与生成时注入正文的事实口径**逐字一致**。
+        conflict_fact_rows: ✅ R82（对齐易标 CG:1686「审计用全量事实」）可选——
+            在全案已过 fail-closed 门控的**全量已确认事实行**。非 None 时，
+            数值矛盾/型号冲突（value_mismatch/value_conflict/model_conflict）的
+            检出面扩到 ``fact_rows ∪ conflict_fact_rows``（按 title 去重，本章事实
+            已在内不重复），以捕获「正文与未注入本章的事实冲突」；覆盖率
+            （fact_value_missing）仍只按 ``fact_rows``（避免全量噪声）。None（默认）
+            → 检出面 == ``fact_rows``，输出与引入前**逐字节一致**（回归护栏锁定）。
         section_id / section_title: 仅用于内部标记（trace）定位，不影响校验结论
 
     返回：
@@ -499,6 +509,25 @@ def standard_report(content: str, standard: str, fact_rows: list,
             g = fact_groups.setdefault(fm["title"], {"numbers": [], "models": [], "kw": fm["kw"]})
             g["models"].append(fm)
 
+        # ✅ R82（对齐易标 CG:1686「审计用全量事实」）：把「未注入本章」的全量已
+        #    确认事实（conflict_fact_rows 中 title 不在 fact_groups 的部分）聚合成
+        #    额外冲突组，仅用于其后的矛盾检出（覆盖率/豁免/trace 仍按 fact_groups）。
+        #    conflict_fact_rows 为 None（默认）→ _extra_groups 恒空 → 输出逐字节等于引入前。
+        _extra_groups: dict[str, dict] = {}
+        if conflict_fact_rows:
+            _seen_titles = set(fact_groups)
+            for row in conflict_fact_rows:
+                _t, _ftext = _fact_text(row)
+                if not _t or _t in _seen_titles:
+                    continue
+                g = _extra_groups.setdefault(
+                    _t, {"numbers": [], "models": [], "kw": _title_keywords(_t)})
+                _joined = f"{_t} {_ftext}"
+                for nt in extract_number_tokens(_joined):
+                    g["numbers"].append({**nt, "title": _t, "kw": g["kw"]})
+                for mt in extract_model_tokens(_joined):
+                    g["models"].append({**mt, "title": _t, "kw": g["kw"]})
+
         # 正文「数值+单位」与「型号」查找索引（原始值集合 + 同系列型号）
         body_value_units = {(bn["value"], bn["unit"]) for bn in body_numbers}
         body_model_by_family: dict[str, set[str]] = {}
@@ -508,26 +537,13 @@ def standard_report(content: str, standard: str, fact_rows: list,
         def _number_present(value: float, unit: str) -> bool:
             return (value, unit) in body_value_units
 
-        for title, g in fact_groups.items():
-            numbers = g["numbers"]
-            models = g["models"]
-            kw = g["kw"]
+        def _detect_conflicts(title: str, numbers: list, models: list, kw) -> None:
+            """数值矛盾 + 型号冲突检出（value_mismatch/value_conflict/model_conflict）。
 
-            # ---- 覆盖率（精准，warning）：事实的数值/型号在正文一个都找不到 ----
-            if std == PRECISE and (numbers or models):
-                num_hit = any(_number_present(n["value"], n["unit"]) for n in numbers)
-                model_hit = any(m["token"] in body_model_by_family.get(m["family"], set())
-                                for m in models)
-                if not num_hit and not model_hit:
-                    expected = "、".join(
-                        [f"{n['value']:g}{n['unit']}" for n in numbers]
-                        + [m["token"] for m in models])
-                    issues.append({
-                        "type": "fact_value_missing", "severity": "warning",
-                        "message": f"本章相关事实「{title}」（{expected}）未在正文中引用",
-                        "excerpt": "",
-                    })
-
+            ✅ R82：矛盾判据**唯一实现**，供本章事实组与「未注入本章」的全量事实
+            组（_extra_groups）共同调用——绝不复制第二份判据（仓库「同一判据多份
+            副本」头号反模式）。只追加 error 级 issue，不动覆盖率口径。
+            """
             # ---- 数值矛盾：正文中与事实同单位、且在事实标题语境附近的不同数值 ----
             for fn in numbers:
                 for bn in body_numbers:
@@ -566,6 +582,33 @@ def standard_report(content: str, standard: str, fact_rows: list,
                         "message": f"「{title}」型号与全局事实矛盾：事实 {fm['token']}，正文出现 {token}",
                         "excerpt": _excerpt(scanned, pos),
                     })
+
+        for title, g in fact_groups.items():
+            numbers = g["numbers"]
+            models = g["models"]
+            kw = g["kw"]
+
+            # ---- 覆盖率（精准，warning）：事实的数值/型号在正文一个都找不到 ----
+            if std == PRECISE and (numbers or models):
+                num_hit = any(_number_present(n["value"], n["unit"]) for n in numbers)
+                model_hit = any(m["token"] in body_model_by_family.get(m["family"], set())
+                                for m in models)
+                if not num_hit and not model_hit:
+                    expected = "、".join(
+                        [f"{n['value']:g}{n['unit']}" for n in numbers]
+                        + [m["token"] for m in models])
+                    issues.append({
+                        "type": "fact_value_missing", "severity": "warning",
+                        "message": f"本章相关事实「{title}」（{expected}）未在正文中引用",
+                        "excerpt": "",
+                    })
+
+            _detect_conflicts(title, numbers, models, kw)
+
+        # ✅ R82：对「未注入本章」的全量已确认事实跑**同一**矛盾判据（不跑覆盖率，
+        #    避免全量噪声）。conflict_fact_rows 为 None → _extra_groups 空 → 零追加。
+        for title, g in _extra_groups.items():
+            _detect_conflicts(title, g["numbers"], g["models"], g["kw"])
 
         # ============ 2026-10-01 新增：占位标记 / 空话 / 暴露缺失 / 编造日期 ============
         # 这四类是「正文完整生成」的底线口径，与生成标准无关（精准 / 模糊都查）：
