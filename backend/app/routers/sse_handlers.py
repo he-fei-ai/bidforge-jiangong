@@ -2145,6 +2145,14 @@ async def _fetch_unit_children(
             raise
         except Exception as e:          # noqa: BLE001
             last_err = e
+            # ✅ BUG 修复（2026-10-16 · 配额/认证类错误不重试）：与
+            #    _fetch_chapter_children 的 O8/O9 闸门同口径 —— 402/403/404/429
+            #    重试几乎必然再失败，白烧一轮配额与超时。旧实现批量路径缺少
+            #    该闸门，配额耗尽时每轮都浪费 2 次批量调用后才逐章回退。
+            if not AI_RETRY_ON_QUOTA_ERROR and _is_quota_error(e):
+                logger.warning("批量子目录（第%d次，%d章）配额/认证类错误（不重试）: %s",
+                               attempt, len(unit_chapters), e)
+                break
             logger.warning("批量子目录（第%d次，%d章）失败: %s",
                            attempt, len(unit_chapters), e)
     if batch_obj is None:

@@ -20,7 +20,7 @@ import copy
 import logging
 import re
 
-from app.services.numbering import strip_outline_numbering
+from app.services.numbering import strip_outline_numbering_tree
 from app.services.outline_utils import MAX_OUTLINE_DEPTH
 
 logger = logging.getLogger("outline_reorganize")
@@ -58,7 +58,7 @@ CHAPTER_ALIASES: dict[str, list[str]] = {
     "施工工艺技术": [
         "施工工艺技术", "施工工艺", "施工方法", "施工技术方案", "施工技术",
         "主要施工方法", "施工技术要求", "施工工艺要求", "施工工艺及方法",
-        "施工技术方案", "施工要点", "工艺流程",
+        "施工要点", "工艺流程",
     ],
     "施工安全保证措施": [
         "施工安全保证措施", "安全保证措施", "安全保障措施", "安全措施",
@@ -81,10 +81,10 @@ CHAPTER_ALIASES: dict[str, list[str]] = {
     ],
     "计算书及相关图纸": [
         "计算书", "计算书及图纸", "计算书与相关图纸", "计算", "相关图纸",
-        "施工图纸", "附图", "计算书及附图", "设计计算", "计算书及图纸",
+        "施工图纸", "附图", "计算书及附图", "设计计算",
     ],
     "监测方案": [
-        "监测方案", "施工监测", "监测", "监控量测", "监测监控", "监测方案",
+        "监测方案", "施工监测", "监测", "监控量测", "监测监控",
         "变形监测", "施工监测方案", "监测与监控",
     ],
     "绿色施工": [
@@ -96,11 +96,20 @@ CHAPTER_ALIASES: dict[str, list[str]] = {
     ],
 }
 
-# 反查：别名子串 → 分组
+# 反查：别名子串 → 标准分组。
+#
+# ✅ 2026-10-16（注释订正）：注册顺序**不影响**归属结果——键是各分组的别名串，
+#    字典按键去重而非按写入顺序覆盖（实测 12 组 / 127 个唯一键 / 跨组零冲突），
+#    旧注释「后写的会被短的覆盖」不成立。真正的「长别名优先」由下方
+#    _ALIAS_SORTED 的**遍历顺序**保证：_group_of 命中即返回，故最长命中
+#    必须最先被检查（「监测」在「监测监控」之前命中会把「监测监控方案」
+#    错归到更短别名的同组之外时才暴露）。
+# ⚠️ 组内不得重复登记同一别名（原「施工技术方案」/「计算书及图纸」/「监测方案」
+#    各重复一次，虽无害但是死重量）；跨组不得复用同一别名（会静默归错组）——
+#    两者由护栏 test_outline_reorg_alias_r84 锁定。
 _ALIAS_LOOKUP: dict[str, str] = {}
 for _grp, _toks in CHAPTER_ALIASES.items():
     for _t in _toks:
-        # 长别名优先：后写的会被短的覆盖，故按长度降序注册
         _ALIAS_LOOKUP[_t] = _grp
 _ALIAS_SORTED = sorted(_ALIAS_LOOKUP.keys(), key=len, reverse=True)
 
@@ -128,10 +137,15 @@ def _strip_number(title: str) -> str:
 
     而 _strip_tree 的剥离结果会被写入 description（"（含：…）"）与
     补充/附录章节标题，最终随 outline_json 落库 —— 属数据损坏级缺陷。
-    现统一委托 `numbering.strip_outline_numbering`（编号剥离的唯一实现），
-    删除本地 `_NUM_RE`，杜绝「改一处、另一处漂移」的第三份副本。
+    现统一委托 numbering 的唯一实现，删除本地 `_NUM_RE`，
+    杜绝「改一处、另一处漂移」的第三份副本。
+
+    ✅ 2026-10-16（遗留收口）：剥净档（strip_outline_numbering_all）会让
+    "1.2.3（1）细部构造" 丢掉子项标记变成 "细部构造"——此处剥离的是**目录树
+    标题**，与 numbering.renumber_outline_nodes 同一语义，改用 tree 档
+    （多轮剥章节编号、到子项标记即停），两处标题口径收敛为唯一。
     """
-    return strip_outline_numbering(title or "")
+    return strip_outline_numbering_tree(title or "")
 
 
 def _strip_tree(nodes: list) -> list:

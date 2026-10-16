@@ -132,6 +132,74 @@ def strip_outline_numbering(title: str) -> str:
     return stripped or trimmed
 
 
+def strip_outline_numbering_all(title: str) -> str:
+    """去掉标题开头已嵌入的**全部**编号前缀（有界循环，直到收敛）。
+
+    与 :func:`strip_outline_numbering`（单次剥离）的区别：本函数剥净所有编号
+    层（"第1章 1.1 工程概况" → "工程概况"）。单次剥离只去掉第一层（"第1章"），
+    残留 "1.1 工程概况" 仍带编号——落库后再被导出层按位置套一层 → 双重编号。
+
+    有界循环（最多 8 轮）：每轮剥一层；纯编号 / 年份 / 无匹配均立即终止。
+    幂等：已收敛的标题再次调用零改动。
+
+    三档契约的分工（共用同一份正则，只在「剥几轮、剥到哪里」上不同）：
+    - :func:`strip_outline_numbering` —— 单轮，保留子项标记；
+    - 本函数 —— 剥净，连子项标记一起吃掉（正文子标题重编号路径用：剥掉的
+      编号会被程序重新分配，保留反而多余）；
+    - :func:`strip_outline_numbering_tree` —— 多轮剥章节编号、到子项标记即停
+      （目录树标题专用，目录树编号重排的唯一入口）。
+    """
+    if title is None:
+        return title
+    if not isinstance(title, str):
+        title = str(title)
+    if not title.strip():
+        return title
+    s = title.strip()
+    for _ in range(8):
+        new = strip_outline_numbering(s)
+        if new == s:
+            break
+        s = new
+    return s
+
+
+#: 正文子项标记（「（1）」「(三)」「1）」）。目录树标题里这类标记是**内容**
+#: 而非章节编号：剥掉就丢了子项归属（"1.2.3（1）细部构造" 剥净成 "细部构造"，
+#: 子项与哪一章无关）。多轮剥章节编号时必须在遇到它之前停下。
+_SUB_ITEM_MARKER_RE = re.compile(
+    r"^\s*(?:[（(][一二三四五六七八九十0-9]+[)）]|[0-9]{1,3}\s*[)）])")
+
+
+def strip_outline_numbering_tree(title: str) -> str:
+    """剥掉标题开头的**章节编号**，但**保留正文子项标记**（目录树标题专用）。
+
+    用途：目录树标题直接参与展示，若标题里残留章节编号，导出层按位置再套一层
+    → 用户看到双重编号（"第1章 1.1 工程概况" 的单轮剥离结果是 "1.1 工程概况"，
+    导出即变成 "第一章 1.1 工程概况"）。
+
+    实现上**第一轮严格等价于 :func:`strip_outline_numbering`**，因此所有既有的
+    单轮锁定契约（含 "1.2.3（1）细部构造" → "（1）细部构造"）逐字不变；只有
+    单轮未收敛——说明标题带多重章节前缀——才进入额外轮次，且每轮入口都过
+    :data:`_SUB_ITEM_MARKER_RE` 闸门。有界 8 轮，幂等。
+    """
+    if title is None:
+        return title
+    if not isinstance(title, str):
+        title = str(title)
+    if not title.strip():
+        return title
+    s = strip_outline_numbering(title)
+    for _ in range(7):
+        if _SUB_ITEM_MARKER_RE.match(s):
+            break
+        new = strip_outline_numbering(s)
+        if new == s:
+            break
+        s = new
+    return s
+
+
 def renumber_outline_nodes(nodes: list, *, strip_titles: bool = True,
                            prefix: str = "", _depth: int = 0,
                            _path: set | None = None) -> list:
@@ -183,8 +251,13 @@ def renumber_outline_nodes(nodes: list, *, strip_titles: bool = True,
         node["id"] = node_id
         node["level"] = node_id.count(".") + 1
         # ✅ 清洗标题内嵌编号（双重编号根因修复）
+        # ✅ 2026-10-16（遗留收口 · 多重章节前缀）：改用 strip_outline_numbering_tree
+        #    —— 单轮只剥第一层（"第1章 1.1 工程概况" → "1.1 工程概况"），残留编号
+        #    落库后导出层再套一层 → 用户可见双重编号；而剥净（_all）会连子项标记
+        #    「（1）」一起吃掉、损坏目录树标题。tree 档首轮与单轮逐字等价（既有
+        #    锁定契约不变），仅在未收敛时多剥，且到子项标记即停。
         if strip_titles and node.get("title"):
-            node["title"] = strip_outline_numbering(str(node["title"]))
+            node["title"] = strip_outline_numbering_tree(str(node["title"]))
         # 确保 children 是合法列表
         children = node.get("children")
         if not isinstance(children, list):

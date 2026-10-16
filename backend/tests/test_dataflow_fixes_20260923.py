@@ -149,24 +149,33 @@ def test_to_db_row_carries_extended_fields():
     # ✅ 2026-09-24：九大章节四维标注追加在元组尾部，23 → 27 列。
     # ✅ 2026-10-06：is_stale 补入（GLOBAL_FACTS_INSERT_COLS 单一事实源），
     #    位置在四维**之前** → 27 → 28 列，尾部 4 列仍是四维。
-    #    列数与顺序不再写死，统一由 GLOBAL_FACTS_INSERT_COLS 校验。
+    # ✅ 2026-10-16（R80 同步）：value_kind 插入 is_stale 之前 → 28 → 29 列。
+    #    旧断言把列数写死为 28 并逐个按位置硬编码取行，R80 加列后**恒定失败**；
+    #    且与上方「列数与顺序不再写死」的注释自相矛盾。现统一按**列名查位**取行：
+    #    schema 再加列也不会让本用例失效，同时补锁 R80 新列与两个位置契约
+    #    （value_kind 先于 is_stale、尾部 4 列 == 九大章节四维）。
     from app.services.facts_extractor import GLOBAL_FACTS_INSERT_COLS
-    assert len(row) == len(GLOBAL_FACTS_INSERT_COLS) == 28
-    assert row[16] == "台"
-    assert row[17] == "machinery"
-    assert row[18] == "table"
-    assert row[19] == 42
-    assert row[20] == "machinery_stat"
-    assert row[21] == 1
-    assert row[22] == "machinery"
+    assert len(row) == len(GLOBAL_FACTS_INSERT_COLS) == 29
+    cols = GLOBAL_FACTS_INSERT_COLS
+
+    def at(name: str):
+        return row[cols.index(name)]
+
+    assert at("value_unit") == "台"
+    assert at("fact_type") == "machinery"
+    assert at("evidence_kind") == "table"
+    assert at("page_ref") == 42
+    assert at("zone_type") == "machinery_stat"
+    assert at("is_safety_critical") == 1
+    assert at("norm_group") == "machinery"
+    # ✅ R80：value_kind 未显式设置 → 归一为 ''（读侧按 fact 处理）
+    assert at("value_kind") == ""
+    assert cols.index("value_kind") < cols.index("is_stale")
     # is_stale：提取管线产出的事实恒为「未过期」（过期只由资料重传/删除触发）
-    assert GLOBAL_FACTS_INSERT_COLS[23] == "is_stale"
-    assert row[23] == 0
+    assert at("is_stale") == 0
     # 尾部 4 列：未显式标注的 FactItem 取默认值（章节/属性/来源为空、非共享）
-    assert row[24] == ""
-    assert row[25] == ""
-    assert row[26] == ""
-    assert row[27] == 0
+    assert row[-4:] == ("", "", "", 0)
+    assert cols[-4:] == ("chapter", "fact_attr", "source_kind", "is_shared")
 
 
 @pytest.mark.asyncio

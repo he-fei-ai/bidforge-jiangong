@@ -37,7 +37,7 @@ from app.services.chart_validators import (
     detect_mermaid_chart_type,
     infer_chart_type_from_payload,
 )
-from app.services.numbering import strip_outline_numbering
+from app.services.numbering import strip_outline_numbering_all
 # ✅ R76（2026-10-13）：围栏闭合判据唯一事实源。本模块的 parse_fence_line
 #    保留历史签名与 lang 语义（图表三侧的上百处引用 + 既有测试的导入名不动），
 #    但「这一行是不是闭合行」的判定一律下沉 fence_common —— 旧实现只比对围栏
@@ -889,22 +889,11 @@ def _strip_title_number(title: str) -> str:
     而 export.py 又会用 heading_gen 重新生成标准编号 —— 必须先剥离再生成，
     否则会出现 "第一章 第一章 工程概况" / "1 1.1 项目基本信息" 等双重编号。
 
-    ✅ 2026-10-05（D4 · 编号剥离分叉收口）：旧实现自带 `_TITLE_NUM_STRIP_RES`
-    （5 条正则、循环剥离），与 `services/numbering.py` 的 `strip_outline_numbering`
-    分叉，实测差异（更差）：
-        "1.2.3钢筋工程" → 旧 "3钢筋工程"（点分未吃满整条路径） / 规范 "钢筋工程"
-        "1.1"           → 旧 "1"（纯编号标题被误剥半截）      / 规范 "1.1"
-    现改为委托 numbering 的唯一实现 + **有界循环**（兼容 "第1章 1.1 工程概况"
-    这类多重前缀；numbering 内部已保证年份/纯编号/正常标题不被误剥），
-    并删除本地 `_TITLE_NUM_STRIP_RES`。
+    ✅ 2026-10-16（编号剥离收敛）：改为委托 numbering.strip_outline_numbering_all
+    （唯一有界循环实现），删除本地循环——此前本函数与 numbering.py 各自维护一份
+    循环逻辑，属同族「同一判据多份副本」反模式。行为逐字不变。
     """
-    s = str(title or "").strip()
-    for _ in range(8):  # 多重前缀最多 8 轮即可收敛；有界避免异常输入死循环
-        new = strip_outline_numbering(s).strip()
-        if new == s:
-            break
-        s = new
-    return s
+    return strip_outline_numbering_all(str(title or ""))
 
 
 def _cn_pure_to_int(cn: str) -> int | None:

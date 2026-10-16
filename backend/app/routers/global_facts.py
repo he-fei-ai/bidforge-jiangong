@@ -1518,11 +1518,6 @@ async def _apply_item_updates(db, updates: list[dict],
             cat_changed = new_cat != (row["category"] or "").strip()
             sets.append("category=?")
             vals.append(new_cat)
-        # R81: value_kind is manually editable (normalized via the
-        # single whitelist; explicit "" clears the marker).
-        if u.get("value_kind") is not None:
-            sets.append("value_kind=?")
-            vals.append(normalize_value_kind(u.get("value_kind")))
         # ✅ R81（2026-10-15）：要求 vs 事实口径（value_kind）手工可改。
         #    归一走 normalize_value_kind 单一白名单（与 _manual_fact_row /
         #    list_facts 同源）；用 ``is not None`` 而非真值判定 —— 显式传
@@ -1530,6 +1525,9 @@ async def _apply_item_updates(db, updates: list[dict],
         #    不传该键的既有调用方（含未升级的前端）行为逐字不变。
         #    口径变更不触发维度重派生（value_kind 与 chapter/fact_attr
         #    派生输入正交），也不清 stale（改口径不等于重新核对过值）。
+        if u.get("value_kind") is not None:
+            sets.append("value_kind=?")
+            vals.append(normalize_value_kind(u.get("value_kind")))
         # ✅ BUG 修复（2026-09-29 · 改分类后九大章节归属过期）+
         #    ✅ BUG 修复（2026-10-01 · 改名后九大章节归属过期）：
         #    chapter / fact_attr 的派生输入是

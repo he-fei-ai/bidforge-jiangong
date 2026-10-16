@@ -444,6 +444,17 @@ class TestSegmentStrategy:
     def test_concurrency_helpers_are_config_driven(self):
         """并发/重试/预算必须来自配置，且下限保护（不得为 0 导致死锁或空转）。"""
         from app.config import settings
+        # ✅ 2026-10-16（测试卫生）：finally 原先写死
+        # `settings.bid_analysis_segment_budget = 30000` —— 那不是恢复而是**遗留
+        # 污染**（本用例从头到尾没改过预算，断言 457 需要的是默认 400000）。
+        # 全局 settings 单例被改成 30000 后，任何随后按「活配置值」断言
+        # `_MAX_DOC_CHARS`（导入期常量，仍是 400000）的用例恒假
+        # （test_import_parse_r79_closeout_20261015::TestMaxDocCharsConfig
+        #   ::test_default_budget_unchanged 即因此在全量跑中失败、隔离跑通过）。
+        # 改为快照-恢复，与被改动的每项一一对应，绝不多写、绝不写死。
+        _orig = (settings.bid_analysis_item_concurrency,
+                 settings.bid_analysis_segment_concurrency,
+                 settings.bid_analysis_item_retries)
         try:
             assert ba._item_concurrency() == 2
             assert ba._segment_concurrency() == 3
@@ -456,10 +467,9 @@ class TestSegmentStrategy:
             assert ba._item_retries() == 0, "重试下限必须为 0"
             assert ba._MAX_DOC_CHARS == settings.bid_analysis_segment_budget
         finally:
-            settings.bid_analysis_item_concurrency = 2
-            settings.bid_analysis_segment_concurrency = 3
-            settings.bid_analysis_item_retries = 2
-            settings.bid_analysis_segment_budget = 30000
+            (settings.bid_analysis_item_concurrency,
+             settings.bid_analysis_segment_concurrency,
+             settings.bid_analysis_item_retries) = _orig
 
 
 # =========================================================================
