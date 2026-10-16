@@ -674,3 +674,102 @@ class TestKeyRulesChapterAlignment:
 
 
 
+# ---------------------------------------------------------------------------
+# 未接线工具函数登记护栏（R81 收口审计 · 遗留项 1）
+# ---------------------------------------------------------------------------
+# 背景：R77b §11.3 曾声称 ``section_data_trace``「覆盖注入完整性」，但该轮
+# 实测未找到生产调用点。本组把这一遗留结论从「文档散文」升级为**可执行断言**：
+#
+#   * ``section_data_trace``  —— 定义在位，**零生产调用点**（仅模块 docstring 提及）
+#   * ``merge_injected_rows``  —— 仅被 ``section_data_trace`` 调用 → 传递性死代码
+#   * ``consistency_facts_rows`` —— **根本不存在**（旧 docstring 的 :func: 引用是
+#     悬空引用，本轮已订正为 ``consistency_fact_titles`` + ``must_keep_consistency_rows``）
+#
+# 为何锁「零调用点」而不是删函数：删除需连带改测试与契约（高 churn），接线则是
+# **行为变更**（会新增 report 键与提示词注入），两者都超出「不改行为」授权边界。
+# 锁「零调用点」的价值在于：日后有人接线时**必须显式改这条护栏**，从而让接线成为
+# 一次有意识的决策，而非无声漂移。
+#
+# 同时锁「docstring 的 :func: 引用必须都能解析」—— 悬空引用会让 Sphinx 报错，且
+# 会让读代码的人以为存在一个并不存在的对策函数（本轮已实测踩到）。
+class TestUnwiredToolingIsRegistered:
+    """未接线工具函数的可执行登记（而非文档散文）。"""
+
+    _MODULE = "app/services/content_data_contract.py"
+
+    def _module_src(self):
+        from app.services import content_data_contract as c
+        return open(c.__file__, encoding="utf-8").read()
+
+    def _module_level_names(self):
+        import ast
+        tree = ast.parse(self._module_src())
+        names = set()
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                names.add(node.name)
+        return names
+
+    def test_docstring_func_refs_all_resolve(self):
+        """docstring 里每个 :func:`X` 都必须在本模块有同名定义。
+
+        悬空引用（本轮实测的 ``consistency_facts_rows``）会让文档构建报错，
+        且会让读者以为存在一个并不存在的对策函数。
+        """
+        import ast
+        import re
+        src = self._module_src()
+        doc = ast.get_docstring(ast.parse(src)) or ""
+        refs = sorted(set(re.findall(r":func:`([A-Za-z_][A-Za-z0-9_]*)`", doc)))
+        assert refs, "模块 docstring 应含 :func: 引用（否则本护栏会空转）"
+        names = self._module_level_names()
+        dangling = [r for r in refs if r not in names]
+        assert not dangling, (
+            f"docstring 存在悬空 :func: 引用（无对应定义）：{dangling}")
+
+    def test_unwired_symbols_have_no_production_callers(self):
+        """登记的未接线符号：生产代码（app/ 其它文件）零调用点。
+
+        这不是「断言它们永远不被调用」，而是让**接线必须显式改本护栏**。
+        """
+        import pathlib
+        from app.services import content_data_contract as c
+        repo_app = pathlib.Path(c.__file__).resolve().parent.parent
+        targets = {"section_data_trace", "merge_injected_rows"}
+        offenders = []
+        for f in repo_app.rglob("*.py"):
+            if f.name == c.__file__.split("\\")[-1].split("/")[-1]:
+                continue
+            try:
+                text = f.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            for name in targets:
+                if name in text:
+                    offenders.append(f"{name} <- {f}")
+        assert not offenders, (
+            "下列符号已被生产代码引用 —— 若这是有意接线，请同步更新本护栏与"
+            f"R81 报告 §6 遗留 1：{offenders}")
+
+    def test_merge_injected_rows_only_called_by_section_data_trace(self):
+        """``merge_injected_rows`` 的唯一调用者是 ``section_data_trace``。
+
+        锁住「传递性死代码」的现状：若它被直接接线，本护栏必须显式更新。
+        """
+        import ast
+        tree = ast.parse(self._module_src())
+        callers = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id == "merge_injected_rows":
+                    # 找到它所在的顶层函数
+                    for outer in tree.body:
+                        if isinstance(outer, (ast.FunctionDef,
+                                               ast.AsyncFunctionDef)):
+                            for sub in ast.walk(outer):
+                                if sub is node:
+                                    callers.add(outer.name)
+                                    break
+        assert callers <= {"section_data_trace"}, (
+            f"merge_injected_rows 出现了预期外调用者：{sorted(callers)}")

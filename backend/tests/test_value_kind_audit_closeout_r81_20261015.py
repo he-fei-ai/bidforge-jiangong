@@ -30,6 +30,7 @@ requirement=招标·规范要求原文口径）接进了提取、落库、正文
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import uuid
@@ -362,3 +363,124 @@ class TestFrontendParity:
         assert 'name="value_kind"' in src, "编辑弹窗必须有 value_kind 表单项"
         assert "factValueKindLabel(it.value_kind)" in src, (
             "徽标文案必须走单一导出函数（与测试同源）")
+
+
+# ---------------------------------------------------------------------------
+# G 组 · 冲突裁决（resolve_conflict）必须保留既有口径 —— 不变量护栏
+# ---------------------------------------------------------------------------
+# 设计依据（R81 收口审计）：
+#   `resolve_conflict` 是全仓第 4 条「改事实值」写路径（R54 记账）。R80 引入
+#   value_kind 后需明确它的口径语义：**裁决换的是「值」，不是「这条事实是招标
+#   要求还是本方案既定值」**。人工在冲突候选里选定某个值，并不代表他重新认定
+#   了这条事实的来源口径 —— 口径属于 `_apply_item_updates` / `/adjust` 显式
+#   改，不属冲突裁决。
+#
+#   因此本组做**行为锁**（真实 DB 跑裁决），而非「源码含 value_kind」字面锁：
+#   §5.14 教训 ——「名字在场」是比「源码含字符串」更隐蔽的假护栏，把字段名写进
+#   注释就能骗过。真实走一遍 resolve_conflict 才能证明列真的没被写。
+
+class TestResolveConflictPreservesValueKind:
+    """冲突裁决不得改写口径列（真实 DB 行为锁 + 静态互补锁）。"""
+
+    @staticmethod
+    async def _mkrow(db, pid, sid, fid, kind, candidates_json):
+        await db.execute(
+            "INSERT INTO global_facts(id,project_id,scheme_id,group_id,"
+            "group_title,title,content,category,is_resolved,has_conflict,"
+            "conflict_keys,value_kind) VALUES(?,?,?,?,?,?,?,?,0,1,?,?)",
+            (fid, pid, sid, "g1", "工期", "建设工期",
+             "- **建设工期**: 按招标文件要求", "schedule",
+             candidates_json, kind))
+
+    @pytest.mark.asyncio
+    async def test_resolve_conflict_keeps_requirement_kind(self, tmp_path):
+        """裁决 requirement 行 → 口径仍为 requirement（不得被重置为 fact/''）。
+
+        依据：``resolve_conflict`` 的语义是「在既有冲突候选中选定一个值」，
+        口径（招标要求 vs 本方案既定值）属 ``_apply_item_updates`` / ``/adjust``
+        的显式更新职责。把 value_kind 写进裁决路径会让「裁决一个矛盾数值」意外
+        改变该事实的来源口径，属静默数据语义损坏。
+        """
+        import app.db as appdb
+        from app.models import ResolveConflictRequest
+        appdb.DB_PATH = tmp_path / "r81conflict.sqlite"
+        await appdb.init_db()
+        db = await appdb.get_conn()
+        pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
+        await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
+        await db.execute(
+            "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+        fid = uuid.uuid4().hex
+        cand = json.dumps([
+            {"value": "365天", "source": "招标文件", "confidence": 0.9},
+            {"value": "400天", "source": "设计说明", "confidence": 0.8},
+        ], ensure_ascii=False)
+        await self._mkrow(db, pid, sid, fid, "requirement", cand)
+        await db.commit()
+        try:
+            from app.routers.global_facts import resolve_conflict
+            res = await resolve_conflict(
+                fid, ResolveConflictRequest(value="400天"), "", db)
+            assert res.get("ok") is True, f"裁决应成功：{res}"
+            cur = await db.execute(
+                "SELECT value_kind, conflict_keys, is_resolved "
+                "FROM global_facts WHERE id=?", (fid,))
+            row = await cur.fetchone()
+            assert row["value_kind"] == "requirement", (
+                "冲突裁决只换值，不得改写既有口径（value_kind 必须保持 requirement）")
+            # 防本组退化为空转断言：同时锁住裁决本体的既有语义
+            assert (row["conflict_keys"] or "") == "", (
+                "裁决后冲突候选必须被清空")
+            assert row["is_resolved"] == 1, "采纳非模拟候选后应确认为已解决"
+        finally:
+            await appdb.close_db()
+
+    @pytest.mark.asyncio
+    async def test_resolve_conflict_keeps_unclassified_kind(self, tmp_path):
+        """历史 '' 行经裁决后仍为 ''（不得被升格为 fact）。"""
+        import app.db as appdb
+        from app.models import ResolveConflictRequest
+        appdb.DB_PATH = tmp_path / "r81conflict2.sqlite"
+        await appdb.init_db()
+        db = await appdb.get_conn()
+        pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
+        await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
+        await db.execute(
+            "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+        fid = uuid.uuid4().hex
+        cand = json.dumps([{"value": "365天", "source": "招标文件",
+                            "confidence": 0.9}], ensure_ascii=False)
+        await self._mkrow(db, pid, sid, fid, "", cand)
+        await db.commit()
+        try:
+            from app.routers.global_facts import resolve_conflict
+            await resolve_conflict(fid, ResolveConflictRequest(value="365天"), "", db)
+            cur = await db.execute(
+                "SELECT value_kind FROM global_facts WHERE id=?", (fid,))
+            assert (await cur.fetchone())["value_kind"] == "", (
+                "历史未区分行经裁决后不得被升格为 fact")
+        finally:
+            await appdb.close_db()
+
+    def test_resolve_conflict_update_has_no_value_kind_assignment(self):
+        """静态互补锁：裁决 UPDATE 的 SET 片段不含 ``value_kind=`` 赋值。
+
+        与上面两条行为锁互补 —— 行为锁证明「列没被改」，本条证明「SQL 根本没打算
+        改」。两条同时在位时，任何「顺手补一句 value_kind 复位」的改动都会被其中
+        之一抓住（避免单条判据成为假护栏）。
+        """
+        src = _src(os.path.join("routers", "global_facts.py"))
+        tree = ast.parse(src)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.AsyncFunctionDef)
+                  and n.name == "resolve_conflict")
+        sets_assign = next(
+            n for n in ast.walk(fn)
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "sets" for t in n.targets))
+        literals = [e.value for e in sets_assign.value.elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+        assert literals, "未取到裁决 UPDATE 的 SET 片段字面量"
+        offenders = [s for s in literals if "value_kind" in s]
+        assert not offenders, (
+            f"resolve_conflict 不得改写口径列（发现赋值片段：{offenders}）")
