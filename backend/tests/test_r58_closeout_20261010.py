@@ -21,10 +21,11 @@ from pathlib import Path
 import pytest
 from app.config import settings
 from app.routers import bid_analysis as ba
-from app.routers._chart_pipeline import build_chart_quota_hint
 from app.routers import sse_handlers as sh
+from app.routers._chart_pipeline import build_chart_quota_hint
 from app.services.content_runtime import build_chapter_layered_messages
 from app.services.facts_builder import core_facts_rows, exclude_rows
+
 
 # ===========================================================================
 # F3 · 提纲一次性失败 → 分步兜底

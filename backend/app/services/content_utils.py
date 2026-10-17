@@ -37,17 +37,23 @@ DEFAULT_WORD_BUDGET = 1200   # 未设置预算时的默认目标字数（= 标�
 WORD_UNDER_RATIO = 0.8       # 低于预算 80% → under（同时是"是否需要续写"的门槛）
 # ✅ 2026-10-06（R47 债-1）：WORD_OVER_RATIO 数值搬入
 #    ``services/ai/prompts/_limits.py`` 单一事实源，本模块仍以同名可读。
-from app.services.ai.prompts._limits import WORD_OVER_RATIO  # noqa: E402
 # ✅ R76（2026-10-13）：围栏闭合判据唯一事实源。本模块只保留历史签名与用途口径，
 #    「这一行是不是闭合行」的判定一律下沉到 fence_common（见其模块 docstring 的
 #    三套语义分叉取证）。
 from app.services import fence_common as _fence_common
+from app.services.ai.prompts._limits import WORD_OVER_RATIO  # noqa: E402
+from app.services.fence_common import (
+    FENCE_LINE_RE as _FENCE_LINE_RE,
+)
 from app.services.fence_common import (  # noqa: E402
     append_missing_closes,
-    find_unclosed as _fence_common_find_unclosed,
-    is_fence_close as _fence_common_is_close,
     normalize_fence_closes,
-    FENCE_LINE_RE as _FENCE_LINE_RE,
+)
+from app.services.fence_common import (
+    find_unclosed as _fence_common_find_unclosed,
+)
+from app.services.fence_common import (
+    is_fence_close as _fence_common_is_close,
 )
 
 # ---------- 四档字数控制（R66 · 2026-10-11） ----------

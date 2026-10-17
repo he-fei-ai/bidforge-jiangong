@@ -12,8 +12,8 @@ G. sections 表 DDL 含 plan_json（静态护栏，保证建表与迁移声明�
 import json
 from pathlib import Path
 
-import app.services.ai.prompts.content  # 触发 _reg 注册 content_plan_* 提示词
 import app.schema_sql as schema_sql_mod
+import app.services.ai.prompts.content  # 触发 _reg 注册 content_plan_* 提示词
 from app.config import settings
 from app.services.ai.prompts._registry import render
 from app.services.content_plan import (

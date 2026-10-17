@@ -26,7 +26,6 @@ import pathlib
 import re
 
 import pytest
-
 from app import models
 from app.config import settings
 from app.routers import sse_handlers as sse_module

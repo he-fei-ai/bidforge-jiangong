@@ -6,8 +6,8 @@
 - autouse fixture 在每个测试前重置模块级全局状态（缓存、订阅者）
 """
 import os
-import time
 import tempfile
+import time
 from pathlib import Path
 
 import aiosqlite

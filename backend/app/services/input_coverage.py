@@ -156,7 +156,7 @@ async def build_inventory(db, project_id: str, scheme_id: str,
     #   修法：ok_cnt 改走唯一出口；并补两条 filtered_* 台账（additive，
     #   旧调用方读 available/not_injectable 的行为不变）。
     try:
-        from app.services.facts_extractor import FACTS_GT_COLUMN, FACT_SCOPE_SHARED_FRAGMENT, get_facts_inject_where
+        from app.services.facts_extractor import FACT_SCOPE_SHARED_FRAGMENT, FACTS_GT_COLUMN, get_facts_inject_where
         # FACTS_GT_COLUMN 自带 `AS gt` 别名，不可重复拼接
         inject_where = get_facts_inject_where()
         # 门控是「A AND B AND C」形式，直接嵌入 CASE WHEN ... THEN 即可

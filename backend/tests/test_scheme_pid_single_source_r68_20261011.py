@@ -14,9 +14,8 @@ import re
 from pathlib import Path
 
 import pytest
-
-from app.services.ai import mermaid_common as mc
 from app.services import facts_extractor as fe
+from app.services.ai import mermaid_common as mc
 
 _AI_DIR = Path(inspect.getsourcefile(mc)).resolve().parent
 _APP_DIR = _AI_DIR.parent.parent

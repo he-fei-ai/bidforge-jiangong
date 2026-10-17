@@ -734,6 +734,7 @@ class TestUnwiredToolingIsRegistered:
         这不是「断言它们永远不被调用」，而是让**接线必须显式改本护栏**。
         """
         import pathlib
+
         from app.services import content_data_contract as c
         repo_app = pathlib.Path(c.__file__).resolve().parent.parent
         targets = {"section_data_trace", "merge_injected_rows"}

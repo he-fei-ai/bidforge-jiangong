@@ -36,6 +36,7 @@ from typing import Optional
 #    `_registry` / `_cache` 都不反向依赖本模块，环在此被打断。
 from app.services.ai.prompts._cache import get_prompt
 from app.services.ai.prompts._registry import _reg
+
 # ✅ R76b · G1：围栏保护区间委托全仓唯一事实源。`fence_common` 是仅依赖 `re` 的
 #    叶子模块（不反向引用本模块、也不经 `ai.prompts` 包顶层），因此这里可以安全地
 #    顶层 import —— 与上面「必须从叶子模块直取」的约束不冲突。

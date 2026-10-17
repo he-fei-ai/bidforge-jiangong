@@ -23,8 +23,7 @@ import hashlib
 import logging
 
 from app.services import review_db
-from app.services.facts_extractor import (FACT_SCOPE_PREDICATE,
-                                          resolve_scheme_project_id)
+from app.services.facts_extractor import FACT_SCOPE_PREDICATE, resolve_scheme_project_id
 
 logger = logging.getLogger("scheme_fingerprint")
 

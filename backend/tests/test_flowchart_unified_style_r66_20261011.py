@@ -22,16 +22,15 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
-from PIL import Image
-
 from app.services.ai import mermaid_renderer as mr
 from app.services.ai.mermaid_flowchart import (
     _render_flowchart_image_v2,
     _render_flowchart_with_edges,
     flowchart_json_to_mermaid,
 )
-from app.services.chart_validators import normalize_flowchart_data
 from app.services.ai.prompts._registry import get_default_prompt
+from app.services.chart_validators import normalize_flowchart_data
+from PIL import Image
 
 _AI_DIR = Path(mr.__file__).parent
 

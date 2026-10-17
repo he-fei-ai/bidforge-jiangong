@@ -16,7 +16,6 @@ import pathlib
 import re
 
 import pytest
-
 from app.services import bid_analysis_service as bas
 from app.services import fence_common as fc
 from app.services.repair_validator import structure_signature, validate_repair

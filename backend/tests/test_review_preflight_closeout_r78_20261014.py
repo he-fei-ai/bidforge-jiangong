@@ -31,11 +31,10 @@ import re
 import uuid
 
 import pytest
-from fastapi import HTTPException
-
 from app.routers import compliance as cc
 from app.routers import consistency_repair as cr
 from app.services import facts_builder, repair_record
+from fastapi import HTTPException
 
 # pytest.ini asyncio_mode = auto —— 不设全局 asyncio mark（同步静态护栏用例会被误标）
 

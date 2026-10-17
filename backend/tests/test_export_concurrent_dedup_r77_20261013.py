@@ -6,13 +6,11 @@ import os
 import uuid
 from pathlib import Path
 
-import pytest
-
 import app.config as cfg
 import app.db as _appdb
 import app.routers.export as export_mod
+import pytest
 from app.db import close_db, get_conn, init_db
-
 
 
 @pytest.fixture

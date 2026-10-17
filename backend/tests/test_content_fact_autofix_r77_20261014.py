@@ -22,7 +22,6 @@ import os
 from pathlib import Path
 
 import pytest
-
 from app.config import settings
 from app.services.ai.provider_factory import KNOWN_SCENES
 from app.services.content_fact_autofix import (

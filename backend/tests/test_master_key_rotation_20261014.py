@@ -19,9 +19,8 @@ import inspect
 from pathlib import Path
 
 import pytest
-from cryptography.fernet import Fernet
-
 from app.services import crypto
+from cryptography.fernet import Fernet
 
 
 @pytest.fixture(autouse=True)

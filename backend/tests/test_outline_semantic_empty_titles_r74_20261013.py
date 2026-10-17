@@ -16,14 +16,12 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from app.services.outline_quality import (
     check_outline_continuity,
     check_structure_standards,
     detect_generic_titles,
     is_generic_title,
 )
-
 
 # ---------------------------------------------------------------------------
 # 测试用标题样本

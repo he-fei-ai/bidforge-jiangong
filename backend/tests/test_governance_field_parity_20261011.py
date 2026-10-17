@@ -102,6 +102,7 @@ class TestGovernanceFieldParity:
     def test_get_and_put_return_same_fields(self):
         """GET 与 PUT 返回体字段集合 = 期望集合（API 契约对称）。"""
         import inspect
+
         from app.routers import system as sys_mod
         # governance_get 返回 dict，字段在源码里硬编码
         get_src = inspect.getsource(sys_mod.governance_get)

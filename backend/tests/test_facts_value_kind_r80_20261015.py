@@ -20,13 +20,12 @@ import uuid
 
 import pytest
 import pytest_asyncio
-
 from app.services.facts_extractor import (
     GLOBAL_FACTS_INSERT_COLS,
-    FactItem,
-    normalize_value_kind,
-    _parse_fact_dict,
     VALUE_KIND_ALLOWED,
+    FactItem,
+    _parse_fact_dict,
+    normalize_value_kind,
 )
 
 _FE_PATH = os.path.abspath(

@@ -459,8 +459,8 @@ class TestOutlineDepthSemantics:
 
     def test_alert_line_is_not_below_hard_cap(self):
         """规范告警线必须 ≥ 落库硬上限，否则合法目录会被判违规（误报）。"""
-        from app.services.outline_utils import MAX_OUTLINE_DEPTH
         from app.services.outline_quality import OUTLINE_MAX_DEPTH
+        from app.services.outline_utils import MAX_OUTLINE_DEPTH
         assert OUTLINE_MAX_DEPTH >= MAX_OUTLINE_DEPTH, (
             f"告警线 {OUTLINE_MAX_DEPTH} 低于硬上限 {MAX_OUTLINE_DEPTH}："
             "落库允许的深度会被规范检查判为越界")
@@ -580,8 +580,7 @@ class TestSingleSourceCrossModule:
             f"以下位置把 scheme_id 当 project_id 传给作用域谓词：{offenders}")
 
     def test_all_modules_share_predicate_values(self):
-        from app.services.facts_extractor import (FACT_SCOPE_PREDICATE,
-                                                  FACT_SCOPE_SHARED_FRAGMENT)
         from app.routers.global_facts import _FACT_SCOPE_PREDICATE
+        from app.services.facts_extractor import FACT_SCOPE_PREDICATE, FACT_SCOPE_SHARED_FRAGMENT
         assert _FACT_SCOPE_PREDICATE == FACT_SCOPE_PREDICATE
         assert FACT_SCOPE_SHARED_FRAGMENT in FACT_SCOPE_PREDICATE

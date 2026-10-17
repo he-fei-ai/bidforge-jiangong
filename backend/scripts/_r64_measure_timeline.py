@@ -14,9 +14,9 @@ sys.path.insert(0, _B)
 for _k in ("ARCH_AUTO_SPLIT", "ARCH_LEAF_AUTO_VERTICAL", "TIMELINE_AUTO_WRAP"):
     os.environ.pop(_k, None)
 
-from PIL import Image  # noqa: E402
 from app.services.ai import mermaid_common as mc  # noqa: E402
 from app.services.ai import mermaid_timeline as mt  # noqa: E402
+from PIL import Image  # noqa: E402
 
 # 各档字号（设计 px × scale=2.5 = 设备 px）
 FONTS = {"标题20": 50, "名称15": 37, "日期12": 30, "描述11": 27}

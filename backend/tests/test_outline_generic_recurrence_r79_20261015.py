@@ -31,7 +31,6 @@ import os
 
 import pytest
 import pytest_asyncio
-
 from app.routers import sse_handlers as sh
 from app.services import checkpoint_schema as cs
 from app.services.outline_quality import (
@@ -212,8 +211,8 @@ class TestSaveOutlineGenericDetection:
 
     async def test_switch_off_disables_detection(self, ctx, monkeypatch):
         """`outline_check_generic_titles=False` ⇒ 逐字回到引入前（不检测）。"""
-        from app.routers.sections import _save_outline_to_db
         from app.config import settings
+        from app.routers.sections import _save_outline_to_db
         db, _pid, sid = ctx
         orig = settings.outline_check_generic_titles
         monkeypatch.setattr(settings, "outline_check_generic_titles", False,

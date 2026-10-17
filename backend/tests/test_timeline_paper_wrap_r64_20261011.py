@@ -23,8 +23,6 @@ import re
 from pathlib import Path
 
 import pytest
-from PIL import Image, ImageDraw
-
 from app.services.ai import mermaid_common as mc
 from app.services.ai import mermaid_comparison as mcmp
 from app.services.ai import mermaid_gantt as mg
@@ -32,6 +30,7 @@ from app.services.ai import mermaid_labor as mlb
 from app.services.ai import mermaid_layout as mly
 from app.services.ai import mermaid_renderer as mr
 from app.services.ai import mermaid_timeline as mt
+from PIL import Image, ImageDraw
 
 _AI_DIR = Path(inspect.getsourcefile(mc)).resolve().parent
 _ENV_NAMES = ("TIMELINE_AUTO_WRAP", "TIMELINE_MAX_ROWS_PER_FIGURE",

@@ -30,7 +30,6 @@ import inspect
 import re
 
 import pytest
-
 from app.routers import global_facts as gf
 from app.routers import global_facts_docs as gfd
 

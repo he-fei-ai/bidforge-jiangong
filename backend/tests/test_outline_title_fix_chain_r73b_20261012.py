@@ -42,7 +42,6 @@ import os
 import re
 
 import pytest
-
 from app.routers import sse_handlers as sh
 from app.services.outline_quality import (
     check_outline_continuity,

@@ -28,9 +28,9 @@ import hashlib
 import re
 
 from app.services.facts_extractor import (
+    _NAME_KEY_INDEX,
     FactItem,
     _fact_key_seed,
-    _NAME_KEY_INDEX,
     extract_value_from_markdown_line,
     merge_and_deduplicate,
     normalize_key,

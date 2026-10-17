@@ -291,12 +291,14 @@ class TestLayoutPreset:
 
     def test_default_docx_bytes_ignore_preset_code_path(self, tmp_path):
         """未配置预设时构建参数与改造前同值：行距 1.15、边距走 2.5 缺省。"""
-        from docx import Document
-        from docx.shared import Cm
         from app.routers.export import (
-            _build_docx_sync, _load_heading_styles, _parse_content_blocks,
+            _build_docx_sync,
+            _load_heading_styles,
+            _parse_content_blocks,
             _resolve_layout_preset,
         )
+        from docx import Document
+        from docx.shared import Cm
         content = "本章为施工工艺技术内容，参数按专项计算书核定。"
         sections = [{"id": "c1", "parent_id": "", "sort_order": 0, "level": 1,
                      "title": "第一章 施工工艺技术", "content": content}]

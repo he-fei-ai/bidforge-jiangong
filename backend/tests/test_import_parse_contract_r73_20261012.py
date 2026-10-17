@@ -25,7 +25,6 @@ import zipfile
 from pathlib import Path
 
 import pytest
-
 from app.config import Settings
 from app.routers import global_facts as gf
 from app.routers import global_facts_docs as gfd

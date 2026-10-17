@@ -20,10 +20,9 @@ import py_compile
 from pathlib import Path
 from unittest import mock
 
+import app.services.ai.mermaid_labor as ml
 import pytest
 from PIL import Image
-
-import app.services.ai.mermaid_labor as ml
 
 _HERE = Path(__file__).resolve().parent
 _TARGET = _HERE.parent / "app" / "services" / "ai" / "mermaid_labor.py"

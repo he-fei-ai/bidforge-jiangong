@@ -18,10 +18,10 @@ from fastapi.responses import StreamingResponse
 
 from app.config import APP_VERSION, settings
 from app.db import get_read_conn, release_read_conn
+from app.routers import global_facts as _gf  # 上传配额运行时权威（R73 续作 · G5 收敛）
 from app.services import activity_broadcaster as _ab
 from app.services.ai import task_registry as _tr
 from app.services.ai.provider_factory import get_ai_live_stats
-from app.routers import global_facts as _gf  # 上传配额运行时权威（R73 续作 · G5 收敛）
 
 logger = logging.getLogger("system")
 

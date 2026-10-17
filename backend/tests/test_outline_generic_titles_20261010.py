@@ -22,12 +22,10 @@ import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from app.services.outline_quality import (
     check_outline_continuity,
     detect_generic_titles,
 )
-
 
 # 复现生产实证的三级标题占位现象
 GENERIC_OUTLINE = [

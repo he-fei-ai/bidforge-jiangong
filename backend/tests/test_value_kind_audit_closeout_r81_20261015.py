@@ -152,7 +152,7 @@ class TestComplianceFactsPromptText:
     def test_prefix_sits_before_safety_mark(self):
         """顺序契约：口径前缀在单位之后、安全关键标记之前（标记仍是
         最后一个可抢救后缀——_keep_suffixes 只对它生效）。"""
-        from app.routers.compliance import _facts_prompt_text, SAFETY_MARK
+        from app.routers.compliance import SAFETY_MARK, _facts_prompt_text
         rows = [{"name": "双重标记", "value": "1",
                  "is_safety_critical": True, "value_kind": "requirement"}]
         line = next(ln for ln in _facts_prompt_text(rows).splitlines()

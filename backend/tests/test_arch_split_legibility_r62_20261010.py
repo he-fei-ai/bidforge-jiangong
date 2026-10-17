@@ -21,11 +21,10 @@ import re
 from pathlib import Path
 
 import pytest
-from PIL import Image
-
 from app.routers.export import _fit_image_cm
 from app.services.ai import mermaid_architecture as ma
 from app.services.ai import mermaid_common as mc
+from PIL import Image
 
 SCALE = ma.ARCH_RENDER_SCALE
 DPI = ma.ARCH_OUTPUT_DPI

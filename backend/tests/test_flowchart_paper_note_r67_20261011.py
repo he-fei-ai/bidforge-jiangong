@@ -26,10 +26,9 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
-from PIL import Image
-
 from app.services.ai import mermaid_common as mc
 from app.services.ai import mermaid_flowchart as mfc
+from PIL import Image
 
 _AI_DIR = Path(inspect.getsourcefile(mc)).resolve().parent
 

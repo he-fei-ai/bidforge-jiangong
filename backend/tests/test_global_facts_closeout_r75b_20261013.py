@@ -268,6 +268,7 @@ class TestMultiLineRowDisplaysFullContent:
     def test_authority_fn_has_explicit_multiline_branch(self):
         """静态锁：权威本体必须显式存在多行分支（防实现回流为单行截断）。"""
         import inspect
+
         from app.services import facts_extractor as _fe
         src = inspect.getsource(_fe.fact_name_value)
         assert 'if "\\n" in stripped' in src, (

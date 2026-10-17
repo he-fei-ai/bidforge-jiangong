@@ -49,13 +49,12 @@ import pathlib
 import re
 
 import pytest
-
+from app.routers import export as ex
+from app.routers import sse_handlers as sh
 from app.services import audit_rules as ar
 from app.services import duplicate_detection as dd
 from app.services import preflight_engine as pf
 from app.services.audit_rules import SEVERITY_ORDER, validate_rule_registry
-from app.routers import export as ex
-from app.routers import sse_handlers as sh
 
 _BACKEND = pathlib.Path(__file__).resolve().parent.parent
 _ENGINE_PY = _BACKEND / "app" / "services" / "preflight_engine.py"
@@ -372,6 +371,7 @@ class TestContentEmptyLeavesTerminalStatus:
         """
         import json as _json
         import shutil
+
         import app.db as _appdb
         from app.services.ai import task_registry as tr
 

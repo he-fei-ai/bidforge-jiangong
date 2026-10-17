@@ -20,9 +20,11 @@ from .mermaid_common import (
     _render_hq,
     _vertical_text_capacity,
     delivered_worst_mm,
-    paper_font_mm as _common_paper_font_mm,
     paper_height_binds,
     stitch_geometry,
+)
+from .mermaid_common import (
+    paper_font_mm as _common_paper_font_mm,
 )
 
 logger = logging.getLogger(__name__)

@@ -31,10 +31,8 @@ import copy
 import json
 
 import pytest
-
 from app.routers import sse_handlers as sh
 from app.services.outline_quality import collect_titles, detect_generic_titles
-
 
 # ---------------------------------------------------------------------------
 # 夹具
@@ -288,8 +286,8 @@ class TestApplyTitleUpdates:
 class TestPromptContract:
     def test_registered_with_contract(self):
         from app.services.ai.prompts._registry import (
-            PROMPT_VARIABLE_CONTRACTS,
             _ALL_PROMPTS,
+            PROMPT_VARIABLE_CONTRACTS,
         )
         assert "outline_title_fix_system" in _ALL_PROMPTS
         assert "outline_title_fix_system" in PROMPT_VARIABLE_CONTRACTS

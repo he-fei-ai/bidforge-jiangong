@@ -7,19 +7,14 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 
 from app.db import get_db, safe_rowcount
+from app.services import facts_extractor as _fe
 from app.services.ai.json_response import (
     OUTLINE_REPAIR_KEY,
     collect_json_response,
 )
 from app.services.ai.prompts._registry import render
 from app.services.bid_section_detector import detect_bid_sections
-from app.services import facts_extractor as _fe
 from app.services.content_utils import DEFAULT_WORD_BUDGET
-from app.services.outline_quality import (
-    # ✅ R86 L5：写路径占位回传的**单一出口**（与 sections 的 create/update/
-    #    save-outline 共用同一判据、同一形态、同一日志口径）。
-    attach_generic_residual,
-)
 from app.services.file_parser import (
     MAX_UPLOAD_BYTES,
     SUPPORTED_EXTENSIONS,
@@ -28,6 +23,11 @@ from app.services.file_parser import (
     parse_file_content_ex,
     signature_valid,
     simple_parse_outline,
+)
+from app.services.outline_quality import (
+    # ✅ R86 L5：写路径占位回传的**单一出口**（与 sections 的 create/update/
+    #    save-outline 共用同一判据、同一形态、同一日志口径）。
+    attach_generic_residual,
 )
 
 logger = logging.getLogger("upload_outline")

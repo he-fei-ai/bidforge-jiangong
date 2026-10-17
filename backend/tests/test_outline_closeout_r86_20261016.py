@@ -22,24 +22,26 @@ import ast
 import json
 import re
 import uuid
+from pathlib import Path
 
 import pytest
-
 from app.models import SectionCreate
 from app.routers import schemes as _schemes
 from app.routers.sections import _build_tree, create_section
 from app.services.ai.heading_templates import (
-    format_heading_by_id, outline_number_parts,
+    format_heading_by_id,
+    outline_number_parts,
 )
 from app.services.numbering import (
-    renumber_section_outline_ids, stored_id_parts,
-    stored_id_to_display, stored_id_to_prefix,
+    renumber_section_outline_ids,
+    stored_id_parts,
+    stored_id_to_display,
+    stored_id_to_prefix,
 )
 from app.services.outline_quality import (
-    attach_generic_residual, detect_generic_titles_for_write,
+    attach_generic_residual,
+    detect_generic_titles_for_write,
 )
-
-from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 

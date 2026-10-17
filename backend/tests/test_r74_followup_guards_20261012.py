@@ -144,8 +144,9 @@ class TestDbPathRestoreBehaviorR74:
     """
 
     def test_c3a_dirty_db_path(self):
-        import app.db as _appdb
         from pathlib import Path as _P
+
+        import app.db as _appdb
         _DB_BASELINE["path"] = str(_appdb.DB_PATH)
         _appdb.DB_PATH = _P("__r74_pollution_marker__.sqlite")
         assert "pollution" in str(_appdb.DB_PATH)

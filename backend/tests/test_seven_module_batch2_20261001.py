@@ -74,9 +74,9 @@ def test_a1_budget_ge_parsed_chars_cap():
     R70 已把两份收敛为单一事实源（``global_facts`` 改为 import 别名），
     故此处改为钉住「上限值真的生效且只有一份定义」。
     """
+    from app.config import Settings
     from app.routers import global_facts as gf_mod
     from app.routers import global_facts_docs as gfd_mod
-    from app.config import Settings
 
     cap = gf_mod.MAX_PARSED_CHARS
     assert cap >= 400_000, f"入库上限回退：{cap}"

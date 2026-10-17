@@ -16,10 +16,10 @@ from .mermaid_common import (
     _draw_text_center,
     _image_font,
     _image_to_stream,
-    paper_floor_note,
     _render_hq,
     _text_height,
     _wrap_text,
+    paper_floor_note,
 )
 
 logger = logging.getLogger(__name__)

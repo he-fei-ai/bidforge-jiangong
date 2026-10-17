@@ -27,17 +27,23 @@ import uuid
 from pathlib import Path
 
 import pytest
-
 from app.models import SectionCreate, SectionUpdate
 from app.routers import schemes as _schemes
 from app.routers.sections import (
-    _save_outline_to_db, _build_tree, create_section, update_section,
+    _build_tree,
+    _save_outline_to_db,
+    create_section,
+    update_section,
 )
 from app.services.numbering import (
-    renumber_section_outline_ids, strip_outline_numbering_tree,
+    renumber_section_outline_ids,
+    strip_outline_numbering_tree,
 )
 from app.services.outline_quality import (
-    GENERIC_BARE_STEMS, _norm, detect_generic_titles, has_trailing_counter_suffix,
+    GENERIC_BARE_STEMS,
+    _norm,
+    detect_generic_titles,
+    has_trailing_counter_suffix,
     is_generic_title,
 )
 
@@ -158,7 +164,10 @@ class TestBugBCounterSuffixDomain:
     def test_suffix_regex_value_domain(self):
         """正则值域锁定（防日后收窄回 1~3 位阿拉伯数字）。"""
         from app.services.outline_quality import (
-            _CN_ORDINAL_CHARS, _TRAILING_COUNTER_SUFFIX_RE as rx,
+            _CN_ORDINAL_CHARS,
+        )
+        from app.services.outline_quality import (
+            _TRAILING_COUNTER_SUFFIX_RE as rx,
         )
         pat = rx.pattern
         assert "\\d{1,4}" in pat or "{4}" in pat, pat

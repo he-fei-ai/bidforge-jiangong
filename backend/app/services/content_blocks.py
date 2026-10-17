@@ -37,7 +37,7 @@ from app.services.chart_validators import (
     detect_mermaid_chart_type,
     infer_chart_type_from_payload,
 )
-from app.services.numbering import strip_outline_numbering_all
+
 # ✅ R76（2026-10-13）：围栏闭合判据唯一事实源。本模块的 parse_fence_line
 #    保留历史签名与 lang 语义（图表三侧的上百处引用 + 既有测试的导入名不动），
 #    但「这一行是不是闭合行」的判定一律下沉 fence_common —— 旧实现只比对围栏
@@ -46,9 +46,14 @@ from app.services.numbering import strip_outline_numbering_all
 #    （CommonMark）判该行为正文保留 —— 预览与导出反向分叉（BUG-F2）。
 from app.services.fence_common import (  # noqa: E402
     is_fence_close as _fence_is_close,
+)
+from app.services.fence_common import (
     looks_like_prose as _looks_like_prose,
+)
+from app.services.fence_common import (
     parse_fence_line as _fence_parse_line,
 )
+from app.services.numbering import strip_outline_numbering_all
 
 logger = logging.getLogger("content_blocks")
 # 围栏工具沿用原 logger 名，日志来源保持不变（不改变运维检索习惯）

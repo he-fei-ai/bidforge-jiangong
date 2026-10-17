@@ -183,7 +183,8 @@ async def test_upload_limits_reflect_runtime_authority(monkeypatch):
     各读一份 → ``monkeypatch(gf, "MAX_UPLOAD_BYTES", N)`` 时**前端拿旧值、后端按新值**
     （漂移）。收敛后端点读 ``gf.MAX_UPLOAD_*``，与上传路径同一对象，不再漂移。
     """
-    from app.routers import global_facts as gf, system as sys_mod
+    from app.routers import global_facts as gf
+    from app.routers import system as sys_mod
 
     monkeypatch.setattr(gf, "MAX_UPLOAD_BYTES", 50 * 1024 * 1024)
     monkeypatch.setattr(gf, "MAX_UPLOAD_FILES_PER_REQUEST", 7)

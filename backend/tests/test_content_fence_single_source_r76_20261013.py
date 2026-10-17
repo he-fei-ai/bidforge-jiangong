@@ -19,7 +19,6 @@ import pathlib
 import re
 
 import pytest
-
 from app.config import settings
 from app.services import content_blocks as cb
 from app.services import content_utils as cu

@@ -19,8 +19,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.config import settings
-from app.services.content_plan import plan_section_content, render_content_plan_guidance
-from app.services import facts_extractor as _fe
 from app.db import get_conn, get_db, get_read_conn, release_read_conn, safe_rowcount, settle_global_conn
 from app.routers._chart_pipeline import (
     _load_scheme_type_counts,
@@ -31,6 +29,7 @@ from app.routers._chart_pipeline import (
     count_inline_charts,
 )
 from app.services import activity_broadcaster as _ab
+from app.services import facts_extractor as _fe
 from app.services.ai import task_registry as _tr
 
 # ✅ 正文子标题编号规则生成方（{subheading_rule} 占位符的唯一实现）；
@@ -79,6 +78,16 @@ from app.services.content_checkpoint import (
     rewrite_placeholder_marks,
 )
 from app.services.content_data_contract import cross_section_value_findings
+
+# ✅ R77（2026-10-14 · 引入易标「生成后事实冲突审计 + 定点替换」）：
+#    standard_report 检出的 error 级事实冲突经本模块接入自动修复闭环。
+from app.services.content_fact_autofix import (
+    accumulate_fact_autofix,
+    autofix_section_fact_conflicts,
+    empty_fact_autofix_summary,
+    select_fact_conflicts,
+)
+from app.services.content_plan import plan_section_content, render_content_plan_guidance
 from app.services.content_polish import quality_issues, sanitize_ai_content
 
 # ✅ 2026-09-28（T-1 收口）：章节运行时纯函数（user 上下文 / 续写 messages /
@@ -105,14 +114,6 @@ from app.services.content_standard import (
     paragraph_structure_report,
     resolve_effective_standard,
     standard_report,
-)
-# ✅ R77（2026-10-14 · 引入易标「生成后事实冲突审计 + 定点替换」）：
-#    standard_report 检出的 error 级事实冲突经本模块接入自动修复闭环。
-from app.services.content_fact_autofix import (
-    accumulate_fact_autofix,
-    autofix_section_fact_conflicts,
-    empty_fact_autofix_summary,
-    select_fact_conflicts,
 )
 from app.services.content_utils import (
     DEFAULT_WORD_BUDGET,
@@ -360,9 +361,17 @@ CONTENT_TEMPERATURE = settings.content_temperature
 #    要改全局应 patch ``app.services.content_progress.STAGE_MODEL``。
 from app.services.content_progress import (  # noqa: E402
     SECTION_PHASE_MAX as _SECTION_PHASE_MAX,
+)
+from app.services.content_progress import (
     STAGE_FILL_MAX as _STAGE_FILL_MAX,
+)
+from app.services.content_progress import (
     STAGE_LABELS as _STAGE_LABELS,
+)
+from app.services.content_progress import (
     STAGE_MODEL as _STAGE_MODEL,
+)
+from app.services.content_progress import (
     STATS_PUSH_INTERVAL as _STATS_PUSH_INTERVAL,
 )
 
@@ -3028,8 +3037,7 @@ def _apply_title_updates(outline: list, updates: list) -> tuple[list, int, list]
         # ✅ R79 C2：编号冲突后缀判据复用唯一事实源；判据不可用时退化为
         #    「不拒收」（与下方 is_generic_title 导入失败同一降级方向 ——
         #    语义拒绝全部让位给形态校验，绝不把外科式重写整体关掉）
-        from app.services.outline_quality import (
-            has_trailing_counter_suffix as _counter_suffix)
+        from app.services.outline_quality import has_trailing_counter_suffix as _counter_suffix
     except Exception:  # pragma: no cover - 判据不可用时不新增拒绝
         def _counter_suffix(_t: str) -> bool:  # type: ignore[no-redef]
             return False

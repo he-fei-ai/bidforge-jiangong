@@ -7,17 +7,16 @@ import logging
 import re
 from datetime import date
 
-from app.routers._chart_pipeline import INLINE_CHART_FENCE_LANGS
 # ⚠️ R86 L3 收敛后本文件不再需要 `json` / `parse_fence_line` / `content_blocks`
 #    的 5 个子标题工具 —— 它们此前**只**被那 14 个副本函数体使用。
 #    留着即死导入（ruff F401），删掉不改变任何行为（已由差分验证逐项比对）。
-
 # ✅ R86 L3（2026-10-16）：本文件此前**物理复制**了 export.py 的 14 个判据（编号折算 / 排序键 / 重复章节 / 编号错位 / 子标题命名空间冲突 / 陈旧交叉引用 /
 #   图表取码 / 未闭合围栏计数 / 审计日志格式化）。实测去掉 docstring 后 14 个函数体 AST **完全一致**，
 #   即纯副本 —— 属本仓最高频反模式「同一判据两份副本」：任一侧改动即漂移，且漂移无任何测试能发现。
 #   现统一委派到 export（唯一事实源），本文件不再持有副本；函数签名与 docstring 逐字保留，调用方零改动。
 #   ⚠️ 同名函数 `audit_content` **刻意不收敛**：本文件版本是能力超集（另加全文级体检），收敛会丢功能。
 from app.routers import export as _ex  # ✅ R86 L3：14 个与 export 逐字同源的判据统一委派
+from app.routers._chart_pipeline import INLINE_CHART_FENCE_LANGS
 
 logger = logging.getLogger("export.audit")
 

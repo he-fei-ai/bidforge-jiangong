@@ -11,18 +11,18 @@
 
 全部为行为断言：正样例零误报、坏样例必命中（含报告实证形态）。
 """
-from app.services.docx_math import (
-    clean_text,
-    scan_issues,
-    unescape_markdown_literals,
-)
-from app.services.outline_quality import _norm
 from app.routers.export import (
     _display_scheme_name,
     _project_name_from_facts,
     _sanitize_template_residue_title,
 )
 from app.routers.export_audit import audit_content
+from app.services.docx_math import (
+    clean_text,
+    scan_issues,
+    unescape_markdown_literals,
+)
+from app.services.outline_quality import _norm
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +244,7 @@ class TestResidueWiring:
         """方案名出口必须同时走残留清洗与项目名兜底（两个分支都在）。"""
         import ast
         from pathlib import Path
+
         from app.routers import export as exp
         tree = ast.parse(Path(exp.__file__).read_text(encoding="utf-8"))
         fn = next(n for n in tree.body
@@ -257,6 +258,7 @@ class TestResidueWiring:
         """五个外露表面全部消费清洗/兜底出口（AST 调用点判定）。"""
         import ast
         from pathlib import Path
+
         from app.routers import export as exp
         targets = {
             "_scheme_form_header": {"_sanitize_template_residue_title"},

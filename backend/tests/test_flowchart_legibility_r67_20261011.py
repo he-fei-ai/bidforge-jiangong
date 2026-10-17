@@ -31,8 +31,6 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
-from PIL import Image
-
 from app.services.ai import mermaid_renderer as mr
 from app.services.ai.mermaid_flowchart import (
     LANE_PITCH_DESIGN_PX,
@@ -43,6 +41,7 @@ from app.services.ai.mermaid_flowchart import (
     _render_flowchart_with_edges,
     _unescape_label_text,
 )
+from PIL import Image
 
 _AI_DIR = Path(mr.__file__).parent
 

@@ -212,7 +212,8 @@ async def test_upload_limits_endpoint_reads_runtime_authority(monkeypatch):
     """
     import inspect
 
-    from app.routers import global_facts as gf, system
+    from app.routers import global_facts as gf
+    from app.routers import system
 
     # AST 锁：端点源码引用 _gf.MAX_UPLOAD_*（不是 _positive_setting / settings.upload_*）
     src = inspect.getsource(system.upload_limits)

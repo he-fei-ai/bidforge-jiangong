@@ -25,9 +25,9 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from fastapi import HTTPException
 from app.db import get_conn, init_db
 from app.routers import bid_analysis as ba
+from fastapi import HTTPException
 
 _BA_PATH = os.path.join(os.path.dirname(ba.__file__), "bid_analysis.py")
 

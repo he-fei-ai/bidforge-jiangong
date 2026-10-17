@@ -16,13 +16,12 @@ import os
 import py_compile
 from pathlib import Path
 
-import pytest
-from PIL import Image
-
 import app.services.ai.mermaid_architecture as ma
 import app.services.ai.mermaid_comparison as mc
 import app.services.ai.mermaid_layout as ml
 import app.services.ai.mermaid_timeline as mt
+import pytest
+from PIL import Image
 
 SCALE = 2.5
 _AI_DIR = Path(ma.__file__).resolve().parent

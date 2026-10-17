@@ -33,6 +33,7 @@ from app.services.content_fuzzy import (
     scan_vague_statements,
 )
 from app.services.content_trace import build_trace as _build_trace
+
 # ✅ R76b · G3：围栏「这块到哪结束」的行口径由唯一事实源供给（`fence_common` 是仅
 #    依赖 `re` 的叶子模块，不构成环）。本模块的 `_FENCE_RE` 只保留**剥离**用途 ——
 #    它刻意维持「非贪婪配对、含行内 ``` 片段」的保守剔除语义（宁可多剔，也不让

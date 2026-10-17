@@ -60,16 +60,17 @@ from app.services.content_utils import (
     word_audit_summary,
     word_deviation_of,
 )
-# ✅ R76（2026-10-13）：DLV-07 改用围栏判据唯一事实源的分类出口（严格/容错两口径
-# 的分派不在本模块重做）。content_utils.find_unclosed_fences 在本模块已无其它用途，
-# 不再导入（避免"预检自己持有一份判据入口"的观感，也满足 ruff F401）。
-from app.services.fence_common import classify_fence_defects
 from app.services.duplicate_detection import find_cross_section_copies
 
 # ✅ 2026-10-03（全局事实桥接 · 判据同源）：SAF-08 事实反哺危大判定与
 #    /global-facts/danger-check 共用同一两步判定出口（extract_danger_params +
 #    classify_scheme），不在预检侧重抄阈值表。
 from app.services.facts_classification import danger_check as facts_danger_check
+
+# ✅ R76（2026-10-13）：DLV-07 改用围栏判据唯一事实源的分类出口（严格/容错两口径
+# 的分派不在本模块重做）。content_utils.find_unclosed_fences 在本模块已无其它用途，
+# 不再导入（避免"预检自己持有一份判据入口"的观感，也满足 ruff F401）。
+from app.services.fence_common import classify_fence_defects
 from app.services.scheme_classification import is_hazardous_by_keywords
 from app.services.standards_registry import (
     ABOLISHED_STANDARDS,

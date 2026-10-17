@@ -31,12 +31,13 @@ from app.config import settings
 from app.db import get_db, safe_rowcount, settle_global_conn
 from app.routers.schemes import require_project_id  # ✅ G3 根因加固（R45）
 from app.services import scheme_classification as sc
-from app.services.ai.provider_factory import chat_with_fallback
+
 # ✅ R58（2026-10-10）：统一 JSON 通道（见下方 _collect_json_str）。
 from app.services.ai.json_response import (
     GENERIC_REPAIR_KEY,
     collect_json_response_with_chat,
 )
+from app.services.ai.provider_factory import chat_with_fallback
 from app.services.ai.sse_utils import with_heartbeat
 from app.services.ai.task_registry import (
     finish_task,
