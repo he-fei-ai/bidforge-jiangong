@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 
 from app.services.duplicate_detection import find_similar_titles
 
@@ -57,14 +58,59 @@ def _has_dash_title(title: str) -> bool:
     return bool(_DASH_TITLE_RE.search(str(title or "")))
 
 
-#: ✅ 2026-10-10（文档质量报告 修复7）：标题尾部「（N）」计数后缀（整组剥除）。
+#: ✅ 2026-10-16（R87 FIX-4）：**零宽 / 不可见字符族**。
+#: 一个不可见字符即可让**全部**判据同时失效 —— 实测 `措\u200b施1`、`措施1\u200b`、
+#: `\ufeff措施1` 三种放置下，`is_generic_title` 与 `detect_generic_titles` 全部
+#: **逃逸**（连 R85 之前就有的 `GENERIC_TITLE_PATTERNS` 字面量枚举一并被打穿）。
+#: 来源真实：AI 输出偶发零宽字符、从 Word / 网页复制粘贴的标题也常带
+#: U+200B / U+FEFF / U+00AD（软连字符）。
+#: ⚠️ 这些字符对**用户完全不可见** —— 用户在目录树里看到的是「措施1」，
+#: 系统却判它不是占位名。
+_INVISIBLE_RE = re.compile(r"[\u200b-\u200f\u2060\ufeff\u00ad\u180e\u034f]+")
+
+
+def _canon(text: str) -> str:
+    """标题**判据用**的规范形（仅供比较，绝不用于展示/落库）。
+
+    两步，缺一不可：
+      1. **剥零宽族** —— 否则一个不可见字符就让全部判据失效（R87 FIX-4）；
+      2. **NFKC 归一** —— 把全角数字/字母/括号折成 ASCII
+         （「措施１」→「措施1」、「监测措施（2）」→「监测措施(2)」）。
+         顺带统一同形异码（CJK 兼容字），这是「同一判据两份取值」的另一条漂移路径。
+
+    ⚠️ 只在**比较语境**使用（`_norm` / `has_trailing_counter_suffix`），
+    其返回值全部用作 dict 键 / 正则入参 / 比较基准，**从不出现在任何用户
+    可见文本里** ⇒ 归一不会改写用户数据。
+    """
+    s = _INVISIBLE_RE.sub("", str(text or ""))
+    try:
+        return unicodedata.normalize("NFKC", s)
+    except (TypeError, ValueError):  # pragma: no cover - normalize 对 str 不会抛
+        return s
+
+
+#: ✅ 2026-10-16（R85 BUG-B）：标题尾部「（N）」计数后缀（整组剥除）。
 #: AI 编号歧义把重复章节记成「专项6（3）」（第 3 次出现）——去重必须归一为
 #: 「专项6」才能与本体碰撞；旧实现只剥括号留数字（「专项63」），与本永不
-#: 存在的标题互不碰撞，重复全部漏报。计数上限 3 位（正常章节号 ≤ 99）。
-_TRAILING_COUNTER_SUFFIX_RE = re.compile(r"[（(]\s*\d{1,3}\s*[)）]\s*$")
+#: 存在的标题互不碰撞，重复全部漏报。
+#:
+#: ⚠️ **R85 值域拓宽（修 BUG-B）**：旧值域只收 1~3 位阿拉伯数字，于是
+#: 「总体实施策划（三）」（中文数字）与「（1234）」两个形态**同时逃过检测侧
+#: 与回写红线**——AI 换一种写法即可绕过全部占位闸门，用户报的症状原样复发。
+#: 现补中文数字（一~十，规范方案里「第N章」用汉字，故 AI 消歧用汉字同样常见）
+#: 与 4 位数字；判定刻意**只认「整组位于标题末尾」**的形态，绝不匹配正文中
+#: 出现的括号数字（如「按第（3）条执行」不在标题末尾 ⇒ 不命中）。
+#: ✅ R89（2026-10-17）：值域由「一~十」扩到「一~千」——原值域使
+#: 「专项一百」「总体实施策划（一百）」这类百位/千位中文序号**同时逃过**
+#: 结构判据（`GENERIC_STEM_ORDINAL_RE`）与冲突后缀判据
+#: （`_TRAILING_COUNTER_SUFFIX_RE` 共用同一字符表）。两个判据声明的意图就是
+#: 「中文数字序号」，补全值域只是兑现声明，不改变任何已命中形态的结论。
+_CN_ORDINAL_CHARS = "一二三四五六七八九十零百千两"
+_TRAILING_COUNTER_SUFFIX_RE = re.compile(
+    rf"[（(]\s*(?:\d{{1,4}}|[{_CN_ORDINAL_CHARS}]{{1,3}})\s*[)）]\s*$")
 
 def _norm(text: str) -> str:
-    return _STRIP_RE.sub("", _TRAILING_COUNTER_SUFFIX_RE.sub("", str(text or "")))
+    return _STRIP_RE.sub("", _TRAILING_COUNTER_SUFFIX_RE.sub("", _canon(text)))
 
 
 def has_trailing_counter_suffix(title: str) -> bool:
@@ -80,8 +126,12 @@ def has_trailing_counter_suffix(title: str) -> bool:
     ⚠️ 与 `detect_generic_titles` 的 conflict_suffix 是**两个不同用途的判据**，
        勿合并：检测侧必须防误报（要看碰撞），回写侧必须防复现（只看形态）。
        导出的 re-export 文案不参与任何「ok」结论，仅用于回写拒因。
+
+    ✅ R87 FIX-4：入参先过 `_canon`（剥零宽族 + NFKC 归一）—— 否则
+    「监测措施（2）\\u200b」这类**用户完全看不见**的尾随零宽字符会让本判据
+    返回 False，占位名原样落库。
     """
-    return bool(_TRAILING_COUNTER_SUFFIX_RE.search(str(title or "")))
+    return bool(_TRAILING_COUNTER_SUFFIX_RE.search(_canon(title)))
 
 
 #: ✅ 2026-10-10（目录占位/泛化标题收口）：三级标题大量出现占位式泛化名称
@@ -127,17 +177,164 @@ GENERIC_TITLE_PATTERNS: tuple[re.Pattern, ...] = (
 )
 
 
+#: ✅ 2026-10-16（R85 BUG-A）：「泛化词干 + 纯序号」结构化占位判据。
+#:
+#: **问题（用户症状的直接复发路径）**：上方 ``GENERIC_TITLE_PATTERNS`` 是
+#: **字面量枚举**，`^专项\d+$` 只覆盖「专项 + 阿拉伯数字」这一种形态。AI 只要
+#: 换一种同义写法即可让占位名**完全逃过检测**，实测（`sse_handlers`
+#: 外科式标题重写端到端）把「专项6」改写成下列任一形态时，
+#: ``applied=1 / rejected=0`` 且复检 ``generic_residual=0``（闸门报「干净」）：
+#:     专项方案6 / 专项六 / 专项措施6 / 措施3 / 内容2
+#: ⇒ 占位闸门形同虚设，用户报的症状原样复发，而 6 份既有护栏全绿。
+#:
+#: **解法**：把枚举升级为**结构判据** —— 标题整体等于「泛化词干（可选）+ 序号」
+#: 时视为占位。两处刻意的保守约束：
+#:   ① **全串锚定**（``^…$``）：词干表是「纯占位词」闭集，故真实复合标题
+#:      （「专项施工方案」「监测措施」「施工要求」）结构上不可能命中
+#:      ——「专项」后面跟的是「施工方案」既非空也非序号，直接不匹配；
+#:   ② **裸词干**（无序号）只在**窄白名单**内成立（「专项/措施/内容/要点/
+#:      其它/其他」）：这些词单独成句即为空话；「方法/步骤/流程/要求/说明」
+#:      等可能构成正常章节名，**必须带序号**才判占位。
+GENERIC_STEM_ORDINAL_RE = re.compile(
+    r"^(?:专项方案|专项措施|专项|措施|内容|要点|方法|步骤|流程|工序|要求|说明"
+    r"|保障|安排|其它|其他)"
+    # ✅ R87 FIX-3：值域由 `[0-9]`（**ASCII 显式范围**）改为 `\d`，与同模块兄弟
+    #   判据 `_TRAILING_COUNTER_SUFFIX_RE` 的 `\d{1,4}` 对齐 —— Python 的 `\d`
+    #   匹配 Unicode Nd（含全角）。否则同一模块里出现「括号路径收全角、序号
+    #   路径不收」的值域分叉：`_norm("措施（１）")=="措施"`（被结构判据收）
+    #   而 `is_generic_title("措施１")==False`（逃逸）。
+    #   （主防线仍是 `_canon` 的 NFKC 归一，此处是让本谓词**自身**自洽、
+    #   独立调用时也不分叉。）
+    rf"(?:\d{{1,3}}|[{_CN_ORDINAL_CHARS}]{{1,3}})?$"
+)
+#: 裸词干白名单（无序号也判占位的**封闭**集合；刻意不含「要求/说明/方法」等）
+GENERIC_BARE_STEMS: frozenset[str] = frozenset(
+    {"专项", "措施", "内容", "要点", "其它", "其他"})
+
+# ============================================================================
+# ✅ R89（2026-10-17 · 用户投诉形态复发收口）
+# ----------------------------------------------------------------------------
+# 用户反馈：目录三级标题仍是「专项6」「总体实施策划（2）」「总体实施策划（3）」
+# 等占位泛化名称并带（N）编号冲突后缀。核查结论分两类，需分别修：
+#
+# ① **真漏检**（下方 R89 判据补齐）：
+#     - 「总体方案」「总体部署」等**裸占位词**——旧字面枚举只列了
+#       `^总体实施策划`（前缀），「总体方案」不匹配；
+#     - 「章节」「小节」等裸词——不在 `GENERIC_BARE_STEMS`（该集合刻意保守，
+#       R85 护栏 test_bare_stem_whitelist_is_narrow 锁定为 6 词精确相等，
+#       故本轮**不改它**，另立本表，两层语义不混）；
+#     - 「专项6：土方开挖」「专项6-降水」「专项6、土方」——旧结构判据
+#       `GENERIC_STEM_ORDINAL_RE` 要求**全串**等于「词干+可选序号」，
+#       序号后带任何描述性长尾即整条逃逸（R85 文档 §2 记录过同类逃逸，
+#       但当时只补了词干，没补长尾方向）。
+#
+# ② **检出但未阻断**（不在本表范围内，见 config.outline_autofix_generic_on_save）：
+#     「总体实施策划（2）」已被 `^总体实施策划` 命中为 generic，
+#     但写路径只加法式回传 `generic_residual` 不阻断（R79 起的设计纪律），
+#     用户忽略告警即原样落库。本轮在写路径补一道「落库前自动外科式重写」。
+#
+# ⚠️ 全部经 `outline_generic_extended_patterns`（默认 True）门控：置 False
+#    即逐字回到 R89 之前（新增判据整体不生效），既有判据一字未动。
+# ============================================================================
+
+#: 裸占位词（整串等于该词即视为占位；与 `GENERIC_BARE_STEMS` 分层——后者是
+#: 「结构判据里词干+可选序号」的裸词白名单，两者判据语义不同、不得合并）。
+#: 只收「单独成句即不含任何施工信息」的词，刻意不收「部署/方案/要求」等
+#: 可能构成正常章节名的通用词。
+GENERIC_BARE_WORDS_R89: frozenset[str] = frozenset(
+    {"章节", "小节", "总体方案", "总体部署", "专项部署",
+     "总体策划", "部署安排", "总体部署安排"})
+
+#: 「总体…」族泛化前缀（与既有 `^总体实施策划` 同族：只写「总体+泛化词」，
+#: 不含具体施工对象/工序）。
+GENERIC_TITLE_PATTERNS_R89: tuple[re.Pattern, ...] = tuple(
+    re.compile(rf"^{w}$") for w in sorted(GENERIC_BARE_WORDS_R89)) + (
+    re.compile(r"^总体实施策划"),          # 既有 R2，此处显式复述以便整族一起门控
+    re.compile(r"^总体方案"), re.compile(r"^总体部署"),
+    re.compile(r"^总体策划"), re.compile(r"^总体安排"),
+    re.compile(r"^总体布置"), re.compile(r"^总体技术"),
+    re.compile(r"^专项部署"), re.compile(r"^专项安排"),
+    re.compile(r"^专项内容"), re.compile(r"^部署安排"),
+)
+
+#: ✅ R89：「泛化词干 + 序号 + 描述性长尾」逃逸形态。
+#:
+#: 在 `_norm` 的输出上判定（`_STRIP_RE` 已剥空白与常见标点），故
+#: 「专项6：土方开挖」→「专项6土方开挖」、「专项6、土方」→「专项6土方」
+#: 都归一到「词干+序号+长尾」同一形态；破折号（—/–/-）不在 `_STRIP_RE` 内
+#: （F4 另有破折号长尾判据，不在此处改 `_STRIP_RE`），故长尾前允许至多 3 个
+#: 非 CJK/数字/字母的分隔字符。
+#:
+#: 三处刻意的保守约束（防误伤真实复合标题）：
+#:   ① **必须带序号**（\d{1,3} 或中文序号）——「专项6土方开挖」有数字前缀，
+#:      说明它是「第 6 个专项」的编号式命名，而非正常章节名；
+#:   ② **长尾必须是 ≥2 个汉字**——「方法100人」「措施2023年度」这类
+#:      长尾首字符是数字即不命中（正常数量/年份型标题）；
+#:   ③ **全串锚定**——与 `GENERIC_STEM_ORDINAL_RE` 同纪律，绝不子串模糊匹配，
+#:      故「专项6土方开挖措施及验收」命中，而「基坑专项6土方开挖方案」不命中。
+GENERIC_STEM_ORDINAL_TAIL_RE = re.compile(
+    r"^(?:专项方案|专项措施|专项|措施|内容|要点|方法|步骤|流程|工序|要求|说明"
+    r"|保障|安排|其它|其他)"
+    rf"(?:\d{{1,3}}|[{_CN_ORDINAL_CHARS}]{{1,3}})"
+    r"[^\u4e00-\u9fff0-9A-Za-z]{0,3}"
+    r"[\u4e00-\u9fff]{2,}$")
+
+#: R89 判据总闸默认值（实际读取 config.outline_generic_extended_patterns）
+_R89_GENERIC_DEFAULT = True
+
+
+def _r89_extended_on() -> bool:
+    """R89 扩展判据是否启用（配置不可用时按**开启**处理 —— 补齐漏检，不静默放过）。"""
+    try:
+        from app.config import settings
+        return bool(getattr(settings, "outline_generic_extended_patterns",
+                            _R89_GENERIC_DEFAULT))
+    except Exception:
+        return _R89_GENERIC_DEFAULT
+
+
+def _is_generic_r89(norm: str) -> bool:
+    """R89 扩展判据（内部纯函数，零 IO）。入参必须是 :func:`_norm` 的输出。"""
+    if not norm:
+        return False
+    if norm in GENERIC_BARE_WORDS_R89:
+        return True
+    if GENERIC_STEM_ORDINAL_TAIL_RE.match(norm):
+        return True
+    return any(pat.search(norm) for pat in GENERIC_TITLE_PATTERNS_R89)
+
+
+
+def _is_stem_ordinal_generic(norm: str) -> bool:
+    """「泛化词干（可选序号）」结构化占位判定（内部纯函数，零 IO）。
+
+    入参必须是 :func:`_norm` 的输出（已剥「（N）」后缀与空白标点）。
+    """
+    if not norm:
+        return False
+    if norm in GENERIC_BARE_STEMS:
+        return True
+    return bool(GENERIC_STEM_ORDINAL_RE.fullmatch(norm))
+
+
 def is_generic_title(title: str) -> bool:
     """单个标题是否命中「泛化/占位」模式（纯函数，零 IO）。
 
-    与 :func:`detect_generic_titles` 用**同一份** ``GENERIC_TITLE_PATTERNS`` 与
-    同一个 ``_norm``（先剥「（N）」计数后缀再匹配）—— 单一判据事实源，
+    与 :func:`detect_generic_titles` 用**同一份** ``GENERIC_TITLE_PATTERNS``、
+    同一个 ``_norm``（先剥「（N）」计数后缀再匹配）与同一个
+    ``_is_stem_ordinal_generic``（R85 结构判据）—— 单一判据事实源，
     严禁在调用方另抄一套正则。供「标题改写」一类需要**逐条校验新标题**
     的场景使用：改写结果若仍是泛化名，就地拒绝落回目录。
     """
     norm = _norm(str(title or "").strip())
     if not norm:
         return False
+    # ✅ R85 BUG-A：结构判据与字面量枚举**或**关系（任一命中即占位）。
+    #    放在同一出口 ⇒ 外科式重写回写红线与检出闸门同时收紧，不会分叉。
+    if _is_stem_ordinal_generic(norm):
+        return True
+    if _r89_extended_on() and _is_generic_r89(norm):
+        return True
     return any(pat.search(norm) for pat in GENERIC_TITLE_PATTERNS)
 
 
@@ -172,7 +369,12 @@ def detect_generic_titles(outline: list) -> list[dict]:
         kind = None
         if is_generic_title(title):
             kind = "generic"
-        if kind is None and _TRAILING_COUNTER_SUFFIX_RE.search(title):
+        # ✅ R87 FIX-6：改调 `has_trailing_counter_suffix` **单一出口**。
+        #    旧实现直接拿 `_TRAILING_COUNTER_SUFFIX_RE.search(title)` 判**原文**，
+        #    绕过了该函数内部的 `_canon`（剥零宽族 + NFKC）⇒
+        #    「钢内支撑安装（三）\u200b」检测侧 MISS、而回写红线收 ⇒ 两侧分叉。
+        #    本仓最高频反模式「同一判据两份副本」在此处的第四份副本。
+        if kind is None and has_trailing_counter_suffix(title):
             # 仅当去后缀基名与其它节点碰撞（编号冲突后缀）才报，
             # 排除「深基坑支护（2）」这类合法带部位限定标题
             if norm and norm_count.get(norm, 0) >= 2:
@@ -630,3 +832,58 @@ def render_structure_notice(report: dict) -> str:
         return ""
     return "目录结构规范建议：" + "；".join(
         str(w.get("message") or "") for w in report["warnings"][:6])
+
+
+# ============================================================================
+# R86（L5）· 写路径共用占位闸门 —— **单一出口**
+# ============================================================================
+
+def detect_generic_titles_for_write(outline: list, *, context: str = "") -> list[dict]:
+    """目录**写路径**共用的占位/泛化标题检测（加法式，单一出口，fail-soft）。
+
+    ✅ R86 L5（2026-10-16）：占位检测此前只有 ``sections._save_outline_to_db``
+    一处接线，``create_section`` / ``update_section`` /
+    ``upload_outline.save_as_outline`` 三条入口**零闸门** —— 而它们正是用户报
+    的「三级标题大量专项6 / 总体实施策划（2）」的另一批来源：手工新增/改名、
+    上传目录识别（该路径连 ``_save_outline_to_db`` 都不走）。
+
+    三条语义约束（刻意与 R79 C3 保持同口径）：
+      1. **只报不拒**：调用方把结果放进响应体供前端提示，**不拒收、不改写**
+         任何标题 —— 静默改写用户已输入的标题是本仓红线；
+      2. 受既有 ``settings.outline_check_generic_titles`` 总闸控制（置 False
+         即逐字回到本项引入前：不检测、不回传该键），**零新增配置项**；
+      3. 检测自身异常一律 fail-soft（返回 ``[]`` 并记 WARNING）——
+         **绝不阻断保存**（占位检测是提示性增强，不是数据完整性闸门）。
+    """
+    try:
+        from app.config import settings
+        if not getattr(settings, "outline_check_generic_titles", True):
+            return []
+    except Exception:  # noqa: BLE001 - 配置读不到即按默认开，不阻断写路径
+        pass
+    try:
+        return detect_generic_titles(outline)
+    except Exception:  # noqa: BLE001 - 检测失败不得阻断保存
+        logger.warning("目录占位标题检测失败（不影响保存）%s",  # 单占位符 + exc_info
+                       f"[{context}]" if context else "",
+                       exc_info=True)
+        return []
+
+
+def attach_generic_residual(result: dict, outline: list, *, scheme_id: str = "",
+                            context: str = "") -> dict:
+    """把占位残留**加法式**挂到写路径响应体（唯一回传形态）。
+
+    与 ``_save_outline_to_db`` 的回传形态逐字一致：仅当确有残留时才加
+    ``generic_residual`` 键（明细清单），并记一条 WARNING —— 前端据此提示
+    「请人工核对」，用户不被静默改写，也不会被静默丢失。
+    """
+    hits = detect_generic_titles_for_write(outline, context=context)
+    if hits:
+        result["generic_residual"] = hits
+        logger.warning(
+            "目录写入%s：检出 %d 个占位/泛化标题（已保存，建议人工核对）：%s",
+            f"（{context} scheme={scheme_id[:8]}）" if scheme_id else f"（{context}）",
+            len(hits),
+            "、".join(str(h.get("title") or "")[:20] for h in hits[:10]))
+    return result

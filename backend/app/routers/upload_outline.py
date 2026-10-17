@@ -15,6 +15,11 @@ from app.services.ai.prompts._registry import render
 from app.services.bid_section_detector import detect_bid_sections
 from app.services import facts_extractor as _fe
 from app.services.content_utils import DEFAULT_WORD_BUDGET
+from app.services.outline_quality import (
+    # ✅ R86 L5：写路径占位回传的**单一出口**（与 sections 的 create/update/
+    #    save-outline 共用同一判据、同一形态、同一日志口径）。
+    attach_generic_residual,
+)
 from app.services.file_parser import (
     MAX_UPLOAD_BYTES,
     SUPPORTED_EXTENSIONS,
@@ -718,6 +723,14 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     except Exception as _e:  # noqa: BLE001
         logger.warning("上传目录保存：导出缓存失效失败（不影响保存结果）: %s", _e)
     result = {"ok": True, "count": counter["n"], "outline": outline}
+    # ✅ R86 L5：上传目录落库过占位闸门（加法式回传，不阻断、不改写）。
+    #    这条路径此前**零闸门**：它既不走 `_save_outline_to_db`（自己
+    #    normalize + 裸 DELETE/INSERT），也从不调 `detect_generic_titles`
+    #    ⇒ 用户上传的文档里若本身就写着「专项6」「总体实施策划（2）」，
+    #    会**原样落库**且前端零感知。R85 已在提示词侧补了识别纪律
+    #    （`outline_recognition_system` 规则 6），程序侧闸门补上后形成双层。
+    result = attach_generic_residual(result, outline, scheme_id=scheme_id,
+                                     context="upload-outline")
     if preserved_count:
         result["preserved_content"] = preserved_count
         result["note"] = f"已通过标题匹配保留 {preserved_count} 个章节的已有正文内容"

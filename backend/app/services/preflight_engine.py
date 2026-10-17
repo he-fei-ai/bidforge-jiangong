@@ -205,13 +205,29 @@ def _resolve_rule(rule_id: str):
 
 
 def _finding(rule_id: str, detail: str, *, evidence=None, section_id: str = "",
-             section_title: str = "", suggestion: str = "") -> dict:
-    """构造一条发现（自动补全规则的维度 / 严重度 / 标题 / 行业依据）。"""
+             section_title: str = "", suggestion: str = "",
+             severity: str | None = None) -> dict:
+    """构造一条发现（自动补全规则的维度 / 严重度 / 标题 / 行业依据）。
+
+    ``severity`` 为**加法式**覆盖：缺省（``None``）一律取注册表值，与本函数
+    引入前**逐字一致**，六个既有调用点零改动；仅当某条发现需要脱离注册表
+    默认严重度时（如「检测触顶截断、结论可能不完整」这类**元信息**，按
+    ``medium`` 报会虚增扣分、必须降级为 ``low``）才显式传入。
+
+    ✅ BUG 修复（2026-10-17 · 正文/审核联合审计）：此前 ``check_duplication``
+    的截断分支调用 ``_finding(..., severity="low")``，而本函数**没有**该形参
+    → ``TypeError`` → 被 ``run_preflight`` 的逐 checker 兜底吞成
+    ``engine_error``（``dimension=""``）。后果三重：① 本次运行的 **CON-06
+    全部成段雷同结论被整体丢弃**（评审硬伤查不出来）；② consistency 维度
+    **分数虚高**（探针实测 84.0 → 100.0，检查器崩溃反而"更好"）；
+    ③ ``unknown_dimension_count`` 被污染成 1，前端误弹「有发现命中未登记的
+    评分维度，请核对规则库」。
+    """
     rule = _resolve_rule(rule_id)
     return {
         "rule_id": rule_id,
         "dimension": rule.dimension if rule else "",
-        "severity": rule.severity if rule else "medium",
+        "severity": severity or (rule.severity if rule else "medium"),
         "title": rule.title if rule else rule_id,
         "detail": detail,
         "evidence": list(evidence or [])[:20],
@@ -772,15 +788,26 @@ def check_duplication(ctx: PreflightContext) -> list:
     if res.get("truncated"):
         # ✅ P1-4 修复（2026-10-07）：跨章搬运检测触顶截断时旧实现仅记 INFO，
         #    预检结论"可能不完整"但用户无任何信号。现升级为 WARNING 并注入一条
-        #    合成 finding（CON-06-TRUNC），让预检面板/前端可见。
+        #    合成 finding（登记编号 CON-06，severity=low），让预检面板/前端可见。
+        #    ⚠️ 2026-10-17：该分支原用自造串 ``CON-06-TRUNC`` + ``severity=`` 形参，
+        #    二者各有一处缺陷（见下方与 _finding docstring），一并修掉。
         logger.warning(
             "跨章节段落搬运检测触顶截断（pairwise=%d），"
             "结论可能不完整——部分搬运组可能漏报",
             res.get("pairwise_compared", 0))
         findings.append(_finding(
-            "CON-06-TRUNC",
+            # ⚠️ 必须是**已登记的基编号** ``CON-06``，不得用 ``CON-06-TRUNC``
+            #    这类自造串：``_resolve_base_rule`` 只剥离「-<数字>」序号后缀，
+            #    遇到 ``-TRUNC`` 直接 break → 返回 None → ``dimension=""``
+            #    （污染 unknown_dimension_count）、``title`` 退化成裸串、
+            #    ``basis`` 为空 —— 正是本函数 :195 注释记载的 CON-05-N 同款病。
+            #    基编号 ``CON-06`` 已登记（consistency 维度 / 有依据），
+            #    且派生编号走 ``CON-06-1`` 形态，与本条不会撞键去重。
+            "CON-06",
             f"跨章节段落搬运检测因两两比对量过大（{res.get('pairwise_compared', 0)} 对）"
             "已截断，结论可能不完整，部分搬运组可能漏报",
+            suggestion="本方案的跨章节搬运检测已触顶，建议缩短章节数或分段核查；"
+                       "本次结论可能不完整，个别搬运组可能漏报",
             severity="low"))
 
     for idx, g in enumerate(res.get("groups") or [], 1):

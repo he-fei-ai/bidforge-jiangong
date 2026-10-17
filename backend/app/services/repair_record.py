@@ -7,6 +7,42 @@
 - 查询历史修复记录
 
 所有写操作幂等且只影响方案正文，不触碰其他数据。
+
+## DB 访问单一出口（2026-10-17 收口）
+
+本模块此前有 9 处**裸** ``db.execute``，零游标判空（R13，AGENTS §5.5），
+且写路径**汇报假成功**：
+
+  ==========================  =========================================
+  站点                        假成功后的用户可见后果
+  ==========================  =========================================
+  ``mark_repair_status``       ``/consistency/confirm`` 与 ``/rollback``
+                               返回 ``confirmed`` / ``rolled_back``，
+                               而 ``consistency_repairs.status`` 未变
+  ``rollback_snapshot``        ``restored`` 计数照加（``restored += 1``
+                               不看写入结果），用户以为已恢复正文
+  ``save_repair``              返回一个**从未落库**的 ``repair_id``，
+                               后续 confirm/rollback 全部找不到批次
+  ``get_snapshot``/``get_repair``  ``AttributeError`` → 500
+                               （读路径本应 503「数据服务暂不可用」，
+                               空结果会被误读成「快照不存在」）
+  ==========================  =========================================
+
+现全部改走 :mod:`app.services.review_db`（审核与预检模块的**唯一** DB 出口，
+R78 已把四个 router 收口到同一处；本模块是当时漏网的 services 侧空白点）：
+
+  * 读路径 ``fetch_one`` / ``fetch_all`` / ``fetch_scalar`` —— 游标为
+    ``None`` 抛 503，**不是**空结果（否则「快照不存在」会被误当业务答案）；
+  * 写路径 ``exec_write(require_rows=True)`` —— 游标为 ``None`` 或
+    ``rowcount == 0`` 均抛 503，**绝不汇报假成功**。
+
+⚠️ 语义变化（均为「把原本静默的错误变成显式的 503」，正常路径逐字不变）：
+  ① ``get_snapshot`` 查不到行仍返回 ``None``（调用方转 ``KeyError``）；
+     DB 不可用时不再谎报「快照不存在」，而是 503。
+  ② ``mark_repair_status`` / ``save_repair`` / ``rollback_snapshot`` 的写
+     在未生效时不再静默通过；调用点（``routers/consistency_repair.py``
+     ``routers/review_autofix.py``）均**未**包裹 ``except Exception``，
+     503 会如实冒泡到 HTTP 层。
 """
 from __future__ import annotations
 
@@ -21,6 +57,7 @@ from app.services.content_utils import (
     text_word_count,
     word_status_for,
 )
+from app.services.review_db import exec_write, fetch_all, fetch_one, fetch_scalar
 
 logger = logging.getLogger("repair_record")
 
@@ -48,23 +85,24 @@ async def create_snapshot(
             "content_before": s.get("content_before", s.get("content", "")),
         })
     snapshot_id = new_id("ver")
-    await db.execute(
+    await exec_write(
+        db,
         "INSERT INTO scheme_snapshots (id, scheme_id, type, sections, created_at)"
         " VALUES (?,?,?,?,?)",
         (snapshot_id, scheme_id, snapshot_type,
-         json.dumps(payload, ensure_ascii=False), _now()))
+         json.dumps(payload, ensure_ascii=False), _now()),
+        what="repair_record.create_snapshot:INSERT")
     await db.commit()
     return snapshot_id
 
 
 async def get_snapshot(db, snapshot_id: str) -> dict | None:
-    cur = await db.execute(
+    item = await fetch_one(
+        db,
         "SELECT id, scheme_id, type, sections, created_at FROM scheme_snapshots WHERE id=?",
-        (snapshot_id,))
-    row = await cur.fetchone()
-    if not row:
+        (snapshot_id,), what="repair_record.get_snapshot")
+    if not item:
         return None
-    item = dict(row)
     try:
         item["sections"] = json.loads(item.get("sections") or "[]")
     except json.JSONDecodeError:
@@ -92,10 +130,10 @@ async def rollback_snapshot(db, snapshot_id: str, *,
         sid = sec.get("section_id")
         if not sid:
             continue
-        cur = await db.execute("SELECT content FROM sections WHERE id=?", (sid,))
-        row = await cur.fetchone()
-        current.append({"section_id": sid,
-                        "content_before": row[0] if row else ""})
+        cur_content = await fetch_scalar(
+            db, "SELECT content FROM sections WHERE id=?", (sid,),
+            default="", what="repair_record.rollback_snapshot:读当前正文")
+        current.append({"section_id": sid, "content_before": cur_content or ""})
     undo_id = await create_snapshot(db, snap["scheme_id"], current,
                                     snapshot_type=undo_type)
 
@@ -104,9 +142,9 @@ async def rollback_snapshot(db, snapshot_id: str, *,
         sid = sec.get("section_id")
         if not sid:
             continue
-        cur = await db.execute(
-            "SELECT id, word_budget FROM sections WHERE id=?", (sid,))
-        srow = await cur.fetchone()
+        srow = await fetch_one(
+            db, "SELECT id, word_budget FROM sections WHERE id=?", (sid,),
+            what="repair_record.rollback_snapshot:读章节")
         if not srow:
             continue
         # ✅ BUG 修复（2026-09-16 · 与 repair_agent 同一字数口径问题）：
@@ -115,12 +153,16 @@ async def rollback_snapshot(db, snapshot_id: str, *,
         #    回滚，库里仍显示 1500 字/over）。这里按全项目唯一口径重算。
         restored_content = sec.get("content_before", "")
         wc = text_word_count(restored_content)
-        await db.execute(
+        # ✅ 2026-10-17：改走 exec_write（require_rows=True）——旧实现
+        #    `restored += 1` 不看写入结果，DB 写未生效时仍汇报「已恢复 N 章」。
+        await exec_write(
+            db,
             "UPDATE sections SET content=?, word_count=?, word_status=?, updated_at=? "
             "WHERE id=?",
             (restored_content, wc,
              word_status_for(wc, srow["word_budget"] or DEFAULT_WORD_BUDGET),
-             _now(), sid))
+             _now(), sid),
+            what="repair_record.rollback_snapshot:恢复正文")
         restored += 1
     await db.commit()
     logger.info("快照 %s 已回滚：恢复 %d 章（撤销快照 %s）",
@@ -147,7 +189,8 @@ async def save_repair(db, *, scheme_id: str, scan_id: str, mode: str,
         skipped = sum(1 for i in items if i.get("status") == "skipped")
         failed = sum(1 for i in items if i.get("status") == "failed")
     repair_id = new_id("R")
-    await db.execute(
+    await exec_write(
+        db,
         "INSERT INTO consistency_repairs "
         "(id, scheme_id, scan_id, mode, total_conflicts, repaired, skipped, failed,"
         " items, snapshot_id, status, created_at)"
@@ -155,7 +198,8 @@ async def save_repair(db, *, scheme_id: str, scan_id: str, mode: str,
         (repair_id, scheme_id, scan_id, mode, total_conflicts,
          repaired, skipped, failed,
          json.dumps(items, ensure_ascii=False), snapshot_id,
-         "pending_confirm", _now()))
+         "pending_confirm", _now()),
+        what="repair_record.save_repair:INSERT")
     await db.commit()
     return {
         "repair_id": repair_id, "scan_id": scan_id,
@@ -167,12 +211,11 @@ async def save_repair(db, *, scheme_id: str, scan_id: str, mode: str,
 
 
 async def get_repair(db, repair_id: str) -> dict | None:
-    cur = await db.execute(
-        "SELECT * FROM consistency_repairs WHERE id=?", (repair_id,))
-    row = await cur.fetchone()
-    if not row:
+    item = await fetch_one(
+        db, "SELECT * FROM consistency_repairs WHERE id=?", (repair_id,),
+        what="repair_record.get_repair")
+    if not item:
         return None
-    item = dict(row)
     try:
         item["items"] = json.loads(item.get("items") or "[]")
     except json.JSONDecodeError:
@@ -181,16 +224,25 @@ async def get_repair(db, repair_id: str) -> dict | None:
 
 
 async def mark_repair_status(db, repair_id: str, status: str):
-    await db.execute(
-        "UPDATE consistency_repairs SET status=? WHERE id=?", (status, repair_id))
+    # ✅ BUG 修复（2026-10-17）：旧实现 `await db.execute(...)` 后**不看结果**
+    #    就 commit 并返回 —— R13 下 execute 返回 None 时写根本没生效，调用点
+    #    （/consistency/confirm、/consistency/rollback、/autofix/confirm、
+    #    /autofix/rollback）照样返回 confirmed / rolled_back，界面报「已回滚」
+    #    而 consistency_repairs.status 未变。改走 exec_write（require_rows=True）
+    #    → 未生效即抛 503，**绝不汇报假成功**。
+    await exec_write(
+        db, "UPDATE consistency_repairs SET status=? WHERE id=?",
+        (status, repair_id),
+        what=f"repair_record.mark_repair_status({status})")
     await db.commit()
 
 
 async def list_repairs(db, scheme_id: str, limit: int = 20) -> list[dict]:
     limit = max(1, min(limit, 50))
-    cur = await db.execute(
+    return await fetch_all(
+        db,
         "SELECT id, scan_id, mode, total_conflicts, repaired, skipped, failed,"
         " snapshot_id, status, created_at FROM consistency_repairs "
         "WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?",
-        (scheme_id, limit))
-    return [dict(r) for r in await cur.fetchall()]
+        (scheme_id, limit),
+        what="repair_record.list_repairs")

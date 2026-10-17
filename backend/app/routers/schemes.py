@@ -1,5 +1,6 @@
 """方案管理路由（项目下多方案）"""
 import json
+import logging
 import uuid
 from datetime import datetime
 
@@ -8,6 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.db import get_db, read_db
 from app.models import SchemeCreate, SchemeUpdate
 from app.services.content_utils import DEFAULT_WORD_BUDGET
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}/schemes", tags=["schemes"])
 
@@ -323,6 +326,35 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
              s.get("chapter", ""), s.get("fact_attr", ""),
              s.get("source_kind", ""), s.get("is_shared", 0),
              s.get("is_stale", 0)))
+
+    # ✅ R85 BUG-C：副本落库后**按副本自身的位置重排章节编号**。
+    #
+    # 缺陷：`sections.outline_json.id` 是「章节编号」的唯一权威（前端树、正文
+    # 生成 `{section_number}`、导出标题、导出预检 `_detect_section_number_mismatch`
+    # 全部读它），而本函数把 `sort_order` 与 `outline_json` **逐字复制**、只重映射
+    # UUID。`sections._build_tree` 的同级排序键是 `(sort_order, id)` —— 一旦
+    # `sort_order` 存在并列（历史脏数据 / 外部脚本直改 / 旧版 reorder 只带部分 id），
+    # 次级键就是 **UUID**：源方案靠 UUID 恰好排出的顺序，在副本上换成全新随机
+    # UUID 后**必然可能翻转**，而 `outline_json.id` 仍停留在源方案的旧号。
+    # 实测（护栏 test_outline_closeout_r85_20261016.py）源方案
+    # `[("A 章","1"), ("B 章","2")]` 复制后变成 `[("B 章","2"), ("A 章","1")]`
+    # ⇒ **副本一落库就带着两章全错的编号**，正文子标题编号也未按新位置重排，
+    # 唯一暴露口是导出预检的编号错位告警。
+    #
+    # 修法：复用唯一事实源 `renumber_sections_after_reorder`（sections 侧
+    # create/update/delete/reorder 四条结构路径同一出口），**同一事务内**调用，
+    # 编号由副本自身的位置派生 ⇒ 复制结果与源方案逐字一致；对干净数据是恒等
+    # 变换（无并列时 renumber 输出与复制值相同，零行为变化）。
+    # 正文子标题重排（`_renormalize_all_section_contents`）本路径**刻意不接**：
+    # 副本章节 `status="empty"`、正文不复制，没有任何子标题需要重算；接了只是
+    # 白跑一次全表扫描。fail-soft：重排失败只告警，**绝不阻断复制**（用户拿到
+    # 的仍是一个可用副本，只是编号可能未对齐）。
+    try:
+        from app.routers.sections import renumber_sections_after_reorder
+        await renumber_sections_after_reorder(db, new_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("方案复制后章节编号重排失败（副本编号可能与源方案不一致，scheme=%s）: %s",
+                       new_id, e)
     await db.commit()
     return {"id": new_id}
 

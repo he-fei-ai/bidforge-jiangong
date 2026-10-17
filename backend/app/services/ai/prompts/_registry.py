@@ -607,10 +607,30 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
         "project_facts", "chapter_titles", "missing_items",
     ],
     # R73（2026-10-12）：占位标题外科式重写。已核对唯一渲染点
-    #   · outline_title_fix_system ← sse_handlers._try_outline_title_fix（5/5 全传）
+    #   · outline_title_fix_system ← sse_handlers._try_outline_title_fix
+    # ✅ R89（2026-10-17）：契约与模板占位符同步扩到 11 个业务变量。
+    #   旧契约只有 5 个（scheme_name/scheme_type/project_brief/project_facts/
+    #   broken_items），模板里实际已声明的 6 个占位符从未传值 ⇒ 渲染为空串，
+    #   模型拿到的提示词里没有「方案名称解析」「主要施工内容」「编制要求」
+    #   「编制依据规范」「全目录已有标题」「上一轮拒绝原因」任何一条 ——
+    #   这是「外科式重写产不出具体标题」的根因（长方案只有 project_brief
+    #   前 1500 字可依据）。check_prompt_variables 的 used_not_declared 双向
+    #   漂移校验在 R73 时就应捕获，因模板与契约同一轮加而未暴露。
     "outline_title_fix_system": [
-        "scheme_name", "scheme_type", "project_brief",
-        "project_facts", "broken_items",
+        "scheme_name", "scheme_type", "construction_scope",
+        "project_brief", "project_facts",
+        "scheme_basis", "standards_text",
+        # 编制要求原文：判定「每个标题本应承载什么内容」的直接依据，
+        #   旧实现漏传 ⇒ 模型无从得知方案对各专项的具体要求。
+        "requirements",
+        # 「全目录已有标题」清单：让模型避开与既有标题重名（_apply_title_updates
+        #   红线「兄弟重名」拒收），而不是靠猜。
+        "existing_titles",
+        # 「上一轮改写被拒绝的原因」：回灌重试的依据（第 1 轮传空串，
+        #   render_prompt 对空串占位符整行保留但内容为空 —— 与 scheme_basis
+        #   同口径，无反馈时不干扰模型）。
+        "rewrite_feedback",
+        "broken_items",
     ],
     "outline_feedback_system": [
         "scheme_name", "scheme_type", "project_brief",

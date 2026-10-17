@@ -30,10 +30,33 @@ REPO_ROOT = str(Path(__file__).resolve().parents[2])
 
 _BAK_GLOBS = ("*.bak-*", "*.bak", "*.bak~", "*~")
 
+#: ⚠️ R85（2026-10-16）：本护栏此前 `os.walk(REPO_ROOT)` 遍历**整个仓库**，
+#: 而 `backend/data/projects/<pid>/documents/**` 是四层存储的运行时产物目录，
+#: 实测已膨胀到 **2.9 万个目录**（单次 os.walk > 120s）⇒ `test_no_bak_files_in_repo`
+#: 无限期挂起，**整条后端全量 pytest 从此跑不完**（R84 的 32 分钟全量基线不再
+#: 可复现）。属 AGENTS §4.17.3 记过的同族缺陷：「静态护栏本身也是性能敏感代码，
+#: 写递归全仓扫描前先量一下耗时」。
+#:
+#: 排除项的**判据**是「该目录只可能装运行时/生成物，永远不会是源码」：
+#:   · `backend/data`  —— 解析四层存储 + SQLite + 导出产物（运行时数据）
+#:   · `logs`           —— 日志轮转输出
+#:   · `artifacts`      —— 历轮探针/报告归档（AGENTS §3.1.9 的临时产物区）
+#:   · `.trash`         —— 回收站
+#:   · `.ruff_cache` / `.pytest_cache` —— 工具缓存
+#: **刻意不排除** `backend/app` / `backend/tests` / `frontend/src` / `docs` /
+#: `tools` / `chart-gap-filler` / 根目录文件 —— 源码与文档仍全量扫描，
+#: 护栏的原始意图（人工作业的 swap 备份只可能出现在源码目录）一字未弱化。
 _EXCLUDE_DIRS = {
     "node_modules", ".git", "__pycache__", ".venv", "venv",
     ".idea", ".vscode", "dist", "build", "coverage", ".pytest_cache",
+    # ↓ R85：运行时/生成物目录（只可能装数据，不可能装源码备份）
+    "data", "logs", "artifacts", ".trash", ".ruff_cache",
 }
+
+#: R85 预算锁：全量扫描的**目录数上限**。超限即说明又有人往被排除树之外
+#: 塞了巨型目录，护栏会先变红而不是先挂起 —— 「挂起」是最坏的失败形态
+#: （既不报错也不出结论，只能靠外部 kill）。
+_MAX_WALK_DIRS = 20000
 
 
 def _is_bak(name: str) -> bool:
@@ -44,8 +67,16 @@ def _is_bak(name: str) -> bool:
 
 
 def _walk_all_files():
+    seen = 0
     for root, dirs, files in os.walk(REPO_ROOT):
         dirs[:] = [d for d in dirs if d not in _EXCLUDE_DIRS]
+        seen += 1
+        if seen > _MAX_WALK_DIRS:
+            raise AssertionError(
+                f"护栏扫描目录数超过预算 {_MAX_WALK_DIRS}"
+                f"（已扫到 {os.path.relpath(root, REPO_ROOT)}）。"
+                "请把新的巨型运行时/生成物目录加入 _EXCLUDE_DIRS，"
+                "而不是放任护栏挂起。")
         for f in files:
             yield os.path.join(root, f)
 

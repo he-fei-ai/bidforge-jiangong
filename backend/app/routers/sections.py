@@ -8,7 +8,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.config import settings
-from app.db import get_db
+from app.db import get_db, safe_rowcount
 from app.models import SectionCreate, SectionUpdate
 from app.routers.review import reset_review_on_content_change  # ✅ G9：正文变更→退回待审核
 from app.services import facts_extractor as _fe
@@ -16,7 +16,10 @@ from app.services.ai.json_response import (
     OUTLINE_REPAIR_KEY,
     collect_json_response,
     renumber_outline,
-    strip_outline_numbering,
+    # ✅ R85 BUG-D：`strip_outline_numbering` **不再**从 json_response 导入。
+    #    本模块的标题写入路径改用 `numbering.strip_outline_numbering_tree`
+    #    （见下方别名导入），两者若同时存在会遮蔽生效口径、并触发 F811 ——
+    #    这正是「同一判据两份副本」在本仓的典型形态。
 )
 from app.services.ai.prompts._registry import render
 from app.services.ai.provider_factory import chat_with_fallback
@@ -31,6 +34,25 @@ from app.services.numbering import (
 )
 from app.services.numbering import (
     rollback_numbering_version as _rollback_numbering_version,  # ✅ 编号版本管理
+)
+from app.services.numbering import (
+    # ✅ R85 BUG-D：标题写入路径统一改用 **tree 档**剥离（与 save-outline /
+    #    upload_outline 落库 / `renumber_outline_nodes` 目录树入口同一口径）。
+    #    旧实现用单轮档：`create_section("第1章 1.1 工程概况")` 落库为
+    #    「1.1 工程概况」（残留一层编号），而同一目录经 save-outline 落库为
+    #    「工程概况」——同一目录经两条路径落库标题形态不同，且残留串会经
+    #    `sse_handlers` 的 `{section_title}` 原样注入正文生成提示词
+    #    （与权威 `{section_number}` 并列出现，模型看到自相矛盾的章节标识）。
+    #    tree 档对已干净标题是恒等变换（护栏 test_outline_closeout_r84
+    #    锁定幂等），前端单轮剥离照常生效（对干净标题亦为恒等）。
+    strip_outline_numbering_tree as strip_outline_numbering,
+)
+from app.services.outline_quality import (
+    # ✅ R86 L5：写路径占位回传的**单一出口**（create / update / save-outline /
+    #    upload_outline 四条入口共用同一判据、同一形态、同一日志口径）。
+    #    加法式：仅当确有残留才加 `generic_residual` 键，绝不阻断保存、
+    #    绝不静默改写用户已输入的标题。
+    attach_generic_residual,
 )
 from app.services.outline_utils import MAX_OUTLINE_DEPTH, normalize_outline
 
@@ -509,8 +531,10 @@ async def create_section(scheme_id: str, data: SectionCreate, db=Depends(get_db)
     # ✅ 双重编号防御缺口修复（2026-09-23）：PATCH(update_section) 路径早已剥离
     #    标题内嵌编号，唯独 POST 新增路径直写 data.title —— 客户端/复制粘贴带入
     #    "1.1 编制依据" 时，前端树与导出会再套一次位置编号 → "1.1 1.1 编制依据"。
-    #    口径与 update_section 一致：先剥后存；剥离后为空时 strip_outline_numbering
-    #    自动回退原标题（标题本身即编号时不丢内容）。
+    #    口径与 update_section 一致：先剥后存；剥离后为空时自动回退原标题
+    #    （标题本身即编号时不丢内容）。
+    #    ✅ R85 BUG-D：剥离档位由单轮改 **tree 档**（多重章节前缀如
+    #    「第1章 1.1 工程概况」一次剥净，与 save-outline 落库同口径）。
     if isinstance(data.title, str) and data.title.strip():
         data.title = strip_outline_numbering(data.title)
     level = data.level
@@ -572,7 +596,12 @@ async def create_section(scheme_id: str, data: SectionCreate, db=Depends(get_db)
         await invalidate_export_cache(db, scheme_id)
     except Exception as _e:  # noqa: BLE001 - 缓存失效不得阻断新增结果
         logger.warning("新增章节：导出缓存失效失败（不影响新增结果）: %s", _e)
-    return {"id": sid}
+    # ✅ R86 L5：新增章节同样过占位闸门（加法式回传，不阻断、不改写）。
+    #    背景：用户报的「三级标题大量专项6 / 总体实施策划（2）」有相当一部分
+    #    是**手工新增/改名**进来的 —— 这条入口此前零闸门，只有 save-outline 有。
+    return attach_generic_residual(
+        {"id": sid}, [{"title": data.title, "children": []}],
+        scheme_id=scheme_id, context="create-section")
 
 
 @router.patch("/{section_id}")
@@ -652,7 +681,18 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
     # ✅ G9：本次保存是否使审核结论失效（未传 content 时为 False）
     _review_reset = False
     # 正文子标题编号规范化待办标记：必须在**结构重排之后**执行（见下方说明）
-    _content_renorm_pending = False
+    #
+    # ✅ R89（2026-10-17 · BUG-N1「标题改名不同步正文」）：判定由 `"content" in fields`
+    #    扩为 **content 或 title**。`renumber_section_body_subheadings` 的
+    #    `section_title` 参数被 `_strip_duplicate_leading_title` 消费，用于剥离正文
+    #    开头与本节标题重复的块（AI 常在正文首行自引用章节标题）。title-only 改名时
+    #    旧实现不触发规范化 ⇒ 正文首行残留**改名前**的标题；导出端按**新**标题比对
+    #    不匹配 ⇒ 该块被保留 ⇒ 成稿出现「新标题 / 旧标题」两行重复标题，
+    #    且前端预览（落库原文）与导出成稿两处不同源。
+    #    仅规范化**本章**（不跑 `_renormalize_all_section_contents`）：改名不改变
+    #    任何编号，兄弟章节无需重扫，避免把一次改名放大成全方案正文重写。
+    #    规范化是恒等变换（幂等、只重写子标题行与去重块），无内容变更时零写库。
+    _content_renorm_pending = ("content" in fields or "title" in fields)
     if "content" in fields:
         # ✅ 竞态守卫：后台正文生成任务运行中，其 _persist_section 为无条件 UPDATE，
         # 用户此刻保存会与生成结果互相覆盖（丢失更新）。返回 409 提示等待任务完成。
@@ -787,8 +827,18 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
     #    ⚠️ 结构变更时该规范化已由 _renormalize_all_section_contents 统一处理（覆盖本节
     #    及所有兄弟章节），此处仅负责「纯改正文、无结构变更」的情况，避免重复写库。
     if _content_renorm_pending and not _struct_changed:
+        # ✅ R89（BUG-N1）：title-only 改名时 `fields` 里没有 content ——
+        #    规范化必须拿**已落库正文**跑（上方 line ~790 的 UPDATE 已把新标题
+        #    写入本连接事务，同事务读取即为改名后的标题，正是判定去重块需要的值）。
+        _renorm_src = fields.get("content")
+        if _renorm_src is None:
+            _rc = await db.execute(
+                "SELECT content FROM sections WHERE id=? AND scheme_id=?",
+                (section_id, scheme_id))
+            _rr = await _rc.fetchone()
+            _renorm_src = (str(_rr["content"] or "") if _rr else "")
         _new_content, _changed = await normalize_section_content_subheadings(
-            db, scheme_id, section_id, fields.get("content") or "")
+            db, scheme_id, section_id, _renorm_src)
         if _changed:
             _wb = fields.get("word_budget")
             if not _wb:
@@ -825,8 +875,16 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
     # ✅ G9/G10：前端据此提示「审核结论已失效」并刷新审核工作台
     # （此前 update 只回 {"ok": true}，连 word_count 都不带，
     #  前端 `data.word_count` 恒为 undefined → 成功提示里显示「已保存，当前 0 字」）
-    return {"ok": True, "word_count": int(fields.get("word_count") or 0),
-            "review_reset": _review_reset}
+    _result = {"ok": True, "word_count": int(fields.get("word_count") or 0),
+               "review_reset": _review_reset}
+    # ✅ R86 L5：**改名**时过占位闸门（加法式回传，不阻断、不改写）。
+    #    只在本次请求真的改了标题时才判 —— 标题未变说明它在上一次写入时
+    #    已被报告过，重复回传只会制造噪音（且要求多打一次库）。
+    if fields.get("title"):
+        _result = attach_generic_residual(
+            _result, [{"title": fields["title"], "children": []}],
+            scheme_id=scheme_id, context="update-section")
+    return _result
 
 
 @router.delete("/{section_id}")
@@ -1078,6 +1136,61 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
         except Exception:  # noqa: BLE001 - 检测失败不得阻断保存
             logger.warning("目录占位标题检测失败（不影响保存）: %s", scheme_id[:8],
                            exc_info=True)
+    # ✅ R89 G1：落库前**自动外科式重写**（治「检出但未阻断」）。
+    #
+    # 用户报的「总体实施策划（2）（3）」其实**早就被检出**为 generic（`^总体实施
+    # 策划` 前缀命中），但它进不了导出成品的前提不成立：R79 起的设计纪律是
+    # 「只报不拒」—— 只回传 generic_residual 供前端提示，用户忽略告警就原样落库。
+    # 而生成链路的占位闸门只在 `_review_and_fix_outline` 内生效；上传识别 /
+    # 目录库套用 / AI 调整目录 / 手工编辑保存 / stopped·error 部分成果这五类
+    # 写入口都不走它 ⇒ 占位标题从这里直接进 sections 表、进 DOCX/PDF 导出。
+    #
+    # 现在：检出非空即**先**做一次外科式重写（复用 sse_handlers.
+    # `_try_outline_title_fix` 同一实现 —— 只回填 title、绝不增删节点，失败返回
+    # None 回退原样保存），重写后仍残留才按原样落库并照旧回传 generic_residual
+    # （加法式不阻断的纪律不变，只是多了一次自动修复的机会）。
+    #
+    # 成本口径：与 `content_fact_autofix_enabled` 同 —— **仅在检出非空时触发**，
+    # 干净目录零 AI 调用、零额外延迟。重写失败（超时 / 异常 / 全被保守红线拒收）
+    # 一律 fail-soft 回退原样保存，绝不阻断落库。
+    #
+    # ⚠️ 位置要求：必须在下方**任何写操作之前**—— AI 调用期间不得持有写事务。
+    # 本函数此前的语句只有读（SCHEME_PROJECT_ID_SQL / sections 查询），故此处
+    # 尚未开启事务，AI 调用不占用写锁。
+    #
+    # 受 ``outline_autofix_generic_on_save`` 控制（默认 True；置 False 即逐字
+    # 回到 R89 之前：只检出、只回传、不发起重写调用）。
+    _generic_autofixed = 0
+    if generic_hits and getattr(settings, "outline_autofix_generic_on_save", True):
+        _hits_before = generic_hits
+        try:
+            from app.routers.sse_handlers import _try_outline_title_fix
+            from app.services.outline_quality import detect_generic_titles as _det
+            _sname = _stype = ""
+            _scur = await db.execute(
+                "SELECT name, type FROM schemes WHERE id=?", (scheme_id,))
+            _srec = await _scur.fetchone()
+            if _srec is not None:
+                _sname = str(_srec[0] or "")
+                _stype = str(_srec[1] or "")
+            _fixed = await _try_outline_title_fix(
+                outline, generic_hits, scheme_name=_sname, scheme_type=_stype)
+            if _fixed is not None:
+                _left = _det(_fixed)
+                # 加法式回传：告诉用户「有多少占位标题被自动改掉了」——
+                # 否则自动重写静默生效，用户以为目录原样保存，实际上章节名变了。
+                _generic_autofixed = max(0, len(_hits_before) - len(_left))
+                logger.info(
+                    "方案 %s 目录落库前自动重写占位标题：%d 处 → 残留 %d 处（source=%s）",
+                    scheme_id[:8], len(generic_hits), len(_left), source or "-")
+                outline = _fixed
+                generic_hits = _left
+        except Exception as e:      # noqa: BLE001 - 自动修复失败不得阻断保存
+            logger.warning("方案 %s 目录落库前自动重写失败（按原样保存）: %s",
+                           scheme_id[:8], e, exc_info=True)
+    # ✅ R86 L5：检测与回传收敛到 `outline_quality.attach_generic_residual`
+    #    **单一出口**（此前这段内联逻辑只此一处，且 create/update/upload 三条
+    #    入口零接线）。下方 `result["generic_residual"]` 已改由该出口统一挂载。
 
     cur = await db.execute(_fe.SCHEME_PROJECT_ID_SQL, (scheme_id,))
     row = await cur.fetchone()
@@ -1288,16 +1401,15 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
                 _strip_internal_fields(n["children"])
     _strip_internal_fields(tree)
     result: dict = {"ok": True, "count": node_counter["n"], "tree": tree}
+    # ✅ R86 L5：回传改由单一出口 `attach_generic_residual` 统一挂载
+    #    （与 create/update/upload 三条入口同一形态、同一判据、同一日志口径）。
     if generic_hits:
-        # 加法式回传：前端「保存已生成部分」后据此提示人工核对（不阻断、
-        # 不静默）。与 _review_and_fix_outline 的 generic_residual 同名不同
-        # 形（那边是计数），此处是明细清单 —— 保存入口不是审核结论，
-        # 给明细才有可操作性。
-        result["generic_residual"] = generic_hits
-        logger.warning(
-            "方案 %s 目录保存：检出 %d 个占位/泛化标题（已保存，建议人工核对）：%s",
-            scheme_id[:8], len(generic_hits),
-            "、".join(str(h.get("title") or "")[:20] for h in generic_hits[:10]))
+        attach_generic_residual(result, outline, scheme_id=scheme_id,
+                                context="save-outline")
+    if _generic_autofixed:
+        # 自动重写实际改掉的数量（R89 G1 可观测性）。与 generic_residual 互补：
+        # 残留为空时用户看到的应该是「已自动修复 N 处」而不是「什么都没发生」。
+        result["generic_autofixed"] = _generic_autofixed
     if roots_locked:
         result["roots_locked"] = True
     if cleared_content:
@@ -1488,6 +1600,30 @@ async def adjust_outline(scheme_id: str, body: dict, db=Depends(get_db)):
     }
 
 
+SAVE_OUTLINE_ADDITIVE_KEYS: tuple[str, ...] = (
+    "cleared_content_sections",   # 整表重建清除了多少章已生成正文（量化，用户须被告知）
+    "generic_residual",           # 检出占位/泛化标题的明细（R79 C3，R86 收敛到单一出口）
+    "generic_autofixed",          # 落库前自动重写改掉的占位标题数（R89 G1）
+    "roots_locked",               # 一级章节是否已锁定
+)
+
+
+def passthrough_additive(result: dict) -> dict:
+    """挑出 `_save_outline_to_db` 的**加法式回传键** —— 唯一透传口径。
+
+    ⚠️ R88 FIX-8：消费方此前**手写白名单**逐个挑选，结果**每次新增键都会静默丢**
+    —— 本常量本身就是历史证据：2026-09-30（P1-7）补了 `cleared_content_sections`
+    的透传，R79 新增的 `generic_residual`（明细清单，注释写明「给明细才有
+    可操作性」）又被丢了一次 ⇒ 套用目录库命中占位标题时**只进后端日志、
+    前端零感知**。
+
+    纪律：`_save_outline_to_db` 新增加法式键时，**只改本常量**；
+    任何消费方都不得再手写 `{k: result[k] ...}`。
+    """
+    return {k: result[k] for k in SAVE_OUTLINE_ADDITIVE_KEYS
+            if result.get(k) is not None}
+
+
 async def renumber_sections_after_reorder(db, scheme_id: str) -> None:
     """按当前 sort_order 顺序重排所有章节的 outline_json.id / level（章节编号）。
 
@@ -1501,9 +1637,26 @@ async def renumber_sections_after_reorder(db, scheme_id: str) -> None:
     tree = await _build_tree(db, scheme_id)
     oj_updates = renumber_section_outline_ids(tree)
     if oj_updates:
-        await db.executemany(
+        cur = await db.executemany(
             "UPDATE sections SET outline_json=?, level=? WHERE id=? AND scheme_id=?",
             [(*u, scheme_id) for u in oj_updates])
+        # ✅ R89 N2：批量回写必须校验行数。此前 executemany 写完不看结果：
+        # 「建树」与「批量 UPDATE」之间若某节点被并发增删（多标签页同时拖拽排序、
+        # 另一请求插队删章 / 建章），该批就静默少落 N 行 —— 章节编号从此陈旧
+        # **且无任何日志**；紧接着同事务内 `_renormalize_all_section_contents`
+        # 会按这份陈旧编号重写**全部**正文章节的子标题，把一个静默缺陷放大成
+        # 全方案正文错号（用户侧表现为「多级编号不同步」，排查时完全无线索）。
+        # 口径与 upload_outline._r13_write 一致：aiosqlite 下 executemany 的
+        # rowcount 是**累计影响行数**（0 行写报 0，safe_rowcount 把负值归一 0）。
+        # fail-soft 只告警不回滚：本函数已在调用方的事务内，回滚会把整次结构
+        # 变更一并撤销，代价远大于「编号暂时陈旧」；且重排本身幂等，下次
+        # 结构变更会自然补齐。
+        _written = safe_rowcount(cur, what=f"重排编号回写 scheme={scheme_id[:8]}")
+        if _written != len(oj_updates):
+            logger.warning(
+                "方案 %s 重排编号回写：期望 %d 行，实际 %d 行（建树后节点已被并发"
+                "增删，本次编号可能陈旧，下次重排会补齐）",
+                scheme_id[:8], len(oj_updates), _written)
 
 
 async def _renormalize_all_section_contents(db, scheme_id: str) -> None:

@@ -152,11 +152,18 @@ class TestEarlyExitGate:
         assert review["passed"] is True
 
     async def test_switch_off_restores_old_early_exit(self, monkeypatch):
-        """`outline_check_generic_titles=False` ⇒ 完整回到本轮之前的早退行为。"""
+        """`outline_check_generic_titles=False` ⇒ 完整回到本轮之前的早退行为。
+
+        ⚠️ 本用例只验证**占位标题开关**的可回退性，故同时隔离 R89 新增的
+        「重复标题闸门」：同一开关管不到它，而夹具的「总体实施策划（2）」与
+        「（3）」经 `_norm` 归一后正好构成重复，会独立挡住早退（这正是 R89
+        想要的新行为，不是本用例要测的东西）。
+        """
         seen = []
         _fake_ai(monkeypatch, seen)
         monkeypatch.setattr(sh.settings, "outline_check_generic_titles", False,
                             raising=False)
+        monkeypatch.setattr(sh, "_detect_duplicate_titles", lambda _t: [])
 
         _out, review = await sh._review_and_fix_outline(
             _outline(), "基坑", False, "摘要", requirements=REQUIREMENTS)

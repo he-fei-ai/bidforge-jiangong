@@ -59,6 +59,14 @@ import { MAX_OUTLINE_DEPTH } from "../utils/outlineConstants";
 // ✅ 2026-09-26 解析可信度提示：把后端的「文档被截断 / 预算耗尽被跳过 / 编码降级」
 //    翻译成用户可见的告警。集中在 utils 的纯函数里，避免页面各处拼文案而漂移。
 import { sourceNotice, previewNotices } from "../utils/parseSourceNotice";
+// ✅ R86 L1：目录写入检出占位/泛化标题时的可操作提示（后端 create/update/
+//    save-outline/upload 四条入口加法式回传 `generic_residual` 明细）。
+//    文案集中在 utils 纯函数里（vitest 可直接覆盖），页面只负责 msg.warning。
+import { genericResidualNotice } from "../utils/genericResidual";
+// ✅ R87 FIX-1：章节编号**合法性判据**（与后端 `numbering.stored_id_parts` 同口径）。
+//    此前本页面自持一份「逐段 parseInt 挑数字」的松过滤，会把脏编号抢救成
+//    看似合法的章号，而后端 fail-closed ⇒ 目录树与导出成稿编号不一致。
+import { storedIdParts } from "../utils/outlineNumbering";
 import ContentGenerationTab from "../components/ContentGenerationTab";
 import {
   upsertSectionLog, finalizeRunningLogsIn, mergeFailedSectionsInto,
@@ -97,6 +105,27 @@ import PlaceholderReportPanel from "../components/PlaceholderReportPanel";
 import ReviewWorkflowPanel from "../components/review/ReviewWorkflowPanel";
 import type { AuditRule, Severity } from "../types/audit";
 import { SEVERITY_COLOR, SEVERITY_LABEL } from "../types/audit";
+import type { facts_result as GeneratedFactsResult } from "../types/checkpointSchema";
+/**
+ * ✅ R89（2026-10-17）：接入 `types/facts.ts` 真实契约（此前 facts 主链路整体 `any`）。
+ * 该文件自 2026-10-06 建立却**只被 api/index.ts 当读路径泛型**引用，组件层零引用
+ * ⇒ `facts: any[]` / `factsSummary: any` / `FactsGroupList.groups: any[]`，
+ * 字段名漂移在编译期完全失明 —— BUG-1（by_chapter 形状）正是这样活下来的。
+ * 契约本身必须独立核对后端源码，不得由前端实现反推。
+ */
+import type {
+  FactGroup,
+  FactItem,
+  FactStats,
+  FactChapterStat,
+  FactChapterStatBlock,
+  FactPagination,
+  FactChaptersResponse,
+  FactDangerResponse,
+  FactsSummary,
+  FactGroupLike,
+  FactItemLike,
+} from "../types/facts";
 import {
   deriveExportGate,
   renderChartsForExport,
@@ -194,10 +223,12 @@ export function formatOutlineTitle(
 ): string {
   if (!title || !title.trim()) return title || "";
   const bareTitle = stripOutlineNumbering(title);
-  const parts = String(id || "")
-    .split(".")
-    .map((p) => parseInt(p, 10))
-    .filter((n) => !Number.isNaN(n));
+  // ✅ R87 FIX-1（P1）：合法性判据收敛到 `utils/outlineNumbering`（与后端
+  //    `numbering.stored_id_parts` 同口径）。旧实现逐段 parseInt 挑数字，会把
+  //    `abc1.2` → [2]、`0.3` → [3]、`1.0.2` → [1,2] **抢救**成看似合法的编号，
+  //    而后端对同一输入 fail-closed ⇒ 目录树显示的章号与导出成稿对不上。
+  //    非法编号一律**退回裸标题**（不编造编号）。
+  const parts = storedIdParts(id);
   if (!parts.length) return bareTitle;
 
   let number = "";
@@ -1090,6 +1121,11 @@ export function FactsSegmentFailuresAlert({ stats }: {
  *   的事实都必须计入告警，不能让用户误以为可以进入下一步。
  */
 export function buildFactsSummary(stats: any): any {
+  // ⚠️ 签名刻意保持 `any`：本函数是「把后端可能为脏/缺席的计数归一成 number」
+  // 的**防御层**，输入本就不可信。收紧签名（R89 曾试过 `Partial<FactStats>`）
+  // 会让 12 处既有断言与全部测试夹具被迫处理可空性 —— 把防御逻辑挪到调用方，
+  // 与本函数存在的目的相反。归一化后的**读出侧**类型见 `types/facts.ts::FactsSummary`，
+  // 页面状态 `factsSummary` 已按该类型声明。
   if (!stats || typeof stats !== "object") return null;
   const simulated = Number(stats.simulated) || 0;
   const unresolved = Number(stats.unresolved) || 0;
@@ -1102,6 +1138,8 @@ export function buildFactsSummary(stats: any): any {
     conflicts,
     stale,
     total: Number(stats.total) || 0,
+    // ⚠️ 口径：任一门控类计数 > 0 即告警（与后端 `_FACTS_INJECT_WHERE` 四条件
+    //    对齐）—— stale 必须计入，否则误显示「全部就绪」并放行正文生成。
     has_warnings: simulated > 0 || unresolved > 0 || conflicts > 0 || stale > 0,
   };
 }
@@ -1130,10 +1168,30 @@ export type FactChapterStatRow = {
   shared: number;
 };
 
-export function buildFactChapterStats(stats: any, titles?: Record<string, string>): FactChapterStatRow[] {
-  const rows = Array.isArray(stats?.by_chapter) ? stats.by_chapter : [];
+export function buildFactChapterStats(
+  stats: { by_chapter?: FactChapterStatBlock } | null | undefined,
+  titles?: Record<string, string>,
+): FactChapterStatRow[] {
+  const bc = stats?.by_chapter;
+  /**
+   * ✅ R89（2026-10-17）· 【P0 前后端契约断裂】形状读错，本面板自引入起永久空转。
+   *
+   * 后端 `list_facts` 的 `stats.by_chapter` 是**对象**
+   * `{chapters, totals, by_fact_attr, by_source_kind, shared_count}`
+   * （`global_facts._chapter_stats_for_items`）。旧实现
+   * `Array.isArray(stats?.by_chapter) ? … : []` 对对象恒判 false ⇒ rows 恒 `[]`
+   * ⇒ `FactsChapterCoveragePanel` **永远**渲染「暂无章节统计」。
+   * 致命之处在于 `types/facts.ts` 当时也把该字段声明成数组 —— 契约与实现
+   * **同错**，`tsc` 因此不可能报错（详见 FactChapterStatBlock 的订正说明）。
+   *
+   * 现按真实形状读取，并**额外容错裸数组**（防御旧后端/未来扁平化）；
+   * 契约类型已同步订正为对象，数组分支只是运行时兜底。
+   */
+  const rows: FactChapterStat[] = Array.isArray(bc)
+    ? (bc as unknown as FactChapterStat[])
+    : (Array.isArray(bc?.chapters) ? bc.chapters : []);
   return rows
-    .map((c: any) => {
+    .map((c) => {
       const key = String(c?.key || "");
       const missing = Array.isArray(c?.missing_fields) ? c.missing_fields : [];
       return {
@@ -1144,7 +1202,8 @@ export function buildFactChapterStats(stats: any, titles?: Record<string, string
         coverage: Number(c?.coverage) || 0,
         missingCount: missing.length,
         missingFields: missing.map((f: unknown) => String(f)),
-        shared: Number((c as any)?.shared_count) || 0,
+        // ✅ R89：per-chapter 共性计数由后端聚合下发（旧的顶层合计语义错位 ⇒ 恒 0）。
+        shared: Number(c?.shared_count) || 0,
       };
     })
     .sort((a: FactChapterStatRow, b: FactChapterStatRow) => a.order - b.order);
@@ -1157,7 +1216,21 @@ export function buildFactsPagination(pagination: any, pageSize: number): {
   const total = Number(pagination?.total_groups) || 0;
   const limit = Math.max(1, Number(pageSize) || 20);
   const totalPages = Math.max(1, Math.ceil(total / limit));
-  const page = Math.min(Math.max(1, (Number(pagination?.offset) || 0) / limit + 1), totalPages);
+  /**
+   * ✅ R89（2026-10-17）· 【P1 分页页码可产出小数 / 非有限值】
+   * 旧实现 `(offset) / limit + 1` 未取整：offset 不是 limit 整数倍时
+   * （offset=25 / limit=20 ⇒ 2.25）得到**小数页码**并原样交给 antd
+   * `Pagination current` —— 该组件按整数页取值，小数会让「当前页高亮」
+   * 落到没有数据的页；更糟的是 `total > limit` 时 `show=true`，用户能点
+   * 到一个不存在的页。offset 来自后端回传而非本地计算（未来任何按
+   * limit 变更/多标签页切换都可能给出非整倍数），属**不可依赖调用方自律**
+   * 的输入。
+   * 同时 `Number(undefined) / limit` 得 NaN，`Math.min/max` 对 NaN
+   * **恒返回 NaN** ⇒ page 变成 NaN，比小数更难排查。
+   */
+  const rawOffset = Number(pagination?.offset);
+  const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
+  const page = Math.min(Math.max(1, Math.floor(offset / limit) + 1), totalPages);
   return { page, pageSize: limit, total, totalPages, show: total > limit };
 }
 
@@ -1848,19 +1921,15 @@ export interface TaskTerminalInfo {
    * status+message，segment_stats / cross_conflicts 全丢 —— 用户看到「已完成」
    * 却不知道哪几段失败、是否存在跨段矛盾。
    *
-   * 字段集必须与后端 `_FACTS_CHECKPOINT_FIELDS` 逐项一致（见 parity 断言）。
-   * `cross_conflicts` 用 unknown[] 而非具体结构：跨段矛盾的具体形态由
-   * facts_extractor 决定，前端 applyFactsCompletedEvent 只按数组消费。
+   * ✅ R89（2026-10-17）：类型改为**直接引用生成的契约**（`checkpointSchema.ts`
+   * 由 `backend/app/services/checkpoint_schema.py` 生成），不再在本文件内联
+   * 第三份手抄。旧实现内联副本与生成器产出可能分叉，而分叉方向正是本仓反复
+   * 记账的「同一判据多副本」—— `facts_result` 能活到今天就是因为既不在生成器
+   * 源里、也没有 parity 断言（内容/目录两族都有）。
+   * `cross_conflicts` 仍是 `unknown[]`：跨段矛盾的具体形态由 facts_extractor
+   * 决定，前端 applyFactsCompletedEvent 只按数组消费。
    */
-  facts_result?: {
-    event?: string;
-    message?: string;
-    segment_stats?: { total?: number; ok?: number; failed?: number; skipped?: number };
-    cross_conflicts?: unknown[];
-    warnings?: string[];
-    group_count?: number;
-    total_items?: number;
-  };
+  facts_result?: GeneratedFactsResult;
   [k: string]: unknown;
 }
 
@@ -3407,13 +3476,20 @@ export const FactsGroupList = memo(function FactsGroupList({
   factAttrTitles,
   sourceKindTitles,
 }: {
-  groups: any[];
+  // ✅ R89（2026-10-17）：接入真实契约（此前 groups / 各回调全是 any）。
+  //   本组件是 facts 交互覆盖最充分的组件（既有 13+ 例），却对「后端字段改名」
+  //   完全失明 —— BUG-1（by_chapter 形状错位）正属此类。
+  //   ⚠️ 刻意**不**把 items/回调参数收到 FactItem：既有测试夹具是**局部对象**
+  //   （只列被断言的字段），强行收紧会让 20+ 处夹具与断言一起改写 ——
+  //   「判据过严 → 后人改松」比判据缺失更糟（§5.14）。形状正确性改由
+  //   `types/facts.ts ↔ 后端真实响应` 的跨语言 parity 护栏担守（pytest 侧）。
+  groups: FactGroupLike[];
   filter: string;
-  onEditGroup: (group: any) => void;
-  onDeleteGroup: (group: any) => void;
-  onEditItem: (group: any, item: any) => void;
-  onResolveItem: (item: any) => void;
-  onResolveConflict: (item: any, value: string) => void;
+  onEditGroup: (group: FactGroupLike) => void;
+  onDeleteGroup: (group: FactGroupLike) => void;
+  onEditItem: (group: FactGroupLike, item: FactItemLike) => void;
+  onResolveItem: (item: FactItemLike) => void;
+  onResolveConflict: (item: FactItemLike, value: string) => void;
   onAckStaleOne?: (itemId: string, title?: string) => void;
   chapterTitles?: Record<string, string>;
   factAttrTitles?: Record<string, string>;
@@ -3750,8 +3826,8 @@ export default function SchemeWorkbenchPage() {
   // ✅ F3 暂停状态可见：当前活跃任务是否已暂停（暂停/恢复按钮互斥 + 「已暂停」Tag）
   const [taskPaused, setTaskPaused] = useState(false);
   const [selectedSection, setSelectedSection] = useState<any>(null);
-  const [facts, setFacts] = useState<any[]>([]);
-  const [factsSummary, setFactsSummary] = useState<any>(null);
+  const [facts, setFacts] = useState<FactGroup[]>([]);
+  const [factsSummary, setFactsSummary] = useState<FactsSummary | null>(null);
   // ✅ facts 加载已落定（成功或失败都置 true）：起始 Tab 判定以它为「可以决策」
   //    信号 —— 旧实现只看 factsSummary===null，加载失败时永远停在等待态。
   const [factsReady, setFactsReady] = useState(false);
@@ -3790,14 +3866,14 @@ export default function SchemeWorkbenchPage() {
   const [factSourceKindTitles, setFactSourceKindTitles] = useState<Record<string, string>>(FALLBACK_SOURCE_KIND_TITLES);
   // ✅ 2026-10-06：分页状态（消费后端 pagination；此前从不下发 limit/offset）
   const [factsPage, setFactsPage] = useState(1);
-  const [factsPagination, setFactsPagination] = useState<any>(null);
+  const [factsPagination, setFactsPagination] = useState<FactPagination | null>(null);
   // ✅ 左侧分类面板（2026-09-23）：全局事实 Tab 选中分类（悬空时由
   //    resolveSelectedFactCategory 回退）+ 项目资料卡片折叠态（默认收起）
   const [selectedFactCategory, setSelectedFactCategory] = useState<string>("");
   const [factsDocsCollapsed, setFactsDocsCollapsed] = useState(true);
   // 九大章节字段完整性与危大阈值诊断（后端确定性计算，零 AI）。
-  const [factsChapterReport, setFactsChapterReport] = useState<any>(null);
-  const [factsDangerReport, setFactsDangerReport] = useState<any>(null);
+  const [factsChapterReport, setFactsChapterReport] = useState<FactChaptersResponse | null>(null);
+  const [factsDangerReport, setFactsDangerReport] = useState<FactDangerResponse | null>(null);
   const [factsDiagnosticsLoading, setFactsDiagnosticsLoading] = useState(false);
   // ✅ R45 · D5：自然语言调整（预览 → 二次确认 → 应用）的状态机已抽到
   // 模块级 FactsAdjustPanel，页面上不再持有这组瞬态。
@@ -4959,6 +5035,10 @@ const draftKey = selectedSection && id
             const { data: st } = await tasksApi.status(active.id);
             // ✅ F3：接管期间同步暂停态（后台可能被其他入口暂停/恢复）
             if (takenOver) setTaskPaused(st.status === "paused");
+            // ✅ R89 S4：接管轮询期间同步进度。旧实现只同步暂停态，用户刷新页面
+            // 后接管一个 30 章长任务（最长十几分钟）期间进度条一直停在接管那一刻
+            // 的值，看起来像卡死（stuckAtFull 兜底只在 >=0.99 时生效，中段无信号）。
+            if (takenOver && typeof st.progress === "number") setProgress(st.progress);
             // ✅ 2026-10-10：终态判定改用单一事实源 —— 旧白名单漏了 degraded，
             //    降级完成的后台任务在这里会被一直判为「仍在跑」。
             if (isTerminalTaskStatus(st.status)) {
@@ -4983,10 +5063,16 @@ const draftKey = selectedSection && id
                 load();
               } else if (st.status === "degraded") {
                 // ✅ 2026-10-10：降级完成同样要刷新（正文已落库），但必须告警
-                msg.warning("后台任务降级完成：一致性修复有失败项，成稿含未修复缺陷");
+                // ✅ R89 S2：目录检查点写失败也会降级 —— 成果只经 SSE 送出一次，
+                //    刷新后 checkpoint_json 为空、无法恢复，因此文案同时覆盖两种成因。
+                msg.warning("后台任务降级完成：成稿可能含未修复缺陷，或成果未能写入检查点（刷新后可能无法恢复，建议立即保存）");
                 load();
               } else if (st.status === "failed") {
                 msg.error(`后台任务失败：${st.message || ""}`);
+              } else if (st.status === "stopped") {
+                // ✅ R89 S4：接管路径此前对 stopped 无分支 —— 用户主动停止后台
+                // 目录生成后刷新页面，这里静默 return，进度条与状态停在接管前。
+                msg.info(`后台任务已停止${st.message ? `：${st.message}` : ""}`);
               }
               return;
             }
@@ -5182,6 +5268,23 @@ const draftKey = selectedSection && id
     }
   }
 
+  /** 目录写入检出占位/泛化标题（后端 R85/R86 加法式回传 `generic_residual` 明细）。
+   *
+   * 背景：用户在 TOC 里看到的「专项6」「总体实施策划（2）」有两批来源 ——
+   * 一批来自 AI 生成（有占位闸门 + 修复链路），另一批来自**写入路径**
+   * （手工新增/改名、上传目录识别、目录库套用）。后端已在 create/update/
+   * save-outline/upload 四条入口统一加法式回传明细（绝不阻断、绝不静默改写），
+   * 但前端此前 `generic_residual` **零消费** ⇒ 用户完全无感知。
+   *
+   * 文案由纯函数 `genericResidualNotice` 产出（utils 层，vitest 可直接覆盖）。
+   * 契约：仅当确有残留才回传该键（数组，元素 `{path,title,kind}`），
+   * 旧后端 / 干净目录都不带此键 ⇒ 老版本一字不变、无提示。
+   */
+  function notifyGenericResidual(data: any) {
+    const text = genericResidualNotice(data);
+    if (text) msg.warning(text);
+  }
+
   /** 一级目录确认闸门（对齐 OpenBidKit outline-selection）：
    * 生成完成后不自动入库，由用户勾选确认一级章节后保存并锁定（locked=1） */
   function openOutlineGate(outline: any[]) {
@@ -5243,6 +5346,7 @@ const draftKey = selectedSection && id
       });
       msg.success(`目录已确认保存（${filtered.length} 个一级章节已锁定）`);
       notifyClearedContent(data);
+      notifyGenericResidual(data);
     } catch (saveErr: any) {
       msg.error(
         `目录已生成但保存失败：${saveErr?.message || "未知错误"}，请点击「保存目录」重试`);
@@ -5310,6 +5414,7 @@ const draftKey = selectedSection && id
                   const { data } = await sectionsApi.saveOutline(id, { outline: evt.outline, source: "ai" });
                   msg.success(`已保存 ${partialCount} 个章节节点`);
                   notifyClearedContent(data);
+                  notifyGenericResidual(data);
                   load();
                 } catch (saveErr: any) {
                   msg.error(saveErr?.message || "保存失败");
@@ -5391,6 +5496,7 @@ const draftKey = selectedSection && id
                   const { data } = await sectionsApi.saveOutline(id, { outline: evt.outline, source: "ai" });
                   msg.success(`已保存 ${partialCount} 个章节的目录`);
                   notifyClearedContent(data);
+                  notifyGenericResidual(data);
                   load();
                 } catch (saveErr: any) {
                   msg.error(saveErr?.message || "保存失败");
@@ -5513,6 +5619,7 @@ const draftKey = selectedSection && id
                     const { data } = await sectionsApi.saveOutline(id, { outline: failCkpt.outline, source: "ai" });
                     msg.success(`已保存 ${partialCount} 个章节节点`);
                     notifyClearedContent(data);
+                    notifyGenericResidual(data);
                     load();
                   } catch (saveErr: any) {
                     msg.error(saveErr?.message || "保存失败");
@@ -5540,6 +5647,7 @@ const draftKey = selectedSection && id
                     const { data } = await sectionsApi.saveOutline(id, { outline: ckpt.outline, source: "ai" });
                     msg.success(`已保存 ${partialCount} 个章节的目录`);
                     notifyClearedContent(data);
+                    notifyGenericResidual(data);
                     load();
                   } catch (saveErr: any) {
                     msg.error(saveErr?.message || "保存失败");
@@ -7702,6 +7810,7 @@ const draftKey = selectedSection && id
       const { data } = await sectionsApi.saveOutline(id, { outline, source: "手动编辑" });
       msg.success(`目录已保存，共 ${data.count || collectAllKeys(treeRef.current).length} 章节`);
       notifyClearedContent(data);
+      notifyGenericResidual(data);
       // ✅ G10：目录结构变更会改变预检的章节集合 → 刷新审核 / 就绪度工作台
       setReviewTick((t) => t + 1);
       await load();
@@ -7828,6 +7937,14 @@ const draftKey = selectedSection && id
           //    套用是**整表重建**，已有正文不保留（上方确认弹窗文案与此口径一致）。
           const { data } = await outlineLibraryApi.applyAndSave(lib.id, { scheme_id: id });
           msg.success(`已套用「${lib.name}」，共 ${data.count || 0} 个章节`);
+          // ✅ R88 FIX-9：本消费点此前**两个加法式键都不读** ⇒ 双重静默：
+          //   ① `cleared_content_sections` —— 套用是整表重建、**已有正文被级联
+          //      删除**，后端为这件事专门量化回传（2026-09-30 P1-7），此处不读
+          //      ⇒ **用户静默丢正文**；
+          //   ② `generic_residual` —— 套用命中占位/泛化标题时的明细清单，
+          //      后端 R79 起就回传，经 R88 FIX-8 才真正透传到此处。
+          notifyClearedContent(data);
+          notifyGenericResidual(data);
           setLibOpen(false);
           setSelectedSection(null);
           await load();
@@ -7890,6 +8007,7 @@ const draftKey = selectedSection && id
           const { data } = await sectionsApi.saveOutline(id, { outline: [], source: "手动清除" });
           msg.success("所有目录已清除");
           notifyClearedContent(data, "清空目录同时删除了：");
+          notifyGenericResidual(data);
           setTree([]);
           setSelectedSection(null);
           setExpandedKeys([]);
@@ -9544,12 +9662,16 @@ exportPctRef.current = pct;
                   ))}
                 </div>
               )}
-              {factsSummary.simulated_ratio > 0.3 && (
+              {/* ✅ R89：`simulated_ratio` 缺失时必须判 0 —— 旧写法
+                  `stats.simulated_ratio > 0.3` 在字段缺席（后端未下发/旧版本）
+                  时得到 undefined>0.3 = false，虽不崩但也读不出「后端没给」；
+                  归一后与 buildFactsSummary 对其它计数的处理同口径。 */}
+              {Number(factsSummary.simulated_ratio) > 0.3 && (
                 <Alert
                   style={{ marginTop: 8 }}
                   type="warning"
                   showIcon
-                  message={`模拟值占比 ${(factsSummary.simulated_ratio * 100).toFixed(0)}% 超过 30% 阈值，建议补充更多项目资料以减少 AI 模拟`}
+                  message={`模拟值占比 ${(Number(factsSummary.simulated_ratio) * 100).toFixed(0)}% 超过 30% 阈值，建议补充更多项目资料以减少 AI 模拟`}
                 />
               )}
               {/* ✅ 缺陷 B 修复：展示 SSE completed 事件的跨段矛盾清单（旧前端未消费）*/}

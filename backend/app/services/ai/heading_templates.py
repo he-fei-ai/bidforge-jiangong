@@ -17,7 +17,14 @@ HEADING_MANAGED_LEVELS: frozenset[int] = frozenset({1, 2, 3, 4, 5, 6, 7})
 # ✅ 编号统一（2026-09-25）：中文数字 / 字母序号表唯一事实源收敛到
 #    services/numbering.py，此处保留同名再导出（本模块消费方与既有测试
 #    按 heading_templates.CHINESE_NUMBERS / ALPHABET 引用，语义不变）。
-from app.services.numbering import ALPHABET, CHINESE_NUMBERS  # noqa: E402, F401
+from app.services.numbering import (  # noqa: E402, F401
+    ALPHABET,
+    CHINESE_NUMBERS,
+    # ✅ R86（L2）：存储编号合法性判据的唯一公开出口 —— 展示态编号与
+    #   落库态编号（`stored_id_to_prefix` / `stored_id_to_display`）必须共用
+    #   同一把尺子，否则脏编号会被展示侧「抢救」成看似合法的编号。
+    stored_id_parts,
+)
 
 # ============================================================
 # 七级标题样式配置（2026-09 规范）
@@ -99,8 +106,23 @@ DEFAULT_NUMBERING_TEMPLATES: dict[int, dict[str, str]] = {
 
 
 def outline_number_parts(id_str: str) -> list[int]:
-    """将点分 ID 拆分为数字数组"""
-    return [int(p) for p in str(id_str or "").split(".") if p.isdigit() and int(p) > 0]
+    """将点分 ID 拆分为数字数组（**合法性判据 = :func:`numbering.stored_id_parts`**
+    —— 全仓唯一事实源）。
+
+    ✅ R86（L2 · 编号命名空间统一）：旧实现自持一份**松过滤**
+    （逐段 ``p.isdigit()`` 挑数字），会把非法存储编号**抢救**成看似合法的
+    数字序列 —— 实测 ``"abc1.2"`` → ``[2]``、``"1.0.2"`` → ``[1,2]``、
+    ``"0.3"`` → ``[3]``、``"1..2"`` → ``[1,2]``。而
+    ``numbering.stored_id_to_prefix`` / ``stored_id_to_display`` 对同一输入
+    **fail-closed**（返回 ``""`` ⇒ 落库正文不套号）⇒ 同一份脏数据下，
+    **落库正文不套号、导出与前端却渲染出一个看似正常的编号**，正是
+    AGENTS §4.13 D4「落库正文 ≠ 导出成稿」的根因家族。
+
+    改用唯一判据后：canonical 数据（``level == 编号深度``）两侧输出
+    **逐项恒等**（护栏 ``test_outline_closeout_r86_20261016.py`` 逐层锁定
+    depth 1..5），脏数据两侧统一 fail-closed（**不编造编号**）。
+    """
+    return [int(p) for p in stored_id_parts(id_str)]
 
 
 def _replace_last_n(m: re.Match, parts: list[int]) -> str:

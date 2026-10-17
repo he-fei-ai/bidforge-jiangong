@@ -14,6 +14,9 @@ import sqlite3
 from datetime import datetime
 
 from app.db import get_conn, get_read_conn, release_read_conn
+from app.services.checkpoint_schema import (
+    FACTS_CHECKPOINT_FIELDS as SCHEMA_FACTS_CHECKPOINT_FIELDS,
+)
 
 logger = logging.getLogger("sse.checkpoint")
 
@@ -24,8 +27,17 @@ CHECKPOINT_WRITE_BASE_DELAY = 0.2
 #: facts checkpoint 回传字段白名单（与在线 completed 事件消费的键保持一致）。
 #: 刻意**不含** groups/facts 明细：成果本身已落 global_facts 表，前端重挂接后
 #: 会走 loadFacts() 重新拉取；把明细塞进 checkpoint 只会让 task_registry 行膨胀。
-_FACTS_CHECKPOINT_FIELDS = (
-    "segment_stats", "cross_conflicts", "warnings", "group_count", "total_items",
+#:
+#: ✅ R89（2026-10-17）：改为**由单一事实源派生**，不再手写第二份清单。
+#:   `checkpoint_schema.FACTS_CHECKPOINT_FIELDS` 是完整 kind 契约（含 event /
+#:   message —— 那两项由调用方在筛选**之外**补入，故不属于本过滤器的范围）；
+#:   本常量 = 该契约去掉 event/message 后的内容部分。这样：
+#:     · 新增终态字段只需改 schema 一处，写入侧筛选与前端生成的 TS 类型同步生效；
+#:     · `sh._CHECKPOINT_KINDS["facts_generation"][1]` 与
+#:       `cs.CHECKPOINT_KINDS["facts_generation"][1]` 恒等（由 sse_handlers 拼装）。
+#:   旧实现在两处各写一份且**无任何 parity 断言**，分叉时测试不会红。
+_FACTS_CHECKPOINT_FIELDS = tuple(
+    f for f in SCHEMA_FACTS_CHECKPOINT_FIELDS if f not in ("event", "message")
 )
 
 

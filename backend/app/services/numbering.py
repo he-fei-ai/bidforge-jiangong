@@ -406,6 +406,22 @@ def _stored_id_parts(stored_id) -> list[str]:
     return parts
 
 
+#: ✅ R86（L2 · 编号命名空间统一）：``_stored_id_parts`` 的**公开别名**。
+#:
+#: 背景：展示态编号此前有**两套合法性判据**。本模块对脏编号 fail-closed
+#: （返回 ``[]`` ⇒ 落库正文不套号），而 ``services/ai/heading_templates.py``
+#: 的 ``outline_number_parts`` 自持一份**松过滤**（逐段 ``p.isdigit()`` 挑数字），
+#: 会把非法编号**抢救**成看似合法的序列（``"abc1.2"`` → ``[2]``、
+#: ``"1.0.2"`` → ``[1,2]``、``"0.3"`` → ``[3]``）⇒ 同一份脏数据下
+#: **落库正文不套号、导出与前端却渲染出一个看似正常的编号**
+#: （即 §4.13 D4「落库正文 ≠ 导出成稿」的根因家族）。
+#:
+#: 现提供本别名供 ``heading_templates`` 复用同一判据；canonical 数据
+#: （``level == 编号深度``）两侧输出逐项恒等，只有脏数据才从
+#: 「编造编号」变为「统一 fail-closed」。
+stored_id_parts = _stored_id_parts
+
+
 def stored_id_to_display(stored_id: str) -> str:
     """存储态编号 → 展示态编号（导出 V2 口径）。
 

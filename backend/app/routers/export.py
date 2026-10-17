@@ -111,14 +111,27 @@ async def _db_fetch_all(cur, *, what: str, strict: bool = False) -> list:
         return []
 
 
-async def _db_fetch_one(cur, *, what: str):
-    """R13 + 容错读：``fetchone`` 的唯一出口。cur 为 None / 读取异常 → None。"""
+async def _db_fetch_one(cur, *, what: str, strict: bool = False):
+    """R13 + 容错读：``fetchone`` 的唯一出口。cur 为 None / 读取异常 → None。
+
+    ✅ 2026-10-17：补 ``strict``（与 :func:`_db_fetch_all` 同语义），供
+    ``collect_export_issues(strict_read=True)`` 把「查询失败」与「确实无行」
+    区分开。缺省 ``False`` 时行为与引入前**逐字一致**。
+    """
     if cur is None:
-        logger.warning("导出：db.execute 返回 None（%s），降级为无行", what)
+        if strict:
+            msg = f"db.execute 返回 None（{what}）"
+            logger.warning("导出：%s，严格读模式 → 抛 DBReadError", msg)
+            raise DBReadError(msg)
+        logger.warning("导出：%s，降级为无行", what)
         return None
     try:
         return await cur.fetchone()
     except Exception as e:  # pragma: no cover - 连接层异常
+        if strict:
+            logger.warning("导出：读取 %s 失败（严格读模式 → 抛 DBReadError）: %s",
+                           what, e)
+            raise DBReadError(str(e)) from e
         logger.warning("导出：读取 %s 失败（降级为无行）: %s", what, e)
         return None
 
@@ -995,13 +1008,30 @@ async def placeholder_history(scheme_id: str, limit: int = 20, db=Depends(get_db
     return {"scheme_id": scheme_id, "history": rows, "keep": _PLACEHOLDER_BASELINE_KEEP}
 
 
-async def collect_export_issues(scheme_id: str, db) -> dict:
+async def collect_export_issues(scheme_id: str, db, *,
+                                strict_read: bool = False) -> dict:
     """导出预检的核心计算（**不写库**，可被多处复用）。
 
     ✅ G1：此前本计算内联在 ``export_check`` 路由里，就绪度总检无法复用，
     只能各自实现一份判定 → 口径分叉。现抽成独立函数：
       · 导出页 → 展示问题清单 + ``preflight_summary``；
       · readiness_overview → 经 ``export_issues_to_findings`` 并入六维评分。
+
+    Args:
+        strict_read: **加法式**开关，缺省 ``False`` 时全部查询沿用 fail-soft
+            （读失败降级为空结果集），**导出页行为逐字不变**。
+            总检侧传 ``True``：把「查询失败」与「确实无行」区分开，抛
+            ``DBReadError`` 让 ``compliance._readiness_overview_compute``
+            的 ``except`` 真正生效。
+
+    ✅ BUG 修复（2026-10-17 · 正文/审核联合审计）：四路查询此前一律
+    ``_db_fetch_all(strict=False)`` —— DB 瞬时故障时**静默返回空结果集**，
+    于是总检侧 ``export_check`` 这一路 findings 整体消失、
+    ``failed_sources`` **也不会**出现该来源（异常根本没抛出来），
+    用户看到「六路来源正常」而分数**虚高**。总检消费点
+    (``compliance.py`` export_check 段) 的注释本就写着「读取失败必须让用户
+    可见（否则该来源静默不参与评分、分数虚高）」，但那条守卫对 DB 读失败
+    这一形态是**结构性不可达**的 —— 由本参数让它真正可达。
     """
     # ✅ P1-7 性能优化：export_check 仅需校验字段，裁剪 content 外的大字段列
     # ✅ BUG 修复（2026-09-20，第 8 轮交付文档取证）：旧列清单**缺 level**（也缺
@@ -1016,7 +1046,7 @@ async def collect_export_issues(scheme_id: str, db) -> dict:
         "word_count, content, outline_json FROM sections"
         " WHERE scheme_id=? ORDER BY sort_order, level, id", (scheme_id,))
     sections = [dict(r) for r in await _db_fetch_all(
-        cur, what="collect_export_issues:sections")]
+        cur, what="collect_export_issues:sections", strict=strict_read)]
     section_ids = {s["id"] for s in sections}
     parent_ids = {s["parent_id"] for s in sections if s.get("parent_id")}
     issues = []
@@ -1048,7 +1078,7 @@ async def collect_export_issues(scheme_id: str, db) -> dict:
     cur = await db.execute(
         "SELECT chart_type, status FROM chart_predictions WHERE scheme_id=?", (scheme_id,))
     chart_rows = await _db_fetch_all(
-        cur, what="collect_export_issues:chart_predictions")
+        cur, what="collect_export_issues:chart_predictions", strict=strict_read)
     chart_total = len(chart_rows)
     # ✅ 状态口径兼容："generated" 是正文同步图表与 fix-mermaid 的历史写法，
     #    语义上同样是"代码已生成完毕"，必须与 "done" 一并视为已完成，
@@ -1114,7 +1144,7 @@ async def collect_export_issues(scheme_id: str, db) -> dict:
             "WHERE project_id=? AND COALESCE(required,0)=1",
             (ba_pid,))
         ba_required = [dict(r) for r in await _db_fetch_all(
-            cur2, what="collect_export_issues:bid_analysis_items")]
+            cur2, what="collect_export_issues:bid_analysis_items", strict=strict_read)]
         ba_total = len(ba_required)
         ba_success = sum(1 for r in ba_required if r["status"] == "success")
         ba_failed = [r for r in ba_required if r["status"] not in ("success", "idle")]
@@ -1173,7 +1203,8 @@ async def collect_export_issues(scheme_id: str, db) -> dict:
                 "FROM global_facts WHERE " + FACT_SCOPE_PREDICATE,
                 (scheme_id, ba_pid))
             frow = await _db_fetch_one(
-                cur, what="collect_export_issues:global_facts 统计")
+                cur, what="collect_export_issues:global_facts 统计",
+                strict=strict_read)
             if frow:
                 _facts_summary = {k: int(frow[k] or 0) for k in _facts_summary}
                 _facts_status = {"ok": True, "code": "ok"}

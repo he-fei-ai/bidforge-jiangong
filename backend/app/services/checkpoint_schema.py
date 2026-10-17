@@ -19,6 +19,28 @@ from typing import Any
 #: GET /sse/task/{id} under _attach_checkpoint_result.
 #: fields is the whitelist of checkpoint_json keys allowed to pass through
 #: to the frontend response.
+#: ✅ R89（2026-10-17）：``facts_generation`` 此前**缺席**于本单一事实源，
+#: 而实际白名单写在 ``routers/sse_checkpoint.py::_FACTS_CHECKPOINT_FIELDS``
+#: （手写第二份）。后果有两处，且都正是本文件 docstring 声称要消除的漂移：
+#:   ① ``frontend/src/types/checkpointSchema.ts``（由本文件生成）**没有**
+#:      ``facts_result`` 接口 ⇒ 前端 ``SchemeWorkbenchPage`` 只能在页面里
+#:      **内联再抄一份**（其注释已自认「本文件另有本地副本」）；
+#:   ② 内容/目录两种任务类型都有 ``sh._CHECKPOINT_KINDS[t] == cs.CHECKPOINT_KINDS[t]``
+#:      的 parity 断言（R77 / R66 护栏），唯独 facts 这一族没有 ——
+#:      两份清单分叉时无任何测试会红。
+#: 现把 facts 归入本文件，并把内容字段提到模块级常量供写入侧派生。
+#: ``event`` / ``message`` 由调用方在筛选**之外**补入（sse_handlers 统一行为），
+#: 但它们同样属于该 kind 的响应契约，故一并登记以生成前端类型。
+FACTS_CHECKPOINT_FIELDS: tuple[str, ...] = (
+    "event",
+    "message",
+    "segment_stats",
+    "cross_conflicts",
+    "warnings",
+    "group_count",
+    "total_items",
+)
+
 CHECKPOINT_KINDS: dict[str, tuple[str, tuple[str, ...]]] = {
     "outline_generation": (
         "outline_result",
@@ -52,6 +74,9 @@ CHECKPOINT_KINDS: dict[str, tuple[str, tuple[str, ...]]] = {
             "fact_autofix_summary",
         ),
     ),
+    # ✅ R89（2026-10-17）：facts 归入单一事实源（此前只存在于 routers 侧手写副本，
+    #    导致生成的 TS 契约缺 facts_result + 无 parity 断言可拦分叉）。
+    "facts_generation": ("facts_result", FACTS_CHECKPOINT_FIELDS),
 }
 
 #: Python type hints for each field (for documentation / future Pydantic model)
@@ -81,6 +106,17 @@ CHECKPOINT_FIELD_TYPES: dict[str, dict[str, str]] = {
         "over_count": "int",
         "word_audit": "dict",
         "fact_autofix_summary": "dict",
+    },
+    # ✅ R89：与页面内联副本逐项对齐（前端 applyFactsCompletedEvent 只按数组消费
+    #    cross_conflicts，具体形态由 facts_extractor 决定，故用 list[dict] → unknown[]）。
+    "facts_result": {
+        "event": "str",
+        "message": "str",
+        "segment_stats": "dict",
+        "cross_conflicts": "list[dict]",
+        "warnings": "list[str]",
+        "group_count": "int",
+        "total_items": "int",
     },
 }
 

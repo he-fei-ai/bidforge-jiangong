@@ -117,6 +117,59 @@ export interface FactGroup {
   filteredItems?: FactItem[];
 }
 
+// -------------------------------------------------------------------------
+// ✅ R89（2026-10-17）组件层的**最小结构**约束
+// -------------------------------------------------------------------------
+/**
+ * 为什么不是直接用 `FactItem`：
+ *
+ * `FactItem` 要求 `category` 等全部必填字段，而组件（及其既有 20+ 处测试夹具）
+ * 按「只声明被断言的字段」构造对象。强行收紧会把测试夹具与断言一起改写 ——
+ * 本仓纪律明确指出：**判据过严会逼后人把护栏改松，比判据缺失更糟**。
+ *
+ * 这里改为「声明组件真正读取的键 + 索引签名放行其余」：
+ *   · 读取点获得类型（字段改名/类型漂移可见）；
+ *   · 未声明的透传键不被阻断（不制造纯 churn）。
+ * 形状正确性由 pytest 侧的跨语言 parity 护栏
+ * （`test_global_facts_frontend_parity_r89_20261017.py`）兜住。
+ *
+ * ⚠️ **刻意不加索引签名**：带索引签名的目标类型会要求源类型（`FactItem` /
+ * `FactGroup`）也有索引签名，否则 `FactGroup[] → FactGroupLike[]` 不可赋值 ——
+ * 那等于反向要求严格契约也变松。未声明但被读取的键由 `tsc` 直接报出来，
+ * 逐个补进下表即可（这正是本文件该有的收敛方向）。
+ */
+export interface FactItemLike {
+  id?: string | number;
+  fact_id?: string;
+  name?: string;
+  value?: string;
+  category?: string;
+  is_simulated?: boolean;
+  is_resolved?: boolean;
+  has_conflict?: boolean;
+  is_stale?: boolean;
+  is_safety_critical?: boolean;
+  is_shared?: boolean;
+  scope?: string;
+  chapter?: string;
+  chapter_title?: string;
+  fact_attr?: string;
+  source_kind?: string;
+  value_kind?: string;
+  confidence?: number;
+  source?: string;
+  conflict_values?: FactConflictCandidate[];
+}
+
+export interface FactGroupLike {
+  id?: string;
+  title?: string;
+  category?: string;
+  content?: string;
+  items?: FactItemLike[];
+  filteredItems?: FactItemLike[];
+}
+
 // =========================================================================
 // 统计（GET /api/v1/global-facts → stats）
 // =========================================================================
@@ -143,6 +196,41 @@ export interface FactChapterStat {
   covered_fields?: string[];
   fields?: string[];
   items?: FactItem[];
+  /**
+   * ✅ R89（2026-10-17）：**逐章**共性事实条数（is_shared=1 且 chapter 命中本章）。
+   * 顶层 `FactChapterStatBlock.shared_count` 是**全案合计**，两者语义不同、不可混用
+   * —— 旧前端读章条目上的该键（不存在）⇒「共性 N」列自引入起恒不显示。
+   * 未分类事实的共性只计入顶层合计（无法归到任何一章）。
+   */
+  shared_count?: number;
+}
+
+/**
+ * ✅ R89（2026-10-17）：`stats.by_chapter` 的**真实形状是对象而非数组**。
+ *
+ * ⚠️ 本文件此前把它声明为 `FactChapterStat[]`，前端实现照此写成
+ * `Array.isArray(stats.by_chapter) ? … : []` —— **契约与实现同错**，
+ * 于是 `tsc --noEmit` 不可能报错，`FactsChapterCoveragePanel` 自 2026-10-06
+ * 引入起永久显示「暂无章节统计」，而数据逐请求就在同一份 `stats` 里下发。
+ * 该缺陷能长期存活还因为该面板**零组件用例**。
+ *
+ * 权威出处：`backend/app/routers/global_facts.py::_chapter_stats_for_items`。
+ * 判据纪律：类型契约必须**独立核对后端源码**，不能由前端实现反推。
+ */
+export interface FactChapterStatBlock {
+  chapters: FactChapterStat[];
+  totals: {
+    facts: number;
+    uncategorized: number;
+    total_fields: number;
+    covered_fields: number;
+    coverage: number;
+    missing_chapters: number;
+  };
+  by_fact_attr: Record<string, number>;
+  by_source_kind: Record<string, number>;
+  /** 全案共性事实条数（合计，非逐章） */
+  shared_count: number;
 }
 
 export interface FactStats {
@@ -155,9 +243,32 @@ export interface FactStats {
   project_shared?: number;
   simulated_ratio: number;
   by_category: FactCategoryStat[];
-  /** ✅ 逐章维度统计（此前后端每次下发、前端整体丢弃） */
-  by_chapter?: FactChapterStat[];
+  /** ✅ 逐章维度统计（对象包裹，见 FactChapterStatBlock 的形状订正说明） */
+  by_chapter?: FactChapterStatBlock;
+  /**
+   * ✅ R89（2026-10-17）：**前端派生**字段（`buildFactsSummary` 计算），后端
+   * 不下发。声明在此以便消费侧 `factsSummary?.has_warnings` 有编译期依据 ——
+   * 此前它只存在于实现里、类型上完全失明。
+   */
+  has_warnings?: boolean;
 }
+
+/**
+ * ✅ R89：`buildFactsSummary` 的**归一化输出**。
+ *
+ * 刻意是 `Partial<FactStats>`：该函数本身就是「把后端可能为脏/缺席的计数
+ * 归一成 number」的防御层，输入宽松、输出只保证被归一的那些键是数字。
+ * 收紧成 `FactStats` 会强迫每个调用方与测试替身补齐全部维度 —— 那等于把
+ * 防御逻辑挪到调用方，与本函数存在的目的相反。
+ */
+export type FactsSummary = Partial<FactStats> & {
+  total: number;
+  simulated: number;
+  unresolved: number;
+  conflicts: number;
+  stale: number;
+  has_warnings: boolean;
+};
 
 export interface FactPagination {
   limit: number;

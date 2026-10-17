@@ -160,6 +160,20 @@ class TestTitleFixRejectsCounterSuffix:
 # B 组：C3 — 落库入口的占位标题检测（部分成果 / 上传 / 套库 / AI 调整）
 # ---------------------------------------------------------------------------
 class TestSaveOutlineGenericDetection:
+    @pytest.fixture(autouse=True)
+    def _isolate_r89_autofix(self, monkeypatch):
+        """断开 R89 的「落库前自动外科式重写」。
+
+        本组锁的是「检出 → 加法式回传 generic_residual」这一契约，不测
+        「检出后自动改写标题」。若不断开，保存链路会真的发起一次 AI 重写：
+        改写成功后残留为空 ⇒ `generic_residual` 键消失，断言退化成对第三方
+        模型输出的依赖（离线必失败、在线恰好通过，结论不稳定）。
+        自动重写本身由 R89 护栏单独覆盖。
+        """
+        from app.config import settings
+        monkeypatch.setattr(settings, "outline_autofix_generic_on_save", False,
+                            raising=False)
+
     @pytest_asyncio.fixture
     async def ctx(self, tmp_path, monkeypatch):
         import app.db as appdb

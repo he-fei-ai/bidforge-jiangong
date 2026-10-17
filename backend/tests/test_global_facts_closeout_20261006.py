@@ -1448,7 +1448,19 @@ class TestFrontendConsumesByChapterAndPagination:
         p = os.path.join(root, "frontend", "src", "types", "facts.ts")
         assert os.path.exists(p)
         src = io.open(p, encoding="utf-8").read()
-        assert "by_chapter?: FactChapterStat[]" in src
+        # ✅ R89（2026-10-17）形状订正：本断言原本写死 `by_chapter?: FactChapterStat[]`
+        #    （裸数组），而后端 `list_facts` 下发的 `stats.by_chapter` 是**对象**
+        #    `{chapters, totals, by_fact_attr, by_source_kind, shared_count}`。
+        #    ⇒ 类型契约与前端实现**同错**，`tsc --noEmit` 原理上不可能报错，
+        #    九章事实分布面板自 2026-10-06 引入起永久空转（B-1）。
+        #    本用例的**原意图**（类型必须覆盖新下发字段）保持不变，只把错误的
+        #    形状字面量换成真实契约，并补一条反向锁防止错误形状回流。
+        assert "by_chapter?: FactChapterStatBlock" in src, \
+            "FactStats.by_chapter 必须声明为对象块 FactChapterStatBlock"
+        assert "export interface FactChapterStatBlock" in src, \
+            "缺 FactChapterStatBlock 定义"
+        assert "by_chapter?: FactChapterStat[]" not in src, \
+            "by_chapter 不得再声明为裸数组 —— 那正是 B-1 的根因（契约与实现同错）"
         assert "interface FactPagination" in src
 
 

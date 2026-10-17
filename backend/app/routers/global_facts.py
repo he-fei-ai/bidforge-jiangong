@@ -54,14 +54,12 @@ from app.services.facts_classification import (
 )
 from app.services.facts_extractor import (
     CATEGORY_TITLES,
-    FACT_SCOPE_SHARED_FRAGMENT,
-    FACT_SCOPE_PREDICATE,
     CATEGORY_TO_FACT_TYPE,
+    FACT_SCOPE_PREDICATE,
+    FACT_SCOPE_SHARED_FRAGMENT,
     # ✅ 2026-10-06：落库列清单/INSERT 语句的**唯一事实源**（本文件不再本地维护）
     GLOBAL_FACTS_INSERT_COLS,
     GLOBAL_FACTS_INSERT_SQL,
-    # ✅ R80（2026-10-15）：value_kind 白名单归一（单一事实源，解析/落库/手工共用）
-    normalize_value_kind,
     MAX_SOURCE_EXCERPT,
     SCHEME_PROJECT_ID_SQL,
     _clip_excerpt,
@@ -77,6 +75,8 @@ from app.services.facts_extractor import (
     is_safety_critical_name,
     is_simulated_marked,
     normalize_key,
+    # ✅ R80（2026-10-15）：value_kind 白名单归一（单一事实源，解析/落库/手工共用）
+    normalize_value_kind,
     row_field,
     strip_simulated_marker,
 )
@@ -361,8 +361,23 @@ def _chapter_stats_for_items(items: list[dict]) -> dict:
         k = it.get("source_kind") or ""
         if k in by_kind:
             by_kind[k] += 1
+    # ✅ R89（2026-10-17）· per-chapter 共性计数（**纯加法式**，既有键一字未改）：
+    #   此前 `shared_count` 只是**全案合计**，挂在 by_chapter 顶层；前端
+    #   `FactsChapterCoveragePanel` 逐章渲染 `r.shared` 读的是**章条目**上的
+    #   `shared_count`，该键从不存在 ⇒ 「共性 N」永远不显示。
+    #   九章按章共享是**可从已有 rows 直接聚合**的确定性量（零 AI、零额外查询），
+    #   不新增配置、不改任何判定；未分类事实的共性仍只计入顶层合计。
+    shared_by_chapter: dict[str, int] = {}
+    for it in rows:
+        if it.get("is_shared"):
+            k = str(it.get("chapter") or "")
+            shared_by_chapter[k] = shared_by_chapter.get(k, 0) + 1
+    chapters = [
+        {**ch, "shared_count": shared_by_chapter.get(str(ch.get("key") or ""), 0)}
+        for ch in summary["chapters"]
+    ]
     out = {
-        "chapters": summary["chapters"],
+        "chapters": chapters,
         "totals": summary["totals"],
         "by_fact_attr": by_attr,
         "by_source_kind": by_kind,

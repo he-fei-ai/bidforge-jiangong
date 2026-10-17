@@ -1201,7 +1201,12 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
     export_findings: list = []
     try:
         from app.routers.export import collect_export_issues, export_issues_to_findings
-        _exp = await collect_export_issues(scheme_id, db)
+        # ✅ BUG 修复（2026-10-17）：必须传 strict_read=True，否则下面这个
+        #    except 对「DB 读失败」这一形态**结构性不可达** —— collect_export_issues
+        #    内部四路查询原本一律 fail-soft 降级为空结果集，DB 瞬时故障时
+        #    export_check 这一路 findings 整体消失、异常也不抛 → 本来源既不进
+        #    sources 也不进 failed_sources → 用户看到「六路正常」而分数虚高。
+        _exp = await collect_export_issues(scheme_id, db, strict_read=True)
         export_findings = export_issues_to_findings(_exp.get("issues") or [])
         if export_findings:
             sources.append("export_check")

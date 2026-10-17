@@ -3,19 +3,21 @@
 纯数据处理：图表 code 兜底、编号一致性、重复章节、交叉引用陈旧检测等。
 无 DB / AI / HTTP 依赖，仅依赖正则与少量服务层纯函数。
 """
-import json
 import logging
 import re
 from datetime import date
 
-from app.routers._chart_pipeline import INLINE_CHART_FENCE_LANGS, parse_fence_line
-from app.services.content_blocks import (
-    _cn_pure_to_int,
-    _compute_subheading,
-    _parse_content_blocks,
-    _strip_duplicate_leading_title,
-    _strip_title_number,
-)
+from app.routers._chart_pipeline import INLINE_CHART_FENCE_LANGS
+# ⚠️ R86 L3 收敛后本文件不再需要 `json` / `parse_fence_line` / `content_blocks`
+#    的 5 个子标题工具 —— 它们此前**只**被那 14 个副本函数体使用。
+#    留着即死导入（ruff F401），删掉不改变任何行为（已由差分验证逐项比对）。
+
+# ✅ R86 L3（2026-10-16）：本文件此前**物理复制**了 export.py 的 14 个判据（编号折算 / 排序键 / 重复章节 / 编号错位 / 子标题命名空间冲突 / 陈旧交叉引用 /
+#   图表取码 / 未闭合围栏计数 / 审计日志格式化）。实测去掉 docstring 后 14 个函数体 AST **完全一致**，
+#   即纯副本 —— 属本仓最高频反模式「同一判据两份副本」：任一侧改动即漂移，且漂移无任何测试能发现。
+#   现统一委派到 export（唯一事实源），本文件不再持有副本；函数签名与 docstring 逐字保留，调用方零改动。
+#   ⚠️ 同名函数 `audit_content` **刻意不收敛**：本文件版本是能力超集（另加全文级体检），收敛会丢功能。
+from app.routers import export as _ex  # ✅ R86 L3：14 个与 export 逐字同源的判据统一委派
 
 logger = logging.getLogger("export.audit")
 
@@ -41,18 +43,7 @@ def _build_chart_type_index(chart_lookup: dict[tuple[str, str], str],
     跨章借用的**可观测性**（计数 / 响应头 / 前端提示）由 ``_resolve_chart_code``
     统一产出，见其 docstring。
     """
-    index: dict[str, list[tuple[str, str]]] = {}
-    items = list(chart_lookup.items())
-    if order_rank:
-        # 稳定排序：rank 相同的（理论上不会出现）保持原插入顺序
-        items.sort(key=lambda kv: order_rank.get(kv[0][0], 1 << 30))
-    for (sid, ct), code in items:
-        if not code:
-            continue
-        bucket = index.setdefault(ct, [])
-        if not any(s == sid and c == code for s, c in bucket):
-            bucket.append((sid, code))
-    return index
+    return _ex._build_chart_type_index(chart_lookup, order_rank)
 
 
 def _find_fallback_code(
@@ -77,25 +68,7 @@ def _find_fallback_code(
     并**回传来源章节**让调用方能计数与上报 —— 此前跨章借图是**零信号**的
     （成稿里 B 章可能出现 A 章的流程图，图文不符却无任何提示）。
     """
-    bucket = chart_type_index.get(chart_type) or []
-    if not bucket:
-        return "", ""
-    if current_section_id:
-        for sid, code in bucket:
-            if sid == current_section_id:
-                return code, sid
-        if order_rank:
-            me = order_rank.get(current_section_id)
-            if me is not None:
-                # 优先取「排在自己之前且距离最近」的同类图；都排在自己之后时
-                # 取全局第一张（保持"有图总比没图好"的兜底语义）
-                before = [(abs(me - order_rank.get(sid, me)), i, code)
-                          for i, (sid, code) in enumerate(bucket)
-                          if order_rank.get(sid) is not None and order_rank[sid] < me]
-                if before:
-                    before.sort()
-                    return before[0][2], bucket[before[0][1]][0]
-    return bucket[0][1], bucket[0][0]
+    return _ex._find_fallback_code(chart_type_index, chart_type, current_section_id, order_rank)
 
 
 def _resolve_chart_code(block: dict, sec_id: str, chart_type: str,
@@ -113,10 +86,7 @@ def _resolve_chart_code(block: dict, sec_id: str, chart_type: str,
     兜底命中的来源章节由返回值给出，供渲染统计（X-Chart-Render-Stats）
     与导出日志如实上报。
     """
-    code = block.get("code") or chart_lookup.get((sec_id, chart_type), "")
-    if code:
-        return code, ""
-    return _find_fallback_code(chart_type_index, chart_type, sec_id, order_rank)
+    return _ex._resolve_chart_code(block, sec_id, chart_type, chart_lookup, chart_type_index, order_rank)
 
 
 # ✅ 导出器逻辑版本：纳入内容指纹，使渲染/排版逻辑修复后旧缓存放缓。
@@ -465,39 +435,7 @@ def _count_unclosed_chart_fences(content: str) -> int:
       印进交付文档。审计既无计数、用户也无告警，等于"静默丢正文"。
       现改为统计**所有**未闭合围栏。
     """
-    if not content:
-        return 0
-    lines = content.split("\n")
-    n = 0
-    i = 0
-    while i < len(lines):
-        # ✅ 2026-09-24 修复：围栏检测改用 _chart_pipeline.parse_fence_line（与登记/
-        #    改写/解析三侧同源）。旧实现 `startswith("```") + [3:]` 漏检波浪号围栏、
-        #    且对 4 反引号围栏取到错误 lang —— 与 _parse_content_blocks 的同一根因。
-        pf = parse_fence_line(lines[i])
-        if pf is None:
-            i += 1
-            continue
-        open_char, _open_len, lang = pf
-        lang = lang.strip().lower()
-        i += 1
-        closed = False
-        while i < len(lines):
-            pf_end = parse_fence_line(lines[i])
-            if pf_end is not None and pf_end[0] == open_char:
-                # 同种字符即视为闭合（与 read_fenced_block 的闭合判据一致，
-                # 长度不严格要求 ≥ 开围栏，避免 4 反引号开 + 3 反引号闭的错配被判未闭合）
-                closed = True
-                i += 1
-                break
-            i += 1
-        if not closed:
-            n += 1
-            if lang not in _CHART_FENCE_LANGS:
-                logger.warning(
-                    "正文含未闭合的普通代码围栏（lang=%s），"
-                    "其后正文存在被当代码块输出的风险", lang)
-    return n
+    return _ex._count_unclosed_chart_fences(content)
 
 
 def audit_content(sections: list[dict]) -> dict:
@@ -550,10 +488,7 @@ def audit_content(sections: list[dict]) -> dict:
 
 def _format_audit_log(audit: dict) -> str:
     """把体检结果压成一行日志（便于日志里直接看出文档可交付性）。"""
-    if not audit.get("items"):
-        return "导出前内容体检：未发现可交付性风险"
-    parts = [f"{it['label']} {it['count']} 处" for it in audit["items"]]
-    return "导出前内容体检：" + "；".join(parts)
+    return _ex._format_audit_log(audit)
 
 
 def _count_child_namespace_subheadings(blocks: list[dict], section_prefix: str) -> int:
@@ -566,17 +501,7 @@ def _count_child_namespace_subheadings(blocks: list[dict], section_prefix: str) 
 
     依赖 ``blocks`` 中已算好的 ``_fixed_text``（write_section 渲染前会先统一计算）。
     """
-    n = 0
-    if not section_prefix:
-        return 0
-    pat = re.compile(r"^" + re.escape(section_prefix) + r"\.(\d+(?:\.\d+)*)\s")
-    for block in blocks or []:
-        if block.get("type") != "heading":
-            continue
-        m = pat.match(str(block.get("_fixed_text") or ""))
-        if m and "." not in m.group(1):
-            n += 1
-    return n
+    return _ex._count_child_namespace_subheadings(blocks, section_prefix)
 
 
 def _section_sort_key(sec: dict):
@@ -590,9 +515,7 @@ def _section_sort_key(sec: dict):
       2. 内容指纹（依赖章节顺序）随之抖动 → 缓存永远 miss，重复渲染。
     故统一加确定性兜底键，所有排序点必须共用本函数。
     """
-    return (sec.get("sort_order", 0) or 0,
-            int(sec.get("level") or 1),
-            str(sec.get("id") or ""))
+    return _ex._section_sort_key(sec)
 
 
 def _detect_duplicate_sections(sections: list[dict]) -> list[dict]:
@@ -610,117 +533,12 @@ def _detect_duplicate_sections(sections: list[dict]) -> list[dict]:
     凡同一章作用域内出现相同编号即判重复——正常文档不会误报，且若未来有人破坏
     渲染端的修复，本检测会重新报出，作为回归护栏。
     """
-    by_id: dict = {s.get("id"): s for s in sections if s.get("id")}
-    children_map: dict = {}
-    roots: list = []
-    for s in sections:
-        pid = s.get("parent_id")
-        if pid and pid in by_id:
-            children_map.setdefault(pid, []).append(s)
-        else:
-            roots.append(s)
-    roots.sort(key=_section_sort_key)
-    for lst in children_map.values():
-        lst.sort(key=_section_sort_key)
-
-    from app.services.ai.heading_v2 import HeadingNumberingGeneratorV2
-    gen = HeadingNumberingGeneratorV2()
-    seen: dict[tuple, str] = {}   # (章作用域, 渲染编号) -> 首次出现标题
-    dupes: list[dict] = []
-
-    def flag(num: str, scope, title: str, sid):
-        key = (scope, num)
-        if key in seen:
-            dupes.append({
-                "type": "duplicate_section_number",
-                "section_id": sid, "title": title,
-                "detail": (f"章节编号「{num}」在本章内重复出现"
-                           f"（此前见于「{seen[key]}」），导出目录与编号将失去唯一性"),
-            })
-        else:
-            seen[key] = title
-
-    def walk(sec: dict, parent_id: str, chapter_id):
-        level = int(sec.get("level", 1) or 1)
-        title = (sec.get("title") or "").strip()
-        if level == 1:
-            chapter_id = sec.get("id")
-        scope = chapter_id if level >= 2 else None
-        pure = _strip_title_number(title)
-        num = gen.update_counter(level, parent_id)
-        if num:
-            flag(num, scope, title, sec.get("id"))
-        # —— 内容内部子标题（与 write_section 同口径：prefix + _compute_subheading）——
-        n_child_ns = 0
-        content = sec.get("content") or ""
-        if content and num:
-            section_prefix = _section_number_prefix(f"{num} {pure}".strip())
-            blocks = _parse_content_blocks(content)
-            # 与 write_section 同口径：剥离正文开头与本节标题重复的块
-            # （AI 常在正文首行自引用本节标题；渲染端会剥掉，检测器不剥会假阳性）
-            blocks = _strip_duplicate_leading_title(blocks, pure, f"{num} {pure}".strip())
-            # ✅ 加固（2026-10-06 · D4）：`_compute_subheading` 的 `has_children`
-            #    必须与渲染端同口径。渲染端在「本节有 DB 子章节 **且**
-            #    body_subheading_demote_with_children 开启」时把正文子标题降级为
-            #    节内 body 命名空间（1）/ a）、…）—— 这些编号**不占 X.N**。
-            #    旧实现不传该参数（默认 False）⇒ 预检按降级前的口径把它们算成
-            #    "1.1/1.2"，于是**默认配置（降级开启）下预检报出渲染结果里根本
-            #    不存在的重复编号**（实测：渲染为 `1）、项目概况 / 2）、建筑概况 /
-            #    1 工程规模 / 1.1 规模描述`，零重复；预检却报「1.1 重复」）。
-            #    这类「预检说有、成稿没有」的假阳性会直接把用户引向错误的整改方向
-            #    （与 §4.23 已收口的 CMP-01 父节点误报同型）。
-            _demote = True
-            try:
-                from app.config import settings as _s
-                _demote = bool(_s.body_subheading_demote_with_children)
-            except Exception:  # pragma: no cover - 配置不可用时沿用 fail-safe 默认
-                _demote = True
-            has_children_demoted = bool(children_map.get(sec.get("id"))) and _demote
-            sub_counters: dict[int, int] = {}
-            for block in blocks:
-                if block.get("type") != "heading":
-                    continue
-                md_lv = block.get("level", 1)
-                bpure = _strip_title_number(block.get("text", ""))
-                text, _style = _compute_subheading(
-                    section_prefix, level, md_lv, sub_counters, bpure,
-                    sec.get("id") or "", has_children=has_children_demoted)
-                block["_fixed_text"] = text
-            # 通过 export 命名空间调用，使测试 monkeypatch E._count_child_namespace_subheadings 生效
-            from app.routers import export as _ex
-            n_child_ns = _ex._count_child_namespace_subheadings(blocks, section_prefix)
-            for block in blocks:
-                if block.get("type") != "heading":
-                    continue
-                fixed = str(block.get("_fixed_text") or "")
-                m = re.match(r"^(\d+(?:\.\d+)*)\s", fixed)
-                if m:
-                    # 内容子标题统一挂在「章作用域」下：章自身内容的 "1.1" 与
-                    # 其子孙章节的 "1.1" 在读者眼里同为 "1.1"，属于同一判重宇宙。
-                    flag(m.group(1), chapter_id, fixed, sec.get("id"))
-        # —— 与 write_section 一致：有 DB 子章节时把子章节层级计数器前移 ——
-        # 仅 level>=2 时前移有意义（正文子标题 "{本节编号}.N" 恰与 DB 子章节同级）；
-        # level=1 章节的正文子标题 ("1.1") 属于更深命名空间，与其 L2 子章节（"1"/"2"）
-        # 不冲突，前移反而会把子章节错误改成 "18/19"，必须与渲染端保持同口径。
-        if level >= 2 and children_map.get(sec.get("id")) and n_child_ns:
-            _idx = min(level, 7)
-            gen.parent_ids[_idx] = sec.get("id")
-            gen.counters[_idx] = n_child_ns
-            for _i in range(_idx + 1, 8):
-                gen.counters[_i] = 0
-                gen.parent_ids[_i] = None
-        for ch in children_map.get(sec.get("id"), []):
-            walk(ch, sec.get("id"), chapter_id)
-
-    for r in roots:
-        walk(r, "", None)
-    return dupes
+    return _ex._detect_duplicate_sections(sections)
 
 
 def _stored_outline_number(sec: dict) -> str:
     """从章节行提取存储态编号（outline_json.id）；非法/缺失返回 ""。"""
-    from app.services.numbering import stored_outline_id
-    return stored_outline_id(sec)
+    return _ex._stored_outline_number(sec)
 
 
 def _detect_section_number_mismatch(sections: list[dict]) -> list[dict]:
@@ -739,40 +557,7 @@ def _detect_section_number_mismatch(sections: list[dict]) -> list[dict]:
     - 顺序键与渲染端一致（_section_sort_key：sort_order → level → id）；
     - 上限 20 条，避免整树漂移时响应体爆炸（detail 已含计数语义由前端聚合）。
     """
-    by_id: dict = {s.get("id"): s for s in sections if s.get("id")}
-    children_map: dict = {}
-    roots: list = []
-    for s in sections:
-        pid = s.get("parent_id")
-        if pid and pid in by_id:
-            children_map.setdefault(pid, []).append(s)
-        else:
-            roots.append(s)
-    roots.sort(key=_section_sort_key)
-    for lst in children_map.values():
-        lst.sort(key=_section_sort_key)
-
-    issues: list[dict] = []
-
-    def walk(ns: list, prefix: str):
-        for idx, sec in enumerate(ns, 1):
-            expected = f"{prefix}.{idx}" if prefix else str(idx)
-            stored = _stored_outline_number(sec)
-            if stored and stored != expected:
-                issues.append({
-                    "type": "section_number_mismatch",
-                    "section_id": sec.get("id"),
-                    "title": (sec.get("title") or "").strip(),
-                    "stored": stored,
-                    "expected": expected,
-                    "detail": (f"章节存储编号「{stored}」与结构位置推算编号「{expected}」"
-                               f"不一致（增删/拖拽后未重算或历史脏数据），"
-                               f"正文生成与导出展示的编号将错位；重新保存目录或重排可修复"),
-                })
-            walk(children_map.get(sec.get("id"), []), expected)
-
-    walk(roots, "")
-    return issues[:20]
+    return _ex._detect_section_number_mismatch(sections)
 
 
 # ✅ E6 Tier 1 · 失效交叉引用检测（DLV-14）—— 2026-09-25
@@ -797,48 +582,7 @@ def _detect_body_subheading_namespace_conflict(sections: list[dict]) -> list[dic
     本预检在导出前检测这类残留冲突，严重度 high（阻断导出）。
     """
     # 正则：Markdown 井号后接 X.X 点分编号，或纯文本子标题自带 X.X
-    _HEADING_WITH_DOTTED_NUM_RE = re.compile(
-        r"^\s*(?:#{1,6}\s+|\*\*?)?\d+(?:\.\d+)+(?:\.{1,})?\s+")
-
-    # 构建 parent_ids 倒排索引
-    parent_ids = {s.get("parent_id") for s in sections if s.get("parent_id")}
-    # 用 config
-    try:
-        from app.config import settings as _s
-        _demote = _s.body_subheading_demote_with_children
-    except Exception:
-        _demote = True
-    # 只有配置开启降级时才报（关闭时计数器前移处理撞号，属旧预期行为）
-    if not _demote:
-        return []
-
-    issues: list[dict] = []
-    for sec in sections:
-        sid = sec.get("id")
-        if sid not in parent_ids:
-            continue  # 无子章节 → 不可能撞号
-        content = sec.get("content") or ""
-        if not content.strip():
-            continue
-        # 扫逐行，检测正文里的点分子标题
-        conflicts: list[str] = []
-        for line in content.split("\n"):
-            if _HEADING_WITH_DOTTED_NUM_RE.search(line):
-                conflicts.append(line.strip()[:80])
-        if conflicts:
-            issues.append({
-                "type": "body_subheading_namespace_conflict",
-                "section_id": sid,
-                "title": (sec.get("title") or "").strip(),
-                "detail": (
-                    f"本节有 DB 子章节，正文子标题应降级为节内 body 命名空间（1）/ a、…），"
-                    f"但仍残留点分格式（{conflicts[:3]}）——"
-                    f"规范化可能被跳过，导出成稿将出现「正文子标题/DB 子章节 1.1/1.1」撞号。"
-                    f"检查配置 body_subheading_demote_with_children 是否开启，"
-                    f"或重跑正文规范化。"
-                ),
-            })
-    return issues[:20]
+    return _ex._detect_body_subheading_namespace_conflict(sections)
 
 
 def _detect_stale_cross_references(
@@ -865,110 +609,7 @@ def _detect_stale_cross_references(
     """
     # real_nums 默认推导：节号集合从 outline_json → stored_id_to_display +
     # stored_id_to_prefix + 第X章形式。
-    if real_nums is None:
-        real_nums = {"fig": set(), "tbl": set(), "sec": set()}
-    else:
-        # 防御性拷贝，避免调用方的 set 被误修改
-        real_nums = {
-            "fig": set(real_nums.get("fig", set()) or set()),
-            "tbl": set(real_nums.get("tbl", set()) or set()),
-            "sec": set(real_nums.get("sec", set()) or set()),
-        }
-    # 内部推导节号集合（如果调用方没传）
-    if not real_nums.get("sec"):
-        from app.services.numbering import stored_id_to_display, stored_id_to_prefix
-        for s in sections:
-            oj = s.get("outline_json") or ""
-            sid = ""
-            if isinstance(oj, dict):
-                sid = str(oj.get("id") or "")
-            else:
-                try:
-                    sid = str(json.loads(oj).get("id") or "")
-                except Exception:
-                    sid = ""
-            if not sid:
-                continue
-            display = stored_id_to_display(sid)
-            prefix = stored_id_to_prefix(sid)
-            if display:
-                real_nums["sec"].add(display)
-                # 裸数字路径（如 "2" / "2.1" / "2.3"）也加进去，覆盖
-                # 「见 2.3 节」「详见 2 章」这类省略「第/节」的引用写法
-                real_nums["sec"].add(sid.split(".", 1)[0])
-                if prefix and prefix != sid:
-                    real_nums["sec"].add(prefix)
-                    for p in prefix.split("."):
-                        real_nums["sec"].add(p)
-            if prefix:
-                real_nums["sec"].add(prefix)
-
-    issues: list[dict] = []
-    seen: set[tuple] = set()  # 去重键：(section_id, ref_type, ref)
-
-    def _add(section_id: str, title: str, ref_type: str, ref: str, detail: str):
-        key = (section_id, ref_type, ref)
-        if key in seen:
-            return
-        seen.add(key)
-        issues.append({
-            "type": "stale_cross_reference",
-            "section_id": section_id,
-            "title": title,
-            "ref_type": ref_type,
-            "ref": ref,
-            "detail": detail,
-        })
-
-    for sec in sections:
-        content = sec.get("content") or ""
-        if not content.strip():
-            continue
-        sec_id = sec.get("id", "")
-        title = (sec.get("title") or "").strip()
-
-        # 图号
-        if real_nums["fig"]:
-            for m in _STALE_FIG_REF_RE.finditer(content):
-                ref = m.group(1)
-                full_ref = f"图{ref}"
-                if full_ref not in real_nums["fig"]:
-                    _add(sec_id, title, "fig", full_ref,
-                         f"正文引用「{full_ref}」，但本次导出只分配了 "
-                         f"{sorted(real_nums['fig'])}；目录重排或增删章节后图号已漂移，"
-                         f"建议检查引用是否仍有效")
-
-        # 表号
-        if real_nums["tbl"]:
-            for m in _STALE_TBL_REF_RE.finditer(content):
-                ref = m.group(1)
-                full_ref = f"表{ref}"
-                if full_ref not in real_nums["tbl"]:
-                    _add(sec_id, title, "tbl", full_ref,
-                         f"正文引用「{full_ref}」，但本次导出只分配了 "
-                         f"{sorted(real_nums['tbl'])}；目录重排后表号可能漂移")
-
-        # 节号（内部总是推导 sec 集合）
-        for m in _STALE_SEC_REF_RE.finditer(content):
-            # 两个捕获组：组 1=「第…节」形式；组 2=引导词形式
-            ref = (m.group(1) or m.group(2) or "").strip()
-            if not ref:
-                continue
-            ref_text = f"第{ref}节" if m.group(1) else ref
-            # 节号真实集合包含多种口径（第X章 / X / X.X / prefix），逐一比对
-            in_real = (
-                ref_text in real_nums["sec"]
-                or ref in real_nums["sec"]
-                or f"第{ref}章" in real_nums["sec"]
-            )
-            if not in_real:
-                # 节号漂移最常见——说明目录重排后原章节不存在，需要用户确认
-                _add(sec_id, title, "sec", ref_text,
-                     f"正文引用「{ref_text}」，但当前目录结构中无此编号；"
-                     f"章节可能已被删除/重排，建议人工确认引用目标")
-
-    # 上限 20，避免超长文档整树漂移时响应体爆炸
-    return issues[:20]
+    return _ex._detect_stale_cross_references(sections, real_nums)
 
 
 # ---------------------------------------------------------------------------
@@ -985,17 +626,7 @@ def _section_number_prefix(full_title: str) -> str:
         '（一） 设计标准'     -> ''（中文序号前缀无法嵌套，子标题直接用自身序号）
     无编号标题返回 ''。
     """
-    s = (full_title or "").strip()
-    if not s:
-        return ""
-    m = re.match(r"^第([一二三四五六七八九十百千零\d]+)[章节]", s)
-    if m:
-        cn = m.group(1)
-        return _cn_numeral_to_int(cn)
-    m = re.match(r"^(\d+(?:\.\d+)*)", s)
-    if m:
-        return m.group(1)
-    return ""
+    return _ex._section_number_prefix(full_title)
 
 
 def _cn_numeral_to_int(cn: str) -> str:
@@ -1004,26 +635,7 @@ def _cn_numeral_to_int(cn: str) -> str:
     支持纯数字 / 十位组合 / 百位组合 / 千位组合 / 混入阿拉伯数字。
     解析失败时返回原字符串（不做静默吞错）。
     """
-    if not cn:
-        return ""
-    if cn.isdigit():
-        return cn
-    if re.search(r"\d", cn):
-        parts = re.split(r"([0-9]+)", cn)
-        out = ""
-        for p in parts:
-            if p == "":
-                continue
-            if p.isdigit():
-                out += p
-            else:
-                val = _cn_pure_to_int(p)
-                if val is not None:
-                    out += str(val)
-        return out if out else cn
-
-    val = _cn_pure_to_int(cn)
-    return str(val) if val is not None else cn
+    return _ex._cn_numeral_to_int(cn)
 
 
 
