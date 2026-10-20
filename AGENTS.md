@@ -1,6 +1,14 @@
 # AGENTS.md — 专项方案工具箱 · AI Agent 工作边界
 
-> **最近校准：2026-10-20（R111 · 日志审计 P2 承接收口 · 七项 P2 按风险收益落地四项，三项登记不落地）** —— **【承接 R109 §五登记的 7 项 P2：P2-1 保存配置去重提示 / P2-2 死配置报告门槛透明化 / P2-5 导出缓存日志 / P2-6 dashscope 渠道卫生 / P2-7 事实单段永久错误不重试 五项落地四项（P2-3/P2-4 登记不落地）；加法式、零迁移、零 DDL、零新增配置、fail-soft；回归 1660 passed / 0 failed】**：
+> **最近校准：2026-10-20（R112 · 全仓遗留问题与后续建议收口 · 三阶段执行）** —— **【用户指令「全部遗留问题与后续建议按最优方案执行修复和加固处理」⇒ 盘点全仓跨轮遗留登记后按三阶段执行：A 类 7 项零风险加法式（6 项确认前序已落地 + A-5 本轮新落地）；B 类 5 项（B-3/B-4 确认已落地 + B-1/B-2/B-5 登记待产品/排期）；C 类 11 项登记不落地并固化护栏；加法式、零迁移、零 DDL、零新增配置项、fail-soft；回归 46+113 全绿】**：
+> ① **【A-5 · 压缩炸弹阈值环境变量化（本轮唯一新增生产代码）】** `file_parser.py` 四个闸门阈值改 `BIDFORGE_MAX_ARCHIVE_*` 环境变量可配置（默认值逐字相同：2000 / 400MB / 200 / 64MB），非法值 fail-soft 回退默认（`_env_int` helper），`_read_zip_entry_limited` 的 `limit is None` 运行时解析契约保留。护栏 4 例 + A/B 2/2（改默认值 / 移除 fail-soft 各定向红）。
+> ② **【A 类 6 项确认前序已落地】** A-1 R68 作用域谓词静态护栏（R69）、A-2 R75 G8 只读盘点锁、A-3/A-4 R87/R88 export_audit 不接线护栏、A-6 R74 DB_PATH autouse、A-7 DLV-13/14 后端已注册（前端 API 动态获取）。
+> ③ **【B 类 2 确认 + 3 登记】** B-3 `_repair_json` 已由 R58 委托统一 JSON 通道（`_collect_json_str` → `collect_json_response_with_chat` + 注入 `ba.chat_with_fallback`，保留确定性正则下界）；B-4 `SELECT project_id FROM schemes WHERE id=?` 已由 R54 F7 收敛（`SCHEME_PROJECT_ID_SQL` 唯一字面量，`resolve_scheme_project_id` 服务层单一出口）。B-1/B-2 渲染器字号与卡片容量调整（改 DOCX 插图尺寸，**需产品确认**，护栏锁防「改字号不 bump `_RENDERER_VERSION`」）；B-5 前端事实变更清单（前端排期，护栏锁防回流改写 `list_facts` 契约）。
+> ④ **【C 类 11 项登记不落地】** C-1/C-2 已有 R111 护栏（字数 2× / SSE 进度）；C-3~C-11 文档登记（需数据迁移 / 契约变更 / 独立立项 / by-design 不做 / 全仓常态纯 churn），防后人误当漏修补上。
+> **验证**：新护栏 `tests/test_r112_closeout_20261020.py` **13 passed/4 组**（A-5 4 / B-4 3 / B-3 3 / 登记锁 3）；回归簇（R111+R112+R69）**46 passed / 0 failed**；A-5 相关（file_parser/zip 闸门）**113 passed / 0 failed**；A/B `artifacts/r112/ab_r112.py` **2/2 CAUGHT**、restore_sha 全 OK、EXIT 0；ruff 2 文件 All passed；字节体检 BOM=False/FFFD=0/孤立 CR=0。详见 `docs/全仓遗留问题与后续建议收口_三阶段执行_R112_20261020.md`。
+> ⚠️ **运维**：需重启后端（`file_parser` 常驻，压缩炸弹阈值 import 期读环境变量）；零迁移、零 DDL、**零新增配置项**（A-5 走 `os.environ` 直读轻量通道，未进 pydantic Settings）。⚠️ **判据教训归档**：①「确认已落地」必须落在护栏而非文档散文——B-3 初版护栏锚错函数（锚 `_repair_json` 而非 `_collect_json_str`，统一通道调用点在后者）致假红，改「薄壳委托 + 统一通道」三跳接线锁后转绿，接线类护栏必须锁真实调用链不能锁函数名在场；②环境变量化护栏须同时锁「默认值不变（行为变更）」与「fail-soft（脆弱性）」两条各自可判别，A/B 分别摘除各定向红。
+>
+> **上一轮校准：2026-10-20（R111 · 日志审计 P2 承接收口 · 七项 P2 按风险收益落地四项，三项登记不落地）** —— **【承接 R109 §五登记的 7 项 P2：P2-1 保存配置去重提示 / P2-2 死配置报告门槛透明化 / P2-5 导出缓存日志 / P2-6 dashscope 渠道卫生 / P2-7 事实单段永久错误不重试 五项落地四项（P2-3/P2-4 登记不落地）；加法式、零迁移、零 DDL、零新增配置、fail-soft；回归 1660 passed / 0 failed】**：
 > ① **【P2-1 · 保存配置去重提示】** `save_config` 新增配置前按 (provider_name, model, COALESCE(base_url,'')) 三元组（密钥除外）回查库内其它配置，命中则回传 `duplicate_hint` 加法式键；**只提示、不阻断**（同一三元组配不同密钥/环境是合法场景，替用户自动去重会删错）。更新路径不提示。
 > ② **【P2-2 · 死配置报告门槛透明化】** `report_dead_configs_at_startup` 对“样本 < 死配置门槛且非确定性连击死”的配置逐条 `logger.info` 点名，区分“统计口径判死（重启后 24h 内随滑窗自然复活）”与“确定性 404 连击判死（重放必败）”，运维据此清理；纯可观测，AST 护栏锁不新增剔除/写库/冷却。
 > ③ **【P2-5 · 导出缓存命中/未命中日志】** `export.py` docx/pdf 四处 `logger.info`（hit/miss），纯可观测，不得 WARNING（R11 先例）。

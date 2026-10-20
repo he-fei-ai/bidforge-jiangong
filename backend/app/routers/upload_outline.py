@@ -1,4 +1,5 @@
 """上传目录识别路由"""
+import asyncio
 import json
 import logging
 import uuid
@@ -223,7 +224,24 @@ async def parse_outline(file: UploadFile = File(...),
         #    正文），解析器诊断（PDF 页数截断 / CSV、Excel 行数截断 / OCR 兜底 /
         #    加密 PDF）全部被丢弃 —— 用户看到"识别成功"，却不知道第 50 页之后的
         #    机械配置、编号根本没参与识别。现随响应回传。
-        raw_text, diag = parse_file_content_ex(content, fname)
+        #
+        # ✅ FIX-1（2026-10-20 · P0 · 事件循环阻塞）：本路由是 `async def`，
+        #    但 parse_file_content_ex 是**同步阻塞**函数，内部会跑
+        #    MuPDF/pdfplumber 解页、OCR 推理、LibreOffice/Word 子进程转换、
+        #    MinerU 网络轮询（最长 600s）。旧实现直接在本协程里调用它 ⇒
+        #    **整个 FastAPI 事件循环停摆**：一次扫描件识别可让全站所有并发
+        #    请求（正文生成、SSE 心跳、目录保存）一起挂起。
+        #    这同时违背本仓既有设计契约 ——
+        #      · legacy_office.py:15-16「调用方 parse_file_content_ex 本身跑在
+        #        线程池里，避免在事件循环里做阻塞子进程 IO」；
+        #      · mineru_client.py:16-18「全部为同步实现 —— 调用方（file_parser）
+        #        本身运行在线程池中，避免在事件循环里做阻塞网络 IO」。
+        #    姊妹链路 global_facts_docs.py:1097-1099 / :1294-1296 早已用
+        #    asyncio.to_thread，本路由是**唯一漏改点**。
+        #    现与姊妹链路对齐：解析整体挪进线程池，事件循环保持可响应。
+        #    （解析本身仍是同步函数，语义与返回契约完全不变。）
+        raw_text, diag = await asyncio.to_thread(
+            parse_file_content_ex, content, fname)
     except ParseError as e:
         # ✅ 修复（2026-09-17）：解析不可恢复失败（缺依赖/OCR引擎/损坏）用用户可读
         #    文案，与 global-facts 解析路径口径一致；不把底层堆栈/路径泄露给客户端。
