@@ -86,6 +86,11 @@ export type BidAnalysisTabProps = {
   onRetryDefs?: () => void;
   onStart: () => void;
   onStop: () => void;
+  /**
+   * ✅ R106 FIX-4：停止指令已发出、任务尚未落终态。bid_analysis 是协作式停止
+   * （在途解析项跑完、未启动项不再启动），旧实现发完指令即乐观提示且按钮可连点。
+   */
+  stopping?: boolean;
   onOpenConfig: () => void;
   onCheckSections: () => void;
   onRefresh: () => void;
@@ -391,6 +396,7 @@ function BidAnalysisTab({
   onRetryDefs,
   onStart,
   onStop,
+  stopping,
   onOpenConfig,
   onCheckSections,
   onRefresh,
@@ -740,8 +746,14 @@ function BidAnalysisTab({
               开始提取
             </Button>
           ) : (
-            <Button danger icon={<StopOutlined />} onClick={onStop}>
-              停止
+            <Button
+              danger
+              icon={<StopOutlined />}
+              onClick={onStop}
+              disabled={stopping}
+              loading={stopping}
+            >
+              {stopping ? "停止中" : "停止"}
             </Button>
           )}
           <Button icon={<SettingOutlined />} disabled={running} onClick={onOpenConfig}>

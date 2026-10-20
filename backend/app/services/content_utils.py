@@ -797,7 +797,10 @@ def order_sections_dfs(sections: list[dict]) -> list[dict]:
         key = pid if (pid and pid in ids and pid != s.get("id")) else ""
         children.setdefault(key, []).append(s)
     for v in children.values():
-        v.sort(key=lambda x: (x.get("sort_order") or 0, str(x.get("id") or "")))
+        # ✅ R102（G2 · 脏 sort_order 归一）：排序键收敛到 section_sort_order_key
+        #    单一出口 —— 旧内联键对字符串脏值（"3"）与 int 混排会 TypeError，
+        #    且与 sections._build_tree / export._section_sort_key 各写一份。
+        v.sort(key=lambda x: section_sort_order_key(x.get("sort_order"), x.get("id")))
     out: list[dict] = []
     stack: list[dict] = list(reversed(children.get("", [])))
     while stack:
@@ -811,6 +814,145 @@ def order_sections_dfs(sections: list[dict]) -> list[dict]:
         seen = {id(s) for s in out}
         out.extend(s for s in sections if id(s) not in seen)
     return out
+
+
+def section_sort_order_key(sort_order, section_id) -> tuple[int, str]:
+    """章节**同级**排序键的权威实现：``(sort_order 安全取整, id)``。
+
+    ✅ R102（G2 · 三序漂移收口）：``sort_order`` 来自 DB（TEXT 列），
+    脏数据可能是 ``"3"`` / ``"abc"`` / ``None`` / 浮点等形态。旧实现在
+    ``order_sections_dfs`` / ``build_sibling_context`` / ``export._section_sort_key``
+    三处各写一份**不归一**的内联键 —— 脏字符串与 int 混排直接
+    ``TypeError: '<' not supported between instances of 'str' and 'int'``，
+    而 ``sections._build_tree`` 早已归一（int(值 or 0)，非法回落 0）⇒
+    「展示序 / 生成序 / 导出序」三处分叉。现收敛为本单一出口：
+
+    - 取整口径与 ``sections._build_tree`` **逐字一致**（``int(so or 0)``，
+      非法值回落 0）—— 对合法数据是恒等变换，展示序零变化；
+    - ``sections._build_tree`` 与 ``export._section_sort_key`` 必须委托本函数，
+      禁止再内联同形键（护栏锁定）。
+    """
+    so = sort_order
+    try:
+        so_i = int(so or 0)
+    except (TypeError, ValueError):
+        so_i = 0
+    return (so_i, str(section_id or ""))
+
+
+def verify_generation_order(dispatched, expected) -> dict:
+    """校验章节**派发序**是否与目录 DFS 序一致（R102 · G1 顺序留痕）。
+
+    正文生成按 leaves 目录序创建协程、``asyncio.Semaphore`` FIFO 放行 ⇒
+    信号量放行序即「启动序」，应与目录序逐位一致。本函数把两者逐位比对，
+    产出可落报告的纯数据（不抛异常、不改动任何输入）：
+
+    Returns:
+        ``{ok, expected_count, dispatched_count, first_mismatch_index,
+        missing, unexpected}``。``ok=False`` 表示顺序失守（前序承接、
+        进度序号、跨章衔接的既定语义被打破，须告警而非静默）。
+    """
+    exp = [str(x or "") for x in (expected or [])]
+    act = [str(x or "") for x in (dispatched or [])]
+    first_mismatch = None
+    for i, (a, b) in enumerate(zip(act, exp)):
+        if a != b:
+            first_mismatch = i
+            break
+    exp_set = set(exp)
+    act_set = set(act)
+    missing = [x for x in exp if x not in act_set]
+    unexpected = [x for x in act if x not in exp_set]
+    ok = (first_mismatch is None and not missing and not unexpected
+          and len(act) == len(exp))
+    return {
+        "ok": ok,
+        "expected_count": len(exp),
+        "dispatched_count": len(act),
+        "first_mismatch_index": first_mismatch,
+        "missing": missing[:20],
+        "unexpected": unexpected[:20],
+    }
+
+
+def summarize_fact_mapping(mapping, audits=None) -> dict:
+    """"章节 → 所需事实"映射表的终态**汇总口径**（纯函数，绝不抛异常）。
+
+    R105（2026-10-18 · G4/G3 接线收口）：全量映射表（``chapter_fact_mapping``
+    产物）进 checkpoint 落库（DB 面可取证），SSE 终态事件只带本汇总 ——
+    长方案（上百叶子 × 每条事实标题）全量随事件下发会把载荷撑到几十 KB。
+
+    Args:
+        mapping: :func:`facts_builder.chapter_fact_mapping` 的返回
+            ``[{section_id, title, fact_titles, fact_count}, ...]``。
+        audits: sse 侧逐章注入留痕字典
+            ``{leaf_id: {budget_dropped_count, ...}}``（可为 None）。
+
+    Returns:
+        ``{sections, sections_with_facts, sections_without_facts, fact_refs,
+        budget_dropped_total, budget_dropped_sections}``；入参为脏数据时
+        按空汇总降级返回（带 ``degraded=True``），不影响终态落盘。
+    """
+    try:
+        entries = [m for m in (mapping or []) if isinstance(m, dict)]
+        with_facts = sum(1 for m in entries if int(m.get("fact_count") or 0) > 0)
+        stats = {
+            "sections": len(entries),
+            "sections_with_facts": with_facts,
+            "sections_without_facts": len(entries) - with_facts,
+            "fact_refs": sum(int(m.get("fact_count") or 0) for m in entries),
+            "budget_dropped_total": 0,
+            "budget_dropped_sections": 0,
+        }
+        for v in (audits or {}).values():
+            if not isinstance(v, dict):
+                continue
+            n = int(v.get("budget_dropped_count") or 0)
+            if n > 0:
+                stats["budget_dropped_total"] += n
+                stats["budget_dropped_sections"] += 1
+        return stats
+    except (TypeError, ValueError):
+        return {"sections": 0, "sections_with_facts": 0,
+                "sections_without_facts": 0, "fact_refs": 0,
+                "budget_dropped_total": 0, "budget_dropped_sections": 0,
+                "degraded": True}
+
+
+def prev_leaf_tail_summary(content: str, max_chars: int = 300) -> str:
+    """取前一章（叶子）正文的**结尾片段**作跨章承接参考（R102 · G5）。
+
+    与 :func:`build_sibling_context` 的「前序同级摘要」互补：同级摘要只覆盖
+    同父兄弟，目录树 DFS 下的「上一个叶子」（可能是上一章的最后一个子节、
+    也可能是前一章正文本身）才是文档意义上的直接前文 —— 父下第一个叶子的
+    同级摘要恒为空，这条链路此前零承接。
+
+    处理规则（纯函数、绝不抛异常）：
+    - 先剔除代码围栏（mermaid / chart-json / 公式源码不是承接语境）；
+    - 取末尾自然段（按空行分段，从后往前收集至 ``max_chars``，至少保留 1 段）；
+    - 超长时取尾部截断（承接语义在结尾不在开头）；
+    - 正文整体为空 / 只剩围栏 → 返回空串（调用方按无参考处理）。
+    """
+    try:
+        text = strip_fenced_code_blocks(content or "")
+    except Exception:
+        text = content or ""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if not paras:
+        return ""
+    picked: list[str] = []
+    total = 0
+    for p in reversed(paras):
+        if picked and total + len(p) + 2 > max_chars:
+            break
+        picked.append(p)
+        total += len(p) + 2
+        if total >= max_chars:
+            break
+    tail = "\n\n".join(reversed(picked))
+    if len(tail) > max_chars:
+        tail = tail[-max_chars:]
+    return tail.strip()
 
 
 def select_target_leaves(
@@ -927,7 +1069,10 @@ def build_sibling_context(
     else:
         pool = [s for s in all_sections if s.get("parent_id", "") == parent_id]
     siblings = [s for s in pool if s.get("id") != leaf.get("id")]
-    siblings.sort(key=lambda s: (s.get("sort_order", 0), s.get("id", "")))
+    # ✅ R102（G2）：排序键收敛到 section_sort_order_key（脏 sort_order 不再
+    #    字符串/int 混排 TypeError，与展示序/导出序同一归一口径）。
+    siblings.sort(key=lambda s: section_sort_order_key(
+        s.get("sort_order"), s.get("id")))
 
     lines: list[str] = []
     for s in siblings[:max_siblings]:
@@ -935,9 +1080,13 @@ def build_sibling_context(
         lines.append(f"- {s.get('title', '')}" + (f"：{desc}" if desc else ""))
 
     # 前序同级摘要：sort_order 小于当前、离当前最近的一个已有正文者
+    # （✅ R102（G2）：比较也走归一键，脏字符串与 int 不再混排 TypeError）
     prev_summary = ""
-    cur_order = leaf.get("sort_order", 0)
-    for s in reversed([x for x in siblings if x.get("sort_order", 0) < cur_order]):
+    cur_order = section_sort_order_key(
+        leaf.get("sort_order"), leaf.get("id"))[0]
+    for s in reversed([x for x in siblings
+                       if section_sort_order_key(
+                           x.get("sort_order"), x.get("id"))[0] < cur_order]):
         content = (generated_contents or {}).get(s["id"]) or s.get("content") or ""
         content = content.strip()
         if content:

@@ -44,6 +44,7 @@ from app.services.audit_rules import (
     expert_items,
     get_rule,
     rule_catalog,
+    validate_rule_registry,
 )
 from app.services.audit_scoring import (
     ai_results_to_findings,
@@ -113,13 +114,32 @@ CONSISTENCY_TOTAL_CAP = 50000
 # ---------------------------------------------------------------------------
 @router.get("/rules")
 async def list_rules():
-    """全量审核规则目录（含行业依据），供前端展示与用户自查。"""
+    """全量审核规则目录（含行业依据），供前端展示与用户自查。
+
+    ✅ R95（2026-10-17，R90 遗留①）：注册表一致性自检接入生产读路径。
+    此前 ``validate_rule_registry`` 只在 CI 测试时触发 —— 规则表与
+    导出映射 / 引擎产出集一旦在生产分叉（改规则不发版测试），用户拿到的
+    是静默塌陷的 title/basis/dimension。本端点每次被调用即做双向校验：
+    健康时 ``registry_problems`` 为空列表（前端可忽略，响应体加法式）；
+    漂移时记 ERROR 日志并把问题原文透出，「规则说明」抽屉自此成为
+    分叉可观测点。懒导入 export 避免 router 间循环依赖。
+    """
+    from app.routers.export import _EXPORT_ISSUE_RULE_MAP
+    from app.services.audit_rules import _PROGRAM_EMITTED_RULE_IDS
+    problems = validate_rule_registry(
+        mapping=_EXPORT_ISSUE_RULE_MAP,
+        emitted_rule_ids=_PROGRAM_EMITTED_RULE_IDS,
+    )
+    if problems:
+        logger.error("审核规则注册表自检发现 %d 项漂移: %s",
+                     len(problems), "; ".join(problems[:10]))
     return {
         "rule_version": RULE_VERSION,
         "items": rule_catalog(),
         "dimensions": dimension_catalog(),
         "standard_db_version": STANDARD_DB_VERSION,
         "standard_db_checked_at": STANDARD_DB_CHECKED_AT,
+        "registry_problems": problems,
     }
 
 

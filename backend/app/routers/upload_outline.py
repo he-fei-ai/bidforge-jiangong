@@ -417,15 +417,69 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     if not outline:
         raise HTTPException(400, "outline 节点格式非法（应为对象数组）")
 
+    import re as _re
+
+    def _norm_title(t: str) -> str:
+        return _re.sub(r'\s+', '', str(t or '')).strip()
+
+    # ✅ 遗留问题 1 修复（R101）：自动改写会**改标题**，而下方正文保留按
+    #    「归一化标题相等」匹配旧章节 ⇒ 改写后的标题在旧库里找不到同名行，
+    #    匹配落空、旧章节进 to_delete 被级联删除，**已生成正文丢失**（此前只能
+    #    计入 cleared_content_sections 如实回报，无法挽救）。
+    #    现：在改写**之前**按「子节点索引路径」快照原标题，作为**匹配身份**
+    #    与展示/落库标题解耦 —— 改标题不再等于丢正文。
+    #    索引路径 = 自上而下的子节点序号元组（如 (0, 2, 1)），与标题文本无关，
+    #    故不受任何标题改写影响；「结构一一对应」由
+    #    `outline_title_fix._tree_shape` 守卫保证（错位即丢弃改写结果）。
+    pre_nt_index: dict[tuple, str] = {}
+
+    def _snapshot_titles(nodes: list, idx_path: tuple) -> None:
+        for i, node in enumerate(nodes):
+            if not isinstance(node, dict):
+                continue
+            nt = _norm_title(node.get("title", ""))
+            if nt:
+                pre_nt_index[idx_path + (i,)] = nt
+            kids = node.get("children")
+            if isinstance(kids, list) and kids:
+                _snapshot_titles(kids, idx_path + (i,))
+
+    _snapshot_titles(outline, ())
+
+    # ✅ R89 G1 补接线（本轮）：落库前**自动外科式重写**占位标题。
+    #
+    # 本路径自建 DELETE/INSERT、**不走** `sections._save_outline_to_db`，
+    # R89 落地时只接了后者 ⇒ 上传识别入口零闸门：用户上传的文档里若本身就
+    # 写着「专项6」「总体实施策划（2）」，会原样落库且**无任何自动修复机会**，
+    # 与 `config.outline_autofix_generic_on_save` 注释声明的「目录库套用 /
+    # 上传识别 / AI 调整 / 手工编辑后保存」四类写入口全覆盖不符。
+    # 现与 save-outline 共用 `outline_title_fix.autofix_generic_titles_on_save`
+    # **单一实现**（口径不再分叉）；检出为空则零 AI 调用、零额外延迟，
+    # 失败/超时一律 fail-soft 回退原样保存，绝不阻断落库。
+    # ⚠️ 位置：必须在下方**任何写操作**（级联 DELETE/INSERT）以及
+    #    `collect_rows`（会捕获标题快照）**之前**—— 此时尚未开启写事务
+    #    （上方只有读），AI 调用不占写锁。
+    _generic_autofixed = 0
+    try:
+        from app.config import settings
+        if getattr(settings, "outline_check_generic_titles", True):
+            from app.services.outline_quality import detect_generic_titles_for_write
+            from app.services.outline_title_fix import autofix_generic_titles_on_save
+            _hits = detect_generic_titles_for_write(outline, context="upload-outline")
+            if _hits:
+                outline, _hits, _generic_autofixed = await autofix_generic_titles_on_save(
+                    outline, _hits,
+                    context=f"upload-outline upload={upload_id[:8]}")
+    except Exception as _e:      # noqa: BLE001 - 自动修复失败不得阻断保存
+        logger.warning("上传目录保存：占位标题自动重写失败（按原样保存）: %s",
+                       _e, exc_info=True)
+
     # ✅ BUG 修复：标题匹配保留已有章节正文内容。
     # 旧实现无条件 DELETE FROM sections + INSERT，导致重新上传目录时
     # 所有已生成的正文内容丢失（即使章节标题完全相同）。
     # 现：按归一化标题匹配已有 section，匹配成功则保留 content/word_count/status，
     # 仅更新结构字段；不匹配的旧章节被删除，新章节插入空记录。
-    import re as _re
-    def _norm_title(t: str) -> str:
-        return _re.sub(r'\s+', '', str(t or '')).strip()
-
+    # 注：`_norm_title` 与 `pre_nt_index` 已上提至自动改写之前（见上方说明）。
     cur = await _r13(
         await db.execute(
             # ✅ BUG 修复（字段错位，2026-10-08）：SELECT 此前漏取 level ——
@@ -520,16 +574,21 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     new_inserts: list[tuple] = []
     counter = {"n": 0}
 
-    def collect_rows(nodes: list, parent_id: str, path_parts: tuple):
+    def collect_rows(nodes: list, parent_id: str, path_parts: tuple,
+                     idx_path: tuple = ()):
         nonlocal preserved_count
         for i, node in enumerate(nodes):
             if not isinstance(node, dict):
                 continue
             title = node.get("title", "")
             nt = _norm_title(title)
+            # ✅ 遗留 1：**匹配身份**优先取「自动改写前的原标题」（按索引路径查
+            #    pre_nt_index），展示与落库标题仍用改写后的 title —— 二者解耦，
+            #    使「改标题」不再等于「丢正文」。无快照（未改写）时退化为 nt。
+            mnt = pre_nt_index.get(idx_path + (i,)) or nt
             matched = None
-            if nt:
-                cur_path = path_parts + (nt,)
+            if mnt:
+                cur_path = path_parts + (mnt,)
                 # 1) 完整标题路径精确匹配（跨层级重构时最稳）
                 # 2) 同父 + 同层级
                 # 3) 仅同层级
@@ -540,8 +599,8 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
                 for bucket in (existing_by_path.get(cur_path),
                                existing_by_parent_level.get(parent_key),
                                existing_by_level.get(int(node.get("level", 1))),
-                               existing_by_title.get(nt)):
-                    matched = _take_from(bucket, nt)
+                               existing_by_title.get(mnt)):
+                    matched = _take_from(bucket, mnt)
                     if matched is not None:
                         break
             # ✅ 统一形态（2026-09-22）：与 _save_outline_to_db / 重排函数同口径
@@ -567,10 +626,10 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
                 # 标题匹配已有章节：保留正文，只更新结构字段
                 sid = matched["id"]
                 old_path = _old_title_path(matched)
-                if old_path and old_path != (path_parts + (nt,)):
+                if old_path and old_path != (path_parts + (mnt,)):
                     logger.info(
                         "上传目录保存：同名章节跨路径匹配 title=%s old=%s new=%s（按层级兜底）",
-                        title, " > ".join(old_path), " > ".join(path_parts + (nt,)))
+                        title, " > ".join(old_path), " > ".join(path_parts + (mnt,)))
                 preserved_count += 1
                 final_section_ids.add(sid)
                 updates.append((
@@ -588,7 +647,9 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
             counter["n"] += 1
             children = node.get("children")
             if isinstance(children, list) and children:
-                collect_rows(children, sid, path_parts + ((nt,) if nt else ()))
+                collect_rows(children, sid,
+                             path_parts + ((mnt,) if mnt else ()),
+                             idx_path + (i,))
 
     collect_rows(outline, "", ())
 
@@ -731,6 +792,11 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     #    （`outline_recognition_system` 规则 6），程序侧闸门补上后形成双层。
     result = attach_generic_residual(result, outline, scheme_id=scheme_id,
                                      context="upload-outline")
+    # ✅ R89 G1 补接线（本轮）：加法式回传「自动改写了几条占位标题」（>0 才挂）——
+    #    否则自动重写静默生效，用户以为目录原样保存，实际章节名已变。
+    #    与 `sections._save_outline_to_db` 的回传键**同名同形态**，前端一处消费。
+    if _generic_autofixed:
+        result["generic_autofixed"] = _generic_autofixed
     if preserved_count:
         result["preserved_content"] = preserved_count
         result["note"] = f"已通过标题匹配保留 {preserved_count} 个章节的已有正文内容"

@@ -147,7 +147,12 @@ def snapshot_stats(prog: dict, paused_ms: float = 0.0) -> dict:
                 "title": rec.get("title", ""),
                 "index": rec.get("index", 0),
                 "stage": rec.get("stage", ""),
-                "stage_label": rec.get("stage_label", rec.get("stage", "")),
+                # ✅ R98（R90 遗留②最小加固）：回退口径与生产活副本
+                #    sse_handlers._snapshot_stats 对齐（缺 stage_label 回退 ""，
+                #    不再回退 stage 原值）。本函数当前零生产调用（活路径走
+                #    sse_handlers 内私有副本），改动仅为消除两份副本的口径分叉，
+                #    防止未来按本函数恢复共用时静默改变前端 stage_label 语义。
+                "stage_label": rec.get("stage_label", ""),
                 "elapsed_ms": int(max(0, now - rec.get("started_at", now)) * 1000),
             })
         avg_section_ms = None

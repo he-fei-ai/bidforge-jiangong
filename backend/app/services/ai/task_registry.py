@@ -392,7 +392,15 @@ async def set_task_status(task_id: str, status: str) -> bool:
     # ✅ 2026-09-23（正文生成深度审计 · P0）：暂停/停止控制指令的落库此前零重试。
     #    用户点「停止」恰逢 DB 锁竞争时，指令静默丢失（异常冒泡到路由变成 500），
     #    而生成任务仍在后台跑。与 finish_task 同一根因，接入共享重试。
-    rc = await retry_db_op(lambda: _set_task_status_db(task_id, status))
+    # ✅ R108（2026-10-18 · 日志审计 P0-2）：默认预算（3×0.05s ≈ 0.35s）在生产
+    #    实证下仍会耗尽——批量生成轮询风暴 + 审计批量 flush 并发窗口里锁持有
+    #    时间远超 0.35s，POST /sse/task/{id}/control 连续 500 ×6（trace=3b1f2d58edf7，
+    #    logs 2026-10-17 21:08），用户停止指令静默丢失。控制指令是**指令性写入**
+    #    （用户点一次就得成一次），值得更长预算：5 次 × 0.1s 起步指数退避
+    #    （最坏 ≈3.1s）+ 0.1s 抖动打散同拍惊群。仍耗尽时异常上抛，由控制路由
+    #    翻译成 503 + Retry-After（前端自动重试一次），绝不静默丢指令。
+    rc = await retry_db_op(lambda: _set_task_status_db(task_id, status),
+                           max_retries=5, base_delay=0.1, jitter=0.1)
     if rc == 0:
         logger.info("set_task_status: 任务 %s 已处终态或不存在，忽略 %s 覆盖", task_id, status)
         return False
@@ -412,6 +420,15 @@ def request_control(task_id: str, action: str):
     state = _tasks[task_id]
     state["last_control"] = action
     logger.info("control=%s applied to task %s", action, task_id)
+    if state.get("stream_ended_at"):
+        # ✅ R106 FIX-6（活体 E2E 实测）：SSE 泵已结束的僵尸条目没有消费者，
+        #    set 事件不会让任何人退出。此处如实记 WARNING（返回值语义不变，
+        #    避免把「控制契约」改成另一种行为），真正的收尾由
+        #    mark_stream_ended 的宽限回收负责，用户侧最迟 3s 后读到终态。
+        logger.warning("request_control: 任务 %s 的 SSE 流已结束（%.1fs 前），"
+                       "%s 指令无在飞消费者，等待宽限回收",
+                       task_id, time.monotonic() - float(state["stream_ended_at"]),
+                       action)
     now = time.monotonic()
     if action == "pause":
         # ✅ 暂停账本：重复 pause 不得重置已累计时长（否则可无限刷新清零）
@@ -483,6 +500,75 @@ def has_active_task(task_id: str) -> bool:
     return task_id in _tasks
 
 
+# ✅ R106 FIX-6（2026-10-18 · 活体浏览器 E2E 实测「停止后重启 → 目录 Tab 永久锁死」）：
+# event_stream 的取消/断线收尾**依赖一串 await**（checkpoint → finish_task），
+# 而收尾协程自己可能再次被取消。实测 trace=03563da7f91a（task=b3dc5ae0…）：
+# 检查点写库已落库（logs/backend.log 23:36:14,723，DB message=「用户已停止」），
+# 但 `finish_task` 从未进入（全程无「任务终止」INFO、无断线兜底 WARNING）——
+# 于是 `_tasks` 内存态永久停在 running，`GET /sse/task/{id}` 是**内存优先**，
+# 于是刷新后永远读到「正在生成目录... · live」，目录 Tab 再也点不动停止；
+# 而 `reap_orphan_tasks` 的三层防误伤里明确「本进程内存态存在的任务一律不动」
+# → 这类僵尸既进不了 DB 回收，也没有内存回收通道，**只能重启进程**。
+# 下面的 mark_stream_ended 由 with_heartbeat 的 finally 以**同步回调**触发
+# （同步代码不受协程取消影响，一定会执行），不依赖生成器收尾是否成功。
+_STREAM_ABANDON_MESSAGE = "后台收尾：SSE 流已结束但任务未落终态（自动回收）"
+
+
+async def _reap_abandoned_task(task_id: str, grace_seconds: float):
+    """宽限期后仍未落终态 → 回收内存态并补落 DB 终态（detached，独立于被取消的流）。"""
+    try:
+        await asyncio.sleep(grace_seconds)
+    except asyncio.CancelledError:
+        return  # 进程退出：交给 lifespan 启动清理
+    try:
+        state = _tasks.get(task_id)
+        if not state or state.get("status") not in ("running", "paused"):
+            return  # 正常路径：生成器自己的收尾（finish_task）已经落地
+        for t in list(state.get("child_tasks") or ()):
+            if not t.done():
+                t.cancel()
+        _tasks.pop(task_id, None)
+        _ab.notify()
+        logger.warning(
+            "mark_stream_ended: 任务 %s 在 SSE 结束后 %.0fs 内未落终态 → "
+            "内存态回收 + DB 补 stopped（type=%s · scheme=%s）",
+            task_id, grace_seconds, state.get("type", "?"),
+            state.get("scheme_id", "?"))
+        await retry_db_op(lambda: _write_task_terminal_db(
+            task_id, "stopped", _STREAM_ABANDON_MESSAGE))
+    except asyncio.CancelledError:
+        pass  # 进程退出等：下个 lifespan / reap_orphan_tasks 周期自然收敛
+    except Exception as e:
+        # 内存态已回收，DB 写失败不致命：任务已不在 `_tasks`，
+        # `reap_orphan_tasks` 下一周期会把它当 DB 僵尸落终态（第三道防线仍生效）。
+        logger.warning("mark_stream_ended 收尾失败（task=%s，交给周期回收）: %s",
+                       task_id, e)
+
+
+def mark_stream_ended(task_id: str, grace_seconds: float = 3.0) -> bool:
+    """SSE 泵已结束：任务若仍无终态，登记并在宽限期后回收。返回是否登记成功。
+
+    幂等且零侵入：任务不存在 / 已终态（正常 completed·stopped·failed 路径）时
+    直接返回 False，什么都不做。语义与 event_stream 里既有的
+    「客户端断开，任务已终止」兜底完全一致 —— 流结束即代表任务必须落终态。
+
+    不立即 pop 内存而是延后 `grace_seconds`：生成器自己的 finally 还要靠
+    `has_active_task` 判断"是否需要保存部分成果再落终态"，抢跑会把
+    2026-09-16 那次「断线成果可恢复」修复抹掉。宽限期只等真正的收尾协程，
+    实测该协程在毫秒级完成；3s 仍卡住即认定它已被取消。
+    """
+    state = _tasks.get(task_id)
+    if not state or state.get("status") not in ("running", "paused"):
+        return False
+    state["stream_ended_at"] = time.monotonic()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False  # 无运行循环（进程退出中）：交给启动清理
+    loop.create_task(_reap_abandoned_task(task_id, grace_seconds))
+    return True
+
+
 def register_child_task(task_id: str, child: asyncio.Task) -> bool:
     """把子任务登记到父任务的 child_tasks 集合。
 
@@ -543,7 +629,9 @@ async def reap_orphan_tasks(max_stale_seconds: float = 900.0) -> int:
 
     安全性（三层防误伤）：
     - 只扫 `updated_at < now - max_stale_seconds`：刚注册/刚有进度的任务不命中；
-    - 本进程内存态 `_tasks` 中存在的任务一律不动（在跑、或只是长时间无进度）；
+    - 本进程内存态 `_tasks` 中**仍在运行**（未被 mark_stream_ended 标记为流已结束）
+      的任务不动 —— 在跑、或只是长时间无进度都不能误伤；被标记「SSE 已结束」
+      且超过 30s 仍未落终态的条目不再豁免（R106 FIX-6 的兜底路径）；
     - 单语句幂等 UPDATE，只迁移 running/paused。
     DB 异常只记 WARNING 不抛出 —— 下个周期自然重试，绝不影响主流程。
     """
@@ -555,7 +643,22 @@ async def reap_orphan_tasks(max_stale_seconds: float = 900.0) -> int:
             "WHERE status IN ('running','paused') AND updated_at < ?",
             (cutoff,))
         rows = [r[0] for r in await cur.fetchall()]
-        orphan_ids = [i for i in rows if i not in _tasks]
+        # ✅ R106 FIX-6：内存态"在跑"的豁免只看有没有活跃实例。已被
+        #    mark_stream_ended 登记过「SSE 已结束」却仍未被回收的条目（detached
+        #    回收任务因进程退出/loop 拆除没跑成）不能继续豁免，否则又回到
+        #    「内存 running → DB 永不回收 → 只能重启」的死局。
+        #    判据：登记时间早于 30s 前 + 内存里仍未落终态 → 视为已放弃。
+        _ended_before = time.monotonic() - 30.0
+
+        def _abandoned(tid: str) -> bool:
+            st = _tasks.get(tid)
+            if st is None:
+                return True  # 内存无实例：既有语义（DB 僵尸）
+            ended_at = st.get("stream_ended_at")
+            return bool(ended_at) and float(ended_at) < _ended_before \
+                and st.get("status") in ("running", "paused")
+
+        orphan_ids = [i for i in rows if _abandoned(i)]
         if not orphan_ids:
             return 0
         ph = ",".join("?" * len(orphan_ids))

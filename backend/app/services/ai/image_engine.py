@@ -705,6 +705,21 @@ async def generate_illustration_image(
             # 获取适配器实例（注意：get_adapter 需要传入 config）
             _adapter = ProviderRegistry.get_adapter(_actual_provider, _adapter_config)
 
+            # ✅ R111（P2-6 · 渠道卫生）：渠道级前置短路——API Key 缺失时直接
+            # 跳过该候选，不向渠道发必然 400/401 的请求（生产实证 dashscope
+            # 文生图渠道 503/400 噪音：无 key 配置仍逐次白打一轮）。纯短路、
+            # 零行为变更：旧实现下这类请求 100% 失败且已 continue，现只是
+            # 把失败从「网络往返后」提前到「请求前」，并留 INFO 观测点。
+            if not _adapter_config.get("api_key"):
+                logger.info(
+                    "generate_illustration_image: Provider '%s' 无 API Key，跳过（不发请求）",
+                    _pname)
+                _last_error = f"Provider '{_pname}' 未配置 API Key"
+                continue
+
+            # 尺寸语义自适应：
+                continue
+
             # 尺寸语义自适应：
             # - 适配器支持 1K/2K + ratio 风格（agnes 等）→ 传默认尺寸 + 宽高比
             # - 适配器只接受像素尺寸（dashscope 等）→ 传宽x高像素值
@@ -757,10 +772,30 @@ async def generate_illustration_image(
 
         except Exception as e:
             _last_error = f"Provider '{_pname}' 异常: {e}"
+            # ✅ R111（P2-6 · 渠道卫生）：区分「确定性配置错误」与「瞬态故障」。
+            # 适配器把 HTTP 状态码编码进 error 字符串（"HTTP 5xx: ..."）；
+            # 4xx（400 参数/模型不存在 / 401 认证 / 403 无权限 / 404 端点不存在）
+            # 属确定性配置错误——同型渠道重放必败，旧实现在日志里与 5xx 瞬态
+            # 故障同等 WARNING，用户无从区分「配错了」和「服务抖了」。现对 4xx
+            # 点名「确定性渠道配置错误（建议核对 Base URL / 模型名 / Key）」，
+            # 降级链行为不变（仍 continue 下一候选）。
+            _err_low = str(e).lower()
+            _det_cfg = any(tag in _err_low for tag in (
+                "http 400", "http 401", "http 402", "http 403", "http 404"))
+            if _det_cfg:
+                logger.warning(
+                    "generate_illustration_image: Provider '%s' 命中确定性渠道配置"
+                    "错误（%s）——同型渠道重放必败，请核对 Base URL / 模型名 / API Key；"
+                    "继续尝试下一候选", _pname, str(e)[:160])
+            else:
+                logger.warning(
+                    "generate_illustration_image: Provider '%s' 失败 (%s)，尝试下一个",
+                    _pname,
+                    e,
+                )
             logger.warning(
                 "generate_illustration_image: Provider '%s' 失败 (%s)，尝试下一个",
-                _pname,
-                e,
+                _pname, e,
             )
             continue
 

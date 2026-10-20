@@ -136,7 +136,7 @@ _reg("chart_json_fix", "charts", "图表JSON数据修复（分类型专项）", 
 - layout（总平面布置图）：{"type":"layout","title":"...","zones":[{"id":"ASCII标识","name":"区域名","x":0,"y":0,"w":1,"h":1}]}，id 仅 ASCII 字母数字下划线，坐标为非负数，至少 2 个区域且不得大面积重叠
 - flowchart（施工/工艺流程图，横竖双模式：纯线性单链 steps ≤8 用 "LR"、>8 用 "TD"，含 decision 分支用 "TD"）：{"type":"flowchart","title":"...","direction":"TD","steps":[{"id":"s1","label":"施工准备","variant":"start"},{"id":"s2","label":"主体施工","variant":"process"}],"edges":[{"from":"s1","to":"s2"}]}，steps 3-15 个且 id 唯一（ASCII），variant 仅可取 start/process/highlight/decision/end，edges 的 from/to 必须引用已有 id，分支边必须带 label（如"通过"/"不通过"）
 - timeline（时间轴）：{"type":"timeline","title":"...","milestones":[{"name":"事件名","date":"日期标签"}]}，至少 2 个里程碑；date 为 YYYY-MM-DD 或相对日期（如 2026年3月、第30天、T+7）；status 仅可为 completed/in_progress/pending
-- architecture（组织架构图）：{"type":"architecture","title":"...","root":{"label":"名称","children":[...]}}，单一根节点，层级不超过 4 层，同级节点不得重名；可为履约核心的 1 个节点加 "highlight":true（橙色高亮）
+- architecture（组织架构图）：{"type":"architecture","title":"...","root":{"label":"名称","children":[...]}}，单一根节点，层级不超过 4 层，同级节点不得重名；**应**为履约核心且仅 1 个节点加 "highlight":true（渲染为琥珀金高亮，统一样张出图）
 - comparison（对比图 / 占比）：**必须**输出下面两种可渲染结构之一
   · 极简占比（推荐）：{"type":"comparison","title":"方案比选","items":[{"label":"方案A","value":80},{"label":"方案B","value":130}]}
     —— items ≥2 项，value 必须是**大于 0 的数字**（不是字符串、不是 0/负数）
@@ -473,7 +473,7 @@ _reg("chart_json_fix_architecture", "charts", "组织架构图专项修复", """
 6. 子节点用 "children" 数组承载（可为字符串数组或对象数组，对象取 label/name 键）
 7. title ≤ 24 个中文字符；fig_no 固定留空 ""
 8. **highlight 字段**：可选布尔，标记「本方案履约核心节点」，最多 1 个节点为 true
-   （渲染为琥珀橙高亮）；原数据已有的 highlight 标记必须原样保留，不得扩散到多个节点；
+   （渲染为琥珀金高亮）；原数据已有的 highlight 标记必须原样保留，不得扩散到多个节点；
    根节点不加 highlight
 
 ## 修复策略

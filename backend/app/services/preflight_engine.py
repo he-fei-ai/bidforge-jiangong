@@ -161,6 +161,27 @@ _NUM_TOPICS: tuple[tuple[str, re.Pattern, tuple[int, ...], int | None], ...] = (
     ("设备数量", re.compile(
         r"(塔吊|塔式起重机|施工电梯|升降机|挖掘机|起重机)[^0-9]{0,10}(\d+)\s*(台|套)"),
      (2, 3), 1),
+    # ✅ 2026-10-17（文档质量报告 六·2 数据矛盾）：与 consistency_scanner._NUM_TOPICS
+    #    同口径补入报告实证互相矛盾的主题（用工年龄 / 缺陷责任期 / 模板面板厚度 /
+    #    钢管壁厚 / 拆模强度）。两侧表格必须**同向**（见 content_data_contract 注释）：
+    #    生成侧自检与预检 CON-01 的判据口径一致，才不会「自检全绿、预检照报」。
+    ("用工年龄", re.compile(
+        r"(一般|危大工程)[^0-9。\n]{0,16}?(\d{2})\s*周岁"),
+     (2,), 1),
+    ("缺陷责任期", re.compile(
+        r"(整体工程|防水工程|防水|缺陷责任期)[^0-9。\n]{0,12}?(\d+)\s*个月"),
+     (2,), 1),
+    ("模板面板厚度", re.compile(
+        r"(\d+(?:\.\d+)?)\s*(?:mm|毫米)\s*厚"
+        r"|厚度[^0-9。\n]{0,4}?(\d+(?:\.\d+)?)\s*(?:mm|毫米)"),
+     (1, 2), None),
+    ("钢管壁厚", re.compile(
+        r"(?:[φΦ]\s*48(?:\.3)?\s*[×xX*]\s*(\d+(?:\.\d+)?)"
+        r"|壁厚(?!偏差)[^0-9。\n]{0,8}?(\d+(?:\.\d+)?)\s*(?:mm|毫米))"),
+     (1, 2), None),
+    ("拆模强度", re.compile(
+        r"(悬臂构件|悬臂|楼板|板|梁|拱)[^0-9。\n]{0,6}?(?:强度)?\s*[≥>=]{1,2}\s*(\d+)\s*%"),
+     (2,), 1),
 )
 
 
@@ -1160,6 +1181,39 @@ def _sort_findings(findings: list) -> list:
                        f.get("rule_id") or "zzz"))
 
 
+def content_coverage_stats(sections: list) -> dict:
+    """正文覆盖口径的**唯一实现**（✅ R98 · R90 遗留⑤收口）。
+
+    返回 ``{section_count, leaf_count, generated_count, empty_ratio}``：
+      · ``generated_count`` = **有效正文**（自身 + 全部子孙）strip 后非空的
+        章节数（父章节正文由子孙承载，计入是 2026-10-02 订正后的既定口径）；
+      · ``empty_ratio`` = (叶子数 − 有有效正文的叶子数) / **叶子数**。
+
+    为何成文为共享函数：此前同一判据在 ``preflight_stats``（2026-10-02 已
+    收敛为有效正文+叶子分母）与 ``routers/export.collect_export_issues``
+    （仍停留在旧口径：自身 content truthy 判据 + **全章节分母**）各有一份 ——
+    同一方案的总检看板与导出预检弹窗显示两个不同的 empty_ratio，且导出侧
+    正是 2026-10-02 生产实证过的「父节点恒空 → 42.9% 假象」复发形态。
+    现两侧共用本函数，判据不可能再分叉（AGENTS 4.3「同一判据单一事实源」）。
+    """
+    parent_ids, effective = build_section_tree_index(sections)
+    leaf = [s for s in (sections or []) if s.get("id") not in parent_ids]
+    generated = sum(
+        1 for s in (sections or [])
+        if (effective.get(s.get("id")) or s.get("content") or "").strip()
+    )
+    leaf_filled = sum(
+        1 for s in leaf
+        if (effective.get(s.get("id")) or s.get("content") or "").strip()
+    )
+    return {
+        "section_count": len(sections or []),
+        "leaf_count": len(leaf),
+        "generated_count": generated,
+        "empty_ratio": round((len(leaf) - leaf_filled) / max(len(leaf), 1) * 100, 1),
+    }
+
+
 def preflight_stats(ctx: PreflightContext) -> dict:
     """与发现列表配套的客观统计（前端完整性看板用）。"""
     # ✅ 性能修复（2026-09-23）：旧实现把父集合推导写在列表推导的条件里，
@@ -1170,28 +1224,22 @@ def preflight_stats(ctx: PreflightContext) -> dict:
     #    而正文只落叶子，父章节恒为空 -> 生产实测 empty_ratio 报 42.9%
     #    （27/63 恰为父节点数），把 36/36 全部生成成功的方案显示成「六成没写」。
     #    现统一用 build_section_tree_index 的「有效正文」（含子孙）判定。
-    parent_ids, effective = build_section_tree_index(ctx.sections)
-    leaf = [s for s in ctx.sections if s.get("id") not in parent_ids]
+    #
+    # ✅ R98（2026-10-17 · R90 遗留⑤收口）：口径成文为 content_coverage_stats
+    #    唯一实现，export.collect_export_issues 与本函数共用（两侧数字恒等）。
+    _cov = content_coverage_stats(ctx.sections)
     wc = sum(s.get("word_count") or 0 for s in ctx.sections)
-    generated = sum(
-        1 for s in ctx.sections
-        if (effective.get(s.get("id")) or s.get("content") or "").strip()
-    )
     chart_done = sum(1 for c in ctx.charts
                      if (c.get("status") or "") in CHART_DONE_STATUSES)
     return {
-        "section_count": len(ctx.sections),
-        "leaf_count": len(leaf),
-        "generated_count": generated,
+        "section_count": _cov["section_count"],
+        "leaf_count": _cov["leaf_count"],
+        "generated_count": _cov["generated_count"],
         "total_words": wc,
         "word_budget": ctx.word_budget,
         # ✅ 语义收敛（2026-10-02）：分母改用**叶子数**。父章节本就无正文，
         #    计入分母会让「结构正常的方案」恒定显示高比例空章节。
-        "empty_ratio": round(
-            (len(leaf) - sum(
-                1 for s in leaf
-                if (effective.get(s.get("id")) or s.get("content") or "").strip()
-            )) / max(len(leaf), 1) * 100, 1),
+        "empty_ratio": _cov["empty_ratio"],
         "chart_total": len(ctx.charts),
         "chart_done": chart_done,
         "standard_db_version": None,   # 由路由层填充（避免本模块依赖版本常量来源）
@@ -1201,6 +1249,6 @@ def preflight_stats(ctx: PreflightContext) -> dict:
 __all__ = [
     "PreflightContext", "run_preflight", "preflight_stats", "RULE_VERSION",
     "LOW_WORD_THRESHOLD", "DUP_MIN_WORDS", "DUP_SIMILARITY_THRESHOLD",
-    "check_duplication", "build_section_tree_index",
+    "check_duplication", "build_section_tree_index", "content_coverage_stats",
     "has_calc_process",
 ]

@@ -188,8 +188,14 @@ class TestCrossSectionBorrowIsObservable:
         assert E._find_fallback_code({}, "flowchart", "s1", {"s1": 0}) == ("", "")
 
     def test_resolver_is_single_source(self):
-        """取码逻辑必须收敛到 `_resolve_chart_code`（两处各写一遍必然漂移）。"""
-        prepare = inspect.getsource(E._prepare_export)
+        """取码逻辑必须收敛到 `_resolve_chart_code`（两处各写一遍必然漂移）。
+
+        ✅ R94（2026-10-17 · 缓存命中快速路径）：预渲染侧的取码点随渲染段搬到了
+        `_prepare_export_render`（`_prepare_export` 现只做取数段）。判据锁定
+        **预渲染段 + 构建段**这一对，而不是历史上的 `_prepare_export` 函数体 ——
+        否则只是换个函数名，判据就失锚（护栏恒红或恒绿都无价值）。
+        """
+        prepare = inspect.getsource(E._prepare_export_render)
         render = inspect.getsource(E._build_docx_sync)
         assert "_resolve_chart_code(" in prepare
         assert "_resolve_chart_code(" in render

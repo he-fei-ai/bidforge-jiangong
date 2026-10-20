@@ -98,9 +98,45 @@ _OFF_VALUES = {"0", "false", "no", "off", "关闭"}
 # 递归深度上限：畸形/超深数据按叶子截断，避免递归爆栈（RecursionError）
 _MAX_DEPTH = 30
 
+# ============================================================
+# ✅ 样张风格 v2（2026-10-17 · 用户提供的组织架构图样张，配色为样张像素级取证）
+#   样张取证（artifacts/r94/probe_style2.py 对 2000px 原图逐行/列扫描）：
+#     根=#1E3A5F · 一级=#2B579A · 二级=#4472C4 · highlight=#FBBF24（深藏青粗体字）
+#     节点=圆角 + 深色描边（≈填充色×0.6）+ 右下柔和投影（#D5D9DF 薄带）
+#     连线=蓝灰直角折线（样张垂直段实测 #576881~#728196，取中值 #64748B）
+#           + 子端小下箭头；标题=深藏青粗体（样张 #1E3A5F）
+#   所有类型架构图（organization/wbs/system/infrastructure 四子类型）共用本样张——
+#   子类型只影响校验器节点数区间，渲染恒走 `_render_architecture_image_v2` 单一路径。
+# ============================================================
+ARCH_DEPTH_COLORS = [
+    ("#1E3A5F", "#FFFFFF"),  # 根
+    ("#2B579A", "#FFFFFF"),  # 一级
+    ("#4472C4", "#FFFFFF"),  # 二级
+    ("#5B9BD5", "#FFFFFF"),  # 三级
+    ("#A9C6E8", "#1E3A5F"),  # 四级及以下
+]
+ARCH_HIGHLIGHT_FILL = "#FBBF24"   # 琥珀金（样张 highlight 节点）
+ARCH_HIGHLIGHT_TEXT = "#1E3A5F"   # 高亮节点文字 = 深藏青粗体
+ARCH_TITLE_COLOR = "#1E3A5F"      # 左上角标题文字色
+ARCH_EDGE_COLOR = "#64748B"       # 连线/箭头蓝灰
+ARCH_SHADOW_COLOR = "#D5D9DF"     # 节点投影
+ARCH_SHADOW_DX = 4                # 投影右偏移（设计像素）
+ARCH_SHADOW_DY = 5                # 投影下偏移（设计像素）
+ARCH_NODE_RADIUS = 5              # 圆角半径（设计像素）
+ARCH_STROKE_FACTOR = 0.6          # 描边色 = 填充色 × 本系数（逐通道）
+ARCH_STROKE_WIDTH = 2             # 描边宽（设计像素）
+ARCH_ARROW_W = 6                  # 箭头半宽（设计像素）
+ARCH_ARROW_H = 9                  # 箭头高（设计像素）
+
+
+def _darken(hexc: str, factor: float) -> str:
+    """把 #RRGGBB 逐通道乘 factor（样张描边=填充色的加深版，单一公式不逐色手配）。"""
+    r, g, b = (int(hexc[i:i + 2], 16) for i in (1, 3, 5))
+    return "#%02X%02X%02X" % (int(r * factor), int(g * factor), int(b * factor))
+
 
 def _is_highlighted(node: dict) -> bool:
-    """判断节点是否为「核心职责高亮节点」（样张中的琥珀橙节点）。
+    """判断节点是否为「核心职责高亮节点」（样张中的琥珀金节点）。
 
     容错取值：AI 产出的布尔可能是 true/"true"/1/"是"，统一按真值解释。
     """
@@ -948,7 +984,7 @@ def _render_architecture_image_v2(data: dict, *, _allow_split: bool = True) -> B
 
     # ---- 标题 ----
     title = str(root.get("label") or root.get("name") or "组织架构图")
-    draw.text((int(40 * scale), int(16 * scale)), title, fill="#2E5FA3", font=font_title)
+    draw.text((int(40 * scale), int(16 * scale)), title, fill=ARCH_TITLE_COLOR, font=font_title)
 
     # 缩放节点位置
     for n in nodes_pos:
@@ -960,10 +996,12 @@ def _render_architecture_image_v2(data: dict, *, _allow_split: bool = True) -> B
     node_by_id = {n["id"]: n for n in nodes_pos}
 
     # ---- 绘制连线（先画连线）----
-    # ✅ 样张风格（2026-09-18）：灰色直角折线、扁平无阴影、无箭头。
-    #    连线的两端都按「父底边中点 → 子顶边中点」从节点自身宽高推导，
-    #    因此叶子换成窄高竖条后无需另写分支，对齐关系自动成立。
-    edge_color = "#8C8C8C"
+    # ✅ 样张风格 v2（2026-10-17）：蓝灰直角折线 + 子端小下箭头（样张每个子节点
+    #    顶边中点都有一个朝下的三角箭头）。连线两端仍按「父底边中点 → 子顶边中点」
+    #    从节点自身宽高推导，叶子换成窄高竖条后对齐关系自动成立。
+    edge_color = ARCH_EDGE_COLOR
+    arrow_w = int(ARCH_ARROW_W * scale)
+    arrow_h = int(ARCH_ARROW_H * scale)
     for n in nodes_pos:
         if n["depth"] == 0:
             continue
@@ -981,30 +1019,45 @@ def _render_architecture_image_v2(data: dict, *, _allow_split: bool = True) -> B
         draw.line(
             [(sx, sy), (sx, mid_y), (ex, mid_y), (ex, ey)], fill=edge_color, width=int(2 * scale)
         )
+        # 子端下箭头：尖端触顶边中点，底边在上方 arrow_h 处
+        draw.polygon(
+            [(ex, ey), (ex - arrow_w, ey - arrow_h), (ex + arrow_w, ey - arrow_h)],
+            fill=edge_color,
+        )
 
-    # ---- 绘制节点 ----
-    # ✅ 样张配色（2026-09-18）：根=深藏青 → 一级 → 二级 → 三级 → 四级逐层变浅；
-    #    highlight:true 的节点（本方案履约核心部门）用琥珀橙 + 深藏青粗体字；
-    #    扁平无阴影无描边。
-    depth_colors = [
-        ("#1F3864", "#FFFFFF"),  # 根
-        ("#2E5FA3", "#FFFFFF"),  # 一级
-        ("#4472C4", "#FFFFFF"),  # 二级
-        ("#5B9BD5", "#FFFFFF"),  # 三级
-        ("#A9C6E8", "#1F3864"),  # 四级及以下
-    ]
-    HIGHLIGHT_FILL = "#FFC000"
+    # ---- 绘制节点（先投影，后本体，保证描边压在投影之上）----
+    # ✅ 样张风格 v2（2026-10-17）：根=深藏青 #1E3A5F → 逐层变浅；
+    #    highlight:true 的节点（本方案履约核心部门）用琥珀金 #FBBF24 + 深藏青粗体字；
+    #    圆角 + 深色描边（填充色×ARCH_STROKE_FACTOR）+ 右下柔和投影。
+    depth_colors = ARCH_DEPTH_COLORS
+    shadow_dx = int(ARCH_SHADOW_DX * scale)
+    shadow_dy = int(ARCH_SHADOW_DY * scale)
+    node_radius = int(ARCH_NODE_RADIUS * scale)
+    stroke_width = int(ARCH_STROKE_WIDTH * scale)
     pad_x = int(LEAF_VERTICAL_PAD_X * scale)
     pad_y = int(LEAF_VERTICAL_PAD_Y * scale)
     char_gap = int(LEAF_VERTICAL_CHAR_GAP * scale)
+    node_style = {}  # id -> (fill_c, text_c, stroke_c)
     for n in nodes_pos:
         depth_idx = min(n["depth"], len(depth_colors) - 1)
         if n.get("highlight") and n["depth"] > 0:
-            fill_c, text_c = HIGHLIGHT_FILL, "#1F3864"
+            fill_c, text_c = ARCH_HIGHLIGHT_FILL, ARCH_HIGHLIGHT_TEXT
         else:
             fill_c, text_c = depth_colors[depth_idx]
+        node_style[n["id"]] = (fill_c, text_c, _darken(fill_c, ARCH_STROKE_FACTOR))
+    for n in nodes_pos:
         x, y, w, h = n["x"], n["y"] + title_h, n["w"], n["h"]
-        draw.rounded_rectangle([x, y, x + w, y + h], radius=8, fill=fill_c)
+        draw.rounded_rectangle(
+            [x + shadow_dx, y + shadow_dy, x + w + shadow_dx, y + h + shadow_dy],
+            radius=node_radius, fill=ARCH_SHADOW_COLOR,
+        )
+    for n in nodes_pos:
+        fill_c, text_c, stroke_c = node_style[n["id"]]
+        x, y, w, h = n["x"], n["y"] + title_h, n["w"], n["h"]
+        draw.rounded_rectangle(
+            [x, y, x + w, y + h], radius=node_radius,
+            fill=fill_c, outline=stroke_c, width=stroke_width,
+        )
         if n.get("vertical"):
             # 叶子竖排：文字自上而下、列自右向左，汉字保持直立
             _draw_text_vertical_center(

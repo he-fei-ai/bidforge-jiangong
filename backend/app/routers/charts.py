@@ -22,9 +22,44 @@ from app.services.chart_payload import build_chart_envelope, extract_chart_paylo
 # 图表类型标签统一共享自 chart_validators（别名保持原引用点不变）
 from app.services.chart_validators import CHART_TYPE_LABELS as _CHART_LABELS
 from app.services.chart_validators import infer_chart_type_from_payload
+from app.services.content_blocks import chart_type_tags
 
 logger = logging.getLogger("charts")
 router = APIRouter(prefix="/api/v1/charts", tags=["charts"])
+
+
+async def _guard_chart_target(db, section_id: str, action: str,
+                              prediction_id: str = "") -> None:
+    """图表正文写点的生成竞态守卫（✅ R98 · R90 遗留⑦收口）。
+
+    本路由前缀不带 scheme_id，先按 section_id（缺省按 prediction_id）反查
+    方案，再委派 routers.sections.ensure_no_generation_write（判据单一事实源，
+    与审核修复链 / shrink 共用同一守卫）。反查失败/查无 → 不拦：让后续
+    既有的 404/兜底链按原语义处理，守卫绝不比被保护路径更"知道"章节存在。
+    """
+    scheme_id = ""
+    try:
+        if section_id:
+            cur = await db.execute(
+                "SELECT scheme_id FROM sections WHERE id=?", (section_id,))
+            row = await cur.fetchone() if cur is not None else None
+        elif prediction_id:
+            cur = await db.execute(
+                "SELECT scheme_id FROM chart_predictions WHERE id=?",
+                (prediction_id,))
+            row = await cur.fetchone() if cur is not None else None
+        else:
+            row = None
+        if row is not None:
+            scheme_id = str(row["scheme_id"] or "")
+    except Exception as e:  # noqa: BLE001 - 反查异常不阻断（fail-open 到原链路）
+        logger.debug("图表守卫：%s 反查 scheme_id 失败（跳过拦截）: %s",
+                     (section_id or prediction_id)[:8], e)
+        return
+    if scheme_id:
+        from app.routers.sections import ensure_no_generation_write
+        ensure_no_generation_write(scheme_id, action)
+
 
 
 def _infer_payload_type(code: str) -> str:
@@ -76,6 +111,26 @@ async def render_chart(body: dict):
             chart_type, _inferred)
         chart_type = _inferred
 
+    # ✅ R102（2026-10-18 · 日志审计收口）：结构化载荷**非法 JSON**（AI 生成被
+    #    max_tokens 截断的典型形态）提前拒绝。生产实证（backend_err.log
+    #    2026-10-01 14:22:21 trace=646c14650b7d）：342 字符 gantt 载荷截断 →
+    #    `_infer_payload_type` 的 json.loads 失败返回空串 → 类型纠正确失效 →
+    #    前端默认 chart_type=flowchart 拿到 gantt 数据 → PIL v2 必然失败 →
+    #    500 且错误文案误导（"请检查 Mermaid 代码语法"——载荷根本不是 Mermaid）。
+    #    截断载荷对任何渲染器都是确定必败，早退 400 比 500 更可行动：
+    #    前端可明确提示"图表数据损坏，请重新生成"，而不是引导用户去改语法。
+    if mermaid_code.lstrip().startswith(("{", "[")):
+        try:
+            json.loads(mermaid_code)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            logger.warning(
+                "/charts/render：结构化图表载荷不是合法 JSON（疑似生成截断，"
+                "长度=%d），拒绝渲染", len(mermaid_code))
+            raise HTTPException(
+                400,
+                "图表数据载荷不是合法 JSON（疑似内容生成时被截断而损坏），"
+                "无法渲染；请重新生成该图表")
+
     try:
         from app.services.ai.mermaid_renderer import _chart_cache
         img_bytes = await asyncio.to_thread(
@@ -93,11 +148,18 @@ async def render_chart(body: dict):
             client = get_mermaid_service_client(timeout=5)
             avail = client.is_available() if hasattr(client, "is_available") else None
             avail_text = {True: "可用", False: "不可用", None: "尚未探测"}.get(avail, "未知")
+            # ✅ R102：JSON 数据载荷的失败原因与 Mermaid 语法载荷完全不同
+            #    （前者是数据/结构问题，后者才是语法问题），错误文案必须分流，
+            #    否则把"数据坏了"误导成"请检查 Mermaid 语法"（trace=646c14650b7d 实证）。
+            if mermaid_code.lstrip().startswith("{"):
+                _advice = "请检查图表数据结构是否完整（字段缺失/嵌套错误），或重新生成该图表。"
+            else:
+                _advice = "请检查 Mermaid 代码语法，或把分号分隔改为换行格式后重试。"
             raise HTTPException(
                 500,
                 f"图表渲染失败（chart_type={chart_type}）。"
                 f"渲染后端最近一次探测结果: {avail_text}（skip_http={skip_http}）。"
-                f"请检查 Mermaid 代码语法，或把分号分隔改为换行格式后重试。"
+                f"{_advice}"
             )
     except HTTPException:
         raise
@@ -167,7 +229,11 @@ async def list_charts(scheme_id: str, db=Depends(get_db)):
 
     def _is_placed(sid: str, content: str, ct: str) -> bool:
         """正文是否已含该类型图表的落点（内联代码块 或 历史标记）"""
-        if f"[CHART_TYPE: {ct}]" in content:
+        # ✅ R99（2026-10-17）：历史标记判据收敛到 content_blocks.chart_type_tags
+        #    **单一事实源**。旧写法用半角方括号的字面串内联匹配，只认半角形态，
+        #    与块解析侧的正则各写一份 → 全角/异常写法下「清单显示已落位、导出却按
+        #    普通段落处理（机器标记原文还会印进成稿）」，两侧口径分叉。
+        if ct in chart_type_tags(content):
             return True
         if sid not in _inline_types_cache:
             try:
@@ -286,6 +352,11 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
     if prediction_id and ":" in prediction_id:
         section_id, chart_type = prediction_id.rsplit(":", 1)
         prediction_id = ""
+
+    # ✅ R98（R90 遗留⑦收口）：本端点回写 data_json 并同步重写章节正文内联块，
+    #    正文/目录生成在跑时会与生成链路互相覆盖。守卫在 AI 修复调用之前。
+    await _guard_chart_target(db, section_id, "图表代码修复",
+                              prediction_id=prediction_id)
 
     # ✅ BUG 修复：chart_mermaid_fix 提示词含 {scheme_type} 占位符，而旧实现
     #    只传 error/code —— 渲染后系统提示里残留字面量 "{scheme_type}"，模型看到的是
@@ -600,6 +671,9 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
             409,
             "图表已全自动生成（v17 约束）：AI 配图在导出 DOCX 时自动生成真实图片，"
             "无需人工触发。如需脚本/手动重试，请设置 AI_IMAGE_MANUAL_ENABLED=true。")
+    # ✅ R98（R90 遗留⑦收口）：本端点把 ai_image 块改写为图片链接（重写正文），
+    #    生成在跑时与生成链路互相覆盖。守卫在生图成本发生之前。
+    await _guard_chart_target(db, section_id, "AI 配图生成")
     cur = await db.execute(
         "SELECT id, content, word_budget FROM sections WHERE id=?", (section_id,))
     # ✅ R13 守卫（2026-10-04）：读路径 fail-closed 503，绝不把 DB 异常伪装成 404

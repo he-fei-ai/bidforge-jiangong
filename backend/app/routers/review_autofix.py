@@ -54,6 +54,18 @@ async def _load_sections(db, scheme_id: str) -> list[dict]:
         what="自动修复：读取章节")
     return order_sections_dfs(rows)
 
+
+def _guard_not_generating(scheme_id: str, action: str) -> None:
+    """✅ R98（R90 遗留⑦收口）：改写正文的端点入口统一 409 守卫。
+
+    判据不在本文件复制 —— 委派 routers.sections.ensure_no_generation_write
+    （唯一事实源；懒导入规避模块级循环依赖，与本文件 _persist_fixed
+    局部导入 invalidate_consistency_scan_cache 同一手法）。
+    """
+    from app.routers.sections import ensure_no_generation_write
+    ensure_no_generation_write(scheme_id, action)
+
+
 async def _resolve_finding(db, scheme_id: str, rule_id: str,
                            section_id: str = "") -> dict:
     """按 rule_id 从**当前总检口径**重新派生那一条 finding。
@@ -142,6 +154,7 @@ async def _persist_fixed(db, *, scheme_id: str, rule_id: str,
     ⚠️ 本函数位于 **routers 层**（``services`` 不得 import routers，
     见 ``test_outline_name_line_20260927::test_services_never_import_routers``）。
     """
+    from app.routers._chart_pipeline import resync_inline_charts
     from app.routers.sections import invalidate_consistency_scan_cache
     from app.services import repair_record
     from app.services.content_utils import (
@@ -156,7 +169,22 @@ async def _persist_fixed(db, *, scheme_id: str, rule_id: str,
             db, "SELECT word_budget FROM sections WHERE id=?", (sid,),
             what=f"自动修复落库：读取章节字数预算（section={sid[:8]}）")
         budget = (row["word_budget"] if row else None) or DEFAULT_WORD_BUDGET
-        wc = text_word_count(after)
+        # ✅ R92（2026-10-17 · 正文写点同步补链）：审核预检自动修复整章改写了正文，
+        #    须在同事务内（commit 在函数末尾）按修复后正文全量重登记本章内联图表，
+        #    否则 chart_predictions 停留在修复前登记 → 与修复后正文漂移（本轮报障同族）。
+        #    resync 返回登记管线校验/修复后的正文，若某块被修正则以校正后正文落库，
+        #    使 sections.content 与 chart_predictions 逐字一致。异常 fail-soft：保留原
+        #    正文，绝不阻断修复落库。enforce_limits=False：同手动保存 B31 口径。
+        _persist_content = after
+        try:
+            _n, _fixed = await resync_inline_charts(
+                db, scheme_id, sid, after, enforce_limits=False)
+            if _fixed:
+                _persist_content = _fixed
+        except Exception as _re:  # noqa: BLE001 - 登记失败不阻断正文落库
+            logger.warning("自动修复落库：章节 %s 图表重登记失败（保留原正文）: %s",
+                           sid[:8], _re)
+        wc = text_word_count(_persist_content)
         # ✅ R13（2026-10-06）：旧实现丢弃返回值 —— 正文 UPDATE 返回 None 时
         #    循环照常走完、commit 成功、函数返回快照 id，端点据此返回 ok=True。
         #    用户看到「已修复」+「章节审核结论已自动退回待审核」，而**正文一字未改**，
@@ -165,7 +193,7 @@ async def _persist_fixed(db, *, scheme_id: str, rule_id: str,
             db,
             "UPDATE sections SET content=?, word_count=?, word_status=?,"
             " updated_at=? WHERE id=?",
-            (after, wc, word_status_for(wc, budget),
+            (_persist_content, wc, word_status_for(wc, budget),
              datetime.now().isoformat(), sid),
             what=f"自动修复落库：写入正文（section={sid[:8]}）")
         await reset_review_on_content_change(
@@ -199,6 +227,7 @@ async def apply(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     if not rule_id:
         raise HTTPException(422, "缺少 rule_id")
     scheme = await _load_scheme(db, scheme_id)
+    _guard_not_generating(scheme_id, "自动修复落库")
     finding = await _resolve_finding(db, scheme_id, rule_id,
                                      str(body.get("section_id") or ""))
     sections = await _load_sections(db, scheme_id)
@@ -233,9 +262,23 @@ async def rollback(scheme_id: str, body: dict | None = None, db=Depends(get_db))
     snap = await repair_record.get_snapshot(db, snapshot_id)
     if not snap or snap.get("scheme_id") != scheme_id:
         raise HTTPException(404, "快照不存在")
+
+    # ✅ R98（R90 遗留⑦收口）：回滚把正文整体写回修复前快照 —— 生成任务在跑
+    #    时会覆盖刚生成/正在生成的正文（正向修好、反向再漂移），同口守卫。
+    _guard_not_generating(scheme_id, "自动修复回滚")
+
+    # ✅ R92（2026-10-17 · 正文写点同步补链）：回滚恢复了修复前正文，须同事务按
+    #    恢复后正文重登记本章内联图表（消除「正文回退、登记未回退」漂移）。
+    from app.routers._chart_pipeline import resync_inline_charts
+
+    async def _resync(_db, _sid, _content):
+        await resync_inline_charts(_db, scheme_id, _sid, _content,
+                                   enforce_limits=False)
+
     try:
         result = await repair_record.rollback_snapshot(
-            db, snapshot_id, undo_type="review_autofix_rollback")
+            db, snapshot_id, undo_type="review_autofix_rollback",
+            resync_fn=_resync)
     except KeyError:
         raise HTTPException(404, "快照不存在")
     # 回滚同样改写正文 → 审核结论再次失效，退回待审核并留痕
@@ -419,6 +462,9 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     if not batch or batch.get("scheme_id") != scheme_id \
             or batch.get("mode") != "review_autofix_batch":
         raise HTTPException(404, "暂存批次不存在")
+    # ✅ R98（R90 遗留⑦收口）：确认落库整章改写 content（链式重算还会再调 AI）
+    #    —— 生成任务在跑时暂存批次的 before/after 已基于过期正文，必须拒绝。
+    _guard_not_generating(scheme_id, "批量修复确认")
     items = batch.get("items") or []
 
     # ✅ F2a（R55 · 2026-10-08）：accept/reject 条目支持两种粒度 ——

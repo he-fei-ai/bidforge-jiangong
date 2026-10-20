@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   App, Card, Table, Button, Modal, Form, Input, Select, Space,
   Tag, Typography,
@@ -8,6 +8,7 @@ import { PlusOutlined, DeleteOutlined, EditOutlined,
   ArrowUpOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import { useAntdMessageHub } from "../utils/activityCenter";
+import { notifySidebarTreeRefresh } from "../utils/sidebarEvents";
 import { projectsApi } from "../api";
 
 const { Title, Text } = Typography;
@@ -56,6 +57,9 @@ export default function ProjectListPage() {
       setEditingId(null);
       form.resetFields();
       load();
+      // ✅ R91（2026-10-17）：新建/改名项目即时同步左侧项目树
+      //    （旧实现侧栏只在挂载时拉一次，新项目不上树，必须 F5）。
+      notifySidebarTreeRefresh();
     } catch (e: any) {
       if (e.errorFields) return;
       msg.error(e.message || (editingId ? "更新失败" : "创建失败"));
@@ -94,6 +98,7 @@ export default function ProjectListPage() {
           await projectsApi.delete(id);
           msg.success("已删除");
           load();
+          notifySidebarTreeRefresh(); // ✅ R91：删除项目即时从左侧项目树消失
         } catch (e: any) {
           msg.error(e.message || "删除失败");
         }

@@ -154,6 +154,41 @@ def is_valid_master_key(key: str) -> bool:
         return False
 
 
+def master_key_source() -> dict:
+    """「当前生效的主密钥来自哪里」的**只读**唯一出口。
+
+    镜像 :func:`_get_fernet` 的密钥来源优先级（环境变量 → 持久化文件 → 临时），
+    但**不触碰**进程内 Fernet 缓存、不落盘、不产生任何副作用 —— 专为「主密钥
+    轮转 / 存量密文迁移」工作流提供决策依据：轮转前须先知道当前密钥是「来自
+    FERNET_KEY 环境变量」还是「来自 data/secret_key.key 文件」，二者对「轮转
+    持久化文件」的语义完全不同（env 生效时轮转文件不影响解密，会白白制造
+    「已轮转但仍用旧密钥」的静默分叉）。
+
+    返回::
+
+        {"source": "env" | "persisted_file" | "temporary",
+         "key_file_exists": bool,
+         "effective_key": str}   # 当前生效的主密钥明文（仅供内部迁移，严禁外泄到响应体）
+
+    ⚠️ ``effective_key`` 是敏感值，只允许在**进程内**作为迁移的 legacy 密钥使用；
+    任何面向前端的响应体都不得回传它（本模块的端点只回传来源标签与计数）。
+    """
+    file_exists = _KEY_FILE.exists()
+    env_key = (settings.fernet_key or "").strip()
+    if env_key and is_valid_master_key(env_key):
+        return {"source": "env", "key_file_exists": file_exists, "effective_key": env_key}
+    if file_exists:
+        try:
+            content = _KEY_FILE.read_text(encoding="utf-8").strip()
+            if content and is_valid_master_key(content):
+                return {"source": "persisted_file", "key_file_exists": True,
+                        "effective_key": content}
+        except Exception:
+            # 读文件失败等同「无可用文件密钥」，交给下方 temporary 兜底
+            pass
+    return {"source": "temporary", "key_file_exists": file_exists, "effective_key": ""}
+
+
 def backup_master_key() -> "str":
     """把当前持久化主密钥文件复制一份快照，返回快照路径字符串。
 

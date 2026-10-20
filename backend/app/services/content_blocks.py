@@ -156,7 +156,32 @@ _RE_HEADING_NN = re.compile(r"^(\d+\.\d+)\s+([\u4e00-\u9fa5A-Za-z].*)$")
 _RE_HEADING_N = re.compile(r"^(\d+)\s+([\u4e00-\u9fa5A-Za-z].*)$")
 _RE_MD_HEADING = re.compile(r"^(#{1,6})\s+(.*)")
 _RE_TABLE_SEP = re.compile(r"^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$")
-_RE_CHART_TYPE_TAG = re.compile(r"^\[CHART_TYPE:\s*(\w+)\]")
+# ✅ R99（2026-10-17 · 机器标记不得泄漏进交付文档）：
+#    历史图表标记块 ``[CHART_TYPE: xxx]`` 的唯一判据。旧正则只认**半角方括号 +
+#    半角冒号**，而中文语境里模型/用户极可能写成全角 ``【CHART_TYPE: xxx】`` 或
+#    ``[CHART_TYPE：xxx]`` —— 实测（artifacts/exp94/probe_blocks.py 场景 A）该行
+#    退化为普通段落，**机器标记原文被原样印进交付 DOCX**，且该图不进图表清单、
+#    不占图号，等同「成稿出现内部标记 + 静默丢图」。现按「半角/全角皆可」收口。
+_RE_CHART_TYPE_TAG = re.compile(r"^[\[【]\s*CHART_TYPE\s*[:：]\s*(\w+)\s*[\]】]")
+#: 形似机器标记、但类型不合法的行（类型为空 / 含非 \w 字符 / 右括号不匹配）。
+#: 此类行**绝不**按普通段落原样输出（那等于把内部标记印进成稿），改为整块跳过。
+_RE_CHART_TYPE_TAG_LOOSE = re.compile(r"^[\[【]\s*CHART_TYPE\s*[:：]")
+
+
+def chart_type_tags(text: str) -> set[str]:
+    """正文内嵌的 ``[CHART_TYPE: x]`` 历史图表标记类型集合（**单一事实源**）。
+
+    ``routers/charts.py::list_charts`` 的「落点」判定与本模块的块解析曾各写一份
+    字面串（``f"[CHART_TYPE: {ct}]" in content`` vs ``_RE_CHART_TYPE_TAG``），
+    两侧对全角/异常写法不一致 ⇒ 「清单显示已落位、导出却按普通段落处理」。
+    现统一由本函数供给，半角与全角形态在两侧必然一致。
+    """
+    out: set[str] = set()
+    for raw_line in str(text or "").splitlines():
+        m = _RE_CHART_TYPE_TAG.match(raw_line.strip())
+        if m:
+            out.add(m.group(1))
+    return out
 _RE_QUOTE_PREFIX = re.compile(r"^\s*>\s?")
 _RE_HR_LINE = re.compile(r"^([-*_])(\s*\1){2,}$")
 _RE_UL_BULLET = re.compile(r"^[-*•·]\s+(.*)")
@@ -288,8 +313,14 @@ def _looks_like_table_title(title: str) -> bool:
     t = (title or "").strip()
     if not t or len(t) > 40:
         return False
-    # 句读符号 → 正文句子，不是表题
-    if any(ch in t for ch in "：:，,；;。？！?!、…"):
+    # 句读符号 → 正文句子，不是表题。
+    # ✅ 2026-10-17（文档质量报告 表号问题根因 A）：**放行顿号「、」** ——
+    #    实测真实表题大量含顿号（「预埋件、预留孔洞允许偏差」「项目、允许偏差（mm）、
+    #    检验方法」），旧实现把「、」与句末标点一视同仁地拒绝，导致这些表题**不被吸收**
+    #    → 源文表题行残留为正文段 + 导出又自动生成表题 → 双表题、表号错位。
+    #    顿号是中文名词短语的并列分隔符，不构成「这是正文句子」的信号；句末标点
+    #    （。！？；）与逗号/冒号才指示完整句子，故仅保留后者的拦截。
+    if any(ch in t for ch in "：:，,；;。？！?!…"):
         return False
     # "表中的数据…" / "表所列…" / "表如下…" 等正文指代（注意不含"上/下"，
     # 否则「下卧层承载力参数表」这类真实表名会被误排除）
@@ -328,6 +359,174 @@ def _extract_table_caption(blocks: list[dict]) -> str:
         return ""
     blocks.pop()  # 已升格为表题，正文中不再重复输出
     return title
+
+
+#: 图题行「图 X-Y 题名」（与表题同构；编号由导出唯一生成）。
+_FIGURE_CAPTION_RE = re.compile(
+    r"^图\s*(?:[:：]\s*"
+    r"|[0-9一二三四五六七八九十][0-9.\-–—]*[\s、.：:]+)"
+    r"(\S.*)$")
+
+
+def _looks_like_figure_title(title: str) -> bool:
+    """判断候选文本是否像图题（名词短语，而非"如图所示"之类正文引用）。"""
+    t = (title or "").strip()
+    if not t or len(t) > 40:
+        return False
+    # 句读标点 → 正文句子，不是图题（顿号「、」放行，同表题口径）
+    if any(ch in t for ch in "：:，,；;。？！?!…"):
+        return False
+    if t[0] in "中所如为内里":
+        return False
+    if "了" in t:
+        return False
+    if t[:2] in ("列出", "给出", "汇总", "统计", "展示", "对比", "说明", "如下", "所示"):
+        return False
+    return True
+
+
+def _extract_figure_caption(blocks: list[dict]) -> str:
+    """吸收紧邻图表块**上方**的「图 X-Y 题名」行作为该图图题，并移除该行。
+
+    ✅ 2026-10-17（文档质量报告 图号问题）：实测交付文档出现两个「图 3-1」
+    —— 一个由导出按章序号生成（「图 3-1 模板工程施工进度计划」），另一个是
+    源文里 AI 自写的残留图题行（「图 3-1 机械设备管理流程」）。导出为图表
+    统一编号，源文自写的图题行若不吸收，就会与导出图题**重号**。此处与表题
+    同口径：图表块产出的**前一**段落若形似图题则升格为该图图题并移除该段落。
+    """
+    if not blocks:
+        return ""
+    prev = blocks[-1]
+    if prev.get("type") != "paragraph":
+        return ""
+    text = _RE_BOLD_WRAP.sub(r"\1",
+                            str(prev.get("text") or "").strip()).strip()
+    m = _FIGURE_CAPTION_RE.match(text)
+    if not m:
+        return ""
+    title = m.group(1).strip()
+    if not _looks_like_figure_title(title):
+        return ""
+    blocks.pop()  # 已升格为图题，正文中不再重复输出
+    return title
+
+
+def _drop_dangling_figure_captions(blocks: list[dict]) -> list[dict]:
+    """移除**无图可挂**的残留图题段落（"有题无图"）。
+
+    ✅ 2026-10-17（文档质量报告 图号/图片问题）：AI 常在正文里只写一行
+    「图 X-Y 题名」而不产出任何图表块（渲染失败或本就没生成），该行既不进
+    图表清单也不占图号，却与导出为**真实图表**生成的同名图号**重号**，且成稿
+    呈现"有题无图"。已挂图的图题在 `_extract_figure_caption` 吸收阶段移除；
+    走到这里的都是**无图可挂**的残留，按"宁缺毋滥"（不给不存在的图留题）
+    整段移除，并记 WARNING 供排障（绝不静默）。
+    """
+    if not blocks:
+        return blocks
+    kept: list[dict] = []
+    for b in blocks:
+        if b.get("type") == "paragraph":
+            text = _RE_BOLD_WRAP.sub(r"\1",
+                                    str(b.get("text") or "").strip()).strip()
+            m = _FIGURE_CAPTION_RE.match(text)
+            if m and _looks_like_figure_title(m.group(1).strip()):
+                logger.warning(
+                    '移除无图可挂的残留图题行（有题无图，不占图号）: %s',
+                    text[:50])
+                continue
+        kept.append(b)
+    return kept
+
+
+def _strip_leading_table_number(text: str) -> str:
+    """剥离文本开头 AI 自带的「表 X-Y」编号前缀（表题编号由导出唯一生成）。
+
+    ✅ 2026-10-17（文档质量报告 表号问题根因 B）：实测 AI 把表题连同编号写进
+    表格**首行首格**（如「表 6-1 木工班组劳动力配置计划」），导出自动表题取首行
+    前 3 列拼接后前置统一编号 → 「表 6-3 表 6-1 …」叠写、且表头单元格重复出现
+    表题文字。此处剥离首格自带的编号前缀；剥离后为空则保留原文（不制造空单元格）。
+    """
+    t = str(text or "").strip()
+    if not t.startswith("表"):
+        return t
+    m = _TABLE_CAPTION_RE.match(t)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    return t
+
+
+def _split_table_block(tbl_lines: list[str]) -> list[list[str]]:
+    """把连续收集的 `|` 行块切分为规范序 ``[表头, 分隔行, *数据行]`` 表格段。
+
+    ✅ R104（2026-10-18 · 导出乱码收口）：AI 生成的 GFM 表格有两种**实测坏形态**，
+    旧判据（分隔行必须落在 ``tbl_lines[1]``）对它们**整块失效** → 管道语法原样印进
+    交付 DOCX（用户报障「导出文档内容乱码」；生产取证 scheme_assistant.db
+    sections rowid 140 / 227）：
+      A. **分隔行前置**：``| --- |`` 写在表头行**之前**。GFM 规范序是
+         「表头 → 分隔行 → 数据」，AI 把分隔行提到最前 ⇒ ``tbl_lines[1]`` 是中文
+         表头而非分隔行 ⇒ ``sep_ok`` 为假 ⇒ 整表降级为裸文本段落。
+      B. **多表粘连**：两张表之间**无空行**（上表末行紧接下表表头/分隔行）。
+         所有 ``|`` 行被并为一个块，``tbl_lines[1]`` 同样不是分隔行 ⇒ 同样整块
+         降级（rowid 140 的「模板选型配置表」+「允许偏差表」即此形态）。
+    本函数按**分隔行**切分（GFM 语义：分隔行永远紧跟表头），把坏形态重排为
+    规范序；**规范序块（分隔行在 index 1）产出与旧实现逐字节一致**。
+
+    判据（保守，宁可不改，不 Fabrication）：
+      · 块内无分隔行 → 返回 ``[]``（调用方按旧行为整块降级为段落）；
+      · 分隔行在 index 0（前置形态）→ 表头取其**后一行**，重排为规范序；
+      · 分隔行在 index k≥1（规范/粘连形态）→ 表头取其**前一行**；
+      · 块内 ≥2 个分隔行（粘连）→ 每个分隔行各切一张表；
+      · 表头缺失或自身是分隔行（如连续两个分隔行）→ 该段不成立；
+      · **任一行未被任何表格段覆盖**（病态形态，如前导孤儿数据行）→ 整体返回
+        ``[]`` 走旧降级路径，绝不半识别半 Fabrication（内容不丢，全部回落段落）。
+    """
+    n = len(tbl_lines)
+    sep_idx = [k for k in range(n) if _RE_TABLE_SEP.match(tbl_lines[k])]
+    if not sep_idx:
+        return []
+    segments: list[list[str]] = []
+    covered = [False] * n
+    for pos, s in enumerate(sep_idx):
+        # 表头位置：前置形态取分隔行**后**一行；规范/粘连形态取分隔行**前**一行
+        h = 1 if s == 0 else s - 1
+        if h >= n or _RE_TABLE_SEP.match(tbl_lines[h]):
+            continue  # 表头缺失 / 表头自身是分隔行 → 该段形态不可信
+        data_start = h + 1 if s == 0 else s + 1
+        # 数据区终点 = 下一张表表头的前一行（前置形态的下一表头在下一分隔行后）
+        if pos + 1 < len(sep_idx):
+            nxt = sep_idx[pos + 1]
+            data_end = nxt + 1 if nxt == 0 else nxt - 1
+        else:
+            data_end = n
+        if data_end < data_start:
+            data_end = data_start
+        segments.append([tbl_lines[h], tbl_lines[s], *tbl_lines[data_start:data_end]])
+        covered[s] = True
+        for k in range(h, data_end):
+            covered[k] = True
+    if not all(covered):
+        # 病态形态：有行未构成任何表格段 → 整体不识别，交旧降级路径（宁可裸文本，
+        # 不半识别——半识别会把孤儿行静默丢掉或 Fabrication 出一张结构错误的表）。
+        return []
+    return segments
+
+
+def _normalize_table_first_cell(lines: list[str]) -> list[str]:
+    """剥离表格首行首格自带的「表 X-Y」编号前缀（见 `_strip_leading_table_number`）。"""
+    if not lines:
+        return lines
+    first = lines[0]
+    if not first.lstrip().startswith("|"):
+        return lines
+    parts = first.split("|")
+    if len(parts) < 3:
+        return lines
+    cell = parts[1].strip()
+    new_cell = _strip_leading_table_number(cell)
+    if new_cell == cell:
+        return lines
+    parts[1] = " " + new_cell + " "
+    return ["|".join(parts)] + list(lines[1:])
 
 
 def _html_unescape(text: str) -> str:
@@ -623,9 +822,13 @@ def _parse_content_blocks(content: str) -> list[dict]:
                 #    历史注：2026-09-19 曾反转为"引导语优先"（Mermaid title 常是通用词），
                 #    与 _EXPORTER_VERSION v11 规格注释及需求规格相悖，现统一回规格口径；
                 #    引导语在 Mermaid title 缺失时仍兜底。
+                # ✅ 2026-10-17（文档质量报告 图号问题）：图题优先级补入**源文自写图题**
+                #    —— 若图表块**上方**紧邻段落形似「图 X-Y 题名」，升格为本图图题并
+                #    移除该段落（否则与导出统一生成的图号重号，实测「图 3-1」两处）。
                 blocks.append({"type": "chart", "chart_type": chart_type,
                                "code": code_text, "inline": True,
-                               "title": _mermaid_directive_title(code_text)
+                               "title": _extract_figure_caption(blocks)
+                               or _mermaid_directive_title(code_text)
                                or _lead_in_title(blocks)})
             elif lang.lower() == "chart-json":
                 # ✅ 图表同步生成：JSON 数据型图表块（labor/layout 等），
@@ -681,8 +884,11 @@ def _parse_content_blocks(content: str) -> list[dict]:
                     continue
                 blocks.append({"type": "chart", "chart_type": _cj_type,
                                "code": code_text, "inline": True,
-                               # 载荷 title 优先（AI 按本章语义撰写），缺失时退回引导语
-                               "title": _clean_chart_title(_cj_obj.get("title"))
+                               # ✅ 2026-10-17（文档质量报告 图号问题）：源文自写图题优先
+                               #    （吸收图表块上方「图 X-Y 题名」行，避免图号重号）；
+                               #    载荷 title 次之（AI 按本章语义撰写），缺失时退回引导语
+                               "title": _extract_figure_caption(blocks)
+                               or _clean_chart_title(_cj_obj.get("title"))
                                or _lead_in_title(blocks)})
             elif lang.lower() == "ai_image":
                 # ✅ BUG 修复（2026-09-17）：``ai_image`` 占位块此前落到通用 code 分支 ——
@@ -733,17 +939,29 @@ def _parse_content_blocks(content: str) -> list[dict]:
             while i < len(lines) and lines[i].strip().startswith("|"):
                 tbl_lines.append(lines[i].strip())
                 i += 1
-            sep_ok = (
-                len(tbl_lines) >= 2
-                and _RE_TABLE_SEP.match(tbl_lines[1].strip())
-            )
-            if len(tbl_lines) >= 2 and sep_ok:
-                table_block = {"type": "table", "lines": tbl_lines}
-                # ✅ 新增：吸收紧邻表格上方的「表 X-Y 表名」行作为表题
-                caption = _extract_table_caption(blocks)
-                if caption:
-                    table_block["caption"] = caption
-                blocks.append(table_block)
+            # ✅ R104（2026-10-18 · 导出乱码收口）：旧判据要求分隔行必须落在
+            #    ``tbl_lines[1]``，对「分隔行前置」与「多表粘连（表间无空行）」两种
+            #    实测坏形态整块失效 → 管道语法原样印进交付 DOCX（生产取证
+            #    scheme_assistant.db sections rowid 140/227）。现按分隔行切分重排
+            #    为规范序（见 _split_table_block）：规范序块与旧行为逐字节一致，
+            #    坏形态重排为一张/多张规范表，切分失败才走旧降级路径（整块段落）。
+            segments = _split_table_block(tbl_lines)
+            if segments:
+                if len(segments) > 1 or segments[0] != tbl_lines:
+                    logger.info(
+                        "表格块形态重排：源文为分隔行前置/多表粘连等非规范 GFM"
+                        "（%d 行 → %d 张表），已按规范序重组渲染",
+                        len(tbl_lines), len(segments))
+                for seg in segments:
+                    # ✅ 2026-10-17（文档质量报告 表号问题根因 B）：剥离首行首格 AI 自带的
+                    #    「表 X-Y」编号前缀（表号由导出统一生成，否则「表 6-3 表 6-1 …」叠写）
+                    table_block = {"type": "table",
+                                   "lines": _normalize_table_first_cell(seg)}
+                    # ✅ 新增：吸收紧邻表格上方的「表 X-Y 表名」行作为表题
+                    caption = _extract_table_caption(blocks)
+                    if caption:
+                        table_block["caption"] = caption
+                    blocks.append(table_block)
             else:
                 for tl in tbl_lines:
                     blocks.append({"type": "paragraph", "text": tl})
@@ -766,7 +984,9 @@ def _parse_content_blocks(content: str) -> list[dict]:
             if _close_idx is not None:
                 _gfm = _html_table_to_gfm("\n".join(_html_lines))
                 if _gfm:
-                    _tbl = {"type": "table", "lines": _gfm}
+                    # ✅ 2026-10-17（根因 B）：与 GFM 表格同口径剥离首格「表 X-Y」编号前缀
+                    _tbl = {"type": "table",
+                            "lines": _normalize_table_first_cell(_gfm)}
                     # ✅ 与 GFM 表格同口径：吸收紧邻上方的「表 X-Y 表名」行作表题
                     _cap = _extract_table_caption(blocks)
                     if _cap:
@@ -787,17 +1007,32 @@ def _parse_content_blocks(content: str) -> list[dict]:
         #    下载失败仍降级为图题文本，不会在成稿里残留裸 Markdown 语法。
         m_img = _IMAGE_LINE_RE.match(stripped)
         if m_img:
+            # ✅ 2026-10-17（文档质量报告 图号问题）：吸收图**上方**的「图 X-Y 题名」行
+            #    作为该图图题（alt 缺失时兜底），避免源文自写图题与导出图号重号。
+            _img_cap = _extract_figure_caption(blocks)
             blocks.append({
                 "type": "image",
-                "alt": (m_img.group("alt") or "").strip(),
+                "alt": (m_img.group("alt") or "").strip() or _img_cap,
                 "url": m_img.group("url").strip(),
             })
             i += 1
             continue
-        # 图表标记 [CHART_TYPE: xxx]
-        m = _RE_CHART_TYPE_TAG.match(line.strip())
+        # 图表标记 [CHART_TYPE: xxx]（R99：半角/全角方括号与冒号皆可）
+        _stripped = line.strip()
+        m = _RE_CHART_TYPE_TAG.match(_stripped)
         if m:
             blocks.append({"type": "chart", "chart_type": m.group(1)})
+            i += 1
+            continue
+        if _RE_CHART_TYPE_TAG_LOOSE.match(_stripped):
+            # ✅ R99：形似机器标记但类型不合法（缺类型 / 类型含非法字符 / 右括号不匹配）。
+            #    旧实现按普通段落原样输出 ⇒ 「【CHART_TYPE：】」这类内部标记直接印进
+            #    交付 DOCX（AGENTS 反复登记的「机器痕迹泄漏进成稿」同族）。此处整块跳过：
+            #    该行本就无图可画，用户从成稿里看到内部标记毫无价值，只会以为方案有瑕疵。
+            logger.warning(
+                '图表标记行格式异常（疑似机器标记，已整块跳过、不原样输出）: %s',
+                _stripped[:80])
+            _pop_orphan_lead_in_block(blocks)
             i += 1
             continue
         # 引用块 > ...（连续行合并为一个 block）
@@ -846,7 +1081,11 @@ def _parse_content_blocks(content: str) -> list[dict]:
             continue
         blocks.append({"type": "paragraph", "text": line})
         i += 1
-    return blocks
+    # ✅ 2026-10-17（文档质量报告 图号问题）：收尾清理「有题无图」的残留图题段落 ——
+    #    源文自写的「图 X-Y 题名」若无对应图表块（渲染失败/压根未生成），它既不进
+    #    图表清单也不占图号，却与导出为真实图表生成的图号**重号**，且成稿呈现「有题
+    #    无图」。已挂图的图题在解析期被吸收；此处只删无图可挂的残留（绝不静默：记 WARNING）。
+    return _drop_dangling_figure_captions(blocks)
 
 
 def _norm_heading_text(text: str) -> str:

@@ -55,13 +55,22 @@ def _fn(name, src=None):
 
 @pytest.mark.parametrize("key", FORM_KEYS)
 def test_scheme_forms_config_defaults_off(key):
-    """未配置 / 全关 → scheme_forms 为空 dict → _build_docx_sync 不渲染任何表单。"""
-    from app.routers.export import _prepare_export  # 触发导入，确认可加载
-    assert _prepare_export is not None
+    """未配置 / 全关 → scheme_forms 为空 dict → _build_docx_sync 不渲染任何表单。
+
+    ✅ R94（2026-10-17 · 缓存命中快速路径）：版式读取从 `_prepare_export` 尾部
+    抽出为 `_build_docx_options`（DOCX / PDF 两条链路 + 缓存命中路径共用的唯一
+    构造出口）。判据跟着搬 —— 锁的是「读取 + bool 化 + 四键登记」这个不变式，
+    不是某个函数名。
+    """
+    from app.routers.export import (  # 触发导入，确认可加载
+        _build_docx_options,
+        _prepare_export,
+    )
+    assert _prepare_export is not None and _build_docx_options is not None
     # 规范化逻辑：空输入与脏输入都得空 dict
-    src = _fn("_prepare_export")
+    src = _fn("_build_docx_options")
     i = src.find('"scheme_forms"')
-    assert i > 0, "_prepare_export 未读取 scheme_forms"
+    assert i > 0, "_build_docx_options 未读取 scheme_forms"
     seg = src[i:i + 700]
     assert "bool(" in seg, "scheme_forms 未做 bool 化（脏值会渗进渲染分支）"
     # 四个键全部登记

@@ -228,6 +228,33 @@ describe("ReviewWorkflowPanel · 章节审核工作流", () => {
     expect(body.reviewer).toBe("李四");
   });
 
+  it("批量并发冲突：conflicts 必须如实警示，不得静默报成功", async () => {
+    // ✅ R95（2026-10-17）：后端批量 UPDATE 改 compare-and-set，读后写窗口内
+    //    被并发方改写的章节计入 conflicts。前端旧实现不认识该字段 ——
+    //    「1 个成功 + 1 个被并发挤掉」会被播报成纯成功，评审人误以为全部生效。
+    (reviewApi.batch as any).mockResolvedValue({
+      data: {
+        ok: true, changed: 1, changed_ids: ["sec-1"],
+        skipped: [], not_found: [], nochange: [],
+        conflicts: ["sec-2"], total_ids: 2, truncated: false,
+      },
+    });
+    const { container } = render(<App><ReviewWorkflowPanel schemeId={SCHEME} /></App>);
+    await waitFor(() => expect(container.textContent || "").toContain("第3章 基坑支护"));
+    setReviewer(container, "赵六");
+    const rowCbs = Array.from(container.querySelectorAll(".ant-table-tbody .ant-table-row"))
+      .map((row) => row.querySelector("input[type='checkbox']") as HTMLInputElement);
+    fireEvent.click(rowCbs[0]!);
+    fireEvent.click(rowCbs[1]!);
+    fireEvent.click(btnByText(container, "批量通过")!);
+    await waitFor(() => expect(confirmOk()).toBeTruthy());
+    await act(async () => { fireEvent.click(confirmOk()!); });
+    await waitFor(() => expect(reviewApi.batch).toHaveBeenCalled());
+    // changed>0 但有偏差 → warning（非 success），且文案点名并发冲突
+    await waitFor(() => expectMsg(msgSpy.warning, "并发操作修改"));
+    expect(msgSpy.success).not.toHaveBeenCalled();
+  });
+
   it("方案级提交（未全部审核）→ 弹窗内显示 warning；确认后调用 submit", async () => {
     // ✅ BUG 修复回归：「提交审核通过」前置提示
     const { container } = render(<App><ReviewWorkflowPanel schemeId={SCHEME} /></App>);

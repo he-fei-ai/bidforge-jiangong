@@ -11,10 +11,11 @@
   - ``audit``        ：配置变更审计 + 版本回滚（✅ 2026-09-23 新增）
   - ``scene_routes`` ：场景模型路由（✅ 2026-09-23 新增）
   - ``runtime``      ：运行时开关（多环境当前环境 / 厂商禁用，✅ 2026-09-23 新增）
+  - ``key_rotation`` ：主密钥轮转 + 存量密文迁移（✅ 2026-10-17 新增）
 """
 from fastapi import APIRouter
 
-from . import audit, config, connectivity, models, runtime, scene_routes, usage
+from . import audit, config, connectivity, key_rotation, models, runtime, scene_routes, usage
 
 router = APIRouter(prefix="/api/v1/ai", tags=["ai_config"])
 router.include_router(config.router)
@@ -24,6 +25,7 @@ router.include_router(usage.router)
 router.include_router(audit.router)
 router.include_router(scene_routes.router)
 router.include_router(runtime.router)
+router.include_router(key_rotation.router)
 
 # 兼容历史直接导入（如 _diagnostics/_fallback_chain_test.py 的
 # ``from app.routers.ai_config import update_fallback_chain``）
@@ -55,6 +57,7 @@ from .config import (
     update_fallback_chain,
 )
 from .connectivity import ai_health, configs_health, precheck_all, precheck_config, test_config
+from .key_rotation import key_rotation
 from .models import (
     _MODEL_LIST_MAX,
     _ctx_tokens,
@@ -83,4 +86,5 @@ __all__ = [
     "rollback_config", "sanitize_config_snapshot", "diff_snapshots",
     "list_scene_routes", "update_scene_route", "batch_update_scene_routes",
     "get_runtime", "set_disabled_providers",
+    "key_rotation",
 ]

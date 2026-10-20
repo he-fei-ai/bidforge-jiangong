@@ -54,11 +54,17 @@ def isolated(monkeypatch):
     pf._provider_reliability.clear()
     pf.circuit_breaker._per_provider.clear()
     pf.reset_quota_cooldown()
+    # ✅ R110：思考吞噬冷却 + 全熔断快速失败为新增模块级状态，一并清零
+    #    防止前序测试文件设置的 60s 冷却窗口泄漏进本文件用例。
+    pf.reset_thinking_dead()
+    pf.reset_all_circuit_fast_fail()
     yield monkeypatch
     pf._audit_buffer.clear()
     pf._provider_reliability.clear()
     pf.circuit_breaker._per_provider.clear()
     pf.reset_quota_cooldown()
+    pf.reset_thinking_dead()
+    pf.reset_all_circuit_fast_fail()
 
 
 def _wire_single(monkeypatch, provider_factory_fn, *, max_tokens=4096):

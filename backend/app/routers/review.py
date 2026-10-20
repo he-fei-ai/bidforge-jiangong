@@ -366,6 +366,7 @@ async def batch_review_sections(scheme_id: str, body: dict, db=Depends(get_db)):
     skipped: list = []     # 状态机拦截的章节
     not_found: list = []   # 不存在或不属于该方案的章节
     nochange: list = []    # 已是目标状态（幂等），不落痕
+    conflicts: list = []   # ✅ R95：读后写竞态（状态被并发方改写），本条未生效
     for sid in processed_ids:
         row = await review_db.fetch_one(
             db, "SELECT id, title, review_status FROM sections WHERE id=? AND scheme_id=?",
@@ -386,9 +387,21 @@ async def batch_review_sections(scheme_id: str, body: dict, db=Depends(get_db)):
             if to_status not in allowed:
                 skipped.append(sid)
                 continue
-        await review_db.exec_write(
-            db, "UPDATE sections SET review_status=? WHERE id=?", (to_status, sid),
-            what=f"批量审核：更新章节状态（section={sid[:8]}）")
+        # ✅ 并发竞态收口（2026-10-17 · R95，R90 遗留⑥）：上方 SELECT 与下方
+        #    UPDATE 之间隔着 await，另一请求（另一标签页 / 批量与单章并发）可在
+        #    窗口内改写状态 → 旧实现照常落 UPDATE 并写 from_status=旧值的轨迹，
+        #    评审轨迹出现「从已被替换的状态流转」的伪记录。改 compare-and-set：
+        #    WHERE 带上读到的期望状态，0 行 = 状态已被并发方改写，记入 conflicts
+        #    （响应体加法式新键，老调用方忽略不受影响），绝不落痕、绝不假成功。
+        n = await review_db.exec_write(
+            db, "UPDATE sections SET review_status=? WHERE id=?"
+                " AND COALESCE(review_status,'')=?",
+            (to_status, sid, from_status),
+            what=f"批量审核：更新章节状态（section={sid[:8]}）",
+            require_rows=False)
+        if n <= 0:
+            conflicts.append(sid)
+            continue
         await _write_record(db, scheme_id, sid, row["title"] or "",
                             from_status, to_status, reviewer, comment, project_id)
         changed += 1
@@ -401,6 +414,7 @@ async def batch_review_sections(scheme_id: str, body: dict, db=Depends(get_db)):
         "skipped": skipped,
         "not_found": not_found,
         "nochange": nochange,
+        "conflicts": conflicts,
         "total_ids": total_ids,
         "truncated": truncated,
     }
@@ -430,9 +444,17 @@ async def review_section(scheme_id: str, section_id: str, body: SectionReviewIn,
 
     # ✅ R13（2026-10-06）：写路径经 exec_write，本次写没生效时抛 503，
     #    旧实现返回 changed=True 而库里状态未变（假成功）。
-    await review_db.exec_write(
-        db, "UPDATE sections SET review_status=? WHERE id=?",
-        (body.to_status, section_id), what="章节审核：更新章节状态")
+    # ✅ 并发竞态收口（2026-10-17 · R95，R90 遗留⑥）：与批量端点同口径的
+    #    compare-and-set —— 读取与写入之间的 await 窗口里状态被并发方改写时，
+    #    0 行不再假成功，如实 409 让用户刷新后按最新状态重做决定
+    #    （503 保留给「连接瞬时异常」，两者语义不混）。
+    n = await review_db.exec_write(
+        db, "UPDATE sections SET review_status=? WHERE id=?"
+            " AND COALESCE(review_status,'')=?",
+        (body.to_status, section_id, from_status),
+        what="章节审核：更新章节状态", require_rows=False)
+    if n <= 0:
+        raise HTTPException(409, "该章节审核状态已被并发操作修改，请刷新后重试")
     await _write_record(db, scheme_id, section_id, row["title"] or "",
                         from_status, body.to_status, body.reviewer, body.comment)
     await db.commit()
@@ -554,10 +576,20 @@ async def submit_scheme_review(scheme_id: str, body: SchemeReviewIn,
 
     # ✅ R13（2026-10-06）：写路径经 exec_write。这是放行门禁之后最关键的一笔写 ——
     #    旧实现返回 None 时照常 ok=True，方案审核状态实际未推进。
-    await review_db.exec_write(
-        db, "UPDATE schemes SET review_status=?, updated_at=? WHERE id=?",
-        (body.to_status, datetime.now().isoformat(), scheme_id),
-        what="方案评审提交：更新方案审核状态")
+    # ✅ 并发竞态收口（2026-10-17 · R95，R90 遗留⑥）：同章节口径的
+    #    compare-and-set。期望值为空串时**不加**状态约束（沿用 2026-09-17
+    #    既有语义：库里残留非法/空 review_status 的行允许被直接覆盖推进），
+    #    期望值非空时并发方在门禁校验后改写过状态则如实 409 ——
+    #    放行门禁基于的是「读取时刻」的预检结论，绝不能套用在已被并发
+    #    流转过的行上（否则出现 rejected → approved 绕过状态机的伪流转）。
+    n = await review_db.exec_write(
+        db, "UPDATE schemes SET review_status=?, updated_at=? WHERE id=?"
+            " AND (? = '' OR COALESCE(review_status,'') = ?)",
+        (body.to_status, datetime.now().isoformat(), scheme_id,
+         from_status, from_status),
+        what="方案评审提交：更新方案审核状态", require_rows=False)
+    if n <= 0:
+        raise HTTPException(409, "方案审核状态已被并发操作修改，请刷新后重试")
     await _write_record(db, scheme_id, "", row["name"] or "",
                         from_status, body.to_status, body.reviewer, body.comment,
                         await _scheme_project_id(db, scheme_id))

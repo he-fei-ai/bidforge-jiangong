@@ -360,6 +360,26 @@ class DisabledProvidersIn(BaseModel):
     providers: List[str] = Field(default_factory=list)
 
 
+class KeyRotationIn(BaseModel):
+    """主密钥轮转 / 存量密文迁移入参（✅ 2026-10-17 新增）。
+
+    三个 mode 语义（详见 ``routers/ai_config/key_rotation.py``）：
+      - ``inspect``   只读体检（主密钥来源 + 存量密钥健康度），零写入；
+      - ``reencrypt`` 在「当前密钥 / legacy_key」下重加密全部存量密文；
+      - ``rotate``    备份旧密钥 → 换新密钥 → 同一窗口内迁移全部存量密文。
+
+    全部字段加法式、默认值保证「只调 inspect」时无任何副作用（向后兼容）。
+    """
+    mode: str = Field("inspect", max_length=16)
+    # 迁移窗口内可用的「历史密钥」：主密钥轮换后旧密文需用它解出明文再重加密。
+    # 传空 = 仅用当前生效密钥（inspect/reencrypt 无副作用）。
+    legacy_key: str = Field("", max_length=512)
+    # 仅 mode=rotate 有效：新主密钥（44 字符 urlsafe base64）；空 = 自动生成。
+    new_key: str = Field("", max_length=512)
+    # True = 只计算「将迁移/失败多少条」，不写库、不轮转（维护前预演）。
+    dry_run: bool = False
+
+
 # ---------- 目录节点（树） ----------
 class OutlineNode(BaseModel):
     id: str

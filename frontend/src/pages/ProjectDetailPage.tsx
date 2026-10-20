@@ -1,11 +1,12 @@
-﻿import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {App, Card, Button, List, Tag, Modal, Form, Input, Select, Space,
   message, Descriptions, Tabs, Typography, Empty, Tree, Spin,
   Drawer, Table, Popconfirm, Tooltip, Alert,} from "antd";
 import { PlusOutlined, CopyOutlined, InboxOutlined, SearchOutlined, DeleteOutlined, EditOutlined, BookOutlined, ProjectOutlined, FileTextOutlined, ApiOutlined } from "@ant-design/icons";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { projectsApi, schemesApi, schemeCatalogApi, knowledgeApi } from "../api";
 import { useAntdMessageHub } from "../utils/activityCenter";
+import { notifySidebarTreeRefresh } from "../utils/sidebarEvents";
 
 import { PageHero, StatCards, StatItem } from "../utils/ui";
 
@@ -23,6 +24,7 @@ export default function ProjectDetailPage() {
   const { message: _antdMsg, modal } = App.useApp();
   const msg = useAntdMessageHub(_antdMsg, "项目详情");
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [project, setProject] = useState<any>(null);
   const [schemes, setSchemes] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -97,6 +99,18 @@ export default function ProjectDetailPage() {
 
   useEffect(() => { load(); }, [id]);
 
+  // ✅ R91（2026-10-17）：左侧项目树占位项「进入项目新建方案 / 暂无方案」改为
+  //    可点后，带 ?create=1 进入本页时直接打开新建方案弹窗（进入编辑状态），
+  //    并立即以 replace 清理查询参数 —— 防止刷新/返回时重复弹出。
+  //    依赖 searchParams：已在 /project/{id} 上再点侧栏占位项不会重挂载组件，
+  //    只有 URL 查询变化才能触发。
+  useEffect(() => {
+    if (searchParams.get("create") === "1") {
+      setModalOpen(true);
+      navigate(`/project/${id}`, { replace: true });
+    }
+  }, [searchParams, id, navigate]);
+
   useEffect(() => {
     if (modalOpen) {
       loadCatalog();
@@ -113,6 +127,8 @@ export default function ProjectDetailPage() {
         payload.library_ids = [selectedCatalogId];
       }
       const { data } = await schemesApi.create(id!, payload);
+      // ✅ R91：通知左侧项目树重取（绕过其永久去重），新建方案即时上树
+      notifySidebarTreeRefresh(id);
       // ✅ 断链修复：后端现在会在创建阶段直接套用所选目录库并写入 sections。
       //    这里把实际落库的章节数反馈给用户，并给出「进入编制」的直达入口
       //    （旧实现创建完方案章节树为空，用户进工作台只能看到空态，不知从何下手）。
@@ -153,6 +169,7 @@ export default function ProjectDetailPage() {
       //    正文也在，打开副本发现全空。改为如实说明。
       msg.success("已复制目录结构（副本正文需重新生成）");
       load();
+      notifySidebarTreeRefresh(id); // ✅ R91：副本方案同步上左侧项目树
     } catch (e: any) {
       msg.error(e.message || "复制失败");
     }
@@ -163,6 +180,7 @@ export default function ProjectDetailPage() {
       await schemesApi.archive(id!, sid);
       msg.success("操作成功");
       load();
+      notifySidebarTreeRefresh(id); // ✅ R91：归档状态徽标同步左侧项目树
     } catch (e: any) {
       msg.error(e.message || "操作失败");
     }
@@ -190,6 +208,7 @@ export default function ProjectDetailPage() {
       setEditOpen(false);
       setEditing(null);
       load();
+      notifySidebarTreeRefresh(id); // ✅ R91：改名/改类型同步左侧项目树
     } catch (e: any) {
       if (e.errorFields) return; // 校验未通过
       msg.error(e.message || "更新失败");
@@ -224,6 +243,7 @@ export default function ProjectDetailPage() {
           const { data } = await schemesApi.delete(id!, sid);
           msg.success(`方案「${data.name || name}」已删除`);
           load();
+          notifySidebarTreeRefresh(id); // ✅ R91：删除即时从左侧项目树消失（旧树残留是本轮主诉之一）
         } catch (e: any) {
           msg.error(e.message || "删除失败");
         }

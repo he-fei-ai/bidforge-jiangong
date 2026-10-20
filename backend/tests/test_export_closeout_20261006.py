@@ -573,16 +573,31 @@ class TestFrontendBackendConfigParity:
         assert not missing, f"后端白名单键在导出 UI 无落点：{missing}"
 
     def test_whitelist_matches_prepare_export_reads(self):
-        """`_normalize_config` 白名单必须覆盖 `_prepare_export` 实际读取的键。"""
-        src = inspect.getsource(E._prepare_export)
+        """`_normalize_config` 白名单必须覆盖取数/渲染段实际读取的键。
+
+        ✅ R94（2026-10-17 · 缓存命中快速路径）：`_prepare_export` 拆成
+        「取数段 + 渲染段（`_prepare_export_render`）」，版式配置读取搬到了
+        `_build_docx_options`。判据必须扫**三者合起来**，只扫取数段会把
+        「读取点仍在、白名单漏登」误判为「白名单里有无人读的键」。
+        """
+        src = (inspect.getsource(E._prepare_export)
+               + inspect.getsource(E._prepare_export_render)
+               + inspect.getsource(E._build_docx_options))
         read = set(re.findall(r"config\.get\(\s*[\"']([a-z_0-9]+)[\"']", src))
         missing = sorted(read - set(E._EXPORT_CONFIG_KEYS))
         assert not missing, (
-            f"_prepare_export 读取但未纳入指纹白名单的键（改它们不失效缓存）：{missing}")
+            f"取数/渲染段读取但未纳入指纹白名单的键（改它们不失效缓存）：{missing}")
 
     def test_config_values_are_actually_read_somewhere(self):
-        """反向：白名单里的键必须在 docx_options 或渲染侧被真实消费。"""
-        src = inspect.getsource(E._prepare_export) + inspect.getsource(E._build_docx_sync)
+        """反向：白名单里的键必须在取数段/渲染段/docx_options/构建侧被真实消费。
+
+        ✅ R94：`_build_docx_options` 是版式读取的唯一出口（原先内联在
+        `_prepare_export` 尾部），必须纳入扫描面，否则 17 个版式键会被误报为死键。
+        """
+        src = (inspect.getsource(E._prepare_export)
+               + inspect.getsource(E._prepare_export_render)
+               + inspect.getsource(E._build_docx_options)
+               + inspect.getsource(E._build_docx_sync))
         dead = sorted(k for k in E._EXPORT_CONFIG_KEYS
                       if f'"{k}"' not in src and f"'{k}'" not in src
                       and f".get({k}" not in src)
@@ -649,8 +664,13 @@ class TestDegradationObservability:
             assert f"{k}?:" in block, f"既有字段 {k} 被误删"
 
     def test_exporter_version_unchanged_with_justification(self):
-        """本轮修复对正常文档**逐字节不变**，故不失效全量缓存 —— 但必须留证。"""
-        assert E._EXPORTER_VERSION == "22"
+        """本轮修复对正常文档**逐字节不变**，故本轮自身不失效全量缓存。
+
+        ⚠️ 重锚（R109 · 2026-10-19）：后续 R109 修复了「WPS 打不开」的
+        ``w:tcPr`` 序列违例，必须让旧（坏）成稿整体失效，故版本号已升至 23。
+        本轮（2026-10-06）的意图不变：**本轮**不因自身改动失效缓存。
+        """
+        assert E._EXPORTER_VERSION == "23"
 
 
 # =========================================================================

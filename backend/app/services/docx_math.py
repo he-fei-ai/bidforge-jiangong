@@ -56,6 +56,23 @@ _CYRILLIC_WORD = {
 }
 # 连续西里尔字母片段（>=2 个字符），最多 20 字符，避免吞掉长俄语句子
 _CYRILLIC_SEG_RE = re.compile(r"[А-Яа-яЁё]{2,20}")
+# ✅ R104（2026-10-18 · 导出乱码收口）：**单字母**西里尔→希腊形近字误植。
+# 生产取证（scheme_assistant.db sections.content 全量扫描）：西里尔字符仅
+# ``ф``(U+0444)×6，全部是「单字母 + 数字」形态（``ф48.3mm×3.6mm`` / ``ф14``
+# 对拉螺栓）—— AI 把 GB 工程文档里的直径符号 **φ（希腊 Phi, U+03C6）** 误植为
+# 字形几乎一致的西里尔 ф。交付文档里它与 φ 形近但不同码：按 GB 口径是错字，
+# 且 preflight「钢管壁厚」判据（只认 ``[φΦ]``）与事实抽取都会对不上号。
+# 既有 ``_CYRILLIC_SEG_RE`` 只覆盖 **≥2 连续字母的词段**，单字母符号误植
+# 结构性漏修（词表 ``_CYRILLIC_WORD`` 对此亦无映射）。
+# 判据（高置信，封闭映射，宁可不改）：
+#   · 仅映射封闭字母 ``ф/Ф → φ/Φ``（生产实证的唯一形态；不扩大到 а/в/с 等
+#     高频俄语字母——它们在俄语文本里合法，单字母+数字的工程符号上下文才可疑）；
+#   · **后随 ASCII 数字**（工程符号典型上下文；俄语单词/文本里的单字母不会
+#     后随裸数字，如引文「ГОСТ 5」是数字在前）；
+#   · **前不能是西里尔字母**（排除俄语词内字母，如 ``версия5`` 的 в 前有 с）；
+#   · 未命中形态一律保留原样。
+_CYRILLIC_GLYPH_MAP = {"ф": "φ", "Ф": "Φ"}
+_CYRILLIC_GLYPH_NUM_RE = re.compile(r"(?<![А-Яа-яЁё])([фФ])(?=\s*\d)")
 
 # ---------------------------------------------------------------------------
 # 表格残留清理：Excel/Word 剪贴板表格标记 + 粘贴带出的 HTML 表格标签
@@ -137,12 +154,24 @@ def clean_text(text: str) -> str:
         return _CYRILLIC_WORD.get(seg.lower(), seg)
 
     out = _CYRILLIC_SEG_RE.sub(_fix_cyrillic, out)
+    # ✅ R104（2026-10-18 · 导出乱码收口）：单字母西里尔形近字（ф→φ 等，
+    #    仅「后随数字」的高置信工程符号形态，见 _CYRILLIC_GLYPH_NUM_RE 注释）。
+    #    既有词段修复覆盖不到单字母符号误植，生产实测 6 处全部漏修进交付文档。
+    out = _CYRILLIC_GLYPH_NUM_RE.sub(
+        lambda m: _CYRILLIC_GLYPH_MAP[m.group(1)], out)
     # ✅ 新增：剪贴板表格标记 / 残留 HTML 表格标签降级为可读纯文本
     #    （修复交付文档出现「<br><br><table><fcel><nl></table>」式乱码）
     out = strip_table_markup(out)
-    # ✅ 2026-10-10（文档质量报告 格式问题5）：Markdown 转义残留还原
+    # ✅ 2026-10-17（文档质量报告 符号问题）：HTML 实体还原（`&gt;`→`>` / `&lt;`→`<`）
+    out = decode_html_entities(out)
+    # ✅ 2026-10-17（文档质量报告 格式问题5）：Markdown 转义残留还原
     #    （字面 ``\n`` 黏行 / ``\*`` ``\_`` ``\~`` 裸反斜杠，高置信才动）
     out = unescape_markdown_literals(out)
+    # ✅ 2026-10-17（文档质量报告 英文残留）：中英混排误植词还原（公式跨度外）
+    out = fix_english_residue(out)
+    # ✅ 2026-10-17（文档质量报告 公式乱码）：带边界空白的 `$ x $` 归一为 `$x$`，
+    #    使其落回严格形态被 OMML 转换器消费（否则 LaTeX 源码原样印进成稿）
+    out = normalize_spaced_inline_math(out)
     return out
 
 
@@ -191,6 +220,132 @@ def unescape_markdown_literals(text: str) -> str:
         return _fix_seg(text)
     # 偶数索引是公式跨度外的普通文本（可修复），奇数索引是公式原文（保留）
     return "".join(p if i % 2 else _fix_seg(p) for i, p in enumerate(parts))
+
+
+# ---------------------------------------------------------------------------
+# HTML 实体还原（2026-10-17 · 「层高垂直度（&gt;5m）」类实体残留）
+# ---------------------------------------------------------------------------
+# 实测第 2 轮交付文档：正文与表格单元格共 45 处 `<w:t>` 文本内出现**字面** `&gt;`
+# / `&lt;`（如「当跨度&gt;2m 时」「层高垂直度（&gt;5m）」「&gt;2，≤8」），应为
+# `>` / `<`。根因：AI 生成 / 上传解析把 HTML 实体原样写进正文，而 `clean_text`
+# 此前**不解码实体** —— 实体只在 HTML 表格单元格（content_blocks._html_cell_text）
+# 侧被还原，GFM 表格与正文段落的实体一路漏进成稿。
+# 现按**白名单**收口：仅还原常见且无歧义的实体 + 数字引用（`&#NN;` / `&#xNN;`），
+# 最多迭代 2 轮以兼容 `&amp;gt;` 双重转义。白名单外的 `&xxx;` 一律保留
+# （宁可不改，不丢内容）。
+_HTML_ENTITY_MAP = {
+    "&gt;": ">", "&lt;": "<", "&amp;": "&",
+    "&quot;": '"', "&apos;": "'", "&nbsp;": " ",
+}
+_HTML_ENTITY_RE = re.compile(
+    r"&(?:gt|lt|amp|quot|apos|nbsp|#\d{1,6}|#[xX][0-9a-fA-F]{1,6});", re.I)
+
+
+def decode_html_entities(text: str) -> str:
+    """还原白名单内的 HTML 实体（最多 2 轮，兼容 `&amp;gt;` 双重转义）。"""
+    if not text or "&" not in text:
+        return text
+    for _ in range(2):
+        def _rep(m: "re.Match") -> str:
+            ent = m.group(0)
+            low = ent.lower()
+            if low in _HTML_ENTITY_MAP:
+                return _HTML_ENTITY_MAP[low]
+            try:
+                if low.startswith("&#x"):
+                    return chr(int(ent[3:-1], 16))
+                if low.startswith("&#"):
+                    return chr(int(ent[2:-1]))
+            except (ValueError, OverflowError):
+                return ent
+            return ent
+
+        new = _HTML_ENTITY_RE.sub(_rep, text)
+        if new == text:
+            break
+        text = new
+    return text
+
+
+# ---------------------------------------------------------------------------
+# 行内公式「边界空白」归一（2026-10-17 · `$ \gamma_c = 25 $` 类 LaTeX 残留）
+# ---------------------------------------------------------------------------
+# 实测第 2 轮交付文档：`$ \gamma_c = 25 $`、`$ t_0 $`、`$ k $`、`$ \mu $`、
+# `$ \varphi $` 等**带边界空格**的 `$ ... $` 跨度未被转成 OMML，LaTeX 源码
+# 原样印进成稿。根因：`_INLINE_DOLLAR` 要求开/闭 `$` **紧贴非空白**
+# （`(?!\s)` / `(?<!\s)`），而 AI 常写成 `$ x $`（两端各留空格）→ 不匹配 → 公式
+# 不转换。现做「边界空白归一」：仅当跨度内容**形似数学式**（含反斜杠命令 / 上下标
+# / 运算符，或为短变量名）才把两端空白剥掉，使其落回严格 `$x$` 形态被转换器消费；
+# 纯数字（`$ 100 $` 之类货币/数值）与普通文本一律不动。**只剥边界空白，不改内文**。
+_MATH_WS_DOLLAR_RE = re.compile(r"(?<!\$)\$[ \t]+([^$\n]*?\S)[ \t]+\$(?!\$)")
+_MATH_HINT_RE = re.compile(r"\\[A-Za-z]+|[_^=<>+\-*/×÷±≤≥∑∫√∅∈∀∃]")
+_MATH_VAR_RE = re.compile(r"[A-Za-z][A-Za-z0-9]{0,7}")
+_PURE_NUMBER_RE = re.compile(r"[\d.,]+")
+
+
+def _spaced_inline_math_inners(text: str) -> list[str]:
+    """返回文本中「形似数学式」的带边界空白 `$ ... $` 跨度内文（供统计）。"""
+    if not text or "$" not in text:
+        return []
+    out: list[str] = []
+    for m in _MATH_WS_DOLLAR_RE.finditer(text):
+        inner = m.group(1).strip()
+        if inner and not _PURE_NUMBER_RE.fullmatch(inner) and (
+                _MATH_HINT_RE.search(inner) or _MATH_VAR_RE.fullmatch(inner)):
+            out.append(inner)
+    return out
+
+
+def normalize_spaced_inline_math(text: str) -> str:
+    """把形似数学式的 `$ x $` 归一为 `$x$`（仅剥两端空白，不动内文）。"""
+    if not text or "$" not in text:
+        return text
+
+    def _rep(m: "re.Match") -> str:
+        inner = m.group(1).strip()
+        if inner and not _PURE_NUMBER_RE.fullmatch(inner) and (
+                _MATH_HINT_RE.search(inner) or _MATH_VAR_RE.fullmatch(inner)):
+            return "$" + inner + "$"
+        return m.group(0)
+
+    return _MATH_WS_DOLLAR_RE.sub(_rep, text)
+
+
+# ---------------------------------------------------------------------------
+# 中英混排残留词语还原（2026-10-17 · required/assemble/steel tube 类英文误植）
+# ---------------------------------------------------------------------------
+# 实测第 2 轮交付文档（21 处）：AI 生成时把英文单词/短语原样留在中文句中
+# （「高处作业required搭设」「先 assemble 四片模板」「加steel tube 龙骨体系」…）。
+# 语义明确的词按**词边界整体**替换为中文；可能是专名/乱码（如 trofface）
+# 的**不收录**，避免乱猜改写（宁可不改，不丢内容）。
+# 仅作用于**公式跨度之外**的普通文本（避免误伤 `$N_{slab}$` 之类公式内变量）。
+_EN_RESIDUE_MAP = {
+    "required": "需",
+    "assemble": "拼装",
+    "steel tube": "钢管",
+    "renovate": "改造",
+    "nearest": "最近的",
+    "filler": "填充料",
+    "cutting": "切割",
+    "footing": "底座",
+    "verticality": "垂直度",
+    "plywood": "胶合板",
+}
+_EN_RESIDUE_RE = re.compile(
+    r"(?<![A-Za-z])("
+    + "|".join(re.escape(k) for k in sorted(_EN_RESIDUE_MAP, key=len, reverse=True))
+    + r")(?![A-Za-z])", re.I)
+
+
+def fix_english_residue(text: str) -> str:
+    """把公式跨度外的英文误植词还原为中文（词边界整体替换）。"""
+    if not text or not _EN_RESIDUE_RE.search(text):
+        return text
+    parts = _FORMULA_SPAN_RE.split(text)
+    return "".join(
+        p if i % 2 else _EN_RESIDUE_RE.sub(
+            lambda m: _EN_RESIDUE_MAP[m.group(1).lower()], p)
+        for i, p in enumerate(parts))
 
 
 # ---------------------------------------------------------------------------
@@ -704,7 +859,10 @@ def scan_issues(text: str) -> dict:
              "cyrillic": 0,
              # ✅ 2026-10-10（文档质量报告 格式问题5）：字面 ``\n`` / ``\*``
              #    转义残留数（排除公式跨度后计数，与 unescape 修复口径一致）
-             "escape_residue": 0}
+             "escape_residue": 0,
+             # ✅ 2026-10-17（文档质量报告 符号/文字问题）：HTML 实体残留数 /
+             #    中英混排误植词数 / 带边界空白 LaTeX 残留数（供 X-Fix-Stats 观测）
+             "html_entities": 0, "en_residue": 0, "latex_residue": 0}
     for disp, _, _ in iter_formulas(text):
         stats["formulas"] += 1
         if disp:
@@ -713,12 +871,19 @@ def scan_issues(text: str) -> dict:
     stats["control_chars"] = len(_CTRL_RE.findall(text))
     stats["gbk_mojibake"] = len(_MOJIBUKE_GBK_RE.findall(text))
     stats["latin1_mojibake"] = len(_LATIN1_RE.findall(text))
-    stats["cyrillic"] = len(_CYRILLIC_SEG_RE.findall(text))
+    # ✅ R104（2026-10-18 · 导出乱码收口）：西里尔统计覆盖两种形态——
+    #    ≥2 字母词段误植 + 单字母形近字（ф→φ，后随数字）。
+    #    词段正则不匹配单字母，旧口径对后者恒 0（修复发生了却无观测）。
+    stats["cyrillic"] = (len(_CYRILLIC_SEG_RE.findall(text))
+                         + len(_CYRILLIC_GLYPH_NUM_RE.findall(text)))
     # 转义残留只在公式跨度外的普通文本里统计（跨度内不修也不计）
     outside = "".join(p for i, p in enumerate(_FORMULA_SPAN_RE.split(text))
                       if i % 2 == 0)
     stats["escape_residue"] = (len(_MD_UNESCAPE_NL_TAB_RE.findall(outside))
                                + len(_MD_UNESCAPE_PUNCT_RE.findall(outside)))
+    stats["html_entities"] = len(_HTML_ENTITY_RE.findall(text))
+    stats["en_residue"] = len(_EN_RESIDUE_RE.findall(text))
+    stats["latex_residue"] = len(_spaced_inline_math_inners(text))
     return stats
 
 
@@ -741,4 +906,10 @@ def summarize(text: str) -> str:
         parts.append(f"西里尔误植 {s['cyrillic']} 处")
     if s["escape_residue"]:
         parts.append(f"转义残留 {s['escape_residue']} 处")
+    if s["html_entities"]:
+        parts.append(f"HTML 实体残留 {s['html_entities']} 处")
+    if s["en_residue"]:
+        parts.append(f"英文误植 {s['en_residue']} 处")
+    if s["latex_residue"]:
+        parts.append(f"公式边界空白 {s['latex_residue']} 处")
     return "、".join(parts) if parts else "未发现可修复问题"

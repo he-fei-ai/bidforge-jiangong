@@ -3,6 +3,7 @@ import asyncio
 import datetime as _dt
 import logging
 import os
+import random
 import shutil
 import sqlite3
 import time
@@ -93,7 +94,8 @@ def safe_rowcount(cur, what: str = "") -> int:
 
 
 async def retry_db_op(coro_factory, *, max_retries: int = 3,
-                      base_delay: float = 0.05) -> object:
+                      base_delay: float = 0.05,
+                      jitter: float = 0.0) -> object:
     """对瞬态 SQLite 错误做有限重试的共享助手。
 
     coro_factory 是无参 async 函数（每次重试重新调用以创建新 coroutine），
@@ -102,6 +104,12 @@ async def retry_db_op(coro_factory, *, max_retries: int = 3,
     默认参数针对「任务终态 / checkpoint / 审计」这类小写入：
     3 次 × 0.05/0.10/0.20s，最坏多耗 0.35s，远小于一次 AI 调用（数十秒）。
     不可重试错误与重试耗尽后原样抛出，调用方语义不变。
+
+    ✅ R108（2026-10-18 · 日志审计 P0 锁族）：新增可选 ``jitter``——每级退避
+       叠加 [0, jitter) 秒随机量，打散多个并发写协程在锁释放瞬间的**同拍惊群**
+       （生产实证：批量生成 + 审计 flush + 控制指令并发时，等间隔重试会周期
+       性集体撞锁）。默认 0 = 与旧行为逐字一致，仅控制指令这类「指令性写入」
+       调用方显式加预算 + 抖动。
     """
     last_exc: BaseException | None = None
     for attempt in range(max_retries + 1):
@@ -112,6 +120,8 @@ async def retry_db_op(coro_factory, *, max_retries: int = 3,
                 raise
             last_exc = e
             delay = base_delay * (2 ** attempt)
+            if jitter > 0:
+                delay += random.uniform(0, jitter)
             logger.warning(
                 "DB 操作遇到可重试错误（第 %d/%d 次），%.2fs 后重试: %s",
                 attempt + 1, max_retries, delay, str(e)[:200])

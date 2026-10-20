@@ -16,6 +16,9 @@ import {
 } from "@ant-design/icons";
 import { useNavigate, useLocation } from "react-router-dom";
 import { projectsApi, schemesApi } from "../api";
+import {
+  subscribeSidebarTreeRefresh, computeRefreshTargets, resolveTreeClick,
+} from "../utils/sidebarEvents";
 import TaskStatusBar from "./TaskStatusBar";
 import ActivityHint from "./ActivityHint";
 import { SIDEBAR_TOKENS } from "../utils/theme";
@@ -97,6 +100,55 @@ function ProjectTreeMenu({
   //    现改用 schemesMapRef 读取最新值，effect 只依赖 selectedKey 和 projects。
   const schemesMapRef = useRef<Record<string, SchemeItem[]>>({});
   useEffect(() => { schemesMapRef.current = schemesMap; }, [schemesMap]);
+
+  // ✅ 修复（2026-10-17 · R91 浏览器实测复现）：侧栏此前只在挂载时 loadProjects
+  //    一次，且 loadedProjectIdsRef 对已加载项目永久去重；Layout 包裹整个
+  //    Routes，应用内跳转不重挂载该树 —— 新建/删除项目、新建/删除/改名方案
+  //    对侧栏完全不可见，必须 F5 才更新。现订阅 sidebarEvents 事件总线：
+  //    写入入口（ProjectListPage / ProjectDetailPage）成功后通知，这里绕过
+  //    去重缓存重取。projectsRef / expandedKeysRef 只为在回调里读最新值
+  //    （与 schemesMapRef 同一手法，避免 effect 依赖抖动重复订阅）。
+  const projectsRef = useRef<ProjectItem[]>([]);
+  useEffect(() => { projectsRef.current = projects; }, [projects]);
+  const expandedKeysRef = useRef<string[]>([]);
+  useEffect(() => { expandedKeysRef.current = expandedKeys; }, [expandedKeys]);
+
+  const refreshTree = useCallback(async (projectId?: string) => {
+    try {
+      const { data } = await projectsApi.list();
+      const list: ProjectItem[] = data.items || [];
+      const prevIds = new Set(projectsRef.current.map((p) => p.id));
+      setProjects(list);
+      // 绕过 loadedProjectIdsRef 去重：重取「已加载 ∪ 已展开 ∪ 事件目标」项目；
+      // 另并入最新列表中所有有方案的项目（防「别处新建的首个方案」漏取，
+      // 与挂载时 loadProjects 的主动加载口径一致）。
+      const targets = computeRefreshTargets(
+        loadedProjectIdsRef.current, expandedKeysRef.current, projectId,
+      );
+      for (const p of list) {
+        if ((p.scheme_count ?? 0) > 0 && !targets.includes(p.id)) targets.push(p.id);
+      }
+      loadedProjectIdsRef.current.clear();
+      for (const pid of targets) {
+        loadSchemes(pid);
+      }
+      // 仅对「新出现且有方案」的项目自动展开；用户手动收起的项目不被事件
+      // 强行重新展开（事件驱动与挂载时的默认展开策略有意不同）。
+      const newKeys = list
+        .filter((p) => !prevIds.has(p.id) && (p.scheme_count ?? 0) > 0)
+        .map((p) => `/project/${p.id}`);
+      if (newKeys.length) {
+        setExpandedKeys((prev) => [...prev, ...newKeys.filter((k) => !prev.includes(k))]);
+      }
+    } catch {
+      // fail-soft：刷新失败保留旧树，下一次事件再重取，不打扰用户
+    }
+  }, [loadSchemes]);
+
+  useEffect(
+    () => subscribeSidebarTreeRefresh((pid) => { void refreshTree(pid); }),
+    [refreshTree],
+  );
 
   // 当用户进入某个页面时，自动展开对应项目并加载方案
   useEffect(() => {
@@ -197,7 +249,10 @@ function ProjectTreeMenu({
                   进入项目新建方案
                 </span>
               ),
-              disabled: true,
+              // ✅ R91：原 disabled:true 是「看着能点、点了没反应」的死占位
+              //    （用户报「点击新建方案时未能进入编辑状态」）。改为可点，
+              //    onClick 经 resolveTreeClick 跳项目详情并带 ?create=1 直接
+              //    打开新建方案弹窗。
             },
           ]
         : !loaded
@@ -209,10 +264,10 @@ function ProjectTreeMenu({
               icon: <PlusOutlined />,
               label: (
                 <span style={{ opacity: 0.75 }}>
-                  暂无方案
+                  暂无方案 · 点击新建
                 </span>
               ),
-              disabled: true,
+              // ✅ R91：同上，占位项可点直达新建方案弹窗
             },
           ]
         : schemes.map((s) => ({
@@ -284,9 +339,11 @@ function ProjectTreeMenu({
         onOpenChange={onOpenChange}
         items={items}
         onClick={({ key }) => {
-          if (typeof key === "string" && !key.endsWith("/loading") && !key.endsWith("/empty") && !key.endsWith("/create-scheme")) {
-            onNavigate(key);
-          }
+          // ✅ R91：路由判定收敛到纯函数 resolveTreeClick —— loading 占位无
+          //    反应；create-scheme/empty 占位跳「项目详情 ?create=1」自动开弹窗；
+          //    其余 key（项目/方案/菜单）原样导航。
+          const to = resolveTreeClick(key);
+          if (to) onNavigate(to);
         }}
         style={{ borderRight: 0 }}
         expandIcon={({ isOpen }) =>

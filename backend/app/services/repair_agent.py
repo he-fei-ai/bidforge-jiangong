@@ -287,12 +287,20 @@ async def run_repair(db, *, scheme_id: str, scan_id: str, conflicts: list[dict],
                      conflict_ids: list[str] | None = None,
                      contexts: dict | None = None,
                      force_full_repair: bool = False,
-                     progress_cb=None) -> dict:
+                     progress_cb=None, resync_fn=None) -> dict:
     """执行一次修复批次，返回 repair_record.save_repair 的结果。
 
     ``force_full_repair=True``：关闭「跳过已修复且成果仍在」的优化，本批对全部
     命中冲突重新调用 AI 修复（用户想强制重修一遍时使用，代价是多花调用）。
     默认 False —— 已修复且正文未被覆盖的冲突不再重复花钱修。
+
+    ✅ R92（2026-10-17 · 正文写点同步补链）：``resync_fn`` 为可选回调
+    ``async def resync_fn(db, section_id, content) -> None``，在每次正文 UPDATE
+    之后、同事务 commit 之前调用，用于把该章节内联图表**全量重登记**到
+    chart_predictions（消除「正文已改、登记仍旧」的两侧漂移）。本模块属
+    services 层，不得 import routers（见
+    ``test_outline_name_line_20260927::test_services_never_import_routers``），
+    故由 routers 层（consistency_repair）注入实现。缺省 None 时行为与引入前逐字一致。
     """
     contexts = contexts or {}
     facts = contexts.get("global_facts", "")
@@ -439,11 +447,27 @@ async def run_repair(db, *, scheme_id: str, scan_id: str, conflicts: list[dict],
                 _wc = text_word_count(after)
                 _wb = section_budgets.get(sid) or DEFAULT_WORD_BUDGET
                 # ✅ 并发写库串行化：同一连接上的 UPDATE + COMMIT 不与其他章节交错
+                # ✅ R92（2026-10-17 · 正文写点同步补链）：正文改写后，在同一写锁、
+                #    同一次 commit 之前调用 resync_fn 全量重登记本章内联图表；resync_fn
+                #    返回登记管线校验/修复后的正文（若某块被修正，须以校正后正文落库，
+                #    chart_predictions 与 sections.content 才逐字一致）。缺省 None 时
+                #    与本函数引入前逐字一致。异常 fail-soft：保留原正文，绝不阻断落库。
+                _persist_content = after
                 async with _write_lock:
+                    if resync_fn is not None:
+                        try:
+                            _resynced = await resync_fn(db, sid, after)
+                            if isinstance(_resynced, str) and _resynced:
+                                _persist_content = _resynced
+                                _wc = text_word_count(_persist_content)
+                        except Exception as _re:  # noqa: BLE001
+                            logger.warning(
+                                "[一致性修复] 第 %s 章图表重登记失败（保留原正文）: %s",
+                                sid, _re)
                     await db.execute(
                         "UPDATE sections SET content=?, word_count=?, word_status=?, "
                         "updated_at=? WHERE id=?",
-                        (after, _wc, word_status_for(_wc, _wb),
+                        (_persist_content, _wc, word_status_for(_wc, _wb),
                          datetime.now().isoformat(), sid))
                     await db.commit()
                 repaired_conflicts.update(cids)

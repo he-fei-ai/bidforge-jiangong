@@ -220,9 +220,11 @@ def test_generate_content_has_no_unbound_leaf_reference():
     # 逐章精选必须在已有 leaf 形参的上下文构建函数内完成。
     # ✅ 2026-09-24：该调用因章节优先特性（facts_chapter_inject）改为多行写法并
     #    追加 chapter= 关键字，整行匹配会误报；改为两个独立锚点，护栏意图不变
-    #    （_render_facts_text 必须以逐章 leaf 为 relevant_to，而非整批共享）。
-    assert "_render_facts_text(" in src
-    assert "relevant_to=leaf" in src
+    #    （事实渲染必须以逐章 leaf 为精选对象，而非整批共享）。
+    # ✅ R105（2026-10-18）重锚：正文调用点改走 fact_injection_audit 单一出口
+    #    （内部仍以 leaf→relevant_to 调 _render_facts_text），意图不变。
+    assert "fact_injection_audit(" in src
+    assert "leaf=leaf" in src
     # 事实行只加载一次（避免逐章查库）
     assert "facts_rows = await _load_facts_rows(db, scheme_id)" in src
 

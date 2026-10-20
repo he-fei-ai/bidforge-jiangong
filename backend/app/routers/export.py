@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
 from app.config import EXPORTS_DIR
-from app.db import get_db, read_db
+from app.db import get_db, read_db, retry_db_op
 
 # ✅ 围栏保护阈值与图表围栏家族统一取自登记侧（_chart_pipeline），
 #    两端必须同口径：旧实现登记侧按「500 行」判未闭合、导出侧按「8000 字符」判，
@@ -39,6 +39,9 @@ from app.services.ai.json_response import strip_outline_numbering
 from app.services.chart_validators import (
     MERMAID_KEYWORD_TO_CHART_TYPE,
 )
+
+# ✅ R102（G2 · 排序键单一出口）：导出序与展示序/生成序共用同一归一键。
+from app.services.content_utils import section_sort_order_key
 
 # ✅ 《待补充清单》（2026-09-24，治 F 层人工补录兜底）：逐条扫描章节正文中的
 #    占位符（规范字段占位 / 裸标记 / 模糊 ××），按字段与章节聚合，支持前端跳转定位。
@@ -155,8 +158,16 @@ def _merge_borrowed_stats(render_stats: dict, fix_stats: dict | None) -> dict:
 
 
 async def _db_exec(db, sql: str, params=(), *, what: str) -> bool:
-    """R13 + 写路径可观测：``execute`` 的唯一出口。返回 False = 本次写入未生效。"""
-    cur = await db.execute(sql, params)
+    """R13 + 写路径可观测：``execute`` 的唯一出口。返回 False = 本次写入未生效。
+
+    ✅ R108（2026-10-18 · 日志审计 P0-3）：既有 docstring 自称「写路径唯一出口」，
+    但锁瞬态（database is locked）此前**直通上抛**——批量导出撞 WAL 写锁时缓存行
+    写丢 + 500 直通。现接 ``retry_db_op`` 单一出口重试（只重试锁/i/o 瞬态，
+    语义错误原样上抛）；SQLite 的 locked 在语句获取写锁**前**抛出、首次尝试
+    必未落库，INSERT（uuid 主键）/UPDATE/DELETE 重放均无重复副作用。
+    """
+    cur = await retry_db_op(lambda: db.execute(sql, params),
+                            max_retries=4, base_delay=0.1, jitter=0.05)
     if cur is None:
         logger.warning("导出：写操作 %s 未生效（db.execute 返回 None）", what)
         return False
@@ -338,7 +349,12 @@ def _resolve_chart_code(block: dict, sec_id: str, chart_type: str,
 #           与 test_missing_chart_does_not_borrow_other_chapter_code 存在语义
 #           分歧（fallback 契约 vs 章节隔离契约互斥），R-3 保持 strict xfail
 #           记录该分歧，业务侧统一契约后再落地。
-_EXPORTER_VERSION = "22"
+#    v23：R109（2026-10-19 · P0）WPS 打不开修复 —— ``w:tcPr`` 等 CT_* 严格序列
+#        归一（见 ``_normalize_docx_strict_sequence``）。**必须整体失效旧缓存**：
+#        修复前落盘的成稿普遍带有 tcW→vAlign→shd 的非法序列，若沿用旧缓存行，
+#        用户内容与配置未变 → 每次命中都拿回打不开的坏档，修复永不可见。
+#        版式/产物字节变化烤进导出缓存，故沿用既有版本号机制整体失效。
+_EXPORTER_VERSION = "23"
 
 
 _CHART_TYPE_MAP = {
@@ -429,11 +445,21 @@ def _count_unclosed_chart_fences(content: str) -> int:
     return n
 
 
-def audit_content(sections: list[dict]) -> dict:
+def audit_content(sections: list[dict], *,
+                  fences_fixed: int = 0) -> dict:
     """扫描各章正文，产出可交付性问题清单（供导出预检 / 响应头 / 日志）。
 
     返回 ``{"total": int, "items": [...]}``；``items`` 每项含
     key / label / level / count / sections（最多 3 个章节标题，便于定位）。
+
+    ✅ R99（2026-10-17 · 围栏自动修复可观测性）：新增 ``fences_fixed`` 形参。
+    开启 ``auto_fix_unclosed_fences`` 后，围栏在体检**之前**就被补齐 →
+    ``_count_unclosed_chart_fences`` 恒为 0 → 「未闭合围栏」这条 error 级提示
+    在本次导出里**凭空消失**，而用户既看不到任何替代信号、也不知道围栏被改写过。
+    实测更严重：补齐后「围栏之后的中文正文」会被并入图表源码整体丢弃
+    （默认关闭时解析器会按句读行把正文还原出来，开启后反而丢得更多）。
+    现显式产出一条 warn 级提示，如实告知「本次自动补齐了 N 处围栏 + 需人工核对」。
+    缺省 0 = 不传该形参时代码路径与改造前**逐字一致**（既有调用方零影响）。
     """
     hits: dict[str, dict] = {}
     for sec in sections:
@@ -459,6 +485,12 @@ def audit_content(sections: list[dict]) -> dict:
             slot["count"] += unclosed
             if len(slot["sections"]) < 3 and title not in slot["sections"]:
                 slot["sections"].append(title)
+    if fences_fixed > 0:
+        hits.setdefault("fence_auto_fixed", {
+            "key": "fence_auto_fixed",
+            "label": (f"本次导出已自动补齐 {fences_fixed} 处未闭合围栏"
+                      "（围栏之后的中文正文可能被并入图表源码，请人工核对成稿）"),
+            "level": "warn", "count": int(fences_fixed), "sections": []})
     # 级别排序：error → warn，同级按数量降序（用户先看最要命的）
     order = {"error": 0, "warn": 1, "info": 2}
     items = sorted(hits.values(),
@@ -507,10 +539,29 @@ def _section_sort_key(sec: dict):
       1. 同一份内容两次导出章节顺序漂移（读者看到「章节串位」）；
       2. 内容指纹（依赖章节顺序）随之抖动 → 缓存永远 miss，重复渲染。
     故统一加确定性兜底键，所有排序点必须共用本函数。
+
+    ✅ R99（2026-10-17 · 脏 level 不得炸整份导出）：``level`` 来自 DB（TEXT 列），
+    脏数据可能是 ``"二"`` / ``"2.0"`` / 空串等非整数形态。原实现直接 ``int(...)``，
+    一次脏值就让本函数抛 ``ValueError`` —— 而它被 ``_build_docx_sync._rank_order``
+    在**章节递归之外**调用（不受 ``_write_section_safe`` 的逐章 fail-soft 保护），
+    实测表现为「一份产物都出不来」。现统一走安全取整：非法值降级为 1（与
+    ``write_section`` 内部的兜底同口径），对合法数据逐字不变。
+
+    ✅ R102（G2 · 三序漂移收口）：``sort_order`` 同为 DB TEXT 列，脏字符串
+    （``"3"``）与 int 混排会让本函数抛 ``TypeError``（与 R99 同一「递归外
+    无保护」暴露面），且旧键与 ``sections._build_tree`` / ``order_sections_dfs``
+    各写一份 ⇒ 落库序/展示序/导出序可能分叉。首元素现委托
+    ``content_utils.section_sort_order_key`` 单一出口（int 归一，对合法数据
+    恒等变换）。
     """
-    return (sec.get("sort_order", 0) or 0,
-            int(sec.get("level") or 1),
-            str(sec.get("id") or ""))
+    try:
+        level = int(sec.get("level") or 1)
+    except (TypeError, ValueError):
+        level = 1
+    so, sid = section_sort_order_key(sec.get("sort_order"), sec.get("id"))
+    return (so,
+            level,
+            sid)
 
 
 def _detect_duplicate_sections(sections: list[dict]) -> list[dict]:
@@ -757,6 +808,116 @@ def _detect_body_subheading_namespace_conflict(sections: list[dict]) -> list[dic
     return issues[:20]
 
 
+def collect_figure_table_number_superset(
+        sections: list[dict]) -> dict[str, set[str]]:
+    """导出引擎**最宽松**可能分配的图号 / 表号集合（预检用超集 → 零新增误报）。
+
+    ✅ R99（2026-10-17 · DLV-14 Tier 2 接线）：本函数补上 ``_detect_stale_cross_references``
+    长期缺失的图号 / 表号真实集合。此前 ``collect_export_issues`` 只调用
+    ``_detect_stale_cross_references(sections)``（**不传 real_nums**），
+    而该函数在 ``real_nums is None`` 时把 ``fig`` / ``tbl`` 初始化为空集合 →
+    ``if real_nums["fig"]:`` / ``if real_nums["tbl"]:`` 两个分支**结构性不可达**。
+    实测（artifacts/exp94/probe_confirm.py）：正文引用「图9-9 / 表9-9 / 图1-9 / 表1-9」，
+    而真实分配只有「图 1-1、图 2-1、表 1-1」→ ``stale_cross_reference`` 产出 **0** 条。
+    即 DLV-14 号称检测「图号/表号/节号漂移」，实际只能检测节号（第三条分支恒生效）。
+
+    **为什么是「超集」而不是精确集合**：渲染侧的真实分配与「取码 → 渲染 →
+    插入 → 回收图号」交织，且存在若干**只会减少**编号的路径 ——
+    同码图表去重（``rendered_charts``）、渲染失败跳过（不占图号）、
+    位图缺失跳过、块级异常回滚（``_DocxBodyRollback`` + ``_fig_snap``）。
+    只读预检无法复现这些减法，因此本函数只统计**上界**：
+      · 遍历顺序 = ``_section_sort_key``（sort_order → level → id）+ 深度优先，
+        与 ``_build_docx_sync`` 的 ``write_section`` 逐字一致；
+      · 编号原语 = 同一个 ``HeadingNumberingGeneratorV2``（``format_heading``
+        的父级重置语义一字不差），章序号取自**同一个** ``_figure_chapter_num``；
+      · 块类型判定 = 同一个 ``_parse_content_blocks``；
+        ``chart`` / ``image`` / ``ai_image`` 计入图号，``table`` 计入表号。
+    于是「真实分配 ⊆ 本超集」成立，预检只报**结构上不可能存在**的引用 ——
+    对既有判定是**纯增量**（原先恒 0 的分支变为可触发），不会新增任何误报。
+
+    **降级契约**：目录树异常（根节点不是一级章 / level 非整数 / 遍历抛错）时
+    返回空集合，调用方按「无图号/表号集合」降级 = **修复前逐字行为**。
+    之所以在根非一级章时放弃：``_figure_chapter_num`` 会回落到「第一个非零计数器」
+    （可能是 L2/L3 序号），与本函数按一级章序号推导的口径可能分叉，宁可不报。
+
+    Returns:
+        ``{"fig": {"图1-1", ...}, "tbl": {"表1-1", ...}}``；异常/降级时两集合为空。
+    """
+    empty = {"fig": set(), "tbl": set()}
+    try:
+        nodes = {s.get("id"): s for s in sections if s.get("id")}
+        children_map: dict[str, list] = {}
+        roots: list = []
+        for s in sections:
+            pid = s.get("parent_id") or ""
+            if pid and pid in nodes:
+                children_map.setdefault(pid, []).append(s)
+            else:
+                roots.append(s)
+        if not roots:
+            return empty
+        # 根必须是 level==1（否则章序号口径可能分叉 → 降级不报，见 docstring）
+        for r in roots:
+            try:
+                if int(r.get("level") or 1) != 1:
+                    return empty
+            except (TypeError, ValueError):
+                return empty
+
+        from app.services.ai.heading_v2 import HeadingNumberingGeneratorV2
+        gen = HeadingNumberingGeneratorV2()
+        fig_nums: set[str] = set()
+        tbl_nums: set[str] = set()
+        # ⚠️ R99 护栏当场抓出的实现缺陷：计数器必须**按章累加**、跨子章节连续。
+        # 渲染端 `write_section` 的键是 `f"ch{chapter_num}"`（一个一级章共用一个
+        # 计数器，其下所有子章节的图接着往下数）。若这里按「节」各自从 1 起算，
+        # 「一级章 + 2 个子章节各 1 图」只会得到 {图1-1}，而渲染真实分配是
+        # {图1-1, 图1-2, 图1-3} —— 集合成了渲染结果的**子集**，
+        # 对「图1-3」的合法引用会被误报 stale（比漏报更糟）。故此处按章记账。
+        fig_last: dict[int, int] = {}
+        tbl_last: dict[int, int] = {}
+
+        def walk(secs: list, parent_id: str) -> None:
+            for sec in sorted(secs, key=_section_sort_key):
+                try:
+                    level = max(1, min(int(sec.get("level") or 1), 8))
+                except (TypeError, ValueError):
+                    level = 1
+                # 只推进计数器（标题传空串即可，编号语义与标题无关）
+                gen.format_heading(level, "", parent_id)
+                chapter_num = _figure_chapter_num(gen)
+                try:
+                    blocks = _parse_content_blocks(sec.get("content") or "")
+                except Exception:
+                    # 单章解析失败不影响其它章（与渲染端逐块 fail-soft 同精神）
+                    blocks = []
+                fig_n = 0
+                tbl_n = 0
+                for b in blocks:
+                    btype = b.get("type")
+                    if btype in ("chart", "image", "ai_image"):
+                        fig_n += 1
+                    elif btype == "table":
+                        tbl_n += 1
+                base = fig_last.get(chapter_num, 0)
+                for i in range(base + 1, base + fig_n + 1):
+                    fig_nums.add(f"图{chapter_num}-{i}")
+                fig_last[chapter_num] = base + fig_n
+                tbase = tbl_last.get(chapter_num, 0)
+                for i in range(tbase + 1, tbase + tbl_n + 1):
+                    tbl_nums.add(f"表{chapter_num}-{i}")
+                tbl_last[chapter_num] = tbase + tbl_n
+                sec_id = sec.get("id") or ""
+                walk(children_map.get(sec_id, []), sec_id)
+
+        walk(roots, "")
+        return {"fig": fig_nums, "tbl": tbl_nums}
+    except Exception:
+        logger.warning("图号/表号真实集合推导失败（DLV-14 图/表分支按无集合降级）",
+                       exc_info=True)
+        return empty
+
+
 def _detect_stale_cross_references(
         sections: list[dict],
         real_nums: dict[str, set[str]] | None = None) -> list[dict]:
@@ -956,11 +1117,20 @@ async def _record_placeholder_baseline(scheme_id: str, report: dict, db) -> None
 
     与 preflight_runs 的写入策略同构：INSERT 失败 / 事务残留时尝试 rollback，
     绝不让监控写入影响预检主流程。
+
+    ✅ R99（2026-10-17 · R13 写路径收口）：此前本函数的两条写入是**全模块唯一**
+    绕过 ``_db_exec`` 单一出口的写路径 —— 裸 ``await db.execute(...)`` 后**丢弃游标、
+    既不判空也不看 rowcount**，随后照常 ``commit``。全局单连接 + aiosqlite 下
+    ``execute()`` 可能返回 None（R13），此时写操作**静默丢失**（无异常、无日志、
+    连 rollback 都不会触发），而监控旁路恰恰最需要「至少留痕」。
+    现两条写入统一走 ``_db_exec``（内部判空 + WARNING + 返回生效布尔），
+    写未生效即跳过裁剪并降级为一条 WARNING；行为对正常路径**逐字不变**。
     """
     if not isinstance(report, dict):
         return
     try:
-        await db.execute(
+        inserted = await _db_exec(
+            db,
             "INSERT INTO placeholder_baselines (id, scheme_id, total,"
             " formatted_total, bare_total, fuzzy_total, field_count, section_count)"
             " VALUES (?,?,?,?,?,?,?,?)",
@@ -970,13 +1140,19 @@ async def _record_placeholder_baseline(scheme_id: str, report: dict, db) -> None
              int(report.get("bare_total") or 0),
              int(report.get("fuzzy_total") or 0),
              int(report.get("field_count") or 0),
-             int(report.get("section_count") or 0)))
+             int(report.get("section_count") or 0)),
+            what="placeholder_baselines 写入")
         # 写入端裁剪：只保留最近 N 行（created_at 秒级精度不足，按 rowid 兜底）
-        await db.execute(
-            "DELETE FROM placeholder_baselines WHERE scheme_id=? AND id NOT IN ("
-            " SELECT id FROM placeholder_baselines WHERE scheme_id=?"
-            " ORDER BY created_at DESC, rowid DESC LIMIT ?)",
-            (scheme_id, scheme_id, _PLACEHOLDER_BASELINE_KEEP))
+        # ⚠️ 仅在 INSERT 生效后才裁剪：否则「写失败 + 裁剪成功」会把历史基线删掉
+        # 而本次快照根本没进去，历史趋势被单次失败污染。
+        if inserted:
+            await _db_exec(
+                db,
+                "DELETE FROM placeholder_baselines WHERE scheme_id=? AND id NOT IN ("
+                " SELECT id FROM placeholder_baselines WHERE scheme_id=?"
+                " ORDER BY created_at DESC, rowid DESC LIMIT ?)",
+                (scheme_id, scheme_id, _PLACEHOLDER_BASELINE_KEEP),
+                what="placeholder_baselines 裁剪")
         await db.commit()
     except Exception as e:
         logger.warning("placeholder_baselines 写入失败（不影响预检返回）: scheme=%s err=%s",
@@ -1051,20 +1227,26 @@ async def collect_export_issues(scheme_id: str, db, *,
     parent_ids = {s["parent_id"] for s in sections if s.get("parent_id")}
     issues = []
     total_words = 0
-    generated_count = 0
+    # ✅ R98（R90 遗留⑤收口 · DLV 口径分叉根治）：generated_count / empty_ratio
+    #    不再本地自算（旧口径 = 自身 content truthy + **全章节分母**，与总检看板
+    #    preflight_stats 的「有效正文（含子孙）+ 叶子分母」分叉，同一方案两处
+    #    显示两个数字，且导出侧正是 2026-10-02 生产实证过的父节点恒空假象形态）。
+    #    现与 preflight 共用 services.preflight_engine.content_coverage_stats
+    #    唯一实现（懒导入规避模块级依赖，与本函数既有 services 用法同手法）。
+    from app.services.preflight_engine import content_coverage_stats
+    _cov = content_coverage_stats(sections)
     for s in sections:
         has_children = s["id"] in parent_ids
         wc = s.get("word_count") or 0
         total_words += wc
-        if wc > 0 or s.get("content"):
-            generated_count += 1
         # 孤立节点：parent_id 非空但指向不存在的父节点
         pid = s.get("parent_id", "")
         if pid and pid not in section_ids:
             issues.append({"type": "orphan_node", "section_id": s["id"],
                            "title": s["title"], "parent_id": pid})
-        # 空叶子章节（无内容且无子女）
-        if not s.get("content") and not has_children:
+        # 空叶子章节（无内容且无子女；✅ R98 判据补 strip，与共用口径对齐
+        #    「content 只有空白也算空」）
+        if not (s.get("content") or "").strip() and not has_children:
             issues.append({"type": "empty_section", "section_id": s["id"], "title": s["title"]})
         # 状态为 empty 但实际有内容（数据不一致）
         if s.get("status") == "empty" and (s.get("content") or wc > 0):
@@ -1232,13 +1414,22 @@ async def collect_export_issues(scheme_id: str, db, *,
 
     # ✅ E6 Tier 1（2026-09-25 · DLV-14）：失效交叉引用预检（图号/表号/节号漂移）。
     #    默认开启（settings.crossref_stale_detect_enabled=True），关闭即回退旧行为。
-    #    只扫节号引用（从 outline_json 内部推导真实节号集合）——图号/表号漂移
-    #    需导出引擎 dry-run 才能判定，Tier 2 再补；此处节号漂移已能覆盖最常见
-    #    场景（目录重排后章节不存在/编号变化）。严重度 medium，不阻断导出。
+    # ✅ R99 Tier 2（2026-10-17）：图号 / 表号漂移**检测接线**。
+    #    此前本行调 `_detect_stale_cross_references(sections)` 从不传 real_nums，
+    #    而该函数把 None 归一为 `{"fig": set(), "tbl": set(), "sec": set()}` →
+    #    图号 / 表号两个分支**结构性不可达**，DLV-14 实际只能检出节号漂移
+    #    （实测：正文引用「图9-9/表9-9」，真实只有「图 1-1」，产出 0 条告警）。
+    #    现由 `collect_figure_table_number_superset` 供给「最宽松上界」集合：
+    #    渲染侧所有减法路径（同码去重 / 渲染失败 / 位图缺失 / 块级回滚）只会让
+    #    真实分配更小，故本集合是真实分配的**超集** —— 检测为纯增量、零新增误报。
+    #    节号集合仍留空，由被调函数内部照旧从 outline_json 自行推导。
+    #    目录树异常时该函数返回空集合 = 逐字回退修复前行为。
     try:
         from app.config import settings as _s
         if _s.crossref_stale_detect_enabled:
-            issues.extend(_detect_stale_cross_references(sections))
+            issues.extend(_detect_stale_cross_references(
+                sections,
+                real_nums=collect_figure_table_number_superset(sections)))
     except Exception:
         # 配置缺失 / 函数签名变更等异常 → 静默降级（不阻断预检主流程）
         pass
@@ -1251,7 +1442,7 @@ async def collect_export_issues(scheme_id: str, db, *,
     except Exception:
         pass
 
-    empty_ratio = round((len(sections) - generated_count) / max(len(sections), 1) * 100, 1)
+    empty_ratio = _cov["empty_ratio"]  # ✅ R98：与总检共用口径（见上方 _cov）
     # ✅ 新增（2026-09-19）：内容体检（占位符 / HTML 残留 / LaTeX 空参数 /
     #    投标用语 / 未闭合图表围栏）—— 独立字段，不进 issues（避免改变既有
     #    前端"问题计数"语义），供导出前弹窗与"待补充清单"定位使用。
@@ -1270,7 +1461,7 @@ async def collect_export_issues(scheme_id: str, db, *,
     return {
         "issues": issues,
         "section_count": len(sections),
-        "generated_count": generated_count,
+        "generated_count": _cov["generated_count"],
         "total_words": total_words,
         "empty_ratio": empty_ratio,
         "chart_total": chart_total,
@@ -1864,9 +2055,27 @@ _FIX_STATS_KEYS = ("formulas", "block_formulas", "replacement_chars",
                    #   与「静默丢数据」同级的不可见缺陷。
                    #   加法式扩展：既有 7 个键的语义与取值一字未动。
                    "block_render_failed",
-                   # ✅ 新增（2026-10-06 · P1 表格尺寸上限）：
-                   #   GFM 表格行列/单元格数超限时截断的次数（正常表格恒为 0）。
-                   "table_truncated")
+                    # ✅ 新增（2026-10-06 · P1 表格尺寸上限）：
+                    #   GFM 表格行列/单元格数超限时截断的次数（正常表格恒为 0）。
+                    "table_truncated",
+                    # ✅ R99 新增（2026-10-17 · 围栏自动修复可观测性）：
+                    #   导出前置「自动补齐未闭合围栏」修好的围栏数。开启该开关后
+                    #   DLV-07 的 error 级提示会被补齐动作抹掉，而围栏之后的正文
+                    #   可能被并入图表源码（实测开启后丢得比关闭时更多），用户若
+                    #   无任何提示就等于「静默丢正文」。计数随 X-Fix-Stats 下发，
+                    #   与 audit_content 的 fence_auto_fixed 提示互为佐证。
+                    #   加法式扩展：既有 9 个键的语义与取值一字未动（未开启该
+                    #   开关时恒为 0）。
+                    "fences_fixed",
+                    # ✅ 2026-10-17（文档质量报告 符号/文字/公式问题）：
+                    #   HTML 实体残留（`&gt;`/`&lt;`）/ 中英混排误植词 / 带边界空白
+                    #   LaTeX 残留的自动修复计数。加法式扩展：既有键的语义与取值
+                    #   一字未动，新键仅在源文含对应残留时非零。
+                    "html_entities", "en_residue", "latex_residue",
+                    # ✅ 2026-10-17（导出文档发现的问题）：表格「两块侧叠」错位行
+                    #   被拆分还原的次数（普通表恒为 0）。加法式扩展：既有键语义
+                    #   与取值一字未动。
+                    "table_unstacked")
 _FIX_STATS_LOCAL = threading.local()
 
 
@@ -1914,12 +2123,26 @@ def _log_fix_stats() -> dict:
                      "（成稿已保留文字，版式降级）")
     if st["table_truncated"]:
         parts.append(f"超宽/超长表格截断 {st['table_truncated']} 处")
+    if st["fences_fixed"]:
+        parts.append(f"未闭合围栏自动补齐 {st['fences_fixed']} 处"
+                     "（围栏之后的正文可能被并入图表源码，请核对成稿）")
+    if st["html_entities"]:
+        parts.append(f"HTML 实体还原 {st['html_entities']} 处（&gt;/&lt; → >/<）")
+    if st["en_residue"]:
+        parts.append(f"中英混排误植还原 {st['en_residue']} 处（英文词 → 中文）")
+    if st["latex_residue"]:
+        parts.append(f"公式边界空白归一 {st['latex_residue']} 处（$ x $ → $x$）")
     stats = dict(st)
     if st["block_render_failed"] or st["table_truncated"]:
         logger.warning(
             "DOCX 导出存在降级：%d 处内容块渲染失败（已降级为纯文本）、"
             "%d 处表格超尺寸（已截断）—— 成稿可交付但版式不完整，"
             "请回查源文对应章节", st["block_render_failed"], st["table_truncated"])
+    if st["fences_fixed"]:
+        logger.warning(
+            "DOCX 导出前置自动补齐了 %d 处未闭合围栏：围栏之后的正文会被并入"
+            "图表源码并整体跳过（CommonMark 口径），成稿请人工核对缺失段落",
+            st["fences_fixed"])
     logger.info("DOCX 导出自动修复: %s", "、".join(parts))
     st.update({k: 0 for k in st})
     return stats
@@ -1978,6 +2201,27 @@ def _add_table_caption(doc, text: str, font_name: str = "宋体", font_size: flo
     return p
 
 
+#: 表题开头「表 X-Y」/「表：」等编号前缀（剥离后再由导出统一编号，避免叠写）。
+_LEADING_TABLE_NUM_RE = re.compile(
+    r"^表\s*(?:[:：]\s*|[0-9一二三四五六七八九十][0-9.\-–—]*[\s、.：:]+)")
+
+
+def _strip_leading_table_number(text: str) -> str:
+    """剥离表题中 AI 自带的「表 X-Y」编号前缀。
+
+    ✅ 2026-10-17（文档质量报告 表号问题根因 B）：实测交付文档出现
+    「表 6-3 表 6-1 木工班组劳动力配置计划」——AI 把表题连同编号写进表格
+    **首行首格**（首格 = 「表 6-1 木工班组劳动力配置计划」），导出的自动表题
+    取首行前 3 列拼接后再前置统一编号，于是「表 6-3」与「表 6-1」叠写。
+    表题编号由导出**唯一**生成，源文自带的编号一律剥离，杜绝双表号。
+    """
+    t = str(text or "").strip()
+    if not t.startswith("表"):
+        return t
+    stripped = _LEADING_TABLE_NUM_RE.sub("", t).strip()
+    return stripped or t
+
+
 #: GFM 表格尺寸上限（2026-10-06 · P1 性能/稳定性）。
 #: 实测无上限时单表耗时随行列乘积急剧上升：60 列×20 行 = 2.4s、
 #: 200 列×40 行 = **39.5s**、400 列×60 行 > 110s 未完成（建单元格 XML 是
@@ -1988,6 +2232,74 @@ def _add_table_caption(doc, text: str, font_name: str = "宋体", font_size: flo
 _TABLE_MAX_COLS = 63     # Word 表格硬上限即 63 列
 _TABLE_MAX_ROWS = 400
 _TABLE_MAX_CELLS = 12000
+
+
+def _unstack_or_trim_table_rows(rows: list[list[str]]) -> list[list[str]]:
+    """把「两块侧叠」的错位表格拆回规范行，并去掉尾部整列全空的多余列。
+
+    ✅ BUG 修复（2026-10-17 · 导出文档发现的问题）：AI 偶发把**两条记录塞进一行**
+    的「两块并列」形态（实测第 6 章「劳动力配置计划」表：表头只有 5 列有名称、
+    其后 6 列全空，而首条数据行在空白分隔列之后又填了第二条记录）。旧实现
+    ``ncols = max(len(r))`` → 整表被撑成 **11 列**、两条记录挤在同一行，成稿既宽
+    又错位、无法阅读。
+
+    判据（保守，只在形态高度可信时才改写；普通表逐字不动）：
+      1. 先去掉**尾部整列全空**的多余列（所有行该列都为空 ⇒ 必为冗余）；
+      2. 再找**整列全空**的「分隔列」，把表切成 ≥2 个列块；
+      3. 仅当表头**只填充第一个列块**（其后各列块表头全空）时，判为侧叠；
+    命中则每个数据行按「非空列块」拆成多行（列块内取值左对齐），让侧叠的
+    第二条记录回到独立行；不命中一律原样返回（零误伤）。
+
+    设计取舍：只**重排**不**丢弃**（AGENTS.md §3.1.6「宁可不改，不丢内容」）——
+    侧叠的第二条记录被提升为独立行而非截掉。
+    """
+    if not rows:
+        return rows
+    ncols = max(len(r) for r in rows)
+    if ncols < 2:
+        return rows
+    grid = [list(r) + [""] * (ncols - len(r)) for r in rows]
+    empty_col = [all(not g[c].strip() for g in grid) for c in range(ncols)]
+
+    # 1) 尾部整列全空 → 去掉（安全：所有行该列都为空）
+    while ncols > 1 and empty_col[ncols - 1]:
+        ncols -= 1
+    grid = [g[:ncols] for g in grid]
+    empty_col = empty_col[:ncols]
+
+    # 2) 列块 = 被「整列全空」分隔的连续非空列区间
+    blocks: list[tuple[int, int]] = []
+    start = None
+    for c in range(ncols):
+        if empty_col[c]:
+            if start is not None:
+                blocks.append((start, c))
+                start = None
+        elif start is None:
+            start = c
+    if start is not None:
+        blocks.append((start, ncols))
+    if len(blocks) < 2:
+        return grid
+    # 3) 表头只填第一块（其后各块表头全空）才认定侧叠
+    header = grid[0]
+    if any(any(header[a:b]) for a, b in blocks[1:]):
+        return grid
+
+    out: list[list[str]] = [header[blocks[0][0]:blocks[0][1]]]
+    width = len(out[0])
+    for g in grid[1:]:
+        for a, b in blocks:
+            seg = g[a:b]
+            if any(x.strip() for x in seg):
+                out.append(seg)
+                width = max(width, len(seg))
+    logger.warning(
+        "导出：表格侧叠行已拆分还原（原 %d 行 × %d 列 → %d 行 × %d 列）"
+        "——源文存在「两条记录挤在同一行」的错位，成稿已按记录分行。",
+        len(rows), ncols, len(out), width)
+    _fix_stats()["table_unstacked"] = _fix_stats().get("table_unstacked", 0) + 1
+    return [r + [""] * (width - len(r)) for r in out]
 
 
 def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体"):
@@ -2014,6 +2326,9 @@ def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体")
     rows = [_split_row(r) for j, r in enumerate(tbl_lines) if j != 1]
     if not rows:
         return
+    # ✅ 2026-10-17（导出文档发现的问题）：先还原「两块侧叠」的错位行 + 去掉尾部
+    #    整列全空的多余列，再据此确定列数（否则 max(len) 会把整表撑成 11 列）。
+    rows = _unstack_or_trim_table_rows(rows)
     ncols = max(len(r) for r in rows)
     # ---- 尺寸上限（先列后行，保证表头行永远保留）----
     raw_cols, raw_rows = ncols, len(rows)
@@ -2059,11 +2374,9 @@ def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体")
                 _set_run_font(run, font_name, 10.5,
                               bold=True if ri == 0 else run.bold)
             if ri == 0:
-                shd = OxmlElement("w:shd")
-                shd.set(qn("w:val"), "clear")
-                shd.set(qn("w:color"), "auto")
-                shd.set(qn("w:fill"), "B6B1D1")
-                cell._tc.get_or_add_tcPr().append(shd)
+                # ✅ R109：按 CT_TcPr 序列插入 w:shd（旧实现 append 到末尾 →
+                #    与已写入的 w:vAlign 顺序颠倒，WPS 拒绝打开）
+                _set_cell_shading(cell, "B6B1D1")
 
     # ✅ 增强：表头行跨页重复（长表格翻页后仍能看到列名）
     if len(rows) > 1:
@@ -2165,16 +2478,9 @@ def _add_cover_info_table(doc, info: dict, font_name: str) -> None:
         p1 = c1.paragraphs[0]
         p1.alignment = WD_ALIGN_PARAGRAPH.LEFT
         _set_run_font(p1.add_run(v), font_name, 12)
-        shd = OxmlElement("w:shd")
-        shd.set(qn("w:val"), "clear")
-        shd.set(qn("w:color"), "auto")
-        shd.set(qn("w:fill"), "F2F2F2")
-        c0._tc.get_or_add_tcPr().append(shd)
-        shd1 = OxmlElement("w:shd")
-        shd1.set(qn("w:val"), "clear")
-        shd1.set(qn("w:color"), "auto")
-        shd1.set(qn("w:fill"), "F2F2F2")
-        c1._tc.get_or_add_tcPr().append(shd1)
+        # ✅ R109：同上，改走按序列插入的单一实现（并防重复 w:shd）
+        _set_cell_shading(c0, "F2F2F2")
+        _set_cell_shading(c1, "F2F2F2")
 
 
 
@@ -2286,11 +2592,8 @@ def _add_form_table(doc, rows: list[tuple[str, str]], font_name: str = "宋体",
         for cell in (c0, c1):
             cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
             cell.width = Cm(col1_cm if cell is c0 else col2_cm)
-            shd = OxmlElement("w:shd")
-            shd.set(qn("w:val"), "clear")
-            shd.set(qn("w:color"), "auto")
-            shd.set(qn("w:fill"), "F2F2F2")
-            cell._tc.get_or_add_tcPr().append(shd)
+            # ✅ R109：同上，改走按序列插入的单一实现（并防重复 w:shd）
+            _set_cell_shading(cell, "F2F2F2")
         p0 = c0.paragraphs[0]
         p0.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         _set_run_font(p0.add_run(k), font_name, 10.5, bold=True)
@@ -3065,6 +3368,151 @@ def _set_paragraph_borders(paragraph, **sides):
         pbd.append(el)
 
 
+# ---------------------------------------------------------------------------
+# ✅ R109（2026-10-19 · P0）：OOXML 严格序列归一 —— 根治「WPS 打不开」
+# ---------------------------------------------------------------------------
+# 实证取证（桌面《文档损坏诊断与修复报告》对应成稿，逐 ZIP 条目 + lxml 体检）：
+#   落地脚手架第1轮 162 处 / 第2轮 166 处 / 模板工程第4轮 256 处
+#   <w:tcPr> 子元素顺序违例（实测 tcW → vAlign → shd，而 ECMA-376 CT_TcPr
+#   要求 shd 排在 vAlign 之前）；同一份文档「能打开」的修复版违例数为 **0**。
+#   其余部件（styles / numbering / footer / settings）与结构（tbl 归属、
+#   sectPr 位置、非法 XML 字符）两侧均无差异 —— 这是唯一差异点。
+#   Word 对 CT_* 序列违例宽容，WPS 严格校验直接拒绝打开，于是出现
+#   「python-docx 能读、WPS 打不开」的怪象。
+# 根因：旧实现 ``get_or_add_tcPr().append(shd)`` 把 w:shd 追加到末尾，
+#   而该格此前已被 ``cell.vertical_alignment = CENTER`` 写入 w:vAlign，
+#   于是必然产出 tcW → vAlign → shd 的非法序列。
+# CT_TcPr 为严格序列，w:shd 必须排在下列元素之前
+_TCPR_AFTER_SHD = (
+    "w:noWrap", "w:tcMar", "w:textDirection", "w:tcFitText",
+    "w:vAlign", "w:hideMark",
+)
+
+
+def _set_cell_shading(cell, fill: str) -> None:
+    """给单元格加底纹（表头 / 封面信息表 / 签字表共用）。
+
+    ✅ R109：旧实现 ``tcPr.append(shd)`` 有两处缺陷 ——
+      ① 把 w:shd 追加到末尾，若该格已有 w:vAlign 就产出**非法序列**
+         （Word 容忍、WPS 拒绝打开）；
+      ② 重复调用会堆出多个 w:shd，而 CT_TcPr 中 w:shd 只允许 0~1 个。
+    现改为按 CT_TcPr 序列定位插入，并做幂等去重。
+    """
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    tc_pr = cell._tc.get_or_add_tcPr()
+    if tc_pr.find(qn("w:shd")) is not None:
+        return
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), fill)
+    tc_pr.insert_element_before(shd, *_TCPR_AFTER_SHD)
+
+
+# ECMA-376 中具有**严格子元素序列**、且导出侧会手写的属性容器。
+# 顺序表取自 CT_PPr / CT_RPr / CT_TblPr / CT_TcPr / CT_TrPr / CT_SectPr。
+_STRICT_CT_SEQUENCE: dict[str, tuple[str, ...]] = {
+    "pPr": (
+        "pStyle", "keepNext", "keepLines", "pageBreakBefore", "framePr",
+        "widowControl", "numPr", "suppressLineNumbers", "pBdr", "shd", "tabs",
+        "suppressAutoHyphens", "kinsoku", "wordWrap", "overflowPunct",
+        "topLinePunct", "autoSpaceDE", "autoSpaceDN", "bidi", "adjustRightInd",
+        "snapToGrid", "spacing", "ind", "contextualSpacing", "mirrorIndents",
+        "suppressOverlap", "jc", "textDirection", "textAlignment",
+        "textboxTightWrap", "outlineLvl", "divId", "cnfStyle", "rPr", "sectPr",
+        "pPrChange",
+    ),
+    "rPr": (
+        "rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike",
+        "dstrike", "outline", "shadow", "emboss", "imprint", "noProof",
+        "snapToGrid", "vanish", "webHidden", "color", "spacing", "w", "kern",
+        "position", "sz", "szCs", "highlight", "u", "effect", "bdr", "shd",
+        "fitText", "vertAlign", "rtl", "cs", "em", "lang", "eastAsianLayout",
+        "specVanish", "oMath",
+    ),
+    "tblPr": (
+        "tblStyle", "tblpPr", "tblOverlap", "bidiVisual", "tblStyleRowBandSize",
+        "tblStyleColBandSize", "tblW", "jc", "tblCellSpacing", "tblInd",
+        "tblBorders", "shd", "tblLayout", "tblCellMar", "tblLook", "tblCaption",
+        "tblDescription",
+    ),
+    "tcPr": (
+        "cnfStyle", "tcW", "gridSpan", "hMerge", "vMerge", "tcBorders", "shd",
+        "noWrap", "tcMar", "textDirection", "tcFitText", "vAlign", "hideMark",
+    ),
+    "trPr": (
+        "cnfStyle", "divId", "gridBefore", "gridAfter", "wBefore", "wAfter",
+        "cantSplit", "trHeight", "tblHeader", "tblCellSpacing", "jc", "hidden",
+    ),
+    "sectPr": (
+        "footnotePr", "endnotePr", "type", "pgSz", "pgMar", "paperSrc",
+        "pgBorders", "lnNumType", "pgNumType", "cols", "formProt", "vAlign",
+        "noEndnote", "titlePg", "textDirection", "bidirectional", "rtlGutter",
+        "docGrid", "printerSettings", "sectPrChange",
+    ),
+}
+
+
+def _normalize_ct_sequence(root) -> int:
+    """把一棵 XML 树内所有严格序列容器的子元素重排到 ECMA-376 规定顺序。
+
+    返回被修正的容器数。**fail-safe 铁律**：
+      · 容器内出现序列表以外的子元素（含注释 / PI / 未知扩展）→ 整容器不动；
+      · 已经有序的容器 → 一个字节都不动（稳定排序，既有产物零漂移）。
+    """
+    from docx.oxml.ns import qn
+
+    fixed = 0
+    for tag, seq in _STRICT_CT_SEQUENCE.items():
+        rank = {qn(f"w:{n}"): i for i, n in enumerate(seq)}
+        for el in root.iter(qn(f"w:{tag}")):
+            children = list(el)
+            if len(children) < 2:
+                continue
+            ranks = [rank.get(c.tag) for c in children]
+            if any(r is None for r in ranks) or ranks == sorted(ranks):
+                continue
+            for c in sorted(children, key=lambda c: rank[c.tag]):
+                el.append(c)  # lxml：对已在树中的节点 append 即"移动"
+            fixed += 1
+    return fixed
+
+
+def _normalize_docx_strict_sequence(doc) -> int:
+    """落盘前对包内**全部** XML 部件做一次严格序列归一。
+
+    这是最后一道理，不替代正确的插入位置（见 :func:`_set_cell_shading`）：
+    任何一处遗漏的 ``append``（以及未来新增的手写 XML）都在此被兜住，
+    WPS 不会再因 CT_* 序列违例拒绝打开成稿。
+    """
+    total = 0
+    try:
+        parts = list(doc.part.package.iter_parts())
+    except Exception as e:  # pragma: no cover - 拿不到包就只整主文档
+        logger.warning("导出：OOXML 序列归一无法枚举包内部件（仅处理主文档）: %s", e)
+        parts = [(None, doc.part)]
+    for item in parts:
+        part = item[1] if isinstance(item, tuple) else item
+        try:
+            el = getattr(part, "element", None)
+        except Exception as e:  # pragma: no cover - 部件属性本身抛错同样跳过
+            logger.warning("导出：OOXML 序列归一跳过一个部件: %s", e)
+            continue
+        if el is None:
+            continue
+        try:
+            total += _normalize_ct_sequence(el)
+        except Exception as e:  # pragma: no cover - 归一失败绝不阻断落盘
+            logger.warning("导出：OOXML 序列归一跳过一个部件: %s", e)
+    if total:
+        logger.warning(
+            "导出：已修正 %d 处 OOXML 严格序列违例（子元素顺序不符 ECMA-376，"
+            "WPS 会拒绝打开）—— 成稿内容一字不变，仅调整属性元素书写顺序", total)
+    return total
+
+
 def _add_code_block(doc, lines: list[str]):
     """插入代码 / 命令行块：浅灰底纹 + 四边细边框 + 等宽字体，并保留原始缩进。
 
@@ -3551,6 +3999,15 @@ def _build_docx_sync(
     #    合并为单参数而非 4 个位置参数：保持签名尾部稳定、便于同批扩展。
     #    缺省 None 或全 False → 不渲染任何前置表单，产物与旧版逐字一致。
     scheme_forms: dict | None = None,
+    # ✅ R99（2026-10-17）：前置「自动补齐未闭合围栏」修好的围栏数。
+    #    缺省 0 = 不传时行为与改造前**逐字一致**（既有位置参数调用方零影响）。
+    #    在构建线程内累加进线程局部 fix_stats，随返回值进 X-Fix-Stats 响应头。
+    fences_fixed: int = 0,
+    # ✅ R106 FIX-1（2026-10-18）：本次导出的取消事件（threading.Event，
+    #    由 export_docx/export_pdf 登记并经 _build_docx_task 末尾透传）。
+    #    缺省 None = 无取消登记（离线/测试直调），行为与改造前逐字一致。
+    #    命中在「章节写入循环段边界」抛 ExportCancelled 提前退出（不 save）。
+    cancel_event: threading.Event | None = None,
 ) -> None:
     """同步构建 DOCX 并保存（在 asyncio.to_thread 中调用，避免阻塞事件循环）。
 
@@ -3564,6 +4021,15 @@ def _build_docx_sync(
     from docx.shared import Cm, Pt, RGBColor
 
     from app.services.ai.heading_standard import HeadingNumberingGeneratorV2
+
+    # ✅ R106 FIX-1：入口检查点 —— 排队期间已被取消则一个块都不写。
+    _check_export_cancelled(cancel_event)
+
+    # ✅ R99（2026-10-17）：把前置围栏补齐数并入本次构建的修复统计。
+    #    必须在**本构建线程内**累加（_FIX_STATS_LOCAL 是 threading.local，
+    #    _prepare_export 在事件循环线程写入对它不可见），随返回值进 X-Fix-Stats。
+    if fences_fixed:
+        _fix_stats()["fences_fixed"] += int(fences_fixed)
 
     doc = Document()
     style = doc.styles["Normal"]
@@ -3826,8 +4292,10 @@ def _build_docx_sync(
                         table_counters[t_key] = table_counters.get(t_key, 0) + 1
                         table_num = f"{chapter_num}-{table_counters[t_key]}"
                         if caption:
-                            _add_table_caption(doc, f"表 {table_num} {caption}",
-                                               font_name, font_size)
+                            # ✅ 2026-10-17（表号叠写根因 B）：剥离源文自带「表 X-Y」前缀
+                            _add_table_caption(
+                                doc, f"表 {table_num} {_strip_leading_table_number(caption)}",
+                                font_name, font_size)
                         else:
                             # ✅ R51（2026-10-07）：表格无表名行 → 成稿表格裸奔无表题。
                             #    R50 仅补 WARNING 供排障，但用户成稿里 38 张表零编号零表题。
@@ -3844,6 +4312,10 @@ def _build_docx_sync(
                                     _auto_caption = cells[0]
                             if not _auto_caption:
                                 _auto_caption = "相关数据"
+                            # ✅ 2026-10-17（表号叠写根因 B）：AI 把表题连同编号写进首格
+                            #    （首格「表 6-1 …」）→ 拼出的自动表题带编号 → 与导出编号叠写。
+                            #    此处剥离首格自带的「表 X-Y」，只保留统一编号。
+                            _auto_caption = _strip_leading_table_number(_auto_caption)
                             _add_table_caption(doc, f"表 {table_num} {_auto_caption}",
                                                font_name, font_size)
                             logger.warning(
@@ -4101,6 +4573,11 @@ def _build_docx_sync(
             return None
 
     for root in sorted(roots, key=_section_sort_key):
+        # ✅ R106 FIX-1：章节写入循环段边界取消检查点 —— 命中即抛
+        #    ExportCancelled（在 doc.save 之前退出，临时产物不落地）。
+        #    必须放在循环体而非 _write_section_safe 内：后者 fail-soft
+        #    会吞掉任何 Exception（含 ExportCancelled），取消信号将失效。
+        _check_export_cancelled(cancel_event)
         _write_section_safe(root)
 
     # ✅ 修复（2026-09-17）：导出「项目关键事实」附录（全局事实维度）。
@@ -4213,6 +4690,10 @@ def _build_docx_sync(
             "导出：本次有 %d 处图表使用了**跨章借图**（该章节没有自己的图表登记，"
             "借用了同类图）—— 成稿图文可能与章节内容不符，请回查对应章节的图表登记",
             len(borrowed))
+    # ✅ R109（2026-10-19 · P0）：落盘前统一归一 OOXML 严格序列。
+    #    任何手写 XML 的插入位置疏漏（如 w:shd 追加到 w:vAlign 之后）都在此兜住，
+    #    否则 WPS 会因 CT_* 序列违例直接拒绝打开整份成稿。
+    _normalize_docx_strict_sequence(doc)
     doc.save(out_path)
     # ✅ P2-1 修复（2026-10-07）：导出落盘日志缺失。旧实现 doc.save() 后无任何
     #    日志记录，用户从日志中无法追溯成稿何时落盘、落在何处。现补 INFO 日志，
@@ -4397,6 +4878,10 @@ async def _auto_generate_ai_image_blocks(
     sections: list[dict],
     blocks_cache: dict[str, list[dict]],
     config: dict,
+    # ✅ R106 FIX-1：本次导出的取消事件（缺省 None = 无取消登记，行为逐字不变）。
+    #    逐占位码检查：已取消 → 不再发起新的生图调用（在飞的一次跑完即止，
+    #    协作式停止口径），由调用方在 gather 后统一抛 ExportCancelled。
+    cancel_event: threading.Event | None = None,
 ) -> int:
     """AI 配图全自动化：正文内嵌的 ```` ```ai_image ```` 占位块在导出准备阶段**自动**
     生成真实图片并就地改写为 ``{"type":"image"}`` 块（走既有位图下载/嵌入/图号路径）。
@@ -4481,6 +4966,11 @@ async def _auto_generate_ai_image_blocks(
     sem = asyncio.Semaphore(max(1, min(_image_concurrency, 5)))
 
     async def _gen(code: str, blocks: list[dict]) -> None:
+        # ✅ R106 FIX-1：取消已请求 → 不再发起新的生图调用（计费边界检查点）。
+        #    不在这里 raise：gather 的兄弟任务 raise 会引发未取回异常噪声，
+        #    由调用方在全部任务早退后统一抛 ExportCancelled。
+        if cancel_event is not None and cancel_event.is_set():
+            return
         try:
             obj = json.loads(code)
         except (json.JSONDecodeError, TypeError, ValueError):
@@ -4589,14 +5079,22 @@ def _count_undownloaded_image_blocks(
     return n
 
 
-async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
+async def _prepare_export(scheme_id: str, body: dict, db,
+                          cancel_event: threading.Event | None = None) -> dict:
     """导出前的公共准备：解析配置 → 读取章节与图表 → 预渲染图表图片。
 
     DOCX 与 PDF 两条链路共用，避免"改了一处漏一处"（历史上正是如此丢失了
     PDF 里的 JSON 数据型图表）。
-    """
-    from app.config import settings as _settings
 
+    ✅ R106 FIX-1：``cancel_event`` 存入 plan（``_cancel_event``），随
+    「取数段 → 渲染段 → 构建线程」逐层透传；缺省 None = 无取消登记，
+    各检查点自动短路（离线调用方/既有测试零影响）。
+
+    ✅ R100（2026-10-17）：R99 把渲染段拆出 `_prepare_export_render` 后，本函数体内
+    遗留四处**拆分继留死码**（`_settings` 悬空 import、`allow_pil_fallback`、
+    `render_stats` 局部、`_get_cached_blocks` 闭包——渲染统计与块缓存闭包已由渲染段
+    自建，本段只把空 `_blocks_cache` 装进 plan）。全部摘除，行为逐字不变。
+    """
     config = body.get("config", {}) or {}
 
     def _float(key: str, default: float) -> float:
@@ -4611,26 +5109,11 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
         except (TypeError, ValueError):
             return default
 
-    # ✅ 渲染策略（v12 起契约调整）：
-    # - HTTP Service 优先（mermaid 原生渲染）；Mermaid 类图表渲染失败时**默认跳过该图
-    #   且不占图号**（交付文档不写红字报错；可传 chart_fail_placeholder=true 恢复占位）。
-    #   "不静默"承诺保留在系统侧信号：X-Chart-Render-Stats / X-Content-Audit 响应头、
-    #   导出日志与 /export/check 预检。
-    # - layout/timeline/labor 的 JSON 数据载荷不受 allow_pil_fallback 限制
-    #   （PIL 是其唯一渲染路径）。
-    # - 用户显式传 allow_pil_fallback=True 可开启 PIL 兜底。
-    allow_pil_fallback = bool(config.get("allow_pil_fallback", False))
-
     # 统一渲染轨：接收前端 mermaid.js（与预览一致）渲染的 PNG。
     # 命中的图表直接嵌入（所见即所得）；未命中/失败的图表回退后端渲染轨。
+    # ✅ R100：渲染策略注释与 allow_pil_fallback / render_stats 的构造已随
+    #   渲染段迁至 `_prepare_export_render`（本段产出的 plan 只带空 render_stats 壳）。
     fe_images, fe_codes = _parse_frontend_images(body)
-    # 渲染轨统计（写入响应头 X-Chart-Render-Stats，前端展示给用户）
-    render_stats = {"fe": 0, "backend_ok": 0, "failed": 0}
-    # ✅ 加固（D1 · 2026-10-06）：跨章借图此前**零信号** —— 该章节没有自己的
-    #    图表登记时，导出会借一张同类图填进去，成稿图文可能不符而系统侧
-    #    （响应头 / 预检 / 日志）无任何提示。现随渲染统计一并回传
-    #    `fallback_borrowed`（由 _build_docx_sync 的 fix_stats 合流后写入）。
-    render_stats["fallback_borrowed"] = 0
 
     cur = await db.execute("SELECT * FROM schemes WHERE id=?", (scheme_id,))
     scheme = await _db_fetch_one(cur, what="_prepare_export:schemes")
@@ -4692,6 +5175,11 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
                 _fix_total += len(log)
         if _fix_total:
             logger.info("导出前置自动修复未闭合围栏：共 %d 处", _fix_total)
+    else:
+        _fix_total = 0
+    # ✅ R99：围栏补齐会抹掉 DLV-07 的 error 级提示（体检看到的是修好后的正文），
+    #   而围栏之后的中文正文会被并入图表源码整体跳过 —— 计数必须随 prep 传下去，
+    #   一路进 audit_content 的 fence_auto_fixed 提示与 X-Fix-Stats 的 fences_fixed。
 
     # ✅ 修复（2026-09-17）：补齐交付文档的事实维度（此前漏渲染，见 _query_global_facts）
     global_facts_status: dict = {}
@@ -4734,12 +5222,9 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
     # ✅ 性能优化：缓存每章 _parse_content_blocks 结果
     # 旧实现预收集图表代码时解析一次、write_section 中又解析一次，
     # 大文档（50+章）重复解析开销可观。此处统一缓存，两处复用。
+    # ✅ R100：`_get_cached_blocks` 闭包已随渲染段迁入 `_prepare_export_render`，
+    #   本段只建空缓存 dict 装进 plan（闭包在此定义后零调用，属拆分继留死码）。
     _blocks_cache: dict[str, list[dict]] = {}
-
-    def _get_cached_blocks(sec_id: str, content: str) -> list[dict]:
-        if sec_id not in _blocks_cache:
-            _blocks_cache[sec_id] = _parse_content_blocks(content or "")
-        return _blocks_cache[sec_id]
 
     # 构建章节树
     nodes = {s["id"]: s for s in sections}
@@ -4752,6 +5237,112 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
         pid = s.get("parent_id", "")
         if pid and pid not in nodes and s not in roots:
             roots.append(s)
+
+    # ✅ R99（2026-10-17 · 缓存命中快速路径）：先把「取数段」的产物固化到 plan，
+    #    再按调用方意图决定是否执行渲染段。指纹所需字段全部在 plan 内，
+    #    故 export_docx / export_pdf 可在两者之间插入缓存查询。
+    plan = {
+        "scheme": scheme,
+        "sections": sections,
+        "global_facts": global_facts,
+        "global_facts_status": global_facts_status,
+        "chart_fp": chart_fp,
+        "chart_lookup": chart_lookup,
+        "blocks_cache": _blocks_cache,
+        "roots": roots,
+        "children_map": children_map,
+        "fe_codes": fe_codes,
+        "fe_images": fe_images,
+        "render_stats": {"fe": 0, "backend_ok": 0, "failed": 0,
+                         "fallback_borrowed": 0},
+        # ✅ R99：由 _prepare_export_render **就地填充**（同一 dict 对象）
+        "rendered_bytes": {},
+        "image_bytes": {},
+        "ai_image_pending": 0,
+        "ai_image_download_pending": 0,
+        "fences_fixed": _fix_total,
+    }
+
+    # ✅ 导出前内容体检（只读、不改正文）：与预检 /check 同口径，
+    #    通过响应头 X-Content-Audit 回传前端，并在日志中留痕。
+    #    ✅ R99：fences_fixed 只在「本次确实补齐过围栏」时产出提示项，
+    #    缺省 0 时与改造前逐字一致。
+    plan["content_audit"] = audit_content(sections, fences_fixed=_fix_total)
+    logger.info("%s", _format_audit_log(plan["content_audit"]))
+
+    # ✅ D-3（2026-10-01）：补充附录数据源。默认关闭 → 空列表 → 不渲染。
+    # ⚠️ project_id 取自 scheme（本函数作用域内没有名为 project_id 的局部变量，
+    #    直接引用会 NameError 并让**整条导出链路 500**）。
+    plan["appendix_sources"] = await _load_appendix_sources(
+        db, scheme_id, str((scheme or {}).get("project_id", "") or ""))
+    plan["config"] = config
+    plan["heading_styles"] = _load_heading_styles(config)
+    plan["docx_options"] = _build_docx_options(config, _float, _int)
+    # ✅ R106 FIX-1：取消事件入 plan —— 渲染段（含本函数内的慢路径直调）与
+    #    构建线程（经 _build_docx_task 末尾透传）共用同一份登记。
+    plan["_cancel_event"] = cancel_event
+    if not _export_cache_fast_path_enabled():
+        await _prepare_export_render(plan)
+    return plan
+
+
+async def _prepare_export_render(plan: dict) -> dict:
+    """导出的**渲染段**：图表预渲染 + AI 配图生成 + 远程位图下载（会花钱/花时间）。
+
+    ✅ R99（2026-10-17 · 缓存命中快速路径）：本函数由 ``_prepare_export`` 拆出，
+    使「取数段」（DB 读 + 块解析 + 指纹）与「渲染段」可被缓存查询**夹在中间**。
+    原实现缓存查询在 ``_prepare_export`` 之后（模块内自认的未收口项），实测
+    「缓存命中」仍会跑一遍完整渲染：图表全部重新渲染、AI 配图全部重新编排、
+    远程位图全部重新下载（artifacts/exp94/probe_confirm.py 实测 cache=hit 时
+    ``_chart_cache.get_or_render`` 仍被调用 2 次）。用户点「复用上次成果」
+    拿到的秒级响应，实际付出的是一次全量渲染成本。
+
+    拆分口径（**关键不变量**）：``_content_fingerprint`` 所需的全部材料
+    （scheme / sections / chart_fp / global_facts / appendix_sources /
+    fe_codes / fe_images / config + 服务端 settings 签名）**全部**在取数段产出，
+    本段只产出渲染结果（rendered_bytes / image_bytes / render_stats /
+    ai_image_pending / ai_image_download_pending），**不改变任何被指纹覆盖的字段**
+    ⇒ 拆分段与合并路径算出的 (config_hash, content_fingerprint) 逐字相同
+    ⇒ 同一份内容无论走「命中」还是「未命中」，缓存键完全一致（护栏锁定）。
+
+    本段只被 ``_prepare_export``（DOCX/PDF 两条链路的共用入口）与
+    ``export_docx`` / ``export_pdf`` 的缓存未命中分支调用；禁用快速路径时
+    两条链路仍走 ``_prepare_export`` = 取数段 + 本段，与改造前逐字一致。
+
+    ✅ R100（2026-10-17）两处修复：
+    ① **`_settings` 悬空引用（R98 移交、R99 拆分继留）**：本段远程位图下载
+      （`img_sem` 取 `image_max_concurrency`）引用的 `_settings` 原 import 留在
+      取数段函数体内，拆分后本作用域根本没有该名字 —— 正文含远程图片 URL 的
+      方案一导出即 **NameError → 500**（既有测试从未覆盖「渲染段 + 远程图」组合，
+      故基线全绿掩盖了它）。现于本段内显式 import。
+    ② **禁用快速路径时的二次渲染回归**：`export_cache_fast_path=False` 时
+      `_prepare_export` 内部已调本段一次，而 `export_docx`/`export_pdf` 的调用点
+      无条件再调一次（R99 注释声称"此处 if 判定为假"，实际无 if）→ 图表全量重渲染、
+      位图重复下载、AI 编排重跑，回滚开关不再是逐字回退。现以 plan 上的
+      `_render_done` 哨兵做幂等：二次进入直接返回，不重复任何成本。
+    """
+    if plan.get("_render_done"):
+        return plan
+    from app.config import settings as _settings
+    # ✅ R106 FIX-1：本次导出的取消事件（由 _prepare_export 存入 plan；
+    #    缺省 None = 无取消登记，各检查点自动短路，行为逐字不变）。
+    _cancel_ev = plan.get("_cancel_event")
+    _check_export_cancelled(_cancel_ev)
+    config = plan.get("config") or {}
+    sections = plan["sections"]
+    chart_lookup = plan["chart_lookup"]
+    _blocks_cache = plan["blocks_cache"]
+    fe_images = plan.get("fe_images") or {}
+    allow_pil_fallback = bool(config.get("allow_pil_fallback", False))
+    render_stats: dict = {"fe": 0, "backend_ok": 0, "failed": 0,
+                         # ✅ 加固（D1）：跨章借图计数（由 _build_docx_sync 的
+                         #   fix_stats 合流后写入），缺省键保持既有形状。
+                         "fallback_borrowed": 0}
+
+    def _get_cached_blocks(sec_id: str, content: str) -> list[dict]:
+        if sec_id not in _blocks_cache:
+            _blocks_cache[sec_id] = _parse_content_blocks(content or "")
+        return _blocks_cache[sec_id]
 
     # 预收集需要渲染的图表代码（去重）
     # ✅ 图表同步生成：内联块自带代码优先；无内联码的标记块仍走 chart_predictions
@@ -4778,7 +5369,9 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
                 unique_codes.append((ct, code))
 
     # 预渲染（to_thread 线程池，避免阻塞事件循环）
-    rendered_bytes: dict[tuple[str, str], object] = {}
+    # ✅ R99：直接复用 plan 里的同一个 dict（就地填充），
+    #    不得新建局部 dict —— 否则渲染结果不会回传到 plan。
+    rendered_bytes = plan["rendered_bytes"]
 
     async def _render_one(ct: str, code: str):
         # 统一渲染轨：优先采用前端 mermaid.js 渲染的 PNG（与预览所见一致）
@@ -4808,6 +5401,10 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
 
         async def _render_one_limited(ct: str, code: str):
             async with render_sem:
+                # ✅ R106 FIX-1：取消已请求 → 跳过剩余图表渲染（不 raise，
+                #    避免 gather 兄弟任务未取回异常噪声；段后统一判定）。
+                if _cancel_ev is not None and _cancel_ev.is_set():
+                    return
                 await _render_one(ct, code)
 
         await asyncio.gather(*[_render_one_limited(ct, code) for ct, code in unique_codes])
@@ -4816,12 +5413,18 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
             render_stats["fe"], render_stats["backend_ok"], render_stats["failed"],
             len(unique_codes), allow_pil_fallback)
 
+    # ✅ R106 FIX-1：图表段与 AI 配图段之间的取消检查点（命中即抛，
+    #    后续「计费生图 + 位图下载 + DOCX 构建」全部不再发生）。
+    _check_export_cancelled(_cancel_ev)
+
     # ✅ AI 配图全自动化（v17）：```ai_image 占位块在导出时自动生成真实图片并
     #    就地改写为 image 块 —— 随后下面的 URL 收集/下载循环会一并取回位图，
     #    write_section 走既有 image 分支插图与编号。生成失败的块保持占位、
     #    整块跳过（不占图号、无红字）。
     _ai_converted = await _auto_generate_ai_image_blocks(
-        sections, _blocks_cache, config)
+        sections, _blocks_cache, config, cancel_event=_cancel_ev)
+    # ✅ R106 FIX-1：AI 配图段后的取消检查点（在飞生图跑完即止，不再下载/构建）。
+    _check_export_cancelled(_cancel_ev)
     # ✅ P1 修复（2026-09-27 · 残缺文档被写入缓存 → 永久缺图）：
     #   旧实现把返回值赋给 `_ai_converted` 之后再无任何引用，等于「AI 配图全部
     #   失败」这一信号被丢弃；而下方坏缓存守卫只看 render_stats["failed"]
@@ -4846,7 +5449,8 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
             "；成功改写 %d 处", _ai_pending, _ai_converted)
 
     #    下载采用有界安全策略：仅 HTTP(S)、拒绝内网目标、限制超时/大小/重定向。
-    image_bytes: dict[str, BytesIO] = {}
+    # ✅ R99：同上，直接复用 plan["image_bytes"]。
+    image_bytes = plan["image_bytes"]
     unique_image_urls: list[str] = []
     _seen_urls: set[str] = set()
     for sec in sections:
@@ -4863,6 +5467,9 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
 
         async def _fetch_image(url: str):
             async with img_sem:
+                # ✅ R106 FIX-1：取消已请求 → 跳过剩余位图下载（网络成本边界）。
+                if _cancel_ev is not None and _cancel_ev.is_set():
+                    return
                 try:
                     raw = await _download_remote_image(url)
                     data = BytesIO(raw)
@@ -4881,6 +5488,10 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
         await asyncio.gather(*[_fetch_image(u) for u in unique_image_urls])
         logger.info("AI 配图下载: %d/%d 成功", len(image_bytes), len(unique_image_urls))
 
+    # ✅ R106 FIX-1：位图下载段后的取消检查点 —— 渲染段就此收口，
+    #    不再进入（或继续）昂贵的 DOCX 构建段。
+    _check_export_cancelled(_cancel_ev)
+
     # ✅ P2 修复（2026-09-30）：生图成功但**位图下载失败**的配图同样造成成稿缺图，
     #    必须计入坏缓存守卫（判据与 write_section 的 image 分支同口径，见
     #    _count_undownloaded_image_blocks）。与 _ai_pending 一样只在「本应自动生图」
@@ -4897,82 +5508,62 @@ async def _prepare_export(scheme_id: str, body: dict, db) -> dict:
             "已下载 %d/%d 个唯一 URL", _ai_download_pending,
             len(image_bytes), len(unique_image_urls))
 
-    # ✅ 导出前内容体检（只读、不改正文）：与预检 /check 同口径，
-    #    通过响应头 X-Content-Audit 回传前端，并在日志中留痕。
-    content_audit = audit_content(sections)
-    logger.info("%s", _format_audit_log(content_audit))
 
+    plan["render_stats"] = render_stats
+    plan["ai_image_pending"] = _ai_pending
+    plan["ai_image_download_pending"] = _ai_download_pending
+    # ✅ R100：置幂等哨兵（禁用快速路径时 export_docx/export_pdf 的第二次进入
+    #   直接返回，见本函数 docstring ②）。
+    plan["_render_done"] = True
+    return plan
+
+
+def _build_docx_options(config: dict, _float, _int) -> dict:
+    """导出版式选项（``_prepare_export`` 与缓存命中路径共用的唯一构造出口）。"""
     return {
-        "scheme": scheme,
-        "sections": sections,
-        "content_audit": content_audit,
-        "global_facts": global_facts,
-        "global_facts_status": global_facts_status,
-        "chart_fp": chart_fp,
-        "chart_lookup": chart_lookup,
-        "rendered_bytes": rendered_bytes,
-        "image_bytes": image_bytes,
-        "blocks_cache": _blocks_cache,
-        "roots": roots,
-        "children_map": children_map,
-        "fe_codes": fe_codes,
-        "render_stats": render_stats,
-        # ✅ P1（2026-09-27）：AI 配图未生成数随 prep 回传给 export_docx 的
-        #    坏缓存守卫（跨函数，无法直接用局部变量）。
-        "ai_image_pending": _ai_pending,
-        # ✅ P2（2026-09-30）：生图成功但位图下载失败的配图数（第二缺口），
-        #    同样随 prep 回传并计入坏缓存守卫。
-        "ai_image_download_pending": _ai_download_pending,
-        # ✅ D-3（2026-10-01）：补充附录数据源。默认关闭 → 空列表 → 不渲染。
-        # ⚠️ project_id 取自 scheme（本函数作用域内没有名为 project_id 的局部变量，
-        #    直接引用会 NameError 并让**整条导出链路 500**）。
-        "appendix_sources": await _load_appendix_sources(
-            db, scheme_id, str((scheme or {}).get("project_id", "") or "")),
-        "config": config,
-        "heading_styles": _load_heading_styles(config),
-        "docx_options": {
-            "font_name": config.get("font_name", "宋体"),
-            "font_size": _clamp_font_size(config.get("font_size", 12), 12),
-            "page_header": config.get("page_header", ""),
-            "page_footer": config.get("page_footer", ""),
-            "show_page_number": config.get("show_page_number", True),
-            "show_title_page": config.get("show_title_page", False),
-            "show_toc": config.get("show_toc", False),
-            "bidder_name": config.get("bidder_name", ""),
-            # ✅ 新增排版开关（老前端不传时取默认值，行为等同"标准专项方案版式"）
-            "page_break_before_chapter": bool(config.get("chapter_page_break", True)),
-            "line_spacing": max(1.0, min(_float("line_spacing", 1.15), 3.0)),
-            "page_number_style": str(config.get("page_number_style", "simple") or "simple"),
-            "toc_depth": max(1, min(_int("toc_depth", 3), 7)),
-            # ✅ 增强 v7：封面项目信息表 + 页边距（缺省 None → 走默认行为，向后兼容）
-            # ✅ 类型防御：脏预设/直调 API 传入非 dict 时静默忽略，避免构建期 500
-            "cover_info": config.get("cover_info") if isinstance(
-                config.get("cover_info"), dict) else None,
-            "margins": config.get("margins") if isinstance(
-                config.get("margins"), dict) else None,
-            # ✅ 新增（2026-09-19）：图表渲染失败时的产物形态开关。
-            #    False（默认）= 跳过该图、不占图号，交付文档不出现红字报错
-            #    （"不静默"承诺由响应头 X-Chart-Render-Stats / X-Content-Audit、
-            #    日志与导出预检承担）；True = 保留 V7.0 的红色占位段（排查定位用）。
-            "chart_fail_placeholder": bool(config.get("chart_fail_placeholder", False)),
-            # ✅ 2026-09-22 引入：一级章节标题底部边框（章框），默认关闭向后兼容
-            "heading_border": bool(config.get("heading_border", False)),
-            # ✅ 2026-10-02（第二十三轮）：专项施工方案法定前置表单四开关。
-            #    逐项 bool 化 + 只保留为真的键 → 全关时得到空 dict，
-            #    空 dict 在 _build_docx_sync 内等价于「不渲染」，与旧产物逐字一致。
-            #    类型防御：非 dict 的脏预设静默忽略，避免构建期 500。
-            "scheme_forms": {
-                k: True for k in ("compilation_note", "approval",
-                                  "expert_review", "drawing_appendix")
-                if bool((config.get("scheme_forms") or {}).get(k)
-                        if isinstance(config.get("scheme_forms"), dict) else False)
-            },
-            # ✅ 2026-10-11（《文档生成规则》4.2 导出标准）：版式预设名在此**读取**，
-            #    实际覆盖发生在 _build_docx_task → _resolve_layout_preset（DOCX/PDF
-            #    两条链路唯一收敛点）。缺省 "" = 不启用，产物与改造前逐字一致。
-            "layout_preset": str(config.get("layout_preset", "") or "").strip().lower(),
+        "font_name": config.get("font_name", "宋体"),
+        "font_size": _clamp_font_size(config.get("font_size", 12), 12),
+        "page_header": config.get("page_header", ""),
+        "page_footer": config.get("page_footer", ""),
+        "show_page_number": config.get("show_page_number", True),
+        "show_title_page": config.get("show_title_page", False),
+        "show_toc": config.get("show_toc", False),
+        "bidder_name": config.get("bidder_name", ""),
+        # ✅ 新增排版开关（老前端不传时取默认值，行为等同"标准专项方案版式"）
+        "page_break_before_chapter": bool(config.get("chapter_page_break", True)),
+        "line_spacing": max(1.0, min(_float("line_spacing", 1.15), 3.0)),
+        "page_number_style": str(config.get("page_number_style", "simple") or "simple"),
+        "toc_depth": max(1, min(_int("toc_depth", 3), 7)),
+        # ✅ 增强 v7：封面项目信息表 + 页边距（缺省 None → 走默认行为，向后兼容）
+        # ✅ 类型防御：脏预设/直调 API 传入非 dict 时静默忽略，避免构建期 500
+        "cover_info": config.get("cover_info") if isinstance(
+            config.get("cover_info"), dict) else None,
+        "margins": config.get("margins") if isinstance(
+            config.get("margins"), dict) else None,
+        # ✅ 新增（2026-09-19）：图表渲染失败时的产物形态开关。
+        "chart_fail_placeholder": bool(config.get("chart_fail_placeholder", False)),
+        # ✅ 2026-09-22 引入：一级章节标题底部边框（章框），默认关闭向后兼容
+        "heading_border": bool(config.get("heading_border", False)),
+        # ✅ 2026-10-02（第二十三轮）：专项施工方案法定前置表单四开关。
+        "scheme_forms": {
+            k: True for k in ("compilation_note", "approval",
+                              "expert_review", "drawing_appendix")
+            if bool((config.get("scheme_forms") or {}).get(k)
+                    if isinstance(config.get("scheme_forms"), dict) else False)
         },
+        # ✅ 2026-10-11（《文档生成规则》4.2 导出标准）：版式预设名在此**读取**，
+        #    实际覆盖发生在 _build_docx_task → _resolve_layout_preset。
+        "layout_preset": str(config.get("layout_preset", "") or "").strip().lower(),
     }
+
+
+def _export_cache_fast_path_enabled() -> bool:
+    """缓存命中快速路径开关（默认开启）；配置不可用时按默认处理，绝不阻断导出。"""
+    try:
+        from app.config import settings as _fp
+        return bool(getattr(_fp, "export_cache_fast_path", True))
+    except Exception:  # pragma: no cover - 配置不可用时保持默认行为
+        return True
 
 
 async def _load_appendix_sources(db, scheme_id: str, project_id: str) -> list[dict]:
@@ -5060,6 +5651,11 @@ def _build_docx_task(out_path: str, prep: dict) -> tuple:
         prep.get("appendix_sources") or [],
         # ✅ 2026-10-02：专项施工方案法定前置表单开关（默认全关 → 产物逐字不变）
         prep["docx_options"].get("scheme_forms") or {},
+        # ✅ R99（2026-10-17）：末尾追加，既有位置参数顺序不变（与签名同序）
+        int(prep.get("fences_fixed") or 0),
+        # ✅ R106 FIX-1（2026-10-18）：末尾追加，既有位置参数顺序不变（与签名同序）。
+        #    本次导出的取消事件（缺省 None → _build_docx_sync 检查点自动短路）。
+        prep.get("_cancel_event"),
     )
 
 
@@ -5586,17 +6182,53 @@ async def _persist_export_cache_row(db, *, scheme: dict, scheme_id: str,
     新行与裁剪一并回滚（缓存永不落盘），统一为双提交后该窗口闭合。
     INSERT OR IGNORE + (scheme_id, content_fingerprint) 唯一约束保证同指纹并发
     只持久化一行（B5，2026-09-23）。
+
+    ✅ R108（2026-10-18 · 日志审计 P0-3）：缓存行是**辅助产物**——DOCX 已生成、
+    用户即将拿到文件时，绝不允许「写缓存撞锁」把整次导出炸成 500（生产实证：
+    批量导出与正文生成并发时 commit 抛 locked 直通）。现 INSERT+commit 与
+    prune+commit 各自成段接 ``retry_db_op``（commit 与 execute 同段重放：locked
+    在 WAL 下只在获取写锁的语句抛出，重放整段无重复副作用；INSERT OR IGNORE
+    天然幂等）；任一段重试耗尽 → rollback + WARNING 点名，**不阻断交付**。
     """
-    await _db_exec(
-        db,
-        "INSERT OR IGNORE INTO export_cache (id, project_id, scheme_id, config_hash,"
-        " content_fingerprint, cache_key, result_path) VALUES (?,?,?,?,?,?,?)",
-        (str(uuid.uuid4()), scheme.get("project_id", ""), scheme_id, config_hash,
-         content_fingerprint, cache_key, str(out_path)),
-        what=what)
-    await db.commit()
-    await _prune_export_cache(db, scheme_id, protect_path=out_path)
-    await db.commit()
+    async def _insert_and_commit() -> bool:
+        ok = await _db_exec(
+            db,
+            "INSERT OR IGNORE INTO export_cache (id, project_id, scheme_id, config_hash,"
+            " content_fingerprint, cache_key, result_path) VALUES (?,?,?,?,?,?,?)",
+            (str(uuid.uuid4()), scheme.get("project_id", ""), scheme_id, config_hash,
+             content_fingerprint, cache_key, str(out_path)),
+            what=what)
+        await db.commit()
+        return ok
+
+    async def _prune_and_commit() -> None:
+        await _prune_export_cache(db, scheme_id, protect_path=out_path)
+        await db.commit()
+
+    try:
+        await retry_db_op(_insert_and_commit, max_retries=4,
+                          base_delay=0.1, jitter=0.05)
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass  # rollback 本身再失败也无可补救，仅放弃缓存行
+        logger.warning(
+            "导出缓存行持久化失败（%s），本次产物不落缓存、下次将重新生成；"
+            "交付不受影响", what, exc_info=True)
+        return
+    try:
+        await retry_db_op(_prune_and_commit, max_retries=4,
+                          base_delay=0.1, jitter=0.05)
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        # 裁剪失败仅影响保留策略（旧行多留一轮），下一轮导出的裁剪自然自愈
+        logger.warning(
+            "导出缓存裁剪失败（%s），旧缓存行将由下次导出自愈", what,
+            exc_info=True)
 
 
 async def _finalize_export_delivery(db, *, scheme_id: str, kind: str,
@@ -5682,6 +6314,87 @@ def _export_dedup_release(_lk: asyncio.Lock | None) -> None:
         _lk.release()
 
 
+# ---------------------------------------------------------------------------
+# ✅ R106 FIX-1（2026-10-18）：导出取消真停止。
+#    旧「取消导出」只 abort 前端 fetch：``asyncio.to_thread(_build_docx_sync)``
+#    的 await 侧收到 CancelledError，但构建线程（CPU 密集）与延后的位图下载
+#    继续跑完，AI 配图/图表兜底渲染白烧。现按 scheme_id 维护取消登记
+#    （内存事件，**不**纳入 task_registry —— 导出是 await-REST 交付而非后台
+#    任务，强行注册反而破坏其轮询/接管契约），由 /cancel 端点置位事件，
+#    构建线程与渲染段在成本边界协作式退出。
+#    语义契约：
+#      · 协作式取消：命中在「下一段边界」生效（图表逐段之间 / AI 配图逐占位码
+#        / 位图下载逐 URL / 章节写入逐章之间），非硬杀线程；
+#      · 幂等：重复 /cancel 与无在飞导出均返回 ok；
+#      · 断连即停：export 路由被客户端断连 cancel 时同样置位事件，
+#        使失去 awaiter 的孤儿线程在下一检查点退出；
+#      · 取消后不写缓存行、不 os.replace（临时产物清理后 499 退出）。
+# ---------------------------------------------------------------------------
+class ExportCancelled(Exception):
+    """导出在成本边界被 R106 取消登记协作式命中（不落地产物、不写缓存）。"""
+
+
+_EXPORT_CANCEL_EVENTS: dict[str, list[threading.Event]] = {}
+_EXPORT_CANCEL_GUARD = threading.Lock()
+
+
+def _export_cancel_register(scheme_id: str) -> threading.Event:
+    """登记本次导出的取消事件。
+
+    每次调用持**独立** Event（同 scheme 并发导出互不影响；旧导出被取消后
+    其孤儿线程只读自己那份事件，不会误读后续新导出登记的事件）。
+    """
+    ev = threading.Event()
+    with _EXPORT_CANCEL_GUARD:
+        _EXPORT_CANCEL_EVENTS.setdefault(scheme_id, []).append(ev)
+    return ev
+
+
+def _export_cancel_deregister(scheme_id: str, ev: threading.Event) -> None:
+    """注销登记（幂等；只摘本次事件，不动同 scheme 的并发对等导出）。"""
+    try:
+        with _EXPORT_CANCEL_GUARD:
+            lst = _EXPORT_CANCEL_EVENTS.get(scheme_id)
+            if not lst:
+                return
+            try:
+                lst.remove(ev)
+            except ValueError:
+                pass
+            if not lst:
+                _EXPORT_CANCEL_EVENTS.pop(scheme_id, None)
+    except Exception:  # pragma: no cover - 注销失败只失登记表，不损失正确性
+        pass
+
+
+def _export_cancel_request(scheme_id: str) -> bool:
+    """置位该 scheme 全部在飞导出的取消事件，返回是否存在在飞导出。"""
+    with _EXPORT_CANCEL_GUARD:
+        events = list(_EXPORT_CANCEL_EVENTS.get(scheme_id) or [])
+    for ev in events:
+        ev.set()
+    return bool(events)
+
+
+def _check_export_cancelled(ev: threading.Event | None) -> None:
+    """成本边界检查点：取消事件已置位即抛出提前退出（None = 未启用取消）。"""
+    if ev is not None and ev.is_set():
+        raise ExportCancelled("导出已被用户停止")
+
+
+@router.post("/cancel")
+async def export_cancel(scheme_id: str):
+    """✅ R106 FIX-1：导出停止指令（后端真停止，非仅前端断流）。
+
+    置位该 scheme 在飞导出的取消事件：构建线程/渲染段在下一段边界退出，
+    不落地产物、不写缓存。幂等：重复调用与无在飞导出均返回 ok
+    （in_progress=false），前端据此可安全地「先 cancel 再 abort」。
+    """
+    in_progress = _export_cancel_request(scheme_id)
+    logger.info("导出取消指令：scheme=%s 在飞导出=%s", scheme_id[:8], in_progress)
+    return {"ok": True, "in_progress": in_progress}
+
+
 @router.post("/docx")
 async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
     """导出 DOCX（封面 / 目录 / 标题编号 / 图表 / 页眉页脚页码）。
@@ -5702,11 +6415,19 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
     键与判据见 _EXPORT_BUILD_LOCKS 前的模块注释。
     """
     await _guard_numbering_consistency(db, scheme_id)
-    _lk = await _export_dedup_acquire(("docx", scheme_id, _export_config_hash(body)))
+    # ✅ R106 FIX-1：取消事件登记在去重锁**之前** —— /cancel 在全窗口
+    #    （等锁 / 取数段 / 渲染段 / 构建线程）均可生效；本路由 finally 注销。
+    cancel_ev = _export_cancel_register(scheme_id)
+    _lk = None
     try:
-        prep = await _prepare_export(scheme_id, body, db)
+        _lk = await _export_dedup_acquire(("docx", scheme_id, _export_config_hash(body)))
+        # ✅ R99（2026-10-17 · 缓存命中快速路径）：取数段与渲染段之间插入缓存查询。
+        #    `_prepare_export` 在快速路径开启时**只做取数段**（DB 读 + 块解析 +
+        #    指纹材料），渲染段延后到「确认未命中」之后才执行 —— 命中即零渲染。
+        #    关闭 `export_cache_fast_path` 时 `_prepare_export` 内部已跑完渲染段，
+        #    此处 `if` 判定为假 → 与改造前逐字一致。
+        prep = await _prepare_export(scheme_id, body, db, cancel_event=cancel_ev)
         scheme = prep["scheme"]
-        render_stats = prep["render_stats"]
         config_hash, content_hash = _content_fingerprint(prep)
 
         # 导出文件名 = 方案名称 + 导出日期 + 导出轮次（本次导出即一轮，先自增再命名）
@@ -5727,6 +6448,10 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         # ✅ 修复（2026-10-14 · P2）：可用判据收敛到 _cache_row_viable，与
         #    _prune_export_cache 的保留判据同一口径，避免「命中判据/保留判据」分叉。
         if cached and cached[0] and _cache_row_viable(cached[0]):
+            # ✅ R111（P2-5）：缓存命中日志埋点（纯可观测；此前命中态只回
+            #    X-Cache-Status 响应头，运维无法从 backend.log 统计命中率）。
+            logger.info(
+                "导出缓存命中（scheme=%s · docx · 秒级返回历史产物）", scheme_id[:8])
             # ✅ G12：缓存命中同样是「用户拿到了一份文档」，同样落审核留痕
             await _record_export_review_trace(db, scheme_id, "docx", round_no, export_filename)
             # ✅ 契约完整：缓存命中也回传统计/缓存标识响应头，前端统计条行为一致
@@ -5735,6 +6460,10 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
                 headers={"X-Chart-Render-Stats": '{"cached":true}',
                          "X-Cache-Status": "hit", **name_headers},
                 media_type=_DOCX_MIME)
+
+        # ✅ R99：未命中 → 此时才执行渲染段（图表预渲染 / AI 配图 / 位图下载）。
+        await _prepare_export_render(prep)
+        render_stats = prep["render_stats"]
 
         # ✅ 性能优化：out_path 提前计算（仅依赖 scheme_id/hash，与 DOCX 内容无关）
         out_path = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{content_hash[:8]}.docx"
@@ -5756,6 +6485,13 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         # ✅ 资源守卫：构建异常时必须清理临时文件，否则数十 MB 的 tmp.docx 永久残留。
         try:
             fix_stats = await asyncio.to_thread(_build_docx_sync, *_build_docx_task(tmp_out_path, prep))
+        except ExportCancelled:
+            # ✅ R106 FIX-1：构建线程在段边界命中取消 —— 清理本次临时产物、
+            #    注销在飞保护（out_path 从未 replace 出来，不存在成品），
+            #    上抛由路由出口转 499。**不写缓存行**（取消产物指纹无效）。
+            tmp_out_path.unlink(missing_ok=True)
+            _export_inflight_unregister(_inflight_final)
+            raise
         except Exception:
             tmp_out_path.unlink(missing_ok=True)
             raise
@@ -5833,6 +6569,10 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         _merge_borrowed_stats(render_stats, fix_stats)
         headers = {"X-Chart-Render-Stats": json.dumps(render_stats, ensure_ascii=False),
                    "X-Cache-Status": "miss", **name_headers}
+        # ✅ R111（P2-5）：缓存未命中日志埋点（纯可观测）。
+        logger.info(
+            "导出缓存未命中（scheme=%s · docx · 本轮全量渲染，产物已写缓存）",
+            scheme_id[:8])
         if fix_stats:
             headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
         # ✅ G12：导出成稿落一条审核留痕（from_status = to_status，只留痕不改状态机）
@@ -5847,8 +6587,21 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
             filename=export_filename,
             headers=headers,
             media_type=_DOCX_MIME)
+    except asyncio.CancelledError:
+        # ✅ R106 FIX-1：客户端断连（关页/abort/切方案）= 停止 —— 置位取消事件，
+        #    使失去 awaiter 的构建线程/渲染段在下一检查点退出，不再白烧成本。
+        #    断连取消下本协程已无人消费返回值，499 分支不会走到，此处只负责置位。
+        cancel_ev.set()
+        raise
+    except ExportCancelled:
+        # ✅ R106 FIX-1：/cancel 已置位且本协程仍在 await（如第二标签页点停止、
+        #    或前端 cancel 与 abort 之间的窗口）→ 协作式退出，回 499（非常规但
+        #    语义准确的 "client closed request"），不落地产物、不写缓存。
+        logger.info("导出已取消（docx, scheme=%s）", scheme_id[:8])
+        raise HTTPException(499, "导出已被用户停止")
     finally:
         _export_dedup_release(_lk)
+        _export_cancel_deregister(scheme_id, cancel_ev)
 
 
 def _convert_docx_to_pdf(docx_path: str, pdf_path: str) -> str:
@@ -6014,11 +6767,14 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
     守卫在锁外。键与判据见 _EXPORT_BUILD_LOCKS 前的模块注释。
     """
     await _guard_numbering_consistency(db, scheme_id)
-    _lk = await _export_dedup_acquire(("pdf", scheme_id, _export_config_hash(body)))
+    # ✅ R106 FIX-1：与 DOCX 链同构 —— 取消事件登记在去重锁之前，finally 注销。
+    cancel_ev = _export_cancel_register(scheme_id)
+    _lk = None
     try:
+        _lk = await _export_dedup_acquire(("pdf", scheme_id, _export_config_hash(body)))
         import tempfile
 
-        prep = await _prepare_export(scheme_id, body, db)
+        prep = await _prepare_export(scheme_id, body, db, cancel_event=cancel_ev)
         scheme = prep["scheme"]
 
         config_hash, content_hash = _content_fingerprint(prep)
@@ -6047,17 +6803,27 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
         cached = await _db_fetch_one(cur, what="export_pdf 缓存查询")
         # ✅ 修复（2026-10-14 · P2）：同 DOCX，可用判据收敛到 _cache_row_viable。
         if cached and cached[0] and _cache_row_viable(cached[0]):
+            # ✅ R111（P2-5）：PDF 缓存命中日志埋点（纯可观测，与 DOCX 同口径）。
+            logger.info(
+                "导出缓存命中（scheme=%s · pdf · 秒级返回历史产物）", scheme_id[:8])
             await _record_export_review_trace(db, scheme_id, "pdf", round_no, export_filename)
             return FileResponse(
                 str(cached[0]), filename=export_filename, media_type=_PDF_MIME,
                 headers={"X-Chart-Render-Stats": '{"cached":true}',
                          "X-Cache-Status": "hit", **name_headers})
 
+        # ✅ R99（2026-10-17 · 缓存命中快速路径）：与 DOCX 同序 —— 未命中才渲染。
+        #    PDF 链的重复成本更高（DOCX 构建 + 一次 Word COM 转换），故收益更大。
+        await _prepare_export_render(prep)
+
         # 生成 DOCX 到临时文件
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_docx = str(Path(tmpdir) / f"{scheme_id}.docx")
             tmp_pdf = str(Path(tmpdir) / f"{scheme_id}.pdf")
             fix_stats = await asyncio.to_thread(_build_docx_sync, *_build_docx_task(tmp_docx, prep))
+            # ✅ R106 FIX-1：构建段与转换段之间的取消检查点 —— 已取消则不再进入
+            #    Word COM 转换（秒~分钟级成本）；TemporaryDirectory 退出自动清理。
+            _check_export_cancelled(cancel_ev)
             # 转换为 PDF（CPU 密集，放线程池）
             try:
                 await asyncio.to_thread(_convert_docx_to_pdf, tmp_docx, tmp_pdf)
@@ -6145,6 +6911,11 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
         from fastapi.responses import Response
         # ✅ 加固（D1）：PDF 链路同样合流跨章借图计数（与 DOCX 同口径）
         _merge_borrowed_stats(render_stats, fix_stats)
+        # ✅ R111（P2-5）：PDF 缓存未命中日志埋点（纯可观测，与 DOCX 同口径；
+        #    degraded 也记——它同样走了全量渲染 + Word 转换）。
+        logger.info(
+            "导出缓存未命中（scheme=%s · pdf · 本轮全量渲染，产物%s缓存）",
+            scheme_id[:8], "已" if not degraded else "因缺图未写入")
         headers = {
             "Content-Disposition": _attachment_disposition(export_filename),
             "X-Chart-Render-Stats": json.dumps(render_stats, ensure_ascii=False),
@@ -6171,8 +6942,17 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
             media_type=_PDF_MIME,
             headers=headers,
         )
+    except asyncio.CancelledError:
+        # ✅ R106 FIX-1：与 DOCX 链同构 —— 客户端断连即置位，孤儿构建线程在
+        #    下一段边界退出（转换线程不可中断，跑完当前转换即止）。
+        cancel_ev.set()
+        raise
+    except ExportCancelled:
+        logger.info("导出已取消（pdf, scheme=%s）", scheme_id[:8])
+        raise HTTPException(499, "导出已被用户停止")
     finally:
         _export_dedup_release(_lk)
+        _export_cancel_deregister(scheme_id, cancel_ev)
 
 
 @router.get("/cache-status")

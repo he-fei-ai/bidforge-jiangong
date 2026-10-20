@@ -578,6 +578,21 @@ export interface AIConfigsHealthItem {
   network_ip: string;
   network_message: string;
   usable: boolean;
+  /**
+   * ✅ R103（2026-10-18 · 日志审计遗留 L1 收口）：运行时健康快照
+   * （后端 provider_health_snapshot，与选路同源）。
+   * samples 为近 24h 滑动窗口样本数；success_rate 样本不足时为 null；
+   * dead=true 表示实时成功率过低、已被自动剔除出降级链（界面必须可见，
+   * 否则用户只见「降级链 9→3」不知该清理谁）。
+   */
+  runtime_health?: {
+    samples: number;
+    success_rate: number | null;
+    dead: boolean;
+    circuit_open: boolean;
+    cooldown_remaining_s: number;
+    quota_cooldown_s: number;
+  };
 }
 
 /** ✅ 2026-10-06（G3）：GET /ai/configs/health 响应 */
@@ -594,6 +609,8 @@ export interface AIConfigsHealthResponse {
     disabled: number;
     network_ok: number;
     network_unreachable: number;
+    /** ✅ R103：实时成功率过低（已被自动剔除出降级链）的配置条数 */
+    runtime_dead?: number;
   };
   active_env: string;
   disabled_providers: string[];
@@ -725,4 +742,60 @@ export interface AIAuditCleanupResponse {
   keep_days: number;
   /** ✅ 2026-10-06（F-5）：后端一直回传「是否只清失败记录」，此前未声明 */
   only_failed?: boolean;
+}
+
+/**
+ * ✅ 2026-10-17（R89）：GET /ai/key-rotation（mode=inspect）响应。
+ * 只读体检：主密钥来源 + 存量密文健康度，**绝不含任何密钥材料**。
+ */
+export interface AIKeyRotationInspectResponse {
+  ok: boolean;
+  mode: "inspect";
+  master_key_source: "env" | "persisted_file" | "temporary";
+  key_file_exists: boolean;
+  health: {
+    total: number;
+    with_ciphertext: number;
+    decryptable: number;
+    broken_count: number;
+  };
+  broken_configs: Array<{ id: string; provider_name: string; model: string }>;
+  advice: string;
+}
+
+/**
+ * ✅ 2026-10-17（R89）：POST /ai/key-rotation 请求体。
+ * mode=inspect 时 legacy_key / new_key / dry_run 均被忽略。
+ */
+export interface AIKeyRotationRequest {
+  mode: "inspect" | "reencrypt" | "rotate";
+  /** 迁移窗口内可用的历史密钥（rotate 自动从轮转前捕获；reencrypt 显式传入优先） */
+  legacy_key?: string;
+  /** 仅 mode=rotate 有效；空串 = 自动生成（44 字符 urlsafe base64） */
+  new_key?: string;
+  dry_run?: boolean;
+}
+
+/**
+ * ✅ 2026-10-17（R89）：POST /ai/key-rotation 响应（三档共用）。
+ */
+export interface AIKeyRotationResponse {
+  ok: boolean;
+  mode: "inspect" | "reencrypt" | "rotate";
+  /** mode=inspect 时携带 */
+  master_key_source?: "env" | "persisted_file" | "temporary";
+  key_file_exists?: boolean;
+  health?: { total: number; with_ciphertext: number; decryptable: number; broken_count: number };
+  broken_configs?: Array<{ id: string; provider_name: string; model: string }>;
+  advice?: string;
+  /** mode=reencrypt / rotate 时携带 */
+  migrated?: number;
+  unchanged?: number;
+  failed?: number;
+  warning?: string;
+  /** mode=rotate 时携带 */
+  new_key_from?: string;
+  backup_path?: string;
+  hint?: string;
+  error?: string;
 }

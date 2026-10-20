@@ -172,6 +172,19 @@ class Settings(BaseSettings):
     # 缓存行后释放，等待者重查缓存即命中直接返回 —— 不重复构建、不重复计费。
     # 设 False 逐字回退旧行为（并发导出各自独立跑）。
     export_dedup_concurrent: bool = True
+    # ---------- 缓存命中快速路径（R99 · 2026-10-17，默认开启）----------
+    # 缺陷：缓存查询发生在 `_prepare_export` **之后**，而 `_prepare_export` 里
+    # 混着「取数」（DB 读 + 块解析 + 指纹材料）与「渲染」（图表预渲染 +
+    # AI 配图生成 + 远程位图下载）两段 ⇒ 一次**缓存命中**也要先付一遍全量渲染。
+    # 实测（artifacts/exp94/probe_confirm.py）：`X-Cache-Status: hit` 时
+    # `_chart_cache.get_or_render` 仍被调用 2 次；用户点「复用上次成果」拿到的
+    # 秒级响应，实际付出的是一次完整渲染（含 AI 配图编排与全部图片下载）。
+    # 开启后：`_prepare_export` 只跑取数段，把渲染段延后到「确认未命中」之后；
+    # 命中即零渲染，响应头与交付文件**逐字不变**（指纹所需材料全在取数段，
+    # 故命中/未命中算出的缓存键完全一致 —— 见 tests/test_export_closeout_r99_20261017.py）。
+    # 设 False 逐字回退旧行为（`_prepare_export` 内部跑完渲染段；渲染段自带
+    # `_render_done` 幂等哨兵，导出链路的第二次进入零成本 —— R100 修复）。
+    export_cache_fast_path: bool = True
     # ✅ P4（2026-09-23）：AI 配图人工入口门控。v17 产品约束为「图表全自动生成，
     #    无人工生图入口」——导出 DOCX 时由 _auto_generate_ai_image_blocks 自动生成。
     #    默认 False：/charts/generate-ai-image（兼容保留端点）拒绝人工/脚本触发，
@@ -237,6 +250,19 @@ class Settings(BaseSettings):
     #    让截断可观测，再按 ai_reasoning_max_tokens 上限翻倍重试一次。
     #    False = 仅告警不重试（完全回到旧行为）。
     ai_retry_on_partial_truncation: bool = True
+    # ✅ R110（P1-2 · 思考吞噬翻倍失败后 provider 短时冷却）：
+    #    R109 实证：sensetime 1536→3072 翻倍后仍失败，降级链若全是推理模型
+    #    会重复「吞噬→翻倍→失败」。翻倍失败后标记该 provider 短时冷却，
+    #    期间 _gate_candidates 跳过（与配额冷却同走 circuit_skipped 审计口径）。
+    #    0 = 关闭（回到旧行为：翻倍失败后不冷却，降级链照常尝试同型推理模型）。
+    ai_thinking_dead_cooldown: float = 60.0
+    # ✅ R110（P1-1 · 跨章全熔断快速失败）：
+    #    R109 实证：所有候选均熔断/配额冷却时 _gate_candidates 放行 1 个 probe，
+    #    多章生成各自独立 probe → 5 章 × probe 超时 ≈ 150-300s 空转。
+    #    连续 N 次所有候选不可用后激活短时快速失败，不再 probe。
+    #    threshold=0 关闭（回到旧行为：每次都 probe）；默认 2 = 连续 2 次后激活。
+    ai_all_circuit_fast_fail_threshold: int = 2
+    ai_all_circuit_fast_fail_cooldown: float = 60.0
     # ✅ 2026-09-22（对齐 OpenBidKit reasoning_effort 能力）：推理类模型
     #    （DeepSeek-R1 / o1 / QwQ 等）的「思考力度」透传。空串（默认）= 不发送该参数，
     #    沿用各 provider 默认（完全向后兼容，不改变任何现有调用行为）；非空前将作为
@@ -551,8 +577,14 @@ class Settings(BaseSettings):
     # 用户忽略告警即原样落库，占位标题最终进导出成品。这是用户仍看到
     # 「总体实施策划（2）」的直接机制。
     # True（默认）= 写路径检出占位标题时，落库前**先**调外科式重写
-    #   （复用 sse_handlers._try_outline_title_fix 同一实现，只回填 title、
+    #   （复用 services.outline_title_fix.autofix_generic_titles_on_save
+    #   **单一实现** —— 内部即 `_try_outline_title_fix`，只回填 title、
     #   绝不增删节点），重写后仍残留才按原样保存并回传 generic_residual；
+    #   ✅ R101（本轮）：该单一实现已被 `sections._save_outline_to_db`
+    #   **与** `upload_outline.save_as_outline` 两条写路径共用 —— 此前后者
+    #   自建 DELETE/INSERT、不经前者 ⇒ 上传识别入口**零闸门**，与本项声明的
+    #   「目录库套用 / 上传识别 / AI 调整 / 手工编辑后保存」四类写入口全覆盖
+    #   不符；改写条数经加法式键 `generic_autofixed` 回传（仅 >0 时挂）。
     #   **仅在检出非空时触发** ⇒ 干净目录零 AI 调用、零额外延迟（与
     #   content_fact_autofix_enabled 同一「只在检出时付费」口径）。
     # False = 逐字回到 R89 之前：写路径只回传 residual、不发起重写调用。
@@ -664,6 +696,17 @@ class Settings(BaseSettings):
     #    可被 Prompt Cache 命中），本章专属事实进「任务差异」段。
     #    关闭 → 逐字回到 R58 之前（全部事实按章预筛后整块进稳定段）。
     content_facts_split_inject: bool = True
+
+    # ✅ R102（2026-10-18 · G5 前序承接扩到「文档序上一叶子」）：正文生成时
+    #    是否注入【前一章正文结尾】承接参考。旧实现的前序摘要只看**同父兄弟**
+    #    （build_sibling_context）—— 父下第一个叶子的摘要恒为空，且跨章边界
+    #    （上一章最后一个子节 → 本章第一个子节）零承接，全文递进性靠模型自觉。
+    #    True（默认）= 取目录树 DFS 序上**上一个叶子**的正文结尾（剔除代码
+    #    围栏、截 300 字）注入本章任务差异段（逐章变化量，不破坏前缀稳定；
+    #    并发窗口内上一章尚未完成时自然回落为空，软上下文）；提示词第 14 条
+    #    约束「严禁提前写后续章节」与之配套。False = 逐字回退引入前行为
+    #    （不计算、不注入，提示词模板占位段不存在）。
+    content_prev_leaf_context: bool = True
 
     # F6 应急章「专项应急预案按事故类型分组」结构要素注入（2026-10-07）：
     # 文档实证：第4轮成稿应急章 H3 从 2.1 平铺到 2.12，把高处坠落/物体打击、

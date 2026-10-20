@@ -62,7 +62,7 @@ import { sourceNotice, previewNotices } from "../utils/parseSourceNotice";
 // ✅ R86 L1：目录写入检出占位/泛化标题时的可操作提示（后端 create/update/
 //    save-outline/upload 四条入口加法式回传 `generic_residual` 明细）。
 //    文案集中在 utils 纯函数里（vitest 可直接覆盖），页面只负责 msg.warning。
-import { genericResidualNotice } from "../utils/genericResidual";
+import { genericAutofixNotice, genericResidualNotice } from "../utils/genericResidual";
 // ✅ R87 FIX-1：章节编号**合法性判据**（与后端 `numbering.stored_id_parts` 同口径）。
 //    此前本页面自持一份「逐段 parseInt 挑数字」的松过滤，会把脏编号抢救成
 //    看似合法的章号，而后端 fail-closed ⇒ 目录树与导出成稿编号不一致。
@@ -703,10 +703,12 @@ export function buildBatchResolveCopy(stats: {
 }
 
 /** 事实提取进度卡：进度 + 分段级实时日志（最新在上） */
-export function FactsExtractProgressCard({ progress, progressMsg, logs }: {
+export function FactsExtractProgressCard({ progress, progressMsg, logs, controls }: {
   progress: number;
   progressMsg: string;
   logs: Array<{ progress: number; message: string; time?: number; [k: string]: unknown }>;
+  /** ✅ R106 FIX-2：可选控制区（暂停/恢复/停止），由页面注入 TaskControlButtons */
+  controls?: React.ReactNode;
 }) {
   const list = (logs || []).slice().reverse();
   return (
@@ -715,6 +717,7 @@ export function FactsExtractProgressCard({ progress, progressMsg, logs }: {
         <Text strong>📚 正在提取全局事实</Text>
         <Text type="secondary" style={{ fontSize: 12 }}>{progressMsg}</Text>
         <Progress percent={Math.round((progress || 0) * 100)} size="small" />
+        {controls}
         <div style={{ maxHeight: 180, overflow: "auto" }}>
           {list.length === 0 ? (
             <Text type="secondary" style={{ fontSize: 12 }}>正在连接 AI，准备提取...</Text>
@@ -732,6 +735,56 @@ export function FactsExtractProgressCard({ progress, progressMsg, logs }: {
         )}
       </Space>
     </Card>
+  );
+}
+
+/**
+ * 任务控制按钮组（R106 FIX-2 · 组件级可测）
+ *
+ * 目录生成 / 全局事实两 Tab 此前没有停止入口（进度卡纯展示，只能靠全局任务
+ * 抽屉停止）。与 ContentGenerationTab 内的暂停/恢复/停止同构，共用页面
+ * handleControl + activeTaskIdRef（两条链的 SSE 均已写 task_id，后端 pause/
+ * resume/stop 检查点早已生效，本次仅补 UI）：
+ * - 停止发出指令后置灰显示「停止中」，任务落终态（generating 复位）才恢复
+ *   —— 协作式停止「指令 accepted ≠ 已停止」，不给乐观回执；
+ * - 暂停/恢复按 paused 互斥，停止中两者一并禁用（避免 stop 与 resume 竞态）。
+ */
+export function TaskControlButtons({ paused, stopping, onControl }: {
+  paused: boolean;
+  stopping: boolean;
+  onControl: (action: "pause" | "resume" | "stop") => void;
+}) {
+  return (
+    <>
+      <Button
+        icon={<PauseOutlined />}
+        onClick={() => onControl("pause")}
+        disabled={paused || stopping}
+      >
+        暂停
+      </Button>
+      <Button
+        icon={<PlayCircleOutlined />}
+        onClick={() => onControl("resume")}
+        disabled={!paused || stopping}
+      >
+        恢复
+      </Button>
+      <Button
+        danger
+        icon={<StopOutlined />}
+        onClick={() => onControl("stop")}
+        disabled={stopping}
+        loading={stopping}
+      >
+        {stopping ? "停止中" : "停止"}
+      </Button>
+      {paused && !stopping && (
+        <Tag color="warning" style={{ margin: 0 }}>
+          ⏸ 已暂停（恢复后继续生成）
+        </Tag>
+      )}
+    </>
   );
 }
 
@@ -3825,6 +3878,10 @@ export default function SchemeWorkbenchPage() {
   const [genType, setGenType] = useState("");
   // ✅ F3 暂停状态可见：当前活跃任务是否已暂停（暂停/恢复按钮互斥 + 「已暂停」Tag）
   const [taskPaused, setTaskPaused] = useState(false);
+  // ✅ R106 FIX-4：「停止中」态。stop 指令 accepted ≠ 已停止（后端协作式退出，
+  //    要等在飞 AI 调用被 cancel / 段边界检查点命中），按钮保持置灰直至任务落
+  //    终态。旧实现发完指令立刻乐观报「已停止」，用户以为还能接着点。
+  const [taskStopping, setTaskStopping] = useState(false);
   const [selectedSection, setSelectedSection] = useState<any>(null);
   const [facts, setFacts] = useState<FactGroup[]>([]);
   const [factsSummary, setFactsSummary] = useState<FactsSummary | null>(null);
@@ -4302,6 +4359,14 @@ const draftKey = selectedSection && id
   const [saveLibForm] = Form.useForm();
 
   const activeTaskIdRef = useRef<string>("");
+  // ✅ R106 FIX-4：控制指令同步锁。React state 更新异步批处理，快速连点会在同
+  //    一帧内多次 POST /sse/task/{id}/control。pause/resume 在 finally 释放，
+  //    stop 的锁延后到 generating 复位（终态）才释放，与「停止中」置灰同生命周期。
+  const controllingRef = useRef(false);
+  // ✅ R106 FIX-4：结构化提取（bid_analysis）停止锁 + 置灰态。协作式停止要在途
+  //    解析项收口，故发完指令后轮询终态再回执（旧实现只 toast 一句就结束）。
+  const baStoppingRef = useRef(false);
+  const [baStopping, setBaStopping] = useState(false);
   // ✅ 生成世代计数：重入生成（如双击）时旧 SSE 协程被 abort 后其收尾代码
   // 会在新任务启动后才执行，若无世代校验，旧协程的 finally 会把新任务的
   // generating 复位为 false → 暂停/停止按钮消失，运行中的任务无法停止。
@@ -5279,10 +5344,17 @@ const draftKey = selectedSection && id
    * 文案由纯函数 `genericResidualNotice` 产出（utils 层，vitest 可直接覆盖）。
    * 契约：仅当确有残留才回传该键（数组，元素 `{path,title,kind}`），
    * 旧后端 / 干净目录都不带此键 ⇒ 老版本一字不变、无提示。
+   *
+   * ✅ 本轮补：后端落库前可能已**自动改写**部分占位标题（外科式重写，只改标题
+   * 不增删节点），并以加法式键 `generic_autofixed`（整数，仅 >0 才回传）告知
+   * 改写条数。此前前端零消费 ⇒ 自动改写**静默生效**，用户以为目录原样保存。
+   * 现一并提示（同一函数出口，7 个调用点零改动即生效）。
    */
   function notifyGenericResidual(data: any) {
     const text = genericResidualNotice(data);
     if (text) msg.warning(text);
+    const fixed = genericAutofixNotice(data);
+    if (fixed) msg.info(fixed);
   }
 
   /** 一级目录确认闸门（对齐 OpenBidKit outline-selection）：
@@ -5358,6 +5430,12 @@ const draftKey = selectedSection && id
     if (!id) return;
     // ✅ 世代校验：标记本代生成，收尾时仅当仍是最新一代才复位全局状态
     const mySeq = ++genSeqRef.current;
+    // ✅ R106 FIX-8：立刻清空上一代 task_id。本代任务的 task_id 由 SSE
+    //    首个 connecting 事件写入 activeTaskIdRef（后端 FIX-7 已把它前移到装配
+    //    之前），在写入之前若仍留着上一代**已终结**的 id，用户此刻点停止就会
+    //    打到死 id（后端 {ok:false,message:'任务不存在或已结束'}）—— 新任务
+    //    从未收到指令，表现为「停止按钮没反应」。清空后走诚实回执，不再误发。
+    activeTaskIdRef.current = "";  // R106 FIX-8 · 目录链
     // 每代生成重新武装「正文覆盖风险」二次确认
     hasContentRef.current = false;
     // 创建新的 AbortController，取消上一次未完成的 SSE
@@ -6175,6 +6253,12 @@ const draftKey = selectedSection && id
     if (!id) return;
     // ✅ 世代校验：标记本代生成，收尾时仅当仍是最新一代才复位全局状态
     const mySeq = ++genSeqRef.current;
+    // ✅ R106 FIX-8：立刻清空上一代 task_id。本代任务的 task_id 由 SSE
+    //    首个 connecting 事件写入 activeTaskIdRef（后端 FIX-7 已把它前移到装配
+    //    之前），在写入之前若仍留着上一代**已终结**的 id，用户此刻点停止就会
+    //    打到死 id（后端 {ok:false,message:'任务不存在或已结束'}）—— 新任务
+    //    从未收到指令，表现为「停止按钮没反应」。清空后走诚实回执，不再误发。
+    activeTaskIdRef.current = "";  // R106 FIX-8 · 正文链
     // 创建新的 AbortController，取消上一次未完成的 SSE
     abortControllerRef.current?.abort();
     const ac = new AbortController();
@@ -6597,6 +6681,12 @@ const draftKey = selectedSection && id
     if (!id) return;
     // ✅ 世代校验：标记本代生成，收尾时仅当仍是最新一代才复位全局状态
     const mySeq = ++genSeqRef.current;
+    // ✅ R106 FIX-8：立刻清空上一代 task_id。本代任务的 task_id 由 SSE
+    //    首个 connecting 事件写入 activeTaskIdRef（后端 FIX-7 已把它前移到装配
+    //    之前），在写入之前若仍留着上一代**已终结**的 id，用户此刻点停止就会
+    //    打到死 id（后端 {ok:false,message:'任务不存在或已结束'}）—— 新任务
+    //    从未收到指令，表现为「停止按钮没反应」。清空后走诚实回执，不再误发。
+    activeTaskIdRef.current = "";  // R106 FIX-8 · 事实链
     // 创建新的 AbortController
     abortControllerRef.current?.abort();
     const ac = new AbortController();
@@ -7219,6 +7309,11 @@ const draftKey = selectedSection && id
   /** 停止：四类任务共用 task_registry 控制链路（POST /sse/task/{id}/control） */
   const handleStopBa = useCallback(async () => {
     if (!id) return;
+    // ✅ R106 FIX-4：同步锁 —— 旧实现可连点，且发完指令就乐观提示，用户不知道
+  //    任务是否真的退出了。现置灰按钮并轮询到终态才报「已停止」。
+    if (baStoppingRef.current) return;
+    baStoppingRef.current = true;
+    setBaStopping(true);
     try {
       const { data } = await tasksApi.list(id, 10);
       const t = (data.tasks || []).find(
@@ -7226,14 +7321,39 @@ const draftKey = selectedSection && id
           && (x.status === "running" || x.status === "paused"));
       if (!t) {
         msg.info("没有正在运行的结构化提取任务");
+        // ✅ 列表可能滞后（任务刚结束）：顺带刷新结果，避免按钮一直显示可点
+        loadBaResults();
         return;
       }
-      await tasksApi.control(t.id, "stop");
-      msg.success("已发送停止指令，在途解析项将在收口后落终态");
+      const { data: ctl } = await tasksApi.control(t.id, "stop");
+      if (ctl?.ok === false) {
+        msg.error(ctl.message || "停止指令未被接受，任务可能已结束");
+        loadBaResults();
+        return;
+      }
+      if (ctl?.orphaned) {
+        msg.info(ctl.message || "任务已无运行实例，已标记为已停止");
+        loadBaResults();
+        return;
+      }
+      msg.info("停止指令已发送，正在等待在途解析项收口...");
+      // ✅ 轮询至终态（3s × 20 ≈ 1 分钟上限）：协作式停止 = 在途项跑完、未启动项不再启动
+      const fin = await pollTaskUntilTerminalImpl(
+        t.id,
+        async (tid) => (await tasksApi.status(tid)).data as TaskTerminalInfo,
+        undefined,
+        { intervalMs: 3000, maxPolls: 20, netFailTolerance: 3 },
+      );
+      if (fin && isTerminalTaskStatus(fin.status)) msg.success("已停止");
+      else msg.warning("停止指令已发送，任务未在预期内退出，可在任务栏查看");
+      loadBaResults();
     } catch (e: any) {
       msg.error(e.message || "停止失败");
+    } finally {
+      baStoppingRef.current = false;
+      setBaStopping(false);
     }
-  }, [id, msg]);
+  }, [id, msg, loadBaResults]);
 
   /** 多标段检测（规则检测，非 AI，秒级） */
   const handleCheckSections = useCallback(async () => {
@@ -8357,34 +8477,106 @@ const draftKey = selectedSection && id
     [tree, convertToEditTree],
   );
 
+  // ✅ R106 FIX-4：任务不再运行（SSE stopped / 断线轮询接管 / 异常收尾）时复位
+  //    「停止中」态与控制锁。放在这里统一兜底，避免在十几个 stopped 分支各埋一次。
+  useEffect(() => {
+    if (!generating) {
+      setTaskStopping(false);
+      controllingRef.current = false;
+    }
+  }, [generating]);
+
   const handleControl = async (action: "pause" | "resume" | "stop") => {
     const tid = activeTaskIdRef.current;
     if (!tid) {
+      // ✅ R106 FIX-8：区分「刚发起、task_id 还没回」与「真没有任务」。
+      //    发起生成时已主动清空 ref（配合后端 FIX-7 把 connecting 前移到装配之前，
+      //    窗口从实测 30s 压到 ~1s），此窗口的停止必须如实告知"稍候"，
+      //    绝不能把指令发给上一代已终结的 id —— 那正是活体 E2E 里
+      //    「点了停止、后端回任务不存在、新任务照跑」的机理。
+      if (generating) {
+        msg.info("任务正在建立连接，尚未取得任务标识，请稍等 1~2 秒后再点");
+        return;
+      }
       msg.warning("没有活跃的任务");
       return;
     }
+    // ✅ R106 FIX-4：同步锁防连点（同一条指令未回执/未落终态前不再重复发）
+    if (controllingRef.current) return;
+    controllingRef.current = true;
+    if (action === "stop") setTaskStopping(true);
     try {
       const { data } = await tasksApi.control(tid, action);
       if (data.ok) {
         // ✅ F3 暂停状态可见：控制成功后同步本地 paused 态（按钮互斥 + Tag）
         if (action === "pause") { setTaskPaused(true); msg.success("已暂停"); }
-        else if (action === "resume") { setTaskPaused(false); msg.success("已恢复"); }
-        else { setTaskPaused(false); msg.success("已停止"); }
+        else if (action === "resume") { setTaskPaused(false); setTaskStopping(false); msg.success("已恢复"); }
+        else {
+          // ✅ R106 FIX-4：停止是协作式的，指令 accepted ≠ 已停止 —— 这里只确认
+          //    「指令已送达」，真正的「已停止」由 SSE stopped 事件 / 轮询终态提示，
+          //    旧实现在此处直接 msg.success("已停止") 是假回执。
+          setTaskPaused(false);
+          if (data.orphaned) {
+            // 后端僵尸兜底：内存已无运行实例（多为外部进程残留），已直接落终态
+            setTaskStopping(false);
+            controllingRef.current = false;
+            msg.info(data.message || "任务已无运行实例，已标记为已停止");
+          } else {
+            msg.info("停止指令已发送，任务将在当前步骤边界退出");
+          }
+        }
+      } else {
+        // ✅ R106 FIX-4：失败不再静默（旧实现 data.ok=false 时什么都不提示，
+        //    按钮却已复位，用户以为停止成功）
+        setTaskStopping(false);
+        controllingRef.current = false;
+        msg.error(data.message || "控制指令未被接受，任务可能已结束");
       }
     } catch (e: any) {
+      setTaskStopping(false);
+      controllingRef.current = false;
       msg.error(e.message || "控制失败");
+    } finally {
+      // stop 的成功路径由 generating 复位 effect 释放锁（终态才算结束）；
+      // 失败/orphaned 路径已在各自分支内立即释放。
+      if (action !== "stop") controllingRef.current = false;
     }
   };
 
+  // ===== ✅ R106 FIX-5：审核与预检 AI 调用的取消入口 =====
+  // 这些端点是同步 await REST（不注册 task_registry）：客户端 abort 后，服务端在
+  // 下一个 await 边界收到 CancelledError 即中断在飞 AI 调用（Starlette 断连取消），
+  // 无后台残留 —— 所以前端的「取消」对它们就是真停止，不需要轮询终态。
+  const checkAbortRef = useRef<AbortController | null>(null);
+  const auditAbortRef = useRef<AbortController | null>(null);
+  const expertAbortRef = useRef<AbortController | null>(null);
+  const [expertRunning, setExpertRunning] = useState(false);
+
   const handleExpertReview = async () => {
-    if (!id) return;
+    if (!id || expertRunning) return;
+    expertAbortRef.current?.abort();
+    const controller = new AbortController();
+    expertAbortRef.current = controller;
+    setExpertRunning(true);
     try {
-      const { data } = await complianceApi.expertReview({ scheme_id: id });
+      const { data } = await complianceApi.expertReview({ scheme_id: id }, controller.signal);
+      if (controller.signal.aborted) return;
       setExpertResult(data);
       msg.success("预检完成");
     } catch (e: any) {
-      msg.error(e.message || "预检失败");
+      if (e?.name === "AbortError" || e?.code === "ERR_CANCELED") msg.info("已取消预检");
+      else msg.error(e.message || "预检失败");
+    } finally {
+      if (expertAbortRef.current === controller) {
+        expertAbortRef.current = null;
+        setExpertRunning(false);
+      }
     }
+  };
+
+  /** ✅ R106 FIX-5：取消专家论证预检 */
+  const handleCancelExpertReview = () => {
+    expertAbortRef.current?.abort();
   };
 
   /** ✅ 接线 exportApi.cacheStatus：查询仍有效的导出缓存（后端已过滤僵尸行） */
@@ -8428,6 +8620,10 @@ const draftKey = selectedSection && id
       msg.warning("请至少输入一条检查项");
       return;
     }
+    // ✅ R106 FIX-5：接 AbortController，运行中可取消（旧实现只能等 AI 跑完）
+    checkAbortRef.current?.abort();
+    const controller = new AbortController();
+    checkAbortRef.current = controller;
     setCheckingCompliance(true);
     try {
       // ✅ 清单未被手工改动时携带 rule_ids 提交 —— 让落库的 rule_id 指向规则注册表，
@@ -8437,7 +8633,8 @@ const draftKey = selectedSection && id
       const payload = useRules
         ? { scheme_id: id, rule_ids: aiRules.map((r) => r.rule_id) }
         : { scheme_id: id, checklist };
-      const { data } = await complianceApi.check(payload);
+      const { data } = await complianceApi.check(payload, controller.signal);
+      if (controller.signal.aborted) return;
       const results = data.results || [];
       setComplianceResults(results);
       const miss = results.filter((r: any) => r.hit === false).length;
@@ -8446,10 +8643,17 @@ const draftKey = selectedSection && id
       // 结果已落库，刷新历史记录
       loadComplianceHistory();
     } catch (e: any) {
-      msg.error(e.message || "合规检查失败（请确认已配置可用的 AI 供应商）");
+      if (e?.name === "AbortError" || e?.code === "ERR_CANCELED") msg.info("已取消合规检查");
+      else msg.error(e.message || "合规检查失败（请确认已配置可用的 AI 供应商）");
     } finally {
+      if (checkAbortRef.current === controller) checkAbortRef.current = null;
       setCheckingCompliance(false);
     }
+  };
+
+  /** ✅ R106 FIX-5：取消合规检查（abort → 服务端断连即在下一 await 边界取消 AI 调用） */
+  const handleCancelComplianceCheck = () => {
+    checkAbortRef.current?.abort();
   };
 
   // ===== ✅ 全文一致性审计（§3.12.1）：事实 vs 正文比对，0-100 评分 + 不一致项 =====
@@ -8457,19 +8661,31 @@ const draftKey = selectedSection && id
   const [consistencyResult, setConsistencyResult] = useState<{ score: number; issues: any[]; created_at?: string } | null>(null);
 
   const handleConsistencyAudit = async () => {
-    if (!id) return;
+    if (!id || auditRunning) return;
+    // ✅ R106 FIX-5：审计是最长的同步 AI 调用（长方案 1-3 分钟），此前无任何取消入口
+    auditAbortRef.current?.abort();
+    const controller = new AbortController();
+    auditAbortRef.current = controller;
     setAuditRunning(true);
     setConsistencyResult(null);
     try {
-      const { data } = await complianceApi.consistencyAudit(id);
+      const { data } = await complianceApi.consistencyAudit(id, controller.signal);
+      if (controller.signal.aborted) return;
       setConsistencyResult({ score: data.score, issues: data.issues || [] });
       const high = (data.issues || []).filter((i: any) => i.severity === "high").length;
       msg.success(`一致性审计完成：评分 ${data.score}，不一致项 ${data.issues?.length || 0}（高危 ${high}）`);
     } catch (e: any) {
-      msg.error(e.message || "一致性审计失败");
+      if (e?.name === "AbortError" || e?.code === "ERR_CANCELED") msg.info("已取消一致性审计");
+      else msg.error(e.message || "一致性审计失败");
     } finally {
+      if (auditAbortRef.current === controller) auditAbortRef.current = null;
       setAuditRunning(false);
     }
+  };
+
+  /** ✅ R106 FIX-5：取消一致性审计 */
+  const handleCancelConsistencyAudit = () => {
+    auditAbortRef.current?.abort();
   };
 
   const loadConsistencyLatest = async () => {
@@ -8806,11 +9022,17 @@ exportPctRef.current = pct;
    * 用户盯着「正在生成文档...」无法主动退出。`exportAbortRef` 里的
    * AbortController 本就存在，这里只补一个入口：abort → 前端 catch 识别
    * AbortError/ERR_CANCELED → 不弹错误提示 → finally 释放同步锁。
-   * 注：后端已封装好的临时文件与缓存行不会因此留下冗余（取消后下次导出走全链路）。
+   * ✅ R106 FIX-3：此前「取消导出」只 abort 前端 fetch —— 后端的
+   * `asyncio.to_thread(_build_docx_sync)` 线程不可取消，会继续跑完（AI 配图 /
+   * 图表兜底渲染白烧）。现先 POST /export/cancel 置位取消事件，构建线程与渲染段
+   * 在下一段边界协作式退出（不落地产物、不写缓存），再 abort 前端 fetch。
+   * cancel 为 fire-and-forget：后端不可达时降级为纯 abort（与原行为一致）。
    */
   const handleCancelExport = () => {
     if (!exportingRef.current) return;
+    if (id) exportApi.cancel(id).catch(() => {});
     exportAbortRef.current?.abort();
+    msg.info("已发送停止指令，服务端将在当前步骤边界退出");
   };
 
   const handleExportCheck = async () => {
@@ -9325,6 +9547,7 @@ exportPctRef.current = pct;
                       onRetryDefs={loadBaMeta}
                       onStart={baOpenConfig}
                       onStop={handleStopBa}
+                      stopping={baStopping}
                       onOpenConfig={baOpenConfig}
                       onCheckSections={handleCheckSections}
                       onRefresh={baRefreshAll}
@@ -9493,6 +9716,14 @@ exportPctRef.current = pct;
             >
               🗑️ 清除所有目录
             </Button>
+            {/* ✅ R106 FIX-2：目录生成 Tab 补停止入口（此前只能靠全局任务抽屉停止）*/}
+            {generating && genType === "outline" && (
+              <TaskControlButtons
+                paused={taskPaused}
+                stopping={taskStopping}
+                onControl={handleControl}
+              />
+            )}
             <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
               💡 双击章节标题可改名；行内 ↑/↓ 或拖拽可调整顺序；选中后可一键上移/下移/删除
             </Text>
@@ -9833,6 +10064,13 @@ exportPctRef.current = pct;
               progress={progress}
               progressMsg={progressMsg}
               logs={factsLogs}
+              controls={
+                <TaskControlButtons
+                  paused={taskPaused}
+                  stopping={taskStopping}
+                  onControl={handleControl}
+                />
+              }
             />
           )}
 
@@ -10159,6 +10397,7 @@ exportPctRef.current = pct;
           generating={generating}
           running={generating && genType === "content"}
           taskPaused={taskPaused}
+          taskStopping={taskStopping}
           shrinking={shrinking}
           hasTree={tree.length > 0}
           hasSelectedSection={!!selectedSection}
@@ -10283,6 +10522,12 @@ exportPctRef.current = pct;
               >
                 开始合规检查
               </Button>
+              {/* ✅ R106 FIX-5：运行中给出取消入口 */}
+              {checkingCompliance && (
+                <Button danger icon={<StopOutlined />} onClick={handleCancelComplianceCheck}>
+                  取消检查
+                </Button>
+              )}
               <Button
                 onClick={() => {
                   setChecklistText(
@@ -10401,6 +10646,17 @@ exportPctRef.current = pct;
                 >
                   开始审计
                 </Button>
+                {/* ✅ R106 FIX-5：运行中给出取消入口 */}
+                {auditRunning && (
+                  <Button
+                    size="small"
+                    danger
+                    icon={<StopOutlined />}
+                    onClick={handleCancelConsistencyAudit}
+                  >
+                    取消
+                  </Button>
+                )}
               </Space>
             }
             style={{ marginBottom: 12 }}
@@ -10460,9 +10716,27 @@ exportPctRef.current = pct;
               </Space>
             }
             extra={
-              <Button icon={<AuditOutlined />} onClick={handleExpertReview}>
-                开始预检
-              </Button>
+              <Space>
+                <Button
+                  icon={<AuditOutlined />}
+                  loading={expertRunning}
+                  disabled={expertRunning}
+                  onClick={handleExpertReview}
+                >
+                  开始预检
+                </Button>
+                {/* ✅ R106 FIX-5：运行中给出取消入口 */}
+                {expertRunning && (
+                  <Button
+                    size="small"
+                    danger
+                    icon={<StopOutlined />}
+                    onClick={handleCancelExpertReview}
+                  >
+                    取消
+                  </Button>
+                )}
+              </Space>
             }
             style={{ marginBottom: 12 }}
           >

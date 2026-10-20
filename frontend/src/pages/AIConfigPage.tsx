@@ -9,7 +9,7 @@ import {
   SafetyCertificateOutlined, FireOutlined, GlobalOutlined,
   ArrowUpOutlined, ArrowDownOutlined, SortAscendingOutlined,
   ExportOutlined, ImportOutlined, ReloadOutlined, ClearOutlined,
-  WarningOutlined, KeyOutlined, HistoryOutlined, NodeIndexOutlined,
+  WarningOutlined, KeyOutlined, EyeOutlined, HistoryOutlined, NodeIndexOutlined,
   HeartOutlined,
 } from "@ant-design/icons";
 
@@ -21,7 +21,7 @@ import { useAiConfigGovernance } from "../hooks/useAiConfigGovernance";
 // ✅ D7（2026-09-23）：页面直接引用后端契约类型（见 types/aiConfig.ts）
 import type {
   AIAuditLogItem, AIConfigAuditChange, AIConfigAuditItem, AIConfigItem,
-  AIConfigsHealthResponse,
+  AIConfigsHealthResponse, AIKeyRotationRequest, AIKeyRotationResponse,
   AIConfigPrecheckResponse, AIConfigPresetRaw, AIDynamicModel, AIHealth,
   AINetworkProbe, AIProviderPlan, AIProviderPreset, AIRuntimeResponse,
   AISceneRouteItem, AIUsageStats,
@@ -566,7 +566,39 @@ export default function AIConfigPage() {
     }
   };
 
-  // ✅ 2026-10-06（G3）：全部配置的可用性体检 —— 一眼看出哪些配置在当前环境下真能用。
+  // ✅ 2026-10-17（R89）：主密钥体检 —— 只读展示「当前生效密钥来源 + 存量密文健康度」，
+  // 零写入、零密钥改动。主要用于排障（「是否该轮换密钥 / 有多少条密文已损坏」）。
+  const [keyRotationLoading, setKeyRotationLoading] = useState(false);
+  const [keyRotationResult, setKeyRotationResult] = useState<AIKeyRotationResponse | null>(null);
+  const [keyRotationReencryptLoading, setKeyRotationReencryptLoading] = useState(false);
+  const handleKeyRotationInspect = async () => {
+    setKeyRotationLoading(true);
+    try {
+      const { data } = await aiApi.inspectKeyRotation();
+      setKeyRotationResult(data);
+      if (data.advice) msg.info(data.advice, 8);
+    } catch (e: any) {
+      msg.error(e.message || "主密钥体检失败");
+    } finally {
+      setKeyRotationLoading(false);
+    }
+  };
+  const handleKeyRotationReencrypt = async () => {
+    setKeyRotationReencryptLoading(true);
+    try {
+      const { data } = await aiApi.rotateKey({ mode: "reencrypt" });
+      if (!data.ok) { msg.error(data.error || "重加密失败"); return; }
+      setKeyRotationResult(data);
+      const ok = data.migrated ?? 0;
+      const failed = data.failed ?? 0;
+      if (failed) msg.warning(`重加密完成：恢复 ${ok} 条，${failed} 条失败（需重新填写 Key）`, 10);
+      else msg.success(`已重加密 ${ok} 条密文（均保持原样无需修改）`);
+    } catch (e: any) {
+      msg.error(e.message || "重加密失败");
+    } finally {
+      setKeyRotationReencryptLoading(false);
+    }
+  };
   // 单条「测试连接」只查网络；体检额外查 Key 是否填/可解密、缺地址、环境归属、厂商开关，
   // 对应后端 GET /ai/configs/health（一次拿到全部配置，不需要逐条点测试）。
   const [configsHealthLoading, setConfigsHealthLoading] = useState(false);
@@ -584,6 +616,12 @@ export default function AIConfigPage() {
       if (s.out_of_env > 0) issues.push(`${s.out_of_env} 条属于其它环境`);
       if (s.disabled > 0) issues.push(`${s.disabled} 条厂商被禁用`);
       if (s.network_unreachable > 0) issues.push(`${s.network_unreachable} 条网络不可达`);
+      // ✅ R103（2026-10-18 · 日志审计遗留 L1 收口）：实时成功率过低的配置
+      //    已被自动剔除出降级链——「配了却不用它」的最后一块可见性。
+      //    样本不足（冷启动）时 runtime_dead 为 0，不误报。
+      if ((s.runtime_dead || 0) > 0) {
+        issues.push(`${s.runtime_dead} 条实时成功率过低（已自动剔除，建议清理或禁用）`);
+      }
       if (issues.length) {
         msg.warning(`体检完成：${s.usable}/${s.total} 条可用；${issues.join("、")}`, 6);
       } else {
@@ -1587,6 +1625,18 @@ export default function AIConfigPage() {
                         disabled={!configs.length}
                       >
                         全部配置体检
+                      </Button>
+                    </Tooltip>
+                    {/* ✅ 2026-10-17（R89）：主密钥体检 —— 零写入只读，展示「密钥来源 + 存量密文健康度」，
+                        broken 非空时给出恢复指引（可一键重加密或切换 FERNET_KEY）。 */}
+                    <Tooltip title="体检主密钥来源（env / 持久化文件 / 临时）与全部存量密文健康度（解密/不可解密），零写入零密钥改动">
+                      <Button icon={<EyeOutlined />} loading={keyRotationLoading} onClick={handleKeyRotationInspect}>
+                        主密钥体检
+                      </Button>
+                    </Tooltip>
+                    <Tooltip title="对「已保存但无法解密」的存量密文执行一次重加密（仅使用当前生效密钥）；健康密文不动，失败密文原样保留不被清空">
+                      <Button icon={<SafetyCertificateOutlined />} loading={keyRotationReencryptLoading} onClick={handleKeyRotationReencrypt} disabled={keyRotationLoading}>
+                        重加密存量密文
                       </Button>
                     </Tooltip>
                     {/* ✅ 新增：配置备份 / 迁移（导出不含 API Key） */}
@@ -2638,6 +2688,10 @@ export default function AIConfigPage() {
               <Tag color={configsHealthResult.summary.network_unreachable ? "red" : "default"}>
                 网络不可达 {configsHealthResult.summary.network_unreachable}
               </Tag>
+              {/* ✅ R103：实时成功率过低（已被自动剔除出降级链）条数 */}
+              <Tag color={configsHealthResult.summary.runtime_dead ? "volcano" : "default"}>
+                成功率过低 {configsHealthResult.summary.runtime_dead || 0}
+              </Tag>
             </Space>
             <Text type="secondary" style={{ fontSize: 12 }}>
               当前生效环境：<Text strong>{configsHealthResult.active_env || "通用（不过滤）"}</Text>
@@ -2704,6 +2758,68 @@ export default function AIConfigPage() {
                   render: (v: boolean) => (v ? <Tag color="red">已禁用</Tag> : <Tag>启用</Tag>),
                 },
                 {
+                  // ✅ R103（2026-10-18 · 日志审计遗留 L1 收口）：运行时健康列。
+                  //    判据与后端选路同源（provider_health_snapshot），这里只做展示：
+                  //    dead=实时成功率过低已被剔除 / circuit_open=熔断中 /
+                  //    cooldown=冷却剩余秒数 / 样本不足=尚未参与判定（不误报）。
+                  title: "运行时健康",
+                  dataIndex: "runtime_health",
+                  width: 150,
+                  render: (_: any, r: any) => {
+                    const h = r.runtime_health;
+                    if (!h) {
+                      return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                    }
+                    if (h.dead) {
+                      return (
+                        <Tooltip
+                          title={`近 24h ${h.samples} 次样本、成功率 ${Math.round(
+                            (h.success_rate || 0) * 100,
+                          )}%，已自动剔除出降级链。建议清理该配置，或在「运行时厂商开关」禁用该厂商。`}
+                        >
+                          <Tag color="volcano">成功率过低</Tag>
+                        </Tooltip>
+                      );
+                    }
+                    if (h.circuit_open) {
+                      return (
+                        <Tooltip
+                          title={`熔断冷却中（剩余约 ${Math.ceil(
+                            h.cooldown_remaining_s || 0,
+                          )}s），期间跳过调用；冷却结束自动放行探测`}
+                        >
+                          <Tag color="orange">熔断中</Tag>
+                        </Tooltip>
+                      );
+                    }
+                    if ((h.quota_cooldown_s || 0) > 0) {
+                      return (
+                        <Tooltip
+                          title={`配额/限流冷却中（剩余约 ${Math.ceil(
+                            h.quota_cooldown_s,
+                          )}s），期间按节流放行探测`}
+                        >
+                          <Tag>冷却中</Tag>
+                        </Tooltip>
+                      );
+                    }
+                    if (!h.samples) {
+                      return (
+                        <Text type="secondary" style={{ fontSize: 11 }}>暂无样本</Text>
+                      );
+                    }
+                    return (
+                      <Tooltip
+                        title={`近 24h ${h.samples} 次样本、成功率 ${Math.round(
+                          (h.success_rate || 0) * 100,
+                        )}%`}
+                      >
+                        <Tag color="green">正常</Tag>
+                      </Tooltip>
+                    );
+                  },
+                },
+                {
                   title: "网络",
                   dataIndex: "network_ok",
                   width: 150,
@@ -2727,6 +2843,79 @@ export default function AIConfigPage() {
                 },
               ]}
             />
+          </Space>
+        )}
+      </Modal>
+      {/* ✅ 2026-10-17（R89）：主密钥体检结果。只读展示「当前生效密钥来源 + 存量密文健康度」；
+          broken 非空时给出恢复指引（重加密 / 切换 FERNET_KEY / 重新填写 Key）。
+          响应体从不含有效密钥材料（effective_key / api_key），由后端安全约定保证。 */}
+      <Modal
+        title="主密钥体检"
+        open={!!keyRotationResult}
+        onCancel={() => setKeyRotationResult(null)}
+        footer={[
+          <Button key="close" type="primary" onClick={() => setKeyRotationResult(null)}>
+            关闭
+          </Button>,
+          // 仅 inspect 视图显示「重加密」按钮（避免把失败态的结果再次触发）；
+          // rotate 路径由运维人员线下操作，本 UI 不暴露（降低误点风险）。
+          ...(keyRotationResult?.mode === "inspect" && keyRotationResult.health?.broken_count
+            ? [<Button key="reencrypt" type="primary" danger loading={keyRotationReencryptLoading}
+              onClick={() => { handleKeyRotationReencrypt(); setKeyRotationResult(null); }}>
+              一键重加密坏密文
+            </Button>]
+            : []),
+        ]}
+        width={780}
+      >
+        {keyRotationResult && (
+          <Space direction="vertical" size="small" style={{ width: "100%" }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              主密钥来源：<Text strong>{keyRotationResult.master_key_source === "env" ? "FERNET_KEY 环境变量"
+                : keyRotationResult.master_key_source === "persisted_file" ? "data/secret_key.key 持久化文件"
+                : "进程级临时密钥（重启后失效）"}</Text>
+              {keyRotationResult.key_file_exists === false ? "（文件不存在）" : ""}
+            </Text>
+            {keyRotationResult.health && (
+              <Space wrap size="small">
+                <Tag color="blue">共 {keyRotationResult.health.total} 条配置</Tag>
+                <Tag color="blue">含密文 {keyRotationResult.health.with_ciphertext} 条</Tag>
+                <Tag color="green">可解密 {keyRotationResult.health.decryptable} 条</Tag>
+                <Tag color={keyRotationResult.health.broken_count ? "red" : "default"}>
+                  解密失败 {keyRotationResult.health.broken_count} 条
+                </Tag>
+              </Space>
+            )}
+            {(keyRotationResult as any).migrated != null && (
+              <Text>
+                {`重加密完成：迁移 ${(keyRotationResult as any).migrated} 条、`
+                + `保持原样 ${(keyRotationResult as any).unchanged} 条、`
+                + `失败 ${(keyRotationResult as any).failed} 条`}
+                {(keyRotationResult as any).warning ? `；${(keyRotationResult as any).warning}` : ""}
+              </Text>
+            )}
+            {(keyRotationResult as any).error && (
+              <Text type="danger">{`失败：${(keyRotationResult as any).error}`}</Text>
+            )}
+            {keyRotationResult.advice
+              ? <Alert message="建议" description={keyRotationResult.advice} type="info" showIcon />
+              : null}
+            {(keyRotationResult as any).broken_configs?.length
+              ? <>
+                  <Text strong>无法解密的配置（{keyRotationResult.health?.broken_count} 条）</Text>
+                  <Table
+                    size="small"
+                    pagination={false}
+                    dataSource={keyRotationResult.broken_configs || []}
+                    rowKey="id"
+                    columns={[
+                      { title: "配置 ID", dataIndex: "id", width: 140 },
+                      { title: "供应商", dataIndex: "provider_name" },
+                      { title: "模型", dataIndex: "model" },
+                    ]}
+                  />
+                </>
+              : null}
           </Space>
         )}
       </Modal>

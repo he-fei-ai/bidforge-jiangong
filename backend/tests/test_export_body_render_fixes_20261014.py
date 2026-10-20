@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import re
 import time
@@ -424,7 +425,7 @@ class TestPersistExportCacheRowBehavior:
 
     @pytest.mark.asyncio
     async def test_new_row_survives_prune_failure(self, db_conn, tmp_path,
-                                                  monkeypatch):
+                                                  monkeypatch, caplog):
         """双提交语义：prune 抛异常时，新缓存行已在第一次 commit 落盘。
 
         旧 DOCX「INSERT → prune → 单次 commit」口径下本用例必然失败 ——
@@ -437,12 +438,19 @@ class TestPersistExportCacheRowBehavior:
             raise RuntimeError("prune boom")
 
         monkeypatch.setattr(E, "_prune_export_cache", _boom)
-        with pytest.raises(RuntimeError, match="prune boom"):
-            await E._persist_export_cache_row(**kw)
+        # ✅ R108（2026-10-18 · 日志审计 P0-3）重锚：裁剪段重试耗尽由
+        #    「RuntimeError 直穿调用方（500）」刻意改为 fail-soft——
+        #    rollback + WARNING，不阻断已生成交付物。本用例核心意图
+        #    （双提交契约：prune 失败时新缓存行已在第一次 commit 落盘）
+        #    不变，且被强化：调用方不再收到异常，新行仍然存活。
+        with caplog.at_level(logging.WARNING):
+            await E._persist_export_cache_row(**kw)  # 不应抛
         cur = await db_conn.execute(
             "SELECT COUNT(*) FROM export_cache WHERE scheme_id='s1'")
         assert (await cur.fetchone())[0] == 1, (
             "prune 失败把已写入的新缓存行一并回滚（双提交契约被破坏）")
+        assert any("裁剪失败" in r.getMessage() for r in caplog.records), \
+            "裁剪段 fail-soft 必须留 WARNING（静默丢失零容忍）"
 
     @pytest.mark.asyncio
     async def test_prune_keeps_at_most_five(self, db_conn, tmp_path, monkeypatch):

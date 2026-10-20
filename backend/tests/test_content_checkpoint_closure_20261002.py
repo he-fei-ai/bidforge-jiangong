@@ -630,8 +630,13 @@ class TestWiring:
         assert "infer_chapter_key(" in call
 
     def test_primary_key_not_used_for_facts_after_change(self):
-        """事实注入仍走 chapter_key_of_title（补充推断不得改变既有分类结果）。"""
-        call = self._call_window(_sse_source(), "facts_text = _render_facts_text")
+        """事实注入仍走 chapter_key_of_title（补充推断不得改变既有分类结果）。
+
+        ✅ R105（2026-10-18）重锚：正文渲染调用点由 _render_facts_text 改走
+        fact_injection_audit 单一出口（内部同判据），本章侧锚点随之更新，
+        意图不变。
+        """
+        call = self._call_window(_sse_source(), "_chapter_audit = fact_injection_audit")
         assert "chapter_key_of_title(" in call
         assert "infer_chapter_key" not in call
 

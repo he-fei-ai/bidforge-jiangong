@@ -144,6 +144,28 @@ async def save_config(data: AIConfigIn, request: Request = None, db=Depends(get_
         cid = await save_ai_config(data.model_dump())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # ✅ R111（P2-1 · 保存去重提示）：新增配置前，按「供应商+模型+Base URL」
+    #    三元组（密钥除外）回查库内既有**其它**配置 —— 用户批量添加同一
+    #    provider/model 的多个副本（生产实证 5 条 nvidia 死配置）时，逐条
+    #    如实提示「已有 N 条相同配置」，让用户知情并自行合并。
+    #    ⚠️ 只做加法式提示（`duplicate_hint` 键），**不阻断保存**：
+    #    同一三元组配不同密钥/不同环境是合法场景（多 Key 轮询 / 多环境），
+    #    替用户自动去重反而会删错。更新路径（data.id 有值）不提示。
+    duplicate_hint = ""
+    if not data.id:
+        dup_cur = await db.execute(
+            "SELECT id FROM ai_config WHERE provider_name=? AND model=? AND "
+            "COALESCE(base_url,'')=COALESCE(?, '') AND id != ?",
+            (data.provider_name, data.model,
+             resolve_config_base_url(data.provider_name, normalize_plan(data.plan),
+                                     data.base_url or ""), cid))
+        dup_ids = [r[0] for r in await dup_cur.fetchall()]
+        if dup_ids:
+            duplicate_hint = (
+                f"已存在 {len(dup_ids)} 条相同「{data.provider_name} / "
+                f"{data.model}」配置（Base URL 一致，密钥除外）。批量添加多条同型"
+                "配置会让降级链反复命中失败的同型候选；如非有意（多密钥/多环境），"
+                "建议删除冗余条目。")
     after_row = None
     cur1 = await db.execute("SELECT * FROM ai_config WHERE id=?", (cid,))
     r1 = await cur1.fetchone()
@@ -160,7 +182,8 @@ async def save_config(data: AIConfigIn, request: Request = None, db=Depends(get_
         request=request,
         snapshot={"before": sanitize_config_snapshot(prev),
                   "after": sanitize_config_snapshot(after_row)})
-    return {"id": cid, "ok": True, "warning": warning, "warnings": warnings}
+    return {"id": cid, "ok": True, "warning": warning, "warnings": warnings,
+            "duplicate_hint": duplicate_hint}
 
 
 @router.delete("/config/{config_id}")

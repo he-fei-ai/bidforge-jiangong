@@ -44,6 +44,7 @@ def build_chapter_user_content(
     facts_text: str,
     eff_standard: str,
     knowledge_text: str,
+    prev_leaf_summary: str = "",
 ) -> str:
     """构造章节生成的首轮 user 上下文（纯字符串拼接，无 IO / 无 AI）。
 
@@ -65,6 +66,10 @@ def build_chapter_user_content(
         facts_text: 本章相关全局事实文本（可为空）。
         eff_standard: 生效生成标准（precise / fuzzy；驱动事实引导语与标准块）。
         knowledge_text: 本章知识库素材文本（可为空）。
+        prev_leaf_summary: ✅ R102（G5）前一章（文档序上一叶子）正文结尾参考
+            （可为空）。与 ``prev_sibling_summary`` 互补：同级摘要只覆盖同父
+            兄弟（父下第一个叶子恒为空），本参数补上「文档直接前文」链路。
+            缺省空串 → 输出与本参数引入前**逐字一致**。
 
     Returns:
         首轮 user 上下文（多段「【标签】：」结构的完整文本）。
@@ -94,6 +99,12 @@ def build_chapter_user_content(
     if prev_sibling_summary:
         user_content += (
             f"【前序同级章节结尾参考（衔接风格，勿重复）】：{prev_sibling_summary}\n")
+    # ✅ R102（G5）：文档序「前一章」结尾承接 —— 同级摘要的恒空链路补齐。
+    #    逐章变化量 → 与同级摘要同处（都在逐章差异区），不破坏任何前缀语义。
+    if prev_leaf_summary:
+        user_content += (
+            "【前一章正文结尾（文档直接前文，衔接勿重复）】：\n"
+            f"{prev_leaf_summary}\n")
     if facts_text:
         # 分段标签：必须 `【标签】：` 形式（G5 预算分配器切段依据）。
         user_content += (
@@ -182,6 +193,7 @@ def build_chapter_layered_messages(
     chapter_extras: str = "",
     chart_quota_hint: str = "",
     chapter_facts_text: str = "",
+    prev_leaf_summary: str = "",
 ) -> tuple[list[dict], str]:
     """「前缀稳定化」版章节 messages：同一方案各章节共享最长公共前缀。
 
@@ -212,6 +224,9 @@ def build_chapter_layered_messages(
         chapter_facts_text: ✅ R58「本章专属事实」文本（已排除整案核心事实）。
             与 chart_quota_hint 同属逐章变化量 → 追加到任务差异段。
             ``facts_text`` 则应是**整案核心**事实（逐章相同），才配得上「稳定」二字。
+        prev_leaf_summary: ✅ R102（G5）前一章（文档序上一叶子）正文结尾参考。
+            逐章变化量 → 追加到任务差异段（紧随前序同级摘要之后），缺省空串
+            → 输出与本参数引入前**逐字一致**。
         其余参数与 :func:`build_chapter_user_content` 同义同名，便于一一对照。
 
     Returns:
@@ -261,6 +276,12 @@ def build_chapter_layered_messages(
     if prev_sibling_summary:
         task += (
             f"【前序同级章节结尾参考（衔接风格，勿重复）】：{prev_sibling_summary}\n")
+    # ✅ R102（G5）：文档序「前一章」结尾承接 —— 任务差异段（逐章变化量），
+    #    不进稳定段，R57 前缀稳定语义不受影响；缺省空串时整段不存在。
+    if prev_leaf_summary:
+        task += ("【前一章正文结尾（文档直接前文，衔接勿重复）】：\n"
+                 + (prev_leaf_summary if prev_leaf_summary.endswith("\n")
+                    else prev_leaf_summary + "\n"))
     if chapter_extras:
         task += chapter_extras if chapter_extras.endswith("\n") else chapter_extras + "\n"
     if chapter_facts_text:

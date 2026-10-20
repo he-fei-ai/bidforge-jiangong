@@ -16,6 +16,7 @@ import type {
   AISceneRouteUpdateResponse, AISceneRoutesResponse,
   AISetDisabledProvidersResponse, AISetEnvResponse,
   AIUsageStats,
+  AIKeyRotationRequest, AIKeyRotationResponse,
 } from "../types/aiConfig";
 import type {
   PromptAuditLogsResponse, PromptListResponse, PromptMutationResponse,
@@ -658,8 +659,13 @@ export const bidAnalysisApi = {
 // 合规检查（AI 逐条判定 10+ 项清单，耗时较长，120s 超时）
 export const complianceApi = {
   expertItems: () => api.get("/compliance/expert-review/items"),
-  check: (data: any) => api.post("/compliance/check", data, { timeout: 120000 }),
-  expertReview: (data: any) => api.post("/compliance/expert-review", data, { timeout: 120000 }),
+  // ✅ R106 FIX-5：审核/预检三个 AI 端点透传 AbortSignal —— 这些是同步 await REST
+  //    （不注册 task_registry），客户端 abort 后服务端在下一个 await 边界收到
+  //    CancelledError 即中断在飞 AI 调用（Starlette 断连取消），无后台残留。
+  check: (data: any, signal?: AbortSignal) =>
+    api.post("/compliance/check", data, { timeout: 120000, signal }),
+  expertReview: (data: any, signal?: AbortSignal) =>
+    api.post("/compliance/expert-review", data, { timeout: 120000, signal }),
   // ✅ G7（2026-09-21）：透传 limit / check_type —— 此前 limit 完全不传，
   // 后端 /compliance/results 每次都回全量历史（大方案动辄数百条），
   // 列表渲染与内存都被拖慢；现在调用方可显式限定条数。
@@ -671,8 +677,8 @@ export const complianceApi = {
       },
     }),
   /** 全文一致性审计（事实 vs 正文比对，AI 耗时较长） */
-  consistencyAudit: (schemeId: string) =>
-    api.post(`/compliance/consistency-audit/${schemeId}`, null, { timeout: 300000 }),
+  consistencyAudit: (schemeId: string, signal?: AbortSignal) =>
+    api.post(`/compliance/consistency-audit/${schemeId}`, null, { timeout: 300000, signal }),
   consistencyLatest: (schemeId: string) =>
     api.get(`/compliance/consistency-audit/${schemeId}/latest`),
   // 一致性审计历史趋势端点（/history）的前端消费已下线（2026-10-03 孤儿 API
@@ -848,6 +854,11 @@ export const exportApi = {
     ),
   cacheStatus: (schemeId: string, signal?: AbortSignal) =>
     api.get(`/schemes/${schemeId}/export/cache-status`, { signal }),
+  // ✅ R106 FIX-3：取消导出接后端真停止（置位取消事件，构建线程/渲染段在
+  //    下一段边界协作式退出，不落地产物、不写缓存）。幂等：无在飞导出也返回
+  //    {ok:true, in_progress:false}，前端可安全地「先 cancel 再 abort」。
+  cancel: (schemeId: string) =>
+    api.post(`/schemes/${schemeId}/export/cancel`, null, { timeout: 10000 }),
   // ✅ 导出格式预设库（对标 OpenBidKit exportFormatPresets）：同项目排版格式一键复用
   presets: {
     list: (schemeId: string, signal?: AbortSignal) =>
@@ -977,6 +988,17 @@ export const aiApi = {
   /** ✅ 运行时开关：整体覆盖被禁用厂商（空数组 = 全部恢复），即时生效无需重启 */
   setDisabledProviders: (providers: string[]) =>
     api.put<AISetDisabledProvidersResponse>("/ai/runtime/disabled-providers", { providers }),
+  /** ✅ 2026-10-17（R89）：主密钥体检（只读，mode=inspect；零密钥改动，零审计写入）。
+   * 用于「谁在什么时候需要轮换密钥 / 有多少条已保存的 API Key 无法解密」的一次性排查。
+   */
+  inspectKeyRotation: () =>
+    api.post<AIKeyRotationResponse>("/ai/key-rotation", { mode: "inspect" }),
+  /**
+   * ✅ 2026-10-17（R89）：重加密或轮转主密钥并迁移存量密文。
+   * 回滚 / 失败时旧密文原样保留，绝不把可用密文覆盖成空串/坏值。
+   */
+  rotateKey: (body: AIKeyRotationRequest) =>
+    api.post<AIKeyRotationResponse>("/ai/key-rotation", body),
 };
 
 // 提示词
@@ -1005,8 +1027,24 @@ export const promptsApi = {
 
 // 任务
 export const tasksApi = {
-  control: (taskId: string, action: string) =>
-    api.post(`/sse/task/${taskId}/control`, { action }),
+  /**
+   * ✅ R108（2026-10-18 · 日志审计 P0-2）：控制指令落库撞 SQLite 写锁、后端
+   * 重试预算耗尽时返回 **503 + Retry-After**（语义=指令未持久化、稍后必成），
+   * 而非裸 500。此处单一出口自动重试一次（等待 2s，与 Retry-After 对齐），
+   * 覆盖生产实证的「批量生成并发窗口点停止 → 500 → 指令静默丢失」形态；
+   * 其余错误不重试（真故障不粉饰），仍由各调用方按既有语义提示。
+   */
+  control: async (taskId: string, action: string) => {
+    try {
+      return await api.post(`/sse/task/${taskId}/control`, { action });
+    } catch (e) {
+      if (axios.isAxiosError(e) && e.response?.status === 503) {
+        await new Promise((r) => setTimeout(r, 2000));
+        return await api.post(`/sse/task/${taskId}/control`, { action });
+      }
+      throw e;
+    }
+  },
   /** 查询单个任务状态（SSE 断线后重新挂接） */
   status: (taskId: string) => api.get(`/sse/task/${taskId}`),
   /** 列出最近任务（可按方案过滤），刷新页面后据此检测进行中任务 */

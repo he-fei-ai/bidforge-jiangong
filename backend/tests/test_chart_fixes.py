@@ -419,7 +419,7 @@ def _count_color_in_node(img, node: dict, color: tuple, scale: float = 2.5,
 def test_architecture_root_node_gets_root_style():
     """回归：布局为后序遍历（子节点先 append），nodes_pos[0] 是最左侧叶子而非根，
     旧实现据此判定根节点 → 根样式被画到第一个叶子上，真正的根显示为普通节点。
-    2026-09-18 样张改版：根样式 = 深藏青 #1F3864（不再是金色双框）。"""
+    2026-10-17 样张 v2：根样式 = 深藏青 #1E3A5F（样张像素取证，不再是金色双框）。"""
     from app.services.ai.mermaid_architecture import _layout_architecture_tree, _render_architecture_image_v2
     from PIL import Image
 
@@ -433,10 +433,11 @@ def test_architecture_root_node_gets_root_style():
     leaf = nodes[0]
 
     img = Image.open(_render_architecture_image_v2(tree)).convert("RGB")
-    NAVY = (31, 56, 100)  # #1F3864 根节点填充色
+    NAVY = (30, 58, 95)  # #1E3A5F 根节点填充色（样张 v2 取证）
     assert _count_color_in_node(img, root, NAVY) > 500, "真正的根节点未使用根样式（深藏青）"
     assert _count_color_in_node(img, leaf, NAVY) == 0, "根样式被错误地画到了叶子节点上"
-    # 旧金色双框根样式必须彻底移除
+    # 旧金色双框根样式必须彻底移除（本树无 highlight，任何节点框内都不得出现
+    # #FBBF24——该色在样张 v2 中只允许由 highlight:true 触发，见 enhancements 护栏）
     GOLD = (251, 191, 36)  # #FBBF24
     for n in nodes:
         assert _count_color_in_node(img, n, GOLD) == 0, f"旧金色根样式残留在 {n['label']}"

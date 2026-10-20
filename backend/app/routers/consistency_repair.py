@@ -19,6 +19,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.db import get_db
+from app.routers._chart_pipeline import resync_inline_charts
 from app.routers.review import reset_review_on_content_change  # ✅ G9：修复改写正文→退回待审核
 from app.services import conflict_arbiter as arbiter
 from app.services import consistency_scanner as scanner
@@ -52,6 +53,21 @@ async def _load_scheme(db, scheme_id: str) -> dict:
     if not row:
         raise HTTPException(404, "方案不存在")
     return row
+
+
+def _make_chart_resync(scheme_id: str):
+    """✅ R92：给 services 层（repair_agent / repair_record）注入的图表重登记回调。
+
+    返回 ``async (db, section_id, content) -> 校正后正文``：按传入正文全量重登记本章
+    内联图表（先清后登、不 commit，由调用方同事务提交），并回传登记管线校验/修复后的
+    正文（供调用方以校正后正文落库，使两侧逐字一致）。enforce_limits=False：修复/回滚
+    是对既有正文的改写，不因程序级配图上限反向删图（与手动保存 B31 同口径）。
+    """
+    async def _resync(_db, _sid, _content):
+        _n, _fixed = await resync_inline_charts(
+            _db, scheme_id, _sid, _content, enforce_limits=False)
+        return _fixed
+    return _resync
 
 
 async def _load_conflicts(db, scheme_id: str, scan_id: str) -> list[dict]:
@@ -154,6 +170,11 @@ async def repair(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     force_full_repair = bool(body.get("force_full_repair", False))
 
     scheme = await _load_scheme(db, scheme_id)
+    # ✅ R98（R90 遗留⑦收口）：一致性修复整章改写 content——正文/目录生成在跑时
+    #    与 _persist_section 无条件 UPDATE / 目录闸门整表重建互相覆盖。守卫接在
+    #    任何 AI 调用之前（判据单一事实源在 routers.sections）。
+    from app.routers.sections import ensure_no_generation_write
+    ensure_no_generation_write(scheme_id, "全文一致性修复")
     if not scan_id:
         row = await review_db.fetch_one(
             db, "SELECT scan_id FROM consistency_conflicts WHERE scheme_id=? "
@@ -174,6 +195,12 @@ async def repair(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     async def _progress(done: int, total: int, message: str):
         logger.info("[一致性修复] %s %d/%d", scheme_id, done, total)
 
+    # ✅ R92（2026-10-17 · 正文写点同步补链）：一致性修复改写了 sections.content，
+    #    须在同事务内把本章内联图表全量重登记（消除登记/正文两侧漂移）。回调在
+    #    routers 层实现（services 不得 import routers），交给 repair_agent 在其写锁内
+    #    调用；返回管线校正后的正文供落库。
+    _resync_charts = _make_chart_resync(scheme_id)
+
     try:
         result = await repair_agent.run_repair(
             db, scheme_id=scheme_id, scan_id=scan_id, conflicts=conflicts,
@@ -181,7 +208,7 @@ async def repair(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
             conflict_ids=conflict_ids,
             force_full_repair=force_full_repair,
             contexts={"global_facts": facts, "standards": standards},
-            progress_cb=_progress)
+            progress_cb=_progress, resync_fn=_resync_charts)
     except HTTPException:
         raise
     except Exception as e:
@@ -235,6 +262,11 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     snap_map: dict = {}
     rejected_sections: set[str] = set()
     if rejected:
+        # ✅ R98（R90 遗留⑦收口）：拒绝会把整章正文恢复为修复前快照 —— 与
+        #    生成中正文互相覆盖，仅在真有拒绝项（写正文）时拦；纯 accepted
+        #    只写冲突状态、不触碰 content，不拦。
+        from app.routers.sections import ensure_no_generation_write
+        ensure_no_generation_write(scheme_id, "一致性修复拒绝恢复")
         snap = await repair_record.get_snapshot(db, rep.get("snapshot_id") or "")
         if snap:
             snap_map = {s.get("section_id"): s.get("content_before", "")
@@ -271,6 +303,18 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
                         (restored_content, _wc, word_status_for(_wc, wb),
                          datetime.now().isoformat(), sid),
                         what=f"一致性修复确认：恢复章节快照原文（section={sid[:8]}）")
+                    # ✅ R92（2026-10-17 · 正文写点同步补链）：拒绝 = 该章整体回退到
+                    #    修复前快照原文，正文里的内联图表随之复原；须在**同一事务**内
+                    #    （commit 在函数末尾）按恢复后正文全量重登记，否则 chart_predictions
+                    #    仍是修复时那一份（run_repair 已重登记过）→ 与恢复后正文再度漂移。
+                    try:
+                        await resync_inline_charts(
+                            db, scheme_id, sid, restored_content,
+                            enforce_limits=False)
+                    except Exception as _re:  # noqa: BLE001 - 登记失败不阻断恢复
+                        logger.warning(
+                            "一致性修复确认：章节 %s 图表重登记失败（保留恢复正文）: %s",
+                            sid[:8], _re)
 
     # 接受/拒绝的冲突项状态回写
     # ✅ R13（R78 F-3）：cid 来自请求体，未预先校验行存在（历史批次/外部调用
@@ -330,8 +374,12 @@ async def rollback(scheme_id: str, body: dict | None = None, db=Depends(get_db))
     snap = await repair_record.get_snapshot(db, snapshot_id)
     if not snap or snap.get("scheme_id") != scheme_id:
         raise HTTPException(404, "快照不存在")
+    # ✅ R98（R90 遗留⑦收口）：回滚整章恢复修复前正文，生成在跑时互相覆盖。
+    from app.routers.sections import ensure_no_generation_write
+    ensure_no_generation_write(scheme_id, "一致性修复回滚")
     try:
-        result = await repair_record.rollback_snapshot(db, snapshot_id)
+        result = await repair_record.rollback_snapshot(
+            db, snapshot_id, resync_fn=_make_chart_resync(scheme_id))
     except KeyError:
         raise HTTPException(404, "快照不存在")
 

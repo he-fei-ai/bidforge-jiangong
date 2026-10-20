@@ -92,6 +92,10 @@ _REVERSE_MAP = [
      're.match(r"^\\|?\\s*:?-+:?\\s*(\\|\\s*:?-+:?\\s*)*\\|?$", tbl_lines[1].strip())'),
     ("_RE_CHART_TYPE_TAG.match(line.strip())",
      're.match(r"^\\[CHART_TYPE:\\s*(\\w+)\\]", line.strip())'),
+    # ✅ 2026-10-17：补登 R99 新增的 `_RE_CHART_TYPE_TAG_LOOSE`（形似机器标记的
+    #    非法类型行），修复「新增预编译常量未加入对拍表」导致的本护栏自失效。
+    ("_RE_CHART_TYPE_TAG_LOOSE.match(_stripped)",
+     're.match(r"^[\\[【]\\s*CHART_TYPE\\s*[:：]", _stripped)'),
     ('_RE_QUOTE_PREFIX.sub("", lines[i]).rstrip()',
      're.sub(r"^\\s*>\\s?", "", lines[i]).rstrip()'),
     ("_RE_HR_LINE.match(stripped)", 're.match(r"^([-*_])(\\s*\\1){2,}$", stripped)'),

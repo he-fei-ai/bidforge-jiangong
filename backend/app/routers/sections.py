@@ -61,7 +61,10 @@ from app.services.outline_utils import MAX_OUTLINE_DEPTH, normalize_outline
 _DEPTH_EXCEEDED_MSG = (
     f"目录最多支持 {MAX_OUTLINE_DEPTH} 级，请在上一级章节内编写正文小节"
 )
-from app.routers._chart_pipeline import register_inline_charts  # ✅ B31：手动保存同步图表登记
+from app.routers._chart_pipeline import (  # ✅ B31：手动保存同步图表登记
+    register_inline_charts,
+    resync_inline_charts,
+)
 from app.services.content_polish import quality_issues
 from app.services.content_shrink import (
     SHRINK_MAX_ROUNDS,
@@ -72,6 +75,7 @@ from app.services.content_utils import (
     DEFAULT_WORD_BUDGET,
     WORD_OVER_RATIO,
     auto_fix_unclosed_fences,
+    section_sort_order_key,
     text_word_count,
     word_status_for,
 )
@@ -156,13 +160,12 @@ async def _build_tree(db, scheme_id: str, include_content: bool = False) -> list
     #    不同顺序，进而**编号漂移**（正文提示词里的「当前章节编号」与展示不一致）。
     #    现统一以 (sort_order, id) 做最终排序：id 是主键、全局唯一，等值组也有全序。
     #    注意 roots 同样要排 —— 旧实现只排 children，根节点顺序完全依赖 SQL。
+    # ✅ R102（G2 · 排序键单一出口）：键实现委托
+    #    content_utils.section_sort_order_key（与正文生成 DFS 序、导出序同一
+    #    归一口径）。归一逻辑（int(值 or 0)，非法回落 0）与旧内联实现逐字
+    #    一致 —— 对合法数据是恒等变换，展示序零变化。
     def _sort_key(n: dict):
-        so = n.get("sort_order")
-        try:
-            so = int(so or 0)
-        except (TypeError, ValueError):
-            so = 0
-        return (so, str(n.get("id") or ""))
+        return section_sort_order_key(n.get("sort_order"), n.get("id"))
 
     def _sort_children(nodes_list):
         nodes_list.sort(key=_sort_key)
@@ -241,6 +244,41 @@ def outline_generation_in_progress(scheme_id: str) -> str | None:
     renumber_sections_after_reorder 构成同表写写竞态。现补齐同口径守卫。
     """
     return _scheme_task_status_in_progress(scheme_id, "outline_generation")
+
+
+def ensure_no_generation_write(scheme_id: str, action: str) -> None:
+    """改写 sections.content 的**同步端点**统一 409 竞态守卫（R98 · R90 遗留⑦收口）。
+
+    两级判定全部复用既有唯一入口（只拦 running/paused，口径与
+    update_section(content) / reset_content / delete_section 逐字一致）：
+      ① 正文生成在跑 → 无条件 UPDATE 的 ``_persist_section`` 会与本端点的
+         改写互相覆盖（丢失更新）；
+      ② 目录生成在跑 → AI 确认闸门的**整表重建**会静默 wipe 本端点刚写入
+         的正文（与 update_section 顶部拦 outline 的理由同源）。
+
+    为何收口成函数而不是各处内联 if：审核修复链的正文写点分散在
+    review_autofix / consistency_repair / charts / shrink 共 9 个端点，
+    逐处手写判据必然分叉（本仓反复记录的「同一判据散落多处、漏改一处」
+    陷阱）；判据在此单一持有，调用点只声明动作名用于错误文案与日志。
+
+    Args:
+        scheme_id: 方案 ID；
+        action: 本次操作名（如「自动修复落库」），进入 409 文案与 WARNING 日志。
+    """
+    _cg = content_generation_in_progress(scheme_id)
+    if _cg:
+        logger.warning("%s 409 竞态：scheme_id=%s 正文正在后台生成中（%s）",
+                       action, scheme_id, _cg)
+        raise HTTPException(
+            409, f"本方案正文正在后台生成中，此时执行「{action}」会与生成结果"
+                 f"互相覆盖，请等待生成完成（或先停止任务）后再操作")
+    _og = outline_generation_in_progress(scheme_id)
+    if _og:
+        logger.warning("%s 409 竞态：scheme_id=%s 目录正在后台生成中（%s）",
+                       action, scheme_id, _og)
+        raise HTTPException(
+            409, f"本方案目录正在后台生成中，此时执行「{action}」会被目录确认"
+                 f"闸门的整表重建静默覆盖，请等待生成完成（或先停止任务）后再操作")
 
 
 def facts_generation_in_progress(scheme_id: str) -> str | None:
@@ -1145,9 +1183,10 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
     # 目录库套用 / AI 调整目录 / 手工编辑保存 / stopped·error 部分成果这五类
     # 写入口都不走它 ⇒ 占位标题从这里直接进 sections 表、进 DOCX/PDF 导出。
     #
-    # 现在：检出非空即**先**做一次外科式重写（复用 sse_handlers.
-    # `_try_outline_title_fix` 同一实现 —— 只回填 title、绝不增删节点，失败返回
-    # None 回退原样保存），重写后仍残留才按原样落库并照旧回传 generic_residual
+    # 现在：检出非空即**先**做一次外科式重写（复用 services.outline_title_fix 的
+    # `autofix_generic_titles_on_save`（内部即 `_try_outline_title_fix`）同一实现
+    # —— 只回填 title、绝不增删节点，失败返回 None 回退原样保存），重写后仍残留
+    # 才按原样落库并照旧回传 generic_residual
     # （加法式不阻断的纪律不变，只是多了一次自动修复的机会）。
     #
     # 成本口径：与 `content_fact_autofix_enabled` 同 —— **仅在检出非空时触发**，
@@ -1162,10 +1201,7 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
     # 回到 R89 之前：只检出、只回传、不发起重写调用）。
     _generic_autofixed = 0
     if generic_hits and getattr(settings, "outline_autofix_generic_on_save", True):
-        _hits_before = generic_hits
         try:
-            from app.routers.sse_handlers import _try_outline_title_fix
-            from app.services.outline_quality import detect_generic_titles as _det
             _sname = _stype = ""
             _scur = await db.execute(
                 "SELECT name, type FROM schemes WHERE id=?", (scheme_id,))
@@ -1173,18 +1209,15 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
             if _srec is not None:
                 _sname = str(_srec[0] or "")
                 _stype = str(_srec[1] or "")
-            _fixed = await _try_outline_title_fix(
-                outline, generic_hits, scheme_name=_sname, scheme_type=_stype)
-            if _fixed is not None:
-                _left = _det(_fixed)
-                # 加法式回传：告诉用户「有多少占位标题被自动改掉了」——
-                # 否则自动重写静默生效，用户以为目录原样保存，实际上章节名变了。
-                _generic_autofixed = max(0, len(_hits_before) - len(_left))
-                logger.info(
-                    "方案 %s 目录落库前自动重写占位标题：%d 处 → 残留 %d 处（source=%s）",
-                    scheme_id[:8], len(generic_hits), len(_left), source or "-")
-                outline = _fixed
-                generic_hits = _left
+            # ✅ R101（本轮）：重写逻辑收敛到 `outline_title_fix.autofix_generic_titles_on_save`
+            #    单一实现 —— 与 `upload_outline.save_as_outline` 共用同一口径，
+            #    结束「同一功能两份内联实现」的分叉（该类入口此前零闸门）。
+            from app.services.outline_title_fix import autofix_generic_titles_on_save
+            outline, generic_hits, _generic_autofixed = (
+                await autofix_generic_titles_on_save(
+                    outline, generic_hits,
+                    scheme_name=_sname, scheme_type=_stype,
+                    context=f"save-outline scheme={scheme_id[:8]} source={source or '-'}"))
         except Exception as e:      # noqa: BLE001 - 自动修复失败不得阻断保存
             logger.warning("方案 %s 目录落库前自动重写失败（按原样保存）: %s",
                            scheme_id[:8], e, exc_info=True)
@@ -1871,6 +1904,10 @@ async def shrink_section(scheme_id: str, section_id: str, db=Depends(get_db)):
     - 多轮封顶 SHRINK_MAX_ROUNDS，无进展提前退出；
     - 每轮结束重算字数，收敛到目标 1.15 倍以内即停。
     """
+    # ✅ R98（R90 遗留⑦收口）：压缩整章改写 content，生成任务在跑时与
+    #    _persist_section / 目录闸门整表重建互相覆盖。守卫在**任何 AI 调用之前**
+    #    （省下一次无意义的压缩调用成本）。
+    ensure_no_generation_write(scheme_id, "字数压缩")
     cur = await db.execute(
         "SELECT id, title, content, word_budget FROM sections WHERE id=? AND scheme_id=?",
         (section_id, scheme_id))
@@ -1936,6 +1973,20 @@ async def shrink_section(scheme_id: str, section_id: str, db=Depends(get_db)):
         raise HTTPException(422, f"压缩未生效：{stop_reason}")
 
     final_wc = text_word_count(current)
+    # ✅ R92（2026-10-17 · 正文写点同步补链）：AI 压缩整章改写了正文，可能删改围栏内
+    #    文字/图表块；须在**同一事务**（commit 在函数末尾）按压缩后正文全量重登记本章
+    #    内联图表，否则 chart_predictions 停留在压缩前登记 → 与压缩后正文漂移。resync
+    #    返回登记管线校正后的正文（某块被修则以其落库，使两侧逐字一致）。异常 fail-soft：
+    #    保留压缩正文，绝不阻断落库。enforce_limits=False：同手动保存 B31 口径。
+    try:
+        _n, _fixed = await resync_inline_charts(
+            db, scheme_id, section_id, current, enforce_limits=False)
+        if _fixed:
+            current = _fixed
+            final_wc = text_word_count(current)
+    except Exception as _re:  # noqa: BLE001 - 登记失败不阻断压缩落库
+        logger.warning("章节 %s 压缩后图表重登记失败（保留压缩正文）: %s",
+                       section_id[:8], _re, exc_info=True)
     await db.execute(
         "UPDATE sections SET content=?, word_count=?, word_status=?, updated_at=? WHERE id=?",
         (current, final_wc, word_status_for(final_wc, word_budget),

@@ -316,6 +316,16 @@ def render_mermaid_to_bytes(
                         pass
     except (json.JSONDecodeError, TypeError):
         # 非 JSON → 纯 Mermaid 代码，无需归一化
+        # ✅ R102（2026-10-18）：但「以 { 开头却解析失败」不是纯 Mermaid 代码，
+        #    而是**损坏的 JSON 数据载荷**（AI 生成被 max_tokens 截断的典型形态，
+        #    生产实证 trace=646c14650b7d：342 字符 gantt 载荷截断）。
+        #    旧实现静默跳过 → 下游 PIL v2 拿到坏数据必然失败 → 最终日志只剩
+        #    「全部渲染策略失败 + 建议检查 HTTP 服务」，把数据损坏误导成引擎
+        #    不可用。此处显式记 WARNING，让根因在渲染日志第一现场可见。
+        if code.lstrip().startswith("{"):
+            logger.warning(
+                "[渲染] JSON 数据载荷非法（疑似生成截断，长度=%d，chart_type=%s），"
+                "后续渲染策略对损坏数据必然失败", len(code), chart_type)
         pass
 
     # ✅ Mermaid 语法载荷归一（校验侧与渲染侧**共用同一实现**，见

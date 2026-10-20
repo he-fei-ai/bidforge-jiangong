@@ -31,8 +31,8 @@ from PIL import Image, ImageDraw
 
 _HERE = Path(__file__).resolve().parent
 _BE = _HERE.parent
-_EDGE_RGB = (140, 140, 140)   # #8C8C8C 连线灰
-_AMBER_RGB = (255, 192, 0)    # #FFC000 highlight 琥珀橙
+_EDGE_RGB = (100, 116, 139)   # #64748B 连线蓝灰（2026-10-17 样张 v2 取证，子端带同色下箭头）
+_AMBER_RGB = (251, 191, 36)   # #FBBF24 highlight 琥珀金（样张 v2 取证）
 
 
 # ------------------------------------------------------------------ 造树工具
@@ -356,7 +356,7 @@ class TestVerticalTextDrawing:
 
 def _leaf_fill_rgb(leaf: dict) -> tuple:
     depth_idx = min(leaf["depth"], 4)
-    palette = ["#1F3864", "#2E5FA3", "#4472C4", "#5B9BD5", "#A9C6E8"]
+    palette = ["#1E3A5F", "#2B579A", "#4472C4", "#5B9BD5", "#A9C6E8"]
     hexc = palette[depth_idx]
     return tuple(int(hexc[i:i + 2], 16) for i in (1, 3, 5))
 

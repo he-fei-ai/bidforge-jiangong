@@ -666,56 +666,72 @@ async def save_ai_config(data: dict) -> str:
         # ✅ 并发修复：多语句事务改用独立写池连接。原实现在全局共享连接
         # get_conn() 上 rollback，会把并发协程（任务进度写、任务注册 INSERT 等）
         # 已执行未提交的合法语句一并回滚，造成静默数据丢失。
-        async with write_tx_conn() as conn:
-            if data.get("is_active"):
-                await conn.execute("UPDATE ai_config SET is_active = 0")
-            exists = await conn.execute("SELECT id FROM ai_config WHERE id = ?", (cid,))
-            is_update = bool(await exists.fetchone())
-            if is_update:
-                # ✅ 修复：原 UPDATE 语句完全不含 remark / priority 两列，
-                #    前端「备注」表单填写后静默丢失（列表备注列永远为 "-"）。
-                if raw_priority is None:
-                    await conn.execute(
-                        "UPDATE ai_config SET provider_name=?, plan=?,"
-                        " api_key_encrypted=CASE WHEN ?!='' THEN ? ELSE api_key_encrypted END,"
-                        " base_url=?, model=?, max_tokens=?, temperature=?, timeout=?, concurrency=?,"
-                        " request_mode=?, env=?, is_active=?, remark=?, updated_at=? WHERE id=?",
-                        (provider_name, plan, data.get("api_key", ""), enc, base_url,
-                         model, max_tokens, temperature, timeout, concurrency,
-                         request_mode, env, int(data.get("is_active", True)), remark,
-                         datetime.now().isoformat(), cid))
+        # ✅ R108（2026-10-18 · 日志审计 P0-4）：整事务体提取为可重放闭包接
+        # retry_db_op——生产实证保存 AI 配置偶发 500（批量生成写锁窗口内
+        # 首条 UPDATE/INSERT 抛 locked 直通）。write_tx_conn 每次进入获取独立
+        # 连接、异常路径统一回滚，locked 抛出时事务必未提交 → 整事务重放安全
+        # （INSERT 用函数外生成的固定 cid，重放不会双写；语义错误不重试原样上抛）。
+        async def _save_tx_once() -> None:
+            async with write_tx_conn() as conn:
+                if data.get("is_active"):
+                    await conn.execute("UPDATE ai_config SET is_active = 0")
+                exists = await conn.execute("SELECT id FROM ai_config WHERE id = ?", (cid,))
+                is_update = bool(await exists.fetchone())
+                if is_update:
+                    # ✅ 修复：原 UPDATE 语句完全不含 remark / priority 两列，
+                    #    前端「备注」表单填写后静默丢失（列表备注列永远为 "-"）。
+                    if raw_priority is None:
+                        await conn.execute(
+                            "UPDATE ai_config SET provider_name=?, plan=?,"
+                            " api_key_encrypted=CASE WHEN ?!='' THEN ? ELSE api_key_encrypted END,"
+                            " base_url=?, model=?, max_tokens=?, temperature=?, timeout=?, concurrency=?,"
+                            " request_mode=?, env=?, is_active=?, remark=?, updated_at=? WHERE id=?",
+                            (provider_name, plan, data.get("api_key", ""), enc, base_url,
+                             model, max_tokens, temperature, timeout, concurrency,
+                             request_mode, env, int(data.get("is_active", True)), remark,
+                             datetime.now().isoformat(), cid))
+                    else:
+                        await conn.execute(
+                            "UPDATE ai_config SET provider_name=?, plan=?,"
+                            " api_key_encrypted=CASE WHEN ?!='' THEN ? ELSE api_key_encrypted END,"
+                            " base_url=?, model=?, max_tokens=?, temperature=?, timeout=?, concurrency=?,"
+                            " request_mode=?, env=?, is_active=?, remark=?, priority=?, updated_at=? WHERE id=?",
+                            (provider_name, plan, data.get("api_key", ""), enc, base_url,
+                             model, max_tokens, temperature, timeout, concurrency,
+                             request_mode, env, int(data.get("is_active", True)), remark,
+                             int(raw_priority), datetime.now().isoformat(), cid))
                 else:
+                    # 闭包局部 prio：每次重放都重新读外层 raw_priority，
+                    # 避免闭包内赋值把外层名字判为局部（UnboundLocalError）
+                    prio = raw_priority
+                    if prio is None:
+                        # 新配置默认排到降级链末尾，而不是与既有配置同为 0
+                        # （同值时只能靠 updated_at 兜底排序，顺序不可预期）
+                        cur = await conn.execute(
+                            "SELECT COALESCE(MAX(priority), -1) + 1 FROM ai_config")
+                        row = await cur.fetchone()
+                        prio = int(row[0]) if row and row[0] is not None else 0
                     await conn.execute(
-                        "UPDATE ai_config SET provider_name=?, plan=?,"
-                        " api_key_encrypted=CASE WHEN ?!='' THEN ? ELSE api_key_encrypted END,"
-                        " base_url=?, model=?, max_tokens=?, temperature=?, timeout=?, concurrency=?,"
-                        " request_mode=?, env=?, is_active=?, remark=?, priority=?, updated_at=? WHERE id=?",
-                        (provider_name, plan, data.get("api_key", ""), enc, base_url,
-                         model, max_tokens, temperature, timeout, concurrency,
-                         request_mode, env, int(data.get("is_active", True)), remark,
-                         int(raw_priority), datetime.now().isoformat(), cid))
-            else:
-                if raw_priority is None:
-                    # 新配置默认排到降级链末尾，而不是与既有配置同为 0
-                    # （同值时只能靠 updated_at 兜底排序，顺序不可预期）
-                    cur = await conn.execute(
-                        "SELECT COALESCE(MAX(priority), -1) + 1 FROM ai_config")
-                    row = await cur.fetchone()
-                    raw_priority = int(row[0]) if row and row[0] is not None else 0
-                await conn.execute(
-                    "INSERT INTO ai_config (id, provider_name, plan, api_key_encrypted, base_url, model,"
-                    " max_tokens, temperature, timeout, concurrency, request_mode, env,"
-                    " is_active, priority, remark)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (cid, provider_name, plan, enc, base_url, model,
-                     max_tokens, temperature, timeout, concurrency, request_mode, env,
-                     int(data.get("is_active", True)), int(raw_priority), remark))
-            # 注：此处原有一句 INSERT INTO provider_history，已删除 —— 该表全库无任何读取
-            # （数据流审计 R2 强信号），属只增不消费的死写，每次保存配置都会白写一行。
-            await conn.commit()
+                        "INSERT INTO ai_config (id, provider_name, plan, api_key_encrypted, base_url, model,"
+                        " max_tokens, temperature, timeout, concurrency, request_mode, env,"
+                        " is_active, priority, remark)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (cid, provider_name, plan, enc, base_url, model,
+                         max_tokens, temperature, timeout, concurrency, request_mode, env,
+                         int(data.get("is_active", True)), int(prio), remark))
+                # 注：此处原有一句 INSERT INTO provider_history，已删除 —— 该表全库无任何读取
+                # （数据流审计 R2 强信号），属只增不消费的死写，每次保存配置都会白写一行。
+                await conn.commit()
+
+        await retry_db_op(_save_tx_once, max_retries=4, base_delay=0.1,
+                          jitter=0.05)
     except Exception:
         # 半提交状态已由 write_tx_conn 统一回滚（独立连接，不影响其他协程）
         raise
+    # ✅ R108（P1-4）：保存即视为用户改过这条配置（模型/端点/密钥任一），
+    #    确定性死连击清零——改对则回候选链、改错则重新攒 3 次。
+    with _provider_reliability_lock:
+        _det_dead_streak.pop(_reliability_key("", "", cid, ""), None)
     invalidate_config_cache()
     if data.get("is_active"):
         await apply_config_concurrency()
@@ -837,6 +853,26 @@ _audit_overflow_evicted = 0        # 累计被 max_age / 容量驱逐的批次�
 _provider_reliability_lock = threading.Lock()
 _provider_reliability: dict[str, dict] = {}  # provider_name → {"ok": int, "fail": int}
 _PROVIDER_RELIABILITY_WINDOW = 50            # 每个 provider 统计最近 N 次
+# ✅ R108（2026-10-18 · 日志审计 P1-4 · 确定性死配置连击剔除）：
+#    生产实证 volcengine/nvidia 多条配置长期以 HTTP 404 UnsupportedModel/
+#    InvalidEndpointOrModel 失败——「模型/端点不存在」是**确定性**错误
+#    （重放必败，非瞬态），但旧死配置判据走「样本数 × 成功率」统计口径，
+#    滑动窗口压缩（50→折半）+ 成功混入会让这类配置反复回流候选链，
+#    每次降级都白烧一次远程调用与数十秒超时。现按身份键记连击：
+#    连续 ≥3 次命中确定性 404 签名 → 直接判死；任一成功即清零自愈
+#    （用户改对模型名/保存配置同样清零）。内存态、零 DDL、零新增配置。
+_det_dead_streak: dict[str, int] = {}
+DET_DEAD_STREAK_THRESHOLD = 3
+#: 确定性失败签名（小写匹配）：模型或端点在该接入地址下不存在。
+_DET_DEAD_ERROR_SIGNATURES = ("unsupportedmodel", "invalidendpointormodel")
+
+
+def _is_deterministic_dead_error(error_text: str) -> bool:
+    """确定性死配置错误签名判据（封闭枚举，宁缺毋滥）。"""
+    low = (error_text or "").lower()
+    return any(sig in low for sig in _DET_DEAD_ERROR_SIGNATURES)
+
+
 # ✅ 修复（2026-09-17）：统一为与 _is_dead_provider 相同的配置项门槛。
 #    旧实现硬编码 0.50 与 _order_candidates 使用的 ai_provider_dead_success_rate(0.20)
 #    冲突，导致 20%~50% 成功率的候选被 _fallback_chain 静默剔除（即便 _order_candidates
@@ -1499,6 +1535,23 @@ async def get_vision_providers() -> list[BaseProvider]:
     return out
 
 
+def _is_missing_column_error(e: BaseException) -> bool:
+    """「表缺列」异常签名判据（✅ R108 · 日志审计 P1-2 误诊收口）。
+
+    生产实证：批量生成写锁窗口内，`_flush_audit_rows_once` 首条 executemany
+    抛 `database is locked` 也被宽 `except Exception` 归因成
+    「ai_audit_logs 缺 config_id/base_url 列（旧库未迁移）」——**误诊 WARNING
+    长期误导排障方向**；且锁败后降级写若碰巧成功，config_id/base_url 被静默
+    裁掉（可靠性统计身份缺失）。锁瞬态必须上抛给外层 ``retry_db_op``
+    （`_flush_audit_buffer` L1632 已接）整批重放，仅真缺列才走降级链。
+
+    SQLite 两种缺列文案：INSERT 列名不匹配 → "table X has no column named Y"；
+    SELECT/其他引用不存在的列 → "no such column: Y"。其余一律非缺列。
+    """
+    msg = str(e).lower()
+    return "no column named" in msg or "no such column" in msg
+
+
 _AUDIT_INSERT_FULL = (
     "INSERT INTO ai_audit_logs (id, provider_name, model, action,"
     " prompt_tokens, completion_tokens, cached_tokens, duration, success, error, scene,"
@@ -1541,7 +1594,18 @@ async def _flush_audit_rows_once(rows: list) -> None:
         # ✅ 2026-09-21：补齐 scene 列（业务场景标记），/ai/stats 按场景聚合的数据源。
         try:
             await conn.executemany(_AUDIT_INSERT_FULL, rows)
-        except Exception:
+        except Exception as e:
+            # ✅ R108（P1-2 · 误诊收口）：锁/i/o 瞬态与非缺列错误**原样上抛**，
+            #    交给外层 retry_db_op 整批重放（write_tx_conn 已回滚，无半写）；
+            #    只有真·缺列才进降级链。旧实现宽 except 把批量生成写锁窗口的
+            #    locked 归因成「旧库未迁移」，误诊 + config_id 被裁双重损伤。
+            #    ⚠️ 例外：ProgrammingError（绑定数≠占位符数）= 行宽与 FULL 13 列
+            #    不匹配（溢出队列可能残留跨版本的 11/10 元组旧行），属降级切片
+            #    链的预期场景而非确定性故障——上抛会让该批永远回灌溢出、
+            #    并连带拖死同队列新批次。维持既有「按行宽逐级降级」语义。
+            if not (_is_missing_column_error(e)
+                    or isinstance(e, sqlite3.ProgrammingError)):
+                raise
             # ✅ 2026-10-06（B-5 · 降级写入的长度守卫）：降级 INSERT 依赖
             #    **元组按位切片**（13 列 → r[:11] → r[:10]）与各自的列数严格
             #    对齐。一旦将来在元组**中间**插入新字段（例如在 error 之前
@@ -1562,7 +1626,12 @@ async def _flush_audit_rows_once(rows: list) -> None:
                         "ai_audit_logs 缺 config_id/base_url 列（旧库未迁移），"
                         "审计已降级写入；请重启服务触发迁移补列，"
                         "否则可靠性统计无法按配置身份隔离")
-            except Exception:
+            except Exception as e2:
+                # ✅ R108（P1-2）：本级同样只对「缺列/行宽守卫」继续降级；
+                #    NO_IDENTITY 撞锁等瞬态上抛重放（行宽 ValueError 属守卫
+                #    自抛，维持既有「再降一级」语义）。
+                if not (_is_missing_column_error(e2) or isinstance(e2, ValueError)):
+                    raise
                 # 更旧库缺 scene：再降一级，审计行不丢
                 if all(len(r) >= 10 for r in rows):
                     await conn.executemany(_AUDIT_INSERT_LEGACY,
@@ -1699,13 +1768,18 @@ def is_non_retryable_error(err) -> bool:
     限流退避路径（CONTENT_RATE_LIMIT_BACKOFF）。
     """
     s = str(err or "")
-    if ("HTTP 402" in s or "HTTP 403" in s or "HTTP 404" in s):
+    # ✅ R109（P1）：HTTP 401（Unauthorized / 令牌失效）与 402/403/404 同属
+    #    永久性认证错误——token 过期/吊销后重试必然再败，生产实证 agnes 401
+    #    「该令牌状态不可用」被当作瞬态重试 49 次。现统一纳入非重试集合，
+    #    触发配额冷却 + 不浪费 HTTP 往返。429 限流仍走退避路径（可恢复）。
+    if ("HTTP 401" in s or "HTTP 402" in s or "HTTP 403" in s or "HTTP 404" in s):
         return True
     low = s.lower()
     return any(tag in low for tag in (
         "insufficient balance", "quota_exceeded", "quota exceeded",
         "exceeded your current quota", "no valid authorization",
-        "invalid api key", "unsupportedmodel", "not found for account"))
+        "invalid api key", "unsupportedmodel", "not found for account",
+        "令牌状态不可用", "token status", "invalid token", "unauthorized"))
 
 
 # ---------- 配额类错误冷却（2026-09-22 · 调用次数优化 O2） ----------
@@ -1765,6 +1839,107 @@ def reset_quota_cooldown() -> None:
     with _quota_lock:
         _quota_cool_until.clear()
         _quota_last_probe.clear()
+
+
+# ---------- ✅ R110（P1-2 · 思考吞噬翻倍失败后 provider 短时冷却）----------
+# R109 实证：sensetime 1536→3072 翻倍后仍失败，降级链若全是推理模型会重复
+# "吞噬→翻倍→失败"。翻倍失败后标记该 provider 短时冷却，后续候选跳过，
+# 与既有 `_quota_cool_until` 同构（time + dict + threading.Lock）。
+THINKING_DEAD_COOLDOWN = max(0.0, float(getattr(settings, "ai_thinking_dead_cooldown", 60.0) or 0.0))
+_thinking_dead_until: dict[str, float] = {}
+_thinking_dead_lock = threading.Lock()
+
+
+def _note_thinking_dead(pname: str) -> None:
+    """记录「思考吞噬翻倍失败」：该 provider 进入短时冷却。
+
+    触发条件：``_call_one_candidate`` 内翻倍 max_tokens 后仍 ``_is_thinking_exhausted``
+    （已重试一次、达到上限、或翻倍前已达上限）。冷却期内 ``_gate_candidates`` 跳过，
+    与 ``_quota_cooldown_active`` 同走 ``circuit_skipped`` 审计口径。
+    """
+    if THINKING_DEAD_COOLDOWN <= 0 or not pname:
+        return
+    with _thinking_dead_lock:
+        _thinking_dead_until[pname] = time.time() + THINKING_DEAD_COOLDOWN
+    logger.warning(
+        "Provider %s 翻倍后仍思考吞噬，标记 %ds 冷却（期间跳过该 provider）",
+        pname, int(THINKING_DEAD_COOLDOWN))
+
+
+def _is_thinking_dead(pname: str) -> bool:
+    """该 provider 是否在思考吞噬冷却中。"""
+    now = time.time()
+    with _thinking_dead_lock:
+        until = _thinking_dead_until.get(pname, 0.0)
+        if now >= until:
+            if until:
+                _thinking_dead_until.pop(pname, None)
+            return False
+        return True
+
+
+def clear_thinking_dead(pname: str = "") -> None:
+    """清除思考吞噬冷却（成功调用后重置）。"""
+    with _thinking_dead_lock:
+        if pname:
+            _thinking_dead_until.pop(pname, None)
+        else:
+            _thinking_dead_until.clear()
+
+
+def reset_thinking_dead() -> None:
+    """清空思考吞噬状态（测试隔离 / 配置变更后立即生效用）。"""
+    clear_thinking_dead()
+
+
+# ---------- ✅ R110（P1-1 · 跨章全熔断快速失败）----------
+# R109 实证：所有候选均熔断/配额冷却时，`_gate_candidates` 放行 1 个 probe；
+# 多章生成各自独立 probe → 5 章 × probe 超时 ≈ 150-300s 空转。
+# 连续 N 次所有候选不可用后激活短时快速失败，不再 probe。
+ALL_CIRCUIT_FAST_FAIL_THRESHOLD = max(0, int(getattr(settings, "ai_all_circuit_fast_fail_threshold", 2) or 0))
+ALL_CIRCUIT_FAST_FAIL_COOLDOWN = max(0.0, float(getattr(settings, "ai_all_circuit_fast_fail_cooldown", 60.0) or 0.0))
+_all_circuit_consecutive: int = 0
+_all_circuit_dead_until: float = 0.0
+_all_circuit_lock = threading.Lock()
+
+
+def _is_all_circuit_fast_fail() -> bool:
+    """是否处于「全熔断快速失败」窗口。"""
+    with _all_circuit_lock:
+        return (_all_circuit_dead_until > 0
+                and time.time() < _all_circuit_dead_until)
+
+
+def _record_all_circuit_outcome(success: bool) -> None:
+    """记录本次 gate 结果；连续失败达阈值后激活快速失败。
+
+    - success=True（gate 放行非空候选 / 某次调用成功）→ 立即清零
+    - success=False（所有候选熔断/冷却）→ 计数 +1，达阈值后置快速失败窗口
+    """
+    global _all_circuit_consecutive, _all_circuit_dead_until
+    if ALL_CIRCUIT_FAST_FAIL_THRESHOLD <= 0:
+        return
+    with _all_circuit_lock:
+        if success:
+            if _all_circuit_consecutive > 0 or _all_circuit_dead_until > 0:
+                logger.info("全熔断快速失败解除（有候选可用）")
+            _all_circuit_consecutive = 0
+            _all_circuit_dead_until = 0.0
+        else:
+            _all_circuit_consecutive += 1
+            if _all_circuit_consecutive >= ALL_CIRCUIT_FAST_FAIL_THRESHOLD:
+                _all_circuit_dead_until = time.time() + ALL_CIRCUIT_FAST_FAIL_COOLDOWN
+                logger.warning(
+                    "全熔断快速失败激活：连续 %d 次所有候选不可用，%ds 内快速失败（不再 probe）",
+                    _all_circuit_consecutive, int(ALL_CIRCUIT_FAST_FAIL_COOLDOWN))
+
+
+def reset_all_circuit_fast_fail() -> None:
+    """清空全熔断快速失败状态（测试隔离 / 配置变更后立即生效用）。"""
+    global _all_circuit_consecutive, _all_circuit_dead_until
+    with _all_circuit_lock:
+        _all_circuit_consecutive = 0
+        _all_circuit_dead_until = 0.0
 
 
 def _is_thinking_exhausted(err) -> bool:
@@ -1857,8 +2032,23 @@ async def _log_audit(provider_name: str, model: str, action: str,
                     stats["fail"] //= 2
                 if success:
                     stats["ok"] += 1
+                    # ✅ R108（P1-4）：任一成功 → 确定性连击清零（改对模型名自愈）
+                    _det_dead_streak.pop(key, None)
                 else:
                     stats["fail"] += 1
+                    # ✅ R108（P1-4）：确定性 404 签名连击计数；**非连续**失败
+                    #    （瞬态/其它错误）清零——429 限流夹在两次 404 之间说明
+                    #    请求到达过供应商，模型可能已改，不冤枉。
+                    if _is_deterministic_dead_error(error):
+                        streak = _det_dead_streak.get(key, 0) + 1
+                        _det_dead_streak[key] = streak
+                        if streak == DET_DEAD_STREAK_THRESHOLD:
+                            logger.warning(
+                                "配置 %s 连续 %d 次确定性模型/端点不存在错误，"
+                                "运行期判为死配置并从候选链剔除（保存该配置即重置）",
+                                key, streak)
+                    else:
+                        _det_dead_streak.pop(key, None)
     except Exception as e:
         # ✅ 2026-10-06（B-4 · 裸 pass 吞掉可观测性）：可靠性统计异常此前
         #    与审计写入共用一个 ``except Exception: pass``，既不留日志，
@@ -1927,9 +2117,130 @@ def _provider_success_rate(provider_name: str, model: str = "",
         provider_name, model, config_id, base_url)[1]
 
 
+# ---------- R103（2026-10-18 · 日志审计遗留 L1 收口）：配置健康可观测 ----------
+# 背景（R102 日志基线）：provider_factory 的熔断/冷却/实时成功率剔除都是
+# **进程内存态的自愈机制**——「已剔除实时成功率过低的候选」在生产日志里刷了
+# 209 条 WARNING，但「哪条配置被判死、样本多少、成功率多少」只在日志里，
+# 「文本模型配置」页完全看不见 ⇒ 用户看到的是「明明配了 9 条，降级链却只有
+# 3 条」，只能靠翻日志。本组函数把既有判定收敛为**单一只读访问器**，
+# 供启动报告与 /ai/configs-health 共用，不新增任何存储、不改任何选路行为。
+def provider_health_snapshot(provider_name: str, model: str = "",
+                             config_id: str = "", base_url: str = "") -> dict:
+    """某个配置身份的运行时健康快照（只读，fail-soft 永不为空）。
+
+    返回：``{"samples": int, "success_rate": float|None, "dead": bool,
+             "circuit_open": bool, "cooldown_remaining_s": float,
+             "quota_cooldown_s": float}``。
+
+    ⚠️ 判据单一事实源：dead 走 ``_is_dead_provider``、熔断走
+    ``circuit_breaker.allow_request``、冷却走 ``_quota_cooldown_active``——
+    与运行时选路逐字同源，绝不另写一套阈值（否则界面说的和实际做的不一致）。
+    """
+    pname = (provider_name or "").strip()
+    out: dict = {"samples": 0, "success_rate": None, "dead": False,
+                 "circuit_open": False, "cooldown_remaining_s": 0.0,
+                 "quota_cooldown_s": 0.0}
+    try:
+        total, rate = _provider_reliability_snapshot(pname, model, config_id, base_url)
+        out["samples"] = total
+        out["success_rate"] = rate
+        out["dead"] = _is_dead_provider(pname, model, config_id, base_url)
+    except Exception:  # noqa: BLE001 - 快照失败不影响调用方主流程
+        pass
+    try:
+        from app.services.ai.workflows_base import circuit_breaker
+        out["circuit_open"] = not circuit_breaker.allow_request(pname)
+        out["cooldown_remaining_s"] = round(
+            circuit_breaker.cooldown_remaining(pname), 1)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if QUOTA_FAIL_COOLDOWN > 0 and _quota_cooldown_active(pname):
+            out["quota_cooldown_s"] = round(
+                max(0.0, _quota_cool_until.get(pname, 0.0) - time.time()), 1)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+async def report_dead_configs_at_startup() -> list[dict]:
+    """启动期死配置报告（R103）：把预热后的内存统计翻译成可行动清单。
+
+    动机：``warmup_reliability_from_db`` 恢复的是**统计**，而死配置判定
+    （``_is_dead_provider``）发生在每次选路时——「重启后哪些配置一上来就
+    会被剔除」此前无可观测输出。生产实证（R102 基线）：4 条 nvidia 死配置
+    （HTTP 404 UnsupportedModel）与 volcengine 不支持 coding plan 的模型
+    长期占据候选池，每次冷启动都先白打一轮。
+
+    实现：枚举 ``ai_config`` 全部行，逐行走 ``provider_health_snapshot``
+    （身份键解析与运行时选路**同一函数**：库里有 config_id ⇒ ``cfg:{id}``
+    键，绝不自己拼键——自己拼必然与运行时错位）。**只读日志、零行为
+    变更**：不剔除、不禁用、不写库，仅把死配置身份逐条 WARNING，引导用户
+    去「文本模型配置」清理（或接运行时厂商开关）。fail-soft：任何异常只记
+    debug，绝不阻断启动。
+    """
+    dead: list[dict] = []
+    try:
+        conn = await get_conn()
+        cur = await conn.execute(
+            "SELECT id, provider_name, model, base_url FROM ai_config")
+        rows = await cur.fetchall()
+        for r in rows:
+            cid = str(r["id"] or "")
+            pname = str(r["provider_name"] or "")
+            model = str(r["model"] or "")
+            url = str(r["base_url"] or "")
+            snap = provider_health_snapshot(pname, model, cid, url)
+            if not snap.get("dead"):
+                continue
+            dead.append({"config_id": cid, "provider_name": pname,
+                         "model": model, "base_url": url,
+                         "samples": snap.get("samples", 0),
+                         "success_rate": snap.get("success_rate")})
+            # ✅ R111（P2-2 · 门槛倒挂透明化）：死配置「复活循环」可观测。
+            det_dead = _det_dead_streak.get(
+                _reliability_key(pname, model, cid, url), 0) >= DET_DEAD_STREAK_THRESHOLD
+            total, _rate = _provider_reliability_snapshot(pname, model, cid, url)
+            if not det_dead and total < _PROVIDER_DEAD_MIN_SAMPLES:
+                logger.info(
+                    "启动检查：死配置 %s/%s 样本仅 %d 次（< 死配置门槛 %d），"
+                    "本轮判死主要靠确定性 404 连击而非统计口径 —— 重启后 24h 内"
+                    "无新调用将随滑窗自然复活，建议直接清理该配置或接运行时"
+                    "厂商开关禁用（scheme=%s）",
+                    pname, model or "?", total, _PROVIDER_DEAD_MIN_SAMPLES,
+                    snap.get("samples", total))
+
+
+        if dead:
+            logger.warning(
+                "启动检查：%d 条 AI 配置近 24h 实时成功率过低，"
+                "已被自动剔除出降级链（建议到「文本模型配置」清理或禁用）：%s",
+                len(dead),
+                "; ".join(f"{d['provider_name']}/{d['model'] or '?'}"
+                          f"（{d['samples']} 次样本，成功率 "
+                          f"{(d['success_rate'] or 0):.0%}）" for d in dead[:8]))
+        else:
+            logger.info("启动检查：无实时成功率过低的死配置（近 24h）")
+    except Exception as e:  # noqa: BLE001 - 报告失败绝不影响启动
+        logger.debug("启动死配置报告失败（不影响服务）: %s", e)
+        return []
+    return dead
+
+
 def _is_dead_provider(provider_name: str, model: str = "",
                       config_id: str = "", base_url: str = "") -> bool:
-    """死配置判定：样本充足且实时成功率低于 ``_PROVIDER_DEAD_SUCCESS_RATE``。"""
+    """死配置判定：样本充足且实时成功率低于 ``_PROVIDER_DEAD_SUCCESS_RATE``。
+
+    ✅ R108（P1-4）：新增**确定性死配置**前置判据——连续 ≥
+    ``DET_DEAD_STREAK_THRESHOLD`` 次命中 UnsupportedModel/
+    InvalidEndpointOrModel 签名即判死（重放必败，不必等统计口径攒样本，
+    也不会被滑窗折半稀释）。``provider_health_snapshot`` / 启动报告 /
+    前端健康列均复用本函数，判据自动同口径。
+    """
+    key = _reliability_key(provider_name, model, config_id, base_url)
+    with _provider_reliability_lock:
+        if _det_dead_streak.get(key, 0) >= DET_DEAD_STREAK_THRESHOLD:
+            return True
     total, rate = _provider_reliability_snapshot(
         provider_name, model, config_id, base_url)
     return (rate is not None and total >= _PROVIDER_DEAD_MIN_SAMPLES
@@ -2109,7 +2420,7 @@ async def flush_provider_state_to_db() -> None:
         writes.append((pname, _STATE_KIND_CB, json.dumps(entry)))
     if not writes:
         return
-    try:
+    async def _snapshot_tx_once() -> None:
         async with write_tx_conn() as conn:
             for pname, kind, payload in writes:
                 await conn.execute(
@@ -2122,6 +2433,13 @@ async def flush_provider_state_to_db() -> None:
             await conn.execute(
                 "DELETE FROM ai_provider_state "
                 "WHERE datetime(updated_at, '+24 hours') < datetime('now','localtime')")
+
+    try:
+        # ✅ R108（P1-2 锁族同源）：UPSERT/DELETE 均幂等，整事务接 retry_db_op
+        #    ——批量生成写锁窗口内快照曾零重试直通 WARNING（冷却/熔断状态
+        #    跨重启恢复链就此断）。耗尽仍失败则维持既有 fail-soft WARNING。
+        await retry_db_op(_snapshot_tx_once, max_retries=4, base_delay=0.1,
+                          jitter=0.05)
         logger.debug("Provider 状态快照写入 ai_provider_state（%d 行）", len(writes))
     except Exception as e:
         logger.warning("Provider 状态快照写入失败（不影响主流程）: %s", e)
@@ -2557,6 +2875,7 @@ async def _attempt_candidate(c: dict, messages: list, *,
                     concurrency_controller.adjust_concurrency()
                     circuit_breaker.record_success(pname)
                     _note_quota_success(pname)   # ✅ O2：成功即清除配额冷却
+                    clear_thinking_dead(pname)   # ✅ R110（P1-2）：成功即清除思考吞噬冷却
                     # ✅ 修复：成功路径补齐 token 用量（原实现不传，用量统计恒为 0）
                     u = extract_usage(provider)
                     await _log_audit(pname, c.get("model", ""), "chat", duration, True,
@@ -2636,6 +2955,15 @@ async def _attempt_candidate(c: dict, messages: list, *,
                             #    test_cap_blocks_second_retry 的意图对齐。
                             _retry_thinking = False
                             continue
+                    # ✅ R110（P1-2 · 思考吞噬翻倍失败标记冷却）：
+                    #    1) 已重试一次（_retry_thinking 已 False）后仍
+                    #       _is_thinking_exhausted → 翻倍失败；
+                    #    2) 翻倍前已达上限（nxt <= mt，无法 continue）→
+                    #       无法重试的思考吞噬。
+                    #    两种情况都标记该 provider 短时冷却，降级链后续候选
+                    #    在 _gate_candidates 跳过（与配额冷却同口径）。
+                    if _is_thinking_exhausted(e):
+                        _note_thinking_dead(pname)
                     # ✅ 2026-09-22（调用次数优化 O2）：配额类错误记入冷却窗口，
                     #    窗口内该 provider 的后续调用直接跳过（不再打配额）。
                     if QUOTA_FAIL_COOLDOWN > 0 and _is_quota_error(e):
@@ -2731,8 +3059,16 @@ async def _gate_candidates(candidates: list[dict],
     skipped_key_broken = 0
     skipped_cb = 0
     skipped_disabled = 0
+    skipped_thinking = 0
     _disabled = await resolve_disabled_providers()
     last_err: Exception | None = None
+
+    # ✅ R110（P1-1 · 跨章全熔断快速失败）：连续 N 次所有候选不可用后，
+    #    短时快速失败不再 probe（R109 实证 5 章各自 probe 空转 150-300s）。
+    if _is_all_circuit_fast_fail():
+        raise RuntimeError(
+            "全熔断快速失败：连续多次所有 Provider 不可用，"
+            f"等待 {int(ALL_CIRCUIT_FAST_FAIL_COOLDOWN)}s 恢复后重试")
 
     for c in candidates:
         pname = c.get("provider_name", "?")
@@ -2755,11 +3091,30 @@ async def _gate_candidates(candidates: list[dict],
             if last_err is None:
                 last_err = RuntimeError(f"Provider {pname} 已被运行时开关禁用")
             continue
+        if _is_thinking_dead(pname):
+            # ✅ R110（P1-2）：思考吞噬翻倍失败的 provider 短时冷却，
+            #    与配额冷却同走 circuit_skipped 审计口径。
+            skipped_thinking += 1
+            logger.info("思考吞噬冷却中，跳过 %s（冷却 %ds）",
+                        pname, int(THINKING_DEAD_COOLDOWN))
+            await _log_audit(pname, c.get("model", ""), "circuit_skipped", 0.0,
+                             False, error="思考吞噬冷却，跳过本次调用", scene=scene,
+                             config_id=c.get("config_id", ""),
+                             base_url=c.get("base_url", ""))
+            if last_err is None:
+                last_err = RuntimeError(f"Provider {pname} 处于思考吞噬冷却中")
+            continue
         if QUOTA_FAIL_COOLDOWN > 0 and _quota_cooldown_active(pname):
             skipped_cb += 1
             cb_skipped.append(c)
-            logger.warning("配额冷却中，跳过 %s（冷却窗口 %ds）",
-                           pname, int(QUOTA_FAIL_COOLDOWN))
+            # ✅ R103（2026-10-18 · 可观测性降噪）：配额冷却是**设计内的节流**
+            #    （冷却窗口内少打请求、每 QUOTA_PROBE_EVERY 秒放行一次探测），
+            #    不是异常。生产实证（R102 日志基线）：此类跳过单窗口 422 条
+            #    WARNING，占全部 WARNING 的 50%，把真实问题淹没了。按 R11
+            #    「正常控制流不得以 WARNING 刷屏」先例降为 INFO（审计行
+            #    circuit_skipped 不变，数据链完整可查）。
+            logger.info("配额冷却中，跳过 %s（冷却窗口 %ds）",
+                        pname, int(QUOTA_FAIL_COOLDOWN))
             await _log_audit(pname, c.get("model", ""), "circuit_skipped", 0.0,
                              False, error="配额冷却，跳过本次调用", scene=scene,
                              config_id=c.get("config_id", ""),
@@ -2770,7 +3125,8 @@ async def _gate_candidates(candidates: list[dict],
         if not circuit_breaker.allow_request(pname):
             skipped_cb += 1
             cb_skipped.append(c)
-            logger.warning("熔断器 OPEN，跳过 %s", pname)
+            # ✅ R103：同上——熔断 OPEN 是自愈机制的设计内状态，非异常。
+            logger.info("熔断器 OPEN，跳过 %s", pname)
             await _log_audit(pname, c.get("model", ""), "circuit_skipped", 0.0,
                              False, error="熔断器 OPEN，跳过本次调用", scene=scene,
                              config_id=c.get("config_id", ""),
@@ -2781,7 +3137,12 @@ async def _gate_candidates(candidates: list[dict],
         usable.append(c)
 
     if usable:
+        # ✅ R110（P1-1）：gate 放行非空候选 → 重置全熔断计数
+        _record_all_circuit_outcome(success=True)
         return usable, last_err
+
+    # ✅ R110（P1-1）：usable 为空 = 所有候选被门禁跳过 → 计入全熔断计数
+    _record_all_circuit_outcome(success=False)
 
     if (skipped_disabled > 0 and skipped_cb == 0 and skipped_no_key == 0
             and skipped_key_broken == 0):
@@ -2937,6 +3298,8 @@ async def chat_with_fallback(messages: list, ai_config: dict | None = None, *,
                         other.cancel()
                     await asyncio.gather(*list(pending), return_exceptions=True)
                     pending.clear()
+                # ✅ R110（P1-1）：调用成功 → 重置全熔断快速失败计数
+                _record_all_circuit_outcome(success=True)
                 return winner
 
             # 有空位且仍有候选 → 立即补位（失败快速返回时无需等对冲延迟）

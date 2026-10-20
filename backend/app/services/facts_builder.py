@@ -209,6 +209,7 @@ def _render_facts_text(
     rows: list, *, relevant_to: dict | None = None,
     max_total: int = 6000, per_fact: int = 300,
     chapter: str = "",
+    audit_out: list | None = None,
 ) -> str:
     """把 global_facts 行渲染为「项目关键事实」文本（纯函数，便于单测与逐章精选复用）。
 
@@ -218,6 +219,11 @@ def _render_facts_text(
 
     ✅ 逐章精选（relevant_to，对齐 OpenBidKit 的逐章精选注入）：当传入章节 leaf 时，
     先按章节标题/描述关键字预筛相关性更高的事实；命中为空则回退全量（绝不丢事实）。
+
+    ✅ R102（G3 · 预算丢行可观测）：``audit_out`` 非空时，把因**预算**被丢弃的
+    事实标题逐条追加进去（保底为 0 的行 / 硬上限触顶后的行）。缺省 ``None`` 时
+    零开销、渲染结果与引入前逐字一致 —— 调用方（``fact_injection_audit`` /
+    sse_handlers）据此把「哪几条事实没进提示词」留痕进报告，不再静默。
     """
     if relevant_to is not None:
         rows = _filter_facts_rows(rows, relevant_to)
@@ -279,11 +285,15 @@ def _render_facts_text(
         _body = (content or '')[:per_fact]
         if _row_value_kind(_row) == "requirement":
             _body = _REQUIREMENT_KIND_PREFIX + _body
-        prepared.append((gt, _body, _conf))
+        prepared.append((gt, _title, _body, _conf))
 
     header_cost = sum(len(f"### {g}\n") for g in seen_groups)
     fact_budget = int(max_total) - header_cost
-    fact_lens = [len(c) + 1 for _g, c, _cf in prepared]  # +1 换行
+    # ✅ R105 收口（2026-10-18）：prepared 自 R102（G3 留痕）起为 4 元组
+    #    (gt, title, body, conf)——L319 消费循环已同步，本行漏改导致
+    #    **任何非空事实行**直接 ValueError: too many values to unpack
+    #    （正文含全局事实的方案一章都生成不出来）。
+    fact_lens = [len(c) + 1 for _g, _ft, c, _cf in prepared]  # +1 换行
     n = len(prepared)
     allocs = [0] * n
     if n and fact_budget > 0:
@@ -310,9 +320,12 @@ def _render_facts_text(
     parts: list[str] = []
     total = 0
     _cur_gt = None
-    for (gt, body, _conf), alloc in zip(prepared, allocs):
+    for (gt, _ftitle, body, _conf), alloc in zip(prepared, allocs):
         if alloc <= 0:
             # 该条连保底都没拿到：跳过（组标题也不应为此单独出现）
+            # ✅ R102（G3）：预算丢行留痕（audit_out 非空时记录标题）。
+            if audit_out is not None:
+                audit_out.append(str(_ftitle or gt or ""))
             continue
         if gt != _cur_gt:
             header = f"### {gt}\n"
@@ -333,11 +346,80 @@ def _render_facts_text(
         # 硬上限：按实际剩余预算夹一次（组标题开销与低置信度前缀都计入）
         room = max_total - total - len(prefix) - 1
         if room <= 0:
+            # ✅ R102（G3）：硬上限触顶后的整批丢弃同样留痕。
+            if audit_out is not None:
+                audit_out.append(str(_ftitle or gt or ""))
             continue
         fact = prefix + body[:max(0, min(alloc - 1, room))] + "\n"
         parts.append(fact)
         total += len(fact)
     return "".join(parts)
+
+
+def chapter_fact_mapping(sections: list, facts_rows: list) -> list:
+    """显式「章节 → 所需事实」映射表（R102 · G4 唯一出口）。
+
+    对每个传入章节，用与正文注入**同一判据**（:func:`_filter_facts_rows` 的
+    相关性预筛）列出其应注入的事实标题清单 —— 不复制任何筛选逻辑，
+    本函数就是该判据的**声明式视图**，供审计 / 前端展示 / 测试断言消费：
+    正文逐章注入的 ``fact_audit.chapter_facts``（sse 侧）与全方案视角
+    （终态 ``fact_mapping``）都由本出口供给，两侧天然 parity。
+
+    只读纯函数：不落库、不渲染、绝不抛异常（坏行按空串兜底）。
+
+    Returns:
+        ``[{section_id, title, fact_titles: [...], fact_count: n}, ...]``
+        （与入参 ``sections`` 同序）。
+    """
+    out: list[dict] = []
+    for sec in (sections or []):
+        if not isinstance(sec, dict):
+            continue
+        relevant = _filter_facts_rows(list(facts_rows or []), sec)
+        titles: list[str] = []
+        for r in relevant:
+            try:
+                t = str(r[1] or "") if len(r) > 1 else ""
+            except (TypeError, IndexError):
+                t = ""
+            if t:
+                titles.append(t)
+        out.append({
+            "section_id": str(sec.get("id") or ""),
+            "title": str(sec.get("title") or ""),
+            "fact_titles": titles,
+            "fact_count": len(titles),
+        })
+    return out
+
+
+def fact_injection_audit(rows: list, *, leaf: dict | None = None,
+                         chapter: str = "",
+                         max_total: int = 6000,
+                         per_fact: int = 300) -> dict:
+    """单次事实注入的**审计视图**（R102 · G3 留痕的公开出口）。
+
+    与 :func:`_render_facts_text` 共用同一次渲染（不重复扫描、不复制判据）：
+    内部调用同函数并接收 ``audit_out``，把「因预算被丢弃的事实标题」如实
+    带回。sse 侧正文生成走本出口取渲染文本 + 审计数据（替代裸调
+    ``_render_facts_text``），保证「注入了什么 / 丢了什么」单一来源。
+
+    Returns:
+        ``{rows_total, budget_dropped, budget_dropped_count,
+        rendered_chars, rendered_text}``。``rendered_text`` 与
+        ``_render_facts_text(...)`` 返回**逐字节一致**。
+    """
+    dropped: list[str] = []
+    text = _render_facts_text(
+        list(rows or []), relevant_to=leaf, chapter=chapter,
+        max_total=max_total, per_fact=per_fact, audit_out=dropped)
+    return {
+        "rows_total": len(rows or []),
+        "budget_dropped": dropped,
+        "budget_dropped_count": len(dropped),
+        "rendered_chars": len(text),
+        "rendered_text": text,
+    }
 
 
 async def _load_facts_rows(db, scheme_id: str) -> list:

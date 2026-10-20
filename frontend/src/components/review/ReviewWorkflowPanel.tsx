@@ -254,16 +254,21 @@ function ReviewWorkflowPanel({
             //    skipped（状态机拦截）/ not_found（章节不存在）/ nochange（已是
             //    目标态）/ truncated（超 500 截断）全部静默吞掉 —— 部分失败时
             //    用户以为全部生效。现把明细拼进反馈，有偏差时降级为 warning。
+            // ✅ R95（2026-10-17）：后端批量 UPDATE 改 compare-and-set 后新增
+            //    conflicts（读后写窗口内被并发方改写）—— 同样必须如实反馈，
+            //    老后端无该字段时按空数组处理（向后兼容）。
             const changed: number = data.changed ?? 0;
             const skippedN: number = (data.skipped ?? []).length;
             const notFoundN: number = (data.not_found ?? []).length;
             const nochangeN: number = (data.nochange ?? []).length;
+            const conflictN: number = (data.conflicts ?? []).length;
             const parts: string[] = [];
             if (skippedN) parts.push(`${skippedN} 个被状态机拦截`);
             if (notFoundN) parts.push(`${notFoundN} 个章节不存在`);
             if (nochangeN) parts.push(`${nochangeN} 个已是目标状态`);
+            if (conflictN) parts.push(`${conflictN} 个被并发操作修改未生效，请刷新后重试`);
             if (data.truncated) {
-              const dropped = Math.max(0, (data.total_ids ?? 0) - changed - skippedN - notFoundN - nochangeN);
+              const dropped = Math.max(0, (data.total_ids ?? 0) - changed - skippedN - notFoundN - nochangeN - conflictN);
               parts.push(dropped > 0 ? `超出单次上限未处理 ${dropped} 个` : "超出单次上限部分未处理");
             }
             const detail = parts.length ? `，${parts.join("、")}` : "";

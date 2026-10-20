@@ -140,6 +140,23 @@ def normalize_architecture_tree(data: Any) -> dict | None:
                 }
     if not (root.get("label") or root.get("name") or root.get("children")):
         return None
+    # ✅ BUG 修复（2026-10-17 · 导出文档发现的问题）：**有子节点、无标签**的根节点
+    #    旧实现直接放行，渲染出的根节点框**纯色空白无字**（实测第 7 章「组织架构图」
+    #    顶部框体只有底色、没有文本，图题却是"图 7-1 模板工程验收组织架构图"）。
+    #    根因：AI 产出的载荷根节点只有 children（`{"children":[…]}` / 嵌套
+    #    `{"root":{"children":[…]}}`），其 label/name 为空串或缺失，而归档后的根节点
+    #    仍被布局按真实节点绘制。这里按**载荷兜底**补齐根标签：优先沿用载荷自带
+    #    的 title / root 字符串 / name，仍缺失时退回与渲染器同款默认「组织架构图」，
+    #    保证根框恒有字；归一与渲染共用本函数，故校验侧与渲染侧口径一致。
+    _cur = root.get("label") or root.get("name")
+    if _cur is None or not str(_cur).strip():
+        _fallback = ""
+        for _key in ("title", "root", "name"):
+            _v = data.get(_key)
+            if isinstance(_v, str) and _v.strip():
+                _fallback = _v.strip()
+                break
+        root = {**root, "label": _fallback or "组织架构图"}
     return _coerce_arch_children(root)
 
 

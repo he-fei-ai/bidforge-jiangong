@@ -32,6 +32,31 @@ from app.routers import (
     upload_outline,
 )
 
+# ✅ R102（2026-10-18 · 日志审计收口）：控制台流编码统一。
+#    生产实证（backend_err.log / backend_out.log，2026-10-01 快照）：全部
+#    1412 行含中文的日志均为 GBK 字节（Windows locale 默认编码），而生产
+#    文件 handler（SafeRotatingFileHandler encoding="utf-8"）写出的
+#    logs/backend.log 是 UTF-8 —— 同一系统两种编码，任何按 UTF-8 假设的
+#    日志工具（ELK / grep -P / 本仓分析脚本）解析重定向日志即得乱码，
+#    编码探测失败时还会整文件解码失败（实测 utf-8 decode 在 0xd5 处崩）。
+#    修复：仅当 stdout/stderr **被重定向**（非 TTY）时 reconfigure 为
+#    UTF-8 —— 重定向场景按 UTF-8 落盘供工具链解析；TTY 场景保持 locale
+#    编码不变，实时控制台中文显示零回归（GBK 代码页下不会出现乱码）。
+#    reconfigure 为原地修改，uvicorn handler 已持有的 stream 引用同步生效。
+try:
+    import sys as _sys_for_enc
+
+    for _stream_name in ("stdout", "stderr"):
+        _stream = getattr(_sys_for_enc, _stream_name, None)
+        if _stream is not None and hasattr(_stream, "reconfigure") \
+                and not _stream.isatty():
+            try:
+                _stream.reconfigure(encoding="utf-8")
+            except (ValueError, OSError):  # noqa: BLE001 - 特殊流形态不强求
+                pass
+except Exception:  # noqa: BLE001 - 编码调整绝不影响服务启动
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -48,21 +73,55 @@ try:
     #    —— 生产日志与测试日志混在一起，P95/P99、ERROR Top、HTTP 端点延迟等
     #    排障口径全部失真（唯一日志源被污染，且轮转配额被测试日志消耗）。
     #    生产进程不受影响（无 pytest 模块、无 PYTEST_CURRENT_TEST）。
+    # ✅ R108（2026-10-18 · 日志审计 P2-1 · 污染面闭合）：上述 pytest 守卫
+    #    只挡得住 pytest 进程；生产实证 backend.log 2026-10-18 11:32 仍有
+    #    "TestClient" 请求行——**非 pytest 的独立验证脚本**（artifacts 下
+    #    ab_/e2e 类，直接 `from fastapi.testclient import TestClient`）
+    #    绕过守卫把测试流量写进生产日志。修法两层：
+    #    ① 守卫增加 starlette.testclient 模块检测（用 TestClient 必先 import
+    #       它，比 argv/环境变量判定可靠；uvicorn 生产进程永不出现）；
+    #    ② 安装点从「仅模块级」扩为「模块级 + lifespan 首行」双点幂等——
+    #       脚本先 import app.main 再 import TestClient 时模块级守卫拦不住，
+    #       但 lifespan（TestClient with 上下文触发）此刻 starlette.testclient
+    #       必已在 sys.modules，第二道闸 100% 生效。
+    #    逃生开关 ALLOW_FILE_LOG_IN_TESTCLIENT=1 供调试脚本主动落盘。
     import os as _os
     import sys as _sys
 
     from app.config import LOGS_DIR as _LOGS_DIR
     from app.utils.safe_log_handler import SafeRotatingFileHandler
-    if _os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in _sys.modules:
-        pass   # 测试进程：日志走 caplog / 控制台，不写生产文件
-    else:
+
+    _file_log_handler_installed = False
+
+    def _should_skip_file_log() -> bool:
+        """测试/验证进程返回 True（不挂生产文件 handler）。"""
+        if _os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in _sys.modules:
+            return True
+        if "starlette.testclient" in _sys.modules:
+            if _os.environ.get("ALLOW_FILE_LOG_IN_TESTCLIENT") == "1":
+                return False
+            return True
+        return False
+
+    def _install_production_file_log_handler() -> None:
+        """挂 logs/backend.log 轮转 handler（幂等，测试进程跳过）。
+
+        ✅ R108：SafeRotatingFileHandler 轮转失败降级追加写（2026-09-23 事故）；
+        安装点双闸见上方注释。任何异常绝不影响服务启动（外层 try 兜底）。
+        """
+        global _file_log_handler_installed
+        if _file_log_handler_installed or _should_skip_file_log():
+            return
         _LOGS_DIR.mkdir(parents=True, exist_ok=True)
-        _file_handler = SafeRotatingFileHandler(
+        _fh = SafeRotatingFileHandler(
             _LOGS_DIR / "backend.log",
             maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
-        _file_handler.setFormatter(logging.Formatter(
+        _fh.setFormatter(logging.Formatter(
             "%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-        logging.getLogger().addHandler(_file_handler)
+        logging.getLogger().addHandler(_fh)
+        _file_log_handler_installed = True
+
+    _install_production_file_log_handler()
 except Exception:  # noqa: BLE001 - 日志落盘失败绝不影响服务启动
     pass
 
@@ -72,6 +131,19 @@ except Exception:  # noqa: BLE001 - 日志落盘失败绝不影响服务启动
 try:
     from app.utils.log_context import install_filter
     install_filter(logging.getLogger())
+    # ✅ R102（2026-10-18 · 日志审计收口）：uvicorn 自带 handler 的
+    #    `uvicorn` / `uvicorn.access` 两个 logger 是 propagate=false + 自有
+    #    handler → 访问日志**不过** root 的 TraceContextFilter，访问行恒缺
+    #    [trace=…]。生产实证（backend_err.log 2026-10-01）：1952 条请求中
+    #    613 条 /health 只以无 trace 的 uvicorn 访问行存在，grep trace 串链
+    #    时这部分请求凭空消失（埋点缺口）。uvicorn 的 logging 配置在其
+    #    Config.__init__ 阶段完成、早于 app import，故此处补挂 filter 生效
+    #    且不会被覆盖（幂等，重复 import 不重复挂）。
+    for _uv_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+        try:
+            install_filter(logging.getLogger(_uv_name))
+        except Exception:  # noqa: BLE001 - 单个 logger 挂载失败不影响其它
+            pass
 except Exception:  # noqa: BLE001
     pass
 logger = logging.getLogger("main")
@@ -103,6 +175,14 @@ async def _run_startup_orphan_export_gc() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # ✅ R108（P2-1）：第二道安装点——脚本先 import app.main 后 import
+    #    TestClient 时模块级守卫漏拦，但走到这里 starlette.testclient 必已
+    #    在 sys.modules（TestClient with 上下文才触发 lifespan），闸 100% 生效；
+    #    生产 uvicorn / --reload 子进程同样走 lifespan，正常挂 handler（幂等）。
+    try:
+        _install_production_file_log_handler()
+    except Exception:  # noqa: BLE001 - 日志落盘失败绝不影响服务启动
+        pass
     logger.info("正在初始化数据库...")
     await init_db()
     logger.info("数据库初始化完成")
@@ -222,6 +302,19 @@ async def lifespan(app: FastAPI):
         await warmup_reliability_from_db()
     except Exception as e:
         logger.warning("预热 Provider 可靠性统计失败（不影响服务）: %s", e)
+
+    # ✅ R103（2026-10-18 · 日志审计遗留 L1 收口）：预热之后立刻把
+    #    「近 24h 实时成功率过低、一上来就会被剔除出降级链」的死配置身份
+    #    逐条 WARNING。此前该判定只发生在每次选路的内存里、无可观测输出——
+    #    生产实证（R102 基线）：4 条 nvidia 死配置（HTTP 404
+    #    UnsupportedModel）+ volcengine 不支持 coding plan 的模型长期占据
+    #    候选池，用户端只见「降级链 9→3」不知该清理谁。**只读日志、
+    #    零行为变更**（不剔除/不禁用/不写库）。fail-soft。
+    try:
+        from app.services.ai.provider_factory import report_dead_configs_at_startup
+        await report_dead_configs_at_startup()
+    except Exception as e:
+        logger.warning("启动死配置报告失败（不影响服务）: %s", e)
 
     # ✅ 2026-10-05：Provider 运行时状态预热（配额冷却 / 熔断）——
     #    补齐「重启即遗忘」缺口：cool_until 与 circuit breaker state 是

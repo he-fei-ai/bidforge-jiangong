@@ -321,40 +321,45 @@ class TestSyncExtractLayerR13:
         assert fake.hit
         assert res["extract_status"] in ("success", "pending")
 
-    def test_both_updates_are_guarded(self):
-        """静态锁：两条 UPDATE 的结果必须被 None 检查（防再漏）。"""
-        from app.services.doc_pipeline import pipeline as _pl
-        src = textwrap.dedent(inspect_getsource(_pl.sync_extract_layer))
-        tree = ast.parse(src)
-        guarded = 0
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Await)):
-                continue
-            call = node.value.value
-            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)):
-                continue
-            if call.func.attr != "execute":
-                continue
-            sql = call.args[0] if call.args else None
-            if not (isinstance(sql, ast.JoinedStr) or isinstance(sql, ast.Constant)):
-                continue
-            if isinstance(sql, ast.Constant):
-                # 纯字符串字面量（非 f-string）：SQL 在 .value 里
-                text = sql.value if isinstance(sql.value, str) else ""
-            else:
-                text = "".join(v.value for v in sql.values
-                               if isinstance(v, ast.Constant))
-            if "UPDATE doc_extractions SET status='stale'" not in text \
-                    and "UPDATE project_documents SET extract_status" not in text:
-                continue
-            target = node.targets[0]
-            name = target.id if isinstance(target, ast.Name) else ""
-            if not name:
-                continue
-            if f"if {name} is None:" not in src:
-                raise AssertionError("UPDATE 结果 %s 未判空" % name)
-            guarded += 1
-        assert guarded == 2, "两条 UPDATE 都应判空，实际 %d" % guarded
+
+def test_both_updates_are_guarded():
+    """静态锁：两条 UPDATE 的结果必须被 None 检查（防再漏）。
+
+    模块级函数而非 async 用例：R79 复核把它留在 ``@pytest.mark.asyncio``
+    类里会触发 pytest 警告（标记与函数形态不符），噪音会掩盖真实告警。
+    """
+    from app.services.doc_pipeline import pipeline as _pl
+    src = textwrap.dedent(inspect_getsource(_pl.sync_extract_layer))
+    tree = ast.parse(src)
+    guarded = 0
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Await)):
+            continue
+        call = node.value.value
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)):
+            continue
+        if call.func.attr != "execute":
+            continue
+        sql = call.args[0] if call.args else None
+        if not (isinstance(sql, ast.JoinedStr) or isinstance(sql, ast.Constant)):
+            continue
+        if isinstance(sql, ast.Constant):
+            # 纯字符串字面量（非 f-string）：SQL 在 .value 里
+            text = sql.value if isinstance(sql.value, str) else ""
+        else:
+            text = "".join(v.value for v in sql.values
+                           if isinstance(v, ast.Constant))
+        if "UPDATE doc_extractions SET status='stale'" not in text \
+                and "UPDATE project_documents SET extract_status" not in text:
+            continue
+        target = node.targets[0]
+        name = target.id if isinstance(target, ast.Name) else ""
+        if not name:
+            continue
+        if f"if {name} is None:" not in src:
+            raise AssertionError("UPDATE 结果 %s 未判空" % name)
+        guarded += 1
+    assert guarded == 2, "两条 UPDATE 都应判空，实际 %d" % guarded
 
 
 async def db_execute(db, sql, params=()):
@@ -500,3 +505,127 @@ class TestMaxDocCharsConfig:
                         assert " or " not in seg, (
                             "_MAX_DOC_CHARS 仍用 or 读取配置：%s" % seg)
                         assert "is None" in seg, "必须显式判 None"
+
+
+# ---------------------------------------------------------------------------
+# F 组（S1）· 多页 TIFF 帧拼接必须带页码标记
+# ---------------------------------------------------------------------------
+class _FakeOcrResult:
+    def __init__(self, text):
+        self.text = text
+
+
+class TestTiffPageMarkers:
+    """修复前：多页 TIFF 直接 ``"\n".join(parts)`` ⇒ 全部帧归到第 1 页。
+
+    危害链（实测口径）：`md_structured` 的表格/图片按页关联失效、
+    `project_documents.page_count` 恒为 1、完整性报告 total_pages 失真、
+    `doc_chunks.page_num` 全部错位。PDF 通道一直走 `_add_page_markers`，
+    图片通道是唯一漏网点 —— 本组把两条通道收敛到同一出口。
+    """
+
+    @pytest.fixture
+    def patched(self, monkeypatch):
+        import app.services.file_parser as fp
+        import app.services.ocr as ocr
+        monkeypatch.setattr(fp, "_split_tiff_frames",
+                            lambda content: [b"f1", b"f2", b"f3"])
+
+        def _fake_ocr_bytes(frame):
+            idx = {b"f1": 1, b"f2": 2, b"f3": 3}[frame]
+            return _FakeOcrResult(f"第{idx}页内容")
+
+        # ocr_bytes_sync 在 _parse_image_ocr 内部 import，patch 模块属性即可
+        monkeypatch.setattr(ocr, "ocr_bytes_sync", _fake_ocr_bytes)
+        return fp
+
+    def test_markers_injected_per_frame(self, patched):
+        diag = {}
+        out = patched._parse_image_ocr(b"II*", "tiff", diag)
+        for n in (1, 2, 3):
+            assert f"<!-- page:{n} -->" in out, (
+                f"第 {n} 帧缺页码标记（内容会被错记到第 1 页）")
+        assert out.index("<!-- page:1 -->") < out.index("<!-- page:2 -->")
+
+    def test_content_preserved(self, patched):
+        diag = {}
+        out = patched._parse_image_ocr(b"II*", "tiff", diag)
+        for n in (1, 2, 3):
+            assert f"第{n}页内容" in out, "页码标记不得吞掉正文"
+
+    def test_partial_frames_still_marked(self, patched, monkeypatch):
+        """中间帧识别失败：已识别帧仍按各自页码标记，缺帧不得错位。"""
+        import app.services.file_parser as fp
+        import app.services.ocr as ocr
+
+        def _flaky(frame):
+            if frame == b"f2":
+                raise RuntimeError("模拟帧级识别失败")
+            return _FakeOcrResult(f"第{1 if frame == b'f1' else 3}页内容")
+
+        monkeypatch.setattr(ocr, "ocr_bytes_sync", _flaky)
+        diag = {}
+        out = fp._parse_image_ocr(b"II*", "tiff", diag)
+        assert "<!-- page:1 -->" in out and "<!-- page:3 -->" in out
+        assert "<!-- page:2 -->" not in out, "未识别帧不得凭空生成页码标记"
+
+    def test_no_bare_join_left(self):
+        """静态锁：多页 TIFF 分支不得再出现裸 join（防止判据被抄第二份）。"""
+        src = _read(os.path.join(os.path.dirname(_BA_PATH), "..", "services",
+                                "file_parser.py"))
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                    and node.name == "_parse_image_ocr":
+                seg = ast.get_source_segment(src, node) or ""
+        assert "_add_page_markers(" in seg, "TIFF 多帧路径必须复用页码标记单一出口"
+        assert 'return "\\n".join(parts)' not in seg, (
+            "不得再出现裸 join（帧号即页号，缺标记即溯源失真）")
+
+
+# ---------------------------------------------------------------------------
+# G 组（S3）· 重置重跑的主键/域列必须走唯一出口
+# ---------------------------------------------------------------------------
+class TestResetForRerunSingleSource:
+    @pytest.fixture
+    def src(self):
+        return textwrap.dedent(inspect_getsource(ba._reset_items_for_rerun))
+
+    def test_no_handcrafted_pk(self, src):
+        """主键唯一出口纪律：不得手拼 f"{project_id}_{item_id}"。"""
+        assert 'f"{project_id}_{def_' not in src, (
+            "主键必须由 build_item_pk 生成（当前无行为差异，但域一旦启用即分叉）")
+        assert "build_item_pk(" in src
+
+    def test_domain_column_present(self, src):
+        """INSERT 必须与 _update_item_status 同口径写 domain 列（含旧库降级）。"""
+        assert "_bid_analysis_item_cols" in src
+        assert "get_item_domain(" in src
+
+    async def test_row_matches_unique_outlet(self, db_conn):
+        """行为锚点：补齐的行主键与 domain 与唯一出口逐字一致。"""
+        db = db_conn
+        pid = uuid.uuid4().hex
+        await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
+        await db.commit()
+        await ba._reset_items_for_rerun(db, pid, ["projectBasicInfo"])
+        from app.services.bid_analysis_service import build_item_pk, get_item_domain
+        pk = build_item_pk(pid, "projectBasicInfo", get_item_domain("projectBasicInfo"))
+        cur = await db.execute(
+            "SELECT id, status, source FROM bid_analysis_items WHERE id=?", (pk,))
+        row = await cur.fetchone()
+        assert row is not None, "重置重跑必须补齐待跑项的记录"
+        assert row["status"] == "idle" and row["source"] == "ai"
+
+    async def test_idempotent(self, db_conn):
+        """回归：连续两次重置不产生重复行（唯一约束与 exists 判定）。"""
+        db = db_conn
+        pid = uuid.uuid4().hex
+        await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
+        await db.commit()
+        await ba._reset_items_for_rerun(db, pid, ["projectBasicInfo"])
+        await ba._reset_items_for_rerun(db, pid, ["projectBasicInfo"])
+        cur = await db.execute(
+            "SELECT COUNT(*) AS n FROM bid_analysis_items WHERE project_id=?",
+            (pid,))
+        assert (await cur.fetchone())["n"] == 1

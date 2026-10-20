@@ -111,11 +111,18 @@ async def get_snapshot(db, snapshot_id: str) -> dict | None:
 
 
 async def rollback_snapshot(db, snapshot_id: str, *,
-                            undo_type: str = "consistency_rollback") -> dict:
+                            undo_type: str = "consistency_rollback",
+                            resync_fn=None) -> dict:
     """一键回滚：把快照涉及章节的正文恢复为 content_before。
 
     回滚前再存一个"回滚前"快照，保证回滚本身也可撤销；只更新快照内章节。
     undo_type：撤销快照的 type（编号版本管理传 "numbering_rollback" 以隔离场景）。
+
+    ✅ R92（2026-10-17 · 正文写点同步补链）：``resync_fn`` 为可选回调
+    ``async def resync_fn(db, section_id, content) -> None``，在每章正文恢复 UPDATE
+    之后、同事务 commit 之前调用，按恢复后正文全量重登记内联图表（消除「正文回退、
+    登记未回退」的两侧漂移）。本模块属 services 层，不得 import routers，故由调用方
+    （routers）注入。缺省 None 时行为与引入前逐字一致。
     """
     snap = await get_snapshot(db, snapshot_id)
     if not snap:
@@ -163,6 +170,15 @@ async def rollback_snapshot(db, snapshot_id: str, *,
              word_status_for(wc, srow["word_budget"] or DEFAULT_WORD_BUDGET),
              _now(), sid),
             what="repair_record.rollback_snapshot:恢复正文")
+        # ✅ R92：正文恢复后同事务重登记本章内联图表（缺省 resync_fn=None 时不执行，
+        #    与引入前逐字一致）。快照原文当初均经管线落库，重登记为幂等操作。
+        if resync_fn is not None:
+            try:
+                await resync_fn(db, sid, restored_content)
+            except Exception as _re:  # noqa: BLE001 - 登记失败不阻断回滚
+                logger.warning(
+                    "repair_record.rollback_snapshot:章节 %s 图表重登记失败（保留恢复正文）: %s",
+                    str(sid)[:8], _re)
         restored += 1
     await db.commit()
     logger.info("快照 %s 已回滚：恢复 %d 章（撤销快照 %s）",

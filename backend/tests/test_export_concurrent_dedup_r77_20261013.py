@@ -15,10 +15,17 @@ from app.db import close_db, get_conn, init_db
 
 @pytest.fixture
 async def ctx(tmp_path, monkeypatch):
-    """建真实 scheme + 章节；桩掉 _prepare_export 与 DOCX 构建（零真实渲染）。
+    """建真实 scheme + 章节；桩掉 prepare 段与 DOCX 构建（零真实渲染）。
 
     构建桩通过模块属性 ``_build_docx_sync`` 注入：默认写固定字节；测试可替换
     以模拟构建失败（用于验证异常时锁已释放）。
+
+    ✅ R94（2026-10-17 · 缓存命中快速路径）：``_prepare_export`` 已拆成
+    「取数段（本桩替代）+ 渲染段（``_prepare_export_render``）」，缓存查询被夹在
+    两者之间。故本桩必须**同时**替换渲染段，否则真实渲染段会拿本桩返回的精简
+    plan 取 ``chart_lookup`` 抛 KeyError。渲染段被桩掉不影响本文件要锁的不变量：
+    串行化发生在去重锁上（``calls`` 计数的是准备段进入次数），
+    实际构建次数由 ``_build_docx_sync`` 桩独立计数。
     """
     _appdb.DB_PATH = tmp_path / "export_dedup.sqlite"
     await init_db()
@@ -32,8 +39,12 @@ async def ctx(tmp_path, monkeypatch):
         (uuid.uuid4().hex, sid, "Overview"))
 
     calls = []
+    state = {"renders": 0}
 
-    async def fake_prep(sid_arg, body, db_arg):
+    async def fake_prep(sid_arg, body, db_arg, cancel_event=None):
+        # cancel_event：R106 FIX-1 给 _prepare_export 追加的可选形参（取消登记），
+        # 桩必须同样接受，否则路由的真实调用形态 `cancel_event=cancel_ev` 直接
+        # TypeError（本用例测的是去重锁，不是取消链路）。
         calls.append(body["_tag"])
         return {
             "config": body.get("config", {}) or {},
@@ -42,8 +53,20 @@ async def ctx(tmp_path, monkeypatch):
                           "content": "x", "sort_order": 1}],
             "charts": [], "render_stats": {}, "fe_codes": [],
             "chart_fp": [], "fe_images": {}, "rendered_charts": {},
-            "ai_image_pending": 0, "body": body,
+            "chart_lookup": {}, "blocks_cache": {},
+            "rendered_bytes": {}, "image_bytes": {},
+            "ai_image_pending": 0, "ai_image_download_pending": 0,
+            "fences_fixed": 0, "body": body,
         }
+
+    async def fake_render(plan):
+        state["renders"] += 1
+        plan.setdefault("rendered_bytes", {})
+        plan.setdefault("image_bytes", {})
+        plan["render_stats"] = {}
+        plan["ai_image_pending"] = 0
+        plan["ai_image_download_pending"] = 0
+        return plan
 
     def fake_build(*args, **kwargs):
         """DOCX 构建桩：写入固定字节（真实构建走线程池，此处同步写）。"""
@@ -51,12 +74,13 @@ async def ctx(tmp_path, monkeypatch):
         return {"sections": 1, "tables": 0, "figures": 0}
 
     monkeypatch.setattr(export_mod, "_prepare_export", fake_prep)
+    monkeypatch.setattr(export_mod, "_prepare_export_render", fake_render)
     monkeypatch.setattr(export_mod, "_build_docx_sync", fake_build)
     # 不跑真实 DOCX 构建：把构建任务收敛为 (out_path,)，交给上面的桩
     monkeypatch.setattr(export_mod, "_build_docx_task", lambda out, prep: (out,))
     monkeypatch.setattr(export_mod, "EXPORTS_DIR", tmp_path)
     try:
-        yield db, sid, calls, tmp_path
+        yield db, sid, calls, state
     finally:
         await close_db()
 
@@ -152,19 +176,23 @@ class TestConcurrentDedupEndToEnd:
         assert await _count_cache(db, sid) == 1
 
     async def test_second_export_hits_cache_without_rebuilding(self, ctx):
-        db, sid, calls, _ = ctx
+        db, sid, calls, state = ctx
         body = {"config": {}, "_tag": "solo"}
         await export_mod.export_docx(sid, dict(body, _tag="a"), db=db)
         calls.clear()
+        renders_before = state["renders"]
         resp = await export_mod.export_docx(sid, dict(body, _tag="b"), db=db)
         assert "hit" in str(resp.headers.get("X-Cache-Status", ""))
-        assert calls == ["b"]  # 缓存查询在 prepare 之后，仍各付一次准备
+        # ✅ R94：缓存查询现夹在「取数段」与「渲染段」之间 —— 命中时取数段仍各跑
+        #    一次（指纹所需材料全在取数段），但渲染段**一次都不跑**。
+        assert calls == ["b"]
+        assert state["renders"] == renders_before, "缓存命中不得再执行渲染段"
 
     async def test_different_config_not_serialized(self, ctx):
         db, sid, calls, _ = ctx
         started, both_in = asyncio.Event(), asyncio.Event()
 
-        async def slow_prep(sid_arg, body, db_arg):
+        async def slow_prep(sid_arg, body, db_arg, cancel_event=None):
             calls.append(body["_tag"])
             started.set()
             await both_in.wait()  # 两个请求都进了准备阶段才算「并行」
@@ -441,10 +469,16 @@ class TestGuardDiscrimination:
             lines = src.splitlines()
             out = [ln for ln in lines
                    if not ln.lstrip().startswith("await _guard_numbering_consistency(")]
-            guard_call = "    await _guard_numbering_consistency(db, scheme_id)"
+            # ✅ R106 适配：acquire 现位于 `try:` **体内**（8 空格）—— 目的是
+            #    `_lk = None` 先置初值、acquire 抛错时 finally 仍能成对释放并注销
+            #    取消登记（见 export_docx 的 R106 FIX-1 注释）。原实现用
+            #    `startswith("    _lk = ...")` 只认 4 空格缩进，缩进一变就
+            #    StopIteration（守卫自身并未失效）。改为 lstrip 定位 + 沿用该行
+            #    实际缩进插回守卫调用，变异语义不变。
             idx = next(i for i, ln in enumerate(out)
-                       if ln.startswith("    _lk = await _export_dedup_acquire("))
-            out.insert(idx + 1, guard_call)  # 守卫被移到锁获取之后
+                       if ln.lstrip().startswith("_lk = await _export_dedup_acquire("))
+            indent = out[idx][:len(out[idx]) - len(out[idx].lstrip())]
+            out.insert(idx + 1, indent + "await _guard_numbering_consistency(db, scheme_id)")
             src = "\n".join(out)
         return src
 

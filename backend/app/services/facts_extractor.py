@@ -426,6 +426,8 @@ _NAME_TO_KEY: dict[str, str] = {
     # 编制依据（新增分组）
     "编制依据": "compilation_basis", "验收规范": "acceptance_code",
     "执行标准": "execution_standard", "技术标准": "tech_standard",
+    # ✅ R93（2026-10-17）：编制依据「逐条提取」新增标准名
+    "标准图集": "standard_atlas", "法规依据": "legal_basis",
     # 劳动力配置（新增分组）
     "劳动力计划": "labor_plan", "劳动力配置": "labor_plan", "劳动力": "labor_plan",
     "工种": "labor_trade", "高峰人数": "labor_peak", "管理人员配置": "staffing",
@@ -746,6 +748,8 @@ _ZONE_KEYWORDS: dict[str, list[str]] = {
     "basis_zone": [
         "编制依据", "依据规范", "执行标准", "标准规范", "设计文件",
         "法律法规", "技术规程", "验收规范", "图纸会审",
+        # ✅ R93（2026-10-17）：图集/规范清单形态的编制依据也须命中本区
+        "标准图集", "图集", "规范清单", "引用标准", "法规依据",
     ],
     "monitoring_zone": [
         "监测方案", "监测项目", "监测频率", "监测点", "报警值", "控制值",
@@ -1183,7 +1187,7 @@ async def extract_from_single_chunk(text: str, context_summary: str = "",
         "schedule_zone": "本段检测到【工期安排】区（P13），请启用工期规则块",
         "personnel_zone": "本段检测到【人员配置】区（P12），请启用人员/劳动力规则块",
         "tech_param_zone": "本段检测到【技术参数/工程概况】区",
-        "basis_zone": "本段检测到【编制依据】区（P14），请启用编制依据规则块；规范编号与名称原样保留",
+        "basis_zone": "本段检测到【编制依据】区（P14），请启用编制依据规则块；规范编号与名称原样保留；清单逐条提取全部规范/图集/设计文件/法规，一条不落",
         "monitoring_zone": "本段检测到【监测方案】区（P15），请启用监测规则块；测点/频率/报警值必须成组提取",
         "emergency_zone": "本段检测到【应急处置】区（P16），请启用应急规则块",
         "acceptance_zone": "本段检测到【验收要求】区（P17），请启用验收规则块",
@@ -1276,6 +1280,23 @@ async def extract_from_single_chunk(text: str, context_summary: str = "",
                 logger.warning(
                     "第 %d 段提取返回结构性错误（内层修复未通过，不再整段重试）: %s",
                     chunk_index + 1, e)
+                break
+            # ✅ R111（P2-7）：确定性永久错误（401/402/403/404 令牌失效、余额
+            #    不足、模型不存在——R109 实证 agnes 401 被白重试 49 次）整段
+            #    重试 100% 无用：重试只会把该 provider 的配额冷却窗口白白撑满，
+            #    并延迟整段失败暴露。直接终止本段重试（与结构性错误同分支，
+            #    fail-soft：其它段不受影响）。⚠️ 429 限流不在此列——退避后仍
+            #    可能成功，保留既有退避路径。
+            try:
+                from app.services.ai.provider_factory import is_non_retryable_error
+                _permanent = is_non_retryable_error(e)
+            except Exception:  # noqa: BLE001 - 判据自身故障不得中断提取
+                _permanent = False
+            if _permanent:
+                logger.warning(
+                    "第 %d 段提取命中确定性永久错误（%s），不再整段重试"
+                    "（避免白烧重试与延迟失败暴露）",
+                    chunk_index + 1, str(e)[:120])
                 break
             if attempt < FACTS_CHUNK_RETRIES:
                 err_s = str(e).lower()
@@ -1598,6 +1619,65 @@ def _norm_value(v) -> str:
     return re.sub(r'\s+', '', _as_text(v).replace('：', ':'))
 
 
+# ---------------------------------------------------------------------------
+# 编制依据「多值并存」清单型事实（✅ R93 · 2026-10-17）
+# ---------------------------------------------------------------------------
+# 病灶：P14 让 AI 把每一部规范都命名为「执行标准」（同类事实同名的核心纪律），
+#   normalize_key 于是把它们全折叠进同一个 fact_key；merge_and_deduplicate
+#   按 key 聚类后，N 部规范变成「1 条事实 + N-1 个矛盾候选」——编制依据只剩
+#   一部规范可见，其余被伪装成需人工裁决的矛盾，且整行因 has_conflict=1
+#   失去注入资格。但「执行标准」「标准图集」「设计文件」这类名称天然是**类别名**：
+#   一部专项方案本就引用多部规范/多本图集，同键多值是**并存清单**而不是矛盾。
+# 口径：并存簇内每条唯一取值独立成条，fact_key 追加「::值域标签」后缀
+#   （后缀 = _norm_value 的 md5 前 8 位，同一部规范跨段落/跨次提取仍收敛同键）。
+#: 判据单一事实源（merge 分簇与 persist 已确认行兼容共用，勿复制第二份）
+BASIS_COEXIST_CATEGORY = "basis"
+BASIS_COEXIST_KEYS: frozenset = frozenset({
+    "compilation_basis", "execution_standard", "tech_standard",
+    "acceptance_code", "standard_atlas", "legal_basis",
+})
+
+_BASIS_SCOPED_SEP = "::"
+_BASIS_SCOPED_RE = re.compile(r"^(?P<base>.+)::(?P<tag>[0-9a-f]{8})$")
+
+
+def basis_base_key(key: str) -> str:
+    """剥掉「::值域标签」后缀，还原聚类用裸归一化键（无后缀原样返回）。"""
+    k = (key or "").strip()
+    m = _BASIS_SCOPED_RE.match(k)
+    return m.group("base") if m else k
+
+
+def is_basis_coexist_key(key: str) -> bool:
+    """（含限定后缀的）归一化键是否属于多值并存类。"""
+    return basis_base_key(key) in BASIS_COEXIST_KEYS
+
+
+def is_basis_coexist_item(it: "FactItem") -> bool:
+    """条目是否属于多值并存类：category/fact_type 为 basis，或键命中并存白名单。
+
+    三路判据取并集：AI 按 P14 标 fact_type=basis 是第一路；「设计文件」等
+    未注册名称走 normalize_key 兜底哈希键，只能靠 category 兜住；「执行标准」
+    等已注册名称即使 AI 漏标 fact_type，键白名单仍能兜住（防漏网折叠）。
+    """
+    if getattr(it, "category", "") == BASIS_COEXIST_CATEGORY:
+        return True
+    if getattr(it, "fact_type", "") == BASIS_COEXIST_CATEGORY:
+        return True
+    return is_basis_coexist_key(getattr(it, "key", "") or "")
+
+
+def basis_scoped_key(key: str, value) -> str:
+    """并存簇内单条独立成键：``{base}::{归一化值 md5 前 8 位}``。
+
+    后缀基于 :func:`_norm_value`（去空白 + 全角冒号统一），与聚类去重同口径：
+    同一部规范在多个段落/多次提取中重复出现 → 同后缀 → 依旧收敛为一条。
+    幂等：先剥既有 ``::标签`` 再追加（同一结果被二次 merge 不会叠出双后缀）。
+    """
+    tag = hashlib.md5(_norm_value(value).encode("utf-8")).hexdigest()[:8]
+    return f"{basis_base_key(key)}{_BASIS_SCOPED_SEP}{tag}"
+
+
 def apply_norm_dicts(all_items: list[FactItem]) -> None:
     """名称/规格归一化（报告补充①：与 Prompt 共用单一事实源）。
 
@@ -1666,6 +1746,21 @@ def merge_and_deduplicate(all_items: list[FactItem]) -> list[FactItem]:
             if nv and nv not in seen_values:
                 seen_values.add(nv)
                 unique.append(it)
+
+        # ✅ R93（2026-10-17）：多值并存（清单型）事实 —— 每条唯一取值独立
+        #   成条并获「值域限定键」，绝不折叠成「1 条事实 + N-1 个矛盾候选」
+        #   （编制依据多部规范/图集同键多值是清单不是矛盾，判据单一事实源
+        #   is_basis_coexist_item）。单值型事实的原路径逐字不变。
+        _co = [u for u in unique if is_basis_coexist_item(u)]
+        if _co:
+            for u in _co:
+                u.has_conflict = False
+                u.conflict_values = []
+                u.key = basis_scoped_key(u.key, u.value)
+                resolved.append(u)
+            unique = [u for u in unique if not is_basis_coexist_item(u)]
+            if not unique:
+                continue
 
         if len(unique) == 1:
             # 无矛盾，直接取最优
@@ -2219,7 +2314,9 @@ def apply_category_auto_classify(items: list[FactItem]) -> None:
     #      material_mgmt 规则并置于 equipment 之前，equipment 只保留设备/参数/规格。
     rules: list[tuple[str, tuple[str, ...]]] = [
         ("basis", ("编制依据", "依据规范", "执行标准", "标准规范", "法律法规",
-                   "技术规程", "design_code", "standard")),
+                   "技术规程", "design_code", "standard",
+                   # ✅ R93（2026-10-17）：图集/法规依据也是编制依据清单成员
+                   "图集", "法规依据", "规范清单", "引用标准")),
         ("monitoring", ("监测", "报警值", "控制值", "测点", "观测", "monitoring")),
         ("emergency", ("应急", "预案", "抢险", "emergency")),
         ("acceptance", ("验收", "检验批", "acceptance")),
@@ -2649,6 +2746,46 @@ async def persist_extraction(
             if prior is None and it.key:
                 prior = shared_protected_by_key.get(it.key)
                 _hit_shared = prior is not None
+            # ✅ R93（2026-10-17）：并存类事实与「历史裸键已确认行」的兼容 ——
+            #   改判前用户确认的「执行标准」行 fact_key 无 :: 后缀，精确匹配
+            #   必失配；按裸键回查后再比**值**：同值 → 跳过插入并解除过期
+            #   （与下方「同 key 同值」分支同语义）；异值 → 并存不矛盾，
+            #   作为独立事实正常插入，**绝不**回写 conflict_keys（旧行为会把
+            #   多部规范误登记成需人工裁决的矛盾）。
+            _coexist = bool(it.key) and is_basis_coexist_item(it)
+            if prior is None and _coexist:
+                _base = basis_base_key(it.key)
+                if _base and _base != it.key:
+                    prior = protected_by_key.get(_base)
+                    if prior is None:
+                        prior = shared_protected_by_key.get(_base)
+                        _hit_shared = prior is not None
+            if prior is not None and _coexist:
+                _prior_val = extract_value_from_markdown_line(
+                    str(prior.get("content") or ""))[1]
+                _new_val = _as_text(it.value)
+                # 「同值」判据取 :func:`_norm_value`（去空白 + 全角冒号统一）——
+                # 与并存分簇的**值域同一性口径**逐字一致（scoped 后缀本身就
+                # 由 _norm_value 派生）。⚠️ 不沿用下方旧「同 key 同值」分支的
+                # normalize_key 比较：该口径不折叠空白，「GB 50300-2013 /
+                # GB50300-2013」同一部规范的记法变体会被判为异值 → 与已确认
+                # 行并列成两条重复事实（清单型并存最忌重复）。旧分支面向单值
+                # 型真矛盾登记，口径不同是有意为之。
+                _same_value = bool(
+                    _norm_value(_prior_val)
+                    and _norm_value(_prior_val) == _norm_value(_new_val))
+                if _same_value:
+                    if _hit_shared:
+                        shared_hits += 1
+                    await db.execute(
+                        "UPDATE global_facts SET is_stale=0, "
+                        "updated_at=datetime('now','localtime') WHERE id=?",
+                        (prior["id"],))
+                    skipped_dup += 1
+                    continue
+                # 异值并存：摘除 prior，让本条走下方正常插入分支
+                prior = None
+                _hit_shared = False
             if it.key and prior is not None:
                 if _hit_shared:
                     shared_hits += 1

@@ -51,13 +51,10 @@ async def config_audit_logs(limit: int = 50, offset: int = 0, days: int = 30,
                             db=Depends(read_db)):
     """配置变更审计列表（最新在前）。
 
-    参数与 ``/ai/audit-logs`` 保持同口径：limit 钳到 1..200、days 钳到 1..3650。
-
-    ✅ 2026-10-06（G2）：新增可选 ``config_id`` 筛选，并回传 ``config_ids``
-      （该时间窗内出现过的配置清单）。此前只有 ``action`` 一个维度，
-      「这条配置一共被改过几次 / 最近一次是谁改的」只能靠翻页肉眼翻，
-      且无法回答「主配置最近一次变更是哪个动作」。
-      不传 ``config_id`` 时行为与引入前逐字一致（加法式变更）。
+    分页 + 筛选参数（``limit`` / ``days`` 范围与 ``/ai/audit-logs`` **各自独立**：
+    配置变更频率远低于 AI 调用，单页展示上限放宽到 200、时间窗放宽到 10 年；
+    AI 调用审计按日聚合、单页上限 500、默认 30 天。两侧各自有合理的上限，
+    文档按实际口径回传，不互相模仿。
     """
     limit = max(1, min(200, int(limit or 50)))
     offset = max(0, int(offset or 0))

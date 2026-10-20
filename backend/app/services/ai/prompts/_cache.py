@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import threading
+import time
 from pathlib import Path
 
 # ✅ R48（2026-10-06 · prompts 运行时指标）：热路径渲染计数。
@@ -44,6 +45,18 @@ _loaded_db_path: str | None = None
 #    那种情况下路径没变、缓存也没被主动失效，读取方永远拿不到新值。
 #    用 mtime 比较即可闭环，且正常路径下只多一次 os.stat。
 _loaded_db_mtime: float | None = None
+# ✅ R108（2026-10-18 · 日志审计 P1-1 · 重载风暴收口）：prompt_templates **表级水印**
+#    (行数, MAX(updated_at))。整库文件 mtime 是**库级**信号——任务进度、审计流水、
+#    导出缓存任何一张表写入都会 bump 它；批量生成期间每次 get_prompt 读都判「库变新
+#    → 全量重载」，生产实证 loaded=504/reloaded=500 ≈1004 条 INFO（最大日志噪音源，
+#    且每次重载多烧一次全表 SELECT）。mtime 保留为**粗判**（os.stat 微秒级），
+#    变新时再查一次廉价水印（COUNT+MAX，走不到百行的表），水印未变 = 他表写入，
+#    只刷新 mtime 不重载。水印无法记录（极旧库缺列/查询失败）→ 逐字回退旧行为。
+_loaded_db_watermark: tuple[int, str] | None = None
+#: 水印探测最小间隔（秒）：节流窗口内的他表高频写入不再重复开连接查询；
+#: 真实提示词变更被外部进程写入时的可见延迟 ≤ 1s（人尺度操作，可接受）。
+_WATERMARK_PROBE_MIN_INTERVAL = 1.0
+_watermark_probe_ts: float = 0.0
 # 使用 RLock（可重入锁）防止 get_prompt 内调用 _load_prompt_cache_sync 时死锁
 _cache_lock = threading.RLock()
 
@@ -150,9 +163,59 @@ def _db_newer_than_cache(db_path: str) -> bool:
         return False
 
 
+def _query_prompt_watermark(db_path: str) -> tuple[int, str] | None:
+    """读 prompt_templates 表级水印 (行数, MAX(updated_at))；失败返回 None。
+
+    只读连接、单条聚合查询（表体量 ≤ 百行，微秒~毫秒级）。表/列不存在
+    （极旧库）或任何 IO 错误 → None，由调用方按「保守重载」处理。
+    """
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*), COALESCE(MAX(updated_at), '')"
+                " FROM prompt_templates").fetchone()
+            return (int(row[0]), str(row[1])) if row else None
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug("读取 prompt_templates 水印失败（保守回退）: %s", e)
+        return None
+
+
+def _needs_reload_by_watermark(db_path: str) -> bool:
+    """mtime 已判「库变新」后的**第二道闸**：prompt_templates 真的变了才重载。
+
+    调用方须持 _cache_lock。返回值 True = 重载；False = 他表写入，
+    仅把 _loaded_db_mtime 推到当前值（本轮消化该 mtime，下次再 bump 再判）。
+    - 水印从未记录（旧库无法查询）→ True，逐字维持旧「mtime 变新即重载」行为；
+    - 节流窗口内（距上次探测 < 1s）→ False，推迟到下轮再探（变更可见延迟 ≤1s）；
+    - 探测失败 → True（fail-soft：重载本身有异常兜底，宁可多烧一次不可漏更新）。
+    """
+    global _loaded_db_mtime, _watermark_probe_ts
+    if _loaded_db_watermark is None:
+        return True
+    now = time.monotonic()
+    if now - _watermark_probe_ts < _WATERMARK_PROBE_MIN_INTERVAL:
+        return False
+    _watermark_probe_ts = now
+    wm = _query_prompt_watermark(db_path)
+    if wm is None:
+        return True
+    if wm == _loaded_db_watermark:
+        try:
+            _loaded_db_mtime = os.stat(db_path).st_mtime
+        except OSError:
+            pass
+        logger.debug("prompt_templates 水印未变（他表写入 bump 了库 mtime），跳过重载")
+        return False
+    return True
+
+
 def _load_prompt_cache_sync():
     """同步方式从数据库加载所有提示词到缓存。"""
-    global _prompt_cache, _loaded_db_path, _loaded_db_mtime
+    global _prompt_cache, _loaded_db_path, _loaded_db_mtime, _loaded_db_watermark
     with _cache_lock:
         try:
             import sqlite3
@@ -161,10 +224,12 @@ def _load_prompt_cache_sync():
             if not db_path or db_path == ":memory:":
                 _prompt_cache = {}
                 _loaded_db_path = db_path
+                _loaded_db_watermark = None
                 return
             if not Path(db_path).exists():
                 _prompt_cache = {}
                 _loaded_db_path = db_path
+                _loaded_db_watermark = None
                 return
             _loaded_db_mtime = os.stat(db_path).st_mtime
             conn = sqlite3.connect(db_path)
@@ -178,6 +243,18 @@ def _load_prompt_cache_sync():
                     local_cache[row["key"]] = cleaned
                 _prompt_cache = local_cache
                 _loaded_db_path = db_path
+                # ✅ R108（P1-1）：与本次加载**同一连接**记表级水印，计算式与
+                #    _query_prompt_watermark **逐字同口径**（COUNT(*)+MAX，绝不
+                #    用 len(cache) 另写一套——两式不等价会造成每次探测都误判变更）；
+                #    查询失败（极旧库缺列）→ None，mtime 判据逐字回退旧行为。
+                try:
+                    wrow = conn.execute(
+                        "SELECT COUNT(*), COALESCE(MAX(updated_at), '')"
+                        " FROM prompt_templates").fetchone()
+                    _loaded_db_watermark = (
+                        (int(wrow[0]), str(wrow[1])) if wrow else None)
+                except Exception:
+                    _loaded_db_watermark = None
                 logger.info("Prompt cache loaded: %d templates from DB", len(local_cache))
             finally:
                 conn.close()
@@ -210,12 +287,14 @@ def _get_prompt_cache() -> dict[str, str]:
                 logger.warning("Failed to load prompt cache from DB: %s", e)
                 _prompt_cache = None
         elif current is not None and _loaded_db_path == current:
-            # 路径未变但库已变新 → 外部写入（多进程 / 脚本 / 迁移），自动重载
-            if _db_newer_than_cache(current):
+            # 路径未变但库已变新 → 外部写入（多进程 / 脚本 / 迁移），自动重载。
+            # ✅ R108（P1-1）：mtime 只是**粗判**（库级信号，他表写入也算）；
+            #    变新后须再过 prompt_templates 表级水印第二道闸才真正重载。
+            if _db_newer_than_cache(current) and _needs_reload_by_watermark(current):
                 _prompt_cache = {}
                 try:
                     _load_prompt_cache_sync()
-                    logger.info("Prompt cache reloaded: DB 文件已更新")
+                    logger.info("Prompt cache reloaded: prompt_templates 表已更新")
                 except Exception as e:
                     logger.warning("Failed to reload prompt cache from DB: %s", e)
                     _prompt_cache = None
@@ -340,10 +419,14 @@ def reload_prompt_cache():
     与过期标记比对，产生一次不必要的重载或恰好漏掉一次重载 ——
     属于「现在没炸、但语义自相矛盾」的技术债。现三者一并失效，
     使「显式失效」与「按需加载」的状态机口径完全一致。
+    ✅ R108（P1-1）：水印与派生标记**三者一并**失效——显式 reload 无条件重载，
+    下一次加载时会重新记录水印；若只清前两个而留旧水印，mtime 分支会拿
+    过期水印比对，产生一次误判重载或恰好漏掉一次（与 2026-09-24 修的同类债）。
     """
-    global _prompt_cache, _loaded_db_path, _loaded_db_mtime
+    global _prompt_cache, _loaded_db_path, _loaded_db_mtime, _loaded_db_watermark
     with _cache_lock:
         _prompt_cache = None
         _loaded_db_path = None
         _loaded_db_mtime = None
+        _loaded_db_watermark = None
     logger.info("Prompt cache invalidated, will reload on next access")

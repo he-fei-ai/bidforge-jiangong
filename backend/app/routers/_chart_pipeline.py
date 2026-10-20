@@ -15,6 +15,7 @@ import logging
 import re
 import uuid
 
+from app.db import retry_db_op
 from app.services.ai.image_engine import repair_mermaid, validate_mermaid
 from app.services.chart_payload import build_chart_envelope
 from app.services.chart_validators import (
@@ -937,8 +938,17 @@ async def apply_inline_chart_plan(db, section_id: str, rows: list[tuple],
 
     Returns:
         传入 content 时返回裁剪后的正文；否则返回 None。
+
+    ✅ R108（2026-10-18 · 日志审计 P0-1）：事务**首条写语句**（DELETE）是写锁
+       获取点——WAL 下锁冲突只在「读事务升级为写」的瞬间抛出，后续同事务
+       INSERT 不再撞锁。生产实证（logs/backend.log 2026-10-17/18，9 个 500
+       堆栈之一）：批量生成 + 审计 flush 并发下此 DELETE 抛 "database is
+       locked" 直通冒泡 → **已生成正文随异常丢失**。现接 retry_db_op（瞬态
+       锁退避重放，确定性错误原样抛出），调用方语义不变。
     """
-    await db.execute("DELETE FROM chart_predictions WHERE section_id=?", (section_id,))
+    await retry_db_op(
+        lambda: db.execute(
+            "DELETE FROM chart_predictions WHERE section_id=?", (section_id,)))
     if not rows:
         return content
     scheme_id = rows[0][2] if len(rows[0]) > 2 else ""
@@ -1029,6 +1039,65 @@ async def apply_inline_chart_plan(db, section_id: str, rows: list[tuple],
     return content
 
 
+async def resync_inline_charts(db, scheme_id: str, section_id: str,
+                               content: str, *,
+                               enforce_limits: bool = False) -> tuple[int, str]:
+    """✅ R92（2026-10-17 · 正文写点同步补链）：把正文内联图表**全量重登记**到
+    chart_predictions（正文改写后消除两侧漂移的唯一 DB 版原语）。
+
+    本函数即原 `register_inline_charts` 的实现（逐字搬移、行为不变），
+    `register_inline_charts` 改为其薄封装。抽出的理由：正文改写后需要重登记的
+    入口不止「手动保存」一处 —— 事实冲突定点修复（sse）/ 全文一致性修复
+    （repair_agent）/ 审核预检自动修复（review_autofix）/ 回滚与快照恢复
+    （repair_record、consistency_repair）都在**改写已落库正文**，若各处各自
+    复制一段「先清后登」逻辑必然分叉（与本轮报障同族）。现收敛为唯一出口，
+    所有裸写点复用同一实现（对齐 AGENTS「判据单一事实源」）。
+
+    语义与 `register_inline_charts` 完全一致：
+    - **全量同步**：先清理该章节历史登记，再按新正文登记（不留僵尸图）；
+    - 每块过校验/修复；修复失败从正文删块（宁缺勿滥）；
+    - enforce_limits=True 时启用程序级配图上限；
+    - 返回 (登记数量, 修正后的正文)；**不 commit**，由调用方与正文 UPDATE 同事务提交。
+    """
+    scheme_type_counts: dict[str, int] = {}
+    if enforce_limits:
+        scheme_type_counts = await _load_scheme_type_counts(db, scheme_id, section_id)
+    new_content, rows = build_inline_chart_plan(
+        scheme_id, section_id, content,
+        enforce_limits=enforce_limits, scheme_type_counts=scheme_type_counts)
+    # ✅ 防御（2026-09-22）：apply_inline_chart_plan 在"未传入 content"时返回 None，
+    #    而本函数必定传入正文。此处兜底回退到裁剪前的正文，避免返回 None 让
+    #    调用方（sse_handlers._persist_section）把整章正文覆盖成空。
+    new_content = await apply_inline_chart_plan(db, section_id, rows, new_content) \
+        or new_content
+    if rows:
+        logger.info("章节 %s 同步登记 %d 个内联图表", section_id[:8], len(rows))
+    return len(rows), new_content
+
+
+def resync_inline_chart_rows(scheme_id: str, section_id: str, content: str, *,
+                             enforce_limits: bool,
+                             scheme_type_counts: dict[str, int] | None = None,
+                             dropped_out: list | None = None,
+                             ) -> tuple[str, list[tuple]]:
+    """✅ R92：正文生成链路的**锁外纯计算**重登记原语（不访问 DB、不写库）。
+
+    与 `resync_inline_charts`（DB 版）等价，但拆成「纯计算产 rows + content」两步，
+    写库留给调用方在事务内 `apply_inline_chart_plan` —— 这正是
+    `sse_handlers._persist_section` 既有的「构建在锁外、apply 在锁内」纪律
+    （P1-3）。事实冲突定点修复在构建之后又改写了正文（根因 B），需要在修复块内
+    按**修复后正文**重新调用本函数重建配对，使锁内 apply 写入的 rows 与最终正文一致。
+
+    Returns:
+        ``(修正后的正文, rows)``；语义逐字等同 `build_inline_chart_plan`。
+    """
+    return build_inline_chart_plan(
+        scheme_id, section_id, content,
+        enforce_limits=enforce_limits,
+        scheme_type_counts=scheme_type_counts,
+        dropped_out=dropped_out)
+
+
 async def register_inline_charts(db, scheme_id: str, section_id: str,
                                  content: str, *,
                                  enforce_limits: bool = False) -> tuple[int, str]:
@@ -1054,18 +1123,9 @@ async def register_inline_charts(db, scheme_id: str, section_id: str,
     ``_load_scheme_type_counts`` + ``build_inline_chart_plan`` + ``apply_inline_chart_plan``
     组合而成，语义与旧实现一致。正文生成链路（`sse_handlers._persist_section`）
     已改为直接调用后两者，以便把纯计算移出全局写锁临界区。
+
+    ✅ R92（2026-10-17）：实现抽为 `resync_inline_charts` 作唯一出口，本函数
+    委派之（既有手动保存路径 B31 与全部直接调用点的行为逐字不变）。
     """
-    scheme_type_counts: dict[str, int] = {}
-    if enforce_limits:
-        scheme_type_counts = await _load_scheme_type_counts(db, scheme_id, section_id)
-    new_content, rows = build_inline_chart_plan(
-        scheme_id, section_id, content,
-        enforce_limits=enforce_limits, scheme_type_counts=scheme_type_counts)
-    # ✅ 防御（2026-09-22）：apply_inline_chart_plan 在"未传入 content"时返回 None，
-    #    而本函数必定传入正文。此处兜底回退到裁剪前的正文，避免返回 None 让
-    #    调用方（sse_handlers._persist_section）把整章正文覆盖成空。
-    new_content = await apply_inline_chart_plan(db, section_id, rows, new_content) \
-        or new_content
-    if rows:
-        logger.info("章节 %s 同步登记 %d 个内联图表", section_id[:8], len(rows))
-    return len(rows), new_content
+    return await resync_inline_charts(
+        db, scheme_id, section_id, content, enforce_limits=enforce_limits)

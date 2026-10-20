@@ -40,6 +40,11 @@ from app.services.outline_quality import (
 )
 
 _SSE_PATH = os.path.join(os.path.dirname(sh.__file__), "sse_handlers.py")
+# R101（2026-10-17）：占位标题「外科式重写」整组（含纯函数 `_apply_title_updates`）
+# 已下沉 `services/outline_title_fix.py` 以消除路由器反向 import 的分层债；
+# 回写侧判据单一事实源的静态锁据此改指向新归属模块（sse_handlers 仅保留同名 import）。
+_TITLE_FIX_PATH = os.path.join(os.path.dirname(sh.__file__), "..", "services",
+                               "outline_title_fix.py")
 _SECTIONS_PATH = os.path.join(os.path.dirname(os.path.dirname(sh.__file__)),
                               "routers", "sections.py")
 _TS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
@@ -102,9 +107,9 @@ class TestTitleFixRejectsCounterSuffix:
 
     def test_predicate_is_single_source(self):
         """回写侧判据必须复用 outline_quality 唯一事实源（不自造正则）。"""
-        src = _read(_SSE_PATH)
+        src = _read(_TITLE_FIX_PATH)
         assert "has_trailing_counter_suffix" in src, \
-            "sse_handlers 必须 import 唯一事实源判据"
+            "outline_title_fix（占位标题重写归属模块）必须 import 唯一事实源判据"
         fn_src = _read(os.path.join(os.path.dirname(sh.__file__), "..",
                                     "services", "outline_quality.py"))
         tree = ast.parse(fn_src)

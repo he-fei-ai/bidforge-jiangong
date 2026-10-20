@@ -3,7 +3,7 @@
 
 覆盖：
 - 架构图：环数据不再 RecursionError；字符串子节点/别名键不再被静默丢弃；
-  样张配色（深藏青根 + highlight 琥珀橙高亮）
+  样张配色 v2（深藏青根 #1E3A5F + highlight 琥珀金 #FBBF24 高亮）
 - 流程图：横向 LR 布局、统一样式配色（R66 双模式：全节点淡紫底 #f0edff + 紫边框
   #a89aff + 深灰字/连线 #333333）、steps/edges/variant chart-json 载荷校验与渲染闭环
 - 甘特图：`section` 阶段带渲染；关键路径模式下备注不再丢失、不再留白
@@ -111,26 +111,34 @@ def test_architecture_alias_children_key_normalized():
 
 
 def test_architecture_highlight_node_amber_and_layout_passthrough():
-    """回归（2026-09-18 样张改版）：highlight:true 节点必须穿透布局层进入渲染，
-    渲染为琥珀橙 #FFC000 + 深藏青文字；根节点恒为深藏青 #1F3864；
-    旧金色 #FBBF24 根样式不得残留。"""
+    """回归（2026-10-17 样张 v2）：highlight:true 节点必须穿透布局层进入渲染，
+    渲染为琥珀金 #FBBF24 + 深藏青文字；根节点恒为深藏青 #1E3A5F；
+    金色只允许出现在 highlight 节点上，根节点框内不得有金色。"""
     tree = {"label": "项目经理部", "children": [
         {"label": "技术部", "highlight": True},
         {"label": "质量部"},
         {"label": "安全部", "highlight": "true"},  # 字符串形态同样按真值解释
     ]}
     nodes, _w, _h = _layout_architecture_tree(tree)
-    hl_labels = {n["label"] for n in nodes if n.get("highlight")}
-    assert hl_labels == {"技术部", "安全部"}, "highlight 标志未随布局透传"
 
     bio = _render_architecture_image_v2(tree)
     assert bio is not None and len(bio.getvalue()) > 100
     img = _open(bio)
-    AMBER = (255, 192, 0)    # #FFC000
-    NAVY = (31, 56, 100)     # #1F3864
-    assert _count_color(img, AMBER) > 500, "highlight 节点未渲染为琥珀橙"
+    AMBER = (251, 191, 36)    # #FBBF24 样张取证琥珀金
+    NAVY = (30, 58, 95)       # #1E3A5F 样张取证深藏青（根）
+    assert _count_color(img, AMBER) > 500, "highlight 节点未渲染为琥珀金"
     assert _count_color(img, NAVY) > 500, "根节点未使用深藏青"
-    assert _count_color(img, (251, 191, 36)) == 0, "旧金色根样式残留"
+    # 金色不得出现在根节点框内（旧「金色根样式」禁令换根对框的精确口径）
+    root = next(n for n in nodes if n["depth"] == 0)
+    px = img.convert("RGB").load()
+    gold_in_root = sum(
+        1 for y in range(int(root["y"] * 2.5) + 56 + 8, int((root["y"] + root["h"]) * 2.5) + 56 - 8)
+        for x in range(int(root["x"] * 2.5) + 8, int((root["x"] + root["w"]) * 2.5) - 8)
+        if px[x, y] == AMBER
+    )
+    assert gold_in_root == 0, "金色根样式残留（根节点框内出现琥珀金）"
+    hl_labels = {n["label"] for n in nodes if n.get("highlight")}
+    assert hl_labels == {"技术部", "安全部"}, "highlight 标志未随布局透传"
 
 
 def test_flowchart_horizontal_lr_and_doc_palette():

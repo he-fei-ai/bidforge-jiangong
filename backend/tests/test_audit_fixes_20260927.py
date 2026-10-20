@@ -733,9 +733,16 @@ class TestTableMarkupStripNotEatingBodyText:
 
 
 
+class TestAIRenderCountNotDiscardedT7:
     """T7：`_ai_converted` 返回值曾被丢弃 → 缺图成稿被写进 export_cache，
     AI 生图服务恢复后因内容指纹不变而**永久**命中这份残缺文档
     （与代码注释承诺的「服务恢复后可重试」直接矛盾）。
+
+    ✅ 锚点订正（2026-10-17 · R95）：R94 把渲染段从 `_prepare_export` 拆出为
+    `_prepare_export_render`（缓存命中快速路径），`_ai_converted` 与
+    `ai_image_auto_generate` 开关判断随渲染段迁移。本类断言的是**渲染段**
+    行为，锚点须跟随迁移；「取数段声明 ai_image_pending 字段」的断言
+    （test_prep_declares_ai_image_pending）仍锚 `_prepare_export` 不变。
     """
 
     def test_prep_declares_ai_image_pending(self):
@@ -751,14 +758,14 @@ class TestTableMarkupStripNotEatingBodyText:
     def test_pending_count_gated_by_autogen_switch(self):
         """反例：用户显式关闭 ai_image_auto_generate 时占位块残留是既定行为，
         此时判 degraded 会让该方案导出缓存永久失效 —— 那是回归。"""
-        from app.routers.export import _prepare_export
-        src = inspect.getsource(_prepare_export)
+        from app.routers.export import _prepare_export_render
+        src = inspect.getsource(_prepare_export_render)
         assert 'config.get("ai_image_auto_generate", True)' in src
 
     def test_converted_count_is_no_longer_discarded(self):
         """反例：返回值必须真正被使用（不再是悬空赋值）。"""
-        from app.routers.export import _prepare_export
-        src = inspect.getsource(_prepare_export)
+        from app.routers.export import _prepare_export_render
+        src = inspect.getsource(_prepare_export_render)
         assert "_ai_converted" in src
         # 出现次数 >= 2：赋值 + 使用（回归前只有 1 次赋值）
         assert src.count("_ai_converted") >= 2

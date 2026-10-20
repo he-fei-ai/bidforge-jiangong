@@ -19,7 +19,8 @@ _ACLOSE_TIMEOUT = 15.0
 _GET_POLL_INTERVAL = 1.0
 
 
-async def with_heartbeat(gen, interval: float = 10, stats_provider=None):
+async def with_heartbeat(gen, interval: float = 10, stats_provider=None,
+                         on_end=None):
     """用心跳包装原始 SSE 生成器，防止长时间 AI 调用导致浏览器/代理超时断开
 
     核心设计：两路 Task 并行运行，通过 Queue 协调输出：
@@ -35,6 +36,14 @@ async def with_heartbeat(gen, interval: float = 10, stats_provider=None):
     累计字数 / ETA），以 `ping` 事件推送给前端。
     stats_provider 为同步无参函数，返回 dict（可为空）；抛异常时静默跳过，
     绝不影响心跳本身与业务流。
+
+    ✅ R106 FIX-6（2026-10-18）：新增 `on_end` 同步回调 —— 本包装器的 finally
+    是「SSE 流确实结束了」的唯一权威时刻，而内层生成器自己的收尾（落终态 +
+    清内存态）依赖一串 await，在客户端断开的取消风暴里可能被再次取消，
+    留下「内存 running、无人可清」的僵尸（实测 logs/backend.log 23:36:14
+    trace=03563da7f91a：检查点已落库、finish_task 从未进入）。on_end 是**同步**
+    调用，不受后续 await 被取消影响，由业务侧据此登记「流已结束」并宽限回收。
+    回调本身抛异常只记 WARNING，绝不影响流收尾。
 
     ✅ P0 修复（2026-09-23 · 断连事务泄漏 + 僵尸任务不落终态）：
     1) _gen_to_queue 的 finally 此前裸 await queue.put(("done", None)) ——
@@ -150,6 +159,15 @@ async def with_heartbeat(gen, interval: float = 10, stats_provider=None):
                 raise RuntimeError(str(item))
             yield item
     finally:
+        # ✅ R106 FIX-6：先**同步**通知业务侧「流已结束」，再做后面两个可能被
+        #    取消风暴打断的 await（anyio 作用域内 finally 里的 await 会立刻再抛
+        #    CancelledError，届时 gen_task 的 aclose / 内层生成器的 finally
+        #    根本跑不到）。宽限期在 mark_stream_ended 内部，正常收尾仍优先。
+        if on_end is not None:
+            try:
+                on_end()
+            except Exception as e:
+                logger.warning("with_heartbeat: on_end 回调失败（已忽略）: %s", e)
         stop.set()
         gen_task.cancel()
         hb_task.cancel()

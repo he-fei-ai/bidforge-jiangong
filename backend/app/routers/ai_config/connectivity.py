@@ -334,13 +334,16 @@ async def configs_health(db=Depends(read_db)):
         （env 为空 = 通用配置，任何环境可用；否则须等于当前生效环境）；
       - ``network_ok`` —— 复用 ``_dns_precheck_async``（与 precheck-all
         **同一函数**，不重抄 DNS/TCP 逻辑）；
-      - ``disabled`` —— ``resolve_disabled_providers``（运行时厂商开关）。
+      - ``disabled`` —— ``resolve_disabled_providers``（运行时厂商开关）；
+      - ``runtime_health`` —— ``provider_health_snapshot``（R103 新增：实时
+        成功率样本数/死配置判定/熔断/配额冷却，与选路同源）。
 
     ⚠️ 刻意不做密钥定期巡检：没有后台任务、不消耗配额；这是用户主动触发的一次性体检。
     """
     import asyncio
 
     from app.services.ai.provider_factory import (
+        provider_health_snapshot,
         resolve_active_env,
         resolve_disabled_providers,
     )
@@ -406,6 +409,13 @@ async def configs_health(db=Depends(read_db)):
             "network_step": str(net.get("step") or ""),
             "network_ip": str(net.get("ip") or ""),
             "network_message": str(net.get("message") or ""),
+            # ✅ R103（2026-10-18 · 日志审计遗留 L1 收口）：运行时健康快照
+            #    （实时成功率样本/死配置判定/熔断/冷却）。判据单一事实源在
+            #    provider_factory.provider_health_snapshot，与选路同源；
+            #    此前「配置看着正常、却被自动剔除出降级链」在 UI 完全不可见
+            #    （生产实证：降级链 9→3 用户不知该清理谁）。加法式新键。
+            "runtime_health": provider_health_snapshot(
+                provider, str(r.get("model") or ""), r["id"], url),
             # 综合：这条配置在当前环境下是否真的能用上
             "usable": bool(has_key and not key_broken and url and in_env
                            and provider not in disabled),
@@ -423,6 +433,11 @@ async def configs_health(db=Depends(read_db)):
         "network_ok": sum(1 for i in items if i["network_ok"]),
         "network_unreachable": sum(1 for i in items
                                    if i["base_url"] and not i["network_ok"]),
+        # ✅ R103：实时成功率过低（已被自动剔除出降级链）的配置条数。
+        #    与 items[].runtime_health.dead 同源，供体检汇总一眼看出
+        #    「该清理谁」；冷启动/无样本时为 0（不误报）。
+        "runtime_dead": sum(1 for i in items
+                            if (i.get("runtime_health") or {}).get("dead")),
     }
     return {
         "items": items,

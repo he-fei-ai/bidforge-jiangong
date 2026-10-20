@@ -405,13 +405,19 @@ class TestByteHealthAndShadowing:
             compile(f.read(), path, "exec")
 
     def test_no_duplicate_module_level_names(self):
-        """同名遮蔽回归锁：本轮追加的补丁不得与文件既有模块级符号重名
+        """同名遮蔽回归锁：追加的补丁不得与文件既有模块级符号重名
         （首版 _FENCE_RE 覆盖 181 行围栏正则、打挂 strip_code_blocks 的教训）。
-        范围限定本轮真正追加代码的 services 层 + export.py；sse_handlers.py
-        存在**历史遗留**的条件定义同名符号（如 CONTENT_REQUEST_TIMEOUT），
-        不属于本轮契约，纳管需单独立项。"""
+
+        ✅ R101（遗留问题 3 · 已纳管）：`sse_handlers.py` 原先存在**历史遗留**
+        的模块级同名符号 —— ``CONTENT_REQUEST_TIMEOUT`` / ``CONTENT_TOTAL_TIMEOUT``
+        各被定义两次（早处 300/660 过期字面量 + 下方 settings 绑定版），
+        按执行顺序后者静默覆盖前者（属「配置散落 / 静默失效」一类）。
+        本轮已删除过期字面量收敛为唯一定义，并把该文件纳入本锁——
+        此前注释所称「纳管需单独立项」即本次改动。
+        """
         for path in [os.path.join(BACKEND, "app", "services", "outline_quality.py"),
                      os.path.join(BACKEND, "app", "services", "content_standard.py"),
+                     os.path.join(BACKEND, "app", "routers", "sse_handlers.py"),
                      os.path.join(BACKEND, "app", "routers", "export.py")]:
             tree = _tree(path)
             seen: set[str] = set()

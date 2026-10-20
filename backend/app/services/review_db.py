@@ -40,8 +40,11 @@ AGENTS.md §5.5 记录的 R13 事故：全局单写连接 + aiosqlite 下 ``db.e
   方案本身干净 —— 那是**比 500 更坏**的假绿。
 * :func:`exec_write` —— **写路径**。游标为 ``None`` 抛 503；游标有效但
   ``rowcount == 0`` 时按 ``require_rows`` 决定：默认 ``True`` 直接抛 503，
-  因为本模块的每处 UPDATE 都已在调用前校验过目标行存在，「0 行」只可能是
-  「本次写没生效」，此时汇报成功 = 静默丢数据。
+  因为调用方已在写前校验过目标行存在时，「0 行」只可能是「本次写没生效」，
+  此时汇报成功 = 静默丢数据。✅ R95（2026-10-17）起，审核状态三处 UPDATE
+  改为 compare-and-set（``WHERE`` 带期望状态），「0 行」另有「被并发方
+  改写」这一合法含义，故显式传 ``require_rows=False`` 并由调用方把
+  0 行如实转成 409 / ``conflicts`` —— 绝不静默假成功。
 
 ``fastapi.HTTPException`` 是 ``Exception`` 的子类，因此各fail-soft 内部的
 ``except Exception``（``_content_fingerprint`` / ``_facts_signature`` /

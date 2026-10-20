@@ -236,10 +236,20 @@ MAX_EXCEL_ROWS = 1000
 # DOCX/XLSX 本质是 ZIP 容器：30MB 的上传上限不等于解压后的体积上限，
 # 精心构造的归档可以做到 1:1000 以上的膨胀比，在解压阶段直接打满内存/CPU。
 # 这里在解析前先读 ZIP 中央目录（只读元数据、不解压）做三道闸门。
-MAX_ARCHIVE_ENTRIES = 2000                      # 单归档最大条目数
-MAX_ARCHIVE_UNCOMPRESSED_BYTES = 400 * 1024 * 1024   # 单归档最大解压总量（400MB）
-MAX_COMPRESSION_RATIO = 200                     # 最大允许压缩比（解压总量 / 压缩总量）
-MAX_ARCHIVE_ENTRY_BYTES = 64 * 1024 * 1024      # 单条目「实际读出」上限（防中央目录谎报大小）
+# 压缩炸弹闸门阈值（环境变量可覆盖；默认与原硬编码值逐字相同，旧行为不变）。
+# 非法值（非整数 / 负数 / 零）回退到默认值，保持 fail-soft。
+def _env_int(name: str, default: int) -> int:
+    try:
+        v = int(os.environ.get(name, ""))
+        return v if v > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+MAX_ARCHIVE_ENTRIES = _env_int("BIDFORGE_MAX_ARCHIVE_ENTRIES", 2000)                      # 单归档最大条目数
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = _env_int("BIDFORGE_MAX_ARCHIVE_UNCOMPRESSED_BYTES", 400 * 1024 * 1024)   # 单归档最大解压总量（400MB）
+MAX_COMPRESSION_RATIO = _env_int("BIDFORGE_MAX_COMPRESSION_RATIO", 200)                     # 最大允许压缩比（解压总量 / 压缩总量）
+MAX_ARCHIVE_ENTRY_BYTES = _env_int("BIDFORGE_MAX_ARCHIVE_ENTRY_BYTES", 64 * 1024 * 1024)      # 单条目「实际读出」上限（防中央目录谎报大小）
 
 
 class ParseError(RuntimeError):
@@ -1573,13 +1583,13 @@ def _parse_image_ocr(content: bytes, ftype: str,
     if ftype == "tiff":
         frames = _split_tiff_frames(content)
         if len(frames) > 1:
-            parts: list[str] = []
+            pages: list[tuple[int, str]] = []
             for idx, frame in enumerate(frames):
                 try:
                     res = ocr_bytes_sync(frame)
                 except OcrUnavailableError as e:
                     # 首帧就无引擎 → 致命；已有内容 → 保留并告警
-                    if not parts:
+                    if not pages:
                         cloud = _mineru_image_fallback(content, ftype, diag)
                         if cloud:
                             return cloud
@@ -1594,15 +1604,23 @@ def _parse_image_ocr(content: bytes, ftype: str,
                     _note_info(diag, f"多页 TIFF 第 {idx + 1} 帧识别失败已跳过：{str(e)[:80]}")
                     continue
                 if res.text:
-                    parts.append(res.text)
-            if len(parts) < len(frames):
+                    # ✅ R79 S1：帧号即页号，按 _add_page_markers 单一出口拼接。
+                    #    旧实现直接 "\n".join(parts)：全部帧内容归到第 1 页 ⇒
+                    #    md_structured 的表格/图片按页关联失效、
+                    #    project_documents.page_count 恒为 1、完整性报告
+                    #    total_pages 失真、doc_chunks 的 page_num 全部错位。
+                    #    PDF 通道（_parse_pdf / _pdf_ocr_fallback）一直用
+                    #    _add_page_markers，图片通道此前是唯一漏网点。
+                    pages.append((idx + 1, res.text))
+            got = len(pages)
+            if got < len(frames):
                 _note_info(diag, f"多页 TIFF 共 {len(frames)} 帧，"
-                                 f"仅 {len(parts)} 帧识别出文本")
-            if not parts:
+                                 f"仅 {got} 帧识别出文本")
+            if not pages:
                 cloud = _mineru_image_fallback(content, ftype, diag)
                 if cloud:
                     return cloud
-            return "\n".join(parts)
+            return _add_page_markers(pages)
 
     try:
         res = ocr_bytes_sync(content)

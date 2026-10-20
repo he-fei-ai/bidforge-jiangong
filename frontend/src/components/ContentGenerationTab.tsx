@@ -26,6 +26,12 @@ export type ContentGenerationTabProps = {
   running: boolean;
   /** 当前活跃任务是否已暂停（暂停/恢复按钮互斥 + 「已暂停」Tag） */
   taskPaused: boolean;
+  /**
+   * ✅ R106 FIX-4：停止指令已发出、任务尚未落终态 —— 停止按钮置灰显示「停止中」，
+   * 暂停/恢复一并禁用（避免 stop 与 resume 竞态）。协作式停止的「已停止」回执由
+   * 页面在 stopped 事件处给出，组件不再乐观文案。
+   */
+  taskStopping?: boolean;
   /** 正在压缩本章（AI 压缩请求进行中） */
   shrinking: boolean;
   /** 目录树是否有章节（右下提示文案显隐） */
@@ -162,21 +168,27 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
             <Button
               icon={<PauseOutlined />}
               onClick={() => p.onControl("pause")}
-              disabled={p.taskPaused}
+              disabled={p.taskPaused || p.taskStopping}
             >
               暂停
             </Button>
             <Button
               icon={<PlayCircleOutlined />}
               onClick={() => p.onControl("resume")}
-              disabled={!p.taskPaused}
+              disabled={!p.taskPaused || p.taskStopping}
             >
               恢复
             </Button>
-            <Button danger icon={<StopOutlined />} onClick={() => p.onControl("stop")}>
-              停止
+            <Button
+              danger
+              icon={<StopOutlined />}
+              onClick={() => p.onControl("stop")}
+              disabled={p.taskStopping}
+              loading={p.taskStopping}
+            >
+              {p.taskStopping ? "停止中" : "停止"}
             </Button>
-            {p.taskPaused && (
+            {p.taskPaused && !p.taskStopping && (
               <Tag color="warning" style={{ margin: 0 }}>
                 ⏸ 已暂停（恢复后继续生成）
               </Tag>

@@ -189,6 +189,10 @@ def reset_provider_config_cache():
     # ✅ 配额冷却（2026-09-22 · O2）同样是进程级全局：
     #    前一个用例触发的 402/429 冷却会让后续用例的 provider 被跳过。
     pf.reset_quota_cooldown()
+    # ✅ R110：思考吞噬冷却 + 全熔断快速失败也是进程级全局（2026-10-20）：
+    #    前一个用例标记的 60s 冷却窗口会让后续用例的候选被跳过或快速失败。
+    pf.reset_thinking_dead()
+    pf.reset_all_circuit_fast_fail()
     # ✅ 自适应并发控制器（2026-09-22 · 测试隔离修复）：进程级全局。
     #    前面用例的失败调用（402/429 等）会把并发降到 min_c=1 并清不掉，
     #    导致后续依赖并发语义的测试（如 test_perf_content_pipeline 的 hedge）

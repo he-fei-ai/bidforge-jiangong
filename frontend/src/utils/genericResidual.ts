@@ -10,6 +10,8 @@
  * 契约（务必保持向后兼容）：
  * - 仅当确有残留才回传该键（旧后端 / 干净目录都不带）⇒ 无键时返回空串；
  * - 元素形如 `{ path, title, kind }`，`kind` 为 `generic` | `conflict_suffix`；
+ * - 另有加法式键 `generic_autofixed`（整数，仅 >0 才回传）：落库前自动改写了几条
+ *   占位标题 —— 由 `genericAutofixNotice` 消费，使自动改写**不再静默生效**。
  * - **纯函数、零 IO**：只负责把响应片段拼成一句可操作的中文提示。
  *   符合本仓「派生纯函数层」约定（与 `contentEvents.ts` / `workflowDerived.ts` 同层），
  *   因此可被 vitest 直接覆盖，而不必渲染整个页面。
@@ -41,5 +43,37 @@ export function genericResidualNotice(data: unknown): string {
   return (
     `目录已保存，但检出 ${hits.length} 处占位/泛化标题（如「${shown}」${more}）——` +
     `这类标题不是合法目录名，建议逐条改为具体到施工对象/部位/工序的名称`
+  );
+}
+
+/** 自动改写条数：仅接受正整数（数字或纯数字字符串），其余一律 0。 */
+export function genericAutofixedCount(data: unknown): number {
+  const raw = (data as { generic_autofixed?: unknown } | null | undefined)
+    ?.generic_autofixed;
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+  }
+  if (typeof raw === "string" && raw.trim() !== "") {
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  }
+  return 0;
+}
+
+/** 后端在落库前**自动改写**了占位标题时返回提示文案；否则空串。
+ *
+ * 背景：R89 起后端在目录写路径（save-outline / upload-outline …）落库前会做一次
+ * 「外科式标题重写」——只回填标题、绝不增删节点。若前端不提示，自动改写就**静默
+ * 生效**：用户以为目录原样保存，实际章节名已变。故后端加法式回传 `generic_autofixed`
+ * （仅 >0 时才有该键），本函数负责把它变成一句可核对的中文提示。
+ *
+ * 契约与 `generic_autofixed` 同：无键 / 0 / 脏数据 ⇒ 返回空串（旧后端向后兼容）。
+ */
+export function genericAutofixNotice(data: unknown): string {
+  const n = genericAutofixedCount(data);
+  if (!n) return "";
+  return (
+    `目录保存时已自动改写 ${n} 处占位/泛化标题（只改标题，不增删章节），` +
+    `请核对改写后的名称是否符合预期`
   );
 }

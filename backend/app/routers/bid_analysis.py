@@ -2396,23 +2396,45 @@ async def _reset_items_for_rerun(db, project_id: str,
             return
 
         # 1) 先确保本次要跑的解析项都在 DB 中有记录（upsert）
+        #    ✅ R79 S3：主键与 domain 列**必须**走唯一出口（`build_item_pk` +
+        #    `_bid_analysis_item_cols`），与 `_update_item_status`（AI 写路径）
+        #    完全同口径。旧实现手拼 f"{project_id}_{item_id}" 且 INSERT 不带
+        #    domain 列 —— scheme 域下二者与唯一出口逐字相同（当前无行为差异），
+        #    但一旦非 scheme 域可执行（`EXTRACTION_DOMAINS` 已支持），
+        #    主键形态与列集立刻分叉：新行读不出 domain、且与 `build_item_pk`
+        #    生成的键不同 ⇒ 同一条事实出现两行。
+        cur_cols = await _bid_analysis_item_cols(db)
+        _has_domain = "domain" in cur_cols
         for def_ in defs:
-            pk = f"{project_id}_{def_['item_id']}"
+            iid = def_["item_id"]
+            pk = build_item_pk(project_id, iid, get_item_domain(iid))
             try:
-                cur = await _execute(db, 
-                    "SELECT 1 FROM bid_analysis_items WHERE id=?", (pk,))
+                cur = await _execute(
+                    db, "SELECT 1 FROM bid_analysis_items WHERE id=?", (pk,))
                 exists = await cur.fetchone() is not None
             except Exception:
                 exists = False
             if not exists:
-                await _execute(db, 
-                    "INSERT INTO bid_analysis_items "
-                    "(id, project_id, item_id, label, output_type, required, status, content, error, sort_order, source) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    (pk, project_id, def_["item_id"], def_.get("label", def_["item_id"]),
-                     def_.get("output_type", "markdown"),
-                     def_.get("required", 0), "idle", "", "",
-                     def_.get("sort_order", 0), "ai"))
+                base = (pk, project_id, iid, def_.get("label", iid),
+                        def_.get("output_type", "markdown"),
+                        def_.get("required", 0), "idle", "", "",
+                        def_.get("sort_order", 0), "ai")
+                if _has_domain:
+                    await _execute(
+                        db,
+                        "INSERT INTO bid_analysis_items "
+                        "(id, project_id, item_id, label, output_type, required,"
+                        " status, content, error, sort_order, source, domain) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        base + (get_item_domain(iid) or "",))
+                else:
+                    await _execute(
+                        db,
+                        "INSERT INTO bid_analysis_items "
+                        "(id, project_id, item_id, label, output_type, required,"
+                        " status, content, error, sort_order, source) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        base)
 
         # 2) 重置为 idle（仅本次要执行的项）；source 一并复位为 'ai'
         ids = [d["item_id"] for d in defs]
