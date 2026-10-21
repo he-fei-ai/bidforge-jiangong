@@ -222,12 +222,17 @@ def test_fact_dimension_derivation_is_not_n_plus_one():
 
 
 def test_render_facts_text_allocates_once():
-    """分配器只能在循环外调用一次（循环内调用 = O(n^2)）。"""
+    """分配器只能在循环外调用（循环内调用 = O(n^2)）。
+
+    ✅ R122（2026-10-21）：G1 选中事实豁免后出现第 2 处调用——仍在循环外，
+    仅启用态（_wanted 非空且有命中）对非选中行子集一次性分配，关态不触及。
+    本护栏意图（禁止循环内重复分配）不变。
+    """
     import inspect
 
     from app.routers import sse_handlers as sh
     assert inspect.getsource(sh._render_facts_text).count(
-        "_allocate_char_budgets(") == 1
+        "_allocate_char_budgets(") == 2
 
 
 

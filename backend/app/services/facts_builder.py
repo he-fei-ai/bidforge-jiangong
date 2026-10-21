@@ -205,11 +205,24 @@ def _chapter_inject_enabled() -> bool:
         return True
 
 
+def _row_title(row) -> str:
+    """从事实行取 title（行契约 6 元组的第 2 列 r[1]）。
+
+    ✅ R122-G1：与 :func:`resolve_selected_fact_rows`（content_plan）同口径，
+    按下标自适应取列，历史短行/坏行按空串处理（绝不抛）。
+    """
+    try:
+        return str(row[1] or "").strip() if len(row) > 1 else ""
+    except (TypeError, IndexError):
+        return ""
+
+
 def _render_facts_text(
     rows: list, *, relevant_to: dict | None = None,
     max_total: int = 6000, per_fact: int = 300,
     chapter: str = "",
     audit_out: list | None = None,
+    full_titles: list | None = None,
 ) -> str:
     """把 global_facts 行渲染为「项目关键事实」文本（纯函数，便于单测与逐章精选复用）。
 
@@ -224,9 +237,24 @@ def _render_facts_text(
     事实标题逐条追加进去（保底为 0 的行 / 硬上限触顶后的行）。缺省 ``None`` 时
     零开销、渲染结果与引入前逐字一致 —— 调用方（``fact_injection_audit`` /
     sse_handlers）据此把「哪几条事实没进提示词」留痕进报告，不再静默。
+
+    ✅ R122-G1（``full_titles``，引入易标「编排选事实→生成注事实」）：传入编排
+    阶段**选中**的事实标题清单时，命中的行：① 即使未被 ``relevant_to`` 预筛命中也
+    **强制并回**（AI 判定本章需要 > 关键字启发式）；② **前置**（优先于 chapter 分组）；
+    ③ **豁免 ``per_fact`` 单条截断**（保留完整事实值）；④ 在 ``fact_budget`` 内
+    **优先预留全长**，其余行按比例分配剩余预算。缺省 ``None`` 时**逐字节不变**
+    （不进并回/前置/豁免/预留任一分支，走原比例分配）。
     """
+    _all_rows = list(rows or [])
     if relevant_to is not None:
         rows = _filter_facts_rows(rows, relevant_to)
+
+    # ✅ R122-G1：选中事实标题集合（规整 + 去空白，与 resolve_selected_fact_rows 同口径）
+    _wanted: set[str] = set()
+    for _t in (full_titles or []):
+        _s = str(_t or "").strip()
+        if _s:
+            _wanted.add(_s)
 
     # ✅ 章节内事实前置（开关 facts_chapter_inject）：把属于本章
     #    （chapter 匹配）的事实排到最前，其余保持原序跟在后面。
@@ -242,6 +270,16 @@ def _render_facts_text(
             (hit if _row_chapter(r) == chapter else rest).append(r)
         rows = hit + rest
 
+    # ✅ R122-G1：选中事实「并回 + 前置」——置于 chapter 前置之后，确保选中行
+    #    无论预筛/分组结果如何都排在最前（全长优先入预算）。无选中时不进入本分支。
+    if _wanted:
+        _present = {id(r) for r in rows}
+        _back = [r for r in _all_rows
+                 if _row_title(r) in _wanted and id(r) not in _present]
+        _sel = [r for r in rows if _row_title(r) in _wanted]
+        _others = [r for r in rows if _row_title(r) not in _wanted]
+        rows = _back + _sel + _others
+
     # ---------------------------------------------------------------
     # ✅ P1 修复（2026-09-27 · 尾部事实整段消失 → 假性【待补充】）：
     #   旧实现是**头部优先**的 `break`：一旦 total+len(fact) > max_total
@@ -256,6 +294,7 @@ def _render_facts_text(
     #   tests/test_content_facts_budget_20260927.py）。
     # ---------------------------------------------------------------
     prepared: list[tuple[str, str, float | None]] = []
+    _sel_flags: list[bool] = []  # ✅ R122-G1：与 prepared 同序的「选中行」标记
     seen_groups: list[str] = []
     for _row in rows:
         # ✅ 健壮性修复（2026-10-10）：按下标**自适应取值**，与同模块的
@@ -282,7 +321,11 @@ def _render_facts_text(
         # ✅ R80（2026-10-15）：requirement 口径行附加「须转写为本方案承诺」提示。
         #    前缀在 per_fact 截断**之后**拼接（不挤占事实值本身的可视预算）；
         #    fact/'' 行不拼接（渲染与引入前逐字一致——行为不变性锚）。
-        _body = (content or '')[:per_fact]
+        # ✅ R122-G1：选中行**豁免 per_fact 截断**（保留完整事实值），未选中行
+        #    仍按 per_fact 截断；``_wanted`` 为空时 _is_sel 恒 False ⇒ 逐字节不变。
+        _is_sel = bool(_wanted) and str(_title or "").strip() in _wanted
+        _sel_flags.append(_is_sel)
+        _body = (content or '') if _is_sel else (content or '')[:per_fact]
         if _row_value_kind(_row) == "requirement":
             _body = _REQUIREMENT_KIND_PREFIX + _body
         prepared.append((gt, _title, _body, _conf))
@@ -297,25 +340,53 @@ def _render_facts_text(
     n = len(prepared)
     allocs = [0] * n
     if n and fact_budget > 0:
-        allocs = _allocate_char_budgets(fact_lens, fact_budget)
-        # ① 硬上限：_allocate_char_budgets 的保底按 `budget//n*2` 估算，
-        #    n 较大时保底之和会超过 budget —— 必须按比例回收，
-        #    否则会突破 max_total 这个硬契约（提示词长度上限）。
-        total_alloc = sum(allocs)
-        if total_alloc > fact_budget:
-            allocs = [(a * fact_budget) // total_alloc for a in allocs]
-        # ② 保底：预算允许时给每条事实至少 1 个字符，实现「不丢任何一条」。
-        #    预算实在不够（事实数远多于预算）时，超出部分仍会被硬上限挡掉，
-        #    此时「不丢」不可兼得「不超预算」——按老口径以外层契约为准。
-        deficit = fact_budget - sum(allocs)
-        i = 0
-        while deficit > 0 and i < n:
-            room = fact_lens[i] - allocs[i]
-            if room > 0:
-                give = min(room, deficit)
-                allocs[i] += give
-                deficit -= give
-            i += 1
+        # ✅ R122-G1：选中事实优先预留**全长**，剩余预算再按比例分给其余行。
+        #    ``_wanted`` 为空（缺省）时 _sel_idx 恒空 ⇒ 落 else 分支，与原实现逐字一致。
+        _sel_idx = [i for i, f in enumerate(_sel_flags) if f]
+        _nonsel_idx = [i for i, f in enumerate(_sel_flags) if not f]
+        if _wanted and _sel_idx:
+            for i in _sel_idx:
+                allocs[i] = fact_lens[i]  # 选中行：全长
+            _reserved = sum(fact_lens[i] for i in _sel_idx)
+            _nonself_budget = fact_budget - _reserved
+            if _nonself_budget > 0 and _nonsel_idx:
+                _sub_lens = [fact_lens[i] for i in _nonsel_idx]
+                _sub = _allocate_char_budgets(_sub_lens, _nonself_budget)
+                _sub_total = sum(_sub)
+                if _sub_total > _nonself_budget:
+                    _sub = [(a * _nonself_budget) // _sub_total for a in _sub]
+                _def = _nonself_budget - sum(_sub)
+                j = 0
+                while _def > 0 and j < len(_nonsel_idx):
+                    _room = _sub_lens[j] - _sub[j]
+                    if _room > 0:
+                        _give = min(_room, _def)
+                        _sub[j] += _give
+                        _def -= _give
+                    j += 1
+                for _k, _i in enumerate(_nonsel_idx):
+                    allocs[_i] = _sub[_k]
+            # 预留已超预算时：非选中行保持归零（选中行全长由外层硬上限兜底裁剪）
+        else:
+            allocs = _allocate_char_budgets(fact_lens, fact_budget)
+            # ① 硬上限：_allocate_char_budgets 的保底按 `budget//n*2` 估算，
+            #    n 较大时保底之和会超过 budget —— 必须按比例回收，
+            #    否则会突破 max_total 这个硬契约（提示词长度上限）。
+            total_alloc = sum(allocs)
+            if total_alloc > fact_budget:
+                allocs = [(a * fact_budget) // total_alloc for a in allocs]
+            # ② 保底：预算允许时给每条事实至少 1 个字符，实现「不丢任何一条」。
+            #    预算实在不够（事实数远多于预算）时，超出部分仍会被硬上限挡掉，
+            #    此时「不丢」不可兼得「不超预算」——按老口径以外层契约为准。
+            deficit = fact_budget - sum(allocs)
+            i = 0
+            while deficit > 0 and i < n:
+                room = fact_lens[i] - allocs[i]
+                if room > 0:
+                    give = min(room, deficit)
+                    allocs[i] += give
+                    deficit -= give
+                i += 1
 
     parts: list[str] = []
     total = 0
@@ -396,7 +467,8 @@ def chapter_fact_mapping(sections: list, facts_rows: list) -> list:
 def fact_injection_audit(rows: list, *, leaf: dict | None = None,
                          chapter: str = "",
                          max_total: int = 6000,
-                         per_fact: int = 300) -> dict:
+                         per_fact: int = 300,
+                         full_titles: list | None = None) -> dict:
     """单次事实注入的**审计视图**（R102 · G3 留痕的公开出口）。
 
     与 :func:`_render_facts_text` 共用同一次渲染（不重复扫描、不复制判据）：
@@ -404,21 +476,36 @@ def fact_injection_audit(rows: list, *, leaf: dict | None = None,
     带回。sse 侧正文生成走本出口取渲染文本 + 审计数据（替代裸调
     ``_render_facts_text``），保证「注入了什么 / 丢了什么」单一来源。
 
+    ✅ R122-G1：``full_titles``（编排选中事实标题）直接透传给
+    ``_render_facts_text``（并回/前置/豁免截断/优先预留同函数内实现），
+    并把命中的标题回显到结果的 ``selected_titles``。缺省 ``None`` 时渲染与
+    引入前逐字节一致（``selected_titles`` 为空列表）。
+
     Returns:
         ``{rows_total, budget_dropped, budget_dropped_count,
-        rendered_chars, rendered_text}``。``rendered_text`` 与
+        rendered_chars, rendered_text, selected_titles}``。``rendered_text`` 与
         ``_render_facts_text(...)`` 返回**逐字节一致**。
     """
     dropped: list[str] = []
     text = _render_facts_text(
         list(rows or []), relevant_to=leaf, chapter=chapter,
-        max_total=max_total, per_fact=per_fact, audit_out=dropped)
+        max_total=max_total, per_fact=per_fact, audit_out=dropped,
+        full_titles=full_titles)
+    # ✅ R122-G1：回显「在本次行集内真命中」的选中标题（与渲染前置同判据）
+    _wanted = {str(t or "").strip() for t in (full_titles or []) if str(t or "").strip()}
+    _selected_titles: list[str] = []
+    if _wanted:
+        for _r in (rows or []):
+            _t = _row_title(_r)
+            if _t in _wanted and _t not in _selected_titles:
+                _selected_titles.append(_t)
     return {
         "rows_total": len(rows or []),
         "budget_dropped": dropped,
         "budget_dropped_count": len(dropped),
         "rendered_chars": len(text),
         "rendered_text": text,
+        "selected_titles": _selected_titles,
     }
 
 

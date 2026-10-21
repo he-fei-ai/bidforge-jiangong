@@ -141,7 +141,11 @@ class TestPersistParseResultContract:
 
         async def _fail(*a, **k):
             return False
-        monkeypatch.setattr(gf, "_persist_parse_result", _fail)
+        # ✅ R122 配套修复（遗留红）：R123 把 parse_document 直调改为
+        #    _persist_parse_result_with_retry，其内部解析的是 global_facts_docs
+        #    模块全局的 _persist_parse_result——旧 patch 打在 gf 命名空间上
+        #    已不生效（假失败：patch 脱靶、真 persist 成功）。改 patch 真目标。
+        monkeypatch.setattr(gfd, "_persist_parse_result", _fail)
 
         with pytest.raises(HTTPException) as e:
             await gf.parse_document(doc_id, db=db)

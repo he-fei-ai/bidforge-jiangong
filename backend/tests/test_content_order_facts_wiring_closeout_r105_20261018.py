@@ -392,8 +392,11 @@ class TestR105FactInjectionAudit:
         （re-export 仅留给 tests，import 行带 noqa 说明）。"""
         assert "_render_facts_text(" not in _src(), (
             "调用点必须走 fact_injection_audit，防再次漂移出第二套口径")
-        assert _src().count("fact_injection_audit(") == 3, (
-            "core/chapter/plain 三分支各一次，不多不少")
+        # ✅ R122（2026-10-21）：core/chapter/plain 三分支之外新增第 4 处——
+        #    content_plan_selected_facts_inject 门控内的「选中事实重算」，
+        #    同样走 fact_injection_audit 出口（纪律不变，计数+1）。
+        assert _src().count("fact_injection_audit(") == 4, (
+            "core/chapter/plain 三分支 + R122-G1 门控重算各一次，不多不少")
 
 
 # ============================================================================

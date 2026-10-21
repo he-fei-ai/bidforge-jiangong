@@ -97,7 +97,11 @@ from app.services.content_fact_autofix import (
     empty_fact_autofix_summary,
     select_fact_conflicts,
 )
-from app.services.content_plan import plan_section_content, render_content_plan_guidance
+from app.services.content_plan import (
+    plan_section_content,
+    render_content_plan_guidance,
+    resolve_selected_fact_rows,
+)
 from app.services.content_polish import quality_issues, sanitize_ai_content
 
 # ✅ 2026-09-28（T-1 收口）：章节运行时纯函数（user 上下文 / 续写 messages /
@@ -6525,6 +6529,31 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                             _chapter_extras = _chapter_extras + "\n" + _plan_guidance
                         elif _plan_guidance:
                             _chapter_extras = _plan_guidance
+                        # ✅ R122-G1（引入易标「编排选事实→生成注事实」闭环，
+                        #    参考 contentGenerationTask.cjs:134/171 appendSelectedFactsMessage）：
+                        #    编排阶段 AI 只看标题清单挑事实，生成阶段由**程序**按标题
+                        #    取回完整事实行、只注入当前章节。开关
+                        #    `content_plan_selected_facts_inject` 默认关闭 ⇒ 整段不执行，
+                        #    `_chapter_audit`/`_chapter_facts_text` 逐字节保持上方 D1 前算好的值。
+                        #    仅分段注入模式（_chapter_audit 非 None）才重算——单条 user
+                        #    模式事实已全量进 facts_text，无处可加选中强注入。
+                        if (bool(getattr(
+                                settings, "content_plan_selected_facts_inject", False))
+                                and _chapter_audit is not None
+                                and _plan.fact_titles):
+                            _sel_rows = resolve_selected_fact_rows(
+                                _plan.fact_titles, facts_rows)
+                            if _sel_rows:
+                                # 并集 = 本章预筛剩余行 + 选中行中未被预筛命中的行
+                                # （exclude_rows 身份+相等双判，避免同一事实重复并回）
+                                _union_rows = _rest_facts_rows + exclude_rows(
+                                    _sel_rows, _rest_facts_rows)
+                                _chapter_audit = fact_injection_audit(
+                                    _union_rows, leaf=leaf,
+                                    chapter=chapter_key_of_title(
+                                        str(leaf.get("title") or "")),
+                                    full_titles=_plan.fact_titles)
+                                _chapter_facts_text = _chapter_audit["rendered_text"]
                     except Exception:  # noqa: BLE001 - 编排失败绝不阻断正文生成
                         logger.warning(
                             "章节 %s 离散编排阶段失败（回退为无编排）",
@@ -7481,27 +7510,46 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                              scanned_sections=scan_result["sections"],
                              summary=summary)
 
-                        repair_result = await _repair_agent.run_repair(
-                            db,
-                            scheme_id=scheme_id,
-                            scan_id=scan_result["scan_id"],
-                            conflicts=conflicts,
-                            mode="auto",
-                            severity_threshold=consistency_severity,
-                            contexts=scan_result.get("contexts"),
-                            # ✅ BUG 修复（2026-10-03 · 跨模块传递丢失）：入口早已
-                            #    解析 force_full_repair（:4583），但从未传进本调用 ——
-                            #    ruff F841 坐实其为死变量。后果：前端「强制全量重修」
-                            #    复选框（SchemeWorkbenchPage :5087 / useContentGeneration
-                            #    :127 都随 generate-content 请求体下发，且前端注释明言
-                            #    「同时作用于正文生成收尾的自动一致性修复」）在主生成
-                            #    链路**静默失效**：勾选后收尾修复仍跳过「已修复且成果
-                            #    仍在」的冲突，用户白花一遍生成却没拿到预期强度重修。
-                            #    独立修复端点 consistency_repair.py:144 消费正常，
-                            #    两条路径口径在此分叉。现补齐透传。
-                            force_full_repair=force_full_repair,
-                            progress_cb=_repair_cb,
-                        )
+                        # ✅ R122-G2：开关 `consistency_fullbook_repair_enabled` 默认关闭
+                        #    ⇒ else 分支逐字节保持既有逐章 run_repair 链路；开启时收尾
+                        #    自动修复改走整卷合并修复（少轮整卷往返 + 小节闸门）。
+                        if bool(getattr(
+                                settings, "consistency_fullbook_repair_enabled", False)):
+                            from app.services.consistency_fullbook_repair import (
+                                run_fullbook_repair as _run_fullbook,
+                            )
+                            repair_result = await _run_fullbook(
+                                db,
+                                scheme_id=scheme_id,
+                                scan_id=scan_result["scan_id"],
+                                conflicts=conflicts,
+                                facts=scan_result.get(
+                                    "contexts", {}).get("global_facts", ""),
+                                severity_threshold=consistency_severity,
+                                progress_cb=_repair_cb,
+                            )
+                        else:
+                            repair_result = await _repair_agent.run_repair(
+                                db,
+                                scheme_id=scheme_id,
+                                scan_id=scan_result["scan_id"],
+                                conflicts=conflicts,
+                                mode="auto",
+                                severity_threshold=consistency_severity,
+                                contexts=scan_result.get("contexts"),
+                                # ✅ BUG 修复（2026-10-03 · 跨模块传递丢失）：入口早已
+                                #    解析 force_full_repair（:4583），但从未传进本调用 ——
+                                #    ruff F841 坐实其为死变量。后果：前端「强制全量重修」
+                                #    复选框（SchemeWorkbenchPage :5087 / useContentGeneration
+                                #    :127 都随 generate-content 请求体下发，且前端注释明言
+                                #    「同时作用于正文生成收尾的自动一致性修复」）在主生成
+                                #    链路**静默失效**：勾选后收尾修复仍跳过「已修复且成果
+                                #    仍在」的冲突，用户白花一遍生成却没拿到预期强度重修。
+                                #    独立修复端点 consistency_repair.py:144 消费正常，
+                                #    两条路径口径在此分叉。现补齐透传。
+                                force_full_repair=force_full_repair,
+                                progress_cb=_repair_cb,
+                            )
                         _put("consistency_repair_done",
                              scan_id=scan_result["scan_id"],
                              repair_id=repair_result.get("repair_id"),
@@ -7570,6 +7618,192 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         pass
                     yield f"data: {line}"
                 await cons_runner
+
+            # ✅ R122-G3：成稿后跨章节字数批量调度。开关
+            #    `word_adjust_batch_enabled` **默认关闭 ⇒ 整段不执行，收尾链
+            #    与引入前逐字节一致**。思路引自易标（contentGenerationTask
+            #    .cjs:28-45 TOTAL_WORD_ADJUSTMENT_BATCH_SIZE=10）：收集成稿
+            #    under/over 章，按目录序每 10 章一批、批间串行批内并发；
+            #    执行不新造 AI 交互形态 —— under 走既有续写链
+            #    （_continue_if_needed，R66 触发线与轮次封顶不变）、over 走
+            #    既有压缩链（_auto_shrink_if_over，失败保留原正文），只补
+            #    「检出→分批调度」这最后一公里（DLV-02/08 原为转人工）。
+            if (bool(getattr(settings, "word_adjust_batch_enabled", False))
+                    and done_ids):
+                from app.services.word_adjust_batch import (
+                    WORD_ADJUST_CONCURRENCY,
+                    build_adjust_plan,
+                )
+
+                _adj_leaf_by_id = {str(_l.get("id") or ""): _l
+                                   for _l in (leaves or [])}
+                # 1) 清单以**库内最新落库态**为真值 —— 一致性修复可能已改写
+                #    正文，内存 generated_contents / audit_rows 都可能过时。
+                _adj_entries: list[dict] = []
+                try:
+                    _adj_ph = ",".join("?" * len(done_ids))
+                    _adj_cur = await db.execute(
+                        f"SELECT id, title, content FROM sections "
+                        f"WHERE id IN ({_adj_ph})",
+                        tuple(done_ids))
+                    for _r in (await _adj_cur.fetchall()
+                               if _adj_cur is not None else []):
+                        _leaf = _adj_leaf_by_id.get(str(_r["id"] or ""))
+                        if _leaf is None:
+                            continue
+                        _adj_entries.append({
+                            "section_id": str(_r["id"]),
+                            "title": str(_r["title"] or ""),
+                            "word_count": text_word_count(_r["content"] or ""),
+                            "word_budget": leaf_word_budget(_leaf),
+                        })
+                except Exception:
+                    logger.warning("字数批调度清单读取失败（跳过调度）",
+                                   exc_info=True)
+                    _adj_entries = []
+                # SELECT IN 不保序 —— 按 leaves 的目录 DFS 序还原（落库/展示/
+                # 导出顺序与目录一致是 R105 既有纪律，调度不改任何序）。
+                _adj_order = {str(_l.get("id") or ""): _i for _i, _l
+                              in enumerate(leaves or [])}
+                _adj_entries.sort(
+                    key=lambda _e: _adj_order.get(_e["section_id"], 1 << 30))
+                _adj_plan = build_adjust_plan(_adj_entries)
+
+                if _adj_plan["items"]:
+                    yield ("data: " + json.dumps(
+                        {"event": "word_adjust_start", "task_id": task_id,
+                         "under": _adj_plan["under_count"],
+                         "over": _adj_plan["over_count"],
+                         "batch_count": len(_adj_plan["batches"])},
+                        ensure_ascii=False) + "\n\n")
+                    _adj_sem = asyncio.Semaphore(WORD_ADJUST_CONCURRENCY)
+                    _adjusted: dict = {}
+
+                    async def _adjust_one(item: dict) -> None:
+                        """单章扩/缩 + 回写（fail-soft：任何异常只留日志，
+                        绝不打断收尾 —— 与一致性管道同一容错纪律）。"""
+                        _sid = item["section_id"]
+                        _leaf = _adj_leaf_by_id.get(_sid)
+                        if _leaf is None or is_stopped(task_id):
+                            return
+                        try:
+                            await wait_resume(task_id)
+                            if is_stopped(task_id):
+                                return
+                            _cur0 = await db.execute(
+                                "SELECT content FROM sections WHERE id=?",
+                                (_sid,))
+                            _row0 = (await _cur0.fetchone()
+                                     if _cur0 is not None else None)
+                            _content = str((_row0[0] if _row0 else "") or "")
+                            if not _content.strip():
+                                return
+                            _wb = leaf_word_budget(_leaf)
+                            if item["direction"] == "under":
+                                # 重建 user_content 供续写轮复用（默认
+                                # _plan_enabled=False ⇒ 不再触发编排 AI 调用）
+                                try:
+                                    (_g_eff, _g_facts, _g_msgs, _g_user,
+                                     _g_plan_json) = await (
+                                        _build_generation_context(_leaf))
+                                except Exception:
+                                    logger.warning(
+                                        "字数批调度：%s 上下文重建失败（跳过）",
+                                        _sid, exc_info=True)
+                                    return
+                                _new, _cont_failed = await _continue_if_needed(
+                                    _content, _leaf, _g_user,
+                                    str(_leaf.get("title") or ""),
+                                    eff_standard=_g_eff)
+                                if _cont_failed or _new == _content:
+                                    return
+                                _c2, _wc2, _ws2, _ = await _persist_section(
+                                    _sid, _new, _wb,
+                                    eff_standard=_g_eff,
+                                    fact_rows_for_section=_g_facts,
+                                    section_title=str(
+                                        _leaf.get("title") or ""),
+                                    plan_json=_g_plan_json)
+                            else:
+                                _new = await _auto_shrink_if_over(_content,
+                                                                  _leaf)
+                                if _new == _content:
+                                    return
+                                _c2, _wc2, _ws2, _ = await _persist_section(
+                                    _sid, _new, _wb,
+                                    section_title=str(
+                                        _leaf.get("title") or ""))
+                            # 2) 同步内存缓存与终态审计口径：word_audit 保持
+                            #    「每章一行、取最终落库态」（原地替换而非追加，
+                            #    防 completed 事件 total 被调度章双计）；
+                            #    _stat["over"] 按新旧判定差额修正（完成消息一致）。
+                            generated_contents[_sid] = _c2
+                            _old_row = None
+                            for _ar in reversed(_stat.get("audit_rows")
+                                                or []):
+                                if _ar.get("section_id") == _sid:
+                                    _old_row = _ar
+                                    break
+                            _old_ws = word_status_for(
+                                int((_old_row or {}).get("word_count") or 0),
+                                _wb)
+                            if _old_ws == "over" and _ws2 != "over":
+                                _stat["over"] = max(
+                                    0, _stat.get("over", 0) - 1)
+                            elif _old_ws != "over" and _ws2 == "over":
+                                _stat["over"] = _stat.get("over", 0) + 1
+                            if _old_row is not None:
+                                _old_row["word_count"] = _wc2
+                                _old_row["word_status"] = _ws2
+                            else:
+                                _stat.setdefault("audit_rows", []).append({
+                                    "section_id": _sid,
+                                    "title": str(_leaf.get("title") or ""),
+                                    "level": int(_leaf.get("level") or 0),
+                                    "word_budget": _wb,
+                                    "word_count": _wc2,
+                                })
+                            _adjusted[_sid] = {
+                                "title": str(_leaf.get("title") or ""),
+                                "direction": item["direction"],
+                                "before": item["word_count"],
+                                "after": _wc2,
+                                "word_status": _ws2,
+                            }
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            logger.warning("字数批调度：章节 %s 调整失败"
+                                           "（保留原正文）", _sid,
+                                           exc_info=True)
+
+                    _adj_done = 0
+                    for _bi, _batch in enumerate(_adj_plan["batches"]):
+                        if is_stopped(task_id):
+                            break
+                        yield ("data: " + json.dumps(
+                            {"event": "word_adjust_batch_start",
+                             "task_id": task_id, "batch": _bi + 1,
+                             "batch_total": len(_adj_plan["batches"]),
+                             "sections": [_it["section_id"]
+                                          for _it in _batch]},
+                            ensure_ascii=False) + "\n\n")
+                        # 批内并发、批间串行（本 for 不并发 ⇒ 批序即目录序）
+                        await asyncio.gather(*(_adjust_one(_it)
+                                               for _it in _batch))
+                        _adj_done += len(_batch)
+                        yield ("data: " + json.dumps(
+                            {"event": "word_adjust_batch_done",
+                             "task_id": task_id, "batch": _bi + 1,
+                             "done": _adj_done,
+                             "total": len(_adj_plan["items"]),
+                             "adjusted": _adjusted},
+                            ensure_ascii=False) + "\n\n")
+                    yield ("data: " + json.dumps(
+                        {"event": "word_adjust_done", "task_id": task_id,
+                         "planned": len(_adj_plan["items"]),
+                         "adjusted": len(_adjusted)},
+                        ensure_ascii=False) + "\n\n")
 
             # 更新方案总字数
             # ✅ P0 修复（2026-09-27 · R13 漏改点）：db.execute() 在全局单连接 + aiosqlite

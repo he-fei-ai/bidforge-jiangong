@@ -708,6 +708,39 @@ class Settings(BaseSettings):
     #    （不计算、不注入，提示词模板占位段不存在）。
     content_prev_leaf_context: bool = True
 
+    # ✅ R122-G1（2026-10-21 · 引入易标「编排选事实→生成注事实」闭环，
+    #    参考 client/electron/services/contentGenerationTask.cjs:134/171/125）：
+    #    D1 编排阶段产出的 fact_titles（AI 只看标题挑选）此前仅是软建议文字，
+    #    不驱动「按选中标题取完整事实注入本章」。开启后：选中标题对应的事实行
+    #    **全文**并入本章任务段注入（豁免 per_fact=300 单条截断、前置保预算），
+    #    与 2-gram 预筛集合取**并集**（预筛兜底不摘除，编排失败/漏选时倒退不
+    #    受损）。标题白名单钳制：编排编造的候选外标题一律丢弃（对齐易标
+    #    normalizeFactTitles）。仍受总量 6000 预算与 fact_injection_audit 审计
+    #    （审计新增 full_titles 回显）。依赖 content_plan_stage_enabled=True 才有
+    #    实际效果（编排关时没有任何选中标题）。False（默认）= 逐字回退引入前
+    #    行为（注入内容与引入前逐字节一致）。
+    content_plan_selected_facts_inject: bool = False
+
+    # ✅ R122-G2（2026-10-21 · 引入易标「持久 Agent 整卷修复」的程序级等价物，
+    #    参考 contentGenerationTask.cjs:5490/5507/5579）：全文一致性修复新增
+    #    「整卷合并修复」模式：全卷正文（带小节标记）+ 全量事实交给 AI 少轮
+    #    整卷往返，程序四道闸门（未知 section_id / 缺节 / 非空改空 / 图表围栏
+    #    变动）校验后**只回写变化小节**，复用既有快照+确认/回滚链路。刻意不
+    #    移植易标持久会话基建（同 sections.py:1665 既有裁定）。REST 的
+    #    mode=fullbook 与正文收尾自动阶段都受本开关门控；False（默认）=
+    #    REST 拒绝 fullbook 模式（422）、自动阶段逐字节走现链（repair_agent）。
+    consistency_fullbook_repair_enabled: bool = False
+
+    # ✅ R122-G3（2026-10-21 · 引入易标「成稿后跨章节字数批量调度」，
+    #    参考 contentGenerationTask.cjs:28-45 TOTAL_WORD_ADJUSTMENT_BATCH_SIZE=10/
+    #    MAX_WORD_ADJUSTMENT_ROUNDS=3）：正文全部落库后，把仍偏离预算的章节按
+    #    目录序每 10 章一批（批内并发、批间串行）自动调度既有续写链（under）/
+    #    压缩链（over），单章轮次封顶沿用现链常量；此前本软件只有预检检出
+    #    （DLV-02/08/16）+ 人工「补全生成」引导（review_autofix._manual）。
+    #    仅整案自动生成收尾时执行（section/continue 单章模式不触发）；任何
+    #    失败保留原正文。False（默认）= 逐字回退引入前行为（收尾零额外调用）。
+    word_adjust_batch_enabled: bool = False
+
     # F6 应急章「专项应急预案按事故类型分组」结构要素注入（2026-10-07）：
     # 文档实证：第4轮成稿应急章 H3 从 2.1 平铺到 2.12，把高处坠落/物体打击、
     # 火灾、触电、中毒窒息四类事故的处置步骤混在同一层（2.1~2.3、2.4~2.6、

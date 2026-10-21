@@ -201,6 +201,37 @@ async def repair(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     #    调用；返回管线校正后的正文供落库。
     _resync_charts = _make_chart_resync(scheme_id)
 
+    # ✅ R122-G2（引入易标「持久 Agent 整卷修复」的程序级等价物）：
+    #    body.mode=="fullbook" 走整卷合并修复（少轮整卷往返 + 四道小节闸门）。
+    #    开关 `consistency_fullbook_repair_enabled` 默认关闭 ⇒ 显式请求 fullbook 时
+    #    返回 422（不默默降级）；默认 mode!="fullbook" 逐字节保持下方既有逐章链路。
+    if mode == "fullbook":
+        from app.config import settings as _settings
+        if not bool(getattr(_settings, "consistency_fullbook_repair_enabled", False)):
+            raise HTTPException(
+                422, "整卷合并修复未启用（consistency_fullbook_repair_enabled=False）")
+        try:
+            from app.services import consistency_fullbook_repair as _fullbook
+            result = await _fullbook.run_fullbook_repair(
+                db, scheme_id=scheme_id, scan_id=scan_id, conflicts=conflicts,
+                facts=facts, severity_threshold=severity_threshold,
+                conflict_ids=conflict_ids, resync_fn=_resync_charts,
+                progress_cb=_progress)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("整卷合并修复失败")
+            raise HTTPException(500, f"整卷合并修复失败：{e}")
+        result["status"] = "completed"
+        for _item in result.get("items") or []:
+            if _item.get("status") == "repaired" and _item.get("section_id"):
+                await reset_review_on_content_change(
+                    db, scheme_id, _item["section_id"],
+                    actor="整卷一致性修复",
+                    comment="整卷一致性修复已改写正文，原审核结论失效，请重新送审")
+        await db.commit()
+        return result
+
     try:
         result = await repair_agent.run_repair(
             db, scheme_id=scheme_id, scan_id=scan_id, conflicts=conflicts,

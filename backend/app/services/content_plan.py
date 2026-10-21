@@ -158,6 +158,46 @@ def render_content_plan_guidance(plan: ContentPlanData | None) -> str:
     return "\n".join(parts) + "\n"
 
 
+def resolve_selected_fact_rows(
+    titles: list[str] | None,
+    facts_rows: list,
+) -> list:
+    """✅ R122-G1（引入易标「编排选事实 → 生成注事实」闭环）。
+
+    按编排阶段**选中**的事实标题，从完整事实行集中取出对应整行 —— 对齐易标
+    contentGenerationTask.cjs:134/171 的语义：AI 在编排时只看标题清单，
+    生成时由**程序**按标题取回完整事实注入（`appendSelectedFactsMessage`）。
+
+    与 :meth:`ContentPlanData.validate` 同为**白名单钳制**思想：只返回行集内
+    真存在的行，编排若编造候选外标题一律落空（不会注入臆造事实）。
+
+    行契约与 facts_builder 一致：6 元组 (gt, title, content, confidence,
+    chapter, value_kind)，title 按下标 r[1] 取（历史短行按空串处理，与
+    sse_handlers D1 候选池构建同口径）；命中的**整行原样返回**（不裁列）。
+
+    Args:
+        titles: 编排选中的事实标题（可含重复/空白/非字符串项，一律容错）。
+        facts_rows: 完整事实行集（``_load_facts_rows`` 产物）。
+
+    Returns:
+        选中行列表，按**行集原始顺序**排列并去重（同一标题多行全部保留）。
+    """
+    wanted = {str(t or "").strip() for t in (titles or []) if str(t or "").strip()}
+    if not wanted:
+        return []
+    out: list = []
+    seen_ids: set[int] = set()
+    for row in (facts_rows or []):
+        try:
+            title = str(row[1] or "") if len(row) > 1 else ""
+        except (TypeError, IndexError):
+            continue
+        if title.strip() in wanted and id(row) not in seen_ids:
+            seen_ids.add(id(row))
+            out.append(row)
+    return out
+
+
 async def plan_section_content(
     chat_fn,
     *,

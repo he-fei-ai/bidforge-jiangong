@@ -1391,6 +1391,10 @@ KNOWN_SCENES: dict[str, str] = {
     #    存量 ai_scene_routes 行不受影响（scene_routes 有白名单外兜底分支）。
     "consistency_repair_edits": "一致性问题修复·定点编辑",
     "consistency_repair": "一致性问题修复·整章重写",
+    # ✅ R122-G2（2026-10-21）：整卷合并一致性修复（少轮整卷往返 + 四道小节
+    #    闸门），与逐章 consistency_repair 并存、由开关
+    #    consistency_fullbook_repair_enabled 分流（默认关闭走逐章旧链路）。
+    "consistency_fullbook": "一致性问题修复·整卷合并",
     "consistency_arbitrate": "冲突裁决",
     # —— 审核 / 预检 ——
     "compliance_check": "规范符合性检查",
