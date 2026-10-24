@@ -935,12 +935,40 @@ async def _mark_parse_failed(db, doc_id: str, reason: str) -> None:
     回传，前端可展示"⚠ 解析失败"标签与具体原因。
 
     失败写入独立于主解析链路；即便写入本身异常也不影响已经抛出的解析错误。
+
+    ✅ FIX-4（2026-10-20 · P2 · 告警覆盖）：旧实现是**无条件覆盖**写
+    ``parse_warnings`` ⇒ 重解析失败时把上一轮已持久化的告警
+    （「原文 N 字，已截断至上限」/「PDF 共 N 页，仅解析前 M 页」/ OCR 兜底提示）
+    **整条抹掉**。后果：用户重解析一份 300 页 PDF 失败后，原本「这份文档会被
+    截断」的关键信息消失，文档只剩一条「解析失败」，无从判断该拆分还是该
+    换引擎。失败原因是**追加事件**而非**当前状态**，不应抹掉历史告警。
+
+    现改为「读旧值 → 追加失败原因 → 回写」，并保留去重（同一 reason 不重复堆叠）。
+    为避免无界增长，回写仍经 ``dump_parse_warnings``（20 条 × 300 字容量护栏）。
     """
     try:
+        # 先读旧告警（读失败降级为空，不阻断失败标记）
+        old: list[str] = []
+        try:
+            cur0 = await db.execute(
+                "SELECT parse_warnings FROM project_documents WHERE id=?", (doc_id,))
+            if cur0 is not None:
+                row0 = await cur0.fetchone()
+                if row0:
+                    old = _decode_parse_warnings(
+                        row0["parse_warnings"] if "parse_warnings" in row0.keys()
+                        else None)
+        except Exception:
+            old = []
+        msg = f"解析失败：{reason}"
+        # 去重追加：同一失败原因重复重试不堆叠
+        merged = list(old)
+        if msg not in merged:
+            merged.append(msg)
         await db.execute(
             "UPDATE project_documents SET parse_status='failed', "
             "parse_warnings=? WHERE id=?",
-            (dump_parse_warnings([f"解析失败：{reason}"]), doc_id))
+            (dump_parse_warnings(merged), doc_id))
         await db.commit()
     except Exception:
         logger.exception("标记文档 %s 解析失败状态失败（可忽略）", doc_id)
@@ -991,6 +1019,77 @@ async def _persist_parse_result(
         return False
     await db.commit()
     return True
+
+
+# ✅ R123（2026-10-21）：解析断点续跑检查点 + 落库瞬时重试。
+#    解析主流程（parse_document）分阶段（extract→persist→layers→stale）；失败时在
+#    检查点缓存已提取文本，下次解析可从失败阶段续跑，跳过代价高昂的重新提取。
+#    检查点表由 db.py::_migrate 幂等创建，纯辅助、删除即退回旧行为，无数据风险。
+async def _load_parse_checkpoint(db, doc_id: str) -> dict | None:
+    try:
+        cur = await db.execute(
+            "SELECT stage, status, error, text_cache, retries FROM "
+            "doc_parse_checkpoints WHERE doc_id=?", (doc_id,))
+        if cur is None:
+            return None
+        row = await cur.fetchone()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+async def _save_parse_checkpoint(db, doc_id: str, stage: str, status: str,
+                                 error: str = "", text_cache: str = "") -> None:
+    try:
+        await db.execute(
+            "INSERT INTO doc_parse_checkpoints "
+            "(doc_id, stage, status, error, text_cache, updated_at) "
+            "VALUES (?,?,?,?,?,datetime('now','localtime')) "
+            "ON CONFLICT(doc_id) DO UPDATE SET stage=excluded.stage, "
+            "status=excluded.status, error=excluded.error, "
+            "text_cache=excluded.text_cache, updated_at=datetime('now','localtime')",
+            (doc_id, stage, status, error[:200], text_cache))
+        await db.commit()
+    except Exception:
+        logger.warning("保存解析检查点失败（可忽略）: %s", doc_id)
+
+
+async def _clear_parse_checkpoint(db, doc_id: str) -> None:
+    try:
+        await db.execute("DELETE FROM doc_parse_checkpoints WHERE doc_id=?", (doc_id,))
+        await db.commit()
+    except Exception:
+        pass
+
+
+async def _persist_parse_result_with_retry(
+    db, doc_id: str, stored: str, elapsed: float,
+    warnings: list, diag: dict, truncated: bool,
+) -> bool:
+    """R123：落库瞬时失败指数退避重试（仅 DB 瞬时不可用，不重试结构性失败）。
+
+    与既有 R13 守卫同源：`_persist_parse_result` 在 db.execute 返回 None（连接池
+    瞬时故障）时返回 False。此处对 False 做有限次重试，耗尽仍失败才让调用方 503。
+    结构性失败（文件/格式）在落库前已以 400 结束，不会走到这里。
+    """
+    from app.config import settings as _settings
+    max_retries = int(getattr(_settings, "parse_retry_max", 2))
+    base = float(getattr(_settings, "parse_retry_base_ms", 300))
+    cap = float(getattr(_settings, "parse_retry_cap_ms", 3000))
+    attempt = 0
+    while True:
+        ok = await _persist_parse_result(
+            db, doc_id, stored, elapsed, warnings, diag, truncated)
+        if ok:
+            return True
+        attempt += 1
+        if attempt > max_retries:
+            return False
+        wait_ms = min(base * (2 ** (attempt - 1)), cap)
+        logger.warning(
+            "解析落库瞬时失败，%dms 后第 %d/%d 次重试 doc=%s",
+            int(wait_ms), attempt, max_retries, doc_id)
+        await asyncio.sleep(wait_ms / 1000.0)
 
 
 async def _mark_project_facts_stale(db, project_id: str) -> int:
@@ -1093,30 +1192,50 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
             raise HTTPException(400, f"原始文件缺失（{fname}），请重新上传")
         # 本次是否为重解析（源文档此前已有解析内容）—— 解析代次递增判定
         _was_parsed = bool(_cur and _cur["parsed_markdown"])
-        try:
-            content = await asyncio.to_thread(safe_path.read_bytes)
-            text, diag = await asyncio.to_thread(
-                _gf.parse_file_content_ex, content, fname)
-        except ParseError as e:
-            # ParseError 的消息是给用户看的（缺依赖 / 无 OCR 引擎 / 压缩炸弹），
-            # 属于可操作提示，原样返回。
-            logger.warning("文档 %s 解析失败: %s", fname, e)
-            # ✅ 解析失败可观测性：标记 failed 状态 + 持久化原因（前端区分"待解析"）
-            await _mark_parse_failed(db, doc_id, str(e))
-            raise HTTPException(400, f"解析失败：{e}")
-        except Exception:
-            # ✅ 其它异常（库版本、路径、编码等）只进日志，不回传细节，避免泄露环境信息
-            logger.exception("文档 %s 解析出现未预期异常", fname)
-            await _mark_parse_failed(db, doc_id, "文件无法识别或已损坏")
-            raise HTTPException(400, "解析失败：文件无法识别或已损坏，请查看服务端日志")
-        if len(text.strip()) < 10:
-            await _mark_parse_failed(
-                db, doc_id,
-                "未解析到有效文本（空白文件 / 扫描件无 OCR / 已损坏）")
-            raise HTTPException(400,
-                f"「{fname}」未解析到有效文本：可能是空白文件、扫描件或已损坏。"
-                f"若为扫描件/图片，请确认 OCR 引擎可用"
-                f"（打开 /api/v1/diagnostics/capabilities 查看启用方法）")
+        # ✅ R123（2026-10-21）：解析断点续跑检查点。
+        #    force=重解析走完整流程，先清旧检查点（不续跑旧失败态）。
+        if force:
+            await _clear_parse_checkpoint(db, doc_id)
+        _cp = await _load_parse_checkpoint(db, doc_id)
+        _resume_text = None
+        _resume_stage = "extract"
+        if (not force) and _cp and _cp.get("status") == "failed" and _cp.get("text_cache"):
+            _rs = _cp.get("stage") or "persist"
+            if _rs in ("persist", "layers", "stale"):
+                _resume_text = _cp["text_cache"]
+                _resume_stage = _rs
+        if _resume_text is not None:
+            # 断点续跑：复用上次已提取文本，跳过代价高昂的重新解析。
+            text = _resume_text
+            diag = {"resumed_from_stage": _resume_stage, "warnings": []}
+            logger.info("解析断点续跑 doc=%s 从阶段 %s 恢复（跳过提取）", doc_id, _resume_stage)
+        else:
+            try:
+                content = await asyncio.to_thread(safe_path.read_bytes)
+                text, diag = await asyncio.to_thread(
+                    _gf.parse_file_content_ex, content, fname)
+            except ParseError as e:
+                # ParseError 的消息是给用户看的（缺依赖 / 无 OCR 引擎 / 压缩炸弹），
+                # 属于可操作提示，原样返回。结构化失败不重试（重试无意义）。
+                logger.warning("文档 %s 解析失败: %s", fname, e)
+                # ✅ 解析失败可观测性：标记 failed 状态 + 持久化原因（前端区分"待解析"）
+                await _mark_parse_failed(db, doc_id, str(e))
+                raise HTTPException(400, f"解析失败：{e}")
+            except Exception:
+                # ✅ 其它异常（库版本、路径、编码等）只进日志，不回传细节，避免泄露环境信息
+                logger.exception("文档 %s 解析出现未预期异常", fname)
+                await _mark_parse_failed(db, doc_id, "文件无法识别或已损坏")
+                raise HTTPException(400, "解析失败：文件无法识别或已损坏，请查看服务端日志")
+            if len(text.strip()) < 10:
+                await _mark_parse_failed(
+                    db, doc_id,
+                    "未解析到有效文本（空白文件 / 扫描件无 OCR / 已损坏）")
+                raise HTTPException(400,
+                    f"「{fname}」未解析到有效文本：可能是空白文件、扫描件或已损坏。"
+                    f"若为扫描件/图片，请确认 OCR 引擎可用"
+                    f"（打开 /api/v1/diagnostics/capabilities 查看启用方法）")
+            # ✅ R123：提取阶段成功，记录检查点（便于后续阶段失败时可续跑）。
+            await _save_parse_checkpoint(db, doc_id, "extract", "done")
         # ✅ BUG 修复：落库长度与实际存储长度一致，避免前端显示"文本长度 X"
         # 但库里只存了 Y < X 的假象。超限时返回 truncated=true 让前端提示重解析。
         # ✅ 两类截断都要告知：① 落库字数超上限；② 解析器自身截断（PDF 页数 /
@@ -1145,10 +1264,15 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
         # ✅ P1（R13 写路径 · 2026-10-05）：落库未生效时**不能**继续 —— 后面的
         #    _ingest_parsed_doc 会从库里读到空正文、result 也会回 ok=True+text_len，
         #    用户看到「解析成功 N 字」而刷新后是 0 字。503 让用户明确重试。
-        if not await _gf._persist_parse_result(
+        # ✅ R123：落库瞬时失败指数退避重试；耗尽仍失败 → 记录断点（缓存文本）后 503。
+        if not await _persist_parse_result_with_retry(
                 db, doc_id, stored, _elapsed, parser_warnings, diag, truncated):
+            await _save_parse_checkpoint(
+                db, doc_id, "persist", "failed",
+                "落库瞬时失败（已重试耗尽）", text)
             raise HTTPException(
                 503, "解析结果保存失败（数据库暂时不可用），请稍后重试")
+        await _save_parse_checkpoint(db, doc_id, "persist", "done")
         # ✅ 四层存储（阶段2+3）：解析层产物落盘 + 分块入库（失败不阻断解析主结果）
         layer_info = await _ingest_parsed_doc(
             db, doc_id, row["project_id"], fname, _elapsed, diag,
@@ -1156,6 +1280,7 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
         logger.info("文档 %s 解析完成：%d 字%s%s", fname, len(stored),
                     "（已截断至上限）" if char_truncated else "",
                     "（解析器截断）" if diag.get("truncated") else "")
+        await _save_parse_checkpoint(db, doc_id, "layers", "done")
         result: dict = {"ok": True, "text_len": len(stored), "truncated": truncated}
         if layer_info:
             result["layers"] = layer_info
@@ -1189,6 +1314,9 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
             result["stale_facts"] = stale_count
             result["note"] = ("文档解析成功，已纳入项目资料全集；"
                               "如已提取过全局事实，请重新执行「AI 提取事实」")
+        # ✅ R123：全阶段成功，记录 stale 完成并清除断点检查点。
+        await _save_parse_checkpoint(db, doc_id, "stale", "done")
+        await _clear_parse_checkpoint(db, doc_id)
         return result
 
 

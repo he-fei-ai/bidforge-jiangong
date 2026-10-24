@@ -79,6 +79,10 @@ _REVERSE_MAP = [
      're.match(r"^(\\d+\\.\\d+)\\s+([\\u4e00-\\u9fa5A-Za-z].*)$", s_inside)'),
     ("_RE_HEADING_N.match(s_inside)",
      're.match(r"^(\\d+)\\s+([\\u4e00-\\u9fa5A-Za-z].*)$", s_inside)'),
+    # ✅ R117（2026-10-20）：补登「整行加粗的中文枚举伪标题」判据。
+    ("_RE_BOLD_ENUM_HEADING.match(s)",
+     're.match(r"^\\*\\*\\s*(?:\\d+\\s*[)）、]|[（(]\\s*\\d+\\s*[)）])\\s*、?\\s*'
+     '(?P<title>[^*\\n]{2,}?)\\s*\\*\\*$", s)'),
     ('_RE_BOLD_WRAP.sub(r"\\1", text).strip()',
      're.sub(r"^\\*\\*(.*?)\\*\\*$", r"\\1", text).strip()'),
     ('_RE_WS_RUN.sub("", str(raw or "").strip())[:limit]',

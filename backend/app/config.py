@@ -69,6 +69,19 @@ class Settings(BaseSettings):
     #    ⚠️ 显式设小该值即可恢复「只取前 N 页」的旧行为。
     pdf_text_max_pages: int = 500
 
+    # ---------- 解析失败重试（R123 · 2026-10-21） ----------
+    # 仅对「瞬时/可恢复」失败重试（落库 DB 瞬时不可用），不对结构性失败
+    # （文件格式/加密/空白 → ParseError 400）重试。指数退避、上限封顶。
+    # 失败耗尽后仍走既有 503 / _mark_parse_failed 语义，零行为变化。
+    parse_retry_max: int = 2
+    parse_retry_base_ms: int = 300
+    parse_retry_cap_ms: int = 3000
+
+    # ---------- 事实库版本化（R125 · 2026-10-21） ----------
+    # 默认关闭：既有抽取/注入/一致性校验零行为变化（version 列恒默认 1，读路径忽略）。
+    # 开启后：每次重抽先建快照 + 递增 version，支持回滚到历史版本。
+    enable_fact_versioning: bool = False
+
     # ---------- MinerU 云端解析（扫描件 / 复杂 PDF 兜底，2026-09-17） ----------
     # provider 为空 = 关闭云端兜底；可选值：
     #   "agent"    MinerU-Agent 轻量解析（v1 API，免 Token，按 IP 限频）
@@ -157,7 +170,7 @@ class Settings(BaseSettings):
     # （四层存储的提取成果）此前**从未被导出读取** —— 唯一消费点分别是正文生成
     # 注入（sse_handlers:1515）与 doc_pipeline 的完整性报告，用户在软件里维护的
     # 知识库与解析提取成果在交付文档中完全不可见。
-    # 开启后，导出 DOCX/PDF 在「附录：项目关键事实」之后追加一份
+    # 开启后，导出 DOCX 在「附录：项目关键事实」之后追加一份
     # 「附录：参考资料与提取成果」（按来源分组的二维表）。
     # 默认 False：不渲染、产物与旧版逐字一致（向后兼容）。
     export_appendix_sources: bool = False
@@ -166,7 +179,7 @@ class Settings(BaseSettings):
     # 的并发导出（双击 / 多标签页）到达时先行请求尚未落盘，必然 miss，两者各自
     # 付一次全量成本：图表预渲染 + _auto_generate_ai_image_blocks（**真实计费**，
     # image_engine 的 MD5 成功缓存是运行期缓存，并发时双双错过、各调用一次
-    # provider）+ _build_docx_sync，PDF 链再加一次 Word COM 转换。
+    # provider）+ _build_docx_sync。
     # 结果正确（uuid temp + 原子 os.replace + INSERT OR IGNORE 唯一约束），成本翻倍。
     # 开启后按 (格式, 方案, 配置指纹) 取进程内 asyncio.Lock：先行请求构建并**提交**
     # 缓存行后释放，等待者重查缓存即命中直接返回 —— 不重复构建、不重复计费。
@@ -339,6 +352,15 @@ class Settings(BaseSettings):
     # 否则一次性直出。调小 => 更多方案走分步（更稳但调用次数更多）；
     # 调大 => 更多方案一次性直出（更快但弱模型下更易截断）。
     outline_stepwise_min_words: int = 50000
+    # ✅ R133-D6（2026-10-23 · 引入《标书智能体（2）》§二「程序自动判定，
+    #    也支持用户手动指定」）：提纲生成方案手动指定开关。
+    #    "auto"（默认）= 逐字旧行为：按字数阈值 outline_stepwise_min_words 自动判定；
+    #    "oneshot"     = 强制一次性直出（短/长方案均一次生成）；
+    #    "stepwise"    = 强制分步生成（短方案也走「一级 → 逐章 → 审核」）。
+    #    注意：手动 "oneshot" 仍保留 outline_oneshot_fallback_stepwise 的失败
+    #    降级兜底（一次性失败自动转分步，不硬失败 —— fail-soft 红线优先）。
+    #    其他取值一律按 "auto" 处理（fail-soft，不因脏配置炸主流程）。
+    outline_scheme: str = "auto"
 
     # ✅ R58（2026-10-10）：短方案（word_budget ≤ 上阈值）走「一次性直出」时，
     #    若 AI 返回空目录 / 节点全非法 / 调用异常，是否**自动切换分步生成**。
@@ -347,6 +369,14 @@ class Settings(BaseSettings):
     #    是《标书智能体（五）》§六要求的「一次性失败 → 分步兜底」那条边。
     #    关闭（False）→ 逐字回到 R58 之前的行为。
     outline_oneshot_fallback_stepwise: bool = True
+    # ✅ R133（2026-10-23 · 引入《标书智能体（2）》方案二机制①②）：
+    #    长方案分步生成逐章子目录时，是否启用「代码生成骨架 + AI 补全」
+    #    （build_sublevel_framework 预构建 JSON 框架 → 提示词注入 {outline_framework_block}
+    #    → check_json 逐层递归比对 AI 返回与骨架 → 不一致定向修复最多 3 次 →
+    #    仍不一致由 fill_framework_structure 程序化规整兜底）。
+    #    默认 True（机制生效）；False = 逐字回退旧行为（不注入骨架、
+    #    校验仍用宽松形状校验 _sublevel_validate_fn、不做结构规整）。
+    outline_framework_fill: bool = True
     # 修复结果相对原目录的最小节点覆盖率：低于该比例判为「模型截断/敷衍」，
     # 保留原目录（见 _outline_fix_looks_degraded）。
     outline_fix_min_coverage: float = 0.8
@@ -433,8 +463,11 @@ class Settings(BaseSettings):
     content_retry_backoff: float = 6.0
     # 429 限流退避基数（秒）。
     content_rate_limit_backoff: float = 20.0
-    # 自动续写轮数上限（配合 max_tokens_for_budget 折算后的返工需求收敛为 2）。
-    content_continue_max_rounds: int = 2
+    # 自动续写轮数上限。
+    # ✅ 2026-10-23 对齐外部 OpenBidKit_Yibiao v2（MAX_WORD_ADJUSTMENT_ROUNDS=3，
+    #    docs/reference_research/04_content.md §6.2）：默认 2 → 3，单节字数返工
+    #    最多 3 轮（引入方案《生成正文代码与提示词》亦要求「单节最多3轮」）。
+    content_continue_max_rounds: int = 3
     # ✅ R66（2026-10-11）字数容差：提示词【目标字数】区间与校验带 ±tolerance。
     #    0.1（默认）= 与历史提示词承诺「0.9X ~ 1.1X」逐字节一致；
     #    0.2 = 放宽为 0.8X ~ 1.2X（弱模型/长章节场景可配）。
@@ -555,6 +588,21 @@ class Settings(BaseSettings):
     #    强制目录进入修复链路重写为具体标题。默认 True；False 回到旧口径。
     outline_check_generic_titles: bool = True
 
+    # ✅ R114 FIX-B（2026-10-20 · 生成期逐章占位闸门）：长方案分步链路的**单章
+    #    子目录**产出后立即检出占位/泛化标题（如「专项6」「总体实施策划（2）」）；
+    #    命中即对该章重试**一次**并把拒收原因回灌给模型（R89 G4 失败回灌同口径），
+    #    两次仍脏则 fail-soft 接受（下游审核链仍会再修）。
+    #
+    # 为何需要：“子目录校验只判非空+有 title，占位名完全合法” + “收尾审核的
+    # 外科式重写单次最多 40 条、超时即 fail-soft”两者叠加，就是用户报的
+    # 「三级标题**大量**是占位名」的直接生成机制。本项把闸门提前到**每章产出处**，
+    # 从源头压低占比（仅命中时多一次调用，干净章节零额外开销）。
+    #
+    # True（默认）= 生效；False = 逐字回到引入前（只在收尾审核时修）。
+    # ⚠️ 与 ``outline_check_generic_titles`` 分层：后者管「检不检」，本项管
+    #    「检出后要不要在生成期就地重试」，两者独立可回退。
+    outline_reject_generic_children: bool = True
+
     # ✅ R89（2026-10-17 · 用户投诉形态复发收口）：占位/泛化标题判据的**扩展层**。
     # 生产实证（用户反馈）：目录三级标题仍是「总体方案」「总体方案（2）」「章节」
     # 「小节」「专项6：土方开挖」等占位泛化名称。根因是既有判据（R73/R74/R85/R87
@@ -595,6 +643,17 @@ class Settings(BaseSettings):
     # 0 = 单次调用不回灌；2 = 默认（首试 + 至多 2 次回灌）。
     outline_autofix_generic_retries: int = 2
 
+    # ✅ 《标书智能体（五）》§十「一一对应模式」（程序锁死一级目录）：
+    # 外部机制为「程序直接构造一级目录（标题/顺序/关联评分项锁死）→ 模型
+    # 只生成二三级 → 校验一级目录与评分大类完全一致」，本软件适配为
+    # **一级目录锁死九大章节**（scheme_classification.NINE_CHAPTERS），
+    # 危大方案可增补监测方案章（SAF-06 门控），只增不删。
+    # True = 分步链路的 level1 阶段跳过 AI 调用，程序按九大章节构造一级目录
+    #   （零抽卡、一级标题永不漂移），随后照常逐章生成二三级；
+    #   构造结果与 NINE_CHAPTERS 做一一对应一致性校验（缺失即回退 AI 生成）。
+    # False（默认）= 逐字回到本项引入前：level1 仍由 AI 生成（默认行为不变）。
+    outline_one_to_one_level1: bool = False
+
     # ✅ R73（2026-10-12 · 目录占位标题闸门与外科式标题重写）：检出泛化/占位标题后，
     #    除了「整份目录重写」（受节点覆盖率退化护栏与 120s 超时约束，长方案极易
     #    回退「保留原目录」），再提供一条**只送占位节点 + 上下文**的小调用重写
@@ -604,6 +663,37 @@ class Settings(BaseSettings):
     #    ⚠️ 与 ``outline_check_generic_titles`` 分层：后者管「检不检」，本项管
     #    「检出后走不走小调用」，两者独立可回退。
     outline_title_fix: bool = True
+
+    # ✅ R115（BUG 修复 · 占位标题「零 AI 确定性兜底」）：AI 外科式重写在
+    #    任何一次「超时 / 异常 / 首轮无产出 / 全批保守红线拒收」后返回 None，
+    #    两条调用链路（生成期 ``_review_and_fix_outline`` / 落库期
+    #    ``autofix_generic_titles_on_save``）都 fail-soft 原样保留 —— 用户症状
+    #    「三级标题大量是 专项6 / 总体实施策划（2）」正是该路径的产物。
+    #    生产日志实证（trace=acdef1e40a64，2026-10-20 15:06:26~15:11:06）：
+    #    ``外科式补齐超时（120s）`` → ``目录审核超时（60s）`` → 跳过审核直接完成，
+    #    占位标题零拦截落库；当时 provider 侧 agnes 持续 HTTP 401 + zhipu 429，
+    #    AI 链路整体不可用是**常态而非偶发**。
+    # True（默认）= AI 改写未生效时，再用**纯确定性规则**改一轮
+    #   （去「（N）」后缀基名 → 节点 description 首分句 → description 截断），
+    #   **零 AI 调用、零额外延迟、零失败面**；仍走 `_apply_title_updates` 同一套
+    #   六条保守红线，绝不改坏结构。
+    # False = 逐字回到本项引入前：只依赖 AI 改写，失败即原样保留。
+    # ⚠️ 与 ``outline_title_fix`` 分层：后者管「发不发 AI 小调用」，本项管
+    #   「AI 没改成时补不补确定性兜底」，两者独立可回退。
+    outline_deterministic_title_fallback: bool = True
+
+    # ✅ R116（BUG 修复 · 上游已实证不可用即跳过审核）：补齐（scene=outline_fix）
+    #    与审核（scene=outline_review）共用同一批 provider；补齐刚以 120s 超时 /
+    #    异常收场，即已证明**本轮** AI 链路不可用，再花 ``outline_review_timeout``
+    #    （60s）去问一次不会得到不同结果 —— 生产实证（trace=acdef1e40a64）：
+    #    补齐超时 120s → 审核超时 60s → 跳过审核，用户共等 280s 拿到「未经审核」的目录。
+    # True（默认）= 命中该信号直接跳过审核，如实标注 ``review_skip_reason="upstream_dead"``，
+    #   省下整个审核超时预算；**不调** ``outline_review_timeout`` 默认值（调大只会
+    #   让 AI 全挂时等更久才得到同样结果）。
+    # False = 逐字回到本项引入前：无论上游状态如何都发起审核调用。
+    # ⚠️ 刻意**不做**「开跑前主动探活」：会新增固定延迟，且单次探活成功不能证明
+    #   后续大调用成功（探活可能命中另一个健康 provider，而正文调用仍 401）。
+    outline_skip_review_when_upstream_dead: bool = True
 
     # 九大章节「本章必含要素清单」注入（2026-10-03 · 目录与正文生成增强）：
     # True（默认）= 在正文提示词的【本章审核检查点要求】之后，追加该章的
@@ -645,15 +735,26 @@ class Settings(BaseSettings):
     #   默认开启；它是**软提示**（并发下可能偏乐观），硬限额始终兜底。
     content_chart_quota_hint_enabled: bool = True
 
+    # ✅ 2026-10-23 · 表格密度需求（对齐外部 OpenBidKit_Yibiao v2 的
+    #   tableRequirement 四档策略，docs/reference_research/04_content.md §8.3/§9）：
+    #   none → 全卷禁表（0 张）；light → floor(叶子数*0.2)；moderate →
+    #   floor(叶子数*0.4)；heavy → 无上限（null）。
+    #   默认 'heavy' = 与外部前后端默认一致，且本机引入前无此闸门（等价
+    #   无上限），行为保持零回归。非法值一律回落 'heavy'（normalize 安全）。
+    content_table_requirement: str = "heavy"
+
     # ✅ D1（2026-10-11 · 离散正文编排阶段）：正文生成前是否先由「独立 LLM 步」
     #   为每章产出结构化编排决策（写作聚焦 / 建议素材 / 建议事实 / 是否表格），
     #   注入本章任务差异段并随正文落库，供行文聚焦参考。
-    #   默认关闭（False）：与本项引入前**逐字一致**——不触发任何额外 LLM 调用、
-    #   不写入 plan_json、不改变正文提示词，零回归。开启后每章多一次 LLM 调用
-    #   （成本上升），且编排失败会自动回退为「无编排」而非阻断正文生成。
+    #   ✅ 2026-10-23 默认开启（True）：对齐外部 OpenBidKit_Yibiao v2 的
+    #   「正文编排 → 正文生成」两阶段工作流（外部默认每章先做 contentPlan，
+    #   docs/reference_research/04_content.md §4/§11）。开启后每章多一次 LLM
+    #   调用（成本上升），且编排失败会自动回退为「无编排」而非阻断正文生成；
+    #   设为 False 逐字回退到「无编排」旧行为（不触发额外 LLM 调用、不写
+    #   plan_json、不改变正文提示词）。
     #   ⚠️ 设计取舍：本项**只做软建议（建议优先使用），不硬限制**模型可用素材
     #   范围——刻意回避 R57 已论证的「预编排=陈旧结论陷阱」硬约束风险。
-    content_plan_stage_enabled: bool = False
+    content_plan_stage_enabled: bool = True
 
     # ✅ R77（2026-10-14 · 正文生成符合全局事实 · 引入易标「生成后事实冲突
     #    审计 + 定点替换」）：standard_report 每章检出的 error 级事实冲突
@@ -717,9 +818,11 @@ class Settings(BaseSettings):
     #    受损）。标题白名单钳制：编排编造的候选外标题一律丢弃（对齐易标
     #    normalizeFactTitles）。仍受总量 6000 预算与 fact_injection_audit 审计
     #    （审计新增 full_titles 回显）。依赖 content_plan_stage_enabled=True 才有
-    #    实际效果（编排关时没有任何选中标题）。False（默认）= 逐字回退引入前
-    #    行为（注入内容与引入前逐字节一致）。
-    content_plan_selected_facts_inject: bool = False
+    #    实际效果（编排关时没有任何选中标题）。
+    #    ✅ 2026-10-23 默认开启（True）：对齐外部 v2「编排选事实 → 生成注事实」
+    #    默认闭环（外部无此开关、恒执行）；False = 逐字回退引入前行为（选中
+    #    标题仅作软建议文字、不驱动生成注入）。
+    content_plan_selected_facts_inject: bool = True
 
     # ✅ R122-G2（2026-10-21 · 引入易标「持久 Agent 整卷修复」的程序级等价物，
     #    参考 contentGenerationTask.cjs:5490/5507/5579）：全文一致性修复新增
@@ -727,9 +830,11 @@ class Settings(BaseSettings):
     #    整卷往返，程序四道闸门（未知 section_id / 缺节 / 非空改空 / 图表围栏
     #    变动）校验后**只回写变化小节**，复用既有快照+确认/回滚链路。刻意不
     #    移植易标持久会话基建（同 sections.py:1665 既有裁定）。REST 的
-    #    mode=fullbook 与正文收尾自动阶段都受本开关门控；False（默认）=
-    #    REST 拒绝 fullbook 模式（422）、自动阶段逐字节走现链（repair_agent）。
-    consistency_fullbook_repair_enabled: bool = False
+    #    mode=fullbook 与正文收尾自动阶段都受本开关门控；
+    #    ✅ 2026-10-23 默认开启（True）：对齐外部 v2「持久 Agent 整卷修复」
+    #    默认执行（外部无此开关、恒执行）；False = 逐字回退引入前行为
+    #    （REST 拒绝 fullbook 模式 422、自动阶段走现链 repair_agent）。
+    consistency_fullbook_repair_enabled: bool = True
 
     # ✅ R122-G3（2026-10-21 · 引入易标「成稿后跨章节字数批量调度」，
     #    参考 contentGenerationTask.cjs:28-45 TOTAL_WORD_ADJUSTMENT_BATCH_SIZE=10/
@@ -738,8 +843,11 @@ class Settings(BaseSettings):
     #    压缩链（over），单章轮次封顶沿用现链常量；此前本软件只有预检检出
     #    （DLV-02/08/16）+ 人工「补全生成」引导（review_autofix._manual）。
     #    仅整案自动生成收尾时执行（section/continue 单章模式不触发）；任何
-    #    失败保留原正文。False（默认）= 逐字回退引入前行为（收尾零额外调用）。
-    word_adjust_batch_enabled: bool = False
+    #    失败保留原正文。
+    #    ✅ 2026-10-23 默认开启（True）：对齐外部 v2「成稿后跨章节字数批量
+    #    调度」默认执行（外部恒执行批量调整）；False = 逐字回退引入前行为
+    #    （收尾零额外调用）。
+    word_adjust_batch_enabled: bool = True
 
     # F6 应急章「专项应急预案按事故类型分组」结构要素注入（2026-10-07）：
     # 文档实证：第4轮成稿应急章 H3 从 2.1 平铺到 2.12，把高处坠落/物体打击、

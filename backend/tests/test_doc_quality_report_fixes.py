@@ -255,7 +255,11 @@ class TestResidueWiring:
                 "_project_name_from_facts"} <= called
 
     def test_all_five_surfaces_are_wired(self):
-        """五个外露表面全部消费清洗/兜底出口（AST 调用点判定）。"""
+        """五个外露表面全部消费清洗/兜底出口（AST 调用点判定）。
+
+        ✅ R126（2026-10-21）：PDF 导出链整体下线，原第五表面 export_pdf 的
+        wiring 断言随链消失，四表面口径不变。
+        """
         import ast
         from pathlib import Path
 
@@ -266,7 +270,6 @@ class TestResidueWiring:
             "_build_docx_sync": {"_sanitize_template_residue_title",
                                  "_display_scheme_name"},
             "export_docx": {"_display_scheme_name"},
-            "export_pdf": {"_display_scheme_name"},
         }
         tree = ast.parse(Path(exp.__file__).read_text(encoding="utf-8"))
         fns = {n.name: n for n in tree.body

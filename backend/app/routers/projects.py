@@ -221,10 +221,8 @@ async def delete_project(project_id: str, db=Depends(get_db)):
         from app.config import EXPORTS_DIR
         for sid in scheme_ids:
             # ✅ 修复（2026-10-03 · 导出缓存磁盘泄漏）：旧实现只清 `.docx`，
-            #    漏清 `.pdf` 导出缓存文件。PDF 产物同样落在 EXPORTS_DIR，
-            #    命名 `{scheme_id}_*.pdf`（见 export.py 4809 的 out_path），
-            #    删除方案后这些 PDF 缓存文件永久孤儿、目录无限增长。
-            #    现 docx / pdf 一并清理；`{sid}_*` 前缀确保不误删其他方案的文件。
+            #    漏清 `.pdf`。PDF 导出已随 R126 下线，此处保留 `.pdf` 清理
+            #    仅用于回收历史导出缓存；`{sid}_*` 前缀确保不误删其他方案文件。
             for ext in ("docx", "pdf"):
                 for f in EXPORTS_DIR.glob(f"{sid}_*.{ext}"):
                     f.unlink(missing_ok=True)

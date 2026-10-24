@@ -74,9 +74,12 @@ from app.services.facts_extractor import (
     invalidate_export_cache,
     is_safety_critical_name,
     is_simulated_marked,
+    # ✅ R125（2026-10-21）：事实库版本化回滚 / 快照查询（默认关闭，需 enable_fact_versioning）。
+    list_fact_snapshots,
     normalize_key,
     # ✅ R80（2026-10-15）：value_kind 白名单归一（单一事实源，解析/落库/手工共用）
     normalize_value_kind,
+    rollback_facts_to_snapshot,
     row_field,
     strip_simulated_marker,
 )
@@ -2557,6 +2560,26 @@ def _facts_for_adjust_prompt(rows: list) -> list:
     return out
 
 
+# ✅ R122（2026-10-21）：AI 调整事实库超长截断的可观测性补齐。
+#    列表接口把事实库 ``json.dumps(...)[:30000]`` 硬截断喂给模型，超出部分
+#    的事实模型**完全不可见**（既不会被改、也不会进 ignored_ops 回执），
+#    用户误以为「调整已覆盖全部事实」。本纯函数估算上限内可完整序列化的
+#    事实条数，仅供告警与回执，不改变任何生成行为（可单测）。
+def _count_visible_facts(facts_payload: list, limit: int) -> int:
+    """返回在 ``limit`` 字符内可完整序列化的事实条数（粗估，逐条累加）。
+
+    分隔符按 json.dumps 默认 ``, ``（逗号+空格=2 字符）估算，与真实序列化长度一致。
+    """
+    total_chars = 2  # 方括号 []
+    for i, fact in enumerate(facts_payload):
+        piece = json.dumps(fact, ensure_ascii=False)
+        sep = 2 if i > 0 else 0  # json.dumps 列表项间 ``, ``
+        if total_chars + sep + len(piece) > limit:
+            return i
+        total_chars += sep + len(piece)
+    return len(facts_payload)
+
+
 def _validate_adjust_ops(obj, valid_ids: set, *,
                          existing_keys: set | None = None,
                          ignored_out: list | None = None) -> tuple:
@@ -2710,6 +2733,7 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
     #    区分「AI 没产出」与「产出了但被安全校验拦下」—— 与 R48 图表删除
     #    可观测性同族的判据（静默丢弃 = 最贵的缺陷）。
     ignored_ops: list[dict] = []
+    _truncated_count = 0
     if do_apply and isinstance(confirmed_ops, list):
         # 用户已在 UI 预览并二次确认具体操作；直接校验这份计划，禁止再次调用 AI
         # 生成另一份可能不同的计划（否则“确认内容”与“实际落库内容”存在漂移）。
@@ -2717,9 +2741,23 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
             {"operations": confirmed_ops}, valid_ids,
             existing_keys=existing_keys, ignored_out=ignored_ops)
     else:
+        _facts_payload = _facts_for_adjust_prompt(rows)
+        _facts_json = json.dumps(_facts_payload, ensure_ascii=False)
+        _FACTS_PROMPT_LIMIT = 30000
+        if len(_facts_json) > _FACTS_PROMPT_LIMIT:
+            # ✅ R122 可观测性补齐：超大事实库被硬截断喂给 AI，超出部分的事实
+            #    AI 完全不可见（不会被改、也不计入 ignored_ops），用户误以为
+            #    「调整已覆盖全部事实」。现告警并估算可见条数。
+            _visible = _count_visible_facts(_facts_payload, _FACTS_PROMPT_LIMIT)
+            logger.warning(
+                "全局事实 AI 调整：事实库超长被截断 scheme=%s total=%d visible≈%d "
+                "rendered_chars=%d (上限%d)，超出部分 AI 不可见且不计 ignored",
+                scheme_scope or f"项目={real_pid}", len(_facts_payload),
+                _visible, len(_facts_json), _FACTS_PROMPT_LIMIT)
+            _truncated_count = len(_facts_payload) - _visible
         prompt = render(
             "global_facts_adjust_system",
-            current_facts=json.dumps(_facts_for_adjust_prompt(rows), ensure_ascii=False)[:30000],
+            current_facts=_facts_json[:_FACTS_PROMPT_LIMIT],
             instruction=instruction[:3000],
         )
         try:
@@ -2840,6 +2878,10 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
         # ✅ 加法式新字段（旧前端不消费也不报错）：被安全校验丢弃的操作及理由。
         "ignored": ignored_ops,
         "ignored_count": len(ignored_ops),
+        # ✅ R122（加法式新字段，旧前端不消费也不报错）：被超长截断、AI 不可见
+        #    的事实条数；0 表示未截断。前端 FactsAdjustPanel 可据此提示「部分事实
+        #    未纳入本次调整，建议分批或精简事实库后重试」。
+        "truncated": _truncated_count,
     }
 
 
@@ -2923,6 +2965,54 @@ from app.routers.global_facts_docs import (  # noqa: F401
     # 以下被测试直接 monkeypatch gf.xxx（顶部 import 已覆盖命名空间，此处不再重复 import）
 )
 from app.routers.global_facts_docs import router as docs_router  # noqa: F401
+
+# ---------------------------------------------------------------------------
+# ✅ R125（2026-10-21）：事实库版本化回滚 / 快照查询端点（默认关闭）。
+#    需 enable_fact_versioning=true 才生效；关闭时返回 409，零行为变化。
+# ---------------------------------------------------------------------------
+
+@router.post("/{project_id}/rollback")
+async def rollback_facts(
+    project_id: str,
+    body: dict = {},
+    db=Depends(get_db),
+):
+    """回滚到指定快照（enable_fact_versioning=true 时可用）。
+
+    body: ``{"snapshot_id": "..."}``；将快照行写回 global_facts（旧行归档 history）。
+    """
+    if not getattr(settings, "enable_fact_versioning", False):
+        raise HTTPException(409, "事实库版本化未启用（enable_fact_versioning=false）")
+    snapshot_id = (body or {}).get("snapshot_id")
+    if not snapshot_id:
+        raise HTTPException(400, "需要 snapshot_id")
+    try:
+        res = await rollback_facts_to_snapshot(db, snapshot_id, project_id)
+    except ValueError as e:
+        code = str(e)
+        if code == "snapshot_project_mismatch":
+            raise HTTPException(403, "快照不属于该项目")
+        raise HTTPException(404, "快照不存在")
+    # 回滚改变了事实全集 → 失效导出缓存。
+    # ✅ R126 修复（接管 R125 中间态）：旧实现裸调
+    # ``invalidate_export_cache(db, "", facts_touched=True)`` 只失效 scheme_id
+    # 为空的单条缓存，项目下其余方案的导出缓存全部漏失效——与
+    # create/update/delete_fact 的项目级口径不一致（审计护栏
+    # test_fact_write_paths_use_scope_invalidation_helper 即为此红）。现改走
+    # 统一 helper，按项目覆盖全部方案。
+    await _invalidate_fact_scope_cache(db, "", project_id)
+    return res
+
+
+@router.get("/{project_id}/snapshots")
+async def get_fact_snapshots(
+    project_id: str,
+    db=Depends(get_db),
+):
+    """列出该项目的可回滚快照（enable_fact_versioning=true 时可用）。"""
+    if not getattr(settings, "enable_fact_versioning", False):
+        raise HTTPException(409, "事实库版本化未启用（enable_fact_versioning=false）")
+    return {"snapshots": await list_fact_snapshots(db, project_id)}
 
 # ✅ A-4 护栏字符串保留（实际定义在 global_facts_docs.py，此处保留引用供护栏扫描）
 # 复核文档 %s 解析状态失败（exc_info=True 记录 traceback）

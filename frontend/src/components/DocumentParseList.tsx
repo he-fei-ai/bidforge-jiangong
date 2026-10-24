@@ -171,6 +171,15 @@ export default function DocumentParseList({
     <List
       size="small"
       dataSource={visibleDocs}
+      // ✅ FIX-8（2026-10-20 · P2 · 行身份错位）：antd List 未传 rowKey 时
+      //    默认按 `item.key` 取键，而后端 /documents 返回的字段是 `id`
+      //    （**没有** `key`）⇒ 落到 `list-item-${index}` 索引键。
+      //    后端列表按 `created_at DESC` 排序（global_facts_docs.py:85），
+      //    每次刷新顺序都可能变（并发上传/同名替换）⇒ React 按索引复用行，
+      //    行内**受控**元素（分类 Select 的 value、行内按钮的 loading 态）
+      //    会错位到另一份文档上：用户看到 A 文档的分类挂在 B 文档行里。
+      //    显式 rowKey="id" 让行身份绑定文档主键，与后端语义一致。
+      rowKey="id"
       // 2026-09-23：compact 模式下 dataSource 已截断为 visibleDocs（默认 3 行），
       // 非 compact 时 visibleDocs === docs，行为不变。行距压缩由外层 .dpl-compact-list CSS 负责。
       renderItem={(doc) => {

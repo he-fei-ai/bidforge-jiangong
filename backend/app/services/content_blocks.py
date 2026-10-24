@@ -45,6 +45,9 @@ from app.services.chart_validators import (
 #    裸围栏行变成新开围栏、把其后正文整段吞进代码块（state=eof），而前端 marked
 #    （CommonMark）判该行为正文保留 —— 预览与导出反向分叉（BUG-F2）。
 from app.services.fence_common import (  # noqa: E402
+    MARKDOWN_FENCE_LANGS as _MARKDOWN_FENCE_LANGS_SHARED,
+)
+from app.services.fence_common import (
     is_fence_close as _fence_is_close,
 )
 from app.services.fence_common import (
@@ -154,6 +157,32 @@ _RE_HEADING_NNN = re.compile(r"^(\d+\.\d+\.\d+)\s+([\u4e00-\u9fa5A-Za-z].*)$")
 _RE_HEADING_DEEP = re.compile(r"^(\d+(?:\.\d+){3,6})\s+([\u4e00-\u9fa5A-Za-z].*)$")
 _RE_HEADING_NN = re.compile(r"^(\d+\.\d+)\s+([\u4e00-\u9fa5A-Za-z].*)$")
 _RE_HEADING_N = re.compile(r"^(\d+)\s+([\u4e00-\u9fa5A-Za-z].*)$")
+# ✅ R117（2026-10-20 · 导出成稿取证 · 加粗中文枚举伪标题）：
+#    模型高频输出整行加粗的中文枚举伪标题 —— ``**1）、工程基本信息**`` /
+#    ``**（1）施工准备**``。编号后跟的是**顿号/右括号**，而 ``_RE_HEADING_N`` 系列
+#    一律要求「编号 + 空格」，故全部落空 ⇒ 退化成普通段落：既保留源文的 ``1）、``
+#    编号（与 ``_compute_subheading`` 产出的 L6 编号 ``1）、`` 直接撞号，实测同一节
+#    出现 2 个以上 ``1）、``），又永不进目录。
+#    判据刻意收紧为「**整行**被一对 ``**`` 包裹」（行尾多一个字符都不算 —— 那正是
+#    ``**1. 吊装构件设计图**：明确…`` 这类「加粗列表项 + 冒号接正文」的形态）。
+_RE_BOLD_ENUM_HEADING = re.compile(
+    r"^\*\*\s*(?:\d+\s*[)）、]|[（(]\s*\d+\s*[)）])\s*、?\s*"
+    r"(?P<title>[^*\n]{2,}?)\s*\*\*$")
+# ✅ R117（2026-10-20 · 导出成稿取证 · markdown 围栏按 Markdown 解析）：
+#    ```markdown / ```md / ```gfm 是「这段内容本身就是 Markdown」的**显式声明**，
+#    不是代码。旧实现一律落到通用 code 分支 ⇒ 成稿出现一个 Normal 段（实测
+#    53 runs / 33 个 w:br）内含 GFM 表格与 $W_{max}$ 原始 LaTeX：表格不渲染、
+#    表号与真实表格重号、公式泄漏、子标题层级与编号全部消失。
+#    ⚠️ 口径刻意**不含** ```text / ```plaintext —— 那是「纯文本代码块」，
+#    既有契约（test_numbering_unification::test_fence_and_list_and_paragraph_untouched）
+#    明确要求其中的 ``### …`` 不得被当成标题；把 text 纳入本集合会让围栏真正
+#    失去「保护内容不被解析」的语义。
+#    ✅ R119（2026-10-21 · TD-4 字数口径与 markdown 判定同源）：本元组不再是本模块
+#    自造字面量，改为引用 ``fence_common.MARKDOWN_FENCE_LANGS`` 唯一事实源 ——
+#    否则「导出侧按 markdown 递归解析」与「字数侧按 markdown 计入内部正文」两处
+#    lang 列表会各自漂移（一处加 ```mdx``、另一处忘加 → 成稿渲染但字数仍漏计）。
+#    保留模块内名 ``_MARKDOWN_FENCE_LANGS`` 不变，既有引用/测试导入点零改动。
+_MARKDOWN_FENCE_LANGS = _MARKDOWN_FENCE_LANGS_SHARED
 _RE_MD_HEADING = re.compile(r"^(#{1,6})\s+(.*)")
 _RE_TABLE_SEP = re.compile(r"^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$")
 # ✅ R99（2026-10-17 · 机器标记不得泄漏进交付文档）：
@@ -244,6 +273,13 @@ def _detect_plain_heading(line: str) -> tuple[int, str] | None:
     # 3. 长度排除（标题短正文长）
     if len(s_inside) > 50:
         return None
+    # 4. ✅ R117：整行加粗的中文枚举伪标题（**1）、工程基本信息** / **（1）施工准备**）
+    #    —— 编号后是顿号/右括号而非空格，下面四条 N.N 判据必然全部落空。整行加粗
+    #    + 枚举编号 + 短标题三条件同时成立才提升为二级标题，编号交给调用方的
+    #    `_compute_subheading` 统一重排（源文的 `1）、` 前缀由 _strip_title_number 剥除）。
+    m_enum = _RE_BOLD_ENUM_HEADING.match(s)
+    if m_enum:
+        return 2, m_enum.group("title").strip()
 
     # N.N.N 标题（优先级最高，先匹配）
     m = _RE_HEADING_NNN.match(s_inside)
@@ -653,7 +689,8 @@ def _pop_orphan_lead_in_block(blocks: list[dict]) -> bool:
     return True
 
 
-def _parse_content_blocks(content: str) -> list[dict]:
+def _parse_content_blocks(content: str, *, _md_depth: int = 0,
+                          _line_offset: int = 0) -> list[dict]:
     """解析正文内容为 block 列表。
 
     支持的 block 类型：
@@ -661,6 +698,21 @@ def _parse_content_blocks(content: str) -> list[dict]:
       code / table（GFM）/ chart（mermaid 围栏、chart-json、``[CHART_TYPE: x]``）/
       image（AI 配图：``![说明](http...)``）/ quote（``>`` 引用）/
       hr（``---`` ``***`` ``___`` 分隔线）
+
+    ``_md_depth`` 为内部递归深度（R117）：`` ```markdown `` 家族围栏会被**按
+    Markdown 递归解析**，深度上限 2 层，防止畸形输入无限递归。
+
+    ``_line_offset`` 为内部递归的行号基准（R118）：本层 ``content`` 的首行在
+    **最外层原文**中的 0 基行号。递归（围栏内；/嵌套围栏）时必须传入，否则
+    子块上的 ``src_line`` 会退回「围栏内相对行号」。
+
+    ⚠️ R118（2026-10-21 · P0 数据丢失回归）为什么必须传：``src_line`` 的唯一
+    消费方 ``numbering.renumber_section_body_subheadings`` 把它当作
+    ``content.split("\n")`` 的索引**直接覆盖源行**。R117 引入递归时未做偏移换算，
+    实测输入 `` ```markdown␊＃＃ 围栏内全角井号␊## 围栏内标题␊``` `` 时内层块
+    src_line=1，外层 ``lines[1]`` 恰是全角井号行 ⇒ **该行被整行覆盖删除**
+    （原文丢失），且围栏内标题被错误占号（真标题顺延成 2.2）。
+    递归产出的块会额外打 ``_from_fence=True``，编号侧据此不占号（见 numbering 注释）。
     """
     if not content:
         return []
@@ -700,7 +752,9 @@ def _parse_content_blocks(content: str) -> list[dict]:
                     # ✅ 编号统一（2026-09-25）：源行号（0 基）—— 落库前正文子标题
                     #    编号规范化（services/numbering）据其精确重写源行；
                     #    渲染链路不消费该字段，纯增量信息。
-                    "src_line": i,
+                    # ✅ R118：必须是**全文绝对行号**（= _line_offset + 本层下标），
+                    #    递归层要用 _line_offset 把围栏内相对下标抬起。
+                    "src_line": _line_offset + i,
                 })
             i += 1
             continue
@@ -711,7 +765,8 @@ def _parse_content_blocks(content: str) -> list[dict]:
         if plain_h:
             lv, txt = plain_h
             blocks.append({"type": "heading", "level": lv, "text": txt,
-                           "src_line": i})
+                           # ✅ R118：同 # 标题分支，必须是全文绝对行号
+                           "src_line": _line_offset + i})
             i += 1
             continue
         # 代码块 ```lang ... ``` / ~~~lang ... ~~~（图表三侧口径统一，2026-09-24 修复）
@@ -729,6 +784,10 @@ def _parse_content_blocks(content: str) -> list[dict]:
         if _pf is not None:
             _open_char, _open_len, lang = _pf
             lang = lang.strip().lower()
+            # ✅ R118：围栏**开启行**在本层 lines 中的下标（+1 即围栏内容首行）。
+            #    递归解析围栏内部时必须以此换算出内容首行的全文绝对行号，
+            #    否则子块 src_line 是围栏内相对行号（详见本函数 docstring 的 P0 说明）。
+            _fence_open_i = i
             i += 1
             # ✅ 三侧口径统一（2026-09-23，导出幽灵图根因修复）：围栏读取改用与登记侧
             #    （_scan_inline_charts）、改写侧（_rewrite_code_block）同源的共用扫描器
@@ -740,6 +799,43 @@ def _parse_content_blocks(content: str) -> list[dict]:
             code_lines, _fence_state, i = read_fenced_block(
                 lines, i, open_char=_open_char, open_len=_open_len)
             _fence_closed = _fence_state in ("closed", "recovered")
+            # ✅ R117（2026-10-20 · 导出成稿取证）：`` ```markdown `` / ```md / ```text
+            #    是「这段内容**本身就是 Markdown**」的显式声明 —— 必须按 Markdown
+            #    解析，绝不能落到通用 code 分支原样印进成稿。
+            #    实测（室外汽车吊吊装施工专项方案 第 1 轮导出）：模型把整段正文包进
+            #    ```markdown（含 GFM 表格、$W_{max}$ 公式、`##### 3.1.3 …` 子标题），
+            #    成稿里变成**一个 Normal 段落**（53 runs / 33 个 w:br）：
+            #      · GFM 表格不渲染 → 与后续真实表格共用「表 1-1」编号（重号）；
+            #      · LaTeX 以 ```$W_{max}$``` 原文泄漏（不走 OMML 转换）；
+            #      · 子标题层级消失 → 该节 4 个子标题既无 Heading 样式也不进目录；
+            #      · 源文 ``1.2.2 汽车吊选型与性能校核`` 与父章节 ``2.2`` 编号冲突。
+            #    未闭合时按「已交出多少解析多少」处理（宁可少一节代码块，也不丢正文）。
+            if lang in _MARKDOWN_FENCE_LANGS:
+                if not _fence_closed:
+                    logger.warning(
+                        "markdown 围栏未闭合（lang=%s，state=%s，已消费 %d 行），"
+                        "已按 Markdown 解析其内容，不当作代码块输出",
+                        lang, _fence_state, len(code_lines))
+                _inner_md = "\n".join(code_lines)
+                # 围栏内容首行的**全文绝对行号**（+1 跳过开启行自身）
+                _inner_offset = _line_offset + _fence_open_i + 1
+                if _inner_md.strip():
+                    if _md_depth >= 2:
+                        logger.warning(
+                            "markdown 围栏嵌套超过 2 层（lang=%s），余下内容按普通段落输出",
+                            lang)
+                        blocks.append({"type": "paragraph", "text": _inner_md,
+                                       "_from_fence": True})
+                    else:
+                        _inner_blocks = _parse_content_blocks(
+                            _inner_md, _md_depth=_md_depth + 1,
+                            _line_offset=_inner_offset)
+                        for _b in _inner_blocks:
+                            # ✅ R118：围栏派生标记（含嵌套）。编号侧据此
+                            #    **不占号、不重写源行** —— 见 numbering 侧注释。
+                            _b["_from_fence"] = True
+                        blocks.extend(_inner_blocks)
+                continue
             if not _fence_closed:
                 logger.warning('检测到未闭合的代码块（lang=%s，state=%s）', lang, _fence_state)
                 # ✅ 修复（2026-09-19）：围栏被截断时，"消费至文档末尾"会把截断点

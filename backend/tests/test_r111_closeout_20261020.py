@@ -107,12 +107,18 @@ class TestExportCacheLogging:
     SRC = "app/routers/export.py"
 
     def test_docx_hit_and_miss_logged(self):
+        """✅ R126（2026-10-21）：PDF 导出链整体下线，埋点收敛为 DOCX 单链路
+        （原断言 count>=2 为 DOCX+PDF 双链时代口径，随下线一并收敛）。"""
         src = _src(self.SRC)
-        assert src.count("导出缓存命中") >= 2, "DOCX/PDF 命中埋点缺失"
-        assert src.count("导出缓存未命中") >= 2, "DOCX/PDF 未命中埋点缺失"
+        assert src.count("导出缓存命中") >= 1, "DOCX 命中埋点缺失"
+        assert src.count("导出缓存未命中") >= 1, "DOCX 未命中埋点缺失"
 
     def test_logging_is_info_level(self):
-        """缓存命中/未命中是正常控制流，必须 INFO（不得 WARNING，R11 先例）。"""
+        """缓存命中/未命中是正常控制流，必须 INFO（不得 WARNING，R11 先例）。
+
+        R126 FIX-D 新增的「产物完整性校验未通过」为异常路径 WARNING，
+        措辞刻意避开「导出缓存命中」前缀，不与本埋点判据冲突。
+        """
         src = _src(self.SRC)
         for marker in ("导出缓存命中", "导出缓存未命中"):
             i = 0

@@ -399,6 +399,13 @@ def render_mermaid_to_bytes(
     _mermaid_client = get_mermaid_service_client(timeout=30)
     _http_bytes: bytes | None = None
     _max_retries = 2
+    # ✅ R130（日志 TOP1 根因 · 基础设施回退判据）：
+    #    _http_infra_fail = HTTP 失败源于**服务不可用**（连接失败/超时/5xx/
+    #    「所有渲染后端均不可用」/空响应）；_http_content_fail = 失败源于
+    #    **代码本身**（4xx 语法错/载荷非法）。二者决定 allow_pil=False 时
+    #    是否仍允许回退 PIL v2 —— 详见下方 V7.0 开关处的分流。
+    _http_infra_fail = False
+    _http_content_fail = False
     # BUG-F-02 修复：为整段 HTTP 尝试设置总预算（20s）。
     # 原代码每次尝试 30s、最多 2 次（+1s sleep），最坏可叠加到 62s，超过 _add_inline_chart
     # 外层超时保护后，渲染线程被 cancel 但无法回收（shutdown(wait=False)），
@@ -457,13 +464,19 @@ def render_mermaid_to_bytes(
                     len(_http_bytes or b""),
                 )
                 _http_bytes = None
+                _http_infra_fail = True  # 服务可达但无有效产出 → 基础设施类
         except MermaidRenderError as e:
             logger.warning("Mermaid HTTP Service 渲染失败（第%d次）: %s", _retry + 1, e)
             # ✅ BUG 修复：4xx（代码语法错/载荷非法）重试无意义，立即放弃 HTTP 路径
             if 400 <= getattr(e, "status_code", 0) < 500:
+                _http_content_fail = True
                 break
+            # 5xx / status_code=0（mermaid_service 汇总「所有渲染后端均不可用」、
+            # 连接拒绝、超时）→ 基础设施不可用，与代码质量无关
+            _http_infra_fail = True
         except Exception as e:
             logger.warning("Mermaid HTTP Service 异常（第%d次）: %s", _retry + 1, e)
+            _http_infra_fail = True  # 网络/超时/事件循环类异常 → 基础设施不可用
         if _http_bytes is None and _retry < _max_retries - 1:
             __import__("time").sleep(1.0)
 
@@ -477,12 +490,27 @@ def render_mermaid_to_bytes(
     # PIL v2 自绘版式与原生不一致，属于降级输出。allow_pil=False 时直接返回 None，
     # 由调用方在文档中写入占位提示（用户可修复代码后重新导出）。
     # JSON 数据载荷（layout/timeline）不在此列——PIL v2 是其唯一渲染路径。
+    # ✅ R130（日志 TOP1 根因修复 · 「无可用后端」357 次 + 「不降级模式」96 次）：
+    #    旧实现不区分「HTTP 服务挂了」与「代码语法错」——Mermaid HTTP Service
+    #    不可用时（本机未起服务/超时/连接拒绝），导出默认 allow_pil=False 直接
+    #    return None，**全部** Mermaid 源码类图表渲染失败、跳过不占号，成稿少图。
+    #    现按失败原因分流：
+    #      · 基础设施不可用（_http_infra_fail 且非代码错）→ 即使 allow_pil=False
+    #        也回退 PIL v2（记 infra_fallback 日志）——降级出图优于整篇缺图，
+    #        且 PIL v2 本身即商业级渲染器（2.5x 超采样 + 300 DPI）；
+    #      · 代码语法错（4xx，_http_content_fail）→ 维持不降级，返回 None，
+    #    由调用方写占位提示（对齐「失败不静默」）。
     _is_json_payload = code.lstrip().startswith("{")
     if not allow_pil and not _is_json_payload:
-        logger.warning(
-            "[渲染] 不降级模式: HTTP Service 失败且 allow_pil=False, "
-            "Mermaid 载荷不回退 PIL (chart_type=%s)", chart_type)
-        return None
+        if _http_infra_fail and not _http_content_fail:
+            logger.warning(
+                "[渲染] 基础设施回退: HTTP Service 不可用（服务未启动/超时/连接失败），"
+                "allow_pil=False 仍回退 PIL v2 保证出图 (chart_type=%s)", chart_type)
+        else:
+            logger.warning(
+                "[渲染] 不降级模式: HTTP Service 失败且 allow_pil=False, "
+                "Mermaid 载荷不回退 PIL (chart_type=%s)", chart_type)
+            return None
 
     # ---------- Level 2 (PIL v2): 商业级渲染器（零外部依赖，始终可用）----------
     logger.info("[渲染] Level 2 (主路径): 尝试 PIL v2 商业级渲染器 chart_type=%s", chart_type)

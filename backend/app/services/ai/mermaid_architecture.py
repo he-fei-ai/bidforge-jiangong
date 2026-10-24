@@ -249,7 +249,7 @@ def arch_max_nodes() -> int:
 # ✅ 超宽自动拆图（2026-10-10 · R61 授权轮 · 收口 R59 §9 遗留项①真解）
 #   背景：R60 已加「规模预算守卫」（仅告警建议拆分）。本回合落地**真拆图**——
 #   超预算时把架构树按顶层分支分组，每组渲染为子图后**竖向拼接成单张更高 PNG**
-#   返回，契约（单 BytesIO / 单 PNG）不变 ⇒ 缓存/预览/导出/PDF/图号零改动。
+#   返回，契约（单 BytesIO / 单 PNG）不变 ⇒ 缓存/预览/导出/图号零改动。
 ENV_AUTO_SPLIT = "ARCH_AUTO_SPLIT"          # 超宽自动拆图总开关（默认开）
 ENV_SPLIT_MAX_LEAVES = "ARCH_SPLIT_MAX_LEAVES"  # 每组叶子数上限（默认 8）
 ENV_SPLIT_MAX_PARTS = "ARCH_SPLIT_MAX_PARTS"    # 子图数量硬上限（默认 12）
@@ -924,7 +924,7 @@ def _render_architecture_image_v2(data: dict, *, _allow_split: bool = True) -> B
         return None
 
     # ✅ 超宽自动拆图（R61 授权轮）：超预算时拆成多张子图竖向拼接为单张 PNG，
-    #    缓存/预览/导出/PDF/图号全部零改动。递归渲染子图传 _allow_split=False 防二次拆图。
+    #    缓存/预览/导出/图号全部零改动。递归渲染子图传 _allow_split=False 防二次拆图。
     if _allow_split and _arch_autosplit_enabled() and _should_split_arch(root):
         _stream = _render_architecture_split(root)
         if _stream is not None:

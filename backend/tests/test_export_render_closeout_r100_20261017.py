@@ -31,6 +31,7 @@ import ast
 import inspect
 import io
 import uuid
+import zipfile
 from pathlib import Path
 
 import app.config as cfg
@@ -152,7 +153,15 @@ async def db_ctx(tmp_path, monkeypatch):
     await db.commit()
 
     def fake_build(*args, **kwargs):
-        Path(str(args[0])).write_bytes(b"PK\x03\x04" + b"x" * 12)
+        # ✅ R126：桩产物必须是**结构完整的 zip**（本地头 + EOCD 双签名）——
+        #    命中判据已叠加 _artifact_intact 完整性校验，半截假 zip 会被正确
+        #    判为坏缓存走 miss（该行为由 R126 护栏单独覆盖，本组用例锚的是
+        #    「好产物 → 命中零渲染」契约）。
+        with zipfile.ZipFile(str(args[0]), "w") as zf:
+            zf.writestr("[Content_Types].xml",
+                        '<?xml version="1.0" encoding="UTF-8"?>'
+                        '<Types xmlns="http://schemas.openxmlformats.org/package'
+                        '/2006/content-types"/>')
         return {"sections": 1, "tables": 0, "figures": 0}
 
     monkeypatch.setattr(export_mod, "_build_docx_sync", fake_build)
@@ -328,9 +337,12 @@ class TestWiringAndAnchors:
         assert "test_export_closeout_r94_*" not in src, "错误锚点不得回流"
 
     def test_export_chains_call_render_after_cache_query(self):
-        """F2 接线前提：两条链路的 `_prepare_export_render` 调用必须发生在
-        `X-Cache-Status": "hit`` 返回**之后**（命中即零渲染的顺序锁）。"""
-        for name in ("export_docx", "export_pdf"):
+        """F2 接线前提：导出链路的 `_prepare_export_render` 调用必须发生在
+        `X-Cache-Status": "hit`` 返回**之后**（命中即零渲染的顺序锁）。
+
+        ✅ R126：仅剩 export_docx 一条在役链路。
+        """
+        for name in ("export_docx",):
             src = inspect.getsource(getattr(export_mod, name))
             hit_idx = src.find('"hit"')
             render_idx = src.find("_prepare_export_render(")

@@ -197,7 +197,12 @@ def test_read_image_dpi_tolerates_dirty_metadata():
 
 
 def test_docx_chart_sizes_end_to_end(tmp_path):
-    """端到端：宽图 16cm 栏宽；纵向长图不溢出页面；图题规范「图 X-Y 图名」。"""
+    """端到端：宽图 = min(16cm, 版心)；纵向长图不溢出页面；图题规范「图 X-Y 图名」。
+
+    ✅ R127（2026-10-22）：图片宽度改为按当前节版心封顶。本用例走 python-docx
+    默认模板（左右 3.175cm）+ A4 ⇒ 版心 14.65cm，旧断言「必须 16cm」等于在
+    断言「图片横向溢出页面 1.35cm」的缺陷；改为按版心期望值断言。
+    """
     wide = "flowchart LR\n  A[\"施工准备\"] --> B[\"成品保护\"]"
     tall = "flowchart TD\n  A[\"施工准备\"] --> B[\"基层清理\"]\n  B --> C[\"验收\"]"
     sections = [
@@ -216,8 +221,12 @@ def test_docx_chart_sizes_end_to_end(tmp_path):
     assert len(extents) == 2, extents
     wide_w, wide_h = extents[0]
     tall_w, tall_h = extents[1]
-    assert abs(wide_w - 16.0) < 0.05, f"宽图应保持栏宽 16cm，实际 {wide_w}"
-    assert abs(wide_h - 3.44) < 0.05, f"宽图高度应按比例，实际 {wide_h}"
+    sec = doc.sections[-1]
+    available_cm = (sec.page_width - sec.left_margin - sec.right_margin) / 360000
+    expect_w = min(16.0, available_cm)
+    assert abs(wide_w - expect_w) < 0.05, (
+        f"宽图应保持栏宽 min(16cm, 版心 {available_cm:.2f}cm)，实际 {wide_w}")
+    assert abs(wide_h - expect_w * 710 / 3300) < 0.05, f"宽图高度应按比例，实际 {wide_h}"
     assert tall_h <= _CHART_MAX_HEIGHT_CM + 0.05, f"长图不得溢出页面，实际 {tall_h}"
     assert tall_w < 5.0, f"长图高度封顶后宽度等比缩小，实际 {tall_w}"
     captions = [p.text.strip() for p in doc.paragraphs

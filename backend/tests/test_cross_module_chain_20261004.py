@@ -322,18 +322,29 @@ class TestDownstreamInvalidationOnFinish:
 
 # ===========================================================================
 # F8 · P1 导出缓存 cache_key 同值
+# ✅ R126（2026-10-21）：PDF 导出链整体下线，「DOCX/PDF 同值冲突」风险随链消失。
+#    原「双格式 cache_key 互异」断言收敛为两条单链路锚：
+#      ① DOCX cache_key 保持历史形态（无格式后缀，兼容存量行）；
+#      ② 反向锚：fmt=pdf 指纹维度不得随 PDF 复活。
 # ===========================================================================
 class TestExportCacheKeyFormatScoped:
-    def test_docx_and_pdf_cache_keys_differ(self):
+    def test_docx_cache_key_historical_form_kept(self):
         src = _src("routers/export.py")
         keys = re.findall(r"f\"\{scheme_id\}_\{config_hash\[:8\]\}([^\"]*)\"", src)
-        assert "" in keys, "DOCX 的 cache_key 必须保持历史形态"
-        assert any("pdf" in k for k in keys), "PDF 的 cache_key 必须带格式后缀"
-        assert len(set(keys)) >= 2, f"两种格式的 cache_key 仍同值: {keys}"
+        assert "" in keys, "DOCX 的 cache_key 必须保持历史形态（无格式后缀）"
+        assert not any("pdf" in k for k in keys), (
+            "发现 pdf 形态 cache_key 残留（R126：PDF 导出链应整体下线）")
 
-    def test_pdf_content_hash_still_format_scoped(self):
+    def test_r126_no_pdf_fingerprint_dimension(self):
+        """反向锚：content_hash 的 fmt=pdf 维度不得随 PDF 导出复活。
+
+        注：去注释后再判——export.py 顶部版本说明里的「存量 fmt=pdf 指纹行
+        自然淘汰」属历史沿革描述，不是可执行指纹维度。
+        """
         src = _src("routers/export.py")
-        assert 'content_hash + "|fmt=pdf"' in src, "PDF 命中键丢失格式维度"
+        code_only = "\n".join(
+            re.sub(r"#.*$", "", line, count=1) for line in src.splitlines())
+        assert 'fmt=pdf' not in code_only, "PDF 指纹维度复活（R126 已整体下线）"
 
 
 # ===========================================================================

@@ -11,7 +11,7 @@
  * 统计口径（已解析 / 待解析 / 截断 / 全部就绪）复用 computeDocStats，避免页面
  * 与组件各算一套而漂移。
  */
-import React from "react";
+import React, { useEffect, useRef } from "react";
 import { Alert, App, Button, Card, Progress, Space, Spin, Tag, Tooltip, Typography, Upload } from "antd";
 import {
   AppstoreOutlined,
@@ -134,6 +134,18 @@ export default function UploadParseTab({
   parseRunning,
 }: UploadParseTabProps) {
   const { modal, message } = App.useApp();
+  // ✅ FIX-7（2026-10-20 · P2 · 幽灵上传）：上传回调经 setTimeout 延后一拍
+  //    触发（避免在 antd Upload 的 beforeUpload 同步栈内发起请求），
+  //    定时器必须登记并在卸载时清理 —— 否则组件卸载后仍会触发真实上传。
+  const uploadTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (uploadTimerRef.current !== null) {
+        window.clearTimeout(uploadTimerRef.current);
+        uploadTimerRef.current = null;
+      }
+    };
+  }, []);
   // 「下一步」按钮文案动态生成：解析项数取后端 /items 的分组定义（旧实现硬编码
   // 「18 项」，后端增减项后文案失真）；定义未加载时不报数，只说「全表」。
   const baNextLabel = (() => {
@@ -196,7 +208,15 @@ export default function UploadParseTab({
                   );
                 }
                 if (accepted.length > 0) {
-                  setTimeout(() => onUploadFiles(accepted), 0);
+                  // ✅ FIX-7（2026-10-20 · P2 · 幽灵上传）：旧实现用裸
+                  //    `setTimeout(..., 0)` 延后触发 onUploadFiles，**从不清理**
+                  //    ⇒ 组件卸载（切方案/关弹窗）后定时器仍会触发页面级的
+                  //    **真实上传请求**（幽灵上传 + 卸载后 setState）。
+                  //    现登记到 ref，卸载时 clearTimeout，杜绝幽灵上传。
+                  uploadTimerRef.current = window.setTimeout(() => {
+                    uploadTimerRef.current = null;
+                    onUploadFiles(accepted);
+                  }, 0);
                 }
               }
               return false;

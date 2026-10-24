@@ -448,10 +448,25 @@ class TestFrontendByteIntegrity:
             assert "\ufffd" not in b.decode("utf-8-sig"), rel
 
     def test_sse_escape_text_not_expanded_to_raw_bytes(self):
-        """核心回归锁：SSE 拆行/分隔必须是**转义文本**，一个 CR 字节都不许有。"""
+        """核心回归锁：SSE 拆行/分隔必须是**转义文本**，不许出现孤立 CR 字节。
+
+        ✅ R114 判据修正（环境性假红收口）：旧断言是 ``b"\\x0d" not in b``
+        （一个 CR 字节都不许有），与本仓 ``core.autocrlf=true`` 的检出配置
+        **互斥** —— 工作区副本必然是 CRLF，该断言在任何 Windows 检出上
+        恒红（本轮全量回归实证：index.ts CR=1480 / CRLF=1480 / 孤立 CR=0）。
+        同文件 ``test_no_lone_cr_or_control_bytes`` 的 docstring 已明确
+        「纯 CRLF 与纯 LF 都合法（core.autocrlf=true 会做检出转换，不是
+        缺陷）」—— 本用例的硬断言与该口径自相矛盾。
+
+        修正为「**孤立** CR = 0」，检测力不减：真正的「转义被展开成真实
+        换行」会让下面就两个字面量 ``s.count(lit) == 1`` **直接变 0 而红**，
+        而那不是行尾差异能造成的。
+        """
         rel = r"frontend\src\api\index.ts"
         b = _read_bytes(rel)
-        assert b"\x0d" not in b, rel
+        _cr = b.count(b"\x0d")
+        _crlf = b.count(b"\x0d\x0a")
+        assert _cr == _crlf, (rel, _cr, _crlf)   # 无孤立 CR（纯 CRLF/LF 均合法）
         s = b.decode("utf-8-sig")
         for lit in (r'block.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")',
                     r'const separator = /\r\n\r\n|\n\n|\r\r/;'):
@@ -503,6 +518,8 @@ _FE_TEST_FILES = (
     "src/tests/ReadinessDashboard.test.tsx",
     "src/tests/factsAdjust.test.tsx",
     "src/tests/ReviewWorkflowPanel.test.tsx",
+    # R120：L1 加固锚 —— 锁 setup.ts 已抬高 RTL asyncUtilTimeout（防 waitFor 抖动回流）。
+    "src/tests/rtlAsyncUtilTimeoutR120.test.ts",
 )
 _FE_SCRIPTS = ("typescript/bin/tsc", "vitest/vitest.mjs", "eslint/bin/eslint.js")
 _FE_DIR = _ROOT / "frontend"

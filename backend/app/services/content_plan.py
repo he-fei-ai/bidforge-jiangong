@@ -10,8 +10,10 @@
 - 纯函数（`ContentPlanData.validate` / `render_content_plan_guidance`）不依赖 IO，
   便于单测；IO 部分（`plan_section_content`）以注入 `chat_fn` 解耦，便于 mock。
 
-该能力默认关闭（`config.content_plan_stage_enabled=False`），关闭时调用方
-（sse_handlers.generate_content）不会触发任何额外 LLM 调用，行为与本项引入前逐字一致。
+该能力由 `config.content_plan_stage_enabled` 门控（✅ 2026-10-23 起默认开启，
+对齐外部 OpenBidKit_Yibiao v2「正文编排 → 正文生成」两阶段工作流）；关闭时
+调用方（sse_handlers.generate_content）不会触发任何额外 LLM 调用，行为与关闭
+时逐字一致。
 """
 from __future__ import annotations
 
@@ -156,6 +158,87 @@ def render_content_plan_guidance(plan: ContentPlanData | None) -> str:
     else:
         parts.append("- 本章可不强制使用表格")
     return "\n".join(parts) + "\n"
+
+
+# ===========================================================================
+# ✅ 2026-10-23 · 表格密度需求四档（对齐外部 OpenBidKit_Yibiao v2）
+# 参考：contentGenerationTask.cjs:379-389（normalizeTableRequirement）、
+#       :520-525（maxTablesForRequirement）、:2516-2535（pickDistributedTableTargets）、
+#       :3989-3999（择优 + 未中选 clearContentPlanTable 清表）
+# 详见 docs/reference_research/04_content.md §9。
+# ===========================================================================
+
+#: 四档合法值（顺序与外部 ['none','light','moderate','heavy'] 逐字一致）。
+TABLE_REQUIREMENTS = ("none", "light", "moderate", "heavy")
+
+#: 中文档位别名（外部 normalizeTableRequirement 的中文分支）。
+_TABLE_REQUIREMENT_ALIASES = {
+    "不要": "none",
+    "少量": "light",
+    "适中": "moderate",
+    "大量": "heavy",
+}
+
+
+def normalize_table_requirement(value) -> str:
+    """纯函数：把任意输入归一为四档之一（逐字对齐外部 normalizeTableRequirement）。
+
+    合法英文档位原样返回；中文别名（不要/少量/适中/大量）映射；
+    其余一律回落 ``'heavy'``（外部 ``return 'heavy'``，:817）。
+    """
+    text = str(value or "").strip()
+    if text in TABLE_REQUIREMENTS:
+        return text
+    return _TABLE_REQUIREMENT_ALIASES.get(text, "heavy")
+
+
+def max_tables_for_requirement(requirement, leaf_count: int):
+    """纯函数：按档位给出全文表格上限（逐字对齐外部 maxTablesForRequirement，:520-525）。
+
+    - ``none`` → 0
+    - ``light`` → ``floor(max(0, leaf_count) * 0.2)``
+    - ``moderate`` → ``floor(max(0, leaf_count) * 0.4)``
+    - 其余（``heavy`` 及未归一输入）→ ``None`` —— **None 是「无上限」哨兵，
+      不是数字**（外部 ``return null``），调用方必须判 ``is None`` 而非真值判断。
+    """
+    req = normalize_table_requirement(requirement)
+    if req == "none":
+        return 0
+    n = max(0, int(leaf_count or 0))
+    if req == "light":
+        return int(n * 0.2)
+    if req == "moderate":
+        return int(n * 0.4)
+    return None
+
+
+def table_slot_allowed(cap, used: int, pos: int, total: int) -> bool:
+    """纯函数：顺序流（本机逐章生成）下判定第 ``pos`` 章是否还可用表。
+
+    外部 ``pickDistributedTableTargets``（:2516-2535）在**已知全部编排候选**后
+    把候选均分 ``limit`` 槽、每槽取中位者，避免表格全堆在前几章。本机正文按
+    文档序**顺序生成**（外部为批量规划后生成），无法预知后续候选，故采用等价
+    的**累计配额**形态实现同样的均匀分布约束：
+
+        允许 ⇔ used < ceil(cap * (pos + 1) / total)
+
+    即「走到第 pos 章（含）时最多用掉 ceil(cap*进度) 张」——前段不许囤积、
+    末章放开到 ``cap``，总量恒 ≤ cap，且分布近似均匀（与外部每槽一张的
+    分槽思想同源）。``cap`` 为 ``None``（heavy 无上限）时恒允许；
+    ``cap`` 为 0（none）时恒拒绝（外部 none 双保险的程序侧闸门）。
+    """
+    if cap is None:
+        return True
+    cap = int(cap)
+    if cap <= 0:
+        return False
+    total = int(total or 0)
+    if total <= 0:
+        return True  # 无文档序信息时不额外限制（上限仍由累计闸兜底）
+    pos = max(0, int(pos))
+    used = max(0, int(used))
+    allowance = -(-cap * (pos + 1) // total)  # ceil(cap * (pos+1) / total)，整数运算
+    return used < allowance
 
 
 def resolve_selected_fact_rows(

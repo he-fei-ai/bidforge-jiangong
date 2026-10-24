@@ -165,7 +165,7 @@ api.interceptors.response.use(
     }
     // ✅ 修复：导出接口用 responseType:"blob"，失败时后端返回的 JSON 错误体
     // 会被 axios 包成 Blob，此时 data.detail 恒为 undefined，用户只能看到
-    // "Request failed with status code 500"（例如 PDF 转换工具缺失的真实原因被吞掉）。
+    // "Request failed with status code 500"（例如导出文件生成失败的真实原因被吞掉）。
     // 这里把 Blob 解包成文本再尝试 JSON 解析。
     if (typeof Blob !== "undefined" && data instanceof Blob) {
       try {
@@ -442,8 +442,12 @@ export const factsApi = {
   deleteDocument: (docId: string) =>
     api.delete(`/global-facts/documents/${docId}`),
   // ✅ 文件导入/解析增强：文件预览（前 N 字）和分类管理
-  previewDocument: (docId: string, maxChars = 5000) =>
-    api.get(`/global-facts/documents/${docId}/preview`, { params: { max_chars: maxChars } }),
+  //    options.signal：预览可被「切换文档 / 关闭弹窗」中断，避免旧响应覆盖新文档
+  previewDocument: (docId: string, maxChars = 5000, options?: { signal?: AbortSignal }) =>
+    api.get(`/global-facts/documents/${docId}/preview`, {
+      params: { max_chars: maxChars },
+      signal: options?.signal,
+    }),
   updateDocumentCategory: (docId: string, docCategory: string) =>
     api.patch(`/global-facts/documents/${docId}/category`, { doc_category: docCategory }),
   categoryOptions: () => api.get("/global-facts/documents/category-options"),
@@ -466,7 +470,9 @@ export const factsApi = {
 // =========================================================================
 export const docPipelineApi = {
   /** 解析状态：DB 时效列 + 磁盘 meta + 各层产物落盘概览 */
-  status: (docId: string) => api.get(`/documents/${docId}/status`),
+  //    options.signal：管线概览可被中断（切文档/卸载），避免旧响应覆盖新文档
+  status: (docId: string, options?: { signal?: AbortSignal }) =>
+    api.get(`/documents/${docId}/status`, { signal: options?.signal }),
   /** 提取结果查询（按类别：project_info / engineering / geology / ...；后端参数名固定为 type） */
   extractions: (docId: string, extractType?: string) =>
     api.get(`/documents/${docId}/extractions`, { params: extractType ? { type: extractType } : {} }),
@@ -846,12 +852,8 @@ export const exportApi = {
       { config, chart_images: chartImages || [] },
       { responseType: "blob", timeout: 600000, signal }
     ),
-  pdf: (schemeId: string, config: any, chartImages?: { chart_type: string; mermaid_code: string; png: string }[], signal?: AbortSignal) =>
-    api.post(
-      `/schemes/${schemeId}/export/pdf`,
-      { config, chart_images: chartImages || [] },
-      { responseType: "blob", timeout: 600000, signal }
-    ),
+  // ✅ R126（2026-10-21）：PDF 导出下线——原 exportApi.pdf（POST /export/pdf）已删除，
+  //    导出仅保留 DOCX 单链路（用户指令「导出只保留导出DOCX格式文档」）。
   cacheStatus: (schemeId: string, signal?: AbortSignal) =>
     api.get(`/schemes/${schemeId}/export/cache-status`, { signal }),
   // ✅ R106 FIX-3：取消导出接后端真停止（置位取消事件，构建线程/渲染段在

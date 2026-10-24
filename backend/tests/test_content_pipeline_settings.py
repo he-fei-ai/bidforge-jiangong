@@ -16,7 +16,8 @@ def test_settings_content_pipeline_defaults():
     assert s.content_section_retries == 1
     assert s.content_retry_backoff == 6.0
     assert s.content_rate_limit_backoff == 20.0
-    assert s.content_continue_max_rounds == 2
+    # ✅ 2026-10-23：对齐外部 MAX_WORD_ADJUSTMENT_ROUNDS=3（v2 基准，默认 2 → 3）
+    assert s.content_continue_max_rounds == 3
     # ✅ 2026-09-22 引入：正文生成采样温度，默认 None（沿用 provider 默认，保持旧行为）
     assert s.content_temperature is None
 
@@ -142,7 +143,9 @@ def test_content_constants_not_hardcoded():
             "CONTENT_SECTION_RETRIES = 1",
             "CONTENT_RETRY_BACKOFF = 6.0",
             "CONTENT_RATE_LIMIT_BACKOFF = 20.0",
+            # 2026-10-23 默认 2 → 3：新旧字面量都进黑名单，防止任一形态回退硬编码
             "CONTENT_CONTINUE_MAX_ROUNDS = 2",
+            "CONTENT_CONTINUE_MAX_ROUNDS = 3",
     ):
         assert literal not in code, (
             f"{literal!r} 是硬编码字面量，应改为绑定 settings（否则环境变量不生效）")
@@ -168,12 +171,16 @@ def test_content_temperature_reaches_ai_calls():
 
 
 def test_content_constants_defaults_unchanged():
-    """默认值必须与修复前的硬编码逐字相同（保证旧行为不变、向后兼容）。"""
+    """常量默认取值与 Settings 缺省一致。
+
+    ✅ 2026-10-23：content_continue_max_rounds 按外部 v2（MAX_WORD_ADJUSTMENT_
+    ROUNDS=3）对齐，缺省由 2 调整为 3 —— 属于**有意的默认值变更**，其余 5 项
+    维持既有缺省逐字不变（保证旧行为不变、向后兼容）。"""
     from app.routers import sse_handlers as sh
     assert sh.CONTENT_REQUEST_TIMEOUT == 300
     assert sh.CONTENT_TOTAL_TIMEOUT == 660
     assert sh.CONTENT_SECTION_RETRIES == 1
     assert sh.CONTENT_RETRY_BACKOFF == 6.0
     assert sh.CONTENT_RATE_LIMIT_BACKOFF == 20.0
-    assert sh.CONTENT_CONTINUE_MAX_ROUNDS == 2
+    assert sh.CONTENT_CONTINUE_MAX_ROUNDS == 3
     assert sh.CONTENT_TEMPERATURE is None

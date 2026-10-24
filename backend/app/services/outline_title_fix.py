@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import re
 
 from app.config import settings
 
@@ -41,6 +42,7 @@ from app.services.ai.prompts._registry import render
 from app.services.outline_quality import (
     detect_generic_titles,
     detect_generic_titles_for_write,
+    strip_trailing_counter_suffix,
 )
 
 logger = logging.getLogger("outline_title_fix")
@@ -287,13 +289,288 @@ def _apply_title_updates(outline: list, updates: list) -> tuple[list, int, list]
     return tree, applied, rejected
 
 
+# ============================================================================
+# ✅ R115 FIX-1（零 AI 确定性兜底标题）
+# ----------------------------------------------------------------------------
+# 用户症状「三级标题大量是 专项6 / 总体实施策划（2）（3）」的直接根因不在判据
+# （判据自 R85/R87/R89 三层加固后已能逐条命中），而在**修复链路的可用性**：
+# `_try_outline_title_fix` 的 5 个出口里有 4 个在 AI 不可用时返回 None
+# （超时 / 异常 / 首轮无产出 / 全批保守红线拒收），两条调用方
+# （生成期 `_review_and_fix_outline`、落库期 `autofix_generic_titles_on_save`）
+# 一律 fail-soft 原样保留 ⇒ 占位标题原样进 sections 表、进 DOCX/PDF。
+#
+# 生产日志实证（trace=acdef1e40a64，2026-10-20 15:06:26~15:11:06）：
+#   · agnes 持续 `HTTP 401 该令牌状态不可用`、zhipu 429、sensetime 超时；
+#   · 15:10:06 `外科式补齐超时（120s），回退完整 AI 审核`；
+#   · 15:11:06 `目录审核超时（60s），跳过审核直接完成`；
+#   · 该次请求耗时 280582ms 后 200 返回。
+# ⇒ AI 链路整体不可用是**常态**，不能让它成为占位标题的唯一防线。
+#
+# 因此新增本兜底：只用节点自身已有的确定性信息（标题基名 / description）
+# 生成候选，仍走 `_apply_title_updates` 的**同一套六条保守红线**（宁可不改，
+# 绝不改坏），零 AI、零网络、零额外延迟。
+# ============================================================================
+
+#: 确定性兜底的轮数上限（每轮每个 path 只提交 1 个候选，被拒则下轮换下一个）。
+_FALLBACK_MAX_ROUNDS = 3
+
+#: description 分句分隔符（中文句读优先；含换行以兼容多行 description）。
+_DESC_SENT_SPLIT_RE = re.compile(r"[。；;，,、：:\n\r]+")
+
+#: 候选标题长度区间：过短无法表意（「详见」「如下」），过长必然是把整段说明
+#: 塞进标题（与 ``_TITLE_FIX_MAX_LEN`` 的 60 字红线不冲突 —— 本区间是**更严**
+#: 的候选生成约束，不是判定约束）。
+_FALLBACK_TITLE_MIN_LEN = 4
+_FALLBACK_TITLE_MAX_LEN = 24
+
+#: 无句读可分时的定长截断长度（生产库 description 均长 18~23 字，取中位）。
+_FALLBACK_TRUNC_LEN = 18
+
+#: 单节点最多从 description 取几个候选（防止把整段说明拆成一堆碎句）。
+_FALLBACK_DESC_CANDIDATES = 3
+
+#: description 常见「套话引导语」——整段拿来做标题时必须剥掉，否则会产出
+#: 「本节介绍施工总体部署」这类以元话语开头的标题。**长前缀必须排在短前缀
+#: 之前**（`startswith` 逐项尝试，先命中先剥）。
+#: ⚠️ 这是**生成侧**的候选清洗，不进入任何判据体系（判据仍唯一在
+#: ``outline_quality``），且剥完仍要过 `_apply_title_updates` 六条红线。
+_DESC_LEADING_NOISE = (
+    "本节主要介绍", "本节主要说明", "本章主要介绍", "本章主要说明",
+    "本节主要阐述", "本章主要阐述",
+    "本节介绍", "本节说明", "本节阐述", "本章介绍", "本章说明", "本章阐述",
+    "主要介绍", "主要说明", "主要阐述", "主要内容包括", "主要内容为",
+    "本节", "本章", "介绍", "说明", "阐述", "概述", "包括", "包含",
+)
+
+
+# ✅ R115（候选质量门槛）：候选必须是「像中文施工标题」的串。
+# 生产实证（3 个方案 233 节点）：description 覆盖率 100%、均长 18~23 字，全部
+# 是具体中文描述；而**不可用**的形态同样真实存在 —— 「desc1」「N/A」「--」「略」
+# 「占位一级」「待补充」「详见第 3 章」。拿后者当标题比原占位名**更糟**（用户会
+# 看到「占位一级」变成三级标题），故在**产出侧**就拒掉，不进红线也不进 AI：
+#   · CJK 字符数 ≥ 4 —— 「desc1」0 个、「图3」1 个直接出局；
+#   · CJK 占比 ≥ 0.6 —— 「Figure 3」「P-01」这类英文/编号串出局；
+#   · 垃圾值黑名单 —— 精确/子串两级（子串只收**一旦出现就不是在讲施工内容**的词）。
+# 判据刻意留在本模块（生成侧），**不进** ``outline_quality``：那边是**判定**已有
+# 标题是否泛化，这边是**生成**候选，同一函数会把「无缝钢管」「无支护放坡」误判掉。
+_FALLBACK_MIN_CJK = 4
+_FALLBACK_MIN_CJK_RATIO = 0.6
+_CJK_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
+
+#: 精确黑名单（整串去空白、小写后**等于**才拒）。含「略」「无」这类单字，故只能
+#: 整串比对 —— 子串匹配会把「策略」「无缝钢管」「无支护放坡」这些真实标题拒掉。
+_DESC_JUNK_EXACT = frozenset({
+    "略", "无", "暂无", "无内容", "未填", "未填写", "同上", "同上文", "见上",
+    "n/a", "na", "tbd", "todo", "待补充", "待定", "待确认",
+})
+
+#: 子串黑名单（**含**即拒）。只收元话语/占位标记，不收任何施工术语。
+_DESC_JUNK_SUBSTR = ("占位", "待补充", "待完善", "详见", "同上", "见上文")
+
+
+def _is_usable_title(s) -> bool:
+    """候选标题质量门槛（判据见上方常量注释）。纯函数、零 IO、零 AI。"""
+    t = str(s or "").strip()
+    if not t:
+        return False
+    # 去全部空白再比对：模型常把「N / A」「占位 一级」拆开写
+    probe = "".join(t.split()).lower()
+    if not probe or probe in _DESC_JUNK_EXACT:
+        return False
+    if any(m in probe for m in _DESC_JUNK_SUBSTR):
+        return False
+    cjk = len(_CJK_CHAR_RE.findall(t))
+    if cjk < _FALLBACK_MIN_CJK:
+        return False
+    return cjk / len(probe) >= _FALLBACK_MIN_CJK_RATIO
+
+
+def _strip_desc_noise(s) -> str:
+    """剥掉 description 开头的套话引导语（至多 3 层，长前缀优先）。"""
+    t = str(s or "").strip()
+    for _ in range(3):
+        for p in _DESC_LEADING_NOISE:
+            if t.startswith(p):
+                t = t[len(p):].lstrip(" 　：:，,、-—·")
+                break
+        else:
+            break
+    return t
+
+
+def _desc_title_candidates(desc) -> list[str]:
+    """从节点 ``description`` 派生候选标题（纯规则，零 AI）。
+
+    依据：AI 生成目录时每个节点都带一句「本节写什么」，而占位标题的节点
+    **其 description 往往是具体的** —— 生产库实测覆盖率 104/104、80/81、
+    48/48（均长 18~23 字），样例：``项目简介`` → ``工程名称、地点、结构形式、
+    维修面积及参建责任主体``。这句话本身就是该节最具体的主题陈述。
+
+    三级派生（逐级降级，宁可产不出候选，也不产出坏标题）：
+      ① **整段**（长度合规即整段可用，语义最完整）—— 先剥套话引导语；
+      ② **分句**（整段超长时按中文句读切分，取首个 ``>=6`` 字的分句，
+         避开「工程名称」这类 4 字泛词）；
+      ③ **定长截断**（全文无句读时，优先在标点处收口，避免切出
+         「…维修面积及」这类悬空连接词）。
+
+    刻意保守：不在此处做泛化判定 —— 语义判定**只属** ``is_generic_title``，
+    由 ``_apply_title_updates`` 统一把关（两处判定必然分叉）。
+
+    ⚠️ R116 C-1（L2 **刻意不落地**「多级语义候选」）：生产上确实存在「首分句
+    是『本章依据…』这类空话 ⇒ 候选仍被红线拒收」的形态。**不做**更激进的派生
+    （继续往后挑"语义更贴切"的分句 / 借父节点、兄弟节点、项目事实造词）：
+    红线只能判「是否泛化 / 是否同级重名 / 是否过长 / 是否带（N）」，判不了
+    「语义是否比原占位名**更差**」；而兜底的全部价值是「零 AI、零失败面、
+    绝不改坏」。产不出候选时原样保留、交给人工核对与落库闸门，是刻意选择的
+    更小危害（护栏见 ``test_r116_legacy_closeout_20261020.py::TestCL2DeliberateNonLanding``）。
+    """
+    d = " ".join(str(desc or "").split())
+    d = _strip_desc_noise(d)
+    if not d:
+        return []
+    out: list[str] = []
+    if (_FALLBACK_TITLE_MIN_LEN <= len(d) <= _FALLBACK_TITLE_MAX_LEN
+            and _is_usable_title(d)):
+        out.append(d)
+    for seg in _DESC_SENT_SPLIT_RE.split(d):
+        s = str(seg or "").strip(" 　-—·")
+        if not (6 <= len(s) <= _FALLBACK_TITLE_MAX_LEN):
+            continue
+        if not _is_usable_title(s):
+            continue
+        if s not in out:
+            out.append(s)
+        if len(out) >= _FALLBACK_DESC_CANDIDATES:
+            break
+    if not out:
+        cut = d[:_FALLBACK_TRUNC_LEN]
+        # 优先在标点处收口（避免把连接词留在标题末尾）
+        for sep in ("、", "，", ",", "；", ";", "：", ":"):
+            pos = cut.rfind(sep)
+            if pos >= _FALLBACK_TITLE_MIN_LEN:
+                cut = cut[:pos]
+                break
+        s = cut.strip(" 　-—·")
+        if len(s) >= _FALLBACK_TITLE_MIN_LEN and _is_usable_title(s):
+            out.append(s)
+    return out[:_FALLBACK_DESC_CANDIDATES]
+
+
+def _fallback_title_candidates(node) -> list[str]:
+    """单个占位节点的候选标题（按优先级，去重后返回；纯函数）。
+
+    优先级：
+      ① **去「（N）」后缀基名** —— 仅当确实剥掉了后缀才加入（``专项6``
+         无后缀 ⇒ 不加入，避免把原标题当候选白跑一轮红线）；
+      ② **description 首分句 / 后续分句** —— 主要来源；
+      ③ **description 定长截断** —— 无句读时的最后手段。
+
+    出口处**不做泛化判定**（判据单一事实源在 ``outline_quality``，
+    回写侧由 ``_apply_title_updates`` 红线② 统一拒收），但**必须**过
+    ``_is_usable_title`` 质量门槛 —— 否则会把「占位一级」「desc1」这类
+    description 垃圾值搬成三级标题，比原占位名更糟。
+    """
+    if not isinstance(node, dict):
+        return []
+    cands: list[str] = []
+    raw = str(node.get("title") or "").strip()
+    base = strip_trailing_counter_suffix(raw)
+    if base and base != raw:
+        cands.append(base)
+    cands.extend(_desc_title_candidates(node.get("description")))
+    out: list[str] = []
+    for c in cands:
+        c = str(c or "").strip()
+        if c and c not in out and _is_usable_title(c):
+            out.append(c)
+    return out
+
+
+def deterministic_title_fallback(
+    outline: list, hits: list[dict], *, _apply=None,
+) -> list | None:
+    """零 AI 确定性兜底：用节点自带信息把占位标题改写成具体标题。
+
+    ✅ R115 FIX-1：AI 链路不可用时的**最后一道路径**（见本段上方长注释）。
+
+    契约（与 ``_try_outline_title_fix`` 保持一致的调用方语义）：
+      · 输入 ``hits`` 非空、``settings.outline_deterministic_title_fallback``
+        为 True 才动作；否则返回 ``None``（调用方按原样保留）；
+      · **纯函数**：不改入参，返回新树或 ``None``；
+      · 回填走 :func:`_apply_title_updates` **同一套六条保守红线**
+        （路径存在 / 非泛化 / 不与同级重名 / 无换行 / 剥编号非空 /
+        无「（N）」后缀 / 不超长），绝不新增或删除节点；
+      · 每轮**每个 path 只提交 1 个候选**（同 path 多条 update 会依次覆盖）；
+        被拒的 path 下一轮换下一个候选，至多 ``_FALLBACK_MAX_ROUNDS`` 轮
+        （每轮一次 deepcopy，成本与目录规模线性相关、与 AI 无关）；
+      · 全部候选都被拒 ⇒ 返回 ``None``（与 AI 失败的旧行为逐字一致）；
+      · 体量红线与 ``_build_title_fix_items`` 同为 ``hits[:40]``
+        （walk 成本与目录规模线性相关，40 条已覆盖单轮可处理量）。
+    """
+    if not hits or not getattr(settings, "outline_deterministic_title_fallback", True):
+        return None
+    _apply = _apply or _apply_title_updates
+    idx = _outline_path_index(outline)
+    cands: dict[str, list[str]] = {}
+    for h in hits[:40]:
+        path = str(h.get("path") or "")
+        info = idx.get(path)
+        if not info:
+            continue         # 路径不存在：兜底同样无法定位，绝不猜「最接近的节点」
+        lst = _fallback_title_candidates(info["node"])
+        if lst:
+            cands[path] = lst
+    if not cands:
+        logger.info(
+            "占位标题确定性兜底：%d 处待改节点均无可用候选（无 description / "
+            "description 为占位或非中文垃圾值 / 无（N）后缀可剥），保持原样",
+            len(hits))
+        return None
+
+    tree = None
+    applied_total = 0
+    # 候选总数只用于日志归因（循环中 cands 会被逐步消耗，故先快照）
+    _cand_total = sum(len(v) for v in cands.values())
+    pending = list(cands.keys())
+    for _round in range(1, _FALLBACK_MAX_ROUNDS + 1):
+        updates = [{"path": p, "title": cands[p][0]}
+                   for p in pending if cands.get(p)]
+        if not updates:
+            break
+        tree, applied, rejected = _apply(
+            outline if tree is None else tree, updates)
+        applied_total += applied
+        _rejected_paths = {str(r.get("path") or "") for r in (rejected or [])}
+        # 未出现在 rejected 里 ⇒ 已落地；出现的 ⇒ 换下一个候选（耗尽即退出）
+        _next: list[str] = []
+        for p in pending:
+            if p not in _rejected_paths:
+                continue
+            cands[p] = cands[p][1:]
+            if cands[p]:
+                _next.append(p)
+        pending = _next
+        if not pending:
+            break
+
+    if tree is None or not applied_total:
+        logger.info(
+            "占位标题确定性兜底未生效（%d 处候选全被保守红线拒绝，%d 轮），"
+            "残留 %d 条待人工核对", len(cands), _FALLBACK_MAX_ROUNDS, len(hits))
+        return None
+    logger.info(
+        "占位标题确定性兜底落地 %d 条（零 AI 调用，%d 处待改 → %d 条候选）",
+        applied_total, len(hits), _cand_total)
+    return tree
+
+
 async def _try_outline_title_fix(
     outline: list, hits: list[dict], *,
     scheme_name: str = "", scheme_type: str = "",
     project_brief: str = "", project_facts: str = "",
     construction_scope: str = "", requirements: str = "",
     scheme_basis: str = "", standards_text: str = "",
-    _collect=None, _render=None,
+    _collect=None, _render=None, _skip_ai: bool = False,
 ) -> list | None:
     """外科式标题重写：只把占位节点连同上下文送给模型，换回具体标题。
 
@@ -328,12 +605,95 @@ async def _try_outline_title_fix(
     ✅ 2026-10-17（分层下沉）：整函数由 ``routers/sse_handlers.py`` 原样迁入本模块，
     行为逐字不变；占位复检改调 ``detect_generic_titles_for_write``
     （与 ``sse_handlers._detect_generic_titles`` 同一开关、同一判据出口）。
+
+    ✅ R115 FIX-1（零 AI 确定性兜底）：全部 5 个出口统一收敛到内部
+    ``_finalize`` —— AI 改写未生效时（超时 / 异常 / 首轮无产出 / 全批红线
+    拒收）改走 :func:`deterministic_title_fallback`，用节点自身的
+    title 基名 / description 再改一轮，**零 AI 调用、零额外延迟**。
+    生产日志实证（trace=acdef1e40a64）AI 链路整体不可用时
+    「补齐超时 120s → 审核超时 60s → 跳过审核」，占位标题从这条链路原样落库。
+
+    ✅ R115 FIX-2（``_skip_ai`` 快路径）：调用方已知本轮 AI 链路不可用
+    （如 ``_try_outline_patch`` 刚以 120s 超时失败）时，直接走确定性兜底，
+    不再花第二个 ``OUTLINE_FIX_TIMEOUT`` 去试同一个坏链路。
     """
     if not hits or not getattr(settings, "outline_title_fix", True):
         return None
     items = _build_title_fix_items(outline, hits)
     if not items:
         return None
+    # ✅ R114（日志准确性）：单次清单体量红线为 40 条（``_build_title_fix_items``
+    #    的 ``hits[:40]``），超出的部分本轮**不会**被送进模型。旧实现静默截断，
+    #    运维只看到「残留 N 条」却无法区分「模型改不动」与「根本没送」；
+    #    此处如实点名「本次送多少 / 共多少」，剩余部分由回灌轮续送。
+    if len(hits) > 40:
+        logger.info("占位标题重写：本次送前 40 条（共 %d 条），其余由回灌轮续送",
+                    len(hits))
+
+    def _fallback_pass(tree_in: list | None, stage: str) -> list | None:
+        """对 ``tree_in``（None 时用原树）做一轮确定性兜底，返回新树或 None。
+
+        残留清单**重新检出**（``detect_generic_titles_for_write``）而不是复用
+        调用方传入的 ``hits``：AI 部分成功之后真实残留已变，用旧清单会漏改，
+        且「检出」与「复检」共用同一把尺子（判据单一事实源）。
+        """
+        base_tree = outline if tree_in is None else tree_in
+        try:
+            _hits = detect_generic_titles_for_write(base_tree)
+        except Exception:               # noqa: BLE001 - 检出不可用时退回入参清单
+            _hits = list(hits)
+        if not _hits:
+            return None
+        try:
+            return deterministic_title_fallback(base_tree, _hits)
+        except Exception as e:          # noqa: BLE001 - 兜底失败不得改变原契约
+            logger.warning("占位标题确定性兜底失败（按原样返回，stage=%s）: %s",
+                           stage, e, exc_info=True)
+            return None
+
+    def _finalize(base: list | None, stage: str) -> list | None:
+        """统一出口：AI 结果优先，未生效 / 有残留则转零 AI 确定性兜底（R115 FIX-1）。
+
+        ``stage`` 只用于日志归因（``ai-applied`` / ``ai-empty`` / ``ai-timeout``
+        / ``ai-error`` / ``ai-all-rejected`` / ``ai-skipped``），**不进入任何
+        返回契约**，也不回传给调用方。
+
+        两条兜底触发路径缺一不可：
+          · ``base is None``（AI 完全没生效）—— 最常见的用户症状来源；
+          · ``base is not None`` 但**仍有残留**（AI 只改掉一部分）—— 生产上
+            占位标题「大量」残留往往正是「改了几条、剩下没改」的形态，
+            旧实现会在 `ai-applied` 出口直接返回，残留原样落库。
+        """
+        if base is not None:
+            _fixed = base
+            if getattr(settings, "outline_deterministic_title_fallback", True):
+                _supp = _fallback_pass(_fixed, stage + "+residual")
+                if _supp is not None:
+                    _fixed = _supp
+        else:
+            # 双保险：``deterministic_title_fallback`` 内部亦有同一门控。
+            # 这里的提前返回**不是冗余** —— 它保证「日志说的就是将要做的」：
+            # 关掉兜底时不能先打一行「转零 AI 确定性兜底」再静默返回 None
+            # （日志准确性是本仓纪律，见 R115 FIX-3 同族要求）。
+            if not getattr(settings, "outline_deterministic_title_fallback", True):
+                return None
+            logger.info("占位标题重写未生效（stage=%s，scheme=%s），转零 AI 确定性兜底",
+                        stage, scheme_name)
+            _fixed = _fallback_pass(None, stage)
+            if _fixed is None:
+                return None
+        try:
+            _left = detect_generic_titles_for_write(_fixed)
+        except Exception:               # noqa: BLE001 - 复检不可用不影响已落地结果
+            return _fixed
+        if _left:
+            logger.info("占位标题重写收敛后仍有 %d 处残留（stage=%s）：%s",
+                        len(_left), stage, [h.get("title") for h in _left[:5]])
+        return _fixed
+
+    # ✅ R115 FIX-2：AI 链路已被实证不可用（上游刚超时），不再重复等一轮。
+    if _skip_ai:
+        return _finalize(None, "ai-skipped")
 
     # ✅ 依赖注入（可选）：调用方（sse_handlers）显式传入自己的 collect/render 绑定，
     #    使针对 sse_handlers 的 monkeypatch（``sh.collect_json_response`` / ``sh.render``）
@@ -378,7 +738,8 @@ async def _try_outline_title_fix(
             updates = obj.get("updates") if isinstance(obj, dict) else None
             if not isinstance(updates, list) or not updates:
                 if attempt == 1:
-                    return None
+                    # ✅ R115 FIX-1：AI 无产出也要走兜底，不得直接原样返回
+                    return _finalize(None, "ai-empty")
                 break
             tree, applied, rejected = _apply_title_updates(
                 outline if tree is None else tree, updates)
@@ -404,24 +765,22 @@ async def _try_outline_title_fix(
             if not feedback:
                 break
         except asyncio.TimeoutError:
-            logger.warning("占位标题重写超时（%ds，第 %d/%d 轮），回退原链路（scheme=%s）",
+            logger.warning("占位标题重写超时（%ds，第 %d/%d 轮），转确定性兜底（scheme=%s）",
                            OUTLINE_FIX_TIMEOUT, attempt, _total, scheme_name)
-            return None
+            # ✅ R115 FIX-1：AI 超时不得直接放弃 —— 生产实证这是常态
+            return _finalize(None, "ai-timeout")
         except Exception as e:      # noqa: BLE001
-            logger.warning("占位标题重写失败（scheme=%s，第 %d/%d 轮）: %s，回退原链路",
+            logger.warning("占位标题重写失败（scheme=%s，第 %d/%d 轮）: %s，转确定性兜底",
                            scheme_name, attempt, _total, e)
-            return None
+            return _finalize(None, "ai-error")
 
     if tree is None or not applied_total:
-        logger.info("占位标题重写未生效（%d 轮全被保守红线拒绝），残留 %d 条待人工核对",
-                    _total, len(hits))
-        return None
-    _left = detect_generic_titles_for_write(tree)
-    if _left:
-        logger.info("占位标题重写收敛后仍有 %d 处残留（已落地 %d 条，共 %d 轮）：%s",
-                    len(_left), applied_total, _total,
-                    [h.get("title") for h in _left[:5]])
-    return tree
+        logger.info("占位标题重写未生效（%d 轮全被保守红线拒绝，scheme=%s）",
+                    _total, scheme_name)
+        # ✅ R115 FIX-1：AI 全批被拒时，节点自身信息往往仍可用
+        return _finalize(None, "ai-all-rejected")
+    # ✅ R115：残留复检与日志统一收敛在 _finalize（AI 路径与兜底路径同口径）
+    return _finalize(tree, "ai-applied")
 
 
 def _tree_shape(nodes) -> tuple:
@@ -449,6 +808,9 @@ def _tree_shape(nodes) -> tuple:
 async def autofix_generic_titles_on_save(
     outline: list, hits: list[dict], *,
     scheme_name: str = "", scheme_type: str = "", context: str = "",
+    construction_scope: str = "", project_brief: str = "",
+    project_facts: str = "", scheme_basis: str = "",
+    standards_text: str = "", requirements: str = "",
 ) -> tuple[list, list[dict], int]:
     """落库前自动外科式重写占位标题（**单一实现**，目录写路径共用）。
 
@@ -469,6 +831,21 @@ async def autofix_generic_titles_on_save(
         使用户感知到「标题已被自动改写」（否则静默改写，用户以为原样保存）；
       - **结构指纹守卫**（R101 加固）：改写结果的结构与输入不一致即整条丢弃，
         因为 upload 路径依赖「结构一一对应」才能把原标题映射回改写后节点。
+
+    ✅ R114 FIX-A（落库链路补上下文 —— 用户症状的最直接根因）：
+    R89 G3 已把 `construction_scope` / `scheme_basis` / `standards_text` /
+    `requirements` / `existing_titles` 五个漏传变量接到**生成链路**的
+    ``_try_outline_title_fix`` 调用点，但**落库链路**（本函数）仍只传
+    scheme_name / scheme_type —— 与 R89 G3 是同一个根因：模型拿不到「这个专项
+    具体是什么施工」的信息，只能回「专项6」「总体实施策划（2）」这类占位名，
+    再被六条保守红线（仍泛化 / 带（N）后缀 / 与同级重名）全批拒收 ⇒
+    ``applied=0`` ⇒ fail-soft 原样落库。而落库链路恰恰是**最后一道防线**：
+    stopped/error 部分成果、上传识别、目录库套用、AI 调整、手工保存五类入口
+    都不经生成链路的审核闸门。
+
+    因此本函数新增六个**可选**上下文参数（默认空串 ⇒ 逐字回到引入前行为，
+    向后兼容；传了即提升改写成功率）。上下文装配由调用方完成（``sections`` /
+    ``upload_outline``），本模块零 IO，保持纯服务层语义。
     """
     if not hits or not getattr(settings, "outline_autofix_generic_on_save", True):
         return outline, hits, 0
@@ -476,7 +853,10 @@ async def autofix_generic_titles_on_save(
         _before = len(hits)
         _shape_before = _tree_shape(outline)
         _fixed = await _try_outline_title_fix(
-            outline, hits, scheme_name=scheme_name, scheme_type=scheme_type)
+            outline, hits, scheme_name=scheme_name, scheme_type=scheme_type,
+            construction_scope=construction_scope, project_brief=project_brief,
+            project_facts=project_facts, scheme_basis=scheme_basis,
+            standards_text=standards_text, requirements=requirements)
         if _fixed is None:
             return outline, hits, 0
         if not isinstance(_fixed, list) or _tree_shape(_fixed) != _shape_before:

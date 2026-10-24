@@ -679,6 +679,50 @@ async def _migrate(conn: aiosqlite.Connection):
     except Exception as e:
         logger.warning("consistency_scan_cache 建表失败: %s", e)
 
+    # --- ✅ R123（2026-10-21）：解析断点续跑检查点表。记录解析阶段进度
+    #     （extract→persist→layers→stale），失败时在检查点缓存已提取文本，
+    #     供下次解析从失败阶段续跑（跳过代价高昂的重新提取）。纯辅助表，
+    #     删除即退回「无断点」旧行为，无数据风险。幂等建表（旧库自动兼容）。
+    try:
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS doc_parse_checkpoints ("
+            "doc_id TEXT PRIMARY KEY, stage TEXT DEFAULT 'extract', "
+            "status TEXT DEFAULT 'pending', error TEXT DEFAULT '', "
+            "retries INTEGER DEFAULT 0, text_cache TEXT DEFAULT '', "
+            "updated_at TEXT DEFAULT (datetime('now','localtime')))")
+    except Exception as e:
+        logger.warning("doc_parse_checkpoints 建表失败: %s", e)
+
+    # --- ✅ R125（2026-10-21）：事实库版本化。补 version/version_label 列（零迁移，
+    #    旧库自动兼容）+ 新增快照/历史表（幂等 CREATE）。纯加法，删除即退回旧行为，
+    #    无数据风险。索引在补列后创建（遵循 R80 索引教训）。
+    try:
+        await conn.execute(
+            "ALTER TABLE global_facts ADD COLUMN version INTEGER DEFAULT 1")
+        await conn.execute(
+            "ALTER TABLE global_facts ADD COLUMN version_label TEXT DEFAULT ''")
+    except Exception:
+        # 列已存在（旧库迁移过）则忽略；SQLite ALTER 无 IF NOT EXISTS。
+        pass
+    try:
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS global_facts_snapshots ("
+            "snapshot_id TEXT PRIMARY KEY, project_id TEXT DEFAULT '', "
+            "scheme_id TEXT DEFAULT '', version INTEGER DEFAULT 1, "
+            "label TEXT DEFAULT '', created_at TEXT DEFAULT "
+            "(datetime('now','localtime')), fact_rows_json TEXT DEFAULT '')")
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS global_facts_history ("
+            "id TEXT PRIMARY KEY, global_fact_id TEXT DEFAULT '', "
+            "version INTEGER DEFAULT 1, op TEXT DEFAULT 'archive', "
+            "fact_rows_json TEXT DEFAULT '', created_at TEXT DEFAULT "
+            "(datetime('now','localtime')))")
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gf_snap_proj "
+            "ON global_facts_snapshots(project_id)")
+    except Exception as e:
+        logger.warning("global_facts 版本化建表失败: %s", e)
+
     # --- 提示词配置审计（旧库幂等建表；新库已由 SCHEMA_SQL 创建）。
     try:
         await conn.execute(

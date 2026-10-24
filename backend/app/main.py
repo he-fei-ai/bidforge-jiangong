@@ -153,7 +153,7 @@ async def _run_startup_orphan_export_gc() -> None:
     """启动期：对每个在 export_cache 里有行的 scheme 跑一次孤儿导出产物 GC。
 
     R47 债-A3：``_gc_orphan_exports`` 只在导出时跑；长期不导出的方案其
-    孤儿产物（.tmp.docx / PDF INSERT 失败的成稿）永不被清。启动时一次性
+    孤儿产物（.tmp.docx 等未完成成稿）永不被清。启动时一次性
     扫全表兜底。fail-soft：单方案失败仅告警，整体异常由 lifespan 外层
     try/except 兜住，绝不阻断启动。
     """
@@ -261,7 +261,7 @@ async def lifespan(app: FastAPI):
 
     # ✅ R47 债-A3（2026-10-06）：启动期孤儿导出产物 GC。
     #    _gc_orphan_exports 只在导出时跑；长期不导出的方案其孤儿产物
-    #    （.tmp.docx / PDF INSERT 失败的成稿）永不被清。启动时对每个在
+    #    （.tmp.docx 等未完成成稿）永不被清。启动时对每个在
     #    export_cache 里有行的 scheme 跑一次孤儿回收。fail-soft：任何异常
     #    只记 WARNING，绝不阻断启动。
     try:

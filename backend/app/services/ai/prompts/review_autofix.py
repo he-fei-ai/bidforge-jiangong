@@ -27,14 +27,15 @@ _reg("review_autofix_system", "analysis", "审核预检·定向修复（系统�
 
 _reg("review_autofix_user", "analysis", "审核预检·定向修复（用户）", """方案名称：{scheme_name}
 方案类型：{scheme_type}
-章节ID：{section_id}
-章节标题：{section_title}
 
 全局事实变量（最高优先级依据）：
 {global_facts}
 
 现行有效标准参考清单（仅可引用清单内标准）：
 {standards_text}
+
+章节ID：{section_id}
+章节标题：{section_title}
 
 检查结论（规则 {rule_id}｜{rule_title}）：
 {issue}

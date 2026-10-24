@@ -54,6 +54,13 @@ _reg("SHARED_SCOPE_RULES", "共享规则", "文件性质红线（禁投标内容
 #    故未定制用户的行为零变化。
 _reg("SHARED_SCOPE_RULES_BRIEF", "共享规则", "文件性质红线·正文简版（禁投标内容）",
      _shared.SHARED_SCOPE_RULES_BRIEF)
+# ✅ 2026-10-23（五段式提取方法 · 通用第 3/5 段）：处理规则与验证步骤两条
+#    通用纪律，供全部结构化提取任务（bid_item_* 五任务、全局事实提取等）复用。
+#    任务定制的「目标定位 / 提取要点 / 输出示例」仍由各任务模板内联。
+_reg("SHARED_EXTRACT_RULES", "共享规则", "五段式提取 · 处理规则",
+     _shared.SHARED_EXTRACT_RULES)
+_reg("SHARED_EXTRACT_VERIFY", "共享规则", "五段式提取 · 验证步骤（输出前自检）",
+     _shared.SHARED_EXTRACT_VERIFY)
 
 # ✅ R38 D6（2026-10-03）：SHARED_* 在本包 __init__ 里注册，晚于 _registry 尾部
 #    的首次 _apply_variable_contracts() —— 旧时序下契约表里的 SHARED_* 条目

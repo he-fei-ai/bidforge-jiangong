@@ -56,8 +56,8 @@ from app.services.bid_analysis_service import (
     REQUIRED_ITEM_IDS,
     AnalysisConfig,
     build_evidence_json,
-    build_item,
     build_item_pk,
+    build_item_user_messages,
     build_system_messages,
     get_all_items,
     get_groups,
@@ -1742,7 +1742,7 @@ async def _run_single_item(db, project_id: str, scheme_id: str,
 async def _run_single_call(item: dict, text: str, output_type: str,
                            section_hint: str = "",
                            classification_hint: str = "") -> str:
-    """单次 AI 调用：system + user（prompt 模板 + 上下文）。
+    """单次 AI 调用：system + user（分层：资料全文一条、任务说明一条）。
 
     section_hint 由 `services/bid_section_context.build_bid_section_context_hint`
     生成（多标段投标范围）；classification_hint 由本模块 classify 能力生成
@@ -1750,9 +1750,13 @@ async def _run_single_call(item: dict, text: str, output_type: str,
 
     ✅ 标段上下文按易标口径作为**独立的第二条 system 消息**下发
     （``buildTenderContextMessages``），不再与通用纪律拼在同一条。
+
+    ✅ 缓存前缀（《标书智能体（四）》案例一）：user 段拆为「资料全文」+
+    「任务说明」两条 —— 同一份资料的 18 个提取项共享 system + 全文前缀，
+    任务差异放最后；旧实现（任务模板在前、全文在后）单项首字符即分叉。
     """
     system_msgs = build_system_messages(section_hint, classification_hint)
-    user_msg = {"role": "user", "content": build_item(text, item)}
+    user_msgs = build_item_user_messages(text, item)
 
     if output_type == "json":
         # JSON 项用低温 + JSON 模式
@@ -1764,7 +1768,7 @@ async def _run_single_call(item: dict, text: str, output_type: str,
         #    timeout=180 / scene="bid_analysis"）。
         try:
             return await _collect_json_str(
-                [*system_msgs, user_msg], scene="bid_analysis", timeout=180,
+                [*system_msgs, *user_msgs], scene="bid_analysis", timeout=180,
                 temperature=0.2)
         except Exception as e:  # noqa: BLE001 - 保持「永不抛」语义
             logger.warning(
@@ -1777,7 +1781,7 @@ async def _run_single_call(item: dict, text: str, output_type: str,
     else:
         # Markdown 项
         return await chat_with_fallback(
-            [*system_msgs, user_msg],
+            [*system_msgs, *user_msgs],
             temperature=0.3,
             timeout=180,
             scene="bid_analysis",

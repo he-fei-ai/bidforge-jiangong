@@ -246,6 +246,13 @@ async def reparse_document(doc_id: str, body: dict | None = None,
     result.setdefault("skipped", False)
     result["reparse_mode"] = "force" if force else "incremental"
     result["file_changed_detected"] = bool(current_md5) and not unchanged
+    # ✅ R122 加固（推荐项①-②安全子集）：重解析使既有全局事实被标 stale/清空时，
+    #    显式给出机器可读信号，前端据此提示「要素需重新提取」，避免用户误以为
+    #    要素已随重解析自动更新（实际须手动触发 AI 提取，见 global_facts_docs
+    #    的 note 文案）。不自动触发 AI 提取 —— 那会引入不可控的额外调用与回写风险。
+    #    加法式字段：旧前端忽略不报错。
+    if result.get("stale_facts"):
+        result["facts_need_reextract"] = True
     return result
 
 

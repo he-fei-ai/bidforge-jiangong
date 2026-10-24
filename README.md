@@ -141,7 +141,6 @@ npm run dev    # Vite dev server at :5175
 │   ├── tests/                      # 167 个 pytest 文件
 │   ├── requirements.txt
 │   ├── requirements-ocr.txt        # 可选：扫描件 OCR
-│   ├── requirements-windows.txt    # 可选：Windows PDF 导出
 │   └── pytest.ini
 ├── frontend/                       # React 18 + TypeScript + Vite
 │   ├── src/

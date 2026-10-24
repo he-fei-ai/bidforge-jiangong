@@ -158,15 +158,26 @@ async def ai_stats(days: int = 30, db=Depends(read_db)):
     # ✅ 2026-09-21：按业务场景聚合（outline_draft/outline_review/...）。
     #    「一次目录生成到底烧了多少次调用/token」从时间窗估算变为精确数字，
     #    是调用次数优化（A~D）的度量基准。仅统计打了 scene 标记的真实调用。
+    # ✅ 2026-10-23（提示词顺序优化·缓存命中可观测性）：by_scene 纯加法补齐
+    #    cached_tokens / cache_hit_rate —— 此前只有 by_provider/summary 有命中率，
+    #    「哪个场景的提示词前缀改造真命中了」无法按场景度量（改造效果只能靠估算）。
+    #    口径与 by_provider 一致：cache_hit_rate = cached/prompt × 100（保留 1 位）。
     cur = await db.execute(
         "SELECT scene, COUNT(*) as calls, "
         "COALESCE(SUM(CASE WHEN success=1 THEN 1 ELSE 0 END), 0) as success_count, "
-        "COALESCE(SUM(prompt_tokens + completion_tokens), 0) as tokens "
+        "COALESCE(SUM(prompt_tokens + completion_tokens), 0) as tokens, "
+        "COALESCE(SUM(prompt_tokens), 0) as prompt_tokens, "
+        "COALESCE(SUM(completion_tokens), 0) as completion_tokens, "
+        "COALESCE(SUM(cached_tokens), 0) as cached_tokens "
         "FROM ai_audit_logs WHERE action='chat' AND scene!='' "
         "AND created_at >= datetime('now','localtime',?) "
         "GROUP BY scene ORDER BY calls DESC LIMIT 20",
         (since,))
     by_scene = [dict(r) for r in await cur.fetchall()]
+    for s in by_scene:
+        s["cache_hit_rate"] = round(
+            (s["cached_tokens"] or 0) * 100.0 / s["prompt_tokens"], 1
+        ) if s.get("prompt_tokens") else None
 
     return {"by_provider": by_provider, "by_action": by_action,
             "by_error": by_error, "by_scene": by_scene,

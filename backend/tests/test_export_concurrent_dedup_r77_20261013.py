@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import os
 import uuid
+import zipfile
 from pathlib import Path
 
 import app.config as cfg
@@ -69,8 +70,17 @@ async def ctx(tmp_path, monkeypatch):
         return plan
 
     def fake_build(*args, **kwargs):
-        """DOCX 构建桩：写入固定字节（真实构建走线程池，此处同步写）。"""
-        Path(str(args[0])).write_bytes(b"PK\x03\x04" + b"x" * 12)
+        """DOCX 构建桩：写入结构完整的 zip（真实构建走线程池，此处同步写）。
+
+        ✅ R126：命中判据已叠加 _artifact_intact（本地头 + EOCD 双签名），
+        半截假字节会被正确判为坏缓存 → 本文件「二次导出命中缓存」契约
+        必须用完整 zip 才能走到 hit 路径。
+        """
+        with zipfile.ZipFile(str(args[0]), "w") as zf:
+            zf.writestr("[Content_Types].xml",
+                        '<?xml version="1.0" encoding="UTF-8"?>'
+                        '<Types xmlns="http://schemas.openxmlformats.org/package'
+                        '/2006/content-types"/>')
         return {"sections": 1, "tables": 0, "figures": 0}
 
     monkeypatch.setattr(export_mod, "_prepare_export", fake_prep)
@@ -156,7 +166,8 @@ class TestLockKeyParity:
 EXPORT_PY = Path(export_mod.__file__)
 CONFIG_PY = Path(cfg.__file__)
 DOCX_DEC = '@router.post("/docx")'
-PDF_DEC = '@router.post("/pdf")'
+# ✅ R126（2026-10-21）：PDF 导出整体下线，原 PDF_DEC = '@router.post("/pdf")'
+#    死常量随链路删除（防后人误以为 pdf 端点仍在清点范围内）。
 
 
 
@@ -187,6 +198,31 @@ class TestConcurrentDedupEndToEnd:
         #    一次（指纹所需材料全在取数段），但渲染段**一次都不跑**。
         assert calls == ["b"]
         assert state["renders"] == renders_before, "缓存命中不得再执行渲染段"
+
+    async def test_truncated_cache_artifact_is_missed_and_rebuilt(self, ctx):
+        """✅ R126 FIX-D 行为级：半截缓存产物（ZIP 头在、EOCD 缺）必须被判坏缓存
+        → miss → 全量重建修复产物，不得直接交付（WPS「文字程序意外中断」根因之一）。"""
+        db, sid, calls, state = ctx
+        body = {"config": {}, "_tag": "trunc"}
+        await export_mod.export_docx(sid, dict(body, _tag="a"), db=db)
+        calls.clear()
+        renders_before = state["renders"]
+
+        cur = await db.execute(
+            "SELECT result_path FROM export_cache WHERE scheme_id=?", (sid,))
+        row = await cur.fetchone()
+        assert row and row[0], "首轮导出应已落缓存行"
+        p = Path(row[0])
+        assert export_mod._artifact_intact(str(p)), "前置：首轮产物应为完整 zip"
+        # 模拟写盘中断：保留头部 100 字节（PK 头存活、中央目录/EOCD 全失）
+        p.write_bytes(p.read_bytes()[:100])
+
+        resp = await export_mod.export_docx(sid, dict(body, _tag="b"), db=db)
+        assert "miss" in str(resp.headers.get("X-Cache-Status", "")), (
+            "半截缓存必须按未命中处理，不得直接交付")
+        assert calls == ["b"], "miss 后必须走全量重建"
+        assert state["renders"] > renders_before, "重建必须真实执行渲染段"
+        assert export_mod._artifact_intact(str(p)), "重建后产物必须恢复完整"
 
     async def test_different_config_not_serialized(self, ctx):
         db, sid, calls, _ = ctx
@@ -344,13 +380,14 @@ def _read_export_src() -> str:
 
 
 class TestLockWiringSource:
-    """DOCX/PDF 两条端点必须同构地接上并发去重锁（wrapper-only 结构）。"""
+    """导出端点必须同构地接上并发去重锁（wrapper-only 结构）。
+
+    ✅ R126：PDF 下线后仅剩 DOCX 单端点（原 test_pdf_endpoint_guard... 随链路删除，
+    PDF 死灰复燃由 tests/test_r126_pdf_offline_20261021.py 反向锚拦截）。
+    """
 
     def test_docx_endpoint_guard_outside_lock_build_inside_release_finally(self):
         assert _lock_guard_structure(_read_export_src(), "export_docx")
-
-    def test_pdf_endpoint_guard_outside_lock_build_inside_release_finally(self):
-        assert _lock_guard_structure(_read_export_src(), "export_pdf")
 
     def test_docx_body_carries_existing_anchors(self):
         """构建/缓存逻辑锚点守卫（2026-10-14 收口后调整）。
@@ -456,13 +493,13 @@ class TestGuardDiscrimination:
     def _src_mutator(self, variant: str) -> str:
         src = _read_export_src()
         if variant == "no_acquire":
-            # 只替换第一条（DOCX 端点）；此处校验确有 2 处防锚点漂移
-            assert src.count("    _lk = await _export_dedup_acquire(") >= 2
+            # ✅ R126：PDF 下线后 acquire 调用点仅剩 DOCX 一处（原 2 处防漂移清点收敛）
+            assert src.count("    _lk = await _export_dedup_acquire(") == 1
             src = src.replace("    _lk = await _export_dedup_acquire(",
                               "    _lk = None  # 变异", 1)
         elif variant == "no_release":
-            # DOCX / PDF 各一处，**全部**替换：任一未被摘除则守卫仍可命中
-            assert src.count("        _export_dedup_release(_lk)\n") >= 2
+            # DOCX 单处，**全部**替换：任一未被摘除则守卫仍可命中（R126 收敛）
+            assert src.count("        _export_dedup_release(_lk)\n") == 1
             src = src.replace("        _export_dedup_release(_lk)\n",
                               "        pass  # 变异\n")
         elif variant == "acquire_before_guard":
@@ -489,9 +526,4 @@ class TestGuardDiscrimination:
         assert src != _read_export_src()
         assert not _lock_guard_structure(src, "export_docx"), (
             f"变异 {variant!r} 应被守卫判定为失效")
-
-    @pytest.mark.parametrize("variant", ["no_release"])
-    def test_pdf_variant_is_caught(self, variant):
-        src = self._src_mutator(variant)
-        assert src != _read_export_src()
-        assert not _lock_guard_structure(src, "export_pdf")
+    # ✅ R126：原 test_pdf_variant_is_caught（对 export_pdf 的同构变异锚）随链路删除

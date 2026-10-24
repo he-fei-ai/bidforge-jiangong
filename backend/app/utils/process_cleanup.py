@@ -212,9 +212,20 @@ def kill_process_tree(pid: int, grace_sec: float = 3.0) -> bool:
 def _pid_alive(pid: int) -> bool:
     if IS_WIN:
         try:
+            # ✅ R118（2026-10-21 · P2 真实故障取证）：``text=True`` 不指定
+            #    ``errors`` 时按 **locale 编码严格解码**（本机 cp936/GBK）。
+            #    子进程输出里只要有一个 locale 无法识别的字节（实测后端全量回归
+            #    日志命中 ``UnicodeDecodeError: 'gbk' codec can't decode byte 0xa1``，
+            #    抛在 ``subprocess.py::_readerthread`` —— **后台读线程**里），后果是：
+            #      · 异常不在主线程，``except Exception`` 只能拿到空 stdout ⇒
+            #        探测结果失真，且只在日志里留一条 PytestUnhandledThreadException
+            #        式的**线程异常**，极难定位；
+            #      · `_communicate` 可能一直等到 timeout 才返回 —— 与
+            #        ``ai/mermaid_service.py:353-372`` 记载的同一故障族（该处已修）。
+            #    这里只比对 PID 数字串，替换符不影响判定，故统一 ``errors="replace"``。
             out = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, errors="replace", timeout=5,
                 creationflags=_no_window_flags(),
             ).stdout or ""
             return str(pid) in out

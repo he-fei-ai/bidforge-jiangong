@@ -34,6 +34,10 @@ import {
   isTerminalContentEvent,
   degradedConsistencyHint,
 } from "../utils/contentEvents";
+// ✅ R121（承接 R120 遗留 L5）：pollTaskUntilTerminalImpl 已下沉到 utils/taskPolling.ts 叶子，
+//   静态直连即可 —— 不再 `await import("../pages/SchemeWorkbenchPage")`（巨型页面的动态 import
+//   在全量并发 8-worker 冷 jsdom 下撞单测 60s 墙钟产生假红，非回归）。
+import { pollTaskUntilTerminalImpl } from "../utils/taskPolling";
 
 afterEach(cleanup);
 
@@ -101,7 +105,6 @@ describe("终态集合单一事实源", () => {
 
 describe("pollTaskUntilTerminalImpl 认领 degraded", () => {
   it("B1: status=degraded 必须在第一次轮询就收尾（不得跑满 maxPolls）", async () => {
-    const { pollTaskUntilTerminalImpl } = await import("../pages/SchemeWorkbenchPage");
     let calls = 0;
     const fetchStatus = vi.fn(async () => {
       calls += 1;
@@ -114,7 +117,6 @@ describe("pollTaskUntilTerminalImpl 认领 degraded", () => {
   });
 
   it("B2: 回归护栏 —— running + progress 满仍走 stuck 兜底为 completed", async () => {
-    const { pollTaskUntilTerminalImpl } = await import("../pages/SchemeWorkbenchPage");
     const fetchStatus = vi.fn(async () => ({ status: "running", progress: 1 } as any));
     const res = await pollTaskUntilTerminalImpl(
       "task-1", fetchStatus, undefined, { intervalMs: 0, stuckThreshold: 2 });

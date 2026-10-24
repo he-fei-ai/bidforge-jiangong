@@ -145,7 +145,13 @@ async def test_run_single_call_injects_section_hint(monkeypatch):
     assert len(systems) == 2, "标段上下文必须是独立的第二条 system 消息"
     assert hint in systems[1]["content"]
     users = [m for m in captured[0] if m["role"] == "user"]
-    assert users and users[0] is captured[0][-1]
+    # ✅ 《标书智能体（四）》案例一：资料全文独立一条 user（前置、跨提取项
+    #    共享），任务说明单独一条 user 放最后（差异后置）。旧形态是单条 user
+    #    （任务模板在前、全文在后），前缀在各提取项首字符即分叉。
+    assert len(users) == 2, "资料全文 + 任务说明必须拆成两条 user 消息"
+    assert users[-1] is captured[0][-1], "任务说明必须是最后一条消息（差异后置）"
+    assert "项目资料" in users[0]["content"], "前置 user 必须承载资料全文"
+    assert "项目资料文本见上一条消息" in users[1]["content"]
 
 
 @pytest.mark.asyncio

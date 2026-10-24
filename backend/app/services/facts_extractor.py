@@ -287,6 +287,17 @@ GLOBAL_FACTS_INSERT_SQL = (
        ",".join("?" for _ in GLOBAL_FACTS_INSERT_COLS))
 )
 
+#: ✅ R125（2026-10-21）：版本化 INSERT 列清单（在既有 27 列后追加 version /
+#: version_label）。仅在 enable_fact_versioning=True 时走此语句；默认关闭路径
+#: 仍用 GLOBAL_FACTS_INSERT_SQL（27 列，version 列由 DEFAULT 1 填充），保证零行为变化。
+GLOBAL_FACTS_INSERT_COLS_V: tuple[str, ...] = GLOBAL_FACTS_INSERT_COLS + (
+    "version", "version_label")
+GLOBAL_FACTS_INSERT_SQL_V = (
+    "INSERT INTO global_facts (%s) VALUES (%s)"
+    % (", ".join(GLOBAL_FACTS_INSERT_COLS_V),
+       ",".join("?" for _ in GLOBAL_FACTS_INSERT_COLS_V))
+)
+
 
 # ---------------------------------------------------------------------------
 # 要求 vs 事实口径（value_kind，R80 · P2-3 正式落地）
@@ -2619,6 +2630,7 @@ async def persist_extraction(
     db,
     project_id: str,
     scheme_id: str,
+    versioning: bool = False,
 ) -> None:
     """将提取结果写入 global_facts 表（原子事务：DELETE+INSERT 同事务）
 
@@ -2644,6 +2656,33 @@ async def persist_extraction(
         scope_params = (project_id,)
     cur = await db.execute(scope_sql, scope_params)
     existing = [dict(r) for r in await cur.fetchall()]
+
+    # ✅ R125（2026-10-21）：事实库版本化（默认关闭，由 enable_fact_versioning 控制）。
+    #    仅当 versioning=True 时：重抽前先快照当前作用域事实 + 计算下一版本号，
+    #    新插入行带 version。任何版本化异常均降级（告警 + 退回不建快照、version 恒 1），
+    #    不污染主链路。快照与主链路同事务：主链路失败回滚时快照一并回滚，无孤儿快照。
+    _version = 1
+    _version_label = ""
+    if versioning:
+        try:
+            cur = await db.execute(
+                "SELECT COALESCE(MAX(version),0) AS m FROM global_facts "
+                "WHERE project_id=? AND scheme_id=?", (project_id, scheme_id))
+            _row = await cur.fetchone()
+            _version = (_row["m"] if _row else 0) + 1
+            _snap_id = f"{project_id}:{scheme_id}:v{_version}:{uuid.uuid4().hex[:8]}"
+            await db.execute(
+                "INSERT INTO global_facts_snapshots "
+                "(snapshot_id, project_id, scheme_id, version, label, created_at, fact_rows_json) "
+                "VALUES (?,?,?,?,?,datetime('now','localtime'),?)",
+                (_snap_id, project_id, scheme_id, _version,
+                 f"抽取 v{_version}",
+                 json.dumps(existing, ensure_ascii=False, default=str)))
+        except Exception as _ve:
+            logger.warning("事实库版本化快照失败（降级为不建快照）: %s", _ve)
+            versioning = False
+            _version = 1
+            _version_label = ""
 
     def _is_protected(row: dict) -> bool:
         # 已人工确认(已审核) → 保留
@@ -2838,6 +2877,10 @@ async def persist_extraction(
                 skipped_dup += 1
                 continue
             row = list(it.to_db_row(group_id, project_id, scheme_id, grp.title))
+            # ✅ R125（2026-10-21）：版本化开启时，新插入行带 version/version_label。
+            if versioning:
+                row.append(_version)
+                row.append(_version_label)
             # ✅ 2026-09-23（信息调用完整性，配置 AUTO_RESOLVE_EXTRACTED_FACTS）：
             #    提取事实默认 is_resolved=0（待审核），门控 `has_conflict=0 AND
             #    is_resolved=1` 会将其排除在 目录/正文/导出 注入之外，导致「提取完成」
@@ -2908,7 +2951,9 @@ async def persist_extraction(
         if insert_buf:
             # ✅ 2026-10-06：列清单与占位符改走 GLOBAL_FACTS_INSERT_SQL 单一事实源
             #    （此前内联 27 列字面量 + 手写 27 个占位符，与路由侧 28 列清单漂移）。
-            await db.executemany(GLOBAL_FACTS_INSERT_SQL, insert_buf)
+            # ✅ R125（2026-10-21）：版本化开启时走带 version 列的 INSERT 语句。
+            _sql = GLOBAL_FACTS_INSERT_SQL_V if versioning else GLOBAL_FACTS_INSERT_SQL
+            await db.executemany(_sql, insert_buf)
         await db.commit()
     except Exception:
         await db.rollback()
@@ -2922,6 +2967,70 @@ async def persist_extraction(
         if skipped_dup else "",
         scheme_id or f"项目={project_id}",
     )
+
+
+# ---------------------------------------------------------------------------
+# ✅ R125（2026-10-21）：事实库版本化 —— 回滚 / 快照查询（服务层）。
+#    回滚 = 将指定快照写回 global_facts（同一事务，旧行先归档到 history）。
+#    任何异常 → 整事务回滚 + 上抛，调用方转 HTTP 状态码。
+# ---------------------------------------------------------------------------
+
+async def rollback_facts_to_snapshot(db, snapshot_id: str, project_id: str) -> dict:
+    """将指定快照写回 global_facts（同一事务；旧行先归档到 history）。
+
+    返回 ``{"ok": True, "restored_version": int, "rows": int}``；
+    快照不存在抛 ``ValueError("snapshot_not_found")``，项目不匹配抛
+    ``ValueError("snapshot_project_mismatch")``。
+    """
+    cur = await db.execute(
+        "SELECT * FROM global_facts_snapshots WHERE snapshot_id=?", (snapshot_id,))
+    snap = await cur.fetchone()
+    if not snap:
+        raise ValueError("snapshot_not_found")
+    if snap["project_id"] != project_id:
+        raise ValueError("snapshot_project_mismatch")
+    scheme_id = snap["scheme_id"]
+    cur = await db.execute(
+        "SELECT * FROM global_facts WHERE project_id=? AND scheme_id=?",
+        (project_id, scheme_id))
+    current = [dict(r) for r in await cur.fetchall()]
+    try:
+        # 归档当前作用域事实（审计留痕）
+        if current:
+            await db.execute(
+                "INSERT INTO global_facts_history "
+                "(id, global_fact_id, version, op, fact_rows_json, created_at) "
+                "VALUES (?,?,?,?,?,datetime('now','localtime'))",
+                (str(uuid.uuid4()), "", snap["version"], "archive",
+                 json.dumps(current, ensure_ascii=False, default=str)))
+        # 删除当前作用域事实（快照重建前清空，避免 id 冲突/重复）
+        await db.execute(
+            "DELETE FROM global_facts WHERE project_id=? AND scheme_id=?",
+            (project_id, scheme_id))
+        # 还原快照行（字段取自快照时 SELECT *，故与当前表列一致）
+        snap_rows = json.loads(snap["fact_rows_json"] or "[]")
+        for r in snap_rows:
+            cols = list(r.keys())
+            if not cols:
+                continue
+            ph = ",".join("?" * len(cols))
+            await db.execute(
+                f"INSERT INTO global_facts ({','.join(cols)}) VALUES ({ph})",
+                [r.get(c) for c in cols])
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    return {"ok": True, "restored_version": snap["version"], "rows": len(snap_rows)}
+
+
+async def list_fact_snapshots(db, project_id: str) -> list:
+    """列出某项目的可回滚快照（按时间倒序）。"""
+    cur = await db.execute(
+        "SELECT snapshot_id, project_id, scheme_id, version, label, created_at "
+        "FROM global_facts_snapshots WHERE project_id=? ORDER BY created_at DESC",
+        (project_id,))
+    return [dict(r) for r in await cur.fetchall()]
 
 
 # ---------------------------------------------------------------------------

@@ -50,6 +50,10 @@ SCOPE_GUARD_PATTERNS = (
     "_resolve_project_id",
     "_fact_scope_where",
     "_FACT_SCOPE_PREDICATE",
+    # III 类：版本化回滚入口（R125）的作用域校验是**快照归属判定**——
+    #    rollback_facts 拿 snapshot 后先校 project_id 归属，不匹配即 403
+    #    （字面量 snapshot_project_mismatch 是该校验的唯一出口标志）。
+    "snapshot_project_mismatch",
 )
 
 
@@ -125,7 +129,9 @@ def test_A3_route_inventory_size_is_as_documented():
     # 逆序去重后的 (method, path) 计数，避免因 method 集合拆分导致口径漂移
     main_keys = {(m, p) for m, p, _, _ in main_routes}
     docs_keys = {(m, p) for m, p, _, _ in docs_routes}
-    assert len(main_keys) == 15, f"主路由数量变化：{len(main_keys)}"
+    # ✅ R126 重锚（接管 R125 中间态）：版本化回滚新增 2 条主路由
+    #    （POST /{project_id}/rollback + GET /{project_id}/snapshots），15→17。
+    assert len(main_keys) == 17, f"主路由数量变化：{len(main_keys)}"
     assert len(docs_keys) == 8, f"docs 子路由数量变化：{len(docs_keys)}"
     assert not (main_keys & docs_keys), "两组路由出现同 (method, path)"
 
@@ -199,6 +205,9 @@ def test_B3_write_routes_count_is_stable():
         "PATCH /api/v1/global-facts/{fact_id}/resolve",
         "PATCH /api/v1/global-facts/{fact_id}/resolve-conflict",
         "DELETE /api/v1/global-facts/{fact_id}",
+        # ✅ R126 重锚（接管 R125 中间态）：版本化回滚是新增写端点，
+        #    作用域校验走 III 类（快照归属），缓存失效走统一 helper。
+        "POST /api/v1/global-facts/{project_id}/rollback",
     }
     assert set(keys) == expected, f"写路由集合变化：{set(keys) ^ expected}"
 

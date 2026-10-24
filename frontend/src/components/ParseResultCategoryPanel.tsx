@@ -72,10 +72,21 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
     ta.style.top = "-1000px";
     ta.style.opacity = "0";
     document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand("copy");
-    document.body.removeChild(ta);
-    return ok;
+    // ✅ FIX-7（2026-10-20 · P2 · DOM 泄漏）：旧实现把 removeChild 放在
+    //    `execCommand` **之后**、且不在 finally 里 ⇒ `execCommand` 抛异常时
+    //    隐藏 textarea **永久留在 document.body 上**（position:fixed、
+    //    opacity:0 ⇒ 不可见但常驻 DOM，每次降级复制泄漏一个）。
+    //    现改为 try/finally，保证任何路径都清理干净。
+    try {
+      ta.select();
+      return document.execCommand("copy");
+    } finally {
+      try {
+        document.body.removeChild(ta);
+      } catch {
+        /* 已被移除（极端并发）——忽略 */
+      }
+    }
   } catch {
     return false;
   }

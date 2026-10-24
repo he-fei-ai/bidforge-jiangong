@@ -53,63 +53,75 @@ def _fn(path: str, name: str) -> str:
 
 
 # =============================================================================
-# F-1：PDF 缓存原子替换回归
+# F-1：缓存原子替换回归（✅ R126：PDF 导出链整体下线，原子性锚收敛 DOCX 单链路，
+#      原五条 PDF 专属断言的检测力由 DOCX 同构断言 + PDF 反向锚承接，只增不减）
 # =============================================================================
 
-def test_f1_pdf_cache_writes_via_atomic_replace():
-    """PDF 缓存写入必须走 tmp + os.replace 原子替换（不得直接 write_bytes 到 out_path）。"""
-    src = _fn(EX_PATH, "export_pdf")
+def test_r126_pdf_export_chain_gone():
+    """PDF 反向锚：export_pdf 不得复活（原子性问题随链下线整体消失）。"""
+    try:
+        _fn(EX_PATH, "export_pdf")
+    except AssertionError:
+        return  # 未找到 = 符合预期
+    raise AssertionError("export_pdf 函数复活（R126 已整体下线）")
+
+
+def test_f1_docx_cache_writes_via_atomic_replace():
+    """DOCX 缓存写入必须走 tmp + os.replace 原子替换（不得直接 write_bytes 到 out_path）。"""
+    src = _fn(EX_PATH, "export_docx")
     # 必须引入 os.replace（可能以 import 别名）
     assert "os.replace" in src or "_os.replace" in src, (
-        "PDF 分支未做原子替换，与 DOCX 分支不对称（F-1 回退）")
+        "DOCX 分支未做原子替换（F-1 回退）")
     # 必须先生成唯一 tmp 文件路径
-    assert ".tmp.pdf" in src, (
-        "PDF 分支缺少 .tmp.pdf 临时文件名模式（F-1 回退）")
+    assert ".tmp.docx" in src, (
+        "DOCX 分支缺少 .tmp.docx 临时文件名模式（F-1 回退）")
     assert "uuid.uuid4().hex" in src, (
-        "PDF tmp 文件名必须含 uuid（否则并发同指纹会互相覆盖 tmp）")
+        "DOCX tmp 文件名必须含 uuid（否则并发同指纹会互相覆盖 tmp）")
 
 
-def test_f1_pdf_cache_does_not_directly_write_out_path():
-    """禁止 out_path.write_bytes(pdf_bytes) 直写——非原子是 F-1 的根因。
+def test_f1_docx_cache_does_not_directly_write_out_path():
+    """禁止 out_path.write_bytes(...) 直写——非原子是 F-1 的根因。
 
     注意：源码注释里可能引用旧实现的伪代码，因此这里用「去掉注释后」的
     实际可执行文本做匹配，避免注释文字误报。
     """
-    src = _fn(EX_PATH, "export_pdf")
+    src = _fn(EX_PATH, "export_docx")
     # 去掉行注释（Python 里 '#' 起始到行尾），再匹配
     code_only = "\n".join(
         re.sub(r"#.*$", "", line, count=1) for line in src.splitlines())
     assert "out_path.write_bytes" not in code_only, (
-        "PDF 缓存仍在直写 out_path（F-1 回退：并发/崩溃下残留半截 PDF）")
+        "DOCX 缓存仍在直写 out_path（F-1 回退：并发/崩溃下残留半截文件）")
 
 
-def test_f1_pdf_cache_cleans_tmp_on_failure():
+def test_f1_docx_cache_cleans_tmp_on_failure():
     """异常路径必须清理 tmp，否则磁盘孤儿。"""
-    src = _fn(EX_PATH, "export_pdf")
+    src = _fn(EX_PATH, "export_docx")
     assert "unlink(missing_ok=True)" in src, (
-        "PDF 分支异常路径未清理 tmp（F-1 回退）")
+        "DOCX 分支异常路径未清理 tmp（F-1 回退）")
 
 
-def test_f1_pdf_replace_loop_retries_on_permission_error():
-    """os.replace 遇 PermissionError 需 3 次退避重试（与 DOCX 分支同款）。"""
-    src = _fn(EX_PATH, "export_pdf")
+def test_f1_docx_replace_loop_retries_on_permission_error():
+    """os.replace 遇 PermissionError 需 3 次退避重试。"""
+    src = _fn(EX_PATH, "export_docx")
     assert "PermissionError" in src, (
-        "PDF 分支未处理 PermissionError（Windows Word 占用场景）")
+        "DOCX 分支未处理 PermissionError（Windows Word 占用场景）")
     assert "range(3)" in src, (
-        "PDF 分支 os.replace 未做重试循环（F-1 回退）")
+        "DOCX 分支 os.replace 未做重试循环（F-1 回退）")
 
 
-def test_f1_pdf_cache_hit_guards_size_gt_zero():
-    """缓存命中守卫必须同时校验存在 + size>0（旧实现的 size>0 已拦 >0 半截文件——
-    但 F-1 修好后不再产生半截文件，此守卫保留作纵深）。
+def test_f1_docx_cache_hit_guards_viable_and_intact():
+    """缓存命中守卫必须同时校验 可用判据 + 产物完整性（R126 FIX-D 纵深）。
 
-    ✅ 更新（2026-10-14 · P2）：可用判据已收敛到 `_cache_row_viable`（单一事实源），
-    避免「命中判据 / 保留判据」分叉（0 字节僵尸产物此前会占用 5 份保留配额）。
-    断言改为两点合取：调用点必须走该 helper，且 helper 本体必须含 size>0 检查。
+    ✅ 更新（2026-10-14 · P2）：可用判据收敛到 `_cache_row_viable`（单一事实源）。
+    ✅ 更新（R126 FIX-D · 2026-10-21）：命中点再叠加 `_artifact_intact`
+    （ZIP 头/EOCD 双签名）——半截文件（写盘中断、中央目录缺失）不再直接交付，
+    拒绝后走未命中全链路重建。
     """
-    src = _fn(EX_PATH, "export_pdf")
+    src = _fn(EX_PATH, "export_docx")
     assert "_cache_row_viable(cached[0])" in src, (
-        "PDF 缓存命中未走 _cache_row_viable 可用判据（F-1 纵深防御回退）")
+        "DOCX 缓存命中未走 _cache_row_viable 可用判据（F-1 纵深防御回退）")
+    assert "_artifact_intact(cached[0])" in src, (
+        "DOCX 缓存命中未走 _artifact_intact 完整性判据（R126 FIX-D 回退）")
     helper = _fn(EX_PATH, "_cache_row_viable")
     assert "st_size > 0" in helper, (
         "_cache_row_viable 缺 size>0 检查（0 字节产物会被当成有效缓存）")

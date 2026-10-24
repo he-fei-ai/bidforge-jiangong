@@ -315,6 +315,10 @@ def validate_prompt_variables(key: str, **kwargs) -> list[str]:
                if not _is_optional_block_var(v, template)]
     # 过滤误报：保留业务语义变量，只抑制"JSON 示例"类短字段
     missing = [v for v in missing if not _is_false_positive(key, v, template)]
+    # ✅ R132-B（2026-10-23）：动态占位符（{SHARED_*} / .replace 注入的
+    #    CONTEXT 等）调用方本就无需传参 —— 与渲染侧告警共用同一判据
+    #    （is_dynamic_placeholder 唯一事实源），两侧口径不再分叉。
+    missing = [v for v in missing if not is_dynamic_placeholder(v)]
     return missing
 
 
@@ -337,6 +341,40 @@ def _is_shared_reference(name: str) -> bool:
     提示词的当前内容（DB 优先），并非调用方需提供的入参变量。
     """
     return name.startswith("SHARED_")
+
+
+#: 运行时动态注入、渲染期不作为入参解析的占位符白名单。
+#:
+#: ✅ R132-B（2026-10-23 · 提示词占位符未解析专项）：**唯一登记处**。
+#:    这些占位符由调用方在 render 之外用 ``.replace`` 注入，渲染时"未传"
+#:    是设计如此、不是漏传，必须豁免告警 —— 否则每次渲染都刷一条
+#:    "Prompt template has unresolved placeholders"（R130 日志实测
+#:    ``['CONTEXT']`` 432 次，占两类口径 1134+260 的近三分之一）。
+#:    ⚠️ 新增动态占位只能登记到这里；禁止在渲染/校验/告警各处散落
+#:    ``if token == "..."`` 硬编码副本（本仓头号反模式：同一判据多处分叉）。
+#:
+#:    现有登记项：
+#:    - ``CONTEXT`` —— bid_item_* user 模板的 ``__CONTEXT__``，由
+#:      services/bid_analysis_service.py::build_item 用
+#:      ``.replace("__CONTEXT__", content)`` 注入（不经 render_prompt）。
+DYNAMIC_PLACEHOLDER_ALLOWLIST = frozenset({
+    "CONTEXT",
+})
+
+
+def is_dynamic_placeholder(name: str) -> bool:
+    """运行期由系统自动解析/注入、调用方**无需传参**的占位符判据。
+
+    单一事实源：``{SHARED_*}``（_cache._resolve_shared_keys 解析）与
+    :data:`DYNAMIC_PLACEHOLDER_ALLOWLIST`（.replace 注入）两类合判。
+    消费方共四处，均只调用本函数，不再各自内联判断：
+      ① :func:`render_prompt` 的"未解析占位符"告警过滤；
+      ② :func:`validate_prompt_variables` 的缺参告警过滤；
+      ③ ``_cache.get_prompt`` 的 missing 变量告警过滤；
+      ④ ``_cache.get_prompt_with_validation`` 的 missing 返回过滤。
+    """
+    return _is_shared_reference(name) or name in DYNAMIC_PLACEHOLDER_ALLOWLIST
+
 
 
 def extract_user_variables(template: str) -> list[str]:
@@ -443,35 +481,59 @@ def render_prompt(template: str, **kwargs) -> str:
     #    现改为**逐行处理**：只对「模板自身独占一整行的占位符」
     #    判是否删行，注入值永远不参与行判定；且与 _is_optional_block_var
     #    共用 _OPTIONAL_BLOCK_RE（唯一事实源），消除「删行正则 vs 豁免正则」分叉。
-    result = _render_by_line(template, pattern, _replace)
+    # ✅ R132-B（2026-10-23 · fail-soft 硬约束）：占位符替换/解析环节的任何
+    #    异常都**不得阻断 AI 调用** —— 降级为原文（未渲染模板）返回并告警。
+    #    此前异常会沿 _cache.get_prompt 冒泡，整次 AI 调用直接失败。
+    try:
+        result = _render_by_line(template, pattern, _replace)
+    except Exception as e:  # noqa: BLE001 - fail-soft：降级返回原文，不阻断
+        logger.warning(
+            "提示词占位符渲染异常，降级为原文返回（不阻断 AI 调用）: %s", e)
+        return template
 
     # ✅ 只在【模板】层面检测未解析占位符：
     #    旧实现检测的是"渲染后文本"，会把注入的文档正文 / 模型原始输出中
     #    形如 {xxx} 或 __XXX__ 的内容误报为"未解析占位符"，既产生日志噪音，
     #    又误导排查方向（例如把标书正文里的填空下划线当成提示词变量缺失）。
+    #
+    # ⚠️ R132-B（2026-10-23）：此处**不加**「kwargs 非空才告警」门控。
+    #    本轮曾尝试与 ``_cache.get_prompt`` 的 ``if kwargs:`` 同口径收紧
+    #    （历史 1394 条告警中约九成来自全模板无实参扫描），但既有回归
+    #    ``tests/test_content_deep_audit_20260923_b.py::
+    #    test_real_missing_variable_still_reported`` 钉住的契约是
+    #    「无实参渲染 + 真业务缺变量 → 必须告警」（全模板扫描正靠它暴露
+    #    模板变量需求），与门控行为互斥；且该测试属本轮改动范围之外、
+    #    断言不得删改。故 render_prompt 保持原口径，取原始模板的生产路径
+    #    已由 ``_cache.get_prompt`` 既有 ``if kwargs:`` 门（2026-09-23）
+    #    覆盖。若要引入门控，须先经测试契约评审（已列入未决问题）。
     if has_residual_placeholders(template):
-        template_vars = extract_variables(template)
-        kwargs_lower = {k.lower() for k in kwargs if kwargs[k] is not None}
-        unresolved = [v for v in template_vars
-                      if v.lower() not in kwargs_lower
-                      and not v.startswith("SHARED_")]
-        # ✅ 2026-09-23（正文生成深度审计 · P2 日志噪音）：此处此前**没有**套用
-        #    _is_false_positive 过滤，与 validate_prompt_variables() 的两条告警
-        #    路径口径分叉 —— 后者早已过滤（R6），本处仍在报。运行库实测
-        #    2026-09-23 20:54~20:55 单个正文任务打出 6 条
-        #    "Prompt template has unresolved placeholders: ['max']"
-        #    （logs/backend.log，trace=d283bb90c239），历史上更曾有 40 次/天。
-        #    `{max}` 来自提示词里的 JSON 示例，并非真缺变量，
-        #    噪音会淹没真实的 scheme_name/section_number 漏传信号
-        #    （AGENTS.md §5.3 已登记该遗留项）。现与 validate 路径共用同一判据。
-        unresolved = [v for v in unresolved
-                      if not _is_false_positive("", v, template)
-                      # ✅ 2026-10-02（检查点前置）：与 validate_prompt_variables
-                      #    同一口径 —— 整行独占的可选区块（未传即整行丢弃）不是
-                      #    「未解析」，否则开关型注入点每次关闭都刷一条 WARNING。
-                      if not _is_optional_block_var(v, template)]
-        if unresolved:
-            logger.warning("Prompt template has unresolved placeholders: %s", unresolved)
+        try:
+            template_vars = extract_variables(template)
+            kwargs_lower = {k.lower() for k in kwargs if kwargs[k] is not None}
+            unresolved = [v for v in template_vars
+                          if v.lower() not in kwargs_lower
+                          # ✅ R132-B：动态占位（{SHARED_*} / 白名单）与校验侧
+                          #    共用 is_dynamic_placeholder 唯一判据，不再各写一份。
+                          and not is_dynamic_placeholder(v)]
+            # ✅ 2026-09-23（正文生成深度审计 · P2 日志噪音）：此处此前**没有**套用
+            #    _is_false_positive 过滤，与 validate_prompt_variables() 的两条告警
+            #    路径口径分叉 —— 后者早已过滤（R6），本处仍在报。运行库实测
+            #    2026-09-23 20:54~20:55 单个正文任务打出 6 条
+            #    "Prompt template has unresolved placeholders: ['max']"
+            #    （logs/backend.log，trace=d283bb90c239），历史上更曾有 40 次/天。
+            #    `{max}` 来自提示词里的 JSON 示例，并非真缺变量，
+            #    噪音会淹没真实的 scheme_name/section_number 漏传信号
+            #    （AGENTS.md §5.3 已登记该遗留项）。现与 validate 路径共用同一判据。
+            unresolved = [v for v in unresolved
+                          if not _is_false_positive("", v, template)
+                          # ✅ 2026-10-02（检查点前置）：与 validate_prompt_variables
+                          #    同一口径 —— 整行独占的可选区块（未传即整行丢弃）不是
+                          #    「未解析」，否则开关型注入点每次关闭都刷一条 WARNING。
+                          if not _is_optional_block_var(v, template)]
+            if unresolved:
+                logger.warning("Prompt template has unresolved placeholders: %s", unresolved)
+        except Exception as e:  # noqa: BLE001 - fail-soft：检测异常只告警，不影响已渲染结果
+            logger.warning("未解析占位符检测异常（已忽略，不影响渲染结果）: %s", e)
 
     return result
 
@@ -668,12 +730,19 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
         #   现补占位符（措辞与 outline_short_system / outline_level1_system
         #   逐字一致）+ 契约登记。纯增量：调用方早已传参，无调用点改动。
         "standards_text",
+        # ✅ R133（2026-10-23 · 《标书智能体（2）》机制①）：整行独占的
+        #   可选区块（{outline_framework_block}）。程序预生成骨架经此注入
+        #   提示词；调用方未传（开关关闭/骨架构建失败）时整行丢弃、不算缺失
+        #   （_is_optional_block_var 豁免），但契约表按「模板已使用」口径
+        #   必须登记，否则 check_prompt_variables 报 used_not_declared。
+        "outline_framework_block",
     ],
     "outline_sublevel_batch_system": [
         "chapter_count", "chapters_text", "construction_scope", "other_outline",
         "prior_chapters", "project_brief", "project_facts", "requirements",
         "scheme_name", "scheme_type",
         "standards_text",  # ✅ R38：同上，见 outline_sublevel_system 注释
+        "outline_framework_block",  # ✅ R133：同上，批量侧逐章骨架合并块
     ],
     "outline_adjust_system": [
         "current_outline", "instruction", "scheme_name", "scheme_type",
@@ -717,6 +786,10 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     "consistency_audit_system": [
         "content", "facts", "scheme_name", "scheme_type",
     ],
+    # ✅ R122-G2（整卷合并修复）：两条新提示词同步登记契约 ——
+    #    system 零占位（显式空声明）、user 的 2 个占位符逐字照抄渲染口径。
+    "consistency_fullbook_system": [],
+    "consistency_fullbook_user": ["section_count", "workspace"],
     # --- 审核与预检域 ---
     # ✅ 2026-10-03（AI 语义检查侧消费事实）：两条 AI 链路经跨模块只读桥接
     #    load_resolved_facts_for_scope 装配 {global_facts}（与预检/正文/导出
@@ -769,6 +842,10 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     "SHARED_OUTPUT_SPEC": [],
     "SHARED_SCOPE_RULES": [],
     "SHARED_SCOPE_RULES_BRIEF": [],
+    # ✅ 2026-10-23（五段式提取方法）：通用处理规则 / 验证步骤两条共享片段。
+    #    与其它 SHARED_* 同口径——片段自身零占位符，故显式空声明。
+    "SHARED_EXTRACT_RULES": [],
+    "SHARED_EXTRACT_VERIFY": [],
     #   纯指令型 system 模板（变量全部在对应 *_user 侧，system 零占位）：
     "consistency_scan_system": [],
     "consistency_scan_batch_system": [],

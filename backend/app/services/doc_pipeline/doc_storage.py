@@ -92,14 +92,44 @@ def _utcnow() -> str:
 # ---------------------------------------------------------------------------
 
 def _safe_id(raw: str) -> str:
-    """project_id / doc_id 参与路径拼接前的清洗（防目录穿越）。"""
+    """project_id / doc_id 参与路径拼接前的清洗（防目录穿越）。
+
+    ✅ FIX-2（2026-10-20 · P1 · 目录穿越）：旧实现只做「字符白名单」过滤
+    （``ch.isalnum() or ch in "-_."``），**`.` 被保留** ⇒ ``_safe_id("..")``
+    原样返回 ``".."``（非空、不触发兜底）⇒ ``doc_dir("..", x)`` 拼出
+    ``DOCS_ROOT/".."/"documents"/x`` —— **逃出管理层 DOCS_ROOT**，
+    与本函数 docstring 声称的「防目录穿越」不符。
+
+    危害面：
+      · 写路径（``atomic_write_bytes`` / ``write_parsed_layer`` / …）**无
+        ``relative_to`` 守卫**（删除路径 ``delete_doc_tree`` 有）⇒ 越界写入；
+      · ``index_path`` 同样可被引导到 DOCS_ROOT 之外。
+
+    实测（本轮护栏实证）：``_safe_id("..") == ".."``，
+    ``doc_dir("..","x")`` = ``.../backend/data/projects/../documents/x``。
+
+    修法（保持合法 id 逐字不变，零行为回归）：
+      ① 清洗后若**整段由点组成**（``.`` / ``...``）或含 ``..`` 片段 ⇒ 判为
+         非法并回落 ``"unknown"``；
+      ② 额外兜底：清洗结果不得以 ``..`` 开头（``..abc`` 这类虽不穿越，
+         但保留会与后续拼接产生歧义，一并收敛）。
+    """
     s = str(raw or "").strip()
     cleaned = "".join(ch for ch in s if ch.isalnum() or ch in "-_.")
-    return cleaned or "unknown"
+    if not cleaned:
+        return "unknown"
+    # ① 纯点串（"." / ".." / "..."）⇒ 目录穿越，立即拒绝
+    if set(cleaned) == {"."}:
+        return "unknown"
+    # ② 含 ".." 片段（路径分隔已被清洗掉，此处只剩连续点）⇒ 拒绝
+    if ".." in cleaned:
+        return "unknown"
+    return cleaned
 
 
 def doc_dir(project_id: str, doc_id: str) -> Path:
-    return DOCS_ROOT / _safe_id(project_id) / "documents" / _safe_id(doc_id)
+    return _ensure_within_docs_root(
+        DOCS_ROOT / _safe_id(project_id) / "documents" / _safe_id(doc_id))
 
 
 def layer_dir(project_id: str, doc_id: str, layer: str) -> Path:
@@ -107,7 +137,8 @@ def layer_dir(project_id: str, doc_id: str, layer: str) -> Path:
 
 
 def index_path(project_id: str) -> Path:
-    return DOCS_ROOT / _safe_id(project_id) / "documents_index.json"
+    return _ensure_within_docs_root(
+        DOCS_ROOT / _safe_id(project_id) / "documents_index.json")
 
 
 def parsed_md_path(project_id: str, doc_id: str) -> Path:
@@ -117,6 +148,34 @@ def parsed_md_path(project_id: str, doc_id: str) -> Path:
 # ---------------------------------------------------------------------------
 # 原子写入 / 读取
 # ---------------------------------------------------------------------------
+
+def _ensure_within_docs_root(dest: Path) -> Path:
+    """管理层守卫：目标必须位于 ``DOCS_ROOT`` 之下，否则拒绝。
+
+    ✅ FIX-2（2026-10-20 · P1 · 与删除路径同口径）：删除路径
+    ``delete_doc_tree`` / ``delete_project_docs_root`` 早已用
+    ``resolve() + relative_to(root)`` 做管理层守卫（历史脏数据里的
+    ``../`` 或符号链接不得绕过词法检查），但**写路径**此前完全没有对等守卫
+    ⇒ 一旦路径构造环节出现穿越（``_safe_id`` 未挡 ``..`` 即其一），
+    写侧可把产物落到管理层之外。
+
+    守卫位置：**路径构造层**（``doc_dir`` / ``layer_dir`` / ``index_path``）
+    —— 即所有 ``DOCS_ROOT`` 派生路径的**唯一出口**。刻意**不**放在
+    ``atomic_write_bytes``：后者是通用原子写原语（测试与外部调用会合法地
+    写到任意路径），在那一层设限会误伤正常用法。
+
+    正常路径（``doc_dir`` / ``layer_dir`` / ``index_path`` 派生）一律位于
+    DOCS_ROOT 之下，**零行为变化**；仅当目标确实越界时拒绝并告警。
+    """
+    try:
+        root = DOCS_ROOT.resolve()
+        target = Path(dest).resolve()
+        target.relative_to(root)
+    except (OSError, ValueError):
+        logger.warning("拒绝访问管理层外的文档产物路径: %s", dest)
+        raise ValueError(f"文档产物路径越界，已拒绝: {dest}")
+    return Path(dest)
+
 
 def atomic_write_bytes(dest: Path, data: bytes) -> Path:
     """tempfile + os.replace 原子写入，防半截文件。"""

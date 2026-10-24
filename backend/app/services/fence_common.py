@@ -36,6 +36,17 @@ import re
 #: （两处字面量本就相同，合并即"三份副本变一份"）。
 FENCE_LINE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})([^`~\n]*)$")
 
+#: ```markdown / ```md / ```gfm 家族围栏：其**内部本身就是 Markdown 正文**。
+#: 导出侧（``content_blocks._parse_content_blocks``，R117）会递归解析围栏内部成
+#: 真实标题 / GFM 表格 / 列表并渲染进成稿 —— 因此它**不是代码**。
+#: 由此产生的口径要求（R118 遗留 L1 / TD-4）：**正文字数必须计入 markdown 围栏
+#: 的内部正文**，否则「统计口径」与「成稿内容」分叉（生产实测单章最多漏计 52%）。
+#: 本常量为该判据的**唯一事实源**：``content_blocks._MARKDOWN_FENCE_LANGS`` 与
+#: ``content_utils`` 的字数口径都引用此处，杜绝「三处各写一份 lang 列表」的分叉。
+#: ⚠️ 刻意**不含** ```text / ```plaintext —— 那是纯文本代码块，其中 ``### …``
+#:    必须继续被当作代码保护（既有契约 test_numbering_unification 锁定）。
+MARKDOWN_FENCE_LANGS = ("markdown", "md", "gfm", "markdown-gfm")
+
 
 def parse_fence_line(line: str) -> tuple[str, int, str] | None:
     """解析一行是否为围栏行，返回 ``(围栏字符, 长度, 信息串(已 strip))``；否则 None。

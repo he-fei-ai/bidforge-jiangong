@@ -65,14 +65,21 @@ def _row(title: str, content: str, chapter: str = "", kind: str = "value"):
     return ("施工参数", title, content, 0.95, chapter, kind)
 
 
-# ============ A 组：开关默认关 + 关闭态等价 ============
+# ============ A 组：开关默认状态 + 关闭态等价 ============
 
 class TestSwitchDefaultsAndEquivalence:
-    def test_three_switches_default_false(self):
-        """新增 3 配置项默认必须全关（引入铁律：默认关闭）。"""
-        assert settings.content_plan_selected_facts_inject is False
-        assert settings.consistency_fullbook_repair_enabled is False
-        assert settings.word_adjust_batch_enabled is False
+    def test_three_switches_default_true(self):
+        """✅ 2026-10-23 裁决（冲突以外部引用软件为准）：3 配置项默认改开。
+
+        引入铁律原为「默认关闭（零回归）」；本轮经用户裁决按外部
+        OpenBidKit_Yibiao v2 标准对齐 —— 外部无此三开关、对应机制恒执行
+        （G1 编排选事实→生成注事实、G2 持久 Agent 整卷修复、G3 成稿后
+        跨章节字数批量调度），故默认翻转为 True。关闭态等价断言仍然有效
+        （关闭开关 ⇒ 与引入前逐字一致），下方用例继续守关闭路径。
+        """
+        assert settings.content_plan_selected_facts_inject is True
+        assert settings.consistency_fullbook_repair_enabled is True
+        assert settings.word_adjust_batch_enabled is True
 
     def test_render_facts_closed_state_byte_equal(self):
         """full_titles 缺省/空/全不命中三形态输出逐字节一致（关闭态零变化）。"""
@@ -129,7 +136,14 @@ class TestSwitchDefaultsAndEquivalence:
                    "word_adjust_batch_done", "word_adjust_done"):
             assert ev in seg
 
-    async def test_route_fullbook_422(self, db_conn):
+    async def test_route_fullbook_422(self, db_conn, monkeypatch):
+        """fullbook 模式在开关**关闭**时必须 422 拒绝（关闭态路径仍受保护）。
+
+        ✅ 2026-10-23：开关默认已翻转为 True（对齐外部恒执行），本用例显式
+        关开关来验证拒绝分支本身；开关开启态由 fullbook 真实链路用例覆盖。
+        """
+        monkeypatch.setattr(settings, "consistency_fullbook_repair_enabled",
+                            False, raising=False)
         from app.routers import consistency_repair as route
         from fastapi import HTTPException
         await db_conn.execute(

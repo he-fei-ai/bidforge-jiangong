@@ -28,6 +28,7 @@ from ._registry import (
     clean_prompt_text,
     extract_variables,
     has_residual_placeholders,
+    is_dynamic_placeholder,
     render_prompt,
     validate_prompt_variables,
 )
@@ -362,7 +363,9 @@ def get_prompt(key: str, **kwargs) -> str:
         if kwargs:
             missing = [
                 v for v in validate_prompt_variables(key, **kwargs)
-                if not v.startswith("SHARED_")
+                # ✅ R132-B（2026-10-23）：SHARED_* / 白名单动态占位改走
+                #    is_dynamic_placeholder 唯一判据（原为内联 startswith 副本）。
+                if not is_dynamic_placeholder(v)
             ]
             if missing:
                 logger.warning(
@@ -389,12 +392,19 @@ def get_prompt_with_validation(key: str, **kwargs) -> tuple[str, list[str]]:
     prompt = get_prompt(key, **kwargs)
     missing = [
         v for v in validate_prompt_variables(key, **kwargs)
-        if not v.startswith("SHARED_")
+        # ✅ R132-B（2026-10-23）：与 get_prompt / 渲染侧同一判据（唯一事实源）。
+        if not is_dynamic_placeholder(v)
     ]
 
     if not missing and has_residual_placeholders(prompt):
-        residual = extract_variables(prompt)
-        logger.warning("Prompt '%s' has residual placeholders after rendering: %s", key, residual)
+        # ✅ R132-B（2026-10-23）：动态占位（{SHARED_*} / 白名单 CONTEXT）在
+        #    「取原始模板」时本就留在文本里、由后续 .replace / 共享解析注入，
+        #    不算渲染残留 —— 与 missing 过滤同一判据，避免本告警在
+        #    bid_item_* 空参校验路径上反向新增噪音。
+        residual = [v for v in extract_variables(prompt)
+                    if not is_dynamic_placeholder(v)]
+        if residual:
+            logger.warning("Prompt '%s' has residual placeholders after rendering: %s", key, residual)
 
     return prompt, missing
 

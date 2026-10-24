@@ -134,6 +134,25 @@ def has_trailing_counter_suffix(title: str) -> bool:
     return bool(_TRAILING_COUNTER_SUFFIX_RE.search(_canon(title)))
 
 
+def strip_trailing_counter_suffix(title: str) -> str:
+    """剥离标题尾部「（N）」计数后缀，**保留展示形**（✅ R115）。
+
+    与 :func:`has_trailing_counter_suffix` 共用同一份 ``_TRAILING_COUNTER_SUFFIX_RE``
+    与 ``_INVISIBLE_RE``，不新增第三份正则副本；区别只在**用途**：
+
+    · ``has_trailing_counter_suffix`` 走 ``_canon``（NFKC 归一）做**布尔判定**；
+    · 本函数在**原文形**上剥离（该正则的 ``[（(]``/``[)）]`` 已同时覆盖全角半角，
+      ``\\d`` 在 Python 中匹配 Unicode Nd 含全角数字）⇒ 返回值可安全用作
+      用户可见的候选标题，不会把「（２）」改写成别的东西。
+
+    用途（R115 FIX-1 确定性兜底）：``总体实施策划（2）`` 的可用部分正是去掉
+    后缀后的基名。**本函数不做语义判定** —— 若基名自身仍泛化（``^总体实施策划``
+    本就在 ``GENERIC_TITLE_PATTERNS`` 内），回写红线照旧拒收。
+    """
+    s = _INVISIBLE_RE.sub("", str(title or ""))
+    return _TRAILING_COUNTER_SUFFIX_RE.sub("", s).strip()
+
+
 #: ✅ 2026-10-10（目录占位/泛化标题收口）：三级标题大量出现占位式泛化名称
 #: （生产实证「专项6」「总体实施策划（2）」「总体实施策划（3）」），且带
 #: 「（N）」编号冲突后缀。这类标题不是合法目录，必须程序化检出并交由修复链路重写。

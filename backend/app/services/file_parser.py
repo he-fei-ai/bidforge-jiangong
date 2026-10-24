@@ -340,7 +340,15 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
 
     # ✅ 压缩炸弹闸门：DOCX/XLSX 为 ZIP 容器，解析前先校验归档规模。
     #    .xls / .doc / .wps 是 OLE 复合文档，不适用本检查。
-    if ftype in ("docx", "xlsx"):
+    #
+    # ✅ FIX-3（2026-10-20 · P1 · 闸门覆盖）：判据从「扩展名」改为
+    #    「**实际容器类型**」。旧实现只对 ftype ∈ {docx, xlsx} 调闸门，
+    #    而 ``_BINARY_SIGNATURES`` 对 doc/wps **放行 ZIP 魔数**
+    #    （:65-66，部分工具会把 .docx 改名成 .doc）⇒ 改名为 .doc/.wps 的
+    #    OOXML（ZIP 容器）进入 ``_parse_legacy_word``，把**未经归档闸门**的
+    #    字节交给 LibreOffice/Word 外部子进程（转换产物有闸门 :817，输入没有）。
+    #    现按真实容器判定：内容是 ZIP（PK 魔数）即受闸门约束，与扩展名无关。
+    if ftype in ("docx", "xlsx") or content[:4] == b"PK\x03\x04":
         _guard_zip_archive(content, ftype)
 
     raw_text = ""
@@ -396,6 +404,20 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
     #    两条通道各自逐页注入 `<!-- page:N -->`，同一页号出现两次，标记总数
     #    会虚增一倍（3 页 PDF 报 6 页）。页数语义 = 出现过的不同页号个数。
     diag["page_count"] = len(set(_PDF_PAGE_MARK_RE.findall(text))) or (1 if text.strip() else 0)
+
+    # ✅ 解析质量校验（2026-10-23 · 引入《标书智能体》解析校验）：结构化格式
+    #    （docx/pdf/xlsx/doc/wps）文件体积不小却只抽出极少文本，通常意味着
+    #    「全部是扫描图片」「解析器只读到封面/页眉」「内部结构损坏但未抛错」——
+    #    属于「解析成功但内容不可用」，若不告警，下游 AI 会在近乎空白的正文上
+    #    提取事实并全部标注「没有提及」，用户无从判断是文件没内容还是解析失败。
+    #    保守阈值：原始字节 > 1KB 且抽出文本 < 50 字符才告警；纯信息类提示
+    #    （_note_info 口径），不置 truncated、不抛 ParseError、不阻断入库。
+    if ftype in ("docx", "pdf", "xlsx", "doc", "wps") \
+            and len(content) > 1024 and len(text.strip()) < 50:
+        _note_info(diag, f"解析出的文本过短（{len(text.strip())} 字），"
+                         f"文件可能为扫描件、密码保护或结构损坏，"
+                         f"建议确认文件可读性后重新上传")
+
     return text, diag
 
 
@@ -420,6 +442,63 @@ def _add_page_markers(items: list[tuple[int, str]]) -> str:
         else:
             out.append(f"<!-- page:{num} -->\n{t}")
     return "\n".join(out)
+
+
+def _parse_page_markers_to_map(marked_text: str) -> dict[int, str]:
+    """把 `<!-- page:N -->` 标记文本按页号映射到页文本（供逐页 OCR 回填）。
+
+    ✅ R124（2026-10-21）：逐页 OCR 产物是带页标记的字符串，回填到 page_items
+    需先反解出 {页号: 文本}。OCR 文本通常为纯文本，不含页标记，嵌套误判概率极低。
+    """
+    parts = _PDF_PAGE_MARK_RE.split(marked_text)
+    # parts: [pre, '1', text1, '2', text2, ...]（捕获组使页号单独成段）
+    result: dict[int, str] = {}
+    i = 1
+    while i + 1 < len(parts):
+        try:
+            num = int(parts[i])
+        except (TypeError, ValueError):
+            break
+        result[num] = parts[i + 1].strip()
+        i += 2
+    return result
+
+
+def _patch_image_pages_with_ocr(content: bytes, page_items: list[tuple[int, str]],
+                                n_pages: int, diag: dict | None,
+                                threshold: int) -> list[tuple[int, str]]:
+    """R124（2026-10-21）：分块级 OCR 补漏。
+
+    仅对「逐页低文字量」页（image-only）调用按页 OCR 拼接并回填 page_items，
+    避免「整篇 avg_chars 偏高 → 文档级 OCR 不触发 → 中间扫描页静默丢失」（Bug 13）。
+    文档级 OCR（_parse_pdf 内原逻辑）仍作整篇扫描件兜底，二者不冲突：逐页补漏
+    成功后整体文本量达标，文档级不会重复触发。
+
+    OCR 引擎不可用时逐页告警、保留已提取文字（与文档级一致的不阻断语义）。
+    """
+    if not page_items or not n_pages:
+        return page_items
+    image_pages = [num for (num, t) in page_items
+                   if len((t or "").strip()) < threshold]
+    if not image_pages:
+        return page_items
+    try:
+        page_ocr = _pdf_ocr_fallback(content, pages=image_pages, diag=diag)
+    except ParseError as oe:
+        for num in image_pages:
+            _note_info(diag, f"第 {num} 页为纯图片且 OCR 不可用，内容可能缺失")
+        logger.warning("PDF 逐页 OCR 不可用（保留已提取文字）: %s", oe)
+        return page_items
+    if not page_ocr.strip():
+        return page_items
+    ocr_map = _parse_page_markers_to_map(page_ocr)
+    if not ocr_map:
+        return page_items
+    new_items: list[tuple[int, str]] = []
+    for num, t in page_items:
+        ocr_t = ocr_map.get(num, "")
+        new_items.append((num, ocr_t.strip()) if (ocr_t and ocr_t.strip()) else (num, t))
+    return new_items
 
 
 def _note_truncation(diag: dict | None, message: str) -> None:
@@ -476,6 +555,62 @@ def dump_parse_warnings(warnings) -> str:
     return json.dumps(items, ensure_ascii=False)
 
 
+def _zip_declared_entry_count(content: bytes) -> int | None:
+    """从 ZIP 尾部目录记录直接读出「中央目录条目总数」**声明值**。
+
+    ✅ FIX-3（2026-10-20 · P1 · 闸门时序）：``_guard_zip_archive`` 旧实现先
+    ``z.infolist()``（= 解析整个中央目录、构造全部 ZipInfo 对象）**再**判
+    条目数上限 ⇒ 条目数闸门**根本不是内存闸门**：30MB 上限内可构造
+    10⁵~10⁶ 条目，中央目录在闸门生效前就已被完整读进内存。
+
+    本函数只读文件尾部的目录记录（EOCD / ZIP64 EOCD），**不构造
+    ZipFile、不解析中央目录**，因此可以在任何解析动作之前就拿到条目数
+    声明值并据此拒绝。
+
+    返回：
+      - ``int``：声明的条目总数（可能远大于真实可解析条目数，取的是**保守
+        上界**，宁可误拒可疑归档也不放过炸弹）；
+      - ``None``：无法判定（文件过短 / 非 ZIP / 记录异常）⇒ 调用方按原
+        ``infolist()`` 路径继续，行为与旧实现一致。
+
+    仅用于**前置快速拒绝**；精确闸门仍由 ``_guard_zip_archive`` 的
+    ``len(infos)`` 判定（两者口径一致：都取中央目录声明的条目数）。
+    """
+    # EOCD 固定 22 字节，注释最长 65535 字节 ⇒ 目录记录最多出现在末尾
+    # 65557 字节内。
+    tail_len = 22 + 0xFFFF
+    if len(content) < 22:
+        return None
+    tail = content[-tail_len:]
+    # 取**最后**一个 EOCD 签名（注释里可能出现伪签名）
+    eocd_rel = tail.rfind(b"PK\x05\x06")
+    if eocd_rel < 0:
+        return None
+    eocd_abs = len(content) - len(tail) + eocd_rel
+    # EOCD 固定头：sig(4) disk(2) cd_disk(2) n_disk(2) n_total(2)
+    #             cd_size(4) cd_offset(4) comment_len(2)
+    if eocd_abs + 22 > len(content):
+        return None
+    n_total = int.from_bytes(content[eocd_abs + 10:eocd_abs + 12], "little")
+    # 0xFFFF 是 ZIP64 标记：真实条目数在 ZIP64 EOCD 记录里
+    if n_total != 0xFFFF:
+        return n_total
+    # ZIP64：定位器（20 字节）紧邻 EOCD 之前
+    loc_abs = eocd_abs - 20
+    if loc_abs < 0 or content[loc_abs:loc_abs + 4] != b"PK\x06\x07":
+        return None
+    try:
+        z64_off = int.from_bytes(content[loc_abs + 8:loc_abs + 16], "little")
+    except (TypeError, ValueError):
+        return None
+    if z64_off < 0 or z64_off + 56 > len(content):
+        return None
+    if content[z64_off:z64_off + 4] != b"PK\x06\x06":
+        return None
+    # ZIP64 EOCD：n_total 在偏移 32（8 字节小端）
+    return int.from_bytes(content[z64_off + 32:z64_off + 40], "little")
+
+
 def _guard_zip_archive(content: bytes, ftype: str) -> None:
     """ZIP 归档安全闸门：条目数 / 解压总量 / 压缩比，防压缩炸弹。
 
@@ -484,8 +619,21 @@ def _guard_zip_archive(content: bytes, ftype: str) -> None:
 
     设计取舍：宁可拒绝一个可疑的超大归档，也不要在解析阶段把内存打满——
     解析发生在服务进程内，OOM 会连带影响正在生成的方案任务。
+
+    ✅ FIX-3（2026-10-20 · P1 · 闸门时序）：条目数闸门前移 —— 旧实现先
+    ``z.infolist()``（构造全部 ZipInfo）再判条目数，30MB 内可塞 10⁵~10⁶ 条目，
+    中央目录在闸门生效前已完整入内存（闸门因此不是内存闸门）。
+    现先用 ``_zip_declared_entry_count`` 从尾部目录记录**只读**声明条目数，
+    超限立即拒绝，不构造 ZipFile；读不到声明值时才回落到原路径。
     """
     import zipfile
+
+    # ✅ 前置快速拒绝（不构造 ZipFile、不解析中央目录）
+    declared = _zip_declared_entry_count(content)
+    if declared is not None and declared > MAX_ARCHIVE_ENTRIES:
+        raise ParseError(
+            f"文件内部条目过多（{declared} > {MAX_ARCHIVE_ENTRIES}），"
+            "疑似异常归档，已拒绝解析")
 
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as z:
@@ -1090,6 +1238,9 @@ def _parse_pdf(content: bytes, diag: dict | None = None,
     text = ""
     n_pages = 0
     table_blocks: list[str] = []   # 引擎 B 产出的表格 Markdown（逐页收集）
+    # ✅ R124（2026-10-21）：逐页文本（页号, 文本），供分块级 OCR 补漏回填；
+    #    提前声明，保证 fitz 缺失 / 主通道失败时作用域仍有效。
+    page_items: list[tuple[int, str]] = []
     # MuPDF 连「打开」都失败 → 该 PDF 结构异常，不能再交给无闸门的回退通道
     fitz_open_failed = False
     # ✅ B-3 修复：记录「已加密且空密码认证失败」——这类 PDF 主通道提取必为空，
@@ -1153,7 +1304,13 @@ def _parse_pdf(content: bytes, diag: dict | None = None,
             raise ParseError(
                 "PDF 无法解析：文件结构异常或包含异常压缩数据。"
                 "请用 PDF 阅读器「另存为」标准 PDF 后重新上传")
-        text, n_pages = _parse_pdf_fallback(content)
+        # ✅ R126 收口（2026-10-21 · 接管 R124 遗留中间态）：`_parse_pdf_fallback`
+        #    契约为 **(text, 页数, 逐页文本) 三元组**（见其定义与 R124 注释），
+        #    此前调用点仍按二元 unpack → 「MuPDF 能打开但无文字层」的回退路径
+        #    全量 ValueError 崩溃。现按三元解包，并把逐页文本喂给 R124 的
+        #    分块级 OCR 补漏（回退通道产物此前漏接该能力，扫描件经回退通道
+        #    解析时中间空白页会静默丢失）。
+        text, n_pages, page_items = _parse_pdf_fallback(content)
 
     # ✅ 页数截断回报：只提取了前 MAX_PDF_PAGES 页，超出部分内容不会进入事实库
     if n_pages > MAX_PDF_PAGES:
@@ -1162,10 +1319,18 @@ def _parse_pdf(content: bytes, diag: dict | None = None,
             f"PDF 共 {n_pages} 页，仅解析前 {MAX_PDF_PAGES} 页，"
             f"其余 {n_pages - MAX_PDF_PAGES} 页内容未纳入（建议拆分文件后重新上传）")
 
-    # 扫描件检测（双信号）：平均每页文本 < 阈值，或文字层缺失判定命中
-    # → 疑似扫描件，尝试 OCR 兜底
+    # ✅ R124（2026-10-21）：分块级 OCR 补漏（在文档级 OCR 之前）。
+    #    仅对逐页低文字量页按页 OCR 拼接，避免「整篇 avg_chars 偏高 → 文档级不触发
+    #    → 中间扫描页静默丢失」（Bug 13）。成功后整体文本量达标，文档级 OCR 不会
+    #    重复触发；文档级仍作为整篇扫描件的兜底保留（下方原逻辑）。
     from app.config import settings
     threshold = getattr(settings, "ocr_min_chars_per_page", 30)
+    if page_items and n_pages:
+        page_items = _patch_image_pages_with_ocr(content, page_items, n_pages, diag, threshold)
+        text = _add_page_markers(page_items)
+
+    # 扫描件检测（双信号）：平均每页文本 < 阈值，或文字层缺失判定命中
+    # → 疑似扫描件，尝试 OCR 兜底
     avg_chars = len(text.strip()) / max(n_pages, 1)
     text_missing = not has_informative_text(text)
     if avg_chars < threshold or text_missing:
@@ -1223,8 +1388,12 @@ def _parse_pdf(content: bytes, diag: dict | None = None,
     return text
 
 
-def _parse_pdf_fallback(content: bytes) -> tuple[str, int]:
-    """PDF 回退通道：pdfplumber → pypdf，逐页容错。返回 (text, 页数)"""
+def _parse_pdf_fallback(content: bytes) -> tuple[str, int, list]:
+    """PDF 回退通道：pdfplumber → pypdf，逐页容错。
+
+    返回 (text, 页数, 逐页文本)：第三元供 `_parse_pdf` 做分块级 OCR 补漏
+    （R124），与主通道 page_items 同构。
+    """
     import tempfile
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     try:
@@ -1241,7 +1410,9 @@ def _parse_pdf_fallback(content: bytes) -> tuple[str, int]:
                         logger.warning("pdfplumber 第 %d 页失败: %s",
                                        p.page_number, pe)
                         pages_text.append((p.page_number, ""))
-                return _add_page_markers(pages_text), len(pdf.pages)
+                # ✅ R124（2026-10-21）：返回 3 元组（text, 页数, 逐页文本），
+                #    第三元供 _parse_pdf 做分块级 OCR 补漏；旧调用点已同步更新。
+                return _add_page_markers(pages_text), len(pdf.pages), pages_text
         except ImportError:
             logger.warning("pdfplumber 未安装，回退到 pypdf")
         except Exception as e:
@@ -1256,17 +1427,19 @@ def _parse_pdf_fallback(content: bytes) -> tuple[str, int]:
                 except Exception as pe:
                     logger.warning("pypdf 页提取失败: %s", pe)
                     pages_text2.append((idx + 1, ""))
-            return _add_page_markers(pages_text2), len(reader.pages)
+            # ✅ R124（2026-10-21）：返回 3 元组（text, 页数, 逐页文本）。
+            return _add_page_markers(pages_text2), len(reader.pages), pages_text2
         except Exception as e:
             logger.warning("pypdf 也解析失败: %s", e)
-            return "", 0
+            return "", 0, []
     finally:
         if os.path.exists(tmp.name):
             os.unlink(tmp.name)
 
 
 def _pdf_ocr_fallback(content: bytes, max_pages: int | None = None,
-                      diag: dict | None = None) -> str:
+                      diag: dict | None = None,
+                      pages: list[int] | None = None) -> str:
     """扫描件 PDF 的 OCR 兜底：PyMuPDF 渲染页面 → ocr 模块（多引擎识别）。
 
     页数与 DPI 由配置控制（OCR_PDF_MAX_PAGES / OCR_PDF_DPI）。
@@ -1281,6 +1454,15 @@ def _pdf_ocr_fallback(content: bytes, max_pages: int | None = None,
 
     max_pages = max_pages or getattr(settings, "ocr_pdf_max_pages", 20)
     dpi = getattr(settings, "ocr_pdf_dpi", 200)
+    # ✅ R124（2026-10-21）：分块级 OCR 补漏 —— pages 指定仅对哪些页做 OCR，
+    #    避免对整 PDF 重渲染（仅补漏中间扫描页）。默认 None=全量，兼容原文档级行为。
+    pages_filter = set(pages) if pages else None
+    if pages_filter:
+        beyond = [p for p in pages_filter if p > max_pages]
+        if beyond:
+            _note_truncation(
+                diag,
+                f"逐页 OCR 请求的纯图片页 {beyond} 超出 OCR 页数上限（{max_pages}），未识别")
     try:
         import fitz
     except ImportError:
@@ -1301,6 +1483,9 @@ def _pdf_ocr_fallback(content: bytes, max_pages: int | None = None,
                     f"其余 {skipped_pages} 页内容未识别"
                     "（可调大 OCR_PDF_MAX_PAGES 或拆分文件后重新上传）")
             for page in doc.pages(0, max_pages):
+                pnum = page.number + 1
+                if pages_filter is not None and pnum not in pages_filter:
+                    continue
                 try:
                     png = page.get_pixmap(dpi=dpi).tobytes("png")
                     res = ocr_bytes_sync(png)
@@ -1441,13 +1626,33 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
                     parts.extend(render_table_with_header(rows))
                 return "\n".join(parts)
             except ImportError:
-                logger.warning("xlrd 未安装（pip install xlrd==1.2.0），无法解析 .xls")
+                # ✅ FIX-5（2026-10-20 · P2 · 文案与依赖声明冲突）：
+                #    旧文案提示 `pip install xlrd==1.2.0`，而本仓
+                #    requirements.txt 明确 pin `xlrd==2.0.1` —— 用户照做会把
+                #    依赖**降级**到 1.2.0（1.2.0 只支持 .xls、不支持 .xlsx，
+                #    且在 py3.11+ 上安装即失败），与仓库声明自相矛盾。
+                #    现按仓库实际 pin 提示（2.x 才是不支持 xlsx 的安全版本）。
+                logger.warning("xlrd 未安装（pip install xlrd==2.0.1），无法解析 .xls")
                 # ✅ 修复：抛异常而不是返回错误字符串——旧实现会把
                 #    「【Excel .xls 解析失败：缺少 xlrd...】」当作正文返回并落库。
                 raise ParseError(
                     "无法解析 .xls 文件：缺少 xlrd 库。请执行 "
-                    "`pip install xlrd==1.2.0`，或将文件另存为 .xlsx 后重新上传")
-        from openpyxl import load_workbook
+                    "`pip install xlrd==2.0.1`，或将文件另存为 .xlsx 后重新上传")
+        # ✅ FIX-5（2026-10-20 · P2 · 缺库误报「文件已损坏」）：
+        #    旧实现 `from openpyxl import load_workbook` **无 ImportError 守卫**
+        #    ⇒ 环境缺 openpyxl 时，异常冒到 :377 的泛化分支，被翻译成
+        #    「XLSX 文件已损坏或不是有效的文件」——**归因完全错误**：用户的
+        #    文件是好的，是服务端缺依赖；照着「文件已损坏」的提示去换文件
+        #    会白白重试很多次。
+        #    现与同函数 .xls 分支的 xlrd 守卫同口径：缺库 → 独立、可操作的
+        #    提示（说明是服务端依赖缺失，并给出安装命令 + 另存为 .csv 的出路）。
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            logger.warning("openpyxl 未安装（pip install openpyxl），无法解析 .xlsx")
+            raise ParseError(
+                "无法解析 .xlsx 文件：服务端缺少 openpyxl 库（文件本身未损坏）。"
+                "请联系管理员安装 openpyxl，或将文件另存为 .csv / .xls 后重新上传")
         # ✅ 增强：data_only=True 取公式单元格的缓存计算值，避免正文里出现
         #    "=SUM(...)" 这类公式原文（机械统计表的合计列常为公式）。
         wb = load_workbook(tmp.name, read_only=True, data_only=True)

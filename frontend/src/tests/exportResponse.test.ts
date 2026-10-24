@@ -39,7 +39,7 @@ describe("resolveExportFilename", () => {
   });
 
   it("头缺失沿用兜底名", () => {
-    expect(resolveExportFilename({}, "方案.pdf")).toBe("方案.pdf");
+    expect(resolveExportFilename({}, "方案.docx")).toBe("方案.docx");
   });
 
   it("解码异常沿用兜底名不抛错（原内联 try/catch 行为等价）", () => {
@@ -190,24 +190,171 @@ describe("fallbackBorrowWarning · 跨章借图告警（D1）", () => {
   });
 });
 
-describe("EXPORT_STAGE_LABEL / ORDER · 导出阶段（D2）", () => {
-  it("四个阶段均有文案", () => {
-    for (const k of ["idle", "charts", "docx", "pdf"] as const) {
+describe("EXPORT_STAGE_LABEL / ORDER · 导出阶段（D2 · R126 收敛为 DOCX 单链路）", () => {
+  it("三个阶段均有文案（idle/charts/docx，PDF 已随 R126 下线）", () => {
+    for (const k of ["idle", "charts", "docx"] as const) {
       expect(EXPORT_STAGE_LABEL[k]).toBeTruthy();
     }
   });
 
-  it("非空闲阶段号从 1 连续到 3（阶段计数必须与 UI “3 阶”一致）", () => {
+  it("非空闲阶段号从 1 连续到 2（阶段计数必须与 UI “2 阶”一致）", () => {
     expect(EXPORT_STAGE_ORDER.charts).toBe(1);
     expect(EXPORT_STAGE_ORDER.docx).toBe(2);
-    expect(EXPORT_STAGE_ORDER.pdf).toBe(3);
     expect(EXPORT_STAGE_ORDER.idle).toBeUndefined();
-    expect(Math.max(...Object.values(EXPORT_STAGE_ORDER))).toBe(3);
+    expect(Math.max(...Object.values(EXPORT_STAGE_ORDER))).toBe(2);
+  });
+
+  // ✅ R126 反向锚（E 项）：PDF 导出已整体下线——阶段枚举里再现 pdf 即红，
+  //    防「死灰复燃」式回归（重新加回 pdf 阶段会被这两条抓住）。
+  it("pdf 阶段不得再现（PDF 下线反向锚）", () => {
+    expect((EXPORT_STAGE_LABEL as Record<string, string>)["pdf"]).toBeUndefined();
+    expect(EXPORT_STAGE_ORDER["pdf"]).toBeUndefined();
   });
 
   it("文案不得为空字符串（防死状态）", () => {
     for (const v of Object.values(EXPORT_STAGE_LABEL)) {
       expect(v.trim().length).toBeGreaterThan(0);
     }
+  });
+});
+
+
+/**
+ * 【R117 FIX-10 / FIX-11（2026-10-20）· 正文重复的前端消费面闭环。
+ *
+ * 病灶（R115 FIX-6 同一类）：后端把「已折叠的逐字重复」与「刻意没改的近似重复」
+ * 都写进了 X-Fix-Stats，前端**从不读** ⇒ 用户看到的仍是一份"看起来一切正常"的
+ * 成稿。此处锁两件事：① 两类计数都有文案；② 「没修」的那类绝不能混进
+ * 「已自动修复」的成功语气里。
+ */
+import { fixStatsWarnings } from "../utils/exportResponse";
+
+// 静态接线锁沿用本仓既有范式（importParseWarningWiringR72 / contentTerminalParity）：
+// Vite `import.meta.glob(..., { query: "?raw" })` 读源码文本，不引 node:fs
+// （本项目没装 @types/node，tests 也在 tsc 范围内）。
+const RAW: Record<string, string> = Object.fromEntries(
+  Object.entries(
+    import.meta.glob("../**/*.{ts,tsx}", {
+      query: "?raw", import: "default", eager: true,
+    }) as Record<string, string>,
+  ).map(([k, v]) => [k.replace(/^\.\.\//, "").replace(/^\.\//, "tests/"), v]),
+);
+
+describe("fixStatsParts · 逐字重复已折叠（FIX-10，属成功修复）", () => {
+  it("计数进成功文案并点明「仅保留首次」", () => {
+    const parts = fixStatsParts({ repeated_blocks: 5 });
+    expect(parts).toHaveLength(1);
+    expect(parts[0]).toContain("5");
+    expect(parts[0]).toContain("逐字重复");
+    expect(parts[0]).toContain("仅保留首次");
+  });
+
+  it("计数为 0 时不展示", () => {
+    expect(fixStatsParts({ repeated_blocks: 0 })).toEqual([]);
+  });
+});
+
+describe("fixStatsWarnings · 近似重复未改动（FIX-11，属遗留缺陷）", () => {
+  it("告警含数量、「成稿未改」与可执行动作", () => {
+    const ws = fixStatsWarnings({ near_duplicate_blocks: 3 });
+    expect(ws).toHaveLength(1);
+    expect(ws[0]).toContain("3");
+    expect(ws[0]).toContain("未作改动");
+    expect(ws[0]).toContain("重新生成");
+  });
+
+  it("不得混进成功文案（否则把没修说成已修）", () => {
+    expect(fixStatsParts({ near_duplicate_blocks: 3 })).toEqual([]);
+  });
+
+  it("0 / 缺失 / 脏值安全：不产告警、不抛错", () => {
+    expect(fixStatsWarnings({ near_duplicate_blocks: 0 })).toEqual([]);
+    expect(fixStatsWarnings({})).toEqual([]);
+    expect(fixStatsWarnings({} as any)).toEqual([]);
+  });
+
+  it("parseFixStats 能解析含两类新键的载荷", () => {
+    const fs = parseFixStats({
+      "X-Fix-Stats": JSON.stringify({
+        repeated_blocks: 5, near_duplicate_blocks: 3, formulas: 2,
+      }),
+    });
+    expect(fs?.repeated_blocks).toBe(5);
+    expect(fs?.near_duplicate_blocks).toBe(3);
+  });
+
+  it("R128：cross_ref_fields 进成功文案并点明「可点击 / 更新域刷新」", () => {
+    const parts = fixStatsParts({ cross_ref_fields: 7 });
+    expect(parts).toHaveLength(1);
+    expect(parts[0]).toContain("7");
+    expect(parts[0]).toContain("REF 域");
+    expect(parts[0]).toContain("更新域");
+  });
+
+  it("R128：0 / 缺失 / 脏值安全", () => {
+    expect(fixStatsParts({ cross_ref_fields: 0 })).toEqual([]);
+    expect(fixStatsParts({})).toEqual([]);
+    expect(() => fixStatsParts({ cross_ref_fields: "x" } as any)).not.toThrow();
+  });
+
+  it("R128：parseFixStats 能解析含 cross_ref_fields 的载荷", () => {
+    const fs = parseFixStats({
+      "X-Fix-Stats": JSON.stringify({ cross_ref_fields: 4, formulas: 1 }),
+    });
+    expect(fs?.cross_ref_fields).toBe(4);
+    expect(fs?.formulas).toBe(1);
+  });
+
+  // ------------------------------------------------------------------
+  // ✅ R129（2026-10-22）：导出后校验 + Word 2010+ 命名空间清除 + 公式降级
+  // ------------------------------------------------------------------
+  it("R129：ns_parts_sanitized / formula_image_fallback 进成功文案", () => {
+    const parts = fixStatsParts({ ns_parts_sanitized: 5, formula_image_fallback: 2 });
+    expect(parts.some((p) => p.includes("Word 2010+") && p.includes("5"))).toBe(true);
+    expect(parts.some((p) => p.includes("公式降级为图片") && p.includes("2"))).toBe(true);
+  });
+
+  it("R129：导出后校验残留聚合进告警，且绝不混进成功文案", () => {
+    const warns = fixStatsWarnings({
+      postcheck_markdown_residue: 2,
+      postcheck_html_residue: 1,
+      postcheck_placeholder_residue: 1,
+    });
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain("Markdown 残留 2 处");
+    expect(warns[0]).toContain("占位符残留 1 处");
+    expect(warns[0]).toContain("重新导出");
+    expect(fixStatsParts({ postcheck_markdown_residue: 2 })).toEqual([]);
+  });
+
+  it("R129：0 / 缺失 / 脏值安全", () => {
+    expect(fixStatsParts({ ns_parts_sanitized: 0, formula_image_fallback: 0 })).toEqual([]);
+    expect(fixStatsWarnings({ postcheck_entity_residue: 0 })).toEqual([]);
+    expect(fixStatsWarnings({})).toEqual([]);
+  });
+
+  it("R129：parseFixStats 能解析含 R129 新键的载荷", () => {
+    const fs = parseFixStats({
+      "X-Fix-Stats": JSON.stringify({
+        ns_parts_sanitized: 3, ns_clean: true, outline_entries: 12,
+        postcheck_markdown_residue: 1, formula_image_fallback: 2,
+      }),
+    });
+    expect(fs?.ns_parts_sanitized).toBe(3);
+    expect(fs?.postcheck_markdown_residue).toBe(1);
+    expect(fs?.formula_image_fallback).toBe(2);
+  });
+
+  it("页面确实消费了告警（antd message 在 jsdom 不可断言 ⇒ 锁接线）", () => {
+    // 本仓既有说明：antd v5 message 在 jsdom 下不渲染到可查询树，故以源码接线为判据
+    // —— 只要有一天这行接线被删，本用例立即变红。
+    const page = RAW["pages/SchemeWorkbenchPage.tsx"];
+    expect(page).toBeTruthy();
+    const seg = page.slice(page.indexOf("const fs = parseFixStats(resp.headers);"));
+    expect(seg.length).toBeGreaterThan(50);
+    expect(seg).toContain("fixStatsWarnings(fs)");
+    expect(seg).toContain("msg.warning");
+    // 接线必须仍在成功文案之后（顺序错乱 ⇒ 用户先看到告警再看到"已修复"）
+    expect(seg.indexOf("fixStatsWarnings")).toBeGreaterThan(seg.indexOf("msg.success"));
   });
 });

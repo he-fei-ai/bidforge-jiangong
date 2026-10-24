@@ -526,6 +526,19 @@ def renumber_section_body_subheadings(
     if titles:
         blocks = _strip_duplicate_leading_title(blocks, *titles)
 
+    # ✅ R118（2026-10-21 · P0）：**围栏派生标题不参与本节编号**。
+    #    R117 起 `` ```markdown `` 家族围栏会被 ``_parse_content_blocks`` 递归展开，
+    #    围栏内的 ``## xxx`` 因此进入 blocks 列表。若此处照样给它编号：
+    #      ① 会吃掉一个子标题序号 —— 真子标题被顺延成 2.2 / 2.3（**编号虚跳**）；
+    #      ② ``export._collapse_repeated_blocks`` 明确会对「围栏内一份 + 围栏外重述一份」
+    #         去重渲染，编号却在落库阶段已经白白消耗 ⇒ 成稿出现「有 2.1、无 2.2」的空洞；
+    #      ③ 第 ① 条还会进一步放大 R117 之前就存在的 src_line 错位（现已一并修 ✅）。
+    #    故两遍都统一走 ``_renumberable``（不含 _from_fence 块），保持
+    #    test_outline_generation_gaps_20261008.py::D-8g 确立的既有契约
+    #    「代码围栏/围栏内内容一概不动」。
+    _renumberable = [b for b in blocks
+                     if b.get("type") == "heading" and not b.get("_from_fence")]
+
     # 第一遍：按导出同款算法为每个标题块计算规范化文本
     sub_counters: dict = {}
     try:
@@ -539,7 +552,7 @@ def renumber_section_body_subheadings(
         _demote = has_db_children and _s.body_subheading_demote_with_children
     except Exception:
         pass
-    for block in blocks:
+    for block in _renumberable:
         if block.get("type") != "heading":
             continue
         pure = _strip_title_number(block.get("text", ""))
@@ -551,7 +564,8 @@ def renumber_section_body_subheadings(
     # 第二遍：把规范化文本精确重写回源行（#-标题保留井号与缩进；纯文本标题整行替换）
     changes: list[dict] = []
     rewrites: dict[int, str] = {}
-    for block in blocks:
+    # ✅ R118：同一份 _renumberable（与上面注释同源），围栏派生块不重写源行
+    for block in _renumberable:
         if block.get("type") != "heading":
             continue
         fixed = str(block.get("_fixed_text") or "")

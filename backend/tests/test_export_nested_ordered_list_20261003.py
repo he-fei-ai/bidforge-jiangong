@@ -24,6 +24,7 @@ from app.routers.export import (
     _parse_content_blocks,
 )
 from docx import Document
+from docx_display import display_texts
 
 
 def _build_single(content: str) -> list[str]:
@@ -46,8 +47,9 @@ def _build_single(content: str) -> list[str]:
         toc_depth=3,
         margins=None, cover_info=None,
     )
-    return [p.text for p in Document(out).paragraphs
-            if p.text.strip() and p.text.strip() != "第一章 测试章节"]
+    doc = Document(out)
+    return [t for t in display_texts(doc)
+            if t.strip() and t.strip() != "第一章 测试章节"]
 
 
 class TestNestedOrderedRenumbersPerLevel:

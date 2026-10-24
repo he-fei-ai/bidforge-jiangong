@@ -12,6 +12,7 @@ import json
 import logging
 import re
 
+from app.services.ai.outline_schema import schema_issues
 from app.services.ai.prompts._metrics import (
     record_ai_failure,
     record_repair_triggered,
@@ -47,7 +48,8 @@ FACTS_REPAIR_KEY = "facts_json_fix_system"
 
 
 def _build_repair_user_prompt(issues: list, raw: str,
-                             repair_key: str = GENERIC_REPAIR_KEY) -> str:
+                             repair_key: str = GENERIC_REPAIR_KEY,
+                             target_desc: str = "") -> str:
     """构造 JSON 修复 user 提示词。
 
     ✅ 统一提示词源：消费注册条目（DB 优先，可在前端编辑生效），
@@ -59,10 +61,14 @@ def _build_repair_user_prompt(issues: list, raw: str,
 
     ✅ R38：默认值由 ``outline_json_fix_system`` 改为 ``json_schema_fix_system``
     （理由见 :data:`GENERIC_REPAIR_KEY`）。
+
+    ✅ 《标书智能体（五）》§五：修复三部分信息之「目标结果类型」由调用方按场景传入
+    （完整目录 / 一级目录 / 章节子目录 / 审核结果 …），默认 ``"JSON 结果"``
+    与旧硬编码逐字一致，未传参调用点行为不变。
     """
     try:
         return render(repair_key,
-                      target_description="JSON 结果",
+                      target_description=target_desc or "JSON 结果",
                       issues=_format_json_issues(issues or ["JSON 语法错误，无法解析"]),
                       invalid_content=raw or "")
     except Exception:
@@ -227,6 +233,17 @@ def _repair_json_string_escapes(content: str) -> str:
     return ''.join(output)
 
 
+def _format_jsondecode(e: json.JSONDecodeError) -> str:
+    """JSONDecodeError → 「JSON 语法错误：第 N 行第 N 列附近 {msg}」。
+
+    ✅ 《标书智能体（五）》§六：修复助手提示词（outline_json_fix_system）承诺
+    产出「JSON 语法错误：第 N 行第 N 列附近 …」格式，旧实现 ``f"...: {e}"``
+    只有裸消息、无行列定位，模型拿不到出错位置。此处补齐行列号，使提示词
+    与实际喂给模型的问题清单**逐字对齐**（提示词不许诺代码产不出的格式）。
+    """
+    return f"JSON 语法错误：第 {e.lineno} 行第 {e.colno} 列附近 {e.msg}"
+
+
 def parse_and_validate(raw: str, validate_fn=None):
     """解析并校验；validate_fn(obj) 返回错误列表（空列表=通过）
 
@@ -256,9 +273,10 @@ def parse_and_validate(raw: str, validate_fn=None):
                 logger.info(
                     "JSON 本地修复成功（非法反斜杠）：原始错误=%s，已跳过 AI 修复轮", e)
             except json.JSONDecodeError as e2:
-                return None, [f"JSON 语法错误（本地修复后仍失败）: {e2}"]
+                return None, ["JSON 语法错误（本地修复后仍失败）：第 %d 行第 %d 列附近 %s"
+                              % (e2.lineno, e2.colno, e2.msg)]
         else:
-            return None, [f"JSON 语法错误: {e}"]
+            return None, [_format_jsondecode(e)]
     if validate_fn:
         try:
             issues = validate_fn(obj)
@@ -334,7 +352,9 @@ async def collect_json_response_with_chat(chat_fn, messages: list,
                                           timeout: int | None = None,
                                           repair_key: str = GENERIC_REPAIR_KEY,
                                           scene: str = "",
-                                          max_tokens: int | None = None):
+                                          max_tokens: int | None = None,
+                                          schema=None,
+                                          target_desc: str = ""):
     """统一 JSON 收集**编排本体**：生成 → 解析 → 校验 → 定向修复 → 有界重试。
 
     ✅ R57（2026-10-09）：从 :func:`collect_json_response` 中抽出，使「AI 调用来源」
@@ -345,8 +365,23 @@ async def collect_json_response_with_chat(chat_fn, messages: list,
         chat_fn: 与 ``chat_with_fallback`` 同签名的异步可调用对象
             （``(messages, *, temperature=None, json_mode=False, timeout=None,
             scene="", max_tokens=None) -> str``）。
+        schema: 可选 Pydantic 模型类（如 outline_schema.OutlineResponse）。
+            ✅ 《标书智能体（五）》§四「合法 JSON ≠ 可用 JSON」：在 JSON 解析之后、
+            业务校验之前插入 **Schema 校验**（外部九步工作流的第 4 步），校验问题
+            以「路径: 原因」式并入 issues 进入定向修复轮；None 时行为逐字不变。
+        target_desc: 修复提示词的「目标结果类型」（完整目录 / 一级目录 / 章节子目录 /
+            审核结果 …），默认 ``""`` → ``"JSON 结果"``，与旧硬编码一致。
         其余参数、语义、返回值与 :func:`collect_json_response` 完全一致。
     """
+    # Schema 校验（Schema → 业务 的顺序与外部九步工作流一致）
+    if schema is not None:
+        _biz_fn = validate_fn
+
+        def validate_fn(obj, _schema=schema, _biz=_biz_fn):  # noqa: F811
+            issues = schema_issues(_schema, obj)
+            if issues:
+                return issues
+            return _biz(obj) if _biz else []
     messages = _ensure_user_message(messages)
     try:
         raw = await _call_chat_fn(chat_fn, messages, temperature=temperature,
@@ -371,7 +406,7 @@ async def collect_json_response_with_chat(chat_fn, messages: list,
         repair_msgs = list(messages) + [
             {"role": "assistant", "content": raw or ""},
             {"role": "user", "content": _build_repair_user_prompt(
-                issues, first_raw or "", repair_key)},
+                issues, first_raw or "", repair_key, target_desc)},
         ]
         try:
             raw = await _call_chat_fn(chat_fn, repair_msgs, temperature=temperature,
@@ -401,7 +436,9 @@ async def collect_json_response(messages: list, validate_fn=None,
                                 timeout: int | None = None,
                                 repair_key: str = GENERIC_REPAIR_KEY,
                                 scene: str = "",
-                                max_tokens: int | None = None):
+                                max_tokens: int | None = None,
+                                schema=None,
+                                target_desc: str = ""):
     """统一 JSON 收集入口：生成 → 解析 → 校验 → 定向修复 → 重试
 
     ✅ 新增透传参数（供结构化提取使用）：
@@ -416,6 +453,11 @@ async def collect_json_response(messages: list, validate_fn=None,
 
     ✅ 2026-09-21 新增：scene 业务场景标记，透传至 chat_with_fallback 写入
     ai_audit_logs.scene，/ai/stats 可按场景聚合调用次数。
+
+    ✅ 《标书智能体（五）》新增（纯加法，默认 None/"" 行为逐字不变）：
+    - schema：Pydantic 模型类，Schema 校验先于业务校验，问题转「路径: 原因」
+      式进入定向修复轮（见 :func:`collect_json_response_with_chat`）；
+    - target_desc：修复提示词的「目标结果类型」三部分信息之一。
 
     ✅ 兼容性兜底：消息列表只有 system 时自动补一条最小 user 指令
     （见 _ensure_user_message），避免在要求 user 消息的 provider 上整类任务失败。
@@ -440,7 +482,8 @@ async def collect_json_response(messages: list, validate_fn=None,
     return await collect_json_response_with_chat(
         _chat, messages, validate_fn, max_retries,
         temperature=temperature, json_mode=json_mode, timeout=timeout,
-        repair_key=repair_key, scene=scene, max_tokens=max_tokens)
+        repair_key=repair_key, scene=scene, max_tokens=max_tokens,
+        schema=schema, target_desc=target_desc)
 
 
 async def _provider_chat_safe(provider, messages: list, temperature: float = 0.7,

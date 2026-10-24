@@ -23,10 +23,12 @@ from app.services.content_plan import (
 )
 
 
-# ── A. 配置缺省关闭 ───────────────────────────────────────────────
-def test_config_default_off():
-    # ✅ 回归护栏：默认关闭，generate_content 不触发额外 LLM 调用、不改正文提示词
-    assert settings.content_plan_stage_enabled is False
+# ── A. 配置缺省开启（2026-10-23 对齐外部 v2 两阶段工作流） ───────────
+def test_config_default_on():
+    # ✅ 2026-10-23：对齐外部 OpenBidKit_Yibiao v2「正文编排 → 正文生成」
+    #    两阶段工作流（外部默认每章先做 contentPlan），默认开启；
+    #    关闭（False）时 generate_content 不触发额外 LLM 调用、不改正文提示词。
+    assert settings.content_plan_stage_enabled is True
 
 
 # ── B. ContentPlanData 纯函数校验 ─────────────────────────────────

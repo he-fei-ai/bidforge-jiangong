@@ -264,15 +264,15 @@ describe("导出文档 Tab · 配置项贯通导出请求体", () => {
     expect(cfg.auto_fix_unclosed_fences).toBe(true);
   }, 60000);
 
-  it("导出 PDF 与导出 DOCX 共用同一份配置（两键互不串扰）", async () => {
+  it("R126：PDF 导出已整体下线——Tab 内不得出现「导出 PDF」按钮，pdf 接口不再被调用", async () => {
     renderPage();
     await gotoExportTab();
-    await openCoverPanel();
-    fireEvent.click(switchByLabel("专项施工方案审批表")!);
-    fireEvent.click(buttonByText("导出 PDF")!);
-    await waitFor(() => expect(apiCalls["exportApi.pdf"]?.length).toBe(1));
-    expect(apiCalls["exportApi.pdf"][0][1].scheme_forms.approval).toBe(true);
-    expect(apiCalls["exportApi.docx"]).toBeUndefined();
+    // 死灰复燃反向锚：PDF 按钮若重现即红（后端路由反向锚见
+    // backend test_r126_pdf_offline_20261021.py，前后端成对）
+    expect(buttonByText("导出 PDF")).toBeUndefined();
+    fireEvent.click(buttonByText("导出 DOCX")!);
+    await lastDocxConfig();
+    expect(apiCalls["exportApi.pdf"]).toBeUndefined();
   }, 60000);
 });
 
@@ -341,6 +341,64 @@ describe("导出文档 Tab · 失败与降级的可见性", () => {
       const b = buttonByText("导出 DOCX") || buttonByText("导出中");
       expect(b?.disabled ?? false).toBe(false);
     });
+  }, 60000);
+});
+
+// =========================================================================
+describe("导出文档 Tab · 停止导出（R126 F 项：组件级零覆盖补齐）", () => {
+  /**
+   * ✅ R126 F 项（2026-10-21）：「取消导出」链路（R106 FIX-3 接线：
+   * 先 POST /export/cancel 置位取消事件，再 abort 前端 fetch）此前
+   * **组件级零覆盖**——后端改路由名 / 前端改接线都不会被任何测试发现。
+   *
+   * 断言策略（沿用本文件 L281 起的约定：不断言 antd message 文案，改断言
+   * 可观测状态）：
+   *   ① exportApi.cancel 被调且传入方案 id（先置位再 abort 的顺序契约）；
+   *   ② docx 请求以取消形态（ERR_CANCELED）拒绝后 —— 取消不是失败：
+   *      按钮复位可用、「取消导出」提示条消失、无重试风暴；
+   *   ③ 取消后不得弹错误分支（canceled 分支静默，可观测面 = 无 error
+   *      级连锁请求 + 状态完整复位）。
+   *
+   * 夹具：exportApi.docx 注入**可控 pending Promise**（mock 的
+   * `Promise.resolve(d)` 会采纳 d 的终态，故后续手动 reject 即等效
+   * 真实 axios abort 拒绝）。
+   */
+  it("点击「取消导出」：先调 exportApi.cancel，取消态拒绝后按钮复位且不进错误分支", async () => {
+    let rejectDocx!: (e: any) => void;
+    apiDefaults["exportApi.docx"] = new Promise((_res, rej) => {
+      rejectDocx = rej;
+    });
+    renderPage();
+    await gotoExportTab();
+    fireEvent.click(buttonByText("导出 DOCX")!);
+    await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
+    // 导出进行中：进度条提示区出现「取消导出」按钮
+    const stopBtn = await screen.findByText("取消导出");
+    fireEvent.click(stopBtn);
+    // ① cancel 被调且带方案 id（先置位服务端取消事件）
+    await waitFor(() => expect(apiCalls["exportApi.cancel"]?.length).toBe(1));
+    expect(apiCalls["exportApi.cancel"][0][0]).toBe("s1");
+    // ② 模拟前端 fetch 被 abort 后 axios 的取消形态拒绝
+    const abortErr: any = new Error("canceled");
+    abortErr.code = "ERR_CANCELED";
+    rejectDocx(abortErr);
+    // ③ 状态完整复位：按钮回「导出 DOCX」且可用；取消提示条消失
+    await waitFor(() => {
+      const b = buttonByText("导出 DOCX");
+      expect(b).toBeTruthy();
+      expect(b?.disabled ?? false).toBe(false);
+    });
+    await waitFor(() => expect(screen.queryByText("取消导出")).toBeNull());
+    // ④ 无重试风暴：docx 只发一次、cancel 只发一次
+    expect(apiCalls["exportApi.docx"]?.length).toBe(1);
+    expect(apiCalls["exportApi.cancel"]?.length).toBe(1);
+  }, 60000);
+
+  it("未在导出中时「取消导出」入口不存在（无 exporting 状态不得误触 cancel）", async () => {
+    renderPage();
+    await gotoExportTab();
+    expect(screen.queryByText("取消导出")).toBeNull();
+    expect(apiCalls["exportApi.cancel"]).toBeUndefined();
   }, 60000);
 });
 

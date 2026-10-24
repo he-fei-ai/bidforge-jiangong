@@ -46,8 +46,17 @@ class TestJsonModeCallSites:
 
     def test_sublevel_sites(self):
         src = inspect.getsource(sh._fetch_chapter_children)
-        assert src.count('scene="outline_sublevel"') == 2, "首试+重试两处都要打 scene"
-        assert src.count("json_mode=True") == 2
+        # ✅ R114 重锚：旧实现是**两个物理调用点**（首试 + 重试），护栏用
+        #    「scene 出现 2 次」锁「两边都打 scene」。R114 把「调用失败重试」与
+        #    「标题占位重试」合并为**同一份重试预算**（单调用点在
+        #    `for attempt in (1, 2)` 循环内跑两次）—— 文本计数自然降为 1，
+        #    但语义（每一次实际调用都打 scene/json_mode）不变且更强（不再依赖
+        #    复制粘贴）；行为级锁见
+        #    `test_r114_outline_placeholder_closeout_20261020.py::
+        #     TestChildrenGate::test_retry_call_still_carries_scene`。
+        assert src.count('scene="outline_sublevel"') >= 1
+        assert src.count("json_mode=True") >= 1
+        assert "for attempt in (1, 2):" in src, "必须保留两次尝试的循环"
 
     def test_review_and_fix_sites(self):
         src = inspect.getsource(sh._review_and_fix_outline)
@@ -271,7 +280,18 @@ class TestProgrammaticPrecheck:
         assert titles.index("监测方案") == titles.index("安全保证措施") + 1
 
     async def test_patch_failure_falls_back_to_full_review(self, monkeypatch):
-        """外科式补齐失败 → 回退完整 AI 审核链路（旧行为）。"""
+        """补齐失败 → 默认跳过审核（A-2）；关闸门 → 逐字回到旧行为。
+
+        ✅ R116 A-2 语义变更：补齐（scene=outline_fix）刚以异常收场，即已实证
+        **本轮** AI 链路不可用，再花 ``outline_review_timeout``（60s）问一次不会
+        得到不同结果（生产实证 trace=acdef1e40a64：补齐 120s 超时后审核又白等
+        60s）。故默认 ``outline_skip_review_when_upstream_dead=True`` 时审核调用
+        降为 1 次，并以加法式键 ``review_skipped`` / ``review_skip_reason``
+        如实标注「没审」，而不是静默省略。
+
+        ⚠️ 检测力保留：本用例同时锁「关掉闸门必须逐字回到旧行为（2 次调用）」，
+        防止有人把 A-2 写成**无条件早退**（那才是「审核被静默删除」）。
+        """
         calls = []
 
         async def fake_collect(messages, validate_fn=None, **kwargs):
@@ -283,10 +303,29 @@ class TestProgrammaticPrecheck:
         monkeypatch.setattr(sh, "render", lambda *a, **k: "PROMPT")
         monkeypatch.setattr(sh, "collect_json_response", fake_collect)
         base = [{"title": "工程概况", "children": []}]
+
+        # ① 默认（闸门开）：补齐失败 ⇒ 上游已实证不可用 ⇒ 不再发起审核调用
+        monkeypatch.setattr(
+            sh.settings, "outline_skip_review_when_upstream_dead", True,
+            raising=False)
+        _outline, review = await sh._review_and_fix_outline(
+            base, "房建", False, "摘要", requirements="监测方案与预警")
+        assert len(calls) == 1, "上游已实证不可用：不得再发起审核调用"
+        assert review["passed"] is True
+        assert review["review_skipped"] is True
+        assert review["review_skip_reason"] == "upstream_dead"
+        assert "review_mode" not in review
+
+        # ② 关闸门：逐字回到本项引入前（补齐失败必须回退完整 AI 审核）
+        calls.clear()
+        monkeypatch.setattr(
+            sh.settings, "outline_skip_review_when_upstream_dead", False,
+            raising=False)
         _outline, review = await sh._review_and_fix_outline(
             base, "房建", False, "摘要", requirements="监测方案与预警")
         assert len(calls) == 2, "补齐失败必须回退到完整 AI 审核"
         assert review["passed"] is True
+        assert "review_skipped" not in review
         assert "review_mode" not in review
 
     async def test_mode_always_keeps_ai_review(self, monkeypatch):

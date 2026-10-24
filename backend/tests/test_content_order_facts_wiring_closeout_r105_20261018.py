@@ -212,6 +212,27 @@ def _user_text(chat_messages: list[dict]) -> str:
                    if isinstance(m, dict) and m.get("role") == "user")
 
 
+#: 编排轮（content_plan_user）的固定收口句；正文轮提示词永不含此句。
+_PLAN_MARK = "仅输出严格 JSON"
+
+
+def _content_user_texts(box: dict) -> list[str]:
+    """按**文档序**返回正文生成轮的 user 文本（剔除编排轮与其 JSON 修复重试）。
+
+    ✅ 2026-10-23 起 ``content_plan_stage_enabled`` 默认开启（对齐外部 v2
+    「编排 → 生成」两阶段工作流），每章先发编排轮（失败还带修复重试）再发
+    正文轮 ⇒ ``chats`` 下标不再等于章节序。本护栏关注的是正文轮提示词
+    （R105 承接段接线在 content_runtime 装配函数），故以编排标记反向过滤，
+    与 D1 开关取值解耦（开/关两态下断言语义一致）。
+    """
+    out = []
+    for m in box["chats"]:
+        t = _user_text(m)
+        if t and _PLAN_MARK not in t:
+            out.append(t)
+    return out
+
+
 # ============================================================================
 # A · G1 顺序留痕：派发序记录 → 终态 order_check → 三拼装点同键
 # ============================================================================
@@ -293,8 +314,9 @@ class TestR105PrevLeafContext:
         db = _DB()
         events, text = await _run(db)
         _terminal(events)
-        assert len(stub_env["chats"]) >= 2, f"两轮 chat 应发生: {len(stub_env['chats'])}"
-        first, second = (_user_text(m) for m in stub_env["chats"][:2])
+        texts = _content_user_texts(stub_env)
+        assert len(texts) >= 2, f"两章正文轮应发生: {len(texts)}"
+        first, second = texts[:2]
         assert _PREV_TAG not in first, "首章无文档前驱，不得出现承接段"
         assert _PREV_TAG in second, (
             f"第二章提示词必须含前驱叶子结尾段: {second[:600]}")
@@ -306,9 +328,9 @@ class TestR105PrevLeafContext:
         db = _DB()
         events, text = await _run(db)
         _terminal(events)
-        assert len(stub_env["chats"]) >= 2
-        second = _user_text(stub_env["chats"][1])
-        assert _PREV_TAG not in second, "开关关闭后不得注入承接段"
+        texts = _content_user_texts(stub_env)
+        assert len(texts) >= 2
+        assert _PREV_TAG not in texts[1], "开关关闭后不得注入承接段"
 
     @pytest.mark.asyncio
     async def test_tail_extractor_failure_is_failsoft(self, stub_env, monkeypatch):
@@ -321,7 +343,9 @@ class TestR105PrevLeafContext:
         events, text = await _run(db)
         term = _terminal(events)
         assert term["event"] == "completed", f"fail-soft 后生成必须照常完成: {text[:300]}"
-        assert _PREV_TAG not in _user_text(stub_env["chats"][1])
+        texts = _content_user_texts(stub_env)
+        assert len(texts) >= 2
+        assert _PREV_TAG not in texts[1], "取片段炸→回落空串，正文轮不得残留承接段"
 
     def test_both_assembly_calls_receive_prev_leaf(self):
         """分层与非分层两条装配路径都必须传 prev_leaf_summary（同口径纪律）。"""

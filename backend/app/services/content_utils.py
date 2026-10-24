@@ -45,6 +45,9 @@ from app.services.ai.prompts._limits import WORD_OVER_RATIO  # noqa: E402
 from app.services.fence_common import (
     FENCE_LINE_RE as _FENCE_LINE_RE,
 )
+from app.services.fence_common import (
+    MARKDOWN_FENCE_LANGS as _MARKDOWN_FENCE_LANGS,
+)
 from app.services.fence_common import (  # noqa: E402
     append_missing_closes,
     normalize_fence_closes,
@@ -292,6 +295,12 @@ def text_word_count(content: str) -> int:
 
     Returns:
         正文字符数（int，空输入返回 0）。
+
+    ✅ R119（TD-4）：```markdown 家族围栏的内部正文**计入字数**（其余语言围栏仍不计）。
+    R117 后导出侧会把 markdown 围栏内容当真实正文渲染进成稿，若字数仍整段剔除
+    ⇒「统计/落库/报告口径」与「成稿内容」分叉（生产实测 3/258 章达 44%~52%），
+    并使 under/over 判定与续写/压缩门槛失真。判据与导出侧同源（
+    ``fence_common.MARKDOWN_FENCE_LANGS``）；``text`` 等其余围栏逐字不变。
     """
     if not content:
         return 0
@@ -302,7 +311,7 @@ def text_word_count(content: str) -> int:
     #    可能把 under 误判为 normal（不续写）或 normal 误判为 over（触发
     #    不必要的压缩）。正文字数应只计用户实际阅读到的文字量，\r 不可见。
     content = content.replace("\r\n", "\n").replace("\r", "\n")
-    return len(strip_fenced_code_blocks(content))
+    return len(strip_fenced_code_blocks(content, keep_markdown_fences=True))
 
 
 # ---------- 可读字数（R70 · 2026-10-12）**诊断专用，不参与任何判定** ----------
@@ -349,9 +358,12 @@ def _normalize_for_readable(content: str) -> str:
     围栏剔除**复用** ``strip_fenced_code_blocks``（本模块唯一围栏事实源），
     不重造正则；行尾归一口径与 ``text_word_count`` 一致（CRLF/CR → LF），
     保证同一正文在 LF / CRLF 下读数相同。仅供本模块两个诊断函数共用。
+
+    ✅ R119（TD-4）：markdown 围栏内部正文同样计入（与 ``text_word_count``
+    保持同源口径，否则诊断读数与权威口径反向分叉）。
     """
     t = content.replace("\r\n", "\n").replace("\r", "\n")
-    t = strip_fenced_code_blocks(t)
+    t = strip_fenced_code_blocks(t, keep_markdown_fences=True)
     t = _RW_IMG_RE.sub(" ", t)
     t = _RW_LINK_RE.sub(r"\1", t)
     t = _RW_REF_LINK_RE.sub(r"\1", t)
@@ -540,8 +552,16 @@ def fence_spans(content: str | None) -> list[tuple[int, int]]:
     return spans
 
 
-def strip_fenced_code_blocks(content: str | None) -> str:
+def strip_fenced_code_blocks(content: str | None, *,
+                             keep_markdown_fences: bool = False) -> str:
     """剔除正文中的全部（已闭合）代码围栏块，保留围栏外正文。
+
+    ✅ R119（TD-4）新增 ``keep_markdown_fences``（**默认 False = 与旧行为逐字一致**）：
+    置 True 时，```markdown / ```md / ```gfm 家族围栏（``_MARKDOWN_FENCE_LANGS``
+    唯一事实源）**只丢弃开/闭围栏行，保留其内部正文** —— 因为导出侧（R117）会把
+    这些内部内容递归解析成真实标题/表格/列表渲染进成稿，它们本就是**正文而非代码**。
+    其余语言围栏（mermaid / chart-json / python / text …）仍整段剔除，逐字不变。
+    未闭合的 markdown 围栏仍走下方「从开围栏处截断」的严格口径（不改判据）。
 
     语义与 ``find_unclosed_fences`` 严格一致（CommonMark §4.7）：
       · 反引号（```）与波浪线（~~~）两种围栏分别处理；
@@ -577,6 +597,7 @@ def strip_fenced_code_blocks(content: str | None) -> str:
             continue
         ch = m.group(1)[0]
         open_len = len(m.group(1))
+        _lang = (m.group(2) or "").strip().lower()
         # 向前寻找闭合围栏：同种字符、长度 ≥ open_len、且不带标签
         j = i + 1
         closed_idx = -1
@@ -586,7 +607,9 @@ def strip_fenced_code_blocks(content: str | None) -> str:
                 break
             j += 1
         if closed_idx >= 0:
-            # 已闭合：跳过整段围栏（含开闭行）
+            # 已闭合：默认整段丢弃（含开闭行）；markdown 家族围栏保留内部正文
+            if keep_markdown_fences and _lang in _MARKDOWN_FENCE_LANGS:
+                out.extend(lines[i + 1:closed_idx])
             i = closed_idx + 1
         else:
             # 未闭合：从开围栏处截断，其余视为代码
@@ -1087,7 +1110,9 @@ def build_sibling_context(
     for s in reversed([x for x in siblings
                        if section_sort_order_key(
                            x.get("sort_order"), x.get("id"))[0] < cur_order]):
-        content = (generated_contents or {}).get(s["id"]) or s.get("content") or ""
+        # ✅ 引入方案 BUG-2（2026-10-23）：同函数内 .get 口径统一 ——
+        #    同级 dict 缺 id 时回退空串（与上方 s.get('id') 排除逻辑一致）。
+        content = (generated_contents or {}).get(s.get("id", "")) or s.get("content") or ""
         content = content.strip()
         if content:
             prev_summary = content[-summary_chars:]

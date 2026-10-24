@@ -161,7 +161,8 @@ def test_encrypted_pdf_without_password_raises(monkeypatch):
             return [_FakePage()]
 
     monkeypatch.setattr(fp_mod, "has_informative_text", lambda t: False)
-    monkeypatch.setattr(fp_mod, "_parse_pdf_fallback", lambda c: ("", 1))
+    # ✅ R126：_parse_pdf_fallback 契约升为 (text, 页数, 逐页文本) 三元组（R124）
+    monkeypatch.setattr(fp_mod, "_parse_pdf_fallback", lambda c: ("", 1, []))
     monkeypatch.setattr(fp_mod, "_pdf_ocr_fallback", lambda c, **k: "")
     monkeypatch.setattr(fp_mod, "has_informative_text", lambda t: False)
     # _parse_pdf 内部 `from app.config import settings` 惰性导入，需直接 patch 模块属性
@@ -434,8 +435,9 @@ def test_pdf_without_text_still_uses_fallback(monkeypatch):
     pypdf = pytest.importorskip("pypdf")
 
     called: list[int] = []
+    # ✅ R126：_parse_pdf_fallback 契约升为 (text, 页数, 逐页文本) 三元组（R124）
     monkeypatch.setattr(fp, "_parse_pdf_fallback",
-                        lambda content: (called.append(1), ("", 1))[1])
+                        lambda content: (called.append(1), ("", 1, []))[1])
     monkeypatch.setattr(fp, "_pdf_ocr_fallback", lambda *a, **k: "")
 
     writer = pypdf.PdfWriter()

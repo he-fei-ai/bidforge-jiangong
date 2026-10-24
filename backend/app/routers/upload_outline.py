@@ -485,8 +485,30 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
             from app.services.outline_title_fix import autofix_generic_titles_on_save
             _hits = detect_generic_titles_for_write(outline, context="upload-outline")
             if _hits:
+                # ✅ R114 FIX-A：本路径旧实现**连 scheme_name/type 都没传**，
+                #    模型拿到的是全空上下文（与生成链路 R89 G3 同一根因，且
+                #    是upload 识别入口的唯一一道自动修复机会）。现复用
+                #    `sections._build_generic_fix_context` 同一装配实现（含
+                #    scheme_name/type + 施工内容 + 方案名称解析 + 编制要求 +
+                #    项目摘要），结束两份口径分叉；装配失败只降级为空串。
+                #    （本仓分层护栏只禁 router→sse_handlers 私有符号；
+                #    sections 与 upload_outline 同层且后者已在 import 前者公开
+                #    符号，此处复用同一装配函数而非另写一份。）
+                _ctx = {}
+                try:
+                    from app.routers.sections import _build_generic_fix_context
+                    _ctx = await _build_generic_fix_context(db, scheme_id)
+                except Exception as _ce:  # noqa: BLE001 - 上下文降级不得阻断保存
+                    logger.warning("上传目录保存：占位标题重写上下文装配失败（降级为空）: %s",
+                                   _ce)
                 outline, _hits, _generic_autofixed = await autofix_generic_titles_on_save(
                     outline, _hits,
+                    scheme_name=_ctx.get("scheme_name", ""),
+                    scheme_type=_ctx.get("scheme_type", ""),
+                    construction_scope=_ctx.get("construction_scope", ""),
+                    project_brief=_ctx.get("project_brief", ""),
+                    scheme_basis=_ctx.get("scheme_basis", ""),
+                    requirements=_ctx.get("requirements", ""),
                     context=f"upload-outline upload={upload_id[:8]}")
     except Exception as _e:      # noqa: BLE001 - 自动修复失败不得阻断保存
         logger.warning("上传目录保存：占位标题自动重写失败（按原样保存）: %s",

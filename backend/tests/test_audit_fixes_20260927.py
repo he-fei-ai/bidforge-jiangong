@@ -191,12 +191,11 @@ class TestExportRouteRegistration:
         assert hits[0].endpoint.__name__ == "export_docx"
         assert "POST" in hits[0].methods
 
-    def test_pdf_route_binds_the_real_export_function(self):
-        """pdf 端点绑定 export_pdf（对照组：证明断言不是恒真）。"""
+    def test_pdf_route_removed(self):
+        """✅ R126（2026-10-21）：PDF 导出整体下线——本条由正向锚反转为反向锚，
+        /export/pdf 路由必须为 0 条（死灰复燃即红；与 test_r126_pdf_offline 双锁）。"""
         hits = [r for r in self._routes() if r.path.endswith("/export/pdf")]
-        assert len(hits) == 1
-        assert hits[0].endpoint.__name__ == "export_pdf"
-        assert "POST" in hits[0].methods
+        assert hits == [], f"PDF 导出路由复活（R126 已整体下线）: {[r.path for r in hits]}"
 
     def test_no_helper_is_exposed_as_endpoint(self):
         """反例回归：内部辅助函数不得出现在路由表里（装饰器错位的通用形态）。"""
@@ -206,14 +205,15 @@ class TestExportRouteRegistration:
                        "_build_docx_sync", "_build_docx_task", "_export_issues_to_findings"):
             assert helper not in endpoint_names, f"辅助函数 {helper} 被误注册为路由端点"
 
-    def test_docx_and_pdf_return_binary_not_json(self):
+    def test_docx_returns_binary_not_json(self):
         """回归缺陷本体：docx 端点必须返回二进制文档，而不是 JSON 字符串。
 
         直接复现原始 BUG 的线上表现（错位时返回 "不一致章节数=0" 的 JSON）。
+        ✅ R126：PDF 链路已整体下线，循环收敛为 DOCX 单目标。
         """
-        from app.routers.export import export_docx, export_pdf
+        from app.routers.export import export_docx
 
-        for fn in (export_docx, export_pdf):
+        for fn in (export_docx,):
             # 端点签名为 (scheme_id, body, db) 且是协程：装饰器正确时 FastAPI
             # 才会把它当作真实端点（而非把辅助函数的 dict 参数当查询参数）。
             sig = inspect.signature(fn)
@@ -234,9 +234,9 @@ class TestExportRouteRegistration:
         docx = [p for p in paths if p.endswith("/export/docx")]
         pdf = [p for p in paths if p.endswith("/export/pdf")]
         assert len(docx) == 1, f"OpenAPI 中 /export/docx 数量异常：{docx}"
-        assert len(pdf) == 1, f"OpenAPI 中 /export/pdf 数量异常：{pdf}"
+        # ✅ R126：PDF 导出下线——OpenAPI 里 pdf 路径数必须为 0（反向锚）
+        assert len(pdf) == 0, f"OpenAPI 中 /export/pdf 应已消失（R126 下线）：{pdf}"
         assert "post" in paths[docx[0]], "docx 端点必须是 POST"
-        assert "post" in paths[pdf[0]], "pdf 端点必须是 POST"
 
     def test_docx_declares_request_body(self):
         """docx 端点须接收 body（config + chart_images），不得是无参 GET 式端点。
@@ -465,12 +465,29 @@ class TestHeadingThemeFontCleared:
         assert offenders == {}, f"以下样式仍带主题字体属性：{offenders}"
 
     def test_explicit_font_name_preserved(self, tmp_path):
-        """反例：不得「删过头」——显式字体必须仍然在。"""
+        """反例：不得「删过头」——显式字体必须仍然在。
+
+        ✅ R130（六类标准 · 文字标准）后口径：正文（Normal）eastAsia=宋体、
+        标题（Heading 1~7）eastAsia=黑体（标题黑体、正文宋体），
+        西文槽 w:ascii 统一 Times New Roman（三端契约 FONT_LATIN）。
+        旧断言 `set(font.name) == {"宋体"}` 锁的是 R130 之前的旧标准
+        （标题宋体 + 西文随中文字体），随文字标准统一一并更新。
+        """
+        from app.services.content_format_contract import FONT_LATIN
         from docx import Document
+        from docx.oxml.ns import qn
+
         doc = Document(_appendix_docx(tmp_path, []))
-        got = {name: doc.styles[name].font.name
-               for name in ["Normal"] + [f"Heading {i}" for i in range(1, 8)]}
-        assert set(got.values()) == {"宋体"}, f"显式字体被破坏：{got}"
+
+        def _rf(name):
+            rfonts = doc.styles[name].element.get_or_add_rPr().get_or_add_rFonts()
+            return (rfonts.get(qn("w:ascii")), rfonts.get(qn("w:eastAsia")))
+
+        normal = _rf("Normal")
+        assert normal == (FONT_LATIN, "宋体"), f"Normal 显式字体被破坏：{normal}"
+        for i in range(1, 8):
+            hf = _rf(f"Heading {i}")
+            assert hf == (FONT_LATIN, "黑体"), f"Heading {i} 字体不符：{hf}"
 
     def test_heading_styles_are_not_italic(self, tmp_path):
         """需求「标题字体不倾斜」：Heading 1~7 必须显式 italic=False。"""

@@ -119,22 +119,23 @@ class TestCrossSectionBorrowIsObservable:
         assert int((stats or {}).get("chart_fallback_borrowed") or 0) == 0
 
     def test_merge_helper_is_single_source(self):
-        """DOCX / PDF 两条链路的合流必须走同一个 helper（不得各写一遍）。
+        """DOCX 链路的合流必须走同一个 helper（不得各写一遍）。
 
         ⚠️ 判据必须是**调用次数**而非"字符串出现过"：DOCX 分支有两处会回传
         渲染统计的响应头（坏缓存降级分支 + 正常 miss 分支），只查"出现过"
         会被另一处调用顶住 —— A/B 反向验证实测正是如此（摘掉 miss 分支的
         合流调用后，用例仍然绿）。
+
+        ✅ R126：PDF 链路已下线，原第三处合流点（PDF）随之消失；
+        全模块合流点计数 3→2，检测力由 DOCX 反向锚承接。
         """
         docx_src = inspect.getsource(E.export_docx)
-        pdf_src = inspect.getsource(E.export_pdf)
         assert docx_src.count("_merge_borrowed_stats(render_stats, fix_stats)") >= 2, \
             "DOCX 的每个回传渲染统计的分支（降级 + miss）都必须合流借图计数"
-        assert pdf_src.count("_merge_borrowed_stats(render_stats, fix_stats)") >= 1, \
-            "PDF 链路未合流借图计数"
-        # 三处合流点：DOCX 降级、DOCX miss、PDF
+        # 两处合流点：DOCX 降级、DOCX miss（PDF 合流点已随 R126 下线消失）
         whole = inspect.getsource(E)
-        assert whole.count("_merge_borrowed_stats(render_stats, fix_stats)") == 3
+        assert whole.count("_merge_borrowed_stats(render_stats, fix_stats)") == 2
+        assert "def _merge_borrowed_stats" in whole, "合流 helper 本体不得被删"
 
     def test_merge_helper_shapes_the_payload(self):
         rs = {"fe": 1, "backend_ok": 2, "failed": 0}
@@ -243,9 +244,15 @@ class TestImageInsertSingleImplementation:
                 f"{fn.__name__} 未下沉到唯一实现"
 
     def test_add_picture_appears_only_in_core(self):
-        """⚠️ 防漂移核心断言：`doc.add_picture` 全文只允许出现在
-        `_insert_image_with_caption` 一处。任何第二处都意味着版式修复又要改两遍
-        （v20 的 DPI 修复历史上就改过两次）。
+        """⚠️ 防漂移核心断言：``add_picture`` 全文只允许两处调用：
+
+        1. ``_insert_image_with_caption``（正文插图唯一出口：DPI / 版心封顶 /
+           图题编号统一在此）；
+        2. ``_add_omml_formula``（R129 公式三级降级：OMML 失败 → PNG 行内
+           嵌入 —— 这是**公式**的降级形态，高度钉死 14pt、无图题、不参与
+           版心列宽逻辑，与正文插图是两类语义，刻意不并入核心实现）。
+
+        任何第三处都意味着版式修复又要改两遍（v20 的 DPI 修复历史上就改过两次）。
 
         判据用 **AST**（Attribute 调用）而非文本匹配 —— 纯文本扫描会被
         `_DocxBodyRollback` docstring 里那句 ``doc.add_picture()`` 命中而恒假失败
@@ -257,9 +264,9 @@ class TestImageInsertSingleImplementation:
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                     and node.func.attr == "add_picture"):
                 hits.append(node.lineno)
-        assert len(hits) == 1, (
-            f"doc.add_picture 调用点 {len(hits)} 处（行 {hits}），"
-            "应唯一落在 _insert_image_with_caption 内")
+        assert len(hits) == 2, (
+            f"add_picture 调用点 {len(hits)} 处（行 {hits}），"
+            "应仅落在 _insert_image_with_caption 与 _add_omml_formula 内")
 
     def test_add_picture_call_is_inside_core_function(self):
         """上一例的加强：确认唯一调用点确实位于核心实现体内。"""
@@ -343,8 +350,11 @@ class TestDetectorFalsePositiveRegression:
 # =========================================================================
 class TestExportCancellationContract:
     def test_export_routes_accept_abort_via_request_disconnect(self):
-        """取消走客户端断连；两条路由都不得把断连当成业务成功写缓存。"""
-        for fn in (E.export_docx, E.export_pdf):
+        """取消走客户端断连；导出路由不得把断连当成业务成功写缓存。
+
+        ✅ R126：仅剩 export_docx 一条在役链路。
+        """
+        for fn in (E.export_docx,):
             src = inspect.getsource(fn)
             assert "_persist_export_cache_row" in src, "路由未接入统一写存 helper"
             # 缓存写入在构建完成之后（构建失败即无缓存行；取消发生在构建期则不写缓存）

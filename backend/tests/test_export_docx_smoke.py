@@ -208,6 +208,7 @@ from io import BytesIO
 
 from app.routers.export import _build_docx_sync, _load_heading_styles, _parse_content_blocks
 from docx import Document
+from docx_display import display_texts
 
 _CHART_CODE = "graph TD\n A-->B"
 _CHAPTER1_CONTENT = (
@@ -292,7 +293,9 @@ def test_docx_layout_enhancements(tmp_path):
     footer_xml = _part(path, "word/footer")
 
     # 1) 图题规范化为「图 X-Y 图名」，且图片真正嵌入
-    assert "图 1-1 施工流程图" in doc_xml
+    #    ⚠️ R128 起「图 X-Y」编号包进书签（_Ref_fig_*），原始 XML 中题注被拆成
+    #    两个 run —— 连续性断言改在段落文本层做（可见文本不变是 R128 契约）。
+    assert "图 1-1 施工流程图" in [p.text for p in Document(path).paragraphs]
     assert "<w:drawing>" in doc_xml
 
     # 2) 一级章节另起一页：仅第二章分页（首章不分页，避免封面/目录后多出空白页）
@@ -411,7 +414,7 @@ def test_docx_ordered_list_auto_renumber(tmp_path):
         "1. 第四步内容\n"
     )
     out = _build_single(tmp_path, content)
-    paras = [p.text for p in Document(out).paragraphs]
+    paras = display_texts(Document(out))
     assert "1. 第一步内容" in paras, paras
     assert "2. 第二步内容（AI 误写重复编号）" in paras, paras
     assert "3. 第三步内容" in paras, paras
@@ -559,7 +562,10 @@ def test_docx_chart_caption_follows_font_config(tmp_path):
     caps = [p for p in doc.paragraphs if p.text.startswith("图 1-1")]
     assert caps, [p.text for p in doc.paragraphs]
     run = caps[0].runs[0]
-    assert run.font.name == "微软雅黑"
+    # ✅ R130（文字标准）：西文统一 Times New Roman —— 中文字体名只进
+    #    w:eastAsia，w:ascii 不再跟随配置中文字体（图题数字/英文用西文衬线）。
+    from app.services.content_format_contract import FONT_LATIN
+    assert run.font.name == FONT_LATIN
     assert run._element.rPr.rFonts.get(qn("w:eastAsia")) == "微软雅黑"
     assert run.font.size.pt == 14
 
@@ -575,7 +581,7 @@ def test_docx_ordered_list_continues_after_unordered_item(tmp_path):
         "2. 第二步：基坑开挖\n"
     )
     out = _build_single(tmp_path, content)
-    paras = [p.text for p in Document(out).paragraphs]
+    paras = display_texts(Document(out))
     assert "1. 第一步：测量放线" in paras, paras
     assert "2. 第二步：基坑开挖" in paras, paras
     assert "• 注意事项：避开雨天" in paras, paras
@@ -599,7 +605,7 @@ def test_docx_chinese_list_marker_preserved(tmp_path):
         "（1）基坑支护\n"
     )
     out = _build_single(tmp_path, content)
-    paras = [p.text for p in Document(out).paragraphs]
+    paras = display_texts(Document(out))
     assert "（一）设计标准" in paras, paras
     assert "（二）材料要求" in paras, paras
     assert "1、施工准备" in paras, paras
@@ -621,8 +627,17 @@ def test_docx_table_caption_numbered_above_table(tmp_path):
     texts = [p.text for p in Document(out).paragraphs]
     assert "表 1-1 主要施工机械设备表" in texts, texts
     assert not any(t.strip() == "表3-1 主要施工机械设备表" for t in texts), texts
-    doc_xml = _part(out, "word/document.xml")
-    assert doc_xml.index("表 1-1 主要施工机械设备表") < doc_xml.index("<w:tbl>")
+    # ⚠️ R128 起「表 X-Y」编号包进书签（_Ref_tbl_*），原始 XML 中题注被拆成
+    #    两个 run —— 「题注在表格上方」改为 body 子元素顺序断言。
+    from docx.oxml.ns import qn as _qn
+    body = Document(out).element.body
+    children = list(body)
+    cap_idx = next(i for i, el in enumerate(children)
+                   if el.tag == _qn("w:p")
+                   and "表 1-1 主要施工机械设备表" in "".join(
+                       t.text or "" for t in el.iter(_qn("w:t"))))
+    tbl_idx = next(i for i, el in enumerate(children) if el.tag == _qn("w:tbl"))
+    assert cap_idx < tbl_idx
 
 
 def test_docx_table_caption_sequence_per_chapter(tmp_path):

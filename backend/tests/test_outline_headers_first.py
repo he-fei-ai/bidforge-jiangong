@@ -135,7 +135,9 @@ class TestAssemblyRunsInsideStream:
         assert any("工程概况" in n.get("title", "") for n in completed["outline"]), \
             f"completed 必须携带生成的目录，实际: {completed['outline']}"
         # 装配产物注入提示词（config.requirements 在流内装配进 user_prompt）
-        prompts = json.dumps(seen_prompts, ensure_ascii=False)
+        # R134：kwargs 新增 schema=（Pydantic ModelMetaclass 类，非 JSON 类型），
+        # default=str 只影响该新增项的序列化形态，断言口径不变。
+        prompts = json.dumps(seen_prompts, ensure_ascii=False, default=str)
         assert "编制要求" in prompts
         assert "必须包含监测章节" in prompts
 

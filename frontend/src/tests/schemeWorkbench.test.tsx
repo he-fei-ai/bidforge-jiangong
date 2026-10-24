@@ -866,28 +866,10 @@ describe("SchemeWorkbenchPage · 导出成功路径（组件级交互）", () =>
     probe.restore();
   });
 
-  it("导出 PDF 成功：同样解码文件名 + 刷新缓存状态（与 DOCX 共用命名轨）", async () => {
-    const expectedName = "测试方案 2026-10-03 第1轮.pdf";
-    apiDefaults["exportApi.pdf"] = {
-      data: new Uint8Array([37, 80, 68, 70]).buffer, // %PDF 头
-      headers: {
-        "x-export-filename": encodeURIComponent(expectedName),
-        "x-chart-render-stats": JSON.stringify({ fe: 0, backend_ok: 3, failed: 0 }),
-      },
-    };
-    const probe = installDownloadProbes();
-
+  it("R126 反向锚：导出 Tab 不再提供「导出 PDF」入口（PDF 导出已整体下线）", async () => {
     renderPage();
     await gotoExportTab();
-    fireEvent.click(findExportButton("导出 PDF")!);
-
-    await waitFor(() => expect(apiCalls["exportApi.pdf"]?.length).toBe(1));
-    await waitFor(() =>
-      expect(apiCalls["exportApi.cacheStatus"]?.length).toBeGreaterThanOrEqual(1)
-    );
-    expect(probe.anchors.some((a) => a.download === expectedName)).toBe(true);
-    expect(probe.createObjUrl).toHaveBeenCalled();
-    probe.restore();
+    expect(findExportButton("导出 PDF")).toBeFalsy();
   });
 
   it("导出成功：统计头包含失败图也不抛异常（failed>0 走 warning 分支）", async () => {

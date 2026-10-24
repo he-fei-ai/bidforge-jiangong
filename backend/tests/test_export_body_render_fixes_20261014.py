@@ -54,7 +54,7 @@ class TestInflightRegistry:
 
     def test_unregister_is_idempotent(self):
         p = Path("/tmp/never-registered.docx")
-        # 从未注册也绝不抛异常（降级路径 / PDF 降级分支会传 None）
+        # 从未注册也绝不抛异常（降级路径会传 None；R126 起 PDF 下线）
         E._export_inflight_unregister(p)
         E._export_inflight_unregister(None)
 
@@ -143,15 +143,6 @@ class TestInflightWiredIntoExportPaths:
         assert code.count("inflight_path=_inflight_final") == 2, (
             "两条路径都必须注销注册时另存的 _inflight_final，否则本条注册永久残留")
 
-    def test_pdf_registers_and_guards_degraded_branch(self):
-        """PDF 降级分支不落盘 out_path，注销必须用条件表达式（否则 UnboundLocalError）。"""
-        code = _code_only(inspect.getsource(E.export_pdf))
-        assert code.count("_export_inflight_register(out_path)") == 1
-        assert code.count("_finalize_export_delivery(") == 1, (
-            "PDF 成功/降级共用尾部，必须恰好一次统一收尾")
-        assert "inflight_path=(out_path if not degraded else None)" in code, (
-            "PDF 注销在飞保护缺 `if not degraded` 守卫 —— 降级路径下 out_path 未绑定")
-
     def test_finalize_helper_holds_order_contract(self):
         """helper 内部：留痕 → 回收 → 注销，顺序不得颠倒；None 表示无注册可注销。"""
         src = _code_only(inspect.getsource(E._finalize_export_delivery))
@@ -162,7 +153,7 @@ class TestInflightWiredIntoExportPaths:
             "顺序契约被破坏：注销必须在 GC 之后（GC 期间产物仍需受保护），"
             "GC 必须在留痕之后（留痕可能 commit）")
         assert "if inflight_path is not None:" in src, (
-            "缺 None 守卫 —— PDF degraded 分支传 None 时会误注销 Path()")
+            "缺 None 守卫 —— 降级分支传 None 时会误注销 Path()")
         assert src.index("protect=gc_protect") > i_trace, (
             "GC 必须透传调用方的 protect 集合")
 
@@ -258,10 +249,9 @@ class TestPruneTreatsZeroByteAsStale:
     async def test_prune_and_hit_share_one_predicate(self):
         """静态护栏：命中判据与保留判据必须收敛到同一个 helper。"""
         src = _code_only(inspect.getsource(E.export_docx))
-        src += _code_only(inspect.getsource(E.export_pdf))
         prune = _code_only(inspect.getsource(E._prune_export_cache))
         assert "_cache_row_viable" in src, (
-            "export_docx / export_pdf 的命中判据未走 _cache_row_viable")
+            "export_docx 的命中判据未走 _cache_row_viable（R126 起 PDF 下线，DOCX 单链路）")
         assert "_cache_row_viable" in prune, (
             "_prune_export_cache 的保留判据未走 _cache_row_viable")
         assert "st_size > 0" not in prune, (
@@ -375,7 +365,7 @@ class TestFinalizeExportDeliveryBehavior:
 
     @pytest.mark.asyncio
     async def test_none_inflight_skips_unregister(self, monkeypatch):
-        """inflight_path=None（PDF degraded 分支）不得触碰在飞集合 ——
+        """inflight_path=None（降级分支）不得触碰在飞集合 ——
         旧实现靠 `if not degraded:` 守卫，现由 None 判定承担同一防护。"""
         async def _trace(*a, **k):
             pass
@@ -386,11 +376,11 @@ class TestFinalizeExportDeliveryBehavior:
         monkeypatch.setattr(E, "_record_export_review_trace", _trace)
         monkeypatch.setattr(E, "_gc_orphan_exports", _gc)
         E._EXPORT_INFLIGHT_PATHS.clear()
-        sentinel = Path("C:/exports/s1_00000000_11111111.pdf")
+        sentinel = Path("C:/exports/s1_00000000_11111111.docx")
         E._export_inflight_register(sentinel)
         await E._finalize_export_delivery(
-            object(), scheme_id="s1", kind="pdf", round_no=1,
-            export_filename="f.pdf", inflight_path=None)
+            object(), scheme_id="s1", kind="docx", round_no=1,
+            export_filename="f.docx", inflight_path=None)
         assert E._export_inflight_key(sentinel) in E._export_inflight_snapshot(), (
             "None 注销误伤了无关的在飞注册")
         E._export_inflight_unregister(sentinel)

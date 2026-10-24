@@ -377,6 +377,19 @@ _OPS = {
     "emptyset": "∅", "angle": "∠", "perp": "⊥", "parallel": "∥",
     "prime": "′", "ldots": "…", "cdots": "⋯", "dots": "…",
     "degree": "°", "circ": "°",
+    # ✅ R126 FIX-LIM（2026-10-21）：常用算子函数名。旧实现落「未知命令丢弃」
+    #   分支 —— `\lim_{x \to 0}` 整词消失、只剩悬空下标（探针实拍：
+    #   sSub 基座是空 run，「lim」四字母被静默吞掉）。映射为正体文本 run 后
+    #   `_`/`^` 脚本正常附着为 sSub/sSup，渲染为 lim 带下标（行内公式标准形态）。
+    "lim": "lim", "limsup": "limsup", "liminf": "liminf",
+    "max": "max", "min": "min", "sup": "sup", "inf": "inf",
+    "log": "log", "ln": "ln", "lg": "lg", "exp": "exp",
+    "sin": "sin", "cos": "cos", "tan": "tan", "cot": "cot",
+    "sec": "sec", "csc": "csc",
+    "arcsin": "arcsin", "arccos": "arccos", "arctan": "arctan",
+    "sinh": "sinh", "cosh": "cosh", "tanh": "tanh",
+    "det": "det", "dim": "dim", "mod": "mod", "gcd": "gcd",
+    "arg": "arg", "deg": "deg", "Pr": "Pr",
 }
 
 # 大运算符（n-ary）
@@ -392,13 +405,20 @@ _RIGHT_DELIM = {
     "rfloor": "⌋", "rceil": "⌉",
 }
 
+# ✅ R126 FIX-B（2026-10-21）：新增 bracket 令牌类。旧实现 `[`/`]` 落 char 分支，
+#   而 `\sqrt[n]{x}` 与 `_parse_optional_bracket` 的判据都是 ("brace", "[") ——
+#   永不成立 ⇒ 度数组被当被开方数、`x` 游离根号外（探针实拍：
+#   `<m:rad><m:e>[3]</m:e></m:rad>` + 游离 x）。现把方括号单独成类，
+#   仅在 `\sqrt` 后紧跟时作度数可选参；其余位置（如区间 `[0,1]`）由
+#   _parse_seq 降级为普通文本节点，可见字符不丢（新护栏钉住）。
 _TOKEN_RE = re.compile(
     r"\s*(?:"
     r"(?P<cmd>\\[a-zA-Z]+)"
     r"|(?P<brace>\{|\})"
+    r"|(?P<bracket>\[|\])"
     r"|(?P<script>[_^])"
     r"|(?P<space>\\[ ,;!])"
-    r"|(?P<char>[^\\{}_^\s]+)"
+    r"|(?P<char>[^\\{}_^\s\[\]]+)"
     r"|(?P<ws>\s+)"
     r")"
 )
@@ -419,6 +439,8 @@ def _tokenize(latex: str) -> List[Tuple[str, str]]:
             tokens.append(("cmd", m.group("cmd")[1:]))
         elif m.group("brace"):
             tokens.append(("brace", m.group("brace")))
+        elif m.group("bracket"):
+            tokens.append(("bracket", m.group("bracket")))
         elif m.group("script"):
             tokens.append(("script", m.group("script")))
         elif m.group("space"):
@@ -479,8 +501,16 @@ class _LatexParser:
                 if t[1] == "{":
                     inner, i = _is_group_consume(tokens, i)
                     sub_nodes, _ = self._parse_seq(inner, 0, stop_brace=True)
-                    nodes.append(("seq", sub_nodes))
+                    # ✅ R126 FIX-C：brace 组内脚本必须附着（旧实现把未附着的
+                    #    script_marker 嵌进 seq 节点，_node_to_omml 无分支 → "" →
+                    #    `{x_i}` 组内下标静默丢失）。
+                    nodes.append(("seq", self._attach_scripts(sub_nodes)))
                     continue
+            elif t[0] == "bracket":
+                # ✅ R126 FIX-B：非 `\sqrt` 度数位的 [ ] 按普通文本保留（区间等）。
+                nodes.append(("text", t[1]))
+                i += 1
+                continue
             elif t[0] == "script":
                 # 脚本延迟处理（_attach_scripts），这里先记录占位
                 nodes.append(("script_marker", t[1]))
@@ -506,7 +536,10 @@ class _LatexParser:
                     continue
                 if name == "sqrt":
                     # \sqrt[n]{x}
-                    if i + 1 < len(tokens) and tokens[i + 1] == ("brace", "["):
+                    # ✅ R126 FIX-B：判据改 ("bracket", "[")——旧实现比 ("brace", "[")
+                    #    永不成立（brace 类只含 {}），`_parse_optional_bracket` 沦为
+                    #    死代码，`[3]` 被当成被开方数、真被开方数游离到根号外。
+                    if i + 1 < len(tokens) and tokens[i + 1] == ("bracket", "["):
                         deg, i = self._parse_optional_bracket(tokens, i + 1)
                         base, i = self._parse_required_group(tokens, i)
                         nodes.append(("rad", deg, base))
@@ -522,7 +555,11 @@ class _LatexParser:
                         sub, j = self._parse_script_arg(tokens, j + 1)
                     if j < len(tokens) and tokens[j][0] == "script" and tokens[j][1] == "^":
                         sup, j = self._parse_script_arg(tokens, j + 1)
-                    body, i = self._parse_seq(tokens, j, stop_brace=True)
+                    body_nodes, i = self._parse_seq(tokens, j, stop_brace=True)
+                    # ✅ R126 FIX-C：nary body 是 script_marker 丢失重灾区（探针实拍
+                    #    `\sum_{i=1}^{n} x_i` 的 `x_i` 被拆成平排 x、i 两 run），
+                    #    body 产物统一过 `_attach_scripts`。
+                    body = self._attach_scripts(body_nodes)
                     nodes.append(("nary", _NARY[name], sub, sup, body))
                     continue
                 if name in ("text", "mathrm", "operatorname", "mbox"):
@@ -566,7 +603,16 @@ class _LatexParser:
     def _parse_required_group(self, tokens, i):
         inner, ni = _is_group_consume(tokens, i)
         if inner is not None:
-            return self._parse_seq(inner, 0, stop_brace=True), ni
+            # ✅ R122 修复：`_parse_seq` 返回 (节点列表, 新索引) 二元组，此处必须
+            #    取 [0] 只留节点列表。旧实现把整个元组当节点返回，`_node_to_omml`
+            #    对 ("frac", ([...], j), ...) 的 num/den 无分支命中 → 返回 "" →
+            #    **所有** `\frac{a}{b}` 都产出空 `<m:num></m:num><m:den></m:den>`：
+            #    分子分母内容静默丢失，且空 CT_OMathArg 违反 OOXML schema ——
+            #    Word 静默修复、WPS 打开直接「文字程序意外中断」崩溃
+            #    （取证：43b4612e 导出件 10/10 个 m:f 双空，132 个 oMath 全链）。
+            # ✅ R126 FIX-C：同组取回后统一过 _attach_scripts（`\frac{x_i}{y_j}` 的
+            #    参数组内上下标旧实现不附着 → script_marker 无分支 → 内容静默丢失）。
+            return self._attach_scripts(self._parse_seq(inner, 0, stop_brace=True)[0]), ni
         # 无花括号：单个原子
         if i < len(tokens):
             node, ni = self._parse_atom(tokens, i)
@@ -574,21 +620,31 @@ class _LatexParser:
         return [("text", "")], i
 
     def _parse_optional_bracket(self, tokens, i):
-        """tokens[i] == ('brace', '[') 时解析 [..] 返回（节点列表, 新索引）。"""
-        if i < len(tokens) and tokens[i] == ("brace", "["):
+        """tokens[i] == ('bracket', '[') 时解析 [..] 返回（节点列表, 新索引）。
+
+        ✅ R126 FIX-B：判据随 tokenizer 新增的 bracket 令牌类同步激活
+        （旧实现比 ('brace','[') 永不成立，本函数此前是死代码）。
+        """
+        if i < len(tokens) and tokens[i] == ("bracket", "["):
             j = i + 1
             inner = []
-            while j < len(tokens) and tokens[j] != ("brace", "]"):
+            while j < len(tokens) and tokens[j] != ("bracket", "]"):
                 inner.append(tokens[j])
                 j += 1
-            return self._parse_seq(inner, 0, stop_brace=True), j + 1
+            # ✅ R122 修复：同 _parse_required_group，取 [0] 解包（防 `\sqrt[3]{x}`
+            #    的 deg 变成元组 → 空 m:deg）。
+            # ✅ R126 FIX-C：deg 产物同样过 _attach_scripts（防度数位内脚本丢失）。
+            return self._attach_scripts(self._parse_seq(inner, 0, stop_brace=True)[0]), j + 1
         return None, i
 
     def _parse_script_arg(self, tokens, i):
         """解析脚本参数（单个原子或 {组}）。"""
         inner, ni = _is_group_consume(tokens, i)
         if inner is not None:
-            return self._parse_seq(inner, 0, stop_brace=True), ni
+            # ✅ R122 修复：同 _parse_required_group，取 [0] 解包（防 `\sum_{i=1}^{n}`
+            #    的 sub/sup 变成元组 → 空 m:sub/m:sup）。
+            # ✅ R126 FIX-C：脚本参数组内再层脚本同样附着（`a_{b_c}` 旧拍平成 bc）。
+            return self._attach_scripts(self._parse_seq(inner, 0, stop_brace=True)[0]), ni
         if i < len(tokens):
             node, ni = self._parse_atom(tokens, i)
             return [node], ni
@@ -599,7 +655,8 @@ class _LatexParser:
         if t[0] == "brace" and t[1] == "{":
             inner, ni = _is_group_consume(tokens, i)
             sub_nodes, _ = self._parse_seq(inner, 0, stop_brace=True)
-            return ("seq", sub_nodes), ni
+            # ✅ R126 FIX-C：原子位 brace 组同样附着。
+            return ("seq", self._attach_scripts(sub_nodes)), ni
         if t[0] == "char":
             return ("text", t[1]), i + 1
         if t[0] == "cmd":
@@ -652,10 +709,19 @@ class _LatexParser:
                 # 内容节点
                 if j + 1 < len(nodes) and nodes[j + 1][0] != "script_marker":
                     content = nodes[j + 1]
+                    # ✅ R126 FIX-C2（2026-10-21）：空脚本参数（`x_{}` / `x^{}`）
+                    #    丢弃脚本 —— 旧实现产出空 `<m:sub></m:sub>`/`<m:sup></m:sup>`
+                    #    （CT_OMathArg 空内容、schema 违规，与 43b4612e 崩溃取证
+                    #    的空 m:num/m:den 同类的 WPS 风险形态，且逃过 R122 校验：
+                    #    校验正则只覆盖 num/den/e/deg）。空脚本不携带任何信息，
+                    #    丢弃后仅渲染基座，等价且安全。
+                    if content == ("seq", []) or content == ("text", ""):
+                        j += 2
+                        continue
                     merged.append(("_attach", marker, content))
                     j += 2
                 else:
-                    merged.append(("_attach", marker, ("text", "")))
+                    # 尾随孤立脚本（`x_` 无参）：无可附着内容，同样丢弃
                     j += 1
             else:
                 merged.append(node)
@@ -702,6 +768,12 @@ def _r(txt: str, sty_p: bool = False) -> str:
 
 
 def _node_to_omml(node) -> str:
+    # ✅ R122 修复：frac/rad/nary 的 num/den/e/deg/sub/sup 都是「节点列表」
+    #    （_parse_seq 的产物）。旧实现直接 _node_to_omml(list) → node[0] 是
+    #    元组而非字符串 → 无分支命中 → 返回 "" → 空 m:num/m:den（内容全丢 +
+    #    schema 非法致 WPS 崩溃）。列表按 seq 语义拼接。
+    if isinstance(node, list):
+        return "".join(_node_to_omml(n) for n in node)
     kind = node[0]
     if kind == "text":
         return _r(node[1])
@@ -733,10 +805,35 @@ def _node_to_omml(node) -> str:
     if kind == "nary":
         char, sub, sup, body = node[1], node[2], node[3], node[4]
         body_xml = "".join(_node_to_omml(n) for n in body)
+        # ✅ R126 FIX-C2（2026-10-21）：被和/被积分为空（`\sum_{i=1}^{n}` 后无
+        #    被和式）时，旧实现产出空 `<m:e></m:e>` —— CT_OMathArg schema 违规、
+        #    被 R122 防护网整条拒绝 ⇒ 超常见公式回退 LaTeX 源码文本（渲染退化）。
+        #    现补 Word 同款空参 run（`<m:e><m:r><m:t/></m:r></m:e>`，与 lim 空基座
+        #    同形），公式得以按真 OMML 渲染。
+        if not body_xml:
+            body_xml = _r("")
+        # ✅ R126 FIX-C2：无下限/上限时旧实现发射空 `<m:sub></m:sub>`/`<m:sup></m:sup>`
+        #    （schema 违规空参）。改为 Word 原生形态：naryPr 置 subHide/supHide +
+        #    自闭合 `<m:sub/>`（Word 对无界 nary 的标准输出，WPS 大规模实机兼容）。
+        #    判空按**产物 XML**而非节点引用 —— `\sum_{}` 的 sub 是真值空 seq 节点
+        #    `("seq", [])`，`if sub` 拦不住，必须看转换结果是否为空串。
+        #    ⚠️ 有内容时必须保留 `<m:sub>`/`<m:sup>` 包裹（_parse_script_arg 产物
+        #    是裸 run 序列，缺包裹会被拍平成 m:nary 下的游离 run）。
         sub_xml = _node_to_omml(sub) if sub else ""
         sup_xml = _node_to_omml(sup) if sup else ""
-        return (f"<m:nary><m:naryPr><m:chr m:val='{_esc(char)}'/></m:naryPr>"
-                f"<m:sub>{sub_xml}</m:sub><m:sup>{sup_xml}</m:sup>"
+        pr = f"<m:chr m:val='{_esc(char)}'/>"
+        if sub_xml:
+            sub_part = f"<m:sub>{sub_xml}</m:sub>"
+        else:
+            pr += "<m:subHide m:val='1'/>"
+            sub_part = "<m:sub/>"
+        if sup_xml:
+            sup_part = f"<m:sup>{sup_xml}</m:sup>"
+        else:
+            pr += "<m:supHide m:val='1'/>"
+            sup_part = "<m:sup/>"
+        return (f"<m:nary><m:naryPr>{pr}</m:naryPr>"
+                f"{sub_part}{sup_part}"
                 f"<m:e>{body_xml}</m:e></m:nary>")
     return ""
 
@@ -767,17 +864,33 @@ def _dangling_placeholder_omml() -> str:
     )
 
 
+#: 空 OMML 参数元素检测（R122 防护网）：m:f 的 num/den、m:rad 与 m:nary 的 e、
+#: m:rad 的 deg —— 这些是 OOXML schema 要求**必须含内容**的 CT_OMathArg。
+#: Word 对空参数会静默修复，WPS 打开直接「文字程序意外中断」崩溃
+#: （用户取证 2026-10-21 22:03，43b4612e 导出件 10/10 个分式双空触发）。
+_EMPTY_OMML_ARG_RE = re.compile(
+    r"<m:(num|den|e|deg)(?:\s[^>]*)?>\s*</m:\1>|<m:(num|den|e|deg)(?:\s[^>]*)?/>"
+)
+
+
 def latex_to_omml(latex: str) -> str:
     """将 LaTeX 数学表达式转为 OMML 内联公式 XML（``<m:oMath>...</m:oMath>``）。
 
     若表达式以悬空关系运算符结尾（右值待定，如 ``N =``），自动在运算符后补一个
     虚线「待填」占位框：既明确提示此处需补数值，又避免成稿在该处出现语义空洞。
     仅作用于本就不完整的残式，完整公式产物逐字节不变。
+
+    ✅ R122 防护网：产物若含空参数元素（`<m:num/>` 等 schema 非法形态）则
+    抛 ``ValueError``，由调用方（`export._add_omml_formula`）回退为 LaTeX
+    原文文本 —— 宁可显示源码，也绝不再向 docx 写入会令 WPS 崩溃的 OMML。
     """
     nodes = _LatexParser().parse(latex)
     inner = "".join(_node_to_omml(n) for n in nodes)
     if _DANGLING_OP_RE.search(latex.strip()):
         inner += _dangling_placeholder_omml()
+    if _EMPTY_OMML_ARG_RE.search(inner):
+        raise ValueError(
+            f"OMML 含空参数元素(m:num/m:den/m:e/m:deg)，拒绝产出: {latex[:60]!r}")
     return f"<m:oMath xmlns:m='{M_NS}'>{inner}</m:oMath>"
 
 
@@ -789,6 +902,49 @@ def latex_to_omml_display(latex: str) -> str:
     body = m.group(1) if m else inner
     return (f"<m:oMathPara xmlns:m='{M_NS}'><m:oMathParaPr><m:jc m:val='center'/></m:oMathParaPr>"
             f"<m:oMath>{body}</m:oMath></m:oMathPara>")
+
+
+# ---------------------------------------------------------------------------
+# LaTeX → PNG 图片降级（R129 · 引入易标式「复杂公式降级为图片」路径）
+# ---------------------------------------------------------------------------
+
+def latex_to_png_bytes(latex: str, *, dpi: int = 200,
+                       font_size: float = 12.0) -> bytes | None:
+    """将 LaTeX 公式渲染为 PNG（matplotlib mathtext，OMML 失败时的降级路径）。
+
+    职责边界（对齐「失败时降级不阻断」契约）：
+      - 调用方（export._add_omml_formula）在 OMML 转换失败时**先试本函数**，
+        成功则以行内图片嵌入（版式接近真实数学排版），仍失败才回退
+        LaTeX 原文文本 —— 三级降级：OMML → 图片 → 原文；
+      - best-effort：matplotlib 未安装、mathtext 不支持的语法（如 \\text）、
+        任何渲染异常一律返回 ``None``，绝不抛异常打断导出；
+      - matplotlib 为**可选依赖**（不在 requirements.txt 强制清单），
+        未安装时行为与改造前逐字一致（直接走原文回退）。
+    """
+    try:
+        import io
+
+        import matplotlib
+        # Agg 后端必须在 pyplot 之前设置（导出线程内无 GUI 环境）
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+
+        fig = plt.figure(figsize=(0.01, 0.01))
+        try:
+            fig.text(0.5, 0.5, f"${latex}$", ha="center", va="center",
+                     fontsize=float(font_size))
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight",
+                        pad_inches=0.02, facecolor="white")
+        finally:
+            plt.close(fig)
+        data = buf.getvalue()
+        # PNG 魔数自证（防上游异常产出空/坏字节混入 DOCX）
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return data
+        return None
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------

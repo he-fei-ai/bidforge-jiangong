@@ -216,3 +216,46 @@ async def test_adjust_facts_ai_failure_maps_502(db_conn, monkeypatch):
     with pytest.raises(HTTPException) as ei:
         await gf.adjust_facts(gf.AdjustRequest(instruction="改值", scheme_id=sid), db=db_conn)
     assert ei.value.status_code == 502
+
+
+# ---------------------------------------------------------------------------
+# R122（2026-10-21）：AI 调整超长事实库截断的可观测性
+# ---------------------------------------------------------------------------
+def test_count_visible_facts_exact():
+    payload = [{"fact_id": str(i), "name": "n", "value": "x" * 24, "category": "c"}
+               for i in range(5)]
+    full = json.dumps(payload, ensure_ascii=False)
+    # 未超限时返回全部条数。
+    assert gf._count_visible_facts(payload, 10 ** 9) == 5
+    # 空列表。
+    assert gf._count_visible_facts([], 100) == 0
+    # 上限为 0 时不包含任何事实。
+    assert gf._count_visible_facts(payload, 0) == 0
+    # 上限恰好等于完整 JSON 长度时返回全部。
+    assert gf._count_visible_facts(payload, len(full)) == 5
+    # 上限比完整长度少 1 时至少少包含一条（截断生效）。
+    assert gf._count_visible_facts(payload, len(full) - 1) == 4
+
+
+@pytest.mark.asyncio
+async def test_adjust_facts_reports_truncated_when_over_limit(db_conn, monkeypatch):
+    """超大事实库被硬截断时，响应须回传 truncated>0（加法式字段，旧前端忽略）。"""
+    pid, sid = await _seed_scheme(db_conn)
+    # 仅一条种子事实即可，真正触发截断的是下面被 patch 的超大 payload。
+    await _seed_fact(db_conn, pid, sid, "f1", "基坑深度", "5.6m")
+
+    _huge = [{"fact_id": str(i), "name": f"参数{i}", "value": "y" * 200, "category": "c"}
+             for i in range(200)]  # 远超 30000 字符上限
+
+    async def fake_ai(messages, validate_fn, **kwargs):
+        # 不接受截断后的 prompt 校验，直接返回空操作计划，确保走完主流程。
+        return {"operations": []}, ""
+    monkeypatch.setattr(gf, "collect_json_response", fake_ai)
+    monkeypatch.setattr(gf, "_facts_for_adjust_prompt", lambda rows: _huge)
+
+    resp = await gf.adjust_facts(
+        gf.AdjustRequest(instruction="改值", scheme_id=sid), db=db_conn)
+    assert resp["ok"] is True
+    assert resp["truncated"] > 0, "超长事实库须回传被截断条数"
+    assert resp["truncated"] < len(_huge), "截断条数不应超过总条数"
+

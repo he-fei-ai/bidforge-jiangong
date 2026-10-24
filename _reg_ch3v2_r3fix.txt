@@ -1,0 +1,34 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.14.4, pytest-9.1.0, pluggy-1.6.0 -- C:\Program Files\Python314\python.exe
+rootdir: J:\编程\专项方案工具箱\backend
+configfile: pytest.ini
+plugins: anyio-4.13.0, asyncio-1.4.0, cov-7.1.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=function, asyncio_default_test_loop_scope=function
+collecting ... collected 24 items
+
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105OrderCheckWiring::test_completed_terminal_order_check_ok PASSED [  4%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105OrderCheckWiring::test_stopped_terminal_carries_order_check PASSED [  8%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105OrderCheckWiring::test_error_terminal_carries_order_check_and_stats PASSED [ 12%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105OrderCheckWiring::test_dispatch_recorded_right_after_semaphore_gate PASSED [ 16%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105OrderCheckWiring::test_expected_order_established_only_after_early_exit PASSED [ 20%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105OrderCheckWiring::test_order_warning_fires_once PASSED [ 25%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105PrevLeafContext::test_second_chapter_prompt_contains_prev_tail PASSED [ 29%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105PrevLeafContext::test_switch_off_falls_back_verbatim PASSED [ 33%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105PrevLeafContext::test_tail_extractor_failure_is_failsoft PASSED [ 37%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105PrevLeafContext::test_both_assembly_calls_receive_prev_leaf PASSED [ 41%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105PrevLeafContext::test_pure_function_tail_shape PASSED [ 45%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105FactInjectionAudit::test_audit_rendered_text_identical_to_bare_call PASSED [ 50%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105FactInjectionAudit::test_audit_reports_budget_drops PASSED [ 54%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105FactInjectionAudit::test_checkpoint_carries_injection_summary PASSED [ 58%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105FactInjectionAudit::test_persisted_report_carries_fact_audit PASSED [ 62%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105FactInjectionAudit::test_bare_render_facts_text_has_no_call_site PASSED [ 66%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105ChapterFactMapping::test_checkpoint_carries_full_mapping PASSED [ 70%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105ChapterFactMapping::test_mapping_uses_same_criterion_as_injection PASSED [ 75%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105ChapterFactMapping::test_summarize_dirty_input_degrades PASSED [ 79%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105FailSoftDiscipline::test_mapping_failure_degrades_to_empty PASSED [ 83%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105FailSoftDiscipline::test_order_verify_failure_degrades_to_empty PASSED [ 87%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105FailSoftDiscipline::test_zero_facts_still_records_audit PASSED [ 91%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105ByteHygiene::test_crlf_no_bom_no_replacement_char[path0] PASSED [ 95%]
+tests/test_content_order_facts_wiring_closeout_r105_20261018.py::TestR105ByteHygiene::test_crlf_no_bom_no_replacement_char[path1] PASSED [100%]
+
+============================= 24 passed in 2.21s ==============================

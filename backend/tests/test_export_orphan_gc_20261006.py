@@ -121,11 +121,12 @@ class TestGcOrphanExports:
         assert p.exists()
 
     @pytest.mark.asyncio
-    async def test_deletes_orphan_pdf_without_cache_row(
+    async def test_deletes_orphan_artifact_without_cache_row(
             self, db_conn, tmp_path, monkeypatch):
-        """非临时产物只要没有缓存行引用即为孤儿（覆盖 PDF 替换成功但 INSERT 失败）。"""
+        """非临时产物只要没有缓存行引用即为孤儿（R126：口径收敛 DOCX 单链路，
+        覆盖「替换成功但 INSERT 失败」的孤儿形态）。"""
         monkeypatch.setattr(E, "EXPORTS_DIR", tmp_path)
-        p = self._mk(tmp_path / "s1_aabbccdd_eeff0011.pdf")
+        p = self._mk(tmp_path / "s1_aabbccdd_eeff0011.docx")
         assert await E._gc_orphan_exports(db_conn, "s1") == 1
         assert not p.exists()
 
@@ -371,22 +372,14 @@ class TestDbReadStrictMode:
         # helper 内部确实调用 GC（防未来把 GC 从收尾里摘掉）
         assert "_gc_orphan_exports(" in inspect.getsource(E._finalize_export_delivery)
 
-    def test_pdf_calls_gc_before_returning_in_memory_bytes(self):
-        """PDF 响应体是内存字节 → 收尾调用必须在 return Response 之前且不 protect。
-
-        ✅ 2026-10-14 收口后：PDF 走 _finalize_export_delivery，不传 gc_protect
-        （内存字节无需 protect 磁盘产物）；inflight_path 用条件表达式承担旧
-        `if not degraded` 守卫。
-        """
-        src = inspect.getsource(E.export_pdf)
-        i_fin = src.index("_finalize_export_delivery(")
-        i_ret = src.index("return Response(")
-        assert i_fin < i_ret, "收尾必须在返回之前"
-        call_seg = src[i_fin:i_ret]
-        assert "gc_protect" not in call_seg, \
-            "PDF 返回体已是内存字节，无需也不得 protect 磁盘产物"
-        assert "inflight_path=(out_path if not degraded else None)" in call_seg, \
-            "PDF 注销须用条件表达式承担旧 `if not degraded` 守卫"
+    def test_r126_pdf_in_memory_return_chain_gone(self):
+        """PDF 反向锚：export_pdf 不得复活（原「内存字节收尾不 protect」锚随链下线，
+        GC 收缴契约由 DOCX 双路径孪生断言承接）。"""
+        try:
+            inspect.getsource(E.export_pdf)
+        except AttributeError:
+            return  # 函数不存在 = 符合预期
+        raise AssertionError("export_pdf 函数复活（R126 已整体下线）")
 
     def test_degraded_path_is_the_only_tmp_returner_and_it_protects(self):
         """只有 degraded 提前返回 + 正常返回两条路径会交付磁盘产物，均须带 protect。"""

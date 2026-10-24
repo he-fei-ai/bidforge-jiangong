@@ -266,6 +266,36 @@ async def test_incremental_reparse_skips_unchanged(ctx):
     assert (await cur.fetchone())["parse_version"] == "v2"
 
 
+async def test_reparse_signals_facts_need_reextract_when_stale(ctx):
+    """重解析使既有全局事实被标 stale 时，响应须回传 facts_need_reextract=True。
+
+    ✅ R122 加固（推荐项①-②安全子集）：覆盖「用户重解析后要素停留在陈旧态、
+    误以为已更新」缺口。加法式字段，旧前端忽略不报错；不自动触发 AI 提取
+    （避免不可控的额外调用与回写风险），仅给出机器可读信号供前端提示重提取。
+    """
+    db, pid, docs_root, uploads = ctx
+    doc_id = await _upload_and_parse(ctx)
+    # 前置：项目已存在一条全局事实（任何类别均可）
+    await db.execute(
+        "INSERT INTO global_facts (id, project_id, group_id, group_title, title,"
+        " content, category, source_ref, confidence, is_resolved)"
+        " VALUES (?,?,?,?,?,?,?,?,?,1)",
+        ("seed_fact_1", pid, "g_seed", "技术参数", "基坑深度",
+         "- **基坑深度**: 12.5m", "tech_param",
+         json.dumps([{"file": "x", "quote": "y"}], ensure_ascii=False), 0.9))
+    await db.commit()
+    # force 重解析会标旧事实 stale → stale_facts>0 → facts_need_reextract=True
+    res = await dp_api.reparse_document(doc_id, body={"mode": "force"}, db=db)
+    assert res["ok"] is True
+    assert res.get("stale_facts", 0) >= 1
+    assert res.get("facts_need_reextract") is True
+    # 增量模式且文件未变更 → 跳过，不应带该信号
+    res2 = await dp_api.reparse_document(doc_id, body={"mode": "incremental"}, db=db)
+    assert res2.get("skipped") is True
+    assert "facts_need_reextract" not in res2
+
+
+
 # ---------------------------------------------------------------------------
 # 4. 提取层物化（阶段4 产物 → 标准格式，阶段7 入库索引）
 # ---------------------------------------------------------------------------

@@ -156,29 +156,12 @@ class TestExportStrictGuard:
         doc = await export_docx("s1", {}, db=db_conn)
         assert doc is not None
 
-    async def test_pdf_strict_guard_raises_on_drift(self, db_conn, monkeypatch):
-        """PDF 导出与 DOCX 共用同一守卫：严格模式下漂移 → 409（转换前抛出）。"""
-        from app.config import settings
-        from app.routers.export import export_pdf
-        monkeypatch.setattr(settings, "numbering_consistency_strict", True)
-
-        await db_conn.execute(
-            "INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)",
-            ("s1", "p1", "测试专项方案"))
-        await db_conn.execute(
-            "INSERT INTO sections (id, scheme_id, parent_id, sort_order, level, "
-            "title, status, outline_json, content) VALUES (?,?,?,?,?,?,?,?,?)",
-            ("c1", "s1", "", 0, 1, "第一章 总体概述", "generated",
-             json.dumps({"id": "1", "level": 1}, ensure_ascii=False),
-             "## 9.9 总体安排\n这里是第一章正文。\n"))
-        await db_conn.commit()
-
-        # 守卫在 _prepare_export / DOCX 生成 / PDF 转换之前执行，
-        # 因此本测试不依赖任何转换工具（Word COM / docx2pdf / LibreOffice）
-        with pytest.raises(HTTPException) as exc:
-            await export_pdf("s1", {}, db=db_conn)
-        assert exc.value.status_code == 409
-        assert exc.value.detail.get("error") == "numbering_inconsistency"
+    async def test_r126_pdf_export_chain_gone(self):
+        """PDF 反向锚：export_pdf 不得复活（编号守卫在共享 _prepare_export 内、
+        与链路无关，其「转换前抛出」覆盖已由 DOCX 孪生断言承接）。"""
+        import app.routers.export as export_mod
+        assert not hasattr(export_mod, "export_pdf"), (
+            "export_pdf 函数复活（R126 已整体下线）")
 
 
 class TestConsistencySummary:

@@ -333,7 +333,12 @@ async def test_export_docx_no_pipe_garbling(db_conn):
 
     # 表格题注存在（GB/T：表题在表格上方；无表题行时由表头自动生成）
     assert "构件类型、主要选型配置" in all_text, "粘连表 1 应得自动表题"
-    assert "序号、控制项目" in all_text, "粘连表 2 应得自动表题"
+    # ✅ R117（2026-10-20）：自动表题改为剔除「序号/备注」这类**无信息列名**
+    #    （「表 1-2 序号、控制项目、允许偏差…」读者读不出表的内容）。
+    #    意图不变：粘连表 2 必须仍有**可读**表题 —— 故保留正向断言，
+    #    并补一条反向锁，防止有人把过滤整个删掉后本用例仍然通过。
+    assert "控制项目、允许偏差（mm）、检验方法" in all_text, "粘连表 2 应得自动表题"
+    assert "序号、控制项目" not in all_text, "无信息列名不得拼进自动表题"
 
     # X-Fix-Stats：西里尔修复计数可观测
     stats = json.loads(resp.headers.get("X-Fix-Stats", "{}"))

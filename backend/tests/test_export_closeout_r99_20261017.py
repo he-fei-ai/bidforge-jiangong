@@ -484,13 +484,13 @@ class TestCacheFastPath:
         assert i_render > i_cache, (
             "渲染段必须位于缓存查询之后（否则命中路径仍渲染）")
 
-    def test_pdf_calls_render_only_after_cache_miss(self):
-        node = _fn_ast("routers/export.py", "export_pdf")
-        seg = ast.get_source_segment(
-            (APP_DIR / "routers" / "export.py").read_bytes().decode("utf-8"), node)
-        i_cache = seg.index("export_pdf 缓存查询")
-        i_render = seg.index("_prepare_export_render(prep)")
-        assert i_render > i_cache, "PDF 链路渲染段必须位于缓存查询之后"
+    def test_r126_pdf_render_chain_gone(self):
+        """PDF 反向锚：export_pdf 不得复活（渲染段/缓存查询顺序锚已收敛 DOCX 孪生）。"""
+        try:
+            _fn_ast("routers/export.py", "export_pdf")
+        except AssertionError:
+            return  # 未找到 = 符合预期
+        raise AssertionError("export_pdf 函数复活（R126 已整体下线）")
 
     def test_fast_path_switch_defaults_true(self):
         assert cfg.Settings.model_fields["export_cache_fast_path"].default is True

@@ -307,14 +307,14 @@ class TestExportCancelCheckpoints:
 
 
 # ===========================================================================
-# D 组 · FIX-1 · 路由接线（docx / pdf 同构）
+# D 组 · FIX-1 · 路由接线（✅ R126：PDF 链路下线，接线锚收敛 export_docx 单链路）
 # ===========================================================================
 
 class TestExportRouteWiring:
     """/cancel 只有在路由把「登记 → 置位 → 清理 → 注销」全接上才真的有效。"""
 
     def test_both_export_routes_wired(self):
-        for name in ("export_docx", "export_pdf"):
+        for name in ("export_docx",):
             fn = _fn_ast("routers/export.py", name)
             calls = _call_names(fn)
             assert "_export_cancel_register" in calls, f"{name} 未登记取消事件"

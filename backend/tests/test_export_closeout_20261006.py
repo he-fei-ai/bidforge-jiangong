@@ -342,16 +342,19 @@ class TestTableSizeCaps:
 # =========================================================================
 # D. 原子替换失败不写缓存（E5 · P1）
 #
-# ✅ 锚点同步（2026-10-15 · R77 §9.1 收口）：并行会话把 DOCX/PDF 的
+# ✅ 锚点同步（2026-10-15 · R77 §9.1 收口）：并行会话把导出双链的
 #    「INSERT → commit → prune → commit」序列收敛为共享 helper
-#    `_persist_export_cache_row`（export.py:5546，双提交口径）。缓存 INSERT
-#    不再位于 `export_docx`/`export_pdf` 函数体内 —— 旧护栏直接
+#    `_persist_export_cache_row`（export.py，双提交口径）。缓存 INSERT
+#    不再位于 `export_docx` 函数体内 —— 旧护栏直接
 #    `src.index("INSERT OR IGNORE...")` 失去锚点而恒红（R77 全量那 4 个
 #    failed 的根因）。护栏语义不变，改锁**调用形态**：
-#      · 写入调用必须被门控（DOCX `if cacheable:` / PDF `else:` 成功分支）；
+#      · 写入调用必须被门控（DOCX `if cacheable:` 成功分支）；
 #      · 失败分支不得出现写入调用；
 #      · tmp 路径不得作为 out_path 实参进入写入调用；
 #      · 新增 INSERT 单一事实源锁（原子串判据在收敛后结构性失效的形态）。
+#    ✅ R126（2026-10-21）：PDF 导出整体下线，原 PDF 分支两条专属用例
+#    （test_pdf_replaces_before_cache_row / test_pdf_cache_row_not_written_when_replace_fails）
+#    随链路删除；同源语义由 DOCX 侧用例继续锁定。
 # =========================================================================
 _PERSIST_CALL = "_persist_export_cache_row("
 
@@ -364,47 +367,6 @@ class TestAtomicReplaceCacheGovernance:
         assert "cacheable = False" in src
         assert re.search(r"if cacheable:\s*\n\s*await _persist_export_cache_row\(", src), \
             "缓存写入调用必须被 cacheable 门控"
-
-    def test_pdf_replaces_before_cache_row(self):
-        """PDF 分支顺序治理：先 os.replace 落盘，再写缓存行。"""
-        src = inspect.getsource(E.export_pdf)
-        i_replace = src.index("_os.replace(_tmp_pdf, out_path)")
-        i_insert = src.index(_PERSIST_CALL)
-        assert i_replace < i_insert, "缓存行必须晚于原子替换写入（否则留僵尸行）"
-
-    @staticmethod
-    def _block_after(src: str, header: str) -> str:
-        """按缩进取 ``header:`` 之后同级代码块的文本（不含 header 自身）。"""
-        i = src.index(header)
-        indent = len(src[:i].split("\n")[-1])
-        rest = src[i + len(header):]
-        out = []
-        for ln in rest.split("\n"):
-            if not ln.strip():
-                continue
-            cur = len(ln) - len(ln.lstrip())
-            if cur <= indent:
-                break
-            out.append(ln)
-        return "\n".join(out)
-
-    def test_pdf_cache_row_not_written_when_replace_fails(self):
-        """替换失败分支里不得出现缓存写入（旧实现正是"先写缓存再替换"）。
-
-        ⚠️ 只用"字符串先后顺序"断言不够：A/B 实测存在「保留 else: pass、
-        把 INSERT 挪到 else 之后的无条件块」这种形态仍能骗过顺序断言 ——
-        必须按缩进**取出分支体**再判成员（收敛后判据随迁为写入调用）。
-        """
-        src = inspect.getsource(E.export_pdf)
-        # 锚点唯一性前提：失败分支/成功分支各只有一个锚（多锚会让
-        # _block_after 取到第一个而静默错锁）
-        assert src.count("if not _replaced:") == 1
-        assert src.count("else:") == 1
-        fail_branch = self._block_after(src, "if not _replaced:")
-        ok_branch = self._block_after(src, "else:")
-        assert "unlink" in fail_branch, "替换失败必须清理 tmp"
-        assert _PERSIST_CALL not in fail_branch, "替换失败分支不得写缓存行"
-        assert _PERSIST_CALL in ok_branch, "缓存写入调用必须位于替换成功分支内"
 
     def test_docx_tmp_path_never_persisted(self):
         """tmp 路径不得写入 export_cache（否则 DB 永久指向 .tmp 孤儿文件）。"""
@@ -422,7 +384,8 @@ class TestAtomicReplaceCacheGovernance:
         assert helper.count("await db.commit()") == 2, \
             "双提交口径（INSERT→commit→prune→commit）不得退化"
         assert "_prune_export_cache" in helper, "写入必须同序列执行保留裁剪"
-        for fn in (E.export_docx, E.export_pdf):
+        # ✅ R126：PDF 下线后收敛为 DOCX 单目标（原循环含 export_pdf）
+        for fn in (E.export_docx,):
             assert "INSERT OR IGNORE INTO export_cache" not in inspect.getsource(fn), \
                 "缓存 INSERT 只允许存在于 _persist_export_cache_row 一处"
 
@@ -510,8 +473,9 @@ class TestR13SingleSource:
         assert not offenders, (
             f"仍有内联 `if cur is None` 判空（行 {offenders}），应走 _db_* 单一出口")
 
-    def test_both_route_cache_lookups_guarded(self):
-        for fn in (E.export_docx, E.export_pdf):
+    def test_route_cache_lookups_guarded(self):
+        """✅ R126：PDF 下线后收敛为 DOCX 单目标。"""
+        for fn in (E.export_docx,):
             src = inspect.getsource(fn)
             assert "缓存查询" in src, f"{fn.__name__} 缓存查询未走判空 helper"
 
@@ -668,9 +632,32 @@ class TestDegradationObservability:
 
         ⚠️ 重锚（R109 · 2026-10-19）：后续 R109 修复了「WPS 打不开」的
         ``w:tcPr`` 序列违例，必须让旧（坏）成稿整体失效，故版本号已升至 23。
-        本轮（2026-10-06）的意图不变：**本轮**不因自身改动失效缓存。
+        ⚠️ 重锚（R117 · 2026-10-20）：成稿**版式**变化（A4 页面 / 标题字号阶梯 +
+        强制黑色 / 图题 keep_with_next / 表格行 cantSplit）必然改变产物字节。
+        若沿用 v23 缓存行，用户内容与配置未变 → 命中旧缓存 → 每次拿回
+        「Letter + 主题蓝 14pt 标题」的旧成稿，版式修复永不可见。故升至 24。
+        ⚠️ 重锚（R117 FIX-10 · 2026-10-20）：折叠「同章逐字重复正文块」**直接删除
+        成稿里的重复段落**，产物字节必变。若沿用 v24 缓存行，用户内容与配置一字
+        未改 → 命中旧缓存 → 拿回的还是「整节重复两遍」的稿，去重永不可见。故升至 25。
+        ⚠️ 重锚（R126 · 2026-10-21）：公式 OMML 解析两缺陷（`\\sqrt[n]{x}` 结构错误 /
+        组内脚本静默拆平排）改变了**含公式章的产物字节**，旧缓存行内含错位 OMML，
+        必须整体失效重建；PDF 导出链下线不改 DOCX 字节、不单独触发升版。
+        同轮追加的 ④ FIX-C2/LIM（docx_math 算子函数名映射/空 nary 体补 run/
+        空脚本丢弃/subHide 形态）再次改变含公式章产物字节 ⇒ 继续在 26 之上
+        升至 27（export.py 注释块 ①②③④ 即其理由）。
+        ⚠️ R127（2026-10-22）再升至 28：原生列表编号 / 附录表头重复与版心列宽 /
+        域拆分 run / 正文 Body Text CN 样式 / 图片版心封顶 —— 均改变产物字节。
+        ⚠️ R128（2026-10-22）再升至 29：交叉引用 REF 域（题注书签 + 正文回填
+        5-run REF 域）改变 XML 字节；未登记/被回滚编号保持纯文本（零内容变化）。
+        ⚠️ R129（2026-10-22）再升至 30：Word 2010+ 专有命名空间清除（落盘后
+        zip 级重写）/ L1~L9 标题层级（Heading 8/9 + outlineLvl）/ 公式三级
+        降级（OMML → 图片）—— 均改变产物字节，旧缓存整体失效重建。
+        ⚠️ R131-A（2026-10-23）再升至 31：图题 / AI 配图 alt 剥离生成期残留
+        「图 X-Y」前缀（export._strip_leading_figure_number）—— **可见题注文本**
+        由「图 2-1 图 4-1 xxx」变为「图 2-1 xxx」，旧缓存内含双图号必须失效。
+        故锚定 31。本轮（2026-10-06）的意图不变：**本轮**不因自身改动失效缓存。
         """
-        assert E._EXPORTER_VERSION == "23"
+        assert E._EXPORTER_VERSION == "31"
 
 
 # =========================================================================

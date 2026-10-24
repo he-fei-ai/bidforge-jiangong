@@ -1256,13 +1256,32 @@ class TestInsertColumnsSingleSource:
             "占位符必须由列数派生，且无多余空格（与既有 SQL 逐字一致）"
 
     def test_no_inline_column_list_in_persist(self):
-        """persist_extraction 不得再内联列字面量（漂移源）。"""
+        """persist_extraction 不得再内联列字面量（漂移源）。
+
+        ⚠️ R126 重锚（接管 R125 中间态）：版本化引入第二条由列清单派生的
+        SQL（GLOBAL_FACTS_INSERT_SQL_V，占位符同样由 ",".join("?" ...) 构造），
+        executemany 位点经 `_sql` 变量二选一。判据收紧为函数级：
+        persist_extraction 体内不得出现手写 "INSERT INTO" 字面量，写缓冲
+        必须走 executemany(_sql, insert_buf)——检测力与原「全文件计数」
+        等价，且不再误伤定义位点之外的合法新增（snapshots/history 写入与
+        rollback 动态还原）。回滚还原的 f-string 动态列取自快照 SELECT *，
+        非手写清单，不属漂移面。
+        """
+        import inspect
+
         from app.services import facts_extractor as fx
+        body = inspect.getsource(fx.persist_extraction)
+        assert "INSERT INTO global_facts (" not in body, \
+            "persist_extraction 内出现内联手写列清单的 INSERT 语句" \
+            "（注：同体内 INSERT INTO global_facts_snapshots 是 R125 快照位点，合法）"
+        assert "db.executemany(_sql, insert_buf)" in body, \
+            "persist_extraction 写缓冲未走单一事实源变量 _sql"
+        assert ("_sql = GLOBAL_FACTS_INSERT_SQL_V if versioning "
+                "else GLOBAL_FACTS_INSERT_SQL") in body
+        # 全文件静态列名写法只允许出现在两处单一事实源构造位点
         src = io.open(fx.__file__, encoding="utf-8").read()
-        assert "GLOBAL_FACTS_INSERT_SQL, insert_buf" in src
-        # 内联 INSERT 只应剩 GLOBAL_FACTS_INSERT_SQL 的定义处
-        assert src.count("INSERT INTO global_facts") == 1, \
-            "persist_extraction 仍在内联 INSERT 语句"
+        assert src.count('"INSERT INTO global_facts (%s) VALUES (%s)"') == 2, \
+            "列清单 SQL 的构造位点不再是 base+V 两处（判据分叉回归）"
 
     def test_dimension_columns_stay_last_four(self):
         """既有契约：to_db_row()[-4:] 是九大章节四维。"""

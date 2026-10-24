@@ -8,7 +8,7 @@ import {
 } from "antd";
 import {
   PlayCircleOutlined, PauseOutlined, StopOutlined,
-  FileTextOutlined, FilePdfOutlined, ExportOutlined, AuditOutlined,
+  FileTextOutlined, ExportOutlined, AuditOutlined,
   GlobalOutlined, FolderOpenOutlined, UploadOutlined, AppstoreOutlined,
   SwapOutlined, ReloadOutlined, CaretRightOutlined,
   EditOutlined, FontSizeOutlined, CheckCircleOutlined,
@@ -84,6 +84,9 @@ import {
   STANDARD_LABELS, issueLabel, reportHasIssues, reportIssueCount,
   type GenerationStandardChoice,
 } from "../utils/contentStandard";
+// ✅ R121（承接 R120 遗留 L5）：任务轮询到终态纯实现下沉到 utils/taskPolling.ts，
+//  使 contentDegradedTerminal 的 B1/B2 可直连叶子、不再动态 import 本巨型页面。
+import { pollTaskUntilTerminalImpl } from "../utils/taskPolling";
 import { useSchemeLiveTask } from "../hooks/useSchemeLiveTask";
 import { useAntdMessageHub } from "../utils/activityCenter";
 // ✅ 2026-09-25：SSE 批量器抽到 utils/sseBatcher.ts（TaskStatusBar 也要复用，
@@ -94,6 +97,7 @@ import {
   // ✅ D1 加固（2026-10-06）：跨章借图告警文案（此前跨章借图零信号）
   fallbackBorrowWarning,
   fixStatsParts,
+  fixStatsWarnings,
   parseChartRenderStats,
   parseFixStats,
   resolveExportFilename,
@@ -1883,20 +1887,52 @@ export function summarizeOutlineQuality(review: unknown): {
  * - `programmatic`                    覆盖全过，跳过 AI 审核
  * - `programmatic+titled`             另含占位标题外科式重写
  * - `programmatic+surgical[+titled]`  另含外科式补齐缺失章节
- * - 不写 / 非 programmatic 开头        走了完整 AI 审核链路（含审核超时/失败
- *   回退场景，此时 suggestions 里会有「审核超时已跳过」等如实文案）
+ * - 不写 / 非 programmatic 开头        走了完整 AI 审核链路
+ *
+ * ✅ R115 FIX-3：**「跳过审核」不得再被读成「AI 审核链路」**。
+ * 生产实证（trace=acdef1e40a64）：审核以 60s 超时跳过，返回体 passed=true、
+ * suggestions=「审核超时已跳过」，主结论行却写「AI 审核链路」—— 用户以为审过了。
+ * 后端现已回传加法式键 `review_skipped` / `review_skip_reason` / `fix_skipped`，
+ * 本函数把它们**置顶为唯一主结论**（优先级高于 review_mode：跳过时本就没有
+ * 任何审核结论可依据）。
  */
 export function summarizeOutlineReviewBasis(review: unknown): {
-  level: "info" | "none";
+  level: "info" | "warn" | "none";
   message: string;
   logs: string[];
 } {
   const empty = { level: "none" as const, message: "", logs: [] as string[] };
   if (!review || typeof review !== "object") return empty;
-  const r = review as { review_mode?: unknown; suggestions?: unknown };
+  const r = review as {
+    review_mode?: unknown;
+    suggestions?: unknown;
+    review_skipped?: unknown;
+    review_skip_reason?: unknown;
+    fix_skipped?: unknown;
+  };
   const logs: string[] = [];
   const mode = typeof r.review_mode === "string" ? r.review_mode : "";
-  if (mode.startsWith("programmatic")) {
+  // ⚠️ 只认 `true`：后端用 `if _review_skip_reason:` 才写这两个键，脏数据
+  //    （字符串 "false" / 1）不得把正常审核误报成跳过。
+  const skipReason =
+    r.review_skipped === true && typeof r.review_skip_reason === "string"
+      ? r.review_skip_reason
+      : "";
+  if (skipReason) {
+    const reasonMap: Record<string, string> = {
+      timeout: "AI 审核超时",
+      error: "AI 审核调用失败",
+      invalid_shape: "AI 审核返回结构异常",
+      // ✅ R116（A-2）：补齐（scene=outline_fix）刚以超时/异常收场即已实证
+      //    本轮 AI 链路不可用，后端直接跳过审核（省整个 60s 预算）。
+      //    文案刻意点明「同一链路已失败」—— 否则用户会以为审核被无端省略。
+      upstream_dead: "本章目录补齐已失败（同一 AI 链路不可用）",
+    };
+    const why = reasonMap[skipReason] || skipReason;
+    logs.push(
+      "⚠ 审核依据：" + why + "，已跳过审核（本次结论未经审核，请人工核对）",
+    );
+  } else if (mode.startsWith("programmatic")) {
     const detailMap: Record<string, string> = {
       surgical: "外科式补齐缺失章节",
       titled: "占位标题外科式重写",
@@ -1908,6 +1944,20 @@ export function summarizeOutlineReviewBasis(review: unknown): {
   } else {
     logs.push("📘 审核依据：AI 审核链路");
   }
+  // ✅ R115 FIX-3：修复环节跳过同样要如实说（旧实现只打一行日志就放行）
+  const fixSkip = typeof r.fix_skipped === "string" ? r.fix_skipped : "";
+  if (fixSkip) {
+    const fixMap: Record<string, string> = {
+      invalid: "修复结果校验不通过",
+      timeout: "AI 修复超时",
+      error: "AI 修复调用失败",
+    };
+    logs.push(
+      "⚠ 自动修复未完成：" +
+        (fixMap[fixSkip] || fixSkip) +
+        "（目录可能仍含未修正的问题）",
+    );
+  }
   // ⚠️ 脏数据防御：与 summarizeOutlineQuality 同口径 —— suggestions 元素可能
   //    是 null/非字符串（弱模型回传），逐个过滤，绝不在日志路径上抛。
   const sugg = Array.isArray(r.suggestions)
@@ -1917,7 +1967,9 @@ export function summarizeOutlineReviewBasis(review: unknown): {
   //    no-irregular-whitespace 判红（该规则 skipTemplates 默认 false）。
   sugg.slice(0, 8).forEach((s) => logs.push("　· " + s));
   if (sugg.length > 8) logs.push("　· …共 " + sugg.length + " 条");
-  return { level: "info", message: logs.join("\n"), logs };
+  // 跳过类结论属**警示**（不是「已执行的动作」），调用方据此可置顶提醒
+  const level: "info" | "warn" = skipReason || fixSkip ? "warn" : "info";
+  return { level, message: logs.join("\n"), logs };
 }
 
 // ============================================================
@@ -1986,60 +2038,11 @@ export interface TaskTerminalInfo {
   [k: string]: unknown;
 }
 
-export async function pollTaskUntilTerminalImpl(
-  taskId: string,
-  fetchStatus: (taskId: string) => Promise<TaskTerminalInfo>,
-  onPending?: (data: TaskTerminalInfo) => void,
-  opts: {
-    intervalMs?: number;
-    maxPolls?: number;
-    stuckThreshold?: number;
-    netFailTolerance?: number;
-  } = {},
-): Promise<TaskTerminalInfo | null> {
-  const intervalMs = opts.intervalMs ?? 3000;
-  const maxPolls = opts.maxPolls ?? 200;
-  const stuckThreshold = opts.stuckThreshold ?? 3;
-  const netFailTolerance = opts.netFailTolerance ?? 5;
-  let stuckAtFull = 0; // progress==1.0 但 status 仍 running 的连续次数
-  let netFailCount = 0; // 连续网络失败计数
-  for (let i = 0; i < maxPolls; i++) {
-    await new Promise((r) => setTimeout(r, intervalMs));
-    try {
-      const data = await fetchStatus(taskId);
-      netFailCount = 0; // ✅ 成功一次即重置，瞬时网络抖动不应终止重挂
-      // ✅ 2026-10-10：终态集合改由 isTerminalTaskStatus 单一事实源判定。
-      //    旧实现内联 `completed/failed/stopped`，把后端 2026-10-07 引入的
-      //    加法式终态 degraded 漏掉 ⇒ 降级完成时既不匹配终态、也不匹配下方
-      //    「progress 满但 running」兜底，页面卡在「正在重新挂接…」200×3s。
-      if (isTerminalTaskStatus(data.status)) return data;
-      onPending?.(data);
-      // ✅ 进度已满但 status 没更新：连续达阈值就兜底为 completed
-      if ((data.progress || 0) >= 0.99 && !isTerminalTaskStatus(data.status)) {
-        stuckAtFull++;
-        if (stuckAtFull >= stuckThreshold) {
-          console.warn(`pollTaskUntilTerminal: task ${taskId} stuck at progress=100% for ${stuckAtFull} polls, treating as completed`);
-          // ✅ BUG 修复（2026-09-20）：兜底判定 completed 时必须保留全量字段
-          //   （尤其 outline_result）—— 后台成果已落 checkpoint，丢字段会让
-          //   调用方（fin.outline_result 消费分支）误判无成果直接 load()。
-          return { ...data, status: "completed", message: data.message };
-        }
-      } else {
-        stuckAtFull = 0;
-      }
-    } catch (e: any) {
-      // ✅ 修复：区分「任务确实不存在（404，不可恢复）」与「瞬时网络失败」。
-      // 旧实现对任何一次请求失败都直接放弃重挂，一次抖动/502 就导致兜底失效。
-      if (e?.response?.status === 404) return null;
-      netFailCount++;
-      if (netFailCount >= netFailTolerance) {
-        console.warn(`pollTaskUntilTerminal: task ${taskId} 连续 ${netFailCount} 次网络失败，放弃重挂`);
-        return null;
-      }
-    }
-  }
-  return null;
-}
+// ✅ R121（承接 R120 遗留 L5）：pollTaskUntilTerminalImpl 下沉到 utils/taskPolling.ts，
+//   使 contentDegradedTerminal 的 B1/B2 可直连该叶子、不再 `await import` 本 12669 行巨型页面
+//   （全量并发下该动态 import 撞单测 60s 墙钟产生假红）。行为逐字保持，仅换文件位置。
+//   保留具名再导出 ⇒ 页面公共导出面不变（原 `export async function` 的外部契约不破坏）。
+export { pollTaskUntilTerminalImpl };
 
 /**
  * ✅ BUG 修复（2026-09-23 · 「30s 连接超时后目录任务孤儿运行」）：
@@ -2996,15 +2999,15 @@ function describeExportIssue(iss: any): string {
  * （避免「声明了 state 却没人读」的死状态债），也便于单测直接断言
  * 「阶段 → 用户可读文案 + 序号」的映射不会漂移。
  */
-export const EXPORT_STAGE_LABEL: Record<"idle" | "charts" | "docx" | "pdf", string> = {
+// ✅ R126（2026-10-21）：PDF 导出下线，阶段枚举收敛为 DOCX 单链路。
+export const EXPORT_STAGE_LABEL: Record<"idle" | "charts" | "docx", string> = {
   idle: "空闲",
   charts: "渲染图表",
   docx: "生成文档",
-  pdf: "生成 PDF",
 };
 
 /** 阶段在总流程中的序号（1 起，idle 不参与）。 */
-export const EXPORT_STAGE_ORDER: Record<string, number> = { charts: 1, docx: 2, pdf: 3 };
+export const EXPORT_STAGE_ORDER: Record<string, number> = { charts: 1, docx: 2 };
 
 /** 导出配置深合并（2026-10-06 · P0「折叠面板配置被静默丢弃」修复的配套纯函数）。
  *
@@ -3954,10 +3957,11 @@ export default function SchemeWorkbenchPage() {
   const [exportForm] = Form.useForm();
   const [exporting, setExporting] = useState(false);
   // ✅ D2 加固（2026-10-06）：导出阶段枚举 + 真实进度百分比。
-  //    旧实现只有一个文本 phase 字符串，文档生成/转 PDF 阶段
+  //    旧实现只有一个文本 phase 字符串，文档生成阶段
   //    （真正耗时数十秒）只有一句静态文字，用户无从判断是否卡死。
   //    现在由 stage + pct 驱动真实进度条（各阶段权重加权）。
-  const [exportStage, setExportStage] = useState<"idle" | "charts" | "docx" | "pdf">("idle");
+  //    R126：PDF 导出下线，枚举收敛为 DOCX 单链路。
+  const [exportStage, setExportStage] = useState<"idle" | "charts" | "docx">("idle");
   const [exportPct, setExportPct] = useState(0);
   // ✅ 导出预检独立 loading（旧实现复用 exporting，点预检不显示加载态、还会误亮导出按钮）
   const [checkingExport, setCheckingExport] = useState(false);
@@ -4402,6 +4406,17 @@ const draftKey = selectedSection && id
   const uploadAbortRef = useRef<AbortController | null>(null);
   // ✅ 文档解析取消控制器：解析（尤其 OCR）耗时可达数分钟，卸载/切方案时中断请求
   const parseAbortRef = useRef<AbortController | null>(null);
+  // ✅ FIX-7（2026-10-20 · P1 · 预览/管线概览竞态）：预览与四层管线概览此前
+  //    **无 abort、无序号守卫** ⇒ 快速「预览 A → 预览 B」时，A 的响应若后到
+  //    会把 B 的正文覆盖掉（标题是 B、正文是 A），且 A 的 finally 会把 B 的
+  //    loading 态提前清掉（管线概览更明显：先发的请求后回，把后发请求的
+  //    loading 清成 false，界面显示"已加载"但数据是旧的）。
+  //    现按同页其它请求的既有纪律（uploadAbortRef / parseAbortRef / exportSeqRef）
+  //    补齐：AbortController 中断旧请求 + 自增序号令牌判定"我是不是最新那次"。
+  const previewAbortRef = useRef<AbortController | null>(null);
+  const previewSeqRef = useRef(0);
+  const pipelineAbortRef = useRef<AbortController | null>(null);
+  const pipelineSeqRef = useRef(0);
   // 列表请求独立取消通道：切方案时必须同时中止 SSE、上传、解析与普通 GET。
   const factsListAbortRef = useRef<AbortController | null>(null);
   const factsDocsListAbortRef = useRef<AbortController | null>(null);
@@ -5001,6 +5016,15 @@ const draftKey = selectedSection && id
       abortControllerRef.current?.abort();
       uploadAbortRef.current?.abort();
       parseAbortRef.current?.abort();
+      // ✅ FIX-7（2026-10-20 · P1 · 预览/管线概览卸载清理）：与上方同类
+      //    AbortController 同口径 —— 预览与四层管线概览此前**无 abort、无序号
+      //    守卫**，卸载后请求继续跑完并在已卸载组件上 setState（React 警告），
+      //    切文档时更会互相覆盖。补上中断 + 序号推进（推进序号使在途响应
+      //    的 seq 判定失败，自动丢弃）。
+      previewAbortRef.current?.abort();
+      pipelineAbortRef.current?.abort();
+      ++previewSeqRef.current;
+      ++pipelineSeqRef.current;
       presetListAbortRef.current?.abort();
       exportCheckAbortRef.current?.abort();
       cacheAbortRef.current?.abort();
@@ -6968,7 +6992,6 @@ const draftKey = selectedSection && id
     try {
       const { data } = await factsApi.uploadDocuments(toUpload, id, { signal: ac.signal });
       if (ac.signal.aborted) return;
-      const savedCount = data.saved_count ?? 0;
       // ✅ 统一口径（2026-09-21）：提示文案唯一入口收敛到
       //    workflowDerived.buildUploadNotice（六类拒绝原因全覆盖：
       //    unsupported/oversize/empty/signature_invalid/too_many/quota_exceeded）。
@@ -6979,11 +7002,26 @@ const draftKey = selectedSection && id
         maxTotalBytes: maxUploadTotalBytes,
         maxFiles: maxUploadFiles,
       });
-      if (savedCount === 0 && notice.details.length > 0) {
-        console.warn("上传被拒明细:", notice.details);
-      }
       if (notice.tone === "error") msg.error(notice.text);
       else msg.success(notice.text);
+      // ✅ FIX-6（2026-10-20 · P1 · 逐文件拒绝明细不可见）：
+      //    后端 upload-documents 对**每一类**拒绝都点名了具体文件名
+      //    （unsupported / oversize / signature_invalid / empty /
+      //    too_many / quota_files 的 warnings 数组）。但旧实现只在
+      //    「一个都没保存」时把 notice.details 打进 console —— 于是
+      //    「已保存 2 个文件，1 个超过 30MB」这种部分成功的场景，
+      //    用户**不知道是哪个文件**没进去，只能自己一个个数文件名对账。
+      //    现把明细**如实呈现**到用户可见层：逐条 info 提示（后端
+      //    warnings 已是「文件名 + 原因」的可读文案），并保留 console
+      //    留痕便于排查。零保存时用 error 级一次说清，避免刷屏。
+      if (notice.details.length > 0) {
+        console.warn("上传被拒明细:", notice.details);
+        if (notice.tone === "error") {
+          msg.error(`未保存的文件明细：\n${notice.details.join("\n")}`);
+        } else {
+          notice.details.forEach((d) => msg.warning(d));
+        }
+      }
       loadDocuments();
     } catch (e: any) {
       if (e?.name === "AbortError" || ac.signal.aborted) return;
@@ -7056,6 +7094,13 @@ const draftKey = selectedSection && id
           `${force ? "重新" : ""}解析完成：成功 ${data.parsed} 个文档`
           + (reconciledCount > 0 ? `，并修正 ${reconciledCount} 份陈旧状态` : ""));
       }
+      // ✅ FIX-6（2026-10-20 · P1 · 事实失效告知缺失）：与单份解析同口径 ——
+      //    后端在本轮有**新文本落库**时会作废项目已提取的旧事实（源文本变了），
+      //    并回 `note` 告知需要重跑「AI 提取事实」。旧实现从不读该字段 ⇒
+      //    用户以为事实已覆盖最新资料，实际生成链路仍在用陈旧事实。
+      if (data.note) {
+        msg.warning(data.note);
+      }
       loadDocuments();
     } catch (e: any) {
       if (e?.name === "AbortError" || ac.signal.aborted) return;
@@ -7096,6 +7141,16 @@ const draftKey = selectedSection && id
           : "";
         msg.success(`「${fileName}」${force ? "重新" : ""}解析完成（${data.text_len} 字）${cut}${warn}`);
       }
+      // ✅ FIX-6（2026-10-20 · P1 · 事实失效告知缺失）：后端在「强制重解析」
+      //    与「首次解析」后会**作废**项目已提取的旧事实（源文本变了，旧事实
+      //    不再是当前资料全集的产物）并随响应回 `note`（含 stale_facts 条数）
+      //    与 `stale_facts`。旧实现从不读这两个字段 —— 用户看到「解析完成」
+      //    就继续用**已被作废**的旧事实生成目录/正文，产出依据与实际资料
+      //    不一致，且界面上零提示。现按 warning 级别如实告知，并提示
+      //    需要重跑「AI 提取事实」。
+      if (data.note) {
+        msg.warning(data.note);
+      }
       loadDocuments();
     } catch (e: any) {
       if (e?.name === "AbortError" || ac.signal.aborted) return;
@@ -7121,17 +7176,30 @@ const draftKey = selectedSection && id
     setPipelineStatus(null);
     setPipelineError(null);
     setPipelineLoading(true);
+    // ✅ FIX-7（2026-10-20 · P1 · 预览竞态）：中断上一次预览 + 序号令牌。
+    //    旧实现无任何守卫：A 的响应后到会覆盖 B 的正文（标题 B、正文 A）。
+    previewAbortRef.current?.abort();
+    const ac = new AbortController();
+    previewAbortRef.current = ac;
+    const seq = ++previewSeqRef.current;
     try {
-      const { data } = await factsApi.previewDocument(doc.id);
+      const { data } = await factsApi.previewDocument(doc.id, 5000, { signal: ac.signal });
+      // 非最新一次 → 直接丢弃响应（不写状态、不弹提示）
+      if (seq !== previewSeqRef.current) return;
       if (!data.is_parsed) {
         msg.warning(data.message || "该文档尚未解析");
       }
       setPreviewText(data.preview || "");
       setPreviewData(data);
     } catch (e: any) {
+      if (e?.name === "AbortError" || ac.signal.aborted) return;
+      if (seq !== previewSeqRef.current) return;
       msg.error(e.message || "获取预览失败");
     } finally {
-      setPreviewLoading(false);
+      // 仅当自己仍是最新一次时才清 loading（否则会清掉更新请求的 loading）
+      if (seq === previewSeqRef.current) {
+        setPreviewLoading(false);
+      }
     }
     loadPipelineStatus(doc.id);
   };
@@ -7139,16 +7207,27 @@ const draftKey = selectedSection && id
   /** 拉取四层解析质量概览（status + completeness 合并；失败非阻断，仅降级为告警） */
   const loadPipelineStatus = async (docId: string) => {
     if (!docId) return;
+    // ✅ FIX-7（2026-10-20 · P1 · 管线概览竞态）：与预览同口径 ——
+    //    中断上一次 + 序号令牌，杜绝「先发后回」清掉后发请求的 loading 态。
+    pipelineAbortRef.current?.abort();
+    const ac = new AbortController();
+    pipelineAbortRef.current = ac;
+    const seq = ++pipelineSeqRef.current;
     setPipelineLoading(true);
     setPipelineError(null);
     try {
-      const { data } = await docPipelineApi.status(docId);
+      const { data } = await docPipelineApi.status(docId, { signal: ac.signal });
+      if (seq !== pipelineSeqRef.current) return;
       // status 已含 completeness 快照；quality_score 缺省时再取一次报告补全
       setPipelineStatus(data);
     } catch (e: any) {
+      if (e?.name === "AbortError" || ac.signal.aborted) return;
+      if (seq !== pipelineSeqRef.current) return;
       setPipelineError(e?.message || "解析质量信息读取失败");
     } finally {
-      setPipelineLoading(false);
+      if (seq === pipelineSeqRef.current) {
+        setPipelineLoading(false);
+      }
     }
   };
 
@@ -8855,12 +8934,12 @@ const draftKey = selectedSection && id
 
   // ✅ 修复（2026-09-20 深度审查）：导出入口重入保护。
   //    loading={exporting} 只能在重渲染后禁用按钮，React 状态更新异步批处理，
-  //    同一帧内的双击 / 连点（包括 DOCX 与 PDF 两个按钮互点）仍会并发进入导出流程。
+  //    同一帧内的双击 / 连点仍会并发进入导出流程。
   //    用 ref 同步标志做函数级防护，确保任何时刻只有一个导出在进行。
   const exportingRef = useRef(false);
   // ✅ 导出图表渲染进度：上一次已刷新的整数百分比（同百分比内不再排队刷新）
   const exportPctRef = useRef(-1);
-  const handleExport = async (format: "docx" | "pdf" = "docx") => {
+  const handleExport = async (format: "docx" = "docx") => {
     if (!id || exportingRef.current) return;
     const sid = id;
     const controller = new AbortController();
@@ -8928,21 +9007,17 @@ exportPctRef.current = pct;
       // ✅ 收尾前把图表渲染进度的最后一帧刷下去，保证用户看到最终进度文本
       exportBatcherRef.current?.flushNow();
       if (controller.signal.aborted || currentSchemeIdRef.current !== sid) return;
-      // ✅ D2：文档生成阶段显式置位；PDF 走「DOCX(70%) → 转换(→100%)」两段
-      setExportStage(format === "pdf" ? "pdf" : "docx");
+      // ✅ D2：文档生成阶段显式置位（R126：PDF 下线后仅 DOCX 单段）
+      setExportStage("docx");
       setExportPct(70);
-      setExportPhase(format === "pdf" ? "正在生成文档并转换PDF..." : "正在生成文档...");
-      const resp = format === "pdf"
-        ? await exportApi.pdf(sid, config, chartImages, controller.signal)
-        : await exportApi.docx(sid, config, chartImages, controller.signal);
+      setExportPhase("正在生成文档...");
+      const resp = await exportApi.docx(sid, config, chartImages, controller.signal);
       if (
         controller.signal.aborted
         || exportSeqRef.current !== exportSeq
         || currentSchemeIdRef.current !== sid
       ) return;
-      const mime = format === "pdf"
-        ? "application/pdf"
-        : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+      const mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
       const blob = new Blob([resp.data], { type: mime });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -8963,12 +9038,12 @@ exportPctRef.current = pct;
       a.click();
       document.body.removeChild(a);
       // ✅ R-5（2026-10-04）：延迟从 2s 提到 10s。
-      //    大文件（数十 MB 的方案 PDF/DOCX）在弱网 / 移动热点 / 云盘同步下，
+      //    大文件（数十 MB 的方案 DOCX）在弱网 / 移动热点 / 云盘同步下，
       //    浏览器下载器可能超过 2s 才真正从 blob 读取字节。此时如果 URL 已被
       //    revoke，Safari / Firefox 会静默失败（点按钮没反应）。10s 兼顾
       //    兼容性（不永久占内存）与稳定性。
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
-      msg.success(format === "pdf" ? "PDF 导出成功" : "导出成功");
+      msg.success("导出成功");
       if (currentSchemeIdRef.current === sid) await loadCacheStatus();
       if (
         controller.signal.aborted
@@ -8996,6 +9071,11 @@ exportPctRef.current = pct;
       if (fs) {
         const parts = fixStatsParts(fs);
         if (parts.length) msg.success(`导出前已自动修复：${parts.join(" / ")}`, 6);
+        // ✅ R117 FIX-11（2026-10-20）：同章「近似重复」后端**刻意没有改写**成稿
+        //    （两侧各有独有尾句，删任一侧即丢正文）。这类"没修"的事实不能混进
+        //    上面那句"已自动修复"，否则就是把未处理说成已处理 —— 单独走 warning
+        //    并点名唯一可执行动作：回源文该章重新生成。
+        for (const w of fixStatsWarnings(fs)) msg.warning(w, 8);
       }
     } catch (e: any) {
       const canceled = e?.name === "AbortError" || e?.code === "ERR_CANCELED";
@@ -10833,7 +10913,7 @@ exportPctRef.current = pct;
             style={{ marginBottom: 12 }}
           >
             <Text type="secondary" style={{ fontSize: 12 }}>
-              检查空章节、孤立节点、章节字数达标度与图表完成率，确认无误后再到「导出」页生成 DOCX / PDF。
+              检查空章节、孤立节点、章节字数达标度与图表完成率，确认无误后再到「导出」页生成 DOCX。
               本项与上方「规范符合性检查」（AI 逐条判定内容是否合规）用途不同。
             </Text>
             {exportIssues.length > 0 && (
@@ -11090,12 +11170,12 @@ exportPctRef.current = pct;
         <WorkflowTabLabel
           step={6}
           title="导出文档"
-          hint="第六步：设置版式并生成 DOCX / PDF，或导出目录结构 JSON。章节完整性等检查请先在「审核与预检」页完成"
+          hint="第六步：设置版式并生成 DOCX，或导出目录结构 JSON。章节完整性等检查请先在「审核与预检」页完成"
         />
       ),
       children: (
         // ✅ 修复：导出配置表单（基本设置/正文样式/各级标题样式 + 统计 + 缓存）较长，
-        //    Form 根元素需可滚动，避免低视口下底部按钮（导出预检/导出 DOCX/PDF）被裁剪
+        //    Form 根元素需可滚动，避免低视口下底部按钮（导出预检/导出 DOCX）被裁剪
         <Form
           form={exportForm}
           layout="vertical"
@@ -11109,10 +11189,13 @@ exportPctRef.current = pct;
           chapter_page_break: true, line_spacing: 1.15,
           page_number_style: "simple", toc_depth: 3,
           heading_styles: {
-            "1": { font_name: "宋体", font_size: 14, bold: true },
+            // ✅ R117（2026-10-20）：与后端 _DEFAULT_HEADING_STYLES 逐字一致。
+            //    旧默认 1~4 级同为 14pt，成稿四级标题在纸面上无法分辨；
+            //    新阶梯 16/14/14/12（4 级起降为小四）形成明确视觉分水岭。
+            "1": { font_name: "宋体", font_size: 16, bold: true },
             "2": { font_name: "宋体", font_size: 14, bold: true },
             "3": { font_name: "宋体", font_size: 14, bold: true },
-            "4": { font_name: "宋体", font_size: 14, bold: true },
+            "4": { font_name: "宋体", font_size: 12, bold: true },
             "5": { font_name: "宋体", font_size: 12, bold: false },
             "6": { font_name: "宋体", font_size: 12, bold: false },
             "7": { font_name: "宋体", font_size: 12, bold: false },
@@ -11628,14 +11711,6 @@ exportPctRef.current = pct;
             >
               {exporting ? "导出中..." : "导出 DOCX"}
             </Button>
-            <Button
-              icon={<FilePdfOutlined />}
-              onClick={() => handleExport("pdf")}
-              loading={exporting}
-              title="先生成 DOCX 再转换为 PDF（需安装 Microsoft Word 或 LibreOffice）"
-            >
-              导出 PDF
-            </Button>
           </Space>
 
           {/* ✅ 功能归位：目录结构导出也是"导出"，从「目录生成」页收敛到本页，
@@ -11663,7 +11738,7 @@ exportPctRef.current = pct;
           >
             <Text type="secondary" style={{ fontSize: 12 }}>
               导出按后端权威编号（如 1 / 1.1 / 1.1.1）整理的目录树 JSON，可直接给外部工具或存档使用，<b>不改动数据库</b>。
-              与上方 DOCX / PDF 文档导出是两种产物：这里是"目录文件"，上方是"完整方案文档"。
+              与上方 DOCX 文档导出是两种产物：这里是"目录文件"，上方是"完整方案文档"。
             </Text>
           </Card>
 

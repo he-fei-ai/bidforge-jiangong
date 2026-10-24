@@ -171,18 +171,36 @@ class TestBidPromptsRegistered:
 # =====================================================================
 # ④⑤ T1：读取路径逐字等价 + DB 优先
 # =====================================================================
+def _resolve(body: str) -> str:
+    """出厂字面量 → 共享片段解析后的语义基准。
+
+    ✅ 2026-10-23（五段式提取方法 · 接缝同步）：`_ITEM_PROMPTS` 的 5 个提取项
+    新增了 `{SHARED_EXTRACT_RULES}` / `{SHARED_EXTRACT_VERIFY}` 引用，而
+    读取路径（`_cache.get_prompt`:350）自引入起就按设计用
+    `_resolve_shared_keys()` 在**读取时**展开 `{SHARED_*}`（非本次行为变更）。
+    因此读取侧断言的语义基准从「原始字面量逐字」同步为「原始字面量经共享
+    片段解析后逐字」—— 对不含 `{SHARED_*}` 的模板，解析是恒等变换，
+    断言力度不减（零行为变化红线仍由本函数兜住：除 `{SHARED_*}` 展开外，
+    任何额外字符差异都会照常失败）。「注册内容=原始字面量」的逐字红线
+    仍由 `test_registered_content_is_byte_identical` 独立把守（注册侧存原文，
+    不展开）。判据取自唯一事实源，禁止在本文件复制展开逻辑。
+    """
+    from app.services.ai.prompts._cache import _resolve_shared_keys
+    return _resolve_shared_keys(body)
+
+
 class TestBidPromptReadPath:
     def test_get_item_prompt_matches_literal(self, factory, literals):
         _, items = literals
         for iid, body in items.items():
-            assert factory.get_item_prompt(iid) == body, iid
+            assert factory.get_item_prompt(iid) == _resolve(body), iid
 
     def test_build_item_injects_context(self, factory, literals):
         _, items = literals
         content = "招标文件正文片段 ABC"
         iid = "projectBasicInfo"
         got = factory.build_item(content, {"item_id": iid, "label": "项目级基本信息"})
-        assert got == items[iid].replace("__CONTEXT__", content)
+        assert got == _resolve(items[iid]).replace("__CONTEXT__", content)
         assert content in got and "__CONTEXT__" not in got
 
     def test_build_system_prompt_appends_hints(self, factory, literals):

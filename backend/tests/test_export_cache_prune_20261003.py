@@ -6,6 +6,10 @@ EXPORTS_DIR 磁盘文件随 PDF 导出次数无限增长。
 
 修法：把 DOCX 内联裁剪逻辑逐字提取为 `_prune_export_cache` 共享 helper，
 DOCX（行为零变化）与 PDF（补齐同一策略）共同调用，跨格式合计最多 5 份/方案。
+
+✅ R126（2026-10-21）：PDF 导出链整体下线（只保留 DOCX），原「双分支 parity」
+断言收敛为 DOCX 单链路口径；裁剪策略契约本身（保留 5 份 / 僵尸行清理 /
+keep_paths 保护 / 提交顺序）检测力只增不减，另加 PDF 反向锚防死灰复燃。
 """
 import ast
 import uuid
@@ -143,11 +147,21 @@ def _route_fn(name):
     raise AssertionError(f"function {name} not found in export.py")
 
 
-@pytest.mark.parametrize("route", ["export_docx", "export_pdf"])
+def test_r126_pdf_export_chain_gone():
+    """PDF 反向锚：export_pdf 不得复活（裁剪 parity 随链下线收敛 DOCX 单链路）。"""
+    try:
+        _route_fn("export_pdf")
+    except AssertionError:
+        return  # 未找到 = 符合预期
+    raise AssertionError("export_pdf 函数复活（R126 已整体下线）")
+
+
+@pytest.mark.parametrize("route", ["export_docx"])
 def test_both_branches_call_shared_prune(route):
-    """静态 parity 锁：DOCX 与 PDF 都必须经统一写存 helper 接入共享裁剪，
+    """静态 parity 锁：导出路由必须经统一写存 helper 接入共享裁剪，
     防止未来新格式分支再次漏接保留策略（重演 T1）。
 
+    ✅ R126：PDF 分支已下线，锚收敛 DOCX 单链路。
     ✅ 2026-10-14 收口后：裁剪下沉到 _persist_export_cache_row，路由只调 helper。
     """
     route_calls = [n.func.id for n in ast.walk(_route_fn(route))
@@ -162,8 +176,11 @@ def test_both_branches_call_shared_prune(route):
 
 def test_helper_no_inline_duplicate_in_routes():
     """防分叉：裁剪判定逻辑必须只存在于共享 helper，路由分支内不得重抄
-    （扫标志性的「keep_paths」局部变量，路由函数体内出现即说明有人复制了一份）。"""
-    for route in ("export_docx", "export_pdf"):
+    （扫标志性的「keep_paths」局部变量，路由函数体内出现即说明有人复制了一份）。
+
+    ✅ R126：PDF 分支已下线，仅扫 export_docx。
+    """
+    for route in ("export_docx",):
         names = {n.id for n in ast.walk(_route_fn(route)) if isinstance(n, ast.Name)}
         assert "keep_paths" not in names, f"{route} 内联复制了裁剪逻辑"
 
@@ -246,7 +263,7 @@ def _write_points_and_trace(fn):
     return writes, trace
 
 
-@pytest.mark.parametrize("route", ["export_docx", "export_pdf"])
+@pytest.mark.parametrize("route", ["export_docx"])
 def test_cache_writes_committed_before_review_trace(route):
     """每个写缓存语句与**其后的**留痕调用之间必须存在显式 commit。
 
@@ -290,10 +307,11 @@ def test_cache_writes_committed_before_review_trace(route):
             "写存落盘前就留痕，取消/断连发生在写存期会把未落盘行当成功留痕")
 
 
-def test_pdf_prune_delete_also_committed():
-    """写存 helper 内 prune 之后必须有 commit（双提交第二道，PDF 2026-10-13 口径）。
+def test_prune_delete_also_committed():
+    """写存 helper 内 prune 之后必须有 commit（双提交第二道，原 PDF 2026-10-13 口径）。
 
-    ✅ 2026-10-14 收口后：prune 与其后的 commit 均在 _persist_export_cache_row 内。
+    ✅ R126：PDF 下线后收敛为共享 helper 单锚——prune 与其后的 commit 均在
+    _persist_export_cache_row 内，export_docx 必须经此 helper（口径不变）。
     """
     persist = _route_fn("_persist_export_cache_row")
     prune = [n.lineno for n in ast.walk(persist)
@@ -309,8 +327,8 @@ def test_pdf_prune_delete_also_committed():
         "写存 helper: prune(L%d) 之后没有 commit → 裁剪 DELETE 属未提交写入，"
         "异常回滚时「最多 5 份」保留策略被静默跳过，export_cache 行数与磁盘文件"
         "会随导出次数无限增长" % prune[0])
-    # export_pdf 必须经此 helper（与 DOCX 同口径）
-    pdf_calls = [n.func.id for n in ast.walk(_route_fn("export_pdf"))
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
-    assert "_persist_export_cache_row" in pdf_calls, "export_pdf 未接入统一写存 helper"
+    # export_docx 必须经此 helper（唯一在役导出链路，与原 PDF 同口径）
+    docx_calls = [n.func.id for n in ast.walk(_route_fn("export_docx"))
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    assert "_persist_export_cache_row" in docx_calls, "export_docx 未接入统一写存 helper"
 

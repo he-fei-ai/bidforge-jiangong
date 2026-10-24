@@ -203,8 +203,10 @@ async def repair(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
 
     # ✅ R122-G2（引入易标「持久 Agent 整卷修复」的程序级等价物）：
     #    body.mode=="fullbook" 走整卷合并修复（少轮整卷往返 + 四道小节闸门）。
-    #    开关 `consistency_fullbook_repair_enabled` 默认关闭 ⇒ 显式请求 fullbook 时
-    #    返回 422（不默默降级）；默认 mode!="fullbook" 逐字节保持下方既有逐章链路。
+    #    开关 `consistency_fullbook_repair_enabled` ✅ 2026-10-23 起默认开启
+    #    （对齐外部恒执行）⇒ 默认可直接请求 fullbook；开关**关闭**时显式请求
+    #    fullbook 返回 422（不默默降级）；默认 mode!="fullbook" 逐字节保持下方
+    #    既有逐章链路。
     if mode == "fullbook":
         from app.config import settings as _settings
         if not bool(getattr(_settings, "consistency_fullbook_repair_enabled", False)):

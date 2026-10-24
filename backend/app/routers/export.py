@@ -40,6 +40,21 @@ from app.services.chart_validators import (
     MERMAID_KEYWORD_TO_CHART_TYPE,
 )
 
+# ✅ R130（三端格式契约 · 文字标准）：西文统一字体的唯一事实源。
+#    样式级（Normal/Heading）与 run 级（图题/表格/封面）凡中文字体作
+#    w:ascii 都会改为 Times New Roman，禁止在本文件再写字面量副本。
+# ✅ R131-A（2026-10-23 · 图号归属漂移根因修复）：图号前缀剥离判据同样只从
+#    契约模块取（由 FIG_TITLE_RE 派生），禁止在本文件复制正则字面量。
+from app.services.content_format_contract import (
+    FIG_TITLE_PREFIX_RE,
+    FONT_LATIN,
+    MIN_IMAGE_DPI,
+)
+from app.services.content_residue_rules import (
+    HTML_TAG_RESIDUE_RE,
+    PLACEHOLDER_RESIDUE_RE,
+)
+
 # ✅ R102（G2 · 排序键单一出口）：导出序与展示序/生成序共用同一归一键。
 from app.services.content_utils import section_sort_order_key
 
@@ -68,7 +83,7 @@ router = APIRouter(prefix="/api/v1/schemes/{scheme_id}/export", tags=["export"])
 # ``db.execute`` 点位共 31 个，其中包含两条**导出主干**：
 #   · ``export_docx`` 的缓存查询 → 缓存查询失败 ⇒ **整次导出 500**，
 #     用户连"重新生成一次"的机会都没有；
-#   · ``export_pdf`` 的缓存查询（:5023）→ 同上；
+#   · ``export_pdf`` 的缓存查询（已随 R126 PDF 下线删除）→ 同上；
 #   · ``_prepare_export`` 的 schemes / sections / chart_predictions 三次查询
 #     → 同样 500。
 # 本仓历史上已两次因 R13 漏改点被逐个排查（§4.11.6 / §4.17.3），本次直接
@@ -140,7 +155,8 @@ async def _db_fetch_one(cur, *, what: str, strict: bool = False):
 
 
 def _merge_borrowed_stats(render_stats: dict, fix_stats: dict | None) -> dict:
-    """把构建期统计的「跨章借图」并入渲染统计（单一出口，DOCX / PDF 共用）。
+    """把构建期统计的「跨章借图」并入渲染统计（单一出口，DOCX 链路；
+    PDF 链已随 R126 下线）。
 
     ✅ 加固（2026-10-06 · D1）：跨章借图的真实发生地是 `_build_docx_sync`
     （渲染期才知道借给了谁），而响应头 `X-Chart-Render-Stats` 来自
@@ -354,7 +370,102 @@ def _resolve_chart_code(block: dict, sec_id: str, chart_type: str,
 #        修复前落盘的成稿普遍带有 tcW→vAlign→shd 的非法序列，若沿用旧缓存行，
 #        用户内容与配置未变 → 每次命中都拿回打不开的坏档，修复永不可见。
 #        版式/产物字节变化烤进导出缓存，故沿用既有版本号机制整体失效。
-_EXPORTER_VERSION = "23"
+#    v24：成稿版式收口（2026-10-20 · R117 · 依据导出稿逐项取证）：
+#        ① 显式 A4 页面（python-docx 默认模板是 US Letter 21.59×27.94cm，
+#           成稿页高比 A4 少 1.76cm，且与「中国工程文件 A4」不符）；
+#        ② 标题 1~4 级默认字号阶梯化（旧默认 14/14/14/14 四级同大、同色，
+#           视觉上无法分辨层级）+ 标题强制黑色（旧实现继承模板主题蓝
+#           376092/4F81BD + w14:textFill，用户无颜色开关也改不掉）；
+#        ③ 图与图题 keep_with_next / keep_together（旧实现图题可被分页推到
+#           下一页，出现「图在这页、题在下页」）；表格数据行 cantSplit
+#           （长表行内断页后跨页单元格错位 —— 实测导出稿 32 张表 195 行
+#           无一带 cantSplit）。
+#        ④ 首行「通栏标题行」横向合并（源表 ``| 标题 |  |  |`` ⇒ 成稿半条空色带，
+#           且跨页重复的正是这条带、列名永不出现）+ 表头重复行顺移到列名行
+#           （实测导出稿 表 2-4 中招）。
+#        ⚠️ 刻意**未**改动（产品级契约，见 docs/正文导出成稿问题报告_R117_20261020.md）：
+#           · 章节编号 L2 每章重排（heading_v2._format_number：L1 第一章 / L2 "1" /
+#             L3 "1.1"）——改成"章号.节号"会改变全文目录与交叉引用，且
+#             `_detect_duplicate_sections` 的「章作用域判重」语义与之绑定；
+#           · TOC 域深度维持用户配置（\\o "1-N"）—— 导出稿 H5/H6 共 76 段实际是
+#             「节内 body 命名空间」的伪标题（1）、/ X.Y.Z.W、），自动抬深度会把
+#             它们全部拉进目录。
+#        版式/产物字节变化烤进导出缓存，故沿用既有版本号机制整体失效。
+#    v25：同章「逐字重复」正文块折叠（2026-10-20 · R117 FIX-10/11 · 生产库真实源文取证）：
+#        AI 把一整节内容写进 ```markdown 围栏后，又在围栏闭合**之后**重述一遍
+#        （实测 sections.content「通用工程标准」章：L1~25 与 L27~47 两套内容）。
+#        全字符级复核（artifacts/r117/_probe16.txt）把重复分成两类，处理手段不同：
+#        · 逐字相同 5 组（五个 ``**标准名**`` 加粗小标题，归一 20~24 字）
+#          ⇒ `_collapse_repeated_blocks` 折叠，该章 blocks 24 → 19【产物字节变 ⇒ 升版】；
+#        · 前缀相同 5 组（五段正文共享前 66~185 字后各写各的，137~301 字）
+#          ⇒ `_report_near_duplicate_blocks` **只报警不改写**【产物字节不变 ⇒ 不升版】，
+#          因为两侧各有独有尾句，删任一侧都是实质丢正文，导出器无资格替用户取舍。
+#        折叠只在**单章作用域**内做：段落/列表项 ≥ 40 归一字符、
+#        ``**整串加粗小标题**`` 形 ≥ 8；表格/图表/代码/图片等结构块一律不动；
+#        WARNING 按章点名 + 计入 X-Fix-Stats 新键 `repeated_blocks` /
+#        `near_duplicate_blocks`（后者前端同步展示，见 utils/exportResponse.ts）。
+#        ⚠️ 刻意**不**跨章去重 —— 不同章引用同一条标准条文是正常写法。
+#        折叠部分改变产物字节，故升版整体失效旧缓存。
+#    v26：R126 公式 OMML 解析两缺陷修复（2026-10-21 · 探针实测复现，护栏
+#        tests/test_r126_docx_math_20261021.py 内容级断言）：
+#        ① FIX-B `\sqrt[n]{x}` 结构错误 —— tokenizer 新增 bracket 令牌类，
+#           激活死代码 `_parse_optional_bracket`，度数进 m:deg、被开方数回 m:e
+#           （旧实拍：`<m:rad><m:e>[3]</m:e></m:rad>` + 游离 x）；非度数位的
+#           [ ]（如区间 [0,1]）仍按普通文本保留；
+#        ② FIX-C 组内脚本附着 —— nary body / frac 参数组 / 脚本参数组 /
+#           brace 组产物统一过 `_attach_scripts`，`x_i` 不再被静默拆成平排
+#           x、i 两 run（R122 留痕局限②就此闭环）。
+#        ③ PDF 导出功能整体下线（用户指令「导出只保留 DOCX」）：删
+#           `export_pdf` / `_convert_docx_to_pdf` / `_PDF_MIME`，DOCX 产物字节
+#           不因下线而变，但随 ①② 一并升版；存量 fmt=pdf 指纹行自然淘汰。
+#        ④ FIX-C2/LIM（docx_math）：常用算子函数名映射（`\lim` 等不再整词丢失）、
+#           空 nary 体补 Word 同款空参 run（`\sum_{i=1}^{n}` 不再回退源码文本）、
+#           空脚本参数丢弃 + 无界 nary 改 Word 原生 subHide/supHide 形态
+#           （`x_{}` / `\sum` 无界 不再产出 schema 违规空参）。
+#        ①②④ 改变含公式章的产物字节 ⇒ 旧缓存（内含错位/违规 OMML）必须整体失效。
+#        ⚠️ 刻意**未**改动（沿用 v24/v25 两条产品级契约）：章节编号 L2 每章
+#           重排、TOC 域深度维持用户配置；另本轮刻意保留 `_safe_filename` 的
+#           .pdf 已知扩展名消毒白名单（属文件名消毒防御面，不专属导出 PDF 链）。
+#    v27：R127（2026-10-22 · DOCX 格式标准收口，用户任务「完全满足 DOCX 格式标准」）：
+#        ① 列表改走 numbering.xml（`w:numPr` + abstractNum），「1、」「（一）」
+#           「（1）」恢复中文序号原貌 —— 旧实现手写前缀文本（实测 253 个列表段
+#           全部 numPr=0），列表样式被拍平且与正文混为一体；
+#        ② 附录/封面表格补 `w:tblHeader`（跨页重复表头）+ `w:cantSplit`（行不
+#           断页）+ fixed 布局，列宽按**当前节版心**自适应 —— 旧实现 15/39 张
+#           附录表无表头重复、列宽硬编码 16cm（左右 3.18cm 页边距下溢出 1.35cm）；
+#        ③ PAGE / NUMPAGES / TOC 域改 Word 标准写法：begin / instrText /
+#           separate / 结果 / end 分存 5 个 run（旧实现 fldChar 与 instrText
+#           同 run，WPS 偶发域不更新）；
+#        ④ 正文改 `Body Text CN` 段落样式承载首行缩进（旧实现逐段写直接格式，
+#           违反「用样式而非直接格式」的 OOXML 规范）；
+#        ⑤ 图片宽度按当前节版心封顶（旧实现固定 16cm 上限）。
+#        ①②③④⑤ 都改变产物字节 ⇒ 升版整体失效旧缓存（旧件列表被拍平/图片溢出）。
+#    v29：R128（2026-10-22 · 遗留 3 收口 · 交叉引用 REF 域）：题注编号加书签
+#         （图题/表题「图 X-Y / 表 X-Y」前缀包 w:bookmarkStart/End），正文对
+#         **真实存在**图号/表号的引用在渲染完成后回填为 5-run REF 域
+#         （可点击跳转、更新域后随编号刷新）。可见文本逐字节不变（域结果
+#         run = 原匹配文本），但包域改变 XML 字节 ⇒ 旧缓存必须整体失效；
+#         未登记/被回滚的编号保持纯文本（绝不生成指向不存在书签的坏域）。
+#         刻意不改（C-1/C-2/C-3 登记于 R128 报告）：标题编号仍为导出器文本
+#         编号（与目录/图号同源的既定契约）、export.py 四层拆分（独立排期）、
+#         存量 v28 及更早缓存行（由 _prune_export_cache 自然淘汰）。
+#    v30：R129 导出增强（2026-10-22 · 引入易标式导出机制收口）：
+#        ① Word 2010+ 专有扩展清除 —— python-docx 默认模板的 document.xml
+#           根元素声明 w14/wp14/wpg/wps/wpc 等 2010+ 命名空间且带
+#           mc:Ignorable="w14 wp14"，落盘后由 services/docx_namespace
+#           逐部件清理（只删未使用声明与残存注释属性，不动内容）；
+#        ② 导出后读回校验（services/export_validate）—— Markdown/HTML/
+#           HTML 实体/占位符残留 + 命名空间回潮 + 标题大纲映射；
+#        ③ 标题层级 L1~L9（旧 L1~L7）：Heading 7/8/9 显式写 outlineLvl，
+#           toc_depth 上限 7→9（目录域 \o "1-9" 随动）；
+#        ④ 公式三级降级 OMML → 图片（matplotlib mathtext，可选依赖）→ 原文。
+#        产物字节变化 ⇒ 旧缓存（v29 及更早）由 prune 自然淘汰。
+#    v31：R131-A（2026-10-23 · 目录/正文编号一致性 P0 · 图号归属漂移根因修复）：
+#        图题与 AI 配图 alt 剥离生成期残留的「图 X-Y」前缀（图表分支
+#        `fig_title`、配图分支 `alt` 两处；判据 import 自 content_format_contract
+#        的 FIG_TITLE_PREFIX_RE）。**可见题注文本变化**（「图 2-1 图 4-1 xxx」
+#        →「图 2-1 xxx」）⇒ 旧缓存内含双图号题注，必须整体失效。
+_EXPORTER_VERSION = "31"
 
 
 _CHART_TYPE_MAP = {
@@ -376,10 +487,13 @@ _CHART_TYPE_MAP = {
 # ---------------------------------------------------------------------------
 _AUDIT_RULES: tuple[tuple[str, str, str, re.Pattern], ...] = (
     # (key, 人类可读名, 级别, 正则)
+    # ✅ R129：placeholder / html_tag 两个正则上收至 services/content_residue_rules
+    #    （导出后校验 export_validate 同判据共用，且 services 层禁止反向 import
+    #    routers —— 层级护栏实拍抓到，见 tests/test_outline_name_line_20260927.py）。
     ("placeholder", "数据占位符（××/xx/【待补充】）", "warn",
-     re.compile(r"××+|(?<![A-Za-z0-9])[xX]{2}(?![A-Za-z0-9])|【待补充")),
+     PLACEHOLDER_RESIDUE_RE),
     ("html_tag", "HTML 标签残留（应使用 GFM 表格）", "error",
-     re.compile(r"</?(?:table|thead|tbody|tr|td|th|div|span|p|br)\b[^>]*>", re.I)),
+     HTML_TAG_RESIDUE_RE),
     # ✅ 新增：Excel/Word 剪贴板表格占位标记（<fcel>/<lcel>/<ucel>/<xc>/<nl>）——
     #    导出渲染时已降级为纯文本（不再印进成稿），此处仍计入体检供用户回改源文。
     ("clipboard_table", "剪贴板表格残留标记（粘贴表格带入，应改用 GFM 表格）", "error",
@@ -485,6 +599,42 @@ def audit_content(sections: list[dict], *,
             slot["count"] += unclosed
             if len(slot["sections"]) < 3 and title not in slot["sections"]:
                 slot["sections"].append(title)
+        # ✅ R130（三端格式契约 · 第二层「导出前校验」）：与正文生成后的第一层
+        #    自检（sse_handlers.format_contract）**共用同一份判据**
+        #    （services.content_format_contract），两层结论天然一致、不存在双轨。
+        #    只体检不篡改（对齐本块设计原则）；error→error、warning→warn、
+        #    advisory→info（排序表已支持 info 档）。
+        #    与 unclosed_fence 去重：契约的「代码块未闭合」与本块既有 error 项
+        #    是同一事实，不再二次计数。
+        try:
+            from app.services.content_format_contract import check_format_contract
+            _fc = check_format_contract(
+                content, section_id=str(sec.get("id") or ""),
+                section_title=title)
+            for it in _fc.get("issues") or []:
+                if (it.get("category") == "chart"
+                        and str(it.get("message", "")).startswith("代码块未闭合")):
+                    continue  # 与 unclosed_fence 同一事实，已在上方计数
+                _lvl = {"error": "error", "warning": "warn"}.get(
+                    it.get("severity"), "info")
+                _cat = str(it.get("category") or "text")
+                _cat_cn = {"text": "文字", "symbol": "符号", "formula": "公式",
+                           "chart": "图表", "table": "表格", "number": "数字",
+                           "numbering": "编号"}.get(_cat, _cat)
+                _key = f"format_contract_{_cat}"
+                slot = hits.setdefault(_key, {
+                    "key": _key,
+                    "label": f"格式契约·{_cat_cn}标准（正文与导出渲染标准不一致）",
+                    "level": _lvl, "count": 0, "sections": []})
+                slot["count"] += 1
+                if len(slot["sections"]) < 3 and title not in slot["sections"]:
+                    slot["sections"].append(title)
+                # error 级并档（同 key 混级时取更严重，排序/展示不被 advisory 拉低）
+                if _lvl == "error":
+                    slot["level"] = "error"
+        except Exception:
+            logger.warning("章节 %s 格式契约导出前校验失败（忽略，不阻断导出）",
+                           str(sec.get("id") or "")[:8], exc_info=True)
     if fences_fixed > 0:
         hits.setdefault("fence_auto_fixed", {
             "key": "fence_auto_fixed",
@@ -1827,6 +1977,43 @@ def _estimate_prefix_width(prefix: str) -> float:
     return max(0.5, round(w, 2))
 
 
+def _breaks_ordered_sequence(block: dict) -> bool:
+    """该内容块是否应**中断**有序列表的连续编号（R117 · 2026-10-20）。
+
+    ## 为什么不再「遇非列表块一律重置」
+
+    旧契约是「遇到任何非 list_item 块就把整条有序序列清零」。但 AI 生成的中文
+    施工方案里，列举项之间**天然夹着正文段落、表格、图片**：
+
+        1、被吊构件参数梳理
+        （一段 120 字的说明）
+        表 2-2 主要吊装构件参数表
+        （表格）
+        1、汽车吊选型依据        ← 作者意图是「2、」
+
+    实测（室外汽车吊吊装施工专项方案 第 1 轮导出）6 个章节的顶格列举全部被
+    渲染成一串 ``1、`` / ``1.`` —— 编号失去区分度，读者无法引用「第 2 条」。
+    对这类文档，「列表被正文打断」不是两个独立列表，而是同一组列举的延续。
+
+    ## 只在这两种情况下重置
+
+    1. **标题块** —— 结构边界，新标题下的枚举必然是新序列（沿用既有语义）；
+    2. **以冒号/中文冒号收尾的段落** —— 引导句（"主要参数如下："），其后
+       是一次**新**的列举，必须从 1 起算。
+
+    其余块（正文段落、表格、图片、图表、引用、分隔线、代码）一律**不重置**，
+    序号续接。真正需要重启的第二种情况（同一层换标记样式 ``1.`` → ``1、``）
+    仍由「该层 marker 变化 → seq 归零」的既有契约兜底，不受本函数影响。
+    """
+    btype = block.get("type")
+    if btype == "heading":
+        return True
+    if btype == "paragraph":
+        text = str(block.get("text") or "").strip()
+        return text.endswith(("：", ":"))
+    return False
+
+
 def _ensure_list_paragraph_style(doc) -> str:
     """获取或创建 "List Paragraph" 段落样式，返回列表段落样式名。
 
@@ -1850,6 +2037,178 @@ def _ensure_list_paragraph_style(doc) -> str:
     return name
 
 
+def _ensure_body_text_style(doc, first_line_indent) -> str:
+    """获取或创建正文段落样式，返回样式名。
+
+    ✅ R127（2026-10-22 · DOCX 标准符合性）：旧实现正文段落使用 Normal +
+    **直接格式**（first_line_indent / space_after 逐段写进 pPr）。OOXML 虽允许
+    直接格式，但长文档中 1300+ 段重复内联格式会放大文件、且无法通过样式统一
+    调整。现收敛为 ``Body Text CN`` 段落样式，正文只引用样式、不再写直接缩进。
+    """
+    from docx.enum.style import WD_STYLE_TYPE
+    from docx.oxml.ns import qn
+    from docx.shared import Pt
+
+    name = "Body Text CN"
+    for st in doc.styles:
+        if st.type == WD_STYLE_TYPE.PARAGRAPH and st.name == name:
+            return name
+    style = doc.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    style.base_style = doc.styles["Normal"]
+    pf = style.paragraph_format
+    pf.first_line_indent = first_line_indent
+    pf.space_after = Pt(3)
+    ppr = style.element.get_or_add_pPr()
+    # 正文不属于大纲层级，清除继承的 outlineLvl，避免误入目录
+    for ol in ppr.findall(qn("w:outlineLvl")):
+        ppr.remove(ol)
+    return name
+
+
+# ---------------------------------------------------------------------------
+# ✅ R127（2026-10-22）：列表使用 DOCX 原生编号（numbering.xml + w:numPr）
+# ---------------------------------------------------------------------------
+# 旧实现把「1、」「（一）」「1. 」等前缀作为**正文文本**写入 run，并给段落挂
+# List Paragraph 样式 + 悬挂缩进。视觉上正确，但 Word/WPS 不认为它们是列表：
+#   · 无法使用「继续编号 / 重新编号 / 调整级别」；
+#   · 复制到其它文档后编号变成死文本；
+#   · 预检/辅助技术无法识别列表语义。
+# 现改为：前缀不再写入 run，由 numbering.xml 的 abstractNum/lvlText 渲染；
+# 每个列表实例使用独立 w:num（带 startOverride，保证与导出器既有分层计数一致）。
+_NUMBERING_LEVELS = 9          # Word 最多 9 级
+_LIST_INDENT_STEP_TWIPS = 420  # 每级 0.74cm ≈ 420 twips
+
+
+def _marker_numbering_spec(marker: str, level: int) -> tuple[str, str, str]:
+    """返回 (numFmt, lvlText, suff)；level 从 0 开始。"""
+    n = level + 1
+    if marker == "num_dun":
+        return "decimal", f"%{n}、", "nothing"
+    if marker == "num_paren_r":
+        return "decimal", f"%{n}）", "nothing"
+    if marker == "num_paren_lr":
+        return "decimal", f"（%{n}）", "nothing"
+    if marker == "paren_ascii":
+        # 尾随空格由 w:suff="space" 提供，避免与 lvlText 内空格叠加
+        return "decimal", f"%{n})", "space"
+    if marker == "cn_num_paren":
+        # ST_NumberFormat 的 chineseCounting = 一、二、三…… 与 _cn_ordinal 一致
+        return "chineseCounting", f"（%{n}）", "nothing"
+    if marker == "bullet":
+        return "bullet", "•", "space"
+    return "decimal", f"%{n}.", "space"
+
+
+class _DocxListNumbering:
+    """为一次 DOCX 构建管理列表编号定义（abstractNum / num）。"""
+
+    def __init__(self, doc):
+        from docx.oxml.ns import qn
+
+        self._qn = qn
+        self._root = doc.part.numbering_part.element
+        used_abs = [int(a.get(qn("w:abstractNumId")) or 0)
+                    for a in self._root.findall(qn("w:abstractNum"))]
+        used_num = [int(n.get(qn("w:numId")) or 0)
+                    for n in self._root.findall(qn("w:num"))]
+        self._next_abstract = (max(used_abs) + 1) if used_abs else 1
+        self._next_num = (max(used_num) + 1) if used_num else 1
+        self._abstract_by_sig: dict[tuple[str, ...], int] = {}
+        self._bullet_num_id: int | None = None
+
+    def _ensure_abstract(self, signature: tuple[str, ...]) -> int:
+        from docx.oxml import parse_xml
+        from docx.oxml.ns import nsdecls
+
+        if signature in self._abstract_by_sig:
+            return self._abstract_by_sig[signature]
+        aid = self._next_abstract
+        self._next_abstract += 1
+        lvls = []
+        for lvl in range(_NUMBERING_LEVELS):
+            if lvl < len(signature):
+                marker = signature[lvl]
+            elif signature and signature[0] == "bullet":
+                marker = "bullet"
+            else:
+                marker = "ascii"
+            num_fmt, lvl_text, suff = _marker_numbering_spec(marker, lvl)
+            left = _LIST_INDENT_STEP_TWIPS * (lvl + 1)
+            lvls.append(
+                f'<w:lvl w:ilvl="{lvl}">'
+                f'<w:start w:val="1"/>'
+                f'<w:numFmt w:val="{num_fmt}"/>'
+                f'<w:suff w:val="{suff}"/>'
+                f'<w:lvlText w:val="{lvl_text}"/>'
+                f'<w:lvlJc w:val="left"/>'
+                f'<w:pPr><w:ind w:left="{left}" '
+                f'w:hanging="{_LIST_INDENT_STEP_TWIPS}"/></w:pPr>'
+                f'</w:lvl>')
+        xml = (f'<w:abstractNum {nsdecls("w")} '
+               f'w:abstractNumId="{aid}">'
+               f'<w:multiLevelType w:val="hybridMultilevel"/>'
+               f'{"".join(lvls)}</w:abstractNum>')
+        el = parse_xml(xml)
+        # CT_Numbering 要求 abstractNum 全部排在 num 之前
+        first_num = self._root.find(self._qn("w:num"))
+        if first_num is not None:
+            first_num.addprevious(el)
+        else:
+            self._root.append(el)
+        self._abstract_by_sig[signature] = aid
+        return aid
+
+    def new_num(self, signature: tuple[str, ...],
+                start_values: list[int]) -> int:
+        """新建列表实例；start_values = 各层级当前序号（Word 从该值起显示）。"""
+        from docx.oxml import parse_xml
+        from docx.oxml.ns import nsdecls
+
+        aid = self._ensure_abstract(tuple(signature))
+        nid = self._next_num
+        self._next_num += 1
+        overrides = "".join(
+            f'<w:lvlOverride w:ilvl="{i}">'
+            f'<w:startOverride w:val="{max(1, int(v))}"/>'
+            f'</w:lvlOverride>'
+            for i, v in enumerate(start_values))
+        xml = (f'<w:num {nsdecls("w")} w:numId="{nid}">'
+               f'<w:abstractNumId w:val="{aid}"/>{overrides}</w:num>')
+        el = parse_xml(xml)
+        cleanup = self._root.find(self._qn("w:numIdMacAtCleanup"))
+        if cleanup is not None:
+            cleanup.addprevious(el)
+        else:
+            self._root.append(el)
+        return nid
+
+    def bullet_num(self) -> int:
+        if self._bullet_num_id is None:
+            self._bullet_num_id = self.new_num(("bullet",), [])
+        return self._bullet_num_id
+
+    def apply(self, paragraph, num_id: int, level: int) -> None:
+        """把 w:numPr 写入段落 pPr（按 CT_PPr 顺序插到正确位置）。"""
+        from docx.oxml import OxmlElement
+
+        ppr = paragraph._p.get_or_add_pPr()
+        num_pr = OxmlElement("w:numPr")
+        ilvl = OxmlElement("w:ilvl")
+        ilvl.set(self._qn("w:val"), str(max(0, int(level))))
+        num_id_el = OxmlElement("w:numId")
+        num_id_el.set(self._qn("w:val"), str(int(num_id)))
+        num_pr.append(ilvl)
+        num_pr.append(num_id_el)
+        ppr.insert_element_before(
+            num_pr,
+            "w:suppressLineNumbers", "w:pBdr", "w:shd", "w:tabs",
+            "w:suppressAutoHyphens", "w:kinsoku", "w:wordWrap",
+            "w:overflowPunct", "w:topLinePunct", "w:autoSpaceDE",
+            "w:autoSpaceDN", "w:bidi", "w:adjustRightInd", "w:snapToGrid",
+            "w:spacing", "w:ind", "w:contextualSpacing", "w:mirrorIndents",
+            "w:suppressOverlap", "w:jc", "w:textDirection",
+            "w:textAlignment", "w:textboxTightWrap", "w:outlineLvl",
+            "w:divId", "w:cnfStyle", "w:rPr", "w:sectPr", "w:pPrChange")
 
 
 # ✅ 2026-10-05（D4 · 死副本清理）：`_TABLE_CAPTION_RE` / `_IMAGE_LINE_RE` /
@@ -1919,16 +2278,27 @@ _INLINE_RE = re.compile(
 )
 
 
+def _is_cjk_font(name: str) -> bool:
+    """字体名是否为中日韩字体名（含 CJK 统一表意文字）——西文字体名不含。"""
+    return any("一" <= ch <= "鿿" for ch in str(name or ""))
+
+
 def _set_run_font(run, name: str, size=None, *, bold=None, italic=None,
                   strike=None, color=None):
-    """统一设置 run 字体：同时写入 w:ascii / w:hAnsi 与 w:eastAsia。
+    """统一设置 run 字体：中文字体写 w:eastAsia，西文槽按文字标准分流。
 
     ✅ BUG 修复：旧实现只写 `run.font.name`（= w:ascii + w:hAnsi），中文实际
     由主题的 eastAsia 字体接管，在"宋体正文 + 黑体标题"等混排场景下中文会
     悄悄回退成默认字体，与配置不符。
+    ✅ R130（文字标准 · 西文统一 Times New Roman）：name 为中文字体
+    （宋体/黑体/仿宋/微软雅黑…）时，w:ascii/w:hAnsi 改写 Times New Roman、
+    中文仍走 eastAsia=name —— 成稿里的数字/英文统一衬线西文，与 Normal /
+    Heading 样式级口径一致；name 本身是西文字体（Consolas 等行内代码）时
+    行为与旧实现完全相同（ascii/hAnsi/eastAsia 三槽同值）。
     """
     from docx.oxml.ns import qn
-    run.font.name = name
+    latin = FONT_LATIN if _is_cjk_font(name) else name
+    run.font.name = latin
     rfonts = run._element.get_or_add_rPr().get_or_add_rFonts()
     rfonts.set(qn("w:eastAsia"), name)
     if size is not None:
@@ -1987,9 +2357,15 @@ def _add_omml_formula(paragraph, latex: str, display: bool, whole_para: bool):
     - ``display`` 且 ``whole_para``：插入块级公式 ``<m:oMathPara>``（居中独占段）；
     - 其余：插入内联公式 ``<m:oMath>``。
 
-    转换失败时回退为原文文本（``$...$``），保证不丢内容。
+    ✅ R129 三级降级（引入易标式「复杂公式降级为图片」）：
+      1) OMML 原生公式（首选，可编辑、随字体缩放）；
+      2) OMML 失败（不支持的结构 / 空参数防护网拒绝）→ matplotlib mathtext
+         渲染为 PNG 行内图片（可选依赖，未安装时跳过此级）；
+      3) 图片也失败 → 回退为原文文本（``$...$``），保证不丢内容。
+    每级失败都留痕（formula_image_fallback 计数进 X-Fix-Stats）。
     """
     from docx.oxml import parse_xml
+    from docx.shared import Pt
 
     try:
         if display and whole_para:
@@ -1998,9 +2374,27 @@ def _add_omml_formula(paragraph, latex: str, display: bool, whole_para: bool):
             xml = docx_math.latex_to_omml(latex)
         node = parse_xml(xml)
         paragraph._p.append(node)
+        return
     except Exception:  # pragma: no cover - 转换失败兜底
-        logger.warning("LaTeX 公式转换失败，保留原文: %r", latex[:60])
-        paragraph.add_run(("$$" if display else "$") + latex + ("$$" if display else "$"))
+        pass
+    # 降级第 2 级：LaTeX → PNG 图片（best-effort，matplotlib 可选依赖）
+    try:
+        png = docx_math.latex_to_png_bytes(latex)
+    except Exception:
+        png = None
+    if png:
+        try:
+            _fix_stats()["formula_image_fallback"] += 1
+            run = paragraph.add_run()
+            # 高度对齐正文字号，宽度按图片纵横比自动适配
+            run.add_picture(BytesIO(png), height=Pt(14))
+            logger.warning("LaTeX 公式 OMML 失败，降级为图片: %r", latex[:60])
+            return
+        except Exception:
+            logger.warning("公式图片嵌入失败，回退原文: %r", latex[:60])
+    # 降级第 3 级：保留原文文本（行为与 R129 之前逐字一致）
+    logger.warning("LaTeX 公式转换失败，保留原文: %r", latex[:60])
+    paragraph.add_run(("$$" if display else "$") + latex + ("$$" if display else "$"))
 
 
 def _collapse_redundant_spaces(text: str) -> str:
@@ -2075,7 +2469,29 @@ _FIX_STATS_KEYS = ("formulas", "block_formulas", "replacement_chars",
                     # ✅ 2026-10-17（导出文档发现的问题）：表格「两块侧叠」错位行
                     #   被拆分还原的次数（普通表恒为 0）。加法式扩展：既有键语义
                     #   与取值一字未动。
-                    "table_unstacked")
+                    "table_unstacked",
+                    # ✅ R117 FIX-10（2026-10-20）：同章内**逐字重复**的正文块被折叠
+                    #   的次数（正常章节恒为 0；AI 把同一节内容在 ```markdown 围栏
+                    #   内外各写一遍时非零）。加法式扩展：既有键语义与取值一字未动。
+                    "repeated_blocks",
+                    # ✅ R117 FIX-11（2026-10-20）：同章内「前缀相同、后文分歧」的
+                    #   **近似重复**正文块数。这类块**刻意不改写成稿**（两侧各有独有
+                    #   尾句，删任一侧都是真丢内容），只做归因报警 ⇒ 计数非零不代表
+                    #   产物字节变化。加法式扩展：既有键语义与取值一字未动。
+                    "near_duplicate_blocks",
+                    # ✅ R128（2026-10-22 · 遗留 3 收口）：正文「图 X-Y / 表 X-Y」
+                    #   引用被升级为 REF 域（可点击、更新域后随编号刷新）的处数。
+                    #   只对真实存在的题注书签包域；未登记编号保持纯文本。
+                    "cross_ref_fields",
+                    # ✅ R129（2026-10-22 · 引入易标式导出机制收口）：
+                    #   导出后校验与 Word 2010+ 扩展清除的可观测性。加法式扩展：
+                    #   既有键的语义与取值一字未动，新键仅在对应清理/残留发生时非零。
+                    "ns_parts_sanitized",        # 清理了 2010+ 命名空间声明的部件数
+                    "postcheck_markdown_residue", # 产物中 Markdown 语法残留段落数
+                    "postcheck_html_residue",     # 产物中 HTML 标签残留段落数
+                    "postcheck_entity_residue",   # 产物中 HTML 实体残留段落数
+                    "postcheck_placeholder_residue", # 产物中占位符残留段落数
+                    "formula_image_fallback")     # 公式 OMML 失败降级为图片的处数
 _FIX_STATS_LOCAL = threading.local()
 
 
@@ -2132,6 +2548,31 @@ def _log_fix_stats() -> dict:
         parts.append(f"中英混排误植还原 {st['en_residue']} 处（英文词 → 中文）")
     if st["latex_residue"]:
         parts.append(f"公式边界空白归一 {st['latex_residue']} 处（$ x $ → $x$）")
+    if st["repeated_blocks"]:
+        parts.append(f"同章逐字重复正文块折叠 {st['repeated_blocks']} 处"
+                     "（源文同一内容写了两遍，成稿仅保留首次）")
+    if st["near_duplicate_blocks"]:
+        parts.append(f"同章近似重复正文块 {st['near_duplicate_blocks']} 处"
+                     "（前段相同、后文各自扩写，成稿**未改动**，请回查源文）")
+    if st["cross_ref_fields"]:
+        parts.append(f"正文交叉引用升级为可点击 REF 域 {st['cross_ref_fields']} 处"
+                     "（更新域后随编号刷新）")
+    # ✅ R129：导出后校验 + Word 2010+ 扩展清除（新键仅在发生时展示）
+    if st["ns_parts_sanitized"]:
+        parts.append(f"清除 Word 2010+ 专有命名空间声明 {st['ns_parts_sanitized']} 个部件"
+                     "（OOXML Transitional 纯净导出）")
+    if st["postcheck_markdown_residue"]:
+        parts.append(f"产物检出 Markdown 语法残留 {st['postcheck_markdown_residue']} 处"
+                     "（渲染链路漏洞，请回查源文）")
+    if st["postcheck_html_residue"]:
+        parts.append(f"产物检出 HTML 标签残留 {st['postcheck_html_residue']} 处")
+    if st["postcheck_entity_residue"]:
+        parts.append(f"产物检出 HTML 实体残留 {st['postcheck_entity_residue']} 处")
+    if st["postcheck_placeholder_residue"]:
+        parts.append(f"产物检出占位符残留 {st['postcheck_placeholder_residue']} 处")
+    if st["formula_image_fallback"]:
+        parts.append(f"公式降级为图片 {st['formula_image_fallback']} 处"
+                     "（OMML 转换失败的三级降级）")
     stats = dict(st)
     if st["block_render_failed"] or st["table_truncated"]:
         logger.warning(
@@ -2143,9 +2584,181 @@ def _log_fix_stats() -> dict:
             "DOCX 导出前置自动补齐了 %d 处未闭合围栏：围栏之后的正文会被并入"
             "图表源码并整体跳过（CommonMark 口径），成稿请人工核对缺失段落",
             st["fences_fixed"])
+    if st["repeated_blocks"]:
+        logger.warning(
+            "DOCX 导出折叠了 %d 处**同章内逐字重复**的正文块 —— 源文把同一节内容"
+            "写了两遍（实测形态：一整节写进 ```markdown 围栏，围栏闭合后又在围栏外"
+            "重述一遍，其中逐字相同的部分已折叠、后文扩写的部分见下一条）。"
+            "成稿仅保留逐字重复的首次出现，明细已按章节点名；"
+            "请回查源文或重新生成该章", st["repeated_blocks"])
+    if st["near_duplicate_blocks"]:
+        logger.warning(
+            "DOCX 导出检出 %d 处**同章内近似重复**的正文块（前 60 字归一后相同、"
+            "后文分歧）—— 这类块**成稿一字未改**：两侧各有独有的尾句，删除任一侧"
+            "都是实质性丢内容，导出器无权替用户取舍。明细已按章节点名，"
+            "请回查源文该章或重新生成", st["near_duplicate_blocks"])
+    # ✅ R129：导出后校验检出残留 ⇒ 与内容块降级同级警告（成稿可交付但有脏点）
+    if (st["postcheck_markdown_residue"] or st["postcheck_html_residue"]
+            or st["postcheck_entity_residue"] or st["postcheck_placeholder_residue"]):
+        logger.warning(
+            "DOCX 导出后校验检出残留：Markdown %d / HTML %d / 实体 %d / 占位符 %d —— "
+            "明细见本次导出日志，请回查对应章节源文",
+            st["postcheck_markdown_residue"], st["postcheck_html_residue"],
+            st["postcheck_entity_residue"], st["postcheck_placeholder_residue"])
     logger.info("DOCX 导出自动修复: %s", "、".join(parts))
     st.update({k: 0 for k in st})
     return stats
+
+
+#: R117 FIX-10 · 可参与「逐字重复」判定的块类型 —— 只有**正文性**块才可能
+#: 出现整段复述；表格 / 图表 / 代码 / 图片是结构块，重复出现即视为刻意安排。
+_REPEATABLE_BLOCK_TYPES = ("paragraph", "list_item")
+#: 普通正文折叠阈值（归一后字符数）。低于此值时「同一短语出现两次」在正常
+#: 行文里很常见（并列小标题、固定术语），折叠会误删内容。
+_REPEAT_MIN_CHARS = 40
+#: ``**小标题**`` 形的降档阈值。这类块**整串**就是一对 ``**`` 包裹，
+#: 同一章内逐字出现两次几乎必为复述。
+_REPEAT_BOLD_MIN_CHARS = 8
+#: 纯加粗小标题形（内部不再含 ``**``，用以排除「``**名称**：说明…``」行内加粗）。
+_RE_BOLD_ONLY = re.compile(r"^\*\*([^*\n]{4,})\*\*$")
+#: 归一化：剥掉全部空白（换行、缩进、全角空格）后比对，不做任何语义改写。
+_WS_ONLY_RE = re.compile(r"\s+")
+#: R117 FIX-11 · 近似重复判定的「公共前缀」门槛（归一后字符数）。取 60 的取证
+#: 依据：生产实测五对近重复的首个分歧位置分别在 66 / 74 / 91 / 163 / 185 字，
+#: 全部 ≥66；而正常行文里两段不同内容恰好逐字撞满前 60 字的概率极低。
+#: 门槛刻意取高而非取低：公共前缀越短，越容易把「同一标准号 / 同一句式开头的
+#: 两句不同论述」误报成重复，报警一旦失真用户就会忽略它。
+_NEAR_DUP_PREFIX_CHARS = 60
+
+
+def _collapse_repeated_blocks(blocks: list[dict], *, where: str = "") -> list[dict]:
+    """折叠同一章节内**逐字重复**的正文块（R117 FIX-10 · 2026-10-20）。
+
+    取证（``artifacts/r117/_probe13.txt`` / ``_probe14.txt`` / **全字符级复核**
+    ``_probe16.txt``）：生产库 ``sections.content`` 的「通用工程标准」一章把同一批
+    内容写了**两遍** —— 第 1~25 行在 ` ```markdown ` 围栏内，第 27~47 行在围栏闭合
+    **之后**重述一遍。逐字程度分两类（务必分清，早期探针按前 40/60 字截断判重
+    曾把两类混谈）：
+      * **逐字相同 5 组**：五个 ``**标准名 + 现场检查标准**`` 加粗小标题
+        （归一后 20~24 字，如 ``**JGJ59-2011现场检查标准**``）⇒ 本函数折叠，
+        blocks 24 → 19；
+      * **仅前缀相同 5 组**：五段正文（137~301 字）共享前 **66~185** 字后各自
+        往下写 ⇒ **不折叠**（见 :func:`_report_near_duplicate_blocks`）。
+    导出器忠实渲染两份 ⇒ 同一批小标题与同一段落前半在 8 万字方案里重复出现，
+    用户必须手工删掉一半，而此前**没有任何检出面拦住它**。
+
+    判据（保守，四条同时满足才折叠，普通章节零影响）：
+      ① 块类型 ∈ :data:`_REPEATABLE_BLOCK_TYPES`（段落 / 列表项）；
+      ② **归一（剥掉全部空白）后完全相同** —— 只处理"逐字复述"，不碰"近似改写"；
+      ③ 长度达标：普通正文 ≥ :data:`_REPEAT_MIN_CHARS`，
+         `**小标题**` 形 ≥ :data:`_REPEAT_BOLD_MIN_CHARS`；
+      ④ 保留**首次**出现，只丢弃后续副本（被保留块自身一字未改）。
+
+    阈值为何分两档：40 字以下短句重复在正常行文里常见，必须整段比对才安全；
+    但本例的 `**JGJ 59-2011 现场检查标准**` 只有 18 字，若一刀切 40 字就会
+    留下"正文已折叠、加粗小标题仍出现两次"的半截重复 —— 故只对
+    **整串被 `**` 包裹**的块降档，行内加粗（`**名称**：说明…`）不受影响。
+
+    全 fail-soft：任何异常原样返回 blocks（绝不因去重而丢整章内容）。
+
+    ⚠️ **判重作用域刻意限定为单章**（``seen`` 随每次调用重置）—— 不同章节
+    引用同一条标准条文、同一段安全要求是专项方案的正常写法，跨章去重会
+    把第五章「安全检查标准」引用第二章原文的那一段**误删**，属实质性
+    丢内容，远比留一份重复更糟。
+    """
+    try:
+        seen: set[str] = set()
+        out: list[dict] = []
+        dropped: list[str] = []
+        for b in blocks:
+            if (not isinstance(b, dict)
+                    or b.get("type") not in _REPEATABLE_BLOCK_TYPES):
+                out.append(b)
+                continue
+            raw = str(b.get("text") or "")
+            if not raw.strip():
+                out.append(b)
+                continue
+            key = _WS_ONLY_RE.sub("", raw)
+            mb = _RE_BOLD_ONLY.match(key)
+            if mb:
+                key, floor = f"bold:{mb.group(1)}", _REPEAT_BOLD_MIN_CHARS
+            else:
+                floor = _REPEAT_MIN_CHARS
+            if len(key) >= floor and key in seen:
+                dropped.append(raw)
+                continue
+            seen.add(key)
+            out.append(b)
+        if dropped:
+            st = _fix_stats()
+            st["repeated_blocks"] = st.get("repeated_blocks", 0) + len(dropped)
+            logger.warning(
+                "正文重复（%s）：同章检出 %d 个逐字重复正文块，成稿仅保留首次 —— "
+                "样例：%s", where or "未标注章节", len(dropped),
+                " / ".join(x.strip()[:24] for x in dropped[:3]))
+        return out
+    except Exception as exc:  # noqa: BLE001  # fail-soft：宁可不折叠
+        logger.warning("正文重复折叠跳过（%s）：%s —— 原样保留全部块", where, exc)
+        return blocks
+
+
+def _report_near_duplicate_blocks(blocks: list[dict], *, where: str = "") -> int:
+    """检出同章内「前缀相同、后文分歧」的**近似重复**正文块，只报警、不改写。
+
+    R117 FIX-11（2026-10-20）。与 :func:`_collapse_repeated_blocks` 是**一对**：
+    那边折叠逐字相同的副本（零内容损失），这边处理占比更大的另一种形态 ——
+    AI 把同一节内容复述两遍时，段落**前 66~185 字逐字相同、之后各写各的**
+    （取证 ``artifacts/r117/_probe16.txt``：「通用工程标准」一章 5 对，两侧长度
+    分别 137~301 / 176~230 / 187~249 / 195~301 / 200~300 字，首个分歧位置
+    66 / 74 / 91 / 163 / 185 字）。
+
+    ⚠️ **刻意不折叠**（这是本轮最重要的边界，不是偷懒）：
+      近重复的两侧**各自持有独有尾句**，删除任一侧都是**实质性丢正文** ——
+      「短的那段」不是「长的那段」的前缀子串（首个分歧出现在中段），
+      所以连「保留信息量更大的一侧」这种保守做法都做不到。导出器没有资格
+      替用户判断哪一段的后续论述更重要，也不该用「合并 / 截断」自造第三版文字
+      （那是改写正文，属生成域，不属导出域）。
+      ⇒ 正确动作只有两个：**让缺陷可见**（本函数）+ **回到源头重新生成该章**。
+
+    判据（只统计、不动 blocks）：块类型 ∈ :data:`_REPEATABLE_BLOCK_TYPES`，
+    非纯加粗小标题形，归一后长度 ≥ :data:`_NEAR_DUP_PREFIX_CHARS`，且与本章
+    已见过的另一块**共享前 :data:`_NEAR_DUP_PREFIX_CHARS` 字而全文不同**。
+    逐字相同的块不在此计（已由折叠处理，避免双计）。
+
+    返回检出的近重复**副本**数（正常章节恒为 0）；fail-soft：异常返回 0，
+    绝不影响导出主链路。
+    """
+    try:
+        buckets: dict[str, list[str]] = {}
+        pairs: list[tuple[str, str]] = []
+        for b in blocks:
+            if (not isinstance(b, dict)
+                    or b.get("type") not in _REPEATABLE_BLOCK_TYPES):
+                continue
+            key = _WS_ONLY_RE.sub("", str(b.get("text") or ""))
+            if len(key) < _NEAR_DUP_PREFIX_CHARS or _RE_BOLD_ONLY.match(key):
+                continue
+            head = key[:_NEAR_DUP_PREFIX_CHARS]
+            prev = buckets.setdefault(head, [])
+            for p in prev:
+                if p != key:  # 全文相同 ⇒ 属逐字重复，交给折叠那边计
+                    pairs.append((p, key))
+                    break
+            prev.append(key)
+        if pairs:
+            st = _fix_stats()
+            st["near_duplicate_blocks"] = (
+                st.get("near_duplicate_blocks", 0) + len(pairs))
+            logger.warning(
+                "正文近似重复（%s）：同章检出 %d 处前 %d 字相同、后文分歧的正文块 —— "
+                "成稿**未作改动**（两侧各有独有内容，删任一侧即丢正文），样例前 30 字：%s",
+                where or "未标注章节", len(pairs), _NEAR_DUP_PREFIX_CHARS,
+                " / ".join(x[1][:30] for x in pairs[:3]))
+        return len(pairs)
+    except Exception as exc:  # noqa: BLE001  # fail-soft：检出不影响导出
+        logger.warning("正文近似重复检测跳过（%s）：%s", where, exc)
+        return 0
 
 
 #: 附录事实单元格行首的 Markdown 列表符号（``- `` / ``* `` / ``+ ``）。
@@ -2197,7 +2810,9 @@ def _add_table_caption(doc, text: str, font_name: str = "宋体", font_size: flo
     pf.space_before = Pt(6)
     pf.space_after = Pt(2)
     pf.keep_with_next = True
-    _set_run_font(p.add_run(text), font_name, font_size, bold=True)
+    # ✅ R128（遗留 3 收口）：题注编号前缀加书签（正文「表 X-Y」引用可升级
+    #    为 REF 域）；视觉与旧实现逐字节一致（书签为不可见元素）。
+    _add_caption_text_with_ref_bookmark(p, text, font_name, font_size)
     return p
 
 
@@ -2220,6 +2835,71 @@ def _strip_leading_table_number(text: str) -> str:
         return t
     stripped = _LEADING_TABLE_NUM_RE.sub("", t).strip()
     return stripped or t
+
+
+def _strip_leading_figure_number(text: str) -> str:
+    """剥离图题 / 配图 alt 中生成期自带的「图 X-Y」编号前缀。
+
+    ✅ R131-A（2026-10-23 · 目录/正文编号一致性 P0 · 图号归属漂移根因修复）：
+    图号在渲染期由 ``_figure_chapter_num`` 按**当前章节树**现算并前置
+    （见 ``write_section`` 图表 / 配图两分支），而生成期写进图表载荷 title、
+    Mermaid title 指令、``![图 4-1 …](url)`` alt 的「图 4-1 …」被**原样保留**
+    ⇒ 成稿出现「图 2-1 图 4-1 劳动力配置计划」：前半是当前树新号，后半是
+    **过期章号** —— 章节移动后即「图号归属漂移 + 重号」（验收标准所指形态）。
+    表侧同型问题已于 2026-10-17 用 :func:`_strip_leading_table_number` 收口
+    （表号叠写根因 B），图侧一直缺失，此处对齐同口径。
+
+    判据复用唯一事实源 ``content_format_contract.FIG_TITLE_PREFIX_RE``（由
+    ``FIG_TITLE_RE`` 派生，本文件不持有第二份字面量）—— 契约判定为规范图题
+    的才剥，判据与形态检查天然同源。fail-soft：异常或剥离后为空一律返回原文，
+    绝不阻断渲染。
+    """
+    try:
+        t = str(text or "").strip()
+        if not t:
+            return t
+        m = FIG_TITLE_PREFIX_RE.match(t)
+        if not m:
+            return t
+        return t[m.end():].strip() or t
+    except Exception:  # noqa: BLE001 — 剥离失败必须保留原文，绝不阻断导出
+        return str(text or "").strip()
+
+
+#: 自动表题里必须剔除的「无信息表头单元格」—— 把它们拼进表题只会得到
+#: 「表 2-5 序号、项目、参数指标」这类读不出内容的标题（R117 实测）。
+_AUTO_CAPTION_JUNK_CELLS = frozenset({
+    "序号", "编号", "代码", "备注", "说明", "单位", "数量", "No", "NO", "no", "№",
+})
+#: 表头单元格里的行内/独占公式（``高度 $H$ (m)`` / ``$[\Delta]$``）。
+_RE_CAPTION_MATH = re.compile(r"\${1,2}[^$]*\${1,2}")
+
+
+def _sanitize_auto_caption(cells: list[str]) -> str:
+    """把 GFM 表头单元格拼成**可读**的自动表题（R117 · 2026-10-20）。
+
+    两处实测缺陷（室外汽车吊吊装施工专项方案 第 1 轮导出）：
+
+    1. ``表 4-5 构件类型、高度 $H$ (m)、垂直度允许偏差 $[\\Delta]$ (mm)`` ——
+       表题以“单 run”写入（:func:`_add_table_caption`），**不走**行内公式渲染，
+       于是 ``$H$`` / ``$[\\Delta]$`` 的 LaTeX 原文被印进成稿题注。
+    2. ``表 1-8 序号、项目、参数指标`` / ``表 3-5 岗位名称、每人负责数量、备注``
+       —— 表头里的「序号/备注」等**无信息列名**被拼进标题，读者无法判断表的内容。
+
+    故自动表题在拼接前：剥公式、剥首尾分隔符、丢弃无信息列名、去重、压缩空白。
+    只作用于**自动生成**的表题，源文自带表题（``captions`` 分支）逐字保留。
+    """
+    out: list[str] = []
+    for raw in cells:
+        c = _RE_CAPTION_MATH.sub("", str(raw or ""))
+        c = c.replace("$", "").strip(" 　")
+        c = c.strip("、，,；;")
+        c = re.sub(r"[ \t　]{2,}", " ", c).strip()
+        if not c or c in _AUTO_CAPTION_JUNK_CELLS:
+            continue
+        if c not in out:
+            out.append(c)
+    return "、".join(out)
 
 
 #: GFM 表格尺寸上限（2026-10-06 · P1 性能/稳定性）。
@@ -2302,6 +2982,48 @@ def _unstack_or_trim_table_rows(rows: list[list[str]]) -> list[list[str]]:
     return [r + [""] * (width - len(r)) for r in out]
 
 
+def _merge_table_title_band(table, rows: list[list[str]]) -> bool:
+    """首行是「通栏标题行」时横向合并为单格。
+
+    ✅ R117 FIX-9（2026-10-20）：实测导出稿第 16 张表（表 2-4）首行是
+    ``['吊装作业关键文件核查清单', '', '']`` —— 源表用一个「单格标题行」当表头，
+    成稿就渲染成「左格有字、其余两格空着」的半条色带；更糟的是跨页重复
+    （``w:tblHeader``）打的正是这一行，翻页后重复出来的仍是半条空色带，
+    **列名永远不出现**。
+
+    识别条件（保守，四条同时满足）：
+      ① 表格 ≥ 2 列、≥ 2 行；
+      ② 首行**只有第 1 格**有内容（其余格全空）；
+      ③ 第 2 行至少 2 格有内容（证明它是真正的列名/数据行，而非另一条标题）；
+      ④ 首行尚未合并过（``tc`` 数量仍等于列数）—— 保证幂等。
+
+    合并后居中，并清掉合并带入的空段落（python-docx 的 ``merge`` 会把每格的
+    段落都串进来，否则色带被撑成 3 行高）。返回 True 供调用方把「表头重复行」
+    从第 0 行改到第 1 行。
+    """
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    ncols = len(table.columns)
+    if ncols < 2 or len(rows) < 2:
+        return False
+    header = [str(x or "").strip() for x in rows[0]]
+    if not header or not header[0] or any(header[1:]):
+        return False
+    second = [str(x or "").strip() for x in rows[1]]
+    if sum(1 for x in second if x) < 2:
+        return False
+    if len(table.rows[0]._tr.tc_lst) < ncols:
+        return False  # 已合并过（横向合并后 tc 数 < 列数）
+
+    merged = table.rows[0].cells[0].merge(table.rows[0].cells[-1])
+    for p in list(merged.paragraphs)[1:]:
+        if not p.text.strip():
+            p._element.getparent().remove(p._element)
+    for p in merged.paragraphs:
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    return True
+
+
 def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体"):
     """将 GFM 表格行转为 Word 表格。
 
@@ -2315,7 +3037,7 @@ def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体")
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
-    from docx.shared import Pt
+    from docx.shared import Cm, Pt
 
     def _split_row(raw: str) -> list[str]:
         # 先保护转义竖线 \| ，再按竖线切分，最后还原为普通 |
@@ -2378,22 +3100,40 @@ def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体")
                 #    与已写入的 w:vAlign 顺序颠倒，WPS 拒绝打开）
                 _set_cell_shading(cell, "B6B1D1")
 
+    # ✅ R117 FIX-9（2026-10-20）：首行「通栏标题行」横向合并
+    _band_merged = _merge_table_title_band(table, rows)
+
+    # ✅ R117 FIX-8（2026-10-20）：每一行都禁止跨页断开（含表头行）。
+    #    实测导出稿 195 行无一带 cantSplit —— 长表翻页会把同一行劈成两半。
+    for _row in table.rows:
+        _set_row_cant_split(_row)
+
     # ✅ 增强：表头行跨页重复（长表格翻页后仍能看到列名）
+    # ✅ R117 FIX-9：首行已被合并成通栏标题带时，重复的是**列名行**（第 2 行）——
+    #    重复一条标题带既无信息量，又会把真正的列名继续压掉。
+    _hdr_idx = 1 if _band_merged else 0
     if len(rows) > 1:
-        tr_pr = table.rows[0]._tr.get_or_add_trPr()
+        tr_pr = table.rows[_hdr_idx]._tr.get_or_add_trPr()
         if tr_pr.find(qn("w:tblHeader")) is None:
             tbl_header = OxmlElement("w:tblHeader")
             tbl_header.set(qn("w:val"), "true")
             tr_pr.append(tbl_header)
     # ✅ 增强：列宽按各列最长内容自适应分配（总宽约 16cm），避免长文本被挤成多行
-    _assign_table_column_widths(table, rows, ncols)
+    _widths_cm = _assign_table_column_widths(table, rows, ncols)
+    if _band_merged:
+        # 合并单元格横跨**全部列**：固定布局（tblLayout=fixed）下必须显式给全表宽，
+        # 否则沿用首列宽 —— 标题带被压成 1.2cm 宽、文字逐字换行。
+        table.rows[0].cells[0].width = Cm(sum(_widths_cm))
 
 
-def _assign_table_column_widths(table, rows: list[list[str]], ncols: int) -> None:
+def _assign_table_column_widths(table, rows: list[list[str]], ncols: int) -> list[float]:
     """按各列最长内容（中文字符权重1、半角0.5）比例分配列宽，总宽约 16cm。
 
     同时声明固定布局（tblLayout=fixed）+ 表格总宽（tblW），否则 Word 会按内容
     重新折列宽，自适应列宽不生效。
+
+    ✅ R117 FIX-9：返回各列宽度（cm）——首行通栏合并后需要按列宽**求和**给
+    合并单元格显式宽度，否则固定布局下它只拿到首列宽。
     """
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
@@ -2408,7 +3148,16 @@ def _assign_table_column_widths(table, rows: list[list[str]], ncols: int) -> Non
         for ci in range(ncols):
             weights[ci] = max(weights[ci], _w(r[ci] if ci < len(r) else ""))
     total = sum(weights) or 1.0
+    # ✅ R127（2026-10-22 · 表格溢出修复）：旧实现硬编码 16cm 总宽。当用户选择
+    #    Word 标准页边距（左右 3.17cm）时版心仅 14.65cm，实测正文表宽 16cm
+    #    超出页面 1.35cm（右侧被裁切/打印越界）。现按当前节实际版心收敛。
     total_cm = 16.0
+    try:
+        sec = table.part.document.sections[-1]
+        total_cm = (sec.page_width - sec.left_margin - sec.right_margin) / 360000
+    except Exception:
+        pass
+    total_cm = max(4.0, min(float(total_cm), 24.0))
     widths_cm = [max(1.2, total_cm * w / total) for w in weights]
     scale = total_cm / (sum(widths_cm) or 1.0)  # 归一化，避免浮点误差溢出页边距
     widths_cm = [w * scale for w in widths_cm]
@@ -2418,17 +3167,84 @@ def _assign_table_column_widths(table, rows: list[list[str]], ncols: int) -> Non
     tbl_w = tbl_pr.find(qn("w:tblW"))
     if tbl_w is None:
         tbl_w = OxmlElement("w:tblW")
-        tbl_pr.append(tbl_w)
+        tbl_pr.insert_element_before(
+            tbl_w, "w:jc", "w:tblCellSpacing", "w:tblInd", "w:tblBorders",
+            "w:shd", "w:tblLayout", "w:tblCellMar", "w:tblLook",
+            "w:tblCaption", "w:tblDescription")
     tbl_w.set(qn("w:w"), str(sum(twips)))
     tbl_w.set(qn("w:type"), "dxa")
     layout = tbl_pr.find(qn("w:tblLayout"))
     if layout is None:
         layout = OxmlElement("w:tblLayout")
-        tbl_pr.append(layout)
+        tbl_pr.insert_element_before(
+            layout, "w:tblCellMar", "w:tblLook", "w:tblCaption",
+            "w:tblDescription")
     layout.set(qn("w:type"), "fixed")
     for row in table.rows:
         for ci, cell in enumerate(row.cells):
             cell.width = Cm(widths_cm[ci])
+    return widths_cm
+
+
+def _finalize_simple_table(table, *, header_rows: int = 1,
+                           widths_cm: tuple[float, ...] = (4.2, 11.8)) -> None:
+    """收口两列「名称 / 内容」表：固定布局、行不跨页、表头跨页重复。
+
+    ✅ R127（2026-10-22）：附录事实表 / 参考资料表此前直接用 ``add_table``
+    逐行拼装，实测 15 张表**既无 tblHeader 也无 cantSplit、且非 fixed 布局**：
+    跨页后表头丢失、长内容行被从中间劈开、列宽随内容漂移。正文 GFM 表格早已
+    由 ``_add_table_from_markup`` 处理，本 helper 补齐附录/表单类表格。
+    """
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Cm
+
+    ncols = len(table.columns)
+    if not ncols:
+        return
+    for row in table.rows:
+        _set_row_cant_split(row)
+    if header_rows and len(table.rows) >= header_rows:
+        tr_pr = table.rows[header_rows - 1]._tr.get_or_add_trPr()
+        if tr_pr.find(qn("w:tblHeader")) is None:
+            el = OxmlElement("w:tblHeader")
+            el.set(qn("w:val"), "true")
+            tr_pr.append(el)
+    widths = list(widths_cm) if len(widths_cm) == ncols else None
+    if widths is None:
+        step = 14.0 / ncols
+        widths = [step] * ncols
+    # 按当前节的实际版心宽度收敛，避免自定义页边距时表格溢出页面
+    available_cm = 16.0
+    try:
+        sec = table.part.document.sections[-1]
+        available_cm = (sec.page_width - sec.left_margin - sec.right_margin) / 360000
+    except Exception:
+        pass
+    total_w = sum(widths)
+    if total_w > available_cm > 0:
+        widths = [w * available_cm / total_w for w in widths]
+    tbl_pr = table._tbl.tblPr
+    tbl_w = tbl_pr.find(qn("w:tblW"))
+    if tbl_w is None:
+        tbl_w = OxmlElement("w:tblW")
+        # CT_TblPr 严格序列：tblW 在 jc/tblBorders/shd/tblLayout 之前
+        tbl_pr.insert_element_before(
+            tbl_w, "w:jc", "w:tblCellSpacing", "w:tblInd", "w:tblBorders",
+            "w:shd", "w:tblLayout", "w:tblCellMar", "w:tblLook",
+            "w:tblCaption", "w:tblDescription")
+    tbl_w.set(qn("w:w"), str(int(round(sum(widths) * 567))))
+    tbl_w.set(qn("w:type"), "dxa")
+    layout = tbl_pr.find(qn("w:tblLayout"))
+    if layout is None:
+        layout = OxmlElement("w:tblLayout")
+        tbl_pr.insert_element_before(
+            layout, "w:tblCellMar", "w:tblLook", "w:tblCaption",
+            "w:tblDescription")
+    layout.set(qn("w:type"), "fixed")
+    for row in table.rows:
+        for ci, cell in enumerate(row.cells):
+            cell.width = Cm(widths[ci])
 
 
 def _add_cover_info_table(doc, info: dict, font_name: str) -> None:
@@ -2481,6 +3297,8 @@ def _add_cover_info_table(doc, info: dict, font_name: str) -> None:
         # ✅ R109：同上，改走按序列插入的单一实现（并防重复 w:shd）
         _set_cell_shading(c0, "F2F2F2")
         _set_cell_shading(c1, "F2F2F2")
+    # ✅ R127：封面信息表同样禁止行跨页（无表头，不设 tblHeader）
+    _finalize_simple_table(table, header_rows=0, widths_cm=(4.0, 10.0))
 
 
 
@@ -2812,6 +3630,25 @@ def _set_margins(section, margins: dict) -> None:
     section.bottom_margin = _cm("bottom", 2.5)
 
 
+def _content_width_cm(doc) -> float:
+    """当前节「正文可用宽度」（cm）—— 图片/表格共用的版心口径。
+
+    ✅ R127（2026-10-22）：图片宽度旧实现固定封顶 ``_CHART_MAX_WIDTH_CM``
+    （16cm，对应默认 2.5cm 页边距下的版心）。启用 ``engineering`` 版式预设
+    （左右 3.18cm）时版心只剩 14.65cm，16cm 宽图会横向溢出页面 —— 这里按
+    实际节属性换算，取不到时回退 16cm（与旧行为逐字一致）。
+    """
+    fallback = _CHART_MAX_WIDTH_CM
+    try:
+        sec = doc.sections[-1]
+        width = (sec.page_width - sec.left_margin - sec.right_margin) / 360000
+    except Exception:
+        return fallback
+    if not width or width <= 0:
+        return fallback
+    return float(width)
+
+
 # ---------------------------------------------------------------------------
 # ✅ 2026-09-25 修复（P0 · 图表尺寸溢出页面 / 窄图被拉伸）
 #    旧实现只按「PNG 像素 × 2.54 / 96dpi」估算物理宽度、且只用 16cm 宽度封顶，
@@ -2960,7 +3797,7 @@ def _chart_ok(img_bytes) -> bool:
 # 现象：write_section 的块分发里，**只有图表 / 配图两条分支**做了 fail-soft
 #    （渲染失败即跳过并回退图号）。table / code / heading / list_item / quote /
 #    普通段落这 6 类分支**完全没有保护**：任何一个块渲染抛异常都会冒到
-#    `_build_docx_sync` 之外 → export_docx / export_pdf 返回 500，
+#    `_build_docx_sync` 之外 → export_docx 返回 500，
 #    用户**一分钱都拿不到**（连"降级产物"都没有）。
 #    实测（monkeypatch `_add_table_from_markup` 抛异常）：PROPAGATED RuntimeError。
 #    对交付类文档而言，"少一个表格的版式"远好于"整份方案导不出来"。
@@ -3145,6 +3982,28 @@ def _insert_image_with_caption(doc, img_bytes, caption_text: str, *,
         #    旧实现只按 96dpi 估宽 + 仅宽度封顶，纵向长图（700×4070px）
         #    会被撑到 16×93cm，远超页面高度（Letter 22.94cm / A4 24.7cm）。
         _w_cm, _h_cm = _fit_image_cm(_iw_px, _ih_px, _dpi)
+        # ✅ R127：宽度再按当前节版心封顶（默认 2.5cm 边距下版心 16cm，
+        #    与 _CHART_MAX_WIDTH_CM 相同 ⇒ 字节不变；engineering 预设下收窄到
+        #    14.65cm，图片不再横向溢出）。高度由 add_picture 按原比例推导。
+        _avail_cm = _content_width_cm(doc)
+        if _avail_cm and _w_cm > _avail_cm:
+            _scale = _avail_cm / _w_cm
+            _w_cm = _avail_cm
+            _h_cm = _h_cm * _scale
+        # ✅ R130（图表标准 · 质量要求「分辨率≥150dpi」）：按**实际入稿尺寸**
+        #    反算有效分辨率（像素 / 厘米 → dpi），低于 MIN_IMAGE_DPI 只告警
+        #    不阻断（fail-soft，与图号回退契约无关）——低清图仍可交付，
+        #    但必须在日志可见，便于定位上游出图质量问题。
+        if _iw_px and _w_cm:
+            try:
+                _eff_dpi = _iw_px / (_w_cm / 2.54)
+                if _eff_dpi < MIN_IMAGE_DPI:
+                    logger.warning(
+                        "%s 有效分辨率 %.0fdpi 低于商业级下限 %ddpi"
+                        "（%dpx → %.2fcm），建议提升出图尺寸",
+                        log_label, _eff_dpi, MIN_IMAGE_DPI, _iw_px, _w_cm)
+            except Exception:
+                pass
         if log_height_scale and _h_cm >= _CHART_MAX_HEIGHT_CM:
             logger.info(
                 "%s 按高度上限缩放至 %.2f×%.2fcm（页面可用高度约 %.1fcm，"
@@ -3153,11 +4012,23 @@ def _insert_image_with_caption(doc, img_bytes, caption_text: str, *,
                 _iw_px, _ih_px, _dpi or _CHART_DPI_FALLBACK)
         stream.seek(0)
         doc.add_picture(stream, width=Cm(_w_cm))
-        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _pic_p = doc.paragraphs[-1]
+        _pic_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        # ✅ R117 FIX-7（2026-10-20）：图与图题**同页**。
+        #    实测导出稿 `图 3-1` / `图 4-1` 的图题段落 keep_with_next=None
+        #    （表题侧早已是 True，两张表题/图题口径不一致）—— 长文档重新分页时
+        #    会出现「图在本页底部、图题被推到下一页」，读者对不上图号。
+        #    keep_together 同时禁止图片段落自身被拆到两页（图片本体不可拆，
+        #    但段落里的前导空行可以，故一并锁死）。
+        _pic_p.paragraph_format.keep_with_next = True
+        _pic_p.paragraph_format.keep_together = True
         caption = doc.add_paragraph()
         caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
         caption.paragraph_format.first_line_indent = Cm(0)
-        _set_run_font(caption.add_run(caption_text), font_name, font_size, bold=True)
+        caption.paragraph_format.keep_together = True
+        # ✅ R128（遗留 3 收口）：题注编号前缀加书签（正文「图 X-Y」引用可升级
+        #    为 REF 域）；视觉与旧实现逐字节一致（书签为不可见元素）。
+        _add_caption_text_with_ref_bookmark(caption, caption_text, font_name, font_size)
         return True
     except Exception as e:
         logger.warning("%s 插入失败: %s", log_label, e)
@@ -3243,29 +4114,43 @@ def _add_illustration_from_bytes(doc, img_bytes, figure_num: str, alt: str = "",
 
 
 def _add_word_field(paragraph, instr: str, placeholder: str = "1"):
-    """在段落中插入一个简单 Word 域并返回该 run。
+    """在段落中插入一个简单 Word 域，返回承载**域结果**的 run。
 
-    XML 结构：fldChar(begin) + instrText + fldChar(separate) + w:t + fldChar(end)。
-    ✅ BUG 修复：旧实现缺少 `separate` 与占位结果，Word 在域未刷新时该处渲染为
-    空白（页码"消失"），而带 separate 的域即使未刷新也会显示合理占位值。
+    XML 结构（R127 起按 Word 自身写法拆成 5 个 run）：
+    ``fldChar(begin)`` → ``instrText`` → ``fldChar(separate)`` →
+    ``w:t(占位结果)`` → ``fldChar(end)``。
+
+    ✅ R127（2026-10-22 · DOCX 标准符合性）：旧实现把 5 个元素塞进**同一个
+    ``w:r``**。CT_R 虽允许混排，但 Word/WPS 实际写出的域总是分 run 存放；
+    同 run 结构在部分 WPS 版本会触发「域代码损坏」提示或被当普通文本。
+    现按主流实现拆分，且返回结果 run，使页码字体只作用于数字本身。
     """
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
-    run = paragraph.add_run()
+
+    begin_run = paragraph.add_run()
     fld_begin = OxmlElement("w:fldChar")
     fld_begin.set(qn("w:fldCharType"), "begin")
+    begin_run._r.append(fld_begin)
+
+    instr_run = paragraph.add_run()
     instr_el = OxmlElement("w:instrText")
     instr_el.set(qn("xml:space"), "preserve")
     instr_el.text = instr
+    instr_run._r.append(instr_el)
+
+    sep_run = paragraph.add_run()
     fld_sep = OxmlElement("w:fldChar")
     fld_sep.set(qn("w:fldCharType"), "separate")
-    txt = OxmlElement("w:t")
-    txt.text = placeholder
+    sep_run._r.append(fld_sep)
+
+    result_run = paragraph.add_run(placeholder)
+
+    end_run = paragraph.add_run()
     fld_end = OxmlElement("w:fldChar")
     fld_end.set(qn("w:fldCharType"), "end")
-    for el in (fld_begin, instr_el, fld_sep, txt, fld_end):
-        run._r.append(el)
-    return run
+    end_run._r.append(fld_end)
+    return result_run
 
 
 def _add_page_field(paragraph):
@@ -3285,37 +4170,206 @@ def _add_toc_field(paragraph, depth: int = 3):
     Word 打开后自动扫描 Heading 1/2/3 样式生成目录。
     用户可按 F9 或右键"更新域"刷新目录。
     """
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
-    run = paragraph.add_run()
-    fld_begin = OxmlElement("w:fldChar")
-    fld_begin.set(qn("w:fldCharType"), "begin")
-    instr = OxmlElement("w:instrText")
-    instr.set(qn("xml:space"), "preserve")
     try:
-        depth = max(1, min(int(depth or 3), 7))
+        depth = max(1, min(int(depth or 3), 9))
     except (TypeError, ValueError):
         depth = 3
-    instr.text = rf' TOC \o "1-{depth}" \h \z \u \* MERGEFORMAT '
-    fld_sep = OxmlElement("w:fldChar")
-    fld_sep.set(qn("w:fldCharType"), "separate")
-    # 初始占位文本（Word 刷新后会被替换成真实目录）
-    placeholder = OxmlElement("w:t")
-    placeholder.text = "（Word 打开后自动生成目录，请按 F9 更新域）"
-    fld_end = OxmlElement("w:fldChar")
-    fld_end.set(qn("w:fldCharType"), "end")
-    run._r.append(fld_begin)
-    run._r.append(instr)
-    run._r.append(fld_sep)
-    run._r.append(placeholder)
-    run._r.append(fld_end)
+    # ✅ R127：与 PAGE/NUMPAGES 共用拆 run 的域写法（占位文本在刷新前可见）
+    _add_word_field(
+        paragraph,
+        rf' TOC \o "1-{depth}" \h \z \u \* MERGEFORMAT ',
+        "（Word 打开后自动生成目录，请按 F9 更新域）")
+
+
+# ---------------------------------------------------------------------------
+# ✅ R128（2026-10-22 · 遗留 3 收口）：交叉引用 REF 域 —— 题注编号加书签，
+#    正文「图 X-Y / 表 X-Y」引用在渲染完成后回填为可点击的 Word REF 域。
+# ---------------------------------------------------------------------------
+#: 题注文本开头的编号前缀（「图 3-1 …」/「表 3-1 …」/「图3-1」紧排形态）。
+_CAPTION_LEADING_NUM_RE = re.compile(r"^(?P<kind>图|表)\s*(?P<num>\d+-\d+)")
+#: 正文引用形态（与预检 ``_STALE_FIG_REF_RE`` 同族但**刻意不复用**：那是
+#: 「全文扫描找 stale」的诊断正则，这里是「渲染期定点包域」的写入正则，
+#: 生命周期与语义都不同，合并反而制造第二处耦合）。
+_REF_NUM_RE = re.compile(r"(?P<kind>图|表)\s*(?P<num>\d+-\d+)")
+#: 书签前缀对齐 Word 自身的 REF 书签命名习惯（_Ref…，域更新后语义一致）。
+_REF_BM_PREFIX = "_Ref_"
+#: 并发隔离：与 ``_FIX_STATS_LOCAL`` 同款线程局部（DOCX 构建在多工作线程并发）。
+#: 只存 id 计数器 —— 书签「登记表」就是文档本身（回填前做存在性校验，
+#: 题注被 rollback 删除时登记自然失效，不指错号）。
+_REFX_LOCAL = threading.local()
+
+
+def _refx_state() -> dict:
+    st = getattr(_REFX_LOCAL, "state", None)
+    if st is None:
+        st = {"next_id": 9000}
+        _REFX_LOCAL.state = st
+    return st
+
+
+def _reset_refx() -> None:
+    """测试辅助：重置书签 id 计数（生产不调用）。"""
+    st = _refx_state()
+    st["next_id"] = 9000
+
+
+def _ref_bookmark_name(kind: str, num: str) -> str:
+    """编号 → 书签名（OOXML 书签名不含 ``-``，归一为下划线；NFKC 兼容全角数字）。"""
+    import unicodedata
+    num_ascii = unicodedata.normalize("NFKC", num)
+    return f"{_REF_BM_PREFIX}{'fig' if kind == '图' else 'tbl'}_{num_ascii.replace('-', '_')}"
+
+
+def _add_caption_text_with_ref_bookmark(paragraph, caption_text: str,
+                                        font_name: str, font_size: float):
+    """题注写入：编号前缀（加书签）+ 其余文本。
+
+    书签只包「图 X-Y / 表 X-Y」本身（REF 域引用的是**编号**而非整条题注，
+    否则正文「如图 3-1 所示」更新域后会变成「如图 3-1 标题文字所示」）。
+    视觉与旧实现逐字节一致（书签为不可见元素）。若题注被外层 rollback 删除，
+    登记残留由回填 pass 的「书签存在性校验」兜住（不指错号）。
+    无编号前缀的题注（历史形态）保持整串单 run，行为逐字不变。
+    """
+    m = _CAPTION_LEADING_NUM_RE.match(caption_text)
+    if not m:
+        _set_run_font(paragraph.add_run(caption_text), font_name, font_size, bold=True)
+        return
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    num_run = paragraph.add_run(m.group(0))
+    _set_run_font(num_run, font_name, font_size, bold=True)
+    st = _refx_state()
+    bid = str(st["next_id"])
+    st["next_id"] += 1
+    bm_start = OxmlElement("w:bookmarkStart")
+    bm_start.set(qn("w:id"), bid)
+    bm_start.set(qn("w:name"), _ref_bookmark_name(m.group("kind"), m.group("num")))
+    bm_end = OxmlElement("w:bookmarkEnd")
+    bm_end.set(qn("w:id"), bid)
+    num_run._r.addprevious(bm_start)
+    num_run._r.addnext(bm_end)
+    rest = caption_text[m.end():]
+    if rest:
+        _set_run_font(paragraph.add_run(rest), font_name, font_size, bold=True)
+
+
+def _backfill_cross_reference_fields(doc) -> int:
+    """渲染完成后，把正文对已登记图号/表号的纯文本引用升级为 REF 域。
+
+    三重保守判据（防「坏域比没有域更糟」——指向不存在书签的 REF 会让
+    Word/WPS 打开时报「引用源不存在」错误）：
+    ① 只对**真实存在的书签**包域 —— 题注插入成功才有书签；渲染失败被回滚的
+       图号（含题注段被回滚的登记残留）无书签，正文引用保持纯文本；
+    ② 跳过题注自身段落（含 ``_Ref_`` 书签的段）与已含域的段落（防域嵌套）；
+    ③ 匹配必须完整落在**单个 run** 的文本内（跨 run 边界跳过，保持纯文本）。
+    可见文本逐字节不变：域结果 run 写**原匹配文本**（含原文空格形态），
+    ``updateFields=true`` 保证 Word/WPS 打开即刷新。
+    fail-soft：任何异常只 WARNING，绝不阻断导出交付。
+    """
+    import copy as _copy
+
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    try:
+        existing = set()
+        for bm in doc.element.body.iter(qn("w:bookmarkStart")):
+            nm = bm.get(qn("w:name")) or ""
+            if nm.startswith(_REF_BM_PREFIX):
+                existing.add(nm)
+        if not existing:
+            return 0
+        inserted = 0
+
+        def _mk_text_run(rpr, s: str):
+            nr = OxmlElement("w:r")
+            if rpr is not None:
+                nr.append(_copy.deepcopy(rpr))
+            t = OxmlElement("w:t")
+            t.set(qn("xml:space"), "preserve")
+            t.text = s
+            nr.append(t)
+            return nr
+
+        def _fld_run(rpr, kind: str):
+            nr = OxmlElement("w:r")
+            if rpr is not None:
+                nr.append(_copy.deepcopy(rpr))
+            fc = OxmlElement("w:fldChar")
+            fc.set(qn("w:fldCharType"), kind)
+            nr.append(fc)
+            return nr
+
+        for p in list(doc.element.body.iter(qn("w:p"))):
+            # ② 题注自身段（含 _Ref_ 书签）不得再包域；已含域的段防嵌套
+            if any((bs.get(qn("w:name")) or "").startswith(_REF_BM_PREFIX)
+                   for bs in p.findall(qn("w:bookmarkStart"))):
+                continue
+            if p.findall(".//" + qn("w:fldChar")):
+                continue
+            for r in list(p.findall(qn("w:r"))):
+                # 只处理纯文本 run（含域字符 / instrText / drawing 的跳过）
+                if (r.find(qn("w:fldChar")) is not None
+                        or r.find(qn("w:instrText")) is not None
+                        or r.find(qn("w:drawing")) is not None):
+                    continue
+                t_els = r.findall(qn("w:t"))
+                if len(t_els) != 1:
+                    continue  # ③ 复杂 run（多 w:t 等）保持纯文本
+                text = t_els[0].text or ""
+                if not text:
+                    continue
+                segs = []  # ("t", 文本) | ("f", (书签名, 可见文本))
+                pos = 0
+                for m in _REF_NUM_RE.finditer(text):
+                    name = _ref_bookmark_name(m.group("kind"), m.group("num"))
+                    if name not in existing:
+                        continue  # ① 未登记 / 已回滚 → 保持纯文本
+                    if m.start() > pos:
+                        segs.append(("t", text[pos:m.start()]))
+                    segs.append(("f", (name, m.group(0))))
+                    pos = m.end()
+                if not segs:
+                    continue
+                if pos < len(text):
+                    segs.append(("t", text[pos:]))
+                rpr = r.find(qn("w:rPr"))
+                for kind_seg, payload in segs:
+                    if kind_seg == "t":
+                        r.addprevious(_mk_text_run(rpr, payload))
+                    else:
+                        name, visible = payload
+                        r.addprevious(_fld_run(rpr, "begin"))
+                        ir = OxmlElement("w:r")
+                        if rpr is not None:
+                            ir.append(_copy.deepcopy(rpr))
+                        it = OxmlElement("w:instrText")
+                        it.set(qn("xml:space"), "preserve")
+                        it.text = f" REF {name} \\h "
+                        ir.append(it)
+                        r.addprevious(ir)
+                        r.addprevious(_fld_run(rpr, "separate"))
+                        # 域结果 = 原匹配文本 ⇒ 可见文本逐字节不变
+                        r.addprevious(_mk_text_run(rpr, visible))
+                        r.addprevious(_fld_run(rpr, "end"))
+                        inserted += 1
+                p.remove(r)
+        if inserted:
+            _fix_stats()["cross_ref_fields"] += inserted
+            logger.info(
+                "交叉引用：正文 %d 处图/表号引用已升级为可点击 REF 域"
+                "（Word/WPS 更新域后随编号刷新）", inserted)
+        return inserted
+    except Exception as e:
+        logger.warning("交叉引用 REF 域回填失败（成稿保持纯文本引用）: %s", e)
+        return 0
 
 
 # ---------------------------------------------------------------------------
 # ✅ 版式增强：XML 级排版能力（底纹 / 边框 / 代码块 / 域自动刷新 / 文件名）
 # ---------------------------------------------------------------------------
 _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-_PDF_MIME = "application/pdf"
 
 # CT_PPr 为严格序列，w:pBdr / w:shd 必须排在下列元素之前
 _PPR_AFTER_PBDR = (
@@ -3409,6 +4463,34 @@ def _set_cell_shading(cell, fill: str) -> None:
     shd.set(qn("w:color"), "auto")
     shd.set(qn("w:fill"), fill)
     tc_pr.insert_element_before(shd, *_TCPR_AFTER_SHD)
+
+
+# CT_TrPr 为严格序列，w:cantSplit 必须排在下列元素之前
+_TRPR_AFTER_CANT_SPLIT = (
+    "w:trHeight", "w:tblHeader", "w:tblCellSpacing", "w:jc", "w:hidden",
+)
+
+
+def _set_row_cant_split(row) -> None:
+    """禁止表格行跨页断开（``w:cantSplit``）。
+
+    ✅ R117 FIX-8（2026-10-20）：实测导出稿 32 张表 / 195 行**无一行**带
+    ``cantSplit`` —— 长表翻页时同一行会被从中间劈开（上半行留在本页底部、
+    下半行跑到下一页顶部），行内文字与框线错位。表头行同样要加：表头跨页
+    重复时若自身被劈开，重复出来的只是半行。
+
+    ✅ R109 同型教训：手写 XML 必须按 CT_TrPr 顺序插入（``trPr`` 里
+    ``cantSplit`` 在 ``trHeight``/``tblHeader`` 之前），否则 WPS 拒绝打开。
+    落盘前 ``_normalize_docx_strict_sequence`` 仍会兜底重排。
+    """
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    tr_pr = row._tr.get_or_add_trPr()
+    if tr_pr.find(qn("w:cantSplit")) is not None:
+        return  # 幂等：重复调用不会堆出多个 w:cantSplit（CT_TrPr 只允许 0~1 个）
+    cant_split = OxmlElement("w:cantSplit")
+    tr_pr.insert_element_before(cant_split, *_TRPR_AFTER_CANT_SPLIT)
 
 
 # ECMA-376 中具有**严格子元素序列**、且导出侧会手写的属性容器。
@@ -3545,6 +4627,34 @@ def _add_code_block(doc, lines: list[str]):
     return p
 
 
+#: Word 2010+ 扩展命名空间（``<w14:textFill>`` 主题色填充就在其中）。
+_W14_NS = "http://schemas.microsoft.com/office/word/2010/wordml"
+
+
+def _strip_heading_theme_fill(style) -> int:
+    """删除标题样式 rPr 里的 ``<w14:textFill>``，返回删除个数（R117 · 2026-10-20）。
+
+    **为什么只设 ``font.color.rgb`` 还不够**：python-docx 自带模板的
+    ``Heading 2/3/4/7`` 样式带 ``<w14:textFill><w14:solidFill><w14:schemeClr
+    w14:val="accent1"/>`` —— 按 OOXML 扩展规则，``w14:textFill`` 的取值
+    **优先于** ``<w:color>``，于是成稿标题在 Word 2010+ 里仍是模板主题蓝
+    （实测导出稿 H1=#376092、H2~H4=#4F81BD），而导出配置**没有颜色开关**，
+    用户无从修改。工程报审件按惯例为黑色，故这里显式删除。
+    """
+    try:
+        rpr = style.element.rPr
+    except Exception:  # pragma: no cover - 极旧 python-docx 无 rPr 访问器
+        return 0
+    if rpr is None:
+        return 0
+    removed = 0
+    for el in list(rpr):
+        if el.tag == f"{{{_W14_NS}}}textFill":
+            rpr.remove(el)
+            removed += 1
+    return removed
+
+
 def _enable_update_fields_on_open(doc) -> None:
     """在 settings.xml 中声明 ``<w:updateFields w:val="true"/>``。
 
@@ -3609,9 +4719,9 @@ def _attachment_disposition(filename: str) -> str:
     """构造健壮的 Content-Disposition（ASCII 回退名 + RFC 5987 UTF-8 名）。
 
     ✅ BUG 修复（严重）：旧实现把中文文件名直接塞进 HTTP 响应头
-    （``filename="{方案名}.pdf"``），而 HTTP 头只能承载 latin-1 —— 中文方案名
-    会在编码响应头时抛 UnicodeEncodeError，导致 **PDF 导出整体 500**
-    （DOCX 走 FileResponse 由 Starlette 自行编码，所以该缺陷长期只暴露在 PDF 链路）。
+    （``filename="{方案名}"``），而 HTTP 头只能承载 latin-1 —— 中文方案名
+    会在编码响应头时抛 UnicodeEncodeError。DOCX 主链路走 FileResponse，
+    由 Starlette 自行编码；本函数保留给需要显式响应头的下载/回退链路。
     """
     from urllib.parse import quote
     safe = _safe_filename(filename)
@@ -3777,8 +4887,8 @@ def _display_scheme_name(scheme: dict | None, global_facts: list | None = None) 
 async def _bump_export_round(db, scheme_id: str) -> int:
     """累加并返回该方案的导出轮次（持久化在 schemes.export_round）。
 
-    语义：**每次导出请求计一轮**（DOCX / PDF 共用同一计数器，PDF 内部生成的
-    中间 DOCX 不额外计数）—— 保证同一天多次导出的文件名互不重复，不会出现
+    语义：**每次导出请求计一轮**（DOCX 单链路，R126 起 PDF 导出已下线）
+    —— 保证同一天多次导出的文件名互不重复，不会出现
     浏览器/系统自动追加的 "xxx(1).docx" 之类的重名副本。
     失败时回退为第 1 轮，绝不阻塞导出主流程。
     """
@@ -4004,7 +5114,7 @@ def _build_docx_sync(
     #    在构建线程内累加进线程局部 fix_stats，随返回值进 X-Fix-Stats 响应头。
     fences_fixed: int = 0,
     # ✅ R106 FIX-1（2026-10-18）：本次导出的取消事件（threading.Event，
-    #    由 export_docx/export_pdf 登记并经 _build_docx_task 末尾透传）。
+    #    由 export_docx 登记并经 _build_docx_task 末尾透传）。
     #    缺省 None = 无取消登记（离线/测试直调），行为与改造前逐字一致。
     #    命中在「章节写入循环段边界」抛 ExportCancelled 提前退出（不 save）。
     cancel_event: threading.Event | None = None,
@@ -4032,8 +5142,21 @@ def _build_docx_sync(
         _fix_stats()["fences_fixed"] += int(fences_fixed)
 
     doc = Document()
+    # ✅ R117 FIX-5（2026-10-20）：显式 A4 页面。
+    #    python-docx 的默认模板是 **US Letter**（8.5×11in = 21.59×27.94cm），
+    #    旧实现从未设置 page_width/page_height —— 实测导出稿
+    #    `室外汽车吊吊装施工专项方案_20261020_第1轮.docx` 的 sectPr 即 Letter。
+    #    中国工程文件（含专项施工方案报审件）统一 A4 21×29.7cm，
+    #    且 2.5cm 左右边距下 A4 的正文栏宽正好 16cm，与
+    #    `_CHART_MAX_WIDTH_CM` / `_assign_table_column_widths` 的 16cm 口径一致。
+    _page = doc.sections[0]
+    _page.page_width = Cm(21.0)
+    _page.page_height = Cm(29.7)
     style = doc.styles["Normal"]
-    style.font.name = font_name
+    # ✅ R130（文字标准）：西文统一 Times New Roman（w:ascii/w:hAnsi），
+    #    中文由 w:eastAsia 接管（宋体/仿宋，随导出配置）——旧实现把
+    #    font_name 同时写进西文槽，成稿里的数字/英文随正文中文字体走。
+    style.font.name = FONT_LATIN
     style.font.size = Pt(font_size)
     style.element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
     # ✅ P0 修复（2026-09-27）：同标题样式，删除 Normal 上残留的主题字体属性，
@@ -4046,13 +5169,22 @@ def _build_docx_sync(
     style.paragraph_format.line_spacing = line_spacing
     style.paragraph_format.space_after = Pt(0)
 
-    for lvl in range(1, 8):
+    for lvl in range(1, 10):
         hs = heading_styles[lvl]
         h_style = doc.styles[f"Heading {lvl}"]
-        h_style.font.name = hs["font_name"]
+        # ✅ R130（文字标准）：标题西文 Times New Roman，中文黑体（eastAsia，
+        #    见下方 rFonts.set）——旧实现 font.name = 中文字体把西文槽也占了。
+        h_style.font.name = FONT_LATIN
         h_style.font.size = Pt(hs["font_size"])
         h_style.font.bold = hs["bold"]
         h_style.font.italic = False
+        # ✅ R117 FIX-6（2026-10-20）：标题强制黑色 + 删模板主题填充。
+        #    旧实现只写 name/size/bold，从不写 w:color —— 成稿继承 python-docx
+        #    模板的 Heading 主题蓝（实测导出稿 H1=#376092、H2~H4=#4F81BD），且带
+        #    <w14:textFill> 主题色填充（Word 2010+ 优先于 w:color）；导出配置里
+        #    没有颜色项，用户改不掉。工程报审件按惯例为黑色。
+        h_style.font.color.rgb = RGBColor(0, 0, 0)
+        _strip_heading_theme_fill(h_style)
         # ⚠️ 需求「标题字体不倾斜」：这里显式写 italic=False（覆盖 python-docx
         #    内置 Heading 样式可能继承的斜体），是防倾斜的第一道闸。
         h_style.element.rPr.rFonts.set(qn("w:eastAsia"), hs["font_name"])
@@ -4073,10 +5205,20 @@ def _build_docx_sync(
         # ✅ 增强：标题与后文同页（避免标题孤行落在页尾），并留段前段后间距
         hpf = h_style.paragraph_format
         hpf.keep_with_next = True
-        hpf.space_before = Pt(12 if lvl <= 2 else 8)
+        # ✅ R117 FIX-6（2026-10-20）：段前间距也做成层级阶梯。
+        #    旧实现只有 12/8 两档，而 1~4 级默认字号相同（14pt），四级标题
+        #    仅靠 4pt 段前差区分 —— 成稿里 H2/H3/H4 视觉上几乎无法分辨。
+        hpf.space_before = Pt({1: 18, 2: 14, 3: 12, 4: 10}.get(lvl, 8))
         hpf.space_after = Pt(6)
         # ✅ 默认：所有标题行距与正文一致（1.15 倍）
         hpf.line_spacing = line_spacing
+        # ✅ R129：L7~L9 显式写入 outlineLvl（Word 大纲级别 6/7/8）——
+        #    python-docx 模板的 Heading 7~9 虽自带大纲级别，但显式重写
+        #    保证任何模板状态下「深层标题可被 TOC \o "1-9" 域收录、
+        #    Word 导航窗格层级正确」。幂等：先删后写。
+        if lvl >= 7:
+            _ol_el = h_style.element.get_or_add_pPr().get_or_add_outlineLvl()
+            _ol_el.set(qn("w:val"), str(lvl - 1))
 
     # ✅ 增强：声明"打开时更新域"，Word 自动生成目录并计算页码；
     #    否则用户不按 F9 就只能看到"请按 F9 更新域"的占位文本。
@@ -4207,6 +5349,8 @@ def _build_docx_sync(
     body_state = {"started": False}
     # 中文正文首行缩进 2 字符（随正文字号缩放，旧实现固定 0.74cm）
     body_first_line_indent = Cm(round(font_size * 2 * 0.0352778, 3))
+    # ✅ R127：列表编号定义（numbering.xml）在本构建内共享，跨章节复用
+    list_numbering = _DocxListNumbering(doc)
 
     def write_section(sec: dict, parent_id: str = ""):
         # ✅ 健壮性修复（2026-09-20）：level 来自 DB（TEXT 列），脏数据可能为
@@ -4224,7 +5368,9 @@ def _build_docx_sync(
         full_title = heading_gen.format_heading(level, pure_title, parent_id)
         section_prefix = _section_number_prefix(full_title)
 
-        h = doc.add_paragraph(style=f"Heading {min(level, 7)}")
+        # ✅ R129：标题样式层级上限 7→8（DB 大纲共 8 级；L8 旧行为=借用
+        #    Heading 7 外观，现归位 Heading 8，外观同参数、outlineLvl 归位 7）
+        h = doc.add_paragraph(style=f"Heading {min(level, 8)}")
         _add_runs_with_inline_format(h, full_title)
         _finalize_heading_runs(h)
         # ✅ 增强：一级章节另起一页（专项方案通用版式）
@@ -4239,6 +5385,14 @@ def _build_docx_sync(
         if content:
             blocks = blocks_cache.get(sec_id) or _parse_content_blocks(content)
             blocks = _strip_duplicate_leading_title(blocks, title, full_title)
+            # ✅ R117 FIX-10（2026-10-20）：折叠**同章内逐字重复**的正文块。
+            #    判重刻意只在**单章作用域**内做（seen 随每次调用重置）——
+            #    跨章复用同一条标准条文是正常写法，跨章去重会误删正文。
+            blocks = _collapse_repeated_blocks(blocks, where=full_title or title)
+            # ✅ R117 FIX-11（2026-10-20）：「前缀相同、后文分歧」的近似重复**只报警
+            #    不改写**（两侧各有独有尾句，删任一侧即丢正文）——纯可观测，
+            #    blocks 一个字节未动。
+            _report_near_duplicate_blocks(blocks, where=full_title or title)
             sub_counters: dict[int, int] = {}
             # ✅ E3（2026-09-25）：有 DB 子章节 + 配置开启 → 正文子标题降级为节内
             # body 命名空间（1）/ a、…），与 DB 子章节彻底隔离。无子女或配置关
@@ -4272,10 +5426,15 @@ def _build_docx_sync(
             #    1 重计；③ 无序子项不碰栈（父级序号续接）；④ 重复/跳号自动连续编号；
             #    ⑤ 中文枚举符外观保留。零新增依赖 / 零数据迁移 / 零配置项。
             ordered_stack: list[list] = []   # [[marker, seq], ...]，下标 = indent_lvl
+            # ✅ R127：当前 Word 列表实例（numId + 标记签名）；结构边界重置
+            list_ctx: dict | None = None
             for block in blocks:
-                if block["type"] != "list_item":
-                    # ✅ 遇非列表块 → 重置整条有序序列（沿用既有契约）
+                if _breaks_ordered_sequence(block):
+                    # ✅ R117（2026-10-20）：只在**结构边界**（标题 / 冒号引导句）
+                    #    重置。旧的「遇任何非列表块一律清零」会让"1、A / 正文 /
+                    #    1、B"这类被正文与表格打断的同一组列举全部渲染成 ``1、``。
                     ordered_stack = []
+                    list_ctx = None
                 # ✅ P0 逐块 fail-soft（2026-10-06）：把「渲染一个内容块」做成事务。
                 #    快照 = 文档 body 元素集合 + 图号/表号/去重集合；块渲染抛异常时
                 #    全部回滚（不留半截表格、不留已占图号），再降级为纯文本。
@@ -4306,10 +5465,8 @@ def _build_docx_sync(
                             _auto_caption = ""
                             if _first and "|" in _first and not re.match(r'^[\|\s\-:]+$', _first):
                                 cells = [c.strip() for c in _first.split("|") if c.strip()]
-                                if len(cells) >= 2:
-                                    _auto_caption = "、".join(cells[:3])
-                                elif cells:
-                                    _auto_caption = cells[0]
+                                # ✅ R117：剥公式 / 丢无语义列名（序号、备注…）/ 去重
+                                _auto_caption = _sanitize_auto_caption(cells[:4])
                             if not _auto_caption:
                                 _auto_caption = "相关数据"
                             # ✅ 2026-10-17（表号叠写根因 B）：AI 把表题连同编号写进首格
@@ -4365,7 +5522,11 @@ def _build_docx_sync(
                         # ✅ 图题优先用块自带业务标题（载荷 title / 引导语 / Mermaid title 指令），
                         #    仅在其缺失时退回类型通用名 —— 旧实现一律用通用名，导致
                         #    「图 4-1 劳动力配置计划」挂在本章实为流程图的正文之下。
-                        fig_title = (block.get("title") or "").strip() or default_title
+                        # ✅ R131-A（2026-10-23）：生成期残留的「图 X-Y」前缀在此剥离 ——
+                        #    下方 fig_num 由**当前章节树**现算，残留前缀会与新号叠写成
+                        #    「图 2-1 图 4-1 …」（章节移动后携带过期章号 = 归属漂移 + 重号）。
+                        fig_title = _strip_leading_figure_number(
+                            (block.get("title") or "").strip() or default_title)
                         # ✅ 契约变更（2026-09-19，配置开关 chart_fail_placeholder）：
                         #    默认**跳过渲染失败的图表**且不占用图号 —— 交付文档里出现
                         #    「[图 X-Y … — 渲染失败]」红字报错比少一张图更糟（实测取证：
@@ -4440,12 +5601,18 @@ def _build_docx_sync(
                         _ok = _add_illustration_from_bytes(
                             doc, _img_bytes,
                             f"{chapter_num}-{figure_counters[fig_key]}",
-                            (block.get("alt") or "").strip(), font_name, font_size)
+                            # ✅ R131-A（2026-10-23）：alt 同样剥离生成期「图 X-Y」前缀
+                            #    （与图表分支同口径，避免 AI 配图题注双图号）。
+                            _strip_leading_figure_number(
+                                (block.get("alt") or "").strip()),
+                            font_name, font_size)
                         if not _ok:
                             figure_counters[fig_key] = figure_counters.get(fig_key, 0) - 1
                             _pop_orphan_lead_in(doc)
                     elif block["type"] == "heading":
-                        h_lv = min(block.get("_heading_style", min(level + block.get("level", 1), 7)), 7)
+                        # ✅ R129：正文子标题样式上限 7→9（L8/L9 走 Heading 8/9，
+                        #    显式 outlineLvl 7/8，可被 TOC \o "1-9" 收录）
+                        h_lv = min(block.get("_heading_style", min(level + block.get("level", 1), 9)), 9)
                         h = doc.add_paragraph(style=f"Heading {h_lv}")
                         _add_runs_with_inline_format(h, block.get("_fixed_text", block.get("text", "")))
                         _finalize_heading_runs(h)
@@ -4471,14 +5638,25 @@ def _build_docx_sync(
                                 entry[0] = marker
                                 entry[1] = 0
                             entry[1] += 1
-                            # ✅ 按原标记样式渲染（（一）/（1）/ 1、不再被拍平成 "1. "）
+                            # 仅用于悬挂缩进宽度估算；前缀文本不再写入正文
                             prefix = _ordered_prefix(entry[1], marker)
+                            signature = tuple(e[0] for e in ordered_stack)
+                            if list_ctx is None or list_ctx["signature"] != signature:
+                                num_id = list_numbering.new_num(
+                                    signature, [e[1] for e in ordered_stack])
+                                list_ctx = {"signature": signature,
+                                            "num_id": num_id}
+                            else:
+                                num_id = list_ctx["num_id"]
                         else:
                             prefix = "• "
+                            num_id = list_numbering.bullet_num()
                         # ✅ 使用 "List Paragraph" 样式（Word 识别为列表项）
                         _lp_style = _ensure_list_paragraph_style(doc)
                         p = doc.add_paragraph(style=_lp_style)
-                        _add_runs_with_inline_format(p, prefix + block["text"])
+                        _add_runs_with_inline_format(p, block["text"])
+                        # ✅ R127：前缀交由 numbering.xml 渲染（Word 原生列表）
+                        list_numbering.apply(p, num_id, indent_lvl)
                         lpf = p.paragraph_format
                         # ✅ 左缩进：每级 0.74 cm（基础缩进 + 嵌套层级）
                         lpf.left_indent = Cm(0.74 * (indent_lvl + 1))
@@ -4508,10 +5686,11 @@ def _build_docx_sync(
                         # 仅渲染侧丢弃；前端预览 <hr> 不受影响）。
                         continue
                     else:
-                        p = doc.add_paragraph()
+                        # ✅ R127：正文改用 Body Text CN 样式，不再逐段写直接格式
+                        p = doc.add_paragraph(
+                            style=_ensure_body_text_style(
+                                doc, body_first_line_indent))
                         _add_runs_with_inline_format(p, block.get("text", ""))
-                        p.paragraph_format.first_line_indent = body_first_line_indent
-                        p.paragraph_format.space_after = Pt(3)
                 except Exception as _blk_err:
                     # ⚠️ P0 逐块 fail-soft（2026-10-06）：块渲染器抛异常时
                     #    图号/表号/去重集合全部回滚（不留半截表格、不留已占图号），
@@ -4618,6 +5797,7 @@ def _build_docx_sync(
                                   font_name, 10.5)
                     _appendix_cell_paragraph(rc[1], str(f.get("content") or ""),
                                              font_name, first=True)
+                _finalize_simple_table(tbl)
         except TypeError as e:
             # ✅ P0 修复（2026-09-27）：TypeError 是**编程错误**（如把 bold 当位置参数
             #    传给 keyword-only 形参），不是"附录渲染不出来"的可恢复异常。
@@ -4667,6 +5847,7 @@ def _build_docx_sync(
                                   font_name, 10.5)
                     _appendix_cell_paragraph(rc[1], str(it.get("value") or ""),
                                              font_name, first=True)
+                _finalize_simple_table(tbl)
         except TypeError as e:
             # 与事实附录同口径：TypeError 是编程错误，按 ERROR 上报（否则附录
             # 静默消失而导出报成功，是最隐蔽的一类缺陷）。
@@ -4676,6 +5857,27 @@ def _build_docx_sync(
         except Exception as e:
             logger.warning("导出：渲染补充附录失败（降级跳过，不影响正文）: %s", e)
 
+    # ✅ R128（遗留 3 收口）：交叉引用 REF 域回填 —— 必须在**全部题注书签就位、
+    #    渲染成败尘埃落定之后**（此刻回填绝不指错号），且在统计读取（下方
+    #    _log_fix_stats 读取并清零）与严格序列归一之前，否则 cross_ref_fields
+    #    计数进不了 X-Fix-Stats 响应头（本轮首跑护栏当场抓到的接线顺序缺陷）。
+    _backfill_cross_reference_fields(doc)
+    # ✅ R129：导出后校验 · 段落级残留扫描（内存 doc，save 前执行 ⇒ 计数
+    #    进线程局部统计、随下方 _log_fix_stats 输出日志与 X-Fix-Stats）。
+    #    判据与导出前体检同源（懒导入 _AUDIT_RULES），只体检不篡改；
+    #    大纲映射（Heading 1~9 → 层级+标题）随返回值透出，供目录导航核对。
+    _postcheck: dict | None = None
+    try:
+        from app.services.export_validate import validate_document
+        _postcheck = validate_document(doc)
+        _fs_local = _fix_stats()
+        _fs_local["postcheck_markdown_residue"] += _postcheck["markdown_residue"]
+        _fs_local["postcheck_html_residue"] += _postcheck["html_residue"]
+        _fs_local["postcheck_entity_residue"] += _postcheck["entity_residue"]
+        _fs_local["postcheck_placeholder_residue"] += _postcheck["placeholder_residue"]
+    except Exception:
+        logger.warning("导出后校验（段落级）执行失败，跳过", exc_info=True)
+        _postcheck = None
     # 注意：局部变量勿命名为 `_fix_stats`，否则会遮蔽同名模块级函数
     fix_stats = _log_fix_stats()
     # ✅ 加固（D1）：把「本次构建跨章借图」的明细回传给调用方，写进
@@ -4708,15 +5910,55 @@ def _build_docx_sync(
             fix_stats.get("figures", 0) if isinstance(fix_stats, dict) else 0)
     except Exception:
         logger.info("导出：DOCX 已落盘（路径=%s）", out_path)
+    # ✅ R129：Word 2010+ 专有扩展清除（zip 级原子重写，fail-soft）。
+    #    python-docx 默认模板根元素声明 w14/wp14/wpg/wps/wpc 等 2010+
+    #    命名空间（mc:Ignorable="w14 wp14"），全部清除 ⇒ 产物根元素只留
+    #    w/r/wp/m 等基础命名空间，满足「避免 Word 2010+ 专有扩展」约束。
+    _ns_report: dict | None = None
+    try:
+        from app.services.docx_namespace import sanitize_docx_file
+        _ns_report = sanitize_docx_file(out_path)
+        if _ns_report.get("parts_changed"):
+            logger.info("导出：已清除 Word 2010+ 专有命名空间声明（部件=%s，属性=%d）",
+                        sorted(_ns_report["parts_changed"]),
+                        _ns_report.get("attrs_stripped", 0))
+    except Exception:
+        logger.warning("导出：Word 2010+ 命名空间清除失败（不影响交付）",
+                       exc_info=True)
+    # ✅ R129：导出后校验 · 文件级（专有命名空间回潮检查），fail-soft
+    _ns_clean = True
+    try:
+        from app.services.docx_namespace import check_docx_file
+        _ns_clean = bool(check_docx_file(out_path).get("clean"))
+    except Exception:
+        logger.warning("导出：命名空间校验执行失败（不影响交付）", exc_info=True)
     if borrowed:
         fix_stats = dict(fix_stats or {})
         fix_stats["chart_fallback_borrowed"] = len(borrowed)
         fix_stats["chart_fallback_borrowed_details"] = borrowed[:20]
+    # ✅ R129：把文件级结果并入返回值（X-Fix-Stats 透出给前端）。
+    #    ⚠️ 刻意**不**把 outline_map（中文标题）放进响应头：HTTP 头只允许
+    #    latin-1（实测 X-Fix-Stats 带中文标题 → starlette init_headers
+    #    UnicodeEncodeError，整条导出 500）；只透出条数 outline_entries，
+    #    完整映射走 INFO 日志（目录导航核对以日志 + 导出前体检为准）。
+    if _ns_report or _postcheck or not _ns_clean:
+        fix_stats = dict(fix_stats or {})
+        if _ns_report:
+            fix_stats["ns_parts_sanitized"] = len(_ns_report.get("parts_changed") or {})
+        if _postcheck:
+            _omap = _postcheck.get("outline_map") or []
+            fix_stats["outline_entries"] = len(_omap)
+            if _omap:
+                logger.info(
+                    "导出：大纲映射 %d 条（目录收录范围核对）：%s",
+                    len(_omap),
+                    " | ".join(f"L{x['level']} {x['text']}" for x in _omap[:20]))
+        fix_stats["ns_clean"] = _ns_clean
     return fix_stats
 
 
 # ---------------------------------------------------------------------------
-# ✅ 重构：DOCX / PDF 两条导出链路共用同一套"准备逻辑"
+# ✅ 重构：导出链路共用同一套"准备逻辑"（R126 起 PDF 下线，现存 DOCX 单链路）
 # ---------------------------------------------------------------------------
 # 旧实现中 export_docx 与 export_pdf 各自复制了一份"config 解析 + 章节树构建 +
 # 图表取码 + 预渲染"（约 140 行近乎逐行重复）。两份实现的漂移已经造成真实缺陷：
@@ -4725,13 +5967,29 @@ def _build_docx_sync(
 # "信封 + data" 形态的 JSON 数据型图表（组织架构 / 劳动力 / 总平面 / 时间线）
 # 在 PDF 中全部静默消失。此处收敛为单一实现，杜绝再次漂移。
 _DEFAULT_HEADING_STYLES = {
-    1: {"font_name": "宋体", "font_size": 14, "bold": True},
-    2: {"font_name": "宋体", "font_size": 14, "bold": True},
-    3: {"font_name": "宋体", "font_size": 14, "bold": True},
-    4: {"font_name": "宋体", "font_size": 14, "bold": True},
-    5: {"font_name": "宋体", "font_size": 12, "bold": False},
-    6: {"font_name": "宋体", "font_size": 12, "bold": False},
-    7: {"font_name": "宋体", "font_size": 12, "bold": False},
+    # ✅ R130 FIX（2026-10-22 · 六类标准 · 文字标准）：
+    #    「标题黑体」——旧默认 1~9 级全是宋体，成稿标题与正文同字体，
+    #    层级只能靠字号/加粗区分，不符合工程文件「标题黑体、正文宋体」惯例。
+    #    默认改为黑体（eastAsia）；西文统一 Times New Roman（见样式构建处）。
+    #    仍可由导出配置 heading_styles 逐级覆盖（用户预设的宋体等保持生效）。
+    # ✅ R117 FIX-6（2026-10-20）：默认字号改为**层级阶梯**。
+    #    旧默认 1~4 级全是 14pt（5~7 级 12pt）—— 成稿里"章/节/小节/目"
+    #    四级标题同大、同色（模板主题蓝），只能靠段前 4pt 之差区分，
+    #    实测导出稿的 H2/H3/H4 在纸面上几乎不可分辨。
+    #    新阶梯对齐中文工程文件惯例：三号(16) → 四号(14) → 四号(14) → 小四(12)，
+    #    并把「4 级起降为小四」作为视觉分水岭；仍可由导出配置逐级覆盖。
+    1: {"font_name": "黑体", "font_size": 16, "bold": True},
+    2: {"font_name": "黑体", "font_size": 14, "bold": True},
+    3: {"font_name": "黑体", "font_size": 14, "bold": True},
+    4: {"font_name": "黑体", "font_size": 12, "bold": True},
+    5: {"font_name": "黑体", "font_size": 12, "bold": False},
+    6: {"font_name": "黑体", "font_size": 12, "bold": False},
+    7: {"font_name": "黑体", "font_size": 12, "bold": False},
+    # ✅ R129：层级扩展到 L9（引入易标式 L1~L9 逐级样式）。L8/L9 主要服务
+    #    正文深层子标题（level + block.level 可达 9）；默认外观延续 L7 的
+    #    小四不加粗，仅靠缩进与 outlineLvl 区分层级，仍可逐级覆盖。
+    8: {"font_name": "黑体", "font_size": 12, "bold": False},
+    9: {"font_name": "黑体", "font_size": 11, "bold": False},
 }
 
 
@@ -4747,15 +6005,16 @@ def _clamp_font_size(v, default: float) -> float:
 
 
 def _load_heading_styles(config: dict) -> dict:
-    """合并用户配置与默认值，返回 1~7 级标题样式（每级 font_name/font_size/bold）。
+    """合并用户配置与默认值，返回 1~9 级标题样式（每级 font_name/font_size/bold）。
 
     ✅ 防御：heading_styles 子项非 dict、font_size 非数字/越界时静默回退默认，
     避免 merged.update/ Pt() 抛异常导致整个导出 500（脏预设可反复触发）。
+    ✅ R129：层级 7→9（引入易标式 L1~L9，L7~L9 显式写 outlineLvl）。
     """
     raw_user = config.get("heading_styles", {})
     user = raw_user if isinstance(raw_user, dict) else {}
     styles: dict[int, dict] = {}
-    for lvl in range(1, 8):
+    for lvl in range(1, 10):
         merged = dict(_DEFAULT_HEADING_STYLES[lvl])
         user_lvl = user.get(str(lvl))
         if isinstance(user_lvl, dict):
@@ -5083,8 +6342,8 @@ async def _prepare_export(scheme_id: str, body: dict, db,
                           cancel_event: threading.Event | None = None) -> dict:
     """导出前的公共准备：解析配置 → 读取章节与图表 → 预渲染图表图片。
 
-    DOCX 与 PDF 两条链路共用，避免"改了一处漏一处"（历史上正是如此丢失了
-    PDF 里的 JSON 数据型图表）。
+    导出链路共用，避免"改了一处漏一处"（历史上曾如此丢失 PDF 侧的
+    JSON 数据型图表；R126 起 PDF 已下线，现仅 DOCX 单链路）。
 
     ✅ R106 FIX-1：``cancel_event`` 存入 plan（``_cancel_event``），随
     「取数段 → 渲染段 → 构建线程」逐层透传；缺省 None = 无取消登记，
@@ -5240,7 +6499,7 @@ async def _prepare_export(scheme_id: str, body: dict, db,
 
     # ✅ R99（2026-10-17 · 缓存命中快速路径）：先把「取数段」的产物固化到 plan，
     #    再按调用方意图决定是否执行渲染段。指纹所需字段全部在 plan 内，
-    #    故 export_docx / export_pdf 可在两者之间插入缓存查询。
+    #    故 export_docx 可在两者之间插入缓存查询（export_pdf 已随 R126 下线）。
     plan = {
         "scheme": scheme,
         "sections": sections,
@@ -5305,9 +6564,9 @@ async def _prepare_export_render(plan: dict) -> dict:
     ⇒ 拆分段与合并路径算出的 (config_hash, content_fingerprint) 逐字相同
     ⇒ 同一份内容无论走「命中」还是「未命中」，缓存键完全一致（护栏锁定）。
 
-    本段只被 ``_prepare_export``（DOCX/PDF 两条链路的共用入口）与
-    ``export_docx`` / ``export_pdf`` 的缓存未命中分支调用；禁用快速路径时
-    两条链路仍走 ``_prepare_export`` = 取数段 + 本段，与改造前逐字一致。
+    本段只被 ``_prepare_export``（导出链路共用入口，R126 起仅剩 DOCX 单链路）
+    与 ``export_docx`` 的缓存未命中分支调用（``export_pdf`` 已随 R126 下线）；
+    禁用快速路径时仍走 ``_prepare_export`` = 取数段 + 本段，与改造前逐字一致。
 
     ✅ R100（2026-10-17）两处修复：
     ① **`_settings` 悬空引用（R98 移交、R99 拆分继留）**：本段远程位图下载
@@ -5316,7 +6575,7 @@ async def _prepare_export_render(plan: dict) -> dict:
       方案一导出即 **NameError → 500**（既有测试从未覆盖「渲染段 + 远程图」组合，
       故基线全绿掩盖了它）。现于本段内显式 import。
     ② **禁用快速路径时的二次渲染回归**：`export_cache_fast_path=False` 时
-      `_prepare_export` 内部已调本段一次，而 `export_docx`/`export_pdf` 的调用点
+      `_prepare_export` 内部已调本段一次，而 `export_docx` 的调用点
       无条件再调一次（R99 注释声称"此处 if 判定为假"，实际无 if）→ 图表全量重渲染、
       位图重复下载、AI 编排重跑，回滚开关不再是逐字回退。现以 plan 上的
       `_render_done` 哨兵做幂等：二次进入直接返回，不重复任何成本。
@@ -5512,7 +6771,7 @@ async def _prepare_export_render(plan: dict) -> dict:
     plan["render_stats"] = render_stats
     plan["ai_image_pending"] = _ai_pending
     plan["ai_image_download_pending"] = _ai_download_pending
-    # ✅ R100：置幂等哨兵（禁用快速路径时 export_docx/export_pdf 的第二次进入
+    # ✅ R100：置幂等哨兵（禁用快速路径时 export_docx 的第二次进入
     #   直接返回，见本函数 docstring ②）。
     plan["_render_done"] = True
     return plan
@@ -5533,7 +6792,7 @@ def _build_docx_options(config: dict, _float, _int) -> dict:
         "page_break_before_chapter": bool(config.get("chapter_page_break", True)),
         "line_spacing": max(1.0, min(_float("line_spacing", 1.15), 3.0)),
         "page_number_style": str(config.get("page_number_style", "simple") or "simple"),
-        "toc_depth": max(1, min(_int("toc_depth", 3), 7)),
+        "toc_depth": max(1, min(_int("toc_depth", 3), 9)),
         # ✅ 增强 v7：封面项目信息表 + 页边距（缺省 None → 走默认行为，向后兼容）
         # ✅ 类型防御：脏预设/直调 API 传入非 dict 时静默忽略，避免构建期 500
         "cover_info": config.get("cover_info") if isinstance(
@@ -5626,9 +6885,9 @@ async def _load_appendix_sources(db, scheme_id: str, project_id: str) -> list[di
 
 
 def _build_docx_task(out_path: str, prep: dict) -> tuple:
-    """组装 `_build_docx_sync` 的调用参数（DOCX / PDF 两条链路共用）。
+    """组装 `_build_docx_sync` 的调用参数（DOCX 单链路；PDF 已随 R126 下线）。
 
-    ✅ 2026-10-11：本函数是两条链路唯一收敛点，版式预设（layout_preset，
+    ✅ 2026-10-11：本函数是导出链路唯一收敛点，版式预设（layout_preset，
     引入自《文档生成规则分析与软件标准建立》4.2 导出标准）在这里套用一次
     即两侧同时生效；未配置预设时 `_resolve_layout_preset` 原样返回，
     产物与改造前逐字一致。
@@ -5659,7 +6918,7 @@ def _build_docx_task(out_path: str, prep: dict) -> tuple:
     )
 
 
-# 影响 DOCX/PDF 产物内容的全部配置键白名单（与 _prepare_export 读取保持同步）
+# 影响 DOCX 产物内容的全部配置键白名单（与 _prepare_export 读取保持同步）
 _EXPORT_CONFIG_KEYS = frozenset({
     "font_name", "font_size", "page_header", "page_footer",
     "show_page_number", "show_title_page", "show_toc",
@@ -5874,7 +7133,7 @@ def _summarize_numbering_consistency(report: dict) -> str:
 async def _guard_numbering_consistency(db, scheme_id: str) -> None:
     """✅ 编号统一（2026-09-26 · 显式跨校验器）：导出前校验落库正文子标题编号与
     当前 outline 编号一致（捕获 D4 类漂移残留，原始需求 五.6 后半）。
-    DOCX 与 PDF 两条链路共用（均经此守卫，避免"改了一处漏一处"）。
+    导出经此守卫（历史上曾为 DOCX/PDF 两链路共用，R126 起 PDF 下线）。
 
     严格模式（numbering_consistency_strict）直接 409 阻断产出不一致文档
     （CI 校验场景）；默认仅告警——导出成稿本身仍由 _compute_subheading 重算
@@ -5911,7 +7170,7 @@ async def _guard_numbering_consistency(db, scheme_id: str) -> None:
 def _cache_row_viable(result_path: str) -> bool:
     """缓存行是否仍可用：result_path 非空、文件存在且**非空文件**。
 
-    ✅ BUG 修复（2026-10-14 · P2 判据不一致）：命中判据（export_docx / export_pdf）
+    ✅ BUG 修复（2026-10-14 · P2 判据不一致）：命中判据（export_docx，PDF 已下线）
     要求 `Path(...).stat().st_size > 0`，而本函数的两处判据只查 `.exists()`：
       · 一份 0 字节（写盘中断 / 磁盘满）的产物既永远不会被返回给用户（命中判据拦住），
         又被本函数当成「有效缓存」占用 5 份保留配额；
@@ -5924,6 +7183,38 @@ def _cache_row_viable(result_path: str) -> bool:
     try:
         p = Path(result_path)
         return p.is_file() and p.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _artifact_intact(result_path: str) -> bool:
+    """✅ R126 FIX-D（2026-10-21 · P2）：交付前产物完整性判据（仅 DOCX ZIP 签名）。
+
+    背景：`_cache_row_viable` 只查 `st_size > 0`，一份**写盘中断被截断的半截文件**
+    （头部几百字节有效、ZIP 中央目录缺失）仍能通过命中判据直接交付给用户，
+    Word/WPS 打开即报「文件已损坏」/「文字程序意外中断」——用户侧表现为导出文档打不开。
+
+    判据（刻意从简、零依赖、O(尾部) 读）：
+      1. 头 4 字节 == `PK\x03\x04`（本地文件头签名，ZIP 规范固定）；
+      2. 尾部 64KB 内存在 `PK\x05\x06`（EOCD 中央目录结束记录签名——
+         doc.save() 正常收尾才会写入；截断文件必然缺失）。
+
+    刻意不改 `_cache_row_viable`（prune 保留判据语义逐字不变，防止存量
+    0 字节/半截行的清理行为漂移）；本函数只接入 **DOCX 命中点**：
+    命中不通过 ⇒ 走未命中全链路重建（fail-soft，不影响成功路径产物字节）。
+    """
+    try:
+        p = Path(result_path)
+        if not p.is_file():
+            return False
+        size = p.stat().st_size
+        if size < 8:  # 头签名 4B + EOCD 最低 22B 的绝对下界之下的必然残件
+            return False
+        with p.open("rb") as f:
+            if f.read(4) != b"PK\x03\x04":
+                return False
+            f.seek(max(0, size - 65536))
+            return b"PK\x05\x06" in f.read(65536)
     except OSError:
         return False
 
@@ -5958,7 +7249,7 @@ async def _prune_export_cache(db, scheme_id: str, protect_path: Path) -> None:
         # ✅ BUG 修复（2026-09-20）：result_path 为 NULL 时 Path(None) 抛 TypeError；
         #    为空串时 Path("") 等价 Path(".") 恒存在 → 僵尸行被当成「有效缓存」。
         # ✅ 修复（2026-10-14 · P2）：改用 _cache_row_viable（含 st_size>0），
-        #    与 export_docx / export_pdf 的命中判据同一口径 —— 0 字节僵尸产物
+        #    与 export_docx 的命中判据同一口径（export_pdf 已随 R126 下线）—— 0 字节僵尸产物
         #    不再占用 5 份保留配额。
         rp = cr.get("result_path") or ""
         if i >= 5 or not _cache_row_viable(rp):
@@ -6085,7 +7376,7 @@ async def _gc_orphan_exports(db, scheme_id: str,
 #   · `_prepare_export` 内的图表预渲染（有下游缓存，代价较小）；
 #   · `_auto_generate_ai_image_blocks` —— **真实计费**。image_engine 的 MD5 成功
 #     缓存是**运行期**缓存：并发时两个请求同时错过、各自调用一次 provider；
-#   · `_build_docx_sync`（大文档数分钟）；PDF 链再加一次 Word COM 转换。
+#   · `_build_docx_sync`（大文档数分钟）；PDF 链（曾再加一次 Word COM 转换，已下线）。
 # 结果本身正确（uuid temp + 原子 os.replace + INSERT OR IGNORE 唯一约束），
 # 但成本翻倍，且两个重活同时抢线程池与 AI 配额（§4.1 的配额压力来源）。
 #
@@ -6400,7 +7691,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
     """导出 DOCX（封面 / 目录 / 标题编号 / 图表 / 页眉页脚页码）。
 
     ✅ 编号统一（2026-09-26 · 显式跨校验器）：导出前编号一致性守卫
-    （DOCX/PDF 共用实现，见 _guard_numbering_consistency）。
+    （实现见 _guard_numbering_consistency；DOCX 单链路消费，PDF 已下线）。
 
     ✅ D-1（2026-10-01）：守卫**前置**到 _prepare_export 之前。
     旧顺序是「先 prepare、后守卫」，而 _prepare_export 内部会执行图表渲染
@@ -6447,19 +7738,27 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         cached = await _db_fetch_one(cur, what="export_docx 缓存查询")
         # ✅ 修复（2026-10-14 · P2）：可用判据收敛到 _cache_row_viable，与
         #    _prune_export_cache 的保留判据同一口径，避免「命中判据/保留判据」分叉。
+        # ✅ R126 FIX-D（2026-10-21 · P2）：命中判据再叠加产物完整性校验
+        #    （ZIP 头/EOCD 签名）——半截/被截断的缓存文件不再直接交付，
+        #    拒绝后走未命中全链路重建；拒绝原因落一行日志（R111 可观测口径）。
         if cached and cached[0] and _cache_row_viable(cached[0]):
-            # ✅ R111（P2-5）：缓存命中日志埋点（纯可观测；此前命中态只回
-            #    X-Cache-Status 响应头，运维无法从 backend.log 统计命中率）。
-            logger.info(
-                "导出缓存命中（scheme=%s · docx · 秒级返回历史产物）", scheme_id[:8])
-            # ✅ G12：缓存命中同样是「用户拿到了一份文档」，同样落审核留痕
-            await _record_export_review_trace(db, scheme_id, "docx", round_no, export_filename)
-            # ✅ 契约完整：缓存命中也回传统计/缓存标识响应头，前端统计条行为一致
-            return FileResponse(
-                cached[0], filename=export_filename,
-                headers={"X-Chart-Render-Stats": '{"cached":true}',
-                         "X-Cache-Status": "hit", **name_headers},
-                media_type=_DOCX_MIME)
+            if not _artifact_intact(cached[0]):
+                logger.warning(
+                    "导出缓存产物完整性校验未通过（scheme=%s · docx · path=%s）"
+                    "→ 丢弃缓存改走全量重建", scheme_id[:8], cached[0])
+            else:
+                # ✅ R111（P2-5）：缓存命中日志埋点（纯可观测；此前命中态只回
+                #    X-Cache-Status 响应头，运维无法从 backend.log 统计命中率）。
+                logger.info(
+                    "导出缓存命中（scheme=%s · docx · 秒级返回历史产物）", scheme_id[:8])
+                # ✅ G12：缓存命中同样是「用户拿到了一份文档」，同样落审核留痕
+                await _record_export_review_trace(db, scheme_id, "docx", round_no, export_filename)
+                # ✅ 契约完整：缓存命中也回传统计/缓存标识响应头，前端统计条行为一致
+                return FileResponse(
+                    cached[0], filename=export_filename,
+                    headers={"X-Chart-Render-Stats": '{"cached":true}',
+                             "X-Cache-Status": "hit", **name_headers},
+                    media_type=_DOCX_MIME)
 
         # ✅ R99：未命中 → 此时才执行渲染段（图表预渲染 / AI 配图 / 位图下载）。
         await _prepare_export_render(prep)
@@ -6538,7 +7837,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
             if fix_stats:
                 headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
             # ✅ 收口（2026-10-14）：留痕 → 回收 → 注销 统一走 _finalize_export_delivery
-            #    （与 PDF 分支同一实现；GC protect 传 out_path——该文件即将被流式返回，
+            #    （共享 helper，原 PDF 分支已随 R126 下线；GC protect 传 out_path——该文件即将被流式返回，
             #    不得在本次回收；cacheable=False 时本次无缓存行，只能靠这里回收孤儿）。
             await _finalize_export_delivery(
                 db, scheme_id=scheme_id, kind="docx", round_no=round_no,
@@ -6555,7 +7854,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         # ✅ 2026-10-06：原子替换失败（``cacheable=False``）时**跳过**缓存写入，
         #    避免 result_path 永久指向 ``.tmp.docx`` 孤儿文件（见上方 warning）。
         # ✅ 收口（2026-10-14）：INSERT → commit → prune → commit 收敛为
-        #    _persist_export_cache_row（与 PDF 分支同一实现；提交顺序采用 PDF 侧
+        #    _persist_export_cache_row（共享 helper；提交顺序沿用原 PDF 分支侧
         #    2026-10-13 确立的双提交口径，详见 helper docstring）。
         if cacheable:
             await _persist_export_cache_row(
@@ -6598,357 +7897,6 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         #    或前端 cancel 与 abort 之间的窗口）→ 协作式退出，回 499（非常规但
         #    语义准确的 "client closed request"），不落地产物、不写缓存。
         logger.info("导出已取消（docx, scheme=%s）", scheme_id[:8])
-        raise HTTPException(499, "导出已被用户停止")
-    finally:
-        _export_dedup_release(_lk)
-        _export_cancel_deregister(scheme_id, cancel_ev)
-
-
-def _convert_docx_to_pdf(docx_path: str, pdf_path: str) -> str:
-    """将 DOCX 转换为 PDF，尝试多种转换策略。
-
-    策略优先级：
-    1. win32com（Microsoft Word COM，Windows + Word 最可靠）
-    2. docx2pdf（封装 Word COM，需 pip install docx2pdf）
-    3. libreoffice / soffice 命令行（跨平台，需安装 LibreOffice）
-
-    Returns:
-        生成的 PDF 文件路径
-
-    Raises:
-        RuntimeError: 所有转换策略均不可用或失败
-    """
-    import os
-    import shutil
-    import subprocess
-
-    docx_abs = os.path.abspath(docx_path)
-    pdf_abs = os.path.abspath(pdf_path)
-
-    # 策略1: win32com（Microsoft Word COM）
-    # ✅ BUG 修复（严重）：本函数经 `asyncio.to_thread` 在**工作线程**中执行，
-    #    而 COM 要求调用线程先 CoInitialize —— 旧实现未初始化，win32com 在
-    #    线程池里必然抛 "CoInitialize has not been called"，于是"装了 Word 也永远
-    #    走不进策略1"，Windows 上 PDF 导出只能靠 LibreOffice 兜底（多数机器未装）
-    #    → 最终 501。这里补齐 CoInitialize/CoUninitialize。
-    # ✅ 修复（2026-09-20 深度审查、实测证据）：
-    #    ① TOC/页码域在 SaveAs(PDF) 前不更新 → PDF 里目录位置出现「（Word 打开后
-    #       自动生成目录，请按 F9 更新域）」占位文本（Word 2007 与 LibreOffice
-    #       headless 均不尊重 updateFields）。转换前显式更新全部域与目录。
-    #    ② 连续调用时 Word COM 间歇性抛 0x800706BE（RPC 失败，本机实测 4 次中
-    #       3 次失败）。对照实验定位根因：CoUninitialize 执行时 COM 对象仍被
-    #       Python 引用持有（word/doc 未释放），下一次 Dispatch 与垂死的 RPC
-    #       服务器竞态。正确顺序必须是「Quit → del 引用 → gc.collect() →
-    #       CoUninitialize」；配合 3 次重试兜底，把瞬态失败转为重试成功。
-    import gc as _gc
-    import time as _time
-    try:
-        import pythoncom
-        import win32com.client
-    except ImportError:
-        pythoncom = None
-        win32com = None
-    _last_err: Exception | None = None
-    for _attempt in range(3):
-        _word = None
-        _doc = None
-        if pythoncom is None:
-            _last_err = RuntimeError("缺少 pywin32（pythoncom）")
-            break
-        pythoncom.CoInitialize()
-        try:
-            _word = win32com.client.Dispatch("Word.Application")
-            _word.Visible = False
-            try:
-                _word.DisplayAlerts = 0
-            except Exception:
-                pass
-            _doc = _word.Documents.Open(docx_abs, ReadOnly=True)
-            try:
-                _doc.Fields.Update()
-            except Exception:
-                pass
-            try:
-                for _ti in range(1, _doc.TablesOfContents.Count + 1):
-                    _doc.TablesOfContents.Item(_ti).Update()
-            except Exception:
-                pass
-            _doc.SaveAs(pdf_abs, FileFormat=17)  # 17 = wdFormatPDF
-            _doc.Close(False)
-            return pdf_abs
-        except Exception as e:
-            _last_err = e
-            logger.info("win32com 转换失败（第 %d 次）: %s", _attempt + 1, e)
-            _time.sleep(1.0 + _attempt)
-        finally:
-            # 释放顺序是消除 0x800706BE 的关键：Quit → 删除 Python 引用 → GC → 再 CoUninitialize
-            try:
-                if _doc is not None:
-                    try:
-                        _doc.Close(False)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            try:
-                if _word is not None:
-                    try:
-                        _word.Quit()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            try:
-                _doc = None
-                _word = None
-                _gc.collect()
-                _time.sleep(0.3)
-            except Exception:
-                pass
-            pythoncom.CoUninitialize()
-    if _last_err is not None:
-        logger.info("win32com 三次重试均失败，尝试下一策略: %s", _last_err)
-
-    # 策略2: docx2pdf（同样封装 Word COM，线程内需自行初始化）
-    try:
-        import pythoncom
-        from docx2pdf import convert
-        pythoncom.CoInitialize()
-        try:
-            convert(docx_abs, pdf_abs)
-        finally:
-            pythoncom.CoUninitialize()
-        return pdf_abs
-    except ImportError:
-        pass
-    except Exception as e:
-        logger.info("docx2pdf 转换失败，尝试下一策略: %s", e)
-
-    # 策略3: libreoffice / soffice
-    for cmd in ["libreoffice", "soffice"]:
-        if shutil.which(cmd):
-            try:
-                out_dir = str(Path(pdf_abs).parent)
-                subprocess.run(
-                    [cmd, "--headless", "--convert-to", "pdf", "--outdir", out_dir, docx_abs],
-                    check=True, capture_output=True, timeout=120,
-                    # Windows 下 soffice 报错信息可能含中文，显式 utf-8 解码避免 GBK 崩溃
-                    text=True, encoding="utf-8", errors="replace")
-                generated = Path(out_dir) / (Path(docx_abs).stem + ".pdf")
-                if generated.exists():
-                    if str(generated) != pdf_abs:
-                        shutil.move(str(generated), pdf_abs)
-                    return pdf_abs
-            except Exception as e:
-                logger.info("%s 转换失败: %s", cmd, e)
-
-    raise RuntimeError(
-        "DOCX 转 PDF 失败：未找到可用的转换工具。"
-        "请安装 Microsoft Word（推荐）或 LibreOffice，或使用 DOCX 格式导出后手动另存为 PDF。"
-    )
-
-
-@router.post("/pdf")
-async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
-    """导出 PDF（先生成 DOCX 再转换为 PDF）。
-
-    转换策略：优先 Microsoft Word COM（win32com），其次 docx2pdf，最后 LibreOffice。
-    所有策略均不可用时返回 501 错误并提示安装转换工具。
-
-    ✅ 重构：准备逻辑与 DOCX 完全共用（`_prepare_export`），同时修复了旧实现
-    （1）只认 `mermaid_code` 键 → JSON 数据型图表在 PDF 中静默消失；
-    （2）中文方案名直写 HTTP 头 → 全体 PDF 导出 500。
-
-    ✅ 编号统一（2026-09-26 · 显式跨校验器）：与 DOCX 共用导出前守卫，
-    且与 DOCX 同序（守卫 → prepare）。
-
-    ✅ P2（2026-10-13）：同键并发去重。PDF 链的重复成本尤重 —— 除 DOCX 构建外
-    还有一次 Word COM 转换（秒~分钟级），故同样在去重锁内执行构建与缓存提交；
-    守卫在锁外。键与判据见 _EXPORT_BUILD_LOCKS 前的模块注释。
-    """
-    await _guard_numbering_consistency(db, scheme_id)
-    # ✅ R106 FIX-1：与 DOCX 链同构 —— 取消事件登记在去重锁之前，finally 注销。
-    cancel_ev = _export_cancel_register(scheme_id)
-    _lk = None
-    try:
-        _lk = await _export_dedup_acquire(("pdf", scheme_id, _export_config_hash(body)))
-        import tempfile
-
-        prep = await _prepare_export(scheme_id, body, db, cancel_event=cancel_ev)
-        scheme = prep["scheme"]
-
-        config_hash, content_hash = _content_fingerprint(prep)
-        # ✅ D-2（2026-10-01）：PDF 与 DOCX **必须区分缓存键**。
-        #    export_cache 的唯一索引是 (scheme_id, config_hash, content_fingerprint)，
-        #    不含格式维度 —— 若两者共用同一 content_hash，DOCX 与 PDF 会互相覆盖
-        #    （后写入者因 INSERT OR IGNORE 被忽略，PDF 永远写不进缓存）。
-        #    这里只给 **PDF** 的指纹加格式后缀：DOCX 现有键逐字不变 → 既有缓存
-        #    **零失效**（无需用户重新导出一遍），是新格式平铺接入的最小改动。
-        pdf_content_hash = content_hash + "|fmt=pdf"
-
-        # 导出文件名 = 方案名称 + 导出日期 + 导出轮次（PDF 与 DOCX 共用同一轮次计数，
-        # 这里内部的中间 DOCX 不额外计数，避免一次 PDF 导出消耗两轮）
-        round_no = await _bump_export_round(db, scheme_id)
-        # ✅ 2026-10-11（文档质量报告 P0-B）：与 DOCX 同一方案名出口（PDF 走这里）。
-        export_filename = _build_export_filename(
-            _display_scheme_name(scheme, prep.get("global_facts")), "pdf", round_no)
-        name_headers = {**_export_name_headers(export_filename, round_no),
-                        **_export_audit_headers(prep.get("content_audit") or {}),
-                        **_global_facts_status_headers(prep.get("global_facts_status"))}
-
-        # 缓存检查（与 DOCX 同口径：命中则秒级返回，跳过最昂贵的 PDF 转换）
-        cur = await db.execute(
-            "SELECT result_path FROM export_cache WHERE scheme_id=? AND config_hash=? AND content_fingerprint=?",
-            (scheme_id, config_hash, pdf_content_hash))
-        cached = await _db_fetch_one(cur, what="export_pdf 缓存查询")
-        # ✅ 修复（2026-10-14 · P2）：同 DOCX，可用判据收敛到 _cache_row_viable。
-        if cached and cached[0] and _cache_row_viable(cached[0]):
-            # ✅ R111（P2-5）：PDF 缓存命中日志埋点（纯可观测，与 DOCX 同口径）。
-            logger.info(
-                "导出缓存命中（scheme=%s · pdf · 秒级返回历史产物）", scheme_id[:8])
-            await _record_export_review_trace(db, scheme_id, "pdf", round_no, export_filename)
-            return FileResponse(
-                str(cached[0]), filename=export_filename, media_type=_PDF_MIME,
-                headers={"X-Chart-Render-Stats": '{"cached":true}',
-                         "X-Cache-Status": "hit", **name_headers})
-
-        # ✅ R99（2026-10-17 · 缓存命中快速路径）：与 DOCX 同序 —— 未命中才渲染。
-        #    PDF 链的重复成本更高（DOCX 构建 + 一次 Word COM 转换），故收益更大。
-        await _prepare_export_render(prep)
-
-        # 生成 DOCX 到临时文件
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_docx = str(Path(tmpdir) / f"{scheme_id}.docx")
-            tmp_pdf = str(Path(tmpdir) / f"{scheme_id}.pdf")
-            fix_stats = await asyncio.to_thread(_build_docx_sync, *_build_docx_task(tmp_docx, prep))
-            # ✅ R106 FIX-1：构建段与转换段之间的取消检查点 —— 已取消则不再进入
-            #    Word COM 转换（秒~分钟级成本）；TemporaryDirectory 退出自动清理。
-            _check_export_cancelled(cancel_ev)
-            # 转换为 PDF（CPU 密集，放线程池）
-            try:
-                await asyncio.to_thread(_convert_docx_to_pdf, tmp_docx, tmp_pdf)
-            except RuntimeError as e:
-                raise HTTPException(501, str(e))
-
-            # 读取 PDF 内容返回（临时目录会被清理，所以必须读入内存）
-            with open(tmp_pdf, "rb") as f:
-                pdf_bytes = f.read()
-
-        # ✅ 坏缓存守卫（D-2）：与 DOCX 同口径 —— 图表渲染失败 / AI 配图未生成 /
-        #    配图位图下载失败时产物缺图，**不写缓存**，否则服务恢复后因指纹不变
-        #    永远命中残缺 PDF（旧实现 PDF 链完全没有这道守卫）。
-        render_stats = prep.get("render_stats") or {}
-        degraded = (render_stats.get("failed", 0) > 0
-                    or prep.get("ai_image_pending", 0) > 0
-                    or prep.get("ai_image_download_pending", 0) > 0)
-
-        if not degraded:
-            import os as _os
-            # 落盘到 EXPORTS_DIR（缓存行只记路径，与 DOCX 一致；临时目录会被清理）
-            out_path = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{pdf_content_hash[:8]}.pdf"
-            # ✅ BUG 修复（2026-10-14 · P0）：与 DOCX 同口径注册「在飞产物」。
-            #    PDF 的 out_path 后缀是 .pdf（不含 .tmp.），落在 _gc_orphan_exports
-            #    的扫描范围内；replace 成功到 commit 之间的窗口若被不同配置的并发
-            #    DOCX/PDF 导出触发 GC，会被误判孤儿删除 → 缓存行永久指向已删文件。
-            _export_inflight_register(out_path)
-            # ✅ BUG 修复（2026-10-05 · F-1，交付物损坏）：旧实现
-            #    `out_path.write_bytes(pdf_bytes)` **非原子**——并发同指纹 PDF 导出、
-            #    或写盘中途崩溃/磁盘满时，都会残留**半截 PDF** 在目标路径。
-            #    下一次同指纹导出会命中缓存（size>0 守卫拦不住 >0 字节的半截文件），
-            #    直接 FileResponse 返回给用户 → 交付文档损坏。DOCX 分支早已用
-            #    `os.replace` 原子替换 + tmp 文件（见 export_docx），PDF 分支漏做。
-            #    现改为「先写唯一 tmp → DB INSERT 落盘路径 → os.replace 原子替换」。
-            #    失败一律清理 tmp，不留孤儿。
-            _tmp_pdf = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{pdf_content_hash[:8]}.{uuid.uuid4().hex}.tmp.pdf"
-            try:
-                _tmp_pdf.write_bytes(pdf_bytes)
-                # ✅ 2026-10-06：顺序治理 —— **先原子替换落盘、再写缓存行**（与 DOCX
-                #    分支同序）。旧实现是「INSERT + commit → os.replace」，替换失败时
-                #    DB 已指向一个**并不存在**的 out_path → 留下一行僵尸缓存
-                #    （/cache-status 记为 stale、prune 才清），且下一次同指纹导出会
-                #    先走一次「exists() 失败 → 全量重建」的无效往返。
-                # ✅ 与 DOCX 分支同款循环重试：Windows 上 out_path 可能被 Word/
-                #    预览窗口占用（WinError 32）；3 次退避重试。
-                _replaced = False
-                for _attempt in range(3):
-                    try:
-                        _os.replace(_tmp_pdf, out_path)
-                        _replaced = True
-                        break
-                    except PermissionError:
-                        if _attempt < 2:
-                            await asyncio.sleep(0.3 * (_attempt + 1))
-                if not _replaced:
-                    logger.warning(
-                        "PDF 缓存原子替换 3 次重试均失败（scheme=%s, out=%s），"
-                        "本次不写入导出缓存（响应体仍为完整 PDF）",
-                        scheme_id[:8], out_path.name)
-                    _tmp_pdf.unlink(missing_ok=True)
-                else:
-                    # ✅ 收口（2026-10-14）：INSERT → commit → prune → commit 收敛为
-                    #    _persist_export_cache_row（与 DOCX 分支同一实现）。
-                    # ✅ P1（2026-10-04）：cache_key 补格式后缀。旧实现 DOCX 与 PDF 写入
-                    #    **逐字相同**的 cache_key，而 cache_key 是 `/cache-status` 与运维
-                    #    排查按格式辨识缓存行的唯一人读标识 —— 同一方案同一指纹下两行完全
-                    #    同名，无法区分哪个是 docx、哪个是 pdf，清理/核对时极易误删。
-                    #    只改 PDF 侧：DOCX 现有键逐字不变 → 既有缓存行零失效。
-                    #    注意：查缓存走 (scheme_id, config_hash, content_fingerprint)
-                    #    三元组，cache_key 不参与命中判定 → 本键名不影响任何命中。
-                    await _persist_export_cache_row(
-                        db, scheme=scheme, scheme_id=scheme_id,
-                        config_hash=config_hash,
-                        content_fingerprint=pdf_content_hash,
-                        cache_key=f"{scheme_id}_{config_hash[:8]}|pdf",
-                        out_path=out_path, what="export_cache 写入(PDF)")
-            except Exception as e:
-                # 缓存写入失败不得影响本次交付（用户仍拿到完整 PDF）
-                try:
-                    _tmp_pdf.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                logger.warning("PDF 导出缓存写入失败（不影响本次交付）: %s", e, exc_info=True)
-
-        from fastapi.responses import Response
-        # ✅ 加固（D1）：PDF 链路同样合流跨章借图计数（与 DOCX 同口径）
-        _merge_borrowed_stats(render_stats, fix_stats)
-        # ✅ R111（P2-5）：PDF 缓存未命中日志埋点（纯可观测，与 DOCX 同口径；
-        #    degraded 也记——它同样走了全量渲染 + Word 转换）。
-        logger.info(
-            "导出缓存未命中（scheme=%s · pdf · 本轮全量渲染，产物%s缓存）",
-            scheme_id[:8], "已" if not degraded else "因缺图未写入")
-        headers = {
-            "Content-Disposition": _attachment_disposition(export_filename),
-            "X-Chart-Render-Stats": json.dumps(render_stats, ensure_ascii=False),
-            # ✅ 与 DOCX 对齐：补 X-Cache-Status，缺图时标记 degraded（旧实现完全没有）
-            "X-Cache-Status": "degraded" if degraded else "miss",
-            **name_headers,
-        }
-        if fix_stats:
-            headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
-        # ✅ G12：PDF 成稿同样落一条审核留痕
-        # ✅ 收口（2026-10-14）：留痕 → 回收 → 注销 统一走 _finalize_export_delivery。
-        #    GC 不传 protect：PDF 响应体是**内存字节**，本次产物不再依赖磁盘文件。
-        #    覆盖三类残留：os.replace 成功但 INSERT 抛异常的 out_path（盘上孤儿）、
-        #    陈旧缓存行指向的文件、历史 .tmp.* 临时产物（超过宽限期）。
-        #    ⚠️ inflight_path 用条件表达式：out_path 仅在 `if not degraded:` 分支内
-        #    定义，降级路径（缺图不写缓存）下该变量未绑定，直接引用会抛
-        #    UnboundLocalError；None 表示无注册可注销（helper 内部判定）。
-        await _finalize_export_delivery(
-            db, scheme_id=scheme_id, kind="pdf", round_no=round_no,
-            export_filename=export_filename,
-            inflight_path=(out_path if not degraded else None))
-        return Response(
-            content=pdf_bytes,
-            media_type=_PDF_MIME,
-            headers=headers,
-        )
-    except asyncio.CancelledError:
-        # ✅ R106 FIX-1：与 DOCX 链同构 —— 客户端断连即置位，孤儿构建线程在
-        #    下一段边界退出（转换线程不可中断，跑完当前转换即止）。
-        cancel_ev.set()
-        raise
-    except ExportCancelled:
-        logger.info("导出已取消（pdf, scheme=%s）", scheme_id[:8])
         raise HTTPException(499, "导出已被用户停止")
     finally:
         _export_dedup_release(_lk)

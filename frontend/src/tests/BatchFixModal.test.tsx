@@ -183,13 +183,19 @@ describe("BatchFixModal · 一键修复全部阻断项", () => {
     const onFixed = vi.fn();
     render(<App><BatchFixModal schemeId="s1" open onClose={() => {}} onFixed={onFixed} /></App>);
     // 收集结束前该按钮处于 disabled，必须等其可用再点（否则 click 是 no-op）
-    const sb = await waitFor(() => {
-      const b = btn(view(), "生成修复预览") as HTMLButtonElement | undefined;
+    // 就绪门：等「生成修复预览」在 collect 回数据后解禁。点击时**重新查询**当前挂载的按钮，
+    // 不复用 waitFor 捕获的旧引用 —— 全量并发下 collect 落定与点击之间组件可能再渲染一次，旧节点
+    // 已脱离文档树，fireEvent.click(旧节点) 不触发 onClick=stage ⇒ api.stage 永不被调用，
+    // 第 193 行 waitFor 超时给多长都白等（这才是本用例在全量回归里偶发超时的真根因，非纯计时）。
+    // 与同文件「拒绝全部」用例 L206 的稳健写法（点击前重新查询 btn(view(), ...)）保持一致。
+    await waitFor(() => {
+      const b = btn(view(), "生成修复预览");
       expect(b).toBeTruthy();
       expect(b!.disabled).toBe(false);
-      return b!;
     });
-    fireEvent.click(sb);
+    await act(async () => {
+      fireEvent.click(btn(view(), "生成修复预览") as HTMLButtonElement);
+    });
     await waitFor(() => expect(api.stage).toHaveBeenCalledWith("s1", { scope: "all_blocking" }));
     await waitFor(() => expect(txt(view())).toContain("修复后："));
     expect(txt(view())).toContain("正常内容");

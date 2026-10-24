@@ -93,7 +93,9 @@ def build_chapter_user_content(
         "【同级章节（请避免内容重复）】：\n" + sibling_lines + "\n"
         if sibling_lines else "【同级章节（请避免内容重复）】：（无）\n")
     user_content += f"【当前章节编号】：{section_number}\n"
-    user_content += f"【当前章节】：{leaf['title']} — {leaf.get('description', '')}\n"
+    # ✅ 引入方案 BUG-2（2026-10-23）：字段访问一律安全取值 —— 叶子缺 title
+    #    时回退空串而非 KeyError（与同级/上级拼接的 .get 口径一致）。
+    user_content += f"【当前章节】：{leaf.get('title', '')} — {leaf.get('description', '')}\n"
     # 目标字数：调用方传入的提示文案优先，回落 "N字"（与旧实现逐字一致）。
     user_content += f"【目标字数】：{word_budget_hint or f'{word_budget}字'}\n"
     if prev_sibling_summary:
@@ -271,7 +273,9 @@ def build_chapter_layered_messages(
 
     # ③ 本章任务差异：每次请求唯一不同的部分，必须放在**最后**
     task = f"【当前章节编号】：{section_number}\n"
-    task += f"【当前章节】：{leaf['title']} — {leaf.get('description', '')}\n"
+    # ✅ 引入方案 BUG-2（2026-10-23）：与 build_chapter_user_content 同口径，
+    #    安全取值，缺 title 不抛 KeyError。
+    task += f"【当前章节】：{leaf.get('title', '')} — {leaf.get('description', '')}\n"
     task += f"【目标字数】：{word_budget_hint or f'{word_budget}字'}\n"
     if prev_sibling_summary:
         task += (

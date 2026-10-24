@@ -1064,6 +1064,86 @@ async def reset_content(scheme_id: str, db=Depends(get_db)):
     return {"ok": True, "cleared": cleared}
 
 
+async def _build_generic_fix_context(db, scheme_id: str) -> dict:
+    """装配「落库前占位标题重写」所需的项目上下文（✅ R114 FIX-A）。
+
+    为何需要：``autofix_generic_titles_on_save`` 内部即 ``_try_outline_title_fix``，
+    其提示词声明了 ``scheme_basis`` / ``construction_scope`` / ``project_brief`` /
+    ``requirements`` 四个上下文变量；旧实现落库链路只传 scheme_name /
+    scheme_type ⇒ 模型拿不到「这个专项具体是什么施工」的信息，只能回「专项6」
+    「总体实施策划（2）」这类占位名，再被保守红线全批拒收 ⇒ ``applied=0`` ⇒
+    fail-soft 原样落库（用户症状）。R89 G3 修的是**生成链路**的同一根因，
+    落库链路（stopped/error 部分成果、上传识别、目录库套用、AI 调整、手工保存
+    五类入口的最后一道防线）一直漏接。
+
+    数据来源全部是**确定性、零 AI、单次查询**：
+      · ``schemes.name / type / config_json``（编制要求）；
+      · ``projects.name / engineering_type``（与生成链路 ``_assemble_context``
+        的 project_brief 兜底文案**同源同格式**）；
+      · ``services.scheme_scope`` / ``services.scheme_basis``（与生成链路
+        同一服务层单一实现，不复制判据）。
+    任何一环失败只降级为空串（fail-soft），绝不阻断保存。
+    """
+    ctx: dict = {
+        "scheme_name": "", "scheme_type": "", "construction_scope": "",
+        "project_brief": "", "scheme_basis": "", "requirements": "",
+    }
+    try:
+        cur = await db.execute(
+            "SELECT name, type, project_id, config_json FROM schemes WHERE id=?",
+            (scheme_id,))
+        _srow = await cur.fetchone()
+    except Exception:  # noqa: BLE001 - 上下文装配失败只降级，不得阻断保存
+        logger.warning("占位标题重写上下文：方案行读取失败（降级为空上下文）: %s",
+                       scheme_id[:8], exc_info=True)
+        return ctx
+    if _srow is None:
+        return ctx
+    srow = dict(_srow)
+    name = str(srow.get("name") or "")
+    ctx["scheme_name"] = name
+    ctx["scheme_type"] = str(srow.get("type") or "")
+    # 编制要求：与生成链路同一来源（config_json.requirements），非法 JSON 降级
+    try:
+        _cfg = json.loads(srow.get("config_json") or "{}")
+        if isinstance(_cfg, dict):
+            ctx["requirements"] = str(_cfg.get("requirements") or "").strip()
+    except (TypeError, ValueError):
+        logger.debug("占位标题重写上下文：config_json 非法（已降级为空）", exc_info=True)
+    # 主要施工内容：服务层单一实现（与 sse_handlers._outline_construction_scope 同源）
+    try:
+        from app.services.scheme_scope import (
+            extract_construction_scope,
+            render_scope_for_prompt,
+        )
+        if extract_construction_scope(name):
+            ctx["construction_scope"] = render_scope_for_prompt(name)
+    except Exception:  # noqa: BLE001
+        logger.debug("占位标题重写上下文：主要施工内容解析失败（降级为空）", exc_info=True)
+    # 方案名称解析：服务层单一实现（标准章节模板那一小段仅生成链路注入，
+    # 此处不复制 —— 标题重写只需「工序/工艺/对象」清单）
+    try:
+        from app.services.scheme_basis import parse_scheme_basis
+        ctx["scheme_basis"] = str(parse_scheme_basis(name).prompt_text() or "").strip()
+    except Exception:  # noqa: BLE001
+        logger.debug("占位标题重写上下文：方案名称解析失败（降级为空）", exc_info=True)
+    # 项目摘要：与生成链路 _assemble_context 的兜底文案逐字同格式
+    try:
+        cur = await db.execute(
+            "SELECT name, engineering_type FROM projects WHERE id=?",
+            (srow.get("project_id"),))
+        _prow = await cur.fetchone()
+        if _prow is not None:
+            prow = dict(_prow)
+            eng = str(prow.get("engineering_type") or "")
+            pname = str(prow.get("name") or "")
+            if eng or pname:
+                ctx["project_brief"] = f"工程类型：{eng}，项目名称：{pname}"
+    except Exception:  # noqa: BLE001
+        logger.debug("占位标题重写上下文：项目行读取失败（降级为空）", exc_info=True)
+    return ctx
+
+
 async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "",
                              lock_roots: bool = False) -> dict:
     """核心保存逻辑：将目录树写入 sections 表（智能保留已有正文）。
@@ -1181,7 +1261,7 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
     # 「只报不拒」—— 只回传 generic_residual 供前端提示，用户忽略告警就原样落库。
     # 而生成链路的占位闸门只在 `_review_and_fix_outline` 内生效；上传识别 /
     # 目录库套用 / AI 调整目录 / 手工编辑保存 / stopped·error 部分成果这五类
-    # 写入口都不走它 ⇒ 占位标题从这里直接进 sections 表、进 DOCX/PDF 导出。
+    # 写入口都不走它 ⇒ 占位标题从这里直接进 sections 表、进 DOCX 导出。
     #
     # 现在：检出非空即**先**做一次外科式重写（复用 services.outline_title_fix 的
     # `autofix_generic_titles_on_save`（内部即 `_try_outline_title_fix`）同一实现
@@ -1202,13 +1282,11 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
     _generic_autofixed = 0
     if generic_hits and getattr(settings, "outline_autofix_generic_on_save", True):
         try:
-            _sname = _stype = ""
-            _scur = await db.execute(
-                "SELECT name, type FROM schemes WHERE id=?", (scheme_id,))
-            _srec = await _scur.fetchone()
-            if _srec is not None:
-                _sname = str(_srec[0] or "")
-                _stype = str(_srec[1] or "")
+            # ✅ R114 FIX-A：落库前重写必须带上下文 —— 只传 scheme_name/type 时
+            #    模型只能回占位名（再被保守红线全批拒收 ⇒ 原样落库）。现与生成
+            #    链路同口径供给施工内容/方案名称解析/编制要求/项目摘要；
+            #    装配失败一律降级为空串（fail-soft），与旧行为逐字兼容。
+            _ctx = await _build_generic_fix_context(db, scheme_id)
             # ✅ R101（本轮）：重写逻辑收敛到 `outline_title_fix.autofix_generic_titles_on_save`
             #    单一实现 —— 与 `upload_outline.save_as_outline` 共用同一口径，
             #    结束「同一功能两份内联实现」的分叉（该类入口此前零闸门）。
@@ -1216,7 +1294,11 @@ async def _save_outline_to_db(db, scheme_id: str, outline: list, source: str = "
             outline, generic_hits, _generic_autofixed = (
                 await autofix_generic_titles_on_save(
                     outline, generic_hits,
-                    scheme_name=_sname, scheme_type=_stype,
+                    scheme_name=_ctx["scheme_name"], scheme_type=_ctx["scheme_type"],
+                    construction_scope=_ctx["construction_scope"],
+                    project_brief=_ctx["project_brief"],
+                    scheme_basis=_ctx["scheme_basis"],
+                    requirements=_ctx["requirements"],
                     context=f"save-outline scheme={scheme_id[:8]} source={source or '-'}"))
         except Exception as e:      # noqa: BLE001 - 自动修复失败不得阻断保存
             logger.warning("方案 %s 目录落库前自动重写失败（按原样保存）: %s",

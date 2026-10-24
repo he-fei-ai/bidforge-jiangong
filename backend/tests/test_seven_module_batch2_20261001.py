@@ -184,23 +184,16 @@ def test_d1_guard_precedes_prepare_in_source():
 
 
 def test_d1_pdf_also_guarded_before_prepare():
-    """PDF 链保持「守卫 → prepare」顺序（与 DOCX 对齐后的共同口径）。"""
+    """PDF 反向锚（R126）：export_pdf 不得复活。
+
+    原「PDF 链守卫 → prepare 顺序」断言随链下线消失；编号守卫运行在共享
+    `_prepare_export` 入口之前，其顺序契约已由 DOCX 孪生断言承接。
+    """
     src = _src(EX_PATH)
     tree = ast.parse(src)
-    fn = None
     for node in ast.walk(tree):
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "export_pdf":
-            fn = node
-    assert fn is not None
-    guard_line = prep_line = None
-    for node in ast.walk(fn):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id == "_guard_numbering_consistency" and guard_line is None:
-                guard_line = node.lineno
-            if node.func.id == "_prepare_export" and prep_line is None:
-                prep_line = node.lineno
-    assert guard_line is not None and prep_line is not None
-    assert guard_line < prep_line
+            raise AssertionError("export_pdf 函数复活（R126 已整体下线）")
 
 
 # ---------------------------------------------------------------------------
