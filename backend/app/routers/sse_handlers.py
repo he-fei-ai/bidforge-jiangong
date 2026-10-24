@@ -415,6 +415,15 @@ CONTENT_RATE_LIMIT_BACKOFF = float(settings.content_rate_limit_backoff)
 #    首稿已按目标字数折算 max_tokens（见 max_tokens_for_budget）后，
 #    返工需求大幅下降，故默认收敛为 2 轮、且续写失败**不重试**（见下）。
 CONTENT_CONTINUE_MAX_ROUNDS = max(0, int(settings.content_continue_max_rounds))
+# ✅ 引入《标书智能体（六）》扩写无进展退出（外部 contentGenerationTask.cjs:30
+#    MAX_EXPANSION_NO_PROGRESS_ROUNDS = 3，04_content.md §6.2 逐字：
+#    「连续多轮没有增加字数时退出」）：字数不足的扩写轮中，连续 3 轮正文没有
+#    任何字数增长即提前终止续写（增量判定见 _continue_if_needed 的
+#    no_progress_rounds 计数，判定点收口在 content_runtime.should_continue_round）。
+#    与 SHRINK_MAX_ROUNDS（缩写 3 轮，已对齐外部 MAX_WORD_ADJUSTMENT_ROUNDS）
+#    同族但独立：本常量只管扩写侧的「无进展提前退出」，不改变
+#    CONTENT_CONTINUE_MAX_ROUNDS 的轮次封顶语义（既有配置默认行为保持不变）。
+CONTENT_EXPAND_NO_PROGRESS_ROUNDS = 3
 # ✅ 2026-09-22 引入：正文采样温度。默认 None = 不传 temperature，沿用 provider
 #    默认（保持旧行为）；设 CONTENT_TEMPERATURE=0.3 才覆盖。
 CONTENT_TEMPERATURE = settings.content_temperature
@@ -5278,6 +5287,15 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
     override_section_standard = _coerce_bool(
         body.get("override_section_standard"), default=False)
 
+    # ✅ 引入《标书智能体（六）》regenerateRequirement（用户重新生成时填写的
+    #    额外要求；外部 contentGenerationTask.cjs:2989 `payload.requirement`，
+    #    04_content.md §4.1/§4.2 两条链路都注入：正文编排 + 正文生成）。
+    #    别名 `requirement` 同时接受（对齐外部载荷命名，camel/snake 双写习惯）。
+    #    空/纯空白 → 空串，下方编排与生成两处注入点整段不执行 —— 未传该参数的
+    #    既有调用方（全部现有入口）请求路径与本项引入前逐字节一致。
+    regenerate_requirement = str(
+        body.get("regenerate_requirement") or body.get("requirement") or "").strip()
+
     cur = await db.execute("SELECT * FROM schemes WHERE id=?", (scheme_id,))
     row = await cur.fetchone()
     if not row:
@@ -7054,6 +7072,17 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         subheading_rule=_sub_rule,
                         chapter_checkpoint_block=str(
                             _ck_kwargs.get("chapter_checkpoint_block") or ""))
+                    # ✅ 引入《标书智能体（六）》regenerateRequirement（生成链路
+                    #    注入点 · stable 分支）：非空时插在章节基础差异段之后、
+                    #    编排引导语与表格闸门行**之前** —— 顺序对齐外部 §4.2
+                    #    （…同级 → 额外要求 → 编排决策 → 任务）。空串不追加，
+                    #    与本项引入前逐字一致。
+                    if regenerate_requirement:
+                        _req_block = ("【用户对本次重新生成的额外要求】：\n"
+                                      + regenerate_requirement + "\n")
+                        _chapter_extras = (
+                            (_chapter_extras + "\n" + _req_block)
+                            if _chapter_extras else _req_block)
 
                 # ✅ 2026-10-23 · 表格密度需求四档闸门（对齐外部 OpenBidKit_Yibiao
                 #    v2 tableRequirement：normalizeTableRequirement →
@@ -7133,6 +7162,10 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                             scheme_name=str(scheme.get("name") or ""),
                             scheme_type=str(scheme.get("type")
                                             or scheme.get("engineering_type") or ""),
+                            # ✅ 引入《标书智能体（六）》regenerateRequirement：
+                            #    额外要求同样进入编排链路（外部 §4.1 两链路之一）。
+                            #    逐个显式书写，遵守 RenderDynamicBlindspots 纪律。
+                            regenerate_requirement=regenerate_requirement,
                         )
                         # ✅ 2026-10-23 · 表格四档闸门（对齐外部 :3989-3999 未中选
                         #    clearContentPlanTable 清表）：编排建议表格但闸门未放行
@@ -7246,6 +7279,14 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     #    被任何分支消费，编排引导语此前在这条链路**静默丢弃**
                     #    （D1 开启但分层前缀关闭的组合下，正文模型永远看不到建议）。
                     #    现直接拼到 user_content 末尾，两种配置下引导语都必达。
+                    # ✅ regenerateRequirement（生成链路注入点 · 非 stable 分支）：
+                    #    与 _table_gate_line/R74 同款补拼口径 —— 本分支
+                    #    _chapter_extras 不被消费，额外要求必须在此显式入 user，
+                    #    且置于编排引导语**之前**（对齐外部 §4.2 顺序）。
+                    if regenerate_requirement:
+                        user_content = (user_content + "\n\n"
+                                        "【用户对本次重新生成的额外要求】：\n"
+                                        + regenerate_requirement + "\n")
                     if _plan_guidance:
                         user_content = user_content + "\n\n" + _plan_guidance
                     # ✅ 2026-10-23 · 表格闸门提示行与引导语同链路补拼（本分支
@@ -7383,6 +7424,11 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     f"【当前章节】：{leaf.get('title','')} — {leaf.get('description','')}\n")
                 continue_count = 0
                 cont_failed = False
+                # ✅ 引入《标书智能体（六）》扩写无进展退出（外部
+                #    MAX_EXPANSION_NO_PROGRESS_ROUNDS=3，:4778-4796）：
+                #    连续 3 轮正文没有字数增长即停 —— 判定点收口在
+                #    content_runtime.should_continue_round（唯一判定点纪律）。
+                no_progress_rounds = 0
                 # ✅ R66（2026-10-11）：续写触发线取 max(0.8×预算, 300 字叶子下限)；
                 #    下限被钉在**不超过该章预算本身**（min(300, budget)）：用户显式
                 #    设了 <300 的小预算时，若下限仍取 300 会与续写总字数上限
@@ -7396,10 +7442,15 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         wc=wc, word_budget=word_budget,
                         continue_count=continue_count, min_passes=min_passes,
                         max_rounds=CONTENT_CONTINUE_MAX_ROUNDS,
-                        min_floor_chars=min(LEAF_MIN_WORD_BUDGET, int(word_budget or 0))):
+                        min_floor_chars=min(LEAF_MIN_WORD_BUDGET, int(word_budget or 0)),
+                        no_progress_rounds=no_progress_rounds,
+                        max_no_progress_rounds=CONTENT_EXPAND_NO_PROGRESS_ROUNDS):
                     await wait_resume(task_id)
                     if is_stopped(task_id):
                         break
+                    # ✅ 本轮起点字数（无进展计数基准）：每轮开始时快照，
+                    #    轮末与之比较决定计数清零还是 +1。
+                    _round_start_wc = wc
                     # ✅ 进度增强：上报「续写扩充中」阶段（含轮次与当前字数），
                     #    让用户看到字数在增长，而不是只看到进度条不动。
                     if stage_cb is not None:
@@ -7474,6 +7525,13 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         #    仍不达标"区分开 —— 后者交给 word_status=under 表达。
                         cont_failed = True
                         logger.warning("章节 %s 续写最终失败: %s", title, cont_last_err)
+                    # ✅ 无进展计数（外部 :4778-4796 同口径）：本轮结束后字数
+                    #    较轮初有增长 → 清零；未增长（含内容重复被丢弃、调用
+                    #    失败）→ 连续计数 +1，达 3 由 should_continue_round 终止。
+                    if wc > _round_start_wc:
+                        no_progress_rounds = 0
+                    else:
+                        no_progress_rounds += 1
                     continue_count += 1
                 return result, cont_failed
 

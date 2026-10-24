@@ -75,6 +75,55 @@ def test_unknown_command_dropped():
     assert "\\" not in xml
 
 
+def test_nested_brace_scripts_sub_and_sup():
+    """Branch 2: sSub + ^ -> sSubSup (merged into <m:sSubSup>)."""
+    from app.services import docx_math
+
+    xml = docx_math.latex_to_omml(r"x_{i+1}^{n+1}")
+    assert "<m:sSubSup>" in xml
+
+
+def test_empty_script_params_dropped():
+    """FIX-C2: Empty script params are dropped (no empty <m:sub>/<m:sup>)."""
+    from app.services import docx_math
+
+    xml = docx_math.latex_to_omml(r"x_{}")
+    assert "<m:sub>" not in xml
+    assert "<m:sup>" not in xml
+
+
+def test_trailing_orphan_script_discarded():
+    """L714-715: Trailing orphan script markers are discarded."""
+    from app.services import docx_math
+
+    xml = docx_math.latex_to_omml(r"x_")
+    assert "<m:sub>" not in xml
+    assert "<m:sup>" not in xml
+
+
+def test_sup_then_sub_merge_order():
+    """Branch 3: sSup + _ -> sSubSup (reverse order, <m:sSubSup>)."""
+    from app.services import docx_math
+
+    xml = docx_math.latex_to_omml(r"x^i_j")
+    assert "<m:sSubSup>" in xml
+
+
+def test_script_on_nested_base():
+    """Branch 6: Script on a nested base node creates nested <m:sSub>."""
+    from app.services import docx_math
+
+    xml = docx_math.latex_to_omml(r"x_{i}_{j}")
+    assert "<m:sSub>" in xml
+    assert xml.count("<m:sSub>") == 2
+
+
+def test_script_on_operator():
+    """Branch 1: Script on an operator node creates <m:sSup>."""
+    from app.services import docx_math
+
+    xml = docx_math.latex_to_omml(r"e^{2x}")
+    assert "<m:sSup>" in xml
 # ---------------------------------------------------------------------------
 # 乱码清理
 # ---------------------------------------------------------------------------

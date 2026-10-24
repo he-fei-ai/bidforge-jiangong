@@ -354,10 +354,12 @@ def should_continue_round(
     min_passes: int,
     max_rounds: int,
     min_floor_chars: int = 0,
+    no_progress_rounds: int = 0,
+    max_no_progress_rounds: int = 0,
 ) -> bool:
     """续写轮次判定：不足 80% 或未达最少轮次、且未超过最大轮次。
 
-    与正文生成循环 ``while (...)` 的口径逐字一致（P1-1：续写不重试失败调用；
+    与正文生成循环 ``while (...)`` 的口径逐字一致（P1-1：续写不重试失败调用；
     这里只决定"要不要再补一轮"）。
 
     ✅ R66（2026-10-11）``min_floor_chars``：三级目录正文下限（300 字）。
@@ -365,7 +367,15 @@ def should_continue_round(
     650 恰好放行）没问题，但**预算极小**的脏数据章（如 budget=100 → 阈值 80）
     写 90 字就"达标"，违反 300 字要求。判据取
     ``max(budget × WORD_UNDER_RATIO, min_floor_chars)``；
-    缺省 0 时与旧实现逐字等价（`max(x, 0) == x` 对非负成立）。
+    缺省 0 时与旧实现逐字等价（``max(x, 0) == x`` 对非负成立）。
+
+    ✅ 引入《标书智能体（六）》扩写无进展退出（2026-10-24；外部
+    ``MAX_EXPANSION_NO_PROGRESS_ROUNDS = 3``，contentGenerationTask.cjs:4778-4796，
+    04_content.md §6.2）：``max_no_progress_rounds > 0`` 且连续无进展轮数已达
+    上限时返回 False —— 即使字数仍低于触发线也不再补写（AI 停滞时不再空烧轮次）。
+    两参数均缺省（0）时与本项引入前逐字等价，既有调用方零回归；
+    计数的递增/清零由调用方按「本轮字数是否增长」维护（见 sse_handlers
+    ``_continue_if_needed``）。
     """
     try:
         budget = int(word_budget or 0)
@@ -375,6 +385,8 @@ def should_continue_round(
         floor = int(min_floor_chars or 0)
     except (TypeError, ValueError):
         floor = 0
+    if max_no_progress_rounds > 0 and no_progress_rounds >= max_no_progress_rounds:
+        return False
     under_line = max(budget * WORD_UNDER_RATIO, floor)
     return ((wc < under_line or continue_count < min_passes)
             and continue_count < max_rounds)

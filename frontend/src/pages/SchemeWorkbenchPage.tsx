@@ -5994,12 +5994,28 @@ const draftKey = selectedSection && id
   function regenerateCurrentSection() {
     if (!selectedSection) return;
     const hasContent = selectedSection.word_count > 0 || selectedSection.content;
+    // ✅ 引入《标书智能体（六）》「用户重新生成时填写的额外要求」
+    //    （regenerateRequirement）：confirm 弹窗无状态，用闭包变量捕获输入，
+    //    非空时随请求体下发，后端注入正文编排与正文生成两条链路；留空 → 不下发。
+    let regenRequirement = "";
     modal.confirm({
       title: "⚠️ 确认重写本章？",
       content: (
         <div>
-          将重新生成章节 <b>「{selectedSection.title}」</b> 的全部叶子子章节，
-          {hasContent ? "已有的正文内容将被<b style={{ color: '#ff4d4f' }}>覆盖</b>。" : "章节目前为空。"}
+          <div>
+            将重新生成章节 <b>「{selectedSection.title}」</b> 的全部叶子子章节，
+            {hasContent ? "已有的正文内容将被<b style={{ color: '#ff4d4f' }}>覆盖</b>。" : "章节目前为空。"}
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <div style={{ marginBottom: 6, color: "rgba(0,0,0,0.55)" }}>
+              本次重新生成的额外要求（可选）：
+            </div>
+            <Input.TextArea
+              rows={2}
+              placeholder="例如：重点补充雨季施工措施；表格只保留主要设备表"
+              onChange={(e) => { regenRequirement = e.target.value; }}
+            />
+          </div>
         </div>
       ),
       okText: "确认重写",
@@ -6013,6 +6029,7 @@ const draftKey = selectedSection && id
           section_id: selectedSection.key,
           mode: "section",
           force_rewrite: true,
+          regenerate_requirement: regenRequirement.trim(),
         });
       },
     });
@@ -6273,6 +6290,9 @@ const draftKey = selectedSection && id
     // F-CONTENT-STANDARD(2026-09-26): 任务级生成标准覆盖
     task_standard?: "precise" | "fuzzy";
     override_section_standard?: boolean;
+    // ✅ 引入《标书智能体（六）》regenerateRequirement：用户重新生成时填写的
+    //    额外要求，随请求体下发，后端注入正文编排与正文生成两条链路。
+    regenerate_requirement?: string;
   }) => {
     if (!id) return;
     // ✅ 世代校验：标记本代生成，收尾时仅当仍是最新一代才复位全局状态
@@ -6316,6 +6336,11 @@ const draftKey = selectedSection && id
     if (extra?.mode) body.mode = extra.mode;
     body.concurrency = concurrencyOption;
     body.force_rewrite = !!extra?.force_rewrite;
+    // ✅ 用户重新生成的额外要求（regenerateRequirement）：空/纯空白不下发，
+    //    后端缺省路径逐字节与本项引入前一致。
+    if (extra?.regenerate_requirement?.trim()) {
+      body.regenerate_requirement = extra.regenerate_requirement.trim();
+    }
     // ✅ 全文一致性 Agent 修复：正文生成后自动扫描 + 定向修复（默认开启）
     body.auto_consistency_repair = autoConsistencyRepair;
     body.consistency_severity = consistencySeverity;

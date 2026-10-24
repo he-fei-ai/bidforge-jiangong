@@ -685,17 +685,7 @@ class _LatexParser:
 
     def _attach_scripts(self, nodes: list) -> list:
         """将 script_marker 附着到前面的节点（支持 _ ^ 组合为 sSub/sSup/sSubSup）。"""
-        out: list = []
-        for node in nodes:
-            if node[0] == "script_marker":
-                if not out:
-                    # 脚本前无基节点（罕见）：丢弃
-                    continue
-                marker = node[1]
-                # 取出脚本参数（下一个节点即为脚本内容，已被解析为普通节点）
-                # 这里通过后续处理：marker 后面应紧跟一个节点
-                continue
-            out.append(node)
+        # 第一遍已移除：out 列表从未被使用，直接执行第二遍合并
 
         # 第二遍：真正附着。重新扫描，遇到 script 标记时合并。
         result: list = []

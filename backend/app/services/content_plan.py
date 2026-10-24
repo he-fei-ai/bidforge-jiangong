@@ -293,6 +293,7 @@ async def plan_section_content(
     fact_titles: list[str],
     scheme_name: str = "",
     scheme_type: str = "",
+    regenerate_requirement: str = "",
 ) -> ContentPlanData:
     """独立 LLM 步：为单章产出结构化编排决策。
 
@@ -303,6 +304,12 @@ async def plan_section_content(
         chat_fn: 与 chat_with_fallback 同签名的异步函数，用于发起 LLM 请求。
         leaf: 叶子章节 dict（需含 title/description 等）。
         knowledge_names / fact_titles: 候选池（决定模型可挑选的范围）。
+        regenerate_requirement: ✅ 引入《标书智能体（六）》
+            regenerateRequirement（用户重新生成时填写的额外要求）：非空时以
+            **独立 user 消息**插在编排任务消息**之前**下发，逐字对齐外部
+            buildContentPlanningMessages（04_content.md §4.1：`用户对本次重新生成
+            的额外要求：` 消息位于同级章节之后、编排任务之前）。空串时不追加
+            任何消息 —— 缺省路径与本项引入前逐字节一致。
     """
     from app.services.ai.prompts._registry import render
 
@@ -331,8 +338,16 @@ async def plan_section_content(
 
     messages = [
         {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": user_prompt},
     ]
+    # ✅ 用户重新生成的额外要求：独立 user 消息，位置在编排任务消息之前
+    #    （对齐外部 §4.1 分层顺序：…同级 → 额外要求 → 编排任务）。
+    _req = str(regenerate_requirement or "").strip()
+    if _req:
+        messages.append({
+            "role": "user",
+            "content": f"用户对本次重新生成的额外要求：\n{_req}",
+        })
+    messages.append({"role": "user", "content": user_prompt})
 
     try:
         from app.services.ai.json_response import collect_json_response_with_chat
