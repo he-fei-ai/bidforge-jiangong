@@ -29,6 +29,14 @@ def _is_response_format_unsupported(status: int, body: str) -> bool:
 class OpenAICompatibleProvider(BaseProvider):
     name = "openai_compatible"
 
+    def supports_tools(self) -> bool:
+        """OpenAI 兼容协议原生支持 tools / tool_calls。
+
+        ✅ P0：Agent 工具循环据此把本类排在候选首位；不支持的 Provider
+        （如未实现工具协议的 Anthropic 薄封装）会被跳过。
+        """
+        return True
+
     @staticmethod
     def _ensure_user_message(messages: list) -> list:
         """Agnes 等厂商要求 messages 中必须存在 role=user 的消息，否则返回 400"""
@@ -38,7 +46,9 @@ class OpenAICompatibleProvider(BaseProvider):
 
     async def chat(self, messages: list, temperature: float | None = None,
                    json_mode: bool = False, max_tokens: int | None = None,
-                   extra_body: dict | None = None, **_kwargs) -> str:
+                   extra_body: dict | None = None,
+                   tools: list | None = None,
+                   tool_choice=None, **_kwargs):
         # ✅ 移植适配：归一化 AIMessage 对象 → dict；支持参数覆盖
         messages = normalize_messages(messages)
         payload = {
@@ -49,6 +59,14 @@ class OpenAICompatibleProvider(BaseProvider):
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        # ✅ P0（参考易标 piSessionFactory 工具组装）：非 None 才下发 tools。
+        #    部分厂商把 tools / response_format 视为互斥，调用方（agent_loop）
+        #    不会同时传；这里仅做防御性摘除，避免整类厂商 400。
+        if tools:
+            payload["tools"] = tools
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
+            payload.pop("response_format", None)
         if extra_body:
             payload.update(extra_body)
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
@@ -80,6 +98,18 @@ class OpenAICompatibleProvider(BaseProvider):
         if not choices:
             raise RuntimeError(f"厂商返回空 choices: {str(data)[:200]}")
         self.last_finish_reason = str(choices[0].get("finish_reason") or "")
+        # ✅ P0：工具调用模式返回**完整 assistant 消息**，而不是正文字符串。
+        #    模型可能只发 tool_calls 而 content 为 null —— 这是协议内的正常
+        #    形态，绝不能走下面的「空 content 抛错」分支（否则工具循环第一轮
+        #    就被误判成厂商抖动而失败降级）。
+        if tools:
+            msg = dict(choices[0].get("message") or {})
+            msg.setdefault("role", "assistant")
+            if not isinstance(msg.get("tool_calls"), list):
+                msg["tool_calls"] = []
+            if msg.get("content") is None:
+                msg["content"] = None
+            return msg
         # ✅ 修复：content 可能为 None（tool_calls/内容过滤时），避免 None 传给上层
         content = (choices[0].get("message") or {}).get("content")
         if not (content or "").strip():

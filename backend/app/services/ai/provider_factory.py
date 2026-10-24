@@ -3321,6 +3321,130 @@ async def chat_with_fallback(messages: list, ai_config: dict | None = None, *,
     raise RuntimeError("所有 AI 提供商调用失败：无可用候选")
 
 
+async def chat_with_tools(messages: list, *, tools: list, tool_choice=None,
+                          ai_config: dict | None = None, scene: str = "",
+                          temperature: float | None = None,
+                          max_tokens: int | None = None,
+                          timeout: int | None = None,
+                          reasoning_effort: str = "") -> dict:
+    """带降级链的**工具调用**请求（P0，Agent 工具循环专用）。
+
+    与 :func:`chat_with_fallback` 的关系：复用同一套「场景路由 → 候选链 →
+    可用性门禁」前置阶段（阶段 1/2/3），但：
+
+    1. **只保留 ``supports_tools()`` 为真的候选** —— 不支持工具协议的
+       Provider 被静默吞掉 ``tools`` 参数会导致循环永远等不到 ``tool_calls``；
+    2. **顺序尝试，不做对冲请求** —— 工具循环是状态化的多轮对话，
+       并行竞速会白烧 token，且首个成功者之外的请求没有意义；
+    3. 返回**完整 assistant 消息 dict**（含 ``tool_calls``），不是正文字符串；
+    4. 记账口径与 ``_attempt_candidate`` 保持一致：实时状态、并发采样、
+       熔断成败、配额冷却、审计日志（``scene`` 透传，/ai/stats 可按场景聚合）。
+    5. 请求方式固定为普通请求（``request_mode`` 忽略）：工具调用需要拿到
+       完整 ``tool_calls`` 结构，流式需要额外做增量拼装，收益不成正比。
+
+    Args:
+        tools: OpenAI function calling 格式的工具数组（非空）。
+    Returns:
+        ``{"role": "assistant", "content": str|None, "tool_calls": [...]}``
+    Raises:
+        RuntimeError: 无可用工具型候选，或所有候选都失败。
+    """
+    if not tools:
+        raise ValueError("chat_with_tools 需要非空 tools 参数")
+    cfg = await _resolve_chat_config(ai_config, scene)
+    candidates = await _build_candidates(cfg)
+    usable, gate_err = await _gate_candidates(candidates, scene)
+    errors: list[Exception] = [gate_err] if gate_err is not None else []
+
+    _eff = (reasoning_effort or getattr(settings, "ai_reasoning_effort", "") or "").strip()
+    extra_body = {"reasoning_effort": _eff} if _eff else None
+
+    def _build(c: dict, mt: int):
+        return _build_provider(c.get("provider_name", ""), c["api_key"],
+                               c["base_url"], c["model"], max_tokens=mt,
+                               temperature=(temperature if temperature is not None
+                                            else c.get("temperature",
+                                                       DEFAULT_CONFIG_NUMBERS["temperature"])),
+                               timeout=_candidate_timeout(c, timeout))
+
+    # 阶段 4：筛出真正支持 tools 协议的候选
+    capable: list[dict] = []
+    for c in usable:
+        try:
+            probe = _build(c, max_tokens or c.get("max_tokens",
+                                                  DEFAULT_CONFIG_NUMBERS["max_tokens"]))
+        except Exception as e:  # 配置残缺：与该候选无关，记下继续
+            errors.append(e)
+            continue
+        if probe.supports_tools():
+            capable.append(c)
+    if not capable:
+        raise RuntimeError(
+            "没有支持 tools/tool_calls 的可用 Provider"
+            + (f"：{errors[-1]}" if errors else "（请在 AI 配置中启用 OpenAI 兼容厂商）"))
+
+    for c in capable:
+        pname = c.get("provider_name", "?")
+        model = c.get("model", "")
+        mt = int(max_tokens or c.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"]))
+        req_timeout = _candidate_timeout(c, timeout)
+        provider = _build(c, mt)
+        t0 = time.time()
+        with _ai_live_lock:
+            _ai_live["in_flight"] = int(_ai_live["in_flight"]) + 1
+            _ai_live["total"] = int(_ai_live["total"]) + 1
+        _ab.notify()
+        try:
+            async with concurrency_controller.semaphore:
+                result = await asyncio.wait_for(
+                    provider.chat(messages, temperature=temperature, max_tokens=mt,
+                                  tools=tools, tool_choice=tool_choice,
+                                  extra_body=extra_body),
+                    timeout=req_timeout)
+            duration = time.time() - t0
+            _ai_live_record(pname, model, True, duration)
+            concurrency_controller.record(duration, status=200)
+            concurrency_controller.adjust_concurrency()
+            circuit_breaker.record_success(pname)
+            _note_quota_success(pname)
+            clear_thinking_dead(pname)
+            u = extract_usage(provider)
+            await _log_audit(pname, model, "chat", duration, True,
+                             prompt_tokens=u["prompt_tokens"],
+                             completion_tokens=u["completion_tokens"],
+                             cached_tokens=u["cached_tokens"], scene=scene,
+                             config_id=c.get("config_id", ""),
+                             base_url=c.get("base_url", ""))
+            if not isinstance(result, dict):
+                # Provider 契约：传了 tools 必须回 dict。这里兜底一次，
+                # 避免某个 Provider 忘记实现导致 agent_loop 拿到裸字符串。
+                result = {"role": "assistant", "content": str(result), "tool_calls": []}
+            return result
+        except asyncio.CancelledError:
+            _ai_live_record(pname, model, False, time.time() - t0)
+            raise
+        except Exception as e:
+            duration = time.time() - t0
+            status = _status_from_error(e)
+            _ai_live_record(pname, model, False, duration)
+            concurrency_controller.record(duration, status=status)
+            concurrency_controller.adjust_concurrency()
+            await _log_audit(pname, model, "chat", duration, False,
+                             error=_error_summary(e), scene=scene,
+                             config_id=c.get("config_id", ""),
+                             base_url=c.get("base_url", ""))
+            if QUOTA_FAIL_COOLDOWN > 0 and _is_quota_error(e):
+                _note_quota_failure(pname, e)
+            if _is_thinking_exhausted(e):
+                _note_thinking_dead(pname)
+            circuit_breaker.record_failure(pname, is_429=(status == 429))
+            logger.error("Provider %s 工具调用失败: %s", pname, e)
+            errors.append(e)
+            continue
+
+    raise RuntimeError(f"所有支持 tools 的 Provider 调用失败：{errors[-1] if errors else '无候选'}")
+
+
 def _messages_contain_images(messages: list) -> bool:
     """检测 messages 中是否包含图片内容（OpenAI Vision 格式）"""
     for m in messages:

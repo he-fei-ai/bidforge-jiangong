@@ -14,7 +14,16 @@ class AnthropicCompatibleProvider(BaseProvider):
 
     async def chat(self, messages: list, temperature: float | None = None,
                    json_mode: bool = False, max_tokens: int | None = None,
-                   extra_body: dict | None = None, **_kwargs) -> str:
+                   extra_body: dict | None = None,
+                   tools: list | None = None,
+                   tool_choice=None, **_kwargs) -> str:
+        # ✅ P0：本薄封装尚未实现 Anthropic 原生 tools / tool_use 协议。
+        #    显式拒绝而不是让 **_kwargs 静默吞掉 —— 否则模型收不到工具定义，
+        #    Agent 工具循环会「以为能调工具」却永远等不到 tool_calls。
+        if tools:
+            raise ValueError(
+                f"Provider {self.name} 尚不支持 tools/tool_calls 协议，"
+                f"请改用 OpenAI 兼容 Provider 执行 Agent 工具循环")
         # ✅ 移植适配：归一化 AIMessage 对象 → dict；支持参数覆盖
         messages = normalize_messages(messages)
         system = "\n".join(str(m["content"]) for m in messages if m["role"] == "system")

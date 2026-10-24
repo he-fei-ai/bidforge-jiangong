@@ -128,6 +128,16 @@ class BaseProvider:
     def supports_json_mode(self) -> bool:
         return True
 
+    def supports_tools(self) -> bool:
+        """当前 Provider 是否支持 OpenAI 兼容的 ``tools`` / ``tool_calls`` 协议。
+
+        ✅ 移植适配（P0，参考易标 piSessionFactory 工具组装层）：
+        Agent 工具循环（``services/agent/agent_loop.py``）据此挑选可执行工具的
+        Provider。不支持的 Provider 会被**跳过**而不是静默吞掉 ``tools``
+        参数 —— 否则模型收不到工具定义却被告知「可以调用工具」，循环会空转。
+        """
+        return False
+
     def supports_vision(self) -> bool:
         """判断当前模型是否支持图片/视觉输入"""
         model_lower = self.model.lower()
@@ -148,12 +158,24 @@ class BaseProvider:
 
     async def chat(self, messages: list, temperature: float | None = None,
                    json_mode: bool = False, max_tokens: int | None = None,
-                   extra_body: dict | None = None, **_kwargs) -> str:
+                   extra_body: dict | None = None,
+                   tools: list | None = None,
+                   tool_choice: Any = None,
+                   **_kwargs) -> str | dict:
         """对话调用
 
         ✅ 移植适配：支持 temperature/json_mode/max_tokens/extra_body 覆盖参数
         （image_engine 及源项目 collect_json_response 会传这些 kwarg），
         实现方按需取用，未知参数忽略。
+
+        ✅ P0 工具调用扩展（参考易标 piRuntimeService 双层工具循环）：
+        - ``tools`` / ``tool_choice`` 为 None 时：返回值、抛错口径与旧实现
+          **逐字不变**（纯字符串），现有 200+ 调用点零感知；
+        - ``tools`` 非 None 时：返回 assistant 消息 dict
+          ``{"role": "assistant", "content": str|None, "tool_calls": [...]}``，
+          供 ``services/agent/agent_loop.py`` 判断是否继续执行工具。
+          此模式下「content 为空」是**合法状态**（模型只发工具调用），
+          实现方不得按空响应抛错。
         """
         raise NotImplementedError
 
