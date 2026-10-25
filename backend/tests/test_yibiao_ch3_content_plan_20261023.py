@@ -260,7 +260,11 @@ class TestA7PriorityTruncation:
                 < CONTEXT_PRIORITY["项目知识库素材"])
 
     def test_wired_into_content_generation(self):
-        assert "_apply_prompt_context_budget(" in _SSE_SRC
+        # ✅ A/B M6 实证（2026-10-25）：旧断言 `"_apply_prompt_context_budget(" in
+        #    _SSE_SRC` 被 **def 行本身**满足（§5.14「名字在场」假护栏族）—— 摘掉
+        #    唯一调用点后护栏仍全绿。改为锁**真实调用行**：治理必须真的作用在
+        #    分层后的每条 user 消息上，而不是只有定义在场。
+        assert "_txt = _apply_prompt_context_budget(_txt)" in _SSE_SRC
         # 分层后对每条 user 消息逐一治理（R57）
         assert '_guard_external_material(_msg.get("content") or "")' in _SSE_SRC
 
