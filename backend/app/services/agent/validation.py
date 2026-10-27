@@ -53,6 +53,21 @@ OUTLINE_REVIEW_CONTEXT_FILE = "outline-review-context.json"
 #: AI 生成内容模式（L25，``validateScorePlanningRoots`` 校验新增一级目录用）。
 AI_CONTENT_MODE = "ai-generate"
 
+#: 一级目录属性枚举（易标 L26 逐字；Schema ``attr`` enum 与提示词共用）。
+OUTLINE_ATTRIBUTES = ["通用", "商务/资信", "技术", "其他", "目录", "报价", "业绩"]
+
+#: 内容模式枚举（易标 L27 逐字；Schema ``content_mode`` enum 共用）。
+CONTENT_MODES = ["ai-generate", "template-fill", "directory-generate",
+                 "manual-fill", "other"]
+
+#: 属性 → 强制内容模式（易标 L28–33 逐字；未列出的属性不强制）。
+ATTRIBUTE_CONTENT_MODE_RULES = {
+    "商务/资信": "template-fill",
+    "目录": "directory-generate",
+    "报价": "manual-fill",
+    "业绩": "template-fill",
+}
+
 #: 6 个 workflow 阶段的必需产物文件表（L17–L24，键名逐字照抄：
 #: 前两个用连字符、后四个用下划线）。
 STAGE_OUTPUT_FILES: dict[str, list[str]] = {

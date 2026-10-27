@@ -362,6 +362,14 @@ class Settings(BaseSettings):
     #    其他取值一律按 "auto" 处理（fail-soft，不因脏配置炸主流程）。
     outline_scheme: str = "auto"
 
+    # ✅ 接线阶段（2026-10-25 · 《目录生成工具修正移植_实施报告》遗留①）：
+    #    目录生成主流程是否改走 Agent 接线（stage_runner 六阶段骨架 +
+    #    workspace 基线 + 提交止损）。默认 False = 逐字走 legacy 分支，
+    #    行为与基线完全一致（死代码保基线）；置 True 后 generate_outline
+    #    在 SSE 事件流内转 outline_agent_event_stream（产出与 legacy 同
+    #    形状的 completed/stopped/error 事件，落库仍由前端 save-outline 完成）。
+    outline_agent_enabled: bool = False
+
     # ✅ R58（2026-10-10）：短方案（word_budget ≤ 上阈值）走「一次性直出」时，
     #    若 AI 返回空目录 / 节点全非法 / 调用异常，是否**自动切换分步生成**。
     #    旧行为是直接 finish_task failed + yield error（用户只看到「请重试」，
@@ -421,6 +429,21 @@ class Settings(BaseSettings):
     #    即使上一项为 False，含 high 级冲突的章节校验不过仍重试一次 ——
     #    基线实测省重试会让 3/12 的高危冲突留在交付文档里。
     consistency_repair_retry_on_invalid_by_severity: bool = True
+
+    # ✅ R135（2026-10-26 · 《正文生成工具调用与修正机制引入》）：正文 Agent
+    #    分层修复（第二层）。True 时，「定点编辑 → 整章重写」都失败的章节
+    #    改走 Agent 修复：LLM 在**隔离工作区**内以文件读写 + grep 搜索修改
+    #    小节文件，程序重新解析校验（标记完整 / 不新增 / 不删除 / 不重排）
+    #    后**只回写变化小节**；任何失败保留原正文。默认 False = 逐字回到
+    #    引入前行为（Agent 修复完全不参与，仅保留独立触发端点）。
+    #    所有 Agent 任务经全局 FIFO 队列串行执行（content_agent_queue_max_pending）。
+    content_agent_repair_enabled: bool = False
+    # Agent 修复单次批次的模型轮数上限（防无界空转烧 token）。
+    content_agent_repair_max_turns: int = 24
+    # Agent 修复单次批次的墙钟超时（秒）；到点收束且全部不落库（保留原正文）。
+    content_agent_repair_timeout: int = 900
+    # 全局 Agent 队列待执行上限（超出即拒绝入队，调用方择机重试）。
+    content_agent_queue_max_pending: int = 16
 
     # ---------- 审核与预检 · 问题定向自动修复（2026-09-30） ----------
     # 单次「自动修复」最多改写多少个章节（0 = 不限）。定位到的章节数可能很多

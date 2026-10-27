@@ -72,6 +72,37 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit]
 
 
+async def _agent_repair_fallback(*, db, scheme_id: str, sid: str, title: str,
+                                 before: str, conflicts: list[dict],
+                                 facts: str, resync_fn=None) -> str | None:
+    """R135 分层修正第二层：Agent 修复回落（隔离工作区 + 程序结构校验）。
+
+    调用 :func:`content_agent.repair.run_agent_section_repair`（persist=False，
+    不写库）；成功且本节确有变化时返回**新正文**，否则返回 ``None``
+    （调用方维持 failed 状态）。任何异常由调用方兜底，绝不阻断修复批次。
+    """
+    from app.services.content_agent.repair import SectionTarget, run_agent_section_repair
+
+    cur = await db.execute(
+        "SELECT word_budget FROM sections WHERE id=?", (sid,))
+    row = await cur.fetchone()
+    target = SectionTarget(
+        section_id=sid, title=title, content=before,
+        conflicts=list(conflicts), word_budget=int(row[0] or 0) if row else 0)
+    result = await run_agent_section_repair(
+        db, scheme_id=scheme_id, targets=[target],
+        facts_text=facts, resync_fn=resync_fn, persist=False)
+    if result.status == "completed" and sid in (result.new_contents or {}):
+        logger.info(
+            "Agent 修复（第二层）完成：section=%s turns=%d 工具调用=%d 还原输入=%d",
+            sid, result.turns, len(result.tool_calls), len(result.restored_inputs))
+        return result.new_contents[sid]
+    logger.info("Agent 修复（第二层）未产出修复正文：section=%s status=%s reason=%s",
+                sid, result.status, result.reason or "；".join(result.problems[:3]))
+    return None
+
+
+
 def _clean_repair_output(text: str, section_title: str) -> str:
     """剥离模型可能误加的 Markdown 代码块包裹与重复的章节标题。"""
     text = (text or "").strip()
@@ -433,6 +464,25 @@ async def run_repair(db, *, scheme_id: str, scan_id: str, conflicts: list[dict],
                 except Exception as e:
                     logger.warning("章节 %s 第 %d 次修复异常：%s", title, attempt, e)
                     problems = [str(e)[:150]]
+
+            # ✅ R135（2026-10-26 · 分层修正第二层）：「定点编辑 → 整章重写」
+            #    都失败时，若 content_agent_repair_enabled=True，改走 Agent 修复：
+            #    LLM 在隔离工作区内以文件读写 + grep 搜索修改小节文件，程序
+            #    重新解析校验（标记完整/不新增/不删除/不重排）后只交回变化小节
+            #    的新正文；由下方既有落库块统一执行 UPDATE + 图表重登记（R92）。
+            #    Agent 修复自身 persist=False（不写库），任何失败保留原正文。
+            if not ok and bool(getattr(settings, "content_agent_repair_enabled", False)):
+                try:
+                    _agent_after = await _agent_repair_fallback(
+                        db=db, scheme_id=scheme_id, sid=sid, title=title,
+                        before=before, conflicts=confs, facts=facts,
+                        resync_fn=resync_fn)
+                except Exception as e:
+                    logger.warning("章节 %s Agent 修复回落异常：%s", title, e)
+                    _agent_after = None
+                if _agent_after:
+                    after, ok, problems = _agent_after, True, []
+                    logger.info("章节 %s 经 Agent 修复（第二层）产出修复正文", title)
 
             cids = [c["conflict_id"] for c in confs]
             if ok and after:

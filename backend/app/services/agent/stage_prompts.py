@@ -22,16 +22,18 @@
    与易标原文完全相同，提示词文本因此未发生任何变化。
 2. ``ORIGINAL_ONLY_DIRECTORY_RULE``（L34）：已读确认本仓 ``validation.py``
    未导出该常量，故在本模块按 L34 逐字定义并导出。
-3. ``CONTENT_MODES``（L27）：任务指示从 ``.validation`` 导入，但已读确认
-   ``validation.py`` 未定义该符号（全仓 Python 代码也无），且 L599–858 的
-   提示词正文从未引用它，故本模块既不导入也不定义。
+3. ``CONTENT_MODES``（L27）：L599–858 的提示词正文从未引用它，故本模块
+   不导入也不定义；该常量已按易标 L27 逐字补齐于 ``validation.py``
+   （接线阶段遗留②修复），供 Schema 与产物校验层引用。
 4. JS 模板字符串 ``${}`` 插值改为 Python f-string 或显式拼接；三元表达式改为
    显式 ``if`` 分支；``=== null`` 改为 ``is None``；``Math.max(a, b)`` 改为
    ``max(a, b)``；``join('、')`` / ``join('\\n\\n')`` 改为 ``str.join``。
    产出文本与 JS 在相同入参下逐字一致（已用 Node 提取原文函数做字节级比对）。
 5. 注入参数保持为参数、不自行实现：
-   - ``create_output_repair_prompt(request, meta)`` 按属性访问
+   - ``create_output_repair_prompt(request, meta)`` 原文按属性访问
      ``request.kind`` / ``meta.workflow_stage``（对应易标对象属性）；
+     接线阶段（2026-10-25）为对齐 ``stage_runner`` 的 dict 注入契约
+     扩展为 dict / 属性双形态读取，属性形态行为与原文逐字一致；
    - 两个审核构造器的 ``input_files`` 为 ``list[dict]``，每项含 ``path`` 与
      ``content`` 键（对应易标 ``inputFiles`` 数组的 ``.path`` / ``.content``）。
 6. 提示词内的工作区文件名（原方案.md、响应文件要求.md、项目概述.md、
@@ -42,7 +44,10 @@
 - L688「请继续使用当前 Pi Session 已读取的技术评分信息……」——易标私有运行时
   措辞，因产出逐字保真优先而原样保留；
 - 工具名 ``json-validation`` / ``write`` / ``edit`` / ``grep`` / ``read`` /
-  ``bash`` / ``ask-user`` / ``report-failure``——本仓 P1 已按同名工具移植；
+  ``ask-user`` / ``report-failure``——本仓 P1 已按同名工具移植；
+  ``bash`` 本仓 P1 **未**移植（工具表中不存在该工具），构造器产出保持
+  逐字保真不改写，由接线层在提示词出口统一消歧（见
+  ``outline_agent_flow.disambiguate_prompt_tools``）；
 - L803/L835「宿主程序计算的确定性审核结果」等宿主程序措辞；
 - 所有红线句（如「只在回复中输出 JSON 不算写入」「程序已为 X 预置 Schema，
   可用 json-validation 自查」）逐字保留。
@@ -86,14 +91,31 @@ def create_output_file_requirements(stage: str) -> str:
 def create_output_repair_prompt(request, meta):
     """仅将产物校验失败交回当前会话修复（易标 L604–607）。
 
-    - ``request``：需含 ``kind`` 属性；``kind == 'execution'`` 时返回 ``None``
-      （执行错误不走产物修复通道）；
-    - ``meta``：需含 ``workflow_stage`` 属性（本仓可直接传 ``StageMeta``）。
+    - ``request``：``kind == 'execution'`` 时返回 ``None``（执行错误不走
+     产物修复通道）；
+    - ``meta``：需含 ``workflow_stage``（阶段键）。
+
+    ✅ 接线契约对齐（2026-10-25）：``stage_runner.run_stage`` 的两个调用点
+    （执行档 / 提交档）注入的是 **dict**（docstring L33–35 明确
+    ``request['kind']``，``base_meta()`` 同为 dict），而易标原文与本仓
+    单测注入的是属性形态对象。此处按 dict / 属性双形态读取（对齐
+    ``stage_runner._field`` 的兜底模式），两侧行为一致：
+    dict 缺 ``kind`` 键视为非 execution，缺 ``workflow_stage`` 键时
+    ``str(None)`` 会立刻被 ``STAGE_OUTPUT_FILES`` 拦成 KeyError —— 与
+    属性形态缺属性抛 AttributeError 同属「调用方未按契约传参」，不吞错。
     """
-    if request.kind == "execution":
+    if isinstance(request, dict):
+        kind = request.get("kind")
+    else:
+        kind = getattr(request, "kind", None)
+    if kind == "execution":
         return None
+    if isinstance(meta, dict):
+        workflow_stage = meta.get("workflow_stage")
+    else:
+        workflow_stage = getattr(meta, "workflow_stage", None)
     return (
-        f"{create_output_file_requirements(meta.workflow_stage)}\n"
+        f"{create_output_file_requirements(workflow_stage)}\n"
         "沿用已有材料和用户确认结果，只修复本次提交报告中的问题；"
         "已通过的文件保留，不要重复询问已确认事项。"
     )

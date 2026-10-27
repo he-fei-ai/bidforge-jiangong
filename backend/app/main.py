@@ -15,6 +15,7 @@ from app.routers import (
     charts,
     compliance,
     consistency_repair,
+    content_agent,
     doc_pipeline,
     export,
     global_facts,
@@ -437,7 +438,8 @@ setup_middleware(app)
 for r in (projects, schemes, sections, sse_handlers,
           outline_library, upload_outline, global_facts,
           compliance, export, ai_config, charts, scheme_catalog,
-          knowledge, consistency_repair, review, review_autofix, system,
+          knowledge, consistency_repair, content_agent, review,
+          review_autofix, system,
           bid_analysis, doc_pipeline, prompts):
     app.include_router(r.router)
 

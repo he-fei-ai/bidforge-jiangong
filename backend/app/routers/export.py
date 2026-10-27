@@ -560,11 +560,14 @@ def _count_unclosed_chart_fences(content: str) -> int:
 
 
 def audit_content(sections: list[dict], *,
-                  fences_fixed: int = 0) -> dict:
+                  fences_fixed: int = 0,
+                  mermaid_status: dict | None = None) -> dict:
     """扫描各章正文，产出可交付性问题清单（供导出预检 / 响应头 / 日志）。
 
     返回 ``{"total": int, "items": [...]}``；``items`` 每项含
     key / label / level / count / sections（最多 3 个章节标题，便于定位）。
+    当 ``mermaid_status`` 不为 None 时，顶层新增 ``"mermaid_service"`` 键
+    （纯加法，不改既有 total/items 结构，既有调用方零影响）。
 
     ✅ R99（2026-10-17 · 围栏自动修复可观测性）：新增 ``fences_fixed`` 形参。
     开启 ``auto_fix_unclosed_fences`` 后，围栏在体检**之前**就被补齐 →
@@ -574,6 +577,11 @@ def audit_content(sections: list[dict], *,
     （默认关闭时解析器会按句读行把正文还原出来，开启后反而丢得更多）。
     现显式产出一条 warn 级提示，如实告知「本次自动补齐了 N 处围栏 + 需人工核对」。
     缺省 0 = 不传该形参时代码路径与改造前**逐字一致**（既有调用方零影响）。
+
+    ✅ R133-C（2026-10-24 · Mermaid 服务健康探测）：新增 ``mermaid_status`` 形参。
+    由调用方在异步上下文中完成 2s 超时 + fail-soft 的 Mermaid HTTP 服务
+    探测，将结果写回顶层 ``"mermaid_service"`` 键，供前端导出页展示
+    「原生出图 / PIL v2 回退」的确定性结论。探测失败不阻断导出。
     """
     hits: dict[str, dict] = {}
     for sec in sections:
@@ -645,7 +653,33 @@ def audit_content(sections: list[dict], *,
     order = {"error": 0, "warn": 1, "info": 2}
     items = sorted(hits.values(),
                    key=lambda x: (order.get(x["level"], 9), -x["count"]))
-    return {"total": sum(x["count"] for x in items), "items": items}
+    result = {"total": sum(x["count"] for x in items), "items": items}
+    # ✅ R133-C：Mermaid 服务健康状态作为顶层新增键（纯加法，不影响 total/items）
+    if mermaid_status is not None:
+        result["mermaid_service"] = mermaid_status
+    return result
+
+
+async def _probe_mermaid_status() -> dict:
+    """R133-C（2026-10-24）：Mermaid HTTP 服务健康探测（2s 硬超时 + fail-soft）。
+
+    - 复用 mermaid_service 单例客户端的 get_available_backends()（Docker/Railway
+      未配置 URL 时即时 False，mmdc 走 subprocess 探测——其内部超时 5s，本函数
+      用 ``asyncio.wait_for(..., timeout=2)`` **硬封顶**，绝不阻塞导出主流程）；
+    - 任何异常（含超时）一律记 WARNING 并降级为「不可用」，探测失败不阻断导出；
+    - 结果由调用方写进 content_audit 顶层 ``mermaid_service`` 键（纯加法）。
+    """
+    try:
+        from app.services.ai.mermaid_service import get_mermaid_service_client
+        client = get_mermaid_service_client()
+        backends = await asyncio.wait_for(
+            client.get_available_backends(), timeout=2.0)
+        return {"available": len(backends) > 0,
+                "backends": [b.value for b in backends]}
+    except Exception as e:
+        logger.warning(
+            "Mermaid 服务健康探测失败（降级为不可用，不影响导出）: %s", e)
+        return {"available": False, "backends": []}
 
 
 def _format_audit_log(audit: dict) -> str:
@@ -1596,7 +1630,9 @@ async def collect_export_issues(scheme_id: str, db, *,
     # ✅ 新增（2026-09-19）：内容体检（占位符 / HTML 残留 / LaTeX 空参数 /
     #    投标用语 / 未闭合图表围栏）—— 独立字段，不进 issues（避免改变既有
     #    前端"问题计数"语义），供导出前弹窗与"待补充清单"定位使用。
-    content_audit = audit_content(sections)
+    # ✅ R133-C：导出预检同样携带 Mermaid 服务健康探测结论（2s 硬超时 +
+    #    fail-soft，见 _probe_mermaid_status），与导出主链路同口径。
+    content_audit = audit_content(sections, mermaid_status=await _probe_mermaid_status())
     # ✅ 新增（2026-09-24）：《待补充清单》精简版（additive 键，不改变既有字段）。
     #    只有聚合计数与按字段/章节聚合，不带逐条 occurrences（响应体控制），
     #    逐条清单走 GET /export/placeholder-report 专用端点。
@@ -4942,11 +4978,22 @@ def _export_audit_headers(audit: dict) -> dict:
     响应头 Value 必须是 latin-1 安全字节，JSON 里含中文会直接抛
     ``UnicodeEncodeError``（与 X-Export-Filename 同一原因）→ 百分号编码。
     无风险时不发头，避免前端统计条出现无意义的空提示。
+
+    ✅ R133-C：``audit["mermaid_service"]``（Mermaid 服务健康结论）在
+    ``items`` 为空时也要回传 —— 否则「服务可用/不可用」的确定性结论在
+    零风险文档上凭空消失。此时只回传 mermaid_service 一键（不发空 items）。
     """
-    if not audit or not audit.get("items"):
+    if not audit:
         return {}
     from urllib.parse import quote
-    return {"X-Content-Audit": quote(json.dumps(audit, ensure_ascii=False), safe="")}
+
+    if audit.get("items"):
+        return {"X-Content-Audit": quote(json.dumps(audit, ensure_ascii=False), safe="")}
+    if "mermaid_service" in audit:
+        return {"X-Content-Audit": quote(json.dumps(
+            {"mermaid_service": audit["mermaid_service"]},
+            ensure_ascii=False), safe="")}
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -6526,7 +6573,13 @@ async def _prepare_export(scheme_id: str, body: dict, db,
     #    通过响应头 X-Content-Audit 回传前端，并在日志中留痕。
     #    ✅ R99：fences_fixed 只在「本次确实补齐过围栏」时产出提示项，
     #    缺省 0 时与改造前逐字一致。
-    plan["content_audit"] = audit_content(sections, fences_fixed=_fix_total)
+    # ✅ R133-C（2026-10-24 · Mermaid 服务健康探测）：导出预检时探测
+    #    Mermaid HTTP 服务可用性（2s 硬超时 + fail-soft，探测失败不阻断
+    #    导出）。结果写入 content_audit 的 mermaid_service 顶层键，供前端
+    #    导出页展示「原生出图 / PIL v2 回退」的确定性结论。
+    _mermaid_status = await _probe_mermaid_status()
+    plan["content_audit"] = audit_content(
+        sections, fences_fixed=_fix_total, mermaid_status=_mermaid_status)
     logger.info("%s", _format_audit_log(plan["content_audit"]))
 
     # ✅ D-3（2026-10-01）：补充附录数据源。默认关闭 → 空列表 → 不渲染。

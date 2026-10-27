@@ -46,6 +46,9 @@ __all__ = [
     "OUTLINE_REVIEW_FILE",
     "OUTLINE_REVIEW_CONTEXT_FILE",
     "STAGE_OUTPUT_FILES",
+    "OUTLINE_ATTRIBUTES",
+    "CONTENT_MODES",
+    "ATTRIBUTE_CONTENT_MODE_RULES",
     "StageMeta",
     "validate_json_output",
     "validate_outline_output",
@@ -83,6 +86,22 @@ __all__ = [
     "STOP_COMPLETED",
     "STOP_BLOCKING_PREFIX",
     "RESTORED_NOTE_TEMPLATE",
+    # P3 —— Schema 本体与校验器工厂（outline_schemas）
+    "OUTLINE_JSON_SCHEMA",
+    "build_json_validation_schemas",
+    "build_output_validators",
+    # 接线阶段 —— Agent 六阶段编排入口（outline_agent_flow，遗留①）
+    "OUTLINE_AGENT_TASK_KEY",
+    "OutlineAgentStopped",
+    "OutlineAgentReportedFailure",
+    "OutlineAgentOutcome",
+    "disambiguate_prompt_tools",
+    "build_task_instruction",
+    "seed_files_from_context",
+    "workspace_root_for",
+    "build_outline_agent_tools",
+    "run_outline_agent",
+    "outline_agent_event_stream",
 ]
 
 #: 名字 → 所属模块（惰性解析用，避免 import 本包时拉起全部工具实现）。
@@ -112,6 +131,9 @@ _LAZY_MODULES: dict[str, str] = {
     "OUTLINE_REVIEW_FILE": "validation",
     "OUTLINE_REVIEW_CONTEXT_FILE": "validation",
     "STAGE_OUTPUT_FILES": "validation",
+    "OUTLINE_ATTRIBUTES": "validation",
+    "CONTENT_MODES": "validation",
+    "ATTRIBUTE_CONTENT_MODE_RULES": "validation",
     "StageMeta": "validation",
     "validate_json_output": "validation",
     "validate_outline_output": "validation",
@@ -144,6 +166,20 @@ _LAZY_MODULES: dict[str, str] = {
     "STOP_COMPLETED": "stage_runner",
     "STOP_BLOCKING_PREFIX": "stage_runner",
     "RESTORED_NOTE_TEMPLATE": "stage_runner",
+    "OUTLINE_JSON_SCHEMA": "outline_schemas",
+    "build_json_validation_schemas": "outline_schemas",
+    "build_output_validators": "outline_schemas",
+    "OUTLINE_AGENT_TASK_KEY": "outline_agent_flow",
+    "OutlineAgentStopped": "outline_agent_flow",
+    "OutlineAgentReportedFailure": "outline_agent_flow",
+    "OutlineAgentOutcome": "outline_agent_flow",
+    "disambiguate_prompt_tools": "outline_agent_flow",
+    "build_task_instruction": "outline_agent_flow",
+    "seed_files_from_context": "outline_agent_flow",
+    "workspace_root_for": "outline_agent_flow",
+    "build_outline_agent_tools": "outline_agent_flow",
+    "run_outline_agent": "outline_agent_flow",
+    "outline_agent_event_stream": "outline_agent_flow",
 }
 
 

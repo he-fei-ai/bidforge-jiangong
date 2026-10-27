@@ -1,0 +1,909 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.14.4, pytest-9.1.0, pluggy-1.6.0
+rootdir: J:\编程\专项方案工具箱\backend
+configfile: pytest.ini
+plugins: anyio-4.13.0, asyncio-1.4.0, cov-7.1.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=function, asyncio_default_test_loop_scope=function
+collected 9945 items
+
+tests\test_adjust_facts.py ...........                                   [  0%]
+tests\test_adjust_outline.py ...........                                 [  0%]
+tests\test_agent_p0_loop_20261024.py ....................                [  0%]
+tests\test_agent_p1_tools_20261024.py .............................      [  0%]
+tests\test_agent_p2_submission_20261024.py ............................. [  1%]
+.                                                                        [  1%]
+tests\test_agent_p4_task_state_20261025.py .............                 [  1%]
+tests\test_agent_p4_workspace_baseline_20261024.py ..............        [  1%]
+tests\test_ai_config_20260927_fixes.py ......                            [  1%]
+tests\test_ai_config_cross_end_20261005.py ...                           [  1%]
+tests\test_ai_config_debt_20261006.py .................................. [  1%]
+....................                                                     [  1%]
+tests\test_ai_config_env_rollback.py ................................... [  2%]
+....                                                                     [  2%]
+tests\test_ai_config_frontend_parity_20261006.py .................       [  2%]
+tests\test_ai_config_gapfix_20260925.py ...............................  [  2%]
+tests\test_ai_config_key_rotation_20261017.py ...............            [  2%]
+tests\test_ai_config_migration_closeout_20261006.py .................... [  3%]
+.........                                                                [  3%]
+tests\test_ai_config_module.py ......................................... [  3%]
+.....................................................                    [  4%]
+tests\test_ai_config_module_enhance_20261003.py ........................ [  4%]
+.....                                                                    [  4%]
+tests\test_ai_config_request_mode.py ..................................  [  4%]
+tests\test_ai_config_runtime_switch.py ......................            [  5%]
+tests\test_ai_config_security_routing.py ............................... [  5%]
+..........                                                               [  5%]
+tests\test_ai_image_auto_export.py .......                               [  5%]
+tests\test_ai_staleness_and_truncation_r49_20261007.py ...............   [  5%]
+tests\test_api_auth_middleware.py .................                      [  5%]
+tests\test_api_contract.py .......                                       [  5%]
+tests\test_arch_leaf_vertical_r59_20261010.py .......................... [  6%]
+............                                                             [  6%]
+tests\test_arch_paper_font_r60_20261010.py ............................. [  6%]
+................................                                         [  6%]
+tests\test_arch_size_budget_20261010.py ...............................  [  7%]
+tests\test_arch_split_legibility_r62_20261010.py ....................... [  7%]
+.................................................                        [  7%]
+tests\test_arch_style_r94_20261017.py .............                      [  8%]
+tests\test_audit_false_positive_20261002.py ............................ [  8%]
+..................                                                       [  8%]
+tests\test_audit_fixes_20260927.py ..................................... [  8%]
+......................                                                   [  9%]
+tests\test_audit_fixes_20260927_b.py ..........................          [  9%]
+tests\test_audit_overflow_20261005.py .....                              [  9%]
+tests\test_audit_rules_namespace_20261003.py .................           [  9%]
+tests\test_baseline_calls.py ..                                          [  9%]
+tests\test_bid_analysis.py ............................................. [ 10%]
+.                                                                        [ 10%]
+tests\test_bid_analysis_evidence.py ...........                          [ 10%]
+tests\test_bid_analysis_legacy_closeout_20260930.py .................... [ 10%]
+.........                                                                [ 10%]
+tests\test_bid_response_domain_20260930.py ............................. [ 10%]
+...........................................                              [ 11%]
+tests\test_bid_section_context.py ......................                 [ 11%]
+tests\test_bid_section_detector.py ..................................... [ 11%]
+..                                                                       [ 11%]
+tests\test_bid_section_extraction.py ..................                  [ 12%]
+tests\test_callopt_batch1.py .................                           [ 12%]
+tests\test_callopt_batch2.py ...........                                 [ 12%]
+tests\test_callopt_batch3.py .........                                   [ 12%]
+tests\test_callopt_batch4.py .............                               [ 12%]
+tests\test_callopt_batch5.py ....                                        [ 12%]
+tests\test_chapter_injection.py ..                                       [ 12%]
+tests\test_chart_drop_observability_r48_20261006.py .................... [ 12%]
+...........                                                              [ 12%]
+tests\test_chart_edge_parsing.py ............................            [ 13%]
+tests\test_chart_fence_consistency.py ......                             [ 13%]
+tests\test_chart_fence_eof_parity_20261003.py .........................  [ 13%]
+tests\test_chart_fixes.py ..........................                     [ 13%]
+tests\test_chart_json_registration_parity_20260927.py .................. [ 13%]
+..........                                                               [ 14%]
+tests\test_chart_module_hardening.py ..........                          [ 14%]
+tests\test_chart_pipeline_r13.py ...                                     [ 14%]
+tests\test_chart_prompt_coverage_20260927.py ........................... [ 14%]
+....                                                                     [ 14%]
+tests\test_chart_prompt_parity_20260930.py ............................. [ 14%]
+.                                                                        [ 14%]
+tests\test_chart_render_deep_fixes_20260925.py ................          [ 14%]
+tests\test_chart_render_enhancements.py ..........................       [ 15%]
+tests\test_chart_sync_closeout_r92_20261017.py ..............            [ 15%]
+tests\test_chart_visual_fixes.py ..                                      [ 15%]
+tests\test_chart_yield_closure_r49_20261006.py ......................... [ 15%]
+..............                                                           [ 15%]
+tests\test_charts_ai_image_gate.py ...                                   [ 15%]
+tests\test_charts_r13_and_types_parity_20261004.py ...............       [ 15%]
+tests\test_charts_rendering.py ...........................               [ 16%]
+tests\test_checkpoint_feedback_20261002.py ............................. [ 16%]
+..........................................                               [ 16%]
+tests\test_classification_parity_20261001.py ..................          [ 17%]
+tests\test_cleanup_preflight_runs_20261003.py ............               [ 17%]
+tests\test_compliance_ai_facts_20261003.py .............                 [ 17%]
+tests\test_config_health_closeout_r103_20261018.py ..................    [ 17%]
+tests\test_conflict_arbiter.py .....                                     [ 17%]
+tests\test_consistency_audit_error_parity_r104_20261018.py ............. [ 17%]
+..                                                                       [ 17%]
+tests\test_consistency_repair.py ...........                             [ 17%]
+tests\test_consistency_repair_optimization.py .....................      [ 18%]
+tests\test_consistency_repair_wiring.py ..........                       [ 18%]
+tests\test_consistency_scan_optimization.py ........................     [ 18%]
+tests\test_content_audit_full_facts_r82_20261015.py ..............       [ 18%]
+tests\test_content_blocks_regex_perf_20260927.py .......                 [ 18%]
+tests\test_content_call_optimization.py ...........                      [ 18%]
+tests\test_content_chart_fixes.py ..........                             [ 18%]
+tests\test_content_checkpoint_closure_20261002.py ...................... [ 19%]
+............................................                             [ 19%]
+tests\test_content_checkpoint_prepend_20261002.py ...................... [ 19%]
+.......................                                                  [ 19%]
+tests\test_content_continuation.py ..................................... [ 20%]
+..                                                                       [ 20%]
+tests\test_content_data_contract_r52_20261007.py ....................... [ 20%]
+....................................                                     [ 20%]
+tests\test_content_deep_audit.py .................................       [ 21%]
+tests\test_content_deep_audit_20260923.py .............................. [ 21%]
+........                                                                 [ 21%]
+tests\test_content_deep_audit_20260923_b.py ............................ [ 21%]
+......                                                                   [ 21%]
+tests\test_content_fact_autofix_r77_20261014.py ........................ [ 22%]
+.....                                                                    [ 22%]
+tests\test_content_facts.py ..................                           [ 22%]
+tests\test_content_fence_contract_20260929.py ..............             [ 22%]
+tests\test_content_fence_single_source_r76_20261013.py ................. [ 22%]
+.............................                                            [ 23%]
+tests\test_content_generation_g11.py ..............                      [ 23%]
+tests\test_content_generation_g12.py .............................       [ 23%]
+tests\test_content_order_concurrency.py ...................              [ 23%]
+tests\test_content_order_facts_wiring_closeout_r105_20261018.py ........ [ 23%]
+................                                                         [ 23%]
+tests\test_content_outline_enhancement_20261003.py ..................... [ 24%]
+..................                                                       [ 24%]
+tests\test_content_pipeline_settings.py .........                        [ 24%]
+tests\test_content_plan_d1_20261011.py ...............                   [ 24%]
+tests\test_content_polish_tilde_fences_20261003.py ......                [ 24%]
+tests\test_content_progress.py ......................................... [ 25%]
+.........                                                                [ 25%]
+tests\test_content_quality.py ..............................             [ 25%]
+tests\test_content_quality_audit_parity_20261006.py ..............       [ 25%]
+tests\test_content_realworld_fixes.py ..........                         [ 25%]
+tests\test_content_review_closeout_r90_20261017.py ..................... [ 25%]
+...........................................                              [ 26%]
+tests\test_content_rewrite.py .................                          [ 26%]
+tests\test_content_runtime.py .............                              [ 26%]
+tests\test_content_shrink.py ..........                                  [ 26%]
+tests\test_content_standard_api.py ..........                            [ 26%]
+tests\test_content_standard_report_endpoints.py ......                   [ 26%]
+tests\test_content_standard_service.py ................................. [ 27%]
+.                                                                        [ 27%]
+tests\test_content_standard_sse_wiring.py .........................      [ 27%]
+tests\test_content_terminal_payload_20261005.py ........................ [ 27%]
+                                                                         [ 27%]
+tests\test_content_utils.py .........................................    [ 28%]
+tests\test_context_truncation.py ...                                     [ 28%]
+tests\test_cross_module_chain_20261004.py .......................        [ 28%]
+tests\test_cross_module_chain_r70_20261011.py .......................... [ 28%]
+..................                                                       [ 28%]
+tests\test_cross_module_fixes_20260924.py .............                  [ 28%]
+tests\test_crypto.py ..................                                  [ 29%]
+tests\test_data_dict_value_kind_r83_20261016.py .......                  [ 29%]
+tests\test_dataflow_fixes_20260923.py ..........                         [ 29%]
+tests\test_dataflow_risk_fixes.py .........                              [ 29%]
+tests\test_db_dead_connection_20260926.py ...............                [ 29%]
+tests\test_db_lock_closeout_r108_20261018.py ........................... [ 29%]
+..................                                                       [ 29%]
+tests\test_db_migrate_missing_table.py ...                               [ 30%]
+tests\test_db_wal_self_heal_20260929.py ...                              [ 30%]
+tests\test_deep_probe_fixes_20261003.py ........                         [ 30%]
+tests\test_delete_section_cycle_guard_20261003.py ...                    [ 30%]
+tests\test_deprecated_and_bak_guards_20261004.py ....                    [ 30%]
+tests\test_doc_generation_standards_r65_20261011.py .................... [ 30%]
+............................                                             [ 30%]
+tests\test_doc_order_and_dup_title.py ....                               [ 30%]
+tests\test_doc_pipeline.py ...........................                   [ 30%]
+tests\test_doc_pipeline_status_vocab.py ..                               [ 31%]
+tests\test_doc_quality_fixes_20261017.py ............................... [ 31%]
+...............                                                          [ 31%]
+tests\test_doc_quality_report_fixes.py ..............................    [ 31%]
+tests\test_docx_math.py .....................                            [ 31%]
+tests\test_docx_strict_sequence_r109_20261019.py ......................  [ 32%]
+tests\test_duplicate_detection_20261001.py ............................. [ 32%]
+..................................                                       [ 32%]
+tests\test_e2e_chain_hardening.py ......................                 [ 33%]
+tests\test_export.py ................................................... [ 33%]
+........................................                                 [ 33%]
+tests\test_export_appendix_d3_20261001.py ...............                [ 34%]
+tests\test_export_atomicity_r1_20261005.py ............                  [ 34%]
+tests\test_export_body_render_fixes_20261014.py ........................ [ 34%]
+......                                                                   [ 34%]
+tests\test_export_cache_prune_20261003.py .........                      [ 34%]
+tests\test_export_cache_unique.py ..                                     [ 34%]
+tests\test_export_closeout_20261006.py ................................. [ 34%]
+.......                                                                  [ 35%]
+tests\test_export_closeout_r99_20261017.py ......................F...... [ 35%]
+........F.........F........FF                                            [ 35%]
+tests\test_export_concurrent_dedup_r77_20261013.py ..................... [ 35%]
+..                                                                       [ 35%]
+tests\test_export_content_quality.py ................................... [ 36%]
+                                                                         [ 36%]
+tests\test_export_docx_smoke.py ............................             [ 36%]
+tests\test_export_duplicate_sections.py ..............                   [ 36%]
+tests\test_export_fallback_dedup.py ..                                   [ 36%]
+tests\test_export_fence_autofix.py ..                                    [ 36%]
+tests\test_export_fence_unified.py .........                             [ 36%]
+tests\test_export_hardening_d1_d4_20261006.py ...F.....F.....F....F..FFF [ 37%]
+....                                                                     [ 37%]
+tests\test_export_high_risk_regressions.py .......x....                  [ 37%]
+tests\test_export_nested_ordered_list_20261003.py ..........             [ 37%]
+tests\test_export_numbering_parity_20261006.py ..........FFFFFF          [ 37%]
+tests\test_export_orphan_gc_20261006.py ............FF......FFF.F.FF.... [ 37%]
+.........F....FFFFF                                                      [ 37%]
+tests\test_export_presets.py ...                                         [ 38%]
+tests\test_export_remote_image_security.py ..........                    [ 38%]
+tests\test_export_render_closeout_r100_20261017.py ............F.        [ 38%]
+tests\test_export_scheme_forms_20261002.py ...................           [ 38%]
+tests\test_export_table_garbled_closeout_r104_20261018.py .............. [ 38%]
+............                                                             [ 38%]
+tests\test_fact_cross_check_writeback.py ...                             [ 38%]
+tests\test_fact_gate_parity_20260930.py .............                    [ 38%]
+tests\test_fact_scope_single_source_r69_20261011.py ..............       [ 39%]
+tests\test_facts_ack_stale_20261004.py .....................             [ 39%]
+tests\test_facts_basis_itemize_r93_20261017.py ....................      [ 39%]
+tests\test_facts_classification.py ..................................... [ 39%]
+...............................                                          [ 40%]
+tests\test_facts_content_audit_20260929.py .......................       [ 40%]
+tests\test_facts_content_fixes_20260930.py ............................. [ 40%]
+........                                                                 [ 40%]
+tests\test_facts_crosscheck_preserve_20261003.py .....                   [ 40%]
+tests\test_facts_deep_audit_guards.py ..........                         [ 40%]
+tests\test_facts_deep_audit_r45_20261006.py .................            [ 41%]
+tests\test_facts_derivation_closeout_r54_20261008.py ................... [ 41%]
+............................                                             [ 41%]
+tests\test_facts_extractor.py ..............                             [ 41%]
+tests\test_facts_incremental.py ..............                           [ 41%]
+tests\test_facts_inject_gate_failclosed_20260927.py .........            [ 41%]
+tests\test_facts_key_namespace_r63_20261010.py .................         [ 42%]
+tests\test_facts_module_fixes_20261001.py .............................. [ 42%]
+                                                                         [ 42%]
+tests\test_facts_sse_endpoint_no_422_20261003.py ...                     [ 42%]
+tests\test_facts_value_kind_r80_20261015.py ...........................  [ 42%]
+tests\test_facts_versioning.py .......                                   [ 42%]
+tests\test_fence_autofix.py ............................................ [ 43%]
+.                                                                        [ 43%]
+tests\test_figure_number_no_skip_on_render_fail.py .........             [ 43%]
+tests\test_file_import_pipeline.py ....................                  [ 43%]
+tests\test_file_parser.py .............................................. [ 43%]
+..................                                                       [ 44%]
+tests\test_file_parser_hardening.py ..............................       [ 44%]
+tests\test_file_parser_tables.py ...................                     [ 44%]
+tests\test_five_section_prompts_20261023.py ..........                   [ 44%]
+tests\test_flowchart_legibility_r67_20261011.py ........................ [ 44%]
+....                                                                     [ 44%]
+tests\test_flowchart_paper_note_r67_20261011.py ...........              [ 45%]
+tests\test_flowchart_unified_style_r66_20261011.py ..................... [ 45%]
+....                                                                     [ 45%]
+tests\test_four_basis_inputs_20260923.py .........................       [ 45%]
+tests\test_frontend_first_run_r57_20261009.py ........F..........        [ 45%]
+tests\test_fuzzy_eight_and_selfcheck_default_20261002.py ............... [ 45%]
+.......                                                                  [ 46%]
+tests\test_fuzzy_fill_and_trace_20261001.py ............................ [ 46%]
+........................................................................ [ 47%]
+                                                                         [ 47%]
+tests\test_gc_orphan_doc_trees_20261003.py .............                 [ 47%]
+tests\test_global_facts_batch_resolve_safety.py ..........               [ 47%]
+tests\test_global_facts_clear_and_format.py ......                       [ 47%]
+tests\test_global_facts_closeout_20261006.py ........................... [ 47%]
+..s..................................................................... [ 48%]
+..................................                                       [ 48%]
+tests\test_global_facts_closeout_r75_20261013.py ..........              [ 48%]
+tests\test_global_facts_closeout_r75b_20261013.py ............           [ 48%]
+tests\test_global_facts_cross_module.py ...                              [ 48%]
+tests\test_global_facts_enhance_20261003.py ..........                   [ 48%]
+tests\test_global_facts_fact_lines.py ..................                 [ 49%]
+tests\test_global_facts_field_completeness.py ..                         [ 49%]
+tests\test_global_facts_frontend_parity_r89_20261017.py ................ [ 49%]
+...........                                                              [ 49%]
+tests\test_global_facts_hardening.py .........                           [ 49%]
+tests\test_global_facts_item_updates.py ..............                   [ 49%]
+tests\test_global_facts_legacy_closeout_20260930.py .................... [ 49%]
+.............................                                            [ 50%]
+tests\test_global_facts_persist.py .....                                 [ 50%]
+tests\test_global_facts_reference_parity_20260930.py ................... [ 50%]
+.......................................................................  [ 51%]
+tests\test_global_facts_resolve.py .........                             [ 51%]
+tests\test_global_facts_route_contract_20261011.py ..............        [ 51%]
+tests\test_global_facts_routes.py ................                       [ 51%]
+tests\test_global_facts_safety_scope.py ..........                       [ 51%]
+tests\test_governance_field_parity_20261011.py ....                      [ 51%]
+tests\test_hazard_threshold_p0_20261002.py ............................. [ 51%]
+.....                                                                    [ 52%]
+tests\test_heading_spec_alignment.py .................                   [ 52%]
+tests\test_image_budget_g2_20260930.py ....................              [ 52%]
+tests\test_import_module_boundaries_20261008.py ...................      [ 52%]
+tests\test_import_module_crosscut_20261008.py .......................... [ 52%]
+                                                                         [ 52%]
+tests\test_import_module_fixes_20260925.py ............................. [ 53%]
+......................                                                   [ 53%]
+tests\test_import_module_hardening_20260923.py .............             [ 53%]
+tests\test_import_module_linkage_fixes_20261003.py ............s..       [ 53%]
+tests\test_import_outline_deep_fix_20260927.py ......................... [ 53%]
+........................                                                 [ 54%]
+tests\test_import_outline_fixes_20260929.py ............................ [ 54%]
+..........................................                               [ 54%]
+tests\test_import_parse_closeout_20261005.py ..........................  [ 55%]
+tests\test_import_parse_closeout_20261006.py ..................          [ 55%]
+tests\test_import_parse_closeout_r72_20261012.py ........                [ 55%]
+tests\test_import_parse_contract_r73_20261012.py ....................... [ 55%]
+..........................                                               [ 55%]
+tests\test_import_parse_r13_closeout_20261005.py ....................... [ 56%]
+....                                                                     [ 56%]
+tests\test_import_parse_r79_closeout_20261015.py ....................... [ 56%]
+...........                                                              [ 56%]
+tests\test_inline_charts.py ..................................           [ 56%]
+tests\test_json_mode_unsupported_20261001.py ........................... [ 57%]
+.............                                                            [ 57%]
+tests\test_json_repair_key_parity_20261006.py ......                     [ 57%]
+tests\test_labor_vertical_r60_20261010.py ......................         [ 57%]
+tests\test_legacy_office.py .........                                    [ 57%]
+tests\test_list_item_rendering.py ................                       [ 57%]
+tests\test_log_audit_closeout_r102_20261018.py ...............           [ 57%]
+tests\test_logging_accuracy_20261005.py .........................        [ 58%]
+tests\test_master_key_rotation_20261014.py ............................. [ 58%]
+.........                                                                [ 58%]
+tests\test_max_concurrency_single_source_20261005.py ..........          [ 58%]
+tests\test_mermaid_cache_r11.py ..s...                                   [ 58%]
+tests\test_mineru_image_fallback.py .......                              [ 58%]
+tests\test_no_secret_in_logs.py .....                                    [ 58%]
+tests\test_numbering_batch_perf_20260927.py ............                 [ 58%]
+tests\test_numbering_consistency_strict_default_20261004.py .....        [ 58%]
+tests\test_numbering_consistency_validator.py ..............             [ 59%]
+tests\test_numbering_export_fixes_20260926.py ........                   [ 59%]
+tests\test_numbering_fork_cleanup_20261005.py ......                     [ 59%]
+tests\test_numbering_unification.py .................................... [ 59%]
+...........                                                              [ 59%]
+tests\test_ocr.py .................s.                                    [ 59%]
+tests\test_outline_additive_passthrough_r88_20261017.py ................ [ 60%]
+......                                                                   [ 60%]
+tests\test_outline_auto_match_reference.py ...                           [ 60%]
+tests\test_outline_body_subheading_sync.py ................              [ 60%]
+tests\test_outline_call_optimization.py ................................ [ 60%]
+.                                                                        [ 60%]
+tests\test_outline_checkpoint_20261002.py .............................. [ 60%]
+..............                                                           [ 61%]
+tests\test_outline_closeout_r84_20261016.py ............................ [ 61%]
+.............................                                            [ 61%]
+tests\test_outline_closeout_r85_20261016.py ............................ [ 61%]
+....................................................................     [ 62%]
+tests\test_outline_closeout_r86_20261016.py ............................ [ 62%]
+.....................................................                    [ 63%]
+tests\test_outline_closeout_r87_20261016.py ............................ [ 63%]
+...................................................................      [ 64%]
+tests\test_outline_deep_audit.py ..................................      [ 64%]
+tests\test_outline_deep_audit_20260925.py .............                  [ 64%]
+tests\test_outline_fixes.py ............................................ [ 65%]
+..........                                                               [ 65%]
+tests\test_outline_fixes_20261005.py ......................              [ 65%]
+tests\test_outline_framework_r133_20261023.py .......................... [ 65%]
+.......                                                                  [ 65%]
+tests\test_outline_generation.py ...................................     [ 66%]
+tests\test_outline_generation_concurrency_guard_20261003.py ...          [ 66%]
+tests\test_outline_generation_fixes_20260926.py ........................ [ 66%]
+.                                                                        [ 66%]
+tests\test_outline_generation_g13.py ........................            [ 66%]
+tests\test_outline_generation_gaps_20261008.py .......................   [ 67%]
+tests\test_outline_generic_recurrence_r79_20261015.py .................. [ 67%]
+..                                                                       [ 67%]
+tests\test_outline_generic_strictness_intent_r101_20261017.py .......... [ 67%]
+..........................                                               [ 67%]
+tests\test_outline_generic_titles_20261010.py ............               [ 67%]
+tests\test_outline_guard_endpoints.py ......                             [ 67%]
+tests\test_outline_headers_first.py .....                                [ 67%]
+tests\test_outline_library_full_update_20261001.py ..................... [ 68%]
+........................................................................ [ 68%]
+........................................................................ [ 69%]
+....                                                                     [ 69%]
+tests\test_outline_library_normalize.py ............                     [ 69%]
+tests\test_outline_module_fixes_20261007.py ......                       [ 69%]
+tests\test_outline_name_line_20260927.py ............................... [ 70%]
+..................                                                       [ 70%]
+tests\test_outline_numbering_sync.py ...............................     [ 70%]
+tests\test_outline_ocr.py ..........                                     [ 70%]
+tests\test_outline_patch_merge_precision.py ......                       [ 70%]
+tests\test_outline_placeholder_title_gate_r73_20261012.py .............. [ 70%]
+                                                                         [ 70%]
+tests\test_outline_progress.py ......................................... [ 71%]
+.........                                                                [ 71%]
+tests\test_outline_reorganize.py .........                               [ 71%]
+tests\test_outline_scheme_manual_r133d6_20261023.py .........            [ 71%]
+tests\test_outline_semantic_empty_titles_r74_20261013.py ............... [ 71%]
+...............................                                          [ 72%]
+tests\test_outline_shared_dag_guards_20261008.py ...                     [ 72%]
+tests\test_outline_stepwise_concurrency.py ..............                [ 72%]
+tests\test_outline_stepwise_window.py ..                                 [ 72%]
+tests\test_outline_stopped_recovery.py .........                         [ 72%]
+tests\test_outline_title_fix_chain_r73b_20261012.py ................     [ 72%]
+tests\test_outline_upload_autofix_r101_20261017.py ...........           [ 72%]
+tests\test_outline_window_step_bug.py .........                          [ 72%]
+tests\test_outline_workflow_logs.py ...........                          [ 72%]
+tests\test_overview_cache_bounds_20261006.py ................            [ 72%]
+tests\test_p0_sse_disconnect_20260923.py ..........                      [ 73%]
+tests\test_page_level_ocr.py .......                                     [ 73%]
+tests\test_parse_instrumentation.py ........                             [ 73%]
+tests\test_parse_retry_checkpoint.py .....                               [ 73%]
+tests\test_parse_truncated_persist.py ..                                 [ 73%]
+tests\test_parse_truncation_chain.py ...........................         [ 73%]
+tests\test_parse_truncation_fix_20260930.py .........................    [ 73%]
+tests\test_parse_truncation_unify_20261005.py .................          [ 73%]
+tests\test_parser_integration_realdeps.py ......ss.                      [ 74%]
+tests\test_pause_reject_waiters.py ..........                            [ 74%]
+tests\test_perf_baseline_20260927.py .............                       [ 74%]
+tests\test_perf_bottlenecks.py ............................              [ 74%]
+tests\test_perf_content_pipeline.py ...............................      [ 74%]
+tests\test_performance_optimizations_20260924.py ....................... [ 75%]
+                                                                         [ 75%]
+tests\test_pipeline_r13_aux_guards_20261006.py ..........                [ 75%]
+tests\test_placeholder_governance_20260924.py ............               [ 75%]
+tests\test_placeholder_inventory_20260924.py ..............              [ 75%]
+tests\test_preflight_facts_bridge_20261003.py ..........                 [ 75%]
+tests\test_process_cleanup.py .............                              [ 75%]
+tests\test_project_delete_cascade_20261003.py ...............            [ 75%]
+tests\test_prompt_cache_db_path.py .....                                 [ 75%]
+tests\test_prompt_cache_external_write.py ....                           [ 75%]
+tests\test_prompt_cache_order_r134_20261023.py .............             [ 76%]
+tests\test_prompt_e2e_crosscut_r38.py ..........................         [ 76%]
+tests\test_prompt_governance.py ........................................ [ 76%]
+..........................................                               [ 77%]
+tests\test_prompt_known_scenes_parity_20261006.py ...                    [ 77%]
+tests\test_prompt_limits_sink_20261006.py .............                  [ 77%]
+tests\test_prompt_metrics_sync_r48_20261006.py ........                  [ 77%]
+tests\test_prompt_module_fixes_20260927.py ............................. [ 77%]
+..................................                                       [ 78%]
+tests\test_prompt_module_r38_20261003.py .................ssss........s. [ 78%]
+ssssss...........................                                        [ 78%]
+tests\test_prompt_module_regression_20260925.py ........................ [ 78%]
+.....................                                                    [ 79%]
+tests\test_prompt_prefix_stability_r57_20261009.py ..................... [ 79%]
+...............                                                          [ 79%]
+tests\test_prompt_rollback_governance.py .......................         [ 79%]
+tests\test_prompt_shared_variables.py .............                      [ 79%]
+tests\test_prompt_techdebt_r38_20261003.py ...........................   [ 80%]
+tests\test_prompt_techdebt_r39_20261004.py ......................        [ 80%]
+tests\test_prompt_variables.py .....                                     [ 80%]
+tests\test_prompt_variables_r6.py ......                                 [ 80%]
+tests\test_provider_factory.py ...........                               [ 80%]
+tests\test_provider_r4_retry.py .....                                    [ 80%]
+tests\test_provider_state_persistence_20261005.py ................       [ 80%]
+tests\test_r109_closeout_20261019.py .....                               [ 80%]
+tests\test_r110_closeout_20261020.py ..........................          [ 81%]
+tests\test_r111_closeout_20261020.py ...................                 [ 81%]
+tests\test_r112_closeout_20261020.py .............                       [ 81%]
+tests\test_r113_import_module_closeout_20261020.py ..................... [ 81%]
+......................                                                   [ 81%]
+tests\test_r114_outline_placeholder_closeout_20261020.py ............... [ 81%]
+........                                                                 [ 82%]
+tests\test_r115_outline_deterministic_fallback_20261020.py ............. [ 82%]
+.....................................................                    [ 82%]
+tests\test_r116_legacy_closeout_20261020.py ............................ [ 83%]
+....                                                                     [ 83%]
+tests\test_r117_docx_closeout_20261020.py .............................  [ 83%]
+tests\test_r117_docx_layout_20261020.py ................................ [ 83%]
+.............                                                            [ 83%]
+tests\test_r118_cross_module_20261021.py .................               [ 83%]
+tests\test_r119_cross_module_20261021.py ................                [ 84%]
+tests\test_r122_wps_crash_omml_20261021.py .........................     [ 84%]
+tests\test_r122_yibiao_import_20261021.py .............................. [ 84%]
+................                                                         [ 84%]
+tests\test_r126_docx_math_20261021.py ..........                         [ 84%]
+tests\test_r126_docx_open_fixes_20261021.py .......................F.F   [ 85%]
+tests\test_r126_pdf_offline_20261021.py .......                          [ 85%]
+tests\test_r127_docx_standard_20261022.py ...........                    [ 85%]
+tests\test_r128_cross_ref_20261022.py .................F....             [ 85%]
+tests\test_r129_docx_export_20261022.py .......................F....     [ 85%]
+tests\test_r130_format_contract_20261022.py ......F.................     [ 86%]
+tests\test_r130_regenerate_req_20261024.py ..........                    [ 86%]
+tests\test_r131_numbering_20261023.py ...............                    [ 86%]
+tests\test_r132_prompt_placeholders_20261023.py ...........              [ 86%]
+tests\test_r27_followup_fixes_20261002.py ..................             [ 86%]
+tests\test_r50_mixed_language_and_table_caption.py ....                  [ 86%]
+tests\test_r51_remaining_closeout_20261007.py ................           [ 86%]
+tests\test_r58_closeout_20261010.py .................................    [ 87%]
+tests\test_r61_autosplit_and_label_widen_20261010.py ................... [ 87%]
+..                                                                       [ 87%]
+tests\test_r74_followup_guards_20261012.py ............                  [ 87%]
+tests\test_r76b_followup_guards_20261014.py .....................        [ 87%]
+tests\test_readiness_overview_six_sources_20261004.py .............      [ 87%]
+tests\test_reasoning_effort_passthrough.py ....                          [ 87%]
+tests\test_reference_alignment_20260930.py ............................. [ 88%]
+..                                                                       [ 88%]
+tests\test_reliability_granularity.py ......                             [ 88%]
+tests\test_reorder_numbering.py ...                                      [ 88%]
+tests\test_restore_descriptions_fallback_20261009.py .........           [ 88%]
+tests\test_retry_db_locked.py .......                                    [ 88%]
+tests\test_review_autofix_20260930.py .................................. [ 88%]
+                                                                         [ 88%]
+tests\test_review_autofix_batch_20261001.py ..........                   [ 88%]
+tests\test_review_autofix_closeout_r55_20261008.py ..................... [ 89%]
+.....                                                                    [ 89%]
+tests\test_review_autofix_no_persist_20261003.py ........                [ 89%]
+tests\test_review_autofix_retry_20261001.py ....................         [ 89%]
+tests\test_review_autofix_skipped_init_20261004.py ...                   [ 89%]
+tests\test_review_export_closeout_r46_20261006.py ..............         [ 89%]
+tests\test_review_export_fixes_20260930.py .........                     [ 89%]
+tests\test_review_preflight_closeout_r78_20261014.py ...............     [ 89%]
+tests\test_review_preflight_closeout_r95_20261017.py .................   [ 90%]
+tests\test_review_preflight_closeout_r98_20261017.py ................... [ 90%]
+................F..FF.FF....                                             [ 90%]
+tests\test_review_preflight_fixes.py ............                        [ 90%]
+tests\test_review_preflight_followups.py ........                        [ 90%]
+tests\test_review_preflight_module.py .................................. [ 91%]
+..........                                                               [ 91%]
+tests\test_review_r13_closeout_20261006.py ...........................   [ 91%]
+tests\test_review_status_decouple.py .......                             [ 91%]
+tests\test_safe_log_handler.py ...                                       [ 91%]
+tests\test_safe_tail_tilde_20261003.py ..........                        [ 91%]
+tests\test_scene_route_warns_20261005.py ...                             [ 91%]
+tests\test_scheme_classification.py ...............................      [ 91%]
+tests\test_scheme_pid_single_source_r68_20261011.py .................    [ 92%]
+tests\test_scheme_repositioning_20261001.py ............................ [ 92%]
+...........                                                              [ 92%]
+tests\test_schemes_project_id_guard_20261006.py .................        [ 92%]
+tests\test_sections.py ...............                                   [ 92%]
+tests\test_sections_reset.py .......                                     [ 92%]
+tests\test_seven_module_batch2_20261001.py .............                 [ 93%]
+tests\test_seven_module_fixes_20260927.py .............................. [ 93%]
+F.....                                                                   [ 93%]
+tests\test_seven_module_fixes_20261001.py ..............                 [ 93%]
+tests\test_sse_route_decorator_20261001.py ....                          [ 93%]
+tests\test_sse_utils.py ..................                               [ 93%]
+tests\test_stage_prompts_20261025.py ............................        [ 94%]
+tests\test_stage_runner_20261025.py ....................                 [ 94%]
+tests\test_startup_orphan_gc_20261006.py ......                          [ 94%]
+tests\test_static_hygiene_ratchet_r57_20261009.py .............          [ 94%]
+tests\test_stop_control_closeout_r106_20261018.py ...................... [ 94%]
+...................                                                      [ 94%]
+tests\test_strict_syntax_hardening_20261008.py .....                     [ 94%]
+tests\test_strip_quantity_title_20261003.py ......                       [ 94%]
+tests\test_system_activity.py ......                                     [ 95%]
+tests\test_system_governance_20261006.py ....                            [ 95%]
+tests\test_task_activity_projection_20260930.py .....                    [ 95%]
+tests\test_task_control_semantics.py ................                    [ 95%]
+tests\test_task_registry.py ...................................          [ 95%]
+tests\test_text_splitter.py .........                                    [ 95%]
+tests\test_timeline_paper_wrap_r64_20261011.py ......................... [ 95%]
+........................................................................ [ 96%]
+.....                                                                    [ 96%]
+tests\test_trace_id_middleware.py .....                                  [ 96%]
+tests\test_upload_format_contract.py .......                             [ 96%]
+tests\test_upload_outline_interaction.py ...........................     [ 97%]
+tests\test_upload_outline_r13_guards_20261008.py ....................... [ 97%]
+.......                                                                  [ 97%]
+tests\test_upload_outline_reorganize.py ......                           [ 97%]
+tests\test_upload_parse_module.py ...................                    [ 97%]
+tests\test_value_kind_audit_closeout_r81_20261015.py ................... [ 97%]
+....                                                                     [ 97%]
+tests\test_weak_model_json_r134_20261023.py ............................ [ 98%]
+.....                                                                    [ 98%]
+tests\test_word_budget_tiers_r66_20261011.py ........................... [ 98%]
+..........................................................               [ 99%]
+tests\test_word_caliber_diagnostic_r70_20261012.py ..................... [ 99%]
+.....                                                                    [ 99%]
+tests\test_word_caliber_transparency_r71_20261012.py ................    [ 99%]
+tests\test_yibiao_ch3_content_plan_20261023.py ......................... [ 99%]
+....................                                                     [100%]
+
+================================== FAILURES ===================================
+___ TestFenceFixObservability.test_fences_fixed_is_passed_by_task_assembler ___
+tests\test_export_closeout_r99_20261017.py:342: in test_fences_fixed_is_passed_by_task_assembler
+    assert '"fences_fixed"' in _src(E._build_docx_task)
+E   assert '"fences_fixed"' in '        items = []\n'
+E    +  where '        items = []\n' = _src(<function _build_docx_task at 0x00000228A3CCEB90>)
+E    +    where <function _build_docx_task at 0x00000228A3CCEB90> = E._build_docx_task
+_____________ TestCacheFastPath.test_render_segment_is_extracted ______________
+tests\test_export_closeout_r99_20261017.py:465: in test_render_segment_is_extracted
+    assert "async def _render_one" in src
+E   AssertionError: assert 'async def _render_one' in '        _mermaid_client = get_mermaid_service_client()\n'
+__ TestWiringAndHygiene.test_baseline_writer_failure_does_not_block_precheck __
+tests\test_export_closeout_r99_20261017.py:617: in test_baseline_writer_failure_does_not_block_precheck
+    assert "except Exception" in src
+E   AssertionError: assert 'except Exception' in '    章节「可重跑」= 叶子章节 且 至少一个占位字段可补齐——前端据此提供\n'
+___________ TestWiringAndHygiene.test_stale_ref_limit_still_applies ___________
+tests\test_export_closeout_r99_20261017.py:663: in test_stale_ref_limit_still_applies
+    assert "return issues[:20]" in _src(E._detect_stale_cross_references)
+E   AssertionError: assert 'return issues[:20]' in '                tbl_last[chapter_num] = tbase + tbl_n\n'
+E    +  where '                tbl_last[chapter_num] = tbase + tbl_n\n' = _src(<function _detect_stale_cross_references at 0x00000228A3CAACF0>)
+E    +    where <function _detect_stale_cross_references at 0x00000228A3CAACF0> = E._detect_stale_cross_references
+_________ TestWiringAndHygiene.test_detector_ignores_unknown_ref_type _________
+tests\test_export_closeout_r99_20261017.py:666: in test_detector_ignores_unknown_ref_type
+    assert re.search(r'ref_type.{0,40}fig', _src(E._detect_stale_cross_references))
+E   AssertionError: assert None
+E    +  where None = <function search at 0x000002289D983480>('ref_type.{0,40}fig', '                tbl_last[chapter_num] = tbase + tbl_n\n')
+E    +    where <function search at 0x000002289D983480> = re.search
+E    +    and   '                tbl_last[chapter_num] = tbase + tbl_n\n' = _src(<function _detect_stale_cross_references at 0x00000228A3CAACF0>)
+E    +      where <function _detect_stale_cross_references at 0x00000228A3CAACF0> = E._detect_stale_cross_references
+____ TestCrossSectionBorrowIsObservable.test_merge_helper_is_single_source ____
+tests\test_export_hardening_d1_d4_20261006.py:133: in test_merge_helper_is_single_source
+    assert docx_src.count("_merge_borrowed_stats(render_stats, fix_stats)") >= 2, \
+E   AssertionError: DOCX 的每个回传渲染统计的分支（降级 + miss）都必须合流借图计数
+E   assert 0 >= 2
+E    +  where 0 = <built-in method count of str object at 0x00000228D06D04E0>('_merge_borrowed_stats(render_stats, fix_stats)')
+E    +    where <built-in method count of str object at 0x00000228D06D04E0> = '\n\ndef _export_cancel_request(scheme_id: str) -> bool:\n    """置位该 scheme 全部在飞导出的取消事件，返回是否存在在飞导出。"""\n    with _EXPO...= list(_EXPORT_CANCEL_EVENTS.get(scheme_id) or [])\n    for ev in events:\n        ev.set()\n    return bool(events)\n'.count
+______ TestCrossSectionBorrowIsObservable.test_resolver_is_single_source ______
+tests\test_export_hardening_d1_d4_20261006.py:201: in test_resolver_is_single_source
+    assert "_resolve_chart_code(" in prepare
+E   AssertionError: assert '_resolve_chart_code(' in '        _mermaid_client = get_mermaid_service_client()\n'
+___ TestImageInsertSingleImplementation.test_both_entries_delegate_to_core ____
+tests\test_export_hardening_d1_d4_20261006.py:243: in test_both_entries_delegate_to_core
+    assert "_insert_image_with_caption(" in inspect.getsource(fn), \
+E   AssertionError: _add_inline_chart_from_bytes 未下沉到唯一实现
+E   assert '_insert_image_with_caption(' in '        caption.paragraph_format.first_line_indent = Cm(0)\n'
+E    +  where '        caption.paragraph_format.first_line_indent = Cm(0)\n' = <function getsource at 0x000002289DA240F0>(<function _add_inline_chart_from_bytes at 0x00000228A3CCA980>)
+E    +    where <function getsource at 0x000002289DA240F0> = inspect.getsource
+__ TestImageInsertSingleImplementation.test_chart_placeholder_text_unchanged __
+tests\test_export_hardening_d1_d4_20261006.py:311: in test_chart_placeholder_text_unchanged
+    assert 'f"[{caption_text} — {reason}]"' in src
+E   assert 'f"[{caption_text} — {reason}]"' in '            for el in list(self._body):\n'
+___ TestDetectorFalsePositiveRegression.test_detector_forwards_has_children ___
+tests\test_export_hardening_d1_d4_20261006.py:345: in test_detector_forwards_has_children
+    assert "has_children=has_children_demoted" in src
+E   AssertionError: assert 'has_children=has_children_demoted' in '    恒等变换）。\n'
+_ TestExportCancellationContract.test_export_routes_accept_abort_via_request_disconnect _
+tests\test_export_hardening_d1_d4_20261006.py:359: in test_export_routes_accept_abort_via_request_disconnect
+    assert "_persist_export_cache_row" in src, "路由未接入统一写存 helper"
+E   AssertionError: 路由未接入统一写存 helper
+E   assert '_persist_export_cache_row' in '\n\ndef _export_cancel_request(scheme_id: str) -> bool:\n    """置位该 scheme 全部在飞导出的取消事件，返回是否存在在飞导出。"""\n    with _EXPO...= list(_EXPORT_CANCEL_EVENTS.get(scheme_id) or [])\n    for ev in events:\n        ev.set()\n    return bool(events)\n'
+____ TestExportCancellationContract.test_tmp_file_cleanup_on_build_failure ____
+tests\test_export_hardening_d1_d4_20261006.py:369: in test_tmp_file_cleanup_on_build_failure
+    assert "tmp_out_path.unlink(missing_ok=True)" in src
+E   assert 'tmp_out_path.unlink(missing_ok=True)' in '\n\ndef _export_cancel_request(scheme_id: str) -> bool:\n    """置位该 scheme 全部在飞导出的取消事件，返回是否存在在飞导出。"""\n    with _EXPO...= list(_EXPORT_CANCEL_EVENTS.get(scheme_id) or [])\n    for ev in events:\n        ev.set()\n    return bool(events)\n'
+_ TestNumberingReplicationSourceLock.test_detector_forwards_has_children_flag _
+tests\test_export_numbering_parity_20261006.py:247: in test_detector_forwards_has_children_flag
+    assert "has_children=has_children_demoted" in src, (
+E   AssertionError: 预检侧未向 _compute_subheading 传递 has_children —— 降级命名空间下必然报出渲染结果里不存在的重复编号
+E   assert 'has_children=has_children_demoted' in '    恒等变换）。\n'
+____ TestNumberingReplicationSourceLock.test_detector_uses_shared_helpers _____
+tests\test_export_numbering_parity_20261006.py:255: in test_detector_uses_shared_helpers
+    assert "_section_sort_key" in src, "预检侧必须用与渲染端相同的排序键"
+E   AssertionError: 预检侧必须用与渲染端相同的排序键
+E   assert '_section_sort_key' in '    恒等变换）。\n'
+_ TestNumberingReplicationSourceLock.test_detector_mirrors_counter_pre_advance _
+tests\test_export_numbering_parity_20261006.py:265: in test_detector_mirrors_counter_pre_advance
+    assert frag in src, f"预检侧缺失计数器前移的关键行：{frag}"
+E   AssertionError: 预检侧缺失计数器前移的关键行：gen.parent_ids[_idx] = sec.get("id")
+E   assert 'gen.parent_ids[_idx] = sec.get("id")' in '    恒等变换）。\n'
+_ TestNumberingReplicationSourceLock.test_pre_advance_guard_is_level_gated_on_both_sides _
+tests\test_export_numbering_parity_20261006.py:270: in test_pre_advance_guard_is_level_gated_on_both_sides
+    assert "if level >= 2 and children_map.get" in inspect.getsource(
+E   AssertionError: assert 'if level >= 2 and children_map.get' in '    恒等变换）。\n'
+E    +  where '    恒等变换）。\n' = <function getsource at 0x000002289DA240F0>(<function _detect_duplicate_sections at 0x00000228A3CAA610>)
+E    +    where <function getsource at 0x000002289DA240F0> = inspect.getsource
+E    +    and   <function _detect_duplicate_sections at 0x00000228A3CAA610> = E._detect_duplicate_sections
+_ TestNumberingReplicationSourceLock.test_demote_flag_read_fail_safes_to_true _
+tests\test_export_numbering_parity_20261006.py:279: in test_demote_flag_read_fail_safes_to_true
+    assert "_demote = True" in src, "缺 fail-safe 默认值"
+E   AssertionError: 缺 fail-safe 默认值
+E   assert '_demote = True' in '    恒等变换）。\n'
+_ TestNumberingReplicationSourceLock.test_renderer_and_detector_read_the_same_setting_name _
+tests\test_export_numbering_parity_20261006.py:285: in test_renderer_and_detector_read_the_same_setting_name
+    assert name in inspect.getsource(E._detect_duplicate_sections)
+E   AssertionError: assert 'body_subheading_demote_with_children' in '    恒等变换）。\n'
+E    +  where '    恒等变换）。\n' = <function getsource at 0x000002289DA240F0>(<function _detect_duplicate_sections at 0x00000228A3CAA610>)
+E    +    where <function getsource at 0x000002289DA240F0> = inspect.getsource
+E    +    and   <function _detect_duplicate_sections at 0x00000228A3CAA610> = E._detect_duplicate_sections
+_______________ TestGcWiring.test_gc_is_coroutine_and_fail_soft _______________
+tests\test_export_orphan_gc_20261006.py:257: in test_gc_is_coroutine_and_fail_soft
+    assert "except Exception" in src, "GC 必须 fail-soft，绝不影响交付"
+E   AssertionError: GC 必须 fail-soft，绝不影响交付
+E   assert 'except Exception' in '        #    为空串时 Path("") 等价 Path(".") 恒存在 → 僵尸行被当成「有效缓存」。\n        # ✅ 修复（2026-10-14 · P2）：改用 _cache_row_viable（含 s...cx 的命中判据同一口径（export_pdf 已随 R126 下线）—— 0 字节僵尸产物\n        #    不再占用 5 份保留配额。\n        rp = cr.get("result_path") or ""\n'
+____________ TestGcWiring.test_gc_uses_strict_read_for_cache_rows _____________
+tests\test_export_orphan_gc_20261006.py:267: in test_gc_uses_strict_read_for_cache_rows
+    assert "strict=True" in src, (
+E   AssertionError: GC 是破坏性清理路径，读缓存行必须用 _db_fetch_all(strict=True)
+E   assert 'strict=True' in '        #    为空串时 Path("") 等价 Path(".") 恒存在 → 僵尸行被当成「有效缓存」。\n        # ✅ 修复（2026-10-14 · P2）：改用 _cache_row_viable（含 s...cx 的命中判据同一口径（export_pdf 已随 R126 下线）—— 0 字节僵尸产物\n        #    不再占用 5 份保留配额。\n        rp = cr.get("result_path") or ""\n'
+______ TestDbReadStrictMode.test_gc_scoped_to_scheme_and_top_level_files ______
+tests\test_export_orphan_gc_20261006.py:342: in test_gc_scoped_to_scheme_and_top_level_files
+    assert "f.is_file()" in src, "子目录（含 charts/ 图表缓存）必须跳过"
+E   AssertionError: 子目录（含 charts/ 图表缓存）必须跳过
+E   assert 'f.is_file()' in '        #    为空串时 Path("") 等价 Path(".") 恒存在 → 僵尸行被当成「有效缓存」。\n        # ✅ 修复（2026-10-14 · P2）：改用 _cache_row_viable（含 s...cx 的命中判据同一口径（export_pdf 已随 R126 下线）—— 0 字节僵尸产物\n        #    不再占用 5 份保留配额。\n        rp = cr.get("result_path") or ""\n'
+________ TestDbReadStrictMode.test_gc_grace_period_only_applies_to_tmp ________
+tests\test_export_orphan_gc_20261006.py:351: in test_gc_grace_period_only_applies_to_tmp
+    assert ".tmp." in src
+E   assert '.tmp.' in '        #    为空串时 Path("") 等价 Path(".") 恒存在 → 僵尸行被当成「有效缓存」。\n        # ✅ 修复（2026-10-14 · P2）：改用 _cache_row_viable（含 s...cx 的命中判据同一口径（export_pdf 已随 R126 下线）—— 0 字节僵尸产物\n        #    不再占用 5 份保留配额。\n        rp = cr.get("result_path") or ""\n'
+________ TestDbReadStrictMode.test_docx_calls_gc_in_both_return_paths _________
+tests\test_export_orphan_gc_20261006.py:368: in test_docx_calls_gc_in_both_return_paths
+    assert len(calls) == 2, \
+E   AssertionError: degraded 分支与正常分支必须各调用一次统一收尾
+E   assert 0 == 2
+E    +  where 0 = len([])
+_ TestDbReadStrictMode.test_degraded_path_is_the_only_tmp_returner_and_it_protects _
+tests\test_export_orphan_gc_20261006.py:388: in test_degraded_path_is_the_only_tmp_returner_and_it_protects
+    i_hit = src.index('X-Cache-Status": "hit"')
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   ValueError: substring not found
+___ TestIssueTypeRuleParity.test_every_registered_type_is_actually_emitted ____
+tests\test_export_orphan_gc_20261006.py:408: in test_every_registered_type_is_actually_emitted
+    assert not dead, f"映射表存在无人产出的 issue type（死条目）：{sorted(dead)}"
+E   AssertionError: 映射表存在无人产出的 issue type（死条目）：['bid_analysis_incomplete', 'body_subheading_namespace_conflict', 'chart_failed', 'chart_ungenerated', 'duplicate_section_number', 'empty_section', 'global_facts_blocked', 'low_word_count', 'orphan_node', 'review_missing', 'review_pending', 'review_rejected', 'section_number_mismatch', 'stale_cross_reference', 'status_inconsistent']
+E   assert not {'bid_analysis_incomplete', 'body_subheading_namespace_conflict', 'chart_failed', 'chart_ungenerated', 'duplicate_section_number', 'empty_section', ...}
+_______ TestIssueTypeRuleParity.test_mapping_covers_every_export_probe ________
+tests\test_export_orphan_gc_20261006.py:415: in test_mapping_covers_every_export_probe
+    assert n == len(_issue_types_emitted())
+E   assert 15 == 0
+E    +  where 0 = len(set())
+E    +    where set() = _issue_types_emitted()
+_ TestImageGenerationSignature.test_signature_reads_exactly_the_four_pixel_dimensions _
+tests\test_export_orphan_gc_20261006.py:527: in test_signature_reads_exactly_the_four_pixel_dimensions
+    assert need <= names, \
+E   AssertionError: 缺少影响像素的配置维度：['image_base_url', 'image_default_size', 'image_enabled', 'image_model']
+E   assert {'image_base_...'image_model'} <= {'', '_', 'it...键保持同步。\n    '}
+E     
+E     Extra items in the left set:
+E     'image_base_url'
+E     'image_enabled'
+E     'image_default_size'
+E     'image_model'
+__ TestCacheStatusContract.test_cache_status_returns_total_stale_and_exists ___
+tests\test_export_orphan_gc_20261006.py:560: in test_cache_status_returns_total_stale_and_exists
+    assert key in src, f"cache_status 必须返回 {key}"
+E   AssertionError: cache_status 必须返回 "total"
+E   assert '"total"' in '            headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)\n'
+__________ TestCacheStatusContract.test_cache_status_stable_ordering __________
+tests\test_export_orphan_gc_20261006.py:565: in test_cache_status_stable_ordering
+    assert "ORDER BY created_at DESC, rowid DESC" in src
+E   assert 'ORDER BY created_at DESC, rowid DESC' in '            headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)\n'
+_____ TestCacheStatusContract.test_cache_status_rejects_empty_result_path _____
+tests\test_export_orphan_gc_20261006.py:570: in test_cache_status_rejects_empty_result_path
+    assert 'item.get("result_path") or ""' in src
+E   assert 'item.get("result_path") or ""' in '            headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)\n'
+______ TestCacheStatusContract.test_prune_and_gc_complement_not_replace _______
+tests\test_export_orphan_gc_20261006.py:574: in test_prune_and_gc_complement_not_replace
+    assert "DELETE FROM export_cache" in inspect.getsource(E._prune_export_cache)
+E   AssertionError: assert 'DELETE FROM export_cache' in '\n    背景：`_cache_row_viable` 只查 `st_size > 0`，一份**写盘中断被截断的半截文件**\n'
+E    +  where '\n    背景：`_cache_row_viable` 只查 `st_size > 0`，一份**写盘中断被截断的半截文件**\n' = <function getsource at 0x000002289DA240F0>(<function _prune_export_cache at 0x00000228A3CCF690>)
+E    +    where <function getsource at 0x000002289DA240F0> = inspect.getsource
+E    +    and   <function _prune_export_cache at 0x00000228A3CCF690> = E._prune_export_cache
+______ TestCacheStatusContract.test_gc_never_touches_other_export_types _______
+tests\test_export_orphan_gc_20261006.py:581: in test_gc_never_touches_other_export_types
+    assert "is_file()" in src
+E   assert 'is_file()' in '        #    为空串时 Path("") 等价 Path(".") 恒存在 → 僵尸行被当成「有效缓存」。\n        # ✅ 修复（2026-10-14 · P2）：改用 _cache_row_viable（含 s...cx 的命中判据同一口径（export_pdf 已随 R126 下线）—— 0 字节僵尸产物\n        #    不再占用 5 份保留配额。\n        rp = cr.get("result_path") or ""\n'
+____ TestWiringAndAnchors.test_export_chains_call_render_after_cache_query ____
+tests\test_export_render_closeout_r100_20261017.py:349: in test_export_chains_call_render_after_cache_query
+    assert hit_idx != -1, f"{name} 缺少缓存命中分支"
+E   AssertionError: export_docx 缺少缓存命中分支
+E   assert -1 != -1
+_ TestR57ByteAndWiring.test_no_lone_cr_no_bom_no_replacement_char[SchemeWorkbenchPage.tsx] _
+tests\test_frontend_first_run_r57_20261009.py:167: in test_no_lone_cr_no_bom_no_replacement_char
+    assert b.count(b"\r") == 0, "%s 混入 CR（本仓这些文件是纯 LF）" % path
+E   AssertionError: J:\编程\专项方案工具箱\frontend\src\pages\SchemeWorkbenchPage.tsx 混入 CR（本仓这些文件是纯 LF）
+E   assert 12636 == 0
+E    +  where 12636 = <built-in method count of bytes object at 0x00000228E1C17010>(b'\r')
+E    +    where <built-in method count of bytes object at 0x00000228E1C17010> = b'import { useEffect, useState, useCallback, useRef, useMemo, memo } from "react";\r\nimport {\r\n  App, Card, Button,...        />\r\n            )}\r\n          </Card>\r\n        </Spin>\r\n      </Drawer>\r\n    </div>\r\n  );\r\n}\r\n'.count
+____ TestWiringAnchors.test_export_docx_hit_point_requires_artifact_intact ____
+tests\test_r126_docx_open_fixes_20261021.py:221: in test_export_docx_hit_point_requires_artifact_intact
+    i_hit = body.index('X-Cache-Status": "hit"')
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   ValueError: substring not found
+__________ TestWiringAnchors.test_intact_reject_does_not_return_hit ___________
+tests\test_r126_docx_open_fixes_20261021.py:238: in test_intact_reject_does_not_return_hit
+    i_call = body.index("_artifact_intact(")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   ValueError: substring not found
+________ TestWiring.test_wiring_static_lock_backfill_before_normalize _________
+tests\test_r128_cross_ref_20261022.py:299: in test_wiring_static_lock_backfill_before_normalize
+    i_fill = src.index("_backfill_cross_reference_fields(doc)")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   ValueError: substring not found
+_____ TestWiringAndVersion.test_wiring_static_lock_postcheck_before_stats _____
+tests\test_r129_docx_export_20261022.py:326: in test_wiring_static_lock_postcheck_before_stats
+    i_check = src.index("validate_document(doc)")
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   ValueError: substring not found
+____________ TestFormatContractChecks.test_unclosed_fence_is_error ____________
+tests\test_r130_format_contract_20261022.py:80: in test_unclosed_fence_is_error
+    assert any(i["category"] == "chart" and i["severity"] == "error"
+E   AssertionError: []
+E   assert False
+E    +  where False = any(<generator object TestFormatContractChecks.test_unclosed_fence_is_error.<locals>.<genexpr> at 0x00000228FF4BBD80>)
+_____ TestFingerprintEvidence.test_fingerprint_covers_both_dims_in_source _____
+tests\test_review_preflight_closeout_r98_20261017.py:383: in test_fingerprint_covers_both_dims_in_source
+    assert '"sections"' in src and '"charts"' in src
+E   assert ('"sections"' in '\n    return {k: _clean(v) if isinstance(v, dict) else v\n            for k, v in config.items()\n            if k in _EXPORT_CONFIG_KEYS and v is not None and v != ""}\n')
+_______________ TestExportSharedCoverage.test_calls_shared_impl _______________
+tests\test_review_preflight_closeout_r98_20261017.py:406: in test_calls_shared_impl
+    assert "from app.services.preflight_engine import content_coverage_stats" in src
+E   assert 'from app.services.preflight_engine import content_coverage_stats' in '        "SELECT total, formatted_total, bare_total, fuzzy_total,"\n'
+__________ TestExportSharedCoverage.test_return_keys_from_shared_cov __________
+tests\test_review_preflight_closeout_r98_20261017.py:411: in test_return_keys_from_shared_cov
+    assert '"generated_count": _cov["generated_count"]' in src
+E   assert '"generated_count": _cov["generated_count"]' in '        "SELECT total, formatted_total, bare_total, fuzzy_total,"\n'
+__________ TestExportSharedCoverage.test_empty_leaf_judge_has_strip ___________
+tests\test_review_preflight_closeout_r98_20261017.py:422: in test_empty_leaf_judge_has_strip
+    assert 'if not (s.get("content") or "").strip() and not has_children' in src
+E   assert 'if not (s.get("content") or "").strip() and not has_children' in '        "SELECT total, formatted_total, bare_total, fuzzy_total,"\n'
+_____ TestExportSharedCoverage.test_status_and_wordcount_judges_untouched _____
+tests\test_review_preflight_closeout_r98_20261017.py:428: in test_status_and_wordcount_judges_untouched
+    assert 'if s.get("status") == "empty" and (s.get("content") or wc > 0):' in src
+E   assert 'if s.get("status") == "empty" and (s.get("content") or wc > 0):' in '        "SELECT total, formatted_total, bare_total, fuzzy_total,"\n'
+_____________ TestExportFactsGateParity.test_gate_is_fail_closed ______________
+tests\test_seven_module_fixes_20260927.py:286: in test_gate_is_fail_closed
+    assert "COALESCE(is_resolved,0)=0" in src
+E   assert 'COALESCE(is_resolved,0)=0' in '        "SELECT total, formatted_total, bare_total, fuzzy_total,"\n'
+============================== warnings summary ===============================
+C:\Program Files\Python314\Lib\site-packages\fastapi\testclient.py:1
+  C:\Program Files\Python314\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_export_closeout_r99_20261017.py::TestFenceFixObservability::test_fences_fixed_is_passed_by_task_assembler - assert '"fences_fixed"' in '        items = []\n'
+ +  where '        items = []\n' = _src(<function _build_docx_task at 0x00000228A3CCEB90>)
+ +    where <function _build_docx_task at 0x00000228A3CCEB90> = E._build_docx_task
+FAILED tests/test_export_closeout_r99_20261017.py::TestCacheFastPath::test_render_segment_is_extracted - AssertionError: assert 'async def _render_one' in '        _mermaid_client = get_mermaid_service_client()\n'
+FAILED tests/test_export_closeout_r99_20261017.py::TestWiringAndHygiene::test_baseline_writer_failure_does_not_block_precheck - AssertionError: assert 'except Exception' in '    章节「可重跑」= 叶子章节 且 至少一个占位字段可补齐——前端据此提供\n'
+FAILED tests/test_export_closeout_r99_20261017.py::TestWiringAndHygiene::test_stale_ref_limit_still_applies - AssertionError: assert 'return issues[:20]' in '                tbl_last[chapter_num] = tbase + tbl_n\n'
+ +  where '                tbl_last[chapter_num] = tbase + tbl_n\n' = _src(<function _detect_stale_cross_references at 0x00000228A3CAACF0>)
+ +    where <function _detect_stale_cross_references at 0x00000228A3CAACF0> = E._detect_stale_cross_references
+FAILED tests/test_export_closeout_r99_20261017.py::TestWiringAndHygiene::test_detector_ignores_unknown_ref_type - AssertionError: assert None
+ +  where None = <function search at 0x000002289D983480>('ref_type.{0,40}fig', '                tbl_last[chapter_num] = tbase + tbl_n\n')
+ +    where <function search at 0x000002289D983480> = re.search
+ +    and   '                tbl_last[chapter_num] = tbase + tbl_n\n' = _src(<function _detect_stale_cross_references at 0x00000228A3CAACF0>)
+ +      where <function _detect_stale_cross_references at 0x00000228A3CAACF0> = E._detect_stale_cross_references
+FAILED tests/test_export_hardening_d1_d4_20261006.py::TestCrossSectionBorrowIsObservable::test_merge_helper_is_single_source - AssertionError: DOCX 的每个回传渲染统计的分支（降级 + miss）都必须合流借图计数
+assert 0 >= 2
+ +  where 0 = <built-in method count of str object at 0x00000228D06D04E0>('_merge_borrowed_stats(render_stats, fix_stats)')
+ +    where <built-in method count of str object at 0x00000228D06D04E0> = '\n\ndef _export_cancel_request(scheme_id: str) -> bool:\n    """置位该 scheme 全部在飞导出的取消事件，返回是否存在在飞导出。"""\n    with _EXPO...= list(_EXPORT_CANCEL_EVENTS.get(scheme_id) or [])\n    for ev in events:\n        ev.set()\n    return bool(events)\n'.count
+FAILED tests/test_export_hardening_d1_d4_20261006.py::TestCrossSectionBorrowIsObservable::test_resolver_is_single_source - AssertionError: assert '_resolve_chart_code(' in '        _mermaid_client = get_mermaid_service_client()\n'
+FAILED tests/test_export_hardening_d1_d4_20261006.py::TestImageInsertSingleImplementation::test_both_entries_delegate_to_core - AssertionError: _add_inline_chart_from_bytes 未下沉到唯一实现
+assert '_insert_image_with_caption(' in '        caption.paragraph_format.first_line_indent = Cm(0)\n'
+ +  where '        caption.paragraph_format.first_line_indent = Cm(0)\n' = <function getsource at 0x000002289DA240F0>(<function _add_inline_chart_from_bytes at 0x00000228A3CCA980>)
+ +    where <function getsource at 0x000002289DA240F0> = inspect.getsource
+FAILED tests/test_export_hardening_d1_d4_20261006.py::TestImageInsertSingleImplementation::test_chart_placeholder_text_unchanged - assert 'f"[{caption_text} — {reason}]"' in '            for el in list(self._body):\n'
+FAILED tests/test_export_hardening_d1_d4_20261006.py::TestDetectorFalsePositiveRegression::test_detector_forwards_has_children - AssertionError: assert 'has_children=has_children_demoted' in '    恒等变换）。\n'
+FAILED tests/test_export_hardening_d1_d4_20261006.py::TestExportCancellationContract::test_export_routes_accept_abort_via_request_disconnect - AssertionError: 路由未接入统一写存 helper
+assert '_persist_export_cache_row' in '\n\ndef _export_cancel_request(scheme_id: str) -> bool:\n    """置位该 scheme 全部在飞导出的取消事件，返回是否存在在飞导出。"""\n    with _EXPO...= list(_EXPORT_CANCEL_EVENTS.get(scheme_id) or [])\n    for ev in events:\n        ev.set()\n    return bool(events)\n'
+FAILED tests/test_export_hardening_d1_d4_20261006.py::TestExportCancellationContract::test_tmp_file_cleanup_on_build_failure - assert 'tmp_out_path.unlink(missing_ok=True)' in '\n\ndef _export_cancel_request(scheme_id: str) -> bool:\n    """置位该 scheme 全部在飞导出的取消事件，返回是否存在在飞导出。"""\n    with _EXPO...= list(_EXPORT_CANCEL_EVENTS.get(scheme_id) or [])\n    for ev in events:\n        ev.set()\n    return bool(events)\n'
+FAILED tests/test_export_numbering_parity_20261006.py::TestNumberingReplicationSourceLock::test_detector_forwards_has_children_flag - AssertionError: 预检侧未向 _compute_subheading 传递 has_children —— 降级命名空间下必然报出渲染结果里不存在的重复编号
+assert 'has_children=has_children_demoted' in '    恒等变换）。\n'
+FAILED tests/test_export_numbering_parity_20261006.py::TestNumberingReplicationSourceLock::test_detector_uses_shared_helpers - AssertionError: 预检侧必须用与渲染端相同的排序键
+assert '_section_sort_key' in '    恒等变换）。\n'
+FAILED tests/test_export_numbering_parity_20261006.py::TestNumberingReplicationSourceLock::test_detector_mirrors_counter_pre_advance - AssertionError: 预检侧缺失计数器前移的关键行：gen.parent_ids[_idx] = sec.get("id")
+assert 'gen.parent_ids[_idx] = sec.get("id")' in '    恒等变换）。\n'
+FAILED tests/test_export_numbering_parity_20261006.py::TestNumberingReplicationSourceLock::test_pre_advance_guard_is_level_gated_on_both_sides - AssertionError: assert 'if level >= 2 and children_map.get' in '    恒等变换）。\n'
+ +  where '    恒等变换）。\n' = <function getsource at 0x000002289DA240F0>(<function _detect_duplicate_sections at 0x00000228A3CAA610>)
+ +    where <function getsource at 0x000002289DA240F0> = inspect.getsource
+ +    and   <function _detect_duplicate_sections at 0x00000228A3CAA610> = E._detect_duplicate_sections
+FAILED tests/test_export_numbering_parity_20261006.py::TestNumberingReplicationSourceLock::test_demote_flag_read_fail_safes_to_true - AssertionError: 缺 fail-safe 默认值
+assert '_demote = True' in '    恒等变换）。\n'
+FAILED tests/test_export_numbering_parity_20261006.py::TestNumberingReplicationSourceLock::test_renderer_and_detector_read_the_same_setting_name - AssertionError: assert 'body_subheading_demote_with_children' in '    恒等变换）。\n'
+ +  where '    恒等变换）。\n' = <function getsource at 0x000002289DA240F0>(<function _detect_duplicate_sections at 0x00000228A3CAA610>)
+ +    where <function getsource at 0x000002289DA240F0> = inspect.getsource
+ +    and   <function _detect_duplicate_sections at 0x00000228A3CAA610> = E._detect_duplicate_sections
+FAILED tests/test_export_orphan_gc_20261006.py::TestGcWiring::test_gc_is_coroutine_and_fail_soft - AssertionError: GC 必须 fail-soft，绝不影响交付
+assert 'except Exception' in '        #    为空串时 Path("") 等价 Path(".") 恒存在 → 僵尸行被当成「有效缓存」。\n        # ✅ 修复（2026-10-14 · P2）：改用 _cache_row_viable（含 s...cx 的命中判据同一口径（export_pdf 已随 R126 下线）—— 0 字节僵尸产物\n        #    不再占用 5 份保留配额。\n        rp = cr.get("result_path") or ""\n'
+FAILED tests/test_export_orphan_gc_20261006.py::TestGcWiring::test_gc_uses_strict_read_for_cache_rows - AssertionError: GC 是破坏性清理路径，读缓存行必须用 _db_fetch_all(strict=True)
+assert 'strict=True' in '        #    为空串时 Path("") 等价 Path(".") 恒存在 → 僵尸行被当成「有效缓存」。\n        # ✅ 修复（2026-10-14 · P2）：改用 _cache_row_viable（含 s...cx 的命中判据同一口径（export_pdf 已随 R126 下线）—— 0 字节僵尸产物\n        #    不再占用 5 份保留配额。\n        rp = cr.get("result_path") or ""\n'
+FAILED tests/test_export_orphan_gc_20261006.py::TestDbReadStrictMode::test_gc_scoped_to_scheme_and_top_level_files - AssertionError: 子目录（含 charts/ 图表缓存）必须跳过
+assert 'f.is_file()' in '        #    为空串时 Path("") 等价 Path(".") 恒存在 → 僵尸行被当成「有效缓存」。\n        # ✅ 修复（2026-10-14 · P2）：改用 _cache_row_viable（含 s...cx 的命中判据同一口径（export_pdf 已随 R126 下线）—— 0 字节僵尸产物\n        #    不再占用 5 份保留配额。\n        rp = cr.get("result_path") or ""\n'
+FAILED tests/test_export_orphan_gc_20261006.py::TestDbReadStrictMode::test_gc_grace_period_only_applies_to_tmp - assert '.tmp.' in '        #    为空串时 Path("") 等价 Path(".") 恒存在 → 僵尸行被当成「有效缓存」。\n        # ✅ 修复（2026-10-14 · P2）：改用 _cache_row_viable（含 s...cx 的命中判据同一口径（export_pdf 已随 R126 下线）—— 0 字节僵尸产物\n        #    不再占用 5 份保留配额。\n        rp = cr.get("result_path") or ""\n'
+FAILED tests/test_export_orphan_gc_20261006.py::TestDbReadStrictMode::test_docx_calls_gc_in_both_return_paths - AssertionError: degraded 分支与正常分支必须各调用一次统一收尾
+assert 0 == 2
+ +  where 0 = len([])
+FAILED tests/test_export_orphan_gc_20261006.py::TestDbReadStrictMode::test_degraded_path_is_the_only_tmp_returner_and_it_protects - ValueError: substring not found
+FAILED tests/test_export_orphan_gc_20261006.py::TestIssueTypeRuleParity::test_every_registered_type_is_actually_emitted - AssertionError: 映射表存在无人产出的 issue type（死条目）：['bid_analysis_incomplete', 'body_subheading_namespace_conflict', 'chart_failed', 'chart_ungenerated', 'duplicate_section_number', 'empty_section', 'global_facts_blocked', 'low_word_count', 'orphan_node', 'review_missing', 'review_pending', 'review_rejected', 'section_number_mismatch', 'stale_cross_reference', 'status_inconsistent']
+assert not {'bid_analysis_incomplete', 'body_subheading_namespace_conflict', 'chart_failed', 'chart_ungenerated', 'duplicate_section_number', 'empty_section', ...}
+FAILED tests/test_export_orphan_gc_20261006.py::TestIssueTypeRuleParity::test_mapping_covers_every_export_probe - assert 15 == 0
+ +  where 0 = len(set())
+ +    where set() = _issue_types_emitted()
+FAILED tests/test_export_orphan_gc_20261006.py::TestImageGenerationSignature::test_signature_reads_exactly_the_four_pixel_dimensions - AssertionError: 缺少影响像素的配置维度：['image_base_url', 'image_default_size', 'image_enabled', 'image_model']
+assert {'image_base_...'image_model'} <= {'', '_', 'it...键保持同步。\n    '}
+  
+  Extra items in the left set:
+  'image_base_url'
+  'image_enabled'
+  'image_default_size'
+  'image_model'
+FAILED tests/test_export_orphan_gc_20261006.py::TestCacheStatusContract::test_cache_status_returns_total_stale_and_exists - AssertionError: cache_status 必须返回 "total"
+assert '"total"' in '            headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)\n'
+FAILED tests/test_export_orphan_gc_20261006.py::TestCacheStatusContract::test_cache_status_stable_ordering - assert 'ORDER BY created_at DESC, rowid DESC' in '            headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)\n'
+FAILED tests/test_export_orphan_gc_20261006.py::TestCacheStatusContract::test_cache_status_rejects_empty_result_path - assert 'item.get("result_path") or ""' in '            headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)\n'
+FAILED tests/test_export_orphan_gc_20261006.py::TestCacheStatusContract::test_prune_and_gc_complement_not_replace - AssertionError: assert 'DELETE FROM export_cache' in '\n    背景：`_cache_row_viable` 只查 `st_size > 0`，一份**写盘中断被截断的半截文件**\n'
+ +  where '\n    背景：`_cache_row_viable` 只查 `st_size > 0`，一份**写盘中断被截断的半截文件**\n' = <function getsource at 0x000002289DA240F0>(<function _prune_export_cache at 0x00000228A3CCF690>)
+ +    where <function getsource at 0x000002289DA240F0> = inspect.getsource
+ +    and   <function _prune_export_cache at 0x00000228A3CCF690> = E._prune_export_cache
+FAILED tests/test_export_orphan_gc_20261006.py::TestCacheStatusContract::test_gc_never_touches_other_export_types - assert 'is_file()' in '        #    为空串时 Path("") 等价 Path(".") 恒存在 → 僵尸行被当成「有效缓存」。\n        # ✅ 修复（2026-10-14 · P2）：改用 _cache_row_viable（含 s...cx 的命中判据同一口径（export_pdf 已随 R126 下线）—— 0 字节僵尸产物\n        #    不再占用 5 份保留配额。\n        rp = cr.get("result_path") or ""\n'
+FAILED tests/test_export_render_closeout_r100_20261017.py::TestWiringAndAnchors::test_export_chains_call_render_after_cache_query - AssertionError: export_docx 缺少缓存命中分支
+assert -1 != -1
+FAILED tests/test_frontend_first_run_r57_20261009.py::TestR57ByteAndWiring::test_no_lone_cr_no_bom_no_replacement_char[SchemeWorkbenchPage.tsx] - AssertionError: J:\编程\专项方案工具箱\frontend\src\pages\SchemeWorkbenchPage.tsx 混入 CR（本仓这些文件是纯 LF）
+assert 12636 == 0
+ +  where 12636 = <built-in method count of bytes object at 0x00000228E1C17010>(b'\r')
+ +    where <built-in method count of bytes object at 0x00000228E1C17010> = b'import { useEffect, useState, useCallback, useRef, useMemo, memo } from "react";\r\nimport {\r\n  App, Card, Button,...        />\r\n            )}\r\n          </Card>\r\n        </Spin>\r\n      </Drawer>\r\n    </div>\r\n  );\r\n}\r\n'.count
+FAILED tests/test_r126_docx_open_fixes_20261021.py::TestWiringAnchors::test_export_docx_hit_point_requires_artifact_intact - ValueError: substring not found
+FAILED tests/test_r126_docx_open_fixes_20261021.py::TestWiringAnchors::test_intact_reject_does_not_return_hit - ValueError: substring not found
+FAILED tests/test_r128_cross_ref_20261022.py::TestWiring::test_wiring_static_lock_backfill_before_normalize - ValueError: substring not found
+FAILED tests/test_r129_docx_export_20261022.py::TestWiringAndVersion::test_wiring_static_lock_postcheck_before_stats - ValueError: substring not found
+FAILED tests/test_r130_format_contract_20261022.py::TestFormatContractChecks::test_unclosed_fence_is_error - AssertionError: []
+assert False
+ +  where False = any(<generator object TestFormatContractChecks.test_unclosed_fence_is_error.<locals>.<genexpr> at 0x00000228FF4BBD80>)
+FAILED tests/test_review_preflight_closeout_r98_20261017.py::TestFingerprintEvidence::test_fingerprint_covers_both_dims_in_source - assert ('"sections"' in '\n    return {k: _clean(v) if isinstance(v, dict) else v\n            for k, v in config.items()\n            if k in _EXPORT_CONFIG_KEYS and v is not None and v != ""}\n')
+FAILED tests/test_review_preflight_closeout_r98_20261017.py::TestExportSharedCoverage::test_calls_shared_impl - assert 'from app.services.preflight_engine import content_coverage_stats' in '        "SELECT total, formatted_total, bare_total, fuzzy_total,"\n'
+FAILED tests/test_review_preflight_closeout_r98_20261017.py::TestExportSharedCoverage::test_return_keys_from_shared_cov - assert '"generated_count": _cov["generated_count"]' in '        "SELECT total, formatted_total, bare_total, fuzzy_total,"\n'
+FAILED tests/test_review_preflight_closeout_r98_20261017.py::TestExportSharedCoverage::test_empty_leaf_judge_has_strip - assert 'if not (s.get("content") or "").strip() and not has_children' in '        "SELECT total, formatted_total, bare_total, fuzzy_total,"\n'
+FAILED tests/test_review_preflight_closeout_r98_20261017.py::TestExportSharedCoverage::test_status_and_wordcount_judges_untouched - assert 'if s.get("status") == "empty" and (s.get("content") or wc > 0):' in '        "SELECT total, formatted_total, bare_total, fuzzy_total,"\n'
+FAILED tests/test_seven_module_fixes_20260927.py::TestExportFactsGateParity::test_gate_is_fail_closed - assert 'COALESCE(is_resolved,0)=0' in '        "SELECT total, formatted_total, bare_total, fuzzy_total,"\n'
+= 45 failed, 9882 passed, 17 skipped, 1 xfailed, 1 warning in 1636.66s (0:27:16) =

@@ -1,0 +1,47 @@
+# ============================================================================
+# docker-compose.yml —— Mermaid HTTP Service 本机部署模板（R133-C）
+#
+# 用途：为专项方案工具箱提供 Mermaid 原生渲染后端，使导出 DOCX 时
+# 图表走原生 Mermaid 渲染（而非 PIL v2 回退），版式更清晰。
+#
+# 与 backend/app/services/ai/mermaid_service.py 现有 URL 配置对齐：
+#   - 服务名：mermaid-service
+#   - 容器内端口：8080
+#   - 健康探测：GET /health（2s 超时，已在 mermaid_service.py 中实现）
+#   - 渲染端点：POST /render（body: {code, type, theme, scale, backgroundColor}）
+#
+# 环境变量（与 backend/app/main.py:477-483 对齐）：
+#   MERMAID_SERVICE_URL=http://mermaid-service:8080/render   # 后端本地调用
+#   MERMAID_RAILWAY_URL=                                        # 可选，留空即不探测 Railway
+#
+# 启动方式：
+#   docker-compose up -d
+#   然后设置环境变量 MERMAID_SERVICE_URL=http://localhost:8080/render
+#   并重启后端。
+#
+# 注意：mermaid-service 镜像为第三方社区镜像，如需自建可替换为
+# 自定义 Dockerfile（基于 mermaid-cli 构建 HTTP 接口）。
+# ============================================================================
+
+services:
+  mermaid-service:
+    image: ghcr.io/mermaid-js/mermaid-cli:latest  # 占位镜像，如有官方 HTTP 服务镜像请替换
+    container_name: mermaid-service
+    ports:
+      - "8080:8080"
+    environment:
+      - MERMAID_PORT=8080
+      - MERMAID_HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - mermaid-net
+
+networks:
+  mermaid-net:
+    driver: bridge
