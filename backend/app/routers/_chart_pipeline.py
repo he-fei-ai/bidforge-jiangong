@@ -17,7 +17,9 @@ import uuid
 
 from app.db import retry_db_op
 from app.services.ai.image_engine import repair_mermaid, validate_mermaid
+from app.services.chart_local_templates import maybe_append_local_chart
 from app.services.chart_payload import build_chart_envelope
+from app.services.chart_triggers import MIN_SECTION_WORDS, build_section_chart_hint
 from app.services.chart_validators import (
     MERMAID_KEYWORD_TO_CHART_TYPE,
     detect_mermaid_chart_type,
@@ -45,6 +47,10 @@ from app.services.content_blocks import (  # noqa: E402
     #    消除本模块此前的本地副本（`_ORPHAN_LEAD_IN_RE` 8 备选 vs content_blocks 5 备选、
     #    `_LEAD_IN_MAX_CHARS` vs 3 处裸 60）——详见 content_blocks 该常量的分叉说明。
     ORPHAN_LEAD_IN_RE,
+    # ✅ R165（2026-11-01）：图表围栏缩进归一。登记侧必须与导出侧
+    #    （`_parse_content_blocks`）用**同一份**实现，否则「4 空格缩进的图表块」
+    #    会出现「成稿有图 / 清单查无此图 / 限额管不到」的幽灵图（R76 同族）。
+    normalize_chart_fence_indent,
     parse_fence_line,
     read_fenced_block,
 )
@@ -113,7 +119,10 @@ _CHART_SCHEME_TYPE_LIMITS = {"ai_image": 6}
 
 #: ✅ R58（2026-10-10）：提示词里「章节字数 ≤ 200 字不配图」的程序侧同口径阈值
 #: （与 prompts/content.py「何时配图」段落一致 —— 同一判据不得两处各写一份）。
-_CHART_MIN_WORDS = 200
+#: ✅ R166（2026-11-01 · 触发词库引入）：改为从 ``chart_triggers.MIN_SECTION_WORDS``
+#:    转发 —— 本地兜底判定与登记侧剪裁从此共用**同一个**数值来源，值仍为 200
+#:    （R160 D 组 ``_CHART_MIN_WORDS == 200`` 断言不受影响）。
+_CHART_MIN_WORDS = MIN_SECTION_WORDS
 
 #: 配额提示的展示顺序（flowchart/gantt 优先，ai_image 最后）。
 _QUOTA_HINT_TYPES = ("flowchart", "gantt", "architecture", "labor",
@@ -686,6 +695,68 @@ async def _load_scheme_type_counts(db, scheme_id: str,
         return {}
 
 
+async def build_section_chart_hints(
+        db, scheme_id: str, section_id: str, *,
+        word_budget: int = 0,
+        section_title: str = "",
+        section_description: str = "",
+        scheme_type: str = "",
+        quota_hint_enabled: bool = True,
+        trigger_hint_enabled: bool = True,
+        min_confidence: float = 0.70,
+) -> tuple[dict[str, int], str, str]:
+    """一次查库 → 同时产出两类本章软提示（``(counts, quota_hint, trigger_hint)``）。
+
+    ✅ R166（2026-11-01 · 加固）：修复「配额提示查过库、触发词提示拿不到计数」的
+    自相矛盾 —— 旧实现两处提示各自独立，词库会推荐**已达全案上限**的图表类型，
+    AI 照提示画图后必被限额删除（浪费一次生成预算，用户只看到"写了图却没有"）。
+
+    契约（本函数是「配额统计一次查询」的唯一实现点）：
+      * 两个开关都关 → **不查库**，返回空 counts 与空提示；
+      * 查库失败 → fail-soft：counts 置空、仍按无配额提示继续（绝不抛给生成链路）；
+      * 提示构造本身的异常逐项吞掉（软提示不得让一次生成失败）；
+      * 唯一副作用是**只读一次** ``_load_scheme_type_counts``（测试据此断言次数）。
+
+    Args:
+        db: 数据库连接（透传给计数查询）。
+        word_budget: 本章字数预算（供配额提示判断"建议不配图"）。
+        section_title / section_description / scheme_type: 触发词判定入参。
+        quota_hint_enabled / trigger_hint_enabled: 两处提示的独立开关。
+        min_confidence: 词库判定阈值（低于阈值不产出配图参考）。
+
+    Returns:
+        ``(counts, quota_hint, trigger_hint)`` —— 后两者空串表示该处无提示。
+    """
+    counts: dict[str, int] = {}
+    if not (quota_hint_enabled or trigger_hint_enabled):
+        return counts, "", ""
+
+    try:
+        counts = await _load_scheme_type_counts(db, scheme_id, section_id) or {}
+    except Exception:  # noqa: BLE001 - 软提示，绝不阻断生成
+        counts = {}
+        logger.warning("图表配额统计失败（按无提示继续）", exc_info=True)
+
+    quota_hint = ""
+    if quota_hint_enabled:
+        try:
+            quota_hint = build_chart_quota_hint(counts, word_budget=word_budget)
+        except Exception:  # noqa: BLE001 - 软提示，绝不阻断生成
+            logger.warning("图表配额提示生成失败（按无提示继续）", exc_info=True)
+
+    trigger_hint = ""
+    if trigger_hint_enabled:
+        try:
+            trigger_hint = build_section_chart_hint(
+                title=section_title, description=section_description,
+                scheme_type=scheme_type, used_counts=counts,
+                min_confidence=min_confidence)
+        except Exception:  # noqa: BLE001 - 软提示，绝不阻断生成
+            logger.warning("本章配图参考生成失败（按无提示继续）", exc_info=True)
+
+    return counts, quota_hint, trigger_hint
+
+
 def _record_chart_drop(dropped_out: list | None, chart_type: str, reason: str) -> None:
     """把「图表块被系统删除/裁剪」记入观测清单（可观测性唯一出口）。
 
@@ -727,6 +798,11 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
                             enforce_limits: bool = False,
                             scheme_type_counts: dict[str, int] | None = None,
                             dropped_out: list | None = None,
+                            enable_local_fallback: bool = False,
+                            local_fallback_confidence: float = 0.70,
+                            section_title: str = "",
+                            section_desc: str = "",
+                            scheme_type: str = "",
                             ) -> tuple[str, list[tuple]]:
     """**纯计算**：扫描 → 校验/修复 → 限额裁剪，产出修正后的正文与待写入行。
 
@@ -765,6 +841,36 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
                 type(content).__name__, scheme_id[:8], section_id[:8],
                 exc_info=True)
             content = str(content) if content else ""
+
+    # ✅ R165（2026-11-01 · 4 空格缩进图表围栏）：读取前先做**与导出侧同一份**
+    #    缩进归一。行数/行序不变，故后续 ordinal / src_line 契约不受影响；
+    #    归一后的正文即返回给调用方落库（历史脏正文在下次保存时自愈）。
+    content, _indent_log = normalize_chart_fence_indent(content)
+    if _indent_log:
+        logger.info("章节 %s 图表围栏缩进归一 %d 处（登记侧与导出侧同口径）",
+                    section_id[:8], len(_indent_log))
+
+    # ✅ R166（2026-11-01 · 本地模板兜底，默认关闭）：正文 AI 在本章**没有**产出任何
+    #    图表围栏、且本章命中触发词库（置信度 ≥ 阈值）时，追加一张本地模板图。
+    #    设计要点：
+    #    - 默认关闭（``enable_local_fallback=False``）⇒ 既有行为逐字节不变；
+    #    - 只在**零图表**的章节生效（已有任何围栏则不干预，避免与 AI 配图重复）；
+    #    - 载荷带 ``"source": "local"``，登记时透传进信封，前端/导出据此提示
+    #      「模板示例数据，请按项目实际核定」；
+    #    - 仍走下方同一套校验/限额/登记链路 —— 兜底图不享有任何特权通道。
+    if enable_local_fallback and not _scan_chart_fences_full(content):
+        content, _fb = maybe_append_local_chart(
+            content,
+            section_title=section_title,
+            section_description=section_desc,
+            scheme_type=scheme_type,
+            used_counts=scheme_type_counts,
+            min_confidence=local_fallback_confidence,
+        )
+        if _fb:
+            logger.info("章节 %s 已追加本地模板兜底图表：%s（置信度 %.2f）",
+                        section_id[:8], _fb.get("chart_type"),
+                        float(_fb.get("confidence") or 0.0))
 
     charts = _scan_chart_fences_full(content)
     if not charts:
@@ -866,8 +972,7 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
         #    会被当成 JSON 去解析而丢掉。
         if code.lstrip().startswith(("{", "[")):
             try:
-                payload_json = build_chart_envelope(
-                    data=json.loads(code), title="正文同步生成")
+                _data = json.loads(code)
             except (json.JSONDecodeError, TypeError):
                 # ✅ R48（不变式加固）：校验已通过、信封构造却失败 —— 该块无法登记，
                 #    必须从正文删除。旧实现直接 continue 留下未登记的块（幽灵图）。
@@ -879,6 +984,14 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
                 logger.warning("章节 %s 的图表数据块不是合法 JSON，已从正文删除",
                                section_id[:8])
                 continue
+            # ✅ R166（2026-11-01）：透传载荷来源标记 —— 本地模板兜底图带
+            #    ``"source": "local"``（写入 "local" 键，供清单/导出提示「模板数据」）；
+            #    AI 产物保持默认 "ai" ⇒ 信封与本项引入前**逐字节一致**（零回归）。
+            _src = ("local" if isinstance(_data, dict) and
+                    str(_data.get("source") or "").strip().lower() == "local"
+                    else "ai")
+            payload_json = build_chart_envelope(
+                data=_data, title="正文同步生成", source=_src)
         else:
             payload_json = build_chart_envelope(code=code, title="正文同步生成")
         if not payload_json:
