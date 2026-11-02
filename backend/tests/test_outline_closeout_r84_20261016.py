@@ -260,11 +260,24 @@ class TestConcurrencyWindowInvariant:
             finally:
                 depth["now"] -= 1
             # per 与单元章数等长（真实契约：(unit_status, per) 且
-            # per[i] = (st, children)）；每章给出 1 个小节，避免触发
-            # 「占位/泛化标题」护栏（空 children 会被记 9 处占位标题）
-            per = [("ok", [{"title": f"第{i + 1}章-小节{i + 1}.1",
-                            "children": []}])
-                   for i, _ in unit_chapters]
+            # per[i] = (st, children)）。
+            # ✅ R151（2026-10-31）随四级叶子标准同步：每章给出合规四级子树
+            # （3 个二级 × 每个 3 个三级 × 每个 4 个四级叶子，恰在下限）——
+            # 旧的「每章 1 个小节空 children」三级形态会被生成后合规终检
+            # 触发 AI 补齐（桩 chat 不可用 → 任务 error），破坏本用例
+            # 「并发窗口宽度」的测量目的。
+            def _subtree(i):
+                return [
+                    {"title": f"第{i + 1}章-分节{j}", "description": "分节",
+                     "children": [
+                         {"title": f"第{i + 1}章-小节{j}-{k}", "description": "小节",
+                          "children": [
+                              {"title": f"第{i + 1}章-细目{j}-{k}-{m}",
+                               "description": "细目", "children": []}
+                              for m in range(1, 5)]}
+                         for k in range(1, 4)]}
+                    for j in range(1, 4)]
+            per = [("ok", _subtree(i)) for i, _ in unit_chapters]
             return "ok", per
 
         async def fake_collect(messages, validate_fn=None, **kwargs):

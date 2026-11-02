@@ -55,7 +55,7 @@ def test_红线句_只在回复中输出JSON不算写入_逐字出现():
 
 def test_红线句_预置Schema与json_validation自查_逐字出现():
     文本 = create_initial_prompt("执行任务。")
-    assert f"程序已为 outline.json 预置 Schema，可用 json-validation 自查，只传 file_path" in 文本
+    assert "程序已为 outline.json 预置 Schema，可用 json-validation 自查，只传 file_path" in 文本
     分配 = create_leaf_allocation_prompt()
     assert "程序已为 leaf-allocation.json 预置 Schema，可用 json-validation 自查，只传 file_path" in 分配
 

@@ -475,6 +475,12 @@ class TestEndToEndRepair:
     async def test_modified_input_files_restored_by_baseline(
             self, db_conn, tmp_path, monkeypatch, agent_on, queue_guard):
         _patch_workspace(monkeypatch, tmp_path)
+        # ✅ R154：run_agent_section_repair 终态后回收工作区（L-4）。本用例的
+        #    断言面是「基线还原了被改写的输入文件内容」，需在返回后读工作区
+        #    文件——显式豁免清理；清理行为本身由 test_r154 C3 组行为锁覆盖。
+        import app.services.content_agent.repair as _repair_mod
+        monkeypatch.setattr(_repair_mod, "cleanup_workspace_and_baseline",
+                            lambda ws, bl: None)
         chat = _FakeChat([
             _assistant([
                 ("write", {"path": TASK_FILE, "content": "被我改写的任务说明"}),

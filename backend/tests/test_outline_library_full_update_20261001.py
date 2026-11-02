@@ -253,7 +253,10 @@ class TestSeedCatalogStatic:
         assert set(SCHEME_CATALOG) <= set(CATEGORY_PROFILE)
 
     def test_version_bumped_for_content_update(self):
-        assert SEED_VERSION == "v3.0", "内容升级必须递增版本以刷新存量预置库"
+        # ✅ R153（2026-11-01）：outline_json 落库统一过 normalize_outline_json
+        #    （补节点 id/level 与点分编号，R149 遗留 L-10），版本随之递增以刷新
+        #    存量预置库。
+        assert SEED_VERSION == "v3.1", "内容升级必须递增版本以刷新存量预置库"
 
     def test_new_entries_all_in_catalog(self):
         """§7.1 补齐全部类型：26 个新型式代表名都应在预置清单内

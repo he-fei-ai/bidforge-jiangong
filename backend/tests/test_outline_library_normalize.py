@@ -26,7 +26,8 @@ def _deep5():
 class TestNormalizeOutlineJson:
     def test_clamps_and_renumbers(self):
         out = json.loads(normalize_outline_json(_deep5()))
-        # 只保留 3 级
+        # ✅ R151（2026-10-31）随四级叶子标准同步：只保留 4 级，
+        # 第 5 级标题并入四级父节点 description
         lv1 = out[0]
         assert lv1["id"] == "1"
         assert lv1["level"] == 1
@@ -34,7 +35,11 @@ class TestNormalizeOutlineJson:
         assert lv2["id"] == "1.1"
         lv3 = lv2["children"][0]
         assert lv3["id"] == "1.1.1"
-        assert lv3["children"] == []
+        lv4 = lv3["children"][0]
+        assert lv4["id"] == "1.1.1.1"
+        assert lv4["level"] == 4
+        assert lv4["children"] == []
+        assert "深层节点" in str(lv4.get("description") or "")
         # 内嵌编号被剥离
         assert lv1["title"] == "层级1"
 
@@ -81,7 +86,10 @@ class TestSaveAsLibraryNormalizes:
         stored = json.loads((await cur.fetchone())[0])
         assert stored[0]["id"] == "1"
         assert stored[0]["title"] == "层级1"
-        assert stored[0]["children"][0]["children"][0]["children"] == []
+        # ✅ R151：四级为最后一级，第 5 级标题并入其 description
+        lv4 = stored[0]["children"][0]["children"][0]["children"][0]
+        assert lv4["children"] == []
+        assert "深层节点" in str(lv4.get("description") or "")
 
     async def test_empty_outline_rejected(self, db_conn):
         """PRD 9.2：空目录不得沉淀为目录库。"""
@@ -118,7 +126,10 @@ class TestCreateLibraryNormalizes:
         created = await create_library(data, db_conn)
         stored = json.loads(created["outline_json"])
         assert stored[0]["id"] == "1"
-        assert stored[0]["children"][0]["children"][0]["children"] == []
+        # ✅ R151：四级为最后一级，第 5 级标题并入其 description
+        lv4 = stored[0]["children"][0]["children"][0]["children"][0]
+        assert lv4["children"] == []
+        assert "深层节点" in str(lv4.get("description") or "")
 
     async def test_create_rejects_empty_or_invalid_outline(self, db_conn):
         """✅ 修复（2026-09-16）：空/非法目录不得静默写入空目录库。

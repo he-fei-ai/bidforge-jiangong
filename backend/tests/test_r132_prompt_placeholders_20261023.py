@@ -146,6 +146,13 @@ BASELINE_UNRESOLVED = frozenset({
     "json_schema_fix_system::target_description",
     "outline_adjust_system::scheme_name",
     "outline_adjust_system::scheme_type",
+    # R151（2026-10-31）：四级硬性标准合规修复模板 —— 5 个上下文变量在
+    # sections.standardize-outline 直连链路可不传（fail-soft 空串渲染），纳入基线。
+    "outline_compliance_system::construction_scope",
+    "outline_compliance_system::project_brief",
+    "outline_compliance_system::project_facts",
+    "outline_compliance_system::scheme_name",
+    "outline_compliance_system::scheme_type",
     "outline_feedback_system::project_brief",
     "outline_feedback_system::project_facts",
     "outline_feedback_system::scheme_name",
@@ -447,7 +454,11 @@ def test_dynamic_allowlist_is_single_registry():
 
 
 def test_warning_paths_share_single_judgment():
-    """四处告警/校验消费方必须调用 is_dynamic_placeholder，禁止内联副本。"""
+    """所有告警/校验消费方必须调用 is_dynamic_placeholder，禁止内联副本。
+
+    ✅ R168（2026-11-01 · G5）：``_cache.get_prompt_with_validation`` 已下线，
+    消费方由四处收敛为三处（本用例同步收窄，判据不变）。
+    """
     import app.services.ai.prompts._registry as reg
     from app.services.ai.prompts import _cache as cache_mod
 
@@ -455,7 +466,6 @@ def test_warning_paths_share_single_judgment():
         reg.render_prompt,
         reg.validate_prompt_variables,
         cache_mod.get_prompt,
-        cache_mod.get_prompt_with_validation,
     ]
     for fn in consumers:
         src = inspect.getsource(fn)

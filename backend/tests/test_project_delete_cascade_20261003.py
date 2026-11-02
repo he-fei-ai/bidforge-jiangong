@@ -311,8 +311,11 @@ _CASCADE_COVERED = {
     "placeholder_baselines",  # REFERENCES schemes(id) ON DELETE CASCADE
 }
 
-#: 全局审计日志，按设计跨项目保留（不是项目级派生数据）。
-_AUDIT_LOGS = {"ai_audit_logs", "ai_config_audit_logs", "prompt_audit_logs"}
+#: 全局审计/观测日志，按设计跨项目保留（不是项目级派生数据）。
+#: system_logs（R142 可观测性）同样属于「全局运行日志」：生命周期由
+#: cleanup_old_logs 按级别保留天数驱动，删项目时不应抹掉其历史排障线索。
+_AUDIT_LOGS = {"ai_audit_logs", "ai_config_audit_logs", "prompt_audit_logs",
+               "system_logs"}
 
 
 def _cleaned_tables(P) -> set:

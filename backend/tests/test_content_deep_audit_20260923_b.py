@@ -450,7 +450,13 @@ class _WarnCapture(logging.Handler):
 
 
 class TestCacheMissingVariablesNoFalsePositive:
-    """get_prompt / get_prompt_with_validation 的缺失变量告警口径。"""
+    """get_prompt 的缺失变量告警口径 + validate_prompt_variables 的校验口径。
+
+    ✅ R168（2026-11-01 · G5）：原用例组经由 ``get_prompt_with_validation``
+    取「文本 + 缺失列表」；该 API 零生产调用方已下线，等价口径改为
+    ``get_prompt(key, **kwargs)`` + ``validate_prompt_variables(key, **kwargs)``
+    组合（断言逐条不变）。
+    """
 
     def test_get_prompt_without_kwargs_logs_nothing(self):
         """无 kwargs 取原始模板是合法用法，不得报"缺变量"。"""
@@ -496,14 +502,16 @@ class TestCacheMissingVariablesNoFalsePositive:
         cap = _WarnCapture()
         c.logger.addHandler(cap)
         try:
-            _, missing = c.get_prompt_with_validation("outline_review_system")
+            # ✅ R168/G5：等价口径 = get_prompt（取文本）+ validate（取缺失）。
+            c.get_prompt("outline_review_system")
+            missing = c.validate_prompt_variables("outline_review_system")
         finally:
             c.logger.removeHandler(cap)
         assert missing, "校验 API 空 kwargs 仍应如实报出全部缺失变量"
         assert not [l for l in cap.lines if "missing variables" in l], \
             f"但不得刷日志告警（噪音修复点），实际: {cap.lines}"
 
-    def test_get_prompt_with_validation_still_reports_real_gap(self):
+    def test_validate_still_reports_real_gap(self):
         """只要有传参，真实缺口仍要报出来（修 bug 不得吞掉真信号）。
 
         实现口径：kwargs 为空时"缺失"无从谈起（取原始模板是合法调用，
@@ -511,17 +519,19 @@ class TestCacheMissingVariablesNoFalsePositive:
         其余未传的模板变量必须全部报缺。
         """
         import app.services.ai.prompts._cache as c
-        _, missing = c.get_prompt_with_validation(
+        c.get_prompt("outline_review_system", scheme_name="深基坑支护")
+        missing = c.validate_prompt_variables(
             "outline_review_system", scheme_name="深基坑支护")
         assert "scheme_name" not in missing, \
             f"已传入的变量不应报缺，实际: {missing}"
         assert "outline_json" in missing, \
             f"传了部分参数时剩余真实缺口仍应报缺失，实际: {missing}"
 
-    def test_get_prompt_with_validation_partial_passes_partial_missing(self):
+    def test_validate_partial_passes_partial_missing(self):
         """传了一个不相关变量时，真实缺口仍要报出来。"""
         import app.services.ai.prompts._cache as c
-        _, missing = c.get_prompt_with_validation(
+        c.get_prompt("outline_review_system", unrelated="无关参数")
+        missing = c.validate_prompt_variables(
             "outline_review_system", unrelated="无关参数")
         assert "outline_json" in missing, \
             f"传了无关参数但没传 outline_json 时应报缺失，实际: {missing}"
@@ -533,8 +543,7 @@ class TestCacheMissingVariablesNoFalsePositive:
         c.logger.addHandler(cap)
         try:
             # 传全变量后不应有任何缺失 / 残留
-            prompt, missing = c.get_prompt_with_validation(
-                "outline_review_system",
+            kwargs = dict(
                 construction_scope="基坑 10m",
                 is_dangerous="是",
                 outline_json="[]",
@@ -542,6 +551,8 @@ class TestCacheMissingVariablesNoFalsePositive:
                 scheme_name="深基坑支护",
                 scheme_type="基坑支护",
             )
+            prompt = c.get_prompt("outline_review_system", **kwargs)
+            missing = c.validate_prompt_variables("outline_review_system", **kwargs)
             assert missing == []
             assert "{outline_json}" not in prompt
         finally:

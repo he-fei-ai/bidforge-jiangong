@@ -395,9 +395,11 @@ class TestLabelUnescapeR67:
 
 class TestCacheAndSingleSourceR67:
 
-    def test_renderer_version_is_7(self):
-        assert mr._RENDERER_VERSION == 7, \
-            "R67 改了菱形版式与连线通道，版本号必须 6→7，否则旧缓存图永不失效"
+    def test_renderer_version_not_regressed(self):
+        # R67 要求 6→7；后续轮次（R164 甘特/劳动力几何变更）继续升到 8。
+        # 断言「不低于 7」而非钉死具体值：修复的目的是失效旧缓存，不是禁止再升。
+        assert mr._RENDERER_VERSION >= 7, \
+            "R67 改了菱形版式与连线通道，版本号必须 ≥7，否则旧缓存图永不失效"
 
     def test_version_assigned_exactly_once(self):
         src = inspect.getsource(mr)

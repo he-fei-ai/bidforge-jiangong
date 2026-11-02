@@ -96,8 +96,15 @@ def _patch_ai(monkeypatch, unit_delay: float, total_chapters: int = 6):
         if stats["unit_barrier"] is not None:
             await stats["unit_barrier"].wait()
         stats["unit_active"] -= 1
-        outline = [{"title": f"{cid}.1", "description": "子节", "children": []}
-                   for cid in ids]
+        # ✅ R151：每章合规四级子树（3×3×4），旧的「每章 1 个子节叶子」
+        # 会被生成后合规终检触发 AI 补齐（桩不可用 → error）
+        outline = [
+            {"title": f"{cid}.1", "description": "子节", "children": [
+                {"title": f"{cid}.{j}.{k}", "description": "小节", "children": [
+                    {"title": f"{cid}.{j}.{k}.{m}", "description": "细目",
+                     "children": []} for m in range(1, 5)]}
+                for k in range(1, 4)]}
+            for cid in ids for j in range(1, 4)]
         return ({"outline": outline},
                 json.dumps({"outline": outline}, ensure_ascii=False))
 

@@ -239,11 +239,12 @@ class TestSingleChainGeometryR66:
 
 class TestRendererVersionR66:
 
-    def test_renderer_version_is_7(self):
+    def test_renderer_version_not_regressed(self):
         # R67（2026-10-11 流程图渲染可读性）：菱形铺满形状盒 + 文字内接自适应 +
-        # 连线分道，菱形版式/连线走向/画布尺寸都变，版本号必须 6→7。
-        assert mr._RENDERER_VERSION == 7, \
-            "R67 改了菱形版式与连线通道，版本号必须 6→7，否则旧缓存图永不失效"
+        # 连线分道，菱形版式/连线走向/画布尺寸都变，版本号必须 6→7；
+        # 后续轮次（R164 甘特/劳动力几何变更）继续升到 8 —— 故断言「不低于 7」。
+        assert mr._RENDERER_VERSION >= 7, \
+            "R67 改了菱形版式与连线通道，版本号必须 ≥7，否则旧缓存图永不失效"
 
     def test_version_appears_exactly_once(self):
         import inspect

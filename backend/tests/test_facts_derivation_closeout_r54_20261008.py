@@ -433,9 +433,21 @@ class TestAdjustScopeAndAtomicity:
                          ("触发异常项",))
         assert n == 0
 
-    async def test_response_contract_is_additive(self, dbf):
+    async def test_response_contract_is_additive(self, dbf, monkeypatch):
         db, pid, sid = dbf
         fid = await _ins(db, pid=pid, sid=sid, value=OLD_Q)
+        # ✅ R138 修复（用例非确定性）：本用例 `apply=False` 会走「AI 生成计划」
+        #    分支，而本机配置了内置兜底 agnes 的真实 Key（settings.agnes_api_key）
+        #    ⇒ 每次运行都在打真实网络 + 真实 LLM：网络抖动 → 502「事实调整失败」，
+        #    LLM 偶发编造 fact_id → ignored 非空 —— 两种都会让「响应契约」这个纯
+        #    结构断言红掉（实测：簇内跑红、单跑绿）。此处只钉住「AI 返回了什么」
+        #    这一个外部不确定源，原断言（既有键在位 / applied is None /
+        #    ignored 为空 / DB 未被改）一律不动，也不改被测生产代码。
+        async def _fake_collect_json_response(*_a, **_k):
+            return {"operations": []}, {}
+
+        monkeypatch.setattr(gf, "collect_json_response",
+                            _fake_collect_json_response)
         out = await gf.adjust_facts(
             gf.AdjustRequest(
                 instruction="预览不改库",

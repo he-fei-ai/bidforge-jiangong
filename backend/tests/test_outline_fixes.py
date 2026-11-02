@@ -49,7 +49,8 @@ class TestValidateOutlineDepth:
     def test_strict_mode_reports_depth_over_limit(self):
         from app.routers.sse_handlers import _validate_outline
         issues = _validate_outline({"outline": _deep_outline(6)})
-        assert any("3级目录上限" in i for i in issues)
+        # ✅ R151（2026-10-31）随四级叶子标准同步：上限 3→4，文案随动
+        assert any("4级目录上限" in i for i in issues)
 
     def test_non_strict_mode_ignores_depth(self):
         """生成主链路：超三级目录不应作为"问题"上报（否则会中断生成）。"""
@@ -117,39 +118,45 @@ class TestOutlineSkeleton:
 # ============================================================
 class TestClampOutlineDepth:
     def test_clamp_merges_descendant_titles(self):
+        """✅ R151（2026-10-31）随四级叶子标准同步：上限 3→4 级，
+        五/六级标题并入四级父节点 description（递归收集不变）。"""
         from app.services.outline_utils import clamp_outline_depth
         outline = [{"title": "一级", "description": "父描述", "children": [
             {"title": "二级", "children": [
                 {"title": "三级", "children": [
                     {"title": "四级", "children": [
-                        {"title": "五级", "children": []}]}]}]}]}]
+                        {"title": "五级", "children": [
+                            {"title": "六级", "children": []}]}]}]}]}]}]
         result = clamp_outline_depth(outline)
-        lv3 = result[0]["children"][0]["children"][0]
-        assert lv3["children"] == []
-        # 孙节点及更深层标题都应并入描述
-        assert "四级" in lv3["description"]
-        assert "五级" in lv3["description"]
+        lv4 = result[0]["children"][0]["children"][0]["children"][0]
+        assert lv4["children"] == []
+        # 五、六级及更深标题都应并入四级描述
+        assert "五级" in lv4["description"]
+        assert "六级" in lv4["description"]
 
     def test_prev_merge_suffix_replaced_not_appended(self):
         """描述里已有"（含：...）"时必须替换而非叠加。"""
         from app.services.outline_utils import clamp_outline_depth
         outline = [{"title": "A", "children": [
             {"title": "B", "children": [
-                {"title": "C", "description": "原描述（含：旧标题）",
-                 "children": [{"title": "新标题", "children": []}]}]}]}]
+                {"title": "C", "children": [
+                    {"title": "D", "description": "原描述（含：旧标题）",
+                     "children": [{"title": "新标题", "children": []}]}]}]}]}]
         result = clamp_outline_depth(outline)
-        lv3 = result[0]["children"][0]["children"][0]
-        assert lv3["description"] == "原描述（含：新标题）"
-        assert "旧标题" not in lv3["description"]
+        lv4 = result[0]["children"][0]["children"][0]["children"][0]
+        assert lv4["description"] == "原描述（含：新标题）"
+        assert "旧标题" not in lv4["description"]
 
     def test_bare_merge_suffix_replaced(self):
         from app.services.outline_utils import clamp_outline_depth
         outline = [{"title": "A", "children": [
             {"title": "B", "children": [
-                {"title": "C", "description": "含：旧标题",
-                 "children": [{"title": "新标题", "children": []}]}]}]}]
+                {"title": "C", "children": [
+                    {"title": "D", "description": "含：旧标题",
+                     "children": [{"title": "新标题", "children": []}]}]}]}]}]
         result = clamp_outline_depth(outline)
-        assert result[0]["children"][0]["children"][0]["description"] == "含：新标题"
+        assert result[0]["children"][0]["children"][0]["children"][0][
+            "description"] == "含：新标题"
 
     def test_non_dict_nodes_are_dropped(self):
         from app.services.outline_utils import clamp_outline_depth
@@ -163,16 +170,19 @@ class TestClampOutlineDepth:
 
 class TestNormalizeOutline:
     def test_clamps_and_renumbers_and_fills_children(self):
+        """✅ R151：四级为最后一级 —— _deep_outline(5) 的第五级并入四级描述。"""
         from app.services.outline_utils import normalize_outline
-        outline = _deep_outline(4)
+        outline = _deep_outline(5)
         result = normalize_outline(outline)
         lv1 = result[0]
         lv2 = lv1["children"][0]
         lv3 = lv2["children"][0]
-        assert (lv1["id"], lv2["id"], lv3["id"]) == ("1", "1.1", "1.1.1")
-        assert (lv1["level"], lv2["level"], lv3["level"]) == (1, 2, 3)
-        assert lv3["children"] == []
-        assert "L4" in lv3["description"]
+        lv4 = lv3["children"][0]
+        assert (lv1["id"], lv2["id"], lv3["id"], lv4["id"]) == (
+            "1", "1.1", "1.1.1", "1.1.1.1")
+        assert (lv1["level"], lv2["level"], lv3["level"], lv4["level"]) == (1, 2, 3, 4)
+        assert lv4["children"] == []
+        assert "L5" in lv4["description"]
 
     def test_strips_embedded_numbering_in_titles(self):
         from app.services.outline_utils import normalize_outline
@@ -565,12 +575,16 @@ class TestCoerceSuggestions:
 # ============================================================
 class TestBuildPartialPreview:
     def test_does_not_mutate_source_outline(self):
-        """BUG：旧实现浅拷贝 → clamp 的就地修改污染 full_outline，深层标题线索丢失。"""
+        """BUG：旧实现浅拷贝 → clamp 的就地修改污染 full_outline，深层标题线索丢失。
+
+        ✅ R151：夹具加深到五级（四级现在合法，裁剪点随四级叶子标准下移）。
+        """
         from app.routers.sse_handlers import _build_partial_preview
         src = [{"title": "A", "description": "", "children": [
             {"title": "B", "description": "", "children": [
                 {"title": "C", "description": "", "children": [
-                    {"title": "D", "description": "", "children": []}]}]}]}]
+                    {"title": "D", "description": "", "children": [
+                        {"title": "E", "description": "", "children": []}]}]}]}]}]
         snapshot = copy.deepcopy(src)
 
         preview = _build_partial_preview(src)
@@ -580,11 +594,11 @@ class TestBuildPartialPreview:
         # 预览按位置重排编号
         assert preview[0]["id"] == "1"
         assert preview[0]["children"][0]["id"] == "1.1"
-        c = preview[0]["children"][0]["children"][0]
-        assert c["id"] == "1.1.1"
-        # 四级节点 D 被裁掉，其标题并入 C 的 description（保留内容线索）
-        assert c["children"] == []
-        assert "D" in c["description"]
+        d = preview[0]["children"][0]["children"][0]["children"][0]
+        assert d["id"] == "1.1.1.1"
+        # 五级节点 E 被裁掉，其标题并入 D（四级）的 description（保留内容线索）
+        assert d["children"] == []
+        assert "E" in d["description"]
 
     def test_empty_and_invalid_input(self):
         from app.routers.sse_handlers import _build_partial_preview

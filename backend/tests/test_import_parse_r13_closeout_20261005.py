@@ -162,7 +162,10 @@ class TestPersistParseResultContract:
 
         async def _fail(*a, **k):
             return False
-        monkeypatch.setattr(gf, "_persist_parse_result", _fail)
+        # ✅ R136 配套修复（遗留红）：批量链路与直调同款——R136 把
+        #    parse_all_documents 也改走 _persist_parse_result_with_retry，
+        #    注入点须落在函数属主模块 global_facts_docs（gf 上只是 re-export 别名）。
+        monkeypatch.setattr(gfd, "_persist_parse_result", _fail)
 
         res = await gf.parse_all_documents(scheme_id=sid, project_id="", db=db)
         assert res["parsed"] == 0, "落库失败的文档不得计入 parsed（假成功）"

@@ -266,7 +266,8 @@ def _wide_outline(n_children: int, n_roots: int = 1):
 
 class TestValidateOutlineMaxNodes:
     def test_default_limit_still_500(self):
-        """生成链路默认上限保持 500（防止模型无限输出）。"""
+        """生成链路默认上限保持 500（_validate_outline 直调签名默认；
+        生成主链路的可配置上限已由 R151 抬到 1600，见 outline_name_line 测试）。"""
         ol = _wide_outline(600)   # 601 节点
         assert any("500" in s for s in sh._validate_outline({"outline": ol}, strict_depth=False))
 
@@ -281,7 +282,7 @@ class TestValidateOutlineMaxNodes:
     def test_fix_validate_fn_accepts_large_full_outline(self):
         """BUG 修复：长方案完整目录（30 章 × 21 节点 = 630）此前会被判非法，
         导致修复结果整份丢弃、"按审核建议修复" 空转。"""
-        big = _wide_outline(20, n_roots=30)     # 630 节点
+        big = _wide_outline(60, n_roots=30)     # 1830 节点（>1600）
         assert sh._outline_validate_fn({"outline": big}) != []      # 生成链路：超限
         assert sh._outline_fix_validate_fn({"outline": big}) == []  # 修复链路：放行
 

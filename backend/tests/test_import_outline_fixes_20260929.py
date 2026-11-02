@@ -167,19 +167,23 @@ class TestOutlineServicesNullTitle:
     def test_clamp_still_merges_real_deep_titles(self):
         """回归：真实深层标题仍被并入父节点（内容线索不丢）。
 
-        树深 4 级、上限 3 级：第 4 级标题应被并入第 3 级父节点的描述，
-        既不留空壳、也不丢标题。
+        ✅ R151（2026-10-31）随四级叶子标准同步：上限 3→4 级。树深 5 级、
+        上限 4 级：第 5 级标题应被并入第 4 级父节点的描述，四级本身保留为
+        真实节点，既不留空壳、也不丢标题。
         """
         tree = [{"title": "一级", "children": [
             {"title": "二级", "children": [
                 {"title": "三级A", "description": "原有描述",
-                 "children": [{"title": "四级A1"}, {"title": "四级A2"}]}]}]}]
+                 "children": [{"title": "四级A1", "children": [
+                     {"title": "五级A1a"}, {"title": "五级A1b"}]}]}]}]}]
         clamp_outline_depth(tree)
         l3 = tree[0]["children"][0]["children"][0]
-        assert l3.get("children") == [], "超深子树必须被裁剪"
         assert "原有描述" in str(l3.get("description") or ""), "原有描述不得被覆盖"
+        l4 = l3["children"][0]
+        assert l4.get("children") == [], "超深子树必须被裁剪（五级并入四级描述）"
         blob = json.dumps(tree, ensure_ascii=False)
-        assert "四级A1" in blob and "四级A2" in blob, "被裁剪标题必须并入父节点"
+        assert "四级A1" in blob, "四级节点必须保留为真实节点"
+        assert "五级A1a" in blob and "五级A1b" in blob, "被裁剪标题必须并入父节点"
 
     def test_clamp_depth_limit_unchanged(self):
         """回归：目录深度唯一事实源仍为 MAX_OUTLINE_DEPTH。"""
@@ -349,13 +353,19 @@ class TestCreateSectionParentGuard:
         assert (await cur.fetchone())["n"] == 0, "跨方案父节点不得被引用"
 
     async def test_depth_limit_enforced(self, scheme_ctx):
-        """修复前：三级下新增落库四级，前端按三级渲染 → 数据与展示分叉。"""
+        """✅ R151（2026-10-31）随四级叶子标准同步：三级下新增四级现在**合法**
+        （先建出四级父节点验证放行），四级下新增五级仍被 400 拒绝。"""
         from app.models import SectionCreate
         from app.routers.sections import create_section
         c = scheme_ctx
+        l4 = await create_section(c["scheme_id"],
+                                  SectionCreate(title="四级父", parent_id=c["l3"]), c["db"])
+        cur = await c["db"].execute(
+            "SELECT level FROM sections WHERE id=?", (l4["id"],))
+        assert (await cur.fetchone())["level"] == 4, "三级下新增四级必须放行"
         with pytest.raises(HTTPException) as ei:
             await create_section(c["scheme_id"],
-                                 SectionCreate(title="越界", parent_id=c["l3"]), c["db"])
+                                 SectionCreate(title="越界", parent_id=l4["id"]), c["db"])
         assert ei.value.status_code == 400
         assert f"{MAX_OUTLINE_DEPTH} 级" in str(ei.value.detail)
         cur = await c["db"].execute(
@@ -420,9 +430,10 @@ class TestMoveSectionDepthGuard:
     """
 
     async def test_move_below_leaf_rejected(self, scheme_ctx):
-        """修复前：移动成功 + renumber 写成 level=4 → 界面不可见。"""
-        from app.models import SectionUpdate
-        from app.routers.sections import update_section
+        """✅ R151（2026-10-31）随四级叶子标准同步：移动到三级下（成四级）现在
+        **放行**；移动到四级下（成五级）仍被 400 拒绝。"""
+        from app.models import SectionCreate, SectionUpdate
+        from app.routers.sections import create_section, update_section
         c = scheme_ctx
         sid, pid, db = c["scheme_id"], c["project_id"], c["db"]
         # 再造一个一级章节作为被移动者
@@ -432,16 +443,28 @@ class TestMoveSectionDepthGuard:
             " level, sort_order) VALUES(?,?,?,?,?,?,?)",
             (moved, sid, pid, None, "被移动的章", 1, 2))
         await db.commit()
-
+        # 移动到三级下（成四级）现在合法
+        l4 = await create_section(c["scheme_id"],
+                                  SectionCreate(title="四级父", parent_id=c["l3"]), c["db"])
+        await update_section(sid, moved, SectionUpdate(parent_id=c["l3"]), db)
+        cur = await db.execute("SELECT level FROM sections WHERE id=?", (moved,))
+        assert (await cur.fetchone())["level"] == 4, "移动到三级下（成四级）必须放行"
+        # 还原层级后再验证越界拒绝
+        await db.execute("UPDATE sections SET parent_id=NULL, level=1, sort_order=2"
+                         " WHERE id=?", (moved,))
+        await db.commit()
         with pytest.raises(HTTPException) as ei:
-            await update_section(sid, moved, SectionUpdate(parent_id=c["l3"]), db)
+            await update_section(sid, moved, SectionUpdate(parent_id=l4["id"]), db)
         assert ei.value.status_code == 400
         assert f"{MAX_OUTLINE_DEPTH} 级" in str(ei.value.detail)
 
     async def test_move_below_leaf_must_not_write(self, scheme_ctx):
-        """被拒的移动不得改动任何 level / 不得新增章节（校验必须在写入前）。"""
-        from app.models import SectionUpdate
-        from app.routers.sections import update_section
+        """被拒的移动不得改动任何 level / 不得新增章节（校验必须在写入前）。
+
+        ✅ R151：拒绝目标改为「四级下移动（成五级）」—— 三级下移动已合法化。
+        """
+        from app.models import SectionCreate, SectionUpdate
+        from app.routers.sections import create_section, update_section
         c = scheme_ctx
         sid, db = c["scheme_id"], c["db"]
         moved = uuid.uuid4().hex
@@ -450,11 +473,13 @@ class TestMoveSectionDepthGuard:
             " level, sort_order) VALUES(?,?,?,?,?,?,?)",
             (moved, sid, uuid.uuid4().hex, None, "被移动的章", 1, 2))
         await db.commit()
+        l4 = await create_section(c["scheme_id"],
+                                  SectionCreate(title="四级父", parent_id=c["l3"]), c["db"])
         cur = await db.execute("SELECT id, level FROM sections")
         before = {r["id"]: r["level"] for r in await cur.fetchall()}
 
         with pytest.raises(HTTPException):
-            await update_section(sid, moved, SectionUpdate(parent_id=c["l3"]), db)
+            await update_section(sid, moved, SectionUpdate(parent_id=l4["id"]), db)
 
         cur = await db.execute("SELECT id, level FROM sections")
         after = {r["id"]: r["level"] for r in await cur.fetchall()}

@@ -257,13 +257,20 @@ class TestE2PartialPreviewMatchesFinal:
         assert _chain(preview) == _chain(final)
 
     def test_deep_titles_are_merged_into_description(self):
-        """被裁掉的深层标题必须并入父节点 description（内容线索不丢）。"""
+        """被裁掉的深层标题必须并入父节点 description（内容线索不丢）。
+
+        ✅ R151（2026-10-31）随四级叶子标准同步：_deep_outline 的 C1 链共 5 级，
+        裁剪上限现为 4 级 —— 第 5 级标题（C1.1.1.1.1）并入**四级**节点
+        （C1.1.1.1）的 description，四级节点保留为真实节点。
+        """
         final = normalize_outline(copy.deepcopy(_deep_outline()))
         c1 = final[0]
-        node = (c1.get("children") or [])[0]
-        node = (node.get("children") or [])[0]
-        assert "含：" in str(node.get("description") or ""), (
-            "第四级标题未并入三级节点 description"
+        node = (c1.get("children") or [])[0]    # C1.1
+        node = (node.get("children") or [])[0]  # C1.1.1
+        node = (node.get("children") or [])[0]  # C1.1.1.1（四级）
+        assert node.get("children") == [], "四级是最后一级，不得保留子节点"
+        assert "C1.1.1.1.1" in str(node.get("description") or ""), (
+            "第五级标题未并入四级节点 description"
         )
 
     def test_preview_does_not_mutate_source(self):

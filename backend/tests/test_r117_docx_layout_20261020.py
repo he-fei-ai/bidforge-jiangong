@@ -312,8 +312,11 @@ class TestVersionAndDecision:
         ✅ R131-A（2026-10-23）：v30 → v31（图题 / AI 配图 alt 剥离生成期残留
         「图 X-Y」前缀 —— 可见题注文本由「图 2-1 图 4-1 xxx」变「图 2-1 xxx」，
         旧缓存内含双图号题注必须整体失效）。
+        ✅ R151（2026-10-31）：v32（并行会话：正文子标题深度规则 + 字母前缀剥离）
+        → v33（仅识别 L1~L4 级标题：DB 章节 L5+ 与正文子标题超 4 级降级加粗正文、
+        TOC 域深度封顶 4 —— 标题样式/层级变化，旧缓存必须整体失效）。
         """
-        assert _EXPORTER_VERSION == "31"
+        assert _EXPORTER_VERSION == "33"
 
     def test_decision_documented_in_code(self):
         """编号/TOC 深度属跨模块契约 —— 决策必须留在代码里，不能只在报告里。"""

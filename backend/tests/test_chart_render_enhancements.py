@@ -273,8 +273,16 @@ def test_gantt_section_band_adds_rows():
     b_sec = _render_gantt_image_v2(base)
     b_no = _render_gantt_image_v2(no_section)
     assert b_sec is not None and b_no is not None
-    # 2 个阶段 → 2 条阶段带 = 2 行（每行 48 * 2.5 = 120）
-    assert _open(b_sec).size[1] - _open(b_no).size[1] == 240
+    # ✅ R164（2026-11-01）：行高由 48 改为 62（画布 155px）—— 甘特图纸面主文字
+    #    从 1.68mm 提到 2.60mm（见 tests/test_chart_r164_fixes_20261101.py）。
+    #    这里不再写死像素，改为**先测出行高**再断言「2 个阶段 = 2 行」：
+    #    单任务 vs 双任务（均无 section）的高度差即一行。
+    one_task = {**base, "tasks": [no_section["tasks"][0]]}
+    two_tasks = no_section
+    row_h = (_open(_render_gantt_image_v2(two_tasks)).size[1]
+             - _open(_render_gantt_image_v2(one_task)).size[1])
+    assert row_h > 0
+    assert _open(b_sec).size[1] - _open(b_no).size[1] == 2 * row_h
 
 
 # ---------------- 流程图 ----------------

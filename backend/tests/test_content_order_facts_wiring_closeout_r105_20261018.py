@@ -65,27 +65,51 @@ class _FakeRequest:
 
 
 class _DB:
-    """最小桩 DB：2 叶子章节；额外捕获含 last_generation_report 的落库参数。"""
+    """最小桩 DB：合规四级树（R151）；额外捕获含 last_generation_report 的落库参数。"""
 
     def __init__(self):
         self.saved: list[str] = []
         self.reports: list[str] = []
-        self._sections = [self._sec("s1", "1.1", 0), self._sec("s2", "1.2", 1)]
+        self._sections = self.compliant_sections()
 
     @staticmethod
-    def _sec(sid, num, sort):
+    def _sec(sid, num, sort, level=1, parent=""):
         return {
             "id": sid, "scheme_id": "sc1", "title": f"支护章节 {sid}",
-            "level": 1, "parent_id": "", "sort_order": sort,
+            "level": level, "parent_id": parent, "sort_order": sort,
             "word_budget": 20, "content": "", "status": "empty",
             "description": "d",
             "outline_json": json.dumps({"id": num}, ensure_ascii=False),
             "generation_standard": "", "review_status": "", "word_count": 0,
         }
 
+    @classmethod
+    def compliant_sections(cls, budget=20):
+        """✅ R151（2026-10-31）：合规四级树（1×3×3×4 = 36 个四级叶子，恰在下限）
+        —— 旧的「两个一级叶子」会被正文前置闸门拒绝（叶子必须是四级）。"""
+        rows = [cls._sec("L1", "1", 0)]
+        sort = 1
+        for j in range(1, 4):
+            rows.append(cls._sec(f"L2{j}", f"1.{j}", sort, 2, "L1"))
+            sort += 1
+            for k in range(1, 4):
+                rows.append(cls._sec(f"L3{j}{k}", f"1.{j}.{k}", sort, 3, f"L2{j}"))
+                sort += 1
+                for m in range(1, 5):
+                    rows.append(cls._sec(f"L4{j}{k}{m}", f"1.{j}.{k}.{m}", sort,
+                                         4, f"L3{j}{k}"))
+                    sort += 1
+        return rows
+
+    def leaf_count(self) -> int:
+        return sum(1 for s in self._sections if int(s["level"]) >= 4)
+
     class _Cur:
         def __init__(self, rows):
             self._rows = rows
+            # R156 fixture upgrade: emulate real aiosqlite cursor rowcount
+            # (content persist goes through safe_rowcount single exit)
+            self.rowcount = 1
 
         async def fetchone(self):
             return self._rows[0] if self._rows else None
@@ -249,7 +273,8 @@ class TestR105OrderCheckWiring:
         oc = term.get("order_check")
         assert isinstance(oc, dict) and oc, f"completed 必须带非空 order_check: {term}"
         assert oc.get("ok") is True, f"派发序应严格等于目录 DFS 序: {oc}"
-        assert oc.get("expected_count") == 2 and oc.get("dispatched_count") == 2, oc
+        assert oc.get("expected_count") == db.leaf_count() \
+            and oc.get("dispatched_count") == db.leaf_count(), oc
         # checkpoint 面同源（唯一拼装点纪律）
         ck = stub_env["ckpts"][-1]
         assert ck.get("order_check") == oc, "终态事件与 checkpoint 的 order_check 必须同值"
@@ -394,7 +419,7 @@ class TestR105FactInjectionAudit:
         ck = stub_env["ckpts"][-1]
         summ = ck.get("fact_injection_summary")
         assert isinstance(summ, dict) and summ, f"ckpt 必须带注入留痕汇总: {ck}"
-        assert summ["sections"] == 2, f"两个叶子都应有逐章留痕: {summ}"
+        assert summ["sections"] == db.leaf_count(), f"全部叶子都应有逐章留痕: {summ}"
         for key in ("budget_dropped_total", "budget_dropped_sections"):
             assert key in summ
 
@@ -435,9 +460,10 @@ class TestR105ChapterFactMapping:
         events, text = await _run(db)
         term = _terminal(events)
         mapping = stub_env["ckpts"][-1].get("fact_mapping")
-        assert isinstance(mapping, list) and len(mapping) == 2, (
+        assert isinstance(mapping, list) and len(mapping) == db.leaf_count(), (
             f"映射表须与 leaves 同序全量: {mapping}")
-        assert [m["section_id"] for m in mapping] == ["s1", "s2"], mapping
+        leaf_ids = [s["id"] for s in db._sections if int(s["level"]) >= 4]
+        assert [m["section_id"] for m in mapping] == leaf_ids, mapping
         for m in mapping:
             assert set(m) >= {"section_id", "title", "fact_titles", "fact_count"}
             assert m["fact_count"] == len(m["fact_titles"]) and m["fact_count"] >= 1
@@ -521,7 +547,7 @@ class TestR105FailSoftDiscipline:
         events, text = await _run(db)
         _terminal(events)
         ck = stub_env["ckpts"][-1]
-        assert ck["fact_injection_summary"]["sections"] == 2
+        assert ck["fact_injection_summary"]["sections"] == db.leaf_count()
         assert all(m["fact_count"] == 0 for m in ck["fact_mapping"])
 
 

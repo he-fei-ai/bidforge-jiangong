@@ -316,9 +316,10 @@ class TestVersionAndStats:
         # ✅ R129（2026-10-22）：v29 → v30（Word 2010+ 命名空间清除 + L1~L9 +
         # 公式图片降级 —— 均改变产物字节，REF 域契约不变，本组其余断言不受影响）。
         # ✅ R131-A（2026-10-23）：v30 → v31（图题/配图 alt 剥离生成期「图 X-Y」
-        # 前缀，可见题注文本由双图号变单图号 —— 旧缓存内含错号必须整体失效；
-        # REF 域登记/回填契约不变，本组其余断言不受影响）。
-        assert E._EXPORTER_VERSION == "31"
+        # 前缀，可见题注文本由双图号变单图号 —— 旧缓存内含错号必须整体失效）。
+        # ✅ R151（2026-10-31）：v32（并行会话）→ v33（仅识别 L1~L4 级标题：
+        # L5+ 降级加粗正文、TOC 深度封顶 4 —— REF 域登记/回填契约不受影响）。
+        assert E._EXPORTER_VERSION == "33"
 
     def test_stats_key_registered(self):
         assert "cross_ref_fields" in E._FIX_STATS_KEYS

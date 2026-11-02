@@ -212,3 +212,48 @@ def reset_task_registry_state():
     """
     import app.services.ai.task_registry as tr
     tr._tasks.clear()
+
+
+@pytest.fixture(autouse=True)
+def _restore_prompt_registry():
+    """提示词注册表内存快照 / 还原（跨用例污染治理 · R167）。
+
+    根因：``_ALL_PROMPTS`` 是进程级全局，``update_prompt()``（PATCH 路由的
+    内存侧）会**原地改写**该 key 的 ``content`` 与 ``variables``；而既有若干
+    用例（如 test_prompt_module_fixes_20260927 的 PATCH 契约用例）改完不还原，
+    于是同进程内后续任何读取 ``_ALL_PROMPTS[key]["variables"]`` 的用例都会看到
+    被清空的列表 —— 表现为「单文件跑全绿、与污染文件同跑必红」的顺序相关假失败
+    （实测：3 failed / 549 passed 的基线即由此产生）。
+
+    还原口径：``content`` + ``variables``（``default_content`` /
+    ``default_variables`` / ``requires`` 按设计不可被 ``update_prompt`` /
+    ``reset_prompt`` 改写，但仍有用例直接写 ``requires``，故一并纳入快照）；
+    同时删除用例期间新增的临时 key（如 test_prompt_governance 的
+    ``contract_test_*``），避免污染 ``list_prompts`` / 契约校验遍历。
+
+    仅在注册表已被导入时才快照 —— 未导入的进程无状态可污染，且避免
+    为无关用例强制触发提示词包的整链导入（含既有惰性注册兜底）。
+    """
+    import sys
+
+    mod = sys.modules.get("app.services.ai.prompts._registry")
+    if mod is None:
+        yield
+        return
+
+    snapshot = {
+        k: (v.get("content"), v.get("variables"), v.get("requires"))
+        for k, v in mod._ALL_PROMPTS.items()
+    }
+    yield
+    for k, (content, variables, requires) in snapshot.items():
+        meta = mod._ALL_PROMPTS.get(k)
+        if meta is None:
+            # 用例删了注册键：补不回来（注册需要完整元信息），记一笔即可，
+            # 生产代码不会删除注册项，出现即说明用例写法异常。
+            continue
+        meta["content"] = content
+        meta["variables"] = variables
+        meta["requires"] = requires
+    for k in [k for k in mod._ALL_PROMPTS if k not in snapshot]:
+        del mod._ALL_PROMPTS[k]

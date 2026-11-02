@@ -387,14 +387,22 @@ class TestStaticLocksAndByteHealthE:
                 and n.name == "_split_table_block"]
         assert len(defs) == 1
 
-    def test_export_table_markup_skips_index_one(self):
-        """export._add_table_from_markup 的契约未变：仍以 index 1 为分隔行跳过。
+    def test_export_table_markup_skips_all_separator_rows(self):
+        """export._add_table_from_markup 必须**动态**跳过全部 GFM 分隔行。
 
-        这锁死「解析层必须产出规范序」的跨模块契约——若有人把渲染层也改成
-        宽容形态，两处判据就会分叉（登记/渲染两侧再次各写一份）。
+        ✅ 原断言（R104）为 ``"if j != 1" in src`` —— 锁死「分隔行固定在 index 1」。
+        R145（2026-10-29）起表头前短行（标题带/列组标签）可以出现在分隔行之前，
+        分隔行位置不再固定，渲染层改为按 ``_RE_TABLE_SEP`` 动态定位 ``sep_pos``；
+        本断言随之更新为「动态定位契约」，原意图（渲染层不得把分隔行当数据行）不变：
+        解析层仍只产出规范序表格（``_split_table_block`` 对无分隔行/乱序返回 []，
+        另由 test_r145/test_r104 的表解析用例锁定）。
         """
         src = (APP_DIR / "routers" / "export.py").read_bytes().decode("utf-8")
-        assert "if j != 1" in src, "渲染层跳过 index 1 的契约被改写"
+        assert "_RE_TABLE_SEP.match" in src, "分隔行判据（正则）被移除"
+        assert "sep_pos = [j for j, r in enumerate(tbl_lines)" in src, \
+            "渲染层未动态定位分隔行（可能退回硬编码 index）"
+        assert "if j not in sep_pos" in src, "渲染层未按动态位置排除分隔行"
+        assert "if j != 1" not in src, "渲染层残留硬编码「分隔行固定在 index 1」"
 
     def test_cyrillic_glyph_regex_single_definition(self):
         """_CYRILLIC_GLYPH_NUM_RE 唯一定义 + 封闭映射表非空。"""

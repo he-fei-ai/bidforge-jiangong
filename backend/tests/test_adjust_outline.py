@@ -102,14 +102,18 @@ async def test_adjust_outline_preserves_ids_and_drops_hallucination(db_conn, mon
 
 
 @pytest.mark.asyncio
-async def test_adjust_outline_clamps_depth_to_three(db_conn, monkeypatch):
+async def test_adjust_outline_clamps_depth_to_four(db_conn, monkeypatch):
+    """✅ R151（2026-10-31）随四级叶子标准同步：四级合法保留，五级裁剪并入
+    四级父节点 description。"""
     sid = await _seed_scheme(db_conn)
     await _seed_section(db_conn, sid, "R1", "工程概况", level=1, sort=0)
     deep = {
         "outline": [{
             "id": "R1", "title": "工程概况", "children": [{
                 "title": "二级", "children": [{
-                    "title": "三级", "children": [{"title": "四级应被裁掉"}]}]}]
+                    "title": "三级", "children": [{
+                        "title": "四级保留", "children": [
+                            {"title": "五级应被裁掉"}]}]}]}]
         }],
         "summary": "x",
     }
@@ -118,7 +122,10 @@ async def test_adjust_outline_clamps_depth_to_three(db_conn, monkeypatch):
     node = res["outline"][0]
     l2 = node["children"][0]
     l3 = l2["children"][0]
-    assert l3["children"] == []  # 四级被裁剪并入三级 description
+    l4 = l3["children"][0]
+    assert l4["title"] == "四级保留"
+    assert l4["children"] == []  # 五级被裁剪并入四级 description
+    assert "五级应被裁掉" in str(l4.get("description") or "")
 
 
 @pytest.mark.asyncio

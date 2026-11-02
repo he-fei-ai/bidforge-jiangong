@@ -128,17 +128,31 @@ def _patch_ai(monkeypatch, unit_delay: float = 0.01, total_chapters: int = 6):
         stats["unit_calls"].extend(ids)
         await asyncio.sleep(unit_delay)
 
+        def _compliant_children(cid: int) -> list[dict]:
+            """✅ R151（2026-10-31）：每章给合规四级子树（3 二级 × 3 三级 × 4 四级，
+            恰在下限）—— 旧的「每章 1 个小节空 children」三级形态会被生成后
+            合规终检触发 AI 补齐（桩不可用 → error），破坏本用例的调度测量目的。"""
+            return [
+                {"title": f"第{cid}章-分节{j}", "description": "分节",
+                 "children": [
+                     {"title": f"第{cid}章-小节{j}-{k}", "description": "小节",
+                      "children": [
+                          {"title": f"第{cid}章-细目{j}-{k}-{m}",
+                           "description": "细目", "children": []}
+                          for m in range(1, 5)]}
+                     for k in range(1, 4)]}
+                for j in range(1, 4)]
+
         return_obj = None
         if content.startswith("CHAPTERS:"):
             # 批量单元 → 按 chapter_id 归位的 {"chapters": [...]} 契约
             return_obj = {"chapters": [
                 {"chapter_id": str(cid),
-                 "outline": [{"title": f"第{cid}章-小节{cid}.1", "children": []}]}
+                 "outline": _compliant_children(cid)}
                 for cid in ids]}
         else:
             return_obj = {"outline": [
-                {"title": f"第{cid}章-小节{cid}.1", "children": []}
-                for cid in ids]}
+                child for cid in ids for child in _compliant_children(cid)]}
         return (return_obj, json.dumps(return_obj, ensure_ascii=False))
 
     monkeypatch.setattr(sh, "render", fake_render)

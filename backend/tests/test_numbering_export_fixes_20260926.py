@@ -1,8 +1,9 @@
 """编号规则跨模块统一（2026-09-26）回归测试。
 
 覆盖用户给定导出标准与三模块编号一致性的关键约束：
-  - D2：正文子标题（节内 body 命名空间）L6/L7 格式必须与导出行级标题同口径
+  - D2：正文子标题（节内 body 命名空间）编号格式必须与导出行级标题同口径
         （1）、标题 / a、标题，顿号、无空格）；4 段编号（L5 等价）带顿号。
+        层级按「父级 + 相对深度」（2026-10-31 修正：不再固定压到 L6/L7）。
   - D3：导出 DOCX 所有标题（L1~L7）不得倾斜，含标题内嵌 Markdown 行内斜体兜底。
   - D4：章节增删/顺序调整（reorder/create/delete/update 结构变更）后，已落库正文的
         子标题编号按新编号统一重规范化（落库正文 = 导出成稿 同源）。
@@ -23,7 +24,8 @@ class TestBodySubheadingFormatAlignment:
         text, style = _compute_subheading("2", 2, 1, sub, "总体安排",
                                          sec_id="s", has_children=True)
         assert text == "1）、总体安排", text
-        assert style == 6
+        # ✅ 2026-10-31 层级修正：降级只换编号命名空间，样式=父级下一级（2→3）
+        assert style == 3
         # 计数器续排
         text2, _ = _compute_subheading("2", 2, 1, sub, "资源配置",
                                       sec_id="s", has_children=True)
@@ -37,7 +39,8 @@ class TestBodySubheadingFormatAlignment:
         text, style = _compute_subheading("2", 2, 2, sub, "劳动组织",
                                           sec_id="s", has_children=True)  # rel1
         assert text == "a、劳动组织", text
-        assert style == 7
+        # ✅ 2026-10-31 层级修正：rel1 样式=父级下两级（2→4），不再是固定 L7
+        assert style == 4
         # 字母序列续排
         _compute_subheading("2", 2, 3, sub, "工种", sec_id="s", has_children=True)
         text3, _ = _compute_subheading("2", 2, 4, sub, "调度",
@@ -65,13 +68,23 @@ class TestBodySubheadingFormatAlignment:
         assert style4 == 5
 
     async def test_format_matches_export_heading_standard(self):
-        """正文子标题 L6/L7 格式必须与 heading_v2 / HEADING_STYLE_CONFIG 同口径。"""
+        """正文子标题编号格式必须与 heading_v2 / HEADING_STYLE_CONFIG 同口径。
+
+        ✅ 2026-10-31：Heading 层级改按「父级 + 相对深度」后，style 不再等于
+        编号模板级别（rel0 → style 3，但编号仍是 L6 形态「1）、」）。此处按
+        **编号命名空间**校验：rel0 对齐 L6 模板、rel≥1 对齐 L7 模板。
+        """
         from app.routers.export import _compute_subheading
         from app.services.ai.heading_templates import HEADING_STYLE_CONFIG
         sub = {}
         text, style = _compute_subheading("2", 2, 1, sub, "总体安排",
                                          sec_id="s", has_children=True)
-        assert text.endswith(HEADING_STYLE_CONFIG[style]["punctuation"] + "总体安排")
+        assert style == 3
+        assert text.endswith(HEADING_STYLE_CONFIG[6]["punctuation"] + "总体安排")
+        text2, style2 = _compute_subheading("2", 2, 2, sub, "劳动组织",
+                                           sec_id="s", has_children=True)
+        assert style2 == 4
+        assert text2.endswith(HEADING_STYLE_CONFIG[7]["punctuation"] + "劳动组织")
 
 
 # ============================================================

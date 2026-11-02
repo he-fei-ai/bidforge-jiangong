@@ -4,10 +4,13 @@
 引入文档：《标书智能体（2）——生成标书提纲代码+提示词》《AI 标书提纲生成
 工作流程》《目录章节提纲生成工作流程：文档梳理与引入提示词》三份附件。
 
-五机制对照本软件（三级目录 MAX_OUTLINE_DEPTH=3 的实际约束）：
+五机制对照本软件（四级叶子标准 outline_rules.OUTLINE_MAX_LEVEL=4 的实际约束；
+R159 前本文件按三级标准 R133 时代契约锁定，骨架仅到三级 —— R151 翻转提示词
+时遗漏本模块，R159 将骨架翻转为四级并把数量上收 CHILDREN_MIN/MAX 单一事实源）：
   ① 代码生成框架 + AI 补全 —— outline_framework.build_sublevel_framework
      （等价 generate_one_outline_json_by_level1；数量为本软件硬约束
-     2~3 二级 / 1~3 三级的确定性轮转分配，非文档假设的 L2 3~5/L4 4~7）
+     3~5 二级 / 3~5 三级 / 4~6 四级叶子的确定性轮转分配，源自
+     outline_rules.CHILDREN_MIN/MAX 单一事实源）
   ② check_json 结构递归比对 —— outline_framework.check_json + sse_handlers
      _make_framework_validator / _make_framework_batch_validator 闭包
   ③ 最多 3 次定向修复 —— 首试 + MAX_REPAIR_RETRIES=2，严格骨架比对只占
@@ -54,7 +57,8 @@ CLEAN = [
 # ===========================================================================
 class TestBuildFramework:
     def test_structure_and_count_constraints(self):
-        """2~3 二级 / 1~3 三级硬约束 + id 格式 + title/description 留空。"""
+        """3~5 二级 / 3~5 三级硬约束（CHILDREN_MIN/MAX 同源）
+        + id 格式 + title/description 留空 + 三级叶子无子级（R162 三级叶子标准）。"""
         for idx in range(1, 8):
             fw = of.build_sublevel_framework(idx, f"第{idx}章")
             assert set(fw) == {"outline"}
@@ -68,7 +72,33 @@ class TestBuildFramework:
                 assert of.L3_MIN <= len(kids) <= of.L3_MAX, f"第{idx}.{j}三级数越界"
                 for k, l3 in enumerate(kids, start=1):
                     assert l3["id"] == f"{idx}.{j}.{k}"
-                    assert l3["title"] == "" and l3["children"] == []
+                    assert l3["title"] == "" and l3["description"] == ""
+                    assert l3["children"] == [], "三级叶子（R162）不得再挂子级"
+
+    def test_skeleton_itself_is_compliant(self):
+        """✅ R162：骨架自身必须过 outline_rules 硬性标准校验（零违规）。
+
+        骨架必须与同源提示词标准一致 —— 骨架 = 合规树这一结构不变量锁死，
+        避免注入骨架的章节必然结构不合规、必进合规修复轮白烧 AI。
+        """
+        from app.services.outline_rules import is_compliant_outline
+
+        for idx in range(1, 13):
+            fw = of.build_sublevel_framework(idx)
+            ok, violations = is_compliant_outline(
+                [{"title": f"第{idx}章", "description": "d",
+                  "children": fw["outline"]}])
+            assert ok, f"第{idx}章骨架不合规: {[v.code for v in violations]}"
+
+    def test_counts_derive_from_outline_rules_single_source(self):
+        """✅ R159/R162：数量区间上收 outline_rules 单一事实源（禁止私藏字面量）。"""
+        from app.services.outline_rules import CHILDREN_MAX, CHILDREN_MIN
+
+        assert (of.L2_MIN, of.L2_MAX) == (CHILDREN_MIN[1], CHILDREN_MAX[1])
+        assert (of.L3_MIN, of.L3_MAX) == (CHILDREN_MIN[2], CHILDREN_MAX[2])
+        # R162：L3 为最小叶子，骨架不再预建 L4 层（无 L4_MIN/MAX）
+        assert not hasattr(of, "L4_MIN") and not hasattr(of, "L4_MAX"), \
+            "骨架不应再私藏 L4 数量约束（R162 三级叶子标准）"
 
     def test_deterministic_rotation_adjacent_chapters_differ(self):
         """rng=None：按章序轮转分配 —— 相邻章数量有差异、同章可复现。"""
@@ -86,6 +116,8 @@ class TestBuildFramework:
             assert of.L2_MIN <= len(fw["outline"]) <= of.L2_MAX
             for l2 in fw["outline"]:
                 assert of.L3_MIN <= len(l2["children"]) <= of.L3_MAX
+                for l3 in l2["children"]:
+                    assert l3["children"] == [], "三级叶子（R162）不得挂 L4"
 
     def test_shape_is_same_as_sublevel_response(self):
         """骨架与子目录 AI 响应同构（{"outline": [...]}），供 check_json 比对。"""
@@ -182,6 +214,34 @@ class TestFillFramework:
         out = of.fill_framework_structure({"outline": 123}, copy.deepcopy(CLEAN))
         assert all(set(c) == {"title", "description", "children"} for c in out)
 
+    def test_l4_leaf_layer_regularized_against_skeleton(self):
+        """✅ R159：规整叶子层下探到四级（R159 前叶子层停在三级，AI 在三级
+        层给的子树被整层原样保留、四级模板失配）。AI 合法四级树按骨架同构
+        规整（三键齐、多余键丢弃），四级叶子之下的 AI 子孙原样保留交
+        normalize_outline 裁剪。"""
+        fw = of.build_sublevel_framework(1, "第一章")
+        ai = [{
+            "title": "1.1 二级", "description": "d", "extra": "x",
+            "children": [{
+                "title": "1.1.1 三级", "description": "d",
+                "children": [{
+                    "title": "1.1.1.1 四级", "description": "d",
+                    "children": [{"title": "越层子孙", "description": "d",
+                                  "children": []}],
+                }],
+            }],
+        }]
+        out = of.fill_framework_structure(fw, ai)
+        l2 = out[0]
+        assert set(l2) == {"title", "description", "children"} and "extra" not in l2
+        l3 = l2["children"][0]
+        assert set(l3) == {"title", "description", "children"}
+        # 四级层按骨架模板规整（三键齐、越层子孙保留交 normalize 裁剪）
+        l4 = l3["children"][0]
+        assert set(l4) == {"title", "description", "children"}
+        assert l4["title"] == "1.1.1.1 四级"
+        assert l4["children"] == ai[0]["children"][0]["children"][0]["children"]
+
 
 # ===========================================================================
 # D. 校验闭包（机制③：有界严格 + 第 3 次降级）
@@ -216,6 +276,8 @@ class TestValidators:
             l2["title"] = "二级标题"
             for l3 in l2["children"]:
                 l3["title"] = "三级标题"
+                for l4 in l3["children"]:
+                    l4["title"] = "四级标题"
         v = sh._make_framework_validator(lambda o: [], fw)
         for _ in range(4):
             assert v(good) == []
@@ -411,6 +473,9 @@ class TestPromptSide:
         for rule in ("禁止修改 JSON 结构", "禁止修改一级标题",
                      "直接返回补全后的完整 JSON"):
             assert rule in block
+        # ✅ R162：三级叶子标准下填充规则覆盖到三级标题（不再指导四级）
+        assert "三级标题根据二级标题撰写" in block
+        assert "四级标题" not in block
         assert '"2.1"' in block, "骨架 id 必须出现在注入块中"
 
 

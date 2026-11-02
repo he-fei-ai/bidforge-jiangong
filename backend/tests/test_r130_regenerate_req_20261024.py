@@ -91,16 +91,25 @@ def test_requirement_passed_to_plan_stage():
 
 
 def test_requirement_injected_into_both_generation_branches():
-    """生成链路两个分支（stable-prefix 开/关）各一处注入头，缺一即视为断链。"""
-    assert _SSE_SRC.count("【用户对本次重新生成的额外要求】") == 2, (
-        "额外要求注入头应恰好出现 2 次（stable 分支 _chapter_extras + "
-        "非 stable 分支 user_content 补拼）")
+    """生成链路两个分支（stable-prefix 开/关）都必须拿到额外要求。
+
+    R169 D2 收口后：注入头 ``_req_block`` 只构造**一次**并 append 进
+    ``_chapter_increments`` 单一装配点，双分支同源消费（stable 经
+    ``_incs_stable_text``、非 stable 经 ``_incs_plain_text``）——
+    旧「两处独立注入头」的双口径已铲除。
+    """
+    assert _SSE_SRC.count("【用户对本次重新生成的额外要求】") == 1, (
+        "额外要求注入头应只构造一次（单一装配点，杜绝双口径分叉）")
+    assert '_chapter_increments.append(("\\n", _req_block))' in _SSE_SRC
+    assert "_incs_stable_text" in _SSE_SRC, "stable 分支消费点丢失"
+    assert "_incs_plain_text" in _SSE_SRC, "非 stable 分支消费点丢失"
 
 
 def test_requirement_block_ordered_before_plan_guidance():
-    """顺序对齐外部 §4.2：额外要求位于编排引导语之前。"""
-    idx_req = _SSE_SRC.find("【用户对本次重新生成的额外要求】")
-    idx_plan = _SSE_SRC.find("if _plan_guidance:", idx_req)
+    """顺序对齐外部 §4.2：额外要求位于编排引导语之前（装配序即注入序）。"""
+    idx_req = _SSE_SRC.find('_chapter_increments.append(("\\n", _req_block))')
+    idx_plan = _SSE_SRC.find(
+        '_chapter_increments.append(("\\n", _plan_guidance))')
     assert idx_req != -1 and idx_plan != -1 and idx_req < idx_plan
 
 

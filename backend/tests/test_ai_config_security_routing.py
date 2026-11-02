@@ -226,8 +226,11 @@ class TestSceneRoutes:
             SceneRouteUpdate(scene="content_draft", config_id="c1"), db=db_conn)
         cfg = await pf.resolve_scene_config("content_draft")
         assert cfg is not None and cfg["id"] == "c1"
-        # 其他场景不受影响
-        assert await pf.resolve_scene_config("facts_extract") is None
+        # ✅ R150 分档继承后的分层语义（原断言「其他场景不受影响」随之裁定）：
+        #    facts_extract 与 content_draft 同属 throughput 档 → 继承锚点路由；
+        #    outline_draft 属 complex 档 → 跨档不受影响（隔离仍然成立）。
+        assert (await pf.resolve_scene_config("facts_extract"))["id"] == "c1"
+        assert await pf.resolve_scene_config("outline_draft") is None
 
         listed = await ai_router.list_scene_routes(db=db_conn)
         assert listed["configured_count"] == 1
@@ -238,6 +241,8 @@ class TestSceneRoutes:
         await ai_router.update_scene_route(
             SceneRouteUpdate(scene="content_draft", config_id=""), db=db_conn)
         assert await pf.resolve_scene_config("content_draft") is None
+        # ✅ R150：锚点路由清除 → 同档继承同步失效（继承跟随锚点生命周期）
+        assert await pf.resolve_scene_config("facts_extract") is None
         assert (await ai_router.list_scene_routes(db=db_conn))["configured_count"] == 0
 
     async def test_resolution_falls_back_when_config_deleted(self, db_conn):

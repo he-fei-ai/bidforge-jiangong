@@ -340,9 +340,12 @@ class TestNumberingNamespaceIsolation:
         assert not dotted, (
             f"降级后仍产出点分编号（与 DB 子章节命名空间冲突）: {dotted}"
         )
-        assert all(s in (6, 7) for _, s in outs), (
-            f"降级样式越界（会与章节级 Heading 撞样式）: {[s for _, s in outs]}"
-        )
+        # ✅ 2026-10-31 层级修正：Heading 深度改按「父级 + 相对深度」
+        #    （2 → 3/4/5/…），旧实现固定 6/7 导致导航窗格 H2→H6 断级跳跃。
+        #    编号命名空间仍是 1）、/ a、，隔离性由编号文本保证。
+        styles = [s for _, s in outs]
+        assert styles == [3, 4, 5, 6, 7, 7], styles
+        assert all(3 <= s <= 7 for s in styles), styles
 
     def test_demote_toggle_is_the_single_switch(self):
         """D-7b：同一输入，降级开关两侧输出差异必须完全由该开关决定。"""

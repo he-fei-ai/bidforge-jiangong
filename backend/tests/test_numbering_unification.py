@@ -220,6 +220,18 @@ class TestRenumberSectionBodySubheadings:
         assert "## 2.1 真标题" in new
         assert len(changes) == 1
 
+    def test_letter_paren_prefix_stripped(self):
+        """字母枚举子项（"a）" / "a)"）必须与「数字+右括号」同族一并剥离。
+
+        实测导出稿双重编号 "a、a）材料与环保控制参数" 的直接根因：旧正则只认
+        「数字 + 右括号」，字母前缀永远剥不掉（落库后固化）。
+        """
+        assert strip_outline_numbering("a）材料与环保控制参数") == "材料与环保控制参数"
+        assert strip_outline_numbering("a) 材料与环保控制参数") == "材料与环保控制参数"
+        # 无右括号的字母开头不是编号（A4 纸 / A 级防火），原样保留
+        assert strip_outline_numbering("A4纸打印要求") == "A4纸打印要求"
+        assert strip_outline_numbering("A 级防火材料") == "A 级防火材料"
+
     def test_leading_duplicate_title_skipped(self):
         # 正文首行自引用本节标题：导出渲染会丢弃该块，规范化不给它占号
         content = "## 进度计划\n\n## 总体安排\n"
@@ -391,35 +403,38 @@ class TestCharTableAliases:
 class TestBodySubheadingDemotion:
     """有 DB 子章节的章节，正文子标题降级为节内 body 命名空间。
 
-    降级后：正文子标题第一层用「1）、2）、」（L6），更深层用「a、/b、」（L7 字母序列）。
-    这样正文子标题（L6+）与 DB 子章节（L3+）在同一文档内使用两个独立的命名空间——
+    降级后：正文子标题第一层用「1）、2）、」，更深层用「a、/b、」（字母序列）。
+    这样正文子标题与 DB 子章节（X.X）在同一文档内使用两个独立的命名空间——
     不再出现「1.1 正文标题」与「1.1 DB 子章节」成对撞号。
+
+    ✅ 2026-10-31：降级只换编号命名空间，Heading 深度按「父级 + 相对深度」
+    （与未降级路径同规则），修复导出稿 H2→H6 断级跳跃。
     """
 
-    def test_rel0_demotes_to_l6(self):
-        """has_children=True、相对深度 0 → 1）、标题（L6，顿号、无空格）。"""
+    def test_rel0_demotes_one_level_below_parent(self):
+        """has_children=True、相对深度 0 → 1）、标题（样式=父级下一级）。"""
         from app.routers.export import _compute_subheading
         sub = {}
         text, style = _compute_subheading("2", 2, 1, sub, "总体安排",
                                          sec_id="sec-1", has_children=True)
         assert text == "1）、总体安排"
-        assert style == 6  # L6 Heading
+        assert style == 3  # 父级 H2 → H3
         text2, _ = _compute_subheading("2", 2, 1, sub, "资源配置",
                                        sec_id="sec-1", has_children=True)
         assert text2 == "2）、资源配置"
 
-    def test_rel1_demotes_to_l7_lowercase(self):
-        """has_children=True、相对深度 1 → a、标题（L7，顿号、无空格）。"""
+    def test_rel1_demotes_two_levels_below_parent(self):
+        """has_children=True、相对深度 1 → a、标题（样式=父级下两级）。"""
         from app.routers.export import _compute_subheading
         sub = {}
         _compute_subheading("2", 2, 1, sub, "总体安排", has_children=True)  # rel0 → 1）
         text, style = _compute_subheading("2", 2, 2, sub, "劳动组织",
                                          sec_id="sec-1", has_children=True)  # rel1
         assert text == "a、劳动组织"
-        assert style == 7
+        assert style == 4
 
-    def test_rel2_continues_l7(self):
-        """has_children=True、相对深度 2 → b、标题（L7 字母序列续排）。"""
+    def test_rel2_continues_letters(self):
+        """has_children=True、相对深度 2 → b、标题（字母序列续排）。"""
         from app.routers.export import _compute_subheading
         sub = {}
         _compute_subheading("2", 2, 1, sub, "总体安排", has_children=True)
@@ -427,7 +442,27 @@ class TestBodySubheadingDemotion:
         text, style = _compute_subheading("2", 2, 3, sub, "工种分配",
                                          sec_id="sec-1", has_children=True)
         assert text == "b、工种分配"
-        assert style == 7
+        assert style == 5
+
+    def test_ai_letter_paren_prefix_not_doubled(self):
+        """AI 自带 "a）" 前缀不得与降级产出的 "a、" 叠加成 "a、a）"。
+
+        实测导出稿：正文落库为 "## a、a）材料与环保控制参数"（双重编号被固化），
+        根因是 old 正则只认「数字 + 右括号」。
+        """
+        from app.routers.export import _compute_subheading
+        sub = {}
+        _compute_subheading("2", 2, 1, sub, "总体安排", has_children=True)  # rel0
+        text, _ = _compute_subheading("2", 2, 2, sub, "a、a）材料与环保控制参数",
+                                      sec_id="sec-1", has_children=True)
+        assert text == "a、材料与环保控制参数", text
+        assert "a）" not in text and "a、a、" not in text
+        # 纯 "a）" 前缀（尚无 "a、" 叠加）同样剥净
+        sub2 = {}
+        _compute_subheading("2", 2, 1, sub2, "总体安排", has_children=True)  # rel0
+        text2, _ = _compute_subheading("2", 2, 2, sub2, "b）防火与照明控制参数",
+                                       sec_id="sec-1", has_children=True)
+        assert text2 == "a、防火与照明控制参数", text2
 
     def test_no_demote_when_no_children(self):
         """has_children=False（无子章节）时保持旧格式 X.X.X。"""
@@ -452,7 +487,7 @@ class TestBodySubheadingDemotion:
         t2, s2 = _compute_subheading("2", 2, 1, sub2, "总体安排",
                                      sec_id="sec-1", has_children=True)
         assert t1 == t2 == "1）、总体安排"
-        assert s1 == s2 == 6
+        assert s1 == s2 == 3
 
     def test_mixed_depth_counter_resets_properly(self):
         """混合深度：rel0 重开后从新序列 1）起，rel1 从 a、起。"""

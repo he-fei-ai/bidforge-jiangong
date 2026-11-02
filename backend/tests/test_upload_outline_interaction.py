@@ -78,11 +78,11 @@ class TestParseOutlineSuccess:
         # 归一化后层级不超过 3、编号从 1 开始（预览所见 == 落库所得）
         assert res["outline"][0]["level"] == 1
 
-    async def test_normalized_to_three_levels_and_renumbered(self, db_conn):
-        """识别结果统一经 normalize_outline：≤3 级 + 编号重排。"""
-        # 四级嵌套标题，超过三级应被裁剪
+    async def test_normalized_to_four_levels_and_renumbered(self, db_conn):
+        """识别结果统一经 normalize_outline：✅ R151 起 ≤4 级 + 编号重排。"""
+        # 五级嵌套标题，超过四级应被裁剪
         text = ("# 一、总则\n## 1.1 目的\n### 1.1.1 背景\n#### 1.1.1.1 细节\n"
-                "# 二、范围\n").encode("utf-8")
+                "##### 1.1.1.1.1 更细\n# 二、范围\n").encode("utf-8")
         res = await uo.parse_outline(file=_upload("deep.md", text), db=db_conn,
                                      scheme_name="", reorganize=False)
 
@@ -91,7 +91,7 @@ class TestParseOutlineSuccess:
                 return d - 1
             return max(max_level(n.get("children") or [], d + 1) for n in nodes)
 
-        assert max_level(res["outline"]) <= 3
+        assert max_level(res["outline"]) <= 4
 
     async def test_confidence_in_unit_interval(self, db_conn):
         """confidence 必须落在 [0,1]，前端置信度展示不越界。"""

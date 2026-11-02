@@ -74,9 +74,35 @@ class _MultiSectionDB:
             "generation_standard": "", "review_status": "", "word_count": 0,
         }
 
+    @classmethod
+    def compliant_sections(cls, budget=20):
+        """✅ R151（2026-10-31）：合规四级树（1 个一级 × 3 二级 × 3 三级 × 4 四级
+        = 49 行，恰在下限）—— 旧的「两个一级叶子」会被正文前置闸门拒绝，
+        走不到 completed/stopped/error 终态路径。"""
+        rows = [cls._sec("L1", "1", 1, "", 0, budget)]
+        sort = 1
+        for j in range(1, 4):
+            rows.append(cls._sec(f"L2{j}", f"1.{j}", 2, "L1", sort, budget))
+            sort += 1
+            for k in range(1, 4):
+                rows.append(cls._sec(f"L3{j}{k}", f"1.{j}.{k}", 3, f"L2{j}",
+                                     sort, budget))
+                sort += 1
+                for m in range(1, 5):
+                    rows.append(cls._sec(f"L4{j}{k}{m}", f"1.{j}.{k}.{m}", 4,
+                                         f"L3{j}{k}", sort, budget))
+                    sort += 1
+        return rows
+
+    def leaf_count(self) -> int:
+        return sum(1 for s in self._sections if int(s["level"]) >= 4)
+
     class _Cur:
         def __init__(self, rows):
             self._rows = rows
+            # R156 fixture upgrade: emulate real aiosqlite cursor rowcount
+            # (content persist goes through safe_rowcount single exit)
+            self.rowcount = 1
 
         async def fetchone(self):
             return self._rows[0] if self._rows else None
@@ -222,7 +248,8 @@ class TestR1CheckpointStatsSingleSource:
 
     @pytest.mark.asyncio
     async def test_completed_path_carries_real_stats(self, stub_env):
-        db = _MultiSectionDB()
+        # ✅ R151：夹具升级为合规四级树（旧的 2 个一级叶子会被前置闸门拒绝）
+        db = _MultiSectionDB(sections=_MultiSectionDB.compliant_sections())
         events, text = await _run(db)
         term = _terminal(events)
         assert term["event"] == "completed", (
@@ -239,7 +266,8 @@ class TestR1CheckpointStatsSingleSource:
     @pytest.mark.asyncio
     async def test_stopped_path_carries_stats_and_progress(self, stub_env, monkeypatch):
         """用户点停止：checkpoint 与 stopped 事件都必须带真实统计量。"""
-        db = _MultiSectionDB()
+        # ✅ R151：夹具升级为合规四级树
+        db = _MultiSectionDB(sections=_MultiSectionDB.compliant_sections())
 
         def _stop_after_first(tid):
             # 第一章落库之后即视为「用户已停止」
@@ -328,8 +356,8 @@ class TestR3ErrorPayloadParity:
     @pytest.mark.asyncio
     async def test_all_failed_error_carries_details(self, stub_env, monkeypatch):
         """全章失败：error 事件必须带失败明细（供前端逐章重试）。"""
-        db = _MultiSectionDB(sections=[
-            _MultiSectionDB._sec("s1", "1.1", 1, "", 0, 20)])
+        # ✅ R151：夹具升级为合规四级树（36 个四级叶子全失败）
+        db = _MultiSectionDB(sections=_MultiSectionDB.compliant_sections())
 
         async def _boom(messages, **k):
             raise RuntimeError("模拟 AI 全网失败")
@@ -341,11 +369,11 @@ class TestR3ErrorPayloadParity:
         term = _terminal(events)
         assert term["event"] == "error", (
             f"{[e.get('event') for e in events]} / {text[:400]}")
-        assert term["failed_count"] == 1
+        assert term["failed_count"] == db.leaf_count()
         assert term.get("failed_sections"), f"必须带失败明细: {term}"
         assert isinstance(term.get("progress"), (int, float))
         assert "standard_summary" in term
-        assert term["total"] == 1
+        assert term["total"] == db.leaf_count()
 
 
 # ============================================================================
@@ -574,10 +602,8 @@ class TestR6CrossSectionCopyNotDead:
                "并对配电箱设置防雨棚与接地保护。\n")
         monkeypatch.setattr(sh, "chat_with_fallback",
                             lambda *a, **k: _coro(dup))
-        db = _MultiSectionDB(sections=[
-            _MultiSectionDB._sec("s1", "1.1", 1, "", 0, 5000),
-            _MultiSectionDB._sec("s2", "1.2", 1, "", 1, 5000),
-        ])
+        # ✅ R151：夹具升级为合规四级树（36 个四级叶子，全部同文 → CON-06 跨章搬运）
+        db = _MultiSectionDB(sections=_MultiSectionDB.compliant_sections(budget=5000))
         db.reports: list[str] = []
 
         orig_exec = db.execute
@@ -593,8 +619,8 @@ class TestR6CrossSectionCopyNotDead:
 
         db.execute = _exec
         events, text = await _run(db)
-        assert len(db.reports) == 2, (
-            f"两章都应落库并写报告: {len(db.reports)} / "
+        assert len(db.reports) == db.leaf_count(), (
+            f"全部叶子都应落库并写报告: {len(db.reports)} / "
             f"{[e.get('event') for e in events]}")
         joined = "".join(db.reports)
         assert "CON-06" in joined, (

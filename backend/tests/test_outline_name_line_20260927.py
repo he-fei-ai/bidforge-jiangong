@@ -461,12 +461,16 @@ class TestAllLevelRelaxedMatching:
 
 
 class TestNodeCapConfigurable:
-    """P2-2：生成链路节点上限配置化（默认 500 = 原行为）。"""
+    """P2-2：生成链路节点上限配置化。
+
+    ✅ R151（2026-10-31）：默认 500 → 1600 —— 四级叶子标准下合规树理论上限
+    10×5×5×6=1500，500 必然误伤合规大目录（详见 config.py 注释）。
+    """
 
     def test_default_matches_legacy(self):
         from app.config import Settings
-        assert Settings().outline_generate_max_nodes == 500
-        assert sh.OUTLINE_GENERATE_MAX_NODES == 500
+        assert Settings().outline_generate_max_nodes == 1600
+        assert sh.OUTLINE_GENERATE_MAX_NODES == 1600
 
     def test_bound_to_constant(self):
         assert sh.OUTLINE_GENERATE_MAX_NODES == int(
@@ -480,10 +484,10 @@ class TestNodeCapConfigurable:
 
     def test_over_limit_flagged(self):
         big = {"outline": [{"title": f"章{i}", "children": [
-            {"title": f"节{i}-{j}", "children": []} for j in range(30)]}
-            for i in range(20)]}      # 620 节点 > 500
+            {"title": f"节{i}-{j}", "children": []} for j in range(45)]}
+            for i in range(40)]}      # 1840 节点 > 1600
         issues = sh._outline_validate_fn(big)
-        assert issues, "超过 500 节点必须被判非法（与修复前一致）"
+        assert issues, "超过 1600 节点必须被判非法"
 
 
 class TestKeywordLibraryDiscipline:

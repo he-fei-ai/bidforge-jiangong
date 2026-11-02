@@ -69,7 +69,14 @@ def _patch_generation(monkeypatch):
 
     async def fake_collect(messages, validate_fn=None, **kwargs):
         seen_prompts.append(messages)
-        outline = [{"title": "工程概况", "description": "d", "children": []}]
+        # ✅ R151：合规四级树（旧的裸一级叶子会被合规终检拒绝）
+        outline = [{"title": "工程概况", "description": "d", "children": [
+            {"title": f"1.{j} 分节", "description": "d", "children": [
+                {"title": f"1.{j}.{k} 小节", "description": "d", "children": [
+                    {"title": f"1.{j}.{k}.{m} 细目", "description": "d",
+                     "children": []} for m in range(1, 5)]}
+                for k in range(1, 4)]}
+            for j in range(1, 4)]}]
         if kwargs.get("scene") == "outline_draft":
             return ({"outline": outline},
                     json.dumps({"outline": outline}, ensure_ascii=False))

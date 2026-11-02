@@ -120,7 +120,16 @@ def _scan_call_sites():
             fn = node.func
             if not isinstance(fn, ast.Name):
                 continue
-            if fn.id not in ("collect_json_response", "collect_json_response_with_provider"):
+            # ✅ R149（FIX-H）：``_collect_ai`` 是目录审核/修复链路的停止响应
+            #    包装（``_stoppable_outline_collect(task_id)`` 的产物），调用时
+            #    ``*args/**kwargs`` 原样透传给 ``collect_json_response`` ——
+            #    repair_key 归因语义不变，只是 AST 看不见间接层。纳入扫描白名单
+            #    （与直接调用同一 repair_key 判据）；包装层「必须仍转发到
+            #    collect_json_response」由 test_outline_workflow_logs 的
+            #    双分支锁独立锚定，防未来有人把包装层换成裸 chat 绕过守卫。
+            if fn.id not in ("collect_json_response",
+                             "collect_json_response_with_provider",
+                             "_collect_ai"):
                 continue
             # 找 repair_key= kwarg
             rk_value = None
@@ -263,6 +272,9 @@ def test_outline_family_still_uses_outline_repair_key():
     ``OUTLINE_REPAIR_KEY``（与 round2_inventory P2-A 表 9 处目录族对应）。
     注意：sse_handlers.py 里 word_budget_alloc（:5151）等非目录调用点
     合法走默认 GENERIC，不在本计数内。
+    ✅ R149（FIX-H）：审核/修复链路的 3 处调用改经 ``_collect_ai`` 停止响应
+    包装（repair_key 随 kwargs 透传），扫描器已把 ``_collect_ai`` 视为
+    collect_json_response 同一调用面（见 _scan_call_sites 注释）。
     """
     sites = _scan_call_sites()
     outline_sites = [s for s in sites

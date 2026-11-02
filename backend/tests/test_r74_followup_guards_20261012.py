@@ -61,30 +61,44 @@ class TestPlanGuidanceWiringR74:
         assert gate >= 0
         assert init < gate, "_plan_guidance 必须初始化在 D1 开关判断之前"
 
-    def test_a2_disabled_branch_concatenates_guidance(self):
-        """stable-prefix 关闭分支必须把引导语拼进 user_content（修复本体）。"""
-        assert 'user_content = user_content + "\\n\\n" + _plan_guidance' in self.src, (
-            "else 分支对 _plan_guidance 的拼接丢失 —— 引导语将再次静默丢弃"
+    def test_a2_disabled_branch_receives_guidance_via_single_list(self):
+        """stable-prefix 关闭分支必须经单一装配列表拿到引导语（修复本体）。
+
+        R169 D2 收口：引导语只 append 进 ``_chapter_increments`` 恰一次，
+        非 stable 分支经 ``_incs_plain_text`` 必达 —— 旧「双口径逐段补拼」
+        已铲除（本判据由 r167 文件的 TestChapterIncrementSingleAssembly 复守）。
+        """
+        assert '_chapter_increments.append(("\\n", _plan_guidance))' in self.src, (
+            "编排引导语未进单一装配点 —— 引导语将再次静默丢弃"
         )
 
     def test_a3_concat_before_message_assembly(self):
-        """拼接必须发生在该分支 messages 组装之前（否则引导语进不了请求体）。"""
-        cat = self.src.find('user_content + "\\n\\n" + _plan_guidance')
-        asm = self.src.find(
-            'messages = [{"role": "system", "content": sys_prompt}', cat)
-        assert cat >= 0 and asm > cat, "引导语拼接必须在 else 分支 messages 组装之前"
+        """非 stable 分支的列表消费必须发生在该分支 messages 组装之前。"""
+        head = self.src.split("user_content = build_chapter_user_content(", 1)
+        assert len(head) == 2, "未找到非 stable 装配分支锚点"
+        branch = head[1].split(
+            'messages = [{"role": "system", "content": sys_prompt}', 1)
+        assert len(branch) == 2, "未找到 else 分支 messages 组装锚点"
+        assert "_incs_plain_text" in branch[0], (
+            "单一装配列表的 \\n\\n 形态必须在 else 分支 messages 组装之前消费")
 
-    def test_a4_chapter_extras_if_elif_still_present(self):
-        """stable-prefix 开启链路的 _chapter_extras 消费结构不因 G3 破坏。"""
-        assert "if _plan_guidance and _chapter_extras:" in self.src
-        assert "elif _plan_guidance:" in self.src
+    def test_a4_stable_branch_consumption_intact(self):
+        """stable-prefix 开启链路：base extras + 单一列表派生文本仍进 layered。"""
+        idx_layered = self.src.find("build_chapter_layered_messages(")
+        assert idx_layered != -1, "layered 装配调用丢失"
+        assert "_incs_stable_text" in self.src[:idx_layered], (
+            "stable 分支未消费单一装配列表（引导语在该配置下不可达）")
+        assert "chapter_extras=_chapter_extras" in self.src, (
+            "stable 分支 chapter_extras 入参丢失（R57 前缀稳定性契约）")
 
     def test_a5_ab_reverse_anchor(self):
-        """反向锚：模拟「摘除 else 拼接」的旧形态，判据必须归零（证明在守）。"""
+        """反向锚：模拟「摘除引导语 append」的回归形态，判据必须归零（证明在守）。"""
         stripped = self.src.replace(
-            'user_content = user_content + "\\n\\n" + _plan_guidance', "")
-        assert "_plan_guidance" in stripped  # 其余消费点仍在场
-        assert 'user_content = user_content + "\\n\\n" + _plan_guidance' not in stripped
+            '_chapter_increments.append(("\\n", _plan_guidance))', "")
+        assert "_plan_guidance" in stripped  # 初始化/其余消费点仍在场
+        assert '_chapter_increments.append(("\\n", _plan_guidance))' not in stripped
+        assert stripped.count("_chapter_increments.append((") == 4, (
+            "摘除引导语后装配点应为 4 个片段（证明 a2 判据确实在数它）")
 
 
 # ============================================================

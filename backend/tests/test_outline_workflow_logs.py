@@ -118,9 +118,24 @@ class TestEnsureUserMessage:
         assert "await _save_outline_checkpoint" in tail
 
     def test_outline_call_sites_covered_by_shared_guard(self):
-        """目录链路所有 JSON 调用都经由 collect_json_response ⇒ 已被兜底覆盖。"""
-        for fn in (sh.generate_outline, sh._review_and_fix_outline):
-            assert "collect_json_response(" in inspect.getsource(fn)
+        """目录链路所有 JSON 调用都经由 collect_json_response ⇒ 已被兜底覆盖。
+
+        ✅ R149（FIX-H）：审核/修复链路的 AI 调用改经 `_collect_ai`
+        （停止响应包装，task_id 为空时即裸 collect）—— 包装层内部仍调用
+        collect_json_response，共享 ``_ensure_user_message`` 守卫不破。
+        本护栏改双分支锁（改契约必须保留检测力）：
+        ① 生成主链路源码仍含直接调用；审核/修复链路含直接调用或包装调用之一；
+        ② 包装层 `_stoppable_outline_collect` 源码必须仍含
+           ``collect_json_response(`` —— 防后续把包装层换成裸 chat 调用
+           绕过共享守卫。
+        """
+        assert "collect_json_response(" in inspect.getsource(sh.generate_outline)
+        review_src = inspect.getsource(sh._review_and_fix_outline)
+        assert ("collect_json_response(" in review_src
+                or "_collect_ai(" in review_src)
+        wrapper_src = inspect.getsource(sh._stoppable_outline_collect)
+        assert "collect_json_response(" in wrapper_src, (
+            "停止响应包装层必须仍走 collect_json_response（共享 _ensure_user_message 守卫）")
         src = inspect.getsource(sh)
         for marker in ("sub_prompt", "review_prompt", "fix_prompt"):
             assert marker in src, marker

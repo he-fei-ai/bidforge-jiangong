@@ -174,21 +174,62 @@ class _FakeRequest:
 
 
 class _OneSectionDB:
-    """单叶子章节的最小 DB 替身；记录落库正文供断言。"""
+    """合规四级树的最小 DB 替身（R151）；记录落库正文供断言。
+
+    ✅ R151（2026-10-31）：旧的「单个一级叶子」会被正文前置闸门拒绝
+    （叶子必须是四级），故升级为 1×3×3×4 合规树（36 个四级叶子）。
+    """
 
     def __init__(self):
         self.saved: list = []
-        self._section = {
-            "id": "s1", "scheme_id": "sc1", "parent_id": "", "level": 1,
-            "sort_order": 0, "title": "测试章节", "description": "描述",
+        self._sections: list[dict] = []
+        sort = 0
+        self._sections.append({
+            "id": "L1", "scheme_id": "sc1", "parent_id": "", "level": 1,
+            "sort_order": sort, "title": "测试章节", "description": "描述",
             "content": "", "word_count": 0, "status": "empty",
             "word_budget": 50, "generation_standard": "",
             "outline_json": None, "review_status": "pending",
-        }
+        })
+        sort += 1
+        for j in range(1, 4):
+            self._sections.append({
+                "id": f"L2{j}", "scheme_id": "sc1", "parent_id": "L1",
+                "level": 2, "sort_order": sort, "title": f"二级{j}",
+                "description": "描述", "content": "", "word_count": 0,
+                "status": "empty", "word_budget": 50,
+                "generation_standard": "", "outline_json": None,
+                "review_status": "pending"})
+            sort += 1
+            for k in range(1, 4):
+                self._sections.append({
+                    "id": f"L3{j}{k}", "scheme_id": "sc1",
+                    "parent_id": f"L2{j}", "level": 3, "sort_order": sort,
+                    "title": f"三级{j}{k}", "description": "描述",
+                    "content": "", "word_count": 0, "status": "empty",
+                    "word_budget": 50, "generation_standard": "",
+                    "outline_json": None, "review_status": "pending"})
+                sort += 1
+                for m in range(1, 5):
+                    self._sections.append({
+                        "id": f"L4{j}{k}{m}", "scheme_id": "sc1",
+                        "parent_id": f"L3{j}{k}", "level": 4,
+                        "sort_order": sort, "title": f"四级{j}{k}{m}",
+                        "description": "描述", "content": "",
+                        "word_count": 0, "status": "empty",
+                        "word_budget": 50, "generation_standard": "",
+                        "outline_json": None, "review_status": "pending"})
+                    sort += 1
+
+    def leaf_count(self) -> int:
+        return sum(1 for s in self._sections if int(s["level"]) >= 4)
 
     class _Cur:
         def __init__(self, rows):
             self._rows = rows
+            # R156 fixture upgrade: emulate real aiosqlite cursor rowcount
+            # (content persist goes through safe_rowcount single exit)
+            self.rowcount = 1
 
         async def fetchone(self):
             return self._rows[0] if self._rows else None
@@ -205,7 +246,7 @@ class _OneSectionDB:
                 "auto_consistency_repair": 0, "generation_standard": "",
             }])
         if "FROM sections" in s and "ORDER BY sort_order" in s:
-            return self._Cur([dict(self._section)])
+            return self._Cur([dict(x) for x in self._sections])
         if s.strip().upper().startswith("UPDATE SECTIONS SET CONTENT"):
             self.saved.append(params[0])
             return self._Cur([])
@@ -319,7 +360,8 @@ class TestContentGenerationEndToEnd:
         events, _ = await _run(db)
         done = [e for e in events if e.get("event") == "completed"]
         assert done and done[0].get("failed_count") == 0, done
-        assert done[0].get("done") == done[0].get("total") == 1, done
+        # ✅ R151：total/done 随合规四级树的叶子数（36）
+        assert done[0].get("done") == done[0].get("total") == db.leaf_count(), done
 
 
 # ===========================================================================

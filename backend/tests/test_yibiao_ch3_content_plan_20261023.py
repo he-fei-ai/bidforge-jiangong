@@ -507,12 +507,15 @@ class TestC3TableGateWiring:
         assert "_table_slot_used -= 1" in seg
 
     def test_gate_line_injected_into_both_message_paths(self):
-        """stable-prefix 走 _chapter_extras、非 stable 走 user_content 补拼
-        （防 R74 式静默丢弃，双链路都必须在场）。"""
-        assert ('_chapter_extras = _chapter_extras + "\\n" + _table_gate_line'
-                in _SSE_SRC)
-        assert ('user_content = user_content + "\\n\\n" + _table_gate_line'
-                in _SSE_SRC)
+        """表格闸门行必须双链路可达（防 R74 式静默丢弃）。
+
+        R169 D2 收口后：闸门行恰一次 append 进 ``_chapter_increments``
+        单一装配点，双分支同源消费（stable 经 ``_incs_stable_text``、
+        非 stable 经 ``_incs_plain_text``），旧双口径补拼已铲除。
+        """
+        assert '_chapter_increments.append(("\\n", _table_gate_line))' in _SSE_SRC
+        assert "_incs_stable_text" in _SSE_SRC, "stable 分支消费点丢失"
+        assert "_incs_plain_text" in _SSE_SRC, "非 stable 分支消费点丢失"
 
     def test_d1_failure_releases_reservation(self):
         """编排 fail-soft 时必须回滚预占（否则配额越用越紧）。"""

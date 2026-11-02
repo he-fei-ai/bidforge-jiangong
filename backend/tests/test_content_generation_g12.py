@@ -141,12 +141,13 @@ class TestContentCheckpointContract:
             assert f in block, f"checkpoint 载荷缺 {f}（旧实现为死字段/未落库）"
 
     def test_all_checkpoint_sites_use_single_builder(self):
-        """七处终态 checkpoint 调用点全部收口，不再各自手拼 {**_ckpt}。"""
+        """八处终态 checkpoint 调用点全部收口，不再各自手拼 {**_ckpt}。"""
         src = inspect.getsource(sh.generate_content)
         # 2026-09-23：新增「空任务（没有待生成章节）」收尾点，同样走唯一拼装点
-        assert src.count("_content_ckpt_payload(") == 8, (
-            "应为 1 处定义 + 7 处调用（stopped / 全章失败 / completed / "
-            "整批失败 / 断线兜底 / 服务端取消 / 空任务）")
+        # ✅ R151（2026-10-31）：新增「目录合规闸门拒绝」收尾点（四级硬性标准）
+        assert src.count("_content_ckpt_payload(") == 9, (
+            "应为 1 处定义 + 8 处调用（stopped / 全章失败 / completed / "
+            "整批失败 / 断线兜底 / 服务端取消 / 空任务 / 目录合规闸门）")
         assert "**_ckpt" not in src, "仍存在绕过拼装点的 {**_ckpt} 手拼"
 
     def test_attach_checkpoint_result_passes_through_new_fields(self):

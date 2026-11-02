@@ -105,9 +105,13 @@ class TestCheckpointLogUnification:
     CHECKPOINT_PREFIX = 'logger.warning("检查点写入失败'
 
     def test_unified_prefix_used_everywhere(self):
-        """13 处 checkpoint 写盘失败告警必须全部走统一前缀（可一次 grep 命中）。"""
-        assert SSE_FLAT.count(self.CHECKPOINT_PREFIX) == 13, (
-            "checkpoint 告警应恰为 13 处：增删该类告警都要同步本断言")
+        """checkpoint 写盘失败告警必须全部走统一前缀（可一次 grep 命中）。
+
+        ✅ R151（2026-10-31）：新增「正文生成 · 目录合规闸门」与
+        「目录生成 · 结构不合规终止」两处收尾点 → 13 处变 15 处。
+        """
+        assert SSE_FLAT.count(self.CHECKPOINT_PREFIX) == 15, (
+            "checkpoint 告警应恰为 15 处：增删该类告警都要同步本断言")
 
     def test_no_double_failure_phrase(self):
         """禁止「…失败 checkpoint 失败」双失败歧义句式（原 8 处的真实原文）。"""
