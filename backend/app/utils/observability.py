@@ -21,9 +21,14 @@ _chapter_id = contextvars.ContextVar("obs_chapter_id", default="")
 _scheme_id = contextvars.ContextVar("obs_scheme_id", default="")
 
 def new_trace_id():
-    tid = uuid.uuid4().hex[:16]; _trace_id.set(tid); return tid
+    tid = uuid.uuid4().hex[:16]
+    _trace_id.set(tid)
+    return tid
 def new_span(parent=""):
-    sid = uuid.uuid4().hex[:12]; _parent_span_id.set(parent or _span_id.get()); _span_id.set(sid); return sid
+    sid = uuid.uuid4().hex[:12]
+    _parent_span_id.set(parent or _span_id.get())
+    _span_id.set(sid)
+    return sid
 def set_context(**kw):
     m = {"trace_id":_trace_id,"span_id":_span_id,"parent_span_id":_parent_span_id,
          "request_id":_request_id,"task_id":_task_id,"project_id":_project_id,
@@ -32,9 +37,11 @@ def set_context(**kw):
     #    否则 set_context 的空值跳过逻辑会让退出后的 span_id 残留——真实 BUG）。
     force = kw.pop("_force", False)
     for k,v in kw.items():
-        if k in m and (force or v not in (None,"")): m[k].set(str(v))
+        if k in m and (force or v not in (None,"")):
+            m[k].set(str(v))
 def clear_context():
-    for v in (_trace_id,_span_id,_parent_span_id,_request_id,_task_id,_project_id,_chapter_id,_scheme_id): v.set("")
+    for v in (_trace_id,_span_id,_parent_span_id,_request_id,_task_id,_project_id,_chapter_id,_scheme_id):
+        v.set("")
 def context_snapshot():
     return {"trace_id":_trace_id.get(),"span_id":_span_id.get(),"parent_span_id":_parent_span_id.get(),
             "request_id":_request_id.get(),"task_id":_task_id.get(),"project_id":_project_id.get(),
@@ -64,8 +71,10 @@ def redact_sensitive(text):
     if isinstance(text, str):
         out = text
         for _n, pat, repl in REDACTION_RULES:
-            try: out = pat.sub(repl, out)
-            except re.error: continue
+            try:
+                out = pat.sub(repl, out)
+            except re.error:
+                continue
         return out
     if isinstance(text, dict):
         out = {}
@@ -75,7 +84,8 @@ def redact_sensitive(text):
             else:
                 out[k] = redact_sensitive(v)
         return out
-    if isinstance(text, (list, tuple)): return [redact_sensitive(x) for x in text]
+    if isinstance(text, (list, tuple)):
+        return [redact_sensitive(x) for x in text]
     return text
 
 def _now_iso():
@@ -83,8 +93,10 @@ def _now_iso():
 
 class StructuredJsonFormatter(logging.Formatter):
     def format(self, record):
-        try: msg = record.getMessage()
-        except Exception: msg = str(record.msg)
+        try:
+            msg = record.getMessage()
+        except Exception:
+            msg = str(record.msg)
         snap = context_snapshot()
         extra = getattr(record, "_obs_extra", None) or {}
         payload = {
@@ -114,67 +126,95 @@ class StructuredJsonFormatter(logging.Formatter):
 class AsyncStructuredFileHandler(logging.Handler):
     def __init__(self, base_dir, *, queue_size=10000, batch_size=100, flush_interval=1.0, formatter=None):
         super().__init__()
-        self.base_dir = Path(base_dir); self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.queue_size = queue_size; self.batch_size = batch_size; self.flush_interval = flush_interval
+        self.base_dir = Path(base_dir)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.queue_size = queue_size
+        self.batch_size = batch_size
+        self.flush_interval = flush_interval
         self.setFormatter(formatter or StructuredJsonFormatter())
-        self._queue = None; self._dropped = 0; self._worker_task = None; self._running = False; self._loop = None
+        self._queue = None
+        self._dropped = 0
+        self._worker_task = None
+        self._running = False
+        self._loop = None
     def _ensure_queue(self):
         try:
-            try: loop = asyncio.get_running_loop()
-            except RuntimeError: loop = asyncio.get_event_loop()
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.get_event_loop()
         except RuntimeError:
             return None
         if self._queue is None or self._loop is not loop:
-            self._queue = asyncio.Queue(maxsize=self.queue_size); self._loop = loop
+            self._queue = asyncio.Queue(maxsize=self.queue_size)
+            self._loop = loop
             if self._worker_task is None or self._worker_task.done():
-                try: self._worker_task = loop.create_task(self._worker()); self._running = True
-                except RuntimeError: return None
+                try:
+                    self._worker_task = loop.create_task(self._worker())
+                    self._running = True
+                except RuntimeError:
+                    return None
         return self._queue
     async def _worker(self):
-        batch = []; last = time.monotonic()
+        batch = []
+        last = time.monotonic()
         while self._running:
             try:
                 try:
                     rec = await asyncio.wait_for(self._queue.get(), timeout=self.flush_interval)
                 except asyncio.TimeoutError:
                     rec = None
-                if rec is not None: batch.append(rec)
+                if rec is not None:
+                    batch.append(rec)
                 now = time.monotonic()
                 if (len(batch) >= self.batch_size or (batch and now-last >= self.flush_interval)):
-                    await self._flush_batch(batch); batch=[]; last=now
+                    await self._flush_batch(batch)
+                    batch=[]
+                    last=now
             except asyncio.CancelledError:
-                if batch: await self._flush_batch(batch)
+                if batch:
+                    await self._flush_batch(batch)
                 break
             except Exception as e:
                 try:
                     mem = self.base_dir / "_buffer.jsonl"
                     with open(mem, "a", encoding="utf-8") as f:
-                        for line in batch: f.write(line+"\n")
-                except Exception: pass
+                        for line in batch:
+                            f.write(line+"\n")
+                except Exception:
+                    pass
                 batch = []
                 logging.getLogger("observability").warning("结构化日志写入失败，已降级内存缓冲: %s", e)
-        if batch: await self._flush_batch(batch)
+        if batch:
+            await self._flush_batch(batch)
     async def _flush_batch(self, batch):
-        if not batch: return
+        if not batch:
+            return
         day = datetime.now().strftime("%Y-%m-%d")
         path = self.base_dir / f"{day}.jsonl"
         try:
             with open(path, "a", encoding="utf-8") as f:
-                for line in batch: f.write(line+"\n")
+                for line in batch:
+                    f.write(line+"\n")
         except Exception as e:
             logging.getLogger("observability").warning("结构化日志落盘失败: %s", e)
     def emit(self, record):
-        try: line = self.format(record)
-        except Exception: return
+        try:
+            line = self.format(record)
+        except Exception:
+            return
         q = self._ensure_queue()
         if q is None:
             try:
                 day = datetime.now().strftime("%Y-%m-%d")
                 path = self.base_dir / f"{day}.jsonl"
-                with open(path, "a", encoding="utf-8") as f: f.write(line+"\n")
-            except Exception: pass
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(line+"\n")
+            except Exception:
+                pass
             return
-        try: q.put_nowait(line)
+        try:
+            q.put_nowait(line)
         except asyncio.QueueFull:
             self._dropped += 1
             if self._dropped % 1000 == 1:
@@ -182,38 +222,60 @@ class AsyncStructuredFileHandler(logging.Handler):
     def close(self):
         self._running = False
         if self._worker_task is not None:
-            try: self._worker_task.cancel()
-            except Exception: pass
+            try:
+                self._worker_task.cancel()
+            except Exception:
+                pass
         super().close()
     @property
-    def dropped_count(self): return self._dropped
+    def dropped_count(self):
+        return self._dropped
 
 def cleanup_expired_logs(base_dir, *, retention_days):
     base_dir = Path(base_dir)
-    if not base_dir.exists(): return 0
-    now = datetime.now(); removed = 0
+    if not base_dir.exists():
+        return 0
+    now = datetime.now()
+    removed = 0
     min_days = min(retention_days.values()) if retention_days else 7
     for p in base_dir.glob("*.jsonl"):
-        try: d = datetime.strptime(p.stem, "%Y-%m-%d")
-        except ValueError: continue
+        try:
+            d = datetime.strptime(p.stem, "%Y-%m-%d")
+        except ValueError:
+            continue
         if (now-d).days > min_days:
-            try: p.unlink(); removed += 1
-            except OSError: pass
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                pass
     if removed:
         logging.getLogger("observability").info("结构化日志清理：删除 %d 个过期日志文件", removed)
     return removed
 
 class Span:
     def __init__(self, name, *, kind="internal", attributes=None):
-        self.name = name; self.kind = kind; self.attributes = attributes or {}
-        self.span_id = ""; self.parent = ""; self._prev_parent = ""; self.start = 0.0; self.status = "ok"; self.error = None
+        self.name = name
+        self.kind = kind
+        self.attributes = attributes or {}
+        self.span_id = ""
+        self.parent = ""
+        self._prev_parent = ""
+        self.start = 0.0
+        self.status = "ok"
+        self.error = None
     def __enter__(self):
-        self.parent = _span_id.get(); self._prev_parent = _parent_span_id.get()
-        self.span_id = new_span(self.parent); self.start = time.monotonic()
-        set_context(span_id=self.span_id, parent_span_id=self.parent); return self
+        self.parent = _span_id.get()
+        self._prev_parent = _parent_span_id.get()
+        self.span_id = new_span(self.parent)
+        self.start = time.monotonic()
+        set_context(span_id=self.span_id, parent_span_id=self.parent)
+        return self
     def __exit__(self, exc_type, exc, tb):
         dur = (time.monotonic()-self.start)*1000.0
-        if exc is not None: self.status = "error"; self.error = str(exc)[:500]
+        if exc is not None:
+            self.status = "error"
+            self.error = str(exc)[:500]
         rec = logging.getLogger("observability.span")
         extra = {"event": f"span.{self.kind}", "span_id": self.span_id, "parent_span_id": self.parent,
                  "duration_ms": round(dur,2), "status": self.status,
@@ -223,8 +285,10 @@ class Span:
         #    会使 span_id 残留本 span id，嵌套上下文失真）。
         set_context(span_id=self.parent, parent_span_id=self._prev_parent, _force=True)
         return False
-    async def __aenter__(self): return self.__enter__()
-    async def __aexit__(self, exc_type, exc, tb): return self.__exit__(exc_type, exc, tb)
+    async def __aenter__(self):
+        return self.__enter__()
+    async def __aexit__(self, exc_type, exc, tb):
+        return self.__exit__(exc_type, exc, tb)
 
 def span(name, *, kind="internal", attributes=None):
     return Span(name, kind=kind, attributes=attributes)
