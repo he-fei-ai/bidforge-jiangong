@@ -107,6 +107,30 @@ def _to_branch(root: dict, leaf_titles: list) -> dict:
     return base
 
 
+def _deep_branch(root: dict) -> dict:
+    """把已确认根叶节点扩展为**完整三级子树**（R162 三级叶子标准形态）。
+
+    一级下 3 个二级、每个二级下 3 个三级叶子（content_mode）—— 恰好落在
+    CHILDREN_MIN 下限（3/3），可同时验证 Schema 的 minItems 与完成前
+    合规终检（outline_rules.validate_outline_nodes）。
+    """
+    base = {key: value for key, value in root.items()
+            if key not in ("content_mode", "content_mode_note")}
+    children = []
+    for j in range(1, 4):
+        l3s = [{"id": None,
+                "title": f"{root['title']}小节{j}{k}",
+                "description": f"{root['title']}的小节说明",
+                "content_mode": "ai-generate"}
+               for k in range(1, 4)]
+        children.append({"id": None,
+                         "title": f"{root['title']}分节{j}",
+                         "description": f"{root['title']}的分节说明",
+                         "children": l3s})
+    base["children"] = children
+    return base
+
+
 def _read_tree(ws: Path) -> list:
     return json.loads(
         (ws / OUTLINE_OUTPUT_FILE).read_text(encoding="utf-8"))["outline"]
@@ -146,8 +170,7 @@ def _single_chain_chat(ws: Path, counter: dict, snapshots: list | None = None):
         if counter["n"] == 2:
             return _assistant_text("一级目录已写入")
         if counter["n"] == 3:
-            tree = [_to_branch(root, ["现状分析", "建设内容"])
-                    for root in _read_tree(ws)]
+            tree = [_deep_branch(root) for root in _read_tree(ws)]
             return _assistant_write(_json_tree(tree))
         if counter["n"] == 4:
             return _assistant_text("完整目录已写入")
@@ -201,19 +224,25 @@ async def test_单链_业务层_initial到children_generation全流程(db_conn, 
     for node in outline:
         assert re.fullmatch(NODE_ID_PATTERN, node["id"])
         assert "content_mode" not in node
-        assert len(node["children"]) == 2
+        assert len(node["children"]) == 3
         assert all(re.fullmatch(NODE_ID_PATTERN, child["id"])
                    for child in node["children"])
-        assert all(child["content_mode"] == "ai-generate"
-                   for child in node["children"])
+        # ✅ R162：二级是中间节点（父节点不带 content_mode，content_mode 落在三级叶子）
+        assert all("content_mode" not in child for child in node["children"])
     assert [node["number"] for node in outline] == ["1", "2"]
-    assert [child["number"] for child in outline[0]["children"]] == ["1.1", "1.2"]
+    assert [child["number"] for child in outline[0]["children"]] == [
+        "1.1", "1.2", "1.3"]
+    # ✅ R162：三级叶子标准形态 —— 二级下 3 个三级叶子（带 content_mode）
+    l2 = outline[0]["children"][0]
+    assert len(l2["children"]) == 3
+    assert all(l3.get("content_mode") == "ai-generate" for l3 in l2["children"])
+    assert all(l3.get("children") in (None, []) for l3 in l2["children"]), "三级为最小叶子"
 
     # hold 三段式：一级目录确认成果 → children 成果 → 审核后成果
     assert len(holds) == 3
     assert all("children" not in item for item in holds[0])
-    assert all(len(item["children"]) == 2 for item in holds[1])
-    assert all(len(item["children"]) == 2 for item in holds[2])
+    assert all(len(item["children"]) == 3 for item in holds[1])
+    assert all(len(item["children"]) == 3 for item in holds[2])
     assert holds[1] == holds[2]
 
     # 活动与监控事件（阶段流转形状）
@@ -236,8 +265,12 @@ async def test_单链_业务层_initial到children_generation全流程(db_conn, 
 
     # 提示词轮次：初版任务指示 → children 规则 → 审核规则（历史消息原样累积）
     assert len(snapshots) == 6
-    assert len(snapshots[0]) == 1
-    assert "严格按照响应文件要求.md 组织一级目录" in snapshots[0][0]["content"]
+    # ✅ R158：AgentTool.prompt_guidelines 接线 —— 首条为注入的「工具调用守则」
+    #    system 消息，业务任务指示在其后原样保留
+    assert len(snapshots[0]) == 2
+    assert snapshots[0][0]["role"] == "system"
+    assert "【工具调用守则】" in snapshots[0][0]["content"]
+    assert "严格按照响应文件要求.md 组织一级目录" in snapshots[0][1]["content"]
     last_user = [m for m in snapshots[2] if m["role"] == "user"][-1]
     assert ("只扩展 attr=技术 且 content_mode=ai-generate 的一级目录"
             in last_user["content"])
@@ -277,7 +310,7 @@ async def test_单链_事件流_completed且检查点先于finish_task(db_conn, 
     assert final["review"] == _REVIEW_PASSED
     assert "checkpoint_failed" not in final
     assert len(final["outline"]) == 2
-    assert all(len(node["children"]) == 2 for node in final["outline"])
+    assert all(len(node["children"]) == 3 for node in final["outline"])
 
     # 终态顺序契约：checkpoint → finish_task → yield
     # （checkpoint 执行时任务尚在 _tasks；流结束时 finish_task 已 pop）
@@ -409,8 +442,7 @@ async def test_resume断点_直入children_generation且根id保真(db_conn, tmp
         counter["n"] += 1
         snapshots.append([dict(message) for message in messages])
         if counter["n"] == 1:
-            tree = [_to_branch(root, ["现状分析", "建设内容"])
-                    for root in _read_tree(ws)]
+            tree = [_deep_branch(root) for root in _read_tree(ws)]
             return _assistant_write(_json_tree(tree))
         if counter["n"] == 2:
             return _assistant_text("断点续跑完成")
@@ -438,13 +470,17 @@ async def test_resume断点_直入children_generation且根id保真(db_conn, tmp
     assert outcome.result.stage_index == 2
     assert [node["id"] for node in outcome.outline] == root_ids
     assert [node["title"] for node in outcome.outline] == ["项目概述", "实施方案"]
-    assert all(len(node["children"]) == 2 for node in outcome.outline)
+    assert all(len(node["children"]) == 3 for node in outcome.outline)
 
     assert activities[0]["kind"] == "start"
     assert activities[0]["workflow_stage"] == "children_generation"
 
     # 注入的既有会话保留，首个提示词即 children 规则；次阶段即审核规则
-    assert snapshots[0][:2] == prior
+    # ✅ R158：守则 system 消息注入在断点前消息之前，断点前消息原样保留
+    assert snapshots[0][0]["role"] == "system"
+    assert "【工具调用守则】" in snapshots[0][0]["content"]
+    # 首个提示词快照 = [守则system] + 断点前消息 + 本阶段(children)提示词
+    assert snapshots[0][1:-1] == prior
     assert ("只扩展 attr=技术 且 content_mode=ai-generate 的一级目录"
             in snapshots[0][-1]["content"])
     review_user = [m for m in snapshots[2] if m["role"] == "user"][-1]

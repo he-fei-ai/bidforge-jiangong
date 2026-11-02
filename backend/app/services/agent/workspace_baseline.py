@@ -221,3 +221,27 @@ def create_workspace_baseline(workspace_dir: str, baseline_dir: str) -> Workspac
     ``records/`` 随任务目录持久保存。打开时读取既有 manifest，继承此前登记的分组。
     """
     return WorkspaceBaseline(workspace_dir, baseline_dir)
+
+
+def cleanup_workspace_and_baseline(workspace_dir: str | os.PathLike,
+                                   baseline_dir: str | os.PathLike) -> None:
+    """任务收尾回收 Agent 工作区与基线目录（R154 · R149 遗留 L-4）。
+
+    ✅ 背景：``workspace_root_for(task_id)``（DATA_DIR/agent_workspaces/<task_id>）
+    与 ``<task_id>_baseline``（manifest + files 副本 + records）此前**永不清理**
+    —— 目录 Agent（outline_agent_flow）与正文 Agent（content_agent/repair）
+    两条入口每次任务各产出一对目录，磁盘缓慢泄漏。终态后无人再读工作区
+    （成果经 checkpoint/hold_partial 走 SSE 与落库；resume 未跨调用接线，
+    暂停/恢复语义只在单次调用内存活），收尾删除安全。
+
+    刻意 ``ignore_errors=True`` + 纯同步：清理属 best-effort，失败（句柄占用/
+    权限/并发）不应让收尾流程变红；目录小（文本文件），同步删除毫秒级。
+    传 ``None`` 表示该目录本次不回收（如调用方自备的工作区归调用方所有）。
+    """
+    for path in (workspace_dir, baseline_dir):
+        if not path:
+            continue
+        try:
+            shutil.rmtree(os.fspath(path), ignore_errors=True)
+        except Exception:  # noqa: BLE001 —— 同上：best-effort
+            pass

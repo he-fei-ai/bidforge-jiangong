@@ -18,8 +18,19 @@
 红线（易标 2.30.20 一致）：提交修复**没有次数上限**，靠 ``stop`` 兜底止损 ——
 ``minimum`` 档一旦发起过（``minimumAttempted``），此后只看 blocking：有则
 ``stop``，清零即 ``accept``，不再进入修复分支。
+
+✅ R154（R149 遗留 L-5）在上述契约上**追加最后一道止损**：``MAX_STAGE_REPAIRS``
+阶段级修复硬上限。动机：``improved`` 的判据是「blocking 数下降」，病态模型
+在两态间振荡（2→1→2→1…）会让 ``_stalled`` 持续被重置、``minimum`` 档永远
+不触发、``repair`` 无界增长（仅受 agent_loop ``turn_limit`` 兜底，每轮都是
+真实 AI 调用）。到达上限且未进入 ``minimum`` 档时直接 ``stop``——宁可停止
+也不无限烧；``minimum`` 档豁免上限（那是设计内的最后一次机会，其后仍有
+blocking 走既有 ``stop``）。
 """
 from __future__ import annotations
+
+#: 阶段级提交修复硬上限（实例按阶段创建 ⇒ 天然「阶段级」）。
+MAX_STAGE_REPAIRS = 6
 
 
 class _SubmissionPolicy:
@@ -89,6 +100,9 @@ class _SubmissionPolicy:
                 else "normal")
         if mode == "minimum":
             self._minimum_attempted = True
+        elif self._repair_count >= MAX_STAGE_REPAIRS:
+            # ✅ R154（L-5）：振荡绕过止损的最后闸门——见模块 docstring。
+            return {"action": "stop"}
         self._repair_count += 1
         return {"action": "repair", "mode": mode, "attempt": self._repair_count}
 

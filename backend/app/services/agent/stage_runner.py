@@ -307,24 +307,34 @@ async def run_stage(
                      "output_file": output_file})
         return base
 
-    def emit_activity(event: dict) -> None:
+    async def emit_activity(event: dict) -> None:
         if on_activity is None:
             return
         try:
-            on_activity(event)
+            # ✅ BUG 修复（2026-10-28 · 异步观测回调被静默丢弃）：
+            #    on_activity 允许同步或异步可调用（类型为 Callable[[dict], Any]）。
+            #    旧实现直接 on_activity(event) 不 await —— 调用方传 async def 时
+            #    返回的协程永远不被执行：① RuntimeWarning「coroutine was never awaited」；
+            #    ② 观测事件（touchActivity 同族）**静默丢失**，测试/宿主收不到任何
+            #    活动回调。统一走 _maybe_await（与 run_stage 既有
+            #    build_retry_prompt / continue_task 同一出口），同步回调逐字不变。
+            await _maybe_await(on_activity(event))
         except Exception:  # noqa: BLE001 —— 易标 touchActivity 的 try{}catch{}
             logger.debug("on_activity 观测回调异常（已忽略）", exc_info=True)
 
-    def emit_event(event: dict) -> None:
+    async def emit_event(event: dict) -> None:
         if on_event is None:
             return
         try:
-            on_event(event)
+            # ✅ BUG 修复（2026-10-28 · 异步观测回调被静默丢弃）：同上 ——
+            #    emitMonitorEvent 同族；测试 test_技术评分单链_六阶段端到端 传
+            #    async def emit_event，旧实现协程泄漏、events 列表恒空。
+            await _maybe_await(on_event(event))
         except Exception:  # noqa: BLE001 —— 易标 emitMonitorEvent 的 try{}catch{}
             logger.debug("on_event 观测回调异常（已忽略）", exc_info=True)
 
-    def record_retry(message: Any, output_content: Any, retry_prompt: str,
-                     maximum: int | None, kind: str) -> None:
+    async def record_retry(message: Any, output_content: Any, retry_prompt: str,
+                           maximum: int | None, kind: str) -> None:
         """易标 ``recordRetry``（L1050–1071）：摘要 + 换提示词 + 观测事件。"""
         nonlocal stage_prompt
         attempt = len(retry_attempts) + 1
@@ -346,7 +356,7 @@ async def run_stage(
         }
         if maximum is not None:
             activity["maximum"] = maximum  # 易标 L1065 条件展开
-        emit_activity(activity)
+        await emit_activity(activity)
         event = {
             "type": "retry",
             "attempt": attempt,
@@ -355,7 +365,7 @@ async def run_stage(
         }
         if maximum is not None:
             event["maximum"] = maximum  # 易标 L1066 条件展开
-        emit_event(event)
+        await emit_event(event)
 
     while True:  # ── 外层：阶段循环（易标 L1073）─────────────────────────
         candidate = None
@@ -390,8 +400,8 @@ async def run_stage(
                 output_content = (""
                                   if read_output is None
                                   else await _maybe_await(read_output()))
-                record_retry(str(error), output_content, retry_prompt,
-                             max_retries, "execution")
+                await record_retry(str(error), output_content, retry_prompt,
+                                   max_retries, "execution")
                 continue
 
             # 预期产物问题由报告决定；停止决策在执行 catch 之外，不消耗执行重试预算（L1123）。
@@ -411,7 +421,7 @@ async def run_stage(
                         {"stage": stage, "issues": accepted_issues})
                     joined = "；".join(
                         str(issue.get("message", "")) for issue in accepted_issues)
-                    emit_activity({
+                    await emit_activity({
                         "kind": "submission.accepted",
                         "stage_index": stage_index,
                         "workflow_stage": stage,
@@ -442,7 +452,7 @@ async def run_stage(
             repair_details = "\n".join(
                 part for part in (restored_note, business_prompt) if part)
             retry_prompt = build_repair_prompt(report, decision, repair_details)
-            record_retry("\n".join(str(issue.get("message", ""))
+            await record_retry("\n".join(str(issue.get("message", ""))
                                    for issue in report["issues"]),
                          _field(candidate, "output_content"), retry_prompt,
                          None, "submission")
@@ -460,7 +470,7 @@ async def run_stage(
                 or continuation.get("complete") is True
                 or not continuation.get("prompt")):
             break  # L1172
-        emit_event({
+        await emit_event({
             "type": "task_output",
             "stage_index": completed_stage_index,
             "workflow_stage": completed_stage,
@@ -497,7 +507,7 @@ async def run_stage(
         if before_task is not None:
             await before_task
 
-        emit_event({
+        await emit_event({
             "type": "task_input",
             "stage_index": stage_index,
             "workflow_stage": stage,
@@ -505,7 +515,7 @@ async def run_stage(
             "files": [_file_entry(item) for item in files],
         })
         message = continuation.get("message")
-        emit_activity({
+        await emit_activity({
             "kind": "workflow.continue",
             "stage_index": stage_index,
             "workflow_stage": stage,

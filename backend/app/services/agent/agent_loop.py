@@ -126,6 +126,64 @@ def build_tools_payload(tools: list[AgentTool]) -> list[dict]:
     return [t.to_openai() for t in tools]
 
 
+#: 守则块首行标记（幂等判据：调用方复用同一 messages 重试时，块已在场则不重复注入）
+_GUIDELINES_MARKER = "【工具调用守则】"
+
+
+def build_guidelines_system_message(tools: list[AgentTool]) -> str | None:
+    """收集全部工具的非空 ``prompt_guidelines``，拼装「工具调用守则」system 消息。
+
+    ✅ R158（承接 R156-L9-D6 判定反转）：``AgentTool.prompt_guidelines`` 此前
+    是「未完成的移植」—— 8 处构造填了真实守则文本（report_failure 的
+    简单/双工具守则、workspace_tools 的读写守则、user_question 问答守则）、
+    0 处消费，与易标 ``promptGuidelines``「追加到提示词的调用守则」的设计
+    意图相悖。本函数是**唯一拼装实现**：
+
+    - 按工具声明顺序收集，**去重保序**（同一守则出现在多个工具只保留一份）；
+    - 全部为空 → 返回 ``None``（调用方不注入，行为与引入前逐字一致）；
+    - 拼装形态与易标对齐：标记行 + 逐条「- 」列表。
+    """
+    guidelines: list[str] = []
+    seen: set[str] = set()
+    for t in tools:
+        for g in (t.prompt_guidelines or []):
+            line = str(g or "").strip()
+            if line and line not in seen:
+                seen.add(line)
+                guidelines.append(line)
+    if not guidelines:
+        return None
+    return _GUIDELINES_MARKER + "\n" + "\n".join(f"- {g}" for g in guidelines)
+
+
+def inject_guidelines(messages: list, tools: list[AgentTool]) -> bool:
+    """把守则块注入 ``messages``（幂等）；返回是否发生了注入。
+
+    注入位裁定（R156 遗留的「outline 侧无 system 消息」问题）：
+    - 已有 system 消息：插在**首个非 system 消息之前**（即紧跟既有 system
+      之后，协议允许多条 system；Anthropic 适配层会把多条 system 合并，
+      OpenAI 兼容厂商原生支持）—— 不改动调用方既有消息的任何内容；
+    - 无 system 消息：插在 index 0。
+    幂等：任一 system 消息已含 ``_GUIDELINES_MARKER`` → 跳过（调用方复用
+    同一 messages 列表重试时不会出现重复块）。
+    """
+    block = build_guidelines_system_message(tools)
+    if not block:
+        return False
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "system" \
+                and _GUIDELINES_MARKER in str(m.get("content") or ""):
+            return False
+    insert_at = 0
+    for i, m in enumerate(messages):
+        if isinstance(m, dict) and m.get("role") == "system":
+            insert_at = i + 1
+        else:
+            break
+    messages.insert(insert_at, {"role": "system", "content": block})
+    return True
+
+
 def _normalize_arguments(raw: Any) -> dict:
     """厂商返回的 ``function.arguments`` 可能是 JSON 字符串或已解析 dict。"""
     if raw is None or raw == "":
@@ -241,6 +299,12 @@ async def run_agent_loop(
         raise ValueError("run_agent_loop 需要至少一个工具；无工具时应直接走普通 chat")
     tool_index = {t.name: t for t in tools}
     payload = build_tools_payload(tools)
+    # ✅ R158（L9-D6 接线）：工具调用守则注入。任何工具声明了非空
+    #    ``prompt_guidelines`` → 循环开始前注入「工具调用守则」system 消息
+    #    （幂等，见 inject_guidelines）。全空时零行为变化。
+    if inject_guidelines(messages, tools):
+        logger.info("Agent 循环注入工具调用守则（%d 个工具）",
+                    len({t.name for t in tools if t.prompt_guidelines}))
     started = time.monotonic()
     turn = 0
     tool_payloads: list[dict] = []
@@ -305,7 +369,9 @@ __all__ = [
     "STOP_TOOL_STOP",
     "STOP_TURN_LIMIT",
     "ToolCallOutcome",
+    "build_guidelines_system_message",
     "build_tools_payload",
+    "inject_guidelines",
     "normalize_assistant_message",
     "run_agent_loop",
 ]
