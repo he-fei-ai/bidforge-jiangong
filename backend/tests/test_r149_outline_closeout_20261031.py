@@ -54,6 +54,7 @@ from app.services.numbering import (
     renumber_section_body_subheadings,
 )
 from docx import Document
+
 from docx_display import display_texts
 
 # ===========================================================================

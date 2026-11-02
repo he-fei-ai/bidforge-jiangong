@@ -208,6 +208,7 @@ from io import BytesIO
 
 from app.routers.export import _build_docx_sync, _load_heading_styles, _parse_content_blocks
 from docx import Document
+
 from docx_display import display_texts
 
 _CHART_CODE = "graph TD\n A-->B"

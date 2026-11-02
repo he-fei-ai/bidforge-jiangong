@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from app.services.docx_namespace import check_docx_file  # noqa: E402
 from app.services.docx_repair import inspector as insp  # noqa: E402
 from app.services.docx_repair import run_two_round_repair  # noqa: E402
+
 from docx_broken_fixtures import (  # noqa: E402
     ALL_DEFECTS,
     build_broken_docx,
