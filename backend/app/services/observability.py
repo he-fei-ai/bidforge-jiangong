@@ -29,10 +29,14 @@ def make_error_code(module: str, seq: int) -> str:
 
 async def log_event(db, *, level="INFO", module="", event="", trace_id="", span_id="", parent_span_id="", request_id="", task_id="", project_id="", chapter_id="", scheme_id="", duration_ms=None, status="", error_code="", error_layer="", retryable=None, message="", detail=None):
     snap = context_snapshot()
-    trace_id = trace_id or snap["trace_id"]; span_id = span_id or snap["span_id"]
-    parent_span_id = parent_span_id or snap["parent_span_id"]; request_id = request_id or snap["request_id"]
-    task_id = task_id or snap["task_id"]; project_id = project_id or snap["project_id"]
-    chapter_id = chapter_id or snap["chapter_id"]; scheme_id = scheme_id or snap["scheme_id"]
+    trace_id = trace_id or snap["trace_id"]
+    span_id = span_id or snap["span_id"]
+    parent_span_id = parent_span_id or snap["parent_span_id"]
+    request_id = request_id or snap["request_id"]
+    task_id = task_id or snap["task_id"]
+    project_id = project_id or snap["project_id"]
+    chapter_id = chapter_id or snap["chapter_id"]
+    scheme_id = scheme_id or snap["scheme_id"]
     # 采样：DEBUG 级按配置概率丢弃
     try:
         from app.utils.observability import should_sample
@@ -52,30 +56,53 @@ async def log_event(db, *, level="INFO", module="", event="", trace_id="", span_
         logging.getLogger("observability.service").warning("system_logs 写入失败（fail-soft）: %s", e)
 
 async def query_logs(db, *, trace_id="", task_id="", project_id="", scheme_id="", module="", level="", error_code="", keyword="", since="", until="", limit=100, offset=0, order_desc=True):
-    where=[]; params=[]
-    if trace_id: where.append("trace_id = ?"); params.append(trace_id)
-    if task_id: where.append("task_id = ?"); params.append(task_id)
-    if project_id: where.append("project_id = ?"); params.append(project_id)
-    if scheme_id: where.append("scheme_id = ?"); params.append(scheme_id)
-    if module: where.append("module = ?"); params.append(module)
-    if level: where.append("level = ?"); params.append(level.upper())
-    if error_code: where.append("error_code = ?"); params.append(error_code)
+    where=[]
+    params=[]
+    if trace_id:
+        where.append("trace_id = ?")
+        params.append(trace_id)
+    if task_id:
+        where.append("task_id = ?")
+        params.append(task_id)
+    if project_id:
+        where.append("project_id = ?")
+        params.append(project_id)
+    if scheme_id:
+        where.append("scheme_id = ?")
+        params.append(scheme_id)
+    if module:
+        where.append("module = ?")
+        params.append(module)
+    if level:
+        where.append("level = ?")
+        params.append(level.upper())
+    if error_code:
+        where.append("error_code = ?")
+        params.append(error_code)
     if keyword:
-        where.append("(message LIKE ? OR detail LIKE ? OR event LIKE ?)"); params.extend([f"%{keyword}%",f"%{keyword}%",f"%{keyword}%"])
-    if since: where.append("timestamp >= ?"); params.append(since)
-    if until: where.append("timestamp <= ?"); params.append(until)
+        where.append("(message LIKE ? OR detail LIKE ? OR event LIKE ?)")
+        params.extend([f"%{keyword}%",f"%{keyword}%",f"%{keyword}%"])
+    if since:
+        where.append("timestamp >= ?")
+        params.append(since)
+    if until:
+        where.append("timestamp <= ?")
+        params.append(until)
     sql_where = (" WHERE "+" AND ".join(where)) if where else ""
     order = "DESC" if order_desc else "ASC"
     cur = await db.execute(f"SELECT COUNT(*) FROM system_logs{sql_where}", params)
-    row = await cur.fetchone(); total = row[0] if row else 0
+    row = await cur.fetchone()
+    total = row[0] if row else 0
     cur = await db.execute(f"SELECT * FROM system_logs{sql_where} ORDER BY id {order} LIMIT ? OFFSET ?", params+[limit,offset])
-    rows = await cur.fetchall(); cols=[d[0] for d in cur.description] if cur.description else []
+    rows = await cur.fetchall()
+    cols=[d[0] for d in cur.description] if cur.description else []
     items=[dict(zip(cols,r)) for r in rows]
     return {"total":total,"items":items,"limit":limit,"offset":offset}
 
 async def get_trace_tree(db, trace_id):
     cur = await db.execute("SELECT * FROM system_logs WHERE trace_id = ? ORDER BY id ASC", (trace_id,))
-    rows = await cur.fetchall(); cols=[d[0] for d in cur.description] if cur.description else []
+    rows = await cur.fetchall()
+    cols=[d[0] for d in cur.description] if cur.description else []
     items=[dict(zip(cols,r)) for r in rows]
     # 断链判定：parent_span_id 在 trace 内无对应 span_id 的 span 记入 orphan_spans
     # （前端链路视图已消费该键，旧实现未返回 ⇒ 「断链」提示永不出现）。
@@ -84,7 +111,8 @@ async def get_trace_tree(db, trace_id):
 
 async def get_task_timeline(db, task_id):
     cur = await db.execute("SELECT * FROM system_logs WHERE task_id = ? ORDER BY id ASC", (task_id,))
-    rows = await cur.fetchall(); cols=[d[0] for d in cur.description] if cur.description else []
+    rows = await cur.fetchall()
+    cols=[d[0] for d in cur.description] if cur.description else []
     items=[dict(zip(cols,r)) for r in rows]
     return {"task_id":task_id,"count":len(items),"items":items}
 
@@ -92,13 +120,16 @@ async def export_logs(db, fmt="json", **kw):
     res = await query_logs(db, limit=10000, **kw)
     items = res["items"]
     if fmt == "csv":
-        if not items: return ""
+        if not items:
+            return ""
         cols = list(items[0].keys())
         lines = [",".join(cols)]
         for it in items:
             vals=[]
             for c in cols:
-                v=it.get(c); s="" if v is None else str(v).replace('"','""'); vals.append('"'+s+'"')
+                v=it.get(c)
+                s="" if v is None else str(v).replace('"','""')
+                vals.append('"'+s+'"')
             lines.append(",".join(vals))
         return "\n".join(lines)
     return __import__("json").dumps(items, ensure_ascii=False, default=str)
@@ -132,22 +163,26 @@ async def get_metrics(db, *, days=7):
     params = [f"-{int(days)} days"]
     # 总览
     cur = await db.execute(f"SELECT COUNT(*) FROM system_logs{where}", params)
-    row = await cur.fetchone(); total = row[0] if row else 0
+    row = await cur.fetchone()
+    total = row[0] if row else 0
     cur = await db.execute(f"SELECT level, COUNT(*) FROM system_logs{where} GROUP BY level", params)
     by_level = {r[0]: r[1] for r in (await cur.fetchall())}
     # 模块维度
     cur = await db.execute(f"SELECT module, COUNT(*), SUM(CASE WHEN level IN ('ERROR','FATAL') THEN 1 ELSE 0 END) FROM system_logs{where} GROUP BY module", params)
     modules = []
     for r in await cur.fetchall():
-        cnt = r[1] or 0; errs = r[2] or 0
+        cnt = r[1] or 0
+        errs = r[2] or 0
         modules.append({"module": r[0] or "", "count": cnt, "errors": errs,
                         "success_rate": round((cnt - errs) / cnt, 4) if cnt else 1.0})
     # 耗时分布
     cur = await db.execute(f"SELECT duration_ms FROM system_logs{where} AND duration_ms IS NOT NULL", params)
     durs = [r[0] for r in await cur.fetchall() if r[0] is not None]
     def pct(p):
-        if not durs: return 0
-        s = sorted(durs); idx = min(len(s)-1, int(len(s)*p))
+        if not durs:
+            return 0
+        s = sorted(durs)
+        idx = min(len(s)-1, int(len(s)*p))
         return round(s[idx], 2)
     latency = {"p50": pct(0.5), "p95": pct(0.95), "p99": pct(0.99), "count": len(durs)}
     # 错误码 TOP10
