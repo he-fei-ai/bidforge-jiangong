@@ -67,6 +67,9 @@ backend/*.txt
 backend/*.ps1.log
 backend/*.err
 backend/*.out
+# 例外：依赖清单必须入库（否则全新 clone / CI 无法 pip install -r）
+!backend/requirements.txt
+!backend/requirements-ocr.txt
 # backend 根目录下所有一次性调试脚本 / 临时文件
 backend/check_db.py
 backend/_*
