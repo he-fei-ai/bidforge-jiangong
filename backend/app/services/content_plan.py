@@ -23,6 +23,14 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+#: 单章编排输出的 max_tokens 上限（✅ R164 · 2026-11-02）。
+#: 规模依据（对应 ``content_plan_user`` 的严格 JSON 输出契约）：
+#: writing_focus（1-2 句 ≈ 120 字）+ knowledge_names / fact_titles 两组候选名
+#: + table_purpose（≈ 60 字）+ JSON 结构开销；中文按 ~1.5 token/字 估算约 800，
+#: 取 1024 留安全余量。原值 600 会截断成半截 JSON → 每章必然降级（实测日志
+#: 108 次「回退为无编排」，修复两轮亦 100% 失败）。
+CONTENT_PLAN_MAX_TOKENS = 1024
+
 
 @dataclass
 class ContentPlanData:
@@ -281,6 +289,32 @@ def resolve_selected_fact_rows(
     return out
 
 
+def build_content_plan_validator(
+    knowledge_pool: list[str] | None = None,
+    fact_pool: list[str] | None = None,
+):
+    """把 :meth:`ContentPlanData.validate` 适配成 ``json_response`` 的 validate_fn。
+
+    ``validate_fn`` 约定返回「问题清单」（空列表 = 通过）。编排是**软建议**，
+    字段级偏差（缺字段 / 类型不符）由 ``validate`` 自身兜底规整，不应让整份编排
+    作废；因此这里只拦「顶层不是 JSON 对象」这类无法规整的产物。
+
+    返回的函数即 ``collect_json_response_with_chat`` 所需的 ``validate_fn``。
+    """
+
+    def _validate(obj) -> list[str]:
+        if not isinstance(obj, dict):
+            return [
+                "顶层必须是 JSON 对象（含 writing_focus / knowledge_names / "
+                "fact_titles / table_needed / table_purpose）"
+            ]
+        # 复用唯一校验实现：规整池外条目 / 类型兜底（问题不单独上报）
+        ContentPlanData.validate(obj, knowledge_pool=knowledge_pool, fact_pool=fact_pool)
+        return []
+
+    return _validate
+
+
 async def plan_section_content(
     chat_fn,
     *,
@@ -355,10 +389,15 @@ async def plan_section_content(
         obj, _raw = await collect_json_response_with_chat(
             chat_fn,
             messages,
-            validate_fn=None,
+            validate_fn=build_content_plan_validator(knowledge_names, fact_titles),
             scene="content_plan",
-            max_tokens=600,
-            json_mode=False,
+            max_tokens=CONTENT_PLAN_MAX_TOKENS,
+            # ✅ R164：提示词要求「仅输出严格 JSON」，故开启 JSON 模式；
+            # 校验器指向 ContentPlanData.validate，让非法产物走定向修复而非静默降级。
+            json_mode=True,
+            # ✅ R164：编排是加法式软建议，失败即回退、不阻断正文；修复轮实测
+            # 0 成功率（日志中 36/36 两轮均失败），不再消耗 2 轮预算空转。
+            max_retries=0,
         )
         return ContentPlanData.validate(
             obj, knowledge_pool=knowledge_names, fact_pool=fact_titles

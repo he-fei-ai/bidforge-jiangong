@@ -71,6 +71,11 @@
 - **Node.js 20+**（含 npm）
 - **Windows 10/11** 或 Linux/macOS
 
+可选依赖（缺失时对应通道不可用，相关用例自动 skip，不阻塞主流程）：
+
+- `matplotlib`：公式转 PNG 降级通道（LaTeX 公式无法以原生公式写入时的兜底）
+- `pymupdf`：扫描件 PDF 的 OCR / 文本抽取通道
+
 ### 一键启动（Windows，推荐）
 
 ```bash
@@ -90,7 +95,7 @@ python -m uvicorn app.main:app \
   --reload-exclude *.pytest_cache* \
   --reload-exclude *__pycache__* \
   --reload-exclude *.pt_* \
-  --host 0.0.0.0 --port 8000
+  --host 0.0.0.0 --port 8001
 
 # 前端
 cd frontend
@@ -100,8 +105,8 @@ npm run dev    # Vite dev server at :5175
 
 启动完成后：
 - 前端页面：<http://localhost:5175>
-- 后端 API：<http://localhost:8000>
-- API 文档：<http://localhost:8000/docs>
+- 后端 API：<http://localhost:8001>
+- API 文档：<http://localhost:8001/docs>
 
 > ⚠️ **必须**带 `--reload-exclude`：pytest 的 `.pytest_cache / __pycache__ / .pt_*` 会触发 watchfiles 重载风暴，占用 `logs/backend.log` 句柄导致日志冻结（2026-09-23 事故）。
 
@@ -138,7 +143,7 @@ npm run dev    # Vite dev server at :5175
 │   │   ├── middleware.py           # ApiAuthMiddleware
 │   │   ├── main.py                 # 应用入口
 │   │   └── config.py               # pydantic-settings 配置（APP_VERSION = "5.3.0"）
-│   ├── tests/                      # 167 个 pytest 文件
+│   ├── tests/                      # 477 个 pytest 文件
 │   ├── requirements.txt
 │   ├── requirements-ocr.txt        # 可选：扫描件 OCR
 │   └── pytest.ini
@@ -150,7 +155,7 @@ npm run dev    # Vite dev server at :5175
 │   │   ├── api/index.ts            # axios + 19 个按业务域分组的 API 集合 + sseFetch
 │   │   ├── utils/                  # 派生纯函数层
 │   │   ├── types/                  # 前后端类型契约
-│   │   └── tests/                  # 46 个 vitest 文件
+│   │   └── tests/                  # 91 个 vitest 文件
 │   └── package.json
 ├── chart-gap-filler/               # 独立图表补全子项目
 ├── docs/                           # 核心文档（产品需求/技术架构/编译计划书）与专项报告
@@ -214,11 +219,11 @@ npm run dev    # Vite dev server at :5175
 
 ```bash
 cd backend
-python -m pytest tests/ -q
+python -m pytest tests -q --continue-on-collection-errors
 ```
 
-- **2026-09-26 基线**：**2944 passed, 4 skipped, 3 xfailed**
-- 167 个测试文件
+- **2026-11-02 基线**：**10643 passed, 33 skipped, 1 xfailed**（0 failed / 0 error）
+- 477 个 pytest 测试文件（`Get-ChildItem tests -Filter test_*.py -File` 统计）
 
 专项：
 
@@ -244,12 +249,12 @@ python -m pytest tests/test_facts_classification.py tests/test_scheme_classifica
 
 ```bash
 cd frontend
-npm run test    # vitest run，668 用例
+npm run test    # vitest run，1523 用例
 npm run build   # tsc && vite build（类型检查 + 打包）
 ```
 
-- **2026-09-26 基线**：**668 用例全通过**
-- 46 个 vitest 文件
+- **2026-11-02 基线**：**1523 用例全通过**
+- 91 个 vitest 文件
 
 ### 图表子项目
 
@@ -306,7 +311,7 @@ python -m pytest tests/ -x -q
 ### Q1：端口被占用
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File kill_port.ps1 -Ports 8000,5175
+powershell -NoProfile -ExecutionPolicy Bypass -File kill_port.ps1 -Ports 8001,5175
 ```
 
 `uvicorn --reload` 的监听 socket 由父进程创建、worker 子进程继承句柄。父进程一死，`netstat` 仍会报死 PID 为占用者，`taskkill /PID <死 PID>` 报「找不到进程」，端口却长期 LISTENING。`kill_port.ps1` 会递归找出存活后代再杀。
@@ -315,7 +320,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File kill_port.ps1 -Ports 8000,51
 
 **先怀疑日志系统冻结**，不是业务代码 bug：
 1. 看 `logs/backend.log` 的 mtime
-2. 查端口 8000 归属进程
+2. 查端口 8001 归属进程
 3. `py-spy dump` 或 `tasklist /v` 查僵尸 pytest
 4. 清理僵尸 pytest → 重启 uvicorn
 

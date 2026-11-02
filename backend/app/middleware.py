@@ -11,6 +11,43 @@ from app.utils.log_context import clear_context, new_trace_id, set_context
 
 logger = logging.getLogger("http")
 
+# ✅ R142：测试/验证进程跳过 system_logs DB 写（HTTP span）。
+#    与 main.py 的 _should_skip_file_log 同口径：pytest 进程 / TestClient 写测试流量
+#    不该污染生产 system_logs；逃生开关 ALLOW_SYSTEM_LOG_IN_TESTCLIENT=1 供调试脚本。
+def _should_skip_obs_db_write() -> bool:
+    import os as _os
+    import sys as _sys
+    if _os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in _sys.modules:
+        return True
+    if "starlette.testclient" in _sys.modules:
+        if _os.environ.get("ALLOW_SYSTEM_LOG_IN_TESTCLIENT") == "1":
+            return False
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# fire-and-forget 观测任务保活：模块级强引用避免任务被 GC；done 回调统一
+# 记录异常并清理引用（正常完成即移除，不长期累积）。
+# ---------------------------------------------------------------------------
+_OBS_TASKS: set = set()
+
+
+def _track_obs_task(task, label: str) -> None:
+    """登记观测写入任务：强引用保活 + 异常留痕 + 完成后清理。"""
+    _OBS_TASKS.add(task)
+
+    def _on_done(_task) -> None:
+        _OBS_TASKS.discard(_task)
+        if _task.cancelled():
+            return
+        _exc = _task.exception()
+        if _exc is not None:
+            logger.error("观测任务未捕获异常（%s）: %r", label, _exc, exc_info=_exc)
+
+    task.add_done_callback(_on_done)
+
+
 # 无需鉴权的路径（精确匹配）。仅保留健康检查与接口文档：
 #   - /health 供探活与前端启动自检使用；
 #   - /docs、/redoc、/openapi.json 供内网排障查阅，本身不含业务数据。
@@ -165,13 +202,76 @@ class RequestLogMiddleware:
 
         try:
             await self.app(scope, receive, send_wrapper)
-        except Exception:
+        except Exception as _exc:
             logger.exception("请求异常 %s %s [trace=%s]", method, path, trace_id)
+            # ✅ R142-B（2026-10-29 · 错误标准化）：未处理异常统一落入 system_logs
+            #    （event="error"、error_code=GEN_500、error_layer="api"），fire-and-forget
+            #    不阻塞主流程、仍 re-raise（响应行为零变化）。带 trace_id 便于按调用树还原。
+            #    ⚠️ 捕获异常对象的纯值（_exc_type/_exc_str/_tb_str）——CPython 在 except
+            #    块结束时清除异常变量，延迟任务里引用 _exc 会抛 UnboundLocalError。
+            try:
+                if path.startswith("/api/v1/") and not path.startswith("/api/v1/logs") \
+                        and not _should_skip_obs_db_write():
+                    import asyncio
+                    import traceback as _tb
+                    _exc_type = type(_exc).__name__
+                    _exc_str = str(_exc)[:500]
+                    _tb_str = "".join(_tb.format_exception(
+                        type(_exc), _exc, _exc.__traceback__))[:2000]
+
+                    async def _write_error_span():
+                        try:
+                            from app.db import get_conn
+                            from app.services.observability import log_error
+                            _conn = await get_conn()
+                            await log_error(
+                                _conn, error_code="GEN_500", error_layer="api",
+                                retryable=False, trace_id=trace_id,
+                                message=f"{method} {path} 未处理异常",
+                                detail={"exc_type": _exc_type,
+                                        "exc": _exc_str,
+                                        "traceback": _tb_str})
+                        except Exception as _e:  # noqa: BLE001 - fail-soft
+                            logger.warning("_write_error_span fail-soft: %s", _e)
+                    _track_obs_task(
+                        asyncio.create_task(_write_error_span()),
+                        f"error_span:{trace_id}")
+            except Exception:  # noqa: BLE001 - fail-soft
+                pass
             raise
         cost = (time.time() - start) * 1000
         if path not in ("/api/v1/health",):
             logger.info("%s %s -> %s (%.0fms) [trace=%s]", method, path,
                         status_code, cost, trace_id)
+            # ✅ R142（2026-10-28 · 全链路追踪）：HTTP 请求即调用树根 span。
+            #    写入 system_logs 供「按 trace_id 返回完整调用链」重建；fire-and-forget
+            #    不阻塞主流程（spec：日志写入不得阻塞主流程）。只记业务 API，
+            #    跳过 /logs 自身与 /health（避免查询自身的反馈循环与探活噪声）。
+            if path.startswith("/api/v1/") and not path.startswith("/api/v1/logs") \
+                    and path != "/api/v1/health":
+                try:
+                    import asyncio
+
+                    async def _write_http_span():
+                        try:
+                            # ✅ R142：测试/验证进程（pytest/TestClient）跳过 DB 写，
+                            #    避免把测试流量写进生产 system_logs（与文件日志守卫同口径）。
+                            if _should_skip_obs_db_write():
+                                return
+                            from app.db import get_conn
+                            from app.services.observability import record_http_request
+                            _conn = await get_conn()
+                            await record_http_request(
+                                _conn, trace_id=trace_id, method=method, path=path,
+                                status_code=status_code, duration_ms=cost,
+                                client=(scope.get("client") or ("?",))[0])
+                        except Exception:  # noqa: BLE001 - fail-soft：可观测性失败不影响请求
+                            pass
+                    _track_obs_task(
+                        asyncio.create_task(_write_http_span()),
+                        f"http_span:{trace_id}")
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 def setup_middleware(app):

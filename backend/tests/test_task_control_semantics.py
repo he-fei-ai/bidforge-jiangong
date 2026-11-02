@@ -98,7 +98,11 @@ class TestPauseLedger:
         await asyncio.sleep(0.1)
         request_control(tid, "resume")
         request_control(tid, "resume")
-        assert get_task_paused_ms(tid) >= 100
+        # 阈值取标称 100ms 的 80%：Windows 的 asyncio 时钟粒度下，0.1s sleep
+        # 实测可落到 93ms（满负载全套跑时已复现），写死 100 会变成计时抖动。
+        # 80ms 仍能检出「暂停段未结算 / 重复 resume 清零 / 负值」三类语义回归，
+        # 仅放过纯计时误差。
+        assert get_task_paused_ms(tid) >= 80
 
     async def test_unknown_task_returns_none_elapsed(self, db_conn):
         assert get_task_elapsed_ms("nonexistent") is None

@@ -110,6 +110,8 @@ def test_empty_content_diagnostics():
 
 def test_no_extension_pdf_sniffed_and_parsed():
     """B-1：无扩展名的 PDF 应通过文件头嗅探正确解析（而非当文本乱码入库）。"""
+    # 可选依赖保护：无文本层的 PDF 会走 OCR 兜底，需 PyMuPDF 渲染页面
+    pytest.importorskip("pymupdf", reason="未安装 PyMuPDF：扫描件 PDF OCR 路径不可用")
     content = b"%PDF-1.4\n1 0 obj<<>>endobj\n%%EOF"
     text, diag = parse_file_content_ex(content, "招标文件")  # 无扩展名
     assert diag["file_type"] == "pdf"

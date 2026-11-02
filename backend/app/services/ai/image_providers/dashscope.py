@@ -15,6 +15,15 @@ from .base import ImageProviderAdapter, build_endpoint
 
 logger = logging.getLogger(__name__)
 
+#: 模型族 → 请求体中**不被支持**的可选字段（黑名单）。
+#: ✅ R157（2026-11-02）：实测 qwen-image-3.x 走「文生图队列」，带 OpenAI 风格的
+#: ``quality`` 会直接 HTTP 400「quality 不是文生图队列支持的字段」。
+#: 未登记的模型族沿用全量字段（与本类旧行为逐字一致），新增模型族只需在此登记
+#: 一行，无需改动 ``generate`` 主流程。
+_MODEL_UNSUPPORTED_FIELDS: dict[str, frozenset[str]] = {
+    "qwen-image-3": frozenset({"quality"}),
+}
+
 
 class DashScopeAdapter(ImageProviderAdapter):
     """阿里云百炼图像生成适配器"""
@@ -45,6 +54,19 @@ class DashScopeAdapter(ImageProviderAdapter):
 
         return os.getenv("DASHSCOPE_API_KEY", "")
 
+    @classmethod
+    def _unsupported_fields(cls, model: str) -> frozenset[str]:
+        """按模型族能力表返回该模型**不支持**的可选请求字段。
+
+        子串匹配（``qwen-image-3`` 覆盖 qwen-image-3.0 / -3.0-pro 等变体），
+        未命中任何家族时返回空集 → 保持全量字段的旧行为。
+        """
+        fields: set[str] = set()
+        for family, unsupported in _MODEL_UNSUPPORTED_FIELDS.items():
+            if family in (model or ""):
+                fields |= unsupported
+        return frozenset(fields)
+
     async def generate(
         self,
         prompt: str,
@@ -71,6 +93,11 @@ class DashScopeAdapter(ImageProviderAdapter):
             "size": size or self.default_size,
             "quality": "standard",
         }
+
+        # ✅ R157：按模型能力表剔除该模型不支持的字段
+        #    （qwen-image-3.x 文生图队列不支持 quality，见 _MODEL_UNSUPPORTED_FIELDS）
+        for _field in self._unsupported_fields(use_model):
+            payload.pop(_field, None)
 
         # Qwen-Image-3.0 增强：支持更长 prompt 和更丰富的风格参数
         if "qwen-image-3" in use_model:
@@ -135,7 +162,19 @@ class DashScopeAdapter(ImageProviderAdapter):
                             }
                     else:
                         error_text = (await response.text())[:200]
-                        error_msg = f"HTTP {response.status}: {error_text}"
+                        if response.status == 404 and "model_not_found" in error_text:
+                            # ✅ R157：模型未开通属**配置错误**（非瞬时抖动，重试无益），
+                            #    显式 ERROR 并在消息中点名应调整的配置项，避免只留一条
+                            #    可被上层「所有 Provider 均失败」淹没的通用日志。
+                            error_msg = (
+                                f"HTTP 404 model_not_found: 模型 {use_model} 在当前账号"
+                                "分组不可用；请调整配置项 IMAGE_MODEL"
+                                "（settings.image_model / model_configs.image_model），"
+                                "或改用该分组已开通的型号。"
+                                f"原始响应: {error_text}"
+                            )
+                        else:
+                            error_msg = f"HTTP {response.status}: {error_text}"
                         logger.error(error_msg)
                         return {
                             "success": False,

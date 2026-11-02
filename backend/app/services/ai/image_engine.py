@@ -538,6 +538,44 @@ def repair_mermaid(code: str) -> str:
 #    靠 /prompts API），collect_json_response / AIMessage 仍由存留函数消费。
 
 
+# ---------------------------------------------------------------------------
+# qwen_image 伪 Provider（dashscope 适配器 + qwen-image 模型）的启用判据。
+# 型号一律从既有配置读取（IMAGE_MODEL / model_configs.image_model），不再硬编码；
+# 仅当配置值属于 qwen-image 家族时入降级链——未配置或配置为他家模型时跳过，
+# 避免拿别家型号去打 dashscope（必然 model_not_found）。家族用前缀判断，
+# 新增同家族型号只需改配置，无需改代码。
+# ---------------------------------------------------------------------------
+_QWEN_IMAGE_MODEL_PREFIXES: tuple[str, ...] = ("qwen-image", "qwen_image")
+_IMAGE_FALLBACK_CHAIN: tuple[str, ...] = ("qwen_image", "dashscope", "agnes")
+
+
+def _resolve_qwen_image_model(cfg_model: str | None) -> str:
+    """返回可用于 qwen_image 伪 Provider 的模型名；非 qwen-image 家族返回空串。"""
+    _model = (cfg_model or "").strip()
+    if not _model:
+        return ""
+    _low = _model.lower()
+    if any(_low.startswith(_prefix) for _prefix in _QWEN_IMAGE_MODEL_PREFIXES):
+        return _model
+    return ""
+
+
+def _build_image_provider_queue(provider_name: str, qwen_image_model: str) -> list[str]:
+    """构造图像降级链：主 Provider →（qwen_image）→ dashscope → agnes。
+
+    非降级链内的 provider_name 作为第一优先级；qwen_image 是伪 Provider
+    （并非注册 ID），仅当配置了 qwen-image 家族模型时才入链。
+    """
+    _queue: list[str] = []
+    if provider_name and provider_name not in _IMAGE_FALLBACK_CHAIN:
+        _queue.append(provider_name)
+    for _candidate in _IMAGE_FALLBACK_CHAIN:
+        if _candidate == "qwen_image" and not qwen_image_model:
+            continue
+        _queue.append(_candidate)
+    return _queue
+
+
 async def generate_illustration_image(
     provider: Any,
     prompt: str,
@@ -548,7 +586,8 @@ async def generate_illustration_image(
 ) -> str | None:
     """使用配置的图像模型提供商生成实际图片
 
-    支持 Provider 降级链：主 Provider → qwen_image → dashscope → agnes。
+    支持 Provider 降级链：主 Provider → qwen_image（仅当配置了 qwen-image
+    家族模型时）→ dashscope → agnes。
     当主 Provider 调用失败时，自动尝试下一个备选 Provider。
     全部失败则返回 None，不阻塞调用方。
 
@@ -630,14 +669,13 @@ async def generate_illustration_image(
         _cfg_default_size = "2K"
         _cfg_price = 0.0
 
-    # 降级链定义：主 Provider → 备选1 → 备选2
-    _FALLBACK_CHAIN = ["qwen_image", "dashscope", "agnes"]
-
-    # 如果传入的 provider_name 不在降级链中，将其作为第一优先级
-    _provider_queue: list[str] = []
-    if provider_name and provider_name not in _FALLBACK_CHAIN:
-        _provider_queue.append(provider_name)
-    _provider_queue.extend(_FALLBACK_CHAIN)
+    # 降级链：qwen_image 是否入链由既有配置（IMAGE_MODEL）判断，未配置则跳过
+    _qwen_image_model = _resolve_qwen_image_model(_cfg_model)
+    _provider_queue = _build_image_provider_queue(provider_name, _qwen_image_model)
+    if not _qwen_image_model:
+        logger.info(
+            "generate_illustration_image: image_model=%r 非 qwen-image 家族模型，"
+            "qwen_image 伪 Provider 不进入降级链", _cfg_model)
 
     # 已尝试过的 provider（避免重复）
     _tried_providers: set[str] = set()
@@ -684,12 +722,13 @@ async def generate_illustration_image(
 
         try:
             # --- 处理特殊 provider: qwen_image ---
-            # qwen_image 不是注册的 provider ID，它使用 dashscope 适配器 + qwen-image 模型
+            # qwen_image 不是注册的 provider ID，它使用 dashscope 适配器 +
+            # 配置中的 qwen-image 模型（模型名不写死，随 IMAGE_MODEL 变化）
             _actual_provider = _pname
             _model_override = None
             if _pname == "qwen_image":
                 _actual_provider = "dashscope"
-                _model_override = "qwen-image-3.0-pro"
+                _model_override = _qwen_image_model
 
             # 从图像配置构建适配器配置（优先图像 key，而非文本模型 key）
             _adapter_config = {
@@ -715,9 +754,6 @@ async def generate_illustration_image(
                     "generate_illustration_image: Provider '%s' 无 API Key，跳过（不发请求）",
                     _pname)
                 _last_error = f"Provider '{_pname}' 未配置 API Key"
-                continue
-
-            # 尺寸语义自适应：
                 continue
 
             # 尺寸语义自适应：
