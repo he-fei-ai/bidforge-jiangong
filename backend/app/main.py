@@ -18,8 +18,10 @@ from app.routers import (
     content_agent,
     doc_pipeline,
     export,
+    export_flow,
     global_facts,
     knowledge,
+    observability,
     outline_library,
     projects,
     prompts,
@@ -62,6 +64,23 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+# R-LOG: 可选结构化 JSON 日志 handler（默认关闭，向后兼容）。
+try:
+    if getattr(settings, "structured_log_enabled", False):
+        from pathlib import Path
+
+        from app.config import LOGS_DIR as _LOGS_DIR
+        from app.utils.log_context import TraceContextFilter
+        from app.utils.observability import AsyncStructuredFileHandler, StructuredJsonFormatter
+        _sdir = getattr(settings, "structured_log_dir", "") or str(_LOGS_DIR / "structured")
+        _sh = AsyncStructuredFileHandler(Path(_sdir), formatter=StructuredJsonFormatter())
+        logging.getLogger().addHandler(_sh)
+        for _h in logging.getLogger().handlers:
+            if not any(isinstance(f, TraceContextFilter) for f in _h.filters):
+                _h.addFilter(TraceContextFilter())
+except Exception as _e:  # noqa: BLE001
+    logging.getLogger("observability").warning("结构化日志 handler 安装失败（fail-soft）: %s", _e)
+
 # ✅ 2026-09-21：运行日志落盘（logs/backend.log，5MB × 3 轮转）。
 #    此前只有控制台输出——后台 cmd 窗口一关，调用痕迹/失败堆栈全部丢失，
 #    事后无法做调用次数与失败归因分析（logs/ 目录在编译计划书中规划但从未接线）。
@@ -187,6 +206,12 @@ async def lifespan(app: FastAPI):
     logger.info("正在初始化数据库...")
     await init_db()
     logger.info("数据库初始化完成")
+    # ✅ R142-B：启动异步批量 system_logs 缓冲器（需求四：异步写入不阻塞主流程）。
+    try:
+        from app.services.observability import system_log_buffer
+        system_log_buffer.start()
+    except Exception as e:  # noqa: BLE001 - 可观测性失败绝不影响启动
+        logger.warning("system_logs 缓冲器启动失败（fail-soft）: %s", e)
 
     # ✅ 启动即声明鉴权状态：避免"以为开了鉴权其实没开"（API_AUTH_TOKEN 为空时告警）
     try:
@@ -412,6 +437,12 @@ async def lifespan(app: FastAPI):
         logger.warning("关闭 AI HTTP 连接池失败（不影响关闭）: %s", e)
 
     logger.info("正在关闭数据库...")
+    # ✅ R142-B：先停缓冲器（把剩余内存事件落盘）再关库。
+    try:
+        from app.services.observability import system_log_buffer
+        system_log_buffer.stop()
+    except Exception as e:  # noqa: BLE001 - 关闭失败不影响关库
+        logger.warning("system_logs 缓冲器停止失败（fail-soft）: %s", e)
     await close_db()
 
     # ✅ 关闭即时清理：回收应用自有的临时转换脚本 / 锁文件（best-effort，失败仅告警）。
@@ -437,8 +468,9 @@ setup_middleware(app)
 
 for r in (projects, schemes, sections, sse_handlers,
           outline_library, upload_outline, global_facts,
-          compliance, export, ai_config, charts, scheme_catalog,
+          compliance, export, export_flow, ai_config, charts, scheme_catalog,
           knowledge, consistency_repair, content_agent, review,
+          observability,
           review_autofix, system,
           bid_analysis, doc_pipeline, prompts):
     app.include_router(r.router)
