@@ -6,7 +6,7 @@ import http from "node:http";
  * 自定义中间件：把 /api 路径的 OPTIONS CORS 预检转发到后端
  */
 function corsPreflightProxy(): Connect.NextHandleFunction {
-  const BACKEND = "http://localhost:8000";
+  const BACKEND = "http://localhost:8001";
   return (req, res, next) => {
     if (req.method === "OPTIONS" && req.url?.startsWith("/api")) {
       const url = new URL(req.url, BACKEND);
@@ -62,11 +62,11 @@ export default defineConfig({
     host: true,
     proxy: {
       // 前端 F-功能：提示词指标 / 硬编码同步挂根前缀（/system、/admin/prompts），
-      // 不在 /api/v1 命名空间，需单独代理到后端 8000。
-      "/system": { target: "http://localhost:8000", changeOrigin: true },
-      "/admin": { target: "http://localhost:8000", changeOrigin: true },
+      // 不在 /api/v1 命名空间，需单独代理到后端 8001。
+      "/system": { target: "http://localhost:8001", changeOrigin: true },
+      "/admin": { target: "http://localhost:8001", changeOrigin: true },
       "/api": {
-        target: "http://localhost:8000",
+        target: "http://localhost:8001",
         changeOrigin: true,
         // SSE 长连接配置：10分钟超时 + ws支持 + 禁止代理缓冲
         timeout: 600_000,
@@ -106,8 +106,8 @@ export default defineConfig({
             const e = err as NodeJS.ErrnoException;
             response.end(
               JSON.stringify({
-                detail: "后端服务不可达，请确认 8000 端口已启动",
-                target: "http://localhost:8000",
+                detail: "后端服务不可达，请确认 8001 端口已启动",
+                target: "http://localhost:8001",
                 reason: [e?.code, e?.message].filter(Boolean).join(" ") || String(err),
               })
             );

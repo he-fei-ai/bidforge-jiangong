@@ -248,6 +248,12 @@ export const sectionsApi = {
   /** 目录 AI 自然语言调整：**不落库**，返回待确认新树 + 变更总结，确认后仍走 saveOutline */
   adjustOutline: (schemeId: string, instruction: string) =>
     api.post(`/schemes/${schemeId}/sections/adjust-outline`, { instruction }),
+  // ✅ R151 引入 / R162 标准翻新（2026-11-01）目录标准化修复（三级叶子标准）：把不合规目录
+  //    （L5 / L1、L2 子节点数量 3~5 不达标）AI 补齐/精简到合规。
+  //    **不落库**，返回待确认新树 + 违规清单，确认后仍走 saveOutline。
+  standardizeOutline: (schemeId: string) =>
+    api.post(`/schemes/${schemeId}/sections/standardize-outline`, null,
+      { timeout: 300000 }),
   // ✅ 编号一致性（2026-10-04 接线）：后端 4 个端点早已实现（校验 / 修复 /
   //    版本列表 / 回滚），此前前端零封装 —— 用户无从发现「落库正文子标题编号
   //    与当前目录编号漂移」（D4 类问题），导出前也没有自救入口。
@@ -874,6 +880,21 @@ export const exportApi = {
     remove: (schemeId: string, presetId: string) =>
       api.delete(`/schemes/${schemeId}/export/presets/${presetId}`),
   },
+  // ✅ R147（2026-10-30）：两轮次导出（第一轮初稿 + 第二轮检查修复 → 终稿下载）。
+  //    任务化：POST 返回 202 {task_id}，进度经 SSE /export/flow/{task_id}/events 推送
+  //    （初稿 0-50% + 修复 50-100%，修复项逐条实时滚动），终稿走 /flow/{task_id}/download。
+  docxV2: (schemeId: string, config: any, chartImages?: { chart_type: string; mermaid_code: string; png: string }[], signal?: AbortSignal) =>
+    api.post(
+      `/schemes/${schemeId}/export/docx/v2`,
+      { config, chart_images: chartImages || [] },
+      { timeout: 30000, signal }
+    ),
+  flowDownload: (schemeId: string, taskId: string, signal?: AbortSignal) =>
+    api.get(`/schemes/${schemeId}/export/flow/${taskId}/download`, {
+      responseType: "blob", timeout: 600000, signal,
+    }),
+  flowCancel: (schemeId: string, taskId: string) =>
+    api.post(`/schemes/${schemeId}/export/flow/${taskId}/cancel`, null, { timeout: 10000 }),
 };
 
 // 专项方案清单
@@ -1077,6 +1098,10 @@ export interface PromptMetricsSnapshot {
   token_budget_truncated: Record<string, number>;
   repair_triggered: Record<string, number>;
   ai_failure_by_scene: Record<string, number>;
+  /** R168：调用方漏传的变量（按变量名计数） */
+  missing_variables_total: Record<string, number>;
+  /** R168：渲染后残留、未被解析的占位符（按变量名计数） */
+  unresolved_placeholders_total: Record<string, number>;
   registered_keys: string[];
 }
 
@@ -1473,5 +1498,16 @@ export async function* sseGetStream(
   }
   if (stoppedBySoftStop) return; // 明确标记：这是主动软关，不是异常
 }
+
+export const logsApi = {
+  list: (params?: Record<string, any>) => api.get("/logs", { params }),
+  trace: (traceId: string) => api.get(`/logs/trace/${traceId}`),
+  task: (taskId: string) => api.get(`/logs/task/${taskId}`),
+  export: (fmt: "json" | "csv" = "json", params?: Record<string, any>) =>
+    api.get("/logs/export", { params: { fmt, ...(params || {}) }, responseType: fmt === "csv" ? "text" : "json" }),
+  cleanup: (keepDays = 30) => api.post("/logs/cleanup", null, { params: { retention_days: keepDays } }),
+  metrics: (days = 7) => api.get("/logs/metrics", { params: { days } }),
+  alerts: (days = 1) => api.get("/logs/alerts", { params: { days } }),
+};
 
 export default api;

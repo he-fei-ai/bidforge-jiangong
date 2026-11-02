@@ -9,7 +9,11 @@
  * 这些逻辑原先散落在巨型组件内联表达式与 useEffect 中，
  * 导致：修改只能靠人肉点页面验证、无边界保护、重构风险高。
  * 抽出来后，组件只做「调用 + 渲染」，逻辑正确性由单测兜底。
+ *
+ * （「零依赖」指不依赖 antd / api 层；utils 内部互引同层纯函数，如 R159 起
+ *   的 DEFAULT_WORD_BUDGET 取自 wordBudgetTiers 镜像。）
  */
+import { DEFAULT_WORD_BUDGET } from "./wordBudgetTiers";
 
 export type DocRecord = {
   id: string;
@@ -387,6 +391,7 @@ export function canShrinkSection(
   // ✅ R66（2026-10-11）：缺省预算兜底 1500→1200，与后端 DEFAULT_WORD_BUDGET
   //    （content_utils，现等于「标准」档）同口径；后端各路由的 `or 1500`
   //    已全部改为该常量，前端若不同步会造成压缩准入两套数。
-  const wb = Number(s.word_budget) || 1200;
+  // ✅ R159：数值改取 utils/wordBudgetTiers 唯一镜像（双向源码锚锁定），字面量绝迹。
+  const wb = Number(s.word_budget) || DEFAULT_WORD_BUDGET;
   return wc > wb * WORD_OVER_RATIO;
 }

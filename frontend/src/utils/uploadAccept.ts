@@ -8,11 +8,15 @@
  *    改动格式只需改这一处 + 同步后端 SUPPORTED_EXTENSIONS。
  *
  * ⚠️ 必须与后端 `file_parser.SUPPORTED_EXTENSIONS` 保持一致：
- *    docx / pdf / md / txt / xlsx / xls / csv / png / jpg / jpeg / bmp / tiff / doc / wps
+ *    docx / pdf / md / txt / xlsx / xls / csv / png / jpg / jpeg / bmp / tiff / tif / doc / wps
+ *
+ * ✅ R136（2026-10-27）：补齐 .tif —— TIFF 的两个官方扩展名（.tif / .tiff）
+ *    此前只放行后者，而多数扫描仪/传真件默认输出 .tif，用户在选择框里
+ *    根本选不到自己的扫描件。后端已同步（file_parser.SUPPORTED_EXTENSIONS）。
  */
 export const UPLOAD_FILE_EXTENSIONS: string[] = [
   "docx", "pdf", "md", "txt", "xlsx", "xls", "csv",
-  "png", "jpg", "jpeg", "bmp", "tiff",
+  "png", "jpg", "jpeg", "bmp", "tiff", "tif",
   "doc", "wps", // 旧版 Word（需本地 Office 组件转换，见后端 legacy_office.py）
 ];
 

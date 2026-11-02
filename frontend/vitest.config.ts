@@ -18,6 +18,11 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "node",
+    // ✅ 2026-10-30：开启 CSS 处理。默认 false 会把一切 CSS 导入（含 `xxx.css?raw`）
+    // 桩成空模块，导致源码级护栏测试（scrollAreaScrollbarEnhance）读不到 index.css。
+    // 影响面：全仓只有 main.tsx 直接 import "./index.css"，无测试链路引用 CSS，
+    // 故开启后仅使 ?raw 导入返回真实文本，不改变任何既有用例行为。
+    css: true,
     // ✅ 全局测试桩（2026-09-22）：补齐 jsdom/Node 缺失的 URL.createObjectURL，
     // 否则导出/下载类用例 vi.spyOn(URL,'createObjectURL') 直接抛错。
     setupFiles: ["./src/tests/setup.ts"],

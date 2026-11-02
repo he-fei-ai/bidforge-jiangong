@@ -700,6 +700,8 @@ export interface AIUsageByProvider {
   success_rate: number | null;
   cache_hit_rate: number | null;
   skipped_count: number;
+  /** ✅ R158：成功调用耗时 P95（秒，最近邻秩法）—— 旧响应无此键（可选） */
+  p95_duration_ok?: number;
 }
 
 /** 按场景聚合行（GET /ai/stats → by_scene） */
@@ -725,11 +727,22 @@ export interface AIUsageSummary {
   days: number;
 }
 
+/** ✅ R158：结构化错误分类行（GET /ai/stats → by_error_class，error_taxonomy 同源） */
+export interface AIUsageErrorClassRow {
+  error_class: string;
+  label: string;
+  failed_calls: number;
+  skipped_calls: number;
+  total: number;
+}
+
 /** GET /ai/stats（days 为 0 时后端整体返回 null） */
 export interface AIUsageStats {
   by_provider: AIUsageByProvider[];
   by_action: { action: string; calls: number; success_count: number }[];
   by_error: { provider_name: string; model: string; err: string; calls: number }[];
+  /** ✅ R158：失败分类统计（旧响应无此键，可选） */
+  by_error_class?: AIUsageErrorClassRow[];
   by_scene: AIUsageByScene[];
   summary: AIUsageSummary;
   daily: { date: string; calls: number; tokens: number; success_count: number }[];

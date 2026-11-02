@@ -631,7 +631,7 @@ function BidAnalysisTab({
   );
 
   return (
-    <div className="scroll-area" style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+    <div className="scroll-area bp-pane-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
       {/* ===== 前置条件：本步依赖「解析提取」产出的纯文本 =====
           2026-09-23 晚：改为 banner 紧凑模式（~32px vs 原 120px），省 ~88px。 */}
       {parsedDocCount === 0 && (

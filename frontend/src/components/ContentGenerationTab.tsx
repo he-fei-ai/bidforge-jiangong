@@ -9,8 +9,17 @@
 import type { ReactNode } from "react";
 import { Button, Card, Divider, InputNumber, Radio, Select, Space, Switch, Tag, Tooltip, Typography } from "antd";
 import { useBreakpoint } from "../utils/ui";
+import { SplitPane } from "./resizable/SplitPane";
+import { RESIZE_NARROW_THRESHOLD } from "./resizable/resizableLayout";
 // F-CONTENT-STANDARD(2026-09-26): 方案默认标准文案（与后端值域同源）
 import { sectionStandardOptionLabel } from "../utils/contentStandard";
+// ✅ R159：四档字数档位前端唯一镜像（真源 backend content_utils.WORD_BUDGET_TIERS）
+import {
+  CUSTOM_TOTAL_BUDGET_DEFAULT,
+  CUSTOM_TOTAL_BUDGET_MAX,
+  CUSTOM_TOTAL_BUDGET_MIN,
+  WORD_BUDGET_OPTIONS,
+} from "../utils/wordBudgetTiers";
 import {
   ArrowRightOutlined, CaretRightOutlined, ClearOutlined, EditOutlined, FileSearchOutlined,
   FontSizeOutlined, InfoCircleOutlined, MinusCircleOutlined, PauseOutlined, PlayCircleOutlined,
@@ -79,19 +88,12 @@ export type ContentGenerationTabProps = {
   children?: ReactNode;
 };
 
-// ✅ R66（2026-10-11）四档字数控制：档位名直传后端 word_budget_tier
-// （真源 backend content_utils.WORD_BUDGET_TIERS = 800/1200/2000/2500），
+// ✅ R66（2026-10-11）四档字数控制：档位名直传后端 word_budget_tier，
 // 每个叶子（三级）章节按档位目标生成；「自定义」保留旧的二级单元总量
 // 智能分配口径（word_budget_override）。
-const WORD_BUDGET_OPTIONS = [
-  { label: "使用目录默认值", value: "default" },
-  { label: "简短 800 字", value: "brief" },
-  { label: "标准 1200 字", value: "standard" },
-  { label: "详细 2000 字", value: "detailed" },
-  { label: "超长 2500 字", value: "ultra" },
-  { label: "自定义", value: "custom" },
-];
-
+// ✅ R159：选项表（含内嵌数值的 label）与自定义档输入区间收敛至
+// utils/wordBudgetTiers 唯一镜像（真源 backend content_utils.WORD_BUDGET_TIERS，
+// 双向源码锚锁定），本组件不再持有字面量副本。
 const SEVERITY_OPTIONS = [
   { label: "仅高危（推荐）", value: "high" },
   { label: "中及以上", value: "medium" },
@@ -99,14 +101,15 @@ const SEVERITY_OPTIONS = [
 ];
 
 export function ContentGenerationTab(p: ContentGenerationTabProps) {
-  const { isPhone } = useBreakpoint();
+  const { isPhone, width } = useBreakpoint();
+  const narrow = width < RESIZE_NARROW_THRESHOLD;
   // 方案默认标准的展示文案（空值/脏数据统一按精准兜底，与后端默认一致）
   const schemeDefaultLabel = sectionStandardOptionLabel("", p.schemeDefault);
-  return (
+  const controlsContent = (
     // 与 UploadParseTab 同一模式：作为 flex Tab 面板内的可滚动内容区，
     // 必须 flex:1 + minHeight:0 + overflowY:auto，否则长内容会被父容器的
     // overflow:hidden 裁掉，底部「章节正文卡片」无法滚动查看。
-    <div className="scroll-area" style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+    <div className="scroll-area bp-pane-scroll" style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
       {/* 第一行：主要操作按钮 */}
       <Space style={{ marginBottom: 8 }} wrap>
         <Button
@@ -252,10 +255,10 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
               {p.wordBudgetOption === "custom" && (
                 <InputNumber
                   size="small"
-                  min={100}
-                  max={20000}
+                  min={CUSTOM_TOTAL_BUDGET_MIN}
+                  max={CUSTOM_TOTAL_BUDGET_MAX}
                   step={100}
-                  value={p.customWordBudget ?? 2000}
+                  value={p.customWordBudget ?? CUSTOM_TOTAL_BUDGET_DEFAULT}
                   onChange={p.onCustomWordBudgetChange}
                   style={{ width: 100 }}
                 />
@@ -415,8 +418,33 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
         </Text>
       </div>
 
+    </div>
+  );
+
+  // 没有下区工作台内容 → 保持旧单列滚动布局（既有调用方零变化）
+  if (!p.children) return controlsContent;
+
+  // ✅ R146：上区「任务/配置控制台」↔ 下区「章节正文工作台」上下可拖拽，
+  //    两栏各自独立滚动；分隔条双击恢复默认，比例存 LocalStorage。
+  const workbenchContent = (
+    <div className="scroll-area bp-pane-scroll" style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
       {p.children}
     </div>
+  );
+
+  return (
+    <SplitPane
+      direction="vertical"
+      storageKey="wb-tab-content"
+      defaultRatio={0.5}
+      min={220}
+      minSecond={240}
+      disabled={narrow}
+      handleAriaLabel="调整正文生成控制台与章节工作台的高度（双击恢复默认）"
+      style={{ flex: 1, minHeight: 0, width: "100%" }}
+      first={controlsContent}
+      second={workbenchContent}
+    />
   );
 }
 

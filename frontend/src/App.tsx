@@ -15,6 +15,7 @@ const AIConfigPage = lazy(() => import("./pages/AIConfigPage"));
 const PromptEditorPage = lazy(() => import("./pages/PromptEditorPage"));
 const PromptMetricsPage = lazy(() => import("./pages/PromptMetricsPage"));
 const SecuritySettingsPage = lazy(() => import("./pages/SecuritySettingsPage"));
+const LogViewerPage = lazy(() => import("./pages/LogViewerPage"));
 
 /** 路由切换时的占位骨架（antd 5 要求 Spin 有包裹子元素才能显示 tip） */
 function RouteFallback() {
@@ -48,6 +49,7 @@ export default function App() {
             <Route path="/settings/prompts" element={<PromptEditorPage />} />
             <Route path="/settings/prompt-metrics" element={<PromptMetricsPage />} />
             <Route path="/settings/security" element={<SecuritySettingsPage />} />
+<Route path="/logs" element={<LogViewerPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Suspense>

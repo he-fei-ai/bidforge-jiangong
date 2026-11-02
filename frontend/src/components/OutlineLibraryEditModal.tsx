@@ -164,11 +164,11 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
     const newLevel = parentId
       ? (findNode(tree, parentId)?.level || 0) + 1
       : 1;
-    // ✅ BUG 修复：目录硬性限三级（后端 normalize_outline_json 会把四级及更深
-    //    节点裁剪、标题并入父描述），在三级章节下继续添加子章节会导致
-    //    "保存成功后节点凭空消失"。与方案工作台的新增子章节入口保持一致，入口拦截。
+    // ✅ BUG 修复：目录硬性限级（R162 起三级为最小叶子、四级仅兼容层，
+    //    normalize_outline_json 会把五级及更深节点裁剪、标题并入父描述），在四级章节下继续添加子章节
+    //    会导致"保存成功后节点凭空消失"。与方案工作台的新增子章节入口保持一致，入口拦截。
     if (newLevel > MAX_OUTLINE_DEPTH) {
-      msg.warning(`目录最多支持 ${MAX_OUTLINE_DEPTH} 级，无法在三级章节下继续添加子章节`);
+      msg.warning(`目录最多支持 ${MAX_OUTLINE_DEPTH} 级，无法在四级章节下继续添加子章节`);
       return;
     }
     const newNode: OutlineNode = {
@@ -366,7 +366,7 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
         ar.splice(i + 1, 0, dragObj!);
       }
     }
-    // ✅ BUG 修复：拖拽可把节点拖成四级（如拖到三级节点之下），而目录硬性限三级 ——
+    // ✅ BUG 修复：拖拽可把节点拖成四级（如拖到三级节点之下），而目录硬性上限为四级 ——
     //    保存时后端会静默裁剪并把深层标题并入父描述、节点"消失"。这里在落地前拦截。
     if (maxTreeDepth(data) > MAX_OUTLINE_DEPTH) {
       msg.warning(`目录最多支持 ${MAX_OUTLINE_DEPTH} 级，已取消本次拖拽`);

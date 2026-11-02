@@ -13,6 +13,7 @@ import {
   CodeOutlined,
   SafetyCertificateOutlined,
   DashboardOutlined,
+  UndoOutlined,
 } from "@ant-design/icons";
 import { useNavigate, useLocation } from "react-router-dom";
 import { projectsApi, schemesApi } from "../api";
@@ -23,6 +24,20 @@ import TaskStatusBar from "./TaskStatusBar";
 import ActivityHint from "./ActivityHint";
 import { SIDEBAR_TOKENS } from "../utils/theme";
 import { useBreakpoint, ThemeToggle } from "../utils/ui";
+// ✅ 2026-10-30（R145）可拖拽面板：region 1（侧栏↔主区）+ region 5（导航↔后台任务）
+import {
+  RESIZE_NARROW_THRESHOLD,
+  RESIZE_STORAGE_PREFIX,
+  ResizableLayoutProvider,
+  useResizableLayoutReset,
+  useResizableResetSignal,
+} from "./resizable/resizableLayout";
+import { ResizeHandle, SplitPane } from "./resizable/SplitPane";
+
+/** region 1 侧边栏宽度约束（防坍塌） */
+const SIDEBAR_WIDTH_MIN = 200;
+const SIDEBAR_WIDTH_MAX = 400;
+const SIDEBAR_WIDTH_DEFAULT = 260;
 
 const { Header, Sider, Content } = AntLayout;
 
@@ -68,28 +83,22 @@ function ProjectTreeMenu({
   }, []);
 
   // 加载所有项目
+  // ✅ 2026-10-30（用户指令）：侧栏「项目列表」默认**全部折叠收缩** ——
+  //    只显示工程名称，方案列表改为「展开该项目时才懒加载」（onOpenChange →
+  //    loadSchemes）。旧实现在挂载时把所有有方案的项目一次性展开、并逐个预拉
+  //    方案列表：项目/方案一多，整列首屏就被方案名淹没，要滚动才能看到其它工程。
+  //    注：进入某个**方案**页时仍会自动展开其所属项目（见下方 scheme 路由 effect），
+  //    否则当前选中的方案在折叠的树里不可见。
   const loadProjects = useCallback(async () => {
     setLoading(true);
     try {
       const { data } = await projectsApi.list();
-      const list = data.items || [];
-      setProjects(list);
-      // 默认展开所有有方案的项目，并加载其方案列表
-      const withSchemes = list
-        .filter((p: ProjectItem) => (p.scheme_count ?? 0) > 0)
-        .map((p: ProjectItem) => `/project/${p.id}`);
-      setExpandedKeys(withSchemes);
-      // 主动加载这些项目的方案
-      for (const p of list) {
-        if ((p.scheme_count ?? 0) > 0) {
-          loadSchemes(p.id);
-        }
-      }
+      setProjects(data.items || []);
     } catch {
       // ignore
     }
     setLoading(false);
-  }, [loadSchemes]);
+  }, []);
 
   useEffect(() => {
     loadProjects();
@@ -120,8 +129,9 @@ function ProjectTreeMenu({
       const prevIds = new Set(projectsRef.current.map((p) => p.id));
       setProjects(list);
       // 绕过 loadedProjectIdsRef 去重：重取「已加载 ∪ 已展开 ∪ 事件目标」项目；
-      // 另并入最新列表中所有有方案的项目（防「别处新建的首个方案」漏取，
-      // 与挂载时 loadProjects 的主动加载口径一致）。
+      // 另并入最新列表中所有有方案的项目（防「别处新建的首个方案」漏取）——
+      // 事件刷新保持「各项目方案都是最新的」既有口径，与折叠/展开无关；
+      // 首次展开仍走 onOpenChange 的懒加载。
       const targets = computeRefreshTargets(
         loadedProjectIdsRef.current, expandedKeysRef.current, projectId,
       );
@@ -150,33 +160,29 @@ function ProjectTreeMenu({
     [refreshTree],
   );
 
-  // 当用户进入某个页面时，自动展开对应项目并加载方案
+  // ✅ 2026-10-30（用户指令）：侧栏默认全部折叠 —— 只有进入**方案**页才自动展开
+  //    其所属项目（否则当前选中的方案在折叠树里看不见）；进入「项目详情」页不再
+  //    展开（项目节点本身已是选中项），以保持「只显示工程名称」的默认形态。
+  //    依赖 schemesMap（state）而非 schemesMapRef：深链/刷新直达方案页时方案列表
+  //    是异步补齐的，ref 更新不触发 effect —— 旧实现靠「默认全部展开」掩盖了这点。
   useEffect(() => {
+    const m = selectedKey.match(/^\/scheme\/([^/]+)/);
+    if (!m) return;
+    const sid = m[1];
     let projectId: string | null = null;
-    const m1 = selectedKey.match(/^\/project\/([^/]+)/);
-    if (m1) projectId = m1[1];
-    const m2 = selectedKey.match(/^\/scheme\/([^/]+)/);
-    if (m2) {
-      // 在方案页，需要找它属于哪个项目（从 ref 读取最新 schemesMap）
-      const sid = m2[1];
-      for (const [pid, ss] of Object.entries(schemesMapRef.current)) {
-        if (ss.some((s) => s.id === sid)) {
-          projectId = pid;
-          break;
-        }
+    for (const [pid, ss] of Object.entries(schemesMap)) {
+      if (ss.some((s) => s.id === sid)) {
+        projectId = pid;
+        break;
       }
     }
-    if (projectId) {
-      const key = `/project/${projectId}`;
-      setExpandedKeys((prev) =>
-        prev.includes(key) ? prev : [...prev, key]
-      );
-      loadSchemes(projectId);
-    }
-  }, [selectedKey, projects, loadSchemes]);
+    if (!projectId) return;
+    const key = `/project/${projectId}`;
+    setExpandedKeys((prev) => (prev.includes(key) ? prev : [...prev, key]));
+  }, [selectedKey, schemesMap]);
 
   // 深链直达方案页、且 schemesMap 尚未填充（刷新/分享链接）时，
-  // 逐个加载项目方案以定位所属项目；定位后由上方 effect 自动展开并加载。
+  // 并发加载各项目方案以定位所属项目；补齐后由上方 effect 自动展开该项目。
   // ✅ 修复（2026-09-23）：同样移除 schemesMap 依赖，改用 ref 读取。
   useEffect(() => {
     const m = selectedKey.match(/^\/scheme\/([^/]+)/);
@@ -189,8 +195,8 @@ function ProjectTreeMenu({
     (async () => {
       // ✅ 性能修复：原实现逐个 `await loadSchemes` —— N 个项目 = N 个**串行** HTTP
       //    瀑布请求（30 项目 × ~80ms ≈ 2.4s 首屏白屏），刷新/分享链接直达方案页时
-      //    用户只能看到 Spin。改为并发发出（与 loadProjects 中 :79-83 的既有口径
-      //    统一）；请求总数不变（loadSchemes 内部仍按 projectId 去重），仅缩短墙钟时间。
+      //    用户只能看到 Spin。改为并发发出（与 onOpenChange 展开时的懒加载同一
+      //    出口）；请求总数不变（loadSchemes 内部仍按 projectId 去重），仅缩短墙钟时间。
       const pending = projects.filter(
         (p) => !schemesMapRef.current[p.id] || schemesMapRef.current[p.id].length === 0,
       );
@@ -361,12 +367,18 @@ function Sidebar({
   selectedKey,
   navigate,
   style,
+  // ✅ R145 region 1：宽度由 Layout 的拖拽手柄驱动（默认 260，200-400 防坍塌）
+  width = SIDEBAR_WIDTH_DEFAULT,
+  // ✅ R145 region 5 窄屏降级：<1024px / 抽屉侧栏禁用导航↔任务栏拖拽
+  resizeDisabled = false,
 }: {
   collapsed: boolean;
   setCollapsed: (v: boolean) => void;
   selectedKey: string;
   navigate: (k: string) => void;
   style?: React.CSSProperties;
+  width?: number;
+  resizeDisabled?: boolean;
 }) {
   // ---------- 后端健康状态 ----------
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
@@ -433,12 +445,50 @@ function Sidebar({
       ? `服务正常 · 延迟 ${backendLatency}ms · 每 10s 自动检查`
       : "无法连接后端服务，请确认后端进程是否启动";
 
+  // 底部后端服务状态条：region 5 的拖拽分支与窄屏降级分支共用同一节点
+  const backendStatusBadge = (
+    <Tooltip title={tooltipText} placement="right">
+      <div
+        style={{
+          height: 40,
+          flexShrink: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "flex-start",
+          gap: 8,
+          padding: "0 12px",
+          borderTop: "1px solid rgba(0, 212, 255, 0.15)",
+          background: "rgba(15, 43, 79, 0.6)",
+          fontSize: 12,
+          color: "rgba(255, 255, 255, 0.75)",
+          cursor: "default",
+        }}
+        onClick={() => {
+          // ✅ 复用 check()：与 10s 定时器共享 inFlight 单飞 + stopping 守卫
+          setBackendOnline(null);
+          backendCheckRef.current?.();
+        }}
+      >
+        <span className={`bp-status-dot ${statusClass}`} />
+        <span style={{ whiteSpace: "nowrap" }}>
+          <ApiOutlined style={{ marginRight: 4, color: "#00D4FF" }} />
+          {statusLabel}
+          {backendOnline && backendLatency > 0 && (
+            <span style={{ color: "rgba(255, 255, 255, 0.45)", marginLeft: 4, fontFamily: "'JetBrains Mono', monospace", fontSize: 10 }}>
+              · {backendLatency}ms
+            </span>
+          )}
+        </span>
+      </div>
+    </Tooltip>
+  );
+
   return (
     <Sider
       collapsible
       collapsed={collapsed}
       onCollapse={setCollapsed}
-      width={260}
+      width={width}
       className="bp-sidebar"
       style={{
         display: "flex",
@@ -474,16 +524,17 @@ function Sidebar({
           </div>
         </div>
       )}
-      <div
-        style={{
-          flex: 1,
-          overflow: "auto",
-          minHeight: 0,
-        }}
-      >
-        {!collapsed ? (
-          <ProjectTreeMenu onNavigate={navigate} selectedKey={selectedKey} />
-        ) : (
+      {/* ✅ R145 region 5：导航列表 ↔ 底部「后台任务」之间可拖拽（水平拖拽调高度）。
+          仅展开态 + 非窄屏启用 SplitPane；折叠态空间太小、<1024px 按需求禁用拖拽，
+          两者都退回原上下堆叠布局（不挂手柄）。 */}
+      {collapsed ? (
+        <div
+          style={{
+            flex: 1,
+            overflow: "auto",
+            minHeight: 0,
+          }}
+        >
           <Menu
             mode="inline"
             selectedKeys={[selectedKey]}
@@ -498,47 +549,63 @@ function Sidebar({
             onClick={({ key }) => navigate(key)}
             style={{ borderRight: 0 }}
           />
-        )}
-      </div>
-
-      {/* 底部：后台任务运行状态栏（实时任务 / AI 调用 / 生成进度）+ 后端服务状态 */}
-      <TaskStatusBar collapsed={collapsed} />
-      <Tooltip title={tooltipText} placement="right">
+        </div>
+      ) : resizeDisabled ? (
+        /* 窄屏降级（抽屉侧栏 / <1024px）：单列堆叠，导航可滚动、任务栏吸底 */
         <div
           style={{
-            height: 40,
-            flexShrink: 0,
+            flex: 1,
+            minHeight: 0,
+            minWidth: 0,
             display: "flex",
-            alignItems: "center",
-            justifyContent: collapsed ? "center" : "flex-start",
-            gap: 8,
-            padding: "0 12px",
-            borderTop: "1px solid rgba(0, 212, 255, 0.15)",
-            background: "rgba(15, 43, 79, 0.6)",
-            fontSize: 12,
-            color: "rgba(255, 255, 255, 0.75)",
-            cursor: "default",
-          }}
-          onClick={() => {
-            // ✅ 复用 check()：与 10s 定时器共享 inFlight 单飞 + stopping 守卫
-            setBackendOnline(null);
-            backendCheckRef.current?.();
+            flexDirection: "column",
+            overflow: "hidden",
           }}
         >
-          <span className={`bp-status-dot ${statusClass}`} />
-          {!collapsed && (
-            <span style={{ whiteSpace: "nowrap" }}>
-              <ApiOutlined style={{ marginRight: 4, color: "#00D4FF" }} />
-              {statusLabel}
-              {backendOnline && backendLatency > 0 && (
-                <span style={{ color: "rgba(255, 255, 255, 0.45)", marginLeft: 4, fontFamily: "'JetBrains Mono', monospace", fontSize: 10 }}>
-                  · {backendLatency}ms
-                </span>
-              )}
-            </span>
-          )}
+          <div style={{ flex: 1, minHeight: 0, overflow: "auto", minWidth: 0 }}>
+            <ProjectTreeMenu onNavigate={navigate} selectedKey={selectedKey} />
+          </div>
+          <div style={{ flexShrink: 0, minWidth: 0, overflow: "hidden" }}>
+            <TaskStatusBar collapsed={collapsed} />
+            {backendStatusBadge}
+          </div>
         </div>
-      </Tooltip>
+      ) : (
+        <SplitPane
+          direction="vertical"
+          storageKey="sidebar-tasks"
+          defaultRatio={0.68}
+          min={140}
+          minSecond={96}
+          handleAriaLabel="调整导航列表与后台任务区的高度"
+          style={{ flex: 1, minHeight: 0 }}
+          first={
+            <div
+              style={{
+                height: "100%",
+                overflow: "auto",
+                minWidth: 0,
+              }}
+            >
+              <ProjectTreeMenu onNavigate={navigate} selectedKey={selectedKey} />
+            </div>
+          }
+          second={
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                minWidth: 0,
+                overflow: "hidden",
+              }}
+            >
+              {/* 底部：后台任务运行状态栏（实时任务 / AI 调用 / 生成进度）+ 后端服务状态 */}
+              <TaskStatusBar collapsed={collapsed} />
+              {backendStatusBadge}
+            </div>
+          }
+        />
+      )}
     </Sider>
   );
 }
@@ -560,6 +627,8 @@ function MainArea({
 }) {
   // ---------- 根据路由生成面包屑 ----------
   const crumbs: { label: string; to?: string }[] = [{ label: "首页", to: "/" }];
+  // ✅ R145：重置布局按钮 —— 清空全部可拖拽面板的本地持久化并广播重置信号
+  const resetLayout = useResizableLayoutReset();
 
   const mScheme = pathname.match(/^\/scheme\/([^/]+)/);
   const mProject = pathname.match(/^\/project\/([^/]+)/);
@@ -615,6 +684,17 @@ function MainArea({
           )}
         </div>
         <div className="bp-header-right">
+          {/* ✅ R145：重置布局（清除所有可拖拽面板的 LocalStorage 尺寸，恢复默认） */}
+          <Tooltip title="重置布局：恢复所有可拖拽面板的默认尺寸" placement="bottom">
+            <Button
+              type="text"
+              size="small"
+              icon={<UndoOutlined />}
+              onClick={resetLayout}
+              aria-label="重置布局"
+              style={{ color: "inherit" }}
+            />
+          </Tooltip>
           {/* 全局消息中心：所有功能的提示消息/后台消息统一在此展示（不再弹 toast） */}
           <ActivityHint />
           <ThemeToggle collapsed={collapsed} />
@@ -623,7 +703,7 @@ function MainArea({
           <span>v5.3.0</span>
         </div>
       </Header>
-      <Content className="bp-content">
+      <Content className={`bp-content${mScheme ? " bp-content-workbench" : ""}`}>
         {children}
       </Content>
     </AntLayout>
@@ -639,6 +719,34 @@ export function Layout({ children }: { children: ReactNode }) {
   const { isCompact, isSmall, width } = useBreakpoint();
   // 手机竖屏及以下启用抽屉模式；平板保持折叠侧边栏
   const drawerMode = isSmall;
+
+  // ---------- ✅ R145 region 1：侧边栏宽度可拖拽（200-400px 防坍塌）+ LocalStorage 持久化 ----------
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    try {
+      const v = Number(window.localStorage.getItem(RESIZE_STORAGE_PREFIX + "sidebar-width"));
+      if (Number.isFinite(v) && v >= SIDEBAR_WIDTH_MIN && v <= SIDEBAR_WIDTH_MAX) return v;
+    } catch {
+      // ignore
+    }
+    return SIDEBAR_WIDTH_DEFAULT;
+  });
+  // 拖拽即持久化（值为受限 clamp 后的 px；重置布局会写回默认值，等价且幂等）
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(RESIZE_STORAGE_PREFIX + "sidebar-width", String(sidebarWidth));
+    } catch {
+      // ignore
+    }
+  }, [sidebarWidth]);
+  // 「重置布局」广播：region 1 宽度回默认（SplitPane 类区域由各自 resetSignal 副作用重置）
+  const resetSignal = useResizableResetSignal();
+  useEffect(() => {
+    if (resetSignal === 0) return;
+    setSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
+  }, [resetSignal]);
+
+  // 手柄禁用口径：抽屉模式 / 折叠态（宽度不可见）/ 窄屏 <1024（降级单栏布局）
+  const sidebarResizeDisabled = drawerMode || collapsed || width < RESIZE_NARROW_THRESHOLD;
 
   // ---------- 响应式自动折叠 ----------
   // 小于 1200px 自动折叠；用户手动展开后若宽度进一步收窄，也要重新折叠
@@ -676,50 +784,72 @@ export function Layout({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AntLayout style={{ height: "100vh", overflow: "hidden" }}>
-      {/* 左侧：深色主题（蓝图感）；抽屉模式下不挂载固定侧栏，改由下方 Drawer 内的
-          侧栏承载 —— 避免窄屏同时挂载两份 Sidebar（各含一条 SSE 活动流 + 健康轮询 +
-          看门狗），造成双倍常驻连接与后端压力。 */}
-      {!drawerMode && (
-        <ConfigProvider theme={SIDEBAR_THEME}>
-          <Sidebar
-            collapsed={collapsed}
-            setCollapsed={setCollapsed}
-            selectedKey={selectedKey}
-            navigate={navigate}
-          />
-        </ConfigProvider>
-      )}
-      {/* 右侧：主区域（全局 Blueprint 主题已由 main.tsx 注入） */}
-      <MainArea
-        pathname={location.pathname}
-        navigate={navigate}
-        collapsed={collapsed}
-        onMenuClick={drawerMode ? () => setMobileDrawerOpen(true) : undefined}
-      >
-        {children}
-      </MainArea>
-      {drawerMode && (
-        <ConfigProvider theme={SIDEBAR_THEME}>
-          <Drawer
-            placement="left"
-            open={mobileDrawerOpen}
-            onClose={() => setMobileDrawerOpen(false)}
-            width={Math.min(280, width - 20)}
-            styles={{ body: { padding: 0, background: "transparent" } }}
-            closable={false}
-            maskClosable
-            destroyOnClose={false}
-          >
-            <Sidebar
-              collapsed={false}
-              setCollapsed={() => {}}
-              selectedKey={selectedKey}
-              navigate={navigateAndClose}
+    <ResizableLayoutProvider>
+      <AntLayout style={{ height: "100vh", overflow: "hidden" }}>
+        {/* 左侧：深色主题（蓝图感）；抽屉模式下不挂载固定侧栏，改由下方 Drawer 内的
+            侧栏承载 —— 避免窄屏同时挂载两份 Sidebar（各含一条 SSE 活动流 + 健康轮询 +
+            看门狗），造成双倍常驻连接与后端压力。 */}
+        {!drawerMode && (
+          <>
+            <ConfigProvider theme={SIDEBAR_THEME}>
+              <Sidebar
+                collapsed={collapsed}
+                setCollapsed={setCollapsed}
+                selectedKey={selectedKey}
+                navigate={navigate}
+                width={sidebarWidth}
+                resizeDisabled={width < RESIZE_NARROW_THRESHOLD}
+              />
+            </ConfigProvider>
+            {/* ✅ R145 region 1：侧边栏 ↔ 主工作区之间的拖拽手柄（垂直条，调宽度） */}
+            <ResizeHandle
+              direction="horizontal"
+              disabled={sidebarResizeDisabled}
+              ariaLabel="调整侧边栏宽度"
+              ariaValueNow={sidebarWidth}
+              ariaValueMin={SIDEBAR_WIDTH_MIN}
+              ariaValueMax={SIDEBAR_WIDTH_MAX}
+              testId="sidebar-resize-handle"
+              onDelta={(dx) =>
+                setSidebarWidth((w) =>
+                  Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, w + dx)),
+                )
+              }
             />
-          </Drawer>
-        </ConfigProvider>
-      )}
-    </AntLayout>
+          </>
+        )}
+        {/* 右侧：主区域（全局 Blueprint 主题已由 main.tsx 注入） */}
+        <MainArea
+          pathname={location.pathname}
+          navigate={navigate}
+          collapsed={collapsed}
+          onMenuClick={drawerMode ? () => setMobileDrawerOpen(true) : undefined}
+        >
+          {children}
+        </MainArea>
+        {drawerMode && (
+          <ConfigProvider theme={SIDEBAR_THEME}>
+            <Drawer
+              placement="left"
+              open={mobileDrawerOpen}
+              onClose={() => setMobileDrawerOpen(false)}
+              width={Math.min(280, width - 20)}
+              styles={{ body: { padding: 0, background: "transparent" } }}
+              closable={false}
+              maskClosable
+              destroyOnClose={false}
+            >
+              <Sidebar
+                collapsed={false}
+                setCollapsed={() => {}}
+                selectedKey={selectedKey}
+                navigate={navigateAndClose}
+                resizeDisabled
+              />
+            </Drawer>
+          </ConfigProvider>
+        )}
+      </AntLayout>
+    </ResizableLayoutProvider>
   );
 }

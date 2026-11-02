@@ -40,7 +40,8 @@ export default function PromptMetricsPage() {
   const handleReset = () => {
     modal.confirm({
       title: "清零全部运行时计数？",
-      content: "将重置渲染次数、错误、截断、修复触发与 AI 失败计数（进程内存态，不影响提示词内容）。",
+      content:
+        "将重置渲染次数、错误、截断、修复触发、AI 失败、缺变量与未解析占位符计数（进程内存态，不影响提示词内容）。",
       okText: "清零",
       cancelText: "取消",
       onOk: async () => {
@@ -77,6 +78,12 @@ export default function PromptMetricsPage() {
   const repairRows = useMemo(() => toRows(data?.repair_triggered), [data]);
   const failureRows = useMemo(() => toRows(data?.ai_failure_by_scene), [data]);
   const truncatedRows = useMemo(() => toRows(data?.token_budget_truncated), [data]);
+  // R168：缺变量 / 残留占位符（按变量名聚合，直接定位「哪个占位符最常漏传」）
+  const missingVarRows = useMemo(() => toRows(data?.missing_variables_total), [data]);
+  const unresolvedRows = useMemo(
+    () => toRows(data?.unresolved_placeholders_total),
+    [data],
+  );
 
   const countColumns = [
     {
@@ -190,6 +197,8 @@ export default function PromptMetricsPage() {
       {renderCountCard("修复轮触发分布（repair_key）", repairRows, "orange")}
       {renderCountCard("AI 失败 / 降级（scene）", failureRows, "red")}
       {renderCountCard("Token 预算截断（key）", truncatedRows, "purple")}
+      {renderCountCard("缺变量（按变量名）", missingVarRows, "volcano")}
+      {renderCountCard("未解析占位符（按变量名）", unresolvedRows, "magenta")}
     </div>
   );
 }

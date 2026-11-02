@@ -82,11 +82,14 @@ describe("formatOutlineTitle · 接线面行为", () => {
   let formatOutlineTitle: (id: string, level: number, title: string) => string;
   let loadMs = -1;
 
+  // ✅ R148b（2026-10-30）：12k 行页面模块图 transform 在全量并发下会超过 120s
+  //   （R148 实测 hook timed out；独占跑约 50s）。预算提到 300s —— 预热是**一次**
+  //   的固定成本，超时阈值过紧只会在并行负载下制造假红。
   beforeAll(async () => {
     const t0 = Date.now();
     ({ formatOutlineTitle } = await import("../pages/SchemeWorkbenchPage"));
     loadMs = Date.now() - t0;
-  }, 120_000);
+  }, 300_000);
 
   it("模块预热确实完成（否则下面的断言是在测 undefined）", () => {
     expect(typeof formatOutlineTitle).toBe("function");

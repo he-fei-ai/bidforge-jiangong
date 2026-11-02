@@ -24,10 +24,10 @@ import {
   formatUploadLimitMb,
 } from "../utils/uploadAccept";
 
-/** 镜像后端 file_parser.SUPPORTED_EXTENSIONS（2026-09-23） */
+/** 镜像后端 file_parser.SUPPORTED_EXTENSIONS（2026-09-23；R136 补 .tif） */
 const BACKEND_SUPPORTED_EXTENSIONS = [
   "docx", "pdf", "md", "txt", "xlsx", "xls", "csv",
-  "png", "jpg", "jpeg", "bmp", "tiff",
+  "png", "jpg", "jpeg", "bmp", "tiff", "tif",
   "doc", "wps",
 ];
 

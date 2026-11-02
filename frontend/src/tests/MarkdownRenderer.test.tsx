@@ -118,7 +118,24 @@ describe("MarkdownRenderer P1-6 优化行为", () => {
     await waitFor(() => {
       expect(container.querySelector("img[src^='blob:']")).not.toBeNull();
     });
+    // ✅ R166：AI 产物（载荷无 source 键）不得出现「模板数据」标签（存量零打扰）
+    expect(container.innerHTML).not.toContain("模板数据");
     expect(renderMock).not.toHaveBeenCalled();
+  });
+
+  // ✅ R166（2026-11-01）：本地模板兜底图（后端写 source="local"）预览须有
+  //    可见提示，避免用户把模板示例数据当成 AI 生成的真实项目数据。
+  it("本地模板兜底图（source=local）：预览显示「模板数据·请按项目实际核定」标签", async () => {
+    const { container } = render(
+      <MarkdownRenderer
+        content={'```chart-json\n{"type":"labor","title":"劳动力结构","source":"local"}\n```'}
+      />
+    );
+    await waitFor(() => {
+      expect(container.querySelector("img[src^='blob:']")).not.toBeNull();
+    });
+    expect(container.innerHTML).toContain("模板数据");
+    expect(container.innerHTML).toContain("请按项目实际核定");
   });
 
   it("渲染失败 → AI 修复：请求携带 section_id（不硬编码 chart_type），content_updated 时回调 onContentReplaced", async () => {

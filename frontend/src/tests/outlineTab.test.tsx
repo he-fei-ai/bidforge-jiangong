@@ -317,11 +317,14 @@ describe("目录树纯逻辑（模块级导出）", () => {
     expect(flattenTreeKeys(tree)).toEqual(["1", "1.1", "2"]);
   });
 
-  it("hasDeepOutlineNodes：三级为上限，四级及以上命中", () => {
+  it("hasDeepOutlineNodes：✅ R162 四级（兼容层）为上限，五级及以上命中", () => {
     const three = [mkNode("1", "A", [mkNode("1.1", "B", [mkNode("1.1.1", "C")])])];
     const four = [mkNode("1", "A", [mkNode("1.1", "B", [mkNode("1.1.1", "C", [mkNode("1.1.1.1", "D")])])])];
+    const five = [mkNode("1", "A", [mkNode("1.1", "B", [mkNode("1.1.1", "C", [mkNode("1.1.1.1", "D", [mkNode("1.1.1.1.1", "E")])])])])];
     expect(hasDeepOutlineNodes(three)).toBe(false);
-    expect(hasDeepOutlineNodes(four)).toBe(true);
+    // ✅ R162：三级才是最小叶子，四级仅作兼容层（合法但不作数量校验）
+    expect(hasDeepOutlineNodes(four)).toBe(false);
+    expect(hasDeepOutlineNodes(five)).toBe(true);
   });
 
   it("renumberTreeLocally：按位置重算 level 与点分编号，不动 key", () => {
@@ -876,6 +879,28 @@ describe("buildPartialOutlineHint（部分成果弹窗文案）", () => {
     expect(buildPartialOutlineHint({ nodeCount: -4 }).content).toContain("0 个章节节点");
     expect(buildPartialOutlineHint({ nodeCount: NaN }).content).toContain("0 个章节节点");
     expect(buildPartialOutlineHint({ nodeCount: undefined }).content).toContain("0 个章节节点");
+  });
+
+  it("partial=false：完整结果走「完成」口径（不再误报为部分成果）", () => {
+    const h = buildPartialOutlineHint({ event: "stopped", partial: false, nodeCount: 12 });
+    expect(h.title).toBe("目录生成完成");
+    expect(h.content).toContain("完整生成 12 个章节节点");
+    expect(h.content).not.toContain("尚未保存");
+    expect(h.okText).toBe("保存目录");
+    expect(h.tone).toBe("info");
+  });
+
+  it("partial=true：部分成果走既有「已停止/已生成部分」口径", () => {
+    const h = buildPartialOutlineHint({ event: "stopped", partial: true, nodeCount: 12 });
+    expect(h.title).toBe("目录生成已停止，但有部分成果");
+    expect(h.content).toContain("12 个章节节点尚未保存");
+    expect(h.okText).toBe("保存已生成部分");
+  });
+
+  it("partial=undefined（旧 checkpoint 无该键）：保守视为部分成果", () => {
+    const h = buildPartialOutlineHint({ event: "stopped", partial: undefined, nodeCount: 3 });
+    expect(h.title).toBe("目录生成已停止，但有部分成果");
+    expect(h.content).toContain("3 个章节节点尚未保存");
   });
 });
 

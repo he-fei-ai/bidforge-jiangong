@@ -309,7 +309,7 @@ function SectionContentCard({
           </div>
         </>
       ) : (
-        <div className="scroll-area" style={{ minHeight: 200, maxHeight: "calc(100vh - 420px)", overflow: "auto", paddingRight: 8 }}>
+        <div className="scroll-area bp-pane-scroll" style={{ minHeight: 200, maxHeight: "calc(100vh - 420px)", overflow: "auto", paddingRight: 8 }}>
           <MarkdownRenderer
             content={section.content || "（章节尚未生成，点击「一键生成全文」开始）"}
             sectionId={section.key}

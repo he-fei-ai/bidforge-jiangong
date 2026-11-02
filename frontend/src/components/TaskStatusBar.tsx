@@ -130,7 +130,9 @@ const TASK_TYPE_LABELS: Record<string, string> = {
   facts_generation: "事实提取",
   bid_analysis: "结构化提取",
 };
-const taskTypeLabel = (t: string) => TASK_TYPE_LABELS[t] || t || "后台任务";
+// ✅ 2026-10-30（R145）：导出供工作台顶部「后台任务」列表面板（GenTaskListPanel）
+//    复用同一份类型中文映射 —— 两处各写一份必然漂移。
+export const taskTypeLabel = (t: string) => TASK_TYPE_LABELS[t] || t || "后台任务";
 
 /**
  * 任务状态 → 展示元数据。

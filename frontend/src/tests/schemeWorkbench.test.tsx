@@ -19,9 +19,10 @@
  *   触发 act 警告与状态更新）。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-// ✅ 页面级重渲染测试：jsdom + 完整 React 树 + 大量 waitFor，单跑最长 ~30s
-//    全量并发下 worker 争用 CPU，30s 全局 timeout 不够。此处提到 60s。
-vi.setConfig({ testTimeout: 60000 });
+// ✅ 页面级重渲染测试：jsdom + 完整 React 树 + 大量 waitFor，单跑最长 ~31s
+//    全量并发下 worker 争用 CPU，60s 仍偶发不够（R148 实测 2 例假红）。
+//    提到 120s：页面为 12k 行单体组件，超时只会掩盖真实失败、无法提速。
+vi.setConfig({ testTimeout: 120000 });
 import { render, screen, fireEvent, waitFor, cleanup, act } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import React from "react";
@@ -172,12 +173,20 @@ function renderPage() {
   );
 }
 
+/** ⚠️ R120 规程：findByText 捕获的 DOM 引用可能是 stale-node —— 组件在捕获与使用
+ *  之间再渲染会使旧节点脱离文档树、React 事件委托打不中。必须先 await findByText
+ *  作为「就绪门」，再 getByText 重新查询当前挂载节点，然后点击。 */
+async function clickWorkflowTab(text: string) {
+  await screen.findByText(text);
+  const label = screen.getByText(text);
+  const tab = label.closest('[role="tab"]') || label;
+  fireEvent.click(tab);
+}
+
 /** 切到「目录生成」Tab —— 起始 Tab 可能被 pickInitialTab 自动切到「解析提取」，
  *  而 import/facts 页会隐藏左侧目录树，树操作测试必须先在目录可见的 Tab 上。 */
 async function gotoOutlineTab() {
-  const label = await screen.findByText("目录生成");
-  const tab = label.closest('[role="tab"]') || label;
-  fireEvent.click(tab);
+  await clickWorkflowTab("目录生成");
   // ⚠️ 用 getAllByText：目录树同时出现在「左侧导航树」与「右侧编辑树」两处，
   //    getByText 会因匹配到多个元素而报错。
   await waitFor(() => {
@@ -205,7 +214,7 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     expect(screen.getAllByText("施工计划").length).toBeGreaterThan(0);
     // 加载完成后不再显示「加载中...」
     expect(screen.queryByText("加载中...")).toBeNull();
-  }, 60000); // ✅ 后续修复（2026-09-28）：重型组件全量并行时偶发 20s 超时，放大到 60s
+  }, 120_000); // ✅ 后续修复（2026-09-28）：重型组件全量并行时偶发 20s 超时，放大到 60s
 
   it("渲染冒烟：六个工作流 Tab 全部存在，点击可切换", async () => {
     renderPage();
@@ -218,9 +227,7 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
   /** ✅ 2026-10-01：导出不再受审核 / 预检门禁限制，未预检也必须能导出。 */
   it("导出不受预检门禁限制：未预检时按钮仍可用且点击发起导出请求", async () => {
     renderPage();
-    const label = await screen.findByText("导出文档");
-    const tab = label.closest('[role="tab"]') || label;
-    fireEvent.click(tab);
+    await clickWorkflowTab("导出文档");
 
     const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
       .find((button) => (button.textContent || "").includes("导出 DOCX"));
@@ -235,8 +242,7 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
  *  ⚠️ 页面上「专家论证预检」卡片也有同名「开始预检」按钮，必须精确点击
  *  「导出预检（章节完整性）」卡片内的那个（DOM 结构上离该卡片标题最近的）。 */
   async function runExportCheck() {
-    const reviewLabel = await screen.findByText("审核与预检");
-    fireEvent.click(reviewLabel.closest('[role="tab"]') || reviewLabel);
+    await clickWorkflowTab("审核与预检");
     const precheckBtn = await waitFor(() => {
       const all = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
         .filter((b) => (b.textContent || "").includes("开始预检"));
@@ -250,8 +256,7 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     // 等待 placeholderRerunPlan 返回（handleExportCheck 末尾的非致命分支）后再断言
     await waitFor(() => expect(apiCalls["exportApi.check"]?.length).toBeGreaterThan(0));
     await waitFor(() => expect(apiCalls["exportApi.placeholderRerunPlan"]?.length).toBeGreaterThan(0));
-    const exportLabel = await screen.findByText("导出文档");
-    fireEvent.click(exportLabel.closest('[role="tab"]') || exportLabel);
+    await clickWorkflowTab("导出文档");
   }
 
   it("导出-放行态：预检通过 + 就绪度放行 → 导出按钮可用，点导出 DOCX 发请求", async () => {
@@ -367,9 +372,7 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     };
     renderPage();
     // 起点应在「解析提取」Tab（pickInitialTab 默认 import），否则先切过去
-    const importLabel = await screen.findByText("解析提取");
-    const importTab = importLabel.closest('[role="tab"]') || importLabel;
-    fireEvent.click(importTab);
+    await clickWorkflowTab("解析提取");
     // docs 子 Tab：上传解析主体 + 经 props 接入的「信息显示窗口」详情面板
     await waitFor(() => expect(screen.getByText("信息显示窗口")).toBeTruthy());
     // 切到 extract 子 Tab：左栏标题（按定义条数动态） + 右侧 BidAnalysisTab
@@ -399,8 +402,7 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
       },
     };
     renderPage();
-    const importLabel = await screen.findByText("解析提取");
-    fireEvent.click(importLabel.closest('[role="tab"]') || importLabel);
+    await clickWorkflowTab("解析提取");
     const previewBtn = await screen.findByRole("button", { name: /预览/ });
     fireEvent.click(previewBtn);
 
@@ -428,8 +430,7 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
       },
     };
     renderPage();
-    const importLabel = await screen.findByText("解析提取");
-    fireEvent.click(importLabel.closest('[role="tab"]') || importLabel);
+    await clickWorkflowTab("解析提取");
     const previewBtn = await screen.findByRole("button", { name: /预览/ });
     fireEvent.click(previewBtn);
 
@@ -454,8 +455,7 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
       },
     };
     renderPage();
-    const importLabel = await screen.findByText("解析提取");
-    fireEvent.click(importLabel.closest('[role="tab"]') || importLabel);
+    await clickWorkflowTab("解析提取");
     const previewBtn = await screen.findByRole("button", { name: /预览/ });
     fireEvent.click(previewBtn);
 
@@ -645,8 +645,7 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
   }
 
   async function openPreview() {
-    const importLabel = await screen.findByText("解析提取");
-    fireEvent.click(importLabel.closest('[role="tab"]') || importLabel);
+    await clickWorkflowTab("解析提取");
     const previewBtn = await screen.findByRole("button", { name: /预览/ });
     fireEvent.click(previewBtn);
     // 等待管线摘要渲染出操作按钮（加载完成后才出现）
@@ -695,7 +694,7 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
       (t) => t.some((x) => /质量分刷新失败/.test(x)) && !t.some((x) => /质量分已刷新/.test(x)));
     // 确实发起过请求（refresh=true）
     expect(lastCall("docPipelineApi.completeness")[1]).toBe(true);
-  }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
+  }, 120_000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 
   it("刷新质量：接口成功时回填并提示「质量分已刷新」", async () => {
     seedDoc();
@@ -708,7 +707,7 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
 
     await waitForActivity(
       (t) => t.some((x) => /质量分已刷新/.test(x)) && !t.some((x) => /质量分刷新失败/.test(x)));
-  }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
+  }, 120_000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 
   it("重新解析：调用 reparse(force) 并按返回内容反馈，随后重拉权威状态", async () => {
     seedDoc();
@@ -721,7 +720,7 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
     expect(lastCall("docPipelineApi.reparse")).toEqual(["d1", "force"]);
     // 非 refreshQuality 分支动作后必须重拉状态（loadPipelineStatus → status）
     await waitFor(() => expect((apiCalls["docPipelineApi.status"] || []).length).toBeGreaterThan(1));
-  }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
+  }, 120_000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 
   it("物化提取层：反馈物化类别数", async () => {
     seedDoc();
@@ -733,7 +732,7 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
     fireEvent.click(modalActionButton("物化提取层"));
 
     await waitForActivity((t) => t.some((x) => /提取层已物化（3 类）/.test(x)));
-  }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
+  }, 120_000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 
   it("交叉校验：反馈冲突数", async () => {
     seedDoc();
@@ -743,7 +742,7 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
     fireEvent.click(modalActionButton("交叉校验"));
 
     await waitForActivity((t) => t.some((x) => /交叉校验完成（冲突 2）/.test(x)));
-  }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
+  }, 120_000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 
   it("管线动作失败：reparse 抛错时提示错误且不残留 loading", async () => {
     seedDoc();
@@ -756,13 +755,12 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
     // 动作结束（finally）后按钮恢复可点
     await waitFor(() =>
       expect(modalActionButton("重新解析").hasAttribute("disabled")).toBe(false));
-  }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
+  }, 120_000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 
   it("删除文档：确认后发起删除请求、提示成功并重拉文档列表", async () => {
     seedDoc();
     renderPage();
-    const importLabel = await screen.findByText("解析提取");
-    fireEvent.click(importLabel.closest('[role="tab"]') || importLabel);
+    await clickWorkflowTab("解析提取");
     // 用文本匹配删除按钮（文档列表 actions 区，type=link），避免图标干扰 accessible name
     const delBtn = await waitFor(() => {
       const btn = Array.from(document.querySelectorAll("button")).find(
@@ -784,7 +782,7 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
     expect(lastCall("factsApi.deleteDocument")[0]).toBe("d1");
     // 删除成功后重新加载文档列表
     await waitFor(() => expect((apiCalls["factsApi.listDocuments"] || []).length).toBeGreaterThan(1));
-  }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
+  }, 120_000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 });
 
 // =====================================================================
@@ -805,9 +803,7 @@ describe("SchemeWorkbenchPage · 导出成功路径（组件级交互）", () =>
   }
 
   async function gotoExportTab() {
-    const tabLabel = await screen.findByText("导出文档");
-    const tab = tabLabel.closest('[role="tab"]') || tabLabel;
-    fireEvent.click(tab);
+    await clickWorkflowTab("导出文档");
     await waitFor(() => expect(findExportButton("导出 DOCX")).toBeTruthy());
   }
 

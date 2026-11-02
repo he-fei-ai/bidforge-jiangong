@@ -26,6 +26,10 @@ import {
 import DocumentParseList, { type DocumentParseItem } from "./DocumentParseList";
 import ParseResultCategoryPanel, { type ParsePanelSharedState } from "./ParseResultCategoryPanel";
 import { computeDocStats, type WorkflowTabKey } from "../utils/workflowDerived";
+import { useBreakpoint } from "../utils/ui";
+import { useDelayedCallback } from "../hooks/useDelayedCallback";
+import { SplitPane } from "./resizable/SplitPane";
+import { RESIZE_NARROW_THRESHOLD } from "./resizable/resizableLayout";
 import {
   MAX_UPLOAD_BYTES,
   UPLOAD_FILE_ACCEPT,
@@ -134,18 +138,14 @@ export default function UploadParseTab({
   parseRunning,
 }: UploadParseTabProps) {
   const { modal, message } = App.useApp();
-  // ✅ FIX-7（2026-10-20 · P2 · 幽灵上传）：上传回调经 setTimeout 延后一拍
-  //    触发（避免在 antd Upload 的 beforeUpload 同步栈内发起请求），
-  //    定时器必须登记并在卸载时清理 —— 否则组件卸载后仍会触发真实上传。
-  const uploadTimerRef = useRef<number | null>(null);
-  useEffect(() => {
-    return () => {
-      if (uploadTimerRef.current !== null) {
-        window.clearTimeout(uploadTimerRef.current);
-        uploadTimerRef.current = null;
-      }
-    };
-  }, []);
+  const { width } = useBreakpoint();
+  const narrow = width < RESIZE_NARROW_THRESHOLD;
+  // ✅ FIX-7（2026-10-20 · P2 · 幽灵上传）→ R157（2026-11-01 · L1 收口）：
+  //    上传回调经 setTimeout 延后一拍触发（避免在 antd Upload 的 beforeUpload
+  //    同步栈内发起请求），定时器必须登记并在卸载时清理 —— 原为组件内手工
+  //    timer 副本，与页面入口双份并存；现收敛到 useDelayedCallback 单一实现
+  //    （页面入口同款），幽灵上传纪律单点维护。
+  const { schedule: scheduleUpload, clear: clearUploadTimer } = useDelayedCallback();
   // 「下一步」按钮文案动态生成：解析项数取后端 /items 的分组定义（旧实现硬编码
   // 「18 项」，后端增减项后文案失真）；定义未加载时不报数，只说「全表」。
   const baNextLabel = (() => {
@@ -178,8 +178,8 @@ export default function UploadParseTab({
       : MAX_UPLOAD_BYTES;
   const maxMb = formatMb(effectiveMaxBytes);
 
-  return (
-    <div className="scroll-area" style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+  const mainContent = (
+    <div className="scroll-area bp-pane-scroll" style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
       {/* ===== 上传区 ===== */}
       <Card size="small" style={{ marginBottom: 4 }} styles={{ body: { padding: 4 } }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
@@ -213,10 +213,9 @@ export default function UploadParseTab({
                   //    ⇒ 组件卸载（切方案/关弹窗）后定时器仍会触发页面级的
                   //    **真实上传请求**（幽灵上传 + 卸载后 setState）。
                   //    现登记到 ref，卸载时 clearTimeout，杜绝幽灵上传。
-                  uploadTimerRef.current = window.setTimeout(() => {
-                    uploadTimerRef.current = null;
-                    onUploadFiles(accepted);
-                  }, 0);
+                  // ✅ R144 → R157：赋值前清旧 timer + 卸载自动清理已收敛到
+                  //    useDelayedCallback（与页面「① 上传文件保存」入口同一实现）。
+                  scheduleUpload(() => onUploadFiles(accepted));
                 }
               }
               return false;
@@ -403,42 +402,6 @@ export default function UploadParseTab({
         />
       </Card>
 
-      {/* ===== 信息显示窗口（2026-09-23 更名：原「解析信息分类显示栏」）=====
-          按解析结果类别（后端 13 分组）分组展示；点击分类查看其下解析项，
-          右侧显示详情，支持 查看/编辑（人工校正）/复制。仅在页面注入
-          onParseSelectItem 时渲染，未注入时保持既有行为不变。
-          2026-09-23 同步改造：import 模块左侧不再渲染目录树（SchemeTreePanel
-          仅在 outline/content/review 等有目录依赖的模块显示），此处成为
-          解析提取模块的主要信息浏览入口。 */}
-      {onParseSelectItem && (
-        <Card
-          size="small"
-          title={
-            <Space>
-              <AppstoreOutlined />
-              <Text strong>信息显示窗口</Text>
-              <Tag color="blue">{(parseGroups || []).length} 个分类</Tag>
-            </Space>
-          }
-          style={{ marginBottom: 4 }}
-        >
-          <ParseResultCategoryPanel
-            variant="detail-only"
-            groups={parseGroups || []}
-            items={parseItems || []}
-            selectedItem={parseSelectedItem ?? null}
-            loading={parseLoading}
-            error={parseError}
-            sharedState={sharedState}
-            onSelectItem={onParseSelectItem}
-            onEditItem={onParseEditItem}
-            onOpenFullView={onParseFullView}
-            onRefresh={onParseRefresh}
-            running={parseRunning}
-          />
-        </Card>
-      )}
-
       {/* ===== 下一步 ===== */}
       <Space wrap>
         <Button
@@ -467,5 +430,56 @@ export default function UploadParseTab({
         )}
       </Space>
     </div>
+  );
+
+  // 未注入分类栏 → 保持旧单列滚动布局（既有调用方/单测零变化）
+  if (!onParseSelectItem) return mainContent;
+
+  // ✅ R146：右区内部「表单/资料列表 ↔ 信息显示窗口」上下可拖拽。
+  //    两栏各自独立滚动，分隔条双击恢复默认，比例存 LocalStorage。
+  const detailContent = (
+    <div className="scroll-area bp-pane-scroll" style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+      <Card
+        size="small"
+        title={
+          <Space>
+            <AppstoreOutlined />
+            <Text strong>信息显示窗口</Text>
+            <Tag color="blue">{(parseGroups || []).length} 个分类</Tag>
+          </Space>
+        }
+        style={{ marginBottom: 4 }}
+      >
+        <ParseResultCategoryPanel
+          variant="detail-only"
+          groups={parseGroups || []}
+          items={parseItems || []}
+          selectedItem={parseSelectedItem ?? null}
+          loading={parseLoading}
+          error={parseError}
+          sharedState={sharedState}
+          onSelectItem={onParseSelectItem}
+          onEditItem={onParseEditItem}
+          onOpenFullView={onParseFullView}
+          onRefresh={onParseRefresh}
+          running={parseRunning}
+        />
+      </Card>
+    </div>
+  );
+
+  return (
+    <SplitPane
+      direction="vertical"
+      storageKey="wb-import-detail"
+      defaultRatio={0.62}
+      min={180}
+      minSecond={160}
+      disabled={narrow}
+      handleAriaLabel="调整解析表单/资料列表与信息显示窗口的高度（双击恢复默认）"
+      style={{ flex: 1, minHeight: 0, width: "100%" }}
+      first={mainContent}
+      second={detailContent}
+    />
   );
 }

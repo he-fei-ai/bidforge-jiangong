@@ -3,12 +3,26 @@ import {
   upsertSectionLog, finalizeRunningLogsIn, mergeFailedSectionsInto,
   contentResultFailedSections, contentResultSummary,
   normalizeQualityIssues,
+  // ✅ R139（2026-10-28）：图表产出闭环归一出口。与页面内联版
+  //    SchemeWorkbenchPage.tsx 的 section_done 分支共用同一纯函数 —— 旧实现本
+  //    hook **完全没有**装配 chart_yield（类型里定义了字段却从不赋值），
+  //    后端一直在下发 chart_count / charts_dropped_count / charts_dropped，
+  //    这条消费链路却把「配图 N 张（已删 M 张）」永久丢弃（静默断链，与
+  //    quality_issues 同族）。
+  normalizeChartYield,
   isTerminalTaskStatus, isTerminalContentEvent, degradedConsistencyHint,
   // ✅ R77b（2026-10-15）：事实冲突定点修复终态提示（与标准校验提示同纪律）
   factAutofixHint,
   type SectionLogItem, type GenStats,
 } from "../utils/contentEvents";
 import { tasksApi, sectionsApi } from "../api";
+// ✅ R139（2026-10-28）：断线重挂轮询收敛到单一实现（maxPolls 硬上限 +
+//    404 / 瞬时网络失败分级 + 「progress 满但 status 未更新」兜底）。旧实现本
+//    hook 内联**无上限**递归 setTimeout，注释自承「页面版至少有 maxPolls 兜底，
+//    本 hook 版完全没有」—— 后台任务若永远不进入终态（僵尸任务 / 状态列陈旧），
+//    await 永不返回 ⇒ generate() 的 finally 不执行 ⇒ setGenerating(false) 永不
+//    发生，界面永久停在「生成中」，且用户点停止/切方案都无法解绑（不可取消）。
+import { pollTaskUntilTerminalImpl } from "../utils/taskPolling";
 // F-CONTENT-STANDARD(2026-09-26): 生成标准请求体映射（与页面共用同一纯函数）
 import {
   buildStandardRequestFields, standardSummaryHint,
@@ -37,7 +51,15 @@ export interface ContentGenerationState {
   crScanId: string | null;
 }
 export interface ContentGenerationActions {
-  generate: (extra?: { section_id?: string; mode?: string; force_rewrite?: boolean }) => void;
+  /**
+   * ✅ R139：`regenerate_requirement` 与页面内联版同口径 —— 用户重新生成时
+   * 填写的额外要求，随请求体下发（空/纯空白不下发）。
+   */
+  generate: (extra?: {
+    section_id?: string; mode?: string; force_rewrite?: boolean;
+    task_standard?: "precise" | "fuzzy";
+    regenerate_requirement?: string;
+  }) => void;
   generateCurrent: (sectionId: string) => void;
   generateMissing: () => void;
   continueCurrent: (sectionId: string) => void;
@@ -99,7 +121,7 @@ export function useContentGeneration(opts: UseContentGenerationOpts): ContentGen
   //    quality_issues（本章程序化质检问题），前端此前**两个字段都没消费** ——
   //    用户只能在生成结束后重新拉取整篇正文才知道有没有问题。现把质检问题
   //    落到章节日志项，日志区即可直接看到「哪章有质量告警」。
-  const handleSectionDone = (evt: any) => { const ex = sectionLogsRef.current.find((x) => x.section_id === evt.section_id); sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { section_id: evt.section_id, title: evt.title, status: "success", word_count: evt.word_count, word_budget: evt.word_budget, word_status: evt.word_status, continue_failed: !!evt.continue_failed, quality_issues: normalizeQualityIssues(evt.quality_issues), generation_standard: evt.generation_standard, standard_report: evt.standard_report ?? undefined, index: ex?.index, total: ex?.total, time: Date.now(), duration: ex ? Date.now() - ex.time : undefined }); setSectionLogs([...sectionLogsRef.current]); };
+  const handleSectionDone = (evt: any) => { const ex = sectionLogsRef.current.find((x) => x.section_id === evt.section_id); sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { section_id: evt.section_id, title: evt.title, status: "success", word_count: evt.word_count, word_budget: evt.word_budget, word_status: evt.word_status, continue_failed: !!evt.continue_failed, quality_issues: normalizeQualityIssues(evt.quality_issues), chart_yield: normalizeChartYield({ chart_count: evt.chart_count, charts_dropped_count: evt.charts_dropped_count, charts_dropped: evt.charts_dropped }), generation_standard: evt.generation_standard, standard_report: evt.standard_report ?? undefined, index: ex?.index, total: ex?.total, time: Date.now(), duration: ex ? Date.now() - ex.time : undefined }); setSectionLogs([...sectionLogsRef.current]); };
   const handleSectionError = (evt: any) => { const ex = sectionLogsRef.current.find((x) => x.section_id === evt.section_id); sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { section_id: evt.section_id, title: evt.title, status: "failed", reason: evt.reason, index: ex?.index, total: ex?.total, time: Date.now(), duration: ex ? Date.now() - ex.time : undefined, stage: ex?.stage, stage_label: ex?.stage_label }); setSectionLogs([...sectionLogsRef.current]); };
   const handleSectionStage = (evt: any) => { const ex = sectionLogsRef.current.find((x) => x.section_id === evt.section_id); if (ex) { sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { ...ex, stage: evt.stage, stage_label: evt.stage_label }); setSectionLogs([...sectionLogsRef.current]); } };
   const generate = useCallback(async (extra?: any) => {
@@ -121,6 +143,14 @@ export function useContentGeneration(opts: UseContentGenerationOpts): ContentGen
     if (extra?.mode) body.mode = extra.mode;
     body.concurrency = concurrencyOption;
     body.force_rewrite = !!extra?.force_rewrite;
+    // ✅ R139（2026-10-28 · 字段漂移修复）：用户「重新生成时填写的额外要求」。
+    //    页面内联版 handleGenerateContent（SchemeWorkbenchPage.tsx:6341）早已下发
+    //    regenerate_requirement，本 hook 版从未读取 ⇒ 同一次操作在两条消费链路
+    //    上「要求被注入提示词」与「被静默丢弃」两种结果。空/纯空白不下发，
+    //    缺省路径的请求体与引入本项前逐字节一致（向后兼容）。
+    if (extra?.regenerate_requirement?.trim()) {
+      body.regenerate_requirement = extra.regenerate_requirement.trim();
+    }
     body.auto_consistency_repair = autoConsistencyRepair;
     body.consistency_severity = consistencySeverity;
     body.auto_shrink_over = autoShrinkOver;
@@ -199,11 +229,22 @@ export function useContentGeneration(opts: UseContentGenerationOpts): ContentGen
         if (taskId) {
           setProgressMsg("连接中断，正在重新挂接后台任务...");
           try {
-            // ✅ 2026-10-10：终态集合改用单一事实源，补上 degraded。
-            //    旧实现内联三态白名单 + 无上限递归 ⇒ 降级完成的后台任务会让
-            //    这里的 await **永不返回**（页面版的 pollTaskUntilTerminal 至少有
-            //    maxPolls 兜底，本 hook 版完全没有）。
-            const fin = await new Promise<any>((resolve) => { const poll = async () => { try { const { data } = await tasksApi.status(taskId); if (data && isTerminalTaskStatus(data.status)) resolve(data); else setTimeout(poll, 3000); } catch { setTimeout(poll, 3000); } }; poll(); });
+            // ✅ R139（2026-10-28 · 断线重连收敛）：改用 utils/taskPolling 的单一实现
+            //    —— maxPolls=200（≈10 分钟）**硬上限** + 404 / 瞬时网络失败分级 +
+            //    「progress 已达 100% 但 status 仍 running」兜底 + degraded 终态。
+            //    旧实现是本文件内联的**无上限**递归 setTimeout：后台任务若永不进入
+            //    终态（僵尸任务 / 状态列陈旧），await 永不返回 ⇒ generate() 的
+            //    finally 不执行 ⇒ setGenerating(false) 永不发生，界面永久停在
+            //    「生成中」且不可取消。收敛后与页面内联版 pollTaskUntilTerminal
+            //    共用同一判据，杜绝两处口径再次分叉。
+            const fin = await pollTaskUntilTerminalImpl(
+              taskId,
+              async (id) => (await tasksApi.status(id)).data as any,
+            );
+            if (!fin) {
+              // 有界退出：超时 / 任务不存在 → 明确告知，不留「静默卡住」。
+              msg.warning("未能确认后台任务终态（轮询超时或任务已失效），请稍后在任务列表查看");
+            }
             const ck = contentResultFailedSections(fin?.content_result);
             if (ck.sections.length) { mergeFailed(ck.sections); msg.warning(`后台正文生成有 ${ck.failedCount} 章失败`); }
             const sm = contentResultSummary(fin?.content_result);

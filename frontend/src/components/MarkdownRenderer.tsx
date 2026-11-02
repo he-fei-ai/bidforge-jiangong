@@ -65,8 +65,10 @@ interface Placeholder {
   marker: string;
   code: string;
   id: string;
-  /** chart-json 数据块（labor/layout 等，走后端渲染引擎） */
-  json?: { chart_type: string; title: string };
+  /** chart-json 数据块（labor/layout 等，走后端渲染引擎）
+   *  ✅ R166（2026-11-01）：`source==="local"` 为本地模板兜底图（数据非 AI 生成），
+   *  预览据此显示「模板数据」标签；缺省（AI 产物 / 历史数据）不显示，零打扰。 */
+  json?: { chart_type: string; title: string; source?: string };
   /** KaTeX 公式（displayMode 由 value 判定） */
   math?: { tex: string; displayMode: boolean };
   /** AI 文生图块（ai_image，生成前为占位卡片）
@@ -143,17 +145,20 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
           //    （与登记侧、导出侧同一个判据），不再在前端复制一份推断逻辑。
           let chartType = "";
           let title = "";
+          let source = "";
           try {
             const obj = JSON.parse(code.trim());
             if (obj && typeof obj === "object" && !Array.isArray(obj)) {
               const declared = String(obj.type || "").trim().toLowerCase();
               if (RENDERABLE_CHART_TYPES.has(declared)) chartType = declared;
               title = String(obj.title || "");
+              // ✅ R166：后端本地模板兜底图在载荷里写 source="local"（AI 产物不写键）
+              if (String(obj.source || "").trim().toLowerCase() === "local") source = "local";
             }
           } catch { /* 解析失败按占位卡片显示 */ }
           placeholders.push({
             marker, code: code.trim(), id,
-            json: { chart_type: chartType, title },
+            json: { chart_type: chartType, title, source },
           });
         } else if (lang === "ai_image") {
           // ✅ AI 文生图（对齐 OpenBidKit 的 ai 插图）：生成前显示占位卡片 + 生成按钮
@@ -359,7 +364,10 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
                 const blob = new Blob([resp.data], { type: "image/png" });
                 const url = URL.createObjectURL(blob);
                 objectUrls.push(url);
-                div.innerHTML = `<img src="${url}" alt="${DOMPurify.sanitize(ph.json!.title)}" style="max-width:100%" />`;
+                const _localTag = ph.json!.source === "local"
+                  ? '<div style="display:inline-block;margin-bottom:6px;padding:1px 8px;border:1px solid #faad14;border-radius:10px;background:#fffbe6;color:#ad6800;font-size:12px">模板数据 · 请按项目实际核定</div><br/>'
+                  : "";
+                div.innerHTML = `${_localTag}<img src="${url}" alt="${DOMPurify.sanitize(ph.json!.title)}" style="max-width:100%" />`;
                 div.classList.remove("mmd-ph");
                 div.classList.add("mmd-rendered");
               } catch {

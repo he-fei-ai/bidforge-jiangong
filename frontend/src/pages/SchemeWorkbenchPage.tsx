@@ -56,6 +56,24 @@ import {
 // ✅ 2026-10-05（D5 · 前端常量收敛）：目录层级上限统一取 utils/outlineConstants，
 //    与目录库编辑弹窗共用同一事实源（此前两处各自内联，易漂移）。
 import { MAX_OUTLINE_DEPTH } from "../utils/outlineConstants";
+// ✅ R162（2026-11-01）：目录结构硬性标准（三级最小叶子）前端镜像 —— 红点警告 +
+//    渲染层只画到 L4（四级兼容层）。数值单一事实源在后端 outline_rules（有双向 parity 护栏）。
+import {
+  OUTLINE_MAX_LEVEL,
+  countOutlineViolations,
+  formatOutlineViolationTooltip,
+  outlineViolationsByKey,
+} from "../utils/outlineRules";
+// ✅ R159：四档字数档位前端唯一镜像（真源 backend content_utils.WORD_BUDGET_TIERS）。
+//    档位值/合法 key/预算区间全部取自镜像，页面不再持有字面量副本（双向源码锚锁定）。
+import {
+  DEFAULT_WORD_BUDGET,
+  WORD_BUDGET_MAX,
+  WORD_BUDGET_MIN,
+  WORD_BUDGET_TIER_KEYS,
+  WORD_BUDGET_TIERS,
+  WORD_BUDGET_TIER_VALUE_OF,
+} from "../utils/wordBudgetTiers";
 // ✅ 2026-09-26 解析可信度提示：把后端的「文档被截断 / 预算耗尽被跳过 / 编码降级」
 //    翻译成用户可见的告警。集中在 utils 的纯函数里，避免页面各处拼文案而漂移。
 import { sourceNotice, previewNotices } from "../utils/parseSourceNotice";
@@ -88,6 +106,10 @@ import {
 //  使 contentDegradedTerminal 的 B1/B2 可直连叶子、不再动态 import 本巨型页面。
 import { pollTaskUntilTerminalImpl } from "../utils/taskPolling";
 import { useSchemeLiveTask } from "../hooks/useSchemeLiveTask";
+// ✅ R147（2026-10-30）：两轮次导出（初稿 + 检查修复）hook 与展示面板
+import { useExportFlow } from "../hooks/useExportFlow";
+import { useDelayedCallback } from "../hooks/useDelayedCallback";
+import ExportFlowPanel from "../components/ExportFlowPanel";
 import { useAntdMessageHub } from "../utils/activityCenter";
 // ✅ 2026-09-25：SSE 批量器抽到 utils/sseBatcher.ts（TaskStatusBar 也要复用，
 //  工具函数不再寄生在 9000+ 行的页面文件里）
@@ -136,6 +158,11 @@ import {
   type ExportChartItem,
   type ExportChartImage,
 } from "../utils/exportCharts";
+// ✅ 2026-10-30（R145）可拖拽面板：region 2/3/4（监视区上下切分 + 内部左右切分）
+import { SplitPane } from "../components/resizable/SplitPane";
+import GenTaskListPanel from "../components/resizable/GenTaskListPanel";
+import { RESIZE_NARROW_THRESHOLD } from "../components/resizable/resizableLayout";
+import { useBreakpoint } from "../utils/ui";
 const { Title, Text } = Typography;
 
 // ============================================================
@@ -193,6 +220,11 @@ const LEADING_NUMBER_RE = new RegExp(
     "第\\s*[一二三四五六七八九十百千零0-9]+\\s*[章节]" +   // 第X章 / 第 1 章
     "|[（(][一二三四五六七八九十0-9]+[)）]" +               // （三） / (3)
     "|[0-9]+[)）]" +                                        // 1） / 2）
+    // ✅ 2026-10-31（目录编号与等级修正，与后端 numbering.py 同步）：字母枚举
+    //    子项（"a）" / "b)" / "A）"）—— 旧正则只认「数字 + 右括号」⇒
+    //    "a、a）材料与环保控制参数" 的双重编号永远剥不掉。与数字分支同族：
+    //    必须紧跟右括号，"A4纸" / "A 级防火" 不受影响。
+    "|[a-zA-Z]{1,2}\\s*[)）]" +
     "|(?=([0-9]+(?:\\.[0-9]+)+))\\1(?:" +
       LEADING_NUMBER_SEP + "+|(?=" + LEADING_NUMBER_CJK + "))" +
     "|[0-9]+" + LEADING_NUMBER_SEP + "+(?![0-9])" +          // 单段编号（"1 施工准备"）
@@ -257,13 +289,24 @@ export function formatOutlineTitle(
     number = `${parts[parts.length - 1]}）`;
     sep = "、";
   } else if (level === 7) {
-    // L7: "a" / "b"（小写字母，只用最后一个 part）+ 、分隔
+    // L7: "a" / "b" / …（小写字母，只用最后一个 part）+ 、分隔
+    // ✅ R144（2026-10-29）：字母表与后端 numbering.ALPHABET **同口径**
+    //    （a~z 后接 aa~az 共 52 项）。旧实现硬编码 26 项字母串，L7 在第 26
+    //    项后被 clamp 到 z，而后端 ALPHABET 继续用 aa/ab… → 前后端编号
+    //    分叉（AGENTS「同一判据两份副本」反模式实例）。parity 由
+    //    backend/tests/test_r144_export_unify_20261029.py 跨语言锁定。
     const n = parts[parts.length - 1] || 1;
-    const alphaLetters = "abcdefghijklmnopqrstuvwxyz";
-    const idx = Math.max(0, Math.min(n - 1, alphaLetters.length - 1));
-    number = alphaLetters[idx];
+    const idx = Math.max(0, Math.min(n - 1, 51));
+    // a~z + aa~az（共 52 项），与后端 ALPHABET 逐项一致
+    const alphaLetters = idx < 26
+      ? String.fromCharCode(97 + idx)
+      : "a" + String.fromCharCode(97 + (idx - 26));
+    number = alphaLetters;
     sep = "、";
   } else {
+    // L8+ 与后端 heading_v2.format_heading 同口径：不套编号、只返回裸标题
+    // （R129 起 L8/L9 走自定义 Heading 样式 + outlineLvl，编号由导出侧
+    //   number_body_subheadings 在正文子标题命名空间内处理，目录树不编）。
     return bareTitle;
   }
   return `${number}${sep}${bareTitle}`;
@@ -1554,7 +1597,7 @@ export function outlineToTreeNode(outline: any[], parentPath = "", parentLevel =
       level,
       status: "empty",
       word_count: 0,
-      word_budget: n.word_budget || 1200,
+      word_budget: n.word_budget || DEFAULT_WORD_BUDGET,
       description: n.description || "",
       outlineId,
       children: hasChildren ? outlineToTreeNode(n.children, outlineId, level) : [],
@@ -1613,6 +1656,20 @@ export function buildPartialOutlineHint(opts: {
 }): PartialOutlineHint {
   const isErr = opts.event === "error" || opts.event === "failed";
   const n = Math.max(0, Number(opts.nodeCount) || 0);
+  // ✅ 口径补齐（2026-10-28 · R140 遗留 L5）：`partial` 声明后从未消费（死参）。
+  //    现用它区分「部分成果」（默认）与「完整结果」（partial === false）。
+  //    · partial === false → 完整结果：文案不再用「已生成部分」误导用户补章。
+  //    · partial 为 true / undefined → 部分成果（保守；旧 checkpoint 无该键时
+  //      视作部分成果，与 R139 断线 partial 缺键修复同口径）。
+  if (opts.partial === false) {
+    return {
+      title: "目录生成完成",
+      content: `目录已完整生成 ${n} 个章节节点，可直接保存使用。`,
+      okText: "保存目录",
+      cancelText: "不保存",
+      tone: "info",
+    };
+  }
   const prefix = `检测到已生成 ${n} 个章节节点尚未保存。`;
   const cause = isErr
     ? "本次生成因 AI 服务异常中断，成果可能不完整：建议先按需补齐缺失章节，再考虑重试整章。"
@@ -1694,9 +1751,12 @@ export function OutlineTreeActions({
   );
 }
 
-/** 字数预算的合法区间（与后端 sectionsApi.update 的整数语义一致，超限会被服务端拒绝） */
-export const WORD_BUDGET_MIN = 50;
-export const WORD_BUDGET_MAX = 50000;
+/**
+ * 字数预算的合法区间（前端 UX 约定，真值收敛至 utils/wordBudgetTiers 唯一镜像）。
+ * ⚠️ R159 核对修正：后端 SectionUpdate.word_budget 为裸 int、**无范围校验**，
+ * 旧注释「超限会被服务端拒绝」失实 —— 本区间仅约束前端输入，超限服务端照收。
+ */
+export { WORD_BUDGET_MIN, WORD_BUDGET_MAX };
 
 /**
  * 选中章节的「字数预算」编辑面板（模块级导出，行为由 outlineTab.test 钉住）。
@@ -1719,7 +1779,7 @@ export const OutlineNodeBudgetPanel = memo(function OutlineNodeBudgetPanel({
   node: TreeNode;
   onBudgetChange: (key: string, budget: number) => void;
 }) {
-  const current = node.word_budget || 1200;
+  const current = node.word_budget || DEFAULT_WORD_BUDGET;
   const [draft, setDraft] = useState<number>(current);
   // 选中章节切换 / 预算被外部改动（如 load 刷新）时同步草稿
   useEffect(() => {
@@ -2661,6 +2721,105 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(p: Ge
   );
 });
 
+// ✅ R146（2026-10-30）：导出 Tab 右栏「所见即所得预览」——
+//   封面信息 / 目录结构 / 选中章节正文三段，随 Form 配置（Form.useWatch）实时刷新，
+//   避免"改完版式必须真导出一次 DOCX 才能看效果"。
+function ExportPreviewPane({
+  form,
+  schemeName,
+  tree,
+  selectedSection,
+}: {
+  form: any;
+  schemeName?: string;
+  tree: TreeNode[];
+  selectedSection: any;
+}) {
+  const values = (Form.useWatch([], form) as any) || {};
+  const cover = values.cover_info || {};
+  // ✅ useMemo：目录节点在页面高频重渲（进度 tick / 日志）时不重复遍历 + 重算编号
+  const tocNodes = useMemo(() => {
+    const out: any[] = [];
+    const walk = (nodes: TreeNode[], depth: number) => {
+      nodes.forEach((n) => {
+        out.push(
+          <div
+            key={n.key}
+            style={{
+              fontSize: depth <= 1 ? 13 : 12,
+              fontWeight: depth <= 1 ? 600 : 400,
+              paddingLeft: Math.min(depth, 6) * 14,
+              lineHeight: 1.9,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+            title={formatOutlineTitle(n.outlineId || n.key, n.level, n.title)}
+          >
+            {formatOutlineTitle(n.outlineId || n.key, n.level, n.title)}
+          </div>,
+        );
+        if (n.children?.length) walk(n.children, depth + 1);
+      });
+    };
+    walk(tree, 0);
+    return out;
+  }, [tree]);
+  return (
+    <>
+      <Card size="small" title="封面预览" style={{ marginBottom: 8 }} styles={{ body: { padding: 12 } }}>
+        <div style={{ textAlign: "center", padding: "8px 0" }}>
+          <div style={{ fontSize: 15, fontWeight: 700 }}>{cover["工程名称"] || schemeName || "（未填写工程名称）"}</div>
+          <div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>
+            {cover["方案编号"] ? `方案编号：${cover["方案编号"]}` : ""}
+          </div>
+          <div style={{ fontSize: 12, color: "#666" }}>
+            {cover["编制单位"] ? `编制单位：${cover["编制单位"]}` : ""}
+          </div>
+          <div style={{ fontSize: 12, color: "#666" }}>
+            {cover["版本"] ? `版本：${cover["版本"]}` : ""}
+          </div>
+        </div>
+        <Space wrap size={4} style={{ marginTop: 8 }}>
+          <Tag>{values.font_name || "宋体"} · {values.font_size || 12}pt</Tag>
+          <Tag color={values.show_title_page ? "green" : "default"}>封面页{values.show_title_page ? "开" : "关"}</Tag>
+          <Tag color={values.show_toc ? "green" : "default"}>目录页{values.show_toc ? "开" : "关"}</Tag>
+          <Tag color={values.show_page_number ? "green" : "default"}>页码{values.show_page_number ? "开" : "关"}</Tag>
+          <Tag>行距 {values.line_spacing || 1.15}</Tag>
+        </Space>
+      </Card>
+      <Card
+        size="small"
+        title={<Space size={4}><FileTextOutlined /><Text strong>目录结构预览</Text><Tag color="blue">{collectAllKeys(tree).length} 节点</Tag></Space>}
+        style={{ marginBottom: 8 }}
+        styles={{ body: { padding: "8px 12px", maxHeight: "38vh", overflowY: "auto" } }}
+      >
+        {tocNodes.length ? tocNodes : <Text type="secondary" style={{ fontSize: 12 }}>目录为空，请先在「目录生成」页生成或导入目录</Text>}
+      </Card>
+      <Card
+        size="small"
+        title={<Space size={4}><FileTextOutlined /><Text strong>章节正文预览</Text></Space>}
+        styles={{ body: { padding: 12 } }}
+      >
+        {selectedSection ? (
+          <>
+            <Text strong style={{ fontSize: 13 }}>
+              {formatOutlineTitle(selectedSection.outlineId || selectedSection.key, selectedSection.level, selectedSection.title)}
+            </Text>
+            <div style={{ marginTop: 8 }}>
+              <MarkdownRenderer content={selectedSection.content || "（本章尚未生成正文）"} />
+            </div>
+          </>
+        ) : (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            在左侧目录树或「正文生成」页选中章节后，此处显示该章正文预览（导出将按同一份 Markdown 渲染）
+          </Text>
+        )}
+      </Card>
+    </>
+  );
+}
+
 // ✅ P0-5 组件拆分：左侧目录树面板独立 memo 组件——生成期间进度/日志更新
 //    不再带动树与右侧 Tab 重渲；回调均以稳定引用传入
 type SchemeTreePanelProps = {
@@ -2692,6 +2851,8 @@ type SchemeTreePanelProps = {
   setRenamingValue: (v: string) => void;
   /** 左侧树滚动容器 ref（由父组件持有，编辑树移动时同步定位用） */
   scrollRef: React.RefObject<HTMLDivElement>;
+  /** ✅ R145：面板宽度（默认 300；放入可拖拽首面板时传 "100%" 撑满） */
+  width?: number | string;
 };
 
 const SchemeTreePanel = memo(function SchemeTreePanel(p: SchemeTreePanelProps) {
@@ -2702,6 +2863,7 @@ const SchemeTreePanel = memo(function SchemeTreePanel(p: SchemeTreePanelProps) {
     moveFlags, onMoveNode, onRenameNode, onDeleteNode,
     onAddChildNode, onAddSiblingNode, onSaveOutline,
     renamingKey, renamingValue, setRenamingKey, setRenamingValue, scrollRef,
+    width = 300,
   } = p;
   // ✅ 编辑增强：左侧树滚动容器（ref 由父组件持有，编辑树移动时同步定位）
   const handleMoveNode = (key: string, dir: -1 | 1) => {
@@ -2711,7 +2873,7 @@ const SchemeTreePanel = memo(function SchemeTreePanel(p: SchemeTreePanelProps) {
   return (
     <div
       style={{
-        width: 300,
+        width,
         flexShrink: 0,
         background: "#fafafa",
         border: "1px solid #f0f0f0",
@@ -2768,7 +2930,7 @@ const SchemeTreePanel = memo(function SchemeTreePanel(p: SchemeTreePanelProps) {
 
       {/* 树（本面板只做"章节导航"，目录的生成/编辑统一在「目录生成」Tab；
           但为编辑便利，行内提供上移/下移按钮，复用与右侧编辑树同一套 moveNode 逻辑） */}
-      <div ref={scrollRef} className="scroll-area" style={{ flex: 1, overflow: "auto", padding: "8px 4px", minHeight: 0 }}>
+      <div ref={scrollRef} className="scroll-area bp-pane-scroll" style={{ flex: 1, overflow: "auto", padding: "8px 4px", minHeight: 0 }}>
         {/* ✅ 编辑增强：左侧树行内操作按钮默认隐藏，悬浮行时淡入，
             小屏/窄面板下显著省空间（悬浮即"折叠/展开"） */}
         <style>{`
@@ -3008,6 +3170,12 @@ export const EXPORT_STAGE_LABEL: Record<"idle" | "charts" | "docx", string> = {
 
 /** 阶段在总流程中的序号（1 起，idle 不参与）。 */
 export const EXPORT_STAGE_ORDER: Record<string, number> = { charts: 1, docx: 2 };
+// ✅ R143（2026-10-29 · 跨模块深度收口 · BUG-2）：导出阶段总数。R126 下线 PDF 后
+//    EXPORT_STAGE_ORDER 只剩 2 阶段，但进度文案分母仍硬编码 `/3`（永远少显示 1）。
+//    在**模块作用域**算一次（React Compiler 不编译模块级代码，避免 `Object.keys`
+//    在组件渲染内触发 "Compilation Skipped: Existing memoization could not be preserved"）；
+//    新增阶段时自动跟随，无需再手改分母。
+export const EXPORT_STAGE_COUNT = Object.keys(EXPORT_STAGE_ORDER).length;
 
 /** 导出配置深合并（2026-10-06 · P0「折叠面板配置被静默丢弃」修复的配套纯函数）。
  *
@@ -3430,16 +3598,19 @@ export function FactsCategoryPanel({
   totalItems,
   selected,
   onSelect,
+  // ✅ R145：与 SchemeTreePanel 同口径，放入可拖拽首面板时传 "100%" 撑满
+  width = 300,
 }: {
   entries: FactsCategoryEntry[];
   totalItems: number;
   selected: string | null;
   onSelect: (category: string) => void;
+  width?: number | string;
 }) {
   return (
     <div
       style={{
-        width: 300,
+        width,
         flexShrink: 0,
         background: "#fafafa",
         border: "1px solid #f0f0f0",
@@ -3467,7 +3638,7 @@ export function FactsCategoryPanel({
           <Tag color="blue" style={{ margin: 0 }}>{totalItems} 项</Tag>
         )}
       </div>
-      <div className="scroll-area" style={{ flex: 1, overflow: "auto", padding: "8px 8px", minHeight: 0 }}>
+      <div className="scroll-area bp-pane-scroll" style={{ flex: 1, overflow: "auto", padding: "8px 8px", minHeight: 0 }}>
         {entries.length === 0 ? (
           <div style={{ textAlign: "center", padding: "24px 8px", color: "#999", fontSize: 13 }}>
             暂无提取结果
@@ -4404,6 +4575,11 @@ const draftKey = selectedSection && id
   }
   // ✅ 全局事实上传提取取消控制器：组件卸载时取消进行中的上传，避免 net::ERR_ABORTED 控制台噪音
   const uploadAbortRef = useRef<AbortController | null>(null);
+  // ✅ R157（2026-11-01 · L1 收口）：页面入口与 UploadParseTab 的延后触发定时器
+  //    此前各持一份手工 timer 副本（R136 修组件、R144 修页面，两次都先漏一边）
+  //    —— 收敛到 useDelayedCallback 单一实现，幽灵上传纪律不再依赖平行入口
+  //    逐个记忆。
+  const uploadTrigger = useDelayedCallback();
   // ✅ 文档解析取消控制器：解析（尤其 OCR）耗时可达数分钟，卸载/切方案时中断请求
   const parseAbortRef = useRef<AbortController | null>(null);
   // ✅ FIX-7（2026-10-20 · P1 · 预览/管线概览竞态）：预览与四层管线概览此前
@@ -5015,6 +5191,13 @@ const draftKey = selectedSection && id
     return () => {
       abortControllerRef.current?.abort();
       uploadAbortRef.current?.abort();
+      // ✅ R144（2026-10-29）：卸载时清掉「① 上传文件保存」入口的延后定时器 +
+      //    置空 uploadAbortRef —— 否则 handleUploadDocuments 的 finally 里
+      //    `uploadAbortRef.current === ac` 仍成立（卸载只 abort 未清引用），会在
+      //    已卸载组件上执行 setUploadingFacts(false)/setUploadedFiles([])（卸载后
+      //    setState）。与 previewSeqRef 的「卸载丢弃在途响应」同口径。
+      uploadTrigger.clear();
+      uploadAbortRef.current = null;
       parseAbortRef.current?.abort();
       // ✅ FIX-7（2026-10-20 · P1 · 预览/管线概览卸载清理）：与上方同类
       //    AbortController 同口径 —— 预览与四层管线概览此前**无 abort、无序号
@@ -5178,10 +5361,32 @@ const draftKey = selectedSection && id
             } else {
               stuckAtFull = 0;
             }
-          } catch {
+          } catch (e: any) {
+            // ✅ R141（2026-10-28 · 接管循环错误复位）：旧实现在**任意一次**
+            //    任务状态查询失败（瞬时网络抖动 / 5xx / 404 任务已清理）时直接
+            //    `return`，且**不调用 resetTakeover()** —— 而 `resetTakeover` 只在
+            //    终态 / stuck-at-full 分支被调用。后果：刷新页面接管后台任务后，
+            //    一旦状态接口失败一次，`generating=true` / `genType` / `taskPaused`
+            //    永久保持，页面停在「生成中」，暂停/停止按钮控制的是已失效任务，
+            //    唯一出口是手动刷新。对照同文件的断线重连路径（reattachTaskImpl +
+            //    pollTaskUntilTerminalImpl）早已收敛到 netFailTolerance 分级 + 有界
+            //    退出，本条内联循环是**第三套**未收敛实现（漂移温床，R139 教训）。
+            //    最小修复：任何查询失败都复位接管状态，绝不把界面留在「生成中」。
+            //    （后台任务不受影响，仍在跑；用户可再次刷新重新接管。）
+            console.warn(`resume: 接管任务 ${active.id} 状态查询失败（${e?.message || e}），放弃接管并复位`, e);
+            resetTakeover();
             return;
           }
         }
+        // ✅ R141（2026-10-28 · 有界退出复位）：接管轮询跑满 400 次（≈20 分钟）
+        //    仍未达终态（超长任务 / 后端状态列陈旧 / 进度停在 0.95 的目录僵尸）时，
+        //    旧实现**静默退出**且不调用 resetTakeover() —— 与上方 catch 分支同类
+        //    缺陷：`generating=true` / `genType` / `taskPaused` 永久保持，界面停在
+        //    「生成中」。收敛到 pollTaskUntilTerminalImpl 的「maxPolls 有界退出」
+        //    语义：先告警再复位，绝不把界面留在「生成中」；后台任务若仍在跑，
+        //    用户可再次刷新重新接管（本轮修复后此路径不再挂死 20 分钟后的状态）。
+        console.warn(`resume: 接管任务 ${active.id} 轮询 400 次（约 20 分钟）未达终态，放弃接管并复位`);
+        resetTakeover();
       } catch {
         /* 接口异常静默 */
       }
@@ -5263,6 +5468,13 @@ const draftKey = selectedSection && id
         outlineId,
         // ✅ 2026-09-29：事实变更失效标记（后端 _build_tree 读侧派生）
         facts_stale: !!n.facts_stale,
+        // ✅ R149（FIX-L）：补齐后端 _build_tree 已下发、TreeNode 已声明、
+        //    但本映射一直漏拷贝的三个字段 —— 刷新后「章节级生成标准」选择器
+        //    显示错值（实际 fuzzy 显示成沿用方案级）、字数状态归空，直到下一次
+        //    SSE 事件才被补丁写回（字段声明了 ≠ 会装配，跨模块字段丢失家族）。
+        word_status: n.word_status || "",
+        generation_standard: n.generation_standard || "",
+        last_generation_standard: n.last_generation_standard || "",
         children: n.children ? buildTree(n.children) : [],
       };
     });
@@ -5810,14 +6022,15 @@ const draftKey = selectedSection && id
   };
 
   /**
-   * ✅ R66（2026-10-11）四档字数控制：档位数值表（与后端真源
-   * content_utils.WORD_BUDGET_TIERS 一致，前端仅用于预估展示）。
+   * ✅ R66（2026-10-11）四档字数控制：档位数值表前端仅用于预估展示。
+   * ✅ R159：数值真源收敛至 utils/wordBudgetTiers 唯一镜像（与后端
+   * content_utils.WORD_BUDGET_TIERS 双向源码锚锁定），此处不再持有字面量副本。
    */
-  const WORD_BUDGET_TIER_VALUES: Record<string, number> = { brief: 800, standard: 1200, detailed: 2000, ultra: 2500 };
+  const WORD_BUDGET_TIER_VALUES: Record<string, number> = WORD_BUDGET_TIER_VALUE_OF;
 
   /** 选中档位（brief/standard/detailed/ultra）→ word_budget_tier；其余返回 undefined */
   function resolveWordBudgetTier(): string | undefined {
-    return ["brief", "standard", "detailed", "ultra"].includes(wordBudgetOption)
+    return (WORD_BUDGET_TIER_KEYS as readonly string[]).includes(wordBudgetOption)
       ? wordBudgetOption
       : undefined;
   }
@@ -5873,7 +6086,7 @@ const draftKey = selectedSection && id
     // forceRewrite=true 时不过滤
 
     filtered.forEach((l) => {
-      const budget = wbTier || wbOverride || l.word_budget || 1200;
+      const budget = wbTier || wbOverride || l.word_budget || DEFAULT_WORD_BUDGET;
       totalBudget += budget;
       if (hasContent(l)) willOverwrite++;
       missingCount++;
@@ -6041,7 +6254,7 @@ const draftKey = selectedSection && id
   function handleShrinkCurrentSection() {
     if (!id || !selectedSection) return;
     const wc = selectedSection.word_count || 0;
-    const budget = selectedSection.word_budget || 1200;
+    const budget = selectedSection.word_budget || DEFAULT_WORD_BUDGET;
     if (wc <= budget) {
       msg.info(`当前字数 ${wc} 未超出目标 ${budget}，无需压缩`);
       return;
@@ -6951,6 +7164,12 @@ const draftKey = selectedSection && id
   const handleUploadDocuments = async (files: File[]) => {
     if (!id || files.length === 0) return;
     if (uploadingFacts) return;
+    // ✅ R144（2026-10-29，P2）：防重入只查 uploadingFacts，漏了解析并发 ——
+    //    单份/批量解析进行中（OCR 可达数分钟）仍可发起上传；若上传同名文件，
+    //    后端 upload_documents 会删除并替换正在解析的文档，解析链路读到已被
+    //    unlink 的旧文件，四层产物错乱。与 handleParseDocument/handleParseDocuments
+    //    的 `parsingDocs || parsingDocId` 防重入口径对齐。
+    if (parsingDocs || parsingDocId) return;
     // ✅ 单文件硬校验（2026-10-05）：`accept` 属性只过滤文件选择框，拖拽与
     //    「① 上传文件保存」按钮这条入口可绕过。不做这一步的话，超限 / 非法
     //    扩展名的文件会被整批发给后端再逐个拒绝 —— 用户白等一轮上传，
@@ -7749,11 +7968,12 @@ const draftKey = selectedSection && id
     const newLevel = parentKey
       ? (findSectionById(curTree, parentKey)?.level || 0) + 1
       : 1;
-    // ✅ BUG 修复：目录系统硬性限三级（后端 MAX_OUTLINE_DEPTH=3），在三级章节下
-    // 添加的四级节点保存时会被静默裁剪并入父章节描述——用户以为加成功了，
-    // 保存后节点"消失"。这里在添加入口直接拦截并说明。
+    // ✅ BUG 修复：目录系统硬性限级（R162 起三级为最小叶子、四级仅兼容层，后端
+    // MAX_OUTLINE_DEPTH=4），在四级章节下添加的五级节点保存时会被静默裁剪
+    // 并入父章节描述——用户以为加成功了，保存后节点"消失"。这里在添加入口
+    // 直接拦截并说明。
     if (newLevel > MAX_OUTLINE_DEPTH) {
-      msg.warning(`目录最多支持 ${MAX_OUTLINE_DEPTH} 级，无法在三级章节下继续添加子章节`);
+      msg.warning(`目录最多支持 ${MAX_OUTLINE_DEPTH} 级，无法在四级章节下继续添加子章节`);
       return;
     }
     const newNode: TreeNode = {
@@ -7762,7 +7982,7 @@ const draftKey = selectedSection && id
       level: newLevel,
       status: "empty",
       word_count: 0,
-      word_budget: 1200,
+      word_budget: DEFAULT_WORD_BUDGET,
       children: [],
     };
     // ✅ BUG 修复（2026-10-07 · 新增节点编号不同步）：新增节点本身不带 outlineId
@@ -7806,7 +8026,7 @@ const draftKey = selectedSection && id
       level: newLevel,
       status: "empty",
       word_count: 0,
-      word_budget: 1200,
+      word_budget: DEFAULT_WORD_BUDGET,
       children: [],
     };
     // 插入到参照节点之后（同父层级），保留其余结构
@@ -8004,18 +8224,18 @@ const draftKey = selectedSection && id
   /** 保存当前目录树到后端（含自动编号） */
   const saveOutlineTree = useCallback(async () => {
     if (!id) return;
-    // ✅ BUG 修复：手动编辑/拖拽可能产生 4 级及更深节点，后端 normalize_outline
-    // 会静默裁剪并把深层标题并入父章节描述——用户"保存成功"后节点消失却无提示。
-    // 现保存前检测并二次确认，让用户知情。
+    // ✅ BUG 修复：手动编辑/拖拽可能产生 5 级及更深节点（R151 起上限为四级），
+    // 后端 normalize_outline 会静默裁剪并把深层标题并入父章节描述——用户
+    // "保存成功"后节点消失却无提示。现保存前检测并二次确认，让用户知情。
     if (hasDeepOutlineNodes(treeRef.current)) {
       modal.confirm({
-        title: "目录包含超过三级的章节",
+        title: "目录包含超过四级的章节",
         content: (
           <div>
-            系统目录最多支持 <b>三级</b>。保存时，三级以下的深层章节标题将
+            系统目录最多支持 <b>四级</b>（三级为最小叶子章节，四级仅作兼容层）。保存时，四级以下的深层章节标题将
             <b>自动并入其父章节的章节说明</b>，不会作为独立章节保留。
             <br />
-            如需保留这些内容，请先取消并手动将其调整为二级/三级章节。
+            如需保留这些内容，请先取消并手动将其调整为二级/三级/四级章节。
           </div>
         ),
         okText: "仍然保存",
@@ -8054,19 +8274,43 @@ const draftKey = selectedSection && id
   function handleBudgetChange(key: string, budget: number) {
     const node = findSectionById(tree, key);
     if (!node) return;
-    setTree(updateNodeFields(tree, key, { word_budget: budget }));
+    // ✅ R152（2026-11-01）：三级节点的预算按 R151「四档直接作用于 L3」语义
+    //    级联到全部叶子后代（本地树立即同步 + 服务端 cascade_word_budget 一次写）。
+    //    否则 L3 面板改预算只改标题行数字，生成仍按叶子旧预算走。
+    const cascade = node.level === 3 && (node.children?.length ?? 0) > 0;
+    const descendantKeys: string[] = [];
+    if (cascade) {
+      const walkDescendants = (n: TreeNode) => (n.children ?? []).forEach((c) => {
+        descendantKeys.push(c.key);
+        walkDescendants(c);
+      });
+      walkDescendants(node);
+    }
+    let nextTree = updateNodeFields(tree, key, { word_budget: budget });
+    for (const dk of descendantKeys) {
+      nextTree = updateNodeFields(nextTree, dk, { word_budget: budget });
+    }
+    setTree(nextTree);
     setSelectedSection((prev: TreeNode | null) =>
       prev && prev.key === key ? { ...prev, word_budget: budget } : prev
     );
     if (isUnsavedLocalKey(key)) {
-      flashReorderHint("字数预算已本地调整，点击「保存目录」后生效");
+      flashReorderHint(
+        cascade
+          ? `字数预算已本地调整并级联 ${descendantKeys.length} 个子节，点击「保存目录」后生效`
+          : "字数预算已本地调整，点击「保存目录」后生效");
       return;
     }
     if (!id) return;
     sectionsApi
-      .update(id, key, { word_budget: budget })
+      .update(id, key, {
+        word_budget: budget,
+        ...(cascade ? { cascade_word_budget: true } : {}),
+      })
       .then(() => {
-        flashReorderHint(`「${node.title}」字数预算已更新为 ${budget} 字`);
+        flashReorderHint(
+          `「${node.title}」字数预算已更新为 ${budget} 字` +
+            (cascade ? `（已级联 ${descendantKeys.length} 个下级子节）` : ""));
       })
       .catch((err: any) => {
         msg.warning(
@@ -8313,6 +8557,39 @@ const draftKey = selectedSection && id
 
   // （outlineToTreeNode 已提升至模块级导出，行为由 outlineTab 测试钉住）
 
+  // ✅ R151 引入 / R162 标准翻新（2026-11-01）目录标准化修复：正文生成前置闸门
+  //    拒绝不合规目录时，用户从这里一键 AI 补齐/精简到硬性标准
+  //    （L1 下 3~5 个 L2、L2 下 3~5 个 L3；L3 为最小叶子）。
+  //    后端**不落库**（与 adjust-outline 同契约）：结果载入编辑树作为未保存
+  //    变更，用户确认后仍走既有「保存目录」落库（正文按标题匹配智能保留）。
+  const [standardizingOutline, setStandardizingOutline] = useState(false);
+  const handleStandardizeOutline = async () => {
+    if (!scheme || standardizingOutline) return;
+    const hide = msg.loading("正在 AI 标准化目录结构（补齐/精简到三级叶子标准）…", 0);
+    setStandardizingOutline(true);
+    try {
+      const { data } = await sectionsApi.standardizeOutline(scheme.id);
+      if (data.compliant && !data.outline) {
+        msg.success(data.message || "目录已符合硬性标准，无需修复");
+        return;
+      }
+      const newTree = outlineToTreeNode(data.outline);
+      setTree(newTree);
+      setSelectedSection(null);
+      setExpandedKeys(collectAllKeys(newTree));
+      if (data.compliant) {
+        msg.success(data.message || "目录已修复到硬性标准，请检查后保存目录");
+      } else {
+        msg.warning(data.message || "AI 修复后仍有违规项，请手工调整红点节点后保存");
+      }
+    } catch (e: any) {
+      msg.error(e?.response?.data?.detail || e?.message || "目录标准化修复失败");
+    } finally {
+      hide();
+      setStandardizingOutline(false);
+    }
+  };
+
   // （renumberTreeLocally 已提升至模块级导出）
 
   /** 目录树拖拽排序 */
@@ -8409,6 +8686,8 @@ const draftKey = selectedSection && id
   // ✅ 编辑增强：编辑树 / 左侧导航树滚动容器 ref，用于移动后滚动定位到目标节点
   const editTreeScrollRef = useRef<HTMLDivElement>(null);
   const leftTreeScrollRef = useRef<HTMLDivElement>(null);
+  // ✅ R146：审核预检右栏滚动容器 —— 左侧「问题清单」点击后在此容器内定位到对应检查卡
+  const reviewDetailScrollRef = useRef<HTMLDivElement>(null);
   function flashReorderHint(msg = "目录顺序已调整，编号已实时更新（记得点击「保存目录」同步到服务端）") {
     setReorderHint(msg);
     if (reorderHintTimer.current) window.clearTimeout(reorderHintTimer.current);
@@ -8433,6 +8712,19 @@ const draftKey = selectedSection && id
   //    每节点 O(失败章数) 子串匹配。配合下方 outlineEditTreeData 的 useMemo，
   //    无关 state（progress / sectionLogs / genStats …）变化时整棵编辑树不再重算。
   // ⚠️ 必须定义在 renameNode 与 moveFlags 之后：deps 数组是立即求值，前向引用会 TDZ。
+  // ✅ R162（2026-11-01）目录结构合规红点：按节点 key 聚合违规
+  //    （L1/L2 子节点数 3~5/3~5、三级即最小叶子、四级兼容层不得有子级），
+  //    数量不达标/超深的节点在左右两棵树上标红（只提示不阻断；
+  //    正文生成会被后端前置闸门拒绝，由「修复目录结构」一键标准化）。
+  const outlineViolations = useMemo(
+    () => outlineViolationsByKey(tree),
+    [tree],
+  );
+  const outlineViolationCount = useMemo(
+    () => countOutlineViolations(outlineViolations),
+    [outlineViolations],
+  );
+
   const convertToEditTree = useCallback((node: TreeNode): any => {
     const isGenerated = node.status === "generated" || node.word_count > 0;
     const isGenerating = node.status === "running" || node.status === "pending";
@@ -8528,6 +8820,18 @@ const draftKey = selectedSection && id
                   </Tag>
                 </Tooltip>
               )}
+              {/* ✅ R151：结构不合规红点（子节点数量/深度违规），只提示不阻断 */}
+              {(outlineViolations.get(node.key)?.length ?? 0) > 0 && (
+                <Tooltip title={formatOutlineViolationTooltip(outlineViolations.get(node.key)!)}>
+                  <Tag
+                    color="error"
+                    icon={<ExclamationCircleOutlined />}
+                    style={{ margin: "0 0 0 8px", fontSize: 11, lineHeight: "16px", cursor: "help" }}
+                  >
+                    结构违规
+                  </Tag>
+                </Tooltip>
+              )}
               <span
                 style={{
                   marginLeft: "auto",
@@ -8566,9 +8870,14 @@ const draftKey = selectedSection && id
           )}
         </div>
       ),
-      children: node.children?.map((c) => convertToEditTree(c)),
+      // ✅ R162：渲染层只画到 L4（四级兼容层）—— 更深节点数据保留在 tree
+      //    （保存/生成链路不受影响），仅不渲染；后端落库前已把 >4 级裁剪进父级
+      //    description，此处是接口直写脏数据的显示兜底。
+      children: node.children
+        ?.filter((c) => c.level <= OUTLINE_MAX_LEVEL)
+        .map((c) => convertToEditTree(c)),
     };
-  }, [moveFlags, moveNode, renameNode, failedOutlineChapters, renamingKey, renamingValue]);
+  }, [moveFlags, moveNode, renameNode, failedOutlineChapters, renamingKey, renamingValue, outlineViolations]);
 
   // ✅ 性能优化：编辑树数据 useMemo 化。旧实现在组件顶层无条件 `tree.map(...)` ——
   //    300 节点 = 每次整页渲染都重建全量树元素，且与 outline Tab 是否激活无关
@@ -9140,6 +9449,33 @@ exportPctRef.current = pct;
     msg.info("已发送停止指令，服务端将在当前步骤边界退出");
   };
 
+  // ✅ R147（2026-10-30）：两轮次导出（第一轮初稿 + 第二轮检查修复 → 终稿下载）。
+  //    进度/修复项/报告全部收敛在 useExportFlow（SSE），与旧导出并行独立、互不共享锁。
+  const exportFlow = useExportFlow({ schemeId: id || "", msg });
+  const handleExportFlow = useCallback(async () => {
+    if (!id || exportFlow.running) return;
+    const sid = id;
+    try {
+      // 与 handleExport 同口径：折叠面板配置深合并 + mermaid 统一渲染轨
+      const validated = await exportForm.validateFields();
+      const config = deepMergeExportConfig(exportForm.getFieldsValue(true), validated);
+      let chartImages: ExportChartImage[] = [];
+      try {
+        const { data } = await chartsApi.list(sid);
+        const items: ExportChartItem[] = selectPlacedExportCharts(data.items || [])
+          .map((p: any) => ({ chart_type: p.chart_type, mermaid_code: p.code }));
+        chartImages = await renderChartsForExport(items);
+      } catch {
+        // 图表预渲染失败不阻断：后端渲染轨兜底
+      }
+      await exportFlow.start(config, chartImages);
+    } catch (e: any) {
+      if (e?.errorFields) return; // 表单校验失败：antd 已就地提示
+      msg.error(e?.message || "两轮次导出启动失败");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, exportFlow.running, exportForm, msg]);
+
   const handleExportCheck = async () => {
     // ✅ R-3（2026-10-04）：同步锁，与 handleExport 的 exportingRef 同型。
     //    React 状态更新异步批处理，仅靠 exportCheckAbortRef 中止旧请求不够——
@@ -9289,6 +9625,12 @@ exportPctRef.current = pct;
               <div>层级：L{node.level}</div>
               <div>状态：{isGenerated ? "已生成" : isFailed ? "生成失败" : isGenerating ? "生成中" : "未生成"}</div>
               <div>字数：{node.word_count}/{node.word_budget}</div>
+              {/* ✅ R151：结构不合规节点在悬浮提示里给出具体违规项 */}
+              {(outlineViolations.get(node.key)?.length ?? 0) > 0 && (
+                <div style={{ color: "#ff4d4f" }}>
+                  结构违规：{formatOutlineViolationTooltip(outlineViolations.get(node.key)!)}
+                </div>
+              )}
             </div>
           }
           placement="right"
@@ -9304,6 +9646,10 @@ exportPctRef.current = pct;
             background: rowBg,
           }}>
             {statusIcon}
+            {/* ✅ R151：结构不合规红点（红点 = 该节点子节点数量/深度违规） */}
+            {(outlineViolations.get(node.key)?.length ?? 0) > 0 && (
+              <span style={{ color: "#ff4d4f", fontSize: 12, lineHeight: 1 }}>●</span>
+            )}
             {node.level > 1 && <span style={{ color: "#bfbfbf" }}>·</span>}
             <span style={{
               fontWeight: node.level === 1 ? 600 : 400,
@@ -9323,9 +9669,12 @@ exportPctRef.current = pct;
           </span>
         </Tooltip>
       ),
-      children: node.children?.map((c) => convertToAntTree(c, depth + 1)),
+      // ✅ R151：渲染层只画到 L4（与编辑树同口径；数据保留、仅不渲染）
+      children: node.children
+        ?.filter((c) => c.level <= OUTLINE_MAX_LEVEL)
+        .map((c) => convertToAntTree(c, depth + 1)),
     };
-  }, [failedOutlineChapters]);
+  }, [failedOutlineChapters, outlineViolations]);
 
   const treeData = useMemo(() => tree.map((n) => convertToAntTree(n)), [tree, convertToAntTree]);
 
@@ -9487,6 +9836,271 @@ exportPctRef.current = pct;
     [baSummary, baItems, baDefs],
   );
 
+  // ✅ R145/R146 可拖拽工作区：窄屏（<1024px）禁用拖拽、降级为单列堆叠。
+  //    必须在此处声明 —— tabItems 内部各 Tab 的 SplitPane 都要读它，
+  //    声明放在 tabItems 之后会触发 const 的 TDZ 引用错误。
+  const { width: viewportWidth } = useBreakpoint();
+  const narrowWorkbench = viewportWidth < RESIZE_NARROW_THRESHOLD;
+
+  // ✅ 2026-10-31 版式调整（解析提取页）：
+  //   1. 主标签栏（解析提取…导出文档）与「文档解析 / 项目提取」子标签栏同一行（子栏在其右侧）；
+  //   2. 左栏「解析信息分类」卡片提到 Tabs 外层，顶部与主标签栏顶部齐平。
+  //   宽屏由 workbenchTabsCard 的左右 SplitPane 承载（左=分类卡，右=标签栏+内容）；
+  //   窄屏（<1024px）降级仍是原来的「子标签栏 → 左卡 → 内容」上下堆叠。
+  const importCategoryPanel = (
+    <Card
+      size="small"
+      style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}
+      styles={{ body: { flex: 1, minHeight: 0, padding: 4, overflow: "hidden" } }}
+      title={
+        <Space size={4}>
+          <AppstoreOutlined />
+          <Text strong>
+            {importSubTab === "docs"
+              ? "解析信息分类"
+              // ✅ 口径与右侧面板（baScopeText）同源：按已加载的提取项定义实报条数。
+              //    旧实现写死「18 项结构化提取」，后端增减项后标题即失真
+              //    （同 UploadParseTab 与 BidAnalysisTab 已修过的硬编码）。
+              //    定义未加载时不报数，只说「结构化提取」。
+              : baDefs.length
+                ? `${baDefs.length} 项结构化提取`
+                : "结构化提取"}
+          </Text>
+          <Tag color="blue">{(baGroups || []).length} 分类</Tag>
+        </Space>
+      }
+    >
+      {importSubTab === "docs" ? (
+        <ParseResultCategoryPanel
+          variant="list-only"
+          groups={baGroups}
+          items={baItems}
+          selectedItem={selectedBaItem ?? null}
+          loading={baLoading}
+          error={baError}
+          sharedState={sharedParseState}
+          onSelectItem={setSelectedBaItem}
+          onEditItem={openBaEdit}
+          onOpenFullView={setBaFullItem}
+          onRefresh={baRefreshResults}
+        />
+      ) : (
+        /* extract 子 Tab 下：提取项扁平清单（受控组件 BaItemFlatList），
+           每项状态口径与后端 success/error/idle/running + isMissingBaResult 对齐，
+           点击切换到右侧 BidAnalysisTab 中对应项的详情 */
+        <BaItemFlatList
+          defs={baDefs}
+          items={baItems}
+          loading={baLoading && baDefs.length === 0}
+          defsError={baDefsError}
+          selectedItemId={selectedBaItem?.item_id ?? null}
+          onSelectItem={setSelectedBaItem}
+        />
+      )}
+    </Card>
+  );
+
+  // 解析提取页右栏内容（docs = 上传解析主体；extract = 项目提取详情）
+  const importTabBody = (
+    <div style={{ flex: 1, minHeight: 0, minWidth: 0, display: "flex", flexDirection: "column" }}>
+      {importSubTab === "docs" ? (
+        <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
+          {/* 上传解析主体（含上传区、资料与解析列表、下一步等） */}
+          <UploadParseTab
+            docs={docList}
+            maxUploadBytes={maxUploadBytes}
+            categoryOptions={categoryOptions}
+            generating={generating}
+            uploadingFacts={uploadingFacts}
+            uploadedFiles={uploadedFiles}
+            parsingDocs={parsingDocs}
+            parsingDocId={parsingDocId}
+            onUploadFiles={handleUploadDocuments}
+            onParseAll={() => handleParseDocuments()}
+            onReparseAll={() => handleParseDocuments(true)}
+            onRefresh={loadDocuments}
+            onParse={handleParseDocument}
+            onPreview={handlePreviewDocument}
+            onDelete={handleDeleteDocument}
+            onCategoryChange={handleCategoryChange}
+            onNavigate={(t: WorkflowTabKey) => setActiveTab(t)}
+            // 2026-09-23 合并：上传解析「下一步」→ 切到同 Tab 的「项目提取」子页
+            onSwitchToExtract={() => setImportSubTab("extract")}
+            // ✅ 修复（2026-09-25）：把「解析信息分类显示栏」props 接入
+            // UploadParseTab，使其内置的「信息显示窗口」真正渲染（此前页面
+            // 在下方另写了一份 detail-only 面板导致重复渲染，且 UploadParseTab
+            // 的解析项数「下一步」动态文案恒失真）。现由 UploadParseTab 统一
+            // 渲染 detail-only 详情，与左栏 list-only 经同一 sharedParseState 联动。
+            parseGroups={baGroups}
+            parseItems={baItems}
+            parseSelectedItem={selectedBaItem}
+            parseLoading={baLoading}
+            parseError={baError}
+            sharedState={sharedParseState}
+            onParseSelectItem={setSelectedBaItem}
+            onParseEditItem={openBaEdit}
+            onParseFullView={setBaFullItem}
+            onParseRefresh={baRefreshResults}
+            parseRunning={baActive}
+          />
+        </div>
+      ) : (
+        <BidAnalysisTab
+          defs={baDefs}
+          groups={baGroups}
+          schemeId={id || undefined}
+          projectId={scheme?.project_id}
+          items={baItems}
+          summary={baSummaryDerived}
+          running={baActive}
+          progress={baShownProgress}
+          progressMsg={baShownMsg}
+          parsedDocCount={docStats.parsedCount}
+          selectedItem={selectedBaItem}
+          sectionChecking={sectionChecking}
+          sectionCheckResult={sectionCheckResult}
+          textStats={baTextStats}
+          defsError={baDefsError}
+          // 2026-09-23：extract 子 Tab 下，「18 项结构化提取」清单已上移到左侧面板，
+          // 右侧仅保留进度/操作栏 + 详情阅读区，避免与左面板重复展示同一份清单。
+          contentOnly
+          onRetryDefs={loadBaMeta}
+          onStart={baOpenConfig}
+          onStop={handleStopBa}
+          stopping={baStopping}
+          onOpenConfig={baOpenConfig}
+          onCheckSections={handleCheckSections}
+          onRefresh={baRefreshAll}
+          onSelectItem={setSelectedBaItem}
+          onRerunItem={handleRerunItem}
+          onOpenFullView={setBaFullItem}
+          onEditItem={openBaEdit}
+          onDismissSectionResult={baDismissSectionCheck}
+          // 2026-09-23 合并：BidAnalysisTab 内「前往上传解析」→ 切回同 Tab 的 docs 子页
+          onGoImport={baGoImport}
+          onGoOutline={baGoOutline}
+          onGoFacts={baGoFacts}
+        />
+      )}
+    </div>
+  );
+
+  // ===== 审核与预检页左栏「检查项 / 问题清单」（2026-10-31 版式调整）=====
+  // 与解析提取页同一标准：左栏提到 Tabs 外层，顶部与主标签栏顶部齐平；
+  // 宽屏由 workbenchTabsCard 的 SplitPane 承载，窄屏仍在子页内上下堆叠。
+  const reviewComplianceMissing = complianceResults.filter((r: any) => r.hit === false).length;
+  const reviewConsistencyIssues = consistencyResult?.issues?.length || 0;
+  const reviewExpertMissing = expertResult?.missing?.length || 0;
+  const reviewQualityProblems = qualityResult?.summary?.problem_sections || 0;
+  const reviewNavItems = [
+    {
+      sid: "readiness",
+      label: "交付就绪度总检",
+      hint: "六维加权评分 · 阻断项 · 放行结论",
+      icon: <AimOutlined />,
+      badge: exportPreflight ? `${exportPreflight.total ?? 0} 分` : "未检",
+      tone: exportPreflight ? (exportPreflight.released ? "ok" : "warn") : "idle",
+    },
+    {
+      sid: "compliance",
+      label: "规范符合性检查",
+      hint: "AI 逐条判定命中 / 缺失",
+      icon: <SafetyOutlined />,
+      badge: complianceResults.length ? `${reviewComplianceMissing} 缺失` : "未检",
+      tone: reviewComplianceMissing > 0 ? "bad" : complianceResults.length ? "ok" : "idle",
+    },
+    {
+      sid: "consistency",
+      label: "全文一致性审计",
+      hint: "事实 vs 正文逐项比对",
+      icon: <FileSearchOutlined />,
+      badge: consistencyResult ? `${reviewConsistencyIssues} 项` : "未检",
+      tone: reviewConsistencyIssues > 0 ? "warn" : consistencyResult ? "ok" : "idle",
+    },
+    {
+      sid: "expert",
+      label: "专家论证预检",
+      hint: "危大工程论证必要项就绪度",
+      icon: <AuditOutlined />,
+      badge: expertResult ? `${reviewExpertMissing} 缺失` : "未检",
+      tone: reviewExpertMissing > 0 ? "bad" : expertResult ? "ok" : "idle",
+    },
+    {
+      sid: "export",
+      label: "导出预检",
+      hint: "空章节 / 孤立节点 / 图表完成率",
+      icon: <SafetyOutlined />,
+      badge: exportIssues.length ? `${exportIssues.length} 问题` : exportStats ? "已检" : "未检",
+      tone: exportIssues.length > 0 ? "bad" : exportStats ? "ok" : "idle",
+    },
+    {
+      sid: "quality",
+      label: "正文质量自检",
+      hint: "口语化残留 / 废止标准",
+      icon: <CheckCircleOutlined />,
+      badge: qualityResult ? `${reviewQualityProblems} 待修` : "未检",
+      tone: reviewQualityProblems > 0 ? "warn" : qualityResult ? "ok" : "idle",
+    },
+    {
+      sid: "workflow",
+      label: "章节审核工作流",
+      hint: "逐章评审留痕（人工）",
+      icon: <EditOutlined />,
+      badge: "人工",
+      tone: "idle",
+    },
+  ];
+  const reviewToneColor = (tone: string) =>
+    tone === "bad" ? "#ff4d4f" : tone === "warn" ? "#fa8c16" : tone === "ok" ? "#52c41a" : "#8c8c8c";
+  const reviewToneTag = (tone: string) =>
+    tone === "bad" ? "red" : tone === "warn" ? "orange" : tone === "ok" ? "green" : "default";
+  const scrollToReviewSection = (sid: string) => {
+    const root = reviewDetailScrollRef.current;
+    const target = root?.querySelector(`#rm-${sid}`) as HTMLElement | null;
+    target?.scrollIntoView({ block: "start", behavior: "smooth" });
+  };
+  const reviewNavPanel = (
+    <div className="scroll-area bp-pane-scroll" style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+      <Card
+        size="small"
+        title={
+          <Space size={4}>
+            <AuditOutlined />
+            <Text strong>检查项 / 问题清单</Text>
+          </Space>
+        }
+        styles={{ body: { padding: 4 } }}
+      >
+        <List
+          size="small"
+          dataSource={reviewNavItems}
+          renderItem={(it) => (
+            <List.Item
+              style={{ cursor: "pointer", padding: "8px 6px", borderRadius: 6 }}
+              onClick={() => scrollToReviewSection(it.sid)}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8, width: "100%" }}>
+                <span style={{ color: reviewToneColor(it.tone), flexShrink: 0 }}>{it.icon}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {it.label}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#999", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {it.hint}
+                  </div>
+                </div>
+                <Tag color={reviewToneTag(it.tone)} style={{ marginRight: 0, flexShrink: 0 }}>{it.badge}</Tag>
+              </div>
+            </List.Item>
+          )}
+        />
+        <div style={{ fontSize: 11, color: "#999", padding: "6px 8px", lineHeight: 1.5 }}>
+          点击条目可在右侧定位到对应检查详情与修改建议；拖动中间分隔条可调整清单宽度，双击恢复默认。
+        </div>
+      </Card>
+    </div>
+  );
+
   const tabItems = [
     // ================== Tab 1: 上传解析（import） ==================
     // 2026-09-23 合并：把「文档解析」（原 import 主体）与「项目提取」（原 bidAnalysis）
@@ -9514,161 +10128,25 @@ exportPctRef.current = pct;
       // 与左侧分类栏通过 sharedParseState 联动，避免同一分类在两侧同时展示造成的视觉重复。
       children: (
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", gap: 8 }}>
-          {/* ===== 子 Tab 栏（文档解析 / 项目提取）—— 2026-09-23 单独一行，横跨全宽 =====
-              原布局把子 Tab 塞在「右侧栏」内部（tabPosition=left 竖排），切换时只能切换右侧主体。
-              现在拆成两行：
-                第 1 行：子 Tab 标签栏（横排单行，只渲染标签）
-                第 2 行：左侧分类/清单面板 Card + 当前子 Tab 内容（左右并排） */}
-          {/* ✅ 2026-09-24 T2：子 Tab 标签栏抽为受控组件 ImportSubTabBar（含提取徽标） */}
-          <ImportSubTabBar
-            activeKey={importSubTab}
-            onChange={setImportSubTab}
-            summary={baSummary}
-          />
-          {/* ===== 第 2 行：左面板 + 当前子 Tab 内容（左右并排） ===== */}
-          <div style={{ display: "flex", flex: 1, minHeight: 0, minWidth: 0, gap: 8 }}>
-          {/* ===== import 模块专属左面板（随子 Tab 切换展示内容）=====
-              两者的展开/激活状态互不干扰（docs 走 sharedParseState，extract 走自身本地 state） */}
-          <Card
-            size="small"
-            // 2026-09-23：左面板宽度从 vw+紧 max 改为容器内 22%，min/max 保底。
-            // 之前 vw 在大屏上被 maxWidth:300 压死，实际只占 ~15%，与右侧 ~85% 比例悬殊。
-            // 改为百分比后：1920→422px, 1440→317px, 1280→282px，比例稳定在 22:78 ≈ 1:3.5。
-            style={{ flex: "0 0 22%", minWidth: 260, maxWidth: 420, display: "flex", flexDirection: "column" }}
-            styles={{ body: { flex: 1, minHeight: 0, padding: 4, overflow: "hidden" } }}
-            title={
-              <Space size={4}>
-                <AppstoreOutlined />
-                <Text strong>
-                  {importSubTab === "docs"
-                    ? "解析信息分类"
-                    // ✅ 口径与右侧面板（baScopeText）同源：按已加载的提取项定义实报条数。
-                    //    旧实现写死「18 项结构化提取」，后端增减项后标题即失真
-                    //    （同 UploadParseTab:138 与 BidAnalysisTab:61 已修过的硬编码）。
-                    //    定义未加载时不报数，只说「结构化提取」。
-                    : baDefs.length
-                      ? `${baDefs.length} 项结构化提取`
-                      : "结构化提取"}
-                </Text>
-                <Tag color="blue">{(baGroups || []).length} 分类</Tag>
-              </Space>
-            }
-          >
-            {importSubTab === "docs" ? (
-              <ParseResultCategoryPanel
-                variant="list-only"
-                groups={baGroups}
-                items={baItems}
-                selectedItem={selectedBaItem ?? null}
-                loading={baLoading}
-                error={baError}
-                sharedState={sharedParseState}
-                onSelectItem={setSelectedBaItem}
-                onEditItem={openBaEdit}
-                onOpenFullView={setBaFullItem}
-                onRefresh={baRefreshResults}
-              />
-            ) : (
-              /* extract 子 Tab 下：18 项扁平清单（受控组件 BaItemFlatList），
-                 每项状态口径与后端 success/error/idle/running + isMissingBaResult 对齐，
-                 点击切换到右侧 BidAnalysisTab 中对应项的详情 */
-              <BaItemFlatList
-                defs={baDefs}
-                items={baItems}
-                loading={baLoading && baDefs.length === 0}
-                defsError={baDefsError}
-                selectedItemId={selectedBaItem?.item_id ?? null}
-                onSelectItem={setSelectedBaItem}
-              />
-            )}
-          </Card>
-
-          {/* ===== 右侧内容区（占剩余空间）—— 按 importSubTab 直接渲染 =====
-              2026-09-23 版式重构：子 Tab 标签已上移到顶部独立行（横跨左面板 + 右侧），
-              此处不再嵌套 Tabs，只按当前激活的子 Tab 渲染对应主体，
-              避免"标签栏 + 内容栏"双层结构造成的高度浪费与视觉冗余。 */}
-          <div style={{ flex: 1, minHeight: 0, minWidth: 0, display: "flex", flexDirection: "column" }}>
-            {importSubTab === "docs" ? (
-                    <div className="scroll-area" style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
-                      {/* 上传解析主体（含上传区、资料与解析列表、下一步等） */}
-                      <UploadParseTab
-                        docs={docList}
-                        maxUploadBytes={maxUploadBytes}
-                        categoryOptions={categoryOptions}
-                        generating={generating}
-                        uploadingFacts={uploadingFacts}
-                        uploadedFiles={uploadedFiles}
-                        parsingDocs={parsingDocs}
-                        parsingDocId={parsingDocId}
-                        onUploadFiles={handleUploadDocuments}
-                        onParseAll={() => handleParseDocuments()}
-                        onReparseAll={() => handleParseDocuments(true)}
-                        onRefresh={loadDocuments}
-                        onParse={handleParseDocument}
-                        onPreview={handlePreviewDocument}
-                        onDelete={handleDeleteDocument}
-                        onCategoryChange={handleCategoryChange}
-                        onNavigate={(t: WorkflowTabKey) => setActiveTab(t)}
-                        // 2026-09-23 合并：上传解析「下一步」→ 切到同 Tab 的「项目提取」子页
-                        onSwitchToExtract={() => setImportSubTab("extract")}
-                        // ✅ 修复（2026-09-25）：把「解析信息分类显示栏」props 接入
-                        // UploadParseTab，使其内置的「信息显示窗口」真正渲染（此前页面
-                        // 在下方另写了一份 detail-only 面板导致重复渲染，且 UploadParseTab
-                        // 的解析项数「下一步」动态文案恒失真）。现由 UploadParseTab 统一
-                        // 渲染 detail-only 详情，与左栏 list-only 经同一 sharedParseState 联动。
-                        parseGroups={baGroups}
-                        parseItems={baItems}
-                        parseSelectedItem={selectedBaItem}
-                        parseLoading={baLoading}
-                        parseError={baError}
-                        sharedState={sharedParseState}
-                        onParseSelectItem={setSelectedBaItem}
-                        onParseEditItem={openBaEdit}
-                        onParseFullView={setBaFullItem}
-                        onParseRefresh={baRefreshResults}
-                        parseRunning={baActive}
-                      />
-                    </div>
-            ) : (
-                    <BidAnalysisTab
-                      defs={baDefs}
-                      groups={baGroups}
-                      schemeId={id || undefined}
-                      projectId={scheme?.project_id}
-                      items={baItems}
-                      summary={baSummaryDerived}
-                      running={baActive}
-                      progress={baShownProgress}
-                      progressMsg={baShownMsg}
-                      parsedDocCount={docStats.parsedCount}
-                      selectedItem={selectedBaItem}
-                      sectionChecking={sectionChecking}
-                      sectionCheckResult={sectionCheckResult}
-                      textStats={baTextStats}
-                      defsError={baDefsError}
-                      // 2026-09-23：extract 子 Tab 下，「18 项结构化提取」清单已上移到左侧面板，
-                      // 右侧仅保留进度/操作栏 + 详情阅读区，避免与左面板重复展示同一份清单。
-                      contentOnly
-                      onRetryDefs={loadBaMeta}
-                      onStart={baOpenConfig}
-                      onStop={handleStopBa}
-                      stopping={baStopping}
-                      onOpenConfig={baOpenConfig}
-                      onCheckSections={handleCheckSections}
-                      onRefresh={baRefreshAll}
-                      onSelectItem={setSelectedBaItem}
-                      onRerunItem={handleRerunItem}
-                      onOpenFullView={setBaFullItem}
-                      onEditItem={openBaEdit}
-                      onDismissSectionResult={baDismissSectionCheck}
-                      // 2026-09-23 合并：BidAnalysisTab 内「前往上传解析」→ 切回同 Tab 的 docs 子页
-                      onGoImport={baGoImport}
-                      onGoOutline={baGoOutline}
-                      onGoFacts={baGoFacts}
-                    />
-            )}
-          </div>
-          </div>
+          {/* ✅ 2026-10-31 版式调整：宽屏下「文档解析 / 项目提取」子标签栏已上移到主标签栏同一行
+              （Tabs.tabBarExtraContent），左栏「解析信息分类」卡片提到 Tabs 外层并与标签栏顶对齐，
+              本子页只保留右栏内容；窄屏（<1024px）降级仍按「子标签栏 → 左卡 → 内容」堆叠。 */}
+          {narrowWorkbench && (
+            <ImportSubTabBar
+              activeKey={importSubTab}
+              onChange={setImportSubTab}
+              summary={baSummary}
+            />
+          )}
+          {/* 窄屏降级：不做左右分栏，退回单栏上下堆叠（左卡在上、内容在下） */}
+          {!narrowWorkbench ? (
+            importTabBody
+          ) : (
+            <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+              <div style={{ flex: "1 1 auto", minHeight: 0, overflow: "hidden" }}>{importCategoryPanel}</div>
+              <div style={{ flex: "1 1 auto", minHeight: 0 }}>{importTabBody}</div>
+            </div>
+          )}
         </div>
       ),
     },
@@ -9688,7 +10166,116 @@ exportPctRef.current = pct;
         // ✅ 修复：目录生成内容（编制要求卡 + 多标段提示 + 编辑树 + 目录库/AI 生成区）较长，
         //    与其余 Tab 同一模式：根容器必须 flex:1 + minHeight:0 + overflowY:auto，
         //    否则超出视口的底部内容会被外层 overflow:hidden 裁掉，无法滚动查看/操作。
-        <div className="scroll-area" style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+        <div style={{ flex: 1, minHeight: 0, minWidth: 0 }}>
+          <SplitPane
+            direction="horizontal"
+            storageKey="wb-tab-outline"
+            defaultRatio={0.44}
+            min={300}
+            minSecond={340}
+            disabled={narrowWorkbench}
+            handleAriaLabel="调整目录树与目录配置区的宽度（双击恢复默认）"
+            style={{ flex: 1, minHeight: 0 }}
+            first={
+              <div className="scroll-area bp-pane-scroll" style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+                {/* 目录树编辑区（左栏） */}
+                <Card
+                  size="small"
+                  title={
+                    <Space>
+                      <Text strong>目录结构</Text>
+                      <Tag color="blue">{collectAllKeys(tree).length} 个章节</Tag>
+                      {hasUnsavedLocalNodes(tree) && (
+                        <Tag color="orange">有未保存的修改</Tag>
+                      )}
+                    </Space>
+                  }
+                  extra={
+                    <OutlineTreeActions
+                      selected={selectedSection}
+                      moveFlags={moveFlags}
+                      showNext={tree.length > 0}
+                      onAddChild={() => selectedSection && addChildNode(selectedSection.key)}
+                      onMove={(dir) => selectedSection && moveNode(selectedSection.key, dir)}
+                      onDelete={() => selectedSection && deleteNode(selectedSection.key)}
+                      onNextStep={() => setActiveTab(NEXT_TAB.outline)}
+                    />
+                  }
+                >
+                  {reorderHint && (
+                    <Alert
+                      type="success"
+                      showIcon
+                      banner
+                      closable
+                      message={reorderHint}
+                      style={{ marginBottom: 8 }}
+                      onClose={() => setReorderHint(null)}
+                    />
+                  )}
+                  {/* ✅ 字数预算编辑入口（2026-09-21 补齐功能缺口）：
+                      此前预算全链路只读，用户无法在正文生成前规划每章篇幅 */}
+                  {selectedSection && tree.length > 0 && (
+                    <OutlineNodeBudgetPanel
+                      node={selectedSection}
+                      onBudgetChange={handleBudgetChange}
+                    />
+                  )}
+                  {tree.length === 0 ? (
+                    <Empty description="暂无目录，请点击上方 AI 生成目录 或 导入目录" />
+                  ) : (
+                    <div ref={editTreeScrollRef} className="scroll-area bp-pane-scroll" style={{ minHeight: 200, maxHeight: "calc(100vh - 360px)", overflow: "auto" }}>
+                      {/* ✅ R162（2026-11-01）：结构不合规总提示 + 一键 AI 标准化入口。
+                          数量不达标/深度越界节点已在树上标红；正文生成会被后端闸门拒绝。
+                          L3 为最小叶子：三级下是否细分 L4 不作树内数量校验，
+                          四级要点结构要求由 L3 节正文生成提示词承载。 */}
+                      {outlineViolationCount > 0 && (
+                        <Alert
+                          type="warning"
+                          showIcon
+                          style={{ marginBottom: 8 }}
+                          message={`目录结构不合规（${outlineViolationCount} 处）：正文生成将被拒绝`}
+                          description={
+                            <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                              <span style={{ fontSize: 12 }}>
+                                硬性标准：一级下 3~5 个二级、二级下 3~5 个三级；三级为最小叶子（三级下是否细分四级不作树内数量校验，四级要点结构要求由正文生成提示词承载）。请补齐或精简红点节点的子节点。
+                              </span>
+                              <Button
+                                size="small"
+                                type="primary"
+                                danger
+                                loading={standardizingOutline}
+                                onClick={handleStandardizeOutline}
+                              >
+                                修复目录结构（AI 标准化）
+                              </Button>
+                            </Space>
+                          }
+                        />
+                      )}
+                      <Tree
+                        treeData={outlineEditTreeData}
+                        draggable
+                        expandedKeys={expandedKeys}
+                        onExpand={(keys) => setExpandedKeys(keys as React.Key[])}
+                        selectedKeys={selectedSection ? [selectedSection.key] : []}
+                        onSelect={(keys) => {
+                          if (keys.length > 0) {
+                            const sec = findSectionById(tree, keys[0] as string);
+                            if (sec) setSelectedSection(sec);
+                          }
+                        }}
+                        onDrop={onOutlineTreeDrop}
+                        showLine={{ showLeafIcon: false }}
+                        blockNode
+                      />
+                    </div>
+                  )}
+                </Card>
+              </div>
+            }
+            second={
+              <div className="scroll-area bp-pane-scroll" style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
           {/* 编制要求 / 评审要点（对齐 OpenBidKit score-planning：要求→目录必含映射） */}
           <Card
             size="small"
@@ -9835,73 +10422,9 @@ exportPctRef.current = pct;
           </Space>
 
           {/* ✅ 目录生成进度已统一到页面顶部进度区（此处不再重复渲染第二个进度条） */}
-
-          {/* 目录树编辑区 */}
-          <Card
-            size="small"
-            title={
-              <Space>
-                <Text strong>目录结构</Text>
-                <Tag color="blue">{collectAllKeys(tree).length} 个章节</Tag>
-                {hasUnsavedLocalNodes(tree) && (
-                  <Tag color="orange">有未保存的修改</Tag>
-                )}
-              </Space>
-            }
-            extra={
-              <OutlineTreeActions
-                selected={selectedSection}
-                moveFlags={moveFlags}
-                showNext={tree.length > 0}
-                onAddChild={() => selectedSection && addChildNode(selectedSection.key)}
-                onMove={(dir) => selectedSection && moveNode(selectedSection.key, dir)}
-                onDelete={() => selectedSection && deleteNode(selectedSection.key)}
-                onNextStep={() => setActiveTab(NEXT_TAB.outline)}
-              />
-            }
-          >
-            {reorderHint && (
-              <Alert
-                type="success"
-                showIcon
-                banner
-                closable
-                message={reorderHint}
-                style={{ marginBottom: 8 }}
-                onClose={() => setReorderHint(null)}
-              />
-            )}
-            {/* ✅ 字数预算编辑入口（2026-09-21 补齐功能缺口）：
-                此前预算全链路只读，用户无法在正文生成前规划每章篇幅 */}
-            {selectedSection && tree.length > 0 && (
-              <OutlineNodeBudgetPanel
-                node={selectedSection}
-                onBudgetChange={handleBudgetChange}
-              />
-            )}
-            {tree.length === 0 ? (
-              <Empty description="暂无目录，请点击上方 AI 生成目录 或 导入目录" />
-            ) : (
-              <div ref={editTreeScrollRef} className="scroll-area" style={{ minHeight: 200, maxHeight: "calc(100vh - 420px)", overflow: "auto" }}>
-                <Tree
-                  treeData={outlineEditTreeData}
-                  draggable
-                  expandedKeys={expandedKeys}
-                  onExpand={(keys) => setExpandedKeys(keys as React.Key[])}
-                  selectedKeys={selectedSection ? [selectedSection.key] : []}
-                  onSelect={(keys) => {
-                    if (keys.length > 0) {
-                      const sec = findSectionById(tree, keys[0] as string);
-                      if (sec) setSelectedSection(sec);
-                    }
-                  }}
-                  onDrop={onOutlineTreeDrop}
-                  showLine={{ showLeafIcon: false }}
-                  blockNode
-                />
               </div>
-            )}
-          </Card>
+            }
+          />
         </div>
       ),
     },
@@ -9923,10 +10446,12 @@ exportPctRef.current = pct;
             : "第三步：AI 从已解析资料提取全篇统一的事实变量，供正文生成保持一致"}
         />
       ),
-      children: (
-        // ✅ 修复：全局事实内容可能很长（资料列表 + 分组事实 Collapse），
-        //    容器必须可滚动，否则超出视口的内容被外层 overflow:hidden 裁剪，无法查看/点击
-        <div className="scroll-area" style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+      // ✅ R146：右侧详情拆成上下两个可拖拽 pane ——
+      //   上 pane「事实概览 + 提取进度 + 诊断 + 资料来源」，下 pane「事实分组详情」。
+      //   两块各自独立滚动（bp-pane-scroll · 6px 细条 · overscroll 隔离）。
+      children: (() => {
+        const factsSummaryPane = (
+          <div className="scroll-area bp-pane-scroll" style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
           {/* ===== 顶部：统计面板 + 告警 ===== */}
           {factsSummary && factsSummary.total > 0 && (
             <Card size="small" style={{ marginBottom: 12 }} styles={{ body: { padding: "8px 16px" } }}>
@@ -10048,16 +10573,18 @@ exportPctRef.current = pct;
               multiple
               accept={UPLOAD_FILE_ACCEPT}
               showUploadList={false}
-              disabled={generating || uploadingFacts || parsingDocs}
+              disabled={generating || uploadingFacts || parsingDocs || !!parsingDocId}
               beforeUpload={(file, fileList) => {
                 if (fileList[0] === file) {
                   const files = fileList.map((f) => (f as any).originFileObj || f) as File[];
-                  setTimeout(() => handleUploadDocuments(files), 0);
+                  // ✅ R144-F3 → R157：裸 setTimeout 幽灵上传已收敛到
+                  //    useDelayedCallback（赋值前清旧 timer + 卸载自动清理）。
+                  uploadTrigger.schedule(() => handleUploadDocuments(files));
                 }
                 return false;
               }}
             >
-              <Button icon={<UploadOutlined />} disabled={generating || uploadingFacts || parsingDocs} loading={uploadingFacts}>
+              <Button icon={<UploadOutlined />} disabled={generating || uploadingFacts || parsingDocs || !!parsingDocId} loading={uploadingFacts}>
                 ① 上传文件保存
               </Button>
             </Upload>
@@ -10065,7 +10592,7 @@ exportPctRef.current = pct;
               icon={<FileTextOutlined />}
               onClick={() => handleParseDocuments()}
               disabled={generating || uploadingFacts || parsingDocs
-                || docStats.actionableCount === 0}
+                || !!parsingDocId || docStats.actionableCount === 0}
               loading={parsingDocs}
             >
               {/* ✅ 2026-09-24 B4：与 import Tab 按钮同口径（待解析 + 失败均可批量处理）
@@ -10319,7 +10846,7 @@ exportPctRef.current = pct;
                   const ftypeIcon: Record<string, string> = {
                     docx: "📄", pdf: "📑", md: "📝", txt: "📃",
                     xlsx: "📊", xls: "📈", csv: "📉",
-                    png: "🖼️", jpg: "🖼️", jpeg: "🖼️", bmp: "🖼️", tiff: "🖼️",
+                    png: "🖼️", jpg: "🖼️", jpeg: "🖼️", bmp: "🖼️", tiff: "🖼️", tif: "🖼️",
                   };
                   const icon = ftypeIcon[doc.file_type] || "📎";
                   const isParsed = isDocParsed(doc);
@@ -10405,7 +10932,10 @@ exportPctRef.current = pct;
               />
             )}
           </Card>
-
+          </div>
+        );
+        const factsListPane = (
+          <div className="scroll-area bp-pane-scroll" style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
           {/* ===== 全局事实分组列表（增强版：带模拟值/矛盾/置信度标记）=====
                ✅ 2026-09-23 改版：展示左侧分类面板选中的分类详情（项目资料下方），
                组合筛选器（模拟/矛盾/待审核）仍然生效 */}
@@ -10479,8 +11009,23 @@ exportPctRef.current = pct;
               image={Empty.PRESENTED_IMAGE_SIMPLE}
             />
           )}
-        </div>
-      ),
+          </div>
+        );
+        return (
+          <SplitPane
+            direction="vertical"
+            storageKey="wb-tab-facts"
+            defaultRatio={0.52}
+            min={220}
+            minSecond={200}
+            disabled={narrowWorkbench}
+            handleAriaLabel="调整事实概览/资料来源与事实分组详情的高度（双击恢复默认）"
+            style={{ flex: 1, minHeight: 0, width: "100%" }}
+            first={factsSummaryPane}
+            second={factsListPane}
+          />
+        );
+      })(),
     },
     // ================== Tab 4: 正文生成 ==================
     {
@@ -10573,10 +11118,15 @@ exportPctRef.current = pct;
           hint="第五步：先跑「一键总检」拿到六维评分与可否交付结论，再按需下钻规范符合性检查 / 专家论证预检 / 导出预检 / 质量自检；全部通过后用「章节审核工作流」逐章评审留痕，最后去「导出」页生成文档"
         />
       ),
-      children: (
-        // ✅ 修复：审核与预检内容（两张大卡片 + 检查结果表格 + 历史记录）较长，
-        //    容器必须可滚动，避免低视口下底部内容被裁剪
-        <div className="scroll-area" style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+      // ✅ R146：左右两栏可拖拽 —— 左「检查项 / 问题清单」导航，右「检查详情与修改建议」。
+      children: (() => {
+        const reviewDetailPane = (
+        <div
+          ref={reviewDetailScrollRef}
+          className="scroll-area bp-pane-scroll"
+          style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}
+        >
+          <div id="rm-readiness">
           {/* ===== ✅ 交付就绪度总检（六维加权评分 + 阻断项 + 放行结论）=====
                放在最上方：用户进入本页首先要的是"能不能交付"这一个答案，
                下面的分项检查是拿到答案后的下钻入口。 */}
@@ -10585,9 +11135,11 @@ exportPctRef.current = pct;
             refreshKey={reviewTick}
             onContentFixed={() => { load(); setReviewTick((v) => v + 1); }}
           />
+          </div>
 
           {/* ===== ✅ 规范符合性检查（complianceApi.check）===== */}
           <Card
+            id="rm-compliance"
             size="small"
             title={
               <Space>
@@ -10727,6 +11279,7 @@ exportPctRef.current = pct;
 
           {/* ===== ✅ 全文一致性审计（consistency_audit 表，§3.12.1）===== */}
           <Card
+            id="rm-consistency"
             size="small"
             title={
               <Space>
@@ -10813,6 +11366,7 @@ exportPctRef.current = pct;
           <Divider style={{ margin: "8px 0 16px" }} />
 
           <Card
+            id="rm-expert"
             size="small"
             title={
               <Space>
@@ -10897,6 +11451,7 @@ exportPctRef.current = pct;
               「审核与预检」这一步，统一收敛到本页；「导出」页只负责生成文档。
               旧实现把它放在导出页，导致"两个预检分居两页"，用户不知道该在哪一层做检查。 */}
           <Card
+            id="rm-export"
             size="small"
             title={
               <Space>
@@ -11046,6 +11601,7 @@ exportPctRef.current = pct;
           {/* ✅ 接线 GET /schemes/{id}/sections/quality（原本是后端孤儿接口：
               能力已实现、前端从未调用 —— 典型的"信息算得出但传不到用户眼前"） */}
           <Card
+            id="rm-quality"
             size="small"
             title={
               <Space>
@@ -11176,13 +11732,26 @@ exportPctRef.current = pct;
           {/* ===== ✅ 章节审核工作流（人工评审）=====
                机器检查（上方各卡片）之后是人工评审：逐章通过/驳回并留痕，
                方案级提交时后端会校验预检是否存在阻断项，有硬伤不放行评审。 */}
-          <ReviewWorkflowPanel
-            schemeId={id || ""}
-            refreshKey={reviewTick}
-            onChanged={load}
-          />
-        </div>
-      ),
+          <div id="rm-workflow">
+            <ReviewWorkflowPanel
+              schemeId={id || ""}
+              refreshKey={reviewTick}
+              onChanged={load}
+            />
+          </div>
+          </div>
+        );
+        // ✅ 2026-10-31：宽屏下左栏「检查项 / 问题清单」已提到 Tabs 外层（与标签栏顶齐平），
+        //    此处只返回右栏详情；窄屏降级仍按「清单 → 详情」上下堆叠。
+        return !narrowWorkbench ? (
+          reviewDetailPane
+        ) : (
+          <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+            <div style={{ flex: "1 1 auto", minHeight: 0, overflow: "hidden" }}>{reviewNavPanel}</div>
+            <div style={{ flex: "1 1 auto", minHeight: 0 }}>{reviewDetailPane}</div>
+          </div>
+        );
+      })(),
     },
     // ================== Tab 6: 导出文档 ==================
     {
@@ -11198,14 +11767,14 @@ exportPctRef.current = pct;
           hint="第六步：设置版式并生成 DOCX，或导出目录结构 JSON。章节完整性等检查请先在「审核与预检」页完成"
         />
       ),
-      children: (
-        // ✅ 修复：导出配置表单（基本设置/正文样式/各级标题样式 + 统计 + 缓存）较长，
-        //    Form 根元素需可滚动，避免低视口下底部按钮（导出预检/导出 DOCX）被裁剪
+      // ✅ R146：左侧「导出配置」与右侧「实时预览」左右可拖拽，各自独立滚动
+      children: (() => {
+        const exportConfigPane = (
         <Form
           form={exportForm}
           layout="vertical"
-          className="scroll-area"
-          style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}
+          className="scroll-area bp-pane-scroll"
+          style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}
           initialValues={{
           font_name: "宋体", font_size: 12, show_page_number: true,
           show_title_page: false, show_toc: false, bidder_name: "",
@@ -11700,7 +12269,7 @@ exportPctRef.current = pct;
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <span>
                       <Tag color="processing">
-                        阶段 {EXPORT_STAGE_ORDER[exportStage] ?? 1}/3 ·{" "}
+                        阶段 {EXPORT_STAGE_ORDER[exportStage] ?? 1}/{EXPORT_STAGE_COUNT} ·{" "}
                         {EXPORT_STAGE_LABEL[exportStage]}
                       </Tag>
                       大文档导出可能需要 10-30 秒，图表渲染和文档构建在后台进行，请耐心等待。
@@ -11737,6 +12306,32 @@ exportPctRef.current = pct;
               {exporting ? "导出中..." : "导出 DOCX"}
             </Button>
           </Space>
+
+          {/* ✅ R147（2026-10-30）：两轮次导出（第一轮初稿 + 第二轮检查修复 → 终稿下载）。
+              进度分两段（初稿 0-50% + 修复 50-100%），修复项实时滚动，完成后展示修复报告。 */}
+          <Card
+            size="small"
+            data-testid="export-flow-card"
+            title={
+              <Space>
+                <ExportOutlined />
+                <Text strong>两轮次导出（初稿 + 检查修复）</Text>
+              </Space>
+            }
+            style={{ marginTop: 12 }}
+          >
+            <ExportFlowPanel
+              state={exportFlow}
+              onStart={handleExportFlow}
+              onCancel={exportFlow.cancel}
+              onDownload={() => exportFlow.download(exportFlow.taskId || "", "导出文档.docx")}
+              disabled={exporting || !id}
+            />
+            <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 6 }}>
+              第二轮对初稿执行目录编号层级、正文排版、字号字体、图表与兼容性五类检查并自动修复，
+              全过程留痕；修复失败自动回滚交付初稿。
+            </Text>
+          </Card>
 
           {/* ✅ 功能归位：目录结构导出也是"导出"，从「目录生成」页收敛到本页，
               让导出类操作集中在一处（目录生成页专注编辑）。 */}
@@ -11833,9 +12428,125 @@ exportPctRef.current = pct;
             )}
           </Card>
         </Form>
-      ),
+        );
+        const exportPreviewPane = (
+          <div className="scroll-area bp-pane-scroll" style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+            <ExportPreviewPane
+              form={exportForm}
+              schemeName={scheme?.name}
+              tree={tree}
+              selectedSection={selectedSection}
+            />
+          </div>
+        );
+        return (
+          <SplitPane
+            direction="horizontal"
+            storageKey="wb-tab-export"
+            defaultRatio={0.46}
+            min={320}
+            max={760}
+            minSecond={300}
+            disabled={narrowWorkbench}
+            handleAriaLabel="调整导出配置与预览区的宽度（双击恢复默认）"
+            style={{ flex: 1, minHeight: 0, minWidth: 0 }}
+            first={exportConfigPane}
+            second={exportPreviewPane}
+          />
+        );
+      })(),
     },
   ];
+
+  // ============ ✅ R145 可拖拽工作区（region 2/3/4）============
+  // narrowWorkbench 已在 tabItems 之前声明（各 Tab 内 SplitPane 依赖它）。
+
+  // 右侧 Tab 内容卡（三种布局分支共用同一节点，避免三份 JSX 漂移）
+  // ✅ 2026-10-31 版式调整（解析提取页）：
+  //   - 主标签栏行右侧并挂「文档解析 / 项目提取」子标签栏（tabBarExtraContent）；
+  //   - 左栏「解析信息分类」卡片与 Tabs 平级（SplitPane 左栏），顶部与标签栏顶部齐平。
+  const workbenchTabs = (
+    <Tabs
+      activeKey={activeTab}
+      onChange={setActiveTab}
+      items={tabItems}
+      className="swb-tabs-flex"
+      style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+      tabBarStyle={{ flexShrink: 0, marginBottom: 4 }}
+      tabBarExtraContent={
+        activeTab === "import" && !narrowWorkbench ? (
+          <ImportSubTabBar activeKey={importSubTab} onChange={setImportSubTab} summary={baSummary} />
+        ) : undefined
+      }
+    />
+  );
+
+  const workbenchTabsCard = (
+    <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", background: "#fff", border: "1px solid #f0f0f0", borderRadius: 8, padding: 16, overflow: "hidden" }}>
+      {activeTab === "import" && !narrowWorkbench ? (
+        <SplitPane
+          direction="horizontal"
+          storageKey="wb-tab-import"
+          defaultRatio={0.24}
+          min={240}
+          max={460}
+          minSecond={380}
+          handleAriaLabel="调整解析分类清单与解析内容区的宽度（双击恢复默认）"
+          style={{ flex: 1, minHeight: 0, minWidth: 0 }}
+          first={importCategoryPanel}
+          second={
+            <div style={{ height: "100%", minHeight: 0, minWidth: 0, display: "flex" }}>
+              {workbenchTabs}
+            </div>
+          }
+        />
+      ) : activeTab === "review" && !narrowWorkbench ? (
+        // ✅ 2026-10-31：审核与预检按解析提取同样标准 —— 左栏清单与标签栏顶部齐平，标签栏在右栏
+        <SplitPane
+          direction="horizontal"
+          storageKey="wb-tab-review"
+          defaultRatio={0.22}
+          min={200}
+          max={360}
+          minSecond={420}
+          handleAriaLabel="调整检查项清单与检查详情区的宽度（双击恢复默认）"
+          style={{ flex: 1, minHeight: 0, minWidth: 0 }}
+          first={reviewNavPanel}
+          second={
+            <div style={{ height: "100%", minHeight: 0, minWidth: 0, display: "flex" }}>
+              {workbenchTabs}
+            </div>
+          }
+        />
+      ) : (
+        workbenchTabs
+      )}
+    </div>
+  );
+
+  // 监视区左栏：生成进度卡（生成中）或空闲提示（region 3 首面板）
+  const monitorProgressPane = (
+    <div className="scroll-area bp-pane-scroll" style={{ height: "100%", overflowY: "auto", minWidth: 0, paddingRight: 4 }}>
+      {generating && genType !== "facts" ? (
+        <GenerationProgressCard
+          genType={genType}
+          progress={progress}
+          progressMsg={progressMsg}
+          sectionLogs={sectionLogs}
+          outlinePhase={outlinePhase}
+          outlineDoneTotal={outlineDoneTotal}
+          outlineLogs={outlineLogs}
+          stats={genStats}
+        />
+      ) : (
+        <Card size="small" styles={{ body: { padding: 12 } }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            暂无进行中的生成任务 · 任务启动后此处实时显示进度与工作日志（右侧为后台任务列表）
+          </Text>
+        </Card>
+      )}
+    </div>
+  );
 
   return (
     <div
@@ -11849,11 +12560,13 @@ exportPctRef.current = pct;
       }}
     >
       {/* 顶部标题（单行紧凑版：方案名/状态标签与字数统计合并为一行，高度约为原两行布局的一半；
-          方案名超长时省略号截断，字数统计始终可见） */}
+          方案名超长时省略号截断，字数统计始终可见）
+          ✅ 2026-11-01：整条信息带高度再减半（行 22→18px、下留白 8→2px，上留白在
+             Layout 的 .bp-content-workbench 中 20→6px，字号保持 12px 可读） */}
       {scheme && (
         <div
           style={{
-            marginBottom: 8,
+            marginBottom: 2,
             flexShrink: 0,
             display: "flex",
             alignItems: "center",
@@ -11866,7 +12579,7 @@ exportPctRef.current = pct;
             style={{
               margin: 0,
               fontSize: 15,
-              lineHeight: 1.3,
+              lineHeight: 1.2,
               flex: 1,
               minWidth: 0,
               overflow: "hidden",
@@ -11875,92 +12588,175 @@ exportPctRef.current = pct;
             }}
           >
             {scheme.name}
-            {scheme.type && <Tag color="blue" style={{ marginLeft: 8 }}>{scheme.type}</Tag>}
-            <Tag color={scheme.status === "已完成" ? "green" : "default"}>{scheme.status}</Tag>
+            {scheme.type && <Tag color="blue" style={{ marginLeft: 8, lineHeight: "16px", padding: "0 5px" }}>{scheme.type}</Tag>}
+            <Tag
+              color={scheme.status === "已完成" ? "green" : "default"}
+              style={{ marginInlineEnd: 0, lineHeight: "16px", padding: "0 5px" }}
+            >
+              {scheme.status}
+            </Tag>
             {generating && genType === "content" && (
-              <Tag color="processing">📝 正在生成正文...</Tag>
+              <Tag color="processing" style={{ lineHeight: "16px", padding: "0 5px" }}>📝 正在生成正文...</Tag>
             )}
           </Title>
           <Text
             type="secondary"
-            style={{ fontSize: 12, lineHeight: 1.3, flexShrink: 0, marginLeft: "auto" }}
+            style={{ fontSize: 12, lineHeight: 1.2, flexShrink: 0, marginLeft: "auto" }}
           >
             目标字数：{scheme.word_budget || 0} · 当前字数：{scheme.word_count || 0}
           </Text>
         </div>
       )}
 
-      {/* 生成进度区（页面唯一进度条）：目录/正文共用，左侧进度 + 右侧实时工作日志 */}
-      {/* ✅ 全局事实提取有自己的专用进度卡（在事实 Tab 内），此处不再重复渲染空章节日志 */}
-      {generating && genType !== "facts" && (
-        <GenerationProgressCard
-          genType={genType}
-          progress={progress}
-          progressMsg={progressMsg}
-          sectionLogs={sectionLogs}
-          outlinePhase={outlinePhase}
-          outlineDoneTotal={outlineDoneTotal}
-          outlineLogs={outlineLogs}
-          stats={genStats}
+      {/* ============ ✅ R145 可拖拽工作区（region 2/3/4）============
+          region 2：上半监视区（生成进度 | 后台任务列表）↔ 下半工作区（左右切分）
+            ✅ 2026-10-31：监视区默认高度压缩为原来的 1/3（defaultRatio 0.34→0.1133，
+               min 150→50；min 不同步下调会被 px 下限夹回旧高度）。
+          region 3：监视区内部 生成进度卡 ↔ 后台任务列表
+          region 4：工作区内部 左侧面板（目录树/事实分类）↔ 右侧 Tab 内容
+          拖拽结果按比例存 LocalStorage（刷新保持），px 级 min/max 防坍塌；
+          窄屏（<1024px）降级为原单列布局（分支内结构与改造前逐字等价）。 */}
+      {narrowWorkbench ? (
+        <>
+          {/* 生成进度区（页面唯一进度条）：目录/正文共用 */}
+          {/* ✅ 全局事实提取有自己的专用进度卡（在事实 Tab 内），此处不再重复渲染空章节日志 */}
+          {generating && genType !== "facts" && (
+            <GenerationProgressCard
+              genType={genType}
+              progress={progress}
+              progressMsg={progressMsg}
+              sectionLogs={sectionLogs}
+              outlinePhase={outlinePhase}
+              outlineDoneTotal={outlineDoneTotal}
+              outlineLogs={outlineLogs}
+              stats={genStats}
+            />
+          )}
+
+          {/* 主体：左侧导航面板 + 右侧 Tab 内容（flex:1 占满剩余高度，随进度区动态收缩） */}
+          <div style={{ display: "flex", gap: 12, flex: 1, minHeight: 0 }}>
+            {/* ✅ R146：左栏只在「正文生成」需要全局目录树；解析/目录/事实/审核/导出
+                的左栏均由各自 Tab 内部的 SplitPane 承担（避免三重树重复占宽）。 */}
+            {activeTab === "content" && (
+              <SchemeTreePanel
+                tree={tree}
+                treeData={treeData}
+                expandedKeys={expandedKeys}
+                selectedSectionKey={selectedSection ? selectedSection.key : undefined}
+                loading={loading}
+                generating={generating}
+                onRefresh={load}
+                onToggleExpand={handleToggleExpand}
+                onGoToOutline={handleGoToOutline}
+                onSelectSection={handleTreeSelect}
+                onExpand={handleTreeExpand}
+                moveFlags={moveFlags}
+                onMoveNode={moveNode}
+                onRenameNode={renameNode}
+                onDeleteNode={deleteNode}
+                onAddChildNode={addChildNode}
+                onAddSiblingNode={addSiblingNode}
+                onSaveOutline={saveOutlineTree}
+                renamingKey={renamingKey}
+                renamingValue={renamingValue}
+                setRenamingKey={setRenamingKey}
+                setRenamingValue={setRenamingValue}
+                scrollRef={leftTreeScrollRef}
+              />
+            )}
+            {activeTab === "facts" && (
+              <FactsCategoryPanel
+                entries={factCategoryEntries}
+                totalItems={factsSummary?.total || 0}
+                selected={activeFactCategory}
+                onSelect={setSelectedFactCategory}
+              />
+            )}
+            {workbenchTabsCard}
+          </div>
+        </>
+      ) : (
+        <SplitPane
+          direction="vertical"
+          storageKey="wb-monitor"
+          defaultRatio={0.1133}
+          min={50}
+          max={620}
+          minSecond={320}
+          handleAriaLabel="调整生成监视区与下方工作区的高度"
+          style={{ flex: 1, minHeight: 0 }}
+          first={
+            /* region 3：生成进度卡 ↔ 后台任务列表（左右拖拽） */
+            <SplitPane
+              direction="horizontal"
+              storageKey="wb-progress"
+              defaultRatio={0.62}
+              min={340}
+              minSecond={300}
+              handleAriaLabel="调整生成进度卡与后台任务列表的宽度"
+              first={monitorProgressPane}
+              second={<GenTaskListPanel />}
+            />
+          }
+          second={
+            /* region 4：左侧面板 ↔ 右侧 Tab 内容
+               ✅ R146：解析/审核/导出 的左右分栏都在各自 Tab 内部完成，
+               页面级左栏只剩「正文生成」的目录树与「全局事实」的事实分类。 */
+            activeTab === "import" || activeTab === "review" || activeTab === "export" ? (
+              workbenchTabsCard
+            ) : (
+              <SplitPane
+                direction="horizontal"
+                storageKey="wb-tree"
+                defaultRatio={0.24}
+                min={220}
+                max={480}
+                minSecond={420}
+                handleAriaLabel="调整左侧面板与工作区内容的宽度"
+                first={
+                  activeTab === "facts" ? (
+                    <FactsCategoryPanel
+                      width="100%"
+                      entries={factCategoryEntries}
+                      totalItems={factsSummary?.total || 0}
+                      selected={activeFactCategory}
+                      onSelect={setSelectedFactCategory}
+                    />
+                  ) : (
+                    <SchemeTreePanel
+                      width="100%"
+                      tree={tree}
+                      treeData={treeData}
+                      expandedKeys={expandedKeys}
+                      selectedSectionKey={selectedSection ? selectedSection.key : undefined}
+                      loading={loading}
+                      generating={generating}
+                      onRefresh={load}
+                      onToggleExpand={handleToggleExpand}
+                      onGoToOutline={handleGoToOutline}
+                      onSelectSection={handleTreeSelect}
+                      onExpand={handleTreeExpand}
+                      moveFlags={moveFlags}
+                      onMoveNode={moveNode}
+                      onRenameNode={renameNode}
+                      onDeleteNode={deleteNode}
+                      onAddChildNode={addChildNode}
+                      onAddSiblingNode={addSiblingNode}
+                      onSaveOutline={saveOutlineTree}
+                      renamingKey={renamingKey}
+                      renamingValue={renamingValue}
+                      setRenamingKey={setRenamingKey}
+                      setRenamingValue={setRenamingValue}
+                      scrollRef={leftTreeScrollRef}
+                    />
+                  )
+                }
+                second={workbenchTabsCard}
+              />
+            )
+          }
         />
       )}
-
-      {/* 主体：左侧导航面板 + 右侧 Tab 内容（flex:1 占满剩余高度，随进度区动态收缩） */}
-      {/* 2026-09-23：import（解析提取）模块隐藏目录树——此时还没生成目录，章节树无意义；
-          全局事实（facts）模块同样隐藏目录树，改为左侧「事实分类」面板（点击分类
-          在右侧项目资料下方显示该分类提取结果） */}
-      <div style={{ display: "flex", gap: 12, flex: 1, minHeight: 0 }}>
-        {/* 左侧固定目录树（P0-5 memo 组件）—— 仅在有目录依赖的模块显示，import/facts 模块隐藏 */}
-        {activeTab !== "import" && activeTab !== "facts" && (
-        <SchemeTreePanel
-          tree={tree}
-          treeData={treeData}
-          expandedKeys={expandedKeys}
-          selectedSectionKey={selectedSection ? selectedSection.key : undefined}
-          loading={loading}
-          generating={generating}
-          onRefresh={load}
-          onToggleExpand={handleToggleExpand}
-          onGoToOutline={handleGoToOutline}
-          onSelectSection={handleTreeSelect}
-          onExpand={handleTreeExpand}
-          moveFlags={moveFlags}
-          onMoveNode={moveNode}
-          onRenameNode={renameNode}
-          onDeleteNode={deleteNode}
-          onAddChildNode={addChildNode}
-          onAddSiblingNode={addSiblingNode}
-          onSaveOutline={saveOutlineTree}
-          renamingKey={renamingKey}
-          renamingValue={renamingValue}
-          setRenamingKey={setRenamingKey}
-          setRenamingValue={setRenamingValue}
-          scrollRef={leftTreeScrollRef}
-        />
-        )}
-
-        {/* ✅ 全局事实 Tab 左侧面板：提取结果分类（替代目录树），点击 → 右侧项目资料下方展示该分类详情 */}
-        {activeTab === "facts" && (
-          <FactsCategoryPanel
-            entries={factCategoryEntries}
-            totalItems={factsSummary?.total || 0}
-            selected={activeFactCategory}
-            onSelect={setSelectedFactCategory}
-          />
-        )}
-
-        {/* 右侧 Tab 内容（内部滚动：各 Tab 长内容不再撑高整体布局） */}
-        <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", background: "#fff", border: "1px solid #f0f0f0", borderRadius: 8, padding: 16, overflow: "hidden" }}>
-          <Tabs
-            activeKey={activeTab}
-            onChange={setActiveTab}
-            items={tabItems}
-            className="swb-tabs-flex"
-            style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
-            tabBarStyle={{ flexShrink: 0, marginBottom: 4 }}
-          />
-        </div>
-      </div>
 
       {/* ===== ✅ 全局事实新增 / 编辑 ===== */}
       <Modal

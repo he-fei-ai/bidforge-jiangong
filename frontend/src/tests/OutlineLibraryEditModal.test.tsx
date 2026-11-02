@@ -206,8 +206,8 @@ describe("OutlineLibraryEditModal · 保存校验与链路", () => {
   });
 });
 
-describe("OutlineLibraryEditModal · 三级深度拦截", () => {
-  it("逐级加子章节直至三级；继续加第四级被拦截（告警，计数不增长）", () => {
+describe("OutlineLibraryEditModal · 深度拦截（R151 四级叶子标准）", () => {
+  it("逐级加子章节直至四级；继续加第五级被拦截（告警，计数不增长）", () => {
     setup(true);
     clickTab("目录章节");
     // 新增一级章节（L1，自动选中）→ 连续「新增子章节」利用自动选中逐级下钻
@@ -217,10 +217,12 @@ describe("OutlineLibraryEditModal · 三级深度拦截", () => {
     expect(bodyText()).toContain("共 2 个章节");
     fireEvent.click(bodyBtn("新增子章节")!); // L3
     expect(bodyText()).toContain("共 3 个章节");
-    // 在三级节点下继续加 → 拦截（newLevel=4 > MAX_OUTLINE_DEPTH=3）
+    fireEvent.click(bodyBtn("新增子章节")!); // L4（✅ R151：四级现在合法）
+    expect(bodyText()).toContain("共 4 个章节");
+    // 在四级节点下继续加 → 拦截（newLevel=5 > MAX_OUTLINE_DEPTH=4）
     fireEvent.click(bodyBtn("新增子章节")!);
-    expect(bodyText()).toContain("共 3 个章节");
-    expect(getActivityItems().some((i) => i.text.includes("目录最多支持 3 级"))).toBe(true);
+    expect(bodyText()).toContain("共 4 个章节");
+    expect(getActivityItems().some((i) => i.text.includes("目录最多支持 4 级"))).toBe(true);
   });
 });
 /**

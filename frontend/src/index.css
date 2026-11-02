@@ -655,12 +655,26 @@ pre,
   background: rgba(255, 255, 255, 0.85) !important;
   backdrop-filter: blur(12px);
   border-bottom: 1px solid #E8EDF4 !important;
-  height: 44px !important;
-  line-height: 44px !important;
+  /* 用户指令（2026-11-01）：顶栏高度由 44px 减半至 22px */
+  height: 22px !important;
+  line-height: 22px !important;
   padding: 0 24px !important;
   display: flex !important;
   align-items: center !important;
   justify-content: space-between !important;
+}
+
+/* 顶栏减半后，内部按钮/铃铛同步收一档，避免 24px 控件溢出 22px 栏高 */
+.bp-header .ant-btn-sm {
+  height: 20px !important;
+  padding: 0 4px !important;
+  line-height: 20px !important;
+}
+
+.bp-header .bp-activity-bell {
+  width: 20px;
+  height: 20px;
+  font-size: 13px;
 }
 
 .bp-header-crumbs {
@@ -706,12 +720,21 @@ pre,
 /* ---------- 主区域 Content ---------- */
 .bp-content {
   margin: 20px !important;
-  height: calc(100vh - 84px) !important;
+  /* 顶栏 22px + 上下 margin 20px → 内容区高度同步扣减 62px */
+  height: calc(100vh - 62px) !important;
   min-height: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
   background: #F4F6FA !important;
+}
+
+/* ✅ 用户指令（2026-11-01）：方案工作台顶部「状态 + 字数」信息带高度减半。
+   原高度 = 上留白 20 + 信息行 22 + 下留白 8 ≈ 50px，现收紧为 6 + 18 + 2 ≈ 26px。
+   仅作用于 /scheme/* 页面（其余页面保持原 20px 留白）。 */
+.bp-content-workbench {
+  margin-top: 6px !important;
+  height: calc(100vh - 48px) !important;
 }
 
 /* ---------- 页面进入动效 ---------- */
@@ -799,8 +822,17 @@ pre,
 .scroll-area {
   /* 让滚动条占位不闪烁 */
   scrollbar-gutter: stable;
-  scrollbar-width: thin;           /* Firefox */
-  scrollbar-color: #bfbfbf transparent;
+  /* ✅ R146（2026-10-30）：嵌套滚动隔离 —— 面板内滚到边界时不把滚动链传给
+     页面/外层容器，避免「滚到顶再整页抖动」的连锁滚动。 */
+  overscroll-behavior: contain;
+  /* ✅ 2026-10-30 增强：滚动条改为「常规宽度 + 可见浅灰轨道」，明确可拖动查看内容。
+     原因：Chrome/Edge 121+ 与 Firefox 中标准属性 scrollbar-width/scrollbar-color
+     优先于 ::-webkit-scrollbar 系列生效，旧配置 thin + 透明轨道导致滚动条又细又难
+     辨认（透明轨道上只剩 ~6px 浅灰滑块），用户难以看到、更难以抓取拖动。
+     改为 auto 宽度 + #f5f5f5 可见轨道后，滑块与轨道边界清晰，可直接按住拖动。
+     下方 ::-webkit-scrollbar 系列保留，仅服务不支持标准属性的旧浏览器。 */
+  scrollbar-width: auto;            /* Firefox / Chrome 121+：常规宽度，便于鼠标抓取 */
+  scrollbar-color: #bfbfbf #f5f5f5; /* Firefox / Chrome 121+：滑块 + 可见轨道 */
   /* ✅ 性能优化：布局/样式包含。长列表（目录树 260 节点、事实数百条、章节日志）
      滚动时，浏览器可以把 layout/style 重算边界限制在滚动容器内，不必波及整页。
      刻意不加 paint（会裁剪溢出）与 size（与 flex/百分比高度相互作用有反馈环风险）。
@@ -809,31 +841,75 @@ pre,
   contain: layout style;
 }
 
-/* Webkit (Chrome / Edge / Safari) */
+/* Webkit (Chrome / Edge / Safari 旧版本兜底；121+ 走上面的标准属性) */
 .scroll-area::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
 }
 .scroll-area::-webkit-scrollbar-track {
-  background: transparent;
+  background: #f5f5f5;
+  border-radius: 6px;
 }
 .scroll-area::-webkit-scrollbar-thumb {
-  background: #d9d9d9;
-  border-radius: 5px;
-  border: 2px solid transparent;
+  background: #bfbfbf;
+  border-radius: 6px;
+  border: 2px solid #f5f5f5;
   background-clip: content-box;
+  min-height: 32px; /* 滑块最小高度，保证短内容下仍有可抓取的拖动目标 */
 }
 .scroll-area::-webkit-scrollbar-thumb:hover {
-  background: #bfbfbf;
+  background: #999999;
   background-clip: content-box;
-  border: 2px solid transparent;
+  border: 2px solid #f5f5f5;
 }
 .scroll-area::-webkit-scrollbar-thumb:active {
   background: #8c8c8c;
   background-clip: content-box;
-  border: 2px solid transparent;
+  border: 2px solid #f5f5f5;
 }
 .scroll-area::-webkit-scrollbar-button {
+  height: 0;
+  width: 0;
+  display: none;
+}
+
+/* ---------- 标签页分栏滚动条（R146 · 6px 细滚动条） ----------
+   各标签页主内容区（左右/上下分栏的每个 pane）独立滚动：
+   - 隐藏原生粗滚动条，统一 6px 细条 + 透明轨道；
+   - overscroll-behavior: contain 阻断滚动链，拖拽/滚动不带动整页；
+   - 仅作用于分栏 pane，`.scroll-area` 既有口径（12px 易抓取）保持不变，
+     避免影响工作台之外的长列表页。
+   ✅ R150（2026-10-30）：**分块自身**（.bp-resize-pane）也纳入滚动容器 ——
+   每个 Tab 的每一块内容过长时都在自己的右侧出细滚动条，而不是被
+   overflow:hidden 裁掉。内层已有 height:100% 滚动容器时外层不会重复出条。 */
+.bp-pane-scroll,
+.bp-resize-pane {
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #c9cdd4 transparent;
+}
+.bp-pane-scroll::-webkit-scrollbar,
+.bp-resize-pane::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.bp-pane-scroll::-webkit-scrollbar-track,
+.bp-resize-pane::-webkit-scrollbar-track {
+  background: transparent;
+}
+.bp-pane-scroll::-webkit-scrollbar-thumb,
+.bp-resize-pane::-webkit-scrollbar-thumb {
+  background: #c9cdd4;
+  border-radius: 3px;
+  min-height: 28px;
+}
+.bp-pane-scroll::-webkit-scrollbar-thumb:hover,
+.bp-resize-pane::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+.bp-pane-scroll::-webkit-scrollbar-button,
+.bp-resize-pane::-webkit-scrollbar-button {
   height: 0;
   width: 0;
   display: none;
@@ -886,6 +962,17 @@ pre,
    这正是「导航栏内功能混乱」的直接观感来源。 */
 .ant-tabs.swb-tabs-flex > .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane.ant-tabs-tabpane-hidden {
   display: none !important;
+}
+
+/* ✅ R149（2026-10-30）上下滑动条设计 · 高度链闭合：
+   Tab 面板自己**不允许**成为第二个滚动容器 —— 滚动只发生在面板内挂了
+   `.bp-pane-scroll` 的 pane 上。否则「面板可滚 + pane 可滚」会产生双滚动条，
+   且滚到边界时把滚动链传给外层，表现为整页抖动。
+   高度锚点：.bp-content = calc(100vh - 62px)（头部 22px + 上下 margin 20px）
+   → 工作台根 flex:1 → Tabs(.swb-tabs-flex) flex:1 → tabpane height:100%。 */
+.ant-tabs.swb-tabs-flex > .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane:not(.ant-tabs-tabpane-hidden) {
+  overflow: hidden;
+  overscroll-behavior: contain;
 }
 
 /* ✅ 导航栏间距收紧：方案工作台顶部工作流导航各标题之间水平间距过大，
@@ -1013,28 +1100,17 @@ pre,
   display: none !important;
 }
 
-/* ant-tree 在 flex 父里：容器不能被内容撑爆 */
-.ant-tree {
-  min-height: 0;
-  height: 100%;
-  overflow: hidden;  /* 裁剪子元素溢出 */
-}
-/* ant-tree 直接子层：ant-tree-list / ant-tree-treenode 等都要能跟随父 */
-.ant-tree > .ant-tree-list {
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
-}
-.ant-tree-list-holder {
-  height: 100%;
-  position: relative;
-  overflow: hidden;
-}
-.ant-tree-list-holder-inner {
-  position: absolute;
-  inset: 0;
-  overflow-y: auto !important;
-}
+/* ✅ R151（2026-10-30）删除「ant-tree 强制撑满父高」覆写 —— 它把**所有** antd Tree
+   变成 `height:100%` + holder-inner 绝对定位内部滚动。问题是：只有父容器高度
+   是**确定值**（flex 撑满 / 显式 height）时百分比才成立；一旦父容器是 auto 高度
+   （`minHeight/maxHeight`、Card body、Tooltip 预览等），`height:100%` 就地解析为
+   auto，而子层又被绝对定位抽离文档流 ⇒ 树 computed 高度恒为 0，
+   表现为「目录树一片空白」。
+   实测受影响：目录生成页编辑树、ProjectDetailPage 标准目录预览、OutlineLibraryPage
+   预览、编辑弹窗目录树、LogViewer 链路树（全部是 auto 高度父）。
+   正确做法：树按内容自然高度渲染，溢出交给**外层滚动容器**（本仓的
+   `.scroll-area` / `.bp-pane-scroll` / `.bp-resize-pane` 都已可纵向滚动）。
+   antd 虚拟模式（显式传 `height`）由 rc-virtual-list 自己写内联高度，无需本覆写。 */
 
 /* ant-layout-content 高度链路：Content 是 flex 列锚点，所有页面根元素都变成 flex column */
 .ant-layout-content > * {
@@ -1157,7 +1233,12 @@ pre,
 @media (max-width: 1200px) {
   .bp-content {
     margin: 12px !important;
-    height: calc(100dvh - 68px) !important;
+    height: calc(100dvh - 46px) !important;
+  }
+  /* 方案工作台：信息带上留白 12→6，高度同步 +6 */
+  .bp-content-workbench {
+    margin-top: 6px !important;
+    height: calc(100dvh - 40px) !important;
   }
   .bp-stat-cards {
     grid-template-columns: repeat(3, 1fr) !important;
@@ -1220,6 +1301,11 @@ pre,
   .bp-content {
     margin: 8px !important;
     height: calc(100dvh - 68px) !important;
+  }
+  /* 方案工作台：信息带上留白 8→4，高度同步 +4 */
+  .bp-content-workbench {
+    margin-top: 4px !important;
+    height: calc(100dvh - 64px) !important;
   }
   .bp-stat-cards {
     grid-template-columns: 1fr !important;
@@ -1341,4 +1427,116 @@ pre,
   .ant-table-tbody > tr > td {
     padding: 10px 6px !important;
   }
+}
+
+/* ================================================================
+   可拖拽面板（Resizable Panels · 2026-10-30 R145）
+   SplitPane / ResizeHandle · components/resizable/
+   ================================================================ */
+.bp-resize-group {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+}
+.bp-resize-group.axis-x {
+  flex-direction: row;
+}
+.bp-resize-group.axis-y,
+.bp-resize-group.disabled {
+  flex-direction: column;
+}
+
+.bp-resize-pane {
+  min-width: 0;
+  min-height: 0;
+  /* ✅ R150：分块默认就是滚动容器（滚动条样式由上方 .bp-resize-pane 组统一给 6px），
+     内容过长时右侧出现细条；不再用 overflow:hidden 裁掉看不见的内容。
+     只纵向滚：横向多余内容仍裁掉，避免拖窄分块时冒出横向滚动条（全局抖动源之一）。 */
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* 内部自适应：面板尺寸变化时让内容在自己范围内滚动/重排，
+     表格/图表/文本不溢出变形（antd 组件自带容器尺寸监听） */
+  contain: layout style;
+}
+
+/* 分隔条：8px 命中区 + 4px 视觉条（居中），悬停/拖拽高亮 */
+.bp-resize-handle {
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 20;
+  touch-action: none;
+  background: transparent;
+}
+.bp-resize-handle::after {
+  content: "";
+  position: absolute;
+  background: transparent;
+  border-radius: 2px;
+  transition: background-color 0.15s ease-out;
+}
+/* 横向切分（调宽度）：竖条 */
+.bp-resize-handle.axis-x {
+  width: 8px;
+  margin: 0 -2px;
+  cursor: col-resize;
+}
+.bp-resize-handle.axis-x::after {
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  right: 2px;
+}
+/* 纵向切分（调高度）：横条 */
+.bp-resize-handle.axis-y {
+  height: 8px;
+  margin: -2px 0;
+  cursor: row-resize;
+}
+.bp-resize-handle.axis-y::after {
+  left: 0;
+  right: 0;
+  top: 2px;
+  bottom: 2px;
+}
+.bp-resize-handle:hover::after,
+.bp-resize-handle.dragging::after {
+  background: #1677ff;
+}
+[data-bp-mode='dark'] .bp-resize-handle:hover::after,
+[data-bp-mode='dark'] .bp-resize-handle.dragging::after {
+  background: #00d4ff;
+}
+/* ✅ R148 键盘可达性：焦点环（键盘用户能看见当前可调整的分隔条） */
+.bp-resize-handle:focus-visible {
+  outline: 2px solid #1677ff;
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+[data-bp-mode='dark'] .bp-resize-handle:focus-visible {
+  outline-color: #00d4ff;
+}
+.bp-resize-handle.disabled {
+  cursor: default;
+  pointer-events: none;
+}
+
+/* 拖拽期间全局禁用文本选中 + 光标锁定（防止选中页面文字/图表拖花） */
+body.bp-resize-dragging {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+body.bp-resize-dragging.bp-resize-axis-x {
+  cursor: col-resize;
+}
+body.bp-resize-dragging.bp-resize-axis-y {
+  cursor: row-resize;
+}
+
+/* 深色侧栏内的手柄（region 5）：与侧栏底色协调 */
+.bp-sidebar .bp-resize-handle:hover::after,
+.bp-sidebar .bp-resize-handle.dragging::after {
+  background: #00d4ff;
 }

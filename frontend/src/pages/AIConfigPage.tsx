@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {App, Card, Form, Input, Select, Button, message,
   Tag, Table, Typography, Space, InputNumber, Tabs, Tooltip,
   Statistic, Row, Col, Switch, Modal, Empty, List, Alert, Checkbox,} from "antd";
@@ -10,7 +10,7 @@ import {
   ArrowUpOutlined, ArrowDownOutlined, SortAscendingOutlined,
   ExportOutlined, ImportOutlined, ReloadOutlined, ClearOutlined,
   WarningOutlined, KeyOutlined, EyeOutlined, HistoryOutlined, NodeIndexOutlined,
-  HeartOutlined,
+  HeartOutlined, DownOutlined, RightOutlined,
 } from "@ant-design/icons";
 
 import { aiApi, systemApi } from "../api";
@@ -29,7 +29,7 @@ import type {
 
 import { PageHero, StatCards, StatItem } from '../utils/ui';
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
 // ✅ 性能优化（2026-09-24 · 遗留项 #2）：/ai/stats 后端一次聚合 9 条 SQL，
 //    页面每次挂载/刷新/清理都会重跑。模块级 30s TTL 缓存：窗口内复用上次
@@ -86,6 +86,75 @@ export function resolveConcurrencyMax(
 //    正是类型契约的价值体现）。
 type PlanInfo = AIProviderPlan;
 type ProviderInfo = AIProviderPreset;
+
+/**
+ * 默认收起的折叠区块（点击标题展开）。
+ *
+ * ✅ 2026-11-01：本页「各供应商调用分布 / 失败原因 TOP / 已配置的供应商 /
+ *    熔断降级链顺序 / 场景模型路由 / 配置变更记录」统一折叠，减少首屏信息噪音。
+ *    收起时仅用 display:none 隐藏内容而**不卸载**，既有页面测试与内部状态不受影响。
+ */
+function CollapsibleBlock({ label, extra, style, children }: {
+  label: ReactNode;
+  extra?: ReactNode;
+  style?: CSSProperties;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={style}>
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+        flexWrap: "wrap", gap: 8,
+      }}>
+        <div
+          role="button"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+          style={{
+            cursor: "pointer", userSelect: "none", fontWeight: 600, fontSize: 16,
+            display: "inline-flex", alignItems: "center",
+          }}
+        >
+          {open ? <DownOutlined /> : <RightOutlined />}
+          <span style={{ marginLeft: 6 }}>{label}</span>
+        </div>
+        {extra}
+      </div>
+      <div style={{ display: open ? undefined : "none", marginTop: 8 }}>{children}</div>
+    </div>
+  );
+}
+
+/** 默认收起的卡片（与 CollapsibleBlock 同样只在视觉上隐藏内容）。 */
+function CollapsibleCard({ title, extra, style, children }: {
+  title: ReactNode;
+  extra?: ReactNode;
+  style?: CSSProperties;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Card
+      size="small"
+      style={style}
+      extra={extra}
+      title={
+        <span
+          role="button"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+          style={{ cursor: "pointer", userSelect: "none" }}
+        >
+          {open ? <DownOutlined /> : <RightOutlined />}
+          <span style={{ marginLeft: 6 }}>{title}</span>
+        </span>
+      }
+    >
+      <div style={{ display: open ? undefined : "none" }}>{children}</div>
+    </Card>
+  );
+}
 
 export default function AIConfigPage() {
   const { message: _antdMsg, modal } = App.useApp();
@@ -1465,8 +1534,7 @@ export default function AIConfigPage() {
               </Space>
             </Col>
           </Row>
-          <div style={{ marginTop: 12 }}>
-            <div style={{ fontWeight: 600, marginBottom: 8 }}>各供应商调用分布</div>
+          <CollapsibleBlock label="各供应商调用分布" style={{ marginTop: 12 }}>
             <Space wrap>
               {stats.by_provider?.map((p: any) => {
                 // ✅ 2026-09-17 增强：成功率着色（<60% 红色预警，帮助一眼识别死配置）
@@ -1487,11 +1555,13 @@ export default function AIConfigPage() {
                     {p.cache_hit_rate != null && p.cache_hit_rate > 0 && ` / 缓存命中${p.cache_hit_rate}%`}
                     {(p.fail_count || 0) > 0 && ` / 失败${p.fail_count}次`}
                     {(p.skipped_count || 0) > 0 && ` / 熔断跳过${p.skipped_count}次`}
+                    {/* ✅ R158：成功耗时 P95 —— AVG 被长尾稀释，「谁在拖慢交付」只有分位数能回答 */}
+                    {(p.p95_duration_ok || 0) > 0 && ` / P95 ${p.p95_duration_ok}s`}
                   </Tag>
                 );
               })}
             </Space>
-          </div>
+          </CollapsibleBlock>
           {/* ✅ 2026-09-25：按场景聚合 —— 此前后端算了 by_scene 却没有任何展示，
               而明细又只能按供应商/操作筛：「某场景失败率高」这件事既看不见也查不到。
               场景码统一显示中文名（与场景模型路由同口径），点击可直接下钻到该场景明细。 */}
@@ -1562,13 +1632,30 @@ export default function AIConfigPage() {
           )}
           {/* ✅ 2026-09-17 新增：失败原因 TOP 分布（配合审计 error 列） */}
           {stats.by_error?.length > 0 && (
-            <div style={{ marginTop: 12 }}>
-              <div style={{ fontWeight: 600, marginBottom: 8 }}>失败原因 TOP（按调用次数）</div>
+            <CollapsibleBlock label="失败原因 TOP（按调用次数）" style={{ marginTop: 12 }}>
               <Space wrap>
                 {stats.by_error.map((e: any, i: number) => (
                   <Tooltip key={i} title={`${providers[e.provider_name]?.label || e.provider_name} / ${e.model || "—"}`}>
                     <Tag color="volcano">
                       {providers[e.provider_name]?.label || e.provider_name}: {e.err}: {e.calls}次
+                    </Tag>
+                  </Tooltip>
+                ))}
+              </Space>
+            </CollapsibleBlock>
+          )}
+          {/* ✅ R158：结构化失败分类统计（by_error_class，与网关退避判据同源）——
+              「429 一共多少次 / 超时多少次」终于有类级口径；skipped（门禁跳过）
+              与 failed（真实失败）分列，避免「没发出去的请求」混进失败原因。 */}
+          {(stats.by_error_class?.length || 0) > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontWeight: 600, marginBottom: 8 }}>失败分类统计</div>
+              <Space wrap>
+                {stats.by_error_class!.map((c) => (
+                  <Tooltip key={c.error_class} title={`分类码 ${c.error_class}（error_taxonomy 单一事实源）`}>
+                    <Tag color={c.failed_calls > 0 ? "volcano" : "default"}>
+                      {c.label}: 失败 {c.failed_calls} 次
+                      {c.skipped_calls > 0 && `（另熔断/冷却跳过 ${c.skipped_calls} 次未发出）`}
                     </Tag>
                   </Tooltip>
                 ))}
@@ -1612,8 +1699,10 @@ export default function AIConfigPage() {
                     )}
                   </Space>
                 </Card>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
-                  <Title level={5} style={{ margin: 0 }}>已配置的供应商（{configs.length}）</Title>
+                <CollapsibleBlock
+                  label={`已配置的供应商（${configs.length}）`}
+                  style={{ marginBottom: 12 }}
+                  extra={(
                   <Space wrap>
                     {/* ✅ 2026-10-06（G3）：全部配置体检 —— 一次性看出「当前环境下哪几条真能用」，
                         覆盖 Key 缺失/解密失败/缺地址/环境不符/厂商禁用/网络不可达。 */}
@@ -1659,8 +1748,8 @@ export default function AIConfigPage() {
                       添加供应商
                     </Button>
                   </Space>
-                </div>
-
+                  )}
+                >
                 {configs.length === 0 ? (
                   <Empty description="尚未配置任何 AI 供应商，请点击「添加供应商」">
                     <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>
@@ -1676,11 +1765,11 @@ export default function AIConfigPage() {
                     size="small"
                   />
                 )}
+                </CollapsibleBlock>
 
                 {/* ===== ✅ 熔断降级链顺序（aiApi.updateFallbackChain）===== */}
                 {configs.length > 0 && (
-                  <Card
-                    size="small"
+                  <CollapsibleCard
                     title={<span><SortAscendingOutlined /> 熔断降级链顺序</span>}
                     style={{ marginTop: 16 }}
                     extra={
@@ -1776,7 +1865,7 @@ export default function AIConfigPage() {
                         </List.Item>
                       )}
                     />
-                  </Card>
+                  </CollapsibleCard>
                 )}
 
                 {/* ===== ✅ 2026-09-23 新增：运行时厂商开关 ===== */}
@@ -1843,8 +1932,7 @@ export default function AIConfigPage() {
 
                 {/* ===== ✅ 2026-09-23 新增：场景模型路由（多模型）===== */}
                 {configs.length > 0 && sceneRoutes.length > 0 && (
-                  <Card
-                    size="small"
+                  <CollapsibleCard
                     title={<span><NodeIndexOutlined /> 场景模型路由（可选）</span>}
                     style={{ marginTop: 16 }}
                   >
@@ -1904,12 +1992,11 @@ export default function AIConfigPage() {
                       ))}
                     </Row>
                     </div>
-                  </Card>
+                  </CollapsibleCard>
                 )}
 
                 {/* ===== ✅ 2026-09-23 新增：配置变更记录（审计留痕）===== */}
-                <Card
-                  size="small"
+                <CollapsibleCard
                   title={<span><HistoryOutlined /> 配置变更记录</span>}
                   style={{ marginTop: 16 }}
                   extra={
@@ -1969,7 +2056,7 @@ export default function AIConfigPage() {
                       )}
                     />
                   )}
-                </Card>
+                </CollapsibleCard>
 
                 {/* 供应商预设信息展示 */}
                 <Card
