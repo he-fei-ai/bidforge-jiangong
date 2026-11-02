@@ -6,8 +6,15 @@
 - cancel_tasks: set() 存储并发子任务的 asyncio.Task 引用，stop 时统一取消
 """
 import asyncio
-import json
 import logging
+
+try:
+    from app.utils.observability import context_snapshot, new_trace_id, set_context
+except Exception:  # noqa: BLE001
+    def new_trace_id(): return ""
+    def set_context(**kw): return None
+    def context_snapshot(): return {}
+import json
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -19,6 +26,34 @@ from app.services import activity_broadcaster as _ab
 from app.services.ai.workflows_base import concurrency_controller as _cc
 
 logger = logging.getLogger("task_registry")
+
+# ✅ R142（2026-10-28 · 运行轨迹与全链路追踪）：任务生命周期事件写入 system_logs。
+#    此前 task_registry 只写 DB 的 task_registry 表 + 文本日志，system_logs 恒为空，
+#    「按 task_id 返回运行轨迹」接口查不到任何行。此辅助函数把
+#    created/running/paused/resumed/stopping/completed/failed/stopped/degraded
+#    全生命周期落到 system_logs，供可观测性查询接口按 task_id 串联。
+#    任何失败仅告警（fail-soft，绝不影响任务主流程）。
+
+async def _log_task_event(task_id: str, event: str, *, level: str = "INFO",
+                          status: str = "", message: str = "", detail: dict | None = None) -> None:
+    """写一条 system_logs 任务生命周期事件（fail-soft）。
+
+    事件语义：``task.created`` / ``task.running`` / ``task.paused`` /
+    ``task.resumed`` / ``task.stopping`` / ``task.completed`` /
+    ``task.failed`` / ``task.stopped`` / ``task.degraded``。
+    """
+    try:
+        from app.services.observability import log_event
+        conn = await get_conn()
+        _d = dict(detail or {})
+        if message:
+            _d["message"] = message
+        await log_event(conn, level=level, module="task_registry", event=event,
+                        task_id=task_id, status=status, message=message or event,
+                        detail=_d)
+    except Exception as e:  # noqa: BLE001 - fail-soft：可观测性失败绝不阻断主流程
+        logger.warning("task 生命周期事件写入 system_logs 失败（task=%s event=%s）: %s",
+                       task_id, event, e)
 
 # ✅ 进度落库节流参数（2026-09-15）：内存态与 SSE 广播始终实时，
 #    仅对 DB 落库做节流以降低写放大（长方案 60 章会产生上百次进度写盘）。
@@ -143,6 +178,11 @@ async def register_task(task_type: str, project_id: str = "", scheme_id: str = "
         "_db_progress_val": -1.0,
     }
     _ab.notify()
+    # ✅ R142：任务创建即落运行轨迹（created → running），供按 task_id 查轨迹。
+    await _log_task_event(tid, "task.created", status="running",
+                          message=f"任务已注册（type={task_type}）",
+                          detail={"task_type": task_type, "scheme_id": scheme_id,
+                                  "project_id": project_id})
     return tid
 
 
@@ -266,6 +306,11 @@ def get_task_elapsed_ms(task_id: str) -> float | None:
 
 
 async def _write_task_terminal_db(task_id: str, status: str, message: str):
+    try:
+        logging.getLogger("task_registry").info("task terminal", extra={"_obs_extra": {"event": f"task.{status}", "task_id": task_id, "status": status, "detail": {"message": message}}})
+    except Exception:  # noqa: BLE001
+        pass
+
     """任务终态落库（幂等单语句，供 retry_db_op 安全重放）。
 
     ✅ 竞态守卫（2026-09-17 P0 修复）：只从 running/paused 写入终态。
@@ -338,6 +383,13 @@ async def finish_task(task_id: str, status: str = "completed", message: str = ""
             logger.info("任务终止 %s（type=%s · scheme=%s · task=%s）: %s",
                         status, _type, _scheme, task_id,
                         (message or "")[:120])
+        # ✅ R142：终态落运行轨迹（completed/failed/stopped/degraded）。
+        _term_event = {"completed": "task.completed", "degraded": "task.degraded",
+                       "failed": "task.failed"}.get(status, "task.stopped")
+        await _log_task_event(task_id, _term_event, status=status,
+                              message=message or status,
+                              detail={"task_type": _type, "scheme_id": _scheme,
+                                      "terminal": True})
 
     if state:
         state["status"] = status
@@ -404,9 +456,19 @@ async def set_task_status(task_id: str, status: str) -> bool:
     if rc == 0:
         logger.info("set_task_status: 任务 %s 已处终态或不存在，忽略 %s 覆盖", task_id, status)
         return False
+    # ✅ R142：状态迁移的 from_status（迁移前内存态）。
+    _from_status = (_tasks.get(task_id) or {}).get("status", "")
     if task_id in _tasks:
         _tasks[task_id]["status"] = status
         _ab.notify()
+    # ✅ R142：控制指令状态迁移落运行轨迹（paused/resumed/stopping）。
+    _ctl_event = {"paused": "task.paused", "running": "task.resumed",
+                  "stopped": "task.stopping"}.get(status)
+    if _ctl_event:
+        await _log_task_event(task_id, _ctl_event, status=status,
+                              message=f"任务状态迁移 {_from_status or '?'} → {status}",
+                              detail={"from_status": _from_status, "to_status": status,
+                                      "reason": "用户控制指令", "operator": "control"})
     return True
 
 

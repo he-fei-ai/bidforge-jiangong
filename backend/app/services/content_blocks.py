@@ -50,6 +50,12 @@ from app.services.fence_common import (  # noqa: E402
 from app.services.fence_common import (
     is_fence_close as _fence_is_close,
 )
+
+# ✅ R165（2026-11-01 · 4 空格缩进图表围栏）：缩进归一的「保护区」判定复用
+#    fence_common 的**同一份**遍历（块内不解析新围栏），不另写状态机。
+from app.services.fence_common import (
+    iter_all_blocks as _iter_all_blocks,
+)
 from app.services.fence_common import (
     looks_like_prose as _looks_like_prose,
 )
@@ -97,15 +103,27 @@ _IMAGE_LINE_RE = re.compile(r"^!\[(?P<alt>[^\]\n]*)\]\((?P<url>https?://[^)\s]+)
 # 现收敛：正则与上限各只有一份，全部消费方 import，不再有本地副本。
 LEAD_IN_MAX_CHARS = 60
 # 对外公开别名：判定「一行文本是否是图表引导语」。
-LEAD_IN_HINT_RE = re.compile(r"(?:如下图|见下图|如下图示|如图|图示)\s*(?:所示)?\s*[:：。]?$")
+# ✅ R164（2026-11-01 · 图题残字）：备选**必须按「长词在前」排列**——
+#    `re.sub` 用第一条**命中**的备选取代，旧顺序把 `详见下图：` 里的 `见下图：`
+#    当引导语剥掉，只剩一个悬空的「详」字，图题被写成「图 3-1 各项内容详」
+#    （实测 `各项内容详见下图：` → title=`各项内容详`）。把 `详见下图` 提到
+#    最前即可整词剥离；检测语义（`search` + `$`）不变，删图回收引导语的判据
+#    与改动前逐例等价（旧式本就靠子串匹配命中同一行）。
+LEAD_IN_HINT_RE = re.compile(
+    r"(?:详见下图|见下图|如下图示|如下图|如图|图示)\s*(?:所示)?\s*[:：。]?$")
 # 保留私有名（既有本模块内 2 处消费 + 既有测试 import 零改动）。
 _LEAD_IN_HINT_RE = LEAD_IN_HINT_RE
 # 登记侧（_chart_pipeline）删除代码块时回收引导语的判据别名。
 ORPHAN_LEAD_IN_RE = LEAD_IN_HINT_RE
 # 私有常量别名（_chart_pipeline 既有 import 名保持不变）。
 _LEAD_IN_MAX_CHARS = LEAD_IN_MAX_CHARS
+# 引导语剥尾后的**残留连接词**：`详见下图` / `如图所示` 之外，AI 还会写
+# 「具体详见下图」「各项内容详见下图」，剥掉引导语后可能剩一个悬空字
+# （详 / 如 / 见 / 所 / 下 / 示 / 后）。这类单字不构成名词短语图题，
+# 必须一并剥除，否则会沿用上面的残字缺陷。
 _LEAD_IN_TAIL_RE = re.compile(
-    r"(?:如下|如后|见下)?\s*(?:图|表)?\s*(?:所示|如下)?\s*[:：。]?\s*$")
+    r"(?:具体|详见|如下|如后|见下)?\s*(?:图|表)?\s*(?:所示|如下)?"
+    r"(?:详|如|见|所|下|示|后)?\s*[:：。]?\s*$")
 _MERMAID_TITLE_RES = (
     re.compile(r"^\s*%%\s*(?:图题|标题|title)\s*[:：]\s*(.+?)\s*$", re.M),
     re.compile(r"^\s*(?:title|图题)\s*[:：]?\s*(.+?)\s*$", re.M),
@@ -491,6 +509,33 @@ def _strip_leading_table_number(text: str) -> str:
     return t
 
 
+def _table_cell_count(line: str) -> int:
+    """GFM 表格行的单元格数（剥离首尾竖线后按 ``|`` 切分，含空单元格）。
+
+    ✅ R145（2026-10-29）：供 `_split_table_block` 判「表头前短行」，与分隔行
+    的列数比较；含空单元格（``| 项目 | |`` 计 2 格），与导出端
+    ``export._split_row`` 的口径一致。
+    """
+    s = line.strip()
+    if not s:
+        return 0
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return len(s.split("|"))
+
+
+def _table_row_has_content(line: str) -> bool:
+    """GFM 表格行是否至少有一个非空单元格（区分空行与真表头带）。"""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return any(c.strip() for c in s.split("|"))
+
+
 def _split_table_block(tbl_lines: list[str]) -> list[list[str]]:
     """把连续收集的 `|` 行块切分为规范序 ``[表头, 分隔行, *数据行]`` 表格段。
 
@@ -540,6 +585,28 @@ def _split_table_block(tbl_lines: list[str]) -> list[list[str]]:
         covered[s] = True
         for k in range(h, data_end):
             covered[k] = True
+    if segments and not all(covered):
+        # ✅ R145（2026-10-29 · 导出后校验检出 Markdown 残留）：表头**前**的短行
+        #    （单元格数 < 分隔行列数、至少一格有内容）是「表头带/列组标签」行，
+        #    属于表格的一部分，不是孤儿数据行。旧判据「任一行未覆盖 → 整块拒绝」
+        #    把它当病态形态 → 整张表降级为裸文本段落，管道语法/分隔行原样印进
+        #    交付 DOCX（生产取证：精装修方案「抹灰参数」章表 4-1，首行
+        #    ``| 项目 | 技术参数 |`` 2 列 + 表头 3 列）。现把这类短行前置进首个
+        #    表段并标记覆盖；短行由导出端 `_add_table_from_markup` 按 gridSpan 合并。
+        #    若仍不全部覆盖（真·孤儿行）→ 照旧整体拒绝（保守，宁可不改不 Fabrication）。
+        s0 = sep_idx[0]
+        if s0 > 0:
+            sep_cols = _table_cell_count(tbl_lines[s0])
+            preamble: list[str] = []
+            for k in range(s0):
+                if covered[k]:
+                    continue
+                if (_table_cell_count(tbl_lines[k]) < sep_cols
+                        and _table_row_has_content(tbl_lines[k])):
+                    preamble.append(tbl_lines[k])
+                    covered[k] = True
+            if preamble:
+                segments[0] = preamble + segments[0]
     if not all(covered):
         # 病态形态：有行未构成任何表格段 → 整体不识别，交旧降级路径（宁可裸文本，
         # 不半识别——半识别会把孤儿行静默丢掉或 Fabrication 出一张结构错误的表）。
@@ -717,6 +784,20 @@ def _parse_content_blocks(content: str, *, _md_depth: int = 0,
     if not content:
         return []
     blocks = []
+    # ✅ R165（2026-11-01 · 4 空格缩进图表围栏不被识别）：AI 偶尔把图表围栏缩进
+    #    4 个空格（列表项续行习惯）。围栏判据是全仓唯一事实源
+    #    ``fence_common.FENCE_LINE_RE``（≤3 前导空白，对齐 CommonMark），4 空格因此
+    #    **不是围栏** → 整块降级为普通段落，交付成稿里出现裸的 ```mermaid / JSON
+    #    源码（实测探针 ``[indent4]``）。放宽判据风险更大（CommonMark 中 4 空格
+    #    缩进本是代码块，会误判真代码样例）；改用「读取前把图表围栏去缩进」的
+    #    窄口径归一：只动「语言属于图表家族、且外层无其它围栏包住」的行，
+    #    行数/行序完全不变（``src_line`` 契约不受影响），幂等。
+    if _INDENTED_FENCE_RE.search(content):
+        content, _indent_log = normalize_chart_fence_indent(content)
+        for _it in _indent_log:
+            logger.info(
+                "图表围栏缩进归一：第 %d 行（lang=%s，去掉 %d 个前导空白），"
+                "避免源码泄漏进成稿", _it["line"], _it["lang"], _it["indent"])
     lines = content.split("\n")
     i = 0
     while i < len(lines):
@@ -796,7 +877,17 @@ def _parse_content_blocks(content: str, *, _md_depth: int = 0,
             #    导出侧却因超行数上限 break 后判为"未闭合"整块跳过 → 出现在图表清单/预览、
             #    却在导出 DOCX 里凭空消失（幽灵图）。共用扫描器后：closed/recovered 均视为闭合，
             #    正常解析渲染；eof/truncated 才走下方"以句读行还原正文"的未闭合降级。
-            code_lines, _fence_state, i = read_fenced_block(
+            # ✅ R165（2026-11-01 · markdown 外层围栏包裹内嵌图表被整块丢弃）：
+            #    markdown 家族围栏的闭合行必须**让内层围栏配平**才算闭合。旧实现
+            #    用通用扫描器，外层 ```markdown 里第一个内层 ` ``` `（内嵌 mermaid
+            #    的闭合行）被当成外层闭合 → 内嵌图表整块丢失（正文段落保住），
+            #    且外层真正的闭合行反向变成「新开围栏」把其后正文吞进代码块。
+            #    CommonMark 只规定「闭合序列不得带信息串」，不要求配平 —— 因此
+            #    这不是解析器缺陷，而是「markdown 家族按正文递归解析」这一既有
+            #    约定（R117）必须自带的内层感知。非 markdown 围栏仍走通用扫描器。
+            _reader = (_read_markdown_fenced_block
+                       if lang in _MARKDOWN_FENCE_LANGS else read_fenced_block)
+            code_lines, _fence_state, i = _reader(
                 lines, i, open_char=_open_char, open_len=_open_len)
             _fence_closed = _fence_state in ("closed", "recovered")
             # ✅ R117（2026-10-20 · 导出成稿取证）：`` ```markdown `` / ```md / ```text
@@ -1275,6 +1366,42 @@ def _heading_punct(level: int) -> str:
     return HEADING_STYLE_CONFIG.get(level, HEADING_STYLE_CONFIG[3]).get("punctuation", " ")
 
 
+# ✅ R137（2026-10-28 · 正文子标题字母前缀非幂等）：
+#    E3 降级模式（本节有 DB 子章节）下，rel≥1 的子标题由 _compute_subheading 产出
+#    "a、标题"（L7 形态）。该形态**不在** numbering._STRIP_NUMBER_RE 的任何分支内
+#    （那里只覆盖 第X章 / （三） / 1） / 点分路径 / 单段数字 / 中文数字），于是落库
+#    正文里这一层字母前缀永远剥不掉 —— 下一次规范化把 "a、关键节点" 当纯标题再套
+#    一层字母，实测 4 轮逐层膨胀（a、关键节点 → a、a、关键节点 → a、a、a、关键节点
+#    → 四层），且模式切回非降级后残留 "2.1.1 a、关键节点"。任何结构变更都会跑
+#    _renormalize_all_section_contents，故这是**持续污染**（正文不可逆膨胀）。
+#    收口点选在 _compute_subheading 内部：它是 numbering 落库、export 预检、export
+#    写稿三处的唯一算法本体，一处修复即三处同源，不必各自补剥。
+# ✅ 2026-10-31（目录编号与等级修正）：除本模块产出的 "a、" 之外，AI 原文常自带
+#    "a）" / "a)" 枚举前缀（实测正文 "## a、a）材料与环保控制参数" —— 旧实现只剥
+#    "a、" 后剩 "a）…" 再拼回 "a、" ⇒ 双重编号被落库固化）。分隔符字符类扩到
+#    「顿号 / 半角右括号 / 全角右括号」，与 numbering._STRIP_NUMBER_RE 的字母分支同口径。
+_LETTER_PREFIX_RE = re.compile(r"^\s*[a-z]{1,2}\s*[、)）]\s*")
+
+
+def _strip_body_letter_prefix(text: str) -> str:
+    """剥掉正文子标题开头由本模块自己产出的字母前缀（"a、" / "az、"）。
+
+    - 有界 8 轮：既保证幂等，也能自愈历史上已膨胀的多层前缀；
+    - 剥空则保留原文：标题本身只剩 "a、" 时不能变成空标题；
+    - 只认 a-z（= numbering.ALPHABET 的字符集），中文 / 数字前缀一概不动
+      （那由 numbering._STRIP_NUMBER_RE 负责，避免与之重复或冲突）。
+    """
+    s = str(text or "")
+    if not s:
+        return s
+    for _ in range(8):
+        new = _LETTER_PREFIX_RE.sub("", s, count=1).strip()
+        if not new or new == s:
+            return new or s
+        s = new
+    return s
+
+
 def _compute_subheading(section_prefix: str, section_level: int,
                         md_lv: int, sub_counters: dict, pure: str,
                         sec_id: str = "", has_children: bool = False):
@@ -1309,14 +1436,25 @@ def _compute_subheading(section_prefix: str, section_level: int,
     由此编号序列严格递增、无 0 段、无重复，且与 Heading 样式深度一致。
 
     ✅ E3 降级（2026-09-25）：has_children=True 时，正文子标题改走节内 body 命名空间——
-    第一层 rel=0 → ``N） 标题``（L6），更深 rel≥1 → ``字母、 标题``（L7）。
-    这样正文子标题（L6+）与 DB 子章节（L3+）在同一文档内完全隔离，不再出现
+    第一层 rel=0 → ``N） 标题``，更深 rel≥1 → ``字母、 标题``。
+    这样正文子标题与 DB 子章节（X.X）在同一文档内使用两个独立命名空间，不再出现
     「1.1 正文标题」与「1.1 DB 子章节」成对撞号。
+
+    ✅ 层级修正（2026-10-31）：降级只换**编号命名空间**，不再把标题压到 L6/L7。
+    旧实现固定 style=6/7，导出稿导航窗格/目录出现 H2 → H6 断级跳跃（实测
+    「1 技术参数」下的正文子标题被顶到第 6 级缩进）。现按「父级 + 相对深度」
+    与未降级路径同一套深度规则（min(section_level+1+rel, 7)），编号文本仍是
+    ``1）/ a、``，命名空间隔离不变。
     """
     try:
         md_lv = max(1, min(int(md_lv or 1), 6))
     except (TypeError, ValueError):
         md_lv = 1
+
+    # ✅ R137：先剥掉「上一轮本函数自己产出的字母前缀」再参与编号 —— 保证
+    #    降级模式幂等（a、关键节点 再跑一轮仍得 a、关键节点），并让模式切换
+    #    （降级 → 非降级）不残留字母。详见 _strip_body_letter_prefix 说明。
+    pure = _strip_body_letter_prefix(pure)
 
     counts: dict[int, int] = sub_counters.setdefault("c", {})
     if "base" not in sub_counters:
@@ -1340,12 +1478,8 @@ def _compute_subheading(section_prefix: str, section_level: int,
     for d in range(rel + 1, 7):
         counts[d] = 0
     if not pure:
-        # 降级空标题时仍返回 L6/L7 样式（与有文本时一致）
-        if has_children:
-            style = 6 if rel == 0 else 7
-        else:
-            style = min(section_level + 1 + rel, 7)
-        return "", style
+        # 降级空标题时样式与有文本时一致：均为「父级 + 相对深度」
+        return "", min(section_level + 1 + rel, 7)
 
     # ✅ E3：has_children=True → 降级为节内 body 命名空间
     if has_children:
@@ -1358,10 +1492,9 @@ def _compute_subheading(section_prefix: str, section_level: int,
             #    修复「L6 缺顿号 / 多空格」的偏差。
             num = counts[rel]
             text = f"{num}）{_heading_punct(6)}{pure}"
-            style = 6
         else:
-            # 更深层：字母+、（a、/ b、/ …），Heading L7。
-            # ✅ 所有 rel≥1 共享同一个 L7 字母计数器——避免 rel=1 与 rel=2 各自从 a、
+            # 更深层：字母+、（a、/ b、/ …）。
+            # ✅ 所有 rel≥1 共享同一个字母计数器——避免 rel=1 与 rel=2 各自从 a、
             # 起算而撞号。例如 rel1→a、、rel1→b、、rel2→c、… 单调递增。
             l7 = sub_counters.setdefault("l7_count", 0)
             l7 += 1
@@ -1371,8 +1504,9 @@ def _compute_subheading(section_prefix: str, section_level: int,
             # ✅ 编号统一（2026-09-26）：分隔符与 HEADING_STYLE_CONFIG[7] 一致（顿号、无空格），
             #    产出 "a、标题"，与导出行级 L7 标题同口径，修复「L7 多空格」偏差。
             text = f"{letter}{_heading_punct(7)}{pure}"
-            style = 7
-        return text, style
+        # ✅ 层级修正（2026-10-31）：降级只换编号命名空间，Heading 深度与未降级
+        #    路径同规则（父级 + 相对深度）——旧实现固定 6/7，导航窗格/目录断级。
+        return text, min(section_level + 1 + rel, 7)
 
     # Heading 样式跟随**实际编号深度**（而非原始 md 层级），避免 "2.2.1" 却用 H6
     style = min(section_level + 1 + rel, 7)
@@ -1384,6 +1518,69 @@ def _compute_subheading(section_prefix: str, section_level: int,
     dotted = ".".join(str(counts.get(d, 0)) for d in range(0, rel + 1))
     text = f"{section_prefix}.{dotted}{sep}{pure}" if section_prefix else f"{dotted}{sep}{pure}"
     return text, style
+
+
+def number_body_subheadings(blocks: list[dict], *, section_prefix: str,
+                            section_level: int, sec_id: str = "",
+                            has_children: bool = False,
+                            with_style: bool = False) -> dict:
+    """按统一算法为本节正文的 heading 块写入编号文本（``_fixed_text``）。
+
+    ✅ R138（R137-O 报告 L-3 收口）：本循环此前在**三处各自实现**并各自拼装
+    参数 —— ``numbering.renumber_section_body_subheadings``（落库规范化）、
+    ``export._detect_duplicate_sections``（导出预检）、``export.write_section``
+    （导出写稿）。三者共用 ``_compute_subheading``，但「谁传 has_children、谁传
+    sec_id、谁写 _heading_style」全靠人工保持一致：任一处漏传 ``has_children``
+    就会让「前端预览 = 落库正文 = 导出成稿」三处同源契约分叉（预检按点分算、
+    渲染按降级算，实测会报出成稿里根本不存在的重复编号）。现收口为单一
+    helper：循环体与参数拼装只此一份。
+
+    行为等价约束（务必保持）：
+    - 只处理 ``type == "heading"`` 的块，其余原样跳过；**不**做围栏过滤
+      （围栏派生块的取舍统一走 :func:`select_numbering_blocks` —— 三处调用方
+      都传它选出的子集，R149 起导出两侧不再传全量）；
+    - ``sub_counters`` 由本函数内新建：每次调用即「本节」作用域；
+    - ``with_style=False`` 时不写 ``_heading_style``（落库与预检不需要该键）。
+
+    Args:
+        blocks: 已解析的正文块列表（原地写入 ``_fixed_text``）。
+        section_prefix: 本节展示态编号前缀（``_section_number_prefix`` 结果）。
+        section_level: 本节层级（仅影响 Heading 样式深度）。
+        sec_id: 本节 ID，**仅用于日志定位**（层级不齐告警）。不传时告警显示 "?"。
+        has_children: 是否走 E3 降级（节内 body 命名空间 1）/ a、）。
+        with_style: 是否同时回写 ``_heading_style``（仅导出写稿需要）。
+
+    Returns:
+        sub_counters（调用方后续如需可续用；当前三处均不再使用）。
+    """
+    sub_counters: dict = {}
+    for block in blocks:
+        if block.get("type") != "heading":
+            continue
+        text, style = _compute_subheading(
+            section_prefix, section_level, block.get("level", 1), sub_counters,
+            _strip_title_number(block.get("text", "")), sec_id,
+            has_children=has_children)
+        block["_fixed_text"] = text
+        if with_style:
+            block["_heading_style"] = style
+    return sub_counters
+
+
+def select_numbering_blocks(blocks: list) -> list:
+    """编号宇宙块选择唯一实现：``heading`` 且非围栏派生（``_from_fence``）。
+
+    ✅ R149（2026-10-31 · 三侧同源的最后一块）：R138 收口了循环体，但
+    「传哪些块」仍由调用方各自决定 —— 落库侧（numbering）排除围栏派生标题
+    （D-8g 契约：围栏内内容一概不动、不占号），而导出预检 / 导出写稿两处传
+    **全量** blocks ⇒ 围栏派生标题在成稿里占号、在预览/落库不占号，同一份
+    正文两侧编号错位（真实形态：`` ```markdown `` 围栏内含 ``## 子标题``，
+    成稿「资源配置 2.3」vs 预览「资源配置 2.2」）。现三处共用本选择器，
+    导出两侧与落库侧对齐：围栏派生标题在成稿保留原文、不占号（与
+    ``numbering.renumber_section_body_subheadings`` 的 D-8g 口径一致）。
+    """
+    return [b for b in blocks
+            if b.get("type") == "heading" and not b.get("_from_fence")]
 
 
 # ✅ R76（2026-10-13）：_FENCE_LINE_RE / _CJK_TAIL_RE 两份本地副本已删除，
@@ -1482,3 +1679,159 @@ def read_fenced_block(lines: list[str], body_start: int,
                                           tolerant_length=True):
         return code_lines, "closed", i + 1
     return code_lines, "eof", len(lines)
+
+
+# ============================================================
+# R165（2026-11-01）· 围栏容错两件：缩进归一 + markdown 外层包裹内层配平
+# ------------------------------------------------------------
+# 两处都是「文本形态」问题而非「判据」问题，故都在**读取前**把文本改成两种口径
+# 结论一致的形态（与 R76 ``normalize_fence_closes`` 同一纪律：只改形态、行数不变、
+# 幂等、保守）。判据本身（``fence_common.FENCE_LINE_RE`` ≤3 前导空白）**不动** ——
+# 放宽判据会误判 CommonMark 里合法的 4 空格缩进代码块。
+# ============================================================
+
+#: 4+ 前导空白的围栏行：``FENCE_LINE_RE`` 判为非围栏的「缩进越界」形态。
+#: ``re.M`` 只服务 ``.search(content)`` 的快速预检；逐行仍用 ``.match(line)``。
+_INDENTED_FENCE_RE = re.compile(r"^([ \t]{4,})(`{3,}|~{3,})([^`~\n]*)$", re.M)
+#: 任意前导空白的围栏行（定位缩进块的闭合行时用；闭合判据仍由 is_fence_close 给）。
+_ANY_INDENT_FENCE_RE = re.compile(r"^([ \t]*)(`{3,}|~{3,})([^`~\n]*)$")
+
+
+def _dedent_line(line: str, width: int) -> str:
+    """去掉至多 ``width`` 个前导空白（不足则全剥，不含其它字符）。"""
+    k = 0
+    while k < width and k < len(line) and line[k] in " \t":
+        k += 1
+    return line[k:]
+
+
+def normalize_chart_fence_indent(content: str) -> tuple[str, list[dict]]:
+    """把**图表家族围栏**的 4+ 空格缩进去掉（含块内各行与闭合行）。
+
+    动机（R165 遗留项）：提示词已硬性要求围栏「前导 ≤3 空格」，但 AI 仍偶发
+    按列表续行写成 4 空格。此时围栏行不满足 ``fence_common.FENCE_LINE_RE``
+    ⇒ 整块退化为普通段落 ⇒ **裸源码印进交付 DOCX**（探针 ``[indent4]`` 实测）。
+
+    ✅ 为什么归一文本而不是放宽判据：CommonMark 中「4 空格缩进」本身是缩进代码块
+    语义，放宽 ``FENCE_LINE_RE`` 会连真正的代码样例一起当图表围栏解析；而只对
+    「信息串属于 ``mermaid`` / ``chart-json`` / ``ai_image``」的行去缩进，作用域
+    收敛且与提示词一致。
+
+    性质（与 ``normalize_fence_closes`` 同纪律）：
+      · **行数、行序完全不变**（``src_line`` / 围栏 ordinal 契约不受影响）；
+      · 只动缩进，不改任何字符内容；缩进块内每行按同一宽度去缩进（保持相对对齐）；
+      · 幂等（去缩进后不再命中 4+ 空格判据）；
+      · 保守：① 被其它围栏块（``iter_all_blocks``）包住的区域一律不动
+        （那是别人块内的示例文本）；② 找不到闭合行时**原样保留**
+        （不制造新的未闭合围栏）。
+
+    Returns:
+        ``(normalized_content, log)``；log 项
+        ``{"action": "dedent_chart_fence", "line": 1-based, "lang", "indent",
+           "close_line": 1-based}``。
+    """
+    if not content:
+        return content, []
+    lines = content.split("\n")
+    # 保护区：所有 ≤3 空格围栏块（含未闭合块到文末）内部的每一行。
+    covered: set[int] = set()
+    for b in _iter_all_blocks(content):
+        end = b["close_line"] if b["close_line"] >= 0 else len(lines) - 1
+        covered.update(range(b["open_line"], end + 1))
+    log: list[dict] = []
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if i in covered:
+            out.append(line)
+            i += 1
+            continue
+        m = _INDENTED_FENCE_RE.match(line)
+        if not m:
+            out.append(line)
+            i += 1
+            continue
+        info = m.group(3).strip()
+        lang = info.split()[0].lower() if info else ""
+        if lang not in INLINE_CHART_FENCE_LANGS:
+            out.append(line)
+            i += 1
+            continue
+        ch = m.group(2)[0]
+        close_j = -1
+        for j in range(i + 1, n):
+            if j in covered:
+                break
+            cm = _ANY_INDENT_FENCE_RE.match(lines[j])
+            if cm and cm.group(2)[0] == ch and not cm.group(3).strip():
+                close_j = j
+                break
+        if close_j < 0:
+            out.append(line)
+            i += 1
+            continue
+        width = len(m.group(1))
+        out.append(line.lstrip(" \t"))
+        out.extend(_dedent_line(ln, width) for ln in lines[i + 1:close_j])
+        out.append(lines[close_j].lstrip(" \t"))
+        log.append({"action": "dedent_chart_fence", "line": i + 1,
+                    "lang": lang, "indent": width,
+                    "close_line": close_j + 1})
+        i = close_j + 1
+    if not log:
+        return content, []
+    return "\n".join(out), log
+
+
+def _read_markdown_fenced_block(lines: list[str], body_start: int,
+                                max_lines: int = MAX_INLINE_CODE_BLOCK_LINES,
+                                open_char: str = "`", open_len: int = 3,
+                                ) -> tuple[list[str], str, int]:
+    """``markdown`` 家族围栏的读取器：闭合行必须让**内层围栏配平**。
+
+    动机（R165 遗留项）：``content_blocks._parse_content_blocks`` 把
+    `` ```markdown`` 的内部**按 Markdown 递归解析**（R117），因此它必须是
+    「容器」而不是「代码」。但通用扫描器 ``read_fenced_block`` 只按 CommonMark
+    判闭合 —— 内层 `` ```mermaid `` 的**裸闭合行**（信息串为空）会被当成外层闭合，
+    于是 ① 内嵌图表整块丢失（探针 ``_probe_caption.py`` 实测：日志
+    「未闭合 state=eof」，图表被丢弃、正文段落保住）；② 外层真正的闭合行摇身
+    变成「新开围栏」，把其后正文吞进代码块。
+
+    判据（仅本读取器）：遇到信息串为空的同种围栏行时，
+      · 若当前**不在**内层块内 → 这是外层闭合，正常返回（与 CommonMark 一致）；
+      · 若当前**在**内层块内 → 这是内层的闭合，吞进内容、内层出栈。
+    内层块 = 任何非闭合的围栏行（带信息串，或裸行但已在内层）。
+
+    ✅ 保守回退：读到文末内层仍未配平（例如正文里孤立 ``` 作为示例）→ 回退
+    通用扫描器，保持**畸形输入的历史行为逐字不变**（宁可少解析一层，也不让
+    整段正文被吞进围栏）。
+    """
+    code_lines: list[str] = []
+    inner: tuple[str, int] | None = None
+    i = body_start
+    n = len(lines)
+    while i < n:
+        pf = _fence_parse_line(lines[i])
+        if pf is not None:
+            ch, ln, info = pf
+            if inner is not None:
+                if (ch == inner[0] and not info
+                        and _fence_is_close(lines[i], inner[0], inner[1],
+                                            tolerant_length=True)):
+                    inner = None
+            elif (not info
+                  and _fence_is_close(lines[i], open_char, open_len,
+                                      tolerant_length=True)):
+                return code_lines, "closed", i + 1
+            else:
+                # 非闭合的围栏行 = 内层块开启（`` ```mermaid `` / 裸 ` ``` ` 都算）
+                inner = (ch, ln)
+        code_lines.append(lines[i])
+        i += 1
+    _pipe_logger.debug(
+        "markdown 围栏内层未配平（已读 %d 行），回退通用扫描器保持历史语义",
+        len(code_lines))
+    return read_fenced_block(lines, body_start, max_lines=max_lines,
+                             open_char=open_char, open_len=open_len)
