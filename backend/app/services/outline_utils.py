@@ -1,9 +1,11 @@
 """目录工具：层级深度裁剪 + 统一规范化
 
-规则（2026-09）：目录树只保留三个等级
-  一级：第一章  二级：1  三级：1.1
-四级及更深节点在落库前被裁剪，其标题并入父节点的 description，
-避免内容线索丢失。
+规则（R162 · 2026-11-01 用户指令，取代 R151 四级叶子标准）：目录树保留
+四个等级上限，三级为最小叶子（L4 仅作兼容层）：
+  一级：第一章  二级：1  三级：1.1  四级：1.1.1（兼容层，不作数量校验）
+五级及更深节点在落库前被裁剪，其标题并入父节点的 description，
+避免内容线索丢失。层级/数量的硬性判据（含子节点数量区间）集中在
+app.services.outline_rules（单一事实源），本模块只负责「裁剪 + 重排编号」。
 """
 from __future__ import annotations
 
@@ -12,9 +14,11 @@ import json
 import logging
 import re
 
+from app.services.outline_rules import OUTLINE_MAX_LEVEL
+
 logger = logging.getLogger("outline_utils")
 
-MAX_OUTLINE_DEPTH = 3
+MAX_OUTLINE_DEPTH = OUTLINE_MAX_LEVEL
 
 # 已合并过的"（含：...）"后缀（用于重复裁剪时替换而非叠加）
 _MERGE_SUFFIX_RE = re.compile(r"（含：[^（）]*）\s*$")

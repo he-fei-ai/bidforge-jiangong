@@ -32,7 +32,14 @@
   accept 后按 ``outline-review.json`` 状态映射审核结论文案，并经
   ``outcome.review`` / completed 事件 ``review`` 键回传审核结论；
 - score-planning / leaf_allocation / leaf_adjustment 三阶段属技术评分模式，
-  留待六阶段全量接线（报告遗留 新1 剩余部分）。
+  已接线（2026-10-26 遗留 1）：``no_technical_score_mode=False`` 走六阶段
+  ``initial-outline → score-planning → leaf_allocation → children_generation →
+  leaf_adjustment → outline_review``。评分项来源为 ``requirements``（编制要求/
+  评审要点，宿主预置 ``技术评分信息.md`` 与 ``technical-score-groups.json``，
+  模型在 score-planning 完成目录映射）；``NO_TECHNICAL_SCORE_MODE`` 模块常量
+  恒 ``True``，作为 ``run_outline_agent`` 的默认形参 —— 默认走无技术评分单链
+  （既有调用方逐字不变），技术评分单链仅在显式传 ``no_technical_score_mode=False``
+  时启用。
 
 有意偏离（与外部引用软件易标冲突时以易标为准，以下为本仓环境约束）：
 
@@ -69,9 +76,15 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import AsyncIterator, Callable
 
 from app.config import DATA_DIR
+
+# ✅ R162（2026-11-01）：层级硬性标准完成前终检（单一事实源 outline_rules）。
+from app.services.outline_rules import (
+    format_violations_message,
+    validate_outline_nodes,
+)
 
 from .agent_loop import (
     STOP_TIMEOUT,
@@ -82,23 +95,32 @@ from .agent_loop import (
 from .outline_identity import collect_outline_ids
 from .outline_schemas import build_json_validation_schemas, build_output_validators
 from .stage_prompts import (
+    create_children_prompt,
     create_initial_prompt,
+    create_leaf_adjustment_prompt,
+    create_leaf_allocation_prompt,
     create_no_technical_score_children_prompt,
     create_no_technical_score_review_prompt,
+    create_outline_review_prompt,
     create_output_repair_prompt,
+    create_score_planning_prompt,
 )
 from .stage_runner import StageExecutionResult, StageStoppedError, run_stage
 from .validation import (
     AI_CONTENT_MODE,
     CONTENT_MODES,
+    LEAF_ALLOCATION_CONTEXT_FILE,
+    LEAF_ALLOCATION_FILE,
     OUTLINE_OUTPUT_FILE,
     OUTLINE_REVIEW_CONTEXT_FILE,
     OUTLINE_REVIEW_FILE,
+    SCORE_DIRECTORY_PLAN_FILE,
     STAGE_OUTPUT_FILES,
+    TECHNICAL_SCORE_GROUPS_FILE,
     StageMeta,
     validate_stage_outputs,
 )
-from .workspace_baseline import create_workspace_baseline
+from .workspace_baseline import cleanup_workspace_and_baseline, create_workspace_baseline
 from .workspace_tools import (
     build_edit_tool,
     build_find_tool,
@@ -119,6 +141,23 @@ OUTLINE_AGENT_TASK_KEY = "technical-plan-outline-generation"
 NO_TECHNICAL_SCORE_MODE = True
 STANDALONE_TECHNICAL = False
 
+#: 六阶段骨架（单一事实源，2026-10-26 最小接线）：易标
+#: outlineGenerationTaskV2.cjs 六阶段 workflow 顺序，键名与
+#: ``validation.STAGE_OUTPUT_FILES`` 逐字一致（前两个连字符、后四个下划线）。
+#: 本仓当前只接线「无技术评分」单链（initial-outline → children_generation →
+#: outline_review）；技术评分三阶段（score-planning / leaf_allocation /
+#: leaf_adjustment）已登记为骨架但**未接线**（本仓无技术评分数据源
+#: score_mapping / scoreDirectoryPlan，见 build_outline_review_context 有意偏离）。
+#: 护栏测试锁 ``set(_OUTLINE_FLOW_STAGES) == set(STAGE_OUTPUT_FILES)``。
+_OUTLINE_FLOW_STAGES: tuple[str, ...] = (
+    "initial-outline",
+    "score-planning",
+    "leaf_allocation",
+    "children_generation",
+    "leaf_adjustment",
+    "outline_review",
+)
+
 #: 遗留⑤ 消歧目标子串（stage_prompts L597/L673 逐字）与替换词。
 _BASH_PROMPT_TOKEN = "grep、read 或 bash"
 _FIND_PROMPT_TOKEN = "grep、read 或 find"
@@ -129,6 +168,14 @@ _OVERVIEW_FILE = "项目概述.md"
 _ORIGINAL_PLAN_FILE = "原方案.md"
 
 _DEFAULT_MAX_TURNS = 40
+
+#: ✅ R154（R149 遗留 L-6）：``run_agent_loop`` 的 ``total_timeout`` 墙钟预算。
+#:    旧实现只传 ``max_turns``（40 轮 × 单轮最长 180s 模型调用 ≈ 2h 无墙钟上限，
+#:    病态/卡死模型会挂死整个任务）。1800s 与正文 Agent 的
+#:    ``content_agent_repair_timeout=900`` 同量级、放宽一倍（目录阶段单循环
+#:    工作量更大）；超时走 ``STOP_TIMEOUT`` → 上层 RuntimeError → 任务 failed，
+#:    不静默当成功（agent_loop 契约）。
+_LOOP_WALL_CLOCK_BUDGET = 1800.0
 
 
 class OutlineAgentStopped(RuntimeError):
@@ -211,12 +258,15 @@ def collect_outline_structure(items) -> dict:
     return result
 
 
-def build_outline_review_context(*, outline, target_leaf_count) -> dict:
+def build_outline_review_context(
+    *, outline, target_leaf_count, score_mapping=None, scoreDirectoryPlan=None
+) -> dict:
     """宿主程序确定性审核结果（易标 ``buildOutlineReviewContext`` L562-588）。
 
-    有意偏离（登记）：``score_mapping``（易标 L586，技术评分模式专用）
-    随 ``collectScoreMappingCoverage`` 一并留待六阶段接线 —— 本仓单链恒为
-    ``no_technical_score_mode=True``，``scoreDirectoryPlan`` 恒为空。
+    技术评分单链（2026-10-26 遗留 1 接线）：``score_mapping`` / 
+    ``scoreDirectoryPlan`` 由调用方（leaf_adjustment accept）从评分目录规划
+    聚合后注入；无技术评分单链缺省 ``None``，返回结构逐字不变（既有调用方
+    零影响）。
     """
     items = (outline or {}).get("outline") or []
     leaf_counts = count_leaves_by_mode(items)
@@ -230,7 +280,7 @@ def build_outline_review_context(*, outline, target_leaf_count) -> dict:
         acceptable_max = target_leaf_count + 2
         current = leaf_counts.get(AI_CONTENT_MODE, 0)
         within_range = acceptable_min <= current <= acceptable_max
-    return {
+    context = {
         "leaf_count": {
             "target": target_leaf_count,
             "current_ai_generate": leaf_counts.get(AI_CONTENT_MODE, 0),
@@ -246,6 +296,11 @@ def build_outline_review_context(*, outline, target_leaf_count) -> dict:
                       and len(structure["invalid_leaf_content_modes"]) == 0),
         },
     }
+    if scoreDirectoryPlan is not None:
+        context["scoreDirectoryPlan"] = scoreDirectoryPlan
+    if score_mapping is not None:
+        context["score_mapping"] = score_mapping
+    return context
 
 
 def review_status_message(status) -> str:
@@ -259,18 +314,35 @@ def review_status_message(status) -> str:
     return "目录审核完成，用户选择保留当前目录"
 
 
-def build_task_instruction(*, has_original_plan: bool) -> str:
-    """initial-outline 任务指示（易标 L951–955，noTech 非 standalone 二分支逐字）。"""
-    if has_original_plan:
+def build_task_instruction(*, has_original_plan: bool,
+                           has_requirements: bool = True) -> str:
+    """initial-outline 任务指示（易标 L951–955，noTech 非 standalone 二分支逐字）。
+
+    ✅ R149（2026-10-31 · FIX-F）：新增 ``has_requirements``（默认 True ⇒
+    既有调用方/测试逐字不变）。``seed_files_from_context`` 只在 requirements
+    非空时才落盘 ``响应文件要求.md`` —— 为空时该文件不存在，而旧指示词仍
+    宣称它是「目录结构和标题来源的唯一依据」，模型 read 必然 is_error，
+    只能凭 概述/经验 生成（与「唯一依据」声明矛盾）或反复重试烧 turn 预算。
+    requirements 为空时改为与工作区实际输入一致的指示。
+    """
+    if has_requirements:
+        if has_original_plan:
+            return (
+                "严格按照响应文件要求.md 组织一级目录，它是目录结构和标题来源的唯一依据。"
+                "项目概述.md 仅用于理解背景和术语，不得据此新增一级目录；"
+                "原方案.md 仅用于参考标题表达。"
+            )
         return (
             "严格按照响应文件要求.md 组织一级目录，它是目录结构和标题来源的唯一依据。"
-            "项目概述.md 仅用于理解背景和术语，不得据此新增一级目录；"
+            "项目概述.md 仅用于理解背景和术语，不得据此新增一级目录。"
+        )
+    # requirements 为空：响应文件要求.md 未 seed，指示词不得再指向它。
+    if has_original_plan:
+        return (
+            "本次未提供响应文件要求.md，请以项目概述.md 与专业经验组织一级目录；"
             "原方案.md 仅用于参考标题表达。"
         )
-    return (
-        "严格按照响应文件要求.md 组织一级目录，它是目录结构和标题来源的唯一依据。"
-        "项目概述.md 仅用于理解背景和术语，不得据此新增一级目录。"
-    )
+    return "本次未提供响应文件要求.md，请以项目概述.md 与专业经验组织一级目录。"
 
 
 def seed_files_from_context(context: dict) -> list[dict]:
@@ -291,6 +363,68 @@ def seed_files_from_context(context: dict) -> list[dict]:
     if original:
         files.append({"path": _ORIGINAL_PLAN_FILE, "content": original})
     return files
+
+
+def _build_technical_score_groups(requirements_text: str) -> list[dict]:
+    """宿主从 requirements（编制要求/评审要点）构造技术评分项分组。
+
+    每条非空行 = 一个评分大项分组（``R{n}`` 顺序编号）。对齐
+    ``TECHNICAL_SCORE_GROUPS_SCHEMA``（requirement_id 须 ``^R[1-9]\\d*$``、
+    title/description/detail_points 均非空）。本仓无易标 技术评分信息.md，
+    requirements 是评分大项来源（对齐 legacy L4215），故宿主确定性预置，
+    模型在 score-planning 阶段读取确认并完成目录映射。
+    """
+    groups: list[dict] = []
+    for line in (requirements_text or "").splitlines():
+        text = str(line).strip()
+        if not text:
+            continue
+        groups.append({
+            "requirement_id": f"R{len(groups) + 1}",
+            "title": text,
+            "description": text,
+            "detail_points": [text],
+        })
+    return groups
+
+
+def _build_leaf_allocation_context(plan: dict) -> dict:
+    """宿主构建 ``leaf-allocation-context.json``（易标 createLeafAllocationContext）。
+
+    技术评分单链：模式暂为 ``agent-decides``（偏离 3 word_budget→targetLeafCount
+    仍登记），让模型自主分配叶子；``technical_branches`` 来自评分目录规划的
+    branch（root_id/root_title）。目标计数保留 None/0 占位，与 agent-decides 模式
+    的 leaf-allocation.json Schema（``target_ai_leaf_count`` 可为 null）一致。
+    """
+    branches = (plan or {}).get("branches") or []
+    return {
+        "mode": "agent-decides",
+        "target_ai_leaf_count": None,
+        "fixed_ai_leaf_count": 0,
+        "allocatable_ai_leaf_count": None,
+        "technical_branches": [
+            {"root_id": b.get("root_id"), "root_title": b.get("root_title")}
+            for b in branches
+        ],
+    }
+
+
+def _collect_score_mapping(plan: dict) -> dict:
+    """从评分目录规划聚合评分项映射（collectScoreMappingCoverage 本仓子集）。
+
+    key = 一级分支 root_id，value = 该分支下评分项对应的 ``target_title`` 列表；
+    仅用于技术审核上下文（宿主确定性计算，供模型核对覆盖）。
+    """
+    mapping: dict = {}
+    for b in (plan or {}).get("branches") or []:
+        rid = b.get("root_id")
+        if rid is None:
+            continue
+        mapping[rid] = [
+            m.get("target_title") for m in (b.get("mappings") or [])
+            if m.get("target_title")
+        ]
+    return mapping
 
 
 def workspace_root_for(task_id: str) -> Path:
@@ -364,8 +498,17 @@ async def run_outline_agent(
     request_user_question: Callable | None = None,
     report_task_failure: Callable | None = None,
     chat_fn: Callable | None = None,
+    no_technical_score_mode: bool = NO_TECHNICAL_SCORE_MODE,
+    stage_ref: dict | None = None,
 ) -> OutlineAgentOutcome:
-    """执行 initial-outline → children_generation → outline_review 单链（业务层，无 SSE 依赖）。
+    """执行 Agent 目录生成单链（业务层，无 SSE 依赖）。
+
+    默认（``no_technical_score_mode=True``）走无技术评分单链
+    ``initial-outline → children_generation → outline_review``；
+    ``False`` 走技术评分单链 ``initial-outline → score-planning →
+    leaf_allocation → children_generation → leaf_adjustment → outline_review``
+    （评分项来源：``requirements`` 编制要求/评审要点，宿主预置
+    ``技术评分信息.md`` 与 ``technical-score-groups.json``，模型完成映射）。
 
     Args:
         task_id: 已注册的 task_registry 任务 id（停止/暂停控制锚点）。
@@ -378,11 +521,95 @@ async def run_outline_agent(
         hold_partial: ``async (tree) -> None``，阶段 accept 后回传目录树
             （SSE 侧写入 ``_partial_holder``，供停止/异常兜底带出成果）。
         report_progress: ``async (progress, message) -> None`` 阶段进度上报。
+        no_technical_score_mode: 默认 ``True``（无技术评分单链，既有调用方
+            逐字不变）；``False`` 走六阶段技术评分单链（见 docstring）。
+        stage_ref: ✅ R155-O（L-1）宿主共享字典，实时回传当前工作流阶段
+            （透传给实现层，见其 docstring）；不传零影响。
+
+    ✅ R154（R149 遗留 L-4）：薄包装——委托 ``_run_outline_agent_impl`` 并在
+    终态后回收工作区与基线目录。默认路径（未传 workspace_dir）工作区归本
+    函数所有，连同 ``<task_id>_baseline`` 一并回收；调用方自备目录时只回收
+    基线。任何收束路径（completed/stopped/failed/异常）都清理（fail-soft）。
+    """
+    _ws = Path(workspace_dir) if workspace_dir else workspace_root_for(task_id)
+    try:
+        return await _run_outline_agent_impl(
+            task_id=task_id, scheme=scheme, context=context,
+            workspace_dir=workspace_dir, seed_files=seed_files,
+            word_budget=word_budget, initial_stage=initial_stage,
+            initial_stage_index=initial_stage_index, messages=messages,
+            hold_partial=hold_partial, emit_activity=emit_activity,
+            emit_event=emit_event, report_progress=report_progress,
+            request_user_question=request_user_question,
+            report_task_failure=report_task_failure, chat_fn=chat_fn,
+            no_technical_score_mode=no_technical_score_mode,
+            stage_ref=stage_ref)
+    finally:
+        if workspace_dir is None:
+            cleanup_workspace_and_baseline(_ws, _ws.parent / f"{task_id}_baseline")
+        else:
+            cleanup_workspace_and_baseline(None, _ws.parent / f"{task_id}_baseline")
+
+
+async def _run_outline_agent_impl(
+    *,
+    task_id: str,
+    scheme: dict,
+    context: dict,
+    workspace_dir: str | Path | None = None,
+    seed_files: list[dict] | None = None,
+    word_budget: int = 30000,
+    initial_stage: str = "initial-outline",
+    initial_stage_index: int = 0,
+    messages: list | None = None,
+    hold_partial: Callable | None = None,
+    emit_activity: Callable[[dict], None] | None = None,
+    emit_event: Callable[[dict], None] | None = None,
+    report_progress: Callable | None = None,
+    request_user_question: Callable | None = None,
+    report_task_failure: Callable | None = None,
+    chat_fn: Callable | None = None,
+    no_technical_score_mode: bool = NO_TECHNICAL_SCORE_MODE,
+    stage_ref: dict | None = None,
+) -> OutlineAgentOutcome:
+    """``run_outline_agent`` 的实际实现（清理由包装层负责）。
+
+    ✅ R155-O（2026-11-01 · R149 遗留 L-1）：``stage_ref`` 是宿主（SSE 流层）
+    提供的共享字典 —— ``_emit_activity`` / ``_report`` 两个回调入口把当前
+    ``state["stage"]`` 实时同步进去，流层据此给每个 progress 事件携带
+    ``workflow_stage``（Agent 分支统计接线的唯一数据源）。不传（历史直调方/
+    单测桩）零影响。
     """
     ws = Path(workspace_dir) if workspace_dir else workspace_root_for(task_id)
-    baseline_dir = ws.parent / "baseline"
+    # ✅ R149（2026-10-31 · FIX-E）：baseline 目录按任务隔离。
+    #    旧实现 ``ws.parent / "baseline"`` 恒为固定名
+    #    ``DATA_DIR/agent_workspaces/baseline`` —— 所有 outline Agent 任务
+    #    共享同一份 manifest.json + files/：① 并发时 B 的 protect/_save 会
+    #    按自己陈旧的引用集清掉 A 的原件副本（_save 清理「不再被引用」副本），
+    #    A 的 restore() copyfile 命中已删副本 → FileNotFoundError → 整任务失败；
+    #    ② 顺序复用时 restore() 会把前序任务的同名登记**复活**进本任务工作区
+    #    （restore 对不存在文件也重建）→ 跨任务输入污染。seed 文件名固定
+    #    （响应文件要求.md 等），同名相对路径必然互踩。对齐
+    #    content_agent/repair.py:199 的 ``<task_id>_baseline`` 命名（按任务
+    #    隔离，暂停/恢复后 manifest 仍随任务持久生效）。
+    baseline_dir = ws.parent / f"{task_id}_baseline"
     ws.mkdir(parents=True, exist_ok=True)
     files = seed_files if seed_files is not None else seed_files_from_context(context)
+    # 技术评分单链：宿主从 requirements（编制要求/评审要点）预置评分项来源，
+    # 让 score-planning 阶段的模型读取并确认（本仓无易标 技术评分信息.md，
+    # requirements 是评分大项来源——对齐 legacy L4215）。
+    if not no_technical_score_mode:
+        requirements_text = str(context.get("requirements_text") or "").strip()
+        if requirements_text:
+            groups = _build_technical_score_groups(requirements_text)
+            files = [*files, {
+                "path": TECHNICAL_SCORE_GROUPS_FILE,
+                "content": json.dumps(
+                    {"groups": groups}, ensure_ascii=False, indent=2),
+            }, {
+                "path": "技术评分信息.md",
+                "content": requirements_text,
+            }]
     for item in files:
         resolved = resolve_workspace_file(str(ws), item["path"])
         Path(resolved.resolved_path).write_text(
@@ -394,7 +621,7 @@ async def run_outline_agent(
         baseline.protect("inputs", [item["path"] for item in files])
 
     schemas = build_json_validation_schemas(
-        no_technical_score_mode=NO_TECHNICAL_SCORE_MODE,
+        no_technical_score_mode=no_technical_score_mode,
         standalone_technical=STANDALONE_TECHNICAL)
     validators = build_output_validators(schemas)
     tools = build_outline_agent_tools(
@@ -417,6 +644,14 @@ async def run_outline_agent(
             return ""
         return path.read_text(encoding="utf-8")
 
+    def _read_score_directory_plan() -> dict:
+        """读工作区 score-directory-plan.json；损坏/缺失回退空 dict（fail-soft）。"""
+        try:
+            parsed = json.loads(_read_file(SCORE_DIRECTORY_PLAN_FILE) or "{}")
+            return parsed if isinstance(parsed, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+
     # ✅ 加固（2026-10-25 · 接线阶段建议 3「resume 断点」）：断点直入
     #    children_generation 等后续阶段时，工作区 outline.json 里已确认的
     #    目录节点 id 必须恢复进 known_ids —— 否则续跑产物沿用根节点 id 会被
@@ -435,11 +670,17 @@ async def run_outline_agent(
                      exc_info=True)
 
     def _emit_activity(event: dict) -> None:
+        # ✅ R155-O（L-1）：回调入口实时同步当前工作流阶段（流层读 stage_ref
+        #    给事件携带 workflow_stage；回调在每个阶段内高频触发，至多滞后一拍）。
+        if stage_ref is not None:
+            stage_ref["stage"] = str(state.get("stage") or "")
         if emit_activity is not None:
             emit_activity(dict(event))
 
     async def _report(progress: float, message: str) -> None:
         state["last_progress"] = max(state["last_progress"], float(progress))
+        if stage_ref is not None:
+            stage_ref["stage"] = str(state.get("stage") or "")
         if report_progress is not None:
             await report_progress(state["last_progress"], message)
 
@@ -466,7 +707,8 @@ async def run_outline_agent(
             {"role": "user", "content": disambiguate_prompt_tools(prompt)})
         result = await run_agent_loop(
             chat_messages, tools=tools, chat_fn=_chat_with_control,
-            max_turns=_DEFAULT_MAX_TURNS)
+            max_turns=_DEFAULT_MAX_TURNS,
+            total_timeout=_LOOP_WALL_CLOCK_BUDGET)
         if result.stop_reason == STOP_TOOL_STOP:
             raise OutlineAgentReportedFailure(
                 "Agent 报告无法按要求继续任务（report-failure）")
@@ -489,8 +731,12 @@ async def run_outline_agent(
                 "message": ("程序已还原被改动的文件：" + "、".join(restored)
                             + "。这些文件由程序维护，不要修改。"),
             })
+        # score-planning 消费（非产物）outline.json：validate_score_planning_roots
+        # 需用它核对已确认根与规划分支的身份对应，故即便 STAGE_OUTPUT_FILES
+        # 不含它也要读（STAGE_OUTPUT_FILES[score-planning] 只有评分两件套）。
         output_content = (_read_file(OUTLINE_OUTPUT_FILE)
                           if OUTLINE_OUTPUT_FILE in STAGE_OUTPUT_FILES[stage]
+                          or stage == "score-planning"
                           else "")
         candidate = {
             "output_file": OUTLINE_OUTPUT_FILE,
@@ -501,6 +747,9 @@ async def run_outline_agent(
             workflow_stage=stage,
             read_file=_read_file,
             known_node_ids=set(state["known_ids"]),
+            # score-planning 校验（validate_score_planning_roots）需「用户已确认
+            # 的一级目录」根节点 dict 列表；无技术评分链恒空，零影响。
+            locked_roots=list(state.get("confirmed_roots") or []),
         )
         report = validate_stage_outputs(candidate, meta, validators)
         return candidate, report, restored
@@ -527,32 +776,104 @@ async def run_outline_agent(
             # 易标 applyConfirmedSelection：numberOutline 后锁定一级目录；
             # 本仓自动确认（有意偏离 1），选择集 = 全量一级节点。
             state["known_ids"] = set(collect_outline_ids(nodes))
+            state["confirmed_roots"] = list(nodes)
             await _hold(nodes)
-            await _report(0.45, "一级目录已确认，开始生成完整目录")
-            next_prompt = disambiguate_prompt_tools(
-                create_no_technical_score_children_prompt(
-                    target_leaf_count=None,
-                    standalone_technical=STANDALONE_TECHNICAL,
-                    original_only=False,
-                ))
             next_stage_index = (meta.get("stage")
-                                 if isinstance(meta.get("stage"), int)
-                                 else state["stage_index"]) + 1
-            # 校验上下文随流转推进：children 阶段的 _check_submission 必须
-            # 用新 workflow_stage 与累积 known_ids（否则按旧阶段表校验）。
+                                if isinstance(meta.get("stage"), int)
+                                else state["stage_index"]) + 1
+            outline_file = {
+                "path": OUTLINE_OUTPUT_FILE,
+                "content": json.dumps(
+                    {"outline": nodes}, ensure_ascii=False, indent=2),
+            }
+            if no_technical_score_mode:
+                await _report(0.45, "一级目录已确认，开始生成完整目录")
+                next_prompt = disambiguate_prompt_tools(
+                    create_no_technical_score_children_prompt(
+                        target_leaf_count=None,
+                        standalone_technical=STANDALONE_TECHNICAL,
+                        original_only=False,
+                    ))
+                next_stage = "children_generation"
+                prepare = [OUTLINE_OUTPUT_FILE]
+                message = "一级目录已确认，开始生成完整目录"
+            else:
+                # 技术评分单链：进入 score-planning（宿主已预置
+                # technical-score-groups.json，模型确认分组并写目录映射）。
+                await _report(0.30, "一级目录已确认，开始评分项与目录映射")
+                next_prompt = disambiguate_prompt_tools(
+                    create_score_planning_prompt(
+                        standalone_technical=STANDALONE_TECHNICAL,
+                    ))
+                next_stage = "score-planning"
+                prepare = [TECHNICAL_SCORE_GROUPS_FILE,
+                           SCORE_DIRECTORY_PLAN_FILE]
+                message = "Agent 正在规划评分项与目录映射"
+            # 校验上下文随流转推进：下一阶段 _check_submission 必须用新
+            # workflow_stage 与累积 known_ids（否则按旧阶段表校验）。
+            state["stage"] = next_stage
+            state["stage_index"] = next_stage_index
+            return {
+                "stage": next_stage,
+                "stage_index": next_stage_index,
+                "prompt": next_prompt,
+                "files": [outline_file],
+                "prepare_output_files": prepare,
+                "message": message,
+            }
+        if stage == "score-planning":
+            # 模型已写 technical-score-groups.json + score-directory-plan.json；
+            # 宿主据此构建 leaf-allocation-context.json 并进入叶子分配。
+            plan = (value.get(SCORE_DIRECTORY_PLAN_FILE)
+                    if isinstance(value, dict) else None) or {}
+            allocation_context = _build_leaf_allocation_context(plan)
+            await _report(0.55, "评分项与目录映射完成，开始叶子分配")
+            next_stage_index = (meta.get("stage")
+                                if isinstance(meta.get("stage"), int)
+                                else state["stage_index"]) + 1
+            next_prompt = disambiguate_prompt_tools(
+                create_leaf_allocation_prompt(
+                    standalone_technical=STANDALONE_TECHNICAL,
+                ))
+            state["stage"] = "leaf_allocation"
+            state["stage_index"] = next_stage_index
+            return {
+                "stage": "leaf_allocation",
+                "stage_index": next_stage_index,
+                "prompt": next_prompt,
+                "files": [{
+                    "path": LEAF_ALLOCATION_CONTEXT_FILE,
+                    "content": json.dumps(
+                        allocation_context, ensure_ascii=False, indent=2),
+                }],
+                "prepare_output_files": [LEAF_ALLOCATION_FILE],
+                "message": "Agent 正在分配叶子节点",
+            }
+        if stage == "leaf_allocation":
+            plan = _read_score_directory_plan()
+            await _report(0.65, "叶子分配完成，开始生成完整目录")
+            next_stage_index = (meta.get("stage")
+                                if isinstance(meta.get("stage"), int)
+                                else state["stage_index"]) + 1
+            next_prompt = disambiguate_prompt_tools(
+                create_children_prompt(
+                    has_original_plan=has_original_plan,
+                    original_only=False,
+                    # 偏离 3（word_budget→targetLeafCount）仍登记：技术单链
+                    # 暂以 agent-decides 让模型自主分配，不硬映射字数。
+                    target_leaf_count=None,
+                    allow_root_changes=(plan.get("allow_root_changes") is True),
+                    standalone_technical=STANDALONE_TECHNICAL,
+                ))
             state["stage"] = "children_generation"
             state["stage_index"] = next_stage_index
             return {
                 "stage": "children_generation",
                 "stage_index": next_stage_index,
                 "prompt": next_prompt,
-                "files": [{
-                    "path": OUTLINE_OUTPUT_FILE,
-                    "content": json.dumps(
-                        {"outline": nodes}, ensure_ascii=False, indent=2),
-                }],
+                "files": [],
                 "prepare_output_files": [OUTLINE_OUTPUT_FILE],
-                "message": "一级目录已确认，开始生成完整目录",
+                "message": "Agent 正在生成完整目录",
             }
         if stage == "children_generation":
             # 易标 L1394-1406：children accept → target_leaf_count=None 时恒走
@@ -562,9 +883,72 @@ async def run_outline_agent(
                 item for item in collect_outline_ids(nodes) if item}
             await _hold(nodes)
             actual_leaf_count = count_ai_leaves(nodes)
-            await _report(0.88, "子目录生成完成，正在准备最终审核")
+            next_stage_index = (meta.get("stage")
+                                if isinstance(meta.get("stage"), int)
+                                else state["stage_index"]) + 1
+            if no_technical_score_mode:
+                await _report(0.88, "子目录生成完成，正在准备最终审核")
+                review_context = build_outline_review_context(
+                    outline={"outline": nodes}, target_leaf_count=None)
+                review_files = [
+                    {"path": OUTLINE_OUTPUT_FILE,
+                     "content": json.dumps(
+                         {"outline": nodes}, ensure_ascii=False, indent=2)},
+                    {"path": OUTLINE_REVIEW_CONTEXT_FILE,
+                     "content": json.dumps(
+                         review_context, ensure_ascii=False, indent=2)},
+                ]
+                next_prompt = disambiguate_prompt_tools(
+                    create_no_technical_score_review_prompt(
+                        target_leaf_count=None,
+                        actual_leaf_count=actual_leaf_count,
+                        original_only=False,
+                        input_files=review_files,
+                    ))
+                next_stage = "outline_review"
+                prepare = [OUTLINE_REVIEW_FILE]
+                message = "Agent 正在审核并修复目录"
+            else:
+                # 技术评分单链：children accept → leaf_adjustment（先按评分
+                # 规划调整叶子数量，再进入技术审核）。
+                await _report(0.80, "子目录生成完成，开始叶子数量调整")
+                next_prompt = disambiguate_prompt_tools(
+                    create_leaf_adjustment_prompt(
+                        target_leaf_count=None,
+                        actual_leaf_count=actual_leaf_count,
+                        no_technical_score_mode=False,
+                        original_only=False,
+                    ))
+                next_stage = "leaf_adjustment"
+                prepare = [OUTLINE_OUTPUT_FILE]
+                message = "Agent 正在调整叶子数量"
+                review_files = []
+            # 校验上下文随流转推进：review 阶段的 _check_submission 必须用
+            # 累积 known_ids（审核产物沿用全部已确认节点 id）。
+            state["stage"] = next_stage
+            state["stage_index"] = next_stage_index
+            return {
+                "stage": next_stage,
+                "stage_index": next_stage_index,
+                "prompt": next_prompt,
+                "files": review_files,
+                "prepare_output_files": prepare,
+                "message": message,
+            }
+        if stage == "leaf_adjustment":
+            # 技术评分单链：叶子调整 accept → 技术审核（易标 L825-858）。
+            state["known_ids"] = {
+                item for item in collect_outline_ids(nodes) if item}
+            await _hold(nodes)
+            actual_leaf_count = count_ai_leaves(nodes)
+            plan = _read_score_directory_plan()
+            await _report(0.88, "叶子调整完成，正在准备最终审核")
             review_context = build_outline_review_context(
-                outline={"outline": nodes}, target_leaf_count=None)
+                outline={"outline": nodes},
+                target_leaf_count=None,
+                score_mapping=_collect_score_mapping(plan),
+                scoreDirectoryPlan=plan,
+            )
             review_files = [
                 {"path": OUTLINE_OUTPUT_FILE,
                  "content": json.dumps(
@@ -573,18 +957,16 @@ async def run_outline_agent(
                  "content": json.dumps(
                      review_context, ensure_ascii=False, indent=2)},
             ]
-            next_prompt = disambiguate_prompt_tools(
-                create_no_technical_score_review_prompt(
-                    target_leaf_count=None,
-                    actual_leaf_count=actual_leaf_count,
-                    original_only=False,
-                    input_files=review_files,
-                ))
             next_stage_index = (meta.get("stage")
                                 if isinstance(meta.get("stage"), int)
                                 else state["stage_index"]) + 1
-            # 校验上下文随流转推进：review 阶段的 _check_submission 必须用
-            # 累积 known_ids（审核产物沿用全部已确认节点 id）。
+            next_prompt = disambiguate_prompt_tools(
+                create_outline_review_prompt(
+                    target_leaf_count=None,
+                    actual_leaf_count=actual_leaf_count,
+                    allow_root_changes=(plan.get("allow_root_changes") is True),
+                    input_files=review_files,
+                ))
             state["stage"] = "outline_review"
             state["stage_index"] = next_stage_index
             return {
@@ -615,6 +997,13 @@ async def run_outline_agent(
         except Exception:  # noqa: BLE001 — 写回失败不阻断成果交接
             logger.warning("审核通过后写回最终目录失败（工作区保留 Agent 写入版本）",
                            exc_info=True)
+        # ✅ R162 层级硬性标准完成前终检（用户指令 二.2「生成后必须用代码校验」）：
+        #    最终目录若仍有 L4 及更深或子节点数量越界（L1/L2 各 3~5）→ 报错终止，
+        #    不带病完成（与 legacy 生成链路的合规终检同语义）。数量约束在
+        #    children 阶段已由 Schema（minItems/maxItems）前置强制，此处兜底。
+        _violations = validate_outline_nodes(nodes)
+        if _violations:
+            raise OutlineAgentReportedFailure(format_violations_message(_violations))
         return {"complete": True}
 
     async def _write_files(files_to_write, prepare_files) -> None:
@@ -630,11 +1019,15 @@ async def run_outline_agent(
     _prepare_output_files(STAGE_OUTPUT_FILES.get(initial_stage, []))
 
     has_original_plan = bool(str(context.get("reference_outline") or "").strip())
+    # ✅ R149（FIX-F）：指示词与工作区实际 seed 的文件保持一致（requirements
+    #    为空时 响应文件要求.md 不会落盘，见 seed_files_from_context）。
+    has_requirements = bool(str(context.get("requirements_text") or "").strip())
     if initial_stage == "initial-outline":
         first_prompt = disambiguate_prompt_tools(create_initial_prompt(
-            build_task_instruction(has_original_plan=has_original_plan),
+            build_task_instruction(has_original_plan=has_original_plan,
+                                   has_requirements=has_requirements),
             standalone_technical=STANDALONE_TECHNICAL,
-            no_technical_score_mode=NO_TECHNICAL_SCORE_MODE,
+            no_technical_score_mode=no_technical_score_mode,
         ))
     else:
         # resume / 直入 children：与易标 directory runTask 初始 prompt 同构
@@ -725,12 +1118,18 @@ async def outline_agent_event_stream(
 
     holder = partial_holder if partial_holder is not None else {}
     queue: asyncio.Queue = asyncio.Queue()
+    # ✅ R155-O（R149 遗留 L-1）：工作流阶段共享字典 —— run_outline_agent 的
+    #    回调入口实时写入当前 stage，本层三个 progress 构造器据此给事件携带
+    #    ``workflow_stage``（SSE 消费侧映射进进度阶段模型，修「准备中 0/0」
+    #    全程失真）。Agent 未产出任何回调前的早期事件携带空串，消费侧不映射。
+    stage_ref: dict = {}
 
     async def _report_progress(progress: float, message: str) -> None:
         await update_progress(task_id, progress, message)
         await queue.put(("__event__", {
             "event": "progress", "task_id": task_id,
             "progress": progress, "message": message,
+            "workflow_stage": str(stage_ref.get("stage") or ""),
         }))
 
     def _emit_activity(event: dict) -> None:
@@ -740,6 +1139,7 @@ async def outline_agent_event_stream(
         queue.put_nowait(("__event__", {
             "event": "progress", "task_id": task_id,
             "progress": None, "message": str(message),
+            "workflow_stage": str(stage_ref.get("stage") or ""),
         }))
 
     def _emit_event(event: dict) -> None:
@@ -747,6 +1147,7 @@ async def outline_agent_event_stream(
             "event": "progress", "task_id": task_id,
             "progress": None,
             "message": str(event.get("message") or "Agent 正在自动修复"),
+            "workflow_stage": str(stage_ref.get("stage") or ""),
         }))
 
     async def _hold(tree: list) -> None:
@@ -758,7 +1159,8 @@ async def outline_agent_event_stream(
                 task_id=task_id, scheme=scheme, context=context,
                 word_budget=word_budget, hold_partial=_hold,
                 emit_activity=_emit_activity, emit_event=_emit_event,
-                report_progress=_report_progress, **run_kwargs)
+                report_progress=_report_progress, stage_ref=stage_ref,
+                **run_kwargs)
             await queue.put(("__done__", outcome))
         except asyncio.CancelledError:
             raise  # 消费侧断开/收尾取消：不转事件，保持任务取消语义

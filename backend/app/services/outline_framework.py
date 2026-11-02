@@ -11,11 +11,14 @@
 
 适配本软件（建筑工程专项施工方案编写）的差异：
 
-  - 层级：参考实现为三级目录（1 / 1.1 / 1.1.1），本软件目录同样为三级
-    （outline_utils.MAX_OUTLINE_DEPTH = 3），L2/L3 语义一一对应，
-    骨架深度与本软件「严禁第四级及更深」约束一致；
+  - 层级：参考实现为三级目录（1 / 1.1 / 1.1.1），本软件现行标准同为
+    **三级叶子**（outline_rules.LEAF_LEVEL=3：L1 / L2 / L3，L3 为最小
+    叶子，L4 仅作兼容层、严禁 L5。历史：R151 一度翻转「四级叶子」标准、
+    R159 据此把骨架补到四级，R162 按用户指令随标准回摆三级叶子 ——
+    骨架深度始终随单一事实源同深）；
   - 数量：参考实现用随机分布（nodes_distribution），本软件是硬约束
-    「每个一级 2~3 个二级、每个二级 1~3 个三级」，故改为约束区间内
+    「每个一级 3~5 个二级、每个二级 3~5 个三级」（outline_rules.CHILDREN_MIN/MAX
+    单一事实源；L3 下是否细分 L4 不作数量校验），故改为约束区间内
     **按章序确定性轮转分配**（各章有差异、结果稳定可测）；传入 rng
     即可恢复参考实现的随机分布（等价 nodes_distribution 机制）；
   - 内容：参考实现对齐「技术评分要求」，本软件对齐方案主要施工内容与
@@ -31,14 +34,19 @@ import json
 import logging
 from typing import Any
 
+from app.services.outline_rules import CHILDREN_MAX, CHILDREN_MIN
+
 logger = logging.getLogger("outline_framework")
 
+# ✅ R162：各层子节点数量区间上收 outline_rules 单一事实源（现行标准：
+# L1 下 3~5 个 L2、L2 下 3~5 个 L3，L3 为最小叶子）。历史：R159 前本模块
+# 私藏「L2 2~3 / L3 1~3」字面量与 R151 四级提示词打架；R159 曾补到四级
+# 骨架；R162 随「三级叶子」标准回摆（骨架叶子=L3，L4 由 AI 自然产出、
+# 交 normalize_outline 裁剪，本模块不再预建 L4 层）。
 #: 二级目录数量约束（每个一级下的二级数）
-L2_MIN = 2
-L2_MAX = 3
-#: 三级目录数量约束（每个二级下的三级数）
-L3_MIN = 1
-L3_MAX = 3
+L2_MIN, L2_MAX = CHILDREN_MIN[1], CHILDREN_MAX[1]
+#: 三级目录数量约束（每个二级下的三级叶子数）
+L3_MIN, L3_MAX = CHILDREN_MIN[2], CHILDREN_MAX[2]
 
 
 def build_sublevel_framework(
@@ -56,16 +64,18 @@ def build_sublevel_framework(
 
     等价移植参考实现 generate_one_outline_json_by_level1：
     二级/三级节点的 title、description 一律留空（AI 补全），id 与
-    children 结构由程序生成（AI 禁止修改）。
+    children 结构由程序生成（AI 禁止修改）。三级为骨架叶子层
+    （children 为空数组；AI 若自然细分四级，由 _fill_nodes 原文保留、
+    normalize_outline 统一裁剪）。
 
     数量分配（nodes_distribution 等价物）：
-      - rng 为 None（默认）：在 [l2_min, l2_max] / [l3_min, l3_max] 约束
-        区间内按章序轮转确定性分配 —— 相邻章数量不同（有差异，符合
-        参考实现「随机分布」的初衷），同一章多次构建结果一致（可测）；
+      - rng 为 None（默认）：在 [l2_min, l2_max] / [l3_min, l3_max]
+        约束区间内按章序轮转确定性分配 —— 相邻章数量不同（有差异，
+        符合参考实现「随机分布」的初衷），同一章多次构建结果一致（可测）；
       - rng 非 None：区间内随机分配（参考实现原始随机语义）。
 
     返回结构与子目录 AI 响应同构：{"outline": [二级节点, ...]}，
-    每个二级节点含 children（三级叶子，children 为空数组）。
+    每个二级节点含 children（三级叶子节点，children 为空数组）。
     """
     l2_lo = max(1, int(l2_min))
     l2_hi = max(l2_lo, int(l2_max))
@@ -73,17 +83,19 @@ def build_sublevel_framework(
     l3_hi = max(l3_lo, int(l3_max))
     idx = max(1, int(chapter_index))
 
+    def _counts(lo: int, hi: int, offset: int, n: int) -> list[int]:
+        span = hi - lo + 1
+        return [lo + (offset + t) % span for t in range(n)]
+
     if rng is not None:
         n_l2 = rng.randint(l2_lo, l2_hi)
-        leaf_counts = [rng.randint(l3_lo, l3_hi) for _ in range(n_l2)]
+        n_l3s = [rng.randint(l3_lo, l3_hi) for _ in range(n_l2)]
     else:
         n_l2 = l2_lo + (idx - 1) % (l2_hi - l2_lo + 1)
-        l3_span = l3_hi - l3_lo + 1
-        leaf_counts = [l3_lo + ((idx - 1) + j) % l3_span
-                       for j in range(n_l2)]
+        n_l3s = _counts(l3_lo, l3_hi, idx - 1, n_l2)
 
     outline: list[dict] = []
-    for j, n_l3 in enumerate(leaf_counts, start=1):
+    for j, n_l3 in enumerate(n_l3s, start=1):
         l2_node = {
             "id": f"{idx}.{j}",
             "title": "",           # ← AI 填充
@@ -93,7 +105,7 @@ def build_sublevel_framework(
                     "id": f"{idx}.{j}.{k}",
                     "title": "",   # ← AI 填充
                     "description": "",  # ← AI 填充
-                    "children": [],
+                    "children": [],  # 三级叶子（R162），严禁再挂子级
                 }
                 for k in range(1, n_l3 + 1)
             ],
@@ -190,7 +202,8 @@ def fill_framework_structure(framework: Any, ai_nodes: Any) -> list[dict]:
         违反本软件「严禁泛化/占位标题」红线），AI 多给的节点按同构
         模板规整后保留（不丢内容）；
       - 骨架叶子之下的 AI 子孙原样保留，交由 normalize_outline 统一
-        裁剪到三级（保留「深层标题并入 description」的内容线索语义）。
+        裁剪到四级（保留「深层标题并入 description」的内容线索语义；
+        R162 起骨架叶子停在三级，AI 自然产出的四级及更深由此句兜底）。
 
     fail-soft：任何异常返回原 AI 节点列表（由调用方日志告警）。
     """
@@ -207,7 +220,7 @@ def fill_framework_structure(framework: Any, ai_nodes: Any) -> list[dict]:
 
 
 def _fill_nodes(fw_nodes: list, ai_nodes: list, *, level: int) -> list[dict]:
-    """按骨架模板逐节点规整（level=1 为二级层，2 为三级层=骨架叶子层）。"""
+    """按骨架模板逐节点规整（level=1 为二级层，≥2 为三级叶子层）。"""
     out: list[dict] = []
     for i, ai in enumerate(ai_nodes):
         if not isinstance(ai, dict):
@@ -217,7 +230,8 @@ def _fill_nodes(fw_nodes: list, ai_nodes: list, *, level: int) -> list[dict]:
                else (fw_nodes[-1] if fw_nodes else {}))
         raw_children = ai.get("children")
         if level >= 2:
-            # 骨架叶子层：保留 AI 子孙原文，交 normalize_outline 裁剪
+            # 骨架叶子层（三级，R162）：保留 AI 子孙原文（含自然产出的
+            # 四级兼容层），交 normalize_outline 裁剪
             children = list(raw_children) if isinstance(raw_children, list) else []
         else:
             tpl_children = tpl.get("children") if isinstance(tpl, dict) else None

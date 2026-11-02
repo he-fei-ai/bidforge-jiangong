@@ -7,11 +7,22 @@
 
 红线：目录身份 ``id`` 与编号 ``number`` 分离 —— 编号只反映当前树的位置，
 绝不修改节点身份。
+
+✅ R155-O（2026-11-01 · R149 遗留 L-9-D3）：``accept_agent_outline`` 对
+title 过一次**树档编号剥离**（剥空保留原文）—— 与 legacy 链「生成即
+normalize」（``normalize_outline`` → ``renumber_outline_nodes(strip_titles=
+True)``）同口径。提示词虽明令「title 不得含编号」，但无程序侧强制：模型
+违反时「第一章 工程概况」一路带进 completed 事件 / 工作区 outline.json /
+审核上下文（前端保存前预览出现「1 第一章 工程概况」双重编号形态，审核
+语义基于脏标题）。落库时 ``normalize_outline`` 终会收敛，此处收口的是
+中间态契约不对称。
 """
 from __future__ import annotations
 
 import uuid
 from typing import Any, Iterable
+
+from app.services.numbering import strip_outline_numbering_tree
 
 #: UUID v4 节点身份格式（易标原字符串常量，逐字保留）。
 NODE_ID_PATTERN = (
@@ -75,9 +86,14 @@ def accept_agent_outline(items: Iterable[dict] | None,
             if node_id in seen:
                 raise ValueError(f"目录 ID 重复：{node_id}")
             seen.add(node_id)
+            # ✅ R155-O（L-9-D3）：剥标题内嵌编号（树档，与落库 normalize 同一
+            #    唯一实现）；剥空保留原文（标题本身即编号「第一章」时不丢内容，
+            #    与 R85 BUG-D 的「剥离后为空回退原标题」口径一致）。
+            _raw_title = str(item.get("title") or "").strip()
+            _bare_title = strip_outline_numbering_tree(_raw_title) if _raw_title else ""
             node: dict[str, Any] = {
                 "id": node_id,
-                "title": str(item.get("title") or "").strip(),
+                "title": _bare_title if _bare_title else _raw_title,
                 "description": str(item.get("description") or "").strip(),
             }
             if root:

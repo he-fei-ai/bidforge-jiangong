@@ -4,9 +4,12 @@
 outlineGenerationTaskV2.cjs``，行号 1:1 对应）：
 
 - L36–80 ``createDirectoryNodeSchema(level, root)`` →
-  :func:`create_directory_node_schema`（level 1–6 递归，``level < 6`` 时
-  ``oneOf`` 叶/枝，``children`` ``minItems 2``；``root=True`` 追加
-  ``attr`` enum 与 ``ATTRIBUTE_CONTENT_MODE_RULES`` 的 ``if/then`` 规则）；
+  :func:`create_directory_node_schema`（递归生成叶/枝 ``oneOf``；R162 起按
+  仓内层级硬性标准收敛：``level < LEAF_LEVEL(3)`` 时才允许 ``children``，
+  且 ``children`` ``minItems/maxItems`` 取 outline_rules.CHILDREN_MIN/MAX
+  （L1/L2 各 3~5）；L3 为最小叶子，仅 ``leaf_schema``；
+  ``root=True`` 追加 ``attr`` enum 与 ``ATTRIBUTE_CONTENT_MODE_RULES`` 的
+  ``if/then`` 规则）；
 - L82 ``ROOT_NODE_SCHEMA`` / L84–95 ``OUTLINE_JSON_SCHEMA``；
 - L97–122 ``TECHNICAL_SCORE_GROUPS_SCHEMA``（``requirement_id`` pattern
   ``^R[1-9]\\d*$``）；
@@ -33,6 +36,12 @@ outlineGenerationTaskV2.cjs``，行号 1:1 对应）：
 from __future__ import annotations
 
 from jsonschema import Draft7Validator
+
+from app.services.outline_rules import (
+    CHILDREN_MAX,
+    CHILDREN_MIN,
+    LEAF_LEVEL,
+)
 
 from .json_validation import _normalize_errors
 from .outline_identity import NODE_ID_PATTERN
@@ -80,7 +89,10 @@ def create_directory_node_schema(level: int, root: bool = False) -> dict:
             }
             for attr, mode in ATTRIBUTE_CONTENT_MODE_RULES.items()
         ]
-    if level < 6:
+    # ✅ R162（2026-11-01）：目录以三级（LEAF_LEVEL）为最小叶子，L3 仅 leaf；
+    #    子节点数量按父级层级取 CHILDREN_MIN/MAX（L1/L2 各 3~5）——
+    #    Schema 前置强制，替代易标原版的「minItems 2、最多六级」。
+    if level < LEAF_LEVEL:
         branch_schema: dict = {
             "type": "object",
             "required": [*base_required, "children"],
@@ -89,7 +101,8 @@ def create_directory_node_schema(level: int, root: bool = False) -> dict:
                 **base_properties,
                 "children": {
                     "type": "array",
-                    "minItems": 2,
+                    "minItems": CHILDREN_MIN.get(level, 2),
+                    "maxItems": CHILDREN_MAX.get(level, 6),
                     "items": create_directory_node_schema(level + 1),
                 },
             },

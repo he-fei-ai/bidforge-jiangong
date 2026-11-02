@@ -215,22 +215,24 @@ class TestHeadingLevels:
         assert styles[1]["font_size"] == 16
 
     def test_toc_field_depth_9(self):
+        """✅ R151（2026-10-31）随四级叶子标准同步：目录树只到 L4，
+        TOC 域深度封顶 4（用户配置 9 也只到 4）。"""
         doc = Document()
         p = doc.add_paragraph()
         _add_toc_field(p, 9)
-        assert any('\\o "1-9"' in t for t in _instr_texts(doc))
+        assert any('\\o "1-4"' in t for t in _instr_texts(doc))
 
     def test_toc_field_depth_clamped(self):
         doc = Document()
         p = doc.add_paragraph()
         _add_toc_field(p, 99)
-        assert any('\\o "1-9"' in t for t in _instr_texts(doc))
+        assert any('\\o "1-4"' in t for t in _instr_texts(doc))
 
     def test_toc_depth_config_clamp_static(self):
-        """配置层 toc_depth 上限同步放宽到 9（静态锁，防两处漂移）。"""
+        """配置层 toc_depth 上限同步封顶 4（静态锁，防两处漂移）。"""
         import inspect
         src = inspect.getsource(E)
-        assert src.count('min(_int("toc_depth", 3), 9)') == 1
+        assert src.count('min(_int("toc_depth", 3), 4)') == 1
 
     def test_heading_7_9_outline_lvl_written(self):
         """L7~L9 样式显式写入 outlineLvl（6/7/8）——用户硬性要求。"""
@@ -257,6 +259,8 @@ def _mk_png_bytes() -> bytes:
 
 class TestFormulaImageFallback:
     def test_latex_to_png_ok(self):
+        # 可选依赖保护：图片降级通道依赖 matplotlib mathtext（非强制依赖）
+        pytest.importorskip("matplotlib", reason="未安装 matplotlib：公式图片降级通道不可用")
         data = docx_math.latex_to_png_bytes(r"\frac{N}{A} \leq f")
         assert data is not None
         assert data[:8] == b"\x89PNG\r\n\x1a\n"
@@ -309,8 +313,10 @@ class TestWiringAndVersion:
     def test_exporter_version_30(self):
         # ✅ R131-A（2026-10-23）随标准同步：v30 → v31，图题/配图 alt 剥离生成期
         # 「图 X-Y」前缀改变**可见题注文本**（双图号 → 单图号），旧缓存必须失效；
+        # ✅ R151（2026-10-31）：v32（并行会话）→ v33，仅识别 L1~L4 级标题
+        # （L5+ 降级加粗正文、TOC 深度封顶 4），旧缓存必须整体失效。
         # 依据 export.py `_EXPORTER_VERSION` 头注释「每次修改导出排版逻辑后 +1」。
-        assert E._EXPORTER_VERSION == "31"
+        assert E._EXPORTER_VERSION == "33"
 
     def test_fix_stats_keys_include_new(self):
         st = E._fix_stats()
