@@ -441,8 +441,11 @@ class TestRetryDbLockedNoDeadTail:
 # ===========================================================================
 class TestOutlineDepthSemantics:
     def test_hard_cap_is_single_source(self):
+        # ✅ R151（2026-10-31）：三级标准翻转为四级叶子标准（用户指令），
+        # 数值单一事实源 = outline_rules.OUTLINE_MAX_LEVEL（outline_utils 引用它）。
+        from app.services.outline_rules import OUTLINE_MAX_LEVEL
         from app.services.outline_utils import MAX_OUTLINE_DEPTH
-        assert MAX_OUTLINE_DEPTH == 3
+        assert MAX_OUTLINE_DEPTH == 4 == OUTLINE_MAX_LEVEL
 
         def _defs(rel):
             n = 0
@@ -465,11 +468,14 @@ class TestOutlineDepthSemantics:
             f"告警线 {OUTLINE_MAX_DEPTH} 低于硬上限 {MAX_OUTLINE_DEPTH}："
             "落库允许的深度会被规范检查判为越界")
 
-    def test_known_limitation_documented(self):
-        """告警在裁剪后调用时恒不触发 —— 这一已知限制必须写在常量注释里。"""
+    def test_alert_line_invariant_documented(self):
+        """✅ R162：旧「恒不触发」限制已失效（R151 时代硬上限=4 但 normalize 裁到
+        3，故告警在裁剪后恒不触发；R162 三级叶子标准下 normalize 钳到 4，裁剪后
+        仍可到 4 级，告警可真实触发）。改为锁死「告警线必须 ≥ 硬上限」不变式
+        必须写在常量注释里。"""
         src = _src_of(_app_path("services", "outline_quality.py"))
-        assert "恒不触发" in src, (
-            "必须记录：OUTLINE_MAX_DEPTH 告警仅在裁剪前的原始目录上才有意义")
+        assert "告警线必须 ≥ 硬上限" in src, (
+            "必须记录：OUTLINE_MAX_DEPTH 告警线与硬上限的不变式边界")
 
 
 # ===========================================================================
