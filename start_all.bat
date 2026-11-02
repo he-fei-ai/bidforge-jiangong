@@ -141,14 +141,14 @@ echo   npm: %NPM_VER%
 echo.
 
 REM ========== 1. 清理端口 ==========
-echo [1/5] 清理端口占用 (8000 / 5175)...
+echo [1/5] 清理端口占用 (8001 / 5175)...
 REM 先 taskkill 再按结果打印：vite 会同时绑定 0.0.0.0 与 [::]，同一 PID 在
 REM netstat 里出现两行，若先打印就会重复报一次。第二次 taskkill 必然失败，
 REM 因此天然去重，措辞也从「尝试终止」变成准确的「已终止」。
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8000 " ^| findstr "LISTENING"') do (
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8001 " ^| findstr "LISTENING"') do (
     if not "%%a"=="0" (
         taskkill /PID %%a /T /F >nul 2>&1
-        if not errorlevel 1 echo   端口 8000 被 PID %%a 占用，已终止
+        if not errorlevel 1 echo   端口 8001 被 PID %%a 占用，已终止
     )
 )
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":5175 " ^| findstr "LISTENING"') do (
@@ -161,7 +161,7 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":5175 " ^| findstr "LISTENIN
 REM 复核：taskkill 失败时（例如被占用的是管理员进程/系统服务）旧脚本会静默跳过，
 REM 结果是新起的 uvicorn 报「address already in use」而窗口一闪而过，用户完全不知情；
 REM 更糟的是后续健康探测会打到「残留的旧后端」上，脚本误报 [OK] 服务已启动，
-REM 用户实际跑的是一份过期实例。因此 8000 仍被占用时直接硬失败并提示用管理员权限重跑，
+REM 用户实际跑的是一份过期实例。因此 8001 仍被占用时直接硬失败并提示用管理员权限重跑，
 REM 绝不带着假 OK 继续。
 
 REM ---- pass 2: kill_port.ps1 sweeps the real socket holder -----------------
@@ -175,7 +175,7 @@ REM kill_port.ps1 resolves the living descendants of that PID, kills them
 REM and waits until the listener is really gone. Re-run the selftest after
 REM changing either file:  powershell -File kill_port_selftest.ps1
 REM NOTE: keep this block ASCII-only - the file must stay GBK/CP936.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0kill_port.ps1" -Ports 8000,5175 -WaitSec 8
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0kill_port.ps1" -Ports 8001,5175 -WaitSec 8
 if errorlevel 1 echo   [!] kill_port.ps1 could not release every port, see above.
 REM ---- pass 3: sweep leftover zombie pytest / test workers ----
 REM A leaked `python -m pytest` keeps a handle on logs/backend.log, which
@@ -200,17 +200,17 @@ if errorlevel 2 (
 ) else (
     echo   [OK] cleanup_guard: no leftover toolkit / timeout / zombie processes.
 )
-set "PORT_8000_BUSY="
+set "PORT_8001_BUSY="
 set "PORT_5175_BUSY="
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8000 " ^| findstr "LISTENING"') do (
-    if not "%%a"=="0" set "PORT_8000_BUSY=%%a"
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8001 " ^| findstr "LISTENING"') do (
+    if not "%%a"=="0" set "PORT_8001_BUSY=%%a"
 )
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":5175 " ^| findstr "LISTENING"') do (
     if not "%%a"=="0" set "PORT_5175_BUSY=%%a"
 )
-if defined PORT_8000_BUSY (
-    echo   [!] 端口 8000 仍被 PID %PORT_8000_BUSY% 占用（taskkill 可能因权限不足而失败）
-    echo      后端无法在新窗口绑定 8000；若仍启动会得到「假 OK」（探测命中残留旧后端）。
+if defined PORT_8001_BUSY (
+    echo   [!] 端口 8001 仍被 PID %PORT_8001_BUSY% 占用（taskkill 可能因权限不足而失败）
+    echo      后端无法在新窗口绑定 8001；若仍启动会得到「假 OK」（探测命中残留旧后端）。
     echo      请先结束该进程，或「以管理员身份」重跑本脚本：
     echo      （右键 start_all.bat - 以管理员身份运行）
     pause
@@ -306,7 +306,7 @@ REM 检查 OCR 引擎（扫描件 / 图片型资料的文字识别）
     echo   [!] 未检测到本地 OCR 引擎；若未配置视觉模型，扫描件将无法提取文字
     echo      启用方式：cd backend ^&^& pip install -r requirements-ocr.txt
     echo      或安装 Tesseract-OCR 并配置 TESSERACT_PATH，或在「AI 配置」添加视觉模型
-    echo      详情：http://localhost:8000/api/v1/diagnostics/capabilities
+    echo      详情：http://localhost:8001/api/v1/diagnostics/capabilities
 )
 
 REM ========== 3. 前端依赖 ==========
@@ -344,23 +344,23 @@ if not exist "node_modules\.bin\vite.cmd" (
 
 REM ========== 4. 启动后端 ==========
 echo.
-echo [4/5] 启动后端服务 (FastAPI :8000)...
+echo [4/5] 启动后端服务 (FastAPI :8001)...
 cd /d "%~dp0backend"
 REM 用 start /D 指定工作目录，配合 cmd /S /K 保证引号按字面量解析
 REM （不再写成 cmd /k "cd /d "path" && ..." 这种嵌套引号写法）
 REM NOTE: single-process mode (no --reload). The reloader parent owns the
-REM :8000 listen socket and the worker child inherits the handle, which
+REM :8001 listen socket and the worker child inherits the handle, which
 REM produced parent/child accept() races plus orphan workers holding the
 REM port after the parent died. One process = one socket owner.
 REM For hot reload during development, stop the server and restart it.
-start "后端-专项方案工具箱" /D "%~dp0backend" cmd /S /K ""%PY%" -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+start "后端-专项方案工具箱" /D "%~dp0backend" cmd /S /K ""%PY%" -m uvicorn app.main:app --host 0.0.0.0 --port 8001"
 
 REM 等后端起来。旧脚本用 for /l %%i in (1,1,15) 只等 15 秒，且直接调裸 curl：
 REM 精简系统 / 旧版 Windows 没有 curl.exe 时会永远判定未就绪并误报「超时」，
 REM 即使后端其实运行得很好。这里改成 label + set /a 的显式循环，用 %CURL%
 REM 探测、缺失时回退到 Python 标准库（Python 此时必然可用）。
 echo   等待后端就绪 ^(最多 60 秒^)...
-set "PROBE_URL=http://127.0.0.1:8000/api/v1/health"
+set "PROBE_URL=http://127.0.0.1:8001/api/v1/health"
 set "TRIES=0"
 :probe_backend
 set /a TRIES+=1
@@ -405,8 +405,8 @@ echo ============================================
 echo   [OK] 服务已启动！
 echo.
 echo   前端页面: http://localhost:5175
-echo   后端 API: http://localhost:8000
-echo   API 文档: http://localhost:8000/docs
+echo   后端 API: http://localhost:8001
+echo   API 文档: http://localhost:8001/docs
 echo ============================================
 echo.
 

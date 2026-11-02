@@ -9,7 +9,7 @@ REM  removes any code-page dependency. Chinese instructions live in
 REM  docs\process_guard_mechanism.md.
 REM
 REM  What it does (delegated to cleanup_guard.ps1 -Mode Shutdown):
-REM    1. release ports 8000 / 5175 (incl. orphan socket holders)
+REM    1. release ports 8001 / 5175 (incl. orphan socket holders)
 REM    2. close titled toolbox console windows (front-/back-...toolbox)
 REM    3. sweep zombie pytest / test-worker processes (log-rotation pinner)
 REM    4. kill leftover backend/frontend/script/timeout stubs & orphans

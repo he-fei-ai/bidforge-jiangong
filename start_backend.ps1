@@ -4,7 +4,7 @@
 #  self-verify with a timed /api/v1/health probe.
 #  ============================================================================
 #  WHY SINGLE-PROCESS (no --reload)
-#  `uvicorn --reload` runs a reloader PARENT that creates the :8000 listen
+#  `uvicorn --reload` runs a reloader PARENT that creates the :8001 listen
 #  socket and a worker CHILD that inherits a handle to it. On Windows this
 #  causes two problems we hit repeatedly:
 #    * parent/child accept() competition on the same socket,
@@ -16,9 +16,9 @@
 #  is the clean single-process path.
 #
 #  WHAT IT DOES
-#    1. free port 8000 (kill_port.ps1) + sweep leftover zombie pytest,
+#    1. free port 8001 (kill_port.ps1) + sweep leftover zombie pytest,
 #    2. locate an interpreter that can import the app,
-#    3. start `python -m uvicorn app.main:app --host 0.0.0.0 --port 8000`
+#    3. start `python -m uvicorn app.main:app --host 0.0.0.0 --port 8001`
 #       as ONE detached process (no --reload),
 #    4. print PID / listening port / health URL / clickable frontend URL,
 #    5. poll health, print measured latency; exit 1 on failure.
@@ -28,7 +28,7 @@
 # ============================================================================
 
 param(
-    [int] $Port = 8000,
+    [int] $Port = 8001,
     [int] $HealthTimeoutSec = 60,
     [string] $FrontendUrl = "http://localhost:5175",
     [switch] $SkipZombieSweep

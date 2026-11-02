@@ -14,7 +14,7 @@
 #  Sequence: cast a Check (must report exit 2 WITHOUT killing), then a full
 #  Shutdown (must kill all four + exit 0).
 #
-#  SAFETY: refuses to run while the REAL toolbox ports (8000/5175) are being
+#  SAFETY: refuses to run while the REAL toolbox ports (8001/5175) are being
 #  listened on - a live app would otherwise be swept by the Shutdown phase.
 #
 #  Windows only. ASCII-only output (see kill_port.ps1).
@@ -67,9 +67,9 @@ function Invoke-Guard([string[]]$Arguments) {
 }
 
 # --- preconditions: the real toolbox must not be running -------------------
-$live = Get-NetTCPConnection -LocalPort 8000, 5175 -ErrorAction SilentlyContinue
+$live = Get-NetTCPConnection -LocalPort 8001, 5175 -ErrorAction SilentlyContinue
 if ($live) {
-    Write-Host "FATAL: the real toolbox is listening on 8000/5175 - stop it first (stop_all.bat),"
+    Write-Host "FATAL: the real toolbox is listening on 8001/5175 - stop it first (stop_all.bat),"
     Write-Host "       then re-run this selftest. The Shutdown phase would kill a live app."
     exit 1
 }

@@ -2,7 +2,7 @@
 #  cleanup_guard.ps1 - unified process check & cleanup mechanism
 #  ============================================================================
 #  WHY THIS EXISTS
-#  Starting / stopping the toolbox (backend :8000 + frontend :5175) can leave
+#  Starting / stopping the toolbox (backend :8001 + frontend :5175) can leave
 #  residue that KILL_PORT and KILL_PYTEST alone cannot cover:
 #    * backend python (uvicorn app.main:app) that failed to bind a port
 #      (crash loop / hung boot) - no port owner, so port-based kill misses it;
@@ -41,7 +41,7 @@
 param(
     [ValidateSet('Check', 'Clean', 'Startup', 'Shutdown')]
     [string] $Mode = 'Check',
-    [string] $Ports         = '8000,5175',
+    [string] $Ports         = '8001,5175',
     [int]    $WaitSec       = 8,
     # a stub younger than this is treated as "still working" and left alone
     [int]    $StubMinAgeSec = 60,
