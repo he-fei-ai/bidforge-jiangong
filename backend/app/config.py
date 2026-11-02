@@ -41,6 +41,16 @@ class Settings(BaseSettings):
     ocr_pdf_dpi: int = 200             # PDF 渲染 DPI（越高越准、越慢）
     ocr_min_chars_per_page: int = 30   # 平均每页字符数低于该值 → 判定为扫描件
 
+    # ---------- 结构化日志与可观测性（R-LOG · 2026-10-28） ----------
+    # 默认关闭：既有文本日志行为逐字不变；开启后额外写 JSON Lines 结构化日志。
+    structured_log_enabled: bool = False
+    structured_log_dir: str = ""
+    structured_log_retention_error_days: int = 90
+    structured_log_retention_info_days: int = 30
+    structured_log_retention_debug_days: int = 7
+    structured_log_sample_debug: float = 1.0
+    structured_log_queue_size: int = 10000
+
     # ---------- 上传文件大小上限（解析提取模块 · 目录识别上传） ----------
     # 单文件最大字节数：超过即 413 拒绝，避免超大文件一次性读入内存（OOM）。
     # 默认 30MB，与「项目资料上传」口径对齐；设为更大的值即可放宽限制，
@@ -394,10 +404,14 @@ class Settings(BaseSettings):
     # ✅ P2-2（2026-09-27 · 补齐遗留项）：短方案一次性直出的目录节点数上限。
     #    原为 ``_validate_outline`` 的默认形参 500（写死在 services 层、无法调整）：
     #    30 章 × 20 节点的紧凑三级目录会触碰上限并被判非法 → 触发无意义的 JSON
-    #    修复轮。修复轮早已放宽到 OUTLINE_FIX_MAX_NODES=1200，生成/修复两侧口径不一致。
-    #    默认 500 = 与修复前**逐字相同**（不改任何默认行为），仅暴露为可调项：
-    #    弱模型/大方案场景可设 OUTLINE_GENERATE_MAX_NODES=1200 与修复轮对齐。
-    outline_generate_max_nodes: int = 500
+    #    修复轮。修复轮早已放宽（独立上限，见 sse_handlers.OUTLINE_FIX_MAX_NODES），
+    #    生成/修复两侧口径不一致。
+    #    ✅ R151 引入 / R162 语义不变（2026-11-01）：三级叶子标准下合规树
+    #    理论上限为 250（10 章 × 5 二级 × 5 三级），但四级兼容层可继续扩展；
+    #    默认保持 1600（不收紧，兼容存量四级树并留余量）；修复轮
+    #    OUTLINE_FIX_MAX_NODES 现值 2000（见 sse_handlers.py，保持「大于生成链」
+    #    的余量设计；R159 核对：本注释旧记 1600 与代码失同步，已修正）。
+    outline_generate_max_nodes: int = 1600
     # ✅ P1-3（2026-09-27）：把 outline_templates 匹配到的**标准章节模板**注入
     #    目录提示词（24 套模板此前解析出却从未使用）。默认 True = 生效；
     #    置 False 回退到"仅用通用九大章节骨架"的旧行为。
@@ -576,6 +590,13 @@ class Settings(BaseSettings):
     # False = 逐字回退两步前的旧行为（只做文末追加，文本不改一个字节，可回退）。
     # 归一性质：只改闭合行的标记长度，不增删行、不动围栏内内容、幂等。
     content_fence_normalize_close: bool = True
+
+    # ✅ R146（2026-10-29 · 日志 TOP2 error）：落库前为「缺 GFM 分隔行」的表格块
+    # 补一行 ``| --- |``。判据保守：只救「连续表格行、整段一处分隔行都没有、
+    # 段长 ≥2、首行 ≥2 列」的真缺行；围栏块内不动；幂等、无损、确定性。
+    # True（默认）= 生成侧（sse_handlers）与导出侧（export._prepare_export）都会
+    # 执行；False = 两侧都不执行，正文与导出产物与该修复引入前逐字一致（可回退）。
+    content_autofix_table_separators: bool = True
 
     # ✅ F3（2026-10-07 · 待补充清单漏检）：扫描半角方括号中文占位
     # （如 ``[就近综合医院]`` / ``[邻近专科医院/门诊部]``）。生产文档 T21 实证：
@@ -757,6 +778,22 @@ class Settings(BaseSettings):
     #   build_inline_chart_plan 自动删除（生成成本白花、用户看到图消失）。
     #   默认开启；它是**软提示**（并发下可能偏乐观），硬限额始终兜底。
     content_chart_quota_hint_enabled: bool = True
+
+    # ✅ R166（2026-11-01 · 触发词库引入）：正文生成时是否把「本章配图参考」
+    #   （程序词库检测出的最可能图表类型 + 图题建议）作为**软提示**注入本章任务段。
+    #   措辞固定为「仅供参考；是否配图、配哪种仍由你自主判定」，不构成指令、
+    #   不改变配额与判型规则（R58 明确裁定「程序拍板」只到提示为止）。
+    #   关闭 → 注入内容与本项引入前逐字一致（零回归开关）。
+    content_chart_trigger_hint_enabled: bool = True
+
+    # ✅ R166（2026-11-01 · 本地模板兜底，引入但**默认关闭**）：
+    #   正文 AI 在本章**没有**产出任何图表围栏、且词库判定「应配图」时，
+    #   是否在文末追加一张「最小合法模板图」兜底。
+    #   默认 False ⇒ 与引入前逐字一致；打开后载荷带 source="local"，
+    #   引导语标注「模板示例数据，请按项目实际核定」，前端/导出据此提示。
+    chart_local_fallback_enabled: bool = False
+    #: 兜底判定的置信度阈值（对齐外部平台 0.70；低于阈值宁可不配图）。
+    chart_local_fallback_min_confidence: float = 0.70
 
     # ✅ 2026-10-23 · 表格密度需求（对齐外部 OpenBidKit_Yibiao v2 的
     #   tableRequirement 四档策略，docs/reference_research/04_content.md §8.3/§9）：

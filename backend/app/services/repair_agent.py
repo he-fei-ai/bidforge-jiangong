@@ -16,7 +16,10 @@ from datetime import datetime
 from app.config import settings
 
 # ✅ 2026-09-30 第十五轮：定点编辑（old_text/new_text，对齐参考软件 §三.4/§五.1）
-from app.services import consistency_edits, repair_record
+# ✅ D2（2026-10-29 · 跨模块深度收口 · P1 假成功）：repair_agent 此前 6 处裸
+#    db.execute 零判空（R13 护栏未覆盖 services 层，与本模块 review_db 自称
+#    「最后一个空白点」矛盾）。本文件写路径统一改走 review_db.exec_write。
+from app.services import consistency_edits, repair_record, review_db
 from app.services.ai.prompts._registry import render
 from app.services.ai.provider_factory import chat_with_fallback
 from app.services.content_utils import (
@@ -514,11 +517,19 @@ async def run_repair(db, *, scheme_id: str, scan_id: str, conflicts: list[dict],
                             logger.warning(
                                 "[一致性修复] 第 %s 章图表重登记失败（保留原正文）: %s",
                                 sid, _re)
-                    await db.execute(
+                    # ✅ D2（2026-10-29 · 跨模块深度收口 · P1 假成功）：裸 db.execute
+                    #    + commit 在 R13 下「正文未落库却标记已修复」—— 界面报
+                    #    「已修复」、库里内容一字未改。改走 review_db.exec_write
+                    #    （模块既定 R13 单一出口）：游标 None 或 0 行 → 503，绝不
+                    #    汇报假成功。require_rows=True：目标行必然存在（本章由
+                    #    targets 加载而来）。
+                    await review_db.exec_write(
+                        db,
                         "UPDATE sections SET content=?, word_count=?, word_status=?, "
                         "updated_at=? WHERE id=?",
                         (_persist_content, _wc, word_status_for(_wc, _wb),
-                         datetime.now().isoformat(), sid))
+                         datetime.now().isoformat(), sid),
+                        what="一致性修复落库：写入正文（R13 判空）")
                     await db.commit()
                 repaired_conflicts.update(cids)
                 status = "repaired"
@@ -558,12 +569,24 @@ async def run_repair(db, *, scheme_id: str, scan_id: str, conflicts: list[dict],
                           "problems": ["无法确定权威值，建议人工确认"]})
 
     # 回写冲突状态
+    # ✅ D2（2026-10-29 · 跨模块深度收口 · P1 假成功）：同上，冲突状态回写走
+    #    review_db.exec_write（R13 单一出口）。require_rows=False：**正文**落库已用
+    #    require_rows=True 守住「假成功」主风险；此处是**冲突状态书签**，被修复的
+    #    冲突可能来自内存构造（如单测直传 conflicts）而**无** consistency_conflicts
+    #    行，0 行是合法结果（R13 游标 None 仍由 safe_rowcount 抛 503，不假成功），
+    #    由调用方按 items 判读结果，不得因「书签无行」把整个修复 503。
     for cid in repaired_conflicts:
-        await db.execute(
-            "UPDATE consistency_conflicts SET status='repaired' WHERE id=?", (cid,))
+        await review_db.exec_write(
+            db,
+            "UPDATE consistency_conflicts SET status='repaired' WHERE id=?",
+            (cid,), what="一致性修复：回写冲突状态 repaired（R13 判空）",
+            require_rows=False)
     for cid in failed_conflicts:
-        await db.execute(
-            "UPDATE consistency_conflicts SET status='failed' WHERE id=?", (cid,))
+        await review_db.exec_write(
+            db,
+            "UPDATE consistency_conflicts SET status='failed' WHERE id=?",
+            (cid,), what="一致性修复：回写冲突状态 failed（R13 判空）",
+            require_rows=False)
     await db.commit()
 
     # ✅ 统计口径统一（2026-09-16 · 依据运行库记录）：旧实现 total_conflicts 按

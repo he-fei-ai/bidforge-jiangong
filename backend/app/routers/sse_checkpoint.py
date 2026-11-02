@@ -13,7 +13,7 @@ import logging
 import sqlite3
 from datetime import datetime
 
-from app.db import get_conn, get_read_conn, release_read_conn
+from app.db import get_conn, get_read_conn, release_read_conn, safe_rowcount
 from app.services.checkpoint_schema import (
     FACTS_CHECKPOINT_FIELDS as SCHEMA_FACTS_CHECKPOINT_FIELDS,
 )
@@ -179,6 +179,17 @@ async def _checkpoint_partial_outline(task_id: str, outline, failed_chapters,
     if not outline and not failed_chapters:
         return False
     payload = {"event": event, "task_id": task_id, "outline": outline}
+    # ✅ BUG 修复（2026-10-28 · 断线路径 partial 缺键）：
+    #    _checkpoint_partial_outline 是**客户端断开**（GeneratorExit → finally 兜底）
+    #    的唯一收尾出口，旧实现从不写 partial=True —— 而显式停止路径
+    #    _finish_stopped_with_partial（sse_handlers）恒写 partial=True。
+    #    断线重挂接时 `_attach_checkpoint_result` 按白名单回传 partial，缺失时
+    #    前端 buildPartialOutlineHint 拿到 undefined ⇒ 把「用户断开时只生成了
+    #    一部分」当成「完整目录」展示，用户可能把半份目录当完整保存（R89 S3
+    #    注释「同口径带 partial」的承诺就此落空）。
+    #    本函数语义即「部分成果」，到达此处 outline 或 failed_chapters 必非空，
+    #    恒置 partial=True（与 _finish_stopped_with_partial 同口径，不再分叉）。
+    payload["partial"] = True
     if failed_chapters:
         payload["failed_chapters"] = list(failed_chapters)
         payload["failed_count"] = len(failed_chapters)
@@ -193,3 +204,64 @@ async def _checkpoint_partial_outline(task_id: str, outline, failed_chapters,
 async def _load_outline_checkpoint(task_id: str) -> dict | None:
     """读取目录生成成果 checkpoint（薄封装，语义与 kind 校验见 _load_task_checkpoint）。"""
     return await _load_task_checkpoint(task_id, "outline_result")
+
+
+#: 终态任务状态词表（单一事实源：sse_handlers._TERMINAL_STATUSES 改为本常量的别名，
+#: 见 R154）。运行中/暂停任务的 partial checkpoint 是断线重挂的**活兜底**，绝不清。
+TERMINAL_TASK_STATUSES = frozenset({"completed", "degraded", "failed", "stopped"})
+
+
+async def _clear_outline_checkpoints_for_scheme(db, scheme_id: str) -> int:
+    """目录整表重建成功后，清理该方案**终态任务**的目录成果 checkpoint。
+
+    ✅ R154（R149 遗留 L-3 · 终态 checkpoint 永不失效）：目录成果经
+    ``/sse/task/{id}`` 的 ``_attach_checkpoint_result`` 断线重挂回传（kind=
+    ``outline_result``），前端据此走「保存确认」流程。但用户**已保存新目录**
+    （或套用目录库整表重建）之后，旧任务的 checkpoint 仍持久有效——刷新页面
+    重挂接时旧树作为「待确认成果」复活，用户确认即用陈旧树覆盖自己更新过的
+    目录。修法：整表重建（_save_outline_to_db 是 save-outline 与 apply-and-save
+    的共同落库出口）成功提交后，按 scheme 清掉终态任务的 outline_result。
+    只清终态：运行中任务的 partial checkpoint 是生成中途断线的唯一恢复源。
+
+    失败**绝不阻断**目录保存（advisory 语义，与导出缓存失效同口径）。
+    返回清理的任务数（供加法式回传 `cleared_checkpoints`）。
+    """
+    try:
+        cur = await db.execute(
+            "SELECT id, status, checkpoint_json FROM task_registry WHERE scheme_id=?",
+            (scheme_id,))
+        rows = await cur.fetchall()
+    except Exception:  # noqa: BLE001
+        logger.warning("读取任务 checkpoint 失败（task 清理跳过，scheme=%s）",
+                       scheme_id, exc_info=True)
+        return 0
+    stale_ids: list[str] = []
+    for row in rows:
+        if row["status"] not in TERMINAL_TASK_STATUSES or not row["checkpoint_json"]:
+            continue
+        try:
+            data = json.loads(row["checkpoint_json"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("kind") == "outline_result":
+            stale_ids.append(row["id"])
+    if not stale_ids:
+        return 0
+    try:
+        placeholders = ",".join("?" for _ in stale_ids)
+        cur = await db.execute(
+            f"UPDATE task_registry SET checkpoint_json=NULL WHERE id IN ({placeholders})",
+            stale_ids)
+        await db.commit()
+        # ✅ R13 纪律：行数一律走 safe_rowcount 集中化出口（裸 .rowcount 被全量
+        #    扫描器拦截；0 行 = 并发下任务行已消失，按预期清理数回退）。
+        n = safe_rowcount(cur)
+        return n if n > 0 else len(stale_ids)
+    except Exception:  # noqa: BLE001
+        logger.warning("清理目录成果 checkpoint 失败（不影响保存，scheme=%s）",
+                       scheme_id, exc_info=True)
+        try:
+            await db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return 0

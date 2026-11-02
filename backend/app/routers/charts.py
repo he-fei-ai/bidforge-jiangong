@@ -6,7 +6,10 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.db import get_db
+from app.db import (
+    get_db,
+    safe_rowcount,  # ✅ R156：正文回写 0 行守卫走 R13/R72 唯一出口
+)
 
 # ✅ BUG 修复（2026-09-16 · ruff F821）：`fix-mermaid` 里在 `if row:` 分支**内部**
 #    才 import `_rewrite_code_block`，而该名字在第 380 行（更早的
@@ -26,6 +29,23 @@ from app.services.content_blocks import chart_type_tags
 
 logger = logging.getLogger("charts")
 router = APIRouter(prefix="/api/v1/charts", tags=["charts"])
+
+
+def _payload_source(raw) -> str:
+    """解析持久化载荷的来源标记（``source`` 键的唯一读出口）。
+
+    ✅ R166（2026-11-01 · 触发词库/本地兜底引入）：``build_chart_envelope`` 对
+    ``source="local"``（本地模板兜底图）才会写入 ``"source"`` 键，AI 产物**不写**
+    —— 因此缺键即 ``"ai"``。前端/导出据此对模板图提示「模板示例数据，请核定」。
+    兼容历史载荷（裸 Mermaid / 裸结构化 JSON）→ 一律 ``"ai"``。
+    """
+    try:
+        obj = json.loads(str(raw))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return "ai"
+    if isinstance(obj, dict) and str(obj.get("source") or "").strip().lower() == "local":
+        return "local"
+    return "ai"
 
 
 async def _guard_chart_target(db, section_id: str, action: str,
@@ -276,6 +296,8 @@ async def list_charts(scheme_id: str, db=Depends(get_db)):
             "priority": p.get("priority", 3), "status": p.get("status", "generated"),
             "placed": _is_placed(sid, content, ct),
             "code": code,
+            # ✅ R166：来源标记（"local" = 本地模板兜底，详见 _payload_source）。
+            "source": _payload_source(p.get("data_json")),
         })
 
     # 2) sections 表 *_json 列（兼容历史数据）
@@ -304,6 +326,8 @@ async def list_charts(scheme_id: str, db=Depends(get_db)):
                 "priority": 3, "status": "generated",
                 "placed": _is_placed(s["id"], content, ct),
                 "code": _norm_code,
+                # ✅ R166：与 chart_predictions 分支同一口径（唯一读出口）。
+                "source": _payload_source(data),
             })
     return {"items": items}
 
@@ -616,6 +640,14 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
                     if cur is None:
                         raise RuntimeError(
                             "R13：db.execute 返回 None（sections 正文写回 UPDATE）")
+                    # ✅ R156（R72 行数面补齐）：既有 R13 判空只挡「execute 返回 None」，
+                    #    0 行（章节在请求与写之间被删）同样不能汇报假成功 —— 与
+                    #    review_db.exec_write 的 require_rows 同语义，走 safe_rowcount
+                    #    唯一出口，异常由外层 rollback 收口。
+                    if safe_rowcount(
+                            cur, what=f"Mermaid 修复正文写回（section={section_id[:8]}）") < 1:
+                        raise RuntimeError(
+                            f"章节已不存在，正文写回未生效（section={section_id[:8]}）")
                     content_updated = True
                     new_content = patched
                     section_word_count = wc
@@ -785,5 +817,12 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
         logger.warning("AI 配图正文回写失败：db.execute 返回 None（R13，section=%s）",
                        section_id[:8])
         raise HTTPException(503, "配图已生成但正文回写失败，请稍后重试")
+    # ✅ R156（R72 行数面补齐）：0 行（章节在请求与写之间被删）与 None 同判 ——
+    #    与 review_db.exec_write 的 require_rows 同语义，绝不汇报假成功。
+    if safe_rowcount(
+            _cur, what=f"AI 配图正文回写（section={section_id[:8]}）") < 1:
+        logger.warning("AI 配图正文回写失败：章节已不存在（section=%s）",
+                       section_id[:8])
+        raise HTTPException(503, "配图已生成但正文回写失败（章节已不存在），请刷新后重试")
     await db.commit()
     return {"generated": generated, "content_updated": True, "new_content": new_content}

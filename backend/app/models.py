@@ -91,6 +91,10 @@ class SectionUpdate(BaseModel):
     #: ✅ 2026-09-26（F-CONTENT-STANDARD）：章节级生成标准覆盖。
     #: '' = 清除覆盖（沿用方案级，落库为 ''）；precise / fuzzy = 章节覆盖。
     generation_standard: Optional[str] = None
+    #: ✅ R152（2026-11-01）：三级节点字数预算级联（R151「四档字数直接作用于
+    #: L3 节点」的手工编辑面）。true 且本次提交 word_budget 时，把新预算同步
+    #: 给该节点的全部后代章节；缺省 None = 旧行为逐字节不变（只改本节点）。
+    cascade_word_budget: Optional[bool] = None
 
     @field_validator("generation_standard")
     @classmethod

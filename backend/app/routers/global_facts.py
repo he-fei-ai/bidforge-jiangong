@@ -141,6 +141,28 @@ def _require_fact_write_cursor(cur, what: str):
     return cur
 
 
+def _require_fact_read_cursor(cur, what: str):
+    """R13 判空守卫（读 / 缓存失效路径）：游标为 None 时回 503，不裸抛 AttributeError。
+
+    ✅ R138（2026-10-28 · D4）：上一轮 R13 收口（见本段上方注释的自述：**只把
+    「事实侧写路径」**收敛到同一出口）之后，读路径仍是裸 ``await cur.fetchone()``。
+    后果两极：
+
+      · 普通读路径（作用域校验 / 列表查询）：AttributeError → 500，日志里
+        看不出是哪条语句失败；
+      · :func:`_invalidate_fact_scope_cache`：**写已 commit 之后**才炸 → 用户
+        看到 500 以为失败（实际已落库），且导出缓存与 ``facts_updated_at``
+        都没推进，界面永远不提示「事实已变更」。
+
+    与写路径同口径回 503（可重试的依赖故障），日志文案单独区分读/写，
+    便于 ``grep '事实读路径游标为空'`` 定位。
+    """
+    if cur is None:
+        logger.error("事实读路径游标为空（R13）· 操作=%s · 数据库暂不可用", what)
+        raise HTTPException(status_code=503, detail="数据库暂不可用，请稍后重试")
+    return cur
+
+
 def _assert_fact_write_applied(cur, what: str, *, expect: int = 1) -> int:
     """事实写路径统一出口：判空 + 校验实际影响行数，杜绝「假成功」。
 
@@ -442,6 +464,8 @@ async def _validate_fact_scope(db, scheme_id: str, project_id: str) -> tuple[str
     if not pid:
         raise HTTPException(400, "需要 scheme_id 或 project_id")
     cur = await db.execute("SELECT id FROM projects WHERE id=?", (pid,))
+    # ✅ R138（D4）：读路径同样判空（与 _scheme_project_id 的 503 口径一致）
+    cur = _require_fact_read_cursor(cur, f"校验事实作用域 project_id={pid}")
     if not await cur.fetchone():
         raise HTTPException(404, "项目不存在")
     return "", pid
@@ -487,6 +511,8 @@ async def _assert_fact_in_scheme_scope(db, fact_id: str, scheme_id: str) -> dict
     cur = await db.execute(
         "SELECT id, project_id, scheme_id FROM global_facts WHERE id=? OR group_id=? LIMIT 1",
         (fact_id, fact_id))
+    # ✅ R138（D4）：写操作的前置归属查询同样可能拿到 None（R13）
+    cur = _require_fact_read_cursor(cur, f"校验事实归属 fact_id={fact_id}")
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "事实不存在")
@@ -522,6 +548,10 @@ async def _invalidate_fact_scope_cache(db, scheme_id: str, project_id: str = "")
     if not project_id:
         return
     cur = await db.execute("SELECT id FROM schemes WHERE project_id=?", (project_id,))
+    # ✅ R138（D4）：本函数在「写已 commit」之后调用，裸 fetchall 一旦抛
+    #    AttributeError，用户看到 500 而数据其实已落库（最坏的失败形态）。
+    cur = _require_fact_read_cursor(
+        cur, f"失效项目事实缓存 project_id={project_id}")
     for item in await cur.fetchall():
         # ✅ BUG 修复（2026-10-01）：旧实现是 `if not item[0]: break` ——
         # 一旦命中第一个 id 为空的行就**中断整个循环**，其后所有方案的导出
@@ -602,6 +632,7 @@ async def _load_fact_rows(db, scheme_id: str, project_id: str,
     sql = "SELECT * FROM global_facts" + scope_sql + \
         " ORDER BY category, group_id, updated_at, id"
     cur = await db.execute(sql, params)
+    cur = _require_fact_read_cursor(cur, "读取作用域事实列表")
     return [dict(r) for r in await cur.fetchall()]
 
 
@@ -683,6 +714,7 @@ async def list_facts(
     sql += " ORDER BY category, group_id, updated_at, id"
 
     cur = await db.execute(sql, params)
+    cur = _require_fact_read_cursor(cur, "查询全局事实列表")
     rows = [dict(r) for r in await cur.fetchall()]
 
     # 按 group_id 聚合
@@ -797,6 +829,12 @@ async def list_facts(
     total_groups = len(group_list)
     if limit > 0:
         page_groups = group_list[offset:offset + limit]
+    elif offset > 0:
+        # ✅ R138（D5）：limit=0 但传了 offset —— 旧实现直接丢弃 offset，却在
+        #    pagination.offset 里原样回显：调用方以为已翻页、实际拿到全量
+        #    （重复渲染 / 分页控件错位）。现按「从 offset 取到末尾」执行，
+        #    与回显值自洽；不传 offset 时逐字不变。
+        page_groups = group_list[offset:]
     else:
         page_groups = group_list
 
@@ -1093,6 +1131,9 @@ async def check_danger_scheme(
     #    （全空调用方仍合理 400，不做无依据判定）。
     if not name and scheme_id:
         cur = await db.execute("SELECT name FROM schemes WHERE id=?", (scheme_id,))
+        # ✅ R143（2026-10-29 · 跨模块深度收口）：danger-check 的方案名反查属读
+        #    路径，R13 下裸 fetchone() → AttributeError → 500 且日志无指向；回 503。
+        _require_fact_read_cursor(cur, "check_danger_scheme:取方案名")
         row = await cur.fetchone()
         if row:
             name = row["name"] or ""
@@ -1191,12 +1232,20 @@ async def create_fact(
     #    下个请求的 commit 连带提交，形成「部分事实入库 + 前端拿到 500」的脏状态。
     #    与 update_fact(:1562)、clear_all_facts(:1857) 同口径显式回滚，避免脏状态。
     try:
-        rows_buf = _build_create_fact_rows(
+        rows_buf, skipped_blank = _build_create_fact_rows(
             data=data, gid=gid, group_title=group_title, category=category,
             pid=real_pid, sid=scheme_scope)
-        if rows_buf:
-            await db.executemany(MANUAL_FACT_INSERT_SQL, rows_buf)
+        # ✅ R138（D3）：空载荷不再「落一条垃圾事实 + 回 ok=true」。
+        #    FactItem 无长度约束、_split_fact_lines 的兜底是 (未命名, "")，
+        #    旧实现会把它们原样入库（content 形如 ``- ****: ``），列表里出现
+        #    一条空名空值「事实」，统计口径被污染且用户无从解释。
+        if not rows_buf:
+            raise HTTPException(400, "事实内容不能为空")
+        await db.executemany(MANUAL_FACT_INSERT_SQL, rows_buf)
         await db.commit()
+    except HTTPException:
+        await db.rollback()
+        raise
     except Exception:
         await db.rollback()
         raise
@@ -1206,7 +1255,10 @@ async def create_fact(
     # 用户新建「合同工期」等事实后导出仍用旧缓存，产物缺该事实却查不出原因。
     # 现与 update_fact 统一走 _invalidate_fact_scope_cache（按项目覆盖全部方案）。
     await _invalidate_fact_scope_cache(db, scheme_scope, str(real_pid))
-    return {"id": gid, "ok": True}
+    # ✅ R138（D3）：回传实际落库条数与「空条目」跳过数 —— 前端只读 ok，
+    #    加法式键对既有调用方零影响；脚本/调试可据此发现载荷被过滤。
+    return {"id": gid, "ok": True, "inserted": len(rows_buf),
+            "skipped_invalid": skipped_blank}
 
 
 def _build_fact_content(name: str, value: str, is_simulated: bool) -> str:
@@ -1290,7 +1342,8 @@ def _manual_fact_row(*, fid: str, pid: str, sid: str, group_id: str,
 
 
 def _build_create_fact_rows(*, data, gid: str, group_title: str,
-                            category: str, pid: str, sid: str) -> list[tuple]:
+                            category: str, pid: str, sid: str
+                            ) -> tuple[list[tuple], int]:
     """把 FactGroupIn 展开为待 INSERT 的行元组列表（列顺序与 MANUAL_FACT_INSERT_COLS 对齐）。
 
     ✅ G-04 重构（2026-10-04）：从 create_fact 内联抽出，使 create_fact 的主
@@ -1299,9 +1352,16 @@ def _build_create_fact_rows(*, data, gid: str, group_title: str,
     口径，避免「行缓冲构造失败 + commit 已被调用」或反之的脏状态。
     两条分支保留原有语义：结构化 items 逐条入库；旧版单条按多行 Markdown 拆开。
     """
+    # ✅ R138（D3）：空条目（名与值皆空）不构成事实，直接跳过并计数。
+    #    FactItem 的 name/value 无 min_length，旧实现照落：content 变
+    #    ``- ****: ``，读路径回解出空名空值事实。
+    skipped_blank = 0
     if data.items:
         rows_buf: list[tuple] = []
         for it in data.items:
+            if not str(it.name or "").strip() and not str(it.value or "").strip():
+                skipped_blank += 1
+                continue
             fid = str(uuid.uuid4())
             content = _build_fact_content(it.name, it.value, it.is_simulated)
             # ✅ BUG 修复（2026-09-21）：模拟值闸门是**不变式**而非冗余标记。
@@ -1335,7 +1395,7 @@ def _build_create_fact_rows(*, data, gid: str, group_title: str,
                 # ✅ R80：结构化条目自带口径（''/fact/requirement，非法归一 ''）
                 value_kind=it.value_kind,
             ))
-        return rows_buf
+        return rows_buf, skipped_blank
 
     # 旧版单条：title + content
     # ✅ 修复：content 常为多行 Markdown 列表（前端「手动新增」弹窗多行输入），
@@ -1343,6 +1403,11 @@ def _build_create_fact_rows(*, data, gid: str, group_title: str,
     #    现与分组编辑（PATCH）一致，逐行拆开入库。
     rows_buf = []
     for nm, val, is_sim in _split_fact_lines(data.title, data.content):
+        # ✅ R138（D3）：_split_fact_lines 在「全空」时兜底为 (未命名, "")，
+        #    这里按「未命名/空名 + 空值」判定为空白载荷，与结构化分支同口径。
+        if not str(val or "").strip() and str(nm or "").strip() in ("", "未命名"):
+            skipped_blank += 1
+            continue
         rows_buf.append(_manual_fact_row(
             fid=str(uuid.uuid4()), pid=pid, sid=sid,
             group_id=gid, group_title=group_title,
@@ -1359,7 +1424,7 @@ def _build_create_fact_rows(*, data, gid: str, group_title: str,
             is_resolved=(not is_sim),
             # ✅ R80：旧版单条走 group 级缺省 ''（该路径无条目级口径输入）
         ))
-    return rows_buf
+    return rows_buf, skipped_blank
 
 
 async def _invalidate_item_update_caches(db, updates: list[dict]) -> None:
@@ -1370,6 +1435,11 @@ async def _invalidate_item_update_caches(db, updates: list[dict]) -> None:
     ph = ",".join("?" for _ in ids)
     cur = await db.execute(
         f"SELECT DISTINCT project_id, scheme_id FROM global_facts WHERE id IN ({ph})", ids)
+    # ✅ R143（2026-10-29 · 跨模块深度收口）：本函数在 `_apply_item_updates`（默认
+    #    commit=True）**之后**调用，R13 下若不判空会把「已写成功」变成 500（与
+    #    R138 D4 修复的 `_invalidate_fact_scope_cache` 同族）。回 503 而非裸抛，
+    #    语义是「依赖故障可重试」，并给日志留可 grep 的指向。
+    _require_fact_read_cursor(cur, "_invalidate_item_update_caches")
     for r in await cur.fetchall():
         await _invalidate_fact_scope_cache(
             db, str(r["scheme_id"] or ""), str(r["project_id"] or ""))
@@ -1448,6 +1518,10 @@ async def _apply_item_updates(db, updates: list[dict],
         # ✅ 2026-09-29：fact_type 参与九大章节归属的派生（分类变更时重算 chapter），
         #    需一并预取，避免额外一次往返。
         f"fact_key, fact_type FROM global_facts WHERE id IN ({placeholders})", fids)
+    # ✅ R143（2026-10-29 · 跨模块深度收口）：条目级更新前的整批预取，R13 下
+    #    裸 fetchall() → AttributeError → 500，且「写还没开始」却报 500 会把合法
+    #    更新误判为服务故障。回 503（可重试）并留日志指向。
+    _require_fact_read_cursor(cur, "_apply_item_updates:预取条目")
     rows = {r["id"]: r for r in await cur.fetchall()}
 
     scheme_id = ""
@@ -1673,6 +1747,7 @@ async def update_fact(
 
     cur = await db.execute(
         "SELECT * FROM global_facts WHERE id=?", (fact_id,))
+    cur = _require_fact_read_cursor(cur, f"读取事实行 fact_id={fact_id}")
     row = await cur.fetchone()
 
     # ✅ BUG 修复：行级更新收到【多行 Markdown content】时（前端把整组内容
@@ -1701,23 +1776,52 @@ async def update_fact(
         #      3) 改值不清 has_conflict（条目级口径会清）→ 与分组重建路径漂移。
         #    非结构化的普通正文（无列表符、无冒号）回解不出 name/value，
         #    仍走原地更新，避免被退化成空值。
+        # ✅ R138（D1/D6 · 2026-10-28）：
+        #   D1 —— ``category`` 此前**不在**结构化判定里：只传分类时落到下面的
+        #     裸 UPDATE，① 不过 ``_normalize_fact_category`` 白名单（写进
+        #     ``bogus`` 后 ``CATEGORY_TO_CHAPTER`` 查不到 → 该事实从九大章节
+        #     视图与覆盖率统计里静默消失）；② 不重派生 chapter/fact_attr
+        #     （分类是派生输入，正文「按章精选」永久错配）。现纳入判定，
+        #     与 _apply_item_updates / 分组重建同口径。
+        #   D6 —— 反过来，只要提交了 title，``_structured`` 即为真；若同时提交
+        #     的是**非结构化**单行正文（如「基坑深度约 12.5 米」，无列表符、
+        #     无冒号），它不进 iu，而 ``len(iu) > 1`` 命中后直接 return ——
+        #     用户改的正文会被 _apply_item_updates 的「改名同步 content」
+        #     覆盖回旧值，接口照样回 ok=true。现把未被条目口径消费的字段收进
+        #     leftover，与条目级更新**同一事务**落库（commit=False 后统一提交）。
+        _content_field = fields.get("content")
+        _content_structured = ("content" in fields
+                               and _looks_like_fact_line(_content_field))
         _structured = bool(fields) and (
-            "title" in fields or _looks_like_fact_line(fields.get("content")))
+            "title" in fields or "category" in fields or _content_structured)
         if _structured:
             iu: dict = {"fact_id": fact_id}
-            if "content" in fields and _looks_like_fact_line(fields.get("content")):
-                nm, val = extract_value_from_markdown_line(str(fields["content"] or ""))
+            if _content_structured:
+                nm, val = extract_value_from_markdown_line(str(_content_field or ""))
                 iu["value"] = val
                 # ✅ 从 content 回解模拟值标记（历史两种写法通吃），与 is_simulated 列对齐
-                iu["is_simulated"] = is_simulated_marked(str(fields["content"] or ""))
+                iu["is_simulated"] = is_simulated_marked(str(_content_field or ""))
                 if nm and nm != str(row["title"] or ""):
                     iu["name"] = nm
             if "title" in fields and str(fields.get("title") or "").strip():
                 iu["name"] = str(fields["title"]).strip()
-            if fields.get("category"):
-                iu["category"] = str(fields["category"]).strip()
-            if len(iu) > 1:
-                n, _sid = await _apply_item_updates(db, [iu])
+            if "category" in fields:
+                # 空串按白名单口径归一为 other（「清空分类」的等价语义）
+                iu["category"] = _normalize_fact_category(fields.get("category"))
+            leftover = {k: v for k, v in fields.items()
+                        if k not in ("title", "category")
+                        and not (k == "content" and _content_structured)}
+            if len(iu) > 1 or leftover:
+                n, _sid = await _apply_item_updates(
+                    db, [iu] if len(iu) > 1 else [], commit=False)
+                if leftover:
+                    _sets = ", ".join(f"{k}=?" for k in leftover)
+                    _lcur = await db.execute(
+                        f"UPDATE global_facts SET {_sets}, "
+                        f"updated_at=datetime('now','localtime') WHERE id=?",
+                        (*leftover.values(), fact_id))
+                    _assert_fact_write_applied(
+                        _lcur, f"更新事实字段 fact_id={fact_id}")
                 await db.commit()
                 # ✅ 2026-09-29：项目级事实（scheme_id 为空）此前不失效任何缓存，
                 #    统一走 _invalidate_fact_scope_cache（按项目覆盖全部方案）。
@@ -1758,6 +1862,7 @@ async def update_fact(
     else:
         cur = await db.execute(
             "SELECT * FROM global_facts WHERE group_id=?", (group_id,))
+    cur = _require_fact_read_cursor(cur, f"读取分组旧事实 group_id={group_id}")
     old_rows = [dict(r) for r in await cur.fetchall()]
     if not old_rows:
         raise HTTPException(404, "事实不存在")
@@ -1772,7 +1877,22 @@ async def update_fact(
         (fields.get("category") or "").strip()
         or (grow.get("category") or "").strip())
     # ✅ 修复：分组标题需落到 group_title 列，否则重查后分组名退化。
-    group_title = title.strip() or CATEGORY_TITLES.get(category, "") or "其他事实"
+    # ✅ R138（D2 · 2026-10-28）：未传 title 时**沿用旧分组名** —— 与同段
+    #    「category 未回传时沿用旧类别」（见上）口径对齐。旧实现直接回落
+    #    CATEGORY_TITLES：只提交 content 的一次编辑就把用户自定义的分组名
+    #    （如「招标文件关键参数」）改成「工程概况」，且不可恢复（重建是
+    #    DELETE+INSERT，旧值当场被覆盖）。
+    #    判定「自定义」= 旧值 ≠ 旧分类的默认名：旧值本就是自动派生的默认名时，
+    #    仍跟随新分类（保留旧行为），只有用户手工命名过的才铁定保留。
+    _old_gtitle = (grow.get("group_title") or "").strip()
+    _old_cat_default = CATEGORY_TITLES.get((grow.get("category") or "").strip(), "")
+    if title.strip():
+        group_title = title.strip()
+    elif _old_gtitle and _old_gtitle != _old_cat_default:
+        group_title = _old_gtitle
+    else:
+        group_title = (CATEGORY_TITLES.get(category, "") or _old_gtitle
+                       or "其他事实")
 
     # ✅ BUG 修复：重建前按名称索引旧行，保留溯源(source_ref)/归一化键(fact_key)/
     #    置信度。旧实现重建时把这些字段一律清空 —— 编辑一次分组即丢失来源引用，
@@ -1978,6 +2098,7 @@ async def resolve_fact(
     cur = await db.execute(
         "SELECT scheme_id, project_id, is_simulated, has_conflict, is_stale FROM global_facts WHERE id=?",
         (fact_id,))
+    cur = _require_fact_read_cursor(cur, f"读取待确认事实 fact_id={fact_id}")
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "事实不存在")
@@ -2057,6 +2178,8 @@ async def ack_fact_stale(
     cur = await db.execute(
         "SELECT scheme_id, project_id, is_simulated, has_conflict, is_stale, is_resolved"
         " FROM global_facts WHERE id=?", (fact_id,))
+    # ✅ R143（2026-10-29 · 跨模块深度收口）：ack-stale 单条前置读，R13 判空回 503。
+    _require_fact_read_cursor(cur, "ack_fact_stale:前置读")
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "事实不存在")
@@ -2164,6 +2287,8 @@ async def batch_ack_stale(data: AckStaleRequest, db=Depends(get_db)):
             + id_sql + scope_sql +
             " AND (COALESCE(is_simulated,0)=1 OR COALESCE(has_conflict,0)=1)",
             scope_params)
+        # ✅ R143（2026-10-29 · 跨模块深度收口）：批量解除过期前置计数，R13 判空回 503。
+        _require_fact_read_cursor(cur, "batch_ack_stale:门控计数")
         grow = await cur.fetchone()
         if grow:
             gated = int(grow[0] or 0)
@@ -2214,6 +2339,8 @@ async def resolve_conflict(
     cur = await db.execute(
         "SELECT id, title, content, is_simulated, conflict_keys, scheme_id, "
         "project_id, category, fact_type, fact_key FROM global_facts WHERE id=?", (fact_id,))
+    # ✅ R143（2026-10-29 · 跨模块深度收口）：resolve-conflict 前置读，R13 判空回 503。
+    _require_fact_read_cursor(cur, "resolve_conflict:前置读")
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "事实不存在")
@@ -2301,6 +2428,9 @@ async def clear_all_facts(data: ClearFactsRequest, db=Depends(get_db)):
         cur = await db.execute(
             "SELECT count(*) FROM global_facts WHERE " + _FACT_SCOPE_PREDICATE,
             (scheme_id, project_id))
+        # ✅ R143（2026-10-29 · 跨模块深度收口）：clear 前置计数，R13 下 `cur.fetchone()`
+        #    返回 None 时 `[0]` 抛 TypeError（非 AttributeError）→ 500；回 503 并留日志。
+        _require_fact_read_cursor(cur, "clear_all_facts:前置计数")
         total = int((await cur.fetchone())[0] or 0)
         cur = await db.execute(
             "DELETE FROM global_facts WHERE " + _FACT_SCOPE_PREDICATE,
@@ -2392,6 +2522,8 @@ async def batch_resolve(data: BatchResolveRequest, db=Depends(get_db)):
             f"SELECT id, title, fact_key, is_simulated, is_resolved, has_conflict, is_stale "
             f"FROM global_facts WHERE id IN ({placeholders}){scope}",
             params)
+        # ✅ R143（2026-10-29 · 跨模块深度收口）：批量确认（条目级）前置读，R13 判空回 503。
+        _require_fact_read_cursor(cur, "batch_resolve:条目级前置读")
         rows = [dict(r) for r in await cur.fetchall()]
 
     elif scheme_id:
@@ -2404,6 +2536,8 @@ async def batch_resolve(data: BatchResolveRequest, db=Depends(get_db)):
             "SELECT id, title, fact_key, is_simulated, is_resolved, has_conflict, is_stale "
             "FROM global_facts WHERE " + _FACT_SCOPE_PREDICATE,
             (scheme_id, real_pid))
+        # ✅ R143（2026-10-29 · 跨模块深度收口）：批量确认（方案级）前置读，R13 判空回 503。
+        _require_fact_read_cursor(cur, "batch_resolve:方案级前置读")
         rows = [dict(r) for r in await cur.fetchall()]
     else:
         raise HTTPException(400, "需要 scheme_id 才能批量确认")
@@ -2715,6 +2849,7 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
            " FROM global_facts" + scope_sql +
            " ORDER BY category, group_id, updated_at, id")
     cur = await db.execute(sql, params)
+    cur = _require_fact_read_cursor(cur, "读取 AI 调整可见事实集")
     rows = [dict(r) for r in await cur.fetchall()]
     if not rows:
         raise HTTPException(400, "当前作用域还没有任何全局事实，请先提取或新增")
@@ -2900,6 +3035,7 @@ async def delete_fact(
     cur = await db.execute(
         "SELECT id, project_id, scheme_id, group_id FROM global_facts WHERE id=? OR group_id=? LIMIT 1",
         (fact_id, fact_id))
+    cur = _require_fact_read_cursor(cur, f"读取待删除事实 fact_id={fact_id}")
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "事实不存在")

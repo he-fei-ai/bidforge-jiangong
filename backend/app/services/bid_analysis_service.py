@@ -1008,9 +1008,10 @@ def _reg_bid_prompts() -> None:
 _reg_bid_prompts()
 
 # ✅ R39 · T1：注册完成后幂等补套一次变量契约校验。
-#   注册发生在本模块 import 时（晚于 _registry.py 尾部的首次
-#   _apply_variable_contracts()），若不补套，则 requires=[] 的显式空声明
-#   不会下发 meta → 合约表不能监督到本批模板。
+#   注册发生在本模块 import 时（晚于包 __init__ 首次 _apply_variable_contracts()
+#   —— ✅ R169 G6 起该调用同时是惰性钩子的唯一导入期触发点，且彼时本模块
+#   尚在加载、19 条 bid_ 键未注册；本处补套使 requires=[] 的显式空声明
+#   及时下发 meta → 合约表能监督到本批模板）。
 try:  # pragma: no cover - 幂等补套，失败不影响注册结果
     from app.services.ai.prompts._registry import _apply_variable_contracts
     _apply_variable_contracts()

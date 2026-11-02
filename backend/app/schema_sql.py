@@ -773,4 +773,33 @@ CREATE TABLE IF NOT EXISTS placeholder_baselines (
 );
 CREATE INDEX IF NOT EXISTS idx_placeholder_baselines_scheme
     ON placeholder_baselines(scheme_id, created_at);
+
+CREATE TABLE IF NOT EXISTS system_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT DEFAULT (datetime('now','localtime')),
+    level TEXT DEFAULT 'INFO',
+    module TEXT DEFAULT '',
+    event TEXT DEFAULT '',
+    trace_id TEXT DEFAULT '',
+    span_id TEXT DEFAULT '',
+    parent_span_id TEXT DEFAULT '',
+    request_id TEXT DEFAULT '',
+    task_id TEXT DEFAULT '',
+    project_id TEXT DEFAULT '',
+    chapter_id TEXT DEFAULT '',
+    scheme_id TEXT DEFAULT '',
+    duration_ms REAL,
+    status TEXT DEFAULT '',
+    error_code TEXT DEFAULT '',
+    error_layer TEXT DEFAULT '',
+    retryable INTEGER DEFAULT 0,
+    message TEXT DEFAULT '',
+    detail TEXT DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_system_logs_trace ON system_logs(trace_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_system_logs_task ON system_logs(task_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_system_logs_project ON system_logs(project_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_system_logs_level ON system_logs(level, timestamp);
+
 """

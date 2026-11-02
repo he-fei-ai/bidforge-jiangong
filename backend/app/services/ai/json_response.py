@@ -261,6 +261,10 @@ def parse_and_validate(raw: str, validate_fn=None):
     """
     js = extract_json(raw)
     if not js:
+        logger.debug(
+            "JSON 结构未在模型输出中检出（进入修复轮）：raw_head=%r",
+            (raw or "")[:300],
+        )
         return None, ["输出中未找到 JSON 结构"]
     try:
         obj = json.loads(js)

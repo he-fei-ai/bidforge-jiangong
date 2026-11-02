@@ -24,6 +24,7 @@ import uuid
 
 from app.db import get_conn, init_db, safe_rowcount
 from app.services.outline_templates import build_outline, get_meta
+from app.services.outline_utils import normalize_outline_json
 
 logger = logging.getLogger("seed")
 
@@ -34,7 +35,11 @@ _seed_lock = asyncio.Lock()
 #: v3.0（2026-10-01）：目录库六大类危大逐型式全面更新，既有名称依新细粒度
 #:   路由重新归属专属模板（如「落地脚手架」→落地式钢管脚手架），并新增多个
 #:   型式与「其他危大工程」分类的专属条目，故必须递增版本以刷新存量预置库。
-SEED_VERSION = "v3.0"
+#: v3.1（2026-11-01）：outline_json 落库统一过 normalize_outline_json（补节点
+#:   id/level 与点分编号，修复前端 React key 取 outline_json.id 恒 undefined 的
+#:   R149 遗留 L-10；此前 seed 是全库唯一不经 normalize 的入库路径），递增版本
+#:   以刷新存量预置库。
+SEED_VERSION = "v3.1"
 
 # 12 个一级分类及其包含的方案
 SCHEME_CATALOG: dict[str, list[str]] = {
@@ -185,6 +190,20 @@ def _tags(scheme_name: str, category: str, meta: dict) -> str:
     return ",".join(p for p in parts if p)
 
 
+def _seed_outline_json(outline: list) -> str:
+    """预置目录落库序列化：统一过 normalize_outline_json（补 id/level + 编号）。
+
+    ✅ R153（2026-11-01）：_build_record 此前直接 json.dumps，节点无 id ——
+    前端目录库详情 React key 取 outline_json.id 恒 undefined（R149 遗留 L-10，
+    手动 create/update/new_version 路径早已 normalize，唯 seed 偏离）。
+    normalize 失败（返回 default）时回落原始序列化——预置内容绝不因规范化
+    异常而丢失，最坏维持旧行为。
+    """
+    raw = json.dumps(outline, ensure_ascii=False)
+    normalized = normalize_outline_json(outline, default="")
+    return normalized if normalized and normalized != "[]" else raw
+
+
 def _build_record(scheme_name: str, category: str) -> dict:
     """生成一条预置目录的完整字段"""
     meta = get_meta(scheme_name)
@@ -197,7 +216,7 @@ def _build_record(scheme_name: str, category: str) -> dict:
         "profession": profession,
         "applicable_conditions": meta.get("applicable", ""),
         "basis": meta.get("basis", ""),
-        "outline_json": json.dumps(outline, ensure_ascii=False),
+        "outline_json": _seed_outline_json(outline),
         "tags": _tags(scheme_name, category, meta),
     }
 

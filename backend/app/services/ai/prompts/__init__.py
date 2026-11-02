@@ -2,11 +2,15 @@
 
 公共 API：
   - get_prompt(key, **kwargs) -> str  读取并渲染提示词（DB 优先，硬编码回退）
-  - get_prompt_with_validation(key, **kwargs) -> tuple  读取并校验变量
   - render_prompt(template, **kwargs) -> str  统一变量渲染函数
   - reload_prompt_cache()    重新加载缓存
   - _ALL_PROMPTS             全部提示词元信息注册表
   - render(key, **kwargs)    兼容旧接口的渲染函数
+
+✅ R168（2026-11-01 · G5 收口）：``get_prompt_with_validation`` 已下线 ——
+全仓零生产调用方（仅本文件导出 + 测试引用），与 ``get_prompt`` 内部已有
+的缺变量告警路径完全重复。需要「读取即校验」时直接用
+``get_prompt(key)`` + ``validate_prompt_variables(key, **kwargs)`` 组合。
 """
 
 from __future__ import annotations
@@ -14,7 +18,6 @@ from __future__ import annotations
 from . import _shared
 from ._cache import (
     get_prompt,
-    get_prompt_with_validation,
     reload_prompt_cache,
 )
 from ._registry import (
@@ -62,16 +65,19 @@ _reg("SHARED_EXTRACT_RULES", "共享规则", "五段式提取 · 处理规则",
 _reg("SHARED_EXTRACT_VERIFY", "共享规则", "五段式提取 · 验证步骤（输出前自检）",
      _shared.SHARED_EXTRACT_VERIFY)
 
-# ✅ R38 D6（2026-10-03）：SHARED_* 在本包 __init__ 里注册，晚于 _registry 尾部
-#    的首次 _apply_variable_contracts() —— 旧时序下契约表里的 SHARED_* 条目
-#    （含显式空声明）对 meta 永远不生效。注册完成后幂等补套一次（同名重套
-#    只写同样的值，零副作用）。
+# ✅ R38 D6（2026-10-03）：SHARED_* 在本包 __init__ 里注册，契约表里的
+#    SHARED_* 条目（含显式空声明）必须在本调用之后才能对 meta 生效。
+# ✅ R169（2026-11-01 · G6 收口）：本调用同时是惰性钩子（register_lazy_prompts）
+#    的**唯一导入期触发点** —— _registry 尾部已不再触发。彼时 _cache/_registry
+#    均已完成加载，bid_analysis_service 顶部 `from ._cache import get_prompt`
+#    首次即成功，消除了每进程一条的 "partially initialized" WARNING
+#    （旧时序：_registry 尾部在自身加载中触发钩子 → bid 撞半初始化的
+#    _cache → ImportError 被吞 → 本处重试才成功）。
 _apply_variable_contracts()
 
 
 __all__ = [
     "get_prompt",
-    "get_prompt_with_validation",
     "reload_prompt_cache",
     "render_prompt",
     "render",

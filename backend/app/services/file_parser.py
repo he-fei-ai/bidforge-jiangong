@@ -17,7 +17,11 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS = {
     "docx", "pdf", "md", "txt", "xlsx", "xls", "csv",
-    "png", "jpg", "jpeg", "bmp", "tiff",
+    # ✅ R136（2026-10-27）：补齐 .tif —— TIFF 的两个官方扩展名（.tif / .tiff）
+    #    此前只认后者，而绝大多数扫描仪/传真件默认输出 .tif：用户上传扫描件
+    #    直接收到「不支持的文件格式」，而解析器（PIL + _split_tiff_frames）
+    #    本身完全能处理。前端白名单由 test_upload_format_contract 强同步。
+    "png", "jpg", "jpeg", "bmp", "tiff", "tif",
     # ✅ 2026-09-22 新增（对齐 OpenBidKit 招标文件解析模块）：旧版 Word 二进制格式。
     #    招投标场景仍有大量招标文件是 .doc/.wps，旧实现直接以「不支持的文件格式」
     #    400 拒绝，用户必须自己另存为 .docx；现由 services/legacy_office.py
@@ -69,6 +73,7 @@ _BINARY_SIGNATURES: dict[str, tuple[bytes, ...]] = {
     "jpeg": (b"\xff\xd8\xff",),
     "bmp": (b"BM",),
     "tiff": (b"II*\x00", b"MM\x00*"),
+    "tif": (b"II*\x00", b"MM\x00*"),
 }
 
 
@@ -373,7 +378,7 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
             raw_text = _parse_csv(content, diag)
         elif ftype in ("xlsx", "xls"):
             raw_text = _parse_excel(content, ftype, diag)
-        elif ftype in ("png", "jpg", "jpeg", "bmp", "tiff"):
+        elif ftype in ("png", "jpg", "jpeg", "bmp", "tiff", "tif"):
             raw_text = _parse_image_ocr(content, ftype, diag)
         elif ftype in ("doc", "wps"):
             raw_text = _parse_legacy_word(content, fname, diag)
@@ -403,7 +408,20 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
     #    与 OCR 兜底通道拼接时（扫描件检测命中：原生文字层过少 → OCR 补充），
     #    两条通道各自逐页注入 `<!-- page:N -->`，同一页号出现两次，标记总数
     #    会虚增一倍（3 页 PDF 报 6 页）。页数语义 = 出现过的不同页号个数。
-    diag["page_count"] = len(set(_PDF_PAGE_MARK_RE.findall(text))) or (1 if text.strip() else 0)
+    #    ✅ R136（2026-10-27）：口径上收为 `count_page_markers` 公共 helper。
+    diag["page_count"] = count_page_markers(text) or (1 if text.strip() else 0)
+
+    # ✅ R136（2026-10-27，P2 修复 · 覆盖率恒等 1.0）：补「原始总页数」独立来源。
+    #    上方 `page_count` 语义是**已解析页数**（页标记个数），而下游
+    #    `build_completeness_report` 把它同时当作**总页数**分母 ⇒
+    #    `parsed_pages / total_pages` 恒为 1.0，即便 PDF 有 600 页却因
+    #    MAX_PDF_PAGES=500 只解析了前 500 页，覆盖度仍显示 100%（用户
+    #    无法得知后 100 页内容未纳入）。PDF 解析通道已把引擎报告的真实
+    #    总页数写入 `source_page_count`，此处只做规范化透传（非 PDF 留空，
+    #    由下游保持原有 1 页语义）。
+    _src_pages = int(diag.get("source_page_count") or 0)
+    if _src_pages > 0:
+        diag["source_page_count"] = _src_pages
 
     # ✅ 解析质量校验（2026-10-23 · 引入《标书智能体》解析校验）：结构化格式
     #    （docx/pdf/xlsx/doc/wps）文件体积不小却只抽出极少文本，通常意味着
@@ -442,6 +460,19 @@ def _add_page_markers(items: list[tuple[int, str]]) -> str:
         else:
             out.append(f"<!-- page:{num} -->\n{t}")
     return "\n".join(out)
+
+
+def count_page_markers(text: str) -> int:
+    """统计正文中出现过的**不同页号**个数（= 已解析页数）。
+
+    ✅ R136（2026-10-27）：从 `parse_file_content_ex` 内联表达式上收为公共
+    helper——断点续跑恢复、覆盖率计算等多处需要同一口径，旧实现在两处各写
+    一份推导，一旦改口径必然漂移。
+
+    按去重页号数而非标记总数统计：主通道与 OCR 兜底通道拼接时同一页号会
+    出现两次，标记总数会虚增一倍（3 页 PDF 报 6 页）。
+    """
+    return len(set(_PDF_PAGE_MARK_RE.findall(text or "")))
 
 
 def _parse_page_markers_to_map(marked_text: str) -> dict[int, str]:
@@ -1312,6 +1343,15 @@ def _parse_pdf(content: bytes, diag: dict | None = None,
         #    解析时中间空白页会静默丢失）。
         text, n_pages, page_items = _parse_pdf_fallback(content)
 
+    # ✅ R136（2026-10-27，修复「parse_coverage 恒 1.0」）：把**原始总页数**写入
+    #    `source_page_count`（与 `page_count` 的「已解析页数」语义严格分开）。
+    #    主通道取 `doc.page_count`、回退通道取 pdfplumber/pypdf 的页数，两路
+    #    均在此处汇合，故只写一次即覆盖全部通道。下游 `build_completeness_report`
+    #    用 `parsed_pages / source_page_count` 算覆盖率，截页 PDF（如 600 页只
+    #    解析前 500 页）才能如实报出 83% 而非 100%。
+    if diag is not None and n_pages > 0:
+        diag["source_page_count"] = int(n_pages)
+
     # ✅ 页数截断回报：只提取了前 MAX_PDF_PAGES 页，超出部分内容不会进入事实库
     if n_pages > MAX_PDF_PAGES:
         _note_truncation(
@@ -1785,7 +1825,7 @@ def _parse_image_ocr(content: bytes, ftype: str,
     """
     from app.services.ocr import OcrUnavailableError, ocr_bytes_sync
 
-    if ftype == "tiff":
+    if ftype in ("tiff", "tif"):
         frames = _split_tiff_frames(content)
         if len(frames) > 1:
             pages: list[tuple[int, str]] = []

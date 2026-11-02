@@ -566,7 +566,16 @@ class _LatexParser:
                     inner, i = _is_group_consume(tokens, i + 1)
                     if inner is not None:
                         txt = "".join(tk[1] for tk in inner if tk[0] in ("char", "cmd"))
-                        nodes.append(("op", txt))
+                        # ✅ R141 幽灵令牌清理：`\text{}`/`\mathrm{}`/`\operatorname{}`/
+                        #    `\mbox{}` 内容为空时旧实现仍产出 ("op", "") →
+                        #    `<m:r><m:t></m:t></m:r>` 空 run（探针实拍）。空 run 虽不
+                        #    违反 OOXML schema（m:t 可为空），但是语义空洞，且会把
+                        #    `\frac{a}{\text{}}` 的空 den 伪装成「有内容」从而绕过 R122
+                        #    空参防护网。跳过空节点：公式可见内容逐字不变（空文本本就
+                        #    无可见字符），空参形态改为真正为空 → R122 防护网接管
+                        #    （回退源码文本），与 `\frac{a}{}` 同一一致性口径。
+                        if txt:
+                            nodes.append(("op", txt))
                         continue
                     nodes.append(("op", name))
                     i += 1
@@ -674,7 +683,10 @@ class _LatexParser:
             if name in ("text", "mathrm", "operatorname", "mbox"):
                 inner, ni = _is_group_consume(tokens, i + 1)
                 if inner is not None:
-                    return ("op", "".join(tk[1] for tk in inner if tk[0] in ("char", "cmd"))), ni
+                    txt = "".join(tk[1] for tk in inner if tk[0] in ("char", "cmd"))
+                    # ✅ R141 幽灵令牌清理：空内容返回空 seq（渲染为空串），
+                    #    不产空 run（与 _parse_seq 同口径，见该处注释）。
+                    return (("op", txt) if txt else ("seq", [])), ni
                 return ("op", name), i + 1
             return ("text", ""), i + 1
         if t[0] == "script":

@@ -28,9 +28,9 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from app.config import settings
+from app.services.agent.workspace_baseline import cleanup_workspace_and_baseline
 from app.services.content_agent.workspace import (
     FACTS_FILE as FACTS_FILE_NAME,
 )
@@ -161,7 +161,39 @@ async def run_agent_section_repair(
 
     Returns:
         :class:`AgentRepairResult`。任何失败路径都**不写库**（保留原正文）。
+
+    ✅ R154（R149 遗留 L-4）：本函数只是薄包装——生成任务 ID、委托
+    ``_run_agent_section_repair_impl``、终态后回收工作区与基线目录
+    （此前工作区永不清理，磁盘缓慢泄漏；所有文件读取都在 impl 内完成，
+    返回后无消费方再读目录，收尾删除安全）。
     """
+    task_id = f"content_repair_{uuid.uuid4().hex[:12]}"
+    try:
+        return await _run_agent_section_repair_impl(
+            db, scheme_id=scheme_id, targets=targets, facts_text=facts_text,
+            chat_fn=chat_fn, resync_fn=resync_fn, progress_cb=progress_cb,
+            max_turns=max_turns, total_timeout=total_timeout, persist=persist,
+            task_id=task_id)
+    finally:
+        _ws = workspace_root_for(task_id)
+        cleanup_workspace_and_baseline(_ws, _ws.parent / (task_id + "_baseline"))
+
+
+async def _run_agent_section_repair_impl(
+    db,
+    *,
+    scheme_id: str,
+    targets: list[SectionTarget],
+    facts_text: str = "",
+    chat_fn=None,
+    resync_fn=None,
+    progress_cb=None,
+    max_turns: int | None = None,
+    total_timeout: float | None = None,
+    persist: bool = True,
+    task_id: str = "",
+) -> AgentRepairResult:
+    """``run_agent_section_repair`` 的实际实现（task_id 由包装层注入）。"""
     from app.services.agent.agent_loop import run_agent_loop
     from app.services.agent.workspace_baseline import create_workspace_baseline
     from app.services.content_agent.prompts import SYSTEM_PROMPT, USER_TEMPLATE, build_task_instructions
@@ -177,7 +209,6 @@ async def run_agent_section_repair(
         return AgentRepairResult(status="skipped", reason="无可修复小节")
 
     audit: list = []
-    task_id = f"content_repair_{uuid.uuid4().hex[:12]}"
     workspace = workspace_root_for(task_id)
     sections_payload = [
         {"section_id": t.section_id, "title": t.title, "content": t.content or ""}

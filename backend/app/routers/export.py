@@ -46,6 +46,7 @@ from app.services.chart_validators import (
 # ✅ R131-A（2026-10-23 · 图号归属漂移根因修复）：图号前缀剥离判据同样只从
 #    契约模块取（由 FIG_TITLE_RE 派生），禁止在本文件复制正则字面量。
 from app.services.content_format_contract import (
+    FIG_TITLE_ANY_PREFIX_RE,
     FIG_TITLE_PREFIX_RE,
     FONT_LATIN,
     MIN_IMAGE_DPI,
@@ -465,7 +466,27 @@ def _resolve_chart_code(block: dict, sec_id: str, chart_type: str,
 #        `fig_title`、配图分支 `alt` 两处；判据 import 自 content_format_contract
 #        的 FIG_TITLE_PREFIX_RE）。**可见题注文本变化**（「图 2-1 图 4-1 xxx」
 #        →「图 2-1 xxx」）⇒ 旧缓存内含双图号题注，必须整体失效。
-_EXPORTER_VERSION = "31"
+#    v32：目录编号与等级修正（2026-10-31 · 用户任务「已生成的文档中，目录编号与
+#        等级需修正」，导出稿导航窗格逐项取证）：
+#        ① 正文子标题降级（节内 body 命名空间 1）/ a、）不再固定压到 Heading 6/7，
+#           改按「父级 + 相对深度」与未降级路径同一套深度规则（实测「1 技术参数」
+#           下的 「1）、技术参数 — 主要控制参数」被顶到第 6 级，H2→H6 断级跳跃）；
+#           编号文本仍是 1）/ a、，与 DB 子章节 X.X 的命名空间隔离不变。
+#        ② 剥掉 AI 自带的字母枚举前缀（"a）" / "a)"）：旧正则只认「数字 + 右括号」，
+#           正文落库成 "a、a）材料与环保控制参数"（与 a、 前缀叠加成双重编号）。
+#        标题层级/编号文本变化 ⇒ 旧缓存（v31 及更早）必须整体失效。
+#    v33：仅识别 L1~L4 级标题（R151 引入，R162 三级叶子标准下语义不变：
+#        L3 为最小叶子、L4 为兼容层，文档大纲上限仍是四级）：
+#        ① DB 章节 L5+ 不再产出 Heading 样式（降级为加粗正文段落，标题文本与
+#           编号保留、正文照常输出）—— Word 导航窗格 / TOC 恰好只有 1~4 级；
+#        ② 正文子标题 computed 级别 >4 时同样降级加粗正文（L3 叶子内的更深
+#           小节 / L4 兼容叶子内的「1）」小节不再以 Heading 5+ 出现在文档大纲）；
+#        ③ TOC 域深度封顶 4（\_build_docx_options 与 _add_toc_field 双侧钳位，
+#           用户配置再深也无 L5+ 标题可收录）。
+#        ⚠️ 推翻 v24「TOC 深度维持用户配置」契约（用户本轮指令明示仅识别
+#        L1~L4）；判据单一事实源 = services/outline_rules。标题样式/层级
+#        变化 ⇒ 旧缓存（v32 及更早）必须整体失效。
+_EXPORTER_VERSION = "33"
 
 
 _CHART_TYPE_MAP = {
@@ -829,16 +850,16 @@ def _detect_duplicate_sections(sections: list[dict]) -> list[dict]:
             except Exception:  # pragma: no cover - 配置不可用时沿用 fail-safe 默认
                 _demote = True
             has_children_demoted = bool(children_map.get(sec.get("id"))) and _demote
-            sub_counters: dict[int, int] = {}
-            for block in blocks:
-                if block.get("type") != "heading":
-                    continue
-                md_lv = block.get("level", 1)
-                bpure = _strip_title_number(block.get("text", ""))
-                text, _style = _compute_subheading(
-                    section_prefix, level, md_lv, sub_counters, bpure,
-                    sec.get("id") or "", has_children=has_children_demoted)
-                block["_fixed_text"] = text
+            # ✅ R138（L-3 收口）：与落库规范化 / 导出写稿共用同一循环体；
+            #    旧实现此处才是唯一正确传 has_children 的一处 —— 三份副本
+            #    迟早会漂移，现统一由 helper 承担参数拼装。
+            # ✅ R149（2026-10-31）：块选择同源 —— 与落库侧一致排除围栏派生
+            #    标题（D-8g），否则同一份正文「预览/落库」与「预检判重宇宙」
+            #    编号错位（围栏标题在成稿占号、预览不占）。
+            number_body_subheadings(
+                select_numbering_blocks(blocks),
+                section_prefix=section_prefix, section_level=level,
+                sec_id=sec.get("id") or "", has_children=has_children_demoted)
             n_child_ns = _count_child_namespace_subheadings(blocks, section_prefix)
             for block in blocks:
                 if block.get("type") != "heading":
@@ -1944,14 +1965,18 @@ _MERMAID_TYPE_MAP = MERMAID_KEYWORD_TO_CHART_TYPE
 
 from app.services.content_blocks import (
     _LEAD_IN_HINT_RE,  # ✅ 2026-10-05（D4）：引导语识别正则收敛到唯一实现，删除本地副本
+    _RE_TABLE_SEP,  # ✅ R145（2026-10-29）：GFM 表格分隔行正则，_add_table_from_markup
     LEAD_IN_MAX_CHARS,  # ✅ R48（2026-10-06）：引导语长度上限收敛到唯一实现，
     _cn_pure_to_int,
-    _compute_subheading,
+    _compute_subheading,  # noqa: F401  兼容再导出：测试/诊断脚本经 app.routers.export 引用
     _detect_plain_heading,  # noqa: F401  兼容再导出：测试与诊断脚本经 app.routers.export 引用
     #                          消除本模块此前的裸 `60` 字面量（同一判据第 3 份副本）。
     _parse_content_blocks,
+    #                        动态定位分隔行（表头前短行前置后不再固定 index 1）
     _strip_duplicate_leading_title,
     _strip_title_number,
+    number_body_subheadings,
+    select_numbering_blocks,
 )
 
 # ---------------------------------------------------------------------------
@@ -2889,15 +2914,29 @@ def _strip_leading_figure_number(text: str) -> str:
     ``FIG_TITLE_RE`` 派生，本文件不持有第二份字面量）—— 契约判定为规范图题
     的才剥，判据与形态检查天然同源。fail-soft：异常或剥离后为空一律返回原文，
     绝不阻断渲染。
+
+    ✅ R164（2026-11-01 · 图题残留前导标点）：``FIG_TITLE_PREFIX_RE`` 只吃到
+    「图 3-1」为止，源文常见的冒号分隔形态 ``图 3-1：施工工艺流程`` 剥完前缀
+    还剩一个悬空冒号 ⇒ 成稿图题写成「图 2-1 ：施工工艺流程」（实测复现）。
+    此处**只**剥前缀后紧跟的标点/空白，不引入第二份图号正则：判据仍是契约
+    的那一份，标点集合由本函数就地声明（不涉及「图号形态」口径）。
+
+    ✅ R165（2026-11-01 · 非 ``-`` 分隔形态残留）：派生自规范式的
+    ``FIG_TITLE_PREFIX_RE`` 只认 ``图 {数字}-{数字}``，源文/载荷写成
+    ``图 3.1`` / ``图 A-1`` / ``图 3-1-2`` / ``图 3`` 时**整段不剥**，
+    成稿叠成「图 2-1 图 3.1 施工工艺流程」。改用契约模块的**宽口径**剥离判据
+    ``FIG_TITLE_ANY_PREFIX_RE``（仍由契约模块唯一定义，本文件仍无字面量），
+    多段编号一次剥全（``图 3-1-2`` 不再留 ``-2``）。
     """
     try:
         t = str(text or "").strip()
         if not t:
             return t
-        m = FIG_TITLE_PREFIX_RE.match(t)
+        m = FIG_TITLE_ANY_PREFIX_RE.match(t) or FIG_TITLE_PREFIX_RE.match(t)
         if not m:
             return t
-        return t[m.end():].strip() or t
+        rest = t[m.end():].lstrip("：:，,、；;。.·-–— \t　")
+        return rest or t
     except Exception:  # noqa: BLE001 — 剥离失败必须保留原文，绝不阻断导出
         return str(text or "").strip()
 
@@ -3080,8 +3119,11 @@ def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体")
         safe = raw.strip().replace("\\|", "\x00").strip("|")
         return [c.replace("\x00", "|").strip() for c in safe.split("|")]
 
-    # 跳过第 2 行（|:---| 对齐分隔行，由调用方保证存在）
-    rows = [_split_row(r) for j, r in enumerate(tbl_lines) if j != 1]
+    # 跳过分隔行（|:---| 对齐分隔行）。旧实现硬编码 ``j != 1`` 假设分隔行在
+    # 第 2 行；R145 起表头前短行（标题带/列组标签）前置后分隔行位置后移，
+    # 按正则动态定位（兼容旧格式分隔行在 index 1 的逐字节不变行为）。
+    sep_pos = [j for j, r in enumerate(tbl_lines) if _RE_TABLE_SEP.match(r.strip())]
+    rows = [_split_row(r) for j, r in enumerate(tbl_lines) if j not in sep_pos]
     if not rows:
         return
     # ✅ 2026-10-17（导出文档发现的问题）：先还原「两块侧叠」的错位行 + 去掉尾部
@@ -3136,8 +3178,34 @@ def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体")
                 #    与已写入的 w:vAlign 顺序颠倒，WPS 拒绝打开）
                 _set_cell_shading(cell, "B6B1D1")
 
-    # ✅ R117 FIX-9（2026-10-20）：首行「通栏标题行」横向合并
+    # ✅ R117 FIX-9（2026-10-20）：首行「通栏标题行」横向合并。
+    #    ⚠️ R146（2026-10-29 · R117 回归修复）：本步**必须先于**下面的「表头前短行
+    #    gridSpan」执行。通栏标题带（仅首格有内容）恰好也是「内容末列 < ncols-1」的
+    #    短行，旧序被短行逻辑先并成 1 个 tc，随后 `_merge_table_title_band` 的
+    #    幂等判据「tc 数仍等于列数」判为 False → `_band_merged=False`，连带
+    #    ① `w:tblHeader` 落回标题带（翻页重复的仍是空色带、列名永不出现）；
+    #    ② 合并格只拿到首列宽（固定布局下标题带被压成 1 列宽逐字换行）。
     _band_merged = _merge_table_title_band(table, rows)
+
+    # ✅ R145（2026-10-29 · 导出后校验检出 Markdown 残留）：表头前短行
+    #    （列数 < ncols）按 gridSpan 合并尾部空单元格（生产实拍
+    #    ``| 项目 | 技术参数 |`` 在 3 列表头前 → 渲染成「项目 | 技术参数（跨 2 列）」），
+    #    避免短行右侧出现孤立空单元格；与上方 `_merge_table_title_band` 互补：
+    #    后者只管「仅首格有内容」的通栏标题带（已合并时本逻辑跳过），
+    #    本逻辑管「部分列有内容」的列组标签行。
+    #    ⚠️ 刻意只作用于**表头行**（ri==0）：`_unstack_or_trim_table_rows` 已把短行
+    #    补齐到 ncols，按「内容末列 < ncols-1」检测短行；数据行的尾部空格是真实空列
+    #    （如「备注」列某行为空），合并会丢列语义，故不合并。
+    if not _band_merged:
+        _row0_data = rows[0] if rows else []
+        _last_content = max(
+            (c for c in range(len(_row0_data)) if str(_row0_data[c] or "").strip()),
+            default=-1)
+        if 0 <= _last_content < ncols - 1:
+            _merged = table.rows[0].cells[_last_content].merge(
+                table.rows[0].cells[ncols - 1])
+            for _p in _merged.paragraphs:
+                _p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     # ✅ R117 FIX-8（2026-10-20）：每一行都禁止跨页断开（含表头行）。
     #    实测导出稿 195 行无一带 cantSplit —— 长表翻页会把同一行劈成两半。
@@ -4207,7 +4275,8 @@ def _add_toc_field(paragraph, depth: int = 3):
     用户可按 F9 或右键"更新域"刷新目录。
     """
     try:
-        depth = max(1, min(int(depth or 3), 9))
+        # ✅ R151：文档大纲只到 Heading 4，域深度同步封顶 4（与 _build_docx_options 同口径）
+        depth = max(1, min(int(depth or 3), 4))
     except (TypeError, ValueError):
         depth = 3
     # ✅ R127：与 PAGE/NUMPAGES 共用拆 run 的域写法（占位文本在刷新前可见）
@@ -5415,11 +5484,23 @@ def _build_docx_sync(
         full_title = heading_gen.format_heading(level, pure_title, parent_id)
         section_prefix = _section_number_prefix(full_title)
 
-        # ✅ R129：标题样式层级上限 7→8（DB 大纲共 8 级；L8 旧行为=借用
-        #    Heading 7 外观，现归位 Heading 8，外观同参数、outlineLvl 归位 7）
-        h = doc.add_paragraph(style=f"Heading {min(level, 8)}")
-        _add_runs_with_inline_format(h, full_title)
-        _finalize_heading_runs(h)
+        # ✅ R151 引入 / R162 语义不变：仅识别 L1~L4 级标题（三级叶子 + 四级兼容层）。
+        #    L5+ 的 DB 章节不再产出 Heading 样式 —— Word 导航窗格 / TOC 只会
+        #    出现 1~4 级；标题文本与编号保留、降级为加粗正文段落，正文内容
+        #    照常输出（数据不丢，只是不再进入文档大纲）。落库侧
+        #    normalize_outline 已把 >4 级裁剪进父级 description，此分支是
+        #    防御性兜底（历史库 / 直写 DB 的脏数据）。
+        if level <= 4:
+            # ✅ R129：标题样式层级上限 7→8（DB 大纲共 8 级；L8 旧行为=借用
+            #    Heading 7 外观，现归位 Heading 8，外观同参数、outlineLvl 归位 7）
+            #    （R151 起实际封顶 Heading 4，历史注释保留供追溯）
+            h = doc.add_paragraph(style=f"Heading {min(level, 8)}")
+            _add_runs_with_inline_format(h, full_title)
+            _finalize_heading_runs(h)
+        else:
+            h = doc.add_paragraph()
+            _degraded = h.add_run(full_title)
+            _degraded.bold = True
         # ✅ 增强：一级章节另起一页（专项方案通用版式）
         if page_break_before_chapter and level <= 1 and body_state["started"]:
             h.paragraph_format.page_break_before = True
@@ -5440,7 +5521,6 @@ def _build_docx_sync(
             #    不改写**（两侧各有独有尾句，删任一侧即丢正文）——纯可观测，
             #    blocks 一个字节未动。
             _report_near_duplicate_blocks(blocks, where=full_title or title)
-            sub_counters: dict[int, int] = {}
             # ✅ E3（2026-09-25）：有 DB 子章节 + 配置开启 → 正文子标题降级为节内
             # body 命名空间（1）/ a、…），与 DB 子章节彻底隔离。无子女或配置关
             # 闭 → 保持旧点分编号，由后续计数器前移（L2991+）处理撞号。
@@ -5450,15 +5530,15 @@ def _build_docx_sync(
             except Exception:
                 _demote = True
             has_children_demoted = bool(children_map.get(sec_id)) and _demote
-            for block in blocks:
-                if block["type"] == "heading":
-                    md_lv = block.get("level", 1)
-                    pure = _strip_title_number(block.get("text", ""))
-                    text, style_lv = _compute_subheading(
-                        section_prefix, level, md_lv, sub_counters, pure, sec_id,
-                        has_children=has_children_demoted)
-                    block["_fixed_text"] = text
-                    block["_heading_style"] = style_lv
+            # ✅ R138（L-3 收口）：循环体与参数拼装收口到 number_body_subheadings
+            #    （with_style=True 是写稿侧独有的需求，其余两处不写该键）。
+            # ✅ R149（2026-10-31）：块选择同源 —— 与落库侧一致排除围栏派生
+            #    标题（D-8g 契约），围栏标题成稿保留原文不占号，预览=落库=成稿。
+            number_body_subheadings(
+                select_numbering_blocks(blocks),
+                section_prefix=section_prefix, section_level=level,
+                sec_id=sec_id, has_children=has_children_demoted,
+                with_style=True)
 
             # ✅ 增强 v7：有序列表自动连续编号（修复 AI 输出跳号/重复编号，
             #    如 "1. 2. 1. 2." 或断号 "1. 3. 5."）。遇到非列表块即重置序列。
@@ -5659,10 +5739,20 @@ def _build_docx_sync(
                     elif block["type"] == "heading":
                         # ✅ R129：正文子标题样式上限 7→9（L8/L9 走 Heading 8/9，
                         #    显式 outlineLvl 7/8，可被 TOC \o "1-9" 收录）
-                        h_lv = min(block.get("_heading_style", min(level + block.get("level", 1), 9)), 9)
-                        h = doc.add_paragraph(style=f"Heading {h_lv}")
-                        _add_runs_with_inline_format(h, block.get("_fixed_text", block.get("text", "")))
-                        _finalize_heading_runs(h)
+                        # ✅ R151 引入 / R162 语义不变：文档大纲只允许 L1~L4 ——
+                        #    超出 4 级的正文子标题（如 L3 叶子内的更深小节、
+                        #    L4 兼容叶子内的「1）」小节）
+                        #    不再使用 Heading 样式，降级为加粗正文段落（编号文本
+                        #    保留），Word 导航窗格 / TOC 因此恰好只有四级。
+                        _want_lv = min(block.get("_heading_style", min(level + block.get("level", 1), 9)), 9)
+                        if _want_lv <= 4:
+                            h = doc.add_paragraph(style=f"Heading {_want_lv}")
+                            _add_runs_with_inline_format(h, block.get("_fixed_text", block.get("text", "")))
+                            _finalize_heading_runs(h)
+                        else:
+                            h = doc.add_paragraph()
+                            _sub = h.add_run(block.get("_fixed_text", block.get("text", "")))
+                            _sub.bold = True
                     elif block["type"] == "list_item":
                         # ✅ P1-1 修复（2026-10-07 · 列表样式拍平）：
                         #    旧实现将列表项渲染为普通段落（Normal 样式），无缩进、
@@ -6483,6 +6573,27 @@ async def _prepare_export(scheme_id: str, body: dict, db,
             logger.info("导出前置自动修复未闭合围栏：共 %d 处", _fix_total)
     else:
         _fix_total = 0
+    # ✅ R146（2026-10-29 · 日志 TOP2 error）：表格缺 GFM 分隔行 → `_split_table_block`
+    #    返回 [] → 整张表降级裸文本。导出前置确定性补齐（与生成侧同一纯函数，
+    #    判据只救「整段无分隔行」的连续表格行，幂等/无损/围栏内不动）。
+    #    开关取向与生成侧一致：读**服务端 settings**（content_autofix_table_separators，
+    #    默认 True），不占导出 config 白名单 —— 该修复是确定性纠错，不是版式选项，
+    #    无需逐次导出可选（config 键须有 UI 落点，见 test_export_closeout 的
+    #    TestFrontendBackendConfigParity）。
+    from app.config import settings as _afs_settings
+    if bool(getattr(_afs_settings, "content_autofix_table_separators", True)):
+        from app.services.content_utils import auto_fix_table_separators
+        _tbl_total = 0
+        for sec in sections:
+            raw = sec.get("content") or ""
+            if not raw:
+                continue
+            new, tbl_log = auto_fix_table_separators(raw)
+            if tbl_log:
+                sec["content"] = new
+                _tbl_total += len(tbl_log)
+        if _tbl_total:
+            logger.info("导出前置自动补齐表格 GFM 分隔行：共 %d 处", _tbl_total)
     # ✅ R99：围栏补齐会抹掉 DLV-07 的 error 级提示（体检看到的是修好后的正文），
     #   而围栏之后的中文正文会被并入图表源码整体跳过 —— 计数必须随 prep 传下去，
     #   一路进 audit_content 的 fence_auto_fixed 提示与 X-Fix-Stats 的 fences_fixed。
@@ -6845,7 +6956,9 @@ def _build_docx_options(config: dict, _float, _int) -> dict:
         "page_break_before_chapter": bool(config.get("chapter_page_break", True)),
         "line_spacing": max(1.0, min(_float("line_spacing", 1.15), 3.0)),
         "page_number_style": str(config.get("page_number_style", "simple") or "simple"),
-        "toc_depth": max(1, min(_int("toc_depth", 3), 9)),
+        # ✅ R151（2026-10-31）：目录树只到 L4，TOC 深度同步封顶 4
+        #    （用户配置再深也无 L5+ 标题可收录，\o "1-N" N>4 形同虚设）。
+        "toc_depth": max(1, min(_int("toc_depth", 3), 4)),
         # ✅ 增强 v7：封面项目信息表 + 页边距（缺省 None → 走默认行为，向后兼容）
         # ✅ 类型防御：脏预设/直调 API 传入非 dict 时静默忽略，避免构建期 500
         "cover_info": config.get("cover_info") if isinstance(

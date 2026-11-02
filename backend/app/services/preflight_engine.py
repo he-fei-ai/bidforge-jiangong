@@ -55,6 +55,7 @@ from app.services.audit_rules import (
 from app.services.content_polish import find_colloquial_hits
 from app.services.content_utils import (
     LEAF_MIN_WORD_BUDGET,
+    format_word_budget_tier_summary,
     has_cjk,
     readable_word_count,
     word_audit_summary,
@@ -1088,7 +1089,8 @@ def check_deliverability(ctx: PreflightContext) -> list:
             f"{len(wc_off_band)} 个三级目录字数偏离目标容差带"
             f"（±{_wc_tol:.0%}，达标 {_wc_sum['in_band']}/{_wc_sum['total']}）",
             evidence=wc_off_band[:10],
-            suggestion="可在正文生成页选择字数档位（简短800/标准1200/详细2000/超长2500）"
+            suggestion="可在正文生成页选择字数档位（"
+                       f"{format_word_budget_tier_summary()}）"
                        "重新生成，或对偏差章节单独重写；偏差不影响其余检查结论"))
     return findings
 

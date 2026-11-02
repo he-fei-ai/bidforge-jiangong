@@ -29,10 +29,21 @@
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 
+from app.services.chart_validators import (
+    PIL_RENDERABLE_CHART_TYPES,
+    infer_chart_type_from_payload,
+)
 from app.services.content_blocks import INLINE_CHART_FENCE_LANGS as _FENCE_LANGS
 from app.services.fence_common import find_unclosed, iter_all_blocks
+
+# ✅ R143（2026-10-29 · 跨模块深度收口 · R137-F 教训）：此前本模块**无 logger**，
+#    两处 `except Exception: return 空报告` 完全静默 —— 「自检器宕了」与「算法写错」
+#    在日志上毫无区别，且截断正文最需自检时反而无结论。现补 logger + 降级信号。
+logger = logging.getLogger("content_format_contract")
 
 # ---------------------------------------------------------------------------
 # 一、契约常量（三端唯一事实源）
@@ -60,6 +71,14 @@ MERMAID_SOURCE_TYPES: tuple[str, ...] = (
 #: 与 `content_blocks.INLINE_CHART_FENCE_LANGS` 同源（此处只读引用，不复制元组）。
 CHART_FENCE_LANGS: tuple[str, ...] = tuple(_FENCE_LANGS)
 
+#: 图表标准 · chart-json 载荷允许的图表类型（7 类）。
+#: ✅ R146（2026-10-29）：此前契约只校验「是不是 JSON 对象」，不校验 `type`
+#: 是否在登记侧白名单 —— 契约与 `_chart_pipeline._ALL_CHART_TYPES` 口径漂移，
+#: 「类型受限」只在登记侧生效、正文自检看不见。现直接引用 services 层唯一
+#: 事实源 ``chart_validators.PIL_RENDERABLE_CHART_TYPES``（与登记侧同集合，
+#: 由 test_r146 的 parity 断言锁定），不复制字面量。
+CHART_JSON_TYPES: frozenset[str] = PIL_RENDERABLE_CHART_TYPES
+
 #: 图号标准 · 图题 / 表题前缀格式：`图{章号}-{序号} {图名}`、`表{章号}-{序号} {表名}`
 FIG_TITLE_RE = re.compile(r"^图\s*\d+\s*[-–—]\s*\d+\s+\S")
 TBL_TITLE_RE = re.compile(r"^表\s*\d+\s*[-–—]\s*\d+\s+\S")
@@ -73,6 +92,22 @@ TBL_TITLE_RE = re.compile(r"^表\s*\d+\s*[-–—]\s*\d+\s+\S")
 #: 这类形态本就由 ``_check_numbers`` 上报为不规范图题，成稿不得再叠一层导出图号。
 FIG_TITLE_PREFIX_RE = re.compile(
     FIG_TITLE_RE.pattern[:FIG_TITLE_RE.pattern.rfind(r"\s+")])
+
+#: 图号前缀的**宽口径剥离判据**（R165 · 2026-11-01）。
+#: 只服务「把源文/载荷里残留的旧图号去掉」这一步，**不参与**「图题是否规范」的
+#: 判定（后者仍只有 :data:`FIG_TITLE_RE`，`_check_numbers` 对非规范形态照常上报）。
+#: 存在的理由：契约形态是 ``图 {章}-{序}``，但源文/AI 载荷里还会出现
+#: ``图 3.1``（点分）、``图 A-1``（字母章）、``图 3-1-2``（多段）、``图 3``（裸序号）
+#: —— 旧判据只吃 ``-`` 分隔，剥离后残留 ``图 3.1`` 前缀，成稿叠成
+#: 「图 2-1 图 3.1 施工工艺流程」（实测 ``_probe_caption.py``）。
+#: ⚠️ 必须保持「``图`` + 编号」的紧邻形态：图名本身以「图」字起头（``图纸会审流程``）
+#:    不会命中（``图`` 后要求数字/字母编号）。
+FIG_TITLE_ANY_PREFIX_RE = re.compile(
+    r"^图\s*(?:"
+    r"\d+(?:\s*[-–—.]\s*\d+)+"      # 图 3-1 / 图 3.1 / 图 3-1-2 …（多段一律剥全）
+    r"|[A-Za-z]\s*[-–—.]\s*\d+"     # 图 A-1 / 图 B.2（字母章号）
+    r"|\d+"                          # 图 3 / 图3（裸序号）
+    r")")
 
 #: 编号标准 · L1 用中文数字（一、二、…），L2 及以下用阿拉伯数字（1.1 / 1.1.1）。
 #: 正文里的一级编号形态（供自检识别「L1 写成阿拉伯」的偏差）。
@@ -139,17 +174,54 @@ def _issue(category: str, severity: str, message: str, line: int,
     }
 
 
-def _iter_prose_lines(content: str):
-    """产出 (行号1基, 行文本)，跳过全部围栏块内部行（含未闭合块到文末）。"""
+def _protected_line_indexes(content: str) -> set[int]:
+    """围栏块（含未闭合块，一律截到真实末行）所在行的 0 基行号集合。
+
+    ✅ R137（2026-10-28）：散文行 / 表格 / 公式三处此前各写一份同样的循环，
+    其中**公式**那份把未闭合块的 `stop` 写成 `10 ** 9` 哨兵 —— 构造十亿元素
+    `set` 必然抛 MemoryError，又被 `check_format_contract` 的 fail-soft 兜底
+    `except Exception` 吞掉 ⇒ 返回 `checked=False` 的空报告 ⇒ **整份格式自检
+    静默失效**（未闭合围栏恰恰是最需要自检的场景）。判据只留此处一份。
+    """
     lines = content.split("\n")
     protected: set[int] = set()
     for blk in iter_all_blocks(content):
-        stop = blk["close_line"] if blk["close_line"] >= 0 else len(lines) - 1
+        close = blk["close_line"]
+        stop = close if close >= 0 else len(lines) - 1
         protected.update(range(blk["open_line"], stop + 1))
+    return protected
+
+
+def _iter_prose_lines(content: str):
+    """产出 (行号1基, 行文本)，跳过全部围栏块内部行（含未闭合块到文末）。"""
+    lines = content.split("\n")
+    protected = _protected_line_indexes(content)
     for idx, raw in enumerate(lines):
         if idx in protected:
             continue
         yield idx + 1, raw
+
+
+#: 表格上方「表题行」的判据：以「表」开头、后接数字/中文数字/冒号。
+#: 只用于判定「有没有表题」，是否符合 `表{章号}-{序号} {表名}` 由 _check_numbers 负责。
+_TABLE_CAPTION_HINT_RE = re.compile(r"^表\s*(?:\d|[一二三四五六七八九十]|[:：])")
+
+#: 图题 / 表题的「章号-序号」抽取式（供编号连续性校验）。
+_CAPTION_SERIAL_RE = re.compile(r"^(图|表)\s*(\d+)\s*[-–—]\s*(\d+)\s+\S")
+
+
+def _prev_nonblank_prose(lines: list[str], idx: int,
+                         protected: set[int]) -> str:
+    """表格上方的表题候选行（最多上溯 2 行，容忍表题与表格间夹一个空行）。"""
+    j = idx - 1
+    for _ in range(2):
+        if j < 0 or j in protected:
+            return ""
+        s = lines[j].strip()
+        if s:
+            return s
+        j -= 1
+    return ""
 
 
 def _check_headings(content: str, issues: list[dict]) -> None:
@@ -192,11 +264,9 @@ def _check_lists(content: str, issues: list[dict]) -> None:
 def _check_tables(content: str, issues: list[dict]) -> None:
     """表格标准：GFM 表格必须「表头行 + 分隔行」，且列数一致。"""
     lines = content.split("\n")
-    protected: set[int] = set()
-    for blk in iter_all_blocks(content):
-        stop = blk["close_line"] if blk["close_line"] >= 0 else len(lines) - 1
-        protected.update(range(blk["open_line"], stop + 1))
+    protected = _protected_line_indexes(content)
     seen = 0
+    cap_seen = 0  # 表题缺失单列计数（归 numbering 类，不与表格语法错共享上限）
     i = 0
     while i < len(lines):
         if i in protected or not _TABLE_ROW_RE.match(lines[i]):
@@ -221,6 +291,17 @@ def _check_tables(content: str, issues: list[dict]) -> None:
                 f"表格表头 {len(head_cols)} 列与分隔行 {len(sep_cols)} 列不一致，"
                 "列会错位", i + 1, head.strip()))
             seen += 1
+        # ✅ R146（2026-10-29 · 日志 TOP1 告警）：表格上方缺表题 —— 导出侧只能
+        #    按表头拼接「表 1-5 分项工程、样板部位…」这类低质量表题（生产日志
+        #    单次导出 11 条 WARNING）。归 `numbering` 类，与图/表题格式告警同族。
+        if cap_seen < _MAX_ISSUES_PER_CATEGORY:
+            prev_line = _prev_nonblank_prose(lines, i, protected)
+            if not _TABLE_CAPTION_HINT_RE.match(prev_line):
+                issues.append(_issue(
+                    "numbering", "warning",
+                    "表格上方缺少表题（应为独占一行 `表{章号}-{序号} {表名}`），"
+                    "导出将按表头自动生成低质量表题", i + 1, head.strip()))
+                cap_seen += 1
         i += 2
         # ✅ R130：消费表格的**数据行**（连续的表格行），否则首行数据会被当成
         #    「下一个新表头」，因下一行无分隔行而误报「缺少 GFM 分隔行」
@@ -276,12 +357,39 @@ def _check_charts(content: str, issues: list[dict]) -> None:
                     "渲染服务可能拒渲染并跳过该图",
                     blk["open_line"] + 1, first[:60]))
                 seen += 1
-        elif lang == "chart-json" and first and not first.startswith("{"):
-            issues.append(_issue(
-                "chart", "error",
-                "chart-json 围栏内容不是 JSON 对象，导出时跳过不渲染",
-                blk["open_line"] + 1, first[:60]))
-            seen += 1
+        elif lang == "chart-json":
+            # ✅ R146（2026-10-29）：与登记侧 `_chart_pipeline._scan_inline_charts`
+            #    逐字同口径 —— json.loads → 必须是 dict → `infer_chart_type_from_payload`
+            #    （显式 type 优先、结构兜底）→ 类型必须在 7 类白名单内。旧实现只判
+            #    「首行以 { 开头」，类型不在白名单/结构推断不出时正文自检毫无提示，
+            #    而成稿会静默少一张图。此处只上报，不篡改正文。
+            body = "\n".join(body_lines).strip()
+            try:
+                obj = json.loads(body) if body else None
+            except (json.JSONDecodeError, TypeError):
+                issues.append(_issue(
+                    "chart", "error",
+                    "chart-json 围栏内容不是合法 JSON，导出时整块跳过且不占图号",
+                    blk["open_line"] + 1, body[:60]))
+                seen += 1
+                continue
+            if not isinstance(obj, dict):
+                issues.append(_issue(
+                    "chart", "error",
+                    "chart-json 载荷不是 JSON 对象（应为 {\"type\": ...}），"
+                    "导出时跳过不渲染",
+                    blk["open_line"] + 1, body[:60]))
+                seen += 1
+                continue
+            ct = infer_chart_type_from_payload(obj)
+            if not ct or ct not in CHART_JSON_TYPES:
+                issues.append(_issue(
+                    "chart", "warning",
+                    f"chart-json 图表类型无法归入契约白名单"
+                    f"（{', '.join(sorted(CHART_JSON_TYPES))}），"
+                    "登记与导出都会跳过该图（不占图号）",
+                    blk["open_line"] + 1, body[:60]))
+                seen += 1
 
 
 def _check_formulas(content: str, issues: list[dict]) -> None:
@@ -290,10 +398,7 @@ def _check_formulas(content: str, issues: list[dict]) -> None:
     # 剔除块级公式时**保持换行数不变**，否则其后各行的行号会整体前移（line 失真）
     text_wo_display = _DISPLAY_MATH_RE.sub(
         lambda m: "\n" * m.group(0).count("\n"), content)
-    protected: set[int] = set()
-    for blk in iter_all_blocks(content):
-        stop = blk["close_line"] if blk["close_line"] >= 0 else 10 ** 9
-        protected.update(range(blk["open_line"], stop + 1))
+    protected = _protected_line_indexes(content)
     for ln, raw in enumerate(text_wo_display.split("\n"), start=1):
         if (ln - 1) in protected:
             continue
@@ -348,12 +453,24 @@ def _check_encoding(content: str, issues: list[dict]) -> None:
 
 
 def _check_numbers(content: str, issues: list[dict]) -> None:
-    """数字标准 · 图题编号格式：`图{章号}-{序号} {图名}`。"""
+    """数字标准 · 图/表题格式 + **编号连续性**（目录/正文/图号三者一致）。
+
+    ✅ R146（2026-10-29）：用户明确要求「编号连续性校验」。旧实现只校验
+    单条图/表题的格式，同一章 ``图 3-1`` 之后直接跳到 ``图 3-4``（渲染失败占号 /
+    模型自主编号）不会被发现 —— 而成稿图号由导出按实际渲染重排，源文序号断层
+    正是「正文图号与目录/成稿对不上」的源头。
+    """
     seen = 0
+    # (kind, 章号) → [(序号, 行号)]，保持出现顺序
+    serials: dict[tuple[str, int], list[tuple[int, int]]] = {}
     for ln, raw in _iter_prose_lines(content):
-        if seen >= _MAX_ISSUES_PER_CATEGORY:
-            break
         s = raw.strip()
+        m = _CAPTION_SERIAL_RE.match(s)
+        if m:
+            serials.setdefault((m.group(1), int(m.group(2))), []).append(
+                (int(m.group(3)), ln))
+        if seen >= _MAX_ISSUES_PER_CATEGORY:
+            continue
         if re.match(r"^图\s*\d+", s) and not FIG_TITLE_RE.match(s):
             issues.append(_issue(
                 "numbering", "warning",
@@ -366,6 +483,20 @@ def _check_numbers(content: str, issues: list[dict]) -> None:
                 "表题不符合 `表{章号}-{序号} {表名}` 格式，导出时会重编号",
                 ln, s))
             seen += 1
+    # 连续性：同章同类图/表序号必须自 1 起逐 1 递增（≥2 条时才检查，单条不判）
+    for (kind, chapter), items in serials.items():
+        if len(items) < 2 or seen >= _MAX_ISSUES_PER_CATEGORY:
+            continue
+        seqs = [n for n, _ in items]
+        if seqs == list(range(1, len(seqs) + 1)):
+            continue
+        issues.append(_issue(
+            "numbering", "warning",
+            f"{kind}号不连续：第 {chapter} 章{kind}序号依次为 "
+            f"{'、'.join(str(n) for n in seqs)}，应为 1~{len(seqs)}"
+            "（目录 / 正文 / 图号三者必须一致）",
+            items[0][1], f"{kind} {chapter}-{seqs[0]}"))
+        seen += 1
 
 
 def check_format_contract(content: str, *, section_id: str = "",
@@ -420,6 +551,11 @@ def check_format_contract(content: str, *, section_id: str = "",
             "section_title": section_title,
         }
     except Exception:  # pragma: no cover - 自检器自身故障绝不外溢
+        # ✅ R143（2026-10-29 · 跨模块深度收口 · R137-F 教训）：fail-soft 必须留
+        #    可观测降级信号，否则「自检器宕了」与「算法写错」在日志上毫无区别。
+        logger.exception(
+            "正文格式契约自检器故障（fail-soft 降级为空报告）· section_id=%s",
+            section_id)
         return std_empty
 
 
@@ -444,6 +580,7 @@ __all__ = [
     "FONT_BODY_EAST_ASIA", "FONT_BODY_ALT_EAST_ASIA",
     "FONT_HEADING_EAST_ASIA", "FONT_LATIN",
     "MIN_IMAGE_DPI", "MERMAID_SOURCE_TYPES", "CHART_FENCE_LANGS",
+    "CHART_JSON_TYPES",
     "FIG_TITLE_RE", "TBL_TITLE_RE", "FIG_TITLE_PREFIX_RE",
     "L1_CN_RE", "L1_ARABIC_RE",
     "CONTRACT_CATEGORIES",

@@ -407,6 +407,13 @@ async def batch_review_sections(scheme_id: str, body: dict, db=Depends(get_db)):
         changed += 1
         changed_ids.append(sid)
     await db.commit()
+    # ✅ D3（2026-10-29 · 跨模块深度收口 · P2 静默陈旧）：review_status 变更**不**改变
+    #    内容指纹 → `/overview` 缓存键 `(content_fingerprint, facts_signature)` 不变 →
+    #    DLV-09（review_pending/rejected/missing）结论最长 120s 陈旧且前端无「陈旧」提示。
+    #    状态确实有变时立即失效总检缓存（与 schemes/projects 删除方案同口径；懒导入防环）。
+    if changed:
+        from app.routers.compliance import invalidate_overview_cache
+        invalidate_overview_cache(scheme_id)
     return {
         "ok": True,
         "changed": changed,
@@ -458,6 +465,10 @@ async def review_section(scheme_id: str, section_id: str, body: SectionReviewIn,
     await _write_record(db, scheme_id, section_id, row["title"] or "",
                         from_status, body.to_status, body.reviewer, body.comment)
     await db.commit()
+    # ✅ D3（2026-10-29 · 跨模块深度收口 · P2 静默陈旧）：章节级状态变更后立即
+    #    失效总检缓存（内容指纹不变，DLV-09 结论否则最长 120s 陈旧且无 stale 提示）。
+    from app.routers.compliance import invalidate_overview_cache
+    invalidate_overview_cache(scheme_id)
     return {"ok": True, "from_status": from_status, "to_status": body.to_status,
             "idempotent": False, "changed": True}
 
@@ -602,6 +613,10 @@ async def submit_scheme_review(scheme_id: str, body: SchemeReviewIn,
     #    让调用方（前端）自行决定是否弹提示。
 
     await db.commit()
+    # ✅ D3（2026-10-29 · 跨模块深度收口 · P2 静默陈旧）：方案级审核状态变更后
+    #    立即失效总检缓存（内容指纹不变，DLV-09 结论否则最长 120s 陈旧且无提示）。
+    from app.routers.compliance import invalidate_overview_cache
+    invalidate_overview_cache(scheme_id)
     return {
         "ok": True,
         "from_status": from_status,

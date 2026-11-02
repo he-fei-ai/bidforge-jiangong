@@ -335,7 +335,11 @@ def _merged_after_if_prefix(items: list[dict], accepted_ids: set) -> str | None:
         if it.get("rule_id") in accepted_ids:
             if seen_rejected:
                 return None      # 非前缀 → 交由调用方重新链式改写
-            last_accepted_after = it.get("after")
+            # ✅ D1（2026-10-29 · 跨模块深度收口 · P1 数据丢失）：批量 `stage` 落库的
+            #    条目里 `after` 是 [:4000] **预览**，确认时若直接用它落库会把
+            #    >4000 字章节截断。`after_full` 由 `_chain_section_fixes` 加法式透传，
+            #    优先取全文；旧批次（无 after_full）回退 `after`，行为与修复前一致。
+            last_accepted_after = it.get("after_full") or it.get("after")
         else:
             seen_rejected = True
     return last_accepted_after

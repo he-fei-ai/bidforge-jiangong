@@ -151,11 +151,17 @@ def _render_labor_image_v2(labor_data: dict) -> BytesIO | None:
 
     # ---- 尺寸（全部乘以 scale）----
     title_h = int(60 * scale)
-    padding = int(24 * scale)
-    sub_gap = int(24 * scale)
+    padding = int(20 * scale)
+    sub_gap = int(20 * scale)
 
     # 左 1/3：工种柱状图
-    left_w = int(380 * scale)
+    # ✅ R164（2026-11-01 · 纸面主文字 1.75mm < 2.4mm）：纸面字号 ≈ 字号×160/画布
+    #    逻辑宽（docx 按 16cm 宽等比插入，scale/DPI 被约掉），与数据量无关。旧画布
+    #    逻辑宽 1172（padding 24×2 + 左 380 + 间距 24 + 右 720），主文字 13px →
+    #    1.75mm。现把左右留白与左图收窄（总宽 1172→1050），字号 13/12/11→16/16/15
+    #    ⇒ 主文字 2.44mm、数值/图例 2.44mm 达标。右图（720）与竖排工期列阈值
+    #    （120px@2.5x）**刻意不动**：保持默认横排工期标签，不改变既有版式分支。
+    left_w = int(270 * scale)
     left_chart_h = int(360 * scale)
 
     # 右 2/3：堆叠柱状图 + 时段曲线图
@@ -172,12 +178,12 @@ def _render_labor_image_v2(labor_data: dict) -> BytesIO | None:
 
     img = Image.new("RGB", (total_w, total_h), "white")
     draw = ImageDraw.Draw(img)
-    font_title = _image_font(int(20 * scale), bold=True)
-    font_section = _image_font(int(16 * scale), bold=True)
-    font_label = _image_font(int(13 * scale), bold=True)
-    font_value = _image_font(int(12 * scale))
-    font_axis = _image_font(int(11 * scale))
-    font_legend = _image_font(int(12 * scale))
+    font_title = _image_font(int(22 * scale), bold=True)
+    font_section = _image_font(int(20 * scale), bold=True)
+    font_label = _image_font(int(16 * scale), bold=True)
+    font_value = _image_font(int(16 * scale))
+    font_axis = _image_font(int(16 * scale))
+    font_legend = _image_font(int(16 * scale))
 
     title = str(labor_data.get("title") or "劳动力投入及工种分布图")
     draw.text((padding, int(18 * scale)), title, fill="#1E3A5F", font=font_title)
@@ -393,10 +399,12 @@ def _render_labor_image_v2(labor_data: dict) -> BytesIO | None:
             fill="#1E3A5F",
             font=font_legend,
         )
-        legend_x += int(90 * scale)
-        if legend_x + int(90 * scale) > total_w:
+        # ✅ R164：字号 12→16 后「图标 14 + 间距 4 + 文字 86」实际占 104px，
+        #    旧步进 90 会让下一项图标压住上一项文字末尾，故步进与换行判据同步 90→106。
+        legend_x += int(106 * scale)
+        if legend_x + int(106 * scale) > total_w:
             legend_x = padding
-            legend_y += int(16 * scale)
+            legend_y += int(22 * scale)
 
     paper_floor_note(
         "劳动力图",

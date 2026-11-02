@@ -14,6 +14,11 @@ from __future__ import annotations
 import logging
 import re
 
+# ✅ R168（2026-11-01 · D4 收口）：未解析占位符纳入运行时指标。
+#    _metrics 顶层只依赖 stdlib（Counter），不反向 import 本模块 → 无循环依赖；
+#    埋点内部 try/except 兜底，计数失败绝不影响渲染。
+from ._metrics import record_unresolved_placeholders
+
 logger = logging.getLogger(__name__)
 
 _ALL_PROMPTS: dict[str, dict] = {}
@@ -219,7 +224,8 @@ def _reg(key: str, category: str, label: str, value: str,
 #: ✅ 必须**先于**任何出口函数定义存在：钩子被挂在 ``_apply_variable_contracts``、
 #: ``check_prompt_variables``、``list_prompts`` 等 6 个公共出口上，而
 #: ``prompts/__init__.py`` 在本模块 import 完成后立刻调用
-#: ``_apply_variable_contracts()`` —— 声明晚于首次调用会直接 NameError
+#: ``_apply_variable_contracts()``（✅ R169 G6 起这是**唯一**的导入期触发点；
+#: 本模块尾部不再调用）—— 声明晚于首次调用会直接 NameError
 #: （首版正是删旧块时把这条声明一起带走，3 个测试文件在收集期就 NameError）。
 _LAZY_REGISTERED = False
 
@@ -242,16 +248,23 @@ def register_lazy_prompts() -> None:
     读取（调用侧自带的出厂字面量回退仍然有效）。
 
     ✅ R39 BUGFIX（2026-10-05）：幂等锁必须在 **import 成功之后**才置位，
-    而不是在 try 之前无条件置位。原因：本模块尾部首次调用
-    ``_apply_variable_contracts()`` 触发本钩子时，``bid_analysis_service``
-    顶部的 ``from app.services.ai.prompts._cache import get_prompt`` 会遇到
-    ``_cache`` 尚未完成加载的循环导入 —— 抛 ``ImportError`` 被本钩子的
+    而不是在 try 之前无条件置位。原因：首次触发本钩子时（包 ``__init__``
+    的 ``_apply_variable_contracts()``；✅ R169 G6 起本模块尾部不再触发），
+    ``bid_analysis_service`` 顶部的 ``from app.services.ai.prompts._cache
+    import get_prompt`` 可能遇到 ``_cache`` 尚未完成加载的循环导入 ——
+    抛 ``ImportError`` 被本钩子的
     ``except`` 吞掉。若此时 ``_LAZY_REGISTERED`` 已被置 True，后续所有 6 处
     调用点（``get_prompt`` / ``list_prompts`` / ``update_prompt`` /
     ``_apply_variable_contracts`` …）都会短路 return，19 条 bid_ 键**永久缺失**
     （R39 T1 的 6 项护栏因此全线失败）。修复后异常路径下锁保持 False，
     后续任一次读注册表都会重试一次；递归安全 —— 失败后不再进入 try，
     成功路径只置位一次。
+
+    ✅ R169 G6（2026-11-01）：本模块**尾部不再**触发本钩子（旧时序在
+    ``_registry`` 自身加载中触发 → bid 顶部 import ``_cache`` 撞半初始化模块
+    → 每进程一条 "partially initialized" WARNING 后重试成功）。首次触发点
+    收敛到包 ``__init__`` 的 ``_apply_variable_contracts()`` —— 彼时
+    ``_cache``/``_registry`` 均已完成加载，bid 导入首次即成功。
     """
     global _LAZY_REGISTERED
     if _LAZY_REGISTERED:
@@ -296,7 +309,31 @@ def get_prompt_variables(key: str) -> list[str]:
     return []
 
 
-def validate_prompt_variables(key: str, **kwargs) -> list[str]:
+def _effective_template(key: str) -> str:
+    """key 当前**实际生效**的模板正文（DB 覆盖优先，空内容回退出厂默认）。
+
+    ✅ R168（2026-11-01 · G4）：校验侧旧实现只认内存注册表 ``_ALL_PROMPTS[key]``
+    —— 用户经 PATCH 保存时「内存 + DB 同时改」，口径尚一致；但**外部脚本 /
+    迁移工具直接写 prompt_templates** 时内存仍是出厂基线，DB 新增的占位符
+    不会被当成「必需变量」，缺变量告警静默漏报（G4）。
+
+    ``_cache`` ↔ ``_registry`` 是双向依赖（前者 import 后者取注册表与渲染函数），
+    故此处用**函数级 import**（与 :func:`render` 同款手法）打破模块加载期循环。
+
+    任何读取失败（库不可用 / 缓存异常）→ 回退内存注册表基线，保持旧行为。
+    """
+    try:
+        from ._cache import get_effective_prompt_content
+        content = get_effective_prompt_content(key)
+        if content:
+            return content
+    except Exception as e:  # noqa: BLE001 - 读取失败沿用内存基线，不影响校验
+        logger.debug("读取生效提示词失败（回退内存注册表基线）: %s", e)
+    return _ALL_PROMPTS.get(key, {}).get("content", "")
+
+
+def validate_prompt_variables(key: str, _template: str | None = None,
+                              **kwargs) -> list[str]:
     """验证提示词变量是否全部提供，返回缺失变量列表。
 
     ✅ R6 修复（2026-09-22）：过滤"JSON 示例误报"。
@@ -304,10 +341,26 @@ def validate_prompt_variables(key: str, **kwargs) -> list[str]:
     被 _VARIABLE_PATTERN 误抓后进入 variables 列表，导致 render_prompt 反复告警
     "missing variables"，淹没真实错误信号。
     过滤规则见 _is_false_positive()。真实缺变量（业务语义名）不受影响。
+
+    ✅ R168（2026-11-01 · G4 收口）：``required`` 与 ``template`` 均改以
+    **实际生效模板**为基线（DB 覆盖优先），不再只认内存注册表：
+      * 外部直写 DB 新增占位符 → 如实报缺（此前漏报）；
+      * 外部直写 DB 删掉占位符 → 不再误报（此前误报）；
+      * 出厂形态（无 DB 覆盖）下与旧实现逐字等价。
+    ``get_prompt`` 热路径会把本次已选好的生效正文经 ``_template`` 传入，
+    避免校验侧为同一模板重复读缓存/判水位。
+
+    :param _template: 本次**已选定的生效模板正文**（内部参数，勿在业务侧随意传）。
+        为 ``None`` 时按「DB 优先」现场解析；读取失败回退内存注册表。
+        ⚠️ 刻意用下划线前缀：避免与业务变量同名（如某个模板真有一个叫
+        ``template`` 的占位符）。
     """
-    required = get_prompt_variables(key)
+    template = _template if _template is not None else _effective_template(key)
+    # ✅ R168：必需变量集合也从生效模板提取 —— 否则「DB 新增占位符」永远
+    #    进不了 required，下游 missing 判断再准也报不出来（G4 的直接根因）。
+    required = (extract_user_variables(template) if template
+                else get_prompt_variables(key))
     kwargs_lower = {k.lower(): v for k, v in kwargs.items()}
-    template = _ALL_PROMPTS.get(key, {}).get("content", "")
     # ✅ 整行独占的可选区块（2026-09-26）：未传时 render_prompt 整行丢弃，
     #    不留残留占位符 → 不算"缺失"，否则每次调用都刷无意义 WARNING。
     missing = [v for v in required
@@ -367,11 +420,12 @@ def is_dynamic_placeholder(name: str) -> bool:
 
     单一事实源：``{SHARED_*}``（_cache._resolve_shared_keys 解析）与
     :data:`DYNAMIC_PLACEHOLDER_ALLOWLIST`（.replace 注入）两类合判。
-    消费方共四处，均只调用本函数，不再各自内联判断：
+    消费方共三处，均只调用本函数，不再各自内联判断：
       ① :func:`render_prompt` 的"未解析占位符"告警过滤；
       ② :func:`validate_prompt_variables` 的缺参告警过滤；
-      ③ ``_cache.get_prompt`` 的 missing 变量告警过滤；
-      ④ ``_cache.get_prompt_with_validation`` 的 missing 返回过滤。
+      ③ ``_cache.get_prompt`` 的 missing 变量告警过滤。
+    （R168：原第 ④ 处 ``_cache.get_prompt_with_validation`` 已作为零生产调用方
+    的死 API 下线，见该轮报告 G5。）
     """
     return _is_shared_reference(name) or name in DYNAMIC_PLACEHOLDER_ALLOWLIST
 
@@ -532,6 +586,10 @@ def render_prompt(template: str, **kwargs) -> str:
                           if not _is_optional_block_var(v, template)]
             if unresolved:
                 logger.warning("Prompt template has unresolved placeholders: %s", unresolved)
+                # ✅ R168（D4 收口）：残留占位符按变量名计数 —— 运维在
+                #    /system/prompt-metrics 直接看到「哪个占位符没人负责」
+                #    （拼写错误 / 新增变量未接调用点），不必翻日志。
+                record_unresolved_placeholders(unresolved)
         except Exception as e:  # noqa: BLE001 - fail-soft：检测异常只告警，不影响已渲染结果
             logger.warning("未解析占位符检测异常（已忽略，不影响渲染结果）: %s", e)
 
@@ -667,6 +725,16 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     "outline_patch_system": [
         "scheme_name", "scheme_type", "project_brief",
         "project_facts", "chapter_titles", "missing_items",
+    ],
+    # R151 引入 / R162 三级叶子标准：目录硬性标准合规修复。已核对唯一渲染点
+    #   · outline_compliance_system ← services/outline_compliance.build_compliance_fix_messages
+    "outline_compliance_system": [
+        "scheme_name", "scheme_type", "construction_scope",
+        "project_brief", "project_facts",
+        # 程序化体检的违规清单（outline_rules violations → 逐条文本）
+        "violations_text",
+        # 现有目录 JSON（修复基础）
+        "current_outline",
     ],
     # R73（2026-10-12）：占位标题外科式重写。已核对唯一渲染点
     #   · outline_title_fix_system ← sse_handlers._try_outline_title_fix
@@ -1132,7 +1200,14 @@ from app.services.ai.prompts import (
     review_autofix,  # noqa: E402,F401  （审核预检问题定向修复）
 )
 
-# ✅ G4 变量契约：模板全部注册后再套用契约表（见上方 PROMPT_VARIABLE_CONTRACTS）
-_apply_variable_contracts()
+# ✅ G4 变量契约：模板全部注册后再套用契约表（见上方 PROMPT_VARIABLE_CONTRACTS）。
+# ✅ R169（2026-11-01 · G6 收口）：此处**不再**调用 _apply_variable_contracts()。
+#    旧时序：本模块尚在加载（partial）时该调用触发惰性钩子 → import
+#    bid_analysis_service → 其顶部 `from ._cache import get_prompt` 撞上
+#    **同样未加载完的 _cache** → ImportError 被钩子吞掉 → 每进程首次导入
+#    prompts 包必打一条 "partially initialized" WARNING（随后由包 __init__
+#    尾部重试成功）。现把首次契约套用收敛到包 __init__（SHARED_* 注册之后、
+#    _cache/_registry 均已完成时）—— 惰性钩子首次触发即成功，零 WARNING；
+#    契约套用幂等，时序后移无任何语义变化。
 
 

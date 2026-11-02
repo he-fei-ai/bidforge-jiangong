@@ -15,6 +15,7 @@ F-CONTENT-STANDARD（2026-09-26），对齐《正文生成模块 —「生成标
 """
 from __future__ import annotations
 
+import logging
 import re
 
 # ✅ 2026-10-01（模糊生成改造）：模糊表述判据、占位/空话/暴露/编造检测、
@@ -41,6 +42,11 @@ from app.services.content_trace import build_trace as _build_trace
 #    与 2026-09-28 收敛注释钉住，不得改成行锚定严格口径（会把保护面收窄、事实校验
 #    重新看见 Mermaid 数字 → 新误报）。
 from app.services.fence_common import iter_all_blocks
+
+# ✅ R143（2026-10-29 · 跨模块深度收口 · R137-F 教训）：此前本模块**无 logger**，
+#    `standard_report` / `paragraph_structure_report` 两处 `except Exception: return 空报告`
+#    完全静默 —— 「校验器宕了」与「算法写错」在日志上毫无区别。补 logger + 降级信号。
+logger = logging.getLogger("content_standard")
 
 # ---------------------------------------------------------------------------
 # 常量与基础解析
@@ -697,6 +703,10 @@ def standard_report(content: str, standard: str, fact_rows: list,
         }
     except Exception:
         # 兜底：校验器自身任何意外都不得影响生成结果（调用方另包一层 try/except）
+        # ✅ R143（2026-10-29 · 跨模块深度收口 · R137-F 教训）：fail-soft 必须留
+        #    可观测降级信号，否则「校验器宕了」与「算法写错」在日志上毫无区别。
+        logger.exception(
+            "正文标准校验器故障（fail-soft 降级为空报告）· standard=%s", std)
         return _empty_report(std)
 
 
@@ -838,6 +848,8 @@ def paragraph_structure_report(content: str) -> dict:
             "warnings": warnings,
         }
     except Exception:  # pragma: no cover - 校验器自身故障绝不外溢
+        # ✅ R143（2026-10-29 · 跨模块深度收口 · R137-F 教训）：fail-soft 留可观测降级信号。
+        logger.exception("正文段落结构校验器故障（fail-soft 降级为空报告）")
         return {"paragraphs": 0, "recommended_range":
                 [PARA_MIN_CHARS, PARA_RECOMMENDED_CHARS, PARA_MAX_CHARS],
                 "long_paragraphs": 0, "warnings": []}

@@ -3,7 +3,12 @@ import json
 from typing import AsyncIterator
 
 from app.services.ai.http_pool import get_async_client
-from app.services.ai.providers.base import BaseProvider, normalize_messages
+from app.services.ai.providers.base import (
+    BaseProvider,
+    VendorHTTPError,
+    normalize_messages,
+    parse_retry_after,
+)
 
 
 class AnthropicCompatibleProvider(BaseProvider):
@@ -48,6 +53,12 @@ class AnthropicCompatibleProvider(BaseProvider):
         client = get_async_client(self.base_url, self.proxy_url)
         resp = await client.post(f"{self.base_url}/messages", json=payload,
                                  headers=headers, timeout=self.timeout)
+        # ✅ R150：结构化异常（与 OpenAI 兼容层同口径，带 Retry-After）
+        if resp.status_code >= 400:
+            raise VendorHTTPError(
+                resp.status_code, resp.text[:800],
+                parse_retry_after(resp.headers.get("retry-after")),
+                request=resp.request, response=resp)
         resp.raise_for_status()
         data = resp.json()
         # ✅ 记录 token 用量（Anthropic：input_tokens/output_tokens/cache_read_input_tokens）

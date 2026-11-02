@@ -55,7 +55,8 @@ _STRUCT_HINT_KEYS = (
 
 
 def build_chart_envelope(code: str = "", data=None, *,
-                         title: str = "", reason: str = "") -> str:
+                         title: str = "", reason: str = "",
+                         source: str = "ai") -> str:
     """构造图表持久化信封 —— **写入侧唯一构造器**。
 
     与 `extract_chart_payload()` 严格互逆。
@@ -65,6 +66,10 @@ def build_chart_envelope(code: str = "", data=None, *,
         data: 结构化图表数据（gantt/labor/comparison 等 dict）；与 `code` 二选一。
         title: 图表标题（落库供清单/导出展示，可空）。
         reason: 生成理由 / 用户需求原文（可空）。
+        source: 载荷来源标记 ``"ai"`` / ``"local"``（本地模板兜底）。
+            ✅ 引入外部平台的 ``source`` 标记：**仅当非默认值 "ai" 时才写入键**，
+            保证 AI 产出的信封与本项引入前**逐字节一致**（零回归）；`local`
+            由 `chart_local_templates` 打标，前端/导出据此提示「模板数据」。
 
     Returns:
         规范信封 JSON 字符串；`code` 与 `data` 均空时返回 `""`（调用方据此跳过落库）。
@@ -75,17 +80,21 @@ def build_chart_envelope(code: str = "", data=None, *,
     """
     code = (code or "").strip() if isinstance(code, str) else ""
     has_data = data is not None and data != "" and data != {} and data != []
+    src = str(source or "ai").strip().lower()
+    extra = {"source": src} if src and src != "ai" else {}
 
     if not code and not has_data:
         return ""
 
     if code:
         return json.dumps(
-            {"mermaid_code": code, "title": title or "", "reason": reason or ""},
+            {"mermaid_code": code, "title": title or "", "reason": reason or "",
+             **extra},
             ensure_ascii=False)
 
     return json.dumps(
-        {"mermaid_code": "", "data": data, "title": title or "", "reason": reason or ""},
+        {"mermaid_code": "", "data": data, "title": title or "", "reason": reason or "",
+         **extra},
         ensure_ascii=False)
 
 

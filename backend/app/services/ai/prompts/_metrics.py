@@ -32,6 +32,17 @@ token_budget_truncated: Counter = Counter()
 repair_triggered: Counter = Counter()
 #: AI 调用失败/降级次数（key = 业务场景 scene）。
 ai_failure_by_scene: Counter = Counter()
+#: 渲染时「调用方未传」的变量次数（key = 变量名）。
+#: ✅ R168（2026-11-01 · 收口 R167 技术债 D4/G4）：旧实现「缺变量」只有 WARNING
+#:    日志一条信号 —— 运维必须翻 backend.log 才能判断「哪个模板在漏传」；
+#:    端点侧 `/system/prompt-metrics` 看不到任何缺变量/残留信息（永远是空 dict）。
+#:    现按**变量名**计数（低基数、稳定）：`{"scheme_name": 38}` 直接指向
+#:    待修的模板变量，无需区分模板 key（日志侧已带 key）。
+missing_variables_total: Counter = Counter()
+#: 渲染后模板层仍残留未解析占位符的次数（key = 占位符名）。
+#: 与 missing 分开记：missing 是「调用方没传」，本项是「模板里写了但没人负责」
+#: （多为拼写错误 / 新增变量未接入），处置方式不同。
+unresolved_placeholders_total: Counter = Counter()
 
 
 def _inc(counter: Counter, key: str) -> None:
@@ -68,10 +79,31 @@ def record_ai_failure(scene: str) -> None:
     _inc(ai_failure_by_scene, scene or "unknown")
 
 
+def record_missing_variables(names) -> None:
+    """记一次「调用方未传变量」（``_cache.get_prompt`` 的 missing 列表）。
+
+    逐名自增；整段 try/except —— 观测指标**绝不**阻断 prompt 渲染主流程。
+    """
+    try:
+        for name in names or ():
+            _inc(missing_variables_total, name)
+    except Exception:  # noqa: BLE001
+        logger.debug("record_missing_variables failed", exc_info=True)
+
+
+def record_unresolved_placeholders(names) -> None:
+    """记一次「渲染后模板层残留占位符」（``render_prompt`` 的 unresolved 列表）。"""
+    try:
+        for name in names or ():
+            _inc(unresolved_placeholders_total, name)
+    except Exception:  # noqa: BLE001
+        logger.debug("record_unresolved_placeholders failed", exc_info=True)
+
+
 def get_snapshot() -> dict:
     """导出结构化快照（全部为 dict 拷贝，调用方持有后修改不影响内部计数）。
 
-    顶层固定 6 个键：5 个计数器 dict + ``registered_keys``（注册表全部 key，
+    顶层固定 8 个键：7 个计数器 dict + ``registered_keys``（注册表全部 key，
     供运维对照「哪些模板从无人渲染过」）。
     """
     from app.services.ai.prompts._registry import (
@@ -92,6 +124,8 @@ def get_snapshot() -> dict:
         "token_budget_truncated": dict(token_budget_truncated),
         "repair_triggered": dict(repair_triggered),
         "ai_failure_by_scene": dict(ai_failure_by_scene),
+        "missing_variables_total": dict(missing_variables_total),
+        "unresolved_placeholders_total": dict(unresolved_placeholders_total),
         "registered_keys": registered,
     }
 
@@ -99,7 +133,8 @@ def get_snapshot() -> dict:
 def reset() -> None:
     """清零全部内存计数器（运维调试 / 测试隔离用）。"""
     for c in (render_total, render_errors, token_budget_truncated,
-              repair_triggered, ai_failure_by_scene):
+              repair_triggered, ai_failure_by_scene,
+              missing_variables_total, unresolved_placeholders_total):
         try:
             c.clear()
         except Exception:  # noqa: BLE001

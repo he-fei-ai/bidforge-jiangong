@@ -160,7 +160,13 @@ def _resolve_chart_code(block: dict, sec_id: str, chart_type: str,
 #           与 test_missing_chart_does_not_borrow_other_chapter_code 存在语义
 #           分歧（fallback 契约 vs 章节隔离契约互斥），R-3 保持 strict xfail
 #           记录该分歧，业务侧统一契约后再落地。
-_EXPORTER_VERSION = "22"
+# ✅ R143（2026-10-29 · 跨模块深度收口）：本文件自 R86 起把 14 个判据函数全部
+#    委派到 ``app.routers.export``（见文件头 ``from app.routers import export as _ex``），
+#    但此常量仍是 R86 前的本地字面量 ``"22"``，与 ``export._EXPORTER_VERSION``（现为
+#    ``"31"``）长期分叉 —— 任何未来 ``from export_audit import _EXPORTER_VERSION``
+#    都会拿到错误版本号（旧缓存命中/指纹击穿）。改为**只读引用权威源**（同模块
+#    ``_ex`` 已在文件头导入），消除漂移；本文件无其他消费方，行为零变化。
+_EXPORTER_VERSION = _ex._EXPORTER_VERSION
 
 
 _CHART_TYPE_MAP = {

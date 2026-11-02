@@ -268,7 +268,9 @@ async def parse_outline(file: UploadFile = File(...),
     # - 规则法识别但扁平大纲：0.65（有效但不够好）
     # - AI 兜底识别：0.75（质量取决于 AI 表现）
     # - 图片/OCR 文件：在上述基础上 -0.1（OCR 噪声影响）
-    is_image = ftype in ("png", "jpg", "jpeg", "bmp", "tiff")
+    # ✅ R136（2026-10-27）：补 .tif —— 与 file_parser.SUPPORTED_EXTENSIONS 的图片族
+    #    同步（TIFF 两个官方扩展名），否则 .tif 扫描件识别后不触发 OCR 噪声惩罚。
+    is_image = ftype in ("png", "jpg", "jpeg", "bmp", "tiff", "tif")
     outline = simple_parse_outline(raw_text)
     used_ai = False
     if not _outline_seems_valid(outline) and raw_text and len(raw_text) > 50:
@@ -384,6 +386,15 @@ async def parse_outline(file: UploadFile = File(...),
             "未从文件中解析到有效文本（可能是空白文件、扫描件或已损坏）；"
             "若为扫描件，请确认 OCR 引擎可用"
             "（打开 /api/v1/diagnostics/capabilities 查看启用方法）")
+    elif not outline:
+        # ✅ R144（2026-10-29）：文本非空但极短（1~49 字，无编号结构）时，
+        #    既不进 AI 兜底（`raw_text and len(raw_text) > 50` 不满足），也不
+        #    触发 empty_text（文本非空白），前端只看到「识别完成：共 0 个章节」
+        #    —— 用户无法区分「文件确实没目录结构」与「识别失败」。补显式告警，
+        #    说明这是短文本无结构（而非引擎问题），引导用户确认内容。
+        result["warning"] = (
+            "文件中仅有少量文本且未识别出章节结构（可能是封面/页眉等零散文字）；"
+            "若确有章节，请确认文件为完整正文而非仅含目录页")
     return result
 
 
@@ -396,6 +407,14 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
         raise HTTPException(400, "缺少 scheme_id")
     if not outline:
         raise HTTPException(400, "缺少 outline 数据")
+    # ✅ R149（2026-10-31 · FIX-I）：非 list 真值载荷守卫（与
+    #    sections._save_outline_to_db 同文案同口径）。dict / str 等非 list
+    #    真值会同时绕过上面两个判断与 normalize_outline（后者对非 list
+    #    恒等返回），collect_rows 迭代不出任何节点 → to_delete = 全部旧
+    #    章节 → sections + chart_predictions 被**静默全灭**且响应 ok=True
+    #    （破坏性数据丢失 + 假成功）。
+    if not isinstance(outline, list):
+        raise HTTPException(400, "outline 必须是数组")
 
     # 先查上传记录是否存在，再查方案是否存在（避免 JOIN 列名歧义）
     # ✅ R13 读路径（2026-10-08）：None 游标不得降级成 404 —— 那会把数据库
@@ -429,7 +448,7 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
             409, "本方案目录正在后台生成中，请等待生成完成（或先停止任务）后再保存目录")
 
     # 写入 sections 表
-    # ✅ 目录限三级 + 统一重排编号：上传识别结果落库前统一规范化
+    # ✅ 目录规范化（R162：三级为最小叶子、四级兼容层）+ 统一重排编号：上传识别结果落库前统一规范化
     from app.services.outline_utils import normalize_outline
     outline = normalize_outline(outline)
     if not outline:
@@ -613,6 +632,13 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     updates: list[tuple] = []
     new_inserts: list[tuple] = []
     counter = {"n": 0}
+    # ✅ R149（2026-10-31 · FIX-J）：改名台账（R137 BUG-2b 孪生收口）。
+    #    本路径按「归一化标题」匹配旧章节并写入**新** title（含占位标题
+    #    自动改写），而正文首行残留的是**旧**标题 —— 批量重规范化只拿得到
+    #    新标题时，旧标题块被当普通子标题编号（幽灵子标题 1.1 旧标题），
+    #    与 R137 在 save-outline / update_section 修掉的机制逐字相同，
+    #    唯独本入口漏传 rename_map。台账数据现成：matched["title"] 即旧标题。
+    renamed_titles: dict[str, str] = {}
 
     def collect_rows(nodes: list, parent_id: str, path_parts: tuple,
                      idx_path: tuple = ()):
@@ -665,6 +691,9 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
             if matched:
                 # 标题匹配已有章节：保留正文，只更新结构字段
                 sid = matched["id"]
+                _prev_title = str(matched.get("title") or "")
+                if _prev_title and str(title or "") != _prev_title:
+                    renamed_titles[sid] = _prev_title
                 old_path = _old_title_path(matched)
                 if old_path and old_path != (path_parts + (mnt,)):
                     logger.info(
@@ -814,8 +843,26 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     #    （标题匹配命中后按新位置重排），必须按新编号重规范化已落库正文的子标题，
     #    否则与 create/delete/reorder/save-outline 四处漂移。
     from app.routers.sections import _renormalize_all_section_contents
-    await _renormalize_all_section_contents(db, scheme_id)
+    # ✅ R149（FIX-J）：改名章节把旧标题传给批量重规范化（幽灵子标题收口）。
+    await _renormalize_all_section_contents(db, scheme_id,
+                                            rename_map=renamed_titles)
     await db.commit()
+    # ✅ R155-O（2026-11-01 · L-3-tail）：整表重建已提交成功 → 该方案**终态
+    #    任务**的目录成果 checkpoint（kind=outline_result）失效 —— 与 R154 在
+    #    _save_outline_to_db（save-outline / apply-and-save 共同出口）的清理
+    #    同族回扫：本接口是第三条整表重建路径，旧树同样会在刷新重挂时以
+    #    「待确认成果」复活（确认即用陈旧树覆盖刚保存的目录）。只清终态；
+    #    advisory 语义：失败不阻断目录保存（与导出缓存失效同口径）。
+    _cleared_checkpoints = 0
+    try:
+        from app.routers.sse_checkpoint import _clear_outline_checkpoints_for_scheme
+        _cleared_checkpoints = await _clear_outline_checkpoints_for_scheme(
+            db, scheme_id)
+    except Exception as e:  # noqa: BLE001 —— advisory，不阻断
+        logger.warning("清理目录成果 checkpoint 失败（不影响保存）: %s", e)
+    if _cleared_checkpoints:
+        logger.info("save-as-outline：已清理 %d 个终态任务的陈旧目录成果 checkpoint"
+                    "（scheme=%s）", _cleared_checkpoints, scheme_id[:8])
     # ✅ BUG 修复（2026-10-04 · 缓存漏失效）：整表重建改变章节树与编号，
     #    旧 export_cache 行与磁盘产物成为孤儿，口径与 /save-outline 一致。
     try:
@@ -844,6 +891,10 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
         result["cleared_content_sections"] = cleared_content
         result["note"] = ((result.get("note", "") + "；") if result.get("note") else "") + \
             f"另有 {cleared_content} 个未匹配章节的已生成正文被清除"
+    # ✅ R155-O（L-3-tail）：加法式回传（与 save-outline 的 cleared_checkpoints
+    #    同名同语义）；为 0 时不下发（既有前端消费零影响）。
+    if _cleared_checkpoints:
+        result["cleared_checkpoints"] = _cleared_checkpoints
     return result
 
 

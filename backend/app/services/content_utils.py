@@ -61,12 +61,29 @@ from app.services.fence_common import (
 
 # ---------- 四档字数控制（R66 · 2026-10-11） ----------
 # 简短 800 / 标准 1200 / 详细 2000 / 超长 2500。
-# 前端 WORD_BUDGET_OPTIONS 与后端档位解析共用这一组数值（前端只展示，
-# 真源在此处；改档位只改这里，禁止再出现第二套字面量）。
+# 前端唯一镜像 utils/wordBudgetTiers.ts 与后端档位解析共用这一组数值
+# （真源在此处；改档位只改这里 + 前端镜像两处，双向源码锚
+# tests/test_r159_word_tiers_ssot_20261101.py 保证不同步即红）。
 WORD_BUDGET_TIERS = {"brief": 800, "standard": 1200, "detailed": 2000, "ultra": 2500}
 WORD_BUDGET_DEFAULT_TIER = "standard"
-# 三级目录（叶子节点）正文下限：除下级目录章节外，需生成约 300 字正文。
-# 既是档位分配时的叶子预算下限（max(档位值, 300)），也是续写触发的最低门槛。
+#: 档位中文名（面向用户文案的唯一拼装源：审核自修建议等；改档位名只改这里）。
+WORD_BUDGET_TIER_LABELS_ZH = {"brief": "简短", "standard": "标准", "detailed": "详细", "ultra": "超长"}
+
+
+def format_word_budget_tier_summary() -> str:
+    """档位摘要串（中文名+档位值斜杠拼接，字节形态由护栏 test_a1 锁定）。
+
+    供审核自修建议 / 预检建议等用户可见文案唯一拼装，档位数值/中文名
+    变更后自动跟随；禁止在文案里手写字面量副本（R159 前 review_autofix
+    DLV-16 与 preflight_engine DLV-16 即此类散落，盘点工具已纳入绝迹断言）。
+    """
+    return "/".join(
+        f"{WORD_BUDGET_TIER_LABELS_ZH[key]}{WORD_BUDGET_TIERS[key]}"
+        for key in WORD_BUDGET_TIERS
+    )
+# 三级目录（最小叶子，R162 起叶子可为 L3 或 L4）正文下限：除下级目录章节外，
+# 需生成约 300 字正文。既是档位分配时的叶子预算下限（max(档位值, 300)），
+# 也是续写触发的最低门槛。
 LEAF_MIN_WORD_BUDGET = 300
 
 
@@ -98,6 +115,30 @@ def resolve_word_budget_tier(raw) -> int | None:
         if v in WORD_BUDGET_TIERS.values():
             return v
     return None
+
+
+def apply_word_budget_tier_to_l3(
+    all_sections: list[dict], leaves: list[dict], tier_budget: int,
+) -> list[str]:
+    """✅ R151（2026-10-31）：四档字数控制**直接作用于 L3 节点**（用户指令 三.3）。
+
+    档位值写入每个三级节点的 ``word_budget``（就地修改 all_sections 内的行 dict），
+    并级联到本次生成目标叶子（叶子仍是字数判定的执行单位：续写 / under-over /
+    前端显示都读叶子）。R162 起 L3 可作最小叶子——L3 叶子同时命中两次写值
+    （幂等，结果一致）；树含 L4 兼容层时叶子（L4）与 L3 写同值，语义不变。
+
+    返回需要持久化的 section id 列表（L3 节点 + 目标叶子，调用方 executemany）。
+    纯函数：只改传入 dict 的字段，不做任何 IO —— 便于单测与复用。
+    """
+    l3_ids = [s["id"] for s in all_sections
+              if int(s.get("level") or 1) == 3]
+    l3_set = set(l3_ids)
+    for s in all_sections:
+        if s["id"] in l3_set:
+            s["word_budget"] = tier_budget
+    for lf in leaves:
+        lf["word_budget"] = tier_budget
+    return [*l3_ids, *(lf["id"] for lf in leaves)]
 
 
 def word_deviation_of(
@@ -714,6 +755,72 @@ def auto_fix_unclosed_fences(
     if not log:
         return content, []
     return current, log
+
+
+# ---------- 表格缺 GFM 分隔行自动修复（R146 · 2026-10-29） ----------
+# 背景（日志 TOP2 高频 error）：AI 高频输出「表头行 + 数据行」而**漏写分隔行**
+# ``| --- |`` —— GFM 判定该块不是表格，导出 `_split_table_block` 返回 []，
+# 整张表降级为裸文本段落（管道语法原样印进成稿）。契约自检能报 error，却
+# 没有任何确定性修复，用户只能逐章手工补。
+#
+# 判据刻意**保守**（只救「整段无分隔行」的真缺行，不碰 R145 的「表头前短行」）：
+#   · 只处理**连续表格行组成的整段**，且段内**一处分隔行都没有**；
+#   · 段长 ≥ 2（单行是散行，不是表格）；
+#   · 首行单元格数 ≥ 2（单格行更像通栏标题带，留给 `_merge_table_title_band`）；
+#   · 围栏块（含未闭合块）内的行一律不动（与 auto_fix_unclosed_fences 同纪律）；
+#   · 幂等 / 确定性 / 无损：只在首行后插入一行分隔符，其余字符一字不动。
+_TABLE_ROW_LINE_RE = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEP_LINE_RE = re.compile(
+    r"^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$")
+
+
+def _row_cell_count(line: str) -> int:
+    """GFM 表格行的单元格数（含空单元格，剥离首尾竖线）。"""
+    return len(line.strip().strip("|").split("|"))
+
+
+def auto_fix_table_separators(content: str) -> tuple[str, list[dict]]:
+    """为「缺 GFM 分隔行」的表格块补一行 ``| --- | --- |``（纯函数、幂等）。
+
+    Returns:
+        ``(fixed_content, fixes_log)``；fixes_log 每项
+        ``{"line": 表头行号(1-based), "cols": 补出的列数}``；无缺陷返回
+        ``(原样, [])``（逐字不变，调用方可据此判断是否需要回写）。
+    """
+    if not content:
+        return content, []
+    lines = content.split("\n")
+    protected: set[int] = set()
+    for blk in _fence_common.iter_all_blocks(content):
+        stop = blk["close_line"] if blk["close_line"] >= 0 else len(lines) - 1
+        protected.update(range(blk["open_line"], stop + 1))
+
+    fixes: list[dict] = []
+    out: list[str] = []
+    i, n = 0, len(lines)
+    while i < n:
+        if i in protected or not _TABLE_ROW_LINE_RE.match(lines[i]):
+            out.append(lines[i])
+            i += 1
+            continue
+        j = i
+        while (j < n and j not in protected
+               and _TABLE_ROW_LINE_RE.match(lines[j])):
+            j += 1
+        run = lines[i:j]
+        has_sep = any(_TABLE_SEP_LINE_RE.match(r) and "|" in r for r in run)
+        cols = _row_cell_count(run[0])
+        if not has_sep and len(run) >= 2 and cols >= 2:
+            out.append(run[0])
+            out.append("|" + " --- |" * cols)
+            out.extend(run[1:])
+            fixes.append({"line": i + 1, "cols": cols})
+        else:
+            out.extend(run)
+        i = j
+    if not fixes:
+        return content, []
+    return "\n".join(out), fixes
 
 
 def count_fences(content: str) -> int:

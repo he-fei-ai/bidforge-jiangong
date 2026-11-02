@@ -65,6 +65,12 @@ _STRIP_NUMBER_RE = re.compile(
     r"第\s*[一二三四五六七八九十百千零0-9]+\s*[章节]"   # 第X章 / 第X节 / 第 1 章
     r"|[（(][一二三四五六七八九十0-9]+[)）]"            # （三） / (3)
     r"|[0-9]+[)）]"                                     # 1） / 2）
+    # ✅ 2026-10-31（目录编号与等级修正）：字母枚举子项（"a）" / "b)" / "A）"）。
+    #    正文子标题降级命名空间产出 "a、标题"，而 AI 原文常自带 "a）标题"，
+    #    旧正则只认「数字 + 右括号」⇒ "a、a）材料与环保控制参数" 的双重编号
+    #    永远剥不掉并随落库固化（导出行级/正文子标题两处都中招）。
+    #    与上方数字分支同族：必须紧跟右括号，"A4纸" / "A 级防火" 不受影响。
+    r"|[a-zA-Z]{1,2}\s*[)）]"
     # ✅ BUG 修复（2026-09-27 · 标题损坏）：点分编号（1.2 / 1.2.3 …）此前写作
     #    `[0-9]+(?:\.[0-9]+){0,7}[分隔符]+` —— 路径后**没有**分隔符时，
     #    正则引擎会回退成「更短的前缀 + 把点当分隔符」，把标题剥成残句：
@@ -98,7 +104,11 @@ _PURE_NUMBER_TITLE_RE = re.compile(r"[0-9]+(?:[.．][0-9]+)*")
 _YEAR_PREFIX_RE = re.compile(r"^\s*[0-9]{4}\s*年")
 
 # 合法存储编号：点分数字路径（1 / 1.1 / 1.1.1）
-_DOT_PATH_RE = re.compile(r"\d+(\.\d+)*")
+# ✅ R149（2026-10-31）：显式 ASCII 数字 —— Python ``\d`` 匹配 Unicode Nd
+#（含全角"１２"），旧实现会把全角段原样带进 ``stored_id_to_prefix`` 产出
+#（"１２.３" → 前缀 "３" 写进落库正文），与前端 outlineNumbering.ts 折算
+# ASCII 的判据分叉。canonical 数据编号只由 renumber 产出（恒 ASCII）。
+_DOT_PATH_RE = re.compile(r"[0-9]+(\.[0-9]+)*")
 
 
 def strip_outline_numbering(title: str) -> str:
@@ -168,7 +178,10 @@ def strip_outline_numbering_all(title: str) -> str:
 #: 而非章节编号：剥掉就丢了子项归属（"1.2.3（1）细部构造" 剥净成 "细部构造"，
 #: 子项与哪一章无关）。多轮剥章节编号时必须在遇到它之前停下。
 _SUB_ITEM_MARKER_RE = re.compile(
-    r"^\s*(?:[（(][一二三四五六七八九十0-9]+[)）]|[0-9]{1,3}\s*[)）])")
+    r"^\s*(?:[（(][一二三四五六七八九十0-9]+[)）]|[0-9]{1,3}\s*[)）]"
+    # ✅ 2026-10-31：字母子项（"a）"）与数字子项同属正文标记，目录树多轮剥离
+    #    到它即停（正文子标题路径走 strip_outline_numbering_all，无此闸门，仍剥净）。
+    r"|[a-zA-Z]{1,2}\s*[)）])")
 
 
 def strip_outline_numbering_tree(title: str) -> str:
@@ -197,6 +210,26 @@ def strip_outline_numbering_tree(title: str) -> str:
         if new == s:
             break
         s = new
+    return s
+
+
+def sanitize_outline_title(text: str) -> str:
+    """标题字符级清洗（R149 · 2026-10-31）：CR/LF 折为单个空格。
+
+    背景：全仓此前唯一的标题换行拦截在 ``outline_title_fix`` 的重写出口
+    （R73b F4「新标题含换行」拒收），而 AI 生成 / 上传识别 / 目录库 /
+    手工保存的主写入链路都不清洗 —— 内嵌换行的标题原样落库后：前端树把
+    两行渲进一个节点、DOCX 标题段内嵌换行、剥编号正则按 ``^`` 只命中
+    第一行（换行后的行不参与剥离）；而占位检测 ``_STRIP_RE`` 剥空白 ⇒
+    检出/复检全部「看不见」该问题（静默穿透）。
+    只清洗 CR/LF（唯一有实证的破坏形态，与 outline_title_fix 拒收红线
+    同字符集）；无换行时逐字返回（恒等快路径）。
+    """
+    s = str(text or "")
+    if not s:
+        return s
+    if "\r" in s or "\n" in s:
+        s = re.sub(r"\s*[\r\n]+\s*", " ", s).strip()
     return s
 
 
@@ -257,7 +290,11 @@ def renumber_outline_nodes(nodes: list, *, strip_titles: bool = True,
         #    「（1）」一起吃掉、损坏目录树标题。tree 档首轮与单轮逐字等价（既有
         #    锁定契约不变），仅在未收敛时多剥，且到子项标记即停。
         if strip_titles and node.get("title"):
-            node["title"] = strip_outline_numbering_tree(str(node["title"]))
+            # ✅ R149（2026-10-31）：剥编号后再清洗换行（CR/LF 折空格）——
+            #    AI / OCR / 目录库来源的标题可能内嵌换行，原样落库会进 DOCX
+            #    标题段并使剥编号正则只命中第一行。
+            node["title"] = sanitize_outline_title(
+                strip_outline_numbering_tree(str(node["title"])))
         # 确保 children 是合法列表
         children = node.get("children")
         if not isinstance(children, list):
@@ -394,6 +431,12 @@ def _stored_id_parts(stored_id) -> list[str]:
     静默改写落库正文（且导出与前端口径随之错位）。现收敛到唯一判据：
     仅接受 str / int 且整体匹配点分数字路径；类型不符、形态不符、含 0 号段
     （编号从 1 起，脏数据 0 号不存在）一律非法。
+    ✅ R149（2026-10-31）：补齐 D-8a 注释自declared要堵的判据洞 ——
+    ① 前导零段（"01.02" / "1.00"）：旧判据只拒字面 "0"，"00"/"01" 段被放行，
+       ``stored_id_to_prefix("01.02")`` 产出 "02" 写进落库正文（导出端按
+       整数计数器给 "2.1" ⇒ 正文与成稿文本级分叉）；前端对前导零段折算
+       ASCII 渲染，两侧判据分叉。fail-closed 与 "0" 号段同一口径。
+    ② 非 ASCII 数字段：由 ``_DOT_PATH_RE`` 的 ASCII 化拦截（见其注释）。
     """
     if isinstance(stored_id, bool) or not isinstance(stored_id, (str, int)):
         return []
@@ -401,8 +444,10 @@ def _stored_id_parts(stored_id) -> list[str]:
     if not _DOT_PATH_RE.fullmatch(s):
         return []
     parts = s.split(".")
-    if any(p == "0" for p in parts):
-        return []
+    for p in parts:
+        if p == "0" or (len(p) > 1 and p[0] == "0"):
+            # 0 号段 / 前导零段（"00"、"01"）一律非法
+            return []
     return parts
 
 
@@ -460,7 +505,9 @@ def stored_id_to_prefix(stored_id: str) -> str:
 def renumber_section_body_subheadings(
         content: str, section_number: str, section_level: int = 1,
         section_title: str = "",
-        has_db_children: bool = False) -> tuple[str, list[dict]]:
+        has_db_children: bool = False,
+        rename_from: str = "",
+        section_id: str = "") -> tuple[str, list[dict]]:
     """把章节正文内的子标题编号规范化为导出口径（幂等、无损）。
 
     背景（编号统一 · 2026-09-25）：AI 撰写正文时以提示词注入的存储态编号
@@ -485,6 +532,11 @@ def renumber_section_body_subheadings(
         section_title: 本节裸标题（用于剥离正文开头与标题重复的块，与导出同口径）。
         has_db_children: 本节是否有 DB 子章节（用于 E3 降级判定：有子女时正文子标题
             改走节内 body 命名空间 1）/ a、…，与 DB 子章节彻底隔离）。默认 False。
+        rename_from: 本节**改名前**的标题（仅改名时需要传）。传入时先把正文开头与
+            旧标题重复的块改写为新标题，再走编号规范化（详见下方 R137 说明）。
+            默认空串 —— 旧行为逐字不变。
+        section_id: 本节 ID，**仅用于日志定位**（「层级不齐」告警的章节标签）。
+            ✅ R138 新增，默认空串 ⇒ 旧行为逐字不变。
 
     Returns:
         (规范化后正文, changes)；changes 元素为
@@ -504,11 +556,53 @@ def renumber_section_body_subheadings(
     # 依赖方向恢复为 routers → services。此处仍用函数级 import 以避免
     # 任何残余的导入期环（content_blocks 模块级已引用本模块的 ALPHABET）。
     from app.services.content_blocks import (
-        _compute_subheading,
         _parse_content_blocks,
         _strip_duplicate_leading_title,
         _strip_title_number,
+        number_body_subheadings,
+        select_numbering_blocks,
     )
+
+    # ✅ R137（2026-10-28 · BUG-2「改名后旧标题变幽灵子标题」）：
+    #    R89 BUG-N1 只做到「改名触发重规范化」，未同步正文首行的**旧**标题块 ——
+    #    下方按**新**标题比对，旧标题块不再被排除计数 ⇒ 它突然参与编号，被写成
+    #    "1.1 旧标题"（合法外形的幽灵子标题），并把其后真子标题整体顺移一格；
+    #    且任一次后续保存都稳定在该错误态（探针实测 after rename == after resave）。
+    #    现先把前导重复块（按**旧**标题识别）改写为新标题：改写后它自然匹配新标题
+    #    ⇒ 继续被排除计数（正文零丢失、不占编号格子），导出端
+    #    _strip_duplicate_leading_title(新标题) 也会命中并丢弃该块。
+    #    先改文本、后续仍走同一套解析与算法，不引入第二条编号实现。
+    _rename_changes: list[dict] = []
+    if rename_from and str(rename_from).strip():
+        _old_bare = strip_outline_numbering(str(rename_from).strip())
+        _new_bare = strip_outline_numbering(str(section_title or "").strip())
+        if _old_bare and _new_bare and _old_bare != _new_bare:
+            _blocks0 = _parse_content_blocks(content)
+            _kept0 = _strip_duplicate_leading_title(_blocks0, _old_bare)
+            _lead = _blocks0[:len(_blocks0) - len(_kept0)]
+            if _lead:
+                _lines0 = content.split("\n")
+                for _b in _lead:
+                    _src0 = _b.get("src_line")
+                    if not isinstance(_src0, int) or not (0 <= _src0 < len(_lines0)):
+                        continue
+                    _line0 = _lines0[_src0]
+                    _indent0 = _line0[:len(_line0) - len(_line0.lstrip())]
+                    # 与下方重写源行同口径：行首 BOM 不参与 #-标题形态判定
+                    _m0 = re.match(r"^(#{1,6})\s+",
+                                   _line0.lstrip().lstrip("\ufeff").lstrip())
+                    _new_line0 = (
+                        f"{_indent0}{_m0.group(1)} {_new_bare}" if _m0 else
+                        f"{_indent0}{'#' * min(int(_b.get('level') or 2), 6)} {_new_bare}")
+                    if _new_line0 == _line0:
+                        continue
+                    _lines0[_src0] = _new_line0
+                    _rename_changes.append(
+                        {"line": _src0 + 1,
+                         "old": str(_b.get("text") or ""),
+                         "new": _new_bare})
+                if _rename_changes:
+                    content = "\n".join(_lines0)
 
     lines = content.split("\n")
     blocks = _parse_content_blocks(content)
@@ -536,11 +630,13 @@ def renumber_section_body_subheadings(
     #    故两遍都统一走 ``_renumberable``（不含 _from_fence 块），保持
     #    test_outline_generation_gaps_20261008.py::D-8g 确立的既有契约
     #    「代码围栏/围栏内内容一概不动」。
-    _renumberable = [b for b in blocks
-                     if b.get("type") == "heading" and not b.get("_from_fence")]
+    # ✅ R149（2026-10-31）：块选择上收共享选择器 select_numbering_blocks
+    #    （与导出预检 / 导出写稿同源）—— R138 只收口了循环体，「传哪些块」
+    #    仍是各自为政：导出两处传全量 ⇒ 围栏派生标题在成稿占号、预览不占号，
+    #    同一份正文两侧编号错位一格。选择器语义与本处原实现逐字等价。
+    _renumberable = select_numbering_blocks(blocks)
 
     # 第一遍：按导出同款算法为每个标题块计算规范化文本
-    sub_counters: dict = {}
     try:
         sec_level = max(1, min(int(section_level or 1), 8))
     except (TypeError, ValueError):
@@ -552,14 +648,13 @@ def renumber_section_body_subheadings(
         _demote = has_db_children and _s.body_subheading_demote_with_children
     except Exception:
         pass
-    for block in _renumberable:
-        if block.get("type") != "heading":
-            continue
-        pure = _strip_title_number(block.get("text", ""))
-        text, _style = _compute_subheading(
-            section_prefix, sec_level, block.get("level", 1), sub_counters,
-            pure, "", has_children=_demote)
-        block["_fixed_text"] = text
+    # ✅ R138（L-3 收口）：循环体与参数拼装收口到 number_body_subheadings
+    #    （与导出预检 / 导出写稿共用同一实现，消除「同算法多入口」）。
+    #    旧实现在此传 sec_id="" ⇒「层级不齐」告警只能打到 "?"，与导出侧
+    #    同一告警的定位能力不一致（日志不准确）。现传真实 section_id。
+    number_body_subheadings(
+        _renumberable, section_prefix=section_prefix, section_level=sec_level,
+        sec_id=section_id, has_children=_demote)
 
     # 第二遍：把规范化文本精确重写回源行（#-标题保留井号与缩进；纯文本标题整行替换）
     changes: list[dict] = []
@@ -599,10 +694,10 @@ def renumber_section_body_subheadings(
         changes.append({"line": src + 1, "old": orig_text, "new": fixed})
 
     if not rewrites:
-        return content, []
+        return content, _rename_changes
     for idx, new_line in rewrites.items():
         lines[idx] = new_line
-    return "\n".join(lines), changes
+    return "\n".join(lines), _rename_changes + changes
 
 
 # ============================================================
@@ -637,6 +732,8 @@ async def load_scheme_section_index(db, scheme_id: str) -> dict:
     empty: dict = {"meta": {}, "has_children": {}}
     meta: dict = {}
     has_children: dict = {}
+    # ✅ R138（L-1）：空编号章节的跳过计数（聚合后打一条 WARNING，不按章刷屏）
+    _skipped_no_number = 0
     try:
         cur = await db.execute(
             "SELECT id, outline_json, level, title FROM sections WHERE scheme_id=?",
@@ -653,13 +750,33 @@ async def load_scheme_section_index(db, scheme_id: str) -> dict:
             number = str(obj.get("id") or "").strip()
             if not number:
                 # 存储编号非法（历史脏数据 / UUID 主键）→ 与旧实现一致：跳过规范化
+                # ℹ️ R138（L-1）：跳过本身**不是**缺陷 —— 单章查库路径在同条件下
+                #    也返回原样（`normalize_section_content_subheadings` 的
+                #    `if not section_number: return content, False`），两条路径
+                #    结果一致，此处只是省掉一次查库。但旧实现是**静默**跳过：
+                #    方案里有多少章「永远不参与编号同步」无从观察（属于
+                #    「日志不准确」类）。现聚合计数，在循环后打一条 WARNING。
+                _skipped_no_number += 1
                 continue
             try:
                 level = int(r["level"] or 1)
             except (TypeError, ValueError):
                 level = 1
             meta[sid] = {"number": number, "level": level,
-                         "title": str(r["title"] or "")}
+                         "title": str(r["title"] or ""),
+                         # ✅ R138：携带本节 ID，使预取路径的「层级不齐」告警
+                         #    能定位到具体章节（与单章查库路径同口径）
+                         "section_id": sid}
+        if _skipped_no_number:
+            # ✅ R138（L-1 可观测性）：不阻断、不改写，只让「有多少章不参与
+            #    编号同步」变得可见。该状态会在任一次结构变更（增/删/拖拽/
+            #    保存目录）后由 `renumber_sections_after_reorder` 重算整树编号
+            #    而自动消失 —— 无需手工迁移。
+            logger.warning(
+                "方案 %s 预取编号索引：%d 个章节缺存储编号（outline_json.id 为空），"
+                "本次批量规范化将跳过这些章节（与单章路径同口径：不猜测编号，"
+                "避免正文子标题被误改名）；任一次结构变更会重算整树编号并自动消除该状态。",
+                str(scheme_id)[:8], _skipped_no_number)
         cur = await db.execute(
             "SELECT parent_id, COUNT(*) AS n FROM sections "
             "WHERE scheme_id=? AND COALESCE(parent_id,'')!='' GROUP BY parent_id",
@@ -672,17 +789,22 @@ async def load_scheme_section_index(db, scheme_id: str) -> dict:
     return {"meta": meta, "has_children": has_children}
 
 
-def _normalize_from_meta(content: str, info: dict, has_db_children: bool
+def _normalize_from_meta(content: str, info: dict, has_db_children: bool,
+                         rename_from: str = ""
                          ) -> tuple[str, bool]:
     """用已预取的元数据执行规范化（纯计算，无 IO）。
 
     与 `normalize_section_content_subheadings` 的查库之后那半段**逐行等价**，
     是「唯一编号算法」的第二入口：算法本体只此一份，批量/单章共用，
     避免出现第二套实现再次漂移。
+
+    `rename_from`：改名时的旧标题（透传给 renumber_section_body_subheadings），
+    默认空串 —— 非改名路径逐字不变。
     """
     new_content, changes = renumber_section_body_subheadings(
         content, info["number"], info["level"], info["title"],
-        has_db_children=has_db_children)
+        has_db_children=has_db_children, rename_from=rename_from,
+        section_id=str(info.get("section_id") or ""))
     return new_content, bool(changes)
 
 
@@ -697,7 +819,8 @@ def _renumber_disabled() -> bool:
 
 async def normalize_section_content_subheadings(
         db, scheme_id: str, section_id: str, content: str,
-        *, index: dict | None = None) -> tuple[str, bool]:
+        *, index: dict | None = None,
+        rename_from: str = "") -> tuple[str, bool]:
     """正文落库前规范化 Markdown 子标题编号，返回 (规范化后正文, 是否发生改写)。
 
     与导出 write_section 同算法（renumber_section_body_subheadings），
@@ -717,6 +840,11 @@ async def normalize_section_content_subheadings(
     参数 `index`：批量调用方（`load_scheme_section_index`）预取的元数据。
     传入时**跳过全部查库**（消除 N+1）；缺省/查不到该章时回退到原逐章查询路径，
     因此本函数对既有单章调用方**完全向后兼容**（签名仅新增 keyword-only 可选参数）。
+
+    参数 `rename_from`：本节改名前标题。R137 新增，**默认空串 ⇒ 旧行为逐字不变**。
+    只有「改名」链路（update_section 的 title 变更）需要传；批量重规范化
+    （_renormalize_all_section_contents）不传 —— 批量场景正文首行早已在上一次
+    规范化中被同步，不存在「旧标题待改写」的情形。
     """
     if not content:
         return content, False
@@ -729,7 +857,8 @@ async def normalize_section_content_subheadings(
             if info is not None:
                 return _normalize_from_meta(
                     content, info,
-                    bool((index.get("has_children") or {}).get(section_id, False)))
+                    bool((index.get("has_children") or {}).get(section_id, False)),
+                    rename_from=rename_from)
 
         cur = await db.execute(
             "SELECT outline_json, level, title FROM sections WHERE id=? AND scheme_id=?",
@@ -760,8 +889,8 @@ async def normalize_section_content_subheadings(
         return _normalize_from_meta(
             content,
             {"number": section_number, "level": section_level,
-             "title": str(rec["title"] or "")},
-            has_db_children)
+             "title": str(rec["title"] or ""), "section_id": section_id},
+            has_db_children, rename_from=rename_from)
     except Exception as e:  # noqa: BLE001 — 编号规范化绝不能阻断正文落库
         import logging
         logging.getLogger("numbering").warning(

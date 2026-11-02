@@ -177,7 +177,8 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
                               page_count: int, parse_duration_s: float,
                               parse_engine: str,
                               warnings: list[str] | None = None,
-                              prev_version: str = "") -> dict:
+                              prev_version: str = "",
+                              source_page_count: int = 0) -> dict:
     """解析成功后：写解析层四份产物 + front-matter Markdown、分块入 doc_chunks、
     回写 meta 与 project_documents 时效列。
 
@@ -191,6 +192,11 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
 
     prev_version 为空 = 首次解析（v1）；非空 = 重解析（代次递增）。
     返回 {"parse_version", "chunk_count", "changed_chunks", ...}。
+
+    ✅ R136（2026-10-27）：新增 `source_page_count`（源文件真实总页数，仅 PDF
+    解析通道会传入）。`page_count` 语义是**已解析页数**（=正文中不同页标记
+    个数），两者此前混用同一值，导致 `parse_coverage` 恒为 1.0。新增参数默认 0
+    （未传 = 保持旧行为：总页数退化为已解析页数）。
     """
     parse_version = store.bump_parse_version(prev_version) if prev_version else "v1"
     structured = parse_markdown_structured(markdown, doc_id=doc_id)
@@ -330,7 +336,9 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
         (int(parse_duration_s * 1000), parse_version, _now(),
          meta.get("file_hash_md5", ""), meta.get("file_hash_sha256", ""),
          structured["page_count"], f"{parse_engine}+{PARSER_VERSION}",
-         _jdump(_completeness_snapshot(structured, chunks, None)), doc_id))
+         _jdump(_completeness_snapshot(structured, chunks, None,
+                                       source_page_count=source_page_count)),
+         doc_id))
     if meta_cur is None:
         logger.warning(
             "回写 project_documents 解析元数据未生效（db.execute 返回 None，R13），"
@@ -367,10 +375,20 @@ def _patched_row(c: dict, created: str,
 # ---------------------------------------------------------------------------
 
 def _completeness_snapshot(structured: dict, chunks: list[dict],
-                           extractions: dict | None) -> dict:
-    """解析层覆盖率快照（提取字段覆盖在 build_completeness_report 里合并）。"""
+                           extractions: dict | None,
+                           source_page_count: int = 0) -> dict:
+    """解析层覆盖率快照（提取字段覆盖在 build_completeness_report 里合并）。
+
+    ✅ R136（2026-10-27）：新增 `total_pages` 键（源文件真实总页数）。
+    `parsed_pages` 保持原语义（已解析页数）；`total_pages` 仅在解析通道上报了
+    真实总页数（PDF）时取该值，否则退化为 `parsed_pages`（非 PDF 格式本就
+    无分页概念，整体视为 1 页）——保证旧文档快照读不到本键时行为逐字不变。
+    """
+    parsed_pages = int(structured.get("page_count", 0) or 0)
+    src_pages = int(source_page_count or 0)
     return {
-        "parsed_pages": structured.get("page_count", 0),
+        "parsed_pages": parsed_pages,
+        "total_pages": src_pages if src_pages > 0 else parsed_pages,
         "total_tables": structured.get("table_count", 0),
         "extracted_tables": structured.get("table_count", 0),
         "total_images": structured.get("image_count", 0),
@@ -460,8 +478,15 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str,
         except ValueError:
             pass
 
+    # ✅ R136（2026-10-27，修复「parse_coverage 恒 1.0」）：总页数分母纳入
+    #    `snap["total_pages"]`（解析通道上报的源文件真实总页数）。旧实现的分母
+    #    三项（page_count 列 / total_pages_hint / parsed_pages）全是「已解析
+    #    页数」的同源派生，`max()` 取到的最大值必然等于 `parsed_pages` ⇒
+    #    覆盖率恒等 1.0，截页 PDF 看不出来。旧快照无该键时回落 0，max() 行为
+    #    与引入前逐字一致（向后兼容）。
     total_pages = max(int(_row_get(row, "page_count", 0) or 0), total_pages_hint,
-                      int(snap.get("parsed_pages") or 0))
+                      int(snap.get("parsed_pages") or 0),
+                      int(snap.get("total_pages") or 0))
     parsed_pages = int(snap.get("parsed_pages") or 0)
     parse_coverage = min(parsed_pages / total_pages, 1.0) if total_pages else (
         1.0 if parsed_pages else 0.0)
@@ -1145,6 +1170,12 @@ async def purge_document(db, *, doc_id: str, project_id: str) -> None:
         "DELETE FROM doc_chunks WHERE doc_id=?",
         "DELETE FROM doc_extractions WHERE doc_id=?",
         "DELETE FROM doc_validation_reports WHERE doc_id=?",
+        # ✅ R144（2026-10-29）：解析断点续跑检查点表只有 doc_id 主键、无
+        #    project_id，也不在 _PROJECT_SCOPED_TABLES → 删除/同名替换文档时
+        #    purge 不清理检查点行，每次删除/替换遗留一行孤儿（doc_id 为 UUID
+        #    不复用，无功能性影响，但属存储一致性缺口；若后续把检查点做成可
+        #    续跑入口，孤儿行会干扰「该文档是否有进行中检查点」的判断）。
+        "DELETE FROM doc_parse_checkpoints WHERE doc_id=?",
     )
     for idx, sql in enumerate(delete_sqls):
         _cur = await db.execute(sql, (doc_id,))

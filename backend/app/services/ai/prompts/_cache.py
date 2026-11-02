@@ -22,12 +22,14 @@ from pathlib import Path
 #    _metrics 顶层只依赖 stdlib（collections.Counter），不反向 import _cache/_registry，
 #    故此处顶层 import 无循环依赖风险；每个埋点内部已 try/except 兜底，计数失败
 #    绝不影响 prompt 渲染主流程。
-from ._metrics import record_render, record_render_error
+from ._metrics import (
+    record_missing_variables,
+    record_render,
+    record_render_error,
+)
 from ._registry import (
     _ALL_PROMPTS,
     clean_prompt_text,
-    extract_variables,
-    has_residual_placeholders,
     is_dynamic_placeholder,
     render_prompt,
     validate_prompt_variables,
@@ -302,6 +304,48 @@ def _get_prompt_cache() -> dict[str, str]:
         return _prompt_cache or {}
 
 
+def _select_prompt_content(key: str) -> tuple[str | None, str]:
+    """「DB 覆盖优先、空内容回退出厂默认」的**唯一判据**（读取侧）。
+
+    ✅ R168（2026-11-01 · G4）：旧实现把这段选择逻辑只写在 ``get_prompt`` 内部，
+    校验侧（``_registry.validate_prompt_variables``）只能拿内存注册表当基线 ——
+    外部直写 DB 改了占位符时，缺变量告警仍按出厂基线判定，会**漏报**。
+    现抽成单一函数，渲染路径与校验路径共用同一判据，杜绝两份选择逻辑分叉。
+
+    Returns:
+        ``(content, source)``：
+          * ``("内容", "db")``      —— DB 有非空白定制内容，采用；
+          * ``("内容", "empty_db")``—— DB 有行但空/纯空白，已回退出厂默认；
+          * ``("内容", "factory")`` —— DB 无该行，采用出厂默认；
+          * ``(None, "missing")``   —— 注册表也没有该 key（未知 key）。
+
+    纯读取：不加锁外的事务、不解析 ``{SHARED_*}``、不渲染、不计指标、不告警。
+    """
+    with _cache_lock:
+        cached = _get_prompt_cache().get(key)
+    if cached is not None and cached.strip():
+        return cached, "db"
+    meta = _ALL_PROMPTS.get(key)
+    if not meta:
+        return None, "missing"
+    source = "empty_db" if cached is not None else "factory"
+    return (meta.get("default_content") or meta.get("content", "")), source
+
+
+def get_effective_prompt_content(key: str) -> str:
+    """返回 key 当前**实际生效**的模板正文（DB 覆盖优先，空内容回退出厂默认）。
+
+    供 ``_registry.validate_prompt_variables`` 以「实际生效模板」为校验基线
+    （R168 / G4）：外部脚本/迁移直接写 ``prompt_templates`` 增删占位符后，
+    缺变量判定必须跟随生效模板，而不是停在内存注册表的出厂基线。
+
+    与 ``get_prompt`` 的差异：**不做** ``{SHARED_*}`` 解析、变量渲染、指标计数
+    与告警；未知 key 返回空串（不抛异常，便于校验侧 fail-soft）。
+    """
+    content, _source = _select_prompt_content(key)
+    return content or ""
+
+
 def get_prompt(key: str, **kwargs) -> str:
     """获取提示词，优先读取数据库，回退到硬编码。
 
@@ -320,31 +364,32 @@ def get_prompt(key: str, **kwargs) -> str:
     #    绝不吞异常。未知 key 的 ``return ""`` 在 try 内直接退出（不计入渲染，
     #    因为它不是任何已注册模板的渲染）。
     try:
-        with _cache_lock:
-            cached = _get_prompt_cache().get(key)
-        # 关键：仅当缓存内容包含有效字符时才采用 DB 版本
-        if cached is not None and cached.strip():
-            prompt = cached
-        else:
-            meta = _ALL_PROMPTS.get(key)
-            if not meta:
-                # ✅ R39 T1：先惰性补注册「定义在包外」的提示词（投标分析域 19 条），
-                #   再判定是否真的未知键。否则提示词管理页会列不出
-                #   这批模板，而提取侧也拿不到 DB 覆盖。
-                try:
-                    from app.services.ai.prompts._registry import register_lazy_prompts
-                    register_lazy_prompts()
-                except Exception as e:  # noqa: BLE001 - 补注册失败不得影响读取
-                    logger.warning("惰性补注册失败: %s", e)
-                meta = _ALL_PROMPTS.get(key)
-            if not meta:
-                logger.warning("Prompt key '%s' not found in registry or cache", key)
-                return ""
-            if cached is not None and not cached.strip():
-                logger.warning(
-                    "Prompt '%s' 在数据库中内容为空，已回退到出厂默认（避免下发空提示词）", key
-                )
-            prompt = meta.get("default_content") or meta.get("content", "")
+        prompt, _source = _select_prompt_content(key)
+        if prompt is None:
+            # ✅ R39 T1：先惰性补注册「定义在包外」的提示词（投标分析域 19 条），
+            #   再判定是否真的未知键。否则提示词管理页会列不出
+            #   这批模板，而提取侧也拿不到 DB 覆盖。
+            try:
+                from app.services.ai.prompts._registry import register_lazy_prompts
+                register_lazy_prompts()
+            except Exception as e:  # noqa: BLE001 - 补注册失败不得影响读取
+                logger.warning("惰性补注册失败: %s", e)
+            prompt, _source = _select_prompt_content(key)
+        if prompt is None:
+            logger.warning("Prompt key '%s' not found in registry or cache", key)
+            return ""
+        if _source == "empty_db":
+            logger.warning(
+                "Prompt '%s' 在数据库中内容为空，已回退到出厂默认（避免下发空提示词）", key
+            )
+
+        # ✅ R168（2026-11-01 · G4）：校验基线必须是**本次实际生效的模板**
+        #   （DB 覆盖优先；空内容已回退出厂默认）。旧实现让
+        #   ``validate_prompt_variables`` 自带一套「内存注册表」基线 ——
+        #   外部脚本/迁移直接写 prompt_templates 增删占位符后，缺变量判定
+        #   仍按出厂形态算，DB 新增的占位符被漏报（G4）。现在把生效模板显式
+        #   传入，校验与渲染看到的是**同一份正文**，口径不可能再分叉。
+        _template_for_validation = prompt
 
         # ✅ 先动态解析 {SHARED_*} 占位符（避免其被误报为 missing 变量）
         prompt = _resolve_shared_keys(prompt)
@@ -362,7 +407,8 @@ def get_prompt(key: str, **kwargs) -> str:
         #   validate_prompt_variables() 自身一致（后者同样只在有 kwargs 时才有意义）。
         if kwargs:
             missing = [
-                v for v in validate_prompt_variables(key, **kwargs)
+                v for v in validate_prompt_variables(
+                    key, _template=_template_for_validation, **kwargs)
                 # ✅ R132-B（2026-10-23）：SHARED_* / 白名单动态占位改走
                 #    is_dynamic_placeholder 唯一判据（原为内联 startswith 副本）。
                 if not is_dynamic_placeholder(v)
@@ -372,6 +418,9 @@ def get_prompt(key: str, **kwargs) -> str:
                     "Prompt '%s' has missing variables (not passed in call): %s",
                     key, missing,
                 )
+                # ✅ R168：缺变量纳入运行时指标（D4 收口），运维在
+                #    /system/prompt-metrics 直接看到「哪个变量最常漏传」。
+                record_missing_variables(missing)
             prompt = render_prompt(prompt, **kwargs)
     except Exception:
         record_render_error(key)
@@ -379,34 +428,6 @@ def get_prompt(key: str, **kwargs) -> str:
 
     record_render(key)
     return prompt
-
-
-def get_prompt_with_validation(key: str, **kwargs) -> tuple[str, list[str]]:
-    """获取提示词并校验变量，返回 (提示词文本, 缺失变量列表)。
-
-    注意：与 get_prompt() 不同，本函数的职责就是"校验变量完整性"，
-    因此 kwargs 为空时仍会如实返回全部缺失变量（这是调用方明确索取的
-    校验结果，不是日志噪音）。日志噪音只来自 get_prompt() 的告警路径，
-    该路径已在 get_prompt() 内用 `if kwargs:` 收紧（2026-09-23 修复）。
-    """
-    prompt = get_prompt(key, **kwargs)
-    missing = [
-        v for v in validate_prompt_variables(key, **kwargs)
-        # ✅ R132-B（2026-10-23）：与 get_prompt / 渲染侧同一判据（唯一事实源）。
-        if not is_dynamic_placeholder(v)
-    ]
-
-    if not missing and has_residual_placeholders(prompt):
-        # ✅ R132-B（2026-10-23）：动态占位（{SHARED_*} / 白名单 CONTEXT）在
-        #    「取原始模板」时本就留在文本里、由后续 .replace / 共享解析注入，
-        #    不算渲染残留 —— 与 missing 过滤同一判据，避免本告警在
-        #    bid_item_* 空参校验路径上反向新增噪音。
-        residual = [v for v in extract_variables(prompt)
-                    if not is_dynamic_placeholder(v)]
-        if residual:
-            logger.warning("Prompt '%s' has residual placeholders after rendering: %s", key, residual)
-
-    return prompt, missing
 
 
 def get_db_overrides() -> dict[str, str]:

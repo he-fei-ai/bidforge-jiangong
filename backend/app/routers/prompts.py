@@ -380,10 +380,15 @@ async def rollback_prompt(key: str, body: dict, db=Depends(get_db),
 async def get_prompt_metrics():
     """提示词运行时指标快照（进程内内存计数器，不持久化、重启清零）。
 
-    顶层固定 6 个键：``render_total`` / ``render_errors`` /
-    ``token_budget_truncated`` / ``repair_triggered`` / ``ai_failure_by_scene``
-    五个维度 dict，外加 ``registered_keys``（注册表全部 key，供运维对照
-    「哪些模板从无人渲染过」）。
+    顶层固定 8 个键：``render_total`` / ``render_errors`` /
+    ``token_budget_truncated`` / ``repair_triggered`` / ``ai_failure_by_scene`` /
+    ``missing_variables_total`` / ``unresolved_placeholders_total`` 七个维度 dict，
+    外加 ``registered_keys``（注册表全部 key，供运维对照「哪些模板从无人渲染过」）。
+
+    - ``missing_variables_total``（R168 / D4）：调用方漏传的变量，按**变量名**计数，
+      直接回答「哪个占位符最常没传」；
+    - ``unresolved_placeholders_total``（R168 / D4）：渲染后仍残留的占位符，
+      按变量名计数（``{SHARED_*}`` 与 ``CONTEXT`` 等动态占位符不在此列）。
     """
     return _get_metrics_snapshot()
 

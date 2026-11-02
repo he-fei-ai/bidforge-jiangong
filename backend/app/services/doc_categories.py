@@ -102,7 +102,13 @@ def auto_classify_document(file_name: str, file_type: str = "") -> str:
 
     ``file_type`` 目前不参与判定，保留入参以兼容既有调用方签名。
     """
-    fname_lower = (file_name or "").lower()
+    # ✅ R144（2026-10-29）：按文档契约（「仅按文件名（不含扩展名）匹配」）
+    #    剥离扩展名后再匹配。旧实现对完整文件名（含扩展名）做子串匹配，与
+    #    docstring 不符 —— 当前受支持扩展名均不含关键词故无实际误分类，但
+    #    该口径漂移是潜在分类错误源（未来新增含关键词的扩展名、或文件名
+    #    恰好使扩展名命中关键词时，会误分类）。剥扩展名后对既有文件名
+    #    （关键词都在主干上）逐字节等价。
+    fname_lower = (file_name or "").rsplit(".", 1)[0].lower()
     for category, keywords in AUTO_CLASSIFY_RULES:
         for kw in keywords:
             if kw.lower() in fname_lower:

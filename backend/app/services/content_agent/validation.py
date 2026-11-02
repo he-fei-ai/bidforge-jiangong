@@ -63,7 +63,6 @@ def validate_workspace_sections(
     """
     root = Path(workspace_dir)
     expected_ids = [str(s.get("section_id") or "") for s in sections]
-    expected_set = set(expected_ids)
     expected_files = {section_relpath(sid) for sid in expected_ids}
 
     global_problems: list[str] = []

@@ -53,6 +53,7 @@ from app.services.content_polish import find_colloquial_hits, sanitize_ai_conten
 from app.services.content_utils import (
     auto_fix_unclosed_fences,
     find_unclosed_fences,
+    format_word_budget_tier_summary,
     strip_fenced_code_blocks,
 )
 from app.services.repair_record import save_repair
@@ -295,7 +296,8 @@ _CAPABILITY: dict[str, Capability] = {
         "请到「全局事实」页核对并确认来源，或解决多来源冲突。"),
     "DLV-16": _manual(
         "字数偏离目标容差带是**生成量**问题而非改写问题：扩写/缩写无法靠局部改写补齐。"
-        "请到「正文生成」页选择字数档位（简短800/标准1200/详细2000/超长2500）"
+        # 档位摘要由 content_utils 唯一拼装（R159）：档位变更后文案自动跟随，勿写字面量副本。
+        f"请到「正文生成」页选择字数档位（{format_word_budget_tier_summary()}）"
         "对偏差章节重新生成。"),
 }
 
@@ -914,20 +916,32 @@ async def _chain_section_fixes(section: dict, findings_for_section: list[dict],
                 "reason": "未能在正文中定位到该问题的具体位置，为避免无依据改写正文，"
                           "请按整改建议人工处理。",
                 "targets": [], "before": content[:4000], "after": content[:4000],
+                # ✅ D1：未定位项内容不变，全文透传（与上文 repaired 项同口径）。
+                "before_full": content, "after_full": content,
                 "problems": [], "chain_index": idx,
                 "sentence_idx": 0, "sentence_total": 0,
             })
             continue
-        sec_items, _pending, _skipped = await _fix_each_section(
+        sec_items, sec_pending, _skipped = await _fix_each_section(
             finding, [section], cap, scheme, facts, standards_text, targets)
         rec = sec_items[0] if sec_items else {}
-        after = rec.get("after") or content
+        # ✅ D1（2026-10-29 · 跨模块深度收口 · P1 数据丢失）：`_fix_each_section` 的
+        #    `items[].after` 只是**预览**（:815 `[:4000]` 截断）；链式累积与确认落库
+        #    必须用 `pending` 里的**全文**（:810 只把全文放 pending）。此前读
+        #    `rec["after"]` 会把 >4000 字章节逐链截断 —— 批量「一键修复全部阻断项」
+        #    确认后正文被砍到 4000 字，而单条 `/apply` 走 `apply_fix` 的 pending 全文
+        #    不受影响（两条入口不对称）。
+        after = sec_pending[0][2] if sec_pending else content
         items.append({
             "rule_id": rule_id, "section_id": section.get("id"),
             "section_title": section.get("title") or "",
             "mode": cap.mode, "status": rec.get("status", "failed"),
             "targets": targets, "before": content[:4000],
             "after": after[:4000], "problems": rec.get("problems", []),
+            # ✅ D1：全文透传（`stage_fixes` 经 save_repair 落库，`/confirm` 的
+            #    `_merged_after_if_prefix` 据此落库全文；预览键 before/after 仍保持
+            #    [:4000] 展示契约不变，加法式新键对旧前端零影响）。
+            "before_full": content, "after_full": after,
             "chain_index": idx,
             "sentence_idx": targets[0].get("sentence_idx", 0) if targets else 0,
             "sentence_total": targets[0].get("sentence_total", 0) if targets else 0,

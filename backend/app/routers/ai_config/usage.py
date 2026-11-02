@@ -1,10 +1,21 @@
 """AI 配置路由 · 用量统计 / 审计日志（stats / audit-logs）。"""
+import math
+
 from fastapi import APIRouter, Depends
 
 from app.db import get_db, read_db, safe_rowcount
 from app.models import AuditLogCleanup
+from app.services.ai.error_taxonomy import classify_error, error_class_label
 
 router = APIRouter(tags=["ai_config"])
+
+
+def _p95(values: list) -> float:
+    """最近邻秩法 P95（不引 numpy，SQLite 无内置百分位）：sorted[ceil(0.95n)-1]。"""
+    if not values:
+        return 0.0
+    vs = sorted(values)
+    return round(vs[max(0, math.ceil(0.95 * len(vs)) - 1)], 2)
 
 
 @router.get("/stats")
@@ -30,6 +41,14 @@ async def ai_stats(days: int = 30, db=Depends(read_db)):
       （action='chat'），「熔断器跳过」（circuit_skipped）单列 skipped_count。
       旧口径把 3180 条「压根没发出去的请求」算作失败，成功率被系统性低估
       （agnes-3.0-flash 显示 13.9% vs 真实 37.6%）。
+
+    ✅ R150（2026-10-31 · 统一 AI 网关 · 盘点基线）：两个纯加法键 ——
+      1) by_provider[].p95_duration_ok：成功调用耗时 P95（最近邻秩法，
+         Python 侧聚合；AVG 被长尾稀释，P95 才能回答「谁在拖慢交付」）；
+      2) by_error_class：结构化错误分类计数（error_taxonomy 单一事实源，
+         与网关瞬态退避同判据），failed_calls（真实调用失败）与
+         skipped_calls（门禁跳过）分开计数 —— 429/超时/空响应等终于
+         有「类」级口径，不再只能看原文 TOP8。
     """
     days = max(1, min(int(days or 30), 365))
     since = f"-{days} days"
@@ -54,6 +73,24 @@ async def ai_stats(days: int = 30, db=Depends(read_db)):
         (since,)
     )
     by_provider = [dict(r) for r in await cur.fetchall()]
+
+    # ✅ R150（统一 AI 网关 · 盘点基线）：P95 成功耗时 —— AVG 会被长尾稀释
+    #    （30 天 avg 25s vs P95 67s），「哪个厂商拖慢交付」只有分位数能回答。
+    #    成功调用 duration 在 Python 侧分组取最近邻秩 P95（SQLite 无内置百分位，
+    #    不写自定义聚合函数，避免 db 层侵入）。
+    cur = await db.execute(
+        "SELECT provider_name, model, COALESCE(config_id,'') as config_id,"
+        " COALESCE(base_url,'') as base_url, duration FROM ai_audit_logs "
+        "WHERE action='chat' AND success=1 "
+        "AND created_at >= datetime('now','localtime',?)", (since,))
+    _durs: dict[tuple, list] = {}
+    for r in await cur.fetchall():
+        _durs.setdefault(
+            (r["provider_name"], r["model"], r["config_id"], r["base_url"]), []
+        ).append(r["duration"] or 0.0)
+    for p in by_provider:
+        _key = (p["provider_name"], p["model"], p["config_id"], p["base_url"])
+        p["p95_duration_ok"] = _p95(_durs.get(_key, []))
     cur = await db.execute(
         "SELECT provider_name, model, COALESCE(config_id,'') as config_id,"
         " COALESCE(base_url,'') as base_url, COUNT(*) as n FROM ai_audit_logs "
@@ -179,8 +216,35 @@ async def ai_stats(days: int = 30, db=Depends(read_db)):
             (s["cached_tokens"] or 0) * 100.0 / s["prompt_tokens"], 1
         ) if s.get("prompt_tokens") else None
 
+    # ✅ R150（统一 AI 网关 · 盘点基线）：结构化错误分类 —— 旧 by_error 是
+    # 「原文截断 TOP8」，回答不了「429 一共多少次 / 超时多少次 / 格式错误
+    # 多少次」。分类判据与网关瞬态退避同源（error_taxonomy.classify_error，
+    # 单一事实源），真实失败（chat）与门禁跳过（circuit_skipped 等）合并
+    # 分类但分开计数 —— 「发出去失败了」与「压根没发出去」是两类事件。
+    cur = await db.execute(
+        "SELECT action, error FROM ai_audit_logs "
+        "WHERE success=0 AND created_at >= datetime('now','localtime',?)",
+        (since,))
+    _fail_cls: dict[str, int] = {}
+    _skip_cls: dict[str, int] = {}
+    for r in await cur.fetchall():
+        cls = classify_error(r["error"] or "")
+        if r["action"] == "chat":
+            _fail_cls[cls] = _fail_cls.get(cls, 0) + 1
+        else:
+            _skip_cls[cls] = _skip_cls.get(cls, 0) + 1
+    by_error_class = [
+        {"error_class": cls, "label": error_class_label(cls),
+         "failed_calls": _fail_cls.get(cls, 0),
+         "skipped_calls": _skip_cls.get(cls, 0),
+         "total": _fail_cls.get(cls, 0) + _skip_cls.get(cls, 0)}
+        for cls in sorted(set(_fail_cls) | set(_skip_cls),
+                          key=lambda c: -(_fail_cls.get(c, 0) + _skip_cls.get(c, 0)))
+    ]
+
     return {"by_provider": by_provider, "by_action": by_action,
             "by_error": by_error, "by_scene": by_scene,
+            "by_error_class": by_error_class,
             "summary": summary, "daily": daily}
 
 

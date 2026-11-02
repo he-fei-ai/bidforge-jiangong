@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.db import get_db, get_read_conn, release_read_conn, safe_rowcount
 from app.models import OutlineLibraryCreate, OutlineLibraryUpdate
+from app.services.outline_rules import OUTLINE_MAX_LEVEL
 
 router = APIRouter(prefix="/api/v1/outline-library", tags=["outline_library"])
 
@@ -30,7 +31,7 @@ REVIEW_STATUSES = ("待审核", "已通过", "已停用")
 
 
 def _normalize_outline(raw) -> str:
-    """入库前统一规范化（三级裁剪 + 编号重排 + 解包 {"outline": [...]}）"""
+    """入库前统一规范化（深度钳位至 OUTLINE_MAX_LEVEL + 编号重排 + 解包 {"outline": [...]}）"""
     from app.services.outline_utils import normalize_outline_json
     return normalize_outline_json(raw)
 
@@ -38,7 +39,8 @@ def _normalize_outline(raw) -> str:
 def _count_nodes(nodes, _depth: int = 0) -> int:
     """统计目录树节点总数（含全部层级）
 
-    ✅ 健壮性：加深度上限。入库路径都已 normalize 到三级，但导出/详情等只读路径
+    ✅ 健壮性：加深度上限。入库路径都已 normalize 到 OUTLINE_MAX_LEVEL 级，
+    但导出/详情等只读路径
     面对历史脏数据（或畸形 JSON）时不应因递归深度触发 RecursionError 让接口 500。
     """
     if not isinstance(nodes, list) or _depth > 12:
@@ -416,7 +418,13 @@ async def create_from_scheme(body: dict, db=Depends(get_db)):
     if not rows:
         raise HTTPException(400, "该方案暂无目录，无法存为目录库")
 
-    # 扁平行 → 三级树（与 sections 表一致的父子结构还原）
+    # 扁平行 → 树（与 sections 表一致的父子结构还原）。
+    # ✅ R153（2026-11-01）：下降深度由 OUTLINE_MAX_LEVEL 单一事实源驱动。
+    #    旧实现硬编码 level < 3，R151「四级叶子」与 R162「三级最小叶子 + 四级
+    #    兼容层」（L4 仍可存在）下，方案沉淀到目录库会静默丢弃全部 L4 章节。
+    #    旧字面同时兼做 parent_id 环防护，故修复保持有界下降（递归至多到
+    #    OUTLINE_MAX_LEVEL 层）；入库仍经 _normalize_outline（深度钳位 + 编号
+    #    重排），与其他入库路径同口径。
     by_parent: dict[str, list[dict]] = {}
     for r in rows:
         by_parent.setdefault(r.get("parent_id") or "", []).append(r)
@@ -427,7 +435,8 @@ async def create_from_scheme(body: dict, db=Depends(get_db)):
             node = {
                 "title": r.get("title") or "",
                 "description": r.get("description") or "",
-                "children": build(r["id"], level + 1) if level < 3 else [],
+                "children": build(r["id"], level + 1)
+                if level < OUTLINE_MAX_LEVEL else [],
             }
             # ✅ 增强（2026-09-18）：一并沉淀章节字数预算。旧实现只带
             #    title/description/children → 该目录库再被套用到新方案时各章
@@ -462,7 +471,12 @@ async def create_from_scheme(body: dict, db=Depends(get_db)):
          "v1.0", "方案沉淀", "待审核", 0))
     await db.commit()
     cur = await db.execute(f"SELECT {_LIST_COLS} FROM outline_library WHERE id=?", (new_id,))
-    return dict(await cur.fetchone())
+    record = dict(await cur.fetchone())
+    # ✅ R153（2026-11-01）：静默丢弃改为计数回传。孤儿行（parent 已删 /
+    #    parent_id 悬空）与超出 OUTLINE_MAX_LEVEL 的脏行此前无声消失；
+    #    dropped_sections 为加法式键，既有前端消费零影响。
+    record["dropped_sections"] = len(rows) - _count_nodes(outline)
+    return record
 
 
 @router.post("/{library_id}/duplicate")

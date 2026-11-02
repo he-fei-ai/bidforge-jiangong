@@ -2,6 +2,8 @@
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
+import httpx
+
 # 已知支持图片/视觉能力的模型名（小写匹配）
 _VISION_KEYWORDS = (
     "vision", "gpt-4o", "gpt-4v", "gpt-4-turbo", "gpt-4.1",
@@ -197,6 +199,62 @@ def proxy_url_from(proxies: dict | None) -> str | None:
     if not proxies:
         return None
     return next(iter(proxies.values()), None)
+
+
+class VendorHTTPError(httpx.HTTPStatusError):
+    """厂商返回 HTTP >= 400（R150 统一 AI 网关 · 结构化异常）。
+
+    继承 ``httpx.HTTPStatusError``：``openai_compatible.stream()`` 的
+    stream_options / response_format 降级重试按该类型捕获（既有契约），
+    换成裸 RuntimeError 会把这条降级链打死（R150 首版实测回归，
+    test_ai_config_request_mode 双用例当场抓住）。文本形态与旧实现
+    **逐字一致**（``"HTTP {status}: {body}"``），``_status_from_error`` /
+    ``is_non_retryable_error`` / 审计摘要等既有文本判据零感知；额外携带：
+
+    - ``status``：HTTP 状态码（int）；
+    - ``retry_after``：``Retry-After`` 头解析出的秒数（float | None），
+      供网关瞬态退避尊重厂商限流窗口（``parse_retry_after``）；
+    - ``request`` / ``response``：httpx 原生属性（缺省给占位对象，
+      保证 ``except httpx.HTTPStatusError as e: e.response...`` 恒可用）。
+    """
+
+    def __init__(self, status: int, body: str = "",
+                 retry_after: float | None = None,
+                 *, request: "httpx.Request | None" = None,
+                 response: "httpx.Response | None" = None):
+        super().__init__(
+            f"HTTP {int(status)}: {body or ''}",
+            request=request or httpx.Request("POST", "https://vendor.invalid"),
+            response=response or httpx.Response(int(status)))
+        self.status = int(status)
+        self.retry_after = retry_after
+
+
+def parse_retry_after(value) -> float | None:
+    """解析 ``Retry-After`` 头（RFC 7231：秒数或 HTTP-date）。
+
+    解析失败 / 负值 / 非法值一律返回 ``None``（调用方回落指数退避），
+    绝不抛异常 —— 头解析失败不能影响调用主流程。
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        secs = float(s)
+        return secs if secs >= 0 else None
+    except ValueError:
+        pass
+    # HTTP-date 形态：与当前时间求差（本地时区差异可容忍，偏差交给调用方钳制）
+    try:
+        from datetime import datetime as _dt
+        from email.utils import parsedate_to_datetime
+        target = parsedate_to_datetime(s)
+        remain = (target - _dt.now(target.tzinfo)).total_seconds()
+        return round(remain, 2) if remain >= 0 else 0.0
+    except Exception:
+        return None
 
 
 def is_vision_model(model_name: str) -> bool:

@@ -74,10 +74,24 @@ async def repair(scheme_id: str, body: dict | None = None,
         target.conflicts = list(conflicts.get(target.section_id) or [])
 
     facts_text = await build_global_facts_text(db, scheme_id)
+    # ✅ R143（2026-10-29 · 跨模块深度收口 · P1）：此前本路由传 `resync_fn=None`，
+    #    而 `repair_agent` 集成路径（repair.py:313 消费）在正文 UPDATE 同事务内
+    #    **全量重登记本章内联图表**（R92 写点同步补链，消除「登记/正文」两侧漂移）。
+    #    路由入口漏注入 ⇒ 经 `POST /content-agent/repair` 的 Agent 修复回写正文后
+    #    `chart_registry` 与正文图表块可能失同步（旧图号/旧登记残留）。
+    #    现按 `consistency_repair._make_chart_resync` 同一口径注入（enforce_limits=False：
+    #    对既有正文的改写不因程序级配图上限反向删图，与手动保存 B31 同口径）。
+    from app.routers._chart_pipeline import resync_inline_charts
     from app.services.content_agent.repair import run_agent_section_repair
+
+    async def _resync(_db, _sid, _content):
+        _n, _fixed = await resync_inline_charts(
+            _db, scheme_id, _sid, _content, enforce_limits=False)
+        return _fixed
+
     result = await run_agent_section_repair(
         db, scheme_id=scheme_id, targets=targets, facts_text=facts_text,
-        resync_fn=None,  # 路由层可按需注入 _chart_pipeline.resync 图表重登记
+        resync_fn=_resync,
         max_turns=body.get("max_turns"),
         total_timeout=body.get("timeout"))
     return {"ok": result.status != "failed", **result.to_dict()}

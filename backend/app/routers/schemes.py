@@ -199,13 +199,14 @@ async def delete_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
     if not row:
         raise HTTPException(404, "方案不存在")
 
-    await db.execute("DELETE FROM sections WHERE scheme_id=?", (scheme_id,))
-    # ✅ 级联补全：consistency_conflicts / consistency_repairs / scheme_snapshots
-    # 均以 scheme_id 关联且无外键约束，旧清单遗漏会残留孤儿行。
-    for table in ("global_facts", "chart_predictions", "compliance_check",
-                  "consistency_audit", "consistency_conflicts", "consistency_repairs",
-                  "scheme_snapshots", "export_cache", "task_registry",
-                  "preflight_runs", "review_records"):
+    # ✅ R149（2026-10-31 · FIX-K）：级联清单单一事实源 —— 与
+    #    projects._SCHEME_SCOPED_TABLES 对齐。旧内联清单漏
+    #    consistency_scan_cache（「章节正文 hash → 扫描结果」缓存，projects.py
+    #    注释自证曾长期漏删，删项目链路修过、本独立写路径未回灌 ⇒ 单独删方案
+    #    残留孤儿行）与 placeholder_baselines（自带 CASCADE 但测试连接/历史库
+    #    未开 PRAGMA foreign_keys=ON，级联不生效，projects.py 同款显式删除）。
+    from app.routers.projects import _SCHEME_SCOPED_TABLES
+    for table in _SCHEME_SCOPED_TABLES:
         await db.execute(f"DELETE FROM {table} WHERE scheme_id=?", (scheme_id,))
     await db.execute(
         "DELETE FROM facts_extracted_chunks WHERE project_id=? AND scheme_id=?",
@@ -229,11 +230,14 @@ async def delete_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
         logging.getLogger("schemes").warning("清理总检缓存失败: %s", e)
 
     # 清理磁盘导出文件（命名含 scheme_id 前缀）
+    # ✅ R149（FIX-K）：与 projects 删项目链路同口径清 docx+pdf 双扩展名
+    #    （R126 已下线 PDF 导出，但历史遗留 .pdf 产物仍残留在磁盘）。
     removed_files = 0
     try:
-        for f in EXPORTS_DIR.glob(f"{scheme_id}_*.docx"):
-            f.unlink(missing_ok=True)
-            removed_files += 1
+        for _ext in ("docx", "pdf"):
+            for f in EXPORTS_DIR.glob(f"{scheme_id}_*.{_ext}"):
+                f.unlink(missing_ok=True)
+                removed_files += 1
     except OSError as e:
         # 删除失败不阻塞（文件残留无害，下次导出同内容会覆写）
         import logging

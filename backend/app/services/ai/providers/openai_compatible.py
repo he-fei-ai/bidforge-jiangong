@@ -7,7 +7,12 @@ import httpx
 
 from app.services.ai.http_pool import get_async_client
 from app.services.ai.json_mode_compat import response_format_rejected
-from app.services.ai.providers.base import BaseProvider, normalize_messages
+from app.services.ai.providers.base import (
+    BaseProvider,
+    VendorHTTPError,
+    normalize_messages,
+    parse_retry_after,
+)
 
 logger = logging.getLogger("ai_provider")
 
@@ -88,7 +93,12 @@ class OpenAICompatibleProvider(BaseProvider):
                     payload.pop("response_format", None)
                     json_mode = False
                     continue
-                raise RuntimeError(f"HTTP {resp.status_code}: {body_text}")
+                # ✅ R150：结构化异常（文本形态不变，供文本判据零感知）——
+                #    携带状态码 + Retry-After，供网关瞬态退避尊重厂商限流窗口。
+                raise VendorHTTPError(
+                    resp.status_code, body_text,
+                    parse_retry_after(resp.headers.get("retry-after")),
+                    request=resp.request, response=resp)
             resp.raise_for_status()
             break
         data = resp.json()
@@ -208,7 +218,22 @@ class OpenAICompatibleProvider(BaseProvider):
         async with client.stream("POST", f"{self.base_url}/chat/completions",
                                  json=payload, headers=headers,
                                  timeout=self.timeout) as resp:
-            resp.raise_for_status()
+            # ✅ R150：流式路径同样抛结构化异常（带 Retry-After），与 chat() 同口径
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                _r = getattr(e, "response", None)
+                _body = ""
+                try:
+                    _body = str(getattr(_r, "text", "") or "")[:800]
+                except Exception:
+                    pass
+                raise VendorHTTPError(
+                    getattr(_r, "status_code", 500) or 500, _body,
+                    parse_retry_after(
+                        _r.headers.get("retry-after") if _r is not None else None),
+                    request=getattr(_r, "request", None),
+                    response=_r) from e
             async for line in resp.aiter_lines():
                 if not line.startswith("data:"):
                     continue

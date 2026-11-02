@@ -448,10 +448,189 @@ def _self_heal_corrupt_wal() -> bool:
     return True
 
 
+# ---------- 主库损坏自检与抢救重建（R163 · 2026-11-01） ----------
+# 生产事故（logs/backend.log 2026-11-01 18:58~19:18）：主库 b-tree 损坏
+# （system_logs 表 root page 5675 + idx_system_logs_level root page 5713），
+# `PRAGMA integrity_check` 直接抛 database disk image is malformed。
+# 但启动自愈 _self_heal_corrupt_wal 只在「存在 -wal 文件」时才做完整性自检，
+# 而事故当天启动时无 -wal（SQLite 建连后才新建空 WAL），于是损坏主库被原样
+# 服务：所有 system_logs 写入恒失败、正文生成在首笔 DB 操作处抛
+# malformed（前端只看到「后端连接超时（30s 无响应）」这类误导性提示）。
+# 现补齐「主库自检 + 抢救重建」：启动时 quick_check 不通过 → 备份原库 →
+# 按表/索引重建干净库（表可整表读就整表拷，损坏表逐行抢救）→ 校验通过才替换。
+# 全程 fail-soft：任一步失败都保留原库并告警，行为与修复前一致。
+
+_SALVAGE_ROW_CAP = 200000  # 逐行抢救上限（避免超大表在启动期拖死）
+
+
+def _ro_uri(db_path: Path) -> str:
+    """只读 + immutable 打开 URI（不触碰 -wal，绕开 WAL 自身损坏的干扰）。"""
+    return db_path.as_uri() + "?mode=ro&immutable=1"
+
+
+def _quick_check_ok(db_path: Path) -> bool:
+    """主库是否通过 quick_check（True=完好；任何异常均视为损坏）。"""
+    try:
+        probe = sqlite3.connect(str(db_path), timeout=10)
+        try:
+            row = probe.execute("PRAGMA quick_check(1)").fetchone()
+        finally:
+            probe.close()
+        return row == ("ok",)
+    except sqlite3.DatabaseError:
+        return False
+
+
+def _salvage_rebuild_db(db_path: Path, dst_path: Path) -> bool:
+    """把损坏主库按「表 → 索引/视图/触发器」重建为 dst_path。
+
+    - 表数据能整表读就整表拷贝（按 rowid 顺序，保留原主键）；
+    - 整表读失败（损坏页）才逐行抢救，且受 _SALVAGE_ROW_CAP 限制；
+    - 最后自检 quick_check，通过才返回 True —— 调用方据此决定是否替换原库。
+    """
+    if dst_path.exists():
+        try:
+            dst_path.unlink()
+        except OSError:
+            pass
+    try:
+        ro = sqlite3.connect(_ro_uri(db_path), uri=True, timeout=30)
+    except sqlite3.DatabaseError as e:
+        logger.warning("主库抢救：无法以只读方式打开（%s）", e)
+        return False
+    new = sqlite3.connect(str(dst_path), timeout=30)
+    try:
+        rows = ro.execute(
+            "SELECT type,name,sql FROM sqlite_master "
+            "WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").fetchall()
+        tables = [r for r in rows if r[0] == "table"]
+        others = [r for r in rows if r[0] != "table"]
+        new.execute("PRAGMA foreign_keys=OFF")
+        for _t, _name, sql in tables:
+            new.execute(sql)
+        new.commit()
+        ro.execute("ATTACH DATABASE ? AS old", (_ro_uri(db_path),))
+        copied, salvaged, lost = 0, 0, 0
+        for _t, name, _sql in tables:
+            cols = [r[1] for r in ro.execute('PRAGMA old.table_info("%s")' % name)]
+            if not cols:
+                continue
+            collist = ",".join('"%s"' % c for c in cols)
+            insert_sql = 'INSERT INTO main."%s"(rowid,%s) VALUES (%s)' % (
+                name, collist, ",".join("?" * (len(cols) + 1)))
+            table_salvaged = False
+            try:
+                data = ro.execute(
+                    'SELECT rowid,%s FROM old."%s"' % (collist, name)).fetchall()
+            except sqlite3.DatabaseError:
+                table_salvaged = True
+                # 损坏页：退化为逐行抢救（行级失败跳过，只丢该行）
+                data = []
+                try:
+                    max_rowid = ro.execute(
+                        'SELECT MAX(rowid) FROM old."%s"' % name).fetchone()[0] or 0
+                except sqlite3.DatabaseError:
+                    max_rowid = 0
+                for rid in range(1, min(int(max_rowid), _SALVAGE_ROW_CAP) + 1):
+                    try:
+                        data.extend(ro.execute(
+                            'SELECT rowid,%s FROM old."%s" WHERE rowid=?'
+                            % (collist, name), (rid,)).fetchall())
+                    except sqlite3.DatabaseError:
+                        continue
+                salvaged += 1
+                logger.warning("主库抢救：表 %s 损坏，逐行抢救可用 %d 行", name, len(data))
+            if data:
+                new.executemany(insert_sql, data)
+                copied += len(data)
+            elif table_salvaged:
+                lost += 1
+        new.commit()
+        # AUTOINCREMENT 计数器（存在才恢复，避免自增主键回退）
+        if ro.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                      "AND name='sqlite_sequence'").fetchone():
+            try:
+                for r in ro.execute("SELECT * FROM old.sqlite_sequence").fetchall():
+                    new.execute("INSERT INTO sqlite_sequence(name,seq) VALUES (?,?)", r)
+                new.commit()
+            except sqlite3.DatabaseError as e:
+                logger.warning("主库抢救：sqlite_sequence 恢复失败（忽略）: %s", e)
+        order = {"index": 1, "view": 2, "trigger": 3}
+        idx_fail = 0
+        for typ, name, sql in sorted(others, key=lambda r: order.get(r[0], 9)):
+            try:
+                new.execute(sql)
+            except sqlite3.DatabaseError as e:
+                idx_fail += 1
+                logger.warning("主库抢救：跳过 %s %s（%s）", typ, name, e)
+        new.commit()
+        ok = new.execute("PRAGMA quick_check(1)").fetchone() == ("ok",)
+        logger.warning(
+            "主库抢救：重建完成（表=%d 行=%d 逐行抢救表=%d 无数据表=%d 索引失败=%d 自检=%s）",
+            len(tables), copied, salvaged, lost, idx_fail, "ok" if ok else "FAILED")
+        return ok
+    except Exception as e:  # noqa: BLE001 - 抢救失败绝不阻断启动
+        logger.warning("主库抢救：重建过程异常，放弃替换（%s）", e)
+        return False
+    finally:
+        try:
+            new.close()
+        except Exception:
+            pass
+        try:
+            ro.close()
+        except Exception:
+            pass
+
+
+def _self_heal_corrupt_db() -> bool:
+    """启动自愈：主库 quick_check 不通过时，备份后抢救重建并替换。
+
+    默认只在「主库确实损坏」时动作，完好库零成本（一次 quick_check）。
+    返回 True 表示本次确实重建并替换了主库。
+    """
+    db_path = _as_path(DB_PATH)
+    if not db_path.exists() or _quick_check_ok(db_path):
+        return False
+    wal = db_path.with_name(db_path.name + "-wal")
+    shm = db_path.with_name(db_path.name + "-shm")
+    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    bak_dir = db_path.parent / f"recov_bak_{ts}"
+    try:
+        bak_dir.mkdir(parents=True, exist_ok=True)
+        for _f in (db_path, wal, shm):
+            if _f.exists():
+                shutil.copyfile(_f, bak_dir / _f.name)
+    except OSError as e:
+        logger.warning("主库抢救：备份失败，放弃自愈（保持原状）: %s", e)
+        return False
+    tmp = db_path.with_name(db_path.name + f".salvage_{ts}")
+    if not _salvage_rebuild_db(db_path, tmp):
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        return False
+    try:
+        os.replace(tmp, db_path)
+        for _f in (wal, shm):
+            if _f.exists():
+                os.remove(_f)
+    except OSError as e:
+        logger.warning("主库抢救：替换主库失败，保持原库（%s）", e)
+        return False
+    logger.warning("主库抢救：已重建并替换损坏主库（原库备份于 %s），请核对告警中的丢行统计", bak_dir)
+    return True
+
+
 async def init_db():
     # ✅ 启动自愈（2026-09-29）：主库完好但 WAL 损坏会让整库被判 malformed，
     #    此前必须人工停服+清理 WAL 才能恢复。现于首次建连前自动尝试自愈。
     _self_heal_corrupt_wal()
+    # ✅ R163（2026-11-01）：主库自身损坏时同样自愈（旧实现只在存在 -wal 时
+    #    才做完整性自检，无 -wal 的损坏主库会被原样服务，正文生成恒失败）。
+    _self_heal_corrupt_db()
     conn = await get_conn()
     await conn.executescript(SCHEMA_SQL)
     await _migrate(conn)
@@ -689,9 +868,24 @@ async def _migrate(conn: aiosqlite.Connection):
             "doc_id TEXT PRIMARY KEY, stage TEXT DEFAULT 'extract', "
             "status TEXT DEFAULT 'pending', error TEXT DEFAULT '', "
             "retries INTEGER DEFAULT 0, text_cache TEXT DEFAULT '', "
+            "diag_json TEXT DEFAULT '', "
             "updated_at TEXT DEFAULT (datetime('now','localtime')))")
     except Exception as e:
         logger.warning("doc_parse_checkpoints 建表失败: %s", e)
+    # ✅ R136（2026-10-27，BUG 修复 · 断点续跑丢诊断）：补 `diag_json` 列。
+    #    R123 的续跑只缓存了正文与阶段，**诊断字典未持久化** —— resume 分支
+    #    重建的 diag 只剩 `resumed_from_stage` + `warnings=[]`，于是：
+    #    ① `page_count` 回落成 1（→ 解析页数/覆盖率失真）；② `truncated`
+    #    与解析器告警全丢（→ 截页/超行提示在第一阶段失败后永久消失）；
+    #    ③ `file_type` 丢失（→ parse_engine 写空）。新增列沿用 R125 的「幂等
+    #    CREATE + 守卫式 ALTER」双写法（旧库自动兼容，默认空串 = 旧行为）。
+    #    ⚠️ 两条 ALTER 各自独立 try：R125 把两条挤在同一 try 里，前一条失败会
+    #    连带跳过后一条（列已存在时正好命中），本处不重复该写法。
+    try:
+        await conn.execute(
+            "ALTER TABLE doc_parse_checkpoints ADD COLUMN diag_json TEXT DEFAULT ''")
+    except Exception:
+        pass  # 列已存在（新库由上方 CREATE 带上，旧库已迁移过）
 
     # --- ✅ R125（2026-10-21）：事实库版本化。补 version/version_label 列（零迁移，
     #    旧库自动兼容）+ 新增快照/历史表（幂等 CREATE）。纯加法，删除即退回旧行为，

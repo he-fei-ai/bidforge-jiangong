@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import random
 import re
 import sqlite3
 import threading
@@ -14,17 +15,19 @@ from urllib.parse import urlparse
 from app.config import settings
 from app.db import get_conn, retry_db_op, write_tx_conn
 from app.services import activity_broadcaster as _ab
+from app.services.ai import error_taxonomy
 from app.services.ai.json_mode_compat import json_mode_unsupported
 from app.services.ai.providers.anthropic_compatible import AnthropicCompatibleProvider
 from app.services.ai.providers.base import BaseProvider
 from app.services.ai.providers.openai_compatible import OpenAICompatibleProvider
 from app.services.ai.workflows_base import circuit_breaker, concurrency_controller
 from app.services.crypto import decrypt_api_key, encrypt_api_key
+from app.utils.observability import context_snapshot
 
 logger = logging.getLogger("provider_factory")
 
 PROVIDER_PRESETS = {
-    # ==================== 国内 20 个平台 ====================
+    # ==================== 国内 21 个平台 ====================
     "deepseek": {
         "base_url": "https://api.deepseek.com/v1",
         "model": "deepseek-chat",
@@ -168,6 +171,20 @@ PROVIDER_PRESETS = {
         "description": "科大讯飞星火大模型，语音与教育场景领先",
         "website": "https://xinghuo.xfyun.cn",
         "pricing": "4.0 Ultra: 输入¥35/百万Token",
+    },
+    "xfmaas": {
+        "base_url": "https://maas-api.cn-huabei-1.xf-yun.com/v2",
+        "model": "spark-x2.6",
+        "type": "openai_compatible",
+        "label": "讯飞星辰 MaaS",
+        "models": [
+            {"value": "spark-x2.6", "label": "Spark-X2.6 (旗舰)", "context": "1M", "recommended": True},
+            {"value": "spark-x2.5", "label": "Spark-X2.5 (标准)", "context": "256K"},
+            {"value": "xsparkx2flash", "label": "Spark-X2-Flash (Agent)", "context": "192K"},
+        ],
+        "description": "科大讯飞星辰 MaaS 平台，OpenAI 兼容协议，汇集星火与开源大模型",
+        "website": "https://maas.xfyun.cn",
+        "pricing": "Spark-X2.6: 输入¥0.9/百万Token，输出¥3.6/百万Token",
     },
     "sensetime": {
         "base_url": "https://api.sensenova.cn/compatible-mode/v1",
@@ -1350,6 +1367,12 @@ KNOWN_SCENES: dict[str, str] = {
     "outline_fix": "目录修复",
     "outline_adjust": "目录调整",
     "outline_recognition": "上传目录 AI 识别",
+    # ✅ R137（2026-10-28）：目录生成 Agent（工具调用链）的整卷往返调用点。
+    #    R136 全量回归由 TestKnownScenesDrift 双向护栏查出「用了但未登记」——
+    #    未登记时该路径只能共用主配置，无法单独指定模型（静默失效，
+    #    与上方「不设总调度场景」的注释不矛盾：它确实是真实调用点，
+    #    而非从不使用的总调度入口）。
+    "outline_agent": "目录生成 Agent（工具调用）",
     # —— 正文 ——
     # ⚠️ 不设 "content" 总调度场景：正文链路的每个调用点都已细分打标
     #    （draft / continue / shrink），再留一个从不使用的"总调度"入口只会
@@ -1371,6 +1394,9 @@ KNOWN_SCENES: dict[str, str] = {
     #    「AI 定点编辑 + 唯一命中才替换」修复调用点（content_fact_autofix）。
     #    仅在检出冲突的章节触发（无冲突章节零调用），需可单独观测与指定模型。
     "content_fact_autofix": "正文事实冲突定点修复",
+    # ✅ R137（2026-10-28）：正文 Agent 分层修复（工具调用链）调用点 ——
+    #    同由 TestKnownScenesDrift 双向护栏查出未登记，一并补齐。
+    "content_agent_repair": "正文 Agent 修复（工具调用）",
     # —— 事实 / 项目信息 ——
     "facts_extract": "全局事实提取",
     # ✅ 2026-09-30 第十三轮：知识库补充 / 最终整理两个新增 AI 调用点。
@@ -1404,7 +1430,95 @@ KNOWN_SCENES: dict[str, str] = {
     # —— 图表 / 配图 ——
     "chart_fix": "图表（Mermaid/图表数据）修复",
     "image_prompt_optimize": "配图提示词优化",
+    # ✅ R147（2026-10-30）：两轮次导出 · 第二轮 Agent 辅助编号决策调用点
+    #    （docx_repair/agent_fix.py：识别标题编号方案，Agent 只返回白名单
+    #    决策、XML 由本地改写）。仅在程序修复两轮未收敛且已配置 AI key 时触发。
+    "export_docx_repair": "导出第二轮·排版 Agent 辅助修复",
 }
+
+
+# ---------------------------------------------------------------------------
+# ✅ R150（2026-10-31 · 统一 AI 网关）：场景分档与「锚点路由继承」
+# ---------------------------------------------------------------------------
+#: 「智能路由」的分档语义（对齐需求：复杂任务用强模型 / 高并发任务用高性价比 /
+#: 审核用高精度）。每档一个**锚点场景**：用户只需为锚点配置一次「场景模型路由」，
+#: 同档未显式配置的场景自动继承锚点的路由配置 —— 30+ 场景逐个配置的负担降为
+#: 每档一个；显式路由永远优先，未配档回落主配置（行为与引入前逐字一致）。
+#:
+#: ⚠️ 护栏约束（tests/test_ai_gateway_r150_*）：SCENE_TIERS 的键集合必须与
+#:    KNOWN_SCENES 完全一致（双向），tier 只允许封闭枚举内的取值，
+#:    锚点必须属于本档。新增场景时两处同步登记。
+SCENE_TIERS: dict[str, str] = {
+    # —— complex：目录生成 / 长链路编排 / 整卷合并 —— 需要强模型（长上下文、
+    #    结构化输出稳定），失败代价是整章级返工
+    "outline_draft": "complex",
+    "outline_level1": "complex",
+    "outline_sublevel": "complex",
+    "outline_agent": "complex",
+    "consistency_fullbook": "complex",
+    "consistency_repair": "complex",
+    # —— throughput：正文生成族 + 批量事实/标书提取 —— 高并发短轮次，
+    #    用量占大头（30 天 78% 调用），性价比优先
+    "content_draft": "throughput",
+    "content_continue": "throughput",
+    "content_shrink": "throughput",
+    "content_plan": "throughput",
+    "word_budget_alloc": "throughput",
+    "facts_extract": "throughput",
+    "bid_analysis": "throughput",
+    "bid_section_extract": "throughput",
+    # —— precision：审核 / 一致性扫描 / 冲突裁决 / 定点修复 —— 判定性任务，
+    #    误报漏报代价高于延迟，用高精度模型
+    "outline_review": "precision",
+    "compliance_check": "precision",
+    "expert_review": "precision",
+    "consistency_scan": "precision",
+    "consistency_audit": "precision",
+    "consistency_arbitrate": "precision",
+    "consistency_repair_edits": "precision",
+    "content_fact_autofix": "precision",
+    "review_autofix": "precision",
+    # —— light：轻量 / 低频 / 容错高的辅助任务 —— 免费/快速模型即可
+    "outline_recognition": "light",
+    "outline_fix": "light",
+    "outline_adjust": "light",
+    "facts_knowledge_patch": "light",
+    "facts_finalize": "light",
+    "global_facts_adjust": "light",
+    "bid_analysis_merge": "light",
+    "bid_section_merge": "light",
+    "content_agent_repair": "light",
+    "chart_fix": "light",
+    "image_prompt_optimize": "light",
+    "export_docx_repair": "light",
+}
+
+#: 分档封闭枚举 + 每档锚点场景（继承源）。锚点必须是 KNOWN_SCENES 里的场景。
+VALID_SCENE_TIERS: tuple[str, ...] = ("complex", "throughput", "precision", "light")
+TIER_ANCHOR_SCENES: dict[str, str] = {
+    "complex": "outline_draft",
+    "throughput": "content_draft",
+    "precision": "compliance_check",
+    "light": "chart_fix",
+}
+
+
+def scene_tier(scene: str) -> str:
+    """场景所属分档（未登记场景返回空串 —— 与 KNOWN_SCENES 口径一致）。"""
+    return SCENE_TIERS.get((scene or "").strip(), "")
+
+
+def _inherit_tier_route(scene: str, routes: dict[str, str]) -> str:
+    """同档锚点路由继承：场景无显式路由时，返回锚点场景的 config_id（无则空串）。
+
+    只认 TIER_ANCHOR_SCENES 里**每档唯一锚点**（不在同档任意场景间传播），
+    语义可预期、可测试：配置锚点 → 同档生效；配置非锚点同档场景 → 不传播。
+    """
+    tier = SCENE_TIERS.get((scene or "").strip(), "")
+    anchor = TIER_ANCHOR_SCENES.get(tier, "")
+    if not anchor or anchor == scene:
+        return ""
+    return (routes.get(anchor) or "").strip()
 
 
 async def load_scene_routes() -> dict[str, str]:
@@ -1473,7 +1587,19 @@ async def resolve_scene_config(scene: str) -> dict | None:
         return None
     cid = routes.get(scene)
     if not cid:
-        return None
+        # ✅ R150（智能路由 · 锚点继承）：场景无显式路由时，继承同档锚点场景的
+        #    路由配置（复杂任务/高并发/审核/轻量四档，见 SCENE_TIERS）。
+        #    显式路由永远优先；本场景就是锚点时不自继承；无锚点路由回落主配置
+        #    （行为与引入继承前逐字一致）。继承只改「选哪条配置」，不改变
+        #    候选链 / 门禁 / 对冲等任何后续阶段。
+        _inherited = _inherit_tier_route(scene, routes)
+        if not _inherited:
+            return None
+        _tier = scene_tier(scene)
+        logger.info(
+            "场景 %s 无显式路由，按分档 %r 继承锚点场景 %s 的路由配置（config=%s）",
+            scene, _tier, TIER_ANCHOR_SCENES.get(_tier, ""), _inherited)
+        cid = _inherited
     try:
         conn = await get_conn()
         cur = await conn.execute("SELECT * FROM ai_config WHERE id = ?", (cid,))
@@ -2074,6 +2200,33 @@ async def _log_audit(provider_name: str, model: str, action: str,
             due = time.time() - _audit_last_flush["ts"] >= _AUDIT_FLUSH_INTERVAL
         if buf_len >= _AUDIT_BATCH_SIZE or (buf_len and due):
             await _flush_audit_buffer()
+        # ✅ R142-B：AI 调用事件非阻塞入 system_logs 缓冲（异步批量，不阻塞主流程）。
+        #    与 ai_audit_logs 并行，供「按 trace_id 还原调用树」看到 AI 调用节点。
+        #    显式携带上下文 ID（flush 时 contextvars 已不在原请求上下文）。
+        try:
+            from app.services.observability import system_log_buffer
+            _snap = context_snapshot()
+            system_log_buffer.enqueue(
+                level="WARN" if (not success and action not in
+                                 ("circuit_skipped", "provider_disabled")) else "INFO",
+                module="ai", event="ai.call",
+                trace_id=_snap.get("trace_id") or "", span_id=_snap.get("span_id") or "",
+                parent_span_id=_snap.get("parent_span_id") or "",
+                task_id=_snap.get("task_id") or "",
+                project_id=_snap.get("project_id") or "",
+                scheme_id=_snap.get("scheme_id") or "",
+                duration_ms=round(duration * 1000.0, 2),
+                status="ok" if success else "error",
+                message=f"AI {action} {provider_name}/{model} -> "
+                        f"{'ok' if success else 'fail'}",
+                detail={"provider": provider_name, "model": model, "action": action,
+                        "prompt_tokens": int(prompt_tokens or 0),
+                        "completion_tokens": int(completion_tokens or 0),
+                        "cached_tokens": int(cached_tokens or 0),
+                        "success": bool(success), "scene": scene,
+                        "error": (error or "")[:300]})
+        except Exception as e:  # noqa: BLE001 - fail-soft：可观测性失败绝不中断调用
+            logger.warning("AI 调用事件入 system_logs 缓冲失败（fail-soft）: %s", e)
     except Exception as e:
         # 审计是「尽力而为」，写入失败绝不能中断 AI 调用主流程（保持原语义）；
         # 但必须留痕 —— 否则「用量统计/审计日志」整块功能静默为空而无人知晓。
@@ -2645,6 +2798,49 @@ def _candidate_timeout(c: dict, req_timeout: int | None) -> int:
     return max(1, base)
 
 
+# ---------------------------------------------------------------------------
+# ✅ R150（2026-10-31 · 统一 AI 网关）：瞬态错误同候选指数退避
+# ---------------------------------------------------------------------------
+# 基线（artifacts/r150/ai_inventory_baseline.json，近 7 天）：429 限流 182 次 +
+# 超时 69 次，占可归因失败 43% —— 旧实现在 ``_attempt_candidate`` 失败后
+# **立即**返回换下一候选，429 风暴下整条候选链被逐个打穿后才罢休；而 429/5xx/
+# 瞬时网络抖动在 1~2s 的退避后大概率自愈。现对瞬态错误（error_taxonomy.
+# TRANSIENT_CLASSES）做**严格一次**的同候选退避重试：
+#   - 指数退避 base×2^(n-1)，带 ±30% 抖动，封顶 8s（不给一次调用加过长延迟）；
+#   - 厂商下发 ``Retry-After`` 时尊重之（VendorHTTPError.retry_after），
+#     但超过封顶值时**不等待**（等不起 → 直接换候选，由配额冷却接管）；
+#   - 非瞬态（401/402/403/404/余额耗尽/JSON 不兼容等）零重试，与
+#     ``is_non_retryable_error`` 的生产实证口径一致；
+#   - 重试期间不记配额冷却 / 熔断失败 —— 只有重试后仍失败才走原失败路径
+#     （冷却 + 熔断 + 换候选），瞬态恢复则整条链零扰动。
+# 零新增配置项：三个上限均为模块常量（同 ``_CHECKPOINT_DIAG_LIMIT`` 先例）。
+_TRANSIENT_RETRY_MAX = 1
+_TRANSIENT_BACKOFF_BASE = 1.0
+_TRANSIENT_BACKOFF_CAP = 8.0
+_TRANSIENT_BACKOFF_JITTER = 0.3
+
+
+def _transient_backoff_delay(e: Exception, attempt: int) -> float | None:
+    """计算瞬态退避延迟（秒）；返回 None 表示「不值得等，直接换候选」。
+
+    Retry-After 头优先；指数退避（base×2^(n-1)）带抖动兜底，封顶
+    ``_TRANSIENT_BACKOFF_CAP``。
+    """
+    ra = getattr(e, "retry_after", None)
+    if ra is not None:
+        try:
+            ra = float(ra)
+        except (TypeError, ValueError):
+            ra = None
+    if ra is not None:
+        return ra if ra <= _TRANSIENT_BACKOFF_CAP else None
+    raw = min(_TRANSIENT_BACKOFF_CAP,
+              _TRANSIENT_BACKOFF_BASE * (2 ** max(0, attempt - 1)))
+    jitter = 1.0 + random.uniform(-_TRANSIENT_BACKOFF_JITTER,
+                                  _TRANSIENT_BACKOFF_JITTER)
+    return max(0.1, raw * jitter)
+
+
 async def _collect_stream(provider, messages: list, *,
                           temperature: float | None,
                           json_mode: bool,
@@ -2839,6 +3035,8 @@ async def _attempt_candidate(c: dict, messages: list, *,
                                timeout=_candidate_timeout(c, req_timeout))
 
     last_err: Exception | None = None
+    # ✅ R150：瞬态退避计数（严格一次，见 _TRANSIENT_RETRY_MAX 注释）
+    _transient_retries = 0
     request_mode = normalize_request_mode(c.get("request_mode"))
     # ✅ 2026-09-22（调用次数优化 O3）：思考吞噬重试的开关与上限
     _retry_thinking = bool(getattr(settings, "ai_retry_on_thinking_exhausted", True))
@@ -2968,6 +3166,29 @@ async def _attempt_candidate(c: dict, messages: list, *,
                     #    在 _gate_candidates 跳过（与配额冷却同口径）。
                     if _is_thinking_exhausted(e):
                         _note_thinking_dead(pname)
+                    # ✅ R150（统一 AI 网关 · 瞬态退避）：429/5xx/超时/网络抖动
+                    #    同候选短暂退避后重试一次 —— 旧实现立即换候选，429 风暴下
+                    #    候选链被逐个打穿（7 天基线 429×182 次全数换候选）。
+                    #    必须先于配额冷却/熔断记账：退避后成功则整条链零扰动；
+                    #    重试仍失败才走下方原失败路径（冷却 + 熔断 + 换候选）。
+                    _err_cls = error_taxonomy.classify_error(e)
+                    # ⚠️ _best_partial 在手时不退避：截断重试后失败的既定契约是
+                    #    「半截 > 拿不到，立即返回」（test_retry_failure_returns_
+                    #    best_partial 锁定 built 次数）—— 退避只服务「两手空空、
+                    #    即将失去本候选」的失败，不为已可用输出追加等待。
+                    if (_best_partial is None
+                            and _transient_retries < _TRANSIENT_RETRY_MAX
+                            and _err_cls in error_taxonomy.TRANSIENT_CLASSES):
+                        _delay = _transient_backoff_delay(e, _transient_retries + 1)
+                        if _delay is not None:
+                            _transient_retries += 1
+                            logger.warning(
+                                "Provider %s 瞬态错误（%s），%.1fs 后同候选退避重试"
+                                "（第 %d/%d 次）: %s",
+                                pname, _err_cls, _delay, _transient_retries,
+                                _TRANSIENT_RETRY_MAX, _error_summary(e)[:160])
+                            await asyncio.sleep(_delay)
+                            continue
                     # ✅ 2026-09-22（调用次数优化 O2）：配额类错误记入冷却窗口，
                     #    窗口内该 provider 的后续调用直接跳过（不再打配额）。
                     if QUOTA_FAIL_COOLDOWN > 0 and _is_quota_error(e):
@@ -3198,6 +3419,51 @@ async def _gate_candidates(candidates: list[dict],
     raise RuntimeError(f"所有 AI 提供商调用失败：{last_err}")
 
 
+def _notify_degradation(*, scene: str, primary: dict | None, winner: dict,
+                        attempts_failed: int = 0, hedge_used: bool = False) -> None:
+    """✅ R150（统一 AI 网关 · 降级告警）：主配置未胜出时发一条结构化告警。
+
+    触发时机：``chat_with_fallback`` / ``chat_with_tools`` /
+    ``chat_stream_with_fallback`` 的胜出候选**不是主配置**（主配置失败 /
+    被熔断 / 被实时成功率后置 / 对冲竞速落后）—— 此前只有逐候选的失败
+    ERROR 日志与审计行，没有「这次调用最终发生了降级」的任务级汇总，
+    前端与运维都无从感知「正在用备用模型扛量」。
+
+    通道：system_logs（event=``ai.degraded``，WARN，含 primary/winner 明细）
+    —— 与 ``ai.call`` 事件同缓冲，按 trace_id/task_id 可关联还原。
+    纯通知，任何失败绝不影响调用主流程（fail-soft）。
+    """
+    try:
+        from app.services.observability import system_log_buffer
+        _snap = context_snapshot()
+        _p = ({"provider": primary.get("provider_name", ""),
+               "model": primary.get("model", ""),
+               "config_id": primary.get("config_id", "")} if primary else None)
+        system_log_buffer.enqueue(
+            level="WARN", module="ai", event="ai.degraded",
+            trace_id=_snap.get("trace_id") or "", span_id=_snap.get("span_id") or "",
+            parent_span_id=_snap.get("parent_span_id") or "",
+            task_id=_snap.get("task_id") or "",
+            project_id=_snap.get("project_id") or "",
+            scheme_id=_snap.get("scheme_id") or "",
+            status="degraded",
+            message=(f"AI 降级：{(_p or {}).get('provider') or '（无主配置）'}"
+                     f" → {winner.get('provider_name', '?')}"
+                     f"（scene={scene or '-'}）"),
+            detail={"scene": scene, "primary": _p,
+                    "winner": {"provider": winner.get("provider_name", ""),
+                               "model": winner.get("model", ""),
+                               "config_id": winner.get("config_id", "")},
+                    "attempts_failed": int(attempts_failed),
+                    "hedge_used": bool(hedge_used)})
+        logger.warning("AI 降级生效：scene=%s 主配置=%s → 胜出=%s（失败候选 %d 个）",
+                       scene or "-",
+                       (_p or {}).get("provider") or "（无主配置）",
+                       winner.get("provider_name", "?"), attempts_failed)
+    except Exception as e:  # noqa: BLE001 - 告警失败绝不中断调用主流程
+        logger.warning("AI 降级告警写入失败（fail-soft）: %s", e)
+
+
 async def chat_with_fallback(messages: list, ai_config: dict | None = None, *,
                              temperature: float | None = None,
                              json_mode: bool = False,
@@ -3260,6 +3526,11 @@ async def chat_with_fallback(messages: list, ai_config: dict | None = None, *,
             extra_body=extra_body))
         pending[task] = c
 
+    # ✅ R150：降级告警需要的信息（对冲是否触发 / 胜出候选是谁）
+    hedge_used = False
+    winner_cand: dict | None = None
+    _primary_cand = next((x for x in candidates if x.get("_is_primary")), None)
+
     try:
         _launch()
         while pending:
@@ -3274,6 +3545,7 @@ async def chat_with_fallback(messages: list, ai_config: dict | None = None, *,
                     "对冲请求：%s 超过 %.0fs 无响应，并行启动候选 %s",
                     ",".join(c.get("provider_name", "?") for c in pending.values()),
                     hedge_delay, usable[next_idx].get("provider_name", "?"))
+                hedge_used = True
                 _launch()
                 continue
 
@@ -3291,6 +3563,7 @@ async def chat_with_fallback(messages: list, ai_config: dict | None = None, *,
                     result, err = "", e
                 if err is None and result:
                     winner = result
+                    winner_cand = c
                     break
                 if err is not None:
                     errors.append(err)
@@ -3304,6 +3577,12 @@ async def chat_with_fallback(messages: list, ai_config: dict | None = None, *,
                     pending.clear()
                 # ✅ R110（P1-1）：调用成功 → 重置全熔断快速失败计数
                 _record_all_circuit_outcome(success=True)
+                # ✅ R150：胜出者非主配置 → 结构化降级告警（system_logs WARN）
+                if winner_cand is not None and winner_cand is not _primary_cand:
+                    _notify_degradation(scene=scene, primary=_primary_cand,
+                                        winner=winner_cand,
+                                        attempts_failed=len(errors),
+                                        hedge_used=hedge_used)
                 return winner
 
             # 有空位且仍有候选 → 立即补位（失败快速返回时无需等对冲延迟）
@@ -3319,6 +3598,192 @@ async def chat_with_fallback(messages: list, ai_config: dict | None = None, *,
     if errors:
         raise RuntimeError(f"所有 AI 提供商调用失败：{errors[-1]}")
     raise RuntimeError("所有 AI 提供商调用失败：无可用候选")
+
+
+async def chat_stream_with_fallback(
+        messages: list, ai_config: dict | None = None, *,
+        temperature: float | None = None,
+        json_mode: bool = False,
+        timeout: int | None = None,
+        max_tokens: int | None = None,
+        scene: str = "",
+        reasoning_effort: str = ""):
+    """✅ R150（统一 AI 网关）：业务级**流式**对话 —— 归一化事件流的统一入口。
+
+    与 :func:`chat_with_fallback` 的关系：复用同一套「场景路由 → 候选链 →
+    可用性门禁」前置阶段与同一套记账口径（实时状态 / 并发采样 / 熔断 /
+    配额冷却 / 审计），但把「收完再返」升级为真增量：厂商间 SSE 差异
+    （OpenAI ``chat.completion.chunk`` vs Anthropic ``content_block_delta``）
+    由 Provider 适配层抹平为纯文本增量，本函数再封装成统一事件：
+
+    - ``{"type": "delta", "text": <增量正文>, "provider", "model"}``
+    - ``{"type": "done", "text": <全文>, "usage": {...}, "finish_reason",
+      "degraded_normal": bool, "duration_s", "provider", "model", "scene"}``
+
+    与 chat 的行为差异（刻意设计，均有护栏锁定）：
+
+    1. **不做对冲请求** —— 流式竞速会白烧整条响应的 token（与
+       ``chat_with_tools`` 同口径）；候选**顺序**尝试；
+    2. **部分增量产出后失败 = 整体失败**（向消费方抛异常）—— 已把
+       A 厂商的前缀交给消费方后，既不能回退普通模式重收（重复前缀），
+       也不能换候选续传（跨厂商拼接文本）；唯一正确语义是让消费方
+       丢弃本次重来。零增量产出时的失败才走「同候选普通请求回退 →
+       下一候选」；
+    3. 消费方中途放弃（asyncgen 被 aclose）：只做**同步**清理
+       （in_flight 归还 + 并发采样），审计行放弃（GeneratorExit 内不可
+       await），绝不吞 GeneratorExit；
+    4. 暂不支持 tools（工具循环走 ``chat_with_tools``）；流式 v1 不做
+       同候选瞬态退避（零增量失败的既定语义是换候选，配额冷却已覆盖
+       429 风暴的节流）。
+
+    Raises:
+        RuntimeError: 所有候选失败，或流式中途断流（已产出过增量）。
+    """
+    cfg = await _resolve_chat_config(ai_config, scene)
+    candidates = await _build_candidates(cfg)
+    usable, gate_err = await _gate_candidates(candidates, scene)
+    _primary_cand = next((x for x in candidates if x.get("_is_primary")), None)
+    errors: list[Exception] = [gate_err] if gate_err is not None else []
+    _eff = (reasoning_effort or getattr(settings, "ai_reasoning_effort", "") or "").strip()
+    extra_body = {"reasoning_effort": _eff} if _eff else None
+    yielded_any = False
+
+    for c in usable:
+        pname = c.get("provider_name", "?")
+        model = c.get("model", "")
+        mt = int(max_tokens or c.get("max_tokens",
+                                     DEFAULT_CONFIG_NUMBERS["max_tokens"]))
+        provider = _build_provider(pname, c["api_key"], c["base_url"], c["model"],
+                                   max_tokens=mt,
+                                   temperature=(temperature if temperature is not None
+                                                else c.get("temperature",
+                                                           DEFAULT_CONFIG_NUMBERS["temperature"])),
+                                   timeout=_candidate_timeout(c, timeout))
+        cap_key = _stream_capability_key(provider)
+        t0 = time.time()
+        stream_ok = False
+        degraded_normal = False
+        parts: list[str] = []
+        try:
+            async with concurrency_controller.semaphore:
+                with _ai_live_lock:
+                    _ai_live["in_flight"] = int(_ai_live["in_flight"]) + 1
+                    _ai_live["total"] = int(_ai_live["total"]) + 1
+                _ab.notify()
+                if _stream_disabled(cap_key):
+                    # 能力记忆命中：直接普通请求，整段作为单个 delta 产出
+                    degraded_normal = True
+                    logger.info(
+                        "Provider %s 近期流式不可用（已记忆），流式网关直接走普通请求",
+                        getattr(provider, "name", "?"))
+                    text = await provider.chat(
+                        messages, temperature=temperature, json_mode=json_mode,
+                        max_tokens=mt, extra_body=extra_body)
+                    if (text or "").strip():
+                        parts.append(text)
+                        yielded_any = True
+                        yield {"type": "delta", "text": text,
+                               "provider": pname, "model": model}
+                else:
+                    try:
+                        async for piece in provider.stream(
+                                messages, temperature=temperature,
+                                json_mode=json_mode, max_tokens=mt,
+                                extra_body=extra_body):
+                            if piece:
+                                parts.append(piece)
+                                yielded_any = True
+                                yield {"type": "delta", "text": piece,
+                                       "provider": pname, "model": model}
+                        stream_ok = True
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as stream_err:
+                        if yielded_any:
+                            raise   # 部分增量已产出：交给下方统一中断语义
+                        if ai_retry_on_non_retryable and is_non_retryable_error(stream_err):
+                            raise
+                        if _note_stream_failure(cap_key):
+                            logger.warning(
+                                "Provider %s 连续 %d 次流式请求失败，后续 %ds 内直接走普通请求",
+                                getattr(provider, "name", "?"), STREAM_FAIL_STREAK,
+                                int(STREAM_CAPABILITY_TTL))
+                        logger.warning(
+                            "流式请求失败，自动回退普通请求重试（provider=%s）：%s",
+                            pname, str(stream_err)[:160])
+                        text = await provider.chat(
+                            messages, temperature=temperature, json_mode=json_mode,
+                            max_tokens=mt, extra_body=extra_body)
+                        degraded_normal = True
+                        if (text or "").strip():
+                            parts.append(text)
+                            yielded_any = True
+                            yield {"type": "delta", "text": text,
+                                   "provider": pname, "model": model}
+                full_text = "".join(parts)
+                if not full_text.strip():
+                    _finish = str(getattr(provider, "last_finish_reason", "") or "")
+                    raise RuntimeError(
+                        f"流式网关候选 {pname} 返回空正文（finish_reason={_finish or 'unknown'}）")
+                duration = time.time() - t0
+                _ai_live_record(pname, model, True, duration)
+                concurrency_controller.record(duration, status=200)
+                concurrency_controller.adjust_concurrency()
+                circuit_breaker.record_success(pname)
+                _note_quota_success(pname)
+                clear_thinking_dead(pname)
+                if stream_ok:
+                    _note_stream_success(cap_key)
+                u = extract_usage(provider)
+                await _log_audit(pname, model, "chat", duration, True,
+                                 prompt_tokens=u["prompt_tokens"],
+                                 completion_tokens=u["completion_tokens"],
+                                 cached_tokens=u["cached_tokens"], scene=scene,
+                                 config_id=c.get("config_id", ""),
+                                 base_url=c.get("base_url", ""))
+                if c is not _primary_cand:
+                    _notify_degradation(scene=scene, primary=_primary_cand,
+                                        winner=c, attempts_failed=len(errors))
+                yield {"type": "done", "text": full_text, "provider": pname,
+                       "model": model,
+                       "finish_reason": str(getattr(provider, "last_finish_reason", "") or ""),
+                       "usage": u, "degraded_normal": degraded_normal,
+                       "duration_s": round(duration, 3), "scene": scene}
+                return
+        except asyncio.CancelledError:
+            _ai_live_record(pname, model, False, time.time() - t0)
+            raise
+        except GeneratorExit:
+            # 消费方中途放弃：只做同步清理（此处 await 会触发
+            # 「async generator ignored GeneratorExit」类错误），审计行放弃。
+            _ai_live_record(pname, model, False, time.time() - t0)
+            concurrency_controller.record(time.time() - t0, status=499)
+            raise
+        except Exception as e:
+            duration = time.time() - t0
+            status = _status_from_error(e)
+            _ai_live_record(pname, model, False, duration)
+            concurrency_controller.record(duration, status=status)
+            concurrency_controller.adjust_concurrency()
+            await _log_audit(pname, model, "chat", duration, False,
+                             error=_error_summary(e), scene=scene,
+                             config_id=c.get("config_id", ""),
+                             base_url=c.get("base_url", ""))
+            if QUOTA_FAIL_COOLDOWN > 0 and _is_quota_error(e):
+                _note_quota_failure(pname, e)
+            if _is_thinking_exhausted(e):
+                _note_thinking_dead(pname)
+            circuit_breaker.record_failure(pname, is_429=(status == 429))
+            logger.error("Provider %s 流式调用失败: %s", pname, e)
+            if yielded_any:
+                raise RuntimeError(
+                    f"流式输出中断（已产出 {len(parts)} 个分片，不可换候选重拼，"
+                    f"请整体重试）: {e}") from e
+            errors.append(e)
+            continue
+
+    raise RuntimeError(
+        f"所有 AI 提供商流式调用失败：{errors[-1] if errors else '无可用候选'}")
 
 
 async def chat_with_tools(messages: list, *, tools: list, tool_choice=None,
@@ -3368,6 +3833,7 @@ async def chat_with_tools(messages: list, *, tools: list, tool_choice=None,
                                timeout=_candidate_timeout(c, timeout))
 
     # 阶段 4：筛出真正支持 tools 协议的候选
+    _primary_cand = next((x for x in candidates if x.get("_is_primary")), None)
     capable: list[dict] = []
     for c in usable:
         try:
@@ -3419,6 +3885,10 @@ async def chat_with_tools(messages: list, *, tools: list, tool_choice=None,
                 # Provider 契约：传了 tools 必须回 dict。这里兜底一次，
                 # 避免某个 Provider 忘记实现导致 agent_loop 拿到裸字符串。
                 result = {"role": "assistant", "content": str(result), "tool_calls": []}
+            # ✅ R150：胜出者非主配置 → 结构化降级告警（与 chat_with_fallback 同口径）
+            if not c.get("_is_primary"):
+                _notify_degradation(scene=scene, primary=_primary_cand, winner=c,
+                                    attempts_failed=len(errors))
             return result
         except asyncio.CancelledError:
             _ai_live_record(pname, model, False, time.time() - t0)

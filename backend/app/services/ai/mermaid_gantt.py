@@ -359,15 +359,25 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
 
     # ---- 尺寸 ----
     scale = 2.5
-    table_left = int(50 * scale)
+    table_left = int(36 * scale)
     table_top = int(70 * scale)
-    row_h = int(48 * scale)
-    header_h = int(80 * scale)
+    row_h = int(62 * scale)
+    header_h = int(84 * scale)
     # ✅ BUG 修复：最后一列「工期(天)」表头在 font_header 55px 下宽度不足，
     #    被 _draw_text_center 截断为「工期(...」。将列宽从 80 提升到 120，
     #    确保 5 个汉字的表头完整显示。
-    left_widths = [int(w * scale) for w in [60, 360, 80, 80, 120]]
-    axis_w = int(1100 * scale)
+    # ✅ R164（2026-11-01 · 纸面主文字仅 1.68mm）：画布**逻辑宽**此前固定
+    #    1900px（左右边距各 50 + 列宽 700 + 时间轴 1100），而 docx 插图按纸面
+    #    16cm 宽等比缩放 ⇒ 印到纸上的字号 ≈ 字号 × 160 / 画布逻辑宽，与任务条数
+    #    **完全无关**（减少条目只减高度）。20px 正文 → 1.68mm，低于全仓下限
+    #    2.4mm（`mermaid_common.PAPER_FONT_MIN_MM`）。现将左右边距 50→36、
+    #    列宽 700→604、时间轴 1100→740（逻辑宽 1900→1416），字号 20/17/18→
+    #    23/22/22 ⇒ 正文 2.60mm、最小字档 2.49mm，全部达标；行高 48→62 保证
+    #    23px 正文两行（约 54px）不被裁切。时间轴变窄后刻度按 `total_days//12`
+    #    均分仍 ≥60px/格，不会挤成一团。
+    #    ⚠️ 产物尺寸/外观已变，`mermaid_renderer._RENDERER_VERSION` 随之 7→8。
+    left_widths = [int(w * scale) for w in [46, 296, 66, 66, 130]]
+    axis_w = int(740 * scale)
     table_w = sum(left_widths) + axis_w
 
     # ---- 行序列（阶段带 + 任务行）----
@@ -401,11 +411,11 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
     sw, sh = int(width), int(height)
     img = Image.new("RGB", (sw, sh), "white")
     draw = ImageDraw.Draw(img)
-    font_header = _image_font(int(22 * scale), bold=True)
-    font_title = _image_font(int(26 * scale), bold=True)
-    font_body = _image_font(int(20 * scale))
-    font_small = _image_font(int(17 * scale))
-    font_axis = _image_font(int(18 * scale))
+    font_header = _image_font(int(24 * scale), bold=True)
+    font_title = _image_font(int(28 * scale), bold=True)
+    font_body = _image_font(int(23 * scale))
+    font_small = _image_font(int(22 * scale))
+    font_axis = _image_font(int(22 * scale))
 
     # ---- 配色 ----
     border = "#6B7280"
@@ -858,7 +868,7 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
         [font_header, font_title, font_body, font_small, font_axis],
         img.size[0], img.size[1],
         primary=[font_body],
-        suggest="（任务行文字是主文字；任务数或工期跨度大时整图会被等比缩小）",
+        suggest="（任务行文字是主文字；画布宽固定，条目过多时由高度上限触发整图等比缩小）",
     )
     result_stream = _image_to_stream(img)
     size_kb = len(result_stream.getvalue()) // 1024
