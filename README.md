@@ -84,7 +84,7 @@ start_all.bat
 ```bash
 # 后端
 cd backend
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # 含运行时依赖 + pytest/ruff；仅运行用 requirements.txt
 python -m uvicorn app.main:app \
   --reload \
   --reload-exclude *.pytest_cache* \
@@ -113,7 +113,7 @@ npm run dev    # Vite dev server at :5175
 .
 ├── backend/                        # FastAPI 后端
 │   ├── app/
-│   │   ├── routers/                # 18 个路由模块 + ai_config/ 子包
+│   │   ├── routers/                # 21 个已注册路由模块 + ai_config/ 子包
 │   │   │   ├── sse_handlers.py     # SSE 核心（目录/正文/事实生成，最大文件）
 │   │   │   ├── outline_library.py  # 专项方案目录库
 │   │   │   ├── global_facts.py     # 全局事实（九大章节分类）
@@ -134,12 +134,13 @@ npm run dev    # Vite dev server at :5175
 │   │   │   ├── scheme_classification.py # 九大章节 & 危大工程六大类（唯一事实源）
 │   │   │   └── prompt_governance.py # 提示词治理
 │   │   ├── db.py                   # 连接初始化 + 幂等 _migrate
-│   │   ├── schema_sql.py           # 33 张表结构定义
+│   │   ├── schema_sql.py           # 36 张表结构定义
 │   │   ├── middleware.py           # ApiAuthMiddleware
 │   │   ├── main.py                 # 应用入口
 │   │   └── config.py               # pydantic-settings 配置（APP_VERSION = "5.3.0"）
-│   ├── tests/                      # 167 个 pytest 文件
-│   ├── requirements.txt
+│   ├── tests/                      # 409 个 pytest 文件
+│   ├── requirements.txt            # 运行时依赖（版本已锁）
+│   ├── requirements-dev.txt        # 开发/CI：pytest + ruff
 │   ├── requirements-ocr.txt        # 可选：扫描件 OCR
 │   ├── requirements-windows.txt    # 可选：Windows PDF 导出
 │   └── pytest.ini
@@ -148,10 +149,10 @@ npm run dev    # Vite dev server at :5175
 │   │   ├── pages/                  # 7 个页面：ProjectList / ProjectDetail / SchemeWorkbench / OutlineLibrary / AIConfig / PromptEditor / SecuritySettings
 │   │   ├── components/             # 26+ 组件（含 review/ 子目录）
 │   │   ├── hooks/                  # useContentGeneration / useSchemeLiveTask
-│   │   ├── api/index.ts            # axios + 19 个按业务域分组的 API 集合 + sseFetch
+│   │   ├── api/index.ts            # axios + 21 个按业务域分组的 API 集合 + sseFetch
 │   │   ├── utils/                  # 派生纯函数层
 │   │   ├── types/                  # 前后端类型契约
-│   │   └── tests/                  # 46 个 vitest 文件
+│   │   └── tests/                  # 78 个 vitest 文件
 │   └── package.json
 ├── chart-gap-filler/               # 独立图表补全子项目
 ├── docs/                           # 核心文档（产品需求/技术架构/编译计划书）与专项报告
@@ -218,8 +219,10 @@ cd backend
 python -m pytest tests/ -q
 ```
 
-- **2026-09-26 基线**：**2944 passed, 4 skipped, 3 xfailed**
-- 167 个测试文件
+- **2026-11-03 基线**：**9269 passed, 19 skipped, 1 xfailed, 0 failed**
+- 409 个测试文件
+- 分层标记：`slow`（夜间/全量回归）、`integration`（真实文件/外部进程）、`source_lock`（源码文本护栏）。PR 快车道：
+  `python -m pytest tests/ -q -m "not slow and not integration"`
 
 专项：
 
@@ -245,12 +248,12 @@ python -m pytest tests/test_facts_classification.py tests/test_scheme_classifica
 
 ```bash
 cd frontend
-npm run test    # vitest run，668 用例
+npm run test    # vitest run，1357 用例
 npm run build   # tsc && vite build（类型检查 + 打包）
 ```
 
-- **2026-09-26 基线**：**668 用例全通过**
-- 46 个 vitest 文件
+- **2026-11-03 基线**：**78 文件 / 1357 用例全通过**
+- 78 个 vitest 文件
 
 ### 图表子项目
 
