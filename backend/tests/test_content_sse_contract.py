@@ -20,7 +20,6 @@
 import json
 
 import pytest
-
 from app.routers import sse_handlers as sh
 
 
