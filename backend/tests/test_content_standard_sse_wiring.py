@@ -44,6 +44,11 @@ _SRC = _SSE.read_text(encoding="utf-8")
 #    新建服务模块 content_runtime.py —— 接线断言需同时锁两处宿主的源码契约。
 _CR = Path(__file__).resolve().parents[1] / "app" / "services" / "content_runtime.py"
 _CR_SRC = _CR.read_text(encoding="utf-8")
+# B1 拆分（2026-11-03）：正文三个终态载荷拼装点下沉到该模块；sse_handlers 只留
+#    同名薄包装，字段本体断言改读下沉模块源码。
+_CP = (Path(__file__).resolve().parents[1] / "app" / "routers"
+       / "_sse_content_payloads.py")
+_CP_SRC = _CP.read_text(encoding="utf-8")
 
 
 # ============================================================
@@ -186,11 +191,12 @@ class TestEventPayloads:
         # ⚠️ 必须先切到 generate_content 段：目录生成路径里**也有**一个同名
         #    `_stopped_payload(task_id, message, *, progress=None)`（模块级），
         #    全文件 index 会先命中它 —— 锚点选错即恒失败（§5.14）。
+        # B1 拆分：字段本体在下沉模块的 build_stopped_payload 内，包装留在 _c。
         _c = _SRC[_SRC.index("async def generate_content("):]
-        i = _c.index("def _stopped_payload(")
-        block = _c[i:_c.index("\n        def ", i + 10)]
+        i = _CP_SRC.index("def build_stopped_payload(")
+        block = _CP_SRC[i:_CP_SRC.index("\ndef build_error_payload(", i + 10)]
         assert "'event': 'stopped'" in block
-        assert "'standard_summary': _std_sum" in block
+        assert "'standard_summary': standard_summary" in block
         # 两条 stopped 路径都必须走拼装点
         assert "_stopped_payload('用户已停止', stop_progress)" in _c
         assert "_stopped_payload('任务已取消')" in _c

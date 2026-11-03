@@ -22,6 +22,14 @@ import pytest
 from app.routers import sse_handlers as sh
 from app.services import content_shrink as cs
 
+# B1 拆分（2026-11-03）：正文终态载荷拼装点下沉到该模块，结构断言改读其源码。
+_PAYLOADS_PATH = (Path(__file__).resolve().parents[1] / "app" / "routers"
+                  / "_sse_content_payloads.py")
+
+
+def _payload_src() -> str:
+    return _PAYLOADS_PATH.read_text(encoding="utf-8")
+
 
 # ============================================================
 # E-1：正文终态收尾顺序（checkpoint → finish_task → yield）
@@ -75,16 +83,17 @@ class TestTerminalOrdering:
         standard_summary，注释却写「已补齐」）。本用例锁住拼装点本体，
         防止有人把字段从 helper 里删掉而调用点看不出问题。
         """
-        src = self._src()
-        i_def = src.index("def _stopped_payload(")
+        # B1 拆分：拼装点本体在 _sse_content_payloads，改读下沉模块源码。
+        src = _payload_src()
+        i_def = src.index("def build_stopped_payload(")
         # ⚠️ 窗口尺寸必须覆盖 helper **完整体**（含 return 字典）。
         #    首版取 1200 字符恰好在 'standard_summary' 被截断处切掉 →
         #    护栏恒失败，逼着后人改窗口而不是改实现（§5.14 判据锚点）。
-        #    这里改用「到下一个顶层 def 为止」的边界，与实现长度解耦。
-        i_end = src.index("\n        def ", i_def + 10)
+        #    这里用「到下一个模块级 def 为止」的边界，与实现长度解耦。
+        i_end = src.index("\ndef build_error_payload(", i_def + 10)
         block = src[i_def:i_end]
-        assert "'progress': _p" in block, "stopped 载荷必须带 progress"
-        assert "'standard_summary': _std_sum" in block, (
+        assert "'progress': progress" in block, "stopped 载荷必须带 progress"
+        assert "'standard_summary': standard_summary" in block, (
             "stopped 载荷必须带 standard_summary")
         assert "'failed_count': max(total - len(done_ids), 0)" in block
 

@@ -146,7 +146,7 @@ from app.services.content_utils import (
     select_target_leaves,
     summarize_fact_mapping,
     text_word_count,
-    verify_generation_order,
+    verify_generation_order,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
     word_audit_summary,
     word_closeout_notice,
     word_deviation_of,
@@ -213,6 +213,13 @@ from app.services.standards_registry import get_standards_text
 # 公开入口改名后保留旧私有名别名，防止 sse_handlers 内部漏改调用点。
 _build_facts_text = build_facts_text  # noqa: E402
 
+# ✅ B1 拆分（2026-11-03）：正文生成三个终态载荷拼装点下沉到 _sse_content_payloads，
+#    本模块只保留同名薄包装（调用点、源码锚点与 monkeypatch 语义不变）。
+from app.routers._sse_content_payloads import (
+    build_content_checkpoint,
+    build_error_payload,
+    build_stopped_payload,
+)
 from app.routers.sse_checkpoint import (  # noqa: F401 — 测试直接从 sse_handlers monkeypatch/re-export
     _FACTS_CHECKPOINT_FIELDS,
     _checkpoint_partial_outline,
@@ -1929,177 +1936,52 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
         _fact_audit_by_leaf: dict = {}
         _order_warned: dict = {"flag": False}
 
+        # ✅ B1 拆分（2026-11-03）：三个终态拼装点已下沉到
+        #    app/routers/_sse_content_payloads.py（显式收参、不读闭包）。
+        #    此处保留同名薄包装 —— 调用点、源码锚点与 monkeypatch 语义不变。
+        #    _word_tol 提前置 None：该名字原先在 try 内绑定，薄包装收参时不得
+        #    NameError；None 表示「容差未建立」，拼装点按拆分前降级口径记空汇总。
+        _word_tol: float | None = None
+
         def _content_ckpt_payload(event: str, message: str = "") -> dict:
-            """正文生成终态 checkpoint 的**唯一**拼装点。
-
-            唯一定义的意义：completed / stopped / error / 断线兜底 / 空章节
-            五处收尾都要写同一套字段。逐处手写必然漂移 —— 历史上就出现过
-            「completed 带 failed_count、error 不带」的口径矛盾，导致前端
-            终态汇总与 stats 对不上。
-
-            ✅ BUG 修复（2026-10-05 · 正文生成 R-1 · checkpoint 统计字段丢失）：
-            本次运行的三个统计量（累计字数 / 本次生成字数 / 超字数章数）此前由
-            **各收尾路径自己往 _ckpt 里写**，而只有 completed 路径记得写全：
-              · completed   → words + run_words + over_count ✅
-              · 用户停止     → 仅 words，run_words/over_count 恒 0
-              · 取消(断连等) → **一个都没写**（_ckpt 保持初始值 0）
-              · 整批异常     → **一个都没写**
-              · 断线兜底     → **一个都没写**
-            后果：用户点停止 / 刷新页面 / 弱网断连后，前端重挂接走
-            `contentResultSummary(content_result)`（读 done/total/words/
-            over_count）永远读到 0 —— 明明后台已经写了几万字，界面却显示
-            「已完成 0/N 章，共 0 字」，与在线看到的横幅完全对不上。
-            修法：把回填放进**唯一拼装点**（本函数），五条路径一次性全部正确，
-            结构上不可能再漂移；调用点不再各自写 _ckpt 统计量。
-            """
-            _ckpt["words"] = int(_prog.get("words", 0) or 0)
-            _ckpt["run_words"] = _ckpt["words"]
-            _ckpt["over_count"] = int(_stat.get("over", 0) or 0)
-            # ✅ R66（2026-10-11）字数可追溯：汇总随所有终态载荷一并回填
-            #    （与 words/over_count 同一"唯一拼装点"纪律，五条收尾路径全覆盖）。
-            #    统计只服务于展示与审计，任何异常不得影响 checkpoint 落盘。
-            try:
-                _ckpt["word_audit"] = word_audit_summary(
-                    _stat.get("audit_rows") or [], tolerance=_word_tol)
-            except Exception:
-                _ckpt["word_audit"] = {}
-            # ✅ R77b（2026-10-15）：事实冲突定点修复汇总随所有终态载荷回填
-            #    （与 word_audit 同一"唯一拼装点"纪律，五条收尾路径全覆盖；
-            #    断线重挂/审核预检经白名单同读本键）。纯累加器、零异常面。
-            _ckpt["fact_autofix_summary"] = _fa_sum
-            # ✅ R105（G1 · 生成后顺序校验留痕）：派发序 vs 目录 DFS 期望序逐位
-            #    比对（verify_generation_order 纯函数、不抛异常、不改输入）。
-            #    期望序未建立（早退/早期异常，本次一章都没派发）时不产键，
-            #    载荷与引入前同构；失守即 WARNING 点名首个错位与缺/多章节
-            #    （_order_warned 闸门防多条收尾路径重复刷屏）。
-            if _expected_order:
-                try:
-                    _oc = verify_generation_order(_dispatched_order, _expected_order)
-                    _ckpt["order_check"] = _oc
-                    if not _oc.get("ok") and not _order_warned["flag"]:
-                        _order_warned["flag"] = True
-                        logger.warning(
-                            "正文生成顺序校验失守：派发序与目录 DFS 序不一致"
-                            "（task=%s · 首个失配位=%s · 未派发=%s · 乱序多出=%s）",
-                            task_id, _oc.get("first_mismatch_index"),
-                            (_oc.get("missing") or [])[:5],
-                            (_oc.get("unexpected") or [])[:5])
-                except Exception:
-                    _ckpt["order_check"] = {}
-            # ✅ R105（G3 · 逐章注入留痕汇总）：多少章有留痕、多少条事实
-            #    因预算没进提示词、落在哪几章（纯读累加器，零异常面）。
-            try:
-                _fd_total = 0
-                _fd_secs = 0
-                for _v in _fact_audit_by_leaf.values():
-                    _n = int(_v.get("budget_dropped_count") or 0)
-                    if _n > 0:
-                        _fd_total += _n
-                        _fd_secs += 1
-                _ckpt["fact_injection_summary"] = {
-                    "sections": len(_fact_audit_by_leaf),
-                    "budget_dropped_total": _fd_total,
-                    "budget_dropped_sections": _fd_secs,
-                }
-            except Exception:
-                _ckpt["fact_injection_summary"] = {}
-            return {
-                'event': event,
-                'message': message,
-                'done': _ckpt.get("done", len(done_ids)),
-                'total': _ckpt.get("total", total),
-                'failed_count': len(_failed_ids),
-                'failed_sections': list(_failed_reasons.values())[:50],
-                'words': _ckpt.get("words", 0),
-                # ✅ 本次运行统计（前端终态横幅 / 重挂接页展示）：
-                #    run_words = 本次实际生成字数；over_count = 超字数章节数。
-                'run_words': _ckpt.get("run_words", 0),
-                'over_count': _ckpt.get("over_count", 0),
-                # ✅ R66（2026-10-11）：逐章目标/实际/偏差明细 + 达标统计
-                #    （word_audit_summary 结构，断线重挂与审核预检同读本键）。
-                'word_audit': _ckpt.get("word_audit", {}),
-                # ✅ R77b（2026-10-15）：事实冲突定点修复汇总（sections /
-                #    fixed_sections / conflicts / applied / rejected）。
-                'fact_autofix_summary': _ckpt.get("fact_autofix_summary", {}),
-                # ✅ R105（2026-10-18 · G1/G3/G4 断线收口）：三键与上方回填
-                #    同源（唯一拼装点纪律，五条收尾路径全覆盖）。
-                #    order_check = 派发序 vs 目录 DFS 序逐位比对结果
-                #    （verify_generation_order 纯数据形态）；期望序未建立时为空 dict。
-                #    fact_mapping = 显式「章节 → 所需事实」映射表全量
-                #    （chapter_fact_mapping 产物，与逐章注入同一判据）。
-                #    fact_injection_summary = 逐章注入留痕汇总。
-                'order_check': _ckpt.get("order_check", {}),
-                'fact_mapping': _ckpt.get("fact_mapping", []),
-                'fact_injection_summary': _ckpt.get("fact_injection_summary", {}),
-            }
+            """正文生成终态 checkpoint 的唯一拼装点（实现见 _sse_content_payloads）。"""
+            return build_content_checkpoint(
+                event, message,
+                ckpt=_ckpt, task_id=task_id, total=total,
+                done_ids=done_ids, failed_ids=_failed_ids,
+                failed_reasons=_failed_reasons, prog=_prog, run_stats=_stat,
+                word_tol=_word_tol, fact_autofix_summary=_fa_sum,
+                dispatched_order=_dispatched_order,
+                expected_order=_expected_order,
+                fact_audit_by_leaf=_fact_audit_by_leaf,
+                order_warned=_order_warned,
+            )
 
         def _stopped_payload(message: str,
                              progress: float | None = None) -> dict:
-            """`stopped` 终态事件的**唯一**拼装点。
+            """`stopped` 终态事件的唯一拼装点（实现见 _sse_content_payloads）。
 
-            ✅ BUG 修复（2026-10-05 · 正文生成 R-2 · 两条 stopped 路径字段漂移）：
-            「用户主动停止」与「CancelledError（服务端超时 / 防僵尸替换 / 优雅关闭）」
-            两条路径此前各自手写载荷，实测缺失如下：
-              · 用户停止 → progress ✅ / failed_count ✅ / failed_sections ✅
-                          / standard_summary ✅
-              · 取消路径 → **progress 缺** / standard_summary 缺
-            代码注释还写着「并补齐 progress，使两条 stopped 路径的载荷字段保持
-            一致」—— 注释与实现长期不符，正是本仓反复记录的「注释宣称已做、
-            实现没做」型缺陷。前端 `stopped` 分支读 `evt.progress` 决定进度条
-            停在哪个值；缺失时进度条冻结在最后一次心跳的值（可能是 0.3），
-            与 `standard_summary` 丢失一起让「服务端超时中断」这条路径最难排查。
-
-            `progress` 省略时按当前加权进度取值（`_progress_now` 过不可回退护栏）。
+            progress 省略时按当前加权进度取值（_progress_now 过不可回退护栏）。
             """
             _p = _progress_now() if progress is None else float(progress)
-            return {
-                'event': 'stopped', 'task_id': task_id,
-                'progress': _p, 'message': message,
-                'failed_count': max(total - len(done_ids), 0),
-                'failed_sections': list(_failed_reasons.values())[:50],
-                'standard_summary': _std_sum,
-                # ✅ R77b：事实冲突定点修复汇总随 stopped 一并下发 —— 终态
-                #    三处拼装点（stopped / error / completed）字段完全一致
-                #    （R66/R74 同款纪律：用户中途停止也要看得到修复成效）。
-                'fact_autofix_summary': _fa_sum,
-                # ✅ R105：顺序校验 + 事实映射汇总与 completed / error 同键同口径
-                #    （三处拼装点字段一致纪律；全量映射在 checkpoint 面，
-                #    SSE 事件只带 summarize_fact_mapping 汇总）。
-                'order_check': _ckpt.get("order_check", {}),
-                'fact_mapping_stats': summarize_fact_mapping(
-                    _ckpt.get("fact_mapping") or [], _fact_audit_by_leaf),
-            }
+            return build_stopped_payload(
+                message, progress=_p, task_id=task_id, total=total,
+                done_ids=done_ids, failed_reasons=_failed_reasons, ckpt=_ckpt,
+                standard_summary=_std_sum, fact_autofix_summary=_fa_sum,
+                fact_audit_by_leaf=_fact_audit_by_leaf,
+            )
 
         def _error_payload(message: str, *, include_sections: bool = True,
                            progress: float | None = None) -> dict:
-            """`error` 终态事件的**唯一**拼装点。
-
-            ✅ BUG 修复（2026-10-05 · 正文生成 R-3 · 两条 error 路径字段漂移）：
-            「全章失败」（`:69xx`）与「整批异常」（外层 except Exception）两条路径
-            手写的 error 载荷形状不同 —— 后者**完全没有** `total` / `failed_count`
-            / `failed_sections` / `progress` / `standard_summary`。而整批异常恰恰是
-            最需要明细的场景：异常可能发生在任何章节进入 `gen_one` **之前**
-            （例如章节树查询失败），此时一条 `section_error` 都没下发过，
-            `_failed_reasons` 里已有明细却随载荷一起被丢弃，用户只看到一句
-            「正文生成失败：'NoneType' object has no attribute 'fetchall'」，
-            逐章失败原因彻底丢失。
-            """
+            """`error` 终态事件的唯一拼装点（实现见 _sse_content_payloads）。"""
             _p = _progress_now() if progress is None else float(progress)
-            payload = {
-                'event': 'error', 'task_id': task_id,
-                'message': message,
-                'progress': _p, 'total': total,
-                'failed_count': max(total - len(done_ids), 0),
-                'standard_summary': _std_sum,
-                'fact_autofix_summary': _fa_sum,
-                # ✅ R105：与 stopped / completed 两处拼装点同键同口径。
-                'order_check': _ckpt.get("order_check", {}),
-                'fact_mapping_stats': summarize_fact_mapping(
-                    _ckpt.get("fact_mapping") or [], _fact_audit_by_leaf),
-            }
-            if include_sections and _failed_reasons:
-                payload['failed_sections'] = list(_failed_reasons.values())[:50]
-            return payload
+            return build_error_payload(
+                message, include_sections=include_sections, progress=_p,
+                task_id=task_id, total=total, done_ids=done_ids,
+                failed_reasons=_failed_reasons, ckpt=_ckpt,
+                standard_summary=_std_sum, fact_autofix_summary=_fa_sum,
+                fact_audit_by_leaf=_fact_audit_by_leaf,
+            )
 
         _db_write_lock = asyncio.Lock()
         _update_progress_safe = _locked_progress_updater(_db_write_lock, task_id)

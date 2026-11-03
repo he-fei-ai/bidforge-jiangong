@@ -425,10 +425,13 @@ def test_accumulate_tolerates_dirty_types():
 def test_summary_wiring_in_sse_handlers():
     """终态汇总接线四要素：初始化 / 累加调用 / completed 载荷 / checkpoint。"""
     src = _src("app/routers/sse_handlers.py")
+    # B1 拆分（2026-11-03）：终态 checkpoint 拼装点下沉到 _sse_content_payloads，
+    # 「汇总随 checkpoint 回填」这条不变式随之改读下沉模块源码。
+    payloads = _src("app/routers/_sse_content_payloads.py")
     assert "empty_fact_autofix_summary()" in src
     assert "accumulate_fact_autofix(_fa_sum, _std_rep)" in src
     assert "completed_payload['fact_autofix_summary'] = _fa_sum" in src
-    assert "'fact_autofix_summary': _ckpt.get(\"fact_autofix_summary\", {})" in src
+    assert "'fact_autofix_summary': ckpt.get(\"fact_autofix_summary\", {})" in payloads
     # 白名单双副本（sse 侧 + schema 侧）必须同步 —— 漏一处则断线重挂丢字段
     assert '"fact_autofix_summary")),' in src
     schema = _src("app/services/checkpoint_schema.py")

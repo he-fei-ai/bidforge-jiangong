@@ -31,6 +31,7 @@ import asyncio
 import inspect
 import re
 
+import app.routers._sse_content_payloads as cp
 import app.routers.sections as sec
 import app.routers.sse_handlers as sh
 import app.services.ai.task_registry as tr
@@ -133,12 +134,11 @@ class TestContentCheckpointContract:
             assert f in fields, f"白名单缺 {f}：断线重挂无法还原该字段"
 
     def test_payload_builder_carries_terminal_fields(self):
-        src = inspect.getsource(sh.generate_content)
-        i = src.index("def _content_ckpt_payload(")
-        j = src.index("async def _build_generation_context(", i)
-        block = src[i:j]
+        # B1 拆分：拼装点本体下沉到 _sse_content_payloads（sse_handlers 只留薄包装），
+        # 故字段断言改读下沉模块里 build_content_checkpoint 的源码。
+        src = inspect.getsource(cp.build_content_checkpoint)
         for f in ("failed_count", "failed_sections", "run_words", "over_count"):
-            assert f in block, f"checkpoint 载荷缺 {f}（旧实现为死字段/未落库）"
+            assert f in src, f"checkpoint 载荷缺 {f}（旧实现为死字段/未落库）"
 
     def test_all_checkpoint_sites_use_single_builder(self):
         """七处终态 checkpoint 调用点全部收口，不再各自手拼 {**_ckpt}。"""

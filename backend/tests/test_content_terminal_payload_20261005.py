@@ -39,6 +39,19 @@ def _src() -> str:
     return inspect.getsource(sh.generate_content)
 
 
+_PAYLOADS_PATH = (Path(__file__).resolve().parents[1] / "app" / "routers"
+                  / "_sse_content_payloads.py")
+
+
+def _payload_src() -> str:
+    """终态载荷拼装点实现（B1 拆分后下沉到 _sse_content_payloads）。
+
+    结构断言改读下沉模块源码：helper 本体已不在 generate_content 内，
+    但「唯一拼装点必须回填/带字段」这条不变式仍需逐字锁定。
+    """
+    return _PAYLOADS_PATH.read_text(encoding="utf-8")
+
+
 # ============================================================================
 # 端到端 harness（沿用 test_content_fence_contract_20260929 的桩 DB 思路）
 # ============================================================================
@@ -199,24 +212,29 @@ class TestR1CheckpointStatsSingleSource:
 
     def test_payload_helper_backfills_stats(self):
         """唯一拼装点内部必须回填 words / run_words / over_count。"""
-        src = _src()
-        i = src.index("def _content_ckpt_payload(")
-        # 窗口取到下一个顶层 def 为止，与实现长度解耦（§5.14 判据锚点）
-        block = src[i:src.index("\n        def ", i + 10)]
-        assert '_ckpt["words"]' in block, "拼装点必须回填 words"
-        assert '_ckpt["run_words"]' in block, "拼装点必须回填 run_words"
-        assert '_ckpt["over_count"]' in block, "拼装点必须回填 over_count"
+        src = _payload_src()
+        i = src.index("def build_content_checkpoint(")
+        # 窗口取到下一个模块级 def 为止，与实现长度解耦（§5.14 判据锚点）
+        block = src[i:src.index("\ndef build_stopped_payload(", i + 10)]
+        assert 'ckpt["words"]' in block, "拼装点必须回填 words"
+        assert 'ckpt["run_words"]' in block, "拼装点必须回填 run_words"
+        assert 'ckpt["over_count"]' in block, "拼装点必须回填 over_count"
 
     def test_no_call_site_writes_stats_by_hand(self):
         """调用点不得再各自手写统计量（那正是本次漂移的来源）。"""
-        src = _src()
-        assert src.count('_ckpt["run_words"]') == 1, (
+        src = _payload_src()
+        gen = _src()
+        assert src.count('ckpt["run_words"]') == 1, (
             "run_words 只允许在唯一拼装点赋值一次")
-        assert src.count('_ckpt["over_count"]') == 1, (
+        assert src.count('ckpt["over_count"]') == 1, (
             "over_count 只允许在唯一拼装点赋值一次")
+        assert gen.count('_ckpt["run_words"]') == 0, (
+            "调用点不得手写 run_words（应统一由拼装点回填）")
+        assert gen.count('_ckpt["over_count"]') == 0, (
+            "调用点不得手写 over_count（应统一由拼装点回填）")
         # words 另有一处在 _persist_section 里累加进度（_ckpt["done"] 旁），
         # 那是「每落库一章就同步一次」的增量写入，与终态回填语义不同，允许存在。
-        assert src.count('_ckpt["words"] = _prog.get("words", 0)') == 0, (
+        assert gen.count('_ckpt["words"] = _prog.get("words", 0)') == 0, (
             "终态路径不得再手写 _ckpt['words']（应统一由拼装点回填）")
 
     @pytest.mark.asyncio
@@ -268,15 +286,16 @@ class TestR1CheckpointStatsSingleSource:
 class TestR2StoppedPayloadParity:
 
     def _helper_block(self) -> str:
-        src = _src()
-        i = src.index("def _stopped_payload(")
-        return src[i:src.index("\n        def ", i + 10)]
+        # B1 拆分：stopped 拼装点本体在下沉模块内（sse_handlers 只留薄包装）。
+        src = _payload_src()
+        i = src.index("def build_stopped_payload(")
+        return src[i:src.index("\ndef build_error_payload(", i + 10)]
 
     def test_helper_carries_all_fields(self):
         block = self._helper_block()
-        for field in ("'event': 'stopped'", "'progress': _p",
+        for field in ("'event': 'stopped'", "'progress': progress",
                       "'failed_count': max(total - len(done_ids), 0)",
-                      "'failed_sections'", "'standard_summary': _std_sum"):
+                      "'failed_sections'", "'standard_summary': standard_summary"):
             assert field in block, f"stopped 拼装点缺少 {field}"
 
     def test_both_stopped_paths_go_through_helper(self):
@@ -290,8 +309,14 @@ class TestR2StoppedPayloadParity:
             "两条 stopped 路径必须都走 _stopped_payload，不得再内联手拼")
 
     def test_helper_progress_falls_back_to_weighted(self):
-        """省略 progress 时必须回落到加权进度（并过不可回退护栏）。"""
-        block = self._helper_block()
+        """省略 progress 时必须回落到加权进度（并过不可回退护栏）。
+
+        B1 拆分后折算动作留在 sse_handlers 的薄包装内（下沉模块只收已求值的
+        float），故断言锚点改回 generate_content 里的包装本体。
+        """
+        src = _src()
+        i = src.index("def _stopped_payload(")
+        block = src[i:src.index("\n        def ", i + 10)]
         assert "_progress_now() if progress is None" in block
 
 
@@ -302,19 +327,17 @@ class TestR2StoppedPayloadParity:
 class TestR3ErrorPayloadParity:
 
     def _helper_block(self) -> str:
-        src = _src()
-        i = src.index("def _error_payload(")
-        # ⚠️ _error_payload 是 event_stream 内**最后一个**嵌套 def（其后是
-        #    `_db_write_lock = ...`），没有下一个 "def " 可作边界 → 用下一个
-        #    顶层赋值语句收尾。与实现长度解耦（§5.14 判据锚点）。
-        j = src.index("_db_write_lock = asyncio.Lock()", i)
-        return src[i:j]
+        # B1 拆分：error 拼装点本体在下沉模块内（sse_handlers 只留薄包装）。
+        # 该函数是模块内最后一个 def，窗口取到文件末尾即可。
+        src = _payload_src()
+        i = src.index("def build_error_payload(")
+        return src[i:]
 
     def test_helper_carries_all_fields(self):
         block = self._helper_block()
-        for field in ("'event': 'error'", "'progress': _p", "'total': total",
+        for field in ("'event': 'error'", "'progress': progress", "'total': total",
                       "'failed_count': max(total - len(done_ids), 0)",
-                      "'standard_summary': _std_sum", "'failed_sections'"):
+                      "'standard_summary': standard_summary", "'failed_sections'"):
             assert field in block, f"error 拼装点缺少 {field}"
 
     def test_both_error_paths_go_through_helper(self):

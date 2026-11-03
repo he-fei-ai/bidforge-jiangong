@@ -13,6 +13,7 @@
 """
 import inspect
 
+import app.routers._sse_content_payloads as cp
 import pytest
 from app.routers import sse_handlers as sh
 from app.services import content_runtime as crt
@@ -93,12 +94,11 @@ class TestTerminalSemantics:
         #    无法发现拼装点本身把字段删掉。
         assert "_error_payload(_all_msg)" in tail, (
             "全章失败必须经 _error_payload 单一拼装点产出 error 事件")
-        i_helper = src.index("def _error_payload(")
-        j_end = src.index("_db_write_lock = asyncio.Lock()", i_helper)
-        helper = src[i_helper:j_end]
+        # B1 拆分：拼装点本体下沉到 _sse_content_payloads，字段断言改读其源码。
+        helper = inspect.getsource(cp.build_error_payload)
         assert "'event': 'error'" in helper
         assert "failed_sections" in helper      # 明细随 error 事件下发
-        assert "'standard_summary': _std_sum" in helper
+        assert "'standard_summary': standard_summary" in helper
 
     def test_completed_message_distinguishes_run_and_total(self):
         src = self._src()

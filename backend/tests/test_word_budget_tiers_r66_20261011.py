@@ -47,6 +47,8 @@ _SRC = {
     name: (_BACKEND / "app" / rel).read_text(encoding="utf-8")
     for name, rel in {
         "sse": "routers/sse_handlers.py",
+        # B1 拆分（2026-11-03）：正文终态载荷拼装点下沉到该模块。
+        "content_payloads": "routers/_sse_content_payloads.py",
         "compliance": "routers/compliance.py",
         "sections": "routers/sections.py",
         "upload_outline": "routers/upload_outline.py",
@@ -280,7 +282,10 @@ class TestSseWiringSource:
 
     def test_word_audit_in_checkpoint_and_completed(self):
         assert "completed_payload['word_audit'] = word_audit_summary(" in _SRC["sse"]
-        assert _SRC["sse"].count("word_audit_summary(") >= 2
+        # B1 拆分：终态 checkpoint 侧的调用随拼装点下沉到 content_payloads，
+        # 两处（在线 completed 载荷 + checkpoint 回填）合计仍须 ≥ 2。
+        assert (_SRC["sse"].count("word_audit_summary(")
+                + _SRC["content_payloads"].count("word_audit_summary(")) >= 2
         # _CHECKPOINT_KINDS[kind] = (结果名, 字段白名单元组)
         assert "word_audit" in _CHECKPOINT_KINDS["content_generation"][1]
 

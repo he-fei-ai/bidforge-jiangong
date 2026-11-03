@@ -28,6 +28,7 @@ import inspect
 import json
 from pathlib import Path
 
+import app.routers._sse_content_payloads as cp
 import pytest
 from app.routers import sse_handlers as sh
 from app.services.content_utils import (
@@ -43,6 +44,9 @@ from app.services.facts_builder import (
 
 _SH_FILE = (Path(__file__).resolve().parents[1]
             / "app" / "routers" / "sse_handlers.py")
+# B1 拆分（2026-11-03）：正文终态载荷拼装点下沉到该模块，结构断言改读其源码。
+_PAYLOADS_FILE = (Path(__file__).resolve().parents[1]
+                  / "app" / "routers" / "_sse_content_payloads.py")
 _CU_FILE = (Path(__file__).resolve().parents[1]
             / "app" / "services" / "content_utils.py")
 
@@ -274,11 +278,15 @@ class TestR105OrderCheckWiring:
             "期望序必须建立在空章节早退之后（没派发过就不该产校验）")
 
     def test_order_warning_fires_once(self):
-        """失守 WARNING 必须走一次闸（多条收尾路径反复调拼装点不得刷屏）。"""
-        src = _src()
-        block = src[src.index("def _content_ckpt_payload("):
-                    src.index("def _stopped_payload(", src.index("def _content_ckpt_payload("))]
-        assert '_order_warned["flag"]' in block, "顺序失守告警必须经一次闸"
+        """失守 WARNING 必须走一次闸（多条收尾路径反复调拼装点不得刷屏）。
+
+        B1 拆分：告警逻辑随 build_content_checkpoint 下沉到 _sse_content_payloads，
+        结构断言改读下沉模块源码（闸门仍在拼装点内，一次闸语义不变）。
+        """
+        src = _PAYLOADS_FILE.read_text(encoding="utf-8")
+        block = src[src.index("def build_content_checkpoint("):
+                    src.index("def build_stopped_payload(")]
+        assert 'order_warned["flag"]' in block, "顺序失守告警必须经一次闸"
         assert block.count("logger.warning") >= 1 and "order_check" in block
 
 
@@ -478,7 +486,9 @@ class TestR105FailSoftDiscipline:
         def _explode(*a, **k):
             raise RuntimeError("模拟顺序校验炸")
 
-        monkeypatch.setattr(sh, "verify_generation_order", _explode)
+        # B1 拆分：顺序校验的调用点随拼装点下沉到 _sse_content_payloads，
+        # 故把故障注入改到下沉模块的符号上（闸门与降级口径不变）。
+        monkeypatch.setattr(cp, "verify_generation_order", _explode)
         db = _DB()
         events, text = await _run(db)
         term = _terminal(events)

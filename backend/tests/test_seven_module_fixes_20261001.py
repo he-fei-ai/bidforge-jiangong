@@ -23,6 +23,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SSE_PATH = os.path.join(BACKEND, "app", "routers", "sse_handlers.py")
+# B1 拆分（2026-11-03）：正文终态载荷拼装点下沉到该模块，字段本体断言改读它。
+PAYLOADS_PATH = os.path.join(BACKEND, "app", "routers", "_sse_content_payloads.py")
 BA_PATH = os.path.join(BACKEND, "app", "routers", "bid_analysis.py")
 CU_PATH = os.path.join(BACKEND, "app", "services", "content_utils.py")
 
@@ -96,8 +98,10 @@ def test_c3_all_stopped_events_carry_failed_count():
     """
     src = _src(SSE_PATH)
     gen = src[src.index("async def generate_content("):]
-    i = gen.index("def _stopped_payload(")
-    block = gen[i:gen.index("\n        def ", i + 10)]
+    # B1 拆分：拼装点本体下沉到 _sse_content_payloads，字段断言改读其源码。
+    payloads = _src(PAYLOADS_PATH)
+    i = payloads.index("def build_stopped_payload(")
+    block = payloads[i:payloads.index("\ndef build_error_payload(", i + 10)]
     assert "'event': 'stopped'" in block
     assert "failed_count" in block, (
         f"stopped 载荷拼装点必须含 failed_count: {block[:200]}")
