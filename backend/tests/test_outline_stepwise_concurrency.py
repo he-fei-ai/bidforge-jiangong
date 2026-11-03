@@ -156,7 +156,9 @@ class TestStepwiseOrchestrationGuards:
         src = inspect.getsource(sh._fetch_chapter_children)
         # 跳过 docstring（其中引用了旧式反例「先 async with sem 再 wait_resume」）
         body = src[src.index('"""', src.index('"""') + 3) + 3:]
-        assert body.index("await wait_resume(task_id)") < body.index("async with sem:"), \
+        # 拆分兼容：函数下沉 _sse_outline_build.py 后，wait_resume 经 _sh. 延迟
+        # 绑定调用（``await _sh.wait_resume(task_id)``），故锚点不带 await 前缀。
+        assert body.index("wait_resume(task_id)") < body.index("async with sem:"), \
             "暂停闸门必须排在并发信号量之前"
 
     def test_gather_not_as_completed(self):

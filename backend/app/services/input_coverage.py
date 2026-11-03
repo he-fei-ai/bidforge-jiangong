@@ -284,6 +284,6 @@ def log_coverage_audit(scene: str, scheme_id: str, report: dict) -> None:
         logger.warning(
             "输入依据差集审计[%s] 方案 %s 存在未调用/截断/降级：%s｜缺失=%s｜截断=%s｜降级源=%s",
             scene, scheme_id[:8], report.get("summary", ""), detail, trunc, degr)
-    except Exception:
+    except Exception as e:
         # 审计日志绝不允许影响生成主流程
-        pass
+        logger.debug("输入依据差集审计日志输出失败（不影响生成主流程，scene=%s）: %s", scene, e)

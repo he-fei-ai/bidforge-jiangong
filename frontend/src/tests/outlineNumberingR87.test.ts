@@ -113,20 +113,30 @@ describe("formatOutlineTitle · 接线面行为", () => {
 });
 
 describe("wiring · 页面不得再自持松过滤", () => {
-  const pages = import.meta.glob("../pages/*.tsx", {
+  // ✅ R-P1 拆分同步：页面局部模块已迁至 pages/schemeWorkbench/*，glob 随之覆盖
+  //    子目录，保证「页面 + 其局部模块」整体不得回流松过滤（锁意图不变，覆盖更全）。
+  const pages = import.meta.glob("../pages/**/*.tsx", {
+    query: "?raw",
+    import: "default",
+  });
+  const pagesTs = import.meta.glob("../pages/**/*.ts", {
     query: "?raw",
     import: "default",
   });
 
   it("页面消费 utils 的合法性判据", async () => {
-    const mods = await Promise.all(Object.entries(pages).map(([, l]) => l()));
+    const mods = await Promise.all(
+      Object.values(pages).concat(Object.values(pagesTs)).map((l) => l()),
+    );
     const src = mods.join("\n");
     expect(src).toContain('from "../utils/outlineNumbering"');
     expect(src).toContain("storedIdParts(");
   });
 
   it("旧的「逐段 parseInt 挑数字」松过滤不得回流", async () => {
-    const mods = await Promise.all(Object.entries(pages).map(([, l]) => l()));
+    const mods = await Promise.all(
+      Object.values(pages).concat(Object.values(pagesTs)).map((l) => l()),
+    );
     const src = mods.join("\n");
     // 该形态即 R86 从后端 heading_templates 删掉的那份；页面侧同步清除
     expect(src).not.toMatch(/\.map\(\s*\(p\)\s*=>\s*parseInt\(p,\s*10\)\s*\)/);

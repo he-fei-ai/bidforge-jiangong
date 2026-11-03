@@ -345,7 +345,13 @@ _FE_PAGE = os.path.join(_REPO, "frontend", "src", "pages", "SchemeWorkbenchPage.
 class TestFrontendParity:
     def test_options_values_match_backend_whitelist(self):
         from app.services.facts_extractor import VALUE_KIND_ALLOWED
-        src = _read(_FE_PAGE)
+        # 大文件拆分后：FACT_VALUE_KIND_OPTIONS 迁入 pages/schemeWorkbench/factsShared.ts
+        # —— 聚合 facade + 子模块读取，值域 parity 断言不变
+        wb = os.path.join(_REPO, "frontend", "src", "pages", "schemeWorkbench")
+        src = "\n".join(
+            [_read(_FE_PAGE)]
+            + [_read(os.path.join(wb, fn)) for fn in sorted(os.listdir(wb))
+               if fn.endswith((".ts", ".tsx"))])
         m = re.search(
             r"export const FACT_VALUE_KIND_OPTIONS[^\[]*\[(.*?)\];", src, re.S)
         assert m, "前端 FACT_VALUE_KIND_OPTIONS 未找到"

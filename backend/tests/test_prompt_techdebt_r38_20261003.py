@@ -142,8 +142,12 @@ class TestProjectFactsBudgetSingleSource:
         import pathlib
 
         import app as app_pkg
-        src = (pathlib.Path(app_pkg.__file__).parent
-               / "routers" / "sse_handlers.py").read_text(encoding="utf-8")
+        # 拆分兼容：目录构建/评审两阶段下沉 _sse_outline_*.py，消费点计数需聚合
+        root = pathlib.Path(app_pkg.__file__).parent / "routers"
+        src = "\n".join(
+            (root / name).read_text(encoding="utf-8")
+            for name in ("sse_handlers.py", "_sse_outline_build.py",
+                         "_sse_outline_review.py"))
         assert src.count("PROJECT_FACTS_LIMIT_OUTLINE") >= 4, "OUTLINE 档应≥3处消费"
         assert src.count("PROJECT_FACTS_LIMIT_SUBLEVEL") >= 3, "SUBLEVEL 档应≥2处消费"
 

@@ -308,6 +308,21 @@ async def list_charts(scheme_id: str, db=Depends(get_db)):
     return {"items": items}
 
 
+def _json_fix_candidate_rejected(is_json_fix: bool, cand: str) -> bool:
+    """JSON 型图表修复的候选形态闸（✅ R169）。
+
+    旧实现按**候选形态**分流校验：AI 不遵守「只返回 JSON」把数据型图表
+    （labor/layout/timeline 等）改写成 Mermaid 文本时，``_validate_inline_chart``
+    回落 Mermaid 校验照样放行 → ``validated=True`` → 写库 + 重写正文（保留原
+    ```` ```chart-json ```` 围栏）→ 三侧全部不可见：导出解析 ``json.loads`` 失败
+    整块跳过、JSON 型渲染器对 Mermaid 文本必然 None、清单 ``placed`` 翻 false。
+
+    与提示词选择处 ``_looks_mermaid`` 纪律对齐：``is_json_fix`` 的候选必须是
+    JSON 数据形态（对象或数组开头），否则该轮候选作废、带错误反馈进入下一轮。
+    """
+    return bool(is_json_fix) and not (cand or "").lstrip().startswith(("{", "["))
+
+
 @router.post("/fix-mermaid")
 async def fix_mermaid(body: dict, db=Depends(get_db)):
     """AI 自动修复渲染失败的 Mermaid 代码
@@ -467,6 +482,22 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
                 last_error = "修复返回空代码，请重新输出完整代码"
                 continue
             best_effort = cand
+            # ✅ R169：JSON 型修复的候选形态闸。旧实现按**候选形态**分流校验——
+            #    AI 不遵守「只返回 JSON」把数据型图表（labor/layout/timeline 等）
+            #    改写成 Mermaid 文本时，_validate_inline_chart 回落 Mermaid 校验
+            #    照样放行 → validated=True → 写库 + _rewrite_code_block（保留原
+            #    ```chart-json 围栏）→ 三侧全部不可见：导出解析 json.loads 失败
+            #    整块跳过、labor 渲染器对 Mermaid 文本必然 None、清单 placed 翻
+            #    false。现与提示词选择处 _looks_mermaid 纪律对齐：is_json_fix 的
+            #    候选必须是 JSON 数据形态，否则带错误反馈进入下一轮（3 轮耗尽走
+            #    best_effort 降级返回、validated=False，绝不写库）。
+            if _json_fix_candidate_rejected(is_json_fix, cand):
+                last_error = ("该图表为 JSON 数据型，修复结果必须返回完整 JSON 数据"
+                              "（严禁 Mermaid 语法），请重新输出")
+                logger.info("JSON 图表修复第 %d/%d 轮返回 Mermaid 文本，拒绝该候选"
+                            "（section=%s）",
+                            attempt, MAX_FIX_ATTEMPTS, (section_id or prediction_id)[:8])
+                continue
             # 校验闭环：按修复后代码的**实际形态**分流（JSON 数据 / Mermaid 语法）
             _vt = chart_type
             if cand.lstrip().startswith("{"):
@@ -626,8 +657,8 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
             logger.warning("Mermaid 修复结果写回失败（已回滚）: %s", e)
             try:
                 await db.rollback()
-            except Exception:
-                pass
+            except Exception as rb_err:
+                logger.debug("charts 写回失败路径的 rollback 也失败（清理路径，忽略）: %s", rb_err)
             wrote_back = False
             content_updated = False
             new_content = ""

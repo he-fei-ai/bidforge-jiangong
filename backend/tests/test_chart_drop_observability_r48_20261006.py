@@ -444,7 +444,14 @@ def test_lead_in_constants_have_single_source():
     assert CP.LEAD_IN_MAX_CHARS is CB.LEAD_IN_MAX_CHARS
     assert CB._LEAD_IN_MAX_CHARS is CB.LEAD_IN_MAX_CHARS
     assert hasattr(CB, "ORPHAN_LEAD_IN_RE")
+    import glob as _glob
+    import os as _os
+    base = _os.path.dirname(EX.__file__)
     src = open(EX.__file__, encoding="utf-8").read()
-    assert "len(text) > LEAD_IN_MAX_CHARS" in src, (
+    for p in sorted(_glob.glob(_os.path.join(base, "_export_*.py"))):
+        src += "\n" + open(p, encoding="utf-8").read()
+    # 拆分兼容：长度判定已拆至 _export_docx_parts.py，经 facade 延迟绑定（_sh.LEAD_IN_MAX_CHARS）
+    assert ("len(text) > LEAD_IN_MAX_CHARS" in src
+            or "len(text) > _sh.LEAD_IN_MAX_CHARS" in src), (
         "export 侧引导语长度判定应引用 LEAD_IN_MAX_CHARS，不得回退为裸 60")
 

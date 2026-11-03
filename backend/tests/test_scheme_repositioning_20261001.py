@@ -529,8 +529,17 @@ class TestAntiRebidRedlines:
                 f"替代写法不一致：{t}")
 
     def test_export_blocks_bidding_terms(self):
-        """导出体检必须继续拦截投标场景用语（否则 AI 幻觉混进出稿）。"""
-        src = self._read("app/routers/export.py")
+        """导出体检必须继续拦截投标场景用语（否则 AI 幻觉混进出稿）。
+
+        大文件拆分后拦截词表迁入 `_export_issue_scan.py`（export.py 于
+        模块头正式 import）。锚点改为聚合读取 facade + 拆分模块，并新增
+        **更严**的链路断言：词表必须仍被 facade 实际引用，不允许悬空。
+        """
+        src_export = self._read("app/routers/export.py")
+        src_scan = self._read("app/routers/_export_issue_scan.py")
+        assert "from app.routers._export_issue_scan import" in src_export, (
+            "导出 facade 必须仍引用拆分后的体检模块（词表不得悬空）")
+        src = src_export + "\n" + src_scan
         assert "bidding_terms" in src
         for term in ("招标文件", "投标文件", "评标办法", "评分标准", "废标条件"):
             assert term in src, f"导出拦截词缺失：{term}"

@@ -537,8 +537,8 @@ def renumber_section_body_subheadings(
     try:
         from app.config import settings as _s
         _demote = has_db_children and _s.body_subheading_demote_with_children
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("读取 body_subheading_demote_with_children 失败（按默认降级行为继续）: %s", e)
     for block in blocks:
         if block.get("type") != "heading":
             continue

@@ -156,6 +156,26 @@ describe("factsApi 契约", () => {
     expect(last().data).toEqual({ scheme_id: "s1", fact_ids: ["f1", "f2"] });
   });
 
+  // ✅ R166（2026-11-03 · 契约补锁）：ackStale / batchAckStale 此前零契约用例
+  //    （QA 测绘确认的测试缺口）。后端两形态 changed 语义刻意不同（单条 bool /
+  //    批量 int，global_facts.py 注释文档化），历史上曾因 changed===false 被
+  //    静默吞掉；此处锁「HTTP 方法 + 路径 + 参数位置」防契约漂移。
+  it("ackStale：PATCH 单条，scheme_id 走 query", async () => {
+    await factsApi.ackStale("f1", "s1");
+    expect(last()).toMatchObject({
+      method: "patch", url: "/global-facts/f1/ack-stale",
+      config: { params: { scheme_id: "s1" } },
+    });
+  });
+
+  it("batchAckStale：POST 批量，scheme_id 与 fact_ids 放 body", async () => {
+    await factsApi.batchAckStale("s1", ["f1", "f2"]);
+    expect(last()).toMatchObject({
+      method: "post", url: "/global-facts/ack-stale",
+      data: { scheme_id: "s1", fact_ids: ["f1", "f2"] },
+    });
+  });
+
   it("uploadDocuments：multipart 字段名 files、scheme_id 走 query、放宽超时", async () => {
     const files = [new File(["a"], "a.txt"), new File(["b"], "b.csv")];
     await factsApi.uploadDocuments(files, "s1");
@@ -446,7 +466,6 @@ describe("API Token 注入链路", () => {
       };
     });
     try {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of sseFetch("/sse/test", { a: 1 })) {
         /* 无数据 */
       }

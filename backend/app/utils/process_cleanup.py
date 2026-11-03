@@ -163,7 +163,7 @@ def assign_pid_to_kill_job(pid: int) -> bool:
         if proc_handle:
             try:
                 _kernel32.CloseHandle(proc_handle)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 - 句柄关闭失败不影响回收结果，OS 退出时兜底回收
                 pass
 
 
@@ -406,14 +406,14 @@ def _install_signal_handlers() -> None:
                 if callable(_prev):
                     try:
                         _prev(signum, frame)
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001 - 交回原处理器失败不能吞掉中断语义，仅尽力而为
                         pass
                 else:
                     # 原处理器是默认行为：恢复默认并重新抛信号，让 OS 正常收尾
                     try:
                         signal.signal(signum, signal.SIG_DFL)
                         os.kill(os.getpid(), signum)
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001 - 信号重抛失败时进程即将退出，无需额外处理
                         pass
 
             signal.signal(sig, _handler)

@@ -378,6 +378,21 @@ _FRONTEND_PAGE_TS = (
     / "frontend" / "src" / "pages" / "SchemeWorkbenchPage.tsx"
 )
 
+# 大文件拆分后：LEADING_NUMBER_* / stripOutlineNumbering 迁入
+# pages/schemeWorkbench/outlineNumbering.ts —— 聚合读取，逐字节 parity 语义不变。
+_FRONTEND_WB_GLOB = (
+    Path(__file__).resolve().parents[2]
+    / "frontend" / "src" / "pages" / "schemeWorkbench"
+)
+
+
+def _frontend_ts_sources() -> str:
+    parts = [_FRONTEND_PAGE_TS.read_text(encoding="utf-8")]
+    for p in sorted(list(_FRONTEND_WB_GLOB.glob("*.ts"))
+                    + list(_FRONTEND_WB_GLOB.glob("*.tsx"))):
+        parts.append(p.read_text(encoding="utf-8"))
+    return "\n".join(parts)
+
 # JS 字符串字面量内的转义捕获（详见 TestLeadingNumberRegexFrontendParity._extract）
 _U_ESC = re.compile(r"\\u([0-9a-fA-F]{4})")
 
@@ -429,7 +444,7 @@ class TestLeadingNumberRegexFrontendParity:
     def test_char_classes_match_backend_constants(self):
         if not _FRONTEND_PAGE_TS.exists():
             pytest.skip("前端源文件缺失，跳过跨语言 parity")
-        ts = _FRONTEND_PAGE_TS.read_text(encoding="utf-8")
+        ts = _frontend_ts_sources()
         sep, cjk, _ = self._extract(ts)
         from app.services.numbering import _CJK_BOUNDARY, _SEP_CLASS
         assert sep == _SEP_CLASS, f"前端 SEP={sep!r} ≠ 后端 _SEP_CLASS={_SEP_CLASS!r}"
@@ -439,7 +454,7 @@ class TestLeadingNumberRegexFrontendParity:
     def test_full_regex_matches_backend_source(self):
         if not _FRONTEND_PAGE_TS.exists():
             pytest.skip("前端源文件缺失，跳过跨语言 parity")
-        ts = _FRONTEND_PAGE_TS.read_text(encoding="utf-8")
+        ts = _frontend_ts_sources()
         _, _, src = self._extract(ts)
         from app.services.numbering import _STRIP_NUMBER_RE
         assert self._decode(src) == self._decode(_STRIP_NUMBER_RE.pattern), (
@@ -450,7 +465,7 @@ class TestLeadingNumberRegexFrontendParity:
     def test_strip_behavior_battery_parity(self):
         if not _FRONTEND_PAGE_TS.exists():
             pytest.skip("前端源文件缺失，跳过跨语言 parity")
-        ts = _FRONTEND_PAGE_TS.read_text(encoding="utf-8")
+        ts = _frontend_ts_sources()
         _, _, src = self._extract(ts)
         from app.services.numbering import _STRIP_NUMBER_RE
         js_re = re.compile(self._decode(src))

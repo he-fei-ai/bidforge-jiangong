@@ -56,6 +56,8 @@ backend/scheme_assistant.db
 backend/scheme_assistant.db.*
 # 整个 data/ 目录：projects/ uploads/ _exports/ module_map.json（真实用户数据不入库）
 backend/data/
+# data/ 的手工快照备份（如 data_on_J_backup_20261103，仅本地留存）
+backend/data_on_J_backup_*/
 backend/cache/
 backend/logs/
 backend/_exports/
@@ -153,6 +155,7 @@ logs/
 .codeartsdoer/
 .codebuddy/
 .trae/
+.zcode/
 .vscode/
 .workbuddy-ai/
 .idea/

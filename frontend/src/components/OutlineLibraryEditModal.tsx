@@ -17,6 +17,8 @@ import { useAntdMessageHub } from "../utils/activityCenter";
 import { UPLOAD_FILE_ACCEPT, partitionUploadFiles, resolveMaxUploadBytes, formatUploadLimitMb } from "../utils/uploadAccept";
 import { MAX_OUTLINE_DEPTH } from "../utils/outlineConstants";
 
+import type { TreeDataNode, TreeProps } from "antd";
+
 const { Text } = Typography;
 
 /** 方案分类兜底候选（实际还会并入库内已有分类） */
@@ -26,6 +28,22 @@ const DEFAULT_TYPES = [
   "应急预案", "施工组织设计", "钢结构吊装", "降水", "土方开挖",
   "模板工程", "混凝土工程", "有限空间",
 ];
+
+/** /outline-library/templates 行（行业标准模板，前端只消费 key/name/risk） */
+interface OutlineTemplate {
+  key: string;
+  name?: string;
+  risk?: string;
+}
+
+/** 导入目录的原始节点（上传识别 outline / 模板 outline，字段可能缺省，导入时逐项兜底） */
+type OutlineImportNode = {
+  id?: string | number;
+  title?: string;
+  description?: string;
+  level?: number;
+  children?: OutlineImportNode[];
+};
 
 type OutlineNode = {
   id: string;
@@ -63,7 +81,7 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
   const [activeTab, setActiveTab] = useState("basic");
 
   // 行业标准模板 / 分类候选
-  const [templates, setTemplates] = useState<any[]>([]);
+  const [templates, setTemplates] = useState<OutlineTemplate[]>([]);
   const [tplKey, setTplKey] = useState<string | undefined>(undefined);
   const [tplLoading, setTplLoading] = useState(false);
   const [typeOptions, setTypeOptions] = useState<string[]>(DEFAULT_TYPES);
@@ -78,7 +96,8 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
       .catch(() => setTemplates([]));
     outlineLibraryApi.filters()
       .then(({ data }) => {
-        const fromDb = (data.type || []).map((t: any) => t.value);
+        // filters 响应是「筛选项 key → { value, count }[]」的动态字典，前端只消费 type 的 value
+        const fromDb = ((data as { type?: { value: string }[] }).type || []).map((t) => t.value);
         setTypeOptions(Array.from(new Set([...fromDb, ...DEFAULT_TYPES])));
       })
       .catch(() => setTypeOptions(DEFAULT_TYPES));
@@ -111,8 +130,9 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
       } catch { /* ignore */ }
       setTree(outline);
       setExpandedKeys(collectAllKeys(outline));
-    } catch (e: any) {
-      msg.error(e.message || "加载失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "加载失败");
     }
     setLoading(false);
   }, [libraryId, form]);
@@ -306,9 +326,10 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
     updateNode(id, { title: trimmed });
   }
 
-  function onTreeDrop(info: any) {
-    const dropKey = info.node.key;
-    const dragKey = info.dragNode.key;
+  function onTreeDrop(info: Parameters<NonNullable<TreeProps["onDrop"]>>[0]) {
+    // 本组件树节点 key 一律为章节 id string（antd Tree 的 Key 联合在此收窄）
+    const dropKey = info.node.key as string;
+    const dragKey = info.dragNode.key as string;
     const dropPos = info.node.pos.split("-");
     const dropPosition = info.dropPosition - Number(dropPos[dropPos.length - 1]);
 
@@ -375,7 +396,7 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
     setTree(data);
   }
 
-  function convertToEditTree(node: OutlineNode): any {
+  function convertToEditTree(node: OutlineNode): TreeDataNode {
     return {
       key: node.id,
       title: (
@@ -494,8 +515,9 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
       // 非空但内容不完整（截断 / 解析告警 / 归位统计）：逐条如实告知，不阻断
       for (const n of summary.notices) msg.info(String(n));
       msg.success(summary.message);
-    } catch (e: any) {
-      msg.error(e.message || "文件识别失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "文件识别失败");
     } finally {
       hide();
       setImporting(false);
@@ -503,7 +525,7 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
   };
 
   /** ✅ 导入 / 套用模板时保留 description（旧实现丢弃，会把编写要点清空） */
-  function importToTree(outline: any[], parentLevel = 0, parentPath = ""): OutlineNode[] {
+  function importToTree(outline: OutlineImportNode[], parentLevel = 0, parentPath = ""): OutlineNode[] {
     return outline.map((n, i) => {
       const level = n.level || parentLevel + 1;
       // ✅ BUG 修复（2026-10-05 · D2，与方案工作台 BUG-15 同类）：
@@ -517,7 +539,8 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
       //    （同一棵树重复构造得到同一批 id，便于 diff 与测试锁定）。
       const posId = parentPath ? `${parentPath}.${i + 1}` : String(i + 1);
       return {
-        id: n.id || `import_${posId}`,
+        // 上传识别/模板 outline 的 id 实际为 string（类型面为 string | number 的宽松投影）
+        id: (n.id || `import_${posId}`) as string,
         title: n.title || "未命名章节",
         description: n.description || "",
         level,
@@ -544,8 +567,9 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
       if (Object.keys(patch).length) form.setFieldsValue(patch);
       setActiveTab("outline");
       msg.success(`已套用「${templates.find((t) => t.key === key)?.name || key}」标准目录`);
-    } catch (e: any) {
-      msg.error(e.message || "加载模板失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "加载模板失败");
     } finally {
       setTplLoading(false);
     }
@@ -578,9 +602,10 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
       }
       onSaved();
       onClose();
-    } catch (e: any) {
-      if (e.errorFields) return;
-      msg.error(e.message || "保存失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string; errorFields?: unknown };
+      if (err.errorFields) return;
+      msg.error(err.message || "保存失败");
     } finally {
       setSaving(false);
     }

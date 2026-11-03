@@ -170,8 +170,14 @@ class TestR57ByteAndWiring:
 
     def test_workbench_name_ref_is_const(self):
         """F7d：``let nameRef`` → ``const nameRef``（只改 .current，绑定从不重新
-        赋值）。eslint prefer-const 是 error 级，回流会让 CI lint 步骤再红。"""
-        s = _src(P_WORKBENCH)
+        赋值）。eslint prefer-const 是 error 级，回流会让 CI lint 步骤再红。
+        大文件拆分后 nameRef 迁入 pages/schemeWorkbench/useExportPresets.tsx ——
+        聚合 facade + 子模块读取，断言阈值不变（仍恰好 1 处 const 定义）。"""
+        wb = _FE / "pages" / "schemeWorkbench"
+        s = "\n".join(
+            [_src(P_WORKBENCH)]
+            + [_src(p) for p in sorted(list(wb.glob("*.ts")) + list(wb.glob("*.tsx")))]
+        )
         assert s.count("let nameRef") == 0
         assert s.count('const nameRef: { current: string } = { current: "" };') == 1
 

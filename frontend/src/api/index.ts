@@ -27,6 +27,16 @@ import type {
   FactCategoryMap, FactChaptersResponse, FactDangerResponse, FactListResponse,
   FactResolveResponse,
 } from "../types/facts";
+// ✅ any 清理专项（2026-11-02）：错误体 / SSE 事件 / 写路径载荷契约
+import type {
+  ApiErrorBody, AuthBlockedError, ComplianceCheckPayload,
+  ComplianceExpertReviewPayload, ConsistencyRepairPayload, ConsistencyScanPayload,
+  ExportFormatConfig, FactGroupUpsertPayload, FastAPIValidationErrorItem,
+  JsonPayload, OutlineApplyAndSavePayload, OutlineBatchReviewPayload,
+  OutlineNewVersionPayload, OutlineRestoreVersionPayload, OutlineReviewPayload,
+  SseEvent, SseSoftStopMarker,
+} from "../types/api";
+import type { OutlineSavePayload } from "../types/api";
 
 /**
  * ✅ R14 修复（2026-09-22）：全局 401 短路保护。
@@ -84,7 +94,8 @@ async function withRetry<T>(
     } catch (e: unknown) {
       lastErr = e;
       // 只有网络错误 / 超时才重试；401（authGuard）、4xx（参数错误）等确定性错误直接抛出
-      const err = e as any;
+      // 结构化窄断言：仅读取 axios 错误对象上真实存在的 code / response.status
+      const err = e as { code?: string; response?: { status?: number } };
       const isRetryable =
         err?.code === "ECONNABORTED" ||     // axios timeout
         err?.code === "ERR_CANCELED" ||
@@ -103,7 +114,8 @@ async function withRetry<T>(
 //    取值优先构建期注入 VITE_API_TOKEN，其次 localStorage.api_token（便于内网部署临时开启）。
 function getApiToken(): string {
   try {
-    const env = (import.meta as any)?.env?.VITE_API_TOKEN;
+    // import.meta.env 由 vite/client 类型提供（src/vite-env.d.ts），无需 any 断言
+    const env = import.meta.env?.VITE_API_TOKEN;
     if (typeof env === "string" && env) return env;
   } catch {
     // import.meta 不可用时忽略
@@ -125,17 +137,22 @@ api.interceptors.request.use((config) => {
   //    除非用户显式 clearAuthShortCircuit()，否则后续请求**不再发出**，
   //    从源头切断"120 次连续拒绝未授权请求"的日志噪音与无效网络开销。
   if (authGuard.blocked) {
-    const err: any = new Error(authGuard.reason || "未授权访问，请检查 API Token");
-    err.name = "AuthBlockedError";
-    err.isAuthBlocked = true;
-    err.status = 401;
+    // Object.assign 保留原运行期行为（Error 实例上附加 name/isAuthBlocked/status）
+    const err = Object.assign(
+      new Error(authGuard.reason || "未授权访问，请检查 API Token"),
+      {
+        name: "AuthBlockedError",
+        isAuthBlocked: true,
+        status: 401,
+      },
+    ) as AuthBlockedError;
     return Promise.reject(err);
   }
   const h = authHeaders();
   for (const key of Object.keys(h)) {
     // 不覆盖调用方显式设置的同名头
-    if ((config.headers as any)?.[key] === undefined) {
-      (config.headers as any)[key] = h[key];
+    if (config.headers?.[key] === undefined) {
+      config.headers[key] = h[key];
     }
   }
   return config;
@@ -152,16 +169,17 @@ api.interceptors.response.use(
       error.name = "AbortError";
       return Promise.reject(error);
     }
-    let data: any = error?.response?.data;
+    // 响应体形状不可控（对象 / Blob / 空），统一按 unknown 收窄后消费
+    let data: unknown = error?.response?.data;
     // ✅ R14 修复（2026-09-22）：401 后置 authGuard.blocked，
     //    后续所有请求由请求拦截器短路，避免持续轮询产生日志噪音。
     if (error?.response?.status === 401) {
+      const errBody = (typeof data === "object" && data !== null ? data : undefined) as ApiErrorBody | undefined;
       authGuard.blocked = true;
+      // 后端契约下 detail/message 为字符串；非字符串形态的历史行为原样保留（编译期断言）
       authGuard.reason =
-        (typeof data === "object" && data?.detail) ||
-        (typeof data === "object" && data?.message) ||
-        "未授权访问，请检查 API Token";
-      (error as any).isAuthBlocked = true;
+        (errBody?.detail || errBody?.message || "未授权访问，请检查 API Token") as string;
+      Object.assign(error, { isAuthBlocked: true });
     }
     // ✅ 修复：导出接口用 responseType:"blob"，失败时后端返回的 JSON 错误体
     // 会被 axios 包成 Blob，此时 data.detail 恒为 undefined，用户只能看到
@@ -179,7 +197,8 @@ api.interceptors.response.use(
         data = undefined;
       }
     }
-    const rawDetail = data?.detail ?? data?.message;
+    const body = (typeof data === "object" && data !== null ? data : undefined) as ApiErrorBody | undefined;
+    const rawDetail = body?.detail ?? body?.message;
     // ✅ R55 F5（2026-10-08）：FastAPI 422 校验失败的 detail 是**数组**形
     //    （[{loc, msg, type}, ...]），旧实现只认字符串 → 数组整个被丢弃，
     //    用户看到 axios 默认的 "Request failed with status code 422"，
@@ -198,8 +217,8 @@ api.interceptors.response.use(
 export const projectsApi = {
   list: (params?: Record<string, string>) => api.get("/projects", { params }),
   get: (id: string) => api.get(`/projects/${id}`),
-  create: (data: any) => api.post("/projects", data),
-  update: (id: string, data: any) => api.patch(`/projects/${id}`, data),
+  create: (data: JsonPayload) => api.post("/projects", data),
+  update: (id: string, data: JsonPayload) => api.patch(`/projects/${id}`, data),
   delete: (id: string) => api.delete(`/projects/${id}`),
 };
 
@@ -208,9 +227,9 @@ export const schemesApi = {
   list: (projectId: string) => api.get(`/projects/${projectId}/schemes`),
   get: (projectId: string, schemeId: string) =>
     api.get(`/projects/${projectId}/schemes/${schemeId}`),
-  create: (projectId: string, data: any) =>
+  create: (projectId: string, data: JsonPayload) =>
     api.post(`/projects/${projectId}/schemes`, data),
-  update: (projectId: string, schemeId: string, data: any) =>
+  update: (projectId: string, schemeId: string, data: JsonPayload) =>
     api.patch(`/projects/${projectId}/schemes/${schemeId}`, data),
   delete: (projectId: string, schemeId: string) =>
     api.delete(`/projects/${projectId}/schemes/${schemeId}`),
@@ -224,15 +243,15 @@ export const schemesApi = {
 export const sectionsApi = {
   list: (schemeId: string, params?: { include_content?: boolean }) =>
     api.get(`/schemes/${schemeId}/sections`, { params }),
-  create: (schemeId: string, data: any) =>
+  create: (schemeId: string, data: JsonPayload) =>
     api.post(`/schemes/${schemeId}/sections`, data),
-  update: (schemeId: string, sectionId: string, data: any) =>
+  update: (schemeId: string, sectionId: string, data: JsonPayload) =>
     api.patch(`/schemes/${schemeId}/sections/${sectionId}`, data),
   delete: (schemeId: string, sectionId: string) =>
     api.delete(`/schemes/${schemeId}/sections/${sectionId}`),
-  saveOutline: (schemeId: string, data: any) =>
+  saveOutline: (schemeId: string, data: OutlineSavePayload) =>
     api.post(`/schemes/${schemeId}/sections/save-outline`, data),
-  reorder: (schemeId: string, data: any) =>
+  reorder: (schemeId: string, data: JsonPayload) =>
     api.post(`/schemes/${schemeId}/sections/reorder`, data),
   exportTree: (schemeId: string) =>
     api.get(`/schemes/${schemeId}/sections/export-tree`),
@@ -273,15 +292,15 @@ export const outlineLibraryApi = {
   list: (params?: Record<string, string>) =>
     api.get("/outline-library", { params }),
   get: (id: string) => api.get(`/outline-library/${id}`),
-  create: (data: any) => api.post("/outline-library", data),
-  update: (id: string, data: any) => api.patch(`/outline-library/${id}`, data),
+  create: (data: JsonPayload) => api.post("/outline-library", data),
+  update: (id: string, data: JsonPayload) => api.patch(`/outline-library/${id}`, data),
   delete: (id: string) => api.delete(`/outline-library/${id}`),
-  review: (id: string, data: any) => api.post(`/outline-library/${id}/review`, data),
-  newVersion: (id: string, data: any) => api.post(`/outline-library/${id}/new-version`, data),
+  review: (id: string, data: OutlineReviewPayload) => api.post(`/outline-library/${id}/review`, data),
+  newVersion: (id: string, data: OutlineNewVersionPayload) => api.post(`/outline-library/${id}/new-version`, data),
   // ✅ 已移除废弃的 apply（旧链路只取 JSON 不落库、却累加引用计数，易产生幽灵请求）；
   //    套用目录库统一走 applyAndSave（一步写库）。
   // 一步完成：目录库 → 方案 sections（后端复用 _save_outline_to_db 写入 sections）
-  applyAndSave: (id: string, data: any) =>
+  applyAndSave: (id: string, data: OutlineApplyAndSavePayload) =>
     api.post(`/outline-library/${id}/apply-and-save`, data),
   // ---- 增强：统计 / 筛选项 / 标准模板 ----
   stats: () => api.get("/outline-library/stats"),
@@ -289,12 +308,12 @@ export const outlineLibraryApi = {
   templates: () => api.get("/outline-library/templates"),
   template: (key: string) => api.get(`/outline-library/templates/${key}`),
   // ---- 增强：复制 / 版本回滚 / 批量审核 / 导出 ----
-  duplicate: (id: string, data?: any) => api.post(`/outline-library/${id}/duplicate`, data || {}),
+  duplicate: (id: string, data?: JsonPayload) => api.post(`/outline-library/${id}/duplicate`, data || {}),
   /** 把方案当前目录树反向沉淀为目录库 */
-  fromScheme: (data: any) => api.post("/outline-library/from-scheme", data),
-  restoreVersion: (id: string, data: any) =>
+  fromScheme: (data: JsonPayload) => api.post("/outline-library/from-scheme", data),
+  restoreVersion: (id: string, data: OutlineRestoreVersionPayload) =>
     api.post(`/outline-library/${id}/restore-version`, data),
-  batchReview: (data: any) => api.post("/outline-library/batch-review", data),
+  batchReview: (data: OutlineBatchReviewPayload) => api.post("/outline-library/batch-review", data),
   export: (id: string, format: string = "text") =>
     api.get(`/outline-library/${id}/export`, { params: { format } }),
 };
@@ -326,7 +345,7 @@ export const uploadOutlineApi = {
   //    （识别→本地树→保存目录 → /sections/save-outline 按 id 匹配保留正文）语义并存冲突，
   //    前端从不调用（识别结果只替换本地树、由用户编辑后统一落库），属事实死契约。
   //    后端路由保留（有单测、可作程序化 API 使用），前端不再声明以免契约漂移。
-  saveAsLibrary: (id: string, data: any) =>
+  saveAsLibrary: (id: string, data: JsonPayload) =>
     api.post(`/upload-outline/${id}/save-as-library`, data),
 };
 
@@ -338,7 +357,9 @@ export const uploadOutlineApi = {
 // ✅ 2026-10-06：为**读路径**补上返回泛型（此前 23 个方法全是 AxiosResponse<any>，
 //   整个特性在 TS 眼里是 any —— ClassificationPanel 读错字段名
 //   ch.completeness / 后端 field_coverage 长期无法在编译期发现）。
-//   写路径的 data 暂留 any：客户端提交体字段随 UI 演进，收紧会牵连大量渲染点。
+//   ✅ any 清理专项（2026-11-02）：写路径 data 也已收紧 —— 有稳定形状的载荷
+//   用 types/api.ts 的专用类型（FactGroupUpsertPayload / OutlineSavePayload / …），
+//   字段随 UI 演进的宽松提交体统一用 JsonPayload（Record<string, unknown>）。
 export const factsApi = {
   // ✅ 2026-10-06：真正使用后端分页。`limit=0`（不传）时后端返回全量，
   //   行为与引入前一致；传 limit/offset 时按分组分页。
@@ -353,9 +374,9 @@ export const factsApi = {
       },
       signal: options?.signal,
     }),
-  create: (data: any, schemeId: string) =>
+  create: (data: FactGroupUpsertPayload, schemeId: string) =>
     api.post("/global-facts", data, { params: { scheme_id: schemeId } }),
-  update: (id: string, data: any, schemeId?: string) =>
+  update: (id: string, data: FactGroupUpsertPayload, schemeId?: string) =>
     api.patch<FactResolveResponse>(`/global-facts/${id}`, data, { params: { scheme_id: schemeId || "" } }),
   resolve: (factId: string, schemeId?: string) =>
     api.patch<FactResolveResponse>(`/global-facts/${factId}/resolve`, {}, { params: { scheme_id: schemeId || "" } }),
@@ -647,7 +668,7 @@ export const bidAnalysisApi = {
   classify: (
     schemeId: string,
     projectId?: string,
-    body?: { scheme_name?: string; params?: Record<string, any>; extra_text?: string },
+    body?: { scheme_name?: string; params?: Record<string, string | number | boolean>; extra_text?: string },
   ) =>
     api.post(
       "/bid-analysis/classify",
@@ -662,9 +683,9 @@ export const complianceApi = {
   // ✅ R106 FIX-5：审核/预检三个 AI 端点透传 AbortSignal —— 这些是同步 await REST
   //    （不注册 task_registry），客户端 abort 后服务端在下一个 await 边界收到
   //    CancelledError 即中断在飞 AI 调用（Starlette 断连取消），无后台残留。
-  check: (data: any, signal?: AbortSignal) =>
+  check: (data: ComplianceCheckPayload, signal?: AbortSignal) =>
     api.post("/compliance/check", data, { timeout: 120000, signal }),
-  expertReview: (data: any, signal?: AbortSignal) =>
+  expertReview: (data: ComplianceExpertReviewPayload, signal?: AbortSignal) =>
     api.post("/compliance/expert-review", data, { timeout: 120000, signal }),
   // ✅ G7（2026-09-21）：透传 limit / check_type —— 此前 limit 完全不传，
   // 后端 /compliance/results 每次都回全量历史（大方案动辄数百条），
@@ -742,13 +763,15 @@ export const reviewApi = {
 
 // 全文一致性 Agent 修复（扫描 → 仲裁 → 定向修复 → 确认/回滚）
 // 扫描/修复为多章串行 AI 长任务，超时放宽到 10 分钟
+// ✅ R168：scan/repair 补可选 AbortSignal（加法式，旧调用零影响）—— 10 分钟级
+//    AI 长任务此前与同域三个预检端点（R106 FIX-5）不同，没有任何取消入口。
 export const consistencyRepairApi = {
-  scan: (schemeId: string, data?: any) =>
-    api.post(`/schemes/${schemeId}/consistency/scan`, data || {}, { timeout: 600000 }),
+  scan: (schemeId: string, data?: ConsistencyScanPayload, signal?: AbortSignal) =>
+    api.post(`/schemes/${schemeId}/consistency/scan`, data || {}, { timeout: 600000, signal }),
   conflicts: (schemeId: string, scanId?: string) =>
     api.get(`/schemes/${schemeId}/consistency/conflicts`, { params: scanId ? { scan_id: scanId } : {} }),
-  repair: (schemeId: string, data?: any) =>
-    api.post(`/schemes/${schemeId}/consistency/repair`, data || {}, { timeout: 600000 }),
+  repair: (schemeId: string, data?: ConsistencyRepairPayload, signal?: AbortSignal) =>
+    api.post(`/schemes/${schemeId}/consistency/repair`, data || {}, { timeout: 600000, signal }),
   repairDetail: (schemeId: string, repairId: string) =>
     api.get(`/schemes/${schemeId}/consistency/repair/${repairId}`),
   confirm: (schemeId: string, data: { repair_id: string; accepted?: string[]; rejected?: string[] }) =>
@@ -818,7 +841,7 @@ export const knowledgeApi = {
     api.get("/knowledge", { params }),
   create: (data: { project_id?: string; scheme_id?: string; name: string; usage_hint?: string; content?: string }) =>
     api.post("/knowledge", data),
-  update: (id: string, data: any) => api.put(`/knowledge/${id}`, data),
+  update: (id: string, data: JsonPayload) => api.put(`/knowledge/${id}`, data),
   delete: (id: string) => api.delete(`/knowledge/${id}`),
   asText: (params: { project_id?: string; scheme_id?: string }) =>
     api.get("/knowledge/as-text", { params }),
@@ -840,13 +863,13 @@ export const exportApi = {
     api.get(`/schemes/${schemeId}/export/placeholder-history`, { signal }),
   // ✅ 修复：导出需等待图表预渲染（每图 HTTP 预算 20s + PIL），全局 30s 超时极易误报失败
   // chartImages：前端 mermaid.js（与预览一致）渲染的 PNG，后端优先采用实现所见即所得
-  docx: (schemeId: string, config: any, chartImages?: { chart_type: string; mermaid_code: string; png: string }[], signal?: AbortSignal) =>
+  docx: (schemeId: string, config: ExportFormatConfig, chartImages?: { chart_type: string; mermaid_code: string; png: string }[], signal?: AbortSignal) =>
     api.post(
       `/schemes/${schemeId}/export/docx`,
       { config, chart_images: chartImages || [] },
       { responseType: "blob", timeout: 600000, signal }
     ),
-  pdf: (schemeId: string, config: any, chartImages?: { chart_type: string; mermaid_code: string; png: string }[], signal?: AbortSignal) =>
+  pdf: (schemeId: string, config: ExportFormatConfig, chartImages?: { chart_type: string; mermaid_code: string; png: string }[], signal?: AbortSignal) =>
     api.post(
       `/schemes/${schemeId}/export/pdf`,
       { config, chart_images: chartImages || [] },
@@ -863,9 +886,9 @@ export const exportApi = {
   presets: {
     list: (schemeId: string, signal?: AbortSignal) =>
       api.get(`/schemes/${schemeId}/export/presets`, { signal }),
-    create: (schemeId: string, name: string, config: any) =>
+    create: (schemeId: string, name: string, config: ExportFormatConfig) =>
       api.post(`/schemes/${schemeId}/export/presets`, { name, config }),
-    update: (schemeId: string, presetId: string, payload: { name?: string; config?: any }) =>
+    update: (schemeId: string, presetId: string, payload: { name?: string; config?: ExportFormatConfig }) =>
       api.put(`/schemes/${schemeId}/export/presets/${presetId}`, payload),
     setDefault: (schemeId: string, presetId: string) =>
       api.post(`/schemes/${schemeId}/export/presets/${presetId}/default`),
@@ -908,7 +931,11 @@ export const aiApi = {
   deleteConfig: (id: string) => api.delete<AIConfigDeleteResponse>(`/ai/config/${id}`),
   toggleConfig: (id: string) => api.patch<AIConfigToggleResponse>(`/ai/config/${id}/toggle`),
   testConfig: (data: AIConfigTestRequest) =>
-    api.post<AIConfigTestResponse>("/ai/config/test", data, { timeout: 120000 }),
+    // ✅ R169：后端双探测最坏路径 = DNS/TCP 预检(~5s) + 流式探测 120s + 普通探测
+    //    120s ≈ 245s（connectivity.py 专门为「厂商接受 TCP 但响应极慢」的境外
+    //    厂商设计）。旧前端 120s 先行中止，后端精心分类的境外延迟建议永远到不了
+    //    用户（只见 axios 泛化超时）。对齐后端最坏路径并留余量。
+    api.post<AIConfigTestResponse>("/ai/config/test", data, { timeout: 260000 }),
   getModels: () => api.get<AIModelsResponse>("/ai/models"),
   health: () => api.get<AIHealth>("/ai/health"),
   stats: (days = 30) => api.get<AIUsageStats | null>("/ai/stats", { params: { days } }),
@@ -1166,12 +1193,14 @@ function detailArrayToText(detail: unknown[]): string {
   const parts: string[] = [];
   for (const item of detail) {
     if (!item || typeof item !== "object") continue;
-    const locParts = Array.isArray((item as any).loc)
-      ? (item as any).loc.map(String).filter(Boolean)
+    // FastAPI/Pydantic 生成的校验明细（外部规范、前端不可控），仅消费 loc/msg
+    const it = item as FastAPIValidationErrorItem;
+    const locParts = Array.isArray(it.loc)
+      ? it.loc.map(String).filter(Boolean)
       : [];
     const field = locParts.length > 1 ? locParts[locParts.length - 1] : "";
     const scopeLabel = locParts[0] ? scopeCn[locParts[0]] : "";
-    const msg = typeof (item as any).msg === "string" ? (item as any).msg : "";
+    const msg = typeof it.msg === "string" ? it.msg : "";
     let desc: string;
     if (msg.toLowerCase() === "field required") {
       desc = scopeLabel && field ? `缺少必填${scopeLabel} “${field}”` : "缺少必填参数";
@@ -1194,10 +1223,11 @@ function detailArrayToText(detail: unknown[]): string {
  * generate-facts 恒 422，前端零线索，全靠翻后端日志）。
  * 本助手把 422 明细逐条翻译成中文，其余形态保持原样兜底。
  */
-function describeSseHttpError(status: number, data: any): string {
+function describeSseHttpError(status: number, data: unknown): string {
   const base = `SSE 请求失败 (${status})`;
   if (!data || typeof data !== "object") return base;
-  const detail = data.detail;
+  const body = data as ApiErrorBody;
+  const detail = body.detail;
   if (typeof detail === "string" && detail.trim()) {
     return `${base}: ${detail.trim()}`;
   }
@@ -1224,9 +1254,9 @@ async function readSseHttpError(resp: Response): Promise<string> {
 
 export async function* sseFetch(
   url: string,
-  body?: any,
+  body?: unknown,
   options?: SseFetchOptions
-): AsyncGenerator<any> {
+): AsyncGenerator<SseEvent> {
   // AbortController 主动取消时静默返回，避免 net::ERR_ABORTED 在控制台产红线
   if (options?.signal?.aborted) return;
   // ✅ 连接超时防御（2026-09-23 事故）：后端进程挂死时 TCP 可连上但响应头永不到达，
@@ -1246,7 +1276,7 @@ export async function* sseFetch(
       if (timedOut) {
         reject(new Error(timeoutMsg));
       } else {
-        const e: any = new Error("Aborted");
+        const e = new Error("Aborted");
         e.name = "AbortError";
         reject(e);
       }
@@ -1266,9 +1296,10 @@ export async function* sseFetch(
       }),
       abortPromise,
     ]);
-  } catch (err: any) {
+  } catch (err: unknown) {
     if (timedOut) throw new Error(timeoutMsg);
-    if (err?.name === "AbortError" || options?.signal?.aborted) return;
+    const e = err as { name?: string };
+    if (e?.name === "AbortError" || options?.signal?.aborted) return;
     throw err;
   } finally {
     if (connectTimer !== null) clearTimeout(connectTimer);
@@ -1337,8 +1368,9 @@ export async function* sseFetch(
         }
       }
     }
-  } catch (err: any) {
-    if (err?.name === "AbortError" || options?.signal?.aborted) return;
+  } catch (err: unknown) {
+    const e = err as { name?: string };
+    if (e?.name === "AbortError" || options?.signal?.aborted) return;
     throw err;
   } finally {
     reader.cancel().catch(() => {});
@@ -1350,7 +1382,7 @@ export async function* sseGetStream(
   url: string,
   options?: {
     signal?: AbortSignal;
-    params?: Record<string, any>;
+    params?: Record<string, unknown>;
     onHeartbeat?: () => void;
     /**
      * 优雅停止信号：resolve 时立即 break 循环，走 reader.cancel() 优雅收尾，
@@ -1359,7 +1391,7 @@ export async function* sseGetStream(
      */
     softStop?: Promise<void>;
   }
-): AsyncGenerator<any> {
+): AsyncGenerator<SseEvent> {
   if (options?.signal?.aborted) return;
   const query = options?.params
     ? "?" + new URLSearchParams(options.params as Record<string, string>).toString()
@@ -1390,8 +1422,9 @@ export async function* sseGetStream(
         }, { once: true });
       }),
     ]);
-  } catch (err: any) {
-    if (err?.name === "AbortError" || options?.signal?.aborted) return;
+  } catch (err: unknown) {
+    const e = err as { name?: string };
+    if (e?.name === "AbortError" || options?.signal?.aborted) return;
     throw err;
   } finally {
     clearTimeout(connectTimer);
@@ -1418,14 +1451,14 @@ export async function* sseGetStream(
         // softStop 先 resolve 则当作 "流结束" 处理（不抛 AbortError、不记 ERR_ABORTED）
         const race = await Promise.race([
           reader.read(),
-          options.softStop.then(() => ({ _soft: true } as const)),
+          options.softStop.then((): SseSoftStopMarker => ({ _soft: true })),
         ]);
-        if ((race as any)._soft) {
+        if ("_soft" in race) {
           stoppedBySoftStop = true;
           break;
         }
-        done = (race as ReadableStreamReadResult<Uint8Array>).done;
-        value = (race as ReadableStreamReadResult<Uint8Array>).value;
+        done = race.done;
+        value = race.value;
       } else {
         const r = await reader.read();
         done = r.done;
@@ -1449,8 +1482,9 @@ export async function* sseGetStream(
         }
       }
     }
-  } catch (err: any) {
-    if (err?.name === "AbortError" || options?.signal?.aborted) return;
+  } catch (err: unknown) {
+    const e = err as { name?: string };
+    if (e?.name === "AbortError" || options?.signal?.aborted) return;
     throw err;
   } finally {
     if (!stoppedBySoftStop) {

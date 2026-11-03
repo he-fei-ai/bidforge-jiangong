@@ -697,9 +697,9 @@ async def upload_documents(
         #    这些残留语句会随该请求的 commit 一并提交，产生"幽灵删除/幽灵新增"。
         try:
             await db.rollback()
-        except Exception:
+        except Exception as rb_err:
             # 连接已损坏（如 disk I/O）时忽略，交由连接池剔除逻辑处理
-            pass
+            logger.debug("文档上传失败路径 rollback 失败（连接损坏时忽略）: %s", rb_err)
         # ✅ 修复：旧实现在循环中抛异常时，已写盘的文件没有对应 DB 记录，
         #    成为永久孤儿文件（占空间且无法在界面删除）。异常时统一清理。
         for p in written:
@@ -937,10 +937,16 @@ async def _mark_parse_failed(db, doc_id: str, reason: str) -> None:
     失败写入独立于主解析链路；即便写入本身异常也不影响已经抛出的解析错误。
     """
     try:
-        await db.execute(
+        cur = await db.execute(
             "UPDATE project_documents SET parse_status='failed', "
             "parse_warnings=? WHERE id=?",
             (dump_parse_warnings([f"解析失败：{reason}"]), doc_id))
+        if cur is None:
+            logger.warning(
+                "解析失败状态落库未生效（db.execute 返回 None，R13），失败原因未留痕：%s", doc_id)
+            # ⚠️ 不 commit：没有成功的语句要提交，提交只会把上一次语句的残留
+            #    事务上下文固化（同 _persist_parse_result / doc_pipeline.py:322 口径）。
+            return
         await db.commit()
     except Exception:
         logger.exception("标记文档 %s 解析失败状态失败（可忽略）", doc_id)

@@ -37,7 +37,9 @@ export default tseslint.config(
         "warn",
         { allowConstantExport: true },
       ],
-      "@typescript-eslint/no-explicit-any": "warn",
+      // ✅ any 清理专项（2026-11-02）：no-explicit-any 升级为 error 作为 CI 门禁。
+      // src（非测试）存量显式 any 已全部清零；测试目录见下方 per-directory override。
+      "@typescript-eslint/no-explicit-any": "error",
       "@typescript-eslint/no-unused-vars": [
         "warn",
         {
@@ -47,6 +49,18 @@ export default tseslint.config(
           ignoreRestSiblings: true,
         },
       ],
+    },
+  },
+  {
+    // ✅ any 清理专项（2026-11-02）遗留豁免（带原因）：
+    // src/tests/** 约 760 处显式 any 集中在测试桩/夹具（(window as any).matchMedia
+    // 补丁、mockImplementation(async (body: any) => ...)、部分对象夹具等），
+    // 本轮（前端 any 清理专项）未清零。主规则已升级为 error，src 非测试代码
+    // 全量生效；测试目录暂时维持 warn，后续按文件逐个清零后删除本 override。
+    // 受影响文件清单见 any 清理专项报告「遗留风险」章节。
+    files: ["src/tests/**/*.{ts,tsx}"],
+    rules: {
+      "@typescript-eslint/no-explicit-any": "warn",
     },
   },
 );

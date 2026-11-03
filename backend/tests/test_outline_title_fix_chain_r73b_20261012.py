@@ -237,7 +237,13 @@ class TestContinuityLabelSingleSource:
         page = os.path.join(_root, "frontend", "src", "pages",
                             "SchemeWorkbenchPage.tsx")
         assert os.path.isfile(page), f"未找到前端页面源码：{page}"
-        src = io.open(page, encoding="utf-8").read().replace("\r\n", "\n")
+        # 大文件拆分后：summarizeOutlineQuality 的 labels 表迁入
+        # pages/schemeWorkbench/reviewShared.ts —— 聚合 facade + 子模块读取
+        wb = os.path.join(_root, "frontend", "src", "pages", "schemeWorkbench")
+        src = "\n".join(
+            [io.open(page, encoding="utf-8").read().replace("\r\n", "\n")]
+            + [io.open(os.path.join(wb, fn), encoding="utf-8").read().replace("\r\n", "\n")
+               for fn in sorted(os.listdir(wb)) if fn.endswith((".ts", ".tsx"))])
         m = re.search(r"const labels: Record<string, string> = \{(.*?)\n\s*\};",
                       src, re.S)
         assert m, "未在前端找到 summarizeOutlineQuality 的 labels 表"

@@ -539,11 +539,26 @@ MONITOR_CATEGORIES: frozenset = frozenset({"基坑", "模板", "起重机械", "
 
 
 def check_safety(ctx: PreflightContext) -> list:
-    """检查应急预案三要素与监测方案（GB/T 29639-2020）。"""
+    """检查应急预案三要素与监测方案（GB/T 29639-2020）。
+
+    ✅ R168（2026-11-03 · 漏报收口）：应急 / 监测章节的正文此前只取**章节自身**
+    ``content``，与 ``check_completeness`` / ``check_traceability`` 的「有效正文」
+    （自身 + 全部子孙，``build_section_tree_index``）口径分叉。法定应急预案多为
+    L1 父节点（正文由子节承载），自身 content 为空 → ``emer_text.strip()`` 为空，
+    SAF-03/04/05 被 547 行的 if 门**静默跳过**，漏检无任何信号；SAF-06 的预警值
+    判据同病。现统一走有效正文索引（找不到 id / 环保护时回退自身 content）。
+    """
     findings: list = []
+    _parent_ids, effective = build_section_tree_index(ctx.sections)
+
+    def _eff(s: dict) -> str:
+        sid = s.get("id")
+        eff = effective.get(sid) if sid else None
+        return eff if eff is not None else (s.get("content") or "")
+
     emer = [s for s in ctx.sections
             if any(k in (s.get("title") or "") for k in EMERGENCY_TITLE_KEYWORDS)]
-    emer_text = "\n".join((s.get("content") or "") for s in emer)
+    emer_text = "\n".join(_eff(s) for s in emer)
     if emer and emer_text.strip():
         emer_title = emer[0].get("title") or ""
         for rule_id, kws, what in (
@@ -567,7 +582,7 @@ def check_safety(ctx: PreflightContext) -> list:
                 f"本方案属「{'/'.join(sorted(cats & MONITOR_CATEGORIES))}」类危大工程，"
                 "但未检出监测监控方案章节",
                 suggestion="应明确监测项目、点位布置、监测频次与预警值"))
-        elif not any(k in "".join((s.get("content") or "") for s in mon)
+        elif not any(k in "".join(_eff(s) for s in mon)
                      for k in SAF06_THRESHOLD_KEYWORDS):
             findings.append(_finding(
                 "SAF-06", "监测方案未给出预警值 / 控制值",

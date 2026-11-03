@@ -17,6 +17,8 @@ import OutlineLibraryEditModal from "../components/OutlineLibraryEditModal";
 
 import { PageHero, StatCards, StatItem } from '../utils/ui';
 
+import type { TableColumnsType } from "antd";
+
 const { Title, Text, Paragraph } = Typography;
 
 /** 目录树节点（与后端 outline_json 结构一致） */
@@ -26,6 +28,63 @@ type OutlineNode = {
   description?: string;
   level: number;
   children: OutlineNode[];
+};
+
+/** /outline-library 列表行与详情（后端 OutlineLibraryItem 投影，前端只消费以下字段） */
+interface OutlineLibraryItem {
+  id: string;
+  name: string;
+  type?: string | null;
+  engineering_type?: string | null;
+  profession?: string | null;
+  version?: string | null;
+  review_status?: string | null;
+  ref_count?: number;
+  source?: string | null;
+  updated_at?: string | null;
+  applicable_conditions?: string | null;
+  basis?: string | null;
+  node_count?: number;
+  /** 目录树 JSON：历史数据可能回传字符串或已解析数组 */
+  outline_json?: string | OutlineNode[] | null;
+  versions?: OutlineVersionItem[];
+}
+
+/** 版本历史抽屉中的归档版本条目（/outline-library/{id} 的 versions[]） */
+interface OutlineVersionItem {
+  id: string;
+  version?: string | null;
+  node_count?: number;
+  created_at?: string | null;
+}
+
+/** /outline-library/stats 概览统计 */
+interface OutlineStats {
+  total?: number;
+  approved?: number;
+  pending?: number;
+  disabled?: number;
+  preset?: number;
+  ref_total?: number;
+}
+
+/** /outline-library/filters 的单个筛选项 */
+interface OutlineFilterOption {
+  value: string;
+  count?: number;
+}
+
+/** /outline-library/filters 响应：筛选项 key → 选项列表（后端动态字典） */
+type OutlineFilters = Partial<Record<string, OutlineFilterOption[]>>;
+
+/** 导出菜单的三个格式 key（与 items 逐字对应） */
+type OutlineExportFormat = "text" | "markdown" | "json";
+
+/** antd Tree 节点（title 为自定义 JSX，附描述副标题） */
+type OutlineTreeData = {
+  key: React.Key;
+  title: React.ReactNode;
+  children?: OutlineTreeData[];
 };
 
 const REVIEW_COLOR: Record<string, string> = {
@@ -47,7 +106,7 @@ const ellipsisCell: CSSProperties = {
 };
 
 /** 把目录树转成 antd Tree 数据（标题后附描述） */
-function toTreeData(nodes: OutlineNode[]): any[] {
+function toTreeData(nodes: OutlineNode[]): OutlineTreeData[] {
   return (nodes || []).map((n) => ({
     key: n.id,
     title: (
@@ -80,7 +139,7 @@ function countNodes(nodes: OutlineNode[]): number {
     (acc, n) => acc + 1 + countNodes(n.children || []), 0);
 }
 
-function parseOutline(raw: any): OutlineNode[] {
+function parseOutline(raw: unknown): OutlineNode[] {
   if (!raw) return [];
   if (typeof raw === "string") {
     try {
@@ -89,8 +148,12 @@ function parseOutline(raw: any): OutlineNode[] {
       return [];
     }
   }
-  if (raw && !Array.isArray(raw) && Array.isArray(raw.outline)) raw = raw.outline;
-  return Array.isArray(raw) ? raw : [];
+  // 兼容后端 { outline: [...] } 包裹形态（历史响应差异）
+  const holder = raw as { outline?: unknown };
+  if (raw && !Array.isArray(raw) && Array.isArray(holder.outline)) {
+    raw = holder.outline;
+  }
+  return Array.isArray(raw) ? (raw as OutlineNode[]) : [];
 }
 
 /** 触发浏览器下载 */
@@ -110,11 +173,11 @@ function downloadFile(fileName: string, content: string) {
 export default function OutlineLibraryPage() {
   const { message: _antdMsg, modal } = App.useApp();
   const msg = useAntdMessageHub(_antdMsg, "目录库");
-  const [items, setItems] = useState<any[]>([]);
+  const [items, setItems] = useState<OutlineLibraryItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [stats, setStats] = useState<any>({});
-  const [filters, setFilters] = useState<any>({});
+  const [stats, setStats] = useState<OutlineStats>({});
+  const [filters, setFilters] = useState<OutlineFilters>({});
 
   // 查询条件
   const [keyword, setKeyword] = useState("");
@@ -151,12 +214,12 @@ export default function OutlineLibraryPage() {
 
   // 预览抽屉
   const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewData, setPreviewData] = useState<any>(null);
+  const [previewData, setPreviewData] = useState<OutlineLibraryItem | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 
   // 版本历史抽屉
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [historyData, setHistoryData] = useState<any>(null);
+  const [historyData, setHistoryData] = useState<OutlineLibraryItem | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
 
   const load = useCallback(async () => {
@@ -174,8 +237,9 @@ export default function OutlineLibraryPage() {
       const { data } = await outlineLibraryApi.list(params);
       setItems(data.items || []);
       setTotal(data.total || 0);
-    } catch (e: any) {
-      msg.error(e.message || "加载失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "加载失败");
     }
     setLoading(false);
   }, [keyword, fType, fEng, fProf, fStatus, fSource, sortBy, page, pageSize]);
@@ -207,8 +271,9 @@ export default function OutlineLibraryPage() {
       await outlineLibraryApi.review(id, { status });
       msg.success(`已${status === "已通过" ? "通过" : status === "已停用" ? "停用" : "置为待审核"}`);
       refresh();
-    } catch (e: any) {
-      msg.error(e.message || "审核操作失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "审核操作失败");
     }
   };
 
@@ -220,13 +285,14 @@ export default function OutlineLibraryPage() {
       onOk: async () => {
         try {
           const { data } = await outlineLibraryApi.batchReview({
-            ids: selectedRowKeys, status,
+            ids: selectedRowKeys as string[], status,
           });
           msg.success(`已更新 ${data.affected ?? 0} 条`);
           setSelectedRowKeys([]);
           refresh();
-        } catch (e: any) {
-          msg.error(e.message || "批量审核失败");
+        } catch (e: unknown) {
+          const err = e as { message?: string };
+          msg.error(err.message || "批量审核失败");
         }
       },
     });
@@ -243,45 +309,49 @@ export default function OutlineLibraryPage() {
           await outlineLibraryApi.delete(id);
           msg.success("已删除");
           refresh();
-        } catch (e: any) {
-          msg.error(e.message || "删除失败");
+        } catch (e: unknown) {
+          const err = e as { message?: string };
+          msg.error(err.message || "删除失败");
         }
       },
     });
   };
 
   // ---------------- 复制 ----------------
-  const handleDuplicate = async (record: any) => {
+  const handleDuplicate = async (record: OutlineLibraryItem) => {
     try {
       const { data } = await outlineLibraryApi.duplicate(record.id);
       msg.success(`已复制为「${data.name}」`);
       refresh();
-    } catch (e: any) {
-      msg.error(e.message || "复制失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "复制失败");
     }
   };
 
   // ---------------- 导出 ----------------
-  const handleExport = async (record: any, format: "text" | "markdown" | "json") => {
+  const handleExport = async (record: OutlineLibraryItem, format: OutlineExportFormat) => {
     try {
       const { data } = await outlineLibraryApi.export(record.id, format);
       downloadFile(data.file_name, data.content);
       msg.success(`已导出 ${data.node_count} 个章节`);
-    } catch (e: any) {
-      msg.error(e.message || "导出失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "导出失败");
     }
   };
 
   // ---------------- 预览 ----------------
-  const openPreview = async (record: any) => {
+  const openPreview = async (record: OutlineLibraryItem) => {
     setPreviewOpen(true);
     setPreviewLoading(true);
     setPreviewData(null);
     try {
       const { data } = await outlineLibraryApi.get(record.id);
       setPreviewData(data);
-    } catch (e: any) {
-      msg.error(e.message || "读取目录失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "读取目录失败");
     } finally {
       setPreviewLoading(false);
     }
@@ -291,21 +361,22 @@ export default function OutlineLibraryPage() {
     () => parseOutline(previewData?.outline_json), [previewData]);
 
   // ---------------- 版本历史 ----------------
-  const openHistory = async (record: any) => {
+  const openHistory = async (record: OutlineLibraryItem) => {
     setHistoryOpen(true);
     setHistoryLoading(true);
     setHistoryData(null);
     try {
       const { data } = await outlineLibraryApi.get(record.id);
       setHistoryData(data);
-    } catch (e: any) {
-      msg.error(e.message || "读取版本历史失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "读取版本历史失败");
     } finally {
       setHistoryLoading(false);
     }
   };
 
-  const handleRestore = (versionId: string, version: string) => {
+  const handleRestore = (versionId: string, version?: string | null) => {
     if (!historyData) return;
     modal.confirm({
       title: `确认回滚到 ${version}？`,
@@ -317,8 +388,9 @@ export default function OutlineLibraryPage() {
           msg.success(`已回滚到 ${version}`);
           setHistoryOpen(false);
           refresh();
-        } catch (e: any) {
-          msg.error(e.message || "回滚失败");
+        } catch (e: unknown) {
+          const err = e as { message?: string };
+          msg.error(err.message || "回滚失败");
         }
       },
     });
@@ -326,12 +398,12 @@ export default function OutlineLibraryPage() {
 
   // ---------------- 建新版本 ----------------
   const [verOpen, setVerOpen] = useState(false);
-  const [verTarget, setVerTarget] = useState<any>(null);
+  const [verTarget, setVerTarget] = useState<OutlineLibraryItem | null>(null);
   const [verSubmitting, setVerSubmitting] = useState(false);
   const [verLoading, setVerLoading] = useState(false);
   const [verForm] = Form.useForm();
 
-  const openNewVersion = async (record: any) => {
+  const openNewVersion = async (record: OutlineLibraryItem) => {
     setVerTarget(record);
     setVerOpen(true);
     setVerLoading(true);
@@ -344,8 +416,9 @@ export default function OutlineLibraryPage() {
       const m = cur.match(/^v?(\d+)\.(\d+)/i);
       const next = m ? `v${Number(m[1]) + 1}.0` : "v2.0";
       verForm.setFieldsValue({ version: next, outline_json: outline });
-    } catch (e: any) {
-      msg.error(e.message || "读取目录库内容失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "读取目录库内容失败");
     } finally {
       setVerLoading(false);
     }
@@ -356,7 +429,7 @@ export default function OutlineLibraryPage() {
     try {
       const values = await verForm.validateFields();
       setVerSubmitting(true);
-      let parsed: any;
+      let parsed: unknown;
       try {
         parsed = JSON.parse(values.outline_json || "[]");
       } catch {
@@ -371,28 +444,30 @@ export default function OutlineLibraryPage() {
       setVerOpen(false);
       setVerTarget(null);
       refresh();
-    } catch (e: any) {
-      if (e.errorFields) return;
-      msg.error(e.message || "创建版本失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string; errorFields?: unknown };
+      if (err.errorFields) return;
+      msg.error(err.message || "创建版本失败");
     } finally {
       setVerSubmitting(false);
     }
   };
 
   // ---------------- 表格列 ----------------
-  const exportMenu = (record: any) => ({
+  const exportMenu = (record: OutlineLibraryItem) => ({
     items: [
       { key: "text", icon: <FileTextOutlined />, label: "纯文本（多级编号）" },
       { key: "markdown", icon: <FileMarkdownOutlined />, label: "Markdown" },
       { key: "json", icon: <CodeOutlined />, label: "JSON（可再导入）" },
     ],
-    onClick: ({ key }: any) => handleExport(record, key),
+    // items 的 key 即上方三个导出格式字面量，antd MenuInfo.key 放宽为 string
+    onClick: ({ key }: { key: string }) => handleExport(record, key as OutlineExportFormat),
   });
 
-  const columns: any[] = [
+  const columns: TableColumnsType<OutlineLibraryItem> = [
     {
       title: "名称", dataIndex: "name", key: "name", width: 260,
-      render: (t: string, r: any) => {
+      render: (t, r) => {
         const sub = r.applicable_conditions || r.basis;
         return (
           <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
@@ -438,7 +513,7 @@ export default function OutlineLibraryPage() {
       // 宽度须容纳「7 个操作按钮单行排布」(24×6 + 50 + 4×6 = 218) + 单元格左右 padding 24px，
       // 否则最后一个按钮换行，行高被撑成两倍。
       title: "操作", key: "action", width: 250, fixed: "right",
-      render: (_: any, record: any) => (
+      render: (_, record) => (
         <Space size={4} wrap>
           <Tooltip title="预览目录结构">
             <Button size="small" icon={<EyeOutlined />} onClick={() => openPreview(record)} />
@@ -484,7 +559,7 @@ export default function OutlineLibraryPage() {
   ];
 
   const filterOptions = (key: string) =>
-    (filters[key] || []).map((f: any) => ({
+    (filters[key] || []).map((f) => ({
       label: `${f.value}（${f.count}）`, value: f.value,
     }));
 
@@ -495,7 +570,7 @@ export default function OutlineLibraryPage() {
    * 首屏几乎只剩名称与操作两列。
    */
   const tableScrollX =
-    columns.reduce((sum: number, c: any) => sum + (typeof c.width === "number" ? c.width : 0), 0) + 36;
+    columns.reduce((sum: number, c: { width?: number | string }) => sum + (typeof c.width === "number" ? c.width : 0), 0) + 36;
 
   return (
     <div className="scroll-area" style={{ overflowY: "auto", overflowX: "hidden" }}>
@@ -679,7 +754,7 @@ export default function OutlineLibraryPage() {
               <Empty description="暂无历史版本" />
             ) : (
               <Space direction="vertical" style={{ width: "100%" }}>
-                {(historyData.versions || []).map((v: any) => (
+                {(historyData.versions || []).map((v) => (
                   <Card size="small" key={v.id}
                     title={<Space>{v.version}
                       <Text type="secondary" style={{ fontSize: 12 }}>

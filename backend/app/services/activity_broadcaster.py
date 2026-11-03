@@ -50,9 +50,9 @@ def notify() -> None:
     for q in subs:
         try:
             loop.call_soon_threadsafe(_put_nowait, q, True)
-        except Exception:
-            # 通知失败不影响主流程
-            pass
+        except Exception as e:
+            # 通知失败不影响主流程（典型：事件循环已关闭）
+            logger.debug("活动通知投递失败（不影响主流程）: %s", e)
 
 
 async def subscribe() -> asyncio.Queue:

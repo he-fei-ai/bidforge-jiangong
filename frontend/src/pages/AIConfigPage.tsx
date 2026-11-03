@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {App, Card, Form, Input, Select, Button, message,
   Tag, Table, Typography, Space, InputNumber, Tabs, Tooltip,
   Statistic, Row, Col, Switch, Modal, Empty, List, Alert, Checkbox,} from "antd";
+import type { SelectProps } from "antd";
 import {
   PlusOutlined, DeleteOutlined, ThunderboltOutlined,
   CheckCircleOutlined, CloseCircleOutlined, LinkOutlined,
@@ -21,9 +22,10 @@ import { useAiConfigGovernance } from "../hooks/useAiConfigGovernance";
 // ✅ D7（2026-09-23）：页面直接引用后端契约类型（见 types/aiConfig.ts）
 import type {
   AIAuditLogItem, AIConfigAuditChange, AIConfigAuditItem, AIConfigItem,
-  AIConfigsHealthResponse, AIKeyRotationRequest, AIKeyRotationResponse,
-  AIConfigPrecheckResponse, AIConfigPresetRaw, AIDynamicModel, AIHealth,
-  AINetworkProbe, AIProviderPlan, AIProviderPreset, AIRuntimeResponse,
+  AIConfigsHealthItem, AIConfigsHealthResponse, AIKeyRotationRequest,
+  AIKeyRotationResponse, AIConfigPrecheckResponse, AIConfigPresetRaw,
+  AIDynamicModel, AIHealth, AINetworkProbe, AIPrecheckAllItem,
+  AIProviderPlan, AIProviderPreset, AIRuntimeResponse,
   AISceneRouteItem, AIUsageStats,
 } from "../types/aiConfig";
 
@@ -86,6 +88,11 @@ export function resolveConcurrencyMax(
 //    正是类型契约的价值体现）。
 type PlanInfo = AIProviderPlan;
 type ProviderInfo = AIProviderPreset;
+
+// antd v5 公开 SelectProps 已把 legacy 'combobox' 从 mode 联合中剔除，但 rc-select
+// 运行时仍按原值处理（模型下拉依赖它才能直接输入/粘贴任意模型名）。零行为变更：
+// 原值原样传入，仅经 string 窄断言对齐 antd 公开类型（异构逃逸，来源：rc-select mode 逻辑）。
+const LEGACY_COMBOBOX_MODE = "combobox" as string as NonNullable<SelectProps["mode"]>;
 
 export default function AIConfigPage() {
   const { message: _antdMsg, modal } = App.useApp();
@@ -178,8 +185,9 @@ export default function AIConfigPage() {
       await aiApi.updateFallbackChain(chain.map((c) => ({ id: c.id })));
       msg.success("降级顺序已保存，AI 调用失败时会按此顺序依次尝试");
       load();
-    } catch (e: any) {
-      msg.error(e.message || "保存降级顺序失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "保存降级顺序失败");
     } finally {
       setChainSaving(false);
     }
@@ -204,9 +212,10 @@ export default function AIConfigPage() {
       setPrecheckResult(data);
       if (data.ok) msg.success("连通性预检通过");
       else msg.warning(data.message || "连通性预检未通过");
-    } catch (e: any) {
-      setPrecheckResult({ ok: false, message: e.message || "预检请求失败" });
-      msg.error(e.message || "预检失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      setPrecheckResult({ ok: false, message: err.message || "预检请求失败" });
+      msg.error(err.message || "预检失败");
     } finally {
       setPrechecking(false);
     }
@@ -234,8 +243,9 @@ export default function AIConfigPage() {
       setAuditProviders(logs.providers || []);
       setAuditActions(logs.actions || []);
       setAuditScenes(logs.scenes || []);
-    } catch (e: any) {
-      msg.error(e.message || "加载用量日志失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "加载用量日志失败");
     } finally {
       setAuditLoading(false);
     }
@@ -278,8 +288,9 @@ export default function AIConfigPage() {
         loadEnv(),
         loadRuntime(),
       ]);
-    } catch (e: any) {
-      msg.error(e.message || "加载失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "加载失败");
     }
   };
 
@@ -309,8 +320,9 @@ export default function AIConfigPage() {
       setGovDefense(!!data.prompt_injection_defense);
       setGovBudget(data.prompt_context_budget ?? 0);
       msg.success("提示词治理开关已更新（内存态，重启后回 .env 默认）");
-    } catch (e: any) {
-      msg.error(e?.message || "保存提示词治理开关失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "保存提示词治理开关失败");
     } finally {
       setGovSaving(false);
     }
@@ -331,15 +343,20 @@ export default function AIConfigPage() {
       const warns: string[] = Array.isArray(data?.warnings) ? data.warnings : [];
       if (data?.warning) msg.warning(data.warning);
       if (warns.length) msg.warning(`部分参数超出合法范围，已自动调整：${warns.join("；")}`);
+      // ✅ R169：后端对「同供应商+模型+地址」三元组重复的配置回传去重提示
+      //    （R111 落地、只提示不阻断），旧前端零消费导致该提示在界面永远不可达。
+      if (data?.duplicate_hint) msg.info(data.duplicate_hint);
       if (!data?.warning && warns.length === 0) msg.success("配置保存成功");
       setAddModalOpen(false);
       form.resetFields();
       setEditingId("");
       setTestResult(null);
       load();
-    } catch (e: any) {
-      if (e.errorFields) return;
-      msg.error(e.response?.data?.detail || e.message || "保存失败");
+    } catch (e: unknown) {
+      // 表单校验错误带 errorFields；网络错误为 axios 结构（detail 在 response.data.detail）
+      const err = e as { message?: string; errorFields?: unknown; response?: { data?: { detail?: string } } };
+      if (err.errorFields) return;
+      msg.error(err.response?.data?.detail || err.message || "保存失败");
     }
   };
 
@@ -372,8 +389,9 @@ export default function AIConfigPage() {
             suggestion: data.suggestion,
             network: data.network,
           });
-    } catch (e: any) {
-      setTestResult({ ok: false, msg: e.message || "测试失败", category: "http" });
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      setTestResult({ ok: false, msg: err.message || "测试失败", category: "http" });
     }
     setTesting(false);
   };
@@ -386,8 +404,9 @@ export default function AIConfigPage() {
       if (data?.warning) msg.warning(data.warning);
       else msg.success("已设为当前使用平台");
       load();
-    } catch (e: any) {
-      msg.error(e.message || "切换失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "切换失败");
     }
   };
 
@@ -412,15 +431,16 @@ export default function AIConfigPage() {
             msg.success("已删除");
           }
           load();
-        } catch (e: any) {
-          msg.error(e.message || "删除失败");
+        } catch (e: unknown) {
+          const err = e as { message?: string };
+          msg.error(err.message || "删除失败");
         }
       },
     });
   };
 
   // ✅ 2026-09-23 新增：清除已保存的 API Key（收回密钥）
-  const handleClearKey = (record: any) => {
+  const handleClearKey = (record: AIConfigItem) => {
     modal.confirm({
       title: "确认清除 API Key",
       content: `将清除「${record.provider_name} / ${record.model}」已保存的 API Key；`
@@ -435,8 +455,10 @@ export default function AIConfigPage() {
           else if (data?.unchanged) msg.info("该配置本来就没有保存 API Key");
           else msg.success("已清除 API Key");
           load();
-        } catch (e: any) {
-          msg.error(e.response?.data?.detail || e.message || "清除失败");
+        } catch (e: unknown) {
+          // axios 错误：detail 在 response.data.detail
+          const err = e as { message?: string; response?: { data?: { detail?: string } } };
+          msg.error(err.response?.data?.detail || err.message || "清除失败");
         }
       },
     });
@@ -445,7 +467,7 @@ export default function AIConfigPage() {
   // ✅ 2026-09-23 新增：场景路由/运行时开关/多环境操作已收敛到 useAiConfigGovernance hook
 
   // ✅ 2026-09-23 新增（G6）：回滚配置到某次变更之前（密钥不参与回滚）
-  const handleRollback = (record: any) => {
+  const handleRollback = (record: AIConfigAuditItem) => {
     const changes: AIConfigAuditChange[] = record.changes || [];
     // 「是否同时还原当前使用标记」用普通对象承载：确认框内容与 onOk 共享同一引用，
     // 无需为这个一次性开关引入额外的 React 状态。
@@ -488,7 +510,7 @@ export default function AIConfigPage() {
           // ✅ 2026-10-06（G6）：回滚结果如实回显。旧实现只说「已回滚（N 个字段）」，
           // 用户既不知道**哪些字段**被还原，也不知道「当前使用」标记是否被还原 ——
           // 而后者会直接改变主配置身份，是本次操作最需要确认的部分。
-          const restored: Record<string, any> = data?.restored || {};
+          const restored: Record<string, unknown> = data?.restored || {};
           const restoredFields = Object.entries(restored)
             .filter(([, v]) => v !== undefined && v !== null && v !== "")
             .map(([k, v]) => `${k}=${v}`)
@@ -504,8 +526,10 @@ export default function AIConfigPage() {
             6,
           );
           await load();
-        } catch (e: any) {
-          msg.error(e.response?.data?.detail || e.message || "回滚失败");
+        } catch (e: unknown) {
+          // axios 错误：detail 在 response.data.detail
+          const err = e as { message?: string; response?: { data?: { detail?: string } } };
+          msg.error(err.response?.data?.detail || err.message || "回滚失败");
         } finally {
           setRollingBack("");
         }
@@ -513,7 +537,7 @@ export default function AIConfigPage() {
     });
   };
 
-  const handleEdit = (record: any) => {
+  const handleEdit = (record: AIConfigItem) => {
     setEditingId(record.id);
     setSelectedProvider(record.provider_name);
     setAddModalOpen(true);
@@ -540,13 +564,13 @@ export default function AIConfigPage() {
 
   // ✅ 新增：批量连通性预检 —— 一眼看出哪些「备选配置」其实是假备胎
   const [precheckAllLoading, setPrecheckAllLoading] = useState(false);
-  const [precheckAllResult, setPrecheckAllResult] = useState<Record<string, any>>({});
+  const [precheckAllResult, setPrecheckAllResult] = useState<Record<string, AIPrecheckAllItem>>({});
   const handlePrecheckAll = async () => {
     setPrecheckAllLoading(true);
     try {
       const { data } = await aiApi.precheckAll();
-      const map: Record<string, any> = {};
-      (data.items || []).forEach((it: any) => { map[it.id] = it; });
+      const map: Record<string, AIPrecheckAllItem> = {};
+      (data.items || []).forEach((it) => { map[it.id] = it; });
       setPrecheckAllResult(map);
       // ✅ 2026-10-06（G3）：后端把「未填地址 → 已跳过」单列回传（skipped_no_url），
       // 旧版只报 ok/fail 两条计数，用户会误以为跳过的配置「不存在」。
@@ -559,8 +583,9 @@ export default function AIConfigPage() {
       } else {
         msg.success(`全部 ${data.total} 个配置网络可达`);
       }
-    } catch (e: any) {
-      msg.error(e.message || "批量预检失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "批量预检失败");
     } finally {
       setPrecheckAllLoading(false);
     }
@@ -577,8 +602,9 @@ export default function AIConfigPage() {
       const { data } = await aiApi.inspectKeyRotation();
       setKeyRotationResult(data);
       if (data.advice) msg.info(data.advice, 8);
-    } catch (e: any) {
-      msg.error(e.message || "主密钥体检失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "主密钥体检失败");
     } finally {
       setKeyRotationLoading(false);
     }
@@ -593,8 +619,9 @@ export default function AIConfigPage() {
       const failed = data.failed ?? 0;
       if (failed) msg.warning(`重加密完成：恢复 ${ok} 条，${failed} 条失败（需重新填写 Key）`, 10);
       else msg.success(`已重加密 ${ok} 条密文（均保持原样无需修改）`);
-    } catch (e: any) {
-      msg.error(e.message || "重加密失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "重加密失败");
     } finally {
       setKeyRotationReencryptLoading(false);
     }
@@ -627,8 +654,9 @@ export default function AIConfigPage() {
       } else {
         msg.success(`全部 ${s.total} 条配置在当前环境下均可用`);
       }
-    } catch (e: any) {
-      msg.error(e.message || "配置体检失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "配置体检失败");
     } finally {
       setConfigsHealthLoading(false);
     }
@@ -661,8 +689,9 @@ export default function AIConfigPage() {
         `已导出 ${data.count} 条配置（不含 API Key，导入后需重新填写）`
         + (extras.length ? `，附${extras.join("、")}` : ""),
       );
-    } catch (e: any) {
-      msg.error(e.message || "导出失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "导出失败");
     }
   };
 
@@ -789,8 +818,9 @@ export default function AIConfigPage() {
         loadRuntime();
       }
       load();
-    } catch (e: any) {
-      msg.error(e.message || "导入失败，请确认文件为本系统导出的配置 JSON");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "导入失败，请确认文件为本系统导出的配置 JSON");
     } finally {
       setImporting(false);
     }
@@ -835,8 +865,9 @@ export default function AIConfigPage() {
           setAuditPage(1);
           loadAuditLogs(1, auditPageSize, auditFilter);
           loadStats();
-        } catch (e: any) {
-          msg.error(e.message || "清理失败");
+        } catch (e: unknown) {
+          const err = e as { message?: string };
+          msg.error(err.message || "清理失败");
         }
       },
     });
@@ -880,9 +911,10 @@ export default function AIConfigPage() {
         setCustomModels([]);
         setCustomModelsTruncated(false);
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       if (seq !== fetchModelsSeqRef.current) return;
-      setCustomFetchError(e.message || "获取模型列表失败");
+      const err = e as { message?: string };
+      setCustomFetchError(err.message || "获取模型列表失败");
       setCustomModels([]);
       setCustomModelsTruncated(false);
     } finally {
@@ -1019,7 +1051,7 @@ export default function AIConfigPage() {
       title: "API Key",
       dataIndex: "api_key",
       key: "api_key",
-      render: (v: string, r: any) => {
+      render: (v: string, r: AIConfigItem) => {
         if (r.key_broken) {
           return (
             <Tooltip title="密文无法解密（常见于更换过加密密钥或删除过 data/secret_key.key），请重新填写 API Key">
@@ -1102,7 +1134,7 @@ export default function AIConfigPage() {
     {
       title: "操作",
       key: "actions",
-      render: (_: any, r: any) => (
+      render: (_: unknown, r: AIConfigItem) => (
         <Space size="small">
           <Button size="small" type="link" onClick={() => handleEdit(r)}>编辑</Button>
           {r.is_active ? (
@@ -1134,7 +1166,7 @@ export default function AIConfigPage() {
   //    与「场景模型路由」面板同一份口径；未知场景原样显示，绝不隐藏数据）
   const sceneLabel = (code: string) => {
     if (!code) return "";
-    const hit = (sceneRoutes || []).find((s: any) => s.scene === code);
+    const hit = (sceneRoutes || []).find((s) => s.scene === code);
     return hit?.label || code;
   };
 
@@ -1180,7 +1212,7 @@ export default function AIConfigPage() {
     {
       title: "Token 用量",
       key: "tokens",
-      render: (_: any, r: any) => {
+      render: (_: unknown, r: AIAuditLogItem) => {
         const total = (r.prompt_tokens || 0) + (r.completion_tokens || 0);
         if (!total) return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
         return (
@@ -1204,7 +1236,7 @@ export default function AIConfigPage() {
       dataIndex: "success",
       key: "success",
       width: 70,
-      render: (s: number, r: any) => s
+      render: (s: number, r: AIAuditLogItem) => s
         ? <Tag color="success" icon={<CheckCircleOutlined />}>成功</Tag>
         : <Tooltip title={r.error || "（无错误详情：本次改造前的历史记录）"}>
             <Tag color="error" icon={<CloseCircleOutlined />}>失败</Tag>
@@ -1457,7 +1489,7 @@ export default function AIConfigPage() {
             <Col span={2}>
               <div style={{ fontWeight: 600, marginBottom: 8, fontSize: 12 }}>按操作</div>
               <Space wrap size={4}>
-                {stats.by_action?.map((a: any) => (
+                {stats.by_action?.map((a) => (
                   <Tag key={a.action} style={{ fontSize: 11 }}>
                     {a.action}: {a.calls}
                   </Tag>
@@ -1468,7 +1500,7 @@ export default function AIConfigPage() {
           <div style={{ marginTop: 12 }}>
             <div style={{ fontWeight: 600, marginBottom: 8 }}>各供应商调用分布</div>
             <Space wrap>
-              {stats.by_provider?.map((p: any) => {
+              {stats.by_provider?.map((p) => {
                 // ✅ 2026-09-17 增强：成功率着色（<60% 红色预警，帮助一眼识别死配置）
                 const sr = p.success_rate;
                 const srColor = sr == null ? "default" : sr >= 90 ? "green" : sr >= 60 ? "blue" : "red";
@@ -1504,7 +1536,7 @@ export default function AIConfigPage() {
                 </Text>
               </div>
               <Space wrap>
-                {stats.by_scene.map((sc: any) => {
+                {stats.by_scene.map((sc) => {
                   const rate = sc.calls
                     ? Math.round(((sc.success_count || 0) / sc.calls) * 100) : null;
                   const rateColor = rate == null ? "default"
@@ -1537,8 +1569,8 @@ export default function AIConfigPage() {
                 </Text>
               </div>
               <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 64 }}>
-                {stats.daily.map((d: any) => {
-                  const max = Math.max(1, ...stats.daily.map((x: any) => x.calls || 0));
+                {stats.daily.map((d) => {
+                  const max = Math.max(1, ...stats.daily.map((x) => x.calls || 0));
                   const calls = d.calls || 0;
                   const fail = calls - (d.success_count || 0);
                   const h = Math.max(3, Math.round((calls / max) * 56));
@@ -1565,7 +1597,7 @@ export default function AIConfigPage() {
             <div style={{ marginTop: 12 }}>
               <div style={{ fontWeight: 600, marginBottom: 8 }}>失败原因 TOP（按调用次数）</div>
               <Space wrap>
-                {stats.by_error.map((e: any, i: number) => (
+                {stats.by_error.map((e, i: number) => (
                   <Tooltip key={i} title={`${providers[e.provider_name]?.label || e.provider_name} / ${e.model || "—"}`}>
                     <Tag color="volcano">
                       {providers[e.provider_name]?.label || e.provider_name}: {e.err}: {e.calls}次
@@ -1724,7 +1756,7 @@ export default function AIConfigPage() {
                     <List
                       size="small"
                       dataSource={chain}
-                      renderItem={(c: any, i: number) => (
+                      renderItem={(c: AIConfigItem, i: number) => (
                         <List.Item
                           actions={[
                             <Tooltip title="上移（更高优先级）" key="up">
@@ -1867,7 +1899,7 @@ export default function AIConfigPage() {
                     {/* 场景较多（20+），限高滚动避免把页面撑得过长 */}
                     <div style={{ maxHeight: 300, overflowY: "auto" }}>
                     <Row gutter={[8, 8]}>
-                      {sceneRoutes.map((s: any) => (
+                      {sceneRoutes.map((s) => (
                         <Col span={12} key={s.scene}>
                           <Space wrap>
                             <Text style={{ display: "inline-block", width: 132, fontSize: 13 }}>
@@ -1881,7 +1913,7 @@ export default function AIConfigPage() {
                               onChange={(v) => handleSceneRouteChange(s.scene, v)}
                               options={[
                                 { value: "", label: "跟随「当前使用」配置" },
-                                ...configs.map((c: any) => ({
+                                ...configs.map((c) => ({
                                   value: c.id,
                                   label: `${providers[c.provider_name]?.label || c.provider_name} / ${c.model || "-"}${c.has_key ? "" : "（缺 Key）"}`,
                                 })),
@@ -1926,7 +1958,7 @@ export default function AIConfigPage() {
                     <List
                       size="small"
                       dataSource={configAudits}
-                      renderItem={(r: any) => (
+                      renderItem={(r: AIConfigAuditItem) => (
                         <List.Item
                           actions={r.rollbackable ? [
                             <Tooltip key="rb" title="把该配置恢复到这次变更之前的状态（API Key 不参与回滚）">
@@ -1957,7 +1989,7 @@ export default function AIConfigPage() {
                             {/* ✅ 2026-09-23（G6）：结构化变更明细（历史记录无快照 → 不展示） */}
                             {(r.changes || []).length > 0 && (
                               <Space wrap size="small">
-                                {(r.changes || []).map((c: any) => (
+                                {(r.changes || []).map((c) => (
                                   <Tag key={c.field} color="default" style={{ fontSize: 11 }}>
                                     {c.label}：{String(c.before) || "（空）"} → {String(c.after) || "（空）"}
                                   </Tag>
@@ -2014,7 +2046,7 @@ export default function AIConfigPage() {
                               </Space>
                               <Text type="secondary" style={{ fontSize: 12 }}>{info.description}</Text>
                               <Space size={4} wrap>
-                                {info.models.slice(0, 3).map((m: any) => (
+                                {info.models.slice(0, 3).map((m) => (
                                   <Tag key={m.value} style={{ fontSize: 11 }}>
                                     {m.label.split(" ")[0]}
                                     {m.recommended && <FireOutlined style={{ color: "#fa8c16", marginLeft: 2 }} />}
@@ -2271,7 +2303,7 @@ export default function AIConfigPage() {
               {providerKeys.map(key => (
                 <Select.Option key={key} value={key}>
                   {providers[key]?.label || key}
-                  {providers[key]?.models?.some((m: any) => m.recommended) && " (推荐)"}
+                  {providers[key]?.models?.some((m) => m.recommended) && " (推荐)"}
                 </Select.Option>
               ))}
               <Select.Option key="custom" value="custom">
@@ -2446,7 +2478,7 @@ export default function AIConfigPage() {
                     if (editingId && !apiKey) {
                       try {
                         const { data: cfg } = await aiApi.getConfig();
-                        const item = cfg.items?.find((c: any) => c.id === editingId);
+                        const item = cfg.items?.find((c) => c.id === editingId);
                         if (item?.has_key) {
                           // 传 config_id 让后端从 DB 读 key
                           await tryFetchCustomModels(baseUrl, "", editingId);
@@ -2466,7 +2498,7 @@ export default function AIConfigPage() {
             rules={[{ required: true }]}
           >
             <Select
-              mode={"combobox" as any}
+              mode={LEGACY_COMBOBOX_MODE}
               showSearch
               allowClear
               placeholder={
@@ -2481,13 +2513,13 @@ export default function AIConfigPage() {
               options={(() => {
                 // 优先用动态拉取的 customModels；否则 fallback 到静态 preset
                 if (customModels.length > 0) {
-                  return customModels.map((m: any) => ({
+                  return customModels.map((m) => ({
                     value: m.value,
                     label: `${m.label}${m.context ? `  (${m.context})` : ""}`,
                   }));
                 }
                 if (selectedProvider === "custom") return [];
-                return providers[selectedProvider]?.models?.map((m: any) => ({
+                return providers[selectedProvider]?.models?.map((m) => ({
                   value: m.value,
                   label: `${m.label}${m.context ? `  (${m.context})` : ""}`,
                 })) || [];
@@ -2702,13 +2734,13 @@ export default function AIConfigPage() {
             <Table
               size="small"
               pagination={{ pageSize: 10, size: "small" }}
-              dataSource={configsHealthResult.items as any[]}
+              dataSource={configsHealthResult.items}
               rowKey="id"
               columns={[
                 {
                   title: "配置",
                   dataIndex: "provider_name",
-                  render: (v: string, r: any) => (
+                  render: (v: string, r: AIConfigsHealthItem) => (
                     <Space direction="vertical" size={0}>
                       <Text strong>{providers[v]?.label || v}</Text>
                       <Text type="secondary" style={{ fontSize: 11 }}>{r.model || "-"}</Text>
@@ -2725,7 +2757,7 @@ export default function AIConfigPage() {
                   title: "环境",
                   dataIndex: "env",
                   width: 112,
-                  render: (v: string, r: any) => (
+                  render: (v: string, r: AIConfigsHealthItem) => (
                     r.in_current_env
                       ? <Tag>{v || "通用"}</Tag>
                       : <Tooltip title="不属于当前生效环境，运行时会被跳过">
@@ -2737,7 +2769,7 @@ export default function AIConfigPage() {
                   title: "Key",
                   dataIndex: "has_key",
                   width: 104,
-                  render: (v: boolean, r: any) => (
+                  render: (v: boolean, r: AIConfigsHealthItem) => (
                     !v
                       ? <Tag color="red">未填</Tag>
                       : r.key_broken
@@ -2765,7 +2797,7 @@ export default function AIConfigPage() {
                   title: "运行时健康",
                   dataIndex: "runtime_health",
                   width: 150,
-                  render: (_: any, r: any) => {
+                  render: (_: unknown, r: AIConfigsHealthItem) => {
                     const h = r.runtime_health;
                     if (!h) {
                       return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
@@ -2823,7 +2855,7 @@ export default function AIConfigPage() {
                   title: "网络",
                   dataIndex: "network_ok",
                   width: 150,
-                  render: (v: boolean, r: any) => (
+                  render: (v: boolean, r: AIConfigsHealthItem) => (
                     r.no_url
                       ? <Text type="secondary" style={{ fontSize: 11 }}>未测（无地址）</Text>
                       : v
@@ -2886,21 +2918,21 @@ export default function AIConfigPage() {
                 </Tag>
               </Space>
             )}
-            {(keyRotationResult as any).migrated != null && (
+            {keyRotationResult.migrated != null && (
               <Text>
-                {`重加密完成：迁移 ${(keyRotationResult as any).migrated} 条、`
-                + `保持原样 ${(keyRotationResult as any).unchanged} 条、`
-                + `失败 ${(keyRotationResult as any).failed} 条`}
-                {(keyRotationResult as any).warning ? `；${(keyRotationResult as any).warning}` : ""}
+                {`重加密完成：迁移 ${keyRotationResult.migrated} 条、`
+                + `保持原样 ${keyRotationResult.unchanged} 条、`
+                + `失败 ${keyRotationResult.failed} 条`}
+                {keyRotationResult.warning ? `；${keyRotationResult.warning}` : ""}
               </Text>
             )}
-            {(keyRotationResult as any).error && (
-              <Text type="danger">{`失败：${(keyRotationResult as any).error}`}</Text>
+            {keyRotationResult.error && (
+              <Text type="danger">{`失败：${keyRotationResult.error}`}</Text>
             )}
             {keyRotationResult.advice
               ? <Alert message="建议" description={keyRotationResult.advice} type="info" showIcon />
               : null}
-            {(keyRotationResult as any).broken_configs?.length
+            {keyRotationResult.broken_configs?.length
               ? <>
                   <Text strong>无法解密的配置（{keyRotationResult.health?.broken_count} 条）</Text>
                   <Table

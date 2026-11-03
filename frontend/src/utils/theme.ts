@@ -5,7 +5,7 @@
  * 避免「侧边栏一套、主区一套」的漂移问题。
  */
 import { createContext, useContext } from "react";
-import type { theme as AntTheme } from "antd";
+import { theme as AntTheme } from "antd";
 
 export type ThemeMode = "light" | "dark";
 
@@ -93,7 +93,7 @@ export const BlueprintThemeContext = createContext<ThemeCtx>({
   mode: "light",
   toggle: () => {},
   setMode: () => {},
-  algorithm: () => null as any,
+  algorithm: () => AntTheme.defaultAlgorithm,
 });
 
 export function useBlueprintTheme() {

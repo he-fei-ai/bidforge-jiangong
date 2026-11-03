@@ -346,9 +346,11 @@ class TestLayoutPreset:
 class TestGenerationWiring:
 
     SSE = os.path.join(BACKEND, "app", "routers", "sse_handlers.py")
+    # 拆分兼容：目录评审阶段（含 _attach_quality_report）下沉 _sse_outline_review.py
+    SSE_REVIEW = os.path.join(BACKEND, "app", "routers", "_sse_outline_review.py")
 
     def test_outline_advisory_wired_into_quality_report(self):
-        src = _fn_src(self.SSE, "_attach_quality_report")
+        src = _fn_src(self.SSE_REVIEW, "_attach_quality_report")
         assert "struct = check_structure_standards(outline)" in src
         assert '"structure": struct' in src
         # 建议只进 info 级日志；连续性未通过仍是唯一 warning
@@ -414,11 +416,24 @@ class TestByteHealthAndShadowing:
         按执行顺序后者静默覆盖前者（属「配置散落 / 静默失效」一类）。
         本轮已删除过期字面量收敛为唯一定义，并把该文件纳入本锁——
         此前注释所称「纳管需单独立项」即本次改动。
+
+        ⚠️ 拆分纳管：`export.py` / `sse_handlers.py` 拆出的五个子模块
+        （`_export_cache` / `_export_docx_parts` / `_export_issue_scan` /
+        `_sse_outline_build` / `_sse_outline_review`）同样是模块级名字空间，
+        母文件与子模块之间的**符号搬移**若只做一半（母文件留一份副本、
+        子模块再定义一份），宿主 `ImportFrom` 再导出会被子模块定义覆盖，
+        属同一类「静默失效」—— 故一并纳入本锁，而非只锁母文件。
         """
         for path in [os.path.join(BACKEND, "app", "services", "outline_quality.py"),
                      os.path.join(BACKEND, "app", "services", "content_standard.py"),
                      os.path.join(BACKEND, "app", "routers", "sse_handlers.py"),
-                     os.path.join(BACKEND, "app", "routers", "export.py")]:
+                     os.path.join(BACKEND, "app", "routers", "export.py"),
+                     os.path.join(BACKEND, "app", "routers", "_export_cache.py"),
+                     os.path.join(BACKEND, "app", "routers", "_export_docx_parts.py"),
+                     os.path.join(BACKEND, "app", "routers", "_export_issue_scan.py"),
+                     os.path.join(BACKEND, "app", "routers", "_sse_outline_build.py"),
+                     os.path.join(BACKEND, "app", "routers",
+                                   "_sse_outline_review.py")]:
             tree = _tree(path)
             seen: set[str] = set()
             for node in tree.body:

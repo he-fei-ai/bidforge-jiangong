@@ -448,16 +448,20 @@ class TestCategoryAndStageLabelLocks:
         assert "MONITOR_CATEGORIES" in src
 
     def test_stage_label_fallback_parity(self):
-        # R90 遗留②：content_progress.snapshot_stats（休眠副本）与
-        # sse_handlers._snapshot_stats（生产活路径）缺 stage_label 时都回退 ""，
-        # 副本不得回退 stage 原值（否则未来恢复共用时静默改前端语义）。
+        # R90 遗留② → ✅ R168 重锚：content_progress 的休眠函数族（含
+        # snapshot_stats）已删除（活路径唯一在 sse_handlers._snapshot_stats，
+        # 旧「两副本 parity」前提消失）。本护栏改为两段：
+        # (a) 活副本缺 stage_label 回退 "" 的口径不变（回退 stage 原值会静默
+        #     改前端语义）；
+        # (b) 休眠副本不得回流（死代码棘轮）—— content_progress 收敛为纯常量
+        #     事实源，函数族一回来就说明有人按旧副本「恢复共用」，直接红。
         live = re.search(r'"stage_label": rec\.get\([^)]*\)',
                         _src(sse_handlers_mod._snapshot_stats)).group(0)
-        dorm = re.search(r'"stage_label": rec\.get\([^)]*\)',
-                         _src(content_progress_mod.snapshot_stats)).group(0)
-        assert live == dorm, f"两份副本回退口径分叉: live={live} dorm={dorm}"
-        assert dorm == '"stage_label": rec.get("stage_label", "")'
+        assert live == '"stage_label": rec.get("stage_label", "")'
+        assert not hasattr(content_progress_mod, "snapshot_stats"), (
+            "content_progress.snapshot_stats 休眠副本回流 —— 活实现唯一在 "
+            "sse_handlers/_sse_outline_build，恢复共用会静默回退 B19 行为")
 
     def test_old_stage_fallback_not_reintroduced(self):
-        src = _src(content_progress_mod.snapshot_stats)
+        src = _src(sse_handlers_mod._snapshot_stats)
         assert 'rec.get("stage_label", rec.get("stage", ""))' not in src

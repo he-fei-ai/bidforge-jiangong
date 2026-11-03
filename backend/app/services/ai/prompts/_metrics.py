@@ -80,11 +80,11 @@ def get_snapshot() -> dict:
     )
     try:
         register_lazy_prompts()
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - 快照统计尽力而为，注册失败时返回部分快照即可
         pass
     try:
         registered = sorted(_ALL_PROMPTS.keys())
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - 同上，注册表不可读时按空清单导出
         registered = []
     return {
         "render_total": dict(render_total),
@@ -102,5 +102,5 @@ def reset() -> None:
               repair_triggered, ai_failure_by_scene):
         try:
             c.clear()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - 计数器清零尽力而为，失败不影响其余计数器
             pass

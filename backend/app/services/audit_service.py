@@ -383,8 +383,16 @@ async def list_prompt_audit_logs(db, key: str, limit: int = 50,
     key = (key or "").strip()
     if not key:
         raise ValueError("提示词 key 不能为空")
-    limit = max(1, min(200, int(limit or 50)))
-    offset = max(0, int(offset or 0))
+    # ✅ R168：limit/offset 来自查询参数，非数字字符串此前直接 ValueError → 500；
+    #    与同仓分页端点（review.py records）的容错口径对齐，脏值回退默认。
+    try:
+        limit = max(1, min(200, int(limit or 50)))
+    except (TypeError, ValueError):
+        limit = 50
+    try:
+        offset = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        offset = 0
     cur = await db.execute(
         "SELECT COUNT(*) FROM prompt_audit_logs WHERE prompt_key=?", (key,))
     total = int((await cur.fetchone())[0] or 0)

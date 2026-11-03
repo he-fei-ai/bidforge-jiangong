@@ -44,6 +44,7 @@ import {
   parseBaEvidence,
   projectInfoFieldLabel,
   type BaGroup,
+  type BaGroupLike,
   type BaItemDef,
   type BaStoredItem,
   type BaSummary,
@@ -65,7 +66,7 @@ export type BidAnalysisTabProps = {
   /** 解析项定义（后端 /bid-analysis/items 的 items，当前为固定 18 项） */
   defs: BaItemDef[];
   /** 后端 /bid-analysis/items 的 groups（13 分组，唯一权威源） */
-  groups: any[];
+  groups: BaGroupLike[];
   /** 已存储的解析项结果（后端 /bid-analysis/results 的 items） */
   items: BaStoredItem[];
   summary: BaSummary | null;
@@ -75,9 +76,9 @@ export type BidAnalysisTabProps = {
   progressMsg: string;
   /** 已解析文档数（0 → 前置条件未满足） */
   parsedDocCount: number;
-  selectedItem: any | null;
+  selectedItem: BaStoredItem | null;
   sectionChecking: boolean;
-  sectionCheckResult: any | null;
+  sectionCheckResult: Record<string, unknown> | null;
   /** 本轮提取规模（SSE `text_stats`）：项数 × 切段数 ≈ 模型调用次数 */
   textStats?: BaTextStats | null;
   /** 解析项定义（/items）加载失败原因；非空且列表为空时展示错误态 + 重试 */
@@ -94,11 +95,11 @@ export type BidAnalysisTabProps = {
   onOpenConfig: () => void;
   onCheckSections: () => void;
   onRefresh: () => void;
-  onSelectItem: (item: any) => void;
+  onSelectItem: (item: BaStoredItem) => void;
   onRerunItem: (def: BaItemDef) => void;
-  onOpenFullView: (item: any) => void;
+  onOpenFullView: (item: BaStoredItem) => void;
   /** 人工校正当前选中项的提取结果（打开校正弹窗） */
-  onEditItem?: (item: any) => void;
+  onEditItem?: (item: BaStoredItem) => void;
   onDismissSectionResult: () => void;
   onGoImport: () => void;
   onGoOutline: () => void;
@@ -138,7 +139,7 @@ export function baRowSummaryText(
 }
 
 /** 单个解析项内容渲染（右侧阅读区与「查看完整」Modal 共用） */
-export function BidAnalysisItemBody({ item }: { item: any }) {
+export function BidAnalysisItemBody({ item }: { item: BaStoredItem | null }) {
   if (!item) return null;
   const content: string = item.content || "";
   // 失败项的错误原因必须可见：旧实现只在「无内容」时展示 error，
@@ -176,7 +177,7 @@ export function BidAnalysisItemBody({ item }: { item: any }) {
     })();
 
   if (isJson) {
-    let obj: any = null;
+    let obj: unknown = null;
     try {
       obj = JSON.parse(content);
     } catch {
@@ -224,7 +225,7 @@ export function BidAnalysisItemBody({ item }: { item: any }) {
  * 无证据（旧数据 / 未匹配到 / 人工校正后清空）时整块不渲染，不留空壳。
  * 导出供 ParseResultCategoryPanel（上传解析 Tab 分类栏）复用，两处口径一致。
  */
-export function BidAnalysisEvidenceList({ item }: { item: any }) {
+export function BidAnalysisEvidenceList({ item }: { item: BaStoredItem | null }) {
   const list = parseBaEvidence(item?.evidence);
   if (!list.length) return null;
   return (
@@ -279,6 +280,39 @@ const CHAPTER_LABELS: Record<string, string> = {
 };
 
 /**
+ * 九大章节单章条目（后端 validate_chapter_fields 逐章下发）。
+ * field_coverage / completeness 取值用 unknown：后端异常值（如字符串）由 Number()
+ * 归一为 0，测试以 `{ field_coverage: "abc" }` 钉住该容错。
+ */
+export type BaChapterInfo = {
+  title?: string;
+  field_coverage?: unknown;
+  completeness?: unknown;
+  missing_fields?: string[];
+};
+
+/** /bid-analysis/classify 响应体里的分类结果（仅声明本面板读取的字段） */
+export type BaClassificationInfo = {
+  category_names?: string[];
+  sub_names?: string[];
+  is_hazardous?: boolean;
+  is_oversize?: boolean;
+  standards_keys?: string[];
+};
+
+/** /bid-analysis/classify 响应体（仅声明本面板读取的字段，其余透传） */
+export type BaClassificationData = {
+  disabled?: boolean;
+  reason?: string;
+  error?: string;
+  classification?: BaClassificationInfo;
+  chapter_completeness?: {
+    completeness?: number;
+    chapters?: Record<string, BaChapterInfo>;
+  };
+};
+
+/**
  * 单章字段覆盖率（0~1）。
  *
  * ✅ BUG 修复（2026-10-06）：原实现读 `ch.completeness`，而 backend
@@ -291,7 +325,9 @@ const CHAPTER_LABELS: Record<string, string> = {
  * 兼容：若响应确实带 `completeness`（旧缓存 / 未来契约变更）仍按其取值，
  * 两键都缺失才回落 0。
  */
-export function chapterFieldCoverage(ch: any): number {
+export function chapterFieldCoverage(
+  ch: BaChapterInfo | null | undefined,
+): number {
   const raw = ch?.field_coverage ?? ch?.completeness;
   const n = Number(raw);
   if (!Number.isFinite(n)) return 0;
@@ -299,7 +335,10 @@ export function chapterFieldCoverage(ch: any): number {
 }
 
 /** 章节中文标题：优先响应自带 title，其次兜底表，最后退回 key。 */
-export function chapterTitleOf(ch: any, key: string): string {
+export function chapterTitleOf(
+  ch: BaChapterInfo | null | undefined,
+  key: string,
+): string {
   return ch?.title || CHAPTER_LABELS[key] || key;
 }
 
@@ -307,7 +346,7 @@ export function chapterTitleOf(ch: any, key: string): string {
  * 危大工程自动分类 + 九大章节字段完整性面板（#11）。
  * data：/api/v1/bid-analysis/classify 返回体（含 classification / chapter_completeness）。
  */
-export function ClassificationPanel({ data }: { data: any }) {
+export function ClassificationPanel({ data }: { data: BaClassificationData | null }) {
   if (!data) return null;
   if (data.disabled) {
     return (
@@ -321,9 +360,11 @@ export function ClassificationPanel({ data }: { data: any }) {
         message="智能分类失败" description={data.error} />
     );
   }
-  const cls = data.classification || {};
-  const completeness = data.chapter_completeness || {};
-  const chapters: Record<string, any> = completeness.chapters || {};
+  // `|| {}` 兜底后直接取属性：类型标注到全可选字段，兜底与取属性逻辑保持原样
+  const cls: BaClassificationInfo = data.classification || {};
+  const completeness: NonNullable<BaClassificationData["chapter_completeness"]> =
+    data.chapter_completeness || {};
+  const chapters: Record<string, BaChapterInfo> = completeness.chapters || {};
   const chapterKeys = Object.keys(chapters);
 
   return (
@@ -334,7 +375,7 @@ export function ClassificationPanel({ data }: { data: any }) {
           <Text strong>识别大类：</Text>
           {(cls.category_names || []).join("、") || "—"}
           {(cls.sub_names || []).length > 0 && (
-            <span style={{ marginLeft: 8 }}><Text type="secondary">子类：</Text>{cls.sub_names.join("、")}</span>
+            <span style={{ marginLeft: 8 }}><Text type="secondary">子类：</Text>{cls.sub_names!.join("、")}</span>
           )}
         </div>
         <div>
@@ -346,7 +387,7 @@ export function ClassificationPanel({ data }: { data: any }) {
         {(cls.standards_keys || []).length > 0 && (
           <div>
             <Text strong>适用规范类别：</Text>
-            {cls.standards_keys.map((k: string) => <Tag key={k}>{k}</Tag>)}
+            {cls.standards_keys!.map((k: string) => <Tag key={k}>{k}</Tag>)}
           </div>
         )}
         <div style={{ marginTop: 4 }}>
@@ -356,7 +397,7 @@ export function ClassificationPanel({ data }: { data: any }) {
           </Text>
         </div>
         {chapterKeys.map((key) => {
-          const ch = chapters[key] || {};
+          const ch: BaChapterInfo = chapters[key] || {};
           const pct = Math.round(chapterFieldCoverage(ch) * 100);
           const missing = ch.missing_fields || [];
           return (
@@ -448,7 +489,7 @@ function BidAnalysisTab({
 
   // ✅ 2026-09-24（#11 前端面板）：危大工程自动分类结果（九大章节字段完整性）。
   //    由「智能分类」按钮触发（调用 /api/v1/bid-analysis/classify），本地持有，不阻断提取。
-  const [classifyResult, setClassifyResult] = React.useState<any>(null);
+  const [classifyResult, setClassifyResult] = React.useState<BaClassificationData | null>(null);
   const [classifying, setClassifying] = React.useState(false);
   const handleClassify = async () => {
     if (!schemeId) return;
@@ -463,8 +504,9 @@ function BidAnalysisTab({
       } else {
         setClassifyResult({ error: "分类失败" });
       }
-    } catch (e: any) {
-      setClassifyResult({ error: String(e?.message || e) });
+    } catch (e) {
+      const err = e as { message?: string };
+      setClassifyResult({ error: String(err?.message || e) });
     } finally {
       setClassifying(false);
     }
@@ -578,10 +620,19 @@ function BidAnalysisTab({
   const successValid = summary
     ? (summary.success_valid ?? summary.success ?? 0)
     : 0;
+  // 后端 /bid-analysis/check-sections 响应体收窄：api 层为 Record<string, unknown>，
+  // 仅断言本组件读取的字段（断言为编译期行为，运行期取值不变）
+  const scr = sectionCheckResult as {
+    total_declared?: number;
+    detected_count?: number;
+    sections?: string[];
+    has_multiple?: boolean;
+    source?: string;
+  } | null;
   const sectionCount =
-    sectionCheckResult?.total_declared ||
-    sectionCheckResult?.detected_count ||
-    (sectionCheckResult?.sections || []).length;
+    scr?.total_declared ||
+    scr?.detected_count ||
+    (scr?.sections || []).length;
 
   /** 分类栏：桌面竖向侧栏 / 窄屏横向 chips；点击任一分类筛选该分类下解析项 */
   const renderCatBar = (vertical: boolean) => (
@@ -793,7 +844,7 @@ function BidAnalysisTab({
       </Card>
 
       {/* ===== 多标段检测结果明细（未命中也如实告知，避免「点了没反应」） ===== */}
-      {sectionCheckResult && !sectionCheckResult.has_multiple && (
+      {scr && !scr.has_multiple && (
         <Alert
           type="info"
           showIcon
@@ -801,14 +852,14 @@ function BidAnalysisTab({
           style={{ marginBottom: 4 }}
           message="多标段检测：未发现多标段特征"
           description={
-            sectionCheckResult.source === "no_documents" || sectionCheckResult.source === "empty_text"
+            scr.source === "no_documents" || scr.source === "empty_text"
               ? "暂无已解析文档文本，请先完成「解析提取」"
               : "已基于当前方案全部已解析文档规则扫描，可继续「目录生成」"
           }
           onClose={onDismissSectionResult}
         />
       )}
-      {sectionCheckResult?.has_multiple && (
+      {scr?.has_multiple && (
         <Alert
           type="warning"
           showIcon
@@ -816,9 +867,9 @@ function BidAnalysisTab({
           message={`检测到疑似多标段（约 ${sectionCount} 个）`}
           description={
             <div>
-              {(sectionCheckResult.sections || []).length > 0 && (
+              {(scr.sections || []).length > 0 && (
                 <div style={{ marginBottom: 4, fontSize: 12 }}>
-                  识别到的标段标识：{(sectionCheckResult.sections || []).join("、")}
+                  识别到的标段标识：{(scr.sections || []).join("、")}
                 </div>
               )}
               建议按标段拆分项目资料后分别建方案；继续生成将把多个标段内容混淆进同一份方案。

@@ -13,10 +13,17 @@ import {
 } from "../utils/fencePreprocess";
 
 // ✅ KaTeX 公式渲染：动态加载 katex（模块级缓存，多实例共享一次加载）
-let _katexPromise: Promise<any> | null = null;
-function ensureKatex(): Promise<any> {
+// @types/katex 的模块类型面（renderToString 等命名导出）
+type KatexModule = typeof import("katex");
+let _katexPromise: Promise<KatexModule> | null = null;
+function ensureKatex(): Promise<KatexModule> {
   if (!_katexPromise) {
-    _katexPromise = import("katex").then((m) => m.default ?? m);
+    _katexPromise = import("katex").then((m) => {
+      // katex CJS 构建在打包互操作下可能把 API 挂在 default（第三方版本不可控）；
+      // 历史实现按「有 default 取 default，否则整体即模块」兜底，运行时行为不变。
+      const holder = m as typeof m & { default?: unknown };
+      return (holder.default ?? holder) as KatexModule;
+    });
   }
   return _katexPromise;
 }
@@ -214,8 +221,9 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
     let rawHtml = "";
     try {
       rawHtml = marked.parse(mathContent) as string;  // ✅ BUG修复：用 mathContent（含公式占位符）而非 processed（无公式占位符）
-    } catch (e: any) {
-      rawHtml = `<pre style="color:red">Markdown 解析失败: ${e.message}</pre>`;
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      rawHtml = `<pre style="color:red">Markdown 解析失败: ${err.message}</pre>`;
     }
     const clean = DOMPurify.sanitize(rawHtml, {
       ADD_ATTR: ["data-marker"],
@@ -287,8 +295,9 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
           target.textContent = "修复返回空代码";
           target.disabled = false;
         }
-      } catch (e: any) {
-        target.textContent = `修复失败: ${e?.message || "未知错误"}`;
+      } catch (e: unknown) {
+        const err = e as { message?: string };
+        target.textContent = `修复失败: ${err?.message || "未知错误"}`;
         target.disabled = false;
       }
     };
@@ -398,14 +407,15 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
               div.innerHTML = svg;
               div.classList.remove("mmd-ph");
               div.classList.add("mmd-rendered");
-            } catch (renderErr: any) {
+            } catch (renderErr: unknown) {
               if (cancelled || !div.isConnected) continue;
+              const rerr = renderErr as { message?: string };
               // 渲染失败：显示代码 + 错误提示 + AI修复按钮
               const errId = `mmd-err-${ph.id}`;
               div.innerHTML = `<pre style="color:#a00;background:#fff0f0;padding:8px;border-radius:4px;font-size:12px"><b>Mermaid 渲染错误：</b>${DOMPurify.sanitize(
-                renderErr?.message || String(renderErr)
+                rerr?.message || String(renderErr)
               )}\n\n${DOMPurify.sanitize(ph.code)}</pre>
-              <div style="margin-top:6px"><button id="${errId}" data-fix-code="${encodeURIComponent(ph.code)}" data-fix-error="${encodeURIComponent(renderErr?.message || '渲染失败')}" style="padding:4px 12px;font-size:12px;border:1px solid #1677ff;border-radius:4px;background:#1677ff;color:#fff;cursor:pointer">AI 自动修复</button></div>`;
+              <div style="margin-top:6px"><button id="${errId}" data-fix-code="${encodeURIComponent(ph.code)}" data-fix-error="${encodeURIComponent(rerr?.message || '渲染失败')}" style="padding:4px 12px;font-size:12px;border:1px solid #1677ff;border-radius:4px;background:#1677ff;color:#fff;cursor:pointer">AI 自动修复</button></div>`;
               div.classList.remove("mmd-ph");
               div.classList.add("mmd-err");
             }
@@ -428,8 +438,9 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
           </div>`;
           div.classList.remove("mmd-ph");
         }
-      } catch (e: any) {
-        setErrMsg(`Mermaid 加载失败: ${e.message}`);
+      } catch (e: unknown) {
+        const err = e as { message?: string };
+        setErrMsg(`Mermaid 加载失败: ${err.message}`);
       }
 
     })();

@@ -24,6 +24,11 @@ from functools import lru_cache
 from typing import Any
 
 from app.config import settings
+
+# ✅ R166（2026-11-03 · 锁族补面）：事实链三个落库写点接 retry_db_op ——
+#    R108 的锁重试族覆盖了正文/导出/图表/ai_config，事实链三写点漏面，
+#    SQLite 锁竞争下「AI 全部提完、落库瞬间 failed」白烧整轮调用。
+from app.db import retry_db_op
 from app.services.ai.json_response import FACTS_REPAIR_KEY, collect_json_response
 from app.services.ai.prompts._norm_dicts import (
     normalize_machinery_name,
@@ -1291,6 +1296,11 @@ async def extract_from_single_chunk(text: str, context_summary: str = "",
                 from app.services.ai.provider_factory import is_non_retryable_error
                 _permanent = is_non_retryable_error(e)
             except Exception:  # noqa: BLE001 - 判据自身故障不得中断提取
+                # ✅ R166：补 DEBUG 留痕（同 save_extracted_chunks 2026-11-02 口径），
+                #    判据自身故障按「可重试」降级是安全方向，但必须可观测。
+                logger.debug(
+                    "is_non_retryable_error 判据自身故障（按可重试错误处理）",
+                    exc_info=True)
                 _permanent = False
             if _permanent:
                 logger.warning(
@@ -2643,6 +2653,12 @@ async def persist_extraction(
                      FACT_SCOPE_SHARED_FRAGMENT)
         scope_params = (project_id,)
     cur = await db.execute(scope_sql, scope_params)
+    # ✅ R169（R166 FIX-3 服务层延伸）：R13 命中（execute 返回 None）时裸
+    #    .fetchall() 即 AttributeError → 整轮 AI 提取成果在落库前崩掉且无法定位。
+    #    判空降级空集方向危险（DELETE 范围会扩成全量未保护行），故按可定位失败
+    #    抛出，由调用方终态 failed 留痕——与 routers 侧 _require_fact_cursor 同判据。
+    if cur is None:
+        raise RuntimeError("R13：db.execute 返回 None（persist_extraction 作用域事实加载）")
     existing = [dict(r) for r in await cur.fetchall()]
 
     def _is_protected(row: dict) -> bool:
@@ -2698,6 +2714,10 @@ async def persist_extraction(
         cur = await db.execute(
             "SELECT * FROM global_facts WHERE " +
             FACT_SCOPE_SHARED_FRAGMENT, (project_id,))
+        # ✅ R169（R166 FIX-3 服务层延伸）：同上，R13 命中按可定位失败抛出。
+        if cur is None:
+            raise RuntimeError(
+                "R13：db.execute 返回 None（persist_extraction 共享保护行回查）")
         for r in [dict(x) for x in await cur.fetchall()]:
             if not _is_protected(r):
                 continue
@@ -2726,6 +2746,9 @@ async def persist_extraction(
 
     # 2) 新 AI 事实（跳过与已确认事实同 key 的，以用户确认为准）
     insert_buf = []
+    # ✅ R166：中段对已确认行的回写 UPDATE 缓冲（与 DELETE/INSERT 同事务重放，
+    #    旧实现逐条直发、依赖最终 commit 一并提交）
+    writeback_buf: list[tuple[str, tuple]] = []
     skipped_dup = 0
     cat_group_id_cache: dict[str, str] = {}
     for grp in result.groups:
@@ -2777,10 +2800,10 @@ async def persist_extraction(
                 if _same_value:
                     if _hit_shared:
                         shared_hits += 1
-                    await db.execute(
+                    writeback_buf.append((
                         "UPDATE global_facts SET is_stale=0, "
                         "updated_at=datetime('now','localtime') WHERE id=?",
-                        (prior["id"],))
+                        (prior["id"],)))
                     skipped_dup += 1
                     continue
                 # 异值并存：摘除 prior，让本条走下方正常插入分支
@@ -2825,16 +2848,16 @@ async def persist_extraction(
                     #    裁决前一律不进正文/导出（回归护栏见
                     #    tests/test_facts_incremental.py 与
                     #    tests/test_facts_inject_gate_failclosed_20260927.py）。
-                    await db.execute(
+                    writeback_buf.append((
                         "UPDATE global_facts SET conflict_keys=?, has_conflict=1, "
                         "is_stale=1, updated_at=datetime('now','localtime') WHERE id=?",
-                        (json.dumps(candidates, ensure_ascii=False), prior["id"]))
+                        (json.dumps(candidates, ensure_ascii=False), prior["id"])))
                 else:
                     # 同 key 同值：本次资料已再次证明该已确认事实，可解除来源过期标记。
-                    await db.execute(
+                    writeback_buf.append((
                         "UPDATE global_facts SET is_stale=0, "
                         "updated_at=datetime('now','localtime') WHERE id=?",
-                        (prior["id"],))
+                        (prior["id"],)))
                 skipped_dup += 1
                 continue
             row = list(it.to_db_row(group_id, project_id, scheme_id, grp.title))
@@ -2899,7 +2922,26 @@ async def persist_extraction(
     else:
         # 本次结果为空（理论上 SSE 层已拦截，这里兜底）：不删除任何既有事实
         non_protected_ids = []
-    try:
+    # ✅ R166（2026-11-03 · 锁族补面）：DELETE+INSERT+commit 整体提为闭包接
+    #    retry_db_op —— R108 锁族漏面。SQLite 锁竞争下旧实现直接抛异常 →
+    #    SSE 链终态 failed，整轮 AI 提取白烧。可重放性：
+    #    ① 中段对已确认行的回写 UPDATE 不再逐条直发，统一缓冲 writeback_buf，
+    #       与 DELETE/INSERT 同闭包重放（旧实现它们依赖最终 commit 一并提交，
+    #       重试闭包若不含它们，重放会丢回写）；
+    #    ② 仅**重试**时先回滚清掉上一次尝试的半途事务（首次尝试绝不回滚 ——
+    #       调用方可能带着未提交事务进来，逐字保持旧行为）；DELETE/UPDATE
+    #       幂等（同参数重放），INSERT 主键每次重生成（失败未提交，无残留）。
+    _tx_attempt = {"n": 0}
+
+    async def _persist_tx_once() -> None:
+        _tx_attempt["n"] += 1
+        if _tx_attempt["n"] > 1:
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001 - 回滚失败按原语义继续重试
+                pass
+        for _sql, _params in writeback_buf:
+            await db.execute(_sql, _params)
         if non_protected_ids:
             ph = ",".join("?" * len(non_protected_ids))
             await db.execute(
@@ -2910,6 +2952,9 @@ async def persist_extraction(
             #    （此前内联 27 列字面量 + 手写 27 个占位符，与路由侧 28 列清单漂移）。
             await db.executemany(GLOBAL_FACTS_INSERT_SQL, insert_buf)
         await db.commit()
+
+    try:
+        await retry_db_op(_persist_tx_once, max_retries=4, base_delay=0.1, jitter=0.05)
     except Exception:
         await db.rollback()
         raise
@@ -2963,7 +3008,20 @@ async def save_extracted_chunks(db, project_id: str, scheme_id: str,
         return
     ok = {str(h) for h in (ok_hashes or set()) if h}
     all_h = {str(h) for h in (all_hashes or set()) if h}
-    try:
+
+    # ✅ R166（2026-11-03 · 锁族补面）：SELECT→DELETE→INSERT→commit 序列整体提为
+    #    闭包接 retry_db_op。本函数失败只 WARNING 不阻断提取结果，但指纹丢失
+    #    会让下次「增量提取」重复跑全部段（真实 AI 计费），值得给重试预算。
+    #    仅重试时回滚（清上次尝试的半途事务），首次尝试逐字保持旧行为。
+    _chunks_attempt = {"n": 0}
+
+    async def _save_chunks_once() -> None:
+        _chunks_attempt["n"] += 1
+        if _chunks_attempt["n"] > 1:
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001 - 回滚失败按原语义继续重试
+                pass
         cur = await db.execute(
             "SELECT chunk_hash FROM facts_extracted_chunks "
             "WHERE project_id=? AND scheme_id=?",
@@ -2986,12 +3044,17 @@ async def save_extracted_chunks(db, project_id: str, scheme_id: str,
         logger.info(
             "提取进度已更新：项目=%s 方案=%s 完成 %d 段（新增 %d，清理残留 %d）",
             project_id, scheme_id, len(ok), len(missing), len(stale))
+
+    try:
+        await retry_db_op(_save_chunks_once, max_retries=3, base_delay=0.1, jitter=0.05)
     except Exception as e:
         logger.warning("更新提取进度失败（不影响提取结果）: %s", e)
         try:
             await db.rollback()
         except Exception:
-            pass
+            logger.debug(
+                "提取进度更新失败后的回滚也失败（放弃清理 · 项目=%s 方案=%s）",
+                project_id, scheme_id, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -3031,8 +3094,25 @@ async def invalidate_export_cache(db, scheme_id: str, facts_touched: bool = Fals
     rows = [dict(r) for r in await cur.fetchall()]
     cache_count = len(rows)
     if cache_count > 0:
-        await db.execute("DELETE FROM export_cache WHERE scheme_id=?", (scheme_id,))
-        await db.commit()
+        # ✅ R166（2026-11-03 · 锁族补面）：DELETE+commit 接 retry_db_op ——
+        #    本函数在事实链收尾调用，撞锁抛异常会把已成功 persist 的整轮
+        #    提取拖成 failed 终态（事实已落库却报失败）。
+        #    仅重试时回滚（清上次尝试的半途事务），首次尝试逐字保持旧行为 ——
+        #    调用方（sections 等 10 处）可能带着未提交事务进来。
+        _cache_attempt = {"n": 0}
+
+        async def _delete_cache_once() -> None:
+            _cache_attempt["n"] += 1
+            if _cache_attempt["n"] > 1:
+                try:
+                    await db.rollback()
+                except Exception:  # noqa: BLE001 - 回滚失败按原语义继续重试
+                    pass
+            await db.execute(
+                "DELETE FROM export_cache WHERE scheme_id=?", (scheme_id,))
+            await db.commit()
+
+        await retry_db_op(_delete_cache_once, max_retries=3, base_delay=0.1, jitter=0.05)
         for r in rows:
             p = r.get("result_path")
             if not p:

@@ -420,8 +420,8 @@ _reg("content_plan_user", "content", "离散正文编排(用户)", """【方案�
 【全局事实候选标题（仅作建议来源，须从中挑选，不得编造）】：
 {fact_titles_text}
 
-请**仅输出严格 JSON**（不要任何解释、不要代码围栏）：
-{{"writing_focus":"本章应重点写清楚什么（1-2句）","knowledge_names":["候选清单中相关的素材名"],"fact_titles":["候选清单中相关的事实标题"],"table_needed":true,"table_purpose":"为何本章适合用表格（无需则填空串）"}}
+请**仅输出严格 JSON**（不要任何解释、不要代码围栏；示例本身就是合法 JSON，直接照此结构输出）：
+{"writing_focus":"本章应重点写清楚什么（1-2句）","knowledge_names":["候选清单中相关的素材名"],"fact_titles":["候选清单中相关的事实标题"],"table_needed":true,"table_purpose":"为何本章适合用表格（无需则填空串）"}
 
 约束：knowledge_names 与 fact_titles 必须严格来自上方候选清单中的名称/标题；table_needed 为布尔；无表格则 table_needed=false 且 table_purpose=""。
 """)

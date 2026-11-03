@@ -524,8 +524,11 @@ def paper_floor_note(label, fonts, canvas_w, canvas_h=0, *, log=None,
                 "[纸面可读性] %s 主文字印到纸上只有 %.2fmm，低于下限 %.2fmm，"
                 "建议减少条目或拆分图片%s",
                 label, main, floor, suggest)
-    except Exception:                                      # 播报失败绝不连累出图
-        pass
+    except Exception as e:                                 # 播报失败绝不连累出图
+        try:
+            lg.debug("纸面可读性播报失败（不连累出图，label=%s）: %s", label, e)
+        except Exception:  # noqa: BLE001 - 播报器本身炸了也不能从这里再抛（护栏 test_note_never_propagates_logger_failure）
+            pass
     return round(worst, 2)
 
 

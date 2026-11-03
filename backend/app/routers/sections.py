@@ -1713,8 +1713,8 @@ async def _renormalize_all_section_contents(db, scheme_id: str) -> None:
         from app.config import settings
         if not settings.content_subheading_renumber:
             return
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("读取 content_subheading_renumber 配置失败（按默认开启继续）: %s", e)
     try:
         from app.services.numbering import load_scheme_section_index, normalize_section_content_subheadings
         cur = await db.execute(

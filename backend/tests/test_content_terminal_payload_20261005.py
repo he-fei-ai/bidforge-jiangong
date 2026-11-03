@@ -26,7 +26,6 @@ SSE 流断言载荷字段），也锁**结构**（唯一拼装点必须存在、
 import ast
 import inspect
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -668,9 +667,19 @@ class TestR6FrontendErrorConsumesFailedSections:
         assert "selectedSection" not in block
 
     def test_local_merge_failed_sections_delegates(self):
-        """页面内的 mergeFailedSections 必须委托给 helper（单一实现）。"""
+        """页面内的失败章节合并必须委托共享纯函数（单一实现）。
+
+        重锚（R167 · 2026-11-03）：工作树重构把中间层包装 `mergeFailedSections`
+        并入 `mergeFailedSectionsIntoRef` 本体 —— useCallback 直接调
+        contentEvents.ts 的纯函数 `mergeFailedSectionsInto`。锚点随迁移更新；
+        判据（单一实现 + 必须委托纯函数）不放宽。
+        """
         src = self._page()
-        i = src.index("const mergeFailedSections = (list: any) => {")
-        block = src[i:i + 200]
-        assert "mergeFailedSectionsIntoRef(list)" in block, (
+        i = src.index("const mergeFailedSectionsIntoRef = useCallback(")
+        block = src[i:src.index("}, []);", i)]
+        assert "mergeFailedSectionsInto(sectionLogsRef.current, list)" in block, (
             "不得保留第二份合并实现（同一判据两处写 = 分叉病根）")
+        # 纯函数本体唯一事实源在 contentEvents.ts：页面只允许消费，不允许复制
+        assert src.count("function mergeFailedSectionsInto(") == 0, (
+            "页面内不得内联 mergeFailedSectionsInto 函数体"
+            "（单一事实源在 contentEvents.ts）")

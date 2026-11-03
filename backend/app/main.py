@@ -144,7 +144,7 @@ try:
             install_filter(logging.getLogger(_uv_name))
         except Exception:  # noqa: BLE001 - 单个 logger 挂载失败不影响其它
             pass
-except Exception:  # noqa: BLE001
+except Exception:  # noqa: BLE001 - trace 过滤器挂载失败只影响日志可串联性，绝不影响服务启动
     pass
 logger = logging.getLogger("main")
 
@@ -484,7 +484,7 @@ async def capabilities():
     try:
         import PIL  # noqa: F401
         mermaid["pil_renderer"] = True
-    except Exception:
+    except Exception:  # noqa: BLE001 - 可选依赖探测，结果经响应体 pil_renderer 外显，日志反成轮询噪声
         pass
     mermaid["available"] = bool(
         mermaid["pil_renderer"] or mermaid["http_service"] or mermaid["railway"])

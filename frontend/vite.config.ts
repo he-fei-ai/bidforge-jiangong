@@ -53,7 +53,7 @@ export default defineConfig({
         server.middlewares.stack.unshift({
           route: "",
           handle: middleware,
-        } as any);
+        });
       },
     },
   ],

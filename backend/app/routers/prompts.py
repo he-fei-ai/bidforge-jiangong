@@ -440,6 +440,13 @@ async def sync_prompts_from_code(force: bool = False, db=Depends(get_db)):
                 await db.execute(
                     "INSERT INTO prompt_templates (key, content) VALUES (?, ?)",
                     (key, code_content))
+                # ✅ R169：同步写入也要落审计（与 PATCH/reset/rollback 同为「内容
+                #    变更必留痕」口径）。旧实现直写 DB 不写 prompt_audit_logs，
+                #    force 之外的首插行不在任何审计快照里；本函数与最终 commit
+                #    同事务提交（record_prompt_audit 自身不 commit）。
+                await record_prompt_audit(
+                    db, key, "sync_insert", "", code_content,
+                    [], extract_user_variables(code_content), None)
                 summary["inserted"] += 1
                 details.append({
                     "key": key, "status": "inserted",
@@ -464,6 +471,13 @@ async def sync_prompts_from_code(force: bool = False, db=Depends(get_db)):
                     " updated_at=datetime('now','localtime')",
                     (key, code_content))
                 _up(key, code_content)
+                # ✅ R169：force 覆盖用户编辑是本端点唯一可能**丢失内容**的路径，
+                #    被覆盖的 DB 原文必须进审计快照，否则回滚 UI 永远无法恢复。
+                _db_before = row["content"] or ""
+                await record_prompt_audit(
+                    db, key, "sync_overwrite", _db_before, code_content,
+                    extract_user_variables(_db_before),
+                    extract_user_variables(code_content), None)
                 summary["overwritten"] += 1
                 details.append({
                     "key": key, "status": "overwritten",

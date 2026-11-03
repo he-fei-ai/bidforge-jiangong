@@ -949,7 +949,15 @@ def _frontend_src() -> str:
     root = os.path.dirname(APP)
     p = os.path.join(root, "frontend", "src", "pages", "SchemeWorkbenchPage.tsx")
     assert os.path.exists(p), f"找不到前端页面源码：{p}"
-    return io.open(p, encoding="utf-8").read()
+    # 大文件拆分后：兜底字典字面量迁入 pages/schemeWorkbench/factsShared.ts，
+    # 聚合 facade + 子模块读取，字面量提取与 parity 断言语义不变。
+    parts = [io.open(p, encoding="utf-8").read()]
+    wb = os.path.join(root, "frontend", "src", "pages", "schemeWorkbench")
+    if os.path.isdir(wb):
+        for fn in sorted(os.listdir(wb)):
+            if fn.endswith((".ts", ".tsx")):
+                parts.append(io.open(os.path.join(wb, fn), encoding="utf-8").read())
+    return "\n".join(parts)
 
 
 def _ts_record_literal(src: str, name: str) -> dict:

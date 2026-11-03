@@ -193,6 +193,10 @@ def reset_provider_config_cache():
     #    前一个用例标记的 60s 冷却窗口会让后续用例的候选被跳过或快速失败。
     pf.reset_thinking_dead()
     pf.reset_all_circuit_fast_fail()
+    # ✅ R169：可靠性滑窗 + 确定性死配置连击（R108）同为进程级全局——
+    #    前一个用例触发的 ≥3 次 404 连击会让后续依赖同身份键用例的候选
+    #    被静默判死剔除（顺序相关偶发红），与 thinking-dead 污染同族。
+    pf.reset_reliability()
     # ✅ 自适应并发控制器（2026-09-22 · 测试隔离修复）：进程级全局。
     #    前面用例的失败调用（402/429 等）会把并发降到 min_c=1 并清不掉，
     #    导致后续依赖并发语义的测试（如 test_perf_content_pipeline 的 hedge）

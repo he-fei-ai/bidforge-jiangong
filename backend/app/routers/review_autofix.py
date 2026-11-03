@@ -15,6 +15,7 @@ findings 再取那一条，保证「用户点的那条」与「系统判的那�
 from __future__ import annotations
 
 # ruff: noqa: I001 —— R13 契约：review_db 必须单独一行，护栏 test_review_db_is_imported 锁
+import hashlib
 import logging
 from datetime import datetime
 
@@ -537,6 +538,31 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
         merged = _merged_after_if_prefix(
             its, {it.get("rule_id") for it in sec_accepted})
         if merged is not None:
+            # ✅ R168（stage→confirm 竞态守卫）：前缀合并直接取**暂存时**的 after。
+            #    暂存后本章正文被改（手动编辑 / 其它修复批次落库）则 after 基于
+            #    过期内容 —— 直接写库会静默覆盖用户改动。暂存 items 带
+            #    content_sha_before（旧批次无此键 → 保持旧行为），漂移即跳过
+            #    本章并记入 skipped（与 F2c 失效 finding 同一可观测出口）。
+            #    非前缀路径（下方链式重算）按**当前正文**重算，无此风险。
+            _staged_sha = next(
+                (str(it.get("content_sha_before") or "") for it in its
+                 if it.get("content_sha_before")), "")
+            if _staged_sha:
+                _cur_sha = hashlib.sha256(
+                    (section.get("content") or "").encode("utf-8")).hexdigest()[:16]
+                if _cur_sha != _staged_sha:
+                    skipped.append({
+                        "rule_id": ",".join(sorted({
+                            str(it.get("rule_id") or "") for it in sec_accepted})),
+                        "section_id": sid,
+                        "status": "content_changed",
+                        "detail": "暂存后本章正文已被修改（手动编辑或其它修复），"
+                                  "暂存结果基于过期正文，已跳过以防覆盖",
+                    })
+                    logger.warning(
+                        "confirm 内容漂移守卫跳过章节 section=%s（暂存后正文已变）",
+                        str(sid)[:8])
+                    continue
             pending.append((sid, section.get("content") or "", merged))
             continue
         rule_ids = [it.get("rule_id") for it in sec_accepted]

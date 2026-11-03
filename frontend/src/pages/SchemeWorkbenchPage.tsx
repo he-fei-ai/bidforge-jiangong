@@ -6,6 +6,9 @@ import {
   Collapse, Upload, Divider, Tooltip, List, Switch, Alert, Spin, Table,
   Row, Col, Drawer, Popover, Pagination,
 } from "antd";
+// ✅ any 清理专项（2026-11-02）：目录树拖拽回调复用 antd TreeProps 的 onDrop 事件类型，
+//    编辑树/展示树的构建函数返回 antd TreeDataNode
+import type { TreeProps, TreeDataNode } from "antd";
 import {
   PlayCircleOutlined, PauseOutlined, StopOutlined,
   FileTextOutlined, FilePdfOutlined, ExportOutlined, AuditOutlined,
@@ -29,6 +32,8 @@ systemApi,
 } from "../api";
 import MarkdownRenderer from "../components/MarkdownRenderer";
 import UploadParseTab from "../components/UploadParseTab";
+// ✅ any 清理专项（2026-11-02）：UploadParseTab.docs 的元素契约（DocRecord 的严格投影）
+import type { DocumentParseItem } from "../components/DocumentParseList";
 import ParseResultCategoryPanel, {
   type ParsePanelSharedState,
 } from "../components/ParseResultCategoryPanel";
@@ -42,11 +47,12 @@ import BaItemFlatList from "../components/BaItemFlatList";
 import {
 recomputeBaSummary, normalizeBaGroups, findFirstDoneBaItem,
 type BaItemDef, type BaStoredItem, type BaTextStats,
+type BaGroup, type BaSummary,
 } from "../utils/bidAnalysis";
 import {
   buildUploadNotice, computeDocStats, isDocParsed, isDocFailed, NEXT_TAB, pickInitialTab,
   selectPlacedExportCharts, findDefaultExportPreset, canShrinkSection,
-  type WorkflowTabKey,
+  type WorkflowTabKey, type DocRecord,
 } from "../utils/workflowDerived";
 import {
   UPLOAD_FILE_ACCEPT, splitByUploadTotalQuota, splitByUploadFileCount,
@@ -76,6 +82,7 @@ import {
   // ✅ R77b（2026-10-15）：事实冲突定点修复终态提示（与标准校验提示同纪律）
   factAutofixHint,
   type SectionLogItem, type GenStats,
+  type StandardReport, type ChartDropItem,
 } from "../utils/contentEvents";
 // F-CONTENT-STANDARD(2026-09-26): 生成标准纯函数层（请求体映射 / 标签 / 报告判定）
 import {
@@ -125,6 +132,7 @@ import type {
   FactsSummary,
   FactGroupLike,
   FactItemLike,
+  FactCrossConflict,
 } from "../types/facts";
 import {
   deriveExportGate,
@@ -135,1757 +143,291 @@ import {
 const { Title, Text } = Typography;
 
 // ============================================================
+// ✅ any 清理专项（2026-11-02）：后端 SSE 事件与目录节点契约（局部类型）。
+// SSE 载荷是本项目后端自有契约（routers/sse_handlers.py），字段随 event 变化；
+// api 层 sseFetch 产出 SseEvent（Record<string, unknown>），消费侧在
+// for-await 循环体内按链路一次性断言到下列事件类型（编译期行为，运行期取值不变）。
+// ============================================================
+
+/** 后端章节/目录节点的传输形状（sections.tree 项与 SSE outline 字段共用） */
+interface OutlineNodeInput {
+  id?: string | number;
+  title?: string;
+  level?: number;
+  status?: string;
+  word_count?: number;
+  word_budget?: number;
+  content?: string;
+  description?: string;
+  /** 落库章节为 JSON 字符串或对象（读取侧两种形态都兼容） */
+  outline_json?: string | { id?: string | number } | null;
+  facts_stale?: boolean;
+  children?: OutlineNodeInput[];
+}
+
+/** 所有 SSE 事件的公共键（onSseEvent 统一消费层）。
+ *  索引签名对齐 api 层 SseEvent（Record<string, unknown>）：消费侧 for-await 一次性
+ *  断言到具体事件类型时需要双向可比（TS2352），运行期取值不受影响。 */
+interface SseBaseEvent {
+  [k: string]: unknown;
+  task_id?: string;
+  event?: string;
+  message?: string;
+  progress?: number;
+  failed_sections?: unknown[];
+}
+
+/** stats / ping / progress 事件内嵌运行统计的公共键（GenStats 字段子集） */
+interface SseStatsFields {
+  done?: number;
+  total?: number;
+  failed?: number;
+  words?: number;
+  avg_section_ms?: number | null;
+  concurrency?: number;
+  phase?: string;
+  phase_label?: string;
+  stepwise?: boolean;
+  nodes?: number;
+  running?: GenStats["running"];
+}
+
+/** 目录生成链事件（POST /sse/generate-outline/{id}）—— 后端 SSE 契约 */
+interface OutlineGenEvent extends SseBaseEvent, SseStatsFields {
+  outline?: OutlineNodeInput[];
+  failed_chapters?: string[];
+  failed_count?: number;
+  /** 生成后自动校验报告（summarizeOutlineQuality / summarizeOutlineReviewBasis 消费） */
+  review?: unknown;
+  elapsed_ms?: number;
+  eta_ms?: number | null;
+}
+
+/** 正文生成链事件（SSE 端点 generate-content/{id}，经 sseFetch 调用）—— 后端契约。
+ *  ⚠️ 本注释不得写出正文链 SSE 端点的完整 URL 字面量（含前导 /sse/ 与尾部斜杠）：
+ *  源码扫描护栏 contentTerminalParity20261011.test.ts 按该字面量定位正文 SSE 循环
+ *  的切片起点，注释里出现会把切片劫持到此处，导致 F 组事件覆盖比对失真。
+ *  section_id/title 为章节级事件（section_start/done/error/stage）的必备键。 */
+interface ContentGenEvent extends SseBaseEvent, SseStatsFields {
+  section_id: string;
+  title: string;
+  index?: number;
+  stage?: string;
+  stage_label?: string;
+  generation_standard?: "precise" | "fuzzy";
+  word_count?: number;
+  word_budget?: number;
+  word_status?: string;
+  continue_failed?: boolean;
+  quality_issues?: unknown;
+  chart_count?: number;
+  charts_dropped_count?: number;
+  charts_dropped?: ChartDropItem[];
+  content?: string;
+  reason?: string;
+  standard_report?: StandardReport | null;
+  elapsed_ms?: number;
+  eta_ms?: number | null;
+  summary?: { total?: number };
+  repaired?: number;
+  skipped?: number;
+  failed_count?: number;
+  consistency_summary?: { scan_id?: string; total?: number; repaired?: number; failed?: number } | null;
+  standard_summary?: unknown;
+  fact_autofix_summary?: unknown;
+  /** progress 事件随附的权威统计快照（pickStats 消费） */
+  stats?: GenStats;
+}
+
+/** 全局事实提取链事件（POST /sse/generate-facts/{id}）—— 后端 SSE 契约 */
+interface FactsGenEvent extends SseBaseEvent {
+  warnings?: unknown[];
+  elapsed_ms?: number;
+  segment_stats?: { failed?: number } & Record<string, unknown>;
+}
+
+// ============================================================
+// ✅ any 清理专项（2026-11-02）：页面 state / REST 响应契约（局部类型）。
+//    R-P1 拆分的三个 hook（useReviewAudit / useExportPresets / useDocumentWorkflow）
+//    已定稿各自 deps 的具体类型，下列 state 类型与其对齐；
+//    其余为页面独自消费的后端响应形状（字段按实际读取推导，未知字段 ? 修饰）。
+// ============================================================
+
+/** 方案记录（schemesApi.get / list 响应）—— 页面消费字段 —— 后端契约 */
+interface SchemeRecord {
+  project_id?: string;
+  name?: string;
+  type?: string;
+  status?: string;
+  word_budget?: number;
+  word_count?: number;
+  generation_standard?: string;
+}
+
+/** 选中章节（selectedSection / selectedSectionRef）：useReviewAudit 的 SelectedSectionLike
+ *  超集（TreeNode 的全可选投影）。hook 只读写 key/content/status；页面展示读其余字段。 */
+interface WorkbenchSection extends SelectedSectionLike {
+  title?: string;
+  level?: number;
+  word_count?: number;
+  word_budget?: number;
+  word_status?: string;
+  description?: string;
+  generation_standard?: string;
+  facts_stale?: boolean;
+  children?: TreeNode[];
+}
+
+/** 导入目录时检测到的多标段提示（对齐 OpenBidKit bidSectionDetector）—— 后端契约 */
+interface MultiSectionHint {
+  has_multiple?: boolean;
+  total_declared?: number;
+  detected_count?: number;
+}
+
+/** 事实提取分段统计（completed 事件 segment_stats；FactsSegmentFailuresAlert 消费） */
+interface FactsSegmentStats {
+  ok?: number;
+  failed: number;
+  total?: number;
+  failed_details?: Array<{ index?: number; heading?: string; reason?: string }>;
+}
+
+/** 跨段矛盾单条（completed 事件 cross_conflicts[]）—— 复用 types/facts 的后端契约
+ *  （applyFactsCompletedEvent 返回的就是该类型，页面侧不再维护第二份副本） */
+
+/** 导出预检返回的就绪度总检快照（preflight_summary = ExportPreflight + has_run 判别键） */
+type ExportPreflightSummary = ExportPreflight & { has_run?: boolean };
+
+/** 正文质量自检结果（GET /schemes/{id}/sections/quality）—— 后端契约 */
+interface QualityCheckResult {
+  summary?: {
+    checked?: number;
+    problem_sections?: number;
+    colloquial?: number;
+    abolished_standards?: number;
+  };
+  items?: Array<{
+    section_id?: string;
+    title?: string;
+    colloquial_hits?: string[];
+    abolished_standards?: string[];
+  }>;
+  standard_db_version?: string;
+  standard_db_checked_at?: string;
+}
+
+/** 结构化提取项人工校正弹窗的条目形状（baEditItem；label/output_type 展示用） */
+interface BaEditItemLike {
+  item_id?: string;
+  label?: string;
+  output_type?: string;
+  content?: string;
+  [k: string]: unknown;
+}
+
+/** 目录库条目（GET /outline-library 响应 items[]）—— 后端契约 */
+interface OutlineLibraryItem {
+  id?: string;
+  name?: string;
+  version?: string;
+  type?: string;
+  ref_count?: number;
+  engineering_type?: string;
+  profession?: string;
+  source?: string;
+  [k: string]: unknown;
+}
+
+/** 合规检查历史单条（GET /compliance/results 响应 items[]）—— 后端契约 */
+interface ComplianceHistoryItem {
+  id?: string;
+  created_at?: string;
+  rule_id?: string;
+  item?: string;
+  severity?: string;
+  suggestion?: string;
+}
+
+/** 后端任务列表项（GET /sse/tasks 响应 tasks[]；页面刷新接管消费字段）—— 后端契约 */
+interface TaskListItem {
+  id?: string;
+  task_type?: string;
+  status?: string;
+  progress?: number;
+}
+
+/** 导出预检问题（exportIssues state）：useExportPresets.ExportIssueItem 叠加
+ *  deriveExportGate 消费的 type/severity 门控字段（后端 issues 明细实际两者都带）。 */
+type ExportIssueGate = ExportIssueItem & { type?: string; severity?: string };
+
+// ============================================================
 // ✅ P0-6 计时器隔离：实时耗时只让本行组件每秒自更新（React.memo），
 //    消除生成期间整页 1Hz 重渲（旧实现：父组件 setNowTick 驱动全页重渲）
 // ============================================================
-const ElapsedTimer = memo(function ElapsedTimer({ startTime }: { startTime: number }) {
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const t = window.setInterval(() => setTick((v) => v + 1), 1000);
-    return () => window.clearInterval(t);
-  }, []);
-  return (
-    <Text type="secondary" style={{ fontSize: 11, marginLeft: 4, flexShrink: 0 }}>
-      {Math.max(0, Math.floor((Date.now() - startTime) / 1000))}s
-    </Text>
-  );
-});
 
-// ============================================================
-// 目录标题编号（对齐后端 heading_standard.py 的编号原则）
-//   L1: 第X章   L2: N   L3: N.M   L4: N.M.K   L5: （X）
-// 编号直接由节点 id（点分路径，如 "1" / "1.1" / "1.1.1"）推导，
-// 与后端 renumber_outline / HeadingNumberingGeneratorV2 保持一致，
-// 保证目录树与正文/导出编号始终同步。展示时套用、存储仍保留裸标题。
-// ============================================================
-const CN_NUMBERS: string[] = [
-  "", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
-  "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
-  "二十一", "二十二", "二十三", "二十四", "二十五", "二十六", "二十七", "二十八", "二十九", "三十",
-];
+import { FactsAdjustPanel } from "./schemeWorkbench/FactsAdjustPanel.tsx";
+import { FactsCategoryPanel } from "./schemeWorkbench/FactsCategoryPanel.tsx";
+import { FactsChapterCoveragePanel } from "./schemeWorkbench/FactsChapterCoveragePanel.tsx";
+import { FactsDiagnosticsPanel } from "./schemeWorkbench/FactsDiagnosticsPanel.tsx";
+import { FactsExtractProgressCard } from "./schemeWorkbench/FactsExtractProgressCard.tsx";
+import { FactsSegmentFailuresAlert } from "./schemeWorkbench/FactsSegmentFailuresAlert.tsx";
+import { GenerationProgressCard } from "./schemeWorkbench/GenerationProgressCard.tsx";
+import { OutlineGateList } from "./schemeWorkbench/OutlineGateList.tsx";
+import { OutlineNodeBudgetPanel } from "./schemeWorkbench/OutlineNodeBudgetPanel.tsx";
+import { OutlineTreeActions } from "./schemeWorkbench/OutlineTreeActions.tsx";
+import { SchemeTreePanel } from "./schemeWorkbench/SchemeTreePanel.tsx";
+import { SectionLogList } from "./schemeWorkbench/SectionLogList.tsx";
+import { TaskControlButtons } from "./schemeWorkbench/TaskControlButtons.tsx";
+import { EXPORT_ISSUE_LABEL, EXPORT_STAGE_LABEL, EXPORT_STAGE_ORDER, TASK_TYPE_LABEL, deepMergeExportConfig, describeExportIssue, statusColor, statusText } from "./schemeWorkbench/exportShared.ts";
+import { FACTS_PAGE_SIZE, FACT_CATEGORY_OPTIONS, FACT_CHAPTER_TITLES, FACT_VALUE_KIND_OPTIONS, FALLBACK_FACT_ATTR_TITLES, FALLBACK_SOURCE_KIND_TITLES, applyFactsCompletedEvent, applyFactsFilter, buildBatchResolveCopy, buildBatchResolveResultCopy, buildFactsCategoryEntries, buildFactsPagination, buildFactsSummary, factAttrTitle, factChapterTitle, factSourceKindTitle, factValueKindLabel, filterFactsGroupsByCategory, hasFactsFilterMatch, isCurrentSchemeRequest, mergeFactsDiagnosticsSettled, resolveSelectedFactCategory } from "./schemeWorkbench/factsShared.ts";
+import { type FactsLogItem, type OutlineLogItem } from "./schemeWorkbench/logTypes.ts";
+import { formatOutlineTitle } from "./schemeWorkbench/outlineNumbering.ts";
+import { buildPartialOutlineHint, collectAllKeys, countGeneratedLeaves, countOutline, findFirstContentDescendant, findSectionById, flattenTreeKeys, hasAnyContent, hasDeepOutlineNodes, hasUnsavedLocalNodes, isUnsavedLocalKey, moveSiblingInTree, outlineToTreeNode, outlineTreeDepth, renumberOutline, renumberTreeLocally, scrollToNodeInContainer, summarizeUploadOutlineResult, treeFingerprint, treeNodesWithContent, treeToOutline, updateNodeFields, type TreeNode } from "./schemeWorkbench/outlineTreeModel.ts";
+import { CR_ITEM_STATUS, CR_REPAIR_STATUS, CR_STATUS_LABEL, CR_TYPE_LABEL, DEFAULT_COMPLIANCE_CHECKLIST, summarizeOutlineQuality } from "./schemeWorkbench/reviewShared.ts";
+import { pickStats, statsEqual } from "./schemeWorkbench/statsFormat.ts";
+import { findRecentOutlineTaskImpl, pollTaskUntilTerminalImpl, reattachTaskImpl, type TaskTerminalInfo } from "./schemeWorkbench/taskPolling.ts";
+import { useExportPresets } from "./schemeWorkbench/useExportPresets.tsx";
+import { useDocumentWorkflow } from "./schemeWorkbench/useDocumentWorkflow.tsx";
+import { useBidAnalysis } from "./schemeWorkbench/useBidAnalysis.tsx";
+import { useReviewAudit } from "./schemeWorkbench/useReviewAudit.tsx";
+import { useOutlineTreeEdit } from "./schemeWorkbench/useOutlineTreeEdit.tsx";
+// ✅ any 清理专项（2026-11-02）：R-P1 拆分 hook 已定稿的域契约 —— 页面 state
+//    类型与 hook deps 对齐（setter 传入前受 hook props 类型约束）
+import type {
+  ComplianceResultItem, CrConflictItem, CrRepairHistoryItem, CrRepairResult,
+  CrSummary, ExpertReviewResult, SelectedSectionLike,
+} from "./schemeWorkbench/useReviewAudit";
+import type {
+  ExportCacheStatus, ExportIssueItem, ExportPresetItem, ExportPreflight,
+  ExportRerunPlan, ExportStats,
+} from "./schemeWorkbench/useExportPresets";
+import type { DocPreviewData } from "./schemeWorkbench/useDocumentWorkflow";
+import type { PlaceholderReport } from "../utils/placeholderReport";
+
+export { ElapsedTimer } from "./schemeWorkbench/ElapsedTimer.tsx";
+export { FactsAdjustPanel } from "./schemeWorkbench/FactsAdjustPanel.tsx";
+export { FactsCategoryPanel } from "./schemeWorkbench/FactsCategoryPanel.tsx";
+export { FactsChapterCoveragePanel } from "./schemeWorkbench/FactsChapterCoveragePanel.tsx";
+export { FactsDiagnosticsPanel } from "./schemeWorkbench/FactsDiagnosticsPanel.tsx";
+export { FactsExtractProgressCard } from "./schemeWorkbench/FactsExtractProgressCard.tsx";
+export { FactsSegmentFailuresAlert } from "./schemeWorkbench/FactsSegmentFailuresAlert.tsx";
+export { GenerationProgressCard, OUTLINE_LOG_RENDER_MAX, type GenerationProgressProps } from "./schemeWorkbench/GenerationProgressCard.tsx";
+export { OutlineGateList } from "./schemeWorkbench/OutlineGateList.tsx";
+export { OutlineNodeBudgetPanel, WORD_BUDGET_MAX, WORD_BUDGET_MIN } from "./schemeWorkbench/OutlineNodeBudgetPanel.tsx";
+export { OutlineTreeActions } from "./schemeWorkbench/OutlineTreeActions.tsx";
+export { SchemeTreePanel, type SchemeTreePanelProps } from "./schemeWorkbench/SchemeTreePanel.tsx";
+export { SECTION_LOG_BG, SECTION_LOG_ICON, SECTION_LOG_RENDER_MAX, SectionLogList } from "./schemeWorkbench/SectionLogList.tsx";
+export { TaskControlButtons } from "./schemeWorkbench/TaskControlButtons.tsx";
+export { EXPORT_ISSUE_LABEL, EXPORT_STAGE_LABEL, EXPORT_STAGE_ORDER, TASK_TYPE_LABEL, deepMergeExportConfig, describeExportIssue, statusColor, statusText } from "./schemeWorkbench/exportShared.ts";
+export { FACTS_ADJUST_IGNORE_REASONS, FACTS_ADJUST_IGNORE_REASON_LABELS, FACTS_ADJUST_PREVIEW_LIMIT, FACTS_PAGE_SIZE, FACT_CATEGORY_OPTIONS, FACT_CHAPTER_TITLES, FACT_VALUE_KIND_OPTIONS, FALLBACK_FACT_ATTR_TITLES, FALLBACK_SOURCE_KIND_TITLES, applyFactsCompletedEvent, applyFactsFilter, buildBatchResolveCopy, buildBatchResolveResultCopy, buildFactChapterStats, buildFactsCategoryEntries, buildFactsPagination, buildFactsSummary, factAttrTitle, factChapterTitle, factSourceKindTitle, factValueKindLabel, factsAdjustIgnoreText, factsAdjustIgnoredCount, filterFactsGroupsByCategory, formatFactsAdjustOperation, hasFactsFilterMatch, isCurrentSchemeRequest, mergeFactsDiagnosticsSettled, normalizeFactsAdjustPlan, resolveSelectedFactCategory, type FactChapterStatRow, type FactsAdjustIgnoredItem, type FactsAdjustOperation, type FactsAdjustPlanShape, type FactsCategoryEntry } from "./schemeWorkbench/factsShared.ts";
+export { type FactsLogItem, type OutlineLogItem } from "./schemeWorkbench/logTypes.ts";
+export { CN_NUMBERS, LEADING_NUMBER_CJK, LEADING_NUMBER_RE, LEADING_NUMBER_SEP, PURE_NUMBER_TITLE_RE, YEAR_PREFIX_RE, formatOutlineTitle, stripOutlineNumbering } from "./schemeWorkbench/outlineNumbering.ts";
+export { STAGE_COLOR, UNSAVED_KEY_PREFIXES, _PURE_NUMERIC_ID_RE, buildPartialOutlineHint, collectAllKeys, countGeneratedLeaves, countOutline, describeReorganizeReport, findFirstContentDescendant, findSectionById, flattenTreeKeys, hasAnyContent, hasDeepOutlineNodes, hasUnsavedLocalNodes, isUnsavedLocalKey, moveSiblingInTree, outlineToTreeNode, outlineTreeDepth, renumberOutline, renumberTreeLocally, scrollToNodeInContainer, summarizeUploadOutlineResult, treeFingerprint, treeNodesWithContent, treeToOutline, updateNodeFields, type PartialOutlineHint, type TreeNode, type UploadOutlineSummary } from "./schemeWorkbench/outlineTreeModel.ts";
+export { CR_ITEM_STATUS, CR_REPAIR_STATUS, CR_STATUS_LABEL, CR_TYPE_LABEL, DEFAULT_COMPLIANCE_CHECKLIST, summarizeOutlineQuality } from "./schemeWorkbench/reviewShared.ts";
+export { fmtDuration, pickStats, statsEqual } from "./schemeWorkbench/statsFormat.ts";
+export { findRecentOutlineTaskImpl, pollTaskUntilTerminalImpl, reattachTaskImpl, type TaskTerminalInfo } from "./schemeWorkbench/taskPolling.ts";
 
-// ✅ 与后端 strip_outline_numbering 同源：剥离标题开头已嵌入的编号前缀，
-// 修复存量数据 "第一章 第一章 工程概况" / "2.1 2.1 相关法律法规" 双重编号
-//
-// ✅ BUG 修复（2026-09-27 · 标题损坏，与后端 numbering.py 同步修改）：
-// 旧实现的点分编号分支写作 `[0-9]+(?:\.[0-9]+){0,7}[分隔符]+`，路径后**没有**
-// 分隔符时 JS 正则同样会回退成「更短前缀 + 把点当分隔符」，把标题剥成残句：
-//   "1.2.3（1）细部构造" → "3（1）细部构造"
-//   "2.4.1钢筋工程"      → "1钢筋工程"（残留数字 + 叠加位置编号后双重编号）
-// 现改为「前瞻捕获最长路径 + 反向引用整条吃满」（正则没有原子组语法，但前瞻
-// 是原子的、反向引用不可回退），路径后要求紧跟分隔符或 CJK/全角字符。
-// 分隔符与 CJK 边界字符类必须与后端 _SEP_CLASS / _CJK_BOUNDARY 逐字符一致。
-//
-// ✅ BUG 修复（2026-10-03 · 数量型标题丢首字，与后端 numbering.py 同步修改）：
-// 点分编号分支的捕获原用 `[0-9]+(?:\.[0-9]+)*`（星号），于是「单段数字直接接
-// 中文」（无分隔符）也被当编号剥离："2层作业平台" → "层作业平台"、"10个人" →
-// "个人"。此 CJK 无分隔符剥离本就只为多段点分路径（"2.4.1钢筋工程"）设计，
-// 现限定为至少一个点段 `(?:\.[0-9]+)+`，单段数字剥离仍由下方「[0-9]+分隔符+
-// (?![0-9])」分支负责。必须与后端 _STRIP_NUMBER_RE 逐字符一致（parity 测试锁定）。
-const LEADING_NUMBER_SEP = "[、.．，,：: \\-—]";
-const LEADING_NUMBER_CJK = "[\\u3000-\\u303f\\u4e00-\\u9fff\\uff00-\\uffef]";
-const LEADING_NUMBER_RE = new RegExp(
-  "^\\s*(?:" +
-    "第\\s*[一二三四五六七八九十百千零0-9]+\\s*[章节]" +   // 第X章 / 第 1 章
-    "|[（(][一二三四五六七八九十0-9]+[)）]" +               // （三） / (3)
-    "|[0-9]+[)）]" +                                        // 1） / 2）
-    "|(?=([0-9]+(?:\\.[0-9]+)+))\\1(?:" +
-      LEADING_NUMBER_SEP + "+|(?=" + LEADING_NUMBER_CJK + "))" +
-    "|[0-9]+" + LEADING_NUMBER_SEP + "+(?![0-9])" +          // 单段编号（"1 施工准备"）
-    "|[一二三四五六七八九十百千零]+" + LEADING_NUMBER_SEP + "+" +
-  ")" + LEADING_NUMBER_SEP + "*"
-);
-
-// 整条标题本身就是一个编号（"1" / "1.1" / "1.2.3"）时必须原样返回，
-// 不能走剥离流程 —— 否则 "." 同时属于分隔符字符类，会只剥半截
-//（"1.1" → "1"、"1.2.3" → "3"），与后端 numbering.strip_outline_numbering
-// 的 _PURE_NUMBER_TITLE_RE 短路契约不一致：同一节点前后端展示会不同，
-// 叠加位置编号后即产生编号漂移 / 双重编号。
-const PURE_NUMBER_TITLE_RE = /^[0-9]+(?:[.．][0-9]+)*$/;
-
-// ✅ 年份不是编号（与后端 _YEAR_PREFIX_RE 同口径）：
-// "2023 年度安全生产计划" / "2024年施工计划" 原样保留，避免标题丢年份。
-const YEAR_PREFIX_RE = /^\s*[0-9]{4}\s*年/;
-
-export function stripOutlineNumbering(title: string): string {
-  if (!title) return title;
-  const trimmed = title.trim();
-  if (PURE_NUMBER_TITLE_RE.test(trimmed)) return trimmed;
-  if (YEAR_PREFIX_RE.test(title)) return trimmed;
-  const stripped = title.replace(LEADING_NUMBER_RE, "").trim();
-  return stripped || trimmed;
-}
-
-export function formatOutlineTitle(
-  id: string | undefined,
-  level: number,
-  title: string,
-): string {
-  if (!title || !title.trim()) return title || "";
-  const bareTitle = stripOutlineNumbering(title);
-  // ✅ R87 FIX-1（P1）：合法性判据收敛到 `utils/outlineNumbering`（与后端
-  //    `numbering.stored_id_parts` 同口径）。旧实现逐段 parseInt 挑数字，会把
-  //    `abc1.2` → [2]、`0.3` → [3]、`1.0.2` → [1,2] **抢救**成看似合法的编号，
-  //    而后端对同一输入 fail-closed ⇒ 目录树显示的章号与导出成稿对不上。
-  //    非法编号一律**退回裸标题**（不编造编号）。
-  const parts = storedIdParts(id);
-  if (!parts.length) return bareTitle;
-
-  let number = "";
-  let sep = " ";
-  if (level === 1) {
-    number = `第${CN_NUMBERS[parts[0]] || parts[0]}章`;
-  } else if (level === 2) {
-    // L2: "1"（tail 不含章号，直接第一个 part）
-    number = String(parts[parts.length - 1]);
-  } else if (level === 3) {
-    // L3: "1.1"（tail 最后两个 part）
-    number = parts.slice(-2).join(".");
-  } else if (level === 4) {
-    // L4: "1.1.1"（tail 最后三个 part）
-    number = parts.slice(-3).join(".");
-  } else if (level === 5) {
-    // L5: "1.1.1.1"（十进制延续，tail 最后四个）+ 、分隔
-    number = parts.slice(-4).join(".");
-    sep = "、";
-  } else if (level === 6) {
-    // L6: "1）"（括号数字，只用最后一个 part）+ 、分隔
-    number = `${parts[parts.length - 1]}）`;
-    sep = "、";
-  } else if (level === 7) {
-    // L7: "a" / "b"（小写字母，只用最后一个 part）+ 、分隔
-    const n = parts[parts.length - 1] || 1;
-    const alphaLetters = "abcdefghijklmnopqrstuvwxyz";
-    const idx = Math.max(0, Math.min(n - 1, alphaLetters.length - 1));
-    number = alphaLetters[idx];
-    sep = "、";
-  } else {
-    return bareTitle;
-  }
-  return `${number}${sep}${bareTitle}`;
-}
-
-export type TreeNode = {
-  key: string;
-  title: string;
-  level: number;
-  status: string;
-  word_count: number;
-  word_budget: number;
-  word_status?: string;
-  content?: string;
-  description?: string;
-  /** 后端权威编号（点分路径，如 "1" / "1.1" / "1.1.1"） */
-  outlineId?: string;
-  /**
-   * ✅ BUG 修复（2026-09-26）：后端 AI 调整目录（/adjust-outline）回传的真实
-   * DB 主键。后端 renumber 会把节点 id 覆写成展示编号（"1"/"1.1"），
-   * 真实主键只存在于该字段；treeToOutline 需原样透传，否则保存时
-   * is_new 全为 True → 整表重建、已生成正文全部丢失。
-   */
-  __original_id?: string;
-  /** F-CONTENT-STANDARD(2026-09-26)：章节级生成标准覆盖（""=沿用方案级） */
-  generation_standard?: string;
-  /** F-CONTENT-STANDARD(2026-09-26)：最近一次生成实际使用的标准（只读，供复查） */
-  last_generation_standard?: string;
-  /**
-   * ✅ 2026-09-29（事实变更失效标记）：本章节的正文写于「全局事实变更」之前，
-   * 即正文里引用的参数可能已过期。后端按方案级 `schemes.facts_updated_at`
-   * 与章节 `updated_at` 读侧派生（非布尔列），重生成/手工编辑后自动消失。
-   * 仅提示，不阻断任何操作 —— 由用户显式决定要不要重新生成。
-   */
-  facts_stale?: boolean;
-  children?: TreeNode[];
-};
-
-// SectionLogItem / GenStats 类型已抽离至 utils/contentEvents.ts（与纯函数同源，
-// 供组件级测试独立引用），页面统一从该处导入，避免类型定义双份漂移。
-
-/** 阶段徽标配色（与后端 _STAGE_MODEL 的阶段标识对应） */
-const STAGE_COLOR: Record<string, string> = {
-  context: "default",
-  draft: "processing",
-  continue: "warning",
-  persist: "cyan",
-};
-
-/** ✅ 进度增强：毫秒 → 人类可读时长（与后端 _fmt_duration 同口径） */
-function fmtDuration(ms?: number | null): string {
-  if (!ms || ms <= 0) return "0秒";
-  const sec = Math.floor(ms / 1000);
-  if (sec < 60) return `${sec}秒`;
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  if (m < 60) return s ? `${m}分${s}秒` : `${m}分钟`;
-  const h = Math.floor(m / 60);
-  return m % 60 ? `${h}小时${m % 60}分` : `${h}小时`;
-}
-
-/**
- * ✅ 进度增强：从 SSE 事件载荷中提取运行统计。
- * 三种来源共用同一口径：stats 事件、心跳 ping 事件、progress 事件内嵌的 stats。
- */
-function pickStats(src: any): GenStats {
-  return {
-    elapsed_ms: src?.elapsed_ms,
-    eta_ms: src?.eta_ms,
-    done: src?.done,
-    total: src?.total,
-    failed: src?.failed,
-    words: src?.words,
-    avg_section_ms: src?.avg_section_ms,
-    concurrency: src?.concurrency,
-    phase: src?.phase,
-    phase_label: src?.phase_label,
-    progress: src?.progress,
-    stepwise: src?.stepwise,
-    nodes: src?.nodes,
-    running: src?.running,
-  };
-}
-
-/**
- * ✅ 性能优化：判断两个 GenStats 载荷是否语义相等（浅比较所有字段）。
- * 背景：后端 stats/ping 事件每 100–1000ms 推送一次，若载荷与当前状态相同
- *      仍调用 setGenStats 会触发整页（含 GenerationProgressCard、树、Tab）
- *      一次无意义重渲。此函数配合 setState(prev => equalStats ? prev : next)
- *      跳过值不变时的 setState，消除高频 ping 带来的抖动。
- */
-export function statsEqual(a: GenStats | undefined, b: GenStats): boolean {
-  if (!a) return false;
-  return (
-    a.elapsed_ms === b.elapsed_ms &&
-    a.eta_ms === b.eta_ms &&
-    a.done === b.done &&
-    a.total === b.total &&
-    a.failed === b.failed &&
-    a.words === b.words &&
-    a.avg_section_ms === b.avg_section_ms &&
-    a.concurrency === b.concurrency &&
-    a.phase === b.phase &&
-    a.phase_label === b.phase_label &&
-    a.progress === b.progress &&
-    a.stepwise === b.stepwise &&
-    a.nodes === b.nodes &&
-    a.running === b.running
-  );
-}
-
-// ✅ P0-5 组件拆分：目录树辅助纯函数（原组件内定义，无闭包依赖，移模块级供 SchemeTreePanel 复用）
-export function findFirstContentDescendant(node: TreeNode): TreeNode | null {
-  // ✅ BUG修复：同时检查 word_count>0，避免有字数但content为空的数据不一致节点被跳过
-  if (node.content || (node.word_count || 0) > 0) return node;
-  for (const child of node.children || []) {
-    const found = findFirstContentDescendant(child);
-    if (found) return found;
-  }
-  return null;
-}
-
-export function collectAllKeys(nodes: TreeNode[]): string[] {
-  const keys: string[] = [];
-  function walk(n: TreeNode) {
-    keys.push(n.key);
-    n.children?.forEach(walk);
-  }
-  nodes.forEach(walk);
-  return keys;
-}
-
-/**
- * ✅ 性能优化：目录树的轻量指纹，用于「内容未变则跳过 setState」的相等性守卫。
- * 背景：正文生成期间每 3s 轮询一次轻量接口刷新目录树，即使数据完全没变也会产生
- * 全新树对象 → setTree 拿到新引用 → treeData / outlineEditTreeData /
- * countGeneratedLeaves / collectAllKeys 全部重算 + 整页重渲（每 3s 一次无效渲染）。
- * 对齐既有 statsEqual 的守卫思路：指纹相同就返回旧引用，React 直接跳过重渲。
- *
- * 只取影响渲染与用户可感知的字段（遍历顺序 / 字数 / 状态），刻意不含 content
- * 大字段（轻量轮询本就不返回它）；用短字符串拼接而非 JSON.stringify，
- * 避免每 3s 序列化整棵树。
- */
-export function treeFingerprint(nodes: TreeNode[]): string {
-  let out = "";
-  function walk(ns: TreeNode[]) {
-    for (const n of ns) {
-      // ✅ 2026-09-29：facts_stale 参与指纹 —— 它是用户可感知的状态（目录树上
-      // 的「事实已变更」徽标）。若不含它，3s 轻量轮询会因指纹相同而保留旧树，
-      // 事实刚变更后的徽标要等到下一次完整 load() 才出现（表现为「标了却没显示」）。
-      out += `${n.key}:${n.word_count}:${n.status}:${n.facts_stale ? 1 : 0};`;
-      if (n.children?.length) walk(n.children);
-    }
-  }
-  walk(nodes || []);
-  return out;
-}
-
-/**
- * ✅ 编辑增强：把指定 key 的树节点滚动到可视区域中央（平滑滚动）。
- * 兼容"落库后 load 重建 DOM"的异步场景——若首次查询未命中节点元素，
- * 通过 requestAnimationFrame 重试若干次，直到节点出现在树中再滚动。
- * 仅做视图定位，不改动任何状态。
- */
-function scrollToNodeInContainer(container: HTMLElement | null, key: React.Key, tries = 10) {
-  if (!container || tries <= 0) return;
-  const sel = `[data-key="${CSS.escape(String(key))}"]`;
-  const el = (container.querySelector(`.ant-tree-node-content-wrapper${sel}`) ||
-    container.querySelector(sel)) as HTMLElement | null;
-  if (el) {
-    el.scrollIntoView({ block: "center", behavior: "smooth" });
-    return;
-  }
-  requestAnimationFrame(() => scrollToNodeInContainer(container, key, tries - 1));
-}
-
-/** 目录树中是否已有任意章节正文（用于"重新生成目录"的覆盖风险确认） */
-export function hasAnyContent(nodes: TreeNode[]): boolean {
-  for (const n of nodes) {
-    if (n.content || (n.word_count || 0) > 0) return true;
-    if (n.children?.length && hasAnyContent(n.children)) return true;
-  }
-  return false;
-}
-
-/** 目录树中已有正文的叶子章节数（用于上传替换目录时提示影响范围） */
-export function treeNodesWithContent(nodes: TreeNode[]): number {
-  let count = 0;
-  const walk = (ns: TreeNode[]) => {
-    for (const n of ns) {
-      if (n.content || (n.word_count || 0) > 0) count++;
-      if (n.children?.length) walk(n.children);
-    }
-  };
-  walk(nodes || []);
-  return count;
-}
-
-/**
- * ✅ 计算目录树的最大层级（迭代实现 + 节点数保护）。
- * 用于拖拽/新增时判断是否会产出超过三级上限的节点——旧实现对此无校验，
- * 深层节点只能在点「保存目录」时被后端静默裁剪，用户看到节点"消失"。
- */
-export function outlineTreeDepth(nodes: TreeNode[]): number {
-  let max = 0;
-  let guard = 0;
-  const stack: { node: TreeNode; level: number }[] = (nodes || []).map((n) => ({ node: n, level: 1 }));
-  while (stack.length && guard++ < 50000) {
-    const { node, level } = stack.pop()!;
-    if (level > max) max = level;
-    for (const c of node.children || []) stack.push({ node: c, level: level + 1 });
-  }
-  return max;
-}
-
-/** 就地更新树中指定节点的字段（压缩完成后刷新字数/正文用） */
-export function updateNodeFields(
-  nodes: TreeNode[],
-  key: string,
-  fields: Partial<TreeNode>
-): TreeNode[] {
-  return nodes.map((n) => {
-    if (n.key === key) return { ...n, ...fields };
-    if (n.children?.length) {
-      return { ...n, children: updateNodeFields(n.children, key, fields) };
-    }
-    return n;
-  });
-}
-
-/** 统计目录树节点总数（含所有层级；纯函数，供导入识别与导出复用） */
-export function countOutline(outline: any[], depth = 0): number {
-  if (depth > 50 || !outline?.length) return 0;
-  return outline.reduce(
-    (acc, n) => acc + 1 + countOutline(n?.children || [], depth + 1), 0);
-}
-
-/** 把后端「整理为标准结构」报告折算成人话（匹配/补全/补充章节统计） */
-export function describeReorganizeReport(report: any): string {
-  if (!report || typeof report !== "object") return "";
-  const matched = Number(report.matched_chapters) || 0;
-  const standard = Number(report.standard_chapters) || 0;
-  const skeleton = Number(report.kept_standard_skeleton) || 0;
-  const extras = Number(report.appended_extras) || 0;
-  const tpl = report.template ? `（模板 ${report.template}）` : "";
-  const bits = [`匹配 ${matched}/${standard} 章`];
-  if (skeleton > 0) bits.push(`补全空骨架 ${skeleton} 章`);
-  if (extras > 0) bits.push(`${extras} 章归入「补充章节」`);
-  return `已按标准章节骨架整理${tpl}：${bits.join("，")}`;
-}
-
-export type UploadOutlineSummary = {
-  /** 是否得到可应用的目录（outline 非空）——空结果时绝不替换用户当前目录树 */
-  ok: boolean;
-  level: "success" | "warning";
-  /** 主提示文案（成功=识别完成统计，失败=后端给出的原因） */
-  message: string;
-  /** 附加告警（内容不完整/截断/归位统计），逐条如实告知用户 */
-  notices: string[];
-  outline: any[];
-  nodeCount: number;
-  reorganized: boolean;
-};
-
-/**
- * 「导入目录（智能识别）」结果诊断（纯函数，可单测）。
- *
- * ✅ 补齐数据传递链路（2026-09-20）：后端 parse_outline 早已回传
- *    empty_text / warning / parse_warnings / parse_truncated /
- *    reorganized / reorganize_report，但旧前端只读 outline / file_name，
- *    导致：① 扫描件无 OCR 返回空目录时仍误报「识别完成：共 0 个章节」
- *    并清空用户当前目录树；② 「整理为标准结构」归位统计对用户不可见。
- *    这里把「响应 → 用户可读提示」的折算收口成纯函数，供交互链路复用。
- */
-export function summarizeUploadOutlineResult(data: any): UploadOutlineSummary {
-  const d = data || {};
-  const outline: any[] = Array.isArray(d.outline) ? d.outline : [];
-  const nodeCount = countOutline(outline);
-  const reorganized = Boolean(d.reorganized);
-  const notices: string[] = [];
-
-  if (Array.isArray(d.parse_warnings)) {
-    for (const w of d.parse_warnings) {
-      if (typeof w === "string" && w.trim()) notices.push(w.trim());
-      else if (w && typeof w === "object" && w.message) notices.push(String(w.message));
-    }
-  }
-  if (d.reorganize_report) {
-    const desc = describeReorganizeReport(d.reorganize_report);
-    if (desc) notices.push(desc);
-  }
-
-  // 空结果：以「不替换目录树」为前提，如实回传后端给出的失败原因
-  if (nodeCount === 0) {
-    const warn = typeof d.warning === "string" && d.warning.trim()
-      ? d.warning.trim()
-      : "未识别到目录结构，请检查文件是否为扫描件（需 OCR）或格式是否受支持";
-    return { ok: false, level: "warning", message: warn, notices, outline: [], nodeCount: 0, reorganized };
-  }
-
-  // 非空但原文被截断（raw_text_truncated / parse_truncated）：仍可用，补充告警
-  if (typeof d.warning === "string" && d.warning.trim()) notices.unshift(d.warning.trim());
-  const name = d.file_name || "文件";
-  const suffix = reorganized ? "，已按标准章节骨架整理" : "";
-  return {
-    ok: true,
-    level: "success",
-    message: `识别完成：${name}，共 ${nodeCount} 个章节，可在下方调整后保存${suffix}`,
-    notices,
-    outline,
-    nodeCount,
-    reorganized,
-  };
-}
-
-// ============================================================
-// 全局事实 Tab · 模块级可测单元（2026-09-21 拆出，行为由 factsTab.test 钉住）
-// ============================================================
-/** 筛选命中判定：当前 filter 在 groups 里是否存在可展示条目（悬空回退唯一事实源） */
-export function hasFactsFilterMatch(groups: any[], filter: string): boolean {
-  if (filter === "all") return true;
-  return (groups || []).some((g: any) =>
-    (g?.items || []).some((it: any) =>
-      filter === "simulated" ? it.is_simulated
-        : filter === "conflict" ? it.has_conflict
-          : !it.is_resolved));
-}
-
-/** 批量确认文案：修复旧文案把「模拟值 ∩ 未确认」交集重复计数（unresolved+simulated） */
-/** 异步响应是否仍属于当前方案。AbortSignal + 路由 ID 双重守卫，防跨方案污染。 */
-export function isCurrentSchemeRequest(
-  requestedSchemeId: string,
-  currentSchemeId: string,
-  signal?: AbortSignal,
-): boolean {
-  return !!requestedSchemeId && requestedSchemeId === currentSchemeId && !signal?.aborted;
-}
-
-/** 批量确认结果文案：安全跳过时不得误报“事实注入已就绪”。 */
-export function buildBatchResolveResultCopy(result: any | null | undefined): {
-  tone: "success" | "warning";
-  text: string;
-  /** ✅ 2026-10-06：被安全闸门拦下的事实**名称**列表。
-   *  后端 `batch-resolve` 一直逐条回传 `skipped_safety[]`，但前端只读计数
-   *  `skipped_safety_count` —— 用户看到「5 项未放行」却不知道是哪 5 项，
-   *  只能自己逐条翻找。返回名称列表供结果提示直接列出（前 6 条 + 省略号）。 */
-  blockedNames: string[];
-} {
-  const changed = Number(result?.changed) || 0;
-  const skipped = Number(result?.skipped) || 0;
-  const safety = Number(result?.skipped_safety_count) || 0;
-  const blockedNames: string[] = Array.isArray(result?.skipped_safety)
-    ? result.skipped_safety
-      .map((it: any) => String(it?.name || it?.title || "").trim())
-      .filter(Boolean)
-    : [];
-  if (safety > 0) {
-    const shown = blockedNames.slice(0, 6);
-    const detail = shown.length
-      ? `（${shown.join("、")}${blockedNames.length > shown.length
-        ? ` 等 ${blockedNames.length} 条` : ""}）`
-      : "";
-    return {
-      tone: "warning",
-      text: `已确认 ${changed} 项；${safety} 项模拟值或安全关键事实未放行${detail}，请逐条核对裁决`,
-      blockedNames,
-    };
-  }
-  return {
-    tone: "success",
-    text: `已确认 ${changed} 项${skipped ? `，${skipped} 项原本已确认` : ""}，可注入事实已就绪`,
-    blockedNames: [],
-  };
-}
-
-/** 九大章节完整性与危大诊断只读面板（组件级测试锁定空态/覆盖率/缺参）。 */
-export function FactsDiagnosticsPanel({ loading, chapterReport, dangerReport, onRefresh }: {
-  loading: boolean;
-  chapterReport: any | null;
-  dangerReport: any | null;
-  onRefresh: () => void;
-}) {
-  const chapters = chapterReport?.chapters || [];
-  const classification = dangerReport?.classification || {};
-  const missing = dangerReport?.missing_params || [];
-  return (
-    <Card
-      size="small"
-      title="九大章节完整性 · 危大诊断"
-      extra={<Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={onRefresh}>刷新诊断</Button>}
-      style={{ marginBottom: 12 }}
-    >
-      {!chapterReport && !dangerReport ? (
-        <Text type="secondary">暂无诊断数据</Text>
-      ) : (
-        <Space direction="vertical" size={8} style={{ width: "100%" }}>
-          <Space wrap>
-            <Tag color={classification.is_hazardous ? "red" : "default"}>
-              {classification.is_hazardous ? "危大工程" : "未识别为危大工程"}
-            </Tag>
-            <Tag color={classification.is_oversize ? "volcano" : "default"}>
-              {classification.is_oversize ? "超过一定规模" : "未超过一定规模"}
-            </Tag>
-            {missing.map((p: string) => <Tag key={p} color="orange">缺参：{p}</Tag>)}
-          </Space>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 6 }}>
-            {chapters.map((ch: any) => (
-              <Tooltip key={ch.key} title={`缺失字段：${(ch.missing_fields || []).join("、") || "无"}`}>
-                <div>
-                  <Text style={{ fontSize: 12 }}>{ch.order}. {ch.title}</Text>
-                  <Progress percent={Math.round((ch.coverage || 0) * 100)} size="small" />
-                </div>
-              </Tooltip>
-            ))}
-          </div>
-        </Space>
-      )}
-    </Card>
-  );
-}
-
-export function buildBatchResolveCopy(stats: {
-  unresolved?: number; simulated?: number; conflicts?: number;
-} | null | undefined): {
-  headline: string; confirmType: "warning" | "confirm";
-  simulatedNote: string; conflictNote: string;
-} {
-  const unresolved = Number(stats?.unresolved) || 0;
-  const simulated = Number(stats?.simulated) || 0;
-  const conflicts = Number(stats?.conflicts) || 0;
-  return {
-    headline: `当前方案共有 ${unresolved} 项事实未确认，是否全部确认为“已核实”？`,
-    confirmType: simulated > 0 ? "warning" : "confirm",
-    simulatedNote: simulated > 0
-      ? `⚠️ 其中含模拟值 ${simulated} 项（AI 推断的占位数据），确认后会被直接注入正文生成，请先核对真实值。`
-      : "",
-    conflictNote: conflicts > 0
-      ? `另有 ${conflicts} 项存在矛盾（多源取值不一致），批量确认不处理矛盾，建议逐条裁决。`
-      : "",
-  };
-}
-
-/** 事实提取进度卡：进度 + 分段级实时日志（最新在上） */
-export function FactsExtractProgressCard({ progress, progressMsg, logs, controls }: {
-  progress: number;
-  progressMsg: string;
-  logs: Array<{ progress: number; message: string; time?: number; [k: string]: unknown }>;
-  /** ✅ R106 FIX-2：可选控制区（暂停/恢复/停止），由页面注入 TaskControlButtons */
-  controls?: React.ReactNode;
-}) {
-  const list = (logs || []).slice().reverse();
-  return (
-    <Card size="small" style={{ marginBottom: 12 }}>
-      <Space direction="vertical" style={{ width: "100%" }} size={6}>
-        <Text strong>📚 正在提取全局事实</Text>
-        <Text type="secondary" style={{ fontSize: 12 }}>{progressMsg}</Text>
-        <Progress percent={Math.round((progress || 0) * 100)} size="small" />
-        {controls}
-        <div style={{ maxHeight: 180, overflow: "auto" }}>
-          {list.length === 0 ? (
-            <Text type="secondary" style={{ fontSize: 12 }}>正在连接 AI，准备提取...</Text>
-          ) : (
-            list.map((l, i) => (
-              <div key={i} style={{ fontSize: 12, lineHeight: "20px" }}>
-                <Text type="secondary">{Math.round((l.progress || 0) * 100)}%</Text>{" "}
-                <span>{l.message}</span>
-              </div>
-            ))
-          )}
-        </div>
-        {list.length > 0 && (
-          <Text type="secondary" style={{ fontSize: 12 }}>共 {list.length} 条进度记录</Text>
-        )}
-      </Space>
-    </Card>
-  );
-}
-
-/**
- * 任务控制按钮组（R106 FIX-2 · 组件级可测）
- *
- * 目录生成 / 全局事实两 Tab 此前没有停止入口（进度卡纯展示，只能靠全局任务
- * 抽屉停止）。与 ContentGenerationTab 内的暂停/恢复/停止同构，共用页面
- * handleControl + activeTaskIdRef（两条链的 SSE 均已写 task_id，后端 pause/
- * resume/stop 检查点早已生效，本次仅补 UI）：
- * - 停止发出指令后置灰显示「停止中」，任务落终态（generating 复位）才恢复
- *   —— 协作式停止「指令 accepted ≠ 已停止」，不给乐观回执；
- * - 暂停/恢复按 paused 互斥，停止中两者一并禁用（避免 stop 与 resume 竞态）。
- */
-export function TaskControlButtons({ paused, stopping, onControl }: {
-  paused: boolean;
-  stopping: boolean;
-  onControl: (action: "pause" | "resume" | "stop") => void;
-}) {
-  return (
-    <>
-      <Button
-        icon={<PauseOutlined />}
-        onClick={() => onControl("pause")}
-        disabled={paused || stopping}
-      >
-        暂停
-      </Button>
-      <Button
-        icon={<PlayCircleOutlined />}
-        onClick={() => onControl("resume")}
-        disabled={!paused || stopping}
-      >
-        恢复
-      </Button>
-      <Button
-        danger
-        icon={<StopOutlined />}
-        onClick={() => onControl("stop")}
-        disabled={stopping}
-        loading={stopping}
-      >
-        {stopping ? "停止中" : "停止"}
-      </Button>
-      {paused && !stopping && (
-        <Tag color="warning" style={{ margin: 0 }}>
-          ⏸ 已暂停（恢复后继续生成）
-        </Tag>
-      )}
-    </>
-  );
-}
-
-/**
- * 全局事实 · AI 调整面板（R45 · D5 · 组件级可测）
- *
- * 把「自然语言描述 → 预览待确认计划 → 二次确认 → 一次性应用」这条状态机
- * 从页面里抽成独立子组件，对齐 FactsExtractProgressCard 的抽法。
- *
- * 设计要点
- * --------
- * 1. **纯接线、不持有后端契约**：预览/应用分别注入 `preview` / `apply`
- *    两个异步函数，组件只负责收集输入、渲染计划、发起二次确认。
- *    页面保留「请求 payload 怎么拼」的单一出口，避免两处漂移。
- * 2. **切方案即丢弃**：方案切换时清空计划与弹层 —— 否则方案 A 的计划
- *    会被应用到方案 B（页面此前的 `setFactsAdjustPlan(null)` 已在此归位）。
- * 3. **空输入不收**：OK 按钮与 Enter 提交都做 `trim()` 判空，
- *    空白指令不下发（后端会当「无要求」返回空计划，浪费一次 AI 调用）。
- * 4. **计划最多列 20 条**：与确认弹窗同口径，超长时截断展示。
- *
- * ⚠️ 历史（R45 · G4）：调整要求原先用 `window.prompt` 收集 —— 阻塞式原生
- * 对话框会卡住整个渲染线程、无法排版说明，且在部分容器/隐私模式下被直接
- * 禁用（用户点了按钮「什么也没发生」）。全仓其余 57 处交互均走 antd
- * `modal.confirm`，本组件即那次收口的形态，现进一步抽成可测组件。
- */
-export interface FactsAdjustOperation {
-  op: string;
-  fact_id?: string;
-  name?: string;
-  value?: string;
-  // 后端回传字段是开放的（不同 op 带不同载荷），保留索引签名以兼容
-  // api/index.ts 里 factsApi.adjust 的 Array<Record<string, unknown>> 契约。
-  [key: string]: unknown;
-}
-
-export interface FactsAdjustPlanShape {
-  summary?: string;
-  operations: FactsAdjustOperation[];
-  /**
-   * ✅ 2026-10-08（全局事实模块收口 · F3 前端接线）：后端 `POST /global-facts/adjust`
-   * 新增加法式字段 —— 被安全校验丢弃的操作及理由。旧后端不返回该键，
-   * `normalizeFactsAdjustPlan` 一律归一为 `[]`，界面行为与收口前逐字一致。
-   */
-  ignored?: FactsAdjustIgnoredItem[];
-}
-
-/** 被丢弃操作的单条记录（与后端 `_validate_adjust_ops._ignore` 的记录形状对齐） */
-export interface FactsAdjustIgnoredItem {
-  op?: string;
-  reason?: string;
-  fact_id?: string;
-  name?: string;
-}
-
-/**
- * 丢弃理由的**封闭枚举**（必须与后端 `global_facts._validate_adjust_ops` 逐项一致）。
- *
- * ✅ 2026-10-08：这是「展示层映射」而非「判据副本」—— 判定发生在后端，前端只把
- * 已知 reason 翻成中文；未知 reason 原样回显（后端将来加枚举值时，前端不会
- * 静默显示空白，而是显示英文键名，能立刻被发现）。parity 由
- * `frontend/src/tests/factsAdjust.test.tsx` 与后端护栏双向锁死。
- */
-export const FACTS_ADJUST_IGNORE_REASONS = [
-  "op_not_object",
-  "unknown_fact_id",
-  "no_effective_change",
-  "missing_name_or_value",
-  "duplicate_fact_key",
-  "unknown_op",
-] as const;
-
-export const FACTS_ADJUST_IGNORE_REASON_LABELS: Record<string, string> = {
-  op_not_object: "返回项不是合法操作对象",
-  unknown_fact_id: "该事实不在当前方案可见范围（可能属于其它方案或已删除）",
-  no_effective_change: "这一条没有任何实际变更",
-  missing_name_or_value: "缺少名称或取值",
-  duplicate_fact_key: "同名事实已存在，未重复新增",
-  unknown_op: "未知的操作类型",
-};
-
-/** 丢弃理由 → 中文标签；未知/缺失一律回退原文，绝不返回空串 */
-export function factsAdjustIgnoreText(item: FactsAdjustIgnoredItem): string {
-  const reason = String(item?.reason || "").trim();
-  const label = FACTS_ADJUST_IGNORE_REASON_LABELS[reason] || reason || "未知原因";
-  const who = String(item?.name || "").trim() || String(item?.fact_id || "").trim();
-  const op = String(item?.op || "").trim() || "unknown";
-  return who ? `${op} · ${who}：${label}` : `${op}：${label}`;
-}
-
-/**
- * 防御式归一后端调整计划响应。
- *
- * ⚠️ 事件循环里的任何异常都会中断整个交互（本函数在 setState 路径上），
- * 因此缺键 / 类型不符 / 旧版后端一律回退空数组与空串，绝不抛异常。
- */
-export function normalizeFactsAdjustPlan(data: unknown): FactsAdjustPlanShape {
-  const d = (data && typeof data === "object" ? data : {}) as Record<string, unknown>;
-  const ops = Array.isArray(d.operations) ? d.operations : [];
-  const ign = Array.isArray(d.ignored) ? d.ignored : [];
-  return {
-    summary: typeof d.summary === "string" ? d.summary : "",
-    operations: ops.filter((o) => o && typeof o === "object") as FactsAdjustOperation[],
-    ignored: ign.filter((i) => i && typeof i === "object") as FactsAdjustIgnoredItem[],
-  };
-}
-
-/** 未纳入计划的操作数（后端 `ignored_count` 的前端兜底口径） */
-export function factsAdjustIgnoredCount(plan?: { ignored?: FactsAdjustIgnoredItem[] } | null): number {
-  return Array.isArray(plan?.ignored) ? plan!.ignored.length : 0;
-}
-
-/** 确认弹窗与「应用」按钮展示的操作明细上限（两处同口径） */
-export const FACTS_ADJUST_PREVIEW_LIMIT = 20;
-
-/** 操作明细的单行渲染：`op · 名称 值` */
-export function formatFactsAdjustOperation(op: FactsAdjustOperation, i: number): string {
-  const label = op.name || op.fact_id || `第 ${i + 1} 条`;
-  const value = op.value ? ` ${op.value}` : "";
-  return `${op.op} · ${label}${value}`;
-}
-
-export function FactsAdjustPanel({
-  schemeId,
-  disabled,
-  busy,
-  preview,
-  apply,
-  onError,
-  confirmDialog = Modal.confirm,
-}: {
-  /** 当前方案 id；为空时面板完全禁用（避免向空方案发起请求） */
-  schemeId?: string;
-  /** 外部置灰（如正在提取事实 / 上传资料 / 方案尚无事实） */
-  disabled?: boolean;
-  /** 外部忙碌（与自身 adjusting 合并，防双击重复提交） */
-  busy?: boolean;
-  /** 预览：只生成待确认计划，不落库（后端 apply=false） */
-  preview: (instruction: string) => Promise<Partial<FactsAdjustPlanShape>>;
-  /** 应用：把用户刚确认的计划一次性写入（后端 apply=true + operations）
-   *
-   * ✅ 2026-10-08：返回类型放宽为「可回传后端响应」。页面原先返回 void，
-   * 组件拿不到 `ignored` —— 而「要求改 3 条只落 2 条」恰恰只在应用后才知道。
-   * 返回 void 仍然合法（旧接线零改动），此时按「无丢弃」处理。
-   */
-  apply: (operations: FactsAdjustOperation[], instruction: string) =>
-    Promise<Partial<FactsAdjustPlanShape> | void>;
-  /** 业务失败回调（透传后端 detail），缺省时静默降级 */
-  onError?: (fallback: string, e: unknown) => void;
-  /**
-   * 确认弹窗工厂。默认用 antd 静态 `Modal.confirm`；
-   * 页面可注入 `App.useApp().modal` 以继承 ConfigProvider 主题。
-   * ⚠️ 注入是为了组件级可测 —— 静态方法在测试里也可用，但注入后
-   * 用例可以用 mock 直接断言「确认了什么、调用了什么」，无需触碰 DOM。
-   */
-  confirmDialog?: (
-    options: Parameters<typeof Modal.confirm>[0],
-  ) => void;
-}) {
-  const [ask, setAsk] = useState(false);
-  const [text, setText] = useState("");
-  const [adjusting, setAdjusting] = useState(false);
-  const [plan, setPlan] = useState<FactsAdjustPlanShape | null>(null);
-  // ✅ 2026-10-08（F3 前端接线）：应用后才知道的丢弃明细（计划已清空，故独立持有）
-  const [applyNotice, setApplyNotice] = useState<FactsAdjustIgnoredItem[] | null>(null);
-  // 请求期间若已切换方案，丢弃结果（防止旧方案的计划落到新方案上）
-  const schemeRef = useRef(schemeId);
-  schemeRef.current = schemeId;
-
-  // ⚠️ 切换方案 → 丢弃旧方案的全部中间态。与页面此前的
-  // setFactsAdjustPlan(null) 同口径，只是归属从页面挪到了组件内。
-  useEffect(() => {
-    setPlan(null);
-    setApplyNotice(null);
-    setAsk(false);
-    setAdjusting(false);
-    setText("");
-  }, [schemeId]);
-
-  const busyNow = Boolean(busy) || adjusting;
-  const ready = Boolean(schemeId) && !disabled && !busyNow;
-  const operations = Array.isArray(plan?.operations) ? plan.operations : [];
-  // ⚠️ 先绑定再判数组：`Array.isArray(plan?.ignored)` 不会把 `plan` 收窄成非空，
-  //    直接写 `plan.ignored` 在 strict 下报「possibly undefined」。
-  const _ignoredRaw = plan?.ignored;
-  const _applyRaw = applyNotice;
-  const ignoredPlan: FactsAdjustIgnoredItem[] = Array.isArray(_ignoredRaw) ? _ignoredRaw : [];
-  const ignoredApply: FactsAdjustIgnoredItem[] = Array.isArray(_applyRaw) ? _applyRaw : [];
-  const ignoredShown = ignoredApply.length > 0 ? ignoredApply : ignoredPlan;
-
-  const submitError = (fallback: string, e: unknown) => {
-    onError?.(fallback, e);
-  };
-
-  const confirmAsk = async () => {
-    const instruction = text.trim();
-    setAsk(false);
-    if (!schemeId || !instruction) return;   // 空指令不下发
-    setAdjusting(true);
-    try {
-      const data = await preview(instruction);
-      if (schemeRef.current !== schemeId) return;   // 已切方案 → 丢弃
-      setPlan(normalizeFactsAdjustPlan(data));
-      setApplyNotice(null);
-    } catch (e) {
-      submitError("生成调整计划失败", e);
-    } finally {
-      setAdjusting(false);
-    }
-  };
-
-  const requestApply = () => {
-    if (!ready || operations.length === 0) return;
-    confirmDialog({
-      title: "确认应用事实调整",
-      content: (
-        <div>
-          <div>{plan?.summary || `将执行 ${operations.length} 项调整`}</div>
-          <ul>
-            {operations.slice(0, FACTS_ADJUST_PREVIEW_LIMIT).map((op, i) => (
-              <li key={`${op.op}-${op.fact_id || i}`}>
-                {formatFactsAdjustOperation(op, i)}
-              </li>
-            ))}
-          </ul>
-          {operations.length > FACTS_ADJUST_PREVIEW_LIMIT && (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              其余 {operations.length - FACTS_ADJUST_PREVIEW_LIMIT} 项未列出
-            </Text>
-          )}
-          {ignoredPlan.length > 0 && (
-            <Text type="danger" style={{ fontSize: 12 }}>
-              另有 {ignoredPlan.length} 项因安全校验未纳入计划（见下方提示）
-            </Text>
-          )}
-        </div>
-      ),
-      okText: "确认应用",
-      cancelText: "取消",
-      okButtonProps: { danger: true },
-      onOk: async () => {
-        try {
-          const res = await apply(
-            operations,
-            plan?.summary || `按已确认计划调整（${operations.length} 项）`,
-          );
-          // 应用后后端才回传「哪些操作被安全校验丢弃」；返回 void 的旧接线
-          // 归一为空数组 → 与收口前逐字一致（不弹提示）。
-          const norm = normalizeFactsAdjustPlan(res);
-          setApplyNotice(norm.ignored && norm.ignored.length ? norm.ignored : null);
-          setPlan(null);
-        } catch (e) {
-          submitError("应用调整失败", e);
-          throw e;   // 抛出 → 弹窗保持打开，用户可重试或取消
-        }
-      },
-    });
-  };
-
-  return (
-    <>
-      <Button
-        icon={<ThunderboltOutlined />}
-        onClick={() => { setText(""); setAsk(true); }}
-        loading={adjusting}
-        disabled={!ready}
-      >
-        AI 调整事实
-      </Button>
-      {operations.length > 0 && (
-        <Button danger onClick={requestApply} disabled={!ready}>
-          应用调整计划{operations.length > FACTS_ADJUST_PREVIEW_LIMIT
-            ? `（${operations.length} 项）` : ""}
-        </Button>
-      )}
-      {/*
-        ✅ 2026-10-08（全局事实模块收口 · F3 前端接线）：被安全校验丢弃的操作必须可见。
-        后端旧实现「AI 给了 3 条、实际只落 2 条」完全静默（响应只回 applied 计数），
-        用户无法区分「AI 没产出」与「产出了但被拦下」—— 与 R48 图表删除可观测性同族。
-        预览阶段的丢弃来自 `plan.ignored`，应用阶段的丢弃来自 `applyNotice`；
-        旧版后端两个都没有 → 本块整体不渲染，界面与收口前逐字一致。
-      */}
-      {ignoredShown.length > 0 && (
-        <Alert
-          type="warning"
-          showIcon
-          style={{ marginTop: 8 }}
-          message={`${ignoredShown.length} 项调整未纳入（${ignoredApply.length > 0 ? "应用时" : "预览时"}被安全校验丢弃）`}
-          description={(
-            <div style={{ fontSize: 12 }}>
-              {ignoredShown.slice(0, 6).map((it, i) => (
-                <div key={i}>· {factsAdjustIgnoreText(it)}</div>
-              ))}
-              {ignoredShown.length > 6 && (
-                <div>· ……其余 {ignoredShown.length - 6} 条明细略</div>
-              )}
-            </div>
-          )}
-        />
-      )}
-      <Modal
-        title="AI 调整事实"
-        open={ask}
-        okText="生成调整计划"
-        cancelText="取消"
-        onOk={confirmAsk}
-        onCancel={() => setAsk(false)}
-        okButtonProps={{ disabled: !text.trim() || busyNow, loading: adjusting }}
-        maskClosable={false}
-        destroyOnClose
-      >
-        <div style={{ marginBottom: 10, color: "#666", lineHeight: 1.7 }}>
-          用一句自然语言描述调整要求。仅生成<b>待确认</b>的调整计划，
-          不会直接修改事实；确认后再一次性应用。
-        </div>
-        <Input.TextArea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="例如：新增一条「项目经理=张伟」；把开挖深度统一改为 8.5m"
-          rows={4}
-          maxLength={500}
-          showCount
-          autoFocus
-          onPressEnter={(e) => {
-            // Shift+Enter 换行；单独 Enter 才提交（与输入习惯一致）
-            if (!e.shiftKey && text.trim()) {
-              e.preventDefault();
-              confirmAsk();
-            }
-          }}
-        />
-      </Modal>
-    </>
-  );
-}
-
-/** 分段失败告警：部分失败 warning / 全部失败 error，明细最多 6 条 */
-export function FactsSegmentFailuresAlert({ stats }: {
-  stats: { ok?: number; failed?: number; total?: number; failed_details?: Array<{ index?: number; heading?: string; reason?: string }> } | null;
-}) {
-  const s = stats || {};
-  const failed = Number(s.failed) || 0;
-  const total = Number(s.total) || 0;
-  const allFailed = failed > 0 && failed === total;
-  const details = Array.isArray(s.failed_details) ? s.failed_details : [];
-  return (
-    <Alert
-      type={allFailed ? "error" : "warning"}
-      showIcon
-      style={{ marginBottom: 12 }}
-      message={allFailed
-        ? `本次提取全部 ${total} 段失败，未提取到事实`
-        : `本次提取有 ${failed}/${total} 段失败，结果可能不完整`}
-      description={(
-        <div style={{ fontSize: 12 }}>
-          {details.slice(0, 6).map((d, i) => (
-            <div key={i}>· 第 {d.index ?? i + 1} 段（{d.heading || "未命名"}）：{d.reason || "未知原因"}</div>
-          ))}
-          {details.length > 6 && <div>· ……其余 {details.length - 6} 条明细略</div>}
-          {details.length === 0 && (
-            <div>未获取到失败明细，建议稍后点击「③ AI 提取事实」重新提取。</div>
-          )}
-          <div>常见原因：模型超时/限流、网络抖动、单段内容过长。</div>
-        </div>
-      )}
-    />
-  );
-}
-
-// ============================================================
-// 全局事实 · 模块级可测纯函数（2026-09-21 拆出，行为由 factsTab.test 钉住）
-// ============================================================
-/**
- * 把后端 list 接口返回的 stats 收敛为前端事实 Tab 使用的 summary 对象。
- *
- * has_warnings = 模拟值 / 未确认 / 矛盾 / **来源过期** 任一 > 0，驱动「全部就绪」入口与徽标颜色。
- * ✅ 抽纯函数（2026-09-21）：loadFacts 此前内联算 has_warnings，与切方案重置
- *    setFactsSummary(null) 分散两处，口径漂移难以测试。
- *
- * ✅ BUG 修复（2026-09-27 · 过期事实被误判为「全部就绪」）：
- *   后端 `list_facts` 的 stats 早已回传 `stale`（来源资料已变化 / 重新提取后
- *   取代的旧值），且这些行已被注入门控 `... AND is_stale=0` 排除在正文与导出之外；
- *   但本函数只读 simulated / unresolved / conflicts，**stale 从不参与判定**。
- *   后果：项目资料变更后事实被整体标记过期，界面却仍显示绿色「全部就绪」并
- *   放行「下一步：正文生成」—— 用户以为事实可用，实际正文里一条事实都注入不到
- *   （静默失效，且方向是「看起来正常、实际数据全丢」，比报错更难发现）。
- *   口径与后端 `_FACTS_INJECT_WHERE` 四个门控条件对齐：任何一条不满足注入条件
- *   的事实都必须计入告警，不能让用户误以为可以进入下一步。
- */
-export function buildFactsSummary(stats: any): any {
-  // ⚠️ 签名刻意保持 `any`：本函数是「把后端可能为脏/缺席的计数归一成 number」
-  // 的**防御层**，输入本就不可信。收紧签名（R89 曾试过 `Partial<FactStats>`）
-  // 会让 12 处既有断言与全部测试夹具被迫处理可空性 —— 把防御逻辑挪到调用方，
-  // 与本函数存在的目的相反。归一化后的**读出侧**类型见 `types/facts.ts::FactsSummary`，
-  // 页面状态 `factsSummary` 已按该类型声明。
-  if (!stats || typeof stats !== "object") return null;
-  const simulated = Number(stats.simulated) || 0;
-  const unresolved = Number(stats.unresolved) || 0;
-  const conflicts = Number(stats.conflicts) || 0;
-  const stale = Number(stats.stale) || 0;
-  return {
-    ...stats,
-    simulated,
-    unresolved,
-    conflicts,
-    stale,
-    total: Number(stats.total) || 0,
-    // ⚠️ 口径：任一门控类计数 > 0 即告警（与后端 `_FACTS_INJECT_WHERE` 四条件
-    //    对齐）—— stale 必须计入，否则误显示「全部就绪」并放行正文生成。
-    has_warnings: simulated > 0 || unresolved > 0 || conflicts > 0 || stale > 0,
-  };
-}
-
-/**
- * 逐章事实统计（消费后端 `stats.by_chapter`）。
- *
- * ✅ 2026-10-06 新增消费：后端每次 `GET /global-facts` 都下发
- * `stats.by_chapter`（九章各自的事实条数 + 字段覆盖率 + 缺失字段 +
- * by_fact_attr / by_source_kind 分布），此前前端**整体丢弃**。
- * 这类信息是「哪些章节事实不足」的**唯一**量化依据 —— 用户只能靠
- * `FactsDiagnosticsPanel` 的字段覆盖率（口径不同：那个查章节必填字段，
- * 这个查实际落了多少条事实），无法回答「我这套方案的九章事实均衡吗」。
- *
- * 返回按 `order` 升序的渲染就绪列表；`count === 0` 的章节也保留
- * （「这一章一条事实都没有」本身就是要展示的结论）。
- */
-export type FactChapterStatRow = {
-  order: number;
-  key: string;
-  title: string;
-  count: number;
-  coverage: number;
-  missingCount: number;
-  missingFields: string[];
-  shared: number;
-};
-
-export function buildFactChapterStats(
-  stats: { by_chapter?: FactChapterStatBlock } | null | undefined,
-  titles?: Record<string, string>,
-): FactChapterStatRow[] {
-  const bc = stats?.by_chapter;
-  /**
-   * ✅ R89（2026-10-17）· 【P0 前后端契约断裂】形状读错，本面板自引入起永久空转。
-   *
-   * 后端 `list_facts` 的 `stats.by_chapter` 是**对象**
-   * `{chapters, totals, by_fact_attr, by_source_kind, shared_count}`
-   * （`global_facts._chapter_stats_for_items`）。旧实现
-   * `Array.isArray(stats?.by_chapter) ? … : []` 对对象恒判 false ⇒ rows 恒 `[]`
-   * ⇒ `FactsChapterCoveragePanel` **永远**渲染「暂无章节统计」。
-   * 致命之处在于 `types/facts.ts` 当时也把该字段声明成数组 —— 契约与实现
-   * **同错**，`tsc` 因此不可能报错（详见 FactChapterStatBlock 的订正说明）。
-   *
-   * 现按真实形状读取，并**额外容错裸数组**（防御旧后端/未来扁平化）；
-   * 契约类型已同步订正为对象，数组分支只是运行时兜底。
-   */
-  const rows: FactChapterStat[] = Array.isArray(bc)
-    ? (bc as unknown as FactChapterStat[])
-    : (Array.isArray(bc?.chapters) ? bc.chapters : []);
-  return rows
-    .map((c) => {
-      const key = String(c?.key || "");
-      const missing = Array.isArray(c?.missing_fields) ? c.missing_fields : [];
-      return {
-        order: Number(c?.order) || 0,
-        key,
-        title: String(c?.title || "") || factChapterTitle(key, titles),
-        count: Number(c?.count) || 0,
-        coverage: Number(c?.coverage) || 0,
-        missingCount: missing.length,
-        missingFields: missing.map((f: unknown) => String(f)),
-        // ✅ R89：per-chapter 共性计数由后端聚合下发（旧的顶层合计语义错位 ⇒ 恒 0）。
-        shared: Number(c?.shared_count) || 0,
-      };
-    })
-    .sort((a: FactChapterStatRow, b: FactChapterStatRow) => a.order - b.order);
-}
-
-/** 分页参数归一（消费后端 `pagination`）。total_groups 为 0 时不渲染分页控件。 */
-export function buildFactsPagination(pagination: any, pageSize: number): {
-  page: number; pageSize: number; total: number; totalPages: number; show: boolean;
-} {
-  const total = Number(pagination?.total_groups) || 0;
-  const limit = Math.max(1, Number(pageSize) || 20);
-  const totalPages = Math.max(1, Math.ceil(total / limit));
-  /**
-   * ✅ R89（2026-10-17）· 【P1 分页页码可产出小数 / 非有限值】
-   * 旧实现 `(offset) / limit + 1` 未取整：offset 不是 limit 整数倍时
-   * （offset=25 / limit=20 ⇒ 2.25）得到**小数页码**并原样交给 antd
-   * `Pagination current` —— 该组件按整数页取值，小数会让「当前页高亮」
-   * 落到没有数据的页；更糟的是 `total > limit` 时 `show=true`，用户能点
-   * 到一个不存在的页。offset 来自后端回传而非本地计算（未来任何按
-   * limit 变更/多标签页切换都可能给出非整倍数），属**不可依赖调用方自律**
-   * 的输入。
-   * 同时 `Number(undefined) / limit` 得 NaN，`Math.min/max` 对 NaN
-   * **恒返回 NaN** ⇒ page 变成 NaN，比小数更难排查。
-   */
-  const rawOffset = Number(pagination?.offset);
-  const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
-  const page = Math.min(Math.max(1, Math.floor(offset / limit) + 1), totalPages);
-  return { page, pageSize: limit, total, totalPages, show: total > limit };
-}
-
-/** 每页分组数（可由设置覆盖；后端 limit=0 表示不分页） */
-export const FACTS_PAGE_SIZE = 20;
-
-/**
- * 九章事实分布（消费 `stats.by_chapter`）—— 只读面板。
- *
- * ✅ 2026-10-06 新增：后端每次列表请求都下发 by_chapter，此前整体丢弃。
- * 与 :func:`FactsDiagnosticsPanel` 的区别（两者不可互相替代）：
- *   · DiagnosticsPanel 查「章节**必填字段**覆盖率」（该抽到什么字段）
- *   · 本面板查「章节**实际落了多少条事实**」（抽得够不够、均衡吗）
- */
-export function FactsChapterCoveragePanel({ stats, titles }: {
-  stats: any | null; titles?: Record<string, string>;
-}) {
-  const rows = buildFactChapterStats(stats, titles);
-  if (rows.length === 0) {
-    return (
-      <Card size="small" style={{ marginBottom: 8 }}
-        title={<span><BarChartOutlined /> 九章事实分布</span>}>
-        <Text type="secondary">暂无章节统计</Text>
-      </Card>
-    );
-  }
-  const totalFacts = rows.reduce((s, r) => s + r.count, 0);
-  return (
-    <Card size="small" style={{ marginBottom: 8 }}
-      title={<span><BarChartOutlined /> 九章事实分布（共 {totalFacts} 条）</span>}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        {rows.map((r) => (
-          <div key={r.key || r.order}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
-              <span>{r.order}. {r.title || r.key}</span>
-              <span style={{ color: r.count === 0 ? "#ff4d4f" : "#888" }}>
-                {r.count === 0 ? "无事实" : `${r.count} 条`}
-                {r.shared > 0 ? ` · 共性 ${r.shared}` : ""}
-              </span>
-            </div>
-            <Progress
-              percent={totalFacts ? Math.round((r.count / totalFacts) * 100) : 0}
-              size="small"
-              status={r.count === 0 ? "exception" : "normal"}
-            />
-            {r.missingCount > 0 && (
-              <div style={{ fontSize: 11, color: "#999" }}>
-                缺字段（{r.missingCount}）：
-                {r.missingFields.slice(0, 4).join("、")}
-                {r.missingFields.length > 4 ? "…" : ""}
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-    </Card>
-  );
-}
-
-/**
- * SSE completed 事件的统一收口：segment_stats / cross_conflicts 缺字段即清空。
- *
- * ✅ BUG 修复（2026-09-21）：增量提取「全部跳过（all_skipped）」的 completed
- * 事件不带 segment_stats，旧实现 `if (evt.segment_stats) setFactsSegmentStats(...)`
- * 只在有字段时才写 → 上一次提取的失败告警会残留，误导用户以为本次也失败；
- * 跨段矛盾横幅同理。现缺字段一律清空，避免跨次 / 跨方案残留。
- */
-export function applyFactsCompletedEvent(evt: any): {
-  segmentStats: any | null;
-  crossConflicts: any[];
-} {
-  const ss = evt?.segment_stats;
-  return {
-    segmentStats: ss && typeof ss === "object" ? ss : null,
-    crossConflicts: Array.isArray(evt?.cross_conflicts) ? evt.cross_conflicts : [],
-  };
-}
-
-// ============================================================
-// 目录树纯操作函数（模块级导出，行为由 outlineTab.test 钉住）
-// ============================================================
-/** 扁平化工具：按当前树顺序收集所有节点 key（用于 /reorder 全量重排） */
-export function flattenTreeKeys(nodes: TreeNode[]): string[] {
-  const keys: string[] = [];
-  const walk = (ns: TreeNode[]) => {
-    ns.forEach((n) => {
-      keys.push(n.key);
-      if (n.children?.length) walk(n.children);
-    });
-  };
-  walk(nodes);
-  return keys;
-}
-
-/**
- * ✅ 目录编辑增强：同级上移/下移。
- * 在当前层（含递归子层）定位 key 所在兄弟数组，与相邻 sibling 交换位置。
- * - dir=-1 上移；dir=1 下移。
- * - 已在同层首/尾（无相邻 sibling）时返回 null（调用方据此禁用按钮，不触发移动）。
- * 仅交换兄弟顺序、不改层级与父子关系，符合"上下移动章节"语义。
- */
-export function moveSiblingInTree(
-  nodes: TreeNode[],
-  key: string,
-  dir: -1 | 1,
-): TreeNode[] | null {
-  const idx = nodes.findIndex((n) => n.key === key);
-  if (idx !== -1) {
-    if (idx + dir < 0 || idx + dir >= nodes.length) return null;
-    const copy = [...nodes];
-    [copy[idx], copy[idx + dir]] = [copy[idx + dir], copy[idx]];
-    return copy;
-  }
-  for (const n of nodes) {
-    if (n.children && n.children.length) {
-      const res = moveSiblingInTree(n.children, key, dir);
-      if (res) {
-        return nodes.map((x) => (x.key === n.key ? { ...x, children: res } : x));
-      }
-    }
-  }
-  return null;
-}
-
-/** 检测目录树中是否存在超过 3 级的深层节点（后端落库时会被裁剪合并） */
-export function hasDeepOutlineNodes(nodes: TreeNode[], depth = 1): boolean {
-  if (depth > MAX_OUTLINE_DEPTH) return true;
-  return nodes.some((n) => (n.children?.length || 0) > 0 && hasDeepOutlineNodes(n.children!, depth + 1));
-}
-
-/**
- * ✅ 单一口径：未落库「本地临时节点」的 key 前缀全集。
- *
- * 目录树里存在两类尚未写入 sections 表的临时 key：
- *   · `local_`  —— 目录树中手工「新增一级章节 / 新增子章节 / 新增同级」产生的节点；
- *   · `upload_` —— 「导入目录（智能识别）」用识别结果**替换本地树**时构造的节点
- *                   （outlineToTreeNode，见下方模块级实现）。
- *
- * ✅ BUG 根因修复（2026-09-21）：旧实现只认 `local_` 一种前缀，于是
- * 「导入目录」替换后的整棵临时树被各处误判为「已落库章节」，四处口径同时漂移：
- *   1. hasUnsavedLocalNodes 漏检 → 顶部橙色 Tag 与左侧 Alert 都不显示，
- *      用户不知道整棵树都还没保存；
- *   2. deleteNode 误调 `DELETE /sections/{upload_...}` → 后端 404，
- *      异常中断在 `setTree(removeNode(...))` 之前 → **本地节点根本删不掉**；
- *   3. renameNode 误调 `PATCH /sections/{upload_...}` → 404，
- *      被 `.catch(() => {})` 吞掉 → 本地改名看似成功、服务端无任何记录；
- *   4. moveNode 因 `hasUnsavedLocal=false` 走「立即 /reorder」分支，
- *      `executemany UPDATE ... WHERE id=?` 对不存在的 upload_ id 静默 0 行，
- *      却弹出「编号已实时更新（已同步到服务端）」——**假成功**，刷新后回到旧顺序。
- * 统一收口到 isUnsavedLocalKey，四处调用点共用同一判定，禁止再各写一份前缀判断。
- */
-export const UNSAVED_KEY_PREFIXES = ["local_", "upload_"] as const;
-
-/** 判断某节点 key 是否属于「尚未落库的本地临时节点」（见 UNSAVED_KEY_PREFIXES 说明） */
-export function isUnsavedLocalKey(key: string): boolean {
-  const k = String(key || "");
-  return UNSAVED_KEY_PREFIXES.some((p) => k.startsWith(p));
-}
-
-/**
- * ✅ B11 修复：全树递归检测未保存的本地临时节点（见 UNSAVED_KEY_PREFIXES）。
- * 旧实现只查根层（tree.some），嵌套在二/三级下的新增节点会被漏检 ——
- * moveNode/拖拽随即使 /reorder 立即持久化，未落库的新增章节被丢失。
- * 现同时覆盖 local_（手工新增）与 upload_（导入识别替换）两类临时 key。
- */
-export function hasUnsavedLocalNodes(nodes: TreeNode[]): boolean {
-  for (const n of nodes || []) {
-    if (isUnsavedLocalKey(n.key)) return true;
-    if (n.children?.length && hasUnsavedLocalNodes(n.children)) return true;
-  }
-  return false;
-}
-
-/**
- * 目录树 → 提交给 /save-outline 的 outline 结构（纯函数，可单测）。
- *
- * 关键约定：`id` 直接取节点 key —— 已落库章节是 DB 主键（UUID），
- * 临时节点是 local_/upload_ 前缀 key。后端 `_save_outline_to_db` 先按
- * `__original_id` 判定 is_new，再统一 renumber，故此处不做编号改写。
- */
-export function treeToOutline(nodes: TreeNode[]): any[] {
-  return nodes.map((n, i) => ({
-    id: n.key,
-    // ✅ BUG 修复（2026-09-26）：原样透传 __original_id（后端 AI 调整目录
-    //    /adjust-outline 回传的真实 DB 主键）。缺失时后端 _save_outline_to_db
-    //    会退化成"按 id 字段匹配"——而此时 id 已被 renumberOutline 之前的
-    //    编号语义污染，is_new 全为 True → 整表重建、已生成正文全部丢失。
-    //    有 __original_id 时后端优先按它匹配已有 section。
-    ...(n.__original_id ? { __original_id: n.__original_id } : {}),
-    title: n.title,
-    level: n.level,
-    sort_order: i,
-    word_budget: n.word_budget,
-    description: n.description || "",
-    children: n.children && n.children.length ? treeToOutline(n.children) : [],
-  }));
-}
-
-/**
- * 按位置重排 outline 的展示编号（纯函数，可单测）。
- *
- * 只写前端展示字段 `outlineId`（点分路径）与 `sort_order`，**不改 `id`**：
- * `id` 是「已落库章节的 DB 主键 / 临时节点 key」的载体，被后端用于
- * 智能保留正文；编号由后端 `renumber_outline` 落库时统一生成。
- */
-export function renumberOutline(outline: any[], parentKey = ""): any[] {
-  return outline.map((node, idx) => {
-    const newKey = parentKey ? `${parentKey}.${idx + 1}` : String(idx + 1);
-    return {
-      ...node,
-      sort_order: idx,
-      outlineId: newKey,
-      children: node.children ? renumberOutline(node.children, newKey) : [],
-    };
-  });
-}
-
-/**
- * 「导入目录（智能识别）」/「AI 调整目录」结果 → 本地临时树（纯函数，可单测）。
- *
- * ✅ 编号由「位置」推导（与后端 renumber_outline 同口径），而不是直接用
- * n.id —— 识别结果里的 id 常为 "n1"/任意值，直接当编号用会让目录树完全不
- * 显示编号（保存前后观感不一致）。
- *
- * key 的三档口径（顺序即优先级，缺一即造成正文丢失）：
- *   1. `__original_id` —— 后端 AI 调整目录回传的**真实 DB 主键**。
- *      其 id 字段已被 renumber 覆写成展示编号（"1"/"1.1"），主键只在该字段。
- *   2. `upload_` 前缀 —— 尚未落库的本地临时节点（导入识别结果 / AI 新增章）。
- *      必须在「id 是纯数字展示编号」时优先于 id：编号 "3" 既不是 DB 主键、
- *      也不带 local_/upload_ 前缀 → isUnsavedLocalKey 判不出「未保存」，
- *      保存时后端又匹配不到任何 section → 整表重建、正文丢失。
- *   3. `n.id` —— 仅当它**不是**纯数字编号时才可用（如识别结果的 "n1"）。
- *
- * ✅ BUG 修复（2026-09-26 · 临时节点 key 冲突）：旧实现用
- * `upload_${Date.now()}_${i}`，`i` 只是**同父内序号** —— 整棵树在一次
- * `Date.now()` 毫秒内构造完（几十节点很常见，性能优化后更快），于是
- * 「第1章的第1个子节」与「第2章的第1个子节」得到**完全相同的 key**
- * （`upload_1767..._0`）。后果不是"仅 React 警告"：
- *   · renameInNode / updateNodeFields / removeNode 按 key 匹配**所有**节点
- *     → 改一个章节标题，另一章跟着一起改；
- *   · findSectionById 只返回第一个命中 → 改名/删除/字数预算作用在错误的章节上；
- *   · antd Tree 重复 key 渲染错乱，collectAllKeys(expandedKeys) 也出现重复项。
- * 现改用**位置路径**（outlineId 点分路径，树内天然唯一）生成 key：
- * 唯一、稳定（同一棵树重复构造得到同一批 key，便于 diff 与测试锁定）。
- */
-const _PURE_NUMERIC_ID_RE = /^\d+(?:\.\d+)*$/;
-
-export function outlineToTreeNode(outline: any[], parentPath = "", parentLevel = 0): TreeNode[] {
-  return (outline || []).map((n, i) => {
-    const level = n.level || parentLevel + 1;
-    const outlineId = parentPath ? `${parentPath}.${i + 1}` : String(i + 1);
-    const hasChildren = Array.isArray(n.children) && n.children.length > 0;
-    // ✅ 判定「n.id 是否只是展示编号」：纯数字点分路径（"1"/"1.1"）一律视为
-    //    编号而非主键 —— 后端 renumber 的产物必然落在此形态，必须走 upload_ 分支。
-    const rawId = n.id == null ? "" : String(n.id);
-    const isNumericId = _PURE_NUMERIC_ID_RE.test(rawId);
-    const key = n.__original_id
-      || (rawId && !isNumericId ? rawId : `upload_${outlineId}`);
-    return {
-      key,
-      // 透传 __original_id，供 treeToOutline 原样回传给后端匹配正文
-      ...(n.__original_id ? { __original_id: n.__original_id } : {}),
-      title: n.title,
-      level,
-      status: "empty",
-      word_count: 0,
-      word_budget: n.word_budget || 1200,
-      description: n.description || "",
-      outlineId,
-      children: hasChildren ? outlineToTreeNode(n.children, outlineId, level) : [],
-    };
-  });
-}
-
-/**
- * 本地重算展示用编号（outlineId/level）：拖拽/移动后即时刷新，
- * 仅改展示字段，不动 key 与正文数据。
- */
-export function renumberTreeLocally(nodes: TreeNode[], parentPath = "", parentLevel = 0): TreeNode[] {
-  return nodes.map((n, i) => {
-    const level = parentLevel + 1;
-    const outlineId = parentPath ? `${parentPath}.${i + 1}` : String(i + 1);
-    return {
-      ...n,
-      level,
-      outlineId,
-      children: n.children?.length ? renumberTreeLocally(n.children, outlineId, level) : [],
-    };
-  });
-}
-
-/**
- * 目录树卡片右上操作区（2026-09-21 拆出，行为由 outlineTab.test 钉住）：
- * 「下一步 / 新增子章节 / 上移 / 下移 / 删除」全部回调化，禁用口径内聚：
- * 未选中 → 四个操作键禁用；同层首/尾（moveFlags）→ 对应方向禁用。
- */
-/**
- * 断线重挂后「部分成果」弹窗文案（模块级导出，行为由 outlineTab.test 钉住）。
- *
- * ✅ 口径补齐（2026-09-21）：旧实现 failed / stopped 两个分支各自手拼文案，
- * 且只说「已生成 N 章的目录尚未保存」——**不告诉用户为什么中断**。
- * 现在 checkpoint 白名单已回传 `event` / `partial`（见后端
- * `_CHECKPOINT_KINDS.outline_generation`），可据此区分两种语义：
- *   · event=stopped —— 用户主动停止 / 客户端断线兜底：成果本身可信，
- *     建议按需补齐后保存；
- *   · event=error —— AI 调用异常后落库的兜底成果：内容可能不完整，
- *     建议先补齐再考虑重试整章。
- * 收口成纯函数，避免两个消费分支（takeover / SSE 中断重挂）文案再次漂移。
- */
-export type PartialOutlineHint = {
-  title: string;
-  content: string;
-  okText: string;
-  cancelText: string;
-  /** 弹窗视觉基调：warning = 异常中断，info = 用户主动停止 */
-  tone: "warning" | "info";
-};
-
-export function buildPartialOutlineHint(opts: {
-  event?: string;
-  partial?: boolean;
-  nodeCount?: number;
-}): PartialOutlineHint {
-  const isErr = opts.event === "error" || opts.event === "failed";
-  const n = Math.max(0, Number(opts.nodeCount) || 0);
-  const prefix = `检测到已生成 ${n} 个章节节点尚未保存。`;
-  const cause = isErr
-    ? "本次生成因 AI 服务异常中断，成果可能不完整：建议先按需补齐缺失章节，再考虑重试整章。"
-    : "本次生成由用户主动停止或连接中断，已生成部分结果可直接使用：按需补齐后保存即可。";
-  return {
-    title: isErr ? "目录生成中断，但有部分成果" : "目录生成已停止，但有部分成果",
-    content: `${prefix}${cause}`,
-    okText: "保存已生成部分",
-    cancelText: "不保存",
-    tone: isErr ? "warning" : "info",
-  };
-}
-
-export function OutlineTreeActions({
-  selected, moveFlags, showNext, onAddChild, onMove, onDelete, onNextStep,
-}: {
-  selected: TreeNode | null;
-  moveFlags: Record<string, { up: boolean; down: boolean }>;
-  showNext: boolean;
-  onAddChild: () => void;
-  onMove: (dir: -1 | 1) => void;
-  onDelete: () => void;
-  onNextStep: () => void;
-}) {
-  return (
-    <Space size={4}>
-      {showNext && (
-        <Button
-          size="small"
-          type="link"
-          icon={<ArrowRightOutlined />}
-          onClick={onNextStep}
-        >
-          下一步：全局事实
-        </Button>
-      )}
-      <Tooltip title="新增子章节到选中节点">
-        <Button
-          size="small"
-          icon={<CaretRightOutlined />}
-          disabled={!selected}
-          onClick={onAddChild}
-        >
-          新增子章节
-        </Button>
-      </Tooltip>
-      <Tooltip title="上移选中章节">
-        <Button
-          size="small"
-          icon={<ArrowUpOutlined />}
-          disabled={!selected || !moveFlags[selected.key]?.up}
-          onClick={() => onMove(-1)}
-        >
-          上移
-        </Button>
-      </Tooltip>
-      <Tooltip title="下移选中章节">
-        <Button
-          size="small"
-          icon={<ArrowDownOutlined />}
-          disabled={!selected || !moveFlags[selected.key]?.down}
-          onClick={() => onMove(1)}
-        >
-          下移
-        </Button>
-      </Tooltip>
-      <Tooltip title="删除选中节点">
-        <Button
-          size="small"
-          danger
-          icon={<StopOutlined />}
-          disabled={!selected}
-          onClick={onDelete}
-        >
-          删除
-        </Button>
-      </Tooltip>
-    </Space>
-  );
-}
-
-/** 字数预算的合法区间（与后端 sectionsApi.update 的整数语义一致，超限会被服务端拒绝） */
-export const WORD_BUDGET_MIN = 50;
-export const WORD_BUDGET_MAX = 50000;
-
-/**
- * 选中章节的「字数预算」编辑面板（模块级导出，行为由 outlineTab.test 钉住）。
- *
- * ✅ 功能缺口补齐（2026-09-21）：字数预算此前在整条前端链路中**只有读取、没有写入** ——
- *   · 目录树行内只显示只读的 `(L1 · 1500字)`；
- *   · 正文页只显示 `x字 / y字`，预算超了只能点「字数压缩」；
- *   · 压缩器「只缩不扩」，正文偏少时没有任何入口调低预算。
- * 用户无法在正文生成**前**按需规划每章篇幅，只能等生成完再补救。
- * 现把预算编辑收敛到「目录生成」Tab 的选中章节面板：失焦 / 回车即回抛，
- * 落库由父组件统一处理（临时节点 local_/upload_ 仅改本地，等「保存目录」）。
- *
- * 校验口径（防脏数据写库）：非正数 → 回退原值不提交；越界 → 收敛到
- * [WORD_BUDGET_MIN, WORD_BUDGET_MAX]；与原值相同 → 不触发回调（避免无谓写库）。
- */
-export const OutlineNodeBudgetPanel = memo(function OutlineNodeBudgetPanel({
-  node,
-  onBudgetChange,
-}: {
-  node: TreeNode;
-  onBudgetChange: (key: string, budget: number) => void;
-}) {
-  const current = node.word_budget || 1200;
-  const [draft, setDraft] = useState<number>(current);
-  // 选中章节切换 / 预算被外部改动（如 load 刷新）时同步草稿
-  useEffect(() => {
-    setDraft(current);
-  }, [node.key, current]);
-
-  const commit = () => {
-    const n = Math.round(Number(draft));
-    // 空值 / 非数字 / 非正数：回退原值，不静默提交脏数据
-    if (!Number.isFinite(n) || n <= 0) {
-      setDraft(current);
-      return;
-    }
-    const clamped = Math.min(WORD_BUDGET_MAX, Math.max(WORD_BUDGET_MIN, n));
-    setDraft(clamped);
-    if (clamped !== current) onBudgetChange(node.key, clamped);
-  };
-
-  const overBudget = (node.word_count || 0) > current;
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        flexWrap: "wrap",
-        padding: "6px 10px",
-        marginBottom: 8,
-        background: "#fafafa",
-        border: "1px solid #f0f0f0",
-        borderRadius: 4,
-      }}
-    >
-      <Text strong style={{ fontSize: 12 }}>📏 字数预算</Text>
-      <Text ellipsis style={{ fontSize: 12, fontWeight: 600, maxWidth: 240 }}>
-        {formatOutlineTitle(node.outlineId || node.key, node.level, node.title)}
-      </Text>
-      <Text type="secondary" style={{ fontSize: 11 }}>L{node.level}</Text>
-      {/* addonAfter 已废弃，改用 Space.Compact + Space.Addon（antd v5.29+） */}
-      <Space.Compact size="small" style={{ width: 116 }}>
-        <InputNumber
-          // ⚠️ 不设 min/max：antd 会在 blur 时自行把越界值收敛到 min/max 并触发
-          // 一轮额外的 onChange —— 与下方 commit 的受控夹取互相打架（测试里出现
-          // 「输入 10 → 期望 50 却 0 次回调 / 输入 0 → 被夹成 50」的竞态）。
-          // 夹取口径统一收口在 commit（[WORD_BUDGET_MIN, WORD_BUDGET_MAX]），
-          // 秒回弹、幂等、可单测。
-          step={100}
-          value={draft}
-          onChange={(v) => setDraft(v as number)}
-          onBlur={commit}
-          onPressEnter={commit}
-          style={{ width: "100%" }}
-          aria-label="字数预算"
-        />
-        <Space.Addon>字</Space.Addon>
-      </Space.Compact>
-      <Text type="secondary" style={{ fontSize: 11 }}>
-        已写 {(node.word_count || 0).toLocaleString()} 字
-      </Text>
-      {overBudget ? (
-        <Tag color="warning" style={{ margin: 0, fontSize: 11 }}>
-          超预算，可在正文页压缩
-        </Tag>
-      ) : (
-        <Tag style={{ margin: 0, fontSize: 11 }}>生成正文时按此目标控制篇幅</Tag>
-      )}
-    </div>
-  );
-});
-
-/**
- * 后端「生成后自动校验」报告（`review.quality`，由 services/outline_quality 产出）
- * → 面向用户的一句话提示（纯函数，可单测）。
- *
- * 三类信号（对应需求要求三 / 要求四）：
- * - `name_coverage.missing`：方案名称里解析出的施工内容/工序/工艺/对象，
- *   在目录中**无任何落点**（全面性缺口，后端已尝试外科式补齐）；
- * - `continuity.ok === false`：层级跳级 / 有父无子 / 同名章节 / 编号错位 /
- *   破折号长尾标题 / 空标题节点 / 占位泛化标题（七类，与后端标签表同步）；
- * - `redundant_titles`：与方案名称零关联、且不属于通用必要章节的标题候选。
- *
- * ⚠️ 刻意**不自动删除**任何章节：删章是不可逆的用户数据变更，
- * 只提示 + 定位，由用户决定（与后端 `find_redundant_titles` 的口径一致）。
- */
-export function summarizeOutlineQuality(review: unknown): {
-  level: "warn" | "info" | "none";
-  message: string;
-  logs: string[];
-} {
-  const empty = { level: "none" as const, message: "", logs: [] as string[] };
-  const q = (review as any)?.quality;
-  if (!q || typeof q !== "object") return empty;
-
-  const logs: string[] = [];
-  let warn = false;
-
-  const missing: string[] = Array.isArray(q.name_coverage?.missing)
-    ? q.name_coverage.missing.filter((m: unknown): m is string => typeof m === "string")
-    : [];
-  if (q.name_coverage?.evaluated && missing.length > 0) {
-    warn = true;
-    const head = missing.slice(0, 5).join("、");
-    const more = missing.length > 5 ? ` 等 ${missing.length} 项` : "";
-    logs.push(`⚠️ 方案名称涉及但目录未覆盖：${head}${more}`);
-  }
-
-  const cont = q.continuity;
-  if (cont && cont.ok === false) {
-    warn = true;
-    const c = cont.issue_counts || {};
-    // ⚠️ 这张表必须与后端 `outline_quality.CONTINUITY_ISSUE_LABELS` **同步**
-    //    （唯一事实源，跨语言 parity 由
-    //    tests/test_outline_title_fix_chain_r73b_20261012.py 锁定）。
-    //    漏一类的后果是**静默的**：下面的 Object.keys(labels) 会把该类计数直接
-    //    过滤掉，后端已判 ok=false 而界面零提示 —— R73b F5 实证 `generic_titles`
-    //    （占位/泛化标题，正是用户报的「专项6」「总体实施策划（2）」）漏了三天。
-    const labels: Record<string, string> = {
-      level_gaps: "层级跳级",
-      empty_parents: "有父无子",
-      duplicate_titles: "同名章节",
-      numbering_mismatch: "编号错位",
-      dash_titles: "破折号长尾标题",
-      empty_titles: "空标题节点",
-      generic_titles: "占位/泛化标题",
-    };
-    const parts = Object.keys(labels)
-      .filter((k) => (c[k] || 0) > 0)
-      .map((k) => `${labels[k]} ${c[k]} 处`);
-    // 兜底：后端新增了问题类而这张表还没跟上时，也必须把计数透出来（宁可显示
-    // 英文裸代号，不可把已检出的问题咽掉）。
-    const unlabeled = Object.keys(c).filter((k) => !(k in labels) && (c[k] || 0) > 0);
-    if (unlabeled.length)
-      parts.push(`其它问题 ${unlabeled.map((k) => `${k} ${c[k]} 处`).join("、")}`);
-    if (parts.length) logs.push(`⚠️ 目录连续性问题：${parts.join("、")}`);
-  }
-
-  // ⚠️ 脏数据防御：后端只保证是数组，元素仍可能是 null/非对象（旧数据或第三方
-  //    端点塞入），直接读 .title 会把整条提示抛在渲染路径上。
-  const redundant: unknown[] = Array.isArray(q.redundant_titles) ? q.redundant_titles : [];
-  if (redundant.length > 0) {
-    const head = redundant
-      .slice(0, 5)
-      .map((r) => ((r as { title?: string } | null)?.title) || "")
-      .filter(Boolean)
-      .join("、");
-    if (head) logs.push(`ℹ️ 疑似与方案名称无关的章节（未自动删除，请确认）：${head}`);
-  }
-
-  if (logs.length === 0) return empty;
-  return { level: warn ? "warn" : "info", message: logs.join("；"), logs };
-}
-
-/**
- * 后端目录审核载荷（`review.review_mode` / `review.suggestions`）→ 面向用户的
- * 一句审核依据 + 逐条已执行动作（纯函数，可单测）。
- *
- * 背景（R73b 遗留 #1 / R74 G1）：`programmatic*` 与 `programmatic+titled/surgical`
- * 的区分此前只进后端日志，用户在界面看不到「这次结论的程序化程度」；
- * suggestions（已执行的补救动作说明）前端也一直没有消费方 —— 后端每次
- * 程序化出口都带了，前端静默丢。
- * 属呈现增强、不改任何判定：只进生成日志，不弹 toast（避免与 quality
- * 告警叠加成噪音）。
- *
- * review_mode 值域（唯一来源：后端 sse_handlers._review_and_fix_outline）：
- * - `programmatic`                    覆盖全过，跳过 AI 审核
- * - `programmatic+titled`             另含占位标题外科式重写
- * - `programmatic+surgical[+titled]`  另含外科式补齐缺失章节
- * - 不写 / 非 programmatic 开头        走了完整 AI 审核链路（含审核超时/失败
- *   回退场景，此时 suggestions 里会有「审核超时已跳过」等如实文案）
- */
 export function summarizeOutlineReviewBasis(review: unknown): {
   level: "info" | "none";
   message: string;
@@ -1926,1127 +468,7 @@ export function summarizeOutlineReviewBasis(review: unknown): {
 // 终态判定/兜底分支；提取后组件侧仅剩 setState 胶水，断线重挂契约
 // （含 stuckAtFull 兜底保留 outline_result）可直接行为单测。
 // ============================================================
-/** GET /sse/task/{id} 终态响应（含 checkpoint 回传的 outline_result / content_result） */
-export interface TaskTerminalInfo {
-  status: string;
-  message?: string;
-  progress?: number;
-  outline_result?: {
-    outline?: unknown[];
-    // ✅ R79 对齐单一事实源 `backend/app/services/checkpoint_schema.py`
-    //    （原声明 list[dict] 是文档失真，实收值是章标题字符串数组）；
-    //    本文件另有本地副本（未 import 生成的 types/checkpointSchema.ts），
-    //    两处必须同口径，否则前端读法会把字符串当对象遍历。
-    failed_chapters?: string[];
-    failed_count?: number;
-    /**
-     * ✅ 契约补齐（2026-09-21）：后端 `_CHECKPOINT_KINDS.outline_generation`
-     * 白名单含 `review`，断线重挂后目录的审核/修复结果此前在前端无处安放。
-     */
-    review?: unknown;
-    /**
-     * ✅ 契约补齐：checkpoint 记录的是**终态事件类型**（completed/stopped/error），
-     * 前端此前只能靠 `status` 推断，无法区分「用户主动停止保留的部分成果」
-     * 与「AI 异常后保留的部分成果」，两者的补救建议不同。
-     */
-    event?: string;
-    /** partial=true 表示成果不完整（停止 / 失败兜底），需提示用户手动补齐 */
-    partial?: boolean;
-  };
-  /** ✅ G12-6：正文生成 checkpoint（后端 `_CHECKPOINT_KINDS.content_generation` 白名单） */
-  content_result?: {
-    event?: string;
-    message?: string;
-    done?: number;
-    total?: number;
-    failed_count?: number;
-    failed_sections?: Array<{ section_id?: string; title?: string; reason?: string }>;
-    words?: number;
-    word_count?: number;
-    run_words?: number;
-    over_count?: number;
-  };
-  /**
-   * ✅ 契约补齐（2026-09-27）：全局事实提取 checkpoint
-   * （后端 `_CHECKPOINT_KINDS.facts_generation` 白名单，kind=`facts_result`）。
-   *
-   * 此前后端无此通道（既不写 checkpoint 也不在白名单里），断线重挂只能拿到
-   * status+message，segment_stats / cross_conflicts 全丢 —— 用户看到「已完成」
-   * 却不知道哪几段失败、是否存在跨段矛盾。
-   *
-   * ✅ R89（2026-10-17）：类型改为**直接引用生成的契约**（`checkpointSchema.ts`
-   * 由 `backend/app/services/checkpoint_schema.py` 生成），不再在本文件内联
-   * 第三份手抄。旧实现内联副本与生成器产出可能分叉，而分叉方向正是本仓反复
-   * 记账的「同一判据多副本」—— `facts_result` 能活到今天就是因为既不在生成器
-   * 源里、也没有 parity 断言（内容/目录两族都有）。
-   * `cross_conflicts` 仍是 `unknown[]`：跨段矛盾的具体形态由 facts_extractor
-   * 决定，前端 applyFactsCompletedEvent 只按数组消费。
-   */
-  facts_result?: GeneratedFactsResult;
-  [k: string]: unknown;
-}
 
-export async function pollTaskUntilTerminalImpl(
-  taskId: string,
-  fetchStatus: (taskId: string) => Promise<TaskTerminalInfo>,
-  onPending?: (data: TaskTerminalInfo) => void,
-  opts: {
-    intervalMs?: number;
-    maxPolls?: number;
-    stuckThreshold?: number;
-    netFailTolerance?: number;
-  } = {},
-): Promise<TaskTerminalInfo | null> {
-  const intervalMs = opts.intervalMs ?? 3000;
-  const maxPolls = opts.maxPolls ?? 200;
-  const stuckThreshold = opts.stuckThreshold ?? 3;
-  const netFailTolerance = opts.netFailTolerance ?? 5;
-  let stuckAtFull = 0; // progress==1.0 但 status 仍 running 的连续次数
-  let netFailCount = 0; // 连续网络失败计数
-  for (let i = 0; i < maxPolls; i++) {
-    await new Promise((r) => setTimeout(r, intervalMs));
-    try {
-      const data = await fetchStatus(taskId);
-      netFailCount = 0; // ✅ 成功一次即重置，瞬时网络抖动不应终止重挂
-      // ✅ 2026-10-10：终态集合改由 isTerminalTaskStatus 单一事实源判定。
-      //    旧实现内联 `completed/failed/stopped`，把后端 2026-10-07 引入的
-      //    加法式终态 degraded 漏掉 ⇒ 降级完成时既不匹配终态、也不匹配下方
-      //    「progress 满但 running」兜底，页面卡在「正在重新挂接…」200×3s。
-      if (isTerminalTaskStatus(data.status)) return data;
-      onPending?.(data);
-      // ✅ 进度已满但 status 没更新：连续达阈值就兜底为 completed
-      if ((data.progress || 0) >= 0.99 && !isTerminalTaskStatus(data.status)) {
-        stuckAtFull++;
-        if (stuckAtFull >= stuckThreshold) {
-          console.warn(`pollTaskUntilTerminal: task ${taskId} stuck at progress=100% for ${stuckAtFull} polls, treating as completed`);
-          // ✅ BUG 修复（2026-09-20）：兜底判定 completed 时必须保留全量字段
-          //   （尤其 outline_result）—— 后台成果已落 checkpoint，丢字段会让
-          //   调用方（fin.outline_result 消费分支）误判无成果直接 load()。
-          return { ...data, status: "completed", message: data.message };
-        }
-      } else {
-        stuckAtFull = 0;
-      }
-    } catch (e: any) {
-      // ✅ 修复：区分「任务确实不存在（404，不可恢复）」与「瞬时网络失败」。
-      // 旧实现对任何一次请求失败都直接放弃重挂，一次抖动/502 就导致兜底失效。
-      if (e?.response?.status === 404) return null;
-      netFailCount++;
-      if (netFailCount >= netFailTolerance) {
-        console.warn(`pollTaskUntilTerminal: task ${taskId} 连续 ${netFailCount} 次网络失败，放弃重挂`);
-        return null;
-      }
-    }
-  }
-  return null;
-}
-
-/**
- * ✅ BUG 修复（2026-09-23 · 「30s 连接超时后目录任务孤儿运行」）：
- * SSE 在收到首个事件（含 task_id 的 connecting）之前建连失败/超时时，
- * 前端 taskId 为空串，旧实现直接跳过 pollTaskUntilTerminal 重挂 ——
- * 但后端 StreamingResponse 可能已返回、任务已注册并继续生成（AI 照常
- * 计费），成果只躺在 checkpoint 里。此处按方案检索最近的
- * outline_generation 任务，若仍在运行且 updated_at 在时间窗内
- * （默认 5 分钟，覆盖 30s 建连超时 + 装配/排队耗时），返回其 id 供重挂。
- * 提取为模块级实现（fetchTasks 注入），可单测。
- */
-export async function findRecentOutlineTaskImpl(
-  fetchTasks: () => Promise<{ tasks?: Array<Record<string, any>> }>,
-  opts: { typeFilter?: string; windowMs?: number; nowMs?: number } = {},
-): Promise<string | null> {
-  const typeFilter = opts.typeFilter ?? "outline_generation";
-  const windowMs = opts.windowMs ?? 5 * 60_000;
-  const nowMs = opts.nowMs ?? Date.now();
-  try {
-    const { tasks } = await fetchTasks();
-    for (const t of tasks || []) {
-      if (t.task_type !== typeFilter) continue;
-      if (t.status !== "running" && t.status !== "paused") continue;
-      // updated_at 解析失败（脏值/缺字段）时保守接受，避免漏挂
-      const ts = Date.parse(t.updated_at || "");
-      if (!Number.isNaN(ts) && nowMs - ts > windowMs) continue;
-      return String(t.id || "");
-    }
-  } catch {
-    // 检索失败（后端确实不可达）：静默返回 null，由调用方保持旧行为（仅提示）
-  }
-  return null;
-}
-
-/**
- * SSE 断线重挂统一入口（2026-10-14 · 三链收口）。
- *
- * 目录 / 正文 / 事实三条 SSE 链在错误分支里做完全相同的三件事：
- *   ① taskId 为空（30s 建连超时 / 网络抖动 / 网关重连时首个携带 task_id 的事件
- *      尚未到达）→ 按方案检索最近的同类型在跑任务（后端任务已注册并继续计费，
- *      成果只躺在 checkpoint）；
- *   ② 命中 → 先回调 onReattach（UI 提示「正在重新挂接」，必须在轮询开始前，
- *      否则用户在中断刻度上多等一个轮询周期却无任何反馈）；
- *   ③ 轮询至终态并返回 { taskId, final }。
- * 检索不到返回 null，调用方维持旧行为（仅提示，不乱挂）。
- *
- * 终态后的成果恢复（outline_result / content_result / facts_result）各链语义
- * 不同，仍由调用方处理 —— 本 helper 只收敛「检索 → 重挂 → 轮询」三段，
- * 消除三条链各自手写这三步的双写分叉（正是 P1「断线不重挂」缺陷的温床）。
- *
- * 提取为模块级实现（fetchTasks / pollTerminal 注入），可单测。
- */
-export async function reattachTaskImpl(
-  fetchTasks: () => Promise<{ tasks?: Array<Record<string, any>> }>,
-  pollTerminal: (taskId: string) => Promise<any>,
-  opts: {
-    taskId?: string;
-    typeFilter?: string;
-    nowMs?: number;
-    onReattach?: (taskId: string) => void;
-  } = {},
-): Promise<{ taskId: string; final: any } | null> {
-  let tid = opts.taskId || "";
-  if (!tid) {
-    tid =
-      (await findRecentOutlineTaskImpl(fetchTasks, {
-        typeFilter: opts.typeFilter,
-        nowMs: opts.nowMs,
-      })) || "";
-  }
-  if (!tid) return null;
-  opts.onReattach?.(tid);
-  return { taskId: tid, final: await pollTerminal(tid) };
-}
-
-// ============================================================
-// 一级目录确认闸门（对齐 OpenBidKit 的 outline-selection 阶段）：
-// AI 生成目录后不自动入库，先由用户勾选确认一级章节；确认后保存并
-// 将一级章节 locked=1（与 OpenBidKit 的 allowRootChanges=false 语义一致）
-// ============================================================
-export function OutlineGateList({
-  outline,
-  selectedRef,
-}: {
-  outline: any[];
-  selectedRef: { current: number[] };
-}) {  const [checked, setChecked] = useState<string[]>(
-    outline.map((_: any, i: number) => String(i))
-  );
-  // 同步勾选结果到 ref（modal.confirm onOk 读取，避免闭包陈旧值）
-  useEffect(() => {
-    selectedRef.current = checked.map(Number);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [checked]);
-  const toggle = (i: number, on: boolean) => {
-    setChecked((prev) =>
-      on ? [...prev, String(i)] : prev.filter((x) => x !== String(i))
-    );
-  };
-  return (
-    <div>
-      <div style={{ marginBottom: 8 }}>
-        <Text type="secondary">
-          AI 已生成 {outline.length} 个一级章节。取消勾选不需要的章节（其全部子级一并排除）；
-          确认保存后一级目录将被锁定。取消勾选过少可能导致方案覆盖不全，请谨慎操作。
-        </Text>
-      </div>
-      <div
-        style={{
-          maxHeight: 320,
-          overflow: "auto",
-          border: "1px solid #f0f0f0",
-          borderRadius: 6,
-          padding: "4px 12px",
-        }}
-      >
-        {outline.map((n: any, i: number) => (
-          <div key={i} style={{ padding: "4px 0" }}>
-            <Checkbox
-              checked={checked.includes(String(i))}
-              onChange={(e) => toggle(i, e.target.checked)}
-            >
-              {n.title || `（未命名第 ${i + 1} 章）`}
-            </Checkbox>
-            {n.description ? (
-              <Text
-                type="secondary"
-                style={{ fontSize: 12, marginLeft: 8, whiteSpace: "normal" }}
-              >
-                {String(n.description).slice(0, 60)}
-              </Text>
-            ) : null}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-export function findSectionById(nodes: TreeNode[], key: string): TreeNode | null {
-  for (const n of nodes) {
-    if (n.key === key) return n;
-    const found = findSectionById(n.children || [], key);
-    if (found) return found;
-  }
-  return null;
-}
-
-// ✅ P0-5 组件拆分：章节日志列表独立 memo 组件——sectionLogs 更新只重渲日志区，
-//    不再带动整页其余部分重渲；行按 section_id 稳定 key，避免整表重建
-// ✅ 实时日志面板的最大渲染行数：仅限制渲染，数据源保持全量。
-// 长方案（120+ 章）逐章多次事件的日志可达上千条，而该滚动区高度固定，
-// 全量渲染会把视口外的条目也建成 DOM；与下方 OUTLINE_LOG_RENDER_MAX 同口径。
-const SECTION_LOG_RENDER_MAX = 200;
-
-// ✅ 性能优化：状态图标与行底色与 items 无关，提到模块级只构造一次
-// （原实现在组件内每次渲染重建两个对象字面量）
-const SECTION_LOG_ICON: Record<string, React.ReactNode> = {
-  running: <LoadingOutlined style={{ color: "#1677ff" }} />,
-  success: <CheckCircleOutlined style={{ color: "#52c41a" }} />,
-  failed: <CloseCircleOutlined style={{ color: "#ff4d4f" }} />,
-  skipped: <MinusCircleOutlined style={{ color: "#faad14" }} />,
-};
-const SECTION_LOG_BG: Record<string, string> = {
-  running: "rgba(22,119,255,0.06)",
-  success: "rgba(82,196,26,0.06)",
-  failed: "rgba(255,77,79,0.06)",
-  skipped: "rgba(250,173,20,0.06)",
-};
-
-const SectionLogList = memo(function SectionLogList({ items }: { items: SectionLogItem[] }) {
-  // ✅ 性能优化：`[...items].reverse()` 原直接写在 JSX 里 —— 长方案日志条目
-  // 持续增长，每次条目变化都全量复制 + 反转 + 全量建 DOM。改为按 items 记忆化
-  // 并限制渲染行数（数据源 items 本身不动，完成统计等在 GenerationProgressCard
-  // 内基于完整历史计算，不受影响）。
-  const visibleItems = useMemo(
-    () => (items.length > SECTION_LOG_RENDER_MAX
-      ? items.slice(-SECTION_LOG_RENDER_MAX).reverse()
-      : [...items].reverse()),
-    [items],
-  );
-  return (
-    <List
-      size="small"
-      dataSource={visibleItems}
-      renderItem={(item) => (
-        <List.Item key={item.section_id || item.title} style={{ padding: "4px 8px", background: SECTION_LOG_BG[item.status], borderRadius: 4, marginBottom: 4 }}>
-          <div style={{ width: "100%" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {SECTION_LOG_ICON[item.status]}
-              {typeof item.index === "number" && item.total && (
-                <Tag style={{ margin: 0, fontSize: 11, flexShrink: 0 }}>
-                  {item.index}/{item.total}
-                </Tag>
-              )}
-              <Text
-                strong
-                ellipsis
-                style={{ flex: 1, fontSize: 13 }}
-                title={item.title}
-              >
-                {item.title}
-              </Text>
-              {/* ✅ 进度增强：进行中章节显示当前阶段（AI 生成中 / 续写扩充中 …），
-                  让用户知道这一章卡在哪一步，而不是只有一个转圈图标 */}
-              {item.status === "running" && item.stage_label && (
-                <Tag
-                  color={STAGE_COLOR[item.stage || "draft"] || "processing"}
-                  style={{ margin: 0, fontSize: 11, flexShrink: 0 }}
-                >
-                  {item.stage_label}
-                </Tag>
-              )}
-              {item.status === "success" && (
-                <Tag
-                  color={
-                    item.word_status === "under"
-                      ? "orange"
-                      : item.word_status === "over"
-                      ? "red"
-                      : "success"
-                  }
-                  style={{ margin: 0, fontSize: 11, flexShrink: 0 }}
-                >
-                  {item.word_count}字 / {item.word_budget}
-                  {item.word_status === "under"
-                    ? "（偏少）"
-                    : item.word_status === "over"
-                    ? "（超字，可压缩）"
-                    : ""}
-                </Tag>
-              )}
-              {/* ✅ 续写失败信号：发生过续写调用失败/产出被丢弃且最终仍不达标，
-                  单独提示用户「可重试或手工续写」，与「写不满」区分 */}
-              {item.status === "success" && item.continue_failed && (
-                <Tooltip title="续写调用失败或产出被丢弃，最终字数仍偏少——可对该章「续写本章」或重试补足">
-                  <Tag color="warning" style={{ margin: 0, fontSize: 11, flexShrink: 0 }}>
-                    续写未完成
-                  </Tag>
-                </Tooltip>
-              )}
-              {/* ✅ 质量告警（后端 section_done.quality_issues）：本章正文存在程序化
-                  质检问题（如未闭合代码块、章节重复标题等），即时提示可复查 */}
-              {item.status === "success" && Array.isArray(item.quality_issues) && item.quality_issues.length > 0 && (
-                <Tooltip title={item.quality_issues.map((q: any) => String(q?.message || q?.detail || q)).join("；")}>
-                  <Tag color="gold" style={{ margin: 0, fontSize: 11, flexShrink: 0 }}>
-                    质量告警 {item.quality_issues.length}
-                  </Tag>
-                </Tooltip>
-              )}
-              {/* ✅ R49：本章图表产出闭环（后端 section_done 实时下发）。
-                  「配图 N」回答本章配了几张图；出现删图时改为「配图 N（已删 M）」并挂
-                  Tooltip 列出每张图的删除理由 —— 用户在生成过程中即可解释
-                  「为什么正文里少了几张图」，不必等整批结束翻报告或去 grep 后端日志。
-                  零图表且无删图的普通章节不占位（那是最常见的正常情况）。 */}
-              {item.status === "success" && item.chart_yield &&
-                (item.chart_yield.chart_count > 0 || item.chart_yield.charts_dropped_count > 0) &&
-                (() => {
-                  const cy = item.chart_yield!;
-                  const texts = chartDropTexts(cy.charts_dropped);
-                  return texts.length > 0 ? (
-                    <Tooltip title={texts.join("；")}>
-                      <Tag color="warning" style={{ margin: 0, fontSize: 11, flexShrink: 0 }}>
-                        配图 {cy.chart_count}（已删 {cy.charts_dropped_count}）
-                      </Tag>
-                    </Tooltip>
-                  ) : (
-                    <Tag color="blue" style={{ margin: 0, fontSize: 11, flexShrink: 0 }}>
-                      配图 {cy.chart_count}
-                    </Tag>
-                  );
-                })()}
-              {/* ✅ F-CONTENT-STANDARD(2026-09-26)：模式徽标 + 校验告警。
-                  模式徽标回答「这章是按哪种标准写的」，告警 Popover 回答
-                  「哪里不符合、怎么改」—— 两问缺一，用户就只能靠通读正文自查。 */}
-              {item.generation_standard && (
-                <Tag
-                  color={item.generation_standard === "precise" ? "blue" : "cyan"}
-                  style={{ margin: 0, fontSize: 11, flexShrink: 0 }}
-                >
-                  {STANDARD_LABELS[item.generation_standard] || item.generation_standard}
-                </Tag>
-              )}
-              {item.status === "success" && reportHasIssues(item.standard_report) && (
-                <Popover
-                  placement="leftTop"
-                  title="生成标准校验（咨询性，不阻断生成）"
-                  content={
-                    <div style={{ maxWidth: 420, maxHeight: 300, overflowY: "auto" }}>
-                      {(item.standard_report?.issues || []).map((it: any, i: number) => (
-                        <div key={i} style={{ marginBottom: 6, fontSize: 12 }}>
-                          <Tag
-                            color={it?.severity === "error" ? "red" : "orange"}
-                            style={{ marginRight: 4, fontSize: 11 }}
-                          >
-                            {issueLabel(it)}
-                          </Tag>
-                          <span>{it?.message || "（无描述）"}</span>
-                          {it?.excerpt && (
-                            <div style={{ color: "#999", fontSize: 11, marginTop: 2 }}>
-                              原文：{it.excerpt}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  }
-                >
-                  <Tag color="volcano" style={{ margin: 0, fontSize: 11, flexShrink: 0, cursor: "help" }}>
-                    标准告警 {reportIssueCount(item.standard_report)}
-                  </Tag>
-                </Popover>
-              )}
-              {/* 生成中 → 实时耗时；已完成 → 总耗时 */}
-              {item.status === "running" ? (
-                <ElapsedTimer startTime={item.time} />
-              ) : (
-                typeof item.duration === "number" && (
-                  <Text type="secondary" style={{ fontSize: 11, marginLeft: 4, flexShrink: 0 }}>
-                    {item.duration < 1000
-                      ? `${item.duration}ms`
-                      : `${(item.duration / 1000).toFixed(1)}s`}
-                  </Text>
-                )
-              )}
-              {item.status === "failed" && (
-                <ExclamationCircleOutlined style={{ color: "#ff4d4f", fontSize: 13 }} />
-              )}
-            </div>
-            {item.status === "failed" && item.reason && (
-              <div
-                style={{
-                  marginTop: 2,
-                  padding: "4px 8px",
-                  background: "rgba(255,77,79,0.08)",
-                  borderLeft: "2px solid #ff4d4f",
-                  borderRadius: 2,
-                  fontSize: 12,
-                  color: "#cf1322",
-                  wordBreak: "break-all",
-                }}
-              >
-                {item.reason}
-              </div>
-            )}
-          </div>
-        </List.Item>
-      )}
-    />
-  );
-});
-
-// ✅ P0-5 组件拆分：生成进度卡（Progress + 统计 + 双日志）独立 memo 组件——
-//    生成期间高频更新的只有本卡与日志，抽离后整页其余部分不再随之重渲
-export type GenerationProgressProps = {
-  genType: string;
-  progress: number;
-  progressMsg: string;
-  sectionLogs: SectionLogItem[];
-  outlinePhase: string;
-  outlineDoneTotal: OutlineLogItem | null;
-  outlineLogs: OutlineLogItem[];
-  /** ✅ 进度增强：后端下发的运行统计（已耗时 / ETA / 累计字数 / 并发 / 进行中章节） */
-  stats?: GenStats;
-};
-
-/** ✅ 实时日志面板的最大渲染行数：仅限制渲染，数据源保持全量。
- *  长方案分步生成（数十章 × 多阶段）日志可达上千条，而这个滚动区仅 280px 高，
- *  全量渲染会造成严重掉帧；截断到最近若干条对用户可见内容无实质影响。 */
-const OUTLINE_LOG_RENDER_MAX = 200;
-
-export const GenerationProgressCard = memo(function GenerationProgressCard(p: GenerationProgressProps) {
-  const {
-    genType, progress, progressMsg, sectionLogs,
-    outlinePhase, outlineDoneTotal, outlineLogs, stats,
-  } = p;
-  // ✅ 性能优化：原实现把 `[...outlineLogs].reverse()` 写在 JSX 里 —— SSE 期间
-  //    progress 与日志每条更新都触发重渲，也就意味着每次都全量复制一遍整个数组，
-  //    同时把不断增加的日志全部渲染成 List.Item。改为按 outlineLogs 记忆化，
-  //    并对渲染行数设上限（数据源 outlineLogs 本身不动，其它派生产物如
-  //    outlineDoneTotal 仍需读取完整历史，行为保持不变）。
-  const outlineLogItems = useMemo(
-    () => (outlineLogs.length > OUTLINE_LOG_RENDER_MAX
-      ? outlineLogs.slice(-OUTLINE_LOG_RENDER_MAX).reverse()
-      : [...outlineLogs].reverse()),
-    [outlineLogs],
-  );
-  const isContent = genType === "content";
-  const isOutline = genType === "outline";
-  // ✅ 性能优化：正文生成期间 sectionLogs 随每条 SSE 更新，原实现的 3 次独立
-  //    filter 等同把整份日志遍历 3 遍（长方案可达数百章）。合并为单遍扫描 +
-  //    按 sectionLogs 记忆化，非本字段变化（如 progress）不再重算。
-  const { runningLogs, successCount, failedCount } = useMemo(() => {
-    const running: SectionLogItem[] = [];
-    let success = 0;
-    let failed = 0;
-    for (const l of sectionLogs) {
-      if (l.status === "running") running.push(l);
-      else if (l.status === "success") success += 1;
-      else if (l.status === "failed") failed += 1;
-    }
-    return { runningLogs: running, successCount: success, failedCount: failed };
-  }, [sectionLogs]);
-  // ✅ 进度增强：优先采用后端权威统计（含未进入日志的失败章），缺失时回退本地计数
-  const doneCount = typeof stats?.done === "number" ? stats.done : successCount + failedCount;
-  const totalCount = stats?.total ?? sectionLogs[0]?.total ?? 0;
-  const elapsedMs = stats?.elapsed_ms ?? null;
-  const etaMs = stats?.eta_ms ?? null;
-  const words = stats?.words ?? 0;
-  const concurrency = stats?.concurrency ?? 0;
-  const nodes = stats?.nodes ?? 0;
-  const avgSectionMs = stats?.avg_section_ms ?? null;
-  // ✅ 二次增强：失败数取「后端统计 / 本地日志」的较大值 —— 强制重写失败等场景
-  //    章节可能不在日志里（保留旧正文、状态未改），只看日志会把失败数显示为 0，
-  //    与完成提示的「N 章失败」自相矛盾。目录与正文模式同口径。
-  const failedShown = Math.max(
-    failedCount,
-    typeof stats?.failed === "number" ? stats.failed : 0,
-  );
-  // 目录生成分步链路才有章节维度（done/total = 已生成子目录的章数 / 总章数）
-  const outlineStepwise = isOutline && !!stats?.stepwise;
-  const hasFailed = failedShown > 0 && progress >= 1;
-  return (
-    <Card
-      size="small"
-      style={{ marginBottom: 12, flexShrink: 0 }}
-      styles={{ body: { padding: 12 } }}
-    >
-      <div style={{ display: "flex", gap: 16 }}>
-        {/* ---- 左侧：任务标题 + 横向进度条 + 运行统计 + 当前工作内容 ---- */}
-        <div style={{ flex: "0 0 420px", display: "flex", flexDirection: "column", gap: 8 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-            <Text strong style={{ fontSize: 13 }}>
-              {genType === "outline" ? "📂 正在生成目录"
-                : isContent ? "📝 正在生成正文" : "⏳ 正在处理"}
-            </Text>
-            {isContent && totalCount > 0 && (
-              <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
-                已完成 {doneCount}/{totalCount}
-              </Text>
-            )}
-            {outlineStepwise && totalCount > 0 && (
-              <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
-                已完成 {doneCount}/{totalCount} 章
-              </Text>
-            )}
-          </div>
-          <Progress
-            percent={Math.round(progress * 100)}
-            status={hasFailed ? "exception" : "active"}
-          />
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-            <Text style={{ fontSize: 12, color: "#666", flex: 1, minWidth: 0 }} ellipsis title={progressMsg}>
-              {progressMsg}
-            </Text>
-            <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
-              {Math.round(progress * 100)}%
-            </Text>
-          </div>
-
-          {/* ✅ 进度增强：运行态指标（已耗时 / 预计剩余 / 累计字数 / 并发档位 / 目录节点数）
-              目录生成同样展示已耗时与预计剩余 —— 审核+修复最长 180s，没有时间反馈时
-              用户无法判断是「在跑」还是「卡死」。 */}
-          {(isContent || isOutline) && (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {elapsedMs ? (
-                <Tag icon={<ClockCircleOutlined />} style={{ margin: 0 }}>
-                  已耗时 {fmtDuration(elapsedMs)}
-                </Tag>
-              ) : null}
-              {etaMs ? (
-                <Tag icon={<HourglassOutlined />} color="blue" style={{ margin: 0 }}>
-                  预计剩余 {fmtDuration(etaMs)}
-                </Tag>
-              ) : null}
-              {isContent && words > 0 ? (
-                <Tag icon={<FileTextOutlined />} style={{ margin: 0 }}>
-                  已生成 {words.toLocaleString()} 字
-                </Tag>
-              ) : null}
-              {/* ✅ 二次增强：平均单章耗时 —— 用户据此判断「还要等多久」「是不是变慢了」 */}
-              {isContent && avgSectionMs ? (
-                <Tag style={{ margin: 0 }} title="已完成章节的平均实测耗时">
-                  平均单章 {fmtDuration(avgSectionMs)}
-                </Tag>
-              ) : null}
-              {(isContent || isOutline) && failedShown > 0 ? (
-                <Tag color="error" style={{ margin: 0 }}>
-                  失败 {failedShown}
-                </Tag>
-              ) : null}
-              {isOutline && nodes > 0 ? (
-                <Tag icon={<FileTextOutlined />} style={{ margin: 0 }}>
-                  目录 {nodes} 个节点
-                </Tag>
-              ) : null}
-              {isContent && concurrency > 0 ? (
-                <Tag icon={<ThunderboltOutlined />} style={{ margin: 0 }}>
-                  并发 {concurrency}
-                </Tag>
-              ) : null}
-            </div>
-          )}
-
-          {/* ✅ 进度增强：当前正在生成的章节（章节名 + 阶段），让用户知道"卡在哪一步" */}
-          {isContent && runningLogs.length > 0 && (
-            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-              {runningLogs.slice(0, 4).map((l) => (
-                <Tag
-                  key={l.section_id}
-                  color={STAGE_COLOR[l.stage || "draft"] || "processing"}
-                  style={{ margin: 0, maxWidth: 200, overflow: "hidden" }}
-                  title={`${l.title}${l.stage_label ? " · " + l.stage_label : ""}`}
-                >
-                  <span style={{ fontSize: 11 }}>
-                    {typeof l.index === "number" ? `${l.index}. ` : ""}
-                    {l.title}
-                    {l.stage_label ? ` · ${l.stage_label}` : ""}
-                  </span>
-                </Tag>
-              ))}
-              {runningLogs.length > 4 && (
-                <Tag style={{ margin: 0, fontSize: 11 }}>
-                  +{runningLogs.length - 4}
-                </Tag>
-              )}
-            </div>
-          )}
-
-          {/* 统计色块：正文=章节统计；目录=阶段 + 已完成章节 */}
-          {genType === "outline" ? (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              <Tag color="processing" style={{ margin: 0 }}>
-                <LoadingOutlined /> {outlinePhase}
-              </Tag>
-              {/* 后端 stats 未到时（连接初期/旧任务）回退到日志推断的章节计数 */}
-              {!outlineStepwise && outlineDoneTotal && (
-                <Tag color="blue" style={{ margin: 0 }}>
-                  章节 {outlineDoneTotal.done}/{outlineDoneTotal.total}
-                </Tag>
-              )}
-            </div>
-          ) : (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              <Tag color="processing" style={{ margin: 0 }}>
-                <LoadingOutlined /> {runningLogs.length} 进行中
-              </Tag>
-              <Tag color="success" style={{ margin: 0 }}>
-                <CheckCircleOutlined /> {successCount} 成功
-              </Tag>
-              <Tag color="error" style={{ margin: 0 }}>
-                <CloseCircleOutlined /> {failedShown} 失败
-              </Tag>
-            </div>
-          )}
-        </div>
-
-        {/* ---- 右侧：正文生成章节滚动日志 ---- */}
-        {genType === "content" && (
-        <div style={{ flex: 1, minHeight: 0, maxHeight: 280, overflow: "auto", border: "1px solid #f0f0f0", borderRadius: 6, padding: "6px 10px", background: "#fafafa" }}>
-          {sectionLogs.length === 0 ? (
-            <div style={{ textAlign: "center", padding: 12, color: "#999" }}>
-              正在连接 AI，等待章节生成...
-            </div>
-          ) : (
-            <SectionLogList items={sectionLogs} />
-          )}
-        </div>
-        )}
-
-        {/* ---- 右侧：目录生成实时日志 ---- */}
-        {genType === "outline" && (
-        <div style={{ flex: 1, minHeight: 0, maxHeight: 280, overflow: "auto", border: "1px solid #f0f0f0", borderRadius: 6, padding: "6px 10px", background: "#fafafa" }}>
-          {outlineLogs.length === 0 ? (
-            <div style={{ textAlign: "center", padding: 12, color: "#999" }}>
-              正在连接 AI，准备生成目录...
-            </div>
-          ) : (
-            <List
-              size="small"
-              dataSource={outlineLogItems}
-              // ✅ 性能优化：反转后若沿用默认的 index key，每新增一条日志都会让
-              //    所有行的 key 顺移一位 → 全量 reconcile。改为按内容派生稳定 key。
-              rowKey={(item: OutlineLogItem) => `${item.time}-${item.message}`}
-              renderItem={(item) => (
-                <List.Item
-                  style={{
-                    padding: "4px 8px",
-                    borderRadius: 4,
-                    marginBottom: 4,
-                    background: "rgba(22,119,255,0.05)",
-                  }}
-                >
-                  <div style={{ width: "100%", display: "flex", alignItems: "center", gap: 8 }}>
-                    <Tag color="blue" style={{ margin: 0, minWidth: 46, textAlign: "center" }}>
-                      {Math.round(item.progress * 100)}%
-                    </Tag>
-                    <Text style={{ flex: 1, fontSize: 13 }} ellipsis title={item.message}>
-                      {item.message}
-                    </Text>
-                    {/* 仅分步链路（total>0）有章节维度，防历史日志渲染「0/0 章」 */}
-                    {typeof item.done === "number" && typeof item.total === "number" && item.total > 0 && (
-                      <Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>
-                        {item.done}/{item.total} 章
-                      </Text>
-                    )}
-                  </div>
-                </List.Item>
-              )}
-            />
-          )}
-        </div>
-        )}
-      </div>
-    </Card>
-  );
-});
-
-// ✅ P0-5 组件拆分：左侧目录树面板独立 memo 组件——生成期间进度/日志更新
-//    不再带动树与右侧 Tab 重渲；回调均以稳定引用传入
-type SchemeTreePanelProps = {
-  tree: TreeNode[];
-  treeData: any[];
-  expandedKeys: React.Key[];
-  selectedSectionKey?: React.Key;
-  loading: boolean;
-  generating: boolean;
-  onRefresh: () => void;
-  onToggleExpand: () => void;
-  /** ✅ 导航职责：目录"生成/管理"统一在「目录生成」Tab，左侧面板只负责跳转，避免两处重复入口 */
-  onGoToOutline: () => void;
-  onSelectSection: (key: React.Key) => void;
-  onExpand: (keys: React.Key[]) => void;
-  /** ✅ 编辑增强：左侧树也支持上移/下移/重命名/删除，复用与右侧编辑树同一套逻辑 */
-  moveFlags: Record<string, { up: boolean; down: boolean }>;
-  onMoveNode: (key: string, dir: -1 | 1) => void;
-  onRenameNode: (key: string, title: string) => void;
-  onDeleteNode: (key: string) => void;
-  onAddChildNode: (key: string) => void;
-  onAddSiblingNode: (key: string) => void;
-  /** ✅ 编辑增强：左侧树顶部"有未保存修改"提示中的「保存目录」动作 */
-  onSaveOutline: () => void;
-  /** 行内重命名编辑态（与右侧编辑树共用同一份状态） */
-  renamingKey: string | null;
-  renamingValue: string;
-  setRenamingKey: (k: string | null) => void;
-  setRenamingValue: (v: string) => void;
-  /** 左侧树滚动容器 ref（由父组件持有，编辑树移动时同步定位用） */
-  scrollRef: React.RefObject<HTMLDivElement>;
-};
-
-const SchemeTreePanel = memo(function SchemeTreePanel(p: SchemeTreePanelProps) {
-  const {
-    tree, treeData, expandedKeys, selectedSectionKey, loading,
-    generating,
-    onRefresh, onToggleExpand, onGoToOutline, onSelectSection, onExpand,
-    moveFlags, onMoveNode, onRenameNode, onDeleteNode,
-    onAddChildNode, onAddSiblingNode, onSaveOutline,
-    renamingKey, renamingValue, setRenamingKey, setRenamingValue, scrollRef,
-  } = p;
-  // ✅ 编辑增强：左侧树滚动容器（ref 由父组件持有，编辑树移动时同步定位）
-  const handleMoveNode = (key: string, dir: -1 | 1) => {
-    onMoveNode(key, dir);
-    scrollToNodeInContainer(scrollRef.current, key);
-  };
-  return (
-    <div
-      style={{
-        width: 300,
-        flexShrink: 0,
-        background: "#fafafa",
-        border: "1px solid #f0f0f0",
-        borderRadius: 8,
-        overflow: "hidden",
-        display: "flex",
-        flexDirection: "column",
-      }}
-    >
-      <div
-        style={{
-          padding: "10px 14px",
-          background: "#fff",
-          borderBottom: "1px solid #f0f0f0",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-        }}
-      >
-        <Space size={6}>
-          <FolderOpenOutlined style={{ color: "#1677ff" }} />
-          <Text strong style={{ fontSize: 13 }}>目录树</Text>
-          {tree.length > 0 && (
-            <Tag color="blue" style={{ margin: 0 }}>{collectAllKeys(tree).length}</Tag>
-          )}
-        </Space>
-        <Space size={4}>
-          <Tooltip title="刷新">
-            <Button size="small" type="text" icon={<ReloadOutlined />} onClick={onRefresh} />
-          </Tooltip>
-          <Tooltip title="展开/收起">
-            <Button size="small" type="text" icon={<SwapOutlined />} onClick={onToggleExpand} />
-          </Tooltip>
-        </Space>
-      </div>
-
-      {/* ✅ 编辑增强：左侧树新增 local_ 临时节点后，顶部高亮提醒需「保存目录」，
-          右侧工具栏已有橙色 Tag，这里在导航面板内也给出可一键保存的入口 */}
-      {hasUnsavedLocalNodes(tree) && (
-        <Alert
-          type="warning"
-          showIcon
-          banner
-          message="有未保存的新增章节"
-          description="新增的章节尚未同步到服务端，请点击「保存目录」。"
-          action={
-            <Button size="small" type="primary" onClick={onSaveOutline}>
-              保存目录
-            </Button>
-          }
-          style={{ borderRadius: 0 }}
-        />
-      )}
-
-      {/* 树（本面板只做"章节导航"，目录的生成/编辑统一在「目录生成」Tab；
-          但为编辑便利，行内提供上移/下移按钮，复用与右侧编辑树同一套 moveNode 逻辑） */}
-      <div ref={scrollRef} className="scroll-area" style={{ flex: 1, overflow: "auto", padding: "8px 4px", minHeight: 0 }}>
-        {/* ✅ 编辑增强：左侧树行内操作按钮默认隐藏，悬浮行时淡入，
-            小屏/窄面板下显著省空间（悬浮即"折叠/展开"） */}
-        <style>{`
-          .swb-tree-row .swb-act { opacity: 0; transition: opacity .15s ease; }
-          .swb-tree-row:hover .swb-act { opacity: 1; }
-          .swb-tree-row:hover { background: rgba(0,0,0,.03); }
-        `}</style>
-        {loading ? (
-          <div style={{ textAlign: "center", padding: 40, color: "#999" }}>加载中...</div>
-        ) : tree.length > 0 ? (
-          <Tree
-            treeData={treeData}
-            expandedKeys={expandedKeys}
-            onExpand={onExpand}
-            selectedKeys={selectedSectionKey ? [selectedSectionKey] : []}
-            onSelect={(keys) => {
-              if (keys.length > 0) onSelectSection(keys[0]);
-            }}
-            titleRender={(node: any) => {
-              // ✅ 编辑增强：行内重命名（与右侧编辑树共用 renamingKey 状态）
-              if (renamingKey === node.key) {
-                return (
-                  <Input
-                    size="small"
-                    autoFocus
-                    value={renamingValue}
-                    style={{ width: "100%" }}
-                    onChange={(e) => setRenamingValue(e.target.value)}
-                    onClick={(e) => e.stopPropagation()}
-                    onBlur={() => {
-                      onRenameNode(node.key, renamingValue);
-                      setRenamingKey(null);
-                    }}
-                    onPressEnter={() => {
-                      onRenameNode(node.key, renamingValue);
-                      setRenamingKey(null);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Escape") setRenamingKey(null);
-                      e.stopPropagation();
-                    }}
-                  />
-                );
-              }
-              return (
-                <div className="swb-tree-row" style={{ display: "flex", alignItems: "center", gap: 4, width: "100%" }}>
-                  <span
-                    style={{
-                      flex: 1,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {node.title}
-                  </span>
-                  <Space
-                    className="swb-act"
-                    size={2}
-                    align="center"
-                    style={{ flexShrink: 0, marginLeft: "auto" }}
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <Tooltip title="新增子章节">
-                      <Button
-                        type="text"
-                        size="small"
-                        tabIndex={-1}
-                        icon={<CaretRightOutlined />}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onAddChildNode(node.key);
-                        }}
-                      />
-                    </Tooltip>
-                    <Tooltip title="新增同级章节">
-                      <Button
-                        type="text"
-                        size="small"
-                        tabIndex={-1}
-                        icon={<PlusOutlined />}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onAddSiblingNode(node.key);
-                        }}
-                      />
-                    </Tooltip>
-                    <Tooltip title="重命名">
-                      <Button
-                        type="text"
-                        size="small"
-                        tabIndex={-1}
-                        icon={<EditOutlined />}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setRenamingValue(typeof node.title === "string" ? node.title : "");
-                          setRenamingKey(node.key);
-                        }}
-                      />
-                    </Tooltip>
-                    <Tooltip title={!moveFlags[node.key]?.up ? "已是最顶部" : "上移"}>
-                      <Button
-                        type="text"
-                        size="small"
-                        tabIndex={-1}
-                        disabled={!moveFlags[node.key]?.up}
-                        icon={<ArrowUpOutlined />}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleMoveNode(node.key, -1);
-                        }}
-                      />
-                    </Tooltip>
-                    <Tooltip title={!moveFlags[node.key]?.down ? "已是最底部" : "下移"}>
-                      <Button
-                        type="text"
-                        size="small"
-                        tabIndex={-1}
-                        disabled={!moveFlags[node.key]?.down}
-                        icon={<ArrowDownOutlined />}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleMoveNode(node.key, 1);
-                        }}
-                      />
-                    </Tooltip>
-                    <Tooltip title="删除（含所有子章节）">
-                      <Button
-                        type="text"
-                        size="small"
-                        tabIndex={-1}
-                        danger
-                        icon={<DeleteOutlined />}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onDeleteNode(node.key);
-                        }}
-                      />
-                    </Tooltip>
-                  </Space>
-                </div>
-              );
-            }}
-            showLine={{ showLeafIcon: false }}
-            blockNode
-          />
-        ) : (
-          <Empty description="暂无目录" image={Empty.PRESENTED_IMAGE_SIMPLE}>
-            <Button
-              size="small"
-              type="primary"
-              icon={<PlayCircleOutlined />}
-              disabled={generating}
-              onClick={onGoToOutline}
-            >
-              前往「目录生成」
-            </Button>
-          </Empty>
-        )}
-      </div>
-    </div>
-  );
-});
-
-/** 全局事实提取的进度日志条目（阶段/分段级） */
-type FactsLogItem = {
-  progress: number;   // 0~1
-  message: string;
-  time: number;       // epoch ms
-};
-
-/** 目录生成的进度日志条目（阶段/章节级，实时显示工作内容） */
-type OutlineLogItem = {
-  progress: number;   // 0~1
-  message: string;
-  done?: number;      // 已完成章节数（长方案分步生成时下发）
-  total?: number;     // 总章节数
-  time: number;       // epoch ms
-};
-
-const statusColor: Record<string, string> = {
-  empty: "default", pending: "processing", generated: "success",
-  expanded: "blue", reviewed: "green",
-};
-
-const statusText: Record<string, string> = {
-  empty: "待生成", pending: "生成中", generated: "已生成",
-  expanded: "已扩写", reviewed: "已审核",
-};
-
-/** 导出预检问题类型 → 中文标签（后端 export_check 会返回多种类型，需分别展示）
- *  ⚠️ 必须覆盖后端 `routers/export.py::_EXPORT_ISSUE_RULE_MAP` 的**全部 16 类** ——
- *  缺标签时界面会回退显示英文 type（`EXPORT_ISSUE_LABEL[iss.type] || iss.type`），
- *  用户看到 `global_facts_blocked：…` 之类裸代号。parity 由后端
- *  `tests/test_charts_r13_and_types_parity_20261004.py::TestExportIssueLabelParity`
- *  读本文件锁定（后端新增类型而漏改此处即失败）。 */
-const EXPORT_ISSUE_LABEL: Record<string, string> = {
-  empty_section: "空章节",
-  orphan_node: "孤立节点",
-  status_inconsistent: "状态不一致",
-  low_word_count: "字数偏少",
-  chart_failed: "图表异常",
-  chart_ungenerated: "图表未生成",
-  duplicate_section_number: "章节编号重复",
-  duplicate_section_title: "章节标题重复",
-  section_number_mismatch: "章节编号漂移",
-  bid_analysis_incomplete: "项目提取未完成",
-  review_pending: "章节待审核",
-  review_rejected: "章节审核未通过",
-  review_missing: "缺少章节审核记录",
-  global_facts_blocked: "全局事实待确认",
-  stale_cross_reference: "交叉引用已失效",
-  body_subheading_namespace_conflict: "正文子标题撞号",
-};
-
-/** 预检问题的一句话描述（title 缺失时回退 detail / chart_type） */
-function describeExportIssue(iss: any): string {
-  if (iss?.title) return iss.title;
-  if (iss?.detail) return iss.detail;
-  if (iss?.chart_type) return `图表类型 ${iss.chart_type}`;
-  return "—";
-}
-
-/**
- * 导出阶段标签（D2 加固 · 2026-10-06）。
- *
- * 独立成模块级常量（而非内联三元）：既让 `exportStage` 有真实消费点
- * （避免「声明了 state 却没人读」的死状态债），也便于单测直接断言
- * 「阶段 → 用户可读文案 + 序号」的映射不会漂移。
- */
-export const EXPORT_STAGE_LABEL: Record<"idle" | "charts" | "docx" | "pdf", string> = {
-  idle: "空闲",
-  charts: "渲染图表",
-  docx: "生成文档",
-  pdf: "生成 PDF",
-};
-
-/** 阶段在总流程中的序号（1 起，idle 不参与）。 */
-export const EXPORT_STAGE_ORDER: Record<string, number> = { charts: 1, docx: 2, pdf: 3 };
-
-/** 导出配置深合并（2026-10-06 · P0「折叠面板配置被静默丢弃」修复的配套纯函数）。
- *
- * `validateFields()` 只返回**已挂载**表单项的值，而导出配置表单的「封面与
- * 页面」面板默认折叠（defaultActiveKey=["basic","body","headings"]），其中
- * 12 项 —— `margins`(4) / `cover_info`(4) / `scheme_forms`(4)，即**页边距、
- * 封面项目信息表、专项施工方案四张法定前置表单**—— 未挂载即不进返回值，
- * 后端静默回落到自己的默认值（"界面拨了开关、导出毫无变化"）。
- *
- * 本函数把整份 form store（`getFieldsValue(true)`，antd `preserve` 默认 true
- * 保证折叠不丢值）与校验结果深合并：**只让 `validated` 覆盖同名叶子值**，
- * 既保留 `validateFields` 的校验语义，又不丢折叠面板里的配置。
- *
- * 独立成模块级纯函数（而非内联在 handleExport）便于单测直接断言嵌套语义。
- */
-export function deepMergeExportConfig(store: any, validated: any): any {
-  const base = store && typeof store === "object" ? store : {};
-  const patch = validated && typeof validated === "object" ? validated : {};
-  const out: any = Array.isArray(base) ? [...base] : { ...base };
-  for (const key of Object.keys(patch)) {
-    const pv = patch[key];
-    if (pv && typeof pv === "object" && !Array.isArray(pv)) {
-      out[key] = deepMergeExportConfig(out[key], pv);
-    } else if (pv !== undefined) {
-      out[key] = pv;
-    }
-  }
-  return out;
-}
-
-/** 后台任务类型中文标签（断线重挂接提示用） */
-const TASK_TYPE_LABEL: Record<string, string> = {
-  outline_generation: "目录生成",
-  content_generation: "正文生成",
-  facts_generation: "全局事实提取",
-};
-
-/**
- * ✅ 工作流 Tab 标签：步骤序号 + 标题 + 状态徽标。
- * 把「提取项目 → 目录生成 → 全局事实 → 正文生成 → 审核与预检 → 导出」的工序顺序
- * 直接画在导航栏上，用户一眼能看到当前在哪一步、下一步该做什么。
- */
 function WorkflowTabLabel({
   step,
   title,
@@ -3101,419 +523,7 @@ function WorkflowTabLabel({
 }
 
 /** 统计目录树中叶子章节的生成进度（正文页标签徽标用） */
-function countGeneratedLeaves(nodes: TreeNode[]): { done: number; total: number } {
-  let done = 0;
-  let total = 0;
-  const walk = (n: TreeNode) => {
-    if (!n.children || n.children.length === 0) {
-      total += 1;
-      if ((n.word_count || 0) > 0 || (n.content || "").trim()) done += 1;
-    } else {
-      n.children.forEach(walk);
-    }
-  };
-  nodes.forEach(walk);
-  return { done, total };
-}
 
-/** 规范符合性检查默认清单（每行一条，前端发送为 string[]，后端交给 AI 逐条判定） */
-const DEFAULT_COMPLIANCE_CHECKLIST = [
-  "是否引用了现行有效的规范、标准与设计文件",
-  "工程概况与周边环境描述是否完整（地质、水文、邻近建构筑物）",
-  "施工工艺流程是否覆盖全部工序且有可执行步骤",
-  "关键工序是否给出设计计算书与验算依据",
-  "材料与构配件规格、强度等级是否明确",
-  "安全保证措施是否覆盖主要风险源且有针对性",
-  "应急处置措施是否含组织机构、物资、演练要求",
-  "人员分工与岗位职责是否明确到岗到人",
-  "施工进度计划与劳动力配置是否匹配",
-  "验收要求与检验批划分是否符合规范",
-];
-
-// ===== 全文一致性 Agent 修复：状态/类型中文标签（与后端 conflict_type 对齐）=====
-const CR_TYPE_LABEL: Record<string, string> = {
-  numeric: "数值",
-  param: "参数",
-  person: "人名",
-  model: "型号",
-  timeline: "时间口径",
-  commitment: "承诺口径",
-  duplication: "章节重复",
-  facts: "与事实不符",
-  design: "与设计不符",
-  standard: "与规范不符",
-};
-const CR_STATUS_LABEL: Record<string, string> = {
-  pending: "待修复",
-  repaired: "已修复待确认",
-  accepted: "已接受",
-  skipped: "待人工确认",
-  failed: "修复失败",
-};
-const CR_ITEM_STATUS: Record<string, string> = {
-  repaired: "已修复",
-  skipped: "跳过",
-  failed: "失败",
-};
-const CR_REPAIR_STATUS: Record<string, string> = {
-  pending_confirm: "待确认",
-  confirmed: "已确认",
-  partially_confirmed: "部分确认",
-  rejected: "已拒绝",
-  rolled_back: "已回滚",
-};
-
-/** 全局事实分类选项（与后端 CATEGORY_TITLES 对齐，用于手工录入/编辑时归类） */
-const FACT_CATEGORY_OPTIONS: { value: string; label: string }[] = [
-  { value: "basic", label: "基本信息" },
-  { value: "basis", label: "编制依据" },
-  { value: "personnel", label: "人员角色" },
-  { value: "labor", label: "劳动力配置" },
-  { value: "schedule", label: "工期安排" },
-  { value: "equipment", label: "主要设备配置" },
-  { value: "machinery", label: "机械统计" },
-  { value: "material_mgmt", label: "材料管理" },
-  { value: "tech_param", label: "技术参数" },
-  { value: "scale", label: "工程规模与地质参数" },
-  { value: "risk", label: "风险与危大工程" },
-  { value: "safety_critical", label: "安全关键参数" },
-  { value: "deployment", label: "施工部署" },
-  { value: "temporary", label: "临时工程" },
-  { value: "process", label: "施工流程" },
-  { value: "execution", label: "工程做法" },
-  { value: "monitoring", label: "监测方案" },
-  { value: "quality", label: "质量标准" },
-  { value: "acceptance", label: "验收要求" },
-  { value: "commitment", label: "服务承诺" },
-  { value: "environment", label: "环保与文明施工" },
-  { value: "emergency", label: "应急处置" },
-  { value: "other", label: "其他事实" },
-];
-
-/** ✅ R81（2026-10-15）：要求 vs 事实口径选项（后端 value_kind 白名单同源）。
- *
- *  - `fact`：本方案已采用的确定性口径（默认，正文可直接引用）；
- *  - `requirement`：招标文件/规范的要求原文口径（无法安全转写时），
- *    正文引用须写「满足/响应要求」，不得当作本方案既定值；
- *  - 空串 = 未区分（历史行缺省），不渲染徽标、注入无前缀。
- *
- * 与后端 `facts_extractor.VALUE_KIND_ALLOWED` / `normalize_value_kind`
- * 的值域逐字一致；徽标渲染见条目行的「要求口径」Tag。
- */
-export const FACT_VALUE_KIND_OPTIONS: { value: string; label: string }[] = [
-  { value: "fact", label: "本方案口径（默认）" },
-  { value: "requirement", label: "要求口径（招标/规范原文）" },
-];
-
-/** 口径徽标文案（空串返回空——与徽标渲染「空值零渲染」纪律一致）。 */
-export function factValueKindLabel(vk?: string | null): string {
-  if (vk === "requirement") return "要求口径";
-  if (vk === "fact") return "本方案口径";
-  return "";
-}
-
-/** ✅ 2026-09-24：九大章节中文名（建办质〔2018〕31号）。
- *
- * ✅ 2026-10-06 降级为**离线兜底**：权威来源是 `GET /global-facts/category-map`
- * （后端 `facts_classification.category_map_payload()`，源自
- * `scheme_classification.NINE_CHAPTERS`）。此前本表是唯一来源 ——
- * 也就是后端增删章节后前端会静默显示旧标题。后端端点虽早已存在，
- * 前端却从未调用（`factsApi.categoryMap` 只被自己的单测引用）。
- * 现由 `loadFactCategoryMap` 在运行时覆盖；本表仅在端点不可用时兜底。
- * parity 护栏：backend/tests/test_global_facts_closeout_20261006.py。 */
-export const FACT_CHAPTER_TITLES: Record<string, string> = {
-  overview: "工程概况",
-  basis: "编制依据",
-  plan: "施工计划",
-  technique: "施工工艺技术",
-  safety: "施工安全保证措施",
-  personnel: "施工管理及作业人员配备和分工",
-  acceptance: "验收要求",
-  emergency: "应急处置措施",
-  calc_drawings: "计算书及相关施工图纸",
-};
-
-/** ✅ 2026-10-06：事实属性中文名。权威来源同为 /category-map 的 fact_attr_titles；
- *  下方 FALLBACK_FACT_ATTR_TITLES 仅在端点不可用时兜底（此前是 4 个内联三元）。 */
-export const FALLBACK_FACT_ATTR_TITLES: Record<string, string> = {
-  quantitative: "定量事实",
-  qualitative: "定性事实",
-  relation: "关系事实",
-  norm: "规范事实",
-};
-
-/** ✅ 2026-10-06：数据来源类型中文名。此前后端逐条下发 source_kind、
- *  统计里也有 by_source_kind，但**界面零展示** —— 用户无法分辨一条事实
- *  来自招标文件 / 图纸 / 现场勘察 / 总体方案 / 人工手册，而这正是判断
- *  「AI 编造 vs 资料原文」的关键依据。 */
-export const FALLBACK_SOURCE_KIND_TITLES: Record<string, string> = {
-  bid_doc: "项目文件解析提取",
-  drawing: "施工图设计文件提取",
-  survey: "勘察报告提取",
-  overall_plan: "施工组织设计提取",
-  manual: "用户补充录入",
-};
-
-/** 由后端事实条目的 chapter 键取中文标题；空值/未识别的键返回空串（不渲染徽标）。
- *  titles 缺省时用离线兜底表；运行时由 /category-map 覆盖。 */
-export function factChapterTitle(chapter?: string | null, titles?: Record<string, string>): string {
-  const table = titles && Object.keys(titles).length ? titles : FACT_CHAPTER_TITLES;
-  return (chapter && table[chapter]) || "";
-}
-
-/** 事实属性键 → 中文名。
- *
- * ✅ 2026-10-06 未识别键**返回空串**（与 factChapterTitle 同口径）。
- * 最初实现回落原键（便于排障），实测会在条目卡上渲染出「🗂 nope」这类噪声 ——
- * 三套枚举里只有属性/来源会这样显示，行为不一致反而更难判断是数据问题还是
- * 界面问题。统一为「不渲染」后，未识别值只会在原始 JSON 里出现。 */
-export function factAttrTitle(attr?: string | null, titles?: Record<string, string>): string {
-  if (!attr) return "";
-  const table = titles && Object.keys(titles).length ? titles : FALLBACK_FACT_ATTR_TITLES;
-  return table[attr] || "";
-}
-
-/** 数据来源类型键 → 中文名；未识别键同 factChapterTitle 返回空串。 */
-export function factSourceKindTitle(kind?: string | null, titles?: Record<string, string>): string {
-  if (!kind) return "";
-  const table = titles && Object.keys(titles).length ? titles : FALLBACK_SOURCE_KIND_TITLES;
-  return table[kind] || "";
-}
-
-// ============================================================
-// ✅ 全局事实分组列表（可测试组件，2026-09-20）：
-//    旧实现把「筛选 + 分组 Collapse + 条目卡片 + 矛盾裁决」全部内联在
-//    tabItems JSX 里，无法组件级测试；且分组级「编辑/删除」全断链 ——
-//    openFactEdit 死代码、factsApi.delete 无调用点。现抽出组件，
-//    数据操作全部回调化（API 调用留在页面层），纯筛选逻辑另导
-//    applyFactsFilter 供自动回退 effect / 组件 / 测试三方共用。
-// ============================================================
-
-/** 按筛选器返回带 filteredItems 的分组（all 不过滤但同样回填，保证消费口径统一） */
-export function applyFactsFilter(groups: any[], filter: string): any[] {
-  const out: any[] = [];
-  for (const g of groups || []) {
-    let items: any[] = g.items || [];
-    if (filter === "simulated") items = items.filter((it: any) => it.is_simulated);
-    else if (filter === "conflict") items = items.filter((it: any) => it.has_conflict);
-    else if (filter === "unresolved") items = items.filter((it: any) => !it.is_resolved);
-    if (filter !== "all" && items.length === 0) continue;
-    out.push({ ...g, filteredItems: items });
-  }
-  return out;
-}
-
-// ============================================================
-// ✅ R75 · G-D（2026-10-13）事实诊断「单侧失败不丢另一侧成果」：
-//    loadFactsDiagnostics 旧实现用 Promise.all 拉「章节覆盖度」与「危大阈值」
-//    两个**互相独立**的诊断 —— 任一 reject 即整体 reject，另一侧已到达的
-//    成果连带丢弃、两个面板一起空白。生产实证形态：danger-check 对空方案
-//    会 400（后端 P0 修复注释里记录过），此时 chapters 明明 200 返回，
-//    界面却两个面板都空 + 只有一条「加载事实诊断失败」。
-//    现改 Promise.allSettled 独立落定；合并判定抽成纯函数供组件级测试
-//    （沿用 applyFactsFilter 惯例，API 调用留在页面层）。
-// ============================================================
-export function mergeFactsDiagnosticsSettled(
-  chaptersRes: PromiseSettledResult<any>,
-  dangerRes: PromiseSettledResult<any>,
-): { chapters?: any; danger?: any; warning: string | null; aborted: boolean } {
-  const isAbort = (e: any) => e?.name === "AbortError";
-  const out: { chapters?: any; danger?: any; warning: string | null; aborted: boolean } =
-    { warning: null, aborted: false };
-  const failed: any[] = [];
-  if (chaptersRes.status === "fulfilled") out.chapters = chaptersRes.value?.data;
-  else failed.push(chaptersRes.reason);
-  if (dangerRes.status === "fulfilled") out.danger = dangerRes.value?.data;
-  else failed.push(dangerRes.reason);
-  const realFailures = failed.filter((e) => !isAbort(e));
-  // 双侧皆失败且均/含 AbortError（非真实错误）：整个请求作废，静默返回（与旧行为一致）
-  if (failed.length === 2 && failed.some(isAbort) && realFailures.length === 0) {
-    return { warning: null, aborted: true };
-  }
-  if (realFailures.length > 0) {
-    const e: any = realFailures[0];
-    out.warning = e?.response?.data?.detail || e?.message || "加载事实诊断失败";
-  }
-  return out;
-}
-
-// ============================================================
-// ✅ 全局事实左侧分类面板（2026-09-23）：目录树在事实页不再显示，
-//    左栏改为「提取结果分类」，点击分类 → 右侧「项目资料」下方
-//    仅展示该分类的分组事实。数据结构与交互对齐 ParseResultCategoryPanel。
-// ============================================================
-
-/** 单个分类的聚合条目（左侧面板数据源） */
-export type FactsCategoryEntry = {
-  category: string;
-  title: string;
-  groupCount: number;
-  itemCount: number;
-  simulated: number;
-  conflicts: number;
-  unresolved: number;
-};
-
-/**
- * 把分组列表按 category 聚合为分类清单（纯函数，可单测）。
- *
- * - label 优先取 labelOf(category)（页面注入 factCategoryOptions 的中文名），
- *   取不到回退 category 原文；
- * - 分组顺序保持后端稳定排序（按 category），不做二次重排；
- * - groups 为空/null 时安全返回 []。
- */
-export function buildFactsCategoryEntries(
-  groups: any[],
-  labelOf?: (cat: string) => string,
-): FactsCategoryEntry[] {
-  const out: FactsCategoryEntry[] = [];
-  const byCat = new Map<string, FactsCategoryEntry>();
-  for (const g of groups || []) {
-    const cat = (g?.category || "other").trim() || "other";
-    let e = byCat.get(cat);
-    if (!e) {
-      e = {
-        category: cat,
-        title: (labelOf?.(cat) || "").trim() || cat,
-        groupCount: 0,
-        itemCount: 0,
-        simulated: 0,
-        conflicts: 0,
-        unresolved: 0,
-      };
-      byCat.set(cat, e);
-      out.push(e);
-    }
-    e.groupCount += 1;
-    for (const it of g.items || []) {
-      e.itemCount += 1;
-      if (it.is_simulated) e.simulated += 1;
-      if (it.has_conflict) e.conflicts += 1;
-      if (!it.is_resolved) e.unresolved += 1;
-    }
-  }
-  return out;
-}
-
-/**
- * 选中分类的悬空回退（纯函数，可单测）：
- * - selected 仍在清单中 → 原样保留；
- * - 悬空（分组被删除/清空/筛选变化）→ 回退第一个分类；
- * - 无任何分类（尚未提取）→ null（右侧显示空态）。
- */
-export function resolveSelectedFactCategory(
-  entries: FactsCategoryEntry[],
-  selected: string,
-): string | null {
-  if (!entries || entries.length === 0) return null;
-  if (selected && entries.some((e) => e.category === selected)) return selected;
-  return entries[0].category;
-}
-
-/** 取某分类下的分组（保持原顺序；纯函数，可单测） */
-export function filterFactsGroupsByCategory(groups: any[], category: string): any[] {
-  if (!category) return groups || [];
-  return (groups || []).filter(
-    (g) => ((g?.category || "other").trim() || "other") === category,
-  );
-}
-
-/**
- * 左侧「事实分类」面板（与目录树面板同宽同风格，仅全局事实 Tab 显示）。
- * 纯展示组件：选中态与点击全部回调化。
- */
-export function FactsCategoryPanel({
-  entries,
-  totalItems,
-  selected,
-  onSelect,
-}: {
-  entries: FactsCategoryEntry[];
-  totalItems: number;
-  selected: string | null;
-  onSelect: (category: string) => void;
-}) {
-  return (
-    <div
-      style={{
-        width: 300,
-        flexShrink: 0,
-        background: "#fafafa",
-        border: "1px solid #f0f0f0",
-        borderRadius: 8,
-        overflow: "hidden",
-        display: "flex",
-        flexDirection: "column",
-      }}
-    >
-      <div
-        style={{
-          padding: "10px 14px",
-          background: "#fff",
-          borderBottom: "1px solid #f0f0f0",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-        }}
-      >
-        <Space size={6}>
-          <AppstoreOutlined style={{ color: "#1677ff" }} />
-          <Text strong style={{ fontSize: 13 }}>事实分类</Text>
-        </Space>
-        {totalItems > 0 && (
-          <Tag color="blue" style={{ margin: 0 }}>{totalItems} 项</Tag>
-        )}
-      </div>
-      <div className="scroll-area" style={{ flex: 1, overflow: "auto", padding: "8px 8px", minHeight: 0 }}>
-        {entries.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "24px 8px", color: "#999", fontSize: 13 }}>
-            暂无提取结果
-          </div>
-        ) : (
-          entries.map((e) => {
-            const active = e.category === selected;
-            return (
-              <div
-                key={e.category}
-                onClick={() => onSelect(e.category)}
-                style={{
-                  padding: "8px 10px",
-                  borderRadius: 6,
-                  marginBottom: 4,
-                  cursor: "pointer",
-                  background: active ? "#e6f4ff" : "transparent",
-                  border: active ? "1px solid #91caff" : "1px solid transparent",
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <span style={{
-                    flex: 1, minWidth: 0, fontWeight: active ? 600 : 400,
-                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  }} title={e.title}>
-                    {e.title}
-                  </span>
-                  <Tag style={{ margin: 0 }}>{e.itemCount} 项</Tag>
-                </div>
-                {(e.simulated > 0 || e.conflicts > 0 || e.unresolved > 0) && (
-                  <div style={{ display: "flex", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
-                    {e.simulated > 0 && <Tag color="orange" style={{ margin: 0 }}>⚠️{e.simulated}</Tag>}
-                    {e.conflicts > 0 && <Tag color="red" style={{ margin: 0 }}>🔸{e.conflicts}</Tag>}
-                    {e.unresolved > 0 && <Tag color="blue" style={{ margin: 0 }}>📝{e.unresolved}</Tag>}
-                  </div>
-                )}
-              </div>
-            );
-          })
-        )}
-      </div>
-    </div>
-  );
-}
-
-/** 事实分组列表：条目级 编辑/确认/矛盾裁决 + 分组级 编辑/删除，全部回调化 */
-// ✅ 性能优化：memo 化。本组件是模块级函数组件（非页面内），旧实现无任何记忆化：
-// 渲染频率 = 整页渲染频率（正文生成期间 ≤1 次/帧），而每次渲染都要跑
-// applyFactsFilter + 每组 3 次 filter 全量扫描 + 为 antd Collapse 重建全部条目。
 export const FactsGroupList = memo(function FactsGroupList({
   groups,
   filter,
@@ -3552,9 +562,9 @@ export const FactsGroupList = memo(function FactsGroupList({
   const visible = useMemo(() => applyFactsFilter(groups, filter), [groups, filter]);
   return (
     <Collapse
-      items={visible.map((g: any) => {
-        const allItems = g.items || [];
-        const items = g.filteredItems || allItems;
+      items={visible.map((g) => {
+        const allItems: FactItemLike[] = g.items || [];
+        const items: FactItemLike[] = g.filteredItems || allItems;
         // ✅ 性能优化：单次遍历同时统计三项计数（原实现 3 次独立 filter，
         // 事实条目数百条时每组重复扫描 3 遍）
         let simCount = 0;
@@ -3603,9 +613,9 @@ export const FactsGroupList = memo(function FactsGroupList({
           children: (
             <div>
               {/* 增强版：展示结构化 items（无结构化条目时回退整段 Markdown） */}
-              {items.length > 0 && items.some((it: any) => it.name || it.value) ? (
+              {items.length > 0 && items.some((it) => it.name || it.value) ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  {items.map((it: any, idx: number) => (
+                  {items.map((it, idx: number) => (
                     // ✅ 性能优化：稳定 key。旧实现用数组下标，切换筛选条件
                     //（全部/模拟值/矛盾/待审核）导致条目顺序变化时整块 DOM 被销毁
                     // 重建（展开态、输入焦点全部丢失）
@@ -3684,7 +694,7 @@ export const FactsGroupList = memo(function FactsGroupList({
                                 <Tag
                                   color="volcano"
                                   style={{ margin: 0, cursor: "pointer" }}
-                                  onClick={() => onAckStaleOne?.(it.fact_id || it.id, it.name || it.title)}
+                                  onClick={() => onAckStaleOne?.((it.fact_id || it.id) as string, it.name || (it as { title?: string }).title)}
                                 >
                                   来源已变化 ✓
                                 </Tag>
@@ -3719,9 +729,9 @@ export const FactsGroupList = memo(function FactsGroupList({
                               <Tooltip title={
                                 <div>
                                   <div><strong>矛盾选项：</strong></div>
-                                  {(it.conflict_values || []).map((cv: any, ci: number) => (
+                                  {(it.conflict_values || []).map((cv, ci: number) => (
                                     <div key={ci}>
-                                      {cv.value} ({cv.source}, 置信度 {(cv.confidence * 100).toFixed(0)}%)
+                                      {cv.value as string} ({cv.source}, 置信度 {(cv.confidence! * 100).toFixed(0)}%)
                                     </div>
                                   ))}
                                 </div>
@@ -3737,12 +747,12 @@ export const FactsGroupList = memo(function FactsGroupList({
                               </Tag>
                             )}
                             {/* 置信度小条 */}
-                            <Tooltip title={`置信度 ${(it.confidence * 100).toFixed(0)}%`}>
+                            <Tooltip title={`置信度 ${(it.confidence! * 100).toFixed(0)}%`}>
                               <div style={{
                                 width: 50, height: 6, borderRadius: 3,
-                                background: it.confidence >= 0.9 ? "#52c41a" :
-                                  it.confidence >= 0.7 ? "#1677ff" :
-                                  it.confidence >= 0.4 ? "#fa8c16" : "#ff4d4f",
+                                background: it.confidence! >= 0.9 ? "#52c41a" :
+                                  it.confidence! >= 0.7 ? "#1677ff" :
+                                  it.confidence! >= 0.4 ? "#fa8c16" : "#ff4d4f",
                                 opacity: 0.8,
                               }} />
                             </Tooltip>
@@ -3750,13 +760,13 @@ export const FactsGroupList = memo(function FactsGroupList({
                             {it.source && (
                               <span style={{ fontSize: 11, color: "#999" }}>
                                 📎 {it.source}
-                                {it.source_ref && ` · ${it.source_ref.slice(0, 30)}`}
+                                {(it as { source_ref?: string }).source_ref && ` · ${(it as { source_ref?: string }).source_ref!.slice(0, 30)}`}
                               </span>
                             )}
                           </div>
 
                           {/* 矛盾候选值列表 + 一键选值 */}
-                          {it.has_conflict && it.conflict_values?.length > 0 && (
+                          {it.has_conflict && (it.conflict_values?.length ?? 0) > 0 && (
                             <div style={{ marginTop: 4, padding: "4px 8px", background: "#fff7e6", borderRadius: 4 }}>
                               <Text type="secondary" style={{ fontSize: 12 }}>
                                 候选值（点击「选此值」裁决）：
@@ -3771,20 +781,20 @@ export const FactsGroupList = memo(function FactsGroupList({
                                     size="small"
                                     type="link"
                                     style={{ padding: 0, height: "auto" }}
-                                    onClick={() => onResolveConflict(it, it.value)}
+                                    onClick={() => onResolveConflict(it, it.value!)}
                                   >
                                     保留当前值
                                   </Button>
                                 </div>
-                                {it.conflict_values.map((cv: any, ci: number) => (
+                                {it.conflict_values!.map((cv, ci: number) => (
                                   <div key={ci} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                    <Tag color="orange" style={{ margin: 0 }}>{cv.value}</Tag>
+                                    <Tag color="orange" style={{ margin: 0 }}>{cv.value as string}</Tag>
                                     <span style={{ fontSize: 11, color: "#999" }}>来自 {cv.source}</span>
                                     <Button
                                       size="small"
                                       type="link"
                                       style={{ padding: 0, height: "auto" }}
-                                      onClick={() => onResolveConflict(it, cv.value)}
+                                      onClick={() => onResolveConflict(it, cv.value as string)}
                                     >
                                       选此值
                                     </Button>
@@ -3834,13 +844,18 @@ export const FactsGroupList = memo(function FactsGroupList({
   );
 });
 
+
 export default function SchemeWorkbenchPage() {
   const { id } = useParams();
   const { message: _antdMsg, modal } = App.useApp();
   // ✅ 消息中心：页面所有 msg.* 弹出消息（目录/正文生成、审核与预检、导出文档等）
   //    自动同步进全局活动记录，标题栏中部 ActivityHint 可实时查看
   const msg = useAntdMessageHub(_antdMsg, "方案工作台");
-  const [scheme, setScheme] = useState<any>(null);
+  const [scheme, setScheme] = useState<SchemeRecord | null>(null);
+  // R-P1 拆分：project_id 提取为组件级 const —— 既作 useDocumentWorkflow /
+  // useBidAnalysis 的 deps 值，也供 loadDocuments / loadBaResults 等依赖数组
+  // 引用同一绑定（值语义与 scheme?.project_id 完全一致）。
+  const schemeProjectId = scheme?.project_id;
   const [tree, setTree] = useState<TreeNode[]>([]);
   // 长方案分步目录生成时，子目录生成失败的章节标题列表（用于高亮提示）
   const [failedOutlineChapters, setFailedOutlineChapters] = useState<string[]>([]);
@@ -3850,7 +865,7 @@ export default function SchemeWorkbenchPage() {
   // 审核阶段做覆盖检查并自动修复补齐
   const [requirements, setRequirements] = useState("");
   // 导入目录时检测到的多标段提示（对齐 OpenBidKit bidSectionDetector）
-  const [multiSectionHint, setMultiSectionHint] = useState<any>(null);
+  const [multiSectionHint, setMultiSectionHint] = useState<MultiSectionHint | null>(null);
   // 加载已保存的编制要求（config_json.requirements）
   useEffect(() => {
     const pid = scheme?.project_id;
@@ -3882,13 +897,13 @@ export default function SchemeWorkbenchPage() {
   //    要等在飞 AI 调用被 cancel / 段边界检查点命中），按钮保持置灰直至任务落
   //    终态。旧实现发完指令立刻乐观报「已停止」，用户以为还能接着点。
   const [taskStopping, setTaskStopping] = useState(false);
-  const [selectedSection, setSelectedSection] = useState<any>(null);
+  const [selectedSection, setSelectedSection] = useState<WorkbenchSection | null>(null);
   const [facts, setFacts] = useState<FactGroup[]>([]);
   const [factsSummary, setFactsSummary] = useState<FactsSummary | null>(null);
   // ✅ facts 加载已落定（成功或失败都置 true）：起始 Tab 判定以它为「可以决策」
   //    信号 —— 旧实现只看 factsSummary===null，加载失败时永远停在等待态。
   const [factsReady, setFactsReady] = useState(false);
-  const [docList, setDocList] = useState<any[]>([]);
+  const [docList, setDocList] = useState<DocRecord[]>([]);
   // ===== ✅ 接线 factsApi.create / factsApi.update（手工新增与修改事实）=====
   const [factModalOpen, setFactModalOpen] = useState(false);
   const [factEditingId, setFactEditingId] = useState<string | null>(null);
@@ -3897,7 +912,7 @@ export default function SchemeWorkbenchPage() {
   const [factForm] = Form.useForm();
   // ===== 单条事实编辑（item_updates：改名称/值/分类/模拟值标记，不重建分组）=====
   const [factItemModalOpen, setFactItemModalOpen] = useState(false);
-  const [factItemEditing, setFactItemEditing] = useState<any>(null);
+  const [factItemEditing, setFactItemEditing] = useState<(FactItemLike & { groupId?: string; groupTitle?: string }) | null>(null);
   const [factItemSubmitting, setFactItemSubmitting] = useState(false);
   const [factItemForm] = Form.useForm();
   // 全局事实 Tab 筛选：全部 / 模拟值 / 矛盾 / 待审核
@@ -3910,9 +925,9 @@ export default function SchemeWorkbenchPage() {
   const [factsLogs, setFactsLogs] = useState<FactsLogItem[]>([]);
   const factsLogsRef = useRef<FactsLogItem[]>([]);
   // 最近一次提取的分段统计（用于展示"哪些段失败、为什么失败"）
-  const [factsSegmentStats, setFactsSegmentStats] = useState<any>(null);
+  const [factsSegmentStats, setFactsSegmentStats] = useState<FactsSegmentStats | null>(null);
   // ✅ SSE completed 事件的跨段矛盾清单（旧版前端未消费，2026-09-20 接线）
-  const [factsCrossConflicts, setFactsCrossConflicts] = useState<any[]>([]);
+  const [factsCrossConflicts, setFactsCrossConflicts] = useState<FactCrossConflict[]>([]);
   // ✅ 事实分类白名单：初始为本地 FACT_CATEGORY_OPTIONS，挂载后由 GET /global-facts/categories 覆盖
   const [factCategoryOptions, setFactCategoryOptions] = useState<{ value: string; label: string }[]>(FACT_CATEGORY_OPTIONS);
   // ✅ 2026-10-06：九大章节标题 / 事实属性名 / 来源类型名 —— 权威来源是
@@ -3923,6 +938,11 @@ export default function SchemeWorkbenchPage() {
   const [factSourceKindTitles, setFactSourceKindTitles] = useState<Record<string, string>>(FALLBACK_SOURCE_KIND_TITLES);
   // ✅ 2026-10-06：分页状态（消费后端 pagination；此前从不下发 limit/offset）
   const [factsPage, setFactsPage] = useState(1);
+  // ✅ R166：loadFacts 的默认页码走 ref 镜像 —— 旧实现把 factsPage 放进
+  //    loadFacts 的 useCallback deps，分页 setState → loadFacts 身份变化 →
+  //    挂载 effect 整体重跑（目录全量 + 合规历史 + 专家项 3-4 个无关请求
+  //    随每次翻页重发）。ref 镜像后 loadFacts 引用稳定，分页只发事实列表请求。
+  const factsPageRef = useRef(1);
   const [factsPagination, setFactsPagination] = useState<FactPagination | null>(null);
   // ✅ 左侧分类面板（2026-09-23）：全局事实 Tab 选中分类（悬空时由
   //    resolveSelectedFactCategory 回退）+ 项目资料卡片折叠态（默认收起）
@@ -3961,14 +981,14 @@ export default function SchemeWorkbenchPage() {
   const [exportPct, setExportPct] = useState(0);
   // ✅ 导出预检独立 loading（旧实现复用 exporting，点预检不显示加载态、还会误亮导出按钮）
   const [checkingExport, setCheckingExport] = useState(false);
-  const [exportIssues, setExportIssues] = useState<any[]>([]);
-  const [exportStats, setExportStats] = useState<any>(null);
+  const [exportIssues, setExportIssues] = useState<ExportIssueGate[]>([]);
+  const [exportStats, setExportStats] = useState<ExportStats | null>(null);
   // ✅ G1：就绪度总检摘要（由导出预检接口一并返回，不再需要来回切换页面）
-  const [exportPreflight, setExportPreflight] = useState<any>(null);
+  const [exportPreflight, setExportPreflight] = useState<ExportPreflight | null>(null);
   // ✅ 《待补充清单》（2026-09-24）：导出预检返回的占位符聚合（含按字段/按章节）
-  const [placeholderReport, setPlaceholderReport] = useState<any>(null);
+  const [placeholderReport, setPlaceholderReport] = useState<PlaceholderReport | null>(null);
   // ✅ 重跑计划（治 F 层第 3 条）：哪些章节的占位字段已有补录数据、可自动重跑
-  const [rerunPlan, setRerunPlan] = useState<any>(null);
+  const [rerunPlan, setRerunPlan] = useState<ExportRerunPlan | null>(null);
   const [rerunning, setRerunning] = useState(false);
   const [exportPhase, setExportPhase] = useState<string>("");
   // ✅ 2026-10-01：预检结论只用于展示提示，不再用于禁用导出按钮
@@ -3979,7 +999,7 @@ export default function SchemeWorkbenchPage() {
     readiness: exportPreflight,
   }), [exportIssues, exportPreflight, exportStats]);
   // ===== ✅ 导出格式预设库（对标 OpenBidKit exportFormatPresets）=====
-  const [exportPresets, setExportPresets] = useState<any[]>([]);
+  const [exportPresets, setExportPresets] = useState<ExportPresetItem[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState<string>("");
   // 导出域四类请求各自独立取消：预设读取、导出预检、缓存查询、文档导出。
   const presetListAbortRef = useRef<AbortController | null>(null);
@@ -3993,167 +1013,30 @@ export default function SchemeWorkbenchPage() {
   // ✅ BUG 修复（R-3，2026-10-04）：handleExportCheck 只有 abort ref、无同步锁；
   //    React 状态更新异步批处理，同一帧双击仍会并发进入（与 handleExport 的 exportingRef 同病）。
   const checkingExportRef = useRef(false);
-  const fetchExportPresets = useCallback(async (sid: string) => {
-    presetListAbortRef.current?.abort();
-    const controller = new AbortController();
-    presetListAbortRef.current = controller;
-    try {
-      const { data } = await exportApi.presets.list(sid, controller.signal);
-      if (
-        controller.signal.aborted
-        || currentSchemeIdRef.current !== sid
-        || presetListAbortRef.current !== controller
-      ) return;
-      const presets = data.presets || [];
-      setExportPresets(presets);
-      const defaultPreset = findDefaultExportPreset(presets);
-      if (defaultPreset) {
-        setSelectedPresetId(defaultPreset.id);
-        exportForm.setFieldsValue(defaultPreset.config || {});
-      } else {
-        setSelectedPresetId("");
-      }
-    } catch {
-      // 非致命：预设缺失不影响导出；切方案产生的取消不提示错误。
-    } finally {
-      if (presetListAbortRef.current === controller) presetListAbortRef.current = null;
-    }
-  }, [exportForm]);
-  // ✅ R-1：手动刷新预设（点"刷新"按钮）— 与保存/删除/设默认后的自动刷新区分，
-  //    否则自动刷新会把 presetOpLoading 从 "save" 覆盖成 "refresh" 造成按钮状态跳变。
-  const handleRefreshPresets = async () => {
-    if (!id || presetOpLoading) return;
-    const sid = id;
-    setPresetOpLoading("refresh");
-    try {
-      await fetchExportPresets(sid);
-    } finally {
-      setPresetOpLoading(null);
-    }
-  };
-  useEffect(() => {
-    exportForm.resetFields();
-    setExportPresets([]);
-    setSelectedPresetId("");
-    setExportIssues([]);
-    setExportStats(null);
-    setExportPreflight(null);
-    setPlaceholderReport(null);
-    setRerunPlan(null);
-    setCacheStatus(null);
-    if (id) fetchExportPresets(id);
-  }, [id, fetchExportPresets]);
-  const handleSavePreset = async () => {
-    // ✅ BUG 修复：id 来自 useParams（string | undefined），旧实现未判空，
-    //    直接把 undefined 传给 API（类型报错 + 请求 /schemes/undefined/...）
-    if (!id || presetOpLoading) return;
-    const sid = id;
-    const config = exportForm.getFieldsValue(true);
-    // ✅ R-2：弃用 window.prompt —— 浏览器原生弹窗既不受 AntD 主题影响、
-    //    也不能通过 onOk 受控取消，且测试环境里 jsdom 无 prompt API 会失败。
-    //    改用 Modal.confirm + 内联 Input，与项目其他确认弹窗风格一致。
-    //    okButtonProps.disabled 在 modal.confirm 中是静态快照（不会因 Input 变化重渲染），
-    //    所以按钮保持启用、在 onOk 内做空名称校验：拒绝提交并让弹窗保持打开。
-    //    注意：modal.confirm 返回值在部分 AntD 版本不是 Promise，
-    //    因此 loading 清理放在 onOk / onCancel 的 finally 中（不依赖返回值）。
-    // 只改 nameRef.current，绑定本身从不重新赋值 → const（eslint prefer-const）
-    const nameRef: { current: string } = { current: "" };
-    setPresetOpLoading("save");
-    modal.confirm({
-      title: "保存为格式预设",
-      content: (
-        <Input
-          size="small"
-          autoFocus
-          placeholder="请输入格式预设名称"
-          maxLength={40}
-          style={{ marginTop: 8 }}
-          onChange={(e) => { nameRef.current = (e.target.value || "").trim(); }}
-          onPressEnter={() => {
-            // Enter 键直接确认；onOk 内会做空名称校验
-            const box = document.querySelector(".ant-modal-confirm-btns .ant-btn-primary");
-            (box as HTMLButtonElement | null)?.click();
-          }}
-        />
-      ),
-      okText: "保存",
-      cancelText: "取消",
-      onOk: async () => {
-        try {
-          const name = nameRef.current;
-          if (!name) {
-            // 空名称：throw 让 modal.confirm 保持打开（AntD 特性）
-            msg.warning("请输入格式预设名称");
-            return Promise.reject(new Error("empty name"));
-          }
-          await exportApi.presets.create(sid, name, config);
-          if (currentSchemeIdRef.current === sid) {
-            msg.success("已保存为格式预设");
-            await fetchExportPresets(sid);
-          }
-        } catch (e: any) {
-          if (currentSchemeIdRef.current === sid) msg.error(e?.message || "保存预设失败");
-          // 让弹窗保持打开，方便用户重试
-          return Promise.reject(e);
-        } finally {
-          setPresetOpLoading(null);
-        }
-      },
-      onCancel: () => setPresetOpLoading(null),
-    });
-  };
-  const handleSetDefaultPreset = async (pid: string) => {
-    if (!id || presetOpLoading) return;
-    const sid = id;
-    setPresetOpLoading("setDefault");
-    try {
-      await exportApi.presets.setDefault(sid, pid);
-      if (currentSchemeIdRef.current !== sid) return;
-      msg.success("已设为项目默认预设");
-      await fetchExportPresets(sid);
-    } catch (e: any) {
-      if (currentSchemeIdRef.current === sid) msg.error(e?.message || "操作失败");
-    } finally {
-      setPresetOpLoading(null);
-    }
-  };
-  const handleDeletePreset = (pid: string) => {
-    if (!id || presetOpLoading) return;
-    const sid = id;
-    setPresetOpLoading("delete");
-    // ✅ BUG 修复（2026-10-04）：AntD v5 的 modal.confirm() 不返回 Promise，
-    //   不能在返回值上 .finally()（会 TypeError: ... is not a function）。
-    //   loading 清理放 onOk / onCancel 的 finally，失败重试时也能清掉 loading
-    //   —— 否则接口 reject 后弹窗留着、按钮却永远转圈。
-    modal.confirm({
-      title: "确认删除该格式预设？",
-      okText: "删除", okButtonProps: { danger: true },
-      cancelText: "取消",
-      onOk: async () => {
-        try {
-          try {
-            await exportApi.presets.remove(sid, pid);
-            if (currentSchemeIdRef.current !== sid) return;
-            msg.success("已删除预设");
-            if (selectedPresetId === pid) setSelectedPresetId("");
-            await fetchExportPresets(sid);
-          } catch (e: any) {
-            if (currentSchemeIdRef.current === sid) msg.error(e?.message || "删除失败");
-            // 让弹窗保持打开，方便用户重试
-            return Promise.reject(e);
-          }
-        } finally {
-          setPresetOpLoading(null);
-        }
-      },
-      onCancel: () => setPresetOpLoading(null),
-    });
-  };
+  // R-P1 拆分：currentSchemeIdRef 定义自下方 1175 行上移至此 —— useExportPresets
+  // hook 调用点在预设块原位置，deps 对象在 render 期即求值，必须先于其声明（避 TDZ）。
+  const currentSchemeIdRef = useRef(id || "");
+  currentSchemeIdRef.current = id || "";
+  // ===== ✅ 接线 exportApi.cacheStatus（历史导出缓存可见）=====
+  // R-P1 拆分：声明自下方 816 行上移，setCacheStatus 是 useExportPresets 的 deps
+  const [cacheStatus, setCacheStatus] = useState<ExportCacheStatus | null>(null);
+  const [cacheLoading, setCacheLoading] = useState(false);
+  const {
+    fetchExportPresets, handleRefreshPresets, handleSavePreset,
+    handleSetDefaultPreset, handleDeletePreset, loadCacheStatus,
+  } = useExportPresets({
+    id, exportForm, presetOpLoading, setPresetOpLoading, selectedPresetId,
+    cacheAbortRef, setCacheLoading,
+    currentSchemeIdRef, presetListAbortRef,
+    setExportPresets, setSelectedPresetId, setExportIssues,
+    setExportStats, setExportPreflight, setPlaceholderReport,
+    setRerunPlan, setCacheStatus, msg, modal,
+  });
   // ===== ✅ 接线 sectionsApi.quality（正文质量自检：口语化/AI 腔残留 + 废止标准）=====
   //  后端早有该能力但前端从未调用（孤儿接口），属于"后端算得出、用户看不见"的
   //  信息断链；交付前自检的三个预检项在此补齐最后一块。
   const [checkingQuality, setCheckingQuality] = useState(false);
-  const [qualityResult, setQualityResult] = useState<any>(null);
+  const [qualityResult, setQualityResult] = useState<QualityCheckResult | null>(null);
   // ===== ✅ 全文一致性 Agent 修复（F-AGENT-CONSISTENCY-REPAIR）=====
   //  正文全部生成后自动执行「扫描 → 仲裁 → 定向修复」：修复前自动留版本快照，
   //  修复结果先写正文但待确认，用户可在「修复工作台」逐条确认或一键回滚。
@@ -4181,21 +1064,18 @@ export default function SchemeWorkbenchPage() {
   const [crScanning, setCrScanning] = useState(false);
   const [crRepairing, setCrRepairing] = useState(false);
   const [crLoading, setCrLoading] = useState(false);
-  const [crConflicts, setCrConflicts] = useState<any[]>([]);
-  const [crSummary, setCrSummary] = useState<any>(null);
+  const [crConflicts, setCrConflicts] = useState<CrConflictItem[]>([]);
+  const [crSummary, setCrSummary] = useState<CrSummary | null>(null);
   const [crScanId, setCrScanId] = useState<string>("");
-  const [crRepair, setCrRepair] = useState<any>(null);
-  const [crHistory, setCrHistory] = useState<any[]>([]);
-  // ===== ✅ 接线 exportApi.cacheStatus（历史导出缓存可见）=====
-  const [cacheStatus, setCacheStatus] = useState<{ items: any[]; total: number; stale: number } | null>(null);
-  const [cacheLoading, setCacheLoading] = useState(false);
+  const [crRepair, setCrRepair] = useState<CrRepairResult | null>(null);
+  const [crHistory, setCrHistory] = useState<CrRepairHistoryItem[]>([]);
   const [expertItems, setExpertItems] = useState<string[]>([]);
-  const [expertResult, setExpertResult] = useState<any>(null);
+  const [expertResult, setExpertResult] = useState<ExpertReviewResult | null>(null);
   // ===== ✅ 接线 complianceApi.check / complianceApi.results（规范符合性检查 + 历史记录）=====
   const [checklistText, setChecklistText] = useState(DEFAULT_COMPLIANCE_CHECKLIST.join("\n"));
   const [checkingCompliance, setCheckingCompliance] = useState(false);
-  const [complianceResults, setComplianceResults] = useState<any[]>([]);
-  const [complianceHistory, setComplianceHistory] = useState<any[]>([]);
+  const [complianceResults, setComplianceResults] = useState<ComplianceResultItem[]>([]);
+  const [complianceHistory, setComplianceHistory] = useState<ComplianceHistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   // ===== 审核规则库（后端唯一事实源）=====
   // 此前清单在前端硬编码、后端 EXPERT_CHECK_ITEMS、提示词内联文案三处重复维护，
@@ -4228,13 +1108,13 @@ export default function SchemeWorkbenchPage() {
   // 文件分类下拉选项（后端 /global-facts/documents/category-options）
   const [categoryOptions, setCategoryOptions] = useState<string[]>([]);
   // 解析内容预览弹窗
-  const [previewDoc, setPreviewDoc] = useState<any>(null);
+  const [previewDoc, setPreviewDoc] = useState<DocRecord | null>(null);
   const [previewText, setPreviewText] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
   // 预览接口的完整响应：用于派生「文档内容不完整 / 仅预览截取 / 解析告警」提示。
   // 只存 text 会把后端已经算好的 truncated / parse_warnings 丢掉，
   // 用户在预览里看到的是一段看起来正常的短正文，无法判断内容是否真的完整。
-  const [previewData, setPreviewData] = useState<any>(null);
+  const [previewData, setPreviewData] = useState<DocPreviewData | null>(null);
   // ✅ 四层存储（解析质量）预览接线：预览弹窗内展示 status/completeness 概览，
   //    并提供重新解析 / 物化提取层 / 交叉校验 / 刷新质量四个动作。
   const [pipelineStatus, setPipelineStatus] = useState<DocumentPipelineStatusLike | null>(null);
@@ -4245,10 +1125,10 @@ export default function SchemeWorkbenchPage() {
   const [baDefs, setBaDefs] = useState<BaItemDef[]>([]);
   // 解析项定义（/bid-analysis/items）加载失败原因：非空时 Tab 展示错误态 + 重试
   const [baDefsError, setBaDefsError] = useState<string | null>(null);
-  const [baGroups, setBaGroups] = useState<any[]>([]);
+  const [baGroups, setBaGroups] = useState<BaGroup[]>([]);
   const [baItems, setBaItems] = useState<BaStoredItem[]>([]);
-  const [baSummary, setBaSummary] = useState<any>(null);
-  const [selectedBaItem, setSelectedBaItem] = useState<any>(null);
+  const [baSummary, setBaSummary] = useState<BaSummary | null>(null);
+  const [selectedBaItem, setSelectedBaItem] = useState<BaStoredItem | null>(null);
   // 2026-09-23 需求拆分：左侧列表 & 右侧详情分别渲染 ParseResultCategoryPanel，
   // 通过共享对象串联展开/激活状态，避免"点击左侧分类，右侧详情不同步"的割裂。
   const sharedParseState = useRef<ParsePanelSharedState>({
@@ -4256,19 +1136,19 @@ export default function SchemeWorkbenchPage() {
     activeKey: null,
   }).current;
   const [sectionChecking, setSectionChecking] = useState(false);
-  const [sectionCheckResult, setSectionCheckResult] = useState<any>(null);
+  const [sectionCheckResult, setSectionCheckResult] = useState<Record<string, unknown> | null>(null);
   // 配置弹窗（mode = key 必选 / full 全部 / custom 自定义勾选）
   const [baConfigOpen, setBaConfigOpen] = useState(false);
   const [baModeOpt, setBaModeOpt] = useState<"key" | "full" | "custom">("key");
   const [baSelectedIds, setBaSelectedIds] = useState<string[]>([]);
   const [baForceRerun, setBaForceRerun] = useState(false);
   // 「查看完整」弹窗 + 本地 SSE 运行态（进度优先取本地事件，轮询作兜底）
-  const [baFullItem, setBaFullItem] = useState<any>(null);
+  const [baFullItem, setBaFullItem] = useState<BaStoredItem | null>(null);
   // ✅ 人工校正闭环（2026-09-23 复原）：AI 抽错关键参数时直接改写单项结果（source='manual'）。
   //   后端 PUT/DELETE /results/{item_id} 已实现；组件 BidAnalysisTab 与「解析信息分类
   //   显示栏」均有「人工校正」入口（onEditItem 真值才渲染）。此前页面从未传 onEditItem
   //   → 按钮在生产环境从不渲染，这里补齐 openBaEdit / handleBaSaveEdit / handleBaClearEdit。
-  const [baEditItem, setBaEditItem] = useState<any>(null);
+  const [baEditItem, setBaEditItem] = useState<BaEditItemLike | null>(null);
   const [baEditValue, setBaEditValue] = useState("");
   const [baEditSaving, setBaEditSaving] = useState(false);
   // 「解析信息分类显示栏」加载/错误态（供上传解析 Tab 复用）
@@ -4321,7 +1201,7 @@ export default function SchemeWorkbenchPage() {
    *   本函数只写 `sectionLogsRef` 与 `setSectionLogs`（后者是稳定引用），
    *   因此跨渲染恒定安全。纯函数在无明细时原样返回同一引用 → 跳过 setState。
    */
-  const mergeFailedSectionsIntoRef = useCallback((list: any) => {
+  const mergeFailedSectionsIntoRef = useCallback((list: unknown) => {
     const next = mergeFailedSectionsInto(sectionLogsRef.current, list);
     if (next === sectionLogsRef.current) return;
     sectionLogsRef.current = next;
@@ -4347,12 +1227,12 @@ const draftKey = selectedSection && id
   // ===== ✅ 接线 outlineLibraryApi.applyAndSave / uploadOutlineApi.saveAsLibrary =====
   /** 目录库选择弹窗（只列「已通过」的库） */
   const [libOpen, setLibOpen] = useState(false);
-  const [libItems, setLibItems] = useState<any[]>([]);
+  const [libItems, setLibItems] = useState<OutlineLibraryItem[]>([]);
   const [libLoading, setLibLoading] = useState(false);
   const [libApplying, setLibApplying] = useState(false);
   const [libKeyword, setLibKeyword] = useState("");
   /** 最近一次「导入目录（智能识别）」的 upload 记录，用于「存为目录库」 */
-  const [lastUpload, setLastUpload] = useState<{ id: string; name: string; outline: any[] } | null>(null);
+  const [lastUpload, setLastUpload] = useState<{ id: string; name: string; outline: OutlineNodeInput[] } | null>(null);
   // ✅ 接线后端 reorganize 能力：导入识别时是否先按标准章节骨架归位
   const [outlineImportReorganize, setOutlineImportReorganize] = useState(false);
   const [saveLibOpen, setSaveLibOpen] = useState(false);
@@ -4379,7 +1259,7 @@ const draftKey = selectedSection && id
   // 生成中的刷新定时器
   const refreshTimerRef = useRef<number | null>(null);
   // ✅ 修复 stale closure：用 ref 保存 selectedSection 最新值，避免 load 回调读到旧值
-  const selectedSectionRef = useRef<any>(null);
+  const selectedSectionRef = useRef<SelectedSectionLike | null>(null);
   selectedSectionRef.current = selectedSection;
   // ✅ SSE 取消控制器：组件卸载或用户中止时中断 fetch
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -4405,8 +1285,6 @@ const draftKey = selectedSection && id
   // 列表请求独立取消通道：切方案时必须同时中止 SSE、上传、解析与普通 GET。
   const factsListAbortRef = useRef<AbortController | null>(null);
   const factsDocsListAbortRef = useRef<AbortController | null>(null);
-  const currentSchemeIdRef = useRef(id || "");
-  currentSchemeIdRef.current = id || "";
   // 仅在 effect 中推进，用于识别真实方案切换；render 阶段不能改它。
   const mountedSchemeIdRef = useRef(id || "");
   const loadFactsRef = useRef<() => void>(() => undefined);
@@ -4430,11 +1308,12 @@ const draftKey = selectedSection && id
       // 使用 ref 读取最新的 selectedSection，解决 stale closure 问题
       const currentSelected = selectedSectionRef.current;
       if (currentSelected) {
-        const fresh = findSectionById(newTree, currentSelected.key);
+        const fresh = findSectionById(newTree, currentSelected.key!);
         if (fresh) setSelectedSection(fresh);
       }
-    } catch (e: any) {
-      if (requestedSchemeId === currentSchemeIdRef.current) msg.error(e.message || "加载失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      if (requestedSchemeId === currentSchemeIdRef.current) msg.error(err.message || "加载失败");
     }
     if (requestedSchemeId === currentSchemeIdRef.current) setLoading(false);
   }, [id]);
@@ -4510,7 +1389,7 @@ const draftKey = selectedSection && id
     factsListAbortRef.current = ac;
     // ✅ 2026-10-06：真正使用后端分页（此前从不传 limit/offset，
     //   pagination 每次下发却被丢弃 —— 分组一多就整屏渲染，且首屏白等全量）。
-    const wantPage = Math.max(1, Number(pageOverride) || factsPage);
+    const wantPage = Math.max(1, Number(pageOverride) || factsPageRef.current);
     const offset = (wantPage - 1) * FACTS_PAGE_SIZE;
     try {
       const { data } = await factsApi.list(requestedSchemeId, {
@@ -4521,19 +1400,21 @@ const draftKey = selectedSection && id
       setFactsSummary(buildFactsSummary(data.stats));
       setFactsPagination(data.pagination || null);
       setFactsPage(wantPage);
+      factsPageRef.current = wantPage;
       void loadFactsDiagnostics();
-    } catch (e: any) {
-      if (e?.name === "AbortError" || ac.signal.aborted) return;
+    } catch (e: unknown) {
+      const err = e as { name?: string; message?: string };
+      if (err?.name === "AbortError" || ac.signal.aborted) return;
       if (!isCurrentSchemeRequest(requestedSchemeId, currentSchemeIdRef.current)) return;
-      console.warn("加载全局事实失败:", e?.message || e);
-      msg.warning(e?.message || "加载全局事实失败，请稍后重试");
+      console.warn("加载全局事实失败:", err?.message || e);
+      msg.warning(err?.message || "加载全局事实失败，请稍后重试");
     } finally {
       if (isCurrentSchemeRequest(requestedSchemeId, currentSchemeIdRef.current)) {
         setFactsReady(true);
       }
       if (factsListAbortRef.current === ac) factsListAbortRef.current = null;
     }
-  }, [id, msg, loadFactsDiagnostics, factsPage]);
+  }, [id, msg, loadFactsDiagnostics]);
 
   loadFactsRef.current = loadFacts;
 
@@ -4556,14 +1437,15 @@ const draftKey = selectedSection && id
       });
       if (!isCurrentSchemeRequest(requestedSchemeId, currentSchemeIdRef.current, ac.signal)) return;
       setDocList(data.documents || []);
-    } catch (e: any) {
-      if (e?.name === "AbortError" || ac.signal.aborted) return;
+    } catch (e: unknown) {
+      const err = e as { name?: string; message?: string };
+      if (err?.name === "AbortError" || ac.signal.aborted) return;
       if (!isCurrentSchemeRequest(requestedSchemeId, currentSchemeIdRef.current)) return;
-      msg.warning(e?.message || "加载已上传资料列表失败");
+      msg.warning(err?.message || "加载已上传资料列表失败");
     } finally {
       if (factsDocsListAbortRef.current === ac) factsDocsListAbortRef.current = null;
     }
-  }, [id, scheme?.project_id, msg]);
+  }, [id, schemeProjectId, msg]);
 
   // =====「提取项目」(bidAnalysis) 数据加载 =====
   /** 解析项定义 + 分组（后端 /bid-analysis/items 为唯一权威源） */
@@ -4574,11 +1456,12 @@ const draftKey = selectedSection && id
       setBaDefs(defs);
       setBaGroups(normalizeBaGroups(data.groups || [], defs));
       setBaDefsError(null);
-    } catch (e: any) {
-      console.warn("加载解析项定义失败:", e?.message || e);
+    } catch (e: unknown) {
+      const err = e as { name?: string; message?: string; response?: { data?: { detail?: unknown } } };
+      console.warn("加载解析项定义失败:", err?.message || e);
       // 不再只留 console.warn：旧实现失败后组件永久停在「定义加载中…」，
       // 用户既不知道出错也没有重试入口（2026-09-23 遗留项修复）。
-      setBaDefsError(String(e?.response?.data?.detail || e?.message || "网络异常"));
+      setBaDefsError(String(err?.response?.data?.detail || err?.message || "网络异常"));
     }
   }, []);
 
@@ -4592,13 +1475,14 @@ const draftKey = selectedSection && id
       const items: BaStoredItem[] = data.items || [];
       setBaItems(items);
       setBaSummary(data.summary || recomputeBaSummary(items, baDefsRef.current));
-    } catch (e: any) {
-      console.warn("加载结构化提取结果失败:", e?.message || e);
-      setBaError(e?.response?.data?.detail || e?.message || "加载解析结果失败");
+    } catch (e: unknown) {
+      const err = e as { name?: string; message?: string; response?: { data?: { detail?: string } } };
+      console.warn("加载结构化提取结果失败:", err?.message || e);
+      setBaError(err?.response?.data?.detail || err?.message || "加载解析结果失败");
     } finally {
       setBaLoading(false);
     }
-  }, [id, scheme?.project_id]);
+  }, [id, schemeProjectId]);
 
   // ✅ BUG 修复：筛选器"悬空"。用户选中「待审核」后批量确认 → unresolved 归零
   //    → 对应的 Radio.Button 因 `>0` 条件被隐藏，但 factsFilter 仍停在
@@ -4631,8 +1515,8 @@ const draftKey = selectedSection && id
     setFactModalOpen(true);
   }
 
-  function openFactEdit(group: any) {
-    setFactEditingId(group.id);
+  function openFactEdit(group: FactGroupLike) {
+    setFactEditingId(group.id!);
     setFactEditingCategory(group.category || "");
     // ✅ 回传 category：否则后端重建分组时会因缺省把归类降级为 other
     factForm.setFieldsValue({
@@ -4668,16 +1552,17 @@ const draftKey = selectedSection && id
       setFactEditingCategory("");
       factForm.resetFields();
       await loadFacts();
-    } catch (e: any) {
-      if (e.errorFields) return;
-      msg.error(e.message || "保存失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string; errorFields?: unknown };
+      if (err.errorFields) return;
+      msg.error(err.message || "保存失败");
     } finally {
       setFactSubmitting(false);
     }
   }
 
   // ===== ✅ 单条事实编辑（走 PATCH item_updates，不重建整个分组）=====
-  function openFactItemEdit(group: any, item: any) {
+  function openFactItemEdit(group: FactGroupLike | null, item: FactItemLike) {
     setFactItemEditing({ ...item, groupId: group?.id, groupTitle: group?.title });
     factItemForm.setFieldsValue({
       name: item.name,
@@ -4713,9 +1598,10 @@ const draftKey = selectedSection && id
       setFactItemEditing(null);
       factItemForm.resetFields();
       await loadFacts();
-    } catch (e: any) {
-      if (e.errorFields) return;
-      msg.error(e.message || "保存失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string; errorFields?: unknown };
+      if (err.errorFields) return;
+      msg.error(err.message || "保存失败");
     } finally {
       setFactItemSubmitting(false);
     }
@@ -4724,7 +1610,7 @@ const draftKey = selectedSection && id
   // ===== ✅ 断链修复：分组删除 / 单条确认 / 矛盾裁决 / 一键清空 =====
   //    此前 factsApi.delete / clearAll 已封装但前端无任何调用点，
   //    openFactEdit 为死代码；分组级删不掉、也不能一键清空。
-  const handleDeleteFactGroup = (group: any) => {
+  const handleDeleteFactGroup = (group: FactGroupLike) => {
     modal.confirm({
       title: "删除事实分组",
       content: `将删除「${group.title}」及其全部 ${group.items?.length ?? 0} 条事实（含已确认与手动录入），不可撤销。`,
@@ -4735,17 +1621,18 @@ const draftKey = selectedSection && id
       //    异常在内部 try/catch 消化，不向外抛出
       onOk: async () => {
         try {
-          await factsApi.delete(group.id, id);
+          await factsApi.delete(group.id!, id);
           msg.success("事实分组已删除");
           await loadFacts();
-        } catch (e: any) {
-          msg.error(e?.message || "删除失败");
+        } catch (e: unknown) {
+          const err = e as { message?: string };
+          msg.error(err?.message || "删除失败");
         }
       },
     });
   };
 
-  const handleResolveFactItem = async (item: any) => {
+  const handleResolveFactItem = async (item: FactItemLike) => {
     if (!item?.fact_id) return;
     try {
       await factsApi.resolve(item.fact_id, id);
@@ -4753,19 +1640,21 @@ const draftKey = selectedSection && id
       // ✅ 等待刷新完成（2026-09-21）：旧实现未 await，用户紧接着点「一键清空」/
       //    切 Tab 时会读到旧 stats，徽标 /「全部就绪」入口短暂错乱。
       await loadFacts();
-    } catch (e: any) {
-      msg.error(e?.message || "确认失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err?.message || "确认失败");
     }
   };
 
-  const handleResolveConflictItem = async (item: any, value: string) => {
+  const handleResolveConflictItem = async (item: FactItemLike, value: string) => {
     if (!item?.fact_id) return;
     try {
       await factsApi.resolveConflict(item.fact_id, value, id);
       msg.success("矛盾已裁决");
       await loadFacts();
-    } catch (e: any) {
-      msg.error(e?.message || "裁决失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err?.message || "裁决失败");
     }
   };
 
@@ -4785,8 +1674,9 @@ const draftKey = selectedSection && id
           setFactsCrossConflicts([]);
           msg.success(`已清空 ${data?.deleted ?? 0} 条事实，提取进度已重置`);
           await loadFacts();
-        } catch (e: any) {
-          msg.error(e?.message || "清空失败");
+        } catch (e: unknown) {
+          const err = e as { message?: string };
+          msg.error(err?.message || "清空失败");
         }
       },
     });
@@ -4876,7 +1766,7 @@ const draftKey = selectedSection && id
         const chapters = Array.isArray(data?.chapters) ? data.chapters : [];
         if (chapters.length) {
           const m: Record<string, string> = {};
-          chapters.forEach((c: any) => { if (c?.key && c?.title) m[c.key] = c.title; });
+          chapters.forEach((c) => { if (c?.key && c?.title) m[c.key] = c.title; });
           if (Object.keys(m).length) setFactChapterTitles(m);
         }
         if (data?.fact_attr_titles && Object.keys(data.fact_attr_titles).length) {
@@ -4899,7 +1789,7 @@ const draftKey = selectedSection && id
   // ✅ 切入「提取项目」子 Tab 时自动选中第一个已完成项（2026-09-23 合并：改由 importSubTab 触发）
   useEffect(() => {
     if (activeTab === "import" && importSubTab === "extract") {
-      setSelectedBaItem((prev: any) => {
+      setSelectedBaItem((prev) => {
         if (prev) return prev;
         return findFirstDoneBaItem(baItems, baDefs);
       });
@@ -5050,10 +1940,10 @@ const draftKey = selectedSection && id
       try {
         const { data } = await tasksApi.list(id);
         const allRunning = (data.tasks || []).filter(
-          (t: any) => t.status === "running" || t.status === "paused"
+          (t: TaskListItem) => t.status === "running" || t.status === "paused"
         );
         // ✅ 跳过 progress 已满的僵尸（后端没来得及标 completed），直接 load 刷新
-        const stuckFull = allRunning.find((t: any) => (t.progress || 0) >= 0.95);
+        const stuckFull = allRunning.find((t: TaskListItem) => (t.progress || 0) >= 0.95);
         if (stuckFull) {
           console.warn("resume: 发现 progress≥95% 但 status 仍 running 的僵尸任务，直接 load 刷新");
           msg.success("检测到后台任务已完成，正在刷新");
@@ -5108,7 +1998,7 @@ const draftKey = selectedSection && id
             //    降级完成的后台任务在这里会被一直判为「仍在跑」。
             if (isTerminalTaskStatus(st.status)) {
               resetTakeover();
-              const ckpt = (st as any).outline_result;
+              const ckpt = st.outline_result;
               if (active.task_type === "outline_generation"
                 && ckpt?.outline && Array.isArray(ckpt.outline) && ckpt.outline.length) {
                 // ✅ 刷新页面后恢复后台跑完的目录成果（与在线 completed 走同一闸门）
@@ -5214,7 +2104,7 @@ const draftKey = selectedSection && id
   // ✅ 草稿持久化已下沉到 SectionContentCard（组件自持 draft + localStorage 自动保存）；
   //    页面旧版草稿自动保存 effect 会用陈旧 editContent 覆盖卡片草稿，已移除（勿恢复）。
 
-  function buildTree(nodes: any[]): TreeNode[] {
+  function buildTree(nodes: OutlineNodeInput[]): TreeNode[] {
     return nodes.map((n) => {
       // ✅ 从 outline_json 里提取后端权威编号（点分路径，如 "1"/"1.1"/"1.1.1"）
       // 这是目录树编号正确显示的关键 —— UUID 无点号无法解析
@@ -5228,10 +2118,10 @@ const draftKey = selectedSection && id
         }
       } catch { /* ignore */ }
       return {
-        key: n.id,
-        title: n.title,
-        level: n.level,
-        status: n.status,
+        key: n.id as string,
+        title: n.title!,
+        level: n.level!,
+        status: n.status!,
         word_count: n.word_count || 0,
         word_budget: n.word_budget || 0,
         content: n.content,
@@ -5247,7 +2137,7 @@ const draftKey = selectedSection && id
   // ✅ 性能优化：onSseEvent 被每条 SSE 事件调用一次，若每次渲染重建会破坏上层
   //    对它的引用稳定性（未来 memo 化子组件依赖此引用时也会失效）。
   //    此函数只依赖 ref 与 msg，可安全 useCallback([])
-  const onSseEvent = useCallback((evt: any): boolean => {
+  const onSseEvent = useCallback((evt: SseBaseEvent): boolean => {
     if (evt.task_id) activeTaskIdRef.current = evt.task_id;
     // ✅ R72（2026-10-12）解析提取链 warning 事件统一消费点。
     //    目录生成链（§generate_outline）与正文生成链（§generate_content）共用本函数，
@@ -5306,7 +2196,7 @@ const draftKey = selectedSection && id
     }
     try {
       const { data: s } = await schemesApi.get(scheme.project_id, id);
-      let cfg: any = {};
+      let cfg: Record<string, unknown> = {};
       try {
         cfg = JSON.parse(s.config_json || "{}");
       } catch {
@@ -5317,14 +2207,15 @@ const draftKey = selectedSection && id
         config_json: JSON.stringify(cfg),
       });
       msg.success("编制要求已保存：生成目录时将逐条注入并强制覆盖，审核阶段自动补齐缺失章节");
-    } catch (e: any) {
-      msg.error(e?.message || "保存编制要求失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err?.message || "保存编制要求失败");
     }
   }
 
   /** 整表重建可能清除未匹配章节的已生成正文（后端 2026-09-26 起量化回传）。
    * 此前「重新生成目录 → 确认闸门保存」是无提示地清空正文，用户不可恢复。 */
-  function notifyClearedContent(data: any, prefix = "") {
+  function notifyClearedContent(data: { cleared_content_sections?: number } | null | undefined, prefix = "") {
     const n = Number(data?.cleared_content_sections || 0);
     if (n > 0) {
       msg.warning(
@@ -5350,7 +2241,7 @@ const draftKey = selectedSection && id
    * 改写条数。此前前端零消费 ⇒ 自动改写**静默生效**，用户以为目录原样保存。
    * 现一并提示（同一函数出口，7 个调用点零改动即生效）。
    */
-  function notifyGenericResidual(data: any) {
+  function notifyGenericResidual(data: unknown) {
     const text = genericResidualNotice(data);
     if (text) msg.warning(text);
     const fixed = genericAutofixNotice(data);
@@ -5359,14 +2250,14 @@ const draftKey = selectedSection && id
 
   /** 一级目录确认闸门（对齐 OpenBidKit outline-selection）：
    * 生成完成后不自动入库，由用户勾选确认一级章节后保存并锁定（locked=1） */
-  function openOutlineGate(outline: any[]) {
+  function openOutlineGate(outline: OutlineNodeInput[]) {
     if (!id) return;
-    const roots = (outline || []).filter((n: any) => n && typeof n === "object");
+    const roots = (outline || []).filter((n) => n && typeof n === "object");
     if (!roots.length) {
       msg.warning("AI 返回空目录，未保存");
       return;
     }
-    const selectedRef: { current: number[] } = { current: roots.map((_: any, i: number) => i) };
+    const selectedRef: { current: number[] } = { current: roots.map((_, i) => i) };
     modal.confirm({
       title: "🔍 一级目录确认（生成后入库前的最后一道闸门）",
       width: 660,
@@ -5374,7 +2265,7 @@ const draftKey = selectedSection && id
       okText: "确认并保存目录",
       cancelText: "暂不入库（手动编辑）",
       onOk: async () => {
-        const filtered = roots.filter((_: any, i: number) => selectedRef.current.includes(i));
+        const filtered = roots.filter((_, i) => selectedRef.current.includes(i));
         if (!filtered.length) {
           msg.error("至少保留一个一级章节");
           return Promise.reject(new Error("empty"));
@@ -5408,7 +2299,7 @@ const draftKey = selectedSection && id
     });
   }
 
-  async function doSaveGate(filtered: any[]) {
+  async function doSaveGate(filtered: OutlineNodeInput[]) {
     if (!id) return;
     try {
       const { data } = await sectionsApi.saveOutline(id, {
@@ -5419,9 +2310,10 @@ const draftKey = selectedSection && id
       msg.success(`目录已确认保存（${filtered.length} 个一级章节已锁定）`);
       notifyClearedContent(data);
       notifyGenericResidual(data);
-    } catch (saveErr: any) {
+    } catch (saveErr: unknown) {
+      const err = saveErr as { message?: string };
       msg.error(
-        `目录已生成但保存失败：${saveErr?.message || "未知错误"}，请点击「保存目录」重试`);
+        `目录已生成但保存失败：${err?.message || "未知错误"}，请点击「保存目录」重试`);
     }
     load();
   }
@@ -5461,7 +2353,9 @@ const draftKey = selectedSection && id
     let lastP = 0;
     let taskId = "";
     try {
-      for await (const evt of sseFetch(`/sse/generate-outline/${id}`, undefined, { signal: ac.signal })) {
+      for await (const raw of sseFetch(`/sse/generate-outline/${id}`, undefined, { signal: ac.signal })) {
+        // 后端 SSE 契约：目录生成链事件，一次性断言（字段见 OutlineGenEvent）
+        const evt = raw as OutlineGenEvent;
         if (!taskId && evt.task_id) taskId = evt.task_id;
         if (evt.event === "error") {
           onSseEvent(evt);
@@ -5489,13 +2383,14 @@ const draftKey = selectedSection && id
               cancelText: "不保存",
               onOk: async () => {
                 try {
-                  const { data } = await sectionsApi.saveOutline(id, { outline: evt.outline, source: "ai" });
+                  const { data } = await sectionsApi.saveOutline(id, { outline: evt.outline!, source: "ai" });
                   msg.success(`已保存 ${partialCount} 个章节节点`);
                   notifyClearedContent(data);
                   notifyGenericResidual(data);
                   load();
-                } catch (saveErr: any) {
-                  msg.error(saveErr?.message || "保存失败");
+                } catch (saveErr: unknown) {
+                  const err = saveErr as { message?: string };
+                  msg.error(err?.message || "保存失败");
                 }
               },
             });
@@ -5571,13 +2466,14 @@ const draftKey = selectedSection && id
               cancelText: "不保存",
               onOk: async () => {
                 try {
-                  const { data } = await sectionsApi.saveOutline(id, { outline: evt.outline, source: "ai" });
+                  const { data } = await sectionsApi.saveOutline(id, { outline: evt.outline!, source: "ai" });
                   msg.success(`已保存 ${partialCount} 个章节的目录`);
                   notifyClearedContent(data);
                   notifyGenericResidual(data);
                   load();
-                } catch (saveErr: any) {
-                  msg.error(saveErr?.message || "保存失败");
+                } catch (saveErr: unknown) {
+                  const err = saveErr as { message?: string };
+                  msg.error(err?.message || "保存失败");
                 }
               },
             });
@@ -5630,9 +2526,10 @@ const draftKey = selectedSection && id
           }
         }
       }
-    } catch (e: any) {
-      if (e.name !== "AbortError") {
-        msg.warning(e.message || "SSE 连接中断");
+    } catch (e: unknown) {
+      const err = e as { name?: string; message?: string };
+      if (err.name !== "AbortError") {
+        msg.warning(err.message || "SSE 连接中断");
         // ✅ BUG 修复（2026-09-23 · 「30s 连接超时后任务孤儿运行」）：
         //    建连阶段（首个事件到达前）超时/失败时 taskId 尚未产生，旧实现
         //    直接跳过重挂 —— 但后端任务可能已注册并继续生成（AI 照常计费），
@@ -5652,13 +2549,15 @@ const draftKey = selectedSection && id
           },
         );
         if (hit) {
-          const fin: any = hit.final;
+          const fin = hit.final;
           if (fin?.status === "completed") {
             // ✅ 成果恢复：后台完成的目录只存在于任务 checkpoint 中，
             // 仅 load() 刷不到任何东西（目录需用户闸门确认才入库）。
             const ckpt = fin.outline_result;
             if (ckpt?.outline && Array.isArray(ckpt.outline) && ckpt.outline.length) {
-              setTree(buildTree(ckpt.outline));
+              // checkpoint 回传的 outline 即目录树节点（后端 SSE 契约），经 Array.isArray 判别后收窄
+              const restoredOutline = ckpt.outline as OutlineNodeInput[];
+              setTree(buildTree(restoredOutline));
               if (Array.isArray(ckpt.failed_chapters) && ckpt.failed_chapters.length) {
                 setFailedOutlineChapters(ckpt.failed_chapters);
                 msg.warning(`后台目录生成完成，但 ${ckpt.failed_count || ckpt.failed_chapters.length} 章子目录失败，请确认后保存`);
@@ -5667,7 +2566,7 @@ const draftKey = selectedSection && id
               }
               // ✅ R74（G1）：断线重挂路径同样呈现审核依据（与 completed 同口径）
               summarizeOutlineReviewBasis(ckpt.review).logs.forEach((line) => pushOutlineLog(1, line));
-              openOutlineGate(ckpt.outline);
+              openOutlineGate(restoredOutline);
             } else {
               msg.success("目录生成已在后台完成，正在刷新");
               load();
@@ -5678,8 +2577,10 @@ const draftKey = selectedSection && id
             //    断线重连后同样提供部分成果保存入口，与在线 error 分支对齐。
             const failCkpt = fin.outline_result;
             if (failCkpt?.outline && Array.isArray(failCkpt.outline) && failCkpt.outline.length) {
-              setTree(buildTree(failCkpt.outline));
-              const partialCount = countOutline(failCkpt.outline);
+              // checkpoint 回传的 outline 即目录树节点（后端 SSE 契约），收窄一次供闭包复用
+              const partialOutline = failCkpt.outline as OutlineNodeInput[];
+              setTree(buildTree(partialOutline));
+              const partialCount = countOutline(partialOutline);
               // ✅ 文案收口到 buildPartialOutlineHint（旧实现两处各写一份，且不说中断原因）
               const hint = buildPartialOutlineHint({
                 event: failCkpt.event,
@@ -5694,13 +2595,14 @@ const draftKey = selectedSection && id
                 okButtonProps: hint.tone === "warning" ? { danger: true } : undefined,
                 onOk: async () => {
                   try {
-                    const { data } = await sectionsApi.saveOutline(id, { outline: failCkpt.outline, source: "ai" });
+                    const { data } = await sectionsApi.saveOutline(id, { outline: partialOutline, source: "ai" });
                     msg.success(`已保存 ${partialCount} 个章节节点`);
                     notifyClearedContent(data);
                     notifyGenericResidual(data);
                     load();
-                  } catch (saveErr: any) {
-                    msg.error(saveErr?.message || "保存失败");
+                  } catch (saveErr: unknown) {
+                    const err = saveErr as { message?: string };
+                    msg.error(err?.message || "保存失败");
                   }
                 },
               });
@@ -5708,8 +2610,10 @@ const draftKey = selectedSection && id
           } else if (fin?.status === "stopped") {
             const ckpt = fin.outline_result;
             if (ckpt?.outline && Array.isArray(ckpt.outline) && ckpt.outline.length) {
-              setTree(buildTree(ckpt.outline));
-              const partialCount = countOutline(ckpt.outline);
+              // checkpoint 回传的 outline 即目录树节点（后端 SSE 契约），收窄一次供闭包复用
+              const stoppedOutline = ckpt.outline as OutlineNodeInput[];
+              setTree(buildTree(stoppedOutline));
+              const partialCount = countOutline(stoppedOutline);
               const hint = buildPartialOutlineHint({
                 event: ckpt.event,
                 partial: ckpt.partial,
@@ -5722,13 +2626,14 @@ const draftKey = selectedSection && id
                 cancelText: hint.cancelText,
                 onOk: async () => {
                   try {
-                    const { data } = await sectionsApi.saveOutline(id, { outline: ckpt.outline, source: "ai" });
+                    const { data } = await sectionsApi.saveOutline(id, { outline: stoppedOutline, source: "ai" });
                     msg.success(`已保存 ${partialCount} 个章节的目录`);
                     notifyClearedContent(data);
                     notifyGenericResidual(data);
                     load();
-                  } catch (saveErr: any) {
-                    msg.error(saveErr?.message || "保存失败");
+                  } catch (saveErr: unknown) {
+                    const err = saveErr as { message?: string };
+                    msg.error(err?.message || "保存失败");
                   }
                 },
               });
@@ -5862,7 +2767,7 @@ const draftKey = selectedSection && id
     if (!selectedSection || !id) return;
     setSavingSection(true);
     try {
-      const { data } = await sectionsApi.update(id, selectedSection.key, {
+      const { data } = await sectionsApi.update(id, selectedSection.key!, {
         content: content,
         status: content.trim() ? "generated" : "empty",
       });
@@ -5898,8 +2803,9 @@ const draftKey = selectedSection && id
             : { ...n, children: n.children ? updateTreeNode(n.children) : undefined }
         );
       setTree((prev) => updateTreeNode(prev));
-    } catch (e: any) {
-      msg.error(e.message || "保存失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "保存失败");
     } finally {
       setSavingSection(false);
     }
@@ -5923,7 +2829,7 @@ const draftKey = selectedSection && id
     }
     const prev = selectedSection.generation_standard || "";
     if (prev === v) return;
-    const sectionKey = selectedSection.key;
+    const sectionKey = selectedSection.key!;
     try {
       await sectionsApi.update(id, sectionKey, { generation_standard: v });
       const patchNode = (nodes: TreeNode[]): TreeNode[] =>
@@ -5933,11 +2839,12 @@ const draftKey = selectedSection && id
             : { ...n, children: n.children ? patchNode(n.children) : undefined }
         );
       setTree((prevTree) => patchNode(prevTree));
-      setSelectedSection((s: TreeNode | null) => (s && s.key === sectionKey ? { ...s, generation_standard: v } : s));
+      setSelectedSection((s) => (s && s.key === sectionKey ? { ...s, generation_standard: v } : s));
       msg.success(v ? `本章生成标准已设为「${STANDARD_LABELS[v as "precise" | "fuzzy"]}」` : "本章已改为沿用方案默认");
-    } catch (e: any) {
+    } catch (e: unknown) {
       // 受控 Select 未改 state → 自动回滚到旧值
-      msg.error(e?.message || "生成标准保存失败");
+      const err = e as { message?: string };
+      msg.error(err.message || "生成标准保存失败");
     }
   }
 
@@ -5954,13 +2861,14 @@ const draftKey = selectedSection && id
     }
     setSavingStandardDefault(true);
     try {
-      const { data } = await schemesApi.update(scheme.project_id, id, {
+      const { data } = await schemesApi.update(scheme.project_id!, id, {
         generation_standard: std,
       });
-      setScheme((s: any) => (s ? { ...s, generation_standard: data?.generation_standard || std } : s));
+      setScheme((s) => (s ? { ...s, generation_standard: data?.generation_standard || std } : s));
       msg.success(`已存为方案默认：${STANDARD_LABELS[std as "precise" | "fuzzy"]}`);
-    } catch (e: any) {
-      msg.error(e?.message || "保存方案默认失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "保存方案默认失败");
     } finally {
       setSavingStandardDefault(false);
     }
@@ -5969,7 +2877,7 @@ const draftKey = selectedSection && id
   /** 重写当前章节（带二次确认） */
   function regenerateCurrentSection() {
     if (!selectedSection) return;
-    const hasContent = selectedSection.word_count > 0 || selectedSection.content;
+    const hasContent = selectedSection.word_count! > 0 || selectedSection.content;
     modal.confirm({
       title: "⚠️ 确认重写本章？",
       content: (
@@ -6019,16 +2927,16 @@ const draftKey = selectedSection && id
       onOk: async () => {
         setShrinking(true);
         try {
-          const { data } = await sectionsApi.shrink(id, selectedSection.key);
+          const { data } = await sectionsApi.shrink(id, selectedSection.key!);
           // 就地更新选中章节与树（避免整页 load 闪烁）
           setSelectedSection(
-            (prev: TreeNode | null) =>
+            (prev) =>
               prev && prev.key === selectedSection.key
                 ? { ...prev, content: data.content, word_count: data.word_count, word_status: data.word_status }
                 : prev
           );
           setTree((prev) =>
-            updateNodeFields(prev, selectedSection.key, {
+            updateNodeFields(prev, selectedSection.key!, {
               content: data.content,
               word_count: data.word_count,
               word_status: data.word_status,
@@ -6037,8 +2945,9 @@ const draftKey = selectedSection && id
           msg.success(
             `压缩完成：${data.before} → ${data.word_count} 字（${data.rounds_used} 轮，${data.stop_reason}）`
           );
-        } catch (e: any) {
-          msg.error(e?.message || "压缩失败");
+        } catch (e: unknown) {
+          const err = e as { message?: string };
+          msg.error(err.message || "压缩失败");
         } finally {
           setShrinking(false);
         }
@@ -6068,8 +2977,9 @@ const draftKey = selectedSection && id
           const { data } = await sectionsApi.resetContent(id);
           await load();
           msg.success(`已重置：清除 ${data.cleared ?? 0} 个章节的正文`);
-        } catch (e: any) {
-          msg.error(e?.message || "重置失败");
+        } catch (e: unknown) {
+          const err = e as { message?: string };
+          msg.error(err.message || "重置失败");
         }
       },
     });
@@ -6238,7 +3148,7 @@ const draftKey = selectedSection && id
    *   `useCallback([])` 的 `onSseEvent` 安全引用）—— **单一实现**，
    *   避免三处终态各写一份合并逻辑而行为漂移。
    */
-  const mergeFailedSections = (list: any) => {
+  const mergeFailedSections = (list: unknown) => {
     mergeFailedSectionsIntoRef(list);
   };
 
@@ -6282,7 +3192,7 @@ const draftKey = selectedSection && id
     setGenStats({});
 
     // 构造请求体
-    const body: any = {};
+    const body: Record<string, unknown> = {};
     // ✅ R66：档位与总量覆盖互斥，档位优先（与后端 if/elif 分支同口径）
     const wbTier = resolveWordBudgetTier();
     if (wbTier) body.word_budget_tier = wbTier;
@@ -6317,7 +3227,9 @@ const draftKey = selectedSection && id
 
     let taskId = "";
     try {
-      for await (const evt of sseFetch(`/sse/generate-content/${id}`, body, { signal: ac.signal })) {
+      for await (const raw of sseFetch(`/sse/generate-content/${id}`, body, { signal: ac.signal })) {
+        // 后端 SSE 契约：正文生成链事件，一次性断言（字段见 ContentGenEvent）
+        const evt = raw as ContentGenEvent;
         if (!taskId && evt.task_id) taskId = evt.task_id;
         if (onSseEvent(evt)) {
           // ✅ 二次增强：任务终止（error）后收尾残留的「进行中」日志项，不再转圈
@@ -6385,7 +3297,7 @@ const draftKey = selectedSection && id
           //    同时改用 selectedSectionRef 读取最新选中项（SSE 循环闭包里的
           //    selectedSection 是启动时的旧值，用户中途切换章节会更新错对象）。
           if (selectedSectionRef.current?.key === evt.section_id) {
-            setSelectedSection((prev: TreeNode | null) => prev ? {
+            setSelectedSection((prev) => prev ? {
               ...prev,
               content: typeof evt.content === "string" ? evt.content : prev.content,
               word_count: evt.word_count || prev.word_count,
@@ -6549,7 +3461,7 @@ const draftKey = selectedSection && id
             batcher.schedule("progress", () => setProgress(p));
           }
           if (evt.message) {
-            batcher.schedule("progressMsg", () => setProgressMsg(evt.message));
+            batcher.schedule("progressMsg", () => setProgressMsg(evt.message!));
           }
           // ✅ 进度增强：progress 事件随附的权威统计（ETA / 累计字数 / 进行中章节）
           if (evt.stats) {
@@ -6560,9 +3472,10 @@ const draftKey = selectedSection && id
           }
         }
       }
-    } catch (e: any) {
-      if (e.name !== "AbortError") {
-        msg.warning(e.message || "SSE 连接中断");
+    } catch (e: unknown) {
+      const err = e as { name?: string; message?: string };
+      if (err.name !== "AbortError") {
+        msg.warning(err.message || "SSE 连接中断");
         // ✅ 二次增强：连接中断时先收尾「进行中」日志项（后台任务可能仍在跑，
         //    但本页已无法再收到 section_stage —— 残留转圈会误导用户）。
         finalizeRunningLogs("连接中断，等待后台任务收尾", "skipped");
@@ -6717,7 +3630,9 @@ const draftKey = selectedSection && id
     };
     let taskId = "";
     try {
-      for await (const evt of sseFetch(`/sse/generate-facts/${id}`, { missing_value_mode: missingValueMode }, { signal: ac.signal })) {
+      for await (const raw of sseFetch(`/sse/generate-facts/${id}`, { missing_value_mode: missingValueMode }, { signal: ac.signal })) {
+        // 后端 SSE 契约：全局事实提取链事件，一次性断言（字段见 FactsGenEvent）
+        const evt = raw as FactsGenEvent;
         if (!taskId && evt.task_id) taskId = evt.task_id;
         if (evt.event === "error") {
           pushLog(lastProgress, `❌ ${evt.message || "提取失败"}`);
@@ -6783,9 +3698,10 @@ const draftKey = selectedSection && id
           }
         }
       }
-    } catch (e: any) {
-      if (e.name !== "AbortError") {
-        msg.warning(e.message || "SSE 连接中断");
+    } catch (e: unknown) {
+      const err = e as { name?: string; message?: string };
+      if (err.name !== "AbortError") {
+        msg.warning(err.message || "SSE 连接中断");
         // ✅ BUG 修复（2026-10-14 · P1 事实提取断线不重挂）：与目录/正文生成同口径。
         //    旧实现仅当 taskId 非空才重挂；建连阶段（首个事件前）断连时 taskId 为空
         //    → 重挂分支整体跳过，而后端任务已注册并继续跑（AI 照常计费），
@@ -6829,7 +3745,8 @@ const draftKey = selectedSection && id
               const _d = applyFactsCompletedEvent(_fin);
               setFactsSegmentStats(_d.segmentStats);
               setFactsCrossConflicts(_d.crossConflicts);
-              if ((_fin.segment_stats?.failed || 0) > 0) {
+              // segment_stats 为生成的宽松契约（Record<string, unknown>），failed 实际为 number
+              if (((_fin.segment_stats?.failed as number | undefined) || 0) > 0) {
                 msg.warning(_doneMsg);
               } else {
                 msg.success(_doneMsg);
@@ -6875,9 +3792,9 @@ const draftKey = selectedSection && id
   const handleGenerateFacts = async () => {
     if (!id) return;
     // ✅ 分步工作流 ③ 前置校验：必须有已解析的文档
-    const parsedCount = docList.filter((d: any) => isDocParsed(d)).length;
+    const parsedCount = docList.filter((d) => isDocParsed(d)).length;
     if (parsedCount === 0) {
-      const failed = docList.filter((d: any) => isDocFailed(d)).length;
+      const failed = docList.filter((d) => isDocFailed(d)).length;
       msg.warning(failed > 0
         ? `有 ${failed} 个文件解析失败，请先重试解析`
         : docList.length > 0
@@ -6898,738 +3815,47 @@ const draftKey = selectedSection && id
     await runGenerateFactsSse();
   };
 
-  // ✅ 分步工作流 ①：上传保存（仅存文件，不解析不提取）
-  const handleUploadDocuments = async (files: File[]) => {
-    if (!id || files.length === 0) return;
-    if (uploadingFacts) return;
-    // ✅ 单文件硬校验（2026-10-05）：`accept` 属性只过滤文件选择框，拖拽与
-    //    「① 上传文件保存」按钮这条入口可绕过。不做这一步的话，超限 / 非法
-    //    扩展名的文件会被整批发给后端再逐个拒绝 —— 用户白等一轮上传，
-    //    且与 import Tab 的提示口径分叉（那边是先拦、根本不发）。
-    //    收敛在此处 = 两个入口一次覆盖（import Tab 已先过滤，进来 rejected 为空）。
-    const perFileMax =
-      typeof maxUploadBytes === "number" && maxUploadBytes > 0 ? maxUploadBytes : MAX_UPLOAD_BYTES;
-    let toUpload = files;
-    const partition = partitionUploadFiles(files, perFileMax);
-    if (partition.rejected.length > 0) {
-      const typeRejected = partition.rejected.filter((r) => r.reason === "type");
-      const sizeRejected = partition.rejected.filter((r) => r.reason === "size");
-      if (typeRejected.length > 0) {
-        msg.error(`不支持的文件类型，已忽略：${typeRejected.map((r) => r.file.name).join("、")}`);
-      }
-      if (sizeRejected.length > 0) {
-        msg.error(
-          `单个文件不能超过 ${Math.round(perFileMax / (1024 * 1024))}MB，已忽略：${sizeRejected
-            .map((r) => r.file.name)
-            .join("、")}`,
-        );
-      }
-      if (partition.accepted.length === 0) return;
-      toUpload = partition.accepted;
-    }
-    // ✅ 上传前累计体积配额预检（与后端 upload_max_total_bytes 同口径）。
-    //    不做这一步的话，超出 200MB 的那批文件要等整批上传完成才被后端扣下，
-    //    用户白等一轮、且事前对"哪些不会被保存"毫无预期。
-    //    本页面有两条上传入口（UploadParseTab + 「① 上传文件保存」按钮），
-    //    收敛在此处 = 两个入口一次覆盖。
-    const quota = splitByUploadTotalQuota(toUpload, maxUploadTotalBytes);
-    if (quota.held.length > 0) {
-      const mb = Math.round(
-        (Number(maxUploadTotalBytes) > 0 ? Number(maxUploadTotalBytes) : 200 * 1024 * 1024) / (1024 * 1024),
-      );
-      const names = quota.held.map((f) => f.name).slice(0, 10).join("、");
-      const more = quota.held.length > 10 ? ` 等 ${quota.held.length} 个` : "";
-      msg.warning(`单次上传累计不能超过 ${mb}MB，以下文件未上传：${names}${more}`);
-      if (quota.accepted.length === 0) return;
-      toUpload = quota.accepted;
-    }
-    // ✅ 上传前「单次文件数」预检（与后端 upload_max_files_per_request 同口径，2026-10-05 补齐）。
-    //    与上面两项预检构成完整三段：单文件体积 / 累计体积 / 文件数。缺了这一段时，
-    //    超量文件要等整批传完才从响应里得知"未保存"，与另两项体验割裂。
-    //    后端语义是「保留前 N 个、其余记入 too_many」，本预检逐字复刻，故不会有
-    //    文件被"前端悄悄丢弃" —— 只是提前告知并少传多余部分。
-    const byCount = splitByUploadFileCount(toUpload, maxUploadFiles);
-    if (byCount.held.length > 0) {
-      const cap = Math.floor(
-        Number(maxUploadFiles) > 0 ? Number(maxUploadFiles) : MAX_UPLOAD_FILES_FALLBACK,
-      );
-      const names = byCount.held.map((f) => f.name).slice(0, 10).join("、");
-      const more = byCount.held.length > 10 ? ` 等 ${byCount.held.length} 个` : "";
-      msg.warning(`单次最多上传 ${cap} 个文件，以下文件未上传：${names}${more}`);
-      if (byCount.accepted.length === 0) return;
-      toUpload = byCount.accepted;
-    }
-    uploadAbortRef.current?.abort();
-    const ac = new AbortController();
-    uploadAbortRef.current = ac;
-
-    setUploadingFacts(true);
-    setUploadedFiles(toUpload.map((f) => f.name));
-    try {
-      const { data } = await factsApi.uploadDocuments(toUpload, id, { signal: ac.signal });
-      if (ac.signal.aborted) return;
-      const savedCount = data.saved_count ?? 0;
-      // ✅ 统一口径（2026-09-21）：提示文案唯一入口收敛到
-      //    workflowDerived.buildUploadNotice（六类拒绝原因全覆盖：
-      //    unsupported/oversize/empty/signature_invalid/too_many/quota_exceeded）。
-      //    旧实现在此手写拼装，漏掉累计体积超限（quota_exceeded/quota_files）——
-      //    「已保存 3 个文件，其余为什么没了」在界面上完全无解释。
-      const notice = buildUploadNotice(data, {
-        maxBytes: maxUploadBytes,
-        maxTotalBytes: maxUploadTotalBytes,
-        maxFiles: maxUploadFiles,
-      });
-      if (savedCount === 0 && notice.details.length > 0) {
-        console.warn("上传被拒明细:", notice.details);
-      }
-      if (notice.tone === "error") msg.error(notice.text);
-      else msg.success(notice.text);
-      loadDocuments();
-    } catch (e: any) {
-      if (e?.name === "AbortError" || ac.signal.aborted) return;
-      msg.error(e.message || "上传保存失败");
-    } finally {
-      if (uploadAbortRef.current === ac) {
-        uploadAbortRef.current = null;
-        setUploadingFacts(false);
-        setUploadedFiles([]);
-      }
-    }
-  };
-
-  // ✅ 分步工作流 ②：批量解析所有待解析文档
-  //    force=true 时为「全部重解析」：连同已解析文档一起重新解析，用于
-  //    补齐旧版截断内容 / 启用 OCR 后重扫此前失败的扫描件。
-  const handleParseDocuments = async (force = false) => {
-    if (!id) return;
-    // ✅ 防重入：单份解析（OCR 可能数分钟）进行中时不得叠加批量解析，
-    //    否则同一文档被两路并发解析，四层产物与版本列互相覆盖。
-    //    （组件侧已禁用入口，此处是页面层防御，避免其他调用点绕过）
-    if (parsingDocs || parsingDocId) return;
-    // ✅ 2026-09-24 B4：与后端 parse-all 选取口径（parsed_markdown 为空，含 failed）
-    //    及 UploadParseTab 按钮统一到 computeDocStats.actionableCount；
-    //    旧实现用 !text_len 自行计数，与组件按钮的 pendingCount（排除 failed）口径不一致。
-    const docStats = computeDocStats(docList);
-    if (!force && docStats.actionableCount === 0) {
-      // ✅ BUG 修复（2026-09-25，前端早退阻断后端自修复）：actionableCount 为 0
-      // 只说明"没有待解析/失败的文档"，**不等于状态列都正确**——存量文档可能
-      // parse_status 为 null/pending 而正文早已存在，此时统计条与列表都把它显示
-      // 成"已解析"、按钮本应禁用，但后端 parse_status 列永远停在错误值。
-      // 旧实现在此直接 return，后端的 parse_status 自修复永远不可达。
-      // 现仅当全部状态都确认为 success 时才早退，否则放行请求触发后端修正。
-      const hasStaleStatus = docList.some((d) => d.parse_status !== "success");
-      if (!hasStaleStatus) {
-        msg.info("所有文档均已解析");
-        return;
-      }
-    }
-    if (force && docList.length === 0) {
-      msg.info("还没有上传资料文件");
-      return;
-    }
-    setParsingDocs(true);
-    // ✅ 与上传/SSE 同口径：解析挂 AbortController，卸载/切方案时中断
-    parseAbortRef.current?.abort();
-    const ac = new AbortController();
-    parseAbortRef.current = ac;
-    try {
-      const { data } = await factsApi.parseAllDocuments(
-        id, scheme?.project_id, force, { signal: ac.signal });
-      if (ac.signal.aborted) return;
-      const truncatedCount = data.truncated_count || 0;
-      const reconciledCount = data.reconciled_count || 0;
-      if (data.failed_count > 0) {
-        const details = (data.failed || [])
-          .map((f: any) => `${f.file_name}：${f.reason}`)
-          .join("；");
-        msg.warning(`解析完成：成功 ${data.parsed} 个，失败 ${data.failed_count} 个。${details}`);
-      } else if (truncatedCount > 0) {
-        const names = (data.truncated || []).map((f: any) => f.file_name).join("、");
-        msg.warning(
-          `解析完成：成功 ${data.parsed} 个文档；其中 ${truncatedCount} 个内容超长被截断（${names}），建议拆分后重新上传`);
-      } else if (data.parsed === 0 && reconciledCount > 0) {
-        // ✅ 2026-09-25：本轮只修正了陈旧的 parse_status（存量文档正文早已存在，
-        // 但状态列停在 pending/null）→ 给用户明确解释，否则"什么都没发生"。
-        msg.success(`已修正 ${reconciledCount} 份文档的解析状态`);
-      } else {
-        msg.success(
-          `${force ? "重新" : ""}解析完成：成功 ${data.parsed} 个文档`
-          + (reconciledCount > 0 ? `，并修正 ${reconciledCount} 份陈旧状态` : ""));
-      }
-      loadDocuments();
-    } catch (e: any) {
-      if (e?.name === "AbortError" || ac.signal.aborted) return;
-      msg.error(e.message || "解析失败");
-    } finally {
-      if (parseAbortRef.current === ac) {
-        parseAbortRef.current = null;
-        setParsingDocs(false);
-      }
-    }
-  };
-
-  // ✅ 分步工作流 ②：解析单份文档（列表行内按钮）
-  // force=true 时强制重解析（用于补齐早期被截断的文档内容）
-  // ✅ 单文档解析防重入：parsingDocId 非空时忽略新的单份解析请求
-  const handleParseDocument = async (docId: string, fileName: string, force = false) => {
-    if (parsingDocId || parsingDocs) return;
-    setParsingDocId(docId);
-    parseAbortRef.current?.abort();
-    const ac = new AbortController();
-    parseAbortRef.current = ac;
-    try {
-      const { data } = await factsApi.parseDocument(docId, force, { signal: ac.signal });
-      if (ac.signal.aborted) return;
-      if (data.already_parsed) {
-        // ✅ 2026-09-25：后端在短路返回时自修复了陈旧 parse_status
-        //    （正文已存在但状态仍是 pending）→ 明确告知，避免用户误以为
-        //    「点了解析却没反应」。
-        msg.info(data.reconciled
-          ? `「${fileName}」已有解析结果，已修正其解析状态`
-          : `「${fileName}」已解析过`);
-      } else {
-        // ✅ F6（2026-09-26）：与批量解析提示口径一致，即时告知截断/告警，
-        //    避免用户在点「解析」那一刻拿不到内容可能不完整的提示。
-        const cut = data.truncated ? "（内容可能被截断，请查看解析提示）" : "";
-        const warn = (data.warnings && data.warnings.length)
-          ? `（${data.warnings.length} 条解析提示）`
-          : "";
-        msg.success(`「${fileName}」${force ? "重新" : ""}解析完成（${data.text_len} 字）${cut}${warn}`);
-      }
-      loadDocuments();
-    } catch (e: any) {
-      if (e?.name === "AbortError" || ac.signal.aborted) return;
-      msg.error(e.message || "解析失败");
-      // ✅ 失败/超时后补一次列表刷新：后端可能已落库，避免 UI 与后端不同步
-      loadDocuments();
-    } finally {
-      if (parseAbortRef.current === ac) {
-        parseAbortRef.current = null;
-        setParsingDocId(null);
-      }
-    }
-  };
-
-  /** 查看解析内容预览（前 N 字，不下载整份文件） */
-  const handlePreviewDocument = async (doc: any) => {
-    if (!doc?.id) return;
-    setPreviewDoc(doc);
-    setPreviewText("");
-    setPreviewData(null);
-    setPreviewLoading(true);
-    // 重置四层质量概览，随后异步拉取（不阻断正文预览）
-    setPipelineStatus(null);
-    setPipelineError(null);
-    setPipelineLoading(true);
-    try {
-      const { data } = await factsApi.previewDocument(doc.id);
-      if (!data.is_parsed) {
-        msg.warning(data.message || "该文档尚未解析");
-      }
-      setPreviewText(data.preview || "");
-      setPreviewData(data);
-    } catch (e: any) {
-      msg.error(e.message || "获取预览失败");
-    } finally {
-      setPreviewLoading(false);
-    }
-    loadPipelineStatus(doc.id);
-  };
-
-  /** 拉取四层解析质量概览（status + completeness 合并；失败非阻断，仅降级为告警） */
-  const loadPipelineStatus = async (docId: string) => {
-    if (!docId) return;
-    setPipelineLoading(true);
-    setPipelineError(null);
-    try {
-      const { data } = await docPipelineApi.status(docId);
-      // status 已含 completeness 快照；quality_score 缺省时再取一次报告补全
-      setPipelineStatus(data);
-    } catch (e: any) {
-      setPipelineError(e?.message || "解析质量信息读取失败");
-    } finally {
-      setPipelineLoading(false);
-    }
-  };
-
-  /** 刷新完整性校验并回填质量分；成功返回 true，失败返回 false，由调用方决定提示 */
-  const refreshPipelineQuality = async (docId: string): Promise<boolean> => {
-    try {
-      const { data } = await docPipelineApi.completeness(docId, true);
-      const q = typeof data?.quality_score === "number" ? data.quality_score : undefined;
-      setPipelineStatus((prev) => (prev ? { ...prev, quality_score: q, completeness: data?.completeness ?? prev.completeness } : prev));
-      return true;
-    } catch {
-      /* 质量刷新失败：正文/状态仍在，提示交由调用方处理，避免"失败却提示成功" */
-      return false;
-    }
-  };
-
-  /** 预览弹窗内的四层管线动作：调用对应 API → 反馈 → 重新拉取状态 */
-  const handlePipelineAction = async (action: PipelineActionKey) => {
-    const docId = previewDoc?.id;
-    if (!docId || pipelineAction) return;
-    setPipelineAction(action);
-    try {
-      if (action === "reparse") {
-        const { data } = await docPipelineApi.reparse(docId, "force");
-        msg.success(data?.skipped ? "文件未变更，无需重解析" : "已重新解析并刷新四层产物");
-      } else if (action === "syncExtractions") {
-        const { data } = await docPipelineApi.syncExtractions(docId);
-        msg.success(`提取层已物化（${(data?.written_types || []).length} 类）`);
-      } else if (action === "crossCheck") {
-        const { data } = await docPipelineApi.crossCheck(docId);
-        msg.success(`交叉校验完成（冲突 ${data?.stored_conflicts ?? 0}）`);
-      } else if (action === "refreshQuality") {
-        const ok = await refreshPipelineQuality(docId);
-        if (ok) {
-          msg.success("质量分已刷新");
-        } else {
-          msg.error("质量分刷新失败，请稍后重试");
-        }
-      }
-      // 动作可能改变四层产物 → 重新拉取权威状态
-      if (action !== "refreshQuality") await loadPipelineStatus(docId);
-    } catch (e: any) {
-      msg.error(e?.message || "操作失败");
-    } finally {
-      setPipelineAction(null);
-    }
-  };
-
-
-  /** 修改文档分类（招标文件 / 合同文件 / ...，影响提取优先级） */
-  const handleCategoryChange = async (docId: string, category: string) => {
-    try {
-      await factsApi.updateDocumentCategory(docId, category);
-      setDocList((prev: any[]) =>
-        prev.map((d) => (d.id === docId ? { ...d, doc_category: category } : d)));
-      msg.success("分类已更新");
-    } catch (e: any) {
-      // ✅ 2026-09-24 T3：更新失败（超时/网络中断但服务端可能已落库等）时，
-      //    重新拉取服务端真值，避免受控 Select 与后端分类发生漂移。
-      msg.error(e.message || "分类更新失败");
-      loadDocuments();
-    }
-  };
+  // R-P1 拆分：上传/解析/预览/四层管线/分类/批量确认/过期解除/删除文档域处理器
+  // 迁至 useDocumentWorkflow（调用点保持在原位；批确认/过期解除/删除段原在
+  // 「提取项目」块之后，随域合并进同一 hook，见该文件头注释）。
+  const {
+    handleUploadDocuments, handleParseDocuments, handleParseDocument,
+    handlePreviewDocument, handlePipelineAction, handleCategoryChange,
+    handleBatchResolve, handleAckStaleAll, handleAckStaleOne, handleDeleteDocument,
+  } = useDocumentWorkflow({
+    id, schemeProjectId, msg, modal,
+    uploadingFacts, setUploadingFacts, setUploadedFiles,
+    maxUploadBytes, maxUploadTotalBytes, maxUploadFiles,
+    uploadAbortRef, parseAbortRef,
+    parsingDocs, setParsingDocs, parsingDocId, setParsingDocId,
+    docList, loadDocuments,
+    setPreviewDoc, setPreviewText, setPreviewData, setPreviewLoading,
+    previewDoc, setPipelineStatus, setPipelineError, setPipelineLoading,
+    pipelineAction, setPipelineAction,
+    setDocList, loadFacts, factsSummary,
+    factsListAbortRef, currentSchemeIdRef,
+  });
 
   // ============================================================
   // 「提取项目」(bidAnalysis) 处理器
   // ============================================================
 
-  /**
-   * 启动/单项重跑结构化提取（SSE）。
-   * 事件契约（backend routers/bid_analysis.py）：
-   *   item_update {item_id,status,progress,content?,error?} / heartbeat / completed / error / cancelled
-   */
-  const runBaSse = useCallback(async (opts: {
-    mode: "key" | "full" | "custom" | "item";
-    selectedItemIds?: string[];
-    forceRerun?: boolean;
-  }) => {
-    if (!id || baSseAbortRef.current) return;
-    const ac = new AbortController();
-    baSseAbortRef.current = ac;
-    setBaRunning(true);
-    setBaProgress(0);
-    setBaProgressMsg("正在连接 AI...");
-    // 清空上一轮提取规模（避免「本轮尚未切段却显示上轮调用数」的误导）
-    setBaTextStats(null);
-    try {
-      const { path, params } = bidAnalysisApi.startSse(id, scheme?.project_id, opts);
-      for await (const evt of sseGetStream(path, { params, signal: ac.signal })) {
-        if (ac.signal.aborted) break;
-        const t = evt?.type;
-        if (t === "item_update") {
-          setBaItems((prev) => {
-            const idx = prev.findIndex((i) => i.item_id === evt.item_id);
-            const patch: BaStoredItem = { item_id: evt.item_id, status: evt.status };
-            if (evt.content) patch.content = evt.content;
-            if (evt.error) patch.error = evt.error;
-            if (idx >= 0) {
-              const cp = [...prev];
-              cp[idx] = { ...cp[idx], ...patch };
-              return cp;
-            }
-            return [...prev, patch];
-          });
-          if (typeof evt.progress === "number") setBaProgress(evt.progress);
-        } else if (t === "heartbeat") {
-          if (typeof evt.progress === "number") setBaProgress(evt.progress);
-          if (evt.message) setBaProgressMsg(evt.message);
-        } else if (t === "text_stats") {
-          // 提取规模（切段后立即推送）：超长文档的真实消耗对用户必须可见
-          setBaTextStats({
-            total_chars: evt.total_chars ?? 0,
-            segment_count: evt.segment_count ?? 0,
-            item_count: evt.item_count ?? 0,
-            est_model_calls: evt.est_model_calls ?? 0,
-            chunk_size: evt.chunk_size ?? 0,
-            // 提取依据完整性：任一文档被截断/预算不足被跳过时，
-            // 「提取结果不可信」必须在提取结果区显性提示，而不是只藏在后端日志里
-            source_truncated: !!evt.source_truncated,
-            truncated_docs: evt.truncated_docs ?? [],
-            used_doc_count: evt.used_doc_count ?? 0,
-            input_doc_count: evt.input_doc_count ?? 0,
-            dropped_doc_count: evt.dropped_doc_count ?? 0,
-          });
-        } else if (t === "completed") {
-          const r = evt.result || {};
-          // 后端把截断报告一并放进 completed 的 result，作为 SSE 中断时的兜底
-          if (r.source_truncated) {
-            const n = sourceNotice(r);
-            if (n) msg.warning(n.title + (n.detail ? `（${n.detail}）` : ""));
-          }
-          if (r.ok) {
-            msg.success(`结构化提取完成（${r.completed || 0}/${r.total || 0} 项）`);
-            // ✅ 自动跳目录生成收紧为「key/full 且必选项齐备」（停止/报错/单项重跑不跳）
-            if (opts.mode === "key" || opts.mode === "full") autoJumpFrom("import" as WorkflowTabKey, "outline");
-          } else {
-            const missing = (r.missing_required || []).join("、");
-            msg.warning(`提取完成，但必选项未全部完成${missing ? `：${missing}` : ""}`);
-          }
-        } else if (t === "error") {
-          msg.error(evt.error || "结构化提取失败");
-        } else if (t === "cancelled") {
-          msg.info(evt.message || "任务已取消");
-        }
-      }
-    } catch (e: any) {
-      if (e?.name !== "AbortError" && !ac.signal.aborted) {
-        msg.error(e.message || "结构化提取连接中断");
-      }
-    } finally {
-      if (baSseAbortRef.current === ac) baSseAbortRef.current = null;
-      setBaRunning(false);
-      // 收尾以服务端权威结果为准（item_update 只是乐观视图）
-      loadBaResults();
-    }
-  }, [id, scheme?.project_id, loadBaResults, msg]);
+  // R-P1 拆分：「提取项目」域处理器（SSE/停止/多标段/校正/配置启动）迁至 useBidAnalysis
+  const {
+    runBaSse, handleStopBa, handleCheckSections, handleRerunItem,
+    openBaEdit, handleBaSaveEdit, handleBaClearEdit, handleStartBaFromConfig,
+  } = useBidAnalysis({
+    id, schemeProjectId, msg,
+    baSseAbortRef, setBaRunning, setBaProgress, setBaProgressMsg,
+    setBaTextStats, setBaItems, baItems, baDefsRef, setBaSummary,
+    setSelectedBaItem, loadBaResults, autoJumpFrom,
+    baStoppingRef, setBaStopping,
+    sectionChecking, setSectionChecking, setSectionCheckResult,
+    baEditItem, setBaEditItem, baEditValue, setBaEditValue,
+    setBaEditSaving, setBaConfigOpen,
+    baModeOpt, baSelectedIds, baForceRerun,
+  });
 
-  /** 停止：四类任务共用 task_registry 控制链路（POST /sse/task/{id}/control） */
-  const handleStopBa = useCallback(async () => {
-    if (!id) return;
-    // ✅ R106 FIX-4：同步锁 —— 旧实现可连点，且发完指令就乐观提示，用户不知道
-  //    任务是否真的退出了。现置灰按钮并轮询到终态才报「已停止」。
-    if (baStoppingRef.current) return;
-    baStoppingRef.current = true;
-    setBaStopping(true);
-    try {
-      const { data } = await tasksApi.list(id, 10);
-      const t = (data.tasks || []).find(
-        (x: any) => x.task_type === "bid_analysis"
-          && (x.status === "running" || x.status === "paused"));
-      if (!t) {
-        msg.info("没有正在运行的结构化提取任务");
-        // ✅ 列表可能滞后（任务刚结束）：顺带刷新结果，避免按钮一直显示可点
-        loadBaResults();
-        return;
-      }
-      const { data: ctl } = await tasksApi.control(t.id, "stop");
-      if (ctl?.ok === false) {
-        msg.error(ctl.message || "停止指令未被接受，任务可能已结束");
-        loadBaResults();
-        return;
-      }
-      if (ctl?.orphaned) {
-        msg.info(ctl.message || "任务已无运行实例，已标记为已停止");
-        loadBaResults();
-        return;
-      }
-      msg.info("停止指令已发送，正在等待在途解析项收口...");
-      // ✅ 轮询至终态（3s × 20 ≈ 1 分钟上限）：协作式停止 = 在途项跑完、未启动项不再启动
-      const fin = await pollTaskUntilTerminalImpl(
-        t.id,
-        async (tid) => (await tasksApi.status(tid)).data as TaskTerminalInfo,
-        undefined,
-        { intervalMs: 3000, maxPolls: 20, netFailTolerance: 3 },
-      );
-      if (fin && isTerminalTaskStatus(fin.status)) msg.success("已停止");
-      else msg.warning("停止指令已发送，任务未在预期内退出，可在任务栏查看");
-      loadBaResults();
-    } catch (e: any) {
-      msg.error(e.message || "停止失败");
-    } finally {
-      baStoppingRef.current = false;
-      setBaStopping(false);
-    }
-  }, [id, msg, loadBaResults]);
-
-  /** 多标段检测（规则检测，非 AI，秒级） */
-  const handleCheckSections = useCallback(async () => {
-    if (!id || sectionChecking) return;
-    setSectionChecking(true);
-    try {
-      const { data } = await bidAnalysisApi.checkSections(id, scheme?.project_id);
-      setSectionCheckResult(data);
-    } catch (e: any) {
-      msg.error(e.message || "多标段检测失败");
-    } finally {
-      setSectionChecking(false);
-    }
-  }, [id, scheme?.project_id, sectionChecking, msg]);
-
-  /** 单项重跑：mode=item 严格按勾选、不补全必选项、forceRerun=false（直接覆盖该项） */
-  const handleRerunItem = useCallback((def: BaItemDef) => {
-    runBaSse({ mode: "item", selectedItemIds: [def.item_id], forceRerun: false });
-  }, [runBaSse]);
-
-  // ===== ✅ 人工校正闭环（2026-09-23 复原，供「提取项目」与「解析信息分类显示栏」共用）=====
-  /** 打开校正弹窗（载入当前项内容，json/markdown 均可编辑） */
-  const openBaEdit = useCallback((item: any) => {
-    if (!item) return;
-    setBaEditItem(item);
-    setBaEditValue(item?.content || "");
-  }, []);
-
-  /** 保存校正（PUT /results/{item_id}，后端返回权威 item + summary）
-   *  AI 抽错关键参数时唯一可靠出口；校正值标记 source='manual'，下游优先使用。 */
-  const handleBaSaveEdit = useCallback(async () => {
-    const item = baEditItem;
-    if (!item || !id) return;
-    const content = (baEditValue ?? "").trim();
-    if (!content) {
-      msg.warning("内容不能为空（如需清空请点「撤销校正」）");
-      return;
-    }
-    // ✅ 前端预校验 json 项（与后端 422 对齐，避免一次往返）
-    if (item.output_type === "json") {
-      try {
-        const parsed = JSON.parse(content);
-        if (typeof parsed === "string") {
-          msg.error("项目级基本信息为 JSON 对象/数组，不能是裸字符串");
-          return;
-        }
-      } catch {
-        msg.error("项目级基本信息为 JSON 结构，请提交合法 JSON");
-        return;
-      }
-    }
-    setBaEditSaving(true);
-    try {
-      const { data } = await bidAnalysisApi.updateResult(
-        item.item_id, id, content, scheme?.project_id);
-      msg.success("已保存人工校正结果（优先于 AI 输出，下游目录/正文将使用该校正值）");
-      // 以后端权威返回更新（item + summary），避免乐观更新与 DB 漂移
-      if (data?.item) {
-        const updated = { ...item, ...data.item };
-        setBaItems((prev: BaStoredItem[]) => {
-          const idx = prev.findIndex((i) => i.item_id === item.item_id);
-          if (idx < 0) return [...prev, updated];
-          const cp = [...prev]; cp[idx] = { ...cp[idx], ...updated }; return cp;
-        });
-        setSelectedBaItem((prev: any) =>
-          prev && prev.item_id === item.item_id ? { ...prev, ...updated } : prev);
-      }
-      if (data?.summary) setBaSummary(data.summary);
-      else setBaSummary(recomputeBaSummary(baItems, baDefsRef.current));
-      setBaEditItem(null);
-    } catch (e: any) {
-      msg.error(e?.response?.data?.detail || e.message || "保存失败");
-    } finally {
-      setBaEditSaving(false);
-    }
-  }, [baEditItem, baEditValue, id, scheme?.project_id, baItems, msg]);
-
-  /** 撤销校正（DELETE /results/{item_id}，回到 idle + source='ai'）
-   *  不删行本身 —— 行是「解析项槽位」，删掉会破坏 sort_order 展示顺序与 upsert 语义。 */
-  const handleBaClearEdit = useCallback(async () => {
-    const item = baEditItem;
-    if (!item || !id) return;
-    setBaEditSaving(true);
-    try {
-      const { data } = await bidAnalysisApi.clearResult(
-        item.item_id, id, scheme?.project_id);
-      msg.success("已清空该项结果（回到待提取状态）");
-      if (data?.item) {
-        const updated = { ...item, ...data.item };
-        setBaItems((prev: BaStoredItem[]) => {
-          const idx = prev.findIndex((i) => i.item_id === item.item_id);
-          if (idx < 0) return [...prev, updated];
-          const cp = [...prev]; cp[idx] = { ...cp[idx], ...updated }; return cp;
-        });
-        setSelectedBaItem((prev: any) =>
-          prev && prev.item_id === item.item_id ? { ...prev, ...updated } : prev);
-      }
-      if (data?.summary) setBaSummary(data.summary);
-      else setBaSummary(recomputeBaSummary(baItems, baDefsRef.current));
-      setBaEditItem(null);
-    } catch (e: any) {
-      msg.error(e?.response?.data?.detail || e.message || "清空失败");
-    } finally {
-      setBaEditSaving(false);
-    }
-  }, [baEditItem, id, scheme?.project_id, baItems, msg]);
-
-  /** 配置弹窗确认 → 按模式启动 */
-  const handleStartBaFromConfig = useCallback(() => {
-    const selected = baModeOpt === "custom" ? baSelectedIds : undefined;
-    if (baModeOpt === "custom" && (!selected || selected.length === 0)) {
-      msg.warning("自定义模式至少勾选一个解析项");
-      return;
-    }
-    setBaConfigOpen(false);
-    runBaSse({
-      mode: baModeOpt,
-      selectedItemIds: selected,
-      forceRerun: baForceRerun,
-    });
-  }, [baModeOpt, baSelectedIds, baForceRerun, runBaSse, msg]);
-
-  /** 批量确认所有未确认的事实 */
-  const handleBatchResolve = async () => {
-    if (!id) return;
-    const unresolved = factsSummary?.unresolved || 0;
-    const simulated = factsSummary?.simulated || 0;
-    if (unresolved === 0) {
-      msg.info("没有待确认的事实");
-      return;
-    }
-    // ✅ 文案统一走 buildBatchResolveCopy：修复旧文案把「模拟值 ∩ 未确认」
-    //    交集重复计数（unresolved + simulated），且空态判定误伤已确认的模拟值。
-    const copy = buildBatchResolveCopy({
-      unresolved, simulated, conflicts: factsSummary?.conflicts || 0,
-    });
-    modal.confirm({
-      title: "批量确认所有事实",
-      content: (
-        <div>
-          <div>{copy.headline}</div>
-          {copy.simulatedNote && (
-            <div style={{ marginTop: 6 }}>{copy.simulatedNote}</div>
-          )}
-          {copy.conflictNote && (
-            <div style={{ marginTop: 6, color: "#d46b08" }}>{copy.conflictNote}</div>
-          )}
-        </div>
-      ),
-      okText: "全部确认",
-      cancelText: "取消",
-      type: copy.confirmType,
-      onOk: async () => {
-        try {
-          const { data } = await factsApi.batchResolve(id);
-          const copy = buildBatchResolveResultCopy(data);
-          if (copy.tone === "warning") msg.warning(copy.text);
-          else msg.success(copy.text);
-          await loadFacts();
-        } catch (e: any) {
-          msg.error(e.message || "确认失败");
-        }
-      },
-    });
-  };
-
-  /**
-   * ✅ G3（2026-10-04）：批量解除「来源已变化」过期标记。
-   *
-   * 背景：后端 `_mark_project_facts_stale` 在项目资料重新解析/删除时会把**整个
-   * 项目**的事实一次性置 is_stale=1，而解除入口此前只有「改值」和「裁决矛盾」
-   * 两条（都要求值必须先变），`resolve` / `batch-resolve` 对 stale 行还直接跳过。
-   * 结果是：用户核对过、取值并未变化，却被永久排除在正文注入与导出之外，红色
-   * 「来源过期 N」Tag 也消不掉 —— 只能逐条把值改成别的再改回来，或重跑一次
-   * AI 提取（真实计费）。
-   *
-   * 语义只表达「我已核对，这些值仍然有效」；模拟值/矛盾值由后端闸门继续拦住
-   * （只清 stale、不置已确认），故响应里的 `gated` 需要显式提示。
-   */
-  const handleAckStaleAll = async () => {
-    if (!id) return;
-    const stale = factsSummary?.stale || 0;
-    if (stale === 0) {
-      msg.info("没有来源过期的事实");
-      return;
-    }
-    modal.confirm({
-      title: "确认这些事实仍然有效",
-      content: (
-        <div>
-          <div>
-            将把当前方案可见范围内 <strong>{stale}</strong> 条「来源已变化」的事实
-            标记为<strong>已人工核对、仍然有效</strong>，恢复其注入正文与导出。
-          </div>
-          <div style={{ marginTop: 6, color: "#d46b08" }}>
-            仅在你已核对原始资料、确认取值未变时使用；若资料确已更新，请改为重新提取。
-          </div>
-          <div style={{ marginTop: 6, color: "#888" }}>
-            模拟值与存在矛盾的事实仍会保持未确认，需逐条处理。
-          </div>
-        </div>
-      ),
-      okText: "确认仍有效",
-      cancelText: "取消",
-      onOk: async () => {
-        try {
-          const { data } = await factsApi.batchAckStale(id);
-          const changed = Number(data?.changed) || 0;
-          const gated = Number(data?.gated) || 0;
-          if (changed === 0) {
-            msg.info("没有需要解除的过期标记");
-          } else if (gated > 0) {
-            msg.warning(`已解除 ${changed} 条；其中 ${gated} 条为模拟值/矛盾值，仍需逐条处理`);
-          } else {
-            msg.success(`已解除 ${changed} 条过期标记`);
-          }
-          await loadFacts();
-        } catch (e: any) {
-          msg.error(e.message || "解除失败");
-        }
-      },
-    });
-  };
-
-  /**
-   * ✅ G3（2026-10-04）：单条解除「来源已变化」。供用户逐条核对后确认，
-   * 避免只能「一次性全确认」而跳过复核。后端对模拟值/矛盾值仍保留闸门
-   * （只清 stale、不置已确认），返回的 blocked_reason 原样提示。
-   */
-  const handleAckStaleOne = async (factId: string, title?: string) => {
-    if (!id || !factId) return;
-    const sid = id;
-    // 复用列表加载的中止控制器：切方案时一并取消「补丁请求」和随后的「列表刷新」，
-    // 避免旧方案的 stale 回执在切走后触发对已离开方案的刷新。
-    factsListAbortRef.current?.abort();
-    const ac = new AbortController();
-    factsListAbortRef.current = ac;
-    try {
-      const { data } = await factsApi.ackStale(factId, sid, { signal: ac.signal });
-      // 切走方案后不弹提示、不刷新（与 loadFacts 一致）
-      if (sid !== currentSchemeIdRef.current || ac.signal.aborted) return;
-      if (data?.blocked_reason) {
-        msg.warning(data.blocked_reason as string);
-      } else if (data?.idempotent) {
-        // ✅ 2026-10-06：后端把 changed 由 bool 统一为影响行数 int（与
-        //    batch_ack_stale / batch_resolve 同形），并加法式补 idempotent。
-        //    旧写法 `data?.changed === false` 是严格布尔比较，后端一改形状就
-        //    静默失效（tsc 在接入 types/facts.ts 后当场报出）。
-        msg.info("该事实未被标记为过期");
-      } else {
-        msg.success(`已确认「${title || "该事实"}」仍有效`);
-      }
-      await loadFacts();
-    } catch (e: any) {
-      if (e?.name === "AbortError" || ac.signal.aborted) return;
-      if (sid === currentSchemeIdRef.current) msg.error(e.message || "解除失败");
-    }
-  };
-
-  /** 删除已上传的项目资料文档 */
-  const handleDeleteDocument = async (docId: string, fileName: string) => {
-    modal.confirm({
-      title: "确认删除文件",
-      content: `删除后，从「${fileName}」中提取的全局事实不会自动清除，但后续 AI 生成将不再引用该文件。确定删除？`,
-      okButtonProps: { danger: true },
-      onOk: async () => {
-        try {
-          await factsApi.deleteDocument(docId);
-          msg.success("文件已删除");
-          loadDocuments();
-        } catch (e: any) {
-          msg.error(e.message || "删除失败");
-        }
-      },
-    });
-  };
 
   // ============================================================
   // 目录生成 Tab 的辅助函数
@@ -7637,263 +3863,25 @@ const draftKey = selectedSection && id
   //   模块级导出，行为由 outlineTab / outlineTreeLogic 测试钉住）
   // ============================================================
 
-  /** 目录树：在指定节点下新增一个子节点 */
-  const addChildNode = useCallback((parentKey?: string) => {
-    const curTree = treeRef.current;
-    const curExpanded = expandedKeysRef.current;
-    const newId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const newLevel = parentKey
-      ? (findSectionById(curTree, parentKey)?.level || 0) + 1
-      : 1;
-    // ✅ BUG 修复：目录系统硬性限三级（后端 MAX_OUTLINE_DEPTH=3），在三级章节下
-    // 添加的四级节点保存时会被静默裁剪并入父章节描述——用户以为加成功了，
-    // 保存后节点"消失"。这里在添加入口直接拦截并说明。
-    if (newLevel > MAX_OUTLINE_DEPTH) {
-      msg.warning(`目录最多支持 ${MAX_OUTLINE_DEPTH} 级，无法在三级章节下继续添加子章节`);
-      return;
-    }
-    const newNode: TreeNode = {
-      key: newId,
-      title: "新章节",
-      level: newLevel,
-      status: "empty",
-      word_count: 0,
-      word_budget: 1200,
-      children: [],
-    };
-    // ✅ BUG 修复（2026-10-07 · 新增节点编号不同步）：新增节点本身不带 outlineId
-    //    （渲染时无编号），追加为子节点还会使同父后续兄弟的相对位置变化。旧实现
-    //    直接 setTree 不重算，与 moveNode / onOutlineTreeDrop「结构变更即本地
-    //    renumberTreeLocally」的口径不一致，用户在点「保存目录」前看到的编号是
-    //    缺失/陈旧的。现统一按位置即时重算（仅展示字段，不动 key/正文关联）。
-    if (!parentKey) {
-      setTree(renumberTreeLocally([...curTree, newNode]));
-    } else {
-      setTree(renumberTreeLocally(curTree.map((n) => insertIntoNode(n, parentKey, newNode))));
-    }
-    // 自动选中新节点
-    setSelectedSection(newNode);
-    // ✅ 工作流增强（2026-10-07）：新增节点默认标题「新章节」必然要改，
-    //    直接进入内联重命名态（Input autoFocus，回车/失焦即提交），省去
-    //    「新增 → 再双击/点编辑」的一次往返；直接失焦则保留默认名，无害。
-    setRenamingKey(newId);
-    setRenamingValue("新章节");
-    // 自动展开父节点
-    if (parentKey && !curExpanded.includes(parentKey)) {
-      setExpandedKeys([...curExpanded, parentKey]);
-    }
-  }, [msg, id]);
-
-  /** 目录树：在指定节点同级（其后）新增一个节点；未指定 key 时追加为根级章节 */
-  const addSiblingNode = useCallback((key?: string) => {
-    const curTree = treeRef.current;
-    const curExpanded = expandedKeysRef.current;
-    if (!key) {
-      addChildNode(); // 无参照节点：复用"追加到根"
-      return;
-    }
-    const ref = findSectionById(curTree, key);
-    if (!ref) return;
-    const newId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const newLevel = ref.level || 1;
-    const newNode: TreeNode = {
-      key: newId,
-      title: "新章节",
-      level: newLevel,
-      status: "empty",
-      word_count: 0,
-      word_budget: 1200,
-      children: [],
-    };
-    // 插入到参照节点之后（同父层级），保留其余结构
-    const insertAfter = (nodes: TreeNode[]): TreeNode[] => {
-      const out: TreeNode[] = [];
-      for (const n of nodes) {
-        out.push(n);
-        if (n.key === key) {
-          out.push(newNode);
-        } else if (n.children && n.children.length) {
-          out[out.length - 1] = { ...n, children: insertAfter(n.children) };
-        }
-      }
-      return out;
-    };
-    // ✅ BUG 修复（2026-10-07 · 中间插入兄弟编号错位）：新节点插在参照节点之后，
-    //    其后所有兄弟的相对序号 +1。旧实现不本地重算，界面短暂呈现
-    //    「第一章 / 新章节(无编号) / 第二章 / 第三章」的错位编号，直到保存后
-    //    load 才纠正。与 moveNode / 拖拽 / 新增子章同口径即时重算。
-    setTree(renumberTreeLocally(insertAfter(curTree)));
-    setSelectedSection(newNode);
-    // ✅ 工作流增强（2026-10-07）：与 addChildNode 同口径，新增后立即内联重命名
-    setRenamingKey(newId);
-    setRenamingValue("新章节");
-    // 自动展开父节点（确保新同级节点可见）
-    const parentKey = findParentKey(curTree, key);
-    if (parentKey && !curExpanded.includes(parentKey)) {
-      setExpandedKeys([...curExpanded, parentKey]);
-    }
-  }, [addChildNode, id]);
-
-  /** 查找某节点的父节点 key（用于新增同级后确保父级展开） */
-  function findParentKey(nodes: TreeNode[], key: string, parent = ""): string {
-    for (const n of nodes) {
-      if (n.key === key) return parent;
-      if (n.children && n.children.length) {
-        const r = findParentKey(n.children, key, n.key);
-        if (r !== "") return r;
-      }
-    }
-    return "";
-  }
-
-  function insertIntoNode(node: TreeNode, parentKey: string, newNode: TreeNode): TreeNode {
-    if (node.key === parentKey) {
-      return { ...node, children: [...(node.children || []), newNode] };
-    }
-    if (node.children && node.children.length) {
-      return {
-        ...node,
-        children: node.children.map((c) => insertIntoNode(c, parentKey, newNode)),
-      };
-    }
-    return node;
-  }
-
-  /** 目录树：删除一个节点 */
-  const deleteNode = useCallback((key: string) => {
-    const target = findSectionById(treeRef.current, key);
-    if (!target) return;
-    // 确认删除
-    modal.confirm({
-      title: "确认删除章节",
-      content: `「${target.title}」及其所有子章节将被删除，确定继续？`,
-      okButtonProps: { danger: true },
-      onOk: async () => {
-        try {
-          const cur = findSectionById(treeRef.current, key);
-          // ✅ BUG 修复：判据改用 isUnsavedLocalKey（覆盖 local_ + upload_）。
-          // 旧实现只认 local_，「导入目录」替换后的 upload_ 节点会被当成已落库
-          // 章节，误调 DELETE /sections/{upload_...} → 后端 404，异常抛出后
-          // setTree(removeNode(...)) 执行不到 → **本地节点永远删不掉**。
-          let persisted = false;
-          if (cur && !isUnsavedLocalKey(cur.key) && id) {
-            await sectionsApi.delete(id, cur.key);
-            persisted = true;
-          }
-          // ✅ BUG 修复（2026-10-07 · 删除章节后编号未重算）：删除中间章节后，
-          //    其后所有兄弟的相对序号 -1。旧实现只 removeNode 不重算，且已落库
-          //    删除成功后不 load() —— 后端 renumber_sections_after_reorder 已把
-          //    DB 的 outline_json.id 与正文子标题全部重写，前端却仍显示旧编号
-          //    （如删掉第2章后原第3章仍显示「第三章」），前后端短暂不一致。
-          //    现本地即时重算（仅改展示字段），已落库场景再 load() 拉回权威树，
-          //    与 moveNode 的「本地重算 + 服务端同步」口径完全一致。
-          setTree(renumberTreeLocally(removeNode(treeRef.current, key)));
-          setSelectedSection(null);
-          msg.success("已删除");
-          if (persisted) load();
-        } catch (e: any) {
-          msg.error(e.message || "删除失败");
-        }
-      },
-    });
-  }, [modal, id, msg, load]);
-
-  function removeNode(nodes: TreeNode[], key: string): TreeNode[] {
-    return nodes
-      .filter((n) => n.key !== key)
-      .map((n) => ({
-        ...n,
-        children: n.children ? removeNode(n.children, key) : [],
-      }));
-  }
-
-  /** 目录树：重命名 */
-  const renameNode = useCallback((key: string, newTitle: string) => {
-    const trimmed = newTitle.trim();
-    if (!trimmed) {
-      msg.warning("章节标题不能为空");
-      return;
-    }
-    const node = findSectionById(treeRef.current, key);
-    // ✅ 等值短路：用户把旧标题清空/回车即触发（失焦/回车两条路径都调本函数），
-    //    标题未变就直接退出，既避免冗余本地重渲，也不再 PATCH /sections/{id}
-    //    发送「未改即提交」的空变更。node.title 是后端原始文本（buildTree 直取
-    //    n.title，formatOutlineTitle 仅用于渲染展示），这里 .trim() 对齐用户输入。
-    if (node && node.title.trim() === trimmed) return;
-    setTree(treeRef.current.map((n) => renameInNode(n, key, trimmed)));
-    // ✅ 判据改用 isUnsavedLocalKey：upload_（导入识别）节点同样尚未落库，
-    // 误调 PATCH /sections/{upload_...} 会 404。
-    // ✅ BUG 修复（B12 真正落地）：旧实现 `.catch(() => {})` 完全吞掉写库失败，
-    // 用户看到本地标题已改就以为已保存；实际服务端仍是旧标题 —— 若此后不点
-    // 「保存目录」直接生成正文，正文里会出现旧章节名。现失败即明示并给出补救动作。
-    if (node && !isUnsavedLocalKey(key) && id) {
-      sectionsApi
-        .update(id, key, { title: trimmed })
-        .catch((err: any) => {
-          msg.warning(
-            `本地已改名为「${trimmed}」，但服务端保存失败（${err?.message || "未知错误"}）——` +
-              `请点击「保存目录」持久化，否则刷新后仍是旧标题`
-          );
-          flashReorderHint("⚠️ 改名未同步到服务端，请点击「保存目录」持久化");
-        });
-    }
-  }, [msg, id]);
-
-  function renameInNode(node: TreeNode, key: string, title: string): TreeNode {
-    if (node.key === key) return { ...node, title };
-    if (node.children) {
-      return {
-        ...node,
-        children: node.children.map((c) => renameInNode(c, key, title)),
-      };
-    }
-    return node;
-  }
-
-  // （flattenTreeKeys / moveSiblingInTree 已提升至模块级导出，供测试与页面共用）
-
-  /**
-   * 目录树：上移/下移章节（dir=-1 上 / +1 下）。
-   * 本地树立即交换顺序给出视觉反馈；若当前没有「未保存的本地新增节点(local_)」，
-   * 则立即调用 /reorder 持久化（重排 sort_order 并回写章节编号），随后刷新树，
-   * 保证正文生成读取的「当前章节编号」与展示一致。
-   * 若存在未保存新增节点，则仅本地交换、依赖「保存目录」统一落库（与拖拽一致，
-   * 避免 /reorder 只重排 DB 节点而丢失未落库的新增章节）。
-   */
-  const moveNode = useCallback((key: string, dir: -1 | 1) => {
-    const newTree = moveSiblingInTree(treeRef.current, key, dir);
-    if (!newTree) return;
-    const hasUnsavedLocal = hasUnsavedLocalNodes(treeRef.current);
-    // ✅ 编辑增强：移动后滚动定位到目标节点（展开状态天然保留——load 不清空
-    //    expandedKeys，且被移动节点原本可见、其祖先必然已展开）。
-    const scrollToTarget = () => {
-      // ✅ 编辑增强：编辑树与左侧导航树同步滚动定位到目标节点
-      scrollToNodeInContainer(editTreeScrollRef.current, key);
-      scrollToNodeInContainer(leftTreeScrollRef.current, key);
-    };
-    if (!hasUnsavedLocal && id) {
-      // 无未保存新增节点：立即持久化（/reorder 重排 + 回写编号），load 后编号自然正确
-      const order = flattenTreeKeys(newTree);
-      setTree(renumberTreeLocally(newTree)); // 即时刷新编号展示
-      flashReorderHint("章节已上/下移，编号已实时更新（已同步到服务端）");
-      sectionsApi
-        .reorder(id, { order })
-        .then(() => load().then(() => setTimeout(scrollToTarget, 60)))
-        .catch(() => {
-          // ✅ 后端 /reorder 失败降级为"仅本地调整"：当前章节顺序只在前端可见，
-          // 刷新后会回到 DB 原有顺序；明确告知用户需要手动点「保存目录」才能持久化。
-          msg.warning("移动已在本地生效，服务端同步失败，请点击「保存目录」完成持久化");
-          flashReorderHint("⚠️ 服务端同步失败，本地顺序尚未持久化，请点击「保存目录」");
-        });
-    } else {
-      // 存在未保存新增节点：仅本地交换 + 本地重算编号，依赖「保存目录」统一落库
-      setTree(renumberTreeLocally(newTree));
-      flashReorderHint();
-      setTimeout(scrollToTarget, 60);
-    }
-    // ✅ 依赖说明：flashReorderHint 为函数声明（每渲染新建但仅用 setState+ref，
-    //    捕获旧引用语义等价），故不列入依赖，以保证本回调引用稳定。
-  }, [msg, id, load, scrollToNodeInContainer]);
+  // R-P1 拆分：两个滚动 ref 声明自下方 4244 行上移至此（moveNode 依赖，避 TDZ）。
+  const editTreeScrollRef = useRef<HTMLDivElement>(null);
+  const leftTreeScrollRef = useRef<HTMLDivElement>(null);
+  // ------ 目录 Tab 中的 Tree 渲染（支持编辑、增删） ------
+  // R-P1 拆分：renamingKey / renamingValue 声明自下方 3996 行上移
+  // （setRenamingKey / setRenamingValue 是 useOutlineTreeEdit 的 deps，避 TDZ）
+  const [renamingKey, setRenamingKey] = useState<string | null>(null);
+  const [renamingValue, setRenamingValue] = useState<string>("");
+  // R-P1 拆分：目录树编辑回调（新增/同级/删除/重命名/上下移）迁至
+  // useOutlineTreeEdit；flashReorderHint 为组件内提升的函数声明，经 deps 传入。
+  const {
+    addChildNode, addSiblingNode, deleteNode, renameNode, moveNode,
+    findParentKey,
+  } = useOutlineTreeEdit({
+    id, msg, modal, load,
+    treeRef, expandedKeysRef, editTreeScrollRef, leftTreeScrollRef,
+    setTree, setSelectedSection, setRenamingKey, setRenamingValue,
+    setExpandedKeys, flashReorderHint,
+  });
 
   // （hasDeepOutlineNodes 已提升至模块级导出）
 
@@ -7934,8 +3922,9 @@ const draftKey = selectedSection && id
       // ✅ G10：目录结构变更会改变预检的章节集合 → 刷新审核 / 就绪度工作台
       setReviewTick((t) => t + 1);
       await load();
-    } catch (e: any) {
-      msg.error(e.message || "保存目录失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "保存目录失败");
     }
   }
 
@@ -7951,7 +3940,7 @@ const draftKey = selectedSection && id
     const node = findSectionById(tree, key);
     if (!node) return;
     setTree(updateNodeFields(tree, key, { word_budget: budget }));
-    setSelectedSection((prev: TreeNode | null) =>
+    setSelectedSection((prev) =>
       prev && prev.key === key ? { ...prev, word_budget: budget } : prev
     );
     if (isUnsavedLocalKey(key)) {
@@ -7964,9 +3953,10 @@ const draftKey = selectedSection && id
       .then(() => {
         flashReorderHint(`「${node.title}」字数预算已更新为 ${budget} 字`);
       })
-      .catch((err: any) => {
+      .catch((err: unknown) => {
+        const saveFail = err as { message?: string };
         msg.warning(
-          `本地已把字数预算改为 ${budget} 字，但服务端保存失败（${err?.message || "未知错误"}）——` +
+          `本地已把字数预算改为 ${budget} 字，但服务端保存失败（${saveFail?.message || "未知错误"}）——` +
             `请点击「保存目录」持久化`
         );
         flashReorderHint("⚠️ 字数预算未同步到服务端，请点击「保存目录」持久化");
@@ -8005,8 +3995,9 @@ const draftKey = selectedSection && id
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
       msg.success(`目录树已导出，共 ${total} 个章节`);
-    } catch (e: any) {
-      msg.error(e.message || "导出目录树失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "导出目录树失败");
     } finally {
       setExportingTree(false);
     }
@@ -8025,15 +4016,16 @@ const draftKey = selectedSection && id
       if ((data.items || []).length === 0) {
         setLibError("目录库中暂无「已通过」审核的目录。请先到「专项方案目录库」页新建并审核通过。");
       }
-    } catch (e: any) {
-      setLibError(e.message || "加载目录库失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      setLibError(err.message || "加载目录库失败");
     } finally {
       setLibLoading(false);
     }
   }
 
   /** 套用某个目录库到当前方案：apply 取 outline_json → 写入 sections */
-  function handleApplyLibrary(lib: any) {
+  function handleApplyLibrary(lib: OutlineLibraryItem) {
     if (!id) return;
     modal.confirm({
       title: "⚠️ 确认套用该目录库？",
@@ -8055,7 +4047,7 @@ const draftKey = selectedSection && id
           //    （旧链路在第二步失败时引用计数已被累加，且大目录 JSON 多传一次）。
           //    ⚠️ 注意：库节点 id 是编号而非章节主键，无法与已有章节匹配 →
           //    套用是**整表重建**，已有正文不保留（上方确认弹窗文案与此口径一致）。
-          const { data } = await outlineLibraryApi.applyAndSave(lib.id, { scheme_id: id });
+          const { data } = await outlineLibraryApi.applyAndSave(lib.id!, { scheme_id: id });
           msg.success(`已套用「${lib.name}」，共 ${data.count || 0} 个章节`);
           // ✅ R88 FIX-9：本消费点此前**两个加法式键都不读** ⇒ 双重静默：
           //   ① `cleared_content_sections` —— 套用是整表重建、**已有正文被级联
@@ -8068,8 +4060,9 @@ const draftKey = selectedSection && id
           setLibOpen(false);
           setSelectedSection(null);
           await load();
-        } catch (e: any) {
-          msg.error(e.message || "套用目录库失败");
+        } catch (e: unknown) {
+          const err = e as { message?: string };
+          msg.error(err.message || "套用目录库失败");
         } finally {
           setLibApplying(false);
         }
@@ -8097,9 +4090,10 @@ const draftKey = selectedSection && id
       });
       msg.success(`已存入目录库（${data.id?.slice(0, 8) || "ok"}），状态为「待审核」`);
       setSaveLibOpen(false);
-    } catch (e: any) {
-      if (e.errorFields) return;
-      msg.error(e.message || "存入目录库失败");
+    } catch (e: unknown) {
+      const err = e as { errorFields?: unknown; message?: string };
+      if (err.errorFields) return;
+      msg.error(err.message || "存入目录库失败");
     }
   }
 
@@ -8132,8 +4126,9 @@ const draftKey = selectedSection && id
           setSelectedSection(null);
           setExpandedKeys([]);
           await load();
-        } catch (e: any) {
-          msg.error(e.message || "清除失败");
+        } catch (e: unknown) {
+          const err = e as { message?: string };
+          msg.error(err.message || "清除失败");
         }
       },
     });
@@ -8200,8 +4195,9 @@ const draftKey = selectedSection && id
       setSelectedSection(null);
       setExpandedKeys(collectAllKeys(newTree));
       setActiveTab("outline");
-    } catch (e: any) {
-      msg.error(e.message || "文件识别失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "文件识别失败");
     } finally {
       hide();
     }
@@ -8212,9 +4208,10 @@ const draftKey = selectedSection && id
   // （renumberTreeLocally 已提升至模块级导出）
 
   /** 目录树拖拽排序 */
-  function onOutlineTreeDrop(info: any) {
-    const dropKey = info.node.key;
-    const dragKey = info.dragNode.key;
+  function onOutlineTreeDrop(info: Parameters<NonNullable<TreeProps["onDrop"]>>[0]) {
+    // 本页树节点 key 一律为章节主键 string（antd Tree 的 Key 联合在此收窄）
+    const dropKey = info.node.key as string;
+    const dragKey = info.dragNode.key as string;
     const dropPos = info.node.pos.split("-");
     const dropPosition = info.dropPosition - Number(dropPos[dropPos.length - 1]); // -1 到 +1
 
@@ -8296,15 +4293,12 @@ const draftKey = selectedSection && id
   }
 
   // ------ 目录 Tab 中的 Tree 渲染（支持编辑、增删） ------
-  const [renamingKey, setRenamingKey] = useState<string | null>(null);
-  const [renamingValue, setRenamingValue] = useState<string>("");
+  // R-P1 拆分：renamingKey / renamingValue 已上移至 useOutlineTreeEdit 调用点之前。
 
   // ✅ 编辑增强：拖拽/上移下移后实时高亮"编号已更新"提示
   const [reorderHint, setReorderHint] = useState<string | null>(null);
   const reorderHintTimer = useRef<number | null>(null);
   // ✅ 编辑增强：编辑树 / 左侧导航树滚动容器 ref，用于移动后滚动定位到目标节点
-  const editTreeScrollRef = useRef<HTMLDivElement>(null);
-  const leftTreeScrollRef = useRef<HTMLDivElement>(null);
   function flashReorderHint(msg = "目录顺序已调整，编号已实时更新（记得点击「保存目录」同步到服务端）") {
     setReorderHint(msg);
     if (reorderHintTimer.current) window.clearTimeout(reorderHintTimer.current);
@@ -8329,7 +4323,7 @@ const draftKey = selectedSection && id
   //    每节点 O(失败章数) 子串匹配。配合下方 outlineEditTreeData 的 useMemo，
   //    无关 state（progress / sectionLogs / genStats …）变化时整棵编辑树不再重算。
   // ⚠️ 必须定义在 renameNode 与 moveFlags 之后：deps 数组是立即求值，前向引用会 TDZ。
-  const convertToEditTree = useCallback((node: TreeNode): any => {
+  const convertToEditTree = useCallback((node: TreeNode): TreeDataNode => {
     const isGenerated = node.status === "generated" || node.word_count > 0;
     const isGenerating = node.status === "running" || node.status === "pending";
     const isFailed = node.status === "failed";
@@ -8532,10 +4526,11 @@ const draftKey = selectedSection && id
         controllingRef.current = false;
         msg.error(data.message || "控制指令未被接受，任务可能已结束");
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
+      const err = e as { message?: string };
       setTaskStopping(false);
       controllingRef.current = false;
-      msg.error(e.message || "控制失败");
+      msg.error(err.message || "控制失败");
     } finally {
       // stop 的成功路径由 generating 复位 effect 释放锁（终态才算结束）；
       // 失败/orphaned 路径已在各自分支内立即释放。
@@ -8552,141 +4547,28 @@ const draftKey = selectedSection && id
   const expertAbortRef = useRef<AbortController | null>(null);
   const [expertRunning, setExpertRunning] = useState(false);
 
-  const handleExpertReview = async () => {
-    if (!id || expertRunning) return;
-    expertAbortRef.current?.abort();
-    const controller = new AbortController();
-    expertAbortRef.current = controller;
-    setExpertRunning(true);
-    try {
-      const { data } = await complianceApi.expertReview({ scheme_id: id }, controller.signal);
-      if (controller.signal.aborted) return;
-      setExpertResult(data);
-      msg.success("预检完成");
-    } catch (e: any) {
-      if (e?.name === "AbortError" || e?.code === "ERR_CANCELED") msg.info("已取消预检");
-      else msg.error(e.message || "预检失败");
-    } finally {
-      if (expertAbortRef.current === controller) {
-        expertAbortRef.current = null;
-        setExpertRunning(false);
-      }
-    }
-  };
-
-  /** ✅ R106 FIX-5：取消专家论证预检 */
-  const handleCancelExpertReview = () => {
-    expertAbortRef.current?.abort();
-  };
-
-  /** ✅ 接线 exportApi.cacheStatus：查询仍有效的导出缓存（后端已过滤僵尸行） */
-  const loadCacheStatus = async () => {
-    if (!id) return;
-    const sid = id;
-    cacheAbortRef.current?.abort();
-    const controller = new AbortController();
-    cacheAbortRef.current = controller;
-    setCacheLoading(true);
-    try {
-      const { data } = await exportApi.cacheStatus(sid, controller.signal);
-      if (
-        controller.signal.aborted
-        || currentSchemeIdRef.current !== sid
-        || cacheAbortRef.current !== controller
-      ) return;
-      setCacheStatus(data);
-    } catch (e: any) {
-      const canceled = e?.name === "AbortError" || e?.code === "ERR_CANCELED";
-      if (!canceled && currentSchemeIdRef.current === sid) {
-        msg.error(e.message || "读取导出缓存状态失败");
-      }
-    } finally {
-      if (cacheAbortRef.current === controller) {
-        cacheAbortRef.current = null;
-        setCacheLoading(false);
-      }
-    }
-  };
-
-  // ================== ✅ 规范符合性检查（complianceApi.check）==================
-  /** 把多行文本切成检查清单并提交 AI 逐条判定 */
-  const handleComplianceCheck = async () => {
-    if (!id) return;
-    const checklist = checklistText
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (checklist.length === 0) {
-      msg.warning("请至少输入一条检查项");
-      return;
-    }
-    // ✅ R106 FIX-5：接 AbortController，运行中可取消（旧实现只能等 AI 跑完）
-    checkAbortRef.current?.abort();
-    const controller = new AbortController();
-    checkAbortRef.current = controller;
-    setCheckingCompliance(true);
-    try {
-      // ✅ 清单未被手工改动时携带 rule_ids 提交 —— 让落库的 rule_id 指向规则注册表，
-      //    历史结果才能跨版本比对并归并进六维评分（否则 AI 自造的 "R1" 无语义）
-      const useRules = !checklistDirty && aiRules.length > 0
-        && checklist.length === aiRules.length;
-      const payload = useRules
-        ? { scheme_id: id, rule_ids: aiRules.map((r) => r.rule_id) }
-        : { scheme_id: id, checklist };
-      const { data } = await complianceApi.check(payload, controller.signal);
-      if (controller.signal.aborted) return;
-      const results = data.results || [];
-      setComplianceResults(results);
-      const miss = results.filter((r: any) => r.hit === false).length;
-      const high = results.filter((r: any) => r.severity === "high").length;
-      msg.success(`检查完成：${results.length} 项，疑似缺失 ${miss} 项，高风险 ${high} 项`);
-      // 结果已落库，刷新历史记录
-      loadComplianceHistory();
-    } catch (e: any) {
-      if (e?.name === "AbortError" || e?.code === "ERR_CANCELED") msg.info("已取消合规检查");
-      else msg.error(e.message || "合规检查失败（请确认已配置可用的 AI 供应商）");
-    } finally {
-      if (checkAbortRef.current === controller) checkAbortRef.current = null;
-      setCheckingCompliance(false);
-    }
-  };
-
-  /** ✅ R106 FIX-5：取消合规检查（abort → 服务端断连即在下一 await 边界取消 AI 调用） */
-  const handleCancelComplianceCheck = () => {
-    checkAbortRef.current?.abort();
-  };
-
-  // ===== ✅ 全文一致性审计（§3.12.1）：事实 vs 正文比对，0-100 评分 + 不一致项 =====
-  const [auditRunning, setAuditRunning] = useState(false);
-  const [consistencyResult, setConsistencyResult] = useState<{ score: number; issues: any[]; created_at?: string } | null>(null);
-
-  const handleConsistencyAudit = async () => {
-    if (!id || auditRunning) return;
-    // ✅ R106 FIX-5：审计是最长的同步 AI 调用（长方案 1-3 分钟），此前无任何取消入口
-    auditAbortRef.current?.abort();
-    const controller = new AbortController();
-    auditAbortRef.current = controller;
-    setAuditRunning(true);
-    setConsistencyResult(null);
-    try {
-      const { data } = await complianceApi.consistencyAudit(id, controller.signal);
-      if (controller.signal.aborted) return;
-      setConsistencyResult({ score: data.score, issues: data.issues || [] });
-      const high = (data.issues || []).filter((i: any) => i.severity === "high").length;
-      msg.success(`一致性审计完成：评分 ${data.score}，不一致项 ${data.issues?.length || 0}（高危 ${high}）`);
-    } catch (e: any) {
-      if (e?.name === "AbortError" || e?.code === "ERR_CANCELED") msg.info("已取消一致性审计");
-      else msg.error(e.message || "一致性审计失败");
-    } finally {
-      if (auditAbortRef.current === controller) auditAbortRef.current = null;
-      setAuditRunning(false);
-    }
-  };
-
-  /** ✅ R106 FIX-5：取消一致性审计 */
-  const handleCancelConsistencyAudit = () => {
-    auditAbortRef.current?.abort();
-  };
+  // R-P1 拆分：专家论证 / 合规检查 / 一致性审计（含 auditRunning、consistencyResult
+  // 两个 useState）/ CR 修复工作台处理器迁至 useReviewAudit（调用点在原位置）。
+  const {
+    handleExpertReview, handleCancelExpertReview,
+    handleComplianceCheck, handleCancelComplianceCheck,
+    auditRunning, consistencyResult, setConsistencyResult,
+    handleConsistencyAudit, handleCancelConsistencyAudit,
+    loadCrConflicts, loadCrHistory, openConsistencyWorkbench,
+    handleCrScan, handleCancelCrScan, handleCrRepair, handleCancelCrRepair,
+    crRepairItemIds, handleCrConfirm, handleCrRollback,
+  } = useReviewAudit({
+    id, msg, modal,
+    expertAbortRef, expertRunning, setExpertRunning, setExpertResult,
+    checkAbortRef, setCheckingCompliance, checklistText, checklistDirty,
+    aiRules, setComplianceResults, loadComplianceHistory,
+    auditAbortRef,
+    consistencySeverity, forceFullRepair,
+    crScanning, setCrScanning, crRepairing, setCrRepairing, crScanId,
+    setCrRepair, crRepair, setCrConflicts, setCrSummary, setCrScanId,
+    setCrHistory, setCrOpen, setCrLoading,
+    selectedSectionRef, setSelectedSection, load, setReviewTick,
+  });
 
   const loadConsistencyLatest = async () => {
     if (!id) return;
@@ -8698,159 +4580,6 @@ const draftKey = selectedSection && id
     } catch {
       // 历史结果加载失败不阻塞页面
     }
-  };
-
-  // ===== ✅ 全文一致性 Agent 修复工作台（F-AGENT-CONSISTENCY-REPAIR）=====
-  const loadCrConflicts = async (scanId?: string) => {
-    if (!id) return;
-    try {
-      const { data } = await consistencyRepairApi.conflicts(id, scanId);
-      if (data?.exists) {
-        setCrConflicts(data.conflicts || []);
-        setCrSummary(data.summary || null);
-        setCrScanId(data.scan_id || scanId || "");
-      } else {
-        setCrConflicts([]);
-        setCrSummary(null);
-      }
-    } catch (e: any) {
-      msg.warning(e.message || "加载冲突清单失败");
-    }
-  };
-
-  const loadCrHistory = async () => {
-    if (!id) return;
-    try {
-      const { data } = await consistencyRepairApi.repairs(id, 10);
-      setCrHistory(data.items || []);
-    } catch {
-      // 历史修复记录加载失败不阻塞工作台
-    }
-  };
-
-  const openConsistencyWorkbench = () => {
-    setCrOpen(true);
-    setCrLoading(true);
-    Promise.all([loadCrConflicts(), loadCrHistory()]).finally(() => setCrLoading(false));
-  };
-
-  const handleCrScan = async () => {
-    if (!id || crScanning) return;
-    setCrScanning(true);
-    setCrRepair(null);
-    try {
-      const { data } = await consistencyRepairApi.scan(id, {
-        scope: "full",
-        include_global_facts: true,
-        include_project_docs: true,
-        include_design_docs: true,
-      });
-      setCrConflicts(data.conflicts || []);
-      setCrSummary(data.summary || null);
-      setCrScanId(data.scan_id || "");
-      const s = data.summary || {};
-      msg.success(`扫描完成：发现 ${s.total ?? 0} 处冲突（高 ${s.high ?? 0} / 中 ${s.medium ?? 0} / 低 ${s.low ?? 0}）`);
-    } catch (e: any) {
-      msg.error(e.message || "全文一致性扫描失败");
-    } finally {
-      setCrScanning(false);
-    }
-  };
-
-  const handleCrRepair = async (opts?: { conflictIds?: string[]; severity?: string }) => {
-    if (!id || crRepairing) return;
-    setCrRepairing(true);
-    try {
-      const { data } = await consistencyRepairApi.repair(id, {
-        scan_id: crScanId || undefined,
-        mode: "auto",
-        severity_threshold: opts?.severity || consistencySeverity,
-        conflict_ids: opts?.conflictIds,
-        // ✅ 强制全量重修：true 时不跳过「已修复且修复成果仍在正文里」的冲突
-        force_full_repair: forceFullRepair,
-      });
-      setCrRepair(data);
-      await loadCrConflicts();
-      await loadCrHistory();
-      // 若当前选中章节被修复，同步预览正文
-      const curKey = selectedSectionRef.current?.key;
-      if (curKey) {
-        const hit = (data.items || []).find(
-          (x: any) => x.section_id === curKey && x.status === "repaired" && x.after);
-        if (hit?.after) {
-          // ✅ F2（R71）：不再用 hit.after.length 伪造字符口径当「字」；
-          //    保留章节原 word_count，下方 load() 随即回拉后端权威字数（一帧自纠）。
-          setSelectedSection((prev: any) => (prev && prev.key === curKey
-            ? { ...prev, content: hit.after, status: "generated" }
-            : prev));
-        }
-      }
-      load();
-      msg.success(`修复完成：成功 ${data.repaired ?? 0} 处，失败 ${data.failed ?? 0} 处，跳过 ${data.skipped ?? 0} 处`);
-      // ✅ G11（2026-09-21）：修复改写了正文 → 审核结论与总检结论都已失效。
-      // 旧实现只报"修复完成"，不提示重跑总检：用户以为分数没变即可交付，
-      // 实际按旧结论放行会把新写进去的问题一起带出。
-      if ((data.repaired ?? 0) > 0) {
-        setReviewTick((t) => t + 1);
-        msg.warning("正文已被修复改写，审核结论已失效；请重新送审并重新执行一键总检");
-      }
-    } catch (e: any) {
-      msg.error(e.message || "全文一致性修复失败");
-    } finally {
-      setCrRepairing(false);
-    }
-  };
-
-  const crRepairItemIds = (status: string) =>
-    (crRepair?.items || [])
-      .filter((i: any) => i.status === status && i.conflict_id)
-      .map((i: any) => i.conflict_id as string);
-
-  const handleCrConfirm = async (accepted: string[], rejected: string[]) => {
-    if (!id || !crRepair?.repair_id) return;
-    try {
-      const { data } = await consistencyRepairApi.confirm(id, {
-        repair_id: crRepair.repair_id, accepted, rejected,
-      });
-      msg.success(`已确认：接受 ${accepted.length} 条，拒绝 ${rejected.length} 条`);
-      await loadCrConflicts();
-      await loadCrHistory();
-      load();
-      setCrRepair((prev: any) => (prev ? { ...prev, status: data.status } : prev));
-      // ✅ G11：拒绝回滚会把章节正文恢复为修复前版本 → 审核结论失效
-      if (accepted.length + rejected.length > 0) {
-        setReviewTick((t) => t + 1);
-        if (rejected.length > 0) {
-          msg.warning("已拒绝部分修复并恢复原文，相关章节审核结论已失效，需重新送审并重新总检");
-        }
-      }
-    } catch (e: any) {
-      msg.error(e.message || "确认修复结果失败");
-    }
-  };
-
-  const handleCrRollback = (repair: any) => {
-    if (!id) return;
-    modal.confirm({
-      title: "回滚本次修复？",
-      content: `将把本次修复涉及的章节恢复为修复前正文（快照 ${repair.snapshot_id || "—"}）。该操作会生成一个可再次撤销的快照。`,
-      okText: "确认回滚",
-      cancelText: "取消",
-      onOk: async () => {
-        try {
-          await consistencyRepairApi.rollback(id, { repair_id: repair.id });
-          msg.success("已回滚到修复前版本");
-          // ✅ G11：回滚改写了正文 → 审核结论失效，需要重新送审 + 重跑总检
-          setReviewTick((t) => t + 1);
-          msg.warning("正文已回滚到修复前版本，相关章节审核结论已失效，需重新送审并重新总检");
-          await loadCrConflicts();
-          await loadCrHistory();
-          load();
-        } catch (e: any) {
-          msg.error(e.message || "回滚失败");
-        }
-      },
-    });
   };
 
   // ✅ 修复（2026-09-20 深度审查）：导出入口重入保护。
@@ -8896,7 +4625,7 @@ const draftKey = selectedSection && id
         const { data } = await chartsApi.list(sid, controller.signal);
         if (controller.signal.aborted || currentSchemeIdRef.current !== sid) return;
         const items: ExportChartItem[] = selectPlacedExportCharts(data.items || [])
-          .map((p: any) => ({ chart_type: p.chart_type, mermaid_code: p.code }));
+          .map((p) => ({ chart_type: p.chart_type, mermaid_code: p.code! }));
         chartImages = await renderChartsForExport(items, (doneCount, totalCount) => {
           // ✅ 大方案图表渲染可达数十秒，旧实现只显示静态"正在渲染图表..."，
           // 用户无法判断是否卡死。透传工具的逐图进度。
@@ -8997,10 +4726,11 @@ exportPctRef.current = pct;
         const parts = fixStatsParts(fs);
         if (parts.length) msg.success(`导出前已自动修复：${parts.join(" / ")}`, 6);
       }
-    } catch (e: any) {
-      const canceled = e?.name === "AbortError" || e?.code === "ERR_CANCELED";
+    } catch (e: unknown) {
+      const err = e as { name?: string; code?: string; message?: string };
+      const canceled = err.name === "AbortError" || err.code === "ERR_CANCELED";
       if (!canceled && exportSeqRef.current === exportSeq && currentSchemeIdRef.current === sid) {
-        msg.error(e.message || "导出失败");
+        msg.error(err.message || "导出失败");
       }
     } finally {
       if (exportSeqRef.current === exportSeq && exportAbortRef.current === controller) {
@@ -9070,7 +4800,8 @@ exportPctRef.current = pct;
       });
       // ✅ G1：导出预检反向打通就绪度总检 —— 同一份数据、同一套规则词表，
       // 用户不用在两个页面之间来回比对「到底能不能交付」
-      const ps: any = data.preflight_summary || null;
+      // 后端 SSE 契约：export/check 响应的 preflight_summary（ExportPreflight + has_run）
+      const ps = (data.preflight_summary || null) as ExportPreflightSummary | null;
       setExportPreflight(ps && ps.has_run ? ps : null);
       // ✅ 《待补充清单》（2026-09-24）：预检一并返回占位符聚合，供面板展示
       setPlaceholderReport(data.placeholder_report || null);
@@ -9096,9 +4827,10 @@ exportPctRef.current = pct;
       } else {
         msg.warning(`发现 ${data.issues.length} 个问题，建议处理后再导出`);
       }
-    } catch (e: any) {
-      const canceled = e?.name === "AbortError" || e?.code === "ERR_CANCELED";
-      if (!canceled && currentSchemeIdRef.current === sid) msg.error(e.message || "预检失败");
+    } catch (e: unknown) {
+      const err = e as { name?: string; code?: string; message?: string };
+      const canceled = err.name === "AbortError" || err.code === "ERR_CANCELED";
+      if (!canceled && currentSchemeIdRef.current === sid) msg.error(err.message || "预检失败");
     } finally {
       if (exportCheckAbortRef.current === controller) {
         exportCheckAbortRef.current = null;
@@ -9117,7 +4849,9 @@ exportPctRef.current = pct;
    *   - 质量自检：文字层 —— 口语化/AI 腔残留、引用了已废止或被替代的标准编号
    */
   const handleQualityCheck = async () => {
-    if (!id) return;
+    // ✅ R168（FIX-10）：重入锁 —— 同帧双击此前可并发两个请求（checkingQuality 是
+    //    异步置位，挡不住连点），结果相互覆盖；与同页其它预检入口的 running 态口径一致。
+    if (!id || checkingQuality) return;
     setCheckingQuality(true);
     try {
       const { data } = await sectionsApi.quality(id);
@@ -9128,8 +4862,9 @@ exportPctRef.current = pct;
       } else {
         msg.warning(`${s.problem_sections} 个章节存在质量问题，详见清单`);
       }
-    } catch (e: any) {
-      msg.error(e.message || "质量自检失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "质量自检失败");
     } finally {
       setCheckingQuality(false);
     }
@@ -9139,7 +4874,7 @@ exportPctRef.current = pct;
   //    陈旧闭包问题 —— 旧 deps 只有 [tree]，但闭包内读了 failedOutlineChapters，
   //    导致「失败章高亮」在只改 failedOutlineChapters 时不刷新（当前被「setTree 与
   //    setFailedOutlineChapters 总同批次提交」掩盖，新增单点改动路径就会暴露）。
-  const convertToAntTree = useCallback((node: TreeNode, depth = 0): any => {
+  const convertToAntTree = useCallback((node: TreeNode, depth = 0): TreeDataNode => {
     const isGenerated = node.status === "generated" || node.word_count > 0;
     const isGenerating = node.status === "running" || node.status === "pending";
     const isFailed = node.status === "failed";
@@ -9290,8 +5025,9 @@ exportPctRef.current = pct;
       }
       msg.success(`已重跑 ${targets.length} 个受影响章节，正在刷新清单…`);
       await handleExportCheck();
-    } catch (e: any) {
-      msg.error(e?.message || "重跑中断，可稍后重新预检查看进度");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "重跑中断，可稍后重新预检查看进度");
     } finally {
       setRerunning(false);
     }
@@ -9363,7 +5099,7 @@ exportPctRef.current = pct;
           ? { ...n, content: newContent, ...(hasWc ? { word_count: wordCount } : {}) }
           : { ...n, children: n.children ? patchNode(n.children) : undefined }
       );
-    setSelectedSection((prev: any) =>
+    setSelectedSection((prev) =>
       prev && prev.key === sec.key
         ? { ...prev, content: newContent, ...(hasWc ? { word_count: wordCount } : {}) }
         : prev
@@ -9487,7 +5223,7 @@ exportPctRef.current = pct;
                     <div className="scroll-area" style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
                       {/* 上传解析主体（含上传区、资料与解析列表、下一步等） */}
                       <UploadParseTab
-                        docs={docList}
+                        docs={docList as DocumentParseItem[]}
                         maxUploadBytes={maxUploadBytes}
                         categoryOptions={categoryOptions}
                         generating={generating}
@@ -9745,12 +5481,12 @@ exportPctRef.current = pct;
             }
             extra={
               <OutlineTreeActions
-                selected={selectedSection}
+                selected={selectedSection as TreeNode | null}
                 moveFlags={moveFlags}
                 showNext={tree.length > 0}
-                onAddChild={() => selectedSection && addChildNode(selectedSection.key)}
-                onMove={(dir) => selectedSection && moveNode(selectedSection.key, dir)}
-                onDelete={() => selectedSection && deleteNode(selectedSection.key)}
+                onAddChild={() => selectedSection && addChildNode(selectedSection.key!)}
+                onMove={(dir) => selectedSection && moveNode(selectedSection.key!, dir)}
+                onDelete={() => selectedSection && deleteNode(selectedSection.key!)}
                 onNextStep={() => setActiveTab(NEXT_TAB.outline)}
               />
             }
@@ -9770,7 +5506,7 @@ exportPctRef.current = pct;
                 此前预算全链路只读，用户无法在正文生成前规划每章篇幅 */}
             {selectedSection && tree.length > 0 && (
               <OutlineNodeBudgetPanel
-                node={selectedSection}
+                node={selectedSection as TreeNode}
                 onBudgetChange={handleBudgetChange}
               />
             )}
@@ -9783,7 +5519,7 @@ exportPctRef.current = pct;
                   draggable
                   expandedKeys={expandedKeys}
                   onExpand={(keys) => setExpandedKeys(keys as React.Key[])}
-                  selectedKeys={selectedSection ? [selectedSection.key] : []}
+                  selectedKeys={selectedSection ? [selectedSection.key!] : []}
                   onSelect={(keys) => {
                     if (keys.length > 0) {
                       const sec = findSectionById(tree, keys[0] as string);
@@ -9881,7 +5617,7 @@ exportPctRef.current = pct;
               {Array.isArray(factsSummary.by_category) && factsSummary.by_category.length > 0 && (
                 <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
                   <Text type="secondary" style={{ fontSize: 12 }}>分类分布：</Text>
-                  {factsSummary.by_category.map((c: any) => (
+                  {factsSummary.by_category.map((c) => (
                     <Tooltip
                       key={c.category}
                       title={`${c.title || c.category}：${c.groups} 组 / ${c.items} 条·模拟 ${c.simulated}·矛盾 ${c.conflicts}·待审 ${c.unresolved}`}
@@ -9914,15 +5650,16 @@ exportPctRef.current = pct;
                   message={`检测到 ${factsCrossConflicts.length} 处跨段矛盾，请在下方对应条目中手动裁决`}
                   description={
                     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      {factsCrossConflicts.slice(0, 8).map((cf: any, idx: number) => {
+                      {factsCrossConflicts.slice(0, 8).map((cf, idx: number) => {
                         const sevColor = cf.severity === "high" ? "red" : cf.severity === "medium" ? "orange" : "blue";
                         return (
                           <span key={cf.rule_id || idx} style={{ fontSize: 12 }}>
                             <Tag color={sevColor}>{cf.severity || "low"}</Tag>
                             <Text strong>{cf.side_a?.name}</Text>：
-                            <Text delete type="danger">{cf.side_a?.value}</Text>
+                            {/* 后端 value 契约为 string（facts_extractor 下发），编译期收窄 */}
+                            <Text delete type="danger">{cf.side_a?.value as string | undefined}</Text>
                             {" ↔ "}
-                            <Text type="warning">{cf.side_b?.value}</Text>
+                            <Text type="warning">{cf.side_b?.value as string | undefined}</Text>
                             {cf.resolution_hint ? <Text type="secondary"> · {cf.resolution_hint}</Text> : null}
                           </span>
                         );
@@ -9946,7 +5683,8 @@ exportPctRef.current = pct;
               disabled={generating || uploadingFacts || parsingDocs}
               beforeUpload={(file, fileList) => {
                 if (fileList[0] === file) {
-                  const files = fileList.map((f) => (f as any).originFileObj || f) as File[];
+                  // antd Upload 元素的 originFileObj 为可选键（受控链路才有），结构断言读取
+                  const files = fileList.map((f) => (f as { originFileObj?: File }).originFileObj || f) as File[];
                   setTimeout(() => handleUploadDocuments(files), 0);
                 }
                 return false;
@@ -10007,7 +5745,7 @@ exportPctRef.current = pct;
                   scheme_id: id!,
                   apply: false,
                 });
-                return data as any;
+                return data;
               }}
               apply={async (operations, instruction) => {
                 // 应用用户刚确认的预览计划，禁止后端再次调用 AI 生成另一份计划
@@ -10026,14 +5764,17 @@ exportPctRef.current = pct;
                   ? `事实调整已应用，${ignoredCount} 项未纳入（详见面板提示）`
                   : "事实调整已应用");
                 // 回传给面板渲染丢弃明细（组件把 void 当「无丢弃」）
-                return { ignored: data?.ignored } as any;
+                return { ignored: data?.ignored };
               }}
-              onError={(fallback, e) =>
+              onError={(fallback, e) => {
+                // 结构化窄断言：axios 错误体上的 response.data.detail / message
+                const err = e as { response?: { data?: { detail?: string } }; message?: string };
                 msg.error(
-                  (e as any)?.response?.data?.detail
-                  || (e as any)?.message
+                  err?.response?.data?.detail
+                  || err?.message
                   || fallback,
-                )}
+                );
+              }}
             />
             <Button
               icon={<CaretRightOutlined />}
@@ -10204,19 +5945,19 @@ exportPctRef.current = pct;
             ) : factsDocsCollapsed ? (
               // ✅ 折叠态：不渲染文件列表，仅保留一行摘要（避免长列表挤出事实内容）
               <div style={{ textAlign: "center", padding: 8, color: "#999", fontSize: 12 }}>
-                已收起 {docList.length} 个文件（含 {docList.filter((d: any) => isDocParsed(d)).length} 个已解析），点击标题展开查看
+                已收起 {docList.length} 个文件（含 {docList.filter((d) => isDocParsed(d)).length} 个已解析），点击标题展开查看
               </div>
             ) : (
               <List
                 size="small"
                 dataSource={docList}
-                renderItem={(doc: any) => {
+                renderItem={(doc) => {
                   const ftypeIcon: Record<string, string> = {
                     docx: "📄", pdf: "📑", md: "📝", txt: "📃",
                     xlsx: "📊", xls: "📈", csv: "📉",
                     png: "🖼️", jpg: "🖼️", jpeg: "🖼️", bmp: "🖼️", tiff: "🖼️",
                   };
-                  const icon = ftypeIcon[doc.file_type] || "📎";
+                  const icon = ftypeIcon[doc.file_type as string] || "📎";
                   const isParsed = isDocParsed(doc);
                   const isFailed = isDocFailed(doc);
                   return (
@@ -10229,7 +5970,7 @@ exportPctRef.current = pct;
                             type="link"
                             icon={<FileTextOutlined />}
                             disabled={parsingDocs}
-                            onClick={() => handleParseDocument(doc.id, doc.file_name)}
+                            onClick={() => handleParseDocument(doc.id, doc.file_name as string)}
                           >
                             {isFailed ? "重试解析" : "解析"}
                           </Button>,
@@ -10244,7 +5985,7 @@ exportPctRef.current = pct;
                               type="link"
                               icon={<ReloadOutlined />}
                               disabled={parsingDocs}
-                              onClick={() => handleParseDocument(doc.id, doc.file_name, true)}
+                              onClick={() => handleParseDocument(doc.id, doc.file_name as string, true)}
                             >
                               重新解析
                             </Button>
@@ -10256,7 +5997,7 @@ exportPctRef.current = pct;
                           danger
                           type="link"
                           icon={<CloseCircleOutlined />}
-                          onClick={() => handleDeleteDocument(doc.id, doc.file_name)}
+                          onClick={() => handleDeleteDocument(doc.id, doc.file_name as string)}
                         >
                           删除
                         </Button>,
@@ -10271,12 +6012,12 @@ exportPctRef.current = pct;
                             overflow: "hidden",
                             textOverflow: "ellipsis",
                             whiteSpace: "nowrap",
-                          }} title={doc.file_name}>
-                            {doc.file_name}
+                          }} title={doc.file_name as string}>
+                            {doc.file_name as string}
                           </div>
                           <div style={{ fontSize: 12, color: "#999" }}>
                             <Tag color="default" style={{ margin: "0 4px 0 0" }}>
-                              {doc.file_type?.toUpperCase() || "未知格式"}
+                              {(doc.file_type as string | undefined)?.toUpperCase() || "未知格式"}
                             </Tag>
                             {isFailed ? (
                               <Tag color="red" style={{ margin: "0 4px 0 0" }}>解析失败，可重试</Tag>
@@ -10290,7 +6031,7 @@ exportPctRef.current = pct;
                                 <Tag color="volcano" style={{ margin: "0 4px 0 0" }}>⚠ 可能被截断</Tag>
                               </Tooltip>
                             )}
-                            {doc.created_at}
+                            {doc.created_at as string | undefined}
                           </div>
                         </div>
                       </div>
@@ -10312,7 +6053,7 @@ exportPctRef.current = pct;
                     || activeFactCategory}
                 </Text>
                 <Tag color="blue">
-                  {activeFactGroups.length} 组 / {activeFactGroups.reduce((n: number, g: any) => n + (g.items?.length || 0), 0)} 项
+                  {activeFactGroups.length} 组 / {activeFactGroups.reduce((n, g) => n + (g.items?.length || 0), 0)} 项
                 </Tag>
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   来自左侧「事实分类」面板选中项
@@ -10436,7 +6177,7 @@ exportPctRef.current = pct;
         >
 
           <SectionContentCard
-            section={selectedSection}
+            section={selectedSection as TreeNode | null}
             treeEmpty={tree.length === 0}
             isEditing={isEditingSection}
             saving={savingSection}
@@ -10548,7 +6289,7 @@ exportPctRef.current = pct;
             {complianceResults.length > 0 && (
               <Table
                 size="small"
-                rowKey={(r: any, i) => `${r.rule_id || "r"}-${i}`}
+                rowKey={(r, i) => `${r.rule_id || "r"}-${i}`}
                 style={{ marginTop: 12 }}
                 pagination={false}
                 // ✅ 性能优化：虚拟滚动（pagination=false + 固定表体，
@@ -10559,7 +6300,7 @@ exportPctRef.current = pct;
                 columns={[
                   {
                     title: "判定", dataIndex: "hit", width: 80,
-                    render: (hit: any) => (
+                    render: (hit) => (
                       <Tag color={hit === true ? "green" : hit === false ? "red" : "default"}>
                         {hit === true ? "命中" : hit === false ? "缺失" : "疑似"}
                       </Tag>
@@ -10768,18 +6509,18 @@ exportPctRef.current = pct;
             <Card title="预检结果" size="small">
               <Descriptions column={1} size="small">
                 <Descriptions.Item label="就绪度评分">
-                  <Tag color={expertResult.score >= 80 ? "green" : expertResult.score >= 60 ? "orange" : "red"}>
+                  <Tag color={expertResult.score! >= 80 ? "green" : expertResult.score! >= 60 ? "orange" : "red"}>
                     {expertResult.score}
                   </Tag>
                 </Descriptions.Item>
-                {expertResult.missing?.length > 0 && (
+                {(expertResult.missing?.length ?? 0) > 0 && (
                   <Descriptions.Item label="缺失项">
-                    {expertResult.missing.join("、")}
+                    {expertResult.missing!.join("、")}
                   </Descriptions.Item>
                 )}
-                {expertResult.suggestions?.length > 0 && (
+                {(expertResult.suggestions?.length ?? 0) > 0 && (
                   <Descriptions.Item label="补充建议">
-                    {expertResult.suggestions.join("；")}
+                    {expertResult.suggestions!.join("；")}
                   </Descriptions.Item>
                 )}
               </Descriptions>
@@ -10844,7 +6585,8 @@ exportPctRef.current = pct;
                   <ul style={{ margin: 0, paddingLeft: 20, fontSize: 12 }}>
                     {exportIssues.map((iss, idx) => (
                       <li key={idx}>
-                        {EXPORT_ISSUE_LABEL[iss.type] || iss.type}：
+                        {/* 后端契约：预检 issue 一定携带英文 type 键（ExportIssueItem 未收录） */}
+                        {EXPORT_ISSUE_LABEL[iss.type!] || iss.type}：
                         <Text strong>{describeExportIssue(iss)}</Text>
                       </li>
                     ))}
@@ -10947,7 +6689,7 @@ exportPctRef.current = pct;
                 <CheckCircleOutlined />
                 <Text strong>正文质量自检（交付前）</Text>
                 {(qualityResult?.summary?.problem_sections || 0) > 0 && (
-                  <Tag color="orange">{qualityResult.summary.problem_sections} 个章节待修</Tag>
+                  <Tag color="orange">{qualityResult!.summary!.problem_sections} 个章节待修</Tag>
                 )}
               </Space>
             }
@@ -11017,7 +6759,7 @@ exportPctRef.current = pct;
             {qualityResult && (qualityResult.items?.length || 0) > 0 && (
               <Table
                 size="small"
-                rowKey={(r: any) => r.section_id}
+                rowKey={(r) => r.section_id!}
                 style={{ marginTop: 12 }}
                 pagination={false}
                 // ✅ 性能优化：虚拟滚动（同上方：pagination=false + 固定表体）
@@ -12001,8 +7743,9 @@ exportPctRef.current = pct;
                     ? "没有匹配的目录库（可能是全部未审核通过）"
                     : ""
                 );
-              } catch (e: any) {
-                setLibError(e.message || "加载失败");
+              } catch (e: unknown) {
+                const err = e as { message?: string };
+                setLibError(err.message || "加载失败");
               } finally {
                 setLibLoading(false);
               }
@@ -12024,7 +7767,7 @@ exportPctRef.current = pct;
               <List
                 size="small"
                 dataSource={libItems}
-                renderItem={(lib: any) => (
+                renderItem={(lib) => (
                   <List.Item
                     actions={[
                       <Button
@@ -12093,7 +7836,7 @@ exportPctRef.current = pct;
 
       {/* ===== ✅ 上传解析：解析内容预览（前 N 字，不下载整份文件） ===== */}
       <Modal
-        title={previewDoc ? `解析内容预览 · ${previewDoc.file_name}` : "解析内容预览"}
+        title={previewDoc ? `解析内容预览 · ${(previewDoc as { file_name?: string }).file_name}` : "解析内容预览"}
         open={!!previewDoc}
         onCancel={() => setPreviewDoc(null)}
         footer={null}
@@ -12307,6 +8050,11 @@ exportPctRef.current = pct;
                 >
                   开始扫描
                 </Button>
+                {/* ✅ R168（FIX-10）：扫描/修复是 10 分钟级 AI 长任务，补取消入口
+                    （口径与 R106 FIX-5 的三个预检取消按钮一致，运行中才出现） */}
+                {crScanning && (
+                  <Button danger onClick={handleCancelCrScan}>取消扫描</Button>
+                )}
                 <Button
                   type="primary"
                   ghost
@@ -12318,6 +8066,9 @@ exportPctRef.current = pct;
                   一键修复（{consistencySeverity === "high" ? "仅高危"
                     : consistencySeverity === "medium" ? "中及以上" : "全部"}）
                 </Button>
+                {crRepairing && (
+                  <Button danger onClick={handleCancelCrRepair}>取消修复</Button>
+                )}
                 {/* ✅ 强制全量重修（2026-09-22）：默认跳过「已修复且成果仍在」的冲突，
                     勾选后本批全部重新调用 AI 修复 */}
                 <Checkbox
@@ -12327,14 +8078,14 @@ exportPctRef.current = pct;
                   强制全量重修
                 </Checkbox>
                 <Button
-                  disabled={!(crRepair?.items || []).some((i: any) => i.status === "repaired")}
+                  disabled={!(crRepair?.items || []).some((i) => i.status === "repaired")}
                   onClick={() => handleCrConfirm(crRepairItemIds("repaired"), [])}
                 >
                   全部接受
                 </Button>
                 <Button
                   danger
-                  disabled={!(crRepair?.items || []).some((i: any) => i.status === "repaired")}
+                  disabled={!(crRepair?.items || []).some((i) => i.status === "repaired")}
                   onClick={() => handleCrConfirm([], crRepairItemIds("repaired"))}
                 >
                   全部拒绝
@@ -12371,9 +8122,9 @@ exportPctRef.current = pct;
                 virtual
                 dataSource={crConflicts}
                 expandable={{
-                  expandedRowRender: (r: any) => (
+                  expandedRowRender: (r) => (
                     <div style={{ fontSize: 12 }}>
-                      {(r.occurrences || []).map((o: any, i: number) => (
+                      {(r.occurrences || []).map((o, i: number) => (
                         <div key={i} style={{ marginBottom: 4 }}>
                           <Tag>{o.section_title || o.section_id}</Tag>
                           <span>{o.text || o.value}</span>
@@ -12401,14 +8152,14 @@ exportPctRef.current = pct;
                   { title: "主题", dataIndex: "topic", width: 150, ellipsis: true },
                   {
                     title: "涉及章节", dataIndex: "occurrences", width: 160, ellipsis: true,
-                    render: (occs: any[]) =>
-                      Array.from(new Set((occs || []).map((o) => o.section_title || o.section_id)))
+                    render: (occs) =>
+                      Array.from(new Set((occs || []).map((o: { section_title?: string; section_id?: string }) => o.section_title || o.section_id)))
                         .join(" / ") || "—",
                   },
                   {
                     title: "当前值", dataIndex: "occurrences", width: 150, ellipsis: true,
-                    render: (occs: any[]) =>
-                      Array.from(new Set((occs || []).map((o) => o.value).filter(Boolean))).join(" / ") || "—",
+                    render: (occs) =>
+                      Array.from(new Set((occs || []).map((o: { value?: string }) => o.value).filter(Boolean))).join(" / ") || "—",
                   },
                   {
                     title: "权威值", dataIndex: "authoritative_value", width: 130, ellipsis: true,
@@ -12431,7 +8182,7 @@ exportPctRef.current = pct;
                 <span>修复预览</span>
                 {crRepair?.repair_id && (
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    批次 {crRepair.repair_id} · {CR_REPAIR_STATUS[crRepair.status] || crRepair.status}
+                    批次 {crRepair.repair_id} · {CR_REPAIR_STATUS[crRepair.status!] || crRepair.status}
                   </Text>
                 )}
               </Space>
@@ -12442,7 +8193,7 @@ exportPctRef.current = pct;
               <Empty description="暂无修复结果，点击「一键修复」后在此逐条确认" image={Empty.PRESENTED_IMAGE_SIMPLE} />
             ) : (
               <Collapse
-                items={(crRepair.items || []).map((it: any, idx: number) => ({
+                items={(crRepair!.items || []).map((it, idx: number) => ({
                   key: `${it.conflict_id}-${idx}`,
                   label: (
                     <Space wrap size={6}>
@@ -12450,7 +8201,7 @@ exportPctRef.current = pct;
                       <Text style={{ fontSize: 12 }}>{it.section_title || it.section_id || "（无章节）"}</Text>
                       <Text type="secondary" style={{ fontSize: 12 }}>{it.topic}</Text>
                       <Tag color={it.status === "repaired" ? "green" : it.status === "skipped" ? "orange" : "red"}>
-                        {CR_ITEM_STATUS[it.status] || it.status}
+                        {CR_ITEM_STATUS[it.status!] || it.status}
                       </Tag>
                     </Space>
                   ),
@@ -12481,10 +8232,10 @@ exportPctRef.current = pct;
                       )}
                       {it.status === "repaired" && (
                         <Space>
-                          <Button size="small" type="primary" onClick={() => handleCrConfirm([it.conflict_id], [])}>
+                          <Button size="small" type="primary" onClick={() => handleCrConfirm([it.conflict_id!], [])}>
                             接受
                           </Button>
-                          <Button size="small" danger onClick={() => handleCrConfirm([], [it.conflict_id])}>
+                          <Button size="small" danger onClick={() => handleCrConfirm([], [it.conflict_id!])}>
                             拒绝（恢复原文）
                           </Button>
                         </Space>
@@ -12521,7 +8272,7 @@ exportPctRef.current = pct;
                   },
                   {
                     title: "操作", width: 90,
-                    render: (_: any, r: any) => (
+                    render: (_, r) => (
                       <Button size="small" danger onClick={() => handleCrRollback(r)}>回滚</Button>
                     ),
                   },

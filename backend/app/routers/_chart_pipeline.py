@@ -448,8 +448,12 @@ def _rewrite_code_block(content: str, old_code: str,
         i += 1
         code_lines, state, i = read_fenced_block(
             lines, i, open_char=open_char, open_len=open_len)
-        if state == "truncated":
-            # 真正未闭合块：原样保留（含原围栏行），不做任何改写
+        if state in ("truncated", "eof"):
+            # 未闭合块：原样保留（含原围栏行），不做任何改写。
+            # ✅ R169：eof 与 truncated 同口径。旧实现只保 truncated，eof 残片
+            #    落到下方改写分支时会被补写闭合围栏——「用户删掉闭合围栏的截断
+            #    残片」被洗白成合法图表，与登记侧 _scan_chart_fences_full
+            #    （eof/truncated 不算图）、导出侧（eof 跳过）三侧口径分叉。
             out.append(fence_line)
             out.extend(code_lines)
             continue
@@ -1068,8 +1072,14 @@ async def resync_inline_charts(db, scheme_id: str, section_id: str,
     # ✅ 防御（2026-09-22）：apply_inline_chart_plan 在"未传入 content"时返回 None，
     #    而本函数必定传入正文。此处兜底回退到裁剪前的正文，避免返回 None 让
     #    调用方（sse_handlers._persist_section）把整章正文覆盖成空。
-    new_content = await apply_inline_chart_plan(db, section_id, rows, new_content) \
-        or new_content
+    # ✅ R169：兜底判据收紧为 `is None`。旧实现 `or new_content` 把 apply 的
+    #    合法空串返回值也当 None 回退——「正文仅由图表块构成且块被限额全部
+    #    裁掉」时 apply 返回 ""，回退成裁剪前正文 ⇒ 图块留在正文、chart_predictions
+    #    无行 ⇒ 恰是本模块注释反复要杜绝的幽灵图（导出照渲、清单查不到、绕过限额）。
+    _applied = await apply_inline_chart_plan(db, section_id, rows, new_content)
+    if _applied is None:
+        _applied = new_content
+    new_content = _applied
     if rows:
         logger.info("章节 %s 同步登记 %d 个内联图表", section_id[:8], len(rows))
     return len(rows), new_content

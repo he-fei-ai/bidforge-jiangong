@@ -377,18 +377,23 @@ class TestCrossTypeMutexAtRegister:
         import ast
         import re
 
-        src = _read(_SSE_SRC)
-        tree = ast.parse(src)
+        # 拆分兼容：_register_task_exclusive 下沉到 _sse_outline_review.py，
+        # 文本断言走聚合源码；AST 扫描逐文件解析（保证 get_source_segment 坐标
+        # 与所在文件一致；gen 端点函数全部位于 facade）。
+        _sse_files = (_SSE_SRC, "app/routers/_sse_outline_build.py",
+                      "app/routers/_sse_outline_review.py")
+        src = "\n".join(_read(p) for p in _sse_files)
 
         # 1) 找出所有「注册了 generation 类任务」的端点函数
         gen_fns = {}
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            body_src = ast.get_source_segment(src, node) or ""
-            m = re.search(r'_register_task_exclusive\(\s*"(\w+)"', body_src)
-            if m:
-                gen_fns[node.name] = (m.group(1), body_src)
+        for part_src in (_read(p) for p in _sse_files):
+            for node in ast.walk(ast.parse(part_src)):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                body_src = ast.get_source_segment(part_src, node) or ""
+                m = re.search(r'_register_task_exclusive\(\s*"(\w+)"', body_src)
+                if m:
+                    gen_fns[node.name] = (m.group(1), body_src)
 
         expected_kinds = {"outline_generation", "content_generation",
                           "facts_generation"}

@@ -717,6 +717,14 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     "consistency_audit_system": [
         "content", "facts", "scheme_name", "scheme_type",
     ],
+    # ✅ R166（2026-11-03 · 全局事实模块收口）：整卷合并修复两条提示词补登
+    #    契约（R122-G2 引入时漏登 —— 提示词本体已在 consistency_repair.py 经
+    #    _reg 注册并投产，契约表缺行导致启动期 used_not_declared 漂移校验
+    #    永远扫不到这两条，且 R122 契约锁测试持续红）。system 零占位（纯
+    #    指令型），user 的两个占位符逐字照抄渲染口径（consumed by
+    #    services/consistency_fullbook_repair.py:215-217）。
+    "consistency_fullbook_system": [],
+    "consistency_fullbook_user": ["section_count", "workspace"],
     # --- 审核与预检域 ---
     # ✅ 2026-10-03（AI 语义检查侧消费事实）：两条 AI 链路经跨模块只读桥接
     #    load_resolved_facts_for_scope 装配 {global_facts}（与预检/正文/导出

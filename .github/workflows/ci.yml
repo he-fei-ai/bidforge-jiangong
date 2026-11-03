@@ -31,6 +31,12 @@ jobs:
       - name: Ruff
         run: ruff check .
 
+      # 格式门禁：当前为非阻断（存量约数千处格式差异，一次性重排留作独立整改项）
+      # TODO: 待存量 ruff format 全量重排落地后，删除 continue-on-error 转为阻断
+      - name: Ruff format check (non-blocking)
+        continue-on-error: true
+        run: ruff format --check .
+
       - name: Pytest
         run: pytest
 

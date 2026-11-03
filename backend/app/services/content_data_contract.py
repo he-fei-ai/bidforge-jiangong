@@ -877,8 +877,8 @@ def audit_call_matrix(*, extraction_items, facts_rows, sections,
         _unknown = {h.get("name") for h in values if h.get("name")} - _topic_words()
         if _unknown:
             logger.warning("consistency topic drift: %s", sorted(_unknown))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("consistency 替代式漂移自检失败（跳过自检，不影响覆盖度统计）: %s", e)
 
     facts_inventory = {
         "total": len(facts_rows),

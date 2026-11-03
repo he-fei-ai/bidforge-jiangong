@@ -657,8 +657,16 @@ class TestFrontendContractParity:
                          "SchemeWorkbenchPage.tsx")
 
     def _page_src(self) -> str:
-        with open(self._PAGE, encoding="utf-8") as f:
-            return f.read()
+        # 大文件拆分后：契约常量迁入 pages/schemeWorkbench/（factsShared.ts 等），
+        # 调用点散布在 facade 与 FactsAdjustPanel.tsx —— 聚合读取，断言语义不变。
+        root = os.path.dirname(self._PAGE)
+        parts = [open(self._PAGE, encoding="utf-8").read()]
+        wb = os.path.join(root, "schemeWorkbench")
+        for fn in sorted(os.listdir(wb)):
+            if fn.endswith((".ts", ".tsx")):
+                with open(os.path.join(wb, fn), encoding="utf-8") as f:
+                    parts.append(f.read())
+        return "\n".join(parts)
 
     def test_ignore_reason_enum_matches_backend(self):
         import re

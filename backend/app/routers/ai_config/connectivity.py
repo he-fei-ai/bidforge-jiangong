@@ -1,4 +1,5 @@
 """AI 配置路由 · 连通性 / 健康（测试连接、预检、健康快照）。"""
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
@@ -16,6 +17,8 @@ from app.services.ai.provider_factory import (
 from app.services.crypto import decrypt_api_key
 
 from ._common import _classify_error, _dns_precheck_async, _same_base_url
+
+logger = logging.getLogger("ai_config")
 
 router = APIRouter(tags=["ai_config"])
 
@@ -569,8 +572,10 @@ async def ai_health(db=Depends(read_db)):
         elif api_key and d["base_url"]:
             p = _build_provider(d["provider_name"], api_key, d["base_url"], d["model"])
             supports_vision = p.supports_vision()
-    except Exception:
-        pass
+    except Exception as e:
+        # 视觉能力探测属可选增强，失败按不支持处理，不影响连通性判定主流程
+        logger.debug("supports_vision 探测失败（provider=%s，按不支持处理）: %s",
+                     d.get("provider_name", ""), e)
 
     try:
         fallback_count = len(await _fallback_chain())

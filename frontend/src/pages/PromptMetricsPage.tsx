@@ -28,8 +28,9 @@ export default function PromptMetricsPage() {
     try {
       const { data: snap } = await promptMetricsApi.get();
       setData(snap);
-    } catch (e: any) {
-      msg.error(e?.message || "加载提示词指标失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "加载提示词指标失败");
     } finally {
       setLoading(false);
     }
@@ -49,8 +50,9 @@ export default function PromptMetricsPage() {
           await promptMetricsApi.reset();
           msg.success("计数已清零");
           await load();
-        } catch (e: any) {
-          msg.error(e?.message || "重置失败");
+        } catch (e: unknown) {
+          const err = e as { message?: string };
+          msg.error(err.message || "重置失败");
         } finally {
           setResetting(false);
         }

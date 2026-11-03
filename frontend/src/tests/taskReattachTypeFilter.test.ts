@@ -108,7 +108,7 @@ describe("reattachTaskImpl（三链统一重挂入口）", () => {
     expect(fetchCalled).toBe(false);
     expect(hit).not.toBeNull();
     expect(hit!.taskId).toBe("preset-tid");
-    expect(hit!.final.status).toBe("completed");
+    expect(hit!.final!.status).toBe("completed");
     expect(order).toEqual(["reattach", "poll"]);
   });
 

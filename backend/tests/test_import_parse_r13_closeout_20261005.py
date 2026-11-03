@@ -141,11 +141,13 @@ class TestPersistParseResultContract:
 
         async def _fail(*a, **k):
             return False
-        # ✅ R122 配套修复（遗留红）：R123 把 parse_document 直调改为
-        #    _persist_parse_result_with_retry，其内部解析的是 global_facts_docs
-        #    模块全局的 _persist_parse_result——旧 patch 打在 gf 命名空间上
-        #    已不生效（假失败：patch 脱靶、真 persist 成功）。改 patch 真目标。
-        monkeypatch.setattr(gfd, "_persist_parse_result", _fail)
+        # patch 目标必须是**调用点实际解析到的命名空间**：两条链路一律写
+        # `await _gf._persist_parse_result(...)`（global_facts_docs.py:1148 单份
+        # 解析 / :1324 解析全部），而 global_facts 在 :2904 把同名函数再导出，
+        # 所以真目标是 gf 命名空间。旧 patch 打在 gfd 上完全脱靶 —— 桩从未生效、
+        # 真 persist 照常成功 → 不抛 503 → 本用例恒红（假失败，非产品缺陷）。
+        # 与本文件 :165 的批量路径用例同口径（那条一直 patch gf、一直是绿的）。
+        monkeypatch.setattr(gf, "_persist_parse_result", _fail)
 
         with pytest.raises(HTTPException) as e:
             await gf.parse_document(doc_id, db=db)

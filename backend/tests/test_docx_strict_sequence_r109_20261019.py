@@ -292,7 +292,12 @@ class TestNormalizeDocxPackage:
 class TestSourceLocks:
     @pytest.fixture()
     def src(self) -> str:
-        return Path(E.__file__).read_text(encoding="utf-8")
+        # 拆分兼容：聚合读取 export.py 与其子模块（_export_*.py）
+        base = Path(E.__file__).parent
+        segs = [Path(E.__file__).read_text(encoding="utf-8")]
+        segs += [p.read_text(encoding="utf-8")
+                 for p in sorted(base.glob("_export_*.py"))]
+        return "\n".join(segs)
 
     def test_no_tcpr_append_shd(self, src):
         """旧的非法追加方式不得复活（AST 判据，注释里的字面量不算）。"""

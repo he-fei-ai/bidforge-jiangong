@@ -170,6 +170,8 @@ export interface AIConfigSaveResponse {
   warning: string;
   /** ✅ 越界数值被自动收敛的提示（如「并发数 8 超出允许范围 1~5，已按 5 保存」） */
   warnings: string[];
+  /** ✅ R169：与库内既有配置「同供应商+模型+地址」的去重提示（R111 只提示不阻断，可缺省） */
+  duplicate_hint?: string;
 }
 
 /** PATCH /ai/config/{id}/toggle 响应 */

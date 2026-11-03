@@ -37,8 +37,12 @@ FORM_KEYS = ("compilation_note", "approval", "expert_review", "drawing_appendix"
 
 
 def _src(path=EX_PATH):
-    with io.open(path, encoding="utf-8") as f:
-        return f.read()
+    """聚合读取 export.py 与其拆分子模块（_export_*.py，拆分兼容）。"""
+    import glob
+    segs = [io.open(path, encoding="utf-8").read()]
+    for p in sorted(glob.glob(os.path.join(os.path.dirname(path), "_export_*.py"))):
+        segs.append(io.open(p, encoding="utf-8").read())
+    return "\n".join(segs)
 
 
 def _fn(name, src=None):

@@ -1,0 +1,8 @@
+# Prettier 排除清单
+dist
+node_modules
+logs
+*.log
+tsconfig.tsbuildinfo
+package-lock.json
+vitest-*.json

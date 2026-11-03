@@ -40,6 +40,17 @@ from app.services.outline_quality import (
 )
 
 _SSE_PATH = os.path.join(os.path.dirname(sh.__file__), "sse_handlers.py")
+# 拆分兼容：目录构建/评审两阶段下沉到 _sse_outline_*.py（facade 转发），
+# 源码级断言需聚合读取（facade 在前，facade 内函数的 ast 坐标不受影响）。
+_SSE_PATHS = [
+    _SSE_PATH,
+    os.path.join(os.path.dirname(sh.__file__), "_sse_outline_build.py"),
+    os.path.join(os.path.dirname(sh.__file__), "_sse_outline_review.py"),
+]
+
+
+def _read_sse() -> str:
+    return "\n".join(_read(p) for p in _SSE_PATHS)
 # R101（2026-10-17）：占位标题「外科式重写」整组（含纯函数 `_apply_title_updates`）
 # 已下沉 `services/outline_title_fix.py` 以消除路由器反向 import 的分层债；
 # 回写侧判据单一事实源的静态锁据此改指向新归属模块（sse_handlers 仅保留同名 import）。
@@ -241,7 +252,7 @@ class TestBumpRefCountCommits:
         修复前 generate_outline 函数体内零 commit，而 get_db teardown 会
         rollback ⇒ ref_count 递增确定性丢失（统计承诺从未生效）。
         """
-        src = _read(_SSE_PATH)
+        src = _read_sse()
         tree = ast.parse(src)
         target = None
         for node in ast.walk(tree):
@@ -337,6 +348,6 @@ class TestCheckpointSchemaTypes:
 
     def test_runtime_values_are_strings(self):
         """生产写入侧实参形态：章标题字符串（与声明互证）。"""
-        src = _read(_SSE_PATH)
+        src = _read_sse()
         assert 'failed_chapters.append(str(ch.get("title")' in src, (
             "写入侧必须是章标题字符串；若改成 dict，本组类型断言需同步修订")

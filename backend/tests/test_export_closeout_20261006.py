@@ -593,11 +593,18 @@ class TestFrontendBackendConfigParity:
 
         ✅ R94：`_build_docx_options` 是版式读取的唯一出口（原先内联在
         `_prepare_export` 尾部），必须纳入扫描面，否则 17 个版式键会被误报为死键。
+
+        ✅ 拆分继留：`layout_preset` 的读取已从 `_build_docx_options` 外提到
+        `_resolve_layout_preset`（现居 `_export_docx_parts.py`），同样必须纳入
+        扫描面，否则该键被误报为死键。此处刻意用**函数对象**逐个聚合而非整文件
+        文本拼接——`_export_cache.py` 的 `_EXPORT_CONFIG_KEYS` 定义里逐字含全部
+        23 个键名，整文件聚合会让本判据恒真（假护栏）。
         """
         src = (inspect.getsource(E._prepare_export)
                + inspect.getsource(E._prepare_export_render)
                + inspect.getsource(E._build_docx_options)
-               + inspect.getsource(E._build_docx_sync))
+               + inspect.getsource(E._build_docx_sync)
+               + inspect.getsource(E._resolve_layout_preset))
         dead = sorted(k for k in E._EXPORT_CONFIG_KEYS
                       if f'"{k}"' not in src and f"'{k}'" not in src
                       and f".get({k}" not in src)

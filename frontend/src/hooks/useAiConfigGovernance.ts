@@ -96,8 +96,10 @@ export function useAiConfigGovernance(msg: GovernanceMessage) {
       if (data?.warning) msg.warning(data.warning);
       else msg.success(configId ? "已为该场景指定模型" : "已恢复为共用「当前使用」配置");
       await refreshRef.current?.();
-    } catch (e: any) {
-      msg.error(e.response?.data?.detail || e.message || "保存场景路由失败");
+    } catch (e: unknown) {
+      // axios 错误：detail 在 response.data.detail
+      const err = e as { message?: string; response?: { data?: { detail?: string } } };
+      msg.error(err.response?.data?.detail || err.message || "保存场景路由失败");
     } finally {
       setSceneSaving("");
     }
@@ -114,8 +116,10 @@ export function useAiConfigGovernance(msg: GovernanceMessage) {
       else if (!data?.count) msg.success("已恢复全部厂商");
       else msg.success(`已禁用 ${data.count} 个厂商（即时生效，可随时恢复）`);
       await refreshRef.current?.();
-    } catch (e: any) {
-      msg.error(e.response?.data?.detail || e.message || "保存运行时开关失败");
+    } catch (e: unknown) {
+      // axios 错误：detail 在 response.data.detail
+      const err = e as { message?: string; response?: { data?: { detail?: string } } };
+      msg.error(err.response?.data?.detail || err.message || "保存运行时开关失败");
     } finally {
       setRuntimeSaving(false);
     }
@@ -130,8 +134,10 @@ export function useAiConfigGovernance(msg: GovernanceMessage) {
       setEnvError("");
       if (data.hint) msg.info(data.hint);
       await refreshRef.current?.();
-    } catch (e: any) {
-      msg.error(e.response?.data?.detail || e.message || "切换环境失败");
+    } catch (e: unknown) {
+      // axios 错误：detail 在 response.data.detail
+      const err = e as { message?: string; response?: { data?: { detail?: string } } };
+      msg.error(err.response?.data?.detail || err.message || "切换环境失败");
     } finally {
       setEnvSaving(false);
     }

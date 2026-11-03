@@ -46,6 +46,16 @@ REPO_BACKEND = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(E.__file__))))
 EXPORT_PY = os.path.join(REPO_BACKEND, "app", "routers", "export.py")
 
+
+def _export_sources() -> str:
+    """拆分兼容：聚合读取 export.py 与其子模块（_export_*.py）。"""
+    import glob
+    base = os.path.dirname(EXPORT_PY)
+    segs = [open(EXPORT_PY, encoding="utf-8").read()]
+    segs += [open(p, encoding="utf-8").read()
+             for p in sorted(glob.glob(os.path.join(base, "_export_*.py")))]
+    return "\n".join(segs)
+
 # 产 issue 的函数：collect_export_issues 本体 + 四个独立检测器
 _ISSUE_PRODUCERS = ("collect_export_issues", "_detect_duplicate_sections",
                     "_detect_section_number_mismatch",
@@ -265,7 +275,10 @@ class TestGcWiring:
         src = inspect.getsource(E._gc_orphan_exports)
         assert "strict=True" in src, (
             "GC 是破坏性清理路径，读缓存行必须用 _db_fetch_all(strict=True)")
-        assert "except DBReadError" in src, "读失败必须被显式捕获并整体跳过"
+        # 拆分兼容：_gc_orphan_exports 已拆至 _export_cache.py，DBReadError 经
+        # facade 延迟绑定（except _sh.DBReadError，同一类对象，语义不变）
+        assert ("except DBReadError" in src
+                or "except _sh.DBReadError" in src), "读失败必须被显式捕获并整体跳过"
 
 
 class TestDbReadStrictMode:
@@ -316,15 +329,18 @@ class TestDbReadStrictMode:
         的 ``numbering_consistency_strict=True`` 字样误伤（假失败）。
         """
         import ast
-        tree = ast.parse(open(EXPORT_PY, encoding="utf-8").read())
+        tree = ast.parse(_export_sources())
         owners = {}
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.AsyncFunctionDef, ast.FunctionDef)):
                 continue
             for call in ast.walk(fn):
+                # 拆分兼容：子模块内调用经 facade 延迟绑定（_sh._db_fetch_all）
                 if (isinstance(call, ast.Call)
-                        and isinstance(call.func, ast.Name)
-                        and call.func.id == "_db_fetch_all"
+                        and ((isinstance(call.func, ast.Name)
+                              and call.func.id == "_db_fetch_all")
+                             or (isinstance(call.func, ast.Attribute)
+                                 and call.func.attr == "_db_fetch_all"))
                         and any(k.arg == "strict"
                                 and isinstance(k.value, ast.Constant)
                                 and k.value.value is True
@@ -470,7 +486,7 @@ class TestIssueTypeRuleParity:
 class TestExportConfigKeyParity:
     def test_every_read_config_key_is_in_fingerprint_whitelist(self):
         """读取 config 的渲染行为若不入白名单 → config_hash 不变 → 命中旧缓存。"""
-        src = open(EXPORT_PY, encoding="utf-8").read()
+        src = _export_sources()
         missing = sorted(set(_CFG_GET_RE.findall(src)) - set(E._EXPORT_CONFIG_KEYS))
         assert not missing, (
             "以下 config 键被导出渲染读取但未登记 _EXPORT_CONFIG_KEYS："
@@ -479,7 +495,7 @@ class TestExportConfigKeyParity:
 
     def test_every_whitelisted_key_is_actually_used_elsewhere(self):
         """反向：白名单里不得残留无人读取的死键（拼写错误会静默漏入指纹）。"""
-        text = open(EXPORT_PY, encoding="utf-8").read()
+        text = _export_sources()
         i = text.index("_EXPORT_CONFIG_KEYS = frozenset({")
         j = text.index("})", i)
         body = text[:i] + text[j + 2:]           # 剔除白名单定义本体

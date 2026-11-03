@@ -8,10 +8,10 @@
 - 停止时通过 child_tasks 集合统一 cancel 所有并发子任务
 """
 import asyncio
-import copy
+import copy  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
 import json
 import logging
-import re
+import re  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
 import time
 from datetime import datetime
 
@@ -48,7 +48,7 @@ from app.services.ai.heading_templates import build_subheading_rule
 from app.services.ai.json_response import (
     OUTLINE_REPAIR_KEY,
     collect_json_response,
-    renumber_outline,
+    renumber_outline,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
 )
 from app.services.ai.prompts._registry import render
 from app.services.ai.provider_factory import chat_with_fallback
@@ -60,12 +60,12 @@ from app.services.ai.provider_factory import chat_with_fallback
 #    周期性推送运行统计（已耗时/进行中章节/累计字数/ETA），解决进度条静止问题。
 from app.services.ai.sse_utils import with_heartbeat  # noqa: E402
 from app.services.ai.task_registry import (
-    TaskTypeConflict,
+    TaskTypeConflict,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
     finish_task,
     has_active_task,
     is_stopped,
     register_child_task,
-    register_task,
+    register_task,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
     request_control,
     update_progress,
     update_task_stats,
@@ -130,10 +130,10 @@ from app.services.content_standard import (
     standard_report,
 )
 from app.services.content_utils import (
-    DEFAULT_WORD_BUDGET,
+    DEFAULT_WORD_BUDGET,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
     LEAF_MIN_WORD_BUDGET,
-    WORD_OVER_RATIO,
-    WORD_UNDER_RATIO,
+    WORD_OVER_RATIO,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
+    WORD_UNDER_RATIO,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
     auto_fix_unclosed_fences,
     build_sibling_context,
     leaf_word_budget,
@@ -163,7 +163,7 @@ from app.services.content_utils import (
 #    按章相关性注入事实（outline_sublevel_facts_relevant）重新消费二者。
 from app.services.facts_builder import (  # noqa: E402
     LOW_CONFIDENCE_THRESHOLD,  # noqa: F401 - 对外 re-export，tests 经此名取阈值
-    _facts_keywords,
+    _facts_keywords,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
     _filter_facts_rows,
     _load_facts_rows,
     _rank_facts_by_basis,
@@ -186,9 +186,9 @@ from app.services.facts_builder import (  # noqa: E402
 from app.services.numbering import (
     load_scheme_section_index,
     normalize_section_content_subheadings,
-    stored_id_to_display,
-    stored_outline_id,
-    strip_outline_numbering,
+    stored_id_to_display,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
+    stored_outline_id,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
+    strip_outline_numbering,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
     validate_section_content_numbering,
 )
 
@@ -227,9 +227,9 @@ from app.routers.sse_checkpoint import (  # noqa: F401 — 测试直接从 sse_h
     _write_task_checkpoint_db,
 )
 from app.routers.sse_utils import (
-    _cn_number,
+    _cn_number,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
     _coerce_bool,
-    _coerce_suggestions,
+    _coerce_suggestions,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
     _dedup_continuation,
     _safe_tail,
 )
@@ -400,16 +400,16 @@ from app.services.content_progress import (  # noqa: E402
     SECTION_PHASE_MAX as _SECTION_PHASE_MAX,
 )
 from app.services.content_progress import (
-    STAGE_FILL_MAX as _STAGE_FILL_MAX,
+    STAGE_FILL_MAX as _STAGE_FILL_MAX,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
 )
 from app.services.content_progress import (
     STAGE_LABELS as _STAGE_LABELS,
 )
 from app.services.content_progress import (
-    STAGE_MODEL as _STAGE_MODEL,
+    STAGE_MODEL as _STAGE_MODEL,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
 )
 from app.services.content_progress import (
-    STATS_PUSH_INTERVAL as _STATS_PUSH_INTERVAL,
+    STATS_PUSH_INTERVAL as _STATS_PUSH_INTERVAL,  # noqa: F401 — 拆分后保留绑定（测试/兼容引用）
 )
 
 # ✅ 阶段耗时在线校准（2026-09-15 增强 · 承接上一轮报告遗留建议 #1+#3）：
@@ -424,1426 +424,66 @@ _STAGE_EXPECT_MAX = 600.0    # 校准上限（秒）
 _STAGE_EXPECT_ALPHA = 0.3    # EMA 系数：新样本权重（越小越稳，越大越跟手）
 
 
-def _section_partial(rec: dict, now: float,
-                     expect_overrides: dict | None = None) -> float:
-    """折算单个「进行中章节」在本章内已完成的进度比例（0~1）。
-
-    = 阶段基准（base） + 阶段跨度（span）× 该阶段已耗时/预期耗时（封顶 85%）
-    阶段基准保证跨阶段单调递增；时间渐近填充保证耗时最长的 draft 阶段
-    进度条也在持续前进，而不是整段静止。
-
-    expect_overrides：本次任务**在线校准后**的各阶段预期耗时（见
-    `_calibrate_stage_expect`）；缺省时回退出厂经验值。
-
-    ✅ B19（2026-09-23）：渐近填充必须按**阶段起点**（stage_started_at）
-    计时，而不是整章起点（started_at）。旧实现用整章耗时：continue
-    阶段在整章已跑 3 分钟后才开始，elapsed/expect 立刻 >1 → 该阶段开局
-    就填满 85%，用户看到进度条"突然跳一格然后长时间不动"。
-    旧调用方只传 started_at 时回退到它（向后兼容）。
-    """
-    stage = rec.get("stage", "")
-    model = _STAGE_MODEL.get(stage, _STAGE_MODEL["draft"])
-    base, span = model["base"], model["span"]
-    expect = (expect_overrides or {}).get(stage) or model["expect"]
-    try:
-        # 校准值来自本任务的实测耗时（内部状态）：脏值/非数值一律回退出厂经验值，
-        # 否则 elapsed/expect 会抛 TypeError 并把异常带进生成主流程。
-        expect = float(expect)
-    except (TypeError, ValueError):
-        expect = model["expect"]
-    if span <= 0 or expect <= 0:
-        return base
-    # ✅ 阶段起点优先；缺失时回退整章起点（兼容旧调用方）
-    started = rec.get("stage_started_at")
-    if started is None:
-        started = rec.get("started_at", now)
-    elapsed = max(0.0, now - started)
-    frac = min(elapsed / expect, 1.0) * _STAGE_FILL_MAX
-    return base + span * frac
-
-
-def _calibrate_stage_expect(prog: dict, stage: str, actual: float) -> None:
-    """用实测阶段耗时 EMA 校准该阶段的预期耗时（供进度填充速率使用）。
-
-    ✅ 为什么只在**阶段切换点**调用（调用方约定）：校准会改变 expect，而
-    expect 变小会让「同一时刻算出的本章进度」变大、变大则相反 —— 若在阶段
-    进行中反复调整，进度条可能回退。只在离开某阶段时写入新值，则该阶段内
-    填充曲线始终连续；跨阶段的单调性由 base 累积（上一阶段完成值 = 下一阶段
-    基准）保证，与校准无关。
-
-    actual ≤ 0 或阶段已知预期 ≤ 0 时不做任何修改（保持安全默认）。
-    """
-    if not stage or actual <= 0:
-        return
-    overrides = prog.setdefault("stage_expect", {})
-    base_expect = overrides.get(stage) or (_STAGE_MODEL.get(stage, {}) or {}).get("expect") or 0.0
-    if base_expect <= 0:
-        return
-    new_expect = (1 - _STAGE_EXPECT_ALPHA) * base_expect + _STAGE_EXPECT_ALPHA * actual
-    overrides[stage] = round(min(max(new_expect, _STAGE_EXPECT_MIN),
-                                 _STAGE_EXPECT_MAX), 2)
-
-
-def _monotonic_progress(prev: float, new: float) -> float:
-    """对外进度护栏：任何路径都不得让已上报的进度**回退**。
-
-    背景：进度存在多个来源（章节阶段加权进度、准确性更细的统计折算、停止
-    收尾、目录/正文共用口径）。任何一处口径调整或数据竞争都可能算出比上一条
-    事件更小的值，进度条随即「倒退」，观感上等同于卡死或任务被重置。
-    这里统一取「历史最大值」，把不可回退变成结构性约束。
-    """
-    try:
-        new_v = float(new or 0.0)
-    except (TypeError, ValueError):
-        new_v = 0.0
-    try:
-        prev_v = float(prev or 0.0)
-    except (TypeError, ValueError):
-        prev_v = 0.0
-    return round(max(new_v, prev_v, 0.0), 4)
-
-
-def _weighted_progress(prog: dict) -> float:
-    """把进度状态折算为 0~1 的平滑总进度。
-
-    总进度 = _SECTION_PHASE_MAX × (已处理章节数 + Σ进行中章节的本章进度) / 总章数
-    ——「已处理」含成功与失败（失败同样消耗了时间，否则进度永远到不了上限）。
-    进行中章节按「阶段基准 + 阶段内按耗时渐近填充」贡献部分进度，使进度条在
-    单章生成期间也持续前进，而不是等整章落库才跳一格。
-    """
-    total = prog.get("total") or 0
-    if total <= 0:
-        return 0.0
-    processed = prog.get("done", 0)
-    now = time.monotonic()
-    overrides = prog.get("stage_expect") or None
-    partial = sum(_section_partial(rec, now, overrides)
-                  for rec in (prog.get("running") or {}).values())
-    raw = (processed + partial) / total
-    return round(min(raw, 1.0) * _SECTION_PHASE_MAX, 4)
-
-
-def _fmt_duration(ms) -> str:
-    """把毫秒格式化为人类可读时长（用于进度消息文案）。"""
-    if not ms or ms <= 0:
-        return "0秒"
-    sec = int(ms / 1000)
-    if sec < 60:
-        return f"{sec}秒"
-    minutes, s = divmod(sec, 60)
-    if minutes < 60:
-        return f"{minutes}分{s}秒" if s else f"{minutes}分钟"
-    hours, m = divmod(minutes, 60)
-    return f"{hours}小时{m}分" if m else f"{hours}小时"
-
-
-def _snapshot_stats(prog: dict, paused_ms: float = 0.0) -> dict:
-    """构造运行统计快照（供 stats 事件与心跳通道使用，绝不抛异常）。
-
-    字段口径：
-      elapsed_ms  本次任务已耗时；eta_ms 线性外推的剩余耗时（无法预估时为 None）
-      done/total  已处理章节数 / 总章节数；failed 其中失败数
-      words       已落库正文累计字数
-      avg_section_ms 已完成章节的平均实测耗时（无样本为 None）
-      running     进行中章节列表（标题 + 当前阶段 + 该章已耗时）
-      concurrency 当前并发档位
-      phase       阶段标识（prepare/sections/consistency）+ 中文标签
-      progress    折算后的总进度（与 progress 事件同口径）
-
-    ✅ B1（2026-09-20）paused_ms：协作式暂停**不打断在飞 AI 调用**，
-    暂停期间 stats 仍持续推送。若不扣除暂停时长，进度卡的「已耗时」会
-    在用户"什么都没干"的暂停时间里持续增长，与活动中心
-    （task_registry.get_task_elapsed_ms，已扣除暂停）口径相反，
-    同一任务两个界面显示不同耗时。扣减后夹紧到 0（脏输入/超额暂停安全）。
-
-    ✅ ETA 口径修复（2026-09-15 二次增强）：旧实现用「任务总耗时 / 已处理章数」
-    外推，存在两处系统性偏差：
-      1) 分母里含**准备阶段**（字数分配 AI 调用最长 180s）与全文一致性阶段；
-         开头几章就会把 ETA 抬到与实际完全不符的量级；
-      2) 忽略**进行中章节已投入的时间**：并发 3 章在跑而 done=0 时给出 None
-         （或按陈旧样本高估），用户恰恰在最需要预估的开局看不到剩余时间。
-    现改为「章节阶段有效进度」外推：
-        有效进度 = 已处理章节数 + Σ进行中章节在本章内的完成比例（与进度同源）
-        eta = 章节阶段已耗时 / 有效进度 × (总章数 − 有效进度)
-    —— 与进度条同口径，ETA 归零与进度到 100% 同步，不再"100% 还要等很久"。
-    """
-    try:
-        now = time.monotonic()
-        # ✅ 扣除暂停时长，夹紧到 0（脏值/超额暂停都不得产出负耗时）
-        try:
-            _paused = max(0.0, float(paused_ms or 0))
-        except (TypeError, ValueError):
-            _paused = 0.0
-        elapsed_ms = max(0, int((now - prog.get("started_at", now)) * 1000) - int(_paused))
-        total = prog.get("total") or 0
-        done = prog.get("done", 0)
-        running = []
-        for sid, rec in list((prog.get("running") or {}).items()):
-            running.append({
-                "section_id": sid,
-                "title": rec.get("title", ""),
-                "index": rec.get("index", 0),
-                "stage": rec.get("stage", ""),
-                "stage_label": rec.get("stage_label", ""),
-                "elapsed_ms": int((now - rec.get("started_at", now)) * 1000),
-            })
-        # 平均单章耗时：已完成（含失败）章节的实测均值，用于「还要多久」判断
-        # ✅ 单位修复：section_ms 列表实际存的是【秒】（见 _prog 初始化与逐章 append），
-        #    对外字段名是 *_ms —— 必须换算毫秒，否则前端展示「平均 20 毫秒/章」。
-        durations = prog.get("section_ms") or []
-        avg_section_ms = (int(sum(durations) / len(durations) * 1000)
-                          if durations else None)
-        # ETA：按「已处理 + 进行中部分贡献」的有效进度外推（口径见 docstring）
-        eta_ms = None
-        effective = done + sum(
-            _section_partial(rec, now, prog.get("stage_expect") or None)
-            for rec in (prog.get("running") or {}).values())
-        if total > effective > 0:
-            section_started = prog.get("sections_started_at")
-            if section_started is None:
-                # 兼容：调用方未记录章节阶段起点（老任务 / 单测）时退化为任务耗时。
-                # elapsed_ms **已扣除暂停**，此处不得再减（否则二次扣减）。
-                section_elapsed_ms = elapsed_ms
-            else:
-                # ✅ ETA 与 elapsed_ms 同口径：显式章节起点尚未扣暂停，需在此扣除
-                #    （否则暂停后 ETA 会凭空多出暂停时长）。
-                section_elapsed_ms = max(
-                    int((now - section_started) * 1000) - int(_paused), 0)
-            # 至少按 1s 估算：首个统计点（耗时≈0）不应给出 0 或天量 ETA
-            section_elapsed_ms = max(section_elapsed_ms, 1000)
-            eta_ms = int(section_elapsed_ms / effective * (total - effective))
-        return {
-            "elapsed_ms": elapsed_ms,
-            "eta_ms": eta_ms,
-            "done": done,
-            "total": total,
-            "failed": prog.get("failed", 0),
-            "words": prog.get("words", 0),
-            "avg_section_ms": avg_section_ms,
-            "running": running,
-            "concurrency": prog.get("concurrency", 0),
-            "phase": prog.get("phase", ""),
-            "phase_label": prog.get("phase_label", ""),
-            "progress": _weighted_progress(prog),
-        }
-    except Exception:
-        # 统计只服务于展示，任何异常都不允许影响生成主流程
-        return {}
-
-
-def _locked_progress_updater(lock: asyncio.Lock, task_id: str):
-    """构造「在写锁内落库进度」的更新函数（工厂函数，便于单测锁语义）。
-
-    ✅ BUG 修复（2026-09-16）：正文生成的进度落库（task_registry，自带 commit）
-    与章节落库共用同一 aiosqlite 连接，而 `_persist_section` 的写入块是一个**跨多条
-    语句的事务**（DELETE chart_predictions → INSERT … → UPDATE sections → commit）。
-    此前进度 commit 不受请求内的 `_db_write_lock` 保护，并发章节下可能把
-    **另一个章节的半途事务**顺带提交 —— 一旦该章节随后的 UPDATE/commit 失败，
-    rollback 已无法回滚被提交的图表登记/删除变更，「事务整体原子」的守卫被旁路
-    （表现为「正文里还有图表块、图表清单却没有登记」）。
-    """
-    async def _update(progress: float, message: str = "", *, event: str = "progress"):
-        async with lock:
-            await update_progress(task_id, progress, message, event=event)
-    return _update
-
-
-def _word_budget_hint(word_budget: int) -> str:
-    """目标字数提示文案（提示词 / 续写消息共用，避免两处口径漂移）。
-
-    与程序阈值的关系（不写死在文案里会来回漂移）：
-      · 0.8X  → `WORD_UNDER_RATIO`：低于此值触发自动续写；
-      · 1.3X  → `WORD_OVER_RATIO`：高于此值判定 word_status='over'（可压缩/自动压缩）；
-      · 1.2X  → 对模型的**硬上限**（比 1.3X 留一档余量，避免模型"贴线"跑出 over）。
-    实测（运行库 96 章）显示：不给区间与上限时，模型把目标当"下限"，
-    平均写到 1.69X、最高 2.82X，72% 的章节被判 over —— 因此这里必须显式给出
-    「可接受区间 + 硬上限 + 超写即不合格」三件事。
-    """
-    try:
-        b = int(word_budget or 0)
-    except (TypeError, ValueError):
-        b = 0
-    if b <= 0:
-        return ""
-    # ✅ R66（2026-10-11）：容差带由 settings.word_budget_tolerance 驱动。
-    #    默认 0.1 时 1-0.1==0.9 / 1+0.1==1.1 / 1+2*0.1==1.2（IEEE754 逐位相等），
-    #    文案与历史硬编码「0.9~1.1 倍 … 硬上限 1.2X」逐字节一致。
-    try:
-        tol = abs(float(getattr(settings, "word_budget_tolerance", 0.1)))
-    except (TypeError, ValueError):
-        tol = 0.1
-    lo = 1.0 - tol
-    hi = 1.0 + tol
-    hard = 1.0 + 2.0 * tol
-    return (f"{b}字（可接受 {lo:.1f}~{hi:.1f} 倍即 {int(b * lo)}~{int(b * hi)} 字；"
-            f"硬上限 {int(b * hard)} 字，超出即视为不合格）")
-
-
-def _should_auto_shrink(content: str, word_budget: int,
-                        over_ratio: float = WORD_OVER_RATIO) -> bool:
-    """是否需要对该章节跑「超字数自动压缩」（与 word_status='over' 同口径）。
-
-    只看**正文字数**（剔除图表代码块，见 content_utils.text_word_count）——
-    否则一张数百字符的 mermaid 图会把阈值顶过去，触发无意义的压缩调用。
-    """
-    try:
-        wc = text_word_count(content or "")
-        budget = int(word_budget or DEFAULT_WORD_BUDGET)
-    except (TypeError, ValueError):
-        return False
-    if budget <= 0:
-        return False
-    return wc > budget * over_ratio
-
-
-async def _await_with_stats(coro, push_stats, interval: float = _STATS_PUSH_INTERVAL,
-                            task_id: str | None = None):
-    """等待 AI 协程完成，期间每 interval 秒调用一次 push_stats 推送运行统计。
-
-    背景：原实现在 await AI 调用期间完全不产出业务事件（只有 10s 一次的心跳
-    comment，且前端不解析），进度条长时间静止。这里改为轮询式等待，周期性
-    推送 stats（已耗时 / 进行中章节 / 累计字数 / ETA）。
-
-    异常与取消语义与直接 await 完全一致：
-      - coro 抛异常 → 原样重新抛出（调用方的重试 / 降级逻辑保持不变）；
-      - 外层被取消 → 内部协程同步取消，不留悬挂任务。
-
-    ✅ BUG 修复（2026-10-04）：停止语义不取消在飞 AI 调用。传 task_id 时把
-       内层 task 注册进 task_registry 的 child_tasks，用户点停止 → 停止分支
-       同步 `t.cancel()` 全部 child_tasks，本函数内层 await 立刻抛
-       CancelledError → 目录生成链路能真正响应停止，不再等 collect_json_response
-       的 180s 超时预算。与正文生成 L6296-6299 的 register_child_task 参考
-       范式对齐（正文路径已按此接线，目录路径此前漏了）。
-    """
-    task = asyncio.ensure_future(coro)
-    if task_id:
-        # ✅ P2 修复（2026-10-04 · 子任务泄漏）：父任务已被 finish_task 清出
-        #    _tasks 时，register_child_task 返回 False（旧实现静默跳过，返回
-        #    None）。此时本函数创建的 task 不会被父任务的停止链路 cancel，
-        #    会挂住直到 AI 超时预算耗尽 —— 用户点停止后依然占连接池。
-        #
-        # ⚠️ 采用"打 warning + 继续执行"而非直接 cancel：_ai_call_with_stop_awareness
-        #    被多个调用点复用（目录生成 / 正文生成 / outline review 等），其中
-        #    部分合法场景下 task_id 就是"父任务在跑但本 AI 调用不属于生成主链路"
-        #    （例如 review 阶段以独立 task_id 触发）。硬 cancel 会误杀这些合法调用
-        #    并让上游业务整体失败。真泄漏只在父任务已终态、AI 调用又是"本应属于
-        #    父任务的收尾"时才成立，此时父任务侧早已发出停止信号或已 finished，
-        #    AI 调用会随自然完成而结束，泄漏代价仅是"该 AI 调用的超时预算"，
-        #    而非真正的资源挂死。日志足够让运维定位到这类异常链路。
-        try:
-            _reg_ok = register_child_task(task_id, task)
-        except Exception:
-            _reg_ok = False
-        if not _reg_ok:
-            logger.warning(
-                "子任务登记失败：父任务 %s 已不存在（或登记异常），"
-                "该 AI 调用将脱离父任务停止链路，仅靠自然完成/超时结束",
-                task_id)
-    try:
-        while True:
-            done, _ = await asyncio.wait({task}, timeout=interval)
-            if task in done:
-                return task.result()
-            # ✅ BUG 修复（2026-10-04 · BUG-02）：push_stats 异常不得中断 AI 调用。
-            # 旧实现 `await push_stats()` 无异常保护——一旦 push_stats 内部因
-            # stats_provider 状态不一致 / DB 写入超时 / 客户端断线等抛错，异常
-            # 会立刻冒泡到本函数，`finally` 分支随即 `task.cancel()` 掉在飞的
-            # AI 任务，把已经跑了 30s~180s 的章节生成判为失败。这里降级为
-            # warning 日志（stats 是"锦上添花"，AI 调用才是主线）。
-            try:
-                await push_stats()
-            except asyncio.CancelledError:
-                # 取消不能吞，否则外层 finally 已 cancel task 后循环仍会误跑。
-                raise
-            except Exception as e:
-                logger.warning(
-                    "SSE stats push failed (continuing AI call): %s",
-                    e, exc_info=True,
-                )
-    finally:
-        if not task.done():
-            task.cancel()
-
-
-# ---------- 目录生成进度模型（2026-09-15 增强） ----------
-# ✅ 背景：目录生成存在两段长时间「零业务事件」——
-#    1) 每次目录 AI 调用（最长 OUTLINE_REQUEST_TIMEOUT = 180s）；
-#    2) 审核 + 修复（最长 OUTLINE_REVIEW_TIMEOUT + OUTLINE_FIX_TIMEOUT = 180s）。
-#    原实现只在阶段边界推一条 progress（0.1 → 0.6/0.3 → 0.9 → 1.0），
-#    中间数分钟进度条完全静止，用户无法判断是「在跑」还是「卡死」。
-# ✅ 现与正文生成同源处理：
-#    - 阶段模型（base 累积基准 + span 跨度 + expect 预期耗时渐近填充）；
-#    - 每次 AI 调用由 _await_with_stats 周期性推送 stats（3s 一次）；
-#    - 心跳通道 stats_provider 兜底（审核/修复期间调用方正 await，无法 yield）。
-_OUTLINE_PHASE_MODEL = {
-    "prepare":   {"base": 0.02, "span": 0.03, "expect": 4.0,  "label": "准备中"},
-    "draft":     {"base": 0.08, "span": 0.47, "expect": 55.0, "label": "AI 生成目录"},
-    "level1":    {"base": 0.08, "span": 0.17, "expect": 40.0, "label": "生成一级目录"},
-    "sublevels": {"base": 0.25, "span": 0.45, "expect": 0.0,  "label": "生成二三级目录"},
-    "review":    {"base": 0.70, "span": 0.20, "expect": 45.0, "label": "目录审核中"},
-    "fix":       {"base": 0.90, "span": 0.10, "expect": 60.0, "label": "按审核意见修复"},
-}
-
-# ✅ 阶段耗时在线校准（2026-09-16 · 承接上一轮报告遗留建议 #1）：
-#    上表的 expect 与 OUTLINE_CHAPTER_EXPECT 都是**出厂经验值**，与具体模型速度
-#    差异很大（弱模型一级目录 150s、强模型 15s）。校准口径与正文生成的
-#    _calibrate_stage_expect 完全一致：只用**本次任务实测耗时**做 EMA，且只在
-#    阶段切换点写入（阶段内填充曲线保持连续，不会因 expect 变化而回退）。
-_OUTLINE_EXPECT_MIN = 5.0      # 校准下限（秒）：防止个别极快样本把预期压到近 0
-_OUTLINE_EXPECT_MAX = 600.0    # 校准上限（秒）
-_OUTLINE_EXPECT_ALPHA = 0.3    # EMA 系数：新样本权重
-# 校准样本下限（秒）：短于该值的阶段耗时不作为样本。
-#   —— 同一阶段被重复 _set_phase 刷新（如 draft 的「已生成，正在构建目录树」）
-#      会产生 0.x 秒的空转样本，若纳入 EMA 会把 expect 直接拽到下限，
-#      下一阶段的填充速率随之失真。
-_OUTLINE_CALIBRATE_MIN_SAMPLE = 5.0
-
-
-def _outline_expect(st: dict, phase: str) -> float:
-    """取某阶段的预期耗时（优先本任务校准值，回退出厂经验值；脏值安全）。
-
-    只服务于「进度填充」与「阶段剩余时间」，任何异常都不得影响生成主流程，
-    因此非数值/负数一律回退到出厂经验值。
-    """
-    model = _OUTLINE_PHASE_MODEL.get(phase) or {}
-    ov = st.get("stage_expect")
-    if isinstance(ov, dict):
-        try:
-            val = float(ov.get(phase))
-            if val > 0:
-                return val
-        except (TypeError, ValueError):
-            pass
-    try:
-        return float(model.get("expect") or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _outline_chapter_expect(st: dict) -> float:
-    """取「单章子目录」的预期耗时（优先本任务 EMA 校准值，回退出厂经验值）。"""
-    try:
-        val = float(st.get("chapter_expect") or 0.0)
-        if val > 0:
-            return val
-    except (TypeError, ValueError):
-        pass
-    return OUTLINE_CHAPTER_EXPECT
-
-
-def _calibrate_outline_expect(st: dict, phase: str, actual: float) -> None:
-    """用实测阶段耗时 EMA 校准该阶段的预期耗时。
-
-    ✅ 调用约定：**只在离开某阶段时**调用（见 _advance_outline_phase）。
-    理由与正文生成 _calibrate_stage_expect 相同：expect 变小会让「同一时刻算出的
-    阶段进度」变大、变大则相反 —— 阶段进行中反复调整会让进度条回退；只在切换点
-    写入则阶段内曲线连续，跨阶段单调性由 base 累积（上一阶段完成值 = 下一阶段基准）
-    保证，与校准值无关。
-
-    actual 小于 _OUTLINE_CALIBRATE_MIN_SAMPLE 时视为无效样本（空转阶段），忽略。
-    """
-    if not phase or actual < _OUTLINE_CALIBRATE_MIN_SAMPLE:
-        return
-    base_expect = _outline_expect(st, phase)
-    if base_expect <= 0:
-        return
-    overrides = st.get("stage_expect")
-    if not isinstance(overrides, dict):
-        overrides = {}
-        st["stage_expect"] = overrides
-    new_expect = (1 - _OUTLINE_EXPECT_ALPHA) * base_expect + _OUTLINE_EXPECT_ALPHA * actual
-    overrides[phase] = round(min(max(new_expect, _OUTLINE_EXPECT_MIN),
-                                 _OUTLINE_EXPECT_MAX), 2)
-
-
-def _calibrate_outline_chapter_expect(st: dict, actual: float) -> None:
-    """用实测单章耗时 EMA 校准「单章预期耗时」（决定 sublevels 阶段的填充速率）。"""
-    if actual < _OUTLINE_CALIBRATE_MIN_SAMPLE:
-        return
-    base = _outline_chapter_expect(st)
-    if base <= 0:
-        return
-    new = (1 - _OUTLINE_EXPECT_ALPHA) * base + _OUTLINE_EXPECT_ALPHA * actual
-    st["chapter_expect"] = round(min(max(new, _OUTLINE_EXPECT_MIN), _OUTLINE_EXPECT_MAX), 2)
-
-
-def _advance_outline_phase(st: dict, phase: str) -> None:
-    """切换目录生成阶段（统一入口）：先按实测耗时校准**上一阶段**，再写入新阶段。
-
-    ✅ 单一来源：_set_phase 与审核/修复子阶段回调共用本函数，避免两处各写一遍
-    导致「校准点漂移」（漏校准 → 填充速率永远是出厂值；重复校准 → 样本被稀释）。
-
-    同一阶段重复刷新时**保留 phase_started_at**：否则该阶段的耗时样本会被截断成
-    0.x 秒（被 _OUTLINE_CALIBRATE_MIN_SAMPLE 丢弃，真实耗时样本永久丢失）。
-    """
-    now = time.monotonic()
-    prev = st.get("phase", "")
-    if prev != phase:
-        _calibrate_outline_expect(st, prev, now - st.get("phase_started_at", now))
-        st["phase_started_at"] = now
-    st["phase"] = phase
-    st["chapter_started_at"] = now
-
-
-def _outline_push_value(st: dict) -> float:
-    """计算本次 progress 事件的进度值（**不可回退护栏**），并写回 last_p。
-
-    ✅ BUG 修复（2026-09-16）：分步链路原实现 `p = _outline_progress(_prog)` 后
-    直接把 p 塞进 progress 事件，只有 last_p 取 max —— 于是 `_set_phase("sublevels",
-    force=0.3)` 之后的第一次「本章完成」事件（模型折算值 0.25 + 0.45×(1/10) ≈ 0.295）
-    会让前端进度条从 30% **倒退**到 29%。这里统一走 _monotonic_progress 护栏，
-    对外进度结构性不可回退（与正文生成同口径）。
-    """
-    p = _monotonic_progress(st.get("last_p", 0.0), _outline_progress(st))
-    st["last_p"] = p
-    return p
-
-
-def _outline_progress(st: dict) -> float:
-    """折算目录生成的平滑总进度（0~1）。
-
-    - 分步子目录阶段（sublevels）有确定的章节总数，按「已完成章数 + 当前章
-      按已耗时渐近填充」推进，比时间外推更准；
-    - 其余阶段用 base + span × min(已耗时/预期耗时, 1) × 85% 填充。
-
-    base 为累积基准（上一阶段完成值），保证阶段切换时进度不倒退。
-    """
-    phase = st.get("phase", "prepare")
-    model = _OUTLINE_PHASE_MODEL.get(phase) or _OUTLINE_PHASE_MODEL["prepare"]
-    base, span = model["base"], model["span"]
-    now = time.monotonic()
-    if phase == "sublevels":
-        total = st.get("sub_total") or 0
-        done = st.get("sub_done", 0)
-        if total <= 0:
-            frac = 0.0
-        else:
-            cur = 0.0
-            if done < total:
-                elapsed = max(0.0, now - st.get("chapter_started_at", now))
-                # ✅ 单章预期耗时走本任务 EMA 校准值（弱模型下 45s 的出厂值会让
-                #    填充迅速顶格后长时间「静止」）
-                chapter_expect = _outline_chapter_expect(st)
-                if chapter_expect > 0:
-                    cur = min(elapsed / chapter_expect, 1.0) * _STAGE_FILL_MAX
-            frac = min((done + cur) / total, 1.0)
-    else:
-        # ✅ 阶段预期耗时走本任务 EMA 校准值（阶段切换时写入，阶段内取值恒定
-        #    ⇒ 填充曲线连续、单调）
-        try:
-            expect = float(_outline_expect(st, phase))
-        except (TypeError, ValueError):
-            expect = 0.0
-        if span > 0 and expect > 0:
-            elapsed = max(0.0, now - st.get("phase_started_at", now))
-            frac = min(elapsed / expect, 1.0) * _STAGE_FILL_MAX
-        else:
-            frac = 0.0
-    return round(min(base + span * frac, 1.0), 4)
-
-
-def _outline_phase_label(st: dict) -> str:
-    """当前阶段的用户可读标签（progress 事件与 stats 快照共用，单一来源）。"""
-    return (_OUTLINE_PHASE_MODEL.get(st.get("phase", "")) or {}).get("label", "")
-
-
-def _outline_eta_ms(st: dict, now: float, progress: float) -> int | None:
-    """目录生成的「预计剩余」外推（口径与正文生成 _snapshot_stats 同源）。
-
-    ✅ BUG 修复（2026-09-16）：旧实现有三个系统性缺陷：
-      1) **一次性直出链路（短方案）永远没有 ETA** —— 分支条件写成 `if total > done`
-         而该链路 total=0，`0 > 0` 为假，"按阶段预期耗时外推" 的分支**不可达**，
-         用户在唯一需要预估的开局看到的是空白；
-      2) **分步链路分母含准备阶段与一级目录** —— 用 `任务总耗时 / 已完成章数`
-         外推，准备阶段（事实/知识库构建 + 一级目录 AI 最长 180s）被摊到每章上，
-         ETA 被系统性放大（实测 2 章/60s 却给出 40 分钟）；
-      3) **审核/修复阶段（章节已全部完成）返回 None** —— 恰恰在最长 180s 的
-         审核+修复区间里，"预计剩余"消失。
-    现改为两段式口径：
-      ① 有已完成章节样本时：按「子目录阶段」有效进度外推 ——
-         有效进度 = 已完成章数 + 当前章按已耗时折算的贡献（与进度条同源），
-         分母只用 sub_started_at 起的耗时，不含准备/一级目录；
-      ② 无样本（首章前 / 一次性直出 / 审核修复）：按当前阶段**校准后**的预期
-         耗时给出阶段剩余时间。
-    进度已达 100% 时统一返回 None（无剩余），避免"100% 还要等很久"的观感。
-    """
-    if progress >= 1.0:
-        return None
-    total = st.get("sub_total") or 0
-    done = st.get("sub_done", 0) or 0
-    if total > done and done > 0:
-        chapter_expect = _outline_chapter_expect(st)
-        cur = 0.0
-        if chapter_expect > 0:
-            elapsed_cur = max(0.0, now - st.get("chapter_started_at", now))
-            cur = min(elapsed_cur / chapter_expect, 1.0) * _STAGE_FILL_MAX
-        effective = done + cur
-        if effective <= 0:
-            return None
-        # ✅ 分母优先取「子目录阶段」起点（进入 sublevels 时写入）。
-        #    缺失（旧任务/单测）时退回任务耗时，保持与历史口径兼容。
-        base_at = st.get("sub_started_at") or st.get("started_at", now)
-        span_ms = max(int((now - base_at) * 1000), 1000)   # ≥1s：首个统计点不给出 0
-        return int(span_ms / effective * max(total - effective, 0.0))
-    expect = _outline_expect(st, st.get("phase", ""))
-    if expect > 0:
-        left = expect - max(0.0, now - st.get("phase_started_at", now))
-        if left > 0:
-            return int(left * 1000)
-    return None
-
-
-def _snapshot_outline_stats(st: dict) -> dict:
-    """目录生成的运行统计快照（字段与正文 _snapshot_stats 同构，绝不抛异常）。
-
-    done/total 在分步链路中表示「已生成子目录的章数 / 总章数」；
-    一次性直出链路 total=0（无章节维度），前端据此隐藏章节计数。
-
-    progress 取「阶段模型折算值」与「已推送最大值（last_p）」的较大者 ——
-    单步链路里两者可能不一致（如 _set_phase 用 force 对齐可见刻度），
-    对外只暴露一个口径，避免进度条/统计块互相矛盾。
-    """
-    try:
-        now = time.monotonic()
-        elapsed_ms = int((now - st.get("started_at", now)) * 1000)
-        total = st.get("sub_total") or 0
-        done = st.get("sub_done", 0)
-        progress = _monotonic_progress(st.get("last_p", 0.0), _outline_progress(st))
-        return {
-            "elapsed_ms": elapsed_ms,
-            "eta_ms": _outline_eta_ms(st, now, progress),
-            "done": done,
-            "total": total,
-            "failed": len(st.get("failed_chapters") or []),
-            "words": 0,
-            "concurrency": 0,
-            "running": [],
-            "phase": st.get("phase", ""),
-            "phase_label": _outline_phase_label(st),
-            "progress": progress,
-            "stepwise": bool(st.get("stepwise")),
-            "nodes": st.get("nodes", 0),
-        }
-    except Exception:
-        # 统计只服务于展示，任何异常都不允许影响生成主流程
-        return {}
-
-
-def _rank_sections_by_basis(text: str, basis) -> tuple[str, int]:
-    """把解析提取结果的 Markdown 小节按「与方案名称的相关性」**前置**（不删除）。
-
-    同上：``format_downstream_context`` 按 ``ANALYSIS_ITEMS`` 权威顺序输出（与
-    本方案无关的项照样占位），而 ``_budgeted_truncate_sections`` 会按比例截断
-    正文 —— 尾部项可能只剩标题。相关性前置后，方案名称涉及的项在固定预算下
-    **全部可见**，这正是要求一「与方案名称相关的解析提取内容必须进入目录」。
-    """
-    if not text or basis is None or not getattr(
-            settings, "outline_basis_relevance", False):
-        return text, 0
-    try:
-        from app.services.scheme_basis import rank_by_relevance
-        sections = _split_md_sections(text)
-        ordered, hit = rank_by_relevance(
-            sections, basis, text_fn=lambda s: f"{s[0]} {s[1]}")
-        if not hit:
-            return text, 0
-        return "\n".join(f"{t}\n{b}" if t else b for t, b in ordered), hit
-    except Exception:  # pragma: no cover - 纯优化，失败回退原序
-        logger.warning("按方案名称相关性前置提取小节失败（保持原序）", exc_info=True)
-        return text, 0
-
-
-def _split_md_sections(text: str) -> list[tuple[str, str]]:
-    """把 Markdown 文本按 **二级标题**（`## `）切成小节。
-
-    返回 [(小节标题, 小节正文)]；首个 `## ` 之前的内容归入 ("", 前言)。
-
-    只认 `## `：**`### ` 及更深层级不切** —— 它们是二级小节内部的
-    子结构，切开会打散"一节=一个提取项"的对应关系，导致同一提取项
-    被当成多项、上下文断裂。
-    """
-    if not text:
-        return [("", "")]
-    lines = text.split("\n")
-    sections: list[tuple[str, list[str]]] = [("", [])]
-    for line in lines:
-        if line.startswith("## ") and not line.startswith("### "):
-            sections.append((line.strip(), []))
-        else:
-            sections[-1][1].append(line)
-    return [(title, "\n".join(body)) for title, body in sections]
-
-
-def _budgeted_truncate_sections(text: str, budget: int) -> tuple[str, dict]:
-    """按小节比例截断长文本（保底 + 封顶），返回 (截断后文本, 统计报告)。
-
-    统计报告 {"sections": 小节数, "truncated_sections": 被截断的小节数}。
-
-    稳定性契约：**每个小节的标题都保留**（只截正文）—— 目录生成需要看到
-    "有哪 20 个提取项"，即便每项只剩开头一句；否则尾部项会整段消失。
-    """
-    sections = _split_md_sections(text)
-    lengths = [len(body) for _title, body in sections]
-    allocs = _allocate_char_budgets(lengths, budget)
-    parts: list[str] = []
-    truncated = 0
-    for (title, body), alloc in zip(sections, allocs):
-        if len(body) <= alloc:
-            parts.append(f"{title}\n{body}" if title else body)
-            continue
-        truncated += 1
-        if alloc <= 0:
-            # 无配额：只留标题，保证该项"存在"这件事对模型可见
-            parts.append(title)
-            continue
-        parts.append(f"{title}\n{body[:alloc]}" if title else body[:alloc])
-    out = "\n".join(parts)
-    return out, {"sections": len(sections), "truncated_sections": truncated}
-
-
-async def _load_knowledge_rows(db, scheme_id: str) -> list[dict]:
-    """加载方案可用的知识库条目行（专属 + 项目共享），一次查询供逐章内存过滤。"""
-    try:
-        cur = await db.execute(_fe.SCHEME_PROJECT_ID_SQL, (scheme_id,))
-        row = await cur.fetchone()
-        project_id = row["project_id"] if row else ""
-        if not project_id:
-            return []
-        cur = await db.execute(
-            "SELECT name, usage_hint, content FROM knowledge_base "
-            "WHERE project_id=? AND (scheme_id=? OR scheme_id='')",
-            (project_id, scheme_id))
-        return [dict(r) for r in await cur.fetchall()]
-    except Exception as e:  # 表缺失等异常不应阻断生成
-        logger.warning("加载项目知识库素材失败（降级为无）: %s", e)
-        return []
-
-
-def _filter_knowledge_rows(rows: list[dict], leaf: dict) -> list[dict]:
-    """按章节标题/描述对知识条目做相关性预筛（与事实逐章精选同规则）。
-
-    无关键词或命中为空时回退全量，绝不因预筛丢失素材。
-    """
-    if not rows:
-        return rows
-    title = f"{(leaf.get('title') or '')} {(leaf.get('description') or '')}"
-    kws = _facts_keywords(title)
-    if not kws:
-        return rows
-    filtered = [
-        r for r in rows
-        if any(kw in f"{r.get('name','')} {r.get('usage_hint','')} "
-                    f"{r.get('content','')}" for kw in kws)]
-    return filtered or rows
-
-
-async def _build_knowledge_text(db, scheme_id: str,
-                                relevant_to: dict | None = None) -> str:
-    """构建「项目知识库素材」文本（knowledge_base 表，产品需求 §3.9）。
-
-    查询范围：该方案的专属条目（scheme_id=当前方案）+ 项目共享条目（scheme_id=''）。
-    目录生成 / 正文生成共用；查询异常降级为空字符串，绝不阻断生成。
-
-    ✅ 逐章精选（relevant_to）：与全局事实同一套 2-gram 关键字预筛规则，
-    按章节标题/描述过滤相关素材，命中为空回退全量（长方案下避免把整本
-    企业制度库无差别注入每一章，浪费 token 并稀释指令）。
-    """
-    from app.routers.knowledge import build_knowledge_text
-    rows = await _load_knowledge_rows(db, scheme_id)
-    if relevant_to is not None:
-        rows = _filter_knowledge_rows(rows, relevant_to)
-    return build_knowledge_text(rows)
-
-
-# ---------- 辅助：递归构建 parent_chain ----------
-
-
-def _build_parent_chain(
-    all_sections: list[dict],
-    section_id: str,
-    nodes: dict[str, dict] | None = None,
-    children_by_parent: dict[str, list[dict]] | None = None,
-) -> str:
-    """从叶子向上递归拿到 '第N章 > N.M > ...' 的父级章节标题链。
-
-    优化：支持传入预构建的 nodes 和 children_by_parent，避免每次调用重建（O(N²) → O(N)）。
-    编号原则（与 outline_utils.py 一致）：一级用"第X章"，二级用 "N"，三级用 "N.M"。
-    """
-    if nodes is None:
-        nodes = {s["id"]: s for s in all_sections}
-    if children_by_parent is None:
-        children_by_parent = {}
-        for s in all_sections:
-            pid = s.get("parent_id", "")
-            children_by_parent.setdefault(pid, []).append(s)
-        for pid in children_by_parent:
-            children_by_parent[pid].sort(key=lambda x: x.get("sort_order", 0))
-
-    def _get_chapter_index(node: dict) -> int:
-        """获取节点在其同胞中的 1-based 索引"""
-        parent_id = node.get("parent_id", "")
-        siblings = children_by_parent.get(parent_id, [])
-        for idx, sib in enumerate(siblings):
-            if sib["id"] == node["id"]:
-                return idx + 1
-        return 1
-
-    parts: list[str] = []
-    cur = nodes.get(section_id)
-    parent_id = cur.get("parent_id") if cur else None
-    while parent_id and parent_id in nodes:
-        p = nodes[parent_id]
-        title = p.get("title", "")
-        # ✅ 编号统一（2026-09-25）：一律由**存储态编号**折算**展示态编号**，
-        # 与 numbering.stored_id_to_display / 导出 heading_v2 同源。
-        # 旧实现一级用「同胞索引 → 第X章」、二级以下直接吐 outline_json.id
-        # （存储态），于是同一个祖先在正文提示词里显示 "1.1 第一节"，
-        # 而导出版是 "1 第一节" —— 同一份文档两套编号，模型据此写出的
-        # 子标题编号（3.2.1）也会与成稿（2.1）错位一整级。
-        stored = stored_outline_id(p)
-        if stored:
-            level_tag = stored_id_to_display(stored)
-        else:
-            # 历史脏数据（无 outline_json / id 非法）：按同胞位置折算，
-            # 保证链里既不出现 UUID 也不出现空标签（" 标题"）。
-            idx = _get_chapter_index(p)
-            level_tag = f"第{_cn_number(idx)}章" if int(p.get("level") or 1) == 1 else str(idx)
-        parts.append(f"{level_tag} {title}".strip())
-        parent_id = p.get("parent_id")
-    parts.reverse()
-    return " > ".join(parts) if parts else "（顶级章节）"
-
-
-def _apply_word_budget_allocations(
-    units: dict[str, dict],
-    override: int,
-    ai_allocations: dict[str, int],
-) -> None:
-    """将字数预算写入各预算单元 units[unit_id]["alloc"]。
-
-    规则：
-    - 单叶子单元已在调用方直接分配，此处跳过；
-    - 多叶子单元优先采用 AI 返回的 allocations（按叶子 id 键），
-      若总和恰好等于 override 则采用，否则降级为均分（基础均分 + 余数摊给前若干个，
-      保证总和守恒）。
-
-    ✅ 修复：必须写回 units 字典（含 leaves），而不要写回临时的 units_payload
-    （仅含 children、无 leaves），否则后续 apply 阶段读取 u["alloc"] 会 KeyError，
-    导致整个生成任务崩溃。
-    """
-    for u in units.values():
-        unit_leaves = u.get("leaves", [])
-        if len(unit_leaves) <= 1:
-            continue
-        assigned = {lf["id"]: ai_allocations.get(lf["id"]) for lf in unit_leaves}
-        if (all(isinstance(v, int) and v > 0 for v in assigned.values())
-                and sum(assigned.values()) == override):
-            u["alloc"] = assigned
-        else:
-            base = override // len(unit_leaves)
-            rem = override - base * len(unit_leaves)
-            u["alloc"] = {
-                lf["id"]: base + (1 if i < rem else 0)
-                for i, lf in enumerate(unit_leaves)
-            }
-            logger.info("单元 %s 字数分配降级均分（每份 %d）",
-                        u["unit"].get("title", "")[:20], base)
-
-
-def _section_outline_number(sec: dict) -> str:
-    """取章节目录编号（如 1.1.1），用于提示词中的『当前章节编号』。
-
-    ✅ 编号统一（2026-09-25）：收敛到 services/numbering.stored_outline_id
-    （唯一事实源）。旧实现在 outline_json 缺失/非法时回退到主键 id，
-    而主键是 UUID —— 于是「没有待生成章节编号」的方案，其提示词里会出现
-    一串 `550e8400-e29b-41d4-a716-446655440000`。模型会照抄进正文子标题，
-    或据此误判层级（UUID 含连字符、不含点分段），成稿编号彻底失真。
-    现一律返回合法点分路径，非法即空串（由提示词侧「编号缺失」兜底口径接管）。
-    """
-    return stored_outline_id(sec)
-
-
-#: 章节编号缺失时的提示词兜底文案。
-#: ✅ 不得渲染成空串：空串会让模型把「当前章节编号」当成"没有编号"，
-#:    转而自行编造一个（实测出现过 1./1.1 与实际位置完全不符的子标题）。
-#:    显式说明"未提供、不得编造"是唯一能约束模型的做法。
-SECTION_NUMBER_MISSING = "（未提供，请勿自行编造章节编号）"
-
-#: 目录二级小节常见简称 → 九大章节 key。
-#: 目录里「3.2 施工部署」「4.1 施工方法」这类小节标题与一级章标准名
-#: 既不相等也无互含关系（标准名是「施工计划」「施工工艺技术」），
-#: 缺这张别名表会让最常见的小节完全拿不到结构化提取内容。
-#: 只收录**语义唯一**的简称；有多义的一律不列（宁可不注入也不误归）。
-CHAPTER_TITLE_ALIASES: dict[str, str] = {
-    "施工部署": "plan",
-    "部署与进度": "plan",
-    "进度计划": "plan",
-    "施工进度": "plan",
-    "劳动力配置": "plan",
-    "施工方法": "technique",
-    "施工工艺": "technique",
-    "工艺技术": "technique",
-    "施工做法": "technique",
-    "安全措施": "safety",
-    "安全保障": "safety",
-    "安全技术": "safety",
-    "人员配备": "personnel",
-    "管理人员": "personnel",
-    "安全员": "personnel",
-    "质量验收": "acceptance",
-    "验收标准": "acceptance",
-    "应急预案": "emergency",
-    "应急处置": "emergency",
-    "应急救援": "emergency",
-    "计算书": "calc_drawings",
-    "图纸": "calc_drawings",
-    "监测方案": "technique",
-    "监测措施": "technique",
-}
-
-
-def _section_number_for_prompt(sec: dict) -> str:
-    """提示词用的『当前章节编号』——编号缺失时返回**显式兜底文案**。
-
-    与 _section_outline_number 的区别：后者供**程序内部**判断（空串即可），
-    本函数供**提示词渲染**，必须给出可读的兜底说明。
-
-    ✅ 双重防护（回归锁定）：
-    1. UUID 主键绝不作为编号注入（_section_outline_number 已拦截，
-       本函数再兜一层，防止未来有人改回「回退主键」的老写法）；
-    2. 缺失/非法一律返回含「未提供」的文案，且**非空** —— 空串会诱导
-       模型自行编造章号，成稿编号与目录树整体错位。
-    """
-    return _section_outline_number(sec) or SECTION_NUMBER_MISSING
-
-
-def _continue_failed_flag(continue_failed: bool,
-                          word_count, word_budget) -> bool:
-    """续写失败且字数仍不达标 → 置位 continue_failed（BUG-4，2026-09-19）。
-
-    背景：续写轮失败 / 产出被丢弃时**只记日志**，前端无从区分
-    「本章字数达标」与「本章欠字数且补写失败」—— 两者 word_status 都是 under，
-    用户看不出为什么这章明显偏短，也无法判断要不要手工补。
-
-    规则（与 content_utils.WORD_UNDER_RATIO 同口径）：
-      · 未发生续写失败 → 永不为 True（不打扰够不着写不够的用户）；
-      · 续写失败且字数**仍低于**预算的 80% → True；
-      · 续写失败但后续轮补够了（≥ 预算×80%）→ False（已自愈，不报问题）。
-
-    脏值防御：预算/字数为 None、0、"abc" 等一律不抛异常；预算无效（≤0）
-    时保守判 False —— 无法判定达标线时不应给用户挂一个无法解释的红标。
-    """
-    if not continue_failed:
-        return False
-    try:
-        wb = int(word_budget or 0)
-    except (TypeError, ValueError):
-        wb = 0
-    # 预算无效（≤0 / 非数值）→ 无法判定达标线，保守判 False：
-    # 不能给用户挂一个无法解释的红标。
-    if wb <= 0:
-        return False
-    try:
-        wc = int(word_count or 0)
-    except (TypeError, ValueError):
-        # 字数不可解析（None / "abc" / dict）→ 视为 0。
-        # 方向要「偏真」：续写确实失败且拿不到有效字数，就是"没写够"，
-        # 此时报 continue_failed 才能提示用户去手工补。
-        wc = 0
-    return wc < int(wb * WORD_UNDER_RATIO)
-
-
-def chapter_key_of_title(title: str) -> str:
-    """章节标题 → 九大章节 key（空串 = 未分类，**绝不猜**）。
-
-    用于「结构化提取按章注入」：目录里的一级章标题（「3.2 施工部署」）
-    要映射到九大章节之一，才能取到对应的提取项。
-
-    匹配策略：
-    1. 先剥掉标题自带的编号前缀（"1 " / "3.2 " / "第一章 " 等）——
-       目录标题普遍带号，不剥则精确匹配全落空；
-    2. 剥后与 NINE_CHAPTERS 标题**完全相等** → 直接命中；
-    3. 否则按「标题互含」**最长优先**匹配（"施工安全保证措施" 含
-       "安全保证措施"）。最长优先避免短标题抢先命中长标题
-       （"计算书及相关图纸" 不应被 "图纸" 之类的短词抢走）。
-
-    未命中一律返回空串：宁可漏注入（退回全局事实注入）也不错误归类 ——
-    错归会把事实挤到别的章节的提示词里，比不注入危害更大。
-    """
-    if not title:
-        return ""
-    from app.services.facts_classification import TITLE_TO_CHAPTER
-    bare = strip_outline_numbering(str(title)).strip()
-    if not bare:
-        return ""
-    if bare in TITLE_TO_CHAPTER:
-        return TITLE_TO_CHAPTER[bare]
-    # 3. 互含匹配（最长优先）："施工安全保证措施" 含 "安全保证措施"
-    best_key, best_len = "", 0
-    for ch_title, key in TITLE_TO_CHAPTER.items():
-        if ch_title and (ch_title in bare or bare in ch_title):
-            if len(ch_title) > best_len:
-                best_key, best_len = key, len(ch_title)
-    if best_key:
-        return best_key
-    # 4. 二级小节别名（"施工部署" / "施工方法" …）：与一级章标准名既不
-    #    相等也无互含关系，缺这一步会让最常见的目录小节拿不到提取内容
-    for alias, key in CHAPTER_TITLE_ALIASES.items():
-        if alias in bare:
-            return key
-    return ""
-
-
-async def _build_chapter_extraction_map(
-        db, project_id: str, sections: list[dict],
-        nodes: dict, children_by_parent: dict) -> dict[str, str]:
-    """按九大章节把「结构化提取」内容映射到**叶子章节**（正文按章注入）。
-
-    返回 {section_id: 注入文本}，**只含叶子章节**（有子节点的不注入）。
-
-    映射链路：叶子 → 向上找**顶层祖先**（level=1）→ 用章节标题经
-    facts_classification.classify_chapter_from_text 判出九大章节 key →
-    取该章 source_items 对应的提取项内容拼装（映射表唯一事实源：
-    scheme_classification.NINE_CHAPTERS）。
-
-    设计取舍：
-    - 只按**顶层**章节归属，不为每个二/三级节单独找提取项：目录里
-      「1 工程概况 / 1.1 现状 / 1.2 特点」共享同一批项目基本信息，
-      逐节细分既无数据支撑，也会让同一段文本在提示词里重复多次；
-    - 顶层章节自身（level=1 且无子节点）不注入 —— 它们是「预算单元」
-      而非正文最小单位，注入会让单元提示词冗长；
-    - 无提取结果 / 未分类 → 返回 {}，调用方退回原有全局事实注入。
-    """
-    if not isinstance(sections, list) or not sections:
-        return {}
-    # ① 取该项目的成功提取项（与 _build_structured_brief 同源口径）
-    try:
-        cur = await db.execute(
-            "SELECT item_id, label, output_type, content FROM bid_analysis_items "
-            "WHERE project_id=? AND status='success' AND content IS NOT NULL "
-            "AND content != ''", (project_id,))
-        rows = await cur.fetchall()
-    except Exception:
-        logger.warning("章节提取映射：读取结构化提取失败（退回原行为）", exc_info=True)
-        return {}
-    if not rows:
-        return {}
-    from app.services.bid_analysis_service import is_missing_result
-    items: dict[str, str] = {}
-    for r in rows:
-        content = r["content"] or ""
-        if is_missing_result(content, r["output_type"] or "markdown"):
-            continue
-        label = str(r["label"] or r["item_id"] or "").strip()
-        items[str(r["item_id"])] = f"【{label}】\n{content}" if label else content
-    if not items:
-        return {}
-
-    # ② 九大章节 key → source_items（唯一事实源：scheme_classification）
-    from app.services import scheme_classification as _sc
-    chapter_items: dict[str, list[str]] = {}
-    for ch in getattr(_sc, "NINE_CHAPTERS", []) or []:
-        key = str(ch.get("key") or "")
-        if key:
-            chapter_items[key] = list(ch.get("source_items") or [])
-
-    def _has_children(sec: dict) -> bool:
-        return bool(children_by_parent.get(sec.get("id", ""), []) or [])
-
-    def _top_ancestor(sec: dict) -> dict:
-        """向上找顶层（level=1）祖先；走到顶仍无父节点时返回当前节点。"""
-        cur_node = sec
-        for _ in range(20):          # 深度上限：脏数据成环时不至于死循环
-            pid = cur_node.get("parent_id") or ""
-            parent = nodes.get(pid) if pid else None
-            if not parent:
-                break
-            cur_node = parent
-        return cur_node
-
-    out: dict[str, str] = {}
-    for sec in sections:
-        if not isinstance(sec, dict) or _has_children(sec):
-            continue
-        top = _top_ancestor(sec)
-        if top.get("id") == sec.get("id") and int(top.get("level") or 1) == 1:
-            continue        # 顶层章节自身即叶子 → 不注入（见 docstring）
-        title = str(top.get("title") or "")
-        if not title:
-            continue
-        key = chapter_key_of_title(title)
-        if not key:
-            continue
-        blocks = [items[i] for i in chapter_items.get(key, []) if i in items]
-        if blocks:
-            out[sec["id"]] = "\n\n".join(blocks)
-    return out
-
-
-# ---------- 目录审核（短方案/长方案共用） ----------
-def _validate_outline(obj, *, strict_depth: bool = True, max_nodes: int = 500) -> list[str]:
-    """校验 AI 返回的 outline JSON 结构。
-
-    strict_depth=True（默认，供审核/单测使用）：层级超过 3 级会作为"问题"上报，
-    便于把这类目录标记出来；
-    strict_depth=False（目录生成主链路使用）：忽略"层级过深"告警。
-    max_nodes：节点总数上限；<=0 表示不限制。生成链路用默认 500 防止模型
-    无限输出，审核修复链路用 OUTLINE_FIX_MAX_NODES 放宽（见 _outline_fix_validate_fn）。
-
-    ✅ BUG 修复：旧实现把"层级 > 3"一律当作致命问题，而这些调用点用
-    collect_json_response(messages, _validate_outline) 做校验——模型只要返回
-    四级目录，就会连续触发两轮 JSON 修复、最终 raise ValueError，
-    导致整次目录生成失败，永远走不到 clamp_outline_depth 的三级兜底裁剪。
-    现在生成链路改用 strict_depth=False，深度超限交由裁剪处理。
-    """
-    issues = []
-    ol = obj.get("outline", [])
-    if not isinstance(ol, list) or not ol:
-        issues.append("outline 为空或格式错误")
-        return issues
-
-    def _check(nodes, depth=0):
-        if depth > 10:
-            # 循环/异常深度的保护性截断；仅严格模式上报
-            if strict_depth:
-                issues.append(f"目录层级过深（>{10}层），可能存在循环引用")
-            return
-        if depth > 3 and strict_depth:
-            # 超过系统裁剪上限（3层）时提前告警，
-            # 用户可知道 AI 返回的深层节点会被裁剪并入 description
-            issues.append(f"L{depth+1} 节点超出系统支持的3级目录上限，将被裁剪并入父节点描述")
-        for node in nodes:
-            if not isinstance(node, dict):
-                issues.append(f"L{depth+1} 节点不是字典对象")
-                continue
-            title = node.get("title")
-            if not title or not str(title).strip():
-                issues.append(f"L{depth+1} 节点缺少 title 或 title 为空")
-            # ✅ BUG-O4 修复：区分"缺失 children 字段"和"children=None"。
-            # 旧实现把缺失字段也判为错误，但缺失 children 是合法叶节点（AI 常省略）。
-            # 只有显式 children=None 或 children 非列表时才报错。
-            if "children" in node:
-                children = node.get("children")
-                if children is None:
-                    issues.append(f"L{depth+1} 节点 {node.get('title','?')} 的 children 为 null")
-                elif not isinstance(children, list):
-                    issues.append(f"L{depth+1} 节点 {node.get('title','?')} children 不是列表")
-                elif children:
-                    _check(children, depth + 1)
-
-    _check(ol)
-    if max_nodes > 0 and _count_nodes(ol) > max_nodes:
-        issues.append(f"节点总数超过上限 {max_nodes}")
-    return issues
-
-
-def _count_nodes(nodes: list) -> int:
-    """递归计算 outline 节点总数（带深度保护）"""
-    count = 0
-    def _count(ns, depth=0):
-        nonlocal count
-        if depth > 12:
-            return
-        for n in ns:
-            count += 1
-            children = n.get("children") if isinstance(n, dict) else None
-            if isinstance(children, list) and children:
-                _count(children, depth + 1)
-    _count(nodes)
-    return count
-
-
-def _outline_validate_fn(obj) -> list[str]:
-    """目录生成主链路使用的校验函数：只拦截结构性问题，层级超限交由裁剪兜底。
-
-    见 _validate_outline 的 strict_depth 说明。节点上限走
-    ``OUTLINE_GENERATE_MAX_NODES``（P2-2 配置化，默认 500 = 原行为）。
-    """
-    return _validate_outline(obj, strict_depth=False,
-                             max_nodes=OUTLINE_GENERATE_MAX_NODES)
-
-
-def _outline_fix_validate_fn(obj) -> list[str]:
-    """审核修复结果的校验函数：在生成链路校验基础上放宽节点数上限。
-
-    ✅ BUG 修复：修复轮输入/输出都是**完整目录**（长方案 30 章 × 20+ 节点
-    极易超过 500）。沿用生成链路的 500 上限时，修复结果会被一律判为非法 →
-    走 "修复后校验仍不通过，保留原目录" 分支，"按审核建议自动修复" 整轮空转，
-    用户看到的仍是未修正的目录。这里改用 OUTLINE_FIX_MAX_NODES。
-    """
-    return _validate_outline(obj, strict_depth=False, max_nodes=OUTLINE_FIX_MAX_NODES)
-
-
-def _sublevel_validate_fn(o) -> list[str]:
-    """分步链路「单章子目录」的校验函数。
-
-    必须是非空节点数组，且每个节点都是含 title 的 dict。
-    （弱校验 lambda 会放过 ["x", 1] 这类畸形数组，normalize 静默丢弃后
-    章变空壳且不进 failed_chapters，用户看到一堆只有章标题的空章节。）
-
-    ✅ 从 generate_outline 内的闭包提升到模块级：原实现定义在事件流闭包内，
-    无法单测；该函数是「章变空壳」这一线上问题的主要拦截点。
-
-    ✅ BUG 修复（2026-09-29 · title 为 JSON null 时漏判）：旧实现写
-    `str(n.get("title", ""))` —— 该写法只处理「键缺失」，而弱模型常返回
-    **键存在但值为 null**（JSON null → Python None）；`str(None)` 得 `"None"`，
-    `.strip()` 后仍为真值，于是 `{"title": null, "description": "..."}` 被
-    误判为合法标题节点放行。随后在 _merge_unit_results 里对同一 None 调
-    `.strip()` 直接抛 `AttributeError: 'NoneType' object has no attribute 'strip'`，
-    整次目录生成以「目录生成失败」告终（用户白跑数分钟）。现统一用
-    `str(x or "")` 同时覆盖「键缺失」与「值为 null」。
-    """
-    ol = o.get("outline")
-    if not isinstance(ol, list) or not ol:
-        return ["outline 必须为非空数组"]
-    bad = [n for n in ol if not isinstance(n, dict) or not str(n.get("title") or "").strip()]
-    return [f"存在 {len(bad)} 个非法/缺标题节点"] if bad else []
-
-
-def _level1_validate_fn(o) -> list[str]:
-    """长方案分步链路「一级目录」的校验函数。
-
-    ✅ BUG 修复（2026-09-16）：旧实现用内联 lambda
-    `[] if o.get("outline") else ["缺少 outline"]` —— 只看"非空"，
-    `{"outline": ["工程概况", 1, null]}` 这类**非空但节点不是对象**的结果会被放行；
-    随后生成循环里的 `ch.get("title")`（以及 `enumerate(level1)` 后的
-    `ch["title"] = ...`）会抛 AttributeError，整次目录生成以"目录生成失败"告终，
-    用户只能重试且看不到真实原因（弱模型返回字符串数组是常见形态）。
-    这里要求：非空数组 + 每项都是对象。
-
-    注意**不**要求 title 非空：生成循环对缺标题的节点会兜底为「第 N 章」
-    （宽容优先，避免因为一个标题缺失就让整次生成失败）。
-    """
-    ol = o.get("outline")
-    if not isinstance(ol, list) or not ol:
-        return ["outline 必须为非空数组"]
-    bad = [n for n in ol if not isinstance(n, dict)]
-    return [f"存在 {len(bad)} 个非法节点（应为对象）"] if bad else []
-
-
-def _sublevel_batch_validate_fn(o) -> list[str]:
-    """长方案分步「多章合并」批量子目录响应的校验函数。
-
-    契约（宽松但非空壳放行）：chapters 必须是数组；每项必须是含
-    chapter_id 的对象，且其 outline 必须是**数组**（允许为空数组 ——
-    某些章确实没有子目录，硬判非空会触发无意义的 JSON 修复轮）。
-
-    注意：缺章**不在此处判失败** —— 批内缺章由 _fetch_unit_children 逐章
-    回退单章调用兜底（"绝不整批判死"），若在此处报错则整批重试，
-    反而放大调用次数。
-    """
-    chs = o.get("chapters")
-    if not isinstance(chs, list) or not chs:
-        return ["chapters 必须为非空数组"]
-    for c in chs:
-        if not isinstance(c, dict) or not str(c.get("chapter_id") or "").strip():
-            return ["chapters 中存在缺 chapter_id 的非法项"]
-        if not isinstance(c.get("outline"), list):
-            return [f"chapter {c.get('chapter_id')} 的 outline 必须是数组"]
-    return []
-
-
-def _outline_patch_validate_fn(o) -> list[str]:
-    """外科式补齐（patch）响应的校验函数。
-
-    只要求 new_chapters 是**非空数组**，每项含非空 title。
-    不在此处校验 children 结构：patch 只需产出缺失章的一级+二三级骨架，
-    结构完整性由合并后的 normalize_outline 统一裁剪/重排兜底。
-    """
-    ncs = o.get("new_chapters")
-    if not isinstance(ncs, list) or not ncs:
-        return ["new_chapters 必须为非空数组"]
-    bad = [c for c in ncs
-           if not isinstance(c, dict) or not str(c.get("title") or "").strip()]
-    return [f"存在 {len(bad)} 个缺标题的非法章节"] if bad else []
-
-
-def _outline_skeleton(nodes: list, max_nodes: int = OUTLINE_REVIEW_MAX_NODES) -> list:
-    """生成精简目录骨架（用于审核提示词）。
-
-    ✅ 修复：旧实现直接 json.dumps(outline, ensure_ascii=False)[:3000] 做字符截断，
-    会把 JSON 截成非法结构（括号/引号不闭合、字段残缺），审核模型据此容易误判
-    "目录不完整"，进而触发无意义的修复轮次。改为按节点数预算递归裁剪，
-    输出始终是合法 JSON，且保留完整层级轮廓供审核判断章节覆盖度。
-
-    ✅ 增强：携带 description（截断 60 字）——审核要点包含"本章要写什么是否贴合"
-    "是否存在重复、遗漏"，仅凭标题无法判断节点意图；description 体量可控
-    （150 节点 × 60 字 ≈ 9K 字符），显著提升审核信息量。
-
-    ✅ 遗留修复（2026-09-16）：总节点数超预算时，旧实现按「前序优先」截断，
-    超长目录（>150 节点）的尾部章节完全不会进入审核视野 → 审核对尾章的
-    重复/遗漏/错位零检出能力。现改为按一级章均衡取样：每个一级章标题保留
-    1 个节点预算，剩余预算均分给各章子树，保证每章都有代表节点被审核。
-    """
-    if not isinstance(nodes, list) or not nodes:
-        return []
-    budget = [max_nodes]
-
-    def _walk(ns, depth: int = 0) -> list:
-        out: list = []
-        if depth > 10 or budget[0] <= 0:
-            return out
-        for n in ns:
-            if budget[0] <= 0:
-                break
-            if not isinstance(n, dict):
-                continue
-            budget[0] -= 1
-            item: dict = {"title": n.get("title", "")}
-            desc = str(n.get("description", "")).strip()
-            if desc:
-                item["description"] = desc[:60]
-            children = n.get("children")
-            if isinstance(children, list) and children:
-                kids = _walk(children, depth + 1)
-                if kids:
-                    item["children"] = kids
-            out.append(item)
-        return out
-
-    if _count_nodes(nodes) <= max_nodes:
-        return _walk(nodes, 0)
-
-    # 超预算：按一级章均衡取样
-    chapters = [n for n in nodes if isinstance(n, dict)]
-    if not chapters or len(chapters) >= max_nodes:
-        # 一级章本身多到连标题都放不下（极端场景）：退化为前序优先，
-        # 优先保住尽可能多的章标题（章覆盖比章内细节对审核更关键）
-        return _walk(nodes, 0)
-
-    # 章标题各占 1，剩余预算均分给各章子树（每章子树至少 1 个节点）
-    per_chapter = max(1, (max_nodes - len(chapters)) // len(chapters))
-    out: list = []
-    for ch in chapters:
-        if budget[0] <= 0:
-            break
-        budget[0] -= 1  # 章标题
-        item: dict = {"title": ch.get("title", "")}
-        desc = str(ch.get("description", "")).strip()
-        if desc:
-            item["description"] = desc[:60]
-        children = ch.get("children")
-        if isinstance(children, list) and children:
-            saved = budget[0]
-            sub_budget = min(per_chapter, budget[0])
-            budget[0] = sub_budget
-            kids = _walk(children, 1)
-            # 未用完的子树预算归还总池，让后面的章多分一点
-            budget[0] = saved - (sub_budget - budget[0])
-            if kids:
-                item["children"] = kids
-        out.append(item)
-    return out
-
-
-def _build_partial_preview(full_outline: list) -> list:
-    """构造长方案分步生成的「目录预览」载荷（深拷贝 + 全树规范化）。
-
-    ✅ 契约（2026-09-25 · E2 修复）：预览的 (id, title, description) 必须与
-    收尾 normalize_outline 的产物**逐节点完全一致**。旧实现只对 `preview[-1]`
-    （当前章）调 clamp_outline_depth，已完成章的深层节点原样下发：
-      - 分步生成过程中前端预览出现 4/5 级节点（收尾时又消失），
-        用户看到目录树「生成完又变了一次"」；
-      - 深层标题未并入父节点 description，内容线索在预览里"看起来丢了"。
-
-    实现上直接复用 normalize_outline（clamp + renumber 的唯一实现），
-    避免"预览一套、收尾另一套"的规则漂移；深拷贝保证不污染主数据
-    （clamp 是就地修改语义，浅拷贝会共享子节点字典）。
-    """
-    if not isinstance(full_outline, list) or not full_outline:
-        return []
-    preview = copy.deepcopy(full_outline)
-    normalize_outline(preview)
-    return preview
-
-
-# ✅ R38 D4 收口（2026-10-03）：project_facts 提示词注入预算的**单一事实源**。
-#   此前 1500/1000 以字面量散落五处调用点，口径漂移靠专项复盘才发现（D4）。
-#   数值维持原样（零行为变化），仅消灭魔法数并显式化「谁不截断、为什么」：
-#   · OUTLINE 档 = 外科式补齐 / 目录反馈修正 / 长方案一级目录（与旧值 1500 同）
-#   · SUBLEVEL 档 = 二三级小节生成（提示词压力更大，预算更紧，与旧值 1000 同）
-#   · 短方案主目录（outline_short_system）与审核（outline_review_system）
-#     **有意不截断** —— 审核是只读核对、事实越全判得越准；调用点有注释锁定。
-# ✅ 2026-10-06（R47 债-1）：常量值搬入 ``services/ai/prompts/_limits.py`` 单一事实源，
-#    本模块仍以同名可读，下游消费代码零改动。
+# R47 债-1（拆分保留）：常量值单一事实源在 _limits，本模块仍以同名可读（护栏锁定）。
+from app.routers._sse_outline_build import (  # noqa: F401,E402 — 拆分兼容转发（原名原对象，monkeypatch 语义不变）
+    _OUTLINE_CALIBRATE_MIN_SAMPLE,
+    _OUTLINE_EXPECT_ALPHA,
+    _OUTLINE_EXPECT_MAX,
+    _OUTLINE_EXPECT_MIN,
+    _OUTLINE_PHASE_MODEL,
+    _TRUNC_LABELS,
+    CHAPTER_TITLE_ALIASES,
+    SECTION_NUMBER_MISSING,
+    _advance_outline_phase,
+    _apply_word_budget_allocations,
+    _await_with_stats,
+    _budgeted_truncate_sections,
+    _build_chapter_extraction_map,
+    _build_knowledge_text,
+    _build_parent_chain,
+    _build_partial_preview,
+    _calibrate_outline_chapter_expect,
+    _calibrate_outline_expect,
+    _calibrate_stage_expect,
+    _continue_failed_flag,
+    _count_nodes,
+    _filter_knowledge_rows,
+    _fmt_duration,
+    _join_tail_budget,
+    _level1_validate_fn,
+    _load_knowledge_rows,
+    _locked_progress_updater,
+    _monotonic_progress,
+    _outline_chapter_expect,
+    _outline_eta_ms,
+    _outline_expect,
+    _outline_fix_validate_fn,
+    _outline_patch_validate_fn,
+    _outline_phase_label,
+    _outline_progress,
+    _outline_push_value,
+    _outline_skeleton,
+    _outline_validate_fn,
+    _rank_sections_by_basis,
+    _section_number_for_prompt,
+    _section_outline_number,
+    _section_partial,
+    _should_auto_shrink,
+    _site_trunc_extra,
+    _snapshot_outline_stats,
+    _snapshot_stats,
+    _split_md_sections,
+    _sublevel_batch_validate_fn,
+    _sublevel_validate_fn,
+    _validate_outline,
+    _weighted_progress,
+    _word_budget_hint,
+    chapter_key_of_title,
+)
 from app.services.ai.prompts._limits import (  # noqa: E402,F401
     PROJECT_FACTS_LIMIT_OUTLINE,
     PROJECT_FACTS_LIMIT_SUBLEVEL,
 )
-
-
-def _join_tail_budget(items: list[str], max_chars: int) -> str:
-    """把若干条目标签用 `; ` 连接，**超预算时优先保留最近（靠后）的条目**。
-
-    背景：二三级目录生成的提示词要注入「已生成的前序章节小节」以抑制跨章重复。
-    旧实现 `"; ".join(items)[:1500]` 有两个问题：
-      1) 按字符硬截断 → 最后一条常被截成半截标题，模型据此判重时信息失真；
-      2) 保留的是**最早**的章节 —— 而越靠后的章节与当前章越相关（刚生成的
-         内容更容易被重复），预算不够时应优先保留最近的部分。
-    """
-    if not items:
-        return ""
-    budget = max(int(max_chars), 0)
-    picked: list[str] = []
-    used = 0
-    for item in reversed(items):          # 从最近往回取
-        text = str(item).strip()
-        if not text:
-            continue
-        cost = len(text) + (2 if picked else 0)   # 分隔符 "; "
-        if budget and used + cost > budget:
-            break
-        picked.append(text)
-        used += cost
-    picked.reverse()
-    return "; ".join(picked)
-
-
-#: 来源 → 截断台账里的展示名（与 input_coverage.SRC_* 同源）
-_TRUNC_LABELS = {"解析提取": "项目资料摘要", "全局事实": "全局事实"}
-
-
-def _site_trunc_extra(*args) -> dict:
-    """登记装配点的**实际**截断，返回 {来源: 截断说明}。
-
-    签名：`_site_trunc_extra(source…, text, budget[, text, budget, …])`
-    —— **前导项是来源名**（可多个），其后是「文本, 预算」交替的变长参数，
-    第 i 组对应第 i 个来源。
-
-    实参示例（一个装配点有两路输入被截）：
-        _site_trunc_extra("解析提取", "全局事实",
-                          text_a, 2000, text_b, 1500)
-        → {"解析提取": "项目资料摘要 3500 字超本装配点预算 2000 字，已截断",
-            "全局事实": "全局事实 1600 字超本装配点预算 1500 字，已截断"}
-
-    M3（2026-09-23）：台账必须按各装配点的**真实预算**入账，不能统一用
-    全局上限 —— 否则「本装配点本可以放得下」也会被记成截断，运维排查时
-    被大量假告警淹没。未超预算的项**不记录**（零记录 = 未截断）。
-    """
-    from app.services import input_coverage as ic
-    known = {ic.SRC_PARSE, ic.SRC_FACTS, ic.SRC_SCOPE, ic.SRC_REQ,
-             ic.SRC_BASIS, ic.SRC_STANDARDS}
-    args = list(args)
-    sources = [a for a in args if isinstance(a, str) and a in known]
-    rest = [a for a in args if not (isinstance(a, str) and a in known)]
-    extra: dict = {}
-    for j, k in enumerate(range(0, len(rest) - 1, 2)):
-        text, budget = rest[k], rest[k + 1]
-        try:
-            budget_i = int(budget or 0)
-            size = len(text or "")
-        except (TypeError, ValueError):
-            continue
-        if budget_i <= 0 or size <= budget_i:
-            continue
-        src = sources[j] if j < len(sources) else (sources[-1] if sources else "")
-        if not src:
-            continue
-        label = _TRUNC_LABELS.get(src, src)
-        extra[src] = f"{label} {size} 字超本装配点预算 {budget_i} 字，已截断"
-    return extra
-
-
 
 
 async def _run_input_coverage_audit(
@@ -1927,538 +567,46 @@ async def input_coverage(scheme_id: str, db=Depends(get_db)) -> dict:
     return await input_coverage_snapshot(scheme_id, db=db)
 
 
-# ---------- 提示词治理 · SSE 侧薄封装（2026-09-24 · G5 / G6） ----------
-
-#: 句子边界（截断时在这些标点之后断开，尽量不切碎句子）
-_SENTENCE_END_CHARS = "。！？；\n"
-
-
-def _truncate_context(text: str) -> str:
-    """按 context_length_limit 对上下文做**句子边界**截断。
-
-    ✅ 默认关闭（limit=0 → 原样返回）：护栏而非默认行为。
-
-    截断必须落在句子边界上：直接 `text[:limit]` 会把最后一句切成半截
-    （"第二句内容很长很长很长很长很长"），模型据此续写会顺着半句话编，
-    产出与上下文语义不连贯的正文。找不到边界时（超长单句）才硬切，
-    并追加省略号提示内容被截断。
-    """
-    if not text:
-        return text
-    limit = int(getattr(settings, "context_length_limit", 0) or 0)
-    if limit <= 0 or len(text) <= limit:
-        return text
-    window = text[:limit]
-    cut = -1
-    for ch in _SENTENCE_END_CHARS:
-        pos = window.rfind(ch)
-        if pos > cut:
-            cut = pos
-    if cut > 0:
-        return window[:cut + 1]
-    return window + "…"
-
-def _apply_prompt_context_budget(text: str) -> str:
-    """按 prompt_context_budget 对已标注分段的上下文做预算削减。
-
-    ✅ **默认关闭（budget=0 → 原样返回）**：这是护栏而非默认行为，
-    开启会改变发给模型的文本（截断），必须由用户显式配置。
-    实际分配逻辑在 services/prompt_governance.allocate_context_budget
-    （按「全局事实 > 目录树 > 资料摘要 > 知识库」优先级水填），
-    本函数只做开关判断与异常降级 —— 治理异常绝不能阻断生成。
-    """
-    budget = int(getattr(settings, "prompt_context_budget", 0) or 0)
-    if budget <= 0 or not text:
-        return text
-    try:
-        from app.services.prompt_governance import apply_context_budget
-        return apply_context_budget(text, budget)
-    except Exception:
-        logger.warning("上下文预算削减失败（使用原文继续）", exc_info=True)
-        return text
-
-
-def _guard_external_material(text: str) -> str:
-    """对外部资料段落加"只读数据"围栏并做凭据脱敏（prompt_injection_defense 开启时）。
-
-    ✅ **默认关闭**：绝不影响既有生成行为。
-    只加围栏 + 告警，**不改写资料正文** —— 与「数据真实性红线」一致
-    （资料被改写就等于伪造了用户上传的内容）。
-    """
-    if not getattr(settings, "prompt_injection_defense", False) or not text:
-        return text
-    try:
-        from app.services.prompt_governance import (
-            guard_external_segments,
-            redact_sensitive,
-        )
-        # ✅ 顺序：先加围栏（标注"这是只读资料"），再脱敏凭据。
-        #    脱敏放最后 —— 只动凭据形态的片段（sk-/api_key= 等），
-        #    **不碰 GB/JGJ 等标准编号**（误伤会污染技术依据）。
-        guarded = guard_external_segments(text)
-        _redacted, _n = redact_sensitive(guarded)
-        if _n:
-            logger.warning("外部资料中检出 %d 处疑似凭据，已脱敏", _n)
-        return _redacted
-    except Exception:
-        logger.warning("外部资料防护失败（使用原文继续）", exc_info=True)
-        return text
-
-
-# ---------- 长方案分步：子目录取回执行单元（批内并发 / 批内合并） ----------
-
-def _as_children(obj) -> list:
-    """从 AI 响应中取 outline 数组（畸形/缺失一律回退空列表）。
-
-    弱模型常回 {"outline": null} 或 {"outline": {...}}；不归一化会让
-    上层把 dict 当 list 迭代（逐字符变成子章节标题）。
-    """
-    children = obj.get("outline") if isinstance(obj, dict) else None
-    return children if isinstance(children, list) else []
-
-
-async def _finish_stopped_with_partial(task_id: str, holder: dict) -> str:
-    """目录生成「用户停止」的唯一收尾出口：携带已生成成果 + 落 checkpoint。
-
-    返回待 yield 的 SSE 行（event=stopped）。
-
-    为什么必须是唯一出口（2026-09-20 修复）：
-    旧实现在 4 个停止分支发**裸** stopped 事件（不带 outline、不写
-    checkpoint）—— 目录已生成 20 章时用户点停止，成果确定性丢失，前端
-    只能提示"后台任务已停止"，用户白等几分钟。
-
-    顺序契约：**先落 checkpoint → 再置终态 → 最后 yield**。反过来会出现
-    「finish_task 已把任务 pop 出内存、checkpoint 尚未写入」的窗口，
-    断线重挂的 GET /sse/task/{id} 读到 completed/stopped 却拿不到成果。
-
-    holder 处理：读出成果后清空（防 finally 兜底重复落库）；无成果时
-    **不写** checkpoint（避免用空成果覆盖上一次的有效 checkpoint）。
-    """
-    outline = holder.get("outline") or []
-    failed = holder.get("failed_chapters") or []
-    payload = {'event': 'stopped', 'task_id': task_id}
-    if outline:
-        payload['outline'] = outline
-        payload['partial'] = True
-        if failed:
-            payload['failed_chapters'] = list(failed)
-            payload['failed_count'] = len(failed)
-        try:
-            await _save_outline_checkpoint(task_id, payload)
-        except Exception:
-            logger.warning("检查点写入失败（task=%s · 目录生成 · 停止时成果）", task_id,
-                           exc_info=True)
-    # 清空 holder：防 finally 兜底把同一份成果再落一次库
-    holder["outline"] = []
-    holder["failed_chapters"] = []
-    await finish_task(task_id, "stopped", "用户已停止")
-    return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
-
-
-async def _fetch_chapter_children(
-    index: int,
-    chapter: dict,
-    *,
-    sub_prompt: list,
-    task_id: str,
-    sem,
-    validate_fn,
-    timeout: int,
-    push_stats,
-) -> tuple[str, list]:
-    """取回单章的二三级子目录 —— 长方案分步链路的**执行单元**。
-
-    返回 (status, children)：status ∈ {"ok", "failed", "stopped"}。
-
-    关键不变**（与 bid_analysis.run_with_pause_gate 同源教训）：
-    **暂停闸门必须排在并发信号量之前**。写成「先 async with sem 再
-    wait_resume」时，暂停挂起期间在途章把许可全部占住，同批其余章节
-    饿死 —— 表现为"点了暂停，整批卡住不动"。
-
-    失败语义：首次失败**重试恰好一次**（重试前再过一次闸门与停止检查），
-    两次均失败才判 failed（由编排层计入 failed_chapters）。
-    停止语义：进入前 / 排队拿到许可后各复检一次 is_stopped，已停止则
-    **不发起 AI 调用**（省一次配额，也避免"点了停止还在烧 token"）。
-    """
-    # ① 闸门在前：暂停期间不占许可
-    await wait_resume(task_id)
-    if is_stopped(task_id):
-        return "stopped", []
-
-    async def _attempt() -> tuple[str, list]:
-        """首试 + 重试恰好一次。
-
-        两处调用各自显式携带 json_mode / temperature / scene（审计归因
-        要求首试与重试都计入 outline_sublevel；漏打会让 /ai/stats 的调用
-        次数与实际消耗对不上）。
-        """
-        try:
-            obj, _raw = await _await_with_stats(
-                collect_json_response(
-                    sub_prompt, validate_fn, timeout=timeout,
-                    json_mode=True, temperature=0.2, scene="outline_sublevel",
-                    repair_key=OUTLINE_REPAIR_KEY),
-                push_stats, task_id=task_id)
-            return "ok", _as_children(obj)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:          # noqa: BLE001 - 兜住任意 provider 异常
-            # ✅ O8/O9 闸门：配额 / 认证 / 模型不存在类错误（402/403/404/429）
-            #    默认**不重试** —— 这类错误重试几乎必然再失败，白烧一轮配额
-            #    与超时；`AI_RETRY_ON_QUOTA_ERROR=True` 可恢复旧行为。
-            if not AI_RETRY_ON_QUOTA_ERROR and _is_quota_error(e):
-                logger.warning("第%d章子目录生成失败（配额/认证类，不重试）: %s",
-                               index + 1, e)
-                return "failed", []
-            logger.warning("第%d章子目录首次生成失败: %s，重试一次", index + 1, e)
-            # 重试前再过一次闸门与停止检查：用户在首试失败后可能已点
-            # 停止/暂停，此时不该继续烧配额。
-            await wait_resume(task_id)
-            if is_stopped(task_id):
-                return "stopped", []
-            try:
-                obj, _raw = await _await_with_stats(
-                    collect_json_response(
-                        sub_prompt, validate_fn, timeout=timeout,
-                        json_mode=True, temperature=0.2, scene="outline_sublevel",
-                        repair_key=OUTLINE_REPAIR_KEY),
-                    push_stats, task_id=task_id)
-                return "ok", _as_children(obj)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e2:     # noqa: BLE001
-                logger.warning("第%d章子目录重试仍失败: %s", index + 1, e2)
-                return "failed", []
-
-    if sem is not None:
-        async with sem:
-            # ② 拿到许可后复检：排队期间用户可能已点停止
-            if is_stopped(task_id):
-                return "stopped", []
-            return await _attempt()
-    return await _attempt()
-
-
-async def _fetch_unit_children(
-    unit_chapters: list,
-    *,
-    batch_prompt: list | None,
-    single_prompts: list | None,
-    task_id: str,
-    sem,
-    timeout: int,
-    push_stats,
-) -> tuple[str, list]:
-    """取回一个「执行单元」内各章的子目录。
-
-    unit_chapters: [(章序号 i, 章节点 dict), ...]
-    single_prompts: 与 unit_chapters 等长的单章提示词列表（合并调用回退用）
-
-    返回 (unit_status, per)：unit_status ∈ {"ok", "failed", "stopped"}；
-    per 与 unit_chapters 等长，元素为 (章状态, children)。
-
-    合并语义（OUTLINE_CHAPTER_BATCH_SIZE > 1 时）：
-    - 单元内 1 章 → 直接委托 _fetch_chapter_children（逐字等于旧行为）；
-    - 单元内多章 → 1 次批量调用；**缺章逐章回退单章**，批量整体失败
-      （首试+重试）也逐章回退 —— 绝不整批判死（判死会让 1 章失败拖垮整单元）。
-    """
-    if is_stopped(task_id):
-        return "stopped", []
-
-    # 单元内单章：直接委托（保持与旧实现逐字一致）
-    if len(unit_chapters) == 1:
-        i, ch = unit_chapters[0]
-        st, children = await _fetch_chapter_children(
-            i, ch, sub_prompt=(single_prompts[0] if single_prompts else []),
-            task_id=task_id, sem=sem, validate_fn=_sublevel_validate_fn,
-            timeout=timeout, push_stats=push_stats)
-        return ("stopped" if st == "stopped" else "ok"), [(st, children)]
-
-    # 单元内多章：一次批量调用
-    batch_obj = None
-    last_err: Exception | None = None
-    for attempt in (1, 2):
-        try:
-            obj, _raw = await _await_with_stats(
-                collect_json_response(
-                    batch_prompt, _sublevel_batch_validate_fn, timeout=timeout,
-                    json_mode=True, temperature=0.2, scene="outline_sublevel",
-                    repair_key=OUTLINE_REPAIR_KEY),
-                push_stats, task_id=task_id)
-            batch_obj = obj
-            break
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:          # noqa: BLE001
-            last_err = e
-            # ✅ BUG 修复（2026-10-16 · 配额/认证类错误不重试）：与
-            #    _fetch_chapter_children 的 O8/O9 闸门同口径 —— 402/403/404/429
-            #    重试几乎必然再失败，白烧一轮配额与超时。旧实现批量路径缺少
-            #    该闸门，配额耗尽时每轮都浪费 2 次批量调用后才逐章回退。
-            if not AI_RETRY_ON_QUOTA_ERROR and _is_quota_error(e):
-                logger.warning("批量子目录（第%d次，%d章）配额/认证类错误（不重试）: %s",
-                               attempt, len(unit_chapters), e)
-                break
-            logger.warning("批量子目录（第%d次，%d章）失败: %s",
-                           attempt, len(unit_chapters), e)
-    if batch_obj is None:
-        logger.warning("批量子目录重试仍失败（%s），逐章回退单章调用", last_err)
-
-    # 按 chapter_id 归位（章号以「章序号+1」的字符串为准，与提示词一致）
-    by_id: dict[str, list] = {}
-    if isinstance(batch_obj, dict):
-        for c in batch_obj.get("chapters") or []:
-            if not isinstance(c, dict):
-                continue
-            cid = str(c.get("chapter_id") or "").strip()
-            ol = c.get("outline")
-            if cid and isinstance(ol, list):
-                by_id[cid] = ol
-
-    per: list = []
-    for idx, (i, ch) in enumerate(unit_chapters):
-        cid = str(i + 1)
-        if cid in by_id:
-            per.append(("ok", by_id[cid]))
-            continue
-        # 缺章（批量失败 / 模型漏回该章）→ 逐章回退，绝不丢章
-        logger.info("批量响应缺第%s章，回退单章调用", cid)
-        st, children = await _fetch_chapter_children(
-            i, ch, sub_prompt=(single_prompts[idx] if single_prompts else []),
-            task_id=task_id, sem=sem, validate_fn=_sublevel_validate_fn,
-            timeout=timeout, push_stats=push_stats)
-        per.append((st, children))
-    unit_status = "stopped" if any(s == "stopped" for s, _ in per) else "ok"
-    return unit_status, per
-
-
-def _attach_quality_report(outline: list, basis, review_obj: dict) -> dict:
-    """生成后自动校验（要求三/四）：连续性 + 全面性 + 冗余，写日志与 review 载荷。
-
-    - **不修改目录**：纯只读校验（删章/改编号是不可逆的用户数据变更）；
-    - 报告写入 ``review_obj["quality"]``（前端"审核结论"区可见），并按级别落日志；
-    - ⚠️ 刻意**不**把告警塞进 ``suggestions``：那里的文案是"已执行的修复动作"，
-      混入校验告警会让用户误以为目录已被改过；需要人工处理时由 quality 段落呈现。
-    """
-    try:
-        from app.services.outline_quality import (
-            analyze_name_coverage,
-            check_outline_continuity,
-            check_structure_standards,
-            find_redundant_titles,
-            render_continuity_notice,
-            render_coverage_notice,
-            render_structure_notice,
-        )
-        cont = check_outline_continuity(outline)
-        cov = analyze_name_coverage(basis, outline)
-        redundant = find_redundant_titles(basis, outline) if cov.get("evaluated") else []
-        # ✅ 2026-10-11（引入《文档生成规则分析与软件标准建立》目录结构规范）：
-        #    章数 5-10 / 每章二级节数 2-15 / 深度 ≤4 的**建议性**核对。
-        #    只进 quality 报告与本行日志，不进 issues、不改 cont["ok"]、
-        #    不塞 suggestions（微型方案章数少于 5 属合法形态，阻断即误伤）。
-        struct = check_structure_standards(outline)
-        report = {
-            "continuity": {"ok": cont.get("ok"), "nodes": cont.get("nodes"),
-                           "max_level": cont.get("max_level"),
-                           "issue_counts": cont.get("issue_counts"),
-                           "generic_titles": cont.get("generic_titles") or []},
-            "structure": struct,
-            "name_coverage": {
-                "evaluated": cov.get("evaluated"), "covered": cov.get("covered"),
-                "total_items": cov.get("total_items"),
-                "missing": list(cov.get("missing") or [])[:20],
-            },
-            "redundant_titles": redundant[:10],
-        }
-        if not cont.get("ok"):
-            logger.warning("目录连续性校验未通过：%s", render_continuity_notice(cont))
-        _struct_notice = render_structure_notice(struct)
-        if _struct_notice:
-            logger.info("%s（仅建议，不阻断）", _struct_notice)
-        if cov.get("evaluated") and cov.get("missing"):
-            logger.warning("目录全面性校验：%s", render_coverage_notice(cov["missing"]))
-        if redundant:
-            logger.info("目录冗余候选 %d 个（仅报告不删除）：%s",
-                        len(redundant), "、".join(r["title"] for r in redundant[:5]))
-        if isinstance(review_obj, dict):
-            review_obj["quality"] = report
-        return report
-    except Exception:  # pragma: no cover - 校验不得影响生成结果
-        logger.warning("目录质量校验异常（忽略，不影响生成结果）", exc_info=True)
-        return {}
-
-
-def _merge_unit_results(
-    level1: list, unit_idx: list, per: list, full_outline: list,
-    prior_l2: list, failed_chapters: list, unit_status: str = "",
-) -> tuple[bool, int]:
-    """把一个「执行单元」的子目录结果按章序归位到 full_outline（纯函数，可单测）。
-
-    就地修改 full_outline / prior_l2 / failed_chapters 与 level1 里的章节点，
-    返回 (stopped, 本次新增节点数)。
-
-    ✅ BUG 修复（2026-09-26 · 分步生成「停止」丢成果 + 静默漏章）：
-    1) 旧实现在单元内遇到 stopped 直接 break，随后才统一 append —— 于是
-       **同一批（OUTLINE_CHAPTER_BATCH_SIZE > 1）里已经生成完的章节被整批丢弃**：
-       用户点停止后拿到的部分目录少了最近一批的全部子目录，且 failed_chapters
-       里也没有记录（表现为"停了但白跑几分钟"）。现改为「先把已完成章节并入、
-       再返回 stopped」。
-    2) `j >= len(per)`（单元被停止时 per 为空 / 模型少回章节）旧实现 continue
-       静默跳过：章节以空 children 被 append，既不计 failed 也不判 stopped
-       —— 全部章节"看似成功"，completed 事件里的失败章统计为 0，用户无从察觉
-       整批空目录。现：单元状态是 stopped 如实上抛，否则按 failed 记账 + WARNING。
-
-    ⚠️ 顺序不变式：full_outline 必须严格按章序追加（编号由位置推导，
-    乱序 = 全树编号错乱），因此 stopped 分支也只允许追加「已按序完成的前缀」。
-    """
-    stopped = False
-    added_nodes = 0
-    pending: list = []
-
-    for j, i in enumerate(unit_idx):
-        ch = level1[i]
-        if j >= len(per):
-            if unit_status == "stopped":
-                stopped = True
-                break
-            logger.warning("第%s章子目录结果缺失（单元返回 %d 条），按失败记账",
-                           i + 1, len(per))
-            st, children = "failed", []
-        else:
-            st, children = per[j]
-        if st == "stopped":
-            stopped = True
-            break
-        ch["children"] = children if isinstance(children, list) else []
-        if st == "failed":
-            failed_chapters.append(str(ch.get("title") or f"第{i + 1}章"))
-        elif not ch["children"]:
-            # ✅ R89 S1：「ok 但零子章」必须记账（静默丢章）。
-            #
-            # 根因：批量校验器 `_sublevel_batch_validate_fn` 只判「outline 是
-            # list」，`outline: []` 判合法（该契约已被 test_outline_call_optimization
-            # 锁定 —— 单章章确实可能存在无子级的场景，故**不改校验器**）；而此处
-            # 旧实现只认 `st == "failed"` 才记账。弱模型偷懒回空数组时 st 是
-            # "ok" ⇒ 全批不计失败 ⇒ 下方 `all_failed`（`len(failed_chapters) >=
-            # len(level1)`）为假 ⇒ final_status 落 "completed"、failed_count 缺省、
-            # 前端零告警 —— 30 章全空即得一份 30 个空壳一级章的「完成」目录。
-            #
-            # 这里只增记账、不动校验器契约：终态仍可能 completed，但
-            # failed_chapters / failed_count 如实带出，前端有可见信号；全部章
-            # 都空时 all_failed 自然成立，走 failed 终态而非 completed。
-            failed_chapters.append(str(ch.get("title") or f"第{i + 1}章"))
-            logger.warning("第%s章子目录为空（模型未返回任何二级章节），按失败记账",
-                           i + 1)
-        pending.append(ch)
-
-    for ch in pending:
-        full_outline.append(ch)
-        # ✅ BUG 修复（2026-09-29）：与 _sublevel_validate_fn 同一根因 ——
-        #    `str(x.get("title", ""))` 对 title=None 得 "None"（键缺失才得 ""）。
-        #    章标题为 None 时 prior_l2 会写入字面量 "None / 子节标题"，
-        #    随后灌入下一级的「已生成小节」提示词，污染上下文。
-        _ch_title = str(ch.get("title") or "")
-        for _sub in (ch.get("children") or []):
-            # ✅ 崩溃点修复：守卫通过后紧接着 `_sub['title'].strip()` 直接对 None
-            #    调方法 → AttributeError，整次目录生成失败。现取值前先归一为空串，
-            #    并让守卫与取值用同一表达式（单一判据，杜绝两处再漂移）。
-            _sub_title = str(_sub.get("title") or "").strip() if isinstance(_sub, dict) else ""
-            if _sub_title:
-                prior_l2.append(f"{_ch_title} / {_sub_title}")
-        added_nodes += _count_nodes(ch.get("children") or [])
-    return stopped, added_nodes
-
-
-def _compact_outline_json(nodes: list, max_desc: int = 80) -> str:
-    """把目录树渲染为**紧凑 JSON**（供审核修复轮作为「原始目录」输入）。
-
-    ✅ 修复（2026-09-16）：旧实现 `json.dumps(outline, ensure_ascii=False)` 直接
-    把**带 id/level/空 children/长描述**的完整目录塞进修复提示词 —— 长方案
-    （30 章 × 20+ 节点，节点上限 1200）可轻易超过 10 万字符，必然超出模型上下文
-    或触发超时，`outline_feedback_system`（审核建议回灌修复）整轮空转，用户看到的
-    仍是未修正的目录。
-
-    这里做**无损语义压缩**（只去掉对模型无用的字段，不删节点）：
-      · 去掉 id / level / confidence 等程序生成字段；
-      · description 截断到 max_desc（修复只需判断"这节写什么"，不需要全文）；
-      · 空 children 不输出（省掉每节点 14 字符的 `"children":[]`）。
-    实测（30 章 × 3 级真实目录）字符量约为原 JSON 的 **0.63~0.66**
-    （描述越长收益越大），1200 节点目录可压到数万字符以内。
-    """
-    budget = [max(int(max_desc), 0)]
-
-    def _walk(ns, depth: int = 0) -> list:
-        out: list = []
-        if depth > 10 or not isinstance(ns, list):
-            return out
-        for n in ns:
-            if not isinstance(n, dict):
-                continue
-            item: dict = {"title": str(n.get("title", "")).strip()}
-            desc = str(n.get("description", "")).strip()
-            if desc and budget[0]:
-                item["description"] = desc[:budget[0]]
-            children = n.get("children")
-            if isinstance(children, list) and children:
-                kids = _walk(children, depth + 1)
-                if kids:
-                    item["children"] = kids
-            out.append(item)
-        return out
-
-    try:
-        return json.dumps({"outline": _walk(nodes)}, ensure_ascii=False)
-    except (TypeError, ValueError):
-        # 极端脏数据（循环引用等）不应阻断修复链路：退回空目录结构
-        return '{"outline": []}'
-
-
-def _outline_fix_looks_degraded(original: list, fixed: list) -> bool:
-    """修复结果是否**退化**（节点数远少于原目录）。
-
-    ✅ 修复（2026-09-16）：旧实现只做结构校验，通过后**整份替换**原目录 ——
-    弱模型在修复轮只回一个"示例结构"（如 3 个节点）时，用户辛苦生成的几十章
-    目录会被静默替换成 3 个节点（正文生成随即"章节全丢"）。这里给出覆盖率
-    下限：修复结果节点数低于原目录的 OUTLINE_FIX_MIN_COVERAGE 时判定退化，
-    调用方保留原目录（宁可未修复，不可丢目录）。
-    """
-    n_orig = _count_nodes(original) if isinstance(original, list) else 0
-    n_fixed = _count_nodes(fixed) if isinstance(fixed, list) else 0
-    if n_orig <= 0:
-        return False
-    return n_fixed < max(1, int(n_orig * OUTLINE_FIX_MIN_COVERAGE))
-
-
-# ---------- 编制要求程序化覆盖预检 + 外科式补齐（2026-09-21） ----------
-
-# ✅ 2026-10-02（第二十五轮 · 判据同源）：危大必备章节关键词表此前是九大章节
-# 关键词的**第三份手抄副本**（另两份在 ``audit_rules`` 与本文件），已实证与
-# 审核侧**双向分叉**：「工程概述 / 施工部署 / 组织机构 / 图纸」目录侧认、
-# 审核侧不认 → 目录侧程序化预检放行、预检照报 CMP-01/03/06/07。
-#
-# 现改为**单一出口** ``outline_checkpoint.required_chapter_specs()``（判据指向
-# ``audit_rules`` 注册表 + ``preflight_engine`` 实际谓词常量）。本模块保留的
-# ``_DANGEROUS_REQUIRED_KEYWORDS`` 名字**仅作历史兼容别名**，内容由唯一出口
-# 派生，不再是独立副本；护栏测试锁定其与唯一出口逐项一致。
-from app.services import outline_checkpoint as _ocp
-
-
-def _dangerous_required_keywords() -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """危大 10 章必备章节关键词（**由 outline_checkpoint 单一出口派生**）。
-
-    Returns:
-        ``((展示名, 关键词元组), ...)``—— 标签与顺序与原表**逐字一致**
-        （九大法定章节简写 + 「监测方案」），由 ``test_classification_parity_20261001``
-        锁定。仅**关键词**换成审核侧同源词（原表认「工程概述/施工部署/组织机构/
-        图纸」而审核侧不认，是 CMP-01/03/06/07 误报的根因）。
-    """
-    return _ocp.dangerous_required_keywords()
-
-
-#: 历史别名（保留供既有调用点与护栏断言；不再独立维护）。
-_DANGEROUS_REQUIRED_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    _dangerous_required_keywords())
+from app.routers._sse_outline_review import (  # noqa: F401,E402 — 拆分兼容转发（原名原对象，monkeypatch 语义不变）
+    _DANGEROUS_REQUIRED_KEYWORDS,
+    _OUTLINE_REVIEW_AUDIT_HINT,
+    _SENTENCE_END_CHARS,
+    _TITLE_FIXED_MODE_SUFFIX,
+    _apply_prompt_context_budget,
+    _as_children,
+    _attach_quality_report,
+    _build_structured_brief,
+    _check_requirements_coverage,
+    _common_run,
+    _compact_outline_json,
+    _coverage_recheck,
+    _dangerous_required_keywords,
+    _detect_duplicate_titles,
+    _detect_generic_titles,
+    _fetch_chapter_children,
+    _fetch_unit_children,
+    _finish_stopped_with_partial,
+    _guard_external_material,
+    _merge_patch_chapters,
+    _merge_unit_results,
+    _ocp,
+    _outline_construction_scope,
+    _outline_fix_looks_degraded,
+    _outline_input_audit,
+    _outline_review_checkpoint_kwargs,
+    _outline_scheme_basis,
+    _outline_standards_text,
+    _register_task_exclusive,
+    _residual_generic_notice,
+    _restore_descriptions,
+    _review_and_fix_outline,
+    _scheme_basis_obj,
+    _scheme_is_dangerous,
+    _split_requirement_items,
+    _stream_end_guard,
+    _truncate_context,
+    _try_outline_patch,
+)
 
 
 def _outline_checkpoint_kwargs(scheme_name: str = "", scheme_type: str = "",
@@ -2468,6 +616,8 @@ def _outline_checkpoint_kwargs(scheme_name: str = "", scheme_type: str = "",
     受 ``settings.outline_checkpoint_check`` 控制（默认 True）。关闭或构建失败时
     返回**空字典**——调用方据此**不传该变量**，模板独占行整行丢弃 → 提示词与
     本功能引入前**逐字一致**（向后兼容红线，勿改成传空串）。
+    （拆分说明：本函数的裸 ``render(**_outline_checkpoint_kwargs(...))`` 调用点
+    留在 facade，护栏扫描器要求 helper 定义与调用点同文件可静态解析。）
 
     Args:
         scheme_name / scheme_type / is_hazardous: 危大判定的三个输入。
@@ -2496,1135 +646,6 @@ def _outline_checkpoint_kwargs(scheme_name: str = "", scheme_type: str = "",
     return {"outline_checkpoint_block": block} if block else {}
 
 
-#: 目录**审核**提示词的「按清单核对」指令（模板 ``outline_review_system`` 的
-#: ``{outline_checkpoint_audit_hint}`` 独占行）。
-#:
-#: ⚠️ 2026-10-03（R38 · D5）：此前这条指令以**固定文案**写在模板里，而它
-#: 引用的清单来自 ``{outline_checkpoint_block}``——开关关闭时清单整行被丢弃、
-#: 指令却仍在，模型会去核对一份**根本不存在**的清单，臆造「缺失章节」并写进
-#: suggestions，进而触发外科式补齐加进并不存在的章节。故改为随块同生共死。
-_OUTLINE_REVIEW_AUDIT_HINT = (
-    "8.1 目录是否覆盖上方【审核检查点前置要求】列出的全部必备法定章节？"
-    "任一缺失即判 passed=false，并在 suggestions 中列出缺失章节名")
-
-
-def _outline_review_checkpoint_kwargs(scheme_name: str = "",
-                                      scheme_type: str = "",
-                                      is_hazardous: bool = False) -> dict:
-    """审核提示词专用的检查点变量（共享块 + 按清单核对指令）。
-
-    与 :func:`_outline_checkpoint_kwargs` 的区别：**只在审核链路追加
-    ``outline_checkpoint_audit_hint``**。生成链路不得携带该指令（它说
-    「判 passed=false」是审核语义，对生成提示词无意义且会误导）。
-
-    块为空（开关关闭 / 构建失败）时同样返回空字典 —— 指令与清单必须
-    同时在场或同时缺席。
-    """
-    kw = _outline_checkpoint_kwargs(scheme_name, scheme_type, is_hazardous)
-    if not kw:
-        return {}
-    kw["outline_checkpoint_audit_hint"] = _OUTLINE_REVIEW_AUDIT_HINT
-    return kw
-
-
-def _split_requirement_items(requirements: str) -> list[str]:
-    """把用户填写的「编制要求」拆成逐条条目（并剥离条目自带编号）。
-
-    输入通常是评审要点清单：
-        "1. 工程概况及特点\\n2）施工部署与进度计划\\n- 安全保证措施\\n短\\n"
-    期望 → ["工程概况及特点", "施工部署与进度计划", "安全保证措施"]
-
-    「短」这类 1 字条目被丢弃：拆分后仍无法做任何覆盖判定，
-    留在 missing 里只会让外科补齐去"补"一条根本没有内容的条目。
-    """
-    if not requirements or not str(requirements).strip():
-        return []
-    items: list[str] = []
-    for raw in str(requirements).splitlines():
-        line = str(raw).strip().lstrip("-*·•").strip()
-        if not line:
-            continue
-        # 剥离 "1." / "2）" / "（三）" / "一、" 等条目编号前缀
-        line = strip_outline_numbering(line).strip()
-        if len(line) < 2:      # 剥离后过短 → 不是有效条目
-            continue
-        if line not in items:   # 去重保序
-            items.append(line)
-    return items
-
-
-def _common_run(a: str, b: str) -> str:
-    """两个字符串的最长公共子串（朴素 DP，仅用于短标题比对）。"""
-    if not a or not b:
-        return ""
-    best = ""
-    prev = [0] * (len(b) + 1)
-    for i in range(1, len(a) + 1):
-        cur = [0] * (len(b) + 1)
-        for j in range(1, len(b) + 1):
-            if a[i - 1] == b[j - 1]:
-                cur[j] = prev[j - 1] + 1
-                if cur[j] > len(best):
-                    best = a[i - cur[j]:i]
-        prev = cur
-    return best
-
-
-def _check_requirements_coverage(
-    requirements: str, outline: list, is_dangerous: bool = False,
-    basis=None,
-) -> tuple[bool, list[str]]:
-    """程序化检查目录是否覆盖了编制要求 / 危大工程必备章节 / **方案名称维度**。
-
-    返回 (covered, missing)：
-    - covered=True → 全部命中，可跳过 AI 审核（省 1~2 次调用）；
-    - missing     → 未命中的条目清单（供外科式补齐使用）。
-
-    判定策略（**保守方向**：拿不准一律推向 missing，多走 AI，
-    绝不因误判覆盖而放过真实缺失）：
-    1. 双向子串匹配：条目是标题的子串，或标题（≥3 字）是条目的子串
-       —— 避免"计"这种单字误命中；
-    2. 条目含并列分隔符（、/，/与/及）时按**片段**匹配：任一 ≥3 字片段
-       命中即覆盖（"计算书、相关图纸" → 命中"计算书及相关图纸"）；
-    3. 标题与条目有 ≥4 字公共子串时也判覆盖（减少无谓的 AI 打扰）；
-    4. 危大工程额外逐个检查 10 个必备章节关键词；
-    5. ✅ 2026-09-27（要求四 · 全面性）：传入 ``basis`` 时追加
-       `outline_quality.analyze_name_coverage` 的结果 —— 方案名称里解析出的
-       **主要施工内容 / 工序 / 工艺 / 对象**若在目录（全层级）中无任何落点，
-       一并计入 missing，从而复用**既有的外科式补齐**链路自动补章
-       （而不是只靠提示词 0.1 条款自觉）。受 ``outline_name_coverage_check``
-       控制（默认 True；关闭即回退修复前口径）；
-    6. ✅ P1-4（2026-09-27）：第 1~2 条（严格双向子串匹配）**仍只看一级标题**
-       —— 危大必备 10 章是**结构性**要求，必须有独立一级章节；
-       但第 3 条（≥4 字公共子串的宽松匹配）扩展到**全层级标题**，
-       于是"编制要求里写过的内容以二级小节形式落实"也算覆盖。
-       放宽只作用在**最宽松**的那条规则上，误报率不增。
-    """
-    titles: list[str] = []
-    for n in (outline or []):
-        if not isinstance(n, dict):
-            continue
-        t = str(n.get("title") or "").strip()
-        if t:
-            titles.append(t)
-    # ✅ P1-4：全层级标题（仅供规则 3 的宽松匹配使用）
-    all_titles: list[str] = list(titles)
-    try:
-        from app.services.outline_quality import collect_titles
-        all_titles += [str(e.get("title") or "") for e in collect_titles(outline)
-                       if str(e.get("title") or "").strip()]
-    except Exception:  # pragma: no cover - 纯兜底，取不到就退化为仅一级
-        all_titles = list(titles)
-
-    def _hit(fragment: str) -> bool:
-        frag = fragment.strip()
-        if len(frag) < 2:
-            return False
-        for t in titles:
-            if frag in t or (len(t) >= 3 and t in frag):
-                return True
-        return False
-
-    missing: list[str] = []
-    for item in _split_requirement_items(requirements):
-        if _hit(item):
-            continue
-        parts = [p.strip() for p in re.split(r"[、，,和与及]", item)
-                 if len(p.strip()) >= 3]
-        if parts and any(_hit(p) for p in parts):
-            continue
-        if any(len(_common_run(item, t)) >= 4 for t in all_titles):
-            continue
-        missing.append(item)
-
-    if is_dangerous:
-        for label, keywords in _DANGEROUS_REQUIRED_KEYWORDS:
-            if not any(kw in t for kw in keywords for t in titles):
-                missing.append(f"{label}（危大工程必备章节）")
-    # ✅ 2026-10-02（第二十五轮 · 门控对齐 + 判据同源）：**新增**九大法定章节
-    #    检查，与上面危大 10 章检查**并存且互补**（不是替换）：
-    #
-    #    - 上面那条是危大**结构性**要求（须独立一级章节，刻意只判 L1）；
-    #    - 本条对齐预检 ``check_completeness``：九大法定章节**任何专项方案
-    #      都要有**（预检对此**无条件**检查），且**全层级标题**匹配、判据取自
-    #      ``outline_checkpoint`` 单一出口（= 审核侧同谓词）。
-    #
-    #    为什么必须新增：此前非危大专项方案（本软件主力场景，§4.22 定位切换后）
-    #    目录侧**从未被要求过九章**，生产库实证 6 条 CMP 命中（3 block）。
-    #    ⚠️ 本条**只新增判定、不放宽任何既有判定**，故此前能过的目录仍能过；
-    #    此前靠 AI 审核兜住的目录改走外科补齐（多 1 次调用，省掉后续 CMP block）。
-    if getattr(settings, "outline_checkpoint_check", True):
-        try:
-            _ck_missing = _ocp.outline_coverage_missing(outline, is_hazardous=False)
-        except Exception:  # pragma: no cover - 自检是体检，不是闸门
-            logger.warning("目录检查点覆盖校验异常（忽略，不阻断生成）",
-                           exc_info=True)
-            _ck_missing = []
-        for label in _ck_missing:
-            entry = f"{label}（法定必备章节）"
-            if entry not in missing:
-                missing.append(entry)
-    # ⚠️ 早退（跳过 AI 审核）的判据**保持原样**，只按上面新增的 missing 生效：
-    #    `_check_requirements_coverage` 现在恒定参与，但「程序化全过就跳过 AI 审核」
-    #    仍**只在用户填了编制要求 / 提供了方案解析**时成立。
-    #    为什么：AI 审核除九章齐备外还查标题质量、层级、跨章重复、投标章节等，
-    #    无条件跳过会把这些检查一并丢掉（反而让其它规则的问题上升）。
-    #    所以「未填编制要求 + 目录完整」= 旧行为（照旧走 AI 审核）；
-    #    只有**确有缺失**时才改走外科补齐（本轮要达成的效果）。
-    # ✅ 2026-09-27（要求四 · 全面性）：方案名称维度覆盖缺口并入 missing，
-    #    复用外科式补齐链路自动补章（只读校验，失败仅告警不阻断）。
-    if basis is not None and getattr(settings, "outline_name_coverage_check", True):
-        try:
-            from app.services.outline_quality import analyze_name_coverage
-            cov = analyze_name_coverage(basis, outline)
-            if cov.get("evaluated") and cov.get("missing"):
-                missing.extend(cov["missing"])
-        except Exception:  # pragma: no cover - 校验异常不阻断生成
-            logger.warning("方案名称覆盖校验异常（忽略，不阻断生成）", exc_info=True)
-    return (not missing), missing
-
-
-def _restore_descriptions(original: list, target: list) -> None:
-    """把原目录的 description 按「(层级路径, 标题)」回填到合并修复结果上（就地）。
-
-    背景：审核提示词吃的是 _outline_skeleton 截断版目录（description 截到
-    60 字以省 token），模型据此产出的 fixed_outline 里 description 也是截断的。
-    若直接采用，用户目录中每章说明都凭空短一截 —— 审核省了一次调用，
-    却污染了全部章节描述。
-
-    键用「(路径, 标题)」而非 id：模型回传的 id 可能是编号而非原 id。
-    仅当目标描述为空、或短于原描述（典型截断特征）时才回填，
-    模型新写的更长描述予以保留。
-
-    ✅ 改进（2026-10-09 · P1-8 收口）：审核修复轮可能增删 / 重排章节，
-    导致 fixed_outline 的位置路径与原目录不再对齐 —— 旧实现此时完全无法
-    回填 description，用户看到全篇 60 字截断描述（而原描述可能数百字）。
-    现增加**标题回退匹配**：(path, title) 精确匹配失败后，按标题查找原目录；
-    多个同名章节时取**位置路径最近**者（避免错误回填到不相关章节的描述）。
-    回退命中时记 DEBUG 日志（可观测但不打扰正常流程）。
-    """
-    if not isinstance(original, list) or not isinstance(target, list):
-        return
-
-    # (path, title) -> description（精确匹配）+ title -> [(path, desc)]（回退匹配）
-    orig_desc: dict = {}
-    title_index: dict[str, list[tuple[str, str]]] = {}
-
-    def _collect(nodes: list, prefix: str) -> None:
-        idx = 0
-        for n in nodes or []:
-            if not isinstance(n, dict):
-                continue
-            idx += 1
-            path = f"{prefix}.{idx}" if prefix else str(idx)
-            title = str(n.get("title") or "").strip()
-            desc = str(n.get("description") or "")
-            if title:
-                orig_desc[(path, title)] = desc
-                title_index.setdefault(title, []).append((path, desc))
-            children = n.get("children")
-            if isinstance(children, list) and children:
-                _collect(children, path)
-
-    _collect(original, "")
-    if not orig_desc:
-        return
-
-    def _path_distance(a: str, b: str) -> int:
-        """位置路径距离：段数差 + 逐段不等计数（用于多同名时选最近者）。"""
-        ap = a.split(".")
-        bp = b.split(".")
-        dist = abs(len(ap) - len(bp))
-        for x, y in zip(ap, bp):
-            if x != y:
-                dist += 1
-        return dist
-
-    _fallback_count = [0]
-
-    def _restore(nodes: list, prefix: str = "") -> None:
-        idx = 0
-        for n in nodes or []:
-            if not isinstance(n, dict):
-                continue
-            idx += 1
-            path = f"{prefix}.{idx}" if prefix else str(idx)
-            title = str(n.get("title") or "").strip()
-            # ① 精确匹配：(path, title)
-            src = orig_desc.get((path, title))
-            # ② 回退匹配：标题查找（修复轮增删/重排章节导致路径偏移时）
-            if src is None and title:
-                candidates = title_index.get(title)
-                if candidates:
-                    if len(candidates) == 1:
-                        src = candidates[0][1]
-                    else:
-                        # 多同名：取位置路径最近者
-                        best = min(candidates, key=lambda c: _path_distance(c[0], path))
-                        src = best[1]
-                    _fallback_count[0] += 1
-            if src:
-                cur = str(n.get("description") or "")
-                if not cur.strip() or len(cur) <= len(src):
-                    n["description"] = src
-            children = n.get("children")
-            if isinstance(children, list) and children:
-                _restore(children, path)
-
-    _restore(target)
-    if _fallback_count[0]:
-        logger.debug("description 回填使用了标题回退匹配（%d 处路径偏移）",
-                     _fallback_count[0])
-
-
-def _merge_patch_chapters(outline: list, new_chapters: list) -> list:
-    """把外科式补齐产出的新章节合并进现有目录（按 insert_after 定位）。
-
-    定位策略（**精确优先、歧义则追加末尾**，宁可位置不完美也不插错）：
-    1. 标题**完全相等**的命中：唯一 → 插到它后面；多处同名 → 视为歧义，
-       追加末尾（同名章节本就无法判断用户想挂在哪一章之后）；
-    2. 无精确命中时退化为**互含匹配**（「安全文明施工」⊂「安全文明施工保证措施」）：
-       同样只在唯一命中时插入，多处命中视为歧义 → 追加末尾；
-    3. 都不满足 → 追加末尾。
-    拿不准时追加末尾而非猜第一个位置：插错位置会让新章落在语义无关的
-    章节之后，比追加末尾更难被用户一眼看出问题。
-
-    合并后统一 renumber —— 位置即编号的唯一事实源；新章插入到中间时，
-    其后所有章的编号都要顺移（否则导出编号断号/重号）。
-    """
-    merged = [n for n in (outline or []) if isinstance(n, dict)]
-    for nc in (new_chapters or []):
-        if not isinstance(nc, dict):
-            continue
-        title = str(nc.get("title") or "").strip()
-        if not title:
-            continue
-        after = str(nc.get("insert_after") or "").strip()
-        node = {k: v for k, v in nc.items() if k != "insert_after"}
-        node["title"] = title
-        children = node.get("children")
-        node["children"] = children if isinstance(children, list) else []
-        pos = -1
-        if after:
-            titles = [str(ex.get("title") or "").strip() for ex in merged]
-            exact = [i for i, t in enumerate(titles) if t and t == after]
-            if len(exact) == 1:                      # ① 精确且唯一
-                pos = exact[0] + 1
-            elif not exact:                          # ② 无精确 → 互含回退
-                fuzzy = [i for i, t in enumerate(titles)
-                         if t and (after in t or t in after)]
-                if len(fuzzy) == 1:
-                    pos = fuzzy[0] + 1
-        if pos < 0:
-            merged.append(node)
-        else:
-            merged.insert(pos, node)
-    renumber_outline(merged)
-    return merged
-
-
-async def _try_outline_patch(
-    outline: list, missing: list, *,
-    scheme_name: str = "", scheme_type: str = "",
-    project_brief: str = "", project_facts: str = "",
-) -> list | None:
-    """外科式补齐：只为缺失项生成新的一级章节（1 次小调用替代
-    「AI 审核 + 整目录重写」2 次大调用）。
-
-    返回合并后的新目录；失败 / 校验不通过返回 None
-    （调用方回退完整 AI 审核链路）。
-    """
-    if not missing:
-        return None
-    try:
-        prompt = render(
-            "outline_patch_system",
-            scheme_name=scheme_name,
-            scheme_type=scheme_type,
-            project_brief=(project_brief or "")[:1500],
-            project_facts=(project_facts or "")[:PROJECT_FACTS_LIMIT_OUTLINE],
-            chapter_titles="; ".join(
-                str(n.get("title") or "") for n in (outline or [])
-                if isinstance(n, dict))[:2000],
-            missing_items="; ".join(missing[:20]),
-        )
-        obj, _raw = await asyncio.wait_for(
-            collect_json_response(
-                [{"role": "system", "content": prompt}],
-                _outline_patch_validate_fn,
-                json_mode=True, temperature=0.2, scene="outline_fix",
-                repair_key=OUTLINE_REPAIR_KEY,
-                max_tokens=OUTLINE_FIX_MAX_TOKENS),
-            timeout=OUTLINE_FIX_TIMEOUT)
-        new_chapters = obj.get("new_chapters") if isinstance(obj, dict) else None
-        if not isinstance(new_chapters, list) or not new_chapters:
-            return None
-        return normalize_outline(_merge_patch_chapters(outline, new_chapters))
-    except asyncio.TimeoutError:
-        logger.warning("外科式补齐超时（%ds），回退完整 AI 审核（scheme=%s）",
-                       OUTLINE_FIX_TIMEOUT, scheme_name)
-    except Exception as e:      # noqa: BLE001
-        logger.warning("外科式补齐失败，回退完整 AI 审核（scheme=%s）: %s", scheme_name, e)
-    return None
-
-
-def _detect_generic_titles(outline: list) -> list[dict]:
-    """泛化/占位标题检出（配置门控 + 异常软失败，全链路单一入口）。
-
-    - 受 ``settings.outline_check_generic_titles``（默认 True）控制：置 False 即
-      完整回到本项引入前的行为（不检出、不早退闸门、不强制修复）；
-    - 检测异常**绝不阻断生成主链路**：返回空列表并留 WARNING。
-    """
-    if not getattr(settings, "outline_check_generic_titles", True):
-        return []
-    try:
-        from app.services.outline_quality import detect_generic_titles
-        return detect_generic_titles(outline)
-    except Exception as e:  # noqa: BLE001 - 自检是体检，不是闸门
-        logger.warning("目录泛化标题检测异常（忽略）: %s", e, exc_info=True)
-        return []
-
-
-def _detect_duplicate_titles(outline: list) -> list[dict]:
-    """同名章节检出（fail-soft：异常返回空列表，绝不阻断生成主链路）。
-
-    ✅ R89 S5：程序化早退的**第三道闸门**。判据复用
-    `outline_quality.check_outline_continuity` 的 `duplicate_titles`（单一事实源，
-    与审核侧 / 导出侧同口径），不另造判据。
-
-    为何单独立函数：`_detect_generic_titles` 受 `outline_check_generic_titles`
-    控制（占位标题检测），而重复标题检测语义不同，不该绑在同一开关下；
-    两者都只读不写、都 fail-soft，本函数自带 try/except 兜底，**零新增配置项**。
-    """
-    try:
-        from app.services.outline_quality import check_outline_continuity
-        return check_outline_continuity(outline).get("duplicate_titles") or []
-    except Exception as e:      # noqa: BLE001 - 自检是体检，不是闸门
-        logger.warning("目录重复标题检测异常（忽略）: %s", e, exc_info=True)
-        return []
-
-
-#: 出口口径名：早退前先做过占位标题重写的标记（前端「审核依据」区可区分）
-_TITLE_FIXED_MODE_SUFFIX = "titled"
-
-
-def _residual_generic_notice(hits: list[dict]) -> list[str]:
-    """残留占位标题的透明警告（参照 R71 收尾警告口径：绝不谎报已修好）。"""
-    if not hits:
-        return []
-    sample = "、".join(f"「{h.get('title')}」" for h in hits[:5])
-    return [
-        f"⚠ 自动修复后目录仍有 {len(hits)} 处泛化/占位标题（{sample}）："
-        f"请人工核对并改写这些标题，或重新生成目录（系统未强行改名，"
-        f"避免把真实章节标题改坏）"]
-
-
-def _coverage_recheck(requirements: str, tree: list, is_dangerous: bool,
-                      basis=None) -> tuple[bool, list[str]]:
-    """程序化出口的**覆盖回归复核**（✅ R73b F6/F7：纯确定性、零 AI 调用、不改树）。
-
-    为何需要：两条程序化早退的「过」字是**在改名/补齐之前**判的，而两个动作都会
-    动标题集：
-      ① F6 占位标题曾以宽松匹配（≥4 字公共子串，规则 3）替某条编制要求「顶」住
-         落点，换成具体标题后该要求反而没了落点；
-      ② F7 外科补齐只要「有产出」就宣告「已补齐 N 项缺失」，从不回头验证补的章
-         是否覆盖缺失项 —— 模型回任意一章都能过关，那是谎报。
-    出口前用**同一把尺子**（`_check_requirements_coverage`，不另造判据）再量一次，
-    不平就不得以 programmatic* 早退。
-
-    复核自身异常按 ``(True, [])`` 处理（fail-soft：复核是加法式护栏，异常时
-    不该比修复前更严，与 `_detect_generic_titles` 同一口径）。
-    """
-    try:
-        return _check_requirements_coverage(requirements, tree, is_dangerous,
-                                           basis=basis)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("程序化出口覆盖复核异常（按不额外阻断处理）: %s", e,
-                       exc_info=True)
-        return True, []
-
-
-async def _review_and_fix_outline(
-    outline: list, scheme_type: str, is_dangerous: bool, project_brief: str = "",
-    scheme_name: str = "", project_facts: str = "", requirements: str = "",
-    phase_cb=None, construction_scope: str = "",
-    scheme_basis: str | None = None, basis=None,
-    standards_text: str = "",
-) -> tuple[list, dict]:
-    """目录审核 + 超时保护的自动修复。返回 (outline, review_obj)。
-
-    phase_cb: 可选同步回调 `fn(phase)`，在进入「审核」「修复」子阶段时调用，
-    供调用方切换进度阶段（审核+修复最长 180s，期间调用方正 await 本协程、
-    无法 yield 事件，进度改由心跳通道的 stats_provider 带出）。
-
-    scheme_basis: 【方案名称解析】区块文本（_outline_scheme_basis 的产物）。
-    ✅ 2026-09-26：旧实现写死 `scheme_basis=construction_scope`，同一段文字在
-    审核提示词里以两个标签各注入一次（重复 token、且审核员按「工序/工艺/对象」
-    判缺失，而生成侧从未收到该区块 → 系统性误判不通过、白跑一轮修复调用）。
-    默认 None 时回退为 construction_scope（保持既有直调方行为不变）。
-
-    standards_text: 【编制依据规范】文本（_outline_standards_text 的产物）。
-    ✅ R89 G3：外科式标题重写需要它才能确定标题的具体工序/部位；默认 "" 表示
-    不注入（渲染为空串），既有未传参的调用点行为不变。
-    """
-    if scheme_basis is None:
-        scheme_basis = construction_scope
-    if not outline:
-        return outline, {"passed": False, "suggestions": ["目录为空，无法审核"]}
-
-    def _notify(phase: str):
-        """上报子阶段（回调异常绝不影响审核主流程）。"""
-        if phase_cb is None:
-            return
-        try:
-            phase_cb(phase)
-        except Exception:
-            logger.debug("目录审核阶段回调失败（已忽略）", exc_info=True)
-
-    # ---------- C：程序化覆盖预检（OUTLINE_REVIEW_MODE=auto，默认） ----------
-    # 省调用次数的关键路径：编制要求 / 法定必备章节若已被**确定性**覆盖，
-    # 就不必再花 1~2 次大调用去问 AI「过不过」（AI 审核还会随机地
-    # 对同一目录给出不同结论）。任一环节拿不准都回退完整 AI 审核。
-    #
-    # ✅ 2026-10-02（第二十五轮 · 门控对齐）：原门控是
-    # ``(requirements or basis is not None)`` —— **未填「编制要求」时整段程序化
-    # 预检被跳过**，于是非危大专项方案（本软件主力场景，§4.22 定位切换后）
-    # 目录侧**从未被检查过九大法定章节**，而预检 ``check_completeness`` 对
-    # CMP-01~09 是**无条件**检查的 → 生产库实证 6 条 CMP 命中（3 block）。
-    #
-    # 现改为：``_check_requirements_coverage`` **恒定参与**（其内部对
-    # 「编制要求为空」本就返回空 missing，不产生额外判定），九大法定章节
-    # 由 ``outline_checkpoint`` 单一出口按**审核侧同谓词**检查。
-    # ⚠️ 保留 ``settings.outline_checkpoint_check`` 开关（默认 True）：设 False
-    # 即完整回到本轮之前的门控与判据（可回退，不删代码）。
-    if OUTLINE_REVIEW_MODE != "always" and (
-            (requirements or basis is not None)
-            or getattr(settings, "outline_checkpoint_check", True)):
-        _covered, _missing = _check_requirements_coverage(
-            requirements, outline, is_dangerous, basis=basis)
-        # ✅ R73 根因 A：占位标题**检出闸门**。旧实现两条程序化早退都在
-        #    detect_generic_titles 之前 return，于是「填了编制要求 / 有方案解析」
-        #    的目录（长方案常态）里的「专项6」「总体实施策划（2）」从未被检出、
-        #    更从未被修，直接落库。现在：检出即**不得以 passed=True 早退**，
-        #    先走一次小调用标题重写；重写后仍脏 → 落回完整 AI 审核 + 修复链路。
-        _hits = _detect_generic_titles(outline)
-        if _hits:
-            logger.info("程序化预检出口检出 %d 处泛化/占位标题，闸门不得早退",
-                        len(_hits))
-        # ✅ R89 S5：重复标题同为早退闸门（AI 审核的「跨章重复」检查不能跳过）。
-        # 根因：`_level1_validate_fn` 只判 outline 非空 + title 非空 + 无 4 级，
-        # **不判重复标题**；模型回同名两章时早退直接 passed=True，重复章进成品，
-        # 而 failed_chapters 以**标题**为键（下方记账处），两章失败会同时高亮，
-        # 用户无从分辨。现在：有重复即不早退，落回完整 AI 审核链路（审核提示词
-        # 本就要求检查跨章重复）。
-        _dups = _detect_duplicate_titles(outline)
-        if _dups:
-            logger.info("程序化预检出口检出 %d 处重复标题，闸门不得早退", len(_dups))
-        # ⚠️ 早退仍**只在用户填了编制要求 / 提供了方案解析**时成立
-        #    （见 _check_requirements_coverage 末尾的说明）：否则会连带丢掉
-        #    AI 审核对标题质量 / 层级 / 跨章重复 / 投标章节的检查。
-        if not _missing and (requirements or basis is not None):
-            if not _hits and not _dups:
-                logger.info("程序化覆盖预检全过，跳过 AI 审核（省 1~2 次调用）")
-                return outline, {"passed": True, "review_mode": "programmatic",
-                                 "suggestions": ["✅ 程序化预检：编制要求与危大必备"
-                                                 "章节均已覆盖，跳过 AI 审核"]}
-            # 脏目录：先试外科式标题重写（1 次小调用，结构零风险）
-            _titled = await _try_outline_title_fix(
-                outline, _hits, scheme_name=scheme_name, scheme_type=scheme_type,
-                project_brief=project_brief, project_facts=project_facts,
-                construction_scope=construction_scope, requirements=requirements,
-                scheme_basis=scheme_basis, standards_text=standards_text,
-                _collect=collect_json_response, _render=render)
-            if _titled is not None and not _detect_generic_titles(_titled):
-                # ✅ R73b F6：改名后必须回头复检覆盖。旧实现只复检「标题脏不脏」，
-                #    不复检「要求还盖不盖得住」—— 占位标题曾顶住的那条要求会在这
-                #    一步静默失去落点，而出口仍以 passed=True 宣称通过。
-                _covered2, _new_missing = _coverage_recheck(
-                    requirements, _titled, is_dangerous, basis)
-                if not _covered2 and _new_missing:
-                    outline = _titled
-                    _missing = _new_missing
-                    logger.info("占位标题已重写（%d 处），但覆盖出现新缺口 %d 项，"
-                                "不得早退，转入补齐/审核链路：%s",
-                                len(_hits), len(_new_missing), _new_missing[:5])
-                else:
-                    logger.info("占位标题已外科式重写（%d 处），出口干净", len(_hits))
-                    return _titled, {
-                        "passed": True, "review_mode": f"programmatic+{_TITLE_FIXED_MODE_SUFFIX}",
-                        "suggestions": [
-                            f"✅ 程序化预检：必备章节均已覆盖；已将 {len(_hits)} 处"
-                            f"泛化/占位标题重写为具体标题"]}
-            # 重写不可用 / 仍有残留 → 不早退，落回完整 AI 审核链路
-        if requirements or is_dangerous or basis is not None or (
-                getattr(settings, "outline_checkpoint_check", True)):
-            _notify("fix")
-            _patched = await _try_outline_patch(
-                outline, _missing, scheme_name=scheme_name,
-                scheme_type=scheme_type, project_brief=project_brief,
-                project_facts=project_facts) if _missing else None
-            if _patched:
-                # ✅ R73 根因 A（第二条早退）：补齐后的目录仍可能带占位标题，
-                #    旧实现直接以 passed=True 返回 → 同样从未被检出。先重写再判出口。
-                _p_hits = _detect_generic_titles(_patched)
-                _p_titled = _patched
-                if not _p_hits:
-                    _p_missing: list[str] = []
-                else:
-                    _titled2 = await _try_outline_title_fix(
-                        _patched, _p_hits, scheme_name=scheme_name,
-                        scheme_type=scheme_type, project_brief=project_brief,
-                        project_facts=project_facts,
-                        construction_scope=construction_scope, requirements=requirements,
-                        scheme_basis=scheme_basis, standards_text=standards_text,
-                        _collect=collect_json_response, _render=render)
-                    if _titled2 is not None and not _detect_generic_titles(_titled2):
-                        _p_titled = _titled2
-                        _p_missing = []
-                    else:
-                        # 仍有残留：带着补齐成果落回完整 AI 审核（不丢已补的章）
-                        outline = _patched
-                        logger.info("外科补齐后仍残留占位标题，转入完整 AI 审核链路")
-                        _p_missing = None
-                if _p_missing is not None:
-                    # ✅ R73b F6/F7：补齐与改名都动过标题集，出口前回头复检。
-                    #    旧实现只看「补齐调用有没有产出」，从不验证产出是否真盖住了
-                    #    missing —— 模型回一章无关内容就能骗到「✅ 已外科式补齐 N 项」。
-                    _cov_ok, _still_missing = _coverage_recheck(
-                        requirements, _p_titled, is_dangerous, basis)
-                    if not _cov_ok and _still_missing:
-                        outline = _p_titled
-                        _missing = _still_missing
-                        logger.info("外科补齐后仍有 %d 项未真正覆盖，不得以程序化"
-                                    "出口宣称通过，转入 AI 审核：%s",
-                                    len(_still_missing), _still_missing[:5])
-                    elif _p_hits:
-                        logger.info("外科补齐 %d 项 + 占位标题重写 %d 处均完成且复检通过",
-                                    len(_missing), len(_p_hits))
-                        return _p_titled, {
-                            "passed": True,
-                            "review_mode": (f"programmatic+surgical"
-                                            f"+{_TITLE_FIXED_MODE_SUFFIX}"),
-                            "suggestions": [
-                                f"✅ 已外科式补齐 {len(_missing)} 项缺失"
-                                f"（{'；'.join(_missing[:5])}），"
-                                f"并将 {len(_p_hits)} 处泛化/占位标题重写为具体标题"]}
-                    else:
-                        logger.info("外科式补齐完成（缺失 %d 项）且复检通过", len(_missing))
-                        return _p_titled, {
-                            "passed": True, "review_mode": "programmatic+surgical",
-                            "suggestions": [
-                                f"✅ 已按程序化预检外科式补齐 {len(_missing)} 项缺失"
-                                f"（{'；'.join(_missing[:5])}）"]}
-            # 补齐失败 → 落回完整 AI 审核链路（不写 review_mode，
-            # 前端据此判断「审核依据仍是 AI 审核结论」）
-    # 说明（✅ 2026-10-02 已更新）：程序化预检的**触发门控**已放宽 ——
-    #   「编制要求」为空时，九大法定章节检查（outline_checkpoint 单一出口）
-    #   仍会执行，因预检 check_completeness 对 CMP-01~09 是无条件检查。
-    #   「编制要求」本身无内容时其条目检查自然为空，不产生额外判定。
-    #   关闭 settings.outline_checkpoint_check 即完整回到旧门控与旧判据。
-
-    review_prompt = render("outline_review_system",
-                           scheme_name=scheme_name,
-                           scheme_type=scheme_type,
-                           # ✅ 必须传 construction_scope / scheme_basis：
-                           #    模板含这两个占位符，未传时**字面量 {scheme_basis} 会
-                           #    残留进发给模型的提示词** —— 模型要么把它当正文、
-                           #    要么按未知变量编造内容，审核结论随之失真。
-                           #    2026-09-26：两者改为**不同来源**（施工内容清单 /
-                           #    方案名称解析区块），不再同值双注入。
-                           construction_scope=construction_scope,
-                           scheme_basis=scheme_basis,
-                           is_dangerous="是" if is_dangerous else "否",
-                           # ✅ R38 D4：审核链路**有意不截断**事实（只读核对，
-                           #    事实越全审得越准；与生成侧预算解耦，勿顺手对齐）
-                           project_facts=project_facts or "",
-                           outline_json=json.dumps(_outline_skeleton(outline), ensure_ascii=False),
-                           # NOTE(R38 D5): MUST be the review variant, not the shared one --
-                           # the "8.1 audit against the checklist" instruction has to live and
-                           # die with the checklist block. With the shared variant, turning
-                           # outline_checkpoint_check off leaves a dangling reference to a
-                           # checklist that is not in the prompt at all.
-                           **_outline_review_checkpoint_kwargs(
-                               scheme_name, scheme_type, is_dangerous))
-    # ✅ 编制要求覆盖检查（对齐 OpenBidKit score-planning 的「评分大项必须映射为目录分支」）：
-    #    用户在方案设置里填写的编制要求/评审要点，逐条对应目录章节；缺失即审核不通过。
-    if requirements:
-        review_prompt += (
-            "\n\n【编制要求覆盖检查（最高优先级）】目录必须逐条覆盖以下编制要求；"
-            "任何一条在目录中没有对应章节（或仅含糊带过），即判 passed=false，"
-            "并在 suggestions 中逐条列出缺失项及建议补充的章节：\n" + requirements)
-    # ✅ BUG 修复（2026-10-04）：outline_review_system 第 10 条把「合并修复输出」
-    #    的触发条件写成"调用方在追加指令中要求合并修复"，但本调用方此前从未
-    #    追加任何要求合并修复的指令，导致模型永远不输出 fixed_outline，第 10 条
-    #    的合并快路径形同虚设。此处补上显式触发指令，让第 3581 行的合并修复
-    #    分支有机会命中，从而省下一轮独立修复调用（OUTLINE_FIX_TIMEOUT 的 120s）。
-    review_prompt += (
-        "\n\n【合并修复】本次调用要求合并修复：若判定 passed=false，"
-        "请务必在同一 JSON 中额外输出 \"fixed_outline\" 字段（按 suggestions "
-        "修正后的完整三级目录数组，节点 description 保持原文不要改写）；"
-        "passed=true 时不要输出 fixed_outline。")
-    _notify("review")
-    try:
-        review_obj, _ = await asyncio.wait_for(
-            collect_json_response(
-                [{"role": "system", "content": review_prompt}],
-                lambda o: [] if "passed" in o else ["缺少 passed 字段"],
-                json_mode=True, temperature=0.2, scene="outline_review",
-                repair_key=OUTLINE_REPAIR_KEY,
-                max_tokens=OUTLINE_REVIEW_MAX_TOKENS),
-            timeout=OUTLINE_REVIEW_TIMEOUT)
-    except asyncio.TimeoutError:
-        logger.warning("目录审核超时（%ds），跳过审核直接完成（scheme=%s）",
-                       OUTLINE_REVIEW_TIMEOUT, scheme_name)
-        review_obj = {"passed": True, "suggestions": ["审核超时已跳过"]}
-    except Exception as e:
-        logger.warning("目录审核失败（scheme=%s）: %s，跳过审核直接完成", scheme_name, e)
-        review_obj = {"passed": True, "suggestions": [f"审核失败: {e}"]}
-
-    if not isinstance(review_obj, dict):
-        # 弱模型可能把审核结果写成顶层数组/裸值，兜底避免后续 .get 抛 AttributeError
-        review_obj = {"passed": True, "suggestions": ["审核结果结构异常，已跳过"]}
-    # ✅ BUG 修复：统一把 passed / suggestions 归一化为 bool / list[str]
-    #（字符串 "false" 不再被当作通过；字符串 suggestions 不再被按字符拆分）
-    suggestions = _coerce_suggestions(review_obj.get("suggestions"))
-    # ✅ 2026-10-10（目录占位/泛化标题收口）：AI 审核可能漏报泛化占位标题与
-    #    「（N）」编号冲突后缀（生产实证「专项6」「总体实施策划（2）」）。
-    #    ✅ R73 加强：先试**外科式标题重写**（只送占位节点 + 上下文，结构零风险）；
-    #    重写干净则不强迫走「整份重写」（长方案下极易被退化护栏拒绕而「保留原目录」）；
-    #    仍有残留才追加针对性修复建议并强制进入修复链路。
-    _generic_hits = _detect_generic_titles(outline)
-    if _generic_hits:
-        _titled3 = await _try_outline_title_fix(
-            outline, _generic_hits, scheme_name=scheme_name,
-            scheme_type=scheme_type, project_brief=project_brief,
-            project_facts=project_facts,
-            construction_scope=construction_scope, requirements=requirements,
-            scheme_basis=scheme_basis, standards_text=standards_text,
-            _collect=collect_json_response, _render=render)
-        if _titled3 is not None:
-            outline = _titled3
-            _still = _detect_generic_titles(outline)
-            if not _still:
-                logger.info("占位标题已由外科式重写全部修正（%d 处）",
-                            len(_generic_hits))
-                _generic_hits = []
-            else:
-                _generic_hits = _still
-    if _generic_hits:
-        _generic_sugg = [
-            f"标题「{g['title']}」（路径{g['path']}，类型{g['kind']}）为泛化/占位名称"
-            f"或带（N）编号冲突后缀，请改为具体到施工对象/部位/工序的真实标题，"
-            f"并去除（N）类后缀"
-            for g in _generic_hits[:12]
-        ]
-        suggestions = suggestions + _generic_sugg
-        review_obj["passed"] = False
-        logger.info("目录检出 %d 处泛化/占位标题，强制进入修复链路", len(_generic_hits))
-    # ✅ 审核判定收紧（原实现 default=True 语义过宽）：
-    #    模型漏填 passed 时，旧逻辑一律「视为通过」→ 审核形同虚设。
-    #    现区分三种情形：
-    #      - passed 缺失且给出了具体建议 → 按不通过处理（修复有明确输入）；
-    #      - passed 缺失且无任何建议 → 视为通过（避免无依据地空跑一轮修复）；
-    #      - passed 存在 → 按 _coerce_bool 归一化（"false"/"否"/0 等均判不通过）。
-    _passed_raw = review_obj.get("passed")
-    if _passed_raw is None:
-        needs_fix = bool(suggestions)
-    else:
-        needs_fix = not _coerce_bool(_passed_raw, default=True)
-
-    if needs_fix and not suggestions:
-        # 判不通过却没给建议：旧实现直接静默跳过修复，用户拿到未修正的目录
-        # 且看不到任何原因。这里补一条兜底建议，让修复轮有输入、日志有归因。
-        suggestions = ["审核判定目录未通过但未给出具体建议，请按编制要求与危大工程规范补齐必要章节"]
-        logger.info("目录审核判不通过但未给出建议，已注入兜底修复建议")
-
-    if needs_fix:
-        _notify("fix")
-
-        # ---------- A：审核 + 修复合并（省 1 次大调用） ----------
-        # 审核提示词第 10 条已要求模型在 passed=false 时同轮输出 fixed_outline。
-        # 采用条件（三者全满足，缺一即回退独立修复调用）：
-        #   ① 结构合法（_outline_fix_validate_fn）；
-        #   ② 未退化（节点覆盖率 ≥ OUTLINE_FIX_MIN_COVERAGE）；
-        #   ③ 描述可还原（模型回传的是 60 字截断骨架版，须恢复原文）。
-        # 弱模型常只回一个"示例结构"，直接整份替换会把用户几十章目录换成
-        # 三章（正文随之全丢）—— 这是最危险的失败模式，故宁可不合并。
-        _merged_fixed = review_obj.get("fixed_outline")
-        if isinstance(_merged_fixed, list) and _merged_fixed:
-            _issues = _outline_fix_validate_fn({"outline": _merged_fixed})
-            if not _issues and _outline_fix_looks_degraded(outline, _merged_fixed):
-                _issues = [
-                    f"审核轮合并修复结果节点数异常（{_count_nodes(_merged_fixed)}"
-                    f" < 原目录 {_count_nodes(outline)} 的 "
-                    f"{int(OUTLINE_FIX_MIN_COVERAGE * 100)}%）"]
-            if not _issues:
-                # ✅ 恢复原描述：审核输入是 _outline_skeleton 截断版，
-                # 模型回传的 description 同样是截断的；按 (id, title) 回填原文。
-                _restore_descriptions(outline, _merged_fixed)
-                outline = normalize_outline(_merged_fixed)
-                # ✅ R73 根因 B：修复采用后**必须复检**。旧实现无条件置 passed=True
-                #    并声称「已自动修复」，而弱模型的 fixed_outline 常照旧把占位标题
-                #    原样回吐 ⇒ 结论与日志都不准。残留时如实置 False + 给可核对警告。
-                _residual = _detect_generic_titles(outline)
-                review_obj["generic_residual"] = len(_residual)
-                review_obj["passed"] = not _residual
-                if _residual:
-                    suggestions = (_residual_generic_notice(_residual)
-                                   + suggestions)
-                    logger.warning("审核轮合并修复后仍残留 %d 处占位标题（不判通过）",
-                                   len(_residual))
-                else:
-                    suggestions = (["✅ 已根据审核意见自动修复（审核轮合并输出）"]
-                                   + suggestions)
-                review_obj["suggestions"] = suggestions
-                return outline, review_obj
-            logger.warning("审核轮合并修复结果不可用，回退独立修复调用（scheme=%s）: %s",
-                           scheme_name, _issues[:2])
-
-        async def _do_fix():
-            # ✅ 统一提示词源：消费注册条目 outline_feedback_system（旧内联版与注册条目双份漂移，
-            # 前端编辑该条目永不生效）
-            # ✅ 修复（2026-09-16）：原来传入 json.dumps(outline) 完整目录（含
-            #    id/level/空 children/长描述，长方案可超 10 万字符），必然超上下文
-            #    或超时 ⇒ 修复轮整轮空转。改用 _compact_outline_json 压缩（同语义、
-            #    字符量约降 60%），并记日志便于排查。命中路径由 json 保持合法。
-            _orig_json = _compact_outline_json(outline)
-            logger.info("目录修复轮输入：原目录 %d 节点 / 压缩后 %d 字符",
-                        _count_nodes(outline), len(_orig_json))
-            fix_prompt = render("outline_feedback_system",
-                                original_outline=_orig_json,
-                                review_suggestions="; ".join(suggestions),
-                                scheme_name=scheme_name,
-                                scheme_type=scheme_type,
-                                project_brief=(project_brief or "")[:1500],
-                                project_facts=(project_facts or "")[:PROJECT_FACTS_LIMIT_OUTLINE])
-            return await collect_json_response(
-                [{"role": "system", "content": fix_prompt}],
-                _outline_fix_validate_fn,
-                json_mode=True, temperature=0.2, scene="outline_fix",
-                repair_key=OUTLINE_REPAIR_KEY,
-                max_tokens=OUTLINE_FIX_MAX_TOKENS)
-
-        try:
-            fix_obj, _ = await asyncio.wait_for(_do_fix(), timeout=OUTLINE_FIX_TIMEOUT)
-            fixed_outline = fix_obj.get("outline", []) if isinstance(fix_obj, dict) else []
-            if not isinstance(fixed_outline, list):
-                fixed_outline = []
-            # ✅ BUG 修复：修复结果只做"结构性"校验（strict_depth=False），
-            # 且节点上限放宽到 OUTLINE_FIX_MAX_NODES —— 修复轮输入/输出都是
-            # 完整目录，长方案极易超过生成链路的 500 节点上限，沿用旧校验会把
-            # 修复结果整份丢弃、"按审核建议修复"空转。
-            validation_issues = _outline_fix_validate_fn({"outline": fixed_outline})
-            # ✅ 修复（2026-09-16）：结构合法 ≠ 结果可用。弱模型常只回一个"示例
-            #    结构"，旧实现会把它整份替换掉用户几十章的目录（正文生成的章节
-            #    随之全丢）。这里追加节点覆盖率下限判定。
-            if not validation_issues and _outline_fix_looks_degraded(outline, fixed_outline):
-                validation_issues = [
-                    f"修复结果节点数异常（{_count_nodes(fixed_outline)} < "
-                    f"原目录 {_count_nodes(outline)} 的 {int(OUTLINE_FIX_MIN_COVERAGE * 100)}%）"
-                ]
-            if validation_issues:
-                logger.warning("修复后目录校验仍不通过: %s", validation_issues[:3])
-                suggestions = suggestions + ["修复后校验仍不通过，保留原目录"]
-            else:
-                # 修复结果落库前统一裁剪到三级 + 重排编号，与主链路保持一致
-                outline = normalize_outline(fixed_outline)
-                # ✅ R73 根因 B（独立修复轮同样复检）
-                _residual2 = _detect_generic_titles(outline)
-                review_obj["generic_residual"] = len(_residual2)
-                review_obj["passed"] = not _residual2
-                # ✅ 保留原始审核建议（追加而非覆盖）：前端「审核结论」区块要展示
-                #    本轮到底按哪些建议改的，旧实现直接替换成一句话，审核依据丢失。
-                if _residual2:
-                    suggestions = (_residual_generic_notice(_residual2)
-                                   + suggestions)
-                    logger.warning("独立修复轮后仍残留 %d 处占位标题（不判通过）",
-                                   len(_residual2))
-                else:
-                    suggestions = ["✅ 已根据审核意见自动修复"] + suggestions
-        except asyncio.TimeoutError:
-            logger.warning("目录自动修复超时（%ds），跳过修复保留原目录（scheme=%s）",
-                           OUTLINE_FIX_TIMEOUT, scheme_name)
-            suggestions = suggestions + ["自动修复超时，保留原目录"]
-        except Exception as e:
-            logger.warning("目录自动修复失败（scheme=%s）: %s，保留原目录", scheme_name, e)
-            suggestions = suggestions + [f"自动修复失败: {e}"]
-
-    # 统一回写为 list[str]，保证下游（SSE payload / 前端）拿到的形态稳定
-    review_obj["suggestions"] = suggestions
-    # ✅ R73：未走修复采用的出口同样给一个稳定的残留读数（前端/护栏可消费）
-    review_obj.setdefault("generic_residual",
-                          len(_detect_generic_titles(outline)))
-    return outline, review_obj
-
-
-# ---------- 目录生成 ----------
-
-async def _build_structured_brief(db, project_id: str, raw_brief: str,
-                                  max_chars: int = 4000, basis=None) -> str:
-    """构建目录生成用的「项目摘要」：优先消费结构化提取成果，回退原始摘录。
-
-    数据来源：bid_analysis_items（「结构化提取」18 项的 success 结果），
-    经 format_downstream_context 拼为结构化 Markdown；原始文档摘录作为
-    附录补充（截 800 字），保证未覆盖的信息仍可见。
-
-    ✅ 方案名称主线（basis，2026-09-27）：按与方案名称的相关性把相关小节前置
-    （_rank_sections_by_basis，只重排不删除）—— 4000 字预算下"相关项优先可见"。
-
-    ✅ 容错：结构化提取未跑过 / 表不存在 / 单条内容损坏时一律回退 raw_brief，
-    不影响目录生成主流程。
-    """
-    try:
-        cur = await db.execute(
-            "SELECT item_id, label, output_type, content FROM bid_analysis_items "
-            "WHERE project_id=? AND status='success' AND content IS NOT NULL "
-            "AND content != ''", (project_id,))
-        rows = await cur.fetchall()
-        if not rows:
-            return raw_brief
-        from app.services.bid_analysis_service import (
-            format_downstream_context,
-            is_missing_result,
-        )
-        items: dict[str, dict] = {}
-        for r in rows:
-            content = r["content"] or ""
-            output_type = r["output_type"] or "markdown"
-            if is_missing_result(content, output_type):
-                continue
-            items[r["item_id"]] = {
-                "item_id": r["item_id"],
-                "label": r["label"] or r["item_id"],
-                "output_type": output_type,
-                "status": "success",
-                "content": content,
-            }
-        if not items:
-            return raw_brief
-        structured = format_downstream_context(items)
-        if not structured.strip():
-            return raw_brief
-        # ✅ 2026-09-27：按方案名称相关性前置小节（只重排不删除，见 _rank_sections_by_basis）
-        structured, _ranked = _rank_sections_by_basis(structured, basis)
-        # ✅ 边界感知截断（m4 · 2026-09-23）：按小节比例分配预算后再做
-        #    **边界感知**截断（truncate_to_boundary），不再硬切 —— 硬切会把
-        #    小节或 ``` 围栏切成两半，模型看到半截代码块会当成坏数据忽略。
-        from app.utils.text_splitter import truncate_to_boundary
-        structured, rep = _budgeted_truncate_sections(structured, max_chars)
-        structured = truncate_to_boundary(structured, max_chars)
-        if rep.get("truncated_sections"):
-            logger.info("结构化项目摘要按小节比例截断：%d/%d 小节被截（预算 %d 字）",
-                        rep["truncated_sections"], rep["sections"], max_chars)
-        appendix = f"\n\n【原始资料摘录】\n{raw_brief[:800]}" if raw_brief.strip() else ""
-        # ⚠️ 不得在此再做 `[:max_chars+900]` 硬切片 —— 那会把刚按比例
-        #    分配好的尾部小节再次砍掉（比例截断等于白做）。此处直接拼接。
-        return structured + appendix
-    except Exception:
-        logger.warning("结构化项目摘要构建失败，回退原始资料摘录", exc_info=True)
-        return raw_brief
-
-
-async def _outline_input_audit(db, project_id: str) -> str:
-    """目录生成的输入侧差集审计（只读，仅供日志/排查，不参与生成决策）。
-
-    返回已成功完成结构化提取的条目名（分号连接，截断 30 条）。
-    用途：用户报"目录漏了本该有的章节"时，可直接比对「提取到了什么」
-    与「目录写出了什么」，无需手工查库。
-    """
-    try:
-        cur = await db.execute(
-            "SELECT item_id, label, status FROM bid_analysis_items "
-            "WHERE project_id=? ORDER BY item_id", (project_id,))
-        rows = await cur.fetchall()
-        done = [str(r["label"] or r["item_id"]) for r in rows
-                if (r["status"] or "") == "success"]
-        return "；".join(done[:30])
-    except Exception:
-        logger.debug("目录输入差集审计读取失败（忽略）", exc_info=True)
-        return ""
-
-
-def _scheme_basis_obj(scheme: dict):
-    """方案名称解析对象（``scheme_basis.SchemeBasis``），失败降级为 None。
-
-    单点构建：相关性前置（_rank_*_by_basis）、全面性/冗余校验
-    （outline_quality）都消费**同一个**对象，避免各处重复解析口径漂移。
-    """
-    if not getattr(settings, "outline_name_basis", False):
-        return None
-    try:
-        from app.services.scheme_basis import parse_scheme_basis
-        return parse_scheme_basis(str(scheme.get("name") or ""))
-    except Exception:
-        logger.warning("方案名称解析对象构建失败（目录生成降级继续）", exc_info=True)
-        return None
-
-
-def _scheme_is_dangerous(scheme: dict) -> bool:
-    """是否危大工程：**schemes.type 下拉值命中** 或 **方案名称字面命中六大类危大**。
-
-    ✅ 2026-09-27（要求一/四）：旧实现只认 type 下拉值，而危大判定是目录生成
-    最强的结构性约束（必备 10 章 + 提示词"危大工程专项方案必须包含…"）。
-    用户新建方案时 type 常常停在默认「其它」，于是"深基坑支护专项方案"被
-    当成普通方案生成目录 → 缺计算书/监测方案/应急处置等必备章节。
-    config.outline_name_basis 的注释早已写明"type 命中 DANGEROUS_TYPES **或**
-    名称字面命中六大类危大"，此处补齐实现；type 命中仍然生效（行为只增不减），
-    关闭 outline_name_basis 时回退旧口径（纯 type），保持可关。
-    """
-    if str(scheme.get("type") or "") in DANGEROUS_TYPES:
-        return True
-    if not getattr(settings, "outline_name_basis", False):
-        return False
-    try:
-        from app.services.scheme_basis import parse_scheme_basis
-        return bool(parse_scheme_basis(str(scheme.get("name") or "")).is_dangerous)
-    except Exception:
-        logger.warning("方案名称危大判定失败（回退 type 口径）", exc_info=True)
-        return False
-
-
-def _outline_construction_scope(scheme: dict) -> str:
-    """方案名称 → 【方案名称主要施工内容】清单文本（章节划分的直接依据）。
-
-    ✅ BUG 修复（2026-09-26 · 目录生成提示词依据错位）：旧实现返回的是
-    ``scheme_basis.parse_scheme_basis().prompt_text()`` —— 那是一份含「方案类型 /
-    主要施工内容 / 施工工序 / 施工工艺 / 施工对象 / 危大分类」六个维度的**多行区块**，
-    被塞进标签为「主要施工内容」的变量里（标签与内容不符），并且与模板中的
-    ``{scheme_basis}`` 变量**内容完全重复**：审核提示词里同一段文字出现两次，
-    而生成提示词里 ``{scheme_basis}`` 因为从来没人传值被整行丢弃（见
-    _outline_scheme_basis）。现按变量本意拆分：本函数只产出「主要施工内容」清单
-    （services/scheme_scope 是唯一实现），其余维度由 _outline_scheme_basis 供给。
-
-    受 settings.outline_name_basis 控制（默认 True）。关闭 / 名称拆不出任何内容项时
-    返回空串，提示词对应占位符渲染为空 —— 与该开关引入前的行为逐字一致。
-    """
-    if not getattr(settings, "outline_name_basis", False):
-        return ""
-    try:
-        from app.services.scheme_scope import (
-            extract_construction_scope,
-            render_scope_for_prompt,
-        )
-        name = str(scheme.get("name") or "")
-        # 拆不出条目时返回空串（而非 render_scope_for_prompt 的兜底占位文案）：
-        # 保持「无内容 → 整段不注入」的既有语义，调用点的 `if construction_scope:`
-        # 分支才不会为占位文案额外拼一条 user 消息。
-        return render_scope_for_prompt(name) if extract_construction_scope(name) else ""
-    except Exception:
-        logger.warning("方案名称解析失败（目录生成降级继续）", exc_info=True)
-        return ""
-
-
-def _outline_scheme_basis(scheme: dict) -> str:
-    """方案名称确定性解析 → 提示词【方案名称解析】区块文本。
-
-    ✅ BUG 修复（2026-09-26 · 「配了不生效」类静默失效）：目录模板
-    outline_short_system / outline_level1_system / outline_review_system 自
-    2026-09-23「四项依据」改造起就声明了 ``{scheme_basis}``
-    （PROMPT_VARIABLE_CONTRACTS 已登记），但**两条生成链路从未传值** ——
-    render_prompt 对「整行独占占位符」按可选区块处理（未解析即整行丢弃），
-    于是发给模型的提示词里从来没有【方案名称解析】这一段，而模板 0.1 条款
-    （"若提供了【方案名称解析】（含方案类型/施工工序/施工工艺/施工对象），
-    则二级章节必须逐一落实其中列出的每一项施工工序与施工工艺…"）**永远不生效**，
-    每次目录生成还额外打一条 "unresolved placeholders: ['scheme_basis']" WARNING。
-    审核链路反而把 construction_scope 当 scheme_basis 传了同一份值（重复注入）。
-    现补齐生成侧注入、审核侧改用本函数，三处口径统一。
-
-    同样受 settings.outline_name_basis 控制；无任何可解析维度时返回空串 =
-    整段不注入（保持「信息不足时不得编造」红线）。
-    """
-    if not getattr(settings, "outline_name_basis", False):
-        return ""
-    try:
-        from app.services.scheme_basis import parse_scheme_basis
-        text = str(parse_scheme_basis(
-            str(scheme.get("name") or "")).prompt_text() or "").strip()
-    except Exception:
-        logger.warning("方案名称解析（scheme_basis）构建失败（目录生成降级继续）",
-                       exc_info=True)
-        return ""
-    if not text:
-        return ""
-    # ✅ P1-3（2026-09-27 · 补齐遗留项）：把**标准章节模板**注入提示词。
-    #    `outline_templates` 有 24 套标准章节模板（match_template/_TEMPLATE_NAMES），
-    #    `parse_scheme_basis` 也已解析出 `template_key`，但此前**从未进入提示词** ——
-    #    目录骨架完全依赖模板里硬编码的九大章节列表，模板能力形同虚设。
-    #    受 settings.outline_template_inject 控制（默认 True = 生效；
-    #    关闭即回退到"只用通用骨架"的修复前行为）。
-    if getattr(settings, "outline_template_inject", True):
-        try:
-            from app.services.outline_templates import _TEMPLATE_NAMES
-            key = parse_scheme_basis(str(scheme.get("name") or "")).template_key
-            tname = str(_TEMPLATE_NAMES.get(key) or "").strip()
-            if tname:
-                text += f"\n标准章节模板：{tname}（其章节骨架为通用九大章节结构的"\
-                        f"专项变体，优先于通用骨架；缺失的专项子节用名称解析的工序/工艺/对象补齐）"
-        except Exception:
-            logger.debug("标准章节模板注入失败（降级为仅通用骨架）", exc_info=True)
-    return ("【方案名称解析（按方案名称字面确定性拆解，章节划分与三级标题须逐项落实，"
-            "不得虚构名称之外的内容）】：\n" + text)
-
-
-def _outline_standards_text(scheme: dict) -> str:
-    """按方案类别匹配的编制依据规范文本（供提示词引用，防杜撰编号）。
-
-    受 settings.outline_standards_inject 控制（默认 True）；关闭或异常时
-    返回空串，提示词对应占位符渲染为空。
-    """
-    if not getattr(settings, "outline_standards_inject", False):
-        return ""
-    try:
-        return get_standards_text(
-            str(scheme.get("type") or ""), str(scheme.get("name") or ""))
-    except Exception:
-        logger.warning("编制依据规范构建失败（目录生成降级继续）", exc_info=True)
-        return ""
-
-
-async def _register_task_exclusive(
-    kind: str, project_id: str, scheme_id: str, conflict_types: tuple = (),
-) -> tuple[str | None, "TaskTypeConflict | None"]:
-    """注册任务并把跨类型互斥冲突转成返回值（F5 · 2026-10-05）。
-
-    跨类型互斥的**判定**在 ``task_registry.register_task`` 的 ``_register_lock``
-    内完成（锁内、本任务 INSERT 之后），这里只负责把 ``TaskTypeConflict`` 变成
-    调用方可用的 ``(None, exc)`` 二元组 —— 这样两个 SSE 生成器的
-    ``event_stream`` 里**不会新增 try 块**：既有静态护栏要求「进度/计数器等
-    预初始化必须在外层 try 之前」，在 event_stream 头部插 try 会把该护栏
-    锚定的「第一个 try」顶掉（2026-10-05 全量跑当场抓到 3 例）。
-    """
-    try:
-        return await register_task(kind, project_id, scheme_id,
-                                   conflict_types=conflict_types), None
-    except TaskTypeConflict as tc:
-        return None, tc
-
-
-def _stream_end_guard(holder: dict):
-    """生成 :func:`with_heartbeat` 的 ``on_end`` 同步回调（R106 FIX-6）。
-
-    ``holder["task_id"]`` 由各链的 ``event_stream`` 在注册成功后写入。SSE 泵
-    结束时（正常完成 / 客户端断开 / 取消风暴）本回调在 with_heartbeat 的
-    finally 里被**同步**调用 —— 同步代码不受协程取消影响，一定会执行；而生成器
-    自己的落终态收尾（checkpoint → finish_task）是一串 await，实测会被取消风暴
-    打断，留下「内存 running、无人可清」的僵尸（活体 E2E · task=b3dc5ae0…）。
-    交给 task_registry.mark_stream_ended 宽限回收：正常收尾仍优先，到期仍在
-    running 才回收，语义与 event_stream finally 既有的「客户端断开，任务已终止」
-    一致。回调自身抛异常只记 WARNING，绝不干扰流收尾。
-    """
-    def _on_end():
-        tid = holder.get("task_id")
-        if not tid:
-            return
-        try:
-            _tr.mark_stream_ended(tid)
-        except Exception:
-            logger.warning("mark_stream_ended 调用失败（task=%s）", tid, exc_info=True)
-    return _on_end
-
-
-
 @router.post("/generate-outline/{scheme_id}")
 async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db)):
     # ⚠️ 404 校验必须留在路由体（HTTP 状态语义，前端与既有测试都依赖它）。
@@ -3649,6 +670,7 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
     #    或反过来正文落库时章节 id 已被替换，图表登记挂到旧 id。
     from app.routers.sections import (
         content_generation_in_progress,
+        facts_generation_in_progress,
         outline_generation_in_progress,
     )
     _og = outline_generation_in_progress(scheme_id)
@@ -3661,6 +683,18 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
         from fastapi import HTTPException as _HE
         logger.warning("generate_outline 409 冲突：scheme_id=%s 已有正文生成任务在跑（跨类型互斥）", scheme_id)
         raise _HE(409, "本方案正文正在后台生成中，需等正文生成完成后再触发目录生成（否则重建目录会覆盖已写正文）")
+    # ✅ R166（2026-11-03 · 三链互斥对称化）：事实链注册时就声明与目录/正文互斥，
+    #    但目录/正文此前不反向避让事实提取 —— persist_extraction 是「DELETE 未
+    #    保护行 + INSERT 新行」的作用域重写，目录/正文在重写窗内读 global_facts
+    #    会拿到新旧混杂的快照，且 facts_updated_at 推进会让刚生成的成果立刻被
+    #    标「事实已过期」。事实链入口注释自称「与目录/正文对称」，此处补齐对称面。
+    _fg2 = facts_generation_in_progress(scheme_id)
+    if _fg2:
+        from fastapi import HTTPException as _HE
+        logger.warning(
+            "generate_outline 409 冲突：scheme_id=%s 已有事实提取任务在跑（跨类型互斥）", scheme_id)
+        raise _HE(409, "本方案事实提取正在后台进行中，需等提取完成后再生成目录"
+                       "（否则目录将使用新旧混杂的事实快照；可在任务面板停止提取后再试）")
     scheme = dict(scheme)
     project_id = scheme["project_id"]
     project: dict = {}
@@ -3880,7 +914,8 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
         #    两路同时 running 会让「目录整表重建」与「正文逐章 UPDATE」并发。
         #    判定已下沉到 register_task 的 _register_lock 内，这里只消费结果。
         task_id, _conflict = await _register_task_exclusive(
-            "outline_generation", project_id, scheme_id, ("content_generation",))
+            "outline_generation", project_id, scheme_id,
+            ("content_generation", "facts_generation"))
         if _conflict is not None:
             _msg = "本方案正文正在后台生成中，需等正文生成完成后再触发目录生成（否则目录重建会覆盖正文）"
             logger.warning("generate_outline 跨类型互斥（注册期二次判定）：scheme_id=%s", scheme_id)
@@ -3933,7 +968,8 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                 try:
                     await update_task_stats(task_id, **_snapshot_outline_stats(_prog))
                 except Exception:
-                    pass
+                    logger.debug("目录生成运行统计推送失败（不影响生成 · task=%s）", task_id,
+                                 exc_info=True)
 
             async def _set_phase(phase: str, msg: str, *, force: float | None = None,
                                  extra: dict | None = None) -> str:
@@ -4764,6 +1800,7 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
     #    任一类型的任务在跑（running/paused）即 409 拒绝重入。
     from app.routers.sections import (
         content_generation_in_progress,
+        facts_generation_in_progress,
         outline_generation_in_progress,
     )
     _cg = content_generation_in_progress(scheme_id)
@@ -4776,6 +1813,18 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
         from fastapi import HTTPException as _HE
         logger.warning("generate_content 409 冲突：scheme_id=%s 已有目录生成任务在跑（跨类型互斥）", scheme_id)
         raise _HE(409, "本方案目录正在后台生成中，需等目录生成完成后再触发正文生成（否则正文会被目录重建覆盖）")
+    # ✅ R166（2026-11-03 · 三链互斥对称化）：与 generate_outline 同口径 ——
+    #    正文逐章注入的事实来自 _load_facts_rows 快照，事实提取中途重写
+    #    global_facts 会让后生成的章节用到与先生成章节不同的事实集，
+    #    全文口径自相矛盾；且生成后事实修复链（content_fact_autofix）按
+    #    终态事实回灌，与注入期快照错位。事实提取在跑即 409。
+    _fg3 = facts_generation_in_progress(scheme_id)
+    if _fg3:
+        from fastapi import HTTPException as _HE
+        logger.warning(
+            "generate_content 409 冲突：scheme_id=%s 已有事实提取任务在跑（跨类型互斥）", scheme_id)
+        raise _HE(409, "本方案事实提取正在后台进行中，需等提取完成后再生成正文"
+                       "（否则正文将使用新旧混杂的事实快照；可在任务面板停止提取后再试）")
     scheme = dict(row)
     project_id = scheme["project_id"]
 
@@ -4821,7 +1870,8 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
         #    pre-guard（上方 outline_generation_in_progress）与本注册之间存在
         #    await 窗口，判定下沉到 register_task 的 _register_lock 内。
         task_id, _conflict = await _register_task_exclusive(
-            "content_generation", project_id, scheme_id, ("outline_generation",))
+            "content_generation", project_id, scheme_id,
+            ("outline_generation", "facts_generation"))
         _content_holder["task_id"] = task_id
         if _conflict is not None:
             _msg = "本方案目录正在后台生成中，需等目录生成完成后再触发正文生成（否则正文会被目录重建覆盖）"
@@ -5495,7 +2545,8 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 try:
                     await update_task_stats(task_id, **_snapshot_stats(_prog))
                 except Exception:
-                    pass
+                    logger.debug("正文生成运行统计推送失败（不影响生成 · task=%s）", task_id,
+                                 exc_info=True)
 
             def _progress_now() -> float:
                 """折算当前加权进度并过「不可回退」护栏（返回并记录历史最大值）。"""
@@ -5670,7 +2721,8 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                             "章节 %s 疑似引用已废止标准：%s",
                             section_id[:8], _issues["abolished_standards"])
                 except Exception:
-                    pass
+                    logger.debug("章节 %s 生成后质量审计失败（跳过，不影响落库）",
+                                 section_id[:8], exc_info=True)
                 # ✅ 内联图表（锁外计算）：修复成功用修复后代码写正文，修复失败删除坏块，
                 #    保证导出质量；enforce_limits=True = 程序级配图上限（每个 section_id
                 #    （叶子小节）≤1、同类型全方案限额，对齐 OpenBidKit 编排 Agent 的"程序拍板"）。
@@ -5860,7 +2912,8 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                         content, _chart_rows = resync_inline_chart_rows(
                                             scheme_id, section_id, content,
                                             enforce_limits=True,
-                                            scheme_type_counts=_type_counts)
+                                            scheme_type_counts=_type_counts,
+                                            dropped_out=_chart_dropped)
                                         wc = text_word_count(content)
                                         ws = word_status_for(wc, word_budget)
                                     except Exception:
@@ -6066,7 +3119,8 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         try:
                             report_json = json.dumps(report, ensure_ascii=False)
                         except Exception:
-                            pass
+                            logger.debug("章节 %s 报告 JSON 序列化失败（report_json 维持原值，"
+                                         "不阻断落库）", section_id[:8], exc_info=True)
 
                 # ---------- 锁内：最小事务（图表重登记 + 正文 UPDATE） ----------
                 async with _db_write_lock:
@@ -6091,7 +3145,10 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                 try:
                                     await db.rollback()
                                 except Exception:
-                                    pass
+                                    logger.debug(
+                                        "章节 %s 图表登记失败后的回滚也失败"
+                                        "（放弃清理，不影响正文落库）",
+                                        section_id[:8], exc_info=True)
                                 _chart_apply_failed = True
                                 logger.warning(
                                     "章节 %s 内联图表登记失败（重试预算耗尽），"
@@ -6138,7 +3195,10 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                 try:
                                     report_json = json.dumps(report, ensure_ascii=False)
                                 except Exception:
-                                    pass
+                                    logger.debug(
+                                        "章节 %s 报告 JSON 重算序列化失败"
+                                        "（report_json 维持原值，不阻断落库）",
+                                        section_id[:8], exc_info=True)
                                 if _chart_dropped:
                                     logger.info(
                                         "正文生成删除内联图表 %d 个（scheme=%s · task=%s · "
@@ -6210,7 +3270,9 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         try:
                             await db.rollback()
                         except Exception:
-                            pass
+                            logger.debug(
+                                "章节 %s 落库失败后的回滚也失败（原异常继续上抛）",
+                                section_id[:8], exc_info=True)
                         raise
                 done_ids.add(section_id)
                 generated_contents[section_id] = content
@@ -6279,10 +3341,18 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 if not mark_db:
                     return
                 async with _db_write_lock:
-                    await db.execute(
-                        "UPDATE sections SET status='failed', updated_at=? WHERE id=?",
-                        (datetime.now().isoformat(), section_id))
-                    await db.commit()
+                    # ✅ R169：与正文主落库（_persist_content_once）同族接
+                    #    retry_db_op——WAL 锁竞争窗口下本章失败标记裸写曾直接抛
+                    #    locked 逃出 gen_one（其 try 只兜 CancelledError），造成
+                    #    同章双份 section_error 与 stats/库状态漂移。单语句 UPDATE
+                    #    幂等可重放；确定性错误原样上抛走既有兜底。
+                    async def _mark_failed_once():
+                        await db.execute(
+                            "UPDATE sections SET status='failed', updated_at=? WHERE id=?",
+                            (datetime.now().isoformat(), section_id))
+                        await db.commit()
+                    await retry_db_op(_mark_failed_once,
+                                      max_retries=4, base_delay=0.1)
 
             async def _build_generation_context(leaf: dict,
                                                 eff_standard: str = "",
@@ -6499,9 +3569,10 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 if _plan_enabled and bool(getattr(settings, "content_plan_stage_enabled", False)):
                     try:
                         _k_pool = [str(r.get("name") or "") for r in knowledge_rows]
-                        # ⚠️ facts_rows 的行契约是 5 元组 (gt, title, content,
-                        #    confidence, chapter)（facts_builder._load_facts_rows 明写
-                        #    「必须投影回 5 元组，不得直接外泄」），不是 dict —— 用
+                        # ⚠️ facts_rows 的行契约是 6 元组 (gt, title, content,
+                        #    confidence, chapter, value_kind)（facts_builder.
+                        #    _load_facts_rows 自 R80 起投影 6 元组，不得直接外泄），
+                        #    不是 dict —— 用
                         #    .get() 会 AttributeError，被下方 fail-soft 吞掉后 D1 编排
                         #    阶段在每一章都静默空转（功能全灭、日志只有一条 WARNING）。
                         #    按 _row_chapter / _render_facts_text 同口径按下标取 title。
@@ -6617,18 +3688,32 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 #    plain）按分支至多命中一组，丢弃标题合并去重。只进闭包容器：
                 #    终态汇总进 checkpoint 载荷，_persist_section 合并进报告
                 #    fact_audit 键。留痕失败绝不阻断生成（fail-soft）。
+                # ✅ R166（FIX-10 · 审计精确化）：injected_facts 改取三段审计的
+                #    injected_titles 并集（渲染器逐条留痕的**实际下发集合**）——
+                #    旧口径取 _filter_facts_rows 预筛结果，与「core 通用组 + rest
+                #    逐章精选」的分段下发不同源（把未下发的行也记成已注入）。
+                #    _sec_facts 保留原判据，供续写/扩写轮 fact_rows_for_section 使用。
                 try:
                     _audit_group = tuple(_au for _au in
                                          (_core_audit, _chapter_audit, _plain_audit)
                                          if _au)
                     _drop_titles: list[str] = []
+                    _injected_facts: list[str] = []
                     for _au in _audit_group:
                         for _t in _au.get("budget_dropped") or []:
                             if _t not in _drop_titles:
                                 _drop_titles.append(_t)
+                        for _t in _au.get("injected_titles") or []:
+                            _t = str(_t or "")
+                            if _t and _t not in _injected_facts:
+                                _injected_facts.append(_t)
+                    if not _audit_group:
+                        # 审计视图缺位（理论不可达：三段审计必有一段）→ 保留
+                        # 旧预筛口径兜底，绝不因留痕改造丢掉 injected_facts 键。
+                        _injected_facts = [str(r[1] or "") for r in (_sec_facts or [])
+                                           if str(r[1] or "")]
                     _fact_audit_by_leaf[str(leaf.get("id") or "")] = {
-                        "injected_facts": [str(r[1] or "") for r in (_sec_facts or [])
-                                           if str(r[1] or "")],
+                        "injected_facts": _injected_facts,
                         "rendered_chars": sum(int(_au.get("rendered_chars") or 0)
                                               for _au in _audit_group),
                         "budget_dropped": _drop_titles,
@@ -7023,7 +4108,13 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         #    逐章精选事实/标准清单/目标字数）。旧实现传空 user_content，
                         #    续写消息里出现空 user 消息（部分 provider 直接 400 报错），
                         #    且续写缺少事实与同级信息，易与全文口径不一致。
-                        _eff_std_c, _sec_facts, _, user_content, _ = await _build_generation_context(
+                        # ✅ R167（BUG 修复）：续写分支同样绑定 _plan_json ——
+                        #    落库点 plan_json=_plan_json 为两种模式共用，该名字在
+                        #    gen_one 内有赋值即为局部变量，continue 路径不绑定就在
+                        #    落库点抛 UnboundLocalError（自 R70 透传引入起续写本章
+                        #    100% 失败）。_plan_enabled=False ⇒ 恒为空串，
+                        #    CASE WHEN 保留原列语义不变。
+                        _eff_std_c, _sec_facts, _, user_content, _plan_json = await _build_generation_context(
                             leaf, _eff_std, _plan_enabled=False)
                         result, cont_failed = await _continue_if_needed(
                             result, leaf, user_content, title, min_passes=1,
@@ -7222,7 +4313,9 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                 # 旧正文与旧状态），空章 → mark_db=True（打成 failed）。
                                 mark_db=not (leaf.get("content") or "").strip())
                         except Exception:
-                            pass
+                            logger.debug(
+                                "章节 %s 取消后失败标记写入失败（不影响取消流程）",
+                                leaf_id, exc_info=True)
                     raise
 
             # 统一事件队列：所有事件（章节级别 + 总进度 + 终态）都 push 到这里
@@ -7309,7 +4402,9 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                 leaf_id, title, _reason,
                                 mark_db=not (leaf.get("content") or "").strip())
                         except Exception:
-                            pass
+                            logger.warning(
+                                "章节 %s 失败标记/错误事件写入失败"
+                                "（失败计数与库内状态可能不一致）", leaf_id, exc_info=True)
                     finally:
                         # ✅ 进度增强：章节结束（成功 / 失败 / 取消）后移出「进行中」
                         #    集合，否则被取消或异常终止的章节会永久留在统计里。
@@ -7462,7 +4557,9 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                             try:
                                 await _update_progress_safe(_p, message)
                             except Exception:
-                                pass
+                                logger.debug(
+                                    "一致性扫描进度更新失败（不影响扫描 · task=%s）",
+                                    task_id, exc_info=True)
 
                         async def _repair_cb(done: int, total: int, message: str):
                             # ✅ 进度增强：定向修复阶段映射到 [0.98, 1.0]
@@ -7473,7 +4570,9 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                             try:
                                 await _update_progress_safe(_p, message)
                             except Exception:
-                                pass
+                                logger.debug(
+                                    "一致性修复进度更新失败（不影响修复 · task=%s）",
+                                    task_id, exc_info=True)
 
                         scan_result = await _scanner.run_scan(
                             db,
@@ -7574,7 +4673,9 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                 {"event": "consistency_failed", "task_id": task_id,
                                  "reason": str(e)[:150]}, ensure_ascii=False) + "\n\n")
                         except Exception:
-                            pass
+                            logger.debug(
+                                "一致性失败事件推送失败（不影响收尾 · task=%s）",
+                                task_id, exc_info=True)
                     finally:
                         await cons_queue.put(CONS_DONE)
 
@@ -7615,7 +4716,9 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                   f"待人工确认 {_obj.get('skipped', 0)} 处")
                             await _update_progress_safe(1.0, _m)
                     except Exception:
-                        pass
+                        logger.debug(
+                            "一致性进度事件解析/进度更新失败（事件照常下发 · task=%s）",
+                            task_id, exc_info=True)
                     yield f"data: {line}"
                 await cons_runner
 
@@ -8474,7 +5577,9 @@ async def generate_facts(scheme_id: str, request: Request, db=Depends(get_db)):
                     try:
                         await pipe_task
                     except BaseException:
-                        pass
+                        logger.debug(
+                            "停止时等待事实提取管线任务退出失败（已忽略 · task=%s）",
+                            task_id, exc_info=True)
                     pipe_task = None
                     await finish_task(task_id, "stopped", "用户已停止")
                     yield _sse({"event": "stopped", "task_id": task_id})
@@ -8766,7 +5871,9 @@ async def task_status(task_id: str):
                     try:
                         await release_read_conn(conn)
                     except Exception:
-                        pass
+                        logger.debug(
+                            "终态补挂后读取连接归还真失败（task=%s）", task_id,
+                            exc_info=True)
         return res
     conn = await get_read_conn()
     try:

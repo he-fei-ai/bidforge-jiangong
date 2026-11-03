@@ -110,8 +110,8 @@ def _row_get(row: Any, key: str, default=None):
         if key in row.keys():
             v = row[key]
             return default if v is None else v
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("_row_get 读取列失败（key=%s，返回默认值）: %s", key, e)
     return default
 
 
@@ -479,8 +479,9 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str,
             "SELECT COUNT(*) AS n FROM global_facts "
             "WHERE project_id=? AND has_conflict=1", (project_id,))
         conflict_count = int(((await cur.fetchone()) or ["0"])[0] or 0)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("冲突事实计数查询失败（doc_id=%s project_id=%s，报告按 0 计）: %s",
+                       doc_id, str(project_id)[:8], e)
 
     scores = [parse_coverage, chunk_traced]
     if field_coverage is not None:
@@ -830,8 +831,8 @@ def _avg_confidence(payload: dict) -> float:
             confs = [float(v.get("confidence") or 0) for v in body.values()
                      if isinstance(v, dict) and "confidence" in v]
             return round(sum(confs) / len(confs), 3) if confs else _UNASSESSED_CONFIDENCE
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("平均置信度计算失败（按未评估处理）: %s", e)
     return _UNASSESSED_CONFIDENCE
 
 

@@ -32,6 +32,17 @@ from fastapi import HTTPException
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FRONT_PAGE = REPO_ROOT / "frontend" / "src" / "pages" / "SchemeWorkbenchPage.tsx"
 FRONT_CHART_TYPES = REPO_ROOT / "frontend" / "src" / "utils" / "chartTypes.ts"
+# 大文件拆分后：页面内 marker 迁入 pages/schemeWorkbench/ 子模块（如 exportShared.ts），
+# parity 锚点需聚合读取 facade + 子模块，断言语义不变。
+FRONT_WB_DIR = REPO_ROOT / "frontend" / "src" / "pages" / "schemeWorkbench"
+
+
+def _front_page_sources() -> str:
+    """facade 页面 + schemeWorkbench/ 子模块聚合源码（拆分后等价读取范围）。"""
+    parts = [FRONT_PAGE.read_text(encoding="utf-8")]
+    for p in sorted(list(FRONT_WB_DIR.glob("*.ts")) + list(FRONT_WB_DIR.glob("*.tsx"))):
+        parts.append(p.read_text(encoding="utf-8"))
+    return "\n".join(parts)
 
 
 class _NoneDB:
@@ -392,10 +403,10 @@ class TestExportIssueLabelParity:
 
     @staticmethod
     def _frontend_labels() -> dict[str, str]:
-        src = FRONT_PAGE.read_text(encoding="utf-8")
+        src = _front_page_sources()
         m = re.search(
             r"const EXPORT_ISSUE_LABEL[^=]*=\s*\{(.*?)\n\};", src, re.S)
-        assert m, "未在 SchemeWorkbenchPage.tsx 找到 EXPORT_ISSUE_LABEL 定义"
+        assert m, "未在 SchemeWorkbenchPage.tsx（含 schemeWorkbench/ 子模块）找到 EXPORT_ISSUE_LABEL 定义"
         pairs = re.findall(r'([A-Za-z_][A-Za-z0-9_]*)\s*:\s*"([^"]*)"', m.group(1))
         return dict(pairs)
 
@@ -407,6 +418,21 @@ class TestExportIssueLabelParity:
         assert not missing, (
             "导出预检问题类型缺中文标签（界面会显示英文裸代号）：" + ", ".join(sorted(missing)))
 
+    def test_no_frontend_dead_labels(self):
+        """✅ R168 反向棘轮：前端不得残留后端不产出的死标签。
+
+        旧护栏只查「后端 ⊆ 前端」，后端摘除类型后前端残留的死键查不出来
+        （实证：duplicate_section_title 后端零产出，死键存活至今）。双向
+        相等后，本表与 `_EXPORT_ISSUE_RULE_MAP` 恒等 —— 单一事实源。
+        """
+        from app.routers.export import _EXPORT_ISSUE_RULE_MAP
+
+        labels = self._frontend_labels()
+        extra = set(labels) - set(_EXPORT_ISSUE_RULE_MAP)
+        assert not extra, (
+            "导出预检问题标签含后端不产出的死键（不可达翻译，应随类型摘除同步删除）："
+            + ", ".join(sorted(extra)))
+
     def test_labels_are_chinese(self):
         """标签必须是中文 —— 防止用英文代号「补全」使 parity 形同虚设。"""
         cjk = re.compile(r"[\u4e00-\u9fff]")
@@ -415,5 +441,5 @@ class TestExportIssueLabelParity:
 
     def test_label_source_matches_parity_guard_pointer(self):
         """注释必须指向本护栏文件 —— 后端新增 issue 类型时作者能找到入口。"""
-        src = FRONT_PAGE.read_text(encoding="utf-8")
+        src = _front_page_sources()
         assert "test_charts_r13_and_types_parity_20261004" in src

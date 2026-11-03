@@ -25,7 +25,7 @@ const TOKEN_KEY = "api_token";
  */
 const BUILD_TOKEN = (() => {
   try {
-    return ((import.meta as any)?.env?.VITE_API_TOKEN as string) || "";
+    return (import.meta.env?.VITE_API_TOKEN as string) || "";
   } catch {
     return "";
   }
@@ -60,8 +60,10 @@ export default function SecuritySettingsPage() {
     try {
       await systemApi.activity(1);
       setProbe({ ok: true, text: "后端已接受当前凭据，接口可正常访问。" });
-    } catch (e: any) {
-      const status = e?.response?.status;
+    } catch (e: unknown) {
+      // axios 错误携带 response.status；网络层错误退回 message
+      const err = e as { response?: { status?: number }; message?: string };
+      const status = err.response?.status;
       if (status === 401) {
         setProbe({
           ok: false,
@@ -70,10 +72,10 @@ export default function SecuritySettingsPage() {
       } else {
         setProbe({
           ok: false,
-          text: e?.message || "探测失败，请确认后端服务已启动。",
+          text: err.message || "探测失败，请确认后端服务已启动。",
         });
       }
-      if (!silent) msg.error(e?.message || "探测失败");
+      if (!silent) msg.error(err.message || "探测失败");
     } finally {
       setTesting(false);
     }

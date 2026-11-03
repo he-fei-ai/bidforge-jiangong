@@ -318,8 +318,7 @@ async def parse_outline(file: UploadFile = File(...),
             _normalized = normalize_outline(outline)
             if _normalized:
                 outline = _normalized
-        except Exception:
-            # 归一化失败不应阻断识别主流程，保留原始结构回退
+        except Exception:  # noqa: BLE001 - 归一化失败不应阻断识别主流程
             pass
 
     if used_ai:

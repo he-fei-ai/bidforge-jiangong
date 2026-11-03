@@ -37,6 +37,13 @@ SSE_SRC = inspect.getsource(sh)
 from app.routers import sse_checkpoint as _sc
 
 SSE_SRC += "\n" + inspect.getsource(_sc)
+# 2026-11-02 拆分：目录构建/评审两阶段下沉到 _sse_outline_*.py（facade 延迟
+# 绑定模式），日志告警统计同样需覆盖子模块，否则拆走的告警会被漏数。
+from app.routers import _sse_outline_build as _sob
+from app.routers import _sse_outline_review as _sor
+
+SSE_SRC += "\n" + inspect.getsource(_sob)
+SSE_SRC += "\n" + inspect.getsource(_sor)
 TR_SRC = inspect.getsource(tr)
 # 折叠空白/换行后做「同一语句」级断言（多行调用会被拆行，见 F6 各处排版）
 SSE_FLAT = re.sub(r"\s+", " ", SSE_SRC)

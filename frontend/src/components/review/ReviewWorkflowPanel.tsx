@@ -154,8 +154,9 @@ function ReviewWorkflowPanel({
         msg.success(`「${title || "章节"}」已标记为「${STATUS_DONE_LABEL[to] ?? to}」`);
         await load();
         onChanged?.();
-      } catch (e: any) {
-        msg.error(e?.message || "审核操作失败");
+      } catch (e: unknown) {
+        const err = e as { message?: string };
+        msg.error(err?.message || "审核操作失败");
       }
     },
     [schemeId, reviewer, msg, load, onChanged]
@@ -282,8 +283,9 @@ function ReviewWorkflowPanel({
             setSelected([]);
             await load();
             onChanged?.();
-          } catch (e: any) {
-            msg.error(e?.message || "批量审核失败");
+          } catch (e: unknown) {
+            const err = e as { message?: string };
+            msg.error(err?.message || "批量审核失败");
           }
         },
       });
@@ -300,8 +302,9 @@ function ReviewWorkflowPanel({
       setRecords((prev) =>
         offset === 0 ? data.items || [] : [...prev, ...(data.items || [])]);
       setRecordsHasMore(!!data.has_more);
-    } catch (e: any) {
-      if (requestId === recordsRequestId.current) msg.error(e?.message || "评审轨迹加载失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      if (requestId === recordsRequestId.current) msg.error(err?.message || "评审轨迹加载失败");
     }
   }, [schemeId, msg]);
 
@@ -408,8 +411,9 @@ function ReviewWorkflowPanel({
             msg.success(`方案已标记为「${label}」`);
             await load();
             onChanged?.();
-          } catch (e: any) {
-            msg.error(e?.message || "提交失败");
+          } catch (e: unknown) {
+            const err = e as { message?: string };
+            msg.error(err?.message || "提交失败");
           } finally {
             setSubmitting(false);
           }

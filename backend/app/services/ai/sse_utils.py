@@ -102,8 +102,8 @@ async def with_heartbeat(gen, interval: float = 10, stats_provider=None,
                     except asyncio.CancelledError:
                         try:
                             aclose_coro.close()
-                        except Exception:
-                            pass
+                        except Exception as ce:
+                            logger.debug("with_heartbeat: aclose 协程 close() 失败（尽力收尾）: %s", ce)
                         if attempt == 0:
                             continue
                         logger.info("with_heartbeat: 关闭内层生成器时被取消（已尽力收尾）")
@@ -173,5 +173,5 @@ async def with_heartbeat(gen, interval: float = 10, stats_provider=None,
         hb_task.cancel()
         try:
             await asyncio.gather(gen_task, hb_task, return_exceptions=True)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("with_heartbeat: 收尾 gather 失败（子任务已 cancel，忽略）: %s", e)

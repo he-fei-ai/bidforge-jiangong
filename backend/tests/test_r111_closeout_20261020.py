@@ -190,7 +190,7 @@ class TestFactsChunkPermanentNoRetry:
         src = _src(self.SRC)
         i = src.find("_permanent = is_non_retryable_error(e)")
         assert i > 0
-        seg = src[i:i + 300]
+        seg = src[i:i + 500]
         assert "except Exception" in seg and "_permanent = False" in seg
 
     def test_rate_limit_not_in_permanent_set(self):

@@ -32,7 +32,14 @@ _UPLOAD_ACCEPT_TS = _REPO / "frontend" / "src" / "utils" / "uploadAccept.ts"
 
 def _page_src() -> str:
     assert _PAGE.exists(), f"缺少 {_PAGE}"
-    return _PAGE.read_text(encoding="utf-8").replace("\r\n", "\n")
+    # 大文件拆分后：handleUploadDocuments / buildUploadNotice 接线迁入
+    # pages/schemeWorkbench/useDocumentWorkflow.tsx —— 聚合 facade + 子模块读取，
+    # 预检顺序与唯一出口断言语义不变。
+    parts = [_PAGE.read_text(encoding="utf-8").replace("\r\n", "\n")]
+    wb = _REPO / "frontend" / "src" / "pages" / "schemeWorkbench"
+    for p in sorted(list(wb.glob("*.ts")) + list(wb.glob("*.tsx"))):
+        parts.append(p.read_text(encoding="utf-8").replace("\r\n", "\n"))
+    return "\n".join(parts)
 
 
 def _upload_src() -> str:

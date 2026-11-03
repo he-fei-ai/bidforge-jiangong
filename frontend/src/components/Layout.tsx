@@ -1,5 +1,5 @@
 import { ReactNode, useEffect, useState, useCallback, useRef } from "react";
-import { Layout as AntLayout, Menu, theme, Spin, ConfigProvider, Tooltip, Button, Drawer } from "antd";
+import { Layout as AntLayout, Menu, theme, Spin, ConfigProvider, Tooltip, Button, Drawer, type MenuProps } from "antd";
 import {
   ProjectOutlined,
   MenuOutlined,
@@ -296,7 +296,7 @@ function ProjectTreeMenu({
     };
   });
 
-  const items: any[] = [
+  const items: MenuProps["items"] = [
     {
       type: "group",
       label: (

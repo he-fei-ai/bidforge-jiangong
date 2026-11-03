@@ -154,7 +154,7 @@ export function normalizeFactAutofixSummary(raw: unknown): FactAutofixSummary {
  * 「attempted 但未修复」也必须说话 —— 转人工核对的信号不静默（后端
  * 同款纪律：applied=0 时 rejected/attempts 仍落报告）。
  */
-export function factAutofixHint(summary: any): string {
+export function factAutofixHint(summary: unknown): string {
   if (!summary || typeof summary !== "object") return "";
   const s = normalizeFactAutofixSummary(summary);
   if (s.sections <= 0 || s.conflicts <= 0) return "";
@@ -260,7 +260,8 @@ export function normalizeQualityIssues(raw: unknown): string[] | undefined {
     for (const it of raw) {
       if (it === null || it === undefined) continue;
       // 兼容对象形态的历史载荷（{message} / {detail}）
-      const v = (it as any)?.message ?? (it as any)?.detail ?? it;
+      const rec = it as { message?: unknown; detail?: unknown } | null | undefined;
+      const v = rec?.message ?? rec?.detail ?? it;
       if (v !== null && v !== undefined) out.push(String(v));
     }
   } else if (raw && typeof raw === "object") {
@@ -304,6 +305,9 @@ export function finalizeRunningLogsIn(
   );
 }
 
+/** 后端终态事件 failed_sections 单条明细（按实际消费字段推导） */
+type FailedSectionPayload = { section_id: string; title?: string; reason?: string };
+
 /**
  * 合并后端 completed/error/stopped 事件下发的失败章节明细（failed_sections）。
  * 失败章节可能压根没进日志（异常路径 / 保留旧正文未改状态），
@@ -316,7 +320,7 @@ export function mergeFailedSectionsInto(
 ): SectionLogItem[] {
   if (!Array.isArray(failedSections) || failedSections.length === 0) return list;
   const map = new Map(list.map((x) => [x.section_id, x]));
-  failedSections.forEach((f: any) => {
+  failedSections.forEach((f: FailedSectionPayload) => {
     if (!f?.section_id) return;
     const prev = map.get(f.section_id);
     map.set(f.section_id, {
@@ -351,7 +355,7 @@ export function mergeFailedSectionsInto(
  */
 export function contentResultFailedSections(
   contentResult: unknown,
-): { sections: any[]; failedCount: number } {
+): { sections: Array<{ section_id: string }>; failedCount: number } {
   if (!contentResult || typeof contentResult !== "object") {
     return { sections: [], failedCount: 0 };
   }
@@ -362,7 +366,7 @@ export function contentResultFailedSections(
   const sections = Array.isArray(cr.failed_sections)
     ? cr.failed_sections.filter(
         (x: unknown): x is { section_id: string } =>
-          !!x && typeof x === "object" && !!(x as any).section_id,
+          !!x && typeof x === "object" && !!(x as { section_id?: unknown }).section_id,
       )
     : [];
   const declared = cr.failed_count;

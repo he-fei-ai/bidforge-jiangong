@@ -87,32 +87,50 @@ export function issueLabel(issue: { type?: string } | null | undefined): string 
   return STANDARD_ISSUE_LABELS[t] || t;
 }
 
+/** 校验报告的消费子集（按本文件实际读取字段推导；兼容 null/标量等脏输入） */
+type ReportIssueCounts = {
+  error_count?: number;
+  warning_count?: number;
+  issues?: unknown[];
+};
+
+/** 终态事件 standard_summary 载荷（按本文件实际读取字段推导） */
+type StandardSummaryPayload = {
+  issue_sections?: number;
+  total_issues?: number;
+  precise?: number;
+  fuzzy?: number;
+};
+
 /** 报告是否含问题（error 或 warning 都算，供告警 Tag 显隐） */
-export function reportHasIssues(report: any): boolean {
+export function reportHasIssues(report: unknown): boolean {
   if (!report || typeof report !== "object") return false;
-  const n = (report.error_count || 0) + (report.warning_count || 0);
+  const r = report as ReportIssueCounts;
+  const n = (r.error_count || 0) + (r.warning_count || 0);
   if (n > 0) return true;
-  return Array.isArray(report.issues) && report.issues.length > 0;
+  return Array.isArray(r.issues) && r.issues.length > 0;
 }
 
 /** 报告问题总数（告警 Tag 上的数字） */
-export function reportIssueCount(report: any): number {
+export function reportIssueCount(report: unknown): number {
   if (!report || typeof report !== "object") return 0;
-  const n = (report.error_count || 0) + (report.warning_count || 0);
-  return n || (Array.isArray(report.issues) ? report.issues.length : 0);
+  const r = report as ReportIssueCounts;
+  const n = (r.error_count || 0) + (r.warning_count || 0);
+  return n || (Array.isArray(r.issues) ? r.issues.length : 0);
 }
 
 /**
  * 终态汇总 → 追加到完成消息的提示语。
  * 有问题才说话；无问题返回空串（调用方不追加，避免"一切正常"式噪音）。
  */
-export function standardSummaryHint(summary: any): string {
+export function standardSummaryHint(summary: unknown): string {
   if (!summary || typeof summary !== "object") return "";
-  const issueSections = Number(summary.issue_sections || 0);
-  const total = Number(summary.total_issues || 0);
+  const s = summary as StandardSummaryPayload;
+  const issueSections = Number(s.issue_sections || 0);
+  const total = Number(s.total_issues || 0);
   if (issueSections <= 0 || total <= 0) return "";
-  const precise = Number(summary.precise || 0);
-  const fuzzy = Number(summary.fuzzy || 0);
+  const precise = Number(s.precise || 0);
+  const fuzzy = Number(s.fuzzy || 0);
   const parts: string[] = [];
   if (precise) parts.push(`精准 ${precise} 章`);
   if (fuzzy) parts.push(`模糊 ${fuzzy} 章`);

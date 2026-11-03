@@ -130,12 +130,23 @@ def _positive_int_setting(name: str, default: int) -> int:
 #: safe_rowcount** —— 同一文件两套标准。本函数把事实侧写路径收敛到同一出口：
 #: ① 游标为 None → 503（可重试的依赖故障，绝不谎报成功）；
 #: ② 实际影响行数为 0 → 409（行已被并发删除/移动，客户端需重新加载）。
-def _require_fact_write_cursor(cur, what: str):
-    """R13 判空守卫：db.execute() 返回 None 时回 503，绝不继续假成功。"""
+def _require_fact_cursor(cur, what: str):
+    """R13 判空守卫（读路径）：db.execute() 返回 None 时回 503，不冒 AttributeError。
+
+    ✅ R166（2026-11-03）：文档半区早已系统性判空，事实半区的**读/预检**查询
+    此前仍直接 ``cur.fetchone()/fetchall()`` —— 命中 R13（全局单写连接 +
+    aiosqlite 偶发返回 None）时 AttributeError → 500，且日志看不出是哪条
+    语句失败。现与写路径同一出口口径：None → 503（可重试的依赖故障）。
+    """
     if cur is None:
-        logger.error("事实写路径游标为空（R13）· 操作=%s · 数据库暂不可用", what)
+        logger.error("事实读路径游标为空（R13）· 操作=%s · 数据库暂不可用", what)
         raise HTTPException(status_code=503, detail="数据库暂不可用，请稍后重试")
     return cur
+
+
+def _require_fact_write_cursor(cur, what: str):
+    """R13 判空守卫：db.execute() 返回 None 时回 503，绝不继续假成功。"""
+    return _require_fact_cursor(cur, what)
 
 
 def _assert_fact_write_applied(cur, what: str, *, expect: int = 1) -> int:
@@ -439,6 +450,7 @@ async def _validate_fact_scope(db, scheme_id: str, project_id: str) -> tuple[str
     if not pid:
         raise HTTPException(400, "需要 scheme_id 或 project_id")
     cur = await db.execute("SELECT id FROM projects WHERE id=?", (pid,))
+    _require_fact_cursor(cur, "作用域校验·项目存在性")
     if not await cur.fetchone():
         raise HTTPException(404, "项目不存在")
     return "", pid
@@ -484,6 +496,7 @@ async def _assert_fact_in_scheme_scope(db, fact_id: str, scheme_id: str) -> dict
     cur = await db.execute(
         "SELECT id, project_id, scheme_id FROM global_facts WHERE id=? OR group_id=? LIMIT 1",
         (fact_id, fact_id))
+    _require_fact_cursor(cur, "作用域校验·事实归属")
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "事实不存在")
@@ -519,6 +532,7 @@ async def _invalidate_fact_scope_cache(db, scheme_id: str, project_id: str = "")
     if not project_id:
         return
     cur = await db.execute("SELECT id FROM schemes WHERE project_id=?", (project_id,))
+    _require_fact_cursor(cur, "共享事实缓存失效·方案枚举")
     for item in await cur.fetchall():
         # ✅ BUG 修复（2026-10-01）：旧实现是 `if not item[0]: break` ——
         # 一旦命中第一个 id 为空的行就**中断整个循环**，其后所有方案的导出
@@ -599,6 +613,7 @@ async def _load_fact_rows(db, scheme_id: str, project_id: str,
     sql = "SELECT * FROM global_facts" + scope_sql + \
         " ORDER BY category, group_id, updated_at, id"
     cur = await db.execute(sql, params)
+    _require_fact_cursor(cur, "事实列表加载")
     return [dict(r) for r in await cur.fetchall()]
 
 
@@ -680,6 +695,7 @@ async def list_facts(
     sql += " ORDER BY category, group_id, updated_at, id"
 
     cur = await db.execute(sql, params)
+    _require_fact_cursor(cur, "事实列表接口")
     rows = [dict(r) for r in await cur.fetchall()]
 
     # 按 group_id 聚合
@@ -1090,6 +1106,7 @@ async def check_danger_scheme(
     #    （全空调用方仍合理 400，不做无依据判定）。
     if not name and scheme_id:
         cur = await db.execute("SELECT name FROM schemes WHERE id=?", (scheme_id,))
+        _require_fact_cursor(cur, "危大诊断·方案名回查")
         row = await cur.fetchone()
         if row:
             name = row["name"] or ""
@@ -1367,6 +1384,7 @@ async def _invalidate_item_update_caches(db, updates: list[dict]) -> None:
     ph = ",".join("?" for _ in ids)
     cur = await db.execute(
         f"SELECT DISTINCT project_id, scheme_id FROM global_facts WHERE id IN ({ph})", ids)
+    _require_fact_cursor(cur, "条目更新缓存失效·作用域枚举")
     for r in await cur.fetchall():
         await _invalidate_fact_scope_cache(
             db, str(r["scheme_id"] or ""), str(r["project_id"] or ""))
@@ -1445,6 +1463,7 @@ async def _apply_item_updates(db, updates: list[dict],
         # ✅ 2026-09-29：fact_type 参与九大章节归属的派生（分类变更时重算 chapter），
         #    需一并预取，避免额外一次往返。
         f"fact_key, fact_type FROM global_facts WHERE id IN ({placeholders})", fids)
+    _require_fact_cursor(cur, "条目级更新·批量预取")
     rows = {r["id"]: r for r in await cur.fetchall()}
 
     scheme_id = ""
@@ -1670,6 +1689,7 @@ async def update_fact(
 
     cur = await db.execute(
         "SELECT * FROM global_facts WHERE id=?", (fact_id,))
+    _require_fact_cursor(cur, "事实更新·旧行回查")
     row = await cur.fetchone()
 
     # ✅ BUG 修复：行级更新收到【多行 Markdown content】时（前端把整组内容
@@ -1755,6 +1775,7 @@ async def update_fact(
     else:
         cur = await db.execute(
             "SELECT * FROM global_facts WHERE group_id=?", (group_id,))
+    _require_fact_cursor(cur, "分组重建·旧行枚举")
     old_rows = [dict(r) for r in await cur.fetchall()]
     if not old_rows:
         raise HTTPException(404, "事实不存在")
@@ -1938,11 +1959,23 @@ async def update_fact(
     # （连接归还写池后 DELETE 被下个请求的 commit 连带提交 → 整组静默删除）。
     try:
         cur = await db.execute(
-            "DELETE FROM global_facts WHERE group_id=? AND project_id=? AND scheme_id=?",
+            "DELETE FROM global_facts WHERE group_id=? AND project_id=? "
+            "AND COALESCE(scheme_id,'')=?",
             (group_id, grow["project_id"], grow["scheme_id"] or ""))
         # ✅ R13 收口（2026-10-06）：DELETE 判空（分组重建必须整组替换成功，
         #    游标为空时若继续 INSERT 会产生「重复行」脏数据）
         _require_fact_write_cursor(cur, "分组重建删除旧事实")
+        # ✅ R166：DELETE 的 scheme_id 口径与上方 SELECT 旧行的
+        #    COALESCE(scheme_id,'')=? 对称 —— 旧实现裸 scheme_id=?，外部写入
+        #    产生的 NULL scheme_id 行「查得到、删不掉」→ 旧行残留 + 新行照插
+        #    = 分组重复；DELETE 后按实删行数校验，绝不在 0 行时继续 INSERT。
+        _deleted_old = safe_rowcount(cur, what="分组重建删除旧事实")
+        if _deleted_old < 1:
+            logger.warning(
+                "分组重建 DELETE 0 行（group_id=%s · project_id=%s · scheme_id=%r）"
+                "—— 旧行已不存在，跳过重建以防悬空重复", group_id,
+                grow["project_id"], grow["scheme_id"])
+            raise HTTPException(409, "事实分组已被其他操作修改或删除，请刷新后重试")
         for _row_vals in insert_buf:
             if len(_row_vals) != len(_GROUP_REBUILD_COLS):
                 # 列名与取值必须逐一对应，否则 SQLite 报「N values for M columns」
@@ -1975,6 +2008,7 @@ async def resolve_fact(
     cur = await db.execute(
         "SELECT scheme_id, project_id, is_simulated, has_conflict, is_stale FROM global_facts WHERE id=?",
         (fact_id,))
+    _require_fact_cursor(cur, "事实确认·闸门预检")
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "事实不存在")
@@ -2054,6 +2088,7 @@ async def ack_fact_stale(
     cur = await db.execute(
         "SELECT scheme_id, project_id, is_simulated, has_conflict, is_stale, is_resolved"
         " FROM global_facts WHERE id=?", (fact_id,))
+    _require_fact_cursor(cur, "过期解除·闸门预检")
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "事实不存在")
@@ -2161,6 +2196,7 @@ async def batch_ack_stale(data: AckStaleRequest, db=Depends(get_db)):
             + id_sql + scope_sql +
             " AND (COALESCE(is_simulated,0)=1 OR COALESCE(has_conflict,0)=1)",
             scope_params)
+        _require_fact_cursor(cur, "批量过期解除·组别回查")
         grow = await cur.fetchone()
         if grow:
             gated = int(grow[0] or 0)
@@ -2211,6 +2247,7 @@ async def resolve_conflict(
     cur = await db.execute(
         "SELECT id, title, content, is_simulated, conflict_keys, scheme_id, "
         "project_id, category, fact_type, fact_key FROM global_facts WHERE id=?", (fact_id,))
+    _require_fact_cursor(cur, "矛盾裁决·候选回查")
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "事实不存在")
@@ -2298,6 +2335,7 @@ async def clear_all_facts(data: ClearFactsRequest, db=Depends(get_db)):
         cur = await db.execute(
             "SELECT count(*) FROM global_facts WHERE " + _FACT_SCOPE_PREDICATE,
             (scheme_id, project_id))
+        _require_fact_cursor(cur, "清空全部事实·计数预查")
         total = int((await cur.fetchone())[0] or 0)
         cur = await db.execute(
             "DELETE FROM global_facts WHERE " + _FACT_SCOPE_PREDICATE,
@@ -2305,6 +2343,9 @@ async def clear_all_facts(data: ClearFactsRequest, db=Depends(get_db)):
         # ✅ R13 收口（2026-10-06）：游标为空时下方 total 已算出，
         #    若继续删增量指纹并回 ok=True，用户会以为事实已清空而实际未删
         _require_fact_write_cursor(cur, "清空全部事实")
+        # ✅ R166：回传**实际删除行数**（旧实现回预统计 total —— 与 DELETE 之间
+        #    有并发窗口时虚报）。total 仍用于日志对照。
+        deleted = safe_rowcount(cur, what="清空全部事实")
         # 增量提取进度按作用域清空（下次提取全量重跑）。
         # ✅ 修复（2026-09-26）：旧实现仅在 project_id 非空时、且严格按
         #    (project_id, scheme_id) 删除，导致两类残留：
@@ -2325,8 +2366,9 @@ async def clear_all_facts(data: ClearFactsRequest, db=Depends(get_db)):
         raise
 
     await _invalidate_fact_scope_cache(db, scheme_id, project_id)
-    logger.info("已清除方案 %s 可见范围的全局事实（%d 条）并重置提取进度", scheme_id, total)
-    return {"ok": True, "deleted": total}
+    logger.info("已清除方案 %s 可见范围的全局事实（统计 %d 条 · 实删 %d 条）并重置提取进度",
+                scheme_id, total, deleted)
+    return {"ok": True, "deleted": deleted}
 
 
 @router.post("/batch-resolve")
@@ -2389,6 +2431,7 @@ async def batch_resolve(data: BatchResolveRequest, db=Depends(get_db)):
             f"SELECT id, title, fact_key, is_simulated, is_resolved, has_conflict, is_stale "
             f"FROM global_facts WHERE id IN ({placeholders}){scope}",
             params)
+        _require_fact_cursor(cur, "批量确认·目标预检")
         rows = [dict(r) for r in await cur.fetchall()]
 
     elif scheme_id:
@@ -2401,6 +2444,7 @@ async def batch_resolve(data: BatchResolveRequest, db=Depends(get_db)):
             "SELECT id, title, fact_key, is_simulated, is_resolved, has_conflict, is_stale "
             "FROM global_facts WHERE " + _FACT_SCOPE_PREDICATE,
             (scheme_id, real_pid))
+        _require_fact_cursor(cur, "批量确认·作用域预检")
         rows = [dict(r) for r in await cur.fetchall()]
     else:
         raise HTTPException(400, "需要 scheme_id 才能批量确认")
@@ -2692,6 +2736,7 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
            " FROM global_facts" + scope_sql +
            " ORDER BY category, group_id, updated_at, id")
     cur = await db.execute(sql, params)
+    _require_fact_cursor(cur, "AI 调整·现状取数")
     rows = [dict(r) for r in await cur.fetchall()]
     if not rows:
         raise HTTPException(400, "当前作用域还没有任何全局事实，请先提取或新增")
@@ -2790,7 +2835,7 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
                     _add_resolved = False if _is_safety_new else True
                     # ✅ BUG 修复（2026-10-01）：列清单改走 MANUAL_FACT_INSERT_SQL 单一
                     #    出口（原为手写 15 列，与 create_fact 的两条分支各自维护）。
-                    await db.execute(
+                    _add_cur = await db.execute(
                         MANUAL_FACT_INSERT_SQL,
                         _manual_fact_row(
                             fid=str(uuid.uuid4()), pid=real_pid, sid=scheme_scope,
@@ -2810,6 +2855,11 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
                             #    校验器补齐后本行才真正生效（归一幂等）。
                             value_kind=normalize_value_kind(op.get("value_kind")),
                         ))
+                    # ✅ R166：与同函数 delete 分支同口径 —— INSERT 游标为 None
+                    #    （R13）时旧实现照常累加新增计数，前端拿到「已应用」而库里
+                    #    无行。现判空 + 校验影响行数，杜绝假成功。
+                    _assert_fact_write_applied(
+                        _add_cur, f"AI 调整新增事实 {op['name']}")
                     applied["added"] += 1
                     if _is_safety_new:
                         applied.setdefault("added_pending", 0)
@@ -2858,6 +2908,7 @@ async def delete_fact(
     cur = await db.execute(
         "SELECT id, project_id, scheme_id, group_id FROM global_facts WHERE id=? OR group_id=? LIMIT 1",
         (fact_id, fact_id))
+    _require_fact_cursor(cur, "事实删除·归属回查")
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "事实不存在")
@@ -2869,8 +2920,11 @@ async def delete_fact(
         _assert_fact_write_applied(cur, f"删除事实 fact_id={fact_id}")
     else:
         cur = await db.execute(
-            "DELETE FROM global_facts WHERE group_id=? AND project_id=? AND scheme_id=?",
+            "DELETE FROM global_facts WHERE group_id=? AND project_id=? "
+            "AND COALESCE(scheme_id,'')=?",
             (fact_id, row["project_id"], row["scheme_id"] or ""))
+        # ✅ R166：与分组重建同口径 —— scheme_id 空值判定与归属回查的
+        #    COALESCE 对称，NULL 行不再「查得到、删不掉」。
         # ✅ R13 收口（2026-10-06）：整组删除 —— 至少要删掉命中的那一行，
         #    否则「删除分组」回 ok=True 而组内事实原封不动
         _assert_fact_write_applied(cur, f"删除事实分组 group_id={fact_id}")

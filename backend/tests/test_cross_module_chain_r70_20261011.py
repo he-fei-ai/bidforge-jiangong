@@ -123,7 +123,13 @@ class TestExportFingerprintCoversServerSwitch:
             "切换正文子标题降级开关后指纹未变 → 会命中降级前的旧缓存产物")
 
     def test_fingerprint_source_contains_demote_key(self):
-        src = _src_of(_app_path("routers", "export.py"))
+        # 拆分兼容：_content_fingerprint 已拆至 _export_cache.py，聚合读取
+        import glob as _glob
+        import os as _os
+        p = _app_path("routers", "export.py")
+        src = _src_of(p)
+        for q in sorted(_glob.glob(_os.path.join(_os.path.dirname(p), "_export_*.py"))):
+            src += "\n" + _src_of(q)
         assert '"subheading_demote": _demote_on' in src
 
 

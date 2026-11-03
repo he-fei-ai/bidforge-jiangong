@@ -4,8 +4,10 @@ import datetime as _dt
 import logging
 import os
 import random
+import re
 import shutil
 import sqlite3
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -156,8 +158,8 @@ async def _probe_conn(conn: aiosqlite.Connection) -> bool:
 def _mark_poisoned(conn: aiosqlite.Connection) -> None:
     try:
         conn._poisoned = True
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("连接 poisoned 标记设置失败（尽力而为）: %s", e)
 
 
 def _is_poisoned(conn: aiosqlite.Connection) -> bool:
@@ -282,8 +284,8 @@ async def get_conn() -> aiosqlite.Connection:
         if _conn is not None and _conn_path is not None and _conn_path != DB_PATH:
             try:
                 await _conn.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("DB_PATH 切换关闭旧全局连接失败（清理路径，忽略）: %s", e)
             _conn = None
             _conn_path = None
         if _conn is not None:
@@ -296,8 +298,8 @@ async def get_conn() -> aiosqlite.Connection:
                 logger.warning("全局连接已失效（poisoned/已关闭），重建连接")
                 try:
                     await _conn.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("关闭失效全局连接失败（清理路径，忽略）: %s", e)
                 _conn = None
                 _conn_path = None
             else:
@@ -311,8 +313,8 @@ async def get_conn() -> aiosqlite.Connection:
                     logger.warning("数据库连接探活失败（disk I/O），重建连接")
                     try:
                         await _conn.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("关闭探活失败的全局连接失败（清理路径，忽略）: %s", e)
                     _conn = None
                     _conn_path = None
                 else:
@@ -448,15 +450,318 @@ def _self_heal_corrupt_wal() -> bool:
     return True
 
 
+# ---------- R165（2026-11-03 · 启动期主库完整性闸门） ----------
+# 背景（2026-11-01 生产实证，logs/backend.log 15:28:12 起）：
+#   主库 system_logs 表/索引 B 树损坏（"2nd reference to page" ×N +
+#   "wrong # of entries in index idx_system_logs_trace"）。``_self_heal_corrupt_wal``
+#   明确不覆盖这种形态——``if not wal.exists(): return False`` 意味着「无 WAL 就完全
+#   不探测」，而恰是主库损坏（无论有无 WAL）会静默运行：system_logs 写每请求
+#   fail-soft WARNING、普通写路径 database is locked、SSE 生成链路直接 RuntimeError。
+#   前端表现即「后端连接超时（30s 无响应）」，日志里却没有可行动的启动期告警。
+# 本闸门在 init_db 最前（WAL 自愈之后）跑 ``PRAGMA quick_check``：
+#   1) 完好 → 零成本放行；
+#   2) 损坏且**全部错误可归属**到可再生缓存表（一致扫描缓存/导出缓存）→
+#      备份后 DROP 重建该表（业务数据零丢失：这些表本就是可丢弃缓存）；
+#   3) 损坏但范围无法确证（含业务表、freelist 异常、错误数达探针上限）→
+#      **绝不触碰**，保持原状让应用以原始错误暴露根因（与 WAL 自愈同一纪律：
+#      自愈只做确定安全的事，绝不雪上加霜）。
+# 备份口径：修复前把 主库+WAL+SHM 备份到 recov_bak_<ts>_gate/，任何一步失败
+#   都把备份原样还原。逃生开关：``DB_INTEGRITY_GATE=0`` 完全禁用（逐字回退旧行为）。
+
+# 可再生缓存表 → 重建 DDL（与 SCHEMA_SQL 逐字一致；DROP 后由 init_db 的
+# executescript/_migrate 重建索引与唯一约束）。**只有可丢弃缓存允许进入本表**：
+# 任何承载业务数据的表进入这里 = 修复即删数据，属于不可接受行为。
+_REGENERABLE_CACHE_TABLES: dict = {
+    "consistency_scan_cache": (
+        "CREATE TABLE IF NOT EXISTS consistency_scan_cache ("
+        "section_id TEXT PRIMARY KEY, scheme_id TEXT NOT NULL, "
+        "content_hash TEXT NOT NULL, context_hash TEXT NOT NULL, "
+        "rows_json TEXT NOT NULL, "
+        "created_at TEXT DEFAULT (datetime('now','localtime')))"
+    ),
+    "export_cache": (
+        "CREATE TABLE IF NOT EXISTS export_cache ("
+        "id TEXT PRIMARY KEY, "
+        "project_id TEXT DEFAULT '', "
+        "scheme_id TEXT DEFAULT '', "
+        "config_hash TEXT DEFAULT '', "
+        "content_fingerprint TEXT DEFAULT '', "
+        "cache_key TEXT DEFAULT '', "
+        "result_path TEXT DEFAULT '', "
+        "created_at TEXT DEFAULT (datetime('now','localtime')))"
+    ),
+}
+
+# quick_check(64) 的探针上限：达到上限说明错误面超出可枚举范围，
+# 归属判据不再可信，必须放弃自愈（宁可保持损坏也不盲修）。
+_INTEGRITY_PROBE_LIMIT = 64
+
+_TREE_RE = re.compile(r"Tree (\d+)")
+_INDEX_NAME_RE = re.compile(r"wrong # of entries in index (\S+)")
+_PAGE_RE = re.compile(r"\bpage (\d+)")
+
+
+def _quick_check_errors(db_path):
+    """只读跑 quick_check，返回错误消息列表（空列表 = 完好）。"""
+    try:
+        probe = sqlite3.connect(str(db_path))
+        try:
+            rows = probe.execute(
+                f"PRAGMA quick_check({_INTEGRITY_PROBE_LIMIT})").fetchall()
+        finally:
+            probe.close()
+    except sqlite3.DatabaseError as e:
+        # 连 quick_check 都做不了（连接即报 malformed）：损坏确证
+        logger.warning("完整性闸门：quick_check 本身失败（视为损坏）: %s", e)
+        return [f"database disk image is malformed（quick_check 无法完成）: {e}"]
+    msgs = []
+    for r in rows:
+        text = str(r[0] or "")
+        if text.strip() in ("ok", "committed"):  # quick_check 完好时的唯一返回行
+            continue
+        if text.strip().startswith("***"):
+            continue  # '*** in database main ***' 类分组头不是错误
+        if text.strip():
+            msgs.append(text.strip())
+    return msgs
+
+
+def _corruption_scope_known(msgs: list, owner: dict) -> set:
+    """把 quick_check 错误归属到损坏对象；**无法全部归属即返回空集**（放弃自愈）。
+
+    归属规则（只认三种可判别形态，其余一律视为未知）：
+      - "Tree <root> page ..." → 根页 <root> 的表/索引（索引归属到其所属表）；
+      - "wrong # of entries in index <name>" → 该索引所属表（DROP 表即级联重建索引）；
+      - "Page <n> ..."（无 Tree 前缀的页级消息，如 freelist 异常）→ 页号 → 所有者。
+    任何一条归属失败、或归属对象不是可再生缓存表 → 返回空集：绝不 DROP。
+    """
+    tables: set = set()
+    for msg in msgs:
+        root = None
+        m = _TREE_RE.search(msg)
+        if m:
+            root = int(m.group(1))
+        else:
+            im = _INDEX_NAME_RE.search(msg)
+            if im is not None:
+                hit = next((obj for obj in owner.values()
+                            if obj[0] == "index" and obj[1] == im.group(1)), None)
+                tbl = _owner_table(hit)
+                if tbl is None or tbl not in _REGENERABLE_CACHE_TABLES:
+                    return set()
+                tables.add(tbl)
+                continue
+            pm = _PAGE_RE.search(msg)
+            if pm is None:
+                return set()
+            root = int(pm.group(1))
+        tbl = _owner_table(owner.get(root))
+        if tbl is None or tbl not in _REGENERABLE_CACHE_TABLES:
+            return set()
+        tables.add(tbl)
+    return tables
+
+
+def _owner_table(obj):
+    """owner 条目 (type, name, tbl_name) → 所属表名；无法判定返回 None。"""
+    if not obj:
+        return None
+    if obj[0] == "table":
+        return obj[1]
+    if obj[0] == "index":
+        return obj[2] if len(obj) > 2 else None
+    return None
+
+
+def _root_page_owner(db_path) -> dict:
+    """读 sqlite_master 得 {rootpage: (type, name, tbl_name)}；schema 页损坏读不出则返回 {}。"""
+    try:
+        probe = sqlite3.connect(str(db_path))
+        try:
+            rows = probe.execute(
+                "SELECT type, name, tbl_name, rootpage FROM sqlite_master").fetchall()
+        finally:
+            probe.close()
+        return {int(r[3]): (str(r[0]), str(r[1]), str(r[2])) for r in rows
+                if r[3] is not None}
+    except sqlite3.DatabaseError:
+        return {}
+
+
+def _restore_from(bak_dir, db_path, wal, shm) -> None:
+    """把备份目录里的文件原样还原（含 wal/shm；备份里缺席的文件保持缺席）。"""
+    for f in (db_path, wal, shm):
+        bak = Path(bak_dir) / Path(f).name
+        if bak.exists():
+            try:
+                shutil.copyfile(bak, f)
+            except OSError:
+                pass
+
+
+def _startup_db_integrity_gate() -> bool:
+    """init_db 前置主库完整性闸门；返回 True 表示本次发生了修复重建。"""
+    if os.environ.get("DB_INTEGRITY_GATE") == "0":
+        return False
+    db_path = _as_path(DB_PATH)
+    if not db_path.exists():
+        return False
+    wal = db_path.with_name(db_path.name + "-wal")
+    shm = db_path.with_name(db_path.name + "-shm")
+
+    errors = _quick_check_errors(db_path)
+    if not errors:
+        return False
+    preview = " | ".join(e[:120] for e in errors[:5])
+    logger.warning(
+        "完整性闸门：主库 quick_check 异常（%d 条，探针上限 %d）：%s",
+        len(errors), _INTEGRITY_PROBE_LIMIT, preview)
+    if len(errors) >= _INTEGRITY_PROBE_LIMIT:
+        logger.warning("完整性闸门：错误数达到探针上限，范围无法确证，放弃自愈（保持原状）")
+        return False
+
+    tables = _corruption_scope_known(errors, _root_page_owner(db_path))
+    if not tables:
+        logger.warning(
+            "完整性闸门：损坏范围无法归属到可再生缓存表，放弃自愈（保持原状，"
+            "请人工备份后排查；首个错误: %s）", errors[0][:200])
+        return False
+
+    # 备份（主库+WAL+SHM 一并；主库绝不删除）
+    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    bak_dir = db_path.parent / f"recov_bak_{ts}_gate"
+    try:
+        bak_dir.mkdir(parents=True, exist_ok=True)
+        for f in (db_path, wal, shm):
+            if f.exists():
+                shutil.copyfile(f, bak_dir / f.name)
+    except OSError as e:
+        logger.warning("完整性闸门：备份失败，放弃自愈（保持原状）: %s", e)
+        return False
+
+    # 重建：先移走 wal/shm 防回放污染，再 DROP 损坏的缓存表（索引随表级联删除）
+    try:
+        for f in (wal, shm):
+            if f.exists():
+                os.remove(f)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            for t in sorted(tables):
+                conn.execute(f"DROP TABLE IF EXISTS {t}")
+                conn.execute(_REGENERABLE_CACHE_TABLES[t])
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as e:
+        logger.warning("完整性闸门：重建失败（%s），还原备份", e)
+        _restore_from(bak_dir, db_path, wal, shm)
+        return False
+
+    after = _quick_check_errors(db_path)
+    if after:
+        logger.warning(
+            "完整性闸门：重建后 quick_check 仍有 %d 条异常，还原备份（不雪上加霜）",
+            len(after))
+        _restore_from(bak_dir, db_path, wal, shm)
+        return False
+
+    logger.warning(
+        "完整性闸门：已重建损坏的缓存表 %s（备份至 %s）；"
+        "业务数据未触碰，表内容按缓存语义清空", sorted(tables), bak_dir)
+    return True
+
+
+# ---------- R165b（2026-11-03 · 运行期完整性巡检） ----------
+# 取证定罪（Windows 事件日志，artifacts/r165/）：J: USB 盘自 2026-10-31 起持续劣化 ——
+#   disk Id=51 寻页错误 10-31:54 / 11-01:502 / 11-02:558 条；10-31 18:26:09
+#   Ntfs Id=140「系统无法将数据刷新到事务日志。可能发生损坏: VolumeId: J:」即本次
+#   主库 system_logs B 树损坏的直接事件（当晚 J: 卷设备号 Volume13→16 变更 4 次 =
+#   USB 反复掉线重挂）。启动闸门只在进程启动时探测一次，带病长跑的服务对
+#   运行期再次损坏零感知 —— 而本盘正在持续丢页，复发概率高。
+# 巡检设计：asyncio 后台任务每 DB_INTEGRITY_PROBE_SECONDS 秒（默认 1800，0=关闭）
+#   在 to_thread 里跑 quick_check（独立短连接，不触碰连接池，不阻塞事件循环）；
+#   异常或报错即 WARNING 点名（fail-soft，绝不下探针也不阻断业务）。仅生产进程
+#   创建任务（pytest/TestClient 不启动，防测试任务泄漏）；任务幂等防重复创建。
+
+_INTEGRITY_PROBE_DEFAULT_SECONDS = 1800
+_probe_task: asyncio.Task | None = None
+
+
+def _in_test_process() -> bool:
+    """与 middleware._should_skip_obs_db_write 同口径：pytest / TestClient 进程。"""
+    if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        return True
+    return "starlette.testclient" in sys.modules
+
+
+def _integrity_probe_once() -> list:
+    """单次运行期巡检（同步，在线程池里跑）：返回错误消息列表（空 = 完好）。"""
+    db_path = _as_path(DB_PATH)
+    if not db_path.exists():
+        return []
+    return _quick_check_errors(db_path)
+
+
+async def _integrity_probe_loop(interval: float) -> None:
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                errors = await asyncio.to_thread(_integrity_probe_once)
+            except Exception as e:  # noqa: BLE001 - 巡检自身失败也 fail-soft
+                logger.warning("运行期完整性巡检执行失败（下轮继续）: %s", e)
+                continue
+            if errors:
+                preview = " | ".join(e[:120] for e in errors[:5])
+                logger.warning(
+                    "运行期完整性巡检：主库 quick_check 异常（%d 条）：%s —— "
+                    "请尽快停止写入并按 docs/后端连接超时取证与启动期主库完整性闸门"
+                    "_R165_20261103.md 处置", len(errors), preview)
+    except asyncio.CancelledError:
+        pass
+
+
+def _start_integrity_probe_task() -> None:
+    """创建运行期巡检任务（幂等）；测试进程与显式关闭时不创建。"""
+    global _probe_task
+    if os.environ.get("DB_INTEGRITY_PROBE_SECONDS") == "0":
+        return
+    if _in_test_process():
+        return
+    if _probe_task is not None and not _probe_task.done():
+        return
+    raw = os.environ.get("DB_INTEGRITY_PROBE_SECONDS", "")
+    try:
+        interval = float(raw) if raw.strip() else float(
+            _INTEGRITY_PROBE_DEFAULT_SECONDS)
+    except ValueError:
+        interval = float(_INTEGRITY_PROBE_DEFAULT_SECONDS)
+    if interval <= 0:
+        return
+    _probe_task = asyncio.create_task(
+        _integrity_probe_loop(interval), name="db-integrity-probe")
+    logger.info(
+        "运行期完整性巡检已启动（间隔 %ds；DB_INTEGRITY_PROBE_SECONDS 可调，0=关闭）",
+        int(interval))
+
+
 async def init_db():
     # ✅ 启动自愈（2026-09-29）：主库完好但 WAL 损坏会让整库被判 malformed，
     #    此前必须人工停服+清理 WAL 才能恢复。现于首次建连前自动尝试自愈。
     _self_heal_corrupt_wal()
+    # ✅ R165（2026-11-03）：主库本身损坏（无 WAL 也可能存在）的启动期闸门——
+    #    损坏范围可归属到可再生缓存表时自动重建，否则 WARNING 点名保持原状。
+    #    生产实证（2026-11-01）：无 WAL + 主库 system_logs 损坏静默运行数小时，
+    #    正文生成全部失败且前端只见「后端连接超时（30s 无响应）」。
+    _startup_db_integrity_gate()
     conn = await get_conn()
     await conn.executescript(SCHEMA_SQL)
     await _migrate(conn)
     await conn.commit()
     logger.info("数据库初始化完成: %s", DB_PATH)
+    # ✅ R165b（2026-11-03）：运行期完整性巡检 —— J: USB 盘持续丢页（事件日志
+    #    实证 11-01/11-02 每日数百条寻页错误），启动闸门只覆盖进程启动时刻。
+    _start_integrity_probe_task()
 
 
 async def _migrate(conn: aiosqlite.Connection):
@@ -932,8 +1237,8 @@ async def close_db():
         #    重复关闭而中断 —— 否则启动/关闭竞态下残留的池连接永远不被清理。
         try:
             await _conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("close_db 关闭全局连接失败（可能已关闭，忽略）: %s", e)
         _conn = None
         _conn_path = None
     # P1-3：关闭连接池中全部空闲连接
@@ -943,8 +1248,8 @@ async def close_db():
             _db_pool_total -= 1
             try:
                 await c.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("close_db 关闭写池连接失败（忽略）: %s", e)
     # Phase 3：关闭只读连接池
     async with _read_pool_cv:
         while _read_pool:
@@ -952,8 +1257,8 @@ async def close_db():
             _read_pool_total -= 1
             try:
                 await c.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("close_db 关闭读池连接失败（忽略）: %s", e)
 
 
 # P1-3 性能优化：FastAPI 依赖连接池（有界、请求结束归还）
@@ -979,8 +1284,8 @@ async def _acquire_pool_conn() -> aiosqlite.Connection:
                 _db_pool_total -= 1
                 try:
                     await _c.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("DB_PATH 切换关闭旧写池连接失败（清理路径，忽略）: %s", e)
             _db_pool_path = None
         while True:
             if _db_pool:
@@ -992,8 +1297,8 @@ async def _acquire_pool_conn() -> aiosqlite.Connection:
                     _db_pool_total -= 1
                     try:
                         await conn.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("剔除失效写池连接时关闭失败（清理路径，忽略）: %s", e)
                     logger.warning("剔除失效写池连接（poisoned 或已关闭）")
                     continue
                 # PRAGMA wal_checkpoint 探针：真实 IO 往返，覆盖"写入才抖"场景
@@ -1001,8 +1306,8 @@ async def _acquire_pool_conn() -> aiosqlite.Connection:
                     _db_pool_total -= 1
                     try:
                         await conn.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("剔除写池连接时关闭失败（探活失败，忽略）: %s", e)
                     logger.warning("剔除写池连接：探活 disk I/O 失败")
                     continue
                 return conn
@@ -1022,8 +1327,8 @@ async def _acquire_pool_conn() -> aiosqlite.Connection:
                     _db_pool_total -= 1
                     try:
                         await conn.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("关闭新建写池连接失败（探活失败，忽略）: %s", e)
                     last_err = Exception("新建写池连接探活失败")
                     continue
                 return conn
@@ -1048,8 +1353,8 @@ async def _release_pool_conn(conn: aiosqlite.Connection) -> None:
             _db_pool_cv.notify()  # 容量已释放，唤醒等待者
         try:
             await conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("剔除失效写池连接（poisoned/已关闭）时关闭失败（忽略）: %s", e)
         return
     if not await _probe_conn(conn):
         async with _db_pool_cv:
@@ -1057,8 +1362,8 @@ async def _release_pool_conn(conn: aiosqlite.Connection) -> None:
             _db_pool_cv.notify()  # 容量已释放，唤醒等待者
         try:
             await conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("剔除写池连接（归还前探活失败）时关闭失败（忽略）: %s", e)
         logger.warning("剔除写池连接：归还前探活 disk I/O 失败")
         return
     async with _db_pool_cv:
@@ -1082,8 +1387,8 @@ async def get_db():
         # 对无事务连接 rollback 是无害 no-op。
         try:
             await conn.rollback()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("get_db 归还前回滚失败（忽略）: %s", e)
         await _release_pool_conn(conn)
 
 
@@ -1102,15 +1407,15 @@ async def write_tx_conn():
     except BaseException:
         try:
             await conn.rollback()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("write_tx_conn 异常路径回滚失败（忽略）: %s", e)
         raise
     finally:
         # 归还前清残留事务（正常路径已 commit 则为无害 no-op）
         try:
             await conn.rollback()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("write_tx_conn 归还前回滚失败（忽略）: %s", e)
         await _release_pool_conn(conn)
 
 
@@ -1156,8 +1461,8 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
                 _read_pool_total -= 1
                 try:
                     await _c.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("DB_PATH 切换关闭旧读池连接失败（清理路径，忽略）: %s", e)
             _read_pool_path = None
         while True:
             if _read_pool:
@@ -1168,8 +1473,8 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
                     _read_pool_total -= 1
                     try:
                         await conn.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("剔除失效读池连接时关闭失败（清理路径，忽略）: %s", e)
                     logger.warning("剔除失效读池连接（poisoned 或已关闭）")
                     continue
                 # 用 PRAGMA wal_checkpoint(NOOP) 走 IO 层，覆盖"读取时抖"场景
@@ -1177,8 +1482,8 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
                     _read_pool_total -= 1
                     try:
                         await conn.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("剔除读池连接时关闭失败（探活失败，忽略）: %s", e)
                     logger.warning("剔除读池连接：探活 disk I/O 失败")
                     continue
                 return conn
@@ -1200,8 +1505,8 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
                 _read_pool_total -= 1
                 try:
                     await conn.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("关闭新建读池连接失败（探活失败，忽略）: %s", e)
                 last_err = Exception("新建读池连接探活失败")
                 continue
             return conn
@@ -1224,8 +1529,8 @@ async def _release_read_conn(conn: aiosqlite.Connection) -> None:
             _read_pool_cv.notify()  # 容量已释放，唤醒等待者
         try:
             await conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("剔除失效读池连接（poisoned/已关闭）时关闭失败（忽略）: %s", e)
         return
     if not await _read_probe(conn):
         async with _read_pool_cv:
@@ -1233,8 +1538,8 @@ async def _release_read_conn(conn: aiosqlite.Connection) -> None:
             _read_pool_cv.notify()  # 容量已释放，唤醒等待者
         try:
             await conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("剔除读池连接（归还前探活失败）时关闭失败（忽略）: %s", e)
         logger.warning("剔除读池连接：归还前探活 disk I/O 失败")
         return
     async with _read_pool_cv:

@@ -412,7 +412,7 @@ def detect_architecture_subtype(data: dict, section_title: str = None) -> str | 
         if isinstance(data, dict):
             extract_labels(data)
     except Exception as _e:
-        pass
+        logger.debug("图表子类型判定：载荷标签提取失败（降级为仅章节标题关键词）: %s", _e)
 
     # 添加章节标题关键词
     if section_title:

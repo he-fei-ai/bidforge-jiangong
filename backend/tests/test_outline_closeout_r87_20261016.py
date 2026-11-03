@@ -65,7 +65,14 @@ CANONICAL = [("1", 1), ("3.2", 2), ("3.2.4", 3), ("3.2.4.5", 4), ("1.2.3.4.5", 5
 
 
 def _fe_src() -> str:
-    return FE_PAGE.read_bytes().decode("utf-8")
+    # 大文件拆分后：stripOutlineNumbering / CN_NUMBERS / storedIdParts 调用点迁入
+    # pages/schemeWorkbench/outlineNumbering.ts —— 聚合 facade + 子模块读取，
+    # parity 断言阈值与语义不变。
+    parts = [FE_PAGE.read_bytes().decode("utf-8")]
+    wb = REPO / "frontend" / "src" / "pages" / "schemeWorkbench"
+    for p in sorted(list(wb.glob("*.ts")) + list(wb.glob("*.tsx"))):
+        parts.append(p.read_bytes().decode("utf-8"))
+    return "\n".join(parts)
 
 
 def _fe_transpiled() -> str:

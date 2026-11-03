@@ -3,6 +3,7 @@ import {
   App, Card, Table, Button, Modal, Form, Input, Select, Space,
   Tag, Typography,
 } from "antd";
+import type { TableColumnsType } from "antd";
 import { PlusOutlined, DeleteOutlined, EditOutlined,
   FolderOutlined, FileTextOutlined, RocketOutlined,
   ArrowUpOutlined } from "@ant-design/icons";
@@ -18,11 +19,25 @@ const ENGINEERING_TYPES = [
   "地铁", "桥梁", "隧道", "管廊", "机电安装",
 ];
 
+/** 项目列表项（GET /projects），表格行与编辑弹窗预填共用 */
+interface ProjectRow {
+  id: string;
+  name: string;
+  engineering_type?: string;
+  description?: string;
+  location?: string;
+  client_name?: string;
+  contractor_name?: string;
+  project_period?: string;
+  scheme_count?: number;
+  status?: string;
+}
+
 export default function ProjectListPage() {
   const { message: _antdMsg, modal } = App.useApp();
   const msg = useAntdMessageHub(_antdMsg, "项目列表");
   const navigate = useNavigate();
-  const [items, setItems] = useState<any[]>([]);
+  const [items, setItems] = useState<ProjectRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -34,8 +49,9 @@ export default function ProjectListPage() {
     try {
       const { data } = await projectsApi.list();
       setItems(data.items || []);
-    } catch (e: any) {
-      msg.error(e.message || "加载失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "加载失败");
     }
     setLoading(false);
   };
@@ -60,15 +76,16 @@ export default function ProjectListPage() {
       // ✅ R91（2026-10-17）：新建/改名项目即时同步左侧项目树
       //    （旧实现侧栏只在挂载时拉一次，新项目不上树，必须 F5）。
       notifySidebarTreeRefresh();
-    } catch (e: any) {
-      if (e.errorFields) return;
-      msg.error(e.message || (editingId ? "更新失败" : "创建失败"));
+    } catch (e: unknown) {
+      const err = e as { message?: string; errorFields?: unknown };
+      if (err.errorFields) return;
+      msg.error(err.message || (editingId ? "更新失败" : "创建失败"));
     } finally {
       setSubmitting(false);
     }
   };
 
-  const openEdit = (record: any) => {
+  const openEdit = (record: ProjectRow) => {
     setEditingId(record.id);
     form.setFieldsValue({
       name: record.name,
@@ -99,8 +116,9 @@ export default function ProjectListPage() {
           msg.success("已删除");
           load();
           notifySidebarTreeRefresh(); // ✅ R91：删除项目即时从左侧项目树消失
-        } catch (e: any) {
-          msg.error(e.message || "删除失败");
+        } catch (e: unknown) {
+          const err = e as { message?: string };
+          msg.error(err.message || "删除失败");
         }
       },
     });
@@ -111,10 +129,10 @@ export default function ProjectListPage() {
   const totalSchemes = items.reduce((s, p) => s + (p.scheme_count ?? 0), 0);
   const activeProjects = items.filter((p) => !p.status || p.status === "active").length;
 
-  const columns = [
+  const columns: TableColumnsType<ProjectRow> = [
     {
       title: "项目名称", dataIndex: "name", key: "name",
-      render: (text: string, record: any) => (
+      render: (text: string, record) => (
         <a onClick={() => navigate(`/project/${record.id}`)}>{text}</a>
       ),
     },
@@ -150,7 +168,7 @@ export default function ProjectListPage() {
     },
     {
       title: "操作", key: "action",
-      render: (_: any, record: any) => (
+      render: (_, record) => (
         <Space>
           <Button size="small" type="link" onClick={() => navigate(`/project/${record.id}`)}>进入</Button>
           <Button size="small" type="link" onClick={() => openEdit(record)}>编辑</Button>

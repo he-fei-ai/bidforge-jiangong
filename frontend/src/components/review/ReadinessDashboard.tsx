@@ -182,8 +182,9 @@ function ReadinessDashboard({
         );
       }
       loadRuns();
-    } catch (e: any) {
-      msg.error(e?.message || "总检失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err?.message || "总检失败");
     } finally {
       if (requestId === overviewRequestId.current) setLoading(false);
     }
@@ -197,8 +198,9 @@ function ReadinessDashboard({
       setRules(data.items || []);
       setDims(data.dimensions || []);
       setRuleVersion(data.rule_version || "");
-    } catch (e: any) {
-      msg.error(e?.message || "规则目录加载失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err?.message || "规则目录加载失败");
     }
   }, [rules.length, msg]);
 
@@ -229,8 +231,9 @@ function ReadinessDashboard({
       if (data.stale) {
         msg.warning("注意：本次报告基于的正文已发生变更，结论可能已过期，建议先重新总检再导出");
       }
-    } catch (e: any) {
-      msg.error(e?.message || "报告导出失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err?.message || "报告导出失败");
     } finally {
       if (requestId === reportRequestId.current) setReporting(false);
     }

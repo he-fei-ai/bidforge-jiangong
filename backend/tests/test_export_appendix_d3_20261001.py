@@ -25,6 +25,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 EX_PATH = os.path.join(BACKEND, "app", "routers", "export.py")
 CFG_PATH = os.path.join(BACKEND, "app", "config.py")
+# 大文件拆分后导出模块簇：facade + 拆分模块，锚点读取须聚合（判据不放宽）
+EX_CLUSTER = [EX_PATH] + [
+    os.path.join(BACKEND, "app", "routers", name)
+    for name in ("_export_cache.py", "_export_docx_parts.py", "_export_issue_scan.py")
+]
 
 
 def _src(path):
@@ -33,11 +38,21 @@ def _src(path):
 
 
 def _fn(name):
-    src = _src(EX_PATH)
-    for node in ast.parse(src).body:
-        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == name:
-            return ast.get_source_segment(src, node) or ""
-    raise AssertionError("未找到函数 " + name)
+    """在导出模块簇（facade + 拆分模块）中取函数源码。
+
+    比（拆分前的）单文件查找**更严**：要求该函数在全簇恰有一处定义
+    （唯一实现），既接受拆分后的新位置，也拦截拆分期的复制分叉。
+    """
+    hits = []
+    for path in EX_CLUSTER:
+        src = _src(path)
+        for node in ast.parse(src).body:
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == name:
+                hits.append((path, ast.get_source_segment(src, node) or ""))
+    assert len(hits) == 1, (
+        "函数 %s 应在导出模块簇中恰有一处定义，实际 %d 处: %s"
+        % (name, len(hits), [os.path.basename(p) for p, _ in hits]))
+    return hits[0][1]
 
 
 # ---------------------------------------------------------------------------

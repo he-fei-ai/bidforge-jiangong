@@ -40,6 +40,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -1004,6 +1005,14 @@ async def stage_fixes(db, *, scheme_id: str, findings: list[dict],
             fs, key=lambda x: SEVERITY_ORDER.get(x.get("severity") or "", 9))
         _content, items = await _chain_section_fixes(
             section, fs_sorted, scheme, facts, standards_text)
+        # ✅ R168（stage→confirm 竞态守卫）：暂存时记录本章**原始正文**指纹。
+        #    暂存与确认之间正文被手动编辑 / 其它修复批次改写时，暂存的 after
+        #    已基于过期正文 —— confirm 前缀路径落库前比对该指纹，漂移即跳过
+        #    本章（加法式键，旧批次无此键保持旧行为）。
+        _sha = hashlib.sha256(
+            (section.get("content") or "").encode("utf-8")).hexdigest()[:16]
+        for _it in items:
+            _it["content_sha_before"] = _sha
         all_items.extend(items)
 
     repaired = sum(1 for i in all_items if i["status"] == "repaired")

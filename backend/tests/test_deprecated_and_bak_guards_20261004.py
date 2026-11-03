@@ -51,6 +51,8 @@ _EXCLUDE_DIRS = {
     ".idea", ".vscode", "dist", "build", "coverage", ".pytest_cache",
     # ↓ R85：运行时/生成物目录（只可能装数据，不可能装源码备份）
     "data", "logs", "artifacts", ".trash", ".ruff_cache",
+    # ↓ data/ 的手工快照备份（data_on_J_backup_*，只装运行时数据副本）
+    "data_on_J_backup_20261103",
 }
 
 #: R85 预算锁：全量扫描的**目录数上限**。超限即说明又有人往被排除树之外

@@ -149,8 +149,8 @@ class OpenAICompatibleProvider(BaseProvider):
                 body_text = ""
                 try:
                     body_text = str(getattr(getattr(e, "response", None), "text", "") or "")[:800]
-                except Exception:
-                    pass
+                except Exception as be:
+                    logger.debug("读取 400 响应体失败（降级为空 body 判定）: %s", be)
                 if attempt < 2 and status == 400:
                     # stream_options 不支持
                     if "stream_options" in payload and "stream_options" not in _stream_downgraded:

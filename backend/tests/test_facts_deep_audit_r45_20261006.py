@@ -420,24 +420,30 @@ class TestFrontendDialogConvention:
         一处接线。护栏随之改锚组件本身 —— 判据仍是同一风险：不得回到
         window.prompt，且必须存在「打开弹层 + 输入文案」两个受控状态。
 
-        取区间而不是抓函数体：`export function x({...})` 的参数列表本身就以
-        列首的 `}` 结束，按「行首 `}`」截断会停在函数签名那一行（护栏自身
-        判据失真的又一例，见 AGENTS.md §5.14）。
+        大文件拆分后组件迁至 `pages/schemeWorkbench/FactsAdjustPanel.tsx` 独立成
+        文件，原「区块标记 → 页面 default export」区间锚点随迁失效；改为直接锚
+        组件文件 + 全 pages/ 树内「唯一实现」断言（等价于原 marker 唯一性约束，
+        且更严格），行为断言逐条保留不变。
         """
-        p = os.path.join(FRONTEND_SRC, "pages", "SchemeWorkbenchPage.tsx")
-        assert os.path.isfile(p), "未找到 SchemeWorkbenchPage.tsx"
-        src = io.open(p, encoding="utf-8").read()
-        # 区块以组件上方的说明块起始；两者在文件内各出现一次，取区间不会误切
-        marker = "全局事实 · AI 调整面板"
-        assert src.count(marker) == 1, (
-            f"事实调整区块标记应唯一，实际 {src.count(marker)} 次（区间锚点必须唯一）")
-        start = src.index(marker)
-        end = src.index("export default function SchemeWorkbenchPage", start)
-        body = src[start:end]
-        # 组件必须是导出的具名函数：可被单测单独渲染（这是本次抽出换来的价值）
-        assert "export function FactsAdjustPanel" in body, (
-            "AI 调整事实入口必须是 export function FactsAdjustPanel"
-            "（可被单测单独渲染的独立组件）")
+        page = os.path.join(FRONTEND_SRC, "pages", "SchemeWorkbenchPage.tsx")
+        panel = os.path.join(FRONTEND_SRC, "pages", "schemeWorkbench",
+                             "FactsAdjustPanel.tsx")
+        assert os.path.isfile(page), "未找到 SchemeWorkbenchPage.tsx"
+        assert os.path.isfile(panel), "未找到 schemeWorkbench/FactsAdjustPanel.tsx"
+        # 组件必须是唯一实现（facade + schemeWorkbench/ 子模块内不得出现第二份定义）：
+        # 可被单测单独渲染（这是本次抽出换来的价值）
+        pages_dir = os.path.join(FRONTEND_SRC, "pages")
+        impls = []
+        for dirpath, _d, fnames in os.walk(pages_dir):
+            for fn in fnames:
+                if fn.endswith((".ts", ".tsx")):
+                    p = os.path.join(dirpath, fn)
+                    if "export function FactsAdjustPanel" in io.open(
+                            p, encoding="utf-8").read():
+                        impls.append(os.path.relpath(p, FRONTEND_SRC))
+        assert impls == [os.path.relpath(panel, FRONTEND_SRC)], (
+            f"FactsAdjustPanel 必须是唯一具名导出实现，实际：{impls}")
+        body = io.open(panel, encoding="utf-8").read()
         # window.prompt 只查代码行：组件说明块里在讲述「原先用过 window.prompt」
         # 这段历史，按整段文本查会误伤注释（整仓代码行的判据见上一条测试）
         code_lines = [
@@ -452,8 +458,9 @@ class TestFrontendDialogConvention:
         # 页面只能有一处接线：保证状态作用域唯一，切换方案不会串台。
         # 只数代码行 —— 组件上方的说明行里也在提「<FactsAdjustPanel /> 处的
         # preview/apply」，整段文本计数会把它数成第二处接线。
+        page_src = io.open(page, encoding="utf-8").read()
         wires = [
-            ln for ln in src.splitlines()
+            ln for ln in page_src.splitlines()
             if "<FactsAdjustPanel" in ln
             and not ln.strip().startswith(("//", "*", "/*", "{/*"))
         ]

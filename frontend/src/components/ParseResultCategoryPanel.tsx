@@ -31,6 +31,7 @@ import {
   isMissingBaResult,
   mergeBaItem,
   type BaGroup,
+  type BaItemDef,
   type BaStoredItem,
 } from "../utils/bidAnalysis";
 
@@ -111,8 +112,12 @@ export function useNarrowScreen(query: string = NARROW_QUERY): boolean {
   return narrow;
 }
 
-/** 单个解析项的状态标签（口径与 BidAnalysisTab 一致，避免同一数据两套显示） */
-export function baStatusTag(stored: BaStoredItem | undefined, def?: any): React.ReactNode {
+/** 单个解析项的状态标签（口径与 BidAnalysisTab 一致，避免同一数据两套显示）。
+ *  本函数仅消费 output_type，第二参数放宽为该字段的最小投影（定义）或完整存储项（合并态选中项）。 */
+export function baStatusTag(
+  stored: BaStoredItem | undefined,
+  def?: BaStoredItem | Pick<BaItemDef, "output_type">,
+): React.ReactNode {
   const status = stored?.status || "idle";
   const content = stored?.content || "";
   if (status === "running") {
@@ -150,18 +155,18 @@ export type ParseResultCategoryPanelProps = {
   groups: BaGroup[];
   /** 已存储的解析结果（后端 /bid-analysis/results 的 items） */
   items: BaStoredItem[];
-  /** 当前选中项（与「提取项目」Tab 共享，跨 Tab 一致） */
-  selectedItem: any | null;
+  /** 当前选中项（与「提取项目」Tab 共享，跨 Tab 一致；宿主状态为 mergeBaItem 产物，落 BaStoredItem 形态） */
+  selectedItem: BaStoredItem | null;
   /** 加载中（首次加载且无分组时展示 Spin） */
   loading?: boolean;
   /** 加载失败（展示 Alert，可重试） */
   error?: string | null;
   /** 选中某解析项（上抛，由页面统一持有 selectedBaItem） */
-  onSelectItem: (item: any) => void;
+  onSelectItem: (item: BaStoredItem) => void;
   /** 人工校正（可选；未传则隐藏该操作） */
-  onEditItem?: (item: any) => void;
+  onEditItem?: (item: BaStoredItem) => void;
   /** 查看完整（可选；未传则隐藏该操作） */
-  onOpenFullView?: (item: any) => void;
+  onOpenFullView?: (item: BaStoredItem) => void;
   /** 刷新解析结果（可选） */
   onRefresh?: () => void;
   /**
@@ -298,7 +303,7 @@ export default function ParseResultCategoryPanel({
     setExpanded((prev) => (prev[key] ? prev : { ...prev, [key]: true }));
   }, [selectedItem, groups]);
 
-  const selectItem = (def: any, stored?: BaStoredItem) => {
+  const selectItem = (def: BaItemDef, stored?: BaStoredItem) => {
     onSelectItem(mergeBaItem(def, stored));
     if (narrow) setDrawerOpen(false);
   };
@@ -308,7 +313,7 @@ export default function ParseResultCategoryPanel({
     setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const handleCopy = async (item: any) => {
+  const handleCopy = async (item: BaStoredItem) => {
     if (!item?.content) {
       message.warning("该项暂无内容可复制");
       return;

@@ -35,6 +35,13 @@ import type { BaGroup, BaStoredItem } from "../utils/bidAnalysis";
 
 const { Text } = Typography;
 
+/**
+ * antd Upload beforeUpload 的 fileList 元素兼容形态：不同版本/链路下元素可能是
+ * 原生 RcFile，也可能带 originFileObj 包装（UploadFile 形态）。历史实现按
+ * 「有 originFileObj 取之，否则用自身」兜底，这里仅收紧断言目标、不改运行时行为。
+ */
+type BeforeUploadFile = File & { originFileObj?: File };
+
 function formatMb(bytes: number): number {
   return Math.round(bytes / (1024 * 1024));
 }
@@ -70,16 +77,16 @@ export type UploadParseTabProps = {
   parseGroups?: BaGroup[];
   /** 已存储的解析结果（后端 /bid-analysis/results 的 items） */
   parseItems?: BaStoredItem[];
-  /** 当前选中解析项（与「提取项目」Tab 共享） */
-  parseSelectedItem?: any | null;
+  /** 当前选中解析项（与「提取项目」Tab 共享；宿主状态为 mergeBaItem 产物，落 BaStoredItem 形态） */
+  parseSelectedItem?: BaStoredItem | null;
   parseLoading?: boolean;
   parseError?: string | null;
   /** 选中解析项（传入后分类栏才渲染） */
-  onParseSelectItem?: (item: any) => void;
+  onParseSelectItem?: (item: BaStoredItem) => void;
   /** 人工校正当前解析项（可选） */
-  onParseEditItem?: (item: any) => void;
+  onParseEditItem?: (item: BaStoredItem) => void;
   /** 查看完整（可选） */
-  onParseFullView?: (item: any) => void;
+  onParseFullView?: (item: BaStoredItem) => void;
   /** 刷新解析结果（可选） */
   onParseRefresh?: () => void;
   /**
@@ -178,7 +185,7 @@ export default function UploadParseTab({
             disabled={busy}
             beforeUpload={(file, fileList) => {
               if (fileList[0] === file) {
-                const files = fileList.map((f) => (f as any).originFileObj || f) as File[];
+                const files = fileList.map((f) => (f as BeforeUploadFile).originFileObj || f) as File[];
                 // ✅ 硬校验：accept 只过滤文件选择框，拖拽可绕过，故这里再按
                 //    扩展名白名单 + 后端下发的大小上限剔除非法文件；合法文件照常
                 //    上传，避免「整批被后端拒绝」或「白等大文件上传」。

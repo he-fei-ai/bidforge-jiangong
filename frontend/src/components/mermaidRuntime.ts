@@ -13,17 +13,30 @@
  * - 并发调用共享同一个 pending Promise，避免重复加载与重复 initialize。
  */
 
-let mermaidReady = false;
-let mermaidMod: any = null;
-let mermaidPending: Promise<any> | null = null;
+/**
+ * mermaid 动态导入实例的最小 API 面。
+ * mermaid 为 ESM/CJS 双构建且版本演进快（第三方库版本不可控），完整类型面不稳定；
+ * 本项目消费方（MarkdownRenderer / exportCharts）只使用 initialize 与 render 两个方法。
+ */
+interface MermaidRuntime {
+  initialize(config: Record<string, unknown>): void;
+  render(id: string, text: string): Promise<{ svg: string }>;
+}
 
-export async function ensureMermaid(): Promise<any> {
+let mermaidReady = false;
+let mermaidMod: MermaidRuntime | null = null;
+let mermaidPending: Promise<MermaidRuntime> | null = null;
+
+export async function ensureMermaid(): Promise<MermaidRuntime> {
   if (mermaidReady && mermaidMod) return mermaidMod;
   if (mermaidPending) return mermaidPending;
 
   mermaidPending = (async () => {
-    const raw: any = await import("mermaid");
-    const m: any = raw?.default ?? raw;
+    // mermaid 的 ESM 入口带 default，CJS 互操作下整体即实例（第三方版本不可控）；
+    // 历史实现按「有 default 取 default，否则整体即模块」兜底，运行时行为不变。
+    const raw: unknown = await import("mermaid");
+    const holder = raw as { default?: unknown };
+    const m = (holder.default ?? holder) as MermaidRuntime;
     m.initialize({
       startOnLoad: false,
       theme: "neutral",

@@ -35,12 +35,24 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 
 API_TS = "frontend/src/api/index.ts"
 PAGE_TSX = "frontend/src/pages/SchemeWorkbenchPage.tsx"
+# 大文件拆分后：页面内 handler 迁入 pages/schemeWorkbench/ 子模块（如 useReviewAudit.tsx），
+# 锚点读取需聚合 facade + 子模块，断言语义不变。
+PAGE_WB_DIR = "frontend/src/pages/schemeWorkbench"
 COMP_PY = "backend/app/routers/compliance.py"
 FE_TEST = "frontend/src/tests/consistencyAuditErrorR104.test.ts"
 
 
 def _read(rel: str) -> str:
     return io.open(_ROOT / rel, encoding="utf-8-sig").read()
+
+
+def _page_sources() -> str:
+    """facade 页面 + schemeWorkbench/ 子模块聚合源码（拆分后等价读取范围）。"""
+    parts = [_read(PAGE_TSX)]
+    for p in sorted(list((_ROOT / PAGE_WB_DIR).glob("*.ts"))
+                    + list((_ROOT / PAGE_WB_DIR).glob("*.tsx"))):
+        parts.append(io.open(p, encoding="utf-8-sig").read())
+    return "\n".join(parts)
 
 
 def _fn_body(src: str, name: str) -> str:
@@ -110,7 +122,11 @@ class TestFrontendStringDetailChain:
         assert (
             "Array.isArray(rawDetail) ? detailArrayToText(rawDetail) : rawDetail"
         ) in s
-        assert "const rawDetail = data?.detail ?? data?.message" in s
+        # any 类型整改后 data 收敛为类型化别名 body —— 二者语义等价（同一载荷），
+        # 仍要求同一标识符在三元两侧成对出现，不允许分裂成两个来源。
+        m = re.search(
+            r"const rawDetail = (data|body)\?\.detail \?\? \1\?\.message", s)
+        assert m, "未找到 rawDetail 单出口三元（data/body 别名形态均未命中）"
 
     def test_string_branch_writes_error_message_exactly_once(self):
         s = _read(API_TS)
@@ -129,10 +145,17 @@ class TestAuditHandlerConsumesInterceptorMessage:
     """页面的兜底文案只允许兜底 —— 主路径必须消费拦截器写入的 e.message。"""
 
     def test_consistency_audit_handler_reads_e_message(self):
-        body = _handle_body(_read(PAGE_TSX), "handleConsistencyAudit")
-        assert "msg.error(e.message" in body, (
-            "一致性审计失败提示必须透传拦截器的 e.message；"
-            "只写死自己的文案 = 后端 422 文案永远到不了用户"
+        body = _handle_body(_page_sources(), "handleConsistencyAudit")
+        # 大文件拆分后 handler 迁入 pages/schemeWorkbench/useReviewAudit.tsx，
+        # 捕获参数由 e 更名 err，且 message 与兜底文案合并为同一表达式：
+        #   msg.error(err.message || "一致性审计失败")
+        # 语义等价且更严（message 必须在 || 之前 = 主路径优先消费拦截器文案）。
+        merged = re.search(
+            r"msg\.error\(\s*\w+\.message\s*\|\|\s*[\"']一致性审计失败[\"']\s*\)", body)
+        legacy = "msg.error(e.message" in body and '"一致性审计失败"' in body
+        assert merged or legacy, (
+            "一致性审计失败提示必须消费拦截器写入的 message（主路径在前），"
+            "并保留兜底文案；只写死自己的文案 = 后端 422 文案永远到不了用户"
         )
         # 兜底文案保留（拦截器未写入时的最后防线），但主路径在前
         assert '"一致性审计失败"' in body

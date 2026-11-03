@@ -69,8 +69,9 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
         section_id: finding.section_id || undefined,
       });
       setPlan(data as AutoFixPlanResult);
-    } catch (e: any) {
-      msg.error(`定位失败：${e?.message || e}`);
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(`定位失败：${err?.message || err}`);
     } finally {
       setLoading(false);
     }
@@ -101,8 +102,9 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
       } else {
         msg.warning("修复未通过校验，正文已保留原文");
       }
-    } catch (e: any) {
-      msg.error(`修复失败：${e?.message || e}`);
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(`修复失败：${err?.message || err}`);
     } finally {
       setApplying(false);
     }
@@ -116,8 +118,9 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
       msg.success("已回滚到修复前正文");
       setResult(null);
       onFixed?.("");
-    } catch (e: any) {
-      msg.error(`回滚失败：${e?.message || e}`);
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(`回滚失败：${err?.message || err}`);
     } finally {
       setRolling(false);
     }

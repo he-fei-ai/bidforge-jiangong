@@ -269,12 +269,21 @@ class TestResidueWiring:
             "export_pdf": {"_display_scheme_name"},
         }
         tree = ast.parse(Path(exp.__file__).read_text(encoding="utf-8"))
+        # 拆分兼容：聚合 export 子模块（_scheme_form_header / _add_compilation_note_page
+        # 已拆至 _export_docx_parts.py），并对经 facade 延迟绑定的调用（_sh.X）按
+        # Attribute 归一取名。
+        import glob as _glob
+        _base = Path(exp.__file__).parent
+        for _p in sorted(_glob.glob(str(_base / "_export_*.py"))):
+            tree.body.extend(ast.parse(Path(_p).read_text(encoding="utf-8")).body)
         fns = {n.name: n for n in tree.body
                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                and n.name in targets}
         assert set(fns) == set(targets)
         for name, need in targets.items():
-            called = {n.func.id for n in ast.walk(fns[name])
-                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+            called = {getattr(n.func, "id", None) or getattr(n.func, "attr", None)
+                      for n in ast.walk(fns[name])
+                      if isinstance(n, ast.Call)
+                      and isinstance(n.func, (ast.Name, ast.Attribute))}
             assert not (need - called), f"{name} 未接 {sorted(need - called)}"
 

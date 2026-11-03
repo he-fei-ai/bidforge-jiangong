@@ -711,7 +711,9 @@ class TestOutlineEarlyTaskIdDispatch:
             "目录链的 with_heartbeat 没接 on_end → FIX-6 对本链零效果")
 
     def test_guard_calls_mark_stream_ended(self):
-        guard = _fn_ast("routers/sse_handlers.py", "_stream_end_guard")
+        # 拆分兼容：_stream_end_guard 随目录评审阶段下沉 _sse_outline_review.py
+        # （facade 保留转发导入，原名原对象）。
+        guard = _fn_ast("routers/_sse_outline_review.py", "_stream_end_guard")
         inner = [n for n in ast.walk(guard)
                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                  and n.name == "_on_end"]

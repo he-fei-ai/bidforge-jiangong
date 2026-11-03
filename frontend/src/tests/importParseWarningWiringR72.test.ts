@@ -61,7 +61,10 @@ describe("R72 · 前端 onSseEvent 必须消费 warning 事件（不静默丢弃
 
   it("反向锚：若摘除 warning 分支，判据必须变红（证明扫描真的在守）", () => {
     // ⚠️ 四连空格用 {4} 量词书写：字面连续空格会被 eslint no-regex-spaces 判红
-    const stripped = PAGE.replace(/if \(evt\.event === "warning"\)[\s\S]*?\n {4}\}\n/, "");
+    // ⚠️ 行尾用 \r?\n 兼容：本仓 core.autocrlf=true，Windows 工作区是 CRLF 检出，
+    //    纯 \n 收尾的正则在 CRLF 文件上永不匹配 ⇒ 剥离变空操作、反向锚常绿失守
+    //    （2026-11-02 any 清理专项回归时发现，属测试自身对行尾的脆弱性）。
+    const stripped = PAGE.replace(/if \(evt\.event === "warning"\)[\s\S]*?\r?\n {4}\}\r?\n/, "");
     const body = onSseEventBody(stripped);
     expect(body).not.toContain('evt.event === "warning"');
   });

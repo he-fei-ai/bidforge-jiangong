@@ -29,11 +29,15 @@ import { reviewAutoFixApi } from "../../api";
 import { useAntdMessageHub } from "../../utils/activityCenter";
 import type {
   AutoFixCollectResult, AutoFixConfirmResult, AutoFixStageItem, AutoFixStageResult,
+  AutoFixTarget, PreflightFinding,
 } from "../../types/audit";
 
 const { Text, Paragraph } = Typography;
 
 const itemKey = (r: AutoFixStageItem) => `${r.rule_id}|${r.section_id}`;
+
+/** 后端 /collect 在 finding 上附加的定位预览（types/audit.ts 的 PreflightFinding 暂未建模该加法字段） */
+type CollectFinding = PreflightFinding & { targets?: AutoFixTarget[] };
 
 export interface BatchFixModalProps {
   schemeId: string;
@@ -80,8 +84,9 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
     try {
       const { data } = await reviewAutoFixApi.collect(schemeId, { scope: "all_blocking" });
       setCollectData(data as AutoFixCollectResult);
-    } catch (e: any) {
-      msg.error(`收集失败：${e?.message || e}`);
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(`收集失败：${err?.message || err}`);
     } finally {
       setBusy(false);
     }
@@ -113,8 +118,9 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
         msg.warning(`${s.skipped_sections!.length} 个章节因单次修复上限本轮未处理，可再次点击「一键修复」处理剩余章节`);
       }
       setPhase("reviewing");
-    } catch (e: any) {
-      msg.error(`暂存失败：${e?.message || e}`);
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(`暂存失败：${err?.message || err}`);
     } finally {
       setBusy(false);
     }
@@ -188,8 +194,9 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
         msg.warning(`其中 ${skippedList.length} 项在确认时已失效被跳过（未修复），详见结果提示`);
       }
       onFixed?.(data.snapshot_id || "");
-    } catch (e: any) {
-      msg.error(`确认失败：${e?.message || e}`);
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(`确认失败：${err?.message || err}`);
     } finally {
       setBusy(false);
     }
@@ -197,7 +204,7 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
 
   const collectFixable = collectData?.items || [];
   const unsupportedCount = collectFixable.filter(
-    (f) => (f.autofix as any)?.fixable === false).length;
+    (f) => f.autofix?.fixable === false).length;
 
   return (
     <Modal
@@ -267,7 +274,7 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
                 description="点击下方「生成修复预览」将逐条做最小必要改写并展示前后对比，你可逐项决定是否接受。"
               />
               <div style={{ maxHeight: 320, overflowY: "auto" }}>
-                {collectFixable.map((f, i) => (
+                {collectFixable.map((f: CollectFinding, i) => (
                   <div
                     key={`${f.rule_id}-${i}`}
                     style={{
@@ -279,16 +286,16 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
                       <Tag color="blue" style={{ marginRight: 0 }}>{f.rule_id}</Tag>
                       <Text strong style={{ fontSize: 12 }}>{f.title}</Text>
                       <Tag color="volcano" style={{ marginRight: 0, fontSize: 11 }}>阻断</Tag>
-                      {(f.autofix as any)?.mode === "auto"
+                      {f.autofix?.mode === "auto"
                         ? <Tag color="green" style={{ marginRight: 0, fontSize: 11 }}>程序化</Tag>
                         : <Tag color="orange" style={{ marginRight: 0, fontSize: 11 }}>AI</Tag>}
                     </Space>
                     <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>
                       {f.detail}
                     </div>
-                    {Array.isArray((f as any).targets) && (f as any).targets.length > 0 && (
+                    {Array.isArray(f.targets) && f.targets.length > 0 && (
                       <Text type="secondary" style={{ fontSize: 11 }}>
-                        定位：{(f as any).targets.map((t: any) =>
+                        定位：{f.targets.map((t) =>
                           `${t.section_title || "（未命名）"} 第 ${t.line} 行` +
                           (t.sentence_idx ? `（第 ${t.sentence_idx}/${t.sentence_total} 句）` : ""))
                           .join("；")}

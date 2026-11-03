@@ -15,6 +15,21 @@ _fernet: Fernet | None = None
 _KEY_FILE = DATA_DIR / "secret_key.key"
 
 
+def _is_valid_fernet_key(text: str) -> bool:
+    """判定文本是否可作为 Fernet 密钥使用（非空 + 可构造）。
+
+    ✅ R169：排他创建竞态下，失败方轮询读取胜出方正在写入的密钥文件——
+    只有「完整落盘」的密钥才可用（半截内容构造 Fernet 必抛）。
+    """
+    if not text:
+        return False
+    try:
+        Fernet(text.encode())
+        return True
+    except Exception:
+        return False
+
+
 def _load_or_create_persistent_key() -> str:
     """从 data 目录加载持久化密钥；不存在则生成并落盘。
 
@@ -28,11 +43,29 @@ def _load_or_create_persistent_key() -> str:
                 return key
         key = Fernet.generate_key().decode()
         _KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _KEY_FILE.write_text(key, encoding="utf-8")
+        try:
+            # ✅ R169：排他创建（O_EXCL 语义）——多进程同时首启只有一进程胜出
+            #    写盘，失败方读取胜出方密钥（短暂重试等写入完成）。旧实现
+            #    write_text 各写各的，后写者覆盖先写者：先写进程已加密落库的
+            #    API Key 密文对后写进程即 key_broken（界面「密钥失效」、候选
+            #    被静默跳过）。
+            with open(_KEY_FILE, "x", encoding="utf-8") as f:
+                f.write(key)
+        except FileExistsError:
+            import time as _time
+            for _ in range(10):
+                existing = ""
+                if _KEY_FILE.exists():
+                    existing = _KEY_FILE.read_text(encoding="utf-8").strip()
+                if _is_valid_fernet_key(existing):
+                    return existing
+                _time.sleep(0.05)
+            # 抢占方 0.5s 内仍未写出完整密钥（异常场景）→ 交外层降级临时密钥
+            raise
         try:
             os.chmod(_KEY_FILE, 0o600)  # POSIX 下限制权限；Windows 尽力而为
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("密钥文件 chmod 600 失败（尽力而为，不影响密钥可用性）: %s", e)
         return key
     except Exception:
         # 落盘失败（只读盘等）退回进程级临时密钥，功能仍可用但重启失效
@@ -183,9 +216,9 @@ def master_key_source() -> dict:
             if content and is_valid_master_key(content):
                 return {"source": "persisted_file", "key_file_exists": True,
                         "effective_key": content}
-        except Exception:
+        except Exception as e:
             # 读文件失败等同「无可用文件密钥」，交给下方 temporary 兜底
-            pass
+            logger.debug("读取主密钥文件失败（%s，按无文件密钥处理）: %s", _KEY_FILE, e)
     return {"source": "temporary", "key_file_exists": file_exists, "effective_key": ""}
 
 
@@ -206,8 +239,8 @@ def backup_master_key() -> "str":
         shutil.copyfile(_KEY_FILE, bak)
         try:
             os.chmod(bak, 0o600)  # 与原密钥文件同权限；Windows 下尽力而为
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("备份密钥文件 chmod 600 失败（尽力而为）: %s", e)
         return str(bak)
     except Exception:
         logger.warning("主密钥备份失败（不影响轮转本身）", exc_info=True)
@@ -248,8 +281,8 @@ def rotate_master_key(new_key: "str | None" = None) -> "dict":
         _KEY_FILE.write_text(key, encoding="utf-8")
         try:
             os.chmod(_KEY_FILE, 0o600)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("轮转后密钥文件 chmod 600 失败（尽力而为）: %s", e)
     except Exception:
         logger.warning("主密钥落盘失败，已放弃本次轮转（旧密钥不受影响）",
                        exc_info=True)

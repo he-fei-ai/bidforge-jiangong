@@ -437,12 +437,19 @@ class TestFactsStaleSql:
 
 def test_tree_fingerprint_includes_facts_stale():
     """facts_stale 必须参与 treeFingerprint，否则轻量轮询会吞掉刚出现的徽标。"""
-    fp = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "frontend", "src", "pages", "SchemeWorkbenchPage.tsx")
-    if not os.path.exists(fp):
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # 大文件拆分后实现迁入 pages/schemeWorkbench/outlineTreeModel.ts，聚合读取
+    candidates = [os.path.join(
+        root, "frontend", "src", "pages", "SchemeWorkbenchPage.tsx")]
+    wb_dir = os.path.join(root, "frontend", "src", "pages", "schemeWorkbench")
+    if os.path.isdir(wb_dir):
+        candidates += sorted(
+            os.path.join(wb_dir, n) for n in os.listdir(wb_dir)
+            if n.endswith((".ts", ".tsx")))
+    if not any(os.path.exists(p) for p in candidates):
         pytest.skip("前端源码不在当前工作区")
-    src = open(fp, encoding="utf-8").read()
+    src = "\n".join(open(p, encoding="utf-8").read()
+                    for p in candidates if os.path.exists(p))
     m = re.search(r"export function treeFingerprint[\s\S]{0,900}?\n\}", src)
     assert m, "未找到 treeFingerprint 实现"
     assert "facts_stale" in m.group(0), (

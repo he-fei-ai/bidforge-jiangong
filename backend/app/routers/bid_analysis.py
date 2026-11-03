@@ -37,7 +37,10 @@ from app.services.ai.json_response import (
     GENERIC_REPAIR_KEY,
     collect_json_response_with_chat,
 )
-from app.services.ai.provider_factory import chat_with_fallback
+from app.services.ai.provider_factory import (
+    chat_with_fallback,
+    is_non_retryable_error,
+)
 from app.services.ai.sse_utils import with_heartbeat
 from app.services.ai.task_registry import (
     finish_task,
@@ -1196,8 +1199,9 @@ async def _start_sse_inner(db, scheme_id, project_id, mode,
                             t = _tr._tasks.get(task_id)
                             if t:
                                 yield f"data: {json.dumps({'type': 'heartbeat', 'progress': t.get('progress', 0), 'message': t.get('message', '')}, ensure_ascii=False)}\n\n"
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("bid_analysis 心跳任务状态读取失败（跳过本次心跳，task=%s）: %s",
+                                         task_id, e)
                         continue
                     if evt.get("type") == "__done__":
                         break
@@ -1514,6 +1518,12 @@ async def _run_bid_analysis_with_progress(db, project_id: str, scheme_id: str,
                     last_error = e
                     logger.warning("解析项 %s 第 %d 次尝试失败: %s",
                                    item["item_id"], attempt + 1, str(e)[:200])
+                    # ✅ R169：永久错误（配额/认证/模型不存在，401/402/403/404）
+                    #    重试必败 → 立即终止，不再白烧退避等待。与事实链
+                    #    （R111 P2-7）同判据单一出口 is_non_retryable_error；
+                    #    429 限流不在永久错误集，保留退避路径不变。
+                    if is_non_retryable_error(e):
+                        break
                     # 如果是最后一次尝试，跳出循环写 error
                     if attempt >= max_retries:
                         break
@@ -1731,10 +1741,21 @@ async def _run_single_item(db, project_id: str, scheme_id: str,
 
     # Markdown 项整体空结果 → 完整重跑一次
     if output_type == "markdown" and is_missing_result(result_text, "markdown"):
-        logger.info("解析项 %s 首次返回空结果，重跑一次", item_id)
-        result_text = await _run_single_call(item, tender_text, "markdown",
-                                             section_hint=section_hint,
-                                             classification_hint=classification_hint)
+        # ✅ R169：重跑预算闸。分段项的 tender_text 可达 _MAX_DOC_CHARS（40 万字），
+        #    「全部分段均缺失」多为该段本就无内容（合法）或整体故障；旧实现把整份
+        #    输入塞进单条 prompt 重跑，必超模型上下文（一次白烧超大调用，且失败会
+        #    被写成 error 而非缺失哨兵，missing_required 误报、任务终态 failed）。
+        #    超预算时保留缺失哨兵并留痕，不整卷重跑（单项级分段重试已在前序覆盖）。
+        if len(tender_text) <= _MARKDOWN_RERUN_MAX_CHARS:
+            logger.info("解析项 %s 首次返回空结果，重跑一次", item_id)
+            result_text = await _run_single_call(item, tender_text, "markdown",
+                                                 section_hint=section_hint,
+                                                 classification_hint=classification_hint)
+        else:
+            logger.warning(
+                "解析项 %s 全部分段返回空结果且输入 %d 字符超重跑预算 %d，"
+                "保留缺失哨兵不整卷重跑",
+                item_id, len(tender_text), _MARKDOWN_RERUN_MAX_CHARS)
 
     return {"status": "success", "content": result_text, "item_id": item_id}
 
@@ -1904,6 +1925,13 @@ async def _resolve_pid(db, scheme_id: str = "", project_id: str = "") -> str:
         return str(row[0])
     return ""
 
+
+# ✅ R169（2026-11-03）：Markdown 项「整体空结果重跑」的输入预算闸。
+#    分段项的 tender_text 可达 _MAX_DOC_CHARS（40 万字），旧实现把整份输入塞进
+#    单条 prompt 重跑必超模型上下文（一次白烧超大调用，失败还会被写成 error
+#    而非缺失哨兵）。预算与分段口径挂钩（4 段合计 ≈ 6.4 万字，约 3-5 万 token），
+#    超预算保留缺失哨兵不重跑。模块级求值，单测 monkeypatch 生效。
+_MARKDOWN_RERUN_MAX_CHARS = DEFAULT_CHUNK_SIZE * 4
 
 # ✅ 2026-09-25：参与「18 项提取」的字符预算（单一常量）。
 # ⚠️ 语义更正（2026-10-01 · A-1）：注释原写「单份文档」，但 _combine_doc_texts
@@ -2602,8 +2630,9 @@ async def _resolve_classification_hint(db, scheme_id: str) -> str:
             try:
                 data = json.loads(stored)
                 return sc.format_classification_hint(sc.SchemeClassification(**data))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("方案 %s 分类 JSON 解析失败（降级用方案名生成提示）: %s",
+                             str(scheme_id)[:8], e)
         if name:
             return sc.build_classification_hint(name)
     except Exception as e:  # 列缺失/解析失败都不阻断提取

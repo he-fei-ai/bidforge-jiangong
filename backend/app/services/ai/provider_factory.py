@@ -1946,6 +1946,21 @@ def reset_all_circuit_fast_fail() -> None:
         _all_circuit_dead_until = 0.0
 
 
+def reset_reliability() -> None:
+    """清空进程内可靠性统计与确定性死配置连击（测试隔离用）。
+
+    ✅ R169：与 reset_thinking_dead / reset_all_circuit_fast_fail 同族——
+    ``_provider_reliability``（滑动窗口成功率，影响降级链过滤）与
+    ``_det_dead_streak``（确定性 404 连击判死，R108）同为模块级状态，
+    conftest 未重置时跨用例泄漏：任一用例触发连击后，同进程后续依赖相同
+    身份键（无 config_id 的候选，如内置 agnes）的用例会被静默剔除出链，
+    表现为顺序相关偶发红。
+    """
+    with _provider_reliability_lock:
+        _provider_reliability.clear()
+        _det_dead_streak.clear()
+
+
 def _is_thinking_exhausted(err) -> bool:
     """推理模型把 max_tokens 全部耗在思考过程（finish_reason=length、正文为空）。
 
@@ -2156,13 +2171,13 @@ def provider_health_snapshot(provider_name: str, model: str = "",
         out["circuit_open"] = not circuit_breaker.allow_request(pname)
         out["cooldown_remaining_s"] = round(
             circuit_breaker.cooldown_remaining(pname), 1)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - 熔断器不可读时按「未熔断」快照，不影响调用方
         pass
     try:
         if QUOTA_FAIL_COOLDOWN > 0 and _quota_cooldown_active(pname):
             out["quota_cooldown_s"] = round(
                 max(0.0, _quota_cool_until.get(pname, 0.0) - time.time()), 1)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - 冷却态读取失败按 0 呈现，不影响调用方
         pass
     return out
 

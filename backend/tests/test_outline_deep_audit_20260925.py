@@ -323,13 +323,20 @@ class TestE3StripNumberingParity:
 
         以源码级断言锁定（后端 pytest 无法直接 import 前端 TS 实现），
         命中任一等价写法（PURE_NUMBER 常量 / fullMatch 调用）即通过。
+        大文件拆分后实现迁入 pages/schemeWorkbench/outlineNumbering.ts，
+        facade 仅为 re-export —— 读取范围改为 facade + 子模块聚合。
         """
         from pathlib import Path
         page = (Path(__file__).resolve().parents[1].parent
                 / "frontend" / "src" / "pages" / "SchemeWorkbenchPage.tsx")
         if not page.exists():                      # pragma: no cover - 部署形态差异
             pytest.skip("前端源码不在后端仓库路径下，跳过")
-        src = page.read_text(encoding="utf-8")
+        wb = (Path(__file__).resolve().parents[1].parent
+              / "frontend" / "src" / "pages" / "schemeWorkbench")
+        src = "\n".join(
+            [page.read_text(encoding="utf-8")]
+            + [p.read_text(encoding="utf-8")
+               for p in sorted(list(wb.glob("*.ts")) + list(wb.glob("*.tsx")))])
         parts = src.split("export function stripOutlineNumbering", 1)
         assert len(parts) == 2, "未找到前端 stripOutlineNumbering 定义"
         body = parts[1].split("\n}", 1)[0]
@@ -351,7 +358,13 @@ class TestE3StripNumberingParity:
                 / "frontend" / "src" / "pages" / "SchemeWorkbenchPage.tsx")
         if not page.exists():                      # pragma: no cover
             pytest.skip("前端源码不在后端仓库路径下，跳过")
-        src = page.read_text(encoding="utf-8")
+        # 拆分后常量迁入 pages/schemeWorkbench/outlineNumbering.ts —— 聚合读取
+        wb = (Path(__file__).resolve().parents[1].parent
+              / "frontend" / "src" / "pages" / "schemeWorkbench")
+        src = "\n".join(
+            [page.read_text(encoding="utf-8")]
+            + [p.read_text(encoding="utf-8")
+               for p in sorted(list(wb.glob("*.ts")) + list(wb.glob("*.tsx")))])
         m = _re.search(r"const\s+PURE_NUMBER_TITLE_RE\s*=\s*/(.+?)/[a-z]*\s*;",
                        src, _re.S)
         if not m:

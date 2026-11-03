@@ -6,14 +6,53 @@ import {
   isTerminalTaskStatus, isTerminalContentEvent, degradedConsistencyHint,
   // ✅ R77b（2026-10-15）：事实冲突定点修复终态提示（与标准校验提示同纪律）
   factAutofixHint,
-  type SectionLogItem, type GenStats,
+  type SectionLogItem, type GenStats, type StandardReport,
 } from "../utils/contentEvents";
 import { tasksApi, sectionsApi } from "../api";
+import type { SseEvent } from "../types/api";
 // F-CONTENT-STANDARD(2026-09-26): 生成标准请求体映射（与页面共用同一纯函数）
 import {
   buildStandardRequestFields, standardSummaryHint,
   type GenerationStandardChoice,
 } from "../utils/contentStandard";
+
+// 后端 SSE 契约：正文生成流事件载荷（按本 hook 实际消费的字段推导）。
+// for-await 循环体内从 SseEvent 一次性断言到该类型，仅编译期生效、不改运行期取值。
+type ContentGenerationEvent = {
+  event?: string;
+  task_id?: string;
+  progress?: number;
+  message?: string;
+  section_id: string;
+  title: string;
+  index?: number;
+  total?: number;
+  stage?: string;
+  stage_label?: string;
+  generation_standard?: "precise" | "fuzzy";
+  word_count?: number;
+  word_budget?: number;
+  word_status?: string;
+  continue_failed?: boolean;
+  quality_issues?: unknown;
+  standard_report?: StandardReport | null;
+  reason?: string;
+  summary?: { total?: number } | null;
+  repaired?: number;
+  failed_count?: number;
+  failed_sections?: unknown;
+  consistency_summary?: { total?: number; repaired?: number; scan_id?: string } | null;
+  standard_summary?: unknown;
+  fact_autofix_summary?: unknown;
+};
+
+/** generate 的调用参数（页面/测试按需传；task_standard 为任务级生成标准覆盖） */
+type GenerateExtra = {
+  section_id?: string;
+  mode?: string;
+  force_rewrite?: boolean;
+  task_standard?: string;
+};
 
 /**
  * 正文生成状态与操作 Hook（从 SchemeWorkbenchPage.tsx 抽离，2026-09-21）。
@@ -70,9 +109,9 @@ export interface UseContentGenerationOpts {
   load: () => Promise<unknown> | void;
   getActiveTaskId: () => string | null;
   setActiveTab: (tab: string) => void;
-  onSseEvent?: (evt: any) => boolean;
+  onSseEvent?: (evt: SseEvent) => boolean;
   msg: { success: (t: string) => void; warning: (t: string) => void; error: (t: string) => void; info: (t: string) => void };
-  sseFetch: (url: string, body?: Record<string, unknown>, opts?: { signal?: AbortSignal }) => AsyncIterable<any>;
+  sseFetch: (url: string, body?: Record<string, unknown>, opts?: { signal?: AbortSignal }) => AsyncIterable<SseEvent>;
 }
 
 export function useContentGeneration(opts: UseContentGenerationOpts): ContentGenerationState & ContentGenerationActions {
@@ -94,15 +133,15 @@ export function useContentGeneration(opts: UseContentGenerationOpts): ContentGen
   // ✅ F-CONTENT-STANDARD(2026-09-26 · F4)：section_start/section_done 携带的
   //    generation_standard / standard_report 必须落到日志项，否则模式徽标与
   //    校验告警无从展示（字段存在但被丢弃 = 用户看不到任何生成标准信息）。
-  const handleSectionStart = (evt: any) => { sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { section_id: evt.section_id, title: evt.title, status: "running", index: evt.index, total: evt.total, time: Date.now(), stage: evt.stage, stage_label: evt.stage_label, generation_standard: evt.generation_standard }); setSectionLogs([...sectionLogsRef.current]); };
+  const handleSectionStart = (evt: ContentGenerationEvent) => { sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { section_id: evt.section_id, title: evt.title, status: "running", index: evt.index, total: evt.total, time: Date.now(), stage: evt.stage, stage_label: evt.stage_label, generation_standard: evt.generation_standard }); setSectionLogs([...sectionLogsRef.current]); };
   // ✅ 缺口修复（2026-09-24）：后端 section_done 一直下发 content 与
   //    quality_issues（本章程序化质检问题），前端此前**两个字段都没消费** ——
   //    用户只能在生成结束后重新拉取整篇正文才知道有没有问题。现把质检问题
   //    落到章节日志项，日志区即可直接看到「哪章有质量告警」。
-  const handleSectionDone = (evt: any) => { const ex = sectionLogsRef.current.find((x) => x.section_id === evt.section_id); sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { section_id: evt.section_id, title: evt.title, status: "success", word_count: evt.word_count, word_budget: evt.word_budget, word_status: evt.word_status, continue_failed: !!evt.continue_failed, quality_issues: normalizeQualityIssues(evt.quality_issues), generation_standard: evt.generation_standard, standard_report: evt.standard_report ?? undefined, index: ex?.index, total: ex?.total, time: Date.now(), duration: ex ? Date.now() - ex.time : undefined }); setSectionLogs([...sectionLogsRef.current]); };
-  const handleSectionError = (evt: any) => { const ex = sectionLogsRef.current.find((x) => x.section_id === evt.section_id); sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { section_id: evt.section_id, title: evt.title, status: "failed", reason: evt.reason, index: ex?.index, total: ex?.total, time: Date.now(), duration: ex ? Date.now() - ex.time : undefined, stage: ex?.stage, stage_label: ex?.stage_label }); setSectionLogs([...sectionLogsRef.current]); };
-  const handleSectionStage = (evt: any) => { const ex = sectionLogsRef.current.find((x) => x.section_id === evt.section_id); if (ex) { sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { ...ex, stage: evt.stage, stage_label: evt.stage_label }); setSectionLogs([...sectionLogsRef.current]); } };
-  const generate = useCallback(async (extra?: any) => {
+  const handleSectionDone = (evt: ContentGenerationEvent) => { const ex = sectionLogsRef.current.find((x) => x.section_id === evt.section_id); sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { section_id: evt.section_id, title: evt.title, status: "success", word_count: evt.word_count, word_budget: evt.word_budget, word_status: evt.word_status, continue_failed: !!evt.continue_failed, quality_issues: normalizeQualityIssues(evt.quality_issues), generation_standard: evt.generation_standard, standard_report: evt.standard_report ?? undefined, index: ex?.index, total: ex?.total, time: Date.now(), duration: ex ? Date.now() - ex.time : undefined }); setSectionLogs([...sectionLogsRef.current]); };
+  const handleSectionError = (evt: ContentGenerationEvent) => { const ex = sectionLogsRef.current.find((x) => x.section_id === evt.section_id); sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { section_id: evt.section_id, title: evt.title, status: "failed", reason: evt.reason, index: ex?.index, total: ex?.total, time: Date.now(), duration: ex ? Date.now() - ex.time : undefined, stage: ex?.stage, stage_label: ex?.stage_label }); setSectionLogs([...sectionLogsRef.current]); };
+  const handleSectionStage = (evt: ContentGenerationEvent) => { const ex = sectionLogsRef.current.find((x) => x.section_id === evt.section_id); if (ex) { sectionLogsRef.current = upsertSectionLog(sectionLogsRef.current, { ...ex, stage: evt.stage, stage_label: evt.stage_label }); setSectionLogs([...sectionLogsRef.current]); } };
+  const generate = useCallback(async (extra?: GenerateExtra) => {
     if (!schemeId) return;
     const mySeq = ++seqRef.current;
     abortRef.current?.abort();
@@ -140,7 +179,9 @@ export function useContentGeneration(opts: UseContentGenerationOpts): ContentGen
     body.force_full_repair = forceFullRepair;
     let taskId = "";
     try {
-      for await (const evt of sseFetch(`/sse/generate-content/${schemeId}`, body, { signal: ac.signal })) {
+      for await (const raw of sseFetch(`/sse/generate-content/${schemeId}`, body, { signal: ac.signal })) {
+        // 后端 SSE 契约
+        const evt = raw as ContentGenerationEvent;
         if (!taskId && evt.task_id) taskId = evt.task_id;
         if (onSseEvent?.(evt)) { finalizeRunning("生成失败（任务已终止）", "failed"); break; }
         if (evt.event === "section_start") handleSectionStart(evt);
@@ -192,9 +233,10 @@ export function useContentGeneration(opts: UseContentGenerationOpts): ContentGen
           if (evt.message) setProgressMsg(evt.message);
         }
       }
-    } catch (e: any) {
-      if (e.name !== "AbortError") {
-        msg.warning(e.message || "SSE 连接中断");
+    } catch (e: unknown) {
+      const err = e as { name?: string; message?: string };
+      if (err.name !== "AbortError") {
+        msg.warning(err.message || "SSE 连接中断");
         finalizeRunning("连接中断，等待后台任务收尾", "skipped");
         if (taskId) {
           setProgressMsg("连接中断，正在重新挂接后台任务...");
@@ -203,7 +245,7 @@ export function useContentGeneration(opts: UseContentGenerationOpts): ContentGen
             //    旧实现内联三态白名单 + 无上限递归 ⇒ 降级完成的后台任务会让
             //    这里的 await **永不返回**（页面版的 pollTaskUntilTerminal 至少有
             //    maxPolls 兜底，本 hook 版完全没有）。
-            const fin = await new Promise<any>((resolve) => { const poll = async () => { try { const { data } = await tasksApi.status(taskId); if (data && isTerminalTaskStatus(data.status)) resolve(data); else setTimeout(poll, 3000); } catch { setTimeout(poll, 3000); } }; poll(); });
+            const fin = await new Promise<{ status?: string; message?: string; content_result?: unknown }>((resolve) => { const poll = async () => { try { const { data } = await tasksApi.status(taskId); if (data && isTerminalTaskStatus(data.status)) resolve(data); else setTimeout(poll, 3000); } catch { setTimeout(poll, 3000); } }; poll(); });
             const ck = contentResultFailedSections(fin?.content_result);
             if (ck.sections.length) { mergeFailed(ck.sections); msg.warning(`后台正文生成有 ${ck.failedCount} 章失败`); }
             const sm = contentResultSummary(fin?.content_result);
@@ -231,12 +273,12 @@ export function useContentGeneration(opts: UseContentGenerationOpts): ContentGen
       const tid = getActiveTaskId();
       if (!tid) { msg.warning("没有活跃的任务"); return; }
       try { const { data } = await tasksApi.control(tid, action); if (data.ok) { if (action === "pause") { setTaskPaused(true); msg.success("已暂停"); } else if (action === "resume") { setTaskPaused(false); msg.success("已恢复"); } else { setTaskPaused(false); msg.success("已停止"); } } }
-      catch (e: any) { msg.error(e.message || "控制失败"); }
+      catch (e: unknown) { const err = e as { message?: string }; msg.error(err.message || "控制失败"); }
     }, [getActiveTaskId, msg]),
     reset: useCallback(async () => {
       if (!schemeId) return;
       try { const { data } = await sectionsApi.resetContent(schemeId); await load(); msg.success(`已重置：清除 ${data.cleared ?? 0} 个章节的正文`); }
-      catch (e: any) { msg.error(e?.message || "重置失败"); }
+      catch (e: unknown) { const err = e as { message?: string }; msg.error(err?.message || "重置失败"); }
     }, [schemeId, load, msg]),
     setProgress, setProgressMsg,
   };

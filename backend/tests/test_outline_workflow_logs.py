@@ -121,7 +121,15 @@ class TestEnsureUserMessage:
         """目录链路所有 JSON 调用都经由 collect_json_response ⇒ 已被兜底覆盖。"""
         for fn in (sh.generate_outline, sh._review_and_fix_outline):
             assert "collect_json_response(" in inspect.getsource(fn)
-        src = inspect.getsource(sh)
+        # 拆分兼容：_review_and_fix_outline 等下沉 _sse_outline_*.py 后，
+        # sub_prompt / review_prompt / fix_prompt 分散在 facade 与子模块，
+        # 需聚合读取（与 test_logging_accuracy_20261005 同一口径）。
+        import importlib
+        src = "\n".join(
+            inspect.getsource(importlib.import_module(m)) for m in (
+                "app.routers.sse_handlers",
+                "app.routers._sse_outline_build",
+                "app.routers._sse_outline_review"))
         for marker in ("sub_prompt", "review_prompt", "fix_prompt"):
             assert marker in src, marker
         # 三处提示词都是 system-only 的写法（历史写法），由共享入口补齐 user

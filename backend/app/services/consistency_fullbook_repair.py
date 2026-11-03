@@ -167,6 +167,13 @@ async def run_fullbook_repair(db, *, scheme_id: str, scan_id: str,
     """整卷合并修复一次批次。返回 save_repair 结果（含 repair_id / snapshot_id / items）。
 
     仅修复**有权威值**且落在阈值 / 白名单内的冲突（复用 filter_conflicts 口径）。
+
+    ✅ R168（2026-11-03 · 原子性收口）：回写阶段（章节 UPDATE + 冲突状态回写）改为
+    **全程缓冲、不中途 commit**，统一由 :func:`repair_record.save_repair` 内部的那一次
+    commit 落库 —— 全有全无。旧实现每章 UPDATE 后立即 commit，中途异常（锁竞争 /
+    连接故障）会留下「章节已改、批次无记录、snapshot_id 不为用户所知、无法回滚」的
+    半生效态。前置快照（create_snapshot）自带 commit，先于本阶段独立生效，不受影响；
+    调用方经 get_db 池化取得连接，进入本函数前无未提交事务，缓冲安全。
     """
     # 延迟 import 避免模块级成环（repair_agent 亦在函数内消费 routers 注入回调）
     from app.services.repair_agent import filter_conflicts
@@ -322,12 +329,13 @@ async def run_fullbook_repair(db, *, scheme_id: str, scan_id: str,
                 except Exception as _re:  # noqa: BLE001 - 登记失败保留原回包正文
                     logger.warning("[整卷修复] 第 %s 章图表重登记失败（保留回包正文）: %s",
                                    sid, _re)
+            # ✅ R168 原子性：只缓冲不 commit，与冲突状态回写、save_repair 留痕
+            #    同事务一次性提交（中途异常 → 调用方 get_db 归还前回滚，零半生效）。
             await db.execute(
                 "UPDATE sections SET content=?, word_count=?, word_status=?, "
                 "updated_at=? WHERE id=?",
                 (persist_content, _wc, word_status_for(_wc, _wb),
                  datetime.now().isoformat(), sid))
-            await db.commit()
             for cid in cids:
                 repaired_conflicts.add(cid)
             items.extend({
@@ -341,14 +349,13 @@ async def run_fullbook_repair(db, *, scheme_id: str, scan_id: str,
                 "problems": [],
             } for cid in cids)
 
-    # 冲突状态回写
+    # 冲突状态回写（✅ R168：同上缓冲，save_repair 内部 commit 一并落库）
     for cid in repaired_conflicts:
         await db.execute(
             "UPDATE consistency_conflicts SET status='repaired' WHERE id=?", (cid,))
     for cid in failed_conflicts:
         await db.execute(
             "UPDATE consistency_conflicts SET status='failed' WHERE id=?", (cid,))
-    await db.commit()
 
     all_ids = {c["id"] for c in conflicts}
     target_ids = {c["id"] for c in targets}

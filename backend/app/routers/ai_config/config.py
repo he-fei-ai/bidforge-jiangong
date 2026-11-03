@@ -3,6 +3,7 @@
 路由聚合见 ``ai_config/__init__.py``；本模块只负责与「单条配置 CRUD」相关的端点。
 """
 import json
+import logging
 import uuid
 from datetime import datetime
 
@@ -36,6 +37,8 @@ from app.services.ai.provider_factory import (
 from app.services.crypto import decrypt_api_key
 
 from .audit import record_config_audit, sanitize_config_snapshot
+
+logger = logging.getLogger("ai_config")
 
 router = APIRouter(tags=["ai_config"])
 
@@ -474,8 +477,10 @@ async def _export_runtime(db) -> dict:
             row = await cur.fetchone()
             if row is not None:
                 out[key] = str(row["value"] or "")
-    except Exception:
-        pass
+    except Exception as e:
+        # 运行时设置表未迁移/缺列等异常按「空设置」导出，不影响配置主流程。
+        logger.debug("导出运行时设置失败（按空设置导出，keys=%s）: %s",
+                     RUNTIME_ACTIVE_ENV_KEY + "/" + RUNTIME_DISABLED_PROVIDERS_KEY, e)
     return out
 
 

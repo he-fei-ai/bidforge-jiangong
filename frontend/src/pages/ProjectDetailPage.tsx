@@ -2,15 +2,65 @@ import { useEffect, useRef, useState } from "react";
 import {App, Card, Button, List, Tag, Modal, Form, Input, Select, Space,
   message, Descriptions, Tabs, Typography, Empty, Tree, Spin,
   Drawer, Table, Popconfirm, Tooltip, Alert,} from "antd";
+import type { TreeDataNode } from "antd";
 import { PlusOutlined, CopyOutlined, InboxOutlined, SearchOutlined, DeleteOutlined, EditOutlined, BookOutlined, ProjectOutlined, FileTextOutlined, ApiOutlined } from "@ant-design/icons";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { projectsApi, schemesApi, schemeCatalogApi, knowledgeApi } from "../api";
+import type { JsonPayload } from "../types/api";
 import { useAntdMessageHub } from "../utils/activityCenter";
 import { notifySidebarTreeRefresh } from "../utils/sidebarEvents";
 
 import { PageHero, StatCards, StatItem } from "../utils/ui";
 
 const { Title } = Typography;
+
+/** 项目详情（GET /projects/{id} 响应体，按本页读取字段收窄） */
+interface ProjectDetail {
+  id?: string;
+  name?: string;
+  description?: string;
+  engineering_type?: string;
+  location?: string;
+  client_name?: string;
+  contractor_name?: string;
+  project_period?: string;
+}
+
+/** 方案列表项（GET /projects/{id}/schemes），编辑弹窗预填复用 */
+interface SchemeSummary {
+  id: string;
+  name: string;
+  type?: string;
+  status?: string;
+  profession?: string;
+  word_budget?: number;
+  section_count?: number;
+  word_count?: number;
+  outline_source?: string;
+}
+
+/** 标准清单库条目（GET /scheme-catalog，按分类分组） */
+interface CatalogLibraryItem {
+  id: string;
+  name: string;
+  ref_count?: number;
+}
+
+/** 目录树节点（outline_json 解析结果） */
+interface OutlineNode {
+  title?: string;
+  description?: string;
+  level?: number;
+  children?: OutlineNode[];
+}
+
+/** 项目级知识条目（GET /knowledge） */
+interface KnowledgeItem {
+  id: string;
+  name: string;
+  usage_hint?: string;
+  content?: string;
+}
 
 const SCHEME_TYPES = [
   "深基坑", "高支模", "脚手架", "塔吊", "施工电梯", "临时用电",
@@ -25,23 +75,23 @@ export default function ProjectDetailPage() {
   const msg = useAntdMessageHub(_antdMsg, "项目详情");
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const [project, setProject] = useState<any>(null);
-  const [schemes, setSchemes] = useState<any[]>([]);
+  const [project, setProject] = useState<ProjectDetail | null>(null);
+  const [schemes, setSchemes] = useState<SchemeSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
 
-  const [catalogData, setCatalogData] = useState<Record<string, any[]>>({});
+  const [catalogData, setCatalogData] = useState<Record<string, CatalogLibraryItem[]>>({});
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogKeyword, setCatalogKeyword] = useState("");
   const [selectedCatalogId, setSelectedCatalogId] = useState<string>("");
   const [selectedCatalogName, setSelectedCatalogName] = useState<string>("");
-  const [outlinePreview, setOutlinePreview] = useState<any[]>([]);
+  const [outlinePreview, setOutlinePreview] = useState<OutlineNode[]>([]);
   const [outlineLoading, setOutlineLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   // 方案编辑（重命名/改类型/专业/字数）—— 补齐 schemesApi.update 的前端入口
   const [editOpen, setEditOpen] = useState(false);
-  const [editing, setEditing] = useState<any>(null);
+  const [editing, setEditing] = useState<SchemeSummary | null>(null);
   const [editForm] = Form.useForm();
   const [editSubmitting, setEditSubmitting] = useState(false);
   // ✅ 竞态守卫：快速切换项目/目录时，旧请求的响应不应覆盖新数据
@@ -60,8 +110,9 @@ export default function ProjectDetailPage() {
       if (seq !== loadSeqRef.current) return; // 已有更新的请求发出，丢弃旧响应
       setProject(p);
       setSchemes(s.items || []);
-    } catch (e: any) {
-      if (seq === loadSeqRef.current) msg.error(e.message || "加载失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      if (seq === loadSeqRef.current) msg.error(err.message || "加载失败");
     } finally {
       if (seq === loadSeqRef.current) setLoading(false);
     }
@@ -72,8 +123,9 @@ export default function ProjectDetailPage() {
     try {
       const { data } = await schemeCatalogApi.list(keyword ? { keyword } : undefined);
       setCatalogData(data.categories || {});
-    } catch (e: any) {
-      msg.error(e.message || "加载清单失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "加载清单失败");
     }
     setCatalogLoading(false);
   };
@@ -87,10 +139,11 @@ export default function ProjectDetailPage() {
       const outline = typeof data.outline_json === "string"
         ? JSON.parse(data.outline_json) : data.outline_json;
       setOutlinePreview(outline || []);
-    } catch (e: any) {
+    } catch (e: unknown) {
+      const err = e as { message?: string };
       if (seq === previewSeqRef.current) {
         setOutlinePreview([]);
-        if (e?.message) msg.warning(`目录预览加载失败：${e.message}`);
+        if (err.message) msg.warning(`目录预览加载失败：${err.message}`);
       }
     } finally {
       if (seq === previewSeqRef.current) setOutlineLoading(false);
@@ -121,7 +174,7 @@ export default function ProjectDetailPage() {
     try {
       const values = await form.validateFields();
       setSubmitting(true);
-      const payload: any = { ...values };
+      const payload: JsonPayload = { ...values };
       if (selectedCatalogId) {
         payload.outline_source = "library";
         payload.library_ids = [selectedCatalogId];
@@ -153,9 +206,10 @@ export default function ProjectDetailPage() {
       setOutlinePreview([]);
       setCatalogKeyword("");
       load();
-    } catch (e: any) {
-      if (e.errorFields) return;
-      msg.error(e.message || "创建失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string; errorFields?: unknown };
+      if (err.errorFields) return;
+      msg.error(err.message || "创建失败");
     } finally {
       setSubmitting(false);
     }
@@ -170,8 +224,9 @@ export default function ProjectDetailPage() {
       msg.success("已复制目录结构（副本正文需重新生成）");
       load();
       notifySidebarTreeRefresh(id); // ✅ R91：副本方案同步上左侧项目树
-    } catch (e: any) {
-      msg.error(e.message || "复制失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "复制失败");
     }
   };
 
@@ -181,13 +236,14 @@ export default function ProjectDetailPage() {
       msg.success("操作成功");
       load();
       notifySidebarTreeRefresh(id); // ✅ R91：归档状态徽标同步左侧项目树
-    } catch (e: any) {
-      msg.error(e.message || "操作失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "操作失败");
     }
   };
 
   /** 打开编辑弹窗并预填当前方案字段 */
-  const openEdit = (s: any) => {
+  const openEdit = (s: SchemeSummary) => {
     setEditing(s);
     editForm.setFieldsValue({
       name: s.name,
@@ -203,15 +259,16 @@ export default function ProjectDetailPage() {
     try {
       const values = await editForm.validateFields();
       setEditSubmitting(true);
-      await schemesApi.update(id!, editing.id, values);
+      await schemesApi.update(id!, editing!.id, values);
       msg.success("方案已更新");
       setEditOpen(false);
       setEditing(null);
       load();
       notifySidebarTreeRefresh(id); // ✅ R91：改名/改类型同步左侧项目树
-    } catch (e: any) {
-      if (e.errorFields) return; // 校验未通过
-      msg.error(e.message || "更新失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string; errorFields?: unknown };
+      if (err.errorFields) return; // 校验未通过
+      msg.error(err.message || "更新失败");
     } finally {
       setEditSubmitting(false);
     }
@@ -244,8 +301,9 @@ export default function ProjectDetailPage() {
           msg.success(`方案「${data.name || name}」已删除`);
           load();
           notifySidebarTreeRefresh(id); // ✅ R91：删除即时从左侧项目树消失（旧树残留是本轮主诉之一）
-        } catch (e: any) {
-          msg.error(e.message || "删除失败");
+        } catch (e: unknown) {
+          const err = e as { message?: string };
+          msg.error(err.message || "删除失败");
         }
       },
     });
@@ -270,10 +328,10 @@ export default function ProjectDetailPage() {
 
   // ===== ✅ 知识库 / 素材库（§3.9）：项目级条目，AI 生成目录/正文时自动注入 =====
   const [kbOpen, setKbOpen] = useState(false);
-  const [kbItems, setKbItems] = useState<any[]>([]);
+  const [kbItems, setKbItems] = useState<KnowledgeItem[]>([]);
   const [kbLoading, setKbLoading] = useState(false);
   const [kbModalOpen, setKbModalOpen] = useState(false);
-  const [kbEditing, setKbEditing] = useState<any>(null);
+  const [kbEditing, setKbEditing] = useState<KnowledgeItem | null>(null);
   const [kbSaving, setKbSaving] = useState(false);
   const [kbForm] = Form.useForm();
 
@@ -283,8 +341,9 @@ export default function ProjectDetailPage() {
     try {
       const { data } = await knowledgeApi.list({ project_id: id });
       setKbItems(data.items || []);
-    } catch (e: any) {
-      msg.error(e.message || "加载知识库失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "加载知识库失败");
     } finally {
       setKbLoading(false);
     }
@@ -295,7 +354,7 @@ export default function ProjectDetailPage() {
     loadKnowledge();
   };
 
-  const handleKbEdit = (item: any | null) => {
+  const handleKbEdit = (item: KnowledgeItem | null) => {
     setKbEditing(item);
     setKbModalOpen(true);
     if (item) {
@@ -318,8 +377,9 @@ export default function ProjectDetailPage() {
       }
       setKbModalOpen(false);
       loadKnowledge();
-    } catch (e: any) {
-      msg.error(e.message || "保存失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "保存失败");
     } finally {
       setKbSaving(false);
     }
@@ -330,12 +390,13 @@ export default function ProjectDetailPage() {
       await knowledgeApi.delete(kid);
       msg.success("已删除");
       loadKnowledge();
-    } catch (e: any) {
-      msg.error(e.message || "删除失败");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "删除失败");
     }
   };
 
-  const outlineToTreeData = (nodes: any[], parentKey = "root"): any[] => {
+  const outlineToTreeData = (nodes: OutlineNode[], parentKey = "root"): TreeDataNode[] => {
     // ✅ 修复 P1：原用同级索引作 key，不同父节点的第 N 个子节点 key 全部重复，
     // 导致目录预览展开/选中错乱；改用 路径key（parentKey-索引）保证全局唯一
     // ✅ 增强：展示 description（编写要点）—— 预览所见 == 套用所得，
@@ -358,7 +419,7 @@ export default function ProjectDetailPage() {
 
   const stats: StatItem[] = [
     { icon: <ProjectOutlined />, label: "关联方案", value: schemes.length, color: "#00D4FF" },
-    { icon: <FileTextOutlined />, label: "文档数", value: catalogData ? Object.values(catalogData).reduce((a, b: any[]) => a + b.length, 0) : 0, color: "#00C853" },
+    { icon: <FileTextOutlined />, label: "文档数", value: catalogData ? Object.values(catalogData).reduce((a, b) => a + b.length, 0) : 0, color: "#00C853" },
     { icon: <BookOutlined />, label: "知识库", value: kbItems?.length ?? 0, color: "#FFB800" },
   ];
 
@@ -408,25 +469,25 @@ export default function ProjectDetailPage() {
           grid={{ gutter: 16, column: 3 }}
           dataSource={schemes}
           loading={loading}
-          renderItem={(s: any) => (
+          renderItem={(s) => (
             <List.Item>
               <Card
                 hoverable
                 onClick={() => navigate(`/scheme/${s.id}`)}
                 actions={[
-                  <EditOutlined key="edit" onClick={(e: any) => {
+                  <EditOutlined key="edit" onClick={(e) => {
                     e.stopPropagation();
                     openEdit(s);
                   }} />,
-                  <CopyOutlined key="copy" onClick={(e: any) => {
+                  <CopyOutlined key="copy" onClick={(e) => {
                     e.stopPropagation();
                     handleDuplicate(s.id);
                   }} />,
-                  <InboxOutlined key="archive" onClick={(e: any) => {
+                  <InboxOutlined key="archive" onClick={(e) => {
                     e.stopPropagation();
                     handleArchive(s.id);
                   }} />,
-                  <DeleteOutlined key="delete" style={{ color: "#ff4d4f" }} onClick={(e: any) => {
+                  <DeleteOutlined key="delete" style={{ color: "#ff4d4f" }} onClick={(e) => {
                     e.stopPropagation();
                     handleDeleteScheme(s.id, s.name);
                   }} />,
@@ -438,7 +499,7 @@ export default function ProjectDetailPage() {
                     <Space direction="vertical" size={4}>
                       <Space>
                         {s.type && <Tag color="blue">{s.type}</Tag>}
-                        <Tag color={statusColor[s.status] || "default"}>{s.status}</Tag>
+                        <Tag color={statusColor[s.status ?? ""] || "default"}>{s.status}</Tag>
                       </Space>
                       <span>{s.section_count || 0} 章节 · {s.word_count || 0} 字</span>
                       <span>目录来源：{s.outline_source || "-"}</span>
@@ -555,7 +616,7 @@ export default function ProjectDetailPage() {
                             <List
                               size="small"
                               dataSource={items}
-                              renderItem={(item: any) => (
+                              renderItem={(item) => (
                                 <List.Item
                                   style={{
                                     padding: "4px 8px",
@@ -568,7 +629,7 @@ export default function ProjectDetailPage() {
                                 >
                                   <Space>
                                     <span>{item.name.replace("标准目录", "")}</span>
-                                    {item.ref_count > 0 && (
+                                    {(item.ref_count ?? 0) > 0 && (
                                       <Tag style={{ fontSize: 11 }}>引用{item.ref_count}</Tag>
                                     )}
                                   </Space>
@@ -659,7 +720,7 @@ export default function ProjectDetailPage() {
             {
               title: "内容", dataIndex: "content", key: "content",
               ellipsis: true,
-              render: (v: string, r: any) => (
+              render: (v: string, r) => (
                 <Tooltip title={v}>
                   <span>{r.usage_hint ? <Tag color="blue" style={{ marginRight: 4 }}>{r.usage_hint}</Tag> : null}{v || "-"}</span>
                 </Tooltip>
@@ -667,7 +728,7 @@ export default function ProjectDetailPage() {
             },
             {
               title: "操作", key: "actions", width: 110,
-              render: (_: any, r: any) => (
+              render: (_, r) => (
                 <Space>
                   <Button size="small" type="link" icon={<EditOutlined />} onClick={() => handleKbEdit(r)} />
                   <Popconfirm title="确定删除该条目？" onConfirm={() => handleKbDelete(r.id)}>

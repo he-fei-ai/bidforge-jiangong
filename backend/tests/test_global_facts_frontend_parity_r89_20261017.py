@@ -64,7 +64,15 @@ def _types_facts() -> str:
 
 
 def _page() -> str:
-    return _read(os.path.join(FE, "pages", "SchemeWorkbenchPage.tsx"))
+    # 大文件拆分后：buildFactChapterStats / buildFactsPagination / FACT_CATEGORY_OPTIONS
+    # 迁入 pages/schemeWorkbench/factsShared.ts，TaskTerminalInfo.facts_result 迁入
+    # taskPolling.ts —— 聚合 facade + 子模块读取，断言阈值与语义不变。
+    parts = [_read(os.path.join(FE, "pages", "SchemeWorkbenchPage.tsx"))]
+    wb = os.path.join(FE, "pages", "schemeWorkbench")
+    for p in sorted(os.listdir(wb)):
+        if p.endswith((".ts", ".tsx")):
+            parts.append(_read(os.path.join(wb, p)))
+    return "\n".join(parts)
 
 
 # 三条真实事实（名称/取值均落在九大章节内，见 facts_classification）。

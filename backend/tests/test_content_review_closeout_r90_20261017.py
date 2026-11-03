@@ -386,11 +386,19 @@ class TestContentEmptyLeavesTerminalStatus:
 
         conn = await _appdb.get_conn()
         try:
-            cur = await conn.execute("SELECT id FROM schemes LIMIT 1")
-            row = await cur.fetchone() if cur is not None else None
-            sid = row[0] if row else ""
-            assert sid, "运行库无方案，无法构造空章节场景"
-            # ⚠️ 必须让 **sections 表对该方案彻底为空**（而不是「正文为空」）：
+            import uuid as _uuid
+            pid = f"test-r173-proj-{_uuid.uuid4().hex[:8]}"
+            sid = f"test-r173-scheme-{_uuid.uuid4().hex[:8]}"
+            await conn.execute(
+                "INSERT INTO projects(id, name, engineering_type) VALUES(?,?,?)",
+                (pid, "_pytest_scheme", "施工组织设计"))
+            await conn.execute(
+                "INSERT INTO schemes(id, project_id, name, status) "
+                "VALUES(?,?,?,?)",
+                (sid, pid, "_pytest_scheme", "编制中"))
+            # ⚠️ 旧实现直接挑生产库 LIMIT 1 的方案：库被重建为空（2026-11-03）后
+            #    该用例恒红，且属于环境依赖而非代码缺陷。现自建最小项目/方案。
+            # ⚠️ 必须让 sections 表对该方案彻底为空（而不是「正文为空」）：
             #   首版只清 content，结果 `select_target_leaves` 仍返回全部叶子
             #   → 走进完整生成链路（AI 桩抛错 → 重试退避 6s×2）→ 本用例
             #   跑了 201s 才失败。零章节才是 `if not leaves:` 早退分支。

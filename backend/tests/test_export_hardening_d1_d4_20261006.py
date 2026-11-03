@@ -23,6 +23,17 @@ REPO_BACKEND = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(E.__file__))))
 REPO_ROOT = os.path.dirname(REPO_BACKEND)
 EXPORT_PY = os.path.join(REPO_BACKEND, "app", "routers", "export.py")
+
+
+def _export_sources() -> str:
+    """拆分兼容：聚合读取 export.py 与其子模块（_export_*.py）。"""
+    import glob
+    base = os.path.dirname(EXPORT_PY)
+    segs = [io.open(EXPORT_PY, encoding="utf-8").read()]
+    segs += [io.open(p, encoding="utf-8").read()
+             for p in sorted(glob.glob(os.path.join(base, "_export_*.py")))]
+    return "\n".join(segs)
+
 FRONT_EXPORT_RESPONSE = os.path.join(
     REPO_ROOT, "frontend", "src", "utils", "exportResponse.ts")
 
@@ -251,7 +262,7 @@ class TestImageInsertSingleImplementation:
         `_DocxBodyRollback` docstring 里那句 ``doc.add_picture()`` 命中而恒假失败
         （§5.14「护栏判据锚点选错，比不写护栏更糟」的又一例）。
         """
-        tree = ast.parse(io.open(EXPORT_PY, encoding="utf-8").read())
+        tree = ast.parse(_export_sources())
         hits = []
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
@@ -263,7 +274,7 @@ class TestImageInsertSingleImplementation:
 
     def test_add_picture_call_is_inside_core_function(self):
         """上一例的加强：确认唯一调用点确实位于核心实现体内。"""
-        tree = ast.parse(io.open(EXPORT_PY, encoding="utf-8").read())
+        tree = ast.parse(_export_sources())
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
                     and node.name == "_insert_image_with_caption":
@@ -275,7 +286,7 @@ class TestImageInsertSingleImplementation:
         pytest.fail("核心实现内未找到 add_picture 调用")
 
     def test_fit_image_appears_only_in_core(self):
-        src = io.open(EXPORT_PY, encoding="utf-8").read()
+        src = _export_sources()
         hits = [i + 1 for i, ln in enumerate(src.split("\n"))
                 if "_fit_image_cm(" in ln]
         # 1 处定义 + 1 处调用（定义行含 "def "）

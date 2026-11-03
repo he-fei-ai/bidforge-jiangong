@@ -70,7 +70,13 @@ GARBAGE_IDS = ["abc1.2", "1.0.2", "1..2", "0.3", "1.2.x", " 3 . 2 ", "", None, 3
 
 
 def _mod_ast(rel: str) -> ast.Module:
-    return ast.parse((APP_DIR / rel).read_bytes().decode("utf-8"))
+    text = (APP_DIR / rel).read_bytes().decode("utf-8")
+    if rel == "routers/export.py":
+        # 拆分兼容：聚合读取 export.py 与其子模块（_export_*.py）
+        import glob
+        for p in sorted(glob.glob(str(APP_DIR / "routers" / "_export_*.py"))):
+            text += "\n" + open(p, "rb").read().decode("utf-8")
+    return ast.parse(text)
 
 
 def _fn(tree: ast.Module, name: str) -> ast.FunctionDef:
@@ -430,10 +436,16 @@ class TestL4ResidualIsReportedNotRejected:
     静默拒收 —— 拒收会把「AI 修了 3 处占位、还剩 1 处」的好成果一并丢弃。
     本组锁死这个契约，防后人「顺手改成拒收」而悄悄改变语义。"""
 
-    SRC = APP_DIR / "routers" / "sse_handlers.py"
+    SRC = [
+        APP_DIR / "routers" / "sse_handlers.py",
+        APP_DIR / "routers" / "_sse_outline_build.py",
+        APP_DIR / "routers" / "_sse_outline_review.py",
+    ]
 
     def _src(self) -> str:
-        return self.SRC.read_bytes().decode("utf-8")
+        # 拆分兼容：目录构建/评审两阶段下沉到 _sse_outline_*.py（facade 转发），
+        # 源码级计数断言需聚合读取，语义与拆分前一致。
+        return "\n".join(p.read_bytes().decode("utf-8") for p in self.SRC)
 
     def test_both_repair_paths_recheck_residual(self):
         """合并修复轮与独立修复轮**都必须复检**（R73 根因 B 的锁定）。"""

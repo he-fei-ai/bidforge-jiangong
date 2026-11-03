@@ -1565,7 +1565,6 @@ def _render_flowchart_with_edges(data: dict) -> BytesIO | None:
 
         # ✅ 修复（BUG-6）：支持 direction（LR/TD）。默认 TD（自上而下）。
         #    _dir / is_lr 已在上方「尺寸参数」处计算（R66：几何按方向取参）。
-        max_rows = max_level + 1
         max_cols = max(len(g) for g in level_groups.values())
         col_w = node_w + col_gap
         row_h = node_h + row_gap

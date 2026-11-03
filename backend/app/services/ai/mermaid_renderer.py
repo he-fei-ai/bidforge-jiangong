@@ -744,8 +744,8 @@ def render_mermaid_to_bytes(
         # ✅ R11 修复：把成功结果写入模块级 LRU 缓存（BytesIO 有状态，需 seek(0) 归位）
         try:
             _level2_result.seek(0)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("渲染结果 BytesIO seek(0) 失败（chart_type=%s，忽略）: %s", chart_type, e)
         _render_cache_put(_cache_key, _level2_result)
         return _level2_result
 

@@ -32,7 +32,19 @@ export type BaStoredItem = {
   evidence?: string;
   /** 发起本次提取的方案名（/results 附加；结果本体项目级共享） */
   scheme_name?: string;
-} & Record<string, any>;
+  /** 展示用冗余字段（详情头 / 完整查看弹窗读取；mergeBaItem 合并 def 时带入） */
+  label?: string;
+  output_type?: string;
+  /** 后端动态透传的其余字段（updated_at / sort_order 等），消费侧按 unknown 处理 */
+} & Record<string, unknown>;
+
+/** 后端 /bid-analysis/items 的 groups 原始条目（items 缺失时按 defs.group 回退过滤） */
+export type BaGroupLike = {
+  group?: string;
+  key?: string;
+  label?: string;
+  items?: BaItemDef[];
+};
 
 export type BaGroup = {
   /** 分组键（后端 group 字段，如 project_info） */
@@ -95,7 +107,7 @@ function isAllEmptyJson(raw: string): boolean {
   if (text.startsWith("```")) {
     text = text.replace(/^```[A-Za-z0-9_-]*\s*/, "").replace(/\s*```$/, "").trim();
   }
-  let data: any;
+  let data: unknown;
   try {
     data = JSON.parse(text);
   } catch {
@@ -186,21 +198,21 @@ export function recomputeBaSummary(
  * 缺失时按定义项的 group 字段**推导**（不再前端硬编码分组表）。
  */
 export function normalizeBaGroups(
-  groups: any[] = [],
+  groups: BaGroupLike[] = [],
   defs: BaItemDef[] = [],
 ): BaGroup[] {
   const byId = new Map(defs.map(d => [d.item_id, d]));
 
   if (groups?.length) {
-    return groups.map((g: any) => {
+    return groups.map((g) => {
       const key = g.group || g.key || "";
-      const rawItems: any[] = g.items?.length
+      const rawItems = g.items?.length
         ? g.items
         : defs.filter(d => d.group === key);
       return {
         key,
         label: g.label || key,
-        items: rawItems.map((d: any) => byId.get(d.item_id) || d),
+        items: rawItems.map((d) => byId.get(d.item_id) || d),
       };
     });
   }
@@ -220,8 +232,9 @@ export function normalizeBaGroups(
 }
 
 /** 合并「解析项定义」与「已存结果」，供右侧阅读区 / 完整查看使用 */
-export function mergeBaItem(def?: BaItemDef, stored?: BaStoredItem): any {
-  if (!def && !stored) return null;
+export function mergeBaItem(def?: BaItemDef, stored?: BaStoredItem): BaItemDef & BaStoredItem {
+  // 运行期双入参皆缺时仍返回 null（历史行为不变；调用方均至少传入 def，消费侧按非空使用）
+  if (!def && !stored) return null!;
   return {
     ...(def || {}),
     ...(stored || {}),
@@ -237,13 +250,14 @@ export function mergeBaItem(def?: BaItemDef, stored?: BaStoredItem): any {
 export function findFirstDoneBaItem(
   items: BaStoredItem[] = [],
   defs: BaItemDef[] = [],
-): any {
+): BaItemDef & BaStoredItem {
   const byId = new Map(items.map(i => [i.item_id, i]));
   for (const d of defs) {
     const s = byId.get(d.item_id);
     if (s?.status === "success" && s.content) return mergeBaItem(d, s);
   }
-  return null;
+  // 运行期无已完成项时仍返回 null（历史行为不变；调用方以可空处理）
+  return null!;
 }
 
 /**

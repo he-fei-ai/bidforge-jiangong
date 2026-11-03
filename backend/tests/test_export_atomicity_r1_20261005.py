@@ -43,6 +43,28 @@ def _src(path: str) -> str:
         return f.read()
 
 
+def _fn_cluster(name: str) -> str:
+    """在导出模块簇（facade + 拆分模块）中取函数源码。
+
+    大文件拆分后 `_cache_row_viable` 等缓存判据迁入 `_export_cache.py`；
+    比单文件查找更严：要求该函数在全簇恰有一处定义（唯一实现）。
+    """
+    cluster = [EX_PATH] + [
+        os.path.join(BACKEND, "app", "routers", n)
+        for n in ("_export_cache.py", "_export_docx_parts.py", "_export_issue_scan.py")
+    ]
+    hits = []
+    for path in cluster:
+        src = _src(path)
+        for node in ast.parse(src).body:
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == name:
+                hits.append((path, ast.get_source_segment(src, node) or ""))
+    assert len(hits) == 1, (
+        "函数 %s 应在导出模块簇中恰有一处定义，实际 %d 处: %s"
+        % (name, len(hits), [os.path.basename(p) for p, _ in hits]))
+    return hits[0][1]
+
+
 def _fn(path: str, name: str) -> str:
     src = _src(path)
     tree = ast.parse(src)
@@ -110,7 +132,7 @@ def test_f1_pdf_cache_hit_guards_size_gt_zero():
     src = _fn(EX_PATH, "export_pdf")
     assert "_cache_row_viable(cached[0])" in src, (
         "PDF 缓存命中未走 _cache_row_viable 可用判据（F-1 纵深防御回退）")
-    helper = _fn(EX_PATH, "_cache_row_viable")
+    helper = _fn_cluster("_cache_row_viable")
     assert "st_size > 0" in helper, (
         "_cache_row_viable 缺 size>0 检查（0 字节产物会被当成有效缓存）")
 

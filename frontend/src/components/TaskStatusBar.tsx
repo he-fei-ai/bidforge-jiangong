@@ -33,6 +33,17 @@ import { systemApi, tasksApi } from "../api";
 import { useAntdMessageHub } from "../utils/activityCenter";
 import { createSseBatcher, type SseBatcher } from "../utils/sseBatcher";
 
+/** 后端任务运行统计（stats/ping 载荷子集，按状态栏展示实际读取字段推导） */
+type TaskStats = {
+  elapsed_ms?: number;
+  eta_ms?: number | null;
+  done?: number;
+  total?: number;
+  words?: number;
+  concurrency?: number;
+  running?: Array<{ title?: string; section_id?: string }>;
+};
+
 type TaskItem = {
   id: string;
   task_type: string;
@@ -45,7 +56,7 @@ type TaskItem = {
   created_at?: string;
   live?: boolean;
   elapsed?: number;
-  stats?: Record<string, any>;
+  stats?: TaskStats;
 };
 
 type Activity = {
@@ -196,7 +207,7 @@ function TaskRow({
   // 后端 stats：elapsed_ms/eta_ms/done/total/failed/words/running/concurrency
   const elapsedSec = task.elapsed ?? (stats.elapsed_ms ? stats.elapsed_ms / 1000 : null);
   const etaSec = stats.eta_ms ? stats.eta_ms / 1000 : null;
-  const runningChapters: any[] = Array.isArray(stats.running) ? stats.running : [];
+  const runningChapters = Array.isArray(stats.running) ? stats.running : [];
 
   const statChips: string[] = [];
   if (elapsedSec != null) statChips.push(`已耗时 ${fmtDuration(elapsedSec as number)}`);
@@ -295,7 +306,7 @@ function TaskRow({
           {statChips.length > 0 && <div>{statChips.join(" · ")}</div>}
           {runningChapters.length > 0 && (
             <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              进行中：{runningChapters.map((c: any) => c?.title || c?.section_id || "").filter(Boolean).join("、")}
+              进行中：{runningChapters.map((c) => c?.title || c?.section_id || "").filter(Boolean).join("、")}
             </div>
           )}
         </div>
@@ -417,8 +428,10 @@ function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
 
       try {
         // 不传 signal —— 完全靠 softStop 做优雅断连（reader.cancel 路径，无 ERR_ABORTED）
-        for await (const msg of systemApi.activityStream(8, undefined, softStop)) {
+        for await (const raw of systemApi.activityStream(8, undefined, softStop)) {
           if (!active) break;
+          // 后端 SSE 契约：snapshot 事件携带完整活动快照
+          const msg = raw as { event?: string; data: Activity | null };
           if (msg?.event === "snapshot") {
             // ✅ 性能优化：不再逐条 setActivity，统一走合帧 + 指纹去重
             applyActivity(msg.data);
@@ -484,8 +497,9 @@ function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
         } else {
           message.warning(data?.message || "操作未生效（任务可能已结束）");
         }
-      } catch (e: any) {
-        message.error(e?.message || "操作失败");
+      } catch (e: unknown) {
+        const err = e as { message?: string };
+        message.error(err?.message || "操作失败");
       } finally {
         setPendingActions((m) => {
           const next = { ...m };

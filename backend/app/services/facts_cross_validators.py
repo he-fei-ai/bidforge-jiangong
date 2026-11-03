@@ -312,12 +312,8 @@ def _split_flow(value: str | list) -> list[str]:
     return [p for p in (s.strip() for s in _FLOW_ARROW.split(str(value))) if p]
 
 
-def _has_flow_content(item) -> bool:
-    """判断一条事实是否是流程序列（兼容新/旧格式）"""
-    v = item.value
-    if isinstance(v, list):
-        return len(v) >= 2  # 数组 ≥2 个元素就视为序列
-    return bool(_FLOW_ARROW.search(str(v)))
+# ✅ R166 卫生：孤儿流程序列判断函数摘除 —— 全仓（app+tests）零调用点，
+#    ``_check_flow_sequence`` 改用局部 ``_value_is_flow`` 后遗留的同族残骸。
 
 
 def _lcs_len(a: list[str], b: list[str]) -> int:
@@ -646,11 +642,17 @@ def _check_numeric_unit_consistency(merged) -> list[CrossConflict]:
 
     与 XV-SAME-NAME 正交互补：XV-SAME-NAME 报「值不同」，本规则补「量纲根因」。
 
+    ✅ R166（2026-11-03 · 判据同源化）：分组键与 :func:`_check_same_name_conflicts`
+    对齐 —— fact_key 非空只按 key 分组、key 缺失回落按 name。旧实现只按
+    显示名精确相等分组，与 SAME-NAME 的 2026-10-06 整改方向相反：
+    「总工期 90 天」vs「施工总工期 3 个月」这类跨来源异名同物形态漏检。
+
     ⚠️ 仿射量纲（温度）不参与比值换算（见 :data:`_AFFINE_DIMS`）：
     只在「数值相同、单位不同」时报错（30℃ 与 30℉ 必有一处写错），
     绝不按 base 比值判「等价」或「量级差」。
     """
     conflicts: list[CrossConflict] = []
+    by_key: dict[str, list] = {}
     by_name: dict[str, list] = {}
     for it in merged:
         if isinstance(it.value, (list, tuple)):
@@ -658,11 +660,17 @@ def _check_numeric_unit_consistency(merged) -> list[CrossConflict]:
         q = _extract_quantity(it.value)
         if not q:
             continue
-        by_name.setdefault((it.name or "").strip(), []).append((it, q))
-
-    for nm, items in by_name.items():
-        if not nm:
+        # ✅ R166：与 _check_same_name_conflicts 同口径 —— key 非空只按 key
+        #    分组（不再按 name 二次分裂），key 缺失回落 name（旧 shim 兼容）。
+        key = str(getattr(it, "key", "") or "").strip()
+        if key:
+            by_key.setdefault(key, []).append((it, q))
             continue
+        nm = (it.name or "").strip()
+        if nm:
+            by_name.setdefault(nm, []).append((it, q))
+
+    for items in list(by_key.values()) + list(by_name.values()):
         by_dim: dict[str, list] = {}
         for it, q in items:
             by_dim.setdefault(q[2], []).append((it, q))

@@ -223,6 +223,7 @@ def _render_facts_text(
     chapter: str = "",
     audit_out: list | None = None,
     full_titles: list | None = None,
+    injected_out: list | None = None,
 ) -> str:
     """把 global_facts 行渲染为「项目关键事实」文本（纯函数，便于单测与逐章精选复用）。
 
@@ -293,7 +294,7 @@ def _render_facts_text(
     #   未超预算时分配器返回恒等数组，输出与旧实现逐字一致（回归护栏见
     #   tests/test_content_facts_budget_20260927.py）。
     # ---------------------------------------------------------------
-    prepared: list[tuple[str, str, float | None]] = []
+    prepared: list[tuple[str, str, str, float | None]] = []
     _sel_flags: list[bool] = []  # ✅ R122-G1：与 prepared 同序的「选中行」标记
     seen_groups: list[str] = []
     for _row in rows:
@@ -424,6 +425,10 @@ def _render_facts_text(
         fact = prefix + body[:max(0, min(alloc - 1, room))] + "\n"
         parts.append(fact)
         total += len(fact)
+        # ✅ R166（FIX-10）：实际渲染进文本的行标题逐条留痕 —— 与 audit_out
+        # （预算丢弃）合起来对 prepared 行集构成完整账本「进了哪些 / 丢了哪些」。
+        if injected_out is not None:
+            injected_out.append(str(_ftitle or gt or ""))
     return "".join(parts)
 
 
@@ -483,14 +488,21 @@ def fact_injection_audit(rows: list, *, leaf: dict | None = None,
 
     Returns:
         ``{rows_total, budget_dropped, budget_dropped_count,
-        rendered_chars, rendered_text, selected_titles}``。``rendered_text`` 与
-        ``_render_facts_text(...)`` 返回**逐字节一致**。
+        rendered_chars, rendered_text, selected_titles, injected_titles}``。
+        ``rendered_text`` 与 ``_render_facts_text(...)`` 返回**逐字节一致**。
+
+        ✅ R166（FIX-10）：新增 ``injected_titles`` —— **实际渲染进文本**的行标题
+        （与 ``budget_dropped`` 合计恰好覆盖输入行集）。此前 sse 侧逐章审计的
+        ``injected_facts`` 用 ``_filter_facts_rows`` 预筛近似，与「core+rest 分段
+        下发」的实际集合不同源（近似值含未下发行）；现由渲染器逐条留痕，
+        审计口径与实际下发严格一致。
     """
     dropped: list[str] = []
+    injected: list[str] = []
     text = _render_facts_text(
         list(rows or []), relevant_to=leaf, chapter=chapter,
         max_total=max_total, per_fact=per_fact, audit_out=dropped,
-        full_titles=full_titles)
+        full_titles=full_titles, injected_out=injected)
     # ✅ R122-G1：回显「在本次行集内真命中」的选中标题（与渲染前置同判据）
     _wanted = {str(t or "").strip() for t in (full_titles or []) if str(t or "").strip()}
     _selected_titles: list[str] = []
@@ -506,6 +518,7 @@ def fact_injection_audit(rows: list, *, leaf: dict | None = None,
         "rendered_chars": len(text),
         "rendered_text": text,
         "selected_titles": _selected_titles,
+        "injected_titles": injected,
     }
 
 

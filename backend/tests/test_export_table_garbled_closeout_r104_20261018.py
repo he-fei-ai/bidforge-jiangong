@@ -388,7 +388,12 @@ class TestStaticLocksAndByteHealthE:
         这锁死「解析层必须产出规范序」的跨模块契约——若有人把渲染层也改成
         宽容形态，两处判据就会分叉（登记/渲染两侧再次各写一份）。
         """
-        src = (APP_DIR / "routers" / "export.py").read_bytes().decode("utf-8")
+        # 拆分兼容：聚合读取 export.py 与其子模块（_add_table_from_markup 已拆至 _export_docx_parts.py）
+        import glob as _glob
+        segs = [(APP_DIR / "routers" / "export.py").read_bytes().decode("utf-8")]
+        for p in sorted(_glob.glob(str(APP_DIR / "routers" / "_export_*.py"))):
+            segs.append(open(p, "rb").read().decode("utf-8"))
+        src = "\n".join(segs)
         assert "if j != 1" in src, "渲染层跳过 index 1 的契约被改写"
 
     def test_cyrillic_glyph_regex_single_definition(self):

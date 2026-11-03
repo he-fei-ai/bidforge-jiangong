@@ -58,8 +58,8 @@ def get_async_client(base_url: str, proxy: str | None = None) -> httpx.AsyncClie
         try:
             if cached_loop is not None and cached_loop.is_closed():
                 pass  # 已关闭的 loop 上不做任何 await
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("检测旧 client 绑定 loop 状态失败（丢弃旧实例，继续新建）: %s", e)
 
     client = httpx.AsyncClient(
         timeout=_DEFAULT_TIMEOUT,
