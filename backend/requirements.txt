@@ -1,0 +1,40 @@
+# ================================================================
+# 专项方案工具箱 · 后端运行时依赖（Python 3.12）
+# 基线：2026-11-03 本机全量测试通过的环境（见 docs/R169）
+# 约定：只列直接依赖并锁死版本；升级须单独提交并跑全量回归。
+# ================================================================
+
+# Web 框架
+fastapi==0.138.0
+starlette==1.3.1
+uvicorn[standard]==0.49.0
+python-multipart==0.0.32
+
+# 配置与校验
+pydantic==2.13.4
+pydantic-settings==2.14.1
+
+# 存储
+aiosqlite==0.22.1
+
+# 文档解析与导出
+python-docx==1.2.0
+docx2python==3.6.2
+Pillow==12.2.0
+PyMuPDF==1.27.2.3
+pdfplumber==0.11.9
+pypdf==5.4.0
+openpyxl==3.1.5
+xlrd==1.2.0
+
+# 加密与网络
+cryptography==49.0.0
+httpx==0.27.1
+aiohttp==3.14.1
+
+# 图表渲染数值计算
+numpy==2.4.6
+
+# 说明：
+# - OCR（rapidocr/pytesseract）见 requirements-ocr.txt
+# - Windows 专用（pywin32/docx2pdf）见 requirements-windows.txt
