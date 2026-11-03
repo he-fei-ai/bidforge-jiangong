@@ -19,13 +19,11 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-import pytest
-from fastapi import HTTPException
-
 import app.routers.global_facts as gf
 import app.services.facts_builder as fb
 import app.services.facts_cross_validators as fcv
 import app.services.facts_extractor as fe
+import pytest
 from app.models import ClearFactsRequest, FactGroupUpdate
 from app.services.facts_extractor import (
     ExtractionResult,
@@ -34,6 +32,7 @@ from app.services.facts_extractor import (
     invalidate_export_cache,
     persist_extraction,
 )
+from fastapi import HTTPException
 
 BACKEND = Path(__file__).resolve().parents[1]
 
