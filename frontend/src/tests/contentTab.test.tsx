@@ -95,7 +95,9 @@ describe("ContentGenerationTab · 主操作按钮", () => {
   });
 
   it("generating=true 时主按钮禁用、下一步禁用", () => {
-    const utils = render(<ContentGenerationTab {...baseProps({ generating: true, running: true })} />);
+    const utils = render(
+      <ContentGenerationTab {...baseProps({ generating: true, running: true })} />,
+    );
     expect(btnByText(utils, "一键生成全文").disabled).toBe(true);
     expect(btnByText(utils, "下一步：审核与预检").disabled).toBe(true);
   });
@@ -200,12 +202,8 @@ describe("ContentGenerationTab · 导航与设置", () => {
   });
 
   it("一致性修复关闭时修复等级选择器禁用", () => {
-    const utils = render(
-      <ContentGenerationTab {...baseProps({ autoConsistencyRepair: false })} />,
-    );
-    const disabledSelect = utils.container.querySelector(
-      ".ant-select-disabled",
-    );
+    const utils = render(<ContentGenerationTab {...baseProps({ autoConsistencyRepair: false })} />);
+    const disabledSelect = utils.container.querySelector(".ant-select-disabled");
     expect(disabledSelect).toBeTruthy();
   });
 
@@ -226,194 +224,177 @@ describe("ContentGenerationTab · 导航与设置", () => {
     expect(utils.getByTestId("section-card")).toBeTruthy();
   });
 });
-  // ------------------------------------------------------------------
-  // 2026-09-20 补齐：正文生成 Tab 组件级交互测试补全
-  //   此前 5 个主按钮只测了 2 个（一键生成全文 / 生成当前章节），
-  //   字数/并发/自定义字数/修复工作台/摘要缺省分支均无覆盖。
-  // ------------------------------------------------------------------
-  describe("ContentGenerationTab · 主操作按钮（补全）", () => {
-    it("点击补全生成上抛 onGenerateMissing", () => {
-      const p = baseProps();
-      const utils = render(<ContentGenerationTab {...p} />);
-      fireEvent.click(btnByText(utils, "补全生成"));
-      expect(p.onGenerateMissing).toHaveBeenCalledTimes(1);
-    });
-
-    it("点击续写本章上抛 onContinueSection", () => {
-      const p = baseProps();
-      const utils = render(<ContentGenerationTab {...p} />);
-      fireEvent.click(btnByText(utils, "续写本章"));
-      expect(p.onContinueSection).toHaveBeenCalledTimes(1);
-    });
-
-    it("未选中章节时「生成当前章节 / 续写本章」禁用，「补全生成」不受选中态约束", () => {
-      const utils = render(
-        <ContentGenerationTab {...baseProps({ hasSelectedSection: false })} />,
-      );
-      expect(btnByText(utils, "生成当前章节").disabled).toBe(true);
-      expect(btnByText(utils, "续写本章").disabled).toBe(true);
-      // 「补全生成」生成的是全部空章节，不依赖当前选中项（组件口径：
-      // hasSelectedSection 只作用于「生成当前章节 / 续写本章」两个按钮）
-      expect(btnByText(utils, "补全生成").disabled).toBe(false);
-      // 「一键生成全文」同样不依赖章节选中，仍然可点
-      expect(btnByText(utils, "一键生成全文").disabled).toBe(false);
-    });
-
-    it("hasTree 控制右下提示文案：有目录树显示引导，无目录树不渲染", () => {
-      // 组件口径：提示是普通 Text（非 Tooltip），随 hasTree 条件渲染
-      const u1 = render(<ContentGenerationTab {...baseProps({ hasTree: true })} />);
-      expect(u1.getByText(/左侧点击任意章节可查看\/编辑已生成内容/)).toBeTruthy();
-      cleanup();
-      const u2 = render(<ContentGenerationTab {...baseProps({ hasTree: false })} />);
-      expect(u2.queryByText(/左侧点击任意章节可查看\/编辑已生成内容/)).toBeNull();
-    });
-
-    it("字数非默认档时显示口径 Tag（R66：档位=叶子目标 / 自定义=二级总量）", () => {
-      const u1 = render(
-        <ContentGenerationTab {...baseProps({ wordBudgetOption: "default" })} />,
-      );
-      expect(u1.queryByText(/按二级章节总字数控制/)).toBeNull();
-      expect(u1.queryByText(/按叶子章节档位字数控制/)).toBeNull();
-      cleanup();
-      const u2 = render(
-        <ContentGenerationTab {...baseProps({ wordBudgetOption: "detailed" })} />,
-      );
-      expect(u2.getByText(/按叶子章节档位字数控制/)).toBeTruthy();
-      expect(u2.queryByText(/按二级章节总字数控制/)).toBeNull();
-      cleanup();
-      const u3 = render(
-        <ContentGenerationTab {...baseProps({ wordBudgetOption: "custom" })} />,
-      );
-      expect(u3.getByText(/按二级章节总字数控制/)).toBeTruthy();
-      expect(u3.queryByText(/按叶子章节档位字数控制/)).toBeNull();
-    });
+// ------------------------------------------------------------------
+// 2026-09-20 补齐：正文生成 Tab 组件级交互测试补全
+//   此前 5 个主按钮只测了 2 个（一键生成全文 / 生成当前章节），
+//   字数/并发/自定义字数/修复工作台/摘要缺省分支均无覆盖。
+// ------------------------------------------------------------------
+describe("ContentGenerationTab · 主操作按钮（补全）", () => {
+  it("点击补全生成上抛 onGenerateMissing", () => {
+    const p = baseProps();
+    const utils = render(<ContentGenerationTab {...p} />);
+    fireEvent.click(btnByText(utils, "补全生成"));
+    expect(p.onGenerateMissing).toHaveBeenCalledTimes(1);
   });
 
-  describe("ContentGenerationTab · 压缩本章的三重闸门", () => {
-    it("shrinking=true 时「压缩本章」禁用并 loading", () => {
-      const p = baseProps({ shrinking: true });
-      const utils = render(<ContentGenerationTab {...p} />);
-      const b = btnByText(utils, "压缩本章");
-      expect(b.disabled).toBe(true);
-      expect(b.className).toContain("ant-btn-loading");
-    });
-
-    it("有任意生成任务在跑时「压缩本章」禁用（防止与生成并发写同一章节）", () => {
-      const utils = render(<ContentGenerationTab {...baseProps({ generating: true })} />);
-      expect(btnByText(utils, "压缩本章").disabled).toBe(true);
-    });
-
-    it("canShrink=false 时「压缩本章」禁用且不响应点击", () => {
-      const p = baseProps({ canShrink: false });
-      const utils = render(<ContentGenerationTab {...p} />);
-      const b = btnByText(utils, "压缩本章");
-      expect(b.disabled).toBe(true);
-      fireEvent.click(b);
-      expect(p.onShrinkSection).not.toHaveBeenCalled();
-    });
+  it("点击续写本章上抛 onContinueSection", () => {
+    const p = baseProps();
+    const utils = render(<ContentGenerationTab {...p} />);
+    fireEvent.click(btnByText(utils, "续写本章"));
+    expect(p.onContinueSection).toHaveBeenCalledTimes(1);
   });
 
-  describe("ContentGenerationTab · 生成参数设置回调", () => {
-    it("切换并发档位上抛 onConcurrencyChange", () => {
-      const p = baseProps({ concurrencyOption: "balanced" });
-      const utils = render(<ContentGenerationTab {...p} />);
-      fireEvent.click(utils.getByText("🚀 快速（并发 5）"));
-      expect(p.onConcurrencyChange).toHaveBeenCalledWith("fast");
-    });
-
-    it("自定义字数输入变更上抛 onCustomWordBudgetChange", () => {
-      const p = baseProps({ wordBudgetOption: "custom", customWordBudget: 2000 });
-      const utils = render(<ContentGenerationTab {...p} />);
-      const input = utils.container.querySelector(
-        ".ant-input-number-input",
-      ) as HTMLInputElement;
-      expect(input).toBeTruthy();
-      fireEvent.change(input, { target: { value: "3000" } });
-      expect(p.onCustomWordBudgetChange).toHaveBeenCalledWith(3000);
-    });
-
-    it("字数档位选择器渲染 6 个预设项 + 自定义项", async () => {
-      const utils = render(<ContentGenerationTab {...baseProps()} />);
-      const select = utils.container.querySelector(".ant-select") as HTMLElement;
-      expect(select).toBeTruthy();
-      // 打开下拉（rc-select 的选项渲染在 document.body 的 portal 里，
-      // 不在 utils.container 内，故必须查 document）
-      fireEvent.mouseDown(select.querySelector(".ant-select-selector")!);
-      await waitFor(() => {
-        expect(
-          Array.from(document.querySelectorAll(".ant-select-item-option")).length,
-        ).toBe(6);
-      });
-      const labels = Array.from(
-        document.querySelectorAll(".ant-select-item-option-content"),
-      ).map((i) => (i.textContent || "").trim());
-      expect(labels).toEqual([
-        "使用目录默认值",
-        "简短 800 字",
-        "标准 1200 字",
-        "详细 2000 字",
-        "超长 2500 字",
-        "自定义",
-      ]);
-    });
+  it("未选中章节时「生成当前章节 / 续写本章」禁用，「补全生成」不受选中态约束", () => {
+    const utils = render(<ContentGenerationTab {...baseProps({ hasSelectedSection: false })} />);
+    expect(btnByText(utils, "生成当前章节").disabled).toBe(true);
+    expect(btnByText(utils, "续写本章").disabled).toBe(true);
+    // 「补全生成」生成的是全部空章节，不依赖当前选中项（组件口径：
+    // hasSelectedSection 只作用于「生成当前章节 / 续写本章」两个按钮）
+    expect(btnByText(utils, "补全生成").disabled).toBe(false);
+    // 「一键生成全文」同样不依赖章节选中，仍然可点
+    expect(btnByText(utils, "一键生成全文").disabled).toBe(false);
   });
 
-  describe("ContentGenerationTab · 全文一致性 Agent 修复（补全）", () => {
-    it("点击「打开修复工作台」上抛 onOpenConsistencyWorkbench", () => {
-      const p = baseProps();
-      const utils = render(<ContentGenerationTab {...p} />);
-      fireEvent.click(btnByText(utils, "打开修复工作台"));
-      expect(p.onOpenConsistencyWorkbench).toHaveBeenCalledTimes(1);
-    });
-
-    it("一致性修复开关（第一个）上抛 onAutoConsistencyChange", () => {
-      const p = baseProps({ autoConsistencyRepair: false });
-      const utils = render(<ContentGenerationTab {...p} />);
-      const switches = Array.from(utils.container.querySelectorAll(".ant-switch"));
-      expect(switches.length).toBe(2);
-      fireEvent.click(switches[0]);
-      expect(p.onAutoConsistencyChange).toHaveBeenCalledTimes(1);
-      // 自动压缩开关不受影响
-      expect(p.onAutoShrinkChange).not.toHaveBeenCalled();
-    });
-
-    it("修复等级选择器渲染 3 个档位且当前选中值可见", async () => {
-      const utils = render(
-        <ContentGenerationTab {...baseProps({ consistencySeverity: "medium" })} />,
-      );
-      // 当前值直接渲染在触发器里（Select 收起态显示选中项文本）
-      expect(utils.getByText("中及以上")).toBeTruthy();
-      const severitySelect = Array.from(
-        utils.container.querySelectorAll(".ant-select"),
-      ).find((s) => (s.textContent || "").includes("中及以上")) as HTMLElement;
-      expect(severitySelect).toBeTruthy();
-      fireEvent.mouseDown(severitySelect.querySelector(".ant-select-selector")!);
-      await waitFor(() => {
-        expect(
-          Array.from(document.querySelectorAll(".ant-select-item-option")).length,
-        ).toBe(3);
-      });
-      const labels = Array.from(
-        document.querySelectorAll(".ant-select-item-option-content"),
-      ).map((i) => (i.textContent || "").trim());
-      expect(labels).toContain("仅高危（推荐）");
-      expect(labels).toContain("中及以上");
-      expect(labels).toContain("全部（含低危）");
-    });
-
-    it("crSummary 存在但 total=0 时不显示冲突 Tag（0 处不算发现）", () => {
-      const utils = render(
-        <ContentGenerationTab {...baseProps({ crSummary: { total: 0, repaired: 0 } })} />,
-      );
-      expect(utils.queryByText(/最近发现/)).toBeNull();
-    });
-
-    it("crSummary 缺 repaired 字段时只显示发现数，不显示「已修复」", () => {
-      const utils = render(
-        <ContentGenerationTab {...baseProps({ crSummary: { total: 3 } })} />,
-      );
-      expect(utils.getByText(/最近发现 3 处冲突/)).toBeTruthy();
-      expect(utils.queryByText(/已修复/)).toBeNull();
-    });
+  it("hasTree 控制右下提示文案：有目录树显示引导，无目录树不渲染", () => {
+    // 组件口径：提示是普通 Text（非 Tooltip），随 hasTree 条件渲染
+    const u1 = render(<ContentGenerationTab {...baseProps({ hasTree: true })} />);
+    expect(u1.getByText(/左侧点击任意章节可查看\/编辑已生成内容/)).toBeTruthy();
+    cleanup();
+    const u2 = render(<ContentGenerationTab {...baseProps({ hasTree: false })} />);
+    expect(u2.queryByText(/左侧点击任意章节可查看\/编辑已生成内容/)).toBeNull();
   });
 
+  it("字数非默认档时显示口径 Tag（R66：档位=叶子目标 / 自定义=二级总量）", () => {
+    const u1 = render(<ContentGenerationTab {...baseProps({ wordBudgetOption: "default" })} />);
+    expect(u1.queryByText(/按二级章节总字数控制/)).toBeNull();
+    expect(u1.queryByText(/按叶子章节档位字数控制/)).toBeNull();
+    cleanup();
+    const u2 = render(<ContentGenerationTab {...baseProps({ wordBudgetOption: "detailed" })} />);
+    expect(u2.getByText(/按叶子章节档位字数控制/)).toBeTruthy();
+    expect(u2.queryByText(/按二级章节总字数控制/)).toBeNull();
+    cleanup();
+    const u3 = render(<ContentGenerationTab {...baseProps({ wordBudgetOption: "custom" })} />);
+    expect(u3.getByText(/按二级章节总字数控制/)).toBeTruthy();
+    expect(u3.queryByText(/按叶子章节档位字数控制/)).toBeNull();
+  });
+});
+
+describe("ContentGenerationTab · 压缩本章的三重闸门", () => {
+  it("shrinking=true 时「压缩本章」禁用并 loading", () => {
+    const p = baseProps({ shrinking: true });
+    const utils = render(<ContentGenerationTab {...p} />);
+    const b = btnByText(utils, "压缩本章");
+    expect(b.disabled).toBe(true);
+    expect(b.className).toContain("ant-btn-loading");
+  });
+
+  it("有任意生成任务在跑时「压缩本章」禁用（防止与生成并发写同一章节）", () => {
+    const utils = render(<ContentGenerationTab {...baseProps({ generating: true })} />);
+    expect(btnByText(utils, "压缩本章").disabled).toBe(true);
+  });
+
+  it("canShrink=false 时「压缩本章」禁用且不响应点击", () => {
+    const p = baseProps({ canShrink: false });
+    const utils = render(<ContentGenerationTab {...p} />);
+    const b = btnByText(utils, "压缩本章");
+    expect(b.disabled).toBe(true);
+    fireEvent.click(b);
+    expect(p.onShrinkSection).not.toHaveBeenCalled();
+  });
+});
+
+describe("ContentGenerationTab · 生成参数设置回调", () => {
+  it("切换并发档位上抛 onConcurrencyChange", () => {
+    const p = baseProps({ concurrencyOption: "balanced" });
+    const utils = render(<ContentGenerationTab {...p} />);
+    fireEvent.click(utils.getByText("🚀 快速（并发 5）"));
+    expect(p.onConcurrencyChange).toHaveBeenCalledWith("fast");
+  });
+
+  it("自定义字数输入变更上抛 onCustomWordBudgetChange", () => {
+    const p = baseProps({ wordBudgetOption: "custom", customWordBudget: 2000 });
+    const utils = render(<ContentGenerationTab {...p} />);
+    const input = utils.container.querySelector(".ant-input-number-input") as HTMLInputElement;
+    expect(input).toBeTruthy();
+    fireEvent.change(input, { target: { value: "3000" } });
+    expect(p.onCustomWordBudgetChange).toHaveBeenCalledWith(3000);
+  });
+
+  it("字数档位选择器渲染 6 个预设项 + 自定义项", async () => {
+    const utils = render(<ContentGenerationTab {...baseProps()} />);
+    const select = utils.container.querySelector(".ant-select") as HTMLElement;
+    expect(select).toBeTruthy();
+    // 打开下拉（rc-select 的选项渲染在 document.body 的 portal 里，
+    // 不在 utils.container 内，故必须查 document）
+    fireEvent.mouseDown(select.querySelector(".ant-select-selector")!);
+    await waitFor(() => {
+      expect(Array.from(document.querySelectorAll(".ant-select-item-option")).length).toBe(6);
+    });
+    const labels = Array.from(document.querySelectorAll(".ant-select-item-option-content")).map(
+      (i) => (i.textContent || "").trim(),
+    );
+    expect(labels).toEqual([
+      "使用目录默认值",
+      "简短 800 字",
+      "标准 1200 字",
+      "详细 2000 字",
+      "超长 2500 字",
+      "自定义",
+    ]);
+  });
+});
+
+describe("ContentGenerationTab · 全文一致性 Agent 修复（补全）", () => {
+  it("点击「打开修复工作台」上抛 onOpenConsistencyWorkbench", () => {
+    const p = baseProps();
+    const utils = render(<ContentGenerationTab {...p} />);
+    fireEvent.click(btnByText(utils, "打开修复工作台"));
+    expect(p.onOpenConsistencyWorkbench).toHaveBeenCalledTimes(1);
+  });
+
+  it("一致性修复开关（第一个）上抛 onAutoConsistencyChange", () => {
+    const p = baseProps({ autoConsistencyRepair: false });
+    const utils = render(<ContentGenerationTab {...p} />);
+    const switches = Array.from(utils.container.querySelectorAll(".ant-switch"));
+    expect(switches.length).toBe(2);
+    fireEvent.click(switches[0]);
+    expect(p.onAutoConsistencyChange).toHaveBeenCalledTimes(1);
+    // 自动压缩开关不受影响
+    expect(p.onAutoShrinkChange).not.toHaveBeenCalled();
+  });
+
+  it("修复等级选择器渲染 3 个档位且当前选中值可见", async () => {
+    const utils = render(
+      <ContentGenerationTab {...baseProps({ consistencySeverity: "medium" })} />,
+    );
+    // 当前值直接渲染在触发器里（Select 收起态显示选中项文本）
+    expect(utils.getByText("中及以上")).toBeTruthy();
+    const severitySelect = Array.from(utils.container.querySelectorAll(".ant-select")).find((s) =>
+      (s.textContent || "").includes("中及以上"),
+    ) as HTMLElement;
+    expect(severitySelect).toBeTruthy();
+    fireEvent.mouseDown(severitySelect.querySelector(".ant-select-selector")!);
+    await waitFor(() => {
+      expect(Array.from(document.querySelectorAll(".ant-select-item-option")).length).toBe(3);
+    });
+    const labels = Array.from(document.querySelectorAll(".ant-select-item-option-content")).map(
+      (i) => (i.textContent || "").trim(),
+    );
+    expect(labels).toContain("仅高危（推荐）");
+    expect(labels).toContain("中及以上");
+    expect(labels).toContain("全部（含低危）");
+  });
+
+  it("crSummary 存在但 total=0 时不显示冲突 Tag（0 处不算发现）", () => {
+    const utils = render(
+      <ContentGenerationTab {...baseProps({ crSummary: { total: 0, repaired: 0 } })} />,
+    );
+    expect(utils.queryByText(/最近发现/)).toBeNull();
+  });
+
+  it("crSummary 缺 repaired 字段时只显示发现数，不显示「已修复」", () => {
+    const utils = render(<ContentGenerationTab {...baseProps({ crSummary: { total: 3 } })} />);
+    expect(utils.getByText(/最近发现 3 处冲突/)).toBeTruthy();
+    expect(utils.queryByText(/已修复/)).toBeNull();
+  });
+});

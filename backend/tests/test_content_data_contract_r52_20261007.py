@@ -36,6 +36,7 @@
 消费 ``build_global_data_dictionary`` + ``render_data_dictionary_block``
 （数据字典注入，开关 ``content_data_dictionary``）。见 ``TestWiring``。
 """
+
 import ast
 import re
 from pathlib import Path
@@ -45,8 +46,7 @@ import pytest
 from app.services import content_data_contract as c
 
 
-def R(title: str, content: str, conf: float = 0.95,
-      chapter: str = "", project_id: str = "proj") -> tuple:
+def R(title: str, content: str, conf: float = 0.95, chapter: str = "", project_id: str = "proj") -> tuple:
     """构造事实行（5 元组）：``(project_id, title, content, confidence, chapter)``。
 
     ⚠️ 索引约定是硬契约：``_row_text`` 取 ``row[1]/row[2]``、``_row_confidence``
@@ -107,8 +107,7 @@ class TestBridge:
 
     def test_bridge_rejects_plain_cjk(self):
         """桥接不得跨过任意汉字（旧实现 ``[^0-9]{0,N}`` 会跨过）。"""
-        rx = re.compile(r"(?P<name>缺陷责任期)" + c._bridge()
-                        + r"(\d+)\s*(个?月|年|日历天|天)")
+        rx = re.compile(r"(?P<name>缺陷责任期)" + c._bridge() + r"(\d+)\s*(个?月|年|日历天|天)")
         assert rx.search("缺陷责任期届满通知期限28天") is None
         assert rx.search("缺陷责任期最长期限24月") is None
 
@@ -201,13 +200,11 @@ class TestObjectQualify:
         取值本身（「保修期5年」）结构上不可能含前置对象词，所以在压缩后的
         取值里找限定词必然找不到 —— 判据必须落在匹配附近的文本窗口上。
         """
-        assert c._qualify_key("保修期5年", ("屋面及防水",),
-                              "屋面及防水工程保修期5年") == "屋面及防水保修期5年"
+        assert c._qualify_key("保修期5年", ("屋面及防水",), "屋面及防水工程保修期5年") == "屋面及防水保修期5年"
 
     def test_hint_already_in_value_not_doubled(self):
         """⚠️ 限定词已在取值里时不得再加前缀（否则「管理管理人员34人」）。"""
-        assert c._qualify_key("管理人员34人", ("管理",), "管理人员数量34人") == \
-            "管理人员34人"
+        assert c._qualify_key("管理人员34人", ("管理",), "管理人员数量34人") == "管理人员34人"
 
     def test_hint_far_from_match_not_applied(self):
         """对象词离取值太远时不得误当前缀 —— 窗口约束在调用点生效。
@@ -229,14 +226,14 @@ class TestObjectQualify:
         只有静态锚点能拦住。
         """
         src = Path(c.__file__).read_text(encoding="utf-8")
-        idx = src.find('_qualify_key(value_text, obj_hints, ')
+        idx = src.find("_qualify_key(value_text, obj_hints, ")
         assert idx > 0, "取键调用点丢失"
         # 取第三个位置参数：必须是按匹配位置切片的窗口名，不得是整行 text
-        args = src[idx + len('_qualify_key(value_text, obj_hints, '):]
-        assert args.startswith('win)'), args[:30]
-        assert not args.startswith('text'), args[:30]
+        args = src[idx + len("_qualify_key(value_text, obj_hints, ") :]
+        assert args.startswith("win)"), args[:30]
+        assert not args.startswith("text"), args[:30]
         # 窗口必须是「按匹配起点切片」的表达式
-        region = src[max(0, idx - 400):idx]
+        region = src[max(0, idx - 400) : idx]
         assert "m.start()" in region, "窗口未以匹配起点为锚点"
 
     def test_no_object_hints_passthrough(self):
@@ -265,8 +262,7 @@ class TestObjectQualify:
 # ---------------------------------------------------------------------------
 class TestSelfRefRescan:
     def test_self_ref_detected(self):
-        rx = re.compile(r"(?P<name>工程名称)" + c._bridge()
-                        + r"([\u4e00-\u9fffA-Za-z0-9（）()、\-—]{2,60})")
+        rx = re.compile(r"(?P<name>工程名称)" + c._bridge() + r"([\u4e00-\u9fffA-Za-z0-9（）()、\-—]{2,60})")
         m = rx.search("工程名称工程名称")
         assert m is not None
         assert c._is_self_ref(m, c._value_text(m)) is True
@@ -348,24 +344,20 @@ class TestAuditCoverage:
 
     def test_coverage_grouped_by_rule_key(self, facts):
         """⚠️ 关键不变式：按**规则键**聚合，不按单个主题词。"""
-        f = c.audit_call_matrix(extraction_items=[], facts_rows=facts,
-                                sections=[])["facts_inventory"]
+        f = c.audit_call_matrix(extraction_items=[], facts_rows=facts, sections=[])["facts_inventory"]
         assert len(f["consistency_topics_covered"]) == 6
         for item in f["consistency_topics_covered"]:
             assert "|" not in item.split("（")[0], item
 
     def test_missing_shrinks_to_real_gaps(self, facts):
         """缺失清单只含**真正的空档**，不再被同义词撑到恒假红。"""
-        f = c.audit_call_matrix(extraction_items=[], facts_rows=facts,
-                                sections=[])["facts_inventory"]
+        f = c.audit_call_matrix(extraction_items=[], facts_rows=facts, sections=[])["facts_inventory"]
         missing = f["consistency_topics_missing"]
-        assert set(missing) == {"总工期（总工期|工期）",
-                                "设备型号（设备型号|机械型号|起重机型号|升降机型号）"}
+        assert set(missing) == {"总工期（总工期|工期）", "设备型号（设备型号|机械型号|起重机型号|升降机型号）"}
 
     def test_display_includes_alias_expansion(self, facts):
         """展示名必须带上替代式展开，让用户看清一个主题含哪些同义词。"""
-        f = c.audit_call_matrix(extraction_items=[], facts_rows=facts,
-                                sections=[])["facts_inventory"]
+        f = c.audit_call_matrix(extraction_items=[], facts_rows=facts, sections=[])["facts_inventory"]
         for item in f["consistency_topics_missing"]:
             assert "（" in item and "|" in item, item
 
@@ -380,15 +372,13 @@ class TestAuditCoverage:
         assert isinstance(inv["generated_report"], dict)
 
     def test_gaps_sorted_high_first(self):
-        gaps = c.audit_call_matrix(extraction_items=[], facts_rows=[],
-                                   sections=[])["gaps"]
+        gaps = c.audit_call_matrix(extraction_items=[], facts_rows=[], sections=[])["gaps"]
         assert gaps, "空事实库必然产出缺失清单"
         order = [0 if g["severity"] == "high" else 1 for g in gaps]
         assert order == sorted(order)
 
     def test_gaps_carry_impact_text(self):
-        gaps = c.audit_call_matrix(extraction_items=[], facts_rows=[],
-                                   sections=[])["gaps"]
+        gaps = c.audit_call_matrix(extraction_items=[], facts_rows=[], sections=[])["gaps"]
         for g in gaps:
             assert g["kind"], g
             assert g["severity"] in ("high", "medium", "low"), g
@@ -400,8 +390,7 @@ class TestAuditCoverage:
 # ---------------------------------------------------------------------------
 class TestSourceRef:
     def test_source_ref_from_dict(self):
-        assert c._row_source_ref({"source_ref": "docA#page:3#section:概况"}) == \
-            "docA#page:3#section:概况"
+        assert c._row_source_ref({"source_ref": "docA#page:3#section:概况"}) == "docA#page:3#section:概况"
 
     def test_source_ref_empty_for_tuple(self):
         """元组行没有 source_ref 列 → 空串（不是 None）。"""
@@ -415,9 +404,15 @@ class TestSourceRef:
 
     def test_source_ref_flows_into_data_dictionary(self):
         """溯源引用必须一路传到数据字典条目（修复前该字段恒为 None）。"""
-        rows = [("proj", "工程名称", "- **工程名称**: 上海XX", 1.0, "overview"),
-                {"title": "缺陷责任期", "content": "- **缺陷责任期**: 24 个月",
-                 "confidence": 0.95, "source_ref": "docB#page:9"}]
+        rows = [
+            ("proj", "工程名称", "- **工程名称**: 上海XX", 1.0, "overview"),
+            {
+                "title": "缺陷责任期",
+                "content": "- **缺陷责任期**: 24 个月",
+                "confidence": 0.95,
+                "source_ref": "docB#page:9",
+            },
+        ]
         d = c.build_global_data_dictionary(rows)
         refs = [v["source_ref"] for v in d.values()]
         assert "docB#page:9" in refs, refs
@@ -452,8 +447,7 @@ class TestSourceRef:
     def test_no_return_outside_function(self):
         tree = ast.parse(Path(c.__file__).read_text(encoding="utf-8"))
         assert not [n for n in tree.body if isinstance(n, ast.Return)]
-        assert all(n.col_offset >= 4
-                   for n in ast.walk(tree) if isinstance(n, ast.Return))
+        assert all(n.col_offset >= 4 for n in ast.walk(tree) if isinstance(n, ast.Return))
 
 
 # ---------------------------------------------------------------------------
@@ -473,8 +467,7 @@ class TestFailSoft:
         assert out.count("\n- 【") <= 5
 
     def test_digest_accepts_dict_values(self):
-        out = c.build_cross_section_digest(
-            {"s1": {"title": "工程基本情况", "content": "总工期约184天。"}})
+        out = c.build_cross_section_digest({"s1": {"title": "工程基本情况", "content": "总工期约184天。"}})
         assert "工程基本情况" in out
         assert "总工期184天" in out
 
@@ -545,8 +538,7 @@ class TestWiring:
         for py in app_dir.rglob("*.py"):
             if py.name == self_name:
                 continue
-            if "content_data_contract" in py.read_text(encoding="utf-8",
-                                                        errors="replace"):
+            if "content_data_contract" in py.read_text(encoding="utf-8", errors="replace"):
                 return
         raise AssertionError("全仓 app/ 下无任何文件引用 content_data_contract")
 
@@ -554,12 +546,9 @@ class TestWiring:
         """CON-01 逐章自检必须传 new_section_id —— 不传则 new_title 恒空、
         函数恒返回 []（自检静默空转，等于没接线）。"""
         tree, _ = self._app_tree(Path("routers") / "sse_handlers.py")
-        calls = self._call_names(
-            tree, lambda n: self._name_of(n) == "cross_section_value_findings")
+        calls = self._call_names(tree, lambda n: self._name_of(n) == "cross_section_value_findings")
         assert calls, "sse_handlers 未调用 cross_section_value_findings"
-        ok = any(
-            any(k.arg == "new_section_id" for k in call.keywords)
-            for call in calls)
+        ok = any(any(k.arg == "new_section_id" for k in call.keywords) for call in calls)
         assert ok, "cross_section_value_findings 调用缺 new_section_id 实参"
 
     def test_value_check_switch_is_independent_of_duplicate_switch(self):
@@ -569,8 +558,7 @@ class TestWiring:
         `_crosscheck_dup_on` 单独作门控的节点。"""
         tree, _ = self._app_tree(Path("routers") / "sse_handlers.py")
         # 收集每个 Call 所在的最内层 If 测试源码链
-        calls = self._call_names(
-            tree, lambda n: self._name_of(n) == "cross_section_value_findings")
+        calls = self._call_names(tree, lambda n: self._name_of(n) == "cross_section_value_findings")
         assert calls
         parent = {}
         for node in ast.walk(tree):
@@ -583,11 +571,8 @@ class TestWiring:
                 node = parent[node]
                 if isinstance(node, ast.If):
                     gates.append(ast.unparse(node.test))
-            dup_only = [g for g in gates
-                        if "_crosscheck_dup_on" in g
-                        and "_crosscheck_values_on" not in g]
-            assert not dup_only, (
-                f"CON-01 调用被搬运开关单独门控: {dup_only}")
+            dup_only = [g for g in gates if "_crosscheck_dup_on" in g and "_crosscheck_values_on" not in g]
+            assert not dup_only, f"CON-01 调用被搬运开关单独门控: {dup_only}"
 
     def test_facts_builder_injects_data_dictionary(self):
         """数据字典必须真的注入 facts 文本，且受开关门控。
@@ -604,21 +589,20 @@ class TestWiring:
         for node in ast.walk(tree):
             for child in ast.iter_child_nodes(node):
                 parent[child] = node
-        render_calls = self._call_names(
-            tree, lambda n: self._name_of(n) == "render_data_dictionary_block")
+        render_calls = self._call_names(tree, lambda n: self._name_of(n) == "render_data_dictionary_block")
         gated = False
         for call in render_calls:
             node = call
             while node in parent:
                 node = parent[node]
-                if isinstance(node, ast.If) and \
-                        "content_data_dictionary" in ast.unparse(node.test):
+                if isinstance(node, ast.If) and "content_data_dictionary" in ast.unparse(node.test):
                     gated = True
         assert gated, "数据字典注入必须受 content_data_dictionary 开关门控"
 
     def test_config_flags_exist_and_default_true(self):
         """两个新开关必须在 config 中登记且默认 True（向后兼容 = 默认生效）。"""
         import app.config as cfg
+
         assert getattr(cfg.settings, "content_crosscheck_values") is True
         assert getattr(cfg.settings, "content_data_dictionary") is True
 
@@ -635,6 +619,7 @@ class TestKeyRulesChapterAlignment:
 
     def _fields(self, key):
         from app.services.scheme_classification import required_fields_for_chapter
+
         return set(required_fields_for_chapter(key))
 
     def test_exact_keys_have_chapter_home(self):
@@ -659,19 +644,16 @@ class TestKeyRulesChapterAlignment:
     def test_appended_fields_do_not_reorder_existing_fields(self):
         """R52 追加必须在尾部 —— 不得改动既有要素顺序（历史契约）。"""
         from app.services.scheme_classification import NINE_CHAPTERS
+
         for ch in NINE_CHAPTERS:
             base = ch["base_fields"]
-            for tail, anchor in (("总工期", "气候特征"),
-                                 ("保修期与缺陷责任期", "验收人员组成"),
-                                 ("响应时限", "附近医院信息")):
+            for tail, anchor in (
+                ("总工期", "气候特征"),
+                ("保修期与缺陷责任期", "验收人员组成"),
+                ("响应时限", "附近医院信息"),
+            ):
                 if tail in base:
-                    assert base.index(tail) > base.index(anchor), (
-                        f"{ch['key']}: {tail} 必须在 {anchor} 之后")
-
-
-
-
-
+                    assert base.index(tail) > base.index(anchor), f"{ch['key']}: {tail} 必须在 {anchor} 之后"
 
 
 # ---------------------------------------------------------------------------
@@ -699,15 +681,16 @@ class TestUnwiredToolingIsRegistered:
 
     def _module_src(self):
         from app.services import content_data_contract as c
+
         return open(c.__file__, encoding="utf-8").read()
 
     def _module_level_names(self):
         import ast
+
         tree = ast.parse(self._module_src())
         names = set()
         for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                 ast.ClassDef)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 names.add(node.name)
         return names
 
@@ -719,14 +702,14 @@ class TestUnwiredToolingIsRegistered:
         """
         import ast
         import re
+
         src = self._module_src()
         doc = ast.get_docstring(ast.parse(src)) or ""
         refs = sorted(set(re.findall(r":func:`([A-Za-z_][A-Za-z0-9_]*)`", doc)))
         assert refs, "模块 docstring 应含 :func: 引用（否则本护栏会空转）"
         names = self._module_level_names()
         dangling = [r for r in refs if r not in names]
-        assert not dangling, (
-            f"docstring 存在悬空 :func: 引用（无对应定义）：{dangling}")
+        assert not dangling, f"docstring 存在悬空 :func: 引用（无对应定义）：{dangling}"
 
     def test_unwired_symbols_have_no_production_callers(self):
         """登记的未接线符号：生产代码（app/ 其它文件）零调用点。
@@ -736,6 +719,7 @@ class TestUnwiredToolingIsRegistered:
         import pathlib
 
         from app.services import content_data_contract as c
+
         repo_app = pathlib.Path(c.__file__).resolve().parent.parent
         targets = {"section_data_trace", "merge_injected_rows"}
         offenders = []
@@ -750,8 +734,8 @@ class TestUnwiredToolingIsRegistered:
                 if name in text:
                     offenders.append(f"{name} <- {f}")
         assert not offenders, (
-            "下列符号已被生产代码引用 —— 若这是有意接线，请同步更新本护栏与"
-            f"R81 报告 §6 遗留 1：{offenders}")
+            "下列符号已被生产代码引用 —— 若这是有意接线，请同步更新本护栏与" f"R81 报告 §6 遗留 1：{offenders}"
+        )
 
     def test_merge_injected_rows_only_called_by_section_data_trace(self):
         """``merge_injected_rows`` 的唯一调用者是 ``section_data_trace``。
@@ -759,6 +743,7 @@ class TestUnwiredToolingIsRegistered:
         锁住「传递性死代码」的现状：若它被直接接线，本护栏必须显式更新。
         """
         import ast
+
         tree = ast.parse(self._module_src())
         callers = set()
         for node in ast.walk(tree):
@@ -766,11 +751,9 @@ class TestUnwiredToolingIsRegistered:
                 if node.func.id == "merge_injected_rows":
                     # 找到它所在的顶层函数
                     for outer in tree.body:
-                        if isinstance(outer, (ast.FunctionDef,
-                                               ast.AsyncFunctionDef)):
+                        if isinstance(outer, (ast.FunctionDef, ast.AsyncFunctionDef)):
                             for sub in ast.walk(outer):
                                 if sub is node:
                                     callers.add(outer.name)
                                     break
-        assert callers <= {"section_data_trace"}, (
-            f"merge_injected_rows 出现了预期外调用者：{sorted(callers)}")
+        assert callers <= {"section_data_trace"}, f"merge_injected_rows 出现了预期外调用者：{sorted(callers)}"

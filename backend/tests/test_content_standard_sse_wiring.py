@@ -23,6 +23,7 @@
   为此新造整套 AI/DB 夹具的成本与回归风险远大于收益。
   故此处只锁「结构契约」，语义正确性由纯函数用例 + 前端 vitest 共同覆盖。
 """
+
 import re
 from pathlib import Path
 
@@ -46,8 +47,7 @@ _CR = Path(__file__).resolve().parents[1] / "app" / "services" / "content_runtim
 _CR_SRC = _CR.read_text(encoding="utf-8")
 # B1 拆分（2026-11-03）：正文三个终态载荷拼装点下沉到该模块；sse_handlers 只留
 #    同名薄包装，字段本体断言改读下沉模块源码。
-_CP = (Path(__file__).resolve().parents[1] / "app" / "routers"
-       / "_sse_content_payloads.py")
+_CP = Path(__file__).resolve().parents[1] / "app" / "routers" / "_sse_content_payloads.py"
 _CP_SRC = _CP.read_text(encoding="utf-8")
 
 
@@ -55,7 +55,6 @@ _CP_SRC = _CP.read_text(encoding="utf-8")
 # B1：事实块引导语随模式变化（纯函数，可执行断言）
 # ============================================================
 class TestFactsHeaderByStandard:
-
     def test_precise_header_forbids_placeholders_and_requires_fuzzy_fill(self):
         """2026-10-01（模糊生成改造）：精准引导语不再指向占位符。
 
@@ -117,7 +116,6 @@ class TestFactsHeaderByStandard:
 # B3：续写轮模式提醒（纯函数 + 接线）
 # ============================================================
 class TestContinueHint:
-
     def test_hints_differ_per_standard(self):
         assert build_continue_hint(PRECISE) != build_continue_hint(FUZZY)
 
@@ -134,24 +132,21 @@ class TestContinueHint:
 
     def test_continue_accepts_and_appends_eff_standard(self):
         assert re.search(
-            r"async def _continue_if_needed\([^)]*eff_standard:\s*str\s*=\s*\"\"",
-            _SRC, re.S
+            r"async def _continue_if_needed\([^)]*eff_standard:\s*str\s*=\s*\"\"", _SRC, re.S
         ), "_continue_if_needed 必须接收 eff_standard"
         # ✅ 2026-09-28：续写 messages 构造下沉 content_runtime.build_continuation_messages，
         #    接线断言改为锁调用点 + 实现点的两处宿主。
         assert "build_continuation_messages(" in _SRC
         assert "build_continue_hint(eff_standard)" in _CR_SRC
         # 提醒必须真正进入续写的 user 消息（只能算一次，不能只算不用）
-        assert re.search(r"\+ std_hint\}\]", _CR_SRC), "续写 user 消息必须拼接 std_hint"
+        assert re.search(r"\+ std_hint\s*[,]?\s*\}", _CR_SRC), "续写 user 消息必须拼接 std_hint"
 
     def test_both_call_sites_pass_eff_standard(self):
         """续写模式与首轮模式两个调用点都必须透传生效标准。"""
         found = False
-        for m in re.finditer(
-                r"await _continue_if_needed\((?:[^()]|\([^()]*\))*\)", _SRC, re.S):
+        for m in re.finditer(r"await _continue_if_needed\((?:[^()]|\([^()]*\))*\)", _SRC, re.S):
             found = True
-            assert "eff_standard=" in m.group(0), (
-                f"_continue_if_needed 调用点缺少 eff_standard：{m.group(0)[:80]}")
+            assert "eff_standard=" in m.group(0), f"_continue_if_needed 调用点缺少 eff_standard：{m.group(0)[:80]}"
         assert found, "未找到 _continue_if_needed 调用点"
 
 
@@ -159,16 +154,13 @@ class TestContinueHint:
 # B2：事件字段下发（接线断言）
 # ============================================================
 class TestEventPayloads:
-
     def test_section_start_carries_standard(self):
-        m = re.search(r'"event":\s*"section_start".*?\}\s*,\s*ensure_ascii=False\)',
-                      _SRC, re.S)
+        m = re.search(r'"event":\s*"section_start".*?\}\s*,\s*ensure_ascii=False\)', _SRC, re.S)
         assert m, "未找到 section_start 事件"
         assert "generation_standard" in m.group(0)
 
     def test_section_done_carries_standard_and_report(self):
-        m = re.search(r'"event":\s*"section_done".*?\}\s*,\s*ensure_ascii=False\)',
-                      _SRC, re.S)
+        m = re.search(r'"event":\s*"section_done".*?\}\s*,\s*ensure_ascii=False\)', _SRC, re.S)
         assert m, "未找到 section_done 事件"
         assert "generation_standard" in m.group(0)
         assert "standard_report" in m.group(0)
@@ -181,8 +173,7 @@ class TestEventPayloads:
         assert loop_start < resolve_at < evt_at
 
     def test_terminal_payloads_carry_standard_summary(self):
-        assert re.search(
-            r"completed_payload\['standard_summary'\]\s*=\s*_std_sum", _SRC)
+        assert re.search(r"completed_payload\[\s*['\"]standard_summary['\"]\s*\]\s*=\s*_std_sum", _SRC)
         # ✅ R2（2026-10-05）：stopped 也下发（用户在标准校验上同样需要看到
         #    已完成部分的汇总）。载荷改由 `_stopped_payload` 单一拼装点产出，
         #    故断言改锚到该 helper —— 比旧的「路径 A 后面跟着字段」正则更强：
@@ -192,14 +183,14 @@ class TestEventPayloads:
         #    `_stopped_payload(task_id, message, *, progress=None)`（模块级），
         #    全文件 index 会先命中它 —— 锚点选错即恒失败（§5.14）。
         # B1 拆分：字段本体在下沉模块的 build_stopped_payload 内，包装留在 _c。
-        _c = _SRC[_SRC.index("async def generate_content("):]
+        _c = _SRC[_SRC.index("async def generate_content(") :]
         i = _CP_SRC.index("def build_stopped_payload(")
-        block = _CP_SRC[i:_CP_SRC.index("\ndef build_error_payload(", i + 10)]
-        assert "'event': 'stopped'" in block
-        assert "'standard_summary': standard_summary" in block
+        block = _CP_SRC[i : _CP_SRC.index("\ndef build_error_payload(", i + 10)]
+        assert re.search(r"['\"]event['\"]:\s*['\"]stopped['\"]", block)
+        assert re.search(r"['\"]standard_summary['\"]:\s*standard_summary", block)
         # 两条 stopped 路径都必须走拼装点
-        assert "_stopped_payload('用户已停止', stop_progress)" in _c
-        assert "_stopped_payload('任务已取消')" in _c
+        assert re.search(r"_stopped_payload\(\s*['\"]用户已停止['\"]\s*,\s*stop_progress\s*\)", _c)
+        assert re.search(r"_stopped_payload\(\s*['\"]任务已取消['\"]\s*\)", _c)
 
     def test_summary_accumulator_init_outside_loop(self):
         """累加器必须提升到闭包外层（早期失败路径可读，不能 NameError）。"""
@@ -223,18 +214,16 @@ class TestEventPayloads:
         ⚠️ 若未来需要第三个调用点，必须先在这里显式登记并说明门控条件，
         不允许静默增加。
         """
-        code_only = "\n".join(
-            ln for ln in _SRC.splitlines() if not ln.lstrip().startswith("#"))
+        code_only = "\n".join(ln for ln in _SRC.splitlines() if not ln.lstrip().startswith("#"))
         calls = re.findall(r"standard_report\(", code_only)
         assert len(calls) == 2, (
             f"standard_report 应只在落库处调用一次 + 事实修复后条件性重算一次，"
-            f"实际 {len(calls)} 次（事件侧重复扫描 = 每章白跑一遍正则）")
+            f"实际 {len(calls)} 次（事件侧重复扫描 = 每章白跑一遍正则）"
+        )
         # 第二次调用必须位于事实冲突定点修复块内（条件性重算，不是无脑双扫）
         autofix_at = code_only.index("autofix_section_fact_conflicts(")
         second_at = code_only.index("report = standard_report(", autofix_at)
-        assert second_at > autofix_at, (
-            "条件性重算被移出事实冲突修复块了（失去 applied 门控即退化为"
-            "每章双扫）")
+        assert second_at > autofix_at, "条件性重算被移出事实冲突修复块了（失去 applied 门控即退化为" "每章双扫）"
         # 重算必须发生在写锁之前（与原护栏同一纪律：CPU 扫描不进锁）
         assert second_at < code_only.index("async with _db_write_lock:")
 
@@ -243,13 +232,11 @@ class TestEventPayloads:
 # B4：校验器移出全局写锁
 # ============================================================
 class TestValidatorOutsideWriteLock:
-
     def test_standard_report_not_inside_write_lock(self):
         """标准校验必须在 `async with _db_write_lock` **之前**完成。"""
         lock_at = _SRC.index("async with _db_write_lock:")
         call_at = _SRC.index("report = standard_report(")
-        assert call_at < lock_at, (
-            "standard_report 又落回写锁内了（CPU 扫描会串行化高并发档）")
+        assert call_at < lock_at, "standard_report 又落回写锁内了（CPU 扫描会串行化高并发档）"
 
     def test_update_uses_precomputed_report_json(self):
         """UPDATE 必须直接落预计算的 report_json，而不是内联再算一次。"""
@@ -265,7 +252,6 @@ class TestValidatorOutsideWriteLock:
 # 模式差异性（AC「两选项有明确差异」的语义保证）
 # ============================================================
 class TestTwoModesDiffer:
-
     def test_all_four_prompt_blocks_differ_between_modes(self):
         """system / user / facts / continue 四处文案必须两两不同。
 

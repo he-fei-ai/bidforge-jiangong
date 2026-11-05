@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """正文生成 · 未闭合围栏修复函数的**返回契约**防回归（2026-09-29 在线事故）
 
 【事故】运行库 task_registry 记录：正文生成任务 38/38 章**全部失败**，终态消息为
@@ -30,6 +30,7 @@
   是 str、未闭合围栏被补齐（修复前该组用例必然收到 section_error）；
 - TestGuardedGenObservability：全章失败必须留下 ERROR 堆栈。
 """
+
 import ast
 import inspect
 import json
@@ -42,8 +43,7 @@ from app.services.content_utils import (
     find_unclosed_fences,
 )
 
-APP_ROOT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app")
+APP_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app")
 
 _FENCE_FUNC = "auto_fix_unclosed_fences"
 
@@ -62,7 +62,7 @@ class TestFenceFixReturnContract:
         out = auto_fix_unclosed_fences(text)
         assert isinstance(out, tuple) and len(out) == 2
         fixed, log = out
-        assert fixed == text          # 无未闭合围栏时正文逐字不变
+        assert fixed == text  # 无未闭合围栏时正文逐字不变
         assert log == []
 
     def test_unclosed_fence_returns_fixed_str_and_log(self):
@@ -99,27 +99,25 @@ def _bare_fence_assignments(tree: ast.AST) -> list[str]:
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
         value = node.value
-        if not (isinstance(value, ast.Call)
-                and isinstance(value.func, ast.Name)
-                and value.func.id == _FENCE_FUNC):
+        if not (isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == _FENCE_FUNC):
             continue
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         for t in targets:
             if isinstance(t, (ast.Tuple, ast.List)):
-                continue                      # 已解包
+                continue  # 已解包
             offenders.append(f"{getattr(node, 'lineno', '?')}: {ast.dump(t)[:60]}")
     return offenders
 
 
 class TestFenceFixCallSiteUnpacks:
-
     def test_persist_section_unpacks_the_tuple(self):
         """正文生成落库路径必须解包成 (content, log)。"""
         tree = ast.parse(inspect.getsource(sh.generate_content))
         offenders = _bare_fence_assignments(tree)
         assert not offenders, (
             "sse_handlers.generate_content 内出现未解包的 "
-            f"{_FENCE_FUNC}() 调用（会把元组当正文 → 全章失败）：{offenders}")
+            f"{_FENCE_FUNC}() 调用（会把元组当正文 → 全章失败）：{offenders}"
+        )
 
     def test_whole_app_has_no_bare_assignment(self):
         """全仓扫描：任何「整体赋值」写法一律失败（防止新增调用点再踩）。"""
@@ -136,18 +134,19 @@ class TestFenceFixCallSiteUnpacks:
                     continue
                 try:
                     tree = ast.parse(text)
-                except SyntaxError:            # pragma: no cover
+                except SyntaxError:  # pragma: no cover
                     continue
                 rel = os.path.relpath(fp, os.path.dirname(APP_ROOT))
                 for item in _bare_fence_assignments(tree):
                     offenders.append(f"{rel}:{item}")
-        assert not offenders, (
-            f"发现未解包的 {_FENCE_FUNC}() 调用（返回契约是 (content, log)）：\n"
-            + "\n".join(offenders))
+        assert not offenders, f"发现未解包的 {_FENCE_FUNC}() 调用（返回契约是 (content, log)）：\n" + "\n".join(
+            offenders
+        )
 
     def test_export_side_still_unpacks(self):
         """导出侧（历史上正确的那处）不得被改回未解包写法。"""
         import app.routers.export as ex
+
         tree = ast.parse(inspect.getsource(ex))
         assert not _bare_fence_assignments(tree), "导出侧围栏修复调用点被改回错误写法"
 
@@ -179,11 +178,20 @@ class _OneSectionDB:
     def __init__(self):
         self.saved: list = []
         self._section = {
-            "id": "s1", "scheme_id": "sc1", "parent_id": "", "level": 1,
-            "sort_order": 0, "title": "测试章节", "description": "描述",
-            "content": "", "word_count": 0, "status": "empty",
-            "word_budget": 50, "generation_standard": "",
-            "outline_json": None, "review_status": "pending",
+            "id": "s1",
+            "scheme_id": "sc1",
+            "parent_id": "",
+            "level": 1,
+            "sort_order": 0,
+            "title": "测试章节",
+            "description": "描述",
+            "content": "",
+            "word_count": 0,
+            "status": "empty",
+            "word_budget": 50,
+            "generation_standard": "",
+            "outline_json": None,
+            "review_status": "pending",
         }
 
     class _Cur:
@@ -199,11 +207,20 @@ class _OneSectionDB:
     async def execute(self, sql, params=()):
         s = str(sql)
         if "FROM schemes" in s:
-            return self._Cur([{
-                "id": "sc1", "project_id": "p1", "name": "测试方案",
-                "type": "深基坑", "word_budget": 3000, "config_json": "{}",
-                "auto_consistency_repair": 0, "generation_standard": "",
-            }])
+            return self._Cur(
+                [
+                    {
+                        "id": "sc1",
+                        "project_id": "p1",
+                        "name": "测试方案",
+                        "type": "深基坑",
+                        "word_budget": 3000,
+                        "config_json": "{}",
+                        "auto_consistency_repair": 0,
+                        "generation_standard": "",
+                    }
+                ]
+            )
         if "FROM sections" in s and "ORDER BY sort_order" in s:
             return self._Cur([dict(self._section)])
         if s.strip().upper().startswith("UPDATE SECTIONS SET CONTENT"):
@@ -226,11 +243,7 @@ class _OneSectionDB:
 
 #: 桩 AI 返回的正文：末尾**故意留一个未闭合的 ```mermaid 围栏**
 #: （真实事故里 max_tokens 截断就会造成这种正文）。
-_STUB_AI_TEXT = (
-    "## 编制说明\n\n"
-    "本章说明测试内容。\n\n"
-    "```mermaid\ngraph TD;\nA-->B;\n"
-)
+_STUB_AI_TEXT = "## 编制说明\n\n" "本章说明测试内容。\n\n" "```mermaid\ngraph TD;\nA-->B;\n"
 
 
 @pytest.fixture()
@@ -272,31 +285,27 @@ def stub_env(monkeypatch):
 async def _run(db):
     resp = await sh.generate_content(
         "sc1",
-        _FakeRequest({"mode": "all", "concurrency": 1,
-                      "auto_consistency_repair": False}),
+        _FakeRequest({"mode": "all", "concurrency": 1, "auto_consistency_repair": False}),
         db=db,
     )
     chunks: list[str] = []
     async for piece in resp.body_iterator:
-        chunks.append(piece.decode("utf-8", "replace")
-                      if isinstance(piece, bytes) else str(piece))
+        chunks.append(piece.decode("utf-8", "replace") if isinstance(piece, bytes) else str(piece))
     text = "".join(chunks)
-    events = [json.loads(ln[6:]) for ln in text.splitlines()
-              if ln.startswith("data: ")]
+    events = [json.loads(ln[6:]) for ln in text.splitlines() if ln.startswith("data: ")]
     return events, text
 
 
 @pytest.mark.asyncio
 class TestContentGenerationEndToEnd:
-
     async def test_section_persists_and_completes(self, stub_env):
         """端到端：一章正文必须真的落库并 completed（修复前必然 section_error）。"""
         db = _OneSectionDB()
         events, text = await _run(db)
         names = [e.get("event") for e in events]
         assert "section_error" not in names, (
-            "章节生成失败（修复前为 'tuple' object has no attribute 'split'）："
-            + text[:600])
+            "章节生成失败（修复前为 'tuple' object has no attribute 'split'）：" + text[:600]
+        )
         assert "section_done" in names, f"未收到 section_done：{names}"
         assert "completed" in names, f"未收到 completed：{names}"
         assert any(s == "completed" for s, _ in stub_env), stub_env
@@ -307,10 +316,8 @@ class TestContentGenerationEndToEnd:
         await _run(db)
         assert db.saved, "没有任何章节落库（UPDATE sections SET content 未执行）"
         saved = db.saved[0]
-        assert isinstance(saved, str), (
-            f"落库正文类型错误：{type(saved)}（修复前是 tuple）")
-        assert find_unclosed_fences(saved) == [], (
-            f"落库正文仍有未闭合围栏：{saved[-80:]!r}")
+        assert isinstance(saved, str), f"落库正文类型错误：{type(saved)}（修复前是 tuple）"
+        assert find_unclosed_fences(saved) == [], f"落库正文仍有未闭合围栏：{saved[-80:]!r}"
         assert saved.startswith("## 编制说明"), "正文被围栏修复破坏"
 
     async def test_progress_reaches_full(self, stub_env):
@@ -323,10 +330,77 @@ class TestContentGenerationEndToEnd:
 
 
 # ===========================================================================
+# 3b. R179（2026-11-05）：围栏吞正文必须在 section_done 报告里可见
+# ===========================================================================
+#: 桩 AI 返回：未闭合围栏**内部**还夹着一段正常中文正文。
+#: append_close 只能在文末补闭合，这段正文已被当成代码 —— 旧实现只写
+#: backend.log，前端日志区/校验 Popover 完全看不到，用户以为「自动修复了」。
+_STUB_AI_TEXT_SWALLOW = (
+    "## 编制说明\n\n" "本章说明测试内容。\n\n" "```mermaid\ngraph TD;\nA-->B;\n\n" "本段正文不应被困在代码块内。\n"
+)
+
+
+@pytest.fixture()
+def stub_env_swallow(monkeypatch):
+    """同 stub_env，但 AI 返回「围栏吞正文」形态。"""
+    finished: list[tuple] = []
+
+    async def _register(*a, **k):
+        return "task-x"
+
+    async def _progress(*a, **k):
+        return None
+
+    async def _stats(*a, **k):
+        return None
+
+    async def _finish(task_id, status="", message="", **k):
+        finished.append((status, message))
+
+    async def _save_ckpt(task_id, payload):
+        return None
+
+    async def _chat(messages, **k):
+        return _STUB_AI_TEXT_SWALLOW
+
+    monkeypatch.setattr(sh, "register_task", _register)
+    monkeypatch.setattr(sh, "update_progress", _progress)
+    monkeypatch.setattr(sh, "update_task_stats", _stats)
+    monkeypatch.setattr(sh, "finish_task", _finish)
+    monkeypatch.setattr(sh, "_save_content_checkpoint", _save_ckpt)
+    monkeypatch.setattr(sh, "settle_global_conn", _noop)
+    monkeypatch.setattr(sh, "wait_resume", lambda *a, **k: _noop())
+    monkeypatch.setattr(sh, "is_stopped", lambda *a, **k: False)
+    monkeypatch.setattr(sh, "has_active_task", lambda *a, **k: False)
+    monkeypatch.setattr(sh, "chat_with_fallback", _chat)
+    return finished
+
+
+@pytest.mark.asyncio
+class TestSwallowedProseVisibilityR179:
+    async def test_section_done_report_flags_swallowed_prose(self, stub_env_swallow):
+        """R179：围栏吞正文时 section_done.standard_report 必须带 warning 级 issue。
+
+        旧实现仅 `logger.warning(...)`，前端没有任何消费链路 —— 用户无法感知
+        「补齐 N 处」并不等于「正文没丢」。本用例锁定报告可见性，防止回退。
+        """
+        db = _OneSectionDB()
+        events, text = await _run(db)
+        names = [e.get("event") for e in events]
+        assert "section_done" in names, f"未收到 section_done：{names}；{text[:400]}"
+        done = [e for e in events if e.get("event") == "section_done"][0]
+        report = done.get("standard_report") or {}
+        issues = report.get("issues") or []
+        assert any(i.get("code") == "fence_swallowed_prose" for i in issues), f"围栏吞正文未进入报告 issues：{report}"
+        assert int(report.get("warning_count") or 0) >= 1, report
+        # 围栏补齐仍然生效（不得为了可观测性把原有修复回退）
+        assert db.saved and find_unclosed_fences(db.saved[0]) == []
+
+
+# ===========================================================================
 # 4. 可观测性：全章失败必须留下堆栈
 # ===========================================================================
 class TestGuardedGenObservability:
-
     def _guarded_gen_src(self) -> str:
         src = inspect.getsource(sh.generate_content)
         i = src.index("async def guarded_gen(")
@@ -340,17 +414,15 @@ class TestGuardedGenObservability:
         """
         src = self._guarded_gen_src()
         i = src.index('_reason = f"生成异常:')
-        tail = src[i:i + 800]
-        assert "logger.error(" in tail, (
-            "生成异常分支未落日志：全章失败将再次变成「零堆栈」黑洞")
-        assert "exc_info=True" in tail, (
-            "生成异常分支未带 exc_info=True：只有一行文本、没有堆栈")
+        tail = src[i : i + 800]
+        assert "logger.error(" in tail, "生成异常分支未落日志：全章失败将再次变成「零堆栈」黑洞"
+        assert "exc_info=True" in tail, "生成异常分支未带 exc_info=True：只有一行文本、没有堆栈"
 
     def test_all_failed_branch_keeps_reason_detail(self):
         """全章失败消息必须带失败原因（用户据此判断是 AI 还是本地缺陷）。"""
         src = inspect.getsource(sh.generate_content)
         i = src.index("if total > 0 and not done_ids:")
-        block = src[i:i + 1400]
+        block = src[i : i + 1400]
         assert "_failed_reasons" in block, "全章失败分支不再汇总失败原因"
         assert "_reason_txt" in block, "全章失败原因明细被移除，用户无从判断"
 
@@ -358,11 +430,9 @@ class TestGuardedGenObservability:
         """本地缺陷不得再被播报成「AI 服务异常」（本次事故的直接误导源）。"""
         src = inspect.getsource(sh.generate_content)
         i = src.index("if total > 0 and not done_ids:")
-        block = src[i:i + 1400]
+        block = src[i : i + 1400]
         assert "_all_local" in block, "全章失败未区分「本地异常」与「AI 异常」"
         assert "内部处理异常" in block, "本地缺陷缺少可据以排查的指引文案"
         assert "logs/backend.log" in block, "未指引用户/运维去看后端日志"
         # 判定必须以失败原因为依据，而不是无条件写死
-        assert 'startswith("生成异常:")' in block, (
-            "病因判定未基于失败原因（无条件写死会把本地缺陷说成 AI 故障）")
-
+        assert 'startswith("生成异常:")' in block, "病因判定未基于失败原因（无条件写死会把本地缺陷说成 AI 故障）"

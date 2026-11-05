@@ -19,10 +19,12 @@
    恰好落在 len(b)-20k 的离散点上才命中，绝大多数真实重复被漏检
    （正文出现成段复述）。新实现精确求最长重叠（先接缝对齐，再兜底全尾搜索）。
 """
+
 import pytest
 from app.routers.sse_handlers import _dedup_continuation, _safe_tail
 
 # ---------------------------------------------------------------- _safe_tail
+
 
 def test_short_text_returned_as_is():
     text = "混凝土浇筑前应检查模板与钢筋。"
@@ -52,7 +54,7 @@ def test_cut_inside_code_block_skips_to_prose():
     block = "```mermaid\nflowchart TD\n  A --> B\n```"
     prose_tail = "乙" * 80
     text = prose_head + block + "\n" + prose_tail
-    cut = len(prose_head) + 5          # 落在 block 内部
+    cut = len(prose_head) + 5  # 落在 block 内部
     tail = _safe_tail(text, len(text) - cut)
     assert tail == prose_tail
     assert "flowchart" not in tail and "```" not in tail
@@ -69,7 +71,7 @@ def test_old_behaviour_leak_regression():
     prose_head = "甲" * 120
     block_a = "```mermaid\nflowchart TD\n  A --> B\n```"
     prose_mid = "乙" * 60
-    block_b_unclosed = "```chart-json\n{\"type\":\"labor\",\"rows\":[{\"name\":\"钢筋工\""
+    block_b_unclosed = '```chart-json\n{"type":"labor","rows":[{"name":"钢筋工"'
     text = prose_head + block_a + prose_mid + block_b_unclosed
     cut = len(prose_head) + 10
     tail = _safe_tail(text, len(text) - cut)
@@ -81,7 +83,7 @@ def test_old_behaviour_leak_regression():
 def test_trailing_unclosed_block_dropped():
     """✅ 修复 b)：正文以未闭合块结尾 → 整块丢弃（宁缺勿滥）。"""
     prose = "丙" * 150
-    text = prose + "```chart-json\n{\"type\":\"labor\",\"rows\":[1,2"
+    text = prose + '```chart-json\n{"type":"labor","rows":[1,2'
     assert _safe_tail(text, len(text)) == prose
     # 切点落在散文区内、未闭合块在尾部时同样要裁掉
     assert _safe_tail(text, 200) == prose[-200:]
@@ -92,14 +94,17 @@ def test_unclosed_block_only_text_yields_empty():
     assert _safe_tail("```mermaid\nflowchart TD\n A-->B", 1000) == ""
 
 
-@pytest.mark.parametrize("text", [
-    "散文段落。" * 20,
-    "甲" * 30 + "```mermaid\nflowchart TD\n A-->B\n```" + "乙" * 200,
-    "甲" * 200 + "```mermaid\nflowchart TD\n A-->B\n```" + "乙" * 40 + "```chart-json\n{\"type\":\"labor\"",
-    "```mermaid\nflowchart TD\n A-->B\n```" + "丙" * 300,
-    "甲" * 50 + "```\ncode```\n" + "乙" * 50 + "```gantt\n{}",
-    ("段落" * 100) + "\n\n" + "```chart-json\n{\"type\":\"timeline\",\"items\":[]}\n```" + "尾声" * 50,
-])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "散文段落。" * 20,
+        "甲" * 30 + "```mermaid\nflowchart TD\n A-->B\n```" + "乙" * 200,
+        "甲" * 200 + "```mermaid\nflowchart TD\n A-->B\n```" + "乙" * 40 + '```chart-json\n{"type":"labor"',
+        "```mermaid\nflowchart TD\n A-->B\n```" + "丙" * 300,
+        "甲" * 50 + "```\ncode```\n" + "乙" * 50 + "```gantt\n{}",
+        ("段落" * 100) + "\n\n" + '```chart-json\n{"type":"timeline","items":[]}\n```' + "尾声" * 50,
+    ],
+)
 @pytest.mark.parametrize("limit", [40, 120, 300, 2000])
 def test_safe_tail_never_leaves_unbalanced_fence(text, limit):
     """不变量：任何切点/长度下，产出的尾部围栏数都是偶数（模型不会看到半截代码）。
@@ -113,11 +118,14 @@ def test_safe_tail_never_leaves_unbalanced_fence(text, limit):
 
 # ------------------------------------------------------- _dedup_continuation
 
+
 def test_dedup_strips_duplicated_paragraph():
     """整段复述（段落级）：段落已在前文出现 → 整段剥离。"""
-    dup = ("振捣棒应快插慢拔，插点均匀布置，不得漏振或过振；"
-           "以混凝土表面泛浆、不再显著下沉且无气泡逸出为振捣密实标准；"
-           "分层浇筑时每层厚度不应超过振动器作用部分长度的 1.25 倍。")
+    dup = (
+        "振捣棒应快插慢拔，插点均匀布置，不得漏振或过振；"
+        "以混凝土表面泛浆、不再显著下沉且无气泡逸出为振捣密实标准；"
+        "分层浇筑时每层厚度不应超过振动器作用部分长度的 1.25 倍。"
+    )
     assert len(dup) >= 40
     prev = "甲" * 200 + "\n" + dup
     cont = dup + "\n养护措施：浇筑完毕后 12h 内覆盖并保湿。"
@@ -151,20 +159,22 @@ def test_dedup_seam_overlap_len_independent():
         assert out == "随后进行混凝土浇筑。", f"extra={extra} 漏检重叠: {out[:40]!r}"
 
 
-def test_dedup_fallback_finds_prefix_anywhere_in_tail():
-    """兜底分支：续写前缀在前文尾部**任意位置**原文出现（弱模型跨段复述）。
+def test_dedup_mid_tail_prefix_kept_r175():
+    """R175 BUG-2：前缀出现在 tail **中部**（非接缝）时必须保留。
 
-    ⚠️ 前缀长度必须 ≥ min_overlap(40)：短于阈值的重叠按设计不剥离
-    （避免误删正常短句）。
+    旧实现规则②（`b[:n] in tail`，无位置约束）会把「只要在 tail 任意位置
+    出现过的前缀」整段删除 —— 正常复述前文中间的标准条款会被误删
+    （审计探针实测 48 字条款被整段吞掉）。R175 删除规则②，只保留
+    ⓪ 整段闸 + ① 接缝对齐（`tail.endswith`）。
     """
-    shared = ("安全技术交底应由项目技术负责人组织，参加人员须签字确认，"
-              "交底记录随施工资料一并归档保存")
+    shared = "安全技术交底应由项目技术负责人组织，参加人员须签字确认，" "交底记录随施工资料一并归档保存"
     assert len(shared) >= 40
-    prev = shared + "。" + "乙" * 300      # shared 不在尾部最末，但在 tail 窗口内
+    prev = shared + "。" + "乙" * 300  # shared 不在尾部最末，但在 tail 窗口内
     cont = shared + "，交底内容变更时应重新交底。"
     out = _dedup_continuation(prev, cont)
-    assert shared not in out
-    assert out.startswith("交底内容变更")
+    # 中段复述 ≠ 接缝重复：整段原样保留（不制造"删掉半句话"的断链）
+    assert out == cont
+    assert shared in out
 
 
 def test_dedup_no_overlap_returns_original():

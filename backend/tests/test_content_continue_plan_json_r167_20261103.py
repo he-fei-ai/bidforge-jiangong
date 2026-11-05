@@ -35,6 +35,7 @@ from app.routers import sse_handlers as sh
 # 端到端 harness（沿用 test_content_terminal_payload_20261005 的桩 DB 思路）
 # ============================================================================
 
+
 class _FakeRequest:
     def __init__(self, body):
         self._body = body
@@ -55,12 +56,20 @@ class _ContinueDB:
     @classmethod
     def _sec(cls, sid, num):
         return {
-            "id": sid, "scheme_id": "sc1", "title": f"章节 {sid}",
-            "level": 1, "parent_id": "", "sort_order": 0,
-            "word_budget": 200, "content": cls.OLD_CONTENT,
-            "status": "generated", "description": "d",
+            "id": sid,
+            "scheme_id": "sc1",
+            "title": f"章节 {sid}",
+            "level": 1,
+            "parent_id": "",
+            "sort_order": 0,
+            "word_budget": 200,
+            "content": cls.OLD_CONTENT,
+            "status": "generated",
+            "description": "d",
             "outline_json": json.dumps({"id": num}, ensure_ascii=False),
-            "generation_standard": "", "review_status": "", "word_count": 0,
+            "generation_standard": "",
+            "review_status": "",
+            "word_count": 0,
         }
 
     class _Cur:
@@ -76,11 +85,20 @@ class _ContinueDB:
     async def execute(self, sql, params=()):
         s = str(sql)
         if "FROM schemes" in s:
-            return self._Cur([{
-                "id": "sc1", "project_id": "p1", "name": "测试方案",
-                "type": "深基坑", "word_budget": 3000, "config_json": "{}",
-                "auto_consistency_repair": 0, "generation_standard": "",
-            }])
+            return self._Cur(
+                [
+                    {
+                        "id": "sc1",
+                        "project_id": "p1",
+                        "name": "测试方案",
+                        "type": "深基坑",
+                        "word_budget": 3000,
+                        "config_json": "{}",
+                        "auto_consistency_repair": 0,
+                        "generation_standard": "",
+                    }
+                ]
+            )
         if "FROM sections" in s and "ORDER BY sort_order" in s:
             return self._Cur([dict(x) for x in self._sections])
         if s.strip().upper().startswith("UPDATE SECTIONS SET CONTENT"):
@@ -128,8 +146,7 @@ def stub_env(monkeypatch):
         return _CONTINUATION
 
     monkeypatch.setattr(sh, "register_task", _register)
-    monkeypatch.setattr(sh, "_register_task_exclusive",
-                        lambda *a, **k: _register())
+    monkeypatch.setattr(sh, "_register_task_exclusive", lambda *a, **k: _register())
     monkeypatch.setattr(sh, "update_progress", _noop)
     monkeypatch.setattr(sh, "update_task_stats", _noop)
     monkeypatch.setattr(sh, "finish_task", _finish)
@@ -146,17 +163,14 @@ def stub_env(monkeypatch):
 
 
 async def _run(db, body=None):
-    payload = {"mode": "continue", "concurrency": 1,
-               "auto_consistency_repair": False}
+    payload = {"mode": "continue", "concurrency": 1, "auto_consistency_repair": False}
     payload.update(body or {})
     resp = await sh.generate_content("sc1", _FakeRequest(payload), db=db)
     chunks: list[str] = []
     async for piece in resp.body_iterator:
-        chunks.append(piece.decode("utf-8", "replace")
-                      if isinstance(piece, bytes) else str(piece))
+        chunks.append(piece.decode("utf-8", "replace") if isinstance(piece, bytes) else str(piece))
     text = "".join(chunks)
-    events = [json.loads(ln[6:]) for ln in text.splitlines()
-              if ln.startswith("data: ")]
+    events = [json.loads(ln[6:]) for ln in text.splitlines() if ln.startswith("data: ")]
     return events, text
 
 
@@ -171,11 +185,10 @@ def _terminal(events) -> dict:
 # A 组 · 端到端：mode="continue" 必须跑通并真正续写
 # ============================================================================
 
-class TestContinueModeEndToEnd:
 
+class TestContinueModeEndToEnd:
     @pytest.mark.asyncio
-    async def test_continue_mode_completes_without_unbound_error(
-            self, stub_env):
+    async def test_continue_mode_completes_without_unbound_error(self, stub_env):
         """修复前：每章 section_error「生成异常: … '_plan_json'」+ 终态 failed。
 
         修复后：终态 completed、无任何 section_error、正文 = 旧文 + 续写。
@@ -185,16 +198,14 @@ class TestContinueModeEndToEnd:
         errors = [e for e in events if e.get("event") == "section_error"]
         assert not errors, (
             "续写模式不得产生 section_error（UnboundLocalError 被 guarded_gen "
-            f"兜底成『生成异常』即为本 BUG 复现）: {errors} / {text[:400]}")
+            f"兜底成『生成异常』即为本 BUG 复现）: {errors} / {text[:400]}"
+        )
         term = _terminal(events)
-        assert term["event"] == "completed", (
-            f"续写模式终态应为 completed: {term} / {text[:400]}")
+        assert term["event"] == "completed", f"续写模式终态应为 completed: {term} / {text[:400]}"
         # 正文确实续写：落库内容同时包含旧文与续写新增段
         assert db.saved, "续写模式必须落库一次"
-        assert _ContinueDB.OLD_CONTENT in db.saved[0], (
-            "续写必须保留旧正文")
-        assert _CONTINUATION in db.saved[0], (
-            "续写新增内容必须进入落库正文")
+        assert _ContinueDB.OLD_CONTENT in db.saved[0], "续写必须保留旧正文"
+        assert _CONTINUATION in db.saved[0], "续写新增内容必须进入落库正文"
         done_ev = [e for e in events if e.get("event") == "section_done"]
         assert done_ev, "续写成功必须下发 section_done"
 
@@ -208,22 +219,20 @@ class TestContinueModeEndToEnd:
         errs = [e for e in events if e.get("event") == "section_error"]
         assert not errs, f"选章排除不应产生 section_error: {errs} / {text[:300]}"
         term = _terminal(events)
-        assert term["event"] == "completed", (
-            f"空正文叶子应走「没有待生成的章节」正常终态: {term}")
-        assert "没有待生成的章节" in (term.get("message") or ""), (
-            f"终态消息应为选章补集语义: {term}")
+        assert term["event"] == "completed", f"空正文叶子应走「没有待生成的章节」正常终态: {term}"
+        assert "没有待生成的章节" in (term.get("message") or ""), f"终态消息应为选章补集语义: {term}"
 
 
 # ============================================================================
 # B 组 · 静态锁：续写分支必须绑定 _plan_json
 # ============================================================================
 
+
 def _src() -> str:
     return inspect.getsource(sh.generate_content)
 
 
 class TestContinueBranchPlanJsonBinding:
-
     def test_continue_branch_binds_plan_json(self):
         """续写分支五元组解包不得把第 5 位丢弃（丢弃即复现 UnboundLocalError）。"""
         src = _src()
@@ -233,10 +242,10 @@ class TestContinueBranchPlanJsonBinding:
         line = src[i:line_end]
         assert "_plan_json" in line, (
             "续写分支的 _build_generation_context 解包必须绑定 _plan_json"
-            "（continue 模式落库点无条件引用该名字，丢弃即 UnboundLocalError）")
+            "（continue 模式落库点无条件引用该名字，丢弃即 UnboundLocalError）"
+        )
 
     def test_persist_call_passes_plan_json(self):
         """落库调用必须透传 plan_json（R70 CASE WHEN 保列语义的输入端）。"""
         src = _src()
-        assert "plan_json=_plan_json" in src, (
-            "gen_one 落库调用必须透传 plan_json=_plan_json")
+        assert "plan_json=_plan_json" in src, "gen_one 落库调用必须透传 plan_json=_plan_json"

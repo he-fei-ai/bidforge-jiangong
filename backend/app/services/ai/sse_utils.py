@@ -1,4 +1,5 @@
 """SSE 公共工具：心跳包装器等"""
+
 import asyncio
 import json
 import logging
@@ -19,8 +20,7 @@ _ACLOSE_TIMEOUT = 15.0
 _GET_POLL_INTERVAL = 1.0
 
 
-async def with_heartbeat(gen, interval: float = 10, stats_provider=None,
-                         on_end=None):
+async def with_heartbeat(gen, interval: float = 10, stats_provider=None, on_end=None):
     """用心跳包装原始 SSE 生成器，防止长时间 AI 调用导致浏览器/代理超时断开
 
     核心设计：两路 Task 并行运行，通过 Queue 协调输出：
@@ -128,9 +128,9 @@ async def with_heartbeat(gen, interval: float = 10, stats_provider=None,
                     except Exception:
                         payload = None
                     if payload:
-                        await queue.put(("data", "data: " + json.dumps(
-                            {"event": "ping", **payload},
-                            ensure_ascii=False) + "\n\n"))
+                        await queue.put(
+                            ("data", "data: " + json.dumps({"event": "ping", **payload}, ensure_ascii=False) + "\n\n")
+                        )
                 await queue.put(("heartbeat", f": heartbeat {time.time()}\n\n"))
         except asyncio.CancelledError:
             pass
@@ -141,8 +141,7 @@ async def with_heartbeat(gen, interval: float = 10, stats_provider=None,
     try:
         while True:
             try:
-                kind, item = await asyncio.wait_for(
-                    queue.get(), timeout=_GET_POLL_INTERVAL)
+                kind, item = await asyncio.wait_for(queue.get(), timeout=_GET_POLL_INTERVAL)
             except TimeoutError:
                 # 队列空闲超时：仅当生产者已结束（done/error 可能因队满被
                 # 丢弃）才收尾；否则视为事件间隙（长 AI 调用 + 心跳空档），

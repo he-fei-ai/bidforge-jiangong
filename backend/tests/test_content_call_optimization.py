@@ -19,6 +19,7 @@
 3. 记忆有 TTL，到期自动重新探测；流式一旦成功立即清除记忆（平台修复可自愈）；
 4. scene 只做归因标记，不改变任何调用语义与参数。
 """
+
 import inspect
 
 import app.services.ai.provider_factory as pf
@@ -40,8 +41,7 @@ class _FakeProvider:
     last_usage: dict = {}
     last_finish_reason = ""
 
-    def __init__(self, *, stream_pieces=None, stream_err=None,
-                 chat_text="CHAT", chat_err=None):
+    def __init__(self, *, stream_pieces=None, stream_err=None, chat_text="CHAT", chat_err=None):
         self.stream_pieces = list(stream_pieces or [])
         self.stream_err = stream_err
         self.chat_text = chat_text
@@ -63,14 +63,24 @@ class _FakeProvider:
         return self.chat_text
 
 
-async def _insert(db, cid="main", provider="openai", model="gpt-4o",
-                  is_active=1, request_mode="normal"):
+async def _insert(db, cid="main", provider="openai", model="gpt-4o", is_active=1, request_mode="normal"):
     await db.execute(
         "INSERT INTO ai_config (id, provider_name, plan, api_key_encrypted, base_url,"
         " model, is_active, priority, remark, timeout, concurrency, request_mode)"
         " VALUES (?,?,?,?,?,?,?,?,?,60,4,?)",
-        (cid, provider, "pay_as_you_go", encrypt_api_key("sk-test"),
-         "https://api.test.com/v1", model, is_active, 0, "", request_mode))
+        (
+            cid,
+            provider,
+            "pay_as_you_go",
+            encrypt_api_key("sk-test"),
+            "https://api.test.com/v1",
+            model,
+            is_active,
+            0,
+            "",
+            request_mode,
+        ),
+    )
     await db.commit()
 
 
@@ -85,8 +95,7 @@ class TestSceneCallSites:
     def test_content_generation_sites(self):
         """正文链路 4 个场景都必须打标（否则 by_scene 看不到正文调用量）。"""
         src = inspect.getsource(sh.generate_content)
-        for scene in ("word_budget_alloc", "content_draft",
-                      "content_continue", "content_shrink"):
+        for scene in ("word_budget_alloc", "content_draft", "content_continue", "content_shrink"):
             assert f'scene="{scene}"' in src, f"缺少场景标记: {scene}"
 
     def test_consistency_pipeline_sites(self):
@@ -113,8 +122,7 @@ class TestScenePersisted:
         await _call(pf, scene="content_draft")
         await pf.flush_audit_buffer()
 
-        cur = await db_conn.execute(
-            "SELECT scene FROM ai_audit_logs WHERE action='chat'")
+        cur = await db_conn.execute("SELECT scene FROM ai_audit_logs WHERE action='chat'")
         scenes = [r[0] for r in await cur.fetchall()]
         assert "content_draft" in scenes
 
@@ -126,8 +134,7 @@ class TestStreamCapabilityMemory:
     async def test_first_failure_still_probes_stream(self, db_conn, monkeypatch):
         """单次失败只回退、不记忆：偶发网络抖动不能把流式判死。"""
         await _insert(db_conn, request_mode="stream")
-        fake = _FakeProvider(stream_err=RuntimeError("HTTP 400: stream not supported"),
-                             chat_text="回退成功")
+        fake = _FakeProvider(stream_err=RuntimeError("HTTP 400: stream not supported"), chat_text="回退成功")
         monkeypatch.setattr(pf, "_build_provider", lambda *a, **k: fake)
 
         out = await _call(pf)
@@ -138,8 +145,7 @@ class TestStreamCapabilityMemory:
     async def test_two_consecutive_failures_disable_stream(self, db_conn, monkeypatch):
         """连续失败达到阈值后，后续调用直接走普通请求（省掉必然失败的流式 HTTP）。"""
         await _insert(db_conn, request_mode="stream")
-        fake = _FakeProvider(stream_err=RuntimeError("HTTP 400: stream not supported"),
-                             chat_text="回退成功")
+        fake = _FakeProvider(stream_err=RuntimeError("HTTP 400: stream not supported"), chat_text="回退成功")
         monkeypatch.setattr(pf, "_build_provider", lambda *a, **k: fake)
 
         await _call(pf)

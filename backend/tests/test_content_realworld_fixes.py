@@ -11,7 +11,9 @@
 
 对照测试见 `tests/test_content_deep_audit.py`（上一轮：终态顺序 / checkpoint / 写锁 / 超时 / 自动压缩）。
 """
+
 import inspect
+import re
 
 import app.routers._sse_content_payloads as cp
 import pytest
@@ -27,12 +29,12 @@ class TestWordBudgetHint:
     def test_hint_contains_range_and_hard_cap(self):
         hint = sh._word_budget_hint(1000)
         assert "1000字" in hint
-        assert "900~1100" in hint          # 0.9X ~ 1.1X
-        assert "1200" in hint              # 1.2X 硬上限
-        assert "不合格" in hint            # 明确后果
+        assert "900~1100" in hint  # 0.9X ~ 1.1X
+        assert "1200" in hint  # 1.2X 硬上限
+        assert "不合格" in hint  # 明确后果
 
     def test_hint_scales_with_budget(self):
-        assert "2700~3300" in sh._word_budget_hint(3000)     # 小章节也一样
+        assert "2700~3300" in sh._word_budget_hint(3000)  # 小章节也一样
         assert "3600" in sh._word_budget_hint(3000)
 
     def test_dirty_input_is_safe(self):
@@ -48,7 +50,7 @@ class TestWordBudgetHint:
         generate_content 调用点与 content_runtime 实现点两处宿主。
         """
         src = inspect.getsource(sh.generate_content)
-        assert '_word_budget_hint(word_budget)' in src
+        assert "_word_budget_hint(word_budget)" in src
         cr_src = inspect.getsource(crt)
         # 续写：给出「补充后总字数上限」
         assert "补充后总字数上限" in cr_src
@@ -61,16 +63,16 @@ class TestPromptWordCountControl:
     """提示词默认值的回归护栏（运行库无 DB 覆盖，默认值即生效内容）。"""
 
     def test_generation_prompt_has_word_count_section(self):
-        text = render("content_generation_system", section_number="1", standards_text="",
-                      scheme_name="N", scheme_type="T")
+        text = render(
+            "content_generation_system", section_number="1", standards_text="", scheme_name="N", scheme_type="T"
+        )
         assert "字数控制" in text
         assert "1.2X" in text and "0.9X ~ 1.1X" in text
         # 明确禁止注水（否则模型会用套话把字数顶上去）
         assert "严禁为凑字数" in text
 
     def test_continue_prompt_has_upper_bound(self):
-        text = render("content_continue_system", scheme_name="N", scheme_type="T",
-                      standards_text="")
+        text = render("content_continue_system", scheme_name="N", scheme_type="T", standards_text="")
         assert "1.1 倍以内" in text
 
 
@@ -92,28 +94,27 @@ class TestTerminalSemantics:
         #    「event: error」与「failed_sections 明细」两条断言随之改锚到拼装点，
         #    比旧断言更强 —— 旧写法只锁「分支内出现这两个字符串」，
         #    无法发现拼装点本身把字段删掉。
-        assert "_error_payload(_all_msg)" in tail, (
-            "全章失败必须经 _error_payload 单一拼装点产出 error 事件")
+        assert "_error_payload(_all_msg)" in tail, "全章失败必须经 _error_payload 单一拼装点产出 error 事件"
         # B1 拆分：拼装点本体下沉到 _sse_content_payloads，字段断言改读其源码。
         helper = inspect.getsource(cp.build_error_payload)
         assert "'event': 'error'" in helper
-        assert "failed_sections" in helper      # 明细随 error 事件下发
+        assert "failed_sections" in helper  # 明细随 error 事件下发
         assert "'standard_summary': standard_summary" in helper
 
     def test_completed_message_distinguishes_run_and_total(self):
         src = self._src()
-        assert "_partial_run = mode in (\"section\", \"continue\") or len(done_ids) < total" in src
+        assert '_partial_run = mode in ("section", "continue") or len(done_ids) < total' in src
         assert "本次生成 {_run_words} 字（方案合计 {total_wc} 字）" in src
-        assert "正文{total_wc}字完成" in src      # 全量生成仍保持原口径
+        assert "正文{total_wc}字完成" in src  # 全量生成仍保持原口径
 
     def test_over_count_is_reported(self):
         src = self._src()
         assert '_stat["over"] = _stat.get("over", 0) + 1' in src
-        assert "'over_count': _over_n" in src
+        assert re.search(r"['\"]over_count['\"]:\s*_over_n", src)
         assert "章超字数" in src
 
     def test_over_counter_only_counts_over(self):
         """计数只在 word_status=='over' 时累加（与落库口径同源）。"""
         src = self._src()
         idx = src.index('_stat["over"] = _stat.get("over", 0) + 1')
-        assert 'if ws == "over":' in src[idx - 80:idx]
+        assert 'if ws == "over":' in src[idx - 80 : idx]

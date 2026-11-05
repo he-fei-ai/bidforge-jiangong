@@ -12,6 +12,7 @@ test_sse_utils.py::TestWithHeartbeatDisconnectSafety）：
   R2. db.settle_global_conn —— 全局连接悬挂写事务兜底回滚
   R3. task_registry.reap_orphan_tasks —— 运行期僵尸任务周期回收
 """
+
 from datetime import datetime, timedelta
 
 import app.db as db_mod
@@ -77,12 +78,12 @@ class TestReapOrphanTasks:
         await db_conn.execute(
             "INSERT INTO task_registry (id, task_type, status, progress, "
             "created_at, updated_at) VALUES (?, 'facts_generation', ?, 55.0, ?, ?)",
-            (task_id, status, updated_at, updated_at))
+            (task_id, status, updated_at, updated_at),
+        )
         await db_conn.commit()
 
     async def _status(self, db_conn, task_id: str) -> str:
-        cur = await db_conn.execute(
-            "SELECT status FROM task_registry WHERE id = ?", (task_id,))
+        cur = await db_conn.execute("SELECT status FROM task_registry WHERE id = ?", (task_id,))
         row = await cur.fetchone()
         return row["status"] if row is not None else "<missing>"
 
@@ -123,8 +124,7 @@ class TestReapOrphanTasks:
             assert await self._status(db_conn, "p0-mem-1") == "running"
         finally:
             _tr._tasks.pop("p0-mem-1", None)
-            await db_conn.execute(
-                "DELETE FROM task_registry WHERE id = 'p0-mem-1'")
+            await db_conn.execute("DELETE FROM task_registry WHERE id = 'p0-mem-1'")
             await db_conn.commit()
 
     async def test_returns_zero_on_empty(self, db_conn):

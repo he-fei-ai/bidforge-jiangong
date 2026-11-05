@@ -40,16 +40,19 @@ export function createSseBatcher(): SseBatcher {
     pending.clear();
     // 逐个 apply；某一项抛错不能阻断其他项刷新
     for (const t of tasks) {
-      try { t(); } catch { /* 单条失败静默 */ }
+      try {
+        t();
+      } catch {
+        /* 单条失败静默 */
+      }
     }
   }
   function schedule(key: string, fn: () => void) {
     if (stopped) return;
     pending.set(key, fn);
     if (rafId === null) {
-      rafId = typeof requestAnimationFrame === "function"
-        ? requestAnimationFrame(() => flush())
-        : 0; // 非浏览器环境降级：同步 flush
+      rafId =
+        typeof requestAnimationFrame === "function" ? requestAnimationFrame(() => flush()) : 0; // 非浏览器环境降级：同步 flush
       if (rafId === 0) flush();
     }
   }

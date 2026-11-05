@@ -13,6 +13,7 @@ F-CONTENT-STANDARD（2026-09-26），对齐《正文生成模块 —「生成标
 
 本模块全部为纯函数（无 DB / 无 AI / 无 IO），便于单测与生成后实时复算。
 """
+
 from __future__ import annotations
 
 import re
@@ -169,8 +170,7 @@ _FACTS_HEADERS: dict[str, str] = {
 
 def build_facts_header(standard: str) -> str:
     """user 消息中事实块的引导语（末尾已含换行，直接拼接事实正文）。"""
-    return _FACTS_HEADERS.get(normalize_standard(standard) or DEFAULT_STANDARD,
-                               _FACTS_HEADERS[DEFAULT_STANDARD])
+    return _FACTS_HEADERS.get(normalize_standard(standard) or DEFAULT_STANDARD, _FACTS_HEADERS[DEFAULT_STANDARD])
 
 
 def build_continue_hint(standard: str) -> str:
@@ -202,25 +202,60 @@ _NUMBER_RE = re.compile(r"(\d[\d,]{0,12}(?:\.\d+)?)")
 _UNIT_RE = re.compile(
     r"\s{0,2}(日历天|工作日|立方米|平方米|m³|m²|m3|m2|MPa|kPa|kN·m|kN/m|kN"
     r"|毫米|厘米|千米|公分|mm|cm|km|kg|MPa"
-    r"|台|套|层|人|天|次|根|块|个|米|吨|周|年|桩|孔|段|h|d|m|%|‰)")
+    r"|台|套|层|人|天|次|根|块|个|米|吨|周|年|桩|孔|段|h|d|m|%|‰)"
+)
 
 #: 单位归一（同义单位合并；只合并确定等价者，工作日≠日历天不合并）
 _UNIT_ALIASES: dict[str, str] = {
-    "m": "m", "米": "m", "毫米": "mm", "厘米": "cm", "公分": "cm", "千米": "km",
-    "mm": "mm", "cm": "cm", "km": "km",
-    "m³": "m3", "m3": "m3", "立方米": "m3",
-    "m²": "m2", "m2": "m2", "平方米": "m2",
-    "天": "day", "日历天": "day", "d": "day",
+    "m": "m",
+    "米": "m",
+    "毫米": "mm",
+    "厘米": "cm",
+    "公分": "cm",
+    "千米": "km",
+    "mm": "mm",
+    "cm": "cm",
+    "km": "km",
+    "m³": "m3",
+    "m3": "m3",
+    "立方米": "m3",
+    "m²": "m2",
+    "m2": "m2",
+    "平方米": "m2",
+    "天": "day",
+    "日历天": "day",
+    "d": "day",
     "工作日": "workday",
-    "h": "hour", "年": "year", "周": "week",
-    "吨": "t", "t": "t", "kg": "kg",
+    "h": "hour",
+    "年": "year",
+    "周": "week",
+    "吨": "t",
+    "t": "t",
+    "kg": "kg",
 }
 
 #: 型号 / 强度等级：C30（混凝土强度）或 2 个以上大写字母 + 2~4 位数字（QTZ80）
 #: 规范编号（JGJ 120 / GB 50007 等）字母与数字间通常有空格/连字符，且前缀在黑名单内。
 _MODEL_RE = re.compile(r"(?<![A-Za-z0-9])(C\d{2}|[A-Z]{2,6}\d{2,4}[A-Z0-9-]*)")
-_NORM_PREFIXES = {"GB", "JGJ", "JG", "DB", "DBJ", "CJJ", "CECS", "TB", "TJ",
-                  "GBJ", "JTJ", "SL", "DL", "QB", "HG", "SH", "SY"}
+_NORM_PREFIXES = {
+    "GB",
+    "JGJ",
+    "JG",
+    "DB",
+    "DBJ",
+    "CJJ",
+    "CECS",
+    "TB",
+    "TJ",
+    "GBJ",
+    "JTJ",
+    "SL",
+    "DL",
+    "QB",
+    "HG",
+    "SH",
+    "SY",
+}
 
 #: 模糊表述判据（前缀型 / 后缀型 / 空泛指代 / 限值措辞）—— **唯一实现已下沉到
 #: app.services.content_fuzzy**，此处仅保留同名私有别名：
@@ -238,15 +273,39 @@ _COOCCUR_WINDOW = 30
 FUZZY_VALUE_TOLERANCE = 0.10
 #: 关键词黑名单（过泛的词不参与同现判定，避免误关联）
 _KEYWORD_STOP = {
-    "工程", "施工", "方案", "项目", "要求", "技术", "章节", "内容", "情况",
-    "系统", "措施", "管理", "标准", "规定", "一般", "相关", "主要", "其他",
-    "参数", "数据", "信息", "说明", "备注", "名称", "类别", "分类",
+    "工程",
+    "施工",
+    "方案",
+    "项目",
+    "要求",
+    "技术",
+    "章节",
+    "内容",
+    "情况",
+    "系统",
+    "措施",
+    "管理",
+    "标准",
+    "规定",
+    "一般",
+    "相关",
+    "主要",
+    "其他",
+    "参数",
+    "数据",
+    "信息",
+    "说明",
+    "备注",
+    "名称",
+    "类别",
+    "分类",
 }
 
 
 # ---------------------------------------------------------------------------
 # 文本工具
 # ---------------------------------------------------------------------------
+
 
 def strip_code_blocks(text: str) -> str:
     """剔除围栏代码块与行内代码（mermaid/chart-json/ai_image 内的数字不参与事实校验）。"""
@@ -282,12 +341,14 @@ def extract_number_tokens(text: str) -> list[dict]:
         if value is None:
             continue
         unit_raw = tail.group(1)
-        tokens.append({
-            "value": value,
-            "raw": m.group(1),
-            "unit": _norm_unit(unit_raw),
-            "span": (m.start(), tail.end()),
-        })
+        tokens.append(
+            {
+                "value": value,
+                "raw": m.group(1),
+                "unit": _norm_unit(unit_raw),
+                "span": (m.start(), tail.end()),
+            }
+        )
     return tokens
 
 
@@ -315,7 +376,7 @@ def _title_keywords(title: str) -> list[str]:
         if seg not in _KEYWORD_STOP and re.search(r"[一-鿿]", seg):
             kws.append(seg)
             for i in range(len(seg) - 1):
-                bi = seg[i:i + 2]
+                bi = seg[i : i + 2]
                 if bi not in _KEYWORD_STOP:
                     kws.append(bi)
         elif seg not in _KEYWORD_STOP:
@@ -351,6 +412,7 @@ def _excerpt(content: str, pos: int, radius: int = 14) -> str:
 # 校验主入口
 # ---------------------------------------------------------------------------
 
+
 def _fact_text(row) -> tuple[str, str]:
     """从事实行取 (title, content)。行兼容 3/4/5 元组；dict 行也容忍。"""
     if isinstance(row, dict):
@@ -361,9 +423,15 @@ def _fact_text(row) -> tuple[str, str]:
         return "", ""
 
 
-def standard_report(content: str, standard: str, fact_rows: list,
-                    *, section_id: str = "", section_title: str = "",
-                    conflict_fact_rows: list | None = None) -> dict:
+def standard_report(
+    content: str,
+    standard: str,
+    fact_rows: list,
+    *,
+    section_id: str = "",
+    section_title: str = "",
+    conflict_fact_rows: list | None = None,
+) -> dict:
     """对一章已生成正文执行生成标准校验，返回结构化报告（纯函数、不抛业务异常）。
 
     参数：
@@ -408,11 +476,11 @@ def standard_report(content: str, standard: str, fact_rows: list,
         scanned = strip_code_blocks(content or "")
 
         # ---- 事实侧索引（数值/型号/标题关键词 + 豁免集合） ----
-        fact_numbers: list[dict] = []    # {value,unit,title,kw}
-        fact_models: list[dict] = []     # {token,family,title,kw}
+        fact_numbers: list[dict] = []  # {value,unit,title,kw}
+        fact_models: list[dict] = []  # {token,family,title,kw}
         exempt_limits: set[str] = set()  # 事实本身使用的限值措辞
         exempt_hedges: set[tuple] = set()  # 事实本身使用的 (模糊词, 数值)
-        exempt_bare: set[str] = set()   # 事实文本中出现的空泛指代（极端保守豁免）
+        exempt_bare: set[str] = set()  # 事实文本中出现的空泛指代（极端保守豁免）
         fact_all_text: list[str] = []  # 全部事实文本（编造日期比对用）
         for row in fact_rows or []:
             title, ftext = _fact_text(row)
@@ -453,52 +521,63 @@ def standard_report(content: str, standard: str, fact_rows: list,
             seen_spans: set[tuple[int, int]] = set()
             for hm in _HEDGE_PREFIX_RE.finditer(scanned):
                 val = _to_float(hm.group(2))
-                if hm.group(1) in ("约", "大约", "大概") and val is not None \
-                        and (hm.group(1), val) in exempt_hedges:
+                if hm.group(1) in ("约", "大约", "大概") and val is not None and (hm.group(1), val) in exempt_hedges:
                     continue  # 事实原话即“约 X”
                 key = hm.span()
                 if key in seen_spans:
                     continue
                 seen_spans.add(key)
                 fuzzy_hits += 1
-                issues.append({
-                    "type": "fuzzy_expression", "severity": "warning",
-                    "message": f"精准模式禁用概数表述“{hm.group(1)}{hm.group(2)}”",
-                    "excerpt": _excerpt(scanned, hm.start()),
-                })
+                issues.append(
+                    {
+                        "type": "fuzzy_expression",
+                        "severity": "warning",
+                        "message": f"精准模式禁用概数表述“{hm.group(1)}{hm.group(2)}”",
+                        "excerpt": _excerpt(scanned, hm.start()),
+                    }
+                )
             for hm in _HEDGE_SUFFIX_RE.finditer(scanned):
                 key = hm.span()
                 if key in seen_spans:
                     continue
                 seen_spans.add(key)
                 fuzzy_hits += 1
-                issues.append({
-                    "type": "fuzzy_expression", "severity": "warning",
-                    "message": f"精准模式禁用概数表述“{hm.group(1)}{hm.group(2)}”",
-                    "excerpt": _excerpt(scanned, hm.start()),
-                })
+                issues.append(
+                    {
+                        "type": "fuzzy_expression",
+                        "severity": "warning",
+                        "message": f"精准模式禁用概数表述“{hm.group(1)}{hm.group(2)}”",
+                        "excerpt": _excerpt(scanned, hm.start()),
+                    }
+                )
             for bp in _BARE_PHRASES:
                 if bp in exempt_bare:
                     continue
                 start = scanned.find(bp)
                 if start >= 0:
                     fuzzy_hits += 1
-                    issues.append({
-                        "type": "fuzzy_expression", "severity": "warning",
-                        "message": f"精准模式禁用空泛指代“{bp}”",
-                        "excerpt": _excerpt(scanned, start),
-                    })
+                    issues.append(
+                        {
+                            "type": "fuzzy_expression",
+                            "severity": "warning",
+                            "message": f"精准模式禁用空泛指代“{bp}”",
+                            "excerpt": _excerpt(scanned, start),
+                        }
+                    )
             for lp in _LIMIT_PHRASES:
                 if lp in exempt_limits:
                     continue  # 事实本身即限值（如“不低于 C30”），照抄合法
                 start = scanned.find(lp)
                 if start >= 0:
                     fuzzy_hits += 1
-                    issues.append({
-                        "type": "fuzzy_expression", "severity": "warning",
-                        "message": f"精准模式禁用限值表述“{lp}”（事实未如此设定时）",
-                        "excerpt": _excerpt(scanned, start),
-                    })
+                    issues.append(
+                        {
+                            "type": "fuzzy_expression",
+                            "severity": "warning",
+                            "message": f"精准模式禁用限值表述“{lp}”（事实未如此设定时）",
+                            "excerpt": _excerpt(scanned, start),
+                        }
+                    )
 
         # ============ 数值：覆盖率（仅精准）/ 矛盾（两模式） ============
         # 按事实聚合：同一事实（title）的全部数值/型号 token
@@ -521,8 +600,7 @@ def standard_report(content: str, standard: str, fact_rows: list,
                 _t, _ftext = _fact_text(row)
                 if not _t or _t in _seen_titles:
                     continue
-                g = _extra_groups.setdefault(
-                    _t, {"numbers": [], "models": [], "kw": _title_keywords(_t)})
+                g = _extra_groups.setdefault(_t, {"numbers": [], "models": [], "kw": _title_keywords(_t)})
                 _joined = f"{_t} {_ftext}"
                 for nt in extract_number_tokens(_joined):
                     g["numbers"].append({**nt, "title": _t, "kw": g["kw"]})
@@ -557,16 +635,22 @@ def standard_report(content: str, standard: str, fact_rows: list,
                     rel = abs(bn["value"] - fn["value"]) / fn["value"] if fn["value"] else 1.0
                     if std == FUZZY and rel <= FUZZY_VALUE_TOLERANCE:
                         continue  # 模糊模式 ±10% 内视为合理范围表述
-                    issues.append({
-                        "type": "value_conflict" if std == FUZZY else "value_mismatch",
-                        "severity": "error",
-                        "message": (
-                            f"「{title}」数值与全局事实矛盾：事实 {fn['value']:g}{fn['unit']}，"
-                            f"正文 {bn['value']:g}{bn['unit']}"
-                            + (f"（偏差 {rel * 100:.0f}%，超出模糊模式 ±10% 容差）"
-                               if std == FUZZY else "（精准模式须与事实完全一致）")),
-                        "excerpt": _excerpt(scanned, bn["span"][0]),
-                    })
+                    issues.append(
+                        {
+                            "type": "value_conflict" if std == FUZZY else "value_mismatch",
+                            "severity": "error",
+                            "message": (
+                                f"「{title}」数值与全局事实矛盾：事实 {fn['value']:g}{fn['unit']}，"
+                                f"正文 {bn['value']:g}{bn['unit']}"
+                                + (
+                                    f"（偏差 {rel * 100:.0f}%，超出模糊模式 ±10% 容差）"
+                                    if std == FUZZY
+                                    else "（精准模式须与事实完全一致）"
+                                )
+                            ),
+                            "excerpt": _excerpt(scanned, bn["span"][0]),
+                        }
+                    )
 
             # ---- 型号冲突：同系列不同型号，且与事实标题语境同现（两模式均查） ----
             for fm in models:
@@ -578,11 +662,14 @@ def standard_report(content: str, standard: str, fact_rows: list,
                     pos = scanned.find(token)
                     if pos < 0 or not _co_located(scanned, pos, kw):
                         continue
-                    issues.append({
-                        "type": "model_conflict", "severity": "error",
-                        "message": f"「{title}」型号与全局事实矛盾：事实 {fm['token']}，正文出现 {token}",
-                        "excerpt": _excerpt(scanned, pos),
-                    })
+                    issues.append(
+                        {
+                            "type": "model_conflict",
+                            "severity": "error",
+                            "message": f"「{title}」型号与全局事实矛盾：事实 {fm['token']}，正文出现 {token}",
+                            "excerpt": _excerpt(scanned, pos),
+                        }
+                    )
 
         for title, g in fact_groups.items():
             numbers = g["numbers"]
@@ -592,17 +679,17 @@ def standard_report(content: str, standard: str, fact_rows: list,
             # ---- 覆盖率（精准，warning）：事实的数值/型号在正文一个都找不到 ----
             if std == PRECISE and (numbers or models):
                 num_hit = any(_number_present(n["value"], n["unit"]) for n in numbers)
-                model_hit = any(m["token"] in body_model_by_family.get(m["family"], set())
-                                for m in models)
+                model_hit = any(m["token"] in body_model_by_family.get(m["family"], set()) for m in models)
                 if not num_hit and not model_hit:
-                    expected = "、".join(
-                        [f"{n['value']:g}{n['unit']}" for n in numbers]
-                        + [m["token"] for m in models])
-                    issues.append({
-                        "type": "fact_value_missing", "severity": "warning",
-                        "message": f"本章相关事实「{title}」（{expected}）未在正文中引用",
-                        "excerpt": "",
-                    })
+                    expected = "、".join([f"{n['value']:g}{n['unit']}" for n in numbers] + [m["token"] for m in models])
+                    issues.append(
+                        {
+                            "type": "fact_value_missing",
+                            "severity": "warning",
+                            "message": f"本章相关事实「{title}」（{expected}）未在正文中引用",
+                            "excerpt": "",
+                        }
+                    )
 
             _detect_conflicts(title, numbers, models, kw)
 
@@ -618,39 +705,55 @@ def standard_report(content: str, standard: str, fact_rows: list,
         #   missing_reveal    warning  暴露数据缺失（由于资料不足 / 无法确定 / 尚未明确）
         #   fabricated_date   error    凭空编造具体日期（年月日齐全且不在任何事实中）
         for ph in placeholder_hits:
-            issues.append({
-                "type": "placeholder_mark", "severity": "error",
-                "message": f"正文残留占位标记「{(ph.get('mark') or '')[:24]}」（应为完整正文）",
-                "excerpt": _excerpt(scanned, ph["char_start"]),
-            })
+            issues.append(
+                {
+                    "type": "placeholder_mark",
+                    "severity": "error",
+                    "message": f"正文残留占位标记「{(ph.get('mark') or '')[:24]}」（应为完整正文）",
+                    "excerpt": _excerpt(scanned, ph["char_start"]),
+                }
+            )
         for vg in vague_hits:
-            issues.append({
-                "type": "vague_statement", "severity": "warning",
-                "message": f"正文出现{vg.get('label', '空话')}「{(vg.get('mark') or '')[:24]}」",
-                "excerpt": _excerpt(scanned, vg["char_start"]),
-            })
+            issues.append(
+                {
+                    "type": "vague_statement",
+                    "severity": "warning",
+                    "message": f"正文出现{vg.get('label', '空话')}「{(vg.get('mark') or '')[:24]}」",
+                    "excerpt": _excerpt(scanned, vg["char_start"]),
+                }
+            )
         for rv in reveal_hits:
-            issues.append({
-                "type": "missing_reveal", "severity": "warning",
-                "message": f"正文出现暴露数据缺失的表述「{(rv.get('mark') or '')[:24]}」",
-                "excerpt": _excerpt(scanned, rv["char_start"]),
-            })
+            issues.append(
+                {
+                    "type": "missing_reveal",
+                    "severity": "warning",
+                    "message": f"正文出现暴露数据缺失的表述「{(rv.get('mark') or '')[:24]}」",
+                    "excerpt": _excerpt(scanned, rv["char_start"]),
+                }
+            )
         for fd in fabricated_hits:
-            issues.append({
-                "type": "fabricated_date", "severity": "error",
-                "message": f"正文出现凭空编造的具体日期「{fd.get('mark', '')}」（全局事实中无此日期）",
-                "excerpt": _excerpt(scanned, fd["char_start"]),
-            })
+            issues.append(
+                {
+                    "type": "fabricated_date",
+                    "severity": "error",
+                    "message": f"正文出现凭空编造的具体日期「{fd.get('mark', '')}」（全局事实中无此日期）",
+                    "excerpt": _excerpt(scanned, fd["char_start"]),
+                }
+            )
 
         # ---- 内部标记（可追溯性）：只落库、不落正文 ----
         # 派生模糊生成标记：精准（数值/型号命中事实）与模糊（无事实支撑）逐条留痕，
         # 供审核与预检模块只读消费；绝不写入 sections.content，故导出文档看不到。
         fuzzy_expressions = detect_fuzzy_expressions(scanned)
         trace = _build_trace(
-            scanned=scanned, standard=std,
-            section_id=section_id, section_title=section_title,
-            fact_numbers=fact_numbers, fact_models=fact_models,
-            body_numbers=body_numbers, body_models=body_models,
+            scanned=scanned,
+            standard=std,
+            section_id=section_id,
+            section_title=section_title,
+            fact_numbers=fact_numbers,
+            fact_models=fact_models,
+            body_numbers=body_numbers,
+            body_models=body_models,
             fuzzy_expressions=fuzzy_expressions,
             placeholder_hits=placeholder_hits,
         )
@@ -709,19 +812,42 @@ def _empty_report(standard: str) -> dict:
         "warning_count": 0,
         "issues": [],
         # 降级形态下同样给出 trace 结构，避免调用方分支处理（available=False 表意）
-        "trace": {"available": False, "degraded": True, "standard": standard,
-                  "section_id": "", "section_title": "", "items": [],
-                  "summary": {"total": 0, "precise_count": 0, "fuzzy_count": 0,
-                              "warn_count": 0, "error_count": 0,
-                              "placeholder_residue_count": 0,
-                              "by_category": {}, "by_reason": {},
-                              "truncated": False}},
+        "trace": {
+            "available": False,
+            "degraded": True,
+            "standard": standard,
+            "section_id": "",
+            "section_title": "",
+            "items": [],
+            "summary": {
+                "total": 0,
+                "precise_count": 0,
+                "fuzzy_count": 0,
+                "warn_count": 0,
+                "error_count": 0,
+                "placeholder_residue_count": 0,
+                "by_category": {},
+                "by_reason": {},
+                "truncated": False,
+            },
+        },
         "trace_available": False,
-        "stats": {"placeholders": 0, "placeholder_marks": 0, "vague_statements": 0,
-                  "missing_reveals": 0, "fabricated_dates": 0, "fuzzy_hits": 0,
-                  "fuzzy_expressions": 0, "trace_items": 0, "trace_precise": 0,
-                  "trace_fuzzy": 0, "checked_facts": 0,
-                  "fact_numbers": 0, "fact_models": 0, "degraded": True},
+        "stats": {
+            "placeholders": 0,
+            "placeholder_marks": 0,
+            "vague_statements": 0,
+            "missing_reveals": 0,
+            "fabricated_dates": 0,
+            "fuzzy_hits": 0,
+            "fuzzy_expressions": 0,
+            "trace_items": 0,
+            "trace_precise": 0,
+            "trace_fuzzy": 0,
+            "checked_facts": 0,
+            "fact_numbers": 0,
+            "fact_models": 0,
+            "degraded": True,
+        },
     }
 
 
@@ -755,8 +881,8 @@ _PS_TABLE_ROW_RE = re.compile(r"^\s*\|")
 #: 现由 ``fence_common.iter_all_blocks`` 直接给出保护行区间（判据不在此复制）。
 #: 列表项行首（- / * / 1. / （1） / 一、），段落长度判据跳过结构化条目。
 _PS_LIST_HEAD_RE = re.compile(
-    r"^\s*(?:[-*+]\s|\d+(?:\.\d+)*[.、）)]\s*[^\s]|"
-    r"[（(]\s*\d{1,2}\s*[)）]\s|^[一二三四五六七八九十]+、)")
+    r"^\s*(?:[-*+]\s|\d+(?:\.\d+)*[.、）)]\s*[^\s]|" r"[（(]\s*\d{1,2}\s*[)）]\s|^[一二三四五六七八九十]+、)"
+)
 
 
 def paragraph_structure_report(content: str) -> dict:
@@ -783,7 +909,8 @@ def paragraph_structure_report(content: str) -> dict:
             stop = blk["close_line"] if blk["close_line"] >= 0 else len(scanned_lines) - 1
             protected.update(range(blk["open_line"], stop + 1))
         lines: list[str] = [
-            raw_line for idx, raw_line in enumerate(scanned_lines)
+            raw_line
+            for idx, raw_line in enumerate(scanned_lines)
             if idx not in protected and not _PS_TABLE_ROW_RE.match(raw_line)
         ]
         text = "\n".join(lines)
@@ -798,20 +925,28 @@ def paragraph_structure_report(content: str) -> dict:
             if len(core) > PARA_MAX_CHARS:
                 long_paras += 1
                 if long_paras <= 3:
-                    warnings.append({
-                        "type": "long_paragraph", "severity": "advisory",
-                        "message": f"单段 {len(core)} 字，超过 {PARA_MAX_CHARS} 字上限，"
-                                   "建议按观点/措施/承诺拆段",
-                        "excerpt": core[:40]})
+                    warnings.append(
+                        {
+                            "type": "long_paragraph",
+                            "severity": "advisory",
+                            "message": f"单段 {len(core)} 字，超过 {PARA_MAX_CHARS} 字上限，"
+                            "建议按观点/措施/承诺拆段",
+                            "excerpt": core[:40],
+                        }
+                    )
 
         # 日期写法规范
         bad_dates = {m.group(0) for m in _PS_BAD_DATE_SLASH_RE.finditer(text)}
         bad_dates |= {m.group(0) for m in _PS_BAD_DATE_HYPHEN_RE.finditer(text)}
         for d in sorted(bad_dates):
-            warnings.append({
-                "type": "date_format", "severity": "advisory",
-                "message": f"日期写法「{d}」建议统一为 XXXX年X月X日",
-                "excerpt": d})
+            warnings.append(
+                {
+                    "type": "date_format",
+                    "severity": "advisory",
+                    "message": f"日期写法「{d}」建议统一为 XXXX年X月X日",
+                    "excerpt": d,
+                }
+            )
 
         # 工期单位口径：N天 近旁（±12 字）有工期语义词、且窗口内无「日历天」
         seen_days: set[str] = set()
@@ -824,20 +959,26 @@ def paragraph_structure_report(content: str) -> dict:
                 frag = m.group(0)
                 if frag not in seen_days:
                     seen_days.add(frag)
-                    warnings.append({
-                        "type": "duration_unit", "severity": "advisory",
-                        "message": f"工期表述「{frag}」建议统一为"
-                                   f"「{m.group(1)} 日历天」（与全局事实单位口径一致）",
-                        "excerpt": _excerpt(text, m.start(), radius=10)})
+                    warnings.append(
+                        {
+                            "type": "duration_unit",
+                            "severity": "advisory",
+                            "message": f"工期表述「{frag}」建议统一为"
+                            f"「{m.group(1)} 日历天」（与全局事实单位口径一致）",
+                            "excerpt": _excerpt(text, m.start(), radius=10),
+                        }
+                    )
 
         return {
             "paragraphs": len(paras),
-            "recommended_range": [PARA_MIN_CHARS, PARA_RECOMMENDED_CHARS,
-                                  PARA_MAX_CHARS],
+            "recommended_range": [PARA_MIN_CHARS, PARA_RECOMMENDED_CHARS, PARA_MAX_CHARS],
             "long_paragraphs": long_paras,
             "warnings": warnings,
         }
     except Exception:  # pragma: no cover - 校验器自身故障绝不外溢
-        return {"paragraphs": 0, "recommended_range":
-                [PARA_MIN_CHARS, PARA_RECOMMENDED_CHARS, PARA_MAX_CHARS],
-                "long_paragraphs": 0, "warnings": []}
+        return {
+            "paragraphs": 0,
+            "recommended_range": [PARA_MIN_CHARS, PARA_RECOMMENDED_CHARS, PARA_MAX_CHARS],
+            "long_paragraphs": 0,
+            "warnings": [],
+        }

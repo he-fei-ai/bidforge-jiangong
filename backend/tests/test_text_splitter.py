@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """边界感知长文本截断单测（对齐 OpenBidKit userTextSplitter 思路，2026-09-22）"""
+
 import pytest
 from app.utils.text_splitter import truncate_to_boundary
 
@@ -62,6 +63,6 @@ def test_max_len_non_positive_returns_empty():
 def test_none_and_illegal_inputs_no_crash():
     """m5 守卫：None/非字符串/非法 max_len 不抛异常，不返回 None（避免下游占位符残留）。"""
     assert truncate_to_boundary(None, 100) == ""
-    assert truncate_to_boundary("abc", "x") == ""      # 非法 max_len → 视为 0
-    assert truncate_to_boundary("abc", None) == ""      # 非法 max_len → 视为 0
-    assert truncate_to_boundary(12345, 3) == "123"     # 非字符串 text → str() 后截断
+    assert truncate_to_boundary("abc", "x") == ""  # 非法 max_len → 视为 0
+    assert truncate_to_boundary("abc", None) == ""  # 非法 max_len → 视为 0
+    assert truncate_to_boundary(12345, 3) == "123"  # 非字符串 text → str() 后截断

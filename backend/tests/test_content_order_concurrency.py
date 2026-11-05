@@ -10,6 +10,7 @@
 3. **字数脏值（P1）**：leaf.word_budget 为字符串/NULL 时不再让续写判定
    抛 TypeError 把整章误报为"生成失败"（与目录 word_budget 守卫同源）。
 """
+
 import inspect
 
 import app.routers.sse_handlers as sh
@@ -23,16 +24,22 @@ from app.services.content_utils import (
 
 
 def _sec(sid, pid, level, sort_order):
-    return {"id": sid, "parent_id": pid, "level": level,
-            "sort_order": sort_order, "title": sid, "content": "",
-            "word_count": 0, "status": "empty"}
+    return {
+        "id": sid,
+        "parent_id": pid,
+        "level": level,
+        "sort_order": sort_order,
+        "title": sid,
+        "content": "",
+        "word_count": 0,
+        "status": "empty",
+    }
 
 
 # ============================================================
 # 1. order_sections_dfs —— 目录树前序 DFS
 # ============================================================
 class TestOrderSectionsDfs:
-
     def test_empty(self):
         assert order_sections_dfs([]) == []
 
@@ -44,16 +51,23 @@ class TestOrderSectionsDfs:
         1.1.1（sort=0）排到 2（sort=1）之前、把 1.2 与 2.1 混排。
         """
         flat = [
-            _sec("1", "", 1, 0), _sec("1.1", "1", 2, 0), _sec("1.1.1", "1.1", 3, 0),
-            _sec("2", "", 1, 1), _sec("1.2", "1", 2, 1), _sec("2.1", "2", 2, 0),
+            _sec("1", "", 1, 0),
+            _sec("1.1", "1", 2, 0),
+            _sec("1.1.1", "1.1", 3, 0),
+            _sec("2", "", 1, 1),
+            _sec("1.2", "1", 2, 1),
+            _sec("2.1", "2", 2, 0),
         ]
         got = [s["id"] for s in order_sections_dfs(flat)]
         assert got == ["1", "1.1", "1.1.1", "1.2", "2", "2.1"]
 
     def test_siblings_sorted_by_sort_order(self):
         flat = [
-            _sec("c", "", 1, 2), _sec("a", "", 1, 0), _sec("b", "", 1, 1),
-            _sec("b2", "b", 2, 1), _sec("b1", "b", 2, 0),
+            _sec("c", "", 1, 2),
+            _sec("a", "", 1, 0),
+            _sec("b", "", 1, 1),
+            _sec("b2", "b", 2, 1),
+            _sec("b1", "b", 2, 0),
         ]
         got = [s["id"] for s in order_sections_dfs(flat)]
         assert got == ["a", "b", "b1", "b2", "c"]
@@ -79,8 +93,12 @@ class TestOrderSectionsDfs:
     def test_leaves_queue_in_tree_order(self):
         """端到端：DFS 重排 + select_target_leaves 后，叶子队列严格目录序。"""
         flat = [
-            _sec("1", "", 1, 0), _sec("1.1", "1", 2, 0), _sec("1.1.1", "1.1", 3, 0),
-            _sec("2", "", 1, 1), _sec("1.2", "1", 2, 1), _sec("2.1", "2", 2, 0),
+            _sec("1", "", 1, 0),
+            _sec("1.1", "1", 2, 0),
+            _sec("1.1.1", "1.1", 3, 0),
+            _sec("2", "", 1, 1),
+            _sec("1.2", "1", 2, 1),
+            _sec("2.1", "2", 2, 0),
         ]
         leaves = select_target_leaves(order_sections_dfs(flat), mode="all")
         assert [s["id"] for s in leaves] == ["1.1.1", "1.2", "2.1"]
@@ -90,7 +108,6 @@ class TestOrderSectionsDfs:
 # 2. resolve_concurrency —— 用户档位严格归一
 # ============================================================
 class TestResolveConcurrency:
-
     def test_named_levels(self):
         assert resolve_concurrency("slow") == 2
         assert resolve_concurrency("balanced") == 3
@@ -114,7 +131,7 @@ class TestResolveConcurrency:
         assert resolve_concurrency(None, default=4) == 4
         assert resolve_concurrency("abc", default=2) == 2
         assert resolve_concurrency(True, default=3) == 3
-        assert resolve_concurrency(0, default=5) == 5    # 0/负数非法 → default
+        assert resolve_concurrency(0, default=5) == 5  # 0/负数非法 → default
         assert resolve_concurrency(-2, default=5) == 5
 
     def test_default_itself_clamped(self):
@@ -127,7 +144,6 @@ class TestResolveConcurrency:
 # 3. leaf_word_budget —— 脏值稳健
 # ============================================================
 class TestLeafWordBudget:
-
     def test_normal_values(self):
         assert leaf_word_budget({"word_budget": 2000}) == 2000
         assert leaf_word_budget({"word_budget": 2000.7}) == 2000
@@ -148,7 +164,6 @@ class TestLeafWordBudget:
 # 4. 源码级守卫 —— generate_content 接线正确
 # ============================================================
 class TestContentGenerationWiring:
-
     def _src(self):
         return inspect.getsource(sh.generate_content)
 
@@ -178,14 +193,15 @@ class TestContentGenerationWiring:
         #
         # ① 容量严格取用户档位，不得绕全局自适应控制器间接取值
         assert "asyncio.Semaphore(effective_concurrency)" in src, (
-            "并发闸门必须直接用用户档位 effective_concurrency，"
-            "不得再绕 Semaphore 间接控制")
+            "并发闸门必须直接用用户档位 effective_concurrency，" "不得再绕 Semaphore 间接控制"
+        )
         # ② 必须是每任务独立信号量（而非全局 concurrency_controller）
         assert "_run_semaphore" in src
         # ③ 闸门必须在暂停检查**之后**、实际工作之前获取
-        gate = src[src.index("async def guarded_gen"):]
-        assert "await wait_resume(task_id)" in gate.split("async with _run_semaphore")[0], (
-            "暂停闸门必须前置到信号量之前（否则暂停期间白占并发许可）")
+        gate = src[src.index("async def guarded_gen") :]
+        assert (
+            "await wait_resume(task_id)" in gate.split("async with _run_semaphore")[0]
+        ), "暂停闸门必须前置到信号量之前（否则暂停期间白占并发许可）"
         assert "async with _run_semaphore" in gate
         # ④ 回收须用 as_completed 等待全部子任务
         assert "asyncio.as_completed(tasks)" in src
@@ -195,8 +211,9 @@ class TestContentGenerationWiring:
     def test_no_global_adaptive_gate_in_content(self):
         """generate_content 内不得再动全局自适应闸门（跨任务互染源头）。"""
         src = self._src()
-        assert "concurrency_controller.set_concurrency" not in src, (
-            "不得再调用全局 set_concurrency —— 会挤掉其它任务/配置的用户档位")
+        assert (
+            "concurrency_controller.set_concurrency" not in src
+        ), "不得再调用全局 set_concurrency —— 会挤掉其它任务/配置的用户档位"
 
     def test_display_concurrency_locked_to_user_level(self):
         src = self._src()

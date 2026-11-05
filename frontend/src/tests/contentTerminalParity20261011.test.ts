@@ -29,7 +29,9 @@
 import { describe, it, expect } from "vitest";
 import { liveTaskFinishMessage } from "../hooks/useSchemeLiveTask";
 import {
-  isTerminalTaskStatus, isTerminalContentEvent, TERMINAL_TASK_STATUSES,
+  isTerminalTaskStatus,
+  isTerminalContentEvent,
+  TERMINAL_TASK_STATUSES,
 } from "../utils/contentEvents";
 import { STATUS_META, statusMeta } from "../components/TaskStatusBar";
 
@@ -62,9 +64,7 @@ const RAW_SOURCES: Record<string, string> = Object.fromEntries(
  * ⚠️ 只收「非测试源码」：测试里为了做反向锚，必须能复刻旧写法
  * （把 A 组规则扫到测试文件上会让 D 组自相矛盾）。
  */
-const SOURCES = Object.entries(RAW_SOURCES).filter(
-  ([rel]) => !rel.startsWith("tests/"),
-);
+const SOURCES = Object.entries(RAW_SOURCES).filter(([rel]) => !rel.startsWith("tests/"));
 
 /**
  * 「内联终态白名单」的判据（不是单条正则，而是**复合判据**）：
@@ -80,9 +80,7 @@ const SOURCES = Object.entries(RAW_SOURCES).filter(
 const TERMINAL_LITERAL_RE = /["'](completed|failed|stopped)["']/g;
 
 function isInlineTerminalWhitelist(line: string): boolean {
-  const names = new Set(
-    Array.from(line.matchAll(TERMINAL_LITERAL_RE), (m) => m[1]),
-  );
+  const names = new Set(Array.from(line.matchAll(TERMINAL_LITERAL_RE), (m) => m[1]));
   if (names.size < 2) return false;
   return /\.includes\(|\|\|/.test(line);
 }
@@ -122,12 +120,16 @@ describe("A 组 · 源码扫描：不得内联终态白名单", () => {
 
   it("A2b: 判据不受非终态 status 用法干扰（前提校验）", () => {
     // 同为 `.includes(x.status)`，但枚举的不是任务终态 ⇒ 不许被判为违规
-    expect(isInlineTerminalWhitelist(
-      `{!!health && ["configured", "no_key", "key_invalid"].includes(health.status) && (`,
-    )).toBe(false);
-    expect(isInlineTerminalWhitelist(
-      `filtered = leaves.filter((l) => ["empty", "failed", "pending"].includes(l.status));`,
-    )).toBe(false);
+    expect(
+      isInlineTerminalWhitelist(
+        `{!!health && ["configured", "no_key", "key_invalid"].includes(health.status) && (`,
+      ),
+    ).toBe(false);
+    expect(
+      isInlineTerminalWhitelist(
+        `filtered = leaves.filter((l) => ["empty", "failed", "pending"].includes(l.status));`,
+      ),
+    ).toBe(false);
   });
 
   it("A3: 共享判定函数确实被各调用点引用（防止只声明不用）", () => {
@@ -158,6 +160,8 @@ describe("B 组 · degraded 处理点必须可见可控", () => {
    */
   const KNOWN_DEGRADED_HANDLERS: Record<string, string> = {
     "pages/SchemeWorkbenchPage.tsx": "正文 SSE 终态 + 三处轮询",
+    "pages/schemeWorkbench/useUnknownTaskRecovery.tsx":
+      "未知态重新接管：completed/degraded 走刷新分支（G10 自页面原位搬迁）",
     "hooks/useContentGeneration.ts": "正文 SSE 终态 + 断线重挂轮询",
     "hooks/useSchemeLiveTask.ts": "后台任务终态跳变检测（触发刷新）",
     "components/TaskStatusBar.tsx": "纯展示：状态色与图标（不走终态逻辑）",
@@ -169,10 +173,11 @@ describe("B 组 · degraded 处理点必须可见可控", () => {
       if (rel === CONTENT_EVENTS) continue;
       const isStatusCompare = /(status|event)\s*[!=]==\s*["']degraded["']/.test(src);
       if (!isStatusCompare) continue;
-      const shared = src.includes("isTerminalTaskStatus")
-        || src.includes("isTerminalContentEvent")
-        || src.includes("TERMINAL_TASK_STATUSES")
-        || src.includes("CONTENT_TERMINAL_EVENTS");
+      const shared =
+        src.includes("isTerminalTaskStatus") ||
+        src.includes("isTerminalContentEvent") ||
+        src.includes("TERMINAL_TASK_STATUSES") ||
+        src.includes("CONTENT_TERMINAL_EVENTS");
       if (shared || KNOWN_DEGRADED_HANDLERS[rel]) continue;
       offenders.push(rel);
     }
@@ -180,9 +185,9 @@ describe("B 组 · degraded 处理点必须可见可控", () => {
   });
 
   it("B2: 反向锚 —— 共享出口确实覆盖了各终态判定点", () => {
-    const degradedFiles = SOURCES
-      .filter(([, src]) => /(status|event)\s*[!=]==\s*["']degraded["']/.test(src))
-      .map(([rel]) => rel);
+    const degradedFiles = SOURCES.filter(([, src]) =>
+      /(status|event)\s*[!=]==\s*["']degraded["']/.test(src),
+    ).map(([rel]) => rel);
     for (const must of [
       "hooks/useSchemeLiveTask.ts",
       "pages/SchemeWorkbenchPage.tsx",
@@ -196,8 +201,10 @@ describe("B 组 · degraded 处理点必须可见可控", () => {
     for (const rel of Object.keys(KNOWN_DEGRADED_HANDLERS)) {
       const hit = SOURCES.find(([r]) => r === rel);
       expect(hit, `白名单登记了 ${rel}，但源码树里找不到该文件`).toBeTruthy();
-      expect(/(status|event)\s*[!=]==\s*["']degraded["']/.test(hit![1]),
-        `白名单登记了 ${rel}，但该文件已不再处理 degraded，请移除登记项`).toBe(true);
+      expect(
+        /(status|event)\s*[!=]==\s*["']degraded["']/.test(hit![1]),
+        `白名单登记了 ${rel}，但该文件已不再处理 degraded，请移除登记项`,
+      ).toBe(true);
     }
   });
 });
@@ -205,15 +212,17 @@ describe("B 组 · degraded 处理点必须可见可控", () => {
 describe("C 组 · liveTaskFinishMessage 行为", () => {
   it("C1: completed / degraded / failed / stopped 四态均有文案", () => {
     expect(liveTaskFinishMessage("completed", "正文生成")).toEqual({
-      level: "success", text: "后台「正文生成」任务已完成，数据已刷新",
+      level: "success",
+      text: "后台「正文生成」任务已完成，数据已刷新",
     });
     expect(liveTaskFinishMessage("degraded", "正文生成", "3 处失败")?.level).toBe("warning");
-    expect(liveTaskFinishMessage("degraded", "正文生成", "3 处失败")?.text)
-      .toContain("一致性修复有失败项");
-    expect(liveTaskFinishMessage("failed", "目录生成", "配额不足")?.text)
-      .toContain("配额不足");
+    expect(liveTaskFinishMessage("degraded", "正文生成", "3 处失败")?.text).toContain(
+      "一致性修复有失败项",
+    );
+    expect(liveTaskFinishMessage("failed", "目录生成", "配额不足")?.text).toContain("配额不足");
     expect(liveTaskFinishMessage("stopped", "事实提取")).toEqual({
-      level: "info", text: "后台「事实提取」任务已停止",
+      level: "info",
+      text: "后台「事实提取」任务已停止",
     });
   });
 
@@ -279,11 +288,20 @@ describe("F 组 · 两套正文 SSE 消费实现的事件覆盖一致", () => {
 
   it("F3: 核心事件两边都必须处理", () => {
     const core = [
-      "section_start", "section_done", "section_error", "section_stage",
-      "stats", "ping", "stopped",
-      "consistency_scan_start", "consistency_scan_progress", "consistency_scan_done",
-      "consistency_repair_progress", "consistency_repair_done",
-      "consistency_skipped", "consistency_failed",
+      "section_start",
+      "section_done",
+      "section_error",
+      "section_stage",
+      "stats",
+      "ping",
+      "stopped",
+      "consistency_scan_start",
+      "consistency_scan_progress",
+      "consistency_scan_done",
+      "consistency_repair_progress",
+      "consistency_repair_done",
+      "consistency_skipped",
+      "consistency_failed",
     ];
     for (const e of core) {
       expect([...HOOK_EVENTS]).toContain(e);
@@ -331,13 +349,15 @@ describe("E 组 · 状态栏不得再把终态显示成英文原文", () => {
 
 describe("D 组 · 反向锚：证明扫描能抓住旧写法", () => {
   it("D1: 旧三态数组写法会被 A2 抓住", () => {
-    expect(isInlineTerminalWhitelist(
-      `if (["completed", "failed", "stopped"].includes(st.status)) {`)).toBe(true);
+    expect(
+      isInlineTerminalWhitelist(`if (["completed", "failed", "stopped"].includes(st.status)) {`),
+    ).toBe(true);
   });
 
   it("D2: 旧 status 等值链写法会被 A2 抓住", () => {
-    expect(isInlineTerminalWhitelist(
-      `if (t.status === "completed" || t.status === "failed") {`)).toBe(true);
+    expect(
+      isInlineTerminalWhitelist(`if (t.status === "completed" || t.status === "failed") {`),
+    ).toBe(true);
   });
 
   it("D3: 仅含单个终态词的 status 用法不算违规（判据不能过宽）", () => {
@@ -345,8 +365,10 @@ describe("D 组 · 反向锚：证明扫描能抓住旧写法", () => {
   });
 
   it("D4: 换用共享判定后不再被判为内联白名单", () => {
-    expect(isInlineTerminalWhitelist(
-      `if (isTerminalTaskStatus(t.status)) { optsRef.current?.onFinished?.(); }`,
-    )).toBe(false);
+    expect(
+      isInlineTerminalWhitelist(
+        `if (isTerminalTaskStatus(t.status)) { optsRef.current?.onFinished?.(); }`,
+      ),
+    ).toBe(false);
   });
 });

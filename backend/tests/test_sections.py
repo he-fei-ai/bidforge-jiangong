@@ -9,6 +9,7 @@
 - 构造多层数据验证批量操作和级联删除的正确性
 - 验证 DB 实际状态而非仅返回值，确保 SQL 真正执行
 """
+
 import pytest
 from app.routers.sections import delete_section, reorder_sections
 
@@ -18,26 +19,22 @@ from app.routers.sections import delete_section, reorder_sections
 # ============================================================
 async def _insert_project_scheme(db, pid="p1", sid="s1"):
     """插入 project + scheme 基础数据（INSERT OR IGNORE 允许重复 project）"""
-    await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)",
-                     (pid, "测试项目"))
-    await db.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)",
-                     (sid, pid, "测试方案"))
+    await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)", (pid, "测试项目"))
+    await db.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", (sid, pid, "测试方案"))
     await db.commit()
 
 
 async def _insert_section(db, sid, sec_id, title, parent_id="", sort_order=0, level=1):
     """插入单个 section"""
     await db.execute(
-        "INSERT INTO sections (id, scheme_id, title, parent_id, sort_order, level)"
-        " VALUES (?,?,?,?,?,?)",
-        (sec_id, sid, title, parent_id, sort_order, level))
+        "INSERT INTO sections (id, scheme_id, title, parent_id, sort_order, level)" " VALUES (?,?,?,?,?,?)",
+        (sec_id, sid, title, parent_id, sort_order, level),
+    )
 
 
 async def _get_sort_orders(db, sid):
     """按 sort_order 升序返回 (id, sort_order) 列表"""
-    cur = await db.execute(
-        "SELECT id, sort_order FROM sections WHERE scheme_id=? ORDER BY sort_order",
-        (sid,))
+    cur = await db.execute("SELECT id, sort_order FROM sections WHERE scheme_id=? ORDER BY sort_order", (sid,))
     return [dict(r) for r in await cur.fetchall()]
 
 
@@ -61,8 +58,7 @@ class TestReorderSections:
         await _insert_section(db_conn, "s1", "sec3", "章节3", sort_order=2)
         await db_conn.commit()
 
-        result = await reorder_sections("s1", {"order": ["sec3", "sec1", "sec2"]},
-                                        db=db_conn)
+        result = await reorder_sections("s1", {"order": ["sec3", "sec1", "sec2"]}, db=db_conn)
         assert result["ok"] is True
 
         rows = await _get_sort_orders(db_conn, "s1")
@@ -73,14 +69,17 @@ class TestReorderSections:
         ]
 
     async def test_reorder_empty_order(self, db_conn):
-        """空 order 列表：不执行任何更新，返回 ok"""
+        """✅ R175 BUG-2：空 order 不再静默成功 —— 方案内有章节却传空列表 = 缺项，400。"""
+        from fastapi import HTTPException
+
         await _insert_project_scheme(db_conn)
         await _insert_section(db_conn, "s1", "sec1", "章节1", sort_order=5)
         await db_conn.commit()
 
-        result = await reorder_sections("s1", {"order": []}, db=db_conn)
-        assert result["ok"] is True
-        # sort_order 不变
+        with pytest.raises(HTTPException) as ei:
+            await reorder_sections("s1", {"order": []}, db=db_conn)
+        assert ei.value.status_code == 400
+        # 校验在写之前：sort_order 不变
         rows = await _get_sort_orders(db_conn, "s1")
         assert rows == [{"id": "sec1", "sort_order": 5}]
 
@@ -117,27 +116,26 @@ class TestReorderSections:
             assert rows[i]["sort_order"] == i
 
     async def test_reorder_partial_ids(self, db_conn):
-        """order 中包含不存在的 id：该条 UPDATE 影响 0 行，其余正常
+        """✅ R175 BUG-2：不存在的 id（ghost）不再被静默跳过 —— 400 且不产生部分写入。"""
+        from fastapi import HTTPException
 
-        SQL 含 AND scheme_id=? 条件，跨 scheme 的 id 不会被误更新。
-        """
         await _insert_project_scheme(db_conn)
         await _insert_section(db_conn, "s1", "sec1", "章节1", sort_order=0)
         await _insert_section(db_conn, "s1", "sec2", "章节2", sort_order=1)
         await db_conn.commit()
 
-        # "ghost" 不存在
-        result = await reorder_sections("s1", {"order": ["sec2", "ghost", "sec1"]},
-                                        db=db_conn)
-        assert result["ok"] is True
+        with pytest.raises(HTTPException) as ei:
+            await reorder_sections("s1", {"order": ["sec2", "ghost", "sec1"]}, db=db_conn)
+        assert ei.value.status_code == 400
+        assert "不属于本方案" in str(ei.value.detail)
+        # 校验在写之前：原顺序未被部分修改
         rows = await _get_sort_orders(db_conn, "s1")
-        assert rows[0]["id"] == "sec2"
-        assert rows[0]["sort_order"] == 0
-        assert rows[1]["id"] == "sec1"
-        assert rows[1]["sort_order"] == 2  # ghost 占了 index=1
+        assert rows == [{"id": "sec1", "sort_order": 0}, {"id": "sec2", "sort_order": 1}]
 
     async def test_reorder_cross_scheme_isolation(self, db_conn):
-        """跨 scheme 隔离：order 中传入其他 scheme 的 id 不影响其数据"""
+        """✅ R175 BUG-2：跨 scheme 隔离收紧 —— 混入他方案 id 直接 400，双方数据均不变"""
+        from fastapi import HTTPException
+
         await _insert_project_scheme(db_conn, "p1", "s1")
         await _insert_project_scheme(db_conn, "p1", "s2")
         await _insert_section(db_conn, "s1", "a1", "A1", sort_order=0)
@@ -145,18 +143,16 @@ class TestReorderSections:
         await db_conn.commit()
 
         # s1 的 reorder 中混入 s2 的 id
-        result = await reorder_sections("s1", {"order": ["b1", "a1"]}, db=db_conn)
-        assert result["ok"] is True
+        with pytest.raises(HTTPException) as ei:
+            await reorder_sections("s1", {"order": ["b1", "a1"]}, db=db_conn)
+        assert ei.value.status_code == 400
+        assert "不属于本方案" in str(ei.value.detail)
 
-        # b1 属于 s2，不应被 s1 的 reorder 改动
+        # 两个方案的 sort_order 均未被改动
         cur = await db_conn.execute("SELECT sort_order FROM sections WHERE id=?", ("b1",))
-        b1_sort = (await cur.fetchone())[0]
-        assert b1_sort == 0  # 未变
-
-        # a1 应被更新为 sort_order=1
+        assert (await cur.fetchone())[0] == 0
         cur = await db_conn.execute("SELECT sort_order FROM sections WHERE id=?", ("a1",))
-        a1_sort = (await cur.fetchone())[0]
-        assert a1_sort == 1
+        assert (await cur.fetchone())[0] == 0
 
     async def test_reorder_returns_tree(self, db_conn):
         """返回值包含 tree 字段，反映重排后的结构"""
@@ -202,9 +198,7 @@ class TestDeleteSection:
         """
         await _insert_project_scheme(db_conn, "p1", "s1")
         # 第二个方案（同一 project 下）
-        await db_conn.execute(
-            "INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)",
-            ("s2", "p1", "方案二"))
+        await db_conn.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", ("s2", "p1", "方案二"))
         await db_conn.commit()
 
         await _insert_section(db_conn, "s1", "a1", "A章", parent_id="")
@@ -213,20 +207,17 @@ class TestDeleteSection:
         await _insert_section(db_conn, "s2", "b1", "B章", parent_id="a2", level=2)
         # B 方案章节的图表登记
         await db_conn.execute(
-            "INSERT INTO chart_predictions (id, scheme_id, section_id, chart_type)"
-            " VALUES (?,?,?,?)",
-            ("cp1", "s2", "b1", "flowchart"))
+            "INSERT INTO chart_predictions (id, scheme_id, section_id, chart_type)" " VALUES (?,?,?,?)",
+            ("cp1", "s2", "b1", "flowchart"),
+        )
         await db_conn.commit()
 
         await delete_section("s1", "a1", db=db_conn)
 
         assert await _count_sections(db_conn, "s1") == 0, "本方案章节应全部删除"
-        assert await _count_sections(db_conn, "s2") == 1, \
-            "跨方案章节行不得被连带删除"
-        cur = await db_conn.execute(
-            "SELECT COUNT(*) FROM chart_predictions WHERE section_id='b1'")
-        assert (await cur.fetchone())[0] == 1, \
-            "跨方案章节的图表登记不得被误删（P1-4 有效修复点）"
+        assert await _count_sections(db_conn, "s2") == 1, "跨方案章节行不得被连带删除"
+        cur = await db_conn.execute("SELECT COUNT(*) FROM chart_predictions WHERE section_id='b1'")
+        assert (await cur.fetchone())[0] == 1, "跨方案章节的图表登记不得被误删（P1-4 有效修复点）"
 
     async def test_delete_parent_with_children(self, db_conn):
         """删除父节点：级联删除直接子节点"""
@@ -289,8 +280,7 @@ class TestDeleteSection:
         # root, c2, gc2 保留
         assert await _count_sections(db_conn, "s1") == 3
 
-        cur = await db_conn.execute("SELECT id FROM sections WHERE scheme_id=? ORDER BY id",
-                                    ("s1",))
+        cur = await db_conn.execute("SELECT id FROM sections WHERE scheme_id=? ORDER BY id", ("s1",))
         remaining = {r[0] for r in await cur.fetchall()}
         assert remaining == {"root", "c2", "gc2"}
 
@@ -330,8 +320,7 @@ class TestDeleteSection:
         await _insert_project_scheme(db_conn)
         await _insert_section(db_conn, "s1", "parent", "父", parent_id="")
         for i in range(20):
-            await _insert_section(db_conn, "s1", f"c{i}", f"子{i}",
-                                  parent_id="parent")
+            await _insert_section(db_conn, "s1", f"c{i}", f"子{i}", parent_id="parent")
         await db_conn.commit()
 
         result = await delete_section("s1", "parent", db=db_conn)

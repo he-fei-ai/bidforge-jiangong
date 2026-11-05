@@ -1,13 +1,13 @@
 import { memo, useEffect, useState } from "react";
 import { App, Button, Card, Empty, Input, Select, Space, Tag, Tooltip, Typography } from "antd";
-import {
-  EditOutlined,
-  FileTextOutlined,
-  InfoCircleOutlined,
-} from "@ant-design/icons";
+import { EditOutlined, FileTextOutlined, InfoCircleOutlined } from "@ant-design/icons";
 import MarkdownRenderer from "./MarkdownRenderer";
 // F-CONTENT-STANDARD(2026-09-26): 章节级标准选项文案与生效值（与后端 resolve 口径同源）
-import { sectionStandardOptionLabel, effectiveSectionStandard, STANDARD_LABELS } from "../utils/contentStandard";
+import {
+  sectionStandardOptionLabel,
+  effectiveSectionStandard,
+  STANDARD_LABELS,
+} from "../utils/contentStandard";
 
 const { Text } = Typography;
 
@@ -123,11 +123,16 @@ function SectionContentCard({
     if (!isEditing || !dirty || !draftKey) return;
     const timer = setTimeout(() => {
       try {
-        localStorage.setItem(draftKey, JSON.stringify({
-          content: draft,
-          savedAt: Date.now(),
-        }));
-      } catch { /* localStorage 满或不可用时静默 */ }
+        localStorage.setItem(
+          draftKey,
+          JSON.stringify({
+            content: draft,
+            savedAt: Date.now(),
+          }),
+        );
+      } catch {
+        /* localStorage 满或不可用时静默 */
+      }
     }, 800);
     return () => clearTimeout(timer);
   }, [draft, isEditing, dirty, draftKey]);
@@ -170,7 +175,9 @@ function SectionContentCard({
             hasDraft = true;
           }
         }
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
     if (hasDraft) {
       modal.confirm({
@@ -180,7 +187,11 @@ function SectionContentCard({
         cancelText: "放弃草稿",
         onOk: () => startEditing(draftContent, true),
         onCancel: () => {
-          try { localStorage.removeItem(draftKey!); } catch { /* ignore */ }
+          try {
+            localStorage.removeItem(draftKey!);
+          } catch {
+            /* ignore */
+          }
           startEditing(currentContent, false);
         },
       });
@@ -224,7 +235,9 @@ function SectionContentCard({
               与「重写本章」按钮同属生成本章动作，物理相邻才不会漏看。
               运行中禁用 —— 生成进行中改标准会让本次结果与设置不一致。 */}
           {onSectionStandardChange && (
-            <Tooltip title={`仅影响本章：下次生成/重写本章时按「${STANDARD_LABELS[effectiveSectionStandard(sectionStandard, schemeStandard)]}」执行。留空表示沿用方案默认；任务级选「按章节设置」时按本章取值生效。`}>
+            <Tooltip
+              title={`仅影响本章：下次生成/重写本章时按「${STANDARD_LABELS[effectiveSectionStandard(sectionStandard, schemeStandard)]}」执行。留空表示沿用方案默认；任务级选「按章节设置」时按本章取值生效。`}
+            >
               <Select
                 size="small"
                 value={sectionStandard || ""}
@@ -254,23 +267,13 @@ function SectionContentCard({
               >
                 手动编辑
               </Button>
-              <Button
-                size="small"
-                danger
-                onClick={onRegenerate}
-                disabled={generating}
-              >
+              <Button size="small" danger onClick={onRegenerate} disabled={generating}>
                 🔄 重写本章
               </Button>
             </>
           ) : (
             <>
-              <Button
-                size="small"
-                type="primary"
-                loading={saving}
-                onClick={() => onSave(draft)}
-              >
+              <Button size="small" type="primary" loading={saving} onClick={() => onSave(draft)}>
                 💾 保存
               </Button>
               <Button size="small" onClick={handleCancel}>
@@ -294,22 +297,30 @@ function SectionContentCard({
             placeholder="在这里手动编辑章节正文，支持 Markdown 格式..."
             style={{ fontFamily: "monospace", fontSize: 14 }}
           />
-          <div style={{
-            marginTop: 8,
-            fontSize: 12,
-            color: "#999",
-            textAlign: "right",
-          }}>
-            <Text type={dirty ? "warning" : "secondary"}>
-              {dirty ? "● 未保存" : "已保存"}
-            </Text>
+          <div
+            style={{
+              marginTop: 8,
+              fontSize: 12,
+              color: "#999",
+              textAlign: "right",
+            }}
+          >
+            <Text type={dirty ? "warning" : "secondary"}>{dirty ? "● 未保存" : "已保存"}</Text>
             {" · "}
-            编辑中约 <Text strong>{countPlainTextWords(draft)}</Text> 字
-            （含标记 {draft.length} 字，保存后以服务端统计为准）
+            编辑中约 <Text strong>{countPlainTextWords(draft)}</Text> 字 （含标记 {draft.length}{" "}
+            字，保存后以服务端统计为准）
           </div>
         </>
       ) : (
-        <div className="scroll-area" style={{ minHeight: 200, maxHeight: "calc(100vh - 420px)", overflow: "auto", paddingRight: 8 }}>
+        <div
+          className="scroll-area"
+          style={{
+            minHeight: 200,
+            maxHeight: "calc(100vh - 420px)",
+            overflow: "auto",
+            paddingRight: 8,
+          }}
+        >
           <MarkdownRenderer
             content={section.content || "（章节尚未生成，点击「一键生成全文」开始）"}
             sectionId={section.key}

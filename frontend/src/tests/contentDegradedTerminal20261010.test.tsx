@@ -81,12 +81,13 @@ describe("终态集合单一事实源", () => {
   });
 
   it("A4: degradedConsistencyHint 只在 degraded 且确有失败时给出文案", () => {
-    expect(degradedConsistencyHint({ event: "degraded", consistency_failed: 2 }))
-      .toContain("一致性修复 2 处失败");
+    expect(degradedConsistencyHint({ event: "degraded", consistency_failed: 2 })).toContain(
+      "一致性修复 2 处失败",
+    );
     // 兜底：顶层字段缺失时读 consistency_summary.failed
-    expect(degradedConsistencyHint(
-      { event: "degraded", consistency_summary: { failed: 5 } }))
-      .toContain("5 处失败");
+    expect(
+      degradedConsistencyHint({ event: "degraded", consistency_summary: { failed: 5 } }),
+    ).toContain("5 处失败");
     // 非降级 / 无失败信息 → 空串（零噪音）
     expect(degradedConsistencyHint({ event: "completed", consistency_failed: 2 })).toBe("");
     expect(degradedConsistencyHint({ event: "degraded" })).toBe("");
@@ -107,17 +108,20 @@ describe("pollTaskUntilTerminalImpl 认领 degraded", () => {
       calls += 1;
       return { status: "degraded", progress: 1, message: "降级完成" } as any;
     });
-    const res = await pollTaskUntilTerminalImpl(
-      "task-1", fetchStatus, undefined, { intervalMs: 0 });
+    const res = await pollTaskUntilTerminalImpl("task-1", fetchStatus, undefined, {
+      intervalMs: 0,
+    });
     expect(res?.status).toBe("degraded");
     expect(calls).toBe(1);
   });
 
   it("B2: 回归护栏 —— running + progress 满仍走 stuck 兜底为 completed", async () => {
     const { pollTaskUntilTerminalImpl } = await import("../pages/SchemeWorkbenchPage");
-    const fetchStatus = vi.fn(async () => ({ status: "running", progress: 1 } as any));
-    const res = await pollTaskUntilTerminalImpl(
-      "task-1", fetchStatus, undefined, { intervalMs: 0, stuckThreshold: 2 });
+    const fetchStatus = vi.fn(async () => ({ status: "running", progress: 1 }) as any);
+    const res = await pollTaskUntilTerminalImpl("task-1", fetchStatus, undefined, {
+      intervalMs: 0,
+      stuckThreshold: 2,
+    });
     expect(res?.status).toBe("completed");
   });
 });
@@ -140,11 +144,14 @@ function makeHookOpts(stream: AsyncIterable<any>, over: Record<string, unknown> 
     getActiveTaskId: () => "t1",
     setActiveTab: vi.fn(),
     msg: {
-      success: vi.fn(), warning: vi.fn(), error: vi.fn(), info: vi.fn(),
+      success: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
     },
-    sseFetch: (async function* (_url?: string, _body?: unknown) {
+    sseFetch: async function* (_url?: string, _body?: unknown) {
       yield* stream;
-    }) as any,
+    } as any,
     ...over,
   } as any;
 }
@@ -165,15 +172,21 @@ async function runGenerate(opts: any) {
 
 describe("useContentGeneration · 终态事件接线", () => {
   it("C1: degraded 终态必须收口——刷新正文 + 发出降级告警（BUG-C1）", async () => {
-    const opts = makeHookOpts(once(
-      { task_id: "t1", event: "progress", progress: 0.5, message: "已完成 1/2" },
-      {
-        task_id: "t1", event: "degraded", progress: 1, word_count: 8888,
-        failed_count: 0, consistency_failed: 3,
-        message: "正文8888字完成（一致性修复 3 处失败）",
-        consistency_summary: { total: 5, repaired: 2, failed: 3 },
-      },
-    ));
+    const opts = makeHookOpts(
+      once(
+        { task_id: "t1", event: "progress", progress: 0.5, message: "已完成 1/2" },
+        {
+          task_id: "t1",
+          event: "degraded",
+          progress: 1,
+          word_count: 8888,
+          failed_count: 0,
+          consistency_failed: 3,
+          message: "正文8888字完成（一致性修复 3 处失败）",
+          consistency_summary: { total: 5, repaired: 2, failed: 3 },
+        },
+      ),
+    );
     const result = await runGenerate(opts);
     expect(opts.load).toHaveBeenCalledTimes(1);
     expect(opts.msg.warning).toHaveBeenCalledTimes(1);
@@ -185,9 +198,9 @@ describe("useContentGeneration · 终态事件接线", () => {
   });
 
   it("C2: completed 终态保持原语义（success + 刷新），不得被修复破坏", async () => {
-    const opts = makeHookOpts(once(
-      { task_id: "t1", event: "completed", progress: 1, word_count: 100, failed_count: 0 },
-    ));
+    const opts = makeHookOpts(
+      once({ task_id: "t1", event: "completed", progress: 1, word_count: 100, failed_count: 0 }),
+    );
     await runGenerate(opts);
     expect(opts.load).toHaveBeenCalledTimes(1);
     expect(opts.msg.success).toHaveBeenCalledTimes(1);
@@ -195,9 +208,9 @@ describe("useContentGeneration · 终态事件接线", () => {
   });
 
   it("C3: 章节失败口径不被修复打乱（failed_count>0 → warning「N 章失败」）", async () => {
-    const opts = makeHookOpts(once(
-      { task_id: "t1", event: "completed", progress: 1, failed_count: 2, message: "done" },
-    ));
+    const opts = makeHookOpts(
+      once({ task_id: "t1", event: "completed", progress: 1, failed_count: 2, message: "done" }),
+    );
     await runGenerate(opts);
     const warned = String(opts.msg.warning.mock.calls[0][0]);
     expect(warned).toContain("2 章失败");
@@ -211,14 +224,17 @@ describe("useContentGeneration · 终态事件接线", () => {
     // ⚠️ 必须**先给出一个带 task_id 的事件**再抛 —— 否则 catch 分支里
     //    taskId 仍是空串，`if (taskId)` 不成立，根本不会进入重挂轮询
     //    （这正是真实断连的常见形态：连接已注册但正文事件一条没到）。
-    const opts = makeHookOpts((async function* () {
-      yield { task_id: "t1", event: "progress", progress: 0.1, message: "连接中" };
-      throw Object.assign(new Error("SSE 中断"), { name: "NetworkError" });
-    })());
+    const opts = makeHookOpts(
+      (async function* () {
+        yield { task_id: "t1", event: "progress", progress: 0.1, message: "连接中" };
+        throw Object.assign(new Error("SSE 中断"), { name: "NetworkError" });
+      })(),
+    );
     const result = await runGenerate(opts);
     await waitFor(() => expect(opts.load).toHaveBeenCalled(), { timeout: 5000 });
-    expect(opts.msg.warning.mock.calls.some(
-      (c: unknown[]) => String(c[0]).includes("降级完成"))).toBe(true);
+    expect(
+      opts.msg.warning.mock.calls.some((c: unknown[]) => String(c[0]).includes("降级完成")),
+    ).toBe(true);
     expect(result.current.generating).toBe(false);
   });
 });

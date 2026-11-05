@@ -5,6 +5,7 @@
   而不仅是 status=='generated' —— reviewed/expanded 等已人工处理章节
   一旦有正文，绝不能被默认生成覆盖。
 """
+
 from app.routers.sse_handlers import _apply_word_budget_allocations
 from app.services.content_utils import (
     build_sibling_context,
@@ -19,11 +20,17 @@ from app.services.content_utils import (
 )
 
 
-def _s(sid, title, parent="", level=1, status="empty",
-       content="", word_count=0, sort_order=0):
-    return {"id": sid, "title": title, "parent_id": parent, "level": level,
-            "status": status, "content": content,
-            "word_count": word_count, "sort_order": sort_order}
+def _s(sid, title, parent="", level=1, status="empty", content="", word_count=0, sort_order=0):
+    return {
+        "id": sid,
+        "title": title,
+        "parent_id": parent,
+        "level": level,
+        "status": status,
+        "content": content,
+        "word_count": word_count,
+        "sort_order": sort_order,
+    }
 
 
 def _tree():
@@ -136,9 +143,9 @@ class TestApplyWordBudgetAllocations:
     def test_mode_missing_only_empty_failed_pending(self):
         sections = _tree()
         sections[2].update(status="generated", content="正文", word_count=800)  # A1a 跳过
-        sections[3].update(status="failed")                                      # A1b 补
-        sections[4].update(status="pending")                                     # A2 补
-        sections[6].update(status="reviewed", content="正文", word_count=900)    # B1 跳过
+        sections[3].update(status="failed")  # A1b 补
+        sections[4].update(status="pending")  # A2 补
+        sections[6].update(status="reviewed", content="正文", word_count=900)  # B1 跳过
         # B（第二章）自身为空且其子节点 B1 已被排除 → B 成为叶子一并补全
         # （与旧实现语义一致：候选集合内"不是任何候选的父节点"即为叶子）
         assert _ids(select_target_leaves(sections, mode="missing")) == ["A1b", "A2", "B"]
@@ -146,8 +153,8 @@ class TestApplyWordBudgetAllocations:
     def test_parent_becomes_leaf_when_children_all_done(self):
         """子节点全部已完成（有正文）时，空的父节点自身成为生成单元。"""
         sections = _tree()
-        sections[2].update(status="reviewed", content="正文", word_count=800)   # A1a 完成
-        sections[3].update(status="reviewed", content="正文", word_count=800)   # A1b 完成
+        sections[2].update(status="reviewed", content="正文", word_count=800)  # A1a 完成
+        sections[3].update(status="reviewed", content="正文", word_count=800)  # A1b 完成
         got = _ids(select_target_leaves(sections))
         # A1 的子节点都被跳过 → A1 成为叶子；A2、B1 仍为叶子
         assert got == ["A1", "A2", "B1"]
@@ -171,8 +178,13 @@ class TestApplyWordBudgetAllocations:
 
 def _sec(sid, title, *, parent="", sort_order=0, description="", content=""):
     return {
-        "id": sid, "title": title, "parent_id": parent, "level": 3,
-        "sort_order": sort_order, "description": description, "content": content,
+        "id": sid,
+        "title": title,
+        "parent_id": parent,
+        "level": 3,
+        "sort_order": sort_order,
+        "description": description,
+        "content": content,
     }
 
 
@@ -227,9 +239,7 @@ class TestBuildSiblingContext:
 
     def test_max_siblings_limit(self):
         all_sections = self._siblings()
-        all_sections = all_sections + [
-            _sec(f"x{i}", f"1.1.{i}", parent="p", sort_order=10 + i) for i in range(10)
-        ]
+        all_sections = all_sections + [_sec(f"x{i}", f"1.1.{i}", parent="p", sort_order=10 + i) for i in range(10)]
         leaf = _sec("z", "1.1.99", parent="p", sort_order=99)
         all_sections.append(leaf)
         lines, _ = build_sibling_context(all_sections, leaf, max_siblings=2)
@@ -243,8 +253,7 @@ class TestBuildSiblingContext:
             children.setdefault(s.get("parent_id", ""), []).append(s)
         leaf = all_sections[3]
         scanned, s1 = build_sibling_context(all_sections, leaf)
-        indexed, s2 = build_sibling_context(
-            all_sections, leaf, children_by_parent=children)
+        indexed, s2 = build_sibling_context(all_sections, leaf, children_by_parent=children)
         assert indexed == scanned and s1 == s2
 
 
@@ -252,13 +261,13 @@ class TestWordStatusFor:
     """统一的字数状态口径（正文自动落库 / 手工保存共用）。"""
 
     def test_under(self):
-        assert word_status_for(800, 1500) == "under"    # 800 < 1200
+        assert word_status_for(800, 1500) == "under"  # 800 < 1200
 
     def test_normal(self):
         assert word_status_for(1500, 1500) == "normal"
 
     def test_over(self):
-        assert word_status_for(2100, 1500) == "over"    # > 1950
+        assert word_status_for(2100, 1500) == "over"  # > 1950
 
     def test_zero_budget_falls_back_to_default(self):
         assert word_status_for(1500, 0) == "normal"
@@ -281,7 +290,7 @@ class TestTextWordCount:
         assert text_word_count(content) == len("前文\n后文")
 
     def test_excludes_chart_json_block(self):
-        content = "说明如下：\n```chart-json\n{\"type\": \"labor\"}\n```\n"
+        content = '说明如下：\n```chart-json\n{"type": "labor"}\n```\n'
         assert text_word_count(content) == len("说明如下：\n")
 
     def test_excludes_plain_code_block(self):
@@ -306,16 +315,17 @@ class TestTextWordCount:
     def test_inflation_guard_changes_status(self):
         """回归：一张 mermaid 图不得把 under 的正文抬成 normal。"""
         prose = "甲" * 1000
-        chart = ("\n```mermaid\nflowchart TD\n"
-                 + "\n".join(f'  N{i}["节点{i}"] --> N{i1}["节点{i1}"]'
-                             for i, i1 in zip(range(10), range(1, 11)))
-                 + "\n```\n")
+        chart = (
+            "\n```mermaid\nflowchart TD\n"
+            + "\n".join(f'  N{i}["节点{i}"] --> N{i1}["节点{i1}"]' for i, i1 in zip(range(10), range(1, 11)))
+            + "\n```\n"
+        )
         raw = prose + chart
-        assert len(raw) >= 1200                       # 旧口径 len(raw) ≥ 1200 → 误判 normal
+        assert len(raw) >= 1200  # 旧口径 len(raw) ≥ 1200 → 误判 normal
         # ✅ 2026-09-28：围栏整段移除后正文保留 prose + 1 个换行（1001 字符），
         #    语义不变（图表代码不计入正文字数）；旧实现因正则保留围栏外的前后换行
         #    为 1002，两者都不影响 under/over 判定。
-        assert text_word_count(raw) == 1001           # 仅“甲”*1000 + 1 个换行
+        assert text_word_count(raw) == 1001  # 仅“甲”*1000 + 1 个换行
         assert word_status_for(text_word_count(raw), 1500) == "under"
         assert word_status_for(len(raw), 1500) != "under"
 
@@ -324,7 +334,7 @@ class TestTextWordCount:
         且与 find_unclosed_fences 的「未闭合判定」严格一致（CommonMark 同语义）。"""
         closed_sample = (
             "段落A。\n```mermaid\nflowchart LR\nA-->B\n```\n段落B。\n"
-            "~~~chart-json\n{\"type\": \"labor\"}\n~~~\n段落C。\n"
+            '~~~chart-json\n{"type": "labor"}\n~~~\n段落C。\n'
             "````python\nx = 1\n````\n末尾。"
         )
         # 全部闭合 → find_unclosed_fences 为空
@@ -388,6 +398,5 @@ def test_module_source_compile_without_invalid_escape_warning():
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         ast.parse(src, filename=str(cu.__file__))
-    bad = [f"{wi.filename}:{wi.lineno}: {wi.message}"
-           for wi in w if isinstance(wi.message, SyntaxWarning)]
+    bad = [f"{wi.filename}:{wi.lineno}: {wi.message}" for wi in w if isinstance(wi.message, SyntaxWarning)]
     assert not bad, f"模块源码存在无效转义 SyntaxWarning：{bad}"

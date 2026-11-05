@@ -19,6 +19,7 @@ FastAPI 把它当**必需查询参数** → 恒 422），而真正的 ``generate
 3. 端到端：FastAPI 应用路由表里该路径已注册且 endpoint 名为 ``generate_facts``
    （静态扫描全部失效时的最后一道防线）。
 """
+
 import ast
 import io
 import os
@@ -56,9 +57,7 @@ class TestGenerateFactsRouteDecorator:
     def test_route_decorates_generate_facts(self):
         """装饰器必须挂在 generate_facts 上（P0 事故回归锁）"""
         names = _decorated_function_names(_read_source(), _FACTS_ROUTE)
-        assert names == ["generate_facts"], (
-            f"路由 {_FACTS_ROUTE} 应且仅应挂在 generate_facts 上，当前：{names}"
-        )
+        assert names == ["generate_facts"], f"路由 {_FACTS_ROUTE} 应且仅应挂在 generate_facts 上，当前：{names}"
 
     def test_route_registered_in_app(self):
         """端到端：路由已注册且 endpoint 为 generate_facts
@@ -75,16 +74,15 @@ class TestGenerateFactsRouteDecorator:
                 path = getattr(r, "path", None)
                 if path is None:
                     # _IncludedRouter 包装：子路由经 original_router 暴露
-                    sub = getattr(r, "routes", None) or getattr(
-                        r, "original_router", None)
+                    sub = getattr(r, "routes", None) or getattr(r, "original_router", None)
                     yield from walk(getattr(sub, "routes", []) or [])
                 else:
                     yield r
 
         endpoints = [
-            r for r in walk(app.routes)
-            if getattr(r, "path", "") == f"/api/v1/sse{_FACTS_ROUTE}"
-            and "POST" in getattr(r, "methods", set())
+            r
+            for r in walk(app.routes)
+            if getattr(r, "path", "") == f"/api/v1/sse{_FACTS_ROUTE}" and "POST" in getattr(r, "methods", set())
         ]
         assert len(endpoints) == 1, f"路由 {_FACTS_ROUTE} 应恰好注册 1 次"
         assert endpoints[0].endpoint.__name__ == "generate_facts"
@@ -103,7 +101,8 @@ class TestGenerateFactsRouteDecorator:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             has_route = any(
-                isinstance(d, ast.Call) and d.args
+                isinstance(d, ast.Call)
+                and d.args
                 and isinstance(d.args[0], ast.Constant)
                 and isinstance(d.args[0].value, str)
                 and d.args[0].value.startswith("/")
@@ -124,7 +123,6 @@ class TestGenerateFactsRouteDecorator:
                     )
 
 
-
 class TestAllRouteDecoratorsFollowedByDef:
     def test_decorator_next_line_is_def(self):
         """sse_handlers.py 全部 @router.* 装饰器的紧邻下一行必须是函数定义
@@ -141,9 +139,7 @@ class TestAllRouteDecoratorsFollowedByDef:
                 continue
             # 找装饰器的最后一行（跨行装饰器 @router.post(...) 可能折行）
             j = i
-            while lines[j].strip().startswith("@") or (
-                lines[j].strip() and not lines[j].rstrip().endswith(")")
-            ):
+            while lines[j].strip().startswith("@") or (lines[j].strip() and not lines[j].rstrip().endswith(")")):
                 if lines[j].rstrip().endswith("):") or " def " in lines[j + 1]:
                     break
                 j += 1
@@ -156,6 +152,4 @@ class TestAllRouteDecoratorsFollowedByDef:
             nxt = lines[k].strip() if k < len(lines) else ""
             if not nxt.startswith(("async def", "def")):
                 problems.append(f"L{i + 1}: {stripped[:60]} -> 下一行 {nxt[:40]!r}")
-        assert not problems, (
-            "存在装饰器与函数定义分离（错位）的路由：\n" + "\n".join(problems)
-        )
+        assert not problems, "存在装饰器与函数定义分离（错位）的路由：\n" + "\n".join(problems)

@@ -29,7 +29,7 @@ function log(over: Partial<SectionLogItem> & { section_id: string }): SectionLog
 }
 
 // ============================================================
-// upsertSectionLog —— 按 section_id 插入/替换，替换项移到尾部
+// upsertSectionLog —— 按 section_id 插入/替换（R179：替换不再改变位置）
 // ============================================================
 describe("upsertSectionLog", () => {
   it("新增项追加到数组尾部（日志倒序渲染 → 尾部即最上方）", () => {
@@ -38,12 +38,13 @@ describe("upsertSectionLog", () => {
     expect(next.map((x) => x.section_id)).toEqual(["a", "b", "c"]);
   });
 
-  it("替换同 id 项并保持其在尾部（等价旧 [...filter, item] 语义）", () => {
+  it("替换同 id 项保持原位置（R179 修复日志延迟错位）", () => {
     const base = [log({ section_id: "a" }), log({ section_id: "b", status: "running" })];
     const next = upsertSectionLog(base, log({ section_id: "a", status: "success" }));
-    // a 被移除后重新追加 → 顺序变为 [b, a]
-    expect(next.map((x) => x.section_id)).toEqual(["b", "a"]);
-    expect(next[next.length - 1].status).toBe("success");
+    // ✅ R179：旧实现会移除后重新追加（顺序 [b, a]），章节日志随阶段事件反复跳动；
+    //   现改为原位替换 → 顺序稳定为 [a, b]，倒序渲染后章号不再错位。
+    expect(next.map((x) => x.section_id)).toEqual(["a", "b"]);
+    expect(next[0].status).toBe("success");
   });
 
   it("返回新数组，绝不原地修改入参", () => {
@@ -52,6 +53,19 @@ describe("upsertSectionLog", () => {
     const next = upsertSectionLog(base, log({ section_id: "b" }));
     expect(base).toEqual(snapshot);
     expect(next).not.toBe(base);
+  });
+
+  it("连续阶段更新不会改变既有条目顺序", () => {
+    const base = [
+      log({ section_id: "a", status: "running" }),
+      log({ section_id: "b", status: "running" }),
+      log({ section_id: "c", status: "running" }),
+    ];
+    let next = base;
+    next = upsertSectionLog(next, log({ section_id: "a", status: "success" }));
+    next = upsertSectionLog(next, log({ section_id: "b", status: "success" }));
+    next = upsertSectionLog(next, log({ section_id: "a", status: "failed" }));
+    expect(next.map((x) => x.section_id)).toEqual(["a", "b", "c"]);
   });
 });
 
@@ -167,7 +181,9 @@ describe("contentResultFailedSections", () => {
 
   it("未失败（completed 且无明细）：空结果，不弹失败提示", () => {
     const r = contentResultFailedSections({
-      event: "completed", failed_count: 0, failed_sections: [],
+      event: "completed",
+      failed_count: 0,
+      failed_sections: [],
     });
     expect(r.sections).toEqual([]);
     expect(r.failedCount).toBe(0);
@@ -207,7 +223,10 @@ describe("contentResultFailedSections", () => {
 describe("contentResultSummary", () => {
   it("正常载荷：透出 done/total/words/over_count", () => {
     const r = contentResultSummary({
-      done: 12, total: 20, words: 15000, over_count: 3,
+      done: 12,
+      total: 20,
+      words: 15000,
+      over_count: 3,
     });
     expect(r).toEqual({ done: 12, total: 20, words: 15000, overCount: 3 });
   });
@@ -226,7 +245,10 @@ describe("contentResultSummary", () => {
 
   it("脏数据类型（字符串/对象）回退 0，不抛异常", () => {
     const r = contentResultSummary({
-      done: "12", total: {}, words: null, over_count: "3",
+      done: "12",
+      total: {},
+      words: null,
+      over_count: "3",
     });
     expect(r).toEqual({ done: 0, total: 0, words: 0, overCount: 0 });
   });
@@ -261,7 +283,8 @@ describe("stopped 事件 / section_done 质检告警（2026-09-24 缺口修复�
     // 根因：后端一直下发 content 与 quality_issues，前端两个字段都没消费。
     const issues = [{ type: "unclosed_fence", message: "存在未闭合代码块" }];
     const item = upsertSectionLog(
-      [], log({ section_id: "a", status: "success", quality_issues: issues }),
+      [],
+      log({ section_id: "a", status: "success", quality_issues: issues }),
     );
     expect(item[0].quality_issues).toEqual(issues);
     // 非数组脏数据不得污染日志（页面按 Array.isArray 判定）
@@ -286,9 +309,7 @@ describe("normalizeQualityIssues", () => {
   it("数组载荷原样保留（向后兼容 / 未来改为数组时不回归）", () => {
     expect(normalizeQualityIssues(["未闭合代码块"])).toEqual(["未闭合代码块"]);
     // 对象数组：取 message / detail 兜底
-    expect(
-      normalizeQualityIssues([{ message: "m1" }, { detail: "d2" }]),
-    ).toEqual(["m1", "d2"]);
+    expect(normalizeQualityIssues([{ message: "m1" }, { detail: "d2" }])).toEqual(["m1", "d2"]);
   });
 
   it("空载荷一律 undefined（不产生空数组 Tag）", () => {
@@ -339,9 +360,9 @@ describe("normalizeChartYield", () => {
     expect(normalizeChartYield({ chart_count: -3 })).toMatchObject({ chart_count: 0 });
     expect(normalizeChartYield({ chart_count: 2.9 })).toMatchObject({ chart_count: 2 });
     expect(normalizeChartYield({ chart_count: NaN })).toMatchObject({ chart_count: 0 });
-    expect(
-      normalizeChartYield({ chart_count: 1, charts_dropped_count: Infinity }),
-    ).toMatchObject({ chart_count: 1 });
+    expect(normalizeChartYield({ chart_count: 1, charts_dropped_count: Infinity })).toMatchObject({
+      chart_count: 1,
+    });
   });
 
   it("charts_dropped_count 缺省/为 0 时以明细条数兜底（后端漏计不得静默归零）", () => {
@@ -350,9 +371,9 @@ describe("normalizeChartYield", () => {
       chart_count: 0,
       charts_dropped_count: 1,
     });
-    expect(
-      normalizeChartYield({ charts_dropped_count: 0, charts_dropped: dropped }),
-    ).toMatchObject({ charts_dropped_count: 1 });
+    expect(normalizeChartYield({ charts_dropped_count: 0, charts_dropped: dropped })).toMatchObject(
+      { charts_dropped_count: 1 },
+    );
   });
 
   it("charts_dropped 非数组 / 含脏元素：只保留对象元素，数组型恒为数组", () => {
@@ -366,10 +387,7 @@ describe("normalizeChartYield", () => {
 
   it("章节日志项可承载 chart_yield（section_done 实时下发的配图闭环）", () => {
     const cy = normalizeChartYield({ chart_count: 2 });
-    const item = upsertSectionLog(
-      [],
-      log({ section_id: "a", status: "success", chart_yield: cy }),
-    );
+    const item = upsertSectionLog([], log({ section_id: "a", status: "success", chart_yield: cy }));
     expect(item[0].chart_yield).toEqual(cy);
     // 未下发的旧日志项保持 undefined（页面按 truthy 判定，不渲染 Tag）
     expect(log({ section_id: "b" }).chart_yield).toBeUndefined();
@@ -390,10 +408,7 @@ describe("chartDropTexts", () => {
         { type: "flowchart", reason: "per_section_limit" },
         { type: "gantt", reason: "scheme_type_limit" },
       ]),
-    ).toEqual([
-      "flowchart：本节图表数已达上限（每节 1 个）",
-      "gantt：全方案该类型图表数已达上限",
-    ]);
+    ).toEqual(["flowchart：本节图表数已达上限（每节 1 个）", "gantt：全方案该类型图表数已达上限"]);
   });
 
   it("兼容后端两种类型键名（type 优先，chart_type 兜底，都缺则显示「图表」）", () => {

@@ -20,6 +20,7 @@
   - 阶段耗时校准只在**阶段切换点**写入（否则同阶段内 expect 变化会让进度回退）；
   - 统计与进度只服务于展示，任何异常都**不得**影响生成主流程。
 """
+
 import asyncio
 import json
 import time
@@ -44,6 +45,7 @@ from app.services.ai.sse_utils import with_heartbeat
 
 # ---------------------------------------------------------------- 1. 加权进度
 
+
 def test_progress_zero_when_no_total():
     assert _weighted_progress({"total": 0}) == 0.0
 
@@ -58,8 +60,7 @@ def test_stage_baseline_is_monotonic():
     """阶段基准必须单调递增（否则进度条会倒退）。"""
     now = time.monotonic()
     seq = [
-        _weighted_progress({"total": 10, "done": 2,
-                            "running": {"a": {"stage": s, "started_at": now}}})
+        _weighted_progress({"total": 10, "done": 2, "running": {"a": {"stage": s, "started_at": now}}})
         for s in ("context", "draft", "continue", "persist")
     ]
     assert seq == sorted(seq)
@@ -69,22 +70,19 @@ def test_stage_baseline_is_monotonic():
 def test_progress_advances_within_draft_stage():
     """耗时最长的 draft 阶段内，进度条也要持续前进（本次增强的核心诉求）。"""
     now = time.monotonic()
-    p0 = _weighted_progress({"total": 10, "done": 2,
-                             "running": {"a": {"stage": "draft", "started_at": now}}})
-    p1 = _weighted_progress({"total": 10, "done": 2,
-                             "running": {"a": {"stage": "draft", "started_at": now - 45}}})
-    p2 = _weighted_progress({"total": 10, "done": 2,
-                             "running": {"a": {"stage": "draft", "started_at": now - 900}}})
+    p0 = _weighted_progress({"total": 10, "done": 2, "running": {"a": {"stage": "draft", "started_at": now}}})
+    p1 = _weighted_progress({"total": 10, "done": 2, "running": {"a": {"stage": "draft", "started_at": now - 45}}})
+    p2 = _weighted_progress({"total": 10, "done": 2, "running": {"a": {"stage": "draft", "started_at": now - 900}}})
     assert p0 < p1 < p2, f"进度未前进: {p0} {p1} {p2}"
 
 
 def test_draft_fill_capped_below_continue_baseline():
     """draft 阶段的时间填充必须封顶，否则会越过下一阶段基准造成跳变。"""
     now = time.monotonic()
-    p_full = _weighted_progress({"total": 10, "done": 2,
-                                 "running": {"a": {"stage": "draft", "started_at": now - 9999}}})
-    p_cont = _weighted_progress({"total": 10, "done": 2,
-                                 "running": {"a": {"stage": "continue", "started_at": now}}})
+    p_full = _weighted_progress(
+        {"total": 10, "done": 2, "running": {"a": {"stage": "draft", "started_at": now - 9999}}}
+    )
+    p_cont = _weighted_progress({"total": 10, "done": 2, "running": {"a": {"stage": "continue", "started_at": now}}})
     assert p_full < p_cont
     expect = (2 + 0.05 + 0.55 * _STAGE_FILL_MAX) / 10 * _SECTION_PHASE_MAX
     assert p_full == pytest.approx(expect, abs=1e-4)
@@ -92,16 +90,15 @@ def test_draft_fill_capped_below_continue_baseline():
 
 def test_progress_capped_at_section_phase_max():
     """章节全部完成 → 上限 0.95（其余区间留给全文一致性检查）。"""
-    assert _weighted_progress({"total": 3, "done": 3, "running": {}}) == pytest.approx(
-        _SECTION_PHASE_MAX, abs=1e-9)
+    assert _weighted_progress({"total": 3, "done": 3, "running": {}}) == pytest.approx(_SECTION_PHASE_MAX, abs=1e-9)
 
 
 def test_progress_never_exceeds_cap():
     """进行中章节数多于总数时也不得越界。"""
     now = time.monotonic()
-    p = _weighted_progress({"total": 1, "done": 0,
-                            "running": {str(i): {"stage": "persist", "started_at": now}
-                                        for i in range(5)}})
+    p = _weighted_progress(
+        {"total": 1, "done": 0, "running": {str(i): {"stage": "persist", "started_at": now} for i in range(5)}}
+    )
     assert p <= _SECTION_PHASE_MAX
 
 
@@ -109,44 +106,60 @@ def test_stage_model_shape():
     """span 合计 1.0，且 base+span 逐阶段连续（无重叠 / 空洞）。"""
     assert sum(m["span"] for m in _STAGE_MODEL.values()) == pytest.approx(1.0, abs=1e-9)
     for a, b in (("context", "draft"), ("draft", "continue"), ("continue", "persist")):
-        assert _STAGE_MODEL[a]["base"] + _STAGE_MODEL[a]["span"] == pytest.approx(
-            _STAGE_MODEL[b]["base"], abs=1e-9)
+        assert _STAGE_MODEL[a]["base"] + _STAGE_MODEL[a]["span"] == pytest.approx(_STAGE_MODEL[b]["base"], abs=1e-9)
     # persist 阶段的 base+span 必须是 1.0（本章完成）
-    assert (_STAGE_MODEL["persist"]["base"] + _STAGE_MODEL["persist"]["span"]
-            == pytest.approx(1.0, abs=1e-9))
+    assert _STAGE_MODEL["persist"]["base"] + _STAGE_MODEL["persist"]["span"] == pytest.approx(1.0, abs=1e-9)
 
 
 # ---------------------------------------------------------------- 2. 时长文案
 
-@pytest.mark.parametrize("ms,expect", [
-    (None, "0秒"),
-    (0, "0秒"),
-    (45000, "45秒"),
-    (150000, "2分30秒"),
-    (180000, "3分钟"),
-    (3660000, "1小时1分"),
-])
+
+@pytest.mark.parametrize(
+    "ms,expect",
+    [
+        (None, "0秒"),
+        (0, "0秒"),
+        (45000, "45秒"),
+        (150000, "2分30秒"),
+        (180000, "3分钟"),
+        (3660000, "1小时1分"),
+    ],
+)
 def test_fmt_duration(ms, expect):
     assert _fmt_duration(ms) == expect
 
 
 # ---------------------------------------------------------------- 3. 统计快照
 
+
 def _make_prog(elapsed=200.0, section_elapsed=50.0):
     return {
         "started_at": time.monotonic() - elapsed,
-        "total": 10, "done": 2, "failed": 1, "words": 3500,
-        "running": {"a": {"title": "施工部署", "index": 3, "stage": "draft",
-                          "stage_label": "AI 生成中",
-                          "started_at": time.monotonic() - section_elapsed}},
-        "concurrency": 3, "phase": "sections", "phase_label": "生成正文",
+        "total": 10,
+        "done": 2,
+        "failed": 1,
+        "words": 3500,
+        "running": {
+            "a": {
+                "title": "施工部署",
+                "index": 3,
+                "stage": "draft",
+                "stage_label": "AI 生成中",
+                "started_at": time.monotonic() - section_elapsed,
+            }
+        },
+        "concurrency": 3,
+        "phase": "sections",
+        "phase_label": "生成正文",
     }
 
 
 def test_snapshot_basic_fields():
     s = _snapshot_stats(_make_prog())
     assert 199000 <= s["elapsed_ms"] <= 202000
-    assert (s["done"], s["total"], s["failed"], s["words"]) == (2, 10, 1, 3500)
+    # ✅ R175 BUG-4：done 为**成功**章节数（2 已处理 - 1 失败 = 1），
+    #    processed 表达已处理总数，失败另计 failed；与终态 checkpoint 同口径。
+    assert (s["done"], s["processed"], s["total"], s["failed"], s["words"]) == (1, 2, 10, 1, 3500)
     assert s["concurrency"] == 3
     assert s["phase_label"] == "生成正文"
 
@@ -181,11 +194,16 @@ def test_snapshot_eta_excludes_prepare_phase():
     """准备阶段（章节树加载 + 字数分配 AI，最长 180s）不计入 ETA。"""
     now = time.monotonic()
     prog = {
-        "started_at": now - 300,           # 任务已跑 300s（其中准备阶段占 250s）
-        "sections_started_at": now - 50,   # 章节生成阶段只跑了 50s
-        "total": 10, "done": 1, "failed": 0, "words": 0,
-        "running": {}, "concurrency": 3,
-        "phase": "sections", "phase_label": "生成正文",
+        "started_at": now - 300,  # 任务已跑 300s（其中准备阶段占 250s）
+        "sections_started_at": now - 50,  # 章节生成阶段只跑了 50s
+        "total": 10,
+        "done": 1,
+        "failed": 0,
+        "words": 0,
+        "running": {},
+        "concurrency": 3,
+        "phase": "sections",
+        "phase_label": "生成正文",
     }
     s = _snapshot_stats(prog)
     # 50s / 1 章 × 9 章 = 450s（旧口径会用 300s/1 章 × 9 = 2700s）
@@ -223,9 +241,14 @@ def test_snapshot_paused_ms_deducted_from_eta_with_section_start():
     prog = {
         "started_at": now - 300,
         "sections_started_at": now - 50,
-        "total": 10, "done": 1, "failed": 0, "words": 0,
-        "running": {}, "concurrency": 3,
-        "phase": "sections", "phase_label": "生成正文",
+        "total": 10,
+        "done": 1,
+        "failed": 0,
+        "words": 0,
+        "running": {},
+        "concurrency": 3,
+        "phase": "sections",
+        "phase_label": "生成正文",
     }
     s = _snapshot_stats(prog, paused_ms=10_000.0)
     # 章节阶段有效耗时 = 50s - 10s = 40s → 40s / 1 章 × 9 章 = 360s
@@ -252,8 +275,7 @@ def test_snapshot_eta_none_without_sample():
 def test_snapshot_eta_minimum_sample_guard():
     """首个统计点（耗时≈0）按 1s 下限估算，不得给出 0 或天量 ETA。"""
     now = time.monotonic()
-    prog = {"started_at": now, "sections_started_at": now,
-            "total": 4, "done": 0, "running": {}, "concurrency": 2}
+    prog = {"started_at": now, "sections_started_at": now, "total": 4, "done": 0, "running": {}, "concurrency": 2}
     s = _snapshot_stats(prog)
     assert s["eta_ms"] is None, "无任何已完成章节且无进行中章节 → 不预估"
 
@@ -278,6 +300,7 @@ def test_snapshot_never_raises_on_dirty_input():
 
 
 # ---------------------------------------------- 3b. 阶段耗时校准 / 进度护栏
+
 
 def test_calibrate_stage_expect_ema():
     """实测耗时按 EMA 融入预期耗时（0.7 旧 + 0.3 新）。"""
@@ -326,8 +349,7 @@ def test_section_partial_survives_dirty_expect_override():
     """校准映射里的脏值不得抛异常（统计/进度异常会拖垮生成主流程）。"""
     now = time.monotonic()
     rec = {"stage": "draft", "started_at": now - 45}
-    assert _section_partial(rec, now, {"draft": "abc"}) == pytest.approx(
-        _section_partial(rec, now, None))
+    assert _section_partial(rec, now, {"draft": "abc"}) == pytest.approx(_section_partial(rec, now, None))
 
 
 def test_progress_monotonic_under_stage_calibration():
@@ -337,21 +359,23 @@ def test_progress_monotonic_under_stage_calibration():
     rec = {"stage": "context", "started_at": now, "stage_started_at": now}
     prog["running"]["a"] = rec
     seq = []
-    for stage, elapsed in (("context", 4.0), ("draft", 30.0),
-                           ("continue", 15.0), ("persist", 3.0)):
-        _calibrate_stage_expect(prog, rec["stage"], elapsed)   # 与 _on_stage 同一调用点
+    for stage, elapsed in (("context", 4.0), ("draft", 30.0), ("continue", 15.0), ("persist", 3.0)):
+        _calibrate_stage_expect(prog, rec["stage"], elapsed)  # 与 _on_stage 同一调用点
         rec["stage"], rec["stage_started_at"] = stage, now
         rec["started_at"] = now - elapsed
         seq.append(_weighted_progress(prog))
     assert seq == sorted(seq), f"进度回退: {seq}"
 
 
-@pytest.mark.parametrize("prev,new,expect", [
-    (0.0, 0.3, 0.3),
-    (0.5, 0.2, 0.5),          # 新值更小 → 取历史最大值（不可回退）
-    (0.5, 0.5, 0.5),
-    (-1.0, -2.0, 0.0),        # 负数一律抬到 0
-])
+@pytest.mark.parametrize(
+    "prev,new,expect",
+    [
+        (0.0, 0.3, 0.3),
+        (0.5, 0.2, 0.5),  # 新值更小 → 取历史最大值（不可回退）
+        (0.5, 0.5, 0.5),
+        (-1.0, -2.0, 0.0),  # 负数一律抬到 0
+    ],
+)
 def test_monotonic_progress_guard(prev, new, expect):
     assert _monotonic_progress(prev, new) == pytest.approx(expect)
 
@@ -362,6 +386,7 @@ def test_monotonic_progress_dirty_input():
 
 
 # ------------------------------------------------- 4. update_progress 节流
+
 
 class _FakeConn:
     def __init__(self):
@@ -388,14 +413,13 @@ async def _run_throttle_scenario(monkeypatch):
     monkeypatch.setattr(tr, "broadcast", _fake_broadcast)
 
     tid = "t-throttle"
-    tr._tasks[tid] = {"progress": 0.0, "stats": {}, "started_at": 0.0,
-                      "_db_progress_at": 0.0, "_db_progress_val": -1.0}
+    tr._tasks[tid] = {"progress": 0.0, "stats": {}, "started_at": 0.0, "_db_progress_at": 0.0, "_db_progress_val": -1.0}
     try:
-        await tr.update_progress(tid, 0.10, "m1")          # 首次 → 落库
+        await tr.update_progress(tid, 0.10, "m1")  # 首次 → 落库
         n1 = conn.writes
-        await tr.update_progress(tid, 0.101, "m2")         # 微增量 + 短间隔 → 跳过
+        await tr.update_progress(tid, 0.101, "m2")  # 微增量 + 短间隔 → 跳过
         n2 = conn.writes
-        await tr.update_progress(tid, 0.30, "m3")          # 增量够大 → 落库
+        await tr.update_progress(tid, 0.30, "m3")  # 增量够大 → 落库
         n3 = conn.writes
         await tr.update_progress(tid, 0.3001, "done", event="completed")  # 终态 → 强制
         n4 = conn.writes
@@ -426,8 +450,7 @@ async def test_update_progress_never_raises_on_db_failure(monkeypatch):
     monkeypatch.setattr(tr, "get_conn", _boom_get_conn)
     monkeypatch.setattr(tr, "broadcast", _fake_broadcast)
     tid = "t-db-fail"
-    tr._tasks[tid] = {"progress": 0.0, "stats": {}, "started_at": 0.0,
-                      "_db_progress_at": 0.0, "_db_progress_val": -1.0}
+    tr._tasks[tid] = {"progress": 0.0, "stats": {}, "started_at": 0.0, "_db_progress_at": 0.0, "_db_progress_val": -1.0}
     try:
         await tr.update_progress(tid, 0.5, "m")
     finally:
@@ -437,11 +460,12 @@ async def test_update_progress_never_raises_on_db_failure(monkeypatch):
 
 # ---------------------------------------------------- 5. 心跳注入 ping
 
+
 async def test_heartbeat_injects_ping_and_keeps_data():
     async def _gen():
-        yield "data: {\"event\":\"x\"}\n\n"
+        yield 'data: {"event":"x"}\n\n'
         await asyncio.sleep(0.5)
-        yield "data: {\"event\":\"y\"}\n\n"
+        yield 'data: {"event":"y"}\n\n'
 
     calls = {"n": 0}
 
@@ -449,10 +473,8 @@ async def test_heartbeat_injects_ping_and_keeps_data():
         calls["n"] += 1
         return {"elapsed_ms": 1234, "running": []}
 
-    out = [item async for item in with_heartbeat(_gen(), interval=0.1,
-                                                 stats_provider=_provider)]
-    pings = [json.loads(o[6:]) for o in out
-             if o.startswith("data: ") and '"ping"' in o]
+    out = [item async for item in with_heartbeat(_gen(), interval=0.1, stats_provider=_provider)]
+    pings = [json.loads(o[6:]) for o in out if o.startswith("data: ") and '"ping"' in o]
     hbs = [o for o in out if o.startswith(": heartbeat")]
     data = [o for o in out if o.startswith("data: ") and '"ping"' not in o]
 
@@ -466,6 +488,7 @@ async def test_heartbeat_injects_ping_and_keeps_data():
 
 async def test_heartbeat_survives_broken_stats_provider():
     """stats_provider 抛异常不得影响心跳与业务流。"""
+
     async def _gen():
         yield "data: {}\n\n"
         await asyncio.sleep(0.35)
@@ -473,16 +496,16 @@ async def test_heartbeat_survives_broken_stats_provider():
     def _boom():
         raise RuntimeError("provider 炸了")
 
-    out = [o async for o in with_heartbeat(_gen(), interval=0.1,
-                                           stats_provider=_boom)]
+    out = [o async for o in with_heartbeat(_gen(), interval=0.1, stats_provider=_boom)]
     assert any(o.startswith(": heartbeat") for o in out)
     assert any(o.startswith("data: {}") for o in out)
 
 
 async def test_heartbeat_without_provider_is_backward_compatible():
     """不传 stats_provider 时行为与旧版一致（仅心跳 comment）。"""
+
     async def _gen():
-        yield "data: {\"a\":1}\n\n"
+        yield 'data: {"a":1}\n\n'
         await asyncio.sleep(0.25)
 
     out = [o async for o in with_heartbeat(_gen(), interval=0.1)]
@@ -491,6 +514,7 @@ async def test_heartbeat_without_provider_is_backward_compatible():
 
 
 # ------------------------------------------- 6. _await_with_stats 语义
+
 
 async def test_await_with_stats_fast_coro_no_push():
     pushed = {"n": 0}
@@ -524,6 +548,7 @@ async def test_await_with_stats_pushes_periodically():
 
 async def test_await_with_stats_propagates_exception():
     """AI 调用异常必须原样传播（调用方依赖它做重试 / 降级）。"""
+
     async def _push():
         pass
 
@@ -540,6 +565,7 @@ async def test_await_with_stats_propagates_exception():
 
 async def test_await_with_stats_cancels_inner_on_cancel():
     """外层取消 → 内部协程同步取消，不留悬挂任务。"""
+
     async def _push():
         pass
 
@@ -583,6 +609,7 @@ async def test_await_with_stats_push_exception_does_not_cancel_inner():
 
 async def test_await_with_stats_push_cancelled_error_still_propagates():
     """push_stats 抛 CancelledError 时，必须原样向上传播（保保留外层取消语义）。"""
+
     async def _push_cancel():
         raise asyncio.CancelledError()
 

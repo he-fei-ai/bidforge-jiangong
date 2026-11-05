@@ -15,9 +15,15 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, fireEvent, cleanup } from "@testing-library/react";
 import React from "react";
 import {
-  buildStandardRequestFields, normalizeStandard, sectionStandardOptionLabel,
-  effectiveSectionStandard, standardSummaryHint, issueLabel,
-  reportHasIssues, reportIssueCount, STANDARD_LABELS,
+  buildStandardRequestFields,
+  normalizeStandard,
+  sectionStandardOptionLabel,
+  effectiveSectionStandard,
+  standardSummaryHint,
+  issueLabel,
+  reportHasIssues,
+  reportIssueCount,
+  STANDARD_LABELS,
 } from "../utils/contentStandard";
 import ContentGenerationTab from "../components/ContentGenerationTab";
 import SectionContentCard from "../components/SectionContentCard";
@@ -27,15 +33,21 @@ afterEach(cleanup);
 // jsdom 缺 matchMedia / ResizeObserver（antd Radio/Select/Tooltip 需要）
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {},
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
     dispatchEvent: () => false,
   });
 }
 if (!(globalThis as any).ResizeObserver) {
   (globalThis as any).ResizeObserver = class {
-    observe() {} unobserve() {} disconnect() {}
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   };
 }
 
@@ -45,17 +57,18 @@ if (!(globalThis as any).ResizeObserver) {
 describe("buildStandardRequestFields（选项真正生效）", () => {
   it("precise → 传值 + 强覆盖", () => {
     expect(buildStandardRequestFields("precise")).toEqual({
-      task_standard: "precise", override_section_standard: true,
+      task_standard: "precise",
+      override_section_standard: true,
     });
   });
 
   it("fuzzy → 传值 + 强覆盖（载荷与 precise 不同，后端行为不同）", () => {
     expect(buildStandardRequestFields("fuzzy")).toEqual({
-      task_standard: "fuzzy", override_section_standard: true,
+      task_standard: "fuzzy",
+      override_section_standard: true,
     });
     // 两模式载荷必须不同 —— 相同即「两选项无差异」
-    expect(buildStandardRequestFields("precise"))
-      .not.toEqual(buildStandardRequestFields("fuzzy"));
+    expect(buildStandardRequestFields("precise")).not.toEqual(buildStandardRequestFields("fuzzy"));
   });
 
   it("按章节设置 → 不携带任何新字段（逐章回落 + 向后兼容）", () => {
@@ -120,8 +133,12 @@ describe("章节级标准回显", () => {
 // ============================================================
 describe("标准校验报告展示", () => {
   const rep = (over: any = {}) => ({
-    standard: "precise", passed: true, error_count: 0, warning_count: 0,
-    issues: [], ...over,
+    standard: "precise",
+    passed: true,
+    error_count: 0,
+    warning_count: 0,
+    issues: [],
+    ...over,
   });
 
   it("无问题时不出告警", () => {
@@ -168,8 +185,12 @@ describe("standardSummaryHint（终态汇总提示）", () => {
 
   it("有问题时给出章数 + 处数 + 模式分布", () => {
     const h = standardSummaryHint({
-      precise: 8, fuzzy: 2, issue_sections: 3, total_issues: 5,
-      errors: 2, warnings: 3,
+      precise: 8,
+      fuzzy: 2,
+      issue_sections: 3,
+      total_issues: 5,
+      errors: 2,
+      warnings: 3,
     });
     expect(h).toContain("3 章");
     expect(h).toContain("5 处");
@@ -194,17 +215,35 @@ it("中文标签常量齐全（与后端 STANDARD_LABELS 对齐）", () => {
 // ============================================================
 function tabProps(over: any = {}): any {
   return {
-    generating: false, running: false, taskPaused: false, shrinking: false,
-    hasTree: true, hasSelectedSection: true, canShrink: true,
-    wordBudgetOption: "default", customWordBudget: 2000,
-    concurrencyOption: "balanced", autoConsistencyRepair: true,
-    consistencySeverity: "high", autoShrinkOver: false, crSummary: null,
-    onGenerateAll: vi.fn(), onGenerateCurrent: vi.fn(), onGenerateMissing: vi.fn(),
-    onContinueSection: vi.fn(), onShrinkSection: vi.fn(), onReset: vi.fn(),
-    canReset: false, onControl: vi.fn(), onWordBudgetChange: vi.fn(),
-    onCustomWordBudgetChange: vi.fn(), onConcurrencyChange: vi.fn(),
-    onAutoConsistencyChange: vi.fn(), onSeverityChange: vi.fn(),
-    onOpenConsistencyWorkbench: vi.fn(), onAutoShrinkChange: vi.fn(),
+    generating: false,
+    running: false,
+    taskPaused: false,
+    shrinking: false,
+    hasTree: true,
+    hasSelectedSection: true,
+    canShrink: true,
+    wordBudgetOption: "default",
+    customWordBudget: 2000,
+    concurrencyOption: "balanced",
+    autoConsistencyRepair: true,
+    consistencySeverity: "high",
+    autoShrinkOver: false,
+    crSummary: null,
+    onGenerateAll: vi.fn(),
+    onGenerateCurrent: vi.fn(),
+    onGenerateMissing: vi.fn(),
+    onContinueSection: vi.fn(),
+    onShrinkSection: vi.fn(),
+    onReset: vi.fn(),
+    canReset: false,
+    onControl: vi.fn(),
+    onWordBudgetChange: vi.fn(),
+    onCustomWordBudgetChange: vi.fn(),
+    onConcurrencyChange: vi.fn(),
+    onAutoConsistencyChange: vi.fn(),
+    onSeverityChange: vi.fn(),
+    onOpenConsistencyWorkbench: vi.fn(),
+    onAutoShrinkChange: vi.fn(),
     onNextStep: vi.fn(),
     ...over,
   };
@@ -213,15 +252,26 @@ function tabProps(over: any = {}): any {
 function cardProps(over: any = {}): any {
   return {
     section: {
-      key: "s1", title: "1.1 基坑支护", level: 2, status: "generated",
-      word_count: 1200, word_budget: 1500, content: "正文内容",
+      key: "s1",
+      title: "1.1 基坑支护",
+      level: 2,
+      status: "generated",
+      word_count: 1200,
+      word_budget: 1500,
+      content: "正文内容",
     },
-    treeEmpty: false, isEditing: false, saving: false, generating: false,
+    treeEmpty: false,
+    isEditing: false,
+    saving: false,
+    generating: false,
     draftKey: null,
     statusColor: { generated: "green" },
     statusText: { generated: "已生成" },
-    onEditStart: vi.fn(), onSave: vi.fn(), onCancel: vi.fn(),
-    onDirtyChange: vi.fn(), onRegenerate: vi.fn(),
+    onEditStart: vi.fn(),
+    onSave: vi.fn(),
+    onCancel: vi.fn(),
+    onDirtyChange: vi.fn(),
+    onRegenerate: vi.fn(),
     ...over,
   };
 }
@@ -236,8 +286,7 @@ async function openSelect(container: HTMLElement) {
 
 /** 在已展开的下拉里按可见文本找选项并点击 */
 function screenOption(label: string): HTMLElement {
-  const nodes = Array.from(document.querySelectorAll(
-    ".ant-select-item-option-content"));
+  const nodes = Array.from(document.querySelectorAll(".ant-select-item-option-content"));
   const hit = nodes.find((n) => n.textContent?.trim() === label);
   if (!hit) throw new Error(`下拉里找不到选项：${label}`);
   return hit.closest(".ant-select-item-option") as HTMLElement;
@@ -247,9 +296,12 @@ describe("ContentGenerationTab 生成标准入口", () => {
   it("三选项点击分别上抛正确值", () => {
     const onChange = vi.fn();
     const { getByText } = render(
-      <ContentGenerationTab {...tabProps({
-        generationStandard: "inherit", onGenerationStandardChange: onChange,
-      })} />
+      <ContentGenerationTab
+        {...tabProps({
+          generationStandard: "inherit",
+          onGenerationStandardChange: onChange,
+        })}
+      />,
     );
     fireEvent.click(getByText("精准内容"));
     expect(onChange).toHaveBeenCalledWith("precise");
@@ -262,9 +314,12 @@ describe("ContentGenerationTab 生成标准入口", () => {
     // 故必须从一个非 inherit 的选中态出发，才能验证切回路径。
     const onChange = vi.fn();
     const { getByText } = render(
-      <ContentGenerationTab {...tabProps({
-        generationStandard: "precise", onGenerationStandardChange: onChange,
-      })} />
+      <ContentGenerationTab
+        {...tabProps({
+          generationStandard: "precise",
+          onGenerationStandardChange: onChange,
+        })}
+      />,
     );
     fireEvent.click(getByText("按章节设置"));
     expect(onChange).toHaveBeenCalledWith("inherit");
@@ -273,10 +328,13 @@ describe("ContentGenerationTab 生成标准入口", () => {
   it("F5：选择精准/模糊时可存为方案默认，按钮触发回调", () => {
     const onSave = vi.fn();
     const { getByText } = render(
-      <ContentGenerationTab {...tabProps({
-        generationStandard: "precise", onGenerationStandardChange: vi.fn(),
-        onSaveSchemeDefault: onSave,
-      })} />
+      <ContentGenerationTab
+        {...tabProps({
+          generationStandard: "precise",
+          onGenerationStandardChange: vi.fn(),
+          onSaveSchemeDefault: onSave,
+        })}
+      />,
     );
     const btn = getByText("存为方案默认").closest("button")!;
     expect(btn.disabled).toBe(false);
@@ -286,10 +344,13 @@ describe("ContentGenerationTab 生成标准入口", () => {
 
   it("F5：「按章节设置」时存默认按钮禁用（该值不是方案级取值）", () => {
     const { getByText } = render(
-      <ContentGenerationTab {...tabProps({
-        generationStandard: "inherit", onGenerationStandardChange: vi.fn(),
-        onSaveSchemeDefault: vi.fn(),
-      })} />
+      <ContentGenerationTab
+        {...tabProps({
+          generationStandard: "inherit",
+          onGenerationStandardChange: vi.fn(),
+          onSaveSchemeDefault: vi.fn(),
+        })}
+      />,
     );
     expect(getByText("存为方案默认").closest("button")!.disabled).toBe(true);
   });
@@ -297,10 +358,14 @@ describe("ContentGenerationTab 生成标准入口", () => {
   it("生成运行中：存默认按钮禁用，且切换标准被 Radio 自身禁用拦截", () => {
     const onChange = vi.fn();
     const { getByText } = render(
-      <ContentGenerationTab {...tabProps({
-        generating: true, generationStandard: "precise",
-        onGenerationStandardChange: onChange, onSaveSchemeDefault: vi.fn(),
-      })} />
+      <ContentGenerationTab
+        {...tabProps({
+          generating: true,
+          generationStandard: "precise",
+          onGenerationStandardChange: onChange,
+          onSaveSchemeDefault: vi.fn(),
+        })}
+      />,
     );
     expect(getByText("存为方案默认").closest("button")!.disabled).toBe(true);
     fireEvent.click(getByText("模糊内容"));
@@ -309,10 +374,13 @@ describe("ContentGenerationTab 生成标准入口", () => {
 
   it("按章节设置时提示语带出方案默认值", () => {
     const { container } = render(
-      <ContentGenerationTab {...tabProps({
-        generationStandard: "inherit", schemeDefault: "fuzzy",
-        onGenerationStandardChange: vi.fn(),
-      })} />
+      <ContentGenerationTab
+        {...tabProps({
+          generationStandard: "inherit",
+          schemeDefault: "fuzzy",
+          onGenerationStandardChange: vi.fn(),
+        })}
+      />,
     );
     expect(container.textContent).toContain("模糊内容");
   });
@@ -324,10 +392,13 @@ describe("ContentGenerationTab 生成标准入口", () => {
 describe("SectionContentCard 章节级生成标准", () => {
   it("渲染三选项且沿用项文案翻译出方案默认", async () => {
     const { container } = render(
-      <SectionContentCard {...cardProps({
-        sectionStandard: "", schemeStandard: "fuzzy",
-        onSectionStandardChange: vi.fn(),
-      })} />
+      <SectionContentCard
+        {...cardProps({
+          sectionStandard: "",
+          schemeStandard: "fuzzy",
+          onSectionStandardChange: vi.fn(),
+        })}
+      />,
     );
     // antd Select 未展开时把 label 渲染进 DOM，可直接断言
     expect(container.textContent).toContain("沿用方案（模糊内容）");
@@ -339,10 +410,13 @@ describe("SectionContentCard 章节级生成标准", () => {
   it("选择模糊 → 上抛 fuzzy", async () => {
     const onChange = vi.fn();
     const { container } = render(
-      <SectionContentCard {...cardProps({
-        sectionStandard: "", schemeStandard: "precise",
-        onSectionStandardChange: onChange,
-      })} />
+      <SectionContentCard
+        {...cardProps({
+          sectionStandard: "",
+          schemeStandard: "precise",
+          onSectionStandardChange: onChange,
+        })}
+      />,
     );
     await openSelect(container);
     fireEvent.click(screenOption("模糊内容"));
@@ -351,10 +425,13 @@ describe("SectionContentCard 章节级生成标准", () => {
 
   it("运行中（generating）禁用标准下拉", () => {
     const { container } = render(
-      <SectionContentCard {...cardProps({
-        generating: true, sectionStandard: "",
-        onSectionStandardChange: vi.fn(),
-      })} />
+      <SectionContentCard
+        {...cardProps({
+          generating: true,
+          sectionStandard: "",
+          onSectionStandardChange: vi.fn(),
+        })}
+      />,
     );
     const sel = container.querySelector(".ant-select");
     expect(sel?.className).toContain("ant-select-disabled");
@@ -365,4 +442,3 @@ describe("SectionContentCard 章节级生成标准", () => {
     expect(container.textContent).not.toContain("沿用方案");
   });
 });
-

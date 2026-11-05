@@ -5,6 +5,7 @@
 2. 正文落库清洗（content_polish）：口语化/AI 腔清除、图表代码块不被破坏；
 3. 提示词渲染（content_generation_system）：新增变量正确注入，无残留占位符。
 """
+
 from app.services.ai.prompts._registry import render
 from app.services.content_polish import (
     find_colloquial_hits,
@@ -41,8 +42,8 @@ class TestStandardsRegistry:
 
     def test_文本包含禁止引用清单(self):
         text = get_standards_text("临时用电专项施工方案", "临时用电")
-        assert "JGJ/T 46-2024" in text          # 现行版本在库
-        assert "JGJ 46-2005" in text            # 已废止版本列入禁止清单
+        assert "JGJ/T 46-2024" in text  # 现行版本在库
+        assert "JGJ 46-2005" in text  # 已废止版本列入禁止清单
 
     def test_无命中仍返回通用标准(self):
         text = get_standards_text("项目管理大纲", "")
@@ -83,9 +84,11 @@ class TestSanitizeAiContent:
         assert sanitize_ai_content(raw) == raw
 
     def test_保护图表代码块(self):
-        raw = ("施工工艺流程如下图所示：\n\n"
-               "```mermaid\nflowchart TD\n  A[测量放线] --> B[土方开挖]\n```\n\n"
-               "上述工序说白了就是先放线后开挖。")
+        raw = (
+            "施工工艺流程如下图所示：\n\n"
+            "```mermaid\nflowchart TD\n  A[测量放线] --> B[土方开挖]\n```\n\n"
+            "上述工序说白了就是先放线后开挖。"
+        )
         out = sanitize_ai_content(raw)
         assert "```mermaid" in out
         assert "A[测量放线] --> B[土方开挖]" in out
@@ -116,8 +119,7 @@ class TestSanitizeAiContent:
         assert "预计需要3天" in out
 
     def test_GFM表格内容不被清洗(self):
-        raw = ("| 项目 | 说明 |\n|---|---|\n"
-               "| 投资估算 | 估计值待核 |\n\n正文估计三天完成。")
+        raw = "| 项目 | 说明 |\n|---|---|\n" "| 投资估算 | 估计值待核 |\n\n正文估计三天完成。"
         out = sanitize_ai_content(raw)
         assert "| 投资估算 | 估计值待核 |" in out
         assert "正文预计三天完成" in out
@@ -185,8 +187,8 @@ class TestContentPromptRendering:
         assert "数据真实性红线" in prompt
         assert "标准与图集引用规范" in prompt
         assert "语言规范" in prompt
-        assert "GB 50497-2019" in prompt           # 基坑监测现行标准
-        assert "JGJ 46-2005" in prompt             # 废止版本列入禁止项
+        assert "GB 50497-2019" in prompt  # 基坑监测现行标准
+        assert "JGJ 46-2005" in prompt  # 废止版本列入禁止项
 
     def test_续写提示词注入标准清单(self):
         prompt = render(
@@ -210,19 +212,19 @@ def test_find_colloquial_hits_对空文本安全():
 async def test_sections_quality_路由(db_conn):
     from app.routers.sections import sections_quality
 
-    await db_conn.execute(
-        "INSERT INTO projects (id, name) VALUES (?,?)", ("p1", "测试项目"))
+    await db_conn.execute("INSERT INTO projects (id, name) VALUES (?,?)", ("p1", "测试项目"))
     await db_conn.execute(
         "INSERT INTO schemes (id, project_id, name, type) VALUES (?,?,?,?)",
-        ("s1", "p1", "临时用电专项施工方案", "临时用电"))
+        ("s1", "p1", "临时用电专项施工方案", "临时用电"),
+    )
     await db_conn.execute(
-        "INSERT INTO sections (id, scheme_id, title, level, sort_order, content)"
-        " VALUES (?,?,?,?,?,?)",
-        ("sec1", "s1", "配电线路敷设", 1, 0, "本工程按 JGJ 46-2005 执行，咱们要搞定。"))
+        "INSERT INTO sections (id, scheme_id, title, level, sort_order, content)" " VALUES (?,?,?,?,?,?)",
+        ("sec1", "s1", "配电线路敷设", 1, 0, "本工程按 JGJ 46-2005 执行，咱们要搞定。"),
+    )
     await db_conn.execute(
-        "INSERT INTO sections (id, scheme_id, title, level, sort_order, content)"
-        " VALUES (?,?,?,?,?,?)",
-        ("sec2", "s1", "接地与防雷", 1, 1, "接地电阻不应大于4Ω，采用TN-S接零保护系统。"))
+        "INSERT INTO sections (id, scheme_id, title, level, sort_order, content)" " VALUES (?,?,?,?,?,?)",
+        ("sec2", "s1", "接地与防雷", 1, 1, "接地电阻不应大于4Ω，采用TN-S接零保护系统。"),
+    )
     await db_conn.commit()
 
     result = await sections_quality("s1", db_conn)

@@ -7,14 +7,36 @@
  * 数据与副作用全部留在页面，正确性由组件级交互测试兜底（tests/contentTab.test.tsx）。
  */
 import type { ReactNode } from "react";
-import { Button, Card, Divider, InputNumber, Radio, Select, Space, Switch, Tag, Tooltip, Typography } from "antd";
+import {
+  Button,
+  Card,
+  Divider,
+  InputNumber,
+  Radio,
+  Select,
+  Space,
+  Switch,
+  Tag,
+  Tooltip,
+  Typography,
+} from "antd";
 import { useBreakpoint } from "../utils/ui";
 // F-CONTENT-STANDARD(2026-09-26): 方案默认标准文案（与后端值域同源）
 import { sectionStandardOptionLabel } from "../utils/contentStandard";
 import {
-  ArrowRightOutlined, CaretRightOutlined, ClearOutlined, EditOutlined, FileSearchOutlined,
-  FontSizeOutlined, InfoCircleOutlined, MinusCircleOutlined, PauseOutlined, PlayCircleOutlined,
-  StopOutlined, SwapOutlined, SyncOutlined,
+  ArrowRightOutlined,
+  CaretRightOutlined,
+  ClearOutlined,
+  EditOutlined,
+  FileSearchOutlined,
+  FontSizeOutlined,
+  InfoCircleOutlined,
+  MinusCircleOutlined,
+  PauseOutlined,
+  PlayCircleOutlined,
+  StopOutlined,
+  SwapOutlined,
+  SyncOutlined,
 } from "@ant-design/icons";
 
 const { Text } = Typography;
@@ -106,7 +128,10 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
     // 与 UploadParseTab 同一模式：作为 flex Tab 面板内的可滚动内容区，
     // 必须 flex:1 + minHeight:0 + overflowY:auto，否则长内容会被父容器的
     // overflow:hidden 裁掉，底部「章节正文卡片」无法滚动查看。
-    <div className="scroll-area" style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+    <div
+      className="scroll-area"
+      style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}
+    >
       {/* 第一行：主要操作按钮 */}
       <Space style={{ marginBottom: 8 }} wrap>
         <Button
@@ -236,7 +261,9 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
           <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <FontSizeOutlined style={{ color: "#1677ff", fontSize: 14 }} />
-              <Text strong style={{ fontSize: 13 }}>字数设置</Text>
+              <Text strong style={{ fontSize: 13 }}>
+                字数设置
+              </Text>
               <Tooltip title="选档位：每个叶子（三级）章节直接按档位字数生成；自定义：按二级章节总字数由 AI 向叶子分配">
                 <InfoCircleOutlined style={{ color: "#999", fontSize: 12, cursor: "help" }} />
               </Tooltip>
@@ -261,7 +288,9 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
                 />
               )}
               {p.wordBudgetOption === "custom" && (
-                <Text type="secondary" style={{ fontSize: 12, whiteSpace: "nowrap" }}>字 / 二级单元总量</Text>
+                <Text type="secondary" style={{ fontSize: 12, whiteSpace: "nowrap" }}>
+                  字 / 二级单元总量
+                </Text>
               )}
             </div>
             {p.wordBudgetOption === "custom" ? (
@@ -279,7 +308,9 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
           <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <SwapOutlined style={{ color: "#1677ff", fontSize: 14 }} />
-              <Text strong style={{ fontSize: 13 }}>生成模式</Text>
+              <Text strong style={{ fontSize: 13 }}>
+                生成模式
+              </Text>
               <Tooltip title="长方案 / AI 易超时选精细；短方案 / 稳定时选快速">
                 <InfoCircleOutlined style={{ color: "#999", fontSize: 12, cursor: "help" }} />
               </Tooltip>
@@ -291,13 +322,40 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
               buttonStyle="solid"
               style={{ width: "100%", display: "flex", gap: 6 }}
             >
-              <Radio.Button value="slow" style={{ flex: "1 1 0", minWidth: 0, textAlign: "center", fontSize: 12, whiteSpace: "nowrap" }}>
+              <Radio.Button
+                value="slow"
+                style={{
+                  flex: "1 1 0",
+                  minWidth: 0,
+                  textAlign: "center",
+                  fontSize: 12,
+                  whiteSpace: "nowrap",
+                }}
+              >
                 🐢 精细（并发 2）
               </Radio.Button>
-              <Radio.Button value="balanced" style={{ flex: "1 1 0", minWidth: 0, textAlign: "center", fontSize: 12, whiteSpace: "nowrap" }}>
+              <Radio.Button
+                value="balanced"
+                style={{
+                  flex: "1 1 0",
+                  minWidth: 0,
+                  textAlign: "center",
+                  fontSize: 12,
+                  whiteSpace: "nowrap",
+                }}
+              >
                 ⚖️ 平衡（并发 3）
               </Radio.Button>
-              <Radio.Button value="fast" style={{ flex: "1 1 0", minWidth: 0, textAlign: "center", fontSize: 12, whiteSpace: "nowrap" }}>
+              <Radio.Button
+                value="fast"
+                style={{
+                  flex: "1 1 0",
+                  minWidth: 0,
+                  textAlign: "center",
+                  fontSize: 12,
+                  whiteSpace: "nowrap",
+                }}
+              >
                 🚀 快速（并发 5）
               </Radio.Button>
             </Radio.Group>
@@ -310,7 +368,9 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
           <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <SyncOutlined style={{ color: "#1677ff", fontSize: 14 }} />
-              <Text strong style={{ fontSize: 13 }}>全文一致性 Agent 修复</Text>
+              <Text strong style={{ fontSize: 13 }}>
+                全文一致性 Agent 修复
+              </Text>
               <Switch
                 size="small"
                 checked={p.autoConsistencyRepair}
@@ -341,7 +401,9 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
             {p.crSummary && (p.crSummary.total ?? 0) > 0 && (
               <Tag color="orange" style={{ margin: 0, fontSize: 11, lineHeight: "18px" }}>
                 最近发现 {p.crSummary.total} 处冲突
-                {typeof p.crSummary.repaired === "number" ? ` · 已修复 ${p.crSummary.repaired}` : ""}
+                {typeof p.crSummary.repaired === "number"
+                  ? ` · 已修复 ${p.crSummary.repaired}`
+                  : ""}
               </Tag>
             )}
           </div>
@@ -350,12 +412,10 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
           <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <FontSizeOutlined style={{ color: "#1677ff", fontSize: 14 }} />
-              <Text strong style={{ fontSize: 13 }}>超字数章节自动压缩</Text>
-              <Switch
-                size="small"
-                checked={p.autoShrinkOver}
-                onChange={p.onAutoShrinkChange}
-              />
+              <Text strong style={{ fontSize: 13 }}>
+                超字数章节自动压缩
+              </Text>
+              <Switch size="small" checked={p.autoShrinkOver} onChange={p.onAutoShrinkChange} />
               <Tooltip title="仅对超过目标字数 130% 的章节生效；只删不改（表格/图表/代码块/图片/技术参数受保护）。与目录树「压缩本章」同一套实现，开启后每个超字数章节最多额外产生 3 次 AI 调用">
                 <InfoCircleOutlined style={{ color: "#999", fontSize: 12, cursor: "help" }} />
               </Tooltip>
@@ -368,15 +428,24 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
       </Card>
 
       {/* F-CONTENT-STANDARD(2026-09-26): 生成标准选择条 —— 精准 / 模糊 */}
-      <div style={{
-        display: "flex", alignItems: "center", gap: 12,
-        padding: "8px 14px", marginBottom: 8,
-        background: "#fafafa", borderRadius: 6, border: "1px solid #f0f0f0",
-      }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          padding: "8px 14px",
+          marginBottom: 8,
+          background: "#fafafa",
+          borderRadius: 6,
+          border: "1px solid #f0f0f0",
+        }}
+      >
         <Text strong style={{ fontSize: 13 }}>
           生成标准
           <Tooltip title="精准内容：正文严格按全局事实逐条编写，数值/型号/名称编号与事实完全一致，缺失数据标注【待补充：参数名】。模糊内容：以全局事实为基础，允许概括归纳与范围表述，但不得与事实矛盾。默认「按章节设置」= 章节级 → 方案默认 → 精准 逐级回落。">
-            <InfoCircleOutlined style={{ color: "#999", fontSize: 12, cursor: "help", marginLeft: 4 }} />
+            <InfoCircleOutlined
+              style={{ color: "#999", fontSize: 12, cursor: "help", marginLeft: 4 }}
+            />
           </Tooltip>
         </Text>
         <Radio.Group
@@ -399,10 +468,17 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
           type="link"
           onClick={p.onSaveSchemeDefault}
           loading={p.savingSchemeDefault}
-          disabled={p.generating || !p.onSaveSchemeDefault || !p.generationStandard || p.generationStandard === "inherit"}
-          title={p.generationStandard === "inherit"
-            ? "「按章节设置」不是一个方案级取值，请先选择精准内容或模糊内容"
-            : "将当前选择保存为本方案的默认生成标准"}
+          disabled={
+            p.generating ||
+            !p.onSaveSchemeDefault ||
+            !p.generationStandard ||
+            p.generationStandard === "inherit"
+          }
+          title={
+            p.generationStandard === "inherit"
+              ? "「按章节设置」不是一个方案级取值，请先选择精准内容或模糊内容"
+              : "将当前选择保存为本方案的默认生成标准"
+          }
         >
           存为方案默认
         </Button>

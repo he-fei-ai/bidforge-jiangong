@@ -31,16 +31,14 @@ from pathlib import Path
 import pytest
 from app.routers import sse_handlers as sh
 
-_FRONTEND_PAGE = (Path(__file__).resolve().parents[2] / "frontend"
-                  / "src" / "pages" / "SchemeWorkbenchPage.tsx")
+_FRONTEND_PAGE = Path(__file__).resolve().parents[2] / "frontend" / "src" / "pages" / "SchemeWorkbenchPage.tsx"
 
 
 def _src() -> str:
     return inspect.getsource(sh.generate_content)
 
 
-_PAYLOADS_PATH = (Path(__file__).resolve().parents[1] / "app" / "routers"
-                  / "_sse_content_payloads.py")
+_PAYLOADS_PATH = Path(__file__).resolve().parents[1] / "app" / "routers" / "_sse_content_payloads.py"
 
 
 def _payload_src() -> str:
@@ -56,6 +54,7 @@ def _payload_src() -> str:
 # 端到端 harness（沿用 test_content_fence_contract_20260929 的桩 DB 思路）
 # ============================================================================
 
+
 class _FakeRequest:
     def __init__(self, body):
         self._body = body
@@ -69,21 +68,33 @@ class _MultiSectionDB:
 
     def __init__(self, sections=None, *, sections_cursor_none=False):
         self.saved: list[str] = []
-        self._sections = sections if sections is not None else [
-            self._sec("s1", "1.1", 1, "", 0, 20),
-            self._sec("s2", "1.2", 1, "", 1, 20),
-        ]
+        self._sections = (
+            sections
+            if sections is not None
+            else [
+                self._sec("s1", "1.1", 1, "", 0, 20),
+                self._sec("s2", "1.2", 1, "", 1, 20),
+            ]
+        )
         self._sections_cursor_none = sections_cursor_none
 
     @staticmethod
     def _sec(sid, num, level, parent, sort, budget):
         return {
-            "id": sid, "scheme_id": "sc1", "title": f"章节 {sid}",
-            "level": level, "parent_id": parent, "sort_order": sort,
-            "word_budget": budget, "content": "", "status": "empty",
-            "description": "d", "outline_json": json.dumps({"id": num},
-                                                          ensure_ascii=False),
-            "generation_standard": "", "review_status": "", "word_count": 0,
+            "id": sid,
+            "scheme_id": "sc1",
+            "title": f"章节 {sid}",
+            "level": level,
+            "parent_id": parent,
+            "sort_order": sort,
+            "word_budget": budget,
+            "content": "",
+            "status": "empty",
+            "description": "d",
+            "outline_json": json.dumps({"id": num}, ensure_ascii=False),
+            "generation_standard": "",
+            "review_status": "",
+            "word_count": 0,
         }
 
     class _Cur:
@@ -99,14 +110,23 @@ class _MultiSectionDB:
     async def execute(self, sql, params=()):
         s = str(sql)
         if "FROM schemes" in s:
-            return self._Cur([{
-                "id": "sc1", "project_id": "p1", "name": "测试方案",
-                "type": "深基坑", "word_budget": 3000, "config_json": "{}",
-                "auto_consistency_repair": 0, "generation_standard": "",
-            }])
+            return self._Cur(
+                [
+                    {
+                        "id": "sc1",
+                        "project_id": "p1",
+                        "name": "测试方案",
+                        "type": "深基坑",
+                        "word_budget": 3000,
+                        "config_json": "{}",
+                        "auto_consistency_repair": 0,
+                        "generation_standard": "",
+                    }
+                ]
+            )
         if "FROM sections" in s and "ORDER BY sort_order" in s:
             if self._sections_cursor_none:
-                return None          # 模拟 R13：db.execute 返回 None
+                return None  # 模拟 R13：db.execute 返回 None
             return self._Cur([dict(x) for x in self._sections])
         if s.strip().upper().startswith("UPDATE SECTIONS SET CONTENT"):
             self.saved.append(params[0])
@@ -164,8 +184,7 @@ def stub_env(monkeypatch):
         return _LONG_AI_TEXT
 
     monkeypatch.setattr(sh, "register_task", _register)
-    monkeypatch.setattr(sh, "_register_task_exclusive",
-                        lambda *a, **k: _register())
+    monkeypatch.setattr(sh, "_register_task_exclusive", lambda *a, **k: _register())
     monkeypatch.setattr(sh, "update_progress", _progress)
     monkeypatch.setattr(sh, "update_task_stats", _stats)
     monkeypatch.setattr(sh, "finish_task", _finish)
@@ -190,8 +209,7 @@ async def _run(db, body=None):
     resp = await sh.generate_content("sc1", _FakeRequest(payload), db=db)
     chunks: list[str] = []
     async for piece in resp.body_iterator:
-        chunks.append(piece.decode("utf-8", "replace")
-                      if isinstance(piece, bytes) else str(piece))
+        chunks.append(piece.decode("utf-8", "replace") if isinstance(piece, bytes) else str(piece))
     text = "".join(chunks)
     events = [json.loads(ln[6:]) for ln in text.splitlines() if ln.startswith("data: ")]
     return events, text
@@ -208,14 +226,14 @@ def _terminal(events) -> dict:
 # R1 · checkpoint 统计量在全部收尾路径都由唯一拼装点回填
 # ============================================================================
 
-class TestR1CheckpointStatsSingleSource:
 
+class TestR1CheckpointStatsSingleSource:
     def test_payload_helper_backfills_stats(self):
         """唯一拼装点内部必须回填 words / run_words / over_count。"""
         src = _payload_src()
         i = src.index("def build_content_checkpoint(")
         # 窗口取到下一个模块级 def 为止，与实现长度解耦（§5.14 判据锚点）
-        block = src[i:src.index("\ndef build_stopped_payload(", i + 10)]
+        block = src[i : src.index("\ndef build_stopped_payload(", i + 10)]
         assert 'ckpt["words"]' in block, "拼装点必须回填 words"
         assert 'ckpt["run_words"]' in block, "拼装点必须回填 run_words"
         assert 'ckpt["over_count"]' in block, "拼装点必须回填 over_count"
@@ -224,34 +242,29 @@ class TestR1CheckpointStatsSingleSource:
         """调用点不得再各自手写统计量（那正是本次漂移的来源）。"""
         src = _payload_src()
         gen = _src()
-        assert src.count('ckpt["run_words"]') == 1, (
-            "run_words 只允许在唯一拼装点赋值一次")
-        assert src.count('ckpt["over_count"]') == 1, (
-            "over_count 只允许在唯一拼装点赋值一次")
-        assert gen.count('_ckpt["run_words"]') == 0, (
-            "调用点不得手写 run_words（应统一由拼装点回填）")
-        assert gen.count('_ckpt["over_count"]') == 0, (
-            "调用点不得手写 over_count（应统一由拼装点回填）")
+        assert src.count('ckpt["run_words"]') == 1, "run_words 只允许在唯一拼装点赋值一次"
+        assert src.count('ckpt["over_count"]') == 1, "over_count 只允许在唯一拼装点赋值一次"
+        assert gen.count('_ckpt["run_words"]') == 0, "调用点不得手写 run_words（应统一由拼装点回填）"
+        assert gen.count('_ckpt["over_count"]') == 0, "调用点不得手写 over_count（应统一由拼装点回填）"
         # words 另有一处在 _persist_section 里累加进度（_ckpt["done"] 旁），
         # 那是「每落库一章就同步一次」的增量写入，与终态回填语义不同，允许存在。
-        assert gen.count('_ckpt["words"] = _prog.get("words", 0)') == 0, (
-            "终态路径不得再手写 _ckpt['words']（应统一由拼装点回填）")
+        assert (
+            gen.count('_ckpt["words"] = _prog.get("words", 0)') == 0
+        ), "终态路径不得再手写 _ckpt['words']（应统一由拼装点回填）"
 
     @pytest.mark.asyncio
     async def test_completed_path_carries_real_stats(self, stub_env):
         db = _MultiSectionDB()
         events, text = await _run(db)
         term = _terminal(events)
-        assert term["event"] == "completed", (
-            f"{[e.get('event') for e in events]} / {text[:400]}")
+        assert term["event"] == "completed", f"{[e.get('event') for e in events]} / {text[:400]}"
         ck = stub_env["ckpts"][-1]
-        assert ck["words"] > 0 and ck["run_words"] > 0, (
-            f"completed checkpoint 必须带真实字数: {ck}")
+        assert ck["words"] > 0 and ck["run_words"] > 0, f"completed checkpoint 必须带真实字数: {ck}"
         assert ck["over_count"] > 0, f"超字数章数必须回填: {ck}"
         # 在线事件与 checkpoint 必须同口径（前端两处都读）
         assert term["run_words"] == ck["run_words"], (
-            f"completed 事件与 checkpoint 的 run_words 必须一致: "
-            f"{term.get('run_words')} vs {ck.get('run_words')}")
+            f"completed 事件与 checkpoint 的 run_words 必须一致: " f"{term.get('run_words')} vs {ck.get('run_words')}"
+        )
 
     @pytest.mark.asyncio
     async def test_stopped_path_carries_stats_and_progress(self, stub_env, monkeypatch):
@@ -265,17 +278,12 @@ class TestR1CheckpointStatsSingleSource:
         monkeypatch.setattr(sh, "is_stopped", _stop_after_first)
         events, text = await _run(db)
         term = _terminal(events)
-        assert term["event"] == "stopped", (
-            f"应走停止分支: {[e.get('event') for e in events]} / {text[:400]}")
-        assert isinstance(term.get("progress"), (int, float)), (
-            f"stopped 事件必须带 progress: {term}")
-        assert "standard_summary" in term, (
-            f"stopped 事件必须带 standard_summary: {term}")
+        assert term["event"] == "stopped", f"应走停止分支: {[e.get('event') for e in events]} / {text[:400]}"
+        assert isinstance(term.get("progress"), (int, float)), f"stopped 事件必须带 progress: {term}"
+        assert "standard_summary" in term, f"stopped 事件必须带 standard_summary: {term}"
         ck = stub_env["ckpts"][-1]
-        assert ck["words"] > 0 and ck["run_words"] > 0, (
-            f"停止路径 checkpoint 必须带真实字数（修复前恒 0）: {ck}")
-        assert ck["over_count"] > 0, (
-            f"停止路径 checkpoint 必须带超字数章数（修复前恒 0）: {ck}")
+        assert ck["words"] > 0 and ck["run_words"] > 0, f"停止路径 checkpoint 必须带真实字数（修复前恒 0）: {ck}"
+        assert ck["over_count"] > 0, f"停止路径 checkpoint 必须带超字数章数（修复前恒 0）: {ck}"
         assert ck["done"] >= 1, ck
 
 
@@ -283,19 +291,23 @@ class TestR1CheckpointStatsSingleSource:
 # R2 · 两条 stopped 路径字段一致
 # ============================================================================
 
-class TestR2StoppedPayloadParity:
 
+class TestR2StoppedPayloadParity:
     def _helper_block(self) -> str:
         # B1 拆分：stopped 拼装点本体在下沉模块内（sse_handlers 只留薄包装）。
         src = _payload_src()
         i = src.index("def build_stopped_payload(")
-        return src[i:src.index("\ndef build_error_payload(", i + 10)]
+        return src[i : src.index("\ndef build_error_payload(", i + 10)]
 
     def test_helper_carries_all_fields(self):
         block = self._helper_block()
-        for field in ("'event': 'stopped'", "'progress': progress",
-                      "'failed_count': max(total - len(done_ids), 0)",
-                      "'failed_sections'", "'standard_summary': standard_summary"):
+        for field in (
+            "'event': 'stopped'",
+            "'progress': progress",
+            "'failed_count': max(total - len(done_ids), 0)",
+            "'failed_sections'",
+            "'standard_summary': standard_summary",
+        ):
             assert field in block, f"stopped 拼装点缺少 {field}"
 
     def test_both_stopped_paths_go_through_helper(self):
@@ -305,8 +317,7 @@ class TestR2StoppedPayloadParity:
         # CancelledError
         assert "_stopped_payload('任务已取消')" in src
         # 不得再有内联手拼的 stopped dict
-        assert "'event':'stopped'" not in src, (
-            "两条 stopped 路径必须都走 _stopped_payload，不得再内联手拼")
+        assert "'event':'stopped'" not in src, "两条 stopped 路径必须都走 _stopped_payload，不得再内联手拼"
 
     def test_helper_progress_falls_back_to_weighted(self):
         """省略 progress 时必须回落到加权进度（并过不可回退护栏）。
@@ -316,7 +327,7 @@ class TestR2StoppedPayloadParity:
         """
         src = _src()
         i = src.index("def _stopped_payload(")
-        block = src[i:src.index("\n        def ", i + 10)]
+        block = src[i : src.index("\n        def ", i + 10)]
         assert "_progress_now() if progress is None" in block
 
 
@@ -324,8 +335,8 @@ class TestR2StoppedPayloadParity:
 # R3 · 两条 error 路径字段一致
 # ============================================================================
 
-class TestR3ErrorPayloadParity:
 
+class TestR3ErrorPayloadParity:
     def _helper_block(self) -> str:
         # B1 拆分：error 拼装点本体在下沉模块内（sse_handlers 只留薄包装）。
         # 该函数是模块内最后一个 def，窗口取到文件末尾即可。
@@ -335,23 +346,26 @@ class TestR3ErrorPayloadParity:
 
     def test_helper_carries_all_fields(self):
         block = self._helper_block()
-        for field in ("'event': 'error'", "'progress': progress", "'total': total",
-                      "'failed_count': max(total - len(done_ids), 0)",
-                      "'standard_summary': standard_summary", "'failed_sections'"):
+        for field in (
+            "'event': 'error'",
+            "'progress': progress",
+            "'total': total",
+            "'failed_count': max(total - len(done_ids), 0)",
+            "'standard_summary': standard_summary",
+            "'failed_sections'",
+        ):
             assert field in block, f"error 拼装点缺少 {field}"
 
     def test_both_error_paths_go_through_helper(self):
         src = _src()
         assert "_error_payload(_all_msg)" in src, "全章失败路径必须走拼装点"
         assert "_error_payload(str(e))" in src, "整批异常路径必须走拼装点"
-        assert "'event':'error'" not in src, (
-            "两条 error 路径必须都走 _error_payload，不得再内联手拼")
+        assert "'event':'error'" not in src, "两条 error 路径必须都走 _error_payload，不得再内联手拼"
 
     @pytest.mark.asyncio
     async def test_all_failed_error_carries_details(self, stub_env, monkeypatch):
         """全章失败：error 事件必须带失败明细（供前端逐章重试）。"""
-        db = _MultiSectionDB(sections=[
-            _MultiSectionDB._sec("s1", "1.1", 1, "", 0, 20)])
+        db = _MultiSectionDB(sections=[_MultiSectionDB._sec("s1", "1.1", 1, "", 0, 20)])
 
         async def _boom(messages, **k):
             raise RuntimeError("模拟 AI 全网失败")
@@ -361,8 +375,7 @@ class TestR3ErrorPayloadParity:
         monkeypatch.setattr(sh, "CONTENT_SECTION_RETRIES", 0)
         events, text = await _run(db)
         term = _terminal(events)
-        assert term["event"] == "error", (
-            f"{[e.get('event') for e in events]} / {text[:400]}")
+        assert term["event"] == "error", f"{[e.get('event') for e in events]} / {text[:400]}"
         assert term["failed_count"] == 1
         assert term.get("failed_sections"), f"必须带失败明细: {term}"
         assert isinstance(term.get("progress"), (int, float))
@@ -374,14 +387,13 @@ class TestR3ErrorPayloadParity:
 # R4 · 章节树查询的 R13 判空
 # ============================================================================
 
-class TestR4SectionsTreeR13Guard:
 
+class TestR4SectionsTreeR13Guard:
     def test_source_has_r13_guard(self):
         src = _src()
         i = src.index('"SELECT * FROM sections WHERE scheme_id=? ORDER BY sort_order"')
-        window = src[i:i + 600]
-        assert "if cur is not None" in window, (
-            "章节树查询后必须判空（R13：db.execute 可能返回 None）")
+        window = src[i : i + 600]
+        assert "if cur is not None" in window, "章节树查询后必须判空（R13：db.execute 可能返回 None）"
 
     @pytest.mark.asyncio
     async def test_none_cursor_degrades_gracefully(self, stub_env):
@@ -389,34 +401,29 @@ class TestR4SectionsTreeR13Guard:
         db = _MultiSectionDB(sections_cursor_none=True)
         events, text = await _run(db)
         names = [e.get("event") for e in events]
-        assert "error" not in names, (
-            f"R13 命中不得整批失败: {names} / {text[:400]}")
+        assert "error" not in names, f"R13 命中不得整批失败: {names} / {text[:400]}"
         term = _terminal(events)
         assert term["event"] == "completed"
         assert term.get("message") == "没有待生成的章节"
-        assert ("completed", ) == tuple(
-            s for s, _ in stub_env["finished"])
+        assert ("completed",) == tuple(s for s, _ in stub_env["finished"])
 
 
 # ============================================================================
 # R5 · 编号元数据预取接线（消除逐章 N+1）
 # ============================================================================
 
-class TestR5NumberingIndexWiring:
 
+class TestR5NumberingIndexWiring:
     def test_index_is_prefetched_once(self):
         src = _src()
-        assert src.count("load_scheme_section_index(db, scheme_id)") == 1, (
-            "编号索引必须且只能预取一次（生成前）")
+        assert src.count("load_scheme_section_index(db, scheme_id)") == 1, "编号索引必须且只能预取一次（生成前）"
 
     def test_both_numbering_calls_receive_index(self):
         src = _src()
-        for fn in ("normalize_section_content_subheadings",
-                   "validate_section_content_numbering"):
+        for fn in ("normalize_section_content_subheadings", "validate_section_content_numbering"):
             i = src.index(fn + "(")
-            window = src[i:i + 400]
-            assert "index=_numbering_index" in window, (
-                f"{fn} 必须传预取索引（否则逐章 2 次查库的 N+1 依旧）")
+            window = src[i : i + 400]
+            assert "index=_numbering_index" in window, f"{fn} 必须传预取索引（否则逐章 2 次查库的 N+1 依旧）"
 
     def test_module_imports_the_prefetch_helper(self):
         tree = ast.parse(inspect.getsource(sh))
@@ -432,8 +439,8 @@ class TestR5NumberingIndexWiring:
 # R6 · CON-06 跨章搬运检测整链失效（nonlocal 缺失）
 # ============================================================================
 
-class TestR6CrossSectionCopyNotDead:
 
+class TestR6CrossSectionCopyNotDead:
     def test_persist_section_declares_nonlocal(self):
         """`_persist_section` 必须 `nonlocal _crossdup_snapshot`。
 
@@ -444,8 +451,7 @@ class TestR6CrossSectionCopyNotDead:
         tree = ast.parse(_src())
         target = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.AsyncFunctionDef) \
-                    and node.name == "_persist_section":
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_persist_section":
                 target = node
                 break
         assert target is not None, "未找到 _persist_section"
@@ -454,8 +460,8 @@ class TestR6CrossSectionCopyNotDead:
             if isinstance(n, ast.Nonlocal):
                 nonlocal_names.update(n.names)
         assert "_crossdup_snapshot" in nonlocal_names, (
-            "_persist_section 必须 nonlocal _crossdup_snapshot"
-            "（否则跨章搬运检测是死代码）")
+            "_persist_section 必须 nonlocal _crossdup_snapshot" "（否则跨章搬运检测是死代码）"
+        )
 
     def test_no_load_before_store_without_nonlocal(self):
         """通用不变量：本函数内被读取的外层变量不得以普通赋值形式遮蔽。
@@ -467,8 +473,7 @@ class TestR6CrossSectionCopyNotDead:
         tree = ast.parse(_src())
         target = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.AsyncFunctionDef) \
-                    and node.name == "_persist_section":
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_persist_section":
                 target = node
                 break
         assert target is not None
@@ -521,7 +526,8 @@ class TestR6CrossSectionCopyNotDead:
         bad = [
             f"{name}(store@{stores[name]} < load@{loads[name]})"
             for name in stores
-            if name in loads and loads[name] < stores[name]
+            if name in loads
+            and loads[name] < stores[name]
             and name not in nonlocal_names
             and name not in global_names
             and name not in arg_names
@@ -529,7 +535,8 @@ class TestR6CrossSectionCopyNotDead:
         ]
         assert not bad, (
             "以下外层变量在本函数内「先读后写」且未声明 nonlocal，"
-            f"运行期必抛 UnboundLocalError 并被 fail-soft 静默吞掉: {bad}")
+            f"运行期必抛 UnboundLocalError 并被 fail-soft 静默吞掉: {bad}"
+        )
 
     def test_scope_walker_ignores_comprehension_but_catches_real_shadow(self):
         """防改瞎：作用域过滤只放过推导式迭代变量，真实函数级遮蔽仍须抓到。"""
@@ -562,44 +569,41 @@ class TestR6CrossSectionCopyNotDead:
                 w.visit(_s)
             _aa = fn.args
             params = {a.arg for a in (*_aa.posonlyargs, *_aa.args, *_aa.kwonlyargs)}
-            return [n for n in stores
-                    if n in loads and loads[n] < stores[n]
-                    and n not in params and not n.startswith("_")]
+            return [
+                n for n in stores if n in loads and loads[n] < stores[n] and n not in params and not n.startswith("_")
+            ]
 
         # 推导式迭代变量：值表达式引用与 for target 同属独立作用域 → 不得报
-        assert shadowed_names(
-            "async def f():\n    return [label(x) for x in items]\n") == []
+        assert shadowed_names("async def f():\n    return [label(x) for x in items]\n") == []
         # 嵌套函数内的同名遮蔽也不得计入外层函数
-        assert shadowed_names(
-            "async def f():\n"
-            "    async def inner():\n"
-            "        q = q + 1\n"
-            "    return inner\n") == []
+        assert (
+            shadowed_names("async def f():\n" "    async def inner():\n" "        q = q + 1\n" "    return inner\n")
+            == []
+        )
         # 形参先读后写（规范化后回赋）是同一局部变量的合法复用 → 不得报
-        assert shadowed_names(
-            "async def f(content):\n    use(content)\n    content = clean(content)\n"
-        ) == []
+        assert shadowed_names("async def f(content):\n    use(content)\n    content = clean(content)\n") == []
         # 真实函数级「先读后写」遮蔽必须仍被抓到
-        assert shadowed_names(
-            "async def f():\n    if flag:\n        use(z)\n    z = 1\n") == ["z"]
+        assert shadowed_names("async def f():\n    if flag:\n        use(z)\n    z = 1\n") == ["z"]
 
     @pytest.mark.asyncio
-    async def test_con06_finding_actually_reaches_the_report(self, stub_env,
-                                                              monkeypatch):
+    async def test_con06_finding_actually_reaches_the_report(self, stub_env, monkeypatch):
         """端到端：两章正文雷同 → 落库报告里必须真的出现 CON-06 finding。
 
         修复前该链路因 UnboundLocalError 从未执行，报告里恒无 CON-06 ——
         本用例是「功能真的活着」的证据，而不只是静态锁。
         """
-        dup = ("## 编制说明\n\n"
-               "本节明确施工现场的临时用电管理制度与三级配电保护要求，"
-               "并对配电箱设置防雨棚与接地保护。\n")
-        monkeypatch.setattr(sh, "chat_with_fallback",
-                            lambda *a, **k: _coro(dup))
-        db = _MultiSectionDB(sections=[
-            _MultiSectionDB._sec("s1", "1.1", 1, "", 0, 5000),
-            _MultiSectionDB._sec("s2", "1.2", 1, "", 1, 5000),
-        ])
+        dup = (
+            "## 编制说明\n\n"
+            "本节明确施工现场的临时用电管理制度与三级配电保护要求，"
+            "并对配电箱设置防雨棚与接地保护。\n"
+        )
+        monkeypatch.setattr(sh, "chat_with_fallback", lambda *a, **k: _coro(dup))
+        db = _MultiSectionDB(
+            sections=[
+                _MultiSectionDB._sec("s1", "1.1", 1, "", 0, 5000),
+                _MultiSectionDB._sec("s2", "1.2", 1, "", 1, 5000),
+            ]
+        )
         db.reports: list[str] = []
 
         orig_exec = db.execute
@@ -615,28 +619,29 @@ class TestR6CrossSectionCopyNotDead:
 
         db.execute = _exec
         events, text = await _run(db)
-        assert len(db.reports) == 2, (
-            f"两章都应落库并写报告: {len(db.reports)} / "
-            f"{[e.get('event') for e in events]}")
+        assert len(db.reports) == 2, f"两章都应落库并写报告: {len(db.reports)} / " f"{[e.get('event') for e in events]}"
         joined = "".join(db.reports)
         assert "CON-06" in joined, (
             "落库报告里必须出现 CON-06 跨章搬运 finding（修复前恒无，"
-            f"因 UnboundLocalError 被 fail-soft 吞掉）: {joined[:500]}")
+            f"因 UnboundLocalError 被 fail-soft 吞掉）: {joined[:500]}"
+        )
 
     @pytest.mark.asyncio
     async def test_crosscheck_can_still_be_disabled(self, stub_env, monkeypatch):
         """开关关闭时不得产生 CON-06（向后兼容红线）。"""
-        dup = ("## 编制说明\n\n"
-               "本节明确施工现场的临时用电管理制度与三级配电保护要求，"
-               "并对配电箱设置防雨棚与接地保护。\n")
-        monkeypatch.setattr(sh, "chat_with_fallback",
-                            lambda *a, **k: _coro(dup))
-        monkeypatch.setattr(sh.settings, "content_crosscheck_duplicate", False,
-                            raising=False)
-        db = _MultiSectionDB(sections=[
-            _MultiSectionDB._sec("s1", "1.1", 1, "", 0, 5000),
-            _MultiSectionDB._sec("s2", "1.2", 1, "", 1, 5000),
-        ])
+        dup = (
+            "## 编制说明\n\n"
+            "本节明确施工现场的临时用电管理制度与三级配电保护要求，"
+            "并对配电箱设置防雨棚与接地保护。\n"
+        )
+        monkeypatch.setattr(sh, "chat_with_fallback", lambda *a, **k: _coro(dup))
+        monkeypatch.setattr(sh.settings, "content_crosscheck_duplicate", False, raising=False)
+        db = _MultiSectionDB(
+            sections=[
+                _MultiSectionDB._sec("s1", "1.1", 1, "", 0, 5000),
+                _MultiSectionDB._sec("s2", "1.2", 1, "", 1, 5000),
+            ]
+        )
         db.reports = []
         orig_exec = db.execute
 
@@ -658,32 +663,43 @@ class TestR6CrossSectionCopyNotDead:
 # R7 · 前端 error 分支必须消费 failed_sections
 # ============================================================================
 
-class TestR6FrontendErrorConsumesFailedSections:
 
+class TestR6FrontendErrorConsumesFailedSections:
     def _page(self) -> str:
         assert _FRONTEND_PAGE.exists(), f"未找到前端页面: {_FRONTEND_PAGE}"
-        return _FRONTEND_PAGE.read_text(encoding="utf-8")
+        # R176（2026-11-04）：页面正按批拆分，返回**包含 onSseEvent 的那个文件**，
+        # 保持切片在单文件内有效（跨文件聚合会把索引/区间语义打乱）。
+        candidates = [_FRONTEND_PAGE]
+        wb = _FRONTEND_PAGE.parent / "schemeWorkbench"
+        if wb.is_dir():
+            candidates += sorted(wb.rglob("*.ts")) + sorted(wb.rglob("*.tsx"))
+        for p in candidates:
+            src = p.read_text(encoding="utf-8")
+            if "const onSseEvent = useCallback(" in src:
+                return src
+        raise AssertionError("未找到 onSseEvent 消费点（facade + schemeWorkbench/ 递归均无）")
 
     def test_on_sse_event_error_branch_merges_failed_sections(self):
         src = self._page()
         i = src.index("const onSseEvent = useCallback(")
-        block = src[i:src.index("}, []);", i)]
+        block = src[i : src.index("}, []);", i)]
         assert 'evt.event === "error"' in block
         assert "failed_sections" in block, (
-            "onSseEvent 的 error 分支必须消费 failed_sections"
-            "（否则后端下发的逐章失败明细被整段丢弃）")
+            "onSseEvent 的 error 分支必须消费 failed_sections" "（否则后端下发的逐章失败明细被整段丢弃）"
+        )
         assert "mergeFailedSectionsIntoRef" in block
 
     def test_helper_is_defined_before_on_sse_event(self):
         """useCallback([]) 捕获首帧闭包 → helper 必须在 onSseEvent 之上定义。"""
         src = self._page()
-        assert (src.index("const mergeFailedSectionsIntoRef = useCallback(")
-                < src.index("const onSseEvent = useCallback("))
+        assert src.index("const mergeFailedSectionsIntoRef = useCallback(") < src.index(
+            "const onSseEvent = useCallback("
+        )
 
     def test_helper_only_touches_ref_and_stable_setter(self):
         src = self._page()
         i = src.index("const mergeFailedSectionsIntoRef = useCallback(")
-        block = src[i:src.index("}, []);", i)]
+        block = src[i : src.index("}, []);", i)]
         assert "sectionLogsRef.current" in block
         assert "setSectionLogs" in block
         # 不得依赖任何随渲染变化的闭包变量（否则 useCallback([]) 会读到过期值）
@@ -699,10 +715,11 @@ class TestR6FrontendErrorConsumesFailedSections:
         """
         src = self._page()
         i = src.index("const mergeFailedSectionsIntoRef = useCallback(")
-        block = src[i:src.index("}, []);", i)]
-        assert "mergeFailedSectionsInto(sectionLogsRef.current, list)" in block, (
-            "不得保留第二份合并实现（同一判据两处写 = 分叉病根）")
+        block = src[i : src.index("}, []);", i)]
+        assert (
+            "mergeFailedSectionsInto(sectionLogsRef.current, list)" in block
+        ), "不得保留第二份合并实现（同一判据两处写 = 分叉病根）"
         # 纯函数本体唯一事实源在 contentEvents.ts：页面只允许消费，不允许复制
         assert src.count("function mergeFailedSectionsInto(") == 0, (
-            "页面内不得内联 mergeFailedSectionsInto 函数体"
-            "（单一事实源在 contentEvents.ts）")
+            "页面内不得内联 mergeFailedSectionsInto 函数体" "（单一事实源在 contentEvents.ts）"
+        )

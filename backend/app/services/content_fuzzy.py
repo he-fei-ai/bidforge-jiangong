@@ -30,6 +30,7 @@
 （若传入的是 ``strip_code_blocks`` 剔除围栏后的文本，则不映射回原文，
 人工定位以 ``excerpt`` 片段为准）。
 """
+
 from __future__ import annotations
 
 import re
@@ -55,7 +56,7 @@ FUZZY_CATEGORIES: dict[str, dict] = {
         "label": "数值类",
         "precise": "有明确数值直接使用，数值连同单位一并写出（如“基坑深度 12.5m”）",
         "fuzzy": "有范围按范围表述（如“控制在 12~15m 范围内”）；"
-                 "无范围按行业惯例表述（如“控制在设计允许范围内”“控制在规范限值以内”）",
+        "无范围按行业惯例表述（如“控制在设计允许范围内”“控制在规范限值以内”）",
         "forbid": "禁止编造具体数值",
         "data_source": "行业惯例与设计允许范围",
         "reason": "事实未给出该数值",
@@ -63,8 +64,7 @@ FUZZY_CATEGORIES: dict[str, dict] = {
     "name": {
         "label": "名称类",
         "precise": "有明确名称直接使用（人员写姓名与岗位、设备写品牌与型号）",
-        "fuzzy": "无明确名称用岗位或角色表述（如“项目技术负责人”“专职安全生产管理人员”"
-                 "“满足要求的塔吊”）",
+        "fuzzy": "无明确名称用岗位或角色表述（如“项目技术负责人”“专职安全生产管理人员”" "“满足要求的塔吊”）",
         "forbid": "禁止编造人名、公司名、品牌名、设备型号",
         "data_source": "岗位与角色表述",
         "reason": "事实未给出具体名称",
@@ -72,8 +72,7 @@ FUZZY_CATEGORIES: dict[str, dict] = {
     "time": {
         "label": "时间类",
         "precise": "有明确时间直接使用（如“总工期 450 日历天”“2026年8月15日前完成”）",
-        "fuzzy": "无明确时间用相对时间或阶段表述（如“主体结构完成后”“施工高峰期前”"
-                 "“进场施工后 7 天内”）",
+        "fuzzy": "无明确时间用相对时间或阶段表述（如“主体结构完成后”“施工高峰期前”" "“进场施工后 7 天内”）",
         "forbid": "禁止编造具体日期",
         "data_source": "施工阶段与相对时序",
         "reason": "事实未给出具体日期",
@@ -81,8 +80,7 @@ FUZZY_CATEGORIES: dict[str, dict] = {
     "quantity": {
         "label": "数量类",
         "precise": "有明确数量直接使用（如“塔吊 1 台”“作业人员 12 人”）",
-        "fuzzy": "无明确数量用范围或配置原则表述（如“按同类工程经验配置 2~3 台”"
-                 "“按规范配置足够数量的作业人员”）",
+        "fuzzy": "无明确数量用范围或配置原则表述（如“按同类工程经验配置 2~3 台”" "“按规范配置足够数量的作业人员”）",
         "forbid": "禁止编造具体人数、设备台数",
         "data_source": "资源配置原则",
         "reason": "事实未给出具体数量",
@@ -90,8 +88,7 @@ FUZZY_CATEGORIES: dict[str, dict] = {
     "promise": {
         "label": "承诺类",
         "precise": "有明确承诺直接使用（原样引用合同与设计文件中的承诺口径）",
-        "fuzzy": "无明确承诺用行业通用承诺表述（如“确保施工质量满足设计与合同要求”"
-                 "“确保各项检验批一次验收合格”）",
+        "fuzzy": "无明确承诺用行业通用承诺表述（如“确保施工质量满足设计与合同要求”" "“确保各项检验批一次验收合格”）",
         "forbid": "禁止编造超出常规的承诺（工期承诺、质量奖、免责条款等）",
         "data_source": "行业通用承诺口径",
         "reason": "事实未给出明确承诺",
@@ -99,8 +96,7 @@ FUZZY_CATEGORIES: dict[str, dict] = {
     "tech": {
         "label": "技术参数类",
         "precise": "有明确参数直接使用（原样引用事实中的强度等级、荷载、偏差、间距等）",
-        "fuzzy": "无明确参数用技术原则或标准要求表述（如“参数取值经专项计算确定”"
-                 "“满足现行规范要求”）",
+        "fuzzy": "无明确参数用技术原则或标准要求表述（如“参数取值经专项计算确定”" "“满足现行规范要求”）",
         "forbid": "禁止编造具体参数值",
         "data_source": "技术原则与标准要求",
         "reason": "事实未给出具体参数",
@@ -108,9 +104,9 @@ FUZZY_CATEGORIES: dict[str, dict] = {
     "material": {
         "label": "材料规格类",
         "precise": "有明确规格直接使用（混凝土强度等级、钢筋牌号、防水材料品种等"
-                   "原样引用事实，如“HRB400 钢筋”“C30 混凝土”）",
+        "原样引用事实，如“HRB400 钢筋”“C30 混凝土”）",
         "fuzzy": "无明确规格用符合规范要求的通用表述（如“材料品种、规格符合设计文件"
-                 "与现行规范要求，进场后按批次检验复验合格后使用”）",
+        "与现行规范要求，进场后按批次检验复验合格后使用”）",
         "forbid": "禁止编造具体牌号、品牌与型号",
         "data_source": "规范符合性通用表述",
         "reason": "事实未给出材料规格",
@@ -119,7 +115,7 @@ FUZZY_CATEGORIES: dict[str, dict] = {
         "label": "工序流程类",
         "precise": "有明确工序直接按事实顺序编排（含节点顺序与做法细节）",
         "fuzzy": "无明确工序按标准施工工艺表述（沿本工种常规工序顺序展开，"
-                 "写明各环节控制点，如“测量放线→支架搭设→预压→底模安装”）",
+        "写明各环节控制点，如“测量放线→支架搭设→预压→底模安装”）",
         "forbid": "禁止编造不存在的工序",
         "data_source": "标准施工工艺顺序",
         "reason": "事实未给出工序安排",
@@ -130,8 +126,7 @@ FUZZY_CATEGORIES: dict[str, dict] = {
 #: number/time/quantity/name 语义更具体，放在前面避免被 tech 的原则性表述吞掉；
 #: material/process（2026-10-02 补齐）带材料/工序名词前缀，比 tech 的泛化措辞更具体，
 #: 排在 tech 之前，避免「材料符合设计要求」被 tech 抢先归类。
-FUZZY_CATEGORY_ORDER: tuple[str, ...] = (
-    "number", "time", "quantity", "name", "material", "process", "tech", "promise")
+FUZZY_CATEGORY_ORDER: tuple[str, ...] = ("number", "time", "quantity", "name", "material", "process", "tech", "promise")
 
 #: 八类中**无法确定性判定**的类别，仅用于文档与报告说明（不产生误报）。
 #: promise 的“确保 / 保证”在方案正文中极常见，强行判定会把正常表述全标成模糊。
@@ -150,13 +145,30 @@ HEDGE_SUFFIX_RE = re.compile(r"(\d[\d.]{0,12})[^0-9]{0,3}(左右|上下|前后)"
 
 #: 模糊表述：空泛指代（无事实豁免例外）
 BARE_PLACEHOLDER_PHRASES: tuple[str, ...] = (
-    "满足要求的", "符合规范的", "符合要求的", "按设计确定", "按设计要求确定",
-    "按设计要求", "按合同要求", "按业主要求", "按相关规定", "按有关规定", "按规范要求",
+    "满足要求的",
+    "符合规范的",
+    "符合要求的",
+    "按设计确定",
+    "按设计要求确定",
+    "按设计要求",
+    "按合同要求",
+    "按业主要求",
+    "按相关规定",
+    "按有关规定",
+    "按规范要求",
 )
 #: 模糊表述：限值措辞（仅当事实本身使用同一措辞时豁免）
 LIMIT_PHRASES: tuple[str, ...] = (
-    "不少于", "不超过", "不小于", "不大于", "不高于", "不低于",
-    "不短于", "不长于", "不厚于", "不多于",
+    "不少于",
+    "不超过",
+    "不小于",
+    "不大于",
+    "不高于",
+    "不低于",
+    "不短于",
+    "不长于",
+    "不厚于",
+    "不多于",
 )
 
 _LIMIT_PHRASE_RE = re.compile("|".join(re.escape(p) for p in LIMIT_PHRASES))
@@ -186,8 +198,7 @@ _RELATIVE_TIME_RE = re.compile(
 )
 #: 数量类：范围 / 配置原则
 _QUANTITY_PRINCIPLE_RE = re.compile(
-    r"若干(?:个|台|人|套|处|名)?|适量|按需配置|"
-    r"按(?:同类工程经验|规范|设计|施工)?(?:要求)?配置(?:足够)?数量"
+    r"若干(?:个|台|人|套|处|名)?|适量|按需配置|" r"按(?:同类工程经验|规范|设计|施工)?(?:要求)?配置(?:足够)?数量"
 )
 #: 技术参数类：技术原则 / 标准要求
 _TECH_PRINCIPLE_RE = re.compile(
@@ -254,15 +265,16 @@ def detect_fuzzy_expressions(text: str) -> list[dict]:
                     # ✅ BUG 修复（2026-10-02 第二十六轮）：旧写法 `for as_, ae, _ in
                     # accepted` 对 4 键字典解包必抛 ValueError → 被外层 except 吞掉，
                     # 导致「正文有 ≥2 处模糊表述时整体丢失标记」。改为显式取键。
-                    if any(s < h["char_end"] and e > h["char_start"]
-                           for h in accepted):
+                    if any(s < h["char_end"] and e > h["char_start"] for h in accepted):
                         continue  # 已被优先级更高的类别占用
-                    accepted.append({
-                        "category": cat,
-                        "text": m.group(0),
-                        "char_start": s,
-                        "char_end": e,
-                    })
+                    accepted.append(
+                        {
+                            "category": cat,
+                            "text": m.group(0),
+                            "char_start": s,
+                            "char_end": e,
+                        }
+                    )
         accepted.sort(key=lambda d: d["char_start"])
     except Exception:
         return []
@@ -296,9 +308,7 @@ _EXTRA_MARK_BRACKETED_RE = re.compile(
 _EXTRA_MARK_BARE_RE = re.compile(r"(?<![A-Za-z])(?:TBD|t\.b\.d|N/?A)(?![A-Za-z])")
 
 #: 额外占位标记全集（兼容既有口径：检测用；由上两条**派生**，不再另写字面量）
-_EXTRA_MARK_RE = re.compile(
-    "(?:" + _EXTRA_MARK_BRACKETED_RE.pattern + ")|(?:" + _EXTRA_MARK_BARE_RE.pattern + ")"
-)
+_EXTRA_MARK_RE = re.compile("(?:" + _EXTRA_MARK_BRACKETED_RE.pattern + ")|(?:" + _EXTRA_MARK_BARE_RE.pattern + ")")
 
 #: 占位标记检测 · **唯一事实源**（三类基础 + 扩展，附「可否确定性改写」标记）。
 #:
@@ -339,6 +349,7 @@ def placeholder_nonrewritable_patterns() -> tuple[re.Pattern, ...]:
     """
     return tuple(rx for rx, _k, rw in PLACEHOLDER_MARK_PATTERNS if not rw)
 
+
 #: 空话句式（明确禁止，无条件报错）。
 #: 刻意**不含**「以现场实际情况调整」这类真实工程免责表述 —— 它是有实质约束的
 #: 条件式写法，不是空话；把正常写法判成缺陷只会逼 AI 换个说法继续凑字。
@@ -356,11 +367,28 @@ VAGUE_STATEMENT_RULES: tuple[tuple[re.Pattern, str], ...] = (
 
 #: 暴露数据缺失的表述（严禁出现在正文中 —— 模糊内容不得露痕迹）
 MISSING_REVEAL_PHRASES: tuple[str, ...] = (
-    "由于资料不足", "资料不足", "资料未提供", "未提供资料", "未提供相关",
-    "暂未获取", "尚未获取", "未能获取", "未能取得",
-    "缺少资料", "缺少相关", "缺少具体", "未提供具体",
-    "无法确定", "无法确认", "尚不明确", "尚未明确", "有待明确",
-    "尚未确定", "尚无法", "暂无法", "未能提供",
+    "由于资料不足",
+    "资料不足",
+    "资料未提供",
+    "未提供资料",
+    "未提供相关",
+    "暂未获取",
+    "尚未获取",
+    "未能获取",
+    "未能取得",
+    "缺少资料",
+    "缺少相关",
+    "缺少具体",
+    "未提供具体",
+    "无法确定",
+    "无法确认",
+    "尚不明确",
+    "尚未明确",
+    "有待明确",
+    "尚未确定",
+    "尚无法",
+    "暂无法",
+    "未能提供",
 )
 
 #: 具体日历日期（年月日齐全）。方案正文里凭空写具体日期几乎必然是编造。
@@ -372,9 +400,7 @@ _ANCHOR_NUM_UNIT_RE = re.compile(
     r"(?:m|mm|cm|km|m3|立方米|m2|平方米|MPa|kPa|kN|kN/m|人|台|套|层|根|块|个|米|吨"
     r"|天|日历天|工作日|次|%|‰|t|kg|h|d|°C|℃|万元)"
 )
-_ANCHOR_NORM_RE = re.compile(
-    r"(?:GB|JGJ|JG|DBJ|CJJ|DB|GB/T|TB|SH|SY)[\s　]*\d{4,6}"
-)
+_ANCHOR_NORM_RE = re.compile(r"(?:GB|JGJ|JG|DBJ|CJJ|DB|GB/T|TB|SH|SY)[\s　]*\d{4,6}")
 
 
 def scan_placeholder_marks(text: str) -> list[dict]:
@@ -391,14 +417,16 @@ def scan_placeholder_marks(text: str) -> list[dict]:
     # 不再在此处手抄正则（本仓反复踩过的「同一判据两处实现」分叉病根）。
     for rx, kind, rewritable in PLACEHOLDER_MARK_PATTERNS:
         for m in rx.finditer(text):
-            hits.append({
-                "kind": kind,
-                # 加法式字段：改写侧按此筛选，不影响只读 kind 的既有消费方
-                "rewritable": rewritable,
-                "mark": m.group(0),
-                "char_start": m.start(),
-                "char_end": m.end(),
-            })
+            hits.append(
+                {
+                    "kind": kind,
+                    # 加法式字段：改写侧按此筛选，不影响只读 kind 的既有消费方
+                    "rewritable": rewritable,
+                    "mark": m.group(0),
+                    "char_start": m.start(),
+                    "char_end": m.end(),
+                }
+            )
     hits.sort(key=lambda d: d["char_start"])
     return _prune_overlaps(hits)
 
@@ -454,8 +482,9 @@ def scan_vague_statements(text: str) -> list[dict]:
     hits: list[dict] = []
     for rx, label in VAGUE_STATEMENT_RULES:
         for m in rx.finditer(text):
-            hits.append({"kind": "vague", "label": label, "mark": m.group(0),
-                         "char_start": m.start(), "char_end": m.end()})
+            hits.append(
+                {"kind": "vague", "label": label, "mark": m.group(0), "char_start": m.start(), "char_end": m.end()}
+            )
     for phrase in BARE_PLACEHOLDER_PHRASES:
         start = 0
         while True:
@@ -465,8 +494,15 @@ def scan_vague_statements(text: str) -> list[dict]:
             start = pos + len(phrase)
             if not _sentence_is_hollow(_sentence_at(text, pos)):
                 continue  # 句子里有实质锚点：属正常条件式写法，不报空话
-            hits.append({"kind": "vague", "label": "悬空空泛指代", "mark": phrase,
-                         "char_start": pos, "char_end": pos + len(phrase)})
+            hits.append(
+                {
+                    "kind": "vague",
+                    "label": "悬空空泛指代",
+                    "mark": phrase,
+                    "char_start": pos,
+                    "char_end": pos + len(phrase),
+                }
+            )
     hits.sort(key=lambda d: d["char_start"])
     return _prune_overlaps(hits)
 
@@ -478,8 +514,9 @@ def _prune_overlaps(hits: list[dict]) -> list[dict]:
     若不去重，同一处正文会被重复计入 2 次 —— 统计虚高、报告刷屏。
     """
     kept: list[dict] = []
-    for h in sorted(hits, key=lambda d: (-(int(d.get("char_end", 0)) - int(d.get("char_start", 0))),
-                                         int(d.get("char_start", 0)))):
+    for h in sorted(
+        hits, key=lambda d: (-(int(d.get("char_end", 0)) - int(d.get("char_start", 0))), int(d.get("char_start", 0)))
+    ):
         s, e = int(h.get("char_start", 0)), int(h.get("char_end", 0))
         if all(e <= k["char_start"] or s >= k["char_end"] for k in kept):
             kept.append(h)
@@ -499,8 +536,7 @@ def scan_missing_reveal(text: str) -> list[dict]:
             if pos < 0:
                 break
             start = pos + len(phrase)
-            hits.append({"kind": "missing_reveal", "mark": phrase,
-                         "char_start": pos, "char_end": pos + len(phrase)})
+            hits.append({"kind": "missing_reveal", "mark": phrase, "char_start": pos, "char_end": pos + len(phrase)})
     hits.sort(key=lambda d: d["char_start"])
     return _prune_overlaps(hits)
 
@@ -508,6 +544,7 @@ def scan_missing_reveal(text: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # 五、提示词块（注入 system / user，文案单点维护，禁止散落）
 # ---------------------------------------------------------------------------
+
 
 def build_fuzzy_rules_block() -> str:
     """生成「模糊生成规则」提示词段落（八类对照表 + 质量要求）。"""
@@ -528,10 +565,8 @@ def build_fuzzy_rules_block() -> str:
     lines += [
         "",
         "### 模糊生成质量要求（与数据红线同级）",
-        "- **语言自然**：像一线工程师写的技术文件，不用套话模板、不重复句式，"
-        "不要机械地反复使用同一种限定词；",
-        "- **逻辑连贯**：与上下文、全局事实、同级章节都不冲突，"
-        "不重复同级章节已经写过的内容；",
+        "- **语言自然**：像一线工程师写的技术文件，不用套话模板、不重复句式，" "不要机械地反复使用同一种限定词；",
+        "- **逻辑连贯**：与上下文、全局事实、同级章节都不冲突，" "不重复同级章节已经写过的内容；",
         "- **专业可信**：术语准确，符合专项施工方案文档风格与行业惯例；"
         "模糊表述仍要落在具体工艺、工序、控制点上，不能只有结论没有做法；",
         "- **不露痕迹**：严禁出现「由于资料不足」「暂未获取」「无法确定」"
@@ -543,24 +578,22 @@ def build_fuzzy_rules_block() -> str:
 
 def build_no_placeholder_block() -> str:
     """生成「禁止占位标记与空话」提示词段落（硬性，与数据真实性红线同级）。"""
-    return "\n".join([
-        "## 禁止占位标记与空话（硬性）",
-        "正文的**每一个位置**都必须有实质内容。以下三类表述一律严禁出现：",
-        "",
-        "1. **占位标记**：【待补充】【待完善】【待填写】【待定】【待确定】、"
-        "【】、[数值]、[参数]、TBD、N/A、××、xx —— 一个都不允许出现；",
-        "2. **空话**：此处省略、详见附件、后续补充、后续完善、"
-        "具体做法另行说明、另有章节介绍；",
-        "3. **暴露数据缺失的说法**：由于资料不足、暂未获取、无法确定、"
-        "尚未明确、有待明确。",
-        "",
-        "确实没有明确数据时，按「模糊生成规则」写 —— "
-        "把话说完、把做法说清，而不是留一个标记让人去补。",
-    ])
+    return "\n".join(
+        [
+            "## 禁止占位标记与空话（硬性）",
+            "正文的**每一个位置**都必须有实质内容。以下三类表述一律严禁出现：",
+            "",
+            "1. **占位标记**：【待补充】【待完善】【待填写】【待定】【待确定】、"
+            "【】、[数值]、[参数]、TBD、N/A、××、xx —— 一个都不允许出现；",
+            "2. **空话**：此处省略、详见附件、后续补充、后续完善、" "具体做法另行说明、另有章节介绍；",
+            "3. **暴露数据缺失的说法**：由于资料不足、暂未获取、无法确定、" "尚未明确、有待明确。",
+            "",
+            "确实没有明确数据时，按「模糊生成规则」写 —— " "把话说完、把做法说清，而不是留一个标记让人去补。",
+        ]
+    )
 
 
-def build_data_availability_block(available: list[str] | None = None,
-                                  unknown: list[str] | None = None) -> str:
+def build_data_availability_block(available: list[str] | None = None, unknown: list[str] | None = None) -> str:
     """生成「本章可用数据 / 缺失数据」说明块（注入 user 消息）。
 
     让 AI 明确知道哪些字段有明确数据（必须精准使用）、哪些没有（走模糊生成），
@@ -573,8 +606,7 @@ def build_data_availability_block(available: list[str] | None = None,
     if available:
         lines += [
             "",
-            "以下内容**有明确数据**，必须精准使用（数值连同单位原样写出，"
-            "不得改写、不得概括、不得四舍五入）：",
+            "以下内容**有明确数据**，必须精准使用（数值连同单位原样写出，" "不得改写、不得概括、不得四舍五入）：",
         ]
         lines += [f"- {item}" for item in available]
     if unknown:
@@ -589,21 +621,17 @@ def build_data_availability_block(available: list[str] | None = None,
 
 #: 分级生成策略说明（注入 user 消息，与「生成标准」段同级）
 GENERATION_STRATEGY_LINES: tuple[str, ...] = (
-    "- **有明确数据** → 精准生成：全局事实与解析提取结果中的数值、型号、"
-    "人员、工期、参数必须原样使用，不得改写；",
+    "- **有明确数据** → 精准生成：全局事实与解析提取结果中的数值、型号、" "人员、工期、参数必须原样使用，不得改写；",
     "- **有部分数据** → 精准 + 模糊组合：已知部分原样使用，缺口部分"
     "按「模糊生成规则」补齐，两者在同一句或同一段里自然衔接；",
-    "- **无明确数据** → 全部模糊生成：按八类规则做合理概括，"
-    "仍须落在具体工艺与工序上，不得编造关键数据；",
+    "- **无明确数据** → 全部模糊生成：按八类规则做合理概括，" "仍须落在具体工艺与工序上，不得编造关键数据；",
     "- 无论哪种情况，都返回**完整正文**，不留空、不写占位标记、不写空话。",
 )
 
 
 def build_generation_strategy_block() -> str:
     """生成「分级生成策略」提示词段落。"""
-    return "\n".join(
-        ["## 分级生成策略（按本章数据完整性自动判定）"] + list(GENERATION_STRATEGY_LINES)
-    )
+    return "\n".join(["## 分级生成策略（按本章数据完整性自动判定）"] + list(GENERATION_STRATEGY_LINES))
 
 
 def build_fuzzy_rules_for_standard(standard: str) -> str:
@@ -616,13 +644,13 @@ def build_fuzzy_rules_for_standard(standard: str) -> str:
     """
     head = {
         "precise": "本次为**精准内容**模式：有明确数据的必须精准使用；"
-                   "没有明确数据的按下方规则做模糊生成，**一律不得写占位标记**。",
+        "没有明确数据的按下方规则做模糊生成，**一律不得写占位标记**。",
         "fuzzy": "本次为**模糊内容**模式：可使用范围值、岗位称谓、相对时间与"
-                 "限定性表述；底线是**不得编造关键数据**，且不得写占位标记。",
+        "限定性表述；底线是**不得编造关键数据**，且不得写占位标记。",
     }.get(standard or "precise", "")
-    return "\n\n".join([head, build_fuzzy_rules_block(),
-                        build_generation_strategy_block(),
-                        build_no_placeholder_block()])
+    return "\n\n".join(
+        [head, build_fuzzy_rules_block(), build_generation_strategy_block(), build_no_placeholder_block()]
+    )
 
 
 def scan_fabricated_dates(text: str, fact_text: str = "") -> list[dict]:
@@ -643,6 +671,5 @@ def scan_fabricated_dates(text: str, fact_text: str = "") -> list[dict]:
         norm = re.sub(r"[\s　]+", "", m.group(0))
         if norm in fact_norm:
             continue  # 事实里就有这个日期：精准引用，不判编造
-        hits.append({"kind": "fabricated_date", "mark": m.group(0),
-                     "char_start": m.start(), "char_end": m.end()})
+        hits.append({"kind": "fabricated_date", "mark": m.group(0), "char_start": m.start(), "char_end": m.end()})
     return _prune_overlaps(hits)

@@ -19,7 +19,7 @@ function sseResponse(chunks: Array<Uint8Array>): Response {
         controller.close();
       },
     }),
-    { status: 200, headers: { "Content-Type": "text/event-stream" } }
+    { status: 200, headers: { "Content-Type": "text/event-stream" } },
   );
 }
 
@@ -31,16 +31,18 @@ describe("sseFetch", () => {
   });
 
   it("按序产出全部 data 事件，heartbeat 仅触发回调", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      sseResponse([
-        enc.encode(
-          "data: {\"type\":\"section_start\",\"section_id\":\"s1\"}\n\n" +
-            ": heartbeat\n\n" +
-            "data: {\"type\":\"section_done\",\"section_id\":\"s1\"}\n\n" +
-            "data: {\"type\":\"done\"}\n\n"
-        ),
-      ])
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        sseResponse([
+          enc.encode(
+            'data: {"type":"section_start","section_id":"s1"}\n\n' +
+              ": heartbeat\n\n" +
+              'data: {"type":"section_done","section_id":"s1"}\n\n' +
+              'data: {"type":"done"}\n\n',
+          ),
+        ]),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     const onHeartbeat = vi.fn();
@@ -64,13 +66,15 @@ describe("sseFetch", () => {
   it("跨 chunk 边界的事件仍完整解析", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        sseResponse([
-          enc.encode("data: {\"type\":\"sec"),
-          enc.encode("tion_start\"}\n\ndata: {\"type\":\"do"),
-          enc.encode("ne\"}\n\n"),
-        ])
-      )
+      vi
+        .fn()
+        .mockResolvedValue(
+          sseResponse([
+            enc.encode('data: {"type":"sec'),
+            enc.encode('tion_start"}\n\ndata: {"type":"do'),
+            enc.encode('ne"}\n\n'),
+          ]),
+        ),
     );
 
     const events: any[] = [];
@@ -83,9 +87,7 @@ describe("sseFetch", () => {
   it("非 JSON data 行被静默跳过", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        sseResponse([enc.encode("data: ping\n\ndata: {\"ok\":true}\n\n")])
-      )
+      vi.fn().mockResolvedValue(sseResponse([enc.encode('data: ping\n\ndata: {"ok":true}\n\n')])),
     );
 
     const events: any[] = [];
@@ -110,9 +112,9 @@ describe("sseFetch", () => {
   it("HTTP 非 2xx 时抛出带 detail 的错误", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ detail: "方案不存在" }), { status: 404 })
-      )
+      vi
+        .fn()
+        .mockResolvedValue(new Response(JSON.stringify({ detail: "方案不存在" }), { status: 404 })),
     );
 
     await expect(
@@ -120,7 +122,7 @@ describe("sseFetch", () => {
         for await (const _ of sseFetch("/missing")) {
           // noop
         }
-      })()
+      })(),
     ).rejects.toThrow("方案不存在");
   });
 
@@ -138,9 +140,9 @@ describe("sseFetch", () => {
               { loc: ["path", "scheme_id"], msg: "string to strict", type: "string_type" },
             ],
           }),
-          { status: 422 }
-        )
-      )
+          { status: 422 },
+        ),
+      ),
     );
 
     await expect(
@@ -148,16 +150,18 @@ describe("sseFetch", () => {
         for await (const _ of sseFetch("/sse/generate-facts/x")) {
           // noop
         }
-      })()
+      })(),
     ).rejects.toThrow(/缺少必填查询参数 “db”/);
   });
 
   it("422 明细缺失/响应体非 JSON 时回退默认消息", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        new Response("not json", { status: 422, headers: { "Content-Type": "text/plain" } })
-      )
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response("not json", { status: 422, headers: { "Content-Type": "text/plain" } }),
+        ),
     );
 
     await expect(
@@ -165,7 +169,7 @@ describe("sseFetch", () => {
         for await (const _ of sseFetch("/t")) {
           // noop
         }
-      })()
+      })(),
     ).rejects.toThrow("SSE 请求失败");
   });
 
@@ -177,10 +181,12 @@ describe("sseFetch", () => {
 
     await expect(
       (async () => {
-        for await (const _ of sseFetch("/sse/generate-outline/x", undefined, { connectTimeoutMs: 30 })) {
+        for await (const _ of sseFetch("/sse/generate-outline/x", undefined, {
+          connectTimeoutMs: 30,
+        })) {
           // noop
         }
-      })()
+      })(),
     ).rejects.toThrow("后端连接超时");
   });
 
@@ -188,9 +194,9 @@ describe("sseFetch", () => {
     // 头部立即返回，但事件间隔超过 connectTimeoutMs —— 旧数据流不得被超时中断
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        sseResponseWithDelay([enc.encode("data: {\"type\":\"done\"}\n\n")], 80)
-      )
+      vi
+        .fn()
+        .mockResolvedValue(sseResponseWithDelay([enc.encode('data: {"type":"done"}\n\n')], 80)),
     );
 
     const events: any[] = [];
@@ -201,39 +207,54 @@ describe("sseFetch", () => {
   });
 
   it("兼容 CRLF 事件边界与多行 data 字段", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(sseResponse([
-      enc.encode("data: {\"type\":\r\ndata: \"split\"}\r\n\r\n")
-    ])));
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(sseResponse([enc.encode('data: {"type":\r\ndata: "split"}\r\n\r\n')])),
+    );
     const events: any[] = [];
     for await (const ev of sseFetch("/t")) events.push(ev);
     expect(events).toEqual([{ type: "split" }]);
   });
 
   it("响应流关闭时解析末尾未带空行的完整 data 事件", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(sseResponse([
-      enc.encode("data: {\"type\":\"tail\"}")
-    ])));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(sseResponse([enc.encode('data: {"type":"tail"}')])),
+    );
     const events: any[] = [];
     for await (const ev of sseFetch("/t")) events.push(ev);
     expect(events).toEqual([{ type: "tail" }]);
   });
 
   it("响应头已到达但流静默时按空闲超时抛错", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
-      new ReadableStream({ start() { /* 保持打开但不产出 */ } }),
-      { status: 200, headers: { "Content-Type": "text/event-stream" } }
-    )));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          new ReadableStream({
+            start() {
+              /* 保持打开但不产出 */
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        ),
+      ),
+    );
     const collect = (async () => {
       for await (const _ of sseFetch("/t", undefined, { idleTimeoutMs: 20 })) {
         // noop
       }
     })();
-    await expect(Promise.race([
-      collect,
-      new Promise((_, reject) => setTimeout(
-        () => reject(new Error("旧实现未按空闲超时结束")), 200
-      )),
-    ])).rejects.toThrow("SSE 数据流空闲超时");
+    await expect(
+      Promise.race([
+        collect,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("旧实现未按空闲超时结束")), 200),
+        ),
+      ]),
+    ).rejects.toThrow("SSE 数据流空闲超时");
   });
 });
 
@@ -247,6 +268,6 @@ function sseResponseWithDelay(chunks: Array<Uint8Array>, delayMs: number): Respo
         controller.close();
       },
     }),
-    { status: 200, headers: { "Content-Type": "text/event-stream" } }
+    { status: 200, headers: { "Content-Type": "text/event-stream" } },
   );
 }

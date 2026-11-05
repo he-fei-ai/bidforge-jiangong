@@ -7,6 +7,7 @@
 - 验证超过 maxsize 的数据量仍能完整传递（背压暂停生产者，不丢数据）
 - 验证心跳在数据间隙时独立触发（不依赖生成器产出）
 """
+
 import asyncio
 
 import pytest
@@ -32,6 +33,7 @@ class TestWithHeartbeatDataPassing:
 
     async def test_single_item(self):
         """单项数据透传"""
+
         async def gen():
             yield "data: hello\n\n"
 
@@ -40,6 +42,7 @@ class TestWithHeartbeatDataPassing:
 
     async def test_multiple_items(self):
         """多项数据透传，顺序保持"""
+
         async def gen():
             yield "data: 1\n\n"
             yield "data: 2\n\n"
@@ -50,6 +53,7 @@ class TestWithHeartbeatDataPassing:
 
     async def test_empty_generator(self):
         """空生成器：无输出"""
+
         async def gen():
             return
             yield  # 使其成为 async generator
@@ -69,6 +73,7 @@ class TestWithHeartbeatHeartbeat:
 
         生成器 sleep 0.25s，心跳间隔 0.1s → 期间应触发至少 1 次心跳。
         """
+
         async def gen():
             await asyncio.sleep(0.25)
             yield "data: done\n\n"
@@ -82,6 +87,7 @@ class TestWithHeartbeatHeartbeat:
 
     async def test_heartbeat_format(self):
         """心跳格式为 SSE comment：: heartbeat <timestamp>\n\n"""
+
         async def gen():
             await asyncio.sleep(0.15)
             yield "data: x\n\n"
@@ -89,7 +95,7 @@ class TestWithHeartbeatHeartbeat:
         results = await _collect(gen(), interval=0.05)
 
         # ✅ 修复：原实现 if heartbeats: —— 一次心跳都没产生时测试静默通过
-        #（零失败能力）。数据间隔 0.15s > 心跳间隔 0.05s，必然产生心跳。
+        # （零失败能力）。数据间隔 0.15s > 心跳间隔 0.05s，必然产生心跳。
         heartbeats = [r for r in results if "heartbeat" in r]
         assert heartbeats, "数据间隔大于心跳间隔时必须产生心跳"
         hb = heartbeats[0]
@@ -98,6 +104,7 @@ class TestWithHeartbeatHeartbeat:
 
     async def test_no_heartbeat_when_data_fast(self):
         """数据快速产出时无心跳（间隔远大于产出间隔）"""
+
         async def gen():
             for i in range(5):
                 yield f"data: {i}\n\n"
@@ -115,6 +122,7 @@ class TestWithHeartbeatError:
 
     async def test_generator_exception_raises_runtime_error(self):
         """生成器抛异常 → with_heartbeat 抛 RuntimeError"""
+
         async def gen():
             yield "data: 1\n\n"
             raise ValueError("AI 调用失败")
@@ -125,6 +133,7 @@ class TestWithHeartbeatError:
 
     async def test_error_after_partial_data(self):
         """部分数据后异常：已 yield 的数据到达，随后抛错"""
+
         async def gen():
             yield "data: 1\n\n"
             yield "data: 2\n\n"
@@ -184,6 +193,7 @@ class TestWithHeartbeatQueueMaxsize:
 
     async def test_backpressure_does_not_block_forever(self):
         """背压不会死锁：生成器有 IO 等待时也能正常完成"""
+
         async def gen():
             for i in range(120):
                 if i % 10 == 0:
@@ -202,6 +212,7 @@ class TestWithHeartbeatCleanup:
 
     async def test_tasks_cancelled_on_normal_exit(self):
         """正常结束后内部 Task 被取消，无泄漏"""
+
         async def gen():
             yield "data: 1\n\n"
 
@@ -214,6 +225,7 @@ class TestWithHeartbeatCleanup:
 
     async def test_tasks_cancelled_on_exception(self):
         """异常退出后内部 Task 被取消"""
+
         async def gen():
             yield "data: 1\n\n"
             raise ValueError("boom")
@@ -226,6 +238,7 @@ class TestWithHeartbeatCleanup:
 
     async def test_heartbeat_task_cancelled_when_gen_finishes(self):
         """生成器结束后心跳 Task 被取消（不继续发心跳）"""
+
         async def gen():
             yield "data: 1\n\n"
 
@@ -235,6 +248,7 @@ class TestWithHeartbeatCleanup:
 
     async def test_gen_raises_immediately(self):
         """生成器立即抛异常：心跳还没开始就被取消"""
+
         async def gen():
             raise ValueError("instant fail")
             yield  # 使其成为 async generator
@@ -283,6 +297,7 @@ class TestWithHeartbeatDisconnectSafety:
 
     async def test_close_completes_within_bound_with_backlog(self):
         """大队列积压 + 消费者即刻退出：收尾必须在有限时间内完成"""
+
         async def gen():
             i = 0
             while True:
@@ -299,6 +314,7 @@ class TestWithHeartbeatDisconnectSafety:
 
     async def test_error_still_propagates(self):
         """错误语义不回退：内层 gen 抛错 → 消费端仍收到 RuntimeError"""
+
         async def gen():
             yield "data: a\n\n"
             raise ValueError("提取管线炸了")

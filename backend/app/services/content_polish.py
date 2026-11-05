@@ -21,6 +21,7 @@
     from app.services.content_polish import sanitize_ai_content, quality_issues
     content = sanitize_ai_content(raw_content)
 """
+
 from __future__ import annotations
 
 import re
@@ -138,8 +139,7 @@ def _table_ranges(text: str) -> list[tuple[int, int]]:
     if not fences:
         return ranges
     # 排除落在围栏代码块内的区间（代码块里以 | 开头的行不是 Markdown 表格）
-    return [(s, e) for s, e in ranges
-            if not any(s >= fs and e <= fe for fs, fe in fences)]
+    return [(s, e) for s, e in ranges if not any(s >= fs and e <= fe for fs, fe in fences)]
 
 
 def _protected_ranges(text: str, *, include_tables: bool = True) -> list[tuple[int, int]]:
@@ -178,12 +178,9 @@ def _apply_rules_outside_ranges(text: str, ranges: list[tuple[int, int]]) -> str
         out.append(_apply_rules(text[cursor:]))
     return "".join(out)
 
-_COMPILED_COLLOQUIAL: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(p), r) for p, r in COLLOQUIAL_RULES]
-_COMPILED_AI_TONE: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(p, re.MULTILINE), r) for p, r in AI_TONE_RULES]
 
-
+_COMPILED_COLLOQUIAL: list[tuple[re.Pattern[str], str]] = [(re.compile(p), r) for p, r in COLLOQUIAL_RULES]
+_COMPILED_AI_TONE: list[tuple[re.Pattern[str], str]] = [(re.compile(p, re.MULTILINE), r) for p, r in AI_TONE_RULES]
 
 
 def _apply_rules(segment: str) -> str:
@@ -215,8 +212,7 @@ def sanitize_ai_content(text: str) -> str:
     if not text or not text.strip():
         return text
 
-    has_protected = bool(_fence_ranges(text)) or any(
-        _TABLE_LINE_RE.match(ln) for ln in text.split("\n"))
+    has_protected = bool(_fence_ranges(text)) or any(_TABLE_LINE_RE.match(ln) for ln in text.split("\n"))
     if not has_protected:
         return _apply_rules(text)
 
@@ -257,7 +253,7 @@ def find_colloquial_hits(text: str) -> list[str]:
         # 含边界断言的规则：search 命中不代表该点替换生效（"估算"中的"估计"
         # 被断言否决，但同段后面有效的"估计"仍会被 sub 替换），逐命中点验证。
         for m in pattern.finditer(scan):
-            replaced = scan[:m.start()] + m.expand(repl) + scan[m.end():]
+            replaced = scan[: m.start()] + m.expand(repl) + scan[m.end() :]
             if replaced != scan:
                 return m.group(0).strip() if strip else m.group(0)
         return ""
@@ -293,6 +289,5 @@ def quality_issues(text: str) -> dict:
     #    不能被豁免），只豁免代码块这一种「正文并未引用」的形态。
     return {
         "colloquial_hits": find_colloquial_hits(text),
-        "abolished_standards": find_abolished_codes(
-            _strip_fences(text or "", include_tables=False)),
+        "abolished_standards": find_abolished_codes(_strip_fences(text or "", include_tables=False)),
     }

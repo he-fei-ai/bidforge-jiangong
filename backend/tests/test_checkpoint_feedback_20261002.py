@@ -19,6 +19,7 @@ fail-soft（异常只 warning 不上抛，绝不污染生成链路）。
 ⚠️ 判据方向约束（与第二十五轮同源）：生成侧判据必须**等于或略宽于**
 审核侧，使「生成侧判无问题」蕴含「预检也判无问题」。
 """
+
 from __future__ import annotations
 
 import ast
@@ -64,11 +65,8 @@ def _selfcheck_trc01(title: str = "", chapter_key: str = "", content: str = "") 
     ⚠️ 先断言「本节确实被识别为计算书章节」—— 否则用例会因判据判否而
     **空转通过**（``not []`` 恒真），测不出任何东西。
     """
-    assert cc._is_calc_section(title, chapter_key), (
-        f"样本前提不成立：「{title}」/「{chapter_key}」未被判为计算书章节")
-    out = cc.checkpoint_selfcheck(
-        content, chapter_key=chapter_key, section_title=title,
-        is_hazardous_basis=False)
+    assert cc._is_calc_section(title, chapter_key), f"样本前提不成立：「{title}」/「{chapter_key}」未被判为计算书章节"
+    out = cc.checkpoint_selfcheck(content, chapter_key=chapter_key, section_title=title, is_hazardous_basis=False)
     return [f for f in out if f.get("rule_id") == "TRC-01"]
 
 
@@ -124,8 +122,7 @@ class TestCalcProcessPredicateParity:
             if not isinstance(pat, str):
                 continue
             # 「数字 + 运算符」形态才是公式判据；[×xX]{2,} 是占位标记，不算
-            if ("\u00d7" in pat and "\\d" in pat) or \
-               ("\uff0f" in pat and "\\d" in pat):
+            if ("\u00d7" in pat and "\\d" in pat) or ("\uff0f" in pat and "\\d" in pat):
                 offenders.append(node.lineno)
         assert not offenders, f"生成侧重抄了公式判据正则：行 {offenders}"
 
@@ -134,9 +131,7 @@ class TestCalcProcessPredicateParity:
         ``has_calc_process``。"""
         src = CC_PATH.read_text(encoding="utf-8")
         tree = ast.parse(src)
-        fn = next(n for n in tree.body
-                  if isinstance(n, ast.FunctionDef)
-                  and n.name == "_calc_process_findings")
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_calc_process_findings")
         assert "has_calc_process(" in ast.get_source_segment(src, fn)
 
     def test_trc01_reported_when_no_formula(self):
@@ -180,8 +175,7 @@ class TestIsCalcSectionParity:
         assert cc._is_calc_section("平面布置图", "calc_drawings")
 
     def test_non_calc_title_rejected(self):
-        for title in ("施工工艺流程", "安全保证措施", "验收要求",
-                      "材料进场计划", ""):
+        for title in ("施工工艺流程", "安全保证措施", "验收要求", "材料进场计划", ""):
             assert not cc._is_calc_section(title, "")
 
     def test_non_calc_chapter_key_rejected(self):
@@ -219,8 +213,7 @@ class TestIsCalcSectionParity:
         for title in ("稳定性计算", "计算", "受力分析", "抗风计算"):
             if any(k in title for k in CALC_TITLE_KEYWORDS):
                 continue  # 命中关键词的标题不在此断言范围
-            assert not cc._is_calc_section(title, ""), (
-                f"「{title}」预检不认，生成侧不得更宽（会产生假缺项）")
+            assert not cc._is_calc_section(title, ""), f"「{title}」预检不认，生成侧不得更宽（会产生假缺项）"
 
 
 class TestTrc01EndToEndParity:
@@ -230,8 +223,7 @@ class TestTrc01EndToEndParity:
         """预检 TRC-01 语义：整体有过程、个别章节缺失时逐章报。
         生成侧自检必须对同一章节同样报出。"""
         sections = [
-            {"id": "s1", "title": "12.1 移动式脚手架稳定性验算",
-             "content": NO_FORMULA},
+            {"id": "s1", "title": "12.1 移动式脚手架稳定性验算", "content": NO_FORMULA},
             {"id": "s2", "title": "13 计算书", "content": WITH_FORMULA},
         ]
         pf = _preflight_trc01(sections)
@@ -243,18 +235,22 @@ class TestTrc01EndToEndParity:
         assert not _selfcheck_trc01("13 计算书", "", WITH_FORMULA)
         assert all(f["section_id"] != "s2" for f in pf)
 
-    @pytest.mark.parametrize("title", [
-        "稳定性验算", "承载力计算", "安全系数分析", "受力计算书",
-    ])
-    def test_generation_side_recognizes_every_preflight_calc_title(self,
-                                                                    title):
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "稳定性验算",
+            "承载力计算",
+            "安全系数分析",
+            "受力计算书",
+        ],
+    )
+    def test_generation_side_recognizes_every_preflight_calc_title(self, title):
         """核心不变量：**生成侧判据 ⊆ 审核侧判据（不漏检）**。
 
         预检按 ``CALC_TITLE_KEYWORDS`` 判「这节是不是计算书章节」，
         生成侧必须同样判 —— 否则出现「预检报 TRC-01 而自检静默」的漏检。
         """
-        assert cc._is_calc_section(title, ""), (
-            f"预检认「{title}」为计算书章节，生成侧漏判（TRC-01 会漏报）")
+        assert cc._is_calc_section(title, ""), f"预检认「{title}」为计算书章节，生成侧漏判（TRC-01 会漏报）"
 
 
 # ===========================================================================
@@ -268,8 +264,7 @@ class TestCrossSectionCopyFindings:
     """
 
     def test_exact_copy_detected(self):
-        secs = [{"id": "a", "title": "1.1", "content": COPY_TEXT},
-                {"id": "b", "title": "4.2", "content": COPY_TEXT}]
+        secs = [{"id": "a", "title": "1.1", "content": COPY_TEXT}, {"id": "b", "title": "4.2", "content": COPY_TEXT}]
         out = cc.cross_section_copy_findings(secs, new_section_id="b")
         assert len(out) == 1
         f = out[0]
@@ -281,23 +276,26 @@ class TestCrossSectionCopyFindings:
 
     def test_new_section_filter_excludes_history(self):
         """只报涉及本章的搬运组 —— 不把历史搬运重复报出。"""
-        secs = [{"id": "a", "title": "1", "content": COPY_TEXT},
-                {"id": "b", "title": "2", "content": COPY_TEXT},
-                {"id": "c", "title": "3", "content": OTHER_TEXT}]
+        secs = [
+            {"id": "a", "title": "1", "content": COPY_TEXT},
+            {"id": "b", "title": "2", "content": COPY_TEXT},
+            {"id": "c", "title": "3", "content": OTHER_TEXT},
+        ]
         assert cc.cross_section_copy_findings(secs, new_section_id="c") == []
         assert cc.cross_section_copy_findings(secs, new_section_id="b")
 
     def test_only_reports_once_per_new_section(self):
         """本章与多个历史章节雷同也只报一条（避免重复扣分）。"""
-        secs = [{"id": "b", "title": "2", "content": COPY_TEXT},
-                {"id": "h1", "title": "1", "content": COPY_TEXT},
-                {"id": "h2", "title": "3", "content": COPY_TEXT}]
+        secs = [
+            {"id": "b", "title": "2", "content": COPY_TEXT},
+            {"id": "h1", "title": "1", "content": COPY_TEXT},
+            {"id": "h2", "title": "3", "content": COPY_TEXT},
+        ]
         out = cc.cross_section_copy_findings(secs, new_section_id="b")
         assert len(out) == 1
 
     def test_no_false_positive_on_unrelated_content(self):
-        secs = [{"id": "a", "title": "1", "content": OTHER_TEXT},
-                {"id": "b", "title": "2", "content": COPY_TEXT}]
+        secs = [{"id": "a", "title": "1", "content": OTHER_TEXT}, {"id": "b", "title": "2", "content": COPY_TEXT}]
         assert cc.cross_section_copy_findings(secs, new_section_id="b") == []
 
     def test_uses_preflight_detector_single_source(self, monkeypatch):
@@ -313,40 +311,37 @@ class TestCrossSectionCopyFindings:
 
         monkeypatch.setattr(dd, "find_cross_section_copies", _sentinel)
         out = cc.cross_section_copy_findings(
-            [{"id": "a", "content": COPY_TEXT},
-             {"id": "b", "content": COPY_TEXT}], new_section_id="b")
+            [{"id": "a", "content": COPY_TEXT}, {"id": "b", "content": COPY_TEXT}], new_section_id="b"
+        )
         assert out == [], "应透传共享检测器结果，不得本地重算"
         assert called == [2], "必须调用共享检测器（否则是本地副本）"
 
     def test_limit_respected(self):
-        secs = [{"id": "a", "content": COPY_TEXT},
-                {"id": "b", "content": COPY_TEXT},
-                {"id": "c", "content": COPY_TEXT}]
-        assert len(cc.cross_section_copy_findings(
-            secs, new_section_id="c", limit=1)) <= 1
+        secs = [{"id": "a", "content": COPY_TEXT}, {"id": "b", "content": COPY_TEXT}, {"id": "c", "content": COPY_TEXT}]
+        assert len(cc.cross_section_copy_findings(secs, new_section_id="c", limit=1)) <= 1
 
     def test_fail_soft_on_bad_input(self):
         """坏输入一律返回空列表，绝不抛异常（fail-soft）。"""
         assert cc.cross_section_copy_findings(None) == []
         assert cc.cross_section_copy_findings([{}]) == []
-        assert cc.cross_section_copy_findings(
-            [{"id": "a"}, {"id": "b"}], new_section_id="b") == []
+        assert cc.cross_section_copy_findings([{"id": "a"}, {"id": "b"}], new_section_id="b") == []
 
     def test_fail_soft_on_detector_failure(self, monkeypatch):
         def _boom(*a, **kw):
             raise RuntimeError("boom")
 
         monkeypatch.setattr(dd, "find_cross_section_copies", _boom)
-        assert cc.cross_section_copy_findings(
-            [{"id": "a", "content": COPY_TEXT},
-             {"id": "b", "content": COPY_TEXT}], new_section_id="b") == []
+        assert (
+            cc.cross_section_copy_findings(
+                [{"id": "a", "content": COPY_TEXT}, {"id": "b", "content": COPY_TEXT}], new_section_id="b"
+            )
+            == []
+        )
 
     def test_finding_shape(self):
-        secs = [{"id": "a", "title": "1", "content": COPY_TEXT},
-                {"id": "b", "title": "2", "content": COPY_TEXT}]
+        secs = [{"id": "a", "title": "1", "content": COPY_TEXT}, {"id": "b", "title": "2", "content": COPY_TEXT}]
         f = cc.cross_section_copy_findings(secs, new_section_id="b")[0]
-        for k in ("rule_id", "checkpoint", "severity", "source",
-                  "message", "suggestion", "evidence"):
+        for k in ("rule_id", "checkpoint", "severity", "source", "message", "suggestion", "evidence"):
             assert k in f, f"缺少字段 {k}"
 
 
@@ -397,6 +392,7 @@ class TestStandardsRegistryDecorationCoverage:
 class TestCrosscheckWiring:
     """接线护栏：CON-06 必须挂在**生成后自检**、锁在开关后面、DB 读有判空。"""
 
+
 # ===========================================================================
 # 六、CON-04 占位符后的**中文**计量单位吸收（生产库证据驱动）
 # ===========================================================================
@@ -409,18 +405,18 @@ class TestPlaceholderTrailingChineseUnits:
     应吸收为括号注记（与既有 ``深度【待定】m`` → ``（m）`` 同一机制）。
     """
 
-    @pytest.mark.parametrize("text,expect", [
-        ("堆放区面积【待补充：堆放区面积】平方米",
-         "堆放区面积按设计文件及现场实际确定（平方米）"),
-        ("每周清运不少于【待补充：清运频次】次",
-         "每周清运不少于按设计文件及现场实际确定（次）"),
-        ("开挖深度【待定】米", "开挖深度按设计文件及现场实际确定（米）"),
-        ("基坑容积【待补充：容积】立方米",
-         "基坑容积按设计文件及现场实际确定（立方米）"),
-        ("钢筋重量【待定】公斤", "钢筋重量按设计文件及现场实际确定（公斤）"),
-        ("养护时间【待定】小时", "养护时间按设计文件及现场实际确定（小时）"),
-        ("墙面涂刷【待定】遍", "墙面涂刷按设计文件及现场实际确定（遍）"),
-    ])
+    @pytest.mark.parametrize(
+        "text,expect",
+        [
+            ("堆放区面积【待补充：堆放区面积】平方米", "堆放区面积按设计文件及现场实际确定（平方米）"),
+            ("每周清运不少于【待补充：清运频次】次", "每周清运不少于按设计文件及现场实际确定（次）"),
+            ("开挖深度【待定】米", "开挖深度按设计文件及现场实际确定（米）"),
+            ("基坑容积【待补充：容积】立方米", "基坑容积按设计文件及现场实际确定（立方米）"),
+            ("钢筋重量【待定】公斤", "钢筋重量按设计文件及现场实际确定（公斤）"),
+            ("养护时间【待定】小时", "养护时间按设计文件及现场实际确定（小时）"),
+            ("墙面涂刷【待定】遍", "墙面涂刷按设计文件及现场实际确定（遍）"),
+        ],
+    )
     def test_chinese_unit_absorbed_into_parentheses(self, text, expect):
         out, fixes = cc.rewrite_placeholder_marks(text)
         assert out == expect
@@ -441,9 +437,7 @@ class TestPlaceholderTrailingChineseUnits:
 
     def test_no_orphan_unit_left_after_rewrite(self):
         """改写后不得遗留「条件短语 + 裸单位」的读不通形态。"""
-        orphan = re.compile(
-            r"按设计文件及现场实际确定"
-            r"(平方米|立方米|公斤|小时|米|遍|次(?!日))(?![）)])")
+        orphan = re.compile(r"按设计文件及现场实际确定" r"(平方米|立方米|公斤|小时|米|遍|次(?!日))(?![）)])")
         texts = [
             "堆放区面积【待补充：堆放区面积】平方米",
             "每周清运不少于【待补充：清运频次】次",
@@ -456,8 +450,7 @@ class TestPlaceholderTrailingChineseUnits:
 
     def test_rewrite_idempotent_with_chinese_units(self):
         """新增单位吸收后仍须幂等（二次改写零变化）。"""
-        for t in ("堆放区面积【待补充：堆放区面积】平方米",
-                  "每周清运不少于【待补充：清运频次】次"):
+        for t in ("堆放区面积【待补充：堆放区面积】平方米", "每周清运不少于【待补充：清运频次】次"):
             once, _ = cc.rewrite_placeholder_marks(t)
             twice, _ = cc.rewrite_placeholder_marks(once)
             assert once == twice
@@ -490,9 +483,16 @@ class TestStd03BaseNumberExemption:
     报它是对的）。本组锁死「真实现行规范一律放行、作废编号照报」两端。
     """
 
-    @pytest.mark.parametrize("code", [
-        "GB 55034", "GB 55032", "GB 50210", "GB 50325-2020", "GB 12523-2011",
-    ])
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "GB 55034",
+            "GB 55032",
+            "GB 50210",
+            "GB 50325-2020",
+            "GB 12523-2011",
+        ],
+    )
     def test_current_codes_not_reported(self, code):
         assert sr.is_known_standard(code) or sr.is_known_base_number(code), code
 
@@ -515,7 +515,7 @@ class TestStd03BaseNumberExemption:
         assert "cross_section_copy_findings" in self.sse
 
     def test_switch_read_with_default_true(self):
-        assert '_crosscheck_dup_on' in self.sse
+        assert "_crosscheck_dup_on" in self.sse
         assert '"content_crosscheck_duplicate", True' in self.sse
 
     def test_gated_by_selfcheck_and_switch(self):
@@ -526,9 +526,10 @@ class TestStd03BaseNumberExemption:
         搬运调用仍由 ``_crosscheck_dup_on``（+ 20 字性能门槛）**单独**门控 ——
         两个独立开关互不连带。
         """
-        assert 'if _crosscheck_dup_on or _crosscheck_values_on:' in self.sse
-        assert ('if _crosscheck_dup_on and len(content or "") >= 20:'
-                in self.sse), "搬运调用必须仍由 _crosscheck_dup_on 单独门控"
+        assert "if _crosscheck_dup_on or _crosscheck_values_on:" in self.sse
+        assert (
+            'if _crosscheck_dup_on and len(content or "") >= 20:' in self.sse
+        ), "搬运调用必须仍由 _crosscheck_dup_on 单独门控"
 
     def test_called_after_checkpoint_selfcheck(self):
         """顺序锁：CON-06 必须在 checkpoint_selfcheck 之后执行
@@ -547,14 +548,12 @@ class TestStd03BaseNumberExemption:
         # P2 修复（2026-10-04）：跨章搬运检测已改为内存 snapshot 增量对比，
         # sentinel 从旧的 `_dup_secs.append` 更新为 `_dup_secs = list(...)`；
         # 但 None-guard 语义完全不变：`_dup_cur` 为 None 时仍回退到空列表。
-        seg = self.sse[self.sse.find("_dup_cur"):
-                       self.sse.find("_dup_secs = list")]
+        seg = self.sse[self.sse.find("_dup_cur") : self.sse.find("_dup_secs = list")]
         assert "if _dup_cur is not None else []" in seg
 
     def test_fail_soft_guarded(self):
         """异常只打 WARNING，绝不阻断正文落库。"""
-        seg = self.sse[self.sse.find("_crosscheck_dup_on"):
-                       self.sse.find("if _ck_findings:")]
+        seg = self.sse[self.sse.find("_crosscheck_dup_on") : self.sse.find("if _ck_findings:")]
         assert "except Exception:" in seg
         assert "exc_info=True" in seg
 
@@ -566,8 +565,7 @@ class TestStd03BaseNumberExemption:
         —— 语义等价于旧的 `_d["content"] = content`（当前章节的最终正文
         会覆盖/写入到快照里参与比对）。这里改断言为新的快照赋值形式。
         """
-        seg = self.sse[self.sse.find("_dup_rows"):
-                       self.sse.find("if _ck_findings:")]
+        seg = self.sse[self.sse.find("_dup_rows") : self.sse.find("if _ck_findings:")]
         assert "_crossdup_snapshot[section_id]" in seg
         # 快照字典里必须包含 content / id / title 三键，且 content 用当前最终正文
         # 🔧 R58 修复：注释里也出现了 `_crossdup_snapshot[section_id]` 字样，
@@ -575,7 +573,7 @@ class TestStd03BaseNumberExemption:
         #    精确匹配 `= {` 赋值语句，跳过注释干扰。
         _snap_idx = seg.find("_crossdup_snapshot[section_id] = {")
         assert _snap_idx >= 0, "未找到 _crossdup_snapshot[section_id] 赋值语句"
-        _snap_block = seg[_snap_idx:_snap_idx + 400]
+        _snap_block = seg[_snap_idx : _snap_idx + 400]
         assert '"content": content' in _snap_block
         assert '"id": section_id' in _snap_block
 
@@ -608,11 +606,10 @@ class TestConstraintMapAndExports:
     def test_alias_contract_is_documented_in_source(self):
         """公开别名的**契约注释必须紧邻赋值行**（防止后人把它拆成独立实现）。"""
         src = (APP / "services" / "preflight_engine.py").read_text(encoding="utf-8")
-        line = next((l for l in src.splitlines()
-                     if l.startswith("has_calc_process = _has_calc_process")), "")
+        line = next((l for l in src.splitlines() if l.startswith("has_calc_process = _has_calc_process")), "")
         assert line, "别名赋值行丢失"
         idx = src.find(line)
-        head = src[max(0, idx - 600):idx]
+        head = src[max(0, idx - 600) : idx]
         assert "TRC-01" in head, "别名上方注释必须写明与 TRC-01 同源的契约"
 
     def test_cross_section_findings_documented_as_fail_soft(self):

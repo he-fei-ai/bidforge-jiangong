@@ -19,36 +19,57 @@ import SectionContentCard, { countPlainTextWords } from "../components/SectionCo
 
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
   });
 }
 if (!(globalThis as any).ResizeObserver) {
   (globalThis as any).ResizeObserver = class {
-    observe() {} unobserve() {} disconnect() {}
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   };
 }
 
 // 隔离：每个用例清空草稿存储并卸载挂载，避免 modal 草稿/弹窗跨用例污染
-beforeEach(() => { localStorage.clear(); });
-afterEach(() => { cleanup(); localStorage.clear(); });
+beforeEach(() => {
+  localStorage.clear();
+});
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+});
 
 const STATUS_COLOR: Record<string, string> = { generated: "green", empty: "default" };
 const STATUS_TEXT: Record<string, string> = { generated: "已生成", empty: "未生成" };
 
 function makeSection(over: Record<string, any> = {}) {
   return {
-    key: "s1", title: "第一章 工程概况", level: 1, status: "generated",
-    word_count: 1200, word_budget: 1500, content: "## 工程概况\n\n这是正文。",
+    key: "s1",
+    title: "第一章 工程概况",
+    level: 1,
+    status: "generated",
+    word_count: 1200,
+    word_budget: 1500,
+    content: "## 工程概况\n\n这是正文。",
     ...over,
   };
 }
 
 function setup(section: any, over: Record<string, any> = {}) {
   const handlers = {
-    onEditStart: vi.fn(), onSave: vi.fn(), onCancel: vi.fn(),
-    onDirtyChange: vi.fn(), onRegenerate: vi.fn(), onChartFixed: vi.fn(),
+    onEditStart: vi.fn(),
+    onSave: vi.fn(),
+    onCancel: vi.fn(),
+    onDirtyChange: vi.fn(),
+    onRegenerate: vi.fn(),
+    onChartFixed: vi.fn(),
   };
   const utils = render(
     <App>
@@ -72,9 +93,11 @@ function setup(section: any, over: Record<string, any> = {}) {
 /** 在给定容器内按文本查找 button（忽略空白，兼容 antd 渲染间距） */
 function btnByText(container: HTMLElement, text: string): HTMLButtonElement | null {
   const norm = (s: string) => (s || "").replace(/\s+/g, "");
-  return (Array.from(container.querySelectorAll("button")).find(
-    (b) => norm(b.textContent).includes(norm(text)),
-  ) as HTMLButtonElement | undefined) ?? null;
+  return (
+    (Array.from(container.querySelectorAll("button")).find((b) =>
+      norm(b.textContent).includes(norm(text)),
+    ) as HTMLButtonElement | undefined) ?? null
+  );
 }
 
 describe("countPlainTextWords（纯函数）", () => {
@@ -125,11 +148,14 @@ describe("SectionContentCard · 进入编辑（受控契约）", () => {
 
   it("点击手动编辑（有草稿）：弹「恢复草稿」确认框", () => {
     localStorage.clear();
-    localStorage.setItem("draft:s1", JSON.stringify({ content: "上次未保存的草稿", savedAt: Date.now() }));
+    localStorage.setItem(
+      "draft:s1",
+      JSON.stringify({ content: "上次未保存的草稿", savedAt: Date.now() }),
+    );
     const { container } = setup(makeSection());
     fireEvent.click(btnByText(container, "手动编辑")!);
-    const restore = Array.from(document.body.querySelectorAll(".ant-btn")).find(
-      (b) => (b.textContent || "").includes("恢复草稿"),
+    const restore = Array.from(document.body.querySelectorAll(".ant-btn")).find((b) =>
+      (b.textContent || "").includes("恢复草稿"),
     );
     expect(restore).toBeTruthy();
   });
@@ -175,11 +201,13 @@ describe("SectionContentCard · 编辑态 UI（isEditing=true）", () => {
     fireEvent.change(ta, { target: { value: "改了点东西" } });
     fireEvent.click(btnByText(container, "取消")!);
     const norm = (s: string) => (s || "").replace(/\s+/g, "");
-    const ok = Array.from(document.body.querySelectorAll(".ant-btn")).find(
-      (b) => norm(b.textContent).includes("放弃"),
+    const ok = Array.from(document.body.querySelectorAll(".ant-btn")).find((b) =>
+      norm(b.textContent).includes("放弃"),
     ) as HTMLButtonElement;
     expect(ok).toBeTruthy();
-    await act(async () => { fireEvent.click(ok); });
+    await act(async () => {
+      fireEvent.click(ok);
+    });
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
@@ -196,11 +224,14 @@ describe("SectionContentCard · 草稿自动保存", () => {
     const { container } = setup(makeSection(), { isEditing: true });
     const ta = container.querySelector("textarea")!;
     fireEvent.change(ta, { target: { value: "可恢复的草稿内容" } });
-    await waitFor(() => {
-      const raw = localStorage.getItem("draft:s1");
-      expect(raw).toBeTruthy();
-      expect(JSON.parse(raw!).content).toBe("可恢复的草稿内容");
-    }, { timeout: 2000 });
+    await waitFor(
+      () => {
+        const raw = localStorage.getItem("draft:s1");
+        expect(raw).toBeTruthy();
+        expect(JSON.parse(raw!).content).toBe("可恢复的草稿内容");
+      },
+      { timeout: 2000 },
+    );
   });
 });
 
@@ -256,8 +287,8 @@ describe("SectionContentCard · 边界场景", () => {
     // dirty 状态下点取消会弹确认框
     fireEvent.click(btnByText(container, "取消")!);
     const norm = (s: string) => (s || "").replace(/\s+/g, "");
-    const confirmBtn = Array.from(document.body.querySelectorAll(".ant-btn")).find(
-      (b) => norm(b.textContent).includes("放弃"),
+    const confirmBtn = Array.from(document.body.querySelectorAll(".ant-btn")).find((b) =>
+      norm(b.textContent).includes("放弃"),
     );
     expect(confirmBtn).toBeTruthy();
   });

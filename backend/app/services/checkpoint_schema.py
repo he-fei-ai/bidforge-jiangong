@@ -9,6 +9,7 @@ Usage:
 This eliminates the manual sync drift that caused G13-5 (whitelist missing
 event/partial) and G12-6 (frontend never consumed content_result).
 """
+
 from __future__ import annotations
 
 from typing import Any

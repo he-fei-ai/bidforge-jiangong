@@ -3,6 +3,7 @@
 从 sse_handlers.generate_content 中抽出的"目标章节筛选"逻辑：
 范围（全部 / 指定子树）× 模式（all / missing）× 是否强制重写。
 """
+
 from __future__ import annotations
 
 import math
@@ -33,8 +34,8 @@ FENCE_RE_DEPRECATED = None  # deprecated：请用 strip_fenced_code_blocks
 # ✅ 2026-10-11（R66 字数偏差修复）：默认预算 1500 → 1200（四档之"标准"档）。
 #    历史 1500 是散落在 8 处字面量里的"事实默认"，从未与任何档位对齐；
 #    现统一收口到 DEFAULT_WORD_BUDGET，且其值等于 WORD_BUDGET_DEFAULT_TIER。
-DEFAULT_WORD_BUDGET = 1200   # 未设置预算时的默认目标字数（= 标准档）
-WORD_UNDER_RATIO = 0.8       # 低于预算 80% → under（同时是"是否需要续写"的门槛）
+DEFAULT_WORD_BUDGET = 1200  # 未设置预算时的默认目标字数（= 标准档）
+WORD_UNDER_RATIO = 0.8  # 低于预算 80% → under（同时是"是否需要续写"的门槛）
 # ✅ 2026-10-06（R47 债-1）：WORD_OVER_RATIO 数值搬入
 #    ``services/ai/prompts/_limits.py`` 单一事实源，本模块仍以同名可读。
 # ✅ R76（2026-10-13）：围栏闭合判据唯一事实源。本模块只保留历史签名与用途口径，
@@ -157,17 +158,19 @@ def word_audit_summary(rows: list[dict], *, tolerance: float = 0.1) -> dict:
         if wc < LEAF_MIN_WORD_BUDGET:
             n_below_floor += 1
         ratios.append(dev["ratio"])
-        items.append({
-            "section_id": r.get("section_id", ""),
-            "title": r.get("title", ""),
-            "level": int(r.get("level") or 0),
-            "word_budget": wb,
-            "word_count": wc,
-            "deviation": dev["deviation"],
-            "ratio": dev["ratio"],
-            "within_band": dev["within_band"],
-            "word_status": status,
-        })
+        items.append(
+            {
+                "section_id": r.get("section_id", ""),
+                "title": r.get("title", ""),
+                "level": int(r.get("level") or 0),
+                "word_budget": wb,
+                "word_count": wc,
+                "deviation": dev["deviation"],
+                "ratio": dev["ratio"],
+                "within_band": dev["within_band"],
+                "word_status": status,
+            }
+        )
     total = len(items)
     # 中位数比率（sorted 取中间值，偶数取平均）；空输入 0.0
     srt = sorted(ratios)
@@ -195,9 +198,18 @@ def word_audit_summary(rows: list[dict], *, tolerance: float = 0.1) -> dict:
 # 时模型会把"目标字数"当参考持续扩写（实测 62% 章节 over），既浪费时间又触发
 # 额外的续写/压缩调用。此处按目标字数折算输出上限：既给足空间，又给"跑飞"设
 # 物理上限（触顶即结束，不会为了多写字而拉长耗时）。
-WORD_TOKENS_PER_CHAR = 0.8    # 中文正文约 0.7~0.8 token/字（取保守上界）
+WORD_TOKENS_PER_CHAR = 0.8  # 中文正文约 0.7~0.8 token/字（取保守上界）
 MAX_TOKENS_OVER_FACTOR = 1.25  # 相对目标字数的上浮（提示词硬上限 1.2X 留一档余量）
-MAX_TOKENS_FLOOR = 1536        # 下限保护：避免短章节被截断
+# ✅ 2026-11-05（方案 A · 正文输出预算）：1536 → 4000。
+#    生产实证：短章节 / 续写缺口较小时，1536 的下限经常被模型「思考 + 正文」
+#    一起吃掉（尤其推理模型），触发截断重试甚至空结果。4000 覆盖正文首稿
+#    （sse_handlers 4684）、收缩（sse_handlers 4516）与续写
+#    （content_runtime.continue_max_tokens → 本函数）**全部**经本函数折算的路径，
+#    无需各自改常量；不走本函数的场景（目录/事实提取等）不受影响。
+#    与 provider_factory 的 ai_reasoning_output_floor=4096 关系：
+#    正文按 4000 发出；若候选是推理模型，attempt 层再取 max(4000, 4096)=4096，
+#    **不会互相覆盖**（取较大者）；重试上限仍受 ai_reasoning_max_tokens 约束。
+MAX_TOKENS_FLOOR = 4000  # 下限保护：避免正文/续写被思考过程挤占而截断
 
 
 def max_tokens_for_budget(word_budget: int, *, chars: int | None = None) -> int:
@@ -324,19 +336,19 @@ def text_word_count(content: str) -> int:
 #    该补的没补」两类相反错误同时发生（偏短章节在字符口径下提前满足续写门槛）。
 #    把两个读数并列显示，是为了让「是否切口径、预算要不要同时下调」这个决策
 #    有可对照的证据，而不是继续靠一条注释里的旧均值驱动默认值。
-_RW_IMG_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")             # 图片整体不计（含图题语法）
-_RW_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")           # 链接只留锚文字
-_RW_REF_LINK_RE = re.compile(r"\[([^\]]*)\]\[[^\]]*\]")      # 引用式链接同上
+_RW_IMG_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")  # 图片整体不计（含图题语法）
+_RW_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")  # 链接只留锚文字
+_RW_REF_LINK_RE = re.compile(r"\[([^\]]*)\]\[[^\]]*\]")  # 引用式链接同上
 _RW_URL_RE = re.compile(r"(?:https?|file|yibiao-asset)://\S+")  # 裸 URL 不计
 _RW_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 _RW_HTML_TAG_RE = re.compile(r"<br\s*/?>", re.I)
 _RW_HTML_ANY_RE = re.compile(r"<[^>]{1,200}>")
 _RW_INLINE_CODE_RE = re.compile(r"`[^`]*`")
 _RW_TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]+\|[\s:|-]*$")  # 表格分隔行整行剔除
-_RW_LIST_MARK_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")     # 列表符号
-_RW_MARKERS_RE = re.compile(r"[#>*_{}\\]|~~|\*\*|__|&nbsp;")    # 残留结构标记
-_RW_HEADING_RE = re.compile(r"^\s*#{1,6}\s*")                  # 标题井号
-_RW_QUOTE_RE = re.compile(r"^\s*>\s?")                        # 引用标记
+_RW_LIST_MARK_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")  # 列表符号
+_RW_MARKERS_RE = re.compile(r"[#>*_{}\\]|~~|\*\*|__|&nbsp;")  # 残留结构标记
+_RW_HEADING_RE = re.compile(r"^\s*#{1,6}\s*")  # 标题井号
+_RW_QUOTE_RE = re.compile(r"^\s*>\s?")  # 引用标记
 # CJK 字符（含日文假名）：逐字计
 _RW_CJK_IDEO_RE = re.compile(r"[\u3400-\u9fff\u3040-\u30ff]")
 # 西文/数字 token：按词计（``1:1.2`` / ``GB50007`` 这类带连接符的视为一个词）
@@ -451,8 +463,7 @@ def word_closeout_notice(
     message = ""
     if status == "under":
         message = (
-            f"正文约 {wc} 字，低于目标 {wb} 字（续写未能补齐或已停止，"
-            f"系统不强行灌写）——请人工核对是否需要补充。"
+            f"正文约 {wc} 字，低于目标 {wb} 字（续写未能补齐或已停止，" f"系统不强行灌写）——请人工核对是否需要补充。"
         )
     elif status == "over":
         message = (
@@ -863,8 +874,7 @@ def verify_generation_order(dispatched, expected) -> dict:
     act_set = set(act)
     missing = [x for x in exp if x not in act_set]
     unexpected = [x for x in act if x not in exp_set]
-    ok = (first_mismatch is None and not missing and not unexpected
-          and len(act) == len(exp))
+    ok = first_mismatch is None and not missing and not unexpected and len(act) == len(exp)
     return {
         "ok": ok,
         "expected_count": len(exp),
@@ -876,7 +886,7 @@ def verify_generation_order(dispatched, expected) -> dict:
 
 
 def summarize_fact_mapping(mapping, audits=None) -> dict:
-    """"章节 → 所需事实"映射表的终态**汇总口径**（纯函数，绝不抛异常）。
+    """ "章节 → 所需事实"映射表的终态**汇总口径**（纯函数，绝不抛异常）。
 
     R105（2026-10-18 · G4/G3 接线收口）：全量映射表（``chapter_fact_mapping``
     产物）进 checkpoint 落库（DB 面可取证），SSE 终态事件只带本汇总 ——
@@ -890,8 +900,9 @@ def summarize_fact_mapping(mapping, audits=None) -> dict:
 
     Returns:
         ``{sections, sections_with_facts, sections_without_facts, fact_refs,
-        budget_dropped_total, budget_dropped_sections}``；入参为脏数据时
-        按空汇总降级返回（带 ``degraded=True``），不影响终态落盘。
+        budget_dropped_total, budget_dropped_sections, truncated_total,
+        truncated_sections}``；入参为脏数据时按空汇总降级返回
+        （带 ``degraded=True``），不影响终态落盘。
     """
     try:
         entries = [m for m in (mapping or []) if isinstance(m, dict)]
@@ -903,6 +914,11 @@ def summarize_fact_mapping(mapping, audits=None) -> dict:
             "fact_refs": sum(int(m.get("fact_count") or 0) for m in entries),
             "budget_dropped_total": 0,
             "budget_dropped_sections": 0,
+            # ✅ 账实相符（2026-11-04）：截断注入（单条 per_fact 硬切）单列，
+            #    与 budget_dropped（整条未注入）区分，避免「注入的是残缺内容」
+            #    被计入完整注入。
+            "truncated_total": 0,
+            "truncated_sections": 0,
         }
         for v in (audits or {}).values():
             if not isinstance(v, dict):
@@ -911,12 +927,23 @@ def summarize_fact_mapping(mapping, audits=None) -> dict:
             if n > 0:
                 stats["budget_dropped_total"] += n
                 stats["budget_dropped_sections"] += 1
+            tn = int(v.get("truncated_count") or 0)
+            if tn > 0:
+                stats["truncated_total"] += tn
+                stats["truncated_sections"] += 1
         return stats
     except (TypeError, ValueError):
-        return {"sections": 0, "sections_with_facts": 0,
-                "sections_without_facts": 0, "fact_refs": 0,
-                "budget_dropped_total": 0, "budget_dropped_sections": 0,
-                "degraded": True}
+        return {
+            "sections": 0,
+            "sections_with_facts": 0,
+            "sections_without_facts": 0,
+            "fact_refs": 0,
+            "budget_dropped_total": 0,
+            "budget_dropped_sections": 0,
+            "truncated_total": 0,
+            "truncated_sections": 0,
+            "degraded": True,
+        }
 
 
 def prev_leaf_tail_summary(content: str, max_chars: int = 300) -> str:
@@ -1003,23 +1030,20 @@ def select_target_leaves(
         # 旧实现只看 status，status='empty' 但 content 非空（数据不一致）的章节
         # 会被选中重新生成，覆盖已有正文。
         target_set = {
-            s["id"] for s in all_sections
+            s["id"]
+            for s in all_sections
             if s["id"] in target_set
             and s.get("status") in ("empty", "failed", "pending")
             and not (s.get("content") or "").strip()
         }
     elif mode == "continue":
         # ✅ 续写模式：只保留已有非空正文的章节（与 missing 互为补集）。
-        target_set = {
-            s["id"] for s in all_sections
-            if s["id"] in target_set
-            and (s.get("content") or "").strip()
-        }
+        target_set = {s["id"] for s in all_sections if s["id"] in target_set and (s.get("content") or "").strip()}
     elif not force_rewrite:
         target_set = {
-            s["id"] for s in all_sections
-            if s["id"] in target_set
-            and not ((s.get("content") or "").strip() and s.get("word_count", 0) > 0)
+            s["id"]
+            for s in all_sections
+            if s["id"] in target_set and not ((s.get("content") or "").strip() and s.get("word_count", 0) > 0)
         }
 
     # 3) 叶子
@@ -1071,8 +1095,7 @@ def build_sibling_context(
     siblings = [s for s in pool if s.get("id") != leaf.get("id")]
     # ✅ R102（G2）：排序键收敛到 section_sort_order_key（脏 sort_order 不再
     #    字符串/int 混排 TypeError，与展示序/导出序同一归一口径）。
-    siblings.sort(key=lambda s: section_sort_order_key(
-        s.get("sort_order"), s.get("id")))
+    siblings.sort(key=lambda s: section_sort_order_key(s.get("sort_order"), s.get("id")))
 
     lines: list[str] = []
     for s in siblings[:max_siblings]:
@@ -1082,11 +1105,8 @@ def build_sibling_context(
     # 前序同级摘要：sort_order 小于当前、离当前最近的一个已有正文者
     # （✅ R102（G2）：比较也走归一键，脏字符串与 int 不再混排 TypeError）
     prev_summary = ""
-    cur_order = section_sort_order_key(
-        leaf.get("sort_order"), leaf.get("id"))[0]
-    for s in reversed([x for x in siblings
-                       if section_sort_order_key(
-                           x.get("sort_order"), x.get("id"))[0] < cur_order]):
+    cur_order = section_sort_order_key(leaf.get("sort_order"), leaf.get("id"))[0]
+    for s in reversed([x for x in siblings if section_sort_order_key(x.get("sort_order"), x.get("id"))[0] < cur_order]):
         content = (generated_contents or {}).get(s["id"]) or s.get("content") or ""
         content = content.strip()
         if content:

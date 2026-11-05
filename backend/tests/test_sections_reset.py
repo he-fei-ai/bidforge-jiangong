@@ -10,6 +10,7 @@ POST /schemes/{id}/sections/reset-content 的核心不变量：
      （与 update_section 手动保存同一口径）；
   4. 方案不存在 404；跨方案隔离（只清本方案）；重复重置幂等。
 """
+
 import uuid
 
 import pytest
@@ -20,48 +21,107 @@ from fastapi import HTTPException
 async def _seed_scheme(db, scheme_id: str, *, with_content: bool = True):
     """插入 scheme + 3 章（1 一级 + 2 二级），二级章带正文与随生产物。"""
     pid = f"p-{scheme_id[:8]}"
-    await db.execute(
-        "INSERT INTO projects (id, name) VALUES (?, ?)", (pid, "测试项目"))
-    await db.execute(
-        "INSERT INTO schemes (id, project_id, name) VALUES (?, ?, ?)",
-        (scheme_id, pid, "测试方案"))
+    await db.execute("INSERT INTO projects (id, name) VALUES (?, ?)", (pid, "测试项目"))
+    await db.execute("INSERT INTO schemes (id, project_id, name) VALUES (?, ?, ?)", (scheme_id, pid, "测试方案"))
     root_id = f"{scheme_id}-root"
     child1 = f"{scheme_id}-c1"
     child2 = f"{scheme_id}-c2"
     rows = [
         # (id, parent_id, title, level, sort_order, word_budget, content, status,
         #  word_count, word_status, review_status, flowchart_json, gantt_json)
-        (root_id, "", "第一章 总述", 1, 0, 2000,
-         "一级正文" if with_content else "", "empty" if not with_content else "generated",
-         0 if not with_content else 4, "normal" if not with_content else "under", "", "", ""),
-        (child1, root_id, "1.1 工程概况", 2, 0, 1500,
-         "概况正文" * 10 if with_content else "", "generated" if with_content else "empty",
-         40 if with_content else 0, "normal", "已审核" if with_content else "",
-         '{"type":"flowchart"}' if with_content else "",
-         '{"type":"gantt"}' if with_content else ""),
-        (child2, root_id, "1.2 施工工艺", 2, 1, 1800,
-         "工艺正文" * 10 if with_content else "", "generated" if with_content else "empty",
-         40 if with_content else 0, "normal", "已审核" if with_content else "",
-         "", ""),
+        (
+            root_id,
+            "",
+            "第一章 总述",
+            1,
+            0,
+            2000,
+            "一级正文" if with_content else "",
+            "empty" if not with_content else "generated",
+            0 if not with_content else 4,
+            "normal" if not with_content else "under",
+            "",
+            "",
+            "",
+        ),
+        (
+            child1,
+            root_id,
+            "1.1 工程概况",
+            2,
+            0,
+            1500,
+            "概况正文" * 10 if with_content else "",
+            "generated" if with_content else "empty",
+            40 if with_content else 0,
+            "normal",
+            "已审核" if with_content else "",
+            '{"type":"flowchart"}' if with_content else "",
+            '{"type":"gantt"}' if with_content else "",
+        ),
+        (
+            child2,
+            root_id,
+            "1.2 施工工艺",
+            2,
+            1,
+            1800,
+            "工艺正文" * 10 if with_content else "",
+            "generated" if with_content else "empty",
+            40 if with_content else 0,
+            "normal",
+            "已审核" if with_content else "",
+            "",
+            "",
+        ),
     ]
     for r in rows:
-        (sid, parent_id, title, level, sort_order, budget,
-         content, status, word_count, word_status, review_status,
-         flowchart, gantt) = r
+        (
+            sid,
+            parent_id,
+            title,
+            level,
+            sort_order,
+            budget,
+            content,
+            status,
+            word_count,
+            word_status,
+            review_status,
+            flowchart,
+            gantt,
+        ) = r
         await db.execute(
             "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
             " description, level, sort_order, status, word_count, word_budget,"
             " word_status, content, review_status, flowchart_json, gantt_json,"
             " outline_json, locked)"
             " VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
-            (sid, scheme_id, pid, parent_id, title, level, sort_order,
-             status, word_count, budget, word_status, content,
-             review_status, flowchart, gantt, '{"id":"1.1"}'))
+            (
+                sid,
+                scheme_id,
+                pid,
+                parent_id,
+                title,
+                level,
+                sort_order,
+                status,
+                word_count,
+                budget,
+                word_status,
+                content,
+                review_status,
+                flowchart,
+                gantt,
+                '{"id":"1.1"}',
+            ),
+        )
     if with_content:
         await db.execute(
             "INSERT INTO chart_predictions (id, scheme_id, section_id, chart_type, needed)"
             " VALUES (?, ?, ?, 'gantt', 1)",
-            (f"cp-{scheme_id[:8]}", scheme_id, child1))
+            (f"cp-{scheme_id[:8]}", scheme_id, child1),
+        )
     await db.commit()
     return root_id, child1, child2
 
@@ -107,8 +167,7 @@ class TestResetContent:
         scheme_id = str(uuid.uuid4())
         await _seed_scheme(db_conn, scheme_id)
         await sec.reset_content(scheme_id, db=db_conn)
-        cur = await db_conn.execute(
-            "SELECT COUNT(*) FROM chart_predictions WHERE scheme_id=?", (scheme_id,))
+        cur = await db_conn.execute("SELECT COUNT(*) FROM chart_predictions WHERE scheme_id=?", (scheme_id,))
         assert (await cur.fetchone())[0] == 0
 
     @pytest.mark.asyncio
@@ -126,12 +185,16 @@ class TestResetContent:
         旧 fixture 无 status 字段，在状态感知守卫下会被当成终态残留而放行。
         """
         from app.services.ai import task_registry as tr
+
         scheme_id = str(uuid.uuid4())
         root_id, _, _ = await _seed_scheme(db_conn, scheme_id)
-        monkeypatch.setattr(tr, "_tasks", {
-            "t1": {"type": "content_generation", "status": "running",
-                   "scheme_id": scheme_id},
-        })
+        monkeypatch.setattr(
+            tr,
+            "_tasks",
+            {
+                "t1": {"type": "content_generation", "status": "running", "scheme_id": scheme_id},
+            },
+        )
         with pytest.raises(HTTPException) as ei:
             await sec.reset_content(scheme_id, db=db_conn)
         assert ei.value.status_code == 409
@@ -146,12 +209,16 @@ class TestResetContent:
         的手工保存 / 重置正文永久 409，只能重启后端。
         """
         from app.services.ai import task_registry as tr
+
         scheme_id = str(uuid.uuid4())
         await _seed_scheme(db_conn, scheme_id)
-        monkeypatch.setattr(tr, "_tasks", {
-            "t1": {"type": "content_generation", "status": "stopped",
-                   "scheme_id": scheme_id},
-        })
+        monkeypatch.setattr(
+            tr,
+            "_tasks",
+            {
+                "t1": {"type": "content_generation", "status": "stopped", "scheme_id": scheme_id},
+            },
+        )
         result = await sec.reset_content(scheme_id, db=db_conn)
         assert result["ok"] is True and result["cleared"] == 3
 
@@ -159,11 +226,16 @@ class TestResetContent:
     async def test_other_scheme_task_does_not_block(self, db_conn, monkeypatch):
         """其它方案的生成任务不应阻断本方案重置。"""
         from app.services.ai import task_registry as tr
+
         scheme_id = str(uuid.uuid4())
         await _seed_scheme(db_conn, scheme_id)
-        monkeypatch.setattr(tr, "_tasks", {
-            "t1": {"type": "content_generation", "scheme_id": "another-scheme"},
-        })
+        monkeypatch.setattr(
+            tr,
+            "_tasks",
+            {
+                "t1": {"type": "content_generation", "scheme_id": "another-scheme"},
+            },
+        )
         result = await sec.reset_content(scheme_id, db=db_conn)
         assert result["ok"] is True and result["cleared"] == 3
 
@@ -177,8 +249,7 @@ class TestResetContent:
         first = await sec.reset_content(s1, db=db_conn)
         assert first == {"ok": True, "cleared": 3}
         # 另一方案不受影响
-        cur = await db_conn.execute(
-            "SELECT COUNT(*) FROM sections WHERE scheme_id=? AND content!=''", (s2,))
+        cur = await db_conn.execute("SELECT COUNT(*) FROM sections WHERE scheme_id=? AND content!=''", (s2,))
         assert (await cur.fetchone())[0] == 3
         # 幂等：第二次重置 cleared=0
         again = await sec.reset_content(s1, db=db_conn)

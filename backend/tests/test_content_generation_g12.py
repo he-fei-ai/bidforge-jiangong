@@ -27,6 +27,7 @@
          _tasks[task_id] 永久残留 → 直接触发 G12-4。修复：写库与广播各自
          try/except，内存清理放进 finally 无条件执行。
 """
+
 import asyncio
 import inspect
 import re
@@ -54,15 +55,15 @@ class TestStopIsNotFailure:
         """停止检查点必须抛 CancelledError，不得 yield section_error。"""
         src = self._gen_one_src()
         i = src.index("if is_stopped(task_id):")
-        assert "raise asyncio.CancelledError()" in src[i:i + 1400], (
+        assert "raise asyncio.CancelledError()" in src[i : i + 1400], (
             "gen_one 的停止检查点必须抛 CancelledError —— 旧实现 yield "
-            "section_error 后 return，前端落成 failed 日志，与 stopped 终态矛盾")
+            "section_error 后 return，前端落成 failed 日志，与 stopped 终态矛盾"
+        )
 
     def test_no_stopped_reason_section_error_in_gen_one(self):
         """gen_one 内不得再出现 reason='任务已停止' 的 section_error 事件。"""
         src = self._gen_one_src()
-        assert '"reason": "任务已停止"' not in src, (
-            "停止语义修复被回退：该事件会让被停止打断的章节在前端显示「失败」")
+        assert '"reason": "任务已停止"' not in src, "停止语义修复被回退：该事件会让被停止打断的章节在前端显示「失败」"
 
     def test_cancelled_branch_gated_by_is_stopped(self):
         """except CancelledError 分支必须以 is_stopped 为闸门（停止时静默退出）。
@@ -79,10 +80,11 @@ class TestStopIsNotFailure:
         i = src.index("async def gen_one(")
         j1 = src.index("except asyncio.CancelledError:", i)
         j = src.index("except asyncio.CancelledError:", j1 + 1)
-        tail = src[j:j + 1200]
+        tail = src[j : j + 1200]
         assert "if not db_written and not is_stopped(task_id):" in tail, (
             "停止时不得发 section_error、不得标记章节 failed（会污染质量统计，"
-            "并使 missing 模式误选这些章节重新生成）")
+            "并使 missing 模式误选这些章节重新生成）"
+        )
 
     def test_guarded_gen_stop_uses_same_semantics(self):
         """guarded_gen 的停止检查点与 gen_one 同语义（抛 CancelledError）。
@@ -95,12 +97,12 @@ class TestStopIsNotFailure:
         """
         src = inspect.getsource(sh.generate_content)
         i = src.index("async def guarded_gen(")
-        rest = src[i + 1:]
+        rest = src[i + 1 :]
         m = re.search(r"\n    (?:async def |def |@)", rest)
-        block = rest[:m.start()] if m else rest
-        assert "raise asyncio.CancelledError()" in block, (
-            "guarded_gen 必须与本文件其它检查点一致的协作式停止语义（不记为章节失败）"
-        )
+        block = rest[: m.start()] if m else rest
+        assert (
+            "raise asyncio.CancelledError()" in block
+        ), "guarded_gen 必须与本文件其它检查点一致的协作式停止语义（不记为章节失败）"
 
 
 # ---------------------------------------------------------------------------
@@ -116,10 +118,9 @@ class TestWordCountAfterClip:
         pos = block.index("await apply_inline_chart_plan(")
         tail = block[pos:]
         assert "text_word_count(content)" in tail, (
-            "锁内裁剪可能删掉正文片段，字数必须在裁剪之后重算，"
-            "否则库里/SSE 载荷/超字数计数三处口径漂移")
-        assert "word_status_for(" in tail, (
-            "word_status 必须与裁剪后字数同批计算，否则落库状态与字数不匹配")
+            "锁内裁剪可能删掉正文片段，字数必须在裁剪之后重算，" "否则库里/SSE 载荷/超字数计数三处口径漂移"
+        )
+        assert "word_status_for(" in tail, "word_status 必须与裁剪后字数同批计算，否则落库状态与字数不匹配"
 
 
 # ---------------------------------------------------------------------------
@@ -129,8 +130,7 @@ class TestContentCheckpointContract:
     def test_whitelist_covers_all_terminal_fields(self):
         kind, fields = sh._CHECKPOINT_KINDS["content_generation"]
         assert kind == "content_result"
-        for f in ("failed_count", "failed_sections", "run_words", "over_count",
-                  "done", "total", "words", "word_count"):
+        for f in ("failed_count", "failed_sections", "run_words", "over_count", "done", "total", "words", "word_count"):
             assert f in fields, f"白名单缺 {f}：断线重挂无法还原该字段"
 
     def test_payload_builder_carries_terminal_fields(self):
@@ -145,24 +145,30 @@ class TestContentCheckpointContract:
         src = inspect.getsource(sh.generate_content)
         # 2026-09-23：新增「空任务（没有待生成章节）」收尾点，同样走唯一拼装点
         assert src.count("_content_ckpt_payload(") == 8, (
-            "应为 1 处定义 + 7 处调用（stopped / 全章失败 / completed / "
-            "整批失败 / 断线兜底 / 服务端取消 / 空任务）")
+            "应为 1 处定义 + 7 处调用（stopped / 全章失败 / completed / " "整批失败 / 断线兜底 / 服务端取消 / 空任务）"
+        )
         assert "**_ckpt" not in src, "仍存在绕过拼装点的 {**_ckpt} 手拼"
 
     def test_attach_checkpoint_result_passes_through_new_fields(self):
         """白名单透传行为：run_words / over_count / failed_count 不得被过滤，
         内部字段不得泄漏。"""
         import json as _json
+
         ckpt = {
-            "kind": "content_result", "event": "stopped",
-            "message": "用户已停止", "done": 3, "total": 5,
+            "kind": "content_result",
+            "event": "stopped",
+            "message": "用户已停止",
+            "done": 3,
+            "total": 5,
             "failed_count": 2,
             "failed_sections": [{"section_id": "s1", "reason": "超时"}],
-            "words": 4200, "run_words": 4200, "over_count": 1,
-            "word_count": 9000, "_internal": "secret",
+            "words": 4200,
+            "run_words": 4200,
+            "over_count": 1,
+            "word_count": 9000,
+            "_internal": "secret",
         }
-        row = {"task_type": "content_generation",
-               "checkpoint_json": _json.dumps(ckpt, ensure_ascii=False)}
+        row = {"task_type": "content_generation", "checkpoint_json": _json.dumps(ckpt, ensure_ascii=False)}
         result: dict = {}
         sh._attach_checkpoint_result(row, result)
         cr = result.get("content_result")
@@ -180,8 +186,11 @@ class TestContentCheckpointContract:
         assert result == {}
         # kind 不匹配同样跳过
         import json as _json
-        row2 = {"task_type": "content_generation",
-                "checkpoint_json": _json.dumps({"kind": "outline_result", "outline": []})}
+
+        row2 = {
+            "task_type": "content_generation",
+            "checkpoint_json": _json.dumps({"kind": "outline_result", "outline": []}),
+        }
         result2: dict = {}
         sh._attach_checkpoint_result(row2, result2)
         assert result2 == {}
@@ -189,7 +198,7 @@ class TestContentCheckpointContract:
     def test_attach_survives_malformed_json(self):
         row = {"task_type": "content_generation", "checkpoint_json": "{不是JSON"}
         result: dict = {}
-        sh._attach_checkpoint_result(row, result)   # 不得抛异常
+        sh._attach_checkpoint_result(row, result)  # 不得抛异常
         assert result == {}
 
 
@@ -198,14 +207,17 @@ class TestContentCheckpointContract:
 # ---------------------------------------------------------------------------
 class TestContentGenerationGuard:
     @staticmethod
-    def add_task(scheme_id: str = "sc1", *, task_type: str = "content_generation",
-                 status: str = "running") -> str:
+    def add_task(scheme_id: str = "sc1", *, task_type: str = "content_generation", status: str = "running") -> str:
         """往 task_registry 内存态塞一个任务条目（测试专用）。"""
         tid = f"t-{task_type}-{scheme_id}-{status}"
         tr._tasks[tid] = {
-            "type": task_type, "status": status, "scheme_id": scheme_id,
-            "progress": 0.5, "message": "",
-            "pause_event": asyncio.Event(), "stop_event": asyncio.Event(),
+            "type": task_type,
+            "status": status,
+            "scheme_id": scheme_id,
+            "progress": 0.5,
+            "message": "",
+            "pause_event": asyncio.Event(),
+            "stop_event": asyncio.Event(),
             "child_tasks": set(),
         }
         return tid
@@ -231,8 +243,9 @@ class TestContentGenerationGuard:
         """
         tr._tasks.clear()
         self.add_task(status=status)
-        assert sec.content_generation_in_progress("sc1") is None, (
-            f"status={status} 的任务不应阻塞手工编辑（它是终态残留）")
+        assert (
+            sec.content_generation_in_progress("sc1") is None
+        ), f"status={status} 的任务不应阻塞手工编辑（它是终态残留）"
 
     def test_missing_status_ignored(self):
         """脏数据（无 status 字段）按终态处理：不阻塞。
@@ -258,17 +271,17 @@ class TestContentGenerationGuard:
 
 async def _seed_scheme(db, scheme_id: str = "sc1") -> None:
     """插入最小 projects / schemes / sections 行（手工保存与重置正文的前置数据）。"""
-    await db.execute(
-        "INSERT INTO projects (id, name) VALUES (?, ?)", ("p1", "项目A"))
+    await db.execute("INSERT INTO projects (id, name) VALUES (?, ?)", ("p1", "项目A"))
     await db.execute(
         "INSERT INTO schemes (id, project_id, name, type) VALUES (?, ?, ?, ?)",
-        (scheme_id, "p1", "深基坑专项方案", "深基坑"))
+        (scheme_id, "p1", "深基坑专项方案", "深基坑"),
+    )
     await db.execute(
         "INSERT INTO sections (id, scheme_id, project_id, parent_id, title, level,"
         " status, content, word_count, word_budget, sort_order) VALUES"
         " (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("s1", scheme_id, "p1", "", "第一章 工程概况", 1, "generated",
-         "旧正文内容", 100, 1500, 0))
+        ("s1", scheme_id, "p1", "", "第一章 工程概况", 1, "generated", "旧正文内容", 100, 1500, 0),
+    )
     await db.commit()
 
 
@@ -277,8 +290,7 @@ async def test_update_section_not_blocked_by_zombie_task(db_conn):
     """G12-4 端到端：残留 stopped 任务时手工保存必须成功（旧实现永久 409）。"""
     await _seed_scheme(db_conn)
     TestContentGenerationGuard.add_task(scheme_id="sc1", status="stopped")
-    res = await sec.update_section(
-        "sc1", "s1", sec.SectionUpdate(content="手工编辑后的正文"), db_conn)
+    res = await sec.update_section("sc1", "s1", sec.SectionUpdate(content="手工编辑后的正文"), db_conn)
     assert res["ok"] is True
     cur = await db_conn.execute("SELECT content, word_count FROM sections WHERE id='s1'")
     row = await cur.fetchone()
@@ -292,8 +304,7 @@ async def test_update_section_still_blocked_by_running_task(db_conn):
     await _seed_scheme(db_conn)
     TestContentGenerationGuard.add_task(scheme_id="sc1", status="running")
     with pytest.raises(HTTPException) as ei:
-        await sec.update_section(
-            "sc1", "s1", sec.SectionUpdate(content="x"), db_conn)
+        await sec.update_section("sc1", "s1", sec.SectionUpdate(content="x"), db_conn)
     assert ei.value.status_code == 409
 
 
@@ -305,8 +316,7 @@ async def test_reset_content_not_blocked_by_zombie_task(db_conn):
     res = await sec.reset_content("sc1", db_conn)
     assert res["ok"] is True
     assert res["cleared"] == 1
-    cur = await db_conn.execute(
-        "SELECT content, word_count, status, word_status FROM sections WHERE id='s1'")
+    cur = await db_conn.execute("SELECT content, word_count, status, word_status FROM sections WHERE id='s1'")
     row = await cur.fetchone()
     assert row[0] == ""
     assert row[1] == 0
@@ -328,15 +338,17 @@ async def test_reset_content_still_blocked_by_running_task(db_conn):
 # ---------------------------------------------------------------------------
 def _make_running_task(tid: str) -> None:
     tr._tasks[tid] = {
-        "type": "content_generation", "status": "running", "scheme_id": "sc1",
-        "pause_event": asyncio.Event(), "stop_event": asyncio.Event(),
+        "type": "content_generation",
+        "status": "running",
+        "scheme_id": "sc1",
+        "pause_event": asyncio.Event(),
+        "stop_event": asyncio.Event(),
         "child_tasks": set(),
     }
 
 
 @pytest.mark.asyncio
-async def test_finish_task_cleans_memory_even_when_db_write_fails(
-        db_conn, monkeypatch):
+async def test_finish_task_cleans_memory_even_when_db_write_fails(db_conn, monkeypatch):
     """G12-5：终态写库抛异常时，内存态仍必须清理（否则 G12-4 永久 409）。"""
     tid = "t-db-broken"
     _make_running_task(tid)
@@ -347,13 +359,11 @@ async def test_finish_task_cleans_memory_even_when_db_write_fails(
     monkeypatch.setattr(tr, "get_conn", _boom)
     await tr.finish_task(tid, "stopped", "用户已停止")
 
-    assert tid not in tr._tasks, (
-        "终态写库失败后 _tasks 仍残留 → 本方案手工保存/重置永久 409（G12-4）")
+    assert tid not in tr._tasks, "终态写库失败后 _tasks 仍残留 → 本方案手工保存/重置永久 409（G12-4）"
 
 
 @pytest.mark.asyncio
-async def test_finish_task_cleans_memory_even_when_broadcast_fails(
-        db_conn, monkeypatch):
+async def test_finish_task_cleans_memory_even_when_broadcast_fails(db_conn, monkeypatch):
     """广播抛异常同样不得残留内存态。"""
     tid = "t-broadcast-broken"
     _make_running_task(tid)

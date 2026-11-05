@@ -35,6 +35,7 @@
   前面写错的内容错」无法避免）。
 * **零 AI、零 IO、fail-soft**：全部纯函数，脏输入返回空结构，绝不抛出。
 """
+
 from __future__ import annotations
 
 import logging
@@ -43,6 +44,7 @@ import re
 from .preflight_engine import normalize_unit_text
 
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # 一致性主题规则表（唯一事实源）
@@ -87,42 +89,67 @@ _PROJECT_NAME_KEY = "项目全称"
 
 
 CONSISTENCY_KEY_RULES: tuple[tuple[str, str, re.Pattern, tuple[str, ...] | None], ...] = (
-    ("项目全称", "工程名称|项目名称|项目全称|工程全称",
-     re.compile(r"(?P<name>工程名称|项目名称|项目全称|工程全称)"
-                + _bridge()
-                + r"([\u4e00-\u9fffA-Za-z0-9（）()、\-—]{2,60})"),
-     None),
-    ("计划开工日期", "计划开工日期|开工日期",
-     re.compile(r"(?P<name>计划开工日期|开工日期)" + _bridge()
-                + r"(\d{4}年\d{1,2}月\d{1,2}日)"),
-     None),
-    ("计划竣工日期", "计划竣工日期|竣工日期",
-     re.compile(r"(?P<name>计划竣工日期|竣工日期)" + _bridge()
-                + r"(\d{4}年\d{1,2}月\d{1,2}日)"),
-     None),
-    ("总工期", "总工期|工期",
-     re.compile(r"(?P<name>总工期|建设工期|施工工期|工期)" + _bridge()
-                + r"(\d+(?:\.\d+)?)\s*(日历天|自然天|天|个?月|周)"),
-     None),
-    ("保修期与缺陷责任期", "缺陷责任期|保修期|质量保证期",
-     re.compile(r"(?P<name>缺陷责任期|保修期|质量保证期)" + _bridge()
-                + r"(\d+(?:\.\d+)?)\s*(个?月|年|日历天|天)"),
-     ("屋面及防水", "防水", "装修", "电气", "给排水", "安装", "外墙", "渗漏")),
-    ("响应时限", "响应期限|响应时间|到场时间|到达时限",
-     re.compile(r"(?P<name>响应期限|响应时间|到场时间|到场时限|到达时限|到场|响应)"
-                + _bridge()
-                + r"(\d+(?:\.\d+)?)\s*(小时|时|分钟|天|日历天|工作日)"),
-     ("变更", "质量", "安全", "缺陷", "投诉", "索赔", "设计")),
-    ("人员数量", "管理人员数|劳动力人数|作业人员数|作业人员人数|人员数量|人数",
-     re.compile(r"(?P<name>管理人员数|管理人员|劳动力人数|劳动力|作业人员人数"
-                r"|作业人员|人员数量|人数)" + _bridge()
-                + r"(\d+(?:\.\d+)?)\s*(人|名)"),
-     ("管理", "劳动力", "作业", "特种", "专职", "技术")),
-    ("设备型号", "设备型号|机械型号|起重机型号|升降机型号",
-     re.compile(r"(?P<name>设备型号|机械型号|起重机型号|升降机型号|塔机型号)"
-                + _bridge()
-                + r"([\w\-／/]{2,20})"),
-     ("塔机", "升降机", "起重机", "吊车")),
+    (
+        "项目全称",
+        "工程名称|项目名称|项目全称|工程全称",
+        re.compile(
+            r"(?P<name>工程名称|项目名称|项目全称|工程全称)"
+            + _bridge()
+            + r"([\u4e00-\u9fffA-Za-z0-9（）()、\-—]{2,60})"
+        ),
+        None,
+    ),
+    (
+        "计划开工日期",
+        "计划开工日期|开工日期",
+        re.compile(r"(?P<name>计划开工日期|开工日期)" + _bridge() + r"(\d{4}年\d{1,2}月\d{1,2}日)"),
+        None,
+    ),
+    (
+        "计划竣工日期",
+        "计划竣工日期|竣工日期",
+        re.compile(r"(?P<name>计划竣工日期|竣工日期)" + _bridge() + r"(\d{4}年\d{1,2}月\d{1,2}日)"),
+        None,
+    ),
+    (
+        "总工期",
+        "总工期|工期",
+        re.compile(
+            r"(?P<name>总工期|建设工期|施工工期|工期)" + _bridge() + r"(\d+(?:\.\d+)?)\s*(日历天|自然天|天|个?月|周)"
+        ),
+        None,
+    ),
+    (
+        "保修期与缺陷责任期",
+        "缺陷责任期|保修期|质量保证期",
+        re.compile(r"(?P<name>缺陷责任期|保修期|质量保证期)" + _bridge() + r"(\d+(?:\.\d+)?)\s*(个?月|年|日历天|天)"),
+        ("屋面及防水", "防水", "装修", "电气", "给排水", "安装", "外墙", "渗漏"),
+    ),
+    (
+        "响应时限",
+        "响应期限|响应时间|到场时间|到达时限",
+        re.compile(
+            r"(?P<name>响应期限|响应时间|到场时间|到场时限|到达时限|到场|响应)"
+            + _bridge()
+            + r"(\d+(?:\.\d+)?)\s*(小时|时|分钟|天|日历天|工作日)"
+        ),
+        ("变更", "质量", "安全", "缺陷", "投诉", "索赔", "设计"),
+    ),
+    (
+        "人员数量",
+        "管理人员数|劳动力人数|作业人员数|作业人员人数|人员数量|人数",
+        re.compile(
+            r"(?P<name>管理人员数|管理人员|劳动力人数|劳动力|作业人员人数"
+            r"|作业人员|人员数量|人数)" + _bridge() + r"(\d+(?:\.\d+)?)\s*(人|名)"
+        ),
+        ("管理", "劳动力", "作业", "特种", "专职", "技术"),
+    ),
+    (
+        "设备型号",
+        "设备型号|机械型号|起重机型号|升降机型号",
+        re.compile(r"(?P<name>设备型号|机械型号|起重机型号|升降机型号|塔机型号)" + _bridge() + r"([\w\-／/]{2,20})"),
+        ("塔机", "升降机", "起重机", "吊车"),
+    ),
 )
 
 #: 事实文本里会破坏取值抽取的 markdown 标记。
@@ -162,9 +189,8 @@ _RULE_ALIASES: dict[str, str] = {k: p for k, p, _r, _o in CONSISTENCY_KEY_RULES}
 #: 章节标题的逐词匹配）。不含「项目全称」—— 它必然与章节标题强相关、不会被
 #: 预筛裁掉，纳入只会让保留集合变大而无收益。
 MUST_KEEP_TOPIC_NAMES: frozenset[str] = frozenset(
-    w for k, pattern, _r, _o in CONSISTENCY_KEY_RULES
-    if k != _PROJECT_NAME_KEY
-    for w in str(pattern).split("|") if w)
+    w for k, pattern, _r, _o in CONSISTENCY_KEY_RULES if k != _PROJECT_NAME_KEY for w in str(pattern).split("|") if w
+)
 
 #: 数据字典注入块 / 跨章数据摘要的字符上限（提示词预算硬约束）。
 DATA_DICT_MAX_CHARS = 1600
@@ -173,7 +199,6 @@ DIGEST_MAX_ITEMS = 24
 
 #: 低置信度阈值以下的事实不作为权威值（与 facts_builder 同口径）。
 LOW_CONFIDENCE_FOR_DICT = 0.5
-
 
 
 def _value_text(m: re.Match) -> str:
@@ -215,10 +240,26 @@ def _is_self_ref(m: re.Match, value_text: str) -> bool:
 #: 「……工程名称划分依据及数量说明」「……工程名称建设单位、施工单位、监理
 #: 单位、开竣工日期等信息」，桥接字符类跨过空格后把整段说明当成工程名。
 #: 工程名里出现这些词的概率极低，但工程名外的散文中几乎必然出现。
-_NAME_VALUE_STOPWORDS = frozenset((
-    "说明", "依据", "划分", "数量", "要求", "规定", "程序", "方法",
-    "措施", "标准", "规范", "图纸", "清单", "单位", "工期", "编制",
-))
+_NAME_VALUE_STOPWORDS = frozenset(
+    (
+        "说明",
+        "依据",
+        "划分",
+        "数量",
+        "要求",
+        "规定",
+        "程序",
+        "方法",
+        "措施",
+        "标准",
+        "规范",
+        "图纸",
+        "清单",
+        "单位",
+        "工期",
+        "编制",
+    )
+)
 
 #: 只对「自由文本取值」规则启用上面的停用词判据。
 #: ⚠️ **绝不能对所有规则启用**：数值类规则的取值本身就会带主题词
@@ -233,8 +274,7 @@ def _stopwords_for(rule_key: str) -> frozenset:
     return _NAME_VALUE_STOPWORDS if rule_key in _FREE_TEXT_VALUE_KEYS else frozenset()
 
 
-def _iter_value_matches(text: str, rx: re.Pattern, *,
-                        name_value_stopwords: frozenset = frozenset()):
+def _iter_value_matches(text: str, rx: re.Pattern, *, name_value_stopwords: frozenset = frozenset()):
     """按「自指匹配需重扫」的语义逐次产出 ``(match, value_text)``。
 
     ⚠️ 为什么不能用 ``finditer`` 加 continue：自指匹配已经**消费掉了第二个
@@ -253,10 +293,9 @@ def _iter_value_matches(text: str, rx: re.Pattern, *,
             return
         vt = _value_text(m)
         nm = m.group("name") or ""
-        bare = len(vt) <= len(nm)                        # 只取到主题名，没取到取值
-        self_ref = (not bare) and _is_self_ref(m, vt)      # 主题词自吞主题词
-        noisy = (bool(name_value_stopwords)
-                 and any(w in vt for w in name_value_stopwords))
+        bare = len(vt) <= len(nm)  # 只取到主题名，没取到取值
+        self_ref = (not bare) and _is_self_ref(m, vt)  # 主题词自吞主题词
+        noisy = bool(name_value_stopwords) and any(w in vt for w in name_value_stopwords)
         if bare or self_ref or noisy:
             # 自指匹配吞掉了下一个同名词 → 只前进 1 字符重扫；
             # 其余情况直接从匹配末尾继续（取值组至少 2 字，匹配恒非空）
@@ -353,6 +392,8 @@ def _row_value_kind(row) -> str:
     except (TypeError, IndexError, ValueError):
         return ""
     return vk if vk in ("fact", "requirement") else ""
+
+
 def iter_consistency_values(facts_rows) -> list:
     """从全局事实行抽取全部一致性主题取值（不截断、不去重）。
 
@@ -381,25 +422,26 @@ def iter_consistency_values(facts_rows) -> list:
         value_kind = _row_value_kind(row)
         try:
             for _key, name_pattern, rx, obj_hints in CONSISTENCY_KEY_RULES:
-                for m, value_text in _iter_value_matches(
-                        text, rx, name_value_stopwords=_stopwords_for(_key)):
+                for m, value_text in _iter_value_matches(text, rx, name_value_stopwords=_stopwords_for(_key)):
                     # 对象限定词只在**匹配附近**找（±40 字窗口）。⚠️ 这里绝不能传整行
                     # 文本：一条事实里对象词可能出现在与取值毫无关系的段落中，全篇扫描
                     # 会把无关词误当前缀（与 :func:`build_cross_section_digest` 同口径）。
-                    win = text[max(0, m.start() - 40):m.start() + max(len(value_text), 12)]
-                    out.append({
-                        "key": _qualify_key(value_text, obj_hints, win),
-                        "rule_key": _key,
-                        "name": m.group("name") or "",
-                        "value": value_text,
-                        "value_text": value_text,
-                        "chapter": chapter,
-                        "title": title,
-                        "confidence": conf,
-                        "source_ref": source_ref,
-                        "value_kind": value_kind,
-                        "raw_len": len(content),
-                    })
+                    win = text[max(0, m.start() - 40) : m.start() + max(len(value_text), 12)]
+                    out.append(
+                        {
+                            "key": _qualify_key(value_text, obj_hints, win),
+                            "rule_key": _key,
+                            "name": m.group("name") or "",
+                            "value": value_text,
+                            "value_text": value_text,
+                            "chapter": chapter,
+                            "title": title,
+                            "confidence": conf,
+                            "source_ref": source_ref,
+                            "value_kind": value_kind,
+                            "raw_len": len(content),
+                        }
+                    )
         except Exception:
             continue  # 单行失败不影响其它行
     return out
@@ -458,8 +500,7 @@ def build_global_data_dictionary(facts_rows) -> dict:
                 "confidence": None if vk == "requirement" else conf,
                 "conflicting": [],
                 "value_kind": vk,
-                "requirements": ([hit["value_text"]]
-                                 if vk == "requirement" and hit["value_text"] else []),
+                "requirements": ([hit["value_text"]] if vk == "requirement" and hit["value_text"] else []),
                 "_rank": rank,
             }
         else:
@@ -484,8 +525,7 @@ def build_global_data_dictionary(facts_rows) -> dict:
                     cur["_rank"] = rank
                 elif cur["value_text"] != hit["value_text"] and rank > cur["_rank"]:
                     older = cur["value_text"]
-                    new_conflicting = [v for v in cur["conflicting"]
-                                      if v not in (hit["value_text"], older)]
+                    new_conflicting = [v for v in cur["conflicting"] if v not in (hit["value_text"], older)]
                     if older not in new_conflicting:
                         new_conflicting.append(older)
                     cur["value_kind"] = vk
@@ -515,9 +555,9 @@ DICTIONARY_ABSENT_HINT = (
 )
 
 
-def render_data_dictionary_block(data_dict, *, chapter_key: str = "",
-                                 exclude_keys=(),
-                                 max_chars: int = DATA_DICT_MAX_CHARS) -> str:
+def render_data_dictionary_block(
+    data_dict, *, chapter_key: str = "", exclude_keys=(), max_chars: int = DATA_DICT_MAX_CHARS
+) -> str:
     """渲染「全局数据字典」注入块（提示词段）。
 
     - 每个字段**只有一个权威值**，并注明来源事实（可追溯）；
@@ -563,14 +603,16 @@ def render_data_dictionary_block(data_dict, *, chapter_key: str = "",
                 "  · 该主题在事实库中另有候选取值："
                 + "、".join(v["conflicting"][:4])
                 + "。以本表权威值为准；如需改口径，请在「全局事实」中"
-                  "完成裁决后重新生成，不要在本章自行取值。")
+                "完成裁决后重新生成，不要在本章自行取值。"
+            )
         # ✅ R83：要求口径与采用口径同键共存时，单独列出要求约束（与 conflicting
         #    分流，避免「要求≤90 天、本方案 85 天」被当成矛盾）。
         if v.get("requirements") and (v.get("value") or "") not in v["requirements"]:
             lines.append(
                 "  · 该主题另含招标/规范要求口径："
                 + "、".join(v["requirements"][:4])
-                + "。正文须满足要求口径，且前后一致引用本表采用值。")
+                + "。正文须满足要求口径，且前后一致引用本表采用值。"
+            )
     lines.append(DICTIONARY_ABSENT_HINT)
     block = "\n".join(lines)
     return block[:max_chars]
@@ -616,8 +658,7 @@ def must_keep_consistency_rows(facts_rows, keep_titles: set) -> list:
 # ---------------------------------------------------------------------------
 # 三、章节调用痕迹（可追溯）
 # ---------------------------------------------------------------------------
-def section_data_trace(leaf, *, facts_rows, keep_titles,
-                       prefiltered_rows=None) -> dict:
+def section_data_trace(leaf, *, facts_rows, keep_titles, prefiltered_rows=None) -> dict:
     """产出单章节的**数据调用痕迹**，落 ``last_generation_report``。
 
     回答「本章调用了哪些字段、哪些字段在库里但没被读」：
@@ -665,9 +706,9 @@ def section_data_trace(leaf, *, facts_rows, keep_titles,
 # ---------------------------------------------------------------------------
 # 四、跨章节关键数据摘要（传入已生成章节的关键取值）
 # ---------------------------------------------------------------------------
-def build_cross_section_digest(existing_contents, *,
-                               max_chars: int = DIGEST_MAX_CHARS,
-                               max_items: int = DIGEST_MAX_ITEMS) -> str:
+def build_cross_section_digest(
+    existing_contents, *, max_chars: int = DIGEST_MAX_CHARS, max_items: int = DIGEST_MAX_ITEMS
+) -> str:
     """把「已生成章节」的关键取值汇成摘要，注入当前章节提示词。
 
     - 输入 ``{section_id: content}`` 或 ``{section_id: 章节dict}``；
@@ -687,11 +728,10 @@ def build_cross_section_digest(existing_contents, *,
             continue
         clean = _prep(content)
         for _key, _name_pattern, rx, obj_hints in CONSISTENCY_KEY_RULES:
-            for m, vt in _iter_value_matches(
-                    clean, rx, name_value_stopwords=_stopwords_for(_key)):
+            for m, vt in _iter_value_matches(clean, rx, name_value_stopwords=_stopwords_for(_key)):
                 # 对象限定词只在**匹配附近**找（±40 字窗口）：prose 里对象词
                 # 通常与取值同句，全篇扫描会把无关段落里的词误当前缀。
-                win = clean[max(0, m.start() - 40):m.start() + max(len(vt), 12)]
+                win = clean[max(0, m.start() - 40) : m.start() + max(len(vt), 12)]
                 vt = _qualify_key(vt, obj_hints, win)
                 sig = (title, vt)
                 if sig in seen:
@@ -739,6 +779,7 @@ def merge_injected_rows(prefiltered, facts_rows, keep_titles) -> list:
 
     去重按 (group_title, title) 键，预筛顺序优先（相关性的顺序有意义）。
     """
+
     def _key_of(row):
         title, _content = _row_text(row)
         if isinstance(row, dict):
@@ -772,8 +813,7 @@ def merge_injected_rows(prefiltered, facts_rows, keep_titles) -> list:
 # ---------------------------------------------------------------------------
 # 六、生成后自检：跨章节取值一致性（与预检 CON-01 同源）
 # ---------------------------------------------------------------------------
-def cross_section_value_findings(sections, *, new_section_id: str = "",
-                                 limit: int = 3) -> list:
+def cross_section_value_findings(sections, *, new_section_id: str = "", limit: int = 3) -> list:
     """跨章节数值一致性自检 —— **与预检 CON-01 同一判据实现**。
 
     直接调用 ``preflight_engine.numeric_consistency_findings``（预检唯一
@@ -806,8 +846,7 @@ def cross_section_value_findings(sections, *, new_section_id: str = "",
             continue
         nf = dict(f)
         nf["source"] = "selfcheck"
-        nf["detail"] = (str(f.get("detail", ""))
-                          + f"（本章「{new_title}」的取值需与全局事实一致）")
+        nf["detail"] = str(f.get("detail", "")) + f"（本章「{new_title}」的取值需与全局事实一致）"
         out.append(nf)
         if len(out) >= limit:
             break
@@ -817,8 +856,7 @@ def cross_section_value_findings(sections, *, new_section_id: str = "",
 # ---------------------------------------------------------------------------
 # 七、方案级字段完整性对照表（缺失清单 / 影响分析）
 # ---------------------------------------------------------------------------
-def audit_call_matrix(*, extraction_items, facts_rows, sections,
-                      chapter_fields=None, generated_report=None):
+def audit_call_matrix(*, extraction_items, facts_rows, sections, chapter_fields=None, generated_report=None):
     """产出**字段完整性对照表 / 调用完整性对照表 / 缺失清单 / 影响分析**。
 
     四个视图（全部为加法式新报告，不改既有计数口径）：
@@ -842,15 +880,17 @@ def audit_call_matrix(*, extraction_items, facts_rows, sections,
     extraction_inventory = []
     for it in extraction_items:
         content = str(it.get("content") or it.get("content_md") or "")
-        extraction_inventory.append({
-            "item_id": str(it.get("item_id") or ""),
-            "label": str(it.get("label") or ""),
-            "required": bool(it.get("required")),
-            "status": str(it.get("status") or ""),
-            "content_len": len(content),
-            "is_empty": len(content.strip()) == 0,
-            "output_type": str(it.get("output_type") or ""),
-        })
+        extraction_inventory.append(
+            {
+                "item_id": str(it.get("item_id") or ""),
+                "label": str(it.get("label") or ""),
+                "required": bool(it.get("required")),
+                "status": str(it.get("status") or ""),
+                "content_len": len(content),
+                "is_empty": len(content.strip()) == 0,
+                "output_type": str(it.get("output_type") or ""),
+            }
+        )
 
     by_chapter: dict = {}
     confs = []
@@ -867,10 +907,8 @@ def audit_call_matrix(*, extraction_items, facts_rows, sections,
     # 实测在 127 条事实上 missing 恒为 20 项、gaps 冲到 51 条 —— 全是同义词
     # 噪声，审计表失去判据力。
     covered_rule_keys = {h.get("rule_key") for h in values if h.get("rule_key")}
-    consistency_covered = [k for k, _p, _r, _o in CONSISTENCY_KEY_RULES
-                           if k in covered_rule_keys]
-    consistency_missing = [k for k, _p, _r, _o in CONSISTENCY_KEY_RULES
-                           if k not in covered_rule_keys]
+    consistency_covered = [k for k, _p, _r, _o in CONSISTENCY_KEY_RULES if k in covered_rule_keys]
+    consistency_missing = [k for k, _p, _r, _o in CONSISTENCY_KEY_RULES if k not in covered_rule_keys]
     # 自检：抓到的主题词必须都在规则表替代式里，否则就是替代式漂移
     # （例如某处把 name 组写成了表里没有的词，覆盖度会静默漏报）。
     try:
@@ -899,40 +937,54 @@ def audit_call_matrix(*, extraction_items, facts_rows, sections,
         item_id = str(it.get("item_id") or "")
         content = str(it.get("content") or it.get("content_md") or "")
         if not content.strip():
-            state = "missing"          # 库里没有 → 章节无法体现
+            state = "missing"  # 库里没有 → 章节无法体现
         elif (label and label in joined) or (item_id and item_id in joined):
             state = "covered"
         else:
             state = "read_not_reflected"  # 已提取但正文未体现
-        call_matrix.append({
-            "item_id": item_id, "label": label,
-            "state": state, "required": bool(it.get("required")),
-        })
+        call_matrix.append(
+            {
+                "item_id": item_id,
+                "label": label,
+                "state": state,
+                "required": bool(it.get("required")),
+            }
+        )
 
     gaps = []
     for entry in call_matrix:
         if entry["state"] == "missing" and entry["required"]:
-            gaps.append({
-                "kind": "extraction_missing", "severity": "high",
-                "field": entry["label"], "item_id": entry["item_id"],
-                "impact": "必填提取项无内容：相关章节只能按模糊规则成文，"
-                          "具体参数无法落到正文",
-            })
+            gaps.append(
+                {
+                    "kind": "extraction_missing",
+                    "severity": "high",
+                    "field": entry["label"],
+                    "item_id": entry["item_id"],
+                    "impact": "必填提取项无内容：相关章节只能按模糊规则成文，" "具体参数无法落到正文",
+                }
+            )
         elif entry["state"] == "read_not_reflected":
-            gaps.append({
-                "kind": "read_not_reflected", "severity": "medium",
-                "field": entry["label"], "item_id": entry["item_id"],
-                "impact": "已提取但正文未体现：调用不完整或注入被截断，"
-                          "需核查该章节提示词是否被上下文预算裁掉",
-            })
+            gaps.append(
+                {
+                    "kind": "read_not_reflected",
+                    "severity": "medium",
+                    "field": entry["label"],
+                    "item_id": entry["item_id"],
+                    "impact": "已提取但正文未体现：调用不完整或注入被截断，" "需核查该章节提示词是否被上下文预算裁掉",
+                }
+            )
     for topic in facts_inventory["consistency_topics_missing"]:
-        gaps.append({
-            "kind": "consistency_value_missing", "severity": "high",
-            "field": topic, "item_id": "",
-            "impact": f"事实库缺少「{topic}」权威值：各章 AI 只能自行编造，"
-                      "这是跨章节数据不一致的主要成因（生产实证：工期在 4 章"
-                      "出现 4 种口径）",
-        })
+        gaps.append(
+            {
+                "kind": "consistency_value_missing",
+                "severity": "high",
+                "field": topic,
+                "item_id": "",
+                "impact": f"事实库缺少「{topic}」权威值：各章 AI 只能自行编造，"
+                "这是跨章节数据不一致的主要成因（生产实证：工期在 4 章"
+                "出现 4 种口径）",
+            }
+        )
 
     for key, fields in chapter_fields.items():
         if not fields:
@@ -940,12 +992,15 @@ def audit_call_matrix(*, extraction_items, facts_rows, sections,
         hits = sum(1 for t in sec_texts for f in fields if f and f in t)
         tot = len(sec_texts) * len(fields)
         if tot and hits / tot < 0.5:
-            gaps.append({
-                "kind": "chapter_field_undercovered", "severity": "medium",
-                "field": f"章节{key}必含要素", "item_id": "",
-                "impact": f"九大章节「{key}」必含要素仅 {hits}/{tot} 命中，"
-                          "章节要素覆盖不足",
-            })
+            gaps.append(
+                {
+                    "kind": "chapter_field_undercovered",
+                    "severity": "medium",
+                    "field": f"章节{key}必含要素",
+                    "item_id": "",
+                    "impact": f"九大章节「{key}」必含要素仅 {hits}/{tot} 命中，" "章节要素覆盖不足",
+                }
+            )
 
     gaps.sort(key=lambda g: (0 if g["severity"] == "high" else 1, g["field"]))
 

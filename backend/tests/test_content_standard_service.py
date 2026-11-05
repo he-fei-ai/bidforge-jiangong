@@ -8,6 +8,7 @@
 - 模糊模式：概数放行、不查覆盖率、±10% 容差、超差 value_conflict；
 - 型号冲突（两模式）、占位符计数、降级不抛异常。
 """
+
 import pytest
 from app.services.content_standard import (
     FUZZY,
@@ -33,7 +34,6 @@ def _fact(group: str, title: str, content: str):
 # 生效值解析
 # ============================================================
 class TestResolve:
-
     def test_normalize(self):
         assert normalize_standard("precise") == "precise"
         assert normalize_standard("fuzzy") == "fuzzy"
@@ -50,35 +50,44 @@ class TestResolve:
         assert resolve_effective_standard(scheme_standard="x") == PRECISE
 
     def test_section_overrides_scheme(self):
-        assert resolve_effective_standard(
-            section_standard="precise", scheme_standard="fuzzy") == PRECISE
+        assert resolve_effective_standard(section_standard="precise", scheme_standard="fuzzy") == PRECISE
         # 空串=沿用方案
-        assert resolve_effective_standard(
-            section_standard="", scheme_standard="fuzzy") == FUZZY
+        assert resolve_effective_standard(section_standard="", scheme_standard="fuzzy") == FUZZY
 
     def test_task_override_semantics(self):
         # override=False：任务值被忽略（「按章节设置」）
-        assert resolve_effective_standard(
-            task_standard="fuzzy", override=False,
-            section_standard="precise", scheme_standard="precise") == PRECISE
-        assert resolve_effective_standard(
-            task_standard="fuzzy", override=False,
-            section_standard="", scheme_standard="precise") == PRECISE
+        assert (
+            resolve_effective_standard(
+                task_standard="fuzzy", override=False, section_standard="precise", scheme_standard="precise"
+            )
+            == PRECISE
+        )
+        assert (
+            resolve_effective_standard(
+                task_standard="fuzzy", override=False, section_standard="", scheme_standard="precise"
+            )
+            == PRECISE
+        )
         # override=True：任务值强制，压过章节
-        assert resolve_effective_standard(
-            task_standard="fuzzy", override=True,
-            section_standard="precise", scheme_standard="precise") == FUZZY
+        assert (
+            resolve_effective_standard(
+                task_standard="fuzzy", override=True, section_standard="precise", scheme_standard="precise"
+            )
+            == FUZZY
+        )
         # override=True 但任务值非法 → 回落章节/方案
-        assert resolve_effective_standard(
-            task_standard="", override=True,
-            section_standard="fuzzy", scheme_standard="precise") == FUZZY
+        assert (
+            resolve_effective_standard(
+                task_standard="", override=True, section_standard="fuzzy", scheme_standard="precise"
+            )
+            == FUZZY
+        )
 
 
 # ============================================================
 # 提示词文案
 # ============================================================
 class TestPromptBlocks:
-
     def test_precise_block_contains_strict_phrases(self):
         s = build_system_block(PRECISE)
         assert "精准内容" in s
@@ -111,7 +120,6 @@ class TestPromptBlocks:
 # 文本提取工具
 # ============================================================
 class TestExtractors:
-
     def test_strip_fence_and_inline(self):
         text = "正文12.5m。```mermaid\nA|13m\n```结尾`99m`"
         out = strip_code_blocks(text)
@@ -121,7 +129,7 @@ class TestExtractors:
 
     def test_strip_tilde_fence(self):
         # ✅ 2026-09-28：~~~ 波浪线围栏内的数字也必须剔除（此前会进入事实校验）
-        text = "说明12.5m。\n~~~chart-json\n{\"value\": 356}\n~~~\n结尾 20m"
+        text = '说明12.5m。\n~~~chart-json\n{"value": 356}\n~~~\n结尾 20m'
         out = strip_code_blocks(text)
         assert "356" not in out
         assert "12.5m" in out
@@ -151,7 +159,6 @@ class TestExtractors:
 # 精准模式报告
 # ============================================================
 class TestPreciseReport:
-
     def test_clean_precise_passes(self):
         rows = [_fact("参数", "基坑深度", "本工程基坑深度为 12.5m")]
         body = "本工程基坑深度为 12.5m，分层开挖，及时支护。"
@@ -172,8 +179,7 @@ class TestPreciseReport:
         rep2 = standard_report("基坑深度 12.5 米左右。", PRECISE, rows)
         assert any("左右" in i["message"] for i in rep2["issues"])
         # “合约12”不得误报
-        rep3 = standard_report("分包合约 12 份已归档，基坑深度 12.5m。",
-                               PRECISE, rows)
+        rep3 = standard_report("分包合约 12 份已归档，基坑深度 12.5m。", PRECISE, rows)
         assert not any(i["type"] == "fuzzy_expression" for i in rep3["issues"])
 
     def test_bare_and_limit_phrases_flagged(self):
@@ -223,16 +229,13 @@ class TestPreciseReport:
     def test_unrelated_number_outside_window_not_flagged(self):
         """远离事实标题语境（>±30 字符）的同单位异值不算矛盾。"""
         rows = [_fact("参数", "基坑深度", "基坑深度 12.5m")]
-        body = ("排水沟宽度 13m。"
-                "现场材料堆场与运输通道布置在场地东侧围挡内侧，"
-                "本工程基坑深度为 12.5m，按图施工。")
+        body = "排水沟宽度 13m。" "现场材料堆场与运输通道布置在场地东侧围挡内侧，" "本工程基坑深度为 12.5m，按图施工。"
         rep = standard_report(body, PRECISE, rows)
         assert not [i for i in rep["issues"] if i["type"] == "value_mismatch"]
 
     def test_numbers_inside_code_block_ignored(self):
         rows = [_fact("参数", "基坑深度", "基坑深度 12.5m")]
-        body = ("基坑深度 12.5m。\n```mermaid\nA-->B|深度 13m|\n```\n"
-                "行内 `14m` 也不参与。")
+        body = "基坑深度 12.5m。\n```mermaid\nA-->B|深度 13m|\n```\n" "行内 `14m` 也不参与。"
         rep = standard_report(body, PRECISE, rows)
         assert rep["passed"] is True
 
@@ -261,13 +264,10 @@ class TestPreciseReport:
 # 模糊模式报告
 # ============================================================
 class TestFuzzyReport:
-
     def test_hedges_allowed_and_no_coverage_check(self):
         rows = [_fact("参数", "基坑深度", "基坑深度 12.5m")]
-        rep = standard_report(
-            "基坑深度约 12m，具体按设计确定，设备按合同要求进场。", FUZZY, rows)
-        assert not [i for i in rep["issues"]
-                    if i["type"] in ("fuzzy_expression", "fact_value_missing")]
+        rep = standard_report("基坑深度约 12m，具体按设计确定，设备按合同要求进场。", FUZZY, rows)
+        assert not [i for i in rep["issues"] if i["type"] in ("fuzzy_expression", "fact_value_missing")]
 
     def test_within_tolerance_passes(self):
         rows = [_fact("参数", "基坑深度", "基坑深度 12.5m")]
@@ -312,7 +312,6 @@ class TestModelConflictPrecise:
 # 降级与健壮性
 # ============================================================
 class TestRobustness:
-
     def test_none_and_empty_inputs(self):
         rep = standard_report(None, PRECISE, None)
         assert rep["passed"] is True and rep["issues"] == []

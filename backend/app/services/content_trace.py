@@ -36,6 +36,7 @@
 代码块后的**扫描文本**坐标，与 ``content`` 原文坐标不一致（图表代码块内的
 内容不参与事实校验与标记）。因此人工定位以 ``excerpt`` + ``position`` 为准。
 """
+
 from __future__ import annotations
 
 import re
@@ -52,9 +53,18 @@ GENERATION_PLACEHOLDER = "placeholder_residue"
 
 #: 标记条目键集合（护栏用：防止字段漂移）
 TRACE_ITEM_KEYS: tuple[str, ...] = (
-    "id", "section_id", "section_title", "position",
-    "char_start", "char_end", "excerpt",
-    "generation_type", "category", "data_source", "fuzzy_reason", "severity",
+    "id",
+    "section_id",
+    "section_title",
+    "position",
+    "char_start",
+    "char_end",
+    "excerpt",
+    "generation_type",
+    "category",
+    "data_source",
+    "fuzzy_reason",
+    "severity",
 )
 
 #: 段落切分（Markdown 空行）
@@ -74,8 +84,7 @@ def locate_position(scanned: str, char_start: int) -> str:
     return f"L{line} P{para}"
 
 
-def make_excerpt(scanned: str, char_start: int, char_end: int,
-                 radius: int = _EXCERPT_RADIUS) -> str:
+def make_excerpt(scanned: str, char_start: int, char_end: int, radius: int = _EXCERPT_RADIUS) -> str:
     """截取上下文片段（跨行空白折叠为单空格，便于单行展示）。"""
     if not isinstance(scanned, str):
         return ""
@@ -89,10 +98,20 @@ def _excerpt_of(scanned: str, start: int, end: int) -> str:
     return make_excerpt(scanned, start, end)
 
 
-def _new_item(index: int, *, section_id: str, section_title: str, scanned: str,
-              char_start: int, char_end: int, generation_type: str,
-              category: str = "", data_source: str = "",
-              fuzzy_reason: str = "", severity: str = "info") -> dict:
+def _new_item(
+    index: int,
+    *,
+    section_id: str,
+    section_title: str,
+    scanned: str,
+    char_start: int,
+    char_end: int,
+    generation_type: str,
+    category: str = "",
+    data_source: str = "",
+    fuzzy_reason: str = "",
+    severity: str = "info",
+) -> dict:
     """构造一条标记（键集合严格等于 ``TRACE_ITEM_KEYS``）。"""
     return {
         "id": f"tr-{index:04d}",
@@ -110,13 +129,19 @@ def _new_item(index: int, *, section_id: str, section_title: str, scanned: str,
     }
 
 
-
-def build_trace(*, scanned: str, standard: str = "",
-                section_id: str = "", section_title: str = "",
-                fact_numbers: list | None = None, fact_models: list | None = None,
-                body_numbers: list | None = None, body_models: list | None = None,
-                fuzzy_expressions: list | None = None,
-                placeholder_hits: list | None = None) -> dict:
+def build_trace(
+    *,
+    scanned: str,
+    standard: str = "",
+    section_id: str = "",
+    section_title: str = "",
+    fact_numbers: list | None = None,
+    fact_models: list | None = None,
+    body_numbers: list | None = None,
+    body_models: list | None = None,
+    fuzzy_expressions: list | None = None,
+    placeholder_hits: list | None = None,
+) -> dict:
     """把「本章正文 × 本章事实」派生成内部标记清单（纯函数、零 AI、零成本）。
 
     判定口径：
@@ -162,30 +187,49 @@ def build_trace(*, scanned: str, standard: str = "",
                 backed_model[tok].append(title)
 
         # ---- 模糊表述区间（用于重叠收敛）----
-        fuzzy_spans = [(int(f.get("char_start") or 0), int(f.get("char_end") or 0))
-                       for f in fuzzy_expressions]
+        fuzzy_spans = [(int(f.get("char_start") or 0), int(f.get("char_end") or 0)) for f in fuzzy_expressions]
 
         def _inside_fuzzy(start: int, end: int) -> bool:
             return any(start < fe and end > fs for fs, fe in fuzzy_spans)
 
-        def _add(gtype: str, start: int, end: int, category: str = "",
-                 data_source: str = "", fuzzy_reason: str = "",
-                 severity: str = "info") -> None:
-            items.append(_new_item(
-                len(items) + 1, section_id=section_id, section_title=section_title,
-                scanned=text, char_start=start, char_end=end,
-                generation_type=gtype, category=category,
-                data_source=data_source, fuzzy_reason=fuzzy_reason,
-                severity=severity))
+        def _add(
+            gtype: str,
+            start: int,
+            end: int,
+            category: str = "",
+            data_source: str = "",
+            fuzzy_reason: str = "",
+            severity: str = "info",
+        ) -> None:
+            items.append(
+                _new_item(
+                    len(items) + 1,
+                    section_id=section_id,
+                    section_title=section_title,
+                    scanned=text,
+                    char_start=start,
+                    char_end=end,
+                    generation_type=gtype,
+                    category=category,
+                    data_source=data_source,
+                    fuzzy_reason=fuzzy_reason,
+                    severity=severity,
+                )
+            )
 
         # ---- 模糊表述片段 ----
         for fx in fuzzy_expressions:
             cat = str(fx.get("category") or "")
             cat_info = FUZZY_CATEGORIES.get(cat, {})
-            _add(GENERATION_FUZZY, int(fx.get("char_start") or 0),
-                 int(fx.get("char_end") or 0), category=cat,
-                 data_source=cat_info.get("data_source", ""),
-                 fuzzy_reason=cat_info.get("reason", ""), severity="info")
+            _add(
+                GENERATION_FUZZY,
+                int(fx.get("char_start") or 0),
+                int(fx.get("char_end") or 0),
+                category=cat,
+                data_source=cat_info.get("data_source", ""),
+                fuzzy_reason=cat_info.get("reason", ""),
+                severity="info",
+            )
 
         # ---- 正文数值 ----
         for bn in body_numbers:
@@ -195,14 +239,25 @@ def build_trace(*, scanned: str, standard: str = "",
             key = (float(bn.get("value") or 0), str(bn.get("unit") or ""))
             titles = backed_num.get(key)
             if titles:
-                _add(GENERATION_PRECISE, span[0], span[1], category="number",
-                     data_source="全局事实：" + " / ".join(titles[:2]), severity="info")
+                _add(
+                    GENERATION_PRECISE,
+                    span[0],
+                    span[1],
+                    category="number",
+                    data_source="全局事实：" + " / ".join(titles[:2]),
+                    severity="info",
+                )
             else:
                 info = FUZZY_CATEGORIES["number"]
-                _add(GENERATION_FUZZY, span[0], span[1], category="number",
-                     data_source=info["data_source"],
-                     fuzzy_reason="事实未给出该数值（正文出现具体值，需人工复核是否编造）",
-                     severity="warn")
+                _add(
+                    GENERATION_FUZZY,
+                    span[0],
+                    span[1],
+                    category="number",
+                    data_source=info["data_source"],
+                    fuzzy_reason="事实未给出该数值（正文出现具体值，需人工复核是否编造）",
+                    severity="warn",
+                )
         # ---- 正文型号 ----
         for bm in body_models:
             span = bm.get("span") or (0, 0)
@@ -211,21 +266,35 @@ def build_trace(*, scanned: str, standard: str = "",
             tok = str(bm.get("token") or "")
             titles = backed_model.get(tok)
             if titles:
-                _add(GENERATION_PRECISE, span[0], span[1], category="name",
-                     data_source="全局事实：" + " / ".join(titles[:2]), severity="info")
+                _add(
+                    GENERATION_PRECISE,
+                    span[0],
+                    span[1],
+                    category="name",
+                    data_source="全局事实：" + " / ".join(titles[:2]),
+                    severity="info",
+                )
             else:
                 info = FUZZY_CATEGORIES["name"]
-                _add(GENERATION_FUZZY, span[0], span[1], category="name",
-                     data_source=info["data_source"],
-                     fuzzy_reason="事实未给出该型号（正文出现具体型号，需人工复核是否编造）",
-                     severity="warn")
+                _add(
+                    GENERATION_FUZZY,
+                    span[0],
+                    span[1],
+                    category="name",
+                    data_source=info["data_source"],
+                    fuzzy_reason="事实未给出该型号（正文出现具体型号，需人工复核是否编造）",
+                    severity="warn",
+                )
 
         # ---- 残留占位标记 ----
         for ph in placeholder_hits:
-            _add(GENERATION_PLACEHOLDER, int(ph.get("char_start") or 0),
-                 int(ph.get("char_end") or 0),
-                 fuzzy_reason="正文残留占位标记（应为完整正文，不留待补充标记）",
-                 severity="error")
+            _add(
+                GENERATION_PLACEHOLDER,
+                int(ph.get("char_start") or 0),
+                int(ph.get("char_end") or 0),
+                fuzzy_reason="正文残留占位标记（应为完整正文，不留待补充标记）",
+                severity="error",
+            )
 
         # 按正文顺序稳定排序并重编 id
         items.sort(key=lambda d: (d["char_start"], d["char_end"]))
@@ -246,19 +315,28 @@ def build_trace(*, scanned: str, standard: str = "",
         }
     except Exception:
         return {
-            "available": False, "degraded": True, "standard": str(standard or ""),
-            "section_id": section_id or "", "section_title": section_title or "",
-            "items": [], "summary": empty_summary(),
+            "available": False,
+            "degraded": True,
+            "standard": str(standard or ""),
+            "section_id": section_id or "",
+            "section_title": section_title or "",
+            "items": [],
+            "summary": empty_summary(),
         }
-
 
 
 def empty_summary() -> dict:
     """空标记集的汇总形态（降级 / 无内容时返回）。"""
     return {
-        "total": 0, "precise_count": 0, "fuzzy_count": 0, "warn_count": 0,
-        "error_count": 0, "placeholder_residue_count": 0,
-        "by_category": {}, "by_reason": {}, "truncated": False,
+        "total": 0,
+        "precise_count": 0,
+        "fuzzy_count": 0,
+        "warn_count": 0,
+        "error_count": 0,
+        "placeholder_residue_count": 0,
+        "by_category": {},
+        "by_reason": {},
+        "truncated": False,
     }
 
 
@@ -277,14 +355,11 @@ def trace_summary(items: list | None, *, truncated: bool = False) -> dict:
             by_reason[reason] = by_reason.get(reason, 0) + 1
     return {
         "total": len(items),
-        "precise_count": sum(1 for it in items
-                             if it.get("generation_type") == GENERATION_PRECISE),
-        "fuzzy_count": sum(1 for it in items
-                           if it.get("generation_type") == GENERATION_FUZZY),
+        "precise_count": sum(1 for it in items if it.get("generation_type") == GENERATION_PRECISE),
+        "fuzzy_count": sum(1 for it in items if it.get("generation_type") == GENERATION_FUZZY),
         "warn_count": sum(1 for it in items if it.get("severity") == "warn"),
         "error_count": sum(1 for it in items if it.get("severity") == "error"),
-        "placeholder_residue_count": sum(1 for it in items
-                                         if it.get("generation_type") == GENERATION_PLACEHOLDER),
+        "placeholder_residue_count": sum(1 for it in items if it.get("generation_type") == GENERATION_PLACEHOLDER),
         "by_category": dict(sorted(by_cat.items(), key=lambda kv: (-kv[1], kv[0]))),
         "by_reason": dict(sorted(by_reason.items(), key=lambda kv: (-kv[1], kv[0]))),
         "truncated": bool(truncated),
@@ -316,6 +391,7 @@ def collect_scheme_trace(sections: list[dict], item_cap: int = 300) -> dict:
         elif isinstance(raw, str) and raw.strip():
             try:
                 import json as _json
+
                 loaded = _json.loads(raw)
                 report = loaded if isinstance(loaded, dict) else {}
             except Exception:
@@ -333,11 +409,13 @@ def collect_scheme_trace(sections: list[dict], item_cap: int = 300) -> dict:
             it.setdefault("section_title", str(sec.get("title") or ""))
             out_items.append(it)
             cnt += 1
-        section_rows.append({"section_id": sid, "title": str(sec.get("title") or ""),
-                             "total": cnt})
+        section_rows.append({"section_id": sid, "title": str(sec.get("title") or ""), "total": cnt})
     truncated = len(out_items) > item_cap
     if truncated:
         out_items = out_items[:item_cap]
-    return {**trace_summary(out_items, truncated=truncated),
-            "section_count": len(section_rows), "skipped": skipped,
-            "sections": section_rows}
+    return {
+        **trace_summary(out_items, truncated=truncated),
+        "section_count": len(section_rows),
+        "skipped": skipped,
+        "sections": section_rows,
+    }

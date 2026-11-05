@@ -107,22 +107,38 @@ def build_content_checkpoint(
     try:
         _fd_total = 0
         _fd_secs = 0
+        _ft_total = 0
+        _ft_secs = 0
         for _v in fact_audit_by_leaf.values():
             _n = int(_v.get("budget_dropped_count") or 0)
             if _n > 0:
                 _fd_total += _n
                 _fd_secs += 1
+            # ✅ 账实相符（2026-11-04）：截断注入单列统计（≠ 丢弃）。
+            _tn = int(_v.get("truncated_count") or 0)
+            if _tn > 0:
+                _ft_total += _tn
+                _ft_secs += 1
         ckpt["fact_injection_summary"] = {
             "sections": len(fact_audit_by_leaf),
             "budget_dropped_total": _fd_total,
             "budget_dropped_sections": _fd_secs,
+            "truncated_total": _ft_total,
+            "truncated_sections": _ft_secs,
         }
     except Exception:
         ckpt["fact_injection_summary"] = {}
     return {
         'event': event,
         'message': message,
+        # R175 BUG-4：done 恒为**成功**章节数；processed = 已处理（成功 + 失败），
+        # 与运行期 progress 事件同口径。processed 为加法字段，旧消费方读 done/total
+        # 不受影响；ckpt 未写 processed 时按 done + failed 反推。
         'done': ckpt.get("done", len(done_ids)),
+        'processed': int(
+            ckpt.get("processed")
+            or (ckpt.get("done", len(done_ids)) + len(failed_ids))
+        ),
         'total': ckpt.get("total", total),
         'failed_count': len(failed_ids),
         'failed_sections': list(failed_reasons.values())[:50],

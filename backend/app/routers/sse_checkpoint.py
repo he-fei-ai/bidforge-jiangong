@@ -5,6 +5,7 @@
 - 断线重挂接时回读 checkpoint
 - 对 SQLite "database is locked" 瞬态错误做指数退避重试
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -36,13 +37,10 @@ CHECKPOINT_WRITE_BASE_DELAY = 0.2
 #:     · `sh._CHECKPOINT_KINDS["facts_generation"][1]` 与
 #:       `cs.CHECKPOINT_KINDS["facts_generation"][1]` 恒等（由 sse_handlers 拼装）。
 #:   旧实现在两处各写一份且**无任何 parity 断言**，分叉时测试不会红。
-_FACTS_CHECKPOINT_FIELDS = tuple(
-    f for f in SCHEMA_FACTS_CHECKPOINT_FIELDS if f not in ("event", "message")
-)
+_FACTS_CHECKPOINT_FIELDS = tuple(f for f in SCHEMA_FACTS_CHECKPOINT_FIELDS if f not in ("event", "message"))
 
 
-async def _retry_db_locked(factory, max_retries: int = 3,
-                           base_delay: float = 0.2):
+async def _retry_db_locked(factory, max_retries: int = 3, base_delay: float = 0.2):
     """对「database is locked / disk I/O error」做有限重试，其余异常原样抛出。
 
     背景（2026-09-23）：SQLite 在并发写 + busy_timeout 耗尽时会抛
@@ -66,13 +64,13 @@ async def _retry_db_locked(factory, max_retries: int = 3,
             return await factory()
         except sqlite3.OperationalError as e:
             msg = str(e).lower()
-            transient = ("database is locked" in msg or "disk i/o error" in msg)
+            transient = "database is locked" in msg or "disk i/o error" in msg
             if not transient:
                 raise
             last_exc = e
             if i >= attempts:
                 break
-            await asyncio.sleep(base_delay * (2 ** i))
+            await asyncio.sleep(base_delay * (2**i))
     if last_exc is not None:
         raise last_exc
     # ✅ 2026-10-12（技术债 P2-13 · 删除不可达的死代码）：
@@ -85,11 +83,11 @@ async def _retry_db_locked(factory, max_retries: int = 3,
     #    「1 + max_retries」相矛盾 —— 属于本仓反复记录的「注释宣称一套、
     #    实现看起来是另一套」。删掉后 docstring 与实际实现一致。
     raise AssertionError(  # pragma: no cover - 结构性不可达，仅防未来改坏循环
-        "_retry_db_locked 退出循环时 last_exc 必不为 None")
+        "_retry_db_locked 退出循环时 last_exc 必不为 None"
+    )
 
 
-async def _write_task_checkpoint_db(task_id: str, kind: str,
-                                   payload: dict) -> None:
+async def _write_task_checkpoint_db(task_id: str, kind: str, payload: dict) -> None:
     """把 checkpoint 真正写入 task_registry.checkpoint_json。
 
     独立成函数是为了让 `_save_task_checkpoint` 能整体重试（单测可 monkeypatch
@@ -98,8 +96,8 @@ async def _write_task_checkpoint_db(task_id: str, kind: str,
     conn = await get_conn()
     await conn.execute(
         "UPDATE task_registry SET checkpoint_json=?, updated_at=? WHERE id=?",
-        (json.dumps({"kind": kind, **(payload or {})}, ensure_ascii=False),
-         datetime.now().isoformat(), task_id))
+        (json.dumps({"kind": kind, **(payload or {})}, ensure_ascii=False), datetime.now().isoformat(), task_id),
+    )
     await conn.commit()
 
 
@@ -117,10 +115,12 @@ async def _save_task_checkpoint(task_id: str, kind: str, payload: dict):
     时本函数会拿到 mock 版本，保持与拆分前的测试兼容。
     """
     from app.routers import sse_handlers  # 延迟 import：避免循环依赖
+
     await _retry_db_locked(
         lambda: sse_handlers._write_task_checkpoint_db(task_id, kind, payload),
         max_retries=CHECKPOINT_WRITE_RETRIES,
-        base_delay=CHECKPOINT_WRITE_BASE_DELAY)
+        base_delay=CHECKPOINT_WRITE_BASE_DELAY,
+    )
 
 
 async def _save_outline_checkpoint(task_id: str, payload: dict):
@@ -153,8 +153,7 @@ async def _load_task_checkpoint(task_id: str, kind: str) -> dict | None:
     """读取指定类型的任务成果 checkpoint（不匹配的 kind 返回 None）。"""
     conn = await get_read_conn()
     try:
-        cur = await conn.execute(
-            "SELECT checkpoint_json FROM task_registry WHERE id=?", (task_id,))
+        cur = await conn.execute("SELECT checkpoint_json FROM task_registry WHERE id=?", (task_id,))
         row = await cur.fetchone()
     finally:
         await release_read_conn(conn)
@@ -169,8 +168,7 @@ async def _load_task_checkpoint(task_id: str, kind: str) -> dict | None:
     return None
 
 
-async def _checkpoint_partial_outline(task_id: str, outline, failed_chapters,
-                                      *, event: str = "stopped") -> bool:
+async def _checkpoint_partial_outline(task_id: str, outline, failed_chapters, *, event: str = "stopped") -> bool:
     """落库「部分成果」checkpoint（客户端断开/用户停止时的兜底）。
 
     返回是否成功落库（失败静默，绝不影响收尾流程）。

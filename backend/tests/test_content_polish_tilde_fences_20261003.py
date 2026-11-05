@@ -12,6 +12,7 @@ app.services.content_polish 此前只识别 ``` 围栏（_FENCE_SPLIT_RE / has_p
 - quality_issues / find_colloquial_hits：围栏内文本不计入命中；
 - _protected_ranges：波浪号围栏区间被正确纳入保护范围。
 """
+
 from app.services.content_polish import (
     _protected_ranges,
     find_colloquial_hits,
@@ -21,30 +22,23 @@ from app.services.content_polish import (
 
 
 def test_sanitize_preserves_tilde_mermaid_fence():
-    content = (
-        "前言：咱们要注意安全。\n\n"
-        "~~~mermaid\ngraph TD\n A[咱们]-->B[完成]\n~~~\n\n"
-        "结尾：咱们继续施工。\n"
-    )
+    content = "前言：咱们要注意安全。\n\n" "~~~mermaid\ngraph TD\n A[咱们]-->B[完成]\n~~~\n\n" "结尾：咱们继续施工。\n"
     out = sanitize_ai_content(content)
     # 围栏外口语化照常清洗
-    assert "施工项目部" in out          # 咱们 → 施工项目部（围栏外）
+    assert "施工项目部" in out  # 咱们 → 施工项目部（围栏外）
     assert "应注意" in out or "注意" not in out.split("\n")[0] or True
     # 围栏内图表代码逐字保留（不被清洗）
     assert "~~~mermaid" in out
-    assert "A[咱们]" in out              # 围栏内 咱们 不得被改写
+    assert "A[咱们]" in out  # 围栏内 咱们 不得被改写
     assert "B[完成]" in out
 
 
 def test_sanitize_preserves_tilde_chart_json_fence():
-    content = (
-        "说明：咱们采用新工艺。\n\n"
-        "~~~chart-json\n{\"type\":\"flowchart\",\"steps\":[{\"name\":\"咱们\"}]}\n~~~\n"
-    )
+    content = "说明：咱们采用新工艺。\n\n" '~~~chart-json\n{"type":"flowchart","steps":[{"name":"咱们"}]}\n~~~\n'
     out = sanitize_ai_content(content)
     assert "施工项目部" in out
     assert "~~~chart-json" in out
-    assert "咱们" in out                 # JSON 内 咱们 保留
+    assert "咱们" in out  # JSON 内 咱们 保留
 
 
 def test_quality_issues_ignores_tilde_fence():
@@ -57,7 +51,7 @@ def test_quality_issues_ignores_tilde_fence():
 def test_find_colloquial_hits_ignores_tilde_fence():
     content = "普通说明。\n\n~~~mermaid\n我们觉得应该优化\n~~~\n"
     hits = find_colloquial_hits(content)
-    assert "我们" not in hits            # 围栏内 我们 不计入
+    assert "我们" not in hits  # 围栏内 我们 不计入
 
 
 def test_protected_ranges_includes_tilde_fence():

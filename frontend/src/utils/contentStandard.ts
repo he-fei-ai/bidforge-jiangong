@@ -39,9 +39,10 @@ export function normalizeStandard(v: unknown): GenerationStandard | "" {
  *   保持与「未传任何新字段」的旧客户端逐字节一致（NFR-3 向后兼容）。
  * - `precise` / `fuzzy`：返回强覆盖两字段。
  */
-export function buildStandardRequestFields(
-  choice: GenerationStandardChoice | undefined,
-): { task_standard?: GenerationStandard; override_section_standard?: boolean } {
+export function buildStandardRequestFields(choice: GenerationStandardChoice | undefined): {
+  task_standard?: GenerationStandard;
+  override_section_standard?: boolean;
+} {
   const std = choice === "precise" || choice === "fuzzy" ? choice : "";
   if (!std) return {};
   return { task_standard: std, override_section_standard: true };
@@ -49,10 +50,7 @@ export function buildStandardRequestFields(
 
 /**
  * 章节级下拉选项文案：`inherit` 需要把方案默认翻译出来 */
-export function sectionStandardOptionLabel(
-  choice: string,
-  schemeStandard: unknown,
-): string {
+export function sectionStandardOptionLabel(choice: string, schemeStandard: unknown): string {
   if (choice === "precise") return STANDARD_LABELS.precise;
   if (choice === "fuzzy") return STANDARD_LABELS.fuzzy;
   const std = normalizeStandard(schemeStandard) || "precise";
@@ -67,9 +65,7 @@ export function effectiveSectionStandard(
   sectionStandard: unknown,
   schemeStandard: unknown,
 ): GenerationStandard {
-  return normalizeStandard(sectionStandard)
-    || normalizeStandard(schemeStandard)
-    || "precise";
+  return normalizeStandard(sectionStandard) || normalizeStandard(schemeStandard) || "precise";
 }
 
 /** 校验报告里的问题类型 → 中文标签（前端展示用，后端只给 type 英文码） */

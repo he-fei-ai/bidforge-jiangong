@@ -9,6 +9,7 @@ E. 提示词渲染（全占位符 + 无残留占位符 + JSON 示例已渲染）
 F. plan_section_content LLM 步（成功解析 / 失败回退为空，绝不抛）
 G. sections 表 DDL 含 plan_json（静态护栏，保证建表与迁移声明一致）
 """
+
 import json
 from pathlib import Path
 
@@ -48,9 +49,7 @@ def test_validate_filters_to_pool():
         "table_needed": "true",
         "table_purpose": "罗列参数",
     }
-    p = ContentPlanData.validate(
-        raw, knowledge_pool=["基坑支护规范"], fact_pool=["开挖深度"]
-    )
+    p = ContentPlanData.validate(raw, knowledge_pool=["基坑支护规范"], fact_pool=["开挖深度"])
     assert p.knowledge_names == ["基坑支护规范"]
     assert p.fact_titles == ["开挖深度"]
     assert p.table_needed is True
@@ -71,8 +70,11 @@ def test_validate_non_dict():
 # ── C. JSON 往返 ─────────────────────────────────────────────────
 def test_to_from_json_roundtrip():
     p = ContentPlanData(
-        writing_focus="x", knowledge_names=["a"], fact_titles=["b"],
-        table_needed=True, table_purpose="y",
+        writing_focus="x",
+        knowledge_names=["a"],
+        fact_titles=["b"],
+        table_needed=True,
+        table_purpose="y",
     )
     assert ContentPlanData.from_json(p.to_json()) == p
 
@@ -84,8 +86,11 @@ def test_from_json_bad_returns_empty():
 # ── D. 软建议渲染 ────────────────────────────────────────────────
 def test_guidance_rendering_with_plan():
     p = ContentPlanData(
-        writing_focus="聚焦支护", knowledge_names=["基坑规范"],
-        fact_titles=["深度"], table_needed=True, table_purpose="参数表",
+        writing_focus="聚焦支护",
+        knowledge_names=["基坑规范"],
+        fact_titles=["深度"],
+        table_needed=True,
+        table_purpose="参数表",
     )
     g = render_content_plan_guidance(p)
     assert "写作聚焦" in g
@@ -103,34 +108,51 @@ def test_guidance_none_and_empty():
 def test_prompts_render_with_all_kwargs():
     out = render(
         "content_plan_user",
-        scheme_name="方案", scheme_type="基坑", section_number="3.1",
-        section_title="支护", section_description="说明", word_budget=1500,
-        parent_chain="上级", sibling_lines="同级", project_brief="概述",
-        knowledge_names_text="- 基坑规范", fact_titles_text="- 深度",
+        scheme_name="方案",
+        scheme_type="基坑",
+        section_number="3.1",
+        section_title="支护",
+        section_description="说明",
+        word_budget=1500,
+        parent_chain="上级",
+        sibling_lines="同级",
+        project_brief="概述",
+        knowledge_names_text="- 基坑规范",
+        fact_titles_text="- 深度",
     )
     assert "知识库素材候选" in out
     assert "全局事实候选标题" in out
-    assert "{scheme_" not in out          # 无残留占位符
-    assert "{writing_focus" not in out    # JSON 示例已渲染为 {..}
-    assert "{" in out and "}" in out      # JSON 示例块已正确输出
+    assert "{scheme_" not in out  # 无残留占位符
+    assert "{writing_focus" not in out  # JSON 示例已渲染为 {..}
+    assert "{" in out and "}" in out  # JSON 示例块已正确输出
     assert render("content_plan_system").strip() != ""
 
 
 # ── F. plan_section_content LLM 步 ───────────────────────────────
 async def _fake_chat_ok(messages, **kwargs):
-    return json.dumps({
-        "writing_focus": "聚焦", "knowledge_names": ["基坑规范"],
-        "fact_titles": ["深度"], "table_needed": True, "table_purpose": "参数",
-    })
+    return json.dumps(
+        {
+            "writing_focus": "聚焦",
+            "knowledge_names": ["基坑规范"],
+            "fact_titles": ["深度"],
+            "table_needed": True,
+            "table_purpose": "参数",
+        }
+    )
 
 
 async def test_plan_section_content_ok():
     p = await plan_section_content(
         _fake_chat_ok,
         leaf={"title": "支护", "description": "说明"},
-        word_budget=1500, parent_chain="上级", sibling_lines="同级",
-        project_brief="概述", knowledge_names=["基坑规范"], fact_titles=["深度"],
-        scheme_name="方案", scheme_type="基坑",
+        word_budget=1500,
+        parent_chain="上级",
+        sibling_lines="同级",
+        project_brief="概述",
+        knowledge_names=["基坑规范"],
+        fact_titles=["深度"],
+        scheme_name="方案",
+        scheme_type="基坑",
     )
     assert p.knowledge_names == ["基坑规范"]
     assert p.fact_titles == ["深度"]
@@ -143,8 +165,14 @@ async def test_plan_section_content_failure_falls_back():
         raise RuntimeError("boom")
 
     p = await plan_section_content(
-        _bad, leaf={"title": "x"}, word_budget=100, parent_chain="",
-        sibling_lines="", project_brief="", knowledge_names=[], fact_titles=[],
+        _bad,
+        leaf={"title": "x"},
+        word_budget=100,
+        parent_chain="",
+        sibling_lines="",
+        project_brief="",
+        knowledge_names=[],
+        fact_titles=[],
     )
     assert p.writing_focus == ""
     assert p.knowledge_names == []
@@ -158,10 +186,7 @@ def test_schema_has_plan_json():
 
 def _sse_src() -> str:
     """读 sse_handlers.py 源码（集成点护栏的唯一取源出口）。"""
-    return (
-        Path(__file__).resolve().parents[1]
-        / "app" / "routers" / "sse_handlers.py"
-    ).read_text(encoding="utf-8")
+    return (Path(__file__).resolve().parents[1] / "app" / "routers" / "sse_handlers.py").read_text(encoding="utf-8")
 
 
 # ── H. sse_handlers 集成点：两类候选池的行形态 ────────────────────

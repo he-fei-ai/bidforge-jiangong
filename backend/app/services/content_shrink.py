@@ -14,11 +14,13 @@
 
 字数口径与全项目一致：``content_utils.text_word_count``（剔除围栏代码块）。
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import re
+import unicodedata
 
 from app.services.content_utils import fence_spans, text_word_count
 
@@ -26,22 +28,63 @@ logger = logging.getLogger("content_shrink")
 
 # ✅ 常量唯一来源（2026-09-16）：原先定义在 routers/sections.py，正文生成链路的
 #    「生成后自动压缩」需要同一套参数，故上移到服务层，路由改为 import。
-SHRINK_MAX_ROUNDS = 3          # 单次压缩最多轮数（每轮一次 AI 调用）
-SHRINK_SETTLE_RATIO = 1.15     # 收敛判定：字数降到目标的 1.15 倍以内即停
+SHRINK_MAX_ROUNDS = 3  # 单次压缩最多轮数（每轮一次 AI 调用）
+SHRINK_SETTLE_RATIO = 1.15  # 收敛判定：字数降到目标的 1.15 倍以内即停
 
 # Markdown 图片 ![alt](url) 与内联 <img ...>
 _IMAGE_MD_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
 # GFM 表格行（行首可选空白 + |）
 _TABLE_LINE_RE = re.compile(r"^\s*\|")
+# Markdown 列表项行首（无序 -/*/+、有序 1./1、/1）、中文括号编号（1）/(1)）。
+# ✅ R179（2026-11-05 · 列表样式被拍平）：旧保护区间只含围栏/表格/图片，
+#    AI 的 replace/delete 可整段命中列表行 → 列表被压成一段散文（层级丢失、
+#    导出成稿出现「1. xxx 2. xxx」连排）。列表是结构元素，与表格同属
+#    "压缩禁区"，只允许压缩其周边段落，不允许改写/删除列表行本身。
+_LIST_LINE_RE = re.compile(
+    r"^\s*(?:[-*+•·]\s+|\d+(?:\.\d+)*[.)．]\s+|\d+(?:\.\d+)*、|[（(]\s*[\d一二三四五六七八九十]+\s*[）)])"
+)
+
+
+def _collect_list_ranges(content: str) -> list[tuple[int, int]]:
+    """收集 Markdown 列表块的字符区间（连续列表项 + 其缩进续行合并为一块）。
+
+    ✅ R179：列表是不可压缩的**结构**证据 —— 沿用表格的处理方式（连续行合并
+    为一个区间），保证跨多行的 target_text 无法以碎片方式绕过保护。列表项之间
+    的空行不并入区间，但任何跨块的操作仍会与区间重叠而被拒绝。
+    """
+    if not content:
+        return []
+    ranges: list[tuple[int, int]] = []
+    offset = 0
+    start = -1
+    end = -1
+    for line in content.split("\n"):
+        line_len = len(line) + 1  # +1 为换行符
+        if _LIST_LINE_RE.match(line):
+            if start < 0:
+                start = offset
+            end = offset + len(line)
+        elif start >= 0 and line.strip() and (line.startswith(" ") or line.startswith("\t")):
+            # 列表项的缩进续行（换行折行）：同样属于列表块，不能被单独改写
+            end = offset + len(line)
+        else:
+            if start >= 0:
+                ranges.append((start, end + 1))
+                start = -1
+        offset += line_len
+    if start >= 0:
+        ranges.append((start, end + 1))
+    return ranges
 
 
 def collect_protected_ranges(content: str) -> list[tuple[int, int]]:
-    """收集正文中的"压缩禁区"字符区间（代码围栏 / 图片 / GFM 表格）。
+    """收集正文中的"压缩禁区"字符区间（代码围栏 / 图片 / GFM 表格 / 列表）。
 
     对齐 OpenBidKit ``collectProtectedContentRanges``：代码围栏 + 表格 + 图片。
     表格按"连续表格行"合并为一个区间（含表头分隔行），避免逐行区间被
-    跨行 target_text 的碎片命中绕过。
+    跨行 target_text 的碎片命中绕过。列表块按同一方式合并（R179）——
+    列表被压成段落是"结构损坏"，比超字数更需要防范。
 
     ✅ 2026-09-28（围栏口径收敛）：代码围栏改用 ``content_utils.fence_spans``
       （与 ``strip_fenced_code_blocks`` / ``find_unclosed_fences`` 同一套
@@ -56,6 +99,9 @@ def collect_protected_ranges(content: str) -> list[tuple[int, int]]:
     for pattern in (_IMAGE_MD_RE, _IMG_TAG_RE):
         for m in pattern.finditer(content):
             ranges.append((m.start(), m.end()))
+
+    # ✅ R179：Markdown 列表块（连续列表项 + 缩进续行）—— 与表格同属结构区
+    ranges.extend(_collect_list_ranges(content))
 
     # GFM 表格：连续表格行合并成块区间
     lines = content.split("\n")
@@ -104,7 +150,7 @@ def parse_shrink_operations(raw: str) -> list[dict]:
         last = text.rfind("}")
         if first != -1 and last > first:
             try:
-                obj = json.loads(text[first:last + 1])
+                obj = json.loads(text[first : last + 1])
             except (json.JSONDecodeError, TypeError):
                 obj = None
     if not isinstance(obj, dict):
@@ -133,13 +179,68 @@ def parse_shrink_operations(raw: str) -> list[dict]:
     return ops
 
 
+def _normalize_for_match(text: str) -> tuple[str, list[int]]:
+    """空白折叠 + NFKC 标点归一，并保留「规范化字符 → 原文下标」映射。
+
+    ✅ R180（2026-11-05 · 误报治理）：生产日志每日约 4 次
+    ``content_shrink: target_text 未逐字匹配，跳过本次修补``。根因是模型复述
+    target 时空白/换行与正文不同（偶尔还有全/半角标点差异），并非压缩本身失败。
+    本函数只用于**首次逐字查找失败后的回退**：逐字命中优先，因此成功路径行为
+    逐字不变；回退仍要求规范化后**唯一命中**，并照常做保护区重叠校验（偏移已
+    映射回原文），不放松任何红线。
+    """
+    chars: list[str] = []
+    pos: list[int] = []
+    pending_space_at: int | None = None
+    for i, ch in enumerate(text):
+        # NFKC 把全角标点/数字/空格折叠为半角；单个原字符可能展开为多字符，
+        # 每个展开字符都映射回同一原文下标，保证区间端点可逆。
+        for c in unicodedata.normalize("NFKC", ch):
+            if c.isspace():
+                if chars and pending_space_at is None:
+                    pending_space_at = i
+                continue
+            if pending_space_at is not None:
+                chars.append(" ")
+                pos.append(pending_space_at)
+                pending_space_at = None
+            chars.append(c)
+            pos.append(i)
+    return "".join(chars), pos
+
+
+def _locate_target(content: str, target: str) -> tuple[int, int]:
+    """定位 target 在 content 的唯一区间（逐字优先，规范化回退）。
+
+    不存在 / 出现多次 → 抛 ValueError（错误文案与历史逐字一致，调用方口径不变）。
+    """
+    first = content.find(target)
+    if first != -1:
+        second = content.find(target, first + 1)
+        if second != -1:
+            raise ValueError("操作目标在正文中出现多次（target_text 不唯一）")
+        return first, first + len(target)
+
+    n_content, n_map = _normalize_for_match(content)
+    n_target, _ = _normalize_for_match(target)
+    n_target = n_target.strip()
+    if not n_target:
+        raise ValueError("操作目标在正文中不存在（target_text 未逐字匹配）")
+    f = n_content.find(n_target)
+    if f == -1:
+        raise ValueError("操作目标在正文中不存在（target_text 未逐字匹配）")
+    if n_content.find(n_target, f + 1) != -1:
+        raise ValueError("操作目标在正文中出现多次（target_text 不唯一）")
+    return n_map[f], n_map[f + len(n_target) - 1] + 1
+
+
 def apply_shrink_operations(content: str, ops: list[dict]) -> str:
     """把压缩操作应用到正文（全有或全无：任一操作非法即抛 ValueError）。
 
     校验规则（对齐 OpenBidKit applyWordAdjustmentOperations）：
     - target_text 必须在当前正文中**逐字出现且仅出现一次**；
-    - 操作区间不得与保护区间（代码围栏/表格/图片）重叠 —— 命中即拒绝，
-      错误信息与 OpenBidKit 同口径："字数调整不能修改图片、Mermaid、代码块或表格"。
+    - 操作区间不得与保护区间（代码围栏/表格/图片/列表）重叠 —— 命中即拒绝，
+      错误信息与 OpenBidKit 同口径："字数调整不能修改图片、Mermaid、代码块或表格、列表"。
     """
     if not ops:
         raise ValueError("无操作可应用")
@@ -149,16 +250,12 @@ def apply_shrink_operations(content: str, ops: list[dict]) -> str:
     located: list[tuple[int, int, dict]] = []
     for op in ops:
         target = op["target_text"]
-        first = content.find(target)
-        if first == -1:
-            raise ValueError("操作目标在正文中不存在（target_text 未逐字匹配）")
-        second = content.find(target, first + 1)
-        if second != -1:
-            raise ValueError("操作目标在正文中出现多次（target_text 不唯一）")
-        end = first + len(target)
-        if _overlaps_protected(first, end, ranges):
-            raise ValueError("字数调整不能修改图片、Mermaid、代码块或表格")
-        located.append((first, end, op))
+        # ✅ R180：逐字唯一命中优先；失败时回退「空白折叠 + NFKC 标点归一」，
+        #    仍要求唯一命中（多义/不存在照旧拒绝），错误文案不变。
+        start, end = _locate_target(content, target)
+        if _overlaps_protected(start, end, ranges):
+            raise ValueError("字数调整不能修改图片、Mermaid、代码块或表格、列表")
+        located.append((start, end, op))
     located.sort(key=lambda x: x[0], reverse=True)
     result = content
     for start, end, op in located:
@@ -199,8 +296,12 @@ async def shrink_content_rounds(
     current = content
     before = text_word_count(current)
     out = {
-        "content": current, "before": before, "word_count": before,
-        "rounds_used": 0, "stop_reason": "已达轮次上限", "applied": False,
+        "content": current,
+        "before": before,
+        "word_count": before,
+        "rounds_used": 0,
+        "stop_reason": "已达轮次上限",
+        "applied": False,
     }
     if before <= 0 or not (content or "").strip():
         # ✅ 纯空白内容同样视为无可压缩（text_word_count 按字符计数，会把空格算进去）
@@ -212,7 +313,7 @@ async def shrink_content_rounds(
         if on_round is not None:
             try:
                 await on_round(round_no, current_wc)
-            except Exception:      # 进度上报失败绝不影响压缩
+            except Exception:  # 进度上报失败绝不影响压缩
                 logger.debug("压缩进度回调异常（已忽略）", exc_info=True)
         try:
             sys_prompt = prompt_factory(round_no, current_wc)
@@ -220,8 +321,9 @@ async def shrink_content_rounds(
             logger.warning("压缩提示词渲染失败: %s", e)
             out["stop_reason"] = f"提示词渲染失败: {e}"
             break
-        user_payload = (f"当前字数 {current_wc}，目标 {word_budget} 字。"
-                        "请输出压缩操作 JSON（不要输出正文本身）：\n\n" + current)
+        user_payload = (
+            f"当前字数 {current_wc}，目标 {word_budget} 字。" "请输出压缩操作 JSON（不要输出正文本身）：\n\n" + current
+        )
         try:
             raw = await call_ai(sys_prompt, user_payload)
         except Exception as e:

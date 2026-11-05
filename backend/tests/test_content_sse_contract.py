@@ -36,20 +36,32 @@ class _MultiSectionDB:
 
     def __init__(self, sections=None):
         self.saved: list[str] = []
-        self._sections = sections if sections is not None else [
-            self._sec("s1", "1.1", 1, "", 0, 20),
-            self._sec("s2", "1.2", 1, "", 1, 20),
-        ]
+        self._sections = (
+            sections
+            if sections is not None
+            else [
+                self._sec("s1", "1.1", 1, "", 0, 20),
+                self._sec("s2", "1.2", 1, "", 1, 20),
+            ]
+        )
 
     @staticmethod
     def _sec(sid, num, level, parent, sort, budget):
         return {
-            "id": sid, "scheme_id": "sc1", "title": f"章节 {sid}",
-            "level": level, "parent_id": parent, "sort_order": sort,
-            "word_budget": budget, "content": "", "status": "empty",
-            "description": "d", "outline_json": json.dumps({"id": num},
-                                                          ensure_ascii=False),
-            "generation_standard": "", "review_status": "", "word_count": 0,
+            "id": sid,
+            "scheme_id": "sc1",
+            "title": f"章节 {sid}",
+            "level": level,
+            "parent_id": parent,
+            "sort_order": sort,
+            "word_budget": budget,
+            "content": "",
+            "status": "empty",
+            "description": "d",
+            "outline_json": json.dumps({"id": num}, ensure_ascii=False),
+            "generation_standard": "",
+            "review_status": "",
+            "word_count": 0,
         }
 
     class _Cur:
@@ -65,11 +77,20 @@ class _MultiSectionDB:
     async def execute(self, sql, params=()):
         s = str(sql)
         if "FROM schemes" in s:
-            return self._Cur([{
-                "id": "sc1", "project_id": "p1", "name": "测试方案",
-                "type": "深基坑", "word_budget": 3000, "config_json": "{}",
-                "auto_consistency_repair": 0, "generation_standard": "",
-            }])
+            return self._Cur(
+                [
+                    {
+                        "id": "sc1",
+                        "project_id": "p1",
+                        "name": "测试方案",
+                        "type": "深基坑",
+                        "word_budget": 3000,
+                        "config_json": "{}",
+                        "auto_consistency_repair": 0,
+                        "generation_standard": "",
+                    }
+                ]
+            )
         if "FROM sections" in s and "ORDER BY sort_order" in s:
             return self._Cur([dict(x) for x in self._sections])
         if s.strip().upper().startswith("UPDATE SECTIONS SET CONTENT"):
@@ -116,8 +137,7 @@ def stub_env(monkeypatch):
         return _LONG_AI_TEXT
 
     monkeypatch.setattr(sh, "register_task", _register)
-    monkeypatch.setattr(sh, "_register_task_exclusive",
-                        lambda *a, **k: _register())
+    monkeypatch.setattr(sh, "_register_task_exclusive", lambda *a, **k: _register())
     monkeypatch.setattr(sh, "update_progress", _noop)
     monkeypatch.setattr(sh, "update_task_stats", _noop)
     monkeypatch.setattr(sh, "finish_task", _finish)
@@ -138,8 +158,7 @@ async def _run(db, body=None):
     resp = await sh.generate_content("sc1", _FakeRequest(payload), db=db)
     chunks: list[str] = []
     async for piece in resp.body_iterator:
-        chunks.append(piece.decode("utf-8", "replace")
-                      if isinstance(piece, bytes) else str(piece))
+        chunks.append(piece.decode("utf-8", "replace") if isinstance(piece, bytes) else str(piece))
     frames = [f for f in "".join(chunks).split("\n\n") if f.strip()]
     events = []
     for frame in frames:
@@ -167,11 +186,13 @@ def _names(events) -> list:
 # 1 · HTTP 包装
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_response_is_sse_with_anti_buffer_headers(stub_env):
     db = _MultiSectionDB()
-    resp = await sh.generate_content("sc1", _FakeRequest({
-        "mode": "all", "concurrency": 1, "auto_consistency_repair": False}), db=db)
+    resp = await sh.generate_content(
+        "sc1", _FakeRequest({"mode": "all", "concurrency": 1, "auto_consistency_repair": False}), db=db
+    )
     assert resp.media_type == "text/event-stream"
     assert resp.headers["Cache-Control"] == "no-cache"
     assert resp.headers["X-Accel-Buffering"] == "no"
@@ -180,6 +201,7 @@ async def test_response_is_sse_with_anti_buffer_headers(stub_env):
 # ============================================================================
 # 2 · 帧协议
 # ============================================================================
+
 
 @pytest.mark.asyncio
 async def test_every_frame_is_json_or_heartbeat_comment(stub_env):
@@ -200,6 +222,7 @@ async def test_every_frame_is_json_or_heartbeat_comment(stub_env):
 # 3 · 成功链路生命周期
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_success_lifecycle_is_start_done_completed(stub_env):
     db = _MultiSectionDB()
@@ -218,10 +241,8 @@ async def test_success_lifecycle_is_start_done_completed(stub_env):
 
     # 章节事件必须全部先于终态（拆分时最容易断的顺序契约）
     for e in events:
-        if e.get("event") in ("section_start", "section_done",
-                              "section_error", "progress"):
-            assert events.index(e) < events.index(term), (
-                f"{e.get('event')} 出现在终态之后: {names}")
+        if e.get("event") in ("section_start", "section_done", "section_error", "progress"):
+            assert events.index(e) < events.index(term), f"{e.get('event')} 出现在终态之后: {names}"
 
 
 @pytest.mark.asyncio
@@ -232,13 +253,21 @@ async def test_section_start_and_done_payload_contract(stub_env):
     dones = [e for e in events if e.get("event") == "section_done"]
 
     for e in starts:
-        for key in ("section_id", "title", "index", "total",
-                    "stage", "stage_label", "progress"):
+        for key in ("section_id", "title", "index", "total", "stage", "stage_label", "progress"):
             assert key in e, f"section_start 缺 {key}: {e}"
     for e in dones:
-        for key in ("section_id", "title", "word_count", "word_budget",
-                    "word_status", "continue_failed", "word_deviation",
-                    "word_ratio", "word_within_band", "content"):
+        for key in (
+            "section_id",
+            "title",
+            "word_count",
+            "word_budget",
+            "word_status",
+            "continue_failed",
+            "word_deviation",
+            "word_ratio",
+            "word_within_band",
+            "content",
+        ):
             assert key in e, f"section_done 缺 {key}: {e}"
         assert isinstance(e["content"], str) and e["content"], e
 
@@ -246,6 +275,7 @@ async def test_section_start_and_done_payload_contract(stub_env):
 # ============================================================================
 # 4 · completed 终态载荷
 # ============================================================================
+
 
 @pytest.mark.asyncio
 async def test_completed_payload_keys_and_counts(stub_env):
@@ -255,10 +285,21 @@ async def test_completed_payload_keys_and_counts(stub_env):
     assert term["event"] in ("completed", "degraded")
 
     required = {
-        "event", "task_id", "progress", "done", "total", "word_count",
-        "failed_count", "run_words", "over_count", "message",
-        "standard_summary", "fact_autofix_summary", "word_audit",
-        "order_check", "fact_mapping_stats",
+        "event",
+        "task_id",
+        "progress",
+        "done",
+        "total",
+        "word_count",
+        "failed_count",
+        "run_words",
+        "over_count",
+        "message",
+        "standard_summary",
+        "fact_autofix_summary",
+        "word_audit",
+        "order_check",
+        "fact_mapping_stats",
     }
     missing = required - set(term)
     assert not missing, f"completed 载荷缺字段: {missing}"
@@ -283,12 +324,12 @@ async def test_completed_payload_keys_and_counts(stub_env):
 # 5 · 落库契约
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_both_sections_persisted(stub_env):
     db = _MultiSectionDB()
     _, events = await _run(db)
-    assert len(db.saved) == 2, (
-        f"两章都应落库: {len(db.saved)} / {_names(events)}")
+    assert len(db.saved) == 2, f"两章都应落库: {len(db.saved)} / {_names(events)}"
     for content in db.saved:
         assert content.strip(), "落库正文不得为空"
         assert "编制说明" in content, f"落库正文异常: {content[:80]}"
@@ -299,5 +340,6 @@ async def test_finished_status_matches_terminal_event(stub_env):
     db = _MultiSectionDB()
     _, events = await _run(db)
     term = _terminal(events)
-    assert stub_env["finished"][-1][0] == term["event"], (
-        f"任务终态与事件不一致: {stub_env['finished']} vs {term['event']}")
+    assert (
+        stub_env["finished"][-1][0] == term["event"]
+    ), f"任务终态与事件不一致: {stub_env['finished']} vs {term['event']}"

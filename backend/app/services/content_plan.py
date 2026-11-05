@@ -13,6 +13,7 @@
 该能力默认关闭（`config.content_plan_stage_enabled=False`），关闭时调用方
 （sse_handlers.generate_content）不会触发任何额外 LLM 调用，行为与本项引入前逐字一致。
 """
+
 from __future__ import annotations
 
 import json
@@ -20,6 +21,17 @@ import logging
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+#: ✅ R178（D-4 · 2026-11-05）：编排步的输出预算地板。
+#: 旧实现硬编码 ``max_tokens=600`` —— 对**推理模型**必然被思考过程吃光
+#: （生产日志：custom 模型 600→1200 翻倍后仍「思考吞噬 max_tokens（正文为空）」），
+#: 对非推理模型也偏紧（编排 JSON 含 writing_focus 句 + knowledge_names/fact_titles
+#: 两个列表 + table_purpose，容易触顶 → 截断 → 进 JSON 修复轮 → 仍失败 →
+#: 静默降级为「无编排」）。生产实证：8 天内 158 条「离散编排阶段 LLM 调用失败，
+#: 回退为无编排」——**编排阶段事实上长期处于关闭状态，而用户毫不知情**。
+#: 现提到与正文首稿同口径的地板（1536）；provider 层对推理模型还会再抬到
+#: ``ai_reasoning_output_floor``（默认 4096）。
+CONTENT_PLAN_MAX_TOKENS = 1536
 
 
 @dataclass
@@ -71,10 +83,8 @@ class ContentPlanData:
 
         kn = d.get("knowledge_names") or []
         ft = d.get("fact_titles") or []
-        kn = [str(x).strip() for x in kn if isinstance(x, str) and x.strip()] \
-            if isinstance(kn, list) else []
-        ft = [str(x).strip() for x in ft if isinstance(x, str) and x.strip()] \
-            if isinstance(ft, list) else []
+        kn = [str(x).strip() for x in kn if isinstance(x, str) and x.strip()] if isinstance(kn, list) else []
+        ft = [str(x).strip() for x in ft if isinstance(x, str) and x.strip()] if isinstance(ft, list) else []
         tn = d.get("table_needed", False)
         if isinstance(tn, str):
             tn = tn.strip().lower() in ("true", "是", "yes", "1")
@@ -141,9 +151,7 @@ def render_content_plan_guidance(plan: ContentPlanData | None) -> str:
     """
     if plan is None:
         return ""
-    parts = [
-        "【本章离散编排要点（程序预规划，仅供行文聚焦参考，不限制可用素材范围）】："
-    ]
+    parts = ["【本章离散编排要点（程序预规划，仅供行文聚焦参考，不限制可用素材范围）】："]
     if plan.writing_focus:
         parts.append(f"- 写作聚焦：{plan.writing_focus}")
     if plan.knowledge_names:
@@ -187,7 +195,7 @@ def resolve_selected_fact_rows(
         return []
     out: list = []
     seen_ids: set[int] = set()
-    for row in (facts_rows or []):
+    for row in facts_rows or []:
         try:
             title = str(row[1] or "") if len(row) > 1 else ""
         except (TypeError, IndexError):
@@ -259,12 +267,10 @@ async def plan_section_content(
             messages,
             validate_fn=None,
             scene="content_plan",
-            max_tokens=600,
+            max_tokens=CONTENT_PLAN_MAX_TOKENS,
             json_mode=False,
         )
-        return ContentPlanData.validate(
-            obj, knowledge_pool=knowledge_names, fact_pool=fact_titles
-        )
+        return ContentPlanData.validate(obj, knowledge_pool=knowledge_names, fact_pool=fact_titles)
     except Exception:  # noqa: BLE001 - 编排失败绝不阻断正文生成
         logger.warning("离散编排阶段 LLM 调用失败，回退为无编排", exc_info=True)
         return ContentPlanData.empty()

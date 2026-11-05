@@ -23,6 +23,7 @@
 
 所有改写**默认关闭**：不传 ``auto_rewrite_content`` 时导出行为与既往完全一致。
 """
+
 from __future__ import annotations
 
 import html as _html
@@ -68,7 +69,7 @@ def _split_fences(text: str) -> list[tuple[bool, str]]:
         end = close_line if close_line >= 0 else len(lines) - 1
         if open_line > cursor:
             segs.append((False, "\n".join(lines[cursor:open_line])))
-        segs.append((True, "\n".join(lines[open_line:end + 1])))
+        segs.append((True, "\n".join(lines[open_line : end + 1])))
         cursor = end + 1
     if cursor < len(lines):
         segs.append((False, "\n".join(lines[cursor:])))
@@ -136,8 +137,7 @@ def html_table_to_gfm(text: str) -> tuple[str, int]:
         for row in grid:
             while len(row) < ncol:
                 row.append("")
-        lines = ["| " + " | ".join(grid[0]) + " |",
-                 "| " + " | ".join(["---"] * ncol) + " |"]
+        lines = ["| " + " | ".join(grid[0]) + " |", "| " + " | ".join(["---"] * ncol) + " |"]
         lines += ["| " + " | ".join(row) + " |" for row in grid[1:]]
         count += 1
         return "\n\n" + "\n".join(lines) + "\n\n"
@@ -156,8 +156,7 @@ _EN_LEAK_MAP = {
     "materials": "材料",
 }
 # 前后不接字母 → 不切断 Q235B / HPB300 等编号；仅小写 → 不碰句首大写英文专名
-_EN_LEAK_RE = re.compile(
-    r"(?<![A-Za-z])(" + "|".join(_EN_LEAK_MAP) + r")(?![A-Za-z])")
+_EN_LEAK_RE = re.compile(r"(?<![A-Za-z])(" + "|".join(_EN_LEAK_MAP) + r")(?![A-Za-z])")
 
 
 def fix_english_leak(text: str) -> tuple[str, int]:
@@ -175,6 +174,7 @@ def fix_english_leak(text: str) -> tuple[str, int]:
 # ---------------------------------------------------------------------------
 # ③ 相邻完全重复块合并
 # ---------------------------------------------------------------------------
+
 
 def collapse_duplicate_blocks(text: str) -> tuple[str, int]:
     """删除与前一条非空行**完全相同**的行（重复段落/重复子标题）；返回 (新文本, 删除数)。"""
@@ -196,6 +196,7 @@ def collapse_duplicate_blocks(text: str) -> tuple[str, int]:
 # ---------------------------------------------------------------------------
 # 编排：对单个章节正文执行三类改写（均在代码围栏外）
 # ---------------------------------------------------------------------------
+
 
 def normalize_section_content(text: str) -> tuple[str, dict]:
     """返回 ``(改写后正文, {"tables":n,"english":n,"dupes":n})``。

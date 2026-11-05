@@ -13,7 +13,7 @@
  * 前端侧子集建模：只声明前端真正消费的字段，其余（stats 等）忽略。
  */
 export type StandardReportIssue = {
-  type?: string;      // 英文问题码（如 fuzzy_expression / value_conflict）
+  type?: string; // 英文问题码（如 fuzzy_expression / value_conflict）
   severity?: "error" | "warning";
   message?: string;
   excerpt?: string;
@@ -72,9 +72,8 @@ export function normalizeChartYield(raw: unknown): ChartYield {
     : [];
   return {
     chart_count: Number.isFinite(count) && count > 0 ? Math.floor(count) : 0,
-    charts_dropped_count: Number.isFinite(droppedCount) && droppedCount > 0
-      ? Math.floor(droppedCount)
-      : dropped.length,
+    charts_dropped_count:
+      Number.isFinite(droppedCount) && droppedCount > 0 ? Math.floor(droppedCount) : dropped.length,
     charts_dropped: dropped,
   };
 }
@@ -193,13 +192,13 @@ export type SectionLogItem = {
    * 咨询性产物 —— 只提示不阻断；含 issues 明细供 Popover 展示。
    */
   standard_report?: StandardReport | null;
-  index?: number;       // 第几章（后端 section_start 下发）
-  total?: number;       // 总章数
+  index?: number; // 第几章（后端 section_start 下发）
+  total?: number; // 总章数
   reason?: string;
   time: number; // epoch ms
   duration?: number; // 耗时(ms)
   /** ✅ 进度增强：章节内阶段（后端 section_stage 下发） */
-  stage?: string;       // context / draft / continue / persist
+  stage?: string; // context / draft / continue / persist
   stage_label?: string; // 阶段中文名
 };
 
@@ -214,6 +213,8 @@ export type GenStats = {
   done?: number;
   total?: number;
   failed?: number;
+  /** R175 BUG-4：已处理章节数（成功 + 失败），与终态 checkpoint 同口径 */
+  processed?: number;
   words?: number;
   /** ✅ 二次增强：已完成章节的平均实测耗时（后端 stats.avg_section_ms） */
   avg_section_ms?: number | null;
@@ -234,6 +235,20 @@ export type GenStats = {
     elapsed_ms?: number;
   }[];
 };
+
+/**
+ * R175 BUG-3：进度单调护栏（与后端 `_monotonic_progress` 同口径）。
+ *
+ * 进度来源有多个（stats/ping 心跳、section_stage 单章阶段、progress 事件、
+ * consistency_* 扫描），任何一处算出比上一条事件更小的值，进度条就会「倒退」。
+ * 统一取历史最大值，把不可回退变成结构性约束；非法输入（undefined / NaN /
+ * 非数字）一律保留 prev，避免把进度清零。
+ */
+export function nextProgress(prev: number, incoming: unknown): number {
+  const cur = typeof prev === "number" && Number.isFinite(prev) ? prev : 0;
+  if (typeof incoming !== "number" || !Number.isFinite(incoming)) return cur;
+  return Math.max(cur, Math.min(1, Math.max(0, incoming)));
+}
 
 /**
  * 按 section_id 插入或替换一条章节日志，替换项保持在数组尾部
@@ -273,17 +288,23 @@ export function normalizeQualityIssues(raw: unknown): string[] | undefined {
       }
     }
   }
-  const uniq = Array.from(
-    new Set(out.map((s) => String(s).trim()).filter(Boolean)),
-  );
+  const uniq = Array.from(new Set(out.map((s) => String(s).trim()).filter(Boolean)));
   return uniq.length ? uniq : undefined;
 }
 
-export function upsertSectionLog(
-  list: SectionLogItem[],
-  item: SectionLogItem
-): SectionLogItem[] {
-  return [...list.filter((x) => x.section_id !== item.section_id), item];
+export function upsertSectionLog(list: SectionLogItem[], item: SectionLogItem): SectionLogItem[] {
+  // ✅ R179（2026-11-05 · 日志延迟错位）：旧实现 `[...filter, item]` 让**每次更新**
+  //   （section_stage / section_done / section_error）都把该章移到数组尾部。
+  //   由于日志面板倒序渲染，一章的阶段性事件会把已完成的后继章节不断顶下去，
+  //   用户看到的章号顺序随事件到达时间来回跳（"日志错位"）。现改为：
+  //     · 新章节 → 追加（保持目录推进序）；
+  //     · 已存在章节 → **原位替换**（只更新状态/阶段，不再改变位置）。
+  //   列表顺序 = 章节首次出现顺序（即目录 DFS 序），倒序渲染后稳定不跳。
+  const idx = list.findIndex((x) => x.section_id === item.section_id);
+  if (idx < 0) return [...list, item];
+  const next = list.slice();
+  next[idx] = item;
+  return next;
 }
 
 /**
@@ -294,14 +315,12 @@ export function upsertSectionLog(
 export function finalizeRunningLogsIn(
   list: SectionLogItem[],
   reason: string,
-  status: "skipped" | "failed" = "skipped"
+  status: "skipped" | "failed" = "skipped",
 ): SectionLogItem[] {
   if (!list.some((x) => x.status === "running")) return list;
   const now = Date.now();
   return list.map((x) =>
-    x.status === "running"
-      ? { ...x, status, reason, duration: now - x.time }
-      : x
+    x.status === "running" ? { ...x, status, reason, duration: now - x.time } : x,
   );
 }
 
@@ -316,7 +335,7 @@ type FailedSectionPayload = { section_id: string; title?: string; reason?: strin
  */
 export function mergeFailedSectionsInto(
   list: SectionLogItem[],
-  failedSections: unknown
+  failedSections: unknown,
 ): SectionLogItem[] {
   if (!Array.isArray(failedSections) || failedSections.length === 0) return list;
   const map = new Map(list.map((x) => [x.section_id, x]));
@@ -353,9 +372,10 @@ export function mergeFailedSectionsInto(
  * @returns sections = 有效失败明细；failedCount = 后端计数优先，缺失时按明细条数回退
  * （后端明细上限 50 条，被截断时以后端计数为准，故 failed_count 优先）
  */
-export function contentResultFailedSections(
-  contentResult: unknown,
-): { sections: Array<{ section_id: string }>; failedCount: number } {
+export function contentResultFailedSections(contentResult: unknown): {
+  sections: Array<{ section_id: string }>;
+  failedCount: number;
+} {
   if (!contentResult || typeof contentResult !== "object") {
     return { sections: [], failedCount: 0 };
   }
@@ -370,9 +390,7 @@ export function contentResultFailedSections(
       )
     : [];
   const declared = cr.failed_count;
-  const failedCount = typeof declared === "number" && declared > 0
-    ? declared
-    : sections.length;
+  const failedCount = typeof declared === "number" && declared > 0 ? declared : sections.length;
   return { sections, failedCount };
 }
 
@@ -385,9 +403,12 @@ export function contentResultFailedSections(
  *
  * 防御式解析：所有字段可选、类型不符一律回退默认值，绝不抛异常。
  */
-export function contentResultSummary(
-  contentResult: unknown,
-): { done: number; total: number; words: number; overCount: number } {
+export function contentResultSummary(contentResult: unknown): {
+  done: number;
+  total: number;
+  words: number;
+  overCount: number;
+} {
   if (!contentResult || typeof contentResult !== "object") {
     return { done: 0, total: 0, words: 0, overCount: 0 };
   }
@@ -419,9 +440,7 @@ export function contentResultSummary(
  * 三者都静默发生，是同一批现场的关键偶发问题。故把终态集合下沉为常量，
  * 各处一律经 ``isTerminalTaskStatus`` / ``isTerminalContentEvent`` 判定。
  */
-export const TERMINAL_TASK_STATUSES = [
-  "completed", "degraded", "failed", "stopped",
-] as const;
+export const TERMINAL_TASK_STATUSES = ["completed", "degraded", "failed", "stopped"] as const;
 
 /** SSE 正文生成链路的终态事件名（``completed`` 与 ``degraded`` 同语义需一起收口）。 */
 export const CONTENT_TERMINAL_EVENTS = ["completed", "degraded"] as const;
@@ -433,17 +452,15 @@ export const CONTENT_TERMINAL_EVENTS = ["completed", "degraded"] as const;
  * 把「仍在跑」误判为结束 —— 方向相反的误判才不可接受）。
  */
 export function isTerminalTaskStatus(status: unknown): boolean {
-  return typeof status === "string"
-    && (TERMINAL_TASK_STATUSES as readonly string[]).includes(status);
+  return (
+    typeof status === "string" && (TERMINAL_TASK_STATUSES as readonly string[]).includes(status)
+  );
 }
 
 /** SSE 事件是否为正文生成终态事件（``completed`` 或 ``degraded``）。 */
 export function isTerminalContentEvent(evt: unknown): boolean {
-  const name = (evt && typeof evt === "object"
-    ? (evt as Record<string, unknown>).event
-    : undefined);
-  return typeof name === "string"
-    && (CONTENT_TERMINAL_EVENTS as readonly string[]).includes(name);
+  const name = evt && typeof evt === "object" ? (evt as Record<string, unknown>).event : undefined;
+  return typeof name === "string" && (CONTENT_TERMINAL_EVENTS as readonly string[]).includes(name);
 }
 
 /**
@@ -459,11 +476,11 @@ export function degradedConsistencyHint(evt: unknown): string {
   const e = evt as Record<string, unknown>;
   if (e.event !== "degraded") return "";
   const direct = e.consistency_failed;
-  const nested = (e.consistency_summary && typeof e.consistency_summary === "object"
-    ? (e.consistency_summary as Record<string, unknown>).failed
-    : undefined);
-  const n = typeof direct === "number" ? direct
-    : (typeof nested === "number" ? nested : 0);
+  const nested =
+    e.consistency_summary && typeof e.consistency_summary === "object"
+      ? (e.consistency_summary as Record<string, unknown>).failed
+      : undefined;
+  const n = typeof direct === "number" ? direct : typeof nested === "number" ? nested : 0;
   if (n <= 0) return "";
   return `⚠️ 降级完成：一致性修复 ${n} 处失败，成稿含未修复缺陷，建议重跑一致性修复`;
 }

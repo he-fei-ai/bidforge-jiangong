@@ -16,6 +16,7 @@ snapshot_stats / make_content_progress_state，另含 STAGE_EXPECT_* 三常量�
 ⚠️ 函数族的活体在 ``routers/_sse_outline_build.py``（services 不得 import routers，
 故不回填委派）。要改进度行为请改那里；要改全局常量改本文件。
 """
+
 from __future__ import annotations
 
 # ---------- 正文生成进度模型（2026-09-15 增强） ----------
@@ -27,10 +28,10 @@ SECTION_PHASE_MAX = 0.95
 # 章节内阶段进度模型：base 进入该阶段时已完成的累积比例（保证单调递增），
 # span 该阶段自身占本章的比例（合计 1.0），expect 该阶段预期耗时（秒）。
 STAGE_MODEL = {
-    "context":  {"base": 0.00, "span": 0.05, "expect": 3.0},
-    "draft":    {"base": 0.05, "span": 0.55, "expect": 90.0},
+    "context": {"base": 0.00, "span": 0.05, "expect": 3.0},
+    "draft": {"base": 0.05, "span": 0.55, "expect": 90.0},
     "continue": {"base": 0.60, "span": 0.30, "expect": 60.0},
-    "persist":  {"base": 0.90, "span": 0.10, "expect": 12.0},
+    "persist": {"base": 0.90, "span": 0.10, "expect": 12.0},
 }
 # 阶段内渐近填充上限：只填到 span 的 85%，给「阶段完成」留出可见的跳变
 STAGE_FILL_MAX = 0.85

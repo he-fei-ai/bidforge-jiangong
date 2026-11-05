@@ -7,6 +7,7 @@ consistency_audit / knowledge_base 两张表此前为"规划中功能"（schema 
 - 消费：sse_handlers 的目录/正文生成会把项目级知识条目注入 prompt
   （见 _build_knowledge_text），AI 生成时遵守企业规范与既有素材。
 """
+
 import json
 import uuid
 
@@ -25,11 +26,12 @@ async def list_knowledge(project_id: str = "", scheme_id: str = "", db=Depends(g
         cur = await db.execute(
             "SELECT * FROM knowledge_base WHERE project_id=? AND (scheme_id=? OR scheme_id='') "
             "ORDER BY created_at DESC",
-            (project_id, scheme_id))
+            (project_id, scheme_id),
+        )
     elif project_id:
         cur = await db.execute(
-            "SELECT * FROM knowledge_base WHERE project_id=? ORDER BY created_at DESC",
-            (project_id,))
+            "SELECT * FROM knowledge_base WHERE project_id=? ORDER BY created_at DESC", (project_id,)
+        )
     else:
         cur = await db.execute("SELECT * FROM knowledge_base ORDER BY created_at DESC")
     return {"items": [dict(r) for r in await cur.fetchall()]}
@@ -42,10 +44,16 @@ async def create_knowledge(body: dict, db=Depends(get_db)):
         raise HTTPException(422, "name 不能为空")
     kid = str(uuid.uuid4())
     await db.execute(
-        "INSERT INTO knowledge_base (id, project_id, scheme_id, name, usage_hint, content)"
-        " VALUES (?,?,?,?,?,?)",
-        (kid, str(body.get("project_id", "")), str(body.get("scheme_id", "")),
-         name, str(body.get("usage_hint", "")), str(body.get("content", ""))))
+        "INSERT INTO knowledge_base (id, project_id, scheme_id, name, usage_hint, content)" " VALUES (?,?,?,?,?,?)",
+        (
+            kid,
+            str(body.get("project_id", "")),
+            str(body.get("scheme_id", "")),
+            name,
+            str(body.get("usage_hint", "")),
+            str(body.get("content", "")),
+        ),
+    )
     await db.commit()
     cur = await db.execute("SELECT * FROM knowledge_base WHERE id=?", (kid,))
     return dict(await cur.fetchone())
@@ -77,14 +85,35 @@ async def delete_knowledge(kid: str, db=Depends(get_db)):
     return {"ok": True}
 
 
-def build_knowledge_text(rows: list[dict], max_total: int = 3000, per_item: int = 500) -> str:
+def build_knowledge_text(
+    rows: list[dict], max_total: int = 3000, per_item: int = 500, stats_out: dict | None = None
+) -> str:
     """把知识条目格式化为可注入 prompt 的文本块（供生成链路复用与单测）。
 
     - 每条 = 【名称】（用途提示）内容（截断 per_item 字）
     - 空内容条目跳过；总量截断 max_total 字
+
+    ✅ D-39（R176 · 2026-11-04）：硬切必须可对账。``stats_out`` 非空时写入
+    本次裁剪的**精确**统计（不做估算）：
+    - ``items``：仅被裁/被丢条目，逐条含 name / state（truncated|dropped）/
+      original_chars / kept_chars / dropped_chars；
+    - ``truncated_items``：单条超过 per_item 被截的条数；
+    - ``dropped_items``：因总量 max_total 整条没进文本的条数；
+    - ``original_chars`` / ``kept_chars`` / ``dropped_chars``：上述两类条目的
+      内容字符数总和（不含名称/用途提示/分隔符等格式化字符）。
+    无裁剪时 ``items`` 为空且三个字符数均为 0 —— 调用方据此零事件。
     """
     parts: list[str] = []
     total = 0
+    stats = {
+        "items": [],
+        "truncated_items": 0,
+        "dropped_items": 0,
+        "original_chars": 0,
+        "kept_chars": 0,
+        "dropped_chars": 0,
+    }
+    full = False
     for r in rows:
         name = str(r.get("name", "")).strip()
         content = str(r.get("content", "")).strip()
@@ -92,10 +121,41 @@ def build_knowledge_text(rows: list[dict], max_total: int = 3000, per_item: int 
             continue
         hint = str(r.get("usage_hint", "")).strip()
         block = f"【{name}】{('（' + hint + '）') if hint else ''}\n{content[:per_item]}"
-        if total + len(block) > max_total:
-            break
+        if full or total + len(block) > max_total:
+            # 总量已满：整条丢弃（不写半截块），但必须进账本。
+            full = True
+            stats["items"].append(
+                {
+                    "name": name,
+                    "state": "dropped",
+                    "original_chars": len(content),
+                    "kept_chars": 0,
+                    "dropped_chars": len(content),
+                }
+            )
+            stats["dropped_items"] += 1
+            stats["original_chars"] += len(content)
+            stats["dropped_chars"] += len(content)
+            continue
         parts.append(block)
         total += len(block)
+        kept = min(len(content), per_item)
+        if kept < len(content):
+            stats["items"].append(
+                {
+                    "name": name,
+                    "state": "truncated",
+                    "original_chars": len(content),
+                    "kept_chars": kept,
+                    "dropped_chars": len(content) - kept,
+                }
+            )
+            stats["truncated_items"] += 1
+            stats["original_chars"] += len(content)
+            stats["kept_chars"] += kept
+            stats["dropped_chars"] += len(content) - kept
+    if stats_out is not None:
+        stats_out.update(stats)
     return "\n\n".join(parts)
 
 

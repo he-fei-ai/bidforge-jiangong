@@ -25,6 +25,7 @@ F. 接线（源码静态锁）—— sse_handlers 三处接线到位、开关默
 ⚠️ A/B 反向验证：每条「修复」类用例都配一个「还原旧行为即失败」的对照断言
 （见各 Test* 类内的 test_revert_* / test_without_fix_*）。
 """
+
 from __future__ import annotations
 
 import re
@@ -67,6 +68,7 @@ def _sse_source() -> str:
 # A. 映射表完整性
 # ---------------------------------------------------------------------------
 
+
 class TestConstraintMap:
     """「检查点 → 生成约束 → 实现方式」唯一事实源。"""
 
@@ -88,8 +90,12 @@ class TestConstraintMap:
         """通道枚举封闭且六类俱全（防新加魔法字符串绕过约束）。"""
         assert len(CHECKPOINT_CHANNELS) == 6
         assert set(CHECKPOINT_CHANNELS) == {
-            "system_preprompt", "chapter_preprompt", "selfcheck",
-            "autofix", "export_pipeline", "audit_fallback",
+            "system_preprompt",
+            "chapter_preprompt",
+            "selfcheck",
+            "autofix",
+            "export_pipeline",
+            "audit_fallback",
         }
 
     def test_map_non_empty_and_shape(self):
@@ -97,8 +103,15 @@ class TestConstraintMap:
         rows = checkpoint_constraint_map()
         assert len(rows) >= 30
         for r in rows:
-            assert set(r) == {"group", "checkpoint", "rule_ids", "constraint",
-                              "implementation", "channel", "chapter_key"}
+            assert set(r) == {
+                "group",
+                "checkpoint",
+                "rule_ids",
+                "constraint",
+                "implementation",
+                "channel",
+                "chapter_key",
+            }
             assert r["group"] in GROUP_KEYS
             assert r["channel"] in CHECKPOINT_CHANNELS
             assert r["rule_ids"] and all(isinstance(x, str) for x in r["rule_ids"])
@@ -111,18 +124,18 @@ class TestConstraintMap:
     def test_all_anchored_rule_ids_exist(self):
         """映射表引用的每个 rule_id 都必须真实存在于审核注册表。"""
         rows = checkpoint_constraint_map()
-        missing = sorted({rid for r in rows for rid in r["rule_ids"]
-                          if rid not in RULE_MAP})
+        missing = sorted({rid for r in rows for rid in r["rule_ids"] if rid not in RULE_MAP})
         assert missing == [], f"悬空规则锚点: {missing}"
 
     def test_nine_chapters_fully_derived(self):
         """九大章节的每一条必含要求都被派生成映射条目（零遗漏）。"""
         rows = checkpoint_constraint_map()
-        derived = {(r["chapter_key"], r["checkpoint"]) for r in rows
-                   if r["chapter_key"]}
-        expected = {(ck, f"{spec['title']}·{r['label']}")
-                    for ck, spec in CHAPTER_CHECKPOINT_REQUIREMENTS.items()
-                    for r in spec["requirements"]}
+        derived = {(r["chapter_key"], r["checkpoint"]) for r in rows if r["chapter_key"]}
+        expected = {
+            (ck, f"{spec['title']}·{r['label']}")
+            for ck, spec in CHAPTER_CHECKPOINT_REQUIREMENTS.items()
+            for r in spec["requirements"]
+        }
         assert derived == expected
 
     def test_chapter_constraints_are_derived_not_copied(self):
@@ -130,9 +143,7 @@ class TestConstraintMap:
         rows = checkpoint_constraint_map()
         for ck, spec in CHAPTER_CHECKPOINT_REQUIREMENTS.items():
             for r in spec["requirements"]:
-                hit = [x for x in rows
-                       if x["chapter_key"] == ck
-                       and x["checkpoint"] == f"{spec['title']}·{r['label']}"]
+                hit = [x for x in rows if x["chapter_key"] == ck and x["checkpoint"] == f"{spec['title']}·{r['label']}"]
                 assert len(hit) == 1, (ck, r["label"])
                 assert hit[0]["constraint"] == r["note"]
                 assert hit[0]["rule_ids"] == list(r["rule_ids"])
@@ -144,17 +155,14 @@ class TestConstraintMap:
             for r in spec["requirements"]:
                 if not r.get("hazard_only"):
                     continue
-                hit = [x for x in rows
-                       if x["chapter_key"] == ck
-                       and x["checkpoint"] == f"{spec['title']}·{r['label']}"]
+                hit = [x for x in rows if x["chapter_key"] == ck and x["checkpoint"] == f"{spec['title']}·{r['label']}"]
                 assert len(hit) == 1
                 assert "hazard_only" in hit[0]["implementation"]
 
     def test_autofix_channel_present_for_std03(self):
         """STD-03 必须登记为 autofix 通道（否则闭环缺自动修复一环）。"""
         rows = checkpoint_constraint_map()
-        assert any(r["channel"] == "autofix" and "STD-03" in r["rule_ids"]
-                   for r in rows)
+        assert any(r["channel"] == "autofix" and "STD-03" in r["rule_ids"] for r in rows)
 
     def test_cross_chapter_items_well_formed(self):
         """跨章条目自身结构合法（分组/通道/rule_ids 锚点齐全）。"""
@@ -167,10 +175,10 @@ class TestConstraintMap:
     def test_revert_drop_group_fails(self):
         """A/B：剔除整个分组的映射即被 validate_constraint_map 拦下。"""
         import app.services.content_checkpoint as mod
+
         saved = mod.CROSS_CHAPTER_CONSTRAINTS
         try:
-            mod.CROSS_CHAPTER_CONSTRAINTS = tuple(
-                c for c in saved if c["group"] != "other")
+            mod.CROSS_CHAPTER_CONSTRAINTS = tuple(c for c in saved if c["group"] != "other")
             problems = mod.validate_constraint_map()
             assert any("分组 其他" in p for p in problems)
         finally:
@@ -179,14 +187,19 @@ class TestConstraintMap:
     def test_revert_dangling_rule_id_fails(self):
         """A/B：引用不存在的规则编号即被拦下（防悬空锚点）。"""
         import app.services.content_checkpoint as mod
+
         saved = mod.CROSS_CHAPTER_CONSTRAINTS
         try:
-            mod.CROSS_CHAPTER_CONSTRAINTS = saved + ({
-                "group": "other", "checkpoint": "幽灵检查点",
-                "rule_ids": ("NOPE-99",),
-                "constraint": "x", "implementation": "y",
-                "channel": "selfcheck",
-            },)
+            mod.CROSS_CHAPTER_CONSTRAINTS = saved + (
+                {
+                    "group": "other",
+                    "checkpoint": "幽灵检查点",
+                    "rule_ids": ("NOPE-99",),
+                    "constraint": "x",
+                    "implementation": "y",
+                    "channel": "selfcheck",
+                },
+            )
             problems = mod.validate_constraint_map()
             assert any("NOPE-99" in p for p in problems)
         finally:
@@ -195,13 +208,19 @@ class TestConstraintMap:
     def test_revert_bad_channel_fails(self):
         """A/B：非法通道字符串即被拦下（防枚举越界）。"""
         import app.services.content_checkpoint as mod
+
         saved = mod.CROSS_CHAPTER_CONSTRAINTS
         try:
-            mod.CROSS_CHAPTER_CONSTRAINTS = saved + ({
-                "group": "other", "checkpoint": "坏通道", "rule_ids": ("DLV-08",),
-                "constraint": "x", "implementation": "y",
-                "channel": "magic_channel",
-            },)
+            mod.CROSS_CHAPTER_CONSTRAINTS = saved + (
+                {
+                    "group": "other",
+                    "checkpoint": "坏通道",
+                    "rule_ids": ("DLV-08",),
+                    "constraint": "x",
+                    "implementation": "y",
+                    "channel": "magic_channel",
+                },
+            )
             problems = mod.validate_constraint_map()
             assert any("magic_channel" in p for p in problems)
         finally:
@@ -234,8 +253,7 @@ _PRODUCTION_SECTION_TITLES = {
 class TestInferChapterKey:
     def test_primary_key_wins_never_overridden(self):
         """主判据命中时直接返回，绝不被补充表覆盖（只补不覆盖）。"""
-        assert infer_chapter_key("照明及手持电动工具管理",
-                                 "emergency") == "emergency"
+        assert infer_chapter_key("照明及手持电动工具管理", "emergency") == "emergency"
         assert infer_chapter_key("应急演练", "calc_drawings") == "calc_drawings"
 
     def test_production_subsection_titles_mapped(self):
@@ -256,8 +274,7 @@ class TestInferChapterKey:
 
     def test_supplement_covers_all_nine_chapters(self):
         """补充表覆盖九大章节（否则某些章的小节永远拿不到本章要素要求）。"""
-        assert set(CHAPTER_TITLE_SUPPLEMENT) == {
-            ch["key"] for ch in NINE_CHAPTERS}
+        assert set(CHAPTER_TITLE_SUPPLEMENT) == {ch["key"] for ch in NINE_CHAPTERS}
 
     def test_supplement_values_non_empty(self):
         """补充表每项关键词非空且去重（空表项 = 死规则）。"""
@@ -273,15 +290,17 @@ class TestInferChapterKey:
         本用例会失败并提醒同步收窄补充表，避免两套词表长期并存）。
         """
         from app.routers.sse_handlers import chapter_key_of_title as primary
-        uncovered = [t for t in _PRODUCTION_SECTION_TITLES
-                     if primary(t) == ""]
-        assert len(uncovered) >= len(_PRODUCTION_SECTION_TITLES) - 2, (
-            "主判据已覆盖多数实证标题，补充表应重新评估（避免两套词表并存）")
+
+        uncovered = [t for t in _PRODUCTION_SECTION_TITLES if primary(t) == ""]
+        assert (
+            len(uncovered) >= len(_PRODUCTION_SECTION_TITLES) - 2
+        ), "主判据已覆盖多数实证标题，补充表应重新评估（避免两套词表并存）"
 
 
 # ---------------------------------------------------------------------------
 # C. 小节作用域过滤（避免把章级聚合要求拆到小节造成假缺项）
 # ---------------------------------------------------------------------------
+
 
 def _rule_ids(fs: list) -> set:
     return {f.get("rule_id") for f in fs}
@@ -294,8 +313,8 @@ class TestSubsectionScope:
         """「应急组织机构及职责」只承担 SAF-03，不承担 SAF-04/05。"""
         content = "本项目成立应急组织机构，组长由项目经理担任，明确各岗位职责。"
         subs = checkpoint_selfcheck(
-            content, chapter_key="emergency",
-            section_title="应急组织机构及职责", subsection_scope=True)
+            content, chapter_key="emergency", section_title="应急组织机构及职责", subsection_scope=True
+        )
         # 只检查 SAF-03（该小节自己承担的那条），且内容已写全 → 无任何缺项
         assert subs == []
 
@@ -310,51 +329,53 @@ class TestSubsectionScope:
         content = "项目建立应急机制，加强安全教育培训。"
         legacy = checkpoint_selfcheck(content, chapter_key="emergency")
         explicit_legacy = checkpoint_selfcheck(
-            content, chapter_key="emergency", section_title="",
-            subsection_scope=False)
+            content, chapter_key="emergency", section_title="", subsection_scope=False
+        )
         assert legacy == explicit_legacy
 
     def test_safety_aggregate_not_split_to_subsection(self):
         """SAF-02 四要素是章级聚合要求，不得要求「照明及手持电动工具管理」也写全。"""
         content = "照明线路采用低压照明，电缆架空敷设，配电箱设漏电保护。"
         subs = checkpoint_selfcheck(
-            content, chapter_key="safety",
-            section_title="照明及手持电动工具管理", subsection_scope=True)
+            content, chapter_key="safety", section_title="照明及手持电动工具管理", subsection_scope=True
+        )
         assert subs == []
 
     def test_scope_matches_matching_subsection(self):
         """「应急演练」小节只查 SAF-05（主题词命中自身标签）。"""
         content = "每季度组织一次应急演练，做好记录并归档。"
-        subs = checkpoint_selfcheck(
-            content, chapter_key="emergency",
-            section_title="应急演练", subsection_scope=True)
+        subs = checkpoint_selfcheck(content, chapter_key="emergency", section_title="应急演练", subsection_scope=True)
         assert subs == []
 
     def test_subsection_missing_own_element_reported(self):
         """小节确实缺自己那条要素时仍要报出（过滤不能漏真缺陷）。"""
         subs = checkpoint_selfcheck(
-            "本章主要说明现场文明施工管理要求。", chapter_key="emergency",
-            section_title="应急物资装备保障", subsection_scope=True)
+            "本章主要说明现场文明施工管理要求。",
+            chapter_key="emergency",
+            section_title="应急物资装备保障",
+            subsection_scope=True,
+        )
         assert "SAF-04" in _rule_ids(subs)
 
     def test_revert_without_scope_produces_false_positives(self):
         """A/B：不开 subsection_scope 时同一小节产出 2 条假缺项（证明修复有效）。"""
         content = "本项目成立应急领导小组，组长由项目经理担任，明确各岗位职责。"
         subs = checkpoint_selfcheck(
-            content, chapter_key="emergency",
-            section_title="应急组织机构及职责", subsection_scope=False)
-        assert {"SAF-04", "SAF-05"} <= _rule_ids(subs), \
-            "旧行为应产生跨小节的假缺项"
+            content, chapter_key="emergency", section_title="应急组织机构及职责", subsection_scope=False
+        )
+        assert {"SAF-04", "SAF-05"} <= _rule_ids(subs), "旧行为应产生跨小节的假缺项"
 
 
 # ---------------------------------------------------------------------------
 # D. STD-03 裸标准编号自动补年号
 # ---------------------------------------------------------------------------
 
+
 class TestFixBareStandardCodes:
     def test_index_built_from_standards_registry_only(self):
         """年号索引**只**来自现行标准库（本模块不另立词表、不写死年号）。"""
         from app.services import standards_registry as sr
+
         pool = list(sr.BASE_STANDARDS)
         for items in sr.CATEGORY_STANDARDS.values():
             pool.extend(items)
@@ -403,8 +424,7 @@ class TestFixBareStandardCodes:
 
     def test_fenced_block_not_touched(self):
         """围栏代码块（Mermaid / chart-json 载荷）内的编号不动。"""
-        text = ("正文 GB 50210\n```mermaid\nflowchart LR\n"
-                "GB 99999 --> GB 50300\n```\n尾部 GB 55034")
+        text = "正文 GB 50210\n```mermaid\nflowchart LR\n" "GB 99999 --> GB 50300\n```\n尾部 GB 55034"
         out, fixes = fix_bare_standard_codes(text)
         assert "```mermaid\nflowchart LR\nGB 99999 --> GB 50300\n```" in out
         assert "GB 50210-2018" in out and "GB 55034-2022" in out
@@ -413,12 +433,13 @@ class TestFixBareStandardCodes:
     def test_ambiguous_base_is_reported_not_fixed(self):
         """同一基号对应多个编号 → 不补，只报待人工核实（年号不可编造）。"""
         import app.services.content_checkpoint as mod
+
         saved_idx, saved_amb = mod.BASE_CODE_INDEX, mod.AMBIGUOUS_BASES
         try:
-            base = next(iter(saved_idx))          # 取一个真实基号
+            base = next(iter(saved_idx))  # 取一个真实基号
             bare = saved_idx[base].split("-")[0]  # 如 "GB 55034"
-            mod.BASE_CODE_INDEX = {}              # 从可补映射中移除
-            mod.AMBIGUOUS_BASES = {base: "X"}     # 标记为歧义
+            mod.BASE_CODE_INDEX = {}  # 从可补映射中移除
+            mod.AMBIGUOUS_BASES = {base: "X"}  # 标记为歧义
             text = f"引用 {bare} 的规定。"
             out, fixes = mod.fix_bare_standard_codes(text)
             assert out == text, "歧义基号绝不可改写（编造年号比不改更糟）"
@@ -440,8 +461,7 @@ class TestFixBareStandardCodes:
         _, fixes = fix_bare_standard_codes("应执行 JGJ 59。")
         assert len(fixes) == 1
         f = fixes[0]
-        assert {"rule_id", "checkpoint", "from", "to", "position", "severity",
-                "fixable", "fixed", "source"} <= set(f)
+        assert {"rule_id", "checkpoint", "from", "to", "position", "severity", "fixable", "fixed", "source"} <= set(f)
         assert f["source"] == "selfcheck_autofix"
         assert f["position"] >= 0
 
@@ -453,10 +473,13 @@ class TestFixBareStandardCodes:
     def test_fail_soft_on_internal_error(self):
         """内部异常时返回原文与空清单（自检是体检，不是闸门）。"""
         import app.services.content_checkpoint as mod
+
         saved = mod._normalize_code_for_index
         try:
+
             def boom(code):
                 raise RuntimeError("注入异常")
+
             mod._normalize_code_for_index = boom
             text = "应执行 GB55032。"
             out, fixes = mod.fix_bare_standard_codes(text)
@@ -477,6 +500,7 @@ class TestFixBareStandardCodes:
 # ---------------------------------------------------------------------------
 # E. CON-04 占位标记确定性改写
 # ---------------------------------------------------------------------------
+
 
 class TestRewritePlaceholderMarks:
     def test_bracket_form_rewritten_to_conditional(self):
@@ -550,10 +574,13 @@ class TestRewritePlaceholderMarks:
     def test_fail_soft_on_internal_error(self):
         """内部异常时返回原文与空清单（fail-soft）。"""
         import app.services.content_checkpoint as mod
+
         saved = mod._fence_ranges
         try:
+
             def boom(text):
                 raise RuntimeError("注入异常")
+
             mod._fence_ranges = boom
             text = "深度【待定】m"
             out, fixes = mod.rewrite_placeholder_marks(text)
@@ -574,18 +601,22 @@ class TestRewritePlaceholderMarks:
 # F. 接线（源码静态锁）
 # ---------------------------------------------------------------------------
 
+
 class TestWiring:
     """判据只锚定真正生效的装配代码，不做「碰巧含关键字」的全文件匹配。"""
 
     def test_functions_imported(self):
         src = _sse_source()
-        m = re.search(r"from app\.services\.content_checkpoint import \(([^)]*)\)",
-                      src)
+        m = re.search(r"from app\.services\.content_checkpoint import \(([^)]*)\)", src)
         assert m, "sse_handlers 必须从唯一事实源导入 content_checkpoint"
         # 一行可能有多个逗号分隔的导入名，必须按逗号切分而非按行
         imported = {x.strip() for x in m.group(1).split(",") if x.strip()}
-        assert {"infer_chapter_key", "fix_bare_standard_codes",
-                "rewrite_placeholder_marks", "checkpoint_selfcheck"} <= imported
+        assert {
+            "infer_chapter_key",
+            "fix_bare_standard_codes",
+            "rewrite_placeholder_marks",
+            "checkpoint_selfcheck",
+        } <= imported
 
     @staticmethod
     def _call_window(src: str, name: str, span: int = 320) -> str:
@@ -595,7 +626,7 @@ class TestWiring:
         直接按文本定位。
         """
         at = src.index(name if name.endswith(("=", "]")) else name + "(")
-        return src[at:at + span]
+        return src[at : at + span]
 
     def test_autofix_runs_before_any_report(self):
         """确定性自动修复必须在 standard_report **之前**（否则报告与落库正文对不上号）。"""
@@ -613,8 +644,7 @@ class TestWiring:
 
     def test_autofix_block_is_fail_soft(self):
         """自动修复整体包在 try/except 中（异常不得阻断正文落库）。"""
-        block = self._call_window(_sse_source(),
-                                  "_ck_fix_actions: list = []", span=1800)
+        block = self._call_window(_sse_source(), "_ck_fix_actions: list = []", span=1800)
         assert "try:" in block and "except Exception:" in block
 
     def test_selfcheck_receives_subsection_scope(self):
@@ -661,11 +691,11 @@ class TestWiringDefaults:
     def test_revert_switch_stays_available(self):
         """A/B 对照：默认开是刻意行为变更，但设 False 逐字回退必须仍可行。"""
         import app.config as cfg
+
         fresh = cfg.Settings()
         assert fresh.content_selfcheck is True
         assert fresh.content_selfcheck_autofix is True
-        reverted = cfg.Settings(content_selfcheck=False,
-                                content_selfcheck_autofix=False)
+        reverted = cfg.Settings(content_selfcheck=False, content_selfcheck_autofix=False)
         assert reverted.content_selfcheck is False
         assert reverted.content_selfcheck_autofix is False
 
@@ -675,15 +705,16 @@ class TestCheckpointsEndpoint:
 
     def test_route_registered(self):
         from app.main import app
+
         assert "/api/v1/compliance/checkpoints" in app.openapi()["paths"]
 
     def test_endpoint_payload(self):
         import asyncio
 
         from app.routers.compliance import list_checkpoint_constraints
+
         data = asyncio.run(list_checkpoint_constraints())
-        assert set(data) >= {"rule_version", "groups", "channels", "items",
-                             "by_group", "by_channel", "anchor_problems"}
+        assert set(data) >= {"rule_version", "groups", "channels", "items", "by_group", "by_channel", "anchor_problems"}
         assert data["anchor_problems"] == []
         assert len(data["items"]) >= 30
         assert data["by_group"] and data["by_channel"]
@@ -691,4 +722,3 @@ class TestCheckpointsEndpoint:
         assert sum(data["by_group"].values()) == len(data["items"])
         assert sum(data["by_channel"].values()) == len(data["items"])
         assert len(data["groups"]) == 12
-

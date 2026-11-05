@@ -5,6 +5,7 @@
 - 方案 / 章节 PATCH 合法值落库与回读、章节 '' 清空覆盖、非法值 422（Pydantic 校验）；
 - 章节树轻量列表与方案快照携带 generation_standard。
 """
+
 import aiosqlite
 import pytest
 from app.db import _migrate
@@ -15,17 +16,13 @@ from pydantic import ValidationError
 
 
 async def _insert_project_scheme(db, pid="p1", sid="s1"):
-    await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)",
-                     (pid, "测试项目"))
-    await db.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)",
-                     (sid, pid, "测试方案"))
+    await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)", (pid, "测试项目"))
+    await db.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", (sid, pid, "测试方案"))
     await db.commit()
 
 
 async def _insert_section(db, sid="s1", sec_id="sec1", title="章节1"):
-    await db.execute(
-        "INSERT INTO sections (id, scheme_id, title) VALUES (?,?,?)",
-        (sec_id, sid, title))
+    await db.execute("INSERT INTO sections (id, scheme_id, title) VALUES (?,?,?)", (sec_id, sid, title))
     await db.commit()
 
 
@@ -40,13 +37,12 @@ class TestMigration:
         await _insert_project_scheme(db_conn)
         await _insert_section(db_conn)
 
-        cur = await db_conn.execute(
-            "SELECT generation_standard FROM schemes WHERE id='s1'")
+        cur = await db_conn.execute("SELECT generation_standard FROM schemes WHERE id='s1'")
         assert (await cur.fetchone())[0] == "precise"
 
         cur = await db_conn.execute(
-            "SELECT generation_standard, last_generation_standard"
-            " FROM sections WHERE id='sec1'")
+            "SELECT generation_standard, last_generation_standard" " FROM sections WHERE id='sec1'"
+        )
         assert tuple(await cur.fetchone()) == ("", "")
 
     async def test_migrate_idempotent_on_new_db(self, db_conn):
@@ -63,17 +59,17 @@ class TestMigration:
                 "CREATE TABLE schemes (id TEXT PRIMARY KEY, project_id TEXT, name TEXT);"
                 "CREATE TABLE sections (id TEXT PRIMARY KEY, scheme_id TEXT, title TEXT);"
                 "INSERT INTO schemes VALUES ('s1','p1','旧方案');"
-                "INSERT INTO sections VALUES ('sec1','s1','旧章节');")
+                "INSERT INTO sections VALUES ('sec1','s1','旧章节');"
+            )
             await _migrate(conn)
             await conn.commit()
 
-            cur = await conn.execute(
-                "SELECT generation_standard FROM schemes WHERE id='s1'")
+            cur = await conn.execute("SELECT generation_standard FROM schemes WHERE id='s1'")
             # 历史方案回填 precise（与旧行为等价：既有提示词本就强约束事实引用）
             assert (await cur.fetchone())[0] == "precise"
             cur = await conn.execute(
-                "SELECT generation_standard, last_generation_standard"
-                " FROM sections WHERE id='sec1'")
+                "SELECT generation_standard, last_generation_standard" " FROM sections WHERE id='sec1'"
+            )
             assert tuple(await cur.fetchone()) == ("", "")
 
             # 再跑一遍幂等无异常
@@ -86,18 +82,15 @@ class TestMigration:
 # 方案级 PATCH
 # ============================================================
 class TestSchemeStandardPatch:
-
     async def test_patch_fuzzy_and_readback(self, db_conn):
         await _insert_project_scheme(db_conn)
-        await update_scheme(
-            "p1", "s1", SchemeUpdate(generation_standard="fuzzy"), db=db_conn)
+        await update_scheme("p1", "s1", SchemeUpdate(generation_standard="fuzzy"), db=db_conn)
         row = await get_scheme("p1", "s1", db=db_conn)
         assert row["generation_standard"] == "fuzzy"
 
     async def test_patch_precise(self, db_conn):
         await _insert_project_scheme(db_conn)
-        await update_scheme(
-            "p1", "s1", SchemeUpdate(generation_standard="precise"), db=db_conn)
+        await update_scheme("p1", "s1", SchemeUpdate(generation_standard="precise"), db=db_conn)
         row = await get_scheme("p1", "s1", db=db_conn)
         assert row["generation_standard"] == "precise"
 
@@ -113,22 +106,17 @@ class TestSchemeStandardPatch:
 # 章节级 PATCH
 # ============================================================
 class TestSectionStandardPatch:
-
     async def test_patch_section_override_and_clear(self, db_conn):
         await _insert_project_scheme(db_conn)
         await _insert_section(db_conn)
 
-        await update_section(
-            "s1", "sec1", SectionUpdate(generation_standard="fuzzy"), db=db_conn)
-        cur = await db_conn.execute(
-            "SELECT generation_standard FROM sections WHERE id='sec1'")
+        await update_section("s1", "sec1", SectionUpdate(generation_standard="fuzzy"), db=db_conn)
+        cur = await db_conn.execute("SELECT generation_standard FROM sections WHERE id='sec1'")
         assert (await cur.fetchone())[0] == "fuzzy"
 
         # '' = 显式清除覆盖，回落方案级
-        await update_section(
-            "s1", "sec1", SectionUpdate(generation_standard=""), db=db_conn)
-        cur = await db_conn.execute(
-            "SELECT generation_standard FROM sections WHERE id='sec1'")
+        await update_section("s1", "sec1", SectionUpdate(generation_standard=""), db=db_conn)
+        cur = await db_conn.execute("SELECT generation_standard FROM sections WHERE id='sec1'")
         assert (await cur.fetchone())[0] == ""
 
     async def test_patch_section_invalid_rejected(self):
@@ -140,12 +128,10 @@ class TestSectionStandardPatch:
         await _insert_project_scheme(db_conn)
         await _insert_section(db_conn)
         # 模型层即不接受该字段（Pydantic 默认额外字段忽略，不会落库）
-        payload = SectionUpdate.model_validate(
-            {"generation_standard": "fuzzy", "last_generation_standard": "precise"})
+        payload = SectionUpdate.model_validate({"generation_standard": "fuzzy", "last_generation_standard": "precise"})
         assert not hasattr(payload, "last_generation_standard")
         await update_section("s1", "sec1", payload, db=db_conn)
-        cur = await db_conn.execute(
-            "SELECT last_generation_standard FROM sections WHERE id='sec1'")
+        cur = await db_conn.execute("SELECT last_generation_standard FROM sections WHERE id='sec1'")
         assert (await cur.fetchone())[0] == ""
 
 
@@ -153,14 +139,11 @@ class TestSectionStandardPatch:
 # 章节树 / 方案快照下发
 # ============================================================
 class TestTreeProjection:
-
     async def test_tree_and_scheme_carry_standard(self, db_conn):
         await _insert_project_scheme(db_conn)
         await _insert_section(db_conn)
-        await update_scheme(
-            "p1", "s1", SchemeUpdate(generation_standard="fuzzy"), db=db_conn)
-        await update_section(
-            "s1", "sec1", SectionUpdate(generation_standard="precise"), db=db_conn)
+        await update_scheme("p1", "s1", SchemeUpdate(generation_standard="fuzzy"), db=db_conn)
+        await update_section("s1", "sec1", SectionUpdate(generation_standard="precise"), db=db_conn)
 
         # 轻量列表（生成中轮询口径，不含 content）
         light = await list_sections("s1", include_content=False, db=db_conn)

@@ -3,7 +3,15 @@ import { SectionLogList } from "./SectionLogList.tsx";
 import { type OutlineLogItem } from "./logTypes.ts";
 import { STAGE_COLOR } from "./outlineTreeModel.ts";
 import { fmtDuration } from "./statsFormat.ts";
-import { CheckCircleOutlined, ClockCircleOutlined, CloseCircleOutlined, FileTextOutlined, HourglassOutlined, LoadingOutlined, ThunderboltOutlined } from "@ant-design/icons";
+import {
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+  CloseCircleOutlined,
+  FileTextOutlined,
+  HourglassOutlined,
+  LoadingOutlined,
+  ThunderboltOutlined,
+} from "@ant-design/icons";
 import { Card, List, Progress, Tag } from "antd";
 import { memo, useMemo } from "react";
 import { Typography } from "antd";
@@ -26,10 +34,18 @@ export type GenerationProgressProps = {
  *  全量渲染会造成严重掉帧；截断到最近若干条对用户可见内容无实质影响。 */
 export const OUTLINE_LOG_RENDER_MAX = 200;
 
-export const GenerationProgressCard = memo(function GenerationProgressCard(p: GenerationProgressProps) {
+export const GenerationProgressCard = memo(function GenerationProgressCard(
+  p: GenerationProgressProps,
+) {
   const {
-    genType, progress, progressMsg, sectionLogs,
-    outlinePhase, outlineDoneTotal, outlineLogs, stats,
+    genType,
+    progress,
+    progressMsg,
+    sectionLogs,
+    outlinePhase,
+    outlineDoneTotal,
+    outlineLogs,
+    stats,
   } = p;
   // ✅ 性能优化：原实现把 `[...outlineLogs].reverse()` 写在 JSX 里 —— SSE 期间
   //    progress 与日志每条更新都触发重渲，也就意味着每次都全量复制一遍整个数组，
@@ -37,9 +53,10 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(p: Ge
   //    并对渲染行数设上限（数据源 outlineLogs 本身不动，其它派生产物如
   //    outlineDoneTotal 仍需读取完整历史，行为保持不变）。
   const outlineLogItems = useMemo(
-    () => (outlineLogs.length > OUTLINE_LOG_RENDER_MAX
-      ? outlineLogs.slice(-OUTLINE_LOG_RENDER_MAX).reverse()
-      : [...outlineLogs].reverse()),
+    () =>
+      outlineLogs.length > OUTLINE_LOG_RENDER_MAX
+        ? outlineLogs.slice(-OUTLINE_LOG_RENDER_MAX).reverse()
+        : [...outlineLogs].reverse(),
     [outlineLogs],
   );
   const isContent = genType === "content";
@@ -58,8 +75,10 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(p: Ge
     }
     return { runningLogs: running, successCount: success, failedCount: failed };
   }, [sectionLogs]);
-  // ✅ 进度增强：优先采用后端权威统计（含未进入日志的失败章），缺失时回退本地计数
-  const doneCount = typeof stats?.done === "number" ? stats.done : successCount + failedCount;
+  // ✅ 进度增强：优先采用后端权威统计（含未进入日志的失败章），缺失时回退本地计数。
+  //    ✅ R175 BUG-4：stats.done 现为**成功**章节数（失败另计 failed），
+  //    fallback 同步改为 successCount（旧实现 success+failed 会与后端口径打架）。
+  const doneCount = typeof stats?.done === "number" ? stats.done : successCount;
   const totalCount = stats?.total ?? sectionLogs[0]?.total ?? 0;
   const elapsedMs = stats?.elapsed_ms ?? null;
   const etaMs = stats?.eta_ms ?? null;
@@ -70,10 +89,7 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(p: Ge
   // ✅ 二次增强：失败数取「后端统计 / 本地日志」的较大值 —— 强制重写失败等场景
   //    章节可能不在日志里（保留旧正文、状态未改），只看日志会把失败数显示为 0，
   //    与完成提示的「N 章失败」自相矛盾。目录与正文模式同口径。
-  const failedShown = Math.max(
-    failedCount,
-    typeof stats?.failed === "number" ? stats.failed : 0,
-  );
+  const failedShown = Math.max(failedCount, typeof stats?.failed === "number" ? stats.failed : 0);
   // 目录生成分步链路才有章节维度（done/total = 已生成子目录的章数 / 总章数）
   const outlineStepwise = isOutline && !!stats?.stepwise;
   const hasFailed = failedShown > 0 && progress >= 1;
@@ -86,10 +102,20 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(p: Ge
       <div style={{ display: "flex", gap: 16 }}>
         {/* ---- 左侧：任务标题 + 横向进度条 + 运行统计 + 当前工作内容 ---- */}
         <div style={{ flex: "0 0 420px", display: "flex", flexDirection: "column", gap: 8 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 8,
+            }}
+          >
             <Text strong style={{ fontSize: 13 }}>
-              {genType === "outline" ? "📂 正在生成目录"
-                : isContent ? "📝 正在生成正文" : "⏳ 正在处理"}
+              {genType === "outline"
+                ? "📂 正在生成目录"
+                : isContent
+                  ? "📝 正在生成正文"
+                  : "⏳ 正在处理"}
             </Text>
             {isContent && totalCount > 0 && (
               <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
@@ -106,8 +132,19 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(p: Ge
             percent={Math.round(progress * 100)}
             status={hasFailed ? "exception" : "active"}
           />
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-            <Text style={{ fontSize: 12, color: "#666", flex: 1, minWidth: 0 }} ellipsis title={progressMsg}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 8,
+            }}
+          >
+            <Text
+              style={{ fontSize: 12, color: "#666", flex: 1, minWidth: 0 }}
+              ellipsis
+              title={progressMsg}
+            >
               {progressMsg}
             </Text>
             <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
@@ -177,9 +214,7 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(p: Ge
                 </Tag>
               ))}
               {runningLogs.length > 4 && (
-                <Tag style={{ margin: 0, fontSize: 11 }}>
-                  +{runningLogs.length - 4}
-                </Tag>
+                <Tag style={{ margin: 0, fontSize: 11 }}>+{runningLogs.length - 4}</Tag>
               )}
             </div>
           )}
@@ -214,59 +249,83 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(p: Ge
 
         {/* ---- 右侧：正文生成章节滚动日志 ---- */}
         {genType === "content" && (
-        <div style={{ flex: 1, minHeight: 0, maxHeight: 280, overflow: "auto", border: "1px solid #f0f0f0", borderRadius: 6, padding: "6px 10px", background: "#fafafa" }}>
-          {sectionLogs.length === 0 ? (
-            <div style={{ textAlign: "center", padding: 12, color: "#999" }}>
-              正在连接 AI，等待章节生成...
-            </div>
-          ) : (
-            <SectionLogList items={sectionLogs} />
-          )}
-        </div>
+          <div
+            style={{
+              flex: 1,
+              minHeight: 0,
+              maxHeight: 280,
+              overflow: "auto",
+              border: "1px solid #f0f0f0",
+              borderRadius: 6,
+              padding: "6px 10px",
+              background: "#fafafa",
+            }}
+          >
+            {sectionLogs.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 12, color: "#999" }}>
+                正在连接 AI，等待章节生成...
+              </div>
+            ) : (
+              <SectionLogList items={sectionLogs} />
+            )}
+          </div>
         )}
 
         {/* ---- 右侧：目录生成实时日志 ---- */}
         {genType === "outline" && (
-        <div style={{ flex: 1, minHeight: 0, maxHeight: 280, overflow: "auto", border: "1px solid #f0f0f0", borderRadius: 6, padding: "6px 10px", background: "#fafafa" }}>
-          {outlineLogs.length === 0 ? (
-            <div style={{ textAlign: "center", padding: 12, color: "#999" }}>
-              正在连接 AI，准备生成目录...
-            </div>
-          ) : (
-            <List
-              size="small"
-              dataSource={outlineLogItems}
-              // ✅ 性能优化：反转后若沿用默认的 index key，每新增一条日志都会让
-              //    所有行的 key 顺移一位 → 全量 reconcile。改为按内容派生稳定 key。
-              rowKey={(item: OutlineLogItem) => `${item.time}-${item.message}`}
-              renderItem={(item) => (
-                <List.Item
-                  style={{
-                    padding: "4px 8px",
-                    borderRadius: 4,
-                    marginBottom: 4,
-                    background: "rgba(22,119,255,0.05)",
-                  }}
-                >
-                  <div style={{ width: "100%", display: "flex", alignItems: "center", gap: 8 }}>
-                    <Tag color="blue" style={{ margin: 0, minWidth: 46, textAlign: "center" }}>
-                      {Math.round(item.progress * 100)}%
-                    </Tag>
-                    <Text style={{ flex: 1, fontSize: 13 }} ellipsis title={item.message}>
-                      {item.message}
-                    </Text>
-                    {/* 仅分步链路（total>0）有章节维度，防历史日志渲染「0/0 章」 */}
-                    {typeof item.done === "number" && typeof item.total === "number" && item.total > 0 && (
-                      <Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>
-                        {item.done}/{item.total} 章
+          <div
+            style={{
+              flex: 1,
+              minHeight: 0,
+              maxHeight: 280,
+              overflow: "auto",
+              border: "1px solid #f0f0f0",
+              borderRadius: 6,
+              padding: "6px 10px",
+              background: "#fafafa",
+            }}
+          >
+            {outlineLogs.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 12, color: "#999" }}>
+                正在连接 AI，准备生成目录...
+              </div>
+            ) : (
+              <List
+                size="small"
+                dataSource={outlineLogItems}
+                // ✅ 性能优化：反转后若沿用默认的 index key，每新增一条日志都会让
+                //    所有行的 key 顺移一位 → 全量 reconcile。改为按内容派生稳定 key。
+                rowKey={(item: OutlineLogItem) => `${item.time}-${item.message}`}
+                renderItem={(item) => (
+                  <List.Item
+                    style={{
+                      padding: "4px 8px",
+                      borderRadius: 4,
+                      marginBottom: 4,
+                      background: "rgba(22,119,255,0.05)",
+                    }}
+                  >
+                    <div style={{ width: "100%", display: "flex", alignItems: "center", gap: 8 }}>
+                      <Tag color="blue" style={{ margin: 0, minWidth: 46, textAlign: "center" }}>
+                        {Math.round(item.progress * 100)}%
+                      </Tag>
+                      <Text style={{ flex: 1, fontSize: 13 }} ellipsis title={item.message}>
+                        {item.message}
                       </Text>
-                    )}
-                  </div>
-                </List.Item>
-              )}
-            />
-          )}
-        </div>
+                      {/* 仅分步链路（total>0）有章节维度，防历史日志渲染「0/0 章」 */}
+                      {typeof item.done === "number" &&
+                        typeof item.total === "number" &&
+                        item.total > 0 && (
+                          <Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>
+                            {item.done}/{item.total} 章
+                          </Text>
+                        )}
+                    </div>
+                  </List.Item>
+                )}
+              />
+            )}
+          </div>
         )}
       </div>
     </Card>

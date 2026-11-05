@@ -87,9 +87,7 @@ def classify_word_direction(word_count: int, word_budget: int) -> str:
     return DIRECTION_OK
 
 
-def build_adjust_plan(entries: list[dict],
-                      *,
-                      batch_size: int = WORD_ADJUST_BATCH_SIZE) -> dict:
+def build_adjust_plan(entries: list[dict], *, batch_size: int = WORD_ADJUST_BATCH_SIZE) -> dict:
     """按目录顺序（= 输入顺序，调用方须传 DFS 序叶子清单）切批。
 
     Args:
@@ -139,14 +137,16 @@ def build_adjust_plan(entries: list[dict],
             under_count += 1
         else:
             over_count += 1
-        items.append({
-            "section_id": sid,
-            "title": str(e.get("title") or ""),
-            "word_count": wc,
-            "word_budget": wb,
-            "direction": direction,
-        })
-    batches = [items[i:i + size] for i in range(0, len(items), size)]
+        items.append(
+            {
+                "section_id": sid,
+                "title": str(e.get("title") or ""),
+                "word_count": wc,
+                "word_budget": wb,
+                "direction": direction,
+            }
+        )
+    batches = [items[i : i + size] for i in range(0, len(items), size)]
     return {
         "items": items,
         "batches": batches,

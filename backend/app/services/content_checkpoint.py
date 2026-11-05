@@ -29,6 +29,7 @@
 - ``checkpoint_selfcheck(...)``：生成后程序化自检（纯函数），产出与预检
   rule_id 同词表的 findings；是否阻断/修复由调用方按配置决定（默认不修）。
 """
+
 from __future__ import annotations
 
 import logging
@@ -62,121 +63,147 @@ CHAPTER_CHECKPOINT_REQUIREMENTS: dict[str, dict] = {
     "overview": {
         "title": "工程概况",
         "requirements": [
-            {"rule_ids": ("CMP-01",),
-             "label": "周边环境与危大特点",
-             "must_include": ("地质", "水文", "周边环境"),
-             "note": "工程概况须写明地质条件、水文（地下水位）、邻近建（构）筑物"
-                     "与管线等周边环境，以及本危大工程的特点与风险辨识要点"},
+            {
+                "rule_ids": ("CMP-01",),
+                "label": "周边环境与危大特点",
+                "must_include": ("地质", "水文", "周边环境"),
+                "note": "工程概况须写明地质条件、水文（地下水位）、邻近建（构）筑物"
+                "与管线等周边环境，以及本危大工程的特点与风险辨识要点",
+            },
         ],
     },
     "basis": {
         "title": "编制依据",
         "requirements": [
-            {"rule_ids": ("STD-04",),
-             "label": "危大工程法定依据",
-             "must_include": ("37号",),
-             "alt_include": ("建办质〔2018〕31号", "31号文"),
-             "hazard_only": True,
-             "note": "危大工程方案的编制依据必须列出《危险性较大的分部分项工程"
-                     "安全管理规定》（住建部令第37号）与建办质〔2018〕31号文，"
-                     "不得遗漏"},
-            {"rule_ids": ("STD-02", "STD-05"),
-             "label": "四层依据齐备",
-             "must_include": ("法律法规", "标准", "规范"),
-             "note": "编制依据按四层列齐：法律法规 → 部门规章 / 规范性文件 → "
-                     "全文强制性工程建设规范（GB 55xxx）→ 本专业技术标准；"
-                     "有地方标准 / 项目文件（施工图、施工组织设计、合同）一并列入"},
+            {
+                "rule_ids": ("STD-04",),
+                "label": "危大工程法定依据",
+                "must_include": ("37号",),
+                "alt_include": ("建办质〔2018〕31号", "31号文"),
+                "hazard_only": True,
+                "note": "危大工程方案的编制依据必须列出《危险性较大的分部分项工程"
+                "安全管理规定》（住建部令第37号）与建办质〔2018〕31号文，"
+                "不得遗漏",
+            },
+            {
+                "rule_ids": ("STD-02", "STD-05"),
+                "label": "四层依据齐备",
+                "must_include": ("法律法规", "标准", "规范"),
+                "note": "编制依据按四层列齐：法律法规 → 部门规章 / 规范性文件 → "
+                "全文强制性工程建设规范（GB 55xxx）→ 本专业技术标准；"
+                "有地方标准 / 项目文件（施工图、施工组织设计、合同）一并列入",
+            },
         ],
     },
     "plan": {
         "title": "施工计划",
         "requirements": [
-            {"rule_ids": ("CMP-03",),
-             "label": "进度与资源计划",
-             "must_include": ("工期",),
-             "note": "施工计划须含进度安排（总工期与关键节点，口径与全局事实一致）、"
-                     "材料与设备计划（规格、数量、进场时间）与劳动力配置"},
+            {
+                "rule_ids": ("CMP-03",),
+                "label": "进度与资源计划",
+                "must_include": ("工期",),
+                "note": "施工计划须含进度安排（总工期与关键节点，口径与全局事实一致）、"
+                "材料与设备计划（规格、数量、进场时间）与劳动力配置",
+            },
         ],
     },
     "technique": {
         "title": "施工工艺技术",
         "requirements": [
-            {"rule_ids": ("CMP-04",),
-             "label": "参数·工艺·方法·检查要求",
-             "must_include": ("工艺",),
-             "note": "施工工艺技术须含：技术参数、工艺流程、施工方法、"
-                     "操作要求与检查要求，工序可落地执行"},
+            {
+                "rule_ids": ("CMP-04",),
+                "label": "参数·工艺·方法·检查要求",
+                "must_include": ("工艺",),
+                "note": "施工工艺技术须含：技术参数、工艺流程、施工方法、" "操作要求与检查要求，工序可落地执行",
+            },
         ],
     },
     "safety": {
         "title": "施工安全保证措施",
         "requirements": [
-            {"rule_ids": ("CMP-05", "SAF-02"),
-             "label": "专项安全技术措施",
-             "must_include": ("高处作业", "临时用电", "消防", "机械"),
-             "note": "安全保证措施除组织保障与监测监控外，必须逐项给出针对本方案"
-                     "的专项安全技术措施：高处作业防护、施工临时用电、消防防火、"
-                     "机械设备与吊装防护；不得只写通用套话"},
-            {"rule_ids": ("SAF-06",),
-             "label": "监测监控与预警值",
-             "must_include": ("监测",),
-             "alt_include": ("监控",),
-             "note": "需监测的危大工程应明确监测项目、点位布置、监测频次与预警值"},
+            {
+                "rule_ids": ("CMP-05", "SAF-02"),
+                "label": "专项安全技术措施",
+                "must_include": ("高处作业", "临时用电", "消防", "机械"),
+                "note": "安全保证措施除组织保障与监测监控外，必须逐项给出针对本方案"
+                "的专项安全技术措施：高处作业防护、施工临时用电、消防防火、"
+                "机械设备与吊装防护；不得只写通用套话",
+            },
+            {
+                "rule_ids": ("SAF-06",),
+                "label": "监测监控与预警值",
+                "must_include": ("监测",),
+                "alt_include": ("监控",),
+                "note": "需监测的危大工程应明确监测项目、点位布置、监测频次与预警值",
+            },
         ],
     },
     "personnel": {
         "title": "施工管理及作业人员配备和分工",
         "requirements": [
-            {"rule_ids": ("CMP-06", "SAF-07"),
-             "label": "人员配备与持证上岗",
-             "must_include": ("特种作业", "持证"),
-             "note": "必须写明管理人员与作业人员配备及岗位职责，并明确电工、焊工、"
-                     "架子工、起重司索信号工等特种作业人员持证上岗要求"
-                     "（只写岗位称谓，不得编造姓名与证书编号）"},
+            {
+                "rule_ids": ("CMP-06", "SAF-07"),
+                "label": "人员配备与持证上岗",
+                "must_include": ("特种作业", "持证"),
+                "note": "必须写明管理人员与作业人员配备及岗位职责，并明确电工、焊工、"
+                "架子工、起重司索信号工等特种作业人员持证上岗要求"
+                "（只写岗位称谓，不得编造姓名与证书编号）",
+            },
         ],
     },
     "acceptance": {
         "title": "验收要求",
         "requirements": [
-            {"rule_ids": ("CMP-07",),
-             "label": "验收标准·程序·内容·人员",
-             "must_include": ("验收",),
-             "note": "验收要求须明确验收标准（引用现行规范）、验收程序、验收内容"
-                     "与验收人员，检验批划分符合规范"},
+            {
+                "rule_ids": ("CMP-07",),
+                "label": "验收标准·程序·内容·人员",
+                "must_include": ("验收",),
+                "note": "验收要求须明确验收标准（引用现行规范）、验收程序、验收内容" "与验收人员，检验批划分符合规范",
+            },
         ],
     },
     "emergency": {
         "title": "应急处置措施",
         "requirements": [
-            {"rule_ids": ("SAF-03",),
-             "label": "应急组织机构及职责",
-             "must_include": ("应急组织", "职责"),
-             "alt_include": ("组织机构",),
-             "note": "按 GB/T 29639-2020 写明应急组织机构组成与各岗位职责"},
-            {"rule_ids": ("SAF-04",),
-             "label": "应急物资装备保障",
-             "must_include": ("应急物资",),
-             "alt_include": ("物资装备", "救援器材"),
-             "note": "列出应急物资与装备清单（种类、数量、存放位置）"},
-            {"rule_ids": ("SAF-05",),
-             "label": "应急预案演练",
-             "must_include": ("演练",),
-             "alt_include": ("演习",),
-             "note": "明确演练频次、组织方式与记录要求"},
+            {
+                "rule_ids": ("SAF-03",),
+                "label": "应急组织机构及职责",
+                "must_include": ("应急组织", "职责"),
+                "alt_include": ("组织机构",),
+                "note": "按 GB/T 29639-2020 写明应急组织机构组成与各岗位职责",
+            },
+            {
+                "rule_ids": ("SAF-04",),
+                "label": "应急物资装备保障",
+                "must_include": ("应急物资",),
+                "alt_include": ("物资装备", "救援器材"),
+                "note": "列出应急物资与装备清单（种类、数量、存放位置）",
+            },
+            {
+                "rule_ids": ("SAF-05",),
+                "label": "应急预案演练",
+                "must_include": ("演练",),
+                "alt_include": ("演习",),
+                "note": "明确演练频次、组织方式与记录要求",
+            },
         ],
     },
     "calc_drawings": {
         "title": "计算书及相关施工图纸",
         "requirements": [
-            {"rule_ids": ("CMP-09", "TRC-01"),
-             "label": "计算过程完整链条",
-             "must_include": ("计算",),
-             "note": "计算书必须给出完整链条：计算依据 → 参数取值及其来源 → "
-                     "计算公式与过程 → 结论与安全系数；只有结论没有过程视为缺失"},
-            {"rule_ids": ("TRC-03",),
-             "label": "附图与节点详图",
-             "must_include": ("图",),
-             "note": "应附相关图纸（平面布置、节点详图、监测点布置等）并在正文中引出"},
+            {
+                "rule_ids": ("CMP-09", "TRC-01"),
+                "label": "计算过程完整链条",
+                "must_include": ("计算",),
+                "note": "计算书必须给出完整链条：计算依据 → 参数取值及其来源 → "
+                "计算公式与过程 → 结论与安全系数；只有结论没有过程视为缺失",
+            },
+            {
+                "rule_ids": ("TRC-03",),
+                "label": "附图与节点详图",
+                "must_include": ("图",),
+                "note": "应附相关图纸（平面布置、节点详图、监测点布置等）并在正文中引出",
+            },
         ],
     },
 }
@@ -219,7 +246,8 @@ _HAZARD_CHECKPOINT_LINES: tuple[str, ...] = (
 _CHECKPOINT_HEADER = (
     "\n\n## 审核检查点前置要求（硬性，与预检/审核同一规则词表）\n"
     "正文生成后即进入审核与预检（规则 CMP/STD/SAF/CON/TRC/DLV）；"
-    "下列检查点在**写作时**就必须满足，不要指望事后修复：")
+    "下列检查点在**写作时**就必须满足，不要指望事后修复："
+)
 
 
 def _category_display_names(scheme_name: str, scheme_type: str = "") -> list[str]:
@@ -246,8 +274,8 @@ def is_hazardous_scheme(scheme_name: str = "", scheme_type: str = "") -> bool:
 
 
 def build_content_system_checkpoint_block(
-        scheme_name: str = "", scheme_type: str = "",
-        is_hazardous: bool | None = None) -> str:
+    scheme_name: str = "", scheme_type: str = "", is_hazardous: bool | None = None
+) -> str:
     """全方案级「检查点 → 生成约束」system 段落。
 
     Args:
@@ -266,11 +294,56 @@ def build_content_system_checkpoint_block(
         if cats:
             hazard_lines[0] += f"（本工程识别为：{'、'.join(cats)}）"
         lines.extend(hazard_lines)
+    lines.extend(_l3_standard_checkpoint_lines())
     return _CHECKPOINT_HEADER + "\n".join(lines)
 
 
-def chapter_required_elements(chapter_key: str, scheme_name: str = "",
-                              scheme_type: str = "") -> list[str]:
+def _l3_standard_checkpoint_lines() -> list[str]:
+    """《L3以下“少目录、多正文”编制标准》的正文写作要求（默认注入）。
+
+    数值来自 ``app.config.settings``（标准原文默认值），关闭
+    ``l3_standard_enabled`` 时返回空列表，恢复注入前行为。
+    """
+    try:
+        from app.services import l3_standard
+    except Exception:  # 纯提示词增强，导入异常不得阻断生成
+        return []
+    if not l3_standard.standard_enabled():
+        return []
+    try:
+        floor = l3_standard.word_floor("")
+        key_floor = l3_standard.word_floor("加固")
+        min_p = l3_standard.min_paragraphs()
+        max_p = l3_standard.max_paragraphs()
+        from app.config import settings
+
+        short_chars = int(getattr(settings, "content_l3_short_para_chars", 80) or 80)
+    except Exception:
+        floor, key_floor, min_p, max_p, short_chars = 1500, 2500, 3, 5, 80
+    return [
+        "",
+        "### 《L3以下“少目录、多正文”编制标准》（硬性，优先于上文与之冲突的表述）",
+        f"- **正文写足**：本章若为三级目录（L3），正文不少于 {floor} 字；标题含"
+        "「加固/拆除/危大/消防/调试/质量/安全/监测/监控/吊装/脚手架/深基坑」等"
+        f"关键词的关键 L3 不少于 {key_floor} 字（与【目标字数】取高值）。",
+        f"- **自然段**：{min_p}-{max_p} 个自然段，段间空一行；每段不少于 100 字，"
+        f"禁止连续出现 2 段及以上不足 {short_chars} 字的短段（列表项、表格、"
+        "短句承接不在此列）。",
+        "- **表格**：只放参数、工序、检查标准等结构化内容；表前不少于 100 字"
+        "交代用途与关键取值，表后不少于 100 字给出读数/结论，做到"
+        "「表前有交代、表后有结论」。",
+        "- **列表**：同一 L3 正文内列表不超过 6 项，每项不少于 150 字；"
+        "超过 6 项时按工序分组或改为表格。",
+        "- **图表**：本节最多 1 个图表块（图表规范另有更严限制时从其规定）。",
+        "- **标题做减法**：本章（L3）内**不再设 L4 及更深子标题**，需要分层时"
+        "一律用「（1）（2）」段首序号或加粗提示语在同一段内展开，每个引导段"
+        "不少于 400 字；不得只写标题或一句话，原有层级文字内容必须保留。",
+        "- **禁止空章节**：不得连续两级标题之间没有正文，不得只写一两句话的"
+        "「标题+短句」式空泛小节。",
+    ]
+
+
+def chapter_required_elements(chapter_key: str, scheme_name: str = "", scheme_type: str = "") -> list[str]:
     """返回某章节的**完整**必含要素清单（通用要素 + 命中的危大类别追加要素）。
 
     单一事实源为 :func:`scheme_classification.required_fields_for_chapter`
@@ -302,13 +375,16 @@ def chapter_required_elements(chapter_key: str, scheme_name: str = "",
     if chapter_key == "emergency":
         try:
             from app.config import settings
+
             group_on = bool(getattr(settings, "emergency_group_by_accident_type", True))
         except Exception:
             group_on = True
         if group_on:
-            out.append("专项应急预案按事故类型分组展开：按本工程主要事故风险"
-                       "（如高处坠落、物体打击、火灾、触电、中毒窒息等）各设一组，"
-                       "组内再写该类事故的处置流程，不得把各类事故的处置步骤平铺在同一层级")
+            out.append(
+                "专项应急预案按事故类型分组展开：按本工程主要事故风险"
+                "（如高处坠落、物体打击、火灾、触电、中毒窒息等）各设一组，"
+                "组内再写该类事故的处置流程，不得把各类事故的处置步骤平铺在同一层级"
+            )
     try:
         hits = match_category_keywords(f"{scheme_name} {scheme_type}")
     except Exception:
@@ -322,9 +398,9 @@ def chapter_required_elements(chapter_key: str, scheme_name: str = "",
     return out
 
 
-def build_chapter_element_block(chapter_key: str, scheme_name: str = "",
-                                scheme_type: str = "",
-                                include_elements: bool = True) -> str:
+def build_chapter_element_block(
+    chapter_key: str, scheme_name: str = "", scheme_type: str = "", include_elements: bool = True
+) -> str:
     """渲染【本章必含要素清单】提示段（未命中章节 / 开关关闭返回空串 = 不注入）。
 
     ⚠️ 措辞只给**写作要求**（逐项落实 / 缺一项即不完整），不承诺「已包含」——
@@ -344,8 +420,7 @@ def build_chapter_element_block(chapter_key: str, scheme_name: str = "",
     title = str((req or {}).get("title") or chapter_key or "").strip() or "本章"
     lines = [
         f"\n【{title} · 本章必含要素清单】（逐项落实，缺一项即视为章节不完整）",
-        f"本章必须逐项落实下列 {len(elements)} 项要素："
-        f"{'；'.join(elements)}。",
+        f"本章必须逐项落实下列 {len(elements)} 项要素：" f"{'；'.join(elements)}。",
         "落实要求：每一项都要有实质内容（做法、参数、组织或判定结论），"
         "不得只写要素名称不写内容；要素涉及的事实数据以【全局事实变量】为准，"
         "事实未给出具体数值的按「模糊生成规则」用条件式或范围式表述写完整"
@@ -354,11 +429,13 @@ def build_chapter_element_block(chapter_key: str, scheme_name: str = "",
     return "\n".join(lines)
 
 
-def build_chapter_checkpoint_block(chapter_key: str,
-                                   is_hazardous: bool = False,
-                                   include_elements: bool = True,
-                                   scheme_name: str = "",
-                                   scheme_type: str = "") -> str:
+def build_chapter_checkpoint_block(
+    chapter_key: str,
+    is_hazardous: bool = False,
+    include_elements: bool = True,
+    scheme_name: str = "",
+    scheme_type: str = "",
+) -> str:
     """按九大章节 key 反查「本章必含要素」提示块（未命中返回空串 = 不注入）。
 
     ``is_hazardous=False`` 时 hazard_only 要求（如 STD-04 危大法规）整条跳过，
@@ -390,8 +467,8 @@ def build_chapter_checkpoint_block(chapter_key: str,
                 topic += "（或同义表述：" + "、".join(r["alt_include"]) + "）"
             lines.append(f"- 〔{rid}｜{r['label']}〕{r['note']}；涉及关键词：{topic}")
     element_block = build_chapter_element_block(
-        chapter_key, scheme_name=scheme_name, scheme_type=scheme_type,
-        include_elements=include_elements)
+        chapter_key, scheme_name=scheme_name, scheme_type=scheme_type, include_elements=include_elements
+    )
     if element_block:
         lines.append(element_block)
     return "\n".join(lines)
@@ -415,22 +492,21 @@ def build_chapter_checkpoint_block(chapter_key: str,
 #: 占位标记的内部字符类排除 ``【``，否则「深度【待定】m 宽度【待补充：宽度】mm」
 #: 会被当成**一个**占位标记（匹配到整段，把「m 宽度」这段正常正文吞掉）——
 #: 自检报告把 2 个占位符报成 1 个，改写更会把正常正文一起删掉。
-_PLACEHOLDER_RES: tuple[re.Pattern, ...] = tuple(
-    rx for rx, _kind, _rw in PLACEHOLDER_MARK_PATTERNS
-)
+_PLACEHOLDER_RES: tuple[re.Pattern, ...] = tuple(rx for rx, _kind, _rw in PLACEHOLDER_MARK_PATTERNS)
 #: 危大法规引用（STD-04）：任一命中即视为已引
 _HAZARD_REG_RE = re.compile(
     r"37\s*号|住建部令第\s*37|住房和城乡建设部令第37号|危险性较大的分部分项工程"
-    r"|建办质〔?2018〕?31号|建办质\[?2018\]?31号")
+    r"|建办质〔?2018〕?31号|建办质\[?2018\]?31号"
+)
 #: 裸标准编号（无年号）——STD-03 的生成侧形态（正文要求写全年号）
 _BARE_CODE_RE = re.compile(
     r"(?:GB/T|GB|JGJ/T|JGJ|JTG/T|JTG|DBJ|CECS|CJJ/T|CJJ)\s*[0-9]{2,5}"
-    r"(?:\.[0-9]{1,3})?(?![0-9])(?!\s*[—\-－]\s*[0-9]{4})(?![0-9])")
+    r"(?:\.[0-9]{1,3})?(?![0-9])(?!\s*[—\-－]\s*[0-9]{4})(?![0-9])"
+)
 #: 年份形态排除（如「JGJ 59-2011」已带年号；正则已用负向断言，此处双保险不必再查）
 
 
-def _topic_hit(text: str, terms: tuple[str, ...],
-               alts: tuple[str, ...] = ()) -> bool:
+def _topic_hit(text: str, terms: tuple[str, ...], alts: tuple[str, ...] = ()) -> bool:
     """主题命中：``must_include`` **全部**出现才算满足，或命中任一
     ``alt_include`` 同义表述即视为等价满足。
 
@@ -475,9 +551,7 @@ def _req_in_scope(title: str, req: dict) -> bool:
     return False
 
 
-
-def _basis_standard_findings(text: str, *, scheme_name: str = "",
-                             scheme_type: str = "") -> list[dict]:
+def _basis_standard_findings(text: str, *, scheme_name: str = "", scheme_type: str = "") -> list[dict]:
     """编制依据章的标准**编号**级自检（STD-02 / STD-05）。
 
     判据与 ``preflight_engine.check_standards`` **同源**：编号提取直接复用
@@ -506,46 +580,51 @@ def _basis_standard_findings(text: str, *, scheme_name: str = "",
             match_categories,
             normalize_standard_code,
         )
+
         norm = normalize_standard_code(text)
         # ✅ 单一事实源：与 check_standards 完全相同的编号提取正则
         codes = {m.group(0).strip() for m in _pf._STANDARD_CODE_RE.finditer(text)}
         if not any(_pf._MANDATORY_CODE_RE.search(c) for c in codes):
-            out.append({
-                "rule_id": "STD-02",
-                "checkpoint": "未引用全文强制性工程建设规范编号",
-                "severity": "medium",
-                "source": "selfcheck",
-                "message": "编制依据章节未检出 GB 55xxx 系列全文强制规范编号"
-                           "（如 GB 55034-2022 / GB 55032-2022）",
-                "suggestion": "在编制依据中列出本工程适用的全文强制性工程建设规范"
-                              "（GB 55xxx 系列），并写全编号与年号",
-            })
-        cats = match_categories(scheme_name, scheme_type)[:2] if (
-            scheme_name or scheme_type) else []
-        cat_codes = [s.code for cat in cats
-                     for s in CATEGORY_STANDARDS.get(cat, [])]
-        if cat_codes and not any(
-                normalize_standard_code(c) in norm for c in cat_codes):
-            out.append({
-                "rule_id": "STD-05",
-                "checkpoint": "未引用本专业类别现行技术标准",
-                "severity": "medium",
-                "source": "selfcheck",
-                "message": f"编制依据章节未检出「{'/'.join(cats)}」类的现行"
-                           f"专业技术标准编号",
-                "suggestion": "补充本方案专业类别对应的现行技术标准编号"
-                              "（见【现行有效标准参考清单】中该类条目）",
-            })
+            out.append(
+                {
+                    "rule_id": "STD-02",
+                    "checkpoint": "未引用全文强制性工程建设规范编号",
+                    "severity": "medium",
+                    "source": "selfcheck",
+                    "message": "编制依据章节未检出 GB 55xxx 系列全文强制规范编号"
+                    "（如 GB 55034-2022 / GB 55032-2022）",
+                    "suggestion": "在编制依据中列出本工程适用的全文强制性工程建设规范"
+                    "（GB 55xxx 系列），并写全编号与年号",
+                }
+            )
+        cats = match_categories(scheme_name, scheme_type)[:2] if (scheme_name or scheme_type) else []
+        cat_codes = [s.code for cat in cats for s in CATEGORY_STANDARDS.get(cat, [])]
+        if cat_codes and not any(normalize_standard_code(c) in norm for c in cat_codes):
+            out.append(
+                {
+                    "rule_id": "STD-05",
+                    "checkpoint": "未引用本专业类别现行技术标准",
+                    "severity": "medium",
+                    "source": "selfcheck",
+                    "message": f"编制依据章节未检出「{'/'.join(cats)}」类的现行" f"专业技术标准编号",
+                    "suggestion": "补充本方案专业类别对应的现行技术标准编号" "（见【现行有效标准参考清单】中该类条目）",
+                }
+            )
     except Exception as exc:  # fail-soft：自检是体检，不是闸门
         logger.warning("编制依据标准编号自检异常（忽略）: %s", exc, exc_info=True)
     return out
 
 
 def checkpoint_selfcheck(
-        content: str, *, chapter_key: str = "",
-        is_hazardous_basis: bool = False,
-        section_title: str = "", subsection_scope: bool = False,
-        scheme_name: str = "", scheme_type: str = "") -> list[dict]:
+    content: str,
+    *,
+    chapter_key: str = "",
+    is_hazardous_basis: bool = False,
+    section_title: str = "",
+    subsection_scope: bool = False,
+    scheme_name: str = "",
+    scheme_type: str = "",
+) -> list[dict]:
     """对一章生成结果做检查点自检，返回 findings 列表（rule_id 与预检同词表）。
 
     Args:
@@ -586,20 +665,21 @@ def checkpoint_selfcheck(
                 # 小节只查自己承担的要求（章级聚合要求不拆到小节）
                 if subsection_scope and not _req_in_scope(section_title, r):
                     continue
-                if _topic_hit(text, r["must_include"],
-                              tuple(r.get("alt_include") or ())):
+                if _topic_hit(text, r["must_include"], tuple(r.get("alt_include") or ())):
                     continue
                 if r.get("hazard_only") and _HAZARD_REG_RE.search(text):
                     continue
-                findings.append({
-                    "rule_id": r["rule_ids"][0],
-                    "checkpoint": r["label"],
-                    "severity": "medium",
-                    "source": "selfcheck",
-                    "message": f"〔{req['title']}〕缺少「{r['label']}」相关内容"
-                               f"（关键词：{'、'.join(r['must_include'])}）",
-                    "suggestion": r["note"],
-                })
+                findings.append(
+                    {
+                        "rule_id": r["rule_ids"][0],
+                        "checkpoint": r["label"],
+                        "severity": "medium",
+                        "source": "selfcheck",
+                        "message": f"〔{req['title']}〕缺少「{r['label']}」相关内容"
+                        f"（关键词：{'、'.join(r['must_include'])}）",
+                        "suggestion": r["note"],
+                    }
+                )
 
         # ---- 编制依据章：标准**编号**级校验（STD-02 / STD-05） ----
         # ⚠️ 上面的章节必含要素只判「法律法规/标准/规范」等**词**，
@@ -609,8 +689,7 @@ def checkpoint_selfcheck(
         # 词过了而编号没有 → 目录侧/正文侧全绿、预检照样报 high（生产库 STD-05
         # high 实证）。此处用**与预检同源**的判据补齐，零 AI 成本。
         if chapter_key == "basis":
-            findings.extend(_basis_standard_findings(
-                text, scheme_name=scheme_name, scheme_type=scheme_type))
+            findings.extend(_basis_standard_findings(text, scheme_name=scheme_name, scheme_type=scheme_type))
 
         # ---- 计算书章：计算过程完整性（TRC-01，与预检同源判据） ----
         # ⚠️ 上面的章节必含要素只判「计算」这个**词**，而预检
@@ -643,36 +722,42 @@ def checkpoint_selfcheck(
                 if frag and frag not in marks:
                     marks.append(frag)
         if marks:
-            findings.append({
-                "rule_id": "CON-04",
-                "checkpoint": "占位标记残留",
-                "severity": "error",
-                "source": "selfcheck",
-                "fixable": True,
-                "message": f"正文残留 {len(marks)} 处占位标记："
-                           f"{'、'.join(marks[:5])}",
-                "suggestion": "按「模糊生成规则」把占位处改写为完整表述"
-                              "（范围值 / 技术原则 / 条件式），不得编造具体数值",
-                "evidence": marks[:20],
-            })
+            findings.append(
+                {
+                    "rule_id": "CON-04",
+                    "checkpoint": "占位标记残留",
+                    "severity": "error",
+                    "source": "selfcheck",
+                    "fixable": True,
+                    "message": f"正文残留 {len(marks)} 处占位标记：" f"{'、'.join(marks[:5])}",
+                    "suggestion": "按「模糊生成规则」把占位处改写为完整表述"
+                    "（范围值 / 技术原则 / 条件式），不得编造具体数值",
+                    "evidence": marks[:20],
+                }
+            )
 
         # ---- 裸标准编号（无年号） ----
         bare = sorted({m.group(0).strip() for m in _BARE_CODE_RE.finditer(text)})
         # 排除同时以带年号形态出现的编号（正文写全时不报）
         norm = re.sub(r"\s+", "", text)
-        bare = [b for b in bare
-                if re.sub(r"\s+", "", b) + "-" not in norm
-                and not re.search(re.sub(r"\s+", "", b) + r"[—－–-]\s*\d{4}", text)]
+        bare = [
+            b
+            for b in bare
+            if re.sub(r"\s+", "", b) + "-" not in norm
+            and not re.search(re.sub(r"\s+", "", b) + r"[—－–-]\s*\d{4}", text)
+        ]
         if bare:
-            findings.append({
-                "rule_id": "STD-03",
-                "checkpoint": "标准编号未写年号",
-                "severity": "warning",
-                "source": "selfcheck",
-                "message": f"{len(bare)} 处标准编号未带年号：{'、'.join(bare[:5])}",
-                "suggestion": "首次引用写全「《名称》（编号-年号）」",
-                "evidence": bare[:20],
-            })
+            findings.append(
+                {
+                    "rule_id": "STD-03",
+                    "checkpoint": "标准编号未写年号",
+                    "severity": "warning",
+                    "source": "selfcheck",
+                    "message": f"{len(bare)} 处标准编号未带年号：{'、'.join(bare[:5])}",
+                    "suggestion": "首次引用写全「《名称》（编号-年号）」",
+                    "evidence": bare[:20],
+                }
+            )
     except Exception as exc:  # fail-soft：自检异常绝不污染生成链路
         logger.warning("检查点自检异常（忽略）: %s", exc, exc_info=True)
     return findings
@@ -730,29 +815,30 @@ def _calc_process_findings(text: str) -> list[dict]:
         if not text or not text.strip():
             return []
         from app.services.preflight_engine import has_calc_process
+
         if has_calc_process(text):
             return []
     except Exception as exc:  # fail-soft：自检异常绝不污染生成链路
         logger.warning("计算过程判定异常（忽略）: %s", exc, exc_info=True)
         return []
-    return [{
-        "rule_id": "TRC-01",
-        "checkpoint": "计算过程完整性",
-        "severity": "medium",
-        "source": "selfcheck",
-        "message": "〔计算书及相关施工图纸〕未见计算公式或参数代入过程",
-        "suggestion": "计算书须给出完整链条：计算依据 → 参数取值及其来源 → "
-                      "计算公式与过程 → 结论与安全系数；只有结论没有过程"
-                      "视为缺失（该检查点为预检 block 级）",
-    }]
+    return [
+        {
+            "rule_id": "TRC-01",
+            "checkpoint": "计算过程完整性",
+            "severity": "medium",
+            "source": "selfcheck",
+            "message": "〔计算书及相关施工图纸〕未见计算公式或参数代入过程",
+            "suggestion": "计算书须给出完整链条：计算依据 → 参数取值及其来源 → "
+            "计算公式与过程 → 结论与安全系数；只有结论没有过程"
+            "视为缺失（该检查点为预检 block 级）",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
 # 三之四、跨章节段落搬运（CON-06，与预检同源判据）
 # ---------------------------------------------------------------------------
-def cross_section_copy_findings(sections: list[dict], *,
-                                new_section_id: str = "",
-                                limit: int = 3) -> list[dict]:
+def cross_section_copy_findings(sections: list[dict], *, new_section_id: str = "", limit: int = 3) -> list[dict]:
     """跨章节段落搬运检测 —— 生成后自检用，**与预检 CON-06 同源判据**。
 
     Args:
@@ -781,11 +867,11 @@ def cross_section_copy_findings(sections: list[dict], *,
         return findings
     try:
         from app.services.duplicate_detection import find_cross_section_copies
+
         result = find_cross_section_copies(sections)
         groups = result.get("groups") or []
     except Exception as exc:  # 防御性兜底：查重异常不应拖垮生成链路
-        logger.warning("跨章节段落搬运检测异常（忽略）: %s", exc,
-                       exc_info=True)
+        logger.warning("跨章节段落搬运检测异常（忽略）: %s", exc, exc_info=True)
         return findings
 
     emitted = 0
@@ -794,15 +880,12 @@ def cross_section_copy_findings(sections: list[dict], *,
         if not pairs:
             continue
         # 只报涉及本章的组（新章节是搬运的**接收方**或**来源方**都算）
-        if new_section_id and not any(
-                (p[0] == new_section_id or p[1] == new_section_id)
-                for p in pairs):
+        if new_section_id and not any((p[0] == new_section_id or p[1] == new_section_id) for p in pairs):
             continue
         others: list[str] = []
         for a_id, b_id, a_title, b_title in pairs:
             # 取「不是本章」的那一侧标题作为搬运目标名
-            tgt_id, tgt_title = ((a_id, b_title) if b_id == new_section_id
-                                 else (b_id, a_title))
+            tgt_id, tgt_title = (a_id, b_title) if b_id == new_section_id else (b_id, a_title)
             nm = str(tgt_title or "").strip()
             if tgt_id != new_section_id and nm and nm not in others:
                 others.append(nm)
@@ -818,11 +901,10 @@ def cross_section_copy_findings(sections: list[dict], *,
             "checkpoint": "跨章节段落搬运",
             "severity": "high" if g.get("large") else "medium",
             "source": "selfcheck",
-            "message": "本章与「%s」存在成段照抄（%s）" % (
-                "、".join(others[:3]), sim_txt),
+            "message": "本章与「%s」存在成段照抄（%s）" % ("、".join(others[:3]), sim_txt),
             "suggestion": "请改写为针对本章工艺、部位与工程条件的表述"
-                          "（换章节侧重、工艺细节与工程条件），不要复用"
-                          "其他章节的成段文字",
+            "（换章节侧重、工艺细节与工程条件），不要复用"
+            "其他章节的成段文字",
             "evidence": [str(s) for s in (g.get("sentences") or [])][:3],
         }
         if g.get("large"):
@@ -870,25 +952,48 @@ def validate_rule_anchoring() -> list[str]:
 CHAPTER_TITLE_SUPPLEMENT: dict[str, tuple[str, ...]] = {
     "overview": ("工程基本情况", "周边环境", "工程环境", "施工条件", "工程条件"),
     "basis": ("编制依据", "法律法规", "标准清单", "规范清单"),
-    "plan": ("进场计划", "材料计划", "设备计划", "材料准备", "设备准备",
-             "劳动力计划", "进度安排", "工期安排"),
+    "plan": ("进场计划", "材料计划", "设备计划", "材料准备", "设备准备", "劳动力计划", "进度安排", "工期安排"),
     "technique": ("施工做法", "施工方法", "施工工序", "工艺要求", "细部做法"),
-    "safety": ("临时用电", "手持电动工具", "临电", "动火", "消防", "防火",
-               "高处作业", "机械防护", "机械设备管理", "起重吊装安全",
-               "垃圾清运", "扬尘", "噪声", "防护棚"),
-    "personnel": ("持证上岗", "特种作业", "岗位职责", "安全管理机构",
-                  "安全生产管理"),
+    "safety": (
+        "临时用电",
+        "手持电动工具",
+        "临电",
+        "动火",
+        "消防",
+        "防火",
+        "高处作业",
+        "机械防护",
+        "机械设备管理",
+        "起重吊装安全",
+        "垃圾清运",
+        "扬尘",
+        "噪声",
+        "防护棚",
+    ),
+    "personnel": ("持证上岗", "特种作业", "岗位职责", "安全管理机构", "安全生产管理"),
     "acceptance": ("观感质量", "检验批", "竣工资料", "环保检测", "实体检测"),
-    "emergency": ("应急组织", "组织机构及职责", "应急物资", "应急演练",
-                  "救援", "急救", "疏散", "预警响应", "响应程序", "善后"),
+    "emergency": (
+        "应急组织",
+        "组织机构及职责",
+        "应急物资",
+        "应急演练",
+        "救援",
+        "急救",
+        "疏散",
+        "预警响应",
+        "响应程序",
+        "善后",
+    ),
     "calc_drawings": ("施工图纸", "节点详图", "平面布置图", "计算书", "验算"),
 }
 
 #: 补充关键词按长度降序展开（长词优先，避免"垃圾"抢先于"垃圾清运"这类前缀误配）
 _SUPPLEMENT_ORDERED: tuple[tuple[str, str], ...] = tuple(
-    sorted(((kw, key) for key, kws in CHAPTER_TITLE_SUPPLEMENT.items()
-            for kw in kws),
-           key=lambda kv: (-len(kv[0]), kv[1])))
+    sorted(
+        ((kw, key) for key, kws in CHAPTER_TITLE_SUPPLEMENT.items() for kw in kws), key=lambda kv: (-len(kv[0]), kv[1])
+    )
+)
+
 
 # ---------------------------------------------------------------------------
 # 三之二、STD-03 裸标准编号补年号（确定性自动修复，2026-10-02）
@@ -903,6 +1008,7 @@ def _build_base_code_index() -> tuple:
     同一完整编号在多类别重复登记（实测 ``GB 50204-2015`` 出现 4 次）不算歧义。
     """
     from app.services import standards_registry as _sr
+
     base2code: dict = {}
     ambiguous: dict = {}
     pool = list(_sr.BASE_STANDARDS)
@@ -980,17 +1086,20 @@ def fix_bare_standard_codes(text: str) -> tuple:
         for s, e, full, _base in sorted(applied, key=lambda x: -x[0]):
             text = text[:s] + full + text[e:]
 
-        fixes = [{
-            "rule_id": "STD-03",
-            "checkpoint": "标准编号未写年号",
-            "from": _base,
-            "to": _full,
-            "position": _s,
-            "severity": "warning",
-            "fixable": True,
-            "fixed": True,
-            "source": "selfcheck_autofix",
-        } for _s, _e, _full, _base in sorted(applied, key=lambda x: x[0])]
+        fixes = [
+            {
+                "rule_id": "STD-03",
+                "checkpoint": "标准编号未写年号",
+                "from": _base,
+                "to": _full,
+                "position": _s,
+                "severity": "warning",
+                "fixable": True,
+                "fixed": True,
+                "source": "selfcheck_autofix",
+            }
+            for _s, _e, _full, _base in sorted(applied, key=lambda x: x[0])
+        ]
 
         # 歧义基号：报出但不改（年号无法唯一确定）
         seen: set = set()
@@ -1000,30 +1109,30 @@ def fix_bare_standard_codes(text: str) -> tuple:
             base = _normalize_code_for_index(m.group(0))
             if base in AMBIGUOUS_BASES and base not in seen:
                 seen.add(base)
-                fixes.append({
-                    "rule_id": "STD-03",
-                    "checkpoint": "标准编号存在多个年号版本",
-                    "from": base,
-                    "to": "",
-                    "position": -1,
-                    "severity": "warning",
-                    "fixable": False,
-                    "fixed": False,
-                    "source": "selfcheck_autofix",
-                    "suggestion": "同一基号在现行标准库中对应多个编号，"
-                                  "年号无法唯一确定，请人工核实现行版本",
-                })
+                fixes.append(
+                    {
+                        "rule_id": "STD-03",
+                        "checkpoint": "标准编号存在多个年号版本",
+                        "from": base,
+                        "to": "",
+                        "position": -1,
+                        "severity": "warning",
+                        "fixable": False,
+                        "fixed": False,
+                        "source": "selfcheck_autofix",
+                        "suggestion": "同一基号在现行标准库中对应多个编号，" "年号无法唯一确定，请人工核实现行版本",
+                    }
+                )
         return text, fixes
     except Exception as exc:  # fail-soft：修复失败不影响正文落库
-        logger.warning("裸标准编号自动修复异常（返回原文）: %s", exc,
-                       exc_info=True)
+        logger.warning("裸标准编号自动修复异常（返回原文）: %s", exc, exc_info=True)
         return text, []
-
 
 
 def _normalize_code_for_index(code: str) -> str:
     """基号归一化：与 ``standards_registry.strip_standard_year`` 同口径。"""
     from app.services.standards_registry import strip_standard_year
+
     return strip_standard_year(code)
 
 
@@ -1048,168 +1157,261 @@ CHECKPOINT_GROUPS: tuple[tuple[str, str], ...] = (
 
 #: 覆盖通道（封闭枚举）：检查点落在生成链路的哪一环
 CHECKPOINT_CHANNELS: tuple[str, ...] = (
-    "system_preprompt",     # 写入 system 硬约束（build_content_system_checkpoint_block）
-    "chapter_preprompt",    # 逐章注入本章必含要素（build_chapter_checkpoint_block）
-    "selfcheck",            # 生成后程序化自检（checkpoint_selfcheck）
-    "autofix",              # 确定性自动修复 / 改写（零 AI 成本）
-    "export_pipeline",      # 导出期兜底（编号统一、图号、公式、封面）
-    "audit_fallback",       # 只能事后审核（AI 语义 / 章级聚合），生成侧刻意不前置
+    "system_preprompt",  # 写入 system 硬约束（build_content_system_checkpoint_block）
+    "chapter_preprompt",  # 逐章注入本章必含要素（build_chapter_checkpoint_block）
+    "selfcheck",  # 生成后程序化自检（checkpoint_selfcheck）
+    "autofix",  # 确定性自动修复 / 改写（零 AI 成本）
+    "export_pipeline",  # 导出期兜底（编号统一、图号、公式、封面）
+    "audit_fallback",  # 只能事后审核（AI 语义 / 章级聚合），生成侧刻意不前置
 )
 
 #: 跨章节（非「本章必含要素」）的检查点映射。
 #: ``rule_ids`` 只作**指针**指向 audit_rules 注册表 —— 措辞与阈值一律不在
 #: 这里复制（复制就会分叉）；锚点合法性由 :func:`validate_constraint_map` 锁定。
 CROSS_CHAPTER_CONSTRAINTS: tuple[dict, ...] = (
-    {"group": "completeness", "checkpoint": "九大法定章节齐备",
-     "rule_ids": ("CMP-01", "CMP-02", "CMP-03", "CMP-04", "CMP-05", "CMP-06",
-                  "CMP-07", "CMP-08", "CMP-09"),
-     "constraint": "目录必须含九大法定章节骨架；本章属九章之一时不得整章只写概述性套话",
-     "implementation": "目录生成保证九章骨架 + 通用约束第 1 条",
-     "channel": "chapter_preprompt"},
-    {"group": "consistency", "checkpoint": "数值口径唯一",
-     "rule_ids": ("CON-01",),
-     "constraint": "工期、深度、高度、强度等级、人员数量、设备型号、质保期等关键数值"
-                   "全篇只允许一个口径，一律取自【全局事实变量】",
-     "implementation": "全局事实逐章精选注入 + 通用约束第 3 条",
-     "channel": "system_preprompt"},
-    {"group": "consistency", "checkpoint": "术语统一",
-     "rule_ids": ("CON-02",),
-     "constraint": "同一事物全篇使用同一称谓（如「项目经理」不与「项目负责人」混用）",
-     "implementation": "通用约束第 3 条", "channel": "system_preprompt"},
-    {"group": "consistency", "checkpoint": "无占位标记与自相矛盾",
-     "rule_ids": ("CON-03", "CON-04"),
-     "constraint": "禁止输出【待补充】【待定】等占位写法；注入材料含占位符时按模糊"
-                   "生成规则改写为完整表述",
-     "implementation": "通用约束第 3 条 + 自检 CON-04 + rewrite_placeholder_marks 确定性改写",
-     "channel": "selfcheck"},
-    {"group": "consistency", "checkpoint": "禁止跨章重复段落",
-     "rule_ids": ("CON-05",),
-     "constraint": "不得把同一段表述复制进多个章节；主题相近也必须结合本章工艺与工程条件改写",
-     "implementation": "通用约束第 5 条（事前约束）；跨章相似度比对仍归审核",
-     "channel": "audit_fallback"},
-    {"group": "numbering", "checkpoint": "三级编号层级与跳级",
-     "rule_ids": ("DLV-12",),
-     "constraint": "一级一/二/三、二级 1.1、三级 1.1.1，不得跳级跳号；编号由导出器统一生成",
-     "implementation": "numbering.normalize_section_content_subheadings + 导出器编号统一",
-     "channel": "export_pipeline"},
-    {"group": "numbering", "checkpoint": "标题层级",
-     "rule_ids": ("DLV-13",),
-     "constraint": "章节标题层级与目录层级严格对应，不跳级",
-     "implementation": "导出期标题层级映射", "channel": "export_pipeline"},
-    {"group": "numbering", "checkpoint": "正文小节序号",
-     "rule_ids": ("DLV-14", "CON-05"),
-     "constraint": "小节序号用 (1)(2)(3) 或 ①②③，不与章节编号冲突、不重复",
-     "implementation": "build_subheading_rule（{subheading_rule} 占位符注入）",
-     "channel": "system_preprompt"},
-    {"group": "charts", "checkpoint": "图表类型选择",
-     "rule_ids": ("DLV-04",),
-     "constraint": "工艺流程 / 施工平面 / 组织机构 / 进度用 Mermaid；参数对比用 chart-json",
-     "implementation": "通用约束第 6 条 + chart_validators 类型校验",
-     "channel": "system_preprompt"},
-    {"group": "charts", "checkpoint": "图号统一",
-     "rule_ids": ("DLV-04",),
-     "constraint": "正文不得写死图号，统一写「图 1/图 2」递增，实际图号由导出器渲染",
-     "implementation": "通用约束第 6 条 + 导出器图号重排",
-     "channel": "export_pipeline"},
-    {"group": "charts", "checkpoint": "图表节点数",
-     "rule_ids": ("DLV-04",),
-     "constraint": "单图节点数控制在 4~16，超过则拆多张图",
-     "implementation": "通用约束第 6 条 + chart_validators 节点数校验",
-     "channel": "system_preprompt"},
-    {"group": "language", "checkpoint": "口语化与 AI 腔",
-     "rule_ids": ("DLV-06",),
-     "constraint": "不用「首先/其次/最后」堆砌、不用 emoji、不用「总而言之」等客套",
-     "implementation": "通用约束第 7 条 + content_polish 清理",
-     "channel": "system_preprompt"},
-    {"group": "language", "checkpoint": "空话套话",
-     "rule_ids": ("DLV-06",),
-     "constraint": "禁止「确保质量」「高度重视」「加强管理」等无信息量表述",
-     "implementation": "通用约束第 7 条；语义级判定仍归 AI 审核",
-     "channel": "audit_fallback"},
-    {"group": "format", "checkpoint": "Markdown 围栏",
-     "rule_ids": ("DLV-05",),
-     "constraint": "``` / ~~~ 必须成对闭合，代码块与正文不混排",
-     "implementation": "通用约束第 7 条 + auto_fix_unclosed_fences 兜底",
-     "channel": "autofix"},
-    {"group": "format", "checkpoint": "表格规范",
-     "rule_ids": ("DLV-05",),
-     "constraint": "表格必须有表头与分隔行，列对齐，不出现空表格",
-     "implementation": "通用约束第 7 条", "channel": "system_preprompt"},
-    {"group": "logic", "checkpoint": "章节衔接",
-     "rule_ids": ("DLV-06",),
-     "constraint": "章节开头交代与前章的关系，避免突兀起笔；不重复前章已述内容",
-     "implementation": "上级章节要点 + 同级章节提示 + 前序同级结尾注入 user 上下文",
-     "channel": "system_preprompt"},
-    {"group": "logic", "checkpoint": "章节正文非空",
-     "rule_ids": ("CMP-01", "CMP-09"),
-     "constraint": "每个叶子章节必须生成实质正文，不得只有标题",
-     "implementation": "字数预算（word_budget）+ 续写轮补齐",
-     "channel": "system_preprompt"},
-    {"group": "truthfulness", "checkpoint": "数据可追溯",
-     "rule_ids": ("CON-01", "CON-03"),
-     "constraint": "所有数值、材料、设备、人员信息必须与【全局事实变量】一致且可回溯",
-     "implementation": "逐章相关事实精选注入（_filter_facts_rows + _render_facts_text）",
-     "channel": "system_preprompt"},
-    {"group": "truthfulness", "checkpoint": "严禁编造",
-     "rule_ids": ("CON-03", "TRC-02"),
-     "constraint": "事实未提供的参数按模糊生成规则写条件式表述（技术原则 / 按设计文件 / "
-                   "范围值），不得编造具体数值",
-     "implementation": "内容标准系统提示 + 模糊生成规则注入 + 自检不产出占位符",
-     "channel": "system_preprompt"},
-    {"group": "depth", "checkpoint": "计算链条完整",
-     "rule_ids": ("TRC-01", "TRC-02", "CMP-09"),
-     "constraint": "计算书必须给出「计算依据 → 参数取值及来源 → 公式与过程 → 结论与"
-                   "安全系数」完整链条，只有结论没有过程视为缺失",
-     "implementation": "build_chapter_checkpoint_block（calc_drawings 章）",
-     "channel": "chapter_preprompt"},
-    {"group": "depth", "checkpoint": "措施针对性",
-     "rule_ids": ("SAF-02", "CMP-05"),
-     "constraint": "安全技术措施须结合本工程条件逐项给出，不得只写通用套话",
-     "implementation": "build_chapter_checkpoint_block（safety 章）；针对性语义判定归审核",
-     "channel": "audit_fallback"},
-    {"group": "compliance", "checkpoint": "标准引用现行有效",
-     "rule_ids": ("STD-01",),
-     "constraint": "只引用现行有效标准，禁止引用已废止版本",
-     "implementation": "通用约束第 2 条 + standards_registry 现行标准清单注入",
-     "channel": "system_preprompt"},
-    {"group": "compliance", "checkpoint": "库外标准准确",
-     "rule_ids": ("STD-02",),
-     "constraint": "引用标准清单外的标准必须给出准确编号与现行年号，不得编造编号",
-     "implementation": "通用约束第 2 条", "channel": "system_preprompt"},
-    {"group": "compliance", "checkpoint": "标准编号含年号",
-     "rule_ids": ("STD-03",),
-     "constraint": "首次引用标准写全「《名称》（编号-年号）」，禁止裸编号"
-                   "（如「GB 50210」不带年号）",
-     "implementation": "通用约束第 2 条 + 自检 STD-03 + fix_bare_standard_codes 确定性补年号",
-     "channel": "autofix"},
-    {"group": "compliance", "checkpoint": "危大法规引用",
-     "rule_ids": ("STD-04",),
-     "constraint": "危大工程方案的编制依据必须列出住建部令第37号与建办质〔2018〕31号",
-     "implementation": "build_chapter_checkpoint_block（basis 章，hazard_only）",
-     "channel": "chapter_preprompt"},
-    {"group": "compliance", "checkpoint": "专业类别依据",
-     "rule_ids": ("STD-05",),
-     "constraint": "编制依据须覆盖本方案专业类别对应标准（按四层列齐）",
-     "implementation": "build_chapter_checkpoint_block（basis 章）+ 标准清单按方案类型注入",
-     "channel": "audit_fallback"},
-    {"group": "hazard", "checkpoint": "危大判定与规模参数",
-     "rule_ids": ("STD-04",),
-     "constraint": "明确危大工程范围与判定依据，写明本方案的规模参数",
-     "implementation": "危大追加约束（is_hazardous 时注入）",
-     "channel": "system_preprompt"},
-    {"group": "hazard", "checkpoint": "监测监控与预警值",
-     "rule_ids": ("SAF-06",),
-     "constraint": "需监测的危大工程须明确监测项目、点位布置、监测频次与预警值",
-     "implementation": "build_chapter_checkpoint_block（safety 章）",
-     "channel": "chapter_preprompt"},
-    {"group": "other", "checkpoint": "生成与审核同词表",
-     "rule_ids": ("DLV-08",),
-     "constraint": "正文生成即按 CMP/STD/SAF/CON/TRC/DLV 同一规则词表约束与自检",
-     "implementation": "检查点前置（本模块唯一事实源）", "channel": "selfcheck"},
-    {"group": "other", "checkpoint": "专家论证提示",
-     "rule_ids": ("DLV-09",),
-     "constraint": "超过一定规模的危大工程须写明需组织专家论证及相关验算依据",
-     "implementation": "危大追加约束", "channel": "system_preprompt"},
+    {
+        "group": "completeness",
+        "checkpoint": "九大法定章节齐备",
+        "rule_ids": ("CMP-01", "CMP-02", "CMP-03", "CMP-04", "CMP-05", "CMP-06", "CMP-07", "CMP-08", "CMP-09"),
+        "constraint": "目录必须含九大法定章节骨架；本章属九章之一时不得整章只写概述性套话",
+        "implementation": "目录生成保证九章骨架 + 通用约束第 1 条",
+        "channel": "chapter_preprompt",
+    },
+    {
+        "group": "consistency",
+        "checkpoint": "数值口径唯一",
+        "rule_ids": ("CON-01",),
+        "constraint": "工期、深度、高度、强度等级、人员数量、设备型号、质保期等关键数值"
+        "全篇只允许一个口径，一律取自【全局事实变量】",
+        "implementation": "全局事实逐章精选注入 + 通用约束第 3 条",
+        "channel": "system_preprompt",
+    },
+    {
+        "group": "consistency",
+        "checkpoint": "术语统一",
+        "rule_ids": ("CON-02",),
+        "constraint": "同一事物全篇使用同一称谓（如「项目经理」不与「项目负责人」混用）",
+        "implementation": "通用约束第 3 条",
+        "channel": "system_preprompt",
+    },
+    {
+        "group": "consistency",
+        "checkpoint": "无占位标记与自相矛盾",
+        "rule_ids": ("CON-03", "CON-04"),
+        "constraint": "禁止输出【待补充】【待定】等占位写法；注入材料含占位符时按模糊" "生成规则改写为完整表述",
+        "implementation": "通用约束第 3 条 + 自检 CON-04 + rewrite_placeholder_marks 确定性改写",
+        "channel": "selfcheck",
+    },
+    {
+        "group": "consistency",
+        "checkpoint": "禁止跨章重复段落",
+        "rule_ids": ("CON-05",),
+        "constraint": "不得把同一段表述复制进多个章节；主题相近也必须结合本章工艺与工程条件改写",
+        "implementation": "通用约束第 5 条（事前约束）；跨章相似度比对仍归审核",
+        "channel": "audit_fallback",
+    },
+    {
+        "group": "numbering",
+        "checkpoint": "三级编号层级与跳级",
+        "rule_ids": ("DLV-12",),
+        "constraint": "一级一/二/三、二级 1.1、三级 1.1.1，不得跳级跳号；编号由导出器统一生成",
+        "implementation": "numbering.normalize_section_content_subheadings + 导出器编号统一",
+        "channel": "export_pipeline",
+    },
+    {
+        "group": "numbering",
+        "checkpoint": "标题层级",
+        "rule_ids": ("DLV-13",),
+        "constraint": "章节标题层级与目录层级严格对应，不跳级",
+        "implementation": "导出期标题层级映射",
+        "channel": "export_pipeline",
+    },
+    {
+        "group": "numbering",
+        "checkpoint": "正文小节序号",
+        "rule_ids": ("DLV-14", "CON-05"),
+        "constraint": "小节序号用 (1)(2)(3) 或 ①②③，不与章节编号冲突、不重复",
+        "implementation": "build_subheading_rule（{subheading_rule} 占位符注入）",
+        "channel": "system_preprompt",
+    },
+    {
+        "group": "charts",
+        "checkpoint": "图表类型选择",
+        "rule_ids": ("DLV-04",),
+        "constraint": "工艺流程 / 施工平面 / 组织机构 / 进度用 Mermaid；参数对比用 chart-json",
+        "implementation": "通用约束第 6 条 + chart_validators 类型校验",
+        "channel": "system_preprompt",
+    },
+    {
+        "group": "charts",
+        "checkpoint": "图号统一",
+        "rule_ids": ("DLV-04",),
+        "constraint": "正文不得写死图号，统一写「图 1/图 2」递增，实际图号由导出器渲染",
+        "implementation": "通用约束第 6 条 + 导出器图号重排",
+        "channel": "export_pipeline",
+    },
+    {
+        "group": "charts",
+        "checkpoint": "图表节点数",
+        "rule_ids": ("DLV-04",),
+        "constraint": "单图节点数控制在 4~16，超过则拆多张图",
+        "implementation": "通用约束第 6 条 + chart_validators 节点数校验",
+        "channel": "system_preprompt",
+    },
+    {
+        "group": "language",
+        "checkpoint": "口语化与 AI 腔",
+        "rule_ids": ("DLV-06",),
+        "constraint": "不用「首先/其次/最后」堆砌、不用 emoji、不用「总而言之」等客套",
+        "implementation": "通用约束第 7 条 + content_polish 清理",
+        "channel": "system_preprompt",
+    },
+    {
+        "group": "language",
+        "checkpoint": "空话套话",
+        "rule_ids": ("DLV-06",),
+        "constraint": "禁止「确保质量」「高度重视」「加强管理」等无信息量表述",
+        "implementation": "通用约束第 7 条；语义级判定仍归 AI 审核",
+        "channel": "audit_fallback",
+    },
+    {
+        "group": "format",
+        "checkpoint": "Markdown 围栏",
+        "rule_ids": ("DLV-05",),
+        "constraint": "``` / ~~~ 必须成对闭合，代码块与正文不混排",
+        "implementation": "通用约束第 7 条 + auto_fix_unclosed_fences 兜底",
+        "channel": "autofix",
+    },
+    {
+        "group": "format",
+        "checkpoint": "表格规范",
+        "rule_ids": ("DLV-05",),
+        "constraint": "表格必须有表头与分隔行，列对齐，不出现空表格",
+        "implementation": "通用约束第 7 条",
+        "channel": "system_preprompt",
+    },
+    {
+        "group": "logic",
+        "checkpoint": "章节衔接",
+        "rule_ids": ("DLV-06",),
+        "constraint": "章节开头交代与前章的关系，避免突兀起笔；不重复前章已述内容",
+        "implementation": "上级章节要点 + 同级章节提示 + 前序同级结尾注入 user 上下文",
+        "channel": "system_preprompt",
+    },
+    {
+        "group": "logic",
+        "checkpoint": "章节正文非空",
+        "rule_ids": ("CMP-01", "CMP-09"),
+        "constraint": "每个叶子章节必须生成实质正文，不得只有标题",
+        "implementation": "字数预算（word_budget）+ 续写轮补齐",
+        "channel": "system_preprompt",
+    },
+    {
+        "group": "truthfulness",
+        "checkpoint": "数据可追溯",
+        "rule_ids": ("CON-01", "CON-03"),
+        "constraint": "所有数值、材料、设备、人员信息必须与【全局事实变量】一致且可回溯",
+        "implementation": "逐章相关事实精选注入（_filter_facts_rows + _render_facts_text）",
+        "channel": "system_preprompt",
+    },
+    {
+        "group": "truthfulness",
+        "checkpoint": "严禁编造",
+        "rule_ids": ("CON-03", "TRC-02"),
+        "constraint": "事实未提供的参数按模糊生成规则写条件式表述（技术原则 / 按设计文件 / "
+        "范围值），不得编造具体数值",
+        "implementation": "内容标准系统提示 + 模糊生成规则注入 + 自检不产出占位符",
+        "channel": "system_preprompt",
+    },
+    {
+        "group": "depth",
+        "checkpoint": "计算链条完整",
+        "rule_ids": ("TRC-01", "TRC-02", "CMP-09"),
+        "constraint": "计算书必须给出「计算依据 → 参数取值及来源 → 公式与过程 → 结论与"
+        "安全系数」完整链条，只有结论没有过程视为缺失",
+        "implementation": "build_chapter_checkpoint_block（calc_drawings 章）",
+        "channel": "chapter_preprompt",
+    },
+    {
+        "group": "depth",
+        "checkpoint": "措施针对性",
+        "rule_ids": ("SAF-02", "CMP-05"),
+        "constraint": "安全技术措施须结合本工程条件逐项给出，不得只写通用套话",
+        "implementation": "build_chapter_checkpoint_block（safety 章）；针对性语义判定归审核",
+        "channel": "audit_fallback",
+    },
+    {
+        "group": "compliance",
+        "checkpoint": "标准引用现行有效",
+        "rule_ids": ("STD-01",),
+        "constraint": "只引用现行有效标准，禁止引用已废止版本",
+        "implementation": "通用约束第 2 条 + standards_registry 现行标准清单注入",
+        "channel": "system_preprompt",
+    },
+    {
+        "group": "compliance",
+        "checkpoint": "库外标准准确",
+        "rule_ids": ("STD-02",),
+        "constraint": "引用标准清单外的标准必须给出准确编号与现行年号，不得编造编号",
+        "implementation": "通用约束第 2 条",
+        "channel": "system_preprompt",
+    },
+    {
+        "group": "compliance",
+        "checkpoint": "标准编号含年号",
+        "rule_ids": ("STD-03",),
+        "constraint": "首次引用标准写全「《名称》（编号-年号）」，禁止裸编号" "（如「GB 50210」不带年号）",
+        "implementation": "通用约束第 2 条 + 自检 STD-03 + fix_bare_standard_codes 确定性补年号",
+        "channel": "autofix",
+    },
+    {
+        "group": "compliance",
+        "checkpoint": "危大法规引用",
+        "rule_ids": ("STD-04",),
+        "constraint": "危大工程方案的编制依据必须列出住建部令第37号与建办质〔2018〕31号",
+        "implementation": "build_chapter_checkpoint_block（basis 章，hazard_only）",
+        "channel": "chapter_preprompt",
+    },
+    {
+        "group": "compliance",
+        "checkpoint": "专业类别依据",
+        "rule_ids": ("STD-05",),
+        "constraint": "编制依据须覆盖本方案专业类别对应标准（按四层列齐）",
+        "implementation": "build_chapter_checkpoint_block（basis 章）+ 标准清单按方案类型注入",
+        "channel": "audit_fallback",
+    },
+    {
+        "group": "hazard",
+        "checkpoint": "危大判定与规模参数",
+        "rule_ids": ("STD-04",),
+        "constraint": "明确危大工程范围与判定依据，写明本方案的规模参数",
+        "implementation": "危大追加约束（is_hazardous 时注入）",
+        "channel": "system_preprompt",
+    },
+    {
+        "group": "hazard",
+        "checkpoint": "监测监控与预警值",
+        "rule_ids": ("SAF-06",),
+        "constraint": "需监测的危大工程须明确监测项目、点位布置、监测频次与预警值",
+        "implementation": "build_chapter_checkpoint_block（safety 章）",
+        "channel": "chapter_preprompt",
+    },
+    {
+        "group": "other",
+        "checkpoint": "生成与审核同词表",
+        "rule_ids": ("DLV-08",),
+        "constraint": "正文生成即按 CMP/STD/SAF/CON/TRC/DLV 同一规则词表约束与自检",
+        "implementation": "检查点前置（本模块唯一事实源）",
+        "channel": "selfcheck",
+    },
+    {
+        "group": "other",
+        "checkpoint": "专家论证提示",
+        "rule_ids": ("DLV-09",),
+        "constraint": "超过一定规模的危大工程须写明需组织专家论证及相关验算依据",
+        "implementation": "危大追加约束",
+        "channel": "system_preprompt",
+    },
 )
 
 
@@ -1237,7 +1439,8 @@ _PLACEHOLDER_TRAILING_UNIT_RE = re.compile(
     r"^\s*(m²|㎡|m³|mm|cm|km|MPa|kPa|kN·m|kN|kg|t|%|元|万元|天|日历天|人|台|套|个|件"
     r"|平方米|立方米|公斤|小时|米|遍"
     r"|次(?!日)"
-    r"|m(?![A-Za-z0-9]))")
+    r"|m(?![A-Za-z0-9]))"
+)
 
 
 def rewrite_placeholder_marks(text: str) -> tuple:
@@ -1304,45 +1507,49 @@ def rewrite_placeholder_marks(text: str) -> tuple:
                 if frag not in pending:
                     pending.append(frag)
                 continue
-            tail = text[m.end():]
+            tail = text[m.end() :]
             um = _PLACEHOLDER_TRAILING_UNIT_RE.match(tail)
             unit, end = "", m.end()
             if um:
                 unit = um.group(1).strip()
                 end = m.end() + um.end()  # um 基于 tail，须回加 m.end() 才是绝对偏移
             repl = _PLACEHOLDER_CONDITIONAL + (f"（{unit}）" if unit else "")
-            out.append(text[pos:m.start()])
+            out.append(text[pos : m.start()])
             out.append(repl)
             pos = end
-            fixes.append({
-                "rule_id": "CON-04",
-                "checkpoint": "占位标记残留",
-                "from": frag.strip(),
-                "to": repl,
-                "position": m.start(),
-                "severity": "error",
-                "fixable": True,
-                "fixed": True,
-                "source": "selfcheck_autofix",
-            })
+            fixes.append(
+                {
+                    "rule_id": "CON-04",
+                    "checkpoint": "占位标记残留",
+                    "from": frag.strip(),
+                    "to": repl,
+                    "position": m.start(),
+                    "severity": "error",
+                    "fixable": True,
+                    "fixed": True,
+                    "source": "selfcheck_autofix",
+                }
+            )
         out.append(text[pos:])
-        return "".join(out), fixes + [{
-            "rule_id": "CON-04",
-            "checkpoint": "占位标记残留（上下文不明形态，需人工改写）",
-            "from": p,
-            "to": "",
-            "position": -1,
-            "severity": "error",
-            "fixable": False,
-            "fixed": False,
-            "source": "selfcheck_autofix",
-            "suggestion": "×× / XX / TBD / N/A 等上下文不明形态无法确定性改写；"
-                          "请人工补全或按模糊生成规则改写为条件式表述",
-        } for p in pending]
+        return "".join(out), fixes + [
+            {
+                "rule_id": "CON-04",
+                "checkpoint": "占位标记残留（上下文不明形态，需人工改写）",
+                "from": p,
+                "to": "",
+                "position": -1,
+                "severity": "error",
+                "fixable": False,
+                "fixed": False,
+                "source": "selfcheck_autofix",
+                "suggestion": "×× / XX / TBD / N/A 等上下文不明形态无法确定性改写；"
+                "请人工补全或按模糊生成规则改写为条件式表述",
+            }
+            for p in pending
+        ]
     except Exception as exc:  # fail-soft：改写失败不影响正文落库
         logger.warning("占位标记自动改写异常（返回原文）: %s", exc, exc_info=True)
         return text, []
-
 
 
 def infer_chapter_key(title: str, primary_key: str = "") -> str:
@@ -1365,7 +1572,7 @@ def infer_chapter_key(title: str, primary_key: str = "") -> str:
     key = (primary_key or "").strip()
     if key:
         return key
-    t = (str(title).strip() if title else "")
+    t = str(title).strip() if title else ""
     if not t:
         return ""
     for kw, ckey in _SUPPLEMENT_ORDERED:
@@ -1389,29 +1596,34 @@ def checkpoint_constraint_map() -> list[dict]:
     """
     rows: list[dict] = []
     for c in CROSS_CHAPTER_CONSTRAINTS:
-        rows.append({
-            "group": c["group"],
-            "checkpoint": c["checkpoint"],
-            "rule_ids": list(c["rule_ids"]),
-            "constraint": c["constraint"],
-            "implementation": c["implementation"],
-            "channel": c["channel"],
-            "chapter_key": "",
-        })
+        rows.append(
+            {
+                "group": c["group"],
+                "checkpoint": c["checkpoint"],
+                "rule_ids": list(c["rule_ids"]),
+                "constraint": c["constraint"],
+                "implementation": c["implementation"],
+                "channel": c["channel"],
+                "chapter_key": "",
+            }
+        )
     for ckey, spec in CHAPTER_CHECKPOINT_REQUIREMENTS.items():
         for r in spec["requirements"]:
-            rows.append({
-                "group": "completeness",
-                "checkpoint": f"{spec['title']}·{r['label']}",
-                "rule_ids": list(r["rule_ids"]),
-                "constraint": r["note"],
-                "implementation": ("build_chapter_checkpoint_block 逐章注入"
-                                   "（hazard_only，仅危大方案）"
-                                   if r.get("hazard_only")
-                                   else "build_chapter_checkpoint_block 逐章注入"),
-                "channel": "chapter_preprompt",
-                "chapter_key": ckey,
-            })
+            rows.append(
+                {
+                    "group": "completeness",
+                    "checkpoint": f"{spec['title']}·{r['label']}",
+                    "rule_ids": list(r["rule_ids"]),
+                    "constraint": r["note"],
+                    "implementation": (
+                        "build_chapter_checkpoint_block 逐章注入" "（hazard_only，仅危大方案）"
+                        if r.get("hazard_only")
+                        else "build_chapter_checkpoint_block 逐章注入"
+                    ),
+                    "channel": "chapter_preprompt",
+                    "chapter_key": ckey,
+                }
+            )
     return rows
 
 
@@ -1468,5 +1680,3 @@ __all__ = [
     "validate_constraint_map",
     "validate_rule_anchoring",
 ]
-
-
