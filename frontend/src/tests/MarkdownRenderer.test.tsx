@@ -20,7 +20,13 @@ const { renderMock, ensureMermaidMock, nextMermaidIdMock, chartsRenderMock, char
     chartsRenderMock: vi.fn(async () => ({ data: new Uint8Array([137, 80, 78, 71]) })),
     // 返回结构与后端 fix-mermaid 响应对齐（code / written_back / content_updated / new_content / word_count）
     chartsFixMock: vi.fn(async (_p?: Record<string, unknown>) => ({
-      data: { code: "", written_back: false, content_updated: false, new_content: "", word_count: 0 },
+      data: {
+        code: "",
+        written_back: false,
+        content_updated: false,
+        new_content: "",
+        word_count: 0,
+      },
     })),
   }));
 
@@ -52,10 +58,11 @@ afterEach(() => {
 
 describe("MarkdownRenderer P1-6 优化行为", () => {
   it("列表样式显式保留项目符号，防止被全局 reset 拍平", async () => {
-        const { container } = render(<MarkdownRenderer content={"- 第一项\n1. 第二项"} />);
+    const { container } = render(<MarkdownRenderer content={"- 第一项\n1. 第二项"} />);
     await waitFor(() => expect(container.querySelector("ul")).not.toBeNull());
     const style = Array.from(document.querySelectorAll("style"))
-      .map((el) => el.textContent || "").join("\n");
+      .map((el) => el.textContent || "")
+      .join("\n");
     expect(style).toContain("list-style-type: disc");
     expect(style).toContain("list-style-type: decimal");
   });
@@ -74,7 +81,7 @@ describe("MarkdownRenderer P1-6 优化行为", () => {
   it("mermaid 代码块：渲染 SVG 并替换占位 div", async () => {
     const code = "graph TD\n  A-->B";
     const { container } = render(
-      <MarkdownRenderer content={`# 流程图\n\n\`\`\`mermaid\n${code}\n\`\`\``} />
+      <MarkdownRenderer content={`# 流程图\n\n\`\`\`mermaid\n${code}\n\`\`\``} />,
     );
     await waitFor(() => {
       expect(container.querySelector(".mmd-rendered")).not.toBeNull();
@@ -105,15 +112,13 @@ describe("MarkdownRenderer P1-6 优化行为", () => {
 
   it("chart-json 数据块：走后端渲染引擎出图（不经过 mermaid）", async () => {
     const { container } = render(
-      <MarkdownRenderer
-        content={'```chart-json\n{"type":"labor","title":"劳动力结构"}\n```'}
-      />
+      <MarkdownRenderer content={'```chart-json\n{"type":"labor","title":"劳动力结构"}\n```'} />,
     );
     await waitFor(() => {
       expect(chartsRenderMock).toHaveBeenCalledTimes(1);
     });
     expect(chartsRenderMock).toHaveBeenCalledWith(
-      expect.objectContaining({ chart_type: "labor", skip_http: true })
+      expect.objectContaining({ chart_type: "labor", skip_http: true }),
     );
     await waitFor(() => {
       expect(container.querySelector("img[src^='blob:']")).not.toBeNull();
@@ -128,7 +133,13 @@ describe("MarkdownRenderer P1-6 优化行为", () => {
     renderMock.mockRejectedValueOnce(new Error("Parse error on line 2"));
     chartsFixMock.mockResolvedValueOnce({
       // ✅ F2（R71）：后端正文重写后回带权威 word_count，随 new_content 一并上抛。
-      data: { code: fixedCode, written_back: true, content_updated: true, new_content: "重写后的正文", word_count: 6 },
+      data: {
+        code: fixedCode,
+        written_back: true,
+        content_updated: true,
+        new_content: "重写后的正文",
+        word_count: 6,
+      },
     });
     const onContentReplaced = vi.fn();
     const { container } = render(
@@ -136,7 +147,7 @@ describe("MarkdownRenderer P1-6 优化行为", () => {
         content={`\`\`\`mermaid\n${badCode}\n\`\`\``}
         sectionId="sec-abc"
         onContentReplaced={onContentReplaced}
-      />
+      />,
     );
     // 渲染失败 → 出现错误块与修复按钮
     const fixBtn = await waitFor(() => {
@@ -163,11 +174,20 @@ describe("MarkdownRenderer P1-6 优化行为", () => {
     const badCode = "sequenceDiagram\n  A->>?B: hi";
     renderMock.mockRejectedValueOnce(new Error("Parse error"));
     chartsFixMock.mockResolvedValueOnce({
-      data: { code: "sequenceDiagram\n  A->>B: hi", written_back: false, content_updated: false, new_content: "", word_count: 0 },
+      data: {
+        code: "sequenceDiagram\n  A->>B: hi",
+        written_back: false,
+        content_updated: false,
+        new_content: "",
+        word_count: 0,
+      },
     });
     const onContentReplaced = vi.fn();
     const { container } = render(
-      <MarkdownRenderer content={`\`\`\`mermaid\n${badCode}\n\`\`\``} onContentReplaced={onContentReplaced} />
+      <MarkdownRenderer
+        content={`\`\`\`mermaid\n${badCode}\n\`\`\``}
+        onContentReplaced={onContentReplaced}
+      />,
     );
     const fixBtn = await waitFor(() => {
       const el = container.querySelector<HTMLButtonElement>("button[data-fix-code]");

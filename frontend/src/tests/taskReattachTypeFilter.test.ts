@@ -14,10 +14,7 @@
  * checkpoint（正文页显示事实提取的结果 / 反之），是比不复挂更糟的事故。
  */
 import { describe, expect, it } from "vitest";
-import {
-  findRecentOutlineTaskImpl,
-  reattachTaskImpl,
-} from "../pages/SchemeWorkbenchPage";
+import { findRecentOutlineTaskImpl, reattachTaskImpl } from "../pages/SchemeWorkbenchPage";
 
 const NOW = Date.parse("2026-10-14T20:00:00Z");
 
@@ -25,38 +22,47 @@ const NOW = Date.parse("2026-10-14T20:00:00Z");
 function mkAllTypes() {
   return {
     tasks: [
-      { id: "c1", task_type: "content_generation", status: "running",
-        updated_at: "2026-10-14T19:58:00Z" },
-      { id: "f1", task_type: "facts_generation", status: "running",
-        updated_at: "2026-10-14T19:58:00Z" },
-      { id: "o1", task_type: "outline_generation", status: "running",
-        updated_at: "2026-10-14T19:58:00Z" },
+      {
+        id: "c1",
+        task_type: "content_generation",
+        status: "running",
+        updated_at: "2026-10-14T19:58:00Z",
+      },
+      {
+        id: "f1",
+        task_type: "facts_generation",
+        status: "running",
+        updated_at: "2026-10-14T19:58:00Z",
+      },
+      {
+        id: "o1",
+        task_type: "outline_generation",
+        status: "running",
+        updated_at: "2026-10-14T19:58:00Z",
+      },
     ],
   };
 }
 
 describe("断线重挂任务类型过滤（typeFilter 契约）", () => {
   it("正文生成链路：只挂 content_generation，绝不串到事实/目录任务", async () => {
-    const got = await findRecentOutlineTaskImpl(
-      async () => mkAllTypes(),
-      { typeFilter: "content_generation", nowMs: NOW },
-    );
+    const got = await findRecentOutlineTaskImpl(async () => mkAllTypes(), {
+      typeFilter: "content_generation",
+      nowMs: NOW,
+    });
     expect(got).toBe("c1");
   });
 
   it("事实提取链路：只挂 facts_generation", async () => {
-    const got = await findRecentOutlineTaskImpl(
-      async () => mkAllTypes(),
-      { typeFilter: "facts_generation", nowMs: NOW },
-    );
+    const got = await findRecentOutlineTaskImpl(async () => mkAllTypes(), {
+      typeFilter: "facts_generation",
+      nowMs: NOW,
+    });
     expect(got).toBe("f1");
   });
 
   it("目录生成链路：默认过滤器仍是 outline_generation（向后兼容）", async () => {
-    const got = await findRecentOutlineTaskImpl(
-      async () => mkAllTypes(),
-      { nowMs: NOW },
-    );
+    const got = await findRecentOutlineTaskImpl(async () => mkAllTypes(), { nowMs: NOW });
     expect(got).toBe("o1");
   });
 
@@ -64,8 +70,12 @@ describe("断线重挂任务类型过滤（typeFilter 契约）", () => {
     const got = await findRecentOutlineTaskImpl(
       async () => ({
         tasks: [
-          { id: "o9", task_type: "outline_generation", status: "running",
-            updated_at: "2026-10-14T19:58:00Z" },
+          {
+            id: "o9",
+            task_type: "outline_generation",
+            status: "running",
+            updated_at: "2026-10-14T19:58:00Z",
+          },
         ],
       }),
       { typeFilter: "content_generation", nowMs: NOW },
@@ -75,7 +85,9 @@ describe("断线重挂任务类型过滤（typeFilter 契约）", () => {
 
   it("检索请求失败静默返回 null（不得阻断断线后的收尾流程）", async () => {
     const got = await findRecentOutlineTaskImpl(
-      async () => { throw new Error("network down"); },
+      async () => {
+        throw new Error("network down");
+      },
       { typeFilter: "facts_generation", nowMs: NOW },
     );
     expect(got).toBeNull();
@@ -98,8 +110,14 @@ describe("reattachTaskImpl（三链统一重挂入口）", () => {
     const order: string[] = [];
     let fetchCalled = false;
     const hit = await reattachTaskImpl(
-      async () => { fetchCalled = true; return { tasks: [] }; },
-      async (tid) => { order.push("poll"); return { status: "completed", id: tid }; },
+      async () => {
+        fetchCalled = true;
+        return { tasks: [] };
+      },
+      async (tid) => {
+        order.push("poll");
+        return { status: "completed", id: tid };
+      },
       {
         taskId: "preset-tid",
         onReattach: () => order.push("reattach"),
@@ -116,12 +134,19 @@ describe("reattachTaskImpl（三链统一重挂入口）", () => {
     const order: string[] = [];
     const hit = await reattachTaskImpl(
       async () => ({
-        tasks: [{
-          id: "c1", task_type: "content_generation", status: "running",
-          updated_at: "2026-10-14T19:58:00Z",
-        }],
+        tasks: [
+          {
+            id: "c1",
+            task_type: "content_generation",
+            status: "running",
+            updated_at: "2026-10-14T19:58:00Z",
+          },
+        ],
       }),
-      async (tid) => { order.push("poll"); return { status: "completed", id: tid }; },
+      async (tid) => {
+        order.push("poll");
+        return { status: "completed", id: tid };
+      },
       {
         typeFilter: "content_generation",
         nowMs: NOW,
@@ -138,15 +163,25 @@ describe("reattachTaskImpl（三链统一重挂入口）", () => {
     let reattached = false;
     const hit = await reattachTaskImpl(
       async () => ({
-        tasks: [{
-          id: "o1", task_type: "outline_generation", status: "running",
-          updated_at: "2026-10-14T19:58:00Z",
-        }],
+        tasks: [
+          {
+            id: "o1",
+            task_type: "outline_generation",
+            status: "running",
+            updated_at: "2026-10-14T19:58:00Z",
+          },
+        ],
       }),
-      async () => { polled = true; return null; },
+      async () => {
+        polled = true;
+        return null;
+      },
       {
-        typeFilter: "content_generation", nowMs: NOW,
-        onReattach: () => { reattached = true; },
+        typeFilter: "content_generation",
+        nowMs: NOW,
+        onReattach: () => {
+          reattached = true;
+        },
       },
     );
     expect(hit).toBeNull();
@@ -157,10 +192,14 @@ describe("reattachTaskImpl（三链统一重挂入口）", () => {
   it("typeFilter 透传：正文过滤器不误挂事实任务", async () => {
     const hit = await reattachTaskImpl(
       async () => ({
-        tasks: [{
-          id: "f1", task_type: "facts_generation", status: "running",
-          updated_at: "2026-10-14T19:58:00Z",
-        }],
+        tasks: [
+          {
+            id: "f1",
+            task_type: "facts_generation",
+            status: "running",
+            updated_at: "2026-10-14T19:58:00Z",
+          },
+        ],
       }),
       async (tid) => ({ status: "completed", id: tid }),
       { typeFilter: "content_generation", nowMs: NOW },
@@ -170,7 +209,9 @@ describe("reattachTaskImpl（三链统一重挂入口）", () => {
 
   it("检索抛错 → 静默返回 null（不阻断断线后的收尾流程）", async () => {
     const hit = await reattachTaskImpl(
-      async () => { throw new Error("network down"); },
+      async () => {
+        throw new Error("network down");
+      },
       async () => ({ status: "completed" }),
       { typeFilter: "facts_generation", nowMs: NOW },
     );

@@ -86,6 +86,11 @@ export interface OutlineSavePayload {
   source?: string;
   /** AI 生成目录确认保存时锁定一级章节（后端 save-outline 可选开关） */
   lock_roots?: boolean;
+  /** ✅ R175 G-3 逃生舱：显式保留「无子章节的一级章」（空壳章，多为分步生成
+   *  失败章或手工误留）。默认不传 ⇒ 后端 400 闸门行为与旧版本完全一致；
+   *  仅在用户于空章确认框点「仍要保存」后置 true，此时后端响应会加法式
+   *  回传 empty_top_chapters 明细（由 notifyGenericResidual 统一提示）。 */
+  allow_empty_chapters?: boolean;
 }
 
 /** POST /outline-library/{id}/review 请求体 */

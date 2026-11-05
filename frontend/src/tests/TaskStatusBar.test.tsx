@@ -8,14 +8,21 @@ import { systemApi, tasksApi } from "../api";
 // jsdom 缺 matchMedia / ResizeObserver，antd 会用到
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
   });
 }
 if (!(globalThis as any).ResizeObserver) {
   (globalThis as any).ResizeObserver = class {
-    observe() {} unobserve() {} disconnect() {}
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   };
 }
 
@@ -25,19 +32,38 @@ const h = vi.hoisted(() => ({
     tasks: {
       running: [
         {
-          id: "t-1", task_type: "content_generation", status: "running", progress: 0.42,
-          scheme_id: "s1", scheme_name: "基坑方案",
+          id: "t-1",
+          task_type: "content_generation",
+          status: "running",
+          progress: 0.42,
+          scheme_id: "s1",
+          scheme_name: "基坑方案",
           stats: { done: 2, total: 5, elapsed_ms: 120000 },
         },
       ],
       recent: [
-        { id: "t-0", task_type: "outline_generation", status: "completed", scheme_name: "旧方案", updated_at: "2026-09-20T10:00:00" },
+        {
+          id: "t-0",
+          task_type: "outline_generation",
+          status: "completed",
+          scheme_name: "旧方案",
+          updated_at: "2026-09-20T10:00:00",
+        },
       ],
     },
     ai: {
-      in_flight: 2, total: 100, calls_today: 42, tokens_today: 120000, avg_duration: 1.5,
-      failed: 1, success_rate: 97.6, last_provider: "deepseek", last_model: "deepseek-v3",
-      last_ok: true, last_duration: 1.2, last_at: Date.now(),
+      in_flight: 2,
+      total: 100,
+      calls_today: 42,
+      tokens_today: 120000,
+      avg_duration: 1.5,
+      failed: 1,
+      success_rate: 97.6,
+      last_provider: "deepseek",
+      last_model: "deepseek-v3",
+      last_ok: true,
+      last_duration: 1.2,
+      last_at: Date.now(),
     },
   },
 }));
@@ -58,20 +84,29 @@ vi.mock("../api", () => ({
   },
 }));
 
-beforeEach(() => { localStorage.clear(); });
-afterEach(() => { cleanup(); localStorage.clear(); });
+beforeEach(() => {
+  localStorage.clear();
+});
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+});
 
 function btnByText(container: HTMLElement, text: string): HTMLButtonElement | null {
   const norm = (s: string) => (s || "").replace(/\s+/g, "");
-  return (Array.from(container.querySelectorAll("button")).find(
-    (b) => norm(b.textContent).includes(norm(text)),
-  ) as HTMLButtonElement | undefined) ?? null;
+  return (
+    (Array.from(container.querySelectorAll("button")).find((b) =>
+      norm(b.textContent).includes(norm(text)),
+    ) as HTMLButtonElement | undefined) ?? null
+  );
 }
 
 describe("TaskStatusBar · 运行态渲染与任务控制", () => {
   it("拉取快照后渲染运行态概览（状态条）", async () => {
     const { container } = render(
-      <App><TaskStatusBar collapsed={false} /></App>,
+      <App>
+        <TaskStatusBar collapsed={false} />
+      </App>,
     );
     await waitFor(() => {
       expect(container.textContent || "").toContain("正文生成");
@@ -83,7 +118,9 @@ describe("TaskStatusBar · 运行态渲染与任务控制", () => {
 
   it("展开详情面板并暂停任务 → tasksApi.control(taskId, 'pause')", async () => {
     const { container } = render(
-      <App><TaskStatusBar collapsed={false} /></App>,
+      <App>
+        <TaskStatusBar collapsed={false} />
+      </App>,
     );
     await waitFor(() => expect(container.textContent || "").toContain("正文生成"));
     fireEvent.click(container.querySelector(".bp-task-bar")!);
@@ -95,7 +132,9 @@ describe("TaskStatusBar · 运行态渲染与任务控制", () => {
     const pauseIcon = document.querySelector('[aria-label="pause-circle"]');
     expect(pauseIcon).toBeTruthy();
     const pauseBtn = pauseIcon!.closest("button") as HTMLButtonElement;
-    await act(async () => { fireEvent.click(pauseBtn); });
+    await act(async () => {
+      fireEvent.click(pauseBtn);
+    });
 
     expect(tasksApi.control).toHaveBeenCalledWith("t-1", "pause");
   });
@@ -109,14 +148,15 @@ function useSnapshot(patch: Record<string, any>) {
   vi.mocked(systemApi.activityStream).mockImplementation(async function* () {
     yield { event: "snapshot", data: snap };
   });
-  vi.mocked(systemApi.activity).mockImplementation(
-    async () => ({ data: snap }) as any);
+  vi.mocked(systemApi.activity).mockImplementation(async () => ({ data: snap }) as any);
   return snap;
 }
 
 async function renderAndExpand() {
   const { container } = render(
-    <App><TaskStatusBar collapsed={false} /></App>,
+    <App>
+      <TaskStatusBar collapsed={false} />
+    </App>,
   );
   await waitFor(() => expect(container.textContent || "").toContain("正文生成"));
   fireEvent.click(container.querySelector(".bp-task-bar")!);
@@ -127,7 +167,11 @@ describe("TaskStatusBar · 文档解析统计", () => {
   it("有失败：展示计数、待解析与失败率", async () => {
     useSnapshot({
       documents: {
-        total: 4, parsed: 2, failed: 1, pending: 1, failure_rate: 25.0,
+        total: 4,
+        parsed: 2,
+        failed: 1,
+        pending: 1,
+        failure_rate: 25.0,
       },
     });
     await renderAndExpand();
@@ -169,5 +213,50 @@ describe("TaskStatusBar · 文档解析统计", () => {
     const fp1 = activityFingerprint(snap);
     snap.documents = { total: 4, parsed: 3, failed: 0, pending: 1 };
     expect(activityFingerprint(snap)).not.toBe(fp1);
+  });
+});
+
+// =========================================================================
+// ✅ R174 F8（2026-11-03）：任务状态栏键盘可达性
+// 旧缺陷：div role="button" 无 tabIndex/onKeyDown，纯键盘用户无法展开面板。
+// =========================================================================
+describe("TaskStatusBar · 键盘可达（R174 F8）", () => {
+  it("状态条可聚焦（tabIndex=0）且 aria-expanded 随展开态变化", async () => {
+    const { container } = render(
+      <App>
+        <TaskStatusBar collapsed={false} />
+      </App>,
+    );
+    await waitFor(() => expect(container.textContent || "").toContain("正文生成"));
+    const bar = container.querySelector('[data-testid="task-status-bar"]') as HTMLElement;
+    expect(bar).toBeTruthy();
+    expect(bar.getAttribute("tabindex")).toBe("0");
+    expect(bar.getAttribute("role")).toBe("button");
+    expect(bar.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(bar);
+    await waitFor(() => expect(document.querySelector(".bp-task-panel")).toBeTruthy());
+    // 展开后重新查询（detailPanel 渲染在 bar 之前，bar 仍是同一节点）
+    const bar2 = container.querySelector('[data-testid="task-status-bar"]') as HTMLElement;
+    expect(bar2.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("Enter 与 Space 均可切换展开态（不触发页面滚动）", async () => {
+    const { container } = render(
+      <App>
+        <TaskStatusBar collapsed={false} />
+      </App>,
+    );
+    await waitFor(() => expect(container.textContent || "").toContain("正文生成"));
+    const bar = container.querySelector('[data-testid="task-status-bar"]') as HTMLElement;
+    // Enter 展开
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await waitFor(() => expect(document.querySelector(".bp-task-panel")).toBeTruthy());
+    // Space 收起
+    const bar2 = container.querySelector('[data-testid="task-status-bar"]') as HTMLElement;
+    fireEvent.keyDown(bar2, { key: " " });
+    await waitFor(() => expect(document.querySelector(".bp-task-panel")).toBeNull());
+    // 其它按键不切换
+    fireEvent.keyDown(bar2, { key: "a" });
+    expect(document.querySelector(".bp-task-panel")).toBeNull();
   });
 });

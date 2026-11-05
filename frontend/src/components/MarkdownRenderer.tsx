@@ -138,48 +138,58 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
     }
 
     const processed = replaceChartFences(_norm.text, (lang, code) => {
-        const id = nextMermaidId("mmd");
-        const marker = `${markerPrefix}${counter}__`;
-        if (lang === "chart-json") {
-          // ✅ 图表同步生成：JSON 数据块调后端渲染引擎出图（与导出一致）
-          // ✅ BUG 修复（2026-09-27）：旧实现 `obj.type || "labor"` —— 载荷省略
-          //    type 时会**凭空捏造**一个 labor 类型发给后端，把甘特图/架构图载荷
-          //    送进 labor 渲染器必然失败，预览显示"渲染引擎暂不可用"，
-          //    而导出 DOCX 却是对的（导出侧按载荷结构推断）——预览/导出错配。
-          //    此处改为：解析不出合法类型就传空串，交给后端按结构推断
-          //    （与登记侧、导出侧同一个判据），不再在前端复制一份推断逻辑。
-          let chartType = "";
-          let title = "";
-          try {
-            const obj = JSON.parse(code.trim());
-            if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-              const declared = String(obj.type || "").trim().toLowerCase();
-              if (RENDERABLE_CHART_TYPES.has(declared)) chartType = declared;
-              title = String(obj.title || "");
-            }
-          } catch { /* 解析失败按占位卡片显示 */ }
-          placeholders.push({
-            marker, code: code.trim(), id,
-            json: { chart_type: chartType, title },
-          });
-        } else if (lang === "ai_image") {
-          // ✅ AI 文生图（对齐 OpenBidKit 的 ai 插图）：生成前显示占位卡片 + 生成按钮
-          let prompt = ""; let style = "engineering_diagram"; let title = "";
-          try {
-            const obj = JSON.parse(code.trim());
-            prompt = String(obj.prompt || "");
-            style = String(obj.style || "engineering_diagram");
-            title = String(obj.title || "AI 配图");
-          } catch { /* 解析失败按占位卡片显示 */ }
-          placeholders.push({ marker, code: code.trim(), id, aiImage: { prompt, style, title } });
-        } else {
-          placeholders.push({ marker, code: code.trim(), id });
+      const id = nextMermaidId("mmd");
+      const marker = `${markerPrefix}${counter}__`;
+      if (lang === "chart-json") {
+        // ✅ 图表同步生成：JSON 数据块调后端渲染引擎出图（与导出一致）
+        // ✅ BUG 修复（2026-09-27）：旧实现 `obj.type || "labor"` —— 载荷省略
+        //    type 时会**凭空捏造**一个 labor 类型发给后端，把甘特图/架构图载荷
+        //    送进 labor 渲染器必然失败，预览显示"渲染引擎暂不可用"，
+        //    而导出 DOCX 却是对的（导出侧按载荷结构推断）——预览/导出错配。
+        //    此处改为：解析不出合法类型就传空串，交给后端按结构推断
+        //    （与登记侧、导出侧同一个判据），不再在前端复制一份推断逻辑。
+        let chartType = "";
+        let title = "";
+        try {
+          const obj = JSON.parse(code.trim());
+          if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+            const declared = String(obj.type || "")
+              .trim()
+              .toLowerCase();
+            if (RENDERABLE_CHART_TYPES.has(declared)) chartType = declared;
+            title = String(obj.title || "");
+          }
+        } catch {
+          /* 解析失败按占位卡片显示 */
         }
-        counter++;
-        // 占位 div 单独成行：段间**空行**由 replaceChartFences 统一插入（`<div>` 开启的
-        // HTML block 只有空行才结束，单换行会把紧随的正文吸进同一 block、丢掉 `<p>`），
-        // 这里再带 \n 会出现多余空行 → marked 产出空白 <p></p>
-        return `<div class="mmd-ph" data-marker="${marker}"></div>`;
+        placeholders.push({
+          marker,
+          code: code.trim(),
+          id,
+          json: { chart_type: chartType, title },
+        });
+      } else if (lang === "ai_image") {
+        // ✅ AI 文生图（对齐 OpenBidKit 的 ai 插图）：生成前显示占位卡片 + 生成按钮
+        let prompt = "";
+        let style = "engineering_diagram";
+        let title = "";
+        try {
+          const obj = JSON.parse(code.trim());
+          prompt = String(obj.prompt || "");
+          style = String(obj.style || "engineering_diagram");
+          title = String(obj.title || "AI 配图");
+        } catch {
+          /* 解析失败按占位卡片显示 */
+        }
+        placeholders.push({ marker, code: code.trim(), id, aiImage: { prompt, style, title } });
+      } else {
+        placeholders.push({ marker, code: code.trim(), id });
+      }
+      counter++;
+      // 占位 div 单独成行：段间**空行**由 replaceChartFences 统一插入（`<div>` 开启的
+      // HTML block 只有空行才结束，单换行会把紧随的正文吸进同一 block、丢掉 `<p>`），
+      // 这里再带 \n 会出现多余空行 → marked 产出空白 <p></p>
+      return `<div class="mmd-ph" data-marker="${marker}"></div>`;
     }).text;
 
     // ✅ KaTeX 公式提取：在 marked 解析前把 $$...$$ / $...$ 替换为占位符，
@@ -202,7 +212,12 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
           // 块级公式 $$...$$（可跨行不行——按行内非贪婪处理，跨行块级公式罕见）
           .replace(/\$\$([^$\n]+?)\$\$/g, (_m, tex: string) => {
             const marker = `${markerPrefix}m${counter++}__`;
-            placeholders.push({ marker, code: "", id: nextMermaidId("math"), math: { tex: tex.trim(), displayMode: true } });
+            placeholders.push({
+              marker,
+              code: "",
+              id: nextMermaidId("math"),
+              math: { tex: tex.trim(), displayMode: true },
+            });
             return `<span class="math-ph" data-marker="${marker}"></span>`;
           })
           // 行内公式 $...$（内容非空、两端不紧邻空格、不含 $）
@@ -210,7 +225,12 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
             const trimmed = tex.trim();
             if (!trimmed || trimmed.startsWith(" ") || trimmed.endsWith(" ")) return m;
             const marker = `${markerPrefix}m${counter++}__`;
-            placeholders.push({ marker, code: "", id: nextMermaidId("math"), math: { tex: trimmed, displayMode: false } });
+            placeholders.push({
+              marker,
+              code: "",
+              id: nextMermaidId("math"),
+              math: { tex: trimmed, displayMode: false },
+            });
             return `${pre}<span class="math-ph" data-marker="${marker}"></span>`;
           });
       }
@@ -220,7 +240,7 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
 
     let rawHtml = "";
     try {
-      rawHtml = marked.parse(mathContent) as string;  // ✅ BUG修复：用 mathContent（含公式占位符）而非 processed（无公式占位符）
+      rawHtml = marked.parse(mathContent) as string; // ✅ BUG修复：用 mathContent（含公式占位符）而非 processed（无公式占位符）
     } catch (e: unknown) {
       const err = e as { message?: string };
       rawHtml = `<pre style="color:red">Markdown 解析失败: ${err.message}</pre>`;
@@ -249,7 +269,9 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
     // cleanup 会先于挂载执行 —— 监听器被挂到已被替换的 DOM 上（泄漏），或挂载本身丢失，
     // 表现为「AI 自动修复」按钮点击无响应。事件委托挂在稳定的容器 ref 上，同步挂载即可。
     const handleClick = async (ev: MouseEvent) => {
-      const target = (ev.target as HTMLElement)?.closest("button[data-fix-code]") as HTMLButtonElement | null;
+      const target = (ev.target as HTMLElement)?.closest(
+        "button[data-fix-code]",
+      ) as HTMLButtonElement | null;
       if (!target) return;
       ev.preventDefault();
       if (target.disabled) return;
@@ -264,7 +286,8 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
         //    查不到行，回写与正文同步全部静默失效。类型由后端按代码本体推断。
         const sid = sectionIdRef.current;
         const resp = await chartsApi.fixMermaid({
-          code, error,
+          code,
+          error,
           ...(sid ? { section_id: sid } : {}),
         });
         const fixed = resp?.data?.code;
@@ -320,7 +343,9 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
           const katex = await ensureKatex();
           if (cancelled || !ref.current) return;
           for (const ph of mathPhs) {
-            const div = ref.current.querySelector<HTMLSpanElement>(`span.math-ph[data-marker="${ph.marker}"]`);
+            const div = ref.current.querySelector<HTMLSpanElement>(
+              `span.math-ph[data-marker="${ph.marker}"]`,
+            );
             if (!div) continue;
             try {
               div.innerHTML = katex.renderToString(ph.math!.tex, {
@@ -413,22 +438,26 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
               // 渲染失败：显示代码 + 错误提示 + AI修复按钮
               const errId = `mmd-err-${ph.id}`;
               div.innerHTML = `<pre style="color:#a00;background:#fff0f0;padding:8px;border-radius:4px;font-size:12px"><b>Mermaid 渲染错误：</b>${DOMPurify.sanitize(
-                rerr?.message || String(renderErr)
+                rerr?.message || String(renderErr),
               )}\n\n${DOMPurify.sanitize(ph.code)}</pre>
-              <div style="margin-top:6px"><button id="${errId}" data-fix-code="${encodeURIComponent(ph.code)}" data-fix-error="${encodeURIComponent(rerr?.message || '渲染失败')}" style="padding:4px 12px;font-size:12px;border:1px solid #1677ff;border-radius:4px;background:#1677ff;color:#fff;cursor:pointer">AI 自动修复</button></div>`;
+              <div style="margin-top:6px"><button id="${errId}" data-fix-code="${encodeURIComponent(ph.code)}" data-fix-error="${encodeURIComponent(rerr?.message || "渲染失败")}" style="padding:4px 12px;font-size:12px;border:1px solid #1677ff;border-radius:4px;background:#1677ff;color:#fff;cursor:pointer">AI 自动修复</button></div>`;
               div.classList.remove("mmd-ph");
               div.classList.add("mmd-err");
             }
           }
         };
         await Promise.all(
-          Array.from({ length: Math.min(MERMAID_POOL, mermaidJobs.length) }, () => renderOneMermaid())
+          Array.from({ length: Math.min(MERMAID_POOL, mermaidJobs.length) }, () =>
+            renderOneMermaid(),
+          ),
         );
 
         // ✅ AI 文生图（ai_image）占位卡片（信息展示；导出时后端自动生成真实图片）
         for (const ph of parsed.placeholders.filter((p) => p.aiImage)) {
           if (cancelled || !ref.current) return;
-          const div = ref.current.querySelector<HTMLDivElement>(`.mmd-ph[data-marker="${ph.marker}"]`);
+          const div = ref.current.querySelector<HTMLDivElement>(
+            `.mmd-ph[data-marker="${ph.marker}"]`,
+          );
           if (!div) continue;
           const info = ph.aiImage!;
           div.innerHTML = `<div style="padding:14px;border:1px dashed #1677ff;border-radius:6px;background:#f0f7ff;font-size:13px">
@@ -442,7 +471,6 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
         const err = e as { message?: string };
         setErrMsg(`Mermaid 加载失败: ${err.message}`);
       }
-
     })();
 
     return () => {
@@ -456,9 +484,7 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
   return (
     <div className="markdown-body">
       <div ref={ref} dangerouslySetInnerHTML={{ __html: html }} />
-      {errMsg && (
-        <div style={{ color: "red", padding: 8, background: "#fff0f0" }}>{errMsg}</div>
-      )}
+      {errMsg && <div style={{ color: "red", padding: 8, background: "#fff0f0" }}>{errMsg}</div>}
     </div>
   );
 }

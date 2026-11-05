@@ -105,7 +105,10 @@ const JSON_EMPTY_VALUES = new Set(["", "没有提及", "未提取到", "n/a", "�
 function isAllEmptyJson(raw: string): boolean {
   let text = raw;
   if (text.startsWith("```")) {
-    text = text.replace(/^```[A-Za-z0-9_-]*\s*/, "").replace(/\s*```$/, "").trim();
+    text = text
+      .replace(/^```[A-Za-z0-9_-]*\s*/, "")
+      .replace(/\s*```$/, "")
+      .trim();
   }
   let data: unknown;
   try {
@@ -116,7 +119,7 @@ function isAllEmptyJson(raw: string): boolean {
   if (!data || typeof data !== "object" || Array.isArray(data)) return false;
   const values = Object.values(data);
   if (!values.length) return false;
-  return values.every(v => {
+  return values.every((v) => {
     if (v && typeof v === "object") {
       return Array.isArray(v) ? v.length === 0 : Object.keys(v).length === 0;
     }
@@ -139,12 +142,9 @@ export function isMissingBaResult(content?: string, outputType = "markdown"): bo
  * 口径与后端 list_analysis_results 完全一致：total 取定义项数，必选项缺失
  * 同时检查 status 与内容有效性。
  */
-export function recomputeBaSummary(
-  items: BaStoredItem[] = [],
-  defs: BaItemDef[] = [],
-): BaSummary {
+export function recomputeBaSummary(items: BaStoredItem[] = [], defs: BaItemDef[] = []): BaSummary {
   const total = defs.length || items.length || 0;
-  const byId = new Map(items.map(i => [i.item_id, i]));
+  const byId = new Map(items.map((i) => [i.item_id, i]));
   let success = 0;
   let success_valid = 0;
   let manual_count = 0;
@@ -171,10 +171,7 @@ export function recomputeBaSummary(
     if (it?.source === "manual") manual_count++;
 
     if (d.required) {
-      if (
-        status !== "success" ||
-        isMissingBaResult(it?.content, d.output_type || "markdown")
-      ) {
+      if (status !== "success" || isMissingBaResult(it?.content, d.output_type || "markdown")) {
         missing_required.push(d.label || d.item_id);
       }
     }
@@ -197,18 +194,13 @@ export function recomputeBaSummary(
  * 归一化 13 分组：优先用后端 `/bid-analysis/items` 返回的 groups（唯一权威源），
  * 缺失时按定义项的 group 字段**推导**（不再前端硬编码分组表）。
  */
-export function normalizeBaGroups(
-  groups: BaGroupLike[] = [],
-  defs: BaItemDef[] = [],
-): BaGroup[] {
-  const byId = new Map(defs.map(d => [d.item_id, d]));
+export function normalizeBaGroups(groups: BaGroupLike[] = [], defs: BaItemDef[] = []): BaGroup[] {
+  const byId = new Map(defs.map((d) => [d.item_id, d]));
 
   if (groups?.length) {
     return groups.map((g) => {
       const key = g.group || g.key || "";
-      const rawItems = g.items?.length
-        ? g.items
-        : defs.filter(d => d.group === key);
+      const rawItems = g.items?.length ? g.items : defs.filter((d) => d.group === key);
       return {
         key,
         label: g.label || key,
@@ -228,7 +220,7 @@ export function normalizeBaGroups(
     }
     bucket.get(key)!.push(d);
   }
-  return order.map(key => ({ key, label: key, items: bucket.get(key)! }));
+  return order.map((key) => ({ key, label: key, items: bucket.get(key)! }));
 }
 
 /** 合并「解析项定义」与「已存结果」，供右侧阅读区 / 完整查看使用 */
@@ -251,7 +243,7 @@ export function findFirstDoneBaItem(
   items: BaStoredItem[] = [],
   defs: BaItemDef[] = [],
 ): BaItemDef & BaStoredItem {
-  const byId = new Map(items.map(i => [i.item_id, i]));
+  const byId = new Map(items.map((i) => [i.item_id, i]));
   for (const d of defs) {
     const s = byId.get(d.item_id);
     if (s?.status === "success" && s.content) return mergeBaItem(d, s);

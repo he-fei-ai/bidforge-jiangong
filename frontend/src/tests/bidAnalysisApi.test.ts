@@ -40,7 +40,12 @@ const h = vi.hoisted(() => {
     patch: make("patch"),
     delete: make("delete"),
     interceptors: {
-      request: { use: vi.fn((fn: any) => { requestHandlers.push(fn); return requestHandlers.length; }) },
+      request: {
+        use: vi.fn((fn: any) => {
+          requestHandlers.push(fn);
+          return requestHandlers.length;
+        }),
+      },
       response: { use: vi.fn(() => 0) },
     },
   };

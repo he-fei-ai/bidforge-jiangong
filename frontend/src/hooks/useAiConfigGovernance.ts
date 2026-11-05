@@ -1,8 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { aiApi } from "../api";
-import type {
-  AIConfigAuditItem, AIRuntimeResponse, AISceneRouteItem,
-} from "../types/aiConfig";
+import type { AIConfigAuditItem, AIRuntimeResponse, AISceneRouteItem } from "../types/aiConfig";
 
 export interface GovernanceMessage {
   success: (text: string) => void;
@@ -26,6 +24,14 @@ export function useAiConfigGovernance(msg: GovernanceMessage) {
   const [runtime, setRuntime] = useState<AIRuntimeResponse | null>(null);
   const [runtimeDraft, setRuntimeDraft] = useState<string[]>([]);
   const [runtimeSaving, setRuntimeSaving] = useState(false);
+  /**
+   * ✅ R175（2026-11-03 · BUG-01）：运行时开关的「错误态」。
+   *  - 后端 ``disabled_providers`` JSON 损坏时不再 500，而是回传
+   *    ``disabled_error`` + 空集；本字段承接该说明。
+   *  - 请求本身失败（旧后端 / 网关 5xx）也必须显式记录并展示，
+   *    否则整张开关卡片会被 ``runtime &&`` 条件隐藏，恢复入口随之消失。
+   */
+  const [runtimeError, setRuntimeError] = useState<string>("");
   const [configAudits, setConfigAudits] = useState<AIConfigAuditItem[]>([]);
   const [rollingBack, setRollingBack] = useState<string>("");
   /**
@@ -80,9 +86,13 @@ export function useAiConfigGovernance(msg: GovernanceMessage) {
       const { data } = await aiApi.getRuntime();
       setRuntime(data);
       setRuntimeDraft(data.disabled_providers || []);
+      setRuntimeError(data.disabled_error || "");
       syncEnvError(data.env_error);
-    } catch {
-      // 旧后端无该端点时静默
+    } catch (e: unknown) {
+      // ✅ R175：不再静默吞错 —— 记录原因交给页面渲染「错误 + 重置入口」。
+      //    （旧后端无该端点时该卡片本就不展示，这里仅保留错误态供页面判断。）
+      const err = e as { message?: string; response?: { data?: { detail?: string } } };
+      setRuntimeError(err.response?.data?.detail || err.message || "运行时厂商开关加载失败");
     }
   }, []);
 
@@ -109,9 +119,11 @@ export function useAiConfigGovernance(msg: GovernanceMessage) {
     setRuntimeSaving(true);
     try {
       const { data } = await aiApi.setDisabledProviders(runtimeDraft);
-      setRuntime((prev) => (prev
-        ? { ...prev, disabled_providers: data.disabled_providers || [] }
-        : prev));
+      setRuntime((prev) =>
+        prev ? { ...prev, disabled_providers: data.disabled_providers || [] } : prev,
+      );
+      // 本次保存已整体覆盖损坏值，错误态随之解除
+      setRuntimeError("");
       if (data?.warning) msg.warning(data.warning);
       else if (!data?.count) msg.success("已恢复全部厂商");
       else msg.success(`已禁用 ${data.count} 个厂商（即时生效，可随时恢复）`);
@@ -149,14 +161,33 @@ export function useAiConfigGovernance(msg: GovernanceMessage) {
   //    切换运行时厂商开关后 refreshRef.current?.() 静默 no-op，列表不刷新（用户看到
   //    「已保存」但页面无变化，必须手动 F5）。改为 useRef 后引用稳定，刷新真正生效。
   const refreshRef = useRef<(() => Promise<void>) | null>(null);
-  const setRefresh = useCallback((fn: () => Promise<void>) => { refreshRef.current = fn; }, []);
+  const setRefresh = useCallback((fn: () => Promise<void>) => {
+    refreshRef.current = fn;
+  }, []);
 
   return {
-    sceneRoutes, sceneSaving, activeEnv, envOptions, envSaving,
-    runtime, runtimeDraft, runtimeSaving, configAudits, rollingBack,
-    sceneActiveEnv, envError,
-    loadSceneRoutes, loadConfigAudits, loadEnv, loadRuntime,
-    handleSceneRouteChange, handleSaveRuntime, handleEnvChange,
-    setRuntimeDraft, setRollingBack, setRefresh,
+    sceneRoutes,
+    sceneSaving,
+    activeEnv,
+    envOptions,
+    envSaving,
+    runtime,
+    runtimeDraft,
+    runtimeSaving,
+    runtimeError,
+    configAudits,
+    rollingBack,
+    sceneActiveEnv,
+    envError,
+    loadSceneRoutes,
+    loadConfigAudits,
+    loadEnv,
+    loadRuntime,
+    handleSceneRouteChange,
+    handleSaveRuntime,
+    handleEnvChange,
+    setRuntimeDraft,
+    setRollingBack,
+    setRefresh,
   };
 }

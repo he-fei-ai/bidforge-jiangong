@@ -9,6 +9,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  genericAutofixFailedNotice,
   genericAutofixNotice,
   genericResidualHits,
   genericResidualNotice,
@@ -44,11 +45,7 @@ describe("genericResidualNotice · 提示文案", () => {
 
   it("多条残留逐条列出", () => {
     const text = genericResidualNotice({
-      generic_residual: [
-        { title: "专项6" },
-        { title: "总体实施策划（2）" },
-        { title: "其他" },
-      ],
+      generic_residual: [{ title: "专项6" }, { title: "总体实施策划（2）" }, { title: "其他" }],
     });
     expect(text).toContain("3 处占位/泛化标题");
     expect(text).toContain("专项6、总体实施策划（2）、其他");
@@ -73,9 +70,7 @@ describe("genericResidualNotice · 提示文案", () => {
 
   it("conflict_suffix 形态同样出提示（AI 用括号数字消歧产生的冲突后缀）", () => {
     const text = genericResidualNotice({
-      generic_residual: [
-        { title: "钢内支撑安装", kind: "conflict_suffix" },
-      ],
+      generic_residual: [{ title: "钢内支撑安装", kind: "conflict_suffix" }],
     });
     expect(text).toContain("1 处占位/泛化标题");
   });
@@ -130,12 +125,18 @@ describe("genericAutofixNotice · 自动改写提示（R101）", () => {
 });
 
 describe("wiring · 页面必须消费（防纯函数被摘后仍全绿）", () => {
-  const pages = import.meta.glob("../pages/*.tsx", { query: "?raw", import: "default" });
+  // ✅ 2026-11-04 拆分（G4 续 / G5）：目录写入提示与套用目录库链接线已迁至
+  //    pages/schemeWorkbench/ 下（useOutlineGate.tsx / useOutlineActions.tsx），
+  //    判据语义不变（「工作台源码必须消费这些纯函数」），故纳入 glob 范围。
+  const pages = import.meta.glob(
+    ["../pages/*.tsx", "../pages/schemeWorkbench/*.tsx", "../pages/schemeWorkbench/tabs/*.tsx"],
+    { query: "?raw", import: "default" },
+  );
 
   it("SchemeWorkbenchPage 导入并调用 genericResidualNotice", async () => {
     const mods = await Promise.all(Object.entries(pages).map(([, l]) => l()));
     const src = mods.join("\n");
-    expect(src).toContain('from "../utils/genericResidual"');
+    expect(src).toContain('utils/genericResidual"');
     expect(src).toContain("genericResidualNotice(");
   });
 
@@ -155,8 +156,9 @@ describe("wiring · 页面必须消费（防纯函数被摘后仍全绿）", () 
     const mods = await Promise.all(Object.entries(pages).map(([, l]) => l()));
     const src = mods.join("\n");
     // 与既有 notifyClearedContent 同一形态：每个消费点都必须成对出现
-    const cleared = (src.match(/notifyClearedContent\(data/g) || []).length;
-    const residual = (src.match(/notifyGenericResidual\(data/g) || []).length;
+    // 格式不敏感：允许换行/缩进后的 `(\n  data`，同时排除函数声明本身。
+    const cleared = (src.match(/(?<!function )notifyClearedContent\(\s*data\b/g) || []).length;
+    const residual = (src.match(/(?<!function )notifyGenericResidual\(\s*data\b/g) || []).length;
     expect(cleared).toBeGreaterThan(0);
     expect(residual).toBe(cleared);
   });
@@ -186,5 +188,43 @@ describe("wiring · 页面必须消费（防纯函数被摘后仍全绿）", () 
     const mods = await Promise.all(Object.entries(pages).map(([, l]) => l()));
     const src = mods.join("\n");
     expect((src.match(/outlineLibraryApi\.applyAndSave\(/g) || []).length).toBe(1);
+  });
+
+  it("notifyGenericResidual 必须消费 genericAutofixFailedNotice（D-09）", async () => {
+    const mods = await Promise.all(Object.entries(pages).map(([, l]) => l()));
+    const src = mods.join("\n");
+    const start = src.indexOf("function notifyGenericResidual(");
+    expect(start).toBeGreaterThan(-1);
+    const win = src.slice(start, start + 900);
+    expect(win).toContain("genericAutofixFailedNotice(data)");
+  });
+});
+
+/**
+ * ✅ D-09（R176 · 2026-11-04）：落库前自动改写**未执行**（异常/超时）时后端
+ * 按原样保存并回传 `generic_autofix_failed=true`。本组锁定「消费 + 反向静默」。
+ */
+describe("genericAutofixFailedNotice · 自动改写失败提示（D-09）", () => {
+  it("true 时给出可操作提示（含「按原样保存」）", () => {
+    const text = genericAutofixFailedNotice({ generic_autofix_failed: true });
+    expect(text).toContain("未执行");
+    expect(text).toContain("按原样保存");
+    expect(text).toContain("手动改名");
+  });
+
+  it('字符串 "true" 同样识别（序列化路径可能回字符串）', () => {
+    expect(genericAutofixFailedNotice({ generic_autofix_failed: "true" })).toContain("未执行");
+  });
+
+  it.each([
+    ["无该键（旧后端 / 正常改写）", { ok: true, count: 12 }],
+    ["false（改写成功）", { generic_autofix_failed: false }],
+    ['字符串 "false"', { generic_autofix_failed: "false" }],
+    ["1（脏数据，不得当成失败）", { generic_autofix_failed: 1 }],
+    ["空串", { generic_autofix_failed: "" }],
+    ["null", null],
+    ["undefined", undefined],
+  ])("%s → 空串（绝不误报失败）", (_name, data) => {
+    expect(genericAutofixFailedNotice(data as unknown)).toBe("");
   });
 });

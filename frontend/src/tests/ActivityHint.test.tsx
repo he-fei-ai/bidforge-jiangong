@@ -15,15 +15,24 @@ import { render, fireEvent, act } from "@testing-library/react";
 import React from "react";
 import ActivityHint from "../components/ActivityHint";
 import {
-  pushActivity, clearActivity, setLiveTask, getActivityItems, getLiveTask,
+  pushActivity,
+  clearActivity,
+  setLiveTask,
+  getActivityItems,
+  getLiveTask,
 } from "../utils/activityCenter";
 import { liveTaskTypeLabel } from "../hooks/useSchemeLiveTask";
 
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
   });
 }
 
@@ -50,7 +59,7 @@ describe("ActivityHint · 空态与最新消息", () => {
     const { container } = render(<ActivityHint />);
     const chip = container.querySelector(".bp-activity-chip");
     expect(chip).toBeTruthy();
-    expect((chip?.textContent || "")).toContain("目录已生成");
+    expect(chip?.textContent || "").toContain("目录已生成");
     // 打开历史浮层
     click(chip);
     expect(document.body.textContent || "").toContain("目录已生成");
@@ -61,8 +70,8 @@ describe("ActivityHint · 空态与最新消息", () => {
     pushActivity("warning", "存在截断提示", "项目资料");
     const { container } = render(<ActivityHint />);
     click(container.querySelector(".bp-activity-chip"));
-    const clearBtn = Array.from(document.body.querySelectorAll(".ant-btn")).find(
-      (b) => (b.textContent || "").includes("清空"),
+    const clearBtn = Array.from(document.body.querySelectorAll(".ant-btn")).find((b) =>
+      (b.textContent || "").includes("清空"),
     ) as HTMLButtonElement;
     expect(clearBtn).toBeTruthy();
     click(clearBtn);
@@ -73,8 +82,11 @@ describe("ActivityHint · 空态与最新消息", () => {
 describe("ActivityHint · 后台任务提示", () => {
   it("写入 liveTask：顶部展示「检测到后台「正文生成」任务仍在进行」", () => {
     setLiveTask({
-      id: "t1", task_type: "content_generation", status: "running",
-      progress: 0.42, scheme_id: "s1",
+      id: "t1",
+      task_type: "content_generation",
+      status: "running",
+      progress: 0.42,
+      scheme_id: "s1",
     });
     const { container } = render(<ActivityHint />);
     expect(container.textContent || "").toContain("检测到后台");
@@ -84,8 +96,11 @@ describe("ActivityHint · 后台任务提示", () => {
 
   it("liveTask 已暂停：展示「已暂停」而非「仍在进行」", () => {
     setLiveTask({
-      id: "t1", task_type: "outline_generation", status: "paused",
-      progress: 0.2, scheme_id: "s1",
+      id: "t1",
+      task_type: "outline_generation",
+      status: "paused",
+      progress: 0.2,
+      scheme_id: "s1",
     });
     const { container } = render(<ActivityHint />);
     expect(container.textContent || "").toContain("已暂停");

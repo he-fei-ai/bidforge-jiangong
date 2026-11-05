@@ -19,17 +19,29 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Alert, App, Button, Checkbox, Descriptions, Divider, Empty, Modal, Space, Spin, Tag,
+  Alert,
+  App,
+  Button,
+  Checkbox,
+  Descriptions,
+  Divider,
+  Empty,
+  Modal,
+  Space,
+  Spin,
+  Tag,
   Typography,
 } from "antd";
-import {
-  CheckCircleOutlined, CloseCircleOutlined, ThunderboltOutlined,
-} from "@ant-design/icons";
+import { CheckCircleOutlined, CloseCircleOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { reviewAutoFixApi } from "../../api";
 import { useAntdMessageHub } from "../../utils/activityCenter";
 import type {
-  AutoFixCollectResult, AutoFixConfirmResult, AutoFixStageItem, AutoFixStageResult,
-  AutoFixTarget, PreflightFinding,
+  AutoFixCollectResult,
+  AutoFixConfirmResult,
+  AutoFixStageItem,
+  AutoFixStageResult,
+  AutoFixTarget,
+  PreflightFinding,
 } from "../../types/audit";
 
 const { Text, Paragraph } = Typography;
@@ -58,7 +70,9 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [doneInfo, setDoneInfo] = useState<{
-    accepted: number; sections: number; snapshotId: string;
+    accepted: number;
+    sections: number;
+    snapshotId: string;
     // ✅ R55 F3：/confirm 回传的失效跳过明细（R39 起后端就有，此前前端整段丢弃）
     skipped: NonNullable<AutoFixConfirmResult["skipped"]>;
   } | null>(null);
@@ -93,8 +107,12 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
   }, [schemeId, msg]);
 
   // 打开弹窗即触发收集（只读、不落库）
-  const onOpen = useCallback(() => { void collect(); }, [collect]);
-  useEffect(() => { if (open) onOpen(); }, [open, onOpen]);
+  const onOpen = useCallback(() => {
+    void collect();
+  }, [collect]);
+  useEffect(() => {
+    if (open) onOpen();
+  }, [open, onOpen]);
 
   // 步骤 2：批量暂存改写 + 校验（不落库）
   const stage = useCallback(async () => {
@@ -115,7 +133,9 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
       //    「一键修复全部阻断项」把所有章节都处理了）。上限本身是护栏，
       //    不可见才是缺陷 —— 现 toast + 清单上方 Alert 双层提示。
       if ((s.skipped_sections?.length ?? 0) > 0) {
-        msg.warning(`${s.skipped_sections!.length} 个章节因单次修复上限本轮未处理，可再次点击「一键修复」处理剩余章节`);
+        msg.warning(
+          `${s.skipped_sections!.length} 个章节因单次修复上限本轮未处理，可再次点击「一键修复」处理剩余章节`,
+        );
       }
       setPhase("reviewing");
     } catch (e: unknown) {
@@ -153,58 +173,67 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
   }, [allAccepted, repairedItems]);
 
   // 步骤 3：确认（接受选中）/ 拒绝（全部丢弃）
-  const doConfirm = useCallback(async (accept: boolean) => {
-    if (!stageData?.batch_id) return;
-    setBusy(true);
-    try {
-      const payload: {
-        batch_id: string; accept_all?: boolean; accept?: string[]; reject?: string[];
-      } = { batch_id: stageData.batch_id };
-      if (accept) {
-        if (acceptedKeys.length === 0) {
-          msg.warning("请至少勾选一项要接受修复的问题");
-          setBusy(false);
+  const doConfirm = useCallback(
+    async (accept: boolean) => {
+      if (!stageData?.batch_id) return;
+      setBusy(true);
+      try {
+        const payload: {
+          batch_id: string;
+          accept_all?: boolean;
+          accept?: string[];
+          reject?: string[];
+        } = { batch_id: stageData.batch_id };
+        if (accept) {
+          if (acceptedKeys.length === 0) {
+            msg.warning("请至少勾选一项要接受修复的问题");
+            setBusy(false);
+            return;
+          }
+          // 接受全部已勾选 → 若全选则走 accept_all（后端直接取末条合并，零额外 AI）
+          if (allAccepted) payload.accept_all = true;
+          else payload.accept = acceptedKeys;
+        } else {
+          payload.reject = repairedItems.map((i) => itemKey(i));
+        }
+        const { data } = await reviewAutoFixApi.confirm(schemeId, payload);
+        if (data.status === "rejected") {
+          msg.info("已拒绝，正文未改动");
+          close();
           return;
         }
-        // 接受全部已勾选 → 若全选则走 accept_all（后端直接取末条合并，零额外 AI）
-        if (allAccepted) payload.accept_all = true;
-        else payload.accept = acceptedKeys;
-      } else {
-        payload.reject = repairedItems.map((i) => itemKey(i));
+        // ✅ R55 F3：失效跳过的条目必须可见 —— 后端 R39 起回传 skipped（链式重算时
+        //    finding 已不在当前总检结果 → 被丢弃未修），旧前端整段丢弃 → 「以为修了、
+        //    实际没修」的静默在 UI 层复发。
+        const skippedList: NonNullable<AutoFixConfirmResult["skipped"]> = Array.isArray(
+          data.skipped,
+        )
+          ? data.skipped
+          : [];
+        setDoneInfo({
+          accepted: data.accepted,
+          sections: data.repaired_sections,
+          snapshotId: data.snapshot_id || "",
+          skipped: skippedList,
+        });
+        setPhase("done");
+        msg.success(`已修复 ${data.accepted} 项问题，涉及 ${data.repaired_sections} 个章节`);
+        if (skippedList.length > 0) {
+          msg.warning(`其中 ${skippedList.length} 项在确认时已失效被跳过（未修复），详见结果提示`);
+        }
+        onFixed?.(data.snapshot_id || "");
+      } catch (e: unknown) {
+        const err = e as { message?: string };
+        msg.error(`确认失败：${err?.message || err}`);
+      } finally {
+        setBusy(false);
       }
-      const { data } = await reviewAutoFixApi.confirm(schemeId, payload);
-      if (data.status === "rejected") {
-        msg.info("已拒绝，正文未改动");
-        close();
-        return;
-      }
-      // ✅ R55 F3：失效跳过的条目必须可见 —— 后端 R39 起回传 skipped（链式重算时
-      //    finding 已不在当前总检结果 → 被丢弃未修），旧前端整段丢弃 → 「以为修了、
-      //    实际没修」的静默在 UI 层复发。
-      const skippedList: NonNullable<AutoFixConfirmResult["skipped"]> =
-        Array.isArray(data.skipped) ? data.skipped : [];
-      setDoneInfo({
-        accepted: data.accepted, sections: data.repaired_sections,
-        snapshotId: data.snapshot_id || "",
-        skipped: skippedList,
-      });
-      setPhase("done");
-      msg.success(`已修复 ${data.accepted} 项问题，涉及 ${data.repaired_sections} 个章节`);
-      if (skippedList.length > 0) {
-        msg.warning(`其中 ${skippedList.length} 项在确认时已失效被跳过（未修复），详见结果提示`);
-      }
-      onFixed?.(data.snapshot_id || "");
-    } catch (e: unknown) {
-      const err = e as { message?: string };
-      msg.error(`确认失败：${err?.message || err}`);
-    } finally {
-      setBusy(false);
-    }
-  }, [schemeId, stageData, acceptedKeys, allAccepted, repairedItems, msg, onFixed, close]);
+    },
+    [schemeId, stageData, acceptedKeys, allAccepted, repairedItems, msg, onFixed, close],
+  );
 
   const collectFixable = collectData?.items || [];
-  const unsupportedCount = collectFixable.filter(
-    (f) => f.autofix?.fixable === false).length;
+  const unsupportedCount = collectFixable.filter((f) => f.autofix?.fixable === false).length;
 
   return (
     <Modal
@@ -226,25 +255,28 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
         </Button>,
         phase === "collecting" && (
           <Button
-            key="stage" type="primary" icon={<ThunderboltOutlined />}
-            loading={busy} onClick={stage}
+            key="stage"
+            type="primary"
+            icon={<ThunderboltOutlined />}
+            loading={busy}
+            onClick={stage}
             disabled={collectFixable.length === 0}
           >
             生成修复预览
           </Button>
         ),
         phase === "reviewing" && (
-          <Button
-            key="reject" onClick={() => doConfirm(false)}
-            loading={busy}
-          >
+          <Button key="reject" onClick={() => doConfirm(false)} loading={busy}>
             拒绝全部
           </Button>
         ),
         phase === "reviewing" && (
           <Button
-            key="confirm" type="primary" icon={<CheckCircleOutlined />}
-            loading={busy} onClick={() => doConfirm(true)}
+            key="confirm"
+            type="primary"
+            icon={<CheckCircleOutlined />}
+            loading={busy}
+            onClick={() => doConfirm(true)}
             disabled={acceptedKeys.length === 0}
           >
             确认修复（接受选中 {acceptedKeys.length}）
@@ -264,12 +296,16 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
       {phase === "collecting" && !busy && collectData && (
         <div>
           {collectFixable.length === 0 ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description="当前没有可自动修复的阻断项（阻断项均须人工处理，或已无阻断项）" />
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description="当前没有可自动修复的阻断项（阻断项均须人工处理，或已无阻断项）"
+            />
           ) : (
             <>
               <Alert
-                type="info" showIcon style={{ marginBottom: 8 }}
+                type="info"
+                showIcon
+                style={{ marginBottom: 8 }}
                 message={"共 " + collectFixable.length + " 项阻断问题支持自动修复"}
                 description="点击下方「生成修复预览」将逐条做最小必要改写并展示前后对比，你可逐项决定是否接受。"
               />
@@ -278,26 +314,45 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
                   <div
                     key={`${f.rule_id}-${i}`}
                     style={{
-                      border: "1px solid #f0f0f0", borderRadius: 6,
-                      padding: "6px 8px", marginBottom: 6, background: "#fafafa",
+                      border: "1px solid #f0f0f0",
+                      borderRadius: 6,
+                      padding: "6px 8px",
+                      marginBottom: 6,
+                      background: "#fafafa",
                     }}
                   >
                     <Space size={4} wrap>
-                      <Tag color="blue" style={{ marginRight: 0 }}>{f.rule_id}</Tag>
-                      <Text strong style={{ fontSize: 12 }}>{f.title}</Text>
-                      <Tag color="volcano" style={{ marginRight: 0, fontSize: 11 }}>阻断</Tag>
-                      {f.autofix?.mode === "auto"
-                        ? <Tag color="green" style={{ marginRight: 0, fontSize: 11 }}>程序化</Tag>
-                        : <Tag color="orange" style={{ marginRight: 0, fontSize: 11 }}>AI</Tag>}
+                      <Tag color="blue" style={{ marginRight: 0 }}>
+                        {f.rule_id}
+                      </Tag>
+                      <Text strong style={{ fontSize: 12 }}>
+                        {f.title}
+                      </Text>
+                      <Tag color="volcano" style={{ marginRight: 0, fontSize: 11 }}>
+                        阻断
+                      </Tag>
+                      {f.autofix?.mode === "auto" ? (
+                        <Tag color="green" style={{ marginRight: 0, fontSize: 11 }}>
+                          程序化
+                        </Tag>
+                      ) : (
+                        <Tag color="orange" style={{ marginRight: 0, fontSize: 11 }}>
+                          AI
+                        </Tag>
+                      )}
                     </Space>
-                    <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>
-                      {f.detail}
-                    </div>
+                    <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>{f.detail}</div>
                     {Array.isArray(f.targets) && f.targets.length > 0 && (
                       <Text type="secondary" style={{ fontSize: 11 }}>
-                        定位：{f.targets.map((t) =>
-                          `${t.section_title || "（未命名）"} 第 ${t.line} 行` +
-                          (t.sentence_idx ? `（第 ${t.sentence_idx}/${t.sentence_total} 句）` : ""))
+                        定位：
+                        {f.targets
+                          .map(
+                            (t) =>
+                              `${t.section_title || "（未命名）"} 第 ${t.line} 行` +
+                              (t.sentence_idx
+                                ? `（第 ${t.sentence_idx}/${t.sentence_total} 句）`
+                                : ""),
+                          )
                           .join("；")}
                       </Text>
                     )}
@@ -321,12 +376,17 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
           </Space>
           {(stageData.skipped_sections?.length ?? 0) > 0 && (
             <Alert
-              type="warning" showIcon style={{ marginBottom: 6 }}
+              type="warning"
+              showIcon
+              style={{ marginBottom: 6 }}
               message={`受单次修复章节上限${stageData.max_sections ? `（${stageData.max_sections} 章）` : ""}约束，${stageData.skipped_sections!.length} 个章节本轮未处理`}
               description={
-                stageData.skipped_sections!.map((x) =>
-                  `「${x.section_title || x.section_id.slice(0, 8)}」${x.finding_count} 项`).join("；") +
-                  " —— 确认本批后可再次点击「一键修复」处理剩余章节。"
+                stageData
+                  .skipped_sections!.map(
+                    (x) =>
+                      `「${x.section_title || x.section_id.slice(0, 8)}」${x.finding_count} 项`,
+                  )
+                  .join("；") + " —— 确认本批后可再次点击「一键修复」处理剩余章节。"
               }
             />
           )}
@@ -339,7 +399,9 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
                   key={key}
                   style={{
                     border: `1px solid ${fixable ? "#b7eb8f" : "#f0f0f0"}`,
-                    borderRadius: 6, padding: "6px 8px", marginBottom: 6,
+                    borderRadius: 6,
+                    padding: "6px 8px",
+                    marginBottom: 6,
                   }}
                 >
                   <Space size={4} wrap style={{ marginBottom: 4 }}>
@@ -352,15 +414,25 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
                     ) : (
                       <CloseCircleOutlined style={{ color: "#bfbfbf" }} />
                     )}
-                    <Tag color="blue" style={{ marginRight: 0, fontSize: 11 }}>{it.rule_id}</Tag>
-                    <Text strong style={{ fontSize: 12 }}>{it.section_title || "（未命名章节）"}</Text>
-                    {it.status === "repaired"
-                      ? <Tag color="green" style={{ marginRight: 0, fontSize: 11 }}>可修复</Tag>
-                      : it.status === "unsupported"
-                        ? <Tag style={{ marginRight: 0, fontSize: 11 }}>需人工</Tag>
-                        : it.status === "not_located"
-                          ? <Tag style={{ marginRight: 0, fontSize: 11 }}>未定位</Tag>
-                          : <Tag color="red" style={{ marginRight: 0, fontSize: 11 }}>失败</Tag>}
+                    <Tag color="blue" style={{ marginRight: 0, fontSize: 11 }}>
+                      {it.rule_id}
+                    </Tag>
+                    <Text strong style={{ fontSize: 12 }}>
+                      {it.section_title || "（未命名章节）"}
+                    </Text>
+                    {it.status === "repaired" ? (
+                      <Tag color="green" style={{ marginRight: 0, fontSize: 11 }}>
+                        可修复
+                      </Tag>
+                    ) : it.status === "unsupported" ? (
+                      <Tag style={{ marginRight: 0, fontSize: 11 }}>需人工</Tag>
+                    ) : it.status === "not_located" ? (
+                      <Tag style={{ marginRight: 0, fontSize: 11 }}>未定位</Tag>
+                    ) : (
+                      <Tag color="red" style={{ marginRight: 0, fontSize: 11 }}>
+                        失败
+                      </Tag>
+                    )}
                   </Space>
                   {!fixable && (
                     <div style={{ fontSize: 11, color: "#cf1322", marginLeft: 4 }}>
@@ -370,15 +442,33 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
                   {fixable && (
                     <div style={{ fontSize: 11, marginLeft: 4 }}>
                       <Text type="secondary">修复前：</Text>
-                      <pre style={{
-                        margin: "2px 0", fontSize: 11, whiteSpace: "pre-wrap",
-                        wordBreak: "break-all", color: "#999", maxHeight: 100, overflowY: "auto",
-                      }}>{it.before}</pre>
+                      <pre
+                        style={{
+                          margin: "2px 0",
+                          fontSize: 11,
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-all",
+                          color: "#999",
+                          maxHeight: 100,
+                          overflowY: "auto",
+                        }}
+                      >
+                        {it.before}
+                      </pre>
                       <Text type="secondary">修复后：</Text>
-                      <pre style={{
-                        margin: "2px 0 0", fontSize: 11, whiteSpace: "pre-wrap",
-                        wordBreak: "break-all", color: "#333", maxHeight: 100, overflowY: "auto",
-                      }}>{it.after}</pre>
+                      <pre
+                        style={{
+                          margin: "2px 0 0",
+                          fontSize: 11,
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-all",
+                          color: "#333",
+                          maxHeight: 100,
+                          overflowY: "auto",
+                        }}
+                      >
+                        {it.after}
+                      </pre>
                       {it.sentence_idx > 0 && (
                         <Text type="secondary" style={{ fontSize: 11 }}>
                           定位：第 {it.sentence_idx}/{it.sentence_total} 句
@@ -396,21 +486,26 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
       {phase === "done" && doneInfo && (
         <>
           <Alert
-            type="success" showIcon
-            message={"已修复 " + doneInfo.accepted + " 项问题，涉及 " + doneInfo.sections + " 个章节"}
+            type="success"
+            showIcon
+            message={
+              "已修复 " + doneInfo.accepted + " 项问题，涉及 " + doneInfo.sections + " 个章节"
+            }
             description="正文已变更：相关章节审核结论已自动退回「待审核」，请复核后重新送审；导出缓存与总检结论亦已失效。"
           />
           {doneInfo.skipped.length > 0 && (
             <Alert
-              type="warning" showIcon style={{ marginTop: 8 }}
+              type="warning"
+              showIcon
+              style={{ marginTop: 8 }}
               message={`${doneInfo.skipped.length} 项问题在确认时已失效，本轮未修复`}
               description={
                 <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
                   {doneInfo.skipped.map((sk, i) => (
                     <li key={`${sk.rule_id}-${sk.section_id || ""}-${i}`}>
                       {sk.rule_id}
-                      {sk.section_id ? `（章节 ${sk.section_id.slice(0, 8)}）` : ""}
-                      ：{sk.detail || "该问题已不在当前检查结果中，请重新总检"}
+                      {sk.section_id ? `（章节 ${sk.section_id.slice(0, 8)}）` : ""}：
+                      {sk.detail || "该问题已不在当前检查结果中，请重新总检"}
                     </li>
                   ))}
                 </ul>
@@ -418,7 +513,9 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
             />
           )}
           <Alert
-            type="warning" showIcon style={{ marginTop: 8 }}
+            type="warning"
+            showIcon
+            style={{ marginTop: 8 }}
             message="如修复结果不理想，可在「审核与预检」页对该问题使用单条「自动修复」弹窗的回滚，或重新总检后再次修复。"
           />
         </>

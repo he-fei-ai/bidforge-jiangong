@@ -1,9 +1,42 @@
 import { useEffect, useRef, useState } from "react";
-import {App, Card, Button, List, Tag, Modal, Form, Input, Select, Space,
-  message, Descriptions, Tabs, Typography, Empty, Tree, Spin,
-  Drawer, Table, Popconfirm, Tooltip, Alert,} from "antd";
+import {
+  App,
+  Card,
+  Button,
+  List,
+  Tag,
+  Modal,
+  Form,
+  Input,
+  InputNumber,
+  Select,
+  Space,
+  message,
+  Descriptions,
+  Tabs,
+  Typography,
+  Empty,
+  Tree,
+  Spin,
+  Drawer,
+  Table,
+  Popconfirm,
+  Tooltip,
+  Alert,
+} from "antd";
 import type { TreeDataNode } from "antd";
-import { PlusOutlined, CopyOutlined, InboxOutlined, SearchOutlined, DeleteOutlined, EditOutlined, BookOutlined, ProjectOutlined, FileTextOutlined, ApiOutlined } from "@ant-design/icons";
+import {
+  PlusOutlined,
+  CopyOutlined,
+  InboxOutlined,
+  SearchOutlined,
+  DeleteOutlined,
+  EditOutlined,
+  BookOutlined,
+  ProjectOutlined,
+  FileTextOutlined,
+  ApiOutlined,
+} from "@ant-design/icons";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { projectsApi, schemesApi, schemeCatalogApi, knowledgeApi } from "../api";
 import type { JsonPayload } from "../types/api";
@@ -63,10 +96,56 @@ interface KnowledgeItem {
 }
 
 const SCHEME_TYPES = [
-  "深基坑", "高支模", "脚手架", "塔吊", "施工电梯", "临时用电",
-  "消防", "安全文明", "绿色施工", "质量创优", "进度计划",
-  "应急预案", "施工组织设计", "钢结构吊装", "降水", "土方开挖",
-  "模板工程", "混凝土工程", "有限空间",
+  "深基坑",
+  "高支模",
+  "脚手架",
+  "塔吊",
+  "施工电梯",
+  "临时用电",
+  "消防",
+  "安全文明",
+  "绿色施工",
+  "质量创优",
+  "进度计划",
+  "应急预案",
+  "施工组织设计",
+  "钢结构吊装",
+  "降水",
+  "土方开挖",
+  "模板工程",
+  "混凝土工程",
+  "有限空间",
+];
+
+// ✅ R174 F3（2026-11-03）：方案名称必填 + 去空格后非空。
+// 旧缺陷：「从清单选择」路径 name 规则为 required:!selectedCatalogId，
+// 名称留空 / 纯空格都能提交落库，侧栏树出现空白条目。后端 models.py 的
+// name: str 无非空校验（由后端批次负责），前端必须自行兜底。
+const SCHEME_NAME_RULES = [
+  { required: true, whitespace: true, message: "请输入方案名称（不能为空或纯空格）" },
+];
+
+// ✅ R174 F4（2026-11-03）：目标字数范围校验。
+// 旧缺陷：Input type=number 无 min/max/rule，-1/0/999999999 直接落库，
+// 字数预算逻辑失真。后端 word_budget: int 无范围（由后端批次负责），
+// 前端按审计建议取 1,000 ~ 1,000,000。
+export const WORD_BUDGET_MIN = 1000;
+export const WORD_BUDGET_MAX = 1000000;
+export const WORD_BUDGET_RULES = [
+  {
+    validator: (_rule: unknown, v: unknown) => {
+      if (v === undefined || v === null || v === "") return Promise.resolve();
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < WORD_BUDGET_MIN || n > WORD_BUDGET_MAX) {
+        return Promise.reject(
+          new Error(
+            `目标字数需在 ${WORD_BUDGET_MIN.toLocaleString()} ~ ${WORD_BUDGET_MAX.toLocaleString()} 之间`,
+          ),
+        );
+      }
+      return Promise.resolve();
+    },
+  },
 ];
 
 export default function ProjectDetailPage() {
@@ -136,8 +215,8 @@ export default function ProjectDetailPage() {
     try {
       const { data } = await schemeCatalogApi.get(libraryId);
       if (seq !== previewSeqRef.current) return; // 快速切换目录，丢弃旧响应
-      const outline = typeof data.outline_json === "string"
-        ? JSON.parse(data.outline_json) : data.outline_json;
+      const outline =
+        typeof data.outline_json === "string" ? JSON.parse(data.outline_json) : data.outline_json;
       setOutlinePreview(outline || []);
     } catch (e: unknown) {
       const err = e as { message?: string };
@@ -150,7 +229,9 @@ export default function ProjectDetailPage() {
     }
   };
 
-  useEffect(() => { load(); }, [id]);
+  useEffect(() => {
+    load();
+  }, [id]);
 
   // ✅ R91（2026-10-17）：左侧项目树占位项「进入项目新建方案 / 暂无方案」改为
   //    可点后，带 ?create=1 进入本页时直接打开新建方案弹窗（进入编辑状态），
@@ -174,6 +255,8 @@ export default function ProjectDetailPage() {
     try {
       const values = await form.validateFields();
       setSubmitting(true);
+      // ✅ R174 F3：提交前去首尾空格，避免「 」这类名称落库
+      if (typeof values.name === "string") values.name = values.name.trim();
       const payload: JsonPayload = { ...values };
       if (selectedCatalogId) {
         payload.outline_source = "library";
@@ -187,8 +270,7 @@ export default function ProjectDetailPage() {
       //    （旧实现创建完方案章节树为空，用户进工作台只能看到空态，不知从何下手）。
       const applied = data?.applied_library;
       if (applied) {
-        msg.success(
-          `方案创建成功，已套用「${applied.name}」共 ${applied.count} 个章节`);
+        msg.success(`方案创建成功，已套用「${applied.name}」共 ${applied.count} 个章节`);
         modal.confirm({
           title: "目录已套用",
           content: `已按「${applied.name}」（${applied.version}）生成 ${applied.count} 个章节，是否立即进入编制？`,
@@ -259,6 +341,8 @@ export default function ProjectDetailPage() {
     try {
       const values = await editForm.validateFields();
       setEditSubmitting(true);
+      // ✅ R174 F3：提交前去首尾空格，与新建口径一致
+      if (typeof values.name === "string") values.name = values.name.trim();
       await schemesApi.update(id!, editing!.id, values);
       msg.success("方案已更新");
       setEditOpen(false);
@@ -281,7 +365,9 @@ export default function ProjectDetailPage() {
       icon: <DeleteOutlined style={{ color: "#ff4d4f" }} />,
       content: (
         <div>
-          <p>确定删除「{name}」？该操作<b>不可恢复</b>，将一并删除：</p>
+          <p>
+            确定删除「{name}」？该操作<b>不可恢复</b>，将一并删除：
+          </p>
           <ul style={{ paddingLeft: 20, margin: "4px 0" }}>
             <li>全部章节正文与目录</li>
             <li>全局事实（含未确认的模拟值）</li>
@@ -321,9 +407,13 @@ export default function ProjectDetailPage() {
   };
 
   const statusColor: Record<string, string> = {
-    "草稿": "default", "目录生成中": "processing", "目录已确认": "blue",
-    "正文生成中": "processing", "审核中": "warning", "已完成": "success",
-    "已归档": "default",
+    草稿: "default",
+    目录生成中: "processing",
+    目录已确认: "blue",
+    正文生成中: "processing",
+    审核中: "warning",
+    已完成: "success",
+    已归档: "default",
   };
 
   // ===== ✅ 知识库 / 素材库（§3.9）：项目级条目，AI 生成目录/正文时自动注入 =====
@@ -358,7 +448,11 @@ export default function ProjectDetailPage() {
     setKbEditing(item);
     setKbModalOpen(true);
     if (item) {
-      kbForm.setFieldsValue({ name: item.name, usage_hint: item.usage_hint, content: item.content });
+      kbForm.setFieldsValue({
+        name: item.name,
+        usage_hint: item.usage_hint,
+        content: item.content,
+      });
     } else {
       kbForm.resetFields();
     }
@@ -419,7 +513,12 @@ export default function ProjectDetailPage() {
 
   const stats: StatItem[] = [
     { icon: <ProjectOutlined />, label: "关联方案", value: schemes.length, color: "#00D4FF" },
-    { icon: <FileTextOutlined />, label: "文档数", value: catalogData ? Object.values(catalogData).reduce((a, b) => a + b.length, 0) : 0, color: "#00C853" },
+    {
+      icon: <FileTextOutlined />,
+      label: "文档数",
+      value: catalogData ? Object.values(catalogData).reduce((a, b) => a + b.length, 0) : 0,
+      color: "#00C853",
+    },
     { icon: <BookOutlined />, label: "知识库", value: kbItems?.length ?? 0, color: "#FFB800" },
   ];
 
@@ -429,341 +528,454 @@ export default function ProjectDetailPage() {
         title={project?.name || "项目详情"}
         subtitle="BLUEPRINT · PROJECT DETAIL"
         description={project?.description || "管理项目下所有专项方案、知识库与资料文档"}
-        accent={<span style={{ fontSize: 12, color: "rgba(255,255,255,0.65)" }}>
-          {project?.engineering_type && <Tag color="blue">{project.engineering_type}</Tag>}
-        </span>}
+        accent={
+          <span style={{ fontSize: 12, color: "rgba(255,255,255,0.65)" }}>
+            {project?.engineering_type && <Tag color="blue">{project.engineering_type}</Tag>}
+          </span>
+        }
       />
       <StatCards items={stats} />
-      <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, overflow: "auto" }}>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          flex: 1,
+          minHeight: 0,
+          overflow: "auto",
+        }}
+      >
         <Descriptions
           title={project?.name || "项目详情"}
-        bordered
-        column={2}
-        size="small"
-        style={{ marginBottom: 16 }}
-      >
-        <Descriptions.Item label="工程类型">{project?.engineering_type || "-"}</Descriptions.Item>
-        <Descriptions.Item label="项目地点">{project?.location || "-"}</Descriptions.Item>
-        <Descriptions.Item label="建设单位">{project?.client_name || "-"}</Descriptions.Item>
-        <Descriptions.Item label="施工单位">{project?.contractor_name || "-"}</Descriptions.Item>
-        <Descriptions.Item label="项目周期">{project?.project_period || "-"}</Descriptions.Item>
-        <Descriptions.Item label="项目描述">{project?.description || "-"}</Descriptions.Item>
-      </Descriptions>
-
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
-        <Title level={4}>专项方案列表</Title>
-        <Space>
-          <Button icon={<BookOutlined />} onClick={openKbDrawer}>
-            知识库
-          </Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>
-            新建方案
-          </Button>
-        </Space>
-      </div>
-
-      {schemes.length === 0 && !loading ? (
-        <Empty description="暂无方案，请新建" />
-      ) : (
-        <List
-          grid={{ gutter: 16, column: 3 }}
-          dataSource={schemes}
-          loading={loading}
-          renderItem={(s) => (
-            <List.Item>
-              <Card
-                hoverable
-                onClick={() => navigate(`/scheme/${s.id}`)}
-                actions={[
-                  <EditOutlined key="edit" onClick={(e) => {
-                    e.stopPropagation();
-                    openEdit(s);
-                  }} />,
-                  <CopyOutlined key="copy" onClick={(e) => {
-                    e.stopPropagation();
-                    handleDuplicate(s.id);
-                  }} />,
-                  <InboxOutlined key="archive" onClick={(e) => {
-                    e.stopPropagation();
-                    handleArchive(s.id);
-                  }} />,
-                  <DeleteOutlined key="delete" style={{ color: "#ff4d4f" }} onClick={(e) => {
-                    e.stopPropagation();
-                    handleDeleteScheme(s.id, s.name);
-                  }} />,
-                ]}
-              >
-                <Card.Meta
-                  title={s.name}
-                  description={
-                    <Space direction="vertical" size={4}>
-                      <Space>
-                        {s.type && <Tag color="blue">{s.type}</Tag>}
-                        <Tag color={statusColor[s.status ?? ""] || "default"}>{s.status}</Tag>
-                      </Space>
-                      <span>{s.section_count || 0} 章节 · {s.word_count || 0} 字</span>
-                      <span>目录来源：{s.outline_source || "-"}</span>
-                    </Space>
-                  }
-                />
-              </Card>
-            </List.Item>
-          )}
-        />
-      )}
-
-      <Modal
-        title="新建专项方案"
-        open={modalOpen}
-        forceRender
-        confirmLoading={submitting}
-        okButtonProps={{ disabled: submitting }}
-        onOk={handleCreateScheme}
-        onCancel={() => {
-          setModalOpen(false);
-          form.resetFields();
-          setSelectedCatalogId("");
-          setSelectedCatalogName("");
-          setOutlinePreview([]);
-          setCatalogKeyword("");
-        }}
-        width={780}
-        okText="创建方案"
-        cancelText="取消"
-      >
-        <Tabs
-          items={[
-            {
-              key: "manual",
-              // ✅ antd Tabs 默认只渲染 active 面板，form 实例在非 active 时无 Form DOM
-              // → 控制台报 "useForm not connected"。forceRender 让手动填写面板始终挂载。
-              forceRender: true,
-              label: "手动填写",
-              children: (
-                <Form form={form} layout="vertical">
-                  <Form.Item name="name" label="方案名称" rules={[{ required: !selectedCatalogId }]}>
-                    <Input placeholder="如：深基坑专项施工方案" />
-                  </Form.Item>
-                  <Form.Item name="type" label="方案类型">
-                    <Select options={SCHEME_TYPES.map(t => ({ label: t, value: t }))} />
-                  </Form.Item>
-                  <Form.Item name="profession" label="专业">
-                    <Select options={["土建", "机电", "钢结构", "安全", "绿色施工"].map(t => ({ label: t, value: t }))} />
-                  </Form.Item>
-                  <Form.Item name="word_budget" label="目标字数" initialValue={30000}>
-                    <Input type="number" />
-                  </Form.Item>
-                  <Form.Item name="outline_source" label="目录来源" initialValue="ai">
-                    <Select options={[
-                      { label: "AI 生成", value: "ai" },
-                      { label: "目录库调用", value: "library" },
-                      { label: "上传目录识别", value: "upload" },
-                      { label: "混合生成", value: "mixed" },
-                    ]} />
-                  </Form.Item>
-                </Form>
-              ),
-            },
-            {
-              key: "catalog",
-              label: "从清单选择",
-              children: (
-                <div>
-                  <Space style={{ marginBottom: 12, width: "100%" }}>
-                    <Input
-                      placeholder="搜索方案名称..."
-                      value={catalogKeyword}
-                      onChange={(e) => setCatalogKeyword(e.target.value)}
-                      onPressEnter={handleCatalogSearch}
-                      style={{ width: 300 }}
-                      prefix={<SearchOutlined />}
-                    />
-                    <Button onClick={handleCatalogSearch}>搜索</Button>
-                    <Button onClick={() => { setCatalogKeyword(""); loadCatalog(); }}>重置</Button>
-                  </Space>
-
-                  {selectedCatalogId && (
-                    <div style={{
-                      marginBottom: 12, padding: "8px 12px",
-                      background: "rgba(24,144,255,0.1)", borderRadius: 6,
-                    }}>
-                      <Space>
-                        <Tag color="blue">已选择</Tag>
-                        <span style={{ fontWeight: 500 }}>{selectedCatalogName}</span>
-                        <Button size="small" type="link" onClick={() => {
-                          setSelectedCatalogId("");
-                          setSelectedCatalogName("");
-                          setOutlinePreview([]);
-                          form.setFieldValue("name", "");
-                        }}>取消选择</Button>
-                      </Space>
-                    </div>
-                  )}
-
-                  <Spin spinning={catalogLoading}>
-                    <div style={{ maxHeight: 320, overflowY: "auto", paddingRight: 8 }}>
-                      {Object.entries(catalogData).map(([category, items]) => (
-                        items.length > 0 && (
-                          <div key={category} style={{ marginBottom: 12 }}>
-                            <div style={{
-                              fontWeight: 600, fontSize: 13, marginBottom: 6,
-                              color: "rgba(255,255,255,0.85)",
-                              borderBottom: "1px solid rgba(255,255,255,0.15)",
-                              paddingBottom: 4,
-                            }}>
-                              {category} ({items.length})
-                            </div>
-                            <List
-                              size="small"
-                              dataSource={items}
-                              renderItem={(item) => (
-                                <List.Item
-                                  style={{
-                                    padding: "4px 8px",
-                                    cursor: "pointer",
-                                    background: selectedCatalogId === item.id
-                                      ? "rgba(24,144,255,0.15)" : "transparent",
-                                    borderRadius: 4,
-                                  }}
-                                  onClick={() => handleSelectCatalog(item.id, item.name)}
-                                >
-                                  <Space>
-                                    <span>{item.name.replace("标准目录", "")}</span>
-                                    {(item.ref_count ?? 0) > 0 && (
-                                      <Tag style={{ fontSize: 11 }}>引用{item.ref_count}</Tag>
-                                    )}
-                                  </Space>
-                                </List.Item>
-                              )}
-                            />
-                          </div>
-                        )
-                      ))}
-                    </div>
-                  </Spin>
-
-                  {selectedCatalogId && outlinePreview.length > 0 && (
-                    <div style={{ marginTop: 12 }}>
-                      <div style={{ fontWeight: 600, marginBottom: 6 }}>标准目录预览：</div>
-                      <Spin spinning={outlineLoading}>
-                        <Tree
-                          treeData={outlineToTreeData(outlinePreview)}
-                          defaultExpandAll
-                          selectable={false}
-                          style={{ maxHeight: 200, overflowY: "auto" }}
-                        />
-                      </Spin>
-                    </div>
-                  )}
-                </div>
-              ),
-            },
-          ]}
-        />
-      </Modal>
-
-      {/* 方案编辑：重命名 / 改类型 / 专业 / 目标字数 —— 调用 schemesApi.update */}
-      <Modal
-        title="编辑方案"
-        open={editOpen}
-        forceRender
-        confirmLoading={editSubmitting}
-        okButtonProps={{ disabled: editSubmitting }}
-        onOk={handleUpdateScheme}
-        onCancel={() => { setEditOpen(false); setEditing(null); }}
-        okText="保存"
-        cancelText="取消"
-      >
-        <Form form={editForm} layout="vertical">
-          <Form.Item name="name" label="方案名称" rules={[{ required: true, message: "请输入方案名称" }]}>
-            <Input placeholder="如：深基坑专项施工方案" />
-          </Form.Item>
-          <Form.Item name="type" label="方案类型">
-            <Select options={SCHEME_TYPES.map(t => ({ label: t, value: t }))} />
-          </Form.Item>
-          <Form.Item name="profession" label="专业">
-            <Select options={["土建", "机电", "钢结构", "安全", "绿色施工"].map(t => ({ label: t, value: t }))} />
-          </Form.Item>
-          <Form.Item name="word_budget" label="目标字数">
-            <Input type="number" />
-          </Form.Item>
-        </Form>
-      </Modal>
-
-      {/* 知识库 / 素材库管理（§3.9）：条目会在 AI 生成目录/正文时自动注入 */}
-      <Drawer
-        title="项目知识库"
-        width={640}
-        open={kbOpen}
-        onClose={() => setKbOpen(false)}
-        extra={
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => handleKbEdit(null)}>
-            新增条目
-          </Button>
-        }
-      >
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="知识条目（企业管理制度、工艺要点、常用数据等）会在 AI 生成目录与正文时自动作为素材注入，数据口径仍以「全局事实」为准。"
-        />
-        <Table
-          dataSource={kbItems}
-          rowKey="id"
-          loading={kbLoading}
+          bordered
+          column={2}
           size="small"
-          pagination={false}
-          locale={{ emptyText: <Empty description="暂无知识条目" /> }}
-          columns={[
-            { title: "名称", dataIndex: "name", key: "name", width: 140 },
-            {
-              title: "内容", dataIndex: "content", key: "content",
-              ellipsis: true,
-              render: (v: string, r) => (
-                <Tooltip title={v}>
-                  <span>{r.usage_hint ? <Tag color="blue" style={{ marginRight: 4 }}>{r.usage_hint}</Tag> : null}{v || "-"}</span>
-                </Tooltip>
-              ),
-            },
-            {
-              title: "操作", key: "actions", width: 110,
-              render: (_, r) => (
-                <Space>
-                  <Button size="small" type="link" icon={<EditOutlined />} onClick={() => handleKbEdit(r)} />
-                  <Popconfirm title="确定删除该条目？" onConfirm={() => handleKbDelete(r.id)}>
-                    <Button size="small" type="link" danger icon={<DeleteOutlined />} />
-                  </Popconfirm>
-                </Space>
-              ),
-            },
-          ]}
-        />
-      </Drawer>
+          style={{ marginBottom: 16 }}
+        >
+          <Descriptions.Item label="工程类型">{project?.engineering_type || "-"}</Descriptions.Item>
+          <Descriptions.Item label="项目地点">{project?.location || "-"}</Descriptions.Item>
+          <Descriptions.Item label="建设单位">{project?.client_name || "-"}</Descriptions.Item>
+          <Descriptions.Item label="施工单位">{project?.contractor_name || "-"}</Descriptions.Item>
+          <Descriptions.Item label="项目周期">{project?.project_period || "-"}</Descriptions.Item>
+          <Descriptions.Item label="项目描述">{project?.description || "-"}</Descriptions.Item>
+        </Descriptions>
 
-      {/* 知识条目新增/编辑 */}
-      <Modal
-        title={kbEditing ? "编辑知识条目" : "新增知识条目"}
-        open={kbModalOpen}
-        forceRender
-        confirmLoading={kbSaving}
-        onOk={handleKbSave}
-        onCancel={() => { setKbModalOpen(false); setKbEditing(null); kbForm.resetFields(); }}
-        okText="保存"
-        cancelText="取消"
-      >
-        <Form form={kbForm} layout="vertical">
-          <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入条目名称" }]}>
-            <Input placeholder="如：公司安全交底规范" />
-          </Form.Item>
-          <Form.Item name="usage_hint" label="用途提示（可选）">
-            <Input placeholder="如：安全交底章节引用" />
-          </Form.Item>
-          <Form.Item name="content" label="内容" rules={[{ required: true, message: "请输入内容" }]}>
-            <Input.TextArea rows={8} placeholder="粘贴制度条文、工艺要点或常用数据…" />
-          </Form.Item>
-        </Form>
-      </Modal>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+          <Title level={4}>专项方案列表</Title>
+          <Space>
+            <Button icon={<BookOutlined />} onClick={openKbDrawer}>
+              知识库
+            </Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>
+              新建方案
+            </Button>
+          </Space>
+        </div>
+
+        {schemes.length === 0 && !loading ? (
+          <Empty description="暂无方案，请新建" />
+        ) : (
+          <List
+            grid={{ gutter: 16, column: 3 }}
+            dataSource={schemes}
+            loading={loading}
+            renderItem={(s) => (
+              <List.Item>
+                <Card
+                  hoverable
+                  onClick={() => navigate(`/scheme/${s.id}`)}
+                  actions={[
+                    <EditOutlined
+                      key="edit"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openEdit(s);
+                      }}
+                    />,
+                    <CopyOutlined
+                      key="copy"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDuplicate(s.id);
+                      }}
+                    />,
+                    <InboxOutlined
+                      key="archive"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleArchive(s.id);
+                      }}
+                    />,
+                    <DeleteOutlined
+                      key="delete"
+                      style={{ color: "#ff4d4f" }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteScheme(s.id, s.name);
+                      }}
+                    />,
+                  ]}
+                >
+                  <Card.Meta
+                    title={s.name}
+                    description={
+                      <Space direction="vertical" size={4}>
+                        <Space>
+                          {s.type && <Tag color="blue">{s.type}</Tag>}
+                          <Tag color={statusColor[s.status ?? ""] || "default"}>{s.status}</Tag>
+                        </Space>
+                        <span>
+                          {s.section_count || 0} 章节 · {s.word_count || 0} 字
+                        </span>
+                        <span>目录来源：{s.outline_source || "-"}</span>
+                      </Space>
+                    }
+                  />
+                </Card>
+              </List.Item>
+            )}
+          />
+        )}
+
+        <Modal
+          title="新建专项方案"
+          open={modalOpen}
+          forceRender
+          confirmLoading={submitting}
+          okButtonProps={{ disabled: submitting }}
+          onOk={handleCreateScheme}
+          onCancel={() => {
+            setModalOpen(false);
+            form.resetFields();
+            setSelectedCatalogId("");
+            setSelectedCatalogName("");
+            setOutlinePreview([]);
+            setCatalogKeyword("");
+          }}
+          width={780}
+          okText="创建方案"
+          cancelText="取消"
+        >
+          <Tabs
+            items={[
+              {
+                key: "manual",
+                // ✅ antd Tabs 默认只渲染 active 面板，form 实例在非 active 时无 Form DOM
+                // → 控制台报 "useForm not connected"。forceRender 让手动填写面板始终挂载。
+                forceRender: true,
+                label: "手动填写",
+                children: (
+                  <Form form={form} layout="vertical">
+                    <Form.Item
+                      name="name"
+                      label="方案名称"
+                      rules={SCHEME_NAME_RULES}
+                      data-testid="scheme-name-item"
+                    >
+                      <Input placeholder="如：深基坑专项施工方案" />
+                    </Form.Item>
+                    <Form.Item name="type" label="方案类型">
+                      <Select options={SCHEME_TYPES.map((t) => ({ label: t, value: t }))} />
+                    </Form.Item>
+                    <Form.Item name="profession" label="专业">
+                      <Select
+                        options={["土建", "机电", "钢结构", "安全", "绿色施工"].map((t) => ({
+                          label: t,
+                          value: t,
+                        }))}
+                      />
+                    </Form.Item>
+                    <Form.Item
+                      name="word_budget"
+                      label="目标字数"
+                      initialValue={30000}
+                      rules={WORD_BUDGET_RULES}
+                    >
+                      <InputNumber
+                        min={WORD_BUDGET_MIN}
+                        max={WORD_BUDGET_MAX}
+                        step={1000}
+                        style={{ width: 200 }}
+                        data-testid="word-budget-input"
+                      />
+                    </Form.Item>
+                    <Form.Item name="outline_source" label="目录来源" initialValue="ai">
+                      <Select
+                        options={[
+                          { label: "AI 生成", value: "ai" },
+                          { label: "目录库调用", value: "library" },
+                          { label: "上传目录识别", value: "upload" },
+                          { label: "混合生成", value: "mixed" },
+                        ]}
+                      />
+                    </Form.Item>
+                  </Form>
+                ),
+              },
+              {
+                key: "catalog",
+                label: "从清单选择",
+                children: (
+                  <div>
+                    <Space style={{ marginBottom: 12, width: "100%" }}>
+                      <Input
+                        placeholder="搜索方案名称..."
+                        value={catalogKeyword}
+                        onChange={(e) => setCatalogKeyword(e.target.value)}
+                        onPressEnter={handleCatalogSearch}
+                        style={{ width: 300 }}
+                        prefix={<SearchOutlined />}
+                      />
+                      <Button onClick={handleCatalogSearch}>搜索</Button>
+                      <Button
+                        onClick={() => {
+                          setCatalogKeyword("");
+                          loadCatalog();
+                        }}
+                      >
+                        重置
+                      </Button>
+                    </Space>
+
+                    {selectedCatalogId && (
+                      <div
+                        style={{
+                          marginBottom: 12,
+                          padding: "8px 12px",
+                          background: "rgba(24,144,255,0.1)",
+                          borderRadius: 6,
+                        }}
+                      >
+                        <Space>
+                          <Tag color="blue">已选择</Tag>
+                          <span style={{ fontWeight: 500 }}>{selectedCatalogName}</span>
+                          <Button
+                            size="small"
+                            type="link"
+                            onClick={() => {
+                              setSelectedCatalogId("");
+                              setSelectedCatalogName("");
+                              setOutlinePreview([]);
+                              form.setFieldValue("name", "");
+                            }}
+                          >
+                            取消选择
+                          </Button>
+                        </Space>
+                      </div>
+                    )}
+
+                    <Spin spinning={catalogLoading}>
+                      <div style={{ maxHeight: 320, overflowY: "auto", paddingRight: 8 }}>
+                        {Object.entries(catalogData).map(
+                          ([category, items]) =>
+                            items.length > 0 && (
+                              <div key={category} style={{ marginBottom: 12 }}>
+                                <div
+                                  style={{
+                                    fontWeight: 600,
+                                    fontSize: 13,
+                                    marginBottom: 6,
+                                    color: "rgba(255,255,255,0.85)",
+                                    borderBottom: "1px solid rgba(255,255,255,0.15)",
+                                    paddingBottom: 4,
+                                  }}
+                                >
+                                  {category} ({items.length})
+                                </div>
+                                <List
+                                  size="small"
+                                  dataSource={items}
+                                  renderItem={(item) => (
+                                    <List.Item
+                                      style={{
+                                        padding: "4px 8px",
+                                        cursor: "pointer",
+                                        background:
+                                          selectedCatalogId === item.id
+                                            ? "rgba(24,144,255,0.15)"
+                                            : "transparent",
+                                        borderRadius: 4,
+                                      }}
+                                      onClick={() => handleSelectCatalog(item.id, item.name)}
+                                    >
+                                      <Space>
+                                        <span>{item.name.replace("标准目录", "")}</span>
+                                        {(item.ref_count ?? 0) > 0 && (
+                                          <Tag style={{ fontSize: 11 }}>引用{item.ref_count}</Tag>
+                                        )}
+                                      </Space>
+                                    </List.Item>
+                                  )}
+                                />
+                              </div>
+                            ),
+                        )}
+                      </div>
+                    </Spin>
+
+                    {selectedCatalogId && outlinePreview.length > 0 && (
+                      <div style={{ marginTop: 12 }}>
+                        <div style={{ fontWeight: 600, marginBottom: 6 }}>标准目录预览：</div>
+                        <Spin spinning={outlineLoading}>
+                          <Tree
+                            treeData={outlineToTreeData(outlinePreview)}
+                            defaultExpandAll
+                            selectable={false}
+                            style={{ maxHeight: 200, overflowY: "auto" }}
+                          />
+                        </Spin>
+                      </div>
+                    )}
+                  </div>
+                ),
+              },
+            ]}
+          />
+        </Modal>
+
+        {/* 方案编辑：重命名 / 改类型 / 专业 / 目标字数 —— 调用 schemesApi.update */}
+        <Modal
+          title="编辑方案"
+          open={editOpen}
+          forceRender
+          confirmLoading={editSubmitting}
+          okButtonProps={{ disabled: editSubmitting }}
+          onOk={handleUpdateScheme}
+          onCancel={() => {
+            setEditOpen(false);
+            setEditing(null);
+          }}
+          okText="保存"
+          cancelText="取消"
+        >
+          <Form form={editForm} layout="vertical">
+            <Form.Item name="name" label="方案名称" rules={SCHEME_NAME_RULES}>
+              <Input placeholder="如：深基坑专项施工方案" />
+            </Form.Item>
+            <Form.Item name="type" label="方案类型">
+              <Select options={SCHEME_TYPES.map((t) => ({ label: t, value: t }))} />
+            </Form.Item>
+            <Form.Item name="profession" label="专业">
+              <Select
+                options={["土建", "机电", "钢结构", "安全", "绿色施工"].map((t) => ({
+                  label: t,
+                  value: t,
+                }))}
+              />
+            </Form.Item>
+            <Form.Item name="word_budget" label="目标字数" rules={WORD_BUDGET_RULES}>
+              <InputNumber
+                min={WORD_BUDGET_MIN}
+                max={WORD_BUDGET_MAX}
+                step={1000}
+                style={{ width: 200 }}
+              />
+            </Form.Item>
+          </Form>
+        </Modal>
+
+        {/* 知识库 / 素材库管理（§3.9）：条目会在 AI 生成目录/正文时自动注入 */}
+        <Drawer
+          title="项目知识库"
+          width={640}
+          open={kbOpen}
+          onClose={() => setKbOpen(false)}
+          extra={
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => handleKbEdit(null)}>
+              新增条目
+            </Button>
+          }
+        >
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="知识条目（企业管理制度、工艺要点、常用数据等）会在 AI 生成目录与正文时自动作为素材注入，数据口径仍以「全局事实」为准。"
+          />
+          <Table
+            dataSource={kbItems}
+            rowKey="id"
+            loading={kbLoading}
+            size="small"
+            pagination={false}
+            locale={{ emptyText: <Empty description="暂无知识条目" /> }}
+            columns={[
+              { title: "名称", dataIndex: "name", key: "name", width: 140 },
+              {
+                title: "内容",
+                dataIndex: "content",
+                key: "content",
+                ellipsis: true,
+                render: (v: string, r) => (
+                  <Tooltip title={v}>
+                    <span>
+                      {r.usage_hint ? (
+                        <Tag color="blue" style={{ marginRight: 4 }}>
+                          {r.usage_hint}
+                        </Tag>
+                      ) : null}
+                      {v || "-"}
+                    </span>
+                  </Tooltip>
+                ),
+              },
+              {
+                title: "操作",
+                key: "actions",
+                width: 110,
+                render: (_, r) => (
+                  <Space>
+                    <Button
+                      size="small"
+                      type="link"
+                      icon={<EditOutlined />}
+                      onClick={() => handleKbEdit(r)}
+                    />
+                    <Popconfirm title="确定删除该条目？" onConfirm={() => handleKbDelete(r.id)}>
+                      <Button size="small" type="link" danger icon={<DeleteOutlined />} />
+                    </Popconfirm>
+                  </Space>
+                ),
+              },
+            ]}
+          />
+        </Drawer>
+
+        {/* 知识条目新增/编辑 */}
+        <Modal
+          title={kbEditing ? "编辑知识条目" : "新增知识条目"}
+          open={kbModalOpen}
+          forceRender
+          confirmLoading={kbSaving}
+          onOk={handleKbSave}
+          onCancel={() => {
+            setKbModalOpen(false);
+            setKbEditing(null);
+            kbForm.resetFields();
+          }}
+          okText="保存"
+          cancelText="取消"
+        >
+          <Form form={kbForm} layout="vertical">
+            <Form.Item
+              name="name"
+              label="名称"
+              rules={[{ required: true, message: "请输入条目名称" }]}
+            >
+              <Input placeholder="如：公司安全交底规范" />
+            </Form.Item>
+            <Form.Item name="usage_hint" label="用途提示（可选）">
+              <Input placeholder="如：安全交底章节引用" />
+            </Form.Item>
+            <Form.Item
+              name="content"
+              label="内容"
+              rules={[{ required: true, message: "请输入内容" }]}
+            >
+              <Input.TextArea rows={8} placeholder="粘贴制度条文、工艺要点或常用数据…" />
+            </Form.Item>
+          </Form>
+        </Modal>
       </div>
     </div>
   );

@@ -19,14 +19,24 @@
 import { describe, it, expect } from "vitest";
 import pageSource from "../pages/SchemeWorkbenchPage.tsx?raw";
 import subTabBarSource from "../components/ImportSubTabBar.tsx?raw";
+// ✅ 2026-11-04 拆分（G5）：事实 Tab 的 children 迁到 tabs/FactsTab.tsx，
+//    「下一步走 NEXT_TAB」的判据语义不变，故把该文件一并纳入检查。
+import factsTabSource from "../pages/schemeWorkbench/tabs/FactsTab.tsx?raw";
+// ✅ 2026-11-04 拆分（G5）：目录 Tab 的 children 迁到 tabs/OutlineTab.tsx。
+import outlineTabSource from "../pages/schemeWorkbench/tabs/OutlineTab.tsx?raw";
+// ✅ 2026-11-04 拆分（G5）：解析提取 Tab 的 children 迁到 tabs/ImportTab.tsx。
+import importTabSource from "../pages/schemeWorkbench/tabs/ImportTab.tsx?raw";
 
 const src: string = pageSource;
 const subSrc: string = subTabBarSource;
+const factsSrc: string = factsTabSource;
+const outlineSrc: string = outlineTabSource;
+const importSrc: string = importTabSource;
 
 describe("SchemeWorkbenchPage 6 步工作流导航护栏（2026-09-23 合并后）", () => {
   it("tabItems 顶层按链路顺序包含全部 6 个 key（bidAnalysis 已收进 import 子 Tab）", () => {
     const keys = ["import", "outline", "facts", "content", "review", "export"].map(
-      (k) => `key: "${k}"`
+      (k) => `key: "${k}"`,
     );
     let pos = -1;
     for (const marker of keys) {
@@ -36,7 +46,7 @@ describe("SchemeWorkbenchPage 6 步工作流导航护栏（2026-09-23 合并后�
     }
   });
 
-  it("顶层 tabItems 不包含 key: \"bidAnalysis\"（合并后已内嵌）", () => {
+  it('顶层 tabItems 不包含 key: "bidAnalysis"（合并后已内嵌）', () => {
     // 允许在注释/文档中出现字符串 bidAnalysis，但不能再作为 tab key 出现
     expect(src).not.toContain('key: "bidAnalysis"');
   });
@@ -57,22 +67,24 @@ describe("SchemeWorkbenchPage 6 步工作流导航护栏（2026-09-23 合并后�
   });
 
   it("facts/outline 的「下一步」走 NEXT_TAB，不再硬编码跳步", () => {
-    expect(src).toContain("setActiveTab(NEXT_TAB.facts)");
-    expect(src).toContain("setActiveTab(NEXT_TAB.outline)");
-    expect(src).not.toContain("下一步：生成目录");
-    expect(src).not.toContain("下一步：生成正文");
+    expect(src + factsSrc).toContain("setActiveTab(NEXT_TAB.facts)");
+    expect(src + outlineSrc).toContain("setActiveTab(NEXT_TAB.outline)");
+    expect(src + factsSrc).not.toContain("下一步：生成目录");
+    expect(src + factsSrc).not.toContain("下一步：生成正文");
   });
 
   it("两个组件（UploadParseTab + BidAnalysisTab）都接入到 import 顶层 Tab 中", () => {
-    expect(src).toContain("<UploadParseTab");
-    expect(src).toContain("<BidAnalysisTab");
+    // ✅ 2026-11-04 拆分（G5）：接线随 children 迁到 tabs/ImportTab.tsx，语义不变。
+    expect(src + importSrc).toContain("<UploadParseTab");
+    expect(src + importSrc).toContain("<BidAnalysisTab");
   });
 
   it("内嵌子 Tab 结构完整：importSubTab state + ImportSubTabBar 接线 + 组件含 docs/extract 两个 key", () => {
     // 页面侧：state 存在，且标签栏已抽成受控组件 ImportSubTabBar 并接线
-    expect(src).toContain('const [importSubTab, setImportSubTab]');
-    expect(src).toContain("import ImportSubTabBar");
-    expect(src).toContain("<ImportSubTabBar");
+    expect(src).toContain("const [importSubTab, setImportSubTab]");
+    // ✅ 2026-11-04 拆分（G5）：标签栏接线随 children 迁到 tabs/ImportTab.tsx。
+    expect(src + importSrc).toContain("import ImportSubTabBar");
+    expect(src + importSrc).toContain("<ImportSubTabBar");
     // 组件侧：两个子 Tab key 定义在 ImportSubTabBar 内（2026-09-24 T2 抽组件后）
     expect(subSrc).toContain('key: "docs"');
     expect(subSrc).toContain('key: "extract"');

@@ -174,7 +174,7 @@ describe("BidAnalysisTab 渲染性能", () => {
     rerender(
       <BidAnalysisTab
         {...baseProps({ groups: [{ group: "g1", label: "改名分组", items: [DEFS[0]] }] })}
-      />
+      />,
     );
     expect(counters.normalizeCalls).toBe(2);
   });
@@ -192,7 +192,7 @@ describe("Layout 侧栏单挂载（常驻 SSE / 轮询不翻倍）", () => {
         <Layout>
           <div>内容区</div>
         </Layout>
-      </MemoryRouter>
+      </MemoryRouter>,
     );
     expect(counters.sidebarMounted).toBe(1);
   });
@@ -204,7 +204,7 @@ describe("Layout 侧栏单挂载（常驻 SSE / 轮询不翻倍）", () => {
         <Layout>
           <div>内容区</div>
         </Layout>
-      </MemoryRouter>
+      </MemoryRouter>,
     );
     // 修复前窄屏为 2（一份 display:none 的固定侧栏 + 一份抽屉侧栏，各开一条 SSE
     // 活动流 + 一套 10s 健康轮询 + 看门狗）；修复后最多 1 份。

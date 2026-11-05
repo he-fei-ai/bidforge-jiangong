@@ -40,9 +40,18 @@ export interface PlaceholderReportPanelProps {
 }
 
 /** 按字段视图：字段名 | 出现次数 | 所在章节（可跳转） */
-function FieldTable({ report, onJump }: { report: PlaceholderReport; onJump?: (sid: string) => void }) {
+function FieldTable({
+  report,
+  onJump,
+}: {
+  report: PlaceholderReport;
+  onJump?: (sid: string) => void;
+}) {
   const [rows, hidden] = limitEntries(report.by_field);
-  const extra = hidden > 0 ? [{ field: `…其余 ${hidden} 个字段略`, count: 0, section_ids: [], section_titles: [] }] : [];
+  const extra =
+    hidden > 0
+      ? [{ field: `…其余 ${hidden} 个字段略`, count: 0, section_ids: [], section_titles: [] }]
+      : [];
   return (
     <Table
       size="small"
@@ -56,7 +65,12 @@ function FieldTable({ report, onJump }: { report: PlaceholderReport; onJump?: (s
           width: 200,
           render: (v: string) => <Text strong>{v}</Text>,
         },
-        { title: "次数", dataIndex: "count", width: 70, render: (c: number) => (c ? <Tag color="orange">{c}</Tag> : "") },
+        {
+          title: "次数",
+          dataIndex: "count",
+          width: 70,
+          render: (c: number) => (c ? <Tag color="orange">{c}</Tag> : ""),
+        },
         {
           title: "所在章节（点击跳转）",
           dataIndex: "section_titles",
@@ -65,11 +79,19 @@ function FieldTable({ report, onJump }: { report: PlaceholderReport; onJump?: (s
               {rec.section_titles.map((t, i) => {
                 const sid = rec.section_ids[i];
                 return onJump && sid ? (
-                  <Button key={sid} size="small" type="link" style={{ padding: 0 }} onClick={() => onJump(sid)}>
+                  <Button
+                    key={sid}
+                    size="small"
+                    type="link"
+                    style={{ padding: 0 }}
+                    onClick={() => onJump(sid)}
+                  >
                     {t}
                   </Button>
                 ) : (
-                  <Text key={`${sid || t}-${i}`} type="secondary">{t}</Text>
+                  <Text key={`${sid || t}-${i}`} type="secondary">
+                    {t}
+                  </Text>
                 );
               })}
             </Space>
@@ -81,11 +103,18 @@ function FieldTable({ report, onJump }: { report: PlaceholderReport; onJump?: (s
 }
 
 /** 按章节视图：章节 | 占位数 | 涉及字段（可跳转） */
-function SectionTable({ report, onJump }: { report: PlaceholderReport; onJump?: (sid: string) => void }) {
+function SectionTable({
+  report,
+  onJump,
+}: {
+  report: PlaceholderReport;
+  onJump?: (sid: string) => void;
+}) {
   const [rows, hidden] = limitEntries(report.by_section);
-  const extra = hidden > 0
-    ? [{ section_id: "__more__", title: `…其余 ${hidden} 个章节略`, count: 0, fields: [] }]
-    : [];
+  const extra =
+    hidden > 0
+      ? [{ section_id: "__more__", title: `…其余 ${hidden} 个章节略`, count: 0, fields: [] }]
+      : [];
   return (
     <Table
       size="small"
@@ -99,19 +128,37 @@ function SectionTable({ report, onJump }: { report: PlaceholderReport; onJump?: 
           width: 240,
           render: (v: string, rec: { section_id: string; count: number }) =>
             rec.count > 0 && onJump ? (
-              <Button size="small" type="link" style={{ padding: 0 }} onClick={() => onJump(rec.section_id)}>
+              <Button
+                size="small"
+                type="link"
+                style={{ padding: 0 }}
+                onClick={() => onJump(rec.section_id)}
+              >
                 {v}
               </Button>
             ) : (
               <Text strong>{v}</Text>
             ),
         },
-        { title: "占位数", dataIndex: "count", width: 80, render: (c: number) => (c ? <Tag color="orange">{c}</Tag> : "") },
+        {
+          title: "占位数",
+          dataIndex: "count",
+          width: 80,
+          render: (c: number) => (c ? <Tag color="orange">{c}</Tag> : ""),
+        },
         {
           title: "涉及字段",
           dataIndex: "fields",
           render: (fields: string[]) =>
-            fields.length ? fields.map((f) => <Tag key={f} style={{ marginBottom: 2 }}>{f}</Tag>) : <Text type="secondary">—</Text>,
+            fields.length ? (
+              fields.map((f) => (
+                <Tag key={f} style={{ marginBottom: 2 }}>
+                  {f}
+                </Tag>
+              ))
+            ) : (
+              <Text type="secondary">—</Text>
+            ),
         },
       ]}
     />
@@ -119,7 +166,12 @@ function SectionTable({ report, onJump }: { report: PlaceholderReport; onJump?: 
 }
 
 const PlaceholderReportPanel: React.FC<PlaceholderReportPanelProps> = ({
-  report, onJumpToSection, schemeId, rerunCount, rerunning, onRerunAffected,
+  report,
+  onJumpToSection,
+  schemeId,
+  rerunCount,
+  rerunning,
+  onRerunAffected,
 }) => {
   // ✅ 监控基线（六层方案第 6 层）：传入 schemeId 时自取历史，展示趋势。
   //    拉取失败静默降级为无趋势（监控旁路，绝不打断主展示）。
@@ -127,10 +179,17 @@ const PlaceholderReportPanel: React.FC<PlaceholderReportPanelProps> = ({
   useEffect(() => {
     let cancelled = false;
     if (!schemeId) return;
-    exportApi.placeholderHistory(schemeId)
-      .then(({ data }) => { if (!cancelled) setHistory(data?.history || []); })
-      .catch(() => { /* 静默：历史趋势属可选增强 */ });
-    return () => { cancelled = true; };
+    exportApi
+      .placeholderHistory(schemeId)
+      .then(({ data }) => {
+        if (!cancelled) setHistory(data?.history || []);
+      })
+      .catch(() => {
+        /* 静默：历史趋势属可选增强 */
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [schemeId, report?.total]);
   const trend = deriveTrendDelta(history);
 
@@ -144,11 +203,14 @@ const PlaceholderReportPanel: React.FC<PlaceholderReportPanelProps> = ({
   const sev = derivePlaceholderSeverity(report);
   const alert = severityToAlertProps(sev);
   /** 趋势文案：下降绿 / 上升红 / 首次基线灰（负数=改善） */
-  const trendNode = trend.delta === null
-    ? (trend.latest !== null
-      ? <Text type="secondary" style={{ fontSize: 12 }}>已建立监控基线（当前 {trend.latest} 处）</Text>
-      : null)
-    : (
+  const trendNode =
+    trend.delta === null ? (
+      trend.latest !== null ? (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          已建立监控基线（当前 {trend.latest} 处）
+        </Text>
+      ) : null
+    ) : (
       <Text style={{ fontSize: 12 }} type={trend.delta <= 0 ? "success" : "danger"}>
         较上次预检 {trend.delta > 0 ? `+${trend.delta}` : trend.delta} 处
         {trend.delta < 0 ? "（下降）" : trend.delta > 0 ? "（上升，建议核查是否引入新占位）" : ""}
@@ -169,13 +231,7 @@ const PlaceholderReportPanel: React.FC<PlaceholderReportPanelProps> = ({
       />
       {report.total > 0 && onRerunAffected && (rerunCount || 0) > 0 && (
         <div style={{ marginTop: 8 }}>
-          <Button
-            size="small"
-            type="primary"
-            ghost
-            loading={rerunning}
-            onClick={onRerunAffected}
-          >
+          <Button size="small" type="primary" ghost loading={rerunning} onClick={onRerunAffected}>
             重跑受影响章节（{rerunCount}）—— 只重跑补录数据已到位的章节
           </Button>
         </div>
@@ -185,23 +241,40 @@ const PlaceholderReportPanel: React.FC<PlaceholderReportPanelProps> = ({
           size="small"
           style={{ marginTop: 8 }}
           items={[
-            { key: "field", label: `按字段（${report.field_count}）`, children: <FieldTable report={report} onJump={onJumpToSection} /> },
-            { key: "section", label: `按章节（${report.section_count}）`, children: <SectionTable report={report} onJump={onJumpToSection} /> },
+            {
+              key: "field",
+              label: `按字段（${report.field_count}）`,
+              children: <FieldTable report={report} onJump={onJumpToSection} />,
+            },
+            {
+              key: "section",
+              label: `按章节（${report.section_count}）`,
+              children: <SectionTable report={report} onJump={onJumpToSection} />,
+            },
             {
               key: "hint",
               label: "补录指引",
               children: (
                 <div style={{ fontSize: 12, color: "rgba(0,0,0,0.65)" }}>
                   <p style={{ margin: "4px 0" }}>
-                    ① 优先在「上传解析 → 提取项目 / 全局事实」补齐数据源，再重新生成对应章节（只重跑受影响章节，无需整篇重生成）；
+                    ① 优先在「上传解析 → 提取项目 /
+                    全局事实」补齐数据源，再重新生成对应章节（只重跑受影响章节，无需整篇重生成）；
                   </p>
                   <p style={{ margin: "4px 0" }}>
-                    ② 确实无法自动获取的参数（业主特殊要求等），手动编辑章节正文替换对应【待补充：字段名】；
+                    ②
+                    确实无法自动获取的参数（业主特殊要求等），手动编辑章节正文替换对应【待补充：字段名】；
                   </p>
                   <p style={{ margin: "4px 0" }}>
-                    ③ <Tooltip title="提示词要求统一写作【待补充：字段名】；××/xx 无法被本清单定位">裸标记与 ××/xx 属不规范写法</Tooltip>，请回改为统一格式后再导出。
+                    ③{" "}
+                    <Tooltip title="提示词要求统一写作【待补充：字段名】；××/xx 无法被本清单定位">
+                      裸标记与 ××/xx 属不规范写法
+                    </Tooltip>
+                    ，请回改为统一格式后再导出。
                   </p>
-                  <p style={{ margin: "4px 0" }}>每次补录后重新预检，对比 total 下降即验证生效（上限展示 {DISPLAY_ENTRY_LIMIT} 条）。</p>
+                  <p style={{ margin: "4px 0" }}>
+                    每次补录后重新预检，对比 total 下降即验证生效（上限展示 {DISPLAY_ENTRY_LIMIT}{" "}
+                    条）。
+                  </p>
                 </div>
               ),
             },

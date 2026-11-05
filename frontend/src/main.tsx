@@ -25,7 +25,11 @@ function BlueprintRoot() {
 
   useEffect(() => {
     document.documentElement.setAttribute("data-bp-mode", mode);
-    try { localStorage.setItem(LS_THEME_KEY, mode); } catch { /* ignore */ }
+    try {
+      localStorage.setItem(LS_THEME_KEY, mode);
+    } catch {
+      /* ignore */
+    }
   }, [mode]);
 
   const setMode = useCallback((m: ThemeMode) => setModeState(m), []);
@@ -39,19 +43,19 @@ function BlueprintRoot() {
     return BLUEPRINT_TOKENS;
   }, [mode]);
 
-  const ctxValue = useMemo(() => ({
-    mode,
-    toggle,
-    setMode,
-    algorithm: () => algorithm,
-  }), [mode, toggle, setMode, algorithm]);
+  const ctxValue = useMemo(
+    () => ({
+      mode,
+      toggle,
+      setMode,
+      algorithm: () => algorithm,
+    }),
+    [mode, toggle, setMode, algorithm],
+  );
 
   return (
     <BlueprintThemeContext.Provider value={ctxValue}>
-      <ConfigProvider
-        locale={zhCN}
-        theme={{ algorithm, token: tokens }}
-      >
+      <ConfigProvider locale={zhCN} theme={{ algorithm, token: tokens }}>
         <AntdApp>
           <App />
         </AntdApp>
@@ -63,5 +67,5 @@ function BlueprintRoot() {
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <BlueprintRoot />
-  </React.StrictMode>
+  </React.StrictMode>,
 );

@@ -15,11 +15,11 @@ export type SidebarTreeRefreshListener = (projectId?: string) => void;
 const listeners = new Set<SidebarTreeRefreshListener>();
 
 /** 订阅侧栏刷新；返回取消订阅函数（供 useEffect 清理）。 */
-export function subscribeSidebarTreeRefresh(
-  fn: SidebarTreeRefreshListener,
-): () => void {
+export function subscribeSidebarTreeRefresh(fn: SidebarTreeRefreshListener): () => void {
   listeners.add(fn);
-  return () => { listeners.delete(fn); };
+  return () => {
+    listeners.delete(fn);
+  };
 }
 
 /**

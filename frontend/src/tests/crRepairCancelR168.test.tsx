@@ -43,13 +43,17 @@ vi.mock("../api", () => ({
 
 import { useReviewAudit } from "../pages/schemeWorkbench/useReviewAudit";
 import type { ReviewAuditDeps } from "../pages/schemeWorkbench/useReviewAudit";
+import { consistencyRepairApi } from "../api";
 
 // ---------------------------------------------------------------------------
 // 工具：构造 hook deps（全部 no-op / 空实现，只服务本域被测路径）
 // ---------------------------------------------------------------------------
 function makeDeps(over: Partial<ReviewAuditDeps> = {}): ReviewAuditDeps {
   const msg = {
-    success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn(),
+    success: vi.fn(),
+    error: vi.fn(),
+    warning: vi.fn(),
+    info: vi.fn(),
   };
   return {
     id: "scheme-1",
@@ -108,21 +112,25 @@ function hangUntilAbort(signal?: AbortSignal): Promise<never> {
 // ---------------------------------------------------------------------------
 describe("CR 扫描/修复取消链路（hook 级）", () => {
   it("B1: handleCrScan 把 AbortSignal 传给 api，取消后置 info 提示并复位 crScanning", async () => {
-    scanMock.mockImplementation(
-      (_id: string, _data: unknown, signal?: AbortSignal) => hangUntilAbort(signal));
+    scanMock.mockImplementation((_id: string, _data: unknown, signal?: AbortSignal) =>
+      hangUntilAbort(signal),
+    );
     const deps = makeDeps();
     const { result } = renderHook(() => useReviewAudit(deps));
 
-    act(() => { void result.current.handleCrScan(); });
+    act(() => {
+      void result.current.handleCrScan();
+    });
     await waitFor(() => expect(scanMock).toHaveBeenCalledTimes(1));
     // 第一参起依次是 (schemeId, payload, signal)
     const [, , signal] = scanMock.mock.calls[0] as [string, unknown, AbortSignal];
     expect(signal).toBeInstanceOf(AbortSignal);
 
-    act(() => { result.current.handleCancelCrScan(); });
+    act(() => {
+      result.current.handleCancelCrScan();
+    });
     expect(signal!.aborted).toBe(true);
-    await waitFor(() =>
-      expect(deps.msg.info).toHaveBeenCalledWith("已取消一致性扫描"));
+    await waitFor(() => expect(deps.msg.info).toHaveBeenCalledWith("已取消一致性扫描"));
     await waitFor(() => {
       // setCrScanning(true) → ... → setCrScanning(false)：最后一个调用是复位
       const calls = (deps.setCrScanning as ReturnType<typeof vi.fn>).mock.calls;
@@ -131,21 +139,29 @@ describe("CR 扫描/修复取消链路（hook 级）", () => {
   });
 
   it("B2: handleCrRepair 同口径 —— signal 透传 + 取消提示 + setCrRepairing 复位", async () => {
-    repairMock.mockImplementation(
-      (_id: string, _data: unknown, signal?: AbortSignal) => hangUntilAbort(signal));
+    repairMock.mockImplementation((_id: string, _data: unknown, signal?: AbortSignal) =>
+      hangUntilAbort(signal),
+    );
     const deps = makeDeps({ crScanId: "scan-9" });
     const { result } = renderHook(() => useReviewAudit(deps));
 
-    act(() => { void result.current.handleCrRepair(); });
+    act(() => {
+      void result.current.handleCrRepair();
+    });
     await waitFor(() => expect(repairMock).toHaveBeenCalledTimes(1));
-    const [, payload, signal] = repairMock.mock.calls[0] as [string, Record<string, unknown>, AbortSignal];
+    const [, payload, signal] = repairMock.mock.calls[0] as [
+      string,
+      Record<string, unknown>,
+      AbortSignal,
+    ];
     expect(signal).toBeInstanceOf(AbortSignal);
     expect(payload.scan_id).toBe("scan-9");
 
-    act(() => { result.current.handleCancelCrRepair(); });
+    act(() => {
+      result.current.handleCancelCrRepair();
+    });
     expect(signal!.aborted).toBe(true);
-    await waitFor(() =>
-      expect(deps.msg.info).toHaveBeenCalledWith("已取消一致性修复"));
+    await waitFor(() => expect(deps.msg.info).toHaveBeenCalledWith("已取消一致性修复"));
     await waitFor(() => {
       const calls = (deps.setCrRepairing as ReturnType<typeof vi.fn>).mock.calls;
       expect(calls[calls.length - 1][0]).toBe(false);
@@ -162,7 +178,9 @@ describe("CR 扫描/修复取消链路（hook 级）", () => {
     });
     const deps = makeDeps();
     const { result } = renderHook(() => useReviewAudit(deps));
-    await act(async () => { await result.current.handleCrScan(); });
+    await act(async () => {
+      await result.current.handleCrScan();
+    });
     expect(deps.setCrConflicts).toHaveBeenCalledWith([{ id: "c1" }]);
     expect(deps.setCrScanId).toHaveBeenCalledWith("scan-1");
     expect(deps.msg.success).toHaveBeenCalled();
@@ -176,7 +194,9 @@ describe("页面接线源码锁", () => {
   // SchemeWorkbenchPage 体量 8000+ 行，页面级挂载测试成本过高；
   // 按本仓 stopControlR106 先例用 raw 源码锁锁「解构 + 按钮条件渲染」。
   const pageSources = import.meta.glob("../pages/SchemeWorkbenchPage.tsx", {
-    query: "?raw", import: "default", eager: true,
+    query: "?raw",
+    import: "default",
+    eager: true,
   }) as Record<string, string>;
   const pageSrc = Object.values(pageSources)[0] || "";
 
@@ -186,12 +206,116 @@ describe("页面接线源码锁", () => {
   });
 
   it("C2: 取消按钮条件渲染 —— crScanning/crRepairing 运行中才出现", () => {
-    expect(pageSrc).toMatch(/\{crScanning && \(/);
-    expect(pageSrc).toMatch(/\{crRepairing && \(/);
+    // ✅ 2026-11-04 拆分（G4d）：取消按钮随 CR 工作台抽屉迁到
+    //    pages/schemeWorkbench/ComplianceRepairDrawer.tsx。判据语义不变
+    //    （「运行中才出现取消入口」），故指向新位置。
+    const drawerSources = import.meta.glob("../pages/schemeWorkbench/ComplianceRepairDrawer.tsx", {
+      query: "?raw",
+      import: "default",
+      eager: true,
+    }) as Record<string, string>;
+    const drawerSrc = Object.values(drawerSources)[0] || "";
+    expect(drawerSrc, "ComplianceRepairDrawer.tsx 应在 glob 覆盖内").toBeTruthy();
+    expect(drawerSrc).toMatch(/\{scanning && \(/);
+    expect(drawerSrc).toMatch(/\{repairing && \(/);
   });
 
   it("C3: handleQualityCheck 重入锁（同帧双击不再并发）", () => {
-    expect(pageSrc).toMatch(/if \(!id \|\| checkingQuality\) return;/);
+    // ✅ 2026-11-04 拆分（G7）：质量自检处理器迁到
+    //    pages/schemeWorkbench/useExportCheck.ts。判据语义不变
+    //    （「同帧双击必须被同步判据挡住」），故指向新位置。
+    const checkSources = import.meta.glob("../pages/schemeWorkbench/useExportCheck.ts", {
+      query: "?raw",
+      import: "default",
+      eager: true,
+    }) as Record<string, string>;
+    const checkSrc = Object.values(checkSources)[0] || "";
+    expect(checkSrc, "useExportCheck.ts 应在 glob 覆盖内").toBeTruthy();
+    expect(checkSrc).toMatch(/if \(!id \|\| checkingQuality\) return;/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// E 组 · R179：确认结果以后端受理/回滚事实为准（E4/E13）
+// ---------------------------------------------------------------------------
+describe("R179 · 一致性确认结果不得回显请求条数", () => {
+  const confirmMock = consistencyRepairApi.confirm as unknown as ReturnType<typeof vi.fn>;
+
+  it("E1: 快照缺失 → 提示未回滚，禁止宣称「已恢复原文」", async () => {
+    confirmMock.mockResolvedValue({
+      data: {
+        repair_id: "rep-1",
+        status: "rejected",
+        accepted: ["C1"],
+        rejected: ["C2"],
+        restored_sections: [],
+        restore_skipped_sections: ["sec-2"],
+        rescan_required: false,
+      },
+    });
+    const deps = makeDeps({ crRepair: { repair_id: "rep-1" } });
+    const { result } = renderHook(() => useReviewAudit(deps));
+
+    await act(async () => {
+      await result.current.handleCrConfirm([], ["C2"]);
+    });
+
+    expect(deps.msg.success).toHaveBeenCalledWith("已确认：接受 1 条，拒绝 1 条");
+    const warnings = (deps.msg.warning as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+      String(c[0]),
+    );
+    expect(warnings.some((w) => w.includes("快照缺失"))).toBe(true);
+    expect(warnings.some((w) => w.includes("恢复原文"))).toBe(false);
+    // 冲突状态已变（accepted/pending），总检需重算；但不得因此伪造正文回滚提示
+    expect(deps.setReviewTick).toHaveBeenCalled();
+  });
+
+  it("E2: 真正回滚 → 提示已恢复原文并让审核结论失效", async () => {
+    confirmMock.mockResolvedValue({
+      data: {
+        repair_id: "rep-1",
+        status: "rejected",
+        accepted: [],
+        rejected: ["C2"],
+        restored_sections: ["sec-2"],
+        restore_skipped_sections: [],
+        rescan_required: true,
+      },
+    });
+    const deps = makeDeps({ crRepair: { repair_id: "rep-1" } });
+    const { result } = renderHook(() => useReviewAudit(deps));
+
+    await act(async () => {
+      await result.current.handleCrConfirm([], ["C2"]);
+    });
+
+    const warnings = (deps.msg.warning as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+      String(c[0]),
+    );
+    expect(warnings.some((w) => w.includes("恢复原文"))).toBe(true);
+    expect(deps.setReviewTick).toHaveBeenCalled();
+  });
+
+  it("E3: 后端只受理部分条目 → 成功文案按后端回显计数，不按请求条数", async () => {
+    confirmMock.mockResolvedValue({
+      data: {
+        repair_id: "rep-1",
+        status: "partially_confirmed",
+        accepted: ["C1"],
+        rejected: [],
+        restored_sections: [],
+        restore_skipped_sections: [],
+        rescan_required: false,
+      },
+    });
+    const deps = makeDeps({ crRepair: { repair_id: "rep-1" } });
+    const { result } = renderHook(() => useReviewAudit(deps));
+
+    await act(async () => {
+      await result.current.handleCrConfirm(["C1", "C9"], []);
+    });
+
+    expect(deps.msg.success).toHaveBeenCalledWith("已确认：接受 1 条，拒绝 0 条");
   });
 });
 
@@ -200,15 +324,22 @@ describe("页面接线源码锁", () => {
 // ---------------------------------------------------------------------------
 describe("EXPORT_ISSUE_LABEL 死键棘轮", () => {
   const sharedSources = import.meta.glob("../pages/schemeWorkbench/exportShared.ts", {
-    query: "?raw", import: "default", eager: true,
+    query: "?raw",
+    import: "default",
+    eager: true,
   }) as Record<string, string>;
   const sharedSrc = Object.values(sharedSources)[0] || "";
 
   it("D1: duplicate_section_title 死键不得回流（后端 _EXPORT_ISSUE_RULE_MAP 零产出）", () => {
     expect(sharedSrc).not.toContain("duplicate_section_title");
     // 15 类在册键抽查（与后端 pytest 双向锁互补，防文件级误删）
-    for (const key of ["empty_section", "orphan_node", "global_facts_blocked",
-      "stale_cross_reference", "body_subheading_namespace_conflict"]) {
+    for (const key of [
+      "empty_section",
+      "orphan_node",
+      "global_facts_blocked",
+      "stale_cross_reference",
+      "body_subheading_namespace_conflict",
+    ]) {
       expect(sharedSrc).toContain(`${key}:`);
     }
   });

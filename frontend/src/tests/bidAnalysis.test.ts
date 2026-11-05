@@ -19,9 +19,30 @@ import {
 import { baScopeText } from "../components/BidAnalysisTab";
 
 const defs: BaItemDef[] = [
-  { item_id: "projectBasicInfo", label: "项目级基本信息", required: 1, output_type: "json", group: "project_info", sort_order: 1 },
-  { item_id: "schemeBasicInfo", label: "方案级基本信息", required: 1, output_type: "markdown", group: "scheme_info", sort_order: 2 },
-  { item_id: "resourceAllocation", label: "资源配置", required: 0, output_type: "markdown", group: "resource", sort_order: 8 },
+  {
+    item_id: "projectBasicInfo",
+    label: "项目级基本信息",
+    required: 1,
+    output_type: "json",
+    group: "project_info",
+    sort_order: 1,
+  },
+  {
+    item_id: "schemeBasicInfo",
+    label: "方案级基本信息",
+    required: 1,
+    output_type: "markdown",
+    group: "scheme_info",
+    sort_order: 2,
+  },
+  {
+    item_id: "resourceAllocation",
+    label: "资源配置",
+    required: 0,
+    output_type: "markdown",
+    group: "resource",
+    sort_order: 8,
+  },
 ];
 
 describe("isMissingBaResult", () => {
@@ -38,9 +59,11 @@ describe("isMissingBaResult", () => {
   });
 
   it("json 项：全字段「没有提及」/空 → 缺失（旧实现漏判）", () => {
-    expect(isMissingBaResult('{"project_name":"没有提及","contractor":"没有提及"}', "json")).toBe(true);
+    expect(isMissingBaResult('{"project_name":"没有提及","contractor":"没有提及"}', "json")).toBe(
+      true,
+    );
     expect(isMissingBaResult('{"a":null,"b":"无"}', "json")).toBe(true);
-    expect(isMissingBaResult("```json\n{\"a\":\"没有提及\"}\n```", "json")).toBe(true);
+    expect(isMissingBaResult('```json\n{"a":"没有提及"}\n```', "json")).toBe(true);
   });
 
   it("json 项：任一字段有有效值 → 不缺失（含 0 这类有意义的假值）", () => {
@@ -114,9 +137,7 @@ describe("recomputeBaSummary", () => {
 
   it("success_valid 与 json 项同口径：全「没有提及」不计入有效成果", () => {
     const s = recomputeBaSummary(
-      [
-        { item_id: "projectBasicInfo", status: "success", content: '{"a":"没有提及","b":null}' },
-      ],
+      [{ item_id: "projectBasicInfo", status: "success", content: '{"a":"没有提及","b":null}' }],
       defs,
     );
     expect(s.success).toBe(1);
@@ -136,9 +157,7 @@ describe("recomputeBaSummary", () => {
 
     // 重跑后 source 回到 ai
     const rerun = recomputeBaSummary(
-      [
-        { item_id: "projectBasicInfo", status: "success", content: '{"a":"b"}', source: "ai" },
-      ],
+      [{ item_id: "projectBasicInfo", status: "success", content: '{"a":"b"}', source: "ai" }],
       defs,
     );
     expect(rerun.manual_count).toBe(0);
@@ -185,19 +204,19 @@ describe("normalizeBaGroups", () => {
       ],
       defs,
     );
-    expect(groups.map(g => g.key)).toEqual(["project_info", "scheme_info"]);
+    expect(groups.map((g) => g.key)).toEqual(["project_info", "scheme_info"]);
     expect(groups[0].label).toBe("项目级基本信息");
-    expect(groups[0].items.map(i => i.item_id)).toEqual(["projectBasicInfo"]);
+    expect(groups[0].items.map((i) => i.item_id)).toEqual(["projectBasicInfo"]);
   });
 
   it("后端 groups 的 items 缺失时按 defs.group 回退过滤", () => {
     const groups = normalizeBaGroups([{ group: "resource", label: "资源配置" }], defs);
-    expect(groups[0].items.map(i => i.item_id)).toEqual(["resourceAllocation"]);
+    expect(groups[0].items.map((i) => i.item_id)).toEqual(["resourceAllocation"]);
   });
 
   it("无 groups → 按 defs.group 首次出现顺序推导（去重）", () => {
     const groups = normalizeBaGroups([], defs);
-    expect(groups.map(g => g.key)).toEqual(["project_info", "scheme_info", "resource"]);
+    expect(groups.map((g) => g.key)).toEqual(["project_info", "scheme_info", "resource"]);
     expect(groups[0].items[0].label).toBe("项目级基本信息");
   });
 

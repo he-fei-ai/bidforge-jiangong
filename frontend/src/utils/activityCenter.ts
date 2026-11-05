@@ -42,7 +42,7 @@ function emit() {
 export function pushActivity(
   kind: ActivityKind,
   text: string | undefined | null,
-  source = "系统"
+  source = "系统",
 ): ActivityItem | null {
   const t = String(text ?? "").trim();
   if (!t) return null;
@@ -119,16 +119,13 @@ export function useAntdMessageHub(_message: MessageInstance, source: string): Me
     for (const kind of kinds) {
       wrapped[kind] = (...args: unknown[]) => {
         try {
-          const first = args[0] as
-            | string
-            | { content?: unknown }
-            | undefined;
+          const first = args[0] as string | { content?: unknown } | undefined;
           const text =
             typeof first === "string"
               ? first
               : first && typeof first === "object" && "content" in first
-              ? String((first as { content?: unknown }).content ?? "")
-              : String(first ?? "");
+                ? String((first as { content?: unknown }).content ?? "")
+                : String(first ?? "");
           pushActivity(kind, text, source);
         } catch {
           // 记录失败静默
@@ -141,9 +138,9 @@ export function useAntdMessageHub(_message: MessageInstance, source: string): Me
     return {
       open: (config: { content?: unknown; type?: string }) => {
         // message.open（自定义内容）同样只进消息中心
-        const kind = (["success", "error", "warning", "info", "loading"] as ActivityKind[]).includes(
-          (config?.type ?? "") as ActivityKind
-        )
+        const kind = (
+          ["success", "error", "warning", "info", "loading"] as ActivityKind[]
+        ).includes((config?.type ?? "") as ActivityKind)
           ? (config!.type as ActivityKind)
           : "info";
         pushActivity(kind, String(config?.content ?? ""), source);

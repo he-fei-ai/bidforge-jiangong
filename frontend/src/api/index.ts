@@ -2,39 +2,73 @@ import axios from "axios";
 
 // ✅ D7（2026-09-23）：文本模型配置模块的显式类型契约（替代此前的 any）
 import type {
-  AIActiveEnvResponse, AIAuditCleanupResponse, AIAuditLogsResponse,
-  AIConfigAuditLogsResponse, AIConfigClearKeyResponse, AIConfigDeleteResponse,
+  AIActiveEnvResponse,
+  AIAuditCleanupResponse,
+  AIAuditLogsResponse,
+  AIConfigAuditLogsResponse,
+  AIConfigClearKeyResponse,
+  AIConfigDeleteResponse,
   AIConfigExport,
-  AIConfigExportItem, AIConfigImportDryRunResponse, AIConfigImportResponse,
+  AIConfigExportItem,
+  AIConfigImportDryRunResponse,
+  AIConfigImportResponse,
   AIConfigListResponse,
-  AIConfigPayload, AIConfigPrecheckResponse, AIConfigRollbackResponse,
+  AIConfigPayload,
+  AIConfigPrecheckResponse,
+  AIConfigRollbackResponse,
   AIConfigsHealthResponse,
-  AIConfigSaveResponse, AIConfigSceneRouteExport, AIConfigTestRequest,
+  AIConfigSaveResponse,
+  AIConfigSceneRouteExport,
+  AIConfigTestRequest,
   AIConfigTestResponse,
-  AIConfigToggleResponse, AIFallbackChainResponse, AIFetchModelsResponse,
-  AIHealth, AIModelsResponse, AIPrecheckAllResponse, AIRuntimeResponse,
-  AISceneRouteUpdateResponse, AISceneRoutesResponse,
-  AISetDisabledProvidersResponse, AISetEnvResponse,
+  AIConfigToggleResponse,
+  AIFallbackChainResponse,
+  AIFetchModelsResponse,
+  AIHealth,
+  AIModelsResponse,
+  AIPrecheckAllResponse,
+  AIRuntimeResponse,
+  AISceneRouteUpdateResponse,
+  AISceneRoutesResponse,
+  AISetDisabledProvidersResponse,
+  AISetEnvResponse,
   AIUsageStats,
-  AIKeyRotationRequest, AIKeyRotationResponse,
+  AIKeyRotationRequest,
+  AIKeyRotationResponse,
 } from "../types/aiConfig";
 import type {
-  PromptAuditLogsResponse, PromptListResponse, PromptMutationResponse,
+  PromptAuditLogsResponse,
+  PromptListResponse,
+  PromptMutationResponse,
   PromptRollbackResponse,
 } from "../types/prompt";
 // ✅ 2026-10-06：全局事实模块的前后端契约类型（替代此处的 any）
 import type {
-  FactCategoryMap, FactChaptersResponse, FactDangerResponse, FactListResponse,
+  FactCategoryMap,
+  FactChaptersResponse,
+  FactDangerResponse,
+  FactListResponse,
   FactResolveResponse,
 } from "../types/facts";
 // ✅ any 清理专项（2026-11-02）：错误体 / SSE 事件 / 写路径载荷契约
 import type {
-  ApiErrorBody, AuthBlockedError, ComplianceCheckPayload,
-  ComplianceExpertReviewPayload, ConsistencyRepairPayload, ConsistencyScanPayload,
-  ExportFormatConfig, FactGroupUpsertPayload, FastAPIValidationErrorItem,
-  JsonPayload, OutlineApplyAndSavePayload, OutlineBatchReviewPayload,
-  OutlineNewVersionPayload, OutlineRestoreVersionPayload, OutlineReviewPayload,
-  SseEvent, SseSoftStopMarker,
+  ApiErrorBody,
+  AuthBlockedError,
+  ComplianceCheckPayload,
+  ComplianceExpertReviewPayload,
+  ConsistencyRepairPayload,
+  ConsistencyScanPayload,
+  ExportFormatConfig,
+  FactGroupUpsertPayload,
+  FastAPIValidationErrorItem,
+  JsonPayload,
+  OutlineApplyAndSavePayload,
+  OutlineBatchReviewPayload,
+  OutlineNewVersionPayload,
+  OutlineRestoreVersionPayload,
+  OutlineReviewPayload,
+  SseEvent,
+  SseSoftStopMarker,
 } from "../types/api";
 import type { OutlineSavePayload } from "../types/api";
 
@@ -97,10 +131,10 @@ async function withRetry<T>(
       // 结构化窄断言：仅读取 axios 错误对象上真实存在的 code / response.status
       const err = e as { code?: string; response?: { status?: number } };
       const isRetryable =
-        err?.code === "ECONNABORTED" ||     // axios timeout
+        err?.code === "ECONNABORTED" || // axios timeout
         err?.code === "ERR_CANCELED" ||
-        err?.response?.status === undefined ||  // 无响应 = 网络层问题
-        err?.response?.status >= 500;       // 5xx 服务端临时错误
+        err?.response?.status === undefined || // 无响应 = 网络层问题
+        err?.response?.status >= 500; // 5xx 服务端临时错误
       if (!isRetryable || attempt === retries) break;
       // 退避：500ms → 1000ms → 2000ms
       const delay = backoff * Math.pow(2, attempt);
@@ -138,14 +172,11 @@ api.interceptors.request.use((config) => {
   //    从源头切断"120 次连续拒绝未授权请求"的日志噪音与无效网络开销。
   if (authGuard.blocked) {
     // Object.assign 保留原运行期行为（Error 实例上附加 name/isAuthBlocked/status）
-    const err = Object.assign(
-      new Error(authGuard.reason || "未授权访问，请检查 API Token"),
-      {
-        name: "AuthBlockedError",
-        isAuthBlocked: true,
-        status: 401,
-      },
-    ) as AuthBlockedError;
+    const err = Object.assign(new Error(authGuard.reason || "未授权访问，请检查 API Token"), {
+      name: "AuthBlockedError",
+      isAuthBlocked: true,
+      status: 401,
+    }) as AuthBlockedError;
     return Promise.reject(err);
   }
   const h = authHeaders();
@@ -174,11 +205,13 @@ api.interceptors.response.use(
     // ✅ R14 修复（2026-09-22）：401 后置 authGuard.blocked，
     //    后续所有请求由请求拦截器短路，避免持续轮询产生日志噪音。
     if (error?.response?.status === 401) {
-      const errBody = (typeof data === "object" && data !== null ? data : undefined) as ApiErrorBody | undefined;
+      const errBody = (typeof data === "object" && data !== null ? data : undefined) as
+        ApiErrorBody | undefined;
       authGuard.blocked = true;
       // 后端契约下 detail/message 为字符串；非字符串形态的历史行为原样保留（编译期断言）
-      authGuard.reason =
-        (errBody?.detail || errBody?.message || "未授权访问，请检查 API Token") as string;
+      authGuard.reason = (errBody?.detail ||
+        errBody?.message ||
+        "未授权访问，请检查 API Token") as string;
       Object.assign(error, { isAuthBlocked: true });
     }
     // ✅ 修复：导出接口用 responseType:"blob"，失败时后端返回的 JSON 错误体
@@ -197,7 +230,8 @@ api.interceptors.response.use(
         data = undefined;
       }
     }
-    const body = (typeof data === "object" && data !== null ? data : undefined) as ApiErrorBody | undefined;
+    const body = (typeof data === "object" && data !== null ? data : undefined) as
+      ApiErrorBody | undefined;
     const rawDetail = body?.detail ?? body?.message;
     // ✅ R55 F5（2026-10-08）：FastAPI 422 校验失败的 detail 是**数组**形
     //    （[{loc, msg, type}, ...]），旧实现只认字符串 → 数组整个被丢弃，
@@ -210,7 +244,7 @@ api.interceptors.response.use(
       error.message = detail;
     }
     return Promise.reject(error);
-  }
+  },
 );
 
 // 项目
@@ -243,8 +277,7 @@ export const schemesApi = {
 export const sectionsApi = {
   list: (schemeId: string, params?: { include_content?: boolean }) =>
     api.get(`/schemes/${schemeId}/sections`, { params }),
-  create: (schemeId: string, data: JsonPayload) =>
-    api.post(`/schemes/${schemeId}/sections`, data),
+  create: (schemeId: string, data: JsonPayload) => api.post(`/schemes/${schemeId}/sections`, data),
   update: (schemeId: string, sectionId: string, data: JsonPayload) =>
     api.patch(`/schemes/${schemeId}/sections/${sectionId}`, data),
   delete: (schemeId: string, sectionId: string) =>
@@ -253,50 +286,48 @@ export const sectionsApi = {
     api.post(`/schemes/${schemeId}/sections/save-outline`, data),
   reorder: (schemeId: string, data: JsonPayload) =>
     api.post(`/schemes/${schemeId}/sections/reorder`, data),
-  exportTree: (schemeId: string) =>
-    api.get(`/schemes/${schemeId}/sections/export-tree`),
+  exportTree: (schemeId: string) => api.get(`/schemes/${schemeId}/sections/export-tree`),
   /** 正文质量审计（交付前自检）：口语化/AI 腔残留 + 引用已废止标准 */
-  quality: (schemeId: string) =>
-    api.get(`/schemes/${schemeId}/sections/quality`),
+  quality: (schemeId: string) => api.get(`/schemes/${schemeId}/sections/quality`),
   /** 字数压缩（对齐 OpenBidKit 的 shrink）：超字数章节 AI 局部 replace/delete 压缩 */
   shrink: (schemeId: string, sectionId: string) =>
     api.post(`/schemes/${schemeId}/sections/${sectionId}/shrink`, null, { timeout: 600000 }),
   /** 重置正文：清空目录树中所有章节已生成正文（目录结构保留，不可恢复） */
-  resetContent: (schemeId: string) =>
-    api.post(`/schemes/${schemeId}/sections/reset-content`),
+  resetContent: (schemeId: string) => api.post(`/schemes/${schemeId}/sections/reset-content`),
   /** 目录 AI 自然语言调整：**不落库**，返回待确认新树 + 变更总结，确认后仍走 saveOutline */
   adjustOutline: (schemeId: string, instruction: string) =>
     api.post(`/schemes/${schemeId}/sections/adjust-outline`, { instruction }),
-  // ✅ 编号一致性（2026-10-04 接线）：后端 4 个端点早已实现（校验 / 修复 /
-  //    版本列表 / 回滚），此前前端零封装 —— 用户无从发现「落库正文子标题编号
-  //    与当前目录编号漂移」（D4 类问题），导出前也没有自救入口。
+  // ✅ 编号一致性（R174 · 2026-11-03 界面接线）：4 个方法（校验 / 修复 /
+  //    版本列表 / 回滚）于 2026-10-04 封装，但此前生产代码零调用、本注释曾
+  //    失真声称「已接线」（审计 R173 · D1/F1）。现真实接线：工作台
+  //    「审核与预检」Tab 的 NumberingConsistencyPanel 消费全部 4 个方法 ——
+  //    用户可在导出前发现并修复「落库正文子标题编号与当前目录编号漂移」。
   numberingConsistency: (schemeId: string) =>
     api.get(`/schemes/${schemeId}/sections/numbering-consistency`),
   repairNumbering: (schemeId: string) =>
     api.post(`/schemes/${schemeId}/sections/numbering-consistency/repair`),
   numberingVersions: (schemeId: string, limit = 20) =>
-    api.get(`/schemes/${schemeId}/sections/numbering-consistency/versions`,
-      { params: { limit } }),
+    api.get(`/schemes/${schemeId}/sections/numbering-consistency/versions`, { params: { limit } }),
   rollbackNumbering: (schemeId: string, snapshotId: string) =>
     api.post(`/schemes/${schemeId}/sections/numbering-consistency/rollback/${snapshotId}`),
   /** F-CONTENT-STANDARD(2026-09-26)：单个章节最近一次生成标准校验报告 */
   report: (schemeId: string, sectionId: string) =>
     api.get(`/schemes/${schemeId}/sections/report/${sectionId}`),
   /** F-CONTENT-STANDARD(2026-09-26)：方案所有章节生成标准校验汇总 */
-  reportSummary: (schemeId: string) =>
-    api.get(`/schemes/${schemeId}/sections/report-summary`),
+  reportSummary: (schemeId: string) => api.get(`/schemes/${schemeId}/sections/report-summary`),
 };
 
 // 目录库
 export const outlineLibraryApi = {
-  list: (params?: Record<string, string>) =>
-    api.get("/outline-library", { params }),
+  list: (params?: Record<string, string>) => api.get("/outline-library", { params }),
   get: (id: string) => api.get(`/outline-library/${id}`),
   create: (data: JsonPayload) => api.post("/outline-library", data),
   update: (id: string, data: JsonPayload) => api.patch(`/outline-library/${id}`, data),
   delete: (id: string) => api.delete(`/outline-library/${id}`),
-  review: (id: string, data: OutlineReviewPayload) => api.post(`/outline-library/${id}/review`, data),
-  newVersion: (id: string, data: OutlineNewVersionPayload) => api.post(`/outline-library/${id}/new-version`, data),
+  review: (id: string, data: OutlineReviewPayload) =>
+    api.post(`/outline-library/${id}/review`, data),
+  newVersion: (id: string, data: OutlineNewVersionPayload) =>
+    api.post(`/outline-library/${id}/new-version`, data),
   // ✅ 已移除废弃的 apply（旧链路只取 JSON 不落库、却累加引用计数，易产生幽灵请求）；
   //    套用目录库统一走 applyAndSave（一步写库）。
   // 一步完成：目录库 → 方案 sections（后端复用 _save_outline_to_db 写入 sections）
@@ -308,7 +339,8 @@ export const outlineLibraryApi = {
   templates: () => api.get("/outline-library/templates"),
   template: (key: string) => api.get(`/outline-library/templates/${key}`),
   // ---- 增强：复制 / 版本回滚 / 批量审核 / 导出 ----
-  duplicate: (id: string, data?: JsonPayload) => api.post(`/outline-library/${id}/duplicate`, data || {}),
+  duplicate: (id: string, data?: JsonPayload) =>
+    api.post(`/outline-library/${id}/duplicate`, data || {}),
   /** 把方案当前目录树反向沉淀为目录库 */
   fromScheme: (data: JsonPayload) => api.post("/outline-library/from-scheme", data),
   restoreVersion: (id: string, data: OutlineRestoreVersionPayload) =>
@@ -320,7 +352,10 @@ export const outlineLibraryApi = {
 
 // 上传目录识别
 export const uploadOutlineApi = {
-  parse: (file: File, params?: { scheme_name?: string; reorganize?: boolean; project_id?: string }) => {
+  parse: (
+    file: File,
+    params?: { scheme_name?: string; reorganize?: boolean; project_id?: string },
+  ) => {
     const form = new FormData();
     form.append("file", file);
     const qs: string[] = [];
@@ -363,9 +398,14 @@ export const uploadOutlineApi = {
 export const factsApi = {
   // ✅ 2026-10-06：真正使用后端分页。`limit=0`（不传）时后端返回全量，
   //   行为与引入前一致；传 limit/offset 时按分组分页。
-  list: (schemeId: string, options?: {
-    signal?: AbortSignal; limit?: number; offset?: number;
-  }) =>
+  list: (
+    schemeId: string,
+    options?: {
+      signal?: AbortSignal;
+      limit?: number;
+      offset?: number;
+    },
+  ) =>
     api.get<FactListResponse>("/global-facts", {
       params: {
         scheme_id: schemeId,
@@ -377,31 +417,53 @@ export const factsApi = {
   create: (data: FactGroupUpsertPayload, schemeId: string) =>
     api.post("/global-facts", data, { params: { scheme_id: schemeId } }),
   update: (id: string, data: FactGroupUpsertPayload, schemeId?: string) =>
-    api.patch<FactResolveResponse>(`/global-facts/${id}`, data, { params: { scheme_id: schemeId || "" } }),
+    api.patch<FactResolveResponse>(`/global-facts/${id}`, data, {
+      params: { scheme_id: schemeId || "" },
+    }),
   resolve: (factId: string, schemeId?: string) =>
-    api.patch<FactResolveResponse>(`/global-facts/${factId}/resolve`, {}, { params: { scheme_id: schemeId || "" } }),
+    api.patch<FactResolveResponse>(
+      `/global-facts/${factId}/resolve`,
+      {},
+      { params: { scheme_id: schemeId || "" } },
+    ),
   // 选择一个候选值解决矛盾（前端候选值列表「选此值」）
   resolveConflict: (factId: string, value: string, schemeId?: string) =>
-    api.patch<FactResolveResponse>(`/global-facts/${factId}/resolve-conflict`, { value },
-      { params: { scheme_id: schemeId || "" } }),
+    api.patch<FactResolveResponse>(
+      `/global-facts/${factId}/resolve-conflict`,
+      { value },
+      { params: { scheme_id: schemeId || "" } },
+    ),
   batchResolve: (schemeId: string, factIds?: string[]) =>
-    api.post<FactResolveResponse>("/global-facts/batch-resolve", { scheme_id: schemeId, fact_ids: factIds }),
+    api.post<FactResolveResponse>("/global-facts/batch-resolve", {
+      scheme_id: schemeId,
+      fact_ids: factIds,
+    }),
   // ✅ G3（2026-10-04）：解除「来源已变化」过期标记。
   //    后端 `_mark_project_facts_stale` 是**项目级**批量打标的，一次资料重传
   //    就可能让上百条事实同时过期；而解除入口此前只有「改值」与「裁决矛盾」
   //    两条（都要求值必须先变），resolve / batch-resolve 对 stale 行还直接跳过 ——
   //    用户核对过但值未变时无任何出路。这两个端点表达「我已核对，值仍然有效」。
   ackStale: (factId: string, schemeId?: string, options?: { signal?: AbortSignal }) =>
-    api.patch<FactResolveResponse>(`/global-facts/${factId}/ack-stale`, {},
-      { params: { scheme_id: schemeId || "" }, signal: options?.signal }),
+    api.patch<FactResolveResponse>(
+      `/global-facts/${factId}/ack-stale`,
+      {},
+      { params: { scheme_id: schemeId || "" }, signal: options?.signal },
+    ),
   batchAckStale: (schemeId: string, factIds?: string[], options?: { signal?: AbortSignal }) =>
-    api.post<FactResolveResponse>("/global-facts/ack-stale", { scheme_id: schemeId, fact_ids: factIds },
-      { signal: options?.signal }),
+    api.post<FactResolveResponse>(
+      "/global-facts/ack-stale",
+      { scheme_id: schemeId, fact_ids: factIds },
+      { signal: options?.signal },
+    ),
   delete: (id: string, schemeId?: string) =>
     api.delete(`/global-facts/${id}`, { params: { scheme_id: schemeId || "" } }),
   // ✅ 一键清除全部已提取的项目信息（含增量提取进度重置，2026-09-17）
   clearAll: (schemeId: string) =>
-    api.post<FactResolveResponse>("/global-facts/clear", { scheme_id: schemeId }, { timeout: 60000 }),
+    api.post<FactResolveResponse>(
+      "/global-facts/clear",
+      { scheme_id: schemeId },
+      { timeout: 60000 },
+    ),
   // ✅ 事实分类白名单（后端 CATEGORY_TITLES 单一事实源，消三侧口径债 2026-09-20）
   //    注意与 categoryOptions（文档分类 /documents/category-options）是两套不同分类
   categories: () => api.get("/global-facts/categories"),
@@ -418,14 +480,15 @@ export const factsApi = {
     data: { scheme_name?: string; extra_text?: string },
     schemeId: string,
     options?: { signal?: AbortSignal },
-  ) => api.post<FactDangerResponse>("/global-facts/danger-check", data, {
-    params: { scheme_id: schemeId },
-    signal: options?.signal,
-  }),
+  ) =>
+    api.post<FactDangerResponse>("/global-facts/danger-check", data, {
+      params: { scheme_id: schemeId },
+      signal: options?.signal,
+    }),
   // ✅ 分步工作流：① 上传保存（仅存文件，不解析不提取）
   uploadDocuments: (files: File[], schemeId: string, options?: { signal?: AbortSignal }) => {
     const form = new FormData();
-    files.forEach(f => form.append("files", f));
+    files.forEach((f) => form.append("files", f));
     return api.post("/global-facts/upload-documents", form, {
       params: { scheme_id: schemeId },
       headers: { "Content-Type": "multipart/form-data" },
@@ -444,7 +507,9 @@ export const factsApi = {
   // ② 批量解析该项目下的文档（force=true 时连同已解析文档一起重解析，
   //    用于补齐旧版截断内容 / 启用 OCR 后重扫扫描件）
   parseAllDocuments: (
-    schemeId: string, projectId?: string, force = false,
+    schemeId: string,
+    projectId?: string,
+    force = false,
     options?: { signal?: AbortSignal },
   ) =>
     api.post("/global-facts/documents/parse-all", null, {
@@ -460,8 +525,7 @@ export const factsApi = {
       params: { scheme_id: options.schemeId, project_id: options.projectId },
       signal: options.signal,
     }),
-  deleteDocument: (docId: string) =>
-    api.delete(`/global-facts/documents/${docId}`),
+  deleteDocument: (docId: string) => api.delete(`/global-facts/documents/${docId}`),
   // ✅ 文件导入/解析增强：文件预览（前 N 字）和分类管理
   previewDocument: (docId: string, maxChars = 5000) =>
     api.get(`/global-facts/documents/${docId}/preview`, { params: { max_chars: maxChars } }),
@@ -472,8 +536,13 @@ export const factsApi = {
   //    事实，返回最小操作计划，apply=false 默认不落库）早已实现，前端 api 层
   //    **从未封装** —— 「AI 批量调整事实」能力对 UI 完全不可见（调用链断裂）。
   //    现补齐封装；默认 apply=false，与后端「零数据风险」默认一致。
-  adjust: (payload: { instruction: string; scheme_id?: string; project_id?: string; apply?: boolean; operations?: Array<Record<string, unknown>> }) =>
-    api.post("/global-facts/adjust", payload, { timeout: 120000 }),
+  adjust: (payload: {
+    instruction: string;
+    scheme_id?: string;
+    project_id?: string;
+    apply?: boolean;
+    operations?: Array<Record<string, unknown>>;
+  }) => api.post("/global-facts/adjust", payload, { timeout: 120000 }),
 };
 
 // =========================================================================
@@ -490,7 +559,9 @@ export const docPipelineApi = {
   status: (docId: string) => api.get(`/documents/${docId}/status`),
   /** 提取结果查询（按类别：project_info / engineering / geology / ...；后端参数名固定为 type） */
   extractions: (docId: string, extractType?: string) =>
-    api.get(`/documents/${docId}/extractions`, { params: extractType ? { type: extractType } : {} }),
+    api.get(`/documents/${docId}/extractions`, {
+      params: extractType ? { type: extractType } : {},
+    }),
   /** 分块查询（含 source_ref 溯源，供目录/事实提取定位原文） */
   chunks: (docId: string, chunkType?: string) =>
     api.get(`/documents/${docId}/chunks`, { params: chunkType ? { chunk_type: chunkType } : {} }),
@@ -509,8 +580,7 @@ export const docPipelineApi = {
   crossCheck: (docId: string) =>
     api.post(`/documents/${docId}/cross-check`, null, { timeout: 120000 }),
   /** 项目文档索引：磁盘 documents_index.json 与 DB 档案合并视图 */
-  projectIndex: (projectId: string) =>
-    api.get(`/projects/${projectId}/documents/index`),
+  projectIndex: (projectId: string) => api.get(`/projects/${projectId}/documents/index`),
 };
 
 // =========================================================================
@@ -543,9 +613,7 @@ export const bidAnalysisApi = {
    * 空清单 + domain_unknown=true（fail-closed，不静默回退）。
    */
   itemsByDomain: (domain?: string) =>
-    withRetry(() =>
-      api.get("/bid-analysis/items", { params: domain ? { domain } : undefined }),
-    ),
+    withRetry(() => api.get("/bid-analysis/items", { params: domain ? { domain } : undefined })),
   /**
    * 可用提取域清单及启用状态（前端据此决定是否展示域切换器）。
    * 未启用的域 enabled=false，后端对未启用域的 /items 返回 404。
@@ -594,7 +662,9 @@ export const bidAnalysisApi = {
   /** 查询已存储的提取结果（含汇总；summary 含 success_valid / manual_count） */
   /** ✅ 重试加固（同 items，见上方注释） */
   results: (schemeId: string, projectId?: string) =>
-    withRetry(() => api.get("/bid-analysis/results", { params: { scheme_id: schemeId, project_id: projectId } })),
+    withRetry(() =>
+      api.get("/bid-analysis/results", { params: { scheme_id: schemeId, project_id: projectId } }),
+    ),
   /** 单个解析项结果 */
   singleResult: (itemId: string, schemeId: string, projectId?: string) =>
     api.get(`/bid-analysis/results/${itemId}`, {
@@ -607,15 +677,14 @@ export const bidAnalysisApi = {
    * 整项重跑（贵且不稳定），而抽错的值会继续被目录/正文生成消费。
    * json 项提交非法 JSON → 422；空内容 → 422（请用 clearResult）。
    */
-  updateResult: (
-    itemId: string,
-    schemeId: string,
-    content: string,
-    projectId?: string,
-  ) =>
-    api.put(`/bid-analysis/results/${itemId}`, { content }, {
-      params: { scheme_id: schemeId, project_id: projectId },
-    }),
+  updateResult: (itemId: string, schemeId: string, content: string, projectId?: string) =>
+    api.put(
+      `/bid-analysis/results/${itemId}`,
+      { content },
+      {
+        params: { scheme_id: schemeId, project_id: projectId },
+      },
+    ),
   /** 清空单个解析项结果（撤销人工校正 / 放弃该项，回到 idle + source='ai'） */
   clearResult: (itemId: string, schemeId: string, projectId?: string) =>
     api.delete(`/bid-analysis/results/${itemId}`, {
@@ -640,15 +709,19 @@ export const bidAnalysisApi = {
    *   从而复用统一的鉴权头 / AbortController / SSE 分帧逻辑，
    *   消除此前裸 fetch 在开启 VITE_API_TOKEN 后 401 断链的问题。
    */
-  startSse: (schemeId: string, projectId?: string, opts?: {
-    mode?: "key" | "full" | "custom" | "item";
-    selectedItemIds?: string[];
-    forceRerun?: boolean;
-    /** ✅ 2026-09-30：提取域，省略 = scheme 域（与旧版一致） */
-    domain?: "scheme" | "bid_response";
-    /** ✅ 2026-09-30：断点续跑 */
-    skipDone?: boolean;
-  }) => {
+  startSse: (
+    schemeId: string,
+    projectId?: string,
+    opts?: {
+      mode?: "key" | "full" | "custom" | "item";
+      selectedItemIds?: string[];
+      forceRerun?: boolean;
+      /** ✅ 2026-09-30：提取域，省略 = scheme 域（与旧版一致） */
+      domain?: "scheme" | "bid_response";
+      /** ✅ 2026-09-30：断点续跑 */
+      skipDone?: boolean;
+    },
+  ) => {
     const params: Record<string, string> = { scheme_id: schemeId };
     if (projectId) params.project_id = projectId;
     if (opts?.mode) params.mode = opts.mode;
@@ -668,13 +741,15 @@ export const bidAnalysisApi = {
   classify: (
     schemeId: string,
     projectId?: string,
-    body?: { scheme_name?: string; params?: Record<string, string | number | boolean>; extra_text?: string },
+    body?: {
+      scheme_name?: string;
+      params?: Record<string, string | number | boolean>;
+      extra_text?: string;
+    },
   ) =>
-    api.post(
-      "/bid-analysis/classify",
-      body ?? {},
-      { params: { scheme_id: schemeId, project_id: projectId } },
-    ),
+    api.post("/bid-analysis/classify", body ?? {}, {
+      params: { scheme_id: schemeId, project_id: projectId },
+    }),
 };
 
 // 合规检查（AI 逐条判定 10+ 项清单，耗时较长，120s 超时）
@@ -730,7 +805,7 @@ export const reviewApi = {
   reviewSection: (
     schemeId: string,
     sectionId: string,
-    data: { to_status: string; reviewer?: string; comment?: string }
+    data: { to_status: string; reviewer?: string; comment?: string },
   ) => api.post(`/schemes/${schemeId}/review/sections/${sectionId}`, data),
   batch: (
     schemeId: string,
@@ -740,7 +815,7 @@ export const reviewApi = {
       reviewer?: string;
       comment?: string;
       force?: boolean;
-    }
+    },
   ) => api.post(`/schemes/${schemeId}/review/sections/batch`, data),
   /** 提交方案级审核。
    *  ✅ G6：require_all_sections_reviewed 此前后端字段存在但前端从不传，
@@ -752,7 +827,7 @@ export const reviewApi = {
       reviewer?: string;
       comment?: string;
       require_all_sections_reviewed?: boolean;
-    }
+    },
   ) => api.post(`/schemes/${schemeId}/review/submit`, data),
   // ✅ G8：offset + has_more —— 后端评审轨迹超过 200 条时早期记录此前永久不可见
   records: (schemeId: string, sectionId?: string, limit = 50, offset = 0) =>
@@ -769,13 +844,17 @@ export const consistencyRepairApi = {
   scan: (schemeId: string, data?: ConsistencyScanPayload, signal?: AbortSignal) =>
     api.post(`/schemes/${schemeId}/consistency/scan`, data || {}, { timeout: 600000, signal }),
   conflicts: (schemeId: string, scanId?: string) =>
-    api.get(`/schemes/${schemeId}/consistency/conflicts`, { params: scanId ? { scan_id: scanId } : {} }),
+    api.get(`/schemes/${schemeId}/consistency/conflicts`, {
+      params: scanId ? { scan_id: scanId } : {},
+    }),
   repair: (schemeId: string, data?: ConsistencyRepairPayload, signal?: AbortSignal) =>
     api.post(`/schemes/${schemeId}/consistency/repair`, data || {}, { timeout: 600000, signal }),
   repairDetail: (schemeId: string, repairId: string) =>
     api.get(`/schemes/${schemeId}/consistency/repair/${repairId}`),
-  confirm: (schemeId: string, data: { repair_id: string; accepted?: string[]; rejected?: string[] }) =>
-    api.post(`/schemes/${schemeId}/consistency/confirm`, data),
+  confirm: (
+    schemeId: string,
+    data: { repair_id: string; accepted?: string[]; rejected?: string[] },
+  ) => api.post(`/schemes/${schemeId}/consistency/confirm`, data),
   rollback: (schemeId: string, data: { snapshot_id?: string; repair_id?: string }) =>
     api.post(`/schemes/${schemeId}/consistency/rollback`, data),
   repairs: (schemeId: string, limit = 20) =>
@@ -794,8 +873,7 @@ export const reviewAutoFixApi = {
    * finding.autofix。后端已挂 deprecated，保留仅因契约测试锁定。
    * @deprecated 见上；新增功能请用 `finding.autofix`。
    */
-  capabilities: (schemeId: string) =>
-    api.get(`/schemes/${schemeId}/review/autofix/capabilities`),
+  capabilities: (schemeId: string) => api.get(`/schemes/${schemeId}/review/autofix/capabilities`),
   /** 定位矛盾位置（只读预览，不调 AI、不落库） */
   plan: (schemeId: string, data: { rule_id: string; section_id?: string }) =>
     api.post(`/schemes/${schemeId}/review/autofix/plan`, data, { timeout: 120000 }),
@@ -837,10 +915,14 @@ export const reviewAutoFixApi = {
 
 // 知识库 / 素材库（§3.9；生成链路自动注入项目级条目）
 export const knowledgeApi = {
-  list: (params: { project_id?: string; scheme_id?: string }) =>
-    api.get("/knowledge", { params }),
-  create: (data: { project_id?: string; scheme_id?: string; name: string; usage_hint?: string; content?: string }) =>
-    api.post("/knowledge", data),
+  list: (params: { project_id?: string; scheme_id?: string }) => api.get("/knowledge", { params }),
+  create: (data: {
+    project_id?: string;
+    scheme_id?: string;
+    name: string;
+    usage_hint?: string;
+    content?: string;
+  }) => api.post("/knowledge", data),
   update: (id: string, data: JsonPayload) => api.put(`/knowledge/${id}`, data),
   delete: (id: string) => api.delete(`/knowledge/${id}`),
   asText: (params: { project_id?: string; scheme_id?: string }) =>
@@ -863,17 +945,27 @@ export const exportApi = {
     api.get(`/schemes/${schemeId}/export/placeholder-history`, { signal }),
   // ✅ 修复：导出需等待图表预渲染（每图 HTTP 预算 20s + PIL），全局 30s 超时极易误报失败
   // chartImages：前端 mermaid.js（与预览一致）渲染的 PNG，后端优先采用实现所见即所得
-  docx: (schemeId: string, config: ExportFormatConfig, chartImages?: { chart_type: string; mermaid_code: string; png: string }[], signal?: AbortSignal) =>
+  docx: (
+    schemeId: string,
+    config: ExportFormatConfig,
+    chartImages?: { chart_type: string; mermaid_code: string; png: string }[],
+    signal?: AbortSignal,
+  ) =>
     api.post(
       `/schemes/${schemeId}/export/docx`,
       { config, chart_images: chartImages || [] },
-      { responseType: "blob", timeout: 600000, signal }
+      { responseType: "blob", timeout: 600000, signal },
     ),
-  pdf: (schemeId: string, config: ExportFormatConfig, chartImages?: { chart_type: string; mermaid_code: string; png: string }[], signal?: AbortSignal) =>
+  pdf: (
+    schemeId: string,
+    config: ExportFormatConfig,
+    chartImages?: { chart_type: string; mermaid_code: string; png: string }[],
+    signal?: AbortSignal,
+  ) =>
     api.post(
       `/schemes/${schemeId}/export/pdf`,
       { config, chart_images: chartImages || [] },
-      { responseType: "blob", timeout: 600000, signal }
+      { responseType: "blob", timeout: 600000, signal },
     ),
   cacheStatus: (schemeId: string, signal?: AbortSignal) =>
     api.get(`/schemes/${schemeId}/export/cache-status`, { signal }),
@@ -888,8 +980,11 @@ export const exportApi = {
       api.get(`/schemes/${schemeId}/export/presets`, { signal }),
     create: (schemeId: string, name: string, config: ExportFormatConfig) =>
       api.post(`/schemes/${schemeId}/export/presets`, { name, config }),
-    update: (schemeId: string, presetId: string, payload: { name?: string; config?: ExportFormatConfig }) =>
-      api.put(`/schemes/${schemeId}/export/presets/${presetId}`, payload),
+    update: (
+      schemeId: string,
+      presetId: string,
+      payload: { name?: string; config?: ExportFormatConfig },
+    ) => api.put(`/schemes/${schemeId}/export/presets/${presetId}`, payload),
     setDefault: (schemeId: string, presetId: string) =>
       api.post(`/schemes/${schemeId}/export/presets/${presetId}/default`),
     remove: (schemeId: string, presetId: string) =>
@@ -899,8 +994,7 @@ export const exportApi = {
 
 // 专项方案清单
 export const schemeCatalogApi = {
-  list: (params?: Record<string, string>) =>
-    api.get("/scheme-catalog", { params }),
+  list: (params?: Record<string, string>) => api.get("/scheme-catalog", { params }),
   categories: () => api.get("/scheme-catalog/categories"),
   get: (id: string) => api.get(`/scheme-catalog/${id}`),
 };
@@ -910,11 +1004,15 @@ export const chartsApi = {
   types: () => api.get("/charts/types"),
   render: (data: { chart_type: string; code: string; skip_http?: boolean }) =>
     api.post("/charts/render", data, { responseType: "blob", timeout: 60000 }),
-  fixMermaid: (data: { code: string; error: string; chart_type?: string; section_id?: string; prediction_id?: string }) =>
-    api.post("/charts/fix-mermaid", data),
+  fixMermaid: (data: {
+    code: string;
+    error: string;
+    chart_type?: string;
+    section_id?: string;
+    prediction_id?: string;
+  }) => api.post("/charts/fix-mermaid", data),
   /** 图表清单（按方案；导出预渲染用） */
-  list: (schemeId: string, signal?: AbortSignal) =>
-    api.get(`/charts/list/${schemeId}`, { signal }),
+  list: (schemeId: string, signal?: AbortSignal) => api.get(`/charts/list/${schemeId}`, { signal }),
   // ✅ 接口移除（2026-09-23，AGENTS.md 显式迁移决策）：chartsApi.generateAiImage
   //    已删除 —— v17 起配图在导出 DOCX 时由后端全自动生成（全仓 0 调用方已核实）。
   //    后端 /charts/generate-ai-image 端点按「禁止删除既有 API 端点不提供迁移路径」
@@ -930,6 +1028,11 @@ export const aiApi = {
   saveConfig: (data: AIConfigPayload) => api.post<AIConfigSaveResponse>("/ai/config", data),
   deleteConfig: (id: string) => api.delete<AIConfigDeleteResponse>(`/ai/config/${id}`),
   toggleConfig: (id: string) => api.patch<AIConfigToggleResponse>(`/ai/config/${id}/toggle`),
+  /** ✅ R175（BUG-03）：启用/停用单条配置参与真实调用（不改变「当前使用」） */
+  setConfigEnabled: (id: string, enabled: boolean) =>
+    api.put<{ ok: boolean; enabled: boolean; unchanged?: boolean }>(`/ai/config/${id}/enabled`, {
+      enabled,
+    }),
   testConfig: (data: AIConfigTestRequest) =>
     // ✅ R169：后端双探测最坏路径 = DNS/TCP 预检(~5s) + 流式探测 120s + 普通探测
     //    120s ≈ 245s（connectivity.py 专门为「厂商接受 TCP 但响应极慢」的境外
@@ -965,24 +1068,37 @@ export const aiApi = {
   /** 导出全部配置（不含 API Key；✅ 2026-10-06 起附带场景路由与运行时设置） */
   exportConfig: () => api.get<AIConfigExport>("/ai/config/export"),
   /** 导入配置（API Key 需重新填写；✅ 2026-10-06 起可随配置迁移场景路由/运行时设置） */
-  importConfig: (items: AIConfigExportItem[], overwrite = false,
-    set_first_active = false, sceneRoutes?: AIConfigSceneRouteExport[],
-    runtime?: Record<string, string>) =>
+  importConfig: (
+    items: AIConfigExportItem[],
+    overwrite = false,
+    set_first_active = false,
+    sceneRoutes?: AIConfigSceneRouteExport[],
+    runtime?: Record<string, string>,
+  ) =>
     api.post<AIConfigImportResponse>("/ai/config/import", {
-      items, overwrite, set_first_active,
-      scene_routes: sceneRoutes, runtime,
+      items,
+      overwrite,
+      set_first_active,
+      scene_routes: sceneRoutes,
+      runtime,
     }),
   /** ✅ 2026-10-06（G1）：导入预演 —— 只校验不落库，先看处置计划再确认导入 */
-  importConfigDryRun: (items: AIConfigExportItem[], overwrite = false,
-    set_first_active = false, sceneRoutes?: AIConfigSceneRouteExport[],
-    runtime?: Record<string, string>) =>
+  importConfigDryRun: (
+    items: AIConfigExportItem[],
+    overwrite = false,
+    set_first_active = false,
+    sceneRoutes?: AIConfigSceneRouteExport[],
+    runtime?: Record<string, string>,
+  ) =>
     api.post<AIConfigImportDryRunResponse>("/ai/config/import/dry-run", {
-      items, overwrite, set_first_active,
-      scene_routes: sceneRoutes, runtime,
+      items,
+      overwrite,
+      set_first_active,
+      scene_routes: sceneRoutes,
+      runtime,
     }),
   /** ✅ 2026-10-06（G3）：全部配置的可用性体检（密钥/环境/地址/网络/厂商开关） */
-  configsHealth: () =>
-    api.get<AIConfigsHealthResponse>("/ai/configs/health", { timeout: 30000 }),
+  configsHealth: () => api.get<AIConfigsHealthResponse>("/ai/configs/health", { timeout: 30000 }),
   /**
    * ✅ 2026-09-23 新增：清除某条配置已保存的 API Key（收回密钥）。
    * 背景：此前只能整体删除配置才能移除 Key，而「当前使用」的配置**不允许删除**，
@@ -1008,8 +1124,10 @@ export const aiApi = {
   setEnv: (env: string) => api.put<AISetEnvResponse>("/ai/env", { env }),
   /** ✅ G6：把配置回滚到某条变更记录**变更前**的状态（密钥不参与回滚） */
   rollbackConfig: (config_id: string, audit_id: string, include_active = false) =>
-    api.post<AIConfigRollbackResponse>(
-      `/ai/config/${config_id}/rollback`, { audit_id, include_active }),
+    api.post<AIConfigRollbackResponse>(`/ai/config/${config_id}/rollback`, {
+      audit_id,
+      include_active,
+    }),
   /** ✅ 运行时开关：当前生效环境 + 被禁用厂商 + 可选厂商清单 */
   getRuntime: () => api.get<AIRuntimeResponse>("/ai/runtime"),
   /** ✅ 运行时开关：整体覆盖被禁用厂商（空数组 = 全部恢复），即时生效无需重启 */
@@ -1034,8 +1152,7 @@ export const promptsApi = {
     api.get<PromptListResponse>("/prompts", { params: category ? { category } : {} }),
   update: (key: string, content: string) =>
     api.patch<PromptMutationResponse>(`/prompts/${key}`, { content }),
-  reset: (key: string) =>
-    api.post<PromptMutationResponse>(`/prompts/${key}/reset`),
+  reset: (key: string) => api.post<PromptMutationResponse>(`/prompts/${key}/reset`),
   auditLogs: (key: string, limit = 50, offset = 0) =>
     api.get<PromptAuditLogsResponse>("/prompts/audit-logs", {
       params: { key, limit, offset },
@@ -1108,8 +1225,11 @@ export interface PromptMetricsSnapshot {
 /** 硬编码模板→DB 一键同步结果（POST /admin/prompts/sync-from-code） */
 export interface PromptSyncResult {
   summary: {
-    inserted: number; in_sync: number; drift: number;
-    overwritten: number; errors: number;
+    inserted: number;
+    in_sync: number;
+    drift: number;
+    overwritten: number;
+    errors: number;
   };
   details: Array<{
     key: string;
@@ -1132,11 +1252,8 @@ export const systemApi = {
     api.put<GovernanceSettings>("/system/governance", body),
   activity: (limit = 8) => api.get("/system/activity", { params: { limit } }),
   /** SSE 实时流：任务 / AI 状态变更时立即推送快照 */
-  activityStream: (
-    limit = 8,
-    signal?: AbortSignal,
-    softStop?: Promise<void>
-  ) => sseGetStream("/system/activity/stream", { params: { limit }, signal, softStop }),
+  activityStream: (limit = 8, signal?: AbortSignal, softStop?: Promise<void>) =>
+    sseGetStream("/system/activity/stream", { params: { limit }, signal, softStop }),
 };
 
 /** 提示词运行时指标（进程内存计数器，重启清零）。
@@ -1195,9 +1312,7 @@ function detailArrayToText(detail: unknown[]): string {
     if (!item || typeof item !== "object") continue;
     // FastAPI/Pydantic 生成的校验明细（外部规范、前端不可控），仅消费 loc/msg
     const it = item as FastAPIValidationErrorItem;
-    const locParts = Array.isArray(it.loc)
-      ? it.loc.map(String).filter(Boolean)
-      : [];
+    const locParts = Array.isArray(it.loc) ? it.loc.map(String).filter(Boolean) : [];
     const field = locParts.length > 1 ? locParts[locParts.length - 1] : "";
     const scopeLabel = locParts[0] ? scopeCn[locParts[0]] : "";
     const msg = typeof it.msg === "string" ? it.msg : "";
@@ -1255,7 +1370,7 @@ async function readSseHttpError(resp: Response): Promise<string> {
 export async function* sseFetch(
   url: string,
   body?: unknown,
-  options?: SseFetchOptions
+  options?: SseFetchOptions,
 ): AsyncGenerator<SseEvent> {
   // AbortController 主动取消时静默返回，避免 net::ERR_ABORTED 在控制台产红线
   if (options?.signal?.aborted) return;
@@ -1272,19 +1387,28 @@ export async function* sseFetch(
   // 建连阶段中断源：inner 被 abort（超时或外层取消）时立即决出，不依赖
   // fetch 实现对 signal 的响应（部分 polyfill / 挂死场景 fetch 永不 reject）
   const abortPromise = new Promise<never>((_, reject) => {
-    inner.signal.addEventListener("abort", () => {
-      if (timedOut) {
-        reject(new Error(timeoutMsg));
-      } else {
-        const e = new Error("Aborted");
-        e.name = "AbortError";
-        reject(e);
-      }
-    }, { once: true });
+    inner.signal.addEventListener(
+      "abort",
+      () => {
+        if (timedOut) {
+          reject(new Error(timeoutMsg));
+        } else {
+          const e = new Error("Aborted");
+          e.name = "AbortError";
+          reject(e);
+        }
+      },
+      { once: true },
+    );
   });
   abortPromise.catch(() => {}); // race 结束后再 reject 时避免 unhandled rejection
   const connectTimer =
-    connectTimeoutMs > 0 ? setTimeout(() => { timedOut = true; inner.abort(); }, connectTimeoutMs) : null;
+    connectTimeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          inner.abort();
+        }, connectTimeoutMs)
+      : null;
   let resp: Response;
   try {
     resp = await Promise.race([
@@ -1317,7 +1441,10 @@ export async function* sseFetch(
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  const dispatchBlocks = (text: string, flushRemainder = false): Array<{ data?: string; heartbeat: boolean }> => {
+  const dispatchBlocks = (
+    text: string,
+    flushRemainder = false,
+  ): Array<{ data?: string; heartbeat: boolean }> => {
     const out: Array<{ data?: string; heartbeat: boolean }> = [];
     const separator = /\r\n\r\n|\n\n|\r\r/;
     let match: RegExpExecArray | null;
@@ -1339,9 +1466,15 @@ export async function* sseFetch(
           readResult = await Promise.race([
             reader.read(),
             new Promise<never>((_, reject) => {
-              timer = setTimeout(() => reject(new Error(
-                `SSE 数据流空闲超时（${Math.round(idleTimeoutMs / 1000)}s 无心跳或事件）：后台任务可能已失联`
-              )), idleTimeoutMs);
+              timer = setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      `SSE 数据流空闲超时（${Math.round(idleTimeoutMs / 1000)}s 无心跳或事件）：后台任务可能已失联`,
+                    ),
+                  ),
+                idleTimeoutMs,
+              );
             }),
           ]);
         } finally {
@@ -1355,7 +1488,11 @@ export async function* sseFetch(
         for (const block of dispatchBlocks(buffer, true)) {
           if (block.heartbeat) options?.onHeartbeat?.();
           if (block.data !== undefined) {
-            try { yield JSON.parse(block.data); } catch { /* 跳过非 JSON 数据 */ }
+            try {
+              yield JSON.parse(block.data);
+            } catch {
+              /* 跳过非 JSON 数据 */
+            }
           }
         }
         break;
@@ -1364,7 +1501,11 @@ export async function* sseFetch(
       for (const block of dispatchBlocks(buffer)) {
         if (block.heartbeat) options?.onHeartbeat?.();
         if (block.data !== undefined) {
-          try { yield JSON.parse(block.data); } catch { /* 跳过非 JSON 数据 */ }
+          try {
+            yield JSON.parse(block.data);
+          } catch {
+            /* 跳过非 JSON 数据 */
+          }
         }
       }
     }
@@ -1390,7 +1531,7 @@ export async function* sseGetStream(
      * 典型场景：React.StrictMode 开发态 mount→cleanup→mount 时关闭首次连接。
      */
     softStop?: Promise<void>;
-  }
+  },
 ): AsyncGenerator<SseEvent> {
   if (options?.signal?.aborted) return;
   const query = options?.params
@@ -1414,12 +1555,16 @@ export async function* sseGetStream(
         signal: inner.signal,
       }),
       new Promise<never>((_, reject) => {
-        inner.signal.addEventListener("abort", () => {
-          // 仅当不是外层主动取消时才报超时（外层取消走下方 catch 的 return 分支）
-          if (!options?.signal?.aborted) {
-            reject(new Error(timeoutMsg));
-          }
-        }, { once: true });
+        inner.signal.addEventListener(
+          "abort",
+          () => {
+            // 仅当不是外层主动取消时才报超时（外层取消走下方 catch 的 return 分支）
+            if (!options?.signal?.aborted) {
+              reject(new Error(timeoutMsg));
+            }
+          },
+          { once: true },
+        );
       }),
     ]);
   } catch (err: unknown) {

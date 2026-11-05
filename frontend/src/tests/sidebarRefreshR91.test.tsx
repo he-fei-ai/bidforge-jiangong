@@ -20,14 +20,18 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import {
-  subscribeSidebarTreeRefresh, notifySidebarTreeRefresh,
-  computeRefreshTargets, resolveTreeClick,
+  subscribeSidebarTreeRefresh,
+  notifySidebarTreeRefresh,
+  computeRefreshTargets,
+  resolveTreeClick,
 } from "../utils/sidebarEvents";
 
 const RAW: Record<string, string> = Object.fromEntries(
   Object.entries(
     import.meta.glob("../**/*.{ts,tsx}", {
-      query: "?raw", import: "default", eager: true,
+      query: "?raw",
+      import: "default",
+      eager: true,
     }) as Record<string, string>,
   ).map(([k, v]) => [k.replace(/^\.\.\//, "").replace(/^\.\//, "tests/"), v]),
 );
@@ -39,7 +43,9 @@ const LIST = RAW["pages/ProjectListPage.tsx"];
 describe("R91 · sidebarEvents 事件总线（订阅/通知/取消订阅）", () => {
   it("notify 携带 projectId 透传给订阅者；unsubscribe 后不再收", () => {
     const seen: Array<string | undefined> = [];
-    const off = subscribeSidebarTreeRefresh((pid) => { seen.push(pid); });
+    const off = subscribeSidebarTreeRefresh((pid) => {
+      seen.push(pid);
+    });
     notifySidebarTreeRefresh("p1");
     notifySidebarTreeRefresh();
     off();
@@ -49,11 +55,14 @@ describe("R91 · sidebarEvents 事件总线（订阅/通知/取消订阅）", ()
 
   it("单个订阅者抛错不影响其它订阅者（fail-soft 隔离）", () => {
     const good = vi.fn();
-    const offBad = subscribeSidebarTreeRefresh(() => { throw new Error("boom"); });
+    const offBad = subscribeSidebarTreeRefresh(() => {
+      throw new Error("boom");
+    });
     const offGood = subscribeSidebarTreeRefresh(good);
     expect(() => notifySidebarTreeRefresh("x")).not.toThrow();
     expect(good).toHaveBeenCalledWith("x");
-    offBad(); offGood();
+    offBad();
+    offGood();
   });
 });
 
@@ -75,10 +84,8 @@ describe("R91 · computeRefreshTargets（绕过永久去重的重取集合）", 
 
 describe("R91 · resolveTreeClick（占位项可点直达新建方案，症状②）", () => {
   it("「进入项目新建方案 / 暂无方案」占位 → 跳项目详情带 ?create=1", () => {
-    expect(resolveTreeClick("/project/p-1/create-scheme"))
-      .toBe("/project/p-1?create=1");
-    expect(resolveTreeClick("/project/p-1/empty"))
-      .toBe("/project/p-1?create=1");
+    expect(resolveTreeClick("/project/p-1/create-scheme")).toBe("/project/p-1?create=1");
+    expect(resolveTreeClick("/project/p-1/empty")).toBe("/project/p-1?create=1");
   });
 
   it("「加载中...」占位无反应；方案/菜单/项目键原样放行；非字符串安全", () => {
@@ -108,11 +115,11 @@ describe("R91 · 静态接线锁（症状①：写入点必须 notify，侧栏�
   it("Layout：两个占位项已去掉 disabled:true（死占位改可点）", () => {
     // create-scheme 与 empty 两处占位都不得再带 disabled
     const createBlock = LAYOUT.slice(
-      LAYOUT.indexOf('key: `${projectKey}/create-scheme`'),
-      LAYOUT.indexOf('key: `${projectKey}/loading`'),
+      LAYOUT.indexOf("key: `${projectKey}/create-scheme`"),
+      LAYOUT.indexOf("key: `${projectKey}/loading`"),
     );
     const emptyBlock = LAYOUT.slice(
-      LAYOUT.indexOf('key: `${projectKey}/empty`'),
+      LAYOUT.indexOf("key: `${projectKey}/empty`"),
       LAYOUT.indexOf("schemes.map"),
     );
     expect(createBlock.length).toBeGreaterThan(20);
@@ -139,7 +146,7 @@ describe("R91 · 静态接线锁（症状①：写入点必须 notify，侧栏�
   });
 
   it("ProjectDetailPage：?create=1 自动打开新建弹窗并 replace 清理 URL", () => {
-    expect(DETAIL).toContain('useSearchParams');
+    expect(DETAIL).toContain("useSearchParams");
     expect(DETAIL).toContain('searchParams.get("create") === "1"');
     expect(DETAIL).toContain("setModalOpen(true)");
     expect(DETAIL).toContain("navigate(`/project/${id}`, { replace: true })");

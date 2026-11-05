@@ -58,7 +58,7 @@ function setup(props: Partial<React.ComponentProps<typeof BaItemFlatList>> = {})
       defsError={props.defsError ?? null}
       selectedItemId={props.selectedItemId ?? null}
       onSelectItem={props.onSelectItem ?? onSelectItem}
-    />
+    />,
   );
   return { ...utils, onSelectItem, defs };
 }
@@ -66,7 +66,7 @@ function setup(props: Partial<React.ComponentProps<typeof BaItemFlatList>> = {})
 /** 按标签定位某一行（返回行容器 div） */
 function rowByText(container: HTMLElement, label: string): HTMLElement {
   const rows = Array.from(container.querySelectorAll('[data-testid="ba-flat-item"]'));
-  const el = rows.find(d => (d.textContent || "").includes(label));
+  const el = rows.find((d) => (d.textContent || "").includes(label));
   if (!el) throw new Error(`未找到包含「${label}」的清单行`);
   return el as HTMLElement;
 }
@@ -130,11 +130,13 @@ describe("BaItemFlatList", () => {
   it("success 但 json 所有字段都是「没有提及」：橙色「空」", () => {
     const { container } = setup({
       defs: [def({ item_id: "pbi", output_type: "json" })],
-      items: [stored({
-        item_id: "pbi",
-        status: "success",
-        content: '{"project_name":"没有提及","project_number":"没有提及"}',
-      })],
+      items: [
+        stored({
+          item_id: "pbi",
+          status: "success",
+          content: '{"project_name":"没有提及","project_number":"没有提及"}',
+        }),
+      ],
     });
     const tag = rowByText(container, "项目基本信息").querySelectorAll(".ant-tag")[1];
     expect(tag.textContent).toBe("空");
@@ -144,11 +146,13 @@ describe("BaItemFlatList", () => {
   it("success 且 json 至少一个字段有值：绿色 ✓（反例，防误判空）", () => {
     const { container } = setup({
       defs: [def({ item_id: "pbi2", output_type: "json" })],
-      items: [stored({
-        item_id: "pbi2",
-        status: "success",
-        content: '{"project_name":"某某大厦","project_number":"没有提及"}',
-      })],
+      items: [
+        stored({
+          item_id: "pbi2",
+          status: "success",
+          content: '{"project_name":"某某大厦","project_number":"没有提及"}',
+        }),
+      ],
     });
     const tag = rowByText(container, "项目基本信息").querySelectorAll(".ant-tag")[1];
     expect(tag.textContent).toBe("✓");

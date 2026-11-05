@@ -45,9 +45,23 @@ describe("computeDocStats", () => {
 
   it("null / undefined / 非数组：同空数组返回", () => {
     // @ts-expect-error 故意传入非数组验证防御性
-    expect(computeDocStats(null)).toEqual({ parsedCount: 0, pendingCount: 0, truncatedCount: 0, failedCount: 0, actionableCount: 0, allParsed: false });
+    expect(computeDocStats(null)).toEqual({
+      parsedCount: 0,
+      pendingCount: 0,
+      truncatedCount: 0,
+      failedCount: 0,
+      actionableCount: 0,
+      allParsed: false,
+    });
     // @ts-expect-error 故意传入 undefined 验证防御性
-    expect(computeDocStats(undefined)).toEqual({ parsedCount: 0, pendingCount: 0, truncatedCount: 0, failedCount: 0, actionableCount: 0, allParsed: false });
+    expect(computeDocStats(undefined)).toEqual({
+      parsedCount: 0,
+      pendingCount: 0,
+      truncatedCount: 0,
+      failedCount: 0,
+      actionableCount: 0,
+      allParsed: false,
+    });
   });
 
   it("全解析：allParsed=true，pending=0", () => {
@@ -66,9 +80,9 @@ describe("computeDocStats", () => {
   it("部分解析：1 已解析 + 1 待解析 + 1 截断已解析", () => {
     const docs = [
       mkDoc({ id: "a", text_len: 3000 }),
-      mkDoc({ id: "b", text_len: 0 }),          // 待解析
+      mkDoc({ id: "b", text_len: 0 }), // 待解析
       mkDoc({ id: "c", text_len: 8000, truncated: true }),
-      mkDoc({ id: "d" }),                       // 默认已解析
+      mkDoc({ id: "d" }), // 默认已解析
     ];
     const stats = computeDocStats(docs);
     expect(stats.parsedCount).toBe(3);
@@ -92,7 +106,7 @@ describe("computeDocStats", () => {
 
   it("truncated 只在已解析文档中计数（待解析的 truncated 不产生噪声）", () => {
     const docs = [
-      mkDoc({ text_len: 0, truncated: true }),  // 待解析但标记截断 → 不算
+      mkDoc({ text_len: 0, truncated: true }), // 待解析但标记截断 → 不算
       mkDoc({ text_len: 5000, truncated: true }), // 已解析 + 截断 → 算
     ];
     expect(computeDocStats(docs).truncatedCount).toBe(1);
@@ -108,8 +122,8 @@ describe("computeDocStats", () => {
   it("parse_status='failed' 单独计数：不计入已解析/待解析", () => {
     const docs: DocRecord[] = [
       mkDoc({ id: "ok", text_len: 100, parse_status: "success" }),
-      mkDoc({ id: "bad", parse_status: "failed" }),   // 解析失败
-      mkDoc({ id: "pend", text_len: 0 }),              // 待解析
+      mkDoc({ id: "bad", parse_status: "failed" }), // 解析失败
+      mkDoc({ id: "pend", text_len: 0 }), // 待解析
     ];
     const stats = computeDocStats(docs);
     expect(stats.parsedCount).toBe(1);
@@ -123,10 +137,10 @@ describe("computeDocStats", () => {
 
   it("actionableCount：全待解析=文档数；含失败=待解析+失败；全成功=0", () => {
     // 全待解析
-    expect(computeDocStats([
-      mkDoc({ id: "a", text_len: 0 }),
-      mkDoc({ id: "b", text_len: 0 }),
-    ]).actionableCount).toBe(2);
+    expect(
+      computeDocStats([mkDoc({ id: "a", text_len: 0 }), mkDoc({ id: "b", text_len: 0 })])
+        .actionableCount,
+    ).toBe(2);
     // 仅剩失败文档（批量按钮必须仍可用，文案为「重试失败文档」）
     const onlyFailed = computeDocStats([
       mkDoc({ id: "a", parse_status: "failed" }),
@@ -152,8 +166,8 @@ describe("computeDocStats", () => {
 
   it("无 parse_status 的旧数据：回退 text_len 口径（向后兼容）", () => {
     const docs: DocRecord[] = [
-      mkDoc({ id: "a", text_len: 100 }),     // 无 parse_status → 视为已解析
-      mkDoc({ id: "b", text_len: 0 }),       // 无 parse_status → 待解析
+      mkDoc({ id: "a", text_len: 100 }), // 无 parse_status → 视为已解析
+      mkDoc({ id: "b", text_len: 0 }), // 无 parse_status → 待解析
     ];
     const stats = computeDocStats(docs);
     expect(stats.parsedCount).toBe(1);
@@ -172,9 +186,7 @@ describe("pickInitialTab", () => {
   });
 
   it("factsTotal=null → null（数据未加载，暂不决策）", () => {
-    expect(
-      pickInitialTab({ docs: [d()], tree: ["t1"], factsTotal: null })
-    ).toBeNull();
+    expect(pickInitialTab({ docs: [d()], tree: ["t1"], factsTotal: null })).toBeNull();
   });
 
   // ✅ 用户要求（2026-09-17）：打开工作台时优先进「上传解析」（原「文件导入」），不管数据状态
@@ -257,18 +269,21 @@ describe("summarizeUploadResult", () => {
       saved_count: 1,
       warnings: ["以下文件为空（0 字节）已忽略：x.txt", "", "替换了 1 个同名旧文件"],
     });
-    expect(fb.details).toEqual([
-      "以下文件为空（0 字节）已忽略：x.txt",
-      "替换了 1 个同名旧文件",
-    ]);
+    expect(fb.details).toEqual(["以下文件为空（0 字节）已忽略：x.txt", "替换了 1 个同名旧文件"]);
   });
 
   it("空 / null / 脏数据：不抛异常，返回零值", () => {
     expect(summarizeUploadResult(null)).toEqual({
-      savedCount: 0, replaced: 0, rejected: [], details: [],
+      savedCount: 0,
+      replaced: 0,
+      rejected: [],
+      details: [],
     });
     expect(summarizeUploadResult(undefined)).toEqual({
-      savedCount: 0, replaced: 0, rejected: [], details: [],
+      savedCount: 0,
+      replaced: 0,
+      rejected: [],
+      details: [],
     });
     // 非数组的数组字段 → 按 0 处理
     // @ts-expect-error 故意传入非法类型验证防御性
@@ -307,8 +322,24 @@ describe("buildUploadNotice", () => {
     expect(n.tone).toBe("success");
     expect(n.text).toBe(
       "已保存 2 个文件（待解析），替换 1 个同名旧文件，" +
-        "1 个格式不支持，累计体积超过 200MB 上限（1 个文件未保存）"
+        "1 个格式不支持，累计体积超过 200MB 上限（1 个文件未保存）",
     );
+  });
+
+  it("部分成功但有文件落盘失败：主文案必须带失败数（R179 跨模块收口）", () => {
+    const n = buildUploadNotice({
+      saved_count: 2,
+      write_errors: ["a.docx", "b.docx"],
+      warnings: [
+        "以下文件保存失败（磁盘空间不足 / 文件名过长 / 无写入权限），未保存：a.docx、b.docx",
+      ],
+    });
+    expect(n.tone).toBe("success");
+    expect(n.text).toContain("已保存 2 个文件");
+    expect(n.text).toContain("2 个文件保存失败");
+    expect(n.details).toEqual([
+      "以下文件保存失败（磁盘空间不足 / 文件名过长 / 无写入权限），未保存：a.docx、b.docx",
+    ]);
   });
 
   it("一个都没保存：tone=error，文案为「没有文件被保存：<原因>」", () => {
@@ -379,10 +410,7 @@ describe("上传反馈文案按实际生效上限渲染", () => {
   });
 
   it("buildUploadNotice 同样透传 limits（toast 文案与预检口径一致）", () => {
-    const n = buildUploadNotice(
-      { saved_count: 0, oversize: ["a.zip"] },
-      LIMITS,
-    );
+    const n = buildUploadNotice({ saved_count: 0, oversize: ["a.zip"] }, LIMITS);
     expect(n.tone).toBe("error");
     expect(n.text).toContain("1 个超过 100MB");
     expect(n.text).not.toContain("30MB");
@@ -429,9 +457,7 @@ describe("导出派生逻辑", () => {
       { chart_type: "layout", code: "", placed: true },
       { chart_type: "timeline", code: '{"type":"timeline"}' },
     ];
-    expect(selectPlacedExportCharts(items)).toEqual([
-      items[0], items[3],
-    ]);
+    expect(selectPlacedExportCharts(items)).toEqual([items[0], items[3]]);
     expect(selectPlacedExportCharts(null)).toEqual([]);
   });
 
@@ -552,7 +578,13 @@ describe("canShrinkSection", () => {
   });
 
   it("无正文 / 空对象一律不可压缩（脏数据防御）", () => {
-    for (const bad of [null, undefined, {}, { content: "" }, { content: "   ", word_count: 99999 }]) {
+    for (const bad of [
+      null,
+      undefined,
+      {},
+      { content: "" },
+      { content: "   ", word_count: 99999 },
+    ]) {
       expect(canShrinkSection(bad as any)).toBe(false);
     }
   });
@@ -563,4 +595,3 @@ describe("canShrinkSection", () => {
     expect(canShrinkSection({ content: "x", word_count: 1560 })).toBe(false);
   });
 });
-

@@ -76,12 +76,7 @@ export default function ActivityHint() {
       <div className="bp-activity-history-head">
         <span>消息记录（{items.length}）</span>
         {items.length > 0 && (
-          <Button
-            size="small"
-            type="text"
-            icon={<DeleteOutlined />}
-            onClick={clearActivity}
-          >
+          <Button size="small" type="text" icon={<DeleteOutlined />} onClick={clearActivity}>
             清空
           </Button>
         )}
@@ -114,15 +109,14 @@ export default function ActivityHint() {
     </div>
   );
 
-  const liveHint =
-    liveTask ? (
-      <span className="bp-live-task-hint" key={liveTask.id}>
-        {liveTask.status === "paused" ? <PauseCircleOutlined /> : <LoadingOutlined />}
-        检测到后台「{liveTaskTypeLabel(liveTask.task_type)}」任务
-        {liveTask.status === "paused" ? "已暂停" : "仍在进行"}
-        （{Math.round((liveTask.progress || 0) * 100)}%），完成后自动刷新
-      </span>
-    ) : null;
+  const liveHint = liveTask ? (
+    <span className="bp-live-task-hint" key={liveTask.id}>
+      {liveTask.status === "paused" ? <PauseCircleOutlined /> : <LoadingOutlined />}
+      检测到后台「{liveTaskTypeLabel(liveTask.task_type)}」任务
+      {liveTask.status === "paused" ? "已暂停" : "仍在进行"}（
+      {Math.round((liveTask.progress || 0) * 100)}%），完成后自动刷新
+    </span>
+  ) : null;
 
   const chip =
     chipVisible && latest ? (

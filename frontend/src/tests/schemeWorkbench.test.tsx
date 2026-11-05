@@ -49,6 +49,11 @@ const apiMock = vi.hoisted(() => {
       if (d && typeof d === "object" && "__reject__" in d) {
         return Promise.reject(new Error(String((d as any).__reject__)));
       }
+      // 约定：__reject_with__ 标记的默认值按**原样** reject（带 response/status
+      // 的 Axios 错误形态 —— 预检 503 降级态必须能被 catch 读到 read_degraded）
+      if (d && typeof d === "object" && "__reject_with__" in d) {
+        return Promise.reject((d as any).__reject_with__);
+      }
       return Promise.resolve(d !== undefined ? d : { data: {} });
     };
     const proxy = new Proxy(fn, {
@@ -141,8 +146,24 @@ if (!(globalThis as any).ResizeObserver) {
 
 /** 目录树 fixture：两个一级章节（保证「下移」按钮可用） */
 const TREE = [
-  { id: "sec-1", title: "工程概况", level: 1, status: "empty", word_count: 0, word_budget: 1500, children: [] },
-  { id: "sec-2", title: "施工计划", level: 1, status: "empty", word_count: 0, word_budget: 1500, children: [] },
+  {
+    id: "sec-1",
+    title: "工程概况",
+    level: 1,
+    status: "empty",
+    word_count: 0,
+    word_budget: 1500,
+    children: [],
+  },
+  {
+    id: "sec-2",
+    title: "施工计划",
+    level: 1,
+    status: "empty",
+    word_count: 0,
+    word_budget: 1500,
+    children: [],
+  },
 ];
 
 function setupDefaults() {
@@ -168,7 +189,7 @@ function renderPage() {
           <Route path="/scheme/:id" element={<SchemeWorkbenchPage />} />
         </Routes>
       </MemoryRouter>
-    </AntdApp>
+    </AntdApp>,
   );
 }
 
@@ -222,24 +243,26 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     const tab = label.closest('[role="tab"]') || label;
     fireEvent.click(tab);
 
-    const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => (button.textContent || "").includes("导出 DOCX"));
+    const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => (button.textContent || "").includes("导出 DOCX"),
+    );
     expect(docxButton?.disabled).toBe(false);
     fireEvent.click(docxButton!);
     await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
   });
 
   /** 门禁测试通用流：切到「审核与预检」Tab 点「开始预检」→ 再切到「导出文档」Tab。
- *  导出预检的「开始预检」按钮位于审核与预检页（导出页只有门禁 Alert + 导出按钮），
- *  两者共享同一份 exportIssues/exportStats/exportPreflight 状态。
- *  ⚠️ 页面上「专家论证预检」卡片也有同名「开始预检」按钮，必须精确点击
- *  「导出预检（章节完整性）」卡片内的那个（DOM 结构上离该卡片标题最近的）。 */
-  async function runExportCheck() {
+   *  导出预检的「开始预检」按钮位于审核与预检页（导出页只有门禁 Alert + 导出按钮），
+   *  两者共享同一份 exportIssues/exportStats/exportPreflight 状态。
+   *  ⚠️ 页面上「专家论证预检」卡片也有同名「开始预检」按钮，必须精确点击
+   *  「导出预检（章节完整性）」卡片内的那个（DOM 结构上离该卡片标题最近的）。 */
+  async function runExportCheck(opts?: { expectPlan?: boolean }) {
     const reviewLabel = await screen.findByText("审核与预检");
     fireEvent.click(reviewLabel.closest('[role="tab"]') || reviewLabel);
     const precheckBtn = await waitFor(() => {
-      const all = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
-        .filter((b) => (b.textContent || "").includes("开始预检"));
+      const all = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((b) =>
+        (b.textContent || "").includes("开始预检"),
+      );
       // 导出预检卡片的按钮带 loading={checkingExport}（antd 渲染为 primary 小按钮）；
       // 专家论证预检卡片的是 default 按钮。精确匹配 primary 型小按钮。
       const primary = all.filter((b) => b.className.includes("ant-btn-primary"));
@@ -247,9 +270,14 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
       return primary[0]!;
     });
     fireEvent.click(precheckBtn);
-    // 等待 placeholderRerunPlan 返回（handleExportCheck 末尾的非致命分支）后再断言
+    // 等待 placeholderRerunPlan 返回（handleExportCheck 末尾的非致命分支）后再断言。
+    // 预检失败/降级时该分支不会触发（请求在 catch 处结束），故允许跳过等待。
     await waitFor(() => expect(apiCalls["exportApi.check"]?.length).toBeGreaterThan(0));
-    await waitFor(() => expect(apiCalls["exportApi.placeholderRerunPlan"]?.length).toBeGreaterThan(0));
+    if (opts?.expectPlan !== false) {
+      await waitFor(() =>
+        expect(apiCalls["exportApi.placeholderRerunPlan"]?.length).toBeGreaterThan(0),
+      );
+    }
     const exportLabel = await screen.findByText("导出文档");
     fireEvent.click(exportLabel.closest('[role="tab"]') || exportLabel);
   }
@@ -264,7 +292,14 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
         empty_ratio: 0,
         chart_total: 0,
         chart_done: 0,
-        preflight_summary: { has_run: true, total: 92, grade: "A", verdict: "可交付", released: true, stale: false },
+        preflight_summary: {
+          has_run: true,
+          total: 92,
+          grade: "A",
+          verdict: "可交付",
+          released: true,
+          stale: false,
+        },
       },
     };
     renderPage();
@@ -272,8 +307,9 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
 
     // 无 high 问题 → 不展示阻断式提示，按钮可用
     expect(screen.queryByText(/高风险问题/)).toBeNull();
-    const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => (button.textContent || "").includes("导出 DOCX"));
+    const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => (button.textContent || "").includes("导出 DOCX"),
+    );
     expect(docxButton?.disabled).toBe(false);
     fireEvent.click(docxButton!);
     await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
@@ -282,24 +318,30 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
   it("导出-高风险：预检存在 high 问题 → 仅提示问题数，按钮仍可用", async () => {
     apiDefaults["exportApi.check"] = {
       data: {
-        issues: [
-          { type: "empty_section", severity: "high", section_id: "sec-1", title: "空章节" },
-        ],
+        issues: [{ type: "empty_section", severity: "high", section_id: "sec-1", title: "空章节" }],
         section_count: 2,
         generated_count: 1,
         total_words: 1200,
         empty_ratio: 50,
         chart_total: 0,
         chart_done: 0,
-        preflight_summary: { has_run: true, total: 60, grade: "C", verdict: "需整改", released: false, stale: false },
+        preflight_summary: {
+          has_run: true,
+          total: 60,
+          grade: "C",
+          verdict: "需整改",
+          released: false,
+          stale: false,
+        },
       },
     };
     renderPage();
     await runExportCheck();
 
     expect(await screen.findByText(/仍有 1 个高风险问题/)).toBeTruthy();
-    const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => (button.textContent || "").includes("导出 DOCX"));
+    const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => (button.textContent || "").includes("导出 DOCX"),
+    );
     expect(docxButton?.disabled).toBe(false);
     fireEvent.click(docxButton!);
     await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
@@ -315,14 +357,22 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
         empty_ratio: 0,
         chart_total: 0,
         chart_done: 0,
-        preflight_summary: { has_run: true, total: 60, grade: "C", verdict: "需整改", released: false, stale: false },
+        preflight_summary: {
+          has_run: true,
+          total: 60,
+          grade: "C",
+          verdict: "需整改",
+          released: false,
+          stale: false,
+        },
       },
     };
     renderPage();
     await runExportCheck();
 
-    const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => (button.textContent || "").includes("导出 DOCX"));
+    const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => (button.textContent || "").includes("导出 DOCX"),
+    );
     expect(docxButton?.disabled).toBe(false);
     fireEvent.click(docxButton!);
     await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
@@ -338,17 +388,119 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
         empty_ratio: 0,
         chart_total: 0,
         chart_done: 0,
-        preflight_summary: { has_run: true, total: 92, grade: "A", verdict: "可交付", released: true, stale: true },
+        preflight_summary: {
+          has_run: true,
+          total: 92,
+          grade: "A",
+          verdict: "可交付",
+          released: true,
+          stale: true,
+        },
       },
     };
     renderPage();
     await runExportCheck();
 
-    const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => (button.textContent || "").includes("导出 DOCX"));
+    const docxButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => (button.textContent || "").includes("导出 DOCX"),
+    );
     expect(docxButton?.disabled).toBe(false);
     fireEvent.click(docxButton!);
     await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
+  });
+
+  /* ==========================================================================
+     R178 补强 · 导出预检三态（后端审计 → 前端消费的可见出口）
+     之前只有「放行/未放行/stale」三条门禁用例，**没有**任何用例断言预检结果
+     本身是否真的被展示：无问题、有问题、后端降级三态从无护栏。最危险的是
+     第三态 —— 后端 503 没读到数据，前端若渲染成空态，就是「预检假通过」。
+     ========================================================================== */
+
+  const exportCheckActivity = () =>
+    getActivityItems()
+      .map((a) => a.text)
+      .join("\n");
+
+  it("导出预检-无问题：消息中心报「预检通过」，导出页显示已就绪", async () => {
+    apiDefaults["exportApi.check"] = {
+      data: {
+        issues: [],
+        section_count: 2,
+        generated_count: 2,
+        total_words: 3200,
+        empty_ratio: 0,
+        chart_total: 1,
+        chart_done: 1,
+        preflight_summary: { has_run: false },
+      },
+    };
+    renderPage();
+    await runExportCheck();
+
+    await waitFor(() => expect(exportCheckActivity()).toContain("预检通过：2 个章节均无异常"));
+    expect(await screen.findByText(/章节与图表均已就绪/)).toBeTruthy();
+    expect(screen.queryByText(/导出预检发现/)).toBeNull();
+  });
+
+  it("导出预检-有问题：问题计数 + 类型标签 + 具体描述都可见", async () => {
+    apiDefaults["exportApi.check"] = {
+      data: {
+        issues: [
+          {
+            // 后端 chart_ungenerated 的真实形态（type 必须存在，否则标签回退成裸代号）
+            type: "chart_ungenerated",
+            chart_type: "layout",
+            status: "pending",
+            detail: "该图表（AI 配图）正文仅占位",
+          },
+        ],
+        section_count: 2,
+        generated_count: 2,
+        total_words: 3200,
+        empty_ratio: 0,
+        chart_total: 1,
+        chart_done: 0,
+        preflight_summary: { has_run: false },
+      },
+    };
+    renderPage();
+    await runExportCheck();
+
+    await waitFor(() => expect(exportCheckActivity()).toContain("发现 1 个问题，建议处理后再导出"));
+    expect(screen.getAllByText(/导出预检发现 1 个问题/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/图表未生成/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/正文仅占位/).length).toBeGreaterThan(0);
+    // 有问题态不得同时出现「已就绪」的绿色结论
+    expect(screen.queryByText(/章节与图表均已就绪/)).toBeNull();
+  });
+
+  it("导出预检-后端降级：显示「预检未完成」，绝不显示成无问题", async () => {
+    apiDefaults["exportApi.check"] = {
+      __reject_with__: {
+        name: "AxiosError",
+        message: "预检未能读取方案数据（数据库连接异常），本次结果不代表「无问题」，请稍后重试",
+        response: {
+          status: 503,
+          data: {
+            detail:
+              "导出预检未能读取方案数据（数据库连接异常），本次结果不代表「无问题」，请稍后重试",
+            error: "export_check_read_failed",
+            read_degraded: true,
+            retry_after: 5,
+          },
+        },
+      },
+    };
+    renderPage();
+    // 降级在 catch 结束，不会走到 placeholderRerunPlan 分支
+    await runExportCheck({ expectPlan: false });
+
+    await waitFor(() => expect(exportCheckActivity()).toContain("不代表「无问题」"));
+    expect((await screen.findAllByText(/预检未完成/)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/不能视为「无问题」/).length).toBeGreaterThan(0);
+    // 关键回归锁：降级态**不得**出现任何「通过/已就绪」措辞
+    expect(screen.queryByText(/预检通过/)).toBeNull();
+    expect(screen.queryByText(/章节与图表均已就绪/)).toBeNull();
   });
 
   it("import 子 Tab：文档解析 / 项目提取 切换均渲染且不崩溃（2026-09-25 补充）", async () => {
@@ -362,7 +514,9 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
           { item_id: "orgStructure", label: "组织机构", required: 1, output_type: "json" },
           { item_id: "others", label: "其他说明", required: 0, output_type: "markdown" },
         ],
-        groups: [{ key: "basic", label: "基本信息", item_ids: ["schemeType", "orgStructure", "others"] }],
+        groups: [
+          { key: "basic", label: "基本信息", item_ids: ["schemeType", "orgStructure", "others"] },
+        ],
       },
     };
     renderPage();
@@ -393,8 +547,8 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
         is_parsed: true,
         preview: "第一章 工程概况……（正文片段）",
         text_len: 300,
-        truncated: true,            // 解析级截断：内容真的缺了
-        preview_truncated: false,  // 预览级未截取：正文本来就短
+        truncated: true, // 解析级截断：内容真的缺了
+        preview_truncated: false, // 预览级未截取：正文本来就短
         parse_warnings: [],
       },
     };
@@ -423,7 +577,7 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
         preview: "（正文片段）",
         text_len: 20000,
         truncated: false,
-        preview_truncated: true,   // 只是本弹窗没显示全，完整内容仍在库里
+        preview_truncated: true, // 只是本弹窗没显示全，完整内容仍在库里
         parse_warnings: [],
       },
     };
@@ -489,7 +643,8 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     // ⚠️ 走「右侧编辑树」的重命名入口（行尾带「(L1 · 字数)」标记，左树无此标记）：
     //    双击节点行进入重命名，预填 TreeNode.title（字符串）。
     const editTitles = Array.from(document.querySelectorAll<HTMLElement>(".ant-tree-title")).filter(
-      (el) => (el.textContent || "").includes("工程概况") && (el.textContent || "").includes("L1 ·")
+      (el) =>
+        (el.textContent || "").includes("工程概况") && (el.textContent || "").includes("L1 ·"),
     );
     expect(editTitles.length).toBeGreaterThan(0);
     // ⚠️ jsdom 焦点桩：双击派发时原标题 span 被替换成 autoFocus 的 Input，jsdom 的
@@ -503,7 +658,7 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
 
     const input = await waitFor(() => {
       const el = Array.from(document.querySelectorAll<HTMLInputElement>("input")).find(
-        (i) => i.value === "工程概况"
+        (i) => i.value === "工程概况",
       );
       if (!el) throw new Error("重命名输入框未出现");
       return el;
@@ -528,7 +683,8 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     renderPage();
     await gotoOutlineTab();
     const editTitles = Array.from(document.querySelectorAll<HTMLElement>(".ant-tree-title")).filter(
-      (el) => (el.textContent || "").includes("工程概况") && (el.textContent || "").includes("L1 ·")
+      (el) =>
+        (el.textContent || "").includes("工程概况") && (el.textContent || "").includes("L1 ·"),
     );
     expect(editTitles.length).toBeGreaterThan(0);
     // 焦点桩：同重命名主用例，避免 jsdom focus-fixup 把 Input 立刻 blur
@@ -537,7 +693,7 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
 
     const input = await waitFor(() => {
       const el = Array.from(document.querySelectorAll<HTMLInputElement>("input")).find(
-        (i) => i.value === "工程概况"
+        (i) => i.value === "工程概况",
       );
       if (!el) throw new Error("重命名输入框未出现");
       return el;
@@ -601,13 +757,13 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     // ⚠️ 按钮文案是「💾 保存目录」（带图标前缀），不能按纯文本精确匹配；
     //    且页面上还有多处含「保存目录」的说明文字，必须在 button 里找。
     await waitFor(() => {
-      const found = Array.from(document.querySelectorAll("button")).some(
-        (b) => (b.textContent || "").includes("💾")
+      const found = Array.from(document.querySelectorAll("button")).some((b) =>
+        (b.textContent || "").includes("💾"),
       );
       expect(found).toBe(true);
     });
     const btn = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((b) =>
-      (b.textContent || "").includes("💾")
+      (b.textContent || "").includes("💾"),
     )!;
     fireEvent.click(btn);
 
@@ -619,7 +775,69 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     expect(calls[0][0]).toBe("s1");
     expect(Array.isArray(calls[0][1].outline)).toBe(true);
     expect(calls[0][1].outline.length).toBe(2);
+    // ✅ R175 G-3：默认保存不带逃生舱键（请求体与引入前一致，后端闸门零豁免）
+    expect(calls[0][1].allow_empty_chapters).toBeUndefined();
   });
+
+  it("✅ R175 空章闸门：手动保存 400 → 逃生舱确认框 → 确认后带 allow_empty_chapters 重发", async () => {
+    renderPage();
+    await gotoOutlineTab();
+    // 首次保存被后端闸门拒绝（detail 经 axios 拦截器写入 error.message）
+    apiDefaults["sectionsApi.saveOutline"] = {
+      __reject__:
+        "上传目录存在 1 个无子章节的一级章（第2章「施工计划」）：请为其补充二级章节" +
+        "或删除该章后重新保存；如确需按此结构保存，请在请求体中传 allow_empty_chapters=true。",
+    };
+    const btn = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((b) =>
+      (b.textContent || "").includes("💾"),
+    )!;
+    fireEvent.click(btn);
+    // 闸门确认框出现（非普通错误 toast）
+    await waitFor(() => {
+      expect(document.querySelector(".ant-modal-confirm")).not.toBeNull();
+    });
+    expect(document.body.textContent).toContain("检出无子章节的一级章节");
+    expect(document.body.textContent).toContain("仍要保存（保留空章）");
+    // 首次失败后不自动重发（等用户决策）
+    expect(apiCalls["sectionsApi.saveOutline"]!.length).toBe(1);
+    // 放行后二次调用成功
+    delete apiDefaults["sectionsApi.saveOutline"];
+    const btns = document.querySelectorAll<HTMLButtonElement>(".ant-modal-confirm-btns button");
+    fireEvent.click(btns[btns.length - 1]); // ok 按钮
+    await waitFor(() => {
+      expect((apiCalls["sectionsApi.saveOutline"] || []).length).toBe(2);
+    });
+    const retryPayload = apiCalls["sectionsApi.saveOutline"]![1][1];
+    expect(retryPayload.allow_empty_chapters).toBe(true);
+    expect(retryPayload.source).toBe("手动编辑");
+    delete apiDefaults["sectionsApi.saveOutline"];
+  }, 60000);
+
+  it("✅ R175 空章通知：保存成功但响应带 empty_top_chapters → 出现空章 info 提示", async () => {
+    renderPage();
+    await gotoOutlineTab();
+    apiDefaults["sectionsApi.saveOutline"] = {
+      data: { count: 2, empty_top_chapters: [{ index: 1, title: "施工计划" }] },
+    };
+    const btn = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((b) =>
+      (b.textContent || "").includes("💾"),
+    )!;
+    // ✅ R178（2026-11-04）：自 2026-09-16 起 useAntdMessageHub 只把提示写入
+    // 消息中心、不再弹原生 toast，此断言原先锁的是「document.body 里出现 toast 文案」，
+    // 机制已作废（永远不可能绿）。改为锁真实承载渠道：消息中心记录里必须出现
+    // 空章提示原文（含章号与章名），比原来的 DOM 文本断言更贴近行为。
+    const notices = () =>
+      getActivityItems()
+        .map((a) => a.text)
+        .join("\n");
+    clearActivity();
+    fireEvent.click(btn);
+    await waitFor(() => {
+      expect(notices()).toContain("1 个一级章暂无子章节");
+    });
+    expect(notices()).toContain("第2章「施工计划」");
+    delete apiDefaults["sectionsApi.saveOutline"];
+  }, 60000);
 });
 
 // =====================================================================
@@ -661,11 +879,11 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
   function modalActionButton(label: string): HTMLButtonElement {
     const wraps = Array.from(document.querySelectorAll<HTMLElement>(".ant-modal-wrap"));
     const visibleWrap =
-      wraps.find((w) => w.style.display !== "none") ||
-      wraps.find((w) => !w.style.display);
+      wraps.find((w) => w.style.display !== "none") || wraps.find((w) => !w.style.display);
     const scope = visibleWrap?.querySelector(".ant-modal-body") || document;
-    const btn = Array.from(scope.querySelectorAll("button")).find(
-      (b) => (b.textContent || "").replace(/\s+/g, "").includes(label));
+    const btn = Array.from(scope.querySelectorAll("button")).find((b) =>
+      (b.textContent || "").replace(/\s+/g, "").includes(label),
+    );
     if (!btn) throw new Error(`弹窗内未找到按钮：${label}`);
     return btn as HTMLButtonElement;
   }
@@ -692,7 +910,8 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
 
     // 关键回归断言：失败时出现错误提示，且绝不出现「质量分已刷新」
     await waitForActivity(
-      (t) => t.some((x) => /质量分刷新失败/.test(x)) && !t.some((x) => /质量分已刷新/.test(x)));
+      (t) => t.some((x) => /质量分刷新失败/.test(x)) && !t.some((x) => /质量分已刷新/.test(x)),
+    );
     // 确实发起过请求（refresh=true）
     expect(lastCall("docPipelineApi.completeness")[1]).toBe(true);
   }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
@@ -707,7 +926,8 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
     fireEvent.click(modalActionButton("刷新质量"));
 
     await waitForActivity(
-      (t) => t.some((x) => /质量分已刷新/.test(x)) && !t.some((x) => /质量分刷新失败/.test(x)));
+      (t) => t.some((x) => /质量分已刷新/.test(x)) && !t.some((x) => /质量分刷新失败/.test(x)),
+    );
   }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 
   it("重新解析：调用 reparse(force) 并按返回内容反馈，随后重拉权威状态", async () => {
@@ -720,7 +940,9 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
     await waitForActivity((t) => t.some((x) => /已重新解析并刷新四层产物/.test(x)));
     expect(lastCall("docPipelineApi.reparse")).toEqual(["d1", "force"]);
     // 非 refreshQuality 分支动作后必须重拉状态（loadPipelineStatus → status）
-    await waitFor(() => expect((apiCalls["docPipelineApi.status"] || []).length).toBeGreaterThan(1));
+    await waitFor(() =>
+      expect((apiCalls["docPipelineApi.status"] || []).length).toBeGreaterThan(1),
+    );
   }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 
   it("物化提取层：反馈物化类别数", async () => {
@@ -754,8 +976,7 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
 
     await waitForActivity((t) => t.some((x) => /解析服务不可用/.test(x)));
     // 动作结束（finally）后按钮恢复可点
-    await waitFor(() =>
-      expect(modalActionButton("重新解析").hasAttribute("disabled")).toBe(false));
+    await waitFor(() => expect(modalActionButton("重新解析").hasAttribute("disabled")).toBe(false));
   }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 
   it("删除文档：确认后发起删除请求、提示成功并重拉文档列表", async () => {
@@ -766,7 +987,8 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
     // 用文本匹配删除按钮（文档列表 actions 区，type=link），避免图标干扰 accessible name
     const delBtn = await waitFor(() => {
       const btn = Array.from(document.querySelectorAll("button")).find(
-        (b) => (b.textContent || "").trim() === "删除");
+        (b) => (b.textContent || "").trim() === "删除",
+      );
       expect(btn).toBeTruthy();
       return btn as HTMLButtonElement;
     });
@@ -783,7 +1005,9 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
     await waitForActivity((t) => t.some((x) => /文件已删除/.test(x)));
     expect(lastCall("factsApi.deleteDocument")[0]).toBe("d1");
     // 删除成功后重新加载文档列表
-    await waitFor(() => expect((apiCalls["factsApi.listDocuments"] || []).length).toBeGreaterThan(1));
+    await waitFor(() =>
+      expect((apiCalls["factsApi.listDocuments"] || []).length).toBeGreaterThan(1),
+    );
   }, 60000); // ✅ 2026-10-10（TD-2）：与 L208 同口径，全量并发防超时抖动
 });
 
@@ -799,8 +1023,8 @@ describe("SchemeWorkbenchPage · 四层管线动作与删除（页面级交互�
 // =====================================================================
 describe("SchemeWorkbenchPage · 导出成功路径（组件级交互）", () => {
   function findExportButton(label: string): HTMLButtonElement | undefined {
-    return Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
-      (b) => (b.textContent || "").includes(label)
+    return Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((b) =>
+      (b.textContent || "").includes(label),
     );
   }
 
@@ -857,7 +1081,7 @@ describe("SchemeWorkbenchPage · 导出成功路径（组件级交互）", () =>
     await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
     // ③ 成功后刷新缓存状态（exportApi.cacheStatus 被调）
     await waitFor(() =>
-      expect(apiCalls["exportApi.cacheStatus"]?.length).toBeGreaterThanOrEqual(1)
+      expect(apiCalls["exportApi.cacheStatus"]?.length).toBeGreaterThanOrEqual(1),
     );
     // ① 后端百分号编码文件名被解码并用作 a.download（而非兜底 `方案.docx`）
     expect(probe.anchors.some((a) => a.download === expectedName)).toBe(true);
@@ -883,7 +1107,7 @@ describe("SchemeWorkbenchPage · 导出成功路径（组件级交互）", () =>
 
     await waitFor(() => expect(apiCalls["exportApi.pdf"]?.length).toBe(1));
     await waitFor(() =>
-      expect(apiCalls["exportApi.cacheStatus"]?.length).toBeGreaterThanOrEqual(1)
+      expect(apiCalls["exportApi.cacheStatus"]?.length).toBeGreaterThanOrEqual(1),
     );
     expect(probe.anchors.some((a) => a.download === expectedName)).toBe(true);
     expect(probe.createObjUrl).toHaveBeenCalled();
@@ -906,7 +1130,7 @@ describe("SchemeWorkbenchPage · 导出成功路径（组件级交互）", () =>
     await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
     // 失败图分支不应阻断下载：仍刷新缓存状态 + 触发下载
     await waitFor(() =>
-      expect(apiCalls["exportApi.cacheStatus"]?.length).toBeGreaterThanOrEqual(1)
+      expect(apiCalls["exportApi.cacheStatus"]?.length).toBeGreaterThanOrEqual(1),
     );
     expect(probe.anchors.length).toBeGreaterThan(0);
     probe.restore();

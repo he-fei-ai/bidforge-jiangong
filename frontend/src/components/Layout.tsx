@@ -1,5 +1,15 @@
 import { ReactNode, useEffect, useState, useCallback, useRef } from "react";
-import { Layout as AntLayout, Menu, theme, Spin, ConfigProvider, Tooltip, Button, Drawer, type MenuProps } from "antd";
+import {
+  Layout as AntLayout,
+  Menu,
+  theme,
+  Spin,
+  ConfigProvider,
+  Tooltip,
+  Button,
+  Drawer,
+  type MenuProps,
+} from "antd";
 import {
   ProjectOutlined,
   MenuOutlined,
@@ -17,7 +27,9 @@ import {
 import { useNavigate, useLocation } from "react-router-dom";
 import { projectsApi, schemesApi } from "../api";
 import {
-  subscribeSidebarTreeRefresh, computeRefreshTargets, resolveTreeClick,
+  subscribeSidebarTreeRefresh,
+  computeRefreshTargets,
+  resolveTreeClick,
 } from "../utils/sidebarEvents";
 import TaskStatusBar from "./TaskStatusBar";
 import ActivityHint from "./ActivityHint";
@@ -99,7 +111,9 @@ function ProjectTreeMenu({
   //    loadSchemes 更新 schemesMap → effect 重跑 → 再次调用 loadSchemes。
   //    现改用 schemesMapRef 读取最新值，effect 只依赖 selectedKey 和 projects。
   const schemesMapRef = useRef<Record<string, SchemeItem[]>>({});
-  useEffect(() => { schemesMapRef.current = schemesMap; }, [schemesMap]);
+  useEffect(() => {
+    schemesMapRef.current = schemesMap;
+  }, [schemesMap]);
 
   // ✅ 修复（2026-10-17 · R91 浏览器实测复现）：侧栏此前只在挂载时 loadProjects
   //    一次，且 loadedProjectIdsRef 对已加载项目永久去重；Layout 包裹整个
@@ -109,44 +123,56 @@ function ProjectTreeMenu({
   //    去重缓存重取。projectsRef / expandedKeysRef 只为在回调里读最新值
   //    （与 schemesMapRef 同一手法，避免 effect 依赖抖动重复订阅）。
   const projectsRef = useRef<ProjectItem[]>([]);
-  useEffect(() => { projectsRef.current = projects; }, [projects]);
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
   const expandedKeysRef = useRef<string[]>([]);
-  useEffect(() => { expandedKeysRef.current = expandedKeys; }, [expandedKeys]);
+  useEffect(() => {
+    expandedKeysRef.current = expandedKeys;
+  }, [expandedKeys]);
 
-  const refreshTree = useCallback(async (projectId?: string) => {
-    try {
-      const { data } = await projectsApi.list();
-      const list: ProjectItem[] = data.items || [];
-      const prevIds = new Set(projectsRef.current.map((p) => p.id));
-      setProjects(list);
-      // 绕过 loadedProjectIdsRef 去重：重取「已加载 ∪ 已展开 ∪ 事件目标」项目；
-      // 另并入最新列表中所有有方案的项目（防「别处新建的首个方案」漏取，
-      // 与挂载时 loadProjects 的主动加载口径一致）。
-      const targets = computeRefreshTargets(
-        loadedProjectIdsRef.current, expandedKeysRef.current, projectId,
-      );
-      for (const p of list) {
-        if ((p.scheme_count ?? 0) > 0 && !targets.includes(p.id)) targets.push(p.id);
+  const refreshTree = useCallback(
+    async (projectId?: string) => {
+      try {
+        const { data } = await projectsApi.list();
+        const list: ProjectItem[] = data.items || [];
+        const prevIds = new Set(projectsRef.current.map((p) => p.id));
+        setProjects(list);
+        // 绕过 loadedProjectIdsRef 去重：重取「已加载 ∪ 已展开 ∪ 事件目标」项目；
+        // 另并入最新列表中所有有方案的项目（防「别处新建的首个方案」漏取，
+        // 与挂载时 loadProjects 的主动加载口径一致）。
+        const targets = computeRefreshTargets(
+          loadedProjectIdsRef.current,
+          expandedKeysRef.current,
+          projectId,
+        );
+        for (const p of list) {
+          if ((p.scheme_count ?? 0) > 0 && !targets.includes(p.id)) targets.push(p.id);
+        }
+        loadedProjectIdsRef.current.clear();
+        for (const pid of targets) {
+          loadSchemes(pid);
+        }
+        // 仅对「新出现且有方案」的项目自动展开；用户手动收起的项目不被事件
+        // 强行重新展开（事件驱动与挂载时的默认展开策略有意不同）。
+        const newKeys = list
+          .filter((p) => !prevIds.has(p.id) && (p.scheme_count ?? 0) > 0)
+          .map((p) => `/project/${p.id}`);
+        if (newKeys.length) {
+          setExpandedKeys((prev) => [...prev, ...newKeys.filter((k) => !prev.includes(k))]);
+        }
+      } catch {
+        // fail-soft：刷新失败保留旧树，下一次事件再重取，不打扰用户
       }
-      loadedProjectIdsRef.current.clear();
-      for (const pid of targets) {
-        loadSchemes(pid);
-      }
-      // 仅对「新出现且有方案」的项目自动展开；用户手动收起的项目不被事件
-      // 强行重新展开（事件驱动与挂载时的默认展开策略有意不同）。
-      const newKeys = list
-        .filter((p) => !prevIds.has(p.id) && (p.scheme_count ?? 0) > 0)
-        .map((p) => `/project/${p.id}`);
-      if (newKeys.length) {
-        setExpandedKeys((prev) => [...prev, ...newKeys.filter((k) => !prev.includes(k))]);
-      }
-    } catch {
-      // fail-soft：刷新失败保留旧树，下一次事件再重取，不打扰用户
-    }
-  }, [loadSchemes]);
+    },
+    [loadSchemes],
+  );
 
   useEffect(
-    () => subscribeSidebarTreeRefresh((pid) => { void refreshTree(pid); }),
+    () =>
+      subscribeSidebarTreeRefresh((pid) => {
+        void refreshTree(pid);
+      }),
     [refreshTree],
   );
 
@@ -168,9 +194,7 @@ function ProjectTreeMenu({
     }
     if (projectId) {
       const key = `/project/${projectId}`;
-      setExpandedKeys((prev) =>
-        prev.includes(key) ? prev : [...prev, key]
-      );
+      setExpandedKeys((prev) => (prev.includes(key) ? prev : [...prev, key]));
       loadSchemes(projectId);
     }
   }, [selectedKey, projects, loadSchemes]);
@@ -197,7 +221,9 @@ function ProjectTreeMenu({
       await Promise.all(pending.map((p) => loadSchemes(p.id)));
       void cancelled;
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [selectedKey, projects, loadSchemes]);
 
   const onOpenChange = (keys: string[]) => {
@@ -239,60 +265,53 @@ function ProjectTreeMenu({
           )}
         </span>
       ),
-      children: (p.scheme_count ?? 0) === 0
-        ? [
-            {
-              key: `${projectKey}/create-scheme`,
-              icon: <PlusOutlined />,
-              label: (
-                <span style={{ opacity: 0.75 }}>
-                  进入项目新建方案
-                </span>
-              ),
-              // ✅ R91：原 disabled:true 是「看着能点、点了没反应」的死占位
-              //    （用户报「点击新建方案时未能进入编辑状态」）。改为可点，
-              //    onClick 经 resolveTreeClick 跳项目详情并带 ?create=1 直接
-              //    打开新建方案弹窗。
-            },
-          ]
-        : !loaded
-        ? [{ key: `${projectKey}/loading`, label: "加载中...", disabled: true }]
-        : schemes.length === 0
-        ? [
-            {
-              key: `${projectKey}/empty`,
-              icon: <PlusOutlined />,
-              label: (
-                <span style={{ opacity: 0.75 }}>
-                  暂无方案 · 点击新建
-                </span>
-              ),
-              // ✅ R91：同上，占位项可点直达新建方案弹窗
-            },
-          ]
-        : schemes.map((s) => ({
-            key: `/scheme/${s.id}`,
-            icon: <FileTextOutlined />,
-            label: (
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                <span>{s.name}</span>
-                {s.status && s.status !== "草稿" && (
-                  <span
-                    style={{
-                      fontSize: 10,
-                      padding: "0 5px",
-                      background: "#e6f4ff",
-                      color: "#1677ff",
-                      borderRadius: 4,
-                      lineHeight: "16px",
-                    }}
-                  >
-                    {s.status}
-                  </span>
-                )}
-              </span>
-            ),
-          })),
+      children:
+        (p.scheme_count ?? 0) === 0
+          ? [
+              {
+                key: `${projectKey}/create-scheme`,
+                icon: <PlusOutlined />,
+                label: <span style={{ opacity: 0.75 }}>进入项目新建方案</span>,
+                // ✅ R91：原 disabled:true 是「看着能点、点了没反应」的死占位
+                //    （用户报「点击新建方案时未能进入编辑状态」）。改为可点，
+                //    onClick 经 resolveTreeClick 跳项目详情并带 ?create=1 直接
+                //    打开新建方案弹窗。
+              },
+            ]
+          : !loaded
+            ? [{ key: `${projectKey}/loading`, label: "加载中...", disabled: true }]
+            : schemes.length === 0
+              ? [
+                  {
+                    key: `${projectKey}/empty`,
+                    icon: <PlusOutlined />,
+                    label: <span style={{ opacity: 0.75 }}>暂无方案 · 点击新建</span>,
+                    // ✅ R91：同上，占位项可点直达新建方案弹窗
+                  },
+                ]
+              : schemes.map((s) => ({
+                  key: `/scheme/${s.id}`,
+                  icon: <FileTextOutlined />,
+                  label: (
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <span>{s.name}</span>
+                      {s.status && s.status !== "草稿" && (
+                        <span
+                          style={{
+                            fontSize: 10,
+                            padding: "0 5px",
+                            background: "#e6f4ff",
+                            color: "#1677ff",
+                            borderRadius: 4,
+                            lineHeight: "16px",
+                          }}
+                        >
+                          {s.status}
+                        </span>
+                      )}
+                    </span>
+                  ),
+                })),
     };
   });
 
@@ -346,9 +365,7 @@ function ProjectTreeMenu({
           if (to) onNavigate(to);
         }}
         style={{ borderRight: 0 }}
-        expandIcon={({ isOpen }) =>
-          isOpen ? <DownOutlined /> : <RightOutlined />
-        }
+        expandIcon={({ isOpen }) => (isOpen ? <DownOutlined /> : <RightOutlined />)}
       />
     </Spin>
   );
@@ -409,7 +426,9 @@ function Sidebar({
     };
 
     check();
-    backendCheckRef.current = () => { void check(); };
+    backendCheckRef.current = () => {
+      void check();
+    };
     backendPollRef.current = window.setInterval(check, 10000);
     return () => {
       stopping = true;
@@ -418,20 +437,16 @@ function Sidebar({
     };
   }, []);
 
-  const statusClass =
-    backendOnline === null ? "checking"
-    : backendOnline ? "online"
-    : "offline";
+  const statusClass = backendOnline === null ? "checking" : backendOnline ? "online" : "offline";
 
   const statusLabel =
-    backendOnline === null ? "检查中..."
-    : backendOnline ? "后端在线"
-    : "后端离线";
+    backendOnline === null ? "检查中..." : backendOnline ? "后端在线" : "后端离线";
   const tooltipText =
-    backendOnline === null ? "正在连接后端服务..."
-    : backendOnline
-      ? `服务正常 · 延迟 ${backendLatency}ms · 每 10s 自动检查`
-      : "无法连接后端服务，请确认后端进程是否启动";
+    backendOnline === null
+      ? "正在连接后端服务..."
+      : backendOnline
+        ? `服务正常 · 延迟 ${backendLatency}ms · 每 10s 自动检查`
+        : "无法连接后端服务，请确认后端进程是否启动";
 
   return (
     <Sider
@@ -531,7 +546,14 @@ function Sidebar({
               <ApiOutlined style={{ marginRight: 4, color: "#00D4FF" }} />
               {statusLabel}
               {backendOnline && backendLatency > 0 && (
-                <span style={{ color: "rgba(255, 255, 255, 0.45)", marginLeft: 4, fontFamily: "'JetBrains Mono', monospace", fontSize: 10 }}>
+                <span
+                  style={{
+                    color: "rgba(255, 255, 255, 0.45)",
+                    marginLeft: 4,
+                    fontFamily: "'JetBrains Mono', monospace",
+                    fontSize: 10,
+                  }}
+                >
                   · {backendLatency}ms
                 </span>
               )}
@@ -585,7 +607,10 @@ function MainArea({
   return (
     <AntLayout style={{ height: "100%" }}>
       <Header className="bp-header">
-        <div className="bp-header-crumbs" style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: "1 1 auto" }}>
+        <div
+          className="bp-header-crumbs"
+          style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: "1 1 auto" }}
+        >
           {onMenuClick && (
             <Button
               type="text"
@@ -603,13 +628,13 @@ function MainArea({
             crumbs.map((c, i) => (
               <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
                 {c.to ? (
-                  <span className="bp-crumb-link" onClick={() => navigate(c.to!)}>{c.label}</span>
+                  <span className="bp-crumb-link" onClick={() => navigate(c.to!)}>
+                    {c.label}
+                  </span>
                 ) : (
                   <span className="bp-crumb-current">{c.label}</span>
                 )}
-                {i < crumbs.length - 1 && (
-                  <span className="bp-crumb-sep">/</span>
-                )}
+                {i < crumbs.length - 1 && <span className="bp-crumb-sep">/</span>}
               </span>
             ))
           )}
@@ -623,9 +648,7 @@ function MainArea({
           <span>v5.3.0</span>
         </div>
       </Header>
-      <Content className="bp-content">
-        {children}
-      </Content>
+      <Content className="bp-content">{children}</Content>
     </AntLayout>
   );
 }

@@ -1,16 +1,55 @@
 import { useEffect, useRef, useState } from "react";
-import {App, Card, Form, Input, Select, Button, message,
-  Tag, Table, Typography, Space, InputNumber, Tabs, Tooltip,
-  Statistic, Row, Col, Switch, Modal, Empty, List, Alert, Checkbox,} from "antd";
+import {
+  App,
+  Card,
+  Form,
+  Input,
+  Select,
+  Button,
+  message,
+  Tag,
+  Table,
+  Typography,
+  Space,
+  InputNumber,
+  Tabs,
+  Tooltip,
+  Statistic,
+  Row,
+  Col,
+  Switch,
+  Modal,
+  Empty,
+  List,
+  Alert,
+  Checkbox,
+} from "antd";
 import type { SelectProps } from "antd";
 import {
-  PlusOutlined, DeleteOutlined, ThunderboltOutlined,
-  CheckCircleOutlined, CloseCircleOutlined, LinkOutlined,
-  ApiOutlined, SettingOutlined, BarChartOutlined,
-  SafetyCertificateOutlined, FireOutlined, GlobalOutlined,
-  ArrowUpOutlined, ArrowDownOutlined, SortAscendingOutlined,
-  ExportOutlined, ImportOutlined, ReloadOutlined, ClearOutlined,
-  WarningOutlined, KeyOutlined, EyeOutlined, HistoryOutlined, NodeIndexOutlined,
+  PlusOutlined,
+  DeleteOutlined,
+  ThunderboltOutlined,
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  LinkOutlined,
+  ApiOutlined,
+  SettingOutlined,
+  BarChartOutlined,
+  SafetyCertificateOutlined,
+  FireOutlined,
+  GlobalOutlined,
+  ArrowUpOutlined,
+  ArrowDownOutlined,
+  SortAscendingOutlined,
+  ExportOutlined,
+  ImportOutlined,
+  ReloadOutlined,
+  ClearOutlined,
+  WarningOutlined,
+  KeyOutlined,
+  EyeOutlined,
+  HistoryOutlined,
+  NodeIndexOutlined,
   HeartOutlined,
 } from "@ant-design/icons";
 
@@ -21,15 +60,29 @@ import { TtlCache } from "../utils/ttlCache";
 import { useAiConfigGovernance } from "../hooks/useAiConfigGovernance";
 // ✅ D7（2026-09-23）：页面直接引用后端契约类型（见 types/aiConfig.ts）
 import type {
-  AIAuditLogItem, AIConfigAuditChange, AIConfigAuditItem, AIConfigItem,
-  AIConfigsHealthItem, AIConfigsHealthResponse, AIKeyRotationRequest,
-  AIKeyRotationResponse, AIConfigPrecheckResponse, AIConfigPresetRaw,
-  AIDynamicModel, AIHealth, AINetworkProbe, AIPrecheckAllItem,
-  AIProviderPlan, AIProviderPreset, AIRuntimeResponse,
-  AISceneRouteItem, AIUsageStats,
+  AIAuditAttempt,
+  AIAuditLogItem,
+  AIConfigAuditChange,
+  AIConfigAuditItem,
+  AIConfigItem,
+  AIConfigsHealthItem,
+  AIConfigsHealthResponse,
+  AIKeyRotationRequest,
+  AIKeyRotationResponse,
+  AIConfigPrecheckResponse,
+  AIConfigPresetRaw,
+  AIDynamicModel,
+  AIHealth,
+  AINetworkProbe,
+  AIPrecheckAllItem,
+  AIProviderPlan,
+  AIProviderPreset,
+  AIRuntimeResponse,
+  AISceneRouteItem,
+  AIUsageStats,
 } from "../types/aiConfig";
 
-import { PageHero, StatCards, StatItem } from '../utils/ui';
+import { PageHero, StatCards, StatItem } from "../utils/ui";
 
 const { Title, Text } = Typography;
 
@@ -41,8 +94,10 @@ const statsCache = new TtlCache<AIUsageStats | null>(30_000);
 
 /** 健康状态 → 展示颜色（no_key / key_invalid 都是「配置存在但没就绪」的警告态） */
 const healthColor = (status?: string) =>
-  status === "configured" ? "#52c41a"
-    : (status === "key_invalid" || status === "no_key" || status === "env_corrupt") ? "#faad14"
+  status === "configured"
+    ? "#52c41a"
+    : status === "key_invalid" || status === "no_key" || status === "env_corrupt"
+      ? "#faad14"
       : "#ff4d4f";
 
 /** /ai/health 的 status → 中文标签
@@ -83,6 +138,20 @@ export function resolveConcurrencyMax(
   return Number.isFinite(v) && v > 0 ? v : AI_CONCURRENCY_MAX_FALLBACK;
 }
 
+/**
+ * ✅ R175（BUG-04）：降级链实际生效上限的兜底值（= 后端 `ai_fallback_chain_max` 默认 3）。
+ * 真实口径以 `GET /ai/health` 的 `fallback_chain_max` 为准，界面只据此解释
+ * 「仅前 N 条参与降级」，避免用户误以为排序列表里的第 4 条起也会被尝试。
+ */
+export const AI_FALLBACK_CHAIN_MAX_FALLBACK = 3;
+
+export function resolveFallbackChainMax(
+  health: { fallback_chain_max?: number | null } | null | undefined,
+): number {
+  const v = Number(health?.fallback_chain_max);
+  return Number.isFinite(v) && v > 0 ? v : AI_FALLBACK_CHAIN_MAX_FALLBACK;
+}
+
 // ✅ D7（2026-09-23）：供应商预设与动态模型列表直接复用后端契约类型，
 //    不再各写一份「长得像但字段可选性不同」的本地接口（此前 tsc 因二者不兼容报错，
 //    正是类型契约的价值体现）。
@@ -93,6 +162,24 @@ type ProviderInfo = AIProviderPreset;
 // 运行时仍按原值处理（模型下拉依赖它才能直接输入/粘贴任意模型名）。零行为变更：
 // 原值原样传入，仅经 string 窄断言对齐 antd 公开类型（异构逃逸，来源：rc-select mode 逻辑）。
 const LEGACY_COMBOBOX_MODE = "combobox" as string as NonNullable<SelectProps["mode"]>;
+
+/**
+ * ✅ 2026-11-05（方案 B）：失败类别中文标签。
+ * 与后端 provider_factory.ERROR_CLASSES 一一对应；面板始终展示全部类别
+ * （无数据时显示 0 次 / 0%），避免「某类失败突然出现」时界面反而空白。
+ */
+const ERROR_CLASS_LABELS: { key: string; label: string }[] = [
+  { key: "rate_limit", label: "限流(429)" },
+  { key: "auth", label: "认证/鉴权" },
+  { key: "timeout", label: "超时" },
+  { key: "truncated", label: "截断/思考吞噬" },
+  { key: "network", label: "网络" },
+  { key: "upstream_5xx", label: "上游 5xx" },
+  { key: "invalid_response", label: "响应格式/空内容" },
+  { key: "circuit_skipped", label: "熔断/冷却跳过" },
+  { key: "cancelled", label: "被取消" },
+  { key: "unknown", label: "未分类" },
+];
 
 export default function AIConfigPage() {
   const { message: _antdMsg, modal } = App.useApp();
@@ -110,7 +197,13 @@ export default function AIConfigPage() {
   const [auditTotal, setAuditTotal] = useState(0);
   const [auditPage, setAuditPage] = useState(1);
   const [auditPageSize, setAuditPageSize] = useState(20);
-  const [auditFilter, setAuditFilter] = useState<{ provider_name?: string; action?: string; scene?: string; success?: string; days?: number }>({});
+  const [auditFilter, setAuditFilter] = useState<{
+    provider_name?: string;
+    action?: string;
+    scene?: string;
+    success?: string;
+    days?: number;
+  }>({});
   const [auditProviders, setAuditProviders] = useState<string[]>([]);
   const [auditActions, setAuditActions] = useState<string[]>([]);
   // ✅ 2026-09-25：库里出现过的场景（后端随日志一起回传），供「场景」筛选下钻
@@ -152,12 +245,29 @@ export default function AIConfigPage() {
   //     状态、加载与操作收敛到 useAiConfigGovernance hook。
   const governance = useAiConfigGovernance(msg);
   const {
-    sceneRoutes, sceneSaving, activeEnv, envOptions, envSaving,
-    runtime, runtimeDraft, runtimeSaving, configAudits, rollingBack,
-    sceneActiveEnv, envError,
-    loadSceneRoutes, loadConfigAudits, loadEnv, loadRuntime,
-    handleSceneRouteChange, handleSaveRuntime, handleEnvChange,
-    setRuntimeDraft, setRollingBack, setRefresh,
+    sceneRoutes,
+    sceneSaving,
+    activeEnv,
+    envOptions,
+    envSaving,
+    runtime,
+    runtimeDraft,
+    runtimeSaving,
+    runtimeError,
+    configAudits,
+    rollingBack,
+    sceneActiveEnv,
+    envError,
+    loadSceneRoutes,
+    loadConfigAudits,
+    loadEnv,
+    loadRuntime,
+    handleSceneRouteChange,
+    handleSaveRuntime,
+    handleEnvChange,
+    setRuntimeDraft,
+    setRollingBack,
+    setRefresh,
   } = governance;
 
   // ===== F2：提示词治理运行时开关（GET/PUT /system/governance）=====
@@ -197,7 +307,9 @@ export default function AIConfigPage() {
     let baseUrl = "";
     try {
       baseUrl = form.getFieldValue("base_url") || "";
-    } catch { /* form 未挂载 */ }
+    } catch {
+      /* form 未挂载 */
+    }
     if (!baseUrl && !editingId) {
       msg.warning("请先填写 Base URL");
       return;
@@ -225,7 +337,7 @@ export default function AIConfigPage() {
   const loadAuditLogs = async (
     page = auditPage,
     pageSize = auditPageSize,
-    filter = auditFilter
+    filter = auditFilter,
   ) => {
     setAuditLoading(true);
     try {
@@ -328,8 +440,13 @@ export default function AIConfigPage() {
     }
   };
 
-  useEffect(() => { load(); setRefresh(load); }, []);
-  useEffect(() => { void loadGovernance(); }, []);
+  useEffect(() => {
+    load();
+    setRefresh(load);
+  }, []);
+  useEffect(() => {
+    void loadGovernance();
+  }, []);
 
   const handleSave = async () => {
     try {
@@ -354,7 +471,11 @@ export default function AIConfigPage() {
       load();
     } catch (e: unknown) {
       // 表单校验错误带 errorFields；网络错误为 axios 结构（detail 在 response.data.detail）
-      const err = e as { message?: string; errorFields?: unknown; response?: { data?: { detail?: string } } };
+      const err = e as {
+        message?: string;
+        errorFields?: unknown;
+        response?: { data?: { detail?: string } };
+      };
       if (err.errorFields) return;
       msg.error(err.response?.data?.detail || err.message || "保存失败");
     }
@@ -366,10 +487,10 @@ export default function AIConfigPage() {
     try {
       const values = await form.validateFields();
       const { data } = await aiApi.testConfig({
-        config_id: editingId || "",       // 如果是编辑已有配置，把 id 传过去让后端从 DB 读 key
+        config_id: editingId || "", // 如果是编辑已有配置，把 id 传过去让后端从 DB 读 key
         provider_name: values.provider_name,
         plan: values.plan || "pay_as_you_go",
-        api_key: values.api_key || "",   // 表单没填时就是空字符串，后端会用 config_id 去 DB 取
+        api_key: values.api_key || "", // 表单没填时就是空字符串，后端会用 config_id 去 DB 取
         base_url: values.base_url,
         model: values.model,
         // ✅ 探测请求沿用表单的 max_tokens：部分平台单次上限低于默认 8192，
@@ -379,16 +500,18 @@ export default function AIConfigPage() {
         //    否则用户勾了流式、探测却按普通请求走，测出来的结论与真实链路不符。
         request_mode: values.request_mode || "normal",
       });
-      setTestResult(data.ok
-        ? { ok: true, msg: data.response || "", network: data.network, warning: data.warning }
-        : {
-            ok: false,
-            msg: data.error || "",
-            label: data.label,
-            category: data.category,
-            suggestion: data.suggestion,
-            network: data.network,
-          });
+      setTestResult(
+        data.ok
+          ? { ok: true, msg: data.response || "", network: data.network, warning: data.warning }
+          : {
+              ok: false,
+              msg: data.error || "",
+              label: data.label,
+              category: data.category,
+              suggestion: data.suggestion,
+              network: data.network,
+            },
+      );
     } catch (e: unknown) {
       const err = e as { message?: string };
       setTestResult({ ok: false, msg: err.message || "测试失败", category: "http" });
@@ -410,6 +533,22 @@ export default function AIConfigPage() {
     }
   };
 
+  // ✅ R175（BUG-03）：启用/停用「参与真实调用」（降级链 + 视觉候选）
+  const handleToggleEnabled = async (record: AIConfigItem, next: boolean) => {
+    try {
+      await aiApi.setConfigEnabled(record.id, next);
+      msg.success(
+        next
+          ? "已启用：该配置重新参与降级/视觉候选"
+          : "已停用：该配置不再参与降级/视觉候选（密钥与配置仍保留）",
+      );
+      load();
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "切换启用状态失败");
+    }
+  };
+
   const handleDelete = async (id: string) => {
     modal.confirm({
       title: "确认删除",
@@ -424,7 +563,9 @@ export default function AIConfigPage() {
           //    此前只回「已删除」，用户不知道若干场景已经悄悄改回共用主配置。
           const cleared = data?.cleared_scene_routes || 0;
           if (cleared > 0) {
-            msg.info(`已删除；同时解除 ${cleared} 条场景模型路由（这些场景改回共用「当前使用」配置）`);
+            msg.info(
+              `已删除；同时解除 ${cleared} 条场景模型路由（这些场景改回共用「当前使用」配置）`,
+            );
           } else if (data?.warning) {
             msg.warning(data.warning);
           } else {
@@ -443,8 +584,9 @@ export default function AIConfigPage() {
   const handleClearKey = (record: AIConfigItem) => {
     modal.confirm({
       title: "确认清除 API Key",
-      content: `将清除「${record.provider_name} / ${record.model}」已保存的 API Key；`
-        + "清除后该配置无法发起 AI 调用，需要重新填写才能使用。",
+      content:
+        `将清除「${record.provider_name} / ${record.model}」已保存的 API Key；` +
+        "清除后该配置无法发起 AI 调用，需要重新填写才能使用。",
       okText: "清除",
       cancelText: "取消",
       okButtonProps: { danger: true },
@@ -482,7 +624,8 @@ export default function AIConfigPage() {
           <ul style={{ paddingLeft: 18, margin: 0 }}>
             {changes.map((c) => (
               <li key={c.field}>
-                {c.label}：<Text delete>{String(c.before)}</Text> → <Text strong>{String(c.after)}</Text>
+                {c.label}：<Text delete>{String(c.before)}</Text> →{" "}
+                <Text strong>{String(c.after)}</Text>
               </li>
             ))}
             {changes.length === 0 && <li>（该记录无结构化差异信息，将按快照恢复）</li>}
@@ -492,7 +635,9 @@ export default function AIConfigPage() {
           </div>
           <Checkbox
             style={{ marginTop: 8, fontSize: 12 }}
-            onChange={(e) => { opt.includeActive = e.target.checked; }}
+            onChange={(e) => {
+              opt.includeActive = e.target.checked;
+            }}
           >
             同时还原「当前使用」标记（默认不还原；可能切换主配置，且不允许出现零主配置）
           </Checkbox>
@@ -505,7 +650,10 @@ export default function AIConfigPage() {
         setRollingBack(record.id);
         try {
           const { data } = await aiApi.rollbackConfig(
-            record.config_id, record.id, opt.includeActive);
+            record.config_id,
+            record.id,
+            opt.includeActive,
+          );
           if (data?.warning) msg.warning(data.warning);
           // ✅ 2026-10-06（G6）：回滚结果如实回显。旧实现只说「已回滚（N 个字段）」，
           // 用户既不知道**哪些字段**被还原，也不知道「当前使用」标记是否被还原 ——
@@ -515,11 +663,12 @@ export default function AIConfigPage() {
             .filter(([, v]) => v !== undefined && v !== null && v !== "")
             .map(([k, v]) => `${k}=${v}`)
             .join("、");
-          const activeNote = data?.active_restored === true
-            ? "（已还原「当前使用」标记）"
-            : data?.active_restored === false
-              ? "（已解除「当前使用」标记）"
-              : "";
+          const activeNote =
+            data?.active_restored === true
+              ? "（已还原「当前使用」标记）"
+              : data?.active_restored === false
+                ? "（已解除「当前使用」标记）"
+                : "";
           const n = (data.changes || []).length;
           msg.success(
             `已回滚${n ? `（${n} 个字段）` : ""}${restoredFields ? `：${restoredFields}` : ""}${activeNote}`,
@@ -561,7 +710,6 @@ export default function AIConfigPage() {
     });
   };
 
-
   // ✅ 新增：批量连通性预检 —— 一眼看出哪些「备选配置」其实是假备胎
   const [precheckAllLoading, setPrecheckAllLoading] = useState(false);
   const [precheckAllResult, setPrecheckAllResult] = useState<Record<string, AIPrecheckAllItem>>({});
@@ -570,14 +718,19 @@ export default function AIConfigPage() {
     try {
       const { data } = await aiApi.precheckAll();
       const map: Record<string, AIPrecheckAllItem> = {};
-      (data.items || []).forEach((it) => { map[it.id] = it; });
+      (data.items || []).forEach((it) => {
+        map[it.id] = it;
+      });
       setPrecheckAllResult(map);
       // ✅ 2026-10-06（G3）：后端把「未填地址 → 已跳过」单列回传（skipped_no_url），
       // 旧版只报 ok/fail 两条计数，用户会误以为跳过的配置「不存在」。
       const skippedNoUrl = data.skipped_no_url || 0;
       const skipNote = skippedNoUrl > 0 ? `，${skippedNoUrl} 条未填地址已跳过` : "";
       if (data.fail_count > 0) {
-        msg.warning(`${data.ok_count}/${data.total} 个配置网络可达，${data.fail_count} 个不可达${skipNote}`, 6);
+        msg.warning(
+          `${data.ok_count}/${data.total} 个配置网络可达，${data.fail_count} 个不可达${skipNote}`,
+          6,
+        );
       } else if (skippedNoUrl > 0) {
         msg.warning(`可达 ${data.ok_count}/${data.total} 个配置${skipNote}`, 6);
       } else {
@@ -596,6 +749,13 @@ export default function AIConfigPage() {
   const [keyRotationLoading, setKeyRotationLoading] = useState(false);
   const [keyRotationResult, setKeyRotationResult] = useState<AIKeyRotationResponse | null>(null);
   const [keyRotationReencryptLoading, setKeyRotationReencryptLoading] = useState(false);
+  /**
+   * ✅ R175（2026-11-03 · BUG-02）：坏密文若是用「更换前的旧主密钥」加密的，
+   * 必须把旧密钥一起提交，后端才能重加密恢复。此前 UI 只传
+   * ``{ mode: "reencrypt" }``，后端在无 legacy_key 时必然返回 failed，
+   * 与「可一键恢复」的体检建议自相矛盾。此值仅随本次请求发送、不落库。
+   */
+  const [keyRotationLegacyKey, setKeyRotationLegacyKey] = useState("");
   const handleKeyRotationInspect = async () => {
     setKeyRotationLoading(true);
     try {
@@ -612,13 +772,29 @@ export default function AIConfigPage() {
   const handleKeyRotationReencrypt = async () => {
     setKeyRotationReencryptLoading(true);
     try {
-      const { data } = await aiApi.rotateKey({ mode: "reencrypt" });
-      if (!data.ok) { msg.error(data.error || "重加密失败"); return; }
+      const legacy = keyRotationLegacyKey.trim();
+      const { data } = await aiApi.rotateKey({
+        mode: "reencrypt",
+        ...(legacy ? { legacy_key: legacy } : {}),
+      });
+      if (!data.ok) {
+        msg.error(data.error || "重加密失败");
+        return;
+      }
       setKeyRotationResult(data);
       const ok = data.migrated ?? 0;
       const failed = data.failed ?? 0;
-      if (failed) msg.warning(`重加密完成：恢复 ${ok} 条，${failed} 条失败（需重新填写 Key）`, 10);
-      else msg.success(`已重加密 ${ok} 条密文（均保持原样无需修改）`);
+      if (failed) {
+        msg.warning(
+          `重加密完成：恢复 ${ok} 条，${failed} 条失败。` +
+            `若这些密文是用更换前的旧主密钥加密的，请在弹窗中填入旧主密钥后重试；` +
+            `否则需在配置列表重新填写 API Key。`,
+          12,
+        );
+      } else {
+        msg.success(`已重加密 ${ok} 条密文（均保持原样无需修改）`);
+        setKeyRotationLegacyKey("");
+      }
     } catch (e: unknown) {
       const err = e as { message?: string };
       msg.error(err.message || "重加密失败");
@@ -629,7 +805,9 @@ export default function AIConfigPage() {
   // 单条「测试连接」只查网络；体检额外查 Key 是否填/可解密、缺地址、环境归属、厂商开关，
   // 对应后端 GET /ai/configs/health（一次拿到全部配置，不需要逐条点测试）。
   const [configsHealthLoading, setConfigsHealthLoading] = useState(false);
-  const [configsHealthResult, setConfigsHealthResult] = useState<AIConfigsHealthResponse | null>(null);
+  const [configsHealthResult, setConfigsHealthResult] = useState<AIConfigsHealthResponse | null>(
+    null,
+  );
   const handleConfigsHealth = async () => {
     setConfigsHealthLoading(true);
     try {
@@ -642,6 +820,8 @@ export default function AIConfigPage() {
       if (s.no_url > 0) issues.push(`${s.no_url} 条缺地址`);
       if (s.out_of_env > 0) issues.push(`${s.out_of_env} 条属于其它环境`);
       if (s.disabled > 0) issues.push(`${s.disabled} 条厂商被禁用`);
+      // ✅ R179：用户停用（enabled=0）——这类配置不计入「可用」，必须在提示里说清
+      if ((s.disabled_by_user || 0) > 0) issues.push(`${s.disabled_by_user} 条被用户停用`);
       if (s.network_unreachable > 0) issues.push(`${s.network_unreachable} 条网络不可达`);
       // ✅ R103（2026-10-18 · 日志审计遗留 L1 收口）：实时成功率过低的配置
       //    已被自动剔除出降级链——「配了却不用它」的最后一块可见性。
@@ -686,8 +866,8 @@ export default function AIConfigPage() {
       const runtimeKeys = data.runtime_keys || [];
       if (runtimeKeys.length) extras.push(`运行时设置 ${runtimeKeys.length} 项`);
       msg.success(
-        `已导出 ${data.count} 条配置（不含 API Key，导入后需重新填写）`
-        + (extras.length ? `，附${extras.join("、")}` : ""),
+        `已导出 ${data.count} 条配置（不含 API Key，导入后需重新填写）` +
+          (extras.length ? `，附${extras.join("、")}` : ""),
       );
     } catch (e: unknown) {
       const err = e as { message?: string };
@@ -729,16 +909,24 @@ export default function AIConfigPage() {
             导入文件需为本系统「导出配置」产生的 JSON（不含 API Key，导入后需逐条补齐）。
           </Text>
           <Space>
-            <Switch size="small" onChange={(v) => { overwrite = v; }} />
+            <Switch
+              size="small"
+              onChange={(v) => {
+                overwrite = v;
+              }}
+            />
             <Text style={{ fontSize: 12 }}>
               覆盖同名配置（同供应商 + 同模型 + 同地址时更新参数，否则跳过）
             </Text>
           </Space>
           <Space>
-            <Switch size="small" onChange={(v) => { setFirstActive = v; }} />
-            <Text style={{ fontSize: 12 }}>
-              导入后把第一条新配置设为「当前使用」
-            </Text>
+            <Switch
+              size="small"
+              onChange={(v) => {
+                setFirstActive = v;
+              }}
+            />
+            <Text style={{ fontSize: 12 }}>导入后把第一条新配置设为「当前使用」</Text>
           </Space>
         </Space>
       ),
@@ -764,18 +952,24 @@ export default function AIConfigPage() {
       // disabled_providers）—— 随配置一并带走，否则换机器后还要逐场景重配。
       // 旧版导出文件不含这两个键，两个变量均为 undefined，行为与旧版完全一致。
       const sceneRoutes = Array.isArray(parsed.scene_routes) ? parsed.scene_routes : undefined;
-      const runtime = parsed.runtime && typeof parsed.runtime === "object" && !Array.isArray(parsed.runtime)
-        ? parsed.runtime as Record<string, string>
-        : undefined;
+      const runtime =
+        parsed.runtime && typeof parsed.runtime === "object" && !Array.isArray(parsed.runtime)
+          ? (parsed.runtime as Record<string, string>)
+          : undefined;
       // ✅ 2026-10-06（G1）：真导入前跑一次预演，把「跳过几条 + 为什么跳」提前告知。
       // 预演不落库、与真导入同一校验口径；预演失败不阻断导入（它只是辅助信息）。
       try {
         const { data: dry } = await aiApi.importConfigDryRun(
-          items, overwrite, setFirstActive, sceneRoutes, runtime);
+          items,
+          overwrite,
+          setFirstActive,
+          sceneRoutes,
+          runtime,
+        );
         if (dry.skipped > 0) {
           msg.info(
-            `导入预演：将写入 ${dry.would_import} 条，跳过 ${dry.skipped} 条`
-            + (dry.skip_reasons.length ? `（${dry.skip_reasons.join("；")}）` : ""),
+            `导入预演：将写入 ${dry.would_import} 条，跳过 ${dry.skipped} 条` +
+              (dry.skip_reasons.length ? `（${dry.skip_reasons.join("；")}）` : ""),
             5,
           );
         }
@@ -787,21 +981,31 @@ export default function AIConfigPage() {
         // 预演接口不可用（例如后端未重启）时静默跳过，不影响导入本身
       }
       const { data } = await aiApi.importConfig(
-        items, overwrite, setFirstActive, sceneRoutes, runtime);
+        items,
+        overwrite,
+        setFirstActive,
+        sceneRoutes,
+        runtime,
+      );
       // ✅ 修复：导入后若系统仍无「当前使用」配置，后端回传 warning（原本只有成功提示，
       //    用户以为导入即可用，实际依旧一个都生成不了）。
       if (data.warning) msg.warning(data.warning);
-      else msg.success(`导入完成：新增/更新 ${data.imported} 条，跳过 ${data.skipped} 条。${data.hint || ""}`);
+      else
+        msg.success(
+          `导入完成：新增/更新 ${data.imported} 条，跳过 ${data.skipped} 条。${data.hint || ""}`,
+        );
       // ✅ 2026-09-23：导入文件里的越界数值会被后端静默收敛，如实提示条目数
       if (data.clamped_items > 0) {
-        msg.warning(`其中 ${data.clamped_items} 条配置的参数超出合法范围（如并发数 > 5、温度 > 2），已按合法区间保存`);
+        msg.warning(
+          `其中 ${data.clamped_items} 条配置的参数超出合法范围（如并发数 > 5、温度 > 2），已按合法区间保存`,
+        );
       }
       // ✅ 2026-10-06（B-1）：因「计费方式 ↔ Base URL」联动校验被跳过的条目必须
       //    如实告知原因，否则用户只会看到「跳过 M 条」而不知道该改哪里。
       if ((data.invalid_plan_items || 0) > 0) {
         msg.warning(
-          `其中 ${data.invalid_plan_items} 条因配置不完整被跳过：`
-          + (data.skip_reasons || []).join("；"),
+          `其中 ${data.invalid_plan_items} 条因配置不完整被跳过：` +
+            (data.skip_reasons || []).join("；"),
         );
       }
       // ✅ 2026-10-06（G1）：随配置一并迁移的场景路由 / 运行时设置必须回显 ——
@@ -843,12 +1047,19 @@ export default function AIConfigPage() {
               min={1}
               max={3650}
               defaultValue={30}
-              onChange={(v) => { keepDays = Number(v) || 30; }}
+              onChange={(v) => {
+                keepDays = Number(v) || 30;
+              }}
             />
             <span>天</span>
           </Space>
           <Space>
-            <Switch size="small" onChange={(v) => { onlyFailed = v; }} />
+            <Switch
+              size="small"
+              onChange={(v) => {
+                onlyFailed = v;
+              }}
+            />
             <Text style={{ fontSize: 12 }}>仅清理失败记录（保留成功样本用于统计）</Text>
           </Space>
         </Space>
@@ -892,7 +1103,7 @@ export default function AIConfigPage() {
   // ✅ 修复竞态：请求序号守卫——慢的旧请求响应不再覆盖新结果
   const fetchModelsSeqRef = useRef(0);
   const tryFetchCustomModels = async (baseUrl: string, apiKey: string, configId?: string) => {
-    if (!baseUrl) return;  // base_url 必须；apiKey 在有 configId 时后端会从 DB 读
+    if (!baseUrl) return; // base_url 必须；apiKey 在有 configId 时后端会从 DB 读
     const seq = ++fetchModelsSeqRef.current;
     setFetchingModels(true);
     setCustomFetchError("");
@@ -1000,7 +1211,7 @@ export default function AIConfigPage() {
   };
 
   const providerKeys = Object.keys(providers);
-  const activeConfig = configs.find(c => c.is_active);
+  const activeConfig = configs.find((c) => c.is_active);
 
   const columns = [
     {
@@ -1014,7 +1225,9 @@ export default function AIConfigPage() {
             <Tag color="blue">{info.label}</Tag>
             {v === "agnes" && <Tag color="orange">内置</Tag>}
           </Space>
-        ) : v;
+        ) : (
+          v
+        );
       },
     },
     {
@@ -1032,7 +1245,9 @@ export default function AIConfigPage() {
           pay_as_you_go: "按量计费",
           coding_plan: "包月套餐",
         };
-        return <Tag color={v === "coding_plan" ? "purple" : "blue"}>{labels[v] || v || "按量计费"}</Tag>;
+        return (
+          <Tag color={v === "coding_plan" ? "purple" : "blue"}>{labels[v] || v || "按量计费"}</Tag>
+        );
       },
     },
     {
@@ -1043,9 +1258,13 @@ export default function AIConfigPage() {
       render: (v: string) =>
         v ? (
           <Tooltip title={v}>
-            <Text code style={{ fontSize: 11 }}>{v.length > 38 ? v.slice(0, 38) + "…" : v}</Text>
+            <Text code style={{ fontSize: 11 }}>
+              {v.length > 38 ? v.slice(0, 38) + "…" : v}
+            </Text>
           </Tooltip>
-        ) : <Tag color="red">未设置</Tag>,
+        ) : (
+          <Tag color="red">未设置</Tag>
+        ),
     },
     {
       title: "API Key",
@@ -1055,13 +1274,19 @@ export default function AIConfigPage() {
         if (r.key_broken) {
           return (
             <Tooltip title="密文无法解密（常见于更换过加密密钥或删除过 data/secret_key.key），请重新填写 API Key">
-              <Tag color="warning" icon={<WarningOutlined />}>密钥失效</Tag>
+              <Tag color="warning" icon={<WarningOutlined />}>
+                密钥失效
+              </Tag>
             </Tooltip>
           );
         }
-        return r.has_key
-          ? <Tooltip title="为安全起见仅显示末 4 位"><Text type="secondary">{v}</Text></Tooltip>
-          : <Tag color="red">未设置</Tag>;
+        return r.has_key ? (
+          <Tooltip title="为安全起见仅显示末 4 位">
+            <Text type="secondary">{v}</Text>
+          </Tooltip>
+        ) : (
+          <Tag color="red">未设置</Tag>
+        );
       },
     },
     {
@@ -1072,16 +1297,38 @@ export default function AIConfigPage() {
         // ✅ 2026-09-23：被运行时开关禁用的厂商在列表里必须显式可见，
         //    否则「明明配了、却一直不用它」只能靠翻审计日志才发现。
         const disabled = (runtime?.disabled_providers || []).includes(r.provider_name);
+        const enabled = r.enabled == null ? true : Boolean(r.enabled);
         return (
           <Space size={4} wrap>
-            {a
-              ? <Tag color="success" icon={<CheckCircleOutlined />}>当前使用</Tag>
-              : <Tag>未启用</Tag>}
+            {a ? (
+              <Tag color="success" icon={<CheckCircleOutlined />}>
+                当前使用
+              </Tag>
+            ) : (
+              <Tag>备用（参与降级）</Tag>
+            )}
             {disabled && (
               <Tooltip title="该厂商已被「运行时厂商开关」禁用：不参与任何 AI 调用（配置与密钥仍保留，恢复开关即可使用）">
                 <Tag color="error">已禁用</Tag>
               </Tooltip>
             )}
+            {/* ✅ R175（BUG-03）：显式「参与调用」开关；当前主配置不可停用 */}
+            <Tooltip
+              title={
+                a
+                  ? "当前使用中的配置不能停用；请先把其它配置设为「当前使用」"
+                  : "停用后不再进入降级链与视觉/OCR 候选，密钥与配置仍保留"
+              }
+            >
+              <Switch
+                size="small"
+                checked={enabled}
+                disabled={a === 1}
+                checkedChildren="启用"
+                unCheckedChildren="停用"
+                onChange={(next) => handleToggleEnabled(r, next)}
+              />
+            </Tooltip>
           </Space>
         );
       },
@@ -1097,17 +1344,18 @@ export default function AIConfigPage() {
       dataIndex: "request_mode",
       key: "request_mode",
       width: 110,
-      render: (v: string) => (
+      render: (v: string) =>
         v === "stream" ? (
           <Tooltip title="后端以流式（stream）方式接收厂商响应，边收边拼成完整结果后再继续流程：首字节更快、长正文更不易被网关超时掐断">
-            <Tag color="purple" icon={<ThunderboltOutlined />}>流式请求</Tag>
+            <Tag color="purple" icon={<ThunderboltOutlined />}>
+              流式请求
+            </Tag>
           </Tooltip>
         ) : (
           <Tooltip title="一次性请求并等待完整响应（默认）">
             <Tag>普通请求</Tag>
           </Tooltip>
-        )
-      ),
+        ),
     },
     {
       title: "环境",
@@ -1136,9 +1384,13 @@ export default function AIConfigPage() {
       key: "actions",
       render: (_: unknown, r: AIConfigItem) => (
         <Space size="small">
-          <Button size="small" type="link" onClick={() => handleEdit(r)}>编辑</Button>
+          <Button size="small" type="link" onClick={() => handleEdit(r)}>
+            编辑
+          </Button>
           {r.is_active ? (
-            <Tag color="success" style={{ margin: 0 }}>当前使用</Tag>
+            <Tag color="success" style={{ margin: 0 }}>
+              当前使用
+            </Tag>
           ) : (
             <Button size="small" type="primary" onClick={() => handleToggle(r.id)}>
               设为当前使用
@@ -1195,7 +1447,14 @@ export default function AIConfigPage() {
       dataIndex: "model",
       key: "model",
       width: 200,
-      render: (v: string) => v ? <Text code style={{ fontSize: 11 }}>{v}</Text> : "-",
+      render: (v: string) =>
+        v ? (
+          <Text code style={{ fontSize: 11 }}>
+            {v}
+          </Text>
+        ) : (
+          "-"
+        ),
     },
     { title: "操作", dataIndex: "action", key: "action", width: 90 },
     {
@@ -1205,16 +1464,28 @@ export default function AIConfigPage() {
       width: 120,
       // 改造前的历史调用没有 scene（当时漏传）→ 显示「未标记」而不是空白，
       // 便于区分「真的没场景」与「老记录未埋点」
-      render: (v: string) => v
-        ? <Tag color="blue" style={{ fontSize: 11 }}>{sceneLabel(v)}</Tag>
-        : <Text type="secondary" style={{ fontSize: 11 }}>未标记</Text>,
+      render: (v: string) =>
+        v ? (
+          <Tag color="blue" style={{ fontSize: 11 }}>
+            {sceneLabel(v)}
+          </Tag>
+        ) : (
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            未标记
+          </Text>
+        ),
     },
     {
       title: "Token 用量",
       key: "tokens",
       render: (_: unknown, r: AIAuditLogItem) => {
         const total = (r.prompt_tokens || 0) + (r.completion_tokens || 0);
-        if (!total) return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
+        if (!total)
+          return (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              —
+            </Text>
+          );
         return (
           <Space size="small">
             <Tag>输入 {r.prompt_tokens || 0}</Tag>
@@ -1229,18 +1500,25 @@ export default function AIConfigPage() {
       dataIndex: "duration",
       key: "duration",
       width: 90,
-      render: (v: number) => v ? `${Number(v).toFixed(1)}s` : "-",
+      render: (v: number) => (v ? `${Number(v).toFixed(1)}s` : "-"),
     },
     {
       title: "结果",
       dataIndex: "success",
       key: "success",
       width: 70,
-      render: (s: number, r: AIAuditLogItem) => s
-        ? <Tag color="success" icon={<CheckCircleOutlined />}>成功</Tag>
-        : <Tooltip title={r.error || "（无错误详情：本次改造前的历史记录）"}>
-            <Tag color="error" icon={<CloseCircleOutlined />}>失败</Tag>
-          </Tooltip>,
+      render: (s: number, r: AIAuditLogItem) =>
+        s ? (
+          <Tag color="success" icon={<CheckCircleOutlined />}>
+            成功
+          </Tag>
+        ) : (
+          <Tooltip title={r.error || "（无错误详情：本次改造前的历史记录）"}>
+            <Tag color="error" icon={<CloseCircleOutlined />}>
+              失败
+            </Tag>
+          </Tooltip>
+        ),
     },
     {
       title: "时间",
@@ -1259,17 +1537,27 @@ export default function AIConfigPage() {
       {/* 顶部状态卡片 */}
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col span={6}>
-          <Card size="small" style={{ borderLeft: activeConfig ? "3px solid #52c41a" : "3px solid #ff4d4f" }}>
+          <Card
+            size="small"
+            style={{ borderLeft: activeConfig ? "3px solid #52c41a" : "3px solid #ff4d4f" }}
+          >
             <Statistic
               title="当前使用平台"
-              value={activeConfig ? providers[activeConfig.provider_name]?.label || activeConfig.provider_name : "未配置"}
+              value={
+                activeConfig
+                  ? providers[activeConfig.provider_name]?.label || activeConfig.provider_name
+                  : "未配置"
+              }
               prefix={<ApiOutlined />}
               valueStyle={{ fontSize: 18, color: activeConfig ? "#52c41a" : "#ff4d4f" }}
             />
           </Card>
         </Col>
         <Col span={6}>
-          <Card size="small" style={{ borderLeft: activeConfig ? "3px solid #52c41a" : "3px solid #ff4d4f" }}>
+          <Card
+            size="small"
+            style={{ borderLeft: activeConfig ? "3px solid #52c41a" : "3px solid #ff4d4f" }}
+          >
             <Statistic
               title="当前模型"
               value={activeConfig?.model || "—"}
@@ -1283,9 +1571,13 @@ export default function AIConfigPage() {
             <Statistic
               title="连接状态"
               value={HEALTH_LABELS[health?.status || ""] || "未配置"}
-              prefix={health?.status === "configured"
-                ? <CheckCircleOutlined style={{ color: "#52c41a" }} />
-                : <CloseCircleOutlined style={{ color: healthColor(health?.status) }} />}
+              prefix={
+                health?.status === "configured" ? (
+                  <CheckCircleOutlined style={{ color: "#52c41a" }} />
+                ) : (
+                  <CloseCircleOutlined style={{ color: healthColor(health?.status) }} />
+                )
+              }
               valueStyle={{
                 fontSize: 18,
                 color: healthColor(health?.status),
@@ -1323,8 +1615,10 @@ export default function AIConfigPage() {
           showIcon
           style={{ marginBottom: 16 }}
           message="当前使用配置尚未填写 API Key"
-          description={health?.hint
-            || "该配置已启用但没有可用的 Key，所有 AI 生成能力不可用。请编辑该配置补填 API Key 并保存。"}
+          description={
+            health?.hint ||
+            "该配置已启用但没有可用的 Key，所有 AI 生成能力不可用。请编辑该配置补填 API Key 并保存。"
+          }
         />
       )}
       {health?.status === "not_configured" && (
@@ -1349,8 +1643,9 @@ export default function AIConfigPage() {
           description={
             <Space direction="vertical" size={4} style={{ width: "100%" }}>
               <Text style={{ fontSize: 12 }}>
-                {health?.hint || envError
-                  || "运行环境值未通过校验，后端拒绝按通用环境继续（避免误用其它环境的密钥与地址）。"}
+                {health?.hint ||
+                  envError ||
+                  "运行环境值未通过校验，后端拒绝按通用环境继续（避免误用其它环境的密钥与地址）。"}
               </Text>
               <Text type="secondary" style={{ fontSize: 12 }}>
                 下方配置清单已按「通用环境」展示，可正常查看。恢复方法：把当前生效环境
@@ -1379,18 +1674,30 @@ export default function AIConfigPage() {
         <Card size="small" style={{ marginBottom: 16 }}>
           <Row gutter={24}>
             <Col span={8}>
-              <Text type="secondary" style={{ fontSize: 12 }}>当前接入地址：</Text>
-              <Text code style={{ fontSize: 12 }}>{health.base_url || "—"}</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                当前接入地址：
+              </Text>
+              <Text code style={{ fontSize: 12 }}>
+                {health.base_url || "—"}
+              </Text>
             </Col>
             <Col span={4}>
-              <Statistic title="降级候选" value={health.fallback_count ?? 0} suffix="个" valueStyle={{ fontSize: 16 }} />
+              <Statistic
+                title="降级候选"
+                value={health.fallback_count ?? 0}
+                suffix="个"
+                valueStyle={{ fontSize: 16 }}
+              />
             </Col>
             <Col span={4}>
               {/* ✅ 新增：当前使用配置的请求方式 —— 排查「同一份配置首字节慢 /
                   长正文易断」时必须能看到运行时真正生效的是哪一种 */}
-              <Text type="secondary" style={{ fontSize: 12 }}>请求方式：</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                请求方式：
+              </Text>
               <Tag color={health.request_mode === "stream" ? "purple" : "default"}>
-                {health.request_mode_label || (health.request_mode === "stream" ? "流式请求" : "普通请求")}
+                {health.request_mode_label ||
+                  (health.request_mode === "stream" ? "流式请求" : "普通请求")}
               </Tag>
             </Col>
             <Col span={4}>
@@ -1405,14 +1712,19 @@ export default function AIConfigPage() {
               />
             </Col>
             <Col span={6}>
-              <Text type="secondary" style={{ fontSize: 12 }}>熔断状态：</Text>
-              {Object.keys(health.degraded_providers || {}).length === 0
-                ? <Tag color="green">正常</Tag>
-                : Object.entries(health.degraded_providers || {}).map(([k, v]) => (
-                    <Tag key={k} color={v.state === "OPEN" ? "red" : "default"}>
-                      {k}: {v.state}{v.failures ? ` (连续失败${v.failures})` : ""}
-                    </Tag>
-                  ))}
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                熔断状态：
+              </Text>
+              {Object.keys(health.degraded_providers || {}).length === 0 ? (
+                <Tag color="green">正常</Tag>
+              ) : (
+                Object.entries(health.degraded_providers || {}).map(([k, v]) => (
+                  <Tag key={k} color={v.state === "OPEN" ? "red" : "default"}>
+                    {k}: {v.state}
+                    {v.failures ? ` (连续失败${v.failures})` : ""}
+                  </Tag>
+                ))
+              )}
             </Col>
           </Row>
         </Card>
@@ -1425,12 +1737,17 @@ export default function AIConfigPage() {
           style={{ marginBottom: 16 }}
           extra={
             <Space>
-              <Text type="secondary" style={{ fontSize: 12 }}>统计范围</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                统计范围
+              </Text>
               <Select
                 size="small"
                 value={statsDays}
                 style={{ width: 100 }}
-                onChange={(v) => { setStatsDays(v); loadStats(v); }}
+                onChange={(v) => {
+                  setStatsDays(v);
+                  loadStats(v);
+                }}
                 options={[
                   { value: 1, label: "最近 1 天" },
                   { value: 7, label: "最近 7 天" },
@@ -1460,22 +1777,35 @@ export default function AIConfigPage() {
             <Col span={4}>
               <Tooltip title="仅统计成功调用（失败/熔断跳过的 0 秒记录不参与平均）">
                 <div>
-                  <Statistic title="平均耗时" value={Number(stats.summary.avg_duration || 0).toFixed(1)} suffix="s" />
+                  <Statistic
+                    title="平均耗时"
+                    value={Number(stats.summary.avg_duration || 0).toFixed(1)}
+                    suffix="s"
+                  />
                 </div>
               </Tooltip>
             </Col>
             <Col span={3}>
-              <Statistic
-                title="成功率"
-                value={stats.summary.success_rate == null ? "—" : stats.summary.success_rate}
-                suffix={stats.summary.success_rate == null ? "" : "%"}
-              />
+              {/* ✅ 2026-11-05（方案 B）：审计已按逻辑调用合并，成功率分母=逻辑调用 */}
+              <Tooltip
+                title={`成功逻辑调用 ÷ 逻辑调用（action='chat'，一次业务调用含重试/降级/对冲只计一次）。本次窗口共 ${stats.summary.total || 0} 次调用 / ${stats.summary.attempts || 0} 次尝试（尝试成功率 ${stats.summary.attempt_success_rate ?? "—"}%）`}
+              >
+                <div>
+                  <Statistic
+                    title="调用成功率"
+                    value={stats.summary.success_rate == null ? "—" : stats.summary.success_rate}
+                    suffix={stats.summary.success_rate == null ? "" : "%"}
+                  />
+                </div>
+              </Tooltip>
             </Col>
             <Col span={3}>
-              {/* ✅ 口径修正：只统计真实调用失败；熔断跳过单列，避免把「没发出去的请求」当失败 */}
-              <Tooltip title="真实调用失败（不含被熔断器跳过的请求）">
+              {/* ✅ 2026-11-05（方案 B）：失败数=失败逻辑调用；尝试失败另在供应商标签展示 */}
+              <Tooltip
+                title={`失败逻辑调用数（不含熔断跳过）；对应审计 action='chat' AND success=0 行数。其中尝试级失败 ${stats.summary.attempt_failed ?? 0} 次（含重试/降级/对冲副本）`}
+              >
                 <div>
-                  <Statistic title="失败次数" value={stats.summary.failed_count || 0} />
+                  <Statistic title="失败调用次数" value={stats.summary.failed_count || 0} />
                 </div>
               </Tooltip>
             </Col>
@@ -1503,7 +1833,8 @@ export default function AIConfigPage() {
               {stats.by_provider?.map((p) => {
                 // ✅ 2026-09-17 增强：成功率着色（<60% 红色预警，帮助一眼识别死配置）
                 const sr = p.success_rate;
-                const srColor = sr == null ? "default" : sr >= 90 ? "green" : sr >= 60 ? "blue" : "red";
+                const srColor =
+                  sr == null ? "default" : sr >= 90 ? "green" : sr >= 60 ? "blue" : "red";
                 return (
                   <Tag
                     key={`${p.provider_name}-${p.model}-${p.config_id || p.base_url || "default"}`}
@@ -1512,12 +1843,16 @@ export default function AIConfigPage() {
                     {providers[p.provider_name]?.label || p.provider_name}
                     {p.model ? ` / ${p.model}` : ""}
                     {p.config_id ? ` / 配置 ${p.config_id.slice(0, 8)}` : ""}
-                    {p.base_url && !p.config_id ? ` / ${p.base_url}` : ""}: {p.calls}次
+                    {p.base_url && !p.config_id ? ` / ${p.base_url}` : ""}: {p.calls}次调用
+                    {(p.attempts || 0) > p.calls && `（${p.attempts}次尝试）`}
                     {sr != null && ` / 成功率${sr}%`}
                     {(p.prompt_tokens || 0) + (p.completion_tokens || 0) > 0 &&
                       ` / ${(p.prompt_tokens || 0) + (p.completion_tokens || 0)} tokens`}
-                    {p.cache_hit_rate != null && p.cache_hit_rate > 0 && ` / 缓存命中${p.cache_hit_rate}%`}
+                    {p.cache_hit_rate != null &&
+                      p.cache_hit_rate > 0 &&
+                      ` / 缓存命中${p.cache_hit_rate}%`}
                     {(p.fail_count || 0) > 0 && ` / 失败${p.fail_count}次`}
+                    {(p.attempt_failed || 0) > 0 && ` / 尝试失败${p.attempt_failed}次`}
                     {(p.skipped_count || 0) > 0 && ` / 熔断跳过${p.skipped_count}次`}
                   </Tag>
                 );
@@ -1538,9 +1873,10 @@ export default function AIConfigPage() {
               <Space wrap>
                 {stats.by_scene.map((sc) => {
                   const rate = sc.calls
-                    ? Math.round(((sc.success_count || 0) / sc.calls) * 100) : null;
-                  const rateColor = rate == null ? "default"
-                    : rate >= 90 ? "green" : rate >= 60 ? "blue" : "red";
+                    ? Math.round(((sc.success_count || 0) / sc.calls) * 100)
+                    : null;
+                  const rateColor =
+                    rate == null ? "default" : rate >= 90 ? "green" : rate >= 60 ? "blue" : "red";
                   return (
                     <Tag
                       key={sc.scene || "unknown"}
@@ -1581,7 +1917,10 @@ export default function AIConfigPage() {
                     >
                       <div
                         style={{
-                          width: 10, height: h, borderRadius: 2, flex: "0 0 auto",
+                          width: 10,
+                          height: h,
+                          borderRadius: 2,
+                          flex: "0 0 auto",
                           background: fail > 0 ? "#ff7875" : "#597ef7",
                           opacity: calls ? 1 : 0.35,
                         }}
@@ -1592,13 +1931,38 @@ export default function AIConfigPage() {
               </div>
             </div>
           )}
+          {/* ✅ 2026-11-05（方案 B）：失败类别占比。始终渲染全部类别（无数据=0），
+              历史 NULL 行由后端归入 unknown；占比分母=窗口内失败逻辑调用数。 */}
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontWeight: 600, marginBottom: 8 }}>
+              失败类别占比
+              <Text type="secondary" style={{ fontSize: 11, marginLeft: 8 }}>
+                分母 = 窗口内失败逻辑调用数；逐次失败明细见审计 attempts_json
+              </Text>
+            </div>
+            <Space wrap>
+              {ERROR_CLASS_LABELS.map(({ key, label }) => {
+                const row = (stats.by_error_class || []).find((x) => x.error_class === key);
+                const calls = row?.calls ?? 0;
+                const share = row?.share ?? 0;
+                return (
+                  <Tag key={key} color={calls > 0 ? "volcano" : "default"}>
+                    {label}: {calls}次 ({share}%)
+                  </Tag>
+                );
+              })}
+            </Space>
+          </div>
           {/* ✅ 2026-09-17 新增：失败原因 TOP 分布（配合审计 error 列） */}
           {stats.by_error?.length > 0 && (
             <div style={{ marginTop: 12 }}>
               <div style={{ fontWeight: 600, marginBottom: 8 }}>失败原因 TOP（按调用次数）</div>
               <Space wrap>
                 {stats.by_error.map((e, i: number) => (
-                  <Tooltip key={i} title={`${providers[e.provider_name]?.label || e.provider_name} / ${e.model || "—"}`}>
+                  <Tooltip
+                    key={i}
+                    title={`${providers[e.provider_name]?.label || e.provider_name} / ${e.model || "—"}`}
+                  >
                     <Tag color="volcano">
                       {providers[e.provider_name]?.label || e.provider_name}: {e.err}: {e.calls}次
                     </Tag>
@@ -1616,7 +1980,11 @@ export default function AIConfigPage() {
         items={[
           {
             key: "configs",
-            label: <span><SettingOutlined /> 模型配置</span>,
+            label: (
+              <span>
+                <SettingOutlined /> 模型配置
+              </span>
+            ),
             children: (
               <div>
                 {/* ===== ✅ 2026-09-23 新增：多环境切换器（无需重启即时生效）===== */}
@@ -1639,13 +2007,13 @@ export default function AIConfigPage() {
                       主配置优先取该环境专用配置，降级链只使用「通用 + 该环境」的候选，
                       不会跨环境降级。环境标签在每条配置的「环境」列维护。
                     </Text>
-                    {envOptions.length === 0 && (
-                      <Tag>尚未配置任何环境标签</Tag>
-                    )}
+                    {envOptions.length === 0 && <Tag>尚未配置任何环境标签</Tag>}
                   </Space>
                 </Card>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
-                  <Title level={5} style={{ margin: 0 }}>已配置的供应商（{configs.length}）</Title>
+                  <Title level={5} style={{ margin: 0 }}>
+                    已配置的供应商（{configs.length}）
+                  </Title>
                   <Space wrap>
                     {/* ✅ 2026-10-06（G3）：全部配置体检 —— 一次性看出「当前环境下哪几条真能用」，
                         覆盖 Key 缺失/解密失败/缺地址/环境不符/厂商禁用/网络不可达。 */}
@@ -1662,18 +2030,31 @@ export default function AIConfigPage() {
                     {/* ✅ 2026-10-17（R89）：主密钥体检 —— 零写入只读，展示「密钥来源 + 存量密文健康度」，
                         broken 非空时给出恢复指引（可一键重加密或切换 FERNET_KEY）。 */}
                     <Tooltip title="体检主密钥来源（env / 持久化文件 / 临时）与全部存量密文健康度（解密/不可解密），零写入零密钥改动">
-                      <Button icon={<EyeOutlined />} loading={keyRotationLoading} onClick={handleKeyRotationInspect}>
+                      <Button
+                        icon={<EyeOutlined />}
+                        loading={keyRotationLoading}
+                        onClick={handleKeyRotationInspect}
+                      >
                         主密钥体检
                       </Button>
                     </Tooltip>
                     <Tooltip title="对「已保存但无法解密」的存量密文执行一次重加密（仅使用当前生效密钥）；健康密文不动，失败密文原样保留不被清空">
-                      <Button icon={<SafetyCertificateOutlined />} loading={keyRotationReencryptLoading} onClick={handleKeyRotationReencrypt} disabled={keyRotationLoading}>
+                      <Button
+                        icon={<SafetyCertificateOutlined />}
+                        loading={keyRotationReencryptLoading}
+                        onClick={handleKeyRotationReencrypt}
+                        disabled={keyRotationLoading}
+                      >
                         重加密存量密文
                       </Button>
                     </Tooltip>
                     {/* ✅ 新增：配置备份 / 迁移（导出不含 API Key） */}
                     <Tooltip title="导出配置 JSON（不含 API Key，可用于备份或迁移到其他机器）">
-                      <Button icon={<ExportOutlined />} onClick={handleExport} disabled={!configs.length}>
+                      <Button
+                        icon={<ExportOutlined />}
+                        onClick={handleExport}
+                        disabled={!configs.length}
+                      >
                         导出配置
                       </Button>
                     </Tooltip>
@@ -1686,7 +2067,9 @@ export default function AIConfigPage() {
                         导入配置
                       </Button>
                     </Tooltip>
-                    <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
+                    <Button icon={<ReloadOutlined />} onClick={load}>
+                      刷新
+                    </Button>
                     <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>
                       添加供应商
                     </Button>
@@ -1713,7 +2096,11 @@ export default function AIConfigPage() {
                 {configs.length > 0 && (
                   <Card
                     size="small"
-                    title={<span><SortAscendingOutlined /> 熔断降级链顺序</span>}
+                    title={
+                      <span>
+                        <SortAscendingOutlined /> 熔断降级链顺序
+                      </span>
+                    }
                     style={{ marginTop: 16 }}
                     extra={
                       <Space>
@@ -1747,9 +2134,13 @@ export default function AIConfigPage() {
                       style={{ marginBottom: 8 }}
                       message={
                         <Text style={{ fontSize: 12 }}>
-                          调用失败时按顺序依次降级尝试。<Text strong>当前使用中的配置始终最先尝试</Text>
+                          调用失败时按顺序依次降级尝试。
+                          <Text strong>当前使用中的配置始终最先尝试</Text>
                           （不受此顺序影响）；其余配置按下方顺序降级，越靠上越先尝试。
-                          未填写 API Key 的配置会被自动跳过。
+                          {/* ✅ R175（BUG-04）：此前未说明上限，用户误以为第 4 条起也会被尝试 */}
+                          <Text strong>仅前 {resolveFallbackChainMax(health)} 条参与降级</Text>
+                          （超出部分不生效；实际顺序还会按实时成功率微调）。 未填写 API Key
+                          的配置会被自动跳过。
                         </Text>
                       }
                     />
@@ -1778,7 +2169,9 @@ export default function AIConfigPage() {
                           ]}
                         >
                           <Space wrap>
-                            <Tag color="blue" style={{ minWidth: 28, textAlign: "center" }}>{i + 1}</Tag>
+                            <Tag color="blue" style={{ minWidth: 28, textAlign: "center" }}>
+                              {i + 1}
+                            </Tag>
                             {c.is_active && <Tag color="green">当前使用</Tag>}
                             {!c.has_key && (
                               <Tooltip title="未填写 API Key，降级时会被自动跳过">
@@ -1790,10 +2183,16 @@ export default function AIConfigPage() {
                                 <Tag color="error">已禁用</Tag>
                               </Tooltip>
                             )}
-                            <Text strong>{providers[c.provider_name]?.label || c.provider_name}</Text>
-                            <Text type="secondary" style={{ fontSize: 12 }}>{c.model || "-"}</Text>
+                            <Text strong>
+                              {providers[c.provider_name]?.label || c.provider_name}
+                            </Text>
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              {c.model || "-"}
+                            </Text>
                             {c.remark && (
-                              <Text type="secondary" style={{ fontSize: 11 }}>{c.remark}</Text>
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                {c.remark}
+                              </Text>
                             )}
                             {precheckAllResult[c.id] && (
                               <Tooltip title={precheckAllResult[c.id].message}>
@@ -1811,11 +2210,17 @@ export default function AIConfigPage() {
                   </Card>
                 )}
 
-                {/* ===== ✅ 2026-09-23 新增：运行时厂商开关 ===== */}
-                {configs.length > 0 && runtime && (
+                {/* ===== ✅ 2026-09-23 新增：运行时厂商开关 =====
+                    ✅ R175（BUG-01）：条件不再要求 runtime 非空 —— 读取失败时
+                    仍渲染卡片与「保存开关」，否则恢复入口会被整卡隐藏。 */}
+                {configs.length > 0 && (
                   <Card
                     size="small"
-                    title={<span><FireOutlined /> 运行时厂商开关（临时禁用，不删配置）</span>}
+                    title={
+                      <span>
+                        <FireOutlined /> 运行时厂商开关（临时禁用，不删配置）
+                      </span>
+                    }
                     style={{ marginTop: 16 }}
                     extra={
                       <Space>
@@ -1833,43 +2238,68 @@ export default function AIConfigPage() {
                       </Space>
                     }
                   >
-                    <Alert
-                      type={runtime.all_configured_disabled ? "error" : "info"}
-                      showIcon
-                      style={{ marginBottom: 8 }}
-                      message={
-                        <Text style={{ fontSize: 12 }}>
-                          被禁用的厂商<Text strong>不参与任何 AI 调用</Text>（连探测请求都不发），
-                          调用会自动降级到其它候选，并在用量日志中留下 <Text code>provider_disabled</Text> 记录。
-                          与「删除配置」的区别：配置与密钥原样保留，恢复开关即可继续使用。
-                          {runtime.all_configured_disabled && (
-                            <Text type="danger">
-                              ⚠ 当前已禁用全部已配置厂商，所有 AI 生成能力不可用！
-                            </Text>
-                          )}
-                        </Text>
-                      }
-                    />
-                    <Space wrap>
-                      <Text style={{ fontSize: 13 }}>禁用厂商：</Text>
-                      <Select
-                        mode="multiple"
-                        size="small"
-                        style={{ minWidth: 420 }}
-                        placeholder="选择要临时禁用的厂商（留空 = 全部可用）"
-                        value={runtimeDraft}
-                        onChange={(v) => setRuntimeDraft(v as string[])}
-                        options={runtime.providers.map((p) => ({
-                          value: p,
-                          label: runtime.configured_providers.includes(p)
-                            ? `${providers[p]?.label || p}（已配置）`
-                            : `${providers[p]?.label || p}（未配置）`,
-                        }))}
+                    {runtimeError && (
+                      <Alert
+                        type="error"
+                        showIcon
+                        style={{ marginBottom: 8 }}
+                        message={
+                          <Text style={{ fontSize: 12 }}>
+                            运行时厂商开关读取异常：{runtimeError}
+                            <br />
+                            该值已按「空集（全部可用）」处理以保证恢复入口可用；
+                            点击右上角「保存开关」即可用当前选择覆盖损坏值。
+                          </Text>
+                        }
                       />
+                    )}
+                    {runtime ? (
+                      <>
+                        <Alert
+                          type={runtime.all_configured_disabled ? "error" : "info"}
+                          showIcon
+                          style={{ marginBottom: 8 }}
+                          message={
+                            <Text style={{ fontSize: 12 }}>
+                              被禁用的厂商<Text strong>不参与任何 AI 调用</Text>
+                              （连探测请求都不发）， 调用会自动降级到其它候选，并在用量日志中留下{" "}
+                              <Text code>provider_disabled</Text> 记录。
+                              与「删除配置」的区别：配置与密钥原样保留，恢复开关即可继续使用。
+                              {runtime.all_configured_disabled && (
+                                <Text type="danger">
+                                  ⚠ 当前已禁用全部已配置厂商，所有 AI 生成能力不可用！
+                                </Text>
+                              )}
+                            </Text>
+                          }
+                        />
+                        <Space wrap>
+                          <Text style={{ fontSize: 13 }}>禁用厂商：</Text>
+                          <Select
+                            mode="multiple"
+                            size="small"
+                            style={{ minWidth: 420 }}
+                            placeholder="选择要临时禁用的厂商（留空 = 全部可用）"
+                            value={runtimeDraft}
+                            onChange={(v) => setRuntimeDraft(v as string[])}
+                            options={runtime.providers.map((p) => ({
+                              value: p,
+                              label: runtime.configured_providers.includes(p)
+                                ? `${providers[p]?.label || p}（已配置）`
+                                : `${providers[p]?.label || p}（未配置）`,
+                            }))}
+                          />
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            已配置厂商仍可用：{runtime.effective_provider_count} /{" "}
+                            {runtime.configured_providers.length}
+                          </Text>
+                        </Space>
+                      </>
+                    ) : (
                       <Text type="secondary" style={{ fontSize: 12 }}>
-                        已配置厂商仍可用：{runtime.effective_provider_count} / {runtime.configured_providers.length}
+                        开关数据暂不可用：点击右上角「保存开关」即可重置为「全部可用」并恢复。
                       </Text>
-                    </Space>
+                    )}
                   </Card>
                 )}
 
@@ -1877,7 +2307,11 @@ export default function AIConfigPage() {
                 {configs.length > 0 && sceneRoutes.length > 0 && (
                   <Card
                     size="small"
-                    title={<span><NodeIndexOutlined /> 场景模型路由（可选）</span>}
+                    title={
+                      <span>
+                        <NodeIndexOutlined /> 场景模型路由（可选）
+                      </span>
+                    }
                     style={{ marginTop: 16 }}
                   >
                     <Alert
@@ -1886,55 +2320,68 @@ export default function AIConfigPage() {
                       style={{ marginBottom: 8 }}
                       message={
                         <Text style={{ fontSize: 12 }}>
-                          默认为<Text strong>跟随「当前使用」配置</Text> —— 不设置时行为与旧版完全一致。
+                          默认为<Text strong>跟随「当前使用」配置</Text> ——
+                          不设置时行为与旧版完全一致。
                           可为特定业务场景指定专属配置（例如「正文生成」用长文模型、「事实提取」用快模型）。
-                          指定的配置同样需要有可用的 API Key 才会生效；配置被删除后会自动回落主配置。
-                          {activeEnv || sceneActiveEnv
-                            ? <> 当前生效环境为 <Tag color="blue" style={{ fontSize: 11 }}>{activeEnv || sceneActiveEnv}</Tag>
-                              指向<Text strong>其它环境</Text>的配置会被跳过（回落主配置），并标红提示。</>
-                            : " 当前为通用环境，不做环境过滤。"}
+                          指定的配置同样需要有可用的 API Key
+                          才会生效；配置被删除后会自动回落主配置。
+                          {activeEnv || sceneActiveEnv ? (
+                            <>
+                              {" "}
+                              当前生效环境为{" "}
+                              <Tag color="blue" style={{ fontSize: 11 }}>
+                                {activeEnv || sceneActiveEnv}
+                              </Tag>
+                              指向<Text strong>其它环境</Text>
+                              的配置会被跳过（回落主配置），并标红提示。
+                            </>
+                          ) : (
+                            " 当前为通用环境，不做环境过滤。"
+                          )}
                         </Text>
                       }
                     />
                     {/* 场景较多（20+），限高滚动避免把页面撑得过长 */}
                     <div style={{ maxHeight: 300, overflowY: "auto" }}>
-                    <Row gutter={[8, 8]}>
-                      {sceneRoutes.map((s) => (
-                        <Col span={12} key={s.scene}>
-                          <Space wrap>
-                            <Text style={{ display: "inline-block", width: 132, fontSize: 13 }}>
-                              {s.label}
-                            </Text>
-                            <Select
-                              size="small"
-                              style={{ width: 280 }}
-                              value={s.config_id || ""}
-                              loading={sceneSaving === s.scene}
-                              onChange={(v) => handleSceneRouteChange(s.scene, v)}
-                              options={[
-                                { value: "", label: "跟随「当前使用」配置" },
-                                ...configs.map((c) => ({
-                                  value: c.id,
-                                  label: `${providers[c.provider_name]?.label || c.provider_name} / ${c.model || "-"}${c.has_key ? "" : "（缺 Key）"}`,
-                                })),
-                              ]}
-                            />
-                            {s.missing && (
-                              <Tooltip title="路由指向的配置已被删除，该场景会自动回落「当前使用」配置">
-                                <Tag color="error">配置已删除</Tag>
-                              </Tooltip>
-                            )}
-                            {/* ✅ 2026-09-25：跨环境路由此前只在后端日志里 WARNING，
+                      <Row gutter={[8, 8]}>
+                        {sceneRoutes.map((s) => (
+                          <Col span={12} key={s.scene}>
+                            <Space wrap>
+                              <Text style={{ display: "inline-block", width: 132, fontSize: 13 }}>
+                                {s.label}
+                              </Text>
+                              <Select
+                                size="small"
+                                style={{ width: 280 }}
+                                value={s.config_id || ""}
+                                loading={sceneSaving === s.scene}
+                                onChange={(v) => handleSceneRouteChange(s.scene, v)}
+                                options={[
+                                  { value: "", label: "跟随「当前使用」配置" },
+                                  ...configs.map((c) => ({
+                                    value: c.id,
+                                    label: `${providers[c.provider_name]?.label || c.provider_name} / ${c.model || "-"}${c.has_key ? "" : "（缺 Key）"}`,
+                                  })),
+                                ]}
+                              />
+                              {s.missing && (
+                                <Tooltip title="路由指向的配置已被删除，该场景会自动回落「当前使用」配置">
+                                  <Tag color="error">配置已删除</Tag>
+                                </Tooltip>
+                              )}
+                              {/* ✅ 2026-09-25：跨环境路由此前只在后端日志里 WARNING，
                                 界面显示「已指定」但运行时静默回落 —— 典型配了不生效 */}
-                            {!s.missing && s.env_mismatch && (
-                              <Tooltip title={`该配置属于环境「${s.config_env}」，与当前生效环境「${activeEnv || sceneActiveEnv || "通用"}」不同：运行时会跳过此路由并回落「当前使用」配置。请切换环境，或改选本环境的配置。`}>
-                                <Tag color="warning">跨环境·暂不生效</Tag>
-                              </Tooltip>
-                            )}
-                          </Space>
-                        </Col>
-                      ))}
-                    </Row>
+                              {!s.missing && s.env_mismatch && (
+                                <Tooltip
+                                  title={`该配置属于环境「${s.config_env}」，与当前生效环境「${activeEnv || sceneActiveEnv || "通用"}」不同：运行时会跳过此路由并回落「当前使用」配置。请切换环境，或改选本环境的配置。`}
+                                >
+                                  <Tag color="warning">跨环境·暂不生效</Tag>
+                                </Tooltip>
+                              )}
+                            </Space>
+                          </Col>
+                        ))}
+                      </Row>
                     </div>
                   </Card>
                 )}
@@ -1942,7 +2389,11 @@ export default function AIConfigPage() {
                 {/* ===== ✅ 2026-09-23 新增：配置变更记录（审计留痕）===== */}
                 <Card
                   size="small"
-                  title={<span><HistoryOutlined /> 配置变更记录</span>}
+                  title={
+                    <span>
+                      <HistoryOutlined /> 配置变更记录
+                    </span>
+                  }
                   style={{ marginTop: 16 }}
                   extra={
                     <Text type="secondary" style={{ fontSize: 12 }}>
@@ -1960,30 +2411,41 @@ export default function AIConfigPage() {
                       dataSource={configAudits}
                       renderItem={(r: AIConfigAuditItem) => (
                         <List.Item
-                          actions={r.rollbackable ? [
-                            <Tooltip key="rb" title="把该配置恢复到这次变更之前的状态（API Key 不参与回滚）">
-                              <Button
-                                size="small"
-                                type="link"
-                                loading={rollingBack === r.id}
-                                onClick={() => handleRollback(r)}
-                              >
-                                回滚
-                              </Button>
-                            </Tooltip>,
-                          ] : []}
+                          actions={
+                            r.rollbackable
+                              ? [
+                                  <Tooltip
+                                    key="rb"
+                                    title="把该配置恢复到这次变更之前的状态（API Key 不参与回滚）"
+                                  >
+                                    <Button
+                                      size="small"
+                                      type="link"
+                                      loading={rollingBack === r.id}
+                                      onClick={() => handleRollback(r)}
+                                    >
+                                      回滚
+                                    </Button>
+                                  </Tooltip>,
+                                ]
+                              : []
+                          }
                         >
                           <Space direction="vertical" size={2} style={{ width: "100%" }}>
                             <Space wrap size="small">
                               <Tag color="blue">{r.action_label || r.action}</Tag>
                               {(r.provider_name || r.model) && (
                                 <Text style={{ fontSize: 12 }}>
-                                  {r.provider_name}{r.model ? ` / ${r.model}` : ""}
+                                  {r.provider_name}
+                                  {r.model ? ` / ${r.model}` : ""}
                                 </Text>
                               )}
-                              <Text type="secondary" style={{ fontSize: 12 }}>{r.detail}</Text>
+                              <Text type="secondary" style={{ fontSize: 12 }}>
+                                {r.detail}
+                              </Text>
                               <Text type="secondary" style={{ fontSize: 11 }}>
-                                {r.created_at}{r.client_ip ? ` · ${r.client_ip}` : ""}
+                                {r.created_at}
+                                {r.client_ip ? ` · ${r.client_ip}` : ""}
                               </Text>
                             </Space>
                             {/* ✅ 2026-09-23（G6）：结构化变更明细（历史记录无快照 → 不展示） */}
@@ -1991,7 +2453,8 @@ export default function AIConfigPage() {
                               <Space wrap size="small">
                                 {(r.changes || []).map((c) => (
                                   <Tag key={c.field} color="default" style={{ fontSize: 11 }}>
-                                    {c.label}：{String(c.before) || "（空）"} → {String(c.after) || "（空）"}
+                                    {c.label}：{String(c.before) || "（空）"} →{" "}
+                                    {String(c.after) || "（空）"}
                                   </Tag>
                                 ))}
                               </Space>
@@ -2006,27 +2469,33 @@ export default function AIConfigPage() {
                 {/* 供应商预设信息展示 */}
                 <Card
                   size="small"
-                  title={<span><GlobalOutlined /> 支持的供应商</span>}
+                  title={
+                    <span>
+                      <GlobalOutlined /> 支持的供应商
+                    </span>
+                  }
                   style={{ marginTop: 16 }}
                 >
                   <Row gutter={[12, 12]}>
-                    {providerKeys.map(key => {
+                    {providerKeys.map((key) => {
                       const info = providers[key];
-                      const configured = configs.some(c => c.provider_name === key);
+                      const configured = configs.some((c) => c.provider_name === key);
                       return (
                         <Col span={8} key={key}>
                           <Card
                             size="small"
                             hoverable
                             style={{
-                              borderLeft: configured ? "3px solid #52c41a" : "3px solid transparent",
+                              borderLeft: configured
+                                ? "3px solid #52c41a"
+                                : "3px solid transparent",
                             }}
                             onClick={() => {
                               // ✅ 修复：原实现点击「已配置」的卡片没有任何反应，
                               //    用户以为按钮坏了、只能去表格里找「编辑」。
                               //    现在已配置 → 直接进入该配置的编辑弹窗。
                               if (configured) {
-                                const target = configs.find(c => c.provider_name === key);
+                                const target = configs.find((c) => c.provider_name === key);
                                 if (target) handleEdit(target);
                                 return;
                               }
@@ -2042,19 +2511,29 @@ export default function AIConfigPage() {
                             <Space direction="vertical" size={4} style={{ width: "100%" }}>
                               <Space style={{ width: "100%", justifyContent: "space-between" }}>
                                 <Text strong>{info.label}</Text>
-                                {configured ? <Tag color="green">已配置 · 点击编辑</Tag> : <Tag>未配置</Tag>}
+                                {configured ? (
+                                  <Tag color="green">已配置 · 点击编辑</Tag>
+                                ) : (
+                                  <Tag>未配置</Tag>
+                                )}
                               </Space>
-                              <Text type="secondary" style={{ fontSize: 12 }}>{info.description}</Text>
+                              <Text type="secondary" style={{ fontSize: 12 }}>
+                                {info.description}
+                              </Text>
                               <Space size={4} wrap>
                                 {info.models.slice(0, 3).map((m) => (
                                   <Tag key={m.value} style={{ fontSize: 11 }}>
                                     {m.label.split(" ")[0]}
-                                    {m.recommended && <FireOutlined style={{ color: "#fa8c16", marginLeft: 2 }} />}
+                                    {m.recommended && (
+                                      <FireOutlined style={{ color: "#fa8c16", marginLeft: 2 }} />
+                                    )}
                                   </Tag>
                                 ))}
                                 {info.models.length > 3 && <Tag>+{info.models.length - 3}</Tag>}
                               </Space>
-                              <Text type="secondary" style={{ fontSize: 11 }}>{info.pricing}</Text>
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                {info.pricing}
+                              </Text>
                             </Space>
                           </Card>
                         </Col>
@@ -2081,7 +2560,9 @@ export default function AIConfigPage() {
                       >
                         <Space direction="vertical" size={4} style={{ width: "100%" }}>
                           <Space style={{ width: "100%", justifyContent: "space-between" }}>
-                            <Text strong style={{ color: "#fa8c16" }}>自定义</Text>
+                            <Text strong style={{ color: "#fa8c16" }}>
+                              自定义
+                            </Text>
                             <Tag color="orange">OpenAI 兼容</Tag>
                           </Space>
                           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -2104,7 +2585,11 @@ export default function AIConfigPage() {
           },
           {
             key: "audit",
-            label: <span><BarChartOutlined /> 用量日志{auditTotal ? ` (${auditTotal})` : ""}</span>,
+            label: (
+              <span>
+                <BarChartOutlined /> 用量日志{auditTotal ? ` (${auditTotal})` : ""}
+              </span>
+            ),
             children: (
               <div>
                 {/* ✅ 增强：筛选 + 刷新 + 清理（原实现只有一张写死 50 条的只读表格） */}
@@ -2121,8 +2606,9 @@ export default function AIConfigPage() {
                       setAuditPage(1);
                       loadAuditLogs(1, auditPageSize, f);
                     }}
-                    options={auditProviders.map(p => ({
-                      value: p, label: providers[p]?.label || p,
+                    options={auditProviders.map((p) => ({
+                      value: p,
+                      label: providers[p]?.label || p,
                     }))}
                   />
                   <Select
@@ -2137,7 +2623,7 @@ export default function AIConfigPage() {
                       setAuditPage(1);
                       loadAuditLogs(1, auditPageSize, f);
                     }}
-                    options={auditActions.map(a => ({ value: a, label: a }))}
+                    options={auditActions.map((a) => ({ value: a, label: a }))}
                   />
                   {/* ✅ 2026-09-25：场景下钻 —— 用量统计里有「按场景」聚合，
                       但明细此前无法按场景过滤，看到某场景失败率高却查不到具体请求 */}
@@ -2153,8 +2639,9 @@ export default function AIConfigPage() {
                       setAuditPage(1);
                       loadAuditLogs(1, auditPageSize, f);
                     }}
-                    options={auditScenes.map(s => ({
-                      value: s, label: `${sceneLabel(s)}（${s}）`,
+                    options={auditScenes.map((s) => ({
+                      value: s,
+                      label: `${sceneLabel(s)}（${s}）`,
                     }))}
                   />
                   <Select
@@ -2201,7 +2688,12 @@ export default function AIConfigPage() {
                     刷新
                   </Button>
                   <Tooltip title="删除较早的历史日志，控制数据库体积">
-                    <Button size="small" danger icon={<ClearOutlined />} onClick={handleCleanupLogs}>
+                    <Button
+                      size="small"
+                      danger
+                      icon={<ClearOutlined />}
+                      onClick={handleCleanupLogs}
+                    >
                       清理日志
                     </Button>
                   </Tooltip>
@@ -2213,6 +2705,59 @@ export default function AIConfigPage() {
                   loading={auditLoading}
                   size="small"
                   scroll={{ x: 900 }}
+                  // ✅ R180（2026-11-05）：逐次尝试展开（attempts_json 由后端写入）
+                  //    仅当确有多次尝试或存在明细时才显示展开箭头，历史行零副作用。
+                  expandable={{
+                    rowExpandable: (r: AIAuditLogItem) =>
+                      Boolean((r.attempt_count || 0) > 1 || (r.attempts_json || "").trim()),
+                    expandedRowRender: (r: AIAuditLogItem) => {
+                      let attempts: AIAuditAttempt[] = [];
+                      try {
+                        const parsed: unknown = JSON.parse(r.attempts_json || "[]");
+                        if (Array.isArray(parsed)) attempts = parsed as AIAuditAttempt[];
+                      } catch {
+                        attempts = [];
+                      }
+                      if (!attempts.length) {
+                        return (
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            历史记录无逐次尝试明细
+                          </Text>
+                        );
+                      }
+                      return (
+                        <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                          {attempts.map((a, i) => (
+                            <Space key={i} size="small" wrap style={{ fontSize: 12 }}>
+                              <Tag style={{ fontSize: 11 }}>第 {i + 1} 次</Tag>
+                              <Text code style={{ fontSize: 11 }}>
+                                {a.provider || "-"}
+                              </Text>
+                              <Text code style={{ fontSize: 11 }}>
+                                {a.model || "-"}
+                              </Text>
+                              <Tag color={a.ok ? "success" : "error"} style={{ fontSize: 11 }}>
+                                {a.ok ? "成功" : "失败"}
+                              </Tag>
+                              {!a.ok && (
+                                <Tag color="orange" style={{ fontSize: 11 }}>
+                                  {a.error_class || "unknown"}
+                                </Tag>
+                              )}
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                {Number(a.duration || 0).toFixed(2)}s
+                              </Text>
+                              {!a.ok && a.error ? (
+                                <Text type="secondary" style={{ fontSize: 11 }}>
+                                  {a.error}
+                                </Text>
+                              ) : null}
+                            </Space>
+                          ))}
+                        </Space>
+                      );
+                    },
+                  }}
                   pagination={{
                     current: auditPage,
                     pageSize: auditPageSize,
@@ -2235,7 +2780,11 @@ export default function AIConfigPage() {
       {/* ===== F2：提示词治理（实验性）运行时开关 ===== */}
       <Card
         size="small"
-        title={<span><SafetyCertificateOutlined /> 提示词治理（实验性）</span>}
+        title={
+          <span>
+            <SafetyCertificateOutlined /> 提示词治理（实验性）
+          </span>
+        }
         style={{ marginTop: 16 }}
         loading={govLoading}
       >
@@ -2250,9 +2799,7 @@ export default function AIConfigPage() {
             <Switch
               checked={govDefense}
               loading={govSaving}
-              onChange={(checked) =>
-                saveGovernance({ prompt_injection_defense: checked })
-              }
+              onChange={(checked) => saveGovernance({ prompt_injection_defense: checked })}
             />
             <Text strong>注入防护</Text>
             <Text type="secondary" style={{ fontSize: 12 }}>
@@ -2271,9 +2818,7 @@ export default function AIConfigPage() {
                 const next = typeof v === "number" && Number.isFinite(v) ? v : 0;
                 setGovBudget(next);
               }}
-              onBlur={() =>
-                saveGovernance({ prompt_context_budget: govBudget })
-              }
+              onBlur={() => saveGovernance({ prompt_context_budget: govBudget })}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
               ≤0 关闭；&gt;0 时超出预算的外部资料会被截断
@@ -2288,7 +2833,15 @@ export default function AIConfigPage() {
         open={addModalOpen}
         forceRender
         onOk={handleSave}
-        onCancel={() => { setAddModalOpen(false); form.resetFields(); setEditingId(""); setTestResult(null); setCustomModels([]); setCustomModelsTruncated(false); setCustomFetchError(""); }}
+        onCancel={() => {
+          setAddModalOpen(false);
+          form.resetFields();
+          setEditingId("");
+          setTestResult(null);
+          setCustomModels([]);
+          setCustomModelsTruncated(false);
+          setCustomFetchError("");
+        }}
         width={680}
         okText="保存配置"
         cancelText="取消"
@@ -2296,11 +2849,8 @@ export default function AIConfigPage() {
         <Form form={form} layout="vertical">
           {/* 供应商选择 */}
           <Form.Item name="provider_name" label="供应商" rules={[{ required: true }]}>
-            <Select
-              onChange={handleProviderChange}
-              disabled={!!editingId}
-            >
-              {providerKeys.map(key => (
+            <Select onChange={handleProviderChange} disabled={!!editingId}>
+              {providerKeys.map((key) => (
                 <Select.Option key={key} value={key}>
                   {providers[key]?.label || key}
                   {providers[key]?.models?.some((m) => m.recommended) && " (推荐)"}
@@ -2315,11 +2865,11 @@ export default function AIConfigPage() {
           {/* 计费方式 */}
           {selectedProvider !== "custom" && (
             <Form.Item name="plan" label="计费方式" rules={[{ required: true }]}>
-              <Select
-                onChange={handlePlanChange}
-              >
+              <Select onChange={handlePlanChange}>
                 <Select.Option value="pay_as_you_go">按量计费（使用平台预设地址）</Select.Option>
-                <Select.Option value="coding_plan">包月套餐（Coding Plan，手动填写包月接入点地址）</Select.Option>
+                <Select.Option value="coding_plan">
+                  包月套餐（Coding Plan，手动填写包月接入点地址）
+                </Select.Option>
               </Select>
             </Form.Item>
           )}
@@ -2331,7 +2881,8 @@ export default function AIConfigPage() {
               style={{ marginBottom: 16, padding: "6px 12px" }}
               message={
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  按量计费：使用平台预设地址（只读）；包月套餐：API 地址与按量计费不同，需手动填写厂商提供的包月接入点。两种计划对应各自的 API Key。
+                  按量计费：使用平台预设地址（只读）；包月套餐：API
+                  地址与按量计费不同，需手动填写厂商提供的包月接入点。两种计划对应各自的 API Key。
                 </Text>
               }
             />
@@ -2357,8 +2908,12 @@ export default function AIConfigPage() {
                     </Tooltip>
                   )}
                 </Space>
-                <Text type="secondary" style={{ fontSize: 12 }}>{providers[selectedProvider].description}</Text>
-                <Text type="secondary" style={{ fontSize: 12 }}>{providers[selectedProvider].pricing}</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {providers[selectedProvider].description}
+                </Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {providers[selectedProvider].pricing}
+                </Text>
               </Space>
             </Card>
           )}
@@ -2367,9 +2922,12 @@ export default function AIConfigPage() {
           {selectedProvider === "custom" && (
             <Card size="small" style={{ marginBottom: 16, background: "rgba(250,140,22,0.08)" }}>
               <Space direction="vertical" size={2} style={{ width: "100%" }}>
-                <Text strong style={{ color: "#fa8c16" }}>自定义供应商</Text>
+                <Text strong style={{ color: "#fa8c16" }}>
+                  自定义供应商
+                </Text>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  适用于任何兼容 OpenAI API 格式的供应商。填写 Base URL 和 API Key 后，系统将自动获取可用模型列表。
+                  适用于任何兼容 OpenAI API 格式的供应商。填写 Base URL 和 API Key
+                  后，系统将自动获取可用模型列表。
                 </Text>
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   Base URL 格式示例：https://api.example.com/v1
@@ -2410,10 +2968,14 @@ export default function AIConfigPage() {
               <Space>
                 <span>Base URL</span>
                 {selectedProvider !== "custom" && watchPlan === "pay_as_you_go" && (
-                  <Tag color="blue" style={{ fontSize: 11, margin: 0 }}>平台预设</Tag>
+                  <Tag color="blue" style={{ fontSize: 11, margin: 0 }}>
+                    平台预设
+                  </Tag>
                 )}
                 {watchPlan === "coding_plan" && (
-                  <Tag color="purple" style={{ fontSize: 11, margin: 0 }}>包月·手填</Tag>
+                  <Tag color="purple" style={{ fontSize: 11, margin: 0 }}>
+                    包月·手填
+                  </Tag>
                 )}
               </Space>
             }
@@ -2448,14 +3010,24 @@ export default function AIConfigPage() {
             />
           </Form.Item>
           {/* Base URL 来源说明 */}
-          {selectedProvider !== "custom" && watchPlan === "pay_as_you_go" && presets[selectedProvider]?.base_url && (
-            <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: -8, marginBottom: 12 }}>
-              按量计费使用平台预设地址：<Text code>{presets[selectedProvider].base_url}</Text>（只读，如需自定义地址请选包月套餐或自定义供应商）
-            </Text>
-          )}
+          {selectedProvider !== "custom" &&
+            watchPlan === "pay_as_you_go" &&
+            presets[selectedProvider]?.base_url && (
+              <Text
+                type="secondary"
+                style={{ fontSize: 12, display: "block", marginTop: -8, marginBottom: 12 }}
+              >
+                按量计费使用平台预设地址：<Text code>{presets[selectedProvider].base_url}</Text>
+                （只读，如需自定义地址请选包月套餐或自定义供应商）
+              </Text>
+            )}
           {watchPlan === "coding_plan" && (
-            <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: -8, marginBottom: 12 }}>
-              包月套餐（Coding Plan）为包月计费，API 地址不同于按量计费，请填写厂商提供的包月接入点地址
+            <Text
+              type="secondary"
+              style={{ fontSize: 12, display: "block", marginTop: -8, marginBottom: 12 }}
+            >
+              包月套餐（Coding Plan）为包月计费，API
+              地址不同于按量计费，请填写厂商提供的包月接入点地址
             </Text>
           )}
 
@@ -2519,16 +3091,18 @@ export default function AIConfigPage() {
                   }));
                 }
                 if (selectedProvider === "custom") return [];
-                return providers[selectedProvider]?.models?.map((m) => ({
-                  value: m.value,
-                  label: `${m.label}${m.context ? `  (${m.context})` : ""}`,
-                })) || [];
+                return (
+                  providers[selectedProvider]?.models?.map((m) => ({
+                    value: m.value,
+                    label: `${m.label}${m.context ? `  (${m.context})` : ""}`,
+                  })) || []
+                );
               })()}
             />
           </Form.Item>
 
           {/* 模型获取状态提示 */}
-          {(
+          {
             <div style={{ marginBottom: 12 }}>
               {fetchingModels && <Tag color="processing">正在获取模型列表...</Tag>}
               {!fetchingModels && customModels.length > 0 && (
@@ -2549,11 +3123,12 @@ export default function AIConfigPage() {
               )}
               {!fetchingModels && customModels.length === 0 && !customFetchError && (
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  填写 Base URL 和 API Key 后自动获取可用模型列表。也可点击上方「🔄 获取最新模型」按钮手动拉取。
+                  填写 Base URL 和 API Key 后自动获取可用模型列表。也可点击上方「🔄
+                  获取最新模型」按钮手动拉取。
                 </Text>
               )}
             </div>
-          )}
+          }
 
           {/* ✅ 新增：请求方式 —— 流式只改变后端与厂商之间的调用方式，
               应用侧（正文生成/事实提取/图表生成）仍等待完整结果后继续流程。 */}
@@ -2576,7 +3151,10 @@ export default function AIConfigPage() {
               ]}
             />
           </Form.Item>
-          <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: -8, marginBottom: 12 }}>
+          <Text
+            type="secondary"
+            style={{ fontSize: 12, display: "block", marginTop: -8, marginBottom: 12 }}
+          >
             {watchRequestMode === "stream"
               ? "流式请求：后端以分片方式接收厂商响应，拼接为完整结果后再继续后续流程。首字节到达更快、长正文更不易被网关超时掐断；应用侧行为不变。若该平台不支持 stream 接口，系统会自动回退为普通请求重试，不会导致生成失败。"
               : "普通请求：一次性发起请求并等待厂商返回完整响应（默认，兼容性最好）。"}
@@ -2618,7 +3196,7 @@ export default function AIConfigPage() {
             label="环境标签（可选）"
             tooltip="用于 dev/test/prod 等多环境隔离：留空 = 通用（任何环境都可用）；填了具体环境后，只有在「当前生效环境」匹配时才参与主配置/降级链选取。只允许字母、数字、下划线、中划线。"
           >
-            <Input placeholder="如 prod / test，留空 = 通用" allowClear />
+            <Input placeholder="如 prod / test，留空 = 通用" allowClear maxLength={32} />
           </Form.Item>
 
           <Row gutter={16}>
@@ -2646,11 +3224,7 @@ export default function AIConfigPage() {
                 测试连接
               </Button>
               <Tooltip title="只做 DNS + TCP 连通性检查，不发送任何需要认证的请求 —— 用于确认网络与地址是否通，比「测试连接」更快且不消耗额度">
-                <Button
-                  onClick={handlePrecheck}
-                  loading={prechecking}
-                  icon={<LinkOutlined />}
-                >
+                <Button onClick={handlePrecheck} loading={prechecking} icon={<LinkOutlined />}>
                   连通性预检
                 </Button>
               </Tooltip>
@@ -2662,15 +3236,19 @@ export default function AIConfigPage() {
               >
                 {precheckResult.ok
                   ? `DNS/TCP 可达${precheckResult.ip ? `（${precheckResult.host} → ${precheckResult.ip}）` : ""}`
-                  : (precheckResult.message || "预检未通过")}
+                  : precheckResult.message || "预检未通过"}
               </Tag>
             )}
             {testResult && (
               <Space>
                 {testResult.ok ? (
-                  <Tag icon={<CheckCircleOutlined />} color="success">连接成功</Tag>
+                  <Tag icon={<CheckCircleOutlined />} color="success">
+                    连接成功
+                  </Tag>
                 ) : (
-                  <Tag icon={<CloseCircleOutlined />} color="error">{testResult.label || "连接失败"}</Tag>
+                  <Tag icon={<CloseCircleOutlined />} color="error">
+                    {testResult.label || "连接失败"}
+                  </Tag>
                 )}
                 <Text type={testResult.ok ? "success" : "danger"} style={{ fontSize: 12 }}>
                   {testResult.msg}
@@ -2694,7 +3272,11 @@ export default function AIConfigPage() {
         title="全部配置体检"
         open={!!configsHealthResult}
         onCancel={() => setConfigsHealthResult(null)}
-        footer={<Button type="primary" onClick={() => setConfigsHealthResult(null)}>关闭</Button>}
+        footer={
+          <Button type="primary" onClick={() => setConfigsHealthResult(null)}>
+            关闭
+          </Button>
+        }
         width={960}
       >
         {configsHealthResult && (
@@ -2716,6 +3298,10 @@ export default function AIConfigPage() {
               </Tag>
               <Tag color={configsHealthResult.summary.disabled ? "red" : "default"}>
                 厂商禁用 {configsHealthResult.summary.disabled}
+              </Tag>
+              {/* ✅ R179：用户停用（enabled=0）——与厂商开关是两层独立开关 */}
+              <Tag color={configsHealthResult.summary.disabled_by_user ? "orange" : "default"}>
+                用户停用 {configsHealthResult.summary.disabled_by_user || 0}
               </Tag>
               <Tag color={configsHealthResult.summary.network_unreachable ? "red" : "default"}>
                 网络不可达 {configsHealthResult.summary.network_unreachable}
@@ -2743,7 +3329,9 @@ export default function AIConfigPage() {
                   render: (v: string, r: AIConfigsHealthItem) => (
                     <Space direction="vertical" size={0}>
                       <Text strong>{providers[v]?.label || v}</Text>
-                      <Text type="secondary" style={{ fontSize: 11 }}>{r.model || "-"}</Text>
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {r.model || "-"}
+                      </Text>
                     </Space>
                   ),
                 },
@@ -2751,31 +3339,50 @@ export default function AIConfigPage() {
                   title: "当前使用",
                   dataIndex: "is_active",
                   width: 88,
-                  render: (v: boolean) => (v ? <Tag color="green">当前使用</Tag> : <Tag>未启用</Tag>),
+                  render: (v: boolean) =>
+                    v ? <Tag color="green">当前使用</Tag> : <Tag>未启用</Tag>,
+                },
+                {
+                  // ✅ R179（2026-11-05）：参与调用 = 该配置自身的启用开关。
+                  //    「当前使用」主配置与「用户停用」不应并存；此列让
+                  //    「体检说可用、实际不参与调用」的情况可见。
+                  title: "参与调用",
+                  dataIndex: "enabled",
+                  width: 92,
+                  render: (v: boolean | undefined, r: AIConfigsHealthItem) =>
+                    v === false || r.disabled_by_user ? (
+                      <Tooltip title="该配置已被用户停用：不进入降级链/视觉候选/场景路由，启用后恢复">
+                        <Tag color="default">已停用</Tag>
+                      </Tooltip>
+                    ) : (
+                      <Tag color="green">启用</Tag>
+                    ),
                 },
                 {
                   title: "环境",
                   dataIndex: "env",
                   width: 112,
-                  render: (v: string, r: AIConfigsHealthItem) => (
-                    r.in_current_env
-                      ? <Tag>{v || "通用"}</Tag>
-                      : <Tooltip title="不属于当前生效环境，运行时会被跳过">
-                          <Tag color="orange">{v || "通用"}（不符）</Tag>
-                        </Tooltip>
-                  ),
+                  render: (v: string, r: AIConfigsHealthItem) =>
+                    r.in_current_env ? (
+                      <Tag>{v || "通用"}</Tag>
+                    ) : (
+                      <Tooltip title="不属于当前生效环境，运行时会被跳过">
+                        <Tag color="orange">{v || "通用"}（不符）</Tag>
+                      </Tooltip>
+                    ),
                 },
                 {
                   title: "Key",
                   dataIndex: "has_key",
                   width: 104,
-                  render: (v: boolean, r: AIConfigsHealthItem) => (
-                    !v
-                      ? <Tag color="red">未填</Tag>
-                      : r.key_broken
-                        ? <Tag color="red">解密失败</Tag>
-                        : <Tag color="green">已填</Tag>
-                  ),
+                  render: (v: boolean, r: AIConfigsHealthItem) =>
+                    !v ? (
+                      <Tag color="red">未填</Tag>
+                    ) : r.key_broken ? (
+                      <Tag color="red">解密失败</Tag>
+                    ) : (
+                      <Tag color="green">已填</Tag>
+                    ),
                 },
                 {
                   title: "地址",
@@ -2800,7 +3407,11 @@ export default function AIConfigPage() {
                   render: (_: unknown, r: AIConfigsHealthItem) => {
                     const h = r.runtime_health;
                     if (!h) {
-                      return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                      return (
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          —
+                        </Text>
+                      );
                     }
                     if (h.dead) {
                       return (
@@ -2837,7 +3448,9 @@ export default function AIConfigPage() {
                     }
                     if (!h.samples) {
                       return (
-                        <Text type="secondary" style={{ fontSize: 11 }}>暂无样本</Text>
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          暂无样本
+                        </Text>
                       );
                     }
                     return (
@@ -2855,23 +3468,29 @@ export default function AIConfigPage() {
                   title: "网络",
                   dataIndex: "network_ok",
                   width: 150,
-                  render: (v: boolean, r: AIConfigsHealthItem) => (
-                    r.no_url
-                      ? <Text type="secondary" style={{ fontSize: 11 }}>未测（无地址）</Text>
-                      : v
-                        ? <Tooltip title={r.network_message || "网络可达"}>
-                            <Tag color="green">{r.network_ip ? `可达 ${r.network_ip}` : "可达"}</Tag>
-                          </Tooltip>
-                        : <Tooltip title={r.network_message || "网络不可达"}>
-                            <Tag color="red">{r.network_step ? `${r.network_step} 不可达` : "不可达"}</Tag>
-                          </Tooltip>
-                  ),
+                  render: (v: boolean, r: AIConfigsHealthItem) =>
+                    r.no_url ? (
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        未测（无地址）
+                      </Text>
+                    ) : v ? (
+                      <Tooltip title={r.network_message || "网络可达"}>
+                        <Tag color="green">{r.network_ip ? `可达 ${r.network_ip}` : "可达"}</Tag>
+                      </Tooltip>
+                    ) : (
+                      <Tooltip title={r.network_message || "网络不可达"}>
+                        <Tag color="red">
+                          {r.network_step ? `${r.network_step} 不可达` : "不可达"}
+                        </Tag>
+                      </Tooltip>
+                    ),
                 },
                 {
                   title: "结论",
                   dataIndex: "usable",
                   width: 88,
-                  render: (v: boolean) => (v ? <Tag color="green">可用</Tag> : <Tag color="red">不可用</Tag>),
+                  render: (v: boolean) =>
+                    v ? <Tag color="green">可用</Tag> : <Tag color="red">不可用</Tag>,
                 },
               ]}
             />
@@ -2892,10 +3511,20 @@ export default function AIConfigPage() {
           // 仅 inspect 视图显示「重加密」按钮（避免把失败态的结果再次触发）；
           // rotate 路径由运维人员线下操作，本 UI 不暴露（降低误点风险）。
           ...(keyRotationResult?.mode === "inspect" && keyRotationResult.health?.broken_count
-            ? [<Button key="reencrypt" type="primary" danger loading={keyRotationReencryptLoading}
-              onClick={() => { handleKeyRotationReencrypt(); setKeyRotationResult(null); }}>
-              一键重加密坏密文
-            </Button>]
+            ? [
+                <Button
+                  key="reencrypt"
+                  type="primary"
+                  danger
+                  loading={keyRotationReencryptLoading}
+                  onClick={() => {
+                    handleKeyRotationReencrypt();
+                    setKeyRotationResult(null);
+                  }}
+                >
+                  一键重加密坏密文
+                </Button>,
+              ]
             : []),
         ]}
         width={780}
@@ -2903,9 +3532,14 @@ export default function AIConfigPage() {
         {keyRotationResult && (
           <Space direction="vertical" size="small" style={{ width: "100%" }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              主密钥来源：<Text strong>{keyRotationResult.master_key_source === "env" ? "FERNET_KEY 环境变量"
-                : keyRotationResult.master_key_source === "persisted_file" ? "data/secret_key.key 持久化文件"
-                : "进程级临时密钥（重启后失效）"}</Text>
+              主密钥来源：
+              <Text strong>
+                {keyRotationResult.master_key_source === "env"
+                  ? "FERNET_KEY 环境变量"
+                  : keyRotationResult.master_key_source === "persisted_file"
+                    ? "data/secret_key.key 持久化文件"
+                    : "进程级临时密钥（重启后失效）"}
+              </Text>
               {keyRotationResult.key_file_exists === false ? "（文件不存在）" : ""}
             </Text>
             {keyRotationResult.health && (
@@ -2918,36 +3552,52 @@ export default function AIConfigPage() {
                 </Tag>
               </Space>
             )}
+            {keyRotationResult.mode === "inspect" &&
+              (keyRotationResult.health?.broken_count ?? 0) > 0 && (
+                <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    若这些坏密文是用「更换前的旧主密钥」加密的，填入旧主密钥即可一键恢复；
+                    不填则无法恢复，只能逐条重新填写 API Key。
+                  </Text>
+                  <Input.Password
+                    value={keyRotationLegacyKey}
+                    onChange={(e) => setKeyRotationLegacyKey(e.target.value)}
+                    placeholder="旧主密钥（可选；仅本次请求使用，不落库、不写日志）"
+                    autoComplete="off"
+                    style={{ maxWidth: 420 }}
+                  />
+                </Space>
+              )}
             {keyRotationResult.migrated != null && (
               <Text>
-                {`重加密完成：迁移 ${keyRotationResult.migrated} 条、`
-                + `保持原样 ${keyRotationResult.unchanged} 条、`
-                + `失败 ${keyRotationResult.failed} 条`}
+                {`重加密完成：迁移 ${keyRotationResult.migrated} 条、` +
+                  `保持原样 ${keyRotationResult.unchanged} 条、` +
+                  `失败 ${keyRotationResult.failed} 条`}
                 {keyRotationResult.warning ? `；${keyRotationResult.warning}` : ""}
               </Text>
             )}
             {keyRotationResult.error && (
               <Text type="danger">{`失败：${keyRotationResult.error}`}</Text>
             )}
-            {keyRotationResult.advice
-              ? <Alert message="建议" description={keyRotationResult.advice} type="info" showIcon />
-              : null}
-            {keyRotationResult.broken_configs?.length
-              ? <>
-                  <Text strong>无法解密的配置（{keyRotationResult.health?.broken_count} 条）</Text>
-                  <Table
-                    size="small"
-                    pagination={false}
-                    dataSource={keyRotationResult.broken_configs || []}
-                    rowKey="id"
-                    columns={[
-                      { title: "配置 ID", dataIndex: "id", width: 140 },
-                      { title: "供应商", dataIndex: "provider_name" },
-                      { title: "模型", dataIndex: "model" },
-                    ]}
-                  />
-                </>
-              : null}
+            {keyRotationResult.advice ? (
+              <Alert message="建议" description={keyRotationResult.advice} type="info" showIcon />
+            ) : null}
+            {keyRotationResult.broken_configs?.length ? (
+              <>
+                <Text strong>无法解密的配置（{keyRotationResult.health?.broken_count} 条）</Text>
+                <Table
+                  size="small"
+                  pagination={false}
+                  dataSource={keyRotationResult.broken_configs || []}
+                  rowKey="id"
+                  columns={[
+                    { title: "配置 ID", dataIndex: "id", width: 140 },
+                    { title: "供应商", dataIndex: "provider_name" },
+                    { title: "模型", dataIndex: "model" },
+                  ]}
+                />
+              </>
+            ) : null}
           </Space>
         )}
       </Modal>

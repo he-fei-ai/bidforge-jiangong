@@ -97,9 +97,13 @@ describe("SseBatcher（高频 setState 的 rAF 合帧）", () => {
   it("stop 后丢弃未刷任务，且不再接受新调度", () => {
     const b = createSseBatcher();
     let n = 0;
-    b.schedule("k", () => { n += 1; });
+    b.schedule("k", () => {
+      n += 1;
+    });
     b.stop();
-    b.schedule("k", () => { n += 1; }); // stop 后应被忽略
+    b.schedule("k", () => {
+      n += 1;
+    }); // stop 后应被忽略
     expect(n).toBe(0);
     b.flushNow();
     expect(n).toBe(0);
@@ -111,10 +115,25 @@ describe("activityFingerprint（活动快照去重）", () => {
   const snap = (over: Record<string, any> = {}) => ({
     server: { version: "1.0.0", uptime: 100 },
     tasks: {
-      running: [{ id: "t1", task_type: "content_generation", status: "running", progress: 0.37, elapsed: 41.6 }],
+      running: [
+        {
+          id: "t1",
+          task_type: "content_generation",
+          status: "running",
+          progress: 0.37,
+          elapsed: 41.6,
+        },
+      ],
       recent: [],
     },
-    ai: { in_flight: 2, calls_today: 10, tokens_today: 5000, success_rate: 0.9, last_at: 1, last_ok: true },
+    ai: {
+      in_flight: 2,
+      calls_today: 10,
+      tokens_today: 5000,
+      success_rate: 0.9,
+      last_at: 1,
+      last_ok: true,
+    },
     ...over,
   });
 
@@ -125,7 +144,9 @@ describe("activityFingerprint（活动快照去重）", () => {
 
   it("内容未变（即使整体引用不同）指纹相同 → 可安全跳过重渲", () => {
     expect(activityFingerprint(snap())).toBe(activityFingerprint(snap()));
-    expect(activityFingerprint(snap())).toBe(activityFingerprint(JSON.parse(JSON.stringify(snap()))));
+    expect(activityFingerprint(snap())).toBe(
+      activityFingerprint(JSON.parse(JSON.stringify(snap()))),
+    );
   });
 
   it("进度按整数百分比取粒度：同一百分比区间内的浮点抖动视为无变化", () => {
@@ -137,17 +158,40 @@ describe("activityFingerprint（活动快照去重）", () => {
   });
 
   it("耗时按整秒取粒度：同秒内的浮点抖动视为无变化", () => {
-    const a = snap({ tasks: { running: [{ id: "t1", status: "running", progress: 0.4, elapsed: 41.1 }], recent: [] } });
-    const b = snap({ tasks: { running: [{ id: "t1", status: "running", progress: 0.4, elapsed: 41.9 }], recent: [] } });
-    const c = snap({ tasks: { running: [{ id: "t1", status: "running", progress: 0.4, elapsed: 42.1 }], recent: [] } });
+    const a = snap({
+      tasks: {
+        running: [{ id: "t1", status: "running", progress: 0.4, elapsed: 41.1 }],
+        recent: [],
+      },
+    });
+    const b = snap({
+      tasks: {
+        running: [{ id: "t1", status: "running", progress: 0.4, elapsed: 41.9 }],
+        recent: [],
+      },
+    });
+    const c = snap({
+      tasks: {
+        running: [{ id: "t1", status: "running", progress: 0.4, elapsed: 42.1 }],
+        recent: [],
+      },
+    });
     expect(activityFingerprint(a)).toBe(activityFingerprint(b));
     expect(activityFingerprint(a)).not.toBe(activityFingerprint(c));
   });
 
   it("反例：状态 / 任务集合 / AI 计数 / 版本变化必须改变指纹（防过度去重导致数据陈旧）", () => {
     const base = activityFingerprint(snap());
-    expect(activityFingerprint(snap({ tasks: { running: [{ id: "t1", status: "completed", progress: 1 }], recent: [] } }))).not.toBe(base);
-    expect(activityFingerprint(snap({ tasks: { running: [], recent: [{ id: "t1", status: "completed" }] } }))).not.toBe(base);
+    expect(
+      activityFingerprint(
+        snap({ tasks: { running: [{ id: "t1", status: "completed", progress: 1 }], recent: [] } }),
+      ),
+    ).not.toBe(base);
+    expect(
+      activityFingerprint(
+        snap({ tasks: { running: [], recent: [{ id: "t1", status: "completed" }] } }),
+      ),
+    ).not.toBe(base);
     expect(activityFingerprint(snap({ ai: { in_flight: 3 } }))).not.toBe(base);
     expect(activityFingerprint(snap({ server: { version: "1.0.1" } }))).not.toBe(base);
   });
@@ -157,9 +201,23 @@ describe("activityFingerprint（活动快照去重）", () => {
 describe("treeFingerprint（目录树去重，避免 3s 轮询空转重渲）", () => {
   const tree = (over: Record<string, any> = {}): TreeNode[] => [
     {
-      key: "k1", title: "第一章", level: 1, status: "generated",
-      word_count: 100, word_budget: 1500, content: "很长的正文内容",
-      children: [{ key: "k1-1", title: "第一节", level: 2, status: "running", word_count: 0, word_budget: 800 }],
+      key: "k1",
+      title: "第一章",
+      level: 1,
+      status: "generated",
+      word_count: 100,
+      word_budget: 1500,
+      content: "很长的正文内容",
+      children: [
+        {
+          key: "k1-1",
+          title: "第一节",
+          level: 2,
+          status: "running",
+          word_count: 0,
+          word_budget: 800,
+        },
+      ],
       ...over,
     },
   ];
@@ -167,7 +225,9 @@ describe("treeFingerprint（目录树去重，避免 3s 轮询空转重渲）", 
   it("结构不变时指纹稳定（内容大字段不参与，轮询无变化即可跳过）", () => {
     expect(treeFingerprint(tree())).toBe(treeFingerprint(tree()));
     // content 变化不影响指纹（轻量轮询本就不返回正文）
-    expect(treeFingerprint(tree({ content: "完全不同的另一份正文" }))).toBe(treeFingerprint(tree()));
+    expect(treeFingerprint(tree({ content: "完全不同的另一份正文" }))).toBe(
+      treeFingerprint(tree()),
+    );
   });
 
   it("反例：字数 / 状态 / 顺序变化必须改变指纹", () => {
@@ -205,9 +265,30 @@ describe("FactsGroupList / BaItemFlatList memo 化", () => {
         id: "g1",
         title: "工程量",
         items: [
-          { id: 1, name: "土方量", value: "100m³", is_simulated: true, has_conflict: false, is_resolved: true },
-          { id: 2, name: "混凝土", value: "50m³", is_simulated: true, has_conflict: true, is_resolved: false },
-          { id: 3, name: "钢筋", value: "20t", is_simulated: false, has_conflict: false, is_resolved: false },
+          {
+            id: 1,
+            name: "土方量",
+            value: "100m³",
+            is_simulated: true,
+            has_conflict: false,
+            is_resolved: true,
+          },
+          {
+            id: 2,
+            name: "混凝土",
+            value: "50m³",
+            is_simulated: true,
+            has_conflict: true,
+            is_resolved: false,
+          },
+          {
+            id: 3,
+            name: "钢筋",
+            value: "20t",
+            is_simulated: false,
+            has_conflict: false,
+            is_resolved: false,
+          },
         ],
       },
     ];
@@ -220,7 +301,7 @@ describe("FactsGroupList / BaItemFlatList memo 化", () => {
         onEditItem={noop}
         onResolveItem={noop}
         onResolveConflict={noop}
-      />
+      />,
     );
     // 3 条条目；模拟 2 条；矛盾 1 条；未处理 2 条（id 2、3）
     expect(document.body.textContent).toContain("3 项");
@@ -295,7 +376,7 @@ describe("Markdown 样式只注入一份", () => {
         <MarkdownRenderer content={content} />
         <MarkdownRenderer content={content} />
         <MarkdownRenderer content={content} />
-      </div>
+      </div>,
     );
     const after = document.querySelectorAll("style[data-markdown-body-style]").length;
     // 3 个实例渲染不应新增任何 <style>

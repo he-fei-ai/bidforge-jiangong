@@ -26,8 +26,7 @@ export const BLUEPRINT_TOKENS = {
 
   fontFamily:
     "'Geologica', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, system-ui, sans-serif",
-  fontFamilyCode:
-    "'JetBrains Mono', 'Cascadia Code', Consolas, 'Courier New', monospace",
+  fontFamilyCode: "'JetBrains Mono', 'Cascadia Code', Consolas, 'Courier New', monospace",
 
   // 主区域（浅色）覆盖
   colorBgLayout: "#F4F6FA",
@@ -104,10 +103,14 @@ export function readInitialTheme(): ThemeMode {
   try {
     const saved = localStorage.getItem(LS_THEME_KEY) as ThemeMode | null;
     if (saved === "dark" || saved === "light") return saved;
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   // 系统偏好
   try {
     if (matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return "light";
 }

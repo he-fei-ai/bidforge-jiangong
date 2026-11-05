@@ -18,9 +18,16 @@ import {
 
 function makeReport(over: Partial<PlaceholderReport> = {}): PlaceholderReport {
   return {
-    total: 0, formatted_total: 0, bare_total: 0, fuzzy_total: 0,
-    field_count: 0, section_count: 0,
-    by_field: [], by_section: [], occurrences: [], truncated: false,
+    total: 0,
+    formatted_total: 0,
+    bare_total: 0,
+    fuzzy_total: 0,
+    field_count: 0,
+    section_count: 0,
+    by_field: [],
+    by_section: [],
+    occurrences: [],
+    truncated: false,
     ...over,
   };
 }
@@ -34,15 +41,24 @@ describe("derivePlaceholderSeverity", () => {
   });
 
   it("仅规范占位（AI 按红线留的可检索标记）→ warn", () => {
-    expect(derivePlaceholderSeverity(makeReport({
-      total: 3, formatted_total: 3, field_count: 2, section_count: 1,
-      by_field: [{ field: "基坑深度", count: 3, section_ids: ["a"], section_titles: ["概况"] }],
-      by_section: [{ section_id: "a", title: "概况", count: 3, fields: ["基坑深度"] }],
-    }))).toBe("warn");
+    expect(
+      derivePlaceholderSeverity(
+        makeReport({
+          total: 3,
+          formatted_total: 3,
+          field_count: 2,
+          section_count: 1,
+          by_field: [{ field: "基坑深度", count: 3, section_ids: ["a"], section_titles: ["概况"] }],
+          by_section: [{ section_id: "a", title: "概况", count: 3, fields: ["基坑深度"] }],
+        }),
+      ),
+    ).toBe("warn");
   });
 
   it("含裸标记 / 模糊占位（违反提示词规范）→ error", () => {
-    expect(derivePlaceholderSeverity(makeReport({ total: 2, formatted_total: 1, bare_total: 1 }))).toBe("error");
+    expect(
+      derivePlaceholderSeverity(makeReport({ total: 2, formatted_total: 1, bare_total: 1 })),
+    ).toBe("error");
     expect(derivePlaceholderSeverity(makeReport({ total: 1, fuzzy_total: 1 }))).toBe("error");
   });
 });
@@ -59,9 +75,13 @@ describe("severityToAlertProps", () => {
 describe("summarizePlaceholderReport", () => {
   it("空报告返回空串；有数据返回计数摘要", () => {
     expect(summarizePlaceholderReport(null)).toBe("");
-    const s = summarizePlaceholderReport(makeReport({
-      total: 12, field_count: 5, section_count: 4,
-    }));
+    const s = summarizePlaceholderReport(
+      makeReport({
+        total: 12,
+        field_count: 5,
+        section_count: 4,
+      }),
+    );
     expect(s).toContain("12 处");
     expect(s).toContain("5 个字段");
     expect(s).toContain("4 个章节");
@@ -69,8 +89,11 @@ describe("summarizePlaceholderReport", () => {
   });
 
   it("truncated 时文案如实提示（不静默）", () => {
-    expect(summarizePlaceholderReport(makeReport({ total: 1, field_count: 1, section_count: 1, truncated: true })))
-      .toContain("截断");
+    expect(
+      summarizePlaceholderReport(
+        makeReport({ total: 1, field_count: 1, section_count: 1, truncated: true }),
+      ),
+    ).toContain("截断");
   });
 });
 
@@ -95,7 +118,11 @@ describe("deriveTrendDelta", () => {
     expect(deriveTrendDelta(null)).toEqual({ delta: null, latest: null, previous: null });
     expect(deriveTrendDelta(undefined)).toEqual({ delta: null, latest: null, previous: null });
     expect(deriveTrendDelta([])).toEqual({ delta: null, latest: null, previous: null });
-    expect(deriveTrendDelta([{ total: NaN } as any])).toEqual({ delta: null, latest: null, previous: null });
+    expect(deriveTrendDelta([{ total: NaN } as any])).toEqual({
+      delta: null,
+      latest: null,
+      previous: null,
+    });
   });
 
   it("仅一条基线：latest 有值但无 delta（首次建立基线）", () => {

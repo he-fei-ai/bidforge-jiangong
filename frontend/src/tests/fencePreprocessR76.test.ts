@@ -77,11 +77,7 @@ describe("R76-B 块边界：4 反引号 / 波浪围栏 / 块内带标签行", ()
     const blocks = scanFenceBlocks(src);
     expect(blocks).toHaveLength(1);
     expect(blocks[0].closeLine).toBe(4); // 真正的闭合在第 4 行（0-based）
-    expect(blocks[0].codeLines).toEqual([
-      "graph TD",
-      "```python",
-      "console.log(1)",
-    ]);
+    expect(blocks[0].codeLines).toEqual(["graph TD", "```python", "console.log(1)"]);
     // 占位替换后，块外正文必须仍在
     const { text } = replaceChartFences(src, (lang, code) => `[${lang}:${code.length}]`);
     expect(text).toContain("后续正文。");

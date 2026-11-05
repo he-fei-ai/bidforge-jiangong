@@ -54,9 +54,27 @@ if (!(globalThis as any).ResizeObserver) {
 }
 
 const DEFS: BaItemDef[] = [
-  { item_id: "projectBasicInfo", label: "项目级基本信息", required: 1, output_type: "json", group: "project_info" },
-  { item_id: "schemeBasicInfo", label: "方案级基本信息", required: 1, output_type: "markdown", group: "scheme_info" },
-  { item_id: "resourceAllocation", label: "资源配置", required: 0, output_type: "markdown", group: "resource" },
+  {
+    item_id: "projectBasicInfo",
+    label: "项目级基本信息",
+    required: 1,
+    output_type: "json",
+    group: "project_info",
+  },
+  {
+    item_id: "schemeBasicInfo",
+    label: "方案级基本信息",
+    required: 1,
+    output_type: "markdown",
+    group: "scheme_info",
+  },
+  {
+    item_id: "resourceAllocation",
+    label: "资源配置",
+    required: 0,
+    output_type: "markdown",
+    group: "resource",
+  },
 ];
 const GROUPS = [
   { group: "project_info", label: "项目级基本信息", items: [DEFS[0]] },
@@ -103,7 +121,7 @@ function setup(over: Record<string, any> = {}) {
 /** 精确文案按钮（避免「重试」误匹配等） */
 function btn(root: ParentNode, text: string): HTMLButtonElement | null {
   const b = Array.from(root.querySelectorAll("button")).find(
-    x => (x.textContent || "").trim() === text,
+    (x) => (x.textContent || "").trim() === text,
   );
   return (b as HTMLButtonElement) || null;
 }
@@ -133,8 +151,8 @@ describe("BidAnalysisTab", () => {
       ],
     });
     // 分类栏：全部 + 13 分组（此处 3 分组），均带项数角标
-    const cats = Array.from(container.querySelectorAll(".ba-cat-item")).map(
-      h => (h.textContent || "").trim(),
+    const cats = Array.from(container.querySelectorAll(".ba-cat-item")).map((h) =>
+      (h.textContent || "").trim(),
     );
     expect(cats).toEqual(["全部3", "项目级基本信息1", "方案级基本信息1", "资源配置1"]);
     expect(container.textContent).toContain("解析项任务列表（3 项");
@@ -148,7 +166,9 @@ describe("BidAnalysisTab", () => {
     expect(rows[2].querySelector(".ba-row-cat-tag")?.textContent).toBe("资源配置");
     // 摘要：成功项取内容首行前缀；无内容/失败态有专属文案
     expect(rows[0].querySelector(".ba-row-summary")?.textContent).toContain("a");
-    expect(rows[1].querySelector(".ba-row-summary")?.textContent).toBe("已完成，但未提取到有效内容");
+    expect(rows[1].querySelector(".ba-row-summary")?.textContent).toBe(
+      "已完成，但未提取到有效内容",
+    );
     expect(rows[2].querySelector(".ba-row-summary")?.textContent).toBe("限流");
     // 有内容的 success → 绿标字数；「未提取到」→ 无内容（不得显示为已完成）
     expect(rows[0].textContent).toContain("字");
@@ -207,7 +227,11 @@ describe("BidAnalysisTab", () => {
   });
 
   it("运行中：显示停止按钮、进度百分比、配置禁用、重跑禁用", () => {
-    const { container, onStop } = setup({ running: true, progress: 0.5, progressMsg: "已完成 3/9" });
+    const { container, onStop } = setup({
+      running: true,
+      progress: 0.5,
+      progressMsg: "已完成 3/9",
+    });
     expect(btn(container, "开始提取")).toBeNull();
     expect(btn(container, "配置")!.disabled).toBe(true);
     expect(container.textContent).toContain("50%");
@@ -220,8 +244,13 @@ describe("BidAnalysisTab", () => {
   it("汇总：必选项缺失与全部就绪两种态互斥展示", () => {
     const missing = setup({
       summary: {
-        total: 3, success: 1, errors: 0, running: 0, pending: 2,
-        missing_required: ["方案级基本信息"], all_required_done: false,
+        total: 3,
+        success: 1,
+        errors: 0,
+        running: 0,
+        pending: 2,
+        missing_required: ["方案级基本信息"],
+        all_required_done: false,
       },
     });
     expect(missing.container.textContent).toContain("必选项缺失 1");
@@ -229,8 +258,13 @@ describe("BidAnalysisTab", () => {
 
     const done = setup({
       summary: {
-        total: 3, success: 3, errors: 0, running: 0, pending: 0,
-        missing_required: [], all_required_done: true,
+        total: 3,
+        success: 3,
+        errors: 0,
+        running: 0,
+        pending: 0,
+        missing_required: [],
+        all_required_done: true,
       },
     });
     expect(done.container.textContent).toContain("全部就绪");
@@ -239,16 +273,26 @@ describe("BidAnalysisTab", () => {
   it("下一步：无成功项时禁用；有成功项时可点并跳转", () => {
     const none = setup({
       summary: {
-        total: 3, success: 0, errors: 0, running: 0, pending: 3,
-        missing_required: ["项目级基本信息"], all_required_done: false,
+        total: 3,
+        success: 0,
+        errors: 0,
+        running: 0,
+        pending: 3,
+        missing_required: ["项目级基本信息"],
+        all_required_done: false,
       },
     });
     expect(btn(none.container, "下一步：目录生成")!.disabled).toBe(true);
 
     const some = setup({
       summary: {
-        total: 3, success: 1, errors: 0, running: 0, pending: 2,
-        missing_required: ["方案级基本信息"], all_required_done: false,
+        total: 3,
+        success: 1,
+        errors: 0,
+        running: 0,
+        pending: 2,
+        missing_required: ["方案级基本信息"],
+        all_required_done: false,
       },
     });
     const next = btn(some.container, "下一步：目录生成")!;
@@ -270,7 +314,8 @@ describe("BidAnalysisTab", () => {
 
     const hit = setup({
       sectionCheckResult: {
-        has_multiple: true, total_declared: 3,
+        has_multiple: true,
+        total_declared: 3,
         sections: ["标段:1", "标段:2", "标段:3"],
       },
     });
@@ -293,7 +338,9 @@ describe("BidAnalysisTab", () => {
 
     const json = setup({
       selectedItem: {
-        item_id: "projectBasicInfo", label: "项目级基本信息", output_type: "json",
+        item_id: "projectBasicInfo",
+        label: "项目级基本信息",
+        output_type: "json",
         content: '{"project_name":"测试项目","contractor":"没有提及"}',
       },
     });
@@ -307,13 +354,17 @@ describe("BidAnalysisTab", () => {
   it("项目级基本信息：左列显示中文字段名而非英文键（键名存储不变）", () => {
     const { container } = setup({
       selectedItem: {
-        item_id: "projectBasicInfo", label: "项目级基本信息", output_type: "json",
+        item_id: "projectBasicInfo",
+        label: "项目级基本信息",
+        output_type: "json",
         content:
           '{"project_name":"上海市某工程","contractor":"某建工集团","chief_supervision_engineer":"张三"}',
       },
     });
-    const labels = Array.from(container.querySelectorAll(".ba-item-body > div > div > div:first-child"))
-      .map(el => (el.textContent || "").trim())
+    const labels = Array.from(
+      container.querySelectorAll(".ba-item-body > div > div > div:first-child"),
+    )
+      .map((el) => (el.textContent || "").trim())
       .filter(Boolean);
     expect(labels).toEqual(["项目名称", "施工单位", "总监理工程师"]);
     expect(container.textContent).not.toContain("project_name");
@@ -325,7 +376,8 @@ describe("BidAnalysisTab", () => {
   it("项目级基本信息：未登记键回退原始键（不丢字段）；其它 json 项不翻译", () => {
     const fallback = setup({
       selectedItem: {
-        item_id: "projectBasicInfo", output_type: "json",
+        item_id: "projectBasicInfo",
+        output_type: "json",
         content: '{"unknown_field":"x"}',
       },
     });
@@ -333,7 +385,8 @@ describe("BidAnalysisTab", () => {
 
     const other = setup({
       selectedItem: {
-        item_id: "someOtherJsonItem", output_type: "json",
+        item_id: "someOtherJsonItem",
+        output_type: "json",
         content: '{"project_name":"y"}',
       },
     });
@@ -343,8 +396,12 @@ describe("BidAnalysisTab", () => {
   it("结果阅读区：失败项显示 AI 报错原因（此前只有「暂无内容」，无从排查）", () => {
     const { container } = setup({
       selectedItem: {
-        item_id: "schemeBasicInfo", label: "方案级基本信息", output_type: "markdown",
-        status: "error", content: "", error: "AI 调用超时（300s）",
+        item_id: "schemeBasicInfo",
+        label: "方案级基本信息",
+        output_type: "markdown",
+        status: "error",
+        content: "",
+        error: "AI 调用超时（300s）",
       },
     });
     // ✅ 2026-09-20 回归修正：组件文案已从「该项提取失败」细化为「该项本轮提取失败」
@@ -356,7 +413,9 @@ describe("BidAnalysisTab", () => {
   it("结果阅读区：markdown 项走统一渲染器（不直接暴露 ## 源码）", async () => {
     const { container } = setup({
       selectedItem: {
-        item_id: "schemeBasicInfo", label: "方案级基本信息", output_type: "markdown",
+        item_id: "schemeBasicInfo",
+        label: "方案级基本信息",
+        output_type: "markdown",
         content: "## 方案标识\n\n深基坑支护方案",
       },
     });
@@ -401,9 +460,15 @@ describe("BidAnalysisTab", () => {
   it("汇总：完成有效 / 完成无内容 / 人工校正 三种徽标互不掩盖", () => {
     const { container } = setup({
       summary: {
-        total: 5, success: 4, success_valid: 2, manual_count: 2,
-        errors: 0, running: 0, pending: 1,
-        missing_required: ["E"], all_required_done: false,
+        total: 5,
+        success: 4,
+        success_valid: 2,
+        manual_count: 2,
+        errors: 0,
+        running: 0,
+        pending: 1,
+        missing_required: ["E"],
+        all_required_done: false,
       },
     });
     expect(container.textContent).toContain("✓ 有效 2");
@@ -416,7 +481,12 @@ describe("BidAnalysisTab", () => {
   it("人工校正徽标：source='manual' 的行显示「✎ 人工」而非绿色 ✓", () => {
     const { container } = setup({
       items: [
-        { item_id: "schemeBasicInfo", status: "success", content: "人工改写内容", source: "manual" },
+        {
+          item_id: "schemeBasicInfo",
+          status: "success",
+          content: "人工改写内容",
+          source: "manual",
+        },
         { item_id: "resourceAllocation", status: "success", content: "AI 提取内容", source: "ai" },
       ],
     });
@@ -431,8 +501,14 @@ describe("BidAnalysisTab", () => {
   it("下一步：完成项内容全为空标记（success_valid=0）→ 禁用并提示不会被下游使用", () => {
     const { container } = setup({
       summary: {
-        total: 3, success: 2, success_valid: 0, errors: 0, running: 0, pending: 1,
-        missing_required: ["项目级基本信息"], all_required_done: false,
+        total: 3,
+        success: 2,
+        success_valid: 0,
+        errors: 0,
+        running: 0,
+        pending: 1,
+        missing_required: ["项目级基本信息"],
+        all_required_done: false,
       },
     });
     expect(btn(container, "下一步：目录生成")!.disabled).toBe(true);
@@ -441,8 +517,11 @@ describe("BidAnalysisTab", () => {
 
   it("人工校正入口：选中项有内容时出现并回调；运行中禁用；未提供回调则不渲染", () => {
     const item = {
-      item_id: "schemeBasicInfo", label: "方案级基本信息",
-      output_type: "markdown", status: "success", content: "旧内容",
+      item_id: "schemeBasicInfo",
+      label: "方案级基本信息",
+      output_type: "markdown",
+      status: "success",
+      content: "旧内容",
     };
 
     const withHandler = setup({ selectedItem: item });
@@ -468,8 +547,11 @@ describe("BidAnalysisTab", () => {
       running: true,
       progress: 0.2,
       textStats: {
-        total_chars: 500000, segment_count: 32, item_count: 18,
-        est_model_calls: 576, chunk_size: 16000,
+        total_chars: 500000,
+        segment_count: 32,
+        item_count: 18,
+        est_model_calls: 576,
+        chunk_size: 16000,
       },
     });
     expect(container.textContent).toContain("提取规模");
@@ -480,7 +562,9 @@ describe("BidAnalysisTab", () => {
   });
 
   it("提取规模为 0 / 未推送时不渲染该行", () => {
-    const zero = setup({ textStats: { total_chars: 0, segment_count: 0, item_count: 0, est_model_calls: 0 } });
+    const zero = setup({
+      textStats: { total_chars: 0, segment_count: 0, item_count: 0, est_model_calls: 0 },
+    });
     expect(zero.container.textContent).not.toContain("提取规模");
     const none = setup({ textStats: null });
     expect(none.container.textContent).not.toContain("提取规模");
@@ -489,8 +573,12 @@ describe("BidAnalysisTab", () => {
   it("失败项保留了上一轮内容时：仍展示本轮错误原因（旧实现完全不可见）", () => {
     const { container } = setup({
       selectedItem: {
-        item_id: "schemeBasicInfo", label: "方案级基本信息", output_type: "markdown",
-        status: "error", content: "上一轮的旧内容", error: "429 限流",
+        item_id: "schemeBasicInfo",
+        label: "方案级基本信息",
+        output_type: "markdown",
+        status: "error",
+        content: "上一轮的旧内容",
+        error: "429 限流",
       },
     });
     expect(container.textContent).toContain("该项本轮提取失败");
@@ -502,9 +590,7 @@ describe("BidAnalysisTab", () => {
 
   it("行内失败标签：hover 后显示该轮的失败原因（旧实现只写一个红标、无从排查）", async () => {
     const { container } = setup({
-      items: [
-        { item_id: "schemeBasicInfo", status: "error", content: "", error: "AI 调用超时" },
-      ],
+      items: [{ item_id: "schemeBasicInfo", status: "error", content: "", error: "AI 调用超时" }],
     });
     const row = container.querySelector('.ba-item-row[data-item-id="schemeBasicInfo"]')!;
     expect(row.textContent).toContain("✗ 失败");
@@ -525,8 +611,10 @@ describe("BidAnalysisTab", () => {
 
   it("人工校正：json 项（projectBasicInfo）有内容时入口可见，回调携带 output_type 供页面做 JSON 校验", () => {
     const jsonItem = {
-      item_id: "projectBasicInfo", label: "项目级基本信息",
-      output_type: "json", status: "success",
+      item_id: "projectBasicInfo",
+      label: "项目级基本信息",
+      output_type: "json",
+      status: "success",
       content: JSON.stringify({ project_name: "测试项目", total_cost: "1.2 亿" }),
     };
     const { container, onEditItem } = setup({ selectedItem: jsonItem });
@@ -535,16 +623,21 @@ describe("BidAnalysisTab", () => {
     expect(editBtn!.disabled).toBe(false);
     fireEvent.click(editBtn!);
     // 回调必须把完整 item（含 output_type=json）交给页面，页面据此走 JSON 预校验
-    expect(onEditItem).toHaveBeenCalledWith(expect.objectContaining({
-      item_id: "projectBasicInfo",
-      output_type: "json",
-    }));
+    expect(onEditItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        item_id: "projectBasicInfo",
+        output_type: "json",
+      }),
+    );
   });
 
   it("人工校正 + 查看完整：选中项有内容且两种回调均提供时，两按钮在阅读区共存", () => {
     const item = {
-      item_id: "schemeBasicInfo", label: "方案级基本信息",
-      output_type: "markdown", status: "success", content: "方案内容…",
+      item_id: "schemeBasicInfo",
+      label: "方案级基本信息",
+      output_type: "markdown",
+      status: "success",
+      content: "方案内容…",
     };
     const { container } = setup({ selectedItem: item });
     expect(btn(container, "人工校正")).not.toBeNull();
@@ -555,8 +648,11 @@ describe("BidAnalysisTab", () => {
     const { container } = setup({
       running: true,
       textStats: {
-        total_chars: 48000, segment_count: 3, item_count: 16,
-        est_model_calls: 48, chunk_size: 16000,
+        total_chars: 48000,
+        segment_count: 3,
+        item_count: 16,
+        est_model_calls: 48,
+        chunk_size: 16000,
       },
     });
     const txt = container.textContent || "";
@@ -575,11 +671,22 @@ describe("BidAnalysisTab", () => {
 
   it("内容区头部：展示序号 / 分类归属 / 状态，与列表选中项一致", () => {
     const { container } = setup({
-      items: [{ item_id: "schemeBasicInfo", status: "success", content: "正文内容", updated_at: "2026-09-23 10:00:00" }],
+      items: [
+        {
+          item_id: "schemeBasicInfo",
+          status: "success",
+          content: "正文内容",
+          updated_at: "2026-09-23 10:00:00",
+        },
+      ],
       selectedItem: {
-        item_id: "schemeBasicInfo", label: "方案级基本信息", required: 1,
-        output_type: "markdown", group: "scheme_info",
-        status: "success", content: "正文内容",
+        item_id: "schemeBasicInfo",
+        label: "方案级基本信息",
+        required: 1,
+        output_type: "markdown",
+        group: "scheme_info",
+        status: "success",
+        content: "正文内容",
       },
     });
     const header = container.querySelector(".ba-detail-pane")!;
@@ -595,8 +702,11 @@ describe("BidAnalysisTab", () => {
     try {
       const { container } = setup({
         selectedItem: {
-          item_id: "schemeBasicInfo", label: "方案级基本信息", output_type: "markdown",
-          status: "success", content: "原文内容 A\nB 行",
+          item_id: "schemeBasicInfo",
+          label: "方案级基本信息",
+          output_type: "markdown",
+          status: "success",
+          content: "原文内容 A\nB 行",
         },
       });
       const copyBtn = btn(container, "复制");
@@ -620,8 +730,11 @@ describe("BidAnalysisTab", () => {
         { item_id: "resourceAllocation", status: "success", content: "资源配置内容" },
       ],
       selectedItem: {
-        item_id: "schemeBasicInfo", label: "方案级基本信息", output_type: "markdown",
-        status: "success", content: "正文内容",
+        item_id: "schemeBasicInfo",
+        label: "方案级基本信息",
+        output_type: "markdown",
+        status: "success",
+        content: "正文内容",
       },
     });
     fireEvent.click(container.querySelector('[aria-label="下一解析项"]')!);
@@ -642,8 +755,11 @@ describe("BidAnalysisTab", () => {
       const { container, onSelectItem } = setup({
         items: [{ item_id: "schemeBasicInfo", status: "success", content: "正文内容" }],
         selectedItem: {
-          item_id: "schemeBasicInfo", label: "方案级基本信息", output_type: "markdown",
-          status: "success", content: "正文内容",
+          item_id: "schemeBasicInfo",
+          label: "方案级基本信息",
+          output_type: "markdown",
+          status: "success",
+          content: "正文内容",
         },
       });
       // 默认：列表在、详情隐藏
@@ -671,7 +787,10 @@ describe("BidAnalysisTab", () => {
   it("定义加载失败：错误态 + 重试入口；未出错时仍显「加载中」", () => {
     const onRetryDefs = vi.fn();
     const failed = setup({
-      defs: [], groups: [], defsError: "后端 500：内部错误", onRetryDefs,
+      defs: [],
+      groups: [],
+      defsError: "后端 500：内部错误",
+      onRetryDefs,
     });
     expect(failed.container.textContent).toContain("解析项定义加载失败");
     expect(failed.container.textContent).toContain("后端 500：内部错误");
@@ -689,19 +808,30 @@ describe("BidAnalysisTab", () => {
   it("来源位置：有 evidence 时详情区展示文档/标题/行号/摘录；无证据时整块隐藏", () => {
     const evidence = JSON.stringify([
       {
-        doc: "招标文件.pdf", line: 6, heading: "第一章 招标公告 › 1.1 工程概况",
-        quote: "基坑深度 8.5m，支护形式为钻孔灌注桩", match: "基坑深度 8.5m",
+        doc: "招标文件.pdf",
+        line: 6,
+        heading: "第一章 招标公告 › 1.1 工程概况",
+        quote: "基坑深度 8.5m，支护形式为钻孔灌注桩",
+        match: "基坑深度 8.5m",
       },
       {
-        doc: "答疑纪要.docx", line: 3, heading: "", field: "支护形式",
-        quote: "塔吊型号为 QTZ80", match: "QTZ80",
+        doc: "答疑纪要.docx",
+        line: 3,
+        heading: "",
+        field: "支护形式",
+        quote: "塔吊型号为 QTZ80",
+        match: "QTZ80",
       },
     ]);
     const { container } = setup({
       items: [{ item_id: "schemeBasicInfo", status: "success", content: "正文内容", evidence }],
       selectedItem: {
-        item_id: "schemeBasicInfo", label: "方案级基本信息", output_type: "markdown",
-        status: "success", content: "正文内容", evidence,
+        item_id: "schemeBasicInfo",
+        label: "方案级基本信息",
+        output_type: "markdown",
+        status: "success",
+        content: "正文内容",
+        evidence,
       },
     });
     const list = container.querySelector(".ba-evidence-list");
@@ -717,8 +847,12 @@ describe("BidAnalysisTab", () => {
     // 无 evidence（旧数据/未匹配/人工校正后）：整块不渲染，不留空壳
     const bare = setup({
       selectedItem: {
-        item_id: "schemeBasicInfo", label: "方案级基本信息", output_type: "markdown",
-        status: "success", content: "正文内容", source: "manual",
+        item_id: "schemeBasicInfo",
+        label: "方案级基本信息",
+        output_type: "markdown",
+        status: "success",
+        content: "正文内容",
+        source: "manual",
       },
     });
     expect(bare.container.querySelector(".ba-evidence-list")).toBeNull();
@@ -726,13 +860,20 @@ describe("BidAnalysisTab", () => {
 
   it("来源方案：详情头部展示 scheme_name + 项目级共享说明；后端未带时隐藏", () => {
     const { container } = setup({
-      items: [{
-        item_id: "schemeBasicInfo", status: "success", content: "正文内容",
-        scheme_name: "深基坑专项方案",
-      }],
+      items: [
+        {
+          item_id: "schemeBasicInfo",
+          status: "success",
+          content: "正文内容",
+          scheme_name: "深基坑专项方案",
+        },
+      ],
       selectedItem: {
-        item_id: "schemeBasicInfo", label: "方案级基本信息", output_type: "markdown",
-        status: "success", content: "正文内容",
+        item_id: "schemeBasicInfo",
+        label: "方案级基本信息",
+        output_type: "markdown",
+        status: "success",
+        content: "正文内容",
       },
     });
     const header = container.querySelector(".ba-detail-pane")!;
@@ -741,12 +882,14 @@ describe("BidAnalysisTab", () => {
     const old = setup({
       items: [{ item_id: "schemeBasicInfo", status: "success", content: "正文内容" }],
       selectedItem: {
-        item_id: "schemeBasicInfo", label: "方案级基本信息", output_type: "markdown",
-        status: "success", content: "正文内容",
+        item_id: "schemeBasicInfo",
+        label: "方案级基本信息",
+        output_type: "markdown",
+        status: "success",
+        content: "正文内容",
       },
     });
-    expect(old.container.querySelector(".ba-detail-pane")!.textContent)
-      .not.toContain("来源方案");
+    expect(old.container.querySelector(".ba-detail-pane")!.textContent).not.toContain("来源方案");
   });
   // =====================================================================
   // 2026-09-23 加固：操作区禁用口径 + 单项重跑幂等
@@ -800,5 +943,4 @@ describe("BidAnalysisTab", () => {
       vi.useRealTimers();
     }
   });
-
 });

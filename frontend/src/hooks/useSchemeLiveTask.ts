@@ -45,7 +45,9 @@ export const IDLE_POLL_MS = 15000;
  * @returns null 表示不是终态（调用方不得据此做任何收尾动作）
  */
 export function liveTaskFinishMessage(
-  status: string, label: string, message?: string,
+  status: string,
+  label: string,
+  message?: string,
 ): { level: "success" | "warning" | "info"; text: string } | null {
   if (!isTerminalTaskStatus(status)) return null;
   const suffix = message && status !== "completed" ? `：${message}` : "";
@@ -53,6 +55,12 @@ export function liveTaskFinishMessage(
     return { level: "success", text: `后台「${label}」任务已完成，数据已刷新` };
   }
   if (status === "degraded") {
+    // ✅ R180（2026-11-05）：事实链的降级原因是「N 段未成功」，与正文链的
+    //    「一致性修复失败」不同。有具体 message 时直接透出可读原因，避免把
+    //    事实提取的降级误报成一致性缺陷（用户会去重跑一个不存在的动作）。
+    if (label === "事实提取" && message) {
+      return { level: "warning", text: `后台「${label}」任务降级完成（结果不完整）：${message}` };
+    }
     return {
       level: "warning",
       text: `后台「${label}」任务降级完成：一致性修复有失败项，成稿含未修复缺陷${suffix}`,
@@ -83,7 +91,7 @@ export function useSchemeLiveTask(
   opts?: {
     onFinished?: () => void;
     suppressNotify?: () => boolean;
-  }
+  },
 ) {
   const [liveTask, setLiveTask] = useState<LiveTask | null>(null);
   // 上一轮各任务状态（用于检测 running/paused → 终态 的跳变）
@@ -119,14 +127,14 @@ export function useSchemeLiveTask(
         const { data } = await tasksApi.list(schemeId, 5);
         if (stopped) return;
         const items: LiveTask[] = data.tasks || [];
-        const active =
-          items.find((t) => t.status === "running" || t.status === "paused") || null;
+        const active = items.find((t) => t.status === "running" || t.status === "paused") || null;
         // ✅ 性能优化：轮询每 3s 都会产生新对象身份，若关键字段未变则复用旧引用、
         //    跳过 setState，避免空闲期每 3s 一次的整页重渲
         const prevActive = lastActiveRef.current;
         const same =
           (prevActive === null && active === null) ||
-          (!!prevActive && !!active &&
+          (!!prevActive &&
+            !!active &&
             prevActive.id === active.id &&
             prevActive.status === active.status &&
             prevActive.progress === active.progress &&
@@ -151,7 +159,7 @@ export function useSchemeLiveTask(
               pushActivity(
                 "info",
                 `检测到后台「${label}」任务${t.status === "paused" ? "已暂停" : "正在运行"}（${pct}%）`,
-                "后台任务"
+                "后台任务",
               );
             }
             continue;

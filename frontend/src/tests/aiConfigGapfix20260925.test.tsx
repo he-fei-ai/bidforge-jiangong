@@ -17,14 +17,21 @@ import { App as AntdApp } from "antd";
 
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
   });
 }
 if (!(globalThis as any).ResizeObserver) {
   (globalThis as any).ResizeObserver = class {
-    observe() {} unobserve() {} disconnect() {}
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   };
 }
 if (!(window as any).getComputedStyle) {
@@ -82,7 +89,9 @@ vi.mock("../api", () => ({
 // 保证每个用例渲染的都是自己 mock 的数据。
 vi.mock("../utils/ttlCache", () => ({
   TtlCache: class {
-    get() { return { hit: false }; }
+    get() {
+      return { hit: false };
+    }
     set() {}
     clear() {}
     delete() {}
@@ -93,40 +102,83 @@ import AIConfigPage from "../pages/AIConfigPage";
 import { getActivityItems, clearActivity } from "../utils/activityCenter";
 
 const ROW_ACTIVE = {
-  id: "c1", provider_name: "deepseek", plan: "pay_as_you_go",
-  api_key: "****abcd", key_hint: "abcd", has_key: true, key_broken: false,
-  base_url: "https://api.deepseek.com/v1", model: "deepseek-chat",
-  max_tokens: 8192, temperature: 0.7, timeout: 900, concurrency: 4,
-  request_mode: "normal", is_active: 1, priority: 0, remark: "", env: "",
+  id: "c1",
+  provider_name: "deepseek",
+  plan: "pay_as_you_go",
+  api_key: "****abcd",
+  key_hint: "abcd",
+  has_key: true,
+  key_broken: false,
+  base_url: "https://api.deepseek.com/v1",
+  model: "deepseek-chat",
+  max_tokens: 8192,
+  temperature: 0.7,
+  timeout: 900,
+  concurrency: 4,
+  request_mode: "normal",
+  is_active: 1,
+  priority: 0,
+  remark: "",
+  env: "",
 };
 const ROW_SPARE = {
   ...ROW_ACTIVE,
-  id: "c2", provider_name: "zhipu", model: "glm-4-flash",
-  is_active: 0, priority: 1, has_key: true, env: "dev",
+  id: "c2",
+  provider_name: "zhipu",
+  model: "glm-4-flash",
+  is_active: 0,
+  priority: 1,
+  has_key: true,
+  env: "dev",
 };
 
 const PRESETS = {
   deepseek: {
-    base_url: "https://api.deepseek.com/v1", model: "deepseek-chat",
-    plans: { pay_as_you_go: { label: "按量计费", base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" } },
+    base_url: "https://api.deepseek.com/v1",
+    model: "deepseek-chat",
+    plans: {
+      pay_as_you_go: {
+        label: "按量计费",
+        base_url: "https://api.deepseek.com/v1",
+        model: "deepseek-chat",
+      },
+    },
   },
   zhipu: {
-    base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash",
-    plans: { pay_as_you_go: { label: "按量计费", base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash" } },
+    base_url: "https://open.bigmodel.cn/api/paas/v4",
+    model: "glm-4-flash",
+    plans: {
+      pay_as_you_go: {
+        label: "按量计费",
+        base_url: "https://open.bigmodel.cn/api/paas/v4",
+        model: "glm-4-flash",
+      },
+    },
   },
 };
 
 const SCENE_ITEMS = (over: Record<string, any> = {}) => ({
   items: [
     {
-      scene: "content_draft", label: "正文生成", config_id: "c2",
-      provider_name: "zhipu", model: "glm-4-flash", missing: false,
-      config_env: "dev", env_mismatch: false, ...over,
+      scene: "content_draft",
+      label: "正文生成",
+      config_id: "c2",
+      provider_name: "zhipu",
+      model: "glm-4-flash",
+      missing: false,
+      config_env: "dev",
+      env_mismatch: false,
+      ...over,
     },
     {
-      scene: "facts_extract", label: "全局事实提取", config_id: "",
-      provider_name: "", model: "", missing: false,
-      config_env: "", env_mismatch: false,
+      scene: "facts_extract",
+      label: "全局事实提取",
+      config_id: "",
+      provider_name: "",
+      model: "",
+      missing: false,
+      config_env: "",
+      env_mismatch: false,
     },
   ],
   known_scenes: [
@@ -140,20 +192,39 @@ const SCENE_ITEMS = (over: Record<string, any> = {}) => ({
 const AUDIT_LOGS = {
   items: [
     {
-      id: "l1", provider_name: "deepseek", model: "deepseek-chat", action: "chat",
-      scene: "content_draft", prompt_tokens: 100, completion_tokens: 50,
-      cached_tokens: 0, duration: 1.2, success: 1, error: "",
+      id: "l1",
+      provider_name: "deepseek",
+      model: "deepseek-chat",
+      action: "chat",
+      scene: "content_draft",
+      prompt_tokens: 100,
+      completion_tokens: 50,
+      cached_tokens: 0,
+      duration: 1.2,
+      success: 1,
+      error: "",
       created_at: "2026-09-25T10:00:00",
     },
     {
-      id: "l2", provider_name: "zhipu", model: "glm-4-flash", action: "chat",
-      scene: "", prompt_tokens: 10, completion_tokens: 5,
-      cached_tokens: 0, duration: 0.5, success: 0, error: "upstream 500",
+      id: "l2",
+      provider_name: "zhipu",
+      model: "glm-4-flash",
+      action: "chat",
+      scene: "",
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      cached_tokens: 0,
+      duration: 0.5,
+      success: 0,
+      error: "upstream 500",
       created_at: "2026-09-25T10:01:00",
     },
   ],
-  total: 2, limit: 20, offset: 0,
-  providers: ["deepseek", "zhipu"], actions: ["chat"],
+  total: 2,
+  limit: 20,
+  offset: 0,
+  providers: ["deepseek", "zhipu"],
+  actions: ["chat"],
   scenes: ["content_draft"],
 };
 
@@ -162,23 +233,43 @@ beforeEach(() => {
   clearActivity();
   h.getConfig.mockResolvedValue({
     data: {
-      items: [ROW_ACTIVE, ROW_SPARE], presets: PRESETS, active_id: "c1",
-      count: 2, active_env: "", envs: [], env_error: "",
+      items: [ROW_ACTIVE, ROW_SPARE],
+      presets: PRESETS,
+      active_id: "c1",
+      count: 2,
+      active_env: "",
+      envs: [],
+      env_error: "",
     },
   });
   h.getModels.mockResolvedValue({
     data: {
       providers: {
-        deepseek: { label: "DeepSeek", models: [], default_model: "deepseek-chat", base_url: "https://api.deepseek.com/v1" },
-        zhipu: { label: "智谱 AI", models: [], default_model: "glm-4-flash", base_url: "https://open.bigmodel.cn/api/paas/v4" },
+        deepseek: {
+          label: "DeepSeek",
+          models: [],
+          default_model: "deepseek-chat",
+          base_url: "https://api.deepseek.com/v1",
+        },
+        zhipu: {
+          label: "智谱 AI",
+          models: [],
+          default_model: "glm-4-flash",
+          base_url: "https://open.bigmodel.cn/api/paas/v4",
+        },
       },
     },
   });
   h.health.mockResolvedValue({
     data: {
-      status: "configured", base_url: "https://api.deepseek.com/v1",
-      fallback_count: 1, concurrency: 4, live_concurrency: 4,
-      degraded_providers: {}, request_mode: "normal", request_mode_label: "普通请求",
+      status: "configured",
+      base_url: "https://api.deepseek.com/v1",
+      fallback_count: 1,
+      concurrency: 4,
+      live_concurrency: 4,
+      degraded_providers: {},
+      request_mode: "normal",
+      request_mode_label: "普通请求",
       env_error: "",
     },
   });
@@ -198,9 +289,13 @@ beforeEach(() => {
   });
   h.getRuntime.mockResolvedValue({
     data: {
-      active_env: "", env_error: "", disabled_providers: [],
-      providers: ["deepseek", "zhipu"], configured_providers: ["deepseek", "zhipu"],
-      effective_provider_count: 2, all_configured_disabled: false,
+      active_env: "",
+      env_error: "",
+      disabled_providers: [],
+      providers: ["deepseek", "zhipu"],
+      configured_providers: ["deepseek", "zhipu"],
+      effective_provider_count: 2,
+      all_configured_disabled: false,
     },
   });
 });
@@ -235,8 +330,8 @@ async function waitLoaded(container: HTMLElement) {
 
 /** 主 Tab 受控，未激活的 Tab 内容不在 DOM 里，需先点开 */
 async function openTab(container: HTMLElement, label: string) {
-  const tab = Array.from(container.querySelectorAll(".ant-tabs-tab")).find(
-    (t) => (t.textContent || "").includes(label),
+  const tab = Array.from(container.querySelectorAll(".ant-tabs-tab")).find((t) =>
+    (t.textContent || "").includes(label),
   ) as HTMLElement | undefined;
   expect(tab).toBeTruthy();
   fireEvent.click(tab!.querySelector(".ant-tabs-tab-btn") || tab!);
@@ -245,14 +340,19 @@ async function openTab(container: HTMLElement, label: string) {
   });
 }
 
-const activityText = () => getActivityItems().map((i) => i.text).join(" | ");
+const activityText = () =>
+  getActivityItems()
+    .map((i) => i.text)
+    .join(" | ");
 
 describe("文本模型配置 · 缺口修复（2026-09-25）", () => {
   // ===== F5：环境值损坏必须可见且可恢复（此前是「加载失败」+ 无从下手） =====
   it("环境值损坏：给出可读原因与「恢复为通用环境」入口，点击后写回空环境", async () => {
     h.health.mockResolvedValue({
       data: {
-        status: "env_corrupt", fallback_count: 0, degraded_providers: {},
+        status: "env_corrupt",
+        fallback_count: 0,
+        degraded_providers: {},
         env_error: "运行时环境配置损坏，请重新选择环境",
         hint: "运行时环境配置损坏，请重新选择环境；请在「运行时设置」把当前生效环境清空（恢复通用环境）后重试",
       },
@@ -273,8 +373,11 @@ describe("文本模型配置 · 缺口修复（2026-09-25）", () => {
   it("健康状态标签把 env_corrupt 显示为「环境值异常」而不是「未配置」", async () => {
     h.health.mockResolvedValue({
       data: {
-        status: "env_corrupt", fallback_count: 0, degraded_providers: {},
-        env_error: "运行时环境配置损坏", hint: "请清空环境",
+        status: "env_corrupt",
+        fallback_count: 0,
+        degraded_providers: {},
+        env_error: "运行时环境配置损坏",
+        hint: "请清空环境",
       },
     });
     const { container } = renderPage();
@@ -314,25 +417,27 @@ describe("文本模型配置 · 缺口修复（2026-09-25）", () => {
     });
     h.updateSceneRoute.mockResolvedValue({
       data: {
-        ok: true, scene: "content_draft", config_id: "c2",
+        ok: true,
+        scene: "content_draft",
+        config_id: "c2",
         warning: "该配置属于环境「dev」，与当前生效环境「prod」不同，暂不生效",
       },
     });
     const { container } = renderPage();
     await waitLoaded(container);
 
-    const card = Array.from(container.querySelectorAll(".ant-card")).find(
-      (c) => (c.textContent || "").includes("场景模型路由"),
+    const card = Array.from(container.querySelectorAll(".ant-card")).find((c) =>
+      (c.textContent || "").includes("场景模型路由"),
     ) as HTMLElement;
     expect(card).toBeTruthy();
     const selector = card.querySelector(".ant-select-selector") as HTMLElement;
     fireEvent.mouseDown(selector);
     await waitFor(() => {
-      expect(document.querySelectorAll(".ant-select-item-option").length)
-        .toBeGreaterThan(0);
+      expect(document.querySelectorAll(".ant-select-item-option").length).toBeGreaterThan(0);
     });
-    const follow = Array.from(document.querySelectorAll(".ant-select-item-option"))
-      .find((o) => (o.textContent || "").includes("跟随")) as HTMLElement;
+    const follow = Array.from(document.querySelectorAll(".ant-select-item-option")).find((o) =>
+      (o.textContent || "").includes("跟随"),
+    ) as HTMLElement;
     expect(follow).toBeTruthy();
     fireEvent.click(follow);
 
@@ -351,13 +456,13 @@ describe("文本模型配置 · 缺口修复（2026-09-25）", () => {
     const { container } = renderPage();
     await waitLoaded(container);
 
-    const row = Array.from(container.querySelectorAll(".ant-table-row")).find(
-      (r) => (r.textContent || "").includes("glm-4-flash"),
+    const row = Array.from(container.querySelectorAll(".ant-table-row")).find((r) =>
+      (r.textContent || "").includes("glm-4-flash"),
     ) as HTMLElement;
     expect(row).toBeTruthy();
     // 删除按钮是纯图标按钮（无文字），只能按图标定位
-    const del = (row.querySelector(".anticon-delete")?.closest("button")
-      ?? null) as HTMLElement | null;
+    const del = (row.querySelector(".anticon-delete")?.closest("button") ??
+      null) as HTMLElement | null;
     expect(del).toBeTruthy();
     fireEvent.click(del!);
 
@@ -393,40 +498,54 @@ describe("文本模型配置 · 缺口修复（2026-09-25）", () => {
 
     const sceneSelect = Array.from(
       container.querySelectorAll(".ant-select-filter-item, .ant-select"),
-    ).find((el) => (el.textContent || "").includes("全部场景")
-      || (el.querySelector(".ant-select-selection-placeholder")?.textContent || "")
-        .includes("全部场景")) as HTMLElement;
+    ).find(
+      (el) =>
+        (el.textContent || "").includes("全部场景") ||
+        (el.querySelector(".ant-select-selection-placeholder")?.textContent || "").includes(
+          "全部场景",
+        ),
+    ) as HTMLElement;
     expect(sceneSelect).toBeTruthy();
     fireEvent.mouseDown(sceneSelect.querySelector(".ant-select-selector") as HTMLElement);
 
     await waitFor(() => {
-      const opts = Array.from(document.querySelectorAll(".ant-select-item-option"))
-        .map((o) => o.textContent || "");
+      const opts = Array.from(document.querySelectorAll(".ant-select-item-option")).map(
+        (o) => o.textContent || "",
+      );
       expect(opts.some((t) => t.includes("正文生成"))).toBe(true);
     });
-    const opt = Array.from(document.querySelectorAll(".ant-select-item-option"))
-      .find((o) => (o.textContent || "").includes("正文生成")) as HTMLElement;
+    const opt = Array.from(document.querySelectorAll(".ant-select-item-option")).find((o) =>
+      (o.textContent || "").includes("正文生成"),
+    ) as HTMLElement;
     fireEvent.click(opt);
 
     await waitFor(() => {
-      expect(h.auditLogs).toHaveBeenCalledWith(
-        expect.objectContaining({ scene: "content_draft" }),
-      );
+      expect(h.auditLogs).toHaveBeenCalledWith(expect.objectContaining({ scene: "content_draft" }));
     });
   });
 
   it("「按业务场景」聚合标签可点击下钻到该场景明细", async () => {
     h.stats.mockResolvedValue({
       data: {
-        by_provider: [], by_action: [], by_error: [],
+        by_provider: [],
+        by_action: [],
+        by_error: [],
         by_scene: [
           { scene: "content_draft", calls: 10, success_count: 4, tokens: 900 },
           { scene: "facts_extract", calls: 3, success_count: 3, tokens: 120 },
         ],
         summary: {
-          total: 13, total_tokens: 1020, cached_tokens: 0, prompt_tokens: 600,
-          success_count: 7, failed_count: 6, skipped_count: 0, avg_duration: 1.5,
-          success_rate: 53.8, cache_hit_rate: 0, days: 30,
+          total: 13,
+          total_tokens: 1020,
+          cached_tokens: 0,
+          prompt_tokens: 600,
+          success_count: 7,
+          failed_count: 6,
+          skipped_count: 0,
+          avg_duration: 1.5,
+          success_rate: 53.8,
+          cache_hit_rate: 0,
+          days: 30,
         },
         daily: [],
       },
@@ -441,16 +560,14 @@ describe("文本模型配置 · 缺口修复（2026-09-25）", () => {
     expect(container.textContent || "").toContain("正文生成: 10次");
     expect(container.textContent || "").toContain("全局事实提取: 3次");
 
-    const tag = Array.from(container.querySelectorAll(".ant-tag")).find(
-      (t) => (t.textContent || "").includes("正文生成: 10次"),
+    const tag = Array.from(container.querySelectorAll(".ant-tag")).find((t) =>
+      (t.textContent || "").includes("正文生成: 10次"),
     ) as HTMLElement;
     expect(tag).toBeTruthy();
     fireEvent.click(tag);
 
     await waitFor(() => {
-      expect(h.auditLogs).toHaveBeenCalledWith(
-        expect.objectContaining({ scene: "content_draft" }),
-      );
+      expect(h.auditLogs).toHaveBeenCalledWith(expect.objectContaining({ scene: "content_draft" }));
     });
     // 跳转后应落在「用量日志」Tab，并回填了场景筛选控件
     await waitFor(() => {

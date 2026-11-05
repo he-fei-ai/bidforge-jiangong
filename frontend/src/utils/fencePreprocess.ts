@@ -214,9 +214,7 @@ export function replaceChartFences(
   replacer: (lang: string, code: string) => string,
 ): { text: string; count: number } {
   if (!text) return { text, count: 0 };
-  const blocks = scanFenceBlocks(text).filter(
-    (b) => b.isChart && b.closeLine >= 0,
-  );
+  const blocks = scanFenceBlocks(text).filter((b) => b.isChart && b.closeLine >= 0);
   if (!blocks.length) return { text, count: 0 };
   const lines = text.split("\n");
   // 逐段拼接：块前正文 + 占位 + 其后正文，段间用**空行**分隔。

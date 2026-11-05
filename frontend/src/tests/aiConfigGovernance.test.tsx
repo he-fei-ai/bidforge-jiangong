@@ -20,14 +20,21 @@ import { App as AntdApp } from "antd";
 
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
   });
 }
 if (!(globalThis as any).ResizeObserver) {
   (globalThis as any).ResizeObserver = class {
-    observe() {} unobserve() {} disconnect() {}
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   };
 }
 if (!(window as any).getComputedStyle) {
@@ -95,33 +102,68 @@ vi.mock("../api", () => ({
   },
 }));
 
-import AIConfigPage, { resolveConcurrencyMax, AI_CONCURRENCY_MAX_FALLBACK } from "../pages/AIConfigPage";
+import AIConfigPage, {
+  resolveConcurrencyMax,
+  AI_CONCURRENCY_MAX_FALLBACK,
+} from "../pages/AIConfigPage";
 // 注意：页面用 useAntdMessageHub 包装了 message —— 提示**不弹原生 toast**，
 // 而是写入全局消息中心，因此断言读消息中心而不是 DOM 文本。
 import { getActivityItems, clearActivity } from "../utils/activityCenter";
 
 const ACTIVE_ROW = {
-  id: "c1", provider_name: "deepseek", plan: "pay_as_you_go",
-  api_key: "****abcd", key_hint: "abcd", has_key: true, key_broken: false,
-  base_url: "https://api.deepseek.com/v1", model: "deepseek-chat",
-  max_tokens: 8192, temperature: 0.7, timeout: 900, concurrency: 4,
-  request_mode: "normal", is_active: 1, priority: 0, remark: "",
+  id: "c1",
+  provider_name: "deepseek",
+  plan: "pay_as_you_go",
+  api_key: "****abcd",
+  key_hint: "abcd",
+  has_key: true,
+  key_broken: false,
+  base_url: "https://api.deepseek.com/v1",
+  model: "deepseek-chat",
+  max_tokens: 8192,
+  temperature: 0.7,
+  timeout: 900,
+  concurrency: 4,
+  request_mode: "normal",
+  is_active: 1,
+  priority: 0,
+  remark: "",
 };
 
 const FALLBACK_ROW = {
   ...ACTIVE_ROW,
-  id: "c2", provider_name: "zhipu", model: "glm-4-flash",
-  is_active: 0, priority: 1, has_key: false, api_key: "", key_hint: "",
+  id: "c2",
+  provider_name: "zhipu",
+  model: "glm-4-flash",
+  is_active: 0,
+  priority: 1,
+  has_key: false,
+  api_key: "",
+  key_hint: "",
 };
 
 const PRESETS = {
   deepseek: {
-    base_url: "https://api.deepseek.com/v1", model: "deepseek-chat",
-    plans: { pay_as_you_go: { label: "按量计费", base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" } },
+    base_url: "https://api.deepseek.com/v1",
+    model: "deepseek-chat",
+    plans: {
+      pay_as_you_go: {
+        label: "按量计费",
+        base_url: "https://api.deepseek.com/v1",
+        model: "deepseek-chat",
+      },
+    },
   },
   zhipu: {
-    base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash",
-    plans: { pay_as_you_go: { label: "按量计费", base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash" } },
+    base_url: "https://open.bigmodel.cn/api/paas/v4",
+    model: "glm-4-flash",
+    plans: {
+      pay_as_you_go: {
+        label: "按量计费",
+        base_url: "https://open.bigmodel.cn/api/paas/v4",
+        model: "glm-4-flash",
+      },
+    },
   },
 };
 
@@ -134,16 +176,31 @@ beforeEach(() => {
   h.getModels.mockResolvedValue({
     data: {
       providers: {
-        deepseek: { label: "DeepSeek", models: [], default_model: "deepseek-chat", base_url: "https://api.deepseek.com/v1" },
-        zhipu: { label: "智谱 AI", models: [], default_model: "glm-4-flash", base_url: "https://open.bigmodel.cn/api/paas/v4" },
+        deepseek: {
+          label: "DeepSeek",
+          models: [],
+          default_model: "deepseek-chat",
+          base_url: "https://api.deepseek.com/v1",
+        },
+        zhipu: {
+          label: "智谱 AI",
+          models: [],
+          default_model: "glm-4-flash",
+          base_url: "https://open.bigmodel.cn/api/paas/v4",
+        },
       },
     },
   });
   h.health.mockResolvedValue({
     data: {
-      status: "configured", base_url: "https://api.deepseek.com/v1",
-      fallback_count: 1, concurrency: 4, live_concurrency: 4,
-      degraded_providers: {}, request_mode: "normal", request_mode_label: "普通请求",
+      status: "configured",
+      base_url: "https://api.deepseek.com/v1",
+      fallback_count: 1,
+      concurrency: 4,
+      live_concurrency: 4,
+      degraded_providers: {},
+      request_mode: "normal",
+      request_mode_label: "普通请求",
     },
   });
   h.stats.mockResolvedValue({ data: null });
@@ -151,8 +208,22 @@ beforeEach(() => {
   h.getSceneRoutes.mockResolvedValue({
     data: {
       items: [
-        { scene: "content_draft", label: "正文生成", config_id: "", provider_name: "", model: "", missing: false },
-        { scene: "facts_extract", label: "全局事实提取", config_id: "", provider_name: "", model: "", missing: false },
+        {
+          scene: "content_draft",
+          label: "正文生成",
+          config_id: "",
+          provider_name: "",
+          model: "",
+          missing: false,
+        },
+        {
+          scene: "facts_extract",
+          label: "全局事实提取",
+          config_id: "",
+          provider_name: "",
+          model: "",
+          missing: false,
+        },
       ],
       known_scenes: [
         { value: "content_draft", label: "正文生成" },
@@ -163,18 +234,28 @@ beforeEach(() => {
   });
   h.configAuditLogs.mockResolvedValue({
     data: {
-      items: [{
-        id: "a1", action: "update", action_label: "修改配置",
-        config_id: "c1", provider_name: "deepseek", model: "deepseek-reasoner",
-        detail: "更新：plan=pay_as_you_go 环境=通用 位置=当前使用 密钥=已填写 并发=4 温度=0.7",
-        client_ip: "127.0.0.1",
-        created_at: "2026-09-23T10:00:00",
-        rollbackable: true,
-        changes: [{
-          field: "model", label: "模型",
-          before: "deepseek-chat", after: "deepseek-reasoner",
-        }],
-      }],
+      items: [
+        {
+          id: "a1",
+          action: "update",
+          action_label: "修改配置",
+          config_id: "c1",
+          provider_name: "deepseek",
+          model: "deepseek-reasoner",
+          detail: "更新：plan=pay_as_you_go 环境=通用 位置=当前使用 密钥=已填写 并发=4 温度=0.7",
+          client_ip: "127.0.0.1",
+          created_at: "2026-09-23T10:00:00",
+          rollbackable: true,
+          changes: [
+            {
+              field: "model",
+              label: "模型",
+              before: "deepseek-chat",
+              after: "deepseek-reasoner",
+            },
+          ],
+        },
+      ],
       total: 1,
     },
   });
@@ -188,15 +269,23 @@ beforeEach(() => {
   });
   h.rollbackConfig.mockResolvedValue({
     data: {
-      ok: true, config_id: "c1", restored: { model: "deepseek-chat" },
-      active_restored: null, warning: "",
-      changes: [{ field: "model", label: "模型", before: "deepseek-reasoner", after: "deepseek-chat" }],
+      ok: true,
+      config_id: "c1",
+      restored: { model: "deepseek-chat" },
+      active_restored: null,
+      warning: "",
+      changes: [
+        { field: "model", label: "模型", before: "deepseek-reasoner", after: "deepseek-chat" },
+      ],
     },
   });
   h.getRuntime.mockResolvedValue({
     data: {
-      active_env: "", disabled_providers: [], providers: ["deepseek", "zhipu"],
-      configured_providers: ["deepseek", "zhipu"], effective_provider_count: 2,
+      active_env: "",
+      disabled_providers: [],
+      providers: ["deepseek", "zhipu"],
+      configured_providers: ["deepseek", "zhipu"],
+      effective_provider_count: 2,
       all_configured_disabled: false,
     },
   });
@@ -257,8 +346,8 @@ describe("文本模型配置 · 配置治理增强", () => {
     const providerSelect = modal.querySelector(".ant-select-selector") as HTMLElement;
     fireEvent.mouseDown(providerSelect);
     await waitFor(() => {
-      const option = Array.from(document.querySelectorAll(".ant-select-item-option")).find(
-        (o) => (o.textContent || "").includes("智谱"),
+      const option = Array.from(document.querySelectorAll(".ant-select-item-option")).find((o) =>
+        (o.textContent || "").includes("智谱"),
       ) as HTMLElement | undefined;
       expect(option).toBeTruthy();
       fireEvent.click(option!);
@@ -290,10 +379,15 @@ describe("文本模型配置 · 配置治理增强", () => {
     //    管理员上调后界面必须跟随，否则用户「填不上去」（历史缺陷的反向形态）。
     h.health.mockResolvedValueOnce({
       data: {
-        status: "configured", base_url: "https://api.deepseek.com/v1",
-        fallback_count: 1, concurrency: 4, live_concurrency: 4,
+        status: "configured",
+        base_url: "https://api.deepseek.com/v1",
+        fallback_count: 1,
+        concurrency: 4,
+        live_concurrency: 4,
         max_concurrency: 8,
-        degraded_providers: {}, request_mode: "normal", request_mode_label: "普通请求",
+        degraded_providers: {},
+        request_mode: "normal",
+        request_mode_label: "普通请求",
       },
     });
     const { container } = renderPage();
@@ -323,7 +417,9 @@ describe("文本模型配置 · 配置治理增强", () => {
 
     h.saveConfig.mockResolvedValue({
       data: {
-        id: "new", ok: true, warning: "",
+        id: "new",
+        ok: true,
+        warning: "",
         warnings: ["并发数 8 超出允许范围 1~5，已按 5 保存"],
       },
     });
@@ -333,10 +429,14 @@ describe("文本模型配置 · 配置治理增强", () => {
       expect(h.saveConfig).toHaveBeenCalled();
     });
     await waitFor(() => {
-      const texts = getActivityItems().map((i) => i.text).join(" | ");
+      const texts = getActivityItems()
+        .map((i) => i.text)
+        .join(" | ");
       expect(texts).toContain("部分参数超出合法范围");
     });
-    const texts = getActivityItems().map((i) => i.text).join(" | ");
+    const texts = getActivityItems()
+      .map((i) => i.text)
+      .join(" | ");
     expect(texts).toContain("并发数 8 超出允许范围 1~5，已按 5 保存");
   });
 
@@ -372,8 +472,8 @@ describe("文本模型配置 · 配置治理增强", () => {
     expect(container.textContent || "").toContain("跟随「当前使用」配置");
 
     // 页面上有多个 Select（多环境切换器 / 场景路由…），必须定位到场景路由卡片内的那个
-    const routeCard = Array.from(container.querySelectorAll(".ant-card")).find(
-      (c) => (c.textContent || "").includes("场景模型路由"),
+    const routeCard = Array.from(container.querySelectorAll(".ant-card")).find((c) =>
+      (c.textContent || "").includes("场景模型路由"),
     ) as HTMLElement;
     expect(routeCard).toBeTruthy();
     const combo = routeCard.querySelector(".ant-select-selector") as HTMLElement;
@@ -384,8 +484,8 @@ describe("文本模型配置 · 配置治理增强", () => {
       const options = Array.from(document.querySelectorAll(".ant-select-item-option"));
       expect(options.length).toBeGreaterThan(1);
     });
-    const option = Array.from(document.querySelectorAll(".ant-select-item-option")).find(
-      (o) => (o.textContent || "").includes("智谱"),
+    const option = Array.from(document.querySelectorAll(".ant-select-item-option")).find((o) =>
+      (o.textContent || "").includes("智谱"),
     ) as HTMLElement;
     expect(option).toBeTruthy();
     fireEvent.click(option);
@@ -455,8 +555,8 @@ describe("文本模型配置 · 配置治理增强", () => {
     });
     expect(container.textContent || "").toContain("已配置厂商仍可用：2 / 2");
 
-    const switchCard = Array.from(container.querySelectorAll(".ant-card")).find(
-      (c) => (c.textContent || "").includes("运行时厂商开关"),
+    const switchCard = Array.from(container.querySelectorAll(".ant-card")).find((c) =>
+      (c.textContent || "").includes("运行时厂商开关"),
     ) as HTMLElement;
     expect(switchCard).toBeTruthy();
     const combo = switchCard.querySelector(".ant-select-selector") as HTMLElement;
@@ -465,8 +565,8 @@ describe("文本模型配置 · 配置治理增强", () => {
     await waitFor(() => {
       expect(document.querySelectorAll(".ant-select-item-option").length).toBeGreaterThan(1);
     });
-    const zhipu = Array.from(document.querySelectorAll(".ant-select-item-option")).find(
-      (o) => (o.textContent || "").includes("智谱"),
+    const zhipu = Array.from(document.querySelectorAll(".ant-select-item-option")).find((o) =>
+      (o.textContent || "").includes("智谱"),
     ) as HTMLElement;
     expect(zhipu).toBeTruthy();
     fireEvent.click(zhipu);
@@ -475,6 +575,50 @@ describe("文本模型配置 · 配置治理增强", () => {
     await waitFor(() => {
       expect(h.setDisabledProviders).toHaveBeenCalledWith(["zhipu"]);
     });
+  });
+
+  it("BUG-01：禁用厂商配置损坏时展示错误并保留恢复入口", async () => {
+    h.getRuntime.mockResolvedValueOnce({
+      data: {
+        active_env: "",
+        disabled_providers: [],
+        providers: ["deepseek", "zhipu"],
+        configured_providers: ["deepseek", "zhipu"],
+        effective_provider_count: 2,
+        all_configured_disabled: false,
+        disabled_error: "运行时禁用厂商配置损坏：Expecting value",
+      },
+    });
+    const { container } = renderPage();
+    await waitLoaded(container);
+
+    await waitFor(() => {
+      expect(container.textContent || "").toContain("运行时厂商开关读取异常");
+    });
+    expect(container.textContent || "").toContain("Expecting value");
+
+    const switchCard = Array.from(container.querySelectorAll(".ant-card")).find((c) =>
+      (c.textContent || "").includes("运行时厂商开关"),
+    ) as HTMLElement;
+    expect(switchCard).toBeTruthy();
+    // 恢复入口必须仍在：可勾选厂商 + 保存开关
+    expect(switchCard.querySelector(".ant-select-selector")).toBeTruthy();
+    expect(btnByText(switchCard, "保存开关")).toBeTruthy();
+  });
+
+  it("BUG-01：运行时开关读取失败时不得整卡隐藏", async () => {
+    h.getRuntime.mockRejectedValueOnce(new Error("Network Error"));
+    const { container } = renderPage();
+    await waitLoaded(container);
+
+    await waitFor(() => {
+      expect(container.textContent || "").toContain("开关数据暂不可用");
+    });
+    const switchCard = Array.from(container.querySelectorAll(".ant-card")).find((c) =>
+      (c.textContent || "").includes("运行时厂商开关"),
+    ) as HTMLElement;
+    expect(switchCard).toBeTruthy();
+    expect(btnByText(switchCard, "保存开关")).toBeTruthy();
   });
 
   it("多环境：顶部切换器可切换当前生效环境", async () => {
@@ -487,8 +631,8 @@ describe("文本模型配置 · 配置治理增强", () => {
     // 未设置时显示「通用（不过滤）」
     expect(container.textContent || "").toContain("通用（不过滤）");
 
-    const envCard = Array.from(container.querySelectorAll(".ant-card")).find(
-      (c) => (c.textContent || "").includes("当前生效环境"),
+    const envCard = Array.from(container.querySelectorAll(".ant-card")).find((c) =>
+      (c.textContent || "").includes("当前生效环境"),
     ) as HTMLElement;
     expect(envCard).toBeTruthy();
     const selector = envCard.querySelector(".ant-select-selector") as HTMLElement;
@@ -522,12 +666,9 @@ describe("resolveConcurrencyMax · 并发上限解析（唯一口径，2026-10-0
     expect(resolveConcurrencyMax({ max_concurrency: null })).toBe(AI_CONCURRENCY_MAX_FALLBACK);
   });
 
-  it.each([0, -1, NaN])(
-    "非法值（%p）→ 回落兜底 5，绝不当作无上限放行",
-    (bad) => {
-      expect(resolveConcurrencyMax({ max_concurrency: bad })).toBe(AI_CONCURRENCY_MAX_FALLBACK);
-    },
-  );
+  it.each([0, -1, NaN])("非法值（%p）→ 回落兜底 5，绝不当作无上限放行", (bad) => {
+    expect(resolveConcurrencyMax({ max_concurrency: bad })).toBe(AI_CONCURRENCY_MAX_FALLBACK);
+  });
 });
 
 // ===========================================================================
@@ -558,8 +699,8 @@ describe("提示词治理开关（GET/PUT /system/governance）", () => {
       expect(container.textContent || "").toContain("提示词治理");
     });
 
-    const govCard = Array.from(container.querySelectorAll(".ant-card")).find(
-      (c) => (c.textContent || "").includes("提示词治理"),
+    const govCard = Array.from(container.querySelectorAll(".ant-card")).find((c) =>
+      (c.textContent || "").includes("提示词治理"),
     ) as HTMLElement;
     expect(govCard).toBeTruthy();
 
@@ -583,8 +724,8 @@ describe("提示词治理开关（GET/PUT /system/governance）", () => {
       expect(container.textContent || "").toContain("提示词治理");
     });
 
-    const govCard = Array.from(container.querySelectorAll(".ant-card")).find(
-      (c) => (c.textContent || "").includes("提示词治理"),
+    const govCard = Array.from(container.querySelectorAll(".ant-card")).find((c) =>
+      (c.textContent || "").includes("提示词治理"),
     ) as HTMLElement;
     expect(govCard).toBeTruthy();
 

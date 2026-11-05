@@ -5,11 +5,17 @@ import { computeDocStats, buildUploadNotice } from "../../utils/workflowDerived"
 import type { DocRecord } from "../../utils/workflowDerived";
 import type { FactsSummary } from "../../types/facts";
 import {
-  MAX_UPLOAD_BYTES, splitByUploadTotalQuota, splitByUploadFileCount,
-  partitionUploadFiles, MAX_UPLOAD_FILES_FALLBACK,
+  MAX_UPLOAD_BYTES,
+  splitByUploadTotalQuota,
+  splitByUploadFileCount,
+  partitionUploadFiles,
+  MAX_UPLOAD_FILES_FALLBACK,
 } from "../../utils/uploadAccept";
 import { buildBatchResolveCopy, buildBatchResolveResultCopy } from "./factsShared.ts";
-import type { DocumentPipelineStatusLike, PipelineActionKey } from "../../components/DocumentPipelineSummary";
+import type {
+  DocumentPipelineStatusLike,
+  PipelineActionKey,
+} from "../../components/DocumentPipelineSummary";
 
 // =========================================================================
 // ✅ any 清理专项（2026-11-02）：本域消费的后端 REST 响应契约。
@@ -86,17 +92,39 @@ export interface DocumentWorkflowDeps {
 
 export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
   const {
-    id, schemeProjectId, msg, modal,
-    uploadingFacts, setUploadingFacts, setUploadedFiles,
-    maxUploadBytes, maxUploadTotalBytes, maxUploadFiles,
-    uploadAbortRef, parseAbortRef,
-    parsingDocs, setParsingDocs, parsingDocId, setParsingDocId,
-    docList, loadDocuments,
-    setPreviewDoc, setPreviewText, setPreviewData, setPreviewLoading,
-    previewDoc, setPipelineStatus, setPipelineError, setPipelineLoading,
-    pipelineAction, setPipelineAction,
-    setDocList, loadFacts, factsSummary,
-    factsListAbortRef, currentSchemeIdRef,
+    id,
+    schemeProjectId,
+    msg,
+    modal,
+    uploadingFacts,
+    setUploadingFacts,
+    setUploadedFiles,
+    maxUploadBytes,
+    maxUploadTotalBytes,
+    maxUploadFiles,
+    uploadAbortRef,
+    parseAbortRef,
+    parsingDocs,
+    setParsingDocs,
+    parsingDocId,
+    setParsingDocId,
+    docList,
+    loadDocuments,
+    setPreviewDoc,
+    setPreviewText,
+    setPreviewData,
+    setPreviewLoading,
+    previewDoc,
+    setPipelineStatus,
+    setPipelineError,
+    setPipelineLoading,
+    pipelineAction,
+    setPipelineAction,
+    setDocList,
+    loadFacts,
+    factsSummary,
+    factsListAbortRef,
+    currentSchemeIdRef,
   } = deps;
 
   // ✅ 分步工作流 ①：上传保存（仅存文件，不解析不提取）
@@ -136,9 +164,13 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     const quota = splitByUploadTotalQuota(toUpload, maxUploadTotalBytes);
     if (quota.held.length > 0) {
       const mb = Math.round(
-        (Number(maxUploadTotalBytes) > 0 ? Number(maxUploadTotalBytes) : 200 * 1024 * 1024) / (1024 * 1024),
+        (Number(maxUploadTotalBytes) > 0 ? Number(maxUploadTotalBytes) : 200 * 1024 * 1024) /
+          (1024 * 1024),
       );
-      const names = quota.held.map((f) => f.name).slice(0, 10).join("、");
+      const names = quota.held
+        .map((f) => f.name)
+        .slice(0, 10)
+        .join("、");
       const more = quota.held.length > 10 ? ` 等 ${quota.held.length} 个` : "";
       msg.warning(`单次上传累计不能超过 ${mb}MB，以下文件未上传：${names}${more}`);
       if (quota.accepted.length === 0) return;
@@ -154,7 +186,10 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
       const cap = Math.floor(
         Number(maxUploadFiles) > 0 ? Number(maxUploadFiles) : MAX_UPLOAD_FILES_FALLBACK,
       );
-      const names = byCount.held.map((f) => f.name).slice(0, 10).join("、");
+      const names = byCount.held
+        .map((f) => f.name)
+        .slice(0, 10)
+        .join("、");
       const more = byCount.held.length > 10 ? ` 等 ${byCount.held.length} 个` : "";
       msg.warning(`单次最多上传 ${cap} 个文件，以下文件未上传：${names}${more}`);
       if (byCount.accepted.length === 0) return;
@@ -236,8 +271,9 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     const ac = new AbortController();
     parseAbortRef.current = ac;
     try {
-      const { data } = await factsApi.parseAllDocuments(
-        id, schemeProjectId, force, { signal: ac.signal });
+      const { data } = await factsApi.parseAllDocuments(id, schemeProjectId, force, {
+        signal: ac.signal,
+      });
       if (ac.signal.aborted) return;
       const truncatedCount = data.truncated_count || 0;
       const reconciledCount = data.reconciled_count || 0;
@@ -249,15 +285,17 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
       } else if (truncatedCount > 0) {
         const names = (data.truncated || []).map((f: ParseTruncatedItem) => f.file_name).join("、");
         msg.warning(
-          `解析完成：成功 ${data.parsed} 个文档；其中 ${truncatedCount} 个内容超长被截断（${names}），建议拆分后重新上传`);
+          `解析完成：成功 ${data.parsed} 个文档；其中 ${truncatedCount} 个内容超长被截断（${names}），建议拆分后重新上传`,
+        );
       } else if (data.parsed === 0 && reconciledCount > 0) {
         // ✅ 2026-09-25：本轮只修正了陈旧的 parse_status（存量文档正文早已存在，
         // 但状态列停在 pending/null）→ 给用户明确解释，否则"什么都没发生"。
         msg.success(`已修正 ${reconciledCount} 份文档的解析状态`);
       } else {
         msg.success(
-          `${force ? "重新" : ""}解析完成：成功 ${data.parsed} 个文档`
-          + (reconciledCount > 0 ? `，并修正 ${reconciledCount} 份陈旧状态` : ""));
+          `${force ? "重新" : ""}解析完成：成功 ${data.parsed} 个文档` +
+            (reconciledCount > 0 ? `，并修正 ${reconciledCount} 份陈旧状态` : ""),
+        );
       }
       loadDocuments();
     } catch (e: unknown) {
@@ -288,17 +326,20 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
         // ✅ 2026-09-25：后端在短路返回时自修复了陈旧 parse_status
         //    （正文已存在但状态仍是 pending）→ 明确告知，避免用户误以为
         //    「点了解析却没反应」。
-        msg.info(data.reconciled
-          ? `「${fileName}」已有解析结果，已修正其解析状态`
-          : `「${fileName}」已解析过`);
+        msg.info(
+          data.reconciled
+            ? `「${fileName}」已有解析结果，已修正其解析状态`
+            : `「${fileName}」已解析过`,
+        );
       } else {
         // ✅ F6（2026-09-26）：与批量解析提示口径一致，即时告知截断/告警，
         //    避免用户在点「解析」那一刻拿不到内容可能不完整的提示。
         const cut = data.truncated ? "（内容可能被截断，请查看解析提示）" : "";
-        const warn = (data.warnings && data.warnings.length)
-          ? `（${data.warnings.length} 条解析提示）`
-          : "";
-        msg.success(`「${fileName}」${force ? "重新" : ""}解析完成（${data.text_len} 字）${cut}${warn}`);
+        const warn =
+          data.warnings && data.warnings.length ? `（${data.warnings.length} 条解析提示）` : "";
+        msg.success(
+          `「${fileName}」${force ? "重新" : ""}解析完成（${data.text_len} 字）${cut}${warn}`,
+        );
       }
       loadDocuments();
     } catch (e: unknown) {
@@ -364,7 +405,11 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     try {
       const { data } = await docPipelineApi.completeness(docId, true);
       const q = typeof data?.quality_score === "number" ? data.quality_score : undefined;
-      setPipelineStatus((prev) => (prev ? { ...prev, quality_score: q, completeness: data?.completeness ?? prev.completeness } : prev));
+      setPipelineStatus((prev) =>
+        prev
+          ? { ...prev, quality_score: q, completeness: data?.completeness ?? prev.completeness }
+          : prev,
+      );
       return true;
     } catch {
       /* 质量刷新失败：正文/状态仍在，提示交由调用方处理，避免"失败却提示成功" */
@@ -405,13 +450,13 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     }
   };
 
-
   /** 修改文档分类（招标文件 / 合同文件 / ...，影响提取优先级） */
   const handleCategoryChange = async (docId: string, category: string) => {
     try {
       await factsApi.updateDocumentCategory(docId, category);
       setDocList((prev) =>
-        prev.map((d) => (d.id === docId ? { ...d, doc_category: category } : d)));
+        prev.map((d) => (d.id === docId ? { ...d, doc_category: category } : d)),
+      );
       msg.success("分类已更新");
     } catch (e: unknown) {
       // ✅ 2026-09-24 T3：更新失败（超时/网络中断但服务端可能已落库等）时，
@@ -434,16 +479,16 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     // ✅ 文案统一走 buildBatchResolveCopy：修复旧文案把「模拟值 ∩ 未确认」
     //    交集重复计数（unresolved + simulated），且空态判定误伤已确认的模拟值。
     const copy = buildBatchResolveCopy({
-      unresolved, simulated, conflicts: factsSummary?.conflicts || 0,
+      unresolved,
+      simulated,
+      conflicts: factsSummary?.conflicts || 0,
     });
     modal.confirm({
       title: "批量确认所有事实",
       content: (
         <div>
           <div>{copy.headline}</div>
-          {copy.simulatedNote && (
-            <div style={{ marginTop: 6 }}>{copy.simulatedNote}</div>
-          )}
+          {copy.simulatedNote && <div style={{ marginTop: 6 }}>{copy.simulatedNote}</div>}
           {copy.conflictNote && (
             <div style={{ marginTop: 6, color: "#d46b08" }}>{copy.conflictNote}</div>
           )}
@@ -492,8 +537,8 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
       content: (
         <div>
           <div>
-            将把当前方案可见范围内 <strong>{stale}</strong> 条「来源已变化」的事实
-            标记为<strong>已人工核对、仍然有效</strong>，恢复其注入正文与导出。
+            将把当前方案可见范围内 <strong>{stale}</strong> 条「来源已变化」的事实 标记为
+            <strong>已人工核对、仍然有效</strong>，恢复其注入正文与导出。
           </div>
           <div style={{ marginTop: 6, color: "#d46b08" }}>
             仅在你已核对原始资料、确认取值未变时使用；若资料确已更新，请改为重新提取。
@@ -582,8 +627,15 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
   };
 
   return {
-    handleUploadDocuments, handleParseDocuments, handleParseDocument,
-    handlePreviewDocument, handlePipelineAction, handleCategoryChange,
-    handleBatchResolve, handleAckStaleAll, handleAckStaleOne, handleDeleteDocument,
+    handleUploadDocuments,
+    handleParseDocuments,
+    handleParseDocument,
+    handlePreviewDocument,
+    handlePipelineAction,
+    handleCategoryChange,
+    handleBatchResolve,
+    handleAckStaleAll,
+    handleAckStaleOne,
+    handleDeleteDocument,
   };
 }

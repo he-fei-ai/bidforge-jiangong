@@ -1,5 +1,21 @@
-import { collectAllKeys, hasUnsavedLocalNodes, scrollToNodeInContainer, type TreeNode } from "./outlineTreeModel.ts";
-import { ArrowDownOutlined, ArrowUpOutlined, CaretRightOutlined, DeleteOutlined, EditOutlined, FolderOpenOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined, SwapOutlined } from "@ant-design/icons";
+import {
+  collectAllKeys,
+  hasUnsavedLocalNodes,
+  scrollToNodeInContainer,
+  type TreeNode,
+} from "./outlineTreeModel.ts";
+import {
+  ArrowDownOutlined,
+  ArrowUpOutlined,
+  CaretRightOutlined,
+  DeleteOutlined,
+  EditOutlined,
+  FolderOpenOutlined,
+  PlayCircleOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+  SwapOutlined,
+} from "@ant-design/icons";
 import { Alert, Button, Empty, Input, Space, Tag, Tooltip, Tree } from "antd";
 // ✅ any 清理专项（2026-11-02）：treeData 与 titleRender 节点契约复用 antd TreeDataNode
 import type { TreeDataNode } from "antd";
@@ -40,12 +56,29 @@ export type SchemeTreePanelProps = {
 
 export const SchemeTreePanel = memo(function SchemeTreePanel(p: SchemeTreePanelProps) {
   const {
-    tree, treeData, expandedKeys, selectedSectionKey, loading,
+    tree,
+    treeData,
+    expandedKeys,
+    selectedSectionKey,
+    loading,
     generating,
-    onRefresh, onToggleExpand, onGoToOutline, onSelectSection, onExpand,
-    moveFlags, onMoveNode, onRenameNode, onDeleteNode,
-    onAddChildNode, onAddSiblingNode, onSaveOutline,
-    renamingKey, renamingValue, setRenamingKey, setRenamingValue, scrollRef,
+    onRefresh,
+    onToggleExpand,
+    onGoToOutline,
+    onSelectSection,
+    onExpand,
+    moveFlags,
+    onMoveNode,
+    onRenameNode,
+    onDeleteNode,
+    onAddChildNode,
+    onAddSiblingNode,
+    onSaveOutline,
+    renamingKey,
+    renamingValue,
+    setRenamingKey,
+    setRenamingValue,
+    scrollRef,
   } = p;
   // ✅ 编辑增强：左侧树滚动容器（ref 由父组件持有，编辑树移动时同步定位）
   const handleMoveNode = (key: string, dir: -1 | 1) => {
@@ -77,9 +110,13 @@ export const SchemeTreePanel = memo(function SchemeTreePanel(p: SchemeTreePanelP
       >
         <Space size={6}>
           <FolderOpenOutlined style={{ color: "#1677ff" }} />
-          <Text strong style={{ fontSize: 13 }}>目录树</Text>
+          <Text strong style={{ fontSize: 13 }}>
+            目录树
+          </Text>
           {tree.length > 0 && (
-            <Tag color="blue" style={{ margin: 0 }}>{collectAllKeys(tree).length}</Tag>
+            <Tag color="blue" style={{ margin: 0 }}>
+              {collectAllKeys(tree).length}
+            </Tag>
           )}
         </Space>
         <Space size={4}>
@@ -112,7 +149,11 @@ export const SchemeTreePanel = memo(function SchemeTreePanel(p: SchemeTreePanelP
 
       {/* 树（本面板只做"章节导航"，目录的生成/编辑统一在「目录生成」Tab；
           但为编辑便利，行内提供上移/下移按钮，复用与右侧编辑树同一套 moveNode 逻辑） */}
-      <div ref={scrollRef} className="scroll-area" style={{ flex: 1, overflow: "auto", padding: "8px 4px", minHeight: 0 }}>
+      <div
+        ref={scrollRef}
+        className="scroll-area"
+        style={{ flex: 1, overflow: "auto", padding: "8px 4px", minHeight: 0 }}
+      >
         {/* ✅ 编辑增强：左侧树行内操作按钮默认隐藏，悬浮行时淡入，
             小屏/窄面板下显著省空间（悬浮即"折叠/展开"） */}
         <style>{`
@@ -158,7 +199,10 @@ export const SchemeTreePanel = memo(function SchemeTreePanel(p: SchemeTreePanelP
                 );
               }
               return (
-                <div className="swb-tree-row" style={{ display: "flex", alignItems: "center", gap: 4, width: "100%" }}>
+                <div
+                  className="swb-tree-row"
+                  style={{ display: "flex", alignItems: "center", gap: 4, width: "100%" }}
+                >
                   <span
                     style={{
                       flex: 1,

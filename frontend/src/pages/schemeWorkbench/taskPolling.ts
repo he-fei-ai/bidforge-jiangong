@@ -1,4 +1,7 @@
-import { facts_result as GeneratedFactsResult, type facts_result } from "../../types/checkpointSchema";
+import {
+  facts_result as GeneratedFactsResult,
+  type facts_result,
+} from "../../types/checkpointSchema";
 import { isTerminalTaskStatus } from "../../utils/contentEvents";
 import { applyFactsCompletedEvent } from "./factsShared.ts";
 
@@ -94,7 +97,9 @@ export async function pollTaskUntilTerminalImpl(
       if ((data.progress || 0) >= 0.99 && !isTerminalTaskStatus(data.status)) {
         stuckAtFull++;
         if (stuckAtFull >= stuckThreshold) {
-          console.warn(`pollTaskUntilTerminal: task ${taskId} stuck at progress=100% for ${stuckAtFull} polls, treating as completed`);
+          console.warn(
+            `pollTaskUntilTerminal: task ${taskId} stuck at progress=100% for ${stuckAtFull} polls, treating as completed`,
+          );
           // ✅ BUG 修复（2026-09-20）：兜底判定 completed 时必须保留全量字段
           //   （尤其 outline_result）—— 后台成果已落 checkpoint，丢字段会让
           //   调用方（fin.outline_result 消费分支）误判无成果直接 load()。
@@ -110,7 +115,9 @@ export async function pollTaskUntilTerminalImpl(
       if (err?.response?.status === 404) return null;
       netFailCount++;
       if (netFailCount >= netFailTolerance) {
-        console.warn(`pollTaskUntilTerminal: task ${taskId} 连续 ${netFailCount} 次网络失败，放弃重挂`);
+        console.warn(
+          `pollTaskUntilTerminal: task ${taskId} 连续 ${netFailCount} 次网络失败，放弃重挂`,
+        );
         return null;
       }
     }
@@ -149,6 +156,37 @@ export async function findRecentOutlineTaskImpl(
     // 检索失败（后端确实不可达）：静默返回 null，由调用方保持旧行为（仅提示）
   }
   return null;
+}
+
+/**
+ * ✅ R174 F2（2026-11-03）：重挂轮询耗尽后的「任务态未知」判定纯函数。
+ *
+ * 背景：`pollTaskUntilTerminal` 有 200×3s 上限与连续网络失败容错，两者耗尽后
+ * 返回 null —— 此时后端任务**可能仍在运行（AI 仍在计费）**，前端既不知道终态、
+ * 也不能当作已结束。旧调用方对 null 无任何处理，页面静默回空闲，用户重新点
+ * 生成会造成并发 / 重复计费。
+ *
+ * 本函数把「拿到一次任务状态后该走哪条路」收敛为单一事实源，供生成前的
+ * 未知态守卫（SchemeWorkbenchPage.guardUnknownTaskGeneration）消费：
+ *   - "reattach"：仍在运行/暂停 → 自动重新接管监听，**不**发起新生成；
+ *   - "proceed" ：已到终态 → 清除未知态标记，可安全发起新生成；
+ *   - "keep"    ：状态异常（空值/未知枚举）→ 保持未知态，本次不放行新生成。
+ */
+export type UnknownTaskInfo = {
+  taskId: string;
+  /** 任务业务类型（outline / content / facts），仅用于文案展示 */
+  genType: string;
+  /** 进入未知态的原因（展示给用户） */
+  reason: string;
+};
+
+export function resolveUnknownTaskNext(
+  status: string | undefined | null,
+): "reattach" | "proceed" | "keep" {
+  const s = String(status || "");
+  if (s === "running" || s === "paused") return "reattach";
+  if (isTerminalTaskStatus(s)) return "proceed";
+  return "keep";
 }
 
 /**

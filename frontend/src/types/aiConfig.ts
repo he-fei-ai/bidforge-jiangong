@@ -38,11 +38,7 @@ export type BillingPlan = "pay_as_you_go" | "coding_plan";
  *    把环境清空。**必须与 not_configured 区分**，否则用户会去找不存在的配置。
  */
 export type AIHealthStatus =
-  | "configured"
-  | "no_key"
-  | "key_invalid"
-  | "not_configured"
-  | "env_corrupt";
+  "configured" | "no_key" | "key_invalid" | "not_configured" | "env_corrupt";
 
 /** 供应商预设（GET /ai/models 的 providers[key]） */
 export interface AIProviderPreset {
@@ -96,6 +92,11 @@ export interface AIConfigItem {
   env: string;
   /** 数据库里是 0/1（非布尔） */
   is_active: number;
+  /**
+   * ✅ R175（BUG-03）：是否参与真实调用（主配置之外的降级/视觉候选）。
+   * 数据库 0/1；缺省（旧后端/旧数据）按 1 处理。
+   */
+  enabled?: number;
   priority: number;
   remark: string;
   created_at?: string;
@@ -204,6 +205,8 @@ export interface AIHealth {
   /** 并发控制器当前实际生效值（自适应调整会随时变动） */
   live_concurrency?: number | null;
   max_concurrency?: number | null;
+  /** ✅ R175（BUG-04）：降级链实际生效上限（默认 3），用于界面说明「仅前 N 条参与」 */
+  fallback_chain_max?: number | null;
   supports_vision?: boolean;
   fallback_count: number;
   key_configured?: boolean;
@@ -292,6 +295,8 @@ export interface AIPrecheckAllItem {
   message: string;
   ip: string;
   step: string;
+  /** ✅ R179：该配置是否被用户停用（enabled=0 时不参与任何真实调用） */
+  enabled?: boolean;
 }
 
 /** POST /ai/config/precheck-all 响应 */
@@ -301,6 +306,8 @@ export interface AIPrecheckAllResponse {
   ok_count: number;
   fail_count: number;
   skipped_no_url: number;
+  /** ✅ R179：其中被用户停用（enabled=0）的条数 */
+  disabled_by_user?: number;
 }
 
 /** 动态拉取的模型项（/config/fetch-models、/custom-models） */
@@ -453,6 +460,8 @@ export interface AIRuntimeResponse {
   env_error: string;
   /** 被运行时开关禁用的厂商（空数组 = 未启用该开关） */
   disabled_providers: string[];
+  /** ✅ R175（BUG-01）：禁用厂商配置损坏的说明（空串 = 正常）；此时按空集处理，可重新保存恢复 */
+  disabled_error?: string;
   /** 可选项 = 已配置的配置 ∪ 内置厂商预设 ∪ 已禁用 */
   providers: string[];
   configured_providers: string[];
@@ -468,6 +477,9 @@ export interface AISetDisabledProvidersResponse {
   disabled_providers: string[];
   count: number;
   warning: string;
+  /** ✅ R175（BUG-01）：本次保存是否修复了损坏的禁用厂商值 */
+  recovered?: boolean;
+  disabled_error_before?: string;
 }
 
 /** GET /ai/config/export 的单条（**不含任何密钥**） */
@@ -545,6 +557,8 @@ export interface AIConfigImportDryRunResponse {
     env?: string;
     request_mode?: string;
     clamped?: boolean;
+    /** ✅ R179：导入后是否启用；null = 文件未提供（按默认启用落库） */
+    enabled?: number | null;
   }[];
   total: number;
   would_import: number;
@@ -575,6 +589,10 @@ export interface AIConfigsHealthItem {
   key_hint: string;
   no_url: boolean;
   disabled: boolean;
+  /** ✅ R179（2026-11-05）：该配置自身的启用开关（enabled=0 时运行时不参与任何调用） */
+  enabled?: boolean;
+  /** ✅ R179：等价于 !enabled，便于界面直接展示「用户停用」 */
+  disabled_by_user?: boolean;
   network_ok: boolean;
   network_step: string;
   network_ip: string;
@@ -609,6 +627,8 @@ export interface AIConfigsHealthResponse {
     no_url: number;
     out_of_env: number;
     disabled: number;
+    /** ✅ R179：被用户停用（启用开关=停用）的条数 */
+    disabled_by_user?: number;
     network_ok: number;
     network_unreachable: number;
     /** ✅ R103：实时成功率过低（已被自动剔除出降级链）的配置条数 */
@@ -647,7 +667,32 @@ export interface AIAuditLogItem {
   success: number;
   error: string;
   scene: string;
+  /** ✅ 2026-11-05（方案 B）：失败类别码（历史行为 ''，前端按 unknown 展示） */
+  error_class?: string;
+  /** 该逻辑调用包含的底层尝试数（历史行默认 1） */
+  attempt_count?: number;
+  /** 逐次尝试的简要结果 JSON 字符串（历史行 ''） */
+  attempts_json?: string;
   created_at: string;
+}
+
+/**
+ * ✅ R180（2026-11-05）：`attempts_json` 中「每一次底层尝试」的结构。
+ * 与后端 `provider_factory` 的 `self.attempts.append({...})` 同键名，
+ * 供审计明细展开行逐次展示 provider / model / 成败 / 错误类别 / 耗时。
+ */
+export interface AIAuditAttempt {
+  provider?: string;
+  model?: string;
+  config_id?: string;
+  base_url?: string;
+  ok?: number;
+  duration?: number;
+  error_class?: string;
+  error?: string;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cached_tokens?: number;
 }
 
 /** GET /ai/audit-logs */
@@ -664,6 +709,8 @@ export interface AIAuditLogsResponse {
    * 「某场景失败率高」看到数字却查不到具体请求；两者现在接得上了。
    */
   scenes: string[];
+  /** ✅ 2026-11-05（方案 B）：失败类别筛选可选值（历史 NULL 归 unknown） */
+  error_classes?: string[];
 }
 
 /**
@@ -692,7 +739,12 @@ export interface AIUsageByProvider {
   /** 配置身份（可靠性统计粒度）；旧审计行为空串 */
   config_id?: string;
   base_url?: string;
+  /** 逻辑调用数（一次业务调用含重试/对冲只计一次） */
   calls: number;
+  /** 底层尝试数（含重试/降级/对冲）；旧行迁移后默认 1 */
+  attempts?: number;
+  /** 尝试失败数 = attempts - success_count */
+  attempt_failed?: number;
   prompt_tokens: number;
   completion_tokens: number;
   cached_tokens: number;
@@ -708,8 +760,17 @@ export interface AIUsageByProvider {
 export interface AIUsageByScene {
   scene: string;
   calls: number;
+  attempts?: number;
   success_count: number;
   tokens: number;
+}
+
+/** ✅ 2026-11-05（方案 B）：失败类别聚合（GET /ai/stats → by_error_class） */
+export interface AIUsageByErrorClass {
+  error_class: string;
+  calls: number;
+  /** 占全部失败的比例（0~100） */
+  share: number;
 }
 
 /** 汇总（GET /ai/stats → summary） */
@@ -719,7 +780,14 @@ export interface AIUsageSummary {
   cached_tokens: number;
   prompt_tokens: number;
   success_count: number;
+  /** 失败逻辑调用数 */
   failed_count: number;
+  /** 底层尝试总数（含重试/降级/对冲） */
+  attempts?: number;
+  /** 尝试失败数 = attempts - success_count */
+  attempt_failed?: number;
+  /** 尝试成功率 = success_count / attempts */
+  attempt_success_rate?: number | null;
   skipped_count: number;
   avg_duration: number;
   success_rate: number | null;
@@ -732,9 +800,17 @@ export interface AIUsageStats {
   by_provider: AIUsageByProvider[];
   by_action: { action: string; calls: number; success_count: number }[];
   by_error: { provider_name: string; model: string; err: string; calls: number }[];
+  by_error_class?: AIUsageByErrorClass[];
   by_scene: AIUsageByScene[];
   summary: AIUsageSummary;
-  daily: { date: string; calls: number; tokens: number; success_count: number }[];
+  daily: {
+    date: string;
+    calls: number;
+    attempts?: number;
+    tokens: number;
+    success_count: number;
+    failed_count?: number;
+  }[];
 }
 
 /** DELETE /ai/audit-logs 响应 */

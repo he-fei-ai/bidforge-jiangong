@@ -24,6 +24,8 @@ export function pickStats(src: unknown): GenStats {
     elapsed_ms: s?.elapsed_ms,
     eta_ms: s?.eta_ms,
     done: s?.done,
+    // R175 BUG-4：已处理章节数（成功 + 失败），与终态 checkpoint 同口径
+    processed: s?.processed,
     total: s?.total,
     failed: s?.failed,
     words: s?.words,
@@ -51,6 +53,7 @@ export function statsEqual(a: GenStats | undefined, b: GenStats): boolean {
     a.elapsed_ms === b.elapsed_ms &&
     a.eta_ms === b.eta_ms &&
     a.done === b.done &&
+    a.processed === b.processed &&
     a.total === b.total &&
     a.failed === b.failed &&
     a.words === b.words &&

@@ -57,7 +57,9 @@ export default memo(function BaItemFlatList({
   return (
     <div style={{ height: "100%", overflowY: "auto", padding: "4px 2px" }}>
       {loading && defs.length === 0 && (
-        <div style={{ padding: 20, textAlign: "center" }}><Spin /></div>
+        <div style={{ padding: 20, textAlign: "center" }}>
+          <Spin />
+        </div>
       )}
       {defsError && (
         <Alert
@@ -79,8 +81,7 @@ export default memo(function BaItemFlatList({
         const stored = storedMap.get(def.item_id);
         const status = stored?.status || "idle";
         const emptyResult =
-          status === "success" &&
-          isMissingBaResult(stored?.content, def.output_type || "markdown");
+          status === "success" && isMissingBaResult(stored?.content, def.output_type || "markdown");
         const hasValidContent = status === "success" && !emptyResult;
         const selected = selectedItemId === def.item_id;
 
@@ -89,25 +90,33 @@ export default memo(function BaItemFlatList({
         if (status === "running") {
           stateTag = (
             <Tooltip title="正在提取…">
-              <Tag color="blue" style={STATE_TAG_STYLE}>…</Tag>
+              <Tag color="blue" style={STATE_TAG_STYLE}>
+                …
+              </Tag>
             </Tooltip>
           );
         } else if (hasValidContent) {
           stateTag = (
             <Tooltip title="已提取到有效内容">
-              <Tag color="green" style={STATE_TAG_STYLE}>✓</Tag>
+              <Tag color="green" style={STATE_TAG_STYLE}>
+                ✓
+              </Tag>
             </Tooltip>
           );
         } else if (emptyResult) {
           stateTag = (
             <Tooltip title="提取成功但无有效内容（资料中未提及），可补充资料后重试">
-              <Tag color="orange" style={STATE_TAG_STYLE}>空</Tag>
+              <Tag color="orange" style={STATE_TAG_STYLE}>
+                空
+              </Tag>
             </Tooltip>
           );
         } else if (status === "error") {
           stateTag = (
             <Tooltip title={stored?.error || "提取失败，可重试"}>
-              <Tag color="red" style={STATE_TAG_STYLE}>✗</Tag>
+              <Tag color="red" style={STATE_TAG_STYLE}>
+                ✗
+              </Tag>
             </Tooltip>
           );
         } else {

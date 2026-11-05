@@ -51,14 +51,19 @@ export type PlaceholderSeverity = "none" | "info" | "warn" | "error";
  * - 仅规范占位（AI 按「数据真实性红线」留下的可检索标记）→ warn；
  * - 含裸标记 / 模糊占位（违反提示词规范的写法，需回改）→ error。
  */
-export function derivePlaceholderSeverity(report: PlaceholderReport | null | undefined): PlaceholderSeverity {
+export function derivePlaceholderSeverity(
+  report: PlaceholderReport | null | undefined,
+): PlaceholderSeverity {
   if (!report || !Number.isFinite(report.total) || report.total <= 0) return "none";
   if ((report.bare_total || 0) + (report.fuzzy_total || 0) > 0) return "error";
   return "warn";
 }
 
 /** 严重度 → antd Alert type / 文案（集中映射，避免组件内散落三元） */
-export function severityToAlertProps(sev: PlaceholderSeverity): { type: "success" | "info" | "warning" | "error"; message: string } {
+export function severityToAlertProps(sev: PlaceholderSeverity): {
+  type: "success" | "info" | "warning" | "error";
+  message: string;
+} {
   switch (sev) {
     case "none":
       return { type: "success", message: "未发现【待补充】占位符" };
@@ -72,12 +77,17 @@ export function severityToAlertProps(sev: PlaceholderSeverity): { type: "success
 /** 摘要一行文案：如「共 12 处 · 涉及 5 个字段 · 分布于 4 个章节」 */
 export function summarizePlaceholderReport(report: PlaceholderReport | null | undefined): string {
   if (!report || !report.total) return "";
-  return `共 ${report.total} 处 · 涉及 ${report.field_count} 个字段 · 分布于 ${report.section_count} 个章节`
-    + (report.truncated ? "（逐条记录已截断）" : "");
+  return (
+    `共 ${report.total} 处 · 涉及 ${report.field_count} 个字段 · 分布于 ${report.section_count} 个章节` +
+    (report.truncated ? "（逐条记录已截断）" : "")
+  );
 }
 
 /** 聚合条目截断（展示上限），返回 [可见条目, 被隐藏数] */
-export function limitEntries<T>(entries: T[] | undefined, limit = DISPLAY_ENTRY_LIMIT): [T[], number] {
+export function limitEntries<T>(
+  entries: T[] | undefined,
+  limit = DISPLAY_ENTRY_LIMIT,
+): [T[], number] {
   const list = Array.isArray(entries) ? entries : [];
   return [list.slice(0, limit), Math.max(0, list.length - limit)];
 }
@@ -105,9 +115,10 @@ export interface PlaceholderTrend {
  * 由历史基线（按时间**倒序**，最新在前）派生趋势。
  * 非法行（total 非数值）过滤掉，不抛异常。
  */
-export function deriveTrendDelta(history: PlaceholderBaselineRow[] | null | undefined): PlaceholderTrend {
-  const list = (Array.isArray(history) ? history : [])
-    .filter((r) => r && Number.isFinite(r.total));
+export function deriveTrendDelta(
+  history: PlaceholderBaselineRow[] | null | undefined,
+): PlaceholderTrend {
+  const list = (Array.isArray(history) ? history : []).filter((r) => r && Number.isFinite(r.total));
   if (list.length === 0) return { delta: null, latest: null, previous: null };
   const latest = list[0].total;
   const previous = list.length > 1 ? list[1].total : null;
@@ -121,4 +132,3 @@ export interface PlaceholderRerunPlan {
   fillable_field_count?: number;
   total_field_count?: number;
 }
-

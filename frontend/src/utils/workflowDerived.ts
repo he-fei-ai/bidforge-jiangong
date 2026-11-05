@@ -77,7 +77,14 @@ export function isDocFailed(d: DocRecord | null | undefined): boolean {
  */
 export function computeDocStats(docs: DocRecord[]): DocStats {
   if (!Array.isArray(docs) || docs.length === 0) {
-    return { parsedCount: 0, pendingCount: 0, truncatedCount: 0, failedCount: 0, actionableCount: 0, allParsed: false };
+    return {
+      parsedCount: 0,
+      pendingCount: 0,
+      truncatedCount: 0,
+      failedCount: 0,
+      actionableCount: 0,
+      allParsed: false,
+    };
   }
   let parsedCount = 0;
   let truncatedCount = 0;
@@ -120,6 +127,8 @@ export type UploadResultLike = {
   quota_exceeded?: boolean;
   /** 被「本次累计体积上限」拒绝的文件名（2026-09-21 起独立于 oversize） */
   quota_files?: unknown[];
+  /** 单文件落盘失败的文件名（磁盘空间 / 权限 / 文件名过长，后端加法式新增） */
+  write_errors?: unknown[];
   warnings?: string[];
 };
 
@@ -187,7 +196,7 @@ function normalizeFileCount(value: number | undefined, fallback: number): number
  */
 export function summarizeUploadResult(
   data: UploadResultLike | null | undefined,
-  limits?: UploadLimitHints
+  limits?: UploadLimitHints,
 ): UploadFeedback {
   const d = data || {};
   const savedCount = Number(d.saved_count || 0);
@@ -209,13 +218,18 @@ export function summarizeUploadResult(
     // ✅ 后端 quota_files 给出被累计体积上限拒绝的具体文件数（2026-09-21 起
     //    不再混进 oversize），有则带上数量，让用户知道"少了几个"。
     const qn = n(d.quota_files);
-    rejected.push(qn
-      ? `累计体积超过 ${maxTotalText} 上限（${qn} 个文件未保存）`
-      : `累计体积超过 ${maxTotalText} 上限`);
+    rejected.push(
+      qn
+        ? `累计体积超过 ${maxTotalText} 上限（${qn} 个文件未保存）`
+        : `累计体积超过 ${maxTotalText} 上限`,
+    );
   }
-  const details = Array.isArray(d.warnings)
-    ? d.warnings.filter((w) => !!w).map(String)
-    : [];
+  // ✅ 2026-11-05（R179 跨模块收口）：后端新增 `write_errors`（磁盘/权限导致单文件
+  //    落盘失败）。此前仅在 warnings 里出文案，而 warnings 只进 details、且
+  //    「部分成功」时 details 不上屏 —— 用户只看到「已保存 N 个」而不知道少了文件。
+  //    纳入 rejected 后，成功/失败两种 tone 的 toast 主文案都会带上失败数。
+  if (n(d.write_errors)) rejected.push(`${n(d.write_errors)} 个文件保存失败（磁盘空间或权限问题）`);
+  const details = Array.isArray(d.warnings) ? d.warnings.filter((w) => !!w).map(String) : [];
 
   return { savedCount, replaced, rejected, details };
 }
@@ -248,7 +262,7 @@ export type UploadNotice = {
  */
 export function buildUploadNotice(
   data: UploadResultLike | null | undefined,
-  limits?: UploadLimitHints
+  limits?: UploadLimitHints,
 ): UploadNotice {
   const fb = summarizeUploadResult(data, limits);
   if (fb.savedCount === 0) {
@@ -273,17 +287,20 @@ export type ExportChartCandidate = {
   placed?: boolean;
 };
 
-export function selectPlacedExportCharts<T extends ExportChartCandidate>(items: T[] | null | undefined): T[] {
+export function selectPlacedExportCharts<T extends ExportChartCandidate>(
+  items: T[] | null | undefined,
+): T[] {
   if (!Array.isArray(items)) return [];
   return items.filter((item) => item?.placed !== false && !!item?.code);
 }
 
 /** 默认预设仅作为首次进入导出页的初始配置，用户随后仍可手动修改。 */
-export function findDefaultExportPreset<T extends { id: string; is_default?: boolean; config?: Record<string, unknown> }>(presets: T[] | null | undefined): T | null {
+export function findDefaultExportPreset<
+  T extends { id: string; is_default?: boolean; config?: Record<string, unknown> },
+>(presets: T[] | null | undefined): T | null {
   if (!Array.isArray(presets)) return null;
   return presets.find((p) => !!p?.is_default) || null;
 }
-
 
 /**
  * 6 步工作流的合法 Tab key。
@@ -296,13 +313,7 @@ export function findDefaultExportPreset<T extends { id: string; is_default?: boo
  * 保留「bidAnalysis」字面量的向后兼容映射由 SchemeWorkbenchPage 内部处理
  * （见 import-tab-sub 逻辑），此处类型不再暴露。
  */
-export type WorkflowTabKey =
-  | "import"
-  | "outline"
-  | "facts"
-  | "content"
-  | "review"
-  | "export";
+export type WorkflowTabKey = "import" | "outline" | "facts" | "content" | "review" | "export";
 
 export type PickInitialTabInput = {
   docs: DocRecord[];
@@ -380,7 +391,10 @@ export const WORD_OVER_RATIO = 1.3;
  * 本章是否允许「压缩字数」（与后端压缩端点准入阈值对齐）。
  */
 export function canShrinkSection(
-  s: { content?: string | null; word_count?: number | null; word_budget?: number | null } | null | undefined,
+  s:
+    | { content?: string | null; word_count?: number | null; word_budget?: number | null }
+    | null
+    | undefined,
 ): boolean {
   if (!s || !(s.content || "").trim()) return false;
   const wc = Number(s.word_count) || 0;

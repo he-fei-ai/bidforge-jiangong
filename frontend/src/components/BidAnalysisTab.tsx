@@ -57,7 +57,7 @@ const { Text } = Typography;
 /** 动态口径文案：解析项总数 / 必选 / 可选（来源后端 /items 的 items，不再前端硬编码） */
 export function baScopeText(defs: BaItemDef[]): string {
   const total = defs.length;
-  const required = defs.filter(d => d.required).length;
+  const required = defs.filter((d) => d.required).length;
   if (!total) return "结构化提取";
   return `${total} 项结构化提取（${required} 必选 + ${total - required} 可选）`;
 }
@@ -120,10 +120,7 @@ export type BidAnalysisTabProps = {
  * 行内摘要（单行）：内容压平为一行前 60 字 / 失败原因 / 运行中与待执行提示。
  * 口径与后端缺失判定一致（isMissingBaResult），不重复造判据。
  */
-export function baRowSummaryText(
-  stored: BaStoredItem | undefined,
-  absent: boolean,
-): string {
+export function baRowSummaryText(stored: BaStoredItem | undefined, absent: boolean): string {
   const status = stored?.status || "idle";
   if (status === "running") return "提取中…";
   if (status === "error") return String(stored?.error || "本轮提取失败").slice(0, 60);
@@ -187,7 +184,9 @@ export function BidAnalysisItemBody({ item }: { item: BaStoredItem | null }) {
       return (
         <>
           {banner}
-          <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "monospace" }}>{content}</pre>
+          <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "monospace" }}>
+            {content}
+          </pre>
         </>
       );
     }
@@ -198,11 +197,20 @@ export function BidAnalysisItemBody({ item }: { item: BaStoredItem | null }) {
       <div>
         {banner}
         {Object.entries(obj).map(([k, v]) => (
-          <div key={k} style={{ marginBottom: 2, display: "flex", gap: 8, fontSize: 13, lineHeight: 1.4 }}>
+          <div
+            key={k}
+            style={{ marginBottom: 2, display: "flex", gap: 8, fontSize: 13, lineHeight: 1.4 }}
+          >
             <div style={{ minWidth: 160, color: "#666", flexShrink: 0 }}>
               {isProjectInfo ? projectInfoFieldLabel(k) : k}
             </div>
-            <div style={{ flex: 1, color: v === "没有提及" ? "#bbb" : "#333", wordBreak: "break-word" }}>
+            <div
+              style={{
+                flex: 1,
+                color: v === "没有提及" ? "#bbb" : "#333",
+                wordBreak: "break-word",
+              }}
+            >
               {v === "没有提及" || v === "" ? <Text type="secondary">（无）</Text> : String(v)}
             </div>
           </div>
@@ -244,7 +252,11 @@ export function BidAnalysisEvidenceList({ item }: { item: BaStoredItem | null })
         >
           <Space size={6} wrap>
             <Tag style={{ marginInlineEnd: 0 }}>{e.doc || "原文"}</Tag>
-            {e.field && <Tag color="blue" style={{ marginInlineEnd: 0 }}>{e.field}</Tag>}
+            {e.field && (
+              <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+                {e.field}
+              </Tag>
+            )}
             <Text type="secondary" style={{ fontSize: 12 }}>
               {e.heading ? `${e.heading} › ` : ""}第 {e.line ?? "?"} 行
             </Text>
@@ -325,9 +337,7 @@ export type BaClassificationData = {
  * 兼容：若响应确实带 `completeness`（旧缓存 / 未来契约变更）仍按其取值，
  * 两键都缺失才回落 0。
  */
-export function chapterFieldCoverage(
-  ch: BaChapterInfo | null | undefined,
-): number {
+export function chapterFieldCoverage(ch: BaChapterInfo | null | undefined): number {
   const raw = ch?.field_coverage ?? ch?.completeness;
   const n = Number(raw);
   if (!Number.isFinite(n)) return 0;
@@ -335,10 +345,7 @@ export function chapterFieldCoverage(
 }
 
 /** 章节中文标题：优先响应自带 title，其次兜底表，最后退回 key。 */
-export function chapterTitleOf(
-  ch: BaChapterInfo | null | undefined,
-  key: string,
-): string {
+export function chapterTitleOf(ch: BaChapterInfo | null | undefined, key: string): string {
   return ch?.title || CHAPTER_LABELS[key] || key;
 }
 
@@ -350,14 +357,26 @@ export function ClassificationPanel({ data }: { data: BaClassificationData | nul
   if (!data) return null;
   if (data.disabled) {
     return (
-      <Alert type="info" showIcon banner style={{ marginBottom: 4 }}
-        message="智能分类已关闭" description={data.reason} />
+      <Alert
+        type="info"
+        showIcon
+        banner
+        style={{ marginBottom: 4 }}
+        message="智能分类已关闭"
+        description={data.reason}
+      />
     );
   }
   if (data.error) {
     return (
-      <Alert type="error" showIcon banner style={{ marginBottom: 4 }}
-        message="智能分类失败" description={data.error} />
+      <Alert
+        type="error"
+        showIcon
+        banner
+        style={{ marginBottom: 4 }}
+        message="智能分类失败"
+        description={data.error}
+      />
     );
   }
   // `|| {}` 兜底后直接取属性：类型标注到全可选字段，兜底与取属性逻辑保持原样
@@ -368,14 +387,24 @@ export function ClassificationPanel({ data }: { data: BaClassificationData | nul
   const chapterKeys = Object.keys(chapters);
 
   return (
-    <Card size="small" style={{ marginBottom: 4 }}
-      title={<span><AimOutlined /> 危大工程分类与九大章节字段完整性</span>}>
+    <Card
+      size="small"
+      style={{ marginBottom: 4 }}
+      title={
+        <span>
+          <AimOutlined /> 危大工程分类与九大章节字段完整性
+        </span>
+      }
+    >
       <Space direction="vertical" size={4} style={{ width: "100%" }}>
         <div>
           <Text strong>识别大类：</Text>
           {(cls.category_names || []).join("、") || "—"}
           {(cls.sub_names || []).length > 0 && (
-            <span style={{ marginLeft: 8 }}><Text type="secondary">子类：</Text>{cls.sub_names!.join("、")}</span>
+            <span style={{ marginLeft: 8 }}>
+              <Text type="secondary">子类：</Text>
+              {cls.sub_names!.join("、")}
+            </span>
           )}
         </div>
         <div>
@@ -387,13 +416,17 @@ export function ClassificationPanel({ data }: { data: BaClassificationData | nul
         {(cls.standards_keys || []).length > 0 && (
           <div>
             <Text strong>适用规范类别：</Text>
-            {cls.standards_keys!.map((k: string) => <Tag key={k}>{k}</Tag>)}
+            {cls.standards_keys!.map((k: string) => (
+              <Tag key={k}>{k}</Tag>
+            ))}
           </div>
         )}
         <div style={{ marginTop: 4 }}>
           <Text strong>九大章节字段完整性：</Text>
           <Text type="secondary">
-            {chapterKeys.length ? `总体 ${Math.round((completeness.completeness || 0) * 100)}%` : "（暂无提取结果）"}
+            {chapterKeys.length
+              ? `总体 ${Math.round((completeness.completeness || 0) * 100)}%`
+              : "（暂无提取结果）"}
           </Text>
         </div>
         {chapterKeys.map((key) => {
@@ -409,7 +442,8 @@ export function ClassificationPanel({ data }: { data: BaClassificationData | nul
               <Progress percent={pct} size="small" status={pct >= 100 ? "success" : "active"} />
               {missing.length > 0 && (
                 <div style={{ fontSize: 11, color: "#999" }}>
-                  缺失：{missing.slice(0, 6).join("、")}{missing.length > 6 ? "…" : ""}
+                  缺失：{missing.slice(0, 6).join("、")}
+                  {missing.length > 6 ? "…" : ""}
                 </div>
               )}
             </div>
@@ -482,10 +516,13 @@ function BidAnalysisTab({
     timersRef.current.push(t);
     return t;
   };
-  React.useEffect(() => () => {
-    timersRef.current.forEach((t) => window.clearTimeout(t));
-    timersRef.current = [];
-  }, []);
+  React.useEffect(
+    () => () => {
+      timersRef.current.forEach((t) => window.clearTimeout(t));
+      timersRef.current = [];
+    },
+    [],
+  );
 
   // ✅ 2026-09-24（#11 前端面板）：危大工程自动分类结果（九大章节字段完整性）。
   //    由「智能分类」按钮触发（调用 /api/v1/bid-analysis/classify），本地持有，不阻断提取。
@@ -516,7 +553,9 @@ function BidAnalysisTab({
     const key = def.item_id;
     if (rerunGuard.current.has(key)) return;
     rerunGuard.current.add(key);
-    safeTimeout(() => { rerunGuard.current.delete(key); }, rerunLockMs);
+    safeTimeout(() => {
+      rerunGuard.current.delete(key);
+    }, rerunLockMs);
     onRerunItem(def);
   };
 
@@ -534,27 +573,32 @@ function BidAnalysisTab({
   // 扁平任务列表：全局序号按后端 sort_order 与分组顺序确定，与分类筛选无关
   const { flatRows, catEntries, itemCount } = useMemo(() => {
     let seqCursor = 0;
-    const fr = groupList.flatMap(g =>
-      g.items.map(def => ({ def, groupKey: g.key, groupLabel: g.label, seq: (seqCursor += 1) })),
+    const fr = groupList.flatMap((g) =>
+      g.items.map((def) => ({ def, groupKey: g.key, groupLabel: g.label, seq: (seqCursor += 1) })),
     );
     // 分类栏条目：全部 + 各分组（带项数）
     const ce = [
       { key: "all", label: "全部", count: fr.length },
-      ...groupList.map(g => ({ key: g.key, label: g.label, count: g.items.length })),
+      ...groupList.map((g) => ({ key: g.key, label: g.label, count: g.items.length })),
     ];
     return { flatRows: fr, catEntries: ce, itemCount: fr.length };
   }, [groupList]);
-  const visibleRows = useMemo(() =>
-    catFilter === "all" ? flatRows : flatRows.filter(r => r.groupKey === catFilter),
-    [flatRows, catFilter]);
+  const visibleRows = useMemo(
+    () => (catFilter === "all" ? flatRows : flatRows.filter((r) => r.groupKey === catFilter)),
+    [flatRows, catFilter],
+  );
 
   // 选中项：分类归属 / 序号 / 上下切换均基于当前筛选后的行列表
-  const selectedRow = useMemo(() =>
-    selectedItem ? flatRows.find(r => r.def.item_id === selectedItem.item_id) || null : null,
-    [flatRows, selectedItem]);
-  const selIdx = useMemo(() =>
-    selectedItem ? visibleRows.findIndex(r => r.def.item_id === selectedItem.item_id) : -1,
-    [visibleRows, selectedItem]);
+  const selectedRow = useMemo(
+    () =>
+      selectedItem ? flatRows.find((r) => r.def.item_id === selectedItem.item_id) || null : null,
+    [flatRows, selectedItem],
+  );
+  const selIdx = useMemo(
+    () =>
+      selectedItem ? visibleRows.findIndex((r) => r.def.item_id === selectedItem.item_id) : -1,
+    [visibleRows, selectedItem],
+  );
 
   const selectRow = (row: (typeof flatRows)[number]) => {
     onSelectItem(mergeBaItem(row.def, storedMap.get(row.def.item_id)));
@@ -581,7 +625,11 @@ function BidAnalysisTab({
       ta.style.opacity = "0";
       document.body.appendChild(ta);
       ta.select();
-      try { document.execCommand("copy"); } catch { /* 均不可用时由用户手动选中复制 */ }
+      try {
+        document.execCommand("copy");
+      } catch {
+        /* 均不可用时由用户手动选中复制 */
+      }
       document.body.removeChild(ta);
     }
     setCopied(true);
@@ -611,15 +659,17 @@ function BidAnalysisTab({
     }
     if (status === "success") {
       if (isManual) return <Tag color="purple">✎ 人工 {content.length}字符</Tag>;
-      return absent ? <Tag color="volcano">⚠ 无内容</Tag> : <Tag color="green">✓ {content.length}字符</Tag>;
+      return absent ? (
+        <Tag color="volcano">⚠ 无内容</Tag>
+      ) : (
+        <Tag color="green">✓ {content.length}字符</Tag>
+      );
     }
     return <Tag color="default">待执行</Tag>;
   };
   // 「完成且有有效内容」的项数：优先后端 success_valid（/results 权威汇总），
   // 运行中前端重算时也带该字段；两者都缺（老后端）才回退 success。
-  const successValid = summary
-    ? (summary.success_valid ?? summary.success ?? 0)
-    : 0;
+  const successValid = summary ? (summary.success_valid ?? summary.success ?? 0) : 0;
   // 后端 /bid-analysis/check-sections 响应体收窄：api 层为 Record<string, unknown>，
   // 仅断言本组件读取的字段（断言为编译期行为，运行期取值不变）
   const scr = sectionCheckResult as {
@@ -629,10 +679,7 @@ function BidAnalysisTab({
     has_multiple?: boolean;
     source?: string;
   } | null;
-  const sectionCount =
-    scr?.total_declared ||
-    scr?.detected_count ||
-    (scr?.sections || []).length;
+  const sectionCount = scr?.total_declared || scr?.detected_count || (scr?.sections || []).length;
 
   /** 分类栏：桌面竖向侧栏 / 窄屏横向 chips；点击任一分类筛选该分类下解析项 */
   const renderCatBar = (vertical: boolean) => (
@@ -641,16 +688,24 @@ function BidAnalysisTab({
       style={
         vertical
           ? {
-              width: 150, flexShrink: 0, border: "1px solid #f0f0f0",
-              borderRadius: 6, padding: "6px 0", overflowY: "auto" as const,
+              width: 150,
+              flexShrink: 0,
+              border: "1px solid #f0f0f0",
+              borderRadius: 6,
+              padding: "6px 0",
+              overflowY: "auto" as const,
             }
           : {
-              display: "flex", gap: 8, overflowX: "auto" as const,
-              whiteSpace: "nowrap", padding: "2px 0", flexShrink: 0,
+              display: "flex",
+              gap: 8,
+              overflowX: "auto" as const,
+              whiteSpace: "nowrap",
+              padding: "2px 0",
+              flexShrink: 0,
             }
       }
     >
-      {catEntries.map(c => {
+      {catEntries.map((c) => {
         const active = catFilter === c.key;
         return (
           <div
@@ -659,22 +714,31 @@ function BidAnalysisTab({
             data-group={c.key}
             role="button"
             tabIndex={0}
-            onKeyDown={e => { if (e.key === "Enter") setCatFilter(c.key); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") setCatFilter(c.key);
+            }}
             onClick={() => setCatFilter(c.key)}
             style={{
-              cursor: "pointer", fontSize: 12, flexShrink: 0,
+              cursor: "pointer",
+              fontSize: 12,
+              flexShrink: 0,
               padding: vertical ? "7px 12px" : "3px 10px",
               borderRadius: vertical ? 0 : 14,
               background: active ? (vertical ? "#e6f4ff" : "#1677ff") : "transparent",
-              color: active && !vertical ? "#fff" : active ? (vertical ? "#1677ff" : "#fff") : "#555",
+              color:
+                active && !vertical ? "#fff" : active ? (vertical ? "#1677ff" : "#fff") : "#555",
               fontWeight: active ? 600 : 400,
               border: vertical ? "none" : `1px solid ${active ? "#1677ff" : "#d9d9d9"}`,
-              display: "flex", alignItems: "center", gap: 6,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
               justifyContent: vertical ? "space-between" : "center",
             }}
           >
             <span>{c.label}</span>
-            <span style={{ color: active && !vertical ? "#fff" : "#999", fontSize: 11 }}>{c.count}</span>
+            <span style={{ color: active && !vertical ? "#fff" : "#999", fontSize: 11 }}>
+              {c.count}
+            </span>
           </div>
         );
       })}
@@ -682,7 +746,10 @@ function BidAnalysisTab({
   );
 
   return (
-    <div className="scroll-area" style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+    <div
+      className="scroll-area"
+      style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}
+    >
       {/* ===== 前置条件：本步依赖「解析提取」产出的纯文本 =====
           2026-09-23 晚：改为 banner 紧凑模式（~32px vs 原 120px），省 ~88px。 */}
       {parsedDocCount === 0 && (
@@ -708,7 +775,9 @@ function BidAnalysisTab({
       {(summary || running) && (
         <Card size="small" style={{ marginBottom: 4 }} styles={{ body: { padding: "4px 12px" } }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <Text strong style={{ fontSize: 13 }}>提取进度：</Text>
+            <Text strong style={{ fontSize: 13 }}>
+              提取进度：
+            </Text>
             {summary && (
               <>
                 <span>
@@ -755,10 +824,10 @@ function BidAnalysisTab({
           {textStats && (textStats.total_chars || textStats.est_model_calls) > 0 && (
             <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 4 }}>
               提取规模：{textStats.total_chars.toLocaleString()} 字
-              {textStats.chunk_size ? ` ÷ 每段 ${textStats.chunk_size.toLocaleString()} 字` : ""}
-              = <Text strong>{textStats.segment_count}</Text> 段
-              × <Text strong>{textStats.item_count}</Text> 项
-              ≈ <Text strong>{textStats.est_model_calls.toLocaleString()}</Text> 次模型调用
+              {textStats.chunk_size ? ` ÷ 每段 ${textStats.chunk_size.toLocaleString()} 字` : ""}={" "}
+              <Text strong>{textStats.segment_count}</Text> 段 ×{" "}
+              <Text strong>{textStats.item_count}</Text> 项 ≈{" "}
+              <Text strong>{textStats.est_model_calls.toLocaleString()}</Text> 次模型调用
             </Text>
           )}
           {/* ✅ 2026-09-26 提取依据完整性：任一文档被截断、或预算不足导致有文档
@@ -830,7 +899,13 @@ function BidAnalysisTab({
           </Button>
           {/* ✅ 2026-09-24（#11）：危大工程自动分类 + 九大章节字段完整性校验。
               确定性规则 + 提取结果差集分析，不消耗额外 AI 额度；结果以面板展示。 */}
-          <Tooltip title={schemeId ? "按方案名称/资料自动识别危大工程类别，并校验九大章节字段完整性" : "缺少方案 id，无法分类"}>
+          <Tooltip
+            title={
+              schemeId
+                ? "按方案名称/资料自动识别危大工程类别，并校验九大章节字段完整性"
+                : "缺少方案 id，无法分类"
+            }
+          >
             <Button
               icon={<AimOutlined />}
               loading={classifying}
@@ -888,211 +963,327 @@ function BidAnalysisTab({
           contentOnly=true：外部已把「18 项结构化提取」清单放到左侧面板，
             此处仅保留结果阅读区（详情），避免重复展示。 */}
       <div style={{ display: "flex", gap: 8, minHeight: 200, alignItems: "stretch" }}>
-        {!contentOnly && (<>
-        {/* 分类栏（桌面）：左侧竖向栏，点击任一分类筛选该分类下解析项（“全部”回退） */}
-        {isDesktop && renderCatBar(true)}
+        {!contentOnly && (
+          <>
+            {/* 分类栏（桌面）：左侧竖向栏，点击任一分类筛选该分类下解析项（“全部”回退） */}
+            {isDesktop && renderCatBar(true)}
 
-        {/* 中栏（窄屏为唯一栏）：分类 chips（非桌面时置顶）+ 任务列表 */}
-        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
-          {!isDesktop && renderCatBar(false)}
-          {(!isSmall || !detailOpen) && (
-          <div className="ba-task-pane" style={{ flex: 1, minWidth: 0, border: "1px solid #f0f0f0", borderRadius: 6, overflow: "hidden" }}>
-          <div style={{ padding: "4px 8px", background: "#fafafa", borderBottom: "1px solid #f0f0f0", fontSize: 13, fontWeight: 500 }}>
-            解析项任务列表（{itemCount} 项，点击任一查看完整内容）
-            {catFilter !== "all" && (
-              <Text type="secondary" style={{ fontSize: 12, fontWeight: 400, marginLeft: 8 }}>
-                当前分类：{catEntries.find(c => c.key === catFilter)?.label}（{visibleRows.length} 项）
-              </Text>
-            )}
-          </div>
-          {itemCount === 0 ? (
-            defsError ? (
-              /* 定义加载失败：不能永久停在「加载中」，给出原因与重试入口 */
-              <Alert
-                style={{ margin: 8 }}
-                type="error"
-                showIcon
-                message="解析项定义加载失败"
-                description={
-                  <span style={{ wordBreak: "break-word" }}>
-                    {defsError}。列表与提取均依赖后端 /bid-analysis/items，修复后点击重试。
-                  </span>
-                }
-                action={
-                  onRetryDefs ? (
-                    <Button size="small" icon={<ReloadOutlined />} onClick={onRetryDefs}>
-                      重试
-                    </Button>
-                  ) : undefined
-                }
-              />
-            ) : (
-              <div style={{ padding: 12, textAlign: "center", color: "#999" }}>解析项定义加载中…</div>
-            )
-          ) : (
-            visibleRows.map(row => {
-              const { def } = row;
-              const stored = storedMap.get(def.item_id);
-              const absent = stored?.status === "success"
-                && isMissingBaResult(stored?.content || "", def.output_type);
-              const isSelected = selectedItem?.item_id === def.item_id;
-              return (
+            {/* 中栏（窄屏为唯一栏）：分类 chips（非桌面时置顶）+ 任务列表 */}
+            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+              {!isDesktop && renderCatBar(false)}
+              {(!isSmall || !detailOpen) && (
                 <div
-                  key={def.item_id}
-                  className="ba-item-row"
-                  data-item-id={def.item_id}
+                  className="ba-task-pane"
                   style={{
-                    padding: "6px 12px",
-                    borderTop: "1px solid #f5f5f5",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    cursor: "pointer",
-                    background: isSelected ? "#e6f4ff" : "transparent",
+                    flex: 1,
+                    minWidth: 0,
+                    border: "1px solid #f0f0f0",
+                    borderRadius: 6,
+                    overflow: "hidden",
                   }}
-                  onClick={() => selectRow(row)}
                 >
-                  {/* 全局序号：与分类筛选无关，固定按后端 sort_order 排定 */}
-                  <span
-                    className="ba-item-seq"
-                    style={{ width: 24, flexShrink: 0, textAlign: "right", color: "#999", fontSize: 12 }}
+                  <div
+                    style={{
+                      padding: "4px 8px",
+                      background: "#fafafa",
+                      borderBottom: "1px solid #f0f0f0",
+                      fontSize: 13,
+                      fontWeight: 500,
+                    }}
                   >
-                    {row.seq}
-                  </span>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                      {def.required ? <span style={{ color: "#ff4d4f", flexShrink: 0 }}>*</span> : null}
-                      <span
-                        style={{
-                          fontSize: 13, fontWeight: def.required ? 600 : 400,
-                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                        }}
+                    解析项任务列表（{itemCount} 项，点击任一查看完整内容）
+                    {catFilter !== "all" && (
+                      <Text
+                        type="secondary"
+                        style={{ fontSize: 12, fontWeight: 400, marginLeft: 8 }}
                       >
-                        {def.label}
-                      </span>
-                      {/* 所属分类：不再依赖分组表头，每行自带 */}
-                      <Tag
-                        className="ba-row-cat-tag"
-                        style={{ marginInlineEnd: 0, fontSize: 11, lineHeight: "16px", padding: "0 4px", flexShrink: 0 }}
-                      >
-                        {row.groupLabel}
-                      </Tag>
-                    </div>
-                    <div
-                      className="ba-row-summary"
-                      style={{ fontSize: 12, color: "#999", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                    >
-                      {baRowSummaryText(stored, absent)}
-                    </div>
+                        当前分类：{catEntries.find((c) => c.key === catFilter)?.label}（
+                        {visibleRows.length} 项）
+                      </Text>
+                    )}
                   </div>
-                  {renderStatusNode(def, stored)}
-                  <Tooltip title="重新提取该项（仅覆盖该项结果，不影响其它解析项）">
-                    <Button
-                      size="small"
-                      type="link"
-                      icon={<ReloadOutlined />}
-                      disabled={running}
-                      aria-label={`重新提取 ${def.label || def.item_id}`}
-                      onClick={e => {
-                        e.stopPropagation();
-                        handleRerunItem(def);
-                      }}
-                    />
-                  </Tooltip>
+                  {itemCount === 0 ? (
+                    defsError ? (
+                      /* 定义加载失败：不能永久停在「加载中」，给出原因与重试入口 */
+                      <Alert
+                        style={{ margin: 8 }}
+                        type="error"
+                        showIcon
+                        message="解析项定义加载失败"
+                        description={
+                          <span style={{ wordBreak: "break-word" }}>
+                            {defsError}。列表与提取均依赖后端 /bid-analysis/items，修复后点击重试。
+                          </span>
+                        }
+                        action={
+                          onRetryDefs ? (
+                            <Button size="small" icon={<ReloadOutlined />} onClick={onRetryDefs}>
+                              重试
+                            </Button>
+                          ) : undefined
+                        }
+                      />
+                    ) : (
+                      <div style={{ padding: 12, textAlign: "center", color: "#999" }}>
+                        解析项定义加载中…
+                      </div>
+                    )
+                  ) : (
+                    visibleRows.map((row) => {
+                      const { def } = row;
+                      const stored = storedMap.get(def.item_id);
+                      const absent =
+                        stored?.status === "success" &&
+                        isMissingBaResult(stored?.content || "", def.output_type);
+                      const isSelected = selectedItem?.item_id === def.item_id;
+                      return (
+                        <div
+                          key={def.item_id}
+                          className="ba-item-row"
+                          data-item-id={def.item_id}
+                          style={{
+                            padding: "6px 12px",
+                            borderTop: "1px solid #f5f5f5",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
+                            cursor: "pointer",
+                            background: isSelected ? "#e6f4ff" : "transparent",
+                          }}
+                          onClick={() => selectRow(row)}
+                        >
+                          {/* 全局序号：与分类筛选无关，固定按后端 sort_order 排定 */}
+                          <span
+                            className="ba-item-seq"
+                            style={{
+                              width: 24,
+                              flexShrink: 0,
+                              textAlign: "right",
+                              color: "#999",
+                              fontSize: 12,
+                            }}
+                          >
+                            {row.seq}
+                          </span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div
+                              style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}
+                            >
+                              {def.required ? (
+                                <span style={{ color: "#ff4d4f", flexShrink: 0 }}>*</span>
+                              ) : null}
+                              <span
+                                style={{
+                                  fontSize: 13,
+                                  fontWeight: def.required ? 600 : 400,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {def.label}
+                              </span>
+                              {/* 所属分类：不再依赖分组表头，每行自带 */}
+                              <Tag
+                                className="ba-row-cat-tag"
+                                style={{
+                                  marginInlineEnd: 0,
+                                  fontSize: 11,
+                                  lineHeight: "16px",
+                                  padding: "0 4px",
+                                  flexShrink: 0,
+                                }}
+                              >
+                                {row.groupLabel}
+                              </Tag>
+                            </div>
+                            <div
+                              className="ba-row-summary"
+                              style={{
+                                fontSize: 12,
+                                color: "#999",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {baRowSummaryText(stored, absent)}
+                            </div>
+                          </div>
+                          {renderStatusNode(def, stored)}
+                          <Tooltip title="重新提取该项（仅覆盖该项结果，不影响其它解析项）">
+                            <Button
+                              size="small"
+                              type="link"
+                              icon={<ReloadOutlined />}
+                              disabled={running}
+                              aria-label={`重新提取 ${def.label || def.item_id}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleRerunItem(def);
+                              }}
+                            />
+                          </Tooltip>
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
-              );
-            })
-          )}
-          </div>
-          )}
-        </div>
-        </>)}
+              )}
+            </div>
+          </>
+        )}
 
         {/* 右栏（窄屏为详情单栏，带「返回列表」）：结果阅读区
             contentOnly=true 时始终显示详情面板（不依赖 isSmall/detailOpen，因为外部已用左侧面板选项） */}
         {(contentOnly || !isSmall || detailOpen) && (
-        <div className="ba-detail-pane" style={{ flex: contentOnly ? 1 : 1.2, minWidth: 0, border: "1px solid #f0f0f0", borderRadius: 6, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-          <div style={{ padding: "4px 8px", background: "#fafafa", borderBottom: "1px solid #f0f0f0", fontSize: 13, fontWeight: 500, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", minWidth: 0 }}>
-              {selectedItem ? (
-                <>
-                  {selectedRow && <Text type="secondary" style={{ fontSize: 12 }}>#{selectedRow.seq}</Text>}
-                  <span>{selectedItem.label || selectedItem.item_id}</span>
-                  {/* 分类归属 + 状态 + 来源时间：详情头部把「这条结果从哪来」说清楚 */}
-                  {selectedRow && <Tag className="ba-detail-cat-tag">{selectedRow.groupLabel}</Tag>}
-                  {renderStatusNode(selectedRow?.def || { item_id: selectedItem.item_id, output_type: selectedItem.output_type }, storedMap.get(selectedItem.item_id))}
-                  {storedMap.get(selectedItem.item_id)?.updated_at && (
-                    <Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>
-                      更新于 {String(storedMap.get(selectedItem.item_id)!.updated_at)}
-                    </Text>
-                  )}
-                  {/* 关联项目口径：结果项目级共享，逐行唯一能展示的关联是发起提取的方案 */}
-                  {storedMap.get(selectedItem.item_id)?.scheme_name && (
-                    <Tooltip title="提取结果按项目共享：同项目下多个方案共用同一份结果；此处展示发起本次提取的方案">
-                      <Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>
-                        来源方案：{String(storedMap.get(selectedItem.item_id)!.scheme_name)}（项目级共享）
+          <div
+            className="ba-detail-pane"
+            style={{
+              flex: contentOnly ? 1 : 1.2,
+              minWidth: 0,
+              border: "1px solid #f0f0f0",
+              borderRadius: 6,
+              overflow: "hidden",
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            <div
+              style={{
+                padding: "4px 8px",
+                background: "#fafafa",
+                borderBottom: "1px solid #f0f0f0",
+                fontSize: 13,
+                fontWeight: 500,
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 8,
+                flexWrap: "wrap",
+              }}
+            >
+              <span
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  flexWrap: "wrap",
+                  minWidth: 0,
+                }}
+              >
+                {selectedItem ? (
+                  <>
+                    {selectedRow && (
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        #{selectedRow.seq}
                       </Text>
-                    </Tooltip>
-                  )}
-                </>
-              ) : (
-                "结果阅读区（从列表选择解析项）"
-              )}
-            </span>
-            {selectedItem && (
-              <Space size={8} wrap>
-                {isSmall && (
-                  <Button size="small" icon={<ArrowLeftOutlined />} onClick={() => setDetailOpen(false)}>
-                    返回列表
-                  </Button>
+                    )}
+                    <span>{selectedItem.label || selectedItem.item_id}</span>
+                    {/* 分类归属 + 状态 + 来源时间：详情头部把「这条结果从哪来」说清楚 */}
+                    {selectedRow && (
+                      <Tag className="ba-detail-cat-tag">{selectedRow.groupLabel}</Tag>
+                    )}
+                    {renderStatusNode(
+                      selectedRow?.def || {
+                        item_id: selectedItem.item_id,
+                        output_type: selectedItem.output_type,
+                      },
+                      storedMap.get(selectedItem.item_id),
+                    )}
+                    {storedMap.get(selectedItem.item_id)?.updated_at && (
+                      <Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>
+                        更新于 {String(storedMap.get(selectedItem.item_id)!.updated_at)}
+                      </Text>
+                    )}
+                    {/* 关联项目口径：结果项目级共享，逐行唯一能展示的关联是发起提取的方案 */}
+                    {storedMap.get(selectedItem.item_id)?.scheme_name && (
+                      <Tooltip title="提取结果按项目共享：同项目下多个方案共用同一份结果；此处展示发起本次提取的方案">
+                        <Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>
+                          来源方案：{String(storedMap.get(selectedItem.item_id)!.scheme_name)}
+                          （项目级共享）
+                        </Text>
+                      </Tooltip>
+                    )}
+                  </>
+                ) : (
+                  "结果阅读区（从列表选择解析项）"
                 )}
-                <Tooltip title="上一解析项">
-                  <Button size="small" aria-label="上一解析项" icon={<LeftOutlined />} disabled={visibleRows.length < 2} onClick={() => goAdjacent(-1)} />
-                </Tooltip>
-                <Tooltip title="下一解析项">
-                  <Button size="small" aria-label="下一解析项" icon={<RightOutlined />} disabled={visibleRows.length < 2} onClick={() => goAdjacent(1)} />
-                </Tooltip>
-                {selectedItem.content && (
-                  <Tooltip title="复制该项原始解析结果（文本 / JSON 原文）">
-                    <Button size="small" icon={<CopyOutlined />} onClick={handleCopyContent}>
-                      {copied ? "已复制" : "复制"}
-                    </Button>
-                  </Tooltip>
-                )}
-                {onEditItem && selectedItem.content && (
-                  <Tooltip title="人工校正：直接修改该项提取结果（AI 抽错关键参数时的唯一可靠出口）">
+              </span>
+              {selectedItem && (
+                <Space size={8} wrap>
+                  {isSmall && (
                     <Button
                       size="small"
-                      icon={<EditOutlined />}
-                      disabled={running}
-                      onClick={() => onEditItem(selectedItem)}
+                      icon={<ArrowLeftOutlined />}
+                      onClick={() => setDetailOpen(false)}
                     >
-                      人工校正
+                      返回列表
                     </Button>
+                  )}
+                  <Tooltip title="上一解析项">
+                    <Button
+                      size="small"
+                      aria-label="上一解析项"
+                      icon={<LeftOutlined />}
+                      disabled={visibleRows.length < 2}
+                      onClick={() => goAdjacent(-1)}
+                    />
                   </Tooltip>
-                )}
-                {selectedItem.content && (
-                  <Button size="small" icon={<EyeOutlined />} onClick={() => onOpenFullView(selectedItem)}>
-                    查看完整
-                  </Button>
-                )}
-              </Space>
-            )}
+                  <Tooltip title="下一解析项">
+                    <Button
+                      size="small"
+                      aria-label="下一解析项"
+                      icon={<RightOutlined />}
+                      disabled={visibleRows.length < 2}
+                      onClick={() => goAdjacent(1)}
+                    />
+                  </Tooltip>
+                  {selectedItem.content && (
+                    <Tooltip title="复制该项原始解析结果（文本 / JSON 原文）">
+                      <Button size="small" icon={<CopyOutlined />} onClick={handleCopyContent}>
+                        {copied ? "已复制" : "复制"}
+                      </Button>
+                    </Tooltip>
+                  )}
+                  {onEditItem && selectedItem.content && (
+                    <Tooltip title="人工校正：直接修改该项提取结果（AI 抽错关键参数时的唯一可靠出口）">
+                      <Button
+                        size="small"
+                        icon={<EditOutlined />}
+                        disabled={running}
+                        onClick={() => onEditItem(selectedItem)}
+                      >
+                        人工校正
+                      </Button>
+                    </Tooltip>
+                  )}
+                  {selectedItem.content && (
+                    <Button
+                      size="small"
+                      icon={<EyeOutlined />}
+                      onClick={() => onOpenFullView(selectedItem)}
+                    >
+                      查看完整
+                    </Button>
+                  )}
+                </Space>
+              )}
+            </div>
+            <div className="ba-item-body" style={{ flex: 1, overflow: "auto", padding: 4 }}>
+              {selectedItem ? (
+                <>
+                  <BidAnalysisItemBody item={selectedItem} />
+                  {/* 来源位置：有反查到的出处才展示（旧数据/未匹配/人工校正后无此块） */}
+                  <BidAnalysisEvidenceList item={selectedItem} />
+                </>
+              ) : (
+                <div style={{ color: "#999", textAlign: "center", padding: 40 }}>
+                  从左侧选择一个解析项查看其完整提取结果
+                </div>
+              )}
+            </div>
           </div>
-          <div className="ba-item-body" style={{ flex: 1, overflow: "auto", padding: 4 }}>
-            {selectedItem ? (
-              <>
-                <BidAnalysisItemBody item={selectedItem} />
-                {/* 来源位置：有反查到的出处才展示（旧数据/未匹配/人工校正后无此块） */}
-                <BidAnalysisEvidenceList item={selectedItem} />
-              </>
-            ) : (
-              <div style={{ color: "#999", textAlign: "center", padding: 40 }}>
-                从左侧选择一个解析项查看其完整提取结果
-              </div>
-            )}
-          </div>
-        </div>
         )}
       </div>
 

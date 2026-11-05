@@ -25,7 +25,10 @@ vi.mock("axios", async () => {
     err.response = { status: 401, data: { detail: "未授权访问" } };
     throw err;
   };
-  return { ...actual, default: { ...actual, create: () => instance, isAxiosError: actual.isAxiosError } };
+  return {
+    ...actual,
+    default: { ...actual, create: () => instance, isAxiosError: actual.isAxiosError },
+  };
 });
 
 import { authGuard, clearAuthShortCircuit, projectsApi } from "../api";
@@ -80,4 +83,3 @@ describe("R14 全局 401 短路保护", () => {
     expect(authGuard.blocked).toBe(true);
   });
 });
-

@@ -30,7 +30,7 @@ export class TtlCache<T = unknown> {
     /** 过期时长（毫秒）；传 0/负数表示永不过期 */
     private ttlMs: number,
     /** 时钟注入（默认 Date.now），单测传入假时钟验证过期 */
-    private clock: () => number = Date.now
+    private clock: () => number = Date.now,
   ) {}
 
   get(key: string): TtlGetResult<T> {

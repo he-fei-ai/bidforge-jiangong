@@ -16,9 +16,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, fireEvent, cleanup } from "@testing-library/react";
 import React from "react";
-import {
-  TaskControlButtons, FactsExtractProgressCard,
-} from "../pages/SchemeWorkbenchPage";
+import { TaskControlButtons, FactsExtractProgressCard } from "../pages/SchemeWorkbenchPage";
 import ContentGenerationTab, {
   type ContentGenerationTabProps,
 } from "../components/ContentGenerationTab";
@@ -58,7 +56,9 @@ function btnByText(utils: ReturnType<typeof render>, text: string): HTMLButtonEl
 describe("TaskControlButtons · 目录/事实 Tab 停止入口（R106 FIX-2）", () => {
   it("渲染暂停/恢复/停止三键；未暂停时恢复禁用、无「已暂停」Tag", () => {
     const onControl = vi.fn();
-    const utils = render(<TaskControlButtons paused={false} stopping={false} onControl={onControl} />);
+    const utils = render(
+      <TaskControlButtons paused={false} stopping={false} onControl={onControl} />,
+    );
     expect(btnByText(utils, "暂停").disabled).toBe(false);
     expect(btnByText(utils, "恢复").disabled).toBe(true);
     expect(btnByText(utils, "停止").disabled).toBe(false);
@@ -74,7 +74,9 @@ describe("TaskControlButtons · 目录/事实 Tab 停止入口（R106 FIX-2）",
 
   it("点击上抛对应 action", () => {
     const onControl = vi.fn();
-    const utils = render(<TaskControlButtons paused={false} stopping={false} onControl={onControl} />);
+    const utils = render(
+      <TaskControlButtons paused={false} stopping={false} onControl={onControl} />,
+    );
     fireEvent.click(btnByText(utils, "暂停"));
     fireEvent.click(btnByText(utils, "停止"));
     expect(onControl).toHaveBeenNthCalledWith(1, "pause");
@@ -97,9 +99,7 @@ describe("TaskControlButtons · 目录/事实 Tab 停止入口（R106 FIX-2）",
   it("停止中（未暂停）：暂停键也必须禁用 —— 禁用语义来自 stopping 而非 paused", () => {
     // A/B F-M2 口径：把 `disabled={paused || stopping}` 摘成 `disabled={paused}`
     // 时，上一用例（paused=true）两键本来就禁用、抓不到；此处必须 paused=false。
-    const utils = render(
-      <TaskControlButtons paused={false} stopping onControl={vi.fn()} />,
-    );
+    const utils = render(<TaskControlButtons paused={false} stopping onControl={vi.fn()} />);
     expect(btnByText(utils, "暂停").disabled).toBe(true);
     expect(btnByText(utils, "恢复").disabled).toBe(true);
     expect(btnByText(utils, "停止中").disabled).toBe(true);
@@ -132,7 +132,9 @@ describe("FactsExtractProgressCard · controls 插槽（R106 FIX-2）", () => {
   });
 });
 
-function baseContentProps(over: Partial<ContentGenerationTabProps> = {}): ContentGenerationTabProps {
+function baseContentProps(
+  over: Partial<ContentGenerationTabProps> = {},
+): ContentGenerationTabProps {
   return {
     generating: true,
     running: true,
@@ -190,13 +192,21 @@ describe("ContentGenerationTab · 停止中态（R106 FIX-4）", () => {
   });
 
   it("已暂停且同时停止中：不再显示「已暂停」Tag", () => {
-    const utils = render(<ContentGenerationTab {...baseContentProps({ taskPaused: true, taskStopping: true })} />);
+    const utils = render(
+      <ContentGenerationTab {...baseContentProps({ taskPaused: true, taskStopping: true })} />,
+    );
     expect(utils.queryByText(/已暂停/)).toBeNull();
   });
 });
 
 const BA_DEFS: BaItemDef[] = [
-  { item_id: "projectBasicInfo", label: "项目级基本信息", required: 1, output_type: "json", group: "project_info" },
+  {
+    item_id: "projectBasicInfo",
+    label: "项目级基本信息",
+    required: 1,
+    output_type: "json",
+    group: "project_info",
+  },
 ];
 const BA_GROUPS = [{ group: "project_info", label: "项目级基本信息", items: [BA_DEFS[0]] }];
 
@@ -264,17 +274,32 @@ describe("BidAnalysisTab · 停止中态（R106 FIX-4）", () => {
 const RAW: Record<string, string> = Object.fromEntries(
   Object.entries(
     import.meta.glob("../**/*.{ts,tsx}", {
-      query: "?raw", import: "default", eager: true,
+      query: "?raw",
+      import: "default",
+      eager: true,
     }) as Record<string, string>,
   ).map(([k, v]) => [k.replace(/^\.\.\//, "").replace(/^\.\//, "tests/"), v]),
 );
 const PAGE = RAW["pages/SchemeWorkbenchPage.tsx"];
+// ✅ G9–G12（2026-11-04）：目录 / 事实两条生成链已原位搬到各自 hook（函数体逐字
+//    搬运），正文链仍在页面。按**声明 → 所在文件**映射切片，保持逐链判别力；
+//    任一条链丢掉「清陈旧 task_id」仍会单独变红（见地板用例）。
+const CHAIN_FILES: Record<string, string> = {
+  "const doGenerateOutline = async () => {": RAW["pages/schemeWorkbench/useOutlineGeneration.tsx"],
+  "const runGenerateFactsSse = async () => {": RAW["pages/schemeWorkbench/useFactsGeneration.ts"],
+};
+const ALL_CHAIN_SOURCES = [
+  PAGE,
+  RAW["pages/schemeWorkbench/useOutlineGeneration.tsx"],
+  RAW["pages/schemeWorkbench/useFactsGeneration.ts"],
+].join("\n");
 
 /** 从函数声明处向后取一段源码（下一个顶层 `const ` 声明之前，封顶 maxLen） */
 function sliceFn(decl: string, maxLen = 4000): string {
-  const i = PAGE.indexOf(decl);
+  const src = CHAIN_FILES[decl] || PAGE;
+  const i = src.indexOf(decl);
   expect(i, `源码里找不到 ${decl}`).toBeGreaterThan(-1);
-  return PAGE.slice(i, i + maxLen);
+  return src.slice(i, i + maxLen);
 }
 
 describe("SchemeWorkbenchPage · 发起生成即清陈旧 task_id（R106 FIX-8）", () => {
@@ -293,7 +318,9 @@ describe("SchemeWorkbenchPage · 发起生成即清陈旧 task_id（R106 FIX-8�
       expect(seq, `${name} 未找到世代自增`).toBeGreaterThan(-1);
       probed += 1;
       const clear = body.indexOf('activeTaskIdRef.current = "";', seq);
-      expect(clear, `${name} 发起生成后未清空上一代 task_id（停止会打到死 id）`).toBeGreaterThan(-1);
+      expect(clear, `${name} 发起生成后未清空上一代 task_id（停止会打到死 id）`).toBeGreaterThan(
+        -1,
+      );
       // 清空必须发生在函数开头的"发请求前"区段（正文链体量大，用相对距离而非
       // 是否命中 sseFetch 来判——命中与否取决于函数体长度，会退化成空判据）
       expect(clear - seq, `${name} 清空位置离世代自增太远，可能在请求之后`).toBeLessThan(800);
@@ -301,8 +328,8 @@ describe("SchemeWorkbenchPage · 发起生成即清陈旧 task_id（R106 FIX-8�
     expect(probed).toBe(starts.length);
   });
 
-  it("地板：全页清空 activeTaskIdRef 的语句至少 3 处（防整体摘除）", () => {
-    const n = PAGE.split('activeTaskIdRef.current = "";').length - 1;
+  it("地板：三条生成链清空 activeTaskIdRef 的语句至少 3 处（防整体摘除）", () => {
+    const n = ALL_CHAIN_SOURCES.split('activeTaskIdRef.current = "";').length - 1;
     expect(n).toBeGreaterThanOrEqual(3);
   });
 
@@ -319,4 +346,3 @@ describe("SchemeWorkbenchPage · 发起生成即清陈旧 task_id（R106 FIX-8�
     expect(body.indexOf("tasksApi.control")).toBeGreaterThan(lockAt);
   });
 });
-

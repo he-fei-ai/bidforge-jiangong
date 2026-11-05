@@ -23,13 +23,13 @@ import { useBlueprintTheme, type ThemeMode } from "./theme";
  */
 export const BP_XS = 380;
 export const BP_PHONE = 560;
-export const BP_SMALL = 768;    // 手机
-export const BP_TABLET = 1200;  // 平板（侧边栏自动折叠阈值）
+export const BP_SMALL = 768; // 手机
+export const BP_TABLET = 1200; // 平板（侧边栏自动折叠阈值）
 export const BP_DESKTOP = 1600;
 
 export function useBreakpoint() {
   const [w, setW] = useState(() =>
-    typeof window !== "undefined" ? window.innerWidth : BP_DESKTOP
+    typeof window !== "undefined" ? window.innerWidth : BP_DESKTOP,
   );
   useEffect(() => {
     // ✅ 性能优化：resize 在拖动窗口边缘时会以远高于 60Hz 的频率连续触发，
@@ -54,11 +54,11 @@ export function useBreakpoint() {
   }, []);
   return {
     width: w,
-    isXs: w < BP_XS,              // 极窄屏 (<380)
-    isPhone: w < BP_PHONE,        // 手机竖屏 (<560)
-    isSmall: w < BP_SMALL,        // 手机 (<768)
+    isXs: w < BP_XS, // 极窄屏 (<380)
+    isPhone: w < BP_PHONE, // 手机竖屏 (<560)
+    isSmall: w < BP_SMALL, // 手机 (<768)
     isTablet: w >= BP_SMALL && w < BP_TABLET,
-    isCompact: w < BP_TABLET,     // 侧边栏需要折叠
+    isCompact: w < BP_TABLET, // 侧边栏需要折叠
     isDesktop: w >= BP_TABLET,
   };
 }
@@ -77,7 +77,9 @@ export function ThemeToggle({ collapsed }: { collapsed?: boolean }) {
         icon={isDark ? <BulbFilled style={{ color: "#FFB800" }} /> : <BulbOutlined />}
         style={{ color: isDark ? "#9AB4D0" : "#5A6A80" }}
       >
-        {!collapsed && <span style={{ marginLeft: 4, fontSize: 12 }}>{isDark ? "深色" : "浅色"}</span>}
+        {!collapsed && (
+          <span style={{ marginLeft: 4, fontSize: 12 }}>{isDark ? "深色" : "浅色"}</span>
+        )}
       </Button>
     </Tooltip>
   );
@@ -87,7 +89,7 @@ export function ThemeToggle({ collapsed }: { collapsed?: boolean }) {
 
 type PageHeroProps = {
   title: string;
-  subtitle?: string;        // 英文/工程标识，如 "BLUEPRINT ENGINEERING · PROJECTS"
+  subtitle?: string; // 英文/工程标识，如 "BLUEPRINT ENGINEERING · PROJECTS"
   description?: string;
   accent?: React.ReactNode; // 右对齐内容，可传按钮/JSX
   scheme?: "hero" | "flat"; // hero=深蓝渐变网格, flat=扁平浅灰
@@ -97,7 +99,13 @@ export function PageHero({ title, subtitle, description, accent, scheme = "hero"
   const isHero = scheme === "hero";
   const { isPhone, isSmall } = useBreakpoint();
   // 手机：单列布局，padding 收敛；桌面：原有双列
-  const padding = isPhone ? "12px 10px" : isSmall ? "14px 12px" : isHero ? "22px 28px" : "16px 24px";
+  const padding = isPhone
+    ? "12px 10px"
+    : isSmall
+      ? "14px 12px"
+      : isHero
+        ? "22px 28px"
+        : "16px 24px";
   const flexDir = isPhone || isSmall ? "column" : "row";
   const align = isPhone || isSmall ? "flex-start" : "center";
   const titleSize = isPhone ? 16 : isSmall ? 17 : isHero ? 20 : 16;
@@ -138,7 +146,10 @@ export function PageHero({ title, subtitle, description, accent, scheme = "hero"
           <div
             style={{
               position: "absolute",
-              top: -50, right: -30, width: 180, height: 180,
+              top: -50,
+              right: -30,
+              width: 180,
+              height: 180,
               borderRadius: "50%",
               background: "radial-gradient(circle, rgba(0, 212, 255, 0.22), transparent 70%)",
               pointerEvents: "none",
@@ -147,7 +158,17 @@ export function PageHero({ title, subtitle, description, accent, scheme = "hero"
         </>
       )}
 
-      <div style={{ position: "relative", display: "flex", flexDirection: flexDir as "row" | "column", justifyContent: "space-between", alignItems: align as "center" | "flex-start", gap: isPhone ? 8 : 16, width: "100%" }}>
+      <div
+        style={{
+          position: "relative",
+          display: "flex",
+          flexDirection: flexDir as "row" | "column",
+          justifyContent: "space-between",
+          alignItems: align as "center" | "flex-start",
+          gap: isPhone ? 8 : 16,
+          width: "100%",
+        }}
+      >
         <div style={{ minWidth: 0, flex: "1 1 auto" }}>
           <div
             style={{
@@ -192,7 +213,11 @@ export function PageHero({ title, subtitle, description, accent, scheme = "hero"
             </div>
           )}
         </div>
-        {accent && <div style={{ flexShrink: 0, minWidth: 0, display: "flex", flexWrap: "wrap", gap: 8 }}>{accent}</div>}
+        {accent && (
+          <div style={{ flexShrink: 0, minWidth: 0, display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {accent}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -204,7 +229,7 @@ export type StatItem = {
   icon: React.ReactNode;
   label: string;
   value: number | string;
-  color: string;    // 主色，如 #00D4FF
+  color: string; // 主色，如 #00D4FF
   suffix?: string;
 };
 
@@ -251,14 +276,22 @@ function StatCard({ item }: { item: StatItem }) {
         (e.currentTarget as HTMLElement).style.boxShadow =
           "0 2px 6px rgba(15,43,79,0.06), 0 4px 12px rgba(15,43,79,0.05)";
       }}
-      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.boxShadow = "none"; }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLElement).style.boxShadow = "none";
+      }}
     >
       <div
         style={{
-          width: 38, height: 38, borderRadius: 4,
+          width: 38,
+          height: 38,
+          borderRadius: 4,
           background: `${item.color}18`,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          color: item.color, fontSize: 18, flexShrink: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: item.color,
+          fontSize: 18,
+          flexShrink: 0,
         }}
       >
         {item.icon}
@@ -266,7 +299,8 @@ function StatCard({ item }: { item: StatItem }) {
       <div style={{ minWidth: 0 }}>
         <div
           style={{
-            fontSize: 20, fontWeight: 700,
+            fontSize: 20,
+            fontWeight: 700,
             fontFamily: "'JetBrains Mono', monospace",
             color: isDark ? "#D8E6F4" : "#1A2332",
             lineHeight: 1.1,
@@ -277,12 +311,26 @@ function StatCard({ item }: { item: StatItem }) {
         >
           {item.value}
           {item.suffix && (
-            <span style={{ fontSize: 12, fontWeight: 400, marginLeft: 2, color: isDark ? "#9AB4D0" : "#8B99AC" }}>
+            <span
+              style={{
+                fontSize: 12,
+                fontWeight: 400,
+                marginLeft: 2,
+                color: isDark ? "#9AB4D0" : "#8B99AC",
+              }}
+            >
               {item.suffix}
             </span>
           )}
         </div>
-        <div style={{ fontSize: 11, color: isDark ? "#6F87A5" : "#8B99AC", marginTop: 2, letterSpacing: 0.3 }}>
+        <div
+          style={{
+            fontSize: 11,
+            color: isDark ? "#6F87A5" : "#8B99AC",
+            marginTop: 2,
+            letterSpacing: 0.3,
+          }}
+        >
           {item.label}
         </div>
       </div>

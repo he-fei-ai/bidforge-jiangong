@@ -16,7 +16,14 @@
  *     面板显式标注「进行中的 AI 调用返回后即停」，且 elapsed 已在后端扣除暂停时长；
  *   - 折叠态只显示图标 + 运行数徽标，详情面板改为浮层。
  */
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import { App, Button, Popconfirm, Progress, Tag, Tooltip } from "antd";
 import {
   CaretRightOutlined,
@@ -67,10 +74,25 @@ type Activity = {
     total?: number;
     failed?: number;
     calls_today?: number;
+    // ✅ 2026-11-05（统计口径）：attempts_* 为「真实调用尝试」口径，
+    //    calls / call_failed 为「业务逻辑调用」口径（一次调用含重试/降级只计一次）。
+    real_calls_today?: number;
+    attempts_today?: number;
+    failed_today?: number;
+    attempt_failed_today?: number;
+    skipped_today?: number;
+    calls?: number;
+    call_failed?: number;
+    call_cancelled?: number;
+    logical_success_rate?: number | null;
     tokens_today?: number;
     ok_calls?: number;
     success_rate?: number | null;
+    attempt_success_rate?: number | null;
+    /** ✅ 2026-11-05（方案 B）：今日失败按 error_class 聚合（历史 NULL 归 unknown） */
+    error_classes_today?: Record<string, number>;
     avg_duration?: number;
+    avg_duration_all?: number;
     last_provider?: string;
     last_model?: string;
     last_ok?: boolean;
@@ -112,9 +134,12 @@ const SSE_MAX_RETRIES = SSE_BACKOFF_MS.length;
 export function activityFingerprint(a: Activity | null | undefined): string {
   if (!a) return "";
   const part = (arr?: TaskItem[]) =>
-    (arr || []).map((x) =>
-      `${x.id}:${x.status}:${Math.round((x.progress || 0) * 100)}:${Math.floor(x.elapsed || 0)}`
-    ).join(",");
+    (arr || [])
+      .map(
+        (x) =>
+          `${x.id}:${x.status}:${Math.round((x.progress || 0) * 100)}:${Math.floor(x.elapsed || 0)}`,
+      )
+      .join(",");
   const ai = a.ai || {};
   const docs = a.documents || {};
   return [
@@ -122,6 +147,8 @@ export function activityFingerprint(a: Activity | null | undefined): string {
     part(a.tasks?.recent),
     ai.in_flight ?? "",
     ai.calls_today ?? "",
+    ai.calls ?? "",
+    ai.call_failed ?? "",
     ai.tokens_today ?? "",
     ai.success_rate ?? "",
     ai.last_at ?? "",
@@ -222,11 +249,25 @@ function TaskRow({
         <Tag
           style={{ marginInlineEnd: 0, fontSize: 11, lineHeight: "18px", paddingInline: 6 }}
           bordered={false}
-          color={task.status === "running" ? "processing" : task.status === "paused" ? "warning" : "default"}
+          color={
+            task.status === "running"
+              ? "processing"
+              : task.status === "paused"
+                ? "warning"
+                : "default"
+          }
         >
           {taskTypeLabel(task.task_type)}
         </Tag>
-        <span style={{ flex: 1, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span
+          style={{
+            flex: 1,
+            fontSize: 12,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
           {task.scheme_name || task.scheme_id || "未关联方案"}
         </span>
         <span style={{ fontSize: 11, color: meta.color, flexShrink: 0 }}>
@@ -306,7 +347,11 @@ function TaskRow({
           {statChips.length > 0 && <div>{statChips.join(" · ")}</div>}
           {runningChapters.length > 0 && (
             <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              进行中：{runningChapters.map((c) => c?.title || c?.section_id || "").filter(Boolean).join("、")}
+              进行中：
+              {runningChapters
+                .map((c) => c?.title || c?.section_id || "")
+                .filter(Boolean)
+                .join("、")}
             </div>
           )}
         </div>
@@ -423,7 +468,9 @@ function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
       stopPolling();
       // 每次 connectSSE 创建新的 softStop Promise，resolve 函数存 ref 里
       let softStopResolve: () => void = () => {};
-      const softStop = new Promise<void>((resolve) => { softStopResolve = resolve; });
+      const softStop = new Promise<void>((resolve) => {
+        softStopResolve = resolve;
+      });
       softStopResolveRef.current = softStopResolve;
 
       try {
@@ -492,7 +539,7 @@ function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
         if (data?.ok) {
           message.success(
             data.message ||
-              (action === "pause" ? "已暂停" : action === "resume" ? "已恢复" : "已停止")
+              (action === "pause" ? "已暂停" : action === "resume" ? "已恢复" : "已停止"),
           );
         } else {
           message.warning(data?.message || "操作未生效（任务可能已结束）");
@@ -510,7 +557,7 @@ function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
         load();
       }
     },
-    [load, message]
+    [load, message],
   );
 
   const running = activity?.tasks?.running ?? [];
@@ -526,12 +573,14 @@ function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
 
   const summaryText = busy
     ? `${running.length} 个任务运行中${
-        topTask ? ` · ${taskTypeLabel(topTask.task_type)} ${Math.round((topTask.progress || 0) * 100)}%` : ""
+        topTask
+          ? ` · ${taskTypeLabel(topTask.task_type)} ${Math.round((topTask.progress || 0) * 100)}%`
+          : ""
       }`
     : "后台空闲";
   const aiText = aiBusy
     ? `AI 调用中${ai && (ai.in_flight ?? 0) > 1 ? ` ×${ai.in_flight}` : ""}`
-    : `AI 今日 ${ai?.calls_today ?? 0} 次`;
+    : `AI 今日 ${ai?.real_calls_today ?? ai?.calls_today ?? 0} 次调用`;
 
   const detailPanel = (
     <div
@@ -542,7 +591,14 @@ function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
             // 260px 面板若以 Sider 为包含块会被裁成 80px，暂停/停止按钮点不到。
             // fixed 的包含块是视口，天然绕开祖先裁剪；侧边栏贴左，left 即侧边起点。
             // ✅ 窄屏用 max-width + calc 而不是固定 260，避免手机/小窗口溢出。
-            { position: "fixed", bottom: 84, left: 8, width: 260, maxWidth: "calc(100vw - 24px)", zIndex: 1050 }
+            {
+              position: "fixed",
+              bottom: 84,
+              left: 8,
+              width: 260,
+              maxWidth: "calc(100vw - 24px)",
+              zIndex: 1050,
+            }
           : undefined
       }
     >
@@ -635,12 +691,43 @@ function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
             )}
           </div>
           <div>
-            今日 {ai?.calls_today ?? 0} 次
-            {ai?.success_rate != null && <> · 成功率 {ai.success_rate}%</>}
+            {/* ✅ 2026-11-05（方案 B）：审计已按逻辑调用合并 ——
+                「次调用」与 ai_audit_logs 的 action='chat' 行一一对应，
+                括号内是底层尝试数（含重试/降级/对冲）。 */}
+            今日 {ai?.real_calls_today ?? ai?.calls_today ?? 0} 次调用
+            {ai && (ai.attempts_today ?? 0) > (ai.real_calls_today ?? 0) && (
+              <>（{ai.attempts_today} 次尝试）</>
+            )}
+            {ai?.success_rate != null && <> · 成功率(调用) {ai.success_rate}%</>}
+            {ai?.attempt_success_rate != null && (
+              <> · 尝试成功率 {ai.attempt_success_rate}%</>
+            )}
             {ai && (ai.tokens_today ?? 0) > 0 && <> · Token {fmtTokens(ai.tokens_today)}</>}
-            {ai && (ai.avg_duration ?? 0) > 0 && <> · 平均 {ai.avg_duration?.toFixed(1)}s</>}
-            {ai && (ai.failed ?? 0) > 0 && (
-              <span style={{ color: "#FF4D4F" }}> · 本会话失败 {ai.failed} 次</span>
+            {ai && (ai.avg_duration ?? 0) > 0 && <> · 平均(成功调用) {ai.avg_duration?.toFixed(1)}s</>}
+            {ai && (ai.skipped_today ?? 0) > 0 && <> · 跳过 {ai.skipped_today} 次</>}
+            {ai && (ai.failed_today ?? 0) > 0 && Object.keys(ai.error_classes_today || {}).length > 0 && (
+              <>
+                {" · "}失败类别{" "}
+                {Object.entries(ai.error_classes_today || {})
+                  .sort((a, b) => b[1] - a[1])
+                  .slice(0, 3)
+                  .map(([cls, n]) => `${cls} ${n}`)
+                  .join(" / ")}
+              </>
+            )}
+            {ai && (ai.calls ?? 0) > 0 && (
+              <span
+                style={ai.call_failed ? { color: "#FF4D4F" } : undefined}
+                title={
+                  `本会话 = 本后端进程启动至今（重启清零），不是用户登录会话。` +
+                  `业务调用 ${ai.calls} 次（一次调用含重试/降级/对冲只计一次）；` +
+                  `底层调用尝试 ${ai.total ?? 0} 次、尝试失败 ${ai.failed ?? 0} 次`
+                }
+              >
+                {" · "}本会话调用 {ai.calls} 次
+                {ai.call_failed ? ` · 失败 ${ai.call_failed} 次` : ""}
+                {ai.call_cancelled ? ` · 取消 ${ai.call_cancelled} 次` : ""}
+              </span>
             )}
           </div>
         </div>
@@ -678,7 +765,8 @@ function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
               color: "rgba(255,255,255,0.35)",
             }}
           >
-            服务 v{activity.server.version || "-"} · 已运行 {fmtDuration(activity.server.uptime)} · 每 3s 自动刷新
+            服务 v{activity.server.version || "-"} · 已运行 {fmtDuration(activity.server.uptime)} ·
+            每 3s 自动刷新
           </div>
         )}
       </div>
@@ -699,7 +787,18 @@ function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
         <div
           className={`bp-task-bar ${busy ? "busy" : ""}`}
           onClick={() => setExpanded((v) => !v)}
+          // ✅ R174 F8（2026-11-03）：键盘可达 —— 纯键盘用户此前无法展开/收起
+          //    后台任务面板。补 tabIndex、Enter/Space 触发与 aria-expanded。
+          onKeyDown={(e: ReactKeyboardEvent<HTMLDivElement>) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              setExpanded((v) => !v);
+            }
+          }}
           role="button"
+          tabIndex={0}
+          aria-expanded={expanded}
+          data-testid="task-status-bar"
         >
           <span className={`bp-status-dot ${busy ? "checking" : "online"}`} />
           {!collapsed ? (

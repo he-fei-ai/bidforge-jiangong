@@ -3,17 +3,26 @@
    ================================================================ */
 
 /* ---------- 字体全局应用 ---------- */
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
   margin: 0;
   padding: 0;
-  font-family: 'Geologica', 'Noto Sans SC', -apple-system, BlinkMacSystemFont,
-    'Segoe UI', Roboto, system-ui, sans-serif;
+  font-family:
+    "Geologica",
+    "Noto Sans SC",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    system-ui,
+    sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
-  color: #1A2332;
-  background: #F4F6FA;
+  color: #1a2332;
+  background: #f4f6fa;
 }
 
 /* ---------- 全局横向溢出防线（窄屏兜底） ----------
@@ -21,7 +30,8 @@ html, body, #root {
    这里作为最后一道防线防止页面出现横向滚动。
    注意：html/body 层用 hidden 而非 clip —— clip 会阻止所有祖先的滚动，
    包括 antd Table 的 scroll.x 容器；hidden 不会阻止后代显式 overflow-x:auto。 */
-html, body {
+html,
+body {
   max-width: 100vw;
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
@@ -44,24 +54,66 @@ html, body {
    子元素内容过长时会撑破父容器（经典 flex 陷阱）。
    这里给常见 flex/grid 容器的直接子元素显式设 min-width:0，让它们能随父收缩。
    注意：不作用于 antd Table 相关节点，避免破坏 scroll.x 横向滚动。 */
-:is(.ant-flex, .ant-row, .ant-layout, .ant-layout-content,
-    .ant-layout-header, .ant-layout-footer, .ant-card-body, .ant-form-item,
-    .ant-form-item-control, .ant-form-item-row, .ant-descriptions,
-    .ant-descriptions-row, .ant-descriptions-item, .ant-tabs-tabpane,
-    .ant-tabs-content-holder, .ant-tabs-nav-list, .ant-statistic,
-    .ant-list-item, .ant-space, .ant-space-item,
-    .bp-hero, .bp-stat-cards, .bp-stat-card, .bp-header, .bp-header-crumbs,
-    .bp-header-right, .bp-content, .bp-sidebar) > * {
+:is(
+    .ant-flex,
+    .ant-row,
+    .ant-layout,
+    .ant-layout-content,
+    .ant-layout-header,
+    .ant-layout-footer,
+    .ant-card-body,
+    .ant-form-item,
+    .ant-form-item-control,
+    .ant-form-item-row,
+    .ant-descriptions,
+    .ant-descriptions-row,
+    .ant-descriptions-item,
+    .ant-tabs-tabpane,
+    .ant-tabs-content-holder,
+    .ant-tabs-nav-list,
+    .ant-statistic,
+    .ant-list-item,
+    .ant-space,
+    .ant-space-item,
+    .bp-hero,
+    .bp-stat-cards,
+    .bp-stat-card,
+    .bp-header,
+    .bp-header-crumbs,
+    .bp-header-right,
+    .bp-content,
+    .bp-sidebar
+  )
+  > * {
   min-width: 0;
 }
 
 /* 常见容器自身也要能收缩，不能反过来撑破它们的父 */
-.ant-flex, .ant-row, .ant-col, .ant-layout, .ant-layout-content,
-.ant-card, .ant-card-body, .ant-form, .ant-form-item, .ant-form-item-control,
-.ant-descriptions, .ant-tabs, .ant-tabs-content-holder, .ant-tabs-tabpane,
-.ant-space, .ant-list, .ant-list-item, .ant-statistic,
-.bp-hero, .bp-stat-card, .bp-stat-cards, .bp-header, .bp-header-crumbs,
-.bp-header-right, .bp-content {
+.ant-flex,
+.ant-row,
+.ant-col,
+.ant-layout,
+.ant-layout-content,
+.ant-card,
+.ant-card-body,
+.ant-form,
+.ant-form-item,
+.ant-form-item-control,
+.ant-descriptions,
+.ant-tabs,
+.ant-tabs-content-holder,
+.ant-tabs-tabpane,
+.ant-space,
+.ant-list,
+.ant-list-item,
+.ant-statistic,
+.bp-hero,
+.bp-stat-card,
+.bp-stat-cards,
+.bp-header,
+.bp-header-crumbs,
+.bp-header-right,
+.bp-content {
   min-width: 0;
   max-width: 100%;
 }
@@ -156,7 +208,6 @@ html, body {
 
 /* 触屏友好的可点击区域 */
 
-
 /* 2026-09-23：import 模块顶层子 Tab 栏 —— 只渲染 tab bar 标签，隐藏空的 tab pane。
    与之前嵌在右侧 flex row 里的 swb-import-sub-tabs 不同（那个需要 flex:1 撑满），
    现在这个 Tabs 是 column 容器的第 1 行，只需 auto height。 */
@@ -167,7 +218,6 @@ html, body {
 .swb-sub-tabs-bar-only > .ant-tabs-content-holder {
   display: none !important;
 }
-
 
 /* 2026-09-23：文档解析 Tab 文件列表行距砍半（0.5x 视觉密度） */
 .dpl-compact-list .ant-list-item {
@@ -201,7 +251,7 @@ pre,
 /* ---------- 侧边栏：蓝图网格底纹 ---------- */
 .bp-sidebar {
   position: relative;
-  background: #0F2B4F !important;
+  background: #0f2b4f !important;
   isolation: isolate;
 }
 
@@ -261,14 +311,14 @@ pre,
   display: flex;
   flex-direction: column;
   line-height: 1.1;
-  color: #FFFFFF;
+  color: #ffffff;
 }
 
 .bp-logo-text .bp-logo-title {
   font-weight: 700;
   font-size: 14px;
   letter-spacing: 0.5px;
-  background: linear-gradient(90deg, #FFFFFF, #00D4FF);
+  background: linear-gradient(90deg, #ffffff, #00d4ff);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -280,7 +330,7 @@ pre,
   color: rgba(0, 212, 255, 0.7);
   letter-spacing: 1.5px;
   text-transform: uppercase;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: "JetBrains Mono", monospace;
 }
 
 /* ---------- 侧边栏折叠态 Logo ---------- */
@@ -317,8 +367,8 @@ pre,
 
 .bp-sidebar .ant-menu-item-selected {
   background: rgba(0, 212, 255, 0.18) !important;
-  color: #00D4FF !important;
-  box-shadow: inset 2px 0 0 #00D4FF;
+  color: #00d4ff !important;
+  box-shadow: inset 2px 0 0 #00d4ff;
 }
 
 .bp-sidebar .ant-menu-group-title {
@@ -377,31 +427,31 @@ pre,
 }
 
 .bp-status-dot.online {
-  background: #00C853;
+  background: #00c853;
 }
 
 .bp-status-dot.online::after {
-  background: #00C853;
+  background: #00c853;
   will-change: transform, opacity;
   animation: bp-pulse-ring 2.4s ease-in-out infinite;
 }
 
 .bp-status-dot.checking {
-  background: #00D4FF;
+  background: #00d4ff;
 }
 
 .bp-status-dot.checking::after {
-  background: #00D4FF;
+  background: #00d4ff;
   will-change: transform, opacity;
   animation: bp-pulse-ring 1.6s ease-in-out infinite;
 }
 
 .bp-status-dot.offline {
-  background: #FF3D5A;
+  background: #ff3d5a;
 }
 
 .bp-status-dot.offline::after {
-  background: #FF3D5A;
+  background: #ff3d5a;
   will-change: transform, opacity;
   animation: bp-pulse-ring 1.6s ease-in-out infinite;
 }
@@ -458,8 +508,8 @@ pre,
   position: absolute;
   top: -7px;
   right: -10px;
-  background: #FAAD14;
-  color: #0F2B4F;
+  background: #faad14;
+  color: #0f2b4f;
   border-radius: 8px;
   font-size: 10px;
   font-style: normal;
@@ -468,7 +518,7 @@ pre,
   padding: 0 4px;
 }
 .bp-task-panel {
-  background: #0B2140;
+  background: #0b2140;
   border: 1px solid rgba(0, 212, 255, 0.18);
   border-radius: 6px;
   box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.35);
@@ -482,7 +532,7 @@ pre,
   align-items: center;
   padding: 4px 8px 4px 10px;
   font-size: 12px;
-  color: #00D4FF;
+  color: #00d4ff;
   letter-spacing: 1px;
   border-bottom: 1px solid rgba(0, 212, 255, 0.12);
 }
@@ -523,7 +573,7 @@ pre,
   gap: 5px;
   flex-shrink: 0;
   font-size: 12px;
-  color: #FAAD14;
+  color: #faad14;
   background: rgba(250, 173, 20, 0.08);
   border: 1px solid rgba(250, 173, 20, 0.35);
   border-radius: 4px;
@@ -531,7 +581,7 @@ pre,
   white-space: nowrap;
 }
 .bp-live-task-hint .anticon-spin {
-  color: #FAAD14;
+  color: #faad14;
 }
 
 /* ---------- 标题栏消息中心（ActivityHint） ---------- */
@@ -544,18 +594,20 @@ pre,
   font-size: 12px;
   line-height: 1.4;
   padding: 2px 8px;
-  border: 1px solid #E8EDF4;
+  border: 1px solid #e8edf4;
   border-radius: 4px;
-  background: #FAFBFD;
+  background: #fafbfd;
   cursor: pointer;
-  transition: border-color 0.18s ease-out, background-color 0.18s ease-out;
+  transition:
+    border-color 0.18s ease-out,
+    background-color 0.18s ease-out;
 }
 .bp-activity-chip:hover {
-  border-color: #B8C4D4;
-  background: #F0F4FA;
+  border-color: #b8c4d4;
+  background: #f0f4fa;
 }
 .bp-activity-chip-text {
-  color: #4A5568;
+  color: #4a5568;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -568,14 +620,16 @@ pre,
   height: 24px;
   flex-shrink: 0;
   border-radius: 4px;
-  color: #98A6B8;
+  color: #98a6b8;
   font-size: 14px;
   cursor: pointer;
-  transition: color 0.18s ease-out, background-color 0.18s ease-out;
+  transition:
+    color 0.18s ease-out,
+    background-color 0.18s ease-out;
 }
 .bp-activity-bell:hover {
-  color: #1677FF;
-  background: #F0F4FA;
+  color: #1677ff;
+  background: #f0f4fa;
 }
 .bp-activity-history {
   width: 400px;
@@ -587,9 +641,9 @@ pre,
   align-items: center;
   font-size: 13px;
   font-weight: 600;
-  color: #1F2937;
+  color: #1f2937;
   padding-bottom: 6px;
-  border-bottom: 1px solid #EDF1F7;
+  border-bottom: 1px solid #edf1f7;
   margin-bottom: 4px;
 }
 .bp-activity-history-body {
@@ -603,7 +657,7 @@ pre,
   padding: 5px 0;
   font-size: 12px;
   line-height: 1.5;
-  border-bottom: 1px dashed #F0F2F5;
+  border-bottom: 1px dashed #f0f2f5;
 }
 .bp-activity-row:last-child {
   border-bottom: 0;
@@ -614,8 +668,8 @@ pre,
 }
 .bp-activity-row-src {
   flex-shrink: 0;
-  color: #98A6B8;
-  background: #F4F6FA;
+  color: #98a6b8;
+  background: #f4f6fa;
   border-radius: 3px;
   padding: 0 5px;
   font-size: 11px;
@@ -627,26 +681,26 @@ pre,
 }
 .bp-activity-row-time {
   flex-shrink: 0;
-  color: #98A6B8;
+  color: #98a6b8;
   font-family: "JetBrains Mono", monospace;
   font-size: 11px;
   margin-top: 1px;
 }
-[data-bp-mode='dark'] .bp-activity-chip {
+[data-bp-mode="dark"] .bp-activity-chip {
   background: rgba(255, 255, 255, 0.06);
   border-color: rgba(255, 255, 255, 0.12);
 }
-[data-bp-mode='dark'] .bp-activity-chip:hover {
+[data-bp-mode="dark"] .bp-activity-chip:hover {
   background: rgba(255, 255, 255, 0.1);
 }
-[data-bp-mode='dark'] .bp-activity-chip-text {
+[data-bp-mode="dark"] .bp-activity-chip-text {
   color: rgba(255, 255, 255, 0.75);
 }
-[data-bp-mode='dark'] .bp-activity-bell {
+[data-bp-mode="dark"] .bp-activity-bell {
   color: rgba(255, 255, 255, 0.45);
 }
-[data-bp-mode='dark'] .bp-activity-bell:hover {
-  color: #00D4FF;
+[data-bp-mode="dark"] .bp-activity-bell:hover {
+  color: #00d4ff;
   background: rgba(0, 212, 255, 0.08);
 }
 
@@ -654,7 +708,7 @@ pre,
 .bp-header {
   background: rgba(255, 255, 255, 0.85) !important;
   backdrop-filter: blur(12px);
-  border-bottom: 1px solid #E8EDF4 !important;
+  border-bottom: 1px solid #e8edf4 !important;
   height: 44px !important;
   line-height: 44px !important;
   padding: 0 24px !important;
@@ -668,22 +722,22 @@ pre,
   align-items: center;
   gap: 8px;
   font-size: 13px;
-  color: #5A6A80;
+  color: #5a6a80;
 }
 
 .bp-header-crumbs .bp-crumb-sep {
-  color: #B8C4D4;
+  color: #b8c4d4;
   font-size: 11px;
 }
 
 .bp-header-crumbs .bp-crumb-current {
-  color: #1A2332;
+  color: #1a2332;
   font-weight: 600;
   font-size: 14px;
 }
 
 .bp-header-crumbs .bp-crumb-link {
-  color: #00D4FF;
+  color: #00d4ff;
   cursor: pointer;
   text-decoration: none;
   transition: opacity 0.15s;
@@ -699,8 +753,8 @@ pre,
   align-items: center;
   gap: 12px;
   font-size: 12px;
-  color: #8B99AC;
-  font-family: 'JetBrains Mono', monospace;
+  color: #8b99ac;
+  font-family: "JetBrains Mono", monospace;
 }
 
 /* ---------- 主区域 Content ---------- */
@@ -711,7 +765,7 @@ pre,
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  background: #F4F6FA !important;
+  background: #f4f6fa !important;
 }
 
 /* ---------- 页面进入动效 ---------- */
@@ -732,12 +786,16 @@ pre,
 
 /* ---------- 卡片 hover 微位移 ---------- */
 .ant-card {
-  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+  transition:
+    box-shadow 0.2s ease,
+    border-color 0.2s ease;
   border-radius: 4px !important;
 }
 
 .ant-card:hover {
-  box-shadow: 0 2px 6px rgba(15, 43, 79, 0.06), 0 4px 16px rgba(15, 43, 79, 0.05) !important;
+  box-shadow:
+    0 2px 6px rgba(15, 43, 79, 0.06),
+    0 4px 16px rgba(15, 43, 79, 0.05) !important;
 }
 
 /* ---------- 按钮 hover 微动效 ---------- */
@@ -768,13 +826,13 @@ pre,
   background: transparent;
 }
 .ant-layout-content::-webkit-scrollbar-thumb {
-  background: #D8DFE8;
+  background: #d8dfe8;
   border-radius: 5px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 .ant-layout-content::-webkit-scrollbar-thumb:hover {
-  background: #B8C4D4;
+  background: #b8c4d4;
   background-clip: content-box;
   border: 2px solid transparent;
 }
@@ -799,7 +857,7 @@ pre,
 .scroll-area {
   /* 让滚动条占位不闪烁 */
   scrollbar-gutter: stable;
-  scrollbar-width: thin;           /* Firefox */
+  scrollbar-width: thin; /* Firefox */
   scrollbar-color: #bfbfbf transparent;
   /* ✅ 性能优化：布局/样式包含。长列表（目录树 260 节点、事实数百条、章节日志）
      滚动时，浏览器可以把 layout/style 重算边界限制在滚动容器内，不必波及整页。
@@ -871,7 +929,10 @@ pre,
 .ant-tabs.swb-tabs-flex,
 .ant-tabs.swb-tabs-flex > .ant-tabs-content-holder,
 .ant-tabs.swb-tabs-flex > .ant-tabs-content-holder > .ant-tabs-content,
-.ant-tabs.swb-tabs-flex > .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane:not(.ant-tabs-tabpane-hidden) {
+.ant-tabs.swb-tabs-flex
+  > .ant-tabs-content-holder
+  > .ant-tabs-content
+  > .ant-tabs-tabpane:not(.ant-tabs-tabpane-hidden) {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
@@ -884,7 +945,10 @@ pre,
    .ant-tabs-tabpane-hidden 隐藏规则，导致切换 Tab 时多个功能面板内容
    同时堆叠显示（全局事实/目录生成/正文生成内容叠在同一个页面里）——
    这正是「导航栏内功能混乱」的直接观感来源。 */
-.ant-tabs.swb-tabs-flex > .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane.ant-tabs-tabpane-hidden {
+.ant-tabs.swb-tabs-flex
+  > .ant-tabs-content-holder
+  > .ant-tabs-content
+  > .ant-tabs-tabpane.ant-tabs-tabpane-hidden {
   display: none !important;
 }
 
@@ -1002,14 +1066,20 @@ pre,
   min-width: 0;
   min-height: 0;
 }
-.ant-tabs.swb-import-sub-tabs > .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane:not(.ant-tabs-tabpane-hidden) {
+.ant-tabs.swb-import-sub-tabs
+  > .ant-tabs-content-holder
+  > .ant-tabs-content
+  > .ant-tabs-tabpane:not(.ant-tabs-tabpane-hidden) {
   display: flex !important;
   flex-direction: column !important;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
 }
-.ant-tabs.swb-import-sub-tabs > .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane.ant-tabs-tabpane-hidden {
+.ant-tabs.swb-import-sub-tabs
+  > .ant-tabs-content-holder
+  > .ant-tabs-content
+  > .ant-tabs-tabpane.ant-tabs-tabpane-hidden {
   display: none !important;
 }
 
@@ -1017,7 +1087,7 @@ pre,
 .ant-tree {
   min-height: 0;
   height: 100%;
-  overflow: hidden;  /* 裁剪子元素溢出 */
+  overflow: hidden; /* 裁剪子元素溢出 */
 }
 /* ant-tree 直接子层：ant-tree-list / ant-tree-treenode 等都要能跟随父 */
 .ant-tree > .ant-tree-list {
@@ -1043,7 +1113,7 @@ pre,
   min-height: 0;
   flex: 1 1 auto;
   width: 100%;
-  overflow: hidden;  /* 防止页面整体滚，让内部子区自己滚 */
+  overflow: hidden; /* 防止页面整体滚，让内部子区自己滚 */
 }
 
 /* antd Table 在 flex 父里：给个高度锚点，让 ant-table-body 能撑满 */
@@ -1069,76 +1139,80 @@ pre,
    CSS 变量（语义化）—— 亮色默认，暗色在 [data-bp-mode='dark'] 下覆盖
    ================================================================ */
 :root {
-  --bp-primary: #00D4FF;
-  --bp-text: #1A2332;
-  --bp-text-secondary: #5A6A80;
-  --bp-text-tertiary: #8B99AC;
-  --bp-bg-layout: #F4F6FA;
-  --bp-bg-container: #FFFFFF;
-  --bp-border: #E8EDF4;
-  --bp-border-strong: #D8DFE8;
+  --bp-primary: #00d4ff;
+  --bp-text: #1a2332;
+  --bp-text-secondary: #5a6a80;
+  --bp-text-tertiary: #8b99ac;
+  --bp-bg-layout: #f4f6fa;
+  --bp-bg-container: #ffffff;
+  --bp-border: #e8edf4;
+  --bp-border-strong: #d8dfe8;
 }
-[data-bp-mode='dark'] {
-  --bp-primary: #00D4FF;
-  --bp-text: #D8E6F4;
-  --bp-text-secondary: #9AB4D0;
-  --bp-text-tertiary: #6F87A5;
-  --bp-bg-layout: #0A1626;
-  --bp-bg-container: #12243D;
-  --bp-border: #1F3854;
+[data-bp-mode="dark"] {
+  --bp-primary: #00d4ff;
+  --bp-text: #d8e6f4;
+  --bp-text-secondary: #9ab4d0;
+  --bp-text-tertiary: #6f87a5;
+  --bp-bg-layout: #0a1626;
+  --bp-bg-container: #12243d;
+  --bp-border: #1f3854;
   --bp-border-strong: #284466;
 }
 
 /* ================================================================
    暗色模式 · 主区域覆盖
    ================================================================ */
-[data-bp-mode='dark'] .bp-content {
+[data-bp-mode="dark"] .bp-content {
   background: var(--bp-bg-layout) !important;
 }
-[data-bp-mode='dark'] .bp-header {
+[data-bp-mode="dark"] .bp-header {
   background: rgba(18, 36, 61, 0.85) !important;
-  border-bottom-color: #1F3854 !important;
+  border-bottom-color: #1f3854 !important;
 }
-[data-bp-mode='dark'] .bp-header-crumbs .bp-crumb-current { color: #D8E6F4; }
-[data-bp-mode='dark'] .bp-header-right { color: #6F87A5; }
+[data-bp-mode="dark"] .bp-header-crumbs .bp-crumb-current {
+  color: #d8e6f4;
+}
+[data-bp-mode="dark"] .bp-header-right {
+  color: #6f87a5;
+}
 
-[data-bp-mode='dark'] .ant-card {
-  background: #12243D !important;
-  border-color: #1F3854 !important;
+[data-bp-mode="dark"] .ant-card {
+  background: #12243d !important;
+  border-color: #1f3854 !important;
   color: var(--bp-text);
 }
-[data-bp-mode='dark'] .ant-table {
-  background: #12243D !important;
+[data-bp-mode="dark"] .ant-table {
+  background: #12243d !important;
   color: var(--bp-text);
 }
-[data-bp-mode='dark'] .ant-table-thead > tr > th {
-  background: #0F2B4F !important;
-  color: #9AB4D0 !important;
-  border-bottom-color: #1F3854 !important;
+[data-bp-mode="dark"] .ant-table-thead > tr > th {
+  background: #0f2b4f !important;
+  color: #9ab4d0 !important;
+  border-bottom-color: #1f3854 !important;
 }
-[data-bp-mode='dark'] .ant-table-tbody > tr > td {
-  border-bottom-color: #1F3854 !important;
+[data-bp-mode="dark"] .ant-table-tbody > tr > td {
+  border-bottom-color: #1f3854 !important;
 }
-[data-bp-mode='dark'] .ant-table-tbody > tr:hover > td {
+[data-bp-mode="dark"] .ant-table-tbody > tr:hover > td {
   background: rgba(0, 212, 255, 0.06) !important;
 }
 
-[data-bp-mode='dark'] .bp-hero-flat {
+[data-bp-mode="dark"] .bp-hero-flat {
   border-color: #284466 !important;
 }
 
-[data-bp-mode='dark'] .ant-btn-default {
-  background: #12243D;
+[data-bp-mode="dark"] .ant-btn-default {
+  background: #12243d;
   border-color: #284466;
-  color: #D8E6F4;
+  color: #d8e6f4;
 }
-[data-bp-mode='dark'] .ant-input,
-[data-bp-mode='dark'] .ant-select-selector,
-[data-bp-mode='dark'] .ant-input-number,
-[data-bp-mode='dark'] .ant-input-affix-wrapper {
-  background: #0F2B4F !important;
+[data-bp-mode="dark"] .ant-input,
+[data-bp-mode="dark"] .ant-select-selector,
+[data-bp-mode="dark"] .ant-input-number,
+[data-bp-mode="dark"] .ant-input-affix-wrapper {
+  background: #0f2b4f !important;
   border-color: #284466 !important;
-  color: #D8E6F4 !important;
+  color: #d8e6f4 !important;
 }
 
 /* ================================================================
@@ -1211,7 +1285,9 @@ pre,
     min-width: 0;
     flex-wrap: wrap;
   }
-  .bp-header-right span:not(.bp-toggle-text) { display: none; }
+  .bp-header-right span:not(.bp-toggle-text) {
+    display: none;
+  }
   /* 全局消息中心在窄屏隐藏，只保留铃铛 */
   .bp-activity-chip {
     display: none !important;
@@ -1228,7 +1304,9 @@ pre,
     padding: 10px 12px !important;
     gap: 10px !important;
   }
-  .ant-table-wrapper { font-size: 12px; }
+  .ant-table-wrapper {
+    font-size: 12px;
+  }
   /* Hero 更紧凑 */
   .bp-hero {
     padding: 14px 12px !important;
@@ -1324,7 +1402,8 @@ pre,
     margin-inline: 0 !important;
   }
   /* 触屏最小可点击高度提升 */
-  button, .ant-btn {
+  button,
+  .ant-btn {
     min-height: 40px;
   }
 }

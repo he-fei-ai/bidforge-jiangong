@@ -2,7 +2,11 @@ import { FactsExtractProgressCard } from "./FactsExtractProgressCard.tsx";
 import { PauseOutlined, PlayCircleOutlined, StopOutlined } from "@ant-design/icons";
 import { Button, Tag } from "antd";
 
-export function TaskControlButtons({ paused, stopping, onControl }: {
+export function TaskControlButtons({
+  paused,
+  stopping,
+  onControl,
+}: {
   paused: boolean;
   stopping: boolean;
   onControl: (action: "pause" | "resume" | "stop") => void;

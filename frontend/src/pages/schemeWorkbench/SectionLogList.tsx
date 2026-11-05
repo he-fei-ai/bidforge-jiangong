@@ -1,9 +1,20 @@
 import { chartDropTexts, type SectionLogItem } from "../../utils/contentEvents";
-import { STANDARD_LABELS, issueLabel, reportHasIssues, reportIssueCount } from "../../utils/contentStandard";
+import {
+  STANDARD_LABELS,
+  issueLabel,
+  reportHasIssues,
+  reportIssueCount,
+} from "../../utils/contentStandard";
 import { ElapsedTimer } from "./ElapsedTimer.tsx";
 import { GenerationProgressCard, OUTLINE_LOG_RENDER_MAX } from "./GenerationProgressCard.tsx";
 import { STAGE_COLOR } from "./outlineTreeModel.ts";
-import { CheckCircleOutlined, CloseCircleOutlined, ExclamationCircleOutlined, LoadingOutlined, MinusCircleOutlined } from "@ant-design/icons";
+import {
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  ExclamationCircleOutlined,
+  LoadingOutlined,
+  MinusCircleOutlined,
+} from "@ant-design/icons";
 import { List, Popover, Progress, Tag, Tooltip } from "antd";
 import { memo, useMemo } from "react";
 import { Typography } from "antd";
@@ -35,9 +46,10 @@ export const SectionLogList = memo(function SectionLogList({ items }: { items: S
   // 并限制渲染行数（数据源 items 本身不动，完成统计等在 GenerationProgressCard
   // 内基于完整历史计算，不受影响）。
   const visibleItems = useMemo(
-    () => (items.length > SECTION_LOG_RENDER_MAX
-      ? items.slice(-SECTION_LOG_RENDER_MAX).reverse()
-      : [...items].reverse()),
+    () =>
+      items.length > SECTION_LOG_RENDER_MAX
+        ? items.slice(-SECTION_LOG_RENDER_MAX).reverse()
+        : [...items].reverse(),
     [items],
   );
   return (
@@ -45,7 +57,15 @@ export const SectionLogList = memo(function SectionLogList({ items }: { items: S
       size="small"
       dataSource={visibleItems}
       renderItem={(item) => (
-        <List.Item key={item.section_id || item.title} style={{ padding: "4px 8px", background: SECTION_LOG_BG[item.status], borderRadius: 4, marginBottom: 4 }}>
+        <List.Item
+          key={item.section_id || item.title}
+          style={{
+            padding: "4px 8px",
+            background: SECTION_LOG_BG[item.status],
+            borderRadius: 4,
+            marginBottom: 4,
+          }}
+        >
           <div style={{ width: "100%" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               {SECTION_LOG_ICON[item.status]}
@@ -54,12 +74,7 @@ export const SectionLogList = memo(function SectionLogList({ items }: { items: S
                   {item.index}/{item.total}
                 </Tag>
               )}
-              <Text
-                strong
-                ellipsis
-                style={{ flex: 1, fontSize: 13 }}
-                title={item.title}
-              >
+              <Text strong ellipsis style={{ flex: 1, fontSize: 13 }} title={item.title}>
                 {item.title}
               </Text>
               {/* ✅ 进度增强：进行中章节显示当前阶段（AI 生成中 / 续写扩充中 …），
@@ -78,8 +93,8 @@ export const SectionLogList = memo(function SectionLogList({ items }: { items: S
                     item.word_status === "under"
                       ? "orange"
                       : item.word_status === "over"
-                      ? "red"
-                      : "success"
+                        ? "red"
+                        : "success"
                   }
                   style={{ margin: 0, fontSize: 11, flexShrink: 0 }}
                 >
@@ -87,8 +102,8 @@ export const SectionLogList = memo(function SectionLogList({ items }: { items: S
                   {item.word_status === "under"
                     ? "（偏少）"
                     : item.word_status === "over"
-                    ? "（超字，可压缩）"
-                    : ""}
+                      ? "（超字，可压缩）"
+                      : ""}
                 </Tag>
               )}
               {/* ✅ 续写失败信号：发生过续写调用失败/产出被丢弃且最终仍不达标，
@@ -102,19 +117,26 @@ export const SectionLogList = memo(function SectionLogList({ items }: { items: S
               )}
               {/* ✅ 质量告警（后端 section_done.quality_issues）：本章正文存在程序化
                   质检问题（如未闭合代码块、章节重复标题等），即时提示可复查 */}
-              {item.status === "success" && Array.isArray(item.quality_issues) && item.quality_issues.length > 0 && (
-                <Tooltip title={(item.quality_issues as Array<{ message?: unknown; detail?: unknown }>).map((q) => String(q?.message || q?.detail || q)).join("；")}>
-                  <Tag color="gold" style={{ margin: 0, fontSize: 11, flexShrink: 0 }}>
-                    质量告警 {item.quality_issues.length}
-                  </Tag>
-                </Tooltip>
-              )}
+              {item.status === "success" &&
+                Array.isArray(item.quality_issues) &&
+                item.quality_issues.length > 0 && (
+                  <Tooltip
+                    title={(item.quality_issues as Array<{ message?: unknown; detail?: unknown }>)
+                      .map((q) => String(q?.message || q?.detail || q))
+                      .join("；")}
+                  >
+                    <Tag color="gold" style={{ margin: 0, fontSize: 11, flexShrink: 0 }}>
+                      质量告警 {item.quality_issues.length}
+                    </Tag>
+                  </Tooltip>
+                )}
               {/* ✅ R49：本章图表产出闭环（后端 section_done 实时下发）。
                   「配图 N」回答本章配了几张图；出现删图时改为「配图 N（已删 M）」并挂
                   Tooltip 列出每张图的删除理由 —— 用户在生成过程中即可解释
                   「为什么正文里少了几张图」，不必等整批结束翻报告或去 grep 后端日志。
                   零图表且无删图的普通章节不占位（那是最常见的正常情况）。 */}
-              {item.status === "success" && item.chart_yield &&
+              {item.status === "success" &&
+                item.chart_yield &&
                 (item.chart_yield.chart_count > 0 || item.chart_yield.charts_dropped_count > 0) &&
                 (() => {
                   const cy = item.chart_yield!;
@@ -167,7 +189,10 @@ export const SectionLogList = memo(function SectionLogList({ items }: { items: S
                     </div>
                   }
                 >
-                  <Tag color="volcano" style={{ margin: 0, fontSize: 11, flexShrink: 0, cursor: "help" }}>
+                  <Tag
+                    color="volcano"
+                    style={{ margin: 0, fontSize: 11, flexShrink: 0, cursor: "help" }}
+                  >
                     标准告警 {reportIssueCount(item.standard_report)}
                   </Tag>
                 </Popover>

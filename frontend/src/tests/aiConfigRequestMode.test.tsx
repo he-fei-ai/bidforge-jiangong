@@ -19,14 +19,21 @@ import { App as AntdApp } from "antd";
 // jsdom 缺 matchMedia / ResizeObserver，antd 的 Table / Select 会用到
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
   });
 }
 if (!(globalThis as any).ResizeObserver) {
   (globalThis as any).ResizeObserver = class {
-    observe() {} unobserve() {} disconnect() {}
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   };
 }
 
@@ -105,7 +112,11 @@ beforeEach(() => {
           base_url: "https://api.deepseek.com/v1",
           model: "deepseek-chat",
           plans: {
-            pay_as_you_go: { label: "按量计费", base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+            pay_as_you_go: {
+              label: "按量计费",
+              base_url: "https://api.deepseek.com/v1",
+              model: "deepseek-chat",
+            },
           },
         },
       },
@@ -118,7 +129,9 @@ beforeEach(() => {
       providers: {
         deepseek: {
           label: "DeepSeek",
-          models: [{ value: "deepseek-chat", label: "DeepSeek-V3", context: "64K", recommended: true }],
+          models: [
+            { value: "deepseek-chat", label: "DeepSeek-V3", context: "64K", recommended: true },
+          ],
           description: "国产高性价比大模型",
           website: "https://platform.deepseek.com",
           pricing: "输入¥0.5/百万Token",

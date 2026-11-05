@@ -26,8 +26,7 @@ export interface GenericResidualHit {
 const MAX_SHOWN = 5;
 
 export function genericResidualHits(data: unknown): GenericResidualHit[] {
-  const raw = (data as { generic_residual?: unknown } | null | undefined)
-    ?.generic_residual;
+  const raw = (data as { generic_residual?: unknown } | null | undefined)?.generic_residual;
   return Array.isArray(raw) ? (raw as GenericResidualHit[]) : [];
 }
 
@@ -35,9 +34,7 @@ export function genericResidualHits(data: unknown): GenericResidualHit[] {
 export function genericResidualNotice(data: unknown): string {
   const hits = genericResidualHits(data);
   if (!hits.length) return "";
-  const titles = hits
-    .map((h) => String(h?.title ?? "").trim())
-    .filter((t) => t.length > 0);
+  const titles = hits.map((h) => String(h?.title ?? "").trim()).filter((t) => t.length > 0);
   const shown = titles.slice(0, MAX_SHOWN).join("、") || "（空标题）";
   const more = titles.length > MAX_SHOWN ? ` 等 ${titles.length} 处` : "";
   return (
@@ -48,8 +45,7 @@ export function genericResidualNotice(data: unknown): string {
 
 /** 自动改写条数：仅接受正整数（数字或纯数字字符串），其余一律 0。 */
 export function genericAutofixedCount(data: unknown): number {
-  const raw = (data as { generic_autofixed?: unknown } | null | undefined)
-    ?.generic_autofixed;
+  const raw = (data as { generic_autofixed?: unknown } | null | undefined)?.generic_autofixed;
   if (typeof raw === "number") {
     return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
   }
@@ -75,5 +71,25 @@ export function genericAutofixNotice(data: unknown): string {
   return (
     `目录保存时已自动改写 ${n} 处占位/泛化标题（只改标题，不增删章节），` +
     `请核对改写后的名称是否符合预期`
+  );
+}
+
+/** ✅ D-09（R176 · 2026-11-04）：后端落库前自动改写**未执行**（异常/超时）时
+ *  返回提示文案；否则空串。
+ *
+ * 背景：后端 `sections._save_outline_to_db` / `upload_outline.save_as_outline`
+ * 的自动重写是 fail-soft——失败时按原样保存且**不阻断**。此前失败只写后端
+ * 日志，前端只看到「保存成功」，不知道占位标题仍留在目录里。后端加法式回传
+ * `generic_autofix_failed=true`（仅失败时才有该键），本函数把它变成可操作提示。
+ *
+ * 契约：无键 / 非 true ⇒ 空串（旧后端向后兼容，不产生任何噪声）。
+ */
+export function genericAutofixFailedNotice(data: unknown): string {
+  const raw = (data as { generic_autofix_failed?: unknown } | null | undefined)
+    ?.generic_autofix_failed;
+  if (raw !== true && raw !== "true") return "";
+  return (
+    "标题自动重写未执行（服务繁忙或超时），目录已按原样保存 —— " +
+    "若目录中存在「专项6」「总体实施策划（2）」之类的占位标题，请手动改名后重新保存"
   );
 }

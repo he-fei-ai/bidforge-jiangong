@@ -5,7 +5,10 @@ import { sourceNotice } from "../../utils/parseSourceNotice";
 import { isTerminalTaskStatus } from "../../utils/contentEvents";
 import {
   recomputeBaSummary,
-  type BaItemDef, type BaStoredItem, type BaSummary, type BaTextStats,
+  type BaItemDef,
+  type BaStoredItem,
+  type BaSummary,
+  type BaTextStats,
 } from "../../utils/bidAnalysis";
 import type { WorkflowTabKey } from "../../utils/workflowDerived";
 import { pollTaskUntilTerminalImpl, type TaskTerminalInfo } from "./taskPolling.ts";
@@ -34,21 +37,28 @@ type BaSseCompletedResult = {
 
 /** 后端 SSE 事件形态（backend routers/bid_analysis.py，按 type 判别；字段按本 hook 消费值推导） */
 type BaSseEvent =
-  | { type: "item_update"; item_id: string; status?: string; content?: string; error?: string; progress?: number }
+  | {
+      type: "item_update";
+      item_id: string;
+      status?: string;
+      content?: string;
+      error?: string;
+      progress?: number;
+    }
   | { type: "heartbeat"; progress?: number; message?: string }
   | {
-    type: "text_stats";
-    total_chars?: number;
-    segment_count?: number;
-    item_count?: number;
-    est_model_calls?: number;
-    chunk_size?: number;
-    source_truncated?: boolean;
-    truncated_docs?: Array<{ name?: string; category?: string; chars?: number }>;
-    used_doc_count?: number;
-    input_doc_count?: number;
-    dropped_doc_count?: number;
-  }
+      type: "text_stats";
+      total_chars?: number;
+      segment_count?: number;
+      item_count?: number;
+      est_model_calls?: number;
+      chunk_size?: number;
+      source_truncated?: boolean;
+      truncated_docs?: Array<{ name?: string; category?: string; chars?: number }>;
+      used_doc_count?: number;
+      input_doc_count?: number;
+      dropped_doc_count?: number;
+    }
   | { type: "completed"; result?: BaSseCompletedResult }
   | { type: "error"; error?: string }
   | { type: "cancelled"; message?: string };
@@ -97,15 +107,35 @@ export interface BidAnalysisDeps {
 
 export function useBidAnalysis(deps: BidAnalysisDeps) {
   const {
-    id, schemeProjectId, msg,
-    baSseAbortRef, setBaRunning, setBaProgress, setBaProgressMsg,
-    setBaTextStats, setBaItems, baItems, baDefsRef, setBaSummary,
-    setSelectedBaItem, loadBaResults, autoJumpFrom,
-    baStoppingRef, setBaStopping,
-    sectionChecking, setSectionChecking, setSectionCheckResult,
-    baEditItem, setBaEditItem, baEditValue, setBaEditValue,
-    setBaEditSaving, setBaConfigOpen,
-    baModeOpt, baSelectedIds, baForceRerun,
+    id,
+    schemeProjectId,
+    msg,
+    baSseAbortRef,
+    setBaRunning,
+    setBaProgress,
+    setBaProgressMsg,
+    setBaTextStats,
+    setBaItems,
+    baItems,
+    baDefsRef,
+    setBaSummary,
+    setSelectedBaItem,
+    loadBaResults,
+    autoJumpFrom,
+    baStoppingRef,
+    setBaStopping,
+    sectionChecking,
+    setSectionChecking,
+    setSectionCheckResult,
+    baEditItem,
+    setBaEditItem,
+    baEditValue,
+    setBaEditValue,
+    setBaEditSaving,
+    setBaConfigOpen,
+    baModeOpt,
+    baSelectedIds,
+    baForceRerun,
   } = deps;
 
   /**
@@ -113,99 +143,108 @@ export function useBidAnalysis(deps: BidAnalysisDeps) {
    * 事件契约（backend routers/bid_analysis.py）：
    *   item_update {item_id,status,progress,content?,error?} / heartbeat / completed / error / cancelled
    */
-  const runBaSse = useCallback(async (opts: {
-    mode: "key" | "full" | "custom" | "item";
-    selectedItemIds?: string[];
-    forceRerun?: boolean;
-  }) => {
-    if (!id || baSseAbortRef.current) return;
-    const ac = new AbortController();
-    baSseAbortRef.current = ac;
-    setBaRunning(true);
-    setBaProgress(0);
-    setBaProgressMsg("正在连接 AI...");
-    // 清空上一轮提取规模（避免「本轮尚未切段却显示上轮调用数」的误导）
-    setBaTextStats(null);
-    try {
-      const { path, params } = bidAnalysisApi.startSse(id, schemeProjectId, opts);
-      for await (const raw of sseGetStream(path, { params, signal: ac.signal })) {
-        if (ac.signal.aborted) break;
-        // 后端 SSE 契约（backend routers/bid_analysis.py）：循环体内一次性断言到已知事件形态
-        const evt = raw as BaSseEvent;
-        const t = evt?.type;
-        if (t === "item_update") {
-          setBaItems((prev) => {
-            const idx = prev.findIndex((i) => i.item_id === evt.item_id);
-            const patch: BaStoredItem = { item_id: evt.item_id, status: evt.status };
-            if (evt.content) patch.content = evt.content;
-            if (evt.error) patch.error = evt.error;
-            if (idx >= 0) {
-              const cp = [...prev];
-              cp[idx] = { ...cp[idx], ...patch };
-              return cp;
+  const runBaSse = useCallback(
+    async (opts: {
+      mode: "key" | "full" | "custom" | "item";
+      selectedItemIds?: string[];
+      forceRerun?: boolean;
+    }) => {
+      if (!id || baSseAbortRef.current) return;
+      const ac = new AbortController();
+      baSseAbortRef.current = ac;
+      setBaRunning(true);
+      setBaProgress(0);
+      setBaProgressMsg("正在连接 AI...");
+      // 清空上一轮提取规模（避免「本轮尚未切段却显示上轮调用数」的误导）
+      setBaTextStats(null);
+      try {
+        const { path, params } = bidAnalysisApi.startSse(id, schemeProjectId, opts);
+        for await (const raw of sseGetStream(path, { params, signal: ac.signal })) {
+          if (ac.signal.aborted) break;
+          // 后端 SSE 契约（backend routers/bid_analysis.py）：循环体内一次性断言到已知事件形态
+          const evt = raw as BaSseEvent;
+          const t = evt?.type;
+          if (t === "item_update") {
+            setBaItems((prev) => {
+              const idx = prev.findIndex((i) => i.item_id === evt.item_id);
+              const patch: BaStoredItem = { item_id: evt.item_id, status: evt.status };
+              if (evt.content) patch.content = evt.content;
+              if (evt.error) patch.error = evt.error;
+              if (idx >= 0) {
+                const cp = [...prev];
+                cp[idx] = { ...cp[idx], ...patch };
+                return cp;
+              }
+              return [...prev, patch];
+            });
+            if (typeof evt.progress === "number") setBaProgress(evt.progress);
+          } else if (t === "heartbeat") {
+            if (typeof evt.progress === "number") setBaProgress(evt.progress);
+            if (evt.message) setBaProgressMsg(evt.message);
+          } else if (t === "text_stats") {
+            // 提取规模（切段后立即推送）：超长文档的真实消耗对用户必须可见
+            setBaTextStats({
+              total_chars: evt.total_chars ?? 0,
+              segment_count: evt.segment_count ?? 0,
+              item_count: evt.item_count ?? 0,
+              est_model_calls: evt.est_model_calls ?? 0,
+              chunk_size: evt.chunk_size ?? 0,
+              // 提取依据完整性：任一文档被截断/预算不足被跳过时，
+              // 「提取结果不可信」必须在提取结果区显性提示，而不是只藏在后端日志里
+              source_truncated: !!evt.source_truncated,
+              truncated_docs: evt.truncated_docs ?? [],
+              used_doc_count: evt.used_doc_count ?? 0,
+              input_doc_count: evt.input_doc_count ?? 0,
+              dropped_doc_count: evt.dropped_doc_count ?? 0,
+            });
+          } else if (t === "completed") {
+            // 兜底前先断言到含可选字段的 result 契约，{} 兜底与取属性逻辑保持原样
+            const r: BaSseCompletedResult = evt.result || {};
+            // 后端把截断报告一并放进 completed 的 result，作为 SSE 中断时的兜底
+            if (r.source_truncated) {
+              const n = sourceNotice(r);
+              if (n) msg.warning(n.title + (n.detail ? `（${n.detail}）` : ""));
             }
-            return [...prev, patch];
-          });
-          if (typeof evt.progress === "number") setBaProgress(evt.progress);
-        } else if (t === "heartbeat") {
-          if (typeof evt.progress === "number") setBaProgress(evt.progress);
-          if (evt.message) setBaProgressMsg(evt.message);
-        } else if (t === "text_stats") {
-          // 提取规模（切段后立即推送）：超长文档的真实消耗对用户必须可见
-          setBaTextStats({
-            total_chars: evt.total_chars ?? 0,
-            segment_count: evt.segment_count ?? 0,
-            item_count: evt.item_count ?? 0,
-            est_model_calls: evt.est_model_calls ?? 0,
-            chunk_size: evt.chunk_size ?? 0,
-            // 提取依据完整性：任一文档被截断/预算不足被跳过时，
-            // 「提取结果不可信」必须在提取结果区显性提示，而不是只藏在后端日志里
-            source_truncated: !!evt.source_truncated,
-            truncated_docs: evt.truncated_docs ?? [],
-            used_doc_count: evt.used_doc_count ?? 0,
-            input_doc_count: evt.input_doc_count ?? 0,
-            dropped_doc_count: evt.dropped_doc_count ?? 0,
-          });
-        } else if (t === "completed") {
-          // 兜底前先断言到含可选字段的 result 契约，{} 兜底与取属性逻辑保持原样
-          const r: BaSseCompletedResult = evt.result || {};
-          // 后端把截断报告一并放进 completed 的 result，作为 SSE 中断时的兜底
-          if (r.source_truncated) {
-            const n = sourceNotice(r);
-            if (n) msg.warning(n.title + (n.detail ? `（${n.detail}）` : ""));
+            if (r.ok) {
+              msg.success(`结构化提取完成（${r.completed || 0}/${r.total || 0} 项）`);
+              // ✅ 自动跳目录生成收紧为「key/full 且必选项齐备」（停止/报错/单项重跑不跳）
+              if (opts.mode === "key" || opts.mode === "full")
+                autoJumpFrom("import" as WorkflowTabKey, "outline");
+            } else {
+              const missing = (r.missing_required || []).join("、");
+              // 「缺失」有两种处置：AI 调用失败→等配额/网络恢复后单项重试；
+              // 资料确实缺失→补料后单项重试。因此提示必须指向「单项重新提取」，
+              // 而不是笼统的「提取完成但未全部完成」。
+              msg.warning(
+                `提取完成，但必选项未全部完成${missing ? `：${missing}` : ""}（可对缺项单项重新提取）`,
+              );
+            }
+          } else if (t === "error") {
+            msg.error(evt.error || "结构化提取失败");
+          } else if (t === "cancelled") {
+            msg.info(evt.message || "任务已取消");
           }
-          if (r.ok) {
-            msg.success(`结构化提取完成（${r.completed || 0}/${r.total || 0} 项）`);
-            // ✅ 自动跳目录生成收紧为「key/full 且必选项齐备」（停止/报错/单项重跑不跳）
-            if (opts.mode === "key" || opts.mode === "full") autoJumpFrom("import" as WorkflowTabKey, "outline");
-          } else {
-            const missing = (r.missing_required || []).join("、");
-            msg.warning(`提取完成，但必选项未全部完成${missing ? `：${missing}` : ""}`);
-          }
-        } else if (t === "error") {
-          msg.error(evt.error || "结构化提取失败");
-        } else if (t === "cancelled") {
-          msg.info(evt.message || "任务已取消");
         }
+      } catch (e) {
+        const err = e as { name?: string; message?: string };
+        if (err?.name !== "AbortError" && !ac.signal.aborted) {
+          msg.error(err.message || "结构化提取连接中断");
+        }
+      } finally {
+        if (baSseAbortRef.current === ac) baSseAbortRef.current = null;
+        setBaRunning(false);
+        // 收尾以服务端权威结果为准（item_update 只是乐观视图）
+        loadBaResults();
       }
-    } catch (e) {
-      const err = e as { name?: string; message?: string };
-      if (err?.name !== "AbortError" && !ac.signal.aborted) {
-        msg.error(err.message || "结构化提取连接中断");
-      }
-    } finally {
-      if (baSseAbortRef.current === ac) baSseAbortRef.current = null;
-      setBaRunning(false);
-      // 收尾以服务端权威结果为准（item_update 只是乐观视图）
-      loadBaResults();
-    }
-  }, [id, schemeProjectId, loadBaResults, msg]);
+    },
+    [id, schemeProjectId, loadBaResults, msg],
+  );
 
   /** 停止：四类任务共用 task_registry 控制链路（POST /sse/task/{id}/control） */
   const handleStopBa = useCallback(async () => {
     if (!id) return;
     // ✅ R106 FIX-4：同步锁 —— 旧实现可连点，且发完指令就乐观提示，用户不知道
-  //    任务是否真的退出了。现置灰按钮并轮询到终态才报「已停止」。
+    //    任务是否真的退出了。现置灰按钮并轮询到终态才报「已停止」。
     if (baStoppingRef.current) return;
     baStoppingRef.current = true;
     setBaStopping(true);
@@ -214,8 +253,8 @@ export function useBidAnalysis(deps: BidAnalysisDeps) {
       const t = (data.tasks || []).find(
         // 后端 /sse/tasks 任务项（api 层未泛型化，data 为 any）：按本处读取字段标注
         (x: { id?: string; task_type?: string; status?: string }) =>
-          x.task_type === "bid_analysis"
-          && (x.status === "running" || x.status === "paused"));
+          x.task_type === "bid_analysis" && (x.status === "running" || x.status === "paused"),
+      );
       if (!t) {
         msg.info("没有正在运行的结构化提取任务");
         // ✅ 列表可能滞后（任务刚结束）：顺带刷新结果，避免按钮一直显示可点
@@ -269,9 +308,12 @@ export function useBidAnalysis(deps: BidAnalysisDeps) {
   }, [id, schemeProjectId, sectionChecking, msg]);
 
   /** 单项重跑：mode=item 严格按勾选、不补全必选项、forceRerun=false（直接覆盖该项） */
-  const handleRerunItem = useCallback((def: BaItemDef) => {
-    runBaSse({ mode: "item", selectedItemIds: [def.item_id], forceRerun: false });
-  }, [runBaSse]);
+  const handleRerunItem = useCallback(
+    (def: BaItemDef) => {
+      runBaSse({ mode: "item", selectedItemIds: [def.item_id], forceRerun: false });
+    },
+    [runBaSse],
+  );
 
   // ===== ✅ 人工校正闭环（2026-09-23 复原，供「提取项目」与「解析信息分类显示栏」共用）=====
   /** 打开校正弹窗（载入当前项内容，json/markdown 均可编辑） */
@@ -307,7 +349,11 @@ export function useBidAnalysis(deps: BidAnalysisDeps) {
     setBaEditSaving(true);
     try {
       const { data } = await bidAnalysisApi.updateResult(
-        item.item_id!, id, content, schemeProjectId);
+        item.item_id!,
+        id,
+        content,
+        schemeProjectId,
+      );
       msg.success("已保存人工校正结果（优先于 AI 输出，下游目录/正文将使用该校正值）");
       // 以后端权威返回更新（item + summary），避免乐观更新与 DB 漂移
       if (data?.item) {
@@ -315,10 +361,13 @@ export function useBidAnalysis(deps: BidAnalysisDeps) {
         setBaItems((prev: BaStoredItem[]) => {
           const idx = prev.findIndex((i) => i.item_id === item.item_id);
           if (idx < 0) return [...prev, updated];
-          const cp = [...prev]; cp[idx] = { ...cp[idx], ...updated }; return cp;
+          const cp = [...prev];
+          cp[idx] = { ...cp[idx], ...updated };
+          return cp;
         });
         setSelectedBaItem((prev) =>
-          prev && prev.item_id === item.item_id ? { ...prev, ...updated } : prev);
+          prev && prev.item_id === item.item_id ? { ...prev, ...updated } : prev,
+        );
       }
       if (data?.summary) setBaSummary(data.summary);
       else setBaSummary(recomputeBaSummary(baItems, baDefsRef.current));
@@ -338,18 +387,20 @@ export function useBidAnalysis(deps: BidAnalysisDeps) {
     if (!item || !id) return;
     setBaEditSaving(true);
     try {
-      const { data } = await bidAnalysisApi.clearResult(
-        item.item_id!, id, schemeProjectId);
+      const { data } = await bidAnalysisApi.clearResult(item.item_id!, id, schemeProjectId);
       msg.success("已清空该项结果（回到待提取状态）");
       if (data?.item) {
         const updated = { ...item, ...data.item };
         setBaItems((prev: BaStoredItem[]) => {
           const idx = prev.findIndex((i) => i.item_id === item.item_id);
           if (idx < 0) return [...prev, updated];
-          const cp = [...prev]; cp[idx] = { ...cp[idx], ...updated }; return cp;
+          const cp = [...prev];
+          cp[idx] = { ...cp[idx], ...updated };
+          return cp;
         });
         setSelectedBaItem((prev) =>
-          prev && prev.item_id === item.item_id ? { ...prev, ...updated } : prev);
+          prev && prev.item_id === item.item_id ? { ...prev, ...updated } : prev,
+        );
       }
       if (data?.summary) setBaSummary(data.summary);
       else setBaSummary(recomputeBaSummary(baItems, baDefsRef.current));
@@ -378,7 +429,13 @@ export function useBidAnalysis(deps: BidAnalysisDeps) {
   }, [baModeOpt, baSelectedIds, baForceRerun, runBaSse, msg]);
 
   return {
-    runBaSse, handleStopBa, handleCheckSections, handleRerunItem,
-    openBaEdit, handleBaSaveEdit, handleBaClearEdit, handleStartBaFromConfig,
+    runBaSse,
+    handleStopBa,
+    handleCheckSections,
+    handleRerunItem,
+    openBaEdit,
+    handleBaSaveEdit,
+    handleBaClearEdit,
+    handleStartBaFromConfig,
   };
 }
