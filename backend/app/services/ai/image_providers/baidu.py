@@ -95,9 +95,7 @@ class BaiduAdapter(ImageProviderAdapter):
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
-                        image_url = (
-                            data.get("result", [{}])[0].get("url") if "result" in data else None
-                        )
+                        image_url = data.get("result", [{}])[0].get("url") if "result" in data else None
 
                         if image_url:
                             logger.info("Baidu AI 图像生成成功")

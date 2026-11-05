@@ -49,9 +49,7 @@ class HunyuanAdapter(ImageProviderAdapter):
     ) -> dict[str, Any]:
         """调用腾讯混元 API 生成图像（OpenAI 兼容格式）"""
         use_model = model or self.model
-        use_size = (
-            normalize_size(size or self.default_size, self.supported_sizes) or self.default_size
-        )
+        use_size = normalize_size(size or self.default_size, self.supported_sizes) or self.default_size
 
         payload: dict[str, Any] = {
             "model": use_model,
@@ -83,9 +81,7 @@ class HunyuanAdapter(ImageProviderAdapter):
                         data = await response.json()
                         image_urls = data.get("data", [])
                         if image_urls:
-                            image_url = (
-                                image_urls[0].get("url") if isinstance(image_urls, list) else None
-                            )
+                            image_url = image_urls[0].get("url") if isinstance(image_urls, list) else None
                         else:
                             image_url = None
 

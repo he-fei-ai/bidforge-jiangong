@@ -15,6 +15,7 @@
 ⚠️ 行为契约：函数**逐行搬迁、不做任何逻辑修改** —— 正文生成结果必须与搬迁前
 完全一致（由 tests/test_content_runtime.py 钉住 + 全量正文生成测试回归）。
 """
+
 from __future__ import annotations
 
 from app.services.content_standard import (
@@ -84,45 +85,45 @@ def build_chapter_user_content(
         user_content += (
             "【方案名称主要施工内容】（本章内容必须服务于其中对应的"
             "施工内容项；与本章无关的项不得写入）：\n"
-            f"{content_scope}\n")
+            f"{content_scope}\n"
+        )
     user_content += f"【上级章节链】：{parent_chain}\n"
     if parent_points:
         user_content += "【上级章节要点】：\n" + "\n".join(parent_points) + "\n"
     # 同级章节：明确告知"本层还有哪些兄弟章节、各自负责什么"。
     user_content += (
         "【同级章节（请避免内容重复）】：\n" + sibling_lines + "\n"
-        if sibling_lines else "【同级章节（请避免内容重复）】：（无）\n")
+        if sibling_lines
+        else "【同级章节（请避免内容重复）】：（无）\n"
+    )
     user_content += f"【当前章节编号】：{section_number}\n"
     user_content += f"【当前章节】：{leaf['title']} — {leaf.get('description', '')}\n"
     # 目标字数：调用方传入的提示文案优先，回落 "N字"（与旧实现逐字一致）。
     user_content += f"【目标字数】：{word_budget_hint or f'{word_budget}字'}\n"
     if prev_sibling_summary:
-        user_content += (
-            f"【前序同级章节结尾参考（衔接风格，勿重复）】：{prev_sibling_summary}\n")
+        user_content += f"【前序同级章节结尾参考（衔接风格，勿重复）】：{prev_sibling_summary}\n"
     # ✅ R102（G5）：文档序「前一章」结尾承接 —— 同级摘要的恒空链路补齐。
     #    逐章变化量 → 与同级摘要同处（都在逐章差异区），不破坏任何前缀语义。
     if prev_leaf_summary:
-        user_content += (
-            "【前一章正文结尾（文档直接前文，衔接勿重复）】：\n"
-            f"{prev_leaf_summary}\n")
+        user_content += "【前一章正文结尾（文档直接前文，衔接勿重复）】：\n" f"{prev_leaf_summary}\n"
     if facts_text:
         # 分段标签：必须 `【标签】：` 形式（G5 预算分配器切段依据）。
         user_content += (
-            "\n【全局事实变量（唯一可信数据源）】：\n"
-            + build_facts_header(eff_standard)
-            + f"{facts_text}\n")
+            "\n【全局事实变量（唯一可信数据源）】：\n" + build_facts_header(eff_standard) + f"{facts_text}\n"
+        )
     if knowledge_text:
         user_content += (
             "\n【项目知识库素材】：\n"
             "（企业管理制度/工艺要点/既有素材，"
             "与本项目相关的表述应遵循其口径，数据仍以上方全局事实为准）\n"
-            f"{knowledge_text}\n")
+            f"{knowledge_text}\n"
+        )
     # F-CONTENT-STANDARD: 生成标准 user 块（DB 定制模板缺占位符时的兜底通道）。
     user_content += "\n\n" + build_user_block(eff_standard)
     return user_content
-def resolve_system_variables(*, stable: bool, section_number: str,
-                            standards_text: str,
-                            subheading_rule: str) -> dict:
+
+
+def resolve_system_variables(*, stable: bool, section_number: str, standards_text: str, subheading_rule: str) -> dict:
     """决定注入 ``content_generation_system`` 模板的**逐章变量**取值（纯函数）。
 
     ✅ R57（2026-10-09）：从 ``sse_handlers._build_generation_context`` 下沉。
@@ -141,14 +142,12 @@ def resolve_system_variables(*, stable: bool, section_number: str,
     """
     if stable:
         return {"section_number": "", "standards_text": "", "subheading_rule": ""}
-    return {"section_number": section_number,
-            "standards_text": standards_text,
-            "subheading_rule": subheading_rule}
+    return {"section_number": section_number, "standards_text": standards_text, "subheading_rule": subheading_rule}
 
 
-def build_chapter_extras_block(*, section_number: str, standards_text: str,
-                               subheading_rule: str,
-                               chapter_checkpoint_block: str = "") -> str:
+def build_chapter_extras_block(
+    *, section_number: str, standards_text: str, subheading_rule: str, chapter_checkpoint_block: str = ""
+) -> str:
     """把从 system 中剥离出来的逐章提示内容，原样组装成本章任务差异的末段。
 
     ⚠️ 纪律：这里是**唯一**组装点 —— 若同时在 system 里保留一份，
@@ -247,18 +246,17 @@ def build_chapter_layered_messages(
         stable += (
             "【方案名称主要施工内容】（本章内容必须服务于其中对应的"
             "施工内容项；与本章无关的项不得写入）：\n"
-            f"{content_scope}\n")
+            f"{content_scope}\n"
+        )
     if facts_text:
-        stable += (
-            "\n【全局事实变量（唯一可信数据源）】：\n"
-            + build_facts_header(eff_standard)
-            + f"{facts_text}\n")
+        stable += "\n【全局事实变量（唯一可信数据源）】：\n" + build_facts_header(eff_standard) + f"{facts_text}\n"
     if knowledge_text:
         stable += (
             "\n【项目知识库素材】：\n"
             "（企业管理制度/工艺要点/既有素材，"
             "与本项目相关的表述应遵循其口径，数据仍以上方全局事实为准）\n"
-            f"{knowledge_text}\n")
+            f"{knowledge_text}\n"
+        )
     stable += "\n\n" + build_user_block(eff_standard)
 
     # ② 章节树上下文：同一父章节下**各兄弟章节逐字相同**
@@ -267,30 +265,30 @@ def build_chapter_layered_messages(
         tree += "【上级章节要点】：\n" + "\n".join(parent_points) + "\n"
     tree += (
         "【同级章节（请避免内容重复）】：\n" + sibling_lines + "\n"
-        if sibling_lines else "【同级章节（请避免内容重复）】：（无）\n")
+        if sibling_lines
+        else "【同级章节（请避免内容重复）】：（无）\n"
+    )
 
     # ③ 本章任务差异：每次请求唯一不同的部分，必须放在**最后**
     task = f"【当前章节编号】：{section_number}\n"
     task += f"【当前章节】：{leaf['title']} — {leaf.get('description', '')}\n"
     task += f"【目标字数】：{word_budget_hint or f'{word_budget}字'}\n"
     if prev_sibling_summary:
-        task += (
-            f"【前序同级章节结尾参考（衔接风格，勿重复）】：{prev_sibling_summary}\n")
+        task += f"【前序同级章节结尾参考（衔接风格，勿重复）】：{prev_sibling_summary}\n"
     # ✅ R102（G5）：文档序「前一章」结尾承接 —— 任务差异段（逐章变化量），
     #    不进稳定段，R57 前缀稳定语义不受影响；缺省空串时整段不存在。
     if prev_leaf_summary:
-        task += ("【前一章正文结尾（文档直接前文，衔接勿重复）】：\n"
-                 + (prev_leaf_summary if prev_leaf_summary.endswith("\n")
-                    else prev_leaf_summary + "\n"))
+        task += "【前一章正文结尾（文档直接前文，衔接勿重复）】：\n" + (
+            prev_leaf_summary if prev_leaf_summary.endswith("\n") else prev_leaf_summary + "\n"
+        )
     if chapter_extras:
         task += chapter_extras if chapter_extras.endswith("\n") else chapter_extras + "\n"
     if chapter_facts_text:
-        task += ("\n【本章专属事实（仅本章相关；整案通用事实见上方稳定上下文）】：\n"
-                 + (chapter_facts_text if chapter_facts_text.endswith("\n")
-                    else chapter_facts_text + "\n"))
+        task += "\n【本章专属事实（仅本章相关；整案通用事实见上方稳定上下文）】：\n" + (
+            chapter_facts_text if chapter_facts_text.endswith("\n") else chapter_facts_text + "\n"
+        )
     if chart_quota_hint:
-        task += (chart_quota_hint if chart_quota_hint.endswith("\n")
-                 else chart_quota_hint + "\n")
+        task += chart_quota_hint if chart_quota_hint.endswith("\n") else chart_quota_hint + "\n"
 
     segments = [s for s in (stable, tree, task) if s.strip()]
     user_content = "".join(segments)
@@ -330,16 +328,21 @@ def build_continuation_messages(
         {"role": "system", "content": cont_prompt},
         {"role": "user", "content": user_ctx},
         {"role": "assistant", "content": f"（前文已省略，以下为正文结尾部分）\n{cont_tail}"},
-        {"role": "user", "content": (
-            f"当前字数{wc}，目标{word_budget}字，请继续补充。"
-            f"补充后总字数上限为 {int(word_budget * total_cap_factor)} 字"
-            f"（不得超出，接近上限时自然收尾）。"
-            if wc < word_budget else
-            f"当前字数{wc}已达到目标字数，请仍以上文为基础继续补充实质性内容"
-            "（具体工序细节、控制要点、检验标准、安全注意事项等），"
-            f"但**补充后总字数不得超过 {int(word_budget * total_cap_factor)} 字**，"
-            "不要重复前文，不要输出图表代码块。")
-            + std_hint}]
+        {
+            "role": "user",
+            "content": (
+                f"当前字数{wc}，目标{word_budget}字，请继续补充。"
+                f"补充后总字数上限为 {int(word_budget * total_cap_factor)} 字"
+                f"（不得超出，接近上限时自然收尾）。"
+                if wc < word_budget
+                else f"当前字数{wc}已达到目标字数，请仍以上文为基础继续补充实质性内容"
+                "（具体工序细节、控制要点、检验标准、安全注意事项等），"
+                f"但**补充后总字数不得超过 {int(word_budget * total_cap_factor)} 字**，"
+                "不要重复前文，不要输出图表代码块。"
+            )
+            + std_hint,
+        },
+    ]
 
 
 def should_continue_round(
@@ -372,8 +375,7 @@ def should_continue_round(
     except (TypeError, ValueError):
         floor = 0
     under_line = max(budget * WORD_UNDER_RATIO, floor)
-    return ((wc < under_line or continue_count < min_passes)
-            and continue_count < max_rounds)
+    return (wc < under_line or continue_count < min_passes) and continue_count < max_rounds
 
 
 def continue_max_tokens(*, word_budget: int, wc: int) -> int:

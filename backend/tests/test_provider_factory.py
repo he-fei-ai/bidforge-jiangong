@@ -8,6 +8,7 @@
 - 验证 DB 修改后缓存未过期时返回旧值（缓存生效）
 - 验证缓存过期后返回新值（重新查库）
 """
+
 import app.services.ai.provider_factory as pf
 import pytest
 from app.services.ai.provider_factory import (
@@ -20,14 +21,21 @@ from app.services.ai.provider_factory import (
 # ============================================================
 # 辅助函数
 # ============================================================
-async def _insert_ai_config(db, cid="cfg1", provider="openai", is_active=1,
-                            api_key="sk-test", base_url="https://api.test.com/v1",
-                            model="gpt-4o"):
+async def _insert_ai_config(
+    db,
+    cid="cfg1",
+    provider="openai",
+    is_active=1,
+    api_key="sk-test",
+    base_url="https://api.test.com/v1",
+    model="gpt-4o",
+):
     """插入一条 ai_config 记录"""
     await db.execute(
         "INSERT INTO ai_config (id, provider_name, api_key_encrypted, base_url,"
         " model, is_active) VALUES (?,?,?,?,?,?)",
-        (cid, provider, api_key, base_url, model, is_active))
+        (cid, provider, api_key, base_url, model, is_active),
+    )
     await db.commit()
 
 
@@ -67,9 +75,7 @@ class TestLoadActiveConfig:
         assert cfg1["provider_name"] == "openai"
 
         # 修改 DB（但缓存未过期）
-        await db_conn.execute(
-            "UPDATE ai_config SET provider_name=? WHERE id=?",
-            ("deepseek", "cfg1"))
+        await db_conn.execute("UPDATE ai_config SET provider_name=? WHERE id=?", ("deepseek", "cfg1"))
         await db_conn.commit()
 
         cfg2 = await _load_active_config()
@@ -89,9 +95,7 @@ class TestLoadActiveConfig:
         assert cfg1["provider_name"] == "openai"
 
         # 修改 DB
-        await db_conn.execute(
-            "UPDATE ai_config SET provider_name=? WHERE id=?",
-            ("deepseek", "cfg1"))
+        await db_conn.execute("UPDATE ai_config SET provider_name=? WHERE id=?", ("deepseek", "cfg1"))
         await db_conn.commit()
 
         # 强制缓存过期
@@ -111,9 +115,9 @@ class TestLoadActiveConfig:
         try:
             pf.settings.ai_config_cache_ttl = 3600
             assert _config_cache_ttl() == 3600.0
-            pf.settings.ai_config_cache_ttl = 0        # 非法值回落默认
+            pf.settings.ai_config_cache_ttl = 0  # 非法值回落默认
             assert _config_cache_ttl() == 300.0
-            pf.settings.ai_config_cache_ttl = "abc"    # 脏值不抛异常
+            pf.settings.ai_config_cache_ttl = "abc"  # 脏值不抛异常
             assert _config_cache_ttl() == 300.0
         finally:
             pf.settings.ai_config_cache_ttl = old
@@ -122,14 +126,10 @@ class TestLoadActiveConfig:
         """多条活跃配置：取 updated_at 最新的一条"""
         await _insert_ai_config(db_conn, cid="old", provider="openai")
         # 手动设置 old 的 updated_at 为较早时间
-        await db_conn.execute(
-            "UPDATE ai_config SET updated_at=? WHERE id=?",
-            ("2024-01-01T00:00:00", "old"))
+        await db_conn.execute("UPDATE ai_config SET updated_at=? WHERE id=?", ("2024-01-01T00:00:00", "old"))
 
         await _insert_ai_config(db_conn, cid="new", provider="deepseek")
-        await db_conn.execute(
-            "UPDATE ai_config SET updated_at=? WHERE id=?",
-            ("2025-06-01T00:00:00", "new"))
+        await db_conn.execute("UPDATE ai_config SET updated_at=? WHERE id=?", ("2025-06-01T00:00:00", "new"))
         await db_conn.commit()
 
         cfg = await _load_active_config()
@@ -138,10 +138,8 @@ class TestLoadActiveConfig:
 
     async def test_ignores_inactive_config(self, db_conn):
         """仅 is_active=1 的配置被选中"""
-        await _insert_ai_config(db_conn, cid="active", provider="openai",
-                                is_active=1)
-        await _insert_ai_config(db_conn, cid="inactive", provider="deepseek",
-                                is_active=0)
+        await _insert_ai_config(db_conn, cid="active", provider="openai", is_active=1)
+        await _insert_ai_config(db_conn, cid="inactive", provider="deepseek", is_active=0)
         await db_conn.commit()
 
         cfg = await _load_active_config()
@@ -176,13 +174,12 @@ class TestLoadActiveConfig:
 
         # 设置 ts 使 now - ts 恰好 == TTL（边界）
         import time
+
         now = time.time()
         pf._config_cache["ts"] = now - _config_cache_ttl()  # 差值恰好 == TTL
 
         # 修改 DB 以区分缓存命中 vs 重新查库
-        await db_conn.execute(
-            "UPDATE ai_config SET provider_name=? WHERE id=?",
-            ("deepseek", "cfg1"))
+        await db_conn.execute("UPDATE ai_config SET provider_name=? WHERE id=?", ("deepseek", "cfg1"))
         await db_conn.commit()
 
         cfg2 = await _load_active_config()
@@ -191,13 +188,12 @@ class TestLoadActiveConfig:
 
     async def test_returns_dict_with_all_columns(self, db_conn):
         """返回的 dict 包含 ai_config 表的所有列"""
-        await _insert_ai_config(db_conn, cid="cfg1", provider="openai",
-                                api_key="enc-key", base_url="https://api.x.com/v1",
-                                model="gpt-4o")
+        await _insert_ai_config(
+            db_conn, cid="cfg1", provider="openai", api_key="enc-key", base_url="https://api.x.com/v1", model="gpt-4o"
+        )
 
         cfg = await _load_active_config()
         assert isinstance(cfg, dict)
         # 核心字段存在
-        for key in ("id", "provider_name", "api_key_encrypted", "base_url",
-                    "model", "is_active"):
+        for key in ("id", "provider_name", "api_key_encrypted", "base_url", "model", "is_active"):
             assert key in cfg

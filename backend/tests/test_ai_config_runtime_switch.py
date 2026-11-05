@@ -14,6 +14,7 @@
 5. 写入校验：非法字符集 / 未知厂商 → 400；空数组 = 全部恢复；
 6. 解析兼容 JSON 数组与逗号分隔（人工改库）两种写法，脏值跳过不判废整份设置。
 """
+
 import contextlib
 import json
 
@@ -29,6 +30,7 @@ def patch_write_tx_conn(db_conn, monkeypatch):
     @contextlib.asynccontextmanager
     async def _fake():
         yield db_conn
+
     monkeypatch.setattr(pf, "write_tx_conn", _fake)
 
 
@@ -43,20 +45,27 @@ def no_builtin_agnes(monkeypatch):
     monkeypatch.setattr(pf.settings, "agnes_api_key", "", raising=False)
 
 
-async def _insert(db, cid, provider="openai", model="gpt-4o", is_active=0,
-                  priority=0, key="sk-test", env=""):
+async def _insert(db, cid, provider="openai", model="gpt-4o", is_active=0, priority=0, key="sk-test", env=""):
     await db.execute(
         "INSERT INTO ai_config (id, provider_name, plan, api_key_encrypted, base_url,"
         " model, env, is_active, priority, concurrency) VALUES (?,?,?,?,?,?,?,?,?,4)",
-        (cid, provider, "pay_as_you_go", encrypt_api_key(key),
-         "https://api.test.com/v1", model, env, is_active, priority))
+        (
+            cid,
+            provider,
+            "pay_as_you_go",
+            encrypt_api_key(key),
+            "https://api.test.com/v1",
+            model,
+            env,
+            is_active,
+            priority,
+        ),
+    )
     await db.commit()
 
 
 async def _audits(db, action):
-    cur = await db.execute(
-        "SELECT * FROM ai_config_audit_logs WHERE action=? ORDER BY created_at ASC",
-        (action,))
+    cur = await db.execute("SELECT * FROM ai_config_audit_logs WHERE action=? ORDER BY created_at ASC", (action,))
     return [dict(r) for r in await cur.fetchall()]
 
 
@@ -108,6 +117,7 @@ class TestDisabledSkipsCandidates:
             return "ok", None
 
         import app.services.ai.provider_factory as _pf
+
         orig = _pf._attempt_candidate
         _pf._attempt_candidate = fake_attempt
         try:
@@ -128,11 +138,11 @@ class TestDisabledSkipsCandidates:
             return "ok", None
 
         import app.services.ai.provider_factory as _pf
+
         orig = _pf._attempt_candidate
         _pf._attempt_candidate = fake_attempt
         try:
-            out = await pf.chat_with_fallback([{"role": "user", "content": "hi"}],
-                                              scene="content_draft")
+            out = await pf.chat_with_fallback([{"role": "user", "content": "hi"}], scene="content_draft")
         finally:
             _pf._attempt_candidate = orig
         assert out == "ok"
@@ -204,8 +214,7 @@ class TestRuntimeRoutes:
 
     async def test_put_persists_and_audits(self, db_conn):
         await _insert(db_conn, "c1", provider="deepseek")
-        res = await ai_router.set_disabled_providers(
-            DisabledProvidersIn(providers=["deepseek", "zhipu"]), db=db_conn)
+        res = await ai_router.set_disabled_providers(DisabledProvidersIn(providers=["deepseek", "zhipu"]), db=db_conn)
         assert res["ok"] is True
         assert res["disabled_providers"] == ["deepseek", "zhipu"]
         assert res["warning"], "禁用「当前已配置」的厂商必须提示影响"
@@ -215,50 +224,47 @@ class TestRuntimeRoutes:
 
     async def test_put_all_configured_disabled_warns_hard(self, db_conn):
         await _insert(db_conn, "c1", provider="deepseek")
-        res = await ai_router.set_disabled_providers(
-            DisabledProvidersIn(providers=["deepseek"]), db=db_conn)
+        res = await ai_router.set_disabled_providers(DisabledProvidersIn(providers=["deepseek"]), db=db_conn)
         assert "全部" in res["warning"]
         assert (await ai_router.get_runtime(db=db_conn))["all_configured_disabled"] is True
 
     async def test_put_rejects_unknown_provider(self, db_conn):
         with pytest.raises(Exception):
             await ai_router.set_disabled_providers(
-                DisabledProvidersIn(providers=["not-a-real-provider-xyz"]), db=db_conn)
+                DisabledProvidersIn(providers=["not-a-real-provider-xyz"]), db=db_conn
+            )
 
     async def test_put_rejects_illegal_name(self, db_conn):
         with pytest.raises(Exception):
-            await ai_router.set_disabled_providers(
-                DisabledProvidersIn(providers=["bad name"]), db=db_conn)
+            await ai_router.set_disabled_providers(DisabledProvidersIn(providers=["bad name"]), db=db_conn)
 
     async def test_put_empty_restores_all(self, db_conn):
         await _insert(db_conn, "c1", provider="deepseek")
-        await ai_router.set_disabled_providers(
-            DisabledProvidersIn(providers=["deepseek"]), db=db_conn)
-        res = await ai_router.set_disabled_providers(
-            DisabledProvidersIn(providers=[]), db=db_conn)
+        await ai_router.set_disabled_providers(DisabledProvidersIn(providers=["deepseek"]), db=db_conn)
+        res = await ai_router.set_disabled_providers(DisabledProvidersIn(providers=[]), db=db_conn)
         assert res["disabled_providers"] == [] and res["warning"] == ""
         assert await pf.resolve_disabled_providers() == set()
 
     async def test_put_is_idempotent_and_deduped(self, db_conn):
         await _insert(db_conn, "c1", provider="deepseek")
         res = await ai_router.set_disabled_providers(
-            DisabledProvidersIn(providers=["deepseek", "deepseek", " deepseek "]),
-            db=db_conn)
+            DisabledProvidersIn(providers=["deepseek", "deepseek", " deepseek "]), db=db_conn
+        )
         assert res["disabled_providers"] == ["deepseek"]
 
     async def test_disabled_survives_manual_csv_edit(self, db_conn):
         """人工直接改库写成逗号分隔也必须被识别（运维常见操作）。"""
         await db_conn.execute(
             "INSERT INTO ai_runtime_settings (key, value) VALUES (?,?)",
-            (pf.RUNTIME_DISABLED_PROVIDERS_KEY, "deepseek, zhipu"))
+            (pf.RUNTIME_DISABLED_PROVIDERS_KEY, "deepseek, zhipu"),
+        )
         await db_conn.commit()
         pf.invalidate_config_cache()
         assert await pf.resolve_disabled_providers() == {"deepseek", "zhipu"}
 
     async def test_runtime_switch_visible_in_health(self, db_conn):
         await _insert(db_conn, "c1", provider="deepseek", is_active=1)
-        await ai_router.set_disabled_providers(
-            DisabledProvidersIn(providers=["deepseek"]), db=db_conn)
+        await ai_router.set_disabled_providers(DisabledProvidersIn(providers=["deepseek"]), db=db_conn)
         health = await ai_router.ai_health(db=db_conn)
         assert health["disabled_providers"] == ["deepseek"]
         assert "active_env" in health
@@ -269,10 +275,9 @@ class TestRuntimeRoutes:
 # ===========================================================================
 async def test_stored_value_is_json_array(db_conn):
     await _insert(db_conn, "c1", provider="deepseek")
-    await ai_router.set_disabled_providers(
-        DisabledProvidersIn(providers=["zhipu", "deepseek"]), db=db_conn)
+    await ai_router.set_disabled_providers(DisabledProvidersIn(providers=["zhipu", "deepseek"]), db=db_conn)
     cur = await db_conn.execute(
-        "SELECT value FROM ai_runtime_settings WHERE key=?",
-        (pf.RUNTIME_DISABLED_PROVIDERS_KEY,))
+        "SELECT value FROM ai_runtime_settings WHERE key=?", (pf.RUNTIME_DISABLED_PROVIDERS_KEY,)
+    )
     raw = (await cur.fetchone())[0]
     assert json.loads(raw) == ["deepseek", "zhipu"], "落库应为排序去重后的 JSON 数组"

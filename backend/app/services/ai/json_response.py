@@ -8,6 +8,7 @@
 - 目录生成：一级 → 逐章二三级（routers/sse_handlers.py，word_budget > 50000 时启用）；
 - 事实提取：文档分块逐块提取（services/facts_extractor.py，FACTS_CHUNK_RETRIES）。
 """
+
 import json
 import logging
 import re
@@ -46,8 +47,7 @@ OUTLINE_REPAIR_KEY = "outline_json_fix_system"
 FACTS_REPAIR_KEY = "facts_json_fix_system"
 
 
-def _build_repair_user_prompt(issues: list, raw: str,
-                             repair_key: str = GENERIC_REPAIR_KEY) -> str:
+def _build_repair_user_prompt(issues: list, raw: str, repair_key: str = GENERIC_REPAIR_KEY) -> str:
     """构造 JSON 修复 user 提示词。
 
     ✅ 统一提示词源：消费注册条目（DB 优先，可在前端编辑生效），
@@ -61,28 +61,29 @@ def _build_repair_user_prompt(issues: list, raw: str,
     （理由见 :data:`GENERIC_REPAIR_KEY`）。
     """
     try:
-        return render(repair_key,
-                      target_description="JSON 结果",
-                      issues=_format_json_issues(issues or ["JSON 语法错误，无法解析"]),
-                      invalid_content=raw or "")
+        return render(
+            repair_key,
+            target_description="JSON 结果",
+            issues=_format_json_issues(issues or ["JSON 语法错误，无法解析"]),
+            invalid_content=raw or "",
+        )
     except Exception:
-        return JSON_REPAIR_PROMPT.format(
-            issues=_format_json_issues(issues or ["JSON 语法错误，无法解析"]), raw=raw or "")
+        # ✅ R175（2026-11-03 · 修复 D3）：删除已漂移的内联兜底 ``JSON_REPAIR_PROMPT``。
+        #    旧内联文案与注册版措辞已不一致（「最小必要修改」vs「不要整体重写」等），
+        #    属第二事实源。现在渲染异常时改用**注册表原文**做朴素占位符替换，
+        #    全仓只保留注册表一份正文。
+        try:
+            from app.services.ai.prompts._registry import get_prompt as _get_generic
 
-
-# 回退精简版（仅当注册条目渲染异常时使用；正常链路消费 outline_json_fix_system）
-JSON_REPAIR_PROMPT = """你是一个严格的 JSON 修复助手。请根据给出的原始内容和校验问题，修复现有结果。要求：
-1. 优先在原结果基础上做最小必要修改，不要整体重写
-2. 尽量保留原有结构、字段值、节点顺序和已生成内容
-3. 若缺少必填字段，应结合现有上下文补齐合理内容，不要用空字符串敷衍
-4. 若存在多余说明、代码块包裹、字段名错误，应修正为合法 JSON
-5. 只返回修复后的完整 JSON，不要输出任何解释
-
-校验问题：
-{issues}
-
-原始内容：
-{raw}"""
+            _tpl = _get_generic(GENERIC_REPAIR_KEY)
+            return (
+                _tpl.replace("{target_description}", "JSON 结果")
+                .replace("{issues}", _format_json_issues(issues or ["JSON 语法错误，无法解析"]))
+                .replace("{invalid_content}", raw or "")
+            )
+        except Exception:  # noqa: BLE001
+            logger.error("JSON 修复提示词不可用（注册表缺失）", exc_info=True)
+            raise ValueError("JSON 修复提示词不可用：注册表缺少 %s" % GENERIC_REPAIR_KEY) from None
 
 
 def _extract_balanced(text: str) -> str | None:
@@ -126,7 +127,7 @@ def _extract_balanced(text: str) -> str | None:
         elif ch == close_ch:
             depth -= 1
             if depth == 0:
-                return text[start:i + 1]
+                return text[start : i + 1]
     return None
 
 
@@ -156,7 +157,7 @@ def extract_json(text: str) -> str | None:
             return result
         except json.JSONDecodeError:
             idx = remaining.find(result)
-            remaining = remaining[idx + len(result):]
+            remaining = remaining[idx + len(result) :]
 
     return candidates[0] if candidates else None
 
@@ -164,7 +165,7 @@ def extract_json(text: str) -> str | None:
 # JSON 字符串内的合法转义字符集合（JSON 规范 8.4）
 _JSON_ESCAPE_CHARS = set('"\\/bfnrt')
 # AI 常见的 markdown 风格转义（在 JSON 字符串里非法），应去掉反斜杠
-_MARKDOWN_ESCAPE_CHARS = set('.()[]{}#*+-_!<>|`')
+_MARKDOWN_ESCAPE_CHARS = set(".()[]{}#*+-_!<>|`")
 
 
 def _repair_json_string_escapes(content: str) -> str:
@@ -194,22 +195,22 @@ def _repair_json_string_escapes(content: str) -> str:
         if in_string:
             if escaped:
                 escaped = False
-                if ch == 'u' and i + 4 < n and all(c in '0123456789abcdefABCDEF' for c in content[i+1:i+5]):
+                if ch == "u" and i + 4 < n and all(c in "0123456789abcdefABCDEF" for c in content[i + 1 : i + 5]):
                     # 合法 unicode 转义：整个 \uXXXX 保留
-                    output.append(content[i-1:i+5])
+                    output.append(content[i - 1 : i + 5])
                     i += 5
                     continue
                 if ch in _JSON_ESCAPE_CHARS:
-                    output.append('\\')
+                    output.append("\\")
                     output.append(ch)
                 elif ch in _MARKDOWN_ESCAPE_CHARS:
                     # 去掉反斜杠，只输出裸字符
                     output.append(ch)
                 else:
                     # 兜底：变成 \\ + ch，保证 JSON 可解析
-                    output.append('\\\\')
+                    output.append("\\\\")
                     output.append(ch)
-            elif ch == '\\':
+            elif ch == "\\":
                 escaped = True
             elif ch == '"':
                 in_string = False
@@ -223,8 +224,8 @@ def _repair_json_string_escapes(content: str) -> str:
         i += 1
     # 末尾孤立反斜杠（上一轮循环 escaped=True 后遇到 EOF）：追加 \\
     if escaped:
-        output.append('\\\\')
-    return ''.join(output)
+        output.append("\\\\")
+    return "".join(output)
 
 
 def parse_and_validate(raw: str, validate_fn=None):
@@ -253,8 +254,7 @@ def parse_and_validate(raw: str, validate_fn=None):
         if repaired != js:
             try:
                 obj = json.loads(repaired)
-                logger.info(
-                    "JSON 本地修复成功（非法反斜杠）：原始错误=%s，已跳过 AI 修复轮", e)
+                logger.info("JSON 本地修复成功（非法反斜杠）：原始错误=%s，已跳过 AI 修复轮", e)
             except json.JSONDecodeError as e2:
                 return None, [f"JSON 语法错误（本地修复后仍失败）: {e2}"]
         else:
@@ -325,16 +325,19 @@ async def _call_chat_fn(chat_fn, messages: list, **kwargs) -> str:
     raise TypeError("chat_fn 签名不兼容")
 
 
-async def collect_json_response_with_chat(chat_fn, messages: list,
-                                          validate_fn=None,
-                                          max_retries: int = MAX_REPAIR_RETRIES,
-                                          *,
-                                          temperature: float | None = None,
-                                          json_mode: bool = False,
-                                          timeout: int | None = None,
-                                          repair_key: str = GENERIC_REPAIR_KEY,
-                                          scene: str = "",
-                                          max_tokens: int | None = None):
+async def collect_json_response_with_chat(
+    chat_fn,
+    messages: list,
+    validate_fn=None,
+    max_retries: int = MAX_REPAIR_RETRIES,
+    *,
+    temperature: float | None = None,
+    json_mode: bool = False,
+    timeout: int | None = None,
+    repair_key: str = GENERIC_REPAIR_KEY,
+    scene: str = "",
+    max_tokens: int | None = None,
+):
     """统一 JSON 收集**编排本体**：生成 → 解析 → 校验 → 定向修复 → 有界重试。
 
     ✅ R57（2026-10-09）：从 :func:`collect_json_response` 中抽出，使「AI 调用来源」
@@ -349,9 +352,15 @@ async def collect_json_response_with_chat(chat_fn, messages: list,
     """
     messages = _ensure_user_message(messages)
     try:
-        raw = await _call_chat_fn(chat_fn, messages, temperature=temperature,
-                                  json_mode=json_mode, timeout=timeout,
-                                  scene=scene, max_tokens=max_tokens)
+        raw = await _call_chat_fn(
+            chat_fn,
+            messages,
+            temperature=temperature,
+            json_mode=json_mode,
+            timeout=timeout,
+            scene=scene,
+            max_tokens=max_tokens,
+        )
     except Exception:
         # ✅ R48（2026-10-06 · 运行时指标）：首轮 AI 调用失败/降级 → 记一次场景失败。
         #    观测指标，不改变「原样 re-raise」的抛错语义。
@@ -370,18 +379,22 @@ async def collect_json_response_with_chat(chat_fn, messages: list,
     for attempt in range(max_retries):
         repair_msgs = list(messages) + [
             {"role": "assistant", "content": raw or ""},
-            {"role": "user", "content": _build_repair_user_prompt(
-                issues, first_raw or "", repair_key)},
+            {"role": "user", "content": _build_repair_user_prompt(issues, first_raw or "", repair_key)},
         ]
         try:
-            raw = await _call_chat_fn(chat_fn, repair_msgs, temperature=temperature,
-                                      json_mode=json_mode, timeout=timeout,
-                                      scene=scene, max_tokens=max_tokens)
+            raw = await _call_chat_fn(
+                chat_fn,
+                repair_msgs,
+                temperature=temperature,
+                json_mode=json_mode,
+                timeout=timeout,
+                scene=scene,
+                max_tokens=max_tokens,
+            )
         except Exception as e:  # noqa: BLE001
             # 瞬时故障不应丢弃首轮已产出的内容：记录后继续下一轮修复预算
             repair_errors.append("第%d次修复调用异常: %s" % (attempt + 1, e))
-            logger.warning("JSON 修复第 %d 次调用异常（继续使用剩余修复预算）：%s",
-                           attempt + 1, e)
+            logger.warning("JSON 修复第 %d 次调用异常（继续使用剩余修复预算）：%s", attempt + 1, e)
             continue
         obj, issues = parse_and_validate(raw, validate_fn)
         if obj is not None and not issues:
@@ -389,19 +402,22 @@ async def collect_json_response_with_chat(chat_fn, messages: list,
         logger.warning("JSON 修复第 %d 次仍未通过：%s", attempt + 1, issues[:3])
 
     if repair_errors:
-        raise ValueError("JSON 生成/修复失败：%s；修复轮异常：%s"
-                         % (issues[:5], " | ".join(repair_errors)))
+        raise ValueError("JSON 生成/修复失败：%s；修复轮异常：%s" % (issues[:5], " | ".join(repair_errors)))
     raise ValueError(f"JSON 生成/修复失败：{issues[:5]}")
 
 
-async def collect_json_response(messages: list, validate_fn=None,
-                                max_retries: int = MAX_REPAIR_RETRIES,
-                                *, temperature: float | None = None,
-                                json_mode: bool = False,
-                                timeout: int | None = None,
-                                repair_key: str = GENERIC_REPAIR_KEY,
-                                scene: str = "",
-                                max_tokens: int | None = None):
+async def collect_json_response(
+    messages: list,
+    validate_fn=None,
+    max_retries: int = MAX_REPAIR_RETRIES,
+    *,
+    temperature: float | None = None,
+    json_mode: bool = False,
+    timeout: int | None = None,
+    repair_key: str = GENERIC_REPAIR_KEY,
+    scene: str = "",
+    max_tokens: int | None = None,
+):
     """统一 JSON 收集入口：生成 → 解析 → 校验 → 定向修复 → 重试
 
     ✅ 新增透传参数（供结构化提取使用）：
@@ -434,18 +450,27 @@ async def collect_json_response(messages: list, validate_fn=None,
     —— 本函数只剩「把 provider 降级链作为 chat_fn 注入」这一件事，行为逐字不变，
     但同一链路从此可被其它调用方（含需要注入 chat 实现的测试/服务）复用。
     """
+
     async def _chat(_msgs: list, **kwargs) -> str:
         return await chat_with_fallback(_msgs, **kwargs)
 
     return await collect_json_response_with_chat(
-        _chat, messages, validate_fn, max_retries,
-        temperature=temperature, json_mode=json_mode, timeout=timeout,
-        repair_key=repair_key, scene=scene, max_tokens=max_tokens)
+        _chat,
+        messages,
+        validate_fn,
+        max_retries,
+        temperature=temperature,
+        json_mode=json_mode,
+        timeout=timeout,
+        repair_key=repair_key,
+        scene=scene,
+        max_tokens=max_tokens,
+    )
 
 
-async def _provider_chat_safe(provider, messages: list, temperature: float = 0.7,
-                              max_tokens: int | None = None,
-                              extra_body: dict | None = None) -> str:
+async def _provider_chat_safe(
+    provider, messages: list, temperature: float = 0.7, max_tokens: int | None = None, extra_body: dict | None = None
+) -> str:
     """调用 provider.chat，兼容不支持 temperature / max_tokens kwarg 的旧实现。
 
     ✅ R38（2026-10-03）：此前本函数只接受 3 个参数，导致
@@ -498,8 +523,7 @@ async def collect_json_response_with_provider(
     修复提示词。
     """
     messages = _ensure_user_message(messages)
-    raw = await _provider_chat_safe(provider, messages, temperature,
-                                    max_tokens, extra_body)
+    raw = await _provider_chat_safe(provider, messages, temperature, max_tokens, extra_body)
     first_raw = raw
     obj, issues = parse_and_validate(raw, None)
     if obj is not None and not issues and validator is not None:
@@ -519,16 +543,13 @@ async def collect_json_response_with_provider(
     for attempt in range(max_retries):
         repair_msgs = list(messages) + [
             {"role": "assistant", "content": raw or ""},
-            {"role": "user", "content": _build_repair_user_prompt(
-                issues, first_raw or "", repair_key)},
+            {"role": "user", "content": _build_repair_user_prompt(issues, first_raw or "", repair_key)},
         ]
         try:
-            raw = await _provider_chat_safe(provider, repair_msgs, temperature,
-                                            max_tokens, extra_body)
+            raw = await _provider_chat_safe(provider, repair_msgs, temperature, max_tokens, extra_body)
         except Exception as e:  # noqa: BLE001
             repair_errors.append("第%d次修复调用异常: %s" % (attempt + 1, e))
-            logger.warning("JSON 修复第 %d 次调用异常（继续使用剩余修复预算）：%s",
-                           attempt + 1, e)
+            logger.warning("JSON 修复第 %d 次调用异常（继续使用剩余修复预算）：%s", attempt + 1, e)
             continue
         obj, issues = parse_and_validate(raw, None)
         if obj is not None and not issues and validator is not None:
@@ -545,8 +566,7 @@ async def collect_json_response_with_provider(
         logger.warning("JSON 修复第 %d 次仍未通过：%s", attempt + 1, issues[:3])
 
     if repair_errors:
-        raise ValueError("JSON 生成/修复失败：%s；修复轮异常：%s"
-                         % (issues[:5], " | ".join(repair_errors)))
+        raise ValueError("JSON 生成/修复失败：%s；修复轮异常：%s" % (issues[:5], " | ".join(repair_errors)))
     raise ValueError(f"JSON 生成/修复失败：{issues[:5]}")
 
 

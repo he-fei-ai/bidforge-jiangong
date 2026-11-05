@@ -61,9 +61,7 @@ class AgnesAdapter(ImageProviderAdapter):
             图像生成结果字典
         """
         use_model = model or self.model
-        use_size = (
-            normalize_size(size or self.default_size, self.supported_sizes) or self.default_size
-        )
+        use_size = normalize_size(size or self.default_size, self.supported_sizes) or self.default_size
         use_ratio = ratio or self.default_ratio
 
         # 构造请求体

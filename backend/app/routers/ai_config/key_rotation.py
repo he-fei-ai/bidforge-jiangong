@@ -24,6 +24,7 @@
   * 面向前端的响应体只回传来源标签、健康计数与配置 id/名称，**不回传
     ``effective_key`` / 明文 / 密文**。
 """
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.db import get_db
@@ -55,8 +56,8 @@ async def _row_health(db) -> dict:
     secret_key.key）。仅回传配置标识，**不含**密文或任何密钥片段。
     """
     cur = await db.execute(
-        "SELECT id, provider_name, model, api_key_encrypted FROM ai_config"
-        " ORDER BY priority ASC, updated_at DESC")
+        "SELECT id, provider_name, model, api_key_encrypted FROM ai_config" " ORDER BY priority ASC, updated_at DESC"
+    )
     rows = [dict(r) for r in await cur.fetchall()]
     total = len(rows)
     with_ct = 0
@@ -70,10 +71,8 @@ async def _row_health(db) -> dict:
         if decrypt_api_key(enc):
             decryptable += 1
         else:
-            broken.append({"id": r["id"], "provider_name": r["provider_name"],
-                           "model": r["model"]})
-    return {"total": total, "with_ciphertext": with_ct,
-            "decryptable": decryptable, "broken": broken}
+            broken.append({"id": r["id"], "provider_name": r["provider_name"], "model": r["model"]})
+    return {"total": total, "with_ciphertext": with_ct, "decryptable": decryptable, "broken": broken}
 
 
 def _health_summary(health: dict) -> dict:
@@ -94,8 +93,7 @@ async def _reencrypt_scan(db, legacy_key: str) -> dict:
       * 坏密文 → 用 ``reencrypt_token(enc, legacy_key)`` 尝试重加密，能回解且变体
         才计 ``migrated``，否则 ``failed``。
     """
-    cur = await db.execute(
-        "SELECT id, api_key_encrypted FROM ai_config WHERE api_key_encrypted != ''")
+    cur = await db.execute("SELECT id, api_key_encrypted FROM ai_config WHERE api_key_encrypted != ''")
     rows = [dict(r) for r in await cur.fetchall()]
     migrated = unchanged = failed = 0
     for r in rows:
@@ -108,8 +106,7 @@ async def _reencrypt_scan(db, legacy_key: str) -> dict:
             migrated += 1
         else:
             failed += 1
-    return {"scanned": len(rows), "migrated": migrated,
-            "unchanged": unchanged, "failed": failed}
+    return {"scanned": len(rows), "migrated": migrated, "unchanged": unchanged, "failed": failed}
 
 
 async def _reencrypt_apply(db, legacy_key: str) -> dict:
@@ -118,8 +115,7 @@ async def _reencrypt_apply(db, legacy_key: str) -> dict:
     安全不变式：只写回「可回解」的新密文，且**只动坏密文**（健康行原样保留）；
     单条失败不影响其它条，也不回滚整批（每条独立 UPDATE，最终统一 commit）。
     """
-    cur = await db.execute(
-        "SELECT id, api_key_encrypted FROM ai_config WHERE api_key_encrypted != ''")
+    cur = await db.execute("SELECT id, api_key_encrypted FROM ai_config WHERE api_key_encrypted != ''")
     rows = [dict(r) for r in await cur.fetchall()]
     migrated = unchanged = failed = 0
     for r in rows:
@@ -129,13 +125,11 @@ async def _reencrypt_apply(db, legacy_key: str) -> dict:
             continue
         new = reencrypt_token(enc, legacy_key)
         if new and new != enc and decrypt_api_key(new):
-            await db.execute(
-                "UPDATE ai_config SET api_key_encrypted=? WHERE id=?", (new, r["id"]))
+            await db.execute("UPDATE ai_config SET api_key_encrypted=? WHERE id=?", (new, r["id"]))
             migrated += 1
         else:
             failed += 1
-    return {"scanned": len(rows), "migrated": migrated,
-            "unchanged": unchanged, "failed": failed}
+    return {"scanned": len(rows), "migrated": migrated, "unchanged": unchanged, "failed": failed}
 
 
 @router.post("/key-rotation")
@@ -166,9 +160,11 @@ async def key_rotation(body: KeyRotationIn, request: Request = None, db=Depends(
     if mode == "inspect":
         advice = ""
         if health["broken"]:
-            advice = (f"{len(health['broken'])} 条已保存密钥无法解密（常见于更换过 "
-                      "FERNET_KEY 或 secret_key.key 被删）。可用 mode=reencrypt"
-                      "（必要时带 legacy_key）一次性重加密恢复，无需逐条重填 Key。")
+            advice = (
+                f"{len(health['broken'])} 条已保存密钥无法解密（常见于更换过 "
+                "FERNET_KEY 或 secret_key.key 被删）。可用 mode=reencrypt"
+                "（必要时带 legacy_key）一次性重加密恢复，无需逐条重填 Key。"
+            )
         return {
             "ok": True,
             "mode": "inspect",
@@ -195,45 +191,75 @@ async def key_rotation(body: KeyRotationIn, request: Request = None, db=Depends(
     if mode == "reencrypt":
         res = await _reencrypt_apply(db, legacy_key)
         await record_config_audit(
-            db, "key_rotation",
-            detail=(f"主密钥重加密（来源={src['source']}）：迁移 {res['migrated']} 条、"
-                    f"健康不变 {res['unchanged']} 条、失败 {res['failed']} 条"),
-            request=request, commit=False)
+            db,
+            "key_rotation",
+            detail=(
+                f"主密钥重加密（来源={src['source']}）：迁移 {res['migrated']} 条、"
+                f"健康不变 {res['unchanged']} 条、失败 {res['failed']} 条"
+            ),
+            request=request,
+            commit=False,
+        )
         await db.commit()
         invalidate_config_cache()
         warning = ""
         if res["failed"]:
-            warning = (f"{res['failed']} 条密文无法重加密（当前密钥与 legacy_key 都解不开）。"
-                       "这些配置需重新手动填写 API Key。")
-        return {"ok": True, "mode": "reencrypt",
-                "migrated": res["migrated"], "unchanged": res["unchanged"],
-                "failed": res["failed"], "warning": warning}
+            warning = (
+                f"{res['failed']} 条密文无法重加密（当前密钥与 legacy_key 都解不开）。"
+                "这些配置需重新手动填写 API Key。"
+            )
+        return {
+            "ok": True,
+            "mode": "reencrypt",
+            "migrated": res["migrated"],
+            "unchanged": res["unchanged"],
+            "failed": res["failed"],
+            "warning": warning,
+        }
 
     # ---- rotate：备份 → 换密钥 → 同窗口迁移 --------------------------------
     legacy_before = src["effective_key"]  # 轮转前生效主密钥（作为迁移 legacy）
     rot = rotate_master_key((body.new_key or "").strip())
     if not rot["ok"]:
         # 轮转失败：密钥文件原样保留、未写任何密文 → 零副作用
-        return {"ok": False, "mode": "rotate", "error": rot["error"],
-                "backup_path": rot["backup_path"],
-                "hint": "主密钥文件未变，未迁移任何密文；请修正后重试。"}
+        return {
+            "ok": False,
+            "mode": "rotate",
+            "error": rot["error"],
+            "backup_path": rot["backup_path"],
+            "hint": "主密钥文件未变，未迁移任何密文；请修正后重试。",
+        }
     use_legacy = legacy_key or legacy_before
     res = await _reencrypt_apply(db, use_legacy)
     await record_config_audit(
-        db, "key_rotation",
-        detail=(f"主密钥轮转（来源={rot['new_key_from']}）：备份={rot['backup_path'] or '无'}、"
-                f"迁移 {res['migrated']} 条、不变 {res['unchanged']} 条、失败 {res['failed']} 条"),
-        request=request, commit=False)
+        db,
+        "key_rotation",
+        detail=(
+            f"主密钥轮转（来源={rot['new_key_from']}）：备份={rot['backup_path'] or '无'}、"
+            f"迁移 {res['migrated']} 条、不变 {res['unchanged']} 条、失败 {res['failed']} 条"
+        ),
+        request=request,
+        commit=False,
+    )
     await db.commit()
     invalidate_config_cache()
     warning = ""
     if res["failed"]:
-        warning = (f"主密钥已轮转，但 {res['failed']} 条密文未能迁移（legacy 密钥不可用）。"
-                   "这些配置需重新手动填写 API Key。")
+        warning = (
+            f"主密钥已轮转，但 {res['failed']} 条密文未能迁移（legacy 密钥不可用）。" "这些配置需重新手动填写 API Key。"
+        )
     elif src["source"] == "env":
-        warning = ("当前主密钥由 FERNET_KEY 环境变量控制：轮转持久化文件不影响生效密钥"
-                   "（环境变量仍优先），请同步在部署层更新 FERNET_KEY 后重启。")
-    return {"ok": True, "mode": "rotate",
-            "new_key_from": rot["new_key_from"], "backup_path": rot["backup_path"],
-            "migrated": res["migrated"], "unchanged": res["unchanged"],
-            "failed": res["failed"], "warning": warning}
+        warning = (
+            "当前主密钥由 FERNET_KEY 环境变量控制：轮转持久化文件不影响生效密钥"
+            "（环境变量仍优先），请同步在部署层更新 FERNET_KEY 后重启。"
+        )
+    return {
+        "ok": True,
+        "mode": "rotate",
+        "new_key_from": rot["new_key_from"],
+        "backup_path": rot["backup_path"],
+        "migrated": res["migrated"],
+        "unchanged": res["unchanged"],
+        "failed": res["failed"],
+        "warning": warning,
+    }

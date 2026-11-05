@@ -57,8 +57,14 @@ def _image_cache_set(key: str, value: str | None) -> None:
 _ARROW_SPLIT_RE = re.compile(r"\s*(?:-->|---|-\.->|==>|--x|--o)\s*")
 _ID_TOKEN_RE = re.compile(r"^([A-Za-z_][\w\-]*)")
 _GANTT_META_KEYS = {
-    "dateformat", "axisformat", "title", "excludes", "includes",
-    "todaymarker", "autonumber", "config",
+    "dateformat",
+    "axisformat",
+    "title",
+    "excludes",
+    "includes",
+    "todaymarker",
+    "autonumber",
+    "config",
 }
 _GANTT_STATUS_TAGS = {"done", "active", "crit"}
 
@@ -88,8 +94,7 @@ def _parse_flow_graph(code: str) -> tuple[set[str], set[str], int, list[str]]:
         s = raw.strip()
         if not s or s.startswith(("%%", "//")):
             continue
-        if s.lower().startswith(("flowchart", "graph", "subgraph", "end",
-                                 "direction", "click")):
+        if s.lower().startswith(("flowchart", "graph", "subgraph", "end", "direction", "click")):
             continue
         if _ARROW_SPLIT_RE.search(s):
             parts = _ARROW_SPLIT_RE.split(s)
@@ -231,9 +236,7 @@ def validate_mermaid(code: str) -> tuple[bool, str]:
     )
 
     _leading_kw = first_mermaid_keyword(code)
-    _has_other_diagram_keyword = (
-        not has_graph_prefix and _leading_kw in MERMAID_KEYWORD_TO_CHART_TYPE
-    )
+    _has_other_diagram_keyword = not has_graph_prefix and _leading_kw in MERMAID_KEYWORD_TO_CHART_TYPE
 
     if has_arrow and not has_graph_prefix and not _has_other_diagram_keyword:
         # It looks like a simple flowchart without prefix
@@ -366,10 +369,7 @@ def validate_mermaid(code: str) -> tuple[bool, str]:
         if _dups:
             return False, f"甘特图任务 ID 重复: {'、'.join(_dups[:3])}"
         _id_set = set(_ids)
-        _graph = {
-            t["id"]: [d for d in t["deps"] if d in _id_set]
-            for t in _tasks if t["id"]
-        }
+        _graph = {t["id"]: [d for d in t["deps"] if d in _id_set] for t in _tasks if t["id"]}
         _cycle = _find_gantt_cycle(_graph)
         if _cycle:
             return False, "甘特图任务依赖成环: " + " -> ".join(_cycle[:6])
@@ -389,9 +389,9 @@ def validate_mermaid(code: str) -> tuple[bool, str]:
     if code.startswith("pie"):
         # ✅ v3.1：pie 至少 2 个数据项
         _data_rows = [
-            l.strip() for l in code.split("\n")[1:]
-            if l.strip() and ":" in l
-            and not l.strip().startswith(("%%", "//", "title"))
+            l.strip()
+            for l in code.split("\n")[1:]
+            if l.strip() and ":" in l and not l.strip().startswith(("%%", "//", "title"))
         ]
         if len(_data_rows) < 2:
             return False, f"饼图数据项不足（{len(_data_rows)}<2）"
@@ -422,24 +422,30 @@ def validate_mermaid(code: str) -> tuple[bool, str]:
     #    gitGraph / sankey-beta / block-beta / kanban / quadrantChart 等图表
     #    被静默删除 —— 用户既看不到图，也拿不到那段代码。
     #    这里按图表类型补齐识别 + 最低限度结构校验（细节交给渲染引擎判定）。
-    _body_lines = [
-        l.strip() for l in code.split("\n")[1:]
-        if l.strip() and not l.strip().startswith(("%%", "//"))
-    ]
+    _body_lines = [l.strip() for l in code.split("\n")[1:] if l.strip() and not l.strip().startswith(("%%", "//"))]
 
-    if code.startswith(("mindmap", "journey", "gitGraph", "quadrantChart",
-                        "sankey-beta", "sankey", "block-beta", "block",
-                        "kanban", "architecture-beta", "architecture")):
+    if code.startswith(
+        (
+            "mindmap",
+            "journey",
+            "gitGraph",
+            "quadrantChart",
+            "sankey-beta",
+            "sankey",
+            "block-beta",
+            "block",
+            "kanban",
+            "architecture-beta",
+            "architecture",
+        )
+    ):
         if not _body_lines:
             return False, f"{code.split(chr(10))[0][:20]} 图表缺少内容"
         return True, "ok"
 
     if code.startswith(("xychart-beta", "xychart")):
         # xychart 至少要有坐标轴或一条数据系列
-        if not any(
-            l.strip().startswith(("bar", "line", "x-axis", "y-axis"))
-            for l in _body_lines
-        ):
+        if not any(l.strip().startswith(("bar", "line", "x-axis", "y-axis")) for l in _body_lines):
             return False, "xychart 缺少坐标轴/数据系列定义"
         return True, "ok"
 
@@ -467,8 +473,7 @@ def repair_mermaid(code: str) -> str:
     #    （后端 PIL 兜底渲染不解析 classDef/style/%%{init}%%，
     #     会导致预览与导出渲染结果不一致，且部分引擎直接报错）
     code = "\n".join(
-        ln for ln in code.split("\n")
-        if not re.match(r"^\s*(classDef\s|class\s+\w|style\s|linkStyle\s|%%\{init)", ln)
+        ln for ln in code.split("\n") if not re.match(r"^\s*(classDef\s|class\s+\w|style\s|linkStyle\s|%%\{init)", ln)
     )
 
     # ✅ ②：去除标签内 HTML 标签（PIL 兜底渲染不支持，按纯文本输出）
@@ -483,17 +488,20 @@ def repair_mermaid(code: str) -> str:
 
     # ✅ ④：甘特图 status 标签（done/active/crit 渲染器兼容性差）
     code = re.sub(r":\s*(done|active|crit)\s*,", ":", code, flags=re.IGNORECASE)
-    code = re.sub(r":\s*(done|active|crit)\s*$", ":", code,
-                  flags=re.IGNORECASE | re.MULTILINE)
+    code = re.sub(r":\s*(done|active|crit)\s*$", ":", code, flags=re.IGNORECASE | re.MULTILINE)
 
     # ✅ ⑤：中文标签含特殊字符但缺双引号 → 自动补引号
     #    （与 validate_mermaid 的判定条件保持一致：同标签内 CJK + 特殊字符）
     code = re.sub(
         r"\[(?=[^\]\"\n]*[\u4e00-\u9fff])(?=[^\]\"\n]*[,，、()（）])[^\]\"\n]*\]",
-        lambda m: '["' + m.group(0)[1:-1] + '"]', code)
+        lambda m: '["' + m.group(0)[1:-1] + '"]',
+        code,
+    )
     code = re.sub(
         r"\{(?=[^}\"\n]*[\u4e00-\u9fff])(?=[^}\"\n]*[,，、()（）])[^}\"\n]*\}",
-        lambda m: '{"' + m.group(0)[1:-1] + '"}', code)
+        lambda m: '{"' + m.group(0)[1:-1] + '"}',
+        code,
+    )
 
     # ✅ ⑥：甘特图补 dateFormat / axisFormat
     if code.startswith("gantt"):
@@ -570,9 +578,7 @@ async def generate_illustration_image(
     from .image_providers.registry import ProviderRegistry
 
     # ---- 图片生成缓存（基于 MD5，含 provider_name 避免切换 provider 后误命中） ----
-    _cache_key = hashlib.md5(
-        f"{prompt}|{style}|{section_size}|{provider_name}".encode()
-    ).hexdigest()
+    _cache_key = hashlib.md5(f"{prompt}|{style}|{section_size}|{provider_name}".encode()).hexdigest()
     with _image_cache_lock:
         _cached_url = _IMAGE_CACHE.get(_cache_key)
         if _cached_url is not None:
@@ -711,13 +717,11 @@ async def generate_illustration_image(
             # 零行为变更：旧实现下这类请求 100% 失败且已 continue，现只是
             # 把失败从「网络往返后」提前到「请求前」，并留 INFO 观测点。
             if not _adapter_config.get("api_key"):
-                logger.info(
-                    "generate_illustration_image: Provider '%s' 无 API Key，跳过（不发请求）",
-                    _pname)
+                logger.info("generate_illustration_image: Provider '%s' 无 API Key，跳过（不发请求）", _pname)
                 _last_error = f"Provider '{_pname}' 未配置 API Key"
                 continue
 
-            # 尺寸语义自适应：
+                # 尺寸语义自适应：
                 continue
 
             # 尺寸语义自适应：
@@ -741,11 +745,7 @@ async def generate_illustration_image(
             _image_url = (
                 _result.get("image_url")
                 or _result.get("url")
-                or (
-                    _result.get("data", [{}])[0].get("url")
-                    if isinstance(_result.get("data"), list)
-                    else None
-                )
+                or (_result.get("data", [{}])[0].get("url") if isinstance(_result.get("data"), list) else None)
             )
 
             if not _image_url and isinstance(_result, dict):
@@ -780,13 +780,15 @@ async def generate_illustration_image(
             # 点名「确定性渠道配置错误（建议核对 Base URL / 模型名 / Key）」，
             # 降级链行为不变（仍 continue 下一候选）。
             _err_low = str(e).lower()
-            _det_cfg = any(tag in _err_low for tag in (
-                "http 400", "http 401", "http 402", "http 403", "http 404"))
+            _det_cfg = any(tag in _err_low for tag in ("http 400", "http 401", "http 402", "http 403", "http 404"))
             if _det_cfg:
                 logger.warning(
                     "generate_illustration_image: Provider '%s' 命中确定性渠道配置"
                     "错误（%s）——同型渠道重放必败，请核对 Base URL / 模型名 / API Key；"
-                    "继续尝试下一候选", _pname, str(e)[:160])
+                    "继续尝试下一候选",
+                    _pname,
+                    str(e)[:160],
+                )
             else:
                 logger.warning(
                     "generate_illustration_image: Provider '%s' 失败 (%s)，尝试下一个",
@@ -795,7 +797,8 @@ async def generate_illustration_image(
                 )
             logger.warning(
                 "generate_illustration_image: Provider '%s' 失败 (%s)，尝试下一个",
-                _pname, e,
+                _pname,
+                e,
             )
             continue
 
@@ -830,6 +833,7 @@ def build_illustration_url(prompt: str, image_size: str = "landscape_16_9") -> s
 # 段内按 priority 降序取 top-k，跨段累计不超过 max_ai_images。
 # 确定性实现（同输入同输出），不依赖随机，便于回归测试。
 # ---------------------------------------------------------------------------
+
 
 def apply_image_budget(
     candidates: list[dict],
@@ -916,10 +920,6 @@ def select_ai_image_codes(
             return order_of(code)
         return order_of.get(code, 0)
 
-    candidates = [
-        {"key": code, "order": _ord(code), "priority": 0}
-        for code in groups
-    ]
+    candidates = [{"key": code, "order": _ord(code), "priority": 0} for code in groups]
     kept = apply_image_budget(candidates, max_ai_images)
     return {c["key"] for c in kept}
-

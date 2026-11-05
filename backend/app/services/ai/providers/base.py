@@ -1,13 +1,26 @@
 """Provider 基类"""
+
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 # 已知支持图片/视觉能力的模型名（小写匹配）
 _VISION_KEYWORDS = (
-    "vision", "gpt-4o", "gpt-4v", "gpt-4-turbo", "gpt-4.1",
-    "claude-3", "claude-sonnet-4", "claude-opus-4",
-    "gemini", "qwen-vl", "qwen2-vl", "glm-4v", "glm-4v-plus",
-    "doubao-vision", "deepseek-vl", "yi-vision",
+    "vision",
+    "gpt-4o",
+    "gpt-4v",
+    "gpt-4-turbo",
+    "gpt-4.1",
+    "claude-3",
+    "claude-sonnet-4",
+    "claude-opus-4",
+    "gemini",
+    "qwen-vl",
+    "qwen2-vl",
+    "glm-4v",
+    "glm-4v-plus",
+    "doubao-vision",
+    "deepseek-vl",
+    "yi-vision",
 )
 
 
@@ -17,6 +30,7 @@ class AIMessage:
 
     与 dict 形式消息等价：providers 在发送前会通过 normalize_messages 统一转换。
     """
+
     role: str = "user"
     content: Any = ""
 
@@ -46,9 +60,15 @@ def normalize_messages(messages: list) -> list[dict]:
 class BaseProvider:
     name = "base"
 
-    def __init__(self, api_key: str, base_url: str, model: str,
-                 max_tokens: int = 8192, temperature: float = 0.7,
-                 timeout: int = 60):
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        max_tokens: int = 8192,
+        temperature: float = 0.7,
+        timeout: int = 60,
+    ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -58,12 +78,22 @@ class BaseProvider:
         # ✅ 最近一次调用的 token 用量（标准化三字段），供审计日志统计消费。
         #    厂商未返回 usage 时保持全 0，不影响主流程。
         self.last_usage: dict = {
-            "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cached_tokens": 0,
         }
         # 最近一次调用的结束原因（OpenAI: finish_reason / Anthropic: stop_reason）。
         # 用于区分「正常结束」与「被 max_tokens 截断」—— 推理模型在流式下
         # 只回 reasoning 不回正文时，finish_reason=length 是唯一线索。
         self.last_finish_reason: str = ""
+        # ✅ R176 B2-1（2026-11-04）：流式分片解析跳过统计（与 last_finish_reason 同一
+        #    回传契约：流消费结束后由上层读取，绝不混入正文）。
+        #    旧实现单条 SSE 分片 JSON 解析失败即裸 `continue` 丢弃，用户拿到残缺
+        #    输出却没有任何线索说明「少了东西」。现按 provider 实例累计：
+        #    · last_stream_parse_skipped：本次流被跳过的非法分片数（0 = 无跳过）；
+        #    · last_stream_parse_skipped_reason：首个跳过原因的简短描述（空 = 无）。
+        self.last_stream_parse_skipped: int = 0
+        self.last_stream_parse_skipped_reason: str = ""
 
     def _set_usage(self, usage: dict | None) -> None:
         """把各厂商不同命名的 usage 字段归一化为统一三字段。
@@ -94,9 +124,9 @@ class BaseProvider:
         self.last_usage = {
             "prompt_tokens": _num(u.get("prompt_tokens"), u.get("input_tokens")),
             "completion_tokens": _num(u.get("completion_tokens"), u.get("output_tokens")),
-            "cached_tokens": _num(details.get("cached_tokens"),
-                                  u.get("cache_read_input_tokens"),
-                                  u.get("prompt_cache_hit_tokens")),
+            "cached_tokens": _num(
+                details.get("cached_tokens"), u.get("cache_read_input_tokens"), u.get("prompt_cache_hit_tokens")
+            ),
         }
 
     def _merge_usage(self, usage: dict | None) -> None:
@@ -115,9 +145,12 @@ class BaseProvider:
 
     def _proxies(self) -> dict | None:
         from app.config import settings
+
         if settings.proxy_host and settings.proxy_port:
-            return {"http://": f"http://{settings.proxy_host}:{settings.proxy_port}",
-                    "https://": f"http://{settings.proxy_host}:{settings.proxy_port}"}
+            return {
+                "http://": f"http://{settings.proxy_host}:{settings.proxy_port}",
+                "https://": f"http://{settings.proxy_host}:{settings.proxy_port}",
+            }
         return None
 
     @property
@@ -146,9 +179,15 @@ class BaseProvider:
             content.append({"type": "image_url", "image_url": {"url": url}})
         return {"role": "user", "content": content}
 
-    async def chat(self, messages: list, temperature: float | None = None,
-                   json_mode: bool = False, max_tokens: int | None = None,
-                   extra_body: dict | None = None, **_kwargs) -> str:
+    async def chat(
+        self,
+        messages: list,
+        temperature: float | None = None,
+        json_mode: bool = False,
+        max_tokens: int | None = None,
+        extra_body: dict | None = None,
+        **_kwargs,
+    ) -> str:
         """对话调用
 
         ✅ 移植适配：支持 temperature/json_mode/max_tokens/extra_body 覆盖参数
@@ -157,9 +196,15 @@ class BaseProvider:
         """
         raise NotImplementedError
 
-    async def stream(self, messages: list, temperature: float | None = None,
-                     json_mode: bool = False, max_tokens: int | None = None,
-                     extra_body: dict | None = None, **_kwargs) -> AsyncIterator[str]:
+    async def stream(
+        self,
+        messages: list,
+        temperature: float | None = None,
+        json_mode: bool = False,
+        max_tokens: int | None = None,
+        extra_body: dict | None = None,
+        **_kwargs,
+    ) -> AsyncIterator[str]:
         """流式调用：产出**增量文本片段**（不含任何协议封装）。
 
         实现方必须保证：分片按顺序产出，且不把「非正文」内容（reasoning、

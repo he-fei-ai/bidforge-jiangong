@@ -9,6 +9,7 @@
   4. 静态锁：路由已登记、审计动作已登记、re-export 在位、dry_run 预演与真执行
      判据同源（plan 命中数 == 实际写库数）。
 """
+
 import importlib
 
 import app.routers.ai_config as ai_router
@@ -27,8 +28,7 @@ kr = importlib.import_module("app.routers.ai_config.key_rotation")
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-async def _insert_cfg(db, cid, key="", provider="openai", model="gpt-4o",
-                      raw_cipher=None):
+async def _insert_cfg(db, cid, key="", provider="openai", model="gpt-4o", raw_cipher=None):
     """插入一条 ai_config 行。``raw_cipher`` 非空时**原样**写该密文（用于造
     「坏密文」—— 非 Fernet 无法解开的形态），否则写 ``encrypt_api_key(key)``。"""
     cipher = raw_cipher if raw_cipher is not None else encrypt_api_key(key)
@@ -36,15 +36,18 @@ async def _insert_cfg(db, cid, key="", provider="openai", model="gpt-4o",
         "INSERT INTO ai_config (id, provider_name, plan, api_key_encrypted, base_url,"
         " model, is_active, priority, timeout, concurrency)"
         " VALUES (?,?,?,?,?, ?,0,0,60,4)",
-        (cid, provider, "pay_as_you_go", cipher, "https://api.test.com/v1", model))
+        (cid, provider, "pay_as_you_go", cipher, "https://api.test.com/v1", model),
+    )
     await db.commit()
 
 
 def _cipher(db_row_factory):
     """读某配置的 api_key_encrypted（供断言密文是否被改写）。"""
+
     async def _get(cid):
         cur = await db_row_factory.execute("SELECT api_key_encrypted FROM ai_config WHERE id=?", (cid,))
         return (await cur.fetchone())[0]
+
     return _get
 
 
@@ -82,6 +85,7 @@ class TestKeyRotationInspect:
     async def test_unknown_mode_rejected(self, db_conn):
         """非法 mode 必须 400（不静默执行）。"""
         from fastapi import HTTPException
+
         with pytest.raises(HTTPException) as exc:
             await ai_router.key_rotation(KeyRotationIn(mode="bogus"), db=db_conn)
         assert exc.value.status_code == 400
@@ -108,25 +112,24 @@ class TestKeyRotationReencrypt:
         get = _cipher(db_conn)
         # 健康密文未被改写（仍由当前密钥可解）
         from app.services.crypto import decrypt_api_key
+
         assert decrypt_api_key(await get("c-ok"))
 
     async def test_recovery_via_legacy_writes_back(self, db_conn, monkeypatch):
         """坏密文能被（模拟的）重加密结果替换回可解密形态。"""
         await _insert_cfg(db_conn, "c-bad", raw_cipher="garbage")
-        monkeypatch.setattr(kr, "reencrypt_token",
-                            lambda enc, legacy="": encrypt_api_key("sk-recovered"))
+        monkeypatch.setattr(kr, "reencrypt_token", lambda enc, legacy="": encrypt_api_key("sk-recovered"))
         res = await ai_router.key_rotation(KeyRotationIn(mode="reencrypt"), db=db_conn)
         assert res["migrated"] == 1 and res["failed"] == 0
         from app.services.crypto import decrypt_api_key
+
         assert decrypt_api_key(await _cipher(db_conn)("c-bad")) == "sk-recovered"
 
     async def test_dry_run_does_not_write(self, db_conn, monkeypatch):
         """dry_run 只预演：能迁移的计数命中，但库里密文原样不动。"""
         await _insert_cfg(db_conn, "c-bad", raw_cipher="garbage")
-        monkeypatch.setattr(kr, "reencrypt_token",
-                            lambda enc, legacy="": encrypt_api_key("sk-recovered"))
-        res = await ai_router.key_rotation(
-            KeyRotationIn(mode="reencrypt", dry_run=True), db=db_conn)
+        monkeypatch.setattr(kr, "reencrypt_token", lambda enc, legacy="": encrypt_api_key("sk-recovered"))
+        res = await ai_router.key_rotation(KeyRotationIn(mode="reencrypt", dry_run=True), db=db_conn)
         assert res["dry_run"] is True
         assert res["plan"]["migrated"] == 1  # 预演命中
         # 预演不落库：密文仍是原坏值
@@ -134,12 +137,10 @@ class TestKeyRotationReencrypt:
 
     async def test_reencrypt_writes_key_rotation_audit(self, db_conn, monkeypatch):
         await _insert_cfg(db_conn, "c-bad", raw_cipher="garbage")
-        monkeypatch.setattr(kr, "reencrypt_token",
-                            lambda enc, legacy="": encrypt_api_key("sk-recovered"))
+        monkeypatch.setattr(kr, "reencrypt_token", lambda enc, legacy="": encrypt_api_key("sk-recovered"))
         await ai_router.key_rotation(KeyRotationIn(mode="reencrypt"), db=db_conn)
-        cur = await db_conn.execute(
-            "SELECT action FROM ai_config_audit_logs WHERE action='key_rotation'")
-        assert (await cur.fetchall())
+        cur = await db_conn.execute("SELECT action FROM ai_config_audit_logs WHERE action='key_rotation'")
+        assert await cur.fetchall()
 
 
 # ===========================================================================
@@ -149,45 +150,56 @@ class TestKeyRotationRotate:
     async def test_rotate_migrates_and_backs_up(self, db_conn, monkeypatch):
         await _insert_cfg(db_conn, "c-bad", raw_cipher="garbage")
         monkeypatch.setattr(
-            kr, "rotate_master_key",
-            lambda new_key="": {"ok": True, "new_key_from": "generated",
-                                "backup_path": "secret_key.key.bak-20261017", "error": ""})
-        monkeypatch.setattr(kr, "reencrypt_token",
-                            lambda enc, legacy="": encrypt_api_key("sk-migrated"))
+            kr,
+            "rotate_master_key",
+            lambda new_key="": {
+                "ok": True,
+                "new_key_from": "generated",
+                "backup_path": "secret_key.key.bak-20261017",
+                "error": "",
+            },
+        )
+        monkeypatch.setattr(kr, "reencrypt_token", lambda enc, legacy="": encrypt_api_key("sk-migrated"))
         res = await ai_router.key_rotation(KeyRotationIn(mode="rotate"), db=db_conn)
         assert res["ok"] is True and res["new_key_from"] == "generated"
         assert res["backup_path"] == "secret_key.key.bak-20261017"
         assert res["migrated"] == 1
         from app.services.crypto import decrypt_api_key
+
         assert decrypt_api_key(await _cipher(db_conn)("c-bad")) == "sk-migrated"
 
     async def test_rotate_failure_has_zero_side_effects(self, db_conn, monkeypatch):
         """轮转失败（新密钥非法 / 写文件失败）：旧密钥文件不动、不迁移、不写审计。"""
         await _insert_cfg(db_conn, "c-bad", raw_cipher="garbage")
         monkeypatch.setattr(
-            kr, "rotate_master_key",
-            lambda new_key="": {"ok": False, "new_key_from": "", "backup_path": "",
-                                "error": "new_key 不是合法的 Fernet 密钥"})
+            kr,
+            "rotate_master_key",
+            lambda new_key="": {
+                "ok": False,
+                "new_key_from": "",
+                "backup_path": "",
+                "error": "new_key 不是合法的 Fernet 密钥",
+            },
+        )
         res = await ai_router.key_rotation(KeyRotationIn(mode="rotate"), db=db_conn)
         assert res["ok"] is False and "error" in res
         # 零副作用：密文原样、没有 key_rotation 审计
         assert await _cipher(db_conn)("c-bad") == "garbage"
-        cur = await db_conn.execute(
-            "SELECT COUNT(*) FROM ai_config_audit_logs WHERE action='key_rotation'")
+        cur = await db_conn.execute("SELECT COUNT(*) FROM ai_config_audit_logs WHERE action='key_rotation'")
         assert int((await cur.fetchone())[0]) == 0
 
     async def test_env_source_warns_to_update_envvar(self, db_conn, monkeypatch):
         """当前主密钥来自 FERNET_KEY 环境变量时，轮转文件不影响生效密钥 → 必须提示。"""
         await _insert_cfg(db_conn, "c-bad", raw_cipher="garbage")
-        monkeypatch.setattr(kr, "master_key_source",
-                            lambda: {"source": "env", "key_file_exists": True,
-                                     "effective_key": "envkey"})
         monkeypatch.setattr(
-            kr, "rotate_master_key",
-            lambda new_key="": {"ok": True, "new_key_from": "generated",
-                                "backup_path": "", "error": ""})
-        monkeypatch.setattr(kr, "reencrypt_token",
-                            lambda enc, legacy="": encrypt_api_key("sk-x"))
+            kr, "master_key_source", lambda: {"source": "env", "key_file_exists": True, "effective_key": "envkey"}
+        )
+        monkeypatch.setattr(
+            kr,
+            "rotate_master_key",
+            lambda new_key="": {"ok": True, "new_key_from": "generated", "backup_path": "", "error": ""},
+        )
+        monkeypatch.setattr(kr, "reencrypt_token", lambda enc, legacy="": encrypt_api_key("sk-x"))
         res = await ai_router.key_rotation(KeyRotationIn(mode="rotate"), db=db_conn)
         assert res["ok"] is True
         assert "FERNET_KEY" in res["warning"]  # 提示「环境变量仍优先，请同步更新」
@@ -207,8 +219,7 @@ class TestKeyRotationStatic:
         # 且父路由确实接入了本子路由（否则端点不会真正可访问）。
         # 新版 FastAPI 的 include_router 以 _IncludedRouter 承载，其子路由在
         # ``original_router`` 属性里（兼容旧版直接暴露 .router 的形态）。
-        included = [getattr(r, "original_router", None) or getattr(r, "router", None)
-                    for r in ai_router.router.routes]
+        included = [getattr(r, "original_router", None) or getattr(r, "router", None) for r in ai_router.router.routes]
         assert kr.router in included
 
     def test_audit_action_registered(self):

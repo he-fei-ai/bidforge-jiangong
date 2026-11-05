@@ -9,6 +9,7 @@
 回归护栏：若有人改动搬运后的函数导致与 generate_content 行为漂移，
 正文生成提示词与续写请求链路的既有测试（test_content_*）也应同时暴露。
 """
+
 from app.services.content_runtime import (
     build_chapter_user_content,
     build_continuation_messages,
@@ -24,7 +25,8 @@ from app.services.content_standard import (
 
 def _leaf(**ov):
     base = {
-        "id": "s1", "title": "土方开挖",
+        "id": "s1",
+        "title": "土方开挖",
         "description": "基坑土方开挖与运输组织",
     }
     base.update(ov)
@@ -50,13 +52,18 @@ def _base_kwargs(**ov):
     }
     kw.update(ov)
     return kw
+
+
 class TestBuildChapterUserContent:
     def test_assembles_all_sections(self):
         out = build_chapter_user_content(**_base_kwargs())
         assert "【方案名称】：XX项目施工方案" in out
         assert "【方案类型】：深基坑" in out
         assert "【项目概述】：项目概述文本。" in out
-        assert "【方案名称主要施工内容】（本章内容必须服务于其中对应的施工内容项；与本章无关的项不得写入）：\n深基坑支护工程" in out
+        assert (
+            "【方案名称主要施工内容】（本章内容必须服务于其中对应的施工内容项；与本章无关的项不得写入）：\n深基坑支护工程"
+            in out
+        )
         assert "【上级章节链】：1 工程概况" in out
         assert "【上级章节要点】：\n- 工程概况：本章概述内容\n- 总体部署：总体安排说明" in out
         assert "【同级章节（请避免内容重复）】：\n- 2.1 基坑排水\n- 2.2 井点降水" in out
@@ -80,8 +87,9 @@ class TestBuildChapterUserContent:
         assert "方向参考" in out
 
     def test_empty_scope_and_knowledge(self):
-        empties = {k: "" for k in ("content_scope", "knowledge_text", "facts_text",
-                                   "prev_sibling_summary", "sibling_lines")}
+        empties = {
+            k: "" for k in ("content_scope", "knowledge_text", "facts_text", "prev_sibling_summary", "sibling_lines")
+        }
         out = build_chapter_user_content(**{**_base_kwargs(), **empties})
         assert "【方案名称主要施工内容】" not in out
         assert "【项目知识库素材】：" not in out
@@ -98,7 +106,8 @@ class TestBuildContinuationMessages:
         msgs = build_continuation_messages(
             user_ctx="【当前章节】：土方开挖",
             cont_tail="……结尾段落",
-            wc=800, word_budget=1500,
+            wc=800,
+            word_budget=1500,
             cont_prompt="续写系统提示",
             eff_standard="precise",
         )
@@ -115,7 +124,8 @@ class TestBuildContinuationMessages:
         msgs = build_continuation_messages(
             user_ctx="【当前章节】：土方开挖",
             cont_tail="……结尾",
-            wc=1600, word_budget=1500,
+            wc=1600,
+            word_budget=1500,
             cont_prompt="续写系统提示",
             eff_standard="fuzzy",
         )
@@ -127,34 +137,31 @@ class TestBuildContinuationMessages:
 
 class TestShouldContinueRound:
     def test_under_threshold_continues(self):
-        assert should_continue_round(wc=1000, word_budget=1500,
-                                     continue_count=0, min_passes=1, max_rounds=3) is True
+        assert should_continue_round(wc=1000, word_budget=1500, continue_count=0, min_passes=1, max_rounds=3) is True
 
     def test_at_threshold_with_min_passes(self):
         # wc == 1200 = budget*0.8 不触发 under，但 min_passes 未满足仍续写
-        assert should_continue_round(wc=1200, word_budget=1500,
-                                     continue_count=0, min_passes=2, max_rounds=3) is True
+        assert should_continue_round(wc=1200, word_budget=1500, continue_count=0, min_passes=2, max_rounds=3) is True
 
     def test_both_satisfied_stops(self):
-        assert should_continue_round(wc=1400, word_budget=1500,
-                                     continue_count=0, min_passes=0, max_rounds=3) is False
+        assert should_continue_round(wc=1400, word_budget=1500, continue_count=0, min_passes=0, max_rounds=3) is False
 
     def test_rounds_cap(self):
-        assert should_continue_round(wc=1000, word_budget=1500,
-                                     continue_count=3, min_passes=1, max_rounds=3) is False
+        assert should_continue_round(wc=1000, word_budget=1500, continue_count=3, min_passes=1, max_rounds=3) is False
 
     def test_zero_budget_falls_back(self):
         # budget=0 → 0*0.8=0，wc<0 恒假；由 min_passes 决定，保证不抛异常
-        assert should_continue_round(wc=100, word_budget=0,
-                                     continue_count=0, min_passes=0, max_rounds=3) is False
+        assert should_continue_round(wc=100, word_budget=0, continue_count=0, min_passes=0, max_rounds=3) is False
 
 
 class TestContinueMaxTokens:
     def test_matches_legacy_formula(self):
         from app.services.content_utils import max_tokens_for_budget
+
         for budget, wc in ((1500, 800), (1500, 1400), (5000, 1500), (800, 100)):
             assert continue_max_tokens(word_budget=budget, wc=wc) == max_tokens_for_budget(
-                budget, chars=max(1, int(budget * 1.1) - wc))
+                budget, chars=max(1, int(budget * 1.1) - wc)
+            )
 
     def test_floor_guard(self):
         # 剩余字数很小 → 不足下限时回退 MAX_TOKENS_FLOOR（1536），不产生 0/负值

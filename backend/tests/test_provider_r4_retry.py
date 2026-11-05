@@ -11,6 +11,7 @@
 2. 402/403/quota/invalid key 类确定性错误直接抛异常（跳过重试）；
 3. `ai_retry_on_non_retryable=False` 时恢复旧行为（无论什么错误都回退普通请求）。
 """
+
 from __future__ import annotations
 
 import app.services.ai.provider_factory as pf
@@ -73,8 +74,11 @@ async def test_r4_non_retryable_stream_error_raises_without_chat_fallback():
         pf.ai_retry_on_non_retryable = True
         with pytest.raises(Exception, match="402"):
             await pf._call_provider(
-                provider, [{"role": "user", "content": "hi"}],
-                temperature=0.5, json_mode=True, max_tokens=100,
+                provider,
+                [{"role": "user", "content": "hi"}],
+                temperature=0.5,
+                json_mode=True,
+                max_tokens=100,
                 request_mode="stream",
             )
     finally:
@@ -96,8 +100,11 @@ async def test_r4_500_stream_error_still_retries_via_chat():
         old_flag = pf.ai_retry_on_non_retryable
         pf.ai_retry_on_non_retryable = True
         result = await pf._call_provider(
-            provider, [{"role": "user", "content": "hi"}],
-            temperature=0.5, json_mode=True, max_tokens=100,
+            provider,
+            [{"role": "user", "content": "hi"}],
+            temperature=0.5,
+            json_mode=True,
+            max_tokens=100,
             request_mode="stream",
         )
     finally:
@@ -121,8 +128,11 @@ async def test_r4_invalid_api_key_raises():
         pf.ai_retry_on_non_retryable = True
         with pytest.raises(Exception, match="invalid api key"):
             await pf._call_provider(
-                provider, [{"role": "user", "content": "hi"}],
-                temperature=0.5, json_mode=False, max_tokens=100,
+                provider,
+                [{"role": "user", "content": "hi"}],
+                temperature=0.5,
+                json_mode=False,
+                max_tokens=100,
                 request_mode="stream",
             )
     finally:
@@ -143,8 +153,11 @@ async def test_r4_flag_false_keeps_old_behavior():
         old_flag = pf.ai_retry_on_non_retryable
         pf.ai_retry_on_non_retryable = False  # 旧行为
         result = await pf._call_provider(
-            provider, [{"role": "user", "content": "hi"}],
-            temperature=0.5, json_mode=False, max_tokens=100,
+            provider,
+            [{"role": "user", "content": "hi"}],
+            temperature=0.5,
+            json_mode=False,
+            max_tokens=100,
             request_mode="stream",
         )
     finally:

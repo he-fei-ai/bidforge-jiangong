@@ -5,6 +5,7 @@
 - stop_event: 默认未 set，set = 停止
 - cancel_tasks: set() 存储并发子任务的 asyncio.Task 引用，stop 时统一取消
 """
+
 import asyncio
 import json
 import logging
@@ -22,8 +23,8 @@ logger = logging.getLogger("task_registry")
 
 # ✅ 进度落库节流参数（2026-09-15）：内存态与 SSE 广播始终实时，
 #    仅对 DB 落库做节流以降低写放大（长方案 60 章会产生上百次进度写盘）。
-_PROGRESS_DB_MIN_INTERVAL = 0.5   # 秒：距上次进度落库的最小间隔
-_PROGRESS_DB_MIN_DELTA = 0.005    # 进度最小增量（0.5%）
+_PROGRESS_DB_MIN_INTERVAL = 0.5  # 秒：距上次进度落库的最小间隔
+_PROGRESS_DB_MIN_DELTA = 0.005  # 进度最小增量（0.5%）
 
 # task_id -> 运行时控制状态
 _tasks: dict[str, dict] = {}
@@ -52,9 +53,9 @@ class TaskTypeConflict(RuntimeError):
         super().__init__(message)
 
 
-async def register_task(task_type: str, project_id: str = "", scheme_id: str = "",
-                        checkpoint: dict | None = None,
-                        conflict_types=()) -> str:
+async def register_task(
+    task_type: str, project_id: str = "", scheme_id: str = "", checkpoint: dict | None = None, conflict_types=()
+) -> str:
     """注册任务。`conflict_types` 为空时行为与历史逐字一致（零影响面）。
 
     传入 `conflict_types` 时：本任务 INSERT 成功后，若同 scheme 下存在这些类型的
@@ -69,19 +70,25 @@ async def register_task(task_type: str, project_id: str = "", scheme_id: str = "
     async with _register_lock:
         conn = await get_conn()
         cur = await conn.execute(
-            "SELECT id FROM task_registry "
-            "WHERE scheme_id=? AND task_type=? AND status IN ('running','paused')",
-            (scheme_id, task_type))
+            "SELECT id FROM task_registry " "WHERE scheme_id=? AND task_type=? AND status IN ('running','paused')",
+            (scheme_id, task_type),
+        )
         stale = [r[0] for r in await cur.fetchall()]
         if stale:
             placeholders = ",".join("?" * len(stale))
             await conn.execute(
                 f"UPDATE task_registry SET status='failed', message='已被新任务替换（{len(stale)} 条旧 running）', "
                 f"updated_at=? WHERE id IN ({placeholders})",
-                [datetime.now().isoformat(), *stale])
+                [datetime.now().isoformat(), *stale],
+            )
             await conn.commit()
-            logger.warning("register_task: 清理了 %d 条同 scheme=%s type=%s 的旧 running 任务 %s",
-                           len(stale), scheme_id, task_type, stale)
+            logger.warning(
+                "register_task: 清理了 %d 条同 scheme=%s type=%s 的旧 running 任务 %s",
+                len(stale),
+                scheme_id,
+                task_type,
+                stale,
+            )
             # ✅ BUG 修复：旧实现只改 DB 状态，内存 _tasks 里的旧任务控制事件未触发——
             # 旧 event_stream 仍在跑（AI 调用照常、sections 照常写库），与新任务竞态覆盖。
             # 现对仍在内存的旧任务同步触发 stop（set stop_event + cancel 子任务），
@@ -94,8 +101,8 @@ async def register_task(task_type: str, project_id: str = "", scheme_id: str = "
         await conn.execute(
             "INSERT INTO task_registry (id, task_type, project_id, scheme_id, status, progress, checkpoint_json)"
             " VALUES (?,?,?,?,?,?,?)",
-            (tid, task_type, project_id, scheme_id, "running", 0.0,
-             json.dumps(checkpoint or {}, ensure_ascii=False)))
+            (tid, task_type, project_id, scheme_id, "running", 0.0, json.dumps(checkpoint or {}, ensure_ascii=False)),
+        )
         await conn.commit()
         # ✅ 跨类型互斥（F5）：判定必须在**本任务 INSERT 之后**、仍在锁内（见类 docstring）。
         if conflict_types:
@@ -104,7 +111,8 @@ async def register_task(task_type: str, project_id: str = "", scheme_id: str = "
             _ccur = await conn.execute(
                 "SELECT DISTINCT task_type FROM task_registry WHERE scheme_id=?"
                 f" AND status IN ('running','paused') AND task_type IN ({marks})",
-                [scheme_id, *_ctypes])
+                [scheme_id, *_ctypes],
+            )
             # R13：execute() 可能返回 None（此处刚成功 INSERT，实为不可达，
             # 仍守卫以免 AttributeError 把一次合法注册变成 500）。
             _crows = (await _ccur.fetchall()) if _ccur is not None else []
@@ -113,11 +121,16 @@ async def register_task(task_type: str, project_id: str = "", scheme_id: str = "
                 _msg = f"与正在运行的 {'、'.join(rows)} 任务互斥，本任务已放弃"
                 await conn.execute(
                     "UPDATE task_registry SET status='failed', message=?, updated_at=? WHERE id=?",
-                    (_msg, datetime.now().isoformat(), tid))
+                    (_msg, datetime.now().isoformat(), tid),
+                )
                 await conn.commit()
                 logger.warning(
                     "register_task: 跨类型互斥拒绝 %s（scheme=%s，冲突类型=%s，task=%s）",
-                    task_type, scheme_id, rows, tid)
+                    task_type,
+                    scheme_id,
+                    rows,
+                    tid,
+                )
                 raise TaskTypeConflict(tid, _msg, rows)
     pause_event = asyncio.Event()
     pause_event.set()  # 默认为运行中（未暂停）
@@ -136,8 +149,8 @@ async def register_task(task_type: str, project_id: str = "", scheme_id: str = "
         "started_at": time.monotonic(),
         # ✅ 暂停时长账本（2026-09-17）：「已耗时 / ETA」必须扣除暂停时段，
         #    否则用户点暂停后看到耗时仍一路增长，无法判断暂停是否真的生效。
-        "paused_at": None,        # 当前暂停段的 monotonic 起点（未暂停时 None）
-        "paused_total": 0.0,      # 已完成暂停段的累计秒数
+        "paused_at": None,  # 当前暂停段的 monotonic 起点（未暂停时 None）
+        "paused_total": 0.0,  # 已完成暂停段的累计秒数
         "stats": {},
         "_db_progress_at": 0.0,
         "_db_progress_val": -1.0,
@@ -146,17 +159,69 @@ async def register_task(task_type: str, project_id: str = "", scheme_id: str = "
     return tid
 
 
+# ✅ R180（2026-11-05 · 取消原因可观测）：任务被停止/断线时，旧实现只记录
+#    一句自由文本 message，日志里无法聚合「为什么停」。现按既有 message 口径
+#    映射为稳定枚举，写入 finish_task 的终态 INFO 行（reason=...）。
+#    只影响日志，不改 DB 结构、不改 stop/暂停语义。
+_CANCEL_REASON_KEYWORDS: tuple[tuple[str, str], ...] = (
+    ("客户端断开", "client_disconnect"),
+    ("客户端离开", "client_disconnect"),
+    ("用户已停止", "user_stop"),
+    ("用户停止", "user_stop"),
+    ("任务已取消", "task_cancelled"),
+    ("被取消", "task_cancelled"),
+    ("服务重启", "process_restart"),
+    ("进程退出", "process_restart"),
+    ("超时", "timeout"),
+    ("无订阅者", "reaper_no_subscriber"),
+    ("心跳消失", "stream_lost"),
+    ("中断遗留", "reaper_orphan"),
+)
+
+
+def _infer_cancel_reason(status: str, message: str) -> str:
+    """把终态 message 归一为可聚合的取消原因（仅用于日志，不改业务语义）。"""
+    _msg = message or ""
+    for _kw, _reason in _CANCEL_REASON_KEYWORDS:
+        if _kw in _msg:
+            return _reason
+    if status == "completed":
+        return "completed"
+    if status == "degraded":
+        return "partial_failure"
+    if status == "failed":
+        return "task_failure"
+    if status == "stopped":
+        return "stopped_unknown"
+    return status or "unknown"
+
+
+
 async def _update_task_progress_db(task_id: str, progress: float, message: str):
-    """任务进度落库（幂等单语句，供 retry_db_op 安全重放）。"""
+    """任务进度落库（幂等单语句，供 retry_db_op 安全重放）。
+
+    ✅ 竞态守卫（2026-11-04 · 运行库证据修复）：只从 running/paused 写入进度。
+       与 `_write_task_terminal_db` / `_set_task_status_db` 的守卫同口径。
+       事故现场（task_registry 89981f59-c649-4b06-9fe9-000602f2d6cb，
+       2026-11-04 15:40）：SSE 断线兜底先 finish_task 写 stopped 并 pop 内存态，
+       几乎同时 run_inner 跑完最后一项后调用 update_progress（此时 state=None，
+       走 force 分支）→ 无守卫的进度 UPDATE 把已终态行的 message 覆盖成
+       「已完成 17/17」、progress 覆盖成 1.0，而 finish_task 的 guard 又拒绝
+       把 stopped 纠正为 completed，DB 最终呈现「status=stopped + 已完成 17/17 +
+       progress=1.0」的自相矛盾终态（前端任务栏显示已停止，用户误判需重跑）。
+       终态行是唯一事实源，任何晚到的进度写都不得再改动它。
+    """
     conn = await get_conn()
     await conn.execute(
-        "UPDATE task_registry SET progress=?, message=?, updated_at=? WHERE id=?",
-        (progress, message, datetime.now().isoformat(), task_id))
+        "UPDATE task_registry SET progress=?, message=?, updated_at=? " "WHERE id=? AND status IN ('running','paused')",
+        (progress, message, datetime.now().isoformat(), task_id),
+    )
     await conn.commit()
 
 
-async def update_progress(task_id: str, progress: float, message: str = "",
-                          event: str = "progress", force: bool = False):
+async def update_progress(
+    task_id: str, progress: float, message: str = "", event: str = "progress", force: bool = False
+):
     """更新任务进度：内存态/SSE 广播实时，DB 落库节流。
 
     ✅ 增强（2026-09-15）：原实现每次调用都 UPDATE+commit 一次。正文生成
@@ -178,8 +243,7 @@ async def update_progress(task_id: str, progress: float, message: str = "",
         last_at = state.get("_db_progress_at", 0.0)
         last_val = state.get("_db_progress_val", -1.0)
         # 间隔够久 或 增量够大 就落库
-        if ((now - last_at) >= _PROGRESS_DB_MIN_INTERVAL
-                or abs(progress - last_val) >= _PROGRESS_DB_MIN_DELTA):
+        if (now - last_at) >= _PROGRESS_DB_MIN_INTERVAL or abs(progress - last_val) >= _PROGRESS_DB_MIN_DELTA:
             need_write = True
     if need_write:
         try:
@@ -189,8 +253,7 @@ async def update_progress(task_id: str, progress: float, message: str = "",
             #    （内存态 + SSE 广播始终实时），但**终态事件是 force=True**，
             #    写失败会让 DB 里的 progress 停在中间值，task_status 轮询回退
             #    查询拿到的就是脏值。现接入共享重试（仅重试瞬态锁错误）。
-            await retry_db_op(lambda: _update_task_progress_db(
-                task_id, progress, message))
+            await retry_db_op(lambda: _update_task_progress_db(task_id, progress, message))
         except Exception as e:
             # 进度落库失败不应中断生成主流程（内存态与广播仍继续）
             logger.warning("update_progress 落库失败（已忽略）: %s", e)
@@ -200,8 +263,7 @@ async def update_progress(task_id: str, progress: float, message: str = "",
     if state is not None:
         state["progress"] = progress
         state["message"] = message
-    await broadcast(task_id, {"event": event, "task_id": task_id,
-                              "progress": progress, "message": message})
+    await broadcast(task_id, {"event": event, "task_id": task_id, "progress": progress, "message": message})
     _ab.notify()
 
 
@@ -277,10 +339,32 @@ async def _write_task_terminal_db(task_id: str, status: str, message: str):
     """
     conn = await get_conn()
     await conn.execute(
-        "UPDATE task_registry SET status=?, message=?, updated_at=? "
-        "WHERE id=? AND status IN ('running','paused')",
-        (status, message, datetime.now().isoformat(), task_id))
+        "UPDATE task_registry SET status=?, message=?, updated_at=? " "WHERE id=? AND status IN ('running','paused')",
+        (status, message, datetime.now().isoformat(), task_id),
+    )
     await conn.commit()
+
+
+def _mark_task_terminal_in_memory(state: dict | None, status: str) -> None:
+    """把内存态标为终态并停掉后台子任务（**纯同步、无 await**，取消风暴下也必达）。
+
+    ✅ R177（2026-11-05 · 断线收尾 P1）：原实现这段逻辑内联在 ``finish_task``
+    主体里、且位于「终态落库」**之后** —— 落库被取消（CancelledError 属
+    BaseException，**不被** ``except Exception`` 捕获）时整段被跳过，内存态
+    永远停在 running。现抽出为独立同步函数，让「落库被取消」与「正常收尾」
+    两条路径共用同一份语义。
+    """
+    if not state:
+        return
+    state["status"] = status
+    # ✅ 收口修复：非正常完成的任务（stopped/failed/中断清理）必须同步取消所有
+    # 后台子任务。原实现只有 request_control("stop") 才 cancel，而 event_stream
+    # 的 CancelledError 分支直接 finish_task 后 child_tasks 仍在跑——DB 已是
+    # 终态、_tasks 已被 pop，后台生成彻底失去停止通道（继续写库/写进度）。
+    if status != "completed":
+        for t in list(state.get("child_tasks") or ()):
+            if not t.done():
+                t.cancel()
 
 
 async def finish_task(task_id: str, status: str = "completed", message: str = ""):
@@ -294,6 +378,20 @@ async def finish_task(task_id: str, status: str = "completed", message: str = ""
     （用户表现为「生成早就停了，却再也存不了任何一章」），只能重启后端。
     现把 DB 写库与广播各自 try/except，内存清理放进 finally 无条件执行，
     保证内存态绝不泄漏。
+
+    ✅ R177 修复（2026-11-05 · 断线收尾 P1 · 生产日志实证）：logs/backend.log
+    里 11 次「断线兜底保存正文成果被取消」之后**严格 3 秒**出现
+    「mark_stream_ended: 任务 X 在 SSE 结束后 3s 内未落终态」（两次配对率
+    11/11）。根因有两处，本函数两处同修：
+      ① 终态落库被取消 → DB 里任务永远停在 running，而「终态」正是前端
+         ``pollTaskUntilTerminal`` 唯一等待的信号（用户表现为任务栏永远
+         转圈、刷新后拿不到任何终态）。现用 ``asyncio.shield`` 保护落库：
+         外层被取消只中断**等待**，内层写仍在后台完成（与 bid_analysis.py
+         断线兜底同一范式）。
+      ② 内存态清理的 finally 原先只挂在「广播」那层 try 上 —— 首个 await
+         （落库）抛 CancelledError 时**整段清理被跳过** → ``_tasks`` 永久残留，
+         与本函数 docstring 承诺的 G12-5「无条件执行」相悖。现把清理提到
+         **外层 finally**，覆盖函数全体，任何退出路径（含取消）都必达。
     """
     state = _tasks.get(task_id)
     _terminal_db_ok = False
@@ -308,60 +406,74 @@ async def finish_task(task_id: str, status: str = "completed", message: str = ""
         #    「已清理 1 个中断遗留任务（completed=0, failed=1）」即为此任务的归宿）。
         #    内存态清理仍在下方 finally 无条件执行（G12-5 不变量），
         #    重试只补「DB 可见性」这一环，语义与并发安全性不变。
-        await retry_db_op(lambda: _write_task_terminal_db(
-            task_id, status, message))
-        _terminal_db_ok = True
-    except Exception as e:
-        # 终态写库失败必须显式记录（否则用户看到「任务还在跑」却查不到原因），
-        # 但绝不能阻断下面的内存清理 —— 那是防泄漏的关键一步。
-        logger.error("finish_task 终态落库失败（task=%s status=%s）: %s",
-                     task_id, status, e, exc_info=True)
+        try:
+            # ✅ R177（2026-11-05）：终态落库 shield —— 取消风暴下「等待」被打断
+            #    时，内层写仍在后台完成，DB 里的任务因此不会永远停在 running。
+            await asyncio.shield(retry_db_op(lambda: _write_task_terminal_db(task_id, status, message)))
+            _terminal_db_ok = True
+        except asyncio.CancelledError:
+            # 取消信号：shield 的内层落库仍在后台跑，但**当前协程**必须立刻让位 ——
+            # 先把内存态标成终态（并停掉后台子任务），再把取消信号原样上抛，
+            # 既不吞掉调用方的取消语义，也不留下 running 的内存态。
+            _mark_task_terminal_in_memory(state, status)
+            logger.warning(
+                "finish_task 终态落库等待被取消（已 shield，后台继续落库）: task=%s status=%s",
+                task_id,
+                status,
+            )
+            raise
+        except Exception as e:
+            # 终态写库失败必须显式记录（否则用户看到「任务还在跑」却查不到原因），
+            # 但绝不能阻断下面的内存清理 —— 那是防泄漏的关键一步。
+            logger.error("finish_task 终态落库失败（task=%s status=%s）: %s", task_id, status, e, exc_info=True)
 
-    # ✅ F6（2026-10-05 · 日志准确性）：任务生命周期的**成功路径此前零日志** ——
-    #    finish_task 是所有任务类型（目录/正文/事实/一致性/…）唯一的终态收口点，
-    #    正常完成后 logs/backend.log 里查不到任何一行，排障时无法区分
-    #    「任务没跑」与「跑完了但没记录」。此处补状态迁移记录（INFO = 正常追踪，
-    #    见 AGENTS.md §3.1.6）；业务级失败/异常仍由各自调用点按 ERROR/WARNING
-    #    落盘，不在此重复报错。仅在终态**成功落库**时记录 —— 落库失败时上一行
-    #    已按 ERROR 落盘，避免同一事件出现「一条失败 + 一条完成」的矛盾日志。
-    if _terminal_db_ok:
-        _st = state or {}
-        _type = _st.get("type", "?")
-        _scheme = _st.get("scheme_id", "?") or "?"
-        if status == "completed":
-            logger.info("任务完成（type=%s · scheme=%s · task=%s）",
-                        _type, _scheme, task_id)
-        elif status == "degraded":
-            logger.info("任务降级完成（type=%s · scheme=%s · task=%s）: %s",
-                        _type, _scheme, task_id, (message or "")[:120])
-        else:
-            logger.info("任务终止 %s（type=%s · scheme=%s · task=%s）: %s",
-                        status, _type, _scheme, task_id,
-                        (message or "")[:120])
+        # ✅ F6（2026-10-05 · 日志准确性）：任务生命周期的**成功路径此前零日志** ——
+        #    finish_task 是所有任务类型（目录/正文/事实/一致性/…）唯一的终态收口点，
+        #    正常完成后 logs/backend.log 里查不到任何一行，排障时无法区分
+        #    「任务没跑」与「跑完了但没记录」。此处补状态迁移记录（INFO = 正常追踪，
+        #    见 AGENTS.md §3.1.6）；业务级失败/异常仍由各自调用点按 ERROR/WARNING
+        #    落盘，不在此重复报错。仅在终态**成功落库**时记录 —— 落库失败时上一行
+        #    已按 ERROR 落盘，避免同一事件出现「一条失败 + 一条完成」的矛盾日志。
+        if _terminal_db_ok:
+            _st = state or {}
+            _type = _st.get("type", "?")
+            _scheme = _st.get("scheme_id", "?") or "?"
+            if status == "completed":
+                logger.info("任务完成（type=%s · scheme=%s · task=%s）", _type, _scheme, task_id)
+            elif status == "degraded":
+                logger.info(
+                    "任务降级完成（type=%s · scheme=%s · task=%s）: %s", _type, _scheme, task_id, (message or "")[:120]
+                )
+            else:
+                # ✅ R180（2026-11-05）：终态日志补 reason=<稳定枚举>，
+                #    使「客户端离开 / 用户手动停止 / 超时 / 进程重启」可聚合统计。
+                logger.info(
+                    "任务终止 %s（type=%s · scheme=%s · task=%s · reason=%s）: %s",
+                    status,
+                    _type,
+                    _scheme,
+                    task_id,
+                    _infer_cancel_reason(status, message),
+                    (message or "")[:120],
+                )
 
-    if state:
-        state["status"] = status
-        # ✅ 收口修复：非正常完成的任务（stopped/failed/中断清理）必须同步取消所有
-        # 后台子任务。原实现只有 request_control("stop") 才 cancel，而 event_stream
-        # 的 CancelledError 分支直接 finish_task 后 child_tasks 仍在跑——DB 已是
-        # 终态、_tasks 已被 pop，后台生成彻底失去停止通道（继续写库/写进度）。
-        if status != "completed":
-            for t in list(state["child_tasks"]):
-                if not t.done():
-                    t.cancel()
-    try:
-        # completed/stopped/failed 事件都广播
-        broadcast_event = "completed" if status == "completed" else status
-        await broadcast(task_id, {"event": broadcast_event,
-                                  "task_id": task_id, "message": message})
-    except Exception as e:
-        logger.warning("finish_task 广播失败（已忽略，不影响终态）: %s", e)
+        # ✅ R177：内存态终态标记抽成独立同步函数（_mark_task_terminal_in_memory），
+        #    与「落库被取消」路径共用同一份语义 —— 取消风暴下也必达。
+        _mark_task_terminal_in_memory(state, status)
+        try:
+            # completed/stopped/failed 事件都广播
+            broadcast_event = "completed" if status == "completed" else status
+            await broadcast(task_id, {"event": broadcast_event, "task_id": task_id, "message": message})
+        except Exception as e:
+            logger.warning("finish_task 广播失败（已忽略，不影响终态）: %s", e)
     finally:
-        # ✅ G12-5：内存态清理必须**无条件**执行 —— 即使上面的写库 / 广播
-        # 抛了异常，也不能让终态任务残留在 _tasks 里（见函数说明）。
+        # ✅ G12-5（**外层** finally · R177）：内存态清理必须无条件执行 —— 即使上面的
+        #    写库 / 广播抛了异常，**或整个调用被取消**（CancelledError 属 BaseException、
+        #    不被 `except Exception` 捕获），也不能让终态任务残留在 _tasks 里。
+        #    R177：原先该 finally 只挂在「广播」那层 try 上 → 落库被取消时整段清理
+        #    被跳过 → _tasks 永久残留（生产实证 11 次「未落终态」配对）。
         _tasks.pop(task_id, None)
         _ab.notify()
-
 
 
 async def _set_task_status_db(task_id: str, status: str) -> int:
@@ -371,9 +483,9 @@ async def _set_task_status_db(task_id: str, status: str) -> int:
     """
     conn = await get_conn()
     cur = await conn.execute(
-        "UPDATE task_registry SET status=?, updated_at=? "
-        "WHERE id=? AND status IN ('running','paused')",
-        (status, datetime.now().isoformat(), task_id))
+        "UPDATE task_registry SET status=?, updated_at=? " "WHERE id=? AND status IN ('running','paused')",
+        (status, datetime.now().isoformat(), task_id),
+    )
     await conn.commit()
     # ✅ 2026-09-30 收敛到 safe_rowcount 单一出口（R13）：旧写法
     #   int(getattr(cur, "rowcount", 0) or 0) 不抛 AttributeError，但
@@ -399,8 +511,7 @@ async def set_task_status(task_id: str, status: str) -> bool:
     #    （用户点一次就得成一次），值得更长预算：5 次 × 0.1s 起步指数退避
     #    （最坏 ≈3.1s）+ 0.1s 抖动打散同拍惊群。仍耗尽时异常上抛，由控制路由
     #    翻译成 503 + Retry-After（前端自动重试一次），绝不静默丢指令。
-    rc = await retry_db_op(lambda: _set_task_status_db(task_id, status),
-                           max_retries=5, base_delay=0.1, jitter=0.1)
+    rc = await retry_db_op(lambda: _set_task_status_db(task_id, status), max_retries=5, base_delay=0.1, jitter=0.1)
     if rc == 0:
         logger.info("set_task_status: 任务 %s 已处终态或不存在，忽略 %s 覆盖", task_id, status)
         return False
@@ -411,6 +522,7 @@ async def set_task_status(task_id: str, status: str) -> bool:
 
 
 # ---------- 真正的控制 API ----------
+
 
 def request_control(task_id: str, action: str):
     """从后端路由调用，将暂停/恢复/停止指令作用到 Event 上。"""
@@ -425,10 +537,12 @@ def request_control(task_id: str, action: str):
         #    set 事件不会让任何人退出。此处如实记 WARNING（返回值语义不变，
         #    避免把「控制契约」改成另一种行为），真正的收尾由
         #    mark_stream_ended 的宽限回收负责，用户侧最迟 3s 后读到终态。
-        logger.warning("request_control: 任务 %s 的 SSE 流已结束（%.1fs 前），"
-                       "%s 指令无在飞消费者，等待宽限回收",
-                       task_id, time.monotonic() - float(state["stream_ended_at"]),
-                       action)
+        logger.warning(
+            "request_control: 任务 %s 的 SSE 流已结束（%.1fs 前），" "%s 指令无在飞消费者，等待宽限回收",
+            task_id,
+            time.monotonic() - float(state["stream_ended_at"]),
+            action,
+        )
     now = time.monotonic()
     if action == "pause":
         # ✅ 暂停账本：重复 pause 不得重置已累计时长（否则可无限刷新清零）
@@ -446,17 +560,13 @@ def request_control(task_id: str, action: str):
         try:
             n_rejected = _cc.semaphore.reject_waiters(owner_id=task_id)
             if n_rejected > 0:
-                logger.info(
-                    "pause task=%s：拒绝并发排队中的 %d 个 AI 请求协程（加速暂停响应）",
-                    task_id, n_rejected)
+                logger.info("pause task=%s：拒绝并发排队中的 %d 个 AI 请求协程（加速暂停响应）", task_id, n_rejected)
         except Exception as e:
-            logger.warning("pause task=%s：reject_waiters 调用失败（已忽略）: %s",
-                           task_id, e)
+            logger.warning("pause task=%s：reject_waiters 调用失败（已忽略）: %s", task_id, e)
     elif action == "resume":
         # ✅ 结算暂停段；重复 resume 无副作用（paused_at 为 None 时跳过）
         if state.get("paused_at") is not None:
-            state["paused_total"] = float(state.get("paused_total") or 0.0) + (
-                now - state["paused_at"])
+            state["paused_total"] = float(state.get("paused_total") or 0.0) + (now - state["paused_at"])
             state["paused_at"] = None
         state["pause_event"].set()
     elif action == "stop":
@@ -500,6 +610,55 @@ def has_active_task(task_id: str) -> bool:
     return task_id in _tasks
 
 
+# ✅ BUG-B 修复（R173 · 2026-11-03）：delete_scheme / delete_project 此前直接删
+# task_registry 行，对内存 `_tasks` 中仍在跑的目录/正文/事实/解析生成任务不做任何
+# 取消 —— 生成任务跑至自然结束（AI 配额白烧）、继续向已删方案写孤儿行，且
+# finish_task 终态 UPDATE 命中 0 行（DB 无终态痕迹），任务完全游离于互斥/回收
+# 机制之外。现仿 register_task 的防僵尸范式（见上方 register_task 内
+# `request_control(old_id, "stop")`）提供删除前置取消，唯一入口供两条删除链路复用。
+def cancel_active_tasks_for_schemes(scheme_ids) -> list[str]:
+    """对 scheme_id 匹配的内存运行/暂停任务触发协作式停止，返回已触发的 task_id。
+
+    只处理 `status in ('running','paused')` 的内存态；任务已结束（不在 `_tasks`
+    或已终态）时幂等跳过（request_control 对不存在任务返回 False）。
+    """
+    ids = {s for s in (scheme_ids or []) if s}
+    if not ids:
+        return []
+    stopped: list[str] = []
+    for tid, state in list(_tasks.items()):
+        if state.get("scheme_id") in ids and state.get("status") in ("running", "paused"):
+            if request_control(tid, "stop"):
+                stopped.append(tid)
+    if stopped:
+        logger.warning(
+            "删除前取消：scheme %s 仍有 %d 个运行中任务，已请求停止 %s",
+            sorted(s[:8] for s in ids),
+            len(stopped),
+            stopped,
+        )
+    return stopped
+
+
+async def cancel_and_wait_tasks_for_schemes(scheme_ids, grace_seconds: float = 2.0) -> list[str]:
+    """删除前置取消 + 短暂收尾等待（删除链路专用，有界等待不阻塞删除）。
+
+    等待已到达停止检查点的任务退出内存（finish_task 落终态）——这些任务的
+    终态能写进**尚未删除**的 task_registry 行，DB 留痕。仍在飞 AI 调用的任务
+    无法同步打断，超过宽限期即放行删除：其后续终态写库命中 0 行，属协作式
+    取消的既有语义（与 register_task 替换旧任务的行为一致）。
+    """
+    stopped = cancel_active_tasks_for_schemes(scheme_ids)
+    if not stopped:
+        return []
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        if not any(tid in _tasks for tid in stopped):
+            break
+        await asyncio.sleep(0.1)
+    return stopped
+
+
 # ✅ R106 FIX-6（2026-10-18 · 活体浏览器 E2E 实测「停止后重启 → 目录 Tab 永久锁死」）：
 # event_stream 的取消/断线收尾**依赖一串 await**（checkpoint → finish_task），
 # 而收尾协程自己可能再次被取消。实测 trace=03563da7f91a（task=b3dc5ae0…）：
@@ -532,17 +691,18 @@ async def _reap_abandoned_task(task_id: str, grace_seconds: float):
         logger.warning(
             "mark_stream_ended: 任务 %s 在 SSE 结束后 %.0fs 内未落终态 → "
             "内存态回收 + DB 补 stopped（type=%s · scheme=%s）",
-            task_id, grace_seconds, state.get("type", "?"),
-            state.get("scheme_id", "?"))
-        await retry_db_op(lambda: _write_task_terminal_db(
-            task_id, "stopped", _STREAM_ABANDON_MESSAGE))
+            task_id,
+            grace_seconds,
+            state.get("type", "?"),
+            state.get("scheme_id", "?"),
+        )
+        await retry_db_op(lambda: _write_task_terminal_db(task_id, "stopped", _STREAM_ABANDON_MESSAGE))
     except asyncio.CancelledError:
         pass  # 进程退出等：下个 lifespan / reap_orphan_tasks 周期自然收敛
     except Exception as e:
         # 内存态已回收，DB 写失败不致命：任务已不在 `_tasks`，
         # `reap_orphan_tasks` 下一周期会把它当 DB 僵尸落终态（第三道防线仍生效）。
-        logger.warning("mark_stream_ended 收尾失败（task=%s，交给周期回收）: %s",
-                       task_id, e)
+        logger.warning("mark_stream_ended 收尾失败（task=%s，交给周期回收）: %s", task_id, e)
 
 
 def mark_stream_ended(task_id: str, grace_seconds: float = 3.0) -> bool:
@@ -592,6 +752,7 @@ def register_child_task(task_id: str, child: asyncio.Task) -> bool:
 
 # ---------- SSE 订阅 ----------
 
+
 # ✅ 2026-10-04 死链路清理：
 #   `_subscribers: dict[task_id -> list[Queue]]` 及其配套的
 #   subscribe/unsubscribe 曾在旧实现里承担「task_registry 主动 push 事件」
@@ -607,14 +768,13 @@ async def broadcast(task_id: str, payload: dict):
     return
 
 
-
 async def get_interrupted_tasks() -> list[dict]:
     """进程重启后恢复：找出 running/paused 状态的旧任务"""
     conn = await get_conn()
     cur = await conn.execute(
-        "SELECT * FROM task_registry WHERE status IN ('running','paused') ORDER BY created_at DESC")
+        "SELECT * FROM task_registry WHERE status IN ('running','paused') ORDER BY created_at DESC"
+    )
     return [dict(r) for r in await cur.fetchall()]
-
 
 
 async def reap_orphan_tasks(max_stale_seconds: float = 900.0) -> int:
@@ -639,9 +799,8 @@ async def reap_orphan_tasks(max_stale_seconds: float = 900.0) -> int:
         conn = await get_conn()
         cutoff = (datetime.now() - timedelta(seconds=max_stale_seconds)).isoformat()
         cur = await conn.execute(
-            "SELECT id FROM task_registry "
-            "WHERE status IN ('running','paused') AND updated_at < ?",
-            (cutoff,))
+            "SELECT id FROM task_registry " "WHERE status IN ('running','paused') AND updated_at < ?", (cutoff,)
+        )
         rows = [r[0] for r in await cur.fetchall()]
         # ✅ R106 FIX-6：内存态"在跑"的豁免只看有没有活跃实例。已被
         #    mark_stream_ended 登记过「SSE 已结束」却仍未被回收的条目（detached
@@ -655,8 +814,7 @@ async def reap_orphan_tasks(max_stale_seconds: float = 900.0) -> int:
             if st is None:
                 return True  # 内存无实例：既有语义（DB 僵尸）
             ended_at = st.get("stream_ended_at")
-            return bool(ended_at) and float(ended_at) < _ended_before \
-                and st.get("status") in ("running", "paused")
+            return bool(ended_at) and float(ended_at) < _ended_before and st.get("status") in ("running", "paused")
 
         orphan_ids = [i for i in rows if _abandoned(i)]
         if not orphan_ids:
@@ -666,14 +824,15 @@ async def reap_orphan_tasks(max_stale_seconds: float = 900.0) -> int:
             "UPDATE task_registry SET status='stopped', "
             "message='后台周期回收：无运行实例的僵尸任务', updated_at=? "
             f"WHERE id IN ({ph}) AND status IN ('running','paused')",
-            [datetime.now().isoformat(), *orphan_ids])
+            [datetime.now().isoformat(), *orphan_ids],
+        )
         await conn.commit()
         changed = safe_rowcount(cur2, what="僵尸后台任务批量置 stopped")
         if changed:
             _ab.notify()
             logger.warning(
-                "reap_orphan_tasks: 已回收 %d 个僵尸任务（DB running 但无运行实例）: %s",
-                changed, orphan_ids)
+                "reap_orphan_tasks: 已回收 %d 个僵尸任务（DB running 但无运行实例）: %s", changed, orphan_ids
+            )
         return changed
     except asyncio.CancelledError:
         raise

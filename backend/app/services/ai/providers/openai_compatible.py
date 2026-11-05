@@ -1,4 +1,5 @@
 """OpenAI 兼容 Provider（覆盖 OpenAI/DeepSeek/SiliconFlow/通义/智谱/Agnes）"""
+
 import json
 import logging
 from typing import AsyncIterator
@@ -36,9 +37,15 @@ class OpenAICompatibleProvider(BaseProvider):
             messages = list(messages) + [{"role": "user", "content": "请按系统提示执行任务。"}]
         return messages
 
-    async def chat(self, messages: list, temperature: float | None = None,
-                   json_mode: bool = False, max_tokens: int | None = None,
-                   extra_body: dict | None = None, **_kwargs) -> str:
+    async def chat(
+        self,
+        messages: list,
+        temperature: float | None = None,
+        json_mode: bool = False,
+        max_tokens: int | None = None,
+        extra_body: dict | None = None,
+        **_kwargs,
+    ) -> str:
         # ✅ 移植适配：归一化 AIMessage 对象 → dict；支持参数覆盖
         messages = normalize_messages(messages)
         payload = {
@@ -58,19 +65,23 @@ class OpenAICompatibleProvider(BaseProvider):
         # ✅ 2026-09-22 增强（参考 OpenBidKit）：response_format 不支持时自动去掉
         #    重试一次（部分厂商 400 + response_format 字样错误，去掉后用普通文本即可）。
         for attempt in (0, 1):
-            resp = await client.post(f"{self.base_url}/chat/completions", json=payload,
-                                     headers=headers, timeout=self.timeout)
+            resp = await client.post(
+                f"{self.base_url}/chat/completions", json=payload, headers=headers, timeout=self.timeout
+            )
             if resp.status_code >= 400:
                 body_text = resp.text[:800]
-                if (attempt == 0 and json_mode
-                        and _is_response_format_unsupported(resp.status_code, body_text)):
+                if attempt == 0 and json_mode and _is_response_format_unsupported(resp.status_code, body_text):
                     logger.warning(
-                        "厂商 %s 不支持 response_format（HTTP 400），去掉后重试（将改用普通文本输出 JSON）",
-                        self.name)
+                        "厂商 %s 不支持 response_format（HTTP 400），去掉后重试（将改用普通文本输出 JSON）", self.name
+                    )
                     payload.pop("response_format", None)
                     json_mode = False
                     continue
-                raise RuntimeError(f"HTTP {resp.status_code}: {body_text}")
+                # ✅ 2026-11-05（429 处理）：把上游 Retry-After 透出到异常文本，
+                #    编排层据此设置配额冷却（优先于固定 120s），尊重厂商限流窗口。
+                retry_after = resp.headers.get("retry-after")
+                suffix = f"（Retry-After: {retry_after}s）" if retry_after else ""
+                raise RuntimeError(f"HTTP {resp.status_code}: {body_text}{suffix}")
             resp.raise_for_status()
             break
         data = resp.json()
@@ -92,21 +103,26 @@ class OpenAICompatibleProvider(BaseProvider):
             #    b) 内容过滤 / 厂商抖动返回 200 + 空 content。
             _msg = choices[0].get("message") or {}
             _finish = choices[0].get("finish_reason") or "unknown"
-            _reasoning = str(_msg.get("reasoning_content")
-                             or _msg.get("reasoning") or "").strip()
+            _reasoning = str(_msg.get("reasoning_content") or _msg.get("reasoning") or "").strip()
             if _reasoning and _finish == "length":
                 _eff_max = max_tokens or self.max_tokens
                 raise RuntimeError(
                     f"推理模型把 max_tokens({_eff_max}) 全部消耗在思考过程"
                     f"（finish_reason=length），正文为空：请调大 max_tokens"
-                    f" 或改用非推理模型")
-            raise RuntimeError(
-                f"厂商返回空 content（finish_reason={_finish}）: {str(data)[:200]}")
+                    f" 或改用非推理模型"
+                )
+            raise RuntimeError(f"厂商返回空 content（finish_reason={_finish}）: {str(data)[:200]}")
         return content
 
-    async def stream(self, messages: list, temperature: float | None = None,
-                     json_mode: bool = False, max_tokens: int | None = None,
-                     extra_body: dict | None = None, **_kwargs) -> AsyncIterator[str]:
+    async def stream(
+        self,
+        messages: list,
+        temperature: float | None = None,
+        json_mode: bool = False,
+        max_tokens: int | None = None,
+        extra_body: dict | None = None,
+        **_kwargs,
+    ) -> AsyncIterator[str]:
         """流式请求（SSE 分片）。
 
         ✅ 增强（AI 配置「请求方式」新增后）：
@@ -122,8 +138,13 @@ class OpenAICompatibleProvider(BaseProvider):
         """
         messages = normalize_messages(messages)
         messages = self._ensure_user_message(messages)
+        # ✅ R176 B2-1（2026-11-04）：每次流式调用重置跳过统计。重试（stream_options /
+        #    response_format 降级）共用同一计数 —— 统计的是「本次调用被丢掉的分片」。
+        self.last_stream_parse_skipped = 0
+        self.last_stream_parse_skipped_reason = ""
         payload = {
-            "model": self.model, "messages": messages,
+            "model": self.model,
+            "messages": messages,
             "max_tokens": max_tokens or self.max_tokens,
             "temperature": temperature if temperature is not None else self.temperature,
             "stream": True,
@@ -143,6 +164,14 @@ class OpenAICompatibleProvider(BaseProvider):
             try:
                 async for piece in self._iter_stream(client, payload, headers):
                     yield piece
+                # ✅ R176 B2-1：流结束时给一次可观测信号（计数 + 首个原因），
+                #    无跳过时不打日志，避免正常路径噪声。
+                if self.last_stream_parse_skipped:
+                    logger.warning(
+                        "流式响应有 %d 条分片解析失败被跳过（首个原因：%s），正文可能不完整",
+                        self.last_stream_parse_skipped,
+                        self.last_stream_parse_skipped_reason,
+                    )
                 return
             except httpx.HTTPStatusError as e:
                 status = getattr(getattr(e, "response", None), "status_code", None)
@@ -154,40 +183,52 @@ class OpenAICompatibleProvider(BaseProvider):
                 if attempt < 2 and status == 400:
                     # stream_options 不支持
                     if "stream_options" in payload and "stream_options" not in _stream_downgraded:
-                        logger.warning(
-                            "厂商不支持 stream_options（HTTP 400），去掉该字段重试流式请求")
+                        logger.warning("厂商不支持 stream_options（HTTP 400），去掉该字段重试流式请求")
                         payload.pop("stream_options", None)
                         _stream_downgraded.add("stream_options")
                         continue
                     # response_format 不支持
-                    if ("response_format" in payload and json_mode
-                            and "response_format" not in _stream_downgraded
-                            and _is_response_format_unsupported(status, body_text)):
-                        logger.warning(
-                            "厂商 %s 不支持流式 response_format（HTTP 400），去掉后重试",
-                            self.name)
+                    if (
+                        "response_format" in payload
+                        and json_mode
+                        and "response_format" not in _stream_downgraded
+                        and _is_response_format_unsupported(status, body_text)
+                    ):
+                        logger.warning("厂商 %s 不支持流式 response_format（HTTP 400），去掉后重试", self.name)
                         payload.pop("response_format", None)
                         json_mode = False
                         _stream_downgraded.add("response_format")
                         continue
                 raise
 
-    async def _iter_stream(self, client, payload: dict,
-                           headers: dict) -> AsyncIterator[str]:
+    async def _iter_stream(self, client, payload: dict, headers: dict) -> AsyncIterator[str]:
         """单次 SSE 请求并逐片产出正文（不做任何重试/降级决策）。"""
-        async with client.stream("POST", f"{self.base_url}/chat/completions",
-                                 json=payload, headers=headers,
-                                 timeout=self.timeout) as resp:
+        async with client.stream(
+            "POST", f"{self.base_url}/chat/completions", json=payload, headers=headers, timeout=self.timeout
+        ) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
                 if not line.startswith("data:"):
                     continue
                 chunk = line[5:].strip()
+                # ✅ R176 B2-1：纯 `data:` 空行是部分厂商的保活帧，不是解析失败，
+                #    不计入跳过统计（否则会把正常保活误报成「内容缺失」）。
+                if not chunk:
+                    continue
                 if chunk == "[DONE]":
                     break
                 try:
                     data = json.loads(chunk)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    # ✅ R176 B2-1（2026-11-04）：旧实现裸 continue —— 分片被丢掉后
+                    #    用户只看到残缺正文，无从判断「少东西」；排查也只能靠猜。
+                    #    现累计跳过数 + 记首个原因（片段截断，避免日志/状态膨胀）。
+                    self.last_stream_parse_skipped += 1
+                    if not self.last_stream_parse_skipped_reason:
+                        self.last_stream_parse_skipped_reason = (
+                            f"首条非法 SSE 分片（{type(e).__name__}，长度 {len(chunk)}）：" f"{chunk[:40]}"
+                        )
+                    logger.debug("流式分片 JSON 解析失败，已跳过（%s）: %.80s", e, chunk)
                     continue
                 # usage 通常只在最后一个分片出现（此时 choices 为空数组），
                 # 旧实现 `["choices"][0]` 直接 IndexError 把它吞掉 → 用量恒为 0。

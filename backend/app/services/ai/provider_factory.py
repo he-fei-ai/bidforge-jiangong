@@ -1,8 +1,11 @@
 """AI 提供商工厂（自动降级链：当前配置 → 其余配置按 priority → 内置兜底）"""
+
 import asyncio
+import ipaddress
 import json
 import logging
 import re
+import socket
 import sqlite3
 import threading
 import time
@@ -147,7 +150,12 @@ PROVIDER_PRESETS = {
         "type": "openai_compatible",
         "label": "腾讯混元",
         "models": [
-            {"value": "hunyuan-turbos-latest", "label": "Hunyuan-TurboS (极速)", "context": "256K", "recommended": True},
+            {
+                "value": "hunyuan-turbos-latest",
+                "label": "Hunyuan-TurboS (极速)",
+                "context": "256K",
+                "recommended": True,
+            },
             {"value": "hunyuan-turbo-latest", "label": "Hunyuan-Turbo (旗舰)", "context": "256K"},
             {"value": "hunyuan-large-latest", "label": "Hunyuan-Large (超大)", "context": "256K"},
         ],
@@ -302,7 +310,6 @@ PROVIDER_PRESETS = {
         "website": "https://opencompass.org.cn",
         "pricing": "免费",
     },
-
     # ==================== 新加坡 ====================
     "agnes": {
         "base_url": "https://api.agnes-ai.cn/v1",
@@ -316,7 +323,6 @@ PROVIDER_PRESETS = {
         "website": "https://agnes-ai.cn",
         "pricing": "平台内置",
     },
-
     # ==================== 美国 ====================
     "openai": {
         "base_url": "https://api.openai.com/v1",
@@ -341,9 +347,20 @@ PROVIDER_PRESETS = {
         "label": "Anthropic",
         "supports_vision": True,
         "models": [
-            {"value": "claude-sonnet-4-20250514", "label": "Claude Sonnet 4", "context": "200K", "recommended": True, "vision": True},
+            {
+                "value": "claude-sonnet-4-20250514",
+                "label": "Claude Sonnet 4",
+                "context": "200K",
+                "recommended": True,
+                "vision": True,
+            },
             {"value": "claude-opus-4-20250514", "label": "Claude Opus 4 (旗舰)", "context": "200K", "vision": True},
-            {"value": "claude-3-5-haiku-20241022", "label": "Claude 3.5 Haiku (极速)", "context": "200K", "vision": True},
+            {
+                "value": "claude-3-5-haiku-20241022",
+                "label": "Claude 3.5 Haiku (极速)",
+                "context": "200K",
+                "vision": True,
+            },
         ],
         "description": "Anthropic Claude系列，长文本与推理能力卓越",
         "website": "https://console.anthropic.com",
@@ -355,7 +372,12 @@ PROVIDER_PRESETS = {
         "type": "openai_compatible",
         "label": "NVIDIA NIM",
         "models": [
-            {"value": "meta/llama-3.1-405b-instruct", "label": "Llama-3.1-405B (旗舰)", "context": "128K", "recommended": True},
+            {
+                "value": "meta/llama-3.1-405b-instruct",
+                "label": "Llama-3.1-405B (旗舰)",
+                "context": "128K",
+                "recommended": True,
+            },
             {"value": "meta/llama-3.1-70b-instruct", "label": "Llama-3.1-70B", "context": "128K"},
             {"value": "meta/llama-3.1-8b-instruct", "label": "Llama-3.1-8B (轻量)", "context": "128K"},
             {"value": "nvidia/nemotron-4-340b-instruct", "label": "Nemotron-4-340B", "context": "4K"},
@@ -371,18 +393,21 @@ PROVIDER_PRESETS = {
 # - 按量计费使用平台官方默认接入点（preset 自带 base_url / model）
 # - 包月套餐需用户手动填写该套餐对应的 API 地址与模型
 for _preset in PROVIDER_PRESETS.values():
-    _preset.setdefault("plans", {
-        "pay_as_you_go": {
-            "label": "按量计费",
-            "base_url": _preset.get("base_url", ""),
-            "model": _preset.get("model", ""),
+    _preset.setdefault(
+        "plans",
+        {
+            "pay_as_you_go": {
+                "label": "按量计费",
+                "base_url": _preset.get("base_url", ""),
+                "model": _preset.get("model", ""),
+            },
+            "coding_plan": {
+                "label": "包月套餐",
+                "base_url": "",
+                "model": "",
+            },
         },
-        "coding_plan": {
-            "label": "包月套餐",
-            "base_url": "",
-            "model": "",
-        },
-    })
+    )
 
 
 def _build_provider(preset_name: str, api_key: str, base_url: str, model: str, **kw) -> BaseProvider:
@@ -404,8 +429,7 @@ def _build_provider(preset_name: str, api_key: str, base_url: str, model: str, *
         if not base_url:
             base_url = preset.get("base_url", "")
     cls = AnthropicCompatibleProvider if t == "anthropic_compatible" else OpenAICompatibleProvider
-    return cls(api_key=api_key, base_url=base_url,
-               model=model or default_model, **kw)
+    return cls(api_key=api_key, base_url=base_url, model=model or default_model, **kw)
 
 
 # 允许的 API 地址协议（白名单，避免 file:// / ftp:// 等被写入配置后由 httpx 发起）
@@ -443,8 +467,7 @@ def _clamp(value, lo, hi, fallback):
     return max(lo, min(hi, v))
 
 
-def _setting_num(name: str, default: float, *, lo: float | None = None,
-                 hi: float | None = None) -> float:
+def _setting_num(name: str, default: float, *, lo: float | None = None, hi: float | None = None) -> float:
     """读取数值型 ``settings`` 的**单一出口**。
 
     ⚠️ 2026-10-06（B-6）：禁用 ``getattr(settings, name, default) or default``
@@ -506,6 +529,26 @@ def request_mode_label(raw) -> str:
     return "流式请求" if normalize_request_mode(raw) == "stream" else "普通请求"
 
 
+def coerce_enabled_flag(raw) -> int | None:
+    """把「启用/停用」入参归一为 ``1``/``0``；``None`` 表示「本次不改动」。
+
+    ✅ R179（2026-11-05）：R175 引入 ``ai_config.enabled`` 后，只有独立开关接口
+    （``PUT /config/{id}/enabled``）会写该列；保存与导入两条入口都不消费它 ——
+    API 调用方传 ``enabled=false`` 被静默忽略（新建行默认启用），属「写入的值
+    不生效」。本函数作为唯一解析出口，避免两处各自处理 bool / "0" / "false"。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return 1 if raw else 0
+    v = str(raw).strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return 1
+    if v in ("0", "false", "no", "off"):
+        return 0
+    return None
+
+
 #: 探测/校验侧可直接使用的请求方式值域（单一出口）。
 #: ⚠️ 2026-10-06（B-9）：``routers/ai_config/connectivity.py::test_config`` 此前
 #:    自行写了一份 ``raw_mode in ("normal", "stream")`` 判定（还额外引入了一个
@@ -523,15 +566,55 @@ def clamp_config_numbers(raw: dict) -> dict:
     绕过界面的脏数据进入运行链路（超界值会在 provider 请求里被厂商拒绝）。
     """
     return {
-        "max_tokens": int(_clamp(raw.get("max_tokens"), *_RANGE["max_tokens"],
-                                 DEFAULT_CONFIG_NUMBERS["max_tokens"])),
-        "temperature": round(_clamp(raw.get("temperature"), *_RANGE["temperature"],
-                                    DEFAULT_CONFIG_NUMBERS["temperature"]), 3),
-        "timeout": int(_clamp(raw.get("timeout"), *_RANGE["timeout"],
-                              DEFAULT_CONFIG_NUMBERS["timeout"])),
-        "concurrency": int(_clamp(raw.get("concurrency"), *_RANGE["concurrency"],
-                                  DEFAULT_CONFIG_NUMBERS["concurrency"])),
+        "max_tokens": int(_clamp(raw.get("max_tokens"), *_RANGE["max_tokens"], DEFAULT_CONFIG_NUMBERS["max_tokens"])),
+        "temperature": round(
+            _clamp(raw.get("temperature"), *_RANGE["temperature"], DEFAULT_CONFIG_NUMBERS["temperature"]), 3
+        ),
+        "timeout": int(_clamp(raw.get("timeout"), *_RANGE["timeout"], DEFAULT_CONFIG_NUMBERS["timeout"])),
+        "concurrency": int(
+            _clamp(raw.get("concurrency"), *_RANGE["concurrency"], DEFAULT_CONFIG_NUMBERS["concurrency"])
+        ),
     }
+
+
+def _is_internal_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """判定 IP 是否属于内网/回环/链路本地/未指定/保留网段（SSRF 防护判据）。"""
+    return bool(
+        getattr(ip, "is_private", False)
+        or getattr(ip, "is_loopback", False)
+        or getattr(ip, "is_link_local", False)
+        or getattr(ip, "is_unspecified", False)
+        or getattr(ip, "is_reserved", False)
+    )
+
+
+def _is_internal_host(host: str) -> bool:
+    """判定主机名是否指向内网/回环地址（含域名解析结果，防 DNS rebinding 静态版）。
+
+    解析失败时按「无法确认」处理（放行）：不能因为本机 DNS 暂时不可用，
+    就把用户配置的内网/公网地址一律判死 —— 真正的网络错误会在调用时暴露。
+    """
+    h = (host or "").strip().lower()
+    if not h:
+        return False
+    if h == "localhost":
+        return True
+    try:
+        return _is_internal_ip(ipaddress.ip_address(h))
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(h, 0)
+    except Exception:
+        return False
+    for info in infos:
+        addr = info[4][0] if info and len(info) > 4 else ""
+        try:
+            if _is_internal_ip(ipaddress.ip_address(addr)):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def normalize_base_url(raw: str) -> str:
@@ -542,6 +625,11 @@ def normalize_base_url(raw: str) -> str:
       - 未校验域名 —— `http://` 这类空主机地址会一路写库，直到运行时才失败；
       - 尾部斜杠未归一 —— 与 provider 内 `base_url.rstrip("/")` 不一致，
         造成「配置里显示带斜杠、实际请求不带」的表里不一。
+
+    ✅ R175（2026-11-03）：新增 SSRF 防护 —— 回环/私网/链路本地/云元数据/
+    0.0.0.0/localhost 以及「域名解析到内网」一律按安全策略拒绝；
+    本机自建模型服务（Ollama/vLLM 等）需显式设置
+    ``AI_ALLOW_PRIVATE_BASE_URL=1`` 才放行。
     """
     url = (raw or "").strip().rstrip("/")
     if not url:
@@ -554,6 +642,17 @@ def normalize_base_url(raw: str) -> str:
         raise ValueError("Base URL 仅支持 http/https 协议")
     if not parsed.hostname:
         raise ValueError("Base URL 缺少有效域名，请填写形如 https://api.example.com/v1 的地址")
+    # ✅ R175（2026-11-03）：SSRF 防护 —— 默认拒绝指向内网/回环的地址。
+    # ✅ 2026-11-05：拒绝文案统一化 —— 不回显 host（字面 IP 与域名两条路径
+    #    的结论必须逐字一致；回显还可能把用户误填的凭据带进日志），
+    #    原因写明「内网/回环/链路本地」，逃生开关写全名 AI_ALLOW_PRIVATE_BASE_URL=true。
+    if not bool(getattr(settings, "ai_allow_private_base_url", False)):
+        if _is_internal_host(parsed.hostname):
+            raise ValueError(
+                "Base URL 指向内网/回环/链路本地地址，已按安全策略拒绝；"
+                "如确需连接本机/内网自建模型服务，请设置环境变量 "
+                "AI_ALLOW_PRIVATE_BASE_URL=true 后重试"
+            )
     return url
 
 
@@ -594,8 +693,7 @@ def resolve_config_base_url(provider_name: str, plan: str, raw_base_url: str) ->
             raise ValueError("自定义供应商必须填写 Base URL")
     elif plan == "coding_plan":
         if not base_url:
-            raise ValueError("包月套餐（Coding Plan）必须手动填写 API 地址，"
-                             "包月接入点不同于按量计费")
+            raise ValueError("包月套餐（Coding Plan）必须手动填写 API 地址，" "包月接入点不同于按量计费")
     elif plan == "pay_as_you_go":
         if not base_url:
             preset = PROVIDER_PRESETS.get(provider_name)
@@ -622,18 +720,20 @@ def clamp_warnings(raw: dict) -> list[str]:
         try:
             v = float(raw[field])
         except (TypeError, ValueError):
-            warns.append(
-                f"{_NUMBER_LABELS[field]}取值非法（{raw[field]!r}），已按默认 {clamped[field]} 保存")
+            warns.append(f"{_NUMBER_LABELS[field]}取值非法（{raw[field]!r}），已按默认 {clamped[field]} 保存")
             continue
         if v < lo or v > hi:
-            warns.append(
-                f"{_NUMBER_LABELS[field]} {raw[field]} 超出允许范围 {lo}~{hi}，已按 {clamped[field]} 保存")
+            warns.append(f"{_NUMBER_LABELS[field]} {raw[field]} 超出允许范围 {lo}~{hi}，已按 {clamped[field]} 保存")
     return warns
 
 
 async def save_ai_config(data: dict) -> str:
     cid = data.get("id") or str(uuid.uuid4())
-    enc = encrypt_api_key(data.get("api_key", ""))
+    # ✅ R175（2026-11-03）：Key 先 strip 再加密 —— 前端粘贴常带换行/首尾空格，
+    #    旧实现把「空白串」当成有效 Key 加密落库（下游解密后为空仍进候选链），
+    #    且与「留空=不修改已有 Key」的语义冲突。
+    api_key_raw = (data.get("api_key") or "").strip()
+    enc = encrypt_api_key(api_key_raw)
     plan = normalize_plan(data.get("plan"))
     provider_name = (data.get("provider_name") or "").strip()
     model = (data.get("model") or "").strip()
@@ -658,6 +758,12 @@ async def save_ai_config(data: dict) -> str:
     # ✅ 2026-09-23（多环境）：环境标签同样走白名单归一，脏值不落库
     # （非法值直接抛 ValueError → 路由层 400，不静默写成空串）。
     env = normalize_env(data.get("env"))
+    # ✅ R179（2026-11-05）：启用/停用入参显式生效（None = 本次不改动）。
+    #    旧实现只在 INSERT 时依赖列默认值、UPDATE 完全不写 enabled ——
+    #    通过保存接口传 enabled=false 会被静默丢弃，与界面/接口契约不一致。
+    enabled_flag = coerce_enabled_flag(data.get("enabled"))
+    if enabled_flag == 0 and bool(data.get("is_active")):
+        raise ValueError("当前使用中的配置不能停用；请先把其它配置设为「当前使用」再停用该配置")
     # priority 为 None 表示「本次保存不改动降级顺序」（降级链有独立编辑入口），
     # 若保存时无脑写 0，会把用户拖好的顺序每次保存配置时全部清零。
     raw_priority = data.get("priority", None)
@@ -685,21 +791,56 @@ async def save_ai_config(data: dict) -> str:
                             "UPDATE ai_config SET provider_name=?, plan=?,"
                             " api_key_encrypted=CASE WHEN ?!='' THEN ? ELSE api_key_encrypted END,"
                             " base_url=?, model=?, max_tokens=?, temperature=?, timeout=?, concurrency=?,"
-                            " request_mode=?, env=?, is_active=?, remark=?, updated_at=? WHERE id=?",
-                            (provider_name, plan, data.get("api_key", ""), enc, base_url,
-                             model, max_tokens, temperature, timeout, concurrency,
-                             request_mode, env, int(data.get("is_active", True)), remark,
-                             datetime.now().isoformat(), cid))
+                            " request_mode=?, env=?, is_active=?, enabled=COALESCE(?, enabled),"
+                            " remark=?, updated_at=? WHERE id=?",
+                            (
+                                provider_name,
+                                plan,
+                                api_key_raw,
+                                enc,
+                                base_url,
+                                model,
+                                max_tokens,
+                                temperature,
+                                timeout,
+                                concurrency,
+                                request_mode,
+                                env,
+                                int(data.get("is_active", True)),
+                                enabled_flag,
+                                remark,
+                                datetime.now().isoformat(),
+                                cid,
+                            ),
+                        )
                     else:
                         await conn.execute(
                             "UPDATE ai_config SET provider_name=?, plan=?,"
                             " api_key_encrypted=CASE WHEN ?!='' THEN ? ELSE api_key_encrypted END,"
                             " base_url=?, model=?, max_tokens=?, temperature=?, timeout=?, concurrency=?,"
-                            " request_mode=?, env=?, is_active=?, remark=?, priority=?, updated_at=? WHERE id=?",
-                            (provider_name, plan, data.get("api_key", ""), enc, base_url,
-                             model, max_tokens, temperature, timeout, concurrency,
-                             request_mode, env, int(data.get("is_active", True)), remark,
-                             int(raw_priority), datetime.now().isoformat(), cid))
+                            " request_mode=?, env=?, is_active=?, enabled=COALESCE(?, enabled),"
+                            " remark=?, priority=?, updated_at=? WHERE id=?",
+                            (
+                                provider_name,
+                                plan,
+                                api_key_raw,
+                                enc,
+                                base_url,
+                                model,
+                                max_tokens,
+                                temperature,
+                                timeout,
+                                concurrency,
+                                request_mode,
+                                env,
+                                int(data.get("is_active", True)),
+                                enabled_flag,
+                                remark,
+                                int(raw_priority),
+                                datetime.now().isoformat(),
+                                cid,
+                            ),
+                        )
                 else:
                     # 闭包局部 prio：每次重放都重新读外层 raw_priority，
                     # 避免闭包内赋值把外层名字判为局部（UnboundLocalError）
@@ -707,24 +848,38 @@ async def save_ai_config(data: dict) -> str:
                     if prio is None:
                         # 新配置默认排到降级链末尾，而不是与既有配置同为 0
                         # （同值时只能靠 updated_at 兜底排序，顺序不可预期）
-                        cur = await conn.execute(
-                            "SELECT COALESCE(MAX(priority), -1) + 1 FROM ai_config")
+                        cur = await conn.execute("SELECT COALESCE(MAX(priority), -1) + 1 FROM ai_config")
                         row = await cur.fetchone()
                         prio = int(row[0]) if row and row[0] is not None else 0
                     await conn.execute(
                         "INSERT INTO ai_config (id, provider_name, plan, api_key_encrypted, base_url, model,"
                         " max_tokens, temperature, timeout, concurrency, request_mode, env,"
-                        " is_active, priority, remark)"
-                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (cid, provider_name, plan, enc, base_url, model,
-                         max_tokens, temperature, timeout, concurrency, request_mode, env,
-                         int(data.get("is_active", True)), int(prio), remark))
+                        " is_active, enabled, priority, remark)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?,1),?,?)",
+                        (
+                            cid,
+                            provider_name,
+                            plan,
+                            enc,
+                            base_url,
+                            model,
+                            max_tokens,
+                            temperature,
+                            timeout,
+                            concurrency,
+                            request_mode,
+                            env,
+                            int(data.get("is_active", True)),
+                            enabled_flag,
+                            int(prio),
+                            remark,
+                        ),
+                    )
                 # 注：此处原有一句 INSERT INTO provider_history，已删除 —— 该表全库无任何读取
                 # （数据流审计 R2 强信号），属只增不消费的死写，每次保存配置都会白写一行。
                 await conn.commit()
 
-        await retry_db_op(_save_tx_once, max_retries=4, base_delay=0.1,
-                          jitter=0.05)
+        await retry_db_op(_save_tx_once, max_retries=4, base_delay=0.1, jitter=0.05)
     except Exception:
         # 半提交状态已由 write_tx_conn 统一回滚（独立连接，不影响其他协程）
         raise
@@ -732,6 +887,12 @@ async def save_ai_config(data: dict) -> str:
     #    确定性死连击清零——改对则回候选链、改错则重新攒 3 次。
     with _provider_reliability_lock:
         _det_dead_streak.pop(_reliability_key("", "", cid, ""), None)
+        # ✅ R178（D-3 · 2026-11-05）：保存配置 = 用户改过这条配置（模型/端点/密钥），
+        #    此前只清「确定性死连击」，**不清实时成功率统计** → 用户把模型名改对了，
+        #    成功率却仍停在旧值（判死阈值 0.20 / 后置阈值 0.60）→ 改对了仍被剔除或
+        #    静默后置；且统计一旦冻结就**永远判死**，唯一出口是进程重启后 24h 预热。
+        #    现一并清掉该配置身份的实时成功率统计 → 保存即刻生效（用户改配置即恢复）。
+        _provider_reliability.pop(_reliability_key("", "", cid, ""), None)
     invalidate_config_cache()
     if data.get("is_active"):
         await apply_config_concurrency()
@@ -750,8 +911,8 @@ async def apply_config_concurrency() -> int | None:
     try:
         conn = await get_conn()
         cur = await conn.execute(
-            "SELECT concurrency FROM ai_config WHERE is_active = 1 "
-            "ORDER BY updated_at DESC LIMIT 1")
+            "SELECT concurrency FROM ai_config WHERE is_active = 1 " "ORDER BY updated_at DESC LIMIT 1"
+        )
         row = await cur.fetchone()
         if row and row[0]:
             c = int(row[0])
@@ -763,8 +924,7 @@ async def apply_config_concurrency() -> int | None:
                 return c
             elif c > _MAX_CONCURRENCY:
                 concurrency_controller.set_concurrency(_MAX_CONCURRENCY)
-                logger.warning("AI 配置并发数 %d 超过全局上限 %d，已钳到 %d",
-                               c, _MAX_CONCURRENCY, _MAX_CONCURRENCY)
+                logger.warning("AI 配置并发数 %d 超过全局上限 %d，已钳到 %d", c, _MAX_CONCURRENCY, _MAX_CONCURRENCY)
                 return _MAX_CONCURRENCY
     except Exception as e:
         # ✅ 2026-10-06（B-8 · 级别对称性）：成功路径记 INFO、失败路径记
@@ -822,8 +982,7 @@ def _config_cache_ttl() -> float:
        直接改库时的兜底，故调大该值不会有「改了不生效」的风险。
     """
     try:
-        ttl = float(getattr(settings, "ai_config_cache_ttl", _DEFAULT_CONFIG_CACHE_TTL)
-                    or _DEFAULT_CONFIG_CACHE_TTL)
+        ttl = float(getattr(settings, "ai_config_cache_ttl", _DEFAULT_CONFIG_CACHE_TTL) or _DEFAULT_CONFIG_CACHE_TTL)
     except (TypeError, ValueError):
         return _DEFAULT_CONFIG_CACHE_TTL
     return ttl if ttl > 0 else _DEFAULT_CONFIG_CACHE_TTL
@@ -843,16 +1002,100 @@ _audit_last_flush: dict = {"ts": time.time()}  # 模块加载起计时，避免�
 # - 单批 flush 尝试时优先消费 overflow（旧数据优先），再处理新缓冲。
 # - 队列条目超过 max_age 秒仍未落库则丢弃并告警（比无告警静默丢失更明确）。
 _audit_overflow: deque = deque()  # deque[(ts, rows)]，FIFO
-AUDIT_OVERFLOW_MAX_BATCHES = 500   # 最多 500 批 × 每批 50 条 = 25k 条上限
-AUDIT_OVERFLOW_MAX_AGE = 86400.0   # 单日未落库条目过期
-_audit_overflow_evicted = 0        # 累计被 max_age / 容量驱逐的批次数（观测）
+AUDIT_OVERFLOW_MAX_BATCHES = 500  # 最多 500 批 × 每批 50 条 = 25k 条上限
+AUDIT_OVERFLOW_MAX_AGE = 86400.0  # 单日未落库条目过期
+_audit_overflow_evicted = 0  # 累计被 max_age / 容量驱逐的批次数（观测）
 
 # ✅ 2026-09-16 新增：进程内实时可靠性统计（滑动窗口 50 次调用）
 # 用于 _fallback_chain 自动过滤历史成功率过低的 provider（<50% 的直接排除）
 # 主配置总是保留（即使成功率低），只有 fallback 候选会被过滤。
 _provider_reliability_lock = threading.Lock()
 _provider_reliability: dict[str, dict] = {}  # provider_name → {"ok": int, "fail": int}
-_PROVIDER_RELIABILITY_WINDOW = 50            # 每个 provider 统计最近 N 次
+_PROVIDER_RELIABILITY_WINDOW = 50  # 每个 provider 统计最近 N 次
+
+# ✅ 2026-11-05（对冲自适应阈值）：进程内按「配置身份」记录最近成功调用的耗时，
+# 用于计算对冲延迟的 P50/P90。只记成功调用（失败/取消的 0.18s 快速失败会
+# 把分位数拉向 0，反而让对冲更早触发）。重启后为空 → 回落到冷启动阈值。
+_provider_latency_lock = threading.Lock()
+_provider_latency: dict[str, deque] = {}
+_PROVIDER_LATENCY_WINDOW = 50
+
+
+def _percentile(values: list[float], p: float) -> float:
+    """线性插值分位数（p ∈ [0,100]），空列表调用方保证非空。"""
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    k = (len(ordered) - 1) * max(0.0, min(100.0, p)) / 100.0
+    lo = int(k)
+    hi = min(lo + 1, len(ordered) - 1)
+    if lo == hi:
+        return ordered[lo]
+    return ordered[lo] + (ordered[hi] - ordered[lo]) * (k - lo)
+
+
+def _note_provider_latency(key: str, duration: float) -> None:
+    """记录一次成功调用耗时（供自适应对冲阈值使用）。"""
+    if not key or duration <= 0:
+        return
+    with _provider_latency_lock:
+        dq = _provider_latency.get(key)
+        if dq is None:
+            dq = deque(maxlen=_PROVIDER_LATENCY_WINDOW)
+            _provider_latency[key] = dq
+        dq.append(float(duration))
+
+
+def _provider_latency_percentiles(
+    key: str, pct: float = 90.0
+) -> tuple[int, float | None, float | None]:
+    """返回 (样本数, P50, 指定分位)；无样本时后两项为 None。"""
+    with _provider_latency_lock:
+        dq = _provider_latency.get(key)
+        samples = list(dq) if dq else []
+    if not samples:
+        return 0, None, None
+    return len(samples), _percentile(samples, 50.0), _percentile(samples, pct)
+
+
+def reset_provider_latency() -> None:
+    """清空自适应对冲延迟样本（测试隔离 / 配置重载用）。"""
+    with _provider_latency_lock:
+        _provider_latency.clear()
+
+
+def _adaptive_hedge_delay(
+    key: str,
+    *,
+    fixed_delay: float,
+    adaptive: bool = True,
+    pct: float = 90.0,
+    p50_ratio: float = 1.5,
+    min_delay: float = 30.0,
+    max_delay: float = 90.0,
+    min_samples: int = 12,
+) -> float:
+    """计算对冲阈值（秒）。
+
+    规则（✅ 2026-11-05）：
+      · ``fixed_delay <= 0`` → 0（显式立即竞速，保留旧语义）；
+      · 非自适应 → 固定阈值；
+      · 自适应但样本不足 → 固定阈值（冷启动）；
+      · 自适应且有样本 → ``clamp(max(P{pct}, P50×ratio), [min, max])``。
+    依据：生产 agnes 成功调用 P50=25.83s，旧固定 20s 低于中位数，正常偏慢
+    调用会被复制；取 P90 可只复制最慢约 10% 的调用，min=30s 保证阈值高于 P50。
+    """
+    if fixed_delay <= 0:
+        return 0.0
+    if not adaptive:
+        return fixed_delay
+    n, p50, hi = _provider_latency_percentiles(key, pct)
+    if n < max(1, min_samples) or p50 is None or hi is None:
+        return fixed_delay
+    target = max(hi, p50 * max(0.0, p50_ratio))
+    return max(min_delay, min(target, max_delay))
+
+
 # ✅ R108（2026-10-18 · 日志审计 P1-4 · 确定性死配置连击剔除）：
 #    生产实证 volcengine/nvidia 多条配置长期以 HTTP 404 UnsupportedModel/
 #    InvalidEndpointOrModel 失败——「模型/端点不存在」是**确定性**错误
@@ -885,7 +1128,7 @@ _PROVIDER_DEAD_SUCCESS_RATE = _setting_num("ai_provider_dead_success_rate", 0.20
 #    「降级链成功率过滤」与「死配置剔除」会静默用不同门限（同一个 provider
 #    在两条链路上一个被剔除、一个被保留）。现统一为同一常量派生。
 _PROVIDER_MIN_SUCCESS_RATE = _PROVIDER_DEAD_SUCCESS_RATE
-_PROVIDER_MIN_SAMPLES = 5                    # 成功率统计生效的最小样本数
+_PROVIDER_MIN_SAMPLES = 5  # 成功率统计生效的最小样本数
 # ✅ P0-1（2026-09-17）：死配置剔除 / 主配置后置门限
 #    实测 volcengine 21 次调用 100% 失败、spark 78.6% 失败 —— 留在候选链上
 #    只会白等一轮网络往返；主配置（sensetime）44% 失败却因"无条件首位"让
@@ -900,14 +1143,28 @@ _PROVIDER_DEMOTE_SUCCESS_RATE = _setting_num("ai_provider_demote_success_rate", 
 # 审计日志有最长 10s 的攒批延迟且只有已完成的调用，无法表达「AI 调用中」。
 _ai_live_lock = threading.Lock()
 _ai_live: dict = {
-    "in_flight": 0,        # 正在进行的 AI 调用数
-    "total": 0,            # 本次会话累计调用尝试数（含降级重试）
-    "failed": 0,           # 本次会话累计失败尝试数
-    "last_provider": "",   # 最近一次调用的 Provider
-    "last_model": "",      # 最近一次调用的模型
-    "last_ok": True,       # 最近一次调用是否成功
+    "in_flight": 0,  # 正在进行的 AI 调用数
+    "total": 0,  # 本次会话累计调用尝试数（含降级重试）
+    "failed": 0,  # 本次会话累计**真实失败**尝试数（不含取消）
+    # ✅ 2026-11-04（统计口径修复）：对冲落选 / 用户停止 / 断连以
+    #    asyncio.CancelledError 收尾，旧实现与真实失败共用 failed ——
+    #    对冲每胜出一次就凭空多记一次失败（生产实证会话 126 vs 审计 9）。
+    "cancelled": 0,  # 本次会话累计被取消的调用尝试数（非故障）
+    # ✅ 2026-11-05（统计口径修复 · 逻辑调用 / 尝试拆分）：
+    #    total/failed 是**尝试**口径（一次降级链里每个候选各计一次），
+    #    calls/call_failed 是**逻辑调用**口径（一次 chat_with_fallback 只计一次成败）。
+    #    面板同时展示两者，避免「一次业务调用失败 3 次降级 = 失败 3 次」的误读。
+    "calls": 0,  # 本次会话逻辑调用数（含最终成功/失败）
+    "call_failed": 0,  # 本次会话逻辑调用最终失败数
+    "call_cancelled": 0,  # 本次会话逻辑调用被取消数（调用方停止/断连）
+    # ✅ 2026-11-04（可观测性）：全熔断快速失败在门控处直接抛错，
+    #    不发请求也不写审计（生产实证 3 分钟 316 次抛错在库里零记录）。
+    "fast_fail": 0,  # 本次会话累计全熔断快速失败拒绝次数
+    "last_provider": "",  # 最近一次调用的 Provider
+    "last_model": "",  # 最近一次调用的模型
+    "last_ok": True,  # 最近一次调用是否成功
     "last_duration": 0.0,  # 最近一次调用耗时（秒）
-    "last_at": 0.0,        # 最近一次调用完成的时间戳（time.time()）
+    "last_at": 0.0,  # 最近一次调用完成的时间戳（time.time()）
     "started_at": time.time(),  # 会话起点（用于「今日/本会话」语义说明）
 }
 
@@ -991,8 +1248,7 @@ async def load_runtime_setting(key: str) -> str | None:
     """
     try:
         conn = await get_conn()
-        cur = await conn.execute(
-            "SELECT value FROM ai_runtime_settings WHERE key = ?", (key,))
+        cur = await conn.execute("SELECT value FROM ai_runtime_settings WHERE key = ?", (key,))
         row = await cur.fetchone()
     except Exception as e:
         # 仅「旧库表尚未创建」按未设置兼容；锁、I/O、损坏等读取故障必须向上传播。
@@ -1013,7 +1269,8 @@ async def upsert_runtime_setting(db, key: str, value: str) -> None:
         "INSERT INTO ai_runtime_settings (key, value, updated_at) VALUES (?,?,?)"
         " ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
         " updated_at=excluded.updated_at",
-        (key, value, datetime.now().isoformat()))
+        (key, value, datetime.now().isoformat()),
+    )
 
 
 async def save_runtime_setting(key: str, value: str) -> None:
@@ -1127,13 +1384,13 @@ async def resolve_disabled_providers() -> set[str]:
 async def save_disabled_providers(names: list[str]) -> list[str]:
     """写入运行时禁用厂商（去重、排序、JSON 落库）并即时失效缓存。"""
     cleaned = sorted({normalize_provider_name(n) for n in (names or [])} - {""})
-    await save_runtime_setting(
-        RUNTIME_DISABLED_PROVIDERS_KEY, json.dumps(cleaned, ensure_ascii=False))
+    await save_runtime_setting(RUNTIME_DISABLED_PROVIDERS_KEY, json.dumps(cleaned, ensure_ascii=False))
     return cleaned
 
 
 async def _load_active_config() -> dict | None:
     import time as _time
+
     now = _time.time()
     if _config_cache["data"] is not None and now - _config_cache["ts"] < _config_cache_ttl():
         return _config_cache["data"]
@@ -1156,8 +1413,7 @@ async def _load_active_config() -> dict | None:
     cfg = dict(row) if row else None
     if gen != _cache_generation:
         # 读库期间配置被改动并失效了缓存：本次结果已过期，直接返回但不写缓存
-        logger.debug("主配置读取期间缓存被失效，丢弃本次缓存写入（代际 %d→%d）",
-                     gen, _cache_generation)
+        logger.debug("主配置读取期间缓存被失效，丢弃本次缓存写入（代际 %d→%d）", gen, _cache_generation)
         return cfg
     _config_cache["data"] = cfg
     _config_cache["ts"] = now
@@ -1203,6 +1459,7 @@ async def _fallback_chain() -> list[dict]:
       其余所有「有可用 API Key」的配置按 priority 升序作为降级候选。
     """
     import time as _time
+
     _now = _time.time()
     if _fallback_cache["data"] is not None and _now - _fallback_cache["ts"] < _config_cache_ttl():
         return _fallback_cache["data"]
@@ -1222,15 +1479,21 @@ async def _fallback_chain() -> list[dict]:
         # 主配置口径与 _load_active_config() 保持一致
         primary_id = ""
         prim_cur = await conn.execute(
-            "SELECT id FROM ai_config WHERE is_active = 1" + _env_filter
-            + " ORDER BY updated_at DESC LIMIT 1", _env_params)
+            "SELECT id FROM ai_config WHERE is_active = 1" + _env_filter + " ORDER BY updated_at DESC LIMIT 1",
+            _env_params,
+        )
         prim_row = await prim_cur.fetchone()
         if prim_row:
             primary_id = prim_row[0]
 
         cur = await conn.execute(
-            "SELECT * FROM ai_config WHERE 1=1" + _env_filter
-            + " ORDER BY priority ASC, updated_at DESC", _env_params)
+            # ✅ R175（2026-11-03）：disabled 配置即使有 Key 也不得进入降级链。
+            "SELECT * FROM ai_config WHERE 1=1"
+            + _env_filter
+            + " AND COALESCE(enabled, 1) = 1"
+            + " ORDER BY priority ASC, updated_at DESC",
+            _env_params,
+        )
         rows = [dict(r) for r in await cur.fetchall()]
 
         for row in rows:
@@ -1244,21 +1507,25 @@ async def _fallback_chain() -> list[dict]:
                     logger.warning(
                         "降级候选 %s/%s 已保存的密钥无法解密（常见于更换过 FERNET_KEY"
                         " 或删除过 data/secret_key.key），已跳过",
-                        row.get("provider_name", "?"), row.get("model", "?"))
+                        row.get("provider_name", "?"),
+                        row.get("model", "?"),
+                    )
                 continue
-            chain.append({
-                "config_id": row.get("id", ""),
-                "provider_name": row.get("provider_name", "openai"),
-                "api_key": key,
-                "base_url": row.get("base_url", ""),
-                "model": row.get("model", ""),
-                "max_tokens": row.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"]),
-                "temperature": row.get("temperature", DEFAULT_CONFIG_NUMBERS["temperature"]),
-                "timeout": row.get("timeout", DEFAULT_CONFIG_NUMBERS["timeout"]),
-                # ✅ 每条降级候选各自携带请求方式：主配置配了流式，
-                #    不代表降级候选的平台也支持流式，必须逐条生效。
-                "request_mode": normalize_request_mode(row.get("request_mode")),
-            })
+            chain.append(
+                {
+                    "config_id": row.get("id", ""),
+                    "provider_name": row.get("provider_name", "openai"),
+                    "api_key": key,
+                    "base_url": row.get("base_url", ""),
+                    "model": row.get("model", ""),
+                    "max_tokens": row.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"]),
+                    "temperature": row.get("temperature", DEFAULT_CONFIG_NUMBERS["temperature"]),
+                    "timeout": row.get("timeout", DEFAULT_CONFIG_NUMBERS["timeout"]),
+                    # ✅ 每条降级候选各自携带请求方式：主配置配了流式，
+                    #    不代表降级候选的平台也支持流式，必须逐条生效。
+                    "request_mode": normalize_request_mode(row.get("request_mode")),
+                }
+            )
     except Exception:
         # 降级链加载失败不应阻断主流程
         logger.exception("加载 DB 降级链失败，退回内置兜底")
@@ -1266,8 +1533,16 @@ async def _fallback_chain() -> list[dict]:
     # ✅ 本轮修复：内置兜底从 chain 中独立出来（见下方「兜底不被截断」）。
     builtin_agnes = None
     if settings.agnes_api_key:
-        builtin_agnes = {"provider_name": "agnes", "api_key": settings.agnes_api_key,
-                         "base_url": settings.agnes_base_url, "model": settings.agnes_model}
+        builtin_agnes = {
+            "provider_name": "agnes",
+            "api_key": settings.agnes_api_key,
+            "base_url": settings.agnes_base_url,
+            "model": settings.agnes_model,
+            # ✅ R178（D-1 · 2026-11-05）：内置兜底标记 —— `_order_candidates`
+            #    依此豁免「判死剔除」（该函数在其后运行），兑现「兜底必须留在
+            #    链内」的设计意图（见下方「兜底不被截断」注释）。
+            "_is_builtin_fallback": True,
+        }
 
     # ✅ 2026-09-16 新增：根据实时成功率过滤低质量 fallback 候选
     # （主配置由 chat_with_fallback 另行排在首位，这里只处理 fallback 链）
@@ -1275,13 +1550,15 @@ async def _fallback_chain() -> list[dict]:
         filtered = []
         for c in chain:
             pname = c.get("provider_name", "")
-            rate = _provider_success_rate(
-                pname, c.get("model", ""), c.get("config_id", ""),
-                c.get("base_url", ""))
+            rate = _provider_success_rate(pname, c.get("model", ""), c.get("config_id", ""), c.get("base_url", ""))
             if rate is not None and rate < _PROVIDER_MIN_SUCCESS_RATE:
-                logger.warning(
+                # ✅ R178（D-2）：设计内节流降 INFO（生产实证 253 条）。
+                logger.info(
                     "fallback 候选 %s 实时成功率 %.1f%% < %.0f%%，已自动排除（样本≥5次）",
-                    pname, rate * 100, _PROVIDER_MIN_SUCCESS_RATE * 100)
+                    pname,
+                    rate * 100,
+                    _PROVIDER_MIN_SUCCESS_RATE * 100,
+                )
                 continue
             filtered.append(c)
         # 极端情况下（所有 fallback 都被排除）保留前 1 个作为保底
@@ -1296,13 +1573,13 @@ async def _fallback_chain() -> list[dict]:
     #    真正可用的候选反而被截掉。
     def _health_rank(c: dict) -> tuple:
         _t, rate = _provider_reliability_snapshot(
-            c.get("provider_name", ""), c.get("model", ""),
-            c.get("config_id", ""), c.get("base_url", ""))
+            c.get("provider_name", ""), c.get("model", ""), c.get("config_id", ""), c.get("base_url", "")
+        )
         if rate is None:
-            return (1, 0.0)   # 无样本：排在「已知健康」之后（冷启动不误杀）
-        return (0, -rate)     # 有样本：成功率高的优先
+            return (1, 0.0)  # 无样本：排在「已知健康」之后（冷启动不误杀）
+        return (0, -rate)  # 有样本：成功率高的优先
 
-    chain.sort(key=_health_rank)   # 稳定排序：同档仍按 priority
+    chain.sort(key=_health_rank)  # 稳定排序：同档仍按 priority
 
     # ✅ P0-3（2026-09-17）：降级链长度上限。
     #    实测 ai_config 曾配 14 条（priority 全为 0）→ 降级候选 13 个，
@@ -1311,8 +1588,7 @@ async def _fallback_chain() -> list[dict]:
     #    收敛到 N 个（默认 3）后，最坏路径随之收敛。
     _max_chain = int(getattr(settings, "ai_fallback_chain_max", 3) or 3)
     if len(chain) > _max_chain:
-        logger.info("降级链收敛：%d → %d 个候选（ai_fallback_chain_max）",
-                    len(chain), _max_chain)
+        logger.info("降级链收敛：%d → %d 个候选（ai_fallback_chain_max）", len(chain), _max_chain)
         chain = chain[:_max_chain]
     # ✅ 本轮修复：内置兜底必须留在链内。旧实现把它 append 在末尾参与截断，
     #    配置 ≥3 条时兜底恒被 ``chain[:3]`` 切掉 —— 名义上有兜底，实际没有。
@@ -1321,8 +1597,7 @@ async def _fallback_chain() -> list[dict]:
 
     if _gen != _cache_generation:
         # 读库期间配置被改动并失效了缓存：不写回，避免把旧顺序钉住一整个 TTL
-        logger.debug("降级链读取期间缓存被失效，丢弃本次缓存写入（代际 %d→%d）",
-                     _gen, _cache_generation)
+        logger.debug("降级链读取期间缓存被失效，丢弃本次缓存写入（代际 %d→%d）", _gen, _cache_generation)
         return chain
     _fallback_cache["data"] = chain
     _fallback_cache["ts"] = _time.time()
@@ -1414,6 +1689,7 @@ async def load_scene_routes() -> dict[str, str]:
     即**默认行为与未引入该功能时完全一致**（向后兼容）。
     """
     import time as _time
+
     _now = _time.time()
     if _scene_route_cache["data"] is not None and _now - _scene_route_cache["ts"] < _config_cache_ttl():
         return _scene_route_cache["data"]
@@ -1421,8 +1697,7 @@ async def load_scene_routes() -> dict[str, str]:
     routes: dict[str, str] = {}
     try:
         conn = await get_conn()
-        cur = await conn.execute(
-            "SELECT scene, config_id FROM ai_scene_routes WHERE config_id != ''")
+        cur = await conn.execute("SELECT scene, config_id FROM ai_scene_routes WHERE config_id != ''")
         for row in await cur.fetchall():
             r = dict(row)
             scene = (r.get("scene") or "").strip()
@@ -1460,7 +1735,8 @@ async def resolve_scene_config(scene: str) -> dict | None:
             "场景 %r 未在 KNOWN_SCENES 登记，场景路由不会生效（回落主配置）。"
             "若是新增 AI 调用点，请同步登记到 provider_factory.KNOWN_SCENES；"
             "详见 tests/test_ai_config_security_routing.py::TestKnownScenesDrift",
-            scene)
+            scene,
+        )
     try:
         routes = await load_scene_routes()
     except Exception as e:
@@ -1486,13 +1762,31 @@ async def resolve_scene_config(scene: str) -> dict | None:
         logger.warning("场景 %s 路由到的配置 %s 已不存在，回落主配置", scene, cid)
         return None
     cfg = dict(row)
+    # ✅ R179（2026-11-05）：场景路由必须尊重用户停用（enabled=0）。
+    #    旧实现只校验「存在 + 环境」，被停用的配置照样被场景路由拉进真实调用，
+    #    与 R175 定义的「停用 = 不再参与真实调用」自相矛盾，且界面显示停用却仍有
+    #    用量（静默失效）。停用 → 回落主配置/降级链，与降级链口径一致。
+    enabled_raw = cfg.get("enabled", 1)
+    if enabled_raw is None:
+        enabled_raw = 1
+    if int(enabled_raw) == 0:
+        logger.warning(
+            "场景 %s 路由到的配置 %s 已被用户停用（enabled=0），跳过场景路由并回落主配置",
+            scene,
+            cid,
+        )
+        return None
     # ✅ 2026-09-23（多环境）：路由指向的配置若属于**其它环境**，视为未配置 ——
     #    否则切了环境后场景仍会打到别环境的地址，与「环境隔离」的预期相反。
     env = await resolve_active_env()
     if env and str(cfg.get("env") or "").strip() not in ("", env):
         logger.warning(
             "场景 %s 路由到的配置 %s 属于环境 %s（当前环境 %s），跳过场景路由并回落主配置",
-            scene, cid, cfg.get("env"), env)
+            scene,
+            cid,
+            cfg.get("env"),
+            env,
+        )
         return None
     return cfg
 
@@ -1507,24 +1801,38 @@ async def get_vision_providers() -> list[BaseProvider]:
     cfg = await _load_active_config()
     primary_key = _primary_api_key(cfg) if cfg else ""
     if cfg and primary_key:
-        candidates.append({
-            "provider_name": cfg.get("provider_name", "openai"),
-            "api_key": primary_key,
-            "base_url": cfg.get("base_url", ""),
-            "model": cfg.get("model", ""),
-            "max_tokens": cfg.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"]),
-            "temperature": 0.0,
-            "timeout": cfg.get("timeout", DEFAULT_CONFIG_NUMBERS["timeout"]),
-        })
+        candidates.append(
+            {
+                "provider_name": cfg.get("provider_name", "openai"),
+                "api_key": primary_key,
+                "base_url": cfg.get("base_url", ""),
+                "model": cfg.get("model", ""),
+                "max_tokens": cfg.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"]),
+                "temperature": 0.0,
+                "timeout": cfg.get("timeout", DEFAULT_CONFIG_NUMBERS["timeout"]),
+            }
+        )
     for c in await _fallback_chain():
         if c.get("api_key") and c not in candidates:
             candidates.append(c)
+
+    # ✅ R175（2026-11-03）：运行时 disabled 的供应商不再参与视觉通道 ——
+    #    否则用户在界面禁用了某个 provider，OCR 仍会继续把图片发给它。
+    try:
+        _disabled = await resolve_disabled_providers()
+    except Exception:
+        _disabled = set()
+    if _disabled:
+        candidates = [c for c in candidates if (c.get("provider_name") or "openai") not in _disabled]
 
     out: list[BaseProvider] = []
     for c in candidates:
         try:
             provider = _build_provider(
-                c["provider_name"], c["api_key"], c["base_url"], c["model"],
+                c["provider_name"],
+                c["api_key"],
+                c["base_url"],
+                c["model"],
                 max_tokens=c.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"]),
                 temperature=0.0,
                 timeout=c.get("timeout", DEFAULT_CONFIG_NUMBERS["timeout"]),
@@ -1556,21 +1864,35 @@ def _is_missing_column_error(e: BaseException) -> bool:
     return "no column named" in msg or "no such column" in msg
 
 
+# ✅ 2026-11-05（审计合并 · 错误分类）：新版 16 列写入（13 列 + error_class /
+#    attempt_count / attempts_json）。新列**只能追加在末尾**，降级切片链才安全。
+#    不能直接改 _AUDIT_INSERT_FULL：compliance.py 仍按 13 列元组复用它，改动会
+#    让合规审计批量写入因绑定数不匹配而整批丢失。FULL 保持 13 列不变。
+_AUDIT_INSERT_RICH = (
+    "INSERT INTO ai_audit_logs (id, provider_name, model, action,"
+    " prompt_tokens, completion_tokens, cached_tokens, duration, success, error, scene,"
+    " config_id, base_url, error_class, attempt_count, attempts_json)"
+    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+)
+# 新库迁移前的兼容写入（13 列，含 scene/config_id/base_url）
 _AUDIT_INSERT_FULL = (
     "INSERT INTO ai_audit_logs (id, provider_name, model, action,"
     " prompt_tokens, completion_tokens, cached_tokens, duration, success, error, scene,"
     " config_id, base_url)"
-    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+)
 # 旧库缺 config_id/base_url 列时的降级写入（保留 scene）
 _AUDIT_INSERT_NO_IDENTITY = (
     "INSERT INTO ai_audit_logs (id, provider_name, model, action,"
     " prompt_tokens, completion_tokens, cached_tokens, duration, success, error, scene)"
-    " VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+    " VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+)
 # 更旧库缺 scene 列时的降级写入（审计记录不丢，仅场景/身份标记为空）
 _AUDIT_INSERT_LEGACY = (
     "INSERT INTO ai_audit_logs (id, provider_name, model, action,"
     " prompt_tokens, completion_tokens, cached_tokens, duration, success, error)"
-    " VALUES (?,?,?,?,?,?,?,?,?,?)")
+    " VALUES (?,?,?,?,?,?,?,?,?,?)"
+)
 _audit_legacy_warned = False
 
 
@@ -1597,19 +1919,19 @@ async def _flush_audit_rows_once(rows: list) -> None:
         # ✅ 2026-09-17：补齐 error 列（失败原因摘要），/ai/stats 失败原因分布的数据源。
         # ✅ 2026-09-21：补齐 scene 列（业务场景标记），/ai/stats 按场景聚合的数据源。
         try:
-            await conn.executemany(_AUDIT_INSERT_FULL, rows)
+            await conn.executemany(_AUDIT_INSERT_RICH, [r[:16] for r in rows])
         except Exception as e:
             # ✅ R108（P1-2 · 误诊收口）：锁/i/o 瞬态与非缺列错误**原样上抛**，
             #    交给外层 retry_db_op 整批重放（write_tx_conn 已回滚，无半写）；
             #    只有真·缺列才进降级链。旧实现宽 except 把批量生成写锁窗口的
             #    locked 归因成「旧库未迁移」，误诊 + config_id 被裁双重损伤。
-            #    ⚠️ 例外：ProgrammingError（绑定数≠占位符数）= 行宽与 FULL 13 列
-            #    不匹配（溢出队列可能残留跨版本的 11/10 元组旧行），属降级切片
-            #    链的预期场景而非确定性故障——上抛会让该批永远回灌溢出、
+            #    ⚠️ 例外：ProgrammingError（绑定数≠占位符数）= 行宽与新列数
+            #    不匹配（溢出队列可能残留跨版本的 13/11/10 元组旧行），属降级
+            #    切片链的预期场景而非确定性故障——上抛会让该批永远回灌溢出、
             #    并连带拖死同队列新批次。维持既有「按行宽逐级降级」语义。
-            if not (_is_missing_column_error(e)
-                    or isinstance(e, sqlite3.ProgrammingError)):
+            if not (_is_missing_column_error(e) or isinstance(e, sqlite3.ProgrammingError)):
                 raise
+            # 第一级降级：13 列（旧库缺 error_class/attempt_count/attempts_json）。
             # ✅ 2026-10-06（B-5 · 降级写入的长度守卫）：降级 INSERT 依赖
             #    **元组按位切片**（13 列 → r[:11] → r[:10]）与各自的列数严格
             #    对齐。一旦将来在元组**中间**插入新字段（例如在 error 之前
@@ -1617,41 +1939,57 @@ async def _flush_audit_rows_once(rows: list) -> None:
             #    比直接抛异常糟糕得多（数据看似正常、实则全错）。
             #    故每级降级前先断言行宽足够，不足则跳过该级并记 ERROR。
             try:
-                if all(len(r) >= 11 for r in rows):
-                    await conn.executemany(_AUDIT_INSERT_NO_IDENTITY,
-                                           [r[:11] for r in rows])
+                if all(len(r) >= 13 for r in rows):
+                    await conn.executemany(_AUDIT_INSERT_FULL, [r[:13] for r in rows])
                 else:
                     raise ValueError(
-                        f"审计行宽 {min(len(r) for r in rows)} < 11，无法按"
-                        "「含 scene、不含配置身份」降级写入（可能已变更审计元组结构）")
-                if not _audit_legacy_warned:
+                        f"审计行宽 {min(len(r) for r in rows)} < 13，无法按"
+                        "「含配置身份、不含错误分类」降级写入（可能已变更审计元组结构）"
+                    )
+                # 仅「真缺列」才告警；行宽不足导致的 ProgrammingError 属旧版
+                # 元组混入，已正常降级，不再误报为旧库未迁移。
+                if _is_missing_column_error(e) and not _audit_legacy_warned:
                     _audit_legacy_warned = True
                     logger.error(
-                        "ai_audit_logs 缺 config_id/base_url 列（旧库未迁移），"
-                        "审计已降级写入；请重启服务触发迁移补列，"
-                        "否则可靠性统计无法按配置身份隔离")
+                        "ai_audit_logs 缺 error_class/attempt_count/attempts_json 列"
+                        "（旧库未迁移），审计已降级写入；请重启服务触发迁移补列，"
+                        "否则面板无法按失败类别聚合"
+                    )
             except Exception as e2:
                 # ✅ R108（P1-2）：本级同样只对「缺列/行宽守卫」继续降级；
-                #    NO_IDENTITY 撞锁等瞬态上抛重放（行宽 ValueError 属守卫
-                #    自抛，维持既有「再降一级」语义）。
+                #    撞锁等瞬态上抛重放（行宽 ValueError 属守卫自抛，维持
+                #    既有「再降一级」语义）。
                 if not (_is_missing_column_error(e2) or isinstance(e2, ValueError)):
                     raise
-                # 更旧库缺 scene：再降一级，审计行不丢
-                if all(len(r) >= 10 for r in rows):
-                    await conn.executemany(_AUDIT_INSERT_LEGACY,
-                                           [r[:10] for r in rows])
-                else:
-                    logger.error(
-                        "审计行宽 %d < 10，无法降级写入（可能已变更审计元组结构），"
-                        "本批 %d 条审计记录丢弃",
-                        min(len(r) for r in rows), len(rows))
-                    await conn.commit()
-                    return
-                if not _audit_legacy_warned:
-                    _audit_legacy_warned = True
-                    logger.error(
-                        "ai_audit_logs 缺 scene/config_id/base_url 列（旧库未迁移），"
-                        "审计已降级写入；请重启服务以触发迁移补列")
+                # 第二级降级：11 列（旧库缺 config_id/base_url，保留 scene）
+                try:
+                    if all(len(r) >= 11 for r in rows):
+                        await conn.executemany(_AUDIT_INSERT_NO_IDENTITY, [r[:11] for r in rows])
+                    else:
+                        raise ValueError(
+                            f"审计行宽 {min(len(r) for r in rows)} < 11，无法按"
+                            "「保留场景、不含配置身份」降级写入（可能已变更审计元组结构）"
+                        )
+                except Exception as e3:
+                    if not (_is_missing_column_error(e3) or isinstance(e3, ValueError)):
+                        raise
+                    # 更旧库缺 scene：再降一级，审计行不丢
+                    if all(len(r) >= 10 for r in rows):
+                        await conn.executemany(_AUDIT_INSERT_LEGACY, [r[:10] for r in rows])
+                    else:
+                        logger.error(
+                            "审计行宽 %d < 10，无法降级写入（可能已变更审计元组结构），" "本批 %d 条审计记录丢弃",
+                            min(len(r) for r in rows),
+                            len(rows),
+                        )
+                        await conn.commit()
+                        return
+                    if not _audit_legacy_warned:
+                        _audit_legacy_warned = True
+                        logger.error(
+                            "ai_audit_logs 缺 scene/config_id/base_url 列（旧库未迁移），"
+                            "审计已降级写入；请重启服务以触发迁移补列"
+                        )
         await conn.commit()
 
 
@@ -1731,14 +2069,19 @@ def _enqueue_audit_overflow(rows: list, reason: str, original_ts: float | None =
             dropped_ts, dropped_rows = _audit_overflow.popleft()
             _audit_overflow_evicted += 1
             logger.warning(
-                "AI 审计溢出队列已满（%d 批），驱逐最旧批次（%d 条，滞留 %.1fs）；"
-                "累计驱逐 %d 批",
-                AUDIT_OVERFLOW_MAX_BATCHES, len(dropped_rows),
-                now - dropped_ts, _audit_overflow_evicted)
+                "AI 审计溢出队列已满（%d 批），驱逐最旧批次（%d 条，滞留 %.1fs）；" "累计驱逐 %d 批",
+                AUDIT_OVERFLOW_MAX_BATCHES,
+                len(dropped_rows),
+                now - dropped_ts,
+                _audit_overflow_evicted,
+            )
         _audit_overflow.append((original_ts, list(rows)))
         logger.warning(
             "AI 审计批量落库重试耗尽，%d 条转入溢出队列等待下轮落库（队列 %d 批）：%s",
-            len(rows), len(_audit_overflow), reason)
+            len(rows),
+            len(_audit_overflow),
+            reason,
+        )
 
 
 def _expire_audit_overflow() -> None:
@@ -1756,9 +2099,11 @@ def _expire_audit_overflow() -> None:
         dropped_rows_total += len(_rows)
     if dropped_rows_total:
         logger.warning(
-            "AI 审计溢出队列驱逐滞留超过 %.0fs 的 %d 条记录（累计驱逐 %d 批）；"
-            "如需追补请检查 DB 状态",
-            AUDIT_OVERFLOW_MAX_AGE, dropped_rows_total, _audit_overflow_evicted)
+            "AI 审计溢出队列驱逐滞留超过 %.0fs 的 %d 条记录（累计驱逐 %d 批）；" "如需追补请检查 DB 状态",
+            AUDIT_OVERFLOW_MAX_AGE,
+            dropped_rows_total,
+            _audit_overflow_evicted,
+        )
 
 
 def is_non_retryable_error(err) -> bool:
@@ -1776,14 +2121,26 @@ def is_non_retryable_error(err) -> bool:
     #    永久性认证错误——token 过期/吊销后重试必然再败，生产实证 agnes 401
     #    「该令牌状态不可用」被当作瞬态重试 49 次。现统一纳入非重试集合，
     #    触发配额冷却 + 不浪费 HTTP 往返。429 限流仍走退避路径（可恢复）。
-    if ("HTTP 401" in s or "HTTP 402" in s or "HTTP 403" in s or "HTTP 404" in s):
+    if "HTTP 401" in s or "HTTP 402" in s or "HTTP 403" in s or "HTTP 404" in s:
         return True
     low = s.lower()
-    return any(tag in low for tag in (
-        "insufficient balance", "quota_exceeded", "quota exceeded",
-        "exceeded your current quota", "no valid authorization",
-        "invalid api key", "unsupportedmodel", "not found for account",
-        "令牌状态不可用", "token status", "invalid token", "unauthorized"))
+    return any(
+        tag in low
+        for tag in (
+            "insufficient balance",
+            "quota_exceeded",
+            "quota exceeded",
+            "exceeded your current quota",
+            "no valid authorization",
+            "invalid api key",
+            "unsupportedmodel",
+            "not found for account",
+            "令牌状态不可用",
+            "token status",
+            "invalid token",
+            "unauthorized",
+        )
+    )
 
 
 # ---------- 配额类错误冷却（2026-09-22 · 调用次数优化 O2） ----------
@@ -1796,15 +2153,71 @@ def is_non_retryable_error(err) -> bool:
 # 配额恢复后（探测成功）自动接回。
 QUOTA_FAIL_COOLDOWN = max(0.0, float(getattr(settings, "ai_fail_cooldown_seconds", 120) or 0))
 QUOTA_PROBE_EVERY = max(1.0, float(getattr(settings, "ai_fail_probe_every_seconds", 10) or 10))
+QUOTA_COOLDOWN_MAX = max(
+    0.0, float(getattr(settings, "ai_fail_cooldown_max_seconds", 600.0) or 0.0)
+)
 _quota_cool_until: dict[str, float] = {}
 _quota_last_probe: dict[str, float] = {}
 _quota_lock = threading.Lock()
+
+# ✅ 2026-11-05（429 处理）：``Retry-After`` 可能出现在异常文本（openai_compatible
+# 拼接）或 httpx 响应的 headers 中；只接受数字秒，HTTP-date 形态忽略。
+_RETRY_AFTER_RE = re.compile(r"retry[-\s]?after\s*[:=]?\s*(\d+(?:\.\d+)?)", re.I)
+
+
+def _extract_retry_after(err) -> float | None:
+    """从异常/响应头解析 ``Retry-After``（秒）；取不到返回 None。"""
+    raw = None
+    try:
+        resp = getattr(err, "response", None)
+        headers = getattr(resp, "headers", None)
+        if headers is not None:
+            raw = headers.get("retry-after")
+    except Exception:
+        raw = None
+    if raw is not None:
+        try:
+            return max(0.0, float(str(raw).strip()))
+        except (TypeError, ValueError):
+            pass
+    m = _RETRY_AFTER_RE.search(str(err or ""))
+    if m:
+        try:
+            return max(0.0, float(m.group(1)))
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _is_rate_limit_error(err) -> bool:
+    """是否属于「限流」类错误（429 / rate limit / too many requests / 限流）。
+
+    与 ``_is_quota_error`` 的区别：后者还包含 402/403/404 等确定性配额/鉴权
+    错误；限流有独立的 ``Retry-After`` 语义，不能与普通指数退避混为一谈。
+    """
+    s = (str(err or "")).lower()
+    return "429" in s or "rate limit" in s or "too many requests" in s or "限流" in s
 
 
 def _is_quota_error(err) -> bool:
     """配额/限流/认证类错误（429 + 确定性错误）：冷却节流的对象。"""
     s = str(err or "")
     return "HTTP 429" in s or is_non_retryable_error(err)
+
+
+def _quota_cooldown_seconds(err) -> float:
+    """本次配额失败应设置的冷却秒数。
+
+    ✅ 2026-11-05：429 优先尊重上游 ``Retry-After``（不低于默认冷却，不让
+    限流参与普通指数退避的放大）；非限流类确定性错误沿用默认冷却。
+    """
+    base = QUOTA_FAIL_COOLDOWN
+    if _is_rate_limit_error(err):
+        retry_after = _extract_retry_after(err)
+        if retry_after is not None:
+            cap = QUOTA_COOLDOWN_MAX if QUOTA_COOLDOWN_MAX > 0 else retry_after
+            return max(base, min(retry_after, cap))
+    return base
 
 
 def _quota_cooldown_active(pname: str) -> bool:
@@ -1825,9 +2238,14 @@ def _quota_cooldown_active(pname: str) -> bool:
 
 
 def _note_quota_failure(pname: str, err) -> None:
-    """记录配额类失败：进入冷却窗口。"""
+    """记录配额类失败：进入冷却窗口。
+
+    ✅ 2026-11-05：429 的冷却时长优先尊重上游 ``Retry-After``（见
+    ``_quota_cooldown_seconds``），不再用固定值反复撞限流。
+    """
+    cooldown = _quota_cooldown_seconds(err)
     with _quota_lock:
-        _quota_cool_until[pname] = time.time() + QUOTA_FAIL_COOLDOWN
+        _quota_cool_until[pname] = time.time() + cooldown
         _quota_last_probe[pname] = time.time()
 
 
@@ -1866,8 +2284,8 @@ def _note_thinking_dead(pname: str) -> None:
     with _thinking_dead_lock:
         _thinking_dead_until[pname] = time.time() + THINKING_DEAD_COOLDOWN
     logger.warning(
-        "Provider %s 翻倍后仍思考吞噬，标记 %ds 冷却（期间跳过该 provider）",
-        pname, int(THINKING_DEAD_COOLDOWN))
+        "Provider %s 翻倍后仍思考吞噬，标记 %ds 冷却（期间跳过该 provider）", pname, int(THINKING_DEAD_COOLDOWN)
+    )
 
 
 def _is_thinking_dead(pname: str) -> bool:
@@ -1892,8 +2310,10 @@ def clear_thinking_dead(pname: str = "") -> None:
 
 
 def reset_thinking_dead() -> None:
-    """清空思考吞噬状态（测试隔离 / 配置变更后立即生效用）。"""
+    """清空思考吞噬状态与「疑似推理模型」标记（测试隔离 / 配置变更后立即生效用）。"""
     clear_thinking_dead()
+    with _thinking_suspect_lock:
+        _thinking_suspect.clear()
 
 
 # ---------- ✅ R110（P1-1 · 跨章全熔断快速失败）----------
@@ -1910,8 +2330,7 @@ _all_circuit_lock = threading.Lock()
 def _is_all_circuit_fast_fail() -> bool:
     """是否处于「全熔断快速失败」窗口。"""
     with _all_circuit_lock:
-        return (_all_circuit_dead_until > 0
-                and time.time() < _all_circuit_dead_until)
+        return _all_circuit_dead_until > 0 and time.time() < _all_circuit_dead_until
 
 
 def _record_all_circuit_outcome(success: bool) -> None:
@@ -1935,7 +2354,9 @@ def _record_all_circuit_outcome(success: bool) -> None:
                 _all_circuit_dead_until = time.time() + ALL_CIRCUIT_FAST_FAIL_COOLDOWN
                 logger.warning(
                     "全熔断快速失败激活：连续 %d 次所有候选不可用，%ds 内快速失败（不再 probe）",
-                    _all_circuit_consecutive, int(ALL_CIRCUIT_FAST_FAIL_COOLDOWN))
+                    _all_circuit_consecutive,
+                    int(ALL_CIRCUIT_FAST_FAIL_COOLDOWN),
+                )
 
 
 def reset_all_circuit_fast_fail() -> None:
@@ -1961,6 +2382,54 @@ def reset_reliability() -> None:
         _det_dead_streak.clear()
 
 
+# ✅ 2026-11-05（推理模型输出预算）：识别「会思考」的候选，预先给足输出预算，
+# 避免 1536 这类小预算被思考过程吃光。名称判据之外，本会话一旦发生过
+# 「思考吞噬」，该 provider 也被记为疑似推理模型（覆盖 custom 任意模型名）。
+_REASONING_MODEL_RE = re.compile(
+    r"(reasoner|reasoning|thinking|qwq|deepseek[-_]?r1|(?:^|[-_/])(?:o1|o3)(?:[-_/]|$))", re.I
+)
+_thinking_suspect_lock = threading.Lock()
+_thinking_suspect: set[str] = set()
+
+
+def _looks_like_reasoning_model(model: str) -> bool:
+    """按模型名判断是否推理模型（保守封闭枚举，避免误伤普通模型）。"""
+    return bool(_REASONING_MODEL_RE.search(str(model or "")))
+
+
+def _note_thinking_suspect(pname: str) -> None:
+    """记录「该 provider 出现过思考吞噬」，后续调用预先给足输出预算。"""
+    if not pname:
+        return
+    with _thinking_suspect_lock:
+        _thinking_suspect.add(pname)
+
+
+def _is_thinking_suspect(pname: str) -> bool:
+    with _thinking_suspect_lock:
+        return pname in _thinking_suspect
+
+
+def _is_reasoning_candidate(c: dict) -> bool:
+    """候选是否应按推理模型给输出预算：名称命中 / 全局 reasoning_effort / 已实测吞噬。"""
+    if _looks_like_reasoning_model(c.get("model", "")):
+        return True
+    if str(getattr(settings, "ai_reasoning_effort", "") or "").strip():
+        return True
+    return _is_thinking_suspect(c.get("provider_name", ""))
+
+
+def _reasoning_retry_tokens(current: int, cap: int, floor: int) -> int:
+    """思考吞噬/截断重试时的目标 max_tokens（一次性放大，严格一次）。
+
+    旧实现 ``min(mt*2, cap)``：1536→3072，仍装不下思考过程；生产实测 14 次
+    失败累计浪费 675.5s。现至少抬到 ``ai_reasoning_retry_floor_tokens``
+    （默认 8192），让「思考 + 正文」一次到位。
+    """
+    target = max(current * 2, floor)
+    return min(target, cap) if cap > 0 else target
+
+
 def _is_thinking_exhausted(err) -> bool:
     """推理模型把 max_tokens 全部耗在思考过程（finish_reason=length、正文为空）。
 
@@ -1973,9 +2442,9 @@ def _is_thinking_exhausted(err) -> bool:
 
 
 # ---------- 批处理按 provider 成功率分级（2026-09-22 · 调用次数优化 O6） ----------
-def get_effective_batch_size(base: int, provider_name: str = "",
-                             model: str = "", config_id: str = "",
-                             base_url: str = "") -> int:
+def get_effective_batch_size(
+    base: int, provider_name: str = "", model: str = "", config_id: str = "", base_url: str = ""
+) -> int:
     """按 provider 实时成功率**防御性降批**（O6），返回本次应使用的批大小。
 
     · ``ai_batch_by_success_rate=False``（默认）→ 原样返回 base（零行为变化）；
@@ -1990,8 +2459,7 @@ def get_effective_batch_size(base: int, provider_name: str = "",
         return base
     if not provider_name:
         return base
-    total, rate = _provider_reliability_snapshot(
-        provider_name, model, config_id, base_url)
+    total, rate = _provider_reliability_snapshot(provider_name, model, config_id, base_url)
     if rate is None:
         return base
     threshold = float(getattr(settings, "ai_batch_min_success_rate", 0.60) or 0.0)
@@ -2008,31 +2476,166 @@ async def effective_batch_size(base: int) -> int:
         cfg = await _load_active_config()
         pname = str((cfg or {}).get("provider_name") or "")
         return get_effective_batch_size(
-            base, pname, str((cfg or {}).get("model") or ""),
-            str((cfg or {}).get("id") or ""), str((cfg or {}).get("base_url") or ""))
+            base,
+            pname,
+            str((cfg or {}).get("model") or ""),
+            str((cfg or {}).get("id") or ""),
+            str((cfg or {}).get("base_url") or ""),
+        )
     except Exception:
         return get_effective_batch_size(base, "")
 
 
-async def _log_audit(provider_name: str, model: str, action: str,
-                     duration: float, success: bool,
-                     prompt_tokens: int = 0, completion_tokens: int = 0,
-                     cached_tokens: int = 0, error: str = "", scene: str = "",
-                     config_id: str = "", base_url: str = ""):
-    """记录 AI 调用审计日志（P0-4：攒批落库，避免每次调用一次 fsync commit）
+# ---------- ✅ 2026-11-05（审计合并 · 失败分类） ----------
+# 一次逻辑业务调用（含重试 / 降级链 / 对冲副本）落**一条**主审计记录，
+# 逐次尝试压缩进 attempts_json。失败按机器可读类别聚合，避免面板只能按
+# 自由文本 error 前缀猜（"HTTP 429..." / "TimeoutError..." 混杂）。
+ERROR_CLASSES = (
+    "rate_limit",
+    "auth",
+    "timeout",
+    "truncated",
+    "network",
+    "upstream_5xx",
+    "invalid_response",
+    "circuit_skipped",
+    "cancelled",
+    "unknown",
+)
 
-    token 统计为可选参数（默认 0），保持既有 5 位置参数调用方式兼容。
+_HTTP_STATUS_RE = re.compile(r"\b(?:http[^\d]{0,3})?(\d{3})\b", re.I)
 
-    ✅ 2026-09-16 新增：同时更新进程内实时可靠性统计，供 _fallback_chain
-    自动排除低成功率 provider。
 
-    ✅ 2026-09-17 新增：``error`` 记录失败原因摘要（前 300 字符）——
-    实测近 7 天 1061 条失败记录零信息，无法区分 429 限流/超时/认证失败，
-    排障只能翻 stderr。落库后 /ai/stats 可输出「失败原因 TOP」分布。
+def _error_class(err) -> str:
+    """把异常/错误文本映射为稳定类别码（ERROR_CLASSES 之一）。
 
-    ✅ 2026-09-21 新增：``scene`` 业务场景标记（如 outline_draft /
-    outline_review），/ai/stats 按场景聚合，定位「哪一步在烧调用」。
+    判定顺序刻意从「确定性、可动作」到「兜底」：限流 > 认证 > 超时 >
+    截断（思考吞噬）> 网络 > 上游 5xx > 响应格式 > 熔断跳过 > unknown。
+    截断必须排在 invalid_response 之前 —— 否则「finish_reason=length +
+    正文为空」会被归成 invalid_response，丢失「加预算」这一唯一正确处置。
     """
+    if not err:
+        return ""
+    if isinstance(err, str):
+        msg = err
+    else:
+        msg = f"{type(err).__name__}: {err}"
+    low = msg.lower()
+    code = None
+    match = _HTTP_STATUS_RE.search(low)
+    if match:
+        try:
+            code = int(match.group(1))
+        except ValueError:
+            code = None
+
+    if code == 429 or "rate limit" in low or "too many requests" in low or "限流" in low:
+        return "rate_limit"
+    if code in (401, 403) or "unauthorized" in low or "invalid api key" in low or "认证" in low or "鉴权" in low:
+        return "auth"
+    if isinstance(err, (TimeoutError, asyncio.TimeoutError)) or "timed out" in low or "timeout" in low or "超时" in low:
+        return "timeout"
+    if _is_thinking_exhausted(err) or "finish_reason=length" in low or "truncated" in low or "截断" in low:
+        return "truncated"
+    if "connecterror" in low or "network" in low or "connection" in low or "dns" in low or "网络" in low:
+        return "network"
+    if code is not None and 500 <= code <= 599:
+        return "upstream_5xx"
+    if (
+        "invalid json" in low
+        or "json" in low
+        or "parse" in low
+        or "invalid response" in low
+        or "empty" in low
+        or "正文为空" in low
+        or "空内容" in low
+        or "格式" in low
+    ):
+        return "invalid_response"
+    if "circuit" in low or "熔断" in low or "冷却" in low:
+        return "circuit_skipped"
+    return "unknown"
+
+
+class _LogicalAuditScope:
+    """一次逻辑调用的逐次尝试收集器（供合并审计 + 诊断）。
+
+    对冲副本在独立 asyncio task 中执行，但共享同一个 scope 实例（由调用方
+    显式传入，不依赖 ContextVar 的 task 拷贝语义），因此胜者/败者/超时尝试
+    都能归到同一条主记录。
+    """
+
+    __slots__ = ("scene", "started_at", "attempts", "cancelled")
+
+    def __init__(self, scene: str = ""):
+        self.scene = scene or ""
+        self.started_at = time.monotonic()
+        self.attempts: list[dict] = []
+        self.cancelled = False
+
+    def record(
+        self,
+        *,
+        provider_name: str,
+        model: str,
+        config_id: str = "",
+        base_url: str = "",
+        duration: float = 0.0,
+        success: bool,
+        error: str = "",
+        error_class: str = "",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        cached_tokens: int = 0,
+    ) -> None:
+        self.attempts.append(
+            {
+                "provider": (provider_name or "")[:64],
+                "model": (model or "")[:64],
+                "config_id": (config_id or "")[:64],
+                "base_url": (base_url or "")[:200],
+                "ok": 1 if success else 0,
+                "duration": round(float(duration or 0.0), 2),
+                "error_class": error_class or "",
+                "error": (error or "")[:120],
+                "prompt_tokens": int(prompt_tokens or 0),
+                "completion_tokens": int(completion_tokens or 0),
+                "cached_tokens": int(cached_tokens or 0),
+            }
+        )
+
+    def last(self) -> dict:
+        return self.attempts[-1] if self.attempts else {}
+
+    def last_success(self) -> dict:
+        for item in reversed(self.attempts):
+            if item.get("ok"):
+                return item
+        return {}
+
+    def attempts_json(self, limit: int = 2000) -> str:
+        """逐次尝试序列化（硬截断保护，防止异常长的错误文本撑大审计行）。"""
+        try:
+            raw = json.dumps(self.attempts, ensure_ascii=False)
+        except Exception:
+            return ""
+        return raw[:limit]
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started_at
+
+
+def _update_reliability_stats(
+    provider_name: str,
+    model: str,
+    action: str,
+    success: bool,
+    error: str = "",
+    config_id: str = "",
+    base_url: str = "",
+) -> None:
+    """更新进程内实时可靠性统计（从 _log_audit 拆出，供逐次尝试复用）。"""
     try:
         # ✅ 更新实时可靠性统计（thread-safe）
         # ✅ 2026-09-17：熔断跳过（circuit_skipped）不是真实网络调用，
@@ -2065,7 +2668,9 @@ async def _log_audit(provider_name: str, model: str, action: str,
                             logger.warning(
                                 "配置 %s 连续 %d 次确定性模型/端点不存在错误，"
                                 "运行期判为死配置并从候选链剔除（保存该配置即重置）",
-                                key, streak)
+                                key,
+                                streak,
+                            )
                     else:
                         _det_dead_streak.pop(key, None)
     except Exception as e:
@@ -2074,17 +2679,14 @@ async def _log_audit(provider_name: str, model: str, action: str,
         #    又让「统计没更新」与「审计没落库」两种后果无法区分。
         #    统计失真会**直接影响候选排序**（死配置剔除 / 主配置后置 /
         #    降级链分档），静默失真 = 排序依据悄悄错。故单独告警。
-        logger.warning("更新 Provider 实时可靠性统计失败（%s/%s action=%s）: %s",
-                       provider_name, model, action, e)
+        logger.warning("更新 Provider 实时可靠性统计失败（%s/%s action=%s）: %s", provider_name, model, action, e)
+
+
+async def _append_audit_row(row: tuple) -> None:
+    """审计行入缓冲并按其触发条件攒批落库（失败只告警，绝不中断 AI 主流程）。"""
     try:
-        # 原有审计缓冲逻辑
         with _audit_lock:
-            _audit_buffer.append((
-                str(uuid.uuid4()), provider_name, model, action,
-                int(prompt_tokens or 0), int(completion_tokens or 0), int(cached_tokens or 0),
-                duration, 1 if success else 0,
-                (error or "")[:300], (scene or "")[:64],
-                (config_id or "")[:64], (base_url or "")[:512]))
+            _audit_buffer.append(row)
             buf_len = len(_audit_buffer)
             due = time.time() - _audit_last_flush["ts"] >= _AUDIT_FLUSH_INTERVAL
         if buf_len >= _AUDIT_BATCH_SIZE or (buf_len and due):
@@ -2092,12 +2694,220 @@ async def _log_audit(provider_name: str, model: str, action: str,
     except Exception as e:
         # 审计是「尽力而为」，写入失败绝不能中断 AI 调用主流程（保持原语义）；
         # 但必须留痕 —— 否则「用量统计/审计日志」整块功能静默为空而无人知晓。
-        logger.warning("写入 AI 调用审计缓冲失败（%s/%s action=%s，本次审计记录丢失）: %s",
-                       provider_name, model, action, e)
+        logger.warning(
+            "写入 AI 调用审计缓冲失败（%s/%s，本次审计记录丢失）: %s", row[1] if len(row) > 1 else "?", row[3] if len(row) > 3 else "?", e
+        )
 
 
-def _reliability_key(provider_name: str, model: str = "",
-                     config_id: str = "", base_url: str = "") -> str:
+def _build_audit_row(
+    *,
+    provider_name: str,
+    model: str,
+    action: str,
+    duration: float,
+    success: bool,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    cached_tokens: int = 0,
+    error: str = "",
+    scene: str = "",
+    config_id: str = "",
+    base_url: str = "",
+    error_class: str = "",
+    attempt_count: int = 1,
+    attempts_json: str = "",
+) -> tuple:
+    """构造 16 列审计行（新列追加在末尾，降级切片链依赖此顺序）。"""
+    return (
+        str(uuid.uuid4()),
+        provider_name,
+        model,
+        action,
+        int(prompt_tokens or 0),
+        int(completion_tokens or 0),
+        int(cached_tokens or 0),
+        duration,
+        1 if success else 0,
+        (error or "")[:300],
+        (scene or "")[:64],
+        (config_id or "")[:64],
+        (base_url or "")[:512],
+        (error_class or "")[:32],
+        max(0, int(attempt_count or 0)),
+        (attempts_json or "")[:2000],
+    )
+
+
+async def _log_audit(
+    provider_name: str,
+    model: str,
+    action: str,
+    duration: float,
+    success: bool,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    cached_tokens: int = 0,
+    error: str = "",
+    scene: str = "",
+    config_id: str = "",
+    base_url: str = "",
+    error_class: str = "",
+    attempt_count: int = 1,
+    attempts_json: str = "",
+):
+    """记录 AI 调用审计日志（P0-4：攒批落库，避免每次调用一次 fsync commit）
+
+    token 统计为可选参数（默认 0），保持既有 5 位置参数调用方式兼容。
+
+    ✅ 2026-09-16 新增：同时更新进程内实时可靠性统计，供 _fallback_chain
+    自动排除低成功率 provider。
+
+    ✅ 2026-09-17 新增：``error`` 记录失败原因摘要（前 300 字符）——
+    实测近 7 天 1061 条失败记录零信息，无法区分 429 限流/超时/认证失败，
+    排障只能翻 stderr。落库后 /ai/stats 可输出「失败原因 TOP」分布。
+
+    ✅ 2026-09-21 新增：``scene`` 业务场景标记（如 outline_draft /
+    outline_review），/ai/stats 按场景聚合，定位「哪一步在烧调用」。
+
+    ✅ 2026-11-05：新增 ``error_class`` / ``attempt_count`` / ``attempts_json``
+    （追加在 13 列之后，降级切片链安全）。普通调用仍走本函数（一条尝试
+    一条记录）；业务调用由 ``_chat_with_fallback_result`` 合并成一条主记录。
+    """
+    _update_reliability_stats(provider_name, model, action, success, error, config_id, base_url)
+    if not error_class and error:
+        error_class = _error_class(error)
+    await _append_audit_row(
+        _build_audit_row(
+            provider_name=provider_name,
+            model=model,
+            action=action,
+            duration=duration,
+            success=success,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
+            error=error,
+            scene=scene,
+            config_id=config_id,
+            base_url=base_url,
+            error_class=error_class,
+            attempt_count=attempt_count,
+            attempts_json=attempts_json,
+        )
+    )
+
+
+async def _record_attempt(
+    scope: _LogicalAuditScope | None,
+    *,
+    provider_name: str,
+    model: str,
+    config_id: str = "",
+    base_url: str = "",
+    duration: float = 0.0,
+    success: bool,
+    error: str = "",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    cached_tokens: int = 0,
+    counts_reliability: bool = True,
+) -> None:
+    """记录**一次底层尝试**：更新实时可靠性 + 收集进逻辑调用 scope。
+
+    ✅ 2026-11-05（方案 B）：被合并的尝试不再各写一条审计行；只有 scope
+    为空（非业务调用路径 / 单元测试直调 ``_attempt_candidate``）才回退到
+    单条落库，保证旧调用方行为不变。取消的尝试只进 scope（用于 attempt
+    计数与诊断）而不更新可靠性——取消不是供应商的失败。
+    """
+    error_class = "" if success else _error_class(error)
+    if scope is None:
+        # 非业务调用路径（单元测试直调 / 兼容旧调用方）：保持「一次尝试 =
+        # 一条审计行」，并复用 ``_log_audit`` 单一出口（可靠性统计与审计
+        # 写入同源，且 action 字面量可被白名单静态扫描覆盖）。
+        await _log_audit(
+            provider_name,
+            model,
+            "chat",
+            duration,
+            success,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
+            error=error,
+            config_id=config_id,
+            base_url=base_url,
+            error_class=error_class,
+            attempt_count=1,
+        )
+        return
+    if counts_reliability:
+        _update_reliability_stats(provider_name, model, "chat", success, error, config_id, base_url)
+    scope.record(
+        provider_name=provider_name,
+        model=model,
+        config_id=config_id,
+        base_url=base_url,
+        duration=duration,
+        success=success,
+        error=error,
+        error_class=error_class,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cached_tokens=cached_tokens,
+    )
+
+
+async def _flush_logical_audit(
+    scope: _LogicalAuditScope,
+    *,
+    success: bool,
+    error: str = "",
+    error_class: str = "",
+) -> None:
+    """把一次逻辑调用的逐次尝试合并成**一条**主审计记录。
+
+    主记录语义：
+    - success=True：winning attempt 的 provider/model/token，duration=整段逻辑
+      调用耗时；attempt_count=实际尝试数（含已取消的对冲副本）。
+    - success=False：最后一次失败尝试的 provider/model，error=最终错误摘要，
+      error_class=最终错误类别；逐次失败类别仍在 attempts_json 中可查。
+    - 无任何尝试（gate 快速失败，如全熔断/全部无 Key）：attempt_count=0，
+      error_class=circuit_skipped，使面板「失败调用」与审计行能对上。
+    """
+    try:
+        attempt = scope.last_success() if success else (scope.attempts[-1] if scope.attempts else {})
+        if not attempt:
+            attempt = {}
+        scene = scope.scene
+        final_error = "" if success else (error or attempt.get("error", ""))
+        final_class = "" if success else (error_class or attempt.get("error_class", "") or _error_class(final_error))
+        if not success and not scope.attempts and not final_class:
+            final_class = "circuit_skipped"
+        await _append_audit_row(
+            _build_audit_row(
+                provider_name=attempt.get("provider_name", attempt.get("provider", "")),
+                model=attempt.get("model", ""),
+                action="chat",
+                duration=scope.elapsed,
+                success=success,
+                prompt_tokens=attempt.get("prompt_tokens", 0) or 0,
+                completion_tokens=attempt.get("completion_tokens", 0) or 0,
+                cached_tokens=attempt.get("cached_tokens", 0) or 0,
+                error=final_error,
+                scene=scene,
+                config_id=attempt.get("config_id", ""),
+                base_url=attempt.get("base_url", ""),
+                error_class=final_class,
+                attempt_count=len(scope.attempts),
+                attempts_json=scope.attempts_json(),
+            )
+        )
+    except Exception as e:
+        # 审计失败不得改变业务调用结果（保持「尽力而为」语义）
+        logger.warning("合并写入逻辑调用审计失败（scene=%s）: %s", getattr(scope, "scene", ""), e)
+
+
+def _reliability_key(provider_name: str, model: str = "", config_id: str = "", base_url: str = "") -> str:
     """可靠性统计身份键：优先 config_id；否则 provider+model+base_url。
 
     同一 provider 可以有多条配置、多个模型或不同接入地址，只在 provider 维度
@@ -2106,14 +2916,12 @@ def _reliability_key(provider_name: str, model: str = "",
     cid = (config_id or "").strip()
     if cid:
         return f"cfg:{cid}"
-    return (f"prov:{(provider_name or '').strip()}"
-            f"|model:{(model or '').strip()}"
-            f"|url:{(base_url or '').strip()}")
+    return f"prov:{(provider_name or '').strip()}" f"|model:{(model or '').strip()}" f"|url:{(base_url or '').strip()}"
 
 
-def _provider_reliability_snapshot(provider_name: str, model: str = "",
-                                   config_id: str = "",
-                                   base_url: str = "") -> tuple[int, float | None]:
+def _provider_reliability_snapshot(
+    provider_name: str, model: str = "", config_id: str = "", base_url: str = ""
+) -> tuple[int, float | None]:
     """返回 (样本数, 实时成功率)；样本不足（< ``_PROVIDER_MIN_SAMPLES``）时成功率为 None。"""
     key = _reliability_key(provider_name, model, config_id, base_url)
     with _provider_reliability_lock:
@@ -2129,11 +2937,11 @@ def _provider_reliability_snapshot(provider_name: str, model: str = "",
         return total, stats["ok"] / total
 
 
-def _provider_success_rate(provider_name: str, model: str = "",
-                           config_id: str = "", base_url: str = "") -> float | None:
+def _provider_success_rate(
+    provider_name: str, model: str = "", config_id: str = "", base_url: str = ""
+) -> float | None:
     """返回某个配置身份的实时成功率（0~1），样本不足时返回 None。"""
-    return _provider_reliability_snapshot(
-        provider_name, model, config_id, base_url)[1]
+    return _provider_reliability_snapshot(provider_name, model, config_id, base_url)[1]
 
 
 # ---------- R103（2026-10-18 · 日志审计遗留 L1 收口）：配置健康可观测 ----------
@@ -2143,8 +2951,7 @@ def _provider_success_rate(provider_name: str, model: str = "",
 # 「文本模型配置」页完全看不见 ⇒ 用户看到的是「明明配了 9 条，降级链却只有
 # 3 条」，只能靠翻日志。本组函数把既有判定收敛为**单一只读访问器**，
 # 供启动报告与 /ai/configs-health 共用，不新增任何存储、不改任何选路行为。
-def provider_health_snapshot(provider_name: str, model: str = "",
-                             config_id: str = "", base_url: str = "") -> dict:
+def provider_health_snapshot(provider_name: str, model: str = "", config_id: str = "", base_url: str = "") -> dict:
     """某个配置身份的运行时健康快照（只读，fail-soft 永不为空）。
 
     返回：``{"samples": int, "success_rate": float|None, "dead": bool,
@@ -2156,9 +2963,14 @@ def provider_health_snapshot(provider_name: str, model: str = "",
     与运行时选路逐字同源，绝不另写一套阈值（否则界面说的和实际做的不一致）。
     """
     pname = (provider_name or "").strip()
-    out: dict = {"samples": 0, "success_rate": None, "dead": False,
-                 "circuit_open": False, "cooldown_remaining_s": 0.0,
-                 "quota_cooldown_s": 0.0}
+    out: dict = {
+        "samples": 0,
+        "success_rate": None,
+        "dead": False,
+        "circuit_open": False,
+        "cooldown_remaining_s": 0.0,
+        "quota_cooldown_s": 0.0,
+    }
     try:
         total, rate = _provider_reliability_snapshot(pname, model, config_id, base_url)
         out["samples"] = total
@@ -2168,15 +2980,14 @@ def provider_health_snapshot(provider_name: str, model: str = "",
         pass
     try:
         from app.services.ai.workflows_base import circuit_breaker
+
         out["circuit_open"] = not circuit_breaker.allow_request(pname)
-        out["cooldown_remaining_s"] = round(
-            circuit_breaker.cooldown_remaining(pname), 1)
+        out["cooldown_remaining_s"] = round(circuit_breaker.cooldown_remaining(pname), 1)
     except Exception:  # noqa: BLE001 - 熔断器不可读时按「未熔断」快照，不影响调用方
         pass
     try:
         if QUOTA_FAIL_COOLDOWN > 0 and _quota_cooldown_active(pname):
-            out["quota_cooldown_s"] = round(
-                max(0.0, _quota_cool_until.get(pname, 0.0) - time.time()), 1)
+            out["quota_cooldown_s"] = round(max(0.0, _quota_cool_until.get(pname, 0.0) - time.time()), 1)
     except Exception:  # noqa: BLE001 - 冷却态读取失败按 0 呈现，不影响调用方
         pass
     return out
@@ -2201,8 +3012,7 @@ async def report_dead_configs_at_startup() -> list[dict]:
     dead: list[dict] = []
     try:
         conn = await get_conn()
-        cur = await conn.execute(
-            "SELECT id, provider_name, model, base_url FROM ai_config")
+        cur = await conn.execute("SELECT id, provider_name, model, base_url FROM ai_config")
         rows = await cur.fetchall()
         for r in rows:
             cid = str(r["id"] or "")
@@ -2212,13 +3022,18 @@ async def report_dead_configs_at_startup() -> list[dict]:
             snap = provider_health_snapshot(pname, model, cid, url)
             if not snap.get("dead"):
                 continue
-            dead.append({"config_id": cid, "provider_name": pname,
-                         "model": model, "base_url": url,
-                         "samples": snap.get("samples", 0),
-                         "success_rate": snap.get("success_rate")})
+            dead.append(
+                {
+                    "config_id": cid,
+                    "provider_name": pname,
+                    "model": model,
+                    "base_url": url,
+                    "samples": snap.get("samples", 0),
+                    "success_rate": snap.get("success_rate"),
+                }
+            )
             # ✅ R111（P2-2 · 门槛倒挂透明化）：死配置「复活循环」可观测。
-            det_dead = _det_dead_streak.get(
-                _reliability_key(pname, model, cid, url), 0) >= DET_DEAD_STREAK_THRESHOLD
+            det_dead = _det_dead_streak.get(_reliability_key(pname, model, cid, url), 0) >= DET_DEAD_STREAK_THRESHOLD
             total, _rate = _provider_reliability_snapshot(pname, model, cid, url)
             if not det_dead and total < _PROVIDER_DEAD_MIN_SAMPLES:
                 logger.info(
@@ -2226,18 +3041,25 @@ async def report_dead_configs_at_startup() -> list[dict]:
                     "本轮判死主要靠确定性 404 连击而非统计口径 —— 重启后 24h 内"
                     "无新调用将随滑窗自然复活，建议直接清理该配置或接运行时"
                     "厂商开关禁用（scheme=%s）",
-                    pname, model or "?", total, _PROVIDER_DEAD_MIN_SAMPLES,
-                    snap.get("samples", total))
-
+                    pname,
+                    model or "?",
+                    total,
+                    _PROVIDER_DEAD_MIN_SAMPLES,
+                    snap.get("samples", total),
+                )
 
         if dead:
             logger.warning(
                 "启动检查：%d 条 AI 配置近 24h 实时成功率过低，"
                 "已被自动剔除出降级链（建议到「文本模型配置」清理或禁用）：%s",
                 len(dead),
-                "; ".join(f"{d['provider_name']}/{d['model'] or '?'}"
-                          f"（{d['samples']} 次样本，成功率 "
-                          f"{(d['success_rate'] or 0):.0%}）" for d in dead[:8]))
+                "; ".join(
+                    f"{d['provider_name']}/{d['model'] or '?'}"
+                    f"（{d['samples']} 次样本，成功率 "
+                    f"{(d['success_rate'] or 0):.0%}）"
+                    for d in dead[:8]
+                ),
+            )
         else:
             logger.info("启动检查：无实时成功率过低的死配置（近 24h）")
     except Exception as e:  # noqa: BLE001 - 报告失败绝不影响启动
@@ -2246,8 +3068,7 @@ async def report_dead_configs_at_startup() -> list[dict]:
     return dead
 
 
-def _is_dead_provider(provider_name: str, model: str = "",
-                      config_id: str = "", base_url: str = "") -> bool:
+def _is_dead_provider(provider_name: str, model: str = "", config_id: str = "", base_url: str = "") -> bool:
     """死配置判定：样本充足且实时成功率低于 ``_PROVIDER_DEAD_SUCCESS_RATE``。
 
     ✅ R108（P1-4）：新增**确定性死配置**前置判据——连续 ≥
@@ -2260,10 +3081,8 @@ def _is_dead_provider(provider_name: str, model: str = "",
     with _provider_reliability_lock:
         if _det_dead_streak.get(key, 0) >= DET_DEAD_STREAK_THRESHOLD:
             return True
-    total, rate = _provider_reliability_snapshot(
-        provider_name, model, config_id, base_url)
-    return (rate is not None and total >= _PROVIDER_DEAD_MIN_SAMPLES
-            and rate < _PROVIDER_DEAD_SUCCESS_RATE)
+    total, rate = _provider_reliability_snapshot(provider_name, model, config_id, base_url)
+    return rate is not None and total >= _PROVIDER_DEAD_MIN_SAMPLES and rate < _PROVIDER_DEAD_SUCCESS_RATE
 
 
 def _order_candidates(candidates: list[dict]) -> list[dict]:
@@ -2278,28 +3097,51 @@ def _order_candidates(candidates: list[dict]) -> list[dict]:
     if not candidates:
         return candidates
 
-    alive = [c for c in candidates
-             if not _is_dead_provider(
-                 c.get("provider_name", ""), c.get("model", ""),
-                 c.get("config_id", ""), c.get("base_url", ""))]
+    # ✅ R178（D-1 · 2026-11-05）：内置兜底**豁免判死**。
+    #    设计注释明写「内置兜底必须留在链内」（_fallback_chain:1582-1585），
+    #    但该候选是在**成功率过滤之后**追加的、随后又流经本函数 —— 于是
+    #    「兜底不得被截断」的设计意图被本函数打破：兜底一旦因成功率过低被判死，
+    #    就会被**静默剔除**，而这恰恰发生在主配置也已不可用的最坏时刻。
+    #    现对带 ``_is_builtin_fallback`` 标记的候选豁免判死 —— 只降级不剔除；
+    #    它在链内本就位于尾部（_fallback_chain 末尾追加），仍保持「最后兜底」序。
+    alive = [
+        c
+        for c in candidates
+        if c.get("_is_builtin_fallback")
+        or not _is_dead_provider(
+            c.get("provider_name", ""), c.get("model", ""), c.get("config_id", ""), c.get("base_url", "")
+        )
+    ]
     if not alive:
         alive = list(candidates)  # 全部被判定为死配置 → 保底不空
     if len(alive) < len(candidates):
-        dropped = [c.get("provider_name", "?")
-                   for c in candidates if c not in alive]
-        logger.warning("已剔除实时成功率过低的候选：%s", ", ".join(dropped))
+        dropped = [c.get("provider_name", "?") for c in candidates if c not in alive]
+        # ✅ R178（D-2 · 2026-11-05）：设计内节流降为 INFO。
+        #    生产实证（logs/backend.log 2026-10-28~11-04）：本条 WARNING 刷了
+        #    372 次，配合「主配置后置」的 642 次共 1014 条，占全量 WARNING 的 24%，
+        #    把真正的故障（429/401/锁冲突/库损坏）彻底淹没。按 R103 先例
+        #    （test_config_health_closeout_r103_20261018.py:184-191「熔断/配额冷却
+        #    跳过是设计内节流，降为 INFO」+「旧 WARNING 形态不得回流」），
+        #    本条同属「自愈机制的正常动作」，降 INFO。
+        logger.info("已剔除实时成功率过低的候选：%s", ", ".join(dropped))
 
     primary = [c for c in alive if c.get("_is_primary")]
     rest = [c for c in alive if not c.get("_is_primary")]
     if primary and rest:
         _total, rate = _provider_reliability_snapshot(
-            primary[0].get("provider_name", ""), primary[0].get("model", ""),
-            primary[0].get("config_id", ""), primary[0].get("base_url", ""))
+            primary[0].get("provider_name", ""),
+            primary[0].get("model", ""),
+            primary[0].get("config_id", ""),
+            primary[0].get("base_url", ""),
+        )
         if rate is not None and rate < _PROVIDER_DEMOTE_SUCCESS_RATE:
-            logger.warning(
+            # ✅ R178（D-2）：同上，设计内节流降 INFO（生产 642 条）。
+            logger.info(
                 "主配置 %s 实时成功率 %.1f%% < %.0f%%，本次调用将其后置到候选链尾部",
-                primary[0].get("provider_name"), rate * 100,
-                _PROVIDER_DEMOTE_SUCCESS_RATE * 100)
+                primary[0].get("provider_name"),
+                rate * 100,
+                _PROVIDER_DEMOTE_SUCCESS_RATE * 100,
+            )
             return rest + primary
     return alive
 
@@ -2344,7 +3186,8 @@ async def warmup_reliability_from_db() -> None:
                 "FROM ai_audit_logs "
                 "WHERE action='chat' AND created_at >= datetime('now','localtime','-1 day') "
                 "GROUP BY config_id, provider_name, model, base_url HAVING COUNT(*) >= ?",
-                (_PROVIDER_MIN_SAMPLES,))
+                (_PROVIDER_MIN_SAMPLES,),
+            )
             has_identity = True
         except Exception:
             # 旧库尚无 config_id/base_url 列：回退 provider+model 聚合
@@ -2353,7 +3196,8 @@ async def warmup_reliability_from_db() -> None:
                 "FROM ai_audit_logs "
                 "WHERE action='chat' AND created_at >= datetime('now','localtime','-1 day') "
                 "GROUP BY provider_name, model HAVING COUNT(*) >= ?",
-                (_PROVIDER_MIN_SAMPLES,))
+                (_PROVIDER_MIN_SAMPLES,),
+            )
             has_identity = False
         rows = await cur.fetchall()
         if not rows:
@@ -2376,7 +3220,9 @@ async def warmup_reliability_from_db() -> None:
                 loaded += 1
         logger.info(
             "已从审计日志预热 %d 个配置身份的可靠性统计（近 24h%s）",
-            loaded, "" if has_identity else "，旧库按 provider+model 聚合")
+            loaded,
+            "" if has_identity else "，旧库按 provider+model 聚合",
+        )
     except Exception as e:
         logger.debug("预热 Provider 可靠性统计失败（不影响服务）: %s", e)
 
@@ -2431,14 +3277,14 @@ async def flush_provider_state_to_db() -> None:
         if until <= 0:
             continue
         last_probe = float(state_snapshot.get("last_probe", {}).get(pname, 0.0))
-        writes.append((pname, _STATE_KIND_QUOTA, json.dumps(
-            {"cool_until": until, "last_probe": last_probe})))
+        writes.append((pname, _STATE_KIND_QUOTA, json.dumps({"cool_until": until, "last_probe": last_probe})))
     for pname, entry in cb_snapshot.items():
         if str(entry.get("state") or "CLOSED") == "CLOSED":
             continue
         writes.append((pname, _STATE_KIND_CB, json.dumps(entry)))
     if not writes:
         return
+
     async def _snapshot_tx_once() -> None:
         async with write_tx_conn() as conn:
             for pname, kind, payload in writes:
@@ -2450,15 +3296,14 @@ async def flush_provider_state_to_db() -> None:
                     (pname, kind, payload, now_iso),
                 )
             await conn.execute(
-                "DELETE FROM ai_provider_state "
-                "WHERE datetime(updated_at, '+24 hours') < datetime('now','localtime')")
+                "DELETE FROM ai_provider_state " "WHERE datetime(updated_at, '+24 hours') < datetime('now','localtime')"
+            )
 
     try:
         # ✅ R108（P1-2 锁族同源）：UPSERT/DELETE 均幂等，整事务接 retry_db_op
         #    ——批量生成写锁窗口内快照曾零重试直通 WARNING（冷却/熔断状态
         #    跨重启恢复链就此断）。耗尽仍失败则维持既有 fail-soft WARNING。
-        await retry_db_op(_snapshot_tx_once, max_retries=4, base_delay=0.1,
-                          jitter=0.05)
+        await retry_db_op(_snapshot_tx_once, max_retries=4, base_delay=0.1, jitter=0.05)
         logger.debug("Provider 状态快照写入 ai_provider_state（%d 行）", len(writes))
     except Exception as e:
         logger.warning("Provider 状态快照写入失败（不影响主流程）: %s", e)
@@ -2482,8 +3327,7 @@ async def warmup_provider_state_from_db() -> None:
     try:
         conn = await get_conn()
         try:
-            cur = await conn.execute(
-                "SELECT provider_name, kind, payload_json FROM ai_provider_state")
+            cur = await conn.execute("SELECT provider_name, kind, payload_json FROM ai_provider_state")
             rows = await cur.fetchall()
         except Exception as e:
             logger.debug("预热 Provider 状态失败（表缺失或读取失败，忽略）: %s", e)
@@ -2532,12 +3376,11 @@ async def warmup_provider_state_from_db() -> None:
 
     if restored_quota or restored_cb:
         logger.info(
-            "已从 ai_provider_state 预热 Provider 状态（配额冷却 %d 个、熔断 %d 个）",
-            restored_quota, restored_cb)
+            "已从 ai_provider_state 预热 Provider 状态（配额冷却 %d 个、熔断 %d 个）", restored_quota, restored_cb
+        )
 
 
-async def _persist_provider_state_loop(stop_event: asyncio.Event,
-                                       interval: float = 10.0) -> None:
+async def _persist_provider_state_loop(stop_event: asyncio.Event, interval: float = 10.0) -> None:
     """周期落库 Provider 状态（默认 10s）。失败仅告警，下一周期重试。
 
     调用点在 main.py lifespan：
@@ -2568,6 +3411,37 @@ def _ai_live_record(provider_name: str, model: str, ok: bool, duration: float):
         _ai_live["last_at"] = time.time()
         if not ok:
             _ai_live["failed"] = int(_ai_live["failed"]) + 1
+    _ab.notify()
+
+
+def _ai_live_record_cancelled(provider_name: str, model: str, duration: float):
+    """记录一次**被取消**的调用尝试（对冲落选 / 用户停止 / 断连）。
+
+    ✅ 2026-11-04（口径修复）：取消不是 Provider 故障，不能计入 ``failed``；
+    单列 ``cancelled``，同时保证 in_flight 递减与最近一次状态更新。
+    """
+    with _ai_live_lock:
+        _ai_live["in_flight"] = max(0, int(_ai_live["in_flight"]) - 1)
+        _ai_live["last_provider"] = provider_name
+        _ai_live["last_model"] = model
+        _ai_live["last_duration"] = duration
+        _ai_live["last_at"] = time.time()
+        _ai_live["cancelled"] = int(_ai_live.get("cancelled", 0)) + 1
+    _ab.notify()
+
+
+def _ai_live_record_logical(ok: bool = False, cancelled: bool = False) -> None:
+    """记录一次**逻辑调用**的最终结果（一次 chat_with_fallback 计一次）。
+
+    与 ``_ai_live_record`` 的尝试口径分开：降级链里 3 个候选各失败一次只让
+    ``failed`` +3，而 ``call_failed`` 只 +1（整次业务调用最终失败）。
+    """
+    with _ai_live_lock:
+        _ai_live["calls"] = int(_ai_live.get("calls", 0)) + 1
+        if cancelled:
+            _ai_live["call_cancelled"] = int(_ai_live.get("call_cancelled", 0)) + 1
+        elif not ok:
+            _ai_live["call_failed"] = int(_ai_live.get("call_failed", 0)) + 1
     _ab.notify()
 
 
@@ -2625,7 +3499,12 @@ def _error_summary(e: Exception) -> str:
     """
     msg = (str(e) or "").strip()
     if msg:
-        return msg[:300]
+        # ✅ R175（2026-11-03）：落库前脱敏 —— 上游 4xx 报错常把请求体/Key 片段
+        #    原样回显（如 "Incorrect API key provided: sk-..."），审计表长期留存
+        #    等价于把密钥写进数据库与导出包。
+        from app.services.redaction import redact_sensitive_text
+
+        return redact_sensitive_text(msg)[:300]
     name = type(e).__name__
     if "Timeout" in name or name == "TimeoutError":
         return f"{name}（无错误信息，常见于请求超时）"
@@ -2652,19 +3531,22 @@ def _candidate_timeout(c: dict, req_timeout: int | None) -> int:
     降级候选套用 ``ai_fallback_attempt_timeout`` 上限（默认 120s），
     不再把 300s 下发到每一个降级候选造成"超时叠乘"。
     """
-    base = int(req_timeout if req_timeout is not None
-               else (c.get("timeout") or DEFAULT_CONFIG_NUMBERS["timeout"]))
+    base = int(req_timeout if req_timeout is not None else (c.get("timeout") or DEFAULT_CONFIG_NUMBERS["timeout"]))
     if not c.get("_is_primary"):
         cap = int(getattr(settings, "ai_fallback_attempt_timeout", 120) or 120)
         base = min(base, cap)
     return max(1, base)
 
 
-async def _collect_stream(provider, messages: list, *,
-                          temperature: float | None,
-                          json_mode: bool,
-                          max_tokens: int | None,
-                          extra_body: dict | None = None) -> str:
+async def _collect_stream(
+    provider,
+    messages: list,
+    *,
+    temperature: float | None,
+    json_mode: bool,
+    max_tokens: int | None,
+    extra_body: dict | None = None,
+) -> str:
     """消费 ``provider.stream()`` 并把分片拼成完整正文。
 
     ✅ 新增（请求方式 = 流式请求）：
@@ -2678,9 +3560,9 @@ async def _collect_stream(provider, messages: list, *,
     「回退普通请求 → 降级下一候选」，绝不把半截内容当成完整结果。
     """
     parts: list[str] = []
-    async for piece in provider.stream(messages, temperature=temperature,
-                                       json_mode=json_mode, max_tokens=max_tokens,
-                                       extra_body=extra_body):
+    async for piece in provider.stream(
+        messages, temperature=temperature, json_mode=json_mode, max_tokens=max_tokens, extra_body=extra_body
+    ):
         if piece:
             parts.append(piece)
     text = "".join(parts)
@@ -2690,10 +3572,9 @@ async def _collect_stream(provider, messages: list, *,
         if finish in ("length", "max_tokens"):
             raise RuntimeError(
                 f"流式响应被 max_tokens 截断且正文为空（finish_reason={finish}）："
-                f"请调大 max_tokens 或改用非推理模型")
-        raise RuntimeError(
-            "流式请求未返回任何内容（该平台可能不支持 stream 流式接口，"
-            "或流式参数受限）")
+                f"请调大 max_tokens 或改用非推理模型"
+            )
+        raise RuntimeError("流式请求未返回任何内容（该平台可能不支持 stream 流式接口，" "或流式参数受限）")
     return text
 
 
@@ -2704,18 +3585,16 @@ async def _collect_stream(provider, messages: list, *,
 # 连续 STREAM_FAIL_STREAK 次后，在 STREAM_CAPABILITY_TTL 秒内直接走普通请求
 # （流式只改变与厂商之间的传输方式，应用侧语义完全不变）；流式一旦成功立即
 # 清除记忆；TTL 到期后自动重新探测一次（平台修复/换模型可自愈）。
-STREAM_FAIL_STREAK = 2          # 连续失败几次才认定不支持（单次要能容忍偶发抖动）
+STREAM_FAIL_STREAK = 2  # 连续失败几次才认定不支持（单次要能容忍偶发抖动）
 # ✅ 2026-09-22（调用次数优化 O5）：TTL 配置化并延长。3600s → 86400s（1 天）：
 #    模型对流式的支持不会一天内变化，缩短只会增加「TTL 到期后每章重探测一次
 #    必败流式」的浪费；到期自动重探测与成功即清除的机制保持不变（可自愈）。
-STREAM_CAPABILITY_TTL = max(
-    1.0, float(getattr(settings, "ai_stream_capability_ttl_seconds", 86400) or 86400.0))
+STREAM_CAPABILITY_TTL = max(1.0, float(getattr(settings, "ai_stream_capability_ttl_seconds", 86400) or 86400.0))
 
 # ✅ R4 修复（2026-09-22）：流式请求命中确定性错误时是否回退普通请求。
 # 默认 True = 不回退（确定性错误对同一 provider 非流式同样 100% 失败，重试白烧 HTTP）。
 # False = 旧行为（一律回退普通请求重试），可通过环境变量关闭以恢复旧行为。
-ai_retry_on_non_retryable = bool(
-    getattr(settings, "ai_retry_on_non_retryable", True))
+ai_retry_on_non_retryable = bool(getattr(settings, "ai_retry_on_non_retryable", True))
 
 _stream_fail_streak: dict[str, int] = {}
 _stream_unsupported_at: dict[str, float] = {}
@@ -2767,10 +3646,16 @@ def reset_stream_capability() -> None:
         _stream_unsupported_at.clear()
 
 
-async def _call_provider(provider, messages: list, *, request_mode: str,
-                         temperature: float | None, json_mode: bool,
-                         max_tokens: int | None,
-                         extra_body: dict | None = None) -> str:
+async def _call_provider(
+    provider,
+    messages: list,
+    *,
+    request_mode: str,
+    temperature: float | None,
+    json_mode: bool,
+    max_tokens: int | None,
+    extra_body: dict | None = None,
+) -> str:
     """按配置的「请求方式」向厂商发起一次调用，返回完整正文。
 
     - ``normal``：普通请求（等待完整响应），与历史行为一致；
@@ -2781,23 +3666,44 @@ async def _call_provider(provider, messages: list, *, request_mode: str,
       否则用户为了更快首字节勾了流式，反而整条链路直接失败，
       而同样的配置用普通请求其实完全可用（请求方式不该成为可用性开关）。
     """
+    # ✅ R179（2026-11-05 · 出站脱敏兜底从未接线）：prompt_material_guard 早已
+    #    提供 ``redact_outbound_messages()``（注释声称它是「覆盖全部 AI 链路的
+    #    出站单点收口」），但全仓**零调用方** —— 用户开启 PROMPT_REDACT_SENSITIVE
+    #    后，只有经过 govern_text/govern_blob 的资料入口会脱敏，其它链路（直接
+    #    拼 f-string、把资料塞进 system 消息等）仍会把疑似凭据原样发往外部 AI。
+    #    此处是全部 provider 调用的唯一出口（normal/stream 两分支共用），作为
+    #    兜底接线：只替换 user 消息中的高置信度凭据形态，不触碰库内原文。
+    #    开关关闭时 ``redact_outbound_messages`` 直接返回原列表，零行为变化。
+    try:
+        from app.services.prompt_material_guard import redact_outbound_messages
+
+        messages = redact_outbound_messages(messages)
+    except Exception:  # noqa: BLE001 - 脱敏失败绝不阻断调用
+        logger.debug("出站消息脱敏失败（使用原文继续）", exc_info=True)
     if request_mode != "stream":
-        return await provider.chat(messages, temperature=temperature,
-                                   json_mode=json_mode, max_tokens=max_tokens,
-                                   extra_body=extra_body)
+        return await provider.chat(
+            messages, temperature=temperature, json_mode=json_mode, max_tokens=max_tokens, extra_body=extra_body
+        )
     _cap_key = _stream_capability_key(provider)
     if _stream_disabled(_cap_key):
         # ✅ 能力记忆命中：省掉一次必然失败的流式 HTTP（正文生成按章累积，收益显著）
         logger.info(
             "Provider %s 近期流式不可用（已记忆 %ds 内不再尝试），本次直接走普通请求",
-            getattr(provider, "name", "?"), int(STREAM_CAPABILITY_TTL))
-        return await provider.chat(messages, temperature=temperature,
-                                   json_mode=json_mode, max_tokens=max_tokens,
-                                   extra_body=extra_body)
+            getattr(provider, "name", "?"),
+            int(STREAM_CAPABILITY_TTL),
+        )
+        return await provider.chat(
+            messages, temperature=temperature, json_mode=json_mode, max_tokens=max_tokens, extra_body=extra_body
+        )
     try:
-        text = await _collect_stream(provider, messages, temperature=temperature,
-                                     json_mode=json_mode, max_tokens=max_tokens,
-                                     extra_body=extra_body)
+        text = await _collect_stream(
+            provider,
+            messages,
+            temperature=temperature,
+            json_mode=json_mode,
+            max_tokens=max_tokens,
+            extra_body=extra_body,
+        )
         _note_stream_success(_cap_key)
         return text
     except asyncio.CancelledError:
@@ -2810,28 +3716,39 @@ async def _call_provider(provider, messages: list, *, request_mode: str,
         if ai_retry_on_non_retryable and is_non_retryable_error(stream_err):
             logger.info(
                 "流式请求命中确定性错误，跳过普通请求重试直接切换候选（provider=%s）：%s",
-                getattr(provider, "name", "?"), str(stream_err)[:160])
+                getattr(provider, "name", "?"),
+                str(stream_err)[:160],
+            )
             raise
         if _note_stream_failure(_cap_key):
             logger.warning(
                 "Provider %s 连续 %d 次流式请求失败，后续 %ds 内直接走普通请求",
-                getattr(provider, "name", "?"), STREAM_FAIL_STREAK,
-                int(STREAM_CAPABILITY_TTL))
+                getattr(provider, "name", "?"),
+                STREAM_FAIL_STREAK,
+                int(STREAM_CAPABILITY_TTL),
+            )
         logger.warning(
             "流式请求失败，自动回退普通请求重试（provider=%s）：%s",
-            getattr(provider, "name", "?"), str(stream_err)[:160])
-        return await provider.chat(messages, temperature=temperature,
-                                   json_mode=json_mode, max_tokens=max_tokens,
-                                   extra_body=extra_body)
+            getattr(provider, "name", "?"),
+            str(stream_err)[:160],
+        )
+        return await provider.chat(
+            messages, temperature=temperature, json_mode=json_mode, max_tokens=max_tokens, extra_body=extra_body
+        )
 
 
-async def _attempt_candidate(c: dict, messages: list, *,
-                             temperature: float | None,
-                             json_mode: bool,
-                             max_tokens: int | None,
-                             req_timeout: int | None,
-                             scene: str = "",
-                             extra_body: dict | None = None) -> tuple[str, Exception | None]:
+async def _attempt_candidate(
+    c: dict,
+    messages: list,
+    *,
+    temperature: float | None,
+    json_mode: bool,
+    max_tokens: int | None,
+    req_timeout: int | None,
+    scene: str = "",
+    extra_body: dict | None = None,
+    audit_scope: _LogicalAuditScope | None = None,
+) -> tuple[str, Exception | None]:
     """单候选调用（JSON 模式不被支持时同候选回退普通模式重试一次）。
 
     成功返回 ``(正文, None)``；失败返回 ``("", 异常)``。
@@ -2843,26 +3760,38 @@ async def _attempt_candidate(c: dict, messages: list, *,
     """
     pname = c.get("provider_name", "?")
     base_mt = max_tokens or c.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"])
+    # ✅ 2026-11-05（推理预算）：已知/疑似推理模型先给足输出预算，避免调用方
+    #    传入的小预算（正文生成 MAX_TOKENS_FLOOR=4000，见 content_utils）被
+    #    思考过程整段吃掉。两者取较大者（4000 vs 4096），互不覆盖。
+    _reasoning_floor = max(0, int(getattr(settings, "ai_reasoning_output_floor", 4096) or 0))
+    if _reasoning_floor > 0 and _is_reasoning_candidate(c):
+        base_mt = max(int(base_mt), _reasoning_floor)
 
     def _build(mt: int):
         """按本次尝试的 max_tokens 构建 Provider（O3 思考吞噬重试需要翻倍）。"""
-        return _build_provider(pname, c["api_key"], c["base_url"], c["model"],
-                               max_tokens=mt,
-                               temperature=(temperature if temperature is not None
-                                            else c.get("temperature",
-                                                       DEFAULT_CONFIG_NUMBERS["temperature"])),
-                               timeout=_candidate_timeout(c, req_timeout))
+        return _build_provider(
+            pname,
+            c["api_key"],
+            c["base_url"],
+            c["model"],
+            max_tokens=mt,
+            temperature=(
+                temperature if temperature is not None else c.get("temperature", DEFAULT_CONFIG_NUMBERS["temperature"])
+            ),
+            timeout=_candidate_timeout(c, req_timeout),
+        )
 
     last_err: Exception | None = None
     request_mode = normalize_request_mode(c.get("request_mode"))
     # ✅ 2026-09-22（调用次数优化 O3）：思考吞噬重试的开关与上限
     _retry_thinking = bool(getattr(settings, "ai_retry_on_thinking_exhausted", True))
-    _reasoning_cap = max(0, int(getattr(settings, "ai_reasoning_max_tokens", 4096) or 0))
+    _reasoning_cap = max(0, int(getattr(settings, "ai_reasoning_max_tokens", 16384) or 0))
+    _reasoning_retry_floor = max(0, int(getattr(settings, "ai_reasoning_retry_floor_tokens", 8192) or 0))
     # ✅ 2026-10-07：非空正文被 max_tokens 截断时的重试（与 O3 同构，严格一次）
     _retry_partial = bool(getattr(settings, "ai_retry_on_partial_truncation", True))
     _best_partial: str | None = None
     # JSON 模式优先：支持则用，被厂商拒绝则同 Provider 立即回退普通模式
-    for use_json in ([True, False] if json_mode else [False]):
+    for use_json in [True, False] if json_mode else [False]:
         mt = base_mt
         while True:  # ✅ O3：思考吞噬时同一 use_json 下翻倍 max_tokens 重试一次
             provider = _build(mt)
@@ -2879,9 +3808,14 @@ async def _attempt_candidate(c: dict, messages: list, *,
                 _ab.notify()
                 try:
                     result = await _call_provider(
-                        provider, messages, request_mode=request_mode,
-                        temperature=temperature, json_mode=use_json, max_tokens=mt,
-                        extra_body=extra_body)
+                        provider,
+                        messages,
+                        request_mode=request_mode,
+                        temperature=temperature,
+                        json_mode=use_json,
+                        max_tokens=mt,
+                        extra_body=extra_body,
+                    )
                     # ✅ 空返回视为失败：HTTP 200 但正文为空时，旧实现把空串当成功
                     #    直接 return，既不降级到下一 Provider 也不触发重试 ——
                     #    章节生成表现为「AI 返回空内容」且无任何自愈。现转为异常，
@@ -2893,16 +3827,29 @@ async def _attempt_candidate(c: dict, messages: list, *,
                     concurrency_controller.record(duration, status=200)
                     concurrency_controller.adjust_concurrency()
                     circuit_breaker.record_success(pname)
-                    _note_quota_success(pname)   # ✅ O2：成功即清除配额冷却
-                    clear_thinking_dead(pname)   # ✅ R110（P1-2）：成功即清除思考吞噬冷却
+                    _note_quota_success(pname)  # ✅ O2：成功即清除配额冷却
+                    clear_thinking_dead(pname)  # ✅ R110（P1-2）：成功即清除思考吞噬冷却
+                    # ✅ 2026-11-05：记录成功耗时样本（自适应对冲阈值的唯一数据源）
+                    _note_provider_latency(
+                        _reliability_key(pname, c.get("model", ""), c.get("config_id", ""), c.get("base_url", "")),
+                        duration,
+                    )
                     # ✅ 修复：成功路径补齐 token 用量（原实现不传，用量统计恒为 0）
                     u = extract_usage(provider)
-                    await _log_audit(pname, c.get("model", ""), "chat", duration, True,
-                                     prompt_tokens=u["prompt_tokens"],
-                                     completion_tokens=u["completion_tokens"],
-                                     cached_tokens=u["cached_tokens"], scene=scene,
-                                     config_id=c.get("config_id", ""),
-                                     base_url=c.get("base_url", ""))
+                    # ✅ 2026-11-05（方案 B）：尝试级记录只进 scope，
+                    #    由 _chat_with_fallback_result 合并成一条主记录。
+                    await _record_attempt(
+                        audit_scope,
+                        provider_name=pname,
+                        model=c.get("model", ""),
+                        config_id=c.get("config_id", ""),
+                        base_url=c.get("base_url", ""),
+                        duration=duration,
+                        success=True,
+                        prompt_tokens=u["prompt_tokens"],
+                        completion_tokens=u["completion_tokens"],
+                        cached_tokens=u["cached_tokens"],
+                    )
                     # ✅ 2026-10-07（生产库实证）：非空正文 + finish_reason=length/max_tokens
                     #    = 被 max_tokens 截断的半截正文。旧实现直接返回且不留痕 ——
                     #    生产方案 5 个章节句尾停在半句，用户无从得知，审核/导出照常用。
@@ -2911,24 +3858,49 @@ async def _attempt_candidate(c: dict, messages: list, *,
                     _finish = str(getattr(provider, "last_finish_reason", "") or "").lower()
                     if _finish in ("length", "max_tokens"):
                         logger.warning(
-                            "Provider %s 正文疑似被 max_tokens 截断"
-                            "（finish_reason=%s，%d 字）", pname, _finish, len(result or ""))
+                            "Provider %s 正文疑似被 max_tokens 截断" "（finish_reason=%s，%d 字）",
+                            pname,
+                            _finish,
+                            len(result or ""),
+                        )
                         if _retry_partial:
-                            _retry_partial = False   # 严格重试一次，避免连锁翻倍
-                            _best_partial = result   # 重试后失败时用它兜底
-                            _nxt = (min(mt * 2, _reasoning_cap)
-                                    if _reasoning_cap > 0 else mt * 2)
+                            _retry_partial = False  # 严格重试一次，避免连锁翻倍
+                            _best_partial = result  # 重试后失败时用它兜底
+                            _nxt = _reasoning_retry_tokens(mt, _reasoning_cap, _reasoning_retry_floor)
                             if _nxt > mt:
                                 logger.warning(
-                                    "Provider %s 正文被截断，max_tokens 由 %d 翻倍至 %d 重试一次",
-                                    pname, mt, _nxt)
+                                    "Provider %s 正文被截断，max_tokens 由 %d 放大至 %d 重试一次", pname, mt, _nxt
+                                )
                                 mt = _nxt
                                 continue
+                    # ✅ R176 B2（2026-11-04）：把本次 provider 的「流式解析跳过」
+                    #    计数带出到候选 dict，供 chat_with_fallback_meta 上报
+                    #    （非流式/本地分片路径恒为 0，与引入前行为一致）。
+                    c["_stream_parse_skipped"] = int(getattr(provider, "last_stream_parse_skipped", 0) or 0)
+                    c["_stream_parse_skipped_reason"] = str(
+                        getattr(provider, "last_stream_parse_skipped_reason", "") or ""
+                    )
                     return result, None
                 except asyncio.CancelledError:
                     # ✅ 对冲/停止被取消：只登记实时状态（保证 in_flight 不泄漏），
                     #    不计入熔断失败（取消不是 provider 故障），异常向上传播。
-                    _ai_live_record(pname, c.get("model", ""), False, time.time() - t0)
+                    # ✅ 2026-11-04（口径修复）：取消单列 cancelled，不再计入 failed。
+                    _ai_live_record_cancelled(pname, c.get("model", ""), time.time() - t0)
+                    # ✅ 2026-11-05（方案 B）：对冲落败/任务停止的取消也算一次
+                    #    真实尝试（已发出上游 POST，会消耗额度），进 scope 但不
+                    #    更新可靠性（取消不是供应商失败）。scope 路径无 await，
+                    #    在被取消的协程里记录是安全的。
+                    if audit_scope is not None:
+                        audit_scope.record(
+                            provider_name=pname,
+                            model=c.get("model", ""),
+                            config_id=c.get("config_id", ""),
+                            base_url=c.get("base_url", ""),
+                            duration=time.time() - t0,
+                            success=False,
+                            error="调用被取消（对冲落败/任务停止）",
+                            error_class="cancelled",
+                        )
                     raise
                 except Exception as e:
                     duration = time.time() - t0
@@ -2938,14 +3910,20 @@ async def _attempt_candidate(c: dict, messages: list, *,
                     concurrency_controller.adjust_concurrency()
                     last_err = e
                     # ✅ 2026-09-17：失败原因摘要落审计（/ai/stats 失败原因分布的数据源）
-                    await _log_audit(pname, c.get("model", ""), "chat", duration, False,
-                                     error=_error_summary(e), scene=scene,
-                                     config_id=c.get("config_id", ""),
-                                     base_url=c.get("base_url", ""))
+                    # ✅ 2026-11-05（方案 B）：不再逐次落「失败行」，合并进逻辑调用主记录。
+                    await _record_attempt(
+                        audit_scope,
+                        provider_name=pname,
+                        model=c.get("model", ""),
+                        config_id=c.get("config_id", ""),
+                        base_url=c.get("base_url", ""),
+                        duration=duration,
+                        success=False,
+                        error=_error_summary(e),
+                    )
                     if use_json and _json_mode_unsupported(str(e)):
                         # 参数不支持 ≠ Provider 故障：不计入熔断，回退普通模式重试
-                        logger.warning("Provider %s 不支持 JSON 模式，回退普通模式重试: %s",
-                                       pname, str(e)[:160])
+                        logger.warning("Provider %s 不支持 JSON 模式，回退普通模式重试: %s", pname, str(e)[:160])
                         circuit_breaker.record_success(pname)
                         break
                     # ✅ 2026-09-22（调用次数优化 O3）：推理模型把 max_tokens 全部
@@ -2953,12 +3931,12 @@ async def _attempt_candidate(c: dict, messages: list, *,
                     #    max_tokens 重试一次 —— 旧实现直接判失败进入降级链，
                     #    每个推理模型候选各白烧一次（运行库实测 101 次）。
                     if _retry_thinking and _is_thinking_exhausted(e):
-                        nxt = (min(mt * 2, _reasoning_cap)
-                               if _reasoning_cap > 0 else mt * 2)
+                        _note_thinking_suspect(pname)  # 标记疑似推理模型，后续预扩预算
+                        nxt = _reasoning_retry_tokens(mt, _reasoning_cap, _reasoning_retry_floor)
                         if nxt > mt:
                             logger.warning(
-                                "Provider %s 思考吞噬 max_tokens=%d（正文为空），"
-                                "翻倍至 %d 重试一次", pname, mt, nxt)
+                                "Provider %s 思考吞噬 max_tokens=%d（正文为空），" "放大至 %d 重试一次", pname, mt, nxt
+                            )
                             mt = nxt
                             # ✅ 2026-09-23（正文生成深度审计 · P1 调用效率）：
                             #    严格「重试一次」。旧实现只靠 `nxt > mt` 与
@@ -2982,19 +3960,25 @@ async def _attempt_candidate(c: dict, messages: list, *,
                     #    两种情况都标记该 provider 短时冷却，降级链后续候选
                     #    在 _gate_candidates 跳过（与配额冷却同口径）。
                     if _is_thinking_exhausted(e):
+                        _note_thinking_suspect(pname)
                         _note_thinking_dead(pname)
                     # ✅ 2026-09-22（调用次数优化 O2）：配额类错误记入冷却窗口，
                     #    窗口内该 provider 的后续调用直接跳过（不再打配额）。
                     if QUOTA_FAIL_COOLDOWN > 0 and _is_quota_error(e):
                         _note_quota_failure(pname, e)
-                    circuit_breaker.record_failure(pname, is_429=(status == 429))
+                    # ✅ 2026-11-05（429 处理）：限流不参与熔断冷却的指数放大；
+                    #    冷却时长由 ``Retry-After`` / 配额冷却负责。旧实现
+                    #    ``is_429=True`` 每次把熔断冷却翻倍，放大限流影响。
+                    circuit_breaker.record_failure(pname)
                     logger.error("Provider %s 调用失败: %s", pname, e)
                     if _best_partial:
                         # 截断重试后失败：返回已拿到的半截正文，而不是丢弃它再降级到
                         # 下一候选（本候选已产出可用内容：半截 > 拿不到）。
-                        logger.warning(
-                            "Provider %s 截断重试后失败，返回已获取的部分正文: %s",
-                            pname, _error_summary(e))
+                        logger.warning("Provider %s 截断重试后失败，返回已获取的部分正文: %s", pname, _error_summary(e))
+                        c["_stream_parse_skipped"] = int(getattr(provider, "last_stream_parse_skipped", 0) or 0)
+                        c["_stream_parse_skipped_reason"] = str(
+                            getattr(provider, "last_stream_parse_skipped_reason", "") or ""
+                        )
                         return _best_partial, None
                     return "", e
     return "", last_err
@@ -3026,18 +4010,21 @@ async def _build_candidates(cfg: dict | None) -> list[dict]:
         #    「没有配置任何有 API Key 的 Provider」，把用户指向完全错误的
         #    排查方向。现打 key_broken 标记，门控处分开计数并如实归因。
         _enc = str(cfg.get("api_key_encrypted") or "")
-        candidates.append({
-            "config_id": cfg.get("id", ""),
-            "provider_name": cfg.get("provider_name", "openai"),
-            "api_key": _pk,
-            "base_url": cfg.get("base_url", ""), "model": cfg.get("model", ""),
-            "max_tokens": cfg.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"]),
-            "temperature": cfg.get("temperature", DEFAULT_CONFIG_NUMBERS["temperature"]),
-            "timeout": cfg.get("timeout", DEFAULT_CONFIG_NUMBERS["timeout"]),
-            "request_mode": normalize_request_mode(cfg.get("request_mode")),
-            "key_broken": bool(_enc) and not _pk,
-            "_is_primary": True,
-        })
+        candidates.append(
+            {
+                "config_id": cfg.get("id", ""),
+                "provider_name": cfg.get("provider_name", "openai"),
+                "api_key": _pk,
+                "base_url": cfg.get("base_url", ""),
+                "model": cfg.get("model", ""),
+                "max_tokens": cfg.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"]),
+                "temperature": cfg.get("temperature", DEFAULT_CONFIG_NUMBERS["temperature"]),
+                "timeout": cfg.get("timeout", DEFAULT_CONFIG_NUMBERS["timeout"]),
+                "request_mode": normalize_request_mode(cfg.get("request_mode")),
+                "key_broken": bool(_enc) and not _pk,
+                "_is_primary": True,
+            }
+        )
         is_primary_set = True
 
     seen_config_ids: set[str] = set()
@@ -3060,8 +4047,7 @@ async def _build_candidates(cfg: dict | None) -> list[dict]:
     return _order_candidates(candidates)
 
 
-async def _gate_candidates(candidates: list[dict],
-                           scene: str) -> tuple[list[dict], Exception | None]:
+async def _gate_candidates(candidates: list[dict], scene: str) -> tuple[list[dict], Exception | None]:
     """候选编排阶段 3：可用性门禁。
 
     依次过滤：
@@ -3085,9 +4071,15 @@ async def _gate_candidates(candidates: list[dict],
     # ✅ R110（P1-1 · 跨章全熔断快速失败）：连续 N 次所有候选不可用后，
     #    短时快速失败不再 probe（R109 实证 5 章各自 probe 空转 150-300s）。
     if _is_all_circuit_fast_fail():
+        # ✅ 2026-11-04（可观测性）：此路径不发请求、不写审计行，旧实现
+        #    在数据库里完全不可见（生产实证 3 分钟内 316 次拒绝零记录）。
+        #    仅进程内计数，随 /system/activity 暴露；不写审计以免污染成功率分母。
+        with _ai_live_lock:
+            _ai_live["fast_fail"] = int(_ai_live.get("fast_fail", 0)) + 1
+        _ab.notify()
         raise RuntimeError(
-            "全熔断快速失败：连续多次所有 Provider 不可用，"
-            f"等待 {int(ALL_CIRCUIT_FAST_FAIL_COOLDOWN)}s 恢复后重试")
+            "全熔断快速失败：连续多次所有 Provider 不可用，" f"等待 {int(ALL_CIRCUIT_FAST_FAIL_COOLDOWN)}s 恢复后重试"
+        )
 
     for c in candidates:
         pname = c.get("provider_name", "?")
@@ -3103,10 +4095,19 @@ async def _gate_candidates(candidates: list[dict],
         if pname in _disabled:
             skipped_disabled += 1
             logger.warning("厂商 %s 已被运行时开关禁用，跳过本次调用", pname)
-            await _log_audit(pname, c.get("model", ""), "provider_disabled", 0.0,
-                             False, error="运行时开关已禁用该厂商", scene=scene,
-                             config_id=c.get("config_id", ""),
-                             base_url=c.get("base_url", ""))
+            await _log_audit(
+                pname,
+                c.get("model", ""),
+                "provider_disabled",
+                0.0,
+                False,
+                error="运行时开关已禁用该厂商",
+                scene=scene,
+                config_id=c.get("config_id", ""),
+                base_url=c.get("base_url", ""),
+                error_class="circuit_skipped",
+                attempt_count=0,
+            )
             if last_err is None:
                 last_err = RuntimeError(f"Provider {pname} 已被运行时开关禁用")
             continue
@@ -3114,12 +4115,20 @@ async def _gate_candidates(candidates: list[dict],
             # ✅ R110（P1-2）：思考吞噬翻倍失败的 provider 短时冷却，
             #    与配额冷却同走 circuit_skipped 审计口径。
             skipped_thinking += 1
-            logger.info("思考吞噬冷却中，跳过 %s（冷却 %ds）",
-                        pname, int(THINKING_DEAD_COOLDOWN))
-            await _log_audit(pname, c.get("model", ""), "circuit_skipped", 0.0,
-                             False, error="思考吞噬冷却，跳过本次调用", scene=scene,
-                             config_id=c.get("config_id", ""),
-                             base_url=c.get("base_url", ""))
+            logger.info("思考吞噬冷却中，跳过 %s（冷却 %ds）", pname, int(THINKING_DEAD_COOLDOWN))
+            await _log_audit(
+                pname,
+                c.get("model", ""),
+                "circuit_skipped",
+                0.0,
+                False,
+                error="思考吞噬冷却，跳过本次调用",
+                scene=scene,
+                config_id=c.get("config_id", ""),
+                base_url=c.get("base_url", ""),
+                error_class="circuit_skipped",
+                attempt_count=0,
+            )
             if last_err is None:
                 last_err = RuntimeError(f"Provider {pname} 处于思考吞噬冷却中")
             continue
@@ -3132,12 +4141,20 @@ async def _gate_candidates(candidates: list[dict],
             #    WARNING，占全部 WARNING 的 50%，把真实问题淹没了。按 R11
             #    「正常控制流不得以 WARNING 刷屏」先例降为 INFO（审计行
             #    circuit_skipped 不变，数据链完整可查）。
-            logger.info("配额冷却中，跳过 %s（冷却窗口 %ds）",
-                        pname, int(QUOTA_FAIL_COOLDOWN))
-            await _log_audit(pname, c.get("model", ""), "circuit_skipped", 0.0,
-                             False, error="配额冷却，跳过本次调用", scene=scene,
-                             config_id=c.get("config_id", ""),
-                             base_url=c.get("base_url", ""))
+            logger.info("配额冷却中，跳过 %s（冷却窗口 %ds）", pname, int(QUOTA_FAIL_COOLDOWN))
+            await _log_audit(
+                pname,
+                c.get("model", ""),
+                "circuit_skipped",
+                0.0,
+                False,
+                error="配额冷却，跳过本次调用",
+                scene=scene,
+                config_id=c.get("config_id", ""),
+                base_url=c.get("base_url", ""),
+                error_class="circuit_skipped",
+                attempt_count=0,
+            )
             if last_err is None:
                 last_err = RuntimeError(f"Provider {pname} 处于配额冷却中")
             continue
@@ -3146,10 +4163,19 @@ async def _gate_candidates(candidates: list[dict],
             cb_skipped.append(c)
             # ✅ R103：同上——熔断 OPEN 是自愈机制的设计内状态，非异常。
             logger.info("熔断器 OPEN，跳过 %s", pname)
-            await _log_audit(pname, c.get("model", ""), "circuit_skipped", 0.0,
-                             False, error="熔断器 OPEN，跳过本次调用", scene=scene,
-                             config_id=c.get("config_id", ""),
-                             base_url=c.get("base_url", ""))
+            await _log_audit(
+                pname,
+                c.get("model", ""),
+                "circuit_skipped",
+                0.0,
+                False,
+                error="熔断器 OPEN，跳过本次调用",
+                scene=scene,
+                config_id=c.get("config_id", ""),
+                base_url=c.get("base_url", ""),
+                error_class="circuit_skipped",
+                attempt_count=0,
+            )
             if last_err is None:
                 last_err = RuntimeError(f"Provider {pname} 被熔断器跳过")
             continue
@@ -3161,66 +4187,127 @@ async def _gate_candidates(candidates: list[dict],
         return usable, last_err
 
     # ✅ R110（P1-1）：usable 为空 = 所有候选被门禁跳过 → 计入全熔断计数
-    _record_all_circuit_outcome(success=False)
+    # ✅ R177（D-2 · P1 · 2026-11-05 · 生产日志实证）：「所有 Provider 不可用」
+    #    只认**厂商侧**不可用（熔断 OPEN / 配额冷却 / 思考吞噬冷却）。
+    #    此前本行在**所有 raise 分支之前**无条件执行 → 「密钥解不开 / 没填 Key /
+    #    被运行时开关禁用」这类**本地配置问题**同样计入全局闸门：
+    #    生产实证（logs/backend.log 2026-11-01 前后）连续 2 次「候选 storm 已保存的
+    #    密钥无法解密」即激活 60s 全局快速失败，该窗口内**全站所有模块**
+    #    （正文生成 / bid_analysis / content_plan / 事实提取）全部中止，
+    #    与厂商可用性毫无关系 —— 一个本地密钥问题被放大成全站停摆。
+    #    现按跳过原因分类：只有厂商侧原因才计入全局闸门，本地配置问题照常
+    #    走各自的 raise 分支（文案与语义完全不变）。
+    if skipped_cb > 0 or skipped_thinking > 0:
+        _record_all_circuit_outcome(success=False)
 
-    if (skipped_disabled > 0 and skipped_cb == 0 and skipped_no_key == 0
-            and skipped_key_broken == 0):
+    if skipped_disabled > 0 and skipped_cb == 0 and skipped_no_key == 0 and skipped_key_broken == 0:
         raise RuntimeError(
             "所有候选 Provider 均被运行时开关禁用（disabled_providers="
-            f"{sorted(_disabled)}），请在「文本模型配置 → 运行时厂商开关」恢复后再试")
+            f"{sorted(_disabled)}），请在「文本模型配置 → 运行时厂商开关」恢复后再试"
+        )
     if skipped_cb > 0 and cb_skipped:
         probeable = [
-            c for c in cb_skipped
-            if not (QUOTA_FAIL_COOLDOWN > 0
-                    and _quota_cooldown_active(c.get("provider_name", "")))]
+            c
+            for c in cb_skipped
+            if not (QUOTA_FAIL_COOLDOWN > 0 and _quota_cooldown_active(c.get("provider_name", "")))
+        ]
         if not probeable:
             raise RuntimeError(
                 "所有候选 Provider 均处于熔断/配额冷却中"
                 f"（探测节流 {int(QUOTA_PROBE_EVERY)}s），请稍后重试 "
-                f"(skipped_no_key={skipped_no_key}, skipped_cb={skipped_cb})")
-        probe = min(probeable,
-                    key=lambda c: circuit_breaker.cooldown_remaining(
-                        c.get("provider_name", "")))
+                f"(skipped_no_key={skipped_no_key}, skipped_cb={skipped_cb})"
+            )
+        probe = min(probeable, key=lambda c: circuit_breaker.cooldown_remaining(c.get("provider_name", "")))
         _pname = probe.get("provider_name", "")
         _remain = circuit_breaker.cooldown_remaining(_pname)
         circuit_breaker.force_probe(_pname)
         usable.append(probe)
-        logger.warning(
-            "全部候选均处于熔断冷却中，放行 %s 做一次探测（原剩余冷却 %.0fs）",
-            _pname, _remain)
+        logger.warning("全部候选均处于熔断冷却中，放行 %s 做一次探测（原剩余冷却 %.0fs）", _pname, _remain)
         return usable, last_err
     if skipped_cb > 0:
         raise RuntimeError(
             "所有候选 Provider 均被熔断器跳过，请等待冷却重试 "
-            f"(skipped_no_key={skipped_no_key}, skipped_cb={skipped_cb})")
+            f"(skipped_no_key={skipped_no_key}, skipped_cb={skipped_cb})"
+        )
     if skipped_key_broken and not skipped_no_key:
         # ✅ 2026-10-06（B-2 · 归因准确）：此前「全部候选均被禁用」的判定
         #    只看 skipped_no_key，**漏掉 skipped_key_broken** —— 当候选里同时
         #    有一条「密文解不开」和一条「被禁用」时，错误文案归因成
         #    「都被禁用了，请去恢复开关」，用户去恢复开关后问题依旧（真因是密钥）。
         #    现把 key_broken 纳入判据，并在两类原因并存时同时如实报出。
-        _extra = (f"（另有 {skipped_disabled} 条候选被运行时开关禁用）"
-                  if skipped_disabled else "")
+        _extra = f"（另有 {skipped_disabled} 条候选被运行时开关禁用）" if skipped_disabled else ""
         raise RuntimeError(
             "候选 Provider 已保存的 API Key 无法解密（常见于更换过加密密钥 "
             "FERNET_KEY 或删除过 data/secret_key.key），"
-            f"请在「文本模型配置」重新填写并保存 Key{_extra}")
+            f"请在「文本模型配置」重新填写并保存 Key{_extra}"
+        )
     if skipped_no_key > 0 or skipped_key_broken > 0:
         raise RuntimeError(
             "没有配置任何有 API Key 的 Provider"
-            + (f"（其中 {skipped_key_broken} 条已保存的密钥无法解密，"
-               "请重新填写或删除该配置）" if skipped_key_broken else ""))
+            + (
+                f"（其中 {skipped_key_broken} 条已保存的密钥无法解密，" "请重新填写或删除该配置）"
+                if skipped_key_broken
+                else ""
+            )
+        )
     raise RuntimeError(f"所有 AI 提供商调用失败：{last_err}")
 
 
-async def chat_with_fallback(messages: list, ai_config: dict | None = None, *,
-                             temperature: float | None = None,
-                             json_mode: bool = False,
-                             timeout: int | None = None,
-                             max_tokens: int | None = None,
-                             scene: str = "",
-                             reasoning_effort: str = "") -> str:
-    """带熔断降级 + **对冲请求**的对话调用（2026-09-17 性能改造）。
+def _classify_fallback_reason(err: Exception | None) -> str:
+    """把降级触发原因归一为稳定的机器码（供报表/前端聚合）。
+
+    ✅ R176 B2（2026-11-04）：失败原文含随机 request-id/URL，按文本聚合无法
+    得到稳定分布；这里在落库前归一到 4 类，口径与审计 error 文本解耦。
+      - timeout       请求超时（含 ``HTTP 408``）
+      - rate_limited  限流/配额（429 / quota / rate limit）
+      - parse_failed  响应为空/被截断/JSON 解析失败
+      - provider_error 其它上游错误（5xx、鉴权、网络等）
+    无错误（主候选一次成功）时返回空串。
+    """
+    if err is None:
+        return ""
+    msg = (str(err) or "").lower()
+    if not msg:
+        return "provider_error"
+    if "408" in msg or "timeout" in msg or "timed out" in msg or "超时" in msg:
+        return "timeout"
+    if (
+        "429" in msg
+        or "rate limit" in msg
+        or "too many requests" in msg
+        or "quota" in msg
+        or "配额" in msg
+        or "限流" in msg
+    ):
+        return "rate_limited"
+    if "json" in msg or "parse" in msg or "解析" in msg or "空正文" in msg or "截断" in msg or "empty" in msg:
+        return "parse_failed"
+    return "provider_error"
+
+
+async def _chat_with_fallback_inner(
+    messages: list,
+    ai_config: dict | None = None,
+    *,
+    temperature: float | None = None,
+    json_mode: bool = False,
+    timeout: int | None = None,
+    max_tokens: int | None = None,
+    scene: str = "",
+    reasoning_effort: str = "",
+    audit_scope: _LogicalAuditScope | None = None,
+) -> dict:
+    """带熔断降级 + **对冲请求**的对话调用（返回正文 + 降级元信息）。
+
+    ✅ R176 B2（2026-11-04）：原 ``chat_with_fallback`` 只回正文，调用方无法
+    知道「本次是否走了降级、为什么降级、流式解析是否跳过」。现把编排结果
+    统一收敛为 dict，正文入口保持 ``chat_with_fallback`` 薄包装（行为不变）。
+    返回键：
+      · text                    正文（与旧返回值逐字节一致）
+      · provider_used           实际胜出的 provider_name
+      · fallback_reason         降级原因机器码（见 _classify_fallback_reason）
+      · stream_parse_skipped    流式分片解析失败被跳过的行数
+      · stream_parse_skipped_reason 跳过原因摘要
 
     关键设计：
     1. 熔断器 **per-provider 隔离**：sensetime 连续失败只熔断 sensetime，
@@ -3252,12 +4339,69 @@ async def chat_with_fallback(messages: list, ai_config: dict | None = None, *,
     errors: list[Exception] = [gate_err] if gate_err is not None else []
     pending: dict[asyncio.Task, dict] = {}
     next_idx = 0
-    hedge_enabled = (bool(getattr(settings, "ai_hedge_enabled", True))
-                     and len(usable) > 1)
-    # 非正值一律按 0 处理（= 等价于"立即并行竞速"），不做人为下限钳制，
-    # 否则配置里的短延迟会被悄悄放大（曾钳到 1.0s，与配置语义不符）。
-    _hedge_raw = float(getattr(settings, "ai_hedge_delay_seconds", 20.0) or 0.0)
-    hedge_delay = _hedge_raw if _hedge_raw > 0 else 0.0
+    # ✅ 2026-11-05（对冲放大修复）：
+    #   ① 同一逻辑调用最多 _hedge_max_copies 个对冲副本（默认 1），杜绝
+    #      "候选链 3 个 → 最多 2 个副本" 的重复请求放大；
+    #   ② 阈值改为按候选最近成功调用 P90 自适应（至少 P50×1.5），并夹在
+    #      [min, max] 内；样本不足时用 ai_hedge_delay_seconds（默认 45s）。
+    _hedge_raw = float(getattr(settings, "ai_hedge_delay_seconds", 45.0) or 0.0)
+    hedge_fixed_delay = _hedge_raw if _hedge_raw > 0 else 0.0
+    _hedge_adaptive = bool(getattr(settings, "ai_hedge_adaptive_enabled", True))
+    _hedge_pct = float(getattr(settings, "ai_hedge_percentile", 90.0) or 90.0)
+    _hedge_p50_ratio = max(0.0, float(getattr(settings, "ai_hedge_p50_ratio", 1.5) or 0.0))
+    _hedge_min_delay = max(0.0, float(getattr(settings, "ai_hedge_min_delay_seconds", 30.0) or 0.0))
+    _hedge_max_delay = max(
+        _hedge_min_delay,
+        float(getattr(settings, "ai_hedge_max_delay_seconds", 90.0) or 0.0),
+    )
+    _hedge_min_samples = max(1, int(getattr(settings, "ai_hedge_min_samples", 12) or 1))
+    _hedge_max_copies = max(0, int(getattr(settings, "ai_hedge_max_copies", 1) or 0))
+    hedge_enabled = (
+        bool(getattr(settings, "ai_hedge_enabled", True)) and len(usable) > 1 and _hedge_max_copies > 0
+    )
+    hedges_launched = 0
+
+    def _hedge_delay_for(c: dict) -> float:
+        """某个在跑候选的自适应对冲阈值（秒）。"""
+        return _adaptive_hedge_delay(
+            _reliability_key(
+                c.get("provider_name", ""),
+                c.get("model", ""),
+                c.get("config_id", ""),
+                c.get("base_url", ""),
+            ),
+            fixed_delay=hedge_fixed_delay,
+            adaptive=_hedge_adaptive,
+            pct=_hedge_pct,
+            p50_ratio=_hedge_p50_ratio,
+            min_delay=_hedge_min_delay,
+            max_delay=_hedge_max_delay,
+            min_samples=_hedge_min_samples,
+        )
+
+    def _hedge_candidate_blocked(c: dict) -> bool:
+        """对冲前复检：命中配额冷却/熔断/思考吞噬冷却的候选不得被对冲拉起。"""
+        pname = c.get("provider_name", "")
+        if _is_thinking_dead(pname):
+            return True
+        if QUOTA_FAIL_COOLDOWN > 0 and _quota_cooldown_active(pname):
+            return True
+        return not circuit_breaker.allow_request(pname)
+
+    def _promote_next_candidate() -> bool:
+        """前进到下一个未被冷却/熔断的候选；全部不可用返回 False。"""
+        nonlocal next_idx
+        while next_idx < len(usable):
+            cand = usable[next_idx]
+            if _hedge_candidate_blocked(cand):
+                logger.info(
+                    "候选 %s 处于配额冷却/熔断，跳过（不发起对冲/补位）",
+                    cand.get("provider_name", "?"),
+                )
+                next_idx += 1
+                continue
+            return True
+        return False
 
     # ✅ 2026-09-22（对齐 OpenBidKit reasoning_effort 能力）：推理类模型「思考力度」透传。
     #    空串（默认）= 不发送该参数，完全向后兼容；非空前作为 extra_body["reasoning_effort"]
@@ -3269,30 +4413,58 @@ async def chat_with_fallback(messages: list, ai_config: dict | None = None, *,
         nonlocal next_idx
         c = usable[next_idx]
         next_idx += 1
-        task = asyncio.create_task(_attempt_candidate(
-            c, messages, temperature=temperature, json_mode=json_mode,
-            max_tokens=max_tokens, req_timeout=timeout, scene=scene,
-            extra_body=extra_body))
+        # 记录启动时刻：对冲窗口按「该候选已运行时长」计算，避免被其他
+        # 任务的完成事件重置计时（旧实现每轮 asyncio.wait 都重新计 20s）。
+        c["_launched_at"] = time.monotonic()
+        task = asyncio.create_task(
+            _attempt_candidate(
+                c,
+                messages,
+                temperature=temperature,
+                json_mode=json_mode,
+                max_tokens=max_tokens,
+                req_timeout=timeout,
+                scene=scene,
+                extra_body=extra_body,
+                audit_scope=audit_scope,
+            )
+        )
         pending[task] = c
 
     try:
         _launch()
         while pending:
-            # 还有可对冲的候选时才设置等待窗口，否则等到有结果为止
-            wait_timeout = hedge_delay if (hedge_enabled and next_idx < len(usable)) else None
-            done, _ = await asyncio.wait(
-                set(pending), timeout=wait_timeout,
-                return_when=asyncio.FIRST_COMPLETED)
+            # ✅ 2026-11-05：仅当「仍有对冲名额 + 还有候选」时才设置等待窗口；
+            #    已用满对冲名额 / 剩余候选全部处于冷却或熔断 → 等到有结果为止。
+            wait_timeout = None
+            if hedge_enabled and hedges_launched < _hedge_max_copies and next_idx < len(usable):
+                if _promote_next_candidate():
+                    oldest = min(
+                        pending.values(), key=lambda x: float(x.get("_launched_at", 0.0))
+                    )
+                    delay = _hedge_delay_for(oldest)
+                    elapsed = time.monotonic() - float(oldest.get("_launched_at", 0.0))
+                    wait_timeout = max(0.0, delay - elapsed)
+            done, _ = await asyncio.wait(set(pending), timeout=wait_timeout, return_when=asyncio.FIRST_COMPLETED)
             if not done:
-                # 对冲触发：在跑候选超时仍无结果 → 并行启动下一候选
+                # 窗口到期：复检冷却/熔断后再拉起「唯一一个」对冲副本。
+                if not _promote_next_candidate():
+                    continue
+                target = usable[next_idx]
+                oldest = min(pending.values(), key=lambda x: float(x.get("_launched_at", 0.0)))
                 logger.info(
-                    "对冲请求：%s 超过 %.0fs 无响应，并行启动候选 %s",
+                    "对冲请求：%s 已运行超 %.0fs 无响应，并行启动候选 %s（本逻辑调用剩余对冲名额 %d）",
                     ",".join(c.get("provider_name", "?") for c in pending.values()),
-                    hedge_delay, usable[next_idx].get("provider_name", "?"))
+                    _hedge_delay_for(oldest),
+                    target.get("provider_name", "?"),
+                    _hedge_max_copies - hedges_launched,
+                )
                 _launch()
+                hedges_launched += 1
                 continue
 
             winner: str | None = None
+            winner_c: dict | None = None
             for task in done:
                 c = pending.pop(task, None)
                 if c is None:
@@ -3300,12 +4472,12 @@ async def chat_with_fallback(messages: list, ai_config: dict | None = None, *,
                 try:
                     result, err = task.result()
                 except asyncio.CancelledError:
-                    result, err = "", RuntimeError(
-                        f"候选 {c.get('provider_name', '?')} 被取消")
+                    result, err = "", RuntimeError(f"候选 {c.get('provider_name', '?')} 被取消")
                 except Exception as e:  # pragma: no cover - 防御：任务内异常已自处理
                     result, err = "", e
                 if err is None and result:
                     winner = result
+                    winner_c = c
                     break
                 if err is not None:
                     errors.append(err)
@@ -3319,10 +4491,19 @@ async def chat_with_fallback(messages: list, ai_config: dict | None = None, *,
                     pending.clear()
                 # ✅ R110（P1-1）：调用成功 → 重置全熔断快速失败计数
                 _record_all_circuit_outcome(success=True)
-                return winner
+                _wc = winner_c or {}
+                return {
+                    "text": winner,
+                    "provider_used": _wc.get("provider_name", ""),
+                    "fallback_reason": _classify_fallback_reason(errors[-1] if errors else None),
+                    "stream_parse_skipped": int(_wc.get("_stream_parse_skipped", 0) or 0),
+                    "stream_parse_skipped_reason": str(_wc.get("_stream_parse_skipped_reason", "") or ""),
+                }
 
-            # 有空位且仍有候选 → 立即补位（失败快速返回时无需等对冲延迟）
-            if not pending and next_idx < len(usable):
+            # 有空位且仍有候选 → 立即补位（失败快速返回时无需等对冲延迟）；
+            # ✅ 2026-11-05：补位同样跳过处于配额冷却/熔断的候选，避免每个
+            #    分段都去撞一次已限流的 provider。
+            if not pending and next_idx < len(usable) and _promote_next_candidate():
                 _launch()
     finally:
         if pending:
@@ -3334,6 +4515,113 @@ async def chat_with_fallback(messages: list, ai_config: dict | None = None, *,
     if errors:
         raise RuntimeError(f"所有 AI 提供商调用失败：{errors[-1]}")
     raise RuntimeError("所有 AI 提供商调用失败：无可用候选")
+
+
+async def _chat_with_fallback_result(
+    messages: list,
+    ai_config: dict | None = None,
+    *,
+    temperature: float | None = None,
+    json_mode: bool = False,
+    timeout: int | None = None,
+    max_tokens: int | None = None,
+    scene: str = "",
+    reasoning_effort: str = "",
+) -> dict:
+    """逻辑调用外壳：一次调用（含重试/降级/对冲）只记一次业务成败。
+
+    ✅ 2026-11-05（统计口径修复）：``_ai_live`` 里的 ``total/failed`` 是**尝试**
+    口径（降级链每个候选各计一次）；本外壳额外维护 ``calls/call_failed``
+    **逻辑调用**口径，面板据此同时展示「业务调用 N 次 / 失败 M 次」与
+    「尝试 A 次 / 尝试失败 B 次」，避免把一次业务失败误读成多次失败。
+
+    ✅ 2026-11-05（方案 B · 审计合并）：一次逻辑调用只落**一条**审计主记录，
+    逐次尝试压缩进 attempts_json；``attempt_count`` 与上面的尝试口径一致。
+    取消（任务停止）不写失败行——取消不是业务失败，仍在实时面板 cancelled
+    单列；对冲落败副本的取消会进入胜者主记录的 attempts_json。
+    """
+    audit_scope = _LogicalAuditScope(scene)
+    try:
+        result = await _chat_with_fallback_inner(
+            messages,
+            ai_config,
+            temperature=temperature,
+            json_mode=json_mode,
+            timeout=timeout,
+            max_tokens=max_tokens,
+            scene=scene,
+            reasoning_effort=reasoning_effort,
+            audit_scope=audit_scope,
+        )
+    except asyncio.CancelledError:
+        _ai_live_record_logical(cancelled=True)
+        raise
+    except Exception as e:
+        await _flush_logical_audit(
+            audit_scope,
+            success=False,
+            error=_error_summary(e),
+            error_class=_error_class(e),
+        )
+        _ai_live_record_logical(ok=False)
+        raise
+    else:
+        await _flush_logical_audit(audit_scope, success=True)
+        _ai_live_record_logical(ok=True)
+        return result
+
+
+async def chat_with_fallback(
+    messages: list,
+    ai_config: dict | None = None,
+    *,
+    temperature: float | None = None,
+    json_mode: bool = False,
+    timeout: int | None = None,
+    max_tokens: int | None = None,
+    scene: str = "",
+    reasoning_effort: str = "",
+) -> str:
+    """正文入口（旧签名/旧返回值）：只回正文，行为与引入元信息前逐字节一致。"""
+    _result = await _chat_with_fallback_result(
+        messages,
+        ai_config,
+        temperature=temperature,
+        json_mode=json_mode,
+        timeout=timeout,
+        max_tokens=max_tokens,
+        scene=scene,
+        reasoning_effort=reasoning_effort,
+    )
+    return _result["text"]
+
+
+async def chat_with_fallback_meta(
+    messages: list,
+    ai_config: dict | None = None,
+    *,
+    temperature: float | None = None,
+    json_mode: bool = False,
+    timeout: int | None = None,
+    max_tokens: int | None = None,
+    scene: str = "",
+    reasoning_effort: str = "",
+) -> dict:
+    """元信息入口：返回 text/provider_used/fallback_reason/stream_parse_skipped*。
+
+    ✅ R176 B2（2026-11-04）：需要观测降级链与流式解析跳过时使用；
+    不需要时继续用 chat_with_fallback（同一编排实现，零分叉）。
+    """
+    return await _chat_with_fallback_result(
+        messages,
+        ai_config,
+        temperature=temperature,
+        json_mode=json_mode,
+        timeout=timeout,
+        max_tokens=max_tokens,
+        scene=scene,
+        reasoning_effort=reasoning_effort,
+    )
 
 
 def _messages_contain_images(messages: list) -> bool:

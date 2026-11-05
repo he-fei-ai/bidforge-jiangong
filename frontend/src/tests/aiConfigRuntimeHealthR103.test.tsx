@@ -24,14 +24,21 @@ import { App as AntdApp } from "antd";
 
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
   });
 }
 if (!(globalThis as any).ResizeObserver) {
   (globalThis as any).ResizeObserver = class {
-    observe() {} unobserve() {} disconnect() {}
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   };
 }
 
@@ -163,26 +170,41 @@ beforeEach(() => {
   h.getModels.mockResolvedValue({
     data: {
       providers: {
-        deepseek: { label: "DeepSeek", models: [], default_model: "deepseek-chat", base_url: "https://api.deepseek.com/v1" },
+        deepseek: {
+          label: "DeepSeek",
+          models: [],
+          default_model: "deepseek-chat",
+          base_url: "https://api.deepseek.com/v1",
+        },
       },
     },
   });
   h.health.mockResolvedValue({
     data: {
-      status: "configured", base_url: "https://api.deepseek.com/v1",
-      fallback_count: 1, concurrency: 4, live_concurrency: 4,
-      degraded_providers: {}, request_mode: "normal", request_mode_label: "普通请求",
+      status: "configured",
+      base_url: "https://api.deepseek.com/v1",
+      fallback_count: 1,
+      concurrency: 4,
+      live_concurrency: 4,
+      degraded_providers: {},
+      request_mode: "normal",
+      request_mode_label: "普通请求",
     },
   });
   h.stats.mockResolvedValue({ data: null });
   h.auditLogs.mockResolvedValue({ data: { items: [], total: 0, providers: [], actions: [] } });
-  h.getSceneRoutes.mockResolvedValue({ data: { items: [], known_scenes: [], configured_count: 0 } });
+  h.getSceneRoutes.mockResolvedValue({
+    data: { items: [], known_scenes: [], configured_count: 0 },
+  });
   h.configAuditLogs.mockResolvedValue({ data: { items: [], total: 0 } });
   h.getEnv.mockResolvedValue({ data: { active_env: "", envs: [], routed: false } });
   h.getRuntime.mockResolvedValue({
     data: {
-      active_env: "", disabled_providers: [], providers: ["deepseek"],
-      configured_providers: ["deepseek"], effective_provider_count: 1,
+      active_env: "",
+      disabled_providers: [],
+      providers: ["deepseek"],
+      configured_providers: ["deepseek"],
+      effective_provider_count: 1,
       all_configured_disabled: false,
     },
   });
@@ -232,18 +254,26 @@ describe("R103 · 运行时健康（配置体检）", () => {
   it("runtime_dead>0 时汇总消息如实提示「已自动剔除，建议清理或禁用」", async () => {
     h.configsHealth.mockResolvedValue(
       healthResponse(
-        [HEALTH_ITEM({
-          runtime_health: {
-            samples: 12, success_rate: 0, dead: true,
-            circuit_open: false, cooldown_remaining_s: 0, quota_cooldown_s: 0,
-          },
-        })],
+        [
+          HEALTH_ITEM({
+            runtime_health: {
+              samples: 12,
+              success_rate: 0,
+              dead: true,
+              circuit_open: false,
+              cooldown_remaining_s: 0,
+              quota_cooldown_s: 0,
+            },
+          }),
+        ],
         1,
       ),
     );
     await openHealthModal();
     await waitFor(() => {
-      const texts = getActivityItems().map((i) => i.text).join(" | ");
+      const texts = getActivityItems()
+        .map((i) => i.text)
+        .join(" | ");
       expect(texts).toContain("实时成功率过低");
       expect(texts).toContain("已自动剔除");
     });
@@ -258,10 +288,14 @@ describe("R103 · 运行时健康（配置体检）", () => {
     h.configsHealth.mockResolvedValue(healthResponse([HEALTH_ITEM()], 0));
     await openHealthModal();
     await waitFor(() => {
-      const texts = getActivityItems().map((i) => i.text).join(" | ");
+      const texts = getActivityItems()
+        .map((i) => i.text)
+        .join(" | ");
       expect(texts).toContain("均可用");
     });
-    const texts = getActivityItems().map((i) => i.text).join(" | ");
+    const texts = getActivityItems()
+      .map((i) => i.text)
+      .join(" | ");
     expect(texts).not.toContain("已自动剔除");
   });
 
@@ -272,16 +306,24 @@ describe("R103 · 运行时健康（配置体检）", () => {
           HEALTH_ITEM({
             id: "dead",
             runtime_health: {
-              samples: 12, success_rate: 0, dead: true,
-              circuit_open: false, cooldown_remaining_s: 0, quota_cooldown_s: 0,
+              samples: 12,
+              success_rate: 0,
+              dead: true,
+              circuit_open: false,
+              cooldown_remaining_s: 0,
+              quota_cooldown_s: 0,
             },
           }),
           HEALTH_ITEM({
             id: "fresh",
             provider_name: "zhipu",
             runtime_health: {
-              samples: 0, success_rate: null, dead: false,
-              circuit_open: false, cooldown_remaining_s: 0, quota_cooldown_s: 0,
+              samples: 0,
+              success_rate: null,
+              dead: false,
+              circuit_open: false,
+              cooldown_remaining_s: 0,
+              quota_cooldown_s: 0,
             },
           }),
         ],

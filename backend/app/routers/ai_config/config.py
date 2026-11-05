@@ -2,6 +2,7 @@
 
 路由聚合见 ``ai_config/__init__.py``；本模块只负责与「单条配置 CRUD」相关的端点。
 """
+
 import json
 import logging
 import uuid
@@ -13,6 +14,7 @@ from app.db import get_db, read_db
 from app.models import (
     ActiveEnvIn,
     AIConfigIn,
+    ConfigEnabledIn,
     ConfigImportIn,
     FallbackChainUpdate,
 )
@@ -24,6 +26,7 @@ from app.services.ai.provider_factory import (
     apply_config_concurrency,
     clamp_config_numbers,
     clamp_warnings,
+    coerce_enabled_flag,
     invalidate_config_cache,
     normalize_env,
     normalize_plan,
@@ -60,8 +63,7 @@ async def get_config(db=Depends(read_db)):
         且前端只用它判断「有没有配」。现改为仅回传 key_hint（后 4 位），
         并统一走只读连接池（query_only）。
     """
-    cur = await db.execute(
-        "SELECT * FROM ai_config ORDER BY is_active DESC, priority ASC, updated_at DESC")
+    cur = await db.execute("SELECT * FROM ai_config ORDER BY is_active DESC, priority ASC, updated_at DESC")
     rows = [dict(r) for r in await cur.fetchall()]
     active_id = ""
     for r in rows:
@@ -159,34 +161,43 @@ async def save_config(data: AIConfigIn, request: Request = None, db=Depends(get_
         dup_cur = await db.execute(
             "SELECT id FROM ai_config WHERE provider_name=? AND model=? AND "
             "COALESCE(base_url,'')=COALESCE(?, '') AND id != ?",
-            (data.provider_name, data.model,
-             resolve_config_base_url(data.provider_name, normalize_plan(data.plan),
-                                     data.base_url or ""), cid))
+            (
+                data.provider_name,
+                data.model,
+                resolve_config_base_url(data.provider_name, normalize_plan(data.plan), data.base_url or ""),
+                cid,
+            ),
+        )
         dup_ids = [r[0] for r in await dup_cur.fetchall()]
         if dup_ids:
             duplicate_hint = (
                 f"已存在 {len(dup_ids)} 条相同「{data.provider_name} / "
                 f"{data.model}」配置（Base URL 一致，密钥除外）。批量添加多条同型"
                 "配置会让降级链反复命中失败的同型候选；如非有意（多密钥/多环境），"
-                "建议删除冗余条目。")
+                "建议删除冗余条目。"
+            )
     after_row = None
     cur1 = await db.execute("SELECT * FROM ai_config WHERE id=?", (cid,))
     r1 = await cur1.fetchone()
     if r1:
         after_row = dict(r1)
     await record_config_audit(
-        db, "update" if prev else "create", config_id=cid,
-        provider_name=data.provider_name, model=data.model,
-        detail=(f"{'更新' if prev else '新增'}：plan={normalize_plan(data.plan)} "
-                f"环境={normalize_env(data.env) or '通用'} "
-                f"位置={'当前使用' if data.is_active else '降级候选'} "
-                f"密钥={'已填写' if (data.api_key or '').strip() else '未变更'} "
-                f"并发={data.concurrency} 温度={data.temperature}"),
+        db,
+        "update" if prev else "create",
+        config_id=cid,
+        provider_name=data.provider_name,
+        model=data.model,
+        detail=(
+            f"{'更新' if prev else '新增'}：plan={normalize_plan(data.plan)} "
+            f"环境={normalize_env(data.env) or '通用'} "
+            f"位置={'当前使用' if data.is_active else '降级候选'} "
+            f"密钥={'已填写' if (data.api_key or '').strip() else '未变更'} "
+            f"并发={data.concurrency} 温度={data.temperature}"
+        ),
         request=request,
-        snapshot={"before": sanitize_config_snapshot(prev),
-                  "after": sanitize_config_snapshot(after_row)})
-    return {"id": cid, "ok": True, "warning": warning, "warnings": warnings,
-            "duplicate_hint": duplicate_hint}
+        snapshot={"before": sanitize_config_snapshot(prev), "after": sanitize_config_snapshot(after_row)},
+    )
+    return {"id": cid, "ok": True, "warning": warning, "warnings": warnings, "duplicate_hint": duplicate_hint}
 
 
 @router.delete("/config/{config_id}")
@@ -202,25 +213,27 @@ async def delete_config(config_id: str, request: Request = None, db=Depends(get_
     #    否则 ai_scene_routes 留下僵尸行：界面永远显示「配置已删除」红标，
     #    用户还得逐场景手动清除；运行时虽会回落，但数据链已断（DB 与展示
     #    永远对不上）。删除路由行后场景自动恢复「跟随当前使用配置」。
-    cur_routes = await db.execute(
-        "SELECT COUNT(*) FROM ai_scene_routes WHERE config_id=?", (config_id,))
+    cur_routes = await db.execute("SELECT COUNT(*) FROM ai_scene_routes WHERE config_id=?", (config_id,))
     cleared_routes = int((await cur_routes.fetchone())[0] or 0)
     if cleared_routes:
-        await db.execute(
-            "DELETE FROM ai_scene_routes WHERE config_id=?", (config_id,))
+        await db.execute("DELETE FROM ai_scene_routes WHERE config_id=?", (config_id,))
     # ✅ 修复：删除后 priority 留下空洞（0,2,3…），降级链顺序仍旧可用但序号不连续。
     #    统一重排为 0..n-1，保证与前端展示的 1..n 一致。
     await _resequence_priority(db)
     await record_config_audit(
-        db, "delete", config_id=config_id,
-        provider_name=row["provider_name"], model=row["model"],
+        db,
+        "delete",
+        config_id=config_id,
+        provider_name=row["provider_name"],
+        model=row["model"],
         detail=f"删除配置：{row['provider_name']}/{row['model']}"
-               f"（密钥{'已设置' if row['api_key_encrypted'] else '未设置'}，已随配置一并删除）"
-               + (f"；已同步解除 {cleared_routes} 条场景路由" if cleared_routes else ""),
+        f"（密钥{'已设置' if row['api_key_encrypted'] else '未设置'}，已随配置一并删除）"
+        + (f"；已同步解除 {cleared_routes} 条场景路由" if cleared_routes else ""),
         request=request,
         # 快照留存删除前状态（供「这条配置当时是什么样」追溯；配置已删故不可回滚）
         snapshot={"before": sanitize_config_snapshot(dict(row)), "after": None},
-        commit=False)
+        commit=False,
+    )
     await db.commit()
     invalidate_config_cache()
     return {"ok": True, "cleared_scene_routes": cleared_routes}
@@ -237,8 +250,8 @@ async def clear_config_key(config_id: str, request: Request = None, db=Depends(g
     返回 `warning` 明确告知「AI 生成能力将不可用」，不再静默失效。
     """
     cur = await db.execute(
-        "SELECT is_active, provider_name, model, api_key_encrypted FROM ai_config WHERE id=?",
-        (config_id,))
+        "SELECT is_active, provider_name, model, api_key_encrypted FROM ai_config WHERE id=?", (config_id,)
+    )
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "配置不存在")
@@ -248,32 +261,40 @@ async def clear_config_key(config_id: str, request: Request = None, db=Depends(g
         # 幂等：本来就没有 Key，不写审计噪音
         return {"ok": True, "unchanged": True, "warning": ""}
     if row["is_active"]:
-        warning = ("已清除该配置的 API Key，但它是当前的「当前使用」配置 —— "
-                   "在所有 AI 调用成功前，请尽快补填新 Key 或切换到其他配置。")
+        warning = (
+            "已清除该配置的 API Key，但它是当前的「当前使用」配置 —— "
+            "在所有 AI 调用成功前，请尽快补填新 Key 或切换到其他配置。"
+        )
     # ✅ 2026-09-25（缺口修复）：被场景路由引用的配置清 Key 后，相关场景会在
     #    运行时被静默跳过并回落主配置 —— 此前完全无提示（静默失效）。
-    cur_routes = await db.execute(
-        "SELECT COUNT(*) FROM ai_scene_routes WHERE config_id=?", (config_id,))
+    cur_routes = await db.execute("SELECT COUNT(*) FROM ai_scene_routes WHERE config_id=?", (config_id,))
     n_routes = int((await cur_routes.fetchone())[0] or 0)
     if n_routes:
-        route_warn = (f"该配置被 {n_routes} 条场景路由引用，清除 Key 后这些场景"
-                      "将自动回落「当前使用」配置/降级链，直到重新填写 Key。")
+        route_warn = (
+            f"该配置被 {n_routes} 条场景路由引用，清除 Key 后这些场景"
+            "将自动回落「当前使用」配置/降级链，直到重新填写 Key。"
+        )
         warning = f"{warning}{route_warn}" if warning else route_warn
 
     await db.execute(
-        "UPDATE ai_config SET api_key_encrypted='', updated_at=? WHERE id=?",
-        (datetime.now().isoformat(), config_id))
+        "UPDATE ai_config SET api_key_encrypted='', updated_at=? WHERE id=?", (datetime.now().isoformat(), config_id)
+    )
     await record_config_audit(
-        db, "clear_key", config_id=config_id,
-        provider_name=row["provider_name"], model=row["model"],
+        db,
+        "clear_key",
+        config_id=config_id,
+        provider_name=row["provider_name"],
+        model=row["model"],
         detail=f"清除已保存的 API Key：{row['provider_name']}/{row['model']}"
-               + ("（该配置为当前使用）" if row["is_active"] else "")
-               + (f"；解除 {n_routes} 条场景路由引用" if n_routes else ""),
+        + ("（该配置为当前使用）" if row["is_active"] else "")
+        + (f"；解除 {n_routes} 条场景路由引用" if n_routes else ""),
         request=request,
-        snapshot={"before": sanitize_config_snapshot(dict(row)),
-                  "after": sanitize_config_snapshot(
-                      {**dict(row), "api_key_encrypted": ""})},
-        commit=False)
+        snapshot={
+            "before": sanitize_config_snapshot(dict(row)),
+            "after": sanitize_config_snapshot({**dict(row), "api_key_encrypted": ""}),
+        },
+        commit=False,
+    )
     await db.commit()
     invalidate_config_cache()
     return {"ok": True, "warning": warning}
@@ -281,8 +302,7 @@ async def clear_config_key(config_id: str, request: Request = None, db=Depends(g
 
 async def _resequence_priority(db) -> None:
     """把 ai_config.priority 重排为连续的 0..n-1（按现有顺序）。"""
-    cur = await db.execute(
-        "SELECT id FROM ai_config ORDER BY priority ASC, updated_at DESC")
+    cur = await db.execute("SELECT id FROM ai_config ORDER BY priority ASC, updated_at DESC")
     for i, r in enumerate(await cur.fetchall()):
         await db.execute("UPDATE ai_config SET priority=? WHERE id=?", (i, r[0]))
 
@@ -312,35 +332,92 @@ async def toggle_config(config_id: str, request: Request = None, db=Depends(get_
     enc = row["api_key_encrypted"] or ""
     key = decrypt_api_key(enc) if enc else ""
     if not key:
-        warning = ("该配置已设为当前使用，但它的 API Key 不可用：" + (
+        warning = "该配置已设为当前使用，但它的 API Key 不可用：" + (
             "已保存的密文无法解密（常见于更换过加密密钥 FERNET_KEY 或删除过 "
             "data/secret_key.key），请重新填写并保存 API Key。"
-            if enc else "尚未填写 API Key，请补填后再使用。"))
+            if enc
+            else "尚未填写 API Key，请补填后再使用。"
+        )
 
     await db.execute("UPDATE ai_config SET is_active=0")
-    await db.execute("UPDATE ai_config SET is_active=1, updated_at=? WHERE id=?",
-                     (datetime.now().isoformat(), config_id))
+    # ✅ R179（2026-11-05）：激活即视为启用。旧实现把一条「用户已停用
+    #    （enabled=0）」的配置设为当前使用却不改 enabled —— 产生「当前使用 +
+    #    已停用」的矛盾状态（主调用仍会走它，且此后无法通过开关停用）。
+    await db.execute(
+        "UPDATE ai_config SET is_active=1, enabled=1, updated_at=? WHERE id=?",
+        (datetime.now().isoformat(), config_id),
+    )
     cur = await db.execute("SELECT * FROM ai_config WHERE id=?", (config_id,))
     _r = await cur.fetchone()
     await record_config_audit(
-        db, "toggle", config_id=config_id,
-        provider_name=str(row["provider_name"] or ""), model=str(row["model"] or ""),
+        db,
+        "toggle",
+        config_id=config_id,
+        provider_name=str(row["provider_name"] or ""),
+        model=str(row["model"] or ""),
         detail=f"切换「当前使用」配置为：{row['provider_name']}/{row['model']}",
         request=request,
-        snapshot={"before": _before_snap,
-                  "after": sanitize_config_snapshot(dict(_r) if _r else None)},
-        commit=False)
+        snapshot={"before": _before_snap, "after": sanitize_config_snapshot(dict(_r) if _r else None)},
+        commit=False,
+    )
     await db.commit()
     invalidate_config_cache()
     # ✅ 统一并发体系：切换活跃配置后自动应用该配置的并发数
     from app.services.ai.provider_factory import apply_config_concurrency
+
     await apply_config_concurrency()
     return {"ok": True, "is_active": True, "warning": warning}
 
 
+@router.put("/config/{config_id}/enabled")
+async def set_config_enabled(config_id: str, body: ConfigEnabledIn, request: Request = None, db=Depends(get_db)):
+    """✅ R175（BUG-03）：启用/停用单条配置参与真实调用（降级链与视觉候选）。
+
+    与 ``is_active`` 语义严格分离：
+      * ``is_active=1`` = 当前主配置（全局唯一，由 toggle_config 维护）；
+      * ``enabled=0``  = 用户显式停用，不再进入 ``_fallback_chain()`` / 视觉候选。
+    当前使用中的主配置不允许停用（否则主调用仍会走它，造成语义自相矛盾）。
+    """
+    cur = await db.execute("SELECT * FROM ai_config WHERE id=?", (config_id,))
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "配置不存在")
+    new_val = 1 if body.enabled else 0
+    cur_val = 1 if row["enabled"] is None else int(row["enabled"])
+    if cur_val == new_val:
+        return {"ok": True, "enabled": bool(new_val), "unchanged": True}
+    if new_val == 0 and row["is_active"]:
+        raise HTTPException(400, "当前使用中的配置不能停用；请先把其它配置设为「当前使用」")
+
+    _before_snap = sanitize_config_snapshot(dict(row))
+    await db.execute(
+        "UPDATE ai_config SET enabled=?, updated_at=? WHERE id=?", (new_val, datetime.now().isoformat(), config_id)
+    )
+    cur = await db.execute("SELECT * FROM ai_config WHERE id=?", (config_id,))
+    _r = await cur.fetchone()
+    await record_config_audit(
+        db,
+        "enable" if new_val else "disable",
+        config_id=config_id,
+        provider_name=str(row["provider_name"] or ""),
+        model=str(row["model"] or ""),
+        detail=(
+            "启用该配置参与真实调用（主配置之外的降级/视觉候选）"
+            if new_val
+            else "停用该配置（不再进入降级链与视觉候选）"
+        ),
+        request=request,
+        snapshot={"before": _before_snap, "after": sanitize_config_snapshot(dict(_r) if _r else None)},
+        commit=False,
+    )
+    await db.commit()
+    # 降级链/视觉候选均有缓存，必须显式失效才能即时生效
+    invalidate_config_cache()
+    return {"ok": True, "enabled": bool(new_val), "unchanged": False}
+
+
 @router.put("/fallback-chain")
-async def update_fallback_chain(body: FallbackChainUpdate, request: Request = None,
-                                db=Depends(get_db)):
+async def update_fallback_chain(body: FallbackChainUpdate, request: Request = None, db=Depends(get_db)):
     """更新降级链优先级。
 
     ✅ 增强：原实现对未知 id 静默忽略（前端拖错/配置已删时无任何反馈），
@@ -364,20 +441,28 @@ async def update_fallback_chain(body: FallbackChainUpdate, request: Request = No
         if cid and cid not in ids:
             ids.append(cid)
     if not ids:
-        raise HTTPException(400, "降级链不能为空（请提交 [{\"id\": \"...\"}, ...]）")
+        raise HTTPException(400, '降级链不能为空（请提交 [{"id": "..."}, ...]）')
 
-    cur = await db.execute(
-        f"SELECT id FROM ai_config WHERE id IN ({','.join('?' * len(ids))})", tuple(ids))
+    cur = await db.execute(f"SELECT id FROM ai_config WHERE id IN ({','.join('?' * len(ids))})", tuple(ids))
     known = {r[0] for r in await cur.fetchall()}
     unknown = [i for i in ids if i not in known]
     if unknown:
         raise HTTPException(400, f"以下配置不存在（可能已被删除）：{', '.join(unknown[:3])}")
 
-    for i, cid in enumerate(ids):
+    # ✅ R175（BUG-09）：只重排传入 id 会让未传入配置保留旧 priority，出现
+    #    重复值/乱序（运行时 ORDER BY priority 失去确定性）。统一全表重排：
+    #    传入 id 取 0..n-1，其余按原 priority/updated_at 接续到末尾。
+    cur = await db.execute(
+        f"SELECT id FROM ai_config WHERE id NOT IN ({','.join('?' * len(ids))})"
+        " ORDER BY priority ASC, updated_at DESC",
+        tuple(ids),
+    )
+    rest = [r[0] for r in await cur.fetchall()]
+    for i, cid in enumerate(ids + rest):
         await db.execute("UPDATE ai_config SET priority=? WHERE id=?", (i, cid))
     await record_config_audit(
-        db, "fallback_chain", detail=f"降级链顺序调整为 {len(ids)} 个候选", request=request,
-        commit=False)
+        db, "fallback_chain", detail=f"降级链顺序调整为 {len(ids)} 个候选", request=request, commit=False
+    )
     await db.commit()
     # ✅ 修复（F-2 复发）：降级链有 5 分钟缓存（P0-4 性能优化引入），
     #    改完 priority 不失效缓存的话，`_fallback_chain()` 会继续返回旧顺序，
@@ -404,9 +489,21 @@ def _classify_import_item(raw, existing: set, overwrite: bool) -> dict:
          "request_mode" / "env" / "remark"}
     """
     out: dict = {
-        "action": "new", "reason": "", "invalid_plan": False, "clamped": False,
-        "provider_name": "", "model": "", "plan": "pay_as_you_go", "base_url": "",
-        "nums": {}, "request_mode": "normal", "env": "", "remark": "",
+        "action": "new",
+        "reason": "",
+        "invalid_plan": False,
+        "clamped": False,
+        "provider_name": "",
+        "model": "",
+        "plan": "pay_as_you_go",
+        "base_url": "",
+        "nums": {},
+        "request_mode": "normal",
+        "env": "",
+        "remark": "",
+        # ✅ R179（2026-11-05）：导入保留「用户停用」状态（None = 文件未提供，
+        #    落库走默认启用，与旧版导出文件完全兼容）。
+        "enabled": None,
     }
     if not isinstance(raw, dict):
         out.update({"action": "skip", "reason": "条目格式非法（不是对象）"})
@@ -415,8 +512,7 @@ def _classify_import_item(raw, existing: set, overwrite: bool) -> dict:
     model = (raw.get("model") or "").strip()
     out["provider_name"], out["model"] = provider_name, model
     if not provider_name or not model:
-        out.update({"action": "skip",
-                    "reason": f"{provider_name or '(空)'}：供应商或模型名称为空"})
+        out.update({"action": "skip", "reason": f"{provider_name or '(空)'}：供应商或模型名称为空"})
         return out
     plan = normalize_plan(raw.get("plan"))
     out["plan"] = plan
@@ -426,8 +522,7 @@ def _classify_import_item(raw, existing: set, overwrite: bool) -> dict:
     try:
         base_url = resolve_config_base_url(provider_name, plan, raw.get("base_url") or "")
     except ValueError as e:
-        out.update({"action": "skip", "invalid_plan": True,
-                    "reason": f"{provider_name}/{model}：{e}"})
+        out.update({"action": "skip", "invalid_plan": True, "reason": f"{provider_name}/{model}：{e}"})
         return out
     out["base_url"] = base_url
     nums = clamp_config_numbers(raw)
@@ -437,16 +532,17 @@ def _classify_import_item(raw, existing: set, overwrite: bool) -> dict:
     try:
         out["env"] = normalize_env(raw.get("env"))
     except ValueError:
-        out.update({"action": "skip",
-                    "reason": f"{provider_name}/{model}：环境标签非法"})
+        out.update({"action": "skip", "reason": f"{provider_name}/{model}：环境标签非法"})
         return out
     out["remark"] = str(raw.get("remark") or "").strip()[:2000]
+    # ✅ R179（2026-11-05）：导出文件已包含 enabled，但旧导入逻辑完全忽略它 ——
+    #    停用配置迁移后会被静默启用（与「降级链不参与的配置」预期相反）。
+    out["enabled"] = coerce_enabled_flag(raw.get("enabled"))
     if (provider_name, model, base_url) in existing:
         if overwrite:
             out["action"] = "overwrite"
         else:
-            out.update({"action": "skip",
-                        "reason": f"{provider_name}/{model}：已存在同名配置（未开启覆盖）"})
+            out.update({"action": "skip", "reason": f"{provider_name}/{model}：已存在同名配置（未开启覆盖）"})
     return out
 
 
@@ -454,8 +550,8 @@ async def _export_scene_routes(db) -> list:
     """导出场景路由（scene → config_id；不含任何敏感字段）。"""
     try:
         cur = await db.execute(
-            "SELECT scene, config_id, updated_at FROM ai_scene_routes"
-            " WHERE config_id != '' ORDER BY scene")
+            "SELECT scene, config_id, updated_at FROM ai_scene_routes" " WHERE config_id != '' ORDER BY scene"
+        )
         return [dict(r) for r in await cur.fetchall()]
     except Exception:
         # 表未创建等异常按「无路由」处理，不影响配置主流程导出。
@@ -472,15 +568,17 @@ async def _export_runtime(db) -> dict:
     out: dict = {}
     try:
         for key in (RUNTIME_ACTIVE_ENV_KEY, RUNTIME_DISABLED_PROVIDERS_KEY):
-            cur = await db.execute(
-                "SELECT value FROM ai_runtime_settings WHERE key=?", (key,))
+            cur = await db.execute("SELECT value FROM ai_runtime_settings WHERE key=?", (key,))
             row = await cur.fetchone()
             if row is not None:
                 out[key] = str(row["value"] or "")
     except Exception as e:
         # 运行时设置表未迁移/缺列等异常按「空设置」导出，不影响配置主流程。
-        logger.debug("导出运行时设置失败（按空设置导出，keys=%s）: %s",
-                     RUNTIME_ACTIVE_ENV_KEY + "/" + RUNTIME_DISABLED_PROVIDERS_KEY, e)
+        logger.debug(
+            "导出运行时设置失败（按空设置导出，keys=%s）: %s",
+            RUNTIME_ACTIVE_ENV_KEY + "/" + RUNTIME_DISABLED_PROVIDERS_KEY,
+            e,
+        )
     return out
 
 
@@ -536,14 +634,13 @@ async def import_config(body: ConfigImportIn, request: Request = None, db=Depend
     if not body.items:
         raise HTTPException(400, "导入内容为空")
 
-    cur = await db.execute(
-        "SELECT provider_name, model, base_url FROM ai_config")
+    cur = await db.execute("SELECT provider_name, model, base_url FROM ai_config")
     existing = {(r[0], r[1], r[2]) for r in await cur.fetchall()}
 
     imported, skipped = 0, 0
-    clamped_items = 0   # 数值被收敛的条目数（导入文件可能来自旧版本/被手工改过）
+    clamped_items = 0  # 数值被收敛的条目数（导入文件可能来自旧版本/被手工改过）
     invalid_plan_items = 0  # 因「计费方式 ↔ Base URL」联动校验不合规而跳过的条目数
-    import_skip_reasons: list[str] = []   # 跳过原因（最多回传前若干条，避免载荷膨胀）
+    import_skip_reasons: list[str] = []  # 跳过原因（最多回传前若干条，避免载荷膨胀）
     first_new_id = ""
     import_changes: list[tuple[str, str, str, str, dict | None, dict | None]] = []
     # ✅ 2026-10-06（G1 · 迁移完整性）：导出源机器上的配置 id → 本次导入落库的 id。
@@ -571,26 +668,48 @@ async def import_config(body: ConfigImportIn, request: Request = None, db=Depend
         if c["action"] == "overwrite":
             # 历史库可能存在同一三元组的重复行；逐行留快照，避免 UPDATE 多行却只审计一行。
             before_rows = [
-                dict(r) for r in await (await db.execute(
-                    "SELECT * FROM ai_config WHERE provider_name=? AND model=? AND base_url=?",
-                    (provider_name, model, base_url))).fetchall()
+                dict(r)
+                for r in await (
+                    await db.execute(
+                        "SELECT * FROM ai_config WHERE provider_name=? AND model=? AND base_url=?",
+                        (provider_name, model, base_url),
+                    )
+                ).fetchall()
             ]
             await db.execute(
                 "UPDATE ai_config SET plan=?, max_tokens=?, temperature=?, timeout=?, concurrency=?,"
-                " request_mode=?, env=?, remark=?, updated_at=?"
+                " request_mode=?, env=?, enabled=COALESCE(?, enabled), remark=?, updated_at=?"
                 " WHERE provider_name=? AND model=? AND base_url=?",
-                (plan, nums["max_tokens"], nums["temperature"], nums["timeout"],
-                 nums["concurrency"], request_mode, env, remark,
-                 datetime.now().isoformat(), provider_name, model, base_url))
+                (
+                    plan,
+                    nums["max_tokens"],
+                    nums["temperature"],
+                    nums["timeout"],
+                    nums["concurrency"],
+                    request_mode,
+                    env,
+                    c.get("enabled"),
+                    remark,
+                    datetime.now().isoformat(),
+                    provider_name,
+                    model,
+                    base_url,
+                ),
+            )
             for before_row in before_rows:
                 key_to_new_id[str(before_row.get("id") or "")] = str(before_row["id"])
-                after_cur = await db.execute(
-                    "SELECT * FROM ai_config WHERE id=?", (before_row["id"],))
+                after_cur = await db.execute("SELECT * FROM ai_config WHERE id=?", (before_row["id"],))
                 after_row = await after_cur.fetchone()
-                import_changes.append((
-                    before_row["id"], provider_name, model, "覆盖", before_row,
-                    dict(after_row) if after_row else None,
-                ))
+                import_changes.append(
+                    (
+                        before_row["id"],
+                        provider_name,
+                        model,
+                        "覆盖",
+                        before_row,
+                        dict(after_row) if after_row else None,
+                    )
+                )
             imported += 1
             continue
 
@@ -600,12 +719,26 @@ async def import_config(body: ConfigImportIn, request: Request = None, db=Depend
         await db.execute(
             "INSERT INTO ai_config (id, provider_name, plan, api_key_encrypted, base_url, model,"
             " max_tokens, temperature, timeout, concurrency, request_mode, env,"
-            " is_active, priority, remark)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)",
-            (new_id, provider_name, plan, "",
-             base_url, model, nums["max_tokens"], nums["temperature"],
-             nums["timeout"], nums["concurrency"], request_mode, env,
-             int(pr) if pr is not None else 0, remark))
+            " is_active, enabled, priority, remark)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,COALESCE(?,1),?,?)",
+            (
+                new_id,
+                provider_name,
+                plan,
+                "",
+                base_url,
+                model,
+                nums["max_tokens"],
+                nums["temperature"],
+                nums["timeout"],
+                nums["concurrency"],
+                request_mode,
+                env,
+                c.get("enabled"),
+                int(pr) if pr is not None else 0,
+                remark,
+            ),
+        )
         existing.add((provider_name, model, base_url))
         if old_id:
             key_to_new_id[old_id] = new_id
@@ -613,15 +746,22 @@ async def import_config(body: ConfigImportIn, request: Request = None, db=Depend
             first_new_id = new_id
         new_cur = await db.execute("SELECT * FROM ai_config WHERE id=?", (new_id,))
         new_row = await new_cur.fetchone()
-        import_changes.append((
-            new_id, provider_name, model, "新增", None,
-            dict(new_row) if new_row else None,
-        ))
+        import_changes.append(
+            (
+                new_id,
+                provider_name,
+                model,
+                "新增",
+                None,
+                dict(new_row) if new_row else None,
+            )
+        )
         imported += 1
 
     if body.set_first_active and first_new_id:
         await db.execute("UPDATE ai_config SET is_active=0")
-        await db.execute("UPDATE ai_config SET is_active=1 WHERE id=?", (first_new_id,))
+        # ✅ R179：「设为当前使用」即启用，避免出现「当前使用 + 用户停用」矛盾状态
+        await db.execute("UPDATE ai_config SET is_active=1, enabled=1 WHERE id=?", (first_new_id,))
 
     for cid, provider_name, model, change_kind, before_row, _after_row in import_changes:
         # set_first_active 可能在本轮末尾改变 is_active；审计必须在全部导入写操作
@@ -629,31 +769,40 @@ async def import_config(body: ConfigImportIn, request: Request = None, db=Depend
         final_cur = await db.execute("SELECT * FROM ai_config WHERE id=?", (cid,))
         final_row = await final_cur.fetchone()
         await record_config_audit(
-            db, "import", config_id=cid, provider_name=provider_name, model=model,
+            db,
+            "import",
+            config_id=cid,
+            provider_name=provider_name,
+            model=model,
             detail=f"导入{change_kind}配置：{provider_name}/{model}",
-            request=request, commit=False,
-            snapshot={"before": sanitize_config_snapshot(before_row),
-                      "after": sanitize_config_snapshot(
-                          dict(final_row) if final_row else None)})
+            request=request,
+            commit=False,
+            snapshot={
+                "before": sanitize_config_snapshot(before_row),
+                "after": sanitize_config_snapshot(dict(final_row) if final_row else None),
+            },
+        )
     # ✅ 2026-10-06（G1 · 迁移完整性）：迁移场景路由与运行时设置。
     #    两者均为可选（默认 None = 不迁移），旧版导出文件不含这些键时行为不变。
     migrated_scene_routes = 0
     migrated_runtime_keys: list[str] = []
     if body.scene_routes is not None:
-        migrated_scene_routes = await _import_scene_routes(
-            db, body.scene_routes, key_to_new_id, import_skip_reasons)
+        migrated_scene_routes = await _import_scene_routes(db, body.scene_routes, key_to_new_id, import_skip_reasons)
     if body.runtime is not None:
         migrated_runtime_keys = await _import_runtime(db, body.runtime)
 
     route_note = ""
     if body.scene_routes is not None or body.runtime is not None:
-        route_note = (f"；场景路由迁移 {migrated_scene_routes} 条"
-                      f"，运行时设置迁移 {len(migrated_runtime_keys)} 项")
+        route_note = f"；场景路由迁移 {migrated_scene_routes} 条" f"，运行时设置迁移 {len(migrated_runtime_keys)} 项"
     await record_config_audit(
-        db, "import", detail=f"导入配置汇总：新增/覆盖 {imported} 条、跳过 {skipped} 条"
-                             f"（overwrite={bool(body.overwrite)}，"
-                             f"set_first_active={bool(body.set_first_active)}）{route_note}",
-        request=request, commit=False)
+        db,
+        "import",
+        detail=f"导入配置汇总：新增/覆盖 {imported} 条、跳过 {skipped} 条"
+        f"（overwrite={bool(body.overwrite)}，"
+        f"set_first_active={bool(body.set_first_active)}）{route_note}",
+        request=request,
+        commit=False,
+    )
     await db.commit()
     invalidate_config_cache()
     # ✅ 2026-09-25（缺口修复）：set_first_active 激活了新主配置后必须重放并发 ——
@@ -665,12 +814,18 @@ async def import_config(body: ConfigImportIn, request: Request = None, db=Depend
     # ✅ 增强：导入后若系统仍无「当前使用」配置，明确告知（否则用户以为导入即可用）
     cur = await db.execute("SELECT COUNT(*) FROM ai_config WHERE is_active=1")
     has_active = bool((await cur.fetchone())[0])
-    warning = "" if has_active else (
-        "导入完成，但当前没有任何配置处于「当前使用」状态，AI 生成能力仍不可用："
-        "请在列表中点击目标配置的「设为当前使用」。"
+    warning = (
+        ""
+        if has_active
+        else (
+            "导入完成，但当前没有任何配置处于「当前使用」状态，AI 生成能力仍不可用："
+            "请在列表中点击目标配置的「设为当前使用」。"
+        )
     )
     return {
-        "ok": True, "imported": imported, "skipped": skipped,
+        "ok": True,
+        "imported": imported,
+        "skipped": skipped,
         "activated_id": first_new_id if body.set_first_active else "",
         "warning": warning,
         # ✅ 2026-09-23：导入文件里的越界数值会被静默收敛，如实回传条目数
@@ -698,8 +853,7 @@ async def import_config_dry_run(body: ConfigImportIn, db=Depends(read_db)):
     ⚠️ 判据单一出口：本端点绝不允许另写一份校验逻辑 —— 否则会出现
     「预演说会通过、真导入却跳过」的静默错配（本仓已多次踩同类陷阱）。
     """
-    cur = await db.execute(
-        "SELECT provider_name, model, base_url FROM ai_config")
+    cur = await db.execute("SELECT provider_name, model, base_url FROM ai_config")
     # 批内去重与真导入同口径：前一条新增的三元组会挡住后一条同名单元
     existing = {(r[0], r[1], r[2]) for r in await cur.fetchall()}
 
@@ -715,8 +869,9 @@ async def import_config_dry_run(body: ConfigImportIn, db=Depends(read_db)):
                 invalid_plan_items += 1
             if c["reason"]:
                 skip_reasons.append(c["reason"])
-            planned.append({"action": "skip", "reason": c["reason"],
-                            "provider_name": c["provider_name"], "model": c["model"]})
+            planned.append(
+                {"action": "skip", "reason": c["reason"], "provider_name": c["provider_name"], "model": c["model"]}
+            )
             continue
         if c["clamped"]:
             clamped_items += 1
@@ -726,17 +881,25 @@ async def import_config_dry_run(body: ConfigImportIn, db=Depends(read_db)):
         else:
             existing.add((c["provider_name"], c["model"], c["base_url"]))
             key_to_new_id[old_id] = "__new__"
-        planned.append({
-            "action": c["action"], "provider_name": c["provider_name"],
-            "model": c["model"], "plan": c["plan"], "env": c["env"],
-            "request_mode": c["request_mode"], "clamped": c["clamped"],
-        })
+        planned.append(
+            {
+                "action": c["action"],
+                "provider_name": c["provider_name"],
+                "model": c["model"],
+                "plan": c["plan"],
+                "env": c["env"],
+                "request_mode": c["request_mode"],
+                "clamped": c["clamped"],
+                # ✅ R179：预演即回显「导入后是否启用」，None = 文件未提供（默认启用）
+                "enabled": c["enabled"],
+            }
+        )
 
     # 场景路由预演：能否映射到本次导入会落库的配置 id（与真导入同一批跳过原因）
     route_planned = route_skipped = 0
     route_reasons: list[str] = []
     if body.scene_routes is not None:
-        for raw in (body.scene_routes if isinstance(body.scene_routes, list) else []):
+        for raw in body.scene_routes if isinstance(body.scene_routes, list) else []:
             if not isinstance(raw, dict):
                 continue
             scene = str(raw.get("scene") or "").strip()
@@ -749,8 +912,7 @@ async def import_config_dry_run(body: ConfigImportIn, db=Depends(read_db)):
                 continue
             if old_cfg_id not in key_to_new_id:
                 route_skipped += 1
-                route_reasons.append(
-                    f"场景路由「{scene}」：原配置未包含在本次导入中，已跳过")
+                route_reasons.append(f"场景路由「{scene}」：原配置未包含在本次导入中，已跳过")
                 continue
             route_planned += 1
 
@@ -785,8 +947,7 @@ async def import_config_dry_run(body: ConfigImportIn, db=Depends(read_db)):
         "clamped_items": clamped_items,
         "invalid_plan_items": invalid_plan_items,
         "skip_reasons": skip_reasons[:5],
-        "scene_routes": {"planned": route_planned, "skipped": route_skipped,
-                         "skip_reasons": route_reasons[:5]},
+        "scene_routes": {"planned": route_planned, "skipped": route_skipped, "skip_reasons": route_reasons[:5]},
         "runtime": {"planned": runtime_planned, "skipped": runtime_skipped},
         "hint": "预演不产生任何写入；确认无误后再点「导入」",
     }
@@ -828,7 +989,8 @@ async def _import_scene_routes(db, raw_routes, key_to_new_id, reasons) -> int:
             "INSERT INTO ai_scene_routes (scene, config_id, updated_at) VALUES (?,?,?)"
             " ON CONFLICT(scene) DO UPDATE SET config_id=excluded.config_id,"
             " updated_at=excluded.updated_at",
-            (scene, new_id, datetime.now().isoformat()))
+            (scene, new_id, datetime.now().isoformat()),
+        )
         migrated += 1
     return migrated
 
@@ -865,8 +1027,7 @@ async def _import_runtime(db, raw_runtime) -> list[str]:
                         continue
                     if nm:
                         clean.append(nm)
-                await upsert_runtime_setting(
-                    db, key, json.dumps(sorted(set(clean)), ensure_ascii=False))
+                await upsert_runtime_setting(db, key, json.dumps(sorted(set(clean)), ensure_ascii=False))
             else:
                 continue
             migrated.append(key)
@@ -896,13 +1057,11 @@ async def get_active_env(db=Depends(read_db)):
     envs: list[str] = []
     try:
         cur = await db.execute("SELECT DISTINCT env FROM ai_config")
-        envs = sorted({str(dict(r).get("env") or "").strip()
-                       for r in await cur.fetchall()} - {""})
+        envs = sorted({str(dict(r).get("env") or "").strip() for r in await cur.fetchall()} - {""})
     except Exception:
         # 旧库缺 env 列（未重启触发迁移）时不影响主流程
         envs = []
-    return {"active_env": env, "envs": envs, "routed": bool(env),
-            "env_error": env_error}
+    return {"active_env": env, "envs": envs, "routed": bool(env), "env_error": env_error}
 
 
 @router.put("/env")
@@ -920,8 +1079,8 @@ async def set_active_env(body: ActiveEnvIn, request: Request = None, db=Depends(
     try:
         await upsert_runtime_setting(db, RUNTIME_ACTIVE_ENV_KEY, env)
         await record_config_audit(
-            db, "env", detail=f"切换当前生效环境为：{env or '通用（不过滤）'}",
-            request=request, commit=False)
+            db, "env", detail=f"切换当前生效环境为：{env or '通用（不过滤）'}", request=request, commit=False
+        )
         await db.commit()
     except Exception as e:
         await db.rollback()
@@ -929,8 +1088,12 @@ async def set_active_env(body: ActiveEnvIn, request: Request = None, db=Depends(
     # 提交成功后再失效缓存并重放环境感知并发，避免出现「已落库但仍用旧缓存」。
     invalidate_config_cache()
     await apply_config_concurrency()
-    return {"ok": True, "active_env": env,
-            "hint": ("已切回通用环境：不做环境过滤，行为与未启用多环境时一致"
-                     if not env else
-                     f"已切换到环境「{env}」：主配置优先取该环境专用配置，"
-                     "降级链只使用「通用 + 该环境」的候选")}
+    return {
+        "ok": True,
+        "active_env": env,
+        "hint": (
+            "已切回通用环境：不做环境过滤，行为与未启用多环境时一致"
+            if not env
+            else f"已切换到环境「{env}」：主配置优先取该环境专用配置，" "降级链只使用「通用 + 该环境」的候选"
+        ),
+    }

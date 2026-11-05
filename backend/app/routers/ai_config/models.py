@@ -1,10 +1,12 @@
 """AI 配置路由 · 模型管理（拉取厂商模型列表 / 预设 / 自定义供应商）。"""
+
 from fastapi import APIRouter, Depends
 
 from app.db import read_db
 from app.models import ProviderModelsIn
 from app.services.ai.provider_factory import PROVIDER_PRESETS, normalize_base_url
 from app.services.crypto import decrypt_api_key
+from app.services.redaction import redact_sensitive_text
 
 from ._common import _classify_error, _dns_precheck_async, _same_base_url
 
@@ -29,16 +31,16 @@ async def _resolve_conn_credentials(db, data: ProviderModelsIn) -> tuple[str, st
     api_key = (data.api_key or "").strip()
     config_id = (data.config_id or "").strip()
     if config_id:
-        cur = await db.execute(
-            "SELECT base_url, api_key_encrypted FROM ai_config WHERE id=?", (config_id,))
+        cur = await db.execute("SELECT base_url, api_key_encrypted FROM ai_config WHERE id=?", (config_id,))
         row = await cur.fetchone()
         if not row:
             return "", "", "配置不存在（可能已被删除）"
         saved_base_url = (row["base_url"] or "").strip()
         if base_url and not _same_base_url(base_url, saved_base_url) and not api_key:
-            return "", "", (
-                "Base URL 已变更，请重新输入该地址对应的 API Key；"
-                "为防止密钥外泄，系统不会复用原配置中保存的 Key"
+            return (
+                "",
+                "",
+                ("Base URL 已变更，请重新输入该地址对应的 API Key；" "为防止密钥外泄，系统不会复用原配置中保存的 Key"),
             )
         if not base_url:
             base_url = saved_base_url
@@ -87,15 +89,21 @@ async def _fetch_models_list(base_url: str, api_key: str, timeout: int = 15) -> 
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     if not api_key:
-        return {"ok": False, "error": "API Key 不能为空",
-                "suggestion": "请先填写 API Key（或保存后由系统从已存配置读取）"}
+        return {
+            "ok": False,
+            "error": "API Key 不能为空",
+            "suggestion": "请先填写 API Key（或保存后由系统从已存配置读取）",
+        }
 
     # 先做 DNS/TCP 预检，命不中就不浪费一次带 Key 的请求
     pre = await _dns_precheck_async(base_url)
     if not pre["ok"]:
-        return {"ok": False, "error": pre["message"], "detail": pre,
-                "suggestion": _classify_error(
-                    Exception(pre.get("raw") or pre["message"])).get("suggestion", "")}
+        return {
+            "ok": False,
+            "error": pre["message"],
+            "detail": pre,
+            "suggestion": _classify_error(Exception(pre.get("raw") or pre["message"])).get("suggestion", ""),
+        }
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     try:
@@ -103,19 +111,21 @@ async def _fetch_models_list(base_url: str, api_key: str, timeout: int = 15) -> 
             resp = await client.get(f"{base_url}/models", headers=headers)
     except Exception as e:
         classified = _classify_error(e)
-        return {"ok": False, "error": classified["message"],
-                "suggestion": classified["suggestion"]}
+        return {"ok": False, "error": classified["message"], "suggestion": classified["suggestion"]}
 
     if resp.status_code >= 400:
-        classified = _classify_error(Exception(f"HTTP {resp.status_code}: {resp.text[:300]}"))
-        return {"ok": False, "error": classified["message"],
-                "suggestion": classified["suggestion"], "raw": resp.text[:300]}
+        _raw = redact_sensitive_text(resp.text)[:300]
+        classified = _classify_error(Exception(f"HTTP {resp.status_code}: {_raw}"))
+        return {"ok": False, "error": classified["message"], "suggestion": classified["suggestion"], "raw": _raw}
 
     try:
         payload = resp.json()
     except Exception:
-        return {"ok": False, "error": "厂商返回了非 JSON 响应",
-                "suggestion": "该地址可能不是 OpenAI 兼容接口，请检查 Base URL 是否以 /v1 结尾"}
+        return {
+            "ok": False,
+            "error": "厂商返回了非 JSON 响应",
+            "suggestion": "该地址可能不是 OpenAI 兼容接口，请检查 Base URL 是否以 /v1 结尾",
+        }
 
     raw = payload.get("data") or payload.get("models") or []
     if isinstance(raw, dict):
@@ -129,17 +139,22 @@ async def _fetch_models_list(base_url: str, api_key: str, timeout: int = 15) -> 
             continue
         owned = m.get("owned_by", "")
         ctx = m.get("context_window") or m.get("context_length") or m.get("max_context") or ""
-        models.append({
-            "value": mid,
-            "label": f"{mid}  ({owned})" if owned else mid,
-            "owned_by": owned,
-            "context": _fmt_context(ctx),
-            "context_tokens": _ctx_tokens(ctx),
-        })
+        models.append(
+            {
+                "value": mid,
+                "label": f"{mid}  ({owned})" if owned else mid,
+                "owned_by": owned,
+                "context": _fmt_context(ctx),
+                "context_tokens": _ctx_tokens(ctx),
+            }
+        )
 
     if not models:
-        return {"ok": False, "error": "供应商返回了空的模型列表",
-                "suggestion": "该平台可能未开放 /models 接口，请手动填写模型名称"}
+        return {
+            "ok": False,
+            "error": "供应商返回了空的模型列表",
+            "suggestion": "该平台可能未开放 /models 接口，请手动填写模型名称",
+        }
 
     # 排序：上下文越大越靠前（能力更强通常更靠前），同尺寸按字母序；
     # 无上下文信息的排在末尾。
@@ -150,8 +165,7 @@ async def _fetch_models_list(base_url: str, api_key: str, timeout: int = 15) -> 
     truncated = len(models) > _MODEL_LIST_MAX
     if truncated:
         models = models[:_MODEL_LIST_MAX]
-    return {"ok": True, "count": len(models), "models": models,
-            "base_url": base_url, "truncated": truncated}
+    return {"ok": True, "count": len(models), "models": models, "base_url": base_url, "truncated": truncated}
 
 
 @router.post("/config/fetch-models")

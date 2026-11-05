@@ -11,6 +11,7 @@
   2. 审计写入是**尽力而为**：旧库尚未触发 ``_migrate`` 建表时，表不存在，
      此时只记 debug 日志，绝不让配置保存/切换等主流程失败。
 """
+
 import json
 import logging
 from datetime import datetime
@@ -46,9 +47,9 @@ from app.services.audit_service import (
 
 
 @router.get("/config/audit-logs")
-async def config_audit_logs(limit: int = 50, offset: int = 0, days: int = 30,
-                            action: str = "", config_id: str = "",
-                            db=Depends(read_db)):
+async def config_audit_logs(
+    limit: int = 50, offset: int = 0, days: int = 30, action: str = "", config_id: str = "", db=Depends(read_db)
+):
     """配置变更审计列表（最新在前）。
 
     分页 + 筛选参数（``limit`` / ``days`` 范围与 ``/ai/audit-logs`` **各自独立**：
@@ -70,14 +71,13 @@ async def config_audit_logs(limit: int = 50, offset: int = 0, days: int = 30,
         params.append(config_id)
     clause = " AND ".join(where)
 
-    cur = await db.execute(
-        f"SELECT COUNT(*) FROM ai_config_audit_logs WHERE {clause}", tuple(params))
+    cur = await db.execute(f"SELECT COUNT(*) FROM ai_config_audit_logs WHERE {clause}", tuple(params))
     total = int((await cur.fetchone())[0])
 
     cur = await db.execute(
-        f"SELECT * FROM ai_config_audit_logs WHERE {clause}"
-        " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
-        tuple(params) + (limit, offset))
+        f"SELECT * FROM ai_config_audit_logs WHERE {clause}" " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+        tuple(params) + (limit, offset),
+    )
     items = [dict(r) for r in await cur.fetchall()]
     for it in items:
         it["action_label"] = CONFIG_ACTIONS.get(it.get("action", ""), it.get("action", ""))
@@ -104,14 +104,15 @@ async def config_audit_logs(limit: int = 50, offset: int = 0, days: int = 30,
             f"SELECT config_id, COUNT(*) AS n, "
             f"GROUP_CONCAT(DISTINCT provider_name || '/' || model) AS labels "
             f"FROM ai_config_audit_logs WHERE {clause} GROUP BY config_id "
-            "ORDER BY MAX(created_at) DESC", tuple(params))
+            "ORDER BY MAX(created_at) DESC",
+            tuple(params),
+        )
         for r in await cur.fetchall():
             cid = str(r["config_id"] or "")
             label = str(r["labels"] or "").split(",")[0].strip()
             if not label or label == "/":
                 label = cid[:8] if cid else "（汇总记录）"
-            config_ids.append({"value": cid, "label": label,
-                               "count": int(r["n"]) or 0})
+            config_ids.append({"value": cid, "label": label, "count": int(r["n"]) or 0})
     except Exception:
         # 审计查询的附加能力失败不应影响主列表（与表缺失时只记 debug 的约定一致）
         config_ids = []
@@ -142,14 +143,25 @@ async def config_audit_logs(limit: int = 50, offset: int = 0, days: int = 30,
 #:      回滚不触碰 —— 与 models.ConfigSave.priority 的「None = 本次不改动降级顺序」
 #:      同口径。
 ROLLBACK_FIELDS: tuple[str, ...] = (
-    "provider_name", "plan", "base_url", "model", "max_tokens", "temperature",
-    "timeout", "concurrency", "request_mode", "env", "remark",
+    "provider_name",
+    "plan",
+    "base_url",
+    "model",
+    "max_tokens",
+    "temperature",
+    "timeout",
+    "concurrency",
+    "request_mode",
+    "env",
+    "remark",
+    "enabled",
 )
 
 
 @router.post("/config/{config_id}/rollback")
-async def rollback_config(config_id: str, body: ConfigRollbackIn | None = None,
-                          request: Request = None, db=Depends(get_db)):
+async def rollback_config(
+    config_id: str, body: ConfigRollbackIn | None = None, request: Request = None, db=Depends(get_db)
+):
     """把配置回滚到某条审计记录**变更前**的状态（✅ G6）。
 
     安全与边界约定：
@@ -167,8 +179,7 @@ async def rollback_config(config_id: str, body: ConfigRollbackIn | None = None,
     if not audit_id:
         raise HTTPException(400, "缺少 audit_id（要回滚到哪条变更记录之前）")
 
-    cur = await db.execute(
-        "SELECT * FROM ai_config_audit_logs WHERE id = ?", (audit_id,))
+    cur = await db.execute("SELECT * FROM ai_config_audit_logs WHERE id = ?", (audit_id,))
     log = await cur.fetchone()
     if not log:
         raise HTTPException(404, "变更记录不存在")
@@ -186,8 +197,8 @@ async def rollback_config(config_id: str, body: ConfigRollbackIn | None = None,
     before = snap.get("before") if isinstance(snap, dict) else None
     if not isinstance(before, dict) or not before:
         raise HTTPException(
-            400, "该变更记录没有『变更前』快照，无法回滚"
-                 "（新增配置的记录请改用删除；历史记录可能早于快照功能上线）")
+            400, "该变更记录没有『变更前』快照，无法回滚" "（新增配置的记录请改用删除；历史记录可能早于快照功能上线）"
+        )
 
     cur = await db.execute("SELECT * FROM ai_config WHERE id = ?", (config_id,))
     row = await cur.fetchone()
@@ -200,8 +211,7 @@ async def rollback_config(config_id: str, body: ConfigRollbackIn | None = None,
     # ✅ 2026-09-23：``include_active=True`` 时连「当前使用」标记一起还原（默认不还原，
     #    因为主配置唯一性有系统级守卫，见下方 want_active 分支）。
     include_active = bool(getattr(body, "include_active", False))
-    nums = clamp_config_numbers({**current, **{k: v for k, v in before.items()
-                                               if k in ROLLBACK_FIELDS}})
+    nums = clamp_config_numbers({**current, **{k: v for k, v in before.items() if k in ROLLBACK_FIELDS}})
     assign: dict = {}
     for f in ROLLBACK_FIELDS:
         if f not in before:
@@ -218,6 +228,8 @@ async def rollback_config(config_id: str, body: ConfigRollbackIn | None = None,
                 raise HTTPException(400, f"快照中的环境名非法：{val!r}")
         elif f == "plan":
             val = normalize_plan(val)
+        elif f == "enabled":
+            val = 1 if val else 0
         assign[f] = val
 
     warning = ""
@@ -230,38 +242,54 @@ async def rollback_config(config_id: str, body: ConfigRollbackIn | None = None,
             assign["is_active"] = 1
             active_restored = True
         elif want == 0 and current.get("is_active"):
-            cur2 = await db.execute(
-                "SELECT COUNT(1) FROM ai_config WHERE is_active=1 AND id != ?",
-                (config_id,))
+            cur2 = await db.execute("SELECT COUNT(1) FROM ai_config WHERE is_active=1 AND id != ?", (config_id,))
             others = int((await cur2.fetchone())[0])
             if others > 0:
                 assign["is_active"] = 0
                 active_restored = False
             else:
-                warning = ("快照中该配置当时不是「当前使用」，但回滚它会变成零个主配置，"
-                           "已保留其「当前使用」状态。请先启用其它配置后再回滚。")
+                warning = (
+                    "快照中该配置当时不是「当前使用」，但回滚它会变成零个主配置，"
+                    "已保留其「当前使用」状态。请先启用其它配置后再回滚。"
+                )
+
+    # ✅ R179（2026-11-05）：回滚不得制造「当前使用 + 已停用」矛盾状态。
+    #    旧快照可能早于该配置被设为当前使用（或 include_active 把 is_active
+    #    还原为 1）；若同时把 enabled 还原成 0，主调用仍会使用一条界面显示
+    #    「已停用」的配置。此时保留启用并明确告知，而不是静默写入矛盾值。
+    final_active = bool(assign.get("is_active", current.get("is_active")))
+    if assign.get("enabled") == 0 and final_active:
+        assign["enabled"] = 1
+        extra = (
+            "回滚快照中该配置为「已停用」，但它当前是「当前使用」配置，"
+            "已保留启用状态（避免出现「当前使用 + 停用」矛盾）"
+        )
+        warning = f"{warning}；{extra}" if warning else extra
 
     if not assign:
         raise HTTPException(400, "该变更记录不含可回滚字段")
     sets = [f"{k}=?" for k in assign] + ["updated_at=?"]
     params = list(assign.values()) + [datetime.now().isoformat(), config_id]
-    await db.execute(
-        f"UPDATE ai_config SET {', '.join(sets)} WHERE id=?", tuple(params))
+    await db.execute(f"UPDATE ai_config SET {', '.join(sets)} WHERE id=?", tuple(params))
 
     cur = await db.execute("SELECT * FROM ai_config WHERE id = ?", (config_id,))
     after_row = await cur.fetchone()
     after = dict(after_row) if after_row else {}
 
     await record_config_audit(
-        db, "rollback", config_id=config_id,
+        db,
+        "rollback",
+        config_id=config_id,
         provider_name=str(after.get("provider_name") or ""),
         model=str(after.get("model") or ""),
-        detail=(f"回滚到变更记录 {audit_id[:8]} 之前的状态"
-                + ("（含「当前使用」标记）" if active_restored is not None else "")),
+        detail=(
+            f"回滚到变更记录 {audit_id[:8]} 之前的状态"
+            + ("（含「当前使用」标记）" if active_restored is not None else "")
+        ),
         request=request,
-        snapshot={"before": sanitize_config_snapshot(current),
-                  "after": sanitize_config_snapshot(after)},
-        commit=False)
+        snapshot={"before": sanitize_config_snapshot(current), "after": sanitize_config_snapshot(after)},
+        commit=False,
+    )
     await db.commit()
     invalidate_config_cache()
     if after.get("is_active"):
@@ -276,6 +304,5 @@ async def rollback_config(config_id: str, body: ConfigRollbackIn | None = None,
         "restored": {k: restored.get(k) for k in fields if k in before},
         "active_restored": active_restored,
         "warning": warning,
-        "changes": diff_snapshots(
-            {"before": sanitize_config_snapshot(current), "after": restored}),
+        "changes": diff_snapshots({"before": sanitize_config_snapshot(current), "after": restored}),
     }

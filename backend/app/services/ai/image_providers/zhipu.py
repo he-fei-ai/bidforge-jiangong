@@ -49,9 +49,7 @@ class ZhipuAdapter(ImageProviderAdapter):
     ) -> dict[str, Any]:
         """调用智谱 API 生成图像（OpenAI 兼容格式）"""
         use_model = model or self.model
-        use_size = (
-            normalize_size(size or self.default_size, self.supported_sizes) or self.default_size
-        )
+        use_size = normalize_size(size or self.default_size, self.supported_sizes) or self.default_size
 
         payload: dict[str, Any] = {
             "model": use_model,

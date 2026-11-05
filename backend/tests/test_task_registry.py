@@ -9,6 +9,7 @@
   ``_subscribers[tid] = [q]`` 直接改队列的写法已一并去除）
 - 验证 finish_task 清理内存态 ``_tasks``
 """
+
 import asyncio
 import json
 
@@ -40,8 +41,7 @@ class TestRegisterTask:
 
     async def test_persists_to_db(self, db_conn):
         """任务写入 task_registry 表"""
-        tid = await register_task("generate_content",
-                                  project_id="p1", scheme_id="s1")
+        tid = await register_task("generate_content", project_id="p1", scheme_id="s1")
 
         cur = await db_conn.execute("SELECT * FROM task_registry WHERE id=?", (tid,))
         row = await cur.fetchone()
@@ -58,8 +58,7 @@ class TestRegisterTask:
         cp = {"last_section": "sec1", "index": 5}
         tid = await register_task("generate_content", checkpoint=cp)
 
-        cur = await db_conn.execute("SELECT checkpoint_json FROM task_registry WHERE id=?",
-                                    (tid,))
+        cur = await db_conn.execute("SELECT checkpoint_json FROM task_registry WHERE id=?", (tid,))
         row = await cur.fetchone()
         stored = json.loads(row[0])
         assert stored == cp
@@ -68,8 +67,7 @@ class TestRegisterTask:
         """无 checkpoint → 存储 {}"""
         tid = await register_task("generate_content")
 
-        cur = await db_conn.execute("SELECT checkpoint_json FROM task_registry WHERE id=?",
-                                    (tid,))
+        cur = await db_conn.execute("SELECT checkpoint_json FROM task_registry WHERE id=?", (tid,))
         row = await cur.fetchone()
         assert json.loads(row[0]) == {}
 
@@ -109,8 +107,7 @@ class TestUpdateProgress:
 
         await update_progress(tid, 0.5, message="处理中")
 
-        cur = await db_conn.execute("SELECT progress, message FROM task_registry WHERE id=?",
-                                    (tid,))
+        cur = await db_conn.execute("SELECT progress, message FROM task_registry WHERE id=?", (tid,))
         row = await cur.fetchone()
         assert row[0] == 0.5
         assert row[1] == "处理中"
@@ -174,8 +171,7 @@ class TestFinishTask:
 
         await finish_task(tid, status="completed", message="全部完成")
 
-        cur = await db_conn.execute("SELECT status, message FROM task_registry WHERE id=?",
-                                    (tid,))
+        cur = await db_conn.execute("SELECT status, message FROM task_registry WHERE id=?", (tid,))
         row = await cur.fetchone()
         assert row[0] == "completed"
         assert row[1] == "全部完成"

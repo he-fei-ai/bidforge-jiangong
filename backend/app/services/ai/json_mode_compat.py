@@ -26,11 +26,15 @@
 
 ⚠️ 新增厂商 / 新增报错形态时，**只改本文件**；两处调用方不得内联关键词。
 """
+
 from __future__ import annotations
 
 __all__ = [
-    "JSON_MODE_TOKENS", "JSON_MODE_NEGATION_TOKENS", "JSON_MODE_HINT_TOKENS",
-    "json_mode_unsupported", "response_format_rejected",
+    "JSON_MODE_TOKENS",
+    "JSON_MODE_NEGATION_TOKENS",
+    "JSON_MODE_HINT_TOKENS",
+    "json_mode_unsupported",
+    "response_format_rejected",
 ]
 
 #: 直接命中关键词：token 本身已唯一指向 JSON 模式，单独出现即可判定。
@@ -85,7 +89,11 @@ JSON_MODE_NEGATION_TOKENS: tuple[str, ...] = (
 #: 另收录去下划线形态（``json_mode`` / ``json_object`` 含下划线，
 #: 厂商报错里两种写法都存在）。
 JSON_MODE_HINT_TOKENS: tuple[str, ...] = (
-    "json", "jsonmode", "jsonobject", "json_mode", "json_object",
+    "json",
+    "jsonmode",
+    "jsonobject",
+    "json_mode",
+    "json_object",
 )
 
 #: HTTP 层「参数被拒」的兜底关键词：厂商直接点名被拒参数名。
@@ -109,8 +117,7 @@ def json_mode_unsupported(err) -> bool:
         return False
     if any(tok in s for tok in JSON_MODE_TOKENS):
         return True
-    if (any(tok in s for tok in JSON_MODE_NEGATION_TOKENS)
-            and any(tok in s for tok in JSON_MODE_HINT_TOKENS)):
+    if any(tok in s for tok in JSON_MODE_NEGATION_TOKENS) and any(tok in s for tok in JSON_MODE_HINT_TOKENS):
         return True
     return "400" in s and "json" in s
 

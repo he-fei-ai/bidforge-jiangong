@@ -1,9 +1,11 @@
 """AI 配置路由 · 连通性 / 健康（测试连接、预检、健康快照）。"""
+
 import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
 
+from app.config import settings
 from app.db import read_db
 from app.models import AIConfigTest
 from app.services.ai.provider_factory import (
@@ -15,6 +17,7 @@ from app.services.ai.provider_factory import (
     request_mode_label,
 )
 from app.services.crypto import decrypt_api_key
+from app.services.redaction import redact_sensitive_text
 
 from ._common import _classify_error, _dns_precheck_async, _same_base_url
 
@@ -38,12 +41,11 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
     db_request_mode = ""
     if config_id:
         cur = await db.execute(
-            "SELECT base_url, api_key_encrypted, model, request_mode"
-            " FROM ai_config WHERE id=?", (config_id,))
+            "SELECT base_url, api_key_encrypted, model, request_mode" " FROM ai_config WHERE id=?", (config_id,)
+        )
         row = await cur.fetchone()
         if not row:
-            return {"ok": False, "error": "配置不存在（可能已被删除）",
-                    "suggestion": "请刷新页面后重新选择配置"}
+            return {"ok": False, "error": "配置不存在（可能已被删除）", "suggestion": "请刷新页面后重新选择配置"}
         saved_base_url = (row["base_url"] or "").strip()
         # 已保存 Key 与其 Base URL 是一组不可拆分的凭据。地址被改写时若仍从
         # DB 取旧 Key，会把密钥发给任意请求方指定的外部地址，属于密钥外泄。
@@ -81,10 +83,13 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
 
     # Step 0: 参数校验 —— 没填 key 就拒绝，别让 httpx 去拼出 "Bearer "
     if not base_url:
-        return {"ok": False, "error": "base_url 不能为空", "suggestion": "请填写 API Base URL，如 https://api.openai.com/v1"}
+        return {
+            "ok": False,
+            "error": "base_url 不能为空",
+            "suggestion": "请填写 API Base URL，如 https://api.openai.com/v1",
+        }
     if not model:
-        return {"ok": False, "error": "模型名称为空",
-                "suggestion": "请先选择或填写模型名称，再测试连接"}
+        return {"ok": False, "error": "模型名称为空", "suggestion": "请先选择或填写模型名称，再测试连接"}
     if not api_key:
         return {
             "ok": False,
@@ -126,15 +131,20 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
     # ✅ 增强：探测 max_tokens 与保存链路同一口径钳制（256..200000）。
     #    原实现只做 `int(...) or 8192`，手工请求可把 10^9 一路发给厂商拿 400，
     #    错误被归因为「Key/模型不对」。前端表单已限 min/max，这里补 API 层兜底。
-    probe_max_tokens = clamp_config_numbers(
-        {"max_tokens": int(getattr(data, "max_tokens", 0) or 0) or 8192}
-    )["max_tokens"]
+    probe_max_tokens = clamp_config_numbers({"max_tokens": int(getattr(data, "max_tokens", 0) or 0) or 8192})[
+        "max_tokens"
+    ]
     try:
-        provider = _build_provider(data.provider_name, api_key, base_url, model,
-                                   max_tokens=probe_max_tokens, timeout=120)
+        provider = _build_provider(
+            data.provider_name, api_key, base_url, model, max_tokens=probe_max_tokens, timeout=120
+        )
     except ValueError as e:
-        return {"ok": False, "error": str(e), "category": "config",
-                "suggestion": "请检查供应商、Base URL 与模型名称是否填写完整"}
+        return {
+            "ok": False,
+            "error": str(e),
+            "category": "config",
+            "suggestion": "请检查供应商、Base URL 与模型名称是否填写完整",
+        }
 
     import time as _t
 
@@ -149,9 +159,9 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
         return total
 
     async def _probe_chat() -> str:
-        return await provider.chat([{"role": "user", "content": "回复ok"}],
-                                   temperature=provider.temperature,
-                                   max_tokens=probe_max_tokens)
+        return await provider.chat(
+            [{"role": "user", "content": "回复ok"}], temperature=provider.temperature, max_tokens=probe_max_tokens
+        )
 
     probes = {"stream": _probe_stream, "chat": _probe_chat}
     order = ["stream", "chat"] if prefer_stream else ["chat", "stream"]
@@ -207,8 +217,12 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
     # （显式选了流式就用流式错误；normal / auto 时正文生成走 chat，以 chat 为准），
     # 同时附带另一条路径的错误便于对照差异。
     primary = "stream" if probe_mode == "stream" else "chat"
-    err = (probe_errors.get(primary) or probe_errors.get("chat")
-           or probe_errors.get("stream") or RuntimeError("厂商返回了空响应"))
+    err = (
+        probe_errors.get(primary)
+        or probe_errors.get("chat")
+        or probe_errors.get("stream")
+        or RuntimeError("厂商返回了空响应")
+    )
     classified = _classify_error(err)
     # 如果超时但网络预检 OK，给用户特别提示（NVIDIA 等美国厂商在国内就是慢）
     if classified["category"] == "timeout" and pre.get("ok"):
@@ -222,11 +236,9 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
     _stream_err = probe_errors.get("stream")
     if _chat_err is not None and _stream_err is not None:
         if primary == "chat":
-            classified["raw"] = (f"非流式：{classified.get('raw', '')}"
-                                 f" ｜ 流式：{str(_stream_err)[:150]}")
+            classified["raw"] = f"非流式：{classified.get('raw', '')}" f" ｜ 流式：{str(_stream_err)[:150]}"
         else:
-            classified["raw"] = (f"流式：{classified.get('raw', '')}"
-                                 f" ｜ 非流式：{str(_chat_err)[:150]}")
+            classified["raw"] = f"流式：{classified.get('raw', '')}" f" ｜ 非流式：{str(_chat_err)[:150]}"
     classified["network"] = pre
     classified["latency_ms"] = elapsed_ms
     return {
@@ -235,7 +247,7 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
         "suggestion": classified["suggestion"],
         "category": classified["category"],
         "label": classified.get("label", ""),
-        "raw": classified.get("raw", str(err)),
+        "raw": redact_sensitive_text(classified.get("raw", str(err))),
         "model": model,
         "base_url": base_url,
         "network": pre,
@@ -251,8 +263,7 @@ async def precheck_config(data: AIConfigTest, db=Depends(read_db)):
     """
     base_url = (data.base_url or "").strip()
     if not base_url and (data.config_id or "").strip():
-        cur = await db.execute(
-            "SELECT base_url FROM ai_config WHERE id=?", (data.config_id.strip(),))
+        cur = await db.execute("SELECT base_url FROM ai_config WHERE id=?", (data.config_id.strip(),))
         row = await cur.fetchone()
         if row:
             base_url = (row["base_url"] or "").strip()
@@ -279,8 +290,9 @@ async def precheck_all(db=Depends(read_db)):
     import asyncio
 
     cur = await db.execute(
-        "SELECT id, provider_name, model, base_url, request_mode FROM ai_config"
-        " ORDER BY priority ASC, updated_at DESC")
+        "SELECT id, provider_name, model, base_url, request_mode, enabled FROM ai_config"
+        " ORDER BY priority ASC, updated_at DESC"
+    )
     rows = [dict(r) for r in await cur.fetchall()]
 
     targets = []
@@ -297,12 +309,16 @@ async def precheck_all(db=Depends(read_db)):
     async def _one(item):
         r, url = item
         res = await _dns_precheck_async(url)
+        # ✅ R179：回传用户停用状态，避免把「已停用」的配置当作可用备胎
+        enabled_val = r.get("enabled", 1)
+        enabled = True if enabled_val is None else int(enabled_val or 0) != 0
         return {
             "id": r["id"],
             "provider_name": r["provider_name"],
             "model": r["model"],
             "base_url": url,
             "request_mode": normalize_request_mode(r.get("request_mode")),
+            "enabled": enabled,
             "ok": bool(res.get("ok")),
             "message": res.get("message") or ("可达" if res.get("ok") else "不可达"),
             "ip": res.get("ip", ""),
@@ -317,6 +333,8 @@ async def precheck_all(db=Depends(read_db)):
         "ok_count": ok_count,
         "fail_count": len(results) - ok_count,
         "skipped_no_url": len(rows) - len(results),
+        # ✅ R179：其中被用户停用（enabled=0）的条数——它们即使网络可达也不参与调用
+        "disabled_by_user": sum(1 for r in results if not r["enabled"]),
     }
 
 
@@ -362,8 +380,9 @@ async def configs_health(db=Depends(read_db)):
 
     cur = await db.execute(
         "SELECT id, provider_name, plan, api_key_encrypted, base_url, model,"
-        " env, is_active, priority, request_mode FROM ai_config"
-        " ORDER BY is_active DESC, priority ASC, updated_at DESC")
+        " env, is_active, priority, request_mode, enabled FROM ai_config"
+        " ORDER BY is_active DESC, priority ASC, updated_at DESC"
+    )
     rows = [dict(r) for r in await cur.fetchall()]
 
     async def _net(url: str) -> dict:
@@ -375,8 +394,7 @@ async def configs_health(db=Depends(read_db)):
             # 地址格式非法 / 预检自身异常都不能让整份体检失败
             return {"ok": False, "step": "url", "message": str(e)}
 
-    nets = await asyncio.gather(*[_net((r.get("base_url") or "").strip())
-                                  for r in rows])
+    nets = await asyncio.gather(*[_net((r.get("base_url") or "").strip()) for r in rows])
 
     items: list[dict] = []
     for r, net in zip(rows, nets):
@@ -388,41 +406,49 @@ async def configs_health(db=Depends(read_db)):
         env = str(r.get("env") or "")
         in_env = (env == "") or (env == active_env)
         provider = str(r.get("provider_name") or "")
-        items.append({
-            "id": r["id"],
-            "provider_name": provider,
-            "model": str(r.get("model") or ""),
-            "base_url": url,
-            "plan": str(r.get("plan") or "pay_as_you_go"),
-            "is_active": bool(r.get("is_active")),
-            "priority": r.get("priority"),
-            "env": env,
-            "in_current_env": in_env,
-            "request_mode": normalize_request_mode(r.get("request_mode")),
-            "request_mode_label": request_mode_label(r.get("request_mode")),
-            # 密钥三态（与 GET /ai/config 同口径）
-            "has_key": has_key,
-            "key_broken": key_broken,
-            "key_hint": api_key[-4:] if has_key else "",
-            "no_url": not bool(url),
-            # 厂商是否被运行时开关禁用（与运行时选模同一来源）
-            "disabled": provider in disabled,
-            # 网络（只 DNS + TCP，不发认证请求、不消耗额度）
-            "network_ok": bool(net.get("ok")),
-            "network_step": str(net.get("step") or ""),
-            "network_ip": str(net.get("ip") or ""),
-            "network_message": str(net.get("message") or ""),
-            # ✅ R103（2026-10-18 · 日志审计遗留 L1 收口）：运行时健康快照
-            #    （实时成功率样本/死配置判定/熔断/冷却）。判据单一事实源在
-            #    provider_factory.provider_health_snapshot，与选路同源；
-            #    此前「配置看着正常、却被自动剔除出降级链」在 UI 完全不可见
-            #    （生产实证：降级链 9→3 用户不知该清理谁）。加法式新键。
-            "runtime_health": provider_health_snapshot(
-                provider, str(r.get("model") or ""), r["id"], url),
-            # 综合：这条配置在当前环境下是否真的能用上
-            "usable": bool(has_key and not key_broken and url and in_env
-                           and provider not in disabled),
-        })
+        # ✅ R179（2026-11-05）：用户停用（enabled=0）此前完全没进体检判定 ——
+        #    这样一条配置会被报成「可用」，但降级链/视觉候选/场景路由都不会用它，
+        #    即「体检说能用、实际不用」。现纳入结论并单独计数。
+        enabled_val = r.get("enabled", 1)
+        enabled = True if enabled_val is None else int(enabled_val or 0) != 0
+        items.append(
+            {
+                "id": r["id"],
+                "provider_name": provider,
+                "model": str(r.get("model") or ""),
+                "base_url": url,
+                "plan": str(r.get("plan") or "pay_as_you_go"),
+                "is_active": bool(r.get("is_active")),
+                "priority": r.get("priority"),
+                "env": env,
+                "in_current_env": in_env,
+                "request_mode": normalize_request_mode(r.get("request_mode")),
+                "request_mode_label": request_mode_label(r.get("request_mode")),
+                # 密钥三态（与 GET /ai/config 同口径）
+                "has_key": has_key,
+                "key_broken": key_broken,
+                "key_hint": api_key[-4:] if has_key else "",
+                "no_url": not bool(url),
+                # 厂商是否被运行时开关禁用（与运行时选模同一来源）
+                "disabled": provider in disabled,
+                # 用户是否显式停用该配置（enabled=0；与厂商开关是两层独立开关）
+                "enabled": enabled,
+                "disabled_by_user": not enabled,
+                # 网络（只 DNS + TCP，不发认证请求、不消耗额度）
+                "network_ok": bool(net.get("ok")),
+                "network_step": str(net.get("step") or ""),
+                "network_ip": str(net.get("ip") or ""),
+                "network_message": str(net.get("message") or ""),
+                # ✅ R103（2026-10-18 · 日志审计遗留 L1 收口）：运行时健康快照
+                #    （实时成功率样本/死配置判定/熔断/冷却）。判据单一事实源在
+                #    provider_factory.provider_health_snapshot，与选路同源；
+                #    此前「配置看着正常、却被自动剔除出降级链」在 UI 完全不可见
+                #    （生产实证：降级链 9→3 用户不知该清理谁）。加法式新键。
+                "runtime_health": provider_health_snapshot(provider, str(r.get("model") or ""), r["id"], url),
+                # 综合：这条配置在当前环境下是否真的能用上（停用即不可用）
+                "usable": bool(has_key and not key_broken and url and in_env and provider not in disabled and enabled),
+            }
+        )
 
     summary = {
         "total": len(items),
@@ -433,14 +459,14 @@ async def configs_health(db=Depends(read_db)):
         "no_url": sum(1 for i in items if i["no_url"]),
         "out_of_env": sum(1 for i in items if not i["in_current_env"]),
         "disabled": sum(1 for i in items if i["disabled"]),
+        # ✅ R179：被用户停用（enabled=0）的条数（运行时不参与任何调用）
+        "disabled_by_user": sum(1 for i in items if i["disabled_by_user"]),
         "network_ok": sum(1 for i in items if i["network_ok"]),
-        "network_unreachable": sum(1 for i in items
-                                   if i["base_url"] and not i["network_ok"]),
+        "network_unreachable": sum(1 for i in items if i["base_url"] and not i["network_ok"]),
         # ✅ R103：实时成功率过低（已被自动剔除出降级链）的配置条数。
         #    与 items[].runtime_health.dead 同源，供体检汇总一眼看出
         #    「该清理谁」；冷启动/无样本时为 0（不误报）。
-        "runtime_dead": sum(1 for i in items
-                            if (i.get("runtime_health") or {}).get("dead")),
+        "runtime_dead": sum(1 for i in items if (i.get("runtime_health") or {}).get("dead")),
     }
     return {
         "items": items,
@@ -485,8 +511,7 @@ async def ai_health(db=Depends(read_db)):
     breaker = {}
     try:
         for name, entry in getattr(circuit_breaker, "_per_provider", {}).items():
-            breaker[name] = {"state": entry.get("state"),
-                             "failures": entry.get("failures", 0)}
+            breaker[name] = {"state": entry.get("state"), "failures": entry.get("failures", 0)}
     except Exception:
         breaker = {}
 
@@ -511,15 +536,20 @@ async def ai_health(db=Depends(read_db)):
         "active_env": _env,
         # 环境值损坏的原因描述（空串 = 正常）；前端据此给出「重置为通用」入口
         "env_error": env_error,
+        # ✅ R175（BUG-04）：降级链生效上限，前端据此说明「仅前 N 条参与」
+        "fallback_chain_max": int(getattr(settings, "ai_fallback_chain_max", 3) or 3),
     }
 
     if not row:
         if env_error:
             # 不把「环境值损坏」误报成「尚未配置模型」——两者提示与修法完全不同
-            base.update({"status": "env_corrupt",
-                         "fallback_count": 0,
-                         "hint": f"{env_error}；请在「运行时设置」把当前生效环境清空"
-                                 "（恢复通用环境）后重试"})
+            base.update(
+                {
+                    "status": "env_corrupt",
+                    "fallback_count": 0,
+                    "hint": f"{env_error}；请在「运行时设置」把当前生效环境清空" "（恢复通用环境）后重试",
+                }
+            )
         else:
             # ✅ 2026-10-06（B-7 · 多环境下的误导性提示）：多环境开启后，
             #    ``is_active=1`` 是**全局唯一**的（save/toggle 都会先把其它行清 0），
@@ -537,10 +567,9 @@ async def ai_health(db=Depends(read_db)):
                         f"当前生效环境「{_env}」下没有可用的「当前使用」配置"
                         "（该标记全局唯一，当前它属于其它环境或通用环境），"
                         "所有 AI 生成能力将不可用：请在列表中把目标环境的配置"
-                        "点「设为当前使用」，或把生效环境切回通用（清空）")
-            base.update({"status": "not_configured",
-                         "fallback_count": 0,
-                         "hint": hint})
+                        "点「设为当前使用」，或把生效环境切回通用（清空）"
+                    )
+            base.update({"status": "not_configured", "fallback_count": 0, "hint": hint})
         return base
 
     d = row
@@ -558,8 +587,10 @@ async def ai_health(db=Depends(read_db)):
         status, hint = "configured", ""
     elif key_broken:
         status = "key_invalid"
-        hint = ("已保存的 API Key 无法解密（常见于更换过加密密钥 FERNET_KEY "
-                "或删除过 data/secret_key.key），请重新填写并保存该配置的 API Key")
+        hint = (
+            "已保存的 API Key 无法解密（常见于更换过加密密钥 FERNET_KEY "
+            "或删除过 data/secret_key.key），请重新填写并保存该配置的 API Key"
+        )
     else:
         status = "no_key"
         hint = "当前使用配置尚未填写 API Key，所有 AI 生成能力不可用，请补填后保存"
@@ -574,35 +605,36 @@ async def ai_health(db=Depends(read_db)):
             supports_vision = p.supports_vision()
     except Exception as e:
         # 视觉能力探测属可选增强，失败按不支持处理，不影响连通性判定主流程
-        logger.debug("supports_vision 探测失败（provider=%s，按不支持处理）: %s",
-                     d.get("provider_name", ""), e)
+        logger.debug("supports_vision 探测失败（provider=%s，按不支持处理）: %s", d.get("provider_name", ""), e)
 
     try:
         fallback_count = len(await _fallback_chain())
     except Exception:
         fallback_count = 0
 
-    base.update({
-        # key 密文存在但解不开时状态是「未就绪」，否则前端会显示绿色却实际调不通
-        "status": status,
-        "hint": hint,
-        "id": d["id"],
-        "provider": d["provider_name"],
-        "model": d["model"],
-        "base_url": d["base_url"],
-        "timeout": d["timeout"],
-        # ✅ 增强：`concurrency` 为配置值（落库），`live_concurrency` 为并发控制器
-        #    当前实际生效值（自适应调整会随时改动）。原实现只回一个 `concurrency`，
-        #    前端标着「当前并发」显示的却是配置值 —— 与运行时脱节。
-        "concurrency": d["concurrency"],
-        "live_concurrency": getattr(concurrency_controller, "current", None),
-        "supports_vision": supports_vision,
-        "fallback_count": fallback_count,
-        "key_configured": key_configured,
-        "key_broken": key_broken,
-        # ✅ 新增：请求方式（normal / stream）—— 排查「同一份配置，
-        #    为什么这条链路首字节慢/长正文易断」时必须能看到当前生效值。
-        "request_mode": normalize_request_mode(d.get("request_mode")),
-        "request_mode_label": request_mode_label(d.get("request_mode")),
-    })
+    base.update(
+        {
+            # key 密文存在但解不开时状态是「未就绪」，否则前端会显示绿色却实际调不通
+            "status": status,
+            "hint": hint,
+            "id": d["id"],
+            "provider": d["provider_name"],
+            "model": d["model"],
+            "base_url": d["base_url"],
+            "timeout": d["timeout"],
+            # ✅ 增强：`concurrency` 为配置值（落库），`live_concurrency` 为并发控制器
+            #    当前实际生效值（自适应调整会随时改动）。原实现只回一个 `concurrency`，
+            #    前端标着「当前并发」显示的却是配置值 —— 与运行时脱节。
+            "concurrency": d["concurrency"],
+            "live_concurrency": getattr(concurrency_controller, "current", None),
+            "supports_vision": supports_vision,
+            "fallback_count": fallback_count,
+            "key_configured": key_configured,
+            "key_broken": key_broken,
+            # ✅ 新增：请求方式（normal / stream）—— 排查「同一份配置，
+            #    为什么这条链路首字节慢/长正文易断」时必须能看到当前生效值。
+            "request_mode": normalize_request_mode(d.get("request_mode")),
+            "request_mode_label": request_mode_label(d.get("request_mode")),
+        }
+    )
     return base

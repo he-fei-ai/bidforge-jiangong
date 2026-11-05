@@ -17,6 +17,7 @@
 注：``httpx.AsyncClient`` 构造是同步且惰性的（不发起网络），
 因此本模块全部为同步函数，无 await 点，无需加锁。
 """
+
 import asyncio
 import logging
 

@@ -14,6 +14,7 @@ reencrypt_token 四个纯函数（加法式，既有 encrypt_api_key / decrypt_a
   E. 迁移窗口（历史密钥解旧密文 / 当前密钥重加密）
   F. 字节体检 + 静态护栏（既有导出签名不变、模块内无重名定义）
 """
+
 import ast
 import inspect
 from pathlib import Path
@@ -69,8 +70,7 @@ class TestIsValidMasterKey:
         assert crypto.is_valid_master_key(None) is False
 
     def test_garbage_is_invalid(self):
-        for bad in ("not-a-valid-key", "!!!", "short", "gAAAAAA",
-                    "a" * 44, "=" * 44):
+        for bad in ("not-a-valid-key", "!!!", "short", "gAAAAAA", "a" * 44, "=" * 44):
             assert crypto.is_valid_master_key(bad) is False, bad
 
     def test_whitespace_around_valid_key_is_accepted(self):
@@ -110,23 +110,19 @@ class TestMasterKeyPathOutlet:
         for node in tree.body:
             if not isinstance(node, ast.Assign):
                 continue
-            if not any(isinstance(t, ast.Name) and t.id == "_KEY_FILE"
-                       for t in node.targets):
+            if not any(isinstance(t, ast.Name) and t.id == "_KEY_FILE" for t in node.targets):
                 continue
-            literals = [n.value for n in ast.walk(node)
-                        if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+            literals = [n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
             if "secret_key.key" in literals:
                 assign_to_key_file.append(node)
-        assert len(assign_to_key_file) == 1, (
-            f"`_KEY_FILE` 的定义处应为 1 处，实测 {len(assign_to_key_file)} 处")
+        assert len(assign_to_key_file) == 1, f"`_KEY_FILE` 的定义处应为 1 处，实测 {len(assign_to_key_file)} 处"
 
         # 任何函数体里都不得再出现该字面量（否则就是第二份路径取值）
         offenders = []
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 for sub in ast.walk(node):
-                    if isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
-                            and sub.value == "secret_key.key":
+                    if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and sub.value == "secret_key.key":
                         offenders.append(node.name)
         assert not offenders, f"以下函数体内再次出现了密钥路径字面量：{sorted(set(offenders))}"
 
@@ -218,18 +214,18 @@ class TestRotateMasterKey:
     def test_write_failure_reports_structured_error(self, tmp_path, monkeypatch):
         """落盘失败：不得抛异常、不落盘、也不清空在用缓存。"""
         blocker = tmp_path / "blocker"
-        blocker.write_text("x", encoding="utf-8")   # 父路径是文件 → mkdir 必失败
+        blocker.write_text("x", encoding="utf-8")  # 父路径是文件 → mkdir 必失败
         key_path = blocker / "secret_key.key"
         monkeypatch.setattr(crypto, "_KEY_FILE", key_path)
 
-        crypto._get_fernet()       # 先让缓存建立
+        crypto._get_fernet()  # 先让缓存建立
         assert crypto._fernet is not None
 
         res = crypto.rotate_master_key()
         assert res["ok"] is False
         assert res["error"]
-        assert not key_path.exists()        # 失败不落盘
-        assert crypto._fernet is not None   # 失败不得清掉在用密钥
+        assert not key_path.exists()  # 失败不落盘
+        assert crypto._fernet is not None  # 失败不得清掉在用密钥
 
 
 class TestRotateKeyInvariant:
@@ -249,8 +245,7 @@ class TestRotateKeyInvariant:
         assert crypto.decrypt_api_key(ct) == ""
         # 而历史密钥仍能解出 —— 这就是「迁移窗口」存在的前提
         assert crypto.decrypt_with_legacy_key(ct, old_key) == plaintext
-        assert crypto.decrypt_with_legacy_key(
-            ct, Fernet.generate_key().decode()) == ""
+        assert crypto.decrypt_with_legacy_key(ct, Fernet.generate_key().decode()) == ""
 
     def test_reencrypted_ciphertext_survives_a_second_rotation(self, key_file):
         """两次轮转 + 每次迁移：明文必须逐字保留。"""
@@ -294,8 +289,7 @@ class TestMigrationWindow:
     def test_decrypt_with_legacy_key_rejects_wrong_key(self, key_file):
         key = _write_valid_key(key_file)
         ct = Fernet(key.encode()).encrypt(b"secret").decode()
-        assert crypto.decrypt_with_legacy_key(
-            ct, Fernet.generate_key().decode()) == ""
+        assert crypto.decrypt_with_legacy_key(ct, Fernet.generate_key().decode()) == ""
 
     def test_reencrypt_token_is_a_noop_on_undecryptable_input(self, key_file):
         _write_valid_key(key_file)
@@ -308,7 +302,7 @@ class TestMigrationWindow:
         old_key = _read_key(key_file)
         ct = crypto.encrypt_api_key("sk-需要迁移")
         crypto.rotate_master_key()
-        assert crypto.reencrypt_token(ct) == ""                   # 缺历史密钥 → 搬不动
+        assert crypto.reencrypt_token(ct) == ""  # 缺历史密钥 → 搬不动
         migrated = crypto.reencrypt_token(ct, legacy_key=old_key)
         assert migrated
         assert crypto.decrypt_api_key(migrated) == "sk-需要迁移"
@@ -329,10 +323,9 @@ class TestMigrationWindow:
         crypto.rotate_master_key()
         ct_new = crypto.encrypt_api_key("sk-B")
 
-        assert crypto.decrypt_api_key(ct_old) == ""       # 旧密文失效
+        assert crypto.decrypt_api_key(ct_old) == ""  # 旧密文失效
         assert crypto.decrypt_api_key(ct_new) == "sk-B"
-        assert crypto.decrypt_with_legacy_key(
-            ct_old, _old_key_of(key_file)) == "sk-A"
+        assert crypto.decrypt_with_legacy_key(ct_old, _old_key_of(key_file)) == "sk-A"
 
 
 def _old_key_of(key_file):
@@ -359,8 +352,7 @@ def _src_bytes():
 
 def _func_node(name):
     tree = ast.parse(_src_text())
-    return next(n for n in tree.body
-                if isinstance(n, ast.FunctionDef) and n.name == name)
+    return next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
 
 
 class TestByteAndStaticGuards:
@@ -380,33 +372,28 @@ class TestByteAndStaticGuards:
         assert str(inspect.signature(crypto.is_encrypted)) == "(raw: str) -> bool"
 
     def test_new_functions_have_keyword_safe_signatures(self):
-        assert str(inspect.signature(crypto.rotate_master_key)) == \
-            "(new_key: 'str | None' = None) -> 'dict'"
-        assert str(inspect.signature(crypto.decrypt_with_legacy_key)) == \
-            "(enc: 'str', legacy_key: 'str') -> 'str'"
-        assert str(inspect.signature(crypto.reencrypt_token)) == \
-            "(enc: 'str', legacy_key: 'str' = '') -> 'str'"
+        assert str(inspect.signature(crypto.rotate_master_key)) == "(new_key: 'str | None' = None) -> 'dict'"
+        assert str(inspect.signature(crypto.decrypt_with_legacy_key)) == "(enc: 'str', legacy_key: 'str') -> 'str'"
+        assert str(inspect.signature(crypto.reencrypt_token)) == "(enc: 'str', legacy_key: 'str' = '') -> 'str'"
         assert str(inspect.signature(crypto.backup_master_key)) == "() -> 'str'"
-        assert str(inspect.signature(crypto.is_valid_master_key)) == \
-            "(key: str) -> bool"
+        assert str(inspect.signature(crypto.is_valid_master_key)) == "(key: str) -> bool"
         assert str(inspect.signature(crypto.master_key_path)) == "() -> 'os.PathLike'"
 
     def test_no_duplicate_top_level_names(self):
         """editor 重复插入会把同一函数写两份（历史踩坑形态）。"""
         tree = ast.parse(_src_text())
-        names = [n.name for n in tree.body
-                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                   ast.ClassDef))]
+        names = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
         dupes = sorted({n for n in names if names.count(n) > 1})
         assert not dupes, f"crypto.py 存在重名顶层定义：{dupes}"
 
     def test_rotate_clears_the_encrypted_cache(self):
         """摘掉清缓存那行会让「已轮换仍用旧钥」静默发生。"""
         fn = _func_node("rotate_master_key")
-        assigns = [n for n in ast.walk(fn)
-                   if isinstance(n, ast.Assign)
-                   and any(isinstance(t, ast.Name) and t.id == "_fernet"
-                           for t in n.targets)]
+        assigns = [
+            n
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "_fernet" for t in n.targets)
+        ]
         assert assigns, "rotate_master_key 必须显式清空模块级加密器缓存"
         const = assigns[-1].value
         assert isinstance(const, ast.Constant) and const.value is None
@@ -416,17 +403,14 @@ class TestByteAndStaticGuards:
         fn = _func_node("rotate_master_key")
         refs = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
         assert "_KEY_FILE" in refs
-        literals = {n.value for n in ast.walk(fn)
-                    if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        literals = {n.value for n in ast.walk(fn) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
         assert "secret_key.key" not in literals
 
     def test_fail_soft_helpers_never_raise(self):
         """三个辅助函数体内必须有 try/except 兜底（不抛异常承诺）。"""
-        for name in ("backup_master_key", "decrypt_with_legacy_key",
-                     "reencrypt_token"):
+        for name in ("backup_master_key", "decrypt_with_legacy_key", "reencrypt_token"):
             fn = _func_node(name)
-            assert any(isinstance(n, ast.Try) for n in ast.walk(fn)), \
-                f"{name} 缺少 try/except 兜底"
+            assert any(isinstance(n, ast.Try) for n in ast.walk(fn)), f"{name} 缺少 try/except 兜底"
 
     def test_reencrypt_actually_calls_the_legacy_fallback(self):
         """迁移兜底必须**真的被调用**，而不只是「函数名在场」。
@@ -436,10 +420,9 @@ class TestByteAndStaticGuards:
         这里用 AST 找 reencrypt_token 函数体里的**真实调用点**。
         """
         fn = _func_node("reencrypt_token")
-        calls = [n for n in ast.walk(fn)
-                 if isinstance(n, ast.Call)
-                 and isinstance(n.func, ast.Name)
-                 and n.func.id == "decrypt_with_legacy_key"]
-        assert calls, (
-            "reencrypt_token 必须实际调用 decrypt_with_legacy_key，"
-            "否则主密钥轮换后的旧密文永远无法迁移")
+        calls = [
+            n
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "decrypt_with_legacy_key"
+        ]
+        assert calls, "reencrypt_token 必须实际调用 decrypt_with_legacy_key，" "否则主密钥轮换后的旧密文永远无法迁移"

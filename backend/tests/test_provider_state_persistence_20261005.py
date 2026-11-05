@@ -12,6 +12,7 @@ F4. flush 跳过默认状态（避免全 0 默认态刷屏）
 F5. flush 顺手清理 24h 未更新的陈旧行
 F6. 表缺失时 warmup / flush 均静默降级，不影响主流程
 """
+
 from __future__ import annotations
 
 import json
@@ -51,7 +52,8 @@ class TestSnapshotRestore:
     def test_restore_downgrades_expired_open_to_half_open(self, cb) -> None:
         snap = {
             "p1": {
-                "state": "OPEN", "failures": 5,
+                "state": "OPEN",
+                "failures": 5,
                 "opened_at": time.time() - 9999,
                 "effective_cooldown": 15,
                 "last_failure_at": 0.0,
@@ -64,7 +66,8 @@ class TestSnapshotRestore:
     def test_restore_keeps_fresh_open(self, cb) -> None:
         snap = {
             "p1": {
-                "state": "OPEN", "failures": 5,
+                "state": "OPEN",
+                "failures": 5,
                 "opened_at": time.time() - 1,
                 "effective_cooldown": 15,
                 "last_failure_at": 0.0,
@@ -96,8 +99,7 @@ class TestFlushWrites:
 
         await pf.flush_provider_state_to_db()
 
-        cur = await db_conn.execute(
-            "SELECT provider_name, kind, payload_json FROM ai_provider_state ORDER BY kind")
+        cur = await db_conn.execute("SELECT provider_name, kind, payload_json FROM ai_provider_state ORDER BY kind")
         rows = await cur.fetchall()
         assert len(rows) == 2
         quota_row = [r for r in rows if r[1] == pf._STATE_KIND_QUOTA][0]
@@ -129,8 +131,7 @@ class TestFlushWrites:
         pf._note_quota_failure("p1", RuntimeError("HTTP 429"))  # 新冷却窗口
         await pf.flush_provider_state_to_db()
 
-        cur = await db_conn.execute(
-            "SELECT COUNT(*) FROM ai_provider_state WHERE provider_name='p1'")
+        cur = await db_conn.execute("SELECT COUNT(*) FROM ai_provider_state WHERE provider_name='p1'")
         row = await cur.fetchone()
         assert row[0] == 1, "同一 provider + kind 应始终只有一行（UPSERT）"
 
@@ -149,11 +150,18 @@ class TestWarmupReads:
         await db_conn.execute(
             "INSERT INTO ai_provider_state(provider_name, kind, payload_json, updated_at) "
             "VALUES('p2', ?, ?, datetime('now','localtime'))",
-            (pf._STATE_KIND_CB, json.dumps({
-                "state": "OPEN", "failures": 5,
-                "opened_at": time.time() - 1, "effective_cooldown": 15,
-                "last_failure_at": 0.0,
-            })),
+            (
+                pf._STATE_KIND_CB,
+                json.dumps(
+                    {
+                        "state": "OPEN",
+                        "failures": 5,
+                        "opened_at": time.time() - 1,
+                        "effective_cooldown": 15,
+                        "last_failure_at": 0.0,
+                    }
+                ),
+            ),
         )
         await db_conn.commit()
 
@@ -182,11 +190,18 @@ class TestWarmupReads:
         await db_conn.execute(
             "INSERT INTO ai_provider_state(provider_name, kind, payload_json, updated_at) "
             "VALUES('p1', ?, ?, datetime('now','localtime'))",
-            (pf._STATE_KIND_CB, json.dumps({
-                "state": "OPEN", "failures": 5,
-                "opened_at": time.time() - 9999, "effective_cooldown": 15,
-                "last_failure_at": 0.0,
-            })),
+            (
+                pf._STATE_KIND_CB,
+                json.dumps(
+                    {
+                        "state": "OPEN",
+                        "failures": 5,
+                        "opened_at": time.time() - 9999,
+                        "effective_cooldown": 15,
+                        "last_failure_at": 0.0,
+                    }
+                ),
+            ),
         )
         await db_conn.commit()
 
@@ -215,17 +230,18 @@ class TestCleanup:
         """超过 24h 未更新的行在下次 flush 时被清理。"""
         await db_conn.execute(
             "INSERT INTO ai_provider_state(provider_name, kind, payload_json, updated_at) "
-            "VALUES('stale', 'quota_cooldown', '{}', datetime('now','localtime','-25 hours'))")
+            "VALUES('stale', 'quota_cooldown', '{}', datetime('now','localtime','-25 hours'))"
+        )
         await db_conn.execute(
             "INSERT INTO ai_provider_state(provider_name, kind, payload_json, updated_at) "
-            "VALUES('fresh', 'quota_cooldown', '{}', datetime('now','localtime'))")
+            "VALUES('fresh', 'quota_cooldown', '{}', datetime('now','localtime'))"
+        )
         await db_conn.commit()
 
         pf._note_quota_failure("p1", RuntimeError("HTTP 429"))
         await pf.flush_provider_state_to_db()
 
-        cur = await db_conn.execute(
-            "SELECT provider_name FROM ai_provider_state ORDER BY provider_name")
+        cur = await db_conn.execute("SELECT provider_name FROM ai_provider_state ORDER BY provider_name")
         names = [r[0] for r in await cur.fetchall()]
         assert "stale" not in names, "24h 未更新的陈旧行应被清理"
         assert "fresh" in names
@@ -243,6 +259,7 @@ class TestGracefulDegradation:
 
     async def test_flush_missing_table_does_not_raise(self, db_conn, caplog) -> None:
         import logging
+
         await db_conn.execute("DROP TABLE ai_provider_state")
         await db_conn.commit()
 
@@ -255,7 +272,8 @@ class TestGracefulDegradation:
     async def test_warmup_malformed_json_does_not_crash(self, db_conn) -> None:
         await db_conn.execute(
             "INSERT INTO ai_provider_state(provider_name, kind, payload_json, updated_at) "
-            "VALUES('p1', 'quota_cooldown', 'not-json', datetime('now','localtime'))")
+            "VALUES('p1', 'quota_cooldown', 'not-json', datetime('now','localtime'))"
+        )
         await db_conn.commit()
         await pf.warmup_provider_state_from_db()  # 不抛异常即可
         with pf._quota_lock:
@@ -265,7 +283,8 @@ class TestGracefulDegradation:
         # 缺 kind 列或 payload_json 空 → 应跳过
         await db_conn.execute(
             "INSERT INTO ai_provider_state(provider_name, kind, payload_json, updated_at) "
-            "VALUES('p1', '', '', datetime('now','localtime'))")
+            "VALUES('p1', '', '', datetime('now','localtime'))"
+        )
         await db_conn.commit()
         await pf.warmup_provider_state_from_db()
         with pf._quota_lock:

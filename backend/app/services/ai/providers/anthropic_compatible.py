@@ -1,4 +1,5 @@
 """Anthropic 兼容 Provider"""
+
 import json
 from typing import AsyncIterator
 
@@ -12,9 +13,15 @@ class AnthropicCompatibleProvider(BaseProvider):
     def supports_json_mode(self) -> bool:
         return False
 
-    async def chat(self, messages: list, temperature: float | None = None,
-                   json_mode: bool = False, max_tokens: int | None = None,
-                   extra_body: dict | None = None, **_kwargs) -> str:
+    async def chat(
+        self,
+        messages: list,
+        temperature: float | None = None,
+        json_mode: bool = False,
+        max_tokens: int | None = None,
+        extra_body: dict | None = None,
+        **_kwargs,
+    ) -> str:
         # ✅ 移植适配：归一化 AIMessage 对象 → dict；支持参数覆盖
         messages = normalize_messages(messages)
         system = "\n".join(str(m["content"]) for m in messages if m["role"] == "system")
@@ -37,8 +44,7 @@ class AnthropicCompatibleProvider(BaseProvider):
         headers = {"x-api-key": self.api_key, "anthropic-version": "2023-06-01"}
         # ✅ 性能（P0-4）：复用进程级连接池，逐请求传入超时
         client = get_async_client(self.base_url, self.proxy_url)
-        resp = await client.post(f"{self.base_url}/messages", json=payload,
-                                 headers=headers, timeout=self.timeout)
+        resp = await client.post(f"{self.base_url}/messages", json=payload, headers=headers, timeout=self.timeout)
         resp.raise_for_status()
         data = resp.json()
         # ✅ 记录 token 用量（Anthropic：input_tokens/output_tokens/cache_read_input_tokens）
@@ -52,9 +58,15 @@ class AnthropicCompatibleProvider(BaseProvider):
                 return block["text"]
         raise RuntimeError("Anthropic 响应中无文本内容")
 
-    async def stream(self, messages: list, temperature: float | None = None,
-                     json_mode: bool = False, max_tokens: int | None = None,
-                     extra_body: dict | None = None, **_kwargs) -> AsyncIterator[str]:
+    async def stream(
+        self,
+        messages: list,
+        temperature: float | None = None,
+        json_mode: bool = False,
+        max_tokens: int | None = None,
+        extra_body: dict | None = None,
+        **_kwargs,
+    ) -> AsyncIterator[str]:
         """流式请求（SSE 分片）。
 
         ✅ 增强（AI 配置「请求方式」新增后）：
@@ -76,7 +88,8 @@ class AnthropicCompatibleProvider(BaseProvider):
             "model": self.model,
             "max_tokens": max_tokens or self.max_tokens,
             "temperature": temperature if temperature is not None else self.temperature,
-            "messages": rest, "stream": True,
+            "messages": rest,
+            "stream": True,
         }
         if extra_body:
             payload.update(extra_body)
@@ -84,9 +97,9 @@ class AnthropicCompatibleProvider(BaseProvider):
             payload["system"] = system
         headers = {"x-api-key": self.api_key, "anthropic-version": "2023-06-01"}
         client = get_async_client(self.base_url, self.proxy_url)
-        async with client.stream("POST", f"{self.base_url}/messages",
-                                 json=payload, headers=headers,
-                                 timeout=self.timeout) as resp:
+        async with client.stream(
+            "POST", f"{self.base_url}/messages", json=payload, headers=headers, timeout=self.timeout
+        ) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
                 if not line.startswith("data:"):
@@ -111,5 +124,4 @@ class AnthropicCompatibleProvider(BaseProvider):
                     if piece := (evt.get("delta") or {}).get("text"):
                         yield piece
                 elif etype == "error":
-                    raise RuntimeError(
-                        f"Anthropic 流式返回错误：{str(evt.get('error'))[:200]}")
+                    raise RuntimeError(f"Anthropic 流式返回错误：{str(evt.get('error'))[:200]}")
