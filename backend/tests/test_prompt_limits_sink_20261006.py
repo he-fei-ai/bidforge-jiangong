@@ -8,6 +8,7 @@
 
 护栏用 AST 遍历，不做「源码是否包含字符串 X」的假判据（R46 教训④）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -27,6 +28,7 @@ class TestLimitsSingleSource:
 
     def test_limits_module_exists_with_expected_constants(self):
         from app.services.ai.prompts import _limits
+
         expected = {
             "FACTS_PROMPT_CAP": 3000,
             "FACT_PROMPT_VALUE_CAP": 120,
@@ -40,19 +42,20 @@ class TestLimitsSingleSource:
         for name, want in expected.items():
             got = getattr(_limits, name, None)
             assert got == want, (
-                f"_limits.{name} = {got!r}，预期 {want!r}。"
-                "数值是出厂默认档，改动需同步更新护栏与 AGENTS.md。"
+                f"_limits.{name} = {got!r}，预期 {want!r}。" "数值是出厂默认档，改动需同步更新护栏与 AGENTS.md。"
             )
 
     def test_scanner_and_repair_limits_aligned(self):
         """R38-D D2 本意：重写硬上限对齐扫描侧分片上限（都是 12000）。"""
         from app.services.ai.prompts import _limits
+
         assert _limits.REPAIR_REWRITE_MAX_CHARS == _limits.SECTION_CHUNK_LIMIT
 
     def test_consumers_rebind_original_names(self):
         """消费方仍以原模块名可读，下游业务代码零改动。"""
         from app.routers import compliance, sse_handlers
         from app.services import consistency_scanner, content_utils, repair_agent
+
         assert compliance.FACTS_PROMPT_CAP == 3000
         assert compliance._FACT_PROMPT_VALUE_CAP == 120
         assert sse_handlers.PROJECT_FACTS_LIMIT_OUTLINE == 1500
@@ -70,13 +73,16 @@ class TestLimitsSingleSource:
         """
         targets = {
             "routers/compliance.py": {
-                "FACTS_PROMPT_CAP", "FACT_PROMPT_VALUE_CAP",
+                "FACTS_PROMPT_CAP",
+                "FACT_PROMPT_VALUE_CAP",
             },
             "routers/sse_handlers.py": {
-                "PROJECT_FACTS_LIMIT_OUTLINE", "PROJECT_FACTS_LIMIT_SUBLEVEL",
+                "PROJECT_FACTS_LIMIT_OUTLINE",
+                "PROJECT_FACTS_LIMIT_SUBLEVEL",
             },
             "services/consistency_scanner.py": {
-                "SECTION_CHUNK_LIMIT", "PER_SECTION_LIMIT",
+                "SECTION_CHUNK_LIMIT",
+                "PER_SECTION_LIMIT",
             },
             "services/repair_agent.py": {"REPAIR_REWRITE_MAX_CHARS"},
             "services/content_utils.py": {"WORD_OVER_RATIO"},
@@ -86,8 +92,7 @@ class TestLimitsSingleSource:
             tree = ast.parse(path.read_text(encoding="utf-8"))
             got: set[str] = set()
             for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module == \
-                        "app.services.ai.prompts._limits":
+                if isinstance(node, ast.ImportFrom) and node.module == "app.services.ai.prompts._limits":
                     for alias in node.names:
                         got.add(alias.name)
             missing = want_names - got
@@ -105,6 +110,7 @@ class TestAllocateBudgetsSink:
 
     def test_prompt_governance_exposes_public_function(self):
         from app.services import prompt_governance
+
         fn = getattr(prompt_governance, "allocate_char_budgets", None)
         assert callable(fn), "prompt_governance.allocate_char_budgets 必须存在且可调用"
         # 行为自检（与历史用例同口径）
@@ -116,6 +122,7 @@ class TestAllocateBudgetsSink:
         """sse_handlers 内部仍以 ``_allocate_char_budgets`` 调用，行为逐字不变。"""
         from app.routers import sse_handlers
         from app.services import prompt_governance
+
         assert sse_handlers._allocate_char_budgets is prompt_governance.allocate_char_budgets
 
     def test_no_router_reverse_imports_sse_handlers_private_symbols(self):
@@ -138,13 +145,10 @@ class TestAllocateBudgetsSink:
         for p in routers_dir.glob("*.py"):
             tree = ast.parse(p.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module == \
-                        "app.routers.sse_handlers":
+                if isinstance(node, ast.ImportFrom) and node.module == "app.routers.sse_handlers":
                     for alias in node.names:
-                        if alias.name.startswith("_") and \
-                                alias.name not in known_preexisting:
-                            offenders.append(
-                                f"{p.name}:{node.lineno} -> sse_handlers.{alias.name}")
+                        if alias.name.startswith("_") and alias.name not in known_preexisting:
+                            offenders.append(f"{p.name}:{node.lineno} -> sse_handlers.{alias.name}")
         assert not offenders, (
             "路由器反向 import sse_handlers 私有符号（分层反向耦合）：\n  "
             + "\n  ".join(offenders)
@@ -170,17 +174,21 @@ class TestAllocateBudgetsSink:
                 fn = node.func
                 # 形式一: allocate_char_budgets(...) / _allocate_char_budgets(...)
                 #         （from ... import 后直调；sse_handlers 走别名 _allocate_char_budgets）
-                if isinstance(fn, ast.Name) and fn.id in (
-                        "allocate_char_budgets", "_allocate_char_budgets"):
+                if isinstance(fn, ast.Name) and fn.id in ("allocate_char_budgets", "_allocate_char_budgets"):
                     call_sites.append(f"{p.relative_to(_APP_DIR)}:{node.lineno}")
                 # 形式二: <pkg>.allocate_char_budgets(...)（模块前缀）
-                elif (isinstance(fn, ast.Attribute) and fn.attr == "allocate_char_budgets"
-                      and isinstance(fn.value, ast.Name)):
+                elif (
+                    isinstance(fn, ast.Attribute)
+                    and fn.attr == "allocate_char_budgets"
+                    and isinstance(fn.value, ast.Name)
+                ):
                     call_sites.append(f"{p.relative_to(_APP_DIR)}:{node.lineno}")
         assert len(call_sites) >= 2, (
             f"allocate_char_budgets 仅 {len(call_sites)} 处调用：{call_sites}。"
             "下沉后 sse_handlers 与 compliance 两个调用方都应切到新路径。"
         )
+
+
 # ==========================================================================
 # 债-5：_build_facts_text 整组下沉到 services/facts_builder（R47 债-5）
 # ==========================================================================
@@ -195,6 +203,7 @@ class TestFactsBuilderSink:
 
     def test_facts_builder_exposes_public_function(self):
         from app.services import facts_builder
+
         fn = getattr(facts_builder, "build_facts_text", None)
         assert callable(fn), "facts_builder.build_facts_text 必须存在且可调用"
         # LOW_CONFIDENCE_THRESHOLD 也应一并下沉
@@ -205,6 +214,7 @@ class TestFactsBuilderSink:
         旧私有名 ``_build_facts_text`` 必须是新公开名的同一对象。"""
         from app.routers import sse_handlers
         from app.services import facts_builder
+
         assert sse_handlers.build_facts_text is facts_builder.build_facts_text
         assert sse_handlers._build_facts_text is facts_builder.build_facts_text
 
@@ -220,12 +230,10 @@ class TestFactsBuilderSink:
         for p in services_dir.glob("*.py"):
             tree = ast.parse(p.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module == \
-                        "app.routers.sse_handlers":
+                if isinstance(node, ast.ImportFrom) and node.module == "app.routers.sse_handlers":
                     for alias in node.names:
                         if alias.name.startswith("_"):
-                            offenders.append(
-                                f"{p.name}:{node.lineno} -> sse_handlers.{alias.name}")
+                            offenders.append(f"{p.name}:{node.lineno} -> sse_handlers.{alias.name}")
         assert not offenders, (
             "service 反向 import sse_handlers 私有符号（分层反向耦合）：\n  "
             + "\n  ".join(offenders)
@@ -247,11 +255,9 @@ class TestFactsBuilderSink:
                 if not isinstance(node, ast.Call):
                     continue
                 fn = node.func
-                if isinstance(fn, ast.Name) and fn.id in (
-                        "build_facts_text", "_build_facts_text"):
+                if isinstance(fn, ast.Name) and fn.id in ("build_facts_text", "_build_facts_text"):
                     call_sites.append(f"{p.relative_to(_APP_DIR)}:{node.lineno}")
-                elif (isinstance(fn, ast.Attribute) and fn.attr == "build_facts_text"
-                      and isinstance(fn.value, ast.Name)):
+                elif isinstance(fn, ast.Attribute) and fn.attr == "build_facts_text" and isinstance(fn.value, ast.Name):
                     call_sites.append(f"{p.relative_to(_APP_DIR)}:{node.lineno}")
         assert len(call_sites) >= 2, (
             f"build_facts_text 仅 {len(call_sites)} 处调用：{call_sites}。"
@@ -269,8 +275,7 @@ class TestFactsBuilderSink:
             tree = ast.parse(path.read_text(encoding="utf-8"))
             got: set[str] = set()
             for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module == \
-                        "app.services.facts_builder":
+                if isinstance(node, ast.ImportFrom) and node.module == "app.services.facts_builder":
                     for alias in node.names:
                         got.add(alias.name)
             missing = want_names - got

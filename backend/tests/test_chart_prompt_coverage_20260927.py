@@ -15,6 +15,7 @@
 **每一类、每一种格式，最终被选中的提示词正文里必须能读到这个类型的
 结构口径**（含其 Mermaid 关键字别名），否则回退通用版就是静默失准。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -65,8 +66,8 @@ class TestFixPromptCoverageMatrix:
         body = get_default_prompt(key)
         aliases = _TYPE_ALIASES[chart_type]
         assert any(a.lower() in body.lower() for a in aliases), (
-            f"{key} 未提及 {chart_type}（别名 {aliases}）——"
-            f"该类型回退到通用版后会失去结构约束")
+            f"{key} 未提及 {chart_type}（别名 {aliases}）——" f"该类型回退到通用版后会失去结构约束"
+        )
 
     @pytest.mark.parametrize("chart_type", ALL_TYPES)
     def test_selector_matches_runtime_semantics(self, chart_type):
@@ -74,8 +75,10 @@ class TestFixPromptCoverageMatrix:
         for is_json in (True, False):
             key = _select_key(chart_type, is_json)
             assert key in _ALL_PROMPTS, f"选中的 {key} 未注册"
-            assert key == f"{'chart_json_fix' if is_json else 'chart_mermaid_fix'}_{chart_type}" \
-                or key in ("chart_json_fix", "chart_mermaid_fix")
+            assert key == f"{'chart_json_fix' if is_json else 'chart_mermaid_fix'}_{chart_type}" or key in (
+                "chart_json_fix",
+                "chart_mermaid_fix",
+            )
 
     @pytest.mark.parametrize("chart_type", ALL_TYPES)
     def test_every_fix_prompt_renders_without_residue(self, chart_type):
@@ -84,22 +87,22 @@ class TestFixPromptCoverageMatrix:
             _is_false_positive,
             extract_variables,
         )
+
         for is_json in (True, False):
             key = _select_key(chart_type, is_json)
             requires = PROMPT_VARIABLE_CONTRACTS.get(key, [])
             tpl = get_default_prompt(key)
             out = render_prompt(tpl, **{v: f"<{v}>" for v in requires})
-            residual = [v for v in extract_variables(out)
-                        if not v.startswith("SHARED_")
-                        and not _is_false_positive(key, v, tpl)]
+            residual = [
+                v for v in extract_variables(out) if not v.startswith("SHARED_") and not _is_false_positive(key, v, tpl)
+            ]
             assert not residual, f"{key} 渲染后残留：{residual}"
 
     def test_generic_json_template_covers_all_seven(self):
         """``chart_json_fix`` 通用版必须覆盖全部 7 类。"""
         body = get_default_prompt("chart_json_fix").lower()
         for t in ALL_TYPES:
-            assert any(a.lower() in body for a in _TYPE_ALIASES[t]), \
-                f"chart_json_fix 通用版未覆盖 {t}"
+            assert any(a.lower() in body for a in _TYPE_ALIASES[t]), f"chart_json_fix 通用版未覆盖 {t}"
 
     def test_generic_mermaid_template_covers_all_seven(self):
         """``chart_mermaid_fix`` 通用版必须覆盖全部 7 类。
@@ -109,14 +112,11 @@ class TestFixPromptCoverageMatrix:
         """
         body = get_default_prompt("chart_mermaid_fix").lower()
         for t in ALL_TYPES:
-            assert any(a.lower() in body for a in _TYPE_ALIASES[t]), \
-                f"chart_mermaid_fix 通用版未覆盖 {t}"
+            assert any(a.lower() in body for a in _TYPE_ALIASES[t]), f"chart_mermaid_fix 通用版未覆盖 {t}"
 
     def test_mermaid_reachable_types_all_have_guidance(self):
         """Mermaid 能产出的类型，必须都能在通用版里找到口径。"""
         body = get_default_prompt("chart_mermaid_fix").lower()
-        reachable = {t for t in MERMAID_KEYWORD_TO_CHART_TYPE.values()
-                     if t in PIL_RENDERABLE_CHART_TYPES}
+        reachable = {t for t in MERMAID_KEYWORD_TO_CHART_TYPE.values() if t in PIL_RENDERABLE_CHART_TYPES}
         for t in sorted(reachable):
-            assert any(a.lower() in body for a in _TYPE_ALIASES[t]), \
-                f"mermaid 可产出 {t}，但通用修复提示词无对应口径"
+            assert any(a.lower() in body for a in _TYPE_ALIASES[t]), f"mermaid 可产出 {t}，但通用修复提示词无对应口径"

@@ -8,6 +8,7 @@
 修复：_load_prompt_cache_sync 记录加载时的库文件 mtime；路径未变但
 库文件已变新时自动重载。正常路径仅多一次 os.stat。
 """
+
 from __future__ import annotations
 
 import os
@@ -24,12 +25,8 @@ PROBE_KEY = "test_external_write_probe"
 def _seed(db_path, content: str) -> None:
     conn = sqlite3.connect(str(db_path))
     try:
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS prompt_templates ("
-            "key TEXT PRIMARY KEY, content TEXT DEFAULT '')")
-        conn.execute(
-            "INSERT OR REPLACE INTO prompt_templates(key, content) VALUES(?,?)",
-            (PROBE_KEY, content))
+        conn.execute("CREATE TABLE IF NOT EXISTS prompt_templates (" "key TEXT PRIMARY KEY, content TEXT DEFAULT '')")
+        conn.execute("INSERT OR REPLACE INTO prompt_templates(key, content) VALUES(?,?)", (PROBE_KEY, content))
         conn.commit()
     finally:
         conn.close()
@@ -57,8 +54,7 @@ class TestExternalWriteReload:
         time.sleep(0.02)
         _seed(db, "VERSION-B")
         # 关键：不调用 reload_prompt_cache()
-        assert _cache.get_prompt(PROBE_KEY) == "VERSION-B", (
-            "外部直写 prompt_templates 后，读取方必须自动重载缓存")
+        assert _cache.get_prompt(PROBE_KEY) == "VERSION-B", "外部直写 prompt_templates 后，读取方必须自动重载缓存"
 
     async def test_same_path_no_write_no_reload(self, ctx, tmp_path, monkeypatch):
         """库文件未变时不得反复重载（get_prompt 高频调用不能每次开连接）。"""

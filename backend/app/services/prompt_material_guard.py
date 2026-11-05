@@ -1,0 +1,309 @@
+"""外部资料治理统一入口（R175 · 2026-11-03）。
+
+把「凭据脱敏 → 注入围栏 → 上下文预算」收敛为**单一公共函数**，供所有向
+外部 AI 发送用户资料原文的链路复用，消除历史上「每个链路各写一份开关判断 +
+各写一份围栏逻辑」的分叉（正文生成一处接线、其余五处裸奔的问题）。
+
+三个开关全部**默认关闭**，因此本模块接入任何链路时，未开启配置的行为与
+修复前**逐字节一致**：
+
+* ``prompt_redact_sensitive``（默认 False）：对外部资料原文做凭据脱敏；
+* ``prompt_injection_defense``（默认 False）：给外部资料加「只读数据」围栏；
+* ``prompt_context_budget``（默认 0）：按优先级削减超长上下文。
+
+⚠️ 行为变更说明（详见 docs/提示词模块审计_R175_20261103.md）：
+本模块**不改变任何默认值**。用户显式开启 ``prompt_redact_sensitive`` 后，
+送往 AI 的资料原文中的疑似凭据会被替换为 ``[已脱敏凭据]``（仅出站，不回写库），
+把该开关置回 False 即完全回退。
+
+设计约束：
+* 纯函数，不触 DB、不发网络请求（配置读取走 ``app.config.settings``）；
+* 任何异常都必须 fail-soft（治理失败绝不能阻断生成）；
+* 围栏幂等：已含围栏标记的文本不会被二次包裹。
+"""
+
+from __future__ import annotations
+
+import logging
+
+from app.config import settings
+
+logger = logging.getLogger("prompt_material_guard")
+
+#: 启动期提示只打一次（避免每个请求刷屏）
+_POSTURE_LOGGED = False
+
+
+# --------------------------------------------------------------------------
+# 开关读取（唯一事实源，禁止各链路自行 getattr 判断）
+# --------------------------------------------------------------------------
+
+
+def redaction_enabled() -> bool:
+    """凭据脱敏开关。
+
+    生效条件 = ``prompt_redact_sensitive`` **或** ``prompt_injection_defense``。
+
+    ✅ 为什么「或」：修复前（历史行为）注入防护开启时会顺带做脱敏，已有用户
+    若只开了 ``prompt_injection_defense``，改成纯独立开关会让他们**静默失去**
+    既有脱敏（属回归）。因此保留旧的耦合语义，同时允许新开关单独开启脱敏。
+    """
+    return bool(
+        getattr(settings, "prompt_redact_sensitive", False) or getattr(settings, "prompt_injection_defense", False)
+    )
+
+
+def injection_defense_enabled() -> bool:
+    """注入防护开关（``prompt_injection_defense``，默认 False）。"""
+    return bool(getattr(settings, "prompt_injection_defense", False))
+
+
+def context_budget() -> int:
+    """上下文预算（``prompt_context_budget``，≤0 表示关闭）。"""
+    return int(getattr(settings, "prompt_context_budget", 0) or 0)
+
+
+def governance_posture() -> dict:
+    """当前治理姿态（供诊断接口 / 启动日志使用）。"""
+    return {
+        "redaction_enabled": redaction_enabled(),
+        "injection_defense_enabled": injection_defense_enabled(),
+        "context_budget": context_budget(),
+        # 未开启脱敏时给出显式风险提示，避免「以为已防护」的静默假安全感
+        "redaction_notice": (
+            ""
+            if redaction_enabled()
+            else "敏感信息脱敏未开启（PROMPT_REDACT_SENSITIVE=False）：上传资料原文"
+            "中的疑似密钥/凭据将原样发送给外部 AI 服务商。生产环境建议开启。"
+        ),
+    }
+
+
+def log_governance_posture_once() -> None:
+    """启动期一次性打印治理姿态；脱敏未开启时以 WARNING 明确提示风险。
+
+    由 ``app.main`` 的 lifespan 调用一次（测试可直接调用，幂等）。
+    """
+    global _POSTURE_LOGGED
+    if _POSTURE_LOGGED:
+        return
+    _POSTURE_LOGGED = True
+    posture = governance_posture()
+    if not posture["redaction_enabled"]:
+        logger.warning(
+            "提示词敏感信息脱敏当前**未开启**（PROMPT_REDACT_SENSITIVE=False）："
+            "用户上传资料原文会原样发往外部 AI。如需防护请在 .env 或 "
+            "PUT /system/governance 中开启（重启后仍生效）。"
+        )
+    if posture["injection_defense_enabled"]:
+        logger.info("提示词注入防护已开启（外部资料将加只读围栏并扫描注入手法）")
+    if posture["context_budget"] > 0:
+        logger.info("提示词上下文预算已开启：%d 字符", posture["context_budget"])
+
+
+# --------------------------------------------------------------------------
+# 核心治理函数
+# --------------------------------------------------------------------------
+
+
+def redact_text(text: str) -> tuple[str, int]:
+    """对外部资料原文做凭据脱敏，返回 (脱敏后文本, 命中数)。
+
+    开关关闭时**原样返回**（命中数 0），保证既有行为逐字节不变。
+    只替换高置信度凭据形态（sk-/gsk_/api_key=…/URL 内嵌账号口令），
+    刻意避开 GB/JGJ 标准编号、工程编号、人员姓名等正常文本。
+    """
+    if not text or not redaction_enabled():
+        return text, 0
+    try:
+        from app.services.prompt_governance import redact_sensitive
+
+        return redact_sensitive(text)
+    except Exception:  # noqa: BLE001 - 脱敏失败绝不阻断生成
+        logger.warning("凭据脱敏失败（使用原文继续）", exc_info=True)
+        return text, 0
+
+
+def redact_only(text: str) -> str:
+    """只脱敏、不加围栏、不做预算（供出站消息统一收口使用）。"""
+    out, n = redact_text(text)
+    if n:
+        logger.warning("出站消息中检出 %d 处疑似凭据，已脱敏", n)
+    return out
+
+
+def redact_outbound_messages(messages: list) -> list:
+    """出站前对 ``role=user`` 消息统一脱敏（覆盖全部 AI 链路的兜底收口）。
+
+    ✅ 为什么放在出站侧：一致性审计 / 合规预检 / 导出等链路目前由其他会话
+    占用或直接组装 f-string 提示词，逐点接线会漏；出站单点收口可保证
+    「任何走向外部 AI 的用户资料原文」都被同一判据覆盖，且**不修改**库内
+    原文（用户上传的文档内容保持完整）。
+
+    开关关闭时返回**原列表对象**（调用方无需感知，零开销零行为变化）。
+    """
+    if not redaction_enabled() or not isinstance(messages, list):
+        return messages
+    out: list = []
+    changed = False
+    total = 0
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            out.append(msg)
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or not content:
+            out.append(msg)
+            continue
+        redacted, n = redact_text(content)
+        total += n
+        if n:
+            changed = True
+            out.append({**msg, "content": redacted})
+        else:
+            out.append(msg)
+    if total:
+        logger.warning("出站 user 消息共脱敏 %d 处疑似凭据", total)
+    return out if changed else messages
+
+
+def guard_text(text: str, labels=None) -> str:
+    """按标签给外部资料段加「只读数据」边界围栏（开关关闭时原样返回）。
+
+    幂等：文本中已含围栏标记时不再二次包裹（防止链路接线 + 出站兜底重复加栏）。
+    """
+    if not text or not injection_defense_enabled():
+        return text
+    try:
+        from app.services.prompt_governance import (
+            MATERIAL_OPEN,
+            guard_external_segments,
+        )
+
+        if MATERIAL_OPEN in text:
+            return text
+        if labels is None:
+            return guard_external_segments(text)
+        return guard_external_segments(text, labels=labels)
+    except Exception:  # noqa: BLE001
+        logger.warning("注入防护围栏失败（使用原文继续）", exc_info=True)
+        return text
+
+
+def apply_budget(text: str) -> str:
+    """按 ``prompt_context_budget`` 削减超长上下文（≤0 时原样返回）。"""
+    if not text:
+        return text
+    budget = context_budget()
+    if budget <= 0:
+        return text
+    try:
+        from app.services.prompt_governance import apply_context_budget
+
+        return apply_context_budget(text, budget)
+    except Exception:  # noqa: BLE001
+        logger.warning("上下文预算削减失败（使用原文继续）", exc_info=True)
+        return text
+
+
+def govern_text(text: str, *, labels=None, fence: bool = True, budget: bool = True) -> str:
+    """统一治理入口：围栏 → 脱敏 → 预算（顺序固定，任何一步失败均降级）。
+
+    顺序理由：
+    1. 先围栏：把资料显式标注为「只读数据」，降低被当作指令执行的概率；
+    2. 再脱敏：只替换凭据形态片段，不影响围栏结构；
+    3. 最后预算：截断会切掉尾部（含 ``MATERIAL_CLOSE``），因此放在最后；
+       截断后若围栏闭合标记丢失，由 ``_repair_closing_fence`` 补回。
+
+    :param labels: 外部资料段标签；None = 使用 ``MATERIAL_LABELS`` 默认集
+    :param fence: 是否加围栏（某些链路已自带围栏语义时可关）
+    :param budget: 是否做预算削减
+    """
+    if not text:
+        return text
+    out = text
+    if fence:
+        out = guard_text(out, labels=labels)
+    before = out
+    out, n = redact_text(out)
+    if n:
+        logger.warning("外部资料中检出 %d 处疑似凭据，已脱敏", n)
+    if budget:
+        out = apply_budget(out)
+        out = _repair_closing_fence(before, out)
+    return out
+
+
+def govern_blob(text: str, label: str = "外部资料原文", *, fence: bool = True, budget: bool = True) -> str:
+    """单块外部资料（无「【标签】」分段结构）的统一治理入口。
+
+    与 :func:`govern_text` 的区别：这里对**整块**资料加围栏
+    （``guard_material`` 语义），用于事实提取素材 / 招标文件分段 /
+    上传文档正文等「整段都是不可信外部输入」的场景。
+
+    顺序：围栏 → 脱敏 → 预算（与 govern_text 一致）。
+    """
+    if not text:
+        return text
+    out = text
+    if fence and injection_defense_enabled():
+        try:
+            from app.services.prompt_governance import MATERIAL_OPEN, guard_material
+
+            if MATERIAL_OPEN not in out:
+                out = guard_material(label, out)
+        except Exception:  # noqa: BLE001
+            logger.warning("单块资料围栏失败（使用原文继续）", exc_info=True)
+    out, n = redact_text(out)
+    if n:
+        logger.warning("外部资料（%s）中检出 %d 处疑似凭据，已脱敏", label, n)
+    if budget:
+        before = out
+        out = apply_budget(out)
+        out = _repair_closing_fence(before, out)
+    return out
+
+
+def clip_text(text: str, limit: int, label: str = "") -> str:
+    """按字符上限截断文本，并在**真正发生截断**时写日志 + 计入指标（可见化）。
+
+    ✅ R179（2026-11-05 · 截断静默丢信息）：目录链路多处对 ``project_brief`` /
+    ``project_facts`` 做硬切片（1500 / ``PROJECT_FACTS_LIMIT_OUTLINE``），旧实现
+    是**静默丢字** —— 日志与指标都无痕迹，运维无法区分「没截断」与「截断丢了
+    高优信息」，也无法在方案变长后判断该不该调大上限。本函数只做「截断 + 留痕」：
+    未超限时原样返回（逐字节一致），``limit <= 0`` 表示不截断；
+    留痕失败一律 fail-soft，绝不阻断生成。
+    """
+    if not text or limit is None or limit <= 0 or len(text) <= limit:
+        return text
+    try:
+        logger.warning(
+            "上下文截断（%s）：%d → %d 字符，超出部分已丢弃",
+            label or "未命名片段",
+            len(text),
+            limit,
+        )
+    except Exception:  # noqa: BLE001 - 留痕失败不得阻断生成
+        pass
+    try:
+        from app.services.ai.prompts._metrics import record_token_budget_truncated
+
+        record_token_budget_truncated(label or "unknown")
+    except Exception:  # noqa: BLE001 - 指标失败不得阻断生成
+        pass
+    return text[:limit]
+
+
+def _repair_closing_fence(before: str, after: str) -> str:
+    """预算截断可能切掉围栏的闭合标记 —— 补回，避免模型把后续内容当作资料。
+
+    仅在「截断前含闭合标记、截断后丢失」时补一个（不重复、不改变正常文本）。
+    """
+    try:
+        from app.services.prompt_governance import MATERIAL_CLOSE
+
+        if MATERIAL_CLOSE in before and MATERIAL_CLOSE not in after:
+            return after.rstrip("\n") + "\n" + MATERIAL_CLOSE
+    except Exception:  # noqa: BLE001
+        pass
+    return after

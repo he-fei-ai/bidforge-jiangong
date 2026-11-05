@@ -1,18 +1,36 @@
 ﻿import { useEffect, useState, useRef, useMemo, useCallback } from "react";
-import { App, Button, Typography, Tabs, List, Spin, Modal, Input, Tag, Space, Tooltip, Alert, Drawer, Table,} from "antd";
 import {
-  EditOutlined, RollbackOutlined, SaveOutlined, CodeOutlined,
-  HistoryOutlined, SyncOutlined,
+  App,
+  Button,
+  Typography,
+  Tabs,
+  List,
+  Spin,
+  Modal,
+  Input,
+  Tag,
+  Space,
+  Tooltip,
+  Alert,
+  Drawer,
+  Table,
+} from "antd";
+import {
+  EditOutlined,
+  RollbackOutlined,
+  SaveOutlined,
+  CodeOutlined,
+  HistoryOutlined,
+  SyncOutlined,
 } from "@ant-design/icons";
 
 import { promptsApi } from "../api";
 import type { PromptSyncResult } from "../api";
 import { useAntdMessageHub } from "../utils/activityCenter";
 
-import { PageHero, StatCards, StatItem } from '../utils/ui';
+import { PageHero, StatCards, StatItem } from "../utils/ui";
 import type { PromptAuditLog, PromptItem } from "../types/prompt";
 import { diffPromptVariables, extractPromptVariables } from "../utils/promptVariables";
-
 
 // ✅ 修复：后端 category 实际值域为 outline/content/charts/analysis/配图/共享规则，
 // 旧实现键是中文（目录/正文/...）→ 全部 miss 落入 extra 显示 cyan
@@ -40,8 +58,7 @@ const CATEGORY_LABELS: Record<string, string> = {
 //   「引用了不存在的共享片段 / 被他人修改 / 内容过长」这三类**用户可以自己
 //   解决**的问题，全部退化成一句无信息量的提示。现统一透传。
 function promptErrorText(err: unknown, fallback: string): string {
-  const raw = (err as { response?: { data?: { detail?: unknown } };
-                     message?: string } | null);
+  const raw = err as { response?: { data?: { detail?: unknown } }; message?: string } | null;
   const detail = raw?.response?.data?.detail;
   if (typeof detail === "string" && detail.trim()) return detail.trim();
   if (Array.isArray(detail) && detail.length) {
@@ -49,8 +66,11 @@ function promptErrorText(err: unknown, fallback: string): string {
     const first = detail[0] as { msg?: string };
     if (first?.msg) return first.msg;
   }
-  if (typeof raw?.message === "string" && raw.message.trim()
-      && !/^Request failed with status code \d+$/.test(raw.message.trim())) {
+  if (
+    typeof raw?.message === "string" &&
+    raw.message.trim() &&
+    !/^Request failed with status code \d+$/.test(raw.message.trim())
+  ) {
     return raw.message.trim();
   }
   return fallback;
@@ -90,7 +110,9 @@ export default function PromptEditorPage() {
   const categories = useMemo(() => {
     const known = Object.keys(CATEGORY_COLORS);
     const seen = new Set<string>();
-    prompts.forEach((p) => { if (p.category) seen.add(p.category); });
+    prompts.forEach((p) => {
+      if (p.category) seen.add(p.category);
+    });
     const ordered = known.filter((k) => seen.has(k));
     const extra = [...seen].filter((k) => !known.includes(k));
     return [...ordered, ...extra].map((key) => ({
@@ -102,7 +124,9 @@ export default function PromptEditorPage() {
 
   useEffect(() => {
     isMountedRef.current = true;
-    return () => { isMountedRef.current = false; };
+    return () => {
+      isMountedRef.current = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -112,7 +136,8 @@ export default function PromptEditorPage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    promptsApi.list()
+    promptsApi
+      .list()
       .then(({ data }) => {
         if (cancelled) return;
         setPrompts(data.items || []);
@@ -124,12 +149,16 @@ export default function PromptEditorPage() {
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const handleSave = async (key: string) => {
     if (editContent.length > PROMPT_MAX_CHARS) {
-      msg.error(`内容过长（${editContent.length.toLocaleString()} 字符），上限 ${PROMPT_MAX_CHARS.toLocaleString()} 字符`);
+      msg.error(
+        `内容过长（${editContent.length.toLocaleString()} 字符），上限 ${PROMPT_MAX_CHARS.toLocaleString()} 字符`,
+      );
       return;
     }
     try {
@@ -139,9 +168,11 @@ export default function PromptEditorPage() {
       const finalContent = data?.content ?? editContent;
       const warnings = data?.warnings || [];
       msg.success(
-        data?.reset ? "内容为空，已恢复默认提示词"
-          : warnings.length ? `已保存，但有 ${warnings.length} 条提醒`
-          : "提示词已更新",
+        data?.reset
+          ? "内容为空，已恢复默认提示词"
+          : warnings.length
+            ? `已保存，但有 ${warnings.length} 条提醒`
+            : "提示词已更新",
       );
       // ✅ 2026-09-27：把后端回传的 warning 原样展示（保存成功 ≠ 一定正确）。
       //   例：删掉了契约变量、引用了未声明的新变量 —— 这些不会阻断保存，
@@ -197,98 +228,112 @@ export default function PromptEditorPage() {
   };
 
   /** ✅ G2：打开版本历史抽屉并加载该提示词的变更审计 */
-  const openHistory = useCallback(async (key: string) => {
-    setHistoryKey(key);
-    setHistoryOpen(true);
-    setHistoryLoading(true);
-    try {
-      const { data } = await promptsApi.auditLogs(key, 50, 0);
-      if (!isMountedRef.current) return;
-      setHistoryLogs(data.items || []);
-      setHistoryTotal(data.total || 0);
-    } catch (e) {
-      if (isMountedRef.current) msg.error(promptErrorText(e, "加载变更历史失败"));
-    } finally {
-      if (isMountedRef.current) setHistoryLoading(false);
-    }
-  }, [msg]);
+  const openHistory = useCallback(
+    async (key: string) => {
+      setHistoryKey(key);
+      setHistoryOpen(true);
+      setHistoryLoading(true);
+      try {
+        const { data } = await promptsApi.auditLogs(key, 50, 0);
+        if (!isMountedRef.current) return;
+        setHistoryLogs(data.items || []);
+        setHistoryTotal(data.total || 0);
+      } catch (e) {
+        if (isMountedRef.current) msg.error(promptErrorText(e, "加载变更历史失败"));
+      } finally {
+        if (isMountedRef.current) setHistoryLoading(false);
+      }
+    },
+    [msg],
+  );
 
   /** ✅ G2：回滚到某条审计记录「变更前」的版本（后端会再写一条 rollback 审计） */
-  const handleRollback = useCallback(async (key: string, auditId: string) => {
-    modal.confirm({
-      title: "回滚此版本？",
-      content: "将把该提示词恢复到此条变更之前的内容，并立即对所有生成任务生效。",
-      okText: "回滚",
-      cancelText: "取消",
-      onOk: async () => {
-        try {
-          const { data } = await promptsApi.rollback(key, auditId);
-          msg.success("已回滚到所选版本");
-          setPrompts((prev) =>
-            prev.map((p) =>
-              p.key === key
-                ? {
-                    ...p,
-                    content: data.content,
-                    modified: data.content !== p.default_content,
-                    variables: extractPromptVariables(data.content || "").map((v) => v.name),
-                    content_hash: data.content_hash,
-                    updated_at: new Date().toISOString(),
-                    audit_count: (p.audit_count || 0) + 1,
-                  }
-                : p,
-            ),
-          );
-          if (editingKey === key) setEditContent(data.content || "");
-          // 刷新历史列表（回滚本身也写了一条审计）
-          await openHistory(key);
-        } catch (e) {
-          msg.error(promptErrorText(e, "回滚失败"));
-        }
-      },
-    });
-  }, [modal, msg, editingKey, openHistory]);
+  const handleRollback = useCallback(
+    async (key: string, auditId: string) => {
+      modal.confirm({
+        title: "回滚此版本？",
+        content: "将把该提示词恢复到此条变更之前的内容，并立即对所有生成任务生效。",
+        okText: "回滚",
+        cancelText: "取消",
+        onOk: async () => {
+          try {
+            const { data } = await promptsApi.rollback(key, auditId);
+            msg.success("已回滚到所选版本");
+            setPrompts((prev) =>
+              prev.map((p) =>
+                p.key === key
+                  ? {
+                      ...p,
+                      content: data.content,
+                      modified: data.content !== p.default_content,
+                      variables: extractPromptVariables(data.content || "").map((v) => v.name),
+                      content_hash: data.content_hash,
+                      updated_at: new Date().toISOString(),
+                      audit_count: (p.audit_count || 0) + 1,
+                    }
+                  : p,
+              ),
+            );
+            if (editingKey === key) setEditContent(data.content || "");
+            // 刷新历史列表（回滚本身也写了一条审计）
+            await openHistory(key);
+          } catch (e) {
+            msg.error(promptErrorText(e, "回滚失败"));
+          }
+        },
+      });
+    },
+    [modal, msg, editingKey, openHistory],
+  );
 
-  const handleSyncFromCode = useCallback((force: boolean) => {
-    modal.confirm({
-      title: force ? "强制覆盖所有漂移行？" : "从代码同步提示词？",
-      content: force
-        ? "将用硬编码出厂模板覆盖所有「漂移」行（你在后台改过的内容会丢失）。是否继续？"
-        : "将对比硬编码模板与 DB 现有行。DB 缺失的会插入，用户已修改的不会被覆盖（标记为漂移）。是否继续？",
-      okText: force ? "强制覆盖" : "开始同步",
-      okButtonProps: force ? { danger: true } : undefined,
-      cancelText: "取消",
-      onOk: async () => {
-        setSyncing(true);
-        try {
-          const { data } = await promptsApi.syncFromCode(force);
-          setSyncResult(data);
-          setSyncModalOpen(true);
-          msg.success(
-            `同步完成：新增 ${data.summary.inserted} · 一致 ${data.summary.in_sync} · 漂移 ${data.summary.drift} · 覆盖 ${data.summary.overwritten} · 错误 ${data.summary.errors}`,
-          );
-          promptsApi.list()
-            .then(({ data: ld }) => { if (isMountedRef.current) setPrompts(ld.items || []); })
-            .catch(() => {});
-        } catch (e) {
-          msg.error(promptErrorText(e, "从代码同步失败"));
-        } finally {
-          setSyncing(false);
-        }
-      },
-    });
-  }, [modal, msg]);
+  const handleSyncFromCode = useCallback(
+    (force: boolean) => {
+      modal.confirm({
+        title: force ? "强制覆盖所有漂移行？" : "从代码同步提示词？",
+        content: force
+          ? "将用硬编码出厂模板覆盖所有「漂移」行（你在后台改过的内容会丢失）。是否继续？"
+          : "将对比硬编码模板与 DB 现有行。DB 缺失的会插入，用户已修改的不会被覆盖（标记为漂移）。是否继续？",
+        okText: force ? "强制覆盖" : "开始同步",
+        okButtonProps: force ? { danger: true } : undefined,
+        cancelText: "取消",
+        onOk: async () => {
+          setSyncing(true);
+          try {
+            const { data } = await promptsApi.syncFromCode(force);
+            setSyncResult(data);
+            setSyncModalOpen(true);
+            msg.success(
+              `同步完成：新增 ${data.summary.inserted} · 一致 ${data.summary.in_sync} · 漂移 ${data.summary.drift} · 覆盖 ${data.summary.overwritten} · 错误 ${data.summary.errors}`,
+            );
+            promptsApi
+              .list()
+              .then(({ data: ld }) => {
+                if (isMountedRef.current) setPrompts(ld.items || []);
+              })
+              .catch(() => {});
+          } catch (e) {
+            msg.error(promptErrorText(e, "从代码同步失败"));
+          } finally {
+            setSyncing(false);
+          }
+        },
+      });
+    },
+    [modal, msg],
+  );
 
-  if (loading) return <Spin size="large" style={{ display: "block", marginTop: 80, textAlign: "center" }} />;
+  if (loading)
+    return <Spin size="large" style={{ display: "block", marginTop: 80, textAlign: "center" }} />;
 
-  const categoryPrompts = (cat: string) =>
-    prompts.filter((p) => p.category === cat);
+  const categoryPrompts = (cat: string) => prompts.filter((p) => p.category === cat);
 
   const tabItems = categories.map((cat) => ({
     key: cat.key,
     label: (
       <span>
-        <Tag color={cat.color} style={{ marginRight: 4 }}>{cat.label}</Tag>
+        <Tag color={cat.color} style={{ marginRight: 4 }}>
+          {cat.label}
+        </Tag>
         ({categoryPrompts(cat.key).length})
       </span>
     ),
@@ -329,11 +374,15 @@ export default function PromptEditorPage() {
               title={
                 <Space>
                   <CodeOutlined />
-                  <Typography.Text code style={{ fontSize: 12 }}>{item.key}</Typography.Text>
+                  <Typography.Text code style={{ fontSize: 12 }}>
+                    {item.key}
+                  </Typography.Text>
                   <Typography.Text strong>{item.label}</Typography.Text>
                   {item.modified && (
                     <Tooltip title="当前内容与出厂默认不同，可点击重置按钮恢复">
-                      <Tag color="orange" style={{ marginRight: 0 }}>已修改</Tag>
+                      <Tag color="orange" style={{ marginRight: 0 }}>
+                        已修改
+                      </Tag>
                     </Tooltip>
                   )}
                 </Space>
@@ -344,7 +393,7 @@ export default function PromptEditorPage() {
                     ellipsis={{ rows: 2 }}
                     style={{ margin: 0, marginBottom: 4, fontSize: 12, color: "#888" }}
                   >
-                      {item.content.slice(0, 200)}
+                    {item.content.slice(0, 200)}
                   </Typography.Paragraph>
                   <Typography.Text type="secondary" style={{ fontSize: 11 }}>
                     {item.updated_at
@@ -358,7 +407,10 @@ export default function PromptEditorPage() {
                         变量（{item.variables.length}）：
                       </Typography.Text>
                       {item.variables.slice(0, 6).map((v: string) => (
-                        <Tag key={v} style={{ fontFamily: "monospace", fontSize: 11, marginRight: 0 }}>
+                        <Tag
+                          key={v}
+                          style={{ fontFamily: "monospace", fontSize: 11, marginRight: 0 }}
+                        >
                           {v}
                         </Tag>
                       ))}
@@ -379,7 +431,10 @@ export default function PromptEditorPage() {
   }));
 
   return (
-    <div className="scroll-area" style={{ maxWidth: 960, margin: "0 auto", overflowY: "auto", overflowX: "hidden" }}>
+    <div
+      className="scroll-area"
+      style={{ maxWidth: 960, margin: "0 auto", overflowY: "auto", overflowX: "hidden" }}
+    >
       <Typography.Title level={4}>
         <CodeOutlined /> 提示词管理
       </Typography.Title>
@@ -453,10 +508,14 @@ export default function PromptEditorPage() {
               <Space wrap>
                 <span>相对默认模板的变量变化：</span>
                 {liveVariableDiff.added.map((name) => (
-                  <Tag key={`add-${name}`} color="green">+{name}</Tag>
+                  <Tag key={`add-${name}`} color="green">
+                    +{name}
+                  </Tag>
                 ))}
                 {liveVariableDiff.removed.map((name) => (
-                  <Tag key={`del-${name}`} color="red">-{name}</Tag>
+                  <Tag key={`del-${name}`} color="red">
+                    -{name}
+                  </Tag>
                 ))}
               </Space>
             }
@@ -487,7 +546,12 @@ export default function PromptEditorPage() {
 
       {/* F3：从代码同步结果（汇总 + 漂移明细 + 强制覆盖入口） */}
       <Modal
-        title={<Space><SyncOutlined /><span>从代码同步结果</span></Space>}
+        title={
+          <Space>
+            <SyncOutlined />
+            <span>从代码同步结果</span>
+          </Space>
+        }
         open={syncModalOpen}
         onCancel={() => setSyncModalOpen(false)}
         width={760}
@@ -503,7 +567,9 @@ export default function PromptEditorPage() {
                 强制覆盖所有漂移（{syncResult.summary.drift}）
               </Button>
             )}
-            <Button type="primary" onClick={() => setSyncModalOpen(false)}>关闭</Button>
+            <Button type="primary" onClick={() => setSyncModalOpen(false)}>
+              关闭
+            </Button>
           </Space>
         }
       >
@@ -518,9 +584,8 @@ export default function PromptEditorPage() {
                 <Tag color="red">错误 {syncResult.summary.errors}</Tag>
               )}
             </Space>
-            {syncResult.details.filter(
-              (d) => d.status === "drift" || d.status === "error",
-            ).length > 0 ? (
+            {syncResult.details.filter((d) => d.status === "drift" || d.status === "error").length >
+            0 ? (
               <Table
                 size="small"
                 rowKey="key"
@@ -529,14 +594,38 @@ export default function PromptEditorPage() {
                   (d) => d.status === "drift" || d.status === "error",
                 )}
                 columns={[
-                  { title: "Key", dataIndex: "key",
-                    render: (k: string) => <Typography.Text code style={{ fontSize: 12 }}>{k}</Typography.Text> },
-                  { title: "状态", dataIndex: "status",
-                    render: (s: string) => <Tag color={s === "drift" ? "orange" : "red"}>{s}</Tag> },
-                  { title: "代码指纹", dataIndex: "code_hash",
-                    render: (h?: string) => <Typography.Text style={{ fontSize: 11 }}>{(h || "").slice(0, 12)}</Typography.Text> },
-                  { title: "库内指纹", dataIndex: "db_hash",
-                    render: (h?: string) => <Typography.Text style={{ fontSize: 11 }}>{(h || "").slice(0, 12)}</Typography.Text> },
+                  {
+                    title: "Key",
+                    dataIndex: "key",
+                    render: (k: string) => (
+                      <Typography.Text code style={{ fontSize: 12 }}>
+                        {k}
+                      </Typography.Text>
+                    ),
+                  },
+                  {
+                    title: "状态",
+                    dataIndex: "status",
+                    render: (s: string) => <Tag color={s === "drift" ? "orange" : "red"}>{s}</Tag>,
+                  },
+                  {
+                    title: "代码指纹",
+                    dataIndex: "code_hash",
+                    render: (h?: string) => (
+                      <Typography.Text style={{ fontSize: 11 }}>
+                        {(h || "").slice(0, 12)}
+                      </Typography.Text>
+                    ),
+                  },
+                  {
+                    title: "库内指纹",
+                    dataIndex: "db_hash",
+                    render: (h?: string) => (
+                      <Typography.Text style={{ fontSize: 11 }}>
+                        {(h || "").slice(0, 12)}
+                      </Typography.Text>
+                    ),
+                  },
                 ]}
               />
             ) : (
@@ -554,7 +643,11 @@ export default function PromptEditorPage() {
           <Space>
             <HistoryOutlined />
             <span>版本历史</span>
-            {historyKey && <Typography.Text code style={{ fontSize: 12 }}>{historyKey}</Typography.Text>}
+            {historyKey && (
+              <Typography.Text code style={{ fontSize: 12 }}>
+                {historyKey}
+              </Typography.Text>
+            )}
           </Space>
         }
         placement="right"
@@ -593,8 +686,7 @@ export default function PromptEditorPage() {
                       key="rb-na"
                       // ✅ 2026-09-27：直接展示后端给的不可回滚原因，
                       //   不再自己猜「较早于快照功能上线」（截断/超长也属此类）。
-                      title={log.rollback_blocked_reason
-                        || "此记录没有可用的变更前正文，无法回滚"}
+                      title={log.rollback_blocked_reason || "此记录没有可用的变更前正文，无法回滚"}
                     >
                       <Button size="small" disabled icon={<RollbackOutlined />}>
                         回滚
@@ -606,7 +698,15 @@ export default function PromptEditorPage() {
                 <List.Item.Meta
                   title={
                     <Space wrap size={4}>
-                      <Tag color={log.action === "rollback" ? "purple" : log.action === "reset" ? "red" : "blue"}>
+                      <Tag
+                        color={
+                          log.action === "rollback"
+                            ? "purple"
+                            : log.action === "reset"
+                              ? "red"
+                              : "blue"
+                        }
+                      >
                         {log.action_label || log.action}
                       </Tag>
                       <Typography.Text type="secondary" style={{ fontSize: 11 }}>

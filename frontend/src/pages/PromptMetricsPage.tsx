@@ -36,12 +36,15 @@ export default function PromptMetricsPage() {
     }
   }, [msg]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   const handleReset = () => {
     modal.confirm({
       title: "清零全部运行时计数？",
-      content: "将重置渲染次数、错误、截断、修复触发与 AI 失败计数（进程内存态，不影响提示词内容）。",
+      content:
+        "将重置渲染次数、错误、截断、修复触发与 AI 失败计数（进程内存态，不影响提示词内容）。",
       okText: "清零",
       cancelText: "取消",
       onOk: async () => {
@@ -84,7 +87,11 @@ export default function PromptMetricsPage() {
     {
       title: "Key / 场景",
       dataIndex: "name",
-      render: (v: string) => <Text code style={{ fontSize: 12 }}>{v}</Text>,
+      render: (v: string) => (
+        <Text code style={{ fontSize: 12 }}>
+          {v}
+        </Text>
+      ),
     },
     {
       title: "次数",
@@ -94,17 +101,15 @@ export default function PromptMetricsPage() {
     },
   ];
 
-  const renderCountCard = (
-    title: string,
-    rows: CountRow[],
-    color: string,
-  ) => (
+  const renderCountCard = (title: string, rows: CountRow[], color: string) => (
     <Card
       size="small"
       title={
         <Space>
           <Tag color={color}>{title}</Tag>
-          <Text type="secondary" style={{ fontSize: 12 }}>共 {rows.length} 项</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            共 {rows.length} 项
+          </Text>
         </Space>
       }
       style={{ marginBottom: 16 }}
@@ -126,9 +131,14 @@ export default function PromptMetricsPage() {
       className="scroll-area"
       style={{ maxWidth: 960, margin: "0 auto", overflowY: "auto", overflowX: "hidden" }}
     >
-      <Space style={{ width: "100%", justifyContent: "space-between", marginBottom: 16 }} align="start">
+      <Space
+        style={{ width: "100%", justifyContent: "space-between", marginBottom: 16 }}
+        align="start"
+      >
         <div>
-          <Title level={4} style={{ margin: 0 }}>提示词运行时指标</Title>
+          <Title level={4} style={{ margin: 0 }}>
+            提示词运行时指标
+          </Title>
           <Text type="secondary" style={{ fontSize: 12 }}>
             进程内内存计数器，重启服务后清零；用于定位渲染失败 / 截断 / 修复热点。
           </Text>
@@ -154,7 +164,9 @@ export default function PromptMetricsPage() {
         title={
           <Space>
             <Tag color="blue">渲染次数 / 错误（按 key）</Tag>
-            <Text type="secondary" style={{ fontSize: 12 }}>共 {renderRows.length} 项</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              共 {renderRows.length} 项
+            </Text>
           </Space>
         }
         style={{ marginBottom: 16 }}
@@ -169,7 +181,11 @@ export default function PromptMetricsPage() {
             {
               title: "Key",
               dataIndex: "name",
-              render: (v: string) => <Text code style={{ fontSize: 12 }}>{v}</Text>,
+              render: (v: string) => (
+                <Text code style={{ fontSize: 12 }}>
+                  {v}
+                </Text>
+              ),
             },
             {
               title: "渲染次数",

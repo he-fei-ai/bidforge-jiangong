@@ -13,6 +13,7 @@
   BUG-E  审计 diff 用 ``extract_variables``（含 SHARED_*）与路由/编辑器口径分叉。
   BUG-F  ``_CREDENTIAL_PATTERNS`` 的 group_index 是纯死代码。
 """
+
 from __future__ import annotations
 
 import io
@@ -94,8 +95,7 @@ class TestVariableContractBaseline:
         _ALL_PROMPTS[TEST_KEY]["requires"] = ["var_a", "var_b"]
         _update(TEST_KEY, "内容 {var_a}")  # 用户删掉 {var_b} 占位符
         issues = {i["key"]: i for i in check_prompt_variables()}
-        assert TEST_KEY not in issues, \
-            f"出厂基线未污染时不应误报漂移，实际：{issues.get(TEST_KEY)}"
+        assert TEST_KEY not in issues, f"出厂基线未污染时不应误报漂移，实际：{issues.get(TEST_KEY)}"
 
     def test_check_still_reports_real_default_drift(self):
         """出厂模板确实与契约不一致 → 仍必须检出（修复不能掩盖真漂移）。"""
@@ -134,8 +134,7 @@ class TestCheckPromptVariablesSemantics:
         finally:
             logging.getLogger("app.services.ai.prompts._registry").removeHandler(h)
         assert buf.getvalue() == "", "verbose=False 必须完全静默"
-        assert any(i["key"] == TEST_KEY for i in issues), \
-            "verbose=False 仍须返回完整漂移明细（否则调用方无从判断）"
+        assert any(i["key"] == TEST_KEY for i in issues), "verbose=False 仍须返回完整漂移明细（否则调用方无从判断）"
 
     def test_verbose_true_logs_details(self):
         _reg(TEST_KEY, "test", "测试", "内容 {a} {hidden}")
@@ -206,8 +205,7 @@ class TestGuardExternalSegments:
         head_idx = out.index(head)
         # 段头之后紧跟着就是围栏（段头在围栏外），正文在围栏内
         next_fence = out.index(pg.MATERIAL_OPEN, head_idx)
-        assert next_fence - head_idx <= len(head) + 1, \
-            f"段头与紧随其后的围栏之间不应有其他内容：{out}"
+        assert next_fence - head_idx <= len(head) + 1, f"段头与紧随其后的围栏之间不应有其他内容：{out}"
         assert out.index(content) > next_fence, "正文应在围栏内"
 
     def test_no_match_returns_original(self):
@@ -235,11 +233,13 @@ class TestSseGuardExternalMaterial:
     def test_off_returns_original(self, monkeypatch):
         monkeypatch.setattr(_cfg.settings, "prompt_injection_defense", False)
         from app.routers.sse_handlers import _guard_external_material
+
         assert _guard_external_material(_CONTEXT) == _CONTEXT
 
     def test_on_wraps_only_external_segments(self, monkeypatch):
         monkeypatch.setattr(_cfg.settings, "prompt_injection_defense", True)
         from app.routers.sse_handlers import _guard_external_material
+
         out = _guard_external_material(_CONTEXT)
         assert out.count(pg.MATERIAL_OPEN) == 3
         assert "【方案名称】：深基坑支护专项施工方案" in out.split(pg.MATERIAL_OPEN)[0]
@@ -247,8 +247,8 @@ class TestSseGuardExternalMaterial:
     def test_on_redacts_credentials_but_keeps_standards(self, monkeypatch):
         monkeypatch.setattr(_cfg.settings, "prompt_injection_defense", True)
         from app.routers.sse_handlers import _guard_external_material
-        text = ("【项目概述】：api_key=sk-aaaaaaaaaaaaaaaa1111，"
-                "执行标准 GB 50300-2013、JGJ 120-2012\n")
+
+        text = "【项目概述】：api_key=sk-aaaaaaaaaaaaaaaa1111，" "执行标准 GB 50300-2013、JGJ 120-2012\n"
         out = _guard_external_material(text)
         assert "sk-aaaaaaaaaaaaaaaa1111" not in out
         assert "[已脱敏凭据]" in out
@@ -266,9 +266,13 @@ class TestCredentialRedaction:
             assert hasattr(p, "finditer")
 
     def test_redaction_still_works(self):
-        text = ("key1=sk-aaaaaaaaaaaaaaaa1111 gsk_" + "b" * 24 +
-                " api_key=" + "abcdef" * 4 +
-                " https://user:pw@host/x GB 50300-2013")
+        text = (
+            "key1=sk-aaaaaaaaaaaaaaaa1111 gsk_"
+            + "b" * 24
+            + " api_key="
+            + "abcdef" * 4
+            + " https://user:pw@host/x GB 50300-2013"
+        )
         out, n = pg.redact_sensitive(text)
         assert n == 4, f"应命中 4 处凭据，实际 {n}"
         assert "GB 50300-2013" in out, "标准编号不得被误伤"
@@ -285,18 +289,15 @@ class TestPatchResponseContract:
     async def test_update_branch_returns_variables(self, db_conn):
         key = "outline_short_system"
         default = get_default_prompt(key)
-        res = await _update_route(key, {"content": default + "\n新增 {tmp_var}"},
-                                  db=db_conn)
+        res = await _update_route(key, {"content": default + "\n新增 {tmp_var}"}, db=db_conn)
         assert res["ok"] is True and res.get("reset") is not True
-        assert res["variables"] == extract_user_variables(
-            default + "\n新增 {tmp_var}")
+        assert res["variables"] == extract_user_variables(default + "\n新增 {tmp_var}")
 
     async def test_empty_content_reset_branch_returns_variables(self, db_conn):
         """BUG-D：空内容 = 恢复默认分支必须与非空分支一样回传 variables。"""
         key = "outline_short_system"
         default = get_default_prompt(key)
-        await _update_route(key, {"content": default + "\n新增 {tmp_var}"},
-                            db=db_conn)
+        await _update_route(key, {"content": default + "\n新增 {tmp_var}"}, db=db_conn)
         res = await _update_route(key, {"content": ""}, db=db_conn)
         assert res["ok"] is True and res["reset"] is True
         assert "variables" in res, "空内容分支必须回传 variables（BUG-D）"
@@ -310,6 +311,7 @@ class TestResetEndpointResponseContract:
 
     async def test_reset_endpoint_returns_variables(self, db_conn):
         from app.routers.prompts import reset_prompt as _reset_route
+
         key = "outline_short_system"
         default = get_default_prompt(key)
         await _update_route(key, {"content": default + "\n新增 {zz}"}, db=db_conn)
@@ -332,14 +334,12 @@ class TestAuditDiffVariableScope:
     def test_real_variable_addition_still_reported(self):
         snap = {"before": "内容 {a}", "after": "内容 {a} {new_var}"}
         changes = diff_prompt_snapshot(snap)
-        assert any(c["field"] == "added_variables" and "new_var" in str(c["after"])
-                   for c in changes)
+        assert any(c["field"] == "added_variables" and "new_var" in str(c["after"]) for c in changes)
 
     def test_removed_variable_still_reported(self):
         snap = {"before": "内容 {a} {old_var}", "after": "内容 {a}"}
         changes = diff_prompt_snapshot(snap)
-        assert any(c["field"] == "removed_variables" and "old_var" in str(c["before"])
-                   for c in changes)
+        assert any(c["field"] == "removed_variables" and "old_var" in str(c["before"]) for c in changes)
 
     def test_no_diff_returns_empty(self):
         assert diff_prompt_snapshot({"before": "内容 {a}", "after": "内容 {a}"}) == []
@@ -355,6 +355,7 @@ class TestAuditListExcludesSharedFromDiff:
 
     async def test_list_changes_skip_shared(self, db_conn):
         from app.services.audit_service import list_prompt_audit_logs
+
         key = "outline_short_system"
         default = get_default_prompt(key)
         new = default + "\n启用 {SHARED_FORBIDDEN_WORDS}\n新增 {real_new_var}"
@@ -363,8 +364,7 @@ class TestAuditListExcludesSharedFromDiff:
         item = res["items"][0]
         assert item["rollbackable"] is True
         added = [c for c in item["changes"] if c["field"] == "added_variables"]
-        assert added and "SHARED_FORBIDDEN_WORDS" not in str(added), \
-            f"changes 里不应出现 SHARED_*：{item['changes']}"
+        assert added and "SHARED_FORBIDDEN_WORDS" not in str(added), f"changes 里不应出现 SHARED_*：{item['changes']}"
         assert "real_new_var" in str(added)
 
 
@@ -404,41 +404,46 @@ class TestFalsePositiveNarrowing:
 
     def test_whitelist_contains_only_short_names(self):
         from app.services.ai.prompts._registry import _FALSE_POSITIVE_VARS
-        assert all(len(v) <= 3 for v in _FALSE_POSITIVE_VARS), \
-            f"白名单只允许极短名（≤3字符）：{_FALSE_POSITIVE_VARS}"
+
+        assert all(len(v) <= 3 for v in _FALSE_POSITIVE_VARS), f"白名单只允许极短名（≤3字符）：{_FALSE_POSITIVE_VARS}"
         # 真实业务变量名一律不得在白名单
-        for name in ("title", "name", "content", "status", "type",
-                     "value", "count", "total", "code", "text", "label"):
+        for name in ("title", "name", "content", "status", "type", "value", "count", "total", "code", "text", "label"):
             assert name not in _FALSE_POSITIVE_VARS, f"{name} 是业务变量名，不得入白名单"
 
     def test_business_var_no_longer_swallowed(self):
         """收窄前 {title} 在含 JSON 特征的上下文会被误抑制，收窄后必须告警。"""
         from app.services.ai.prompts._registry import _is_false_positive
+
         tpl = '{"title": "示例"}\n标题：{title}'
         assert not _is_false_positive("k", "title", tpl)
 
     def test_first_occurrence_json_but_second_real_usage_alarms(self):
         """T8-b：第一处是 JSON 示例、第二处是真实使用 → 必须告警（旧实现被吞）。"""
         from app.services.ai.prompts._registry import _is_false_positive
-        tpl = '示例 {max: 200}；正文最多引用 {max} 条'
+
+        tpl = "示例 {max: 200}；正文最多引用 {max} 条"
         assert not _is_false_positive("k", "max", tpl)
 
     def test_all_occurrences_json_like_still_suppressed(self):
         """全部出现都像示例 → 仍抑制（不误伤既有行为）。"""
         from app.services.ai.prompts._registry import _is_false_positive
-        tpl = '数量 {max} 的取值: 200；另一处 {max} 见下: 列表'
+
+        tpl = "数量 {max} 的取值: 200；另一处 {max} 见下: 列表"
         assert _is_false_positive("k", "max", tpl)
 
     def test_latex_subscript_still_suppressed(self):
         from app.services.ai.prompts._registry import _is_false_positive
-        assert _is_false_positive("k", "max", '公式 $p_{max}$ 与 $q_{max}$')
+
+        assert _is_false_positive("k", "max", "公式 $p_{max}$ 与 $q_{max}$")
 
     def test_existing_template_max_still_suppressed(self):
         """回归：content_generation_system 的 {max}（LaTeX 下标）仍被抑制。"""
         from app.services.ai.prompts._registry import _is_false_positive
+
         real = _ALL_PROMPTS["content_generation_system"]["default_content"]
         assert _is_false_positive("content_generation_system", "max", real)
 
     def test_var_not_in_template_is_not_fp(self):
         from app.services.ai.prompts._registry import _is_false_positive
+
         assert not _is_false_positive("k", "max", "完全不含占位符的文本")

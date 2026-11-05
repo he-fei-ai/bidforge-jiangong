@@ -45,7 +45,7 @@ function renderPage() {
   return render(
     <AntdApp>
       <SecuritySettingsPage />
-    </AntdApp>
+    </AntdApp>,
   );
 }
 

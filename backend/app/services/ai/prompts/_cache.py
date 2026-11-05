@@ -53,6 +53,12 @@ _loaded_db_mtime: float | None = None
 #    变新时再查一次廉价水印（COUNT+MAX，走不到百行的表），水印未变 = 他表写入，
 #    只刷新 mtime 不重载。水印无法记录（极旧库缺列/查询失败）→ 逐字回退旧行为。
 _loaded_db_watermark: tuple[int, str] | None = None
+# ✅ R179（2026-11-05）：记录上次加载时库文件**确实不存在**。
+#    ``_loaded_db_mtime is None`` 有两种来源：①库文件从未出现（需要「出现即重载」）；
+#    ②调用方显式预置缓存/内存态（不得自动重载，见 test_prompt_module_r38 的
+#    预置覆盖语义）。旧实现无法区分二者，只好恒判「不变新」⇒ 库后建永不生效；
+#    现用本标记精确区分，既修复静默失效，也不误伤预置缓存的既有契约。
+_loaded_db_missing: bool = False
 #: 水印探测最小间隔（秒）：节流窗口内的他表高频写入不再重复开连接查询；
 #: 真实提示词变更被外部进程写入时的可见延迟 ≤ 1s（人尺度操作，可接受）。
 _WATERMARK_PROBE_MIN_INTERVAL = 1.0
@@ -155,7 +161,21 @@ def _db_newer_than_cache(db_path: str) -> bool:
     （下次写入必然可见），也不要引入每次 os.stat 之外的额外开销。
     """
     if _loaded_db_mtime is None:
-        return False
+        # ✅ R179（2026-11-05 · 库文件后创建永不生效）：加载时库文件尚不存在
+        #    （或本次加载未记录 mtime）时，旧实现直接返回 False，此后
+        #    ``_loaded_db_path`` 已与当前路径相同、``_prompt_cache`` 也不是 None，
+        #    ``_get_prompt_cache`` 永远进不了重载分支 —— 库文件随后被创建/写入，
+        #    前端保存的定制提示词也**永久不生效**，且无任何告警（实测复现：
+        #    先访问不存在的库 → 再建库写 prompt_templates → get_prompt 仍回 ""）。
+        #    现在「基线未知」以文件是否存在为准：存在即视为库变新，触发一次重载
+        #    （加载成功会记录 mtime 与水印，之后回落到正常的 mtime 比较）。
+        # 仅当上次加载「确实没找到库文件」时才把后来出现的文件视为变更；
+        # 预置缓存（显式 mtime=None）不在此列，保持原语义。
+        try:
+            return bool(_loaded_db_missing) and Path(db_path).exists()
+        except Exception as e:
+            logger.debug("读取 DB 文件是否存在失败（沿用现有缓存）: %s", e)
+            return False
     try:
         return os.stat(db_path).st_mtime > _loaded_db_mtime
     except Exception as e:
@@ -215,7 +235,7 @@ def _needs_reload_by_watermark(db_path: str) -> bool:
 
 def _load_prompt_cache_sync():
     """同步方式从数据库加载所有提示词到缓存。"""
-    global _prompt_cache, _loaded_db_path, _loaded_db_mtime, _loaded_db_watermark
+    global _prompt_cache, _loaded_db_path, _loaded_db_mtime, _loaded_db_watermark, _loaded_db_missing
     with _cache_lock:
         try:
             import sqlite3
@@ -225,13 +245,22 @@ def _load_prompt_cache_sync():
                 _prompt_cache = {}
                 _loaded_db_path = db_path
                 _loaded_db_watermark = None
+                # ✅ R179：未加载到任何库文件时不得残留上一次的 mtime 基线，
+                #    否则「库文件后创建」会因旧基线更小而永不触发重载。
+                _loaded_db_mtime = None
+                # 内存库不可能「后出现」，不纳入库出现即重载的判定。
+                _loaded_db_missing = False
                 return
             if not Path(db_path).exists():
                 _prompt_cache = {}
                 _loaded_db_path = db_path
                 _loaded_db_watermark = None
+                _loaded_db_mtime = None
+                # ✅ R179：标记「库文件确实不存在」，之后文件出现即可自动重载。
+                _loaded_db_missing = True
                 return
             _loaded_db_mtime = os.stat(db_path).st_mtime
+            _loaded_db_missing = False
             conn = sqlite3.connect(db_path)
             try:
                 conn.row_factory = sqlite3.Row
@@ -348,6 +377,19 @@ def get_prompt(key: str, **kwargs) -> str:
         # ✅ 先动态解析 {SHARED_*} 占位符（避免其被误报为 missing 变量）
         prompt = _resolve_shared_keys(prompt)
 
+        # ✅ R175（2026-11-03 · 遗留项 V1「<<FUZZY_FILL>> 对 DB 定制不生效」）：
+        #    模糊生成规则段旧实现只在**注册时**替换（content.py::_wrap_fuzzy_fill），
+        #    用户若在提示词编辑器里把 ``<<FUZZY_FILL>>`` / ``<<NO_PLACEHOLDER>>``
+        #    写进 DB 定制版，读取时不会被展开 → 标记原样下发模型，生成质量静默劣化。
+        #    现改为**读取时补展开**：出厂内容注册时已替换过（里面不含标记），
+        #    再跑一遍是幂等 no-op；只有 DB 定制版残留标记时才真正生效。
+        if "<<" in prompt:
+            try:
+                from app.services.ai.prompts.content import _wrap_fuzzy_fill
+                prompt = _wrap_fuzzy_fill(prompt)
+            except Exception as e:  # noqa: BLE001 - 展开失败不得阻断读取
+                logger.warning("提示词标记展开失败（%s）: %s", key, e)
+
         # BUG-FIX（2026-09-23 · 正文生成深度审计 · P0 日志噪音）：
         #   旧实现把缺失变量校验放在 `if kwargs:` 之外，导致任何"取原始模板"的合法
         #   调用 get_prompt("key")（无 kwargs，例如提示词编辑器预览、/prompts 列表
@@ -423,10 +465,13 @@ def reload_prompt_cache():
     下一次加载时会重新记录水印；若只清前两个而留旧水印，mtime 分支会拿
     过期水印比对，产生一次误判重载或恰好漏掉一次（与 2026-09-24 修的同类债）。
     """
-    global _prompt_cache, _loaded_db_path, _loaded_db_mtime, _loaded_db_watermark
+    global _prompt_cache, _loaded_db_path, _loaded_db_mtime, _loaded_db_watermark, _loaded_db_missing
     with _cache_lock:
         _prompt_cache = None
         _loaded_db_path = None
         _loaded_db_mtime = None
         _loaded_db_watermark = None
+        # ✅ R179：显式失效必须把「库缺失」派生标记一并清掉，避免旧状态
+        #    在下次加载前被误用（与上面三者失效的口径保持一致）。
+        _loaded_db_missing = False
     logger.info("Prompt cache invalidated, will reload on next access")

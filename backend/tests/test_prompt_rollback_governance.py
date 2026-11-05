@@ -8,6 +8,7 @@
   * G5/G6：治理能力默认必须关闭（prompt_context_budget=0 /
         prompt_injection_defense=False），否则会改变所有现存提示词渲染结果。
 """
+
 from __future__ import annotations
 
 import json
@@ -58,8 +59,8 @@ class TestSnapshotWritten:
         default = get_default_prompt(KEY)
         await _update_content(db_conn, default + "\n新增要求：{custom_rule}")
         cur = await db_conn.execute(
-            "SELECT snapshot_json FROM prompt_audit_logs"
-            " WHERE prompt_key=? ORDER BY rowid DESC LIMIT 1", (KEY,))
+            "SELECT snapshot_json FROM prompt_audit_logs" " WHERE prompt_key=? ORDER BY rowid DESC LIMIT 1", (KEY,)
+        )
         row = await cur.fetchone()
         assert row and row["snapshot_json"], "update 审计应写入快照"
         snap = json.loads(row["snapshot_json"])
@@ -71,8 +72,8 @@ class TestSnapshotWritten:
         default = get_default_prompt(KEY)
         await _update_content(db_conn, default + "\n补充：{x}")
         cur = await db_conn.execute(
-            "SELECT snapshot_json FROM prompt_audit_logs"
-            " WHERE prompt_key=? ORDER BY rowid DESC LIMIT 1", (KEY,))
+            "SELECT snapshot_json FROM prompt_audit_logs" " WHERE prompt_key=? ORDER BY rowid DESC LIMIT 1", (KEY,)
+        )
         snap = json.loads((await cur.fetchone())["snapshot_json"])
         assert snap.get("before_truncated") is None
         assert snap.get("after_truncated") is None
@@ -83,8 +84,8 @@ class TestSnapshotWritten:
         default = get_default_prompt(KEY)
         await _update_content(db_conn, default + "\n补充：{x}")
         cur = await db_conn.execute(
-            "SELECT snapshot_json FROM prompt_audit_logs"
-            " WHERE prompt_key=? ORDER BY rowid DESC LIMIT 1", (KEY,))
+            "SELECT snapshot_json FROM prompt_audit_logs" " WHERE prompt_key=? ORDER BY rowid DESC LIMIT 1", (KEY,)
+        )
         snap = json.loads((await cur.fetchone())["snapshot_json"])
         assert snap.get("after_truncated") is True
         assert len(snap["after"]) <= 50
@@ -96,8 +97,9 @@ class TestSnapshotWritten:
         default = get_default_prompt(KEY)
         await _update_content(db_conn, default + "\n补充：{y}")
         cur = await db_conn.execute(
-            "SELECT snapshot_json, after_hash FROM prompt_audit_logs"
-            " WHERE prompt_key=? ORDER BY rowid DESC LIMIT 1", (KEY,))
+            "SELECT snapshot_json, after_hash FROM prompt_audit_logs" " WHERE prompt_key=? ORDER BY rowid DESC LIMIT 1",
+            (KEY,),
+        )
         row = await cur.fetchone()
         assert (row["snapshot_json"] or "") == ""
         assert row["after_hash"], "哈希审计不应受快照开关影响"
@@ -109,6 +111,7 @@ class TestSnapshotWritten:
 class TestAuditListMetadata:
     async def test_list_returns_changes_and_rollbackable(self, db_conn):
         from app.services.audit_service import list_prompt_audit_logs
+
         default = get_default_prompt(KEY)
         await _update_content(db_conn, default + "\n新增：{added_var}")
         res = await list_prompt_audit_logs(db_conn, KEY)
@@ -121,11 +124,14 @@ class TestAuditListMetadata:
 
     async def test_legacy_row_without_snapshot_is_not_rollbackable(self, db_conn):
         from app.services.audit_service import list_prompt_audit_logs
+
         await db_conn.execute(
             "INSERT INTO prompt_audit_logs"
             " (id,prompt_key,action,before_hash,after_hash,"
             "variables_before,variables_after,client_ip)"
-            " VALUES ('legacy-row', ?, 'update', 'a', 'b', '[]', '[]', '')", (KEY,))
+            " VALUES ('legacy-row', ?, 'update', 'a', 'b', '[]', '[]', '')",
+            (KEY,),
+        )
         await db_conn.commit()
         res = await list_prompt_audit_logs(db_conn, KEY)
         item = next(i for i in res["items"] if i["id"] == "legacy-row")
@@ -141,31 +147,30 @@ class TestRollbackEndpoint:
         default = get_default_prompt(KEY)
         changed = default + "\n新增要求：{custom_rule}"
         await _update_content(db_conn, changed)
-        cur = await db_conn.execute(
-            "SELECT content FROM prompt_templates WHERE key=?", (KEY,))
+        cur = await db_conn.execute("SELECT content FROM prompt_templates WHERE key=?", (KEY,))
         assert (await cur.fetchone())["content"] == changed
 
         cur = await db_conn.execute(
-            "SELECT id FROM prompt_audit_logs WHERE prompt_key=?"
-            " ORDER BY rowid DESC LIMIT 1", (KEY,))
+            "SELECT id FROM prompt_audit_logs WHERE prompt_key=?" " ORDER BY rowid DESC LIMIT 1", (KEY,)
+        )
         audit_id = (await cur.fetchone())["id"]
 
         res = await rollback_prompt(KEY, {"audit_id": audit_id}, db=db_conn)
         assert res["ok"] is True
         assert res["content"] == default, "回滚应恢复到变更前的出厂默认"
         assert res["removed_variables"] == ["custom_rule"]
-        cur = await db_conn.execute(
-            "SELECT content FROM prompt_templates WHERE key=?", (KEY,))
+        cur = await db_conn.execute("SELECT content FROM prompt_templates WHERE key=?", (KEY,))
         assert (await cur.fetchone())["content"] == default
 
     async def test_rollback_writes_audit_and_is_itself_rollbackable(self, db_conn):
         """回滚本身也留痕，且可被再次回滚（可撤销链）。"""
         from app.services.audit_service import list_prompt_audit_logs
+
         default = get_default_prompt(KEY)
         await _update_content(db_conn, default + "\n新增：{v1}")
         cur = await db_conn.execute(
-            "SELECT id FROM prompt_audit_logs WHERE prompt_key=?"
-            " ORDER BY rowid DESC LIMIT 1", (KEY,))
+            "SELECT id FROM prompt_audit_logs WHERE prompt_key=?" " ORDER BY rowid DESC LIMIT 1", (KEY,)
+        )
         first_audit = (await cur.fetchone())["id"]
         await rollback_prompt(KEY, {"audit_id": first_audit}, db=db_conn)
         logs = await list_prompt_audit_logs(db_conn, KEY)
@@ -187,7 +192,8 @@ class TestRollbackEndpoint:
         await db_conn.execute(
             "INSERT INTO prompt_audit_logs (id,prompt_key,action,snapshot_json)"
             " VALUES ('other-key-row', 'content_generation_system', 'update', ?)",
-            (json.dumps({"before": "别的模板的内容"}, ensure_ascii=False),))
+            (json.dumps({"before": "别的模板的内容"}, ensure_ascii=False),),
+        )
         await db_conn.commit()
         with pytest.raises(HTTPException) as ei:
             await rollback_prompt(KEY, {"audit_id": "other-key-row"}, db=db_conn)
@@ -198,7 +204,9 @@ class TestRollbackEndpoint:
         await db_conn.execute(
             "INSERT INTO prompt_audit_logs"
             " (id,prompt_key,action,before_hash,after_hash)"
-            " VALUES ('hash-only', ?, 'update', 'a', 'b')", (KEY,))
+            " VALUES ('hash-only', ?, 'update', 'a', 'b')",
+            (KEY,),
+        )
         await db_conn.commit()
         with pytest.raises(HTTPException) as ei:
             await rollback_prompt(KEY, {"audit_id": "hash-only"}, db=db_conn)
@@ -210,8 +218,8 @@ class TestRollbackEndpoint:
         await db_conn.execute(
             "INSERT INTO prompt_audit_logs (id,prompt_key,action,snapshot_json)"
             " VALUES ('trunc-row', ?, 'update', ?)",
-            (KEY, json.dumps({"before": "截断", "before_truncated": True},
-                             ensure_ascii=False)))
+            (KEY, json.dumps({"before": "截断", "before_truncated": True}, ensure_ascii=False)),
+        )
         await db_conn.commit()
         with pytest.raises(HTTPException) as ei:
             await rollback_prompt(KEY, {"audit_id": "trunc-row"}, db=db_conn)
@@ -230,12 +238,11 @@ class TestRollbackEndpoint:
         await _update_content(db_conn, default + "\n新增：{v2}")
         assert "新增" in _ALL_PROMPTS[KEY]["content"], "保存后注册表应已是新内容"
         cur = await db_conn.execute(
-            "SELECT id FROM prompt_audit_logs WHERE prompt_key=?"
-            " ORDER BY rowid DESC LIMIT 1", (KEY,))
+            "SELECT id FROM prompt_audit_logs WHERE prompt_key=?" " ORDER BY rowid DESC LIMIT 1", (KEY,)
+        )
         audit_id = (await cur.fetchone())["id"]
         await rollback_prompt(KEY, {"audit_id": audit_id}, db=db_conn)
-        assert _ALL_PROMPTS[KEY]["content"] == default, \
-            "回滚后运行时注册表必须立刻看到旧内容"
+        assert _ALL_PROMPTS[KEY]["content"] == default, "回滚后运行时注册表必须立刻看到旧内容"
 
 
 # ---------------------------------------------------------------------------
@@ -256,25 +263,33 @@ class TestGovernanceDefaultOff:
 
     def test_sse_budget_helper_returns_text_unchanged_when_off(self):
         from app.routers.sse_handlers import _apply_prompt_context_budget
+
         text = "【全局事实变量（唯一可信数据源）】：\n" + "开挖深度10.5m。" * 500
         assert _apply_prompt_context_budget(text) == text
 
     def test_sse_guard_helper_returns_text_unchanged_when_off(self):
         from app.routers.sse_handlers import _guard_external_material
+
         text = "【项目概述】：正常资料内容"
         assert _guard_external_material(text) == text
 
     def test_sse_budget_helper_activates_when_enabled(self, monkeypatch):
         from app.routers.sse_handlers import _apply_prompt_context_budget
+
         monkeypatch.setattr(_cfg.settings, "prompt_context_budget", 200)
-        text = ("【项目概述】：" + "很长很长的资料。" * 500
-                + "\n【全局事实变量（唯一可信数据源）】：\n" + "开挖深度10.5m。" * 100)
+        text = (
+            "【项目概述】："
+            + "很长很长的资料。" * 500
+            + "\n【全局事实变量（唯一可信数据源）】：\n"
+            + "开挖深度10.5m。" * 100
+        )
         out = _apply_prompt_context_budget(text)
         assert len(out) < len(text), "开启后超长上下文应被削减"
         assert "开挖深度10.5m" in out, "全局事实是最关键上下文，应被保留"
 
     def test_sse_guard_helper_activates_when_enabled(self, monkeypatch):
         from app.routers.sse_handlers import _guard_external_material
+
         monkeypatch.setattr(_cfg.settings, "prompt_injection_defense", True)
         out = _guard_external_material("【项目概述】：正常资料内容")
         assert out.startswith("【以下为外部资料原文"), "开启后应加资料边界围栏"
@@ -293,6 +308,7 @@ class TestGovernanceDefaultOff:
         """
         from app.services.content_runtime import build_chapter_user_content
         from app.services.prompt_governance import _DEFAULT_PRIORITY, segment_priority_of
+
         user_content = build_chapter_user_content(
             scheme={"name": "基坑支护专项方案", "type": "危大工程专项方案"},
             project_brief="（项目概述摘要）",

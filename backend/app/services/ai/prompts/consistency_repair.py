@@ -5,10 +5,15 @@
 - consistency_arbitrate_system / consistency_arbitrate_user：定级 + 权威值仲裁
 - consistency_repair_system / consistency_repair_user：按章节定向修复
 """
+
 from app.services.ai.prompts._registry import _reg
 
 # ---------- 阶段 1：扫描 ----------
-_reg("consistency_scan_system", "analysis", "一致性Agent·扫描（系统）", """你是专项方案全文一致性扫描助手。请从给定章节内容中提取可能与其他章节、全局事实变量、设计文件、规范冲突的内容。
+_reg(
+    "consistency_scan_system",
+    "analysis",
+    "一致性Agent·扫描（系统）",
+    """你是专项方案全文一致性扫描助手。请从给定章节内容中提取可能与其他章节、全局事实变量、设计文件、规范冲突的内容。
 
 要求：
 1. 只返回 JSON，不要输出解释、总结或 Markdown。
@@ -25,9 +30,14 @@ _reg("consistency_scan_system", "analysis", "一致性Agent·扫描（系统）"
    param（其他参数）、duplication（章节交叉重复）、facts（与全局事实不符）、
    design（与设计文件不符）、standard（与规范不符）。
 8. 输出严格 JSON：{"conflicts":[{"conflict_type":"numeric","topic":"项目总工期","value":"120 日历天","text":"本工程总工期为 120 日历天","position":156}]}。
-   没有冲突时返回 {"conflicts":[]}。""")
+   没有冲突时返回 {"conflicts":[]}。""",
+)
 
-_reg("consistency_scan_user", "analysis", "一致性Agent·扫描（用户）", """全局事实变量：
+_reg(
+    "consistency_scan_user",
+    "analysis",
+    "一致性Agent·扫描（用户）",
+    """全局事实变量：
 {global_facts}
 
 项目资料摘要：
@@ -56,12 +66,17 @@ _reg("consistency_scan_user", "analysis", "一致性Agent·扫描（用户）", 
       "position": 156
     }
   ]
-}""")
+}""",
+)
 
 # ---------- 阶段 1（批处理版 · 2026-09-22 P0-1）：一次调用扫描多个章节 ----------
 # 与单章版唯一区别：输入是多个章节、输出每条冲突必须带 section_id。
 # 批结果结构不合法时由调用方「整批作废 + 按章回退单章扫描」，绝不将就。
-_reg("consistency_scan_batch_system", "analysis", "一致性Agent·扫描·多章批处理（系统）", """你是专项方案全文一致性扫描助手。请从给定的多个章节内容中提取可能与其他章节、全局事实变量、设计文件、规范冲突的内容。
+_reg(
+    "consistency_scan_batch_system",
+    "analysis",
+    "一致性Agent·扫描·多章批处理（系统）",
+    """你是专项方案全文一致性扫描助手。请从给定的多个章节内容中提取可能与其他章节、全局事实变量、设计文件、规范冲突的内容。
 
 要求：
 1. 只返回 JSON，不要输出解释、总结或 Markdown。
@@ -77,11 +92,19 @@ _reg("consistency_scan_batch_system", "analysis", "一致性Agent·扫描·多�
    model（型号/材料等级）、timeline（时间口径/质保期）、commitment（承诺口径）、
    param（其他参数）、duplication（章节交叉重复）、facts（与全局事实不符）、
    design（与设计文件不符）、standard（与规范不符）。
-9. 输出严格 JSON：
-   {"conflicts":[{"section_id":"章节ID","conflict_type":"numeric","topic":"项目总工期","value":"120 日历天","text":"本工程总工期为 120 日历天","position":156}]}。
-   全部章节都没有冲突时返回 {"conflicts":[]}。""")
+9. **必须声明覆盖**：``scanned_sections`` 列出本次**实际检查过**的全部章节ID，
+   输入中的每个章节都要列出（即使该章没有任何冲突）。漏列会被判定为漏答，
+   该批结果作废并重扫。
+10. 输出严格 JSON：
+   {"scanned_sections":["章节ID1","章节ID2"],"conflicts":[{"section_id":"章节ID","conflict_type":"numeric","topic":"项目总工期","value":"120 日历天","text":"本工程总工期为 120 日历天","position":156}]}。
+   全部章节都没有冲突时返回 {"scanned_sections":[全部章节ID],"conflicts":[]}。""",
+)
 
-_reg("consistency_scan_batch_user", "analysis", "一致性Agent·扫描·多章批处理（用户）", """全局事实变量：
+_reg(
+    "consistency_scan_batch_user",
+    "analysis",
+    "一致性Agent·扫描·多章批处理（用户）",
+    """全局事实变量：
 {global_facts}
 
 项目资料摘要：
@@ -96,8 +119,9 @@ _reg("consistency_scan_batch_user", "analysis", "一致性Agent·扫描·多章�
 本次共 {section_count} 个章节需要扫描，章节之间用「-----」分隔：
 {sections_block}
 
-请逐章提取冲突项，返回 JSON（每条冲突必须带 section_id）：
+请逐章提取冲突项，返回 JSON（必须列出 scanned_sections = 本次检查过的全部章节ID，每条冲突必须带 section_id）：
 {
+  "scanned_sections": ["章节ID1", "章节ID2"],
   "conflicts": [
     {
       "section_id": "章节ID",
@@ -108,10 +132,15 @@ _reg("consistency_scan_batch_user", "analysis", "一致性Agent·扫描·多章�
       "position": 156
     }
   ]
-}""")
+}""",
+)
 
 # ---------- 阶段 2：仲裁 ----------
-_reg("consistency_arbitrate_system", "analysis", "一致性Agent·仲裁（系统）", """你是专项方案冲突仲裁助手。请根据权威值优先级，为每个冲突项确定权威值和修复指令。
+_reg(
+    "consistency_arbitrate_system",
+    "analysis",
+    "一致性Agent·仲裁（系统）",
+    """你是专项方案冲突仲裁助手。请根据权威值优先级，为每个冲突项确定权威值和修复指令。
 
 权威值优先级：
 1. 全局事实变量
@@ -129,9 +158,14 @@ _reg("consistency_arbitrate_system", "analysis", "一致性Agent·仲裁（系�
 4. 如果无法确定权威值，authoritative_value 留空，repair_instruction 留空，
    并在 reason 中注明"无法确定权威值，建议人工确认"，不要强行指定。
 5. 输出严格 JSON：
-{"arbitrations":[{"conflict_id":"C001","severity":"high","authoritative_value":"90 日历天","authoritative_source":"全局事实变量 · 工期安排","repair_instruction":"将 120 日历天统一改为 90 日历天","reason":"全局事实变量已设定建设工期为 90 日历天"}]}""")
+{"arbitrations":[{"conflict_id":"C001","severity":"high","authoritative_value":"90 日历天","authoritative_source":"全局事实变量 · 工期安排","repair_instruction":"将 120 日历天统一改为 90 日历天","reason":"全局事实变量已设定建设工期为 90 日历天"}]}""",
+)
 
-_reg("consistency_arbitrate_user", "analysis", "一致性Agent·仲裁（用户）", """全局事实变量：
+_reg(
+    "consistency_arbitrate_user",
+    "analysis",
+    "一致性Agent·仲裁（用户）",
+    """全局事实变量：
 {global_facts}
 
 设计文件摘要：
@@ -158,10 +192,15 @@ _reg("consistency_arbitrate_user", "analysis", "一致性Agent·仲裁（用户�
       "reason": "全局事实变量已设定建设工期为 90 日历天"
     }
   ]
-}""")
+}""",
+)
 
 # ---------- 阶段 3：定向修复 ----------
-_reg("consistency_repair_system", "analysis", "一致性Agent·修复（系统）", """你是专项方案全文一致性修复助手。请根据冲突清单和权威值，修复指定章节中的冲突内容。
+_reg(
+    "consistency_repair_system",
+    "analysis",
+    "一致性Agent·修复（系统）",
+    """你是专项方案全文一致性修复助手。请根据冲突清单和权威值，修复指定章节中的冲突内容。
 
 要求：
 1. 只修复冲突清单中列出的内容，不要改动无关内容。
@@ -171,9 +210,14 @@ _reg("consistency_repair_system", "analysis", "一致性Agent·修复（系统�
 5. 修复后的内容必须与同章节其他内容保持一致。
 6. 如果冲突项无法确定权威值，保留原文不要强行修改。
 7. 只返回修复后的章节内容，不要输出解释、总结或 Markdown 代码块。
-8. 不要输出标题，不要输出额外说明。""")
+8. 不要输出标题，不要输出额外说明。""",
+)
 
-_reg("consistency_repair_user", "analysis", "一致性Agent·修复（用户）", """全局事实变量：
+_reg(
+    "consistency_repair_user",
+    "analysis",
+    "一致性Agent·修复（用户）",
+    """全局事实变量：
 {global_facts}
 
 权威值来源：
@@ -189,7 +233,8 @@ _reg("consistency_repair_user", "analysis", "一致性Agent·修复（用户）"
 本章节需要修复的冲突项：
 {conflicts_in_section}
 
-请修复上述冲突项，返回修复后的完整章节内容。""")
+请修复上述冲突项，返回修复后的完整章节内容。""",
+)
 
 
 # ---------- 阶段 3b：定点编辑（对齐《标书智能体（三）》§三.4 / §五.1） ----------
@@ -197,8 +242,11 @@ _reg("consistency_repair_user", "analysis", "一致性Agent·修复（用户）"
 # 由程序整列覆盖 sections.content —— 一处冲突会连带改写章内已正确的内容。
 # 本组提示词改为**只产出编辑**（old_text / new_text），由程序在「唯一命中」
 # 时才替换，从机制上杜绝「重写已正确内容」。
-_reg("consistency_repair_edits_system", "analysis", "一致性Agent·定点编辑（系统）",
-     """你是专项方案全文一致性**定点编辑**助手。你只负责给出「改哪一段、改成什么」，
+_reg(
+    "consistency_repair_edits_system",
+    "analysis",
+    "一致性Agent·定点编辑（系统）",
+    """你是专项方案全文一致性**定点编辑**助手。你只负责给出「改哪一段、改成什么」，
 不要重写整章。
 
 核心纪律：
@@ -214,11 +262,15 @@ _reg("consistency_repair_edits_system", "analysis", "一致性Agent·定点编�
 7. 若某个冲突项无法确定权威值，**不要为它生成 edit**（宁可不改，也不要改错）。
 8. 没有需要修改的地方时返回 {"edits": []}。
 
-输出 JSON：{"edits": [{"old_text": "...", "new_text": "..."}]}""")
+输出 JSON：{"edits": [{"old_text": "...", "new_text": "..."}]}""",
+)
 
 
-_reg("consistency_repair_edits_user", "analysis", "一致性Agent·定点编辑（用户）",
-     """全局事实变量：
+_reg(
+    "consistency_repair_edits_user",
+    "analysis",
+    "一致性Agent·定点编辑（用户）",
+    """全局事实变量：
 {global_facts}
 
 权威值来源：
@@ -231,15 +283,19 @@ _reg("consistency_repair_edits_user", "analysis", "一致性Agent·定点编辑�
 本章节需要修复的冲突项（含每个冲突项的权威值、权威来源与修复指令）：
 {conflicts_in_section}
 
-请针对上述冲突项逐条给出 old_text / new_text。只返回 JSON。""")
+请针对上述冲突项逐条给出 old_text / new_text。只返回 JSON。""",
+)
 
 
 # ---------- 阶段 3c：整卷合并修复（R122-G2，引入易标持久 Agent 整卷修复的程序级等价物） ----------
 # 与逐章修复（consistency_repair_*）不同：本组把「全局事实 + 冲突清单 + 全部末级
 # 章节」拼成带 <!-- §:章节ID --> 小节标记的整卷工作区，让模型**一次**就地修订，
 # 由程序按标记切回各章并施加小节闸门（详见 services/consistency_fullbook_repair.py）。
-_reg("consistency_fullbook_system", "analysis", "一致性Agent·整卷修复（系统）",
-     """你是专项方案全文一致性**整卷合并修复**助手。你会拿到一份带小节标记的整卷文本，
+_reg(
+    "consistency_fullbook_system",
+    "analysis",
+    "一致性Agent·整卷修复（系统）",
+    """你是专项方案全文一致性**整卷合并修复**助手。你会拿到一份带小节标记的整卷文本，
 需要跨章节统一口径、就地修订冲突取值。
 
 核心纪律：
@@ -252,13 +308,18 @@ _reg("consistency_fullbook_system", "analysis", "一致性Agent·整卷修复（
 5. 保留原有的段落结构、标题层级、列表、表格、编号与图表代码围栏（不得增删代码块）。
 6. 若某冲突无法从清单确定权威值，保留原文不要强行修改。
 7. 章节标题行（标记后的 `# 标题`）不得改动（程序维护）。
-8. 除修订冲突外不做任何润色、纠错或排版调整。""")
+8. 除修订冲突外不做任何润色、纠错或排版调整。""",
+)
 
-_reg("consistency_fullbook_user", "analysis", "一致性Agent·整卷修复（用户）",
-     """待修订章节数：{section_count}
+_reg(
+    "consistency_fullbook_user",
+    "analysis",
+    "一致性Agent·整卷修复（用户）",
+    """待修订章节数：{section_count}
 
 以下是带小节标记的整卷工作区（全局事实与冲突清单已附在顶部）。请严格按系统要求，
 只在 `<!-- §:章节ID -->` 标记下就地修订冲突取值，保持所有标记一字不动，
 返回修订后的完整整卷：
 
-{workspace}""")
+{workspace}""",
+)

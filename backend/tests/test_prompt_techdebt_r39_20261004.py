@@ -11,6 +11,7 @@
   ⑤ T1：DB 有覆盖时用户编辑生效（DB 优先语义），无覆盖时回退出厂字面量；
   ⑥ 反向护栏：把读取改回硬编码 → ④/⑤ 必失败（防退化）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -31,12 +32,10 @@ def _module_defs(path: Path) -> tuple[str | None, dict[str, str]]:
     system: str | None = None
     items: dict[str, str] = {}
     for n in ast.walk(t):
-        if isinstance(n, ast.Assign) and any(
-                getattr(x, "id", "") == "STABLE_SYSTEM_PROMPT" for x in n.targets):
+        if isinstance(n, ast.Assign) and any(getattr(x, "id", "") == "STABLE_SYSTEM_PROMPT" for x in n.targets):
             if isinstance(n.value, ast.Constant):
                 system = n.value.value
-        if isinstance(n, ast.AnnAssign) and \
-                getattr(n.target, "id", "") == "_ITEM_PROMPTS":
+        if isinstance(n, ast.AnnAssign) and getattr(n.target, "id", "") == "_ITEM_PROMPTS":
             for k, v in zip(n.value.keys, n.value.values):
                 if isinstance(k, ast.Constant) and isinstance(v, ast.Constant):
                     items[k.value] = v.value
@@ -46,6 +45,7 @@ def _module_defs(path: Path) -> tuple[str | None, dict[str, str]]:
 @pytest.fixture(scope="module")
 def factory():
     from app.services import bid_analysis_service as svc
+
     return svc
 
 
@@ -65,8 +65,10 @@ def _ensure_registered():
     这个真实场景。
     """
     from app.services.ai.prompts._registry import register_lazy_prompts
+
     register_lazy_prompts()
     from app.services.ai.prompts import get_prompt
+
     # 走真实读取出口：未命中时 _cache 会触发补注册
     get_prompt("bid_analysis_system")
     yield
@@ -80,27 +82,28 @@ class TestGlobalCoverage:
     #   的 contract_test_*、test_prompt_variables_r6 的 r6_test_*）会注册临时探针
     #   模板。它们各自有 autouse fixture 清理，但 pytest 全量顺序不可控 ——
     #   排除探针键前缀防串扰（与 test_prompt_techdebt_r38 的 probe_prefixes 同口径）。
-    _PROBE_PREFIXES = ("contract_test_", "r6_test_", "__probe", "_test_prompt_",
-                       "__r39_probe")
+    _PROBE_PREFIXES = ("contract_test_", "r6_test_", "__probe", "_test_prompt_", "__r39_probe")
 
     def test_every_registered_prompt_has_contract(self):
         from app.services.ai.prompts._registry import _ALL_PROMPTS, PROMPT_VARIABLE_CONTRACTS
+
         missing = sorted(
-            k for k in set(_ALL_PROMPTS) - set(PROMPT_VARIABLE_CONTRACTS)
-            if not k.startswith(self._PROBE_PREFIXES))
+            k for k in set(_ALL_PROMPTS) - set(PROMPT_VARIABLE_CONTRACTS) if not k.startswith(self._PROBE_PREFIXES)
+        )
         assert not missing, "已注册但无契约的模板：%s" % missing
 
     def test_no_prompt_has_undeclared_requires(self):
         """``requires`` 不得为 None —— 未声明会被「跳过校验」掩盖（R38 D6 语义）。"""
         from app.services.ai.prompts._registry import _ALL_PROMPTS
+
         undeclared = sorted(
-            k for k, v in _ALL_PROMPTS.items()
-            if v.get("requires") is None
-            and not k.startswith(self._PROBE_PREFIXES))
+            k for k, v in _ALL_PROMPTS.items() if v.get("requires") is None and not k.startswith(self._PROBE_PREFIXES)
+        )
         assert not undeclared, "requires 未声明（跳过契约校验）的模板：%s" % undeclared
 
     def test_contract_has_no_orphan_keys(self):
         from app.services.ai.prompts._registry import _ALL_PROMPTS, PROMPT_VARIABLE_CONTRACTS
+
         orphan = sorted(set(PROMPT_VARIABLE_CONTRACTS) - set(_ALL_PROMPTS))
         assert not orphan, "契约里有、注册表里没有的键：%s" % orphan
 
@@ -117,14 +120,16 @@ class TestGlobalCoverage:
         注入、不经 render），如实登记才能让启动期漂移校验归零。
         """
         from app.services.ai.prompts._registry import _ALL_PROMPTS, extract_user_variables
+
         zero = [k for k, v in _ALL_PROMPTS.items() if v.get("requires") == []]
         assert SYSTEM_KEY in zero, "通用 system 提示词未显式声明零变量"
         assert len(zero) >= 10, "显式零声明的模板数异常偏少：%d" % len(zero)
         for k in zero:
             body = _ALL_PROMPTS[k].get("default_content", "")
-            assert extract_user_variables(body) == [], (
-                "requires=[] 的模板 %s 实际含调用方变量 %s"
-                % (k, extract_user_variables(body)))
+            assert extract_user_variables(body) == [], "requires=[] 的模板 %s 实际含调用方变量 %s" % (
+                k,
+                extract_user_variables(body),
+            )
 
 
 # =====================================================================
@@ -133,28 +138,29 @@ class TestGlobalCoverage:
 class TestBidPromptsRegistered:
     def test_all_item_prompts_registered(self, literals):
         from app.services.ai.prompts._registry import _ALL_PROMPTS
+
         _, items = literals
-        assert len(items) == EXPECTED_ITEM_COUNT, (
-            "解析项数量变化，护栏基线需同步（当前 %d）" % len(items))
-        missing = [k for k in items
-                   if ITEM_KEY_PREFIX + k not in _ALL_PROMPTS]
+        assert len(items) == EXPECTED_ITEM_COUNT, "解析项数量变化，护栏基线需同步（当前 %d）" % len(items)
+        missing = [k for k in items if ITEM_KEY_PREFIX + k not in _ALL_PROMPTS]
         assert not missing, "未注册的解析项提示词：%s" % missing
 
     def test_system_prompt_registered(self):
         from app.services.ai.prompts._registry import _ALL_PROMPTS
+
         assert SYSTEM_KEY in _ALL_PROMPTS, "通用 system 提示词未注册"
 
     def test_category_visible_in_list_prompts(self):
         """用户后台按分类能看到这批模板（否则等于没接进编辑器）。"""
         from app.services.ai.prompts import list_prompts
+
         items = list_prompts("bid_analysis")
-        assert len(items) == EXPECTED_ITEM_COUNT + 1, (
-            "bid_analysis 分类下模板数异常：%d" % len(items))
+        assert len(items) == EXPECTED_ITEM_COUNT + 1, "bid_analysis 分类下模板数异常：%d" % len(items)
         assert any(p["key"] == SYSTEM_KEY for p in items)
 
     def test_registered_content_is_byte_identical(self, literals):
         """注册内容必须与模块内出厂字面量逐字一致（零行为变化红线）。"""
         from app.services.ai.prompts._registry import _ALL_PROMPTS
+
         system, items = literals
         for iid, body in items.items():
             got = _ALL_PROMPTS[ITEM_KEY_PREFIX + iid]["default_content"]
@@ -187,8 +193,7 @@ class TestBidPromptReadPath:
 
     def test_build_system_prompt_appends_hints(self, factory, literals):
         system, _ = literals
-        got = factory.build_system_prompt(section_hint="标段1",
-                                          classification_hint="危大")
+        got = factory.build_system_prompt(section_hint="标段1", classification_hint="危大")
         assert got.startswith(system)
         assert "【当前处理标段上下文】标段1" in got
         assert "【本方案危大工程分类结论（提取重点参考）】危大" in got
@@ -209,13 +214,10 @@ class TestBidPromptReadPath:
         """DB 覆盖必须即时生效（T1 的核心价值：用户后台改得到）。"""
         _, items = literals
         marker = "【R39 测试覆盖】"
-        monkeypatch.setattr(factory, "get_prompt",
-                            lambda key: marker + items["projectBasicInfo"])
-        assert factory.get_item_prompt("projectBasicInfo") == \
-            marker + items["projectBasicInfo"]
+        monkeypatch.setattr(factory, "get_prompt", lambda key: marker + items["projectBasicInfo"])
+        assert factory.get_item_prompt("projectBasicInfo") == marker + items["projectBasicInfo"]
 
-    def test_registry_failure_falls_back_to_literal(self, factory, monkeypatch,
-                                                    literals):
+    def test_registry_failure_falls_back_to_literal(self, factory, monkeypatch, literals):
         """注册表读取抛异常必须降级为出厂字面量，不得阻断提取。"""
         system, items = literals
 
@@ -224,8 +226,7 @@ class TestBidPromptReadPath:
 
         monkeypatch.setattr(factory, "get_prompt", _boom)
         assert factory.get_bid_system_prompt() == system
-        assert factory.get_item_prompt("projectBasicInfo") == \
-            items["projectBasicInfo"]
+        assert factory.get_item_prompt("projectBasicInfo") == items["projectBasicInfo"]
 
     def test_empty_db_content_falls_back(self, factory, monkeypatch, literals):
         """DB 内容为空串时回退出厂（不把空提示词下发给模型）。"""
@@ -242,11 +243,8 @@ class TestNoRegressionToHardcoded:
         """源码级锁定：get_item_prompt 必须经 get_prompt，不得直接读 _ITEM_PROMPTS。"""
         src = SVC.read_text(encoding="utf-8")
         tree = ast.parse(src)
-        fn = next(n for n in ast.walk(tree)
-                  if isinstance(n, ast.FunctionDef)
-                  and n.name == "get_item_prompt")
-        called = {getattr(x.func, "id", None) for x in ast.walk(fn)
-                  if isinstance(x, ast.Call)}
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "get_item_prompt")
+        called = {getattr(x.func, "id", None) for x in ast.walk(fn) if isinstance(x, ast.Call)}
         assert "get_prompt" in called, "get_item_prompt 未走统一注册表读取"
 
     def test_system_prompt_readers_go_through_registry(self, factory):
@@ -254,24 +252,23 @@ class TestNoRegressionToHardcoded:
         src = SVC.read_text(encoding="utf-8")
         tree = ast.parse(src)
         for name in ("build_system_prompt", "build_system_messages"):
-            fn = next(n for n in ast.walk(tree)
-                      if isinstance(n, ast.FunctionDef) and n.name == name)
-            direct = {x.id for x in ast.walk(fn)
-                      if isinstance(x, ast.Name) and x.id == "STABLE_SYSTEM_PROMPT"
-                      and isinstance(x.ctx, ast.Load)}
-            assert not direct, (
-                "%s 直接引用了出厂字面量，绕过注册表" % name)
+            fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
+            direct = {
+                x.id
+                for x in ast.walk(fn)
+                if isinstance(x, ast.Name) and x.id == "STABLE_SYSTEM_PROMPT" and isinstance(x.ctx, ast.Load)
+            }
+            assert not direct, "%s 直接引用了出厂字面量，绕过注册表" % name
 
     def test_every_registration_declares_requires(self, factory):
         """bid_item_* 登记 ``CONTEXT``（build_item 注入的真实占位符）。"""
         from app.services.ai.prompts._registry import _ALL_PROMPTS
+
         items = [k for k in _ALL_PROMPTS if k.startswith(ITEM_KEY_PREFIX)]
         assert len(items) == EXPECTED_ITEM_COUNT
         for k in items:
-            assert _ALL_PROMPTS[k].get("requires") == ["CONTEXT"], (
-                "%s 的 requires 不是 ['CONTEXT']" % k)
-        assert _ALL_PROMPTS[SYSTEM_KEY].get("requires") == [], (
-            "system 模板应为零变量显式声明")
+            assert _ALL_PROMPTS[k].get("requires") == ["CONTEXT"], "%s 的 requires 不是 ['CONTEXT']" % k
+        assert _ALL_PROMPTS[SYSTEM_KEY].get("requires") == [], "system 模板应为零变量显式声明"
 
     def test_reg_preserves_explicit_empty_declaration(self, factory):
         """``_reg(requires=[])`` 必须落库为 ``[]``，不得压成 None。
@@ -283,16 +280,15 @@ class TestNoRegressionToHardcoded:
         的假阴性。直接注册一个探针键才能真正判别这一处。
         """
         from app.services.ai.prompts._registry import _ALL_PROMPTS, _reg
+
         probe = "__r39_probe_zero_decl__"
         try:
             _reg(probe, "r39_probe", "探针", "零占位，无花括号。", requires=[])
-            assert _ALL_PROMPTS[probe]["requires"] == [], (
-                "显式空声明被压成 %r" % _ALL_PROMPTS[probe]["requires"])
+            assert _ALL_PROMPTS[probe]["requires"] == [], "显式空声明被压成 %r" % _ALL_PROMPTS[probe]["requires"]
             # 未声明（None）必须仍是 None，两者不得混淆
             probe2 = "__r39_probe_undeclared__"
             _reg(probe2, "r39_probe", "探针", "x", requires=None)
-            assert _ALL_PROMPTS[probe2]["requires"] is None, (
-                "未声明被误判为显式空声明")
+            assert _ALL_PROMPTS[probe2]["requires"] is None, "未声明被误判为显式空声明"
         finally:
             _ALL_PROMPTS.pop(probe, None)
             _ALL_PROMPTS.pop("__r39_probe_undeclared__", None)
@@ -300,5 +296,5 @@ class TestNoRegressionToHardcoded:
     def test_startup_contract_check_is_clean(self, factory):
         """启动期契约校验必须零漂移（否则 strict 模式会阻断启动）。"""
         from app.services.ai.prompts._registry import check_prompt_variables
-        assert check_prompt_variables() == [], (
-            "契约漂移：%s" % check_prompt_variables()[:3])
+
+        assert check_prompt_variables() == [], "契约漂移：%s" % check_prompt_variables()[:3]

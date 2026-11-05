@@ -20,6 +20,7 @@
 
 两组用例均满足「修复前必失败、修复后必通过」。
 """
+
 from __future__ import annotations
 
 import inspect
@@ -36,8 +37,7 @@ from app.services.content_blocks import _parse_content_blocks
 
 
 def _export_chart_types(content: str) -> list[str]:
-    return [b["chart_type"] for b in _parse_content_blocks(content)
-            if b.get("type") == "chart"]
+    return [b["chart_type"] for b in _parse_content_blocks(content) if b.get("type") == "chart"]
 
 
 def _registered_chart_types(content: str) -> list[str]:
@@ -52,36 +52,44 @@ class TestMermaidDefaultParamParity:
         from app.services import content_blocks
 
         src = inspect.getsource(content_blocks._parse_content_blocks)
-        calls = [ln.strip() for ln in src.splitlines()
-                 if "detect_mermaid_chart_type(" in ln]
+        calls = [ln.strip() for ln in src.splitlines() if "detect_mermaid_chart_type(" in ln]
         assert calls, "未找到 detect_mermaid_chart_type 调用点"
         for line in calls:
             assert 'default=""' in line, f"导出侧 default 实参已漂移: {line}"
-            assert 'default="flowchart"' not in line, (
-                f"导出侧仍用 default='flowchart'，与登记侧 default='' 分叉: {line}")
+            assert (
+                'default="flowchart"' not in line
+            ), f"导出侧仍用 default='flowchart'，与登记侧 default='' 分叉: {line}"
 
-    @pytest.mark.parametrize("keyword", [
-        "someRandomKeyword", "unknownDiagram", "nonsenseDiagram",
-        "requirementDiagram", "packetDiagram",
-    ])
+    @pytest.mark.parametrize(
+        "keyword",
+        [
+            "someRandomKeyword",
+            "unknownDiagram",
+            "nonsenseDiagram",
+            "requirementDiagram",
+            "packetDiagram",
+        ],
+    )
     def test_unknown_keyword_not_exported_as_flowchart(self, keyword):
         """认不出的关键字：导出侧与登记侧都必须「整块跳过」，不得产出 flowchart。"""
-        content = (f"施工流程如下图所示：\n\n```mermaid\n{keyword}\n"
-                   "  A --> B\n```\n\n后续。\n")
+        content = f"施工流程如下图所示：\n\n```mermaid\n{keyword}\n" "  A --> B\n```\n\n后续。\n"
         assert _export_chart_types(content) == []
         assert _registered_chart_types(content) == []
 
-    @pytest.mark.parametrize("code,expected", [
-        ("flowchart TD\n  A --> B", "flowchart"),
-        ("graph LR\n  A --> B", "flowchart"),
-        ("mindmap\n  root((x))\n    A", "mindmap"),
-        ("journey\n  title t\n  section s\n    a: 1: b", "journey"),
-        ("sequenceDiagram\n  A->>B: hi", "sequence"),
-        ("pie title X\n  \"a\" : 10", "comparison"),
-        ("xychart-beta\n  x-axis [1,2]\n  bar [3,4]", "comparison"),
-        ("timeline\n  title T\n  2024 : x", "timeline"),
-        ("%% 注释\nflowchart TD\n  A --> B", "flowchart"),
-    ])
+    @pytest.mark.parametrize(
+        "code,expected",
+        [
+            ("flowchart TD\n  A --> B", "flowchart"),
+            ("graph LR\n  A --> B", "flowchart"),
+            ("mindmap\n  root((x))\n    A", "mindmap"),
+            ("journey\n  title t\n  section s\n    a: 1: b", "journey"),
+            ("sequenceDiagram\n  A->>B: hi", "sequence"),
+            ('pie title X\n  "a" : 10', "comparison"),
+            ("xychart-beta\n  x-axis [1,2]\n  bar [3,4]", "comparison"),
+            ("timeline\n  title T\n  2024 : x", "timeline"),
+            ("%% 注释\nflowchart TD\n  A --> B", "flowchart"),
+        ],
+    )
     def test_export_and_registration_agree_on_known_types(self, code, expected):
         """已识别类型：两侧必须给出**同一个**类型（逐条锁定，防再次分叉）。"""
         assert detect_mermaid_chart_type(code, default="") == expected
@@ -96,17 +104,14 @@ class TestMermaidDefaultParamParity:
         for keyword, expected in MERMAID_KEYWORD_TO_CHART_TYPE.items():
             content = f"```mermaid\n{keyword}\n```"
             assert _registered_chart_types(content) == [expected], keyword
-            assert _export_chart_types(content) == (
-                [expected] if expected else []), keyword
+            assert _export_chart_types(content) == ([expected] if expected else []), keyword
 
     def test_unknown_block_does_not_bypass_registration(self):
         """回归：认不出的块不进管线 → 不进清单/预检，也无从绕过配图上限。"""
         content = "```mermaid\nunknownDiagram\n  A --> B\n```"
-        new_content, rows = build_inline_chart_plan(
-            "S", "SEC", content, enforce_limits=False)
+        new_content, rows = build_inline_chart_plan("S", "SEC", content, enforce_limits=False)
         assert rows == []
         assert new_content == content  # 未进管线 → 正文不被改写
-
 
 
 # ===========================================================================
@@ -117,19 +122,25 @@ class TestMermaidDefaultParamParity:
 class TestSharedSelfReferenceFirstSave:
     """`validate_prompt_content` 必须检查**待保存正文**，而非注册表旧内容。"""
 
-    @pytest.mark.parametrize("key", [
-        "SHARED_OUTPUT_SPEC", "SHARED_SCOPE_RULES", "SHARED_FORBIDDEN_WORDS",
-    ])
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "SHARED_OUTPUT_SPEC",
+            "SHARED_SCOPE_RULES",
+            "SHARED_FORBIDDEN_WORDS",
+        ],
+    )
     def test_first_save_self_reference_is_error(self, key):
         from app.services.ai.prompts._registry import (
             _ALL_PROMPTS,
             validate_prompt_content,
         )
+
         assert key in _ALL_PROMPTS
         issues = validate_prompt_content(key, f"见 {{{key}}} 的要求")
         assert "shared_self_reference" in {i["code"] for i in issues}, (
-            f"{key} 首次保存自引用未被拒绝（路由先校验后落库，"
-            f"旧实现读的是注册表旧内容）")
+            f"{key} 首次保存自引用未被拒绝（路由先校验后落库，" f"旧实现读的是注册表旧内容）"
+        )
 
     def test_route_validates_before_writing(self):
         """锁死根因：PATCH 路由确实「先校验、后落库」，故校验必须基于入参 text。
@@ -145,11 +156,17 @@ class TestSharedSelfReferenceFirstSave:
         write_at = src.index("_up(key, content)")
         assert validate_at < write_at, (
             "PATCH 已改为先落库后校验；此时 validate_prompt_content 若仍只读"
-            "注册表旧内容，自引用将再次漏判——需同步复核本护栏的必要性")
+            "注册表旧内容，自引用将再次漏判——需同步复核本护栏的必要性"
+        )
 
-    @pytest.mark.parametrize("key", [
-        "SHARED_OUTPUT_SPEC", "SHARED_SCOPE_RULES", "SHARED_FORBIDDEN_WORDS",
-    ])
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "SHARED_OUTPUT_SPEC",
+            "SHARED_SCOPE_RULES",
+            "SHARED_FORBIDDEN_WORDS",
+        ],
+    )
     def test_normal_shared_save_stays_clean(self, key):
         """反向：不含自引用的正常保存不得被误拒（向后兼容）。"""
         from app.services.ai.prompts._registry import validate_prompt_content
@@ -160,9 +177,7 @@ class TestSharedSelfReferenceFirstSave:
         """反向：普通模板引用合法 SHARED 片段不得被当成自引用。"""
         from app.services.ai.prompts._registry import validate_prompt_content
 
-        issues = validate_prompt_content(
-            "content_generation_system",
-            "生成正文，遵守 {SHARED_OUTPUT_SPEC} 的约定。")
+        issues = validate_prompt_content("content_generation_system", "生成正文，遵守 {SHARED_OUTPUT_SPEC} 的约定。")
         assert "shared_self_reference" not in {i["code"] for i in issues}
 
     def test_factory_defaults_have_no_self_reference_error(self):
@@ -176,7 +191,6 @@ class TestSharedSelfReferenceFirstSave:
             default = meta.get("default_content") or meta.get("content") or ""
             issues = validate_prompt_content(key, default)
             assert "shared_self_reference" not in {i["code"] for i in issues}, key
-
 
 
 # ===========================================================================
@@ -212,14 +226,16 @@ class TestContractCheckFalsePositiveParity:
 
         default = _ALL_PROMPTS["content_generation_system"]["default_content"]
         noisy = default + '\n\n示例：$p_{max}$ 与 {"min": 1}、{"id": 2}。\n'
-        codes = {i["code"] for i in
-                 validate_prompt_content("content_generation_system", noisy)}
+        codes = {i["code"] for i in validate_prompt_content("content_generation_system", noisy)}
         assert "contract_var_added" not in codes
 
-    @pytest.mark.parametrize("mutate,expect", [
-        ("{scheme_name}", "contract_var_removed"),
-        ("{custom_business_field}", "contract_var_added"),
-    ])
+    @pytest.mark.parametrize(
+        "mutate,expect",
+        [
+            ("{scheme_name}", "contract_var_removed"),
+            ("{custom_business_field}", "contract_var_added"),
+        ],
+    )
     def test_real_contract_drift_still_reported(self, mutate, expect):
         """反向：真实契约漂移必须仍然报出（过滤不得掩盖真问题）。"""
         from app.services.ai.prompts._registry import (
@@ -232,6 +248,5 @@ class TestContractCheckFalsePositiveParity:
             text = default.replace(mutate, "方案名称")
         else:
             text = default + f"\n\n补充：{mutate} 必须填写。\n"
-        codes = {i["code"] for i in
-                 validate_prompt_content("content_generation_system", text)}
+        codes = {i["code"] for i in validate_prompt_content("content_generation_system", text)}
         assert expect in codes, f"{expect} 未报出（误报过滤过头）: {codes}"

@@ -90,4 +90,3 @@ export interface PromptRollbackResponse {
   /** ✅ 2026-09-27：回滚后内容若触发保存期体检提醒，原样回传 */
   warnings?: string[];
 }
-

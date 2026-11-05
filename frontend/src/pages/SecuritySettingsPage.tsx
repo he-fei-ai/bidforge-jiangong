@@ -1,10 +1,12 @@
 ﻿import { useCallback, useEffect, useState } from "react";
+import { Alert, App, Button, Card, Divider, Input, Space, Tag, Typography } from "antd";
 import {
-  Alert, App, Button, Card, Divider, Input, Space, Tag, Typography,
-} from "antd";
-import {
-  CheckCircleOutlined, CloseCircleOutlined, DeleteOutlined,
-  KeyOutlined, ReloadOutlined, SafetyCertificateOutlined,
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  DeleteOutlined,
+  KeyOutlined,
+  ReloadOutlined,
+  SafetyCertificateOutlined,
 } from "@ant-design/icons";
 
 import { systemApi, clearAuthShortCircuit } from "../api";
@@ -55,31 +57,34 @@ export default function SecuritySettingsPage() {
   const [probe, setProbe] = useState<{ ok: boolean; text: string } | null>(null);
 
   // 后端若启用了鉴权，进入本页时自动探一次，直接告诉用户"现在到底通不通"
-  const probeNow = useCallback(async (silent = false) => {
-    setTesting(true);
-    try {
-      await systemApi.activity(1);
-      setProbe({ ok: true, text: "后端已接受当前凭据，接口可正常访问。" });
-    } catch (e: unknown) {
-      // axios 错误携带 response.status；网络层错误退回 message
-      const err = e as { response?: { status?: number }; message?: string };
-      const status = err.response?.status;
-      if (status === 401) {
-        setProbe({
-          ok: false,
-          text: "后端拒绝访问（401）：未携带凭据或凭据不正确。",
-        });
-      } else {
-        setProbe({
-          ok: false,
-          text: err.message || "探测失败，请确认后端服务已启动。",
-        });
+  const probeNow = useCallback(
+    async (silent = false) => {
+      setTesting(true);
+      try {
+        await systemApi.activity(1);
+        setProbe({ ok: true, text: "后端已接受当前凭据，接口可正常访问。" });
+      } catch (e: unknown) {
+        // axios 错误携带 response.status；网络层错误退回 message
+        const err = e as { response?: { status?: number }; message?: string };
+        const status = err.response?.status;
+        if (status === 401) {
+          setProbe({
+            ok: false,
+            text: "后端拒绝访问（401）：未携带凭据或凭据不正确。",
+          });
+        } else {
+          setProbe({
+            ok: false,
+            text: err.message || "探测失败，请确认后端服务已启动。",
+          });
+        }
+        if (!silent) msg.error(err.message || "探测失败");
+      } finally {
+        setTesting(false);
       }
-      if (!silent) msg.error(err.message || "探测失败");
-    } finally {
-      setTesting(false);
-    }
-  }, [msg]);
+    },
+    [msg],
+  );
 
   useEffect(() => {
     void probeNow(true);
@@ -143,8 +148,7 @@ export default function SecuritySettingsPage() {
             description={
               <span>
                 构建时已写入 <Text code>VITE_API_TOKEN</Text>（{maskToken(BUILD_TOKEN)}），
-                它在取值顺序上优先于浏览器本地存储。如需在本页修改，
-                请去掉构建参数后重新构建前端。
+                它在取值顺序上优先于浏览器本地存储。如需在本页修改， 请去掉构建参数后重新构建前端。
               </span>
             }
           />
@@ -169,10 +173,9 @@ export default function SecuritySettingsPage() {
           }
         >
           <Paragraph type="secondary" style={{ marginBottom: 16 }}>
-            取值顺序：<Text code>VITE_API_TOKEN</Text>（构建期） → <Text code>
-              localStorage.api_token</Text>（本页保存）。两端都为空时，
-            后端若也未启用鉴权，则一切照常；后端启用了鉴权而这里为空，
-            所有请求会返回 401。
+            取值顺序：<Text code>VITE_API_TOKEN</Text>（构建期） →{" "}
+            <Text code>localStorage.api_token</Text>（本页保存）。两端都为空时，
+            后端若也未启用鉴权，则一切照常；后端启用了鉴权而这里为空， 所有请求会返回 401。
           </Paragraph>
 
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
@@ -190,11 +193,7 @@ export default function SecuritySettingsPage() {
               <Button type="primary" icon={<CheckCircleOutlined />} onClick={save}>
                 保存并生效
               </Button>
-              <Button
-                icon={<ReloadOutlined />}
-                loading={testing}
-                onClick={() => probeNow(false)}
-              >
+              <Button icon={<ReloadOutlined />} loading={testing} onClick={() => probeNow(false)}>
                 测试连接
               </Button>
               <Button
@@ -237,7 +236,7 @@ export default function SecuritySettingsPage() {
                 overflowX: "auto",
               }}
             >
-{`# backend/.env
+              {`# backend/.env
 API_AUTH_TOKEN=请替换为随机长串
 
 # 生成随机串（任选其一）
@@ -246,9 +245,9 @@ openssl rand -base64 32`}
             </pre>
           </Paragraph>
           <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-            重启后端时日志会明确打印「API 鉴权已启用 / 未启用」；
-            未启用时会附带风险提示。健康检查 <Text code>/api/v1/health</Text>、
-            接口文档 <Text code>/docs</Text>、<Text code>/openapi.json</Text>
+            重启后端时日志会明确打印「API 鉴权已启用 / 未启用」； 未启用时会附带风险提示。健康检查{" "}
+            <Text code>/api/v1/health</Text>、 接口文档 <Text code>/docs</Text>、
+            <Text code>/openapi.json</Text>
             始终无需凭据（便于探活与内网排障）。
           </Paragraph>
         </Card>
@@ -262,16 +261,16 @@ openssl rand -base64 32`}
             </li>
             <li>
               当前是<Text strong>单凭据全局共享</Text>模型：没有用户维度、
-              没有过期与轮换、没有请求级审计。若要多用户使用或对外暴露，
-              需要另行接入会话 / OIDC 与按资源的授权。
+              没有过期与轮换、没有请求级审计。若要多用户使用或对外暴露， 需要另行接入会话 / OIDC
+              与按资源的授权。
             </li>
             <li>
               对外暴露时 <Text code>/docs</Text> 与 <Text code>/openapi.json</Text>
               会公开完整 API 结构（内网排障方便，公网建议一并纳入鉴权）。
             </li>
             <li>
-              前端通过 <Text code>X-API-Key</Text> 头携带凭据（普通请求走 axios 拦截器，
-              SSE 长连接走 <Text code>fetch</Text> 通道），两条链路都已覆盖。
+              前端通过 <Text code>X-API-Key</Text> 头携带凭据（普通请求走 axios 拦截器， SSE
+              长连接走 <Text code>fetch</Text> 通道），两条链路都已覆盖。
             </li>
           </ul>
         </Card>

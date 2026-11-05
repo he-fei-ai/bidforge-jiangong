@@ -9,6 +9,7 @@
   登记  consistency_repair_edits_user / facts_finalize_system /
       facts_knowledge_patch_system 接入 PROMPT_VARIABLE_CONTRACTS。
 """
+
 import asyncio
 import re
 
@@ -27,7 +28,6 @@ from app.services.ai.prompts.illustration import ILLUSTRATION_PROMPT_OPTIMIZE  #
 # D2 · 整章重写超长硬上限
 # =========================================================================
 class TestRepairRewriteHardCap:
-
     def test_constant_value(self):
         """阈值对齐扫描侧分片上限 SECTION_CHUNK_LIMIT=12000（数值即口径）。"""
         assert repair_agent.REPAIR_REWRITE_MAX_CHARS == 12000
@@ -44,10 +44,13 @@ class TestRepairRewriteHardCap:
         monkeypatch.setattr(repair_agent, "chat_with_fallback", fake_chat)
         content = "正文" * 7000  # 14000 字 > 12000
         out = await repair_agent.repair_section(
-            section_id="s1", section_title="测试章", section_content=content,
-            conflicts_in_section=[{"topic": "t", "current_value": "1",
-                                   "authoritative_value": "2"}],
-            facts="", sources="")
+            section_id="s1",
+            section_title="测试章",
+            section_content=content,
+            conflicts_in_section=[{"topic": "t", "current_value": "1", "authoritative_value": "2"}],
+            facts="",
+            sources="",
+        )
         assert out == content, "超长章应原样返回（本轮未修复）"
         # ✅ R57（2026-10-09）契约升级：定点编辑有了自己的 scene 与修复轮预算，
         #    因此不再用「调用总次数」这种脆弱判据，而直接断言**核心语义** ——
@@ -55,13 +58,11 @@ class TestRepairRewriteHardCap:
         from app.services.consistency_edits import (
             CONSISTENCY_EDITS_REPAIR_RETRIES as _R,
         )
+
         _EDITS = "consistency_repair_edits"
-        assert "consistency_repair" not in calls, (
-            f"超长章：整章重写兜底必须被硬上限拦下，实际：{calls}")
-        assert all(c == _EDITS for c in calls), (
-            f"超长章只允许定点编辑（含其自身修复轮），实际：{calls}")
-        assert len(calls) <= 1 + _R, (
-            f"定点编辑调用超过 1+{_R} 次预算：{calls}")
+        assert "consistency_repair" not in calls, f"超长章：整章重写兜底必须被硬上限拦下，实际：{calls}"
+        assert all(c == _EDITS for c in calls), f"超长章只允许定点编辑（含其自身修复轮），实际：{calls}"
+        assert len(calls) <= 1 + _R, f"定点编辑调用超过 1+{_R} 次预算：{calls}"
 
     @pytest.mark.asyncio
     async def test_normal_section_still_falls_back_to_rewrite(self, monkeypatch):
@@ -75,21 +76,23 @@ class TestRepairRewriteHardCap:
         monkeypatch.setattr(repair_agent, "chat_with_fallback", fake_chat)
         content = "正文" * 100
         out = await repair_agent.repair_section(
-            section_id="s2", section_title="普通章", section_content=content,
-            conflicts_in_section=[{"topic": "t", "current_value": "1",
-                                   "authoritative_value": "2"}],
-            facts="", sources="")
+            section_id="s2",
+            section_title="普通章",
+            section_content=content,
+            conflicts_in_section=[{"topic": "t", "current_value": "1", "authoritative_value": "2"}],
+            facts="",
+            sources="",
+        )
         # ✅ R57（2026-10-09）契约升级：明示「定点编辑（含 1 轮修复）+ 重写兜底」。
         #    行为变更是有意为之：给定点编辑一次修复机会的成本远低于整章重写
         #    （后者要重新输出数千字），成功即省掉一次重写。
         from app.services.consistency_edits import (
             CONSISTENCY_EDITS_REPAIR_RETRIES as _R,
         )
+
         _EDITS = "consistency_repair_edits"
-        assert calls.count(_EDITS) == 1 + _R, (
-            f"定点编辑应有 1+{_R} 次调用（含修复轮），实际：{calls}")
-        assert calls.count("consistency_repair") == 1, (
-            f"定点编辑失败后重写兜底仍应发起且仅一次，实际：{calls}")
+        assert calls.count(_EDITS) == 1 + _R, f"定点编辑应有 1+{_R} 次调用（含修复轮），实际：{calls}"
+        assert calls.count("consistency_repair") == 1, f"定点编辑失败后重写兜底仍应发起且仅一次，实际：{calls}"
         assert calls[-1] == "consistency_repair", "重写兜底必须是最后一次调用"
         assert isinstance(out, str)
 
@@ -97,6 +100,7 @@ class TestRepairRewriteHardCap:
         """定点编辑侧「不截断正文」纪律（勿顺手加 [:N]）——行为级锚点：
         超长原文必须原样进入提示词尾部（截断会让 old_text 永远无法命中）。"""
         from app.services import consistency_edits as ce
+
         long_content = "X" * 30000
         captured: dict = {}
 
@@ -104,10 +108,17 @@ class TestRepairRewriteHardCap:
             captured["user"] = messages[1]["content"]
             return "不是 JSON"
 
-        res = asyncio.run(ce.collect_repair_edits(
-            section_id="s3", section_title="t", section_content=long_content,
-            conflicts_in_section=[], facts="", sources="",
-            chat_fn=fake_chat))
+        res = asyncio.run(
+            ce.collect_repair_edits(
+                section_id="s3",
+                section_title="t",
+                section_content=long_content,
+                conflicts_in_section=[],
+                facts="",
+                sources="",
+                chat_fn=fake_chat,
+            )
+        )
         assert long_content in captured["user"], "定点编辑提示词不得截断章节原文"
         assert res.content == long_content
 
@@ -116,10 +127,10 @@ class TestRepairRewriteHardCap:
 # D4 · project_facts 预算单一事实源
 # =========================================================================
 class TestProjectFactsBudgetSingleSource:
-
     def test_constants_match_legacy_values(self):
         """数值逐字不变（1500/1000）——本轮收口是零行为变化的判据。"""
         from app.routers import sse_handlers as sh
+
         assert sh.PROJECT_FACTS_LIMIT_OUTLINE == 1500
         assert sh.PROJECT_FACTS_LIMIT_SUBLEVEL == 1000
 
@@ -128,26 +139,23 @@ class TestProjectFactsBudgetSingleSource:
         import pathlib
 
         import app as app_pkg
-        src = (pathlib.Path(app_pkg.__file__).parent
-               / "routers" / "sse_handlers.py").read_text(encoding="utf-8")
-        offenders = [
-            ln.strip() for ln in src.splitlines()
-            if re.search(r"project_facts\b[^\n]*\[:\s*\d", ln)]
-        assert not offenders, (
-            "project_facts 截断残留魔法数（应引用 PROJECT_FACTS_LIMIT_*）：\n"
-            + "\n".join(offenders))
+
+        src = (pathlib.Path(app_pkg.__file__).parent / "routers" / "sse_handlers.py").read_text(encoding="utf-8")
+        offenders = [ln.strip() for ln in src.splitlines() if re.search(r"project_facts\b[^\n]*\[:\s*\d", ln)]
+        assert not offenders, "project_facts 截断残留魔法数（应引用 PROJECT_FACTS_LIMIT_*）：\n" + "\n".join(offenders)
 
     def test_constants_actually_consumed(self):
         """两个常量真的被消费（防空断言：只定义不使用等于没接线）。"""
         import pathlib
 
         import app as app_pkg
+
         # 拆分兼容：目录构建/评审两阶段下沉 _sse_outline_*.py，消费点计数需聚合
         root = pathlib.Path(app_pkg.__file__).parent / "routers"
         src = "\n".join(
             (root / name).read_text(encoding="utf-8")
-            for name in ("sse_handlers.py", "_sse_outline_build.py",
-                         "_sse_outline_review.py"))
+            for name in ("sse_handlers.py", "_sse_outline_build.py", "_sse_outline_review.py")
+        )
         assert src.count("PROJECT_FACTS_LIMIT_OUTLINE") >= 4, "OUTLINE 档应≥3处消费"
         assert src.count("PROJECT_FACTS_LIMIT_SUBLEVEL") >= 3, "SUBLEVEL 档应≥2处消费"
 
@@ -156,9 +164,9 @@ class TestProjectFactsBudgetSingleSource:
 # D6 · 死代码删除 + 零占位显式空声明
 # =========================================================================
 class TestDeadIllustrationRemoved:
-
     def test_dead_functions_removed_from_image_engine(self):
         from app.services.ai import image_engine
+
         assert not hasattr(image_engine, "generate_illustration_prompt")
         assert not hasattr(image_engine, "generate_illustration_arrange")
 
@@ -178,9 +186,14 @@ class TestDeadIllustrationRemoved:
         import pathlib
 
         import app as app_pkg
+
         root = pathlib.Path(app_pkg.__file__).parent
-        syms = {"ILLUSTRATION_PLAN_SYSTEM", "ILLUSTRATION_ARRANGE_SYSTEM",
-                "generate_illustration_prompt", "generate_illustration_arrange"}
+        syms = {
+            "ILLUSTRATION_PLAN_SYSTEM",
+            "ILLUSTRATION_ARRANGE_SYSTEM",
+            "generate_illustration_prompt",
+            "generate_illustration_arrange",
+        }
         bad = []
         for p in root.rglob("*.py"):
             try:
@@ -192,9 +205,12 @@ class TestDeadIllustrationRemoved:
                     hit = [a.name for a in node.names if a.name in syms]
                 elif isinstance(node, ast.Name) and node.id in syms:
                     hit = [node.id]
-                elif (isinstance(node, ast.Call) and node.args
-                      and isinstance(node.args[0], ast.Constant)
-                      and node.args[0].value in syms):
+                elif (
+                    isinstance(node, ast.Call)
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value in syms
+                ):
                     hit = [node.args[0].value]
                 else:
                     hit = []
@@ -204,24 +220,27 @@ class TestDeadIllustrationRemoved:
 
 
 ZERO_DECLARED_KEYS = [
-    "SHARED_FORBIDDEN_WORDS", "SHARED_OUTPUT_SPEC",
-    "SHARED_SCOPE_RULES", "SHARED_SCOPE_RULES_BRIEF",
-    "consistency_scan_system", "consistency_scan_batch_system",
-    "consistency_arbitrate_system", "consistency_repair_system",
-    "consistency_repair_edits_system", "review_autofix_system",
+    "SHARED_FORBIDDEN_WORDS",
+    "SHARED_OUTPUT_SPEC",
+    "SHARED_SCOPE_RULES",
+    "SHARED_SCOPE_RULES_BRIEF",
+    "consistency_scan_system",
+    "consistency_scan_batch_system",
+    "consistency_arbitrate_system",
+    "consistency_repair_system",
+    "consistency_repair_edits_system",
+    "review_autofix_system",
 ]
 
 
 class TestZeroDeclarationSemantics:
-
     @pytest.mark.parametrize("key", ZERO_DECLARED_KEYS)
     def test_registered_as_explicit_empty(self, key):
         """空列表 = 显式声明「零占位符」，与未声明（None）语义分离。"""
         assert key in PROMPT_VARIABLE_CONTRACTS
         assert PROMPT_VARIABLE_CONTRACTS[key] == []
         meta = _ALL_PROMPTS[key]
-        assert meta.get("requires") == [], (
-            f"{key} 的 requires 应被 apply 覆盖为 []（而非 None/缺失）")
+        assert meta.get("requires") == [], f"{key} 的 requires 应被 apply 覆盖为 []（而非 None/缺失）"
         assert meta.get("default_variables") == [], f"{key} 出厂应零占位"
 
     def test_registry_health_zero_drift(self):
@@ -257,16 +276,20 @@ class TestZeroDeclarationSemantics:
         key = "__probe_undeclared_template__"
         assert key not in _ALL_PROMPTS
         _ALL_PROMPTS[key] = {
-            "key": key, "category": "探针", "label": "探针",
-            "content": "正文", "default_content": "正文",
-            "variables": [], "default_variables": [], "requires": None,
+            "key": key,
+            "category": "探针",
+            "label": "探针",
+            "content": "正文",
+            "default_content": "正文",
+            "variables": [],
+            "default_variables": [],
+            "requires": None,
         }
         try:
             meta = _ALL_PROMPTS[key]
             meta["default_content"] = meta["default_content"] + "\n{probe_var2}"
             meta["default_variables"] = ["probe_var2"]
-            issues = [i for i in check_prompt_variables()
-                      if i.get("key") == key]
+            issues = [i for i in check_prompt_variables() if i.get("key") == key]
             assert not issues, "未声明模板不参与契约校验（跳过语义不得扩大）"
         finally:
             _ALL_PROMPTS.pop(key, None)
@@ -276,20 +299,24 @@ class TestZeroDeclarationSemantics:
 # 契约表补全登记（R38 遗留「11 个模板」的现存残余 3 个）
 # =========================================================================
 class TestNewlyContractedTemplates:
-
-    @pytest.mark.parametrize("key,vars_", [
-        ("consistency_repair_edits_user",
-         {"authoritative_sources", "conflicts_in_section", "global_facts",
-          "section_id", "section_title"}),
-        ("facts_finalize_system", {"current_facts"}),
-        ("facts_knowledge_patch_system", {"current_facts", "knowledge_text"}),
-    ])
+    @pytest.mark.parametrize(
+        "key,vars_",
+        [
+            (
+                "consistency_repair_edits_user",
+                {"authoritative_sources", "conflicts_in_section", "global_facts", "section_id", "section_title"},
+            ),
+            ("facts_finalize_system", {"current_facts"}),
+            ("facts_knowledge_patch_system", {"current_facts", "knowledge_text"}),
+        ],
+    )
     def test_contract_matches_template_placeholders(self, key, vars_):
         assert key in PROMPT_VARIABLE_CONTRACTS
         assert set(PROMPT_VARIABLE_CONTRACTS[key]) == vars_
         meta = _ALL_PROMPTS[key]
-        assert set(meta.get("default_variables") or []) == vars_, (
-            "契约必须与模板实际占位符双向一致（check 已锁，此处显式登记）")
+        assert (
+            set(meta.get("default_variables") or []) == vars_
+        ), "契约必须与模板实际占位符双向一致（check 已锁，此处显式登记）"
 
     def test_all_registered_templates_covered(self):
         """收口完整性：注册表内有占位符的模板必须全部在契约表（含空声明组）。
@@ -299,11 +326,14 @@ class TestNewlyContractedTemplates:
         """
         probe_prefixes = ("contract_test_", "r6_test_", "__probe", "_test_prompt_")
         uncovered = [
-            k for k, meta in _ALL_PROMPTS.items()
+            k
+            for k, meta in _ALL_PROMPTS.items()
             if k not in PROMPT_VARIABLE_CONTRACTS
             and not k.startswith(probe_prefixes)
-            and [v for v in (meta.get("default_variables") or [])
-                 if not R._is_false_positive(k, v,
-                                             meta.get("default_content") or "")]
+            and [
+                v
+                for v in (meta.get("default_variables") or [])
+                if not R._is_false_positive(k, v, meta.get("default_content") or "")
+            ]
         ]
         assert not uncovered, f"仍有模板未纳入契约表：{uncovered}"

@@ -20,6 +20,7 @@
 
 本模块只做**纯函数**，不触 DB / 不发网络请求，便于单测与复用。
 """
+
 from __future__ import annotations
 
 import logging
@@ -112,30 +113,32 @@ def split_labeled_segments(text: str) -> tuple[str, list[dict], str]:
             #   （`  【A】：内容` → `【A】：内容`），且 `_render_segment` /
             #   `_overhead_of` 一直在消费这个死字段，看起来像有生效。
             #   现按「行首空白长度」取真实缩进。
-            lead = line[:len(line) - len(line.lstrip())]
+            lead = line[: len(line) - len(line.lstrip())]
             # 标签行 : 后没有正文（正文从下一行开始）→ 分隔符是换行
             head_sep = "" if first.strip() else "\n"
             body = [first] if first.strip() else []
-            segs.append({
-                "label": label,
-                "priority": segment_priority_of(label),
-                # ✅ 2026-10-07（BUG-D1 · 段头不再重写）：原实现 `f"【{label}】："`
-                #   把原始段头整段重写，导致 4 种形态往返后**静默失真**（实测）：
-                #     ① 半角冒号 `【A】:内容` → `【A】：内容`
-                #     ② 冒号后多空格 `【A】：  内容` → `【A】： 内容`（丢 1 个空格）
-                #     ③ 标签内空格 `【 A 】：内容` → `【A】：内容`（label.strip() 吞掉）
-                #     ④ 全角/半角混排的段头一律被强制全角化
-                #   现直接截取「段头原文」= 行首到正文首字符之前的全部字符，
-                #   分隔符、间隔空白、标签内空格一律按原样保留。
-                #   注意必须跳过 `leading` 前缀 —— `m.start(2)` 是相对**行首**的
-                #   绝对偏移，而缩进已单独记在 `leading` 字段里，不跳一次会
-                #   把缩进重复输出（`  【A】：内容` → `    【A】：内容`）。
-                "head": line[len(lead):m.start(2)],
-                "head_sep": head_sep,
-                "body": body,
-                # BUG-D2：见函数开头的 lead 计算说明（缩进曾被恒空吞掉）。
-                "leading": lead,
-            })
+            segs.append(
+                {
+                    "label": label,
+                    "priority": segment_priority_of(label),
+                    # ✅ 2026-10-07（BUG-D1 · 段头不再重写）：原实现 `f"【{label}】："`
+                    #   把原始段头整段重写，导致 4 种形态往返后**静默失真**（实测）：
+                    #     ① 半角冒号 `【A】:内容` → `【A】：内容`
+                    #     ② 冒号后多空格 `【A】：  内容` → `【A】： 内容`（丢 1 个空格）
+                    #     ③ 标签内空格 `【 A 】：内容` → `【A】：内容`（label.strip() 吞掉）
+                    #     ④ 全角/半角混排的段头一律被强制全角化
+                    #   现直接截取「段头原文」= 行首到正文首字符之前的全部字符，
+                    #   分隔符、间隔空白、标签内空格一律按原样保留。
+                    #   注意必须跳过 `leading` 前缀 —— `m.start(2)` 是相对**行首**的
+                    #   绝对偏移，而缩进已单独记在 `leading` 字段里，不跳一次会
+                    #   把缩进重复输出（`  【A】：内容` → `    【A】：内容`）。
+                    "head": line[len(lead) : m.start(2)],
+                    "head_sep": head_sep,
+                    "body": body,
+                    # BUG-D2：见函数开头的 lead 计算说明（缩进曾被恒空吞掉）。
+                    "leading": lead,
+                }
+            )
         elif segs:
             segs[-1]["body"].append(line)
         else:
@@ -176,8 +179,7 @@ def _render_segment(seg: dict) -> str:
     """
     if not seg["body"]:
         return seg["leading"] + seg["head"]
-    return (seg["leading"] + seg["head"] + seg.get("head_sep", "")
-            + "\n".join(seg["body"]))
+    return seg["leading"] + seg["head"] + seg.get("head_sep", "") + "\n".join(seg["body"])
 
 
 def _segment_body(seg: dict) -> str:
@@ -199,6 +201,7 @@ def assemble_segments(prefix: str, segs: list[dict], trailing: str = "") -> str:
 def _truncate_body(text: str, limit: int) -> str:
     """边界感知截断（段内使用），复用 sse_handlers 的统一实现。"""
     from app.utils.text_splitter import truncate_to_boundary
+
     return truncate_to_boundary(text, limit)
 
 
@@ -211,9 +214,7 @@ def _overhead_of(prefix: str, segs: list[dict]) -> int:
     return total
 
 
-def allocate_context_budget(text: str, budget: int,
-                            min_ratio: float = _SEGMENT_MIN_RATIO
-                            ) -> tuple[str, dict]:
+def allocate_context_budget(text: str, budget: int, min_ratio: float = _SEGMENT_MIN_RATIO) -> tuple[str, dict]:
     """按优先级给多段上下文分配字符预算（优先级主导的水填式分配）。
 
     :param text: 「【标签】：内容」拼接的多段文本
@@ -246,8 +247,7 @@ def allocate_context_budget(text: str, budget: int,
     available = budget - overhead
 
     if total <= budget or available <= 0:
-        return text, {"applied": False, "budget": budget,
-                      "total_chars": total, "segments": len(segs)}
+        return text, {"applied": False, "budget": budget, "total_chars": total, "segments": len(segs)}
 
     n = len(segs)
     share = available / n  # 平均份额：下限的天花板
@@ -255,9 +255,7 @@ def allocate_context_budget(text: str, budget: int,
     # 1) 下限保障（不超过平均份额，保证 n 段下限之和 ≤ available）
     #    非空段下限至少 1 字：min_ratio=0.2 对很短的段会算出 0，
     #    导致「方案类型：基坑支护」这种定位信息被整段清空。
-    alloc = [min(max(1, int(len(b) * max(0.0, min(1.0, min_ratio)))), int(share))
-             if b else 0
-             for b in bodies]
+    alloc = [min(max(1, int(len(b) * max(0.0, min(1.0, min_ratio)))), int(share)) if b else 0 for b in bodies]
     for i in range(n):
         alloc[i] = min(alloc[i], len(bodies[i]))
     floor_sum = sum(alloc)
@@ -288,11 +286,13 @@ def allocate_context_budget(text: str, budget: int,
         if len(body) > give:
             cut = _truncate_body(body, give)
             seg = {**seg, "body": [cut]}
-            detail.append({"label": seg["label"], "priority": seg["priority"],
-                           "from": len(body), "to": len(cut), "cut": True})
+            detail.append(
+                {"label": seg["label"], "priority": seg["priority"], "from": len(body), "to": len(cut), "cut": True}
+            )
         else:
-            detail.append({"label": seg["label"], "priority": seg["priority"],
-                           "from": len(body), "to": len(body), "cut": False})
+            detail.append(
+                {"label": seg["label"], "priority": seg["priority"], "from": len(body), "to": len(body), "cut": False}
+            )
         out_segs.append(seg)
 
     # ✅ 2026-10-07（BUG-D6 · 已公开却从未接线的埋点）：
@@ -304,6 +304,7 @@ def allocate_context_budget(text: str, budget: int,
     #   `record_*` 自身 fail-soft（_inc 吞掉一切异常），观测指标不得阻断主流程。
     try:
         from app.services.ai.prompts import _metrics as _pm
+
         for _d in detail:
             if _d.get("cut"):
                 _pm.record_token_budget_truncated(_d.get("label", ""))
@@ -322,9 +323,13 @@ def allocate_context_budget(text: str, budget: int,
     }
     logger.info(
         "上下文预算分配生效：预算 %d 字，实际 %d → %d 字，削减 %d/%d 段",
-        budget, total, len(result), info["cut"], len(segs))
+        budget,
+        total,
+        len(result),
+        info["cut"],
+        len(segs),
+    )
     return result, info
-
 
 
 def apply_context_budget(text: str, budget: int) -> str:
@@ -359,13 +364,15 @@ def wrap_full_segment(seg: dict, head_inside: bool = True) -> dict:
     """
     lines = list(seg["body"]) or [""]
     if head_inside:
-        return {**seg, "body": [f"{MATERIAL_OPEN}\n{lines[0]}", *lines[1:],
-                                MATERIAL_CLOSE]}
+        return {**seg, "body": [f"{MATERIAL_OPEN}\n{lines[0]}", *lines[1:], MATERIAL_CLOSE]}
     # 段头在外：围栏包住 head + body（借助把 head 前缀挪到首行实现）
-    prefix = (seg.get("head", "") + seg.get("head_sep", ""))
-    return {**seg, "body": [f"{MATERIAL_OPEN}\n{prefix}{lines[0]}",
-                            *lines[1:], MATERIAL_CLOSE], "head": "",
-            "head_sep": ""}
+    prefix = seg.get("head", "") + seg.get("head_sep", "")
+    return {
+        **seg,
+        "body": [f"{MATERIAL_OPEN}\n{prefix}{lines[0]}", *lines[1:], MATERIAL_CLOSE],
+        "head": "",
+        "head_sep": "",
+    }
 
 
 def wrap_body_only(seg: dict) -> dict:
@@ -378,28 +385,48 @@ def wrap_body_only(seg: dict) -> dict:
     lines = list(seg["body"])
     if not lines:
         return seg
-    return {**seg, "body": [f"{MATERIAL_OPEN}\n{lines[0]}\n{MATERIAL_CLOSE}"]
-            + lines[1:]}
+    return {**seg, "body": [f"{MATERIAL_OPEN}\n{lines[0]}\n{MATERIAL_CLOSE}"] + lines[1:]}
+
 
 #: 常见提示词注入手法（中英混合）。**只告警，不阻断**。
 INJECTION_PATTERNS: list[tuple[str, re.Pattern]] = [
-    ("ignore_previous", re.compile(
-        r"(忽略|无视|抛弃|丢弃)\s*"
-        r"(?:之前|以上|上述|前面|先前|所有|全部|的|，|、|\s)*\s*"
-        r"(指令|要求|规则|提示|设定|约束|instructions?|prompts?|rules?)", re.I)),
-    ("ignore_english", re.compile(
-        r"\b(ignore|disregard|forget|override|bypass|discard)\s+(all\s+)?(previous|prior|"
-        r"above|earlier)\s+(instructions?|prompts?|rules?|constraints?|settings?)", re.I)),
-    ("new_instruction", re.compile(
-        r"(以下是|以下为|从现在起|接下来请|请(?:立即)?(?:按|根据))\s*(新的|最新的|最新一版)?\s*"
-        r"(指令|规则|要求|设定|任务说明)", re.I)),
-    ("role_hijack", re.compile(
-        r"(你现在是|扮演|假装你是|改为|切换为)\s*[^，。]{0,20}"
-        r"(系统提示词|开发者|管理员|root|无限制|不受约束)", re.I)),
-    ("reveal_system", re.compile(
-        r"(输出|打印|复述|泄露|列出)\s*(系统)?\s*(提示词|系统指令|开发者消息|secret|密钥)", re.I)),
-    ("jailbreak_marker", re.compile(
-        r"(DAN\s*模式|developer\s*mode|越狱|越权模式)", re.I)),
+    (
+        "ignore_previous",
+        re.compile(
+            r"(忽略|无视|抛弃|丢弃)\s*"
+            r"(?:之前|以上|上述|前面|先前|所有|全部|的|，|、|\s)*\s*"
+            r"(指令|要求|规则|提示|设定|约束|instructions?|prompts?|rules?)",
+            re.I,
+        ),
+    ),
+    (
+        "ignore_english",
+        re.compile(
+            r"\b(ignore|disregard|forget|override|bypass|discard)\s+(all\s+)?(previous|prior|"
+            r"above|earlier)\s+(instructions?|prompts?|rules?|constraints?|settings?)",
+            re.I,
+        ),
+    ),
+    (
+        "new_instruction",
+        re.compile(
+            r"(以下是|以下为|从现在起|接下来请|请(?:立即)?(?:按|根据))\s*(新的|最新的|最新一版)?\s*"
+            r"(指令|规则|要求|设定|任务说明)",
+            re.I,
+        ),
+    ),
+    (
+        "role_hijack",
+        re.compile(
+            r"(你现在是|扮演|假装你是|改为|切换为)\s*[^，。]{0,20}" r"(系统提示词|开发者|管理员|root|无限制|不受约束)",
+            re.I,
+        ),
+    ),
+    (
+        "reveal_system",
+        re.compile(r"(输出|打印|复述|泄露|列出)\s*(系统)?\s*(提示词|系统指令|开发者消息|secret|密钥)", re.I),
+    ),
+    ("jailbreak_marker", re.compile(r"(DAN\s*模式|developer\s*mode|越狱|越权模式)", re.I)),
 ]
 
 
@@ -410,11 +437,13 @@ def scan_prompt_injection(text: str) -> list[dict]:
     hits: list[dict] = []
     for name, pat in INJECTION_PATTERNS:
         for m in pat.finditer(text):
-            hits.append({
-                "pattern": name,
-                "text": m.group(0)[:80],
-                "at": m.start(),
-            })
+            hits.append(
+                {
+                    "pattern": name,
+                    "text": m.group(0)[:80],
+                    "at": m.start(),
+                }
+            )
     return hits
 
 
@@ -434,9 +463,11 @@ def guard_material(label: str, material: str, *, warn: bool = True) -> str:
     hits = scan_prompt_injection(material)
     if hits and warn:
         logger.warning(
-            "外部资料疑似包含提示词注入手法（%s，%d 处），已加边界围栏隔离；"
-            "命中示例：%s", label, len(hits),
-            " / ".join(h["text"] for h in hits[:3]))
+            "外部资料疑似包含提示词注入手法（%s，%d 处），已加边界围栏隔离；" "命中示例：%s",
+            label,
+            len(hits),
+            " / ".join(h["text"] for h in hits[:3]),
+        )
     return f"{MATERIAL_OPEN}\n{material}\n{MATERIAL_CLOSE}"
 
 
@@ -446,16 +477,20 @@ def guard_material(label: str, material: str, *, warn: bool = True) -> str:
 #:    其余段（方案名称 / 章节 / 字数 / 同级章节……）属于系统自建指令，
 #:    把整份 user 上下文包进围栏会把可信指令也标记成「外部资料」。
 MATERIAL_LABELS: tuple[str, ...] = (
-    "项目概述", "项目背景", "项目资料", "参考资料",
-    "全局事实", "知识库", "本章专项提取成果",
+    "项目概述",
+    "项目背景",
+    "项目资料",
+    "参考资料",
+    "全局事实",
+    "知识库",
+    "本章专项提取成果",
 )
 
 #: 混合段（「可信指令说明 + 外部数据」）：只围栏正文，保留段头说明。
 _MIXED_MATERIAL_LABELS: tuple[str, ...] = ("全局事实",)
 
 
-def guard_external_segments(text: str, *, labels: tuple[str, ...] = MATERIAL_LABELS,
-                            warn: bool = True) -> str:
+def guard_external_segments(text: str, *, labels: tuple[str, ...] = MATERIAL_LABELS, warn: bool = True) -> str:
     """只对 user 上下文中的「外部资料段」加边界围栏并扫描注入手法。
 
     ✅ 2026-09-25（BUG-C · 围栏作用域误用）修复：
@@ -499,8 +534,7 @@ def guard_external_segments(text: str, *, labels: tuple[str, ...] = MATERIAL_LAB
         return text
     # 单段且无前缀 = 整份上下文只有 1 段外部资料：段头 + 正文整体入围栏
     # （与旧版 guard_material 的整体围栏语义一致，向后兼容单段资料场景）。
-    if len(segs) == 1 and not prefix and \
-            any(segs[0]["label"].startswith(pfx) for pfx in labels):
+    if len(segs) == 1 and not prefix and any(segs[0]["label"].startswith(pfx) for pfx in labels):
         seg = segs[0]
         body = _render_segment(seg)
         return guard_material("", body, warn=warn)
@@ -521,14 +555,14 @@ def guard_external_segments(text: str, *, labels: tuple[str, ...] = MATERIAL_LAB
         hits = scan_prompt_injection("\n".join(external_bodies))
         if hits:
             logger.warning(
-                "外部资料段疑似包含提示词注入手法（%d 处），已加边界围栏隔离；"
-                "命中示例：%s", len(hits),
-                " / ".join(h["text"] for h in hits[:3]))
+                "外部资料段疑似包含提示词注入手法（%d 处），已加边界围栏隔离；" "命中示例：%s",
+                len(hits),
+                " / ".join(h["text"] for h in hits[:3]),
+            )
     return assemble_segments(prefix, out_segs, trailing)
 
 
-def scan_external_materials(text: str, *,
-                            labels: tuple[str, ...] = MATERIAL_LABELS) -> list[dict]:
+def scan_external_materials(text: str, *, labels: tuple[str, ...] = MATERIAL_LABELS) -> list[dict]:
     """只扫描「外部资料段」的注入手法（诊断用，不改写文本）。
 
     供 sse_handlers 在需要**只扫描不加围栏**时调用（例如审计留痕 / 只观测场景）。
@@ -537,10 +571,7 @@ def scan_external_materials(text: str, *,
     if not text:
         return []
     prefix, segs, _trailing = split_labeled_segments(text)
-    bodies = [
-        _segment_body(s) for s in segs
-        if any(s["label"].startswith(pfx) for pfx in labels)
-    ]
+    bodies = [_segment_body(s) for s in segs if any(s["label"].startswith(pfx) for pfx in labels)]
     return scan_prompt_injection("\n".join(bodies)) if bodies else []
 
 
@@ -556,9 +587,17 @@ SENSITIVE_MATERIAL_LABELS = ("项目资料摘要", "项目概述", "知识库", 
 _CREDENTIAL_PATTERNS: list[re.Pattern] = [
     re.compile(r"sk-[A-Za-z0-9]{16,}"),
     re.compile(r"gsk_[A-Za-z0-9]{20,}"),
-    re.compile(r"(?i)\b(api[_-]?key|access[_-]?token|secret|bearer)\s*[:：=]\s*"
-               r"[A-Za-z0-9_\-]{20,}"),
+    re.compile(r"(?i)\b(api[_-]?key|access[_-]?token|secret|bearer)\s*[:：=]\s*" r"[A-Za-z0-9_\-]{20,}"),
     re.compile(r"(?i)\bhttps?://[^\s/]+@[^\s]+"),
+    # ✅ R175（2026-11-03）：数据库/消息队列连接串内嵌账号口令
+    #    （postgres://user:pass@host/db、redis://:pass@host 等）。
+    #    旧清单只覆盖 http(s)，实测 postgres://admin:P@ssw0rd@host 漏脱敏
+    #    —— 上传的招标/项目资料里常带这类「配置截图」文本。
+    #    保守匹配：必须「协议://」+「账号:口令@」，不会误伤标准编号/普通 URL。
+    re.compile(
+        r"(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|"
+        r"clickhouse|oracle|sqlserver|ftps?)://[^\s/@:]+:[^\s/@]+@[^\s]+"
+    ),
 ]
 
 
@@ -573,10 +612,12 @@ def redact_sensitive(text: str) -> tuple[str, int]:
     count = 0
     out = text
     for pat in _CREDENTIAL_PATTERNS:
+
         def _sub(m: re.Match) -> str:
             nonlocal count
             count += 1
             return "[已脱敏凭据]"
+
         out = pat.sub(_sub, out)
     return out, count
 
@@ -629,8 +670,5 @@ def allocate_char_budgets(lengths: list[int], budget: int) -> list[int]:
     flex_total = sum(flexible)
     if flex_total <= 0:
         return base
-    extra = [min(cap - base[i], int(remaining * flexible[i] / flex_total))
-             for i in range(n)]
+    extra = [min(cap - base[i], int(remaining * flexible[i] / flex_total)) for i in range(n)]
     return [base[i] + extra[i] for i in range(n)]
-
-

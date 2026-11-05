@@ -12,6 +12,7 @@
 更新 / 重置 / 路由 diff 各处替代裸 ``extract_variables``。
 ``extract_variables``（含 SHARED_*）保留供残留检测与既有用例。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -87,11 +88,9 @@ class TestValidateExcludesShared:
         # outline_short_system 声明 4 个业务变量 + 3 个 SHARED_*（原始）
         # validate 不传任何 kwargs 时，缺失列表不得出现 SHARED_*
         missing = validate_prompt_variables("outline_short_system")
-        assert not any(v.startswith("SHARED_") for v in missing), \
-            f"validate 不得把 SHARED_* 当缺失变量：{missing}"
+        assert not any(v.startswith("SHARED_") for v in missing), f"validate 不得把 SHARED_* 当缺失变量：{missing}"
         # 真实业务变量仍如实报缺
-        assert set(missing) >= {"scheme_name", "scheme_type",
-                                "construction_scope", "project_facts"}
+        assert set(missing) >= {"scheme_name", "scheme_type", "construction_scope", "project_facts"}
 
     def test_get_prompt_variables_excludes_shared(self):
         out = get_prompt_variables("outline_short_system")
@@ -127,5 +126,6 @@ class TestAuditDiffExcludesShared:
         finally:
             from app.services.ai.prompts._cache import reload_prompt_cache
             from app.services.ai.prompts._registry import reset_prompt
+
             reset_prompt(key)
             reload_prompt_cache()

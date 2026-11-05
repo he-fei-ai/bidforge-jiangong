@@ -15,6 +15,7 @@ B2（任务 4 · ``POST /admin/prompts/sync-from-code``）：
 同型），用 ``db_conn`` 内存库；计数器是进程内全局，autouse fixture 每个用例前后
 各 reset 一次做隔离。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -55,9 +56,14 @@ async def _total_registered() -> int:
 class TestPromptMetrics:
     async def test_top_level_fields_and_registered_keys(self):
         snap = await get_prompt_metrics()
-        for field in ("render_total", "render_errors",
-                      "token_budget_truncated", "repair_triggered",
-                      "ai_failure_by_scene", "registered_keys"):
+        for field in (
+            "render_total",
+            "render_errors",
+            "token_budget_truncated",
+            "repair_triggered",
+            "ai_failure_by_scene",
+            "registered_keys",
+        ):
             assert field in snap, f"GET /prompt-metrics 缺顶层字段 {field}"
         assert isinstance(snap["render_total"], dict)
         assert isinstance(snap["render_errors"], dict)
@@ -67,8 +73,9 @@ class TestPromptMetrics:
     async def test_render_increments_render_total(self):
         get_prompt(TEST_KEY)
         snap = await get_prompt_metrics()
-        assert snap["render_total"].get(TEST_KEY, 0) >= 1, (
-            "调一次 get_prompt 后 render_total[key] 应 >= 1（埋点缺失？）")
+        assert (
+            snap["render_total"].get(TEST_KEY, 0) >= 1
+        ), "调一次 get_prompt 后 render_total[key] 应 >= 1（埋点缺失？）"
 
     async def test_reset_zeroes_all_counters(self):
         get_prompt(TEST_KEY)
@@ -115,8 +122,7 @@ class TestSyncFromCode:
         await sync_prompts_from_code(force=False, db=db_conn)
         # 模拟用户在后台改过该 key：直接往 DB 写一个与硬编码不同的内容
         mutated = clean_prompt_text(get_default_prompt(TEST_KEY)) + "\n# 用户后台手工修改"
-        await db_conn.execute(
-            "UPDATE prompt_templates SET content=? WHERE key=?", (mutated, TEST_KEY))
+        await db_conn.execute("UPDATE prompt_templates SET content=? WHERE key=?", (mutated, TEST_KEY))
         await db_conn.commit()
         res = await sync_prompts_from_code(force=False, db=db_conn)
         items = [d for d in res["details"] if d["key"] == TEST_KEY]
@@ -126,34 +132,28 @@ class TestSyncFromCode:
         for k in ("code_hash", "db_hash", "db_modified_at"):
             assert k in items[0], f"drift 明细缺 {k}"
         # 关键：DB 行不得被硬编码覆盖
-        cur = await db_conn.execute(
-            "SELECT content FROM prompt_templates WHERE key=?", (TEST_KEY,))
+        cur = await db_conn.execute("SELECT content FROM prompt_templates WHERE key=?", (TEST_KEY,))
         row = await cur.fetchone()
-        assert row["content"] == mutated, (
-            "force=false 时 drift 行不得被硬编码覆盖（会丢失用户后台编辑）")
+        assert row["content"] == mutated, "force=false 时 drift 行不得被硬编码覆盖（会丢失用户后台编辑）"
 
     async def test_force_overwrites_drift(self, db_conn):
         await sync_prompts_from_code(force=False, db=db_conn)
         mutated = clean_prompt_text(get_default_prompt(TEST_KEY)) + "\n# 用户后台手工修改"
-        await db_conn.execute(
-            "UPDATE prompt_templates SET content=? WHERE key=?", (mutated, TEST_KEY))
+        await db_conn.execute("UPDATE prompt_templates SET content=? WHERE key=?", (mutated, TEST_KEY))
         await db_conn.commit()
         res = await sync_prompts_from_code(force=True, db=db_conn)
         items = [d for d in res["details"] if d["key"] == TEST_KEY]
         assert items and items[0]["status"] == "overwritten"
         assert res["summary"]["overwritten"] >= 1
-        cur = await db_conn.execute(
-            "SELECT content FROM prompt_templates WHERE key=?", (TEST_KEY,))
+        cur = await db_conn.execute("SELECT content FROM prompt_templates WHERE key=?", (TEST_KEY,))
         row = await cur.fetchone()
-        assert row["content"] == clean_prompt_text(get_default_prompt(TEST_KEY)), (
-            "force=true 时 drift 行应被硬编码覆盖")
+        assert row["content"] == clean_prompt_text(get_default_prompt(TEST_KEY)), "force=true 时 drift 行应被硬编码覆盖"
 
     async def test_idempotent_repeated_call_inserted_zero(self, db_conn):
         await sync_prompts_from_code(force=False, db=db_conn)
         # 制造一处 drift → force 覆盖 → 再跑一次
         mutated = clean_prompt_text(get_default_prompt(TEST_KEY)) + "\n# 临时改动"
-        await db_conn.execute(
-            "UPDATE prompt_templates SET content=? WHERE key=?", (mutated, TEST_KEY))
+        await db_conn.execute("UPDATE prompt_templates SET content=? WHERE key=?", (mutated, TEST_KEY))
         await db_conn.commit()
         await sync_prompts_from_code(force=True, db=db_conn)
         res3 = await sync_prompts_from_code(force=False, db=db_conn)

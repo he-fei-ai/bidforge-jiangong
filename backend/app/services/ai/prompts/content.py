@@ -12,6 +12,7 @@
   · content_orchestration_system —— 正文生成前的独立"预编排"（Phase 2 遗留）
   · content_chart_place_system   —— 图表插入位置判断（Phase 4 遗留）
 """
+
 from app.services.ai.prompts._registry import _reg
 
 # ✅ 2026-10-02（检查点前置）：审核与预检规则中可在生成侧预防的检查点，
@@ -41,11 +42,13 @@ from app.services.content_fuzzy import (
 )
 
 #: 注入正文提示词的三段：模糊生成规则 → 分级生成策略 → 禁止占位标记与空话
-_FUZZY_FILL_SECTION = "\n\n".join([
-    build_fuzzy_rules_block(),
-    build_generation_strategy_block(),
-    build_no_placeholder_block(),
-])
+_FUZZY_FILL_SECTION = "\n\n".join(
+    [
+        build_fuzzy_rules_block(),
+        build_generation_strategy_block(),
+        build_no_placeholder_block(),
+    ]
+)
 
 
 def _wrap_fuzzy_fill(template: str) -> str:
@@ -61,11 +64,16 @@ def _wrap_fuzzy_fill(template: str) -> str:
     ``{SHARED_SCOPE_RULES_BRIEF}`` 形式留在模板里，由运行时按 DB 优先解析，
     才不会退化成「出厂值焊死、用户改不动」。新增注入点时切勿把它加回来。
     """
-    return (template
-            .replace("<<FUZZY_FILL>>", _FUZZY_FILL_SECTION)
-            .replace("<<NO_PLACEHOLDER>>", build_no_placeholder_block()))
+    return template.replace("<<FUZZY_FILL>>", _FUZZY_FILL_SECTION).replace(
+        "<<NO_PLACEHOLDER>>", build_no_placeholder_block()
+    )
 
-_reg("content_generation_system", "content", "章节正文生成", _wrap_fuzzy_fill("""你是资深的工程项目专项方案编制工程师。请为专项方案的指定章节撰写正文。
+
+_reg(
+    "content_generation_system",
+    "content",
+    "章节正文生成",
+    _wrap_fuzzy_fill("""你是资深的工程项目专项方案编制工程师。请为专项方案的指定章节撰写正文。
 
 【方案名称】：{scheme_name}
 【方案类型】：{scheme_type}
@@ -311,9 +319,14 @@ _reg("content_generation_system", "content", "章节正文生成", _wrap_fuzzy_f
 
 ## 编制依据（现行有效标准）
 {standards_text}
-{content_checkpoint_block}"""))
+{content_checkpoint_block}"""),
+)
 
-_reg("content_continue_system", "content", "正文续写", _wrap_fuzzy_fill("""你是资深的工程项目专项方案编制工程师。以下是某章节已生成的正文，但字数未达到要求。请在已有内容基础上自然续写。
+_reg(
+    "content_continue_system",
+    "content",
+    "正文续写",
+    _wrap_fuzzy_fill("""你是资深的工程项目专项方案编制工程师。以下是某章节已生成的正文，但字数未达到要求。请在已有内容基础上自然续写。
 
 【方案名称】：{scheme_name}
 【方案类型】：{scheme_type}
@@ -349,9 +362,14 @@ _reg("content_continue_system", "content", "正文续写", _wrap_fuzzy_fill("""�
 - 禁止口语化、宣传用语与 AI 表述（详见首轮生成的"语言规范"要求），保持与前文一致的书面技术文体。
 
 {standards_text}
-{content_checkpoint_block}"""))
+{content_checkpoint_block}"""),
+)
 
-_reg("content_shrink_system", "content", "正文字数压缩", """你是专项方案正文字数压缩专家。当前章节正文超出目标字数，请在不破坏结构与事实的前提下输出压缩操作。
+_reg(
+    "content_shrink_system",
+    "content",
+    "正文字数压缩",
+    """你是专项方案正文字数压缩专家。当前章节正文超出目标字数，请在不破坏结构与事实的前提下输出压缩操作。
 
 【方案名称】：{scheme_name}
 【方案类型】：{scheme_type}
@@ -375,9 +393,14 @@ _reg("content_shrink_system", "content", "正文字数压缩", """你是专项�
 6. replace 后的 content 必须是完整的可直接替换片段（保持 Markdown 段落格式，段落间空行）
 7. 若当前字数已接近目标（偏差 < 10%），返回 {"operations":[]} 即可
 
-当前章节正文如下：""")
+当前章节正文如下：""",
+)
 
-_reg("word_budget_allocate_system", "content", "章节字数智能分配", """你是专项方案编制规划专家。请为二级章节下的各子章节智能分配目标字数。
+_reg(
+    "word_budget_allocate_system",
+    "content",
+    "章节字数智能分配",
+    """你是专项方案编制规划专家。请为二级章节下的各子章节智能分配目标字数。
 
 【输入】：若干个预算单元，每个单元包含：二级章节标题/说明、该章总字数预算（total_budget）、下属子章节列表（id/title/description）。
 
@@ -392,20 +415,30 @@ _reg("word_budget_allocate_system", "content", "章节字数智能分配", """�
 {"allocations": {"<子章节id>": <字数int>, ...}}
 
 待分配的预算单元：
-{units_json}""")
+{units_json}""",
+)
 
 # ✅ D1（2026-10-11 · 离散正文编排阶段）：正文生成前的「独立编排 LLM 步」提示词。
 #   设计定位：仅产出结构化编排决策（不写正文），作为软建议注入生成阶段，
 #   不硬限制模型可用素材范围（刻意回避 R57 论证的「预编排=陈旧结论陷阱」硬约束风险）。
-_reg("content_plan_system", "content", "离散正文编排(系统)", """你是专项施工方案「正文离散编排助手」。在正式撰写某一章节正文之前，你只需为该章节产出一份**结构化编排决策**（绝不写正文）。你的职责是：
+_reg(
+    "content_plan_system",
+    "content",
+    "离散正文编排(系统)",
+    """你是专项施工方案「正文离散编排助手」。在正式撰写某一章节正文之前，你只需为该章节产出一份**结构化编排决策**（绝不写正文）。你的职责是：
 1. 明确本章的「写作聚焦」——本章最该写清楚的核心内容（1-2 句）；
 2. 从给定的【知识库素材候选】中挑选与本章最相关的若干条（仅建议，模型可酌情选用，不得编造候选外条目）；
 3. 从给定的【全局事实候选标题】中挑选与本章最相关的若干条（仅建议）；
 4. 判断本章是否适合用表格来组织内容，并简述理由。
 你**不能**限制后续正文生成阶段可用的素材/事实范围，你的输出只是「建议优先使用」，最终由正文生成模型根据全文语境决定。
-""")
+""",
+)
 
-_reg("content_plan_user", "content", "离散正文编排(用户)", """【方案名称】：{scheme_name}
+_reg(
+    "content_plan_user",
+    "content",
+    "离散正文编排(用户)",
+    """【方案名称】：{scheme_name}
 【方案类型】：{scheme_type}
 【章节编号】：{section_number}
 【当前章节】：{section_title} —— {section_description}
@@ -424,7 +457,8 @@ _reg("content_plan_user", "content", "离散正文编排(用户)", """【方案�
 {"writing_focus":"本章应重点写清楚什么（1-2句）","knowledge_names":["候选清单中相关的素材名"],"fact_titles":["候选清单中相关的事实标题"],"table_needed":true,"table_purpose":"为何本章适合用表格（无需则填空串）"}
 
 约束：knowledge_names 与 fact_titles 必须严格来自上方候选清单中的名称/标题；table_needed 为布尔；无表格则 table_needed=false 且 table_purpose=""。
-""")
+""",
+)
 
 
 # ---------- R77（2026-10-14 · 引入易标「生成后事实冲突审计 + 定点替换」） ----------
@@ -437,8 +471,11 @@ _reg("content_plan_user", "content", "离散正文编排(用户)", """【方案�
 #
 # ⚠️ 判据不复制：冲突清单由 standard_report 产出（唯一实现），本提示词只
 # 负责「改哪一段、改成什么」；「唯一命中」判据复用 consistency_edits。
-_reg("content_fact_autofix_system", "content", "事实冲突定点修复(系统)",
-     """你是专项方案正文生成的「事实冲突定点修复」助手。章节正文刚由 AI 生成，
+_reg(
+    "content_fact_autofix_system",
+    "content",
+    "事实冲突定点修复(系统)",
+    """你是专项方案正文生成的「事实冲突定点修复」助手。章节正文刚由 AI 生成，
 程序校验发现其中若干取值与本章全局事实矛盾。你只负责给出「改哪一段、改成什么」，
 不要重写整章。
 
@@ -457,11 +494,15 @@ _reg("content_fact_autofix_system", "content", "事实冲突定点修复(系统)
    {"edits": []}。宁可不改，也不要改错。
 8. 全局事实中标注「（低置信度…）」的取值同样按事实值修复，不要自行改判。
 
-输出 JSON：{"edits": [{"old_text": "...", "new_text": "...", "reason": "..."}]}""")
+输出 JSON：{"edits": [{"old_text": "...", "new_text": "...", "reason": "..."}]}""",
+)
 
 
-_reg("content_fact_autofix_user", "content", "事实冲突定点修复(用户)",
-     """本章全局事实变量（唯一可信数据源）：
+_reg(
+    "content_fact_autofix_user",
+    "content",
+    "事实冲突定点修复(用户)",
+    """本章全局事实变量（唯一可信数据源）：
 {global_facts}
 
 当前章节：
@@ -472,4 +513,5 @@ _reg("content_fact_autofix_user", "content", "事实冲突定点修复(用户)",
 程序校验发现的本章事实冲突（正文取值与事实矛盾，含事实口径与正文证据）：
 {conflicts}
 
-请针对上述冲突逐条给出 old_text / new_text。只返回 JSON。""")
+请针对上述冲突逐条给出 old_text / new_text。只返回 JSON。""",
+)

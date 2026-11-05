@@ -21,6 +21,7 @@
 所有新增行为**默认向后兼容**：error 级只拦「本来就会坏」的输入，
 warning 级只提示不阻断。
 """
+
 from __future__ import annotations
 
 import logging
@@ -65,22 +66,25 @@ class TestInjectedContentNeverDeleted:
         注入值里的 ``{heading}`` 行曾被整行删掉（AI 拿到被篡改的原文）。"""
         tpl = _ALL_PROMPTS["facts_json_fix_system"]["default_content"]
         # 断言前提：该占位符确实独占一行（这正是旧实现删行的触发条件）
-        assert re.search(r"^\s*\{invalid_content\}\s*$", tpl, re.M), \
-            "前提失效：{invalid_content} 不再独占一行，本用例失去意义"
+        assert re.search(
+            r"^\s*\{invalid_content\}\s*$", tpl, re.M
+        ), "前提失效：{invalid_content} 不再独占一行，本用例失去意义"
         injected = '前置说明\n{heading}\n{\n  "facts": [\n'
-        out = render_prompt(tpl, issues="i", target_description="d",
-                            invalid_content=injected)
+        out = render_prompt(tpl, issues="i", target_description="d", invalid_content=injected)
         assert "{heading}" in out, "注入值里的 {heading} 行被静默删除了"
         assert '"facts": [' in out, "注入的非法 JSON 原文被篡改了"
         assert injected in out, "注入值必须逐字节保留"
 
-    @pytest.mark.parametrize("value", [
-        "{x}",
-        "a\n{heading}\nb",
-        "资料\n{section_title}\n资料",
-        "{scheme_name}\n{project_facts}",
-        "```json\n{max}\n```",
-    ])
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "{x}",
+            "a\n{heading}\nb",
+            "资料\n{section_title}\n资料",
+            "{scheme_name}\n{project_facts}",
+            "```json\n{max}\n```",
+        ],
+    )
     def test_arbitrary_injected_values_preserved(self, value):
         tpl = "HEAD\n【资料】：{material}\nTAIL\n{opt_block}"
         out = render_prompt(tpl, material=value, opt_block="OPT")
@@ -97,13 +101,11 @@ class TestInjectedContentNeverDeleted:
         assert out == "A\nB"
 
     def test_optional_block_kept_when_provided(self):
-        assert render_prompt("A\n{scheme_basis}\nB",
-                             scheme_basis="依据内容") == "A\n依据内容\nB"
+        assert render_prompt("A\n{scheme_basis}\nB", scheme_basis="依据内容") == "A\n依据内容\nB"
 
     def test_injected_value_containing_optional_block_kept(self):
         """注入值恰好是「一行占位符」时**不得**被删（反向回归）。"""
-        assert render_prompt("{material}",
-                             material="{scheme_basis}") == "{scheme_basis}"
+        assert render_prompt("{material}", material="{scheme_basis}") == "{scheme_basis}"
 
     def test_no_trailing_newline_added_or_removed(self):
         assert render_prompt("a\n{b}", b="B") == "a\nB"
@@ -116,11 +118,9 @@ class TestInjectedContentNeverDeleted:
         """全部 44 个模板：无实参渲染 == 「删掉所有整行独占占位符行」的模板。"""
         for key, meta in _ALL_PROMPTS.items():
             tpl = meta.get("default_content") or meta.get("content") or ""
-            exp = re.sub(r"^[ \t]*\{[A-Za-z_]\w*\}[ \t]*\r?\n", "", tpl,
-                         flags=re.M)
+            exp = re.sub(r"^[ \t]*\{[A-Za-z_]\w*\}[ \t]*\r?\n", "", tpl, flags=re.M)
             exp = re.sub(r"^[ \t]*\{[A-Za-z_]\w*\}[ \t]*$", "", exp, flags=re.M)
             assert render_prompt(tpl) == exp, f"模板 {key} 无实参渲染结果异常"
-
 
 
 # ======================================================================
@@ -129,15 +129,23 @@ class TestInjectedContentNeverDeleted:
 class TestOptionalBlockParity:
     """「删行」与「豁免告警」是同一判据的两个方向，必须一致。"""
 
-    @pytest.mark.parametrize("var", [
-        "x", "ab", "scheme_basis", "_x", "a1", "变量名", "MaxLen",
-    ])
+    @pytest.mark.parametrize(
+        "var",
+        [
+            "x",
+            "ab",
+            "scheme_basis",
+            "_x",
+            "a1",
+            "变量名",
+            "MaxLen",
+        ],
+    )
     def test_drop_and_exempt_agree(self, var):
         tpl = f"head\n{{{var}}}\ntail"
         dropped = f"{{{var}}}" not in render_prompt(tpl)
         exempt = _is_optional_block_var(var, tpl)
-        assert dropped == exempt, (
-            f"变量 {var}: 删行={dropped} 豁免={exempt} —— 两侧判据分叉")
+        assert dropped == exempt, f"变量 {var}: 删行={dropped} 豁免={exempt} —— 两侧判据分叉"
 
     def test_single_char_variable_is_treated_as_optional_block(self):
         """回归：``{x}`` 旧实现被删行但仍报缺失（≥1 vs ≥2 字符分叉）。"""
@@ -153,6 +161,7 @@ class TestOptionalBlockParity:
     def test_validation_side_reuses_shared_pattern(self):
         """校验侧必须复用共享正则常量（消除双份正则）。"""
         import inspect
+
         src = inspect.getsource(_is_optional_block_var)
         assert "_OPTIONAL_BLOCK_RE" in src, "校验侧必须复用共享正则"
 
@@ -176,19 +185,16 @@ class TestSharedRecursionGuard:
         yield
 
     def test_self_reference_does_not_recurse(self):
-        assert "SHARED_T_SELF" in _cache._resolve_shared_keys(
-            "root {SHARED_T_SELF}"), "成环时应保留原字面量"
+        assert "SHARED_T_SELF" in _cache._resolve_shared_keys("root {SHARED_T_SELF}"), "成环时应保留原字面量"
 
     def test_mutual_reference_does_not_recurse(self):
         assert "SHARED_T_A" in _cache._resolve_shared_keys("root {SHARED_T_A}")
 
     def test_unknown_key_keeps_literal(self):
-        assert "SHARED_T_NOT_EXIST" in _cache._resolve_shared_keys(
-            "root {SHARED_T_TYPO}")
+        assert "SHARED_T_NOT_EXIST" in _cache._resolve_shared_keys("root {SHARED_T_TYPO}")
 
     def test_normal_expansion_still_works(self):
-        assert _cache._resolve_shared_keys(
-            "root {SHARED_T_OK}") == "root PLAIN"
+        assert _cache._resolve_shared_keys("root {SHARED_T_OK}") == "root PLAIN"
 
     def test_no_shared_ref_passthrough(self):
         assert _cache._resolve_shared_keys("plain text") == "plain text"
@@ -199,18 +205,15 @@ class TestSharedRecursionGuard:
         注：链尾 ``SHARED_T_L3`` 的**内容**就是 END 本身，所以它是被
         END 取代、而非留下 "L3 END"。
         """
-        table = {f"SHARED_T_L{i}": f"L{i} {{SHARED_T_L{i + 1}}}"
-                 for i in range(3)}
+        table = {f"SHARED_T_L{i}": f"L{i} {{SHARED_T_L{i + 1}}}" for i in range(3)}
         table["SHARED_T_L3"] = "END"
         monkeypatch.setattr(_cache, "get_prompt", lambda k: table.get(k, ""))
-        assert _cache._resolve_shared_keys(
-            "{SHARED_T_L0}") == "L0 L1 L2 END"
+        assert _cache._resolve_shared_keys("{SHARED_T_L0}") == "L0 L1 L2 END"
 
     def test_depth_limit_allows_exactly_max_depth_refs(self, monkeypatch):
         """恰好 ``_SHARED_MAX_DEPTH`` 个引用的链必须完整展开（上限不误伤）。"""
         n = _cache._SHARED_MAX_DEPTH
-        table = {f"SHARED_T_D{i}": f"D{i} {{SHARED_T_D{i + 1}}}"
-                 for i in range(n - 1)}
+        table = {f"SHARED_T_D{i}": f"D{i} {{SHARED_T_D{i + 1}}}" for i in range(n - 1)}
         table[f"SHARED_T_D{n - 1}"] = "TAIL"
         monkeypatch.setattr(_cache, "get_prompt", lambda k: table.get(k, ""))
         out = _cache._resolve_shared_keys("{SHARED_T_D0}")
@@ -219,8 +222,7 @@ class TestSharedRecursionGuard:
     def test_over_depth_chain_truncates_safely(self, monkeypatch):
         """超过上限的链：安全截断（保留字面量），不得崩、不得丢已展开部分。"""
         n = _cache._SHARED_MAX_DEPTH + 3
-        table = {f"SHARED_T_D{i}": f"D{i} {{SHARED_T_D{i + 1}}}"
-                 for i in range(n - 1)}
+        table = {f"SHARED_T_D{i}": f"D{i} {{SHARED_T_D{i + 1}}}" for i in range(n - 1)}
         table[f"SHARED_T_D{n - 1}"] = "TAIL"
         monkeypatch.setattr(_cache, "get_prompt", lambda k: table.get(k, ""))
         out = _cache._resolve_shared_keys("{SHARED_T_D0}")
@@ -245,46 +247,37 @@ class TestSaveTimeValidation:
     KEY = REAL_KEY
 
     def test_unknown_shared_ref_is_error(self):
-        issues = validate_prompt_content(
-            self.KEY,
-            get_default_prompt(self.KEY) + "\n{SHARED_NO_SUCH_THING}")
+        issues = validate_prompt_content(self.KEY, get_default_prompt(self.KEY) + "\n{SHARED_NO_SUCH_THING}")
         assert "unknown_shared_ref" in {i["code"] for i in issues}
         assert any(i["level"] == "error" for i in issues)
 
     def test_valid_shared_ref_passes(self):
-        issues = validate_prompt_content(
-            self.KEY,
-            get_default_prompt(self.KEY) + "\n{SHARED_SCOPE_RULES}")
+        issues = validate_prompt_content(self.KEY, get_default_prompt(self.KEY) + "\n{SHARED_SCOPE_RULES}")
         assert not [i for i in issues if i["level"] == "error"], issues
 
     def test_removing_contract_var_is_warning_not_error(self):
         """删掉契约变量：warning（不阻断），因为可能有正当理由。"""
         tpl = get_default_prompt(self.KEY).replace("{scheme_name}", "固定名")
-        w = [i for i in validate_prompt_content(self.KEY, tpl)
-             if i["code"] == "contract_var_removed"]
+        w = [i for i in validate_prompt_content(self.KEY, tpl) if i["code"] == "contract_var_removed"]
         assert w, "删掉契约变量应给出提示"
         assert w[0]["level"] == "warning"
         assert "scheme_name" in w[0]["detail"]
 
     def test_adding_unknown_var_is_warning(self):
         tpl = get_default_prompt(self.KEY) + "\n新变量：{totally_new_var}"
-        w = [i for i in validate_prompt_content(self.KEY, tpl)
-             if i["code"] == "contract_var_added"]
+        w = [i for i in validate_prompt_content(self.KEY, tpl) if i["code"] == "contract_var_added"]
         assert w and "totally_new_var" in w[0]["detail"]
         assert w[0]["level"] == "warning"
 
     def test_untouched_template_has_no_error(self):
         for key in _ALL_PROMPTS:
             issues = validate_prompt_content(key, get_default_prompt(key))
-            assert not [i for i in issues if i["level"] == "error"], \
-                f"出厂默认模板 {key} 不应有 error 级问题：{issues}"
+            assert not [i for i in issues if i["level"] == "error"], f"出厂默认模板 {key} 不应有 error 级问题：{issues}"
 
     @pytest.mark.asyncio
     async def test_patch_rejects_unknown_shared_ref(self, db_conn):
         with pytest.raises(HTTPException) as ei:
-            await update_prompt(REAL_KEY,
-                                {"content": get_default_prompt(REAL_KEY)
-                                 + "\n{SHARED_NOPE}"}, db=db_conn)
+            await update_prompt(REAL_KEY, {"content": get_default_prompt(REAL_KEY) + "\n{SHARED_NOPE}"}, db=db_conn)
         assert ei.value.status_code == 400
         assert "SHARED_NOPE" in str(ei.value.detail)
 
@@ -303,6 +296,7 @@ class TestContentFidelity:
     @pytest.mark.asyncio
     async def test_patch_stores_cleaned_text(self, db_conn):
         from app.services.ai.prompts._registry import clean_prompt_text
+
         dirty = "标题\ufeff\r\n正文"
         res = await update_prompt(REAL_KEY, {"content": dirty}, db=db_conn)
         assert res["content"] == clean_prompt_text(dirty)
@@ -317,11 +311,10 @@ class TestContentFidelity:
         「只有缓存清洗、编辑器展示未清洗原文」导致的三方分叉。
         """
         from app.services.ai.prompts._registry import clean_prompt_text
+
         dirty = "A\ufeff\r\nB"
         saved = await update_prompt(REAL_KEY, {"content": dirty}, db=db_conn)
-        row = await (await db_conn.execute(
-            "SELECT content FROM prompt_templates WHERE key=?",
-            (REAL_KEY,))).fetchone()
+        row = await (await db_conn.execute("SELECT content FROM prompt_templates WHERE key=?", (REAL_KEY,))).fetchone()
         items = (await list_prompts(db=db_conn))["items"]
         item = next(i for i in items if i["key"] == REAL_KEY)
         expected = clean_prompt_text(dirty)
@@ -329,7 +322,6 @@ class TestContentFidelity:
         assert saved["content"] == expected, "保存响应未清洗"
         assert item["content"] == expected, "列表展示与入库/渲染不一致"
         assert "\ufeff" not in item["content"] and "\r" not in item["content"]
-
 
 
 # ======================================================================
@@ -346,14 +338,12 @@ class TestRollbackableParity:
 
     def test_truncated_snapshot_not_rollbackable(self):
         """回归：旧实现只判 before 非空 → 截断行会回 rollbackable=True。"""
-        ok, why = prompt_snapshot_is_rollbackable(
-            {"before": "内容", "before_truncated": True})
+        ok, why = prompt_snapshot_is_rollbackable({"before": "内容", "before_truncated": True})
         assert not ok, "截断快照不得标记为可回滚"
         assert "截断" in why
 
     def test_oversized_snapshot_not_rollbackable(self):
-        ok, why = prompt_snapshot_is_rollbackable(
-            {"before": "x" * 300}, max_chars=200)
+        ok, why = prompt_snapshot_is_rollbackable({"before": "x" * 300}, max_chars=200)
         assert not ok and "超长" in why
 
     @pytest.mark.parametrize("bad", [None, "str", 123, []])
@@ -369,6 +359,7 @@ class TestRollbackableParity:
     async def test_audit_list_rollbackable_matches_endpoint(self, db_conn):
         """不变量：列表说 rollbackable=True ⟹ 回滚端点必定成功。"""
         from app.services.audit_service import list_prompt_audit_logs
+
         key = "content_generation_system"
         d0 = get_default_prompt(key)
         await update_prompt(key, {"content": d0 + "\n版本一"}, db=db_conn)
@@ -377,13 +368,11 @@ class TestRollbackableParity:
         assert res["items"]
         for it in res["items"]:
             if it["rollbackable"]:
-                out = await rollback_prompt(
-                    key, {"audit_id": it["id"]}, db=db_conn)
+                out = await rollback_prompt(key, {"audit_id": it["id"]}, db=db_conn)
                 assert out["ok"] is True, f"标记可回滚却失败：{it['id']}"
             else:
                 with pytest.raises(HTTPException) as ei:
-                    await rollback_prompt(
-                        key, {"audit_id": it["id"]}, db=db_conn)
+                    await rollback_prompt(key, {"audit_id": it["id"]}, db=db_conn)
                 assert ei.value.status_code == 400
 
     @pytest.mark.asyncio
@@ -396,19 +385,30 @@ class TestRollbackableParity:
         import json
 
         from app.services.audit_service import list_prompt_audit_logs
+
         key = "outline_level1_system"
         await db_conn.execute(
             "INSERT INTO prompt_audit_logs"
             " (id,prompt_key,action,before_hash,after_hash,variables_before,"
             "variables_after,client_ip,snapshot_json) VALUES (?,?,?,?,?,?,?,?,?)",
-            ("t-trunc", key, "update", "h1", "h2", "[]", "[]", "",
-             json.dumps({"before": "被截断的前半段", "before_truncated": True,
-                         "before_chars": 99999}, ensure_ascii=False)))
+            (
+                "t-trunc",
+                key,
+                "update",
+                "h1",
+                "h2",
+                "[]",
+                "[]",
+                "",
+                json.dumps(
+                    {"before": "被截断的前半段", "before_truncated": True, "before_chars": 99999}, ensure_ascii=False
+                ),
+            ),
+        )
         await db_conn.commit()
         res = await list_prompt_audit_logs(db_conn, key)
         item = next(i for i in res["items"] if i["id"] == "t-trunc")
-        assert item["rollbackable"] is False, \
-            "截断快照被标记为可回滚 → 前端按钮可点但必 400"
+        assert item["rollbackable"] is False, "截断快照被标记为可回滚 → 前端按钮可点但必 400"
         assert "截断" in item["rollback_blocked_reason"]
         with pytest.raises(HTTPException) as ei:
             await rollback_prompt(key, {"audit_id": "t-trunc"}, db=db_conn)
@@ -419,14 +419,24 @@ class TestRollbackableParity:
         import json
 
         from app.services.audit_service import list_prompt_audit_logs
+
         key = "outline_sublevel_system"
         await db_conn.execute(
             "INSERT INTO prompt_audit_logs"
             " (id,prompt_key,action,before_hash,after_hash,variables_before,"
             "variables_after,client_ip,snapshot_json) VALUES (?,?,?,?,?,?,?,?,?)",
-            ("t-big", key, "update", "h1", "h2", "[]", "[]", "",
-             json.dumps({"before": "x" * (PROMPT_MAX_CHARS + 10)},
-                        ensure_ascii=False)))
+            (
+                "t-big",
+                key,
+                "update",
+                "h1",
+                "h2",
+                "[]",
+                "[]",
+                "",
+                json.dumps({"before": "x" * (PROMPT_MAX_CHARS + 10)}, ensure_ascii=False),
+            ),
+        )
         await db_conn.commit()
         res = await list_prompt_audit_logs(db_conn, key)
         item = next(i for i in res["items"] if i["id"] == "t-big")
@@ -445,19 +455,30 @@ class TestRollbackableParity:
         import json
 
         from app.services.audit_service import list_prompt_audit_logs
+
         key = "outline_level1_system"
         await db_conn.execute(
             "INSERT INTO prompt_audit_logs"
             " (id,prompt_key,action,before_hash,after_hash,variables_before,"
             "variables_after,client_ip,snapshot_json) VALUES (?,?,?,?,?,?,?,?,?)",
-            ("t-trunc", key, "update", "h1", "h2", "[]", "[]", "",
-             json.dumps({"before": "被截断的前半段", "before_truncated": True,
-                         "before_chars": 99999}, ensure_ascii=False)))
+            (
+                "t-trunc",
+                key,
+                "update",
+                "h1",
+                "h2",
+                "[]",
+                "[]",
+                "",
+                json.dumps(
+                    {"before": "被截断的前半段", "before_truncated": True, "before_chars": 99999}, ensure_ascii=False
+                ),
+            ),
+        )
         await db_conn.commit()
         res = await list_prompt_audit_logs(db_conn, key)
         item = next(i for i in res["items"] if i["id"] == "t-trunc")
-        assert item["rollbackable"] is False, \
-            "截断快照被标记为可回滚 → 前端按钮可点但必 400"
+        assert item["rollbackable"] is False, "截断快照被标记为可回滚 → 前端按钮可点但必 400"
         assert "截断" in item["rollback_blocked_reason"]
         # 且回滚端点必须给出明确的 400（而非 500 或静默成功）
         with pytest.raises(HTTPException) as ei:
@@ -470,14 +491,24 @@ class TestRollbackableParity:
         import json
 
         from app.services.audit_service import list_prompt_audit_logs
+
         key = "outline_sublevel_system"
         await db_conn.execute(
             "INSERT INTO prompt_audit_logs"
             " (id,prompt_key,action,before_hash,after_hash,variables_before,"
             "variables_after,client_ip,snapshot_json) VALUES (?,?,?,?,?,?,?,?,?)",
-            ("t-big", key, "update", "h1", "h2", "[]", "[]", "",
-             json.dumps({"before": "x" * (PROMPT_MAX_CHARS + 10)},
-                        ensure_ascii=False)))
+            (
+                "t-big",
+                key,
+                "update",
+                "h1",
+                "h2",
+                "[]",
+                "[]",
+                "",
+                json.dumps({"before": "x" * (PROMPT_MAX_CHARS + 10)}, ensure_ascii=False),
+            ),
+        )
         await db_conn.commit()
         res = await list_prompt_audit_logs(db_conn, key)
         item = next(i for i in res["items"] if i["id"] == "t-big")
@@ -498,20 +529,19 @@ class TestConcurrentWriteIntegrity:
         d0 = get_default_prompt(key)
         await update_prompt(key, {"content": d0 + "\n版本A"}, db=db_conn)
         # 模拟「别人先改了」：直接把 updated_at 改成旧值
-        await db_conn.execute(
-            "UPDATE prompt_templates SET updated_at='2000-01-01 00:00:00'"
-            " WHERE key=?", (key,))
+        await db_conn.execute("UPDATE prompt_templates SET updated_at='2000-01-01 00:00:00'" " WHERE key=?", (key,))
         await db_conn.commit()
         with pytest.raises(HTTPException) as ei:
             await pr._write_with_before(
-                db_conn, key, d0, d0 + "\n版本B", "update", None,
-                expected_updated_at="1999-01-01 00:00:00")
+                db_conn, key, d0, d0 + "\n版本B", "update", None, expected_updated_at="1999-01-01 00:00:00"
+            )
         assert ei.value.status_code == 409
 
     @pytest.mark.asyncio
     async def test_rollback_preserves_previous_version(self, db_conn):
         """回归：连续两次更新后回滚，能回到「甲」而不是出厂默认。"""
         from app.services.audit_service import list_prompt_audit_logs
+
         key = "compliance_check_system"
         d0 = get_default_prompt(key)
 
@@ -522,8 +552,8 @@ class TestConcurrentWriteIntegrity:
 class TestContractIntegrity:
     def test_no_contract_drift(self):
         from app.services.ai.prompts import check_prompt_variables
-        issues = [i for i in check_prompt_variables(verbose=False)
-                  if i["key"] in _ALL_PROMPTS]
+
+        issues = [i for i in check_prompt_variables(verbose=False) if i["key"] in _ALL_PROMPTS]
         assert not issues, issues
 
     def test_every_shared_ref_in_templates_is_registered(self):
@@ -535,8 +565,7 @@ class TestContractIntegrity:
 
     def test_no_shared_content_self_reference(self):
         for key in [k for k in _ALL_PROMPTS if k.startswith("SHARED_")]:
-            body = (_ALL_PROMPTS[key].get("default_content")
-                    or _ALL_PROMPTS[key].get("content") or "")
+            body = _ALL_PROMPTS[key].get("default_content") or _ALL_PROMPTS[key].get("content") or ""
             assert "{" + key + "}" not in body, f"{key} 自引用"
 
     def test_all_templates_renderable_with_full_contract(self):
@@ -552,15 +581,17 @@ class TestContractIntegrity:
             extract_variables,
             has_residual_placeholders,
         )
+
         for key, requires in PROMPT_VARIABLE_CONTRACTS.items():
             tpl = get_default_prompt(key)
             out = render_prompt(tpl, **{v: f"<{v}>" for v in requires})
             assert out, key
-            residual = [v for v in extract_variables(out)
-                        if not v.startswith("SHARED_")
-                        and not _is_false_positive(key, v, tpl)]
-            assert not has_residual_placeholders(out) or not residual, (
-                f"{key} 按契约传满变量后仍有未解析占位符：{residual}")
+            residual = [
+                v for v in extract_variables(out) if not v.startswith("SHARED_") and not _is_false_positive(key, v, tpl)
+            ]
+            assert (
+                not has_residual_placeholders(out) or not residual
+            ), f"{key} 按契约传满变量后仍有未解析占位符：{residual}"
 
     def test_user_variables_exclude_shared(self):
         for key, meta in _ALL_PROMPTS.items():

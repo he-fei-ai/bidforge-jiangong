@@ -22,10 +22,12 @@
   - 列表直接查 DB，重启后不会因内存注册表回退而显示成“未修改”。
   - ``db.execute()`` 返回 ``None`` 时按连接异常处理（AGENTS.md §5.5 R13）。
 """
+
 from __future__ import annotations
 
 import json
 import logging
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -74,16 +76,23 @@ async def _fetch_content_row(db, key: str):
     命中即 AttributeError → 500，且 PATCH 路径下内存注册表不更新、
     运行时缓存不失效（内容存了却不生效）。
     """
-    cur = await db.execute(
-        "SELECT content, updated_at FROM prompt_templates WHERE key=?", (key,))
+    cur = await db.execute("SELECT content, updated_at FROM prompt_templates WHERE key=?", (key,))
     if cur is None:
         raise HTTPException(503, "数据库连接异常，请重试")
     return await cur.fetchone()
 
 
-async def _write_with_before(db, key: str, before: str, after: str,
-                             action: str, request, *, expected_updated_at,
-                             effective_after: str | None = None):
+async def _write_with_before(
+    db,
+    key: str,
+    before: str,
+    after: str,
+    action: str,
+    request,
+    *,
+    expected_updated_at,
+    effective_after: str | None = None,
+):
     """在**单个写事务**内做「CAS 改内容 + 写审计」，消除 lost update。
 
     ✅ 2026-09-27（BUG-P1-B · 并发丢版本 / 审计链断裂）：
@@ -105,17 +114,13 @@ async def _write_with_before(db, key: str, before: str, after: str,
     try:
         await db.execute("BEGIN IMMEDIATE")
         # 事务内重读：拿到的是「真正被覆盖的那一版」
-        cur = await db.execute(
-            "SELECT content, updated_at FROM prompt_templates WHERE key=?",
-            (key,))
+        cur = await db.execute("SELECT content, updated_at FROM prompt_templates WHERE key=?", (key,))
         row = await cur.fetchone() if cur is not None else None
         real_before = (row["content"] if row else "") or before
-        real_updated_at = (row["updated_at"] if row else None)
-        if expected_updated_at is not None \
-                and real_updated_at != expected_updated_at:
+        real_updated_at = row["updated_at"] if row else None
+        if expected_updated_at is not None and real_updated_at != expected_updated_at:
             await db.rollback()
-            raise HTTPException(
-                409, "提示词已被他人修改（版本冲突），请刷新后重试")
+            raise HTTPException(409, "提示词已被他人修改（版本冲突），请刷新后重试")
         before_vars = extract_user_variables(real_before)
         eff = effective_after if effective_after is not None else after
         after_vars = extract_user_variables(eff)
@@ -125,9 +130,10 @@ async def _write_with_before(db, key: str, before: str, after: str,
             await db.execute(
                 "INSERT INTO prompt_templates (key, content) VALUES (?,?)"
                 " ON CONFLICT(key) DO UPDATE SET content=excluded.content,"
-                " updated_at=datetime('now','localtime')", (key, after))
-        await record_prompt_audit(
-            db, key, action, real_before, eff, before_vars, after_vars, request)
+                " updated_at=datetime('now','localtime')",
+                (key, after),
+            )
+        await record_prompt_audit(db, key, action, real_before, eff, before_vars, after_vars, request)
         await db.commit()
         return real_before, before_vars, after_vars
     except HTTPException:
@@ -147,16 +153,13 @@ async def list_prompts(category: str = "", db=Depends(read_db)):
     from app.services.ai.prompts._registry import (
         list_prompts as _lp,
     )
+
     items = _lp(category) if category else _lp()
     cur = await db.execute("SELECT key, content, updated_at FROM prompt_templates")
     rows = await cur.fetchall() if cur is not None else []
     meta = {r["key"]: dict(r) for r in rows}
-    cur2 = await db.execute(
-        "SELECT prompt_key, COUNT(*) AS n FROM prompt_audit_logs GROUP BY prompt_key")
-    counts = {
-        r["prompt_key"]: int(r["n"] or 0)
-        for r in (await cur2.fetchall() if cur2 is not None else [])
-    }
+    cur2 = await db.execute("SELECT prompt_key, COUNT(*) AS n FROM prompt_audit_logs GROUP BY prompt_key")
+    counts = {r["prompt_key"]: int(r["n"] or 0) for r in (await cur2.fetchall() if cur2 is not None else [])}
     for it in items:
         row = meta.get(it["key"])
         if row and (row.get("content") or "").strip():
@@ -177,8 +180,7 @@ async def list_prompts(category: str = "", db=Depends(read_db)):
 
 
 @router.get("/audit-logs")
-async def prompt_audit_logs(key: str, limit: int = 50, offset: int = 0,
-                            db=Depends(read_db)):
+async def prompt_audit_logs(key: str, limit: int = 50, offset: int = 0, db=Depends(read_db)):
     """提示词变更审计（只含指纹与变量集合，不复制完整正文）。"""
     try:
         return await list_prompt_audit_logs(db, key, limit, offset)
@@ -187,8 +189,7 @@ async def prompt_audit_logs(key: str, limit: int = 50, offset: int = 0,
 
 
 @router.patch("/{key}")
-async def update_prompt(key: str, body: dict, db=Depends(get_db),
-                        request: Request = None):
+async def update_prompt(key: str, body: dict, db=Depends(get_db), request: Request = None):
     """保存提示词编辑；空内容按“恢复默认”处理。"""
     from app.services.ai.prompts._cache import reload_prompt_cache
     from app.services.ai.prompts._registry import (
@@ -233,10 +234,15 @@ async def update_prompt(key: str, body: dict, db=Depends(get_db),
     # 保留行会把「出厂默认」复制一份进库，徒增表体积且让「是否被改过」
     # 只能靠内容比对来推断。变更后实际生效的是出厂默认，故传 effective_after。
     before, before_vars, after_vars = await _write_with_before(
-        db, key, before, "" if is_reset else content,
-        "reset" if is_reset else "update", request,
+        db,
+        key,
+        before,
+        "" if is_reset else content,
+        "reset" if is_reset else "update",
+        request,
         expected_updated_at=expected_updated_at,
-        effective_after=default if is_reset else None)
+        effective_after=default if is_reset else None,
+    )
     if is_reset:
         _reset(key)
     else:
@@ -267,6 +273,7 @@ async def reset_prompt(key: str, db=Depends(get_db), request: Request = None):
     from app.services.ai.prompts._registry import (
         reset_prompt as _reset,
     )
+
     default = get_default_prompt(key) if key in _ALL_PROMPTS else None
     if default is None:
         raise HTTPException(404, "提示词不存在")
@@ -274,25 +281,33 @@ async def reset_prompt(key: str, db=Depends(get_db), request: Request = None):
     before = (row["content"] if row else "") or default
     # 恢复出厂默认 = 删除该行（落库空串），变更后实际生效的是出厂默认
     before, before_vars, after_vars = await _write_with_before(
-        db, key, before, "", "reset", request,
+        db,
+        key,
+        before,
+        "",
+        "reset",
+        request,
         expected_updated_at=(row["updated_at"] if row else None),
-        effective_after=default)
+        effective_after=default,
+    )
     _reset(key)
     reload_prompt_cache()
-    return {"ok": True, "content": default,
-            "content_hash": prompt_content_hash(default),
-            # ✅ 2026-09-25（BUG-D · 响应契约对称）：三个变更端点（PATCH 非空 /
-            #   PATCH 空内容 / POST reset）一律回传 variables，供调用方直接
-            #   判断「当前生效模板的变量集合」而不必自行重算。
-            "variables": after_vars,
-            "added_variables": sorted(set(after_vars) - set(before_vars)),
-            "removed_variables": sorted(set(before_vars) - set(after_vars)),
-            "warnings": []}
+    return {
+        "ok": True,
+        "content": default,
+        "content_hash": prompt_content_hash(default),
+        # ✅ 2026-09-25（BUG-D · 响应契约对称）：三个变更端点（PATCH 非空 /
+        #   PATCH 空内容 / POST reset）一律回传 variables，供调用方直接
+        #   判断「当前生效模板的变量集合」而不必自行重算。
+        "variables": after_vars,
+        "added_variables": sorted(set(after_vars) - set(before_vars)),
+        "removed_variables": sorted(set(before_vars) - set(after_vars)),
+        "warnings": [],
+    }
 
 
 @router.post("/{key}/rollback")
-async def rollback_prompt(key: str, body: dict, db=Depends(get_db),
-                          request: Request = None):
+async def rollback_prompt(key: str, body: dict, db=Depends(get_db), request: Request = None):
     """把提示词回滚到某条审计记录**变更前**的版本（✅ G2 版本回滚）。
 
     语义与 ``POST /api/v1/ai/config/{id}/rollback`` 对齐：
@@ -325,9 +340,7 @@ async def rollback_prompt(key: str, body: dict, db=Depends(get_db),
         raise HTTPException(400, "缺少 audit_id")
     audit_id = audit_id.strip()
 
-    cur = await db.execute(
-        "SELECT id, prompt_key, snapshot_json FROM prompt_audit_logs WHERE id=?",
-        (audit_id,))
+    cur = await db.execute("SELECT id, prompt_key, snapshot_json FROM prompt_audit_logs WHERE id=?", (audit_id,))
     if cur is None:
         raise HTTPException(503, "数据库连接异常，请重试")
     row = await cur.fetchone()
@@ -356,8 +369,14 @@ async def rollback_prompt(key: str, body: dict, db=Depends(get_db),
     # 与「保存/重置」同口径：单事务 + CAS，事务提交成功后才更新内存注册表
     # 并失效运行时缓存，避免出现「已落库但运行时仍用旧缓存」的不一致窗口。
     current, current_vars, restored_vars = await _write_with_before(
-        db, key, (row2["content"] if row2 else "") or default, before,
-        "rollback", request, expected_updated_at=expected_updated_at)
+        db,
+        key,
+        (row2["content"] if row2 else "") or default,
+        before,
+        "rollback",
+        request,
+        expected_updated_at=expected_updated_at,
+    )
     _up(key, before)
     reload_prompt_cache()
     return {
@@ -368,8 +387,7 @@ async def rollback_prompt(key: str, body: dict, db=Depends(get_db),
         "added_variables": sorted(set(restored_vars) - set(current_vars)),
         "removed_variables": sorted(set(current_vars) - set(restored_vars)),
         "rollback_from_audit": audit_id,
-        "warnings": [i["message"] for i in validate_prompt_content(key, before)
-                     if i["level"] == "warning"],
+        "warnings": [i["message"] for i in validate_prompt_content(key, before) if i["level"] == "warning"],
     }
 
 
@@ -377,15 +395,43 @@ async def rollback_prompt(key: str, body: dict, db=Depends(get_db),
 # ✅ R48（2026-10-06）：prompts 运行时指标（进程内内存计数器，重启清零）
 # ---------------------------------------------------------------------------
 @system_metrics_router.get("/prompt-metrics")
-async def get_prompt_metrics():
+async def get_prompt_metrics(db=Depends(read_db)):
     """提示词运行时指标快照（进程内内存计数器，不持久化、重启清零）。
 
     顶层固定 6 个键：``render_total`` / ``render_errors`` /
     ``token_budget_truncated`` / ``repair_triggered`` / ``ai_failure_by_scene``
     五个维度 dict，外加 ``registered_keys``（注册表全部 key，供运维对照
     「哪些模板从无人渲染过」）。
+
+    ✅ R180（2026-11-05 · 可观测性）：新增 ``today`` 子对象（加法式，不改原有键）：
+      · ``version_changes_today``：今日提示词版本变更（覆盖/回滚/恢复默认）次数，
+        来源 ``prompt_audit_logs``（每次变更都写审计，见 audit_service）；
+      · ``render_calls_today``：今日渲染次数，口径为 ``ai_audit_logs`` 调用数
+        （本仓每次 AI 调用都渲染一次提示词；进程内 ``render_total`` 重启清零，
+        无法回答「今日」，故给出 DB 侧近似口径，并显式标注 ``render_basis``）。
+    指标查询失败不得影响运维页：任何异常都降级为 0 并在 ``today.error`` 说明。
     """
-    return _get_metrics_snapshot()
+    _snap = _get_metrics_snapshot()
+    _today = time.strftime("%Y-%m-%d")
+    _today_stats = {"version_changes_today": 0, "render_calls_today": 0}
+    if hasattr(db, "execute"):  # 直调（非 FastAPI 注入）时 db 为 Depends 占位，跳过统计
+        try:
+            _cur = await db.execute(
+                "SELECT COUNT(*) FROM prompt_audit_logs WHERE created_at >= ?", (_today,)
+            )
+            _row = await _cur.fetchone() if _cur is not None else None
+            if _row is not None:
+                _today_stats["version_changes_today"] = int(_row[0] or 0)
+            _cur = await db.execute("SELECT COUNT(*) FROM ai_audit_logs WHERE created_at >= ?", (_today,))
+            _row = await _cur.fetchone() if _cur is not None else None
+            if _row is not None:
+                _today_stats["render_calls_today"] = int(_row[0] or 0)
+        except Exception as e:  # 指标失败绝不阻断页面
+            logger.warning("prompt-metrics 今日计数查询失败（已降级为 0）: %s", e)
+            _today_stats["error"] = str(e)[:120]
+    _today_stats["render_basis"] = "ai_audit_logs 调用数（每次 AI 调用渲染一次提示词，近似口径）"
+    _snap["today"] = _today_stats
+    return _snap
 
 
 @system_metrics_router.post("/prompt-metrics/reset")
@@ -424,44 +470,45 @@ async def sync_prompts_from_code(force: bool = False, db=Depends(get_db)):
     )
 
     register_lazy_prompts()
-    summary = {"inserted": 0, "in_sync": 0, "drift": 0,
-               "overwritten": 0, "errors": 0}
+    summary = {"inserted": 0, "in_sync": 0, "drift": 0, "overwritten": 0, "errors": 0}
     details: list[dict] = []
     for key in sorted(_ALL_PROMPTS.keys()):
         try:
             # 对比基准 = 硬编码出厂值（统一清洗，与 DB 落库口径一致）
             code_content = clean_prompt_text(get_default_prompt(key))
-            cur = await db.execute(
-                "SELECT content, updated_at FROM prompt_templates WHERE key=?",
-                (key,))
+            cur = await db.execute("SELECT content, updated_at FROM prompt_templates WHERE key=?", (key,))
             row = await cur.fetchone() if cur is not None else None
             if row is None:
                 # DB 无行 → 插入硬编码出厂值
-                await db.execute(
-                    "INSERT INTO prompt_templates (key, content) VALUES (?, ?)",
-                    (key, code_content))
+                await db.execute("INSERT INTO prompt_templates (key, content) VALUES (?, ?)", (key, code_content))
                 # ✅ R169：同步写入也要落审计（与 PATCH/reset/rollback 同为「内容
                 #    变更必留痕」口径）。旧实现直写 DB 不写 prompt_audit_logs，
                 #    force 之外的首插行不在任何审计快照里；本函数与最终 commit
                 #    同事务提交（record_prompt_audit 自身不 commit）。
                 await record_prompt_audit(
-                    db, key, "sync_insert", "", code_content,
-                    [], extract_user_variables(code_content), None)
+                    db, key, "sync_insert", "", code_content, [], extract_user_variables(code_content), None
+                )
                 summary["inserted"] += 1
-                details.append({
-                    "key": key, "status": "inserted",
-                    "code_hash": prompt_content_hash(code_content),
-                })
+                details.append(
+                    {
+                        "key": key,
+                        "status": "inserted",
+                        "code_hash": prompt_content_hash(code_content),
+                    }
+                )
                 continue
             db_content = clean_prompt_text(row["content"] or "")
             if db_content == code_content:
                 summary["in_sync"] += 1
-                details.append({
-                    "key": key, "status": "in_sync",
-                    "code_hash": prompt_content_hash(code_content),
-                    "db_hash": prompt_content_hash(db_content),
-                    "db_modified_at": row["updated_at"] or "",
-                })
+                details.append(
+                    {
+                        "key": key,
+                        "status": "in_sync",
+                        "code_hash": prompt_content_hash(code_content),
+                        "db_hash": prompt_content_hash(db_content),
+                        "db_modified_at": row["updated_at"] or "",
+                    }
+                )
                 continue
             # 不一致：默认 drift（不覆盖用户编辑）；force=true 才覆盖
             if force:
@@ -469,34 +516,46 @@ async def sync_prompts_from_code(force: bool = False, db=Depends(get_db)):
                     "INSERT INTO prompt_templates (key, content) VALUES (?, ?)"
                     " ON CONFLICT(key) DO UPDATE SET content=excluded.content,"
                     " updated_at=datetime('now','localtime')",
-                    (key, code_content))
+                    (key, code_content),
+                )
                 _up(key, code_content)
                 # ✅ R169：force 覆盖用户编辑是本端点唯一可能**丢失内容**的路径，
                 #    被覆盖的 DB 原文必须进审计快照，否则回滚 UI 永远无法恢复。
                 _db_before = row["content"] or ""
                 await record_prompt_audit(
-                    db, key, "sync_overwrite", _db_before, code_content,
+                    db,
+                    key,
+                    "sync_overwrite",
+                    _db_before,
+                    code_content,
                     extract_user_variables(_db_before),
-                    extract_user_variables(code_content), None)
+                    extract_user_variables(code_content),
+                    None,
+                )
                 summary["overwritten"] += 1
-                details.append({
-                    "key": key, "status": "overwritten",
-                    "code_hash": prompt_content_hash(code_content),
-                    "db_hash": prompt_content_hash(db_content),
-                    "db_modified_at": row["updated_at"] or "",
-                })
+                details.append(
+                    {
+                        "key": key,
+                        "status": "overwritten",
+                        "code_hash": prompt_content_hash(code_content),
+                        "db_hash": prompt_content_hash(db_content),
+                        "db_modified_at": row["updated_at"] or "",
+                    }
+                )
             else:
                 summary["drift"] += 1
-                details.append({
-                    "key": key, "status": "drift",
-                    "code_hash": prompt_content_hash(code_content),
-                    "db_hash": prompt_content_hash(db_content),
-                    "db_modified_at": row["updated_at"] or "",
-                })
+                details.append(
+                    {
+                        "key": key,
+                        "status": "drift",
+                        "code_hash": prompt_content_hash(code_content),
+                        "db_hash": prompt_content_hash(db_content),
+                        "db_modified_at": row["updated_at"] or "",
+                    }
+                )
         except Exception as e:  # noqa: BLE001 - 单 key 失败不阻断其他 key
             summary["errors"] += 1
-            logger.warning("sync-from-code 处理 key=%s 失败（跳过，不阻断）: %s",
-                           key, e)
+            logger.warning("sync-from-code 处理 key=%s 失败（跳过，不阻断）: %s", key, e)
             details.append({"key": key, "status": "error", "error": str(e)})
 
     try:
@@ -507,4 +566,3 @@ async def sync_prompts_from_code(force: bool = False, db=Depends(get_db)):
         raise HTTPException(500, "硬编码→DB 同步提交失败")
     reload_prompt_cache()
     return {"summary": summary, "details": details, "force": force}
-

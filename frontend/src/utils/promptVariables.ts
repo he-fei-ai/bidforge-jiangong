@@ -1,4 +1,3 @@
-
 import type { PromptVariable, PromptVariableDiff } from "../types/prompt";
 
 // 与后端 _registry._VARIABLE_PATTERN 对齐：{var} 总长至少 2，且排除 JSON 对象键 `{key}:`。

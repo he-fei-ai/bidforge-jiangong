@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
-  diffPromptVariables, extractOptionalBlockVars, extractPromptVariables,
+  diffPromptVariables,
+  extractOptionalBlockVars,
+  extractPromptVariables,
   isOptionalBlockLine,
 } from "../utils/promptVariables";
 
 describe("提示词变量治理", () => {
   it("与后端一致地排除 JSON 对象键，同时保留普通占位符", () => {
-    const vars = extractPromptVariables('示例 {tasks: []}，正文 {scheme_name}，__RULE__');
+    const vars = extractPromptVariables("示例 {tasks: []}，正文 {scheme_name}，__RULE__");
     expect(vars).toEqual([
       { name: "RULE", dunder: true },
       { name: "scheme_name", dunder: false },
@@ -14,10 +16,12 @@ describe("提示词变量治理", () => {
   });
 
   it("计算相对默认模板新增和删除的变量", () => {
-    expect(diffPromptVariables(
-      "默认 {scheme_name}，新增 {section_number}",
-      "默认 {scheme_name}，旧 {standards_text}",
-    )).toEqual({
+    expect(
+      diffPromptVariables(
+        "默认 {scheme_name}，新增 {section_number}",
+        "默认 {scheme_name}，旧 {standards_text}",
+      ),
+    ).toEqual({
       added: ["section_number"],
       removed: ["standards_text"],
     });
@@ -25,7 +29,8 @@ describe("提示词变量治理", () => {
 
   it("无变量变化时返回空差异", () => {
     expect(diffPromptVariables("内容 {name}", "默认 {name}")).toEqual({
-      added: [], removed: [],
+      added: [],
+      removed: [],
     });
   });
 
@@ -38,10 +43,9 @@ describe("提示词变量治理", () => {
   });
 
   it("启用/停用一段 {SHARED_*} 不计为变量增删", () => {
-    expect(diffPromptVariables(
-      "规则 {SHARED_OUTPUT_SPEC} 正文 {scheme_name}",
-      "正文 {scheme_name}",
-    )).toEqual({ added: [], removed: [] });
+    expect(
+      diffPromptVariables("规则 {SHARED_OUTPUT_SPEC} 正文 {scheme_name}", "正文 {scheme_name}"),
+    ).toEqual({ added: [], removed: [] });
   });
 });
 
@@ -79,14 +83,17 @@ describe("可选区块（整行独占占位符）判据", () => {
   });
 
   it("extractOptionalBlockVars 收集整行独占变量（去重排序）", () => {
-    expect(extractOptionalBlockVars(
-      "头部\n{scheme_basis}\n{standards_text}\n尾部\n【事实】：{project_facts}\n{scheme_basis}\n",
-    )).toEqual(["scheme_basis", "standards_text"]);
+    expect(
+      extractOptionalBlockVars(
+        "头部\n{scheme_basis}\n{standards_text}\n尾部\n【事实】：{project_facts}\n{scheme_basis}\n",
+      ),
+    ).toEqual(["scheme_basis", "standards_text"]);
   });
 
   it("extractOptionalBlockVars 不含行内混排与 SHARED 引用", () => {
     const v = extractOptionalBlockVars(
-      "【方案名称】：{scheme_name}\n{SHARED_SCOPE_RULES}\n{scheme_basis}\n");
+      "【方案名称】：{scheme_name}\n{SHARED_SCOPE_RULES}\n{scheme_basis}\n",
+    );
     expect(v).toEqual(["SHARED_SCOPE_RULES", "scheme_basis"]);
   });
 

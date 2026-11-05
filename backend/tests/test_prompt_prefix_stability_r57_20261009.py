@@ -14,6 +14,7 @@
 ⚠️ A/B 反向验证（本仓库例行的「护栏必须能红」纪律）：
    见 ``docs/标书智能体六篇方法论对齐_增强落地与验证_R57_20261009.md`` §5。
 """
+
 from __future__ import annotations
 
 import inspect
@@ -98,8 +99,7 @@ class TestChapterLayeredMessages:
         只要「每条消息 + 消息内每个字符」在逐章间不变，前缀即可复用。
         """
         msgs_a, _ = build_chapter_layered_messages(**_base_kwargs(_leaf("1", "降水施工")))
-        msgs_b, _ = build_chapter_layered_messages(
-            **_base_kwargs(_leaf("2", "土方开挖", "分层分段开挖")))
+        msgs_b, _ = build_chapter_layered_messages(**_base_kwargs(_leaf("2", "土方开挖", "分层分段开挖")))
         assert len(msgs_a) == len(msgs_b) == 4
         assert msgs_a[:-1] == msgs_b[:-1], "兄弟章节的非任务段必须逐字节相同"
         assert msgs_a[-1] != msgs_b[-1]
@@ -113,9 +113,11 @@ class TestChapterLayeredMessages:
         """
         kw = _base_kwargs(_leaf("1", "降水施工"))
         msgs_a, _ = build_chapter_layered_messages(**kw)
-        kw.update(parent_chain="1 工程概况 > 5 安全保证措施",
-                  parent_points=["- 安全保证措施：组织与技术措施"],
-                  sibling_lines="5.1 组织保障\n5.2 技术措施")
+        kw.update(
+            parent_chain="1 工程概况 > 5 安全保证措施",
+            parent_points=["- 安全保证措施：组织与技术措施"],
+            sibling_lines="5.1 组织保障\n5.2 技术措施",
+        )
         msgs_b, _ = build_chapter_layered_messages(**kw)
         assert msgs_a[0] == msgs_b[0], "system 必须整案稳定"
         assert msgs_a[1] == msgs_b[1], "整案稳定上下文段必须逐章稳定"
@@ -126,8 +128,7 @@ class TestChapterLayeredMessages:
         旧实现把这些块排在【当前章节编号】【目标字数】之后 —— 本用例
         一旦把「全局事实 / 知识库」挪回任务段之后即定向失败。
         """
-        _, user_content = build_chapter_layered_messages(
-            **_base_kwargs(_leaf("1", "降水施工")))
+        _, user_content = build_chapter_layered_messages(**_base_kwargs(_leaf("1", "降水施工")))
         idx_facts = user_content.find("【全局事实变量")
         idx_knowledge = user_content.find("【项目知识库素材")
         idx_section = user_content.find("【当前章节编号】")
@@ -145,19 +146,31 @@ class TestChapterLayeredMessages:
         kw = _base_kwargs(leaf)
         layered_kwargs = dict(kw)
         _, layered_text = build_chapter_layered_messages(**layered_kwargs)
-        flat_text = build_chapter_user_content(
-            **{k: v for k, v in kw.items() if k != "sys_prompt"})
+        flat_text = build_chapter_user_content(**{k: v for k, v in kw.items() if k != "sys_prompt"})
         assert set(_labels(layered_text)) == set(_labels(flat_text))
         assert set(_labels(flat_text))
-        for marker in (FACTS_TEXT, KNOWLEDGE_TEXT, CONTENT_SCOPE, PROJECT_BRIEF,
-                       SCHEME["name"], "管井施工与运行", "800字"):
+        for marker in (
+            FACTS_TEXT,
+            KNOWLEDGE_TEXT,
+            CONTENT_SCOPE,
+            PROJECT_BRIEF,
+            SCHEME["name"],
+            "管井施工与运行",
+            "800字",
+        ):
             assert marker in layered_text, marker
 
     def test_empty_optional_blocks_do_not_produce_empty_user_messages(self):
         """部分 provider 显式拒绝空 content → 空段必须跳过。"""
         kw = _base_kwargs(_leaf("1", "降水施工"))
-        kw.update(content_scope="", facts_text="", knowledge_text="",
-                  parent_points=[], sibling_lines="", prev_sibling_summary="")
+        kw.update(
+            content_scope="",
+            facts_text="",
+            knowledge_text="",
+            parent_points=[],
+            sibling_lines="",
+            prev_sibling_summary="",
+        )
         messages, _ = build_chapter_layered_messages(**kw)
         assert all(str(m["content"]).strip() for m in messages)
         # 每条消息都必须非空；段数可以少于 3，但不能有空串
@@ -165,10 +178,10 @@ class TestChapterLayeredMessages:
 
     def test_chapter_extras_are_appended_to_last_user_message(self):
         """从 system 剥离出来的逐章变量，必须落在**任务差异**段里而不是丢失。"""
-        extras = ("\n【本章编写定位】：\n本章目录编号：3.3\n"
-                  "\n【本章编制依据】：\nGB 51004-2015\n")
+        extras = "\n【本章编写定位】：\n本章目录编号：3.3\n" "\n【本章编制依据】：\nGB 51004-2015\n"
         messages, user_content = build_chapter_layered_messages(
-            **_base_kwargs(_leaf("1", "降水施工"), chapter_extras=extras))
+            **_base_kwargs(_leaf("1", "降水施工"), chapter_extras=extras)
+        )
         assert "本章目录编号：3.3" in messages[-1]["content"]
         assert "GB 51004-2015" in messages[-1]["content"]
         assert "本章目录编号：3.3" not in messages[1]["content"]
@@ -181,10 +194,8 @@ class TestChapterLayeredMessages:
 
     def test_user_content_is_the_join_of_all_user_segments(self):
         """续写轮复用 user_content，必须与 messages 同步（不可各探一路）。"""
-        messages, user_content = build_chapter_layered_messages(
-            **_base_kwargs(_leaf("1", "降水施工")))
-        assert user_content == "".join(
-            m["content"] for m in messages if m["role"] == "user")
+        messages, user_content = build_chapter_layered_messages(**_base_kwargs(_leaf("1", "降水施工")))
+        assert user_content == "".join(m["content"] for m in messages if m["role"] == "user")
 
 
 # ===========================================================================
@@ -195,33 +206,31 @@ class TestSystemVariablesDecision:
 
     def test_stable_mode_clears_every_per_chapter_variable(self):
         got = resolve_system_variables(
-            stable=True, section_number="3.3",
-            standards_text="GB 51004-2015", subheading_rule="- 二级小标题")
+            stable=True, section_number="3.3", standards_text="GB 51004-2015", subheading_rule="- 二级小标题"
+        )
         assert set(got) == {"section_number", "standards_text", "subheading_rule"}
         assert all(v == "" for v in got.values()), got
 
     def test_stable_mode_result_is_invariant_to_chapter(self):
         """同一方案下 system 必须逐字节相同 —— 命中缓存的前提。"""
-        a = resolve_system_variables(stable=True, section_number="3.3",
-                                     standards_text="GB-A", subheading_rule="R1")
-        b = resolve_system_variables(stable=True, section_number="5.1",
-                                     standards_text="GB-B", subheading_rule="R2")
+        a = resolve_system_variables(stable=True, section_number="3.3", standards_text="GB-A", subheading_rule="R1")
+        b = resolve_system_variables(stable=True, section_number="5.1", standards_text="GB-B", subheading_rule="R2")
         assert a == b
 
     def test_legacy_mode_returns_values_verbatim(self):
         got = resolve_system_variables(
-            stable=False, section_number="3.3",
-            standards_text="GB 51004-2015", subheading_rule="- 二级小标题")
-        assert got == {"section_number": "3.3",
-                       "standards_text": "GB 51004-2015",
-                       "subheading_rule": "- 二级小标题"}
+            stable=False, section_number="3.3", standards_text="GB 51004-2015", subheading_rule="- 二级小标题"
+        )
+        assert got == {"section_number": "3.3", "standards_text": "GB 51004-2015", "subheading_rule": "- 二级小标题"}
 
     def test_extras_block_carries_the_stripped_values_verbatim(self):
         """system 里被清空的内容必须**一字不差**地回到 user，不得丢段。"""
         block = build_chapter_extras_block(
-            section_number="3.3", standards_text="GB 51004-2015",
+            section_number="3.3",
+            standards_text="GB 51004-2015",
             subheading_rule="- 二级小标题：1.1 标题",
-            chapter_checkpoint_block="\n【本章审核检查点要求】\n- 必须写明值班电话")
+            chapter_checkpoint_block="\n【本章审核检查点要求】\n- 必须写明值班电话",
+        )
         assert "本章目录编号：3.3" in block
         assert "GB 51004-2015" in block
         assert "- 二级小标题：1.1 标题" in block
@@ -230,8 +239,8 @@ class TestSystemVariablesDecision:
 
     def test_extras_block_skips_empty_sections(self):
         block = build_chapter_extras_block(
-            section_number="3.3", standards_text="", subheading_rule="",
-            chapter_checkpoint_block="")
+            section_number="3.3", standards_text="", subheading_rule="", chapter_checkpoint_block=""
+        )
         assert "【本章编制依据】" not in block
         assert "【本章子标题编号规范】" not in block
         assert block.endswith("\n")
@@ -249,6 +258,7 @@ class TestSseHandlersWiring:
     @staticmethod
     def _src() -> str:
         import io
+
         return io.open(sse_handlers.__file__, encoding="utf-8").read()
 
     def test_switch_default_is_on(self):
@@ -256,7 +266,7 @@ class TestSseHandlersWiring:
 
     def test_switch_is_read_from_settings(self):
         src = re.sub(r"\s+", " ", self._src())
-        assert 'getattr( settings, "content_stable_prefix_enabled", True)' in src
+        assert re.search(r'getattr\(\s*settings,\s*"content_stable_prefix_enabled",\s*True\s*\)', src)
 
     def test_render_no_longer_inlines_per_chapter_variables(self):
         """逐章变量不得再直接注入 system —— 否则 system 自首字符起就逐章变化。"""
@@ -307,12 +317,12 @@ def _fake_chat_factory(responses: list, calls: list):
         if len(calls) > len(responses):
             raise AssertionError("调用次数超出预期")
         return responses[len(calls) - 1]
+
     return _fake
 
 
 def _conflicts():
-    return [{"id": "C1", "conflict_type": "numeric", "current": _OLD,
-             "authoritative": _NEW}]
+    return [{"id": "C1", "conflict_type": "numeric", "current": _OLD, "authoritative": _NEW}]
 
 
 class TestConsistencyEditsRepairChannel:
@@ -322,17 +332,22 @@ class TestConsistencyEditsRepairChannel:
         """旧实现：模型多说一句话 → 整节放弃 → 回落整章重写（改掉本没问题的段落）。"""
         calls: list = []
         responses = [
-            "好的，以下是修改：\n" + json.dumps({"edits": [{"old_text": _OLD,
-                                                            "new_text": _NEW}]},
-                                               ensure_ascii=False) + "\n希望有帮助。",
+            "好的，以下是修改：\n"
+            + json.dumps({"edits": [{"old_text": _OLD, "new_text": _NEW}]}, ensure_ascii=False)
+            + "\n希望有帮助。",
         ]
         fake = _fake_chat_factory(responses, calls)
 
         async def _run():
             return await consistency_edits.collect_repair_edits(
-                section_id="sec-1", section_title="工程概况",
-                section_content=_CONTENT, conflicts_in_section=_conflicts(),
-                facts="工期=90天", sources="招标文件", chat_fn=fake)
+                section_id="sec-1",
+                section_title="工程概况",
+                section_content=_CONTENT,
+                conflicts_in_section=_conflicts(),
+                facts="工期=90天",
+                sources="招标文件",
+                chat_fn=fake,
+            )
 
         # 解释文字包裹的 JSON 必须被 extract_json 救回（成功路径零额外调用）
         res = _await(_run())
@@ -343,15 +358,21 @@ class TestConsistencyEditsRepairChannel:
         calls: list = []
         responses = [
             "抱歉，我无法输出 JSON。",  # 完全无 JSON 结构
-            json.dumps({"edits": [{"old_text": _OLD, "new_text": _NEW}]},
-                       ensure_ascii=False),
+            json.dumps({"edits": [{"old_text": _OLD, "new_text": _NEW}]}, ensure_ascii=False),
         ]
         fake = _fake_chat_factory(responses, calls)
 
-        res = _await(consistency_edits.collect_repair_edits(
-            section_id="sec-1", section_title="工程概况",
-            section_content=_CONTENT, conflicts_in_section=_conflicts(),
-            facts="工期=90天", sources="招标文件", chat_fn=fake))
+        res = _await(
+            consistency_edits.collect_repair_edits(
+                section_id="sec-1",
+                section_title="工程概况",
+                section_content=_CONTENT,
+                conflicts_in_section=_conflicts(),
+                facts="工期=90天",
+                sources="招标文件",
+                chat_fn=fake,
+            )
+        )
 
         assert len(calls) == 2, "必须真正进入定向修复轮（旧实现只调 1 次即放弃）"
         assert res.applied == 1
@@ -363,13 +384,19 @@ class TestConsistencyEditsRepairChannel:
     def test_success_path_costs_exactly_one_call(self):
         """成功时不得因为接入通道而多花一次 AI 调用（经济性护栏）。"""
         calls: list = []
-        responses = [json.dumps({"edits": [{"old_text": _OLD, "new_text": _NEW}]},
-                                ensure_ascii=False)]
+        responses = [json.dumps({"edits": [{"old_text": _OLD, "new_text": _NEW}]}, ensure_ascii=False)]
         fake = _fake_chat_factory(responses, calls)
-        res = _await(consistency_edits.collect_repair_edits(
-            section_id="sec-1", section_title="工程概况",
-            section_content=_CONTENT, conflicts_in_section=_conflicts(),
-            facts="工期=90天", sources="招标文件", chat_fn=fake))
+        res = _await(
+            consistency_edits.collect_repair_edits(
+                section_id="sec-1",
+                section_title="工程概况",
+                section_content=_CONTENT,
+                conflicts_in_section=_conflicts(),
+                facts="工期=90天",
+                sources="招标文件",
+                chat_fn=fake,
+            )
+        )
         assert len(calls) == 1
         assert res.applied == 1
 
@@ -378,10 +405,17 @@ class TestConsistencyEditsRepairChannel:
         calls: list = []
         responses = ["还是写不出来。", "真的写不出来。"]
         fake = _fake_chat_factory(responses, calls)
-        res = _await(consistency_edits.collect_repair_edits(
-            section_id="sec-1", section_title="工程概况",
-            section_content=_CONTENT, conflicts_in_section=_conflicts(),
-            facts="工期=90天", sources="招标文件", chat_fn=fake))
+        res = _await(
+            consistency_edits.collect_repair_edits(
+                section_id="sec-1",
+                section_title="工程概况",
+                section_content=_CONTENT,
+                conflicts_in_section=_conflicts(),
+                facts="工期=90天",
+                sources="招标文件",
+                chat_fn=fake,
+            )
+        )
         assert res.applied == 0
         assert res.content == _CONTENT
         assert len(calls) == 1 + consistency_edits.CONSISTENCY_EDITS_REPAIR_RETRIES
@@ -391,14 +425,20 @@ class TestConsistencyEditsRepairChannel:
         calls: list = []
         responses = [
             json.dumps({"engine": [{"old_text": _OLD, "new_text": _NEW}]}),
-            json.dumps({"edits": [{"old_text": _OLD, "new_text": _NEW}]},
-                       ensure_ascii=False),
+            json.dumps({"edits": [{"old_text": _OLD, "new_text": _NEW}]}, ensure_ascii=False),
         ]
         fake = _fake_chat_factory(responses, calls)
-        res = _await(consistency_edits.collect_repair_edits(
-            section_id="sec-1", section_title="工程概况",
-            section_content=_CONTENT, conflicts_in_section=_conflicts(),
-            facts="工期=90天", sources="招标文件", chat_fn=fake))
+        res = _await(
+            consistency_edits.collect_repair_edits(
+                section_id="sec-1",
+                section_title="工程概况",
+                section_content=_CONTENT,
+                conflicts_in_section=_conflicts(),
+                facts="工期=90天",
+                sources="招标文件",
+                chat_fn=fake,
+            )
+        )
         assert len(calls) == 2
         assert res.applied == 1
 
@@ -408,27 +448,38 @@ class TestConsistencyEditsRepairChannel:
 
         async def _minimal(messages):  # 无 **kwargs
             calls.append(list(messages))
-            return json.dumps({"edits": [{"old_text": _OLD, "new_text": _NEW}]},
-                              ensure_ascii=False)
+            return json.dumps({"edits": [{"old_text": _OLD, "new_text": _NEW}]}, ensure_ascii=False)
 
-        res = _await(consistency_edits.collect_repair_edits(
-            section_id="sec-1", section_title="工程概况",
-            section_content=_CONTENT, conflicts_in_section=_conflicts(),
-            facts="工期=90天", sources="招标文件", chat_fn=_minimal))
+        res = _await(
+            consistency_edits.collect_repair_edits(
+                section_id="sec-1",
+                section_title="工程概况",
+                section_content=_CONTENT,
+                conflicts_in_section=_conflicts(),
+                facts="工期=90天",
+                sources="招标文件",
+                chat_fn=_minimal,
+            )
+        )
         assert res.applied == 1, "必须以「逐层降级」方式兼容最小签名"
 
     def test_unique_hit_semantics_unchanged(self):
         """接入通道不得放宽「唯一命中」纪律 —— 多处命中仍必须拒绝。"""
         ambiguous = "工期 120 天。" + _CONTENT + " 工期 120 天。"
         calls: list = []
-        responses = [json.dumps(
-            {"edits": [{"old_text": "工期 120 天", "new_text": "工期 90 天"}]},
-            ensure_ascii=False)]
+        responses = [json.dumps({"edits": [{"old_text": "工期 120 天", "new_text": "工期 90 天"}]}, ensure_ascii=False)]
         fake = _fake_chat_factory(responses, calls)
-        res = _await(consistency_edits.collect_repair_edits(
-            section_id="sec-1", section_title="工程概况",
-            section_content=ambiguous, conflicts_in_section=_conflicts(),
-            facts="工期=90天", sources="招标文件", chat_fn=fake))
+        res = _await(
+            consistency_edits.collect_repair_edits(
+                section_id="sec-1",
+                section_title="工程概况",
+                section_content=ambiguous,
+                conflicts_in_section=_conflicts(),
+                facts="工期=90天",
+                sources="招标文件",
+                chat_fn=fake,
+            )
+        )
         assert res.applied == 0
         assert res.rejected and res.rejected[0][1] == "ambiguous"
         assert res.content == ambiguous
@@ -452,9 +503,11 @@ class TestUnifiedJsonChannel:
             return "not json at all"
 
         with pytest.raises(ValueError):
-            _await(json_response.collect_json_response_with_chat(
-                _fake, [{"role": "user", "content": "给我 JSON"}],
-                max_retries=0))
+            _await(
+                json_response.collect_json_response_with_chat(
+                    _fake, [{"role": "user", "content": "给我 JSON"}], max_retries=0
+                )
+            )
         assert len(calls) == 1
 
     def test_repair_target_is_always_the_first_output(self):
@@ -469,8 +522,11 @@ class TestUnifiedJsonChannel:
             state["i"] += 1
             return out
 
-        obj, raw = _await(json_response.collect_json_response_with_chat(
-            _fake, [{"role": "user", "content": "给我 JSON"}], max_retries=2))
+        obj, raw = _await(
+            json_response.collect_json_response_with_chat(
+                _fake, [{"role": "user", "content": "给我 JSON"}], max_retries=2
+            )
+        )
         assert obj == {"ok": 1} and raw == '{"ok": 1}'
         # 第 2 轮修复的 user 内容里必须是 garbage-1（首轮产出），不是 garbage-2
         assert "garbage-1" in calls[2][-1]["content"]
@@ -486,16 +542,20 @@ class TestUnifiedJsonChannel:
             calls.append(list(messages))
             return responses[len(calls) - 1]
 
-        obj, _ = _await(json_response.collect_json_response_with_chat(
-            _fake, [{"role": "user", "content": "给我 JSON"}],
-            validate_fn=_boom, max_retries=1))
+        obj, _ = _await(
+            json_response.collect_json_response_with_chat(
+                _fake, [{"role": "user", "content": "给我 JSON"}], validate_fn=_boom, max_retries=1
+            )
+        )
         assert obj == {"outline": []}
 
 
 def _await(coro):
     """同步执行协程（本文件不依赖 pytest-asyncio mode）。"""
     import asyncio
+
     return asyncio.run(coro)
+
 
 # ===========================================================================
 # E 组 · 源文件字节体检（把 R56/R57 两次踩到的坑变成判据）
@@ -556,6 +616,7 @@ class TestSourceByteIntegrity:
     def test_every_touched_file_compiles(self):
         """语法正确性最终判据：行尾被玩坏的文件往往连 py_compile 都过不去。"""
         import py_compile
+
         for rel in _TOUCHED:
             p = None
             for base in (_repo_root(), Path.cwd()):

@@ -19,6 +19,7 @@
 护栏会判这些测试键未登记而失败（实测 3 failed）。
 现用 autouse fixture 在每个测试结束后自动删除本文件注册的键。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -32,6 +33,7 @@ def _cleanup_test_prompts():
     """自动清理：测试结束后删除本文件注册的 ``r6_test_*`` 键，防止污染全局注册表。"""
     yield
     from app.services.ai.prompts._registry import _ALL_PROMPTS
+
     leaked = [k for k in list(_ALL_PROMPTS) if k.startswith(_TEST_KEY_PREFIX)]
     for k in leaked:
         _ALL_PROMPTS.pop(k, None)
@@ -40,6 +42,7 @@ def _cleanup_test_prompts():
 def _reg_with_value(key: str, value: str):
     """注册测试用提示词（由 autouse fixture 负责清理）。"""
     from app.services.ai.prompts._registry import _reg
+
     return _reg(key, "test", key, value)
 
 
@@ -49,7 +52,7 @@ def test_max_in_json_example_is_filtered():
 
     _reg_with_value(
         "r6_test_json_max",
-        "参数配置：{\"max\": 200, \"min\": 10}\n\n请按配置生成：{scheme_name}",
+        '参数配置：{"max": 200, "min": 10}\n\n请按配置生成：{scheme_name}',
     )
     # 只传 scheme_name，不传 max/min
     missing = validate_prompt_variables("r6_test_json_max", scheme_name="测试方案")

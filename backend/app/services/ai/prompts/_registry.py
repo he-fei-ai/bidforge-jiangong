@@ -810,6 +810,14 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     "bid_item_materialManagement": ["CONTEXT"],
     "bid_item_equipmentManagement": ["CONTEXT"],
     "bid_item_engineeringMethods": ["CONTEXT"],
+    # --- R175（2026-11-03）从业务代码收编的 4 条模板 ---
+    # bid_segment_merge_system 用 __TASK_LABEL__ / __TASK_PROMPT__ / __SEGMENTS__
+    # 由调用方 .replace() 注入；其余 3 条为纯静态提示词（空契约 = 显式声明
+    # “不接受任何外部插值”，今后若被加占位符会在启动期报 used_not_declared）。
+    "bid_segment_merge_system": ["TASK_LABEL", "TASK_PROMPT", "SEGMENTS"],
+    "bid_section_extract_system": [],
+    "bid_section_merge_system": [],
+    "ocr_extract_system": [],
 }
 
 

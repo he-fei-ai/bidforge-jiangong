@@ -5,6 +5,7 @@
 "缺失变量"误告警，又可能在 render 阶段被静默替换从而篡改提示词中的 JSON。
 现正则加入 ``(?!\\s*:)`` 排除 JSON 对象键上下文。
 """
+
 from app.services.ai.prompts._registry import (
     extract_variables,
     has_residual_placeholders,
@@ -21,8 +22,8 @@ def test_extract_ignores_json_object_keys():
 
 def test_render_does_not_corrupt_json_keys():
     out = render_prompt("{tasks: []} {title}", title="目录", tasks="SHOULD_NOT_APPLY")
-    assert "{tasks: []}" in out          # JSON 键未被替换
-    assert "目录" in out                 # 正常变量被替换
+    assert "{tasks: []}" in out  # JSON 键未被替换
+    assert "目录" in out  # 正常变量被替换
     assert "SHOULD_NOT_APPLY" not in out
 
 

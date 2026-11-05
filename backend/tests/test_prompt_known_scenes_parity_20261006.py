@@ -14,6 +14,7 @@
 只加测试、不改生产代码。若扫描发现未登记的 scene，测试必须失败 ——
 由维护者决定是补登记还是修护栏（**不得在本文件里悄悄补 KNOWN_SCENES**）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -44,8 +45,7 @@ def _collect_used_scenes() -> set[str]:
             if not isinstance(node, ast.Call):
                 continue
             for kw in node.keywords:
-                if kw.arg == "scene" and isinstance(kw.value, ast.Constant) \
-                        and isinstance(kw.value.value, str):
+                if kw.arg == "scene" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
                     used.add(kw.value.value)
     return used
 
@@ -75,15 +75,17 @@ def test_ast_scanner_found_at_least_one_real_scene():
     used = _collect_used_scenes()
     # 出厂基线至少应覆盖这 8 个核心场景（R46 之前就一直在用）。
     must_have = {
-        "outline_draft", "outline_level1", "outline_sublevel",
-        "content_draft", "content_continue", "content_shrink",
-        "facts_extract", "consistency_scan",
+        "outline_draft",
+        "outline_level1",
+        "outline_sublevel",
+        "content_draft",
+        "content_continue",
+        "content_shrink",
+        "facts_extract",
+        "consistency_scan",
     }
     missing = sorted(must_have - used)
-    assert not missing, (
-        f"AST 扫描只找到 {len(used)} 个 scene 字面量，缺少核心场景：{missing}。"
-        "扫描逻辑可能被改坏。"
-    )
+    assert not missing, f"AST 扫描只找到 {len(used)} 个 scene 字面量，缺少核心场景：{missing}。" "扫描逻辑可能被改坏。"
 
 
 def test_known_scenes_non_empty_and_labels_non_empty():
@@ -91,6 +93,4 @@ def test_known_scenes_non_empty_and_labels_non_empty():
     assert pf.KNOWN_SCENES, "KNOWN_SCENES 不应为空"
     for k, v in pf.KNOWN_SCENES.items():
         assert isinstance(k, str) and k, f"空 scene key: {k!r}"
-        assert isinstance(v, str) and v.strip(), (
-            f"scene {k!r} 的中文 label 为空：界面会显示空白选项"
-        )
+        assert isinstance(v, str) and v.strip(), f"scene {k!r} 的中文 label 为空：界面会显示空白选项"

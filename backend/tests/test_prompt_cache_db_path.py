@@ -5,6 +5,7 @@
 路径切换后缓存仍指向旧库 → DB 里编辑过的提示词"不生效"且无告警。
 现缓存记录加载时路径，路径变化后自动重载。
 """
+
 import sqlite3
 
 import app.db as _appdb
@@ -23,10 +24,9 @@ def _seed_prompt(db_path, content: str) -> None:
             "CREATE TABLE IF NOT EXISTS prompt_templates ("
             "key TEXT PRIMARY KEY, category TEXT DEFAULT '', label TEXT DEFAULT '',"
             " content TEXT DEFAULT '', default_content TEXT DEFAULT '',"
-            " updated_at TEXT)")
-        conn.execute(
-            "INSERT OR REPLACE INTO prompt_templates(key, content) VALUES(?,?)",
-            (PROBE_KEY, content))
+            " updated_at TEXT)"
+        )
+        conn.execute("INSERT OR REPLACE INTO prompt_templates(key, content) VALUES(?,?)", (PROBE_KEY, content))
         conn.commit()
     finally:
         conn.close()
@@ -53,8 +53,7 @@ class TestPromptCacheFollowsDbPath:
 
         # ✅ 关键：不显式 reload，切换 DB_PATH 后必须自动重载
         _appdb.DB_PATH = db2
-        assert _cache.get_prompt(PROBE_KEY) == "FROM-B", (
-            "DB_PATH 切换后缓存必须跟随新库，不得静默指向旧库")
+        assert _cache.get_prompt(PROBE_KEY) == "FROM-B", "DB_PATH 切换后缓存必须跟随新库，不得静默指向旧库"
 
         _appdb.DB_PATH = db1
         assert _cache.get_prompt(PROBE_KEY) == "FROM-A"
@@ -84,6 +83,23 @@ class TestPromptCacheFollowsDbPath:
             assert _cache.get_prompt(PROBE_KEY) == "FROM-C"
         assert not calls, "同一路径重复读取不得触发重新加载"
 
+    async def test_db_created_after_first_access_reloads(self, ctx, tmp_path):
+        """R179：首次访问时库文件不存在、之后才创建 → 必须自动重载。
+
+        旧实现加载失败分支未记录 mtime（保持 None），而 _db_newer_than_cache
+        对 None 恒返回 False ⇒ 后续库文件出现也永不重载，DB 定制提示词
+        **永久不生效**且无告警（静默失效）。实测复现：先访问不存在库 →
+        再建库写 prompt_templates → get_prompt 仍回退空串。
+        """
+        db = tmp_path / "late.sqlite"
+        _appdb.DB_PATH = db
+        _cache.reload_prompt_cache()
+        # 第一次访问：库文件不存在 → 回退注册表（探针 key 未注册 ⇒ 空串）
+        assert _cache.get_prompt(PROBE_KEY) == ""
+        # 库文件此刻才出现（等价于「服务先起、迁移脚本后建库」）
+        _seed_prompt(db, "FROM-LATE")
+        assert _cache.get_prompt(PROBE_KEY) == "FROM-LATE"
+
 
 class TestPromptGovernance:
     async def test_update_and_reset_write_hash_only_audit(self, db_conn):
@@ -92,19 +108,20 @@ class TestPromptGovernance:
 
         key = "outline_short_system"
         default = get_default_prompt(key)
-        before_vars = set(__import__(
-            "app.services.ai.prompts._registry", fromlist=["extract_variables"]
-        ).extract_variables(default))
+        before_vars = set(
+            __import__("app.services.ai.prompts._registry", fromlist=["extract_variables"]).extract_variables(default)
+        )
         changed = default + "\n新增要求：{custom_rule}"
         try:
-            res = await app_main.update_prompt(
-                key, {"content": changed}, db=db_conn)
+            res = await app_main.update_prompt(key, {"content": changed}, db=db_conn)
             assert res["ok"] is True
             assert set(res["added_variables"]) == {"custom_rule"}
 
             cur = await db_conn.execute(
                 "SELECT action,before_hash,after_hash,variables_before,variables_after"
-                " FROM prompt_audit_logs WHERE prompt_key=? ORDER BY rowid DESC", (key,))
+                " FROM prompt_audit_logs WHERE prompt_key=? ORDER BY rowid DESC",
+                (key,),
+            )
             row = await cur.fetchone()
             assert row["action"] == "update"
             assert row["after_hash"] == res["content_hash"]
@@ -122,8 +139,9 @@ class TestPromptGovernance:
             reset = await app_main.reset_prompt(key, db=db_conn)
             assert reset["ok"] is True
             cur = await db_conn.execute(
-                "SELECT action,after_hash FROM prompt_audit_logs"
-                " WHERE prompt_key=? ORDER BY rowid DESC LIMIT 1", (key,))
+                "SELECT action,after_hash FROM prompt_audit_logs" " WHERE prompt_key=? ORDER BY rowid DESC LIMIT 1",
+                (key,),
+            )
             row = await cur.fetchone()
             assert row["action"] == "reset"
             assert row["after_hash"] == reset["content_hash"]
@@ -132,6 +150,7 @@ class TestPromptGovernance:
         finally:
             from app.services.ai.prompts._cache import reload_prompt_cache
             from app.services.ai.prompts._registry import reset_prompt
+
             reset_prompt(key)
             reload_prompt_cache()
 
@@ -143,9 +162,7 @@ class TestPromptGovernance:
             await app_main.update_prompt("outline_short_system", {"content": 123}, db=db_conn)
         assert ei.value.status_code == 400
         with pytest.raises(HTTPException) as ei:
-            await app_main.update_prompt(
-                "outline_short_system", {"content": "测" * 200001}, db=db_conn)
+            await app_main.update_prompt("outline_short_system", {"content": "测" * 200001}, db=db_conn)
         assert ei.value.status_code == 400
         cur = await db_conn.execute("SELECT COUNT(*) FROM prompt_audit_logs")
         assert (await cur.fetchone())[0] == 0
-
