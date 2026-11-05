@@ -1,9 +1,10 @@
-﻿"""export_cache 并发原子性回归测试。
+"""export_cache 并发原子性回归测试。
 
 查询与唯一约束必须使用同一三元组：
 (scheme_id, config_hash, content_fingerprint)。同一内容使用不同排版配置时，
 两种配置都应保留并可分别命中缓存；完全相同的三元组并发写入只保留一行。
 """
+
 import uuid
 
 import app.db as _appdb
@@ -19,9 +20,7 @@ async def ctx(tmp_path):
     pid = uuid.uuid4().hex
     sid = uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-        (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     try:
         yield db, sid
     finally:
@@ -33,7 +32,8 @@ async def _insert_cache(db, sid, config_hash, fp, path):
         "INSERT OR IGNORE INTO export_cache "
         "(id, project_id, scheme_id, config_hash, content_fingerprint, cache_key, result_path) "
         "VALUES (?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, "", sid, config_hash, fp, f"{sid}_{config_hash}", path))
+        (uuid.uuid4().hex, "", sid, config_hash, fp, f"{sid}_{config_hash}", path),
+    )
 
 
 async def test_same_triple_is_idempotent_but_configs_are_kept(ctx):
@@ -47,7 +47,9 @@ async def test_same_triple_is_idempotent_but_configs_are_kept(ctx):
 
     cur = await db.execute(
         "SELECT config_hash, COUNT(*) AS n FROM export_cache "
-        "WHERE scheme_id=? AND content_fingerprint=? GROUP BY config_hash", (sid, fp))
+        "WHERE scheme_id=? AND content_fingerprint=? GROUP BY config_hash",
+        (sid, fp),
+    )
     assert {r["config_hash"]: r["n"] for r in await cur.fetchall()} == {"cfg1": 1, "cfg2": 1}
 
 

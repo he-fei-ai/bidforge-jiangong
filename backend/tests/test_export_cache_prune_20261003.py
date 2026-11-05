@@ -7,6 +7,7 @@ EXPORTS_DIR 磁盘文件随 PDF 导出次数无限增长。
 修法：把 DOCX 内联裁剪逻辑逐字提取为 `_prune_export_cache` 共享 helper，
 DOCX（行为零变化）与 PDF（补齐同一策略）共同调用，跨格式合计最多 5 份/方案。
 """
+
 import ast
 import uuid
 from pathlib import Path
@@ -20,6 +21,18 @@ EXPORT_PY = Path(export_mod.__file__)
 KEEP = 5  # 保留策略：最多 5 份/方案（与前端 tooltip 说明对齐）
 
 
+def _write_docx(path):
+    """写一份**真实合法** DOCX 作 fixture。
+
+    ✅ R175 · BUG-3：`_cache_row_viable` 已升级为 ZIP 完整性校验，
+    旧的 `write_bytes(b"x")` 伪产物会被正确判为「损坏」而全部裁掉，
+    使这些用例的语义（保留/裁掉）失真。
+    """
+    from docx import Document
+
+    Document().save(str(path))
+
+
 @pytest.fixture
 async def ctx(tmp_path):
     _appdb.DB_PATH = tmp_path / "export_prune.sqlite"
@@ -28,9 +41,7 @@ async def ctx(tmp_path):
     pid = uuid.uuid4().hex
     sid = uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-        (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     try:
         yield db, sid, tmp_path
     finally:
@@ -43,13 +54,12 @@ async def _insert_cache(db, sid, path, created_at):
         "INSERT INTO export_cache "
         "(id, project_id, scheme_id, config_hash, content_fingerprint, cache_key, "
         " result_path, created_at) VALUES (?,?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, "", sid, "cfg", f"fp-{uuid.uuid4().hex[:8]}",
-         f"{sid}_cfg", str(path), created_at))
+        (uuid.uuid4().hex, "", sid, "cfg", f"fp-{uuid.uuid4().hex[:8]}", f"{sid}_cfg", str(path), created_at),
+    )
 
 
 async def _row_count(db, sid):
-    cur = await db.execute("SELECT COUNT(*) AS n FROM export_cache WHERE scheme_id=?",
-                           (sid,))
+    cur = await db.execute("SELECT COUNT(*) AS n FROM export_cache WHERE scheme_id=?", (sid,))
     return dict(await cur.fetchone())["n"]
 
 
@@ -59,7 +69,7 @@ async def test_prune_keeps_five_newest_and_deletes_stale_files(ctx):
     files = []
     for i in range(7):
         f = tmp_path / f"old_{i}.docx"
-        f.write_bytes(b"x")
+        _write_docx(f)
         files.append(f)
         await _insert_cache(db, sid, f, f"2026-10-01 10:00:{i:02d}")
     await db.commit()
@@ -84,7 +94,7 @@ async def test_prune_zombie_rows_pruned_even_within_top5(ctx):
     real = []
     for i in range(3):
         f = tmp_path / f"real_{i}.docx"
-        f.write_bytes(b"x")
+        _write_docx(f)
         real.append(f)
         await _insert_cache(db, sid, f, f"2026-10-01 10:0{i}:00")
     ghosts = [tmp_path / f"ghost_{i}.docx" for i in range(3)]
@@ -104,7 +114,7 @@ async def test_prune_protected_file_not_deleted_even_if_row_stale(ctx):
     db, sid, tmp_path = ctx
     for i in range(7):
         f = tmp_path / f"old_{i}.docx"
-        f.write_bytes(b"x")
+        _write_docx(f)
         await _insert_cache(db, sid, f, f"2026-10-01 10:00:{i:02d}")
     protect = tmp_path / "current.pdf"
     protect.write_bytes(b"new")
@@ -150,13 +160,16 @@ def test_both_branches_call_shared_prune(route):
 
     ✅ 2026-10-14 收口后：裁剪下沉到 _persist_export_cache_row，路由只调 helper。
     """
-    route_calls = [n.func.id for n in ast.walk(_route_fn(route))
-                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
-    assert "_persist_export_cache_row" in route_calls, (
-        f"{route} 未接入统一写存 helper _persist_export_cache_row")
+    route_calls = [
+        n.func.id for n in ast.walk(_route_fn(route)) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    ]
+    assert "_persist_export_cache_row" in route_calls, f"{route} 未接入统一写存 helper _persist_export_cache_row"
     # helper 内部必须含裁剪（防未来有人把 prune 从写存里摘掉）
-    helper_calls = [n.func.id for n in ast.walk(_route_fn("_persist_export_cache_row"))
-                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    helper_calls = [
+        n.func.id
+        for n in ast.walk(_route_fn("_persist_export_cache_row"))
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    ]
     assert "_prune_export_cache" in helper_calls, "写存 helper 未接入共享裁剪"
 
 
@@ -199,8 +212,12 @@ def _stmt_line_of_insert(top):
     """
     focus = None
     for c in ast.walk(top):
-        if (isinstance(c, ast.Constant) and isinstance(c.value, str)
-                and "INSERT" in c.value and "export_cache" in c.value):
+        if (
+            isinstance(c, ast.Constant)
+            and isinstance(c.value, str)
+            and "INSERT" in c.value
+            and "export_cache" in c.value
+        ):
             focus = c
             break
     if focus is None:
@@ -221,7 +238,7 @@ def _stmt_line_of_insert(top):
             dfs(child, path_stmt)
 
     dfs(top, [])
-    return (best.lineno if best is not None else top.lineno)
+    return best.lineno if best is not None else top.lineno
 
 
 def _write_points_and_trace(fn):
@@ -234,14 +251,11 @@ def _write_points_and_trace(fn):
     """
     writes, trace = [], []
     for st in fn.body:
-        seg = " ".join(
-            str(c.value) for c in ast.walk(st)
-            if isinstance(c, ast.Constant) and isinstance(c.value, str))
+        seg = " ".join(str(c.value) for c in ast.walk(st) if isinstance(c, ast.Constant) and isinstance(c.value, str))
         if "INSERT" in seg and "export_cache" in seg:
             writes.append(_stmt_line_of_insert(st) or st.lineno)
         for n in ast.walk(st):
-            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                    and n.func.id == _TRACE):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == _TRACE:
                 trace.append(n.lineno)
     return writes, trace
 
@@ -262,32 +276,42 @@ def test_cache_writes_committed_before_review_trace(route):
     persist = _route_fn("_persist_export_cache_row")
     writes, _ = _write_points_and_trace(persist)
     assert writes, "写存 helper 未找到 export_cache 写入语句（测试自身失效）"
-    commits = [n.lineno for n in ast.walk(persist)
-               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-               and isinstance(n.func.value, ast.Name)
-               and n.func.value.id == "db" and n.func.attr == "commit"]
+    commits = [
+        n.lineno
+        for n in ast.walk(persist)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == "db"
+        and n.func.attr == "commit"
+    ]
     for w in writes:
         after = [c for c in commits if c > w]
         assert after, (
             f"写存 helper: 写入(L{w}) 之后没有显式 await db.commit() → "
-            "写入只靠后续副作用落盘；异常回滚会丢缓存行，缓存永不落盘")
+            "写入只靠后续副作用落盘；异常回滚会丢缓存行，缓存永不落盘"
+        )
     # 路由内：写存必须先于留痕收尾
     fn = _route_fn(route)
-    persist_calls = [n.lineno for n in ast.walk(fn)
-                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                     and n.func.id == "_persist_export_cache_row"]
-    finalize_calls = [n.lineno for n in ast.walk(fn)
-                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                      and n.func.id == "_finalize_export_delivery"]
-    assert persist_calls and finalize_calls, (
-        f"{route}: 缺写存/留痕收尾 helper 调用（测试自身失效）")
+    persist_calls = [
+        n.lineno
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_persist_export_cache_row"
+    ]
+    finalize_calls = [
+        n.lineno
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_finalize_export_delivery"
+    ]
+    assert persist_calls and finalize_calls, f"{route}: 缺写存/留痕收尾 helper 调用（测试自身失效）"
     # 每个写存调用之后必须有留痕收尾调用（degraded 路径无写存、只有收尾，
     # 合法地早于任何 persist —— 故只校验 persist 之后的 finalize）
     for pc in persist_calls:
         after_fin = [c for c in finalize_calls if c > pc]
         assert after_fin, (
             f"{route}: 写存(L{pc}) 之后没有留痕收尾调用 → "
-            "写存落盘前就留痕，取消/断连发生在写存期会把未落盘行当成功留痕")
+            "写存落盘前就留痕，取消/断连发生在写存期会把未落盘行当成功留痕"
+        )
 
 
 def test_pdf_prune_delete_also_committed():
@@ -296,21 +320,29 @@ def test_pdf_prune_delete_also_committed():
     ✅ 2026-10-14 收口后：prune 与其后的 commit 均在 _persist_export_cache_row 内。
     """
     persist = _route_fn("_persist_export_cache_row")
-    prune = [n.lineno for n in ast.walk(persist)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-             and n.func.id == "_prune_export_cache"]
+    prune = [
+        n.lineno
+        for n in ast.walk(persist)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_prune_export_cache"
+    ]
     assert prune, "写存 helper 未接入共享裁剪（测试自身失效）"
-    commits = [n.lineno for n in ast.walk(persist)
-               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-               and isinstance(n.func.value, ast.Name)
-               and n.func.value.id == "db" and n.func.attr == "commit"]
+    commits = [
+        n.lineno
+        for n in ast.walk(persist)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == "db"
+        and n.func.attr == "commit"
+    ]
     after_prune = [c for c in commits if c > prune[0]]
     assert after_prune, (
         "写存 helper: prune(L%d) 之后没有 commit → 裁剪 DELETE 属未提交写入，"
         "异常回滚时「最多 5 份」保留策略被静默跳过，export_cache 行数与磁盘文件"
-        "会随导出次数无限增长" % prune[0])
+        "会随导出次数无限增长" % prune[0]
+    )
     # export_pdf 必须经此 helper（与 DOCX 同口径）
-    pdf_calls = [n.func.id for n in ast.walk(_route_fn("export_pdf"))
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    pdf_calls = [
+        n.func.id for n in ast.walk(_route_fn("export_pdf")) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    ]
     assert "_persist_export_cache_row" in pdf_calls, "export_pdf 未接入统一写存 helper"
-

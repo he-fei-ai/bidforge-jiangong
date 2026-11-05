@@ -65,12 +65,16 @@ const apiMock = vi.hoisted(() => {
         if (prop === "then") return undefined;
         return makeCallable([prop]);
       },
-      has(_t, prop: any) { return typeof prop === "string"; },
+      has(_t, prop: any) {
+        return typeof prop === "string";
+      },
       getOwnPropertyDescriptor(_t, prop: any) {
         if (typeof prop !== "string") return undefined;
         return { configurable: true, enumerable: true, value: makeCallable([prop]) };
       },
-      ownKeys() { return []; },
+      ownKeys() {
+        return [];
+      },
     });
   }
 
@@ -83,27 +87,47 @@ const apiDefaults = apiMock.defaults;
 
 vi.mock("../hooks/useSchemeLiveTask", () => ({
   useSchemeLiveTask: () => ({
-    id: null, status: "idle", progress: 0, message: "", task_type: "",
-    control: vi.fn(), refresh: vi.fn(), stop: vi.fn(),
+    id: null,
+    status: "idle",
+    progress: 0,
+    message: "",
+    task_type: "",
+    control: vi.fn(),
+    refresh: vi.fn(),
+    stop: vi.fn(),
   }),
 }));
 
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {},
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
     dispatchEvent: () => false,
   });
 }
 if (!(globalThis as any).ResizeObserver) {
   (globalThis as any).ResizeObserver = class {
-    observe() {} unobserve() {} disconnect() {}
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   };
 }
 
 const TREE = [
-  { id: "sec-1", title: "工程概况", level: 1, status: "empty", word_count: 0, word_budget: 1500, children: [] },
+  {
+    id: "sec-1",
+    title: "工程概况",
+    level: 1,
+    status: "empty",
+    word_count: 0,
+    word_budget: 1500,
+    children: [],
+  },
 ];
 
 function setupDefaults() {
@@ -140,7 +164,7 @@ function renderPage() {
           <Route path="/scheme/:id" element={<SchemeWorkbenchPage />} />
         </Routes>
       </MemoryRouter>
-    </AntdApp>
+    </AntdApp>,
   );
 }
 
@@ -154,8 +178,9 @@ async function gotoExportTab() {
 }
 
 function buttonByText(text: string): HTMLButtonElement | undefined {
-  return Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
-    .find((b) => (b.textContent || "").includes(text));
+  return Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((b) =>
+    (b.textContent || "").includes(text),
+  );
 }
 
 /** antd Switch 在 jsdom 下渲染成 button[role="switch"]，用 label 文案定位 */
@@ -210,8 +235,10 @@ describe("导出文档 Tab · 配置项贯通导出请求体", () => {
     fireEvent.click(buttonByText("导出 DOCX")!);
     const cfg = await lastDocxConfig();
     expect(cfg.scheme_forms).toEqual({
-      compilation_note: false, approval: false,
-      expert_review: false, drawing_appendix: false,
+      compilation_note: false,
+      approval: false,
+      expert_review: false,
+      drawing_appendix: false,
     });
     expect(cfg.chart_fail_placeholder).toBe(false);
     expect(cfg.auto_rewrite_content).toBe(false);

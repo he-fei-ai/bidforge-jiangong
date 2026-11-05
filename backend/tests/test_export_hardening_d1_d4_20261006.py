@@ -10,6 +10,7 @@ parity 文件锁两侧一致，本文件锁「默认配置下预检必须沉默�
 设计原则（承前轮）：每条断言都指向**真实风险**，
 且对"实现细节写错"与"意图写错"分别可判别。
 """
+
 import ast
 import inspect
 import io
@@ -19,8 +20,7 @@ import re
 import pytest
 from app.routers import export as E
 
-REPO_BACKEND = os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(E.__file__))))
+REPO_BACKEND = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(E.__file__))))
 REPO_ROOT = os.path.dirname(REPO_BACKEND)
 EXPORT_PY = os.path.join(REPO_BACKEND, "app", "routers", "export.py")
 
@@ -28,19 +28,56 @@ EXPORT_PY = os.path.join(REPO_BACKEND, "app", "routers", "export.py")
 def _export_sources() -> str:
     """拆分兼容：聚合读取 export.py 与其子模块（_export_*.py）。"""
     import glob
+
     base = os.path.dirname(EXPORT_PY)
     segs = [io.open(EXPORT_PY, encoding="utf-8").read()]
-    segs += [io.open(p, encoding="utf-8").read()
-             for p in sorted(glob.glob(os.path.join(base, "_export_*.py")))]
+    segs += [io.open(p, encoding="utf-8").read() for p in sorted(glob.glob(os.path.join(base, "_export_*.py")))]
     return "\n".join(segs)
 
-FRONT_EXPORT_RESPONSE = os.path.join(
-    REPO_ROOT, "frontend", "src", "utils", "exportResponse.ts")
+
+FRONT_EXPORT_RESPONSE = os.path.join(REPO_ROOT, "frontend", "src", "utils", "exportResponse.ts")
+
+FRONT_PAGES_DIR = os.path.join(REPO_ROOT, "frontend", "src", "pages")
+FRONT_WB_FACADE = os.path.join(FRONT_PAGES_DIR, "SchemeWorkbenchPage.tsx")
+# R176（2026-11-04）：SchemeWorkbenchPage 正按批拆分（8644 → 3959 行，仍在继续），
+# 导出主链已下沉到 schemeWorkbench/useExportRun.ts，外层还有 tabs/ 等子目录 ——
+# 固定路径读取或非递归 glob 会在下一次下沉时静默失锚（断言变绿/变红都失去意义）。
+FRONT_WB_SPLIT_DIR = os.path.join(FRONT_PAGES_DIR, "schemeWorkbench")
+FRONT_EXPORT_RUN = os.path.join(FRONT_WB_SPLIT_DIR, "useExportRun.ts")
+
+
+def _workbench_split_files() -> list:
+    """schemeWorkbench/ **递归**（含 tabs/ 子目录）下的全部 ts/tsx。"""
+    import glob as _glob
+
+    files = []
+    for pat in ("*.ts", "*.tsx"):
+        files += sorted(_glob.glob(os.path.join(FRONT_WB_SPLIT_DIR, "**", pat), recursive=True))
+    assert files, f"拆分目录未被递归扫描到（{FRONT_WB_SPLIT_DIR}）"
+    return files
+
+
+def _workbench_page() -> str:
+    """facade 页面 + schemeWorkbench/ 递归聚合源码（拆分后等价读取范围）。"""
+    assert os.path.exists(FRONT_WB_FACADE), f"页面 facade 缺失：{FRONT_WB_FACADE}"
+    files = [FRONT_WB_FACADE] + _workbench_split_files()
+    assert len(files) > 1, "schemeWorkbench/ 未贡献任何源码（聚合退化为 facade 单文件，" "拆分后必然漏检）"
+    return "\n".join(io.open(p, encoding="utf-8").read() for p in files)
+
+
+def _export_run_body() -> str:
+    """`handleExport` 函数体 —— 导出主链的新位置是 schemeWorkbench/useExportRun.ts。
+
+    右界取同一 hook 内的 `handleCancelExport`：两者若被再次拆散，这里立刻
+    IndexError 变红，而不是像整页跨文件切片那样静默退化成空串。
+    """
+    src = io.open(FRONT_EXPORT_RUN, encoding="utf-8").read()
+    i = src.index("const handleExport = async")
+    return src[i : src.index("const handleCancelExport", i)]
 
 
 def _sec(sid, pid, level, order, title, content=""):
-    return {"id": sid, "parent_id": pid, "level": level,
-            "sort_order": order, "title": title, "content": content}
+    return {"id": sid, "parent_id": pid, "level": level, "sort_order": order, "title": title, "content": content}
 
 
 # 三章均含 [CHART_TYPE: labor]；只有 secC 有登记 → secA/secB 走兜底借用
@@ -57,6 +94,7 @@ def _png_bytes():
     from io import BytesIO
 
     from PIL import Image
+
     bio = BytesIO()
     Image.new("RGB", (200, 100), (200, 30, 30)).save(bio, "PNG")
     return bio.getvalue()
@@ -64,27 +102,36 @@ def _png_bytes():
 
 def _render(tmp_path, sections, chart_lookup, rendered_bytes, name="d1.docx"):
     import io as _io
-    blocks = {s["id"]: E._parse_content_blocks(s.get("content") or "")
-              for s in sections}
+
+    blocks = {s["id"]: E._parse_content_blocks(s.get("content") or "") for s in sections}
     cm = {}
     for s in sections:
         cm.setdefault(s.get("parent_id") or "", []).append(s)
     ids = {s["id"] for s in sections}
     prep = {
         "scheme": {"name": "S", "project_id": "p"},
-        "roots": [s for s in sections
-                  if not s.get("parent_id") or s["parent_id"] not in ids],
-        "children_map": cm, "chart_lookup": chart_lookup,
-        "rendered_bytes": rendered_bytes, "blocks_cache": blocks,
-        "heading_styles": E._load_heading_styles({}), "image_bytes": {},
+        "roots": [s for s in sections if not s.get("parent_id") or s["parent_id"] not in ids],
+        "children_map": cm,
+        "chart_lookup": chart_lookup,
+        "rendered_bytes": rendered_bytes,
+        "blocks_cache": blocks,
+        "heading_styles": E._load_heading_styles({}),
+        "image_bytes": {},
         "global_facts": [],
-        "docx_options": {"font_name": "宋体", "font_size": 12.0,
-                         "page_header": "", "page_footer": "",
-                         "show_page_number": True, "show_title_page": False,
-                         "show_toc": False, "bidder_name": "",
-                         "page_break_before_chapter": True,
-                         "line_spacing": 1.15, "page_number_style": "simple",
-                         "toc_depth": 3},
+        "docx_options": {
+            "font_name": "宋体",
+            "font_size": 12.0,
+            "page_header": "",
+            "page_footer": "",
+            "show_page_number": True,
+            "show_title_page": False,
+            "show_toc": False,
+            "bidder_name": "",
+            "page_break_before_chapter": True,
+            "line_spacing": 1.15,
+            "page_number_style": "simple",
+            "toc_depth": 3,
+        },
     }
     out = str(tmp_path / name)
     stats = E._build_docx_sync(*E._build_docx_task(out, prep))
@@ -105,9 +152,11 @@ def _reset_fix_stats():
 class TestCrossSectionBorrowIsObservable:
     def test_fix_stats_reports_borrowed_count(self, tmp_path):
         _out, stats = _render(
-            tmp_path, THREE_CHAPTER_SAME_TYPE,
+            tmp_path,
+            THREE_CHAPTER_SAME_TYPE,
             {("secC", "labor"): CODE},
-            {("labor", CODE): __import__("io").BytesIO(_png_bytes())})
+            {("labor", CODE): __import__("io").BytesIO(_png_bytes())},
+        )
         n = int((stats or {}).get("chart_fallback_borrowed") or 0)
         assert n == 2, f"secA/secB 应各记一次借图，实际 {n}"
         details = (stats or {}).get("chart_fallback_borrowed_details") or []
@@ -118,10 +167,11 @@ class TestCrossSectionBorrowIsObservable:
     def test_self_registered_chapter_is_not_counted(self, tmp_path):
         """自有登记的章节不算借图（不得把正常图表误报成借图）。"""
         _out, stats = _render(
-            tmp_path, THREE_CHAPTER_SAME_TYPE,
-            {("secA", "labor"): CODE, ("secB", "labor"): CODE,
-             ("secC", "labor"): CODE},
-            {("labor", CODE): __import__("io").BytesIO(_png_bytes())})
+            tmp_path,
+            THREE_CHAPTER_SAME_TYPE,
+            {("secA", "labor"): CODE, ("secB", "labor"): CODE, ("secC", "labor"): CODE},
+            {("labor", CODE): __import__("io").BytesIO(_png_bytes())},
+        )
         assert int((stats or {}).get("chart_fallback_borrowed") or 0) == 0
 
     def test_no_chart_means_no_borrow(self, tmp_path):
@@ -139,20 +189,23 @@ class TestCrossSectionBorrowIsObservable:
         """
         docx_src = inspect.getsource(E.export_docx)
         pdf_src = inspect.getsource(E.export_pdf)
-        assert docx_src.count("_merge_borrowed_stats(render_stats, fix_stats)") >= 2, \
-            "DOCX 的每个回传渲染统计的分支（降级 + miss）都必须合流借图计数"
-        assert pdf_src.count("_merge_borrowed_stats(render_stats, fix_stats)") >= 1, \
-            "PDF 链路未合流借图计数"
+        assert (
+            docx_src.count("_merge_borrowed_stats(render_stats, fix_stats)") >= 2
+        ), "DOCX 的每个回传渲染统计的分支（降级 + miss）都必须合流借图计数"
+        assert pdf_src.count("_merge_borrowed_stats(render_stats, fix_stats)") >= 1, "PDF 链路未合流借图计数"
         # 三处合流点：DOCX 降级、DOCX miss、PDF
         whole = inspect.getsource(E)
         assert whole.count("_merge_borrowed_stats(render_stats, fix_stats)") == 3
 
     def test_merge_helper_shapes_the_payload(self):
         rs = {"fe": 1, "backend_ok": 2, "failed": 0}
-        out = E._merge_borrowed_stats(rs, {
-            "chart_fallback_borrowed": 3,
-            "chart_fallback_borrowed_details": [{"section_id": "a"}],
-        })
+        out = E._merge_borrowed_stats(
+            rs,
+            {
+                "chart_fallback_borrowed": 3,
+                "chart_fallback_borrowed_details": [{"section_id": "a"}],
+            },
+        )
         assert out["fallback_borrowed"] == 3
         assert out["fallback_borrowed_details"][0]["section_id"] == "a"
         assert out["fe"] == 1 and out["backend_ok"] == 2, "既有渲染统计键被改动"
@@ -163,11 +216,8 @@ class TestCrossSectionBorrowIsObservable:
     def test_fallback_choice_is_deterministic_by_document_order(self):
         """借图选择必须按**文档顺序**取最近的前一张，而非 DB 行插入顺序。"""
         # secC 登记了 codeL；secA/secB 都无登记 → 两者都应借 secC 的
-        index = E._build_chart_type_index(
-            {("secC", "labor"): CODE},
-            order_rank={"secA": 0, "secB": 1, "secC": 2})
-        code, src = E._find_fallback_code(index, "labor", "secA",
-                                          {"secA": 0, "secB": 1, "secC": 2})
+        index = E._build_chart_type_index({("secC", "labor"): CODE}, order_rank={"secA": 0, "secB": 1, "secC": 2})
+        code, src = E._find_fallback_code(index, "labor", "secA", {"secA": 0, "secB": 1, "secC": 2})
         assert (code, src) == (CODE, "secC")
 
     def test_fallback_prefers_nearest_preceding(self):
@@ -180,8 +230,7 @@ class TestCrossSectionBorrowIsObservable:
         other = "graph TD\n  C --> D\n"
         rank = {"s0": 0, "s1": 1, "s2": 2}
         # 故意让「全局第一张」属于 s0（顺序最靠前但离 s2 最远）
-        index = E._build_chart_type_index(
-            {("s0", "flowchart"): CODE, ("s1", "flowchart"): other}, rank)
+        index = E._build_chart_type_index({("s0", "flowchart"): CODE, ("s1", "flowchart"): other}, rank)
         code, src = E._find_fallback_code(index, "flowchart", "s2", rank)
         assert src == "s1", f"应借文档顺序上最近的前一张，实际 {src}"
         assert code == other
@@ -190,8 +239,7 @@ class TestCrossSectionBorrowIsObservable:
         """候选全在自己之后时取第一张（保持"有图总比没图好"的兜底语义）。"""
         other = "graph TD\n  C --> D\n"
         rank = {"s1": 0, "s2": 1}
-        index = E._build_chart_type_index(
-            {("s2", "flowchart"): other}, rank)
+        index = E._build_chart_type_index({("s2", "flowchart"): other}, rank)
         code, src = E._find_fallback_code(index, "flowchart", "s1", rank)
         assert (code, src) == (other, "s2")
 
@@ -233,10 +281,10 @@ class TestCrossSectionBorrowIsObservable:
         src = io.open(FRONT_EXPORT_RESPONSE, encoding="utf-8").read()
         assert "fallback_borrowed?:" in src, "前端 ChartRenderStats 缺 fallback_borrowed"
         assert "fallbackBorrowWarning" in src, "前端未提供借图告警文案"
-        page = io.open(os.path.join(
-            REPO_ROOT, "frontend", "src", "pages", "SchemeWorkbenchPage.tsx"),
-            encoding="utf-8").read()
-        assert "fallbackBorrowWarning(stats)" in page, "导出链路未消费借图告警"
+        # 导出主链随 G9 拆分下沉 —— 锚点指向新位置（handleExport 函数体），
+        # 而不是「任意文件里出现过」：告警必须在导出链路里真被消费。
+        body = _export_run_body()
+        assert "fallbackBorrowWarning(stats)" in body, "导出链路未消费借图告警"
 
 
 # =========================================================================
@@ -248,10 +296,8 @@ class TestImageInsertSingleImplementation:
         assert callable(E._write_chart_placeholder_line)
 
     def test_both_entries_delegate_to_core(self):
-        for fn in (E._add_inline_chart_from_bytes,
-                   E._add_illustration_from_bytes):
-            assert "_insert_image_with_caption(" in inspect.getsource(fn), \
-                f"{fn.__name__} 未下沉到唯一实现"
+        for fn in (E._add_inline_chart_from_bytes, E._add_illustration_from_bytes):
+            assert "_insert_image_with_caption(" in inspect.getsource(fn), f"{fn.__name__} 未下沉到唯一实现"
 
     def test_add_picture_appears_only_in_core(self):
         """⚠️ 防漂移核心断言：`doc.add_picture` 全文只允许出现在
@@ -265,30 +311,29 @@ class TestImageInsertSingleImplementation:
         tree = ast.parse(_export_sources())
         hits = []
         for node in ast.walk(tree):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "add_picture"):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_picture":
                 hits.append(node.lineno)
         assert len(hits) == 1, (
-            f"doc.add_picture 调用点 {len(hits)} 处（行 {hits}），"
-            "应唯一落在 _insert_image_with_caption 内")
+            f"doc.add_picture 调用点 {len(hits)} 处（行 {hits}），" "应唯一落在 _insert_image_with_caption 内"
+        )
 
     def test_add_picture_call_is_inside_core_function(self):
         """上一例的加强：确认唯一调用点确实位于核心实现体内。"""
         tree = ast.parse(_export_sources())
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-                    and node.name == "_insert_image_with_caption":
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_insert_image_with_caption":
                 for sub in ast.walk(node):
-                    if (isinstance(sub, ast.Call)
-                            and isinstance(sub.func, ast.Attribute)
-                            and sub.func.attr == "add_picture"):
+                    if (
+                        isinstance(sub, ast.Call)
+                        and isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr == "add_picture"
+                    ):
                         return
         pytest.fail("核心实现内未找到 add_picture 调用")
 
     def test_fit_image_appears_only_in_core(self):
         src = _export_sources()
-        hits = [i + 1 for i, ln in enumerate(src.split("\n"))
-                if "_fit_image_cm(" in ln]
+        hits = [i + 1 for i, ln in enumerate(src.split("\n")) if "_fit_image_cm(" in ln]
         # 1 处定义 + 1 处调用（定义行含 "def "）
         assert len(hits) == 2, f"_fit_image_cm 引用点异常：{hits}"
 
@@ -304,9 +349,10 @@ class TestImageInsertSingleImplementation:
             return orig(run, *a, **kw)
 
         monkeypatch.setattr(E, "_set_run_font", boom)
-        assert E._insert_image_with_caption(
-            d, __import__("io").BytesIO(_png_bytes()), "图 1-1 X",
-            log_label="probe") is False
+        assert (
+            E._insert_image_with_caption(d, __import__("io").BytesIO(_png_bytes()), "图 1-1 X", log_label="probe")
+            is False
+        )
         assert len(d.inline_shapes) == 0
 
     def test_chart_placeholder_text_unchanged(self):
@@ -319,8 +365,7 @@ class TestImageInsertSingleImplementation:
         from docx import Document
 
         d = Document()
-        ok = E._add_illustration_from_bytes(
-            d, __import__("io").BytesIO(b"not-an-image"), "1-1", "配图")
+        ok = E._add_illustration_from_bytes(d, __import__("io").BytesIO(b"not-an-image"), "1-1", "配图")
         assert ok is False
         assert not [p for p in d.paragraphs if "[" in (p.text or "")]
 
@@ -333,15 +378,16 @@ class TestDetectorFalsePositiveRegression:
 
     def test_default_config_detector_is_silent(self):
         tree = [
-            _sec("ch1", "", 1, 0, "第一章 工程概况",
-                 "## 项目概况\n甲。\n\n## 建筑概况\n乙。\n"),
+            _sec("ch1", "", 1, 0, "第一章 工程概况", "## 项目概况\n甲。\n\n## 建筑概况\n乙。\n"),
             _sec("a", "ch1", 2, 1, "工程规模", "## 规模描述\n丙。\n"),
             _sec("b", "ch1", 2, 2, "结构选型", ""),
             _sec("ch2", "", 1, 3, "第二章 施工计划", ""),
         ]
         from app.config import settings
-        assert settings.body_subheading_demote_with_children is True, (
-            "默认应为 True；若测试环境改了默认值，本用例的前提需复核")
+
+        assert (
+            settings.body_subheading_demote_with_children is True
+        ), "默认应为 True；若测试环境改了默认值，本用例的前提需复核"
         assert E._detect_duplicate_sections(tree) == []
 
     def test_detector_forwards_has_children(self):
@@ -359,8 +405,7 @@ class TestExportCancellationContract:
             src = inspect.getsource(fn)
             assert "_persist_export_cache_row" in src, "路由未接入统一写存 helper"
             # 缓存写入在构建完成之后（构建失败即无缓存行；取消发生在构建期则不写缓存）
-            assert src.index("_build_docx_sync") < src.index(
-                "_persist_export_cache_row")
+            assert src.index("_build_docx_sync") < src.index("_persist_export_cache_row")
 
     def test_tmp_file_cleanup_on_build_failure(self):
         """构建异常必须清理临时文件（取消/断连时进程被杀也留 tmp，属已知取舍；
@@ -371,9 +416,8 @@ class TestExportCancellationContract:
 
     @staticmethod
     def _page() -> str:
-        return io.open(os.path.join(
-            REPO_ROOT, "frontend", "src", "pages", "SchemeWorkbenchPage.tsx"),
-            encoding="utf-8").read()
+        """facade 页面 + schemeWorkbench/ 递归（含 tabs/）聚合源码。"""
+        return _workbench_page()
 
     def test_frontend_has_cancel_entry(self):
         """取消入口必须**真的调用 abort**。
@@ -386,9 +430,8 @@ class TestExportCancellationContract:
         page = self._page()
         assert "handleCancelExport" in page, "导出缺少取消入口"
         i = page.index("const handleCancelExport")
-        body = page[i:page.index("\n  };", i)]
-        assert "exportAbortRef.current?.abort()" in body, (
-            "handleCancelExport 未真正触发 abort（函数存在但空实现）")
+        body = page[i : page.index("\n  };", i)]
+        assert "exportAbortRef.current?.abort()" in body, "handleCancelExport 未真正触发 abort（函数存在但空实现）"
         assert "取消导出" in page, "取消按钮文案缺失"
 
     def test_frontend_has_progress_bar(self):
@@ -397,15 +440,21 @@ class TestExportCancellationContract:
         assert "<Progress" in page, "导出缺少进度条组件"
 
     def test_progress_resets_on_finish(self):
-        """finally 必须把阶段与进度归零（否则下次导出残留上一次的进度条）。"""
-        page = self._page()
-        seg = page[page.index("} finally {"):page.index("const handleExportCheck")]
-        assert 'setExportStage("idle")' in seg
-        assert "setExportPct(0)" in seg
+        """finally 必须把阶段与进度归零（否则下次导出残留上一次的进度条）。
+
+        R176 后导出主链迁到 schemeWorkbench/useExportRun.ts —— 原先按整页
+        文本从 `} finally {` 切到 `const handleExportCheck` 的跨文件切片，
+        在拆分后会取到 useExportCheck.ts 的 finally（甚至倒序空切片），
+        断言恒真/恒假都失去判别力。改为锚定 handleExport 函数体的 finally 段。
+        """
+        body = _export_run_body()
+        assert "} finally {" in body, "handleExport 缺少 finally 收尾"
+        tail = body[body.index("} finally {") :]
+        assert 'setExportStage("idle")' in tail, "导出结束未重置阶段"
+        assert "setExportPct(0)" in tail, "导出结束未重置进度"
 
     def test_stage_state_has_real_consumer(self):
         """`exportStage` 必须被真正读取（防"声明了 state 却没人用"的死状态债）。"""
         page = self._page()
-        assert re.search(r"EXPORT_STAGE_LABEL\[\s*exportStage\s*\]", page), \
-            "exportStage 未被消费"
+        assert re.search(r"EXPORT_STAGE_LABEL\[\s*exportStage\s*\]", page), "exportStage 未被消费"
         assert re.search(r"EXPORT_STAGE_ORDER\[\s*exportStage\s*\]", page)

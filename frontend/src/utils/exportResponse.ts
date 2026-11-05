@@ -50,6 +50,21 @@ export interface ChartRenderStats {
     chart_type: string;
     borrowed_from: string;
   }>;
+  /**
+   * ✅ D-23（R176 · 2026-11-04）：甘特图超过单图上限（30 项任务）被截断的
+   * 任务总数。旧实现只在后端日志留 WARNING —— 用户看到「完整」的横道图，
+   * 却不知道成稿里少了若干任务。0/缺省时不展示。
+   */
+  gantt_truncated?: number;
+  /**
+   * ✅ R179（G-06）：**无本地渲染兜底**的类型（mindmap/sequence/class/state/er/journey
+   * 等只能走 Mermaid HTTP Service）渲染失败的张数。旧实现只累加 `failed`，用户
+   * 无法区分「图表语法坏了」与「本机 PIL 根本不会画」，会被泛化提示误导去开启
+   * 「允许 PIL 兜底」（对这些类型无效）。0/缺省时不展示。
+   */
+  no_pil_fallback?: number;
+  /** 上述失败涉及的类型明细（后端去重后给出，最多展示前几个）。 */
+  no_pil_fallback_types?: string[];
 }
 
 /** 解析 X-Chart-Render-Stats；头缺失或 JSON 非法返回 null。 */
@@ -86,6 +101,36 @@ export function fallbackBorrowWarning(stats: ChartRenderStats): string | null {
   const n = Number(stats?.fallback_borrowed || 0);
   if (!Number.isFinite(n) || n <= 0) return null;
   return `${n} 张图表使用了跨章借用（该章节没有自己的图表登记，借用了同类图），成稿图文可能与章节内容不符，请回查对应章节`;
+}
+
+/**
+ * 甘特图截断告警文案（D-23）。返回 null 表示无需提示。
+ *
+ * 后端单张甘特图最多渲染 30 项任务（`_GANTT_MAX_TASKS`），超出部分不画。
+ * 与 `chartRenderStatsParts` 的 info 分层：这里属于「成稿内容不完整」，
+ * 走 warning 并告诉用户可执行动作（拆分/精简任务列表后重新导出）。
+ */
+export function ganttTruncatedWarning(stats: ChartRenderStats): string | null {
+  const n = Number(stats?.gantt_truncated || 0);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return `甘特图任务超出单图上限（每图最多 30 项），成稿中共有 ${n} 项任务未绘制；请精简任务列表或拆分为多张甘特图后重新导出`;
+}
+
+/**
+ * 无本地渲染兜底告警文案（R179 · G-06）。返回 null 表示无需提示。
+ *
+ * 这些图表类型（mindmap/sequence/class/state/er/journey）PIL 本地渲染器不支持，
+ * 只能依赖 Mermaid HTTP Service。失败时「开启允许 PIL 兜底」没有意义，必须
+ * 明确告知用户去检查图表服务，避免给无效操作建议。
+ */
+export function noPilFallbackWarning(stats: ChartRenderStats): string | null {
+  const n = Number(stats?.no_pil_fallback || 0);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const types = Array.isArray(stats?.no_pil_fallback_types)
+    ? stats.no_pil_fallback_types.filter((t): t is string => typeof t === "string").slice(0, 5)
+    : [];
+  const detail = types.length ? `（${types.join("、")}）` : "";
+  return `${n} 张图表依赖 Mermaid HTTP 渲染服务失败${detail}，这些类型没有本地渲染兜底，开启「允许 PIL 兜底」也无法补救；请确认图表服务可用后重试`;
 }
 
 export interface FixStats {
@@ -133,4 +178,224 @@ export function fixStatsParts(fs: FixStats): string[] {
   }
   if (fs.table_truncated) parts.push(`超宽/超长表格截断 ${fs.table_truncated} 处`);
   return parts;
+}
+
+// =========================================================================
+// ✅ R175 BUG-7（2026-11-03）：导出失败错误体解析 + 降级信号识别
+//
+// 审计 R175《导出文档模块审计》BUG-7：导出走 `responseType:"blob"`，后端
+// 4xx/5xx 的真实原因在 `err.response.data`（Blob）里，`handleExport` 的
+// catch 只看 `err.message` → 用户只看到「Request failed with status code N」
+// （如 409 编号不一致、500 渲染异常的真实文案被吞）。另有后端新增的
+// `X-Export-Degraded: empty-sections` 信号前端**完全未读取**，成稿缺章
+// 对用户零提示。
+//
+// 说明：`api/index.ts` 的响应拦截器已有一层 Blob 解包（R14/R104 修复），
+// 本层是**导出链路的防御性兜底**：拦截器被绕过（自定义实例/非 JSON 体）
+// 或解析失败时仍能取回真实 detail；同时补齐降级头识别。
+// =========================================================================
+
+/** 后端降级信号（`X-Export-Degraded`，逗号分隔；未知信号也保留给用户提示）。 */
+export interface ExportDegradedInfo {
+  /** 原始信号列表（小写，去空） */
+  signals: string[];
+  /** 面向用户的中文提示；无法翻译的信号退化为通用降级文案 */
+  message: string;
+}
+
+/** 已知降级信号 → 中文提示（未知信号走通用文案，不静默）。 */
+const EXPORT_DEGRADED_TEXT: Record<string, string> = {
+  "empty-sections": "部分章节为空，导出内容可能不完整（后端已降级导出，本次不写入缓存）",
+  // ✅ B1-2（R176 · 2026-11-04）：全局事实读取失败导致的降级（本次不写缓存）
+  "global-facts-query-failed":
+    "全局事实读取失败，成稿可能缺少「项目关键事实」（后端已降级导出，本次不写入缓存），建议稍后重新导出",
+  // ✅ R179（2026-11-05）：导出出口闸门检测到终稿仍有无法自动消除的格式残留
+  "content-residue":
+    "成稿仍存在无法自动消除的格式残留（后端已降级导出，本次不写入缓存），请检查后重新导出",
+};
+
+/**
+ * 解析 `X-Export-Degraded`。头缺失/空值返回 null（旧行为零提示不变）；
+ * 命中的信号至少产出一条中文提示，未知信号也保留并给出通用降级文案。
+ */
+export function parseExportDegraded(headers: unknown): ExportDegradedInfo | null {
+  const raw = headerValue(headers, "x-export-degraded");
+  if (!raw) return null;
+  const signals = raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (!signals.length) return null;
+  const texts = signals.map((s) => EXPORT_DEGRADED_TEXT[s]).filter((t): t is string => Boolean(t));
+  // 已知信号给出精确文案；未知信号也必须可见（不得因「不认识」而静默吞掉）
+  const unknown = signals.filter((s) => !EXPORT_DEGRADED_TEXT[s]);
+  const parts = [...texts];
+  if (unknown.length) {
+    parts.push(
+      texts.length
+        ? `导出已降级（其他信号：${unknown.join(" / ")}）`
+        : `导出已降级（${unknown.join(" / ")}），成稿内容可能不完整`,
+    );
+  }
+  return { signals, message: parts.join("；") };
+}
+
+/** 全局事实读取状态（`X-Global-Facts-Status` 回传的百分号编码 JSON）。 */
+export interface GlobalFactsStatus {
+  ok: boolean;
+  code: string;
+  count?: number;
+}
+
+/**
+ * ✅ B1-2（R176 · 2026-11-04）：解析 `X-Global-Facts-Status`。
+ *
+ * 后端在 `_query_global_facts()` 异常时降级为「空事实」并把状态写进该响应头
+ * （`export.py:_global_facts_status_headers`），但 R176 审计发现前端全仓零消费 ——
+ * 用户拿到缺少「项目关键事实」的成稿却没有任何提示。头缺失/解码失败/JSON 非法
+ * 返回 null（旧行为零提示不变，绝不阻断下载）。
+ */
+export function parseGlobalFactsStatus(headers: unknown): GlobalFactsStatus | null {
+  const raw = headerValue(headers, "x-global-facts-status");
+  if (!raw) return null;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decoded);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const obj = parsed as Record<string, unknown>;
+  if (typeof obj.code !== "string" || !obj.code) return null;
+  return {
+    ok: obj.ok === true,
+    code: obj.code,
+    count: typeof obj.count === "number" ? obj.count : undefined,
+  };
+}
+
+/** 全局事实状态 → 用户可读告警；读取正常（ok）返回 null。 */
+export function globalFactsStatusWarning(status: GlobalFactsStatus | null): string | null {
+  if (!status || status.ok) return null;
+  if (status.code === "query_failed") {
+    return "全局事实读取失败（数据库连接异常），成稿可能缺少「项目关键事实」，建议稍后重新导出";
+  }
+  return `全局事实状态异常（${status.code}），成稿可能缺少「项目关键事实」`;
+}
+
+/** 导出失败解析结果。 */
+export interface ExportErrorResolution {
+  /** 用户/组件主动取消（AbortError / ERR_CANCELED）：调用方不得弹错误提示 */
+  canceled: boolean;
+  /** 展示文案；canceled 时保留原始消息（调用方不使用） */
+  message: string;
+  /** true 表示后端未给出可读错误体，message 为泛化兜底文案 */
+  generic: boolean;
+}
+
+/** 无错误体时的泛化兜底文案（与旧 catch 的 `|| "导出失败"` 口径一致）。 */
+const GENERIC_EXPORT_FAILURE = "导出失败";
+/** axios 默认状态文案：没有真实 detail 时不能直接展示给用户。 */
+const AXIOS_STATUS_ONLY_MESSAGE = /^Request failed with status code \d+$/;
+
+/** 从对象体取非空字符串字段（detail / message）。 */
+function stringField(obj: unknown, key: string): string | undefined {
+  if (typeof obj !== "object" || obj === null) return undefined;
+  const v = (obj as Record<string, unknown>)[key];
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
+/**
+ * Blob 错误体 → 可读文案：先读文本再按 JSON 解析 `detail`/`message`。
+ * 非 JSON 体（二进制残片 / HTML 错误页）不返回文本，避免把乱码抛给用户。
+ */
+async function blobErrorDetail(data: unknown): Promise<string | undefined> {
+  if (typeof Blob === "undefined" || !(data instanceof Blob)) return undefined;
+  try {
+    const text = (await data.text()).trim();
+    if (!text.startsWith("{") && !text.startsWith("[")) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return undefined;
+    }
+    return stringField(parsed, "detail") ?? stringField(parsed, "message");
+  } catch {
+    return undefined;
+  }
+}
+
+/** 非 Blob 错误体 → 可读文案（字符串体仅在不像 HTML 时采用）。 */
+function bodyErrorDetail(data: unknown): string | undefined {
+  if (typeof data === "string") {
+    const t = data.trim();
+    return t && !t.startsWith("<") ? t : undefined;
+  }
+  return stringField(data, "detail") ?? stringField(data, "message");
+}
+
+/**
+ * ✅ R175 BUG-7：把导出 catch 里的任意错误解析为可展示文案。
+ *
+ * 优先顺序：响应体（Blob→文本→JSON / 对象 detail|message / 纯文本）
+ *   → 拦截器已解析的 `err.message`（排除 axios 裸状态码）
+ *   → 泛化兜底「导出失败（HTTP N），后端未返回可读错误信息」。
+ *
+ * 取消（AbortError / ERR_CANCELED）与**无响应**的网络错误/超时保留原始消息，
+ * 不新增误报（超时文案仍是 axios 的 timeout 提示）。
+ */
+export async function resolveExportError(e: unknown): Promise<ExportErrorResolution> {
+  const err = (typeof e === "object" && e !== null ? e : {}) as {
+    name?: unknown;
+    code?: unknown;
+    message?: unknown;
+    response?: { status?: unknown; data?: unknown };
+  };
+  const name = typeof err.name === "string" ? err.name : "";
+  const code = typeof err.code === "string" ? err.code : "";
+  const rawMessage = typeof err.message === "string" ? err.message.trim() : "";
+
+  if (name === "AbortError" || code === "ERR_CANCELED") {
+    return {
+      canceled: true,
+      message: rawMessage || "已取消导出",
+      generic: false,
+    };
+  }
+
+  const response = err.response;
+  const hasResponse = typeof response === "object" && response !== null;
+  const fromBody = hasResponse
+    ? ((await blobErrorDetail(response?.data)) ?? bodyErrorDetail(response?.data))
+    : undefined;
+  if (fromBody) return { canceled: false, message: fromBody, generic: false };
+
+  // 无响应 = 网络错误 / 超时：保留原始文案（timeout / Network Error），不误报
+  if (!hasResponse) {
+    return {
+      canceled: false,
+      message: rawMessage || GENERIC_EXPORT_FAILURE,
+      generic: !rawMessage,
+    };
+  }
+
+  // 有响应但无可读体：拦截器已翻译过的中文 detail 优先；裸状态码/空 → 泛化
+  if (rawMessage && !AXIOS_STATUS_ONLY_MESSAGE.test(rawMessage)) {
+    return { canceled: false, message: rawMessage, generic: false };
+  }
+  const status = typeof response?.status === "number" ? response.status : undefined;
+  return {
+    canceled: false,
+    message: status
+      ? `${GENERIC_EXPORT_FAILURE}（HTTP ${status}），后端未返回可读错误信息`
+      : GENERIC_EXPORT_FAILURE,
+    generic: true,
+  };
 }

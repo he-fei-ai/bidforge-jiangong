@@ -5,6 +5,7 @@
 - 配置按白名单规范化（未知键丢弃、空值丢弃）
 - 项目维度隔离（A 项目的预设对 B 项目不可见）
 """
+
 import pytest
 from app.routers import export as export_router
 
@@ -13,16 +14,20 @@ async def _seed(db_conn, projects: list[str], schemes: dict[str, str]):
     for pid in projects:
         await db_conn.execute("INSERT INTO projects (id, name) VALUES (?, ?)", (pid, pid))
     for sid, pid in schemes.items():
-        await db_conn.execute(
-            "INSERT INTO schemes (id, project_id, name) VALUES (?, ?, ?)", (sid, pid, sid))
+        await db_conn.execute("INSERT INTO schemes (id, project_id, name) VALUES (?, ?, ?)", (sid, pid, sid))
     await db_conn.commit()
 
 
 async def test_export_presets_crud(db_conn):
     await _seed(db_conn, ["p1"], {"s1": "p1"})
 
-    cfg = {"font_name": "黑体", "page_header": "XX项目", "show_page_number": True,
-           "unknown_key": "drop_me", "empty_val": ""}
+    cfg = {
+        "font_name": "黑体",
+        "page_header": "XX项目",
+        "show_page_number": True,
+        "unknown_key": "drop_me",
+        "empty_val": "",
+    }
     # 创建
     r = await export_router.create_export_preset("s1", {"name": "标准A", "config": cfg}, db=db_conn)
     pid = r["id"]

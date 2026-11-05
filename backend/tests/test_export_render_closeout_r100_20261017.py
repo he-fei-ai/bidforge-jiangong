@@ -25,6 +25,7 @@
 判据纪律（AGENTS §5.14/§5.15）：静态锁一律锚 AST 节点或调用形态；
 每个修复点均配「触发行为」的功能实证，防静态锁的结构性盲区（R98 M2 教训）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -60,13 +61,13 @@ def _imports_aliases(fn) -> set[str]:
 
 
 def _loads(fn) -> set[str]:
-    return {n.id for n in ast.walk(fn)
-            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    return {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
 
 
 def _png_bytes() -> bytes:
     """生成合法 1x1 PNG（渲染段会 PIL verify，桩下载必须回传真图片字节）。"""
     from PIL import Image
+
     buf = io.BytesIO()
     Image.new("RGB", (1, 1), "white").save(buf, format="PNG")
     return buf.getvalue()
@@ -76,8 +77,7 @@ def _img_plan(content: str) -> dict:
     """满足 `_prepare_export_render` 直取键的最小 plan（含一个远程 image 块正文）。"""
     return {
         "config": {"ai_image_auto_generate": False},
-        "sections": [{"id": "s1", "title": "T", "level": 1, "sort_order": 1,
-                      "content": content}],
+        "sections": [{"id": "s1", "title": "T", "level": 1, "sort_order": 1, "content": content}],
         "chart_lookup": {},
         "blocks_cache": {},
         "fe_images": {},
@@ -90,8 +90,8 @@ def _img_plan(content: str) -> dict:
 # A 组 · F1 功能实证：渲染段引用 `_settings` 的远程位图下载路径必须真跑通
 # ---------------------------------------------------------------------------
 
-class TestRenderSettingsWiredF1:
 
+class TestRenderSettingsWiredF1:
     async def test_remote_image_download_path_no_nameerror(self, monkeypatch):
         """摘掉 `_prepare_export_render` 内的 `_settings` import 即 NameError → 本例恒红。"""
         url = "https://example.com/a.png"
@@ -135,6 +135,7 @@ class TestRenderSettingsWiredF1:
 # B 组 · F2 功能实证：`_render_done` 幂等哨兵 + 回滚开关全链路
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 async def db_ctx(tmp_path, monkeypatch):
     """真实库 + 真实 _prepare_export；桩掉 DOCX 构建与 EXPORTS_DIR（零真实渲染对象）。"""
@@ -143,16 +144,19 @@ async def db_ctx(tmp_path, monkeypatch):
     db = await get_conn()
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
-    await db.execute(
-        "INSERT INTO sections(id,scheme_id,level,title,sort_order,content)"
-        " VALUES(?,?,1,?,1,?)",
-        (uuid.uuid4().hex, sid, "Overview", "正文一段。"))
+        "INSERT INTO sections(id,scheme_id,level,title,sort_order,content)" " VALUES(?,?,1,?,1,?)",
+        (uuid.uuid4().hex, sid, "Overview", "正文一段。"),
+    )
     await db.commit()
 
     def fake_build(*args, **kwargs):
-        Path(str(args[0])).write_bytes(b"PK\x03\x04" + b"x" * 12)
+        # ✅ R175 · BUG-3：可用判据含 ZIP 完整性校验，桩须产出真实合法 DOCX
+        #    （旧截断包会被判「损坏」→ 缓存永远 miss）
+        from docx import Document
+
+        Document().save(str(args[0]))
         return {"sections": 1, "tables": 0, "figures": 0}
 
     monkeypatch.setattr(export_mod, "_build_docx_sync", fake_build)
@@ -188,7 +192,6 @@ def _spy_render(monkeypatch):
 
 
 class TestRenderIdempotentF2:
-
     async def test_second_entry_is_noop(self, monkeypatch):
         """同一 plan 二次直调真实渲染段：第二次必须早退（哨兵生效）。"""
         plan = _img_plan("![图](https://example.com/c.png)\n")
@@ -213,7 +216,8 @@ class TestRenderIdempotentF2:
         assert resp is not None
         assert len(calls) == 1, (
             "禁用快速路径时 _prepare_export 内部已渲染，"
-            "导出链路第二次进入必须被幂等哨兵吸收、零二次成本（修复前为 2）")
+            "导出链路第二次进入必须被幂等哨兵吸收、零二次成本（修复前为 2）"
+        )
 
     async def test_fast_path_enabled_render_only_on_miss(self, db_ctx, monkeypatch):
         """默认开启：未命中渲染 1 次；再导出命中 → 渲染次数不再增加（零渲染命中）。"""
@@ -240,12 +244,13 @@ class TestRenderIdempotentF2:
 # C 组 · 静态锁：作用域扫描 + 拆分继留死码不回流
 # ---------------------------------------------------------------------------
 
-class TestStaticLocks:
 
+class TestStaticLocks:
     def test_no_dangling_settings_reference_anywhere(self):
         """模块级扫描：任何函数体内 Load `_settings` 必须自身（或外层闭包可解析地）
         在**同一函数 AST** 内 import —— 抓 F1 同族复发（拆分搬移漏随行 import）。"""
         tree = ast.parse((APP_DIR / "routers" / "export.py").read_bytes().decode("utf-8"))
+
         # 收集顶层函数；闭包（如 _auto_generate_ai_image_blocks 内的 _gen）按
         # 「其最近的顶层祖先函数有 import」判可达。
         def top_functions(node):
@@ -257,8 +262,7 @@ class TestStaticLocks:
 
         offenders = []
         for fn in top_functions(tree):
-            loads = {n.id for n in ast.walk(fn)
-                     if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+            loads = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
             if "_settings" in loads and "_settings" not in _imports_aliases(fn):
                 offenders.append(fn.name)
         assert not offenders, f"`_settings` 悬空引用的函数：{offenders}"
@@ -267,15 +271,16 @@ class TestStaticLocks:
         """F3：取数段不得回流四类拆分继留死码（import 悬空 / 死赋值 / 死闭包）。"""
         fn = _fn_ast("_prepare_export")
         assert "_settings" not in _imports_aliases(fn), "悬空 import 不得回流"
-        assigned = {t.id for n in ast.walk(fn) if isinstance(n, ast.Assign)
-                    for t in n.targets if isinstance(t, ast.Name)}
+        assigned = {
+            t.id for n in ast.walk(fn) if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)
+        }
         loads = _loads(fn)
         for dead in ("allow_pil_fallback", "render_stats"):
             if dead in assigned:
                 assert dead in loads, f"`_prepare_export` 中 {dead} 为死赋值，不得回流"
-        nested = {n.name for n in ast.walk(fn)
-                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                  and n is not fn}
+        nested = {
+            n.name for n in ast.walk(fn) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n is not fn
+        }
         assert "_get_cached_blocks" not in nested, "死闭包不得回流取数段"
 
     def test_render_segment_has_own_settings_import(self):
@@ -291,28 +296,39 @@ class TestStaticLocks:
             body = fn.body
             # 允许 docstring 形态；从末尾往前找最后一个 Return，其后的语句必须仅为
             # 空（Expression 裸字符串 docstring 除外）。
-            last_return = max(
-                (i for i, st in enumerate(body) if isinstance(st, ast.Return)),
-                default=None)
+            last_return = max((i for i, st in enumerate(body) if isinstance(st, ast.Return)), default=None)
             if last_return is None:
                 continue
-            trailing = [st for st in body[last_return + 1:]
-                        if not (isinstance(st, ast.Expr)
-                                and isinstance(st.value, ast.Constant)
-                                and isinstance(st.value.value, str))]
+            trailing = [
+                st
+                for st in body[last_return + 1 :]
+                if not (
+                    isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant) and isinstance(st.value.value, str)
+                )
+            ]
             assert not trailing, f"{name} Return 之后存在不可达语句"
 
     def test_ruff_clean_on_touched_files(self):
         """ruff F821/F401/F841 对触碰文件必须零告警（与本轮验收同判据）。"""
         import subprocess
         import sys
+
         root = APP_DIR.parent
         rc = subprocess.run(
-            [sys.executable, "-m", "ruff", "check",
-             str(root / "app" / "routers" / "export.py"),
-             str(root / "app" / "config.py"),
-             "--select", "F821,F401,F841,F811,E9"],
-            cwd=str(root), capture_output=True, text=True)
+            [
+                sys.executable,
+                "-m",
+                "ruff",
+                "check",
+                str(root / "app" / "routers" / "export.py"),
+                str(root / "app" / "config.py"),
+                "--select",
+                "F821,F401,F841,F811,E9",
+            ],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+        )
         assert rc.returncode == 0, rc.stdout + rc.stderr
 
 
@@ -320,8 +336,8 @@ class TestStaticLocks:
 # D 组 · 注释锚点与快速路径接线
 # ---------------------------------------------------------------------------
 
-class TestWiringAndAnchors:
 
+class TestWiringAndAnchors:
     def test_config_anchor_points_to_r99_guard(self):
         src = (APP_DIR / "config.py").read_bytes().decode("utf-8")
         assert "test_export_closeout_r99_20261017.py" in src
@@ -336,8 +352,7 @@ class TestWiringAndAnchors:
             render_idx = src.find("_prepare_export_render(")
             assert hit_idx != -1, f"{name} 缺少缓存命中分支"
             assert render_idx != -1, f"{name} 渲染段调用不得被摘除"
-            assert hit_idx < render_idx, \
-                f"{name}：渲染段必须先于缓存命中返回（R99 快速路径顺序）"
+            assert hit_idx < render_idx, f"{name}：渲染段必须先于缓存命中返回（R99 快速路径顺序）"
 
     def test_sentinel_keys_are_explicit(self):
         """哨兵键名锁定：`_render_done` 的读写点缺一不可（防改名半边失配）。"""

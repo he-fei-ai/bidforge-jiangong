@@ -9,6 +9,7 @@
   · 开关开启时，未闭合围栏被追加闭合标记，原正文不丢、DLV 检测清零；
   · 开关默认关闭时，正文完全不改写（向后兼容，零回归）。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -28,9 +29,7 @@ async def db_ctx(tmp_path, monkeypatch):
     pid = uuid.uuid4().hex
     sid = uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name,status) VALUES(?,?,?,?)",
-        (sid, pid, "s", "目录已确认"))
+    await db.execute("INSERT INTO schemes(id,project_id,name,status) VALUES(?,?,?,?)", (sid, pid, "s", "目录已确认"))
     await db.commit()
     yield db, pid, sid
     # ✅ 关闭全局连接：aiosqlite worker 为非守护线程，不关闭会阻塞解释器退出
@@ -43,8 +42,8 @@ async def _add_section(db, sid, sec_id, content):
         "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
         " level, status, word_count, word_budget, content, review_status,"
         " sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (sec_id, sid, "", "", "第一章", 1, "generated", 100, 0,
-         content, "", 0))
+        (sec_id, sid, "", "", "第一章", 1, "generated", 100, 0, content, "", 0),
+    )
     await db.commit()
 
 
@@ -55,8 +54,7 @@ async def test_export_auto_fix_applies_when_enabled(db_ctx):
     raw = "前言\n~~~python\ndef f(): pass"  # 未闭合波浪围栏
     await _add_section(db, sid, sec_id, raw)
 
-    prep = await _prepare_export(
-        sid, {"config": {"auto_fix_unclosed_fences": True}}, db)
+    prep = await _prepare_export(sid, {"config": {"auto_fix_unclosed_fences": True}}, db)
     sec = next(s for s in prep["sections"] if s["id"] == sec_id)
 
     assert raw in sec["content"], "原正文不应被改动/丢失"

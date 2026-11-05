@@ -106,40 +106,56 @@ export interface ExportPresetsDeps {
 
 export function useExportPresets(deps: ExportPresetsDeps) {
   const {
-    id, exportForm, presetOpLoading, setPresetOpLoading, selectedPresetId,
-    cacheAbortRef, setCacheLoading,
-    currentSchemeIdRef, presetListAbortRef,
-    setExportPresets, setSelectedPresetId,
-    setExportIssues, setExportStats, setExportPreflight,
-    setPlaceholderReport, setRerunPlan, setCacheStatus,
-    msg, modal,
+    id,
+    exportForm,
+    presetOpLoading,
+    setPresetOpLoading,
+    selectedPresetId,
+    cacheAbortRef,
+    setCacheLoading,
+    currentSchemeIdRef,
+    presetListAbortRef,
+    setExportPresets,
+    setSelectedPresetId,
+    setExportIssues,
+    setExportStats,
+    setExportPreflight,
+    setPlaceholderReport,
+    setRerunPlan,
+    setCacheStatus,
+    msg,
+    modal,
   } = deps;
-  const fetchExportPresets = useCallback(async (sid: string) => {
-    presetListAbortRef.current?.abort();
-    const controller = new AbortController();
-    presetListAbortRef.current = controller;
-    try {
-      const { data } = await exportApi.presets.list(sid, controller.signal);
-      if (
-        controller.signal.aborted
-        || currentSchemeIdRef.current !== sid
-        || presetListAbortRef.current !== controller
-      ) return;
-      const presets: ExportPresetItem[] = data.presets || [];
-      setExportPresets(presets);
-      const defaultPreset = findDefaultExportPreset(presets);
-      if (defaultPreset) {
-        setSelectedPresetId(defaultPreset.id);
-        exportForm.setFieldsValue(defaultPreset.config || {});
-      } else {
-        setSelectedPresetId("");
+  const fetchExportPresets = useCallback(
+    async (sid: string) => {
+      presetListAbortRef.current?.abort();
+      const controller = new AbortController();
+      presetListAbortRef.current = controller;
+      try {
+        const { data } = await exportApi.presets.list(sid, controller.signal);
+        if (
+          controller.signal.aborted ||
+          currentSchemeIdRef.current !== sid ||
+          presetListAbortRef.current !== controller
+        )
+          return;
+        const presets: ExportPresetItem[] = data.presets || [];
+        setExportPresets(presets);
+        const defaultPreset = findDefaultExportPreset(presets);
+        if (defaultPreset) {
+          setSelectedPresetId(defaultPreset.id);
+          exportForm.setFieldsValue(defaultPreset.config || {});
+        } else {
+          setSelectedPresetId("");
+        }
+      } catch {
+        // 非致命：预设缺失不影响导出；切方案产生的取消不提示错误。
+      } finally {
+        if (presetListAbortRef.current === controller) presetListAbortRef.current = null;
       }
-    } catch {
-      // 非致命：预设缺失不影响导出；切方案产生的取消不提示错误。
-    } finally {
-      if (presetListAbortRef.current === controller) presetListAbortRef.current = null;
-    }
-  }, [exportForm]);
+    },
+    [exportForm],
+  );
   // ✅ R-1：手动刷新预设（点"刷新"按钮）— 与保存/删除/设默认后的自动刷新区分，
   //    否则自动刷新会把 presetOpLoading 从 "save" 覆盖成 "refresh" 造成按钮状态跳变。
   const handleRefreshPresets = async () => {
@@ -189,7 +205,9 @@ export function useExportPresets(deps: ExportPresetsDeps) {
           placeholder="请输入格式预设名称"
           maxLength={40}
           style={{ marginTop: 8 }}
-          onChange={(e) => { nameRef.current = (e.target.value || "").trim(); }}
+          onChange={(e) => {
+            nameRef.current = (e.target.value || "").trim();
+          }}
           onPressEnter={() => {
             // Enter 键直接确认；onOk 内会做空名称校验
             const box = document.querySelector(".ant-modal-confirm-btns .ant-btn-primary");
@@ -251,7 +269,8 @@ export function useExportPresets(deps: ExportPresetsDeps) {
     //   —— 否则接口 reject 后弹窗留着、按钮却永远转圈。
     modal.confirm({
       title: "确认删除该格式预设？",
-      okText: "删除", okButtonProps: { danger: true },
+      okText: "删除",
+      okButtonProps: { danger: true },
       cancelText: "取消",
       onOk: async () => {
         try {
@@ -286,10 +305,11 @@ export function useExportPresets(deps: ExportPresetsDeps) {
     try {
       const { data } = await exportApi.cacheStatus(sid, controller.signal);
       if (
-        controller.signal.aborted
-        || currentSchemeIdRef.current !== sid
-        || cacheAbortRef.current !== controller
-      ) return;
+        controller.signal.aborted ||
+        currentSchemeIdRef.current !== sid ||
+        cacheAbortRef.current !== controller
+      )
+        return;
       setCacheStatus(data);
     } catch (e: unknown) {
       // 结构化窄断言：仅读取错误对象上真实存在的 name / code / message
@@ -306,7 +326,11 @@ export function useExportPresets(deps: ExportPresetsDeps) {
     }
   };
   return {
-    fetchExportPresets, handleRefreshPresets, handleSavePreset,
-    handleSetDefaultPreset, handleDeletePreset, loadCacheStatus,
+    fetchExportPresets,
+    handleRefreshPresets,
+    handleSavePreset,
+    handleSetDefaultPreset,
+    handleDeletePreset,
+    loadCacheStatus,
   };
 }

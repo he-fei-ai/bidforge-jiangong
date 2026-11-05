@@ -20,6 +20,7 @@
 本文件锁定两件事：行为正确 + 不再分叉。
 复跑：``python -m pytest tests/test_numbering_fork_cleanup_20261005.py -q``
 """
+
 from app.routers import export as export_mod
 from app.services import content_blocks as cb
 from app.services.numbering import strip_outline_numbering
@@ -37,7 +38,7 @@ _REMOVED_FORK_NAMES = [
 
 
 def test_strip_title_number_handles_dotted_path_fully():
-    """"1.2.3钢筋工程" 必须一次吃满整条编号路径（旧实现回退成 "3钢筋工程"）。"""
+    """ "1.2.3钢筋工程" 必须一次吃满整条编号路径（旧实现回退成 "3钢筋工程"）。"""
     assert cb._strip_title_number("1.2.3钢筋工程") == "钢筋工程"
     assert cb._strip_title_number("1.1 项目基本信息") == "项目基本信息"
     assert cb._strip_title_number("第一章 工程概况") == "工程概况"
@@ -59,8 +60,7 @@ def test_strip_title_number_collapses_multi_prefix():
 
 def test_strip_title_number_matches_canonical_fixed_point():
     """content_blocks 的剥离 = numbering 唯一实现的**有界不动点**（防再次分叉）。"""
-    cases = ["第五章 施工计划", "（一）编制说明", "1.1 项目概况",
-             "a. 附录说明", "钢筋工程", "", "第1章 1.1 工程概况"]
+    cases = ["第五章 施工计划", "（一）编制说明", "1.1 项目概况", "a. 附录说明", "钢筋工程", "", "第1章 1.1 工程概况"]
     for c in cases:
         s = c
         for _ in range(8):

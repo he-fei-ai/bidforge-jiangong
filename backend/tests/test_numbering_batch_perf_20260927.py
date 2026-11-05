@@ -23,6 +23,7 @@
 
 复跑：``python -m pytest tests/test_numbering_batch_perf_20260927.py -q``
 """
+
 import inspect
 import json
 
@@ -32,30 +33,35 @@ import pytest
 async def _seed(db, rows):
     """写入最小可用的 sections 行（列顺序对齐 conftest 的真实 schema）。"""
     await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES ('p1','P')")
-    await db.execute("INSERT OR IGNORE INTO schemes (id, project_id, name) "
-                     "VALUES ('s1','p1','S')")
-    for (sid, parent, outline, level, title, content) in rows:
+    await db.execute("INSERT OR IGNORE INTO schemes (id, project_id, name) " "VALUES ('s1','p1','S')")
+    for sid, parent, outline, level, title, content in rows:
         await db.execute(
             "INSERT OR REPLACE INTO sections (id, scheme_id, project_id, title, "
             "parent_id, level, sort_order, outline_json, content) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
-            (sid, "s1", "p1", title, parent, str(level), 0,
-             outline if isinstance(outline, str)
-             else json.dumps(outline, ensure_ascii=False),
-             content))
+            (
+                sid,
+                "s1",
+                "p1",
+                title,
+                parent,
+                str(level),
+                0,
+                outline if isinstance(outline, str) else json.dumps(outline, ensure_ascii=False),
+                content,
+            ),
+        )
     await db.commit()
 
 
-_BODY = "\n".join(["### 1.1 施工准备", "本段为正文内容示例。" * 5,
-                   "### 2.3 验收要求", "- 要点一", "- 要点二"])
+_BODY = "\n".join(["### 1.1 施工准备", "本段为正文内容示例。" * 5, "### 2.3 验收要求", "- 要点一", "- 要点二"])
 
 
 def _mixed_rows(n=40):
     """父章 + 子章 + 脏数据（无编号 / 坏 JSON）+ 空正文，覆盖各条降级分支。"""
     rows = []
     for i in range(n):
-        rows.append((f"sec{i}", None, {"id": str(i + 1)}, 1,
-                     f"第{i + 1}章", _BODY))
+        rows.append((f"sec{i}", None, {"id": str(i + 1)}, 1, f"第{i + 1}章", _BODY))
     rows.append(("child_a", "sec0", {"id": "1.1"}, 2, "1.1 子章", _BODY))
     rows.append(("child_b", "sec0", {"id": "1.2"}, 2, "1.2 子章", _BODY))
     # 存储编号为空 → 旧实现「原样返回」，不得被当成漂移
@@ -76,7 +82,6 @@ def _count_executes(db):
 
     db.execute = counted
     return state
-
 
 
 class TestNumberingBatchQueryCount:
@@ -103,12 +108,12 @@ class TestNumberingBatchQueryCount:
         assert rep["checked"] > 200
         # 预取 2 条 + 外层 1 条 = 3；留出余量但仍是常数级
         assert n_big <= 6, f"200 章用了 {n_big} 次查询（应为常数级）"
-        assert n_big == n_small, (
-            f"查询数随章数增长（10 章 {n_small} 次 vs 200 章 {n_big} 次）—— N+1 回归")
+        assert n_big == n_small, f"查询数随章数增长（10 章 {n_small} 次 vs 200 章 {n_big} 次）—— N+1 回归"
 
     async def test_index_prefetch_is_two_queries(self, db_conn):
         """预取本身固定 2 条查询。"""
         from app.services.numbering import load_scheme_section_index
+
         await _seed(db_conn, _mixed_rows(50))
         st = _count_executes(db_conn)
         index = await load_scheme_section_index(db_conn, "s1")
@@ -123,6 +128,7 @@ class TestNumberingBatchQueryCount:
     async def test_single_section_path_keeps_two_queries(self, db_conn):
         """不传 index 的单章路径仍按原样逐章查库（向后兼容，未被优化改写）。"""
         from app.services.numbering import normalize_section_content_subheadings
+
         await _seed(db_conn, _mixed_rows(3))
         st = _count_executes(db_conn)
         await normalize_section_content_subheadings(db_conn, "s1", "sec0", _BODY)
@@ -131,11 +137,11 @@ class TestNumberingBatchQueryCount:
     async def test_index_path_does_zero_queries(self, db_conn):
         """传入 index 且命中该章时，规范化本身零查库。"""
         from app.services.numbering import load_scheme_section_index, normalize_section_content_subheadings
+
         await _seed(db_conn, _mixed_rows(3))
         index = await load_scheme_section_index(db_conn, "s1")
         st = _count_executes(db_conn)
-        await normalize_section_content_subheadings(
-            db_conn, "s1", "sec0", _BODY, index=index)
+        await normalize_section_content_subheadings(db_conn, "s1", "sec0", _BODY, index=index)
         assert st["n"] == 0, "命中索引时不应再查库"
 
     def test_no_await_inside_per_section_loop(self):
@@ -144,12 +150,11 @@ class TestNumberingBatchQueryCount:
         计数断言会被「换个循环变量名」绕过，源码断言锁死结构。
         """
         import app.services.numbering as num
+
         src = inspect.getsource(num)
-        body = src.split(
-            "async def validate_scheme_numbering_consistency")[1]
+        body = src.split("async def validate_scheme_numbering_consistency")[1]
         loop = body.split("for r in rows:")[1].split("return {")[0]
-        assert "await db.execute" not in loop, (
-            "校验循环体内出现逐章查库，N+1 回归")
+        assert "await db.execute" not in loop, "校验循环体内出现逐章查库，N+1 回归"
 
 
 class TestNumberingBatchParity:
@@ -164,29 +169,34 @@ class TestNumberingBatchParity:
         async def legacy_validate(db, sid):
             """复刻修复前的实现：不传 index → 逐章查库。"""
             cur = await db.execute(
-                "SELECT id, content FROM sections WHERE scheme_id=? "
-                "AND COALESCE(content,'')!=''", (sid,))
+                "SELECT id, content FROM sections WHERE scheme_id=? " "AND COALESCE(content,'')!=''", (sid,)
+            )
             rows = await cur.fetchall()
             out, mismatched = [], 0
             for r in rows:
-                rep = await validate_section_content_numbering(
-                    db, sid, r["id"], r["content"] or "")
+                rep = await validate_section_content_numbering(db, sid, r["id"], r["content"] or "")
                 out.append(rep)
                 if not rep.get("consistent"):
                     mismatched += 1
-            return {"scheme_id": sid, "checked": len(out), "mismatched": mismatched,
-                    "consistent": mismatched == 0, "sections": out}
+            return {
+                "scheme_id": sid,
+                "checked": len(out),
+                "mismatched": mismatched,
+                "consistent": mismatched == 0,
+                "sections": out,
+            }
 
         await _seed(db_conn, _mixed_rows(20))
         new = await validate_scheme_numbering_consistency(db_conn, "s1")
         old = await legacy_validate(db_conn, "s1")
-        assert json.dumps(new, sort_keys=True, ensure_ascii=False) == \
-            json.dumps(old, sort_keys=True, ensure_ascii=False), \
-            "批量路径与旧路径报告不一致"
+        assert json.dumps(new, sort_keys=True, ensure_ascii=False) == json.dumps(
+            old, sort_keys=True, ensure_ascii=False
+        ), "批量路径与旧路径报告不一致"
 
     async def test_dirty_rows_are_not_reported_as_drift(self, db_conn):
         """无编号 / 坏 JSON 的历史脏数据不得被误判为漂移（与旧实现一致）。"""
         from app.services.numbering import validate_scheme_numbering_consistency
+
         await _seed(db_conn, _mixed_rows(3))
         rep = await validate_scheme_numbering_consistency(db_conn, "s1")
         by_id = {s["section_id"]: s for s in rep["sections"]}
@@ -197,6 +207,7 @@ class TestNumberingBatchParity:
     async def test_repair_uses_batch_and_still_fixes(self, db_conn):
         """修复路径：查询数仍是常数级，且确实走完了修复流程。"""
         from app.services.numbering import repair_scheme_numbering_consistency
+
         await _seed(db_conn, _mixed_rows(20))
         st = _count_executes(db_conn)
         res = await repair_scheme_numbering_consistency(db_conn, "s1")
@@ -204,8 +215,6 @@ class TestNumberingBatchParity:
         assert st["n"] <= 60, f"修复路径查询数 {st['n']} 偏高，疑似 N+1 回归"
         assert res["total"] >= 20
         assert res["fixed"] >= 0
-
-
 
 
 class TestNumberingBatchFailSoft:
@@ -221,43 +230,38 @@ class TestNumberingBatchFailSoft:
             raise RuntimeError("模拟预取失败")
 
         monkeypatch.setattr(num, "load_scheme_section_index", boom)
-        rep = await num.validate_section_content_numbering(
-            db_conn, "s1", "sec0", _BODY)
+        rep = await num.validate_section_content_numbering(db_conn, "s1", "sec0", _BODY)
         assert "diffs" in rep
         assert rep["consistent"] in (True, False)
 
     async def test_index_missing_section_falls_back_to_query(self, db_conn):
         """index 里没有该章 → 回退逐章查询，结果与无 index 时一致。"""
         from app.services.numbering import normalize_section_content_subheadings
+
         await _seed(db_conn, _mixed_rows(3))
         empty = {"meta": {}, "has_children": {}}
-        a, ca = await normalize_section_content_subheadings(
-            db_conn, "s1", "sec0", _BODY)
-        b, cb = await normalize_section_content_subheadings(
-            db_conn, "s1", "sec0", _BODY, index=empty)
+        a, ca = await normalize_section_content_subheadings(db_conn, "s1", "sec0", _BODY)
+        b, cb = await normalize_section_content_subheadings(db_conn, "s1", "sec0", _BODY, index=empty)
         assert a == b and ca == cb
 
     async def test_empty_scheme_returns_clean_report(self, db_conn):
         """空方案：不得抛错，报告为 0 检查 / 一致。"""
         from app.services.numbering import validate_scheme_numbering_consistency
-        await db_conn.execute(
-            "INSERT OR IGNORE INTO projects (id,name) VALUES ('p1','P')")
-        await db_conn.execute("INSERT OR IGNORE INTO schemes (id,project_id,name) "
-                              "VALUES ('s1','p1','S')")
+
+        await db_conn.execute("INSERT OR IGNORE INTO projects (id,name) VALUES ('p1','P')")
+        await db_conn.execute("INSERT OR IGNORE INTO schemes (id,project_id,name) " "VALUES ('s1','p1','S')")
         await db_conn.commit()
         rep = await validate_scheme_numbering_consistency(db_conn, "s1")
-        assert rep == {"scheme_id": "s1", "checked": 0, "mismatched": 0,
-                       "consistent": True, "sections": []}
+        assert rep == {"scheme_id": "s1", "checked": 0, "mismatched": 0, "consistent": True, "sections": []}
 
     async def test_renumber_disabled_short_circuits(self, db_conn, monkeypatch):
         """content_subheading_renumber=False 时逐字节原样返回（开关仍生效）。"""
         from app.config import settings
         from app.services.numbering import normalize_section_content_subheadings
+
         await _seed(db_conn, _mixed_rows(2))
         monkeypatch.setattr(settings, "content_subheading_renumber", False)
         st = _count_executes(db_conn)
-        out, changed = await normalize_section_content_subheadings(
-            db_conn, "s1", "sec0", _BODY)
+        out, changed = await normalize_section_content_subheadings(db_conn, "s1", "sec0", _BODY)
         assert out == _BODY and changed is False
         assert st["n"] == 0, "开关关闭时不应查库"
-

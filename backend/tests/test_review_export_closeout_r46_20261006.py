@@ -20,6 +20,7 @@
 护栏形态：行为锁（断言正确次序）+ 静态锁（禁止 ORDER BY 只写 created_at 的写法
 回退）。静态锁才是能在 A/B 反向验证中定向失败的那一层 —— 见文件末尾注释。
 """
+
 from __future__ import annotations
 
 import ast
@@ -41,8 +42,7 @@ from fastapi import HTTPException
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 ROUTERS_DIR = APP_DIR / "routers"
 #: 前端状态流转字面量（护栏直接解析它，禁止手写镜像 —— 镜像护栏此前恒通过）
-REVIEW_PANEL_TSX = (APP_DIR.parent.parent / "frontend"
-                    / "src" / "components" / "review" / "ReviewWorkflowPanel.tsx")
+REVIEW_PANEL_TSX = APP_DIR.parent.parent / "frontend" / "src" / "components" / "review" / "ReviewWorkflowPanel.tsx"
 
 #: 同秒时间戳（created_at 是 TEXT 秒级精度，这是复现缺陷的唯一前提）
 _TS = "2026-10-06 12:00:00"
@@ -58,22 +58,24 @@ async def db_ctx(tmp_path):
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await db.execute(
         "INSERT INTO schemes(id,project_id,name,status,word_budget) VALUES(?,?,?,?,0)",
-        (sid, pid, "专项方案", "目录已确认"))
+        (sid, pid, "专项方案", "目录已确认"),
+    )
     await db.commit()
     yield db, pid, sid
     await close_db()
 
 
-async def _insert_section(db, sid, pid, title="第一章 工程概况", content="已有正文内容",
-                          updated_at=None, level=1, sort_order=0):
+async def _insert_section(
+    db, sid, pid, title="第一章 工程概况", content="已有正文内容", updated_at=None, level=1, sort_order=0
+):
     """插入一个已生成正文的章节，返回 section_id。"""
     sec_id = uuid.uuid4().hex
-    cols = ("id, scheme_id, project_id, parent_id, title, description, level,"
-            " status, word_count, word_budget, content, review_status, sort_order")
-    params = (sec_id, sid, pid, "", title, "", level, "generated",
-              len(content), 0, content, "", sort_order)
-    await db.execute(
-        f"INSERT INTO sections ({cols}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", params)
+    cols = (
+        "id, scheme_id, project_id, parent_id, title, description, level,"
+        " status, word_count, word_budget, content, review_status, sort_order"
+    )
+    params = (sec_id, sid, pid, "", title, "", level, "generated", len(content), 0, content, "", sort_order)
+    await db.execute(f"INSERT INTO sections ({cols}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", params)
     if updated_at:
         await db.execute("UPDATE sections SET updated_at=? WHERE id=?", (updated_at, sec_id))
     return sec_id
@@ -96,11 +98,25 @@ async def test_submit_picks_newest_row_when_created_at_ties(db_ctx):
             "INSERT INTO preflight_runs (id, scheme_id, project_id, content_fingerprint,"
             " total, grade, verdict, released, blocked, counts, dimensions, findings, stats,"
             " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (f"r{idx}", sid, pid, "", total, "D" if blocked else "A", "未通过" if blocked else "通过",
-             released, blocked, "{}", "[]", "[]", "{}", _TS))
+            (
+                f"r{idx}",
+                sid,
+                pid,
+                "",
+                total,
+                "D" if blocked else "A",
+                "未通过" if blocked else "通过",
+                released,
+                blocked,
+                "{}",
+                "[]",
+                "[]",
+                "{}",
+                _TS,
+            ),
+        )
     await db.commit()
-    res = await submit_scheme_review(
-        sid, SchemeReviewIn(to_status="approved", reviewer="评审人"), db)
+    res = await submit_scheme_review(sid, SchemeReviewIn(to_status="approved", reviewer="评审人"), db)
     assert res["ok"] is True, "同秒两次总检下 /submit 假阻断：取到了旧的 blocked 行"
     assert res["to_status"] == "approved"
     # 行已实际落库（防 review_db.exec_write 假成功）
@@ -119,8 +135,23 @@ async def test_submit_gate_still_blocks_when_latest_row_blocked(db_ctx):
             "INSERT INTO preflight_runs (id, scheme_id, project_id, content_fingerprint,"
             " total, grade, verdict, released, blocked, counts, dimensions, findings, stats,"
             " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (f"r{idx}", sid, pid, "", total, "A" if released else "D",
-             "通过" if released else "未通过", released, blocked, "{}", "[]", "[]", "{}", _TS))
+            (
+                f"r{idx}",
+                sid,
+                pid,
+                "",
+                total,
+                "A" if released else "D",
+                "通过" if released else "未通过",
+                released,
+                blocked,
+                "{}",
+                "[]",
+                "[]",
+                "{}",
+                _TS,
+            ),
+        )
     await db.commit()
     with pytest.raises(HTTPException) as ei:
         await submit_scheme_review(sid, SchemeReviewIn(to_status="approved", reviewer="评审人"), db)
@@ -138,7 +169,8 @@ async def _insert_review_records(db, sid, pid, n=12):
         await db.execute(
             "INSERT INTO review_records (id, scheme_id, project_id, section_id, section_title,"
             " from_status, to_status, reviewer, comment, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (rid, sid, pid, f"sec{i}", f"第{i}章", "", "approved", f"评审人{i}", f"意见{i}", _TS))
+            (rid, sid, pid, f"sec{i}", f"第{i}章", "", "approved", f"评审人{i}", f"意见{i}", _TS),
+        )
         ids.append(rid)
     await db.commit()
     return ids
@@ -170,14 +202,16 @@ async def test_cache_status_returns_newest_rows_when_created_at_ties(db_ctx, tmp
         await db.execute(
             "INSERT INTO export_cache (id, project_id, scheme_id, config_hash,"
             " content_fingerprint, cache_key, result_path, created_at) VALUES (?,?,?,?,?,?,?,?)",
-            (uuid.uuid4().hex, pid, sid, "cfg", f"fp{i}", f"k{i}", str(p), _TS))
+            (uuid.uuid4().hex, pid, sid, "cfg", f"fp{i}", f"k{i}", str(p), _TS),
+        )
         paths.append(str(p))
     await db.commit()
     res = await cache_status(sid, db=db)
     got = [it["result_path"] for it in res["items"]]
     assert len(got) == 5
-    assert got == list(reversed(paths[-5:])), (
-        f"最近 5 份缓存取错：应为最新 5 行的逆序，实际 {[Path(g).name for g in got]}")
+    assert got == list(
+        reversed(paths[-5:])
+    ), f"最近 5 份缓存取错：应为最新 5 行的逆序，实际 {[Path(g).name for g in got]}"
     assert res["total"] == 5 and res["stale"] == 0
 
 
@@ -188,8 +222,8 @@ async def test_cache_status_marks_missing_files_as_stale(db_ctx, tmp_path):
     await db.execute(
         "INSERT INTO export_cache (id, project_id, scheme_id, config_hash,"
         " content_fingerprint, cache_key, result_path, created_at) VALUES (?,?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, pid, sid, "cfg", "fp", "k",
-         str(tmp_path / "已删除的导出文件.docx"), _TS))
+        (uuid.uuid4().hex, pid, sid, "cfg", "fp", "k", str(tmp_path / "已删除的导出文件.docx"), _TS),
+    )
     await db.commit()
     res = await cache_status(sid, db=db)
     assert res["total"] == 0
@@ -210,7 +244,8 @@ async def test_reset_content_invalidates_export_cache(db_ctx, tmp_path):
     await db.execute(
         "INSERT INTO export_cache (id, project_id, scheme_id, config_hash,"
         " content_fingerprint, cache_key, result_path, created_at) VALUES (?,?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, pid, sid, "cfg", "fp", "k", str(artifact), _TS))
+        (uuid.uuid4().hex, pid, sid, "cfg", "fp", "k", str(artifact), _TS),
+    )
     await db.commit()
     res = await reset_content(sid, db)
     assert res.get("ok") is True
@@ -253,12 +288,10 @@ def _calls_name(func_node: ast.AST, name: str) -> bool:
         if not isinstance(sub, ast.Call):
             continue
         f = sub.func
-        target = (f.id if isinstance(f, ast.Name)
-                  else f.attr if isinstance(f, ast.Attribute) else None)
+        target = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None
         if target == name:
             return True
     return False
-
 
 
 def _sections_content_writers() -> dict[str, bool]:
@@ -299,19 +332,18 @@ _CONTENT_WRITER_HELPERS = {"_renormalize_all_section_contents"}
 def test_every_sections_content_writer_invalidates_export_cache():
     """sections.py 的每个正文写路径都必须失效导出缓存（否则孤儿行残留）。"""
     writers = _sections_content_writers()
-    missing = sorted(
-        k for k, v in writers.items()
-        if not v and k not in _CONTENT_WRITER_HELPERS)
+    missing = sorted(k for k, v in writers.items() if not v and k not in _CONTENT_WRITER_HELPERS)
     assert missing == [], (
         f"以下正文写路径漏接 invalidate_export_cache：{missing}。"
         "改写正文后指纹变化 -> 旧 export_cache 行永远不会再被命中，但既不失效也不裁剪，"
         "只能等 _prune_export_cache（5 份/方案）慢慢挤出；期间 /cache-status 仍把这些"
         "行报为 exists=true 的「有效缓存」，界面显示「可复用上次成果」。"
-        "若它是跨入口共用的 helper，请登记进 _CONTENT_WRITER_HELPERS 并补调用方护栏。")
-#: 静态锁：ORDER BY 只写 created_at（缺 rowid 次序兜底）的 SQL 片段
-_CREATED_AT_ONLY = re.compile(
-    r"ORDER\s+BY\s+(?:[A-Za-z_][\w]*\s*\.\s*)?created_at\s+DESC(?!\s*,\s*rowid)")
+        "若它是跨入口共用的 helper，请登记进 _CONTENT_WRITER_HELPERS 并补调用方护栏。"
+    )
 
+
+#: 静态锁：ORDER BY 只写 created_at（缺 rowid 次序兜底）的 SQL 片段
+_CREATED_AT_ONLY = re.compile(r"ORDER\s+BY\s+(?:[A-Za-z_][\w]*\s*\.\s*)?created_at\s+DESC(?!\s*,\s*rowid)")
 
 
 def test_shared_content_helper_callers_all_invalidate_cache():
@@ -328,12 +360,14 @@ def test_shared_content_helper_callers_all_invalidate_cache():
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for sub in ast.walk(node):
-            if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
-                    and sub.func.id in _CONTENT_WRITER_HELPERS
-                    and sub.func.id != node.name):
+            if (
+                isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Name)
+                and sub.func.id in _CONTENT_WRITER_HELPERS
+                and sub.func.id != node.name
+            ):
                 body_src = ast.get_source_segment(src, node) or ""
-                callers.setdefault(node.name,
-                                      _calls_name(node, "invalidate_export_cache"))
+                callers.setdefault(node.name, _calls_name(node, "invalidate_export_cache"))
     assert callers, "未找到任何调用方 —— 判据失效，护栏等于空跑"
     missing = sorted(k for k, v in callers.items() if not v)
 
@@ -347,11 +381,10 @@ def _multiline_string_spans(src: str) -> list[tuple[int, int]]:
     try:
         tree = ast.parse(src)
     except SyntaxError:
-        return [(0, 10 ** 9)]
+        return [(0, 10**9)]
     spans: list[tuple[int, int]] = []
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                and "\n" in node.value):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and "\n" in node.value:
             spans.append((node.lineno, node.end_lineno or node.lineno))
     return spans
 
@@ -393,29 +426,30 @@ def test_no_created_at_only_ordering_in_review_and_export(fname):
         f"{fname} 存在只按 created_at 排序的查询（次序未定义）：{hits}\n"
         "created_at 是 TEXT 秒级精度，同秒写入的多行返回次序取决于查询计划："
         "取到旧行会造成假阻断 / 绕过门禁 / 分页重复或漏行 / 「最近 5 份缓存」取错。"
-        "请补第二排序键 `rowid DESC`（rowid 单调递增 = 真实写入顺序）。")
+        "请补第二排序键 `rowid DESC`（rowid 单调递增 = 真实写入顺序）。"
+    )
 
 
 # ---------------------------------------------------------------------------
 # 5. 跨语言 parity：review.py 的 next_actions 必须是 _ALLOWED_TRANSITIONS 的**真实投影**
 # ---------------------------------------------------------------------------
 
+
 def _allowed_transitions_matrix():
     """动态读取 _ALLOWED_TRANSITIONS，构造 12x12 布尔矩阵。"""
     src = (ROUTERS_DIR / "review.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Assign)
-                and any(isinstance(t, ast.Name) and t.id == "_ALLOWED_TRANSITIONS"
-                        for t in node.targets)):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "_ALLOWED_TRANSITIONS" for t in node.targets
+        ):
             mat = ast.literal_eval(node.value)
             assert mat, "_ALLOWED_TRANSITIONS 为空 —— 护栏失去基线"
             return mat
     raise AssertionError("未在 review.py 中找到 _ALLOWED_TRANSITIONS 定义")
 
 
-_NEXT_ACTIONS_RE = re.compile(
-    r"const\s+NEXT_ACTIONS\s*:\s*[^=]*=\s*\{(.*?)\n\};", re.S)
+_NEXT_ACTIONS_RE = re.compile(r"const\s+NEXT_ACTIONS\s*:\s*[^=]*=\s*\{(.*?)\n\};", re.S)
 _NEXT_KEY_RE = re.compile(r'^\s*(?:"(?P<q>"|[^"]*)"|(?P<bare>[A-Za-z_]\w*))\s*:\s*\[')
 _NEXT_ITEM_RE = re.compile(r'to:\s*"(?P<to>[a-z]+)",\s*label:\s*"(?P<label>[^"]*)"')
 
@@ -438,8 +472,7 @@ def _parse_frontend_next_actions() -> dict[str, dict[str, str]]:
         mk = _NEXT_KEY_RE.match(line)
         if mk:
             # 键可能是 `""`（未纳入审核）也可能是裸标识符
-            current = (mk.group("q") if mk.group("q") is not None
-                       else mk.group("bare"))
+            current = mk.group("q") if mk.group("q") is not None else mk.group("bare")
             out.setdefault(current, {})
         # ⚠️ 同一行既声明 key 又常带 items（`pending: [{ to: ... }]`），
         # 所以不能用 elif —— 否则只有折行 continuation 的 items 会被解析到。
@@ -490,8 +523,7 @@ def test_frontend_next_actions_cover_every_status():
 def test_frontend_next_actions_no_empty_labels():
     """前端 NEXT_ACTIONS 的每个 label 都非空（空文案的按钮用户看不出可做什么）。"""
     actions = _parse_frontend_next_actions()
-    bad = {f: to for f, acts in actions.items() for to, lb in acts.items()
-           if not lb.strip()}
+    bad = {f: to for f, acts in actions.items() for to, lb in acts.items() if not lb.strip()}
     assert bad == {}, f"前端 NEXT_ACTIONS 存在空 label：{bad}"
 
 
@@ -516,4 +548,3 @@ def test_frontend_next_actions_no_empty_labels():
 #     / test_frontend_next_actions_parity 定向失败（本仓此前该护栏是「手写镜像 vs 手写
 #     镜像」，永不失败 —— 见下方 _parse_frontend_next_actions 的说明）
 # ---------------------------------------------------------------------------
-

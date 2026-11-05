@@ -12,6 +12,7 @@
 8. 导出预检 section_number_mismatch（存储编号 vs 结构重算编号）
 9. heading_v2 / heading_templates 字符表别名（唯一事实源）
 """
+
 import json
 
 import pytest
@@ -111,10 +112,13 @@ class TestJsonResponseCompat:
 class TestRenumberSectionOutlineIds:
     def test_updates_and_confidence_preserved(self):
         tree = [
-            {"id": "x1", "outline_json": json.dumps({"id": "5", "confidence": 0.9}),
-             "children": [
-                 {"id": "x2", "outline_json": json.dumps({"id": "5.3"}), "children": []},
-             ]},
+            {
+                "id": "x1",
+                "outline_json": json.dumps({"id": "5", "confidence": 0.9}),
+                "children": [
+                    {"id": "x2", "outline_json": json.dumps({"id": "5.3"}), "children": []},
+                ],
+            },
             {"id": "x3", "outline_json": None, "children": []},
         ]
         updates = renumber_section_outline_ids(tree)
@@ -123,7 +127,7 @@ class TestRenumberSectionOutlineIds:
         assert oj1["id"] == "1" and oj1["confidence"] == 0.9  # 编号刷新 + 保留既有字段
         assert updates[0][1] == 1
         oj2 = json.loads(updates[1][0])
-        assert oj2["id"] == "1.1" and updates[1][1] == 2      # level 与编号深度同步
+        assert oj2["id"] == "1.1" and updates[1][1] == 2  # level 与编号深度同步
         oj3 = json.loads(updates[2][0])
         assert oj3["id"] == "2" and updates[2][1] == 1
 
@@ -158,8 +162,7 @@ class TestStoredIdMapping:
     def test_stored_outline_id(self):
         assert stored_outline_id({"outline_json": json.dumps({"id": "2.1"})}) == "2.1"
         # UUID / 非点分路径 / 非法 JSON / 缺失 → 空
-        assert stored_outline_id({"outline_json": json.dumps(
-            {"id": "6fa8-...-uuid"})}) == ""
+        assert stored_outline_id({"outline_json": json.dumps({"id": "6fa8-...-uuid"})}) == ""
         assert stored_outline_id({"outline_json": "{坏"}) == ""
         assert stored_outline_id({"outline_json": ""}) == ""
         assert stored_outline_id({}) == ""
@@ -198,7 +201,7 @@ class TestRenumberSectionBodySubheadings:
         content = "2 总体安排\n\n**3 资源配置**\n"
         new, changes = renumber_section_body_subheadings(content, "3.2", 2, "进度计划")
         assert "2.1 总体安排" in new
-        assert "2.2 资源配置" in new          # **加粗**包裹的纯文本标题整行规范化
+        assert "2.2 资源配置" in new  # **加粗**包裹的纯文本标题整行规范化
         assert "**" not in new
         assert len(changes) == 2
 
@@ -212,10 +215,10 @@ class TestRenumberSectionBodySubheadings:
             "## 真标题\n"
         )
         new, changes = renumber_section_body_subheadings(content, "3.2", 2, "进度计划")
-        assert "### 围栏内不是标题" in new            # 代码围栏内不动
-        assert "1. 先检查后作业" in new               # 有序列表不动
-        assert "2、先验收后进入" in new               # 中文顿号列表不动
-        assert "3.1.12 身份证复印件、照片；" in new   # 句末标点 → 正文行不动
+        assert "### 围栏内不是标题" in new  # 代码围栏内不动
+        assert "1. 先检查后作业" in new  # 有序列表不动
+        assert "2、先验收后进入" in new  # 中文顿号列表不动
+        assert "3.1.12 身份证复印件、照片；" in new  # 句末标点 → 正文行不动
         assert "# 完成后清理现场，做到工完场清。" in new  # 降级段落不动
         assert "## 2.1 真标题" in new
         assert len(changes) == 1
@@ -224,8 +227,8 @@ class TestRenumberSectionBodySubheadings:
         # 正文首行自引用本节标题：导出渲染会丢弃该块，规范化不给它占号
         content = "## 进度计划\n\n## 总体安排\n"
         new, changes = renumber_section_body_subheadings(content, "3.2", 2, "进度计划")
-        assert "## 进度计划" in new          # 保持原样（导出时被剥）
-        assert "## 2.1 总体安排" in new      # 从 2.1 起算而非 2.2
+        assert "## 进度计划" in new  # 保持原样（导出时被剥）
+        assert "## 2.1 总体安排" in new  # 从 2.1 起算而非 2.2
         assert len(changes) == 1
 
     def test_idempotent(self):
@@ -258,6 +261,7 @@ class TestRenumberSectionBodySubheadings:
         # 终极口径验证：规范化后的正文再走导出端 _compute_subheading，
         # 得到的编号必须与正文行内已有的编号逐字一致（即二次运行零变化）
         from app.routers.export import _compute_subheading, _parse_content_blocks
+
         content = "## 总体安排\n\n### 关键节点\n\n## 资源配置\n"
         normalized, _ = renumber_section_body_subheadings(content, "3.2", 2, "进度计划")
         blocks = _parse_content_blocks(normalized)
@@ -266,9 +270,10 @@ class TestRenumberSectionBodySubheadings:
             if b.get("type") != "heading":
                 continue
             from app.routers.export import _strip_title_number
+
             text, _style = _compute_subheading(
-                "2", 2, b.get("level", 1), counters,
-                _strip_title_number(b.get("text", "")), "")
+                "2", 2, b.get("level", 1), counters, _strip_title_number(b.get("text", "")), ""
+            )
             # 导出重算的编号 == 正文行内已有编号（去掉标题文本后对比前缀）
             assert b["text"].startswith(text.split(" ")[0] + " ")
 
@@ -279,11 +284,12 @@ class TestRenumberSectionBodySubheadings:
 class TestSrcLine:
     def test_md_and_plain_heading_carry_src_line(self):
         from app.routers.export import _parse_content_blocks
+
         blocks = _parse_content_blocks("# A\n\n正文\n\n2.1 B\n")
         assert blocks[0]["src_line"] == 0
-        assert blocks[1]["type"] == "paragraph"          # 正文
+        assert blocks[1]["type"] == "paragraph"  # 正文
         assert blocks[2]["type"] == "heading"
-        assert blocks[2]["src_line"] == 4                # 0 基源行号
+        assert blocks[2]["src_line"] == 4  # 0 基源行号
 
 
 # ============================================================
@@ -294,11 +300,12 @@ class TestAppendixStyle:
         from app.routers.export import _get_or_add_appendix_heading_style
         from docx import Document
         from docx.oxml.ns import qn
+
         doc = Document()
         style = _get_or_add_appendix_heading_style(doc)
         ol = style.element.get_or_add_pPr().find(qn("w:outlineLvl"))
-        assert ol is not None and ol.get(qn("w:val")) == "9"   # 正文文本，不进 TOC \o
-        assert style.base_style.name == "Heading 2"            # 外观继承二级标题
+        assert ol is not None and ol.get(qn("w:val")) == "9"  # 正文文本，不进 TOC \o
+        assert style.base_style.name == "Heading 2"  # 外观继承二级标题
         # 同一文档重复获取必须复用（幂等，不重复创建）。
         # 注意：python-docx 每次按名查找都会新建包装对象，只能比较 style_id。
         again = _get_or_add_appendix_heading_style(doc)
@@ -315,11 +322,24 @@ class TestAppendixStyle:
 class TestSectionNumberMismatch:
     def test_mismatch_detected(self):
         from app.routers.export import _detect_section_number_mismatch
+
         sections = [
-            {"id": "a", "parent_id": "", "level": 1, "sort_order": 0,
-             "title": "第一章", "outline_json": json.dumps({"id": "1"})},
-            {"id": "b", "parent_id": "a", "level": 2, "sort_order": 1,
-             "title": "子章", "outline_json": json.dumps({"id": "9.9"})},
+            {
+                "id": "a",
+                "parent_id": "",
+                "level": 1,
+                "sort_order": 0,
+                "title": "第一章",
+                "outline_json": json.dumps({"id": "1"}),
+            },
+            {
+                "id": "b",
+                "parent_id": "a",
+                "level": 2,
+                "sort_order": 1,
+                "title": "子章",
+                "outline_json": json.dumps({"id": "9.9"}),
+            },
         ]
         issues = _detect_section_number_mismatch(sections)
         assert len(issues) == 1
@@ -330,31 +350,70 @@ class TestSectionNumberMismatch:
 
     def test_consistent_tree_clean(self):
         from app.routers.export import _detect_section_number_mismatch
+
         sections = [
-            {"id": "a", "parent_id": "", "level": 1, "sort_order": 0,
-             "title": "一", "outline_json": json.dumps({"id": "1"})},
-            {"id": "b", "parent_id": "a", "level": 2, "sort_order": 1,
-             "title": "1.1", "outline_json": json.dumps({"id": "1.1"})},
-            {"id": "c", "parent_id": "", "level": 1, "sort_order": 2,
-             "title": "二", "outline_json": json.dumps({"id": "2"})},
+            {
+                "id": "a",
+                "parent_id": "",
+                "level": 1,
+                "sort_order": 0,
+                "title": "一",
+                "outline_json": json.dumps({"id": "1"}),
+            },
+            {
+                "id": "b",
+                "parent_id": "a",
+                "level": 2,
+                "sort_order": 1,
+                "title": "1.1",
+                "outline_json": json.dumps({"id": "1.1"}),
+            },
+            {
+                "id": "c",
+                "parent_id": "",
+                "level": 1,
+                "sort_order": 2,
+                "title": "二",
+                "outline_json": json.dumps({"id": "2"}),
+            },
         ]
         assert _detect_section_number_mismatch(sections) == []
 
     def test_missing_or_invalid_stored_skipped(self):
         from app.routers.export import _detect_section_number_mismatch
+
         sections = [
-            {"id": "a", "parent_id": "", "level": 1, "sort_order": 0,
-             "title": "历史行", "outline_json": ""},                       # 缺失 → 不报
-            {"id": "b", "parent_id": "", "level": 1, "sort_order": 1,
-             "title": "UUID行", "outline_json": json.dumps({"id": "x-y-z"})},  # 非法 → 不报
+            {
+                "id": "a",
+                "parent_id": "",
+                "level": 1,
+                "sort_order": 0,
+                "title": "历史行",
+                "outline_json": "",
+            },  # 缺失 → 不报
+            {
+                "id": "b",
+                "parent_id": "",
+                "level": 1,
+                "sort_order": 1,
+                "title": "UUID行",
+                "outline_json": json.dumps({"id": "x-y-z"}),
+            },  # 非法 → 不报
         ]
         assert _detect_section_number_mismatch(sections) == []
 
     def test_capped_at_20(self):
         from app.routers.export import _detect_section_number_mismatch
+
         sections = [
-            {"id": f"s{i}", "parent_id": "", "level": 1, "sort_order": i,
-             "title": f"章{i}", "outline_json": json.dumps({"id": "99"})}
+            {
+                "id": f"s{i}",
+                "parent_id": "",
+                "level": 1,
+                "sort_order": i,
+                "title": f"章{i}",
+                "outline_json": json.dumps({"id": "99"}),
+            }
             for i in range(30)
         ]
         assert len(_detect_section_number_mismatch(sections)) == 20
@@ -379,6 +438,7 @@ class TestCharTableAliases:
     def test_config_default_on(self):
         # 新增配置项默认开启（预览/落库/导出三处同源为任务要求的统一行为）
         from app.config import settings
+
         assert settings.content_subheading_renumber is True
         # E3 / E6 Tier 1 新增配置项：默认启用统一行为与预检
         assert settings.body_subheading_demote_with_children is True
@@ -399,64 +459,62 @@ class TestBodySubheadingDemotion:
     def test_rel0_demotes_to_l6(self):
         """has_children=True、相对深度 0 → 1）、标题（L6，顿号、无空格）。"""
         from app.routers.export import _compute_subheading
+
         sub = {}
-        text, style = _compute_subheading("2", 2, 1, sub, "总体安排",
-                                         sec_id="sec-1", has_children=True)
+        text, style = _compute_subheading("2", 2, 1, sub, "总体安排", sec_id="sec-1", has_children=True)
         assert text == "1）、总体安排"
         assert style == 6  # L6 Heading
-        text2, _ = _compute_subheading("2", 2, 1, sub, "资源配置",
-                                       sec_id="sec-1", has_children=True)
+        text2, _ = _compute_subheading("2", 2, 1, sub, "资源配置", sec_id="sec-1", has_children=True)
         assert text2 == "2）、资源配置"
 
     def test_rel1_demotes_to_l7_lowercase(self):
         """has_children=True、相对深度 1 → a、标题（L7，顿号、无空格）。"""
         from app.routers.export import _compute_subheading
+
         sub = {}
         _compute_subheading("2", 2, 1, sub, "总体安排", has_children=True)  # rel0 → 1）
-        text, style = _compute_subheading("2", 2, 2, sub, "劳动组织",
-                                         sec_id="sec-1", has_children=True)  # rel1
+        text, style = _compute_subheading("2", 2, 2, sub, "劳动组织", sec_id="sec-1", has_children=True)  # rel1
         assert text == "a、劳动组织"
         assert style == 7
 
     def test_rel2_continues_l7(self):
         """has_children=True、相对深度 2 → b、标题（L7 字母序列续排）。"""
         from app.routers.export import _compute_subheading
+
         sub = {}
         _compute_subheading("2", 2, 1, sub, "总体安排", has_children=True)
         _compute_subheading("2", 2, 2, sub, "劳动组织", has_children=True)
-        text, style = _compute_subheading("2", 2, 3, sub, "工种分配",
-                                         sec_id="sec-1", has_children=True)
+        text, style = _compute_subheading("2", 2, 3, sub, "工种分配", sec_id="sec-1", has_children=True)
         assert text == "b、工种分配"
         assert style == 7
 
     def test_no_demote_when_no_children(self):
         """has_children=False（无子章节）时保持旧格式 X.X.X。"""
         from app.routers.export import _compute_subheading
+
         sub = {}
-        text, style = _compute_subheading("2", 2, 1, sub, "总体安排",
-                                         sec_id="sec-1", has_children=False)
+        text, style = _compute_subheading("2", 2, 1, sub, "总体安排", sec_id="sec-1", has_children=False)
         # 无子章节时不降级，沿用原点分编号
         assert text == "2.1 总体安排"
         assert style == 3  # L3 Heading
-        text2, _ = _compute_subheading("2", 2, 2, sub, "劳动组织",
-                                       sec_id="sec-1", has_children=False)
+        text2, _ = _compute_subheading("2", 2, 2, sub, "劳动组织", sec_id="sec-1", has_children=False)
         assert text2 == "2.1.1 劳动组织"
 
     def test_idempotent_after_demote(self):
         """降级输出再跑一次同样参数 → 结果不变（幂等）。"""
         from app.routers.export import _compute_subheading
+
         sub = {}
-        t1, s1 = _compute_subheading("2", 2, 1, sub, "总体安排",
-                                     sec_id="sec-1", has_children=True)
+        t1, s1 = _compute_subheading("2", 2, 1, sub, "总体安排", sec_id="sec-1", has_children=True)
         sub2 = {}  # 计数器重置
-        t2, s2 = _compute_subheading("2", 2, 1, sub2, "总体安排",
-                                     sec_id="sec-1", has_children=True)
+        t2, s2 = _compute_subheading("2", 2, 1, sub2, "总体安排", sec_id="sec-1", has_children=True)
         assert t1 == t2 == "1）、总体安排"
         assert s1 == s2 == 6
 
     def test_mixed_depth_counter_resets_properly(self):
         """混合深度：rel0 重开后从新序列 1）起，rel1 从 a、起。"""
         from app.routers.export import _compute_subheading
+
         sub = {}
         _compute_subheading("2", 2, 1, sub, "A", has_children=True)  # 1）
         _compute_subheading("2", 2, 2, sub, "A1", has_children=True)  # a、
@@ -482,10 +540,15 @@ class TestStaleCrossRefDetection:
 
     def test_stale_figure_ref(self):
         from app.routers.export import _detect_stale_cross_references
+
         sections = [
-            {"id": "s1", "parent_id": "", "level": 1,
-             "outline_json": '{"id": "1"}',
-             "content": "正文引用 图1-1 为劳动力图；另有一处图3-2 已经漂移。"},
+            {
+                "id": "s1",
+                "parent_id": "",
+                "level": 1,
+                "outline_json": '{"id": "1"}',
+                "content": "正文引用 图1-1 为劳动力图；另有一处图3-2 已经漂移。",
+            },
         ]
         # 真实分配集合：图1-1 / 图1-2（导出端实际分配）
         real = {"fig": {"图1-1", "图1-2"}, "tbl": set(), "sec": set()}
@@ -497,6 +560,7 @@ class TestStaleCrossRefDetection:
 
     def test_stale_table_ref(self):
         from app.routers.export import _detect_stale_cross_references
+
         sections = [{"id": "s1", "content": "详见 表1-1 和 表5-9。"}]
         real = {"fig": set(), "tbl": {"表1-1"}, "sec": set()}
         issues = _detect_stale_cross_references(sections, real)
@@ -504,6 +568,7 @@ class TestStaleCrossRefDetection:
 
     def test_stale_section_ref(self):
         from app.routers.export import _detect_stale_cross_references
+
         sections = [{"id": "s1", "content": "具体做法见 第2.3节。"}]
         real = {"fig": set(), "tbl": set(), "sec": {"第1章", "第2章", "1", "2", "2.1", "2.2"}}
         issues = _detect_stale_cross_references(sections, real)
@@ -513,8 +578,8 @@ class TestStaleCrossRefDetection:
     def test_clean_refs_no_false_positive(self):
         """所有引用均在真实分配集合内 → 空 issues。"""
         from app.routers.export import _detect_stale_cross_references
-        sections = [{"id": "s1",
-                     "content": "图1-1 为进度计划；表1-1 为工程量；详见第2章。"}]
+
+        sections = [{"id": "s1", "content": "图1-1 为进度计划；表1-1 为工程量；详见第2章。"}]
         real = {"fig": {"图1-1"}, "tbl": {"表1-1"}, "sec": {"第1章", "第2章"}}
         issues = _detect_stale_cross_references(sections, real)
         assert issues == []
@@ -522,7 +587,7 @@ class TestStaleCrossRefDetection:
     def test_empty_content_skipped(self):
         """空章节 content 不参与检测。"""
         from app.routers.export import _detect_stale_cross_references
+
         sections = [{"id": "s1", "content": ""}]
-        issues = _detect_stale_cross_references(sections,
-                                                {"fig": set(), "tbl": set(), "sec": set()})
+        issues = _detect_stale_cross_references(sections, {"fig": set(), "tbl": set(), "sec": set()})
         assert issues == []

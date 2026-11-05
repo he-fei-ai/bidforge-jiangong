@@ -35,6 +35,7 @@
 「计数器前移」修复，真实制造重复编号，再要求预检必须报出对应编号。
 双向锁死才算数。
 """
+
 import inspect
 import re
 
@@ -45,8 +46,7 @@ from docx import Document
 
 
 def _sec(sid, pid, level, order, title, content=""):
-    return {"id": sid, "parent_id": pid, "level": level,
-            "sort_order": order, "title": title, "content": content}
+    return {"id": sid, "parent_id": pid, "level": level, "sort_order": order, "title": title, "content": content}
 
 
 #: 夹具设计原则（三条缺一不可）：
@@ -58,11 +58,9 @@ def _sec(sid, pid, level, order, title, content=""):
 #: ③ b（L2）同时含**内容子标题**与**DB 子章节 b1**，这正是计数器前移修复
 #:    唯一生效的场景 —— 反向用例靠它制造真实碰撞。
 TREE = [
-    _sec("ch1", "", 1, 0, "第一章 工程概况",
-         "## 项目概况\n甲。\n\n## 建筑概况\n乙。\n"),
+    _sec("ch1", "", 1, 0, "第一章 工程概况", "## 项目概况\n甲。\n\n## 建筑概况\n乙。\n"),
     _sec("a", "ch1", 2, 1, "工程规模", ""),
-    _sec("b", "ch1", 2, 2, "结构选型",
-         "## 选型依据\n甲。\n\n## 材料要求\n乙。\n"),
+    _sec("b", "ch1", 2, 2, "结构选型", "## 选型依据\n甲。\n\n## 材料要求\n乙。\n"),
     _sec("b1", "b", 3, 3, "具体选型", ""),
     _sec("ch2", "", 1, 4, "第二章 施工计划", ""),
     _sec("ch3", "", 1, 5, "第三章 安全措施", ""),
@@ -73,33 +71,44 @@ _NUM_RE = re.compile(r"^(\d+(?:\.\d+)*)\s")
 
 def render_headings(tmp_path, sections, name="parity.docx"):
     """走真实渲染管线产出 DOCX，返回其**渲染后**的全部标题文本。"""
-    blocks = {s["id"]: E._parse_content_blocks(s.get("content") or "")
-              for s in sections}
+    blocks = {s["id"]: E._parse_content_blocks(s.get("content") or "") for s in sections}
     cm = {}
     for s in sections:
         cm.setdefault(s.get("parent_id") or "", []).append(s)
     ids = {s["id"] for s in sections}
     prep = {
         "scheme": {"name": "S", "project_id": "p"},
-        "roots": [s for s in sections
-                  if not s.get("parent_id") or s["parent_id"] not in ids],
-        "children_map": cm, "chart_lookup": {}, "rendered_bytes": {},
-        "blocks_cache": blocks, "heading_styles": E._load_heading_styles({}),
-        "image_bytes": {}, "global_facts": [],
-        "docx_options": {"font_name": "宋体", "font_size": 12.0,
-                         "page_header": "", "page_footer": "",
-                         "show_page_number": True, "show_title_page": False,
-                         "show_toc": False, "bidder_name": "",
-                         "page_break_before_chapter": True,
-                         "line_spacing": 1.15, "page_number_style": "simple",
-                         "toc_depth": 3},
+        "roots": [s for s in sections if not s.get("parent_id") or s["parent_id"] not in ids],
+        "children_map": cm,
+        "chart_lookup": {},
+        "rendered_bytes": {},
+        "blocks_cache": blocks,
+        "heading_styles": E._load_heading_styles({}),
+        "image_bytes": {},
+        "global_facts": [],
+        "docx_options": {
+            "font_name": "宋体",
+            "font_size": 12.0,
+            "page_header": "",
+            "page_footer": "",
+            "show_page_number": True,
+            "show_title_page": False,
+            "show_toc": False,
+            "bidder_name": "",
+            "page_break_before_chapter": True,
+            "line_spacing": 1.15,
+            "page_number_style": "simple",
+            "toc_depth": 3,
+        },
     }
     out = str(tmp_path / name)
     E._build_docx_sync(*E._build_docx_task(out, prep))
     doc = Document(out)
-    return [p.text.strip() for p in doc.paragraphs
-            if p.style is not None and (p.style.name or "").startswith("Heading")
-            and p.text.strip()]
+    return [
+        p.text.strip()
+        for p in doc.paragraphs
+        if p.style is not None and (p.style.name or "").startswith("Heading") and p.text.strip()
+    ]
 
 
 def rendered_numbers(headings):
@@ -139,8 +148,7 @@ class TestNumberingParityDetectorVsRenderer:
         monkeypatch.setattr(settings, "body_subheading_demote_with_children", False)
         nums = rendered_numbers(render_headings(tmp_path, TREE))
         assert len(nums) >= 7, f"渲染出的编号标题过少，夹具可能失效：{nums}"
-        assert {"1.1", "2.1", "2.3"} <= set(nums), (
-            f"夹具未同时覆盖「内容子标题」与「前移后的子章节」：{nums}")
+        assert {"1.1", "2.1", "2.3"} <= set(nums), f"夹具未同时覆盖「内容子标题」与「前移后的子章节」：{nums}"
 
     def test_fixture_is_not_degenerate_under_default_config(self, tmp_path):
         """默认配置下夹具同样产出编号（内容子标题降级为 1）/2），
@@ -158,13 +166,12 @@ class TestNumberingParityDetectorVsRenderer:
         """
         assert settings.body_subheading_demote_with_children is True
         headings = render_headings(tmp_path, TREE)
-        assert not rendered_duplicates(headings), (
-            f"默认配置渲染应唯一：{rendered_duplicates(headings)}")
-        assert E._detect_duplicate_sections([dict(s) for s in TREE]) == [], \
-            "默认配置下预检报了渲染结果里不存在的重复编号（假阳性）"
+        assert not rendered_duplicates(headings), f"默认配置渲染应唯一：{rendered_duplicates(headings)}"
+        assert (
+            E._detect_duplicate_sections([dict(s) for s in TREE]) == []
+        ), "默认配置下预检报了渲染结果里不存在的重复编号（假阳性）"
 
-    def test_demote_off_render_is_unique_and_detector_silent(self, tmp_path,
-                                                             monkeypatch):
+    def test_demote_off_render_is_unique_and_detector_silent(self, tmp_path, monkeypatch):
         """降级关闭：正文子标题回到 1.1/1.2 命名空间，计数器前移使编号仍唯一。"""
         monkeypatch.setattr(settings, "body_subheading_demote_with_children", False)
         headings = render_headings(tmp_path, TREE)
@@ -179,8 +186,7 @@ class TestNumberingParityDetectorVsRenderer:
         只在干净树上恰好一致）。
         """
         monkeypatch.setattr(settings, "body_subheading_demote_with_children", False)
-        monkeypatch.setattr(E, "_count_child_namespace_subheadings",
-                            lambda blocks, prefix: 0)
+        monkeypatch.setattr(E, "_count_child_namespace_subheadings", lambda blocks, prefix: 0)
         headings = render_headings(tmp_path, TREE)
         dups = rendered_duplicates(headings)
         assert dups == {"2.1"}, f"前置失败：期望恰好 2.1 重复，实际 {dups}"
@@ -190,34 +196,33 @@ class TestNumberingParityDetectorVsRenderer:
     def test_reported_are_all_real_rendered_duplicates(self, tmp_path, monkeypatch):
         """假阳反向：预检报出的编号，必须在渲染结果里真实重复。"""
         monkeypatch.setattr(settings, "body_subheading_demote_with_children", False)
-        monkeypatch.setattr(E, "_count_child_namespace_subheadings",
-                            lambda blocks, prefix: 0)
+        monkeypatch.setattr(E, "_count_child_namespace_subheadings", lambda blocks, prefix: 0)
         headings = render_headings(tmp_path, TREE)
         dups = rendered_duplicates(headings)
         reported = reported_numbers(E._detect_duplicate_sections([dict(s) for s in TREE]))
-        assert reported <= dups, (
-            f"预检报出 {sorted(reported - dups)}，渲染结果里并不重复（假阳性）")
+        assert reported <= dups, f"预检报出 {sorted(reported - dups)}，渲染结果里并不重复（假阳性）"
 
     # ---------------------------------------------------------- 端到端双向
-    @pytest.mark.parametrize("demote,preadv", [
-        (True, True),      # 默认
-        (False, True),     # 降级关闭
-        (False, False),    # 前移修复被摘除（人为制造碰撞）
-    ])
-    def test_parity_holds_in_every_configuration(self, tmp_path, monkeypatch,
-                                                 demote, preadv):
+    @pytest.mark.parametrize(
+        "demote,preadv",
+        [
+            (True, True),  # 默认
+            (False, True),  # 降级关闭
+            (False, False),  # 前移修复被摘除（人为制造碰撞）
+        ],
+    )
+    def test_parity_holds_in_every_configuration(self, tmp_path, monkeypatch, demote, preadv):
         """三种配置下逐一验证「预检 ≡ 渲染」。"""
         monkeypatch.setattr(settings, "body_subheading_demote_with_children", demote)
         if not preadv:
-            monkeypatch.setattr(E, "_count_child_namespace_subheadings",
-                                lambda blocks, prefix: 0)
+            monkeypatch.setattr(E, "_count_child_namespace_subheadings", lambda blocks, prefix: 0)
         headings = render_headings(tmp_path, TREE, f"c{demote}{preadv}.docx")
         rendered_dupes = rendered_duplicates(headings)
-        reported = reported_numbers(
-            E._detect_duplicate_sections([dict(s) for s in TREE]))
+        reported = reported_numbers(E._detect_duplicate_sections([dict(s) for s in TREE]))
         assert reported == rendered_dupes, (
             f"demote={demote} preadv={preadv} 时两侧不一致："
-            f"渲染重复 {sorted(rendered_dupes)} vs 预检 {sorted(reported)}")
+            f"渲染重复 {sorted(rendered_dupes)} vs 预检 {sorted(reported)}"
+        )
 
     def test_real_collision_fixture_is_detected(self):
         """构造一棵**真的**会撞号的树（无子标题可借位）：预检必须报出来。"""
@@ -245,10 +250,9 @@ class TestNumberingReplicationSourceLock:
         漏传（依赖默认值 False）在默认配置下必然产生假阳性 —— 见模块 docstring。"""
         src = inspect.getsource(E._detect_duplicate_sections)
         assert "has_children=has_children_demoted" in src, (
-            "预检侧未向 _compute_subheading 传递 has_children —— "
-            "降级命名空间下必然报出渲染结果里不存在的重复编号")
-        assert "body_subheading_demote_with_children" in src, (
-            "预检侧必须与渲染端读同一个降级开关")
+            "预检侧未向 _compute_subheading 传递 has_children —— " "降级命名空间下必然报出渲染结果里不存在的重复编号"
+        )
+        assert "body_subheading_demote_with_children" in src, "预检侧必须与渲染端读同一个降级开关"
 
     def test_detector_uses_shared_helpers(self):
         src = inspect.getsource(E._detect_duplicate_sections)
@@ -259,18 +263,18 @@ class TestNumberingReplicationSourceLock:
 
     def test_detector_mirrors_counter_pre_advance(self):
         src = inspect.getsource(E._detect_duplicate_sections)
-        for frag in ('gen.parent_ids[_idx] = sec.get("id")',
-                     "gen.counters[_idx] = n_child_ns",
-                     "for _i in range(_idx + 1, 8):"):
+        for frag in (
+            'gen.parent_ids[_idx] = sec.get("id")',
+            "gen.counters[_idx] = n_child_ns",
+            "for _i in range(_idx + 1, 8):",
+        ):
             assert frag in src, f"预检侧缺失计数器前移的关键行：{frag}"
 
     def test_pre_advance_guard_is_level_gated_on_both_sides(self):
         """计数器前移的 `level >= 2` 门控必须两侧都在
         （level=1 前移会把子章节错改成 "18/19"）。"""
-        assert "if level >= 2 and children_map.get" in inspect.getsource(
-            E._detect_duplicate_sections)
-        assert "if level >= 2 and children_map.get" in inspect.getsource(
-            E._build_docx_sync)
+        assert "if level >= 2 and children_map.get" in inspect.getsource(E._detect_duplicate_sections)
+        assert "if level >= 2 and children_map.get" in inspect.getsource(E._build_docx_sync)
 
     def test_demote_flag_read_fail_safes_to_true(self):
         """配置读取失败必须回落 True（与渲染端同一 fail-safe 默认），
@@ -284,3 +288,37 @@ class TestNumberingReplicationSourceLock:
         name = "body_subheading_demote_with_children"
         assert name in inspect.getsource(E._detect_duplicate_sections)
         assert name in inspect.getsource(E._build_docx_sync)
+
+
+class TestR179DbNormalizeMatchesRenderer:
+    """R179 端到端护栏：**落库侧重规范化**后的子标题编号 ≡ 导出渲染成稿。
+
+    2026-11-05 第1轮的导出修复只在 write_section 侧剥字母序前缀、剔除任意位置
+    的重复标题；落库侧 numbering.renumber_section_body_subheadings 未同步，
+    造成「前端预览（读落库正文）≠ 导出成稿」，且更深层子标题每次重规范化
+    多叠一层 "a、"（每次拖拽/保存都会触发全量重规范化 → 无界增长）。
+    本用例把落库结果直接喂给真实渲染管线，锁死两侧逐字一致。
+    """
+
+    def test_alpha_prefix_and_duplicate_title_end_to_end(self, tmp_path):
+        from app.services.numbering import renumber_section_body_subheadings
+
+        raw = "## a、项目概况\n甲。\n\n## 工程概况\n乙。\n\n## b、建筑概况\n丙。\n"
+        stored, _changes = renumber_section_body_subheadings(raw, "1", 1, "工程概况", has_db_children=False)
+        # 落库侧：字母序前缀必须剥离；重复标题只跳过占号，后续编号不得错位
+        assert "## 1.1 项目概况" in stored, stored
+        assert "## 1.2 建筑概况" in stored, stored
+        assert "a、项目概况" not in stored, stored
+        # 再跑一轮必须幂等（旧实现会叠加 "a、"）
+        stored2, _c2 = renumber_section_body_subheadings(stored, "1", 1, "工程概况", has_db_children=False)
+        assert stored2 == stored, (stored, stored2)
+
+        secs = [
+            _sec("ch1", "", 1, 0, "第一章 工程概况", stored),
+            _sec("ch2", "", 1, 1, "第二章 施工计划", ""),
+        ]
+        headings = render_headings(tmp_path, secs, name="r179.docx")
+        # 成稿编号必须与落库侧一致（重复标题在导出侧被整块剔除，不占号）
+        assert "1.1 项目概况" in headings, headings
+        assert "1.2 建筑概况" in headings, headings
+        assert not [h for h in headings if h.startswith("1.3")], headings

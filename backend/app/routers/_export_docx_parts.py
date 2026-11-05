@@ -12,6 +12,35 @@ _INLINE_RE = _sh.re.compile(
 )
 
 
+#: XML 1.0 不允许的字符：C0 控制符（保留 \t \n \r）、U+FFFE/U+FFFF、孤立代理项。
+#: ✅ BUG 修复（2026-11-03 · R175 · BUG-2）：python-docx 的 ``add_run(text)`` 把文本
+#: 直接写进 ``w:t``，lxml 遇到非法字符会抛 ``ValueError: All strings must be
+#: XML compatible``。封面标题 / 投标人 / 页眉页脚 / 封面信息表 / 前置表单等
+#: 路径此前**直写用户输入**，表单里混入一个 ``\x00`` 即让整单导出 500
+#: （连同已生成内容全部作废）。现统一经 ``_xml_safe_text`` 剥除非法字符
+#: （合法空白 \t/\n/\r 原样保留），并由 ``_safe_add_run`` 作为唯一出口。
+_XML_ILLEGAL_RE = _sh.re.compile(
+    "[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffe\uffff\ud800-\udfff]")
+
+
+def _xml_safe_text(text) -> str:
+    """剥除 XML 非法字符；``None`` → 空串，非字符串按 ``str`` 转换。"""
+    if text is None:
+        return ""
+    s = text if isinstance(text, str) else str(text)
+    if not s:
+        return s
+    return _XML_ILLEGAL_RE.sub("", s)
+
+
+def _safe_add_run(paragraph, text):
+    """``paragraph.add_run`` 的安全出口：先剥 XML 非法控制字符再添加 run。
+
+    与 ``add_run`` 返回同一 run 对象，调用方可继续 ``_set_run_font``。
+    """
+    return paragraph.add_run(_xml_safe_text(text))
+
+
 def _set_run_font(run, name: str, size=None, *, bold=None, italic=None,
                   strike=None, color=None):
     """统一设置 run 字体：同时写入 w:ascii / w:hAnsi 与 w:eastAsia。
@@ -109,6 +138,188 @@ def _collapse_redundant_spaces(text: str) -> str:
     return _sh.re.sub(r"[ \t]{2,}", " ", text)
 
 
+# ---------------------------------------------------------------------------
+# ✅ R179（2026-11-05）：「第1轮格式问题分析报告」根因收口 —— 交付文本规范化
+# ---------------------------------------------------------------------------
+# 报告把 16 类痕迹归因为「PDF/Word/HTML/Markdown 多次转换」，但那只是表象。
+# 逐段追溯后的真实入口有四类：
+#   ① 上传解析把 PDF 分页标记 / 页脚当正文写进内容模型；
+#   ② 提示词生成直接输出 LaTeX / HTML 实体 / Markdown 管道符；
+#   ③ 旧版转换器把 HTML 再转 Markdown 时产生双重实体（``&amp;gt;``）；
+#   ④ 模型混入英文误植词、破折号与标准号格式不统一。
+# 本函数是渲染层统一出口：``_add_runs_with_inline_format`` 覆盖正文 / 标题 /
+# 表格单元格；题注路径（表题 / 图题 / 占位行）单独调用。**只做确定性替换**：
+# 「一」形破折号无法与「统一」等正常词区分，明确不自动替换（列入人工校对待办）。
+_FORMULA_SPAN_RE = _sh.re.compile(
+    r"(\$\$.*?\$\$|\$[^$\n]*?\$|\\\(.+?\\\)|\\\[.+?\\\])", _sh.re.S)
+
+#: 「1.5% 0」→「1.5‰」（千分号被 PDF/OCR 拆成「% 0」的高置信形态）。
+_RE_PERMILLE = _sh.re.compile(r"(?<=\d)[ \t]*%[ \t]+0(?![0-9.])")
+
+#: 「0.5MQ」→「0.5MΩ」（兆欧符号 O 被识别成 Q 的高置信形态）。
+_RE_MQ = _sh.re.compile(r"(?<=[0-9])[ \t]*MQ")
+
+#: 中英混排误植词（仅替换**紧邻中文**的独立英文词，避免误伤 URL / 代码 / 品牌）。
+_RE_EN_TERMS = _sh.re.compile(
+    r"(?P<cn>[\u4e00-\u9fff])[ \t]?"
+    r"(?P<w>devices|fabrication|ventilation|spots|spot|materials|equipment)"
+    r"(?![A-Za-z])",
+    _sh.re.I,
+)
+_EN_TERMS_MAP = {
+    "devices": "设备",
+    "fabrication": "制作",
+    "ventilation": "通风",
+    "spots": "斑点",
+    "spot": "斑点",
+    "materials": "材料",
+    "equipment": "设备",
+}
+
+#: 标准编号统一为「前缀 编号-年份」口径（如 `GB50303- 2015` → `GB 50303-2015`）。
+_RE_STD_NO = _sh.re.compile(
+    r"(?P<p>GBJ|GB/T|GB|JGJ/T|JGJ|CJJ/T|CJJ|DG/TJ|DGJ|JG/T|SH/T|HG/T)"
+    r"[ \t]*(?P<n>\d{2,5}(?:\.\d+)?)[ \t]*[—–\-－][ \t]*(?P<y>[12]\d{3})",
+    _sh.re.I,
+)
+
+#: 中文语境下的半角括号统一为全角；`f(x)` 这类纯 ASCII 公式形态保持不动。
+_RE_PAREN_CJK_CONTENT = _sh.re.compile(r"\(([^()\n]{0,50}[\u4e00-\u9fff][^()\n]{0,50})\)")
+_RE_PAREN_AFTER_CJK = _sh.re.compile(r"(?<=[\u4e00-\u9fff])[ \t]?\(([^()\n]{1,50})\)")
+_RE_PAREN_STD = _sh.re.compile(
+    r"\(((?:GBJ|GB/T|GB|JGJ/T|JGJ|CJJ/T|CJJ|DG/TJ|DGJ|JG/T|SH/T|HG/T)"
+    r"[ \t]*\d{2,5}(?:\.\d+)?[ \t]*[—–\-－][ \t]*[12]\d{3})\)", _sh.re.I)
+
+#: 仅归一**两个中文之间**的连字符为破折号；`GB 50303-2015` / `1-2` 不动。
+_RE_CJK_DASH = _sh.re.compile(r"(?<=[\u4e00-\u9fff])[ \t]*[-–][ \t]*(?=[\u4e00-\u9fff])")
+
+#: 数值比较符两侧去空格（`30 ≤ 40` → `30≤40`）。
+_RE_CMP_GAP = _sh.re.compile(r"(?<=\d)[ \t]*(≤|≥|≠|<|>)[ \t]*(?=\d)")
+
+#: 数字与单位间空格统一（`30 mA` → `30mA`）。
+#: ⚠️ 只收**多字符或无歧义**单位：单字母 `A/W/V/N/L/m/g/t/h/s` 会把
+#: `表 1-1 A、B`（表题列名）误改成 `1-1A、B`，故一律不纳入。
+_RE_UNIT_GAP = _sh.re.compile(
+    r"(?<=\d)[ \t\xa0\u3000]+"
+    r"(?P<u>mm|cm|km|MPa|kPa|kW|kN|mA|mL|MΩ|min|kg|Pa|℃|%|°)"
+    r"(?![A-Za-z0-9])"
+)
+
+#: LaTeX 命令 → 普通符号。只映射**语义唯一**的常见命令，未知命令原样保留
+#: （由落盘前 lint 统计为残留并触发可见降级，绝不静默放过）。
+_LATEX_CMD_MAP = {
+    "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "neq": "≠", "ne": "≠",
+    "approx": "≈", "times": "×", "cdot": "·", "pm": "±", "sim": "～",
+    "Omega": "Ω", "Phi": "Φ", "varphi": "φ", "phi": "φ", "mu": "μ",
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "theta": "θ",
+    "lambda": "λ", "pi": "π", "rho": "ρ", "sigma": "σ", "tau": "τ",
+    "degree": "°", "circ": "°", "quad": " ", "qquad": " ",
+}
+_RE_LATEX_CMD = _sh.re.compile(r"\\(?P<c>[A-Za-z]+)")
+_RE_LATEX_ESC = _sh.re.compile(r"\\(?P<c>[%&_#{}$])")
+_RE_LATEX_MATHRM = _sh.re.compile(r"\\(?:mathrm|text|mathbf|mathit)\{([^{}]*)\}")
+_RE_LATEX_FRAC = _sh.re.compile(r"\\frac\{([^{}]*)\}\{([^{}]*)\}")
+_RE_LATEX_SQRT = _sh.re.compile(r"\\sqrt\{([^{}]*)\}")
+_RE_LATEX_DEG_C = _sh.re.compile(
+    r"(?:\^\s*)?\{?\s*\\circ\s*\}?\s*(?:\\mathrm\{C\}|\{C\}|C)?")
+_RE_SUPERSCRIPT = _sh.re.compile(r"(?<=[A-Za-z0-9)])[ \t]*\^[ \t]*\{?([23])\}?")
+#: 数值区间里的波浪号两侧去空格（`0.6～ 0.8` → `0.6～0.8`）。
+_RE_TILDE_GAP = _sh.re.compile(r"(?<=\d)[ \t]*～[ \t]*(?=\d)")
+
+
+def _latex_to_plain(text: str) -> str:
+    """把**残留 LaTeX** 转成可读普通符号（已成功转 OMML 的公式不会走到这里）。"""
+    if not text:
+        return text
+    def _deg(m):
+        # `^{\circ}C` 是「摄氏度」不是「度」—— 有 C 才用 ℃，否则用 °
+        return "℃" if m.group(0).rstrip().endswith("C") else "°"
+
+    s = _RE_LATEX_DEG_C.sub(_deg, text)
+    s = _RE_LATEX_MATHRM.sub(r"\1", s)
+    s = _RE_LATEX_FRAC.sub(r"\1/\2", s)
+    s = _RE_LATEX_SQRT.sub(r"√\1", s)
+    s = _RE_SUPERSCRIPT.sub(lambda m: {"2": "²", "3": "³"}[m.group(1)], s)
+    s = _RE_LATEX_CMD.sub(
+        lambda m: _LATEX_CMD_MAP.get(m.group("c"), m.group(0)), s)
+    s = _RE_LATEX_ESC.sub(lambda m: m.group("c"), s)
+    s = s.replace("°C", "℃").replace("° C", "℃")
+    return s
+
+
+def _normalize_plain_segment(text: str) -> str:
+    """规范化一个**公式跨度之外**的文本片段（顺序固定，保证幂等）。"""
+    if not text or not isinstance(text, str):
+        return text
+    s = text.replace("\xa0", " ")
+    if "&" in s:
+        # 逐层解码 HTML 实体（`&amp;gt;` → `&gt;` → `>`），最多多解一层覆盖
+        # 「PDF→HTML→Markdown→docx」链路造成的 `&amp;amp;gt;` 三重形态。
+        for _ in range(3):
+            try:
+                decoded = _sh.docx_math.decode_html_entities(s)
+            except Exception:  # pragma: no cover - 解码失败保持原文
+                break
+            if decoded == s:
+                break
+            s = decoded
+    if "\\" in s or "^" in s:
+        s = _latex_to_plain(s)
+    s = _RE_PERMILLE.sub("‰", s)
+    s = _RE_MQ.sub("MΩ", s)
+    s = s.replace("力矩矩", "力矩").replace("峻工", "竣工")
+    s = _RE_EN_TERMS.sub(
+        lambda m: m.group("cn") + _EN_TERMS_MAP[m.group("w").lower()], s)
+
+    def _std(m):
+        p = _sh.re.sub(r"[ \t]*/[ \t]*", "/", m.group("p")).upper()
+        return f"{p} {m.group('n')}-{m.group('y')}"
+
+    s = _RE_STD_NO.sub(_std, s)
+    s = _RE_TILDE_GAP.sub("～", s)
+    s = _RE_CMP_GAP.sub(r"\1", s)
+    s = _RE_PAREN_CJK_CONTENT.sub(r"（\1）", s)
+    s = _RE_PAREN_AFTER_CJK.sub(r"（\1）", s)
+    # 纯 ASCII 括号里若是标准编号（`(GB 50303-2015)`）也统一为全角；
+    # `f(x)` / `(a+b)` 这类公式形态不动（正反例见回归测试）。
+    s = _RE_PAREN_STD.sub(r"（\1）", s)
+    s = _RE_CJK_DASH.sub("—", s)
+    s = _RE_UNIT_GAP.sub(lambda m: m.group("u"), s)
+    return s
+
+
+def _normalize_delivery_text(text: str, *, residual: bool = False) -> str:
+    """交付文本规范化的唯一入口。
+
+    Args:
+        text: 待规范化的文本。
+        residual: ``False``（渲染期）→ 公式跨度保持原样，交给 OMML 转换器；
+            ``True``（落盘前 lint）→ 任何仍存在的公式跨度都意味着转换失败，
+            剥掉分隔符并按普通符号还原，避免 ``$...$`` / ``\\(...\\)`` 印进成稿。
+    """
+    if not text or not isinstance(text, str):
+        return text
+    parts = _FORMULA_SPAN_RE.split(text)
+    out = []
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            out.append(_normalize_plain_segment(part))
+        elif residual:
+            inner = part
+            if part.startswith("$$") and part.endswith("$$"):
+                inner = part[2:-2]
+            elif part.startswith(r"\(") and part.endswith(r"\)"):
+                inner = part[2:-2]
+            elif part.startswith(r"\[") and part.endswith(r"\]"):
+                inner = part[2:-2]
+            elif part.startswith("$") and part.endswith("$"):
+                inner = part[1:-1]
+            out.append(_normalize_plain_segment(inner))
+        else:
+            out.append(part)
+    return "".join(out)
+
+
 def _add_runs_with_inline_format(paragraph, text: str):
     """按公式 + 行内标记混合流写入段落。
 
@@ -116,10 +327,13 @@ def _add_runs_with_inline_format(paragraph, text: str):
     1. ``clean_text`` 先清理控制字符 / U+FFFD / GBK 乱码 / 编码 mojibake /
        中文文档中西里尔误植；
     2. ``$...$`` / ``$$...$$`` / ``\\(...\\)`` / ``\\[...\\]`` 公式转为
-       Word 原生公式（OMML），不再以 LaTeX 源码形式残留在导出文档中。
+       Word 原生公式（OMML），不再以 LaTeX 源码形式残留在导出文档中；
+    3. ✅ R179：``_normalize_delivery_text`` 收口残留 LaTeX 符号 / 双重实体 /
+       千分号 / 兆欧符号 / 英文误植词 / 标准号 / 单位空格 / 中文破折号。
     """
     _sh._accumulate_fix_stats(text)
     text = _sh.docx_math.clean_text(text)
+    text = _normalize_delivery_text(text)
     pos = 0
     for disp, latex, m in _sh.docx_math.iter_formulas(text):
         if m.start() > pos:
@@ -245,8 +459,28 @@ def _log_fix_stats() -> dict:
 _APPENDIX_LIST_LEAD_RE = _sh.re.compile(r"^\s*[-*+]\s+")
 
 
+def _strip_leading_fact_name(text: str, name: str) -> str:
+    """去掉「**名称**: 取值」里与前列表头重复的名称前缀，只留取值。
+
+    ✅ R179（2026-11-05）：附录事实表第一列已是事实名，第二列旧实现只剥了
+    ``- `` 列表符，仍显示「名称: 取值」→ 每行名称重复一次（成稿观感问题，
+    与 R175 BUG-09 只修 Markdown 残留属同一处未收口）。仅在行首**精确**
+    匹配本行名称时剥离，取值本身含冒号/名称不匹配时一律原样保留。
+    """
+    nm = (name or "").strip()
+    body = (text or "").strip()
+    if not nm or not body:
+        return text
+    for pat in (rf"^\*\*\s*{_sh.re.escape(nm)}\s*\*\*\s*[:：]\s*", rf"^{_sh.re.escape(nm)}\s*[:：]\s*"):
+        m = _sh.re.match(pat, body)
+        if m:
+            return body[m.end():].strip()
+    return text
+
+
 def _appendix_cell_paragraph(cell, text: str, font_name: str,
-                             font_size: float = 10.5, *, first: bool = False):
+                             font_size: float = 10.5, *, first: bool = False,
+                             strip_name: str = ""):
     """向附录事实表单元格写入一行内容：剥离开头列表符号并解析行内 Markdown。
 
     旧实现直接 ``add_run`` 写入全局事实原文，``- **名称**: 内容`` 等列表 +
@@ -254,6 +488,7 @@ def _appendix_cell_paragraph(cell, text: str, font_name: str,
     本函数：① 剥离行首 ``- ``/``* `` 列表符号；② 复用
     ``_add_runs_with_inline_format`` 解析 ``**加粗**`` / 公式 / 链接等行内标记；
     ③ 统一中文字体。仅改变附录事实单元格的渲染，正文与其他表格不受影响。
+    ④ ✅ R179：``strip_name`` 非空时剥离与第一列重复的名称前缀（只留取值）。
     """
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Pt
@@ -263,6 +498,8 @@ def _appendix_cell_paragraph(cell, text: str, font_name: str,
     started = False
     for raw in lines:
         cleaned = _sh._APPENDIX_LIST_LEAD_RE.sub("", raw.strip())
+        if strip_name:
+            cleaned = _strip_leading_fact_name(cleaned, strip_name)
         target = p if not started else cell.add_paragraph()
         target.alignment = WD_ALIGN_PARAGRAPH.LEFT
         target.paragraph_format.first_line_indent = Pt(0)
@@ -290,7 +527,8 @@ def _add_table_caption(doc, text: str, font_name: str = "宋体", font_size: flo
     pf.space_before = Pt(6)
     pf.space_after = Pt(2)
     pf.keep_with_next = True
-    _sh._set_run_font(p.add_run(text), font_name, font_size, bold=True)
+    # ✅ R179：题注与正文走同一规范化口径（表名可能来自 AI 首行，含 LaTeX/单位残留）
+    _sh._set_run_font(_safe_add_run(p, _normalize_delivery_text(text)), font_name, font_size, bold=True)
     return p
 
 
@@ -567,10 +805,10 @@ def _add_cover_info_table(doc, info: dict, font_name: str) -> None:
         c1.width = Cm(10)
         p0 = c0.paragraphs[0]
         p0.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        _sh._set_run_font(p0.add_run(k), font_name, 12, bold=True)
+        _sh._set_run_font(_safe_add_run(p0, k), font_name, 12, bold=True)
         p1 = c1.paragraphs[0]
         p1.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        _sh._set_run_font(p1.add_run(v), font_name, 12)
+        _sh._set_run_font(_safe_add_run(p1, v), font_name, 12)
         # ✅ R109：同上，改走按序列插入的单一实现（并防重复 w:shd）
         _sh._set_cell_shading(c0, "F2F2F2")
         _sh._set_cell_shading(c1, "F2F2F2")
@@ -689,7 +927,7 @@ def _add_form_table(doc, rows: list[tuple[str, str]], font_name: str = "宋体",
             _sh._set_cell_shading(cell, "F2F2F2")
         p0 = c0.paragraphs[0]
         p0.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        _sh._set_run_font(p0.add_run(k), font_name, 10.5, bold=True)
+        _sh._set_run_font(_safe_add_run(p0, k), font_name, 10.5, bold=True)
         p1 = c1.paragraphs[0]
         p1.alignment = WD_ALIGN_PARAGRAPH.LEFT
         _sh._add_runs_with_inline_format(p1, v)
@@ -704,12 +942,12 @@ def _add_prelim_page_title(doc, title: str, font_name: str,
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.paragraph_format.space_after = Pt(12)
-    _sh._set_run_font(p.add_run(title), font_name, 16, bold=True)
+    _sh._set_run_font(_safe_add_run(p, title), font_name, 16, bold=True)
     if basis:
         b = doc.add_paragraph()
         b.alignment = WD_ALIGN_PARAGRAPH.CENTER
         b.paragraph_format.space_after = Pt(10)
-        _sh._set_run_font(b.add_run(basis), font_name, 9)
+        _sh._set_run_font(_safe_add_run(b, basis), font_name, 9)
 
 
 def _scheme_form_header(scheme: dict, cover_info: dict | None) -> list[tuple[str, str]]:
@@ -1136,9 +1374,7 @@ def _pop_orphan_lead_in(doc) -> bool:
             _sh.logger.debug("孤儿引导语清理：段落样式读取失败（按非标题段落处理）",
                          exc_info=True)
         text = (last.text or "").strip()
-        if not text or len(text) > _sh.LEAD_IN_MAX_CHARS:
-            return False
-        if not _sh._LEAD_IN_HINT_RE.search(text):
+        if not _sh._is_orphan_lead_in_text(text):
             return False
         last._element.getparent().remove(last._element)
         _sh.logger.info("图表被跳过：已同步移除其孤儿引导语「%s」", text[:30])
@@ -1204,7 +1440,7 @@ def _write_chart_placeholder_line(doc, caption_text: str, reason: str) -> None:
 
     p = doc.add_paragraph()
     p.paragraph_format.first_line_indent = Cm(0)
-    run = p.add_run(f"[{caption_text} — {reason}]")
+    run = _safe_add_run(p, _normalize_delivery_text(f"[{caption_text} — {reason}]"))
     run.font.color.rgb = RGBColor(0xFF, 0x00, 0x00)
 
 
@@ -1255,7 +1491,9 @@ def _insert_image_with_caption(doc, img_bytes, caption_text: str, *,
         caption = doc.add_paragraph()
         caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
         caption.paragraph_format.first_line_indent = Cm(0)
-        _sh._set_run_font(caption.add_run(caption_text), font_name, font_size, bold=True)
+        _sh._set_run_font(
+            _safe_add_run(caption, _normalize_delivery_text(caption_text)),
+            font_name, font_size, bold=True)
         return True
     except Exception as e:
         _sh.logger.warning("%s 插入失败: %s", log_label, e)
@@ -1336,5 +1574,5 @@ def _add_illustration_from_bytes(doc, img_bytes, figure_num: str, alt: str = "",
     if placeholder:
         p = doc.add_paragraph()
         p.paragraph_format.first_line_indent = Cm(0)
-        _sh._set_run_font(p.add_run(caption_text), font_name, font_size, bold=True)
+        _sh._set_run_font(_safe_add_run(p, caption_text), font_name, font_size, bold=True)
     return False

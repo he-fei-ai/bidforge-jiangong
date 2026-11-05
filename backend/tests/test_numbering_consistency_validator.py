@@ -7,6 +7,7 @@
   - 导出前严格模式（numbering_consistency_strict）直接 409 阻断
   - 一致性报告摘要辅助函数
 """
+
 import json
 
 import pytest
@@ -15,8 +16,7 @@ from fastapi import HTTPException
 
 async def _seed_scheme(db, pid="p1", sid="s1"):
     await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)", (pid, "P"))
-    await db.execute(
-        "INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", (sid, pid, "S"))
+    await db.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", (sid, pid, "S"))
     await db.commit()
 
 
@@ -28,16 +28,17 @@ class TestNumberingConsistencyValidator:
     async def test_detects_stale_content(self, db_conn):
         """落库正文的子标题编号与当前 outline 不一致 → 标记不一致。"""
         from app.services.numbering import validate_section_content_numbering
+
         await _seed_scheme(db_conn)
         # outline 为 "1"（第 1 章），但正文写死旧号 "3.1"
         await db_conn.execute(
             "INSERT INTO sections (id, scheme_id, project_id, title, parent_id, "
             "level, sort_order, outline_json, content) VALUES "
             "('sec1','s1','p1','工程概况','','1',0,?, '## 3.1 总体安排\n正文\n')",
-            (_outline("1", 1),))
+            (_outline("1", 1),),
+        )
         await db_conn.commit()
-        rep = await validate_section_content_numbering(
-            db_conn, "s1", "sec1", "## 3.1 总体安排\n正文\n")
+        rep = await validate_section_content_numbering(db_conn, "s1", "sec1", "## 3.1 总体安排\n正文\n")
         assert rep["consistent"] is False
         assert rep["changed"] is True
         assert rep["diffs"]  # 存在 diff 行
@@ -45,27 +46,30 @@ class TestNumberingConsistencyValidator:
     async def test_consistent_when_normalized(self, db_conn):
         """落库正文已按当前 outline 规范化 → 一致。"""
         from app.services.numbering import validate_section_content_numbering
+
         await _seed_scheme(db_conn)
         await db_conn.execute(
             "INSERT INTO sections (id, scheme_id, project_id, title, parent_id, "
             "level, sort_order, outline_json, content) VALUES "
             "('sec1','s1','p1','工程概况','','1',0,?, '## 1.1 总体安排\n正文\n')",
-            (_outline("1", 1),))
+            (_outline("1", 1),),
+        )
         await db_conn.commit()
-        rep = await validate_section_content_numbering(
-            db_conn, "s1", "sec1", "## 1.1 总体安排\n正文\n")
+        rep = await validate_section_content_numbering(db_conn, "s1", "sec1", "## 1.1 总体安排\n正文\n")
         assert rep["consistent"] is True
         assert rep["changed"] is False
 
     async def test_scheme_summary(self, db_conn):
         """方案级汇总：1 章漂移 → mismatched=1、consistent=False。"""
         from app.services.numbering import validate_scheme_numbering_consistency
+
         await _seed_scheme(db_conn)
         await db_conn.execute(
             "INSERT INTO sections (id, scheme_id, project_id, title, parent_id, "
             "level, sort_order, outline_json, content) VALUES "
             "('sec1','s1','p1','工程概况','','1',0,?, '## 3.1 总体安排\n正文\n')",
-            (_outline("1", 1),))
+            (_outline("1", 1),),
+        )
         await db_conn.commit()
         rep = await validate_scheme_numbering_consistency(db_conn, "s1")
         assert rep["checked"] == 1
@@ -75,12 +79,14 @@ class TestNumberingConsistencyValidator:
     async def test_get_endpoint(self, db_conn):
         """GET /numbering-consistency 端点返回方案级报告。"""
         from app.routers.sections import get_numbering_consistency
+
         await _seed_scheme(db_conn)
         await db_conn.execute(
             "INSERT INTO sections (id, scheme_id, project_id, title, parent_id, "
             "level, sort_order, outline_json, content) VALUES "
             "('sec1','s1','p1','工程概况','','1',0,?, '## 3.1 总体安排\n正文\n')",
-            (_outline("1", 1),))
+            (_outline("1", 1),),
+        )
         await db_conn.commit()
         rep = await get_numbering_consistency("s1", db=db_conn)
         assert rep["mismatched"] == 1
@@ -89,12 +95,14 @@ class TestNumberingConsistencyValidator:
         """POST /numbering-consistency/repair 修复后内容更新且变为一致。"""
         from app.routers.sections import get_numbering_consistency, repair_numbering_consistency
         from app.services.numbering import validate_scheme_numbering_consistency
+
         await _seed_scheme(db_conn)
         await db_conn.execute(
             "INSERT INTO sections (id, scheme_id, project_id, title, parent_id, "
             "level, sort_order, outline_json, content) VALUES "
             "('sec1','s1','p1','工程概况','','1',0,?, '## 3.1 总体安排\n正文\n')",
-            (_outline("1", 1),))
+            (_outline("1", 1),),
+        )
         await db_conn.commit()
 
         before = await validate_scheme_numbering_consistency(db_conn, "s1")
@@ -116,18 +124,26 @@ class TestExportStrictGuard:
         """导出前严格模式：落库正文与目录编号不一致 → 409 阻断。"""
         from app.config import settings
         from app.routers.export import export_docx
+
         monkeypatch.setattr(settings, "numbering_consistency_strict", True)
 
-        await db_conn.execute(
-            "INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)",
-            ("s1", "p1", "测试专项方案"))
+        await db_conn.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", ("s1", "p1", "测试专项方案"))
         # outline "1" 但正文写死 "9.9"（漂移）；outline_json 必须有值（校验器读它算编号）
         await db_conn.execute(
             "INSERT INTO sections (id, scheme_id, parent_id, sort_order, level, "
             "title, status, outline_json, content) VALUES (?,?,?,?,?,?,?,?,?)",
-            ("c1", "s1", "", 0, 1, "第一章 总体概述", "generated",
-             json.dumps({"id": "1", "level": 1}, ensure_ascii=False),
-             "## 9.9 总体安排\n这里是第一章正文。\n"))
+            (
+                "c1",
+                "s1",
+                "",
+                0,
+                1,
+                "第一章 总体概述",
+                "generated",
+                json.dumps({"id": "1", "level": 1}, ensure_ascii=False),
+                "## 9.9 总体安排\n这里是第一章正文。\n",
+            ),
+        )
         await db_conn.commit()
 
         with pytest.raises(HTTPException) as exc:
@@ -139,17 +155,25 @@ class TestExportStrictGuard:
         """导出前非严格模式（默认）：漂移仅告警、不阻断导出。"""
         from app.config import settings
         from app.routers.export import export_docx
+
         monkeypatch.setattr(settings, "numbering_consistency_strict", False)
 
-        await db_conn.execute(
-            "INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)",
-            ("s1", "p1", "测试专项方案"))
+        await db_conn.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", ("s1", "p1", "测试专项方案"))
         await db_conn.execute(
             "INSERT INTO sections (id, scheme_id, parent_id, sort_order, level, "
             "title, status, outline_json, content) VALUES (?,?,?,?,?,?,?,?,?)",
-            ("c1", "s1", "", 0, 1, "第一章 总体概述", "generated",
-             json.dumps({"id": "1", "level": 1}, ensure_ascii=False),
-             "## 9.9 总体安排\n这里是第一章正文。\n"))
+            (
+                "c1",
+                "s1",
+                "",
+                0,
+                1,
+                "第一章 总体概述",
+                "generated",
+                json.dumps({"id": "1", "level": 1}, ensure_ascii=False),
+                "## 9.9 总体安排\n这里是第一章正文。\n",
+            ),
+        )
         await db_conn.commit()
 
         # 非严格模式不应抛异常（导出成稿仍由 _compute_subheading 重算保证正确）
@@ -160,17 +184,25 @@ class TestExportStrictGuard:
         """PDF 导出与 DOCX 共用同一守卫：严格模式下漂移 → 409（转换前抛出）。"""
         from app.config import settings
         from app.routers.export import export_pdf
+
         monkeypatch.setattr(settings, "numbering_consistency_strict", True)
 
-        await db_conn.execute(
-            "INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)",
-            ("s1", "p1", "测试专项方案"))
+        await db_conn.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", ("s1", "p1", "测试专项方案"))
         await db_conn.execute(
             "INSERT INTO sections (id, scheme_id, parent_id, sort_order, level, "
             "title, status, outline_json, content) VALUES (?,?,?,?,?,?,?,?,?)",
-            ("c1", "s1", "", 0, 1, "第一章 总体概述", "generated",
-             json.dumps({"id": "1", "level": 1}, ensure_ascii=False),
-             "## 9.9 总体安排\n这里是第一章正文。\n"))
+            (
+                "c1",
+                "s1",
+                "",
+                0,
+                1,
+                "第一章 总体概述",
+                "generated",
+                json.dumps({"id": "1", "level": 1}, ensure_ascii=False),
+                "## 9.9 总体安排\n这里是第一章正文。\n",
+            ),
+        )
         await db_conn.commit()
 
         # 守卫在 _prepare_export / DOCX 生成 / PDF 转换之前执行，
@@ -185,12 +217,15 @@ class TestConsistencySummary:
     def test_summary_truncates(self):
         """_summarize_numbering_consistency 压缩报告为单行可读摘要。"""
         from app.routers.export import _summarize_numbering_consistency
+
         report = {
             "mismatched": 1,
             "sections": [
-                {"section_id": "abcdef01", "consistent": False,
-                 "diffs": [{"tag": "replace", "old": ["## 3.1 总体安排"],
-                            "new": ["## 1.1 总体安排"]}]},
+                {
+                    "section_id": "abcdef01",
+                    "consistent": False,
+                    "diffs": [{"tag": "replace", "old": ["## 3.1 总体安排"], "new": ["## 1.1 总体安排"]}],
+                },
             ],
         }
         s = _summarize_numbering_consistency(report)
@@ -207,12 +242,14 @@ class TestNumberingVersioning:
             "INSERT INTO sections (id, scheme_id, project_id, title, parent_id, "
             "level, sort_order, outline_json, content) VALUES "
             "('sec1','s1','p1','工程概况','','1',0,?, '## 3.1 总体安排\n正文\n')",
-            (_outline("1", 1),))
+            (_outline("1", 1),),
+        )
         await db_conn.commit()
 
     async def test_repair_creates_version_snapshot(self, db_conn):
         """编号修复返回 snapshot_id，且修复内容生效。"""
         from app.routers.sections import repair_numbering_consistency
+
         await self._seed_drifted(db_conn)
         res = await repair_numbering_consistency("s1", db=db_conn)
         assert res["fixed"] == 1
@@ -223,6 +260,7 @@ class TestNumberingVersioning:
     async def test_repair_without_drift_has_no_snapshot(self, db_conn):
         """无漂移时修复不建快照（snapshot_id=None）。"""
         from app.routers.sections import repair_numbering_consistency
+
         await _seed_scheme(db_conn)
         res = await repair_numbering_consistency("s1", db=db_conn)
         assert res["fixed"] == 0
@@ -232,6 +270,7 @@ class TestNumberingVersioning:
         """回滚恢复修复前正文；回滚产生的 undo 快照可再次回滚（撤销回滚）。"""
         from app.routers.sections import repair_numbering_consistency, rollback_numbering_version
         from app.services.numbering import validate_scheme_numbering_consistency
+
         await self._seed_drifted(db_conn)
         res = await repair_numbering_consistency("s1", db=db_conn)
         snap_id = res["snapshot_id"]
@@ -258,12 +297,12 @@ class TestNumberingVersioning:
             repair_numbering_consistency,
             rollback_numbering_version,
         )
+
         await self._seed_drifted(db_conn)
         res = await repair_numbering_consistency("s1", db=db_conn)
         rb = await rollback_numbering_version("s1", res["snapshot_id"], db=db_conn)
         lst = await list_numbering_versions("s1", db=db_conn)
-        assert [v["type"] for v in lst["versions"]] == [
-            "numbering_rollback", "numbering_repair"]
+        assert [v["type"] for v in lst["versions"]] == ["numbering_rollback", "numbering_repair"]
         assert lst["versions"][0]["snapshot_id"] == rb["undo_snapshot_id"]
         assert lst["versions"][1]["section_ids"] == ["sec1"]
 
@@ -272,6 +311,7 @@ class TestNumberingVersioning:
         from app.routers.sections import rollback_numbering_version
         from app.services.repair_record import create_snapshot
         from fastapi import HTTPException
+
         await self._seed_drifted(db_conn)
 
         with pytest.raises(HTTPException) as e404:
@@ -279,20 +319,101 @@ class TestNumberingVersioning:
         assert e404.value.status_code == 404
 
         # 跨方案：快照属于 s2
-        await db_conn.execute(
-            "INSERT INTO schemes (id, project_id, name) VALUES ('s2','p1','S2')")
+        await db_conn.execute("INSERT INTO schemes (id, project_id, name) VALUES ('s2','p1','S2')")
         await db_conn.commit()
         other = await create_snapshot(
-            db_conn, "s2", [{"section_id": "sec1", "content_before": "x"}],
-            snapshot_type="numbering_repair")
+            db_conn, "s2", [{"section_id": "sec1", "content_before": "x"}], snapshot_type="numbering_repair"
+        )
         with pytest.raises(HTTPException) as e400:
             await rollback_numbering_version("s1", other, db=db_conn)
         assert e400.value.status_code == 400
 
         # 非 numbering 类型（一致性修复快照走 /consistency/rollback）
         cr = await create_snapshot(
-            db_conn, "s1", [{"section_id": "sec1", "content_before": "x"}],
-            snapshot_type="consistency_repair")
+            db_conn, "s1", [{"section_id": "sec1", "content_before": "x"}], snapshot_type="consistency_repair"
+        )
         with pytest.raises(HTTPException) as e400b:
             await rollback_numbering_version("s1", cr, db=db_conn)
         assert e400b.value.status_code == 400
+
+
+class TestNumberingWarningAttribution:
+    """2026-11-05（R2 日志驱动）：子标题层级告警必须能定位到具体章节。
+
+    日志证据：11-04 单日 323 条「正文子标题层级不齐 section=?」，全部来自
+    numbering.py 归一化路径把 section_id 丢成空串，导致告警无法定位章节。
+    """
+
+    def test_renumber_warning_carries_section_id(self, caplog):
+        import logging
+
+        from app.services.numbering import renumber_section_body_subheadings
+
+        caplog.set_level(logging.WARNING, logger="content_blocks")
+        # 基准层级 H2 之后出现更浅的 H1 → 必然触发「层级不齐」告警
+        content = "## 一级标题\n# 回跳的浅层标题\n正文\n"
+        _out, changes = renumber_section_body_subheadings(
+            content, "1.2", 2, "测试章节", has_db_children=False, section_id="sec-abc123"
+        )
+        assert changes  # 确实发生了重编号
+        msgs = [r.getMessage() for r in caplog.records if "正文子标题层级不齐" in r.getMessage()]
+        assert msgs, "应触发层级不齐告警"
+        assert any("section=sec-abc123" in m for m in msgs), msgs
+
+    def test_renumber_warning_keeps_placeholder_without_id(self, caplog):
+        """未传 section_id 时保持旧行为（section=?），向后兼容。"""
+        import logging
+
+        from app.services.numbering import renumber_section_body_subheadings
+
+        caplog.set_level(logging.WARNING, logger="content_blocks")
+        content = "## 一级标题\n# 回跳的浅层标题\n正文\n"
+        renumber_section_body_subheadings(content, "1.2", 2, "测试章节")
+        msgs = [r.getMessage() for r in caplog.records if "正文子标题层级不齐" in r.getMessage()]
+        assert any("section=?" in m for m in msgs), msgs
+
+
+class TestExportNumberingGuardReporting:
+    """2026-11-05（R2）：导出前编号预检的日志可定位性与 failed 分支。"""
+
+    def test_summary_ignores_skipped(self):
+        from app.routers.export import _summarize_numbering_consistency
+
+        report = {
+            "mismatched": 1,
+            "sections": [
+                {"section_id": "skip0001", "consistent": False, "skipped": True, "diffs": []},
+                {"section_id": "drift001", "consistent": False, "diffs": [{"new": ["## 1.1 总体安排"]}]},
+            ],
+        }
+        s = _summarize_numbering_consistency(report)
+        assert "skip0001" not in s
+        assert "drift001" in s
+
+    async def test_guard_failed_report_logs_distinct_message(self, db_conn, monkeypatch, caplog):
+        import logging
+
+        from app.config import settings as cfg
+        from app.routers import _export_cache
+        from app.services import numbering
+
+        monkeypatch.setattr(cfg, "numbering_consistency_strict", False, raising=False)
+
+        async def _fake_validate(_db, scheme_id):
+            return {
+                "scheme_id": scheme_id,
+                "checked": 0,
+                "mismatched": 0,
+                "consistent": False,
+                "failed": True,
+                "sections": [],
+                "error": "db locked",
+            }
+
+        monkeypatch.setattr(numbering, "validate_scheme_numbering_consistency", _fake_validate)
+        caplog.set_level(logging.WARNING)
+        await _export_cache._guard_numbering_consistency(db_conn, "s1")
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("读取失败" in m and "db locked" in m for m in msgs), msgs
+        assert not any("发现 0 章" in m for m in msgs), msgs
+

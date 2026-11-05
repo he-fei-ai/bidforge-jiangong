@@ -35,6 +35,7 @@
 判据纪律（AGENTS §5.14/§5.15）：静态锁锚 AST 节点；每个修复点均配「触发行为」
 的功能实证，防静态锁的结构性盲区（R98 M2 教训）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -94,6 +95,7 @@ def _paragraphs(content: str) -> list[dict]:
 # A 组 · FIX-1 表格切分功能实证
 # ---------------------------------------------------------------------------
 
+
 class TestTableSplitFunctionalA:
     """触发行为即红：摘除 _split_table_block 接线或改坏判据，本组全部翻红。"""
 
@@ -141,15 +143,29 @@ class TestTableSplitFunctionalA:
         assert t2["lines"][1] == "| --- | --- | --- | --- |"
         assert len(t2["lines"]) == 6  # 表头 + 分隔行 + 4 数据行
         # 不得有任何管道语法残留为段落
-        assert all("|" not in (p.get("text") or "")
-                   for p in _paragraphs(GLUED_CONTENT))
+        assert all("|" not in (p.get("text") or "") for p in _paragraphs(GLUED_CONTENT))
 
-    def test_no_separator_falls_back_to_paragraphs(self):
-        """无分隔行 → 旧降级路径保持（整块按段落输出，内容不丢）。"""
+    def test_no_separator_uniform_columns_synthesizes_table(self):
+        """✅ 契约变更（2026-11-05 · 第1轮格式问题报告 §10）：
+
+        旧契约「无分隔行 → 整块降级段落」在生产成稿留下
+        "|测试系统|测试项目|…" 管道符残留（用户报障）。新契约：
+        ≥2 行、行首 ``|``、列数一致 ≥2 列 → 合成分隔行渲染为真表
+        （内容零丢失）；列数不齐 / 单行仍降级。
+        """
         content = "| 这不是表 | 只是文本 |\n| 第二行 | 同样 |\n"
+        tables = _tables(content)
+        assert len(tables) == 1, "列数一致的连续 | 行必须合成为表格"
+        assert tables[0]["lines"][0] == "| 这不是表 | 只是文本 |"
+        assert tables[0]["lines"][1] == "| --- | --- |"
+        assert _paragraphs(content) == [], "不得残留管道语法段落"
+
+    def test_no_separator_uneven_columns_still_degrades(self):
+        """列数不齐（行首 | 但结构不可信）→ 维持旧降级路径，不 Fabrication。"""
+        content = "| 甲 | 乙 |\n| 丙 | 乙 | 丁 |\n"
         assert _tables(content) == []
         paras = [p.get("text") or "" for p in _paragraphs(content)]
-        assert paras == ["| 这不是表 | 只是文本 |", "| 第二行 | 同样 |"]
+        assert paras == ["| 甲 | 乙 |", "| 丙 | 乙 | 丁 |"]
 
     def test_single_pipe_line_stays_paragraph(self):
         """单行 `| 文字 |`（长度 < 2）→ 段落，不 Fabrication。"""
@@ -165,8 +181,7 @@ class TestTableSplitFunctionalA:
         content = "| 孤儿行 | 甲 |\n| 表头 | 乙 |\n| --- | --- |\n| 1 | 2 |\n"
         assert _tables(content) == []
         paras = [p.get("text") or "" for p in _paragraphs(content)]
-        assert paras == ["| 孤儿行 | 甲 |", "| 表头 | 乙 |",
-                         "| --- | --- |", "| 1 | 2 |"]
+        assert paras == ["| 孤儿行 | 甲 |", "| 表头 | 乙 |", "| --- | --- |", "| 1 | 2 |"]
 
     def test_consecutive_separators_not_fabricated(self):
         """连续两个分隔行（表头不可信）→ 整体降级为段落，不 Fabrication。"""
@@ -183,27 +198,28 @@ class TestTableSplitFunctionalA:
         assert seg == [["| h |", "| --- |", "| 1 |"]]
         # 粘连 → 两段
         seg = _split_table_block(["| --- |", "| h1 |", "| d |", "| h2 |", "| --- |", "| d2 |"])
-        assert seg == [["| h1 |", "| --- |", "| d |"],
-                       ["| h2 |", "| --- |", "| d2 |"]]
+        assert seg == [["| h1 |", "| --- |", "| d |"], ["| h2 |", "| --- |", "| d2 |"]]
 
 
 # ---------------------------------------------------------------------------
 # B 组 · FIX-2 西里尔形近字功能实证
 # ---------------------------------------------------------------------------
 
+
 class TestCyrillicGlyphFunctionalB:
     """触发行为即红：摘除 _CYRILLIC_GLYPH_NUM_RE 接线，本组翻红。"""
 
-    @pytest.mark.parametrize("raw,want", [
-        # 生产真实单元格文本（rowid 140）
-        ("双ф48.3mm×3.6mm钢管围檩，ф14对拉螺栓",
-         "双φ48.3mm×3.6mm钢管围檩，φ14对拉螺栓"),
-        ("底模下设ф48.3mm×3.6mm钢管横楞@500mm",
-         "底模下设φ48.3mm×3.6mm钢管横楞@500mm"),
-        ("Ф100mm 导管", "Φ100mm 导管"),
-        ("ф 48 钢管", "φ 48 钢管"),          # 允许符号与数字间有空白
-        ("ф8@200 箍筋", "φ8@200 箍筋"),
-    ])
+    @pytest.mark.parametrize(
+        "raw,want",
+        [
+            # 生产真实单元格文本（rowid 140）
+            ("双ф48.3mm×3.6mm钢管围檩，ф14对拉螺栓", "双φ48.3mm×3.6mm钢管围檩，φ14对拉螺栓"),
+            ("底模下设ф48.3mm×3.6mm钢管横楞@500mm", "底模下设φ48.3mm×3.6mm钢管横楞@500mm"),
+            ("Ф100mm 导管", "Φ100mm 导管"),
+            ("ф 48 钢管", "φ 48 钢管"),  # 允许符号与数字间有空白
+            ("ф8@200 箍筋", "φ8@200 箍筋"),
+        ],
+    )
     def test_misplanted_cyrillic_glyph_restored(self, raw, want):
         assert clean_text(raw) == want
 
@@ -241,6 +257,7 @@ class TestCyrillicGlyphFunctionalB:
 # ---------------------------------------------------------------------------
 # C 组 · 渲染层端到端（_add_table_from_markup）
 # ---------------------------------------------------------------------------
+
 
 class TestTableRenderEndToEndC:
     """粘连坏形态正文经渲染层产出真 Word 表格，且单元格内 ф 已修复为 φ。"""
@@ -280,6 +297,7 @@ class TestTableRenderEndToEndC:
 # D 组 · export_docx 全链路端到端（生产真实正文）
 # ---------------------------------------------------------------------------
 
+
 async def _seed_scheme(db_conn, content: str):
     await db_conn.execute(
         "INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)",
@@ -301,18 +319,23 @@ async def test_export_docx_no_pipe_garbling(db_conn):
     from fastapi.responses import FileResponse
 
     await _seed_scheme(db_conn, GLUED_CONTENT)
-    resp = await export_docx("s104", {
-        "project_name": "示例项目",
-        "bid_section": "第一标段",
-        "config": {"allow_pil_fallback": True},
-        "chart_images": [],
-        "fe_codes": [],
-    }, db=db_conn)
+    resp = await export_docx(
+        "s104",
+        {
+            "project_name": "示例项目",
+            "bid_section": "第一标段",
+            "config": {"allow_pil_fallback": True},
+            "chart_images": [],
+            "fe_codes": [],
+        },
+        db=db_conn,
+    )
     assert isinstance(resp, FileResponse)
     path = resp.path
     assert path
 
     from docx import Document
+
     doc = Document(path)
 
     # 两张真 Word 表格（粘连块被正确切分）
@@ -348,13 +371,17 @@ async def test_export_docx_separator_first_with_caption(db_conn):
     from fastapi.responses import FileResponse
 
     await _seed_scheme(db_conn, SEP_FIRST_CONTENT)
-    resp = await export_docx("s104", {
-        "project_name": "示例项目",
-        "bid_section": "第一标段",
-        "config": {"allow_pil_fallback": True},
-        "chart_images": [],
-        "fe_codes": [],
-    }, db=db_conn)
+    resp = await export_docx(
+        "s104",
+        {
+            "project_name": "示例项目",
+            "bid_section": "第一标段",
+            "config": {"allow_pil_fallback": True},
+            "chart_images": [],
+            "fe_codes": [],
+        },
+        db=db_conn,
+    )
     doc = Document(resp.path)
     assert len(doc.tables) == 1
     assert len(doc.tables[0].columns) == 4
@@ -371,15 +398,16 @@ async def test_export_docx_separator_first_with_caption(db_conn):
 # E 组 · 静态锁 + 字节体检
 # ---------------------------------------------------------------------------
 
-class TestStaticLocksAndByteHealthE:
 
+class TestStaticLocksAndByteHealthE:
     def test_split_table_block_single_definition(self):
         """_split_table_block 在全仓 AST 中必须只有唯一定义（防副本漂移）。"""
-        tree = ast.parse((APP_DIR / "services" / "content_blocks.py")
-                         .read_bytes().decode("utf-8"))
-        defs = [n for n in ast.walk(tree)
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and n.name == "_split_table_block"]
+        tree = ast.parse((APP_DIR / "services" / "content_blocks.py").read_bytes().decode("utf-8"))
+        defs = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_split_table_block"
+        ]
         assert len(defs) == 1
 
     def test_export_table_markup_skips_index_one(self):
@@ -390,6 +418,7 @@ class TestStaticLocksAndByteHealthE:
         """
         # 拆分兼容：聚合读取 export.py 与其子模块（_add_table_from_markup 已拆至 _export_docx_parts.py）
         import glob as _glob
+
         segs = [(APP_DIR / "routers" / "export.py").read_bytes().decode("utf-8")]
         for p in sorted(_glob.glob(str(APP_DIR / "routers" / "_export_*.py"))):
             segs.append(open(p, "rb").read().decode("utf-8"))
@@ -402,10 +431,13 @@ class TestStaticLocksAndByteHealthE:
         assert src.count("_CYRILLIC_GLYPH_NUM_RE = re.compile") == 1
         assert '_CYRILLIC_GLYPH_MAP = {"ф": "φ", "Ф": "Φ"}' in src
 
-    @pytest.mark.parametrize("rel", [
-        "services/content_blocks.py",
-        "services/docx_math.py",
-    ])
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "services/content_blocks.py",
+            "services/docx_math.py",
+        ],
+    )
     def test_byte_health(self, rel):
         """字节体检：CRLF 工作树约定、无 BOM、无 U+FFFD、无孤立 CR。"""
         raw = (APP_DIR / rel).read_bytes()

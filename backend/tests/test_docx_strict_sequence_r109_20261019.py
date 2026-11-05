@@ -20,6 +20,7 @@
 
 判据纪律（AGENTS §5.14/§5.15）：功能实证为主，AST/源码锁只锚调用形态与结构。
 """
+
 from __future__ import annotations
 
 import zipfile
@@ -33,25 +34,133 @@ from lxml import etree
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
-TCPR = ["cnfStyle", "tcW", "gridSpan", "hMerge", "vMerge", "tcBorders", "shd",
-        "noWrap", "tcMar", "textDirection", "tcFitText", "vAlign", "hideMark"]
-PPR = ["pStyle", "keepNext", "keepLines", "pageBreakBefore", "framePr", "widowControl",
-       "numPr", "suppressLineNumbers", "pBdr", "shd", "tabs", "suppressAutoHyphens",
-       "kinsoku", "wordWrap", "overflowPunct", "topLinePunct", "autoSpaceDE",
-       "autoSpaceDN", "bidi", "adjustRightInd", "snapToGrid", "spacing", "ind",
-       "contextualSpacing", "mirrorIndents", "suppressOverlap", "jc", "textDirection",
-       "textAlignment", "textboxTightWrap", "outlineLvl", "divId", "cnfStyle", "rPr",
-       "sectPr", "pPrChange"]
-RPR = ["rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike",
-       "dstrike", "outline", "shadow", "emboss", "imprint", "noProof", "snapToGrid",
-       "vanish", "webHidden", "color", "spacing", "w", "kern", "position", "sz",
-       "szCs", "highlight", "u", "effect", "bdr", "shd", "fitText", "vertAlign",
-       "rtl", "cs", "em", "lang", "eastAsianLayout", "specVanish", "oMath"]
-TBLPR = ["tblStyle", "tblpPr", "tblOverlap", "bidiVisual", "tblStyleRowBandSize",
-         "tblStyleColBandSize", "tblW", "jc", "tblCellSpacing", "tblInd", "tblBorders",
-         "shd", "tblLayout", "tblCellMar", "tblLook", "tblCaption", "tblDescription"]
-TRPR = ["cnfStyle", "divId", "gridBefore", "gridAfter", "wBefore", "wAfter",
-        "cantSplit", "trHeight", "tblHeader", "tblCellSpacing", "jc", "hidden"]
+TCPR = [
+    "cnfStyle",
+    "tcW",
+    "gridSpan",
+    "hMerge",
+    "vMerge",
+    "tcBorders",
+    "shd",
+    "noWrap",
+    "tcMar",
+    "textDirection",
+    "tcFitText",
+    "vAlign",
+    "hideMark",
+]
+PPR = [
+    "pStyle",
+    "keepNext",
+    "keepLines",
+    "pageBreakBefore",
+    "framePr",
+    "widowControl",
+    "numPr",
+    "suppressLineNumbers",
+    "pBdr",
+    "shd",
+    "tabs",
+    "suppressAutoHyphens",
+    "kinsoku",
+    "wordWrap",
+    "overflowPunct",
+    "topLinePunct",
+    "autoSpaceDE",
+    "autoSpaceDN",
+    "bidi",
+    "adjustRightInd",
+    "snapToGrid",
+    "spacing",
+    "ind",
+    "contextualSpacing",
+    "mirrorIndents",
+    "suppressOverlap",
+    "jc",
+    "textDirection",
+    "textAlignment",
+    "textboxTightWrap",
+    "outlineLvl",
+    "divId",
+    "cnfStyle",
+    "rPr",
+    "sectPr",
+    "pPrChange",
+]
+RPR = [
+    "rStyle",
+    "rFonts",
+    "b",
+    "bCs",
+    "i",
+    "iCs",
+    "caps",
+    "smallCaps",
+    "strike",
+    "dstrike",
+    "outline",
+    "shadow",
+    "emboss",
+    "imprint",
+    "noProof",
+    "snapToGrid",
+    "vanish",
+    "webHidden",
+    "color",
+    "spacing",
+    "w",
+    "kern",
+    "position",
+    "sz",
+    "szCs",
+    "highlight",
+    "u",
+    "effect",
+    "bdr",
+    "shd",
+    "fitText",
+    "vertAlign",
+    "rtl",
+    "cs",
+    "em",
+    "lang",
+    "eastAsianLayout",
+    "specVanish",
+    "oMath",
+]
+TBLPR = [
+    "tblStyle",
+    "tblpPr",
+    "tblOverlap",
+    "bidiVisual",
+    "tblStyleRowBandSize",
+    "tblStyleColBandSize",
+    "tblW",
+    "jc",
+    "tblCellSpacing",
+    "tblInd",
+    "tblBorders",
+    "shd",
+    "tblLayout",
+    "tblCellMar",
+    "tblLook",
+    "tblCaption",
+    "tblDescription",
+]
+TRPR = [
+    "cnfStyle",
+    "divId",
+    "gridBefore",
+    "gridAfter",
+    "wBefore",
+    "wAfter",
+    "cantSplit",
+    "trHeight",
+    "tblHeader",
+    "tblCellSpacing",
+    "jc",
+    "hidden",
+]
 ORDERS = {"pPr": PPR, "rPr": RPR, "tblPr": TBLPR, "tcPr": TCPR, "trPr": TRPR}
 
 
@@ -61,8 +170,7 @@ def _violations(root) -> list[str]:
     for tag, order in ORDERS.items():
         idx = {t: i for i, t in enumerate(order)}
         for el in root.iter(f"{{{W}}}{tag}"):
-            known = [etree.QName(c).localname for c in el
-                     if isinstance(c.tag, str) and etree.QName(c).localname in idx]
+            known = [etree.QName(c).localname for c in el if isinstance(c.tag, str) and etree.QName(c).localname in idx]
             ranks = [idx[k] for k in known]
             if ranks != sorted(ranks):
                 bad.append(f"{tag}:{known}")
@@ -130,12 +238,16 @@ class TestSetCellShading:
 class TestEndToEndNoViolation:
     def test_table_from_markup(self, tmp_path):
         doc = Document()
-        E._add_table_from_markup(doc, [
-            "| 名称 | 规格 |",
-            "| --- | --- |",
-            "| 钢管 | φ48.3×3.6 |",
-            "| 扣件 | 直角 |",
-        ], "宋体")
+        E._add_table_from_markup(
+            doc,
+            [
+                "| 名称 | 规格 |",
+                "| --- | --- |",
+                "| 钢管 | φ48.3×3.6 |",
+                "| 扣件 | 直角 |",
+            ],
+            "宋体",
+        )
         p = _docx(tmp_path, "markup.docx")
         doc.save(p)
         assert _violations_in_docx(p) == []
@@ -176,15 +288,15 @@ class TestEndToEndNoViolation:
 # ---------------------------------------------------------------------------
 def _tc_pr_xml(inner: str) -> etree._Element:
     return etree.fromstring(
-        '<w:tcPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-        f"{inner}</w:tcPr>")
+        '<w:tcPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' f"{inner}</w:tcPr>"
+    )
 
 
 class TestNormalizeCtSequence:
     def test_reorders_bad_tcpr(self):
         el = _tc_pr_xml(
-            '<w:tcW w:w="100" w:type="dxa"/><w:vAlign w:val="center"/>'
-            '<w:shd w:val="clear" w:fill="B6B1D1"/>')
+            '<w:tcW w:w="100" w:type="dxa"/><w:vAlign w:val="center"/>' '<w:shd w:val="clear" w:fill="B6B1D1"/>'
+        )
         n = E._normalize_ct_sequence(el.getroottree().getroot())
         assert n == 1
         seq = [etree.QName(c).localname for c in el]
@@ -193,16 +305,14 @@ class TestNormalizeCtSequence:
 
     def test_ordered_container_untouched(self):
         """已有序 → 一个字节都不动（稳定排序，既有产物零漂移）。"""
-        el = _tc_pr_xml('<w:tcW w:w="1" w:type="dxa"/><w:shd w:fill="FFF"/>'
-                        '<w:vAlign w:val="center"/>')
+        el = _tc_pr_xml('<w:tcW w:w="1" w:type="dxa"/><w:shd w:fill="FFF"/>' '<w:vAlign w:val="center"/>')
         before = etree.tostring(el)
         assert E._normalize_ct_sequence(el) == 0
         assert etree.tostring(el) == before
 
     def test_unknown_child_skips_container(self):
         """容器内出现序列表以外的子元素 → 整容器不动（fail-safe）。"""
-        el = _tc_pr_xml('<w:vAlign w:val="center"/><w:shd w:fill="FFF"/>'
-                        '<w:customXmlInsRangeStart/>')
+        el = _tc_pr_xml('<w:vAlign w:val="center"/><w:shd w:fill="FFF"/>' "<w:customXmlInsRangeStart/>")
         before = etree.tostring(el)
         assert E._normalize_ct_sequence(el) == 0
         assert etree.tostring(el) == before
@@ -214,8 +324,7 @@ class TestNormalizeCtSequence:
         assert etree.tostring(el) == before
 
     def test_content_preserved_after_reorder(self):
-        el = _tc_pr_xml('<w:vAlign w:val="center"/><w:shd w:fill="B6B1D1"/>'
-                        '<w:tcW w:w="2268" w:type="dxa"/>')
+        el = _tc_pr_xml('<w:vAlign w:val="center"/><w:shd w:fill="B6B1D1"/>' '<w:tcW w:w="2268" w:type="dxa"/>')
         E._normalize_ct_sequence(el)
         assert el.find(qn("w:vAlign")).get(qn("w:val")) == "center"
         assert el.find(qn("w:shd")).get(qn("w:fill")) == "B6B1D1"
@@ -232,12 +341,17 @@ class TestNormalizeDocxPackage:
         t = doc.add_table(rows=1, cols=2)
         for cell in t.rows[0].cells:
             tc_pr = cell._tc.get_or_add_tcPr()
-            tc_pr.append(etree.fromstring(
-                '<w:vAlign xmlns:w="http://schemas.openxmlformats.org/'
-                'wordprocessingml/2006/main" w:val="center"/>'))
-            tc_pr.append(etree.fromstring(
-                '<w:shd xmlns:w="http://schemas.openxmlformats.org/'
-                'wordprocessingml/2006/main" w:fill="B6B1D1"/>'))
+            tc_pr.append(
+                etree.fromstring(
+                    '<w:vAlign xmlns:w="http://schemas.openxmlformats.org/'
+                    'wordprocessingml/2006/main" w:val="center"/>'
+                )
+            )
+            tc_pr.append(
+                etree.fromstring(
+                    '<w:shd xmlns:w="http://schemas.openxmlformats.org/' 'wordprocessingml/2006/main" w:fill="B6B1D1"/>'
+                )
+            )
         assert len(_violations(doc.element.body)) == 2
         n = E._normalize_docx_strict_sequence(doc)
         assert n == 2
@@ -256,8 +370,7 @@ class TestNormalizeDocxPackage:
         class _Bare:
             element = None
 
-        monkeypatch.setattr(
-            doc.part.package, "iter_parts", lambda: [("p1", _Bare()), ("p2", doc.part)])
+        monkeypatch.setattr(doc.part.package, "iter_parts", lambda: [("p1", _Bare()), ("p2", doc.part)])
         assert E._normalize_docx_strict_sequence(doc) == 0
 
     def test_part_raising_does_not_block(self, monkeypatch, caplog):
@@ -268,8 +381,7 @@ class TestNormalizeDocxPackage:
             def element(self):
                 raise RuntimeError("boom")
 
-        monkeypatch.setattr(
-            doc.part.package, "iter_parts", lambda: [("p1", _Boom()), ("p2", doc.part)])
+        monkeypatch.setattr(doc.part.package, "iter_parts", lambda: [("p1", _Boom()), ("p2", doc.part)])
         with caplog.at_level("WARNING"):
             assert E._normalize_docx_strict_sequence(doc) == 0
         assert "序列归一跳过一个部件" in caplog.text
@@ -295,8 +407,7 @@ class TestSourceLocks:
         # 拆分兼容：聚合读取 export.py 与其子模块（_export_*.py）
         base = Path(E.__file__).parent
         segs = [Path(E.__file__).read_text(encoding="utf-8")]
-        segs += [p.read_text(encoding="utf-8")
-                 for p in sorted(base.glob("_export_*.py"))]
+        segs += [p.read_text(encoding="utf-8") for p in sorted(base.glob("_export_*.py"))]
         return "\n".join(segs)
 
     def test_no_tcpr_append_shd(self, src):
@@ -306,8 +417,7 @@ class TestSourceLocks:
         tree = ast.parse(src)
         hits = []
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                    and node.func.attr == "append":
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "append":
                 seg = ast.get_source_segment(src, node) or ""
                 if "tcPr" in seg:
                     hits.append(seg)

@@ -5,6 +5,7 @@
 真实图片并就地改写为 image 块；生成失败/缺 prompt/开关关闭时保持占位
 （write_section 整块跳过、不占图号）。
 """
+
 import json
 
 import pytest
@@ -16,8 +17,7 @@ def _ai_block(code: str, title: str = "") -> dict:
 
 
 def _ai_code(prompt: str, title: str = "支护剖面图", style: str = "engineering_diagram") -> str:
-    return json.dumps({"prompt": prompt, "style": style, "title": title},
-                      ensure_ascii=False)
+    return json.dumps({"prompt": prompt, "style": style, "title": title}, ensure_ascii=False)
 
 
 @pytest.fixture()
@@ -29,8 +29,7 @@ def fake_gen(monkeypatch):
         calls.append((prompt, style))
         return f"http://img.example/{len(calls)}.png"
 
-    monkeypatch.setattr(
-        "app.services.ai.image_engine.generate_illustration_image", _fake)
+    monkeypatch.setattr("app.services.ai.image_engine.generate_illustration_image", _fake)
     return calls
 
 
@@ -70,8 +69,7 @@ async def test_generation_failure_keeps_placeholder(fake_gen, monkeypatch):
     async def _fail(provider, prompt, style, size, provider_name, image_config):
         return None
 
-    monkeypatch.setattr(
-        "app.services.ai.image_engine.generate_illustration_image", _fail)
+    monkeypatch.setattr("app.services.ai.image_engine.generate_illustration_image", _fail)
     code = _ai_code("会失败的配图")
     blocks_cache = {"s1": [_ai_block(code)]}
     sections = [{"id": "s1"}]
@@ -86,8 +84,7 @@ async def test_switch_off_restores_legacy_behavior(fake_gen):
     code = _ai_code("不会触发的配图")
     blocks_cache = {"s1": [_ai_block(code)]}
     sections = [{"id": "s1"}]
-    n = await _auto_generate_ai_image_blocks(
-        sections, blocks_cache, {"ai_image_auto_generate": False})
+    n = await _auto_generate_ai_image_blocks(sections, blocks_cache, {"ai_image_auto_generate": False})
     assert n == 0 and not fake_gen
     assert blocks_cache["s1"][0]["type"] == "ai_image"
 
@@ -123,11 +120,8 @@ async def test_generation_concurrency_uses_configured_limit(monkeypatch):
         finally:
             active -= 1
 
-    monkeypatch.setattr(
-        "app.services.ai.image_engine.generate_illustration_image", _tracked_gen)
-    blocks_cache = {
-        f"s{i}": [_ai_block(_ai_code(f"配图 {i}"))] for i in range(4)
-    }
+    monkeypatch.setattr("app.services.ai.image_engine.generate_illustration_image", _tracked_gen)
+    blocks_cache = {f"s{i}": [_ai_block(_ai_code(f"配图 {i}"))] for i in range(4)}
     sections = [{"id": f"s{i}"} for i in range(4)]
 
     converted = await _auto_generate_ai_image_blocks(sections, blocks_cache, {})

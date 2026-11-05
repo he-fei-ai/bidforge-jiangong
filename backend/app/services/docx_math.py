@@ -36,12 +36,32 @@ _REPLACEMENT_RE = re.compile(r"\ufffd+")
 _MOJIBUKE_GBK_RE = re.compile(r"锟斤拷+|锟斤拷(?:锟斤拷)*")
 # Latin-1 / Windows-1252 mojibake（UTF-8 字节被按 Latin-1 读取）
 _LATIN1_MOJIBUKE = [
-    ("Ã©", "é"), ("Ã¨", "è"), ("Ãª", "ê"), ("Ã«", "ë"), ("Ã¢", "â"),
-    ("Ã¤", "ä"), ("Ã¯", "ï"), ("Ã®", "î"), ("Ã´", "ô"), ("Ã¶", "ö"),
-    ("Ã¹", "ù"), ("Ã¼", "ü"), ("Ã»", "û"), ("Ã§", "ç"), ("Ã³", "ó"),
-    ("Ã¡", "á"), ("Ã\xa0", "à"), ("Ã´", "ô"),
-    ("â€™", "’"), ("â€œ", "“"), ("â€\x9d", "”"), ("â€“", "–"),
-    ("â€”", "—"), ("â€¦", "…"), ("Â\xa0", " "), ("Â°", "°"),
+    ("Ã©", "é"),
+    ("Ã¨", "è"),
+    ("Ãª", "ê"),
+    ("Ã«", "ë"),
+    ("Ã¢", "â"),
+    ("Ã¤", "ä"),
+    ("Ã¯", "ï"),
+    ("Ã®", "î"),
+    ("Ã´", "ô"),
+    ("Ã¶", "ö"),
+    ("Ã¹", "ù"),
+    ("Ã¼", "ü"),
+    ("Ã»", "û"),
+    ("Ã§", "ç"),
+    ("Ã³", "ó"),
+    ("Ã¡", "á"),
+    ("Ã\xa0", "à"),
+    ("Ã´", "ô"),
+    ("â€™", "’"),
+    ("â€œ", "“"),
+    ("â€\x9d", "”"),
+    ("â€“", "–"),
+    ("â€”", "—"),
+    ("â€¦", "…"),
+    ("Â\xa0", " "),
+    ("Â°", "°"),
     # 注：移除裸 ("Â", "") —— 合法文本中的 Â（法语词/专名）会被静默删字，
     # 违背"宁可不改，不丢内容"原则。常见 mojibake Â°（度数符号）保留修复。
 ]
@@ -95,13 +115,9 @@ _HTML_ROW_END_RE = re.compile(r"</tr\s*>", re.I)
 #    静默丢正文，违反 AGENTS.md §3.1.6 数据真实性红线）。现按真实 HTML 属性语法收紧：
 #    属性名必须是 ASCII 标识符、属性值必须是引号串或无空白串，中文/空格内容不再匹配；
 #    同时保留「仅处理真实标签」的语义（``<p class="x">`` 仍被清理）。
-_HTML_ATTR = (
-    r"(?:\s+[a-zA-Z_:][-a-zA-Z0-9_:.]*"
-    r"(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s\"'>]+))?)*\s*"
-)
+_HTML_ATTR = r"(?:\s+[a-zA-Z_:][-a-zA-Z0-9_:.]*" r"(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s\"'>]+))?)*\s*"
 _HTML_TABLE_TAG_RE = re.compile(
-    r"</?(?:table|thead|tbody|tfoot|tr|td|th|col|colgroup|caption|div|span|p|font)"
-    r"\b" + _HTML_ATTR + r">",
+    r"</?(?:table|thead|tbody|tfoot|tr|td|th|col|colgroup|caption|div|span|p|font)" r"\b" + _HTML_ATTR + r">",
     re.I,
 )
 
@@ -157,8 +173,7 @@ def clean_text(text: str) -> str:
     # ✅ R104（2026-10-18 · 导出乱码收口）：单字母西里尔形近字（ф→φ 等，
     #    仅「后随数字」的高置信工程符号形态，见 _CYRILLIC_GLYPH_NUM_RE 注释）。
     #    既有词段修复覆盖不到单字母符号误植，生产实测 6 处全部漏修进交付文档。
-    out = _CYRILLIC_GLYPH_NUM_RE.sub(
-        lambda m: _CYRILLIC_GLYPH_MAP[m.group(1)], out)
+    out = _CYRILLIC_GLYPH_NUM_RE.sub(lambda m: _CYRILLIC_GLYPH_MAP[m.group(1)], out)
     # ✅ 新增：剪贴板表格标记 / 残留 HTML 表格标签降级为可读纯文本
     #    （修复交付文档出现「<br><br><table><fcel><nl></table>」式乱码）
     out = strip_table_markup(out)
@@ -189,12 +204,10 @@ def clean_text(text: str) -> str:
 #   2. ``\*`` 等标点转义只剥反斜杠保留原字符（Markdown 转义语义）；
 #   3. ``$...$`` / ``$$...$$`` / ``\(...\)`` / ``\[...\]`` 公式跨度**整段跳过**
 #      —— 内部反斜杠交给公式转换器处理，这里绝不触碰。
-_MD_UNESCAPE_NL_TAB_RE = re.compile(
-    r"(?<![A-Za-z0-9\\])\\(?P<ch>[nt])(?![A-Za-z])")
+_MD_UNESCAPE_NL_TAB_RE = re.compile(r"(?<![A-Za-z0-9\\])\\(?P<ch>[nt])(?![A-Za-z])")
 _MD_UNESCAPE_PUNCT_RE = re.compile(r"(?<![A-Za-z0-9\\])\\([*_~`])")
 # 公式跨度（外层捕获组供 split 使用：偶数段=普通文本，奇数段=公式原文）
-_FORMULA_SPAN_RE = re.compile(
-    r"(\$\$.*?\$\$|\$[^$\n]*?\$|\\\(.+?\\\)|\\\[.+?\\\])", re.S)
+_FORMULA_SPAN_RE = re.compile(r"(\$\$.*?\$\$|\$[^$\n]*?\$|\\\(.+?\\\)|\\\[.+?\\\])", re.S)
 
 
 def unescape_markdown_literals(text: str) -> str:
@@ -210,8 +223,7 @@ def unescape_markdown_literals(text: str) -> str:
         return text
 
     def _fix_seg(seg: str) -> str:
-        seg = _MD_UNESCAPE_NL_TAB_RE.sub(
-            lambda m: "\n" if m.group("ch") == "n" else "\t", seg)
+        seg = _MD_UNESCAPE_NL_TAB_RE.sub(lambda m: "\n" if m.group("ch") == "n" else "\t", seg)
         seg = _MD_UNESCAPE_PUNCT_RE.sub(r"\1", seg)
         return seg
 
@@ -234,11 +246,14 @@ def unescape_markdown_literals(text: str) -> str:
 # 最多迭代 2 轮以兼容 `&amp;gt;` 双重转义。白名单外的 `&xxx;` 一律保留
 # （宁可不改，不丢内容）。
 _HTML_ENTITY_MAP = {
-    "&gt;": ">", "&lt;": "<", "&amp;": "&",
-    "&quot;": '"', "&apos;": "'", "&nbsp;": " ",
+    "&gt;": ">",
+    "&lt;": "<",
+    "&amp;": "&",
+    "&quot;": '"',
+    "&apos;": "'",
+    "&nbsp;": " ",
 }
-_HTML_ENTITY_RE = re.compile(
-    r"&(?:gt|lt|amp|quot|apos|nbsp|#\d{1,6}|#[xX][0-9a-fA-F]{1,6});", re.I)
+_HTML_ENTITY_RE = re.compile(r"&(?:gt|lt|amp|quot|apos|nbsp|#\d{1,6}|#[xX][0-9a-fA-F]{1,6});", re.I)
 
 
 def decode_html_entities(text: str) -> str:
@@ -246,6 +261,7 @@ def decode_html_entities(text: str) -> str:
     if not text or "&" not in text:
         return text
     for _ in range(2):
+
         def _rep(m: "re.Match") -> str:
             ent = m.group(0)
             low = ent.lower()
@@ -290,8 +306,11 @@ def _spaced_inline_math_inners(text: str) -> list[str]:
     out: list[str] = []
     for m in _MATH_WS_DOLLAR_RE.finditer(text):
         inner = m.group(1).strip()
-        if inner and not _PURE_NUMBER_RE.fullmatch(inner) and (
-                _MATH_HINT_RE.search(inner) or _MATH_VAR_RE.fullmatch(inner)):
+        if (
+            inner
+            and not _PURE_NUMBER_RE.fullmatch(inner)
+            and (_MATH_HINT_RE.search(inner) or _MATH_VAR_RE.fullmatch(inner))
+        ):
             out.append(inner)
     return out
 
@@ -303,8 +322,11 @@ def normalize_spaced_inline_math(text: str) -> str:
 
     def _rep(m: "re.Match") -> str:
         inner = m.group(1).strip()
-        if inner and not _PURE_NUMBER_RE.fullmatch(inner) and (
-                _MATH_HINT_RE.search(inner) or _MATH_VAR_RE.fullmatch(inner)):
+        if (
+            inner
+            and not _PURE_NUMBER_RE.fullmatch(inner)
+            and (_MATH_HINT_RE.search(inner) or _MATH_VAR_RE.fullmatch(inner))
+        ):
             return "$" + inner + "$"
         return m.group(0)
 
@@ -334,7 +356,9 @@ _EN_RESIDUE_MAP = {
 _EN_RESIDUE_RE = re.compile(
     r"(?<![A-Za-z])("
     + "|".join(re.escape(k) for k in sorted(_EN_RESIDUE_MAP, key=len, reverse=True))
-    + r")(?![A-Za-z])", re.I)
+    + r")(?![A-Za-z])",
+    re.I,
+)
 
 
 def fix_english_residue(text: str) -> str:
@@ -343,9 +367,9 @@ def fix_english_residue(text: str) -> str:
         return text
     parts = _FORMULA_SPAN_RE.split(text)
     return "".join(
-        p if i % 2 else _EN_RESIDUE_RE.sub(
-            lambda m: _EN_RESIDUE_MAP[m.group(1).lower()], p)
-        for i, p in enumerate(parts))
+        p if i % 2 else _EN_RESIDUE_RE.sub(lambda m: _EN_RESIDUE_MAP[m.group(1).lower()], p)
+        for i, p in enumerate(parts)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -353,30 +377,94 @@ def fix_english_residue(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 _GREEK = {
-    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
-    "varepsilon": "ϵ", "zeta": "ζ", "eta": "η", "theta": "θ", "vartheta": "ϑ",
-    "iota": "ι", "kappa": "κ", "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ",
-    "pi": "π", "varpi": "ϖ", "rho": "ρ", "varrho": "ϱ", "sigma": "σ",
-    "varsigma": "ς", "tau": "τ", "upsilon": "υ", "phi": "φ", "varphi": "ϕ",
-    "chi": "χ", "psi": "ψ", "omega": "ω",
-    "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ",
-    "Pi": "Π", "Sigma": "Σ", "Upsilon": "Υ", "Phi": "Φ", "Psi": "Ψ",
+    "alpha": "α",
+    "beta": "β",
+    "gamma": "γ",
+    "delta": "δ",
+    "epsilon": "ε",
+    "varepsilon": "ϵ",
+    "zeta": "ζ",
+    "eta": "η",
+    "theta": "θ",
+    "vartheta": "ϑ",
+    "iota": "ι",
+    "kappa": "κ",
+    "lambda": "λ",
+    "mu": "μ",
+    "nu": "ν",
+    "xi": "ξ",
+    "pi": "π",
+    "varpi": "ϖ",
+    "rho": "ρ",
+    "varrho": "ϱ",
+    "sigma": "σ",
+    "varsigma": "ς",
+    "tau": "τ",
+    "upsilon": "υ",
+    "phi": "φ",
+    "varphi": "ϕ",
+    "chi": "χ",
+    "psi": "ψ",
+    "omega": "ω",
+    "Gamma": "Γ",
+    "Delta": "Δ",
+    "Theta": "Θ",
+    "Lambda": "Λ",
+    "Xi": "Ξ",
+    "Pi": "Π",
+    "Sigma": "Σ",
+    "Upsilon": "Υ",
+    "Phi": "Φ",
+    "Psi": "Ψ",
     "Omega": "Ω",
 }
 
 # 命令 -> Unicode 运算符（作为普通样式 run，与 pandoc 一致）
 _OPS = {
-    "le": "≤", "leq": "≤", "ge": "≥", "geq": "≥", "ne": "≠", "neq": "≠",
-    "times": "×", "div": "÷", "cdot": "⋅", "pm": "±", "mp": "∓",
-    "infty": "∞", "approx": "≈", "equiv": "≡", "propto": "∝",
-    "rightarrow": "→", "leftarrow": "←", "Rightarrow": "⇒", "Leftarrow": "⇐",
-    "to": "→", "gets": "←", "leftrightarrow": "↔",
-    "partial": "∂", "nabla": "∇", "forall": "∀", "exists": "∃",
-    "in": "∈", "notin": "∉", "subset": "⊂", "supset": "⊃",
-    "subseteq": "⊆", "supseteq": "⊇", "cup": "∪", "cap": "∩",
-    "emptyset": "∅", "angle": "∠", "perp": "⊥", "parallel": "∥",
-    "prime": "′", "ldots": "…", "cdots": "⋯", "dots": "…",
-    "degree": "°", "circ": "°",
+    "le": "≤",
+    "leq": "≤",
+    "ge": "≥",
+    "geq": "≥",
+    "ne": "≠",
+    "neq": "≠",
+    "times": "×",
+    "div": "÷",
+    "cdot": "⋅",
+    "pm": "±",
+    "mp": "∓",
+    "infty": "∞",
+    "approx": "≈",
+    "equiv": "≡",
+    "propto": "∝",
+    "rightarrow": "→",
+    "leftarrow": "←",
+    "Rightarrow": "⇒",
+    "Leftarrow": "⇐",
+    "to": "→",
+    "gets": "←",
+    "leftrightarrow": "↔",
+    "partial": "∂",
+    "nabla": "∇",
+    "forall": "∀",
+    "exists": "∃",
+    "in": "∈",
+    "notin": "∉",
+    "subset": "⊂",
+    "supset": "⊃",
+    "subseteq": "⊆",
+    "supseteq": "⊇",
+    "cup": "∪",
+    "cap": "∩",
+    "emptyset": "∅",
+    "angle": "∠",
+    "perp": "⊥",
+    "parallel": "∥",
+    "prime": "′",
+    "ldots": "…",
+    "cdots": "⋯",
+    "dots": "…",
+    "degree": "°",
+    "circ": "°",
 }
 
 # 大运算符（n-ary）
@@ -384,12 +472,22 @@ _NARY = {"sum": "∑", "prod": "∏", "int": "∫", "oint": "∮", "bigcup": "�
 
 # 需要成对处理的定界符（命令 -> Unicode）
 _LEFT_DELIM = {
-    "(": "(", "[": "[", "{": "{", "|": "|", "langle": "⟨",
-    "lfloor": "⌊", "lceil": "⌈",
+    "(": "(",
+    "[": "[",
+    "{": "{",
+    "|": "|",
+    "langle": "⟨",
+    "lfloor": "⌊",
+    "lceil": "⌈",
 }
 _RIGHT_DELIM = {
-    ")": ")", "]": "]", "}": "}", "|": "|", "rangle": "⟩",
-    "rfloor": "⌋", "rceil": "⌉",
+    ")": ")",
+    "]": "]",
+    "}": "}",
+    "|": "|",
+    "rangle": "⟩",
+    "rfloor": "⌋",
+    "rceil": "⌉",
 }
 
 _TOKEN_RE = re.compile(
@@ -691,6 +789,7 @@ class _LatexParser:
 # AST -> OMML XML
 # ---------------------------------------------------------------------------
 
+
 def _esc(s: str) -> str:
     return html.escape(s, quote=False)
 
@@ -710,34 +809,40 @@ def _node_to_omml(node) -> str:
     if kind == "seq":
         return "".join(_node_to_omml(n) for n in node[1])
     if kind == "frac":
-        return (f"<m:f><m:fPr><m:type m:val='bar'/></m:fPr>"
-                f"<m:num>{_node_to_omml(node[1])}</m:num>"
-                f"<m:den>{_node_to_omml(node[2])}</m:den></m:f>")
+        return (
+            f"<m:f><m:fPr><m:type m:val='bar'/></m:fPr>"
+            f"<m:num>{_node_to_omml(node[1])}</m:num>"
+            f"<m:den>{_node_to_omml(node[2])}</m:den></m:f>"
+        )
     if kind == "sSub":
-        return (f"<m:sSub><m:e>{_node_to_omml(node[1])}</m:e>"
-                f"<m:sub>{_node_to_omml(node[2])}</m:sub></m:sSub>")
+        return f"<m:sSub><m:e>{_node_to_omml(node[1])}</m:e>" f"<m:sub>{_node_to_omml(node[2])}</m:sub></m:sSub>"
     if kind == "sSup":
-        return (f"<m:sSup><m:e>{_node_to_omml(node[1])}</m:e>"
-                f"<m:sup>{_node_to_omml(node[2])}</m:sup></m:sSup>")
+        return f"<m:sSup><m:e>{_node_to_omml(node[1])}</m:e>" f"<m:sup>{_node_to_omml(node[2])}</m:sup></m:sSup>"
     if kind == "sSubSup":
-        return (f"<m:sSubSup><m:e>{_node_to_omml(node[1])}</m:e>"
-                f"<m:sub>{_node_to_omml(node[2])}</m:sub>"
-                f"<m:sup>{_node_to_omml(node[3])}</m:sup></m:sSubSup>")
+        return (
+            f"<m:sSubSup><m:e>{_node_to_omml(node[1])}</m:e>"
+            f"<m:sub>{_node_to_omml(node[2])}</m:sub>"
+            f"<m:sup>{_node_to_omml(node[3])}</m:sup></m:sSubSup>"
+        )
     if kind == "rad":
         deg = node[1]
         base = _node_to_omml(node[2])
         if deg:
-            return (f"<m:rad><m:radPr><m:degHide m:val='0'/></m:radPr>"
-                    f"<m:deg>{_node_to_omml(deg)}</m:deg><m:e>{base}</m:e></m:rad>")
+            return (
+                f"<m:rad><m:radPr><m:degHide m:val='0'/></m:radPr>"
+                f"<m:deg>{_node_to_omml(deg)}</m:deg><m:e>{base}</m:e></m:rad>"
+            )
         return f"<m:rad><m:e>{base}</m:e></m:rad>"
     if kind == "nary":
         char, sub, sup, body = node[1], node[2], node[3], node[4]
         body_xml = "".join(_node_to_omml(n) for n in body)
         sub_xml = _node_to_omml(sub) if sub else ""
         sup_xml = _node_to_omml(sup) if sup else ""
-        return (f"<m:nary><m:naryPr><m:chr m:val='{_esc(char)}'/></m:naryPr>"
-                f"<m:sub>{sub_xml}</m:sub><m:sup>{sup_xml}</m:sup>"
-                f"<m:e>{body_xml}</m:e></m:nary>")
+        return (
+            f"<m:nary><m:naryPr><m:chr m:val='{_esc(char)}'/></m:naryPr>"
+            f"<m:sub>{sub_xml}</m:sub><m:sup>{sup_xml}</m:sup>"
+            f"<m:e>{body_xml}</m:e></m:nary>"
+        )
     return ""
 
 
@@ -751,18 +856,28 @@ _DANGLING_PLACEHOLDER = "待填"
 
 
 def _dangling_placeholder_omml() -> str:
-    """构造悬空右值占位框 OMML：带虚线边框的「待填」文字（直立样式）。"""
+    """构造悬空右值占位框 OMML：带虚线边框的「待填」文字（直立样式）。
+
+    ✅ BUG 修复（2026-11-03 · R175 · BUG-1）：旧实现向 ``m:boxPr`` 写入
+    ``m:alignment`` 与 ``m:border`` 两个**非法子元素**。OMML schema 中
+    ``CT_BoxPr`` 的合法子元素只有 ``opEmu / noBreak / diff / brk / aln / ctrlPr``
+    （且须按此顺序），``m:alignment`` / ``m:border`` 都不在其中；Word 对公式
+    校验较宽松，但 WPS 会把该公式部件判为损坏（公式不渲染，严重时整篇提示
+    文档损坏）。现改为：
+    · 对齐改用合法元素 ``m:aln``（CT_OnOff，``m:val="1"`` 表示启用）；
+    · 虚线边框改由 ``m:ctrlPr/w:rPr/w:bdr`` 承载 —— 这是公式节点内唯一
+      schema 合法的边框写法（``m:border*`` 家族不属于 ``m:boxPr``）。
+    除「悬空运算符结尾」这一情形外，其余公式产物逐字节不变。
+    """
     return (
-        "<m:box><m:boxPr><m:opEmu m:val=\"0\"/>"
-        "<m:noBreak m:val=\"1\"/>"
-        "<m:diff m:val=\"0\"/><m:brk m:val=\"0\"/>"
-        "<m:alignment m:val=\"center\"/>"
-        "<m:border><m:borderHide m:val=\"0\"/>"
-        "<m:borderTop m:val=\"dashed\" smtHide=\"0\"/>"
-        "<m:borderBot m:val=\"dashed\" smtHide=\"0\"/>"
-        "<m:borderLeft m:val=\"dashed\" smtHide=\"0\"/>"
-        "<m:borderRight m:val=\"dashed\" smtHide=\"0\"/>"
-        "</m:border></m:boxPr>"
+        '<m:box><m:boxPr><m:opEmu m:val="0"/>'
+        '<m:noBreak m:val="1"/>'
+        '<m:diff m:val="0"/><m:brk m:val="0"/>'
+        '<m:aln m:val="1"/>'
+        f'<m:ctrlPr><w:rPr xmlns:w="{W_NS}">'
+        '<w:bdr w:val="dashed" w:sz="4" w:space="0" w:color="auto"/>'
+        "</w:rPr></m:ctrlPr>"
+        "</m:boxPr>"
         f"<m:e>{_r(_DANGLING_PLACEHOLDER, sty_p=True)}</m:e></m:box>"
     )
 
@@ -787,8 +902,10 @@ def latex_to_omml_display(latex: str) -> str:
     # 提取 oMath 内容（去掉外层包裹，避免双重 <m:oMath>）
     m = re.search(r"<m:oMath[^>]*>(.*)</m:oMath>", inner, re.S)
     body = m.group(1) if m else inner
-    return (f"<m:oMathPara xmlns:m='{M_NS}'><m:oMathParaPr><m:jc m:val='center'/></m:oMathParaPr>"
-            f"<m:oMath>{body}</m:oMath></m:oMathPara>")
+    return (
+        f"<m:oMathPara xmlns:m='{M_NS}'><m:oMathParaPr><m:jc m:val='center'/></m:oMathParaPr>"
+        f"<m:oMath>{body}</m:oMath></m:oMathPara>"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -813,21 +930,14 @@ _DANGLING_OP_TAIL = r"[=+\-×÷≤≥<>≈]\s"
 #    字面文本 `$p_{max} = $` 印进交付文档（脚手架方案计算书章节实测 4 处）。
 #    现放宽：**仅当**公式内容以悬空运算符结尾（`= + - × ÷ ≤ ≥ < > ≈`，其后一个空白）
 #    时才允许闭 $ 前为空白。普通中文文本跨 $ 误配对仍被字符类与"无空格"规则挡住。
-_INLINE_DOLLAR = (
-    r"\$(?!\s)"
-    r"(?:\\.|[^$\\\n，。；：！？、（）《》“”‘’])+?"
-    r"(?<!\s)\$"
-)
+_INLINE_DOLLAR = r"\$(?!\s)" r"(?:\\.|[^$\\\n，。；：！？、（）《》“”‘’])+?" r"(?<!\s)\$"
 # 悬空形态单独成式（与上式二选一），放在同组内由 _FORMULA_RE 的 inl 分支消费
 _INLINE_DOLLAR_DANGLING = (
-    r"\$(?!\s)"
-    r"(?:\\.|[^$\\\n，。；：！？、（）《》“”‘’])+?"
-    r"(?<=" + _DANGLING_OP_TAIL + r")\$"
+    r"\$(?!\s)" r"(?:\\.|[^$\\\n，。；：！？、（）《》“”‘’])+?" r"(?<=" + _DANGLING_OP_TAIL + r")\$"
 )
 _FORMULA_RE = re.compile(
     r"(?P<disp>\$\$.+?\$\$|\\\[.+?\\\])"
-    r"|(?P<inl>(?:" + _INLINE_DOLLAR + r")|(?:" + _INLINE_DOLLAR_DANGLING
-    + r")|\\\(.+?\\\))",
+    r"|(?P<inl>(?:" + _INLINE_DOLLAR + r")|(?:" + _INLINE_DOLLAR_DANGLING + r")|\\\(.+?\\\))",
     re.S,
 )
 
@@ -852,17 +962,26 @@ def iter_formulas(text: str):
 # 导出文档级扫描报告（供日志 / 前端提示）
 # ---------------------------------------------------------------------------
 
+
 def scan_issues(text: str) -> dict:
     """扫描一段文本中的可修复问题，返回统计（供报告展示）。"""
-    stats = {"formulas": 0, "block_formulas": 0, "replacement_chars": 0,
-             "control_chars": 0, "gbk_mojibake": 0, "latin1_mojibake": 0,
-             "cyrillic": 0,
-             # ✅ 2026-10-10（文档质量报告 格式问题5）：字面 ``\n`` / ``\*``
-             #    转义残留数（排除公式跨度后计数，与 unescape 修复口径一致）
-             "escape_residue": 0,
-             # ✅ 2026-10-17（文档质量报告 符号/文字问题）：HTML 实体残留数 /
-             #    中英混排误植词数 / 带边界空白 LaTeX 残留数（供 X-Fix-Stats 观测）
-             "html_entities": 0, "en_residue": 0, "latex_residue": 0}
+    stats = {
+        "formulas": 0,
+        "block_formulas": 0,
+        "replacement_chars": 0,
+        "control_chars": 0,
+        "gbk_mojibake": 0,
+        "latin1_mojibake": 0,
+        "cyrillic": 0,
+        # ✅ 2026-10-10（文档质量报告 格式问题5）：字面 ``\n`` / ``\*``
+        #    转义残留数（排除公式跨度后计数，与 unescape 修复口径一致）
+        "escape_residue": 0,
+        # ✅ 2026-10-17（文档质量报告 符号/文字问题）：HTML 实体残留数 /
+        #    中英混排误植词数 / 带边界空白 LaTeX 残留数（供 X-Fix-Stats 观测）
+        "html_entities": 0,
+        "en_residue": 0,
+        "latex_residue": 0,
+    }
     for disp, _, _ in iter_formulas(text):
         stats["formulas"] += 1
         if disp:
@@ -874,13 +993,10 @@ def scan_issues(text: str) -> dict:
     # ✅ R104（2026-10-18 · 导出乱码收口）：西里尔统计覆盖两种形态——
     #    ≥2 字母词段误植 + 单字母形近字（ф→φ，后随数字）。
     #    词段正则不匹配单字母，旧口径对后者恒 0（修复发生了却无观测）。
-    stats["cyrillic"] = (len(_CYRILLIC_SEG_RE.findall(text))
-                         + len(_CYRILLIC_GLYPH_NUM_RE.findall(text)))
+    stats["cyrillic"] = len(_CYRILLIC_SEG_RE.findall(text)) + len(_CYRILLIC_GLYPH_NUM_RE.findall(text))
     # 转义残留只在公式跨度外的普通文本里统计（跨度内不修也不计）
-    outside = "".join(p for i, p in enumerate(_FORMULA_SPAN_RE.split(text))
-                      if i % 2 == 0)
-    stats["escape_residue"] = (len(_MD_UNESCAPE_NL_TAB_RE.findall(outside))
-                               + len(_MD_UNESCAPE_PUNCT_RE.findall(outside)))
+    outside = "".join(p for i, p in enumerate(_FORMULA_SPAN_RE.split(text)) if i % 2 == 0)
+    stats["escape_residue"] = len(_MD_UNESCAPE_NL_TAB_RE.findall(outside)) + len(_MD_UNESCAPE_PUNCT_RE.findall(outside))
     stats["html_entities"] = len(_HTML_ENTITY_RE.findall(text))
     stats["en_residue"] = len(_EN_RESIDUE_RE.findall(text))
     stats["latex_residue"] = len(_spaced_inline_math_inners(text))
@@ -892,8 +1008,7 @@ def summarize(text: str) -> str:
     s = scan_issues(text)
     parts = []
     if s["formulas"]:
-        parts.append(f"公式 {s['formulas']} 处"
-                     f"（块级 {s['block_formulas']}）")
+        parts.append(f"公式 {s['formulas']} 处" f"（块级 {s['block_formulas']}）")
     if s["replacement_chars"]:
         parts.append(f"替换字符 {s['replacement_chars']} 处")
     if s["control_chars"]:

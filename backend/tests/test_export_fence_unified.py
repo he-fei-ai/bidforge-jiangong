@@ -15,6 +15,7 @@ export._parse_content_blocks 与 _count_unclosed_chart_fences 此前用
 
 本次改用 parse_fence_line 后登记/改写/导出三侧同口径。本文件锁定该修复不回归。
 """
+
 from __future__ import annotations
 
 from app.routers.export import _count_unclosed_chart_fences, _parse_content_blocks

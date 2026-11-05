@@ -1,5 +1,7 @@
 """导出缓存·指纹与治理群（配置指纹/内容指纹/缓存行判据/缓存修剪/孤儿产物 GC，自 export.py 按导出阶段拆出，facade 延迟绑定，纯搬移零行为变更）"""
 
+import zipfile
+
 import app.routers.export as _sh  # noqa: F401 — facade 命名空间延迟绑定（monkeypatch 兼容）
 
 _EXPORT_CONFIG_KEYS = frozenset({
@@ -69,12 +71,22 @@ def _image_generation_signature() -> dict:
         from app.config import settings as _s
         return {
             "enabled": bool(_s.image_enabled),
+            # ✅ BUG-4（R175）：`image_provider` 决定实际调用哪家生成器
+            #    （export.py 3089 读取），换厂但型号相同 → 像素完全不同，
+            #    旧指纹漏收该键会命中旧图。
+            "provider": str(getattr(_s, "image_provider", "") or ""),
             "model": str(getattr(_s, "image_model", "") or ""),
             "size": str(getattr(_s, "image_default_size", "") or ""),
             "base_url": str(getattr(_s, "image_base_url", "") or ""),
+            # ✅ BUG-4（R175）：AI 配图**全局预算**（export.py:3036 读取）——
+            #    `max_ai_images` 由 0（不限）改为 N 时，产物里保留哪些
+            #    `ai_image` 占位块会变化（apply_image_budget 分段择优），
+            #    属"真正影响产物内容"的服务端配置，必须参与指纹。
+            "max_images": int(getattr(_s, "max_ai_images", 0) or 0),
         }
     except Exception:  # pragma: no cover - 配置不可用时退化为稳定值
-        return {"enabled": False, "model": "", "size": "", "base_url": ""}
+        return {"enabled": False, "provider": "", "model": "", "size": "",
+                "base_url": "", "max_images": 0}
 
 
 def _content_fingerprint(prep: dict) -> tuple[str, str]:
@@ -137,6 +149,14 @@ def _content_fingerprint(prep: dict) -> tuple[str, str]:
             getattr(_demote_settings, "body_subheading_demote_with_children", True))
     except Exception:  # pragma: no cover - 配置不可用时沿用渲染端同款兜底
         _demote_on = True
+    # ✅ BUG-4（R175）：补充附录开关（服务端 settings）—— 与渲染端
+    #    export.py `_load_appendix_sources` 同一读取口径，不可用按关闭。
+    try:
+        from app.config import settings as _apx_settings
+        _appendix_on = bool(
+            getattr(_apx_settings, "export_appendix_sources", False))
+    except Exception:  # pragma: no cover
+        _appendix_on = False
     # R-2：合并 prep["image_config"] 覆盖服务器 settings（保持 settings 路径不变）
     _img_sig = _sh._image_generation_signature()
     _img_cfg = prep.get("image_config") or {}
@@ -187,6 +207,10 @@ def _content_fingerprint(prep: dict) -> tuple[str, str]:
             # ✅ R70（2026-10-11）：正文子标题降级开关（服务端 settings，非请求体）
             #    —— 直接改变产物编号层级，必须参与指纹，否则切换后命中旧产物。
             "subheading_demote": _demote_on,
+            # ✅ BUG-4（R175）：补充附录开关（服务端 settings，export.py:3721）——
+            #    「开启但知识库/提取成果为空」时 appendix_sources 仍为 []，与关闭态
+            #    指纹相同 → 会命中"没有补充附录"的旧产物。显式纳入开关本身。
+            "appendix_sources_on": _appendix_on,
             # ✅ 缓存失效修复（2026-09-23）：纯渲染逻辑改进（mermaid/PIL 渲染器升级，
             #    _RENDERER_VERSION 未变但逻辑已变）也应失效 DOCX 缓存，否则旧图被烤进
             #    二进制后永远命中。图表数据(data_json)变化固然会让 chart_fp 改变，
@@ -208,11 +232,12 @@ def _summarize_numbering_consistency(report: dict) -> str:
     """将编号一致性报告压缩为单行可读摘要（用于严格模式 409 详情）。"""
     parts = []
     for sec in report.get("sections", []):
-        if not sec.get("consistent"):
-            sample = ""
-            for d in (sec.get("diffs") or [])[:1]:
-                sample = " | ".join(d.get("new", [])) if d.get("new") else ""
-            parts.append(f"[{sec.get('section_id', '?')[:8]}]{sample}")
+        if sec.get("consistent") or sec.get("skipped"):
+            continue
+        sample = ""
+        for d in (sec.get("diffs") or [])[:1]:
+            sample = " | ".join(d.get("new", [])) if d.get("new") else ""
+        parts.append(f"[{sec.get('section_id', '?')[:8]}]{sample}")
     return "; ".join(parts) or f"不一致章节数={report.get('mismatched', 0)}"
 
 
@@ -246,17 +271,105 @@ async def _guard_numbering_consistency(db, scheme_id: str) -> None:
         try:
             from app.services.numbering import validate_scheme_numbering_consistency
             _rep = await validate_scheme_numbering_consistency(db, scheme_id)
-            if not _rep["consistent"]:
+            if _rep.get("failed"):
+                # ✅ 2026-11-05（R2 日志驱动）：校验器读取失败时返回 failed=True +
+                #    mismatched=0，旧实现会打出「发现 0 章不一致」的误导日志；
+                #    现与「校验通过」显式区分（fail-closed 结论如实记录）。
+                _sh.logger.warning(
+                    "导出前编号一致性校验读取失败（按未通过处理，不影响导出）: %s",
+                    _rep.get("error") or "unknown")
+            elif not _rep["consistent"]:
                 _sh.logger.warning(
                     "导出前编号一致性校验发现 %d 章落库正文与目录编号不一致（scheme=%s），"
-                    "建议调用 /numbering-consistency/repair 或触发结构重排以同步。",
-                    _rep["mismatched"], scheme_id[:8])
+                    "建议调用 /numbering-consistency/repair 或触发结构重排以同步。"
+                    "不一致章节（前 5 个）：%s",
+                    _rep["mismatched"],
+                    scheme_id[:8],
+                    "; ".join(_summarize_numbering_consistency(_rep).split("; ")[:5]),
+                )
         except Exception as _e:  # noqa: BLE001
             _sh.logger.debug("编号一致性预检失败（不影响导出）: %s", _e)
 
 
+#: ZIP 完整性校验结果记忆化（键 = (路径, 大小, mtime_ns)），避免每次命中/裁剪
+#: 都重新解压整份 DOCX。✅ BUG-3（R175）：此前可用判据只看 `st_size > 0`，
+#: 一次写到一半被杀进程 / 磁盘满留下的**截断 DOCX**（size>0 但中央目录缺失或
+#: CRC 坏）会被判为「可用缓存」，命中后直接返回给用户 —— 正是用户看到的
+#: 「文档打不开」。现对 .docx 做真实完整性校验（`zipfile.testzip()`），
+#: 结果按 (路径, 大小, mtime) 记忆化：同一文件只解压一次，文件一旦被重写
+#: 大小/mtime 变化 → 自动重新校验，绝不出现「旧结论套用到新文件」。
+_ZIP_VERIFIED: dict[tuple[str, int, int], bool] = {}
+_ZIP_VERIFIED_LOCK = _sh.threading.Lock()
+_ZIP_VERIFIED_MAX = 1024
+
+
+def _zip_integrity_ok(path, size: int, mtime_ns: int) -> bool:
+    """DOCX（ZIP 容器）是否结构完整；结果记忆化（线程安全）。"""
+    key = (str(path), int(size), int(mtime_ns))
+    with _ZIP_VERIFIED_LOCK:
+        cached = _ZIP_VERIFIED.get(key)
+    if cached is not None:
+        return cached
+    ok = False
+    try:
+        with zipfile.ZipFile(str(path)) as zf:
+            # testzip 返回首个损坏成员名（None = 全部 CRC 校验通过）
+            ok = zf.testzip() is None
+            # 额外必需部件：缺 [Content_Types].xml 的包 Word/WPS 必判「损坏」
+            if ok:
+                names = set(zf.namelist())
+                ok = "[Content_Types].xml" in names and "word/document.xml" in names
+    except Exception:  # BadZipFile / OSError / CRC 异常
+        ok = False
+    with _ZIP_VERIFIED_LOCK:
+        if len(_ZIP_VERIFIED) >= _ZIP_VERIFIED_MAX:
+            _ZIP_VERIFIED.clear()
+        _ZIP_VERIFIED[key] = ok
+    return ok
+
+
+#: PDF 完整性校验结果记忆化（键 = (路径, 大小, mtime_ns)），避免每次命中/裁剪
+#: 都重读整份 PDF。✅ B1-3（R176）：与 DOCX 的 `_ZIP_VERIFIED` 同型，文件被重写后
+#: 大小/mtime 变化 → 自动重新判定，绝不把旧结论套用到新文件。
+_PDF_VERIFIED: dict[tuple[str, int, int], bool] = {}
+_PDF_VERIFIED_LOCK = _sh.threading.Lock()
+_PDF_VERIFIED_MAX = 512
+
+
+def _pdf_integrity_ok(path, size: int, mtime_ns: int) -> bool:
+    """PDF 是否结构完整（可解析的最小判据）；结果记忆化（线程安全）。
+
+    ✅ B1-3（R176 · 2026-11-04）：旧实现 .pdf 只做 `size>0` —— 写盘中断/磁盘满
+    留下的**截断 PDF**（size>0 但缺文件头或 trailer）会被判「可用缓存」命中并
+    直接 FileResponse 交付，用户拿到打不开的文档。不引入 PDF 解析依赖
+    （部署环境不保证有 pypdf），改用规范规定的结构判据：
+      · 文件头 1024 字节内出现 ``%PDF-``（规范允许前导垃圾，故不限定偏移 0）；
+      · 文件尾 2048 字节内出现 ``%%EOF``（正常与增量更新的 trailer 均在末尾）。
+    两处同时满足才认为可解析；判据失败 → 不可命中（调用方重建产物）。
+    """
+    key = (str(path), int(size), int(mtime_ns))
+    with _PDF_VERIFIED_LOCK:
+        cached = _PDF_VERIFIED.get(key)
+    if cached is not None:
+        return cached
+    ok = False
+    try:
+        with open(path, "rb") as f:
+            head = f.read(1024)
+            if b"%PDF-" in head:
+                f.seek(max(0, int(size) - 2048))
+                ok = b"%%EOF" in f.read()
+    except OSError:
+        ok = False
+    with _PDF_VERIFIED_LOCK:
+        if len(_PDF_VERIFIED) >= _PDF_VERIFIED_MAX:
+            _PDF_VERIFIED.clear()
+        _PDF_VERIFIED[key] = ok
+    return ok
+
+
 def _cache_row_viable(result_path: str) -> bool:
-    """缓存行是否仍可用：result_path 非空、文件存在且**非空文件**。
+    """缓存行是否仍可用：result_path 非空、文件存在、非空且**结构完整**。
 
     ✅ BUG 修复（2026-10-14 · P2 判据不一致）：命中判据（export_docx / export_pdf）
     要求 `Path(...).stat().st_size > 0`，而本函数的两处判据只查 `.exists()`：
@@ -265,14 +378,41 @@ def _cache_row_viable(result_path: str) -> bool:
       · 于是它会在裁剪时把**更新且可用**的缓存行挤出保留窗口，
         用户表现为「明明没改内容，缓存却突然失效、重新付一次全量渲染成本」。
     抽成共享判据，使「可用缓存」在读写两侧同一口径。
+
+    ✅ BUG-3（R175）：在 size>0 之上补真实完整性校验（.docx 走 ZIP 校验；
+    .pdf 只做非空判据——PDF 无 ZIP 结构，越界校验不在本项范围）。
+
+    ✅ B1-3（R176 · 2026-11-04）：补齐 .pdf 等价判据（``_pdf_integrity_ok``：
+    头部 ``%PDF-`` + 尾部 ``%%EOF``）—— 旧实现 .pdf 直接 ``return True``，
+    「size>0 的截断 PDF」会被当作可用缓存命中并交付。其余后缀保持原行为。
+
+    🧵 线程安全（R176 补漏 · 2026-11-04）：本函数被缓存**命中分支**放在
+    ``asyncio.to_thread`` 中执行（ZIP 整包 CRC / PDF 头尾读是同步阻塞）。
+    两处记忆化（``_ZIP_VERIFIED`` / ``_PDF_VERIFIED``）的读与写各自持
+    ``threading.Lock``：并发首次命中最多重复一次校验（同键同文件，结论一致，
+    不会写坏 dict），超限 ``clear()`` 亦持锁；键含 ``(路径, 大小, mtime_ns)``，
+    文件被重写即自动重新判定，绝不套用旧结论。
     """
     if not result_path:
         return False
     try:
         p = _sh.Path(result_path)
-        return p.is_file() and p.stat().st_size > 0
+        if not p.is_file():
+            return False
+        st = p.stat()
+        # 保留 `st_size > 0` 写法：既有护栏测试 test_viable_check_includes_size_guard
+        # 以该子串作为判据锚点（R175 只追加完整性校验，不取消既有判据）。
+        if not (st.st_size > 0):
+            return False
     except OSError:
         return False
+    _suffix = p.suffix.lower()
+    if _suffix == ".docx":
+        return _zip_integrity_ok(p, st.st_size, st.st_mtime_ns)
+    if _suffix == ".pdf":
+        # ✅ B1-3：PDF 走等价结构判据（不可解析/截断 → 判不可用 → 调用方重建）
+        return _pdf_integrity_ok(p, st.st_size, st.st_mtime_ns)
+    return True
 
 
 async def _prune_export_cache(db, scheme_id: str, protect_path: _sh.Path) -> None:
@@ -297,6 +437,9 @@ async def _prune_export_cache(db, scheme_id: str, protect_path: _sh.Path) -> Non
         # 无行 = 查询失败或本方案确无缓存；两种情况都无需裁剪（fail-soft）
         return
     keep_paths = {str(protect_path)}
+    # ✅ BUG-6（R175）：「正在读取」租约内的产物不得删除 —— DB 行照常清理，
+    #    但磁盘文件留到租约过期后由孤儿 GC 兜底（保证下载中的响应不会读到半截）。
+    leased = _sh._export_read_lease_snapshot()
     for cr in cache_rows[:5]:
         if _sh._cache_row_viable(cr.get("result_path") or ""):
             keep_paths.add(cr["result_path"])
@@ -315,10 +458,10 @@ async def _prune_export_cache(db, scheme_id: str, protect_path: _sh.Path) -> Non
         for cr in cache_rows:
             rp = cr.get("result_path") or ""
             if cr["id"] in stale_ids and rp and rp not in keep_paths:
-                try:
-                    _sh.Path(rp).unlink(missing_ok=True)
-                except OSError:
-                    pass
+                if _sh.os.path.normcase(str(rp)) in leased:
+                    continue
+                # ✅ R176 · D2-2：产物与其审计旁车同生共死（单一删除出口）。
+                _sh._remove_export_artifact(rp)
         placeholders = ",".join("?" * len(stale_ids))
         await _sh._db_exec(db, f"DELETE FROM export_cache WHERE id IN ({placeholders})", stale_ids,
                     what="_prune_export_cache 清理")
@@ -398,6 +541,8 @@ async def _gc_orphan_exports(db, scheme_id: str,
         #    导致对端请求 500/404 或缓存行永久指向已删文件。
         #    见模块内 _EXPORT_INFLIGHT_PATHS 的注释（在同模块下方定义，运行时解析）。
         inflight = _sh._export_inflight_snapshot()
+        # ✅ BUG-6（R175）：租约内的产物正在被响应读取，判孤儿也不得删。
+        leased = _sh._export_read_lease_snapshot()
         now = time.time()
         prefix = f"{scheme_id}_"
         try:
@@ -409,11 +554,27 @@ async def _gc_orphan_exports(db, scheme_id: str,
                 if not f.is_file() or not f.name.startswith(prefix):
                     continue
                 key = os.path.normcase(str(f))
-                if key in live or key in protected or key in inflight:
+                # ✅ R176 · D2-2：旁车不是独立产物 —— 它的生死完全跟随宿主产物。
+                #    宿主仍在 live/protected/inflight/leased 时必须保留；宿主已不存在
+                #    则旁车必为孤儿，就地清理（宿主被删时也会连带删它）。
+                if f.name.endswith(_sh._AUDIT_SIDECAR_SUFFIX):
+                    host = _sh.Path(str(f)[: -len(_sh._AUDIT_SIDECAR_SUFFIX)])
+                    host_key = os.path.normcase(str(host))
+                    if (host_key in live or host_key in protected
+                            or host_key in inflight or host_key in leased):
+                        continue
+                    if not host.exists():
+                        # 宿主已不存在 ⇒ 该旁车必为孤儿；仍走唯一删除出口，
+                        # 避免在导出域出现第二条裸删路径（R177 护栏）。
+                        _sh._remove_export_artifact(host)
+                        deleted += 1
+                    continue  # 宿主存在则由宿主分支连同旁车一并处理
+                if key in live or key in protected or key in inflight or key in leased:
                     continue
                 if ".tmp." in f.name and (now - f.stat().st_mtime) < _sh._ORPHAN_TMP_TTL_SECONDS:
                     continue  # 宽限期内：可能是刚降级返回、仍在流式读取的产物
-                f.unlink(missing_ok=True)
+                # ✅ R176 · D2-2：删产物必连带删旁车（不留失主旁车）。
+                _sh._remove_export_artifact(f)
                 deleted += 1
             except OSError:
                 continue

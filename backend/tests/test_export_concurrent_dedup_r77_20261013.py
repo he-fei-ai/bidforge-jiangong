@@ -1,4 +1,5 @@
 """P2 收口（2026-10-13）· 同「方案 + 格式 + 配置」并发导出的重复成本。"""
+
 import ast
 import asyncio
 import hashlib
@@ -32,31 +33,39 @@ async def ctx(tmp_path, monkeypatch):
     db = await get_conn()
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.execute(
         "INSERT INTO sections(id,scheme_id,level,title,sort_order) VALUES(?,?,1,?,1)",
-        (uuid.uuid4().hex, sid, "Overview"))
+        (uuid.uuid4().hex, sid, "Overview"),
+    )
 
     calls = []
     state = {"renders": 0}
 
-    async def fake_prep(sid_arg, body, db_arg, cancel_event=None):
+    async def fake_prep(sid_arg, body, db_arg, cancel_event=None, defer_audit=False):
         # cancel_event：R106 FIX-1 给 _prepare_export 追加的可选形参（取消登记），
         # 桩必须同样接受，否则路由的真实调用形态 `cancel_event=cancel_ev` 直接
         # TypeError（本用例测的是去重锁，不是取消链路）。
+        # defer_audit：R176 D2-2 追加（路由侧体检延后到旁车解析），桩同样接受。
         calls.append(body["_tag"])
         return {
             "config": body.get("config", {}) or {},
             "scheme": {"id": sid_arg, "name": "s", "type": "", "project_id": pid},
-            "sections": [{"id": "s1", "title": "Overview", "level": 1,
-                          "content": "x", "sort_order": 1}],
-            "charts": [], "render_stats": {}, "fe_codes": [],
-            "chart_fp": [], "fe_images": {}, "rendered_charts": {},
-            "chart_lookup": {}, "blocks_cache": {},
-            "rendered_bytes": {}, "image_bytes": {},
-            "ai_image_pending": 0, "ai_image_download_pending": 0,
-            "fences_fixed": 0, "body": body,
+            "sections": [{"id": "s1", "title": "Overview", "level": 1, "content": "x", "sort_order": 1}],
+            "charts": [],
+            "render_stats": {},
+            "fe_codes": [],
+            "chart_fp": [],
+            "fe_images": {},
+            "rendered_charts": {},
+            "chart_lookup": {},
+            "blocks_cache": {},
+            "rendered_bytes": {},
+            "image_bytes": {},
+            "ai_image_pending": 0,
+            "ai_image_download_pending": 0,
+            "fences_fixed": 0,
+            "body": body,
         }
 
     async def fake_render(plan):
@@ -69,8 +78,14 @@ async def ctx(tmp_path, monkeypatch):
         return plan
 
     def fake_build(*args, **kwargs):
-        """DOCX 构建桩：写入固定字节（真实构建走线程池，此处同步写）。"""
-        Path(str(args[0])).write_bytes(b"PK\x03\x04" + b"x" * 12)
+        """DOCX 构建桩：写出一份**真实合法** DOCX（真实构建走线程池，此处同步写）。
+
+        ✅ R175 · BUG-3：缓存可用判据已含 ZIP 完整性校验，旧的
+        ``b"PK\\x03\\x04"+b"x"`` 截断包会被正确判为「损坏」→ 第二次导出永远 miss。
+        """
+        from docx import Document
+
+        Document().save(str(args[0]))
         return {"sections": 1, "tables": 0, "figures": 0}
 
     monkeypatch.setattr(export_mod, "_prepare_export", fake_prep)
@@ -117,9 +132,7 @@ class TestLockKeyParity:
 
     def test_equal_to_content_fingerprint_config_hash(self):
         body = {"config": {"line_spacing": 1.5, "margins": {"top": 2.5}}}
-        assert (export_mod._export_config_hash(body)
-                == export_mod._content_fingerprint(
-                    _minimal_prep(body["config"]))[0])
+        assert export_mod._export_config_hash(body) == export_mod._content_fingerprint(_minimal_prep(body["config"]))[0]
 
     def test_independent_of_content_dimensions(self):
         cfg0 = {"line_spacing": 1.5}
@@ -133,12 +146,12 @@ class TestLockKeyParity:
         assert a != b
 
     def test_normalizes_the_same_ways_as_the_fingerprint(self):
-        noisy = {"config": {"_ts": 1, "line_spacing": 1.5, "empty": "",
-                            "unknown": "z"}}
+        noisy = {"config": {"_ts": 1, "line_spacing": 1.5, "empty": "", "unknown": "z"}}
         body = {"config": noisy}
-        assert (export_mod._export_config_hash(body)
-                == export_mod._content_fingerprint(
-                    _minimal_prep(export_mod._normalize_config(noisy)))[0])
+        assert (
+            export_mod._export_config_hash(body)
+            == export_mod._content_fingerprint(_minimal_prep(export_mod._normalize_config(noisy)))[0]
+        )
 
     def test_missing_config_is_stable(self):
         a = export_mod._export_config_hash({})
@@ -151,13 +164,10 @@ class TestLockKeyParity:
         assert body == {"config": {"line_spacing": 1.5}}
 
 
-
-
 EXPORT_PY = Path(export_mod.__file__)
 CONFIG_PY = Path(cfg.__file__)
 DOCX_DEC = '@router.post("/docx")'
 PDF_DEC = '@router.post("/pdf")'
-
 
 
 class TestConcurrentDedupEndToEnd:
@@ -169,7 +179,8 @@ class TestConcurrentDedupEndToEnd:
         r1, r2 = await asyncio.gather(
             export_mod.export_docx(sid, dict(body, _tag="a"), db=db),
             export_mod.export_docx(sid, dict(body, _tag="b"), db=db),
-            return_exceptions=True)
+            return_exceptions=True,
+        )
         assert not isinstance(r1, Exception) and not isinstance(r2, Exception)
         # 核心断言：两个请求都进入过准备阶段（串行化，不是丢弃），且只落一行缓存
         assert len(calls) == 2 and sorted(calls) == ["a", "b"]
@@ -192,24 +203,28 @@ class TestConcurrentDedupEndToEnd:
         db, sid, calls, _ = ctx
         started, both_in = asyncio.Event(), asyncio.Event()
 
-        async def slow_prep(sid_arg, body, db_arg, cancel_event=None):
+        async def slow_prep(sid_arg, body, db_arg, cancel_event=None, defer_audit=False):
             calls.append(body["_tag"])
             started.set()
             await both_in.wait()  # 两个请求都进了准备阶段才算「并行」
             return {
                 "config": body.get("config", {}) or {},
-                "scheme": {"id": sid_arg, "name": "s", "type": "",
-                           "project_id": ""},
-                "sections": [], "charts": [], "render_stats": {},
-                "fe_codes": [], "chart_fp": [], "fe_images": {},
-                "rendered_charts": {}, "body": body,
+                "scheme": {"id": sid_arg, "name": "s", "type": "", "project_id": ""},
+                "sections": [],
+                "charts": [],
+                "render_stats": {},
+                "fe_codes": [],
+                "chart_fp": [],
+                "fe_images": {},
+                "rendered_charts": {},
+                "body": body,
             }
 
         export_mod._prepare_export = slow_prep
-        tasks = [asyncio.create_task(export_mod.export_docx(
-            sid, {"config": {"line_spacing": 1.5}, "_tag": "a"}, db=db)),
-            asyncio.create_task(export_mod.export_docx(
-            sid, {"config": {"line_spacing": 1.15}, "_tag": "b"}, db=db))]
+        tasks = [
+            asyncio.create_task(export_mod.export_docx(sid, {"config": {"line_spacing": 1.5}, "_tag": "a"}, db=db)),
+            asyncio.create_task(export_mod.export_docx(sid, {"config": {"line_spacing": 1.15}, "_tag": "b"}, db=db)),
+        ]
         # 两个任务都曾让出控制权；等双方都进入 slow_prep 再断言（防调度竞态）
         # ✅ 2026-10-14 加固：原实现固定 200 次 `sleep(0)` 后立即断言。编号一致性
         #    守卫在 db 连接失效时会走**同步** SQLite 回退查询（numbering.py），
@@ -234,7 +249,8 @@ class TestConcurrentDedupEndToEnd:
         r1, r2 = await asyncio.gather(
             export_mod.export_docx(sid, dict(body, _tag="a"), db=db),
             export_mod.export_docx(sid, dict(body, _tag="b"), db=db),
-            return_exceptions=True)
+            return_exceptions=True,
+        )
         assert all(not isinstance(r, Exception) for r in (r1, r2))
         # 旧行为：两个请求各自完整跑一遍构建
         assert len(calls) == 2 and sorted(calls) == ["a", "b"]
@@ -256,17 +272,18 @@ class TestConcurrentDedupEndToEnd:
         export_mod._build_docx_sync = guarded_build
         try:
             with pytest.raises(RuntimeError):
-                await export_mod.export_docx(sid, {"config": {}, "_tag": "boom"},
-                                             db=db)
+                await export_mod.export_docx(sid, {"config": {}, "_tag": "boom"}, db=db)
             assert state["builds"] == 1
             # 锁未释放 ⇒ 本次调用会在 await_lock() 上永久挂起
             resp = await asyncio.wait_for(
-                export_mod.export_docx(sid, {"config": {}, "_tag": "retry"}, db=db),
-                timeout=10)
+                export_mod.export_docx(sid, {"config": {}, "_tag": "retry"}, db=db), timeout=10
+            )
             assert state["builds"] == 2
             assert resp is not None
         finally:
             export_mod._build_docx_sync = orig
+
+
 # ---------------------------------------------------------------------------
 # 接线守卫（源码级 AST）：锁结构必须保持「守卫锁外 → 构建锁内 → finally 释放」
 # ---------------------------------------------------------------------------
@@ -293,8 +310,7 @@ def _awaited_calls_node(nodes) -> list[str]:
 def _release_in(nodes) -> bool:
     for n in nodes:
         for sub in ast.walk(n):
-            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) \
-                    and sub.func.id == "_export_dedup_release":
+            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id == "_export_dedup_release":
                 return True
     return False
 
@@ -321,8 +337,7 @@ def _lock_guard_structure(src: str, endpoint: str) -> bool:
     `_gc_orphan_exports`、`_display_scheme_name` 等）因此原样保留。
     """
     tree = ast.parse(src)
-    fn = next(n for n in tree.body if isinstance(n, _ANY_FUNC)
-              and n.name == endpoint)
+    fn = next(n for n in tree.body if isinstance(n, _ANY_FUNC) and n.name == endpoint)
     awaits = _awaited_calls(fn)
     if len(awaits) < 2:
         return False
@@ -361,19 +376,21 @@ class TestLockWiringSource:
         又守「收尾已接入统一 helper」）。
         """
         tree = ast.parse(_read_export_src())
-        fn = next(n for n in tree.body if isinstance(n, _ANY_FUNC)
-                  and n.name == "export_docx")
+        fn = next(n for n in tree.body if isinstance(n, _ANY_FUNC) and n.name == "export_docx")
         seg = ast.get_source_segment(export_mod.__file__ and _read_export_src(), fn)
-        for anchor in ("_persist_export_cache_row", "_finalize_export_delivery",
-                       "_display_scheme_name", "_build_docx_sync"):
+        for anchor in (
+            "_persist_export_cache_row",
+            "_finalize_export_delivery",
+            "_display_scheme_name",
+            "_build_docx_sync",
+        ):
             assert anchor in seg, f"export_docx 缺锚点 {anchor}"
 
     def test_prepare_export_must_run_inside_lock(self):
         """锁要抑制的正是 prepare 之后的计费区（AI 生图在其中）。"""
         assert _lock_guard_structure(_read_export_src(), "export_docx")
         tree = ast.parse(_read_export_src())
-        fn = next(n for n in tree.body if isinstance(n, _ANY_FUNC)
-                  and n.name == "export_docx")
+        fn = next(n for n in tree.body if isinstance(n, _ANY_FUNC) and n.name == "export_docx")
         for tr in ast.walk(fn):
             if isinstance(tr, ast.Try) and _release_in(tr.finalbody):
                 assert "_prepare_export" in _awaited_calls(tr)
@@ -382,10 +399,12 @@ class TestLockWiringSource:
 
     def test_release_call_has_no_await(self):
         tree = ast.parse(_read_export_src())
-        fn = next(n for n in tree.body if isinstance(n, _ANY_FUNC)
-                  and n.name == "_export_dedup_release")
-        assert not any(isinstance(n, ast.Await) for n in ast.walk(fn)), (
-            "释放不应是异步的（与获取成对，无锁时代价必须为 0）")
+        fn = next(n for n in tree.body if isinstance(n, _ANY_FUNC) and n.name == "_export_dedup_release")
+        assert not any(
+            isinstance(n, ast.Await) for n in ast.walk(fn)
+        ), "释放不应是异步的（与获取成对，无锁时代价必须为 0）"
+
+
 # ---------------------------------------------------------------------------
 # 字节体检 + 单一事实源
 # ---------------------------------------------------------------------------
@@ -412,11 +431,15 @@ class TestByteHealthAndSingleSource:
     def test_export_helpers_defined_once(self):
         src = _read_export_src()
         tree = ast.parse(src)
-        toplevel = [n for n in tree.body
-                    if isinstance(n, (*_ANY_FUNC, ast.Assign, ast.AnnAssign))]
-        for name in ("_export_config_hash", "_export_dedup_acquire",
-                     "_export_dedup_release", "_export_build_lock_for",
-                     "_export_dedup_enabled", "_EXPORT_BUILD_LOCKS"):
+        toplevel = [n for n in tree.body if isinstance(n, (*_ANY_FUNC, ast.Assign, ast.AnnAssign))]
+        for name in (
+            "_export_config_hash",
+            "_export_dedup_acquire",
+            "_export_dedup_release",
+            "_export_build_lock_for",
+            "_export_dedup_enabled",
+            "_EXPORT_BUILD_LOCKS",
+        ):
             hits = 0
             for n in toplevel:
                 if isinstance(n, _ANY_FUNC) and n.name == name:
@@ -436,9 +459,11 @@ class TestByteHealthAndSingleSource:
         会把任何带注解的配置项判成「未声明」。此处两类都收。
         """
         tree = ast.parse(CONFIG_PY.read_text(encoding="utf-8"))
-        hits = [n for n in ast.walk(tree)
-                if isinstance(n, (ast.Assign, ast.AnnAssign))
-                and _lhs_ids(n) == {"export_dedup_concurrent"}]
+        hits = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, (ast.Assign, ast.AnnAssign)) and _lhs_ids(n) == {"export_dedup_concurrent"}
+        ]
         assert hits, "config.py 未声明 export_dedup_concurrent"
         assert len(hits) == 1
         value = ast.literal_eval(hits[0].value)
@@ -458,37 +483,31 @@ class TestGuardDiscrimination:
         if variant == "no_acquire":
             # 只替换第一条（DOCX 端点）；此处校验确有 2 处防锚点漂移
             assert src.count("    _lk = await _export_dedup_acquire(") >= 2
-            src = src.replace("    _lk = await _export_dedup_acquire(",
-                              "    _lk = None  # 变异", 1)
+            src = src.replace("    _lk = await _export_dedup_acquire(", "    _lk = None  # 变异", 1)
         elif variant == "no_release":
             # DOCX / PDF 各一处，**全部**替换：任一未被摘除则守卫仍可命中
             assert src.count("        _export_dedup_release(_lk)\n") >= 2
-            src = src.replace("        _export_dedup_release(_lk)\n",
-                              "        pass  # 变异\n")
+            src = src.replace("        _export_dedup_release(_lk)\n", "        pass  # 变异\n")
         elif variant == "acquire_before_guard":
             lines = src.splitlines()
-            out = [ln for ln in lines
-                   if not ln.lstrip().startswith("await _guard_numbering_consistency(")]
+            out = [ln for ln in lines if not ln.lstrip().startswith("await _guard_numbering_consistency(")]
             # ✅ R106 适配：acquire 现位于 `try:` **体内**（8 空格）—— 目的是
             #    `_lk = None` 先置初值、acquire 抛错时 finally 仍能成对释放并注销
             #    取消登记（见 export_docx 的 R106 FIX-1 注释）。原实现用
             #    `startswith("    _lk = ...")` 只认 4 空格缩进，缩进一变就
             #    StopIteration（守卫自身并未失效）。改为 lstrip 定位 + 沿用该行
             #    实际缩进插回守卫调用，变异语义不变。
-            idx = next(i for i, ln in enumerate(out)
-                       if ln.lstrip().startswith("_lk = await _export_dedup_acquire("))
-            indent = out[idx][:len(out[idx]) - len(out[idx].lstrip())]
+            idx = next(i for i, ln in enumerate(out) if ln.lstrip().startswith("_lk = await _export_dedup_acquire("))
+            indent = out[idx][: len(out[idx]) - len(out[idx].lstrip())]
             out.insert(idx + 1, indent + "await _guard_numbering_consistency(db, scheme_id)")
             src = "\n".join(out)
         return src
 
-    @pytest.mark.parametrize("variant", ["no_acquire", "no_release",
-                                         "acquire_before_guard"])
+    @pytest.mark.parametrize("variant", ["no_acquire", "no_release", "acquire_before_guard"])
     def test_docx_variants_are_caught(self, variant):
         src = self._src_mutator(variant)
         assert src != _read_export_src()
-        assert not _lock_guard_structure(src, "export_docx"), (
-            f"变异 {variant!r} 应被守卫判定为失效")
+        assert not _lock_guard_structure(src, "export_docx"), f"变异 {variant!r} 应被守卫判定为失效"
 
     @pytest.mark.parametrize("variant", ["no_release"])
     def test_pdf_variant_is_caught(self, variant):

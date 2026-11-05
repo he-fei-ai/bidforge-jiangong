@@ -21,6 +21,7 @@
    判空。** 全局单连接下 execute 可能返回 None；两处均为只读旁路，降级返回
    空结果而非 500。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -45,9 +46,7 @@ async def db_ctx(tmp_path, monkeypatch):
     pid = uuid.uuid4().hex
     sid = uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name,status) VALUES(?,?,?,?)",
-        (sid, pid, "s", "目录已确认"))
+    await db.execute("INSERT INTO schemes(id,project_id,name,status) VALUES(?,?,?,?)", (sid, pid, "s", "目录已确认"))
     await db.commit()
     yield db, pid, sid
     await close_db()
@@ -59,7 +58,8 @@ async def _insert_section(db, sid, sec_id=None, title="第一章"):
         "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
         " description, level, status, word_count, word_budget, content,"
         " review_status, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (sec_id, sid, "", "", title, "", 1, "empty", 0, 0, "正文", "pending", 0))
+        (sec_id, sid, "", "", title, "", 1, "empty", 0, 0, "正文", "pending", 0),
+    )
     await db.commit()
     return sec_id
 
@@ -73,8 +73,8 @@ class TestReviewChecklistLatestTieBreak:
             "INSERT INTO review_records (id, scheme_id, project_id, section_id,"
             " section_title, from_status, to_status, reviewer, comment, created_at)"
             " VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (uuid.uuid4().hex, sid, "", sec_id, "章一",
-             "pending", "approved", "评审人", comment, created_at))
+            (uuid.uuid4().hex, sid, "", sec_id, "章一", "pending", "approved", "评审人", comment, created_at),
+        )
         await db.commit()
 
     async def test_latest_is_last_written_in_same_second(self, db_ctx):
@@ -186,7 +186,8 @@ class TestExportReadEndpointR13Guard:
             "INSERT INTO placeholder_baselines (id, scheme_id, total, formatted_total,"
             " bare_total, fuzzy_total, field_count, section_count)"
             " VALUES (?,?,?,?,?,?,?,?)",
-            (uuid.uuid4().hex, sid, 3, 1, 1, 1, 2, 1))
+            (uuid.uuid4().hex, sid, 3, 1, 1, 1, 2, 1),
+        )
         await db.commit()
         result = await placeholder_history(sid, 20, db)
         assert result["history"]

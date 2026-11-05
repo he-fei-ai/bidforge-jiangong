@@ -9,12 +9,14 @@
 ⚠️ 前置条件：需先运行 export_docx 生成 docx 文件，再解析验证。
    测试直接验证块解析与渲染逻辑（非完整导出流程）。
 """
+
 import pytest
 from app.routers.export import _ensure_list_paragraph_style, _estimate_prefix_width, _ordered_prefix
 
 # ---------------------------------------------------------------------------
 # _estimate_prefix_width 单元测试
 # ---------------------------------------------------------------------------
+
 
 class TestEstimatePrefixWidth:
     """前缀宽度估算测试"""
@@ -60,12 +62,14 @@ class TestEstimatePrefixWidth:
 # _ensure_list_paragraph_style 单元测试
 # ---------------------------------------------------------------------------
 
+
 class TestEnsureListParagraphStyle:
     """List Paragraph 样式获取/创建测试"""
 
     def test_style_exists(self):
         """文档已包含 List Paragraph 样式时直接返回"""
         from docx import Document
+
         doc = Document()
         # python-docx 默认文档包含 List Paragraph 样式
         name = _ensure_list_paragraph_style(doc)
@@ -74,6 +78,7 @@ class TestEnsureListParagraphStyle:
     def test_style_idempotent(self):
         """多次调用不重复创建样式"""
         from docx import Document
+
         doc = Document()
         name1 = _ensure_list_paragraph_style(doc)
         name2 = _ensure_list_paragraph_style(doc)
@@ -86,6 +91,7 @@ class TestEnsureListParagraphStyle:
 # ---------------------------------------------------------------------------
 # _ordered_prefix 单元测试
 # ---------------------------------------------------------------------------
+
 
 class TestOrderedPrefix:
     """有序列表前缀生成测试"""
@@ -120,6 +126,7 @@ class TestOrderedPrefix:
 # 集成测试：列表项渲染
 # ---------------------------------------------------------------------------
 
+
 class TestListItemRendering:
     """列表项渲染集成测试（验证缩进与样式）"""
 
@@ -145,7 +152,7 @@ class TestListItemRendering:
             if block.get("ordered"):
                 marker = block.get("marker", "ascii")
                 if indent_lvl < len(ordered_stack):
-                    ordered_stack = ordered_stack[:indent_lvl + 1]
+                    ordered_stack = ordered_stack[: indent_lvl + 1]
                 while len(ordered_stack) <= indent_lvl:
                     ordered_stack.append([marker, 0])
                 entry = ordered_stack[indent_lvl]
@@ -159,6 +166,7 @@ class TestListItemRendering:
 
             p = doc.add_paragraph(style="List Paragraph")
             from app.routers.export import _add_runs_with_inline_format
+
             _add_runs_with_inline_format(p, prefix + block["text"])
             lpf = p.paragraph_format
             lpf.left_indent = Cm(0.74 * (indent_lvl + 1))
@@ -198,7 +206,7 @@ class TestListItemRendering:
             if block.get("ordered"):
                 marker = block.get("marker", "ascii")
                 if indent_lvl < len(ordered_stack):
-                    ordered_stack = ordered_stack[:indent_lvl + 1]
+                    ordered_stack = ordered_stack[: indent_lvl + 1]
                 while len(ordered_stack) <= indent_lvl:
                     ordered_stack.append([marker, 0])
                 entry = ordered_stack[indent_lvl]
@@ -212,6 +220,7 @@ class TestListItemRendering:
 
             p = doc.add_paragraph(style="List Paragraph")
             from app.routers.export import _add_runs_with_inline_format
+
             _add_runs_with_inline_format(p, prefix + block["text"])
             lpf = p.paragraph_format
             lpf.left_indent = Cm(0.74 * (indent_lvl + 1))

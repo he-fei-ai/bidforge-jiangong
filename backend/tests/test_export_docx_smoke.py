@@ -17,6 +17,7 @@
     预检 / 日志）。传 `chart_fail_placeholder=True` 恢复占位形态，见
     `test_export_docx_optin_placeholder_keeps_v70_contract`。
 """
+
 import os
 
 import pytest
@@ -34,21 +35,37 @@ async def _seed_export_fixture(db_conn):
     await db_conn.execute(
         "INSERT INTO sections (id, scheme_id, parent_id, sort_order, level, title, status, content) "
         "VALUES (?,?,?,?,?,?,?,?)",
-        ("c1", "s1", "", 0, 1, "第一章 总体概述", "generated",
-         "## 总体安排\n这里是第一章正文。\n[CHART_TYPE: flowchart]\n"),
+        (
+            "c1",
+            "s1",
+            "",
+            0,
+            1,
+            "第一章 总体概述",
+            "generated",
+            "## 总体安排\n这里是第一章正文。\n[CHART_TYPE: flowchart]\n",
+        ),
     )
     await db_conn.execute(
         "INSERT INTO sections (id, scheme_id, parent_id, sort_order, level, title, status, content) "
         "VALUES (?,?,?,?,?,?,?,?)",
-        ("c1-1", "s1", "c1", 1, 2, "1.1 工程概况", "generated",
-         "### 关键指标\n工程概况内容。\n"),
+        ("c1-1", "s1", "c1", 1, 2, "1.1 工程概况", "generated", "### 关键指标\n工程概况内容。\n"),
     )
     # 图表预测（与 c1 的 [CHART_TYPE: flowchart] 标记对应）
     await db_conn.execute(
         "INSERT INTO chart_predictions (id, section_id, scheme_id, chart_type, needed, purpose, priority, status, data_json) "
         "VALUES (?,?,?,?,?,?,?,?,?)",
-        ("cp1", "c1", "s1", "flowchart", 1, "施工流程图", 3, "generated",
-         '{"mermaid_code":"graph TD\\n A[开始]-->B[结束]"}'),
+        (
+            "cp1",
+            "c1",
+            "s1",
+            "flowchart",
+            1,
+            "施工流程图",
+            3,
+            "generated",
+            '{"mermaid_code":"graph TD\\n A[开始]-->B[结束]"}',
+        ),
     )
     await db_conn.commit()
 
@@ -72,12 +89,14 @@ async def test_export_docx_smoke(db_conn):
 
     # 成功路径返回 FileResponse（路径在 .path 上）
     from fastapi.responses import FileResponse
+
     assert isinstance(resp, FileResponse)
     path = resp.path
     assert path and os.path.exists(path)
 
     # 读取生成的 docx，校验嵌套子标题编号已生效
     from docx import Document
+
     doc = Document(path)
     para = [(p.style.name, p.text) for p in doc.paragraphs]
     joined = "\n".join(t for _, t in para)
@@ -92,6 +111,7 @@ async def test_export_docx_smoke(db_conn):
     # ✅ allow_pil_fallback=True 时应嵌入真实图片而非「渲染失败」占位
     assert "渲染失败" not in joined, f"图表未成功渲染（出现失败占位），实际内容:\n{joined}"
     import zipfile as _zf
+
     with _zf.ZipFile(path) as z:
         media = [n for n in z.namelist() if n.startswith("word/media/")]
     assert media, "未找到嵌入的图表图片"
@@ -141,8 +161,7 @@ async def test_export_heading_border_disabled_by_default(db_conn):
         if p.style is not None and p.style.name == "Heading 1":
             pPr = p._p.find(qn("w:pPr"))
             pbd = pPr.find(qn("w:pBdr")) if pPr is not None else None
-            assert pbd is None or pbd.find(qn("w:bottom")) is None, \
-                "默认不应出现章框边框（保持旧行为）"
+            assert pbd is None or pbd.find(qn("w:bottom")) is None, "默认不应出现章框边框（保持旧行为）"
             break
 
 
@@ -155,16 +174,19 @@ async def test_export_docx_default_no_pil_fallback_skips_failed_chart(db_conn):
     resp = await _run_export(db_conn, {})
 
     from fastapi.responses import FileResponse
+
     assert isinstance(resp, FileResponse)
     assert resp.path and os.path.exists(resp.path)
 
     from docx import Document
+
     joined = "\n".join(p.text for p in Document(resp.path).paragraphs)
     # 文档结构必须完整（编号照常生成），但不再有红字占位段
     # ✅ E3：第一章有 DB 子章节 → 正文子标题降级为 1）、2）、… 格式
     assert "1）、总体安排" in joined, joined
 
     import zipfile as _zf
+
     with _zf.ZipFile(resp.path) as z:
         media = [n for n in z.namelist() if n.startswith("word/media/")]
 
@@ -178,6 +200,7 @@ async def test_export_docx_default_no_pil_fallback_skips_failed_chart(db_conn):
         # 系统侧信号必须保留（"不静默"承诺转移到响应头）
         import json as _json
         from urllib.parse import unquote
+
         stats = _json.loads(resp.headers["X-Chart-Render-Stats"])
         assert stats["failed"] >= 1, stats
 
@@ -188,16 +211,17 @@ async def test_export_docx_optin_placeholder_keeps_v70_contract(db_conn):
     resp = await _run_export(db_conn, {"chart_fail_placeholder": True})
 
     from docx import Document
+
     joined = "\n".join(p.text for p in Document(resp.path).paragraphs)
 
     import zipfile as _zf
+
     with _zf.ZipFile(resp.path) as z:
         media = [n for n in z.namelist() if n.startswith("word/media/")]
 
     if not media:
         assert "图 1-1" in joined, f"占位模式下图号照常分配:\n{joined}"
         assert "渲染失败" in joined, f"占位模式应写入红字提示:\n{joined}"
-
 
 
 # ===========================================================================
@@ -238,30 +262,50 @@ _CHAPTER1_CONTENT = (
 
 def _png_bytes() -> bytes:
     from PIL import Image
+
     buf = BytesIO()
     Image.new("RGB", (60, 40), (200, 210, 230)).save(buf, format="PNG")
     return buf.getvalue()
 
 
-def _build_layout_docx(tmp_path, *, show_title_page=True, show_toc=True,
-                       chapter_page_break=True, page_number_style="page_of_total"):
+def _build_layout_docx(
+    tmp_path, *, show_title_page=True, show_toc=True, chapter_page_break=True, page_number_style="page_of_total"
+):
     sections = [
-        {"id": "c1", "parent_id": "", "sort_order": 0, "level": 1,
-         "title": "第一章 总体概述", "content": _CHAPTER1_CONTENT},
-        {"id": "c2", "parent_id": "", "sort_order": 1, "level": 1,
-         "title": "第二章 施工部署", "content": "第二章正文。"},
+        {
+            "id": "c1",
+            "parent_id": "",
+            "sort_order": 0,
+            "level": 1,
+            "title": "第一章 总体概述",
+            "content": _CHAPTER1_CONTENT,
+        },
+        {
+            "id": "c2",
+            "parent_id": "",
+            "sort_order": 1,
+            "level": 1,
+            "title": "第二章 施工部署",
+            "content": "第二章正文。",
+        },
     ]
     blocks = {s["id"]: _parse_content_blocks(s["content"]) for s in sections}
     out = str(tmp_path / "layout.docx")
     _build_docx_sync(
         out,
         {"id": "s1", "project_id": "p1", "name": "深基坑开挖专项施工方案"},
-        sections, {},                                  # roots / children_map
-        {},                                            # chart_lookup（图表走内联码）
+        sections,
+        {},  # roots / children_map
+        {},  # chart_lookup（图表走内联码）
         {("flowchart", _CHART_CODE): BytesIO(_png_bytes())},
         blocks,
-        "微软雅黑", 12, "深基坑专项方案", "", True,
-        show_title_page, show_toc,
+        "微软雅黑",
+        12,
+        "深基坑专项方案",
+        "",
+        True,
+        show_title_page,
+        show_toc,
         # ✅ 追加参数一律用关键字：_build_docx_sync 的 bidder_name 被插在
         #    heading_styles 之前（export.py 注释自己写了「追加参数统一放末尾，
         #    插入中间会错位」，但没遵守），本文件的位置参数因此整体右移一位
@@ -354,32 +398,56 @@ def test_docx_without_title_page_no_titlepg(tmp_path):
 # ===========================================================================
 def _build_single(tmp_path, content: str, **overrides) -> str:
     """构建单章节 DOCX，便于针对性验证某一项排版能力。"""
-    sections = [{
-        "id": "c1", "parent_id": "", "sort_order": 0, "level": 1,
-        "title": "第一章 测试章节", "content": content,
-    }]
+    sections = [
+        {
+            "id": "c1",
+            "parent_id": "",
+            "sort_order": 0,
+            "level": 1,
+            "title": "第一章 测试章节",
+            "content": content,
+        }
+    ]
     blocks = {"c1": _parse_content_blocks(content)}
     out = str(tmp_path / "single.docx")
     opts = dict(
-        font_name="宋体", font_size=12, page_header="", page_footer="",
-        show_page_number=False, show_title_page=False, show_toc=False,
+        font_name="宋体",
+        font_size=12,
+        page_header="",
+        page_footer="",
+        show_page_number=False,
+        show_title_page=False,
+        show_toc=False,
         heading_styles=_load_heading_styles({}),
-        page_break_before_chapter=True, line_spacing=1.5,
-        page_number_style="simple", toc_depth=3,
+        page_break_before_chapter=True,
+        line_spacing=1.5,
+        page_number_style="simple",
+        toc_depth=3,
     )
     opts.update(overrides)
     _build_docx_sync(
-        out, {"id": "s1", "project_id": "p1", "name": "测试方案"},
-        sections, {}, {}, {}, blocks,
-        opts["font_name"], opts["font_size"], opts["page_header"], opts["page_footer"],
-        opts["show_page_number"], opts["show_title_page"], opts["show_toc"],
+        out,
+        {"id": "s1", "project_id": "p1", "name": "测试方案"},
+        sections,
+        {},
+        {},
+        {},
+        blocks,
+        opts["font_name"],
+        opts["font_size"],
+        opts["page_header"],
+        opts["page_footer"],
+        opts["show_page_number"],
+        opts["show_title_page"],
+        opts["show_toc"],
         bidder_name="",
         heading_styles=opts["heading_styles"],
         page_break_before_chapter=opts["page_break_before_chapter"],
         line_spacing=opts["line_spacing"],
         page_number_style=opts["page_number_style"],
         toc_depth=opts["toc_depth"],
-        margins=opts.get("margins"), cover_info=opts.get("cover_info"),
+        margins=opts.get("margins"),
+        cover_info=opts.get("cover_info"),
     )
     return out
 
@@ -403,13 +471,7 @@ def test_docx_hr_not_rendered_as_line(tmp_path):
 
 def test_docx_ordered_list_auto_renumber(tmp_path):
     """AI 输出重复/跳号的有序列表，导出应自动连续编号为 1. 2. 3. 4."""
-    content = (
-        "正文。\n"
-        "1. 第一步内容\n"
-        "1. 第二步内容（AI 误写重复编号）\n"
-        "1. 第三步内容\n"
-        "1. 第四步内容\n"
-    )
+    content = "正文。\n" "1. 第一步内容\n" "1. 第二步内容（AI 误写重复编号）\n" "1. 第三步内容\n" "1. 第四步内容\n"
     out = _build_single(tmp_path, content)
     paras = [p.text for p in Document(out).paragraphs]
     assert "1. 第一步内容" in paras, paras
@@ -420,12 +482,7 @@ def test_docx_ordered_list_auto_renumber(tmp_path):
 
 def test_docx_table_column_widths(tmp_path):
     """表格应声明固定布局 + 总宽（按内容分配列宽，不等宽挤压）。"""
-    content = (
-        "| 短 | 较长较长较长较长较长较长较长较长较长较长 |\n"
-        "|---|---|\n"
-        "| a | b |\n"
-        "| c | d |\n"
-    )
+    content = "| 短 | 较长较长较长较长较长较长较长较长较长较长 |\n" "|---|---|\n" "| a | b |\n" "| c | d |\n"
     out = _build_single(tmp_path, content)
     doc_xml = _part(out, "word/document.xml")
     assert "w:tblLayout" in doc_xml and 'w:type="fixed"' in doc_xml
@@ -435,30 +492,50 @@ def test_docx_table_column_widths(tmp_path):
 def test_docx_image_small_not_enlarged(tmp_path):
     """窄图（100px 宽）不应被放大到 16cm，而是保持原始比例尺寸。"""
     from PIL import Image as PILImage
+
     buf = BytesIO()
     PILImage.new("RGB", (100, 40), (200, 210, 230)).save(buf, format="PNG")
     small = buf.getvalue()
     content = "```mermaid\ngraph TD\n A-->B\n```"
-    sections = [{
-        "id": "c1", "parent_id": "", "sort_order": 0, "level": 1,
-        "title": "第一章 图", "content": content,
-    }]
+    sections = [
+        {
+            "id": "c1",
+            "parent_id": "",
+            "sort_order": 0,
+            "level": 1,
+            "title": "第一章 图",
+            "content": content,
+        }
+    ]
     blocks = {"c1": _parse_content_blocks(content)}
     out = str(tmp_path / "img.docx")
     _build_docx_sync(
-        out, {"id": "s1", "project_id": "p1", "name": "t"},
-        sections, {}, {}, {("flowchart", "graph TD\n A-->B"): BytesIO(small)},
-        blocks, "宋体", 12, "", "", False, False, False,
+        out,
+        {"id": "s1", "project_id": "p1", "name": "t"},
+        sections,
+        {},
+        {},
+        {("flowchart", "graph TD\n A-->B"): BytesIO(small)},
+        blocks,
+        "宋体",
+        12,
+        "",
+        "",
+        False,
+        False,
+        False,
         bidder_name="",
         heading_styles=_load_heading_styles({}),
         page_break_before_chapter=True,
         line_spacing=1.5,
         page_number_style="simple",
         toc_depth=3,
-        margins=None, cover_info=None,
+        margins=None,
+        cover_info=None,
     )
     doc_xml = _part(out, "word/document.xml")
     import re as _re
+
     m = _re.search(r'wp:extent cx="(\d+)"', doc_xml)
     assert m, "未找到图片 extent"
     cx = int(m.group(1))
@@ -469,7 +546,8 @@ def test_docx_image_small_not_enlarged(tmp_path):
 def test_docx_cover_info_table(tmp_path):
     """开启封面页且提供 cover_info 时，文档应含项目信息表（标签/值文本）。"""
     out = _build_single(
-        tmp_path, "正文。",
+        tmp_path,
+        "正文。",
         show_title_page=True,
         cover_info={"工程名称": "示例工程", "编制单位": "示例建设公司", "方案编号": "FA-1"},
     )
@@ -487,9 +565,7 @@ def test_docx_cover_info_table(tmp_path):
 
 def test_docx_margins_applied(tmp_path):
     """传入页边距应写入 sectPr 的 pgMar（左 3.0cm ≈ 1701 twips）。"""
-    out = _build_single(
-        tmp_path, "正文。",
-        margins={"left": 3.0, "right": 3.0, "top": 2.0, "bottom": 2.0})
+    out = _build_single(tmp_path, "正文。", margins={"left": 3.0, "right": 3.0, "top": 2.0, "bottom": 2.0})
     doc_xml = _part(out, "word/document.xml")
     assert "w:pgMar" in doc_xml
     assert "1701" in doc_xml  # 3.0cm * 567 twips/cm = 1701
@@ -501,6 +577,7 @@ def test_docx_margins_applied(tmp_path):
 def test_export_filename_truncation_keeps_round():
     """超长方案名截断后必须保留「_日期_第N轮」后缀（否则轮次信息丢失、同日重名）。"""
     from app.routers.export import _build_export_filename
+
     name = _build_export_filename("超长方案名" * 60, "docx", 12)
     assert name.endswith("_第12轮.docx"), name
     assert len(name) <= 120, f"文件名超长：{len(name)}"
@@ -523,8 +600,7 @@ async def test_export_filename_rule_with_round(db_conn):
         resp = await export_docx("s1", body, db=db_conn)
         assert resp.headers["X-Export-Round"] == str(expected)
         # 前端 blob 下载据此设置 a.download，故必须是可直接解码的文件名
-        assert unquote(resp.headers["X-Export-Filename"]) == \
-            f"测试专项方案_{day}_第{expected}轮.docx"
+        assert unquote(resp.headers["X-Export-Filename"]) == f"测试专项方案_{day}_第{expected}轮.docx"
         # 后端 Content-Disposition 与之一致（非 ASCII 走 RFC 5987）
         assert f"第{expected}轮.docx" in unquote(resp.headers["content-disposition"])
 
@@ -536,25 +612,44 @@ def test_docx_chart_caption_follows_font_config(tmp_path):
     """✅ 增强：图题字体/字号跟随导出配置（旧实现硬编码「宋体 10.5pt」，
     用户把正文设为微软雅黑/四号后图题会与正文明显不一致）。"""
     content = "```mermaid\ngraph TD\n A-->B\n```"
-    sections = [{
-        "id": "c1", "parent_id": "", "sort_order": 0, "level": 1,
-        "title": "第一章 图", "content": content,
-    }]
+    sections = [
+        {
+            "id": "c1",
+            "parent_id": "",
+            "sort_order": 0,
+            "level": 1,
+            "title": "第一章 图",
+            "content": content,
+        }
+    ]
     blocks = {"c1": _parse_content_blocks(content)}
     out = str(tmp_path / "caption.docx")
     _build_docx_sync(
-        out, {"id": "s1", "project_id": "p1", "name": "t"},
-        sections, {}, {}, {("flowchart", _CHART_CODE): BytesIO(_png_bytes())},
-        blocks, "微软雅黑", 14, "", "", False, False, False,
+        out,
+        {"id": "s1", "project_id": "p1", "name": "t"},
+        sections,
+        {},
+        {},
+        {("flowchart", _CHART_CODE): BytesIO(_png_bytes())},
+        blocks,
+        "微软雅黑",
+        14,
+        "",
+        "",
+        False,
+        False,
+        False,
         bidder_name="",
         heading_styles=_load_heading_styles({}),
         page_break_before_chapter=True,
         line_spacing=1.5,
         page_number_style="simple",
         toc_depth=3,
-        margins=None, cover_info=None,
+        margins=None,
+        cover_info=None,
     )
     from docx.oxml.ns import qn
+
     doc = Document(out)
     caps = [p for p in doc.paragraphs if p.text.startswith("图 1-1")]
     assert caps, [p.text for p in doc.paragraphs]
@@ -569,11 +664,7 @@ def test_docx_chart_caption_follows_font_config(tmp_path):
 # ===========================================================================
 def test_docx_ordered_list_continues_after_unordered_item(tmp_path):
     """✅ 优化：有序列表被无序子项打断后序号继续递增（旧实现从 1 重排）"""
-    content = (
-        "1. 第一步：测量放线\n"
-        "- 注意事项：避开雨天\n"
-        "2. 第二步：基坑开挖\n"
-    )
+    content = "1. 第一步：测量放线\n" "- 注意事项：避开雨天\n" "2. 第二步：基坑开挖\n"
     out = _build_single(tmp_path, content)
     paras = [p.text for p in Document(out).paragraphs]
     assert "1. 第一步：测量放线" in paras, paras
@@ -603,20 +694,14 @@ def test_docx_chinese_list_marker_preserved(tmp_path):
     assert "（一）设计标准" in paras, paras
     assert "（二）材料要求" in paras, paras
     assert "1、施工准备" in paras, paras
-    assert "2、测量放线" in paras, paras          # AI 重复编号被修正，顿号样式保留
+    assert "2、测量放线" in paras, paras  # AI 重复编号被修正，顿号样式保留
     assert "（1）土方开挖" in paras, paras
-    assert "（2）基坑支护" in paras, paras        # 全角括号样式保留
+    assert "（2）基坑支护" in paras, paras  # 全角括号样式保留
 
 
 def test_docx_table_caption_numbered_above_table(tmp_path):
     """✅ 新增：表格题注「表 X-Y 表名」渲染在表格上方，原表名行不再重复出现"""
-    content = (
-        "表3-1 主要施工机械设备表\n"
-        "\n"
-        "| 序号 | 名称 |\n"
-        "|---|---|\n"
-        "| 1 | 挖掘机 |\n"
-    )
+    content = "表3-1 主要施工机械设备表\n" "\n" "| 序号 | 名称 |\n" "|---|---|\n" "| 1 | 挖掘机 |\n"
     out = _build_single(tmp_path, content)
     texts = [p.text for p in Document(out).paragraphs]
     assert "表 1-1 主要施工机械设备表" in texts, texts
@@ -652,23 +737,41 @@ def test_docx_table_without_title_auto_generates_caption(tmp_path):
 # ===========================================================================
 def _build_illustration_docx(tmp_path, content: str, image_bytes: dict) -> str:
     """构建含 AI 配图的单章节 DOCX（image_bytes 为空 dict 模拟下载失败）。"""
-    sections = [{
-        "id": "c1", "parent_id": "", "sort_order": 0, "level": 1,
-        "title": "第一章 基坑支护", "content": content,
-    }]
+    sections = [
+        {
+            "id": "c1",
+            "parent_id": "",
+            "sort_order": 0,
+            "level": 1,
+            "title": "第一章 基坑支护",
+            "content": content,
+        }
+    ]
     blocks = {"c1": _parse_content_blocks(content)}
     out = str(tmp_path / "illu.docx")
     _build_docx_sync(
-        out, {"id": "s1", "project_id": "p1", "name": "测试方案"},
-        sections, {}, {}, {}, blocks,
-        "宋体", 12, "", "", False, False, False,
+        out,
+        {"id": "s1", "project_id": "p1", "name": "测试方案"},
+        sections,
+        {},
+        {},
+        {},
+        blocks,
+        "宋体",
+        12,
+        "",
+        "",
+        False,
+        False,
+        False,
         bidder_name="",
         heading_styles=_load_heading_styles({}),
         page_break_before_chapter=True,
         line_spacing=1.15,
         page_number_style="simple",
         toc_depth=3,
-        margins=None, cover_info=None,
+        margins=None,
+        cover_info=None,
         image_bytes=image_bytes,
     )
     return out
@@ -683,26 +786,51 @@ def test_docx_content_subheadings_shift_child_section_numbers(tmp_path):
       与 DB 子章节的 X.X 命名空间彻底隔离——DB 子章节从 "1/2" 开始，不再被正文占用。
     两种手段都实现"正文子标题与 DB 子章节不撞号"这个语义目标。
     """
-    content = ("本节概述。\n\n## 项目概况\n\n项目概况正文。\n\n"
-               "## 建筑概况\n\n建筑概况正文。")
+    content = "本节概述。\n\n## 项目概况\n\n项目概况正文。\n\n" "## 建筑概况\n\n建筑概况正文。"
     sections = [
-        {"id": "c1", "parent_id": "", "sort_order": 0, "level": 1,
-         "title": "第一章 工程概况", "content": "第一章导语。"},
-        {"id": "p1", "parent_id": "c1", "sort_order": 0, "level": 2,
-         "title": "工程基本信息", "content": content},
-        {"id": "s1", "parent_id": "p1", "sort_order": 0, "level": 3,
-         "title": "工程规模与结构形式", "content": "规模正文。"},
-        {"id": "s2", "parent_id": "p1", "sort_order": 1, "level": 3,
-         "title": "脚手架搭设部位与高度", "content": "部位正文。"},
+        {
+            "id": "c1",
+            "parent_id": "",
+            "sort_order": 0,
+            "level": 1,
+            "title": "第一章 工程概况",
+            "content": "第一章导语。",
+        },
+        {"id": "p1", "parent_id": "c1", "sort_order": 0, "level": 2, "title": "工程基本信息", "content": content},
+        {
+            "id": "s1",
+            "parent_id": "p1",
+            "sort_order": 0,
+            "level": 3,
+            "title": "工程规模与结构形式",
+            "content": "规模正文。",
+        },
+        {
+            "id": "s2",
+            "parent_id": "p1",
+            "sort_order": 1,
+            "level": 3,
+            "title": "脚手架搭设部位与高度",
+            "content": "部位正文。",
+        },
     ]
     blocks = {s["id"]: _parse_content_blocks(s["content"]) for s in sections}
     out = str(tmp_path / "shift.docx")
     _build_docx_sync(
-        out, {"id": "s1", "project_id": "p1", "name": "测试方案"},
-        [sections[0]],                      # roots：只含一级章，子节点走 children_map
+        out,
+        {"id": "s1", "project_id": "p1", "name": "测试方案"},
+        [sections[0]],  # roots：只含一级章，子节点走 children_map
         {"c1": [sections[1]], "p1": sections[2:]},
-        {}, {}, blocks,
-        "宋体", 12, "", "", False, False, False,
+        {},
+        {},
+        blocks,
+        "宋体",
+        12,
+        "",
+        "",
+        False,
+        False,
+        False,
         bidder_name="",
         heading_styles=_load_heading_styles({}),
         page_break_before_chapter=True,
@@ -765,13 +893,8 @@ def test_docx_figure_number_not_skipped_by_failed_illustration(tmp_path):
     """配图失败不占图号 → 后续成功配图从「图 1-1」起（不再虚跳到 1-2）。"""
     bad = "http://example.com/missing.png"
     good = "http://example.com/ok.png"
-    content = (
-        "基坑支护施工说明。\n\n"
-        f"![基坑支护示意]({bad})\n\n"
-        f"![监测布置示意]({good})\n"
-    )
-    out = _build_illustration_docx(
-        tmp_path, content, {good: BytesIO(_png_bytes())})
+    content = "基坑支护施工说明。\n\n" f"![基坑支护示意]({bad})\n\n" f"![监测布置示意]({good})\n"
+    out = _build_illustration_docx(tmp_path, content, {good: BytesIO(_png_bytes())})
     paras = [p.text for p in Document(out).paragraphs]
     assert "图 1-1 监测布置示意" in paras, paras
     assert not any("基坑支护示意" in t for t in paras), paras
@@ -811,5 +934,3 @@ def test_docx_ai_image_placeholder_skipped_without_leaking_prompt(tmp_path):
     # 4) 不得嵌入任何位图
     with zipfile.ZipFile(out) as z:
         assert not [n for n in z.namelist() if n.startswith("word/media/")], paras
-
-

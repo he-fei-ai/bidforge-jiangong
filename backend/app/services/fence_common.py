@@ -27,6 +27,7 @@
 依赖方向：本模块是叶子（仅 ``re``），可被 ``content_utils`` / ``content_blocks`` /
 ``_chart_pipeline`` / ``preflight_engine`` 自由引用，不构成循环导入。
 """
+
 from __future__ import annotations
 
 import re
@@ -50,8 +51,7 @@ def parse_fence_line(line: str) -> tuple[str, int, str] | None:
     return marker[0], len(marker), m.group(2).strip()
 
 
-def is_fence_close(line: str, open_char: str, open_len: int, *,
-                   tolerant_length: bool = True) -> bool:
+def is_fence_close(line: str, open_char: str, open_len: int, *, tolerant_length: bool = True) -> bool:
     """``line`` 是否为 ``(open_char, open_len)`` 围栏的**闭合行** —— 全仓唯一判据。
 
     判据（R76 定稿）：
@@ -115,10 +115,15 @@ def find_unclosed(content: str, *, tolerant_length: bool = True) -> list[dict]:
                 break
             j += 1
         if close_idx < 0:
-            unclosed.append({
-                "line": i + 1, "char": ch, "length": n,
-                "lang": lang, "marker": open_marker,
-            })
+            unclosed.append(
+                {
+                    "line": i + 1,
+                    "char": ch,
+                    "length": n,
+                    "lang": lang,
+                    "marker": open_marker,
+                }
+            )
             break  # 后面的行都在围栏内，不再是新围栏
         i = close_idx + 1
     return unclosed
@@ -195,23 +200,24 @@ def normalize_fence_closes(content: str) -> tuple[str, list[dict]]:
         m = FENCE_LINE_RE.match(lines[close0])
         if m is None:
             continue
-        indent = m.group(0)[:m.group(0).index(m.group(1))]
+        indent = m.group(0)[: m.group(0).index(m.group(1))]
         lines[close0] = f"{indent}{ch * open_len}{m.group(2)}"
-        log.append({
-            "action": "normalize_close_length",
-            "line": close0 + 1,
-            "lang": lang,
-            "char": ch,
-            "length": open_len,
-            "old_length": cur_len,
-        })
+        log.append(
+            {
+                "action": "normalize_close_length",
+                "line": close0 + 1,
+                "lang": lang,
+                "char": ch,
+                "length": open_len,
+                "old_length": cur_len,
+            }
+        )
     if not log:
         return content, []
     return "\n".join(lines), log
 
 
-def iter_all_blocks(content: str, *,
-                    tolerant_length: bool = True) -> list[dict]:
+def iter_all_blocks(content: str, *, tolerant_length: bool = True) -> list[dict]:
     """返回**所有**围栏块（含未闭合），按出现顺序。
 
     项结构 ``{"open_line": 0-based, "close_line": 0-based 或 -1, "char", "length",
@@ -245,16 +251,14 @@ def iter_all_blocks(content: str, *,
                 close_idx = j
                 break
             j += 1
-        blocks.append({"open_line": i, "close_line": close_idx,
-                       "char": ch, "length": open_len, "lang": lang})
+        blocks.append({"open_line": i, "close_line": close_idx, "char": ch, "length": open_len, "lang": lang})
         if close_idx < 0:
             break  # 未闭合：其后都在块内
         i = close_idx + 1
     return blocks
 
 
-def fence_char_ranges(content: str, *,
-                      tolerant_length: bool = True) -> list[tuple[int, int]]:
+def fence_char_ranges(content: str, *, tolerant_length: bool = True) -> list[tuple[int, int]]:
     """围栏块的字符区间 ``[(start, end)]``（``start`` = 开围栏行首，``end`` = 闭合行末，
     均为切片语义）；未闭合块 ``end`` 截到文本末尾（其后的行确实都是代码内容）。
 
@@ -354,16 +358,17 @@ def append_missing_closes(content: str, *, separator: str = "\n") -> tuple[str, 
         #    「补齐 N 处」当成「已修复」。判据与 content_blocks 的「防误吞守卫」同源
         #    （``looks_like_prose``）。
         open_line0 = u["line"] - 1
-        swallowed = sum(1 for ln in lines[open_line0 + 1:]
-                        if looks_like_prose(ln))
-        log.append({
-            "action": "append_close",
-            "line": u["line"],
-            "lang": u["lang"],
-            "char": u["char"],
-            "length": u["length"],
-            "swallowed_prose": swallowed,
-        })
+        swallowed = sum(1 for ln in lines[open_line0 + 1 :] if looks_like_prose(ln))
+        log.append(
+            {
+                "action": "append_close",
+                "line": u["line"],
+                "lang": u["lang"],
+                "char": u["char"],
+                "length": u["length"],
+                "swallowed_prose": swallowed,
+            }
+        )
     return stripped + "".join(parts) + "\n", log
 
 

@@ -1,9 +1,37 @@
 import { storedIdParts } from "../../utils/outlineNumbering";
 
 export const CN_NUMBERS: string[] = [
-  "", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
-  "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
-  "二十一", "二十二", "二十三", "二十四", "二十五", "二十六", "二十七", "二十八", "二十九", "三十",
+  "",
+  "一",
+  "二",
+  "三",
+  "四",
+  "五",
+  "六",
+  "七",
+  "八",
+  "九",
+  "十",
+  "十一",
+  "十二",
+  "十三",
+  "十四",
+  "十五",
+  "十六",
+  "十七",
+  "十八",
+  "十九",
+  "二十",
+  "二十一",
+  "二十二",
+  "二十三",
+  "二十四",
+  "二十五",
+  "二十六",
+  "二十七",
+  "二十八",
+  "二十九",
+  "三十",
 ];
 
 // ✅ 与后端 strip_outline_numbering 同源：剥离标题开头已嵌入的编号前缀，
@@ -28,14 +56,23 @@ export const LEADING_NUMBER_SEP = "[、.．，,：: \\-—]";
 export const LEADING_NUMBER_CJK = "[\\u3000-\\u303f\\u4e00-\\u9fff\\uff00-\\uffef]";
 export const LEADING_NUMBER_RE = new RegExp(
   "^\\s*(?:" +
-    "第\\s*[一二三四五六七八九十百千零0-9]+\\s*[章节]" +   // 第X章 / 第 1 章
-    "|[（(][一二三四五六七八九十0-9]+[)）]" +               // （三） / (3)
-    "|[0-9]+[)）]" +                                        // 1） / 2）
+    "第\\s*[一二三四五六七八九十百千零0-9]+\\s*[章节]" + // 第X章 / 第 1 章
+    "|[（(][一二三四五六七八九十0-9]+[)）]" + // （三） / (3)
+    "|[0-9]+[)）]" + // 1） / 2）
     "|(?=([0-9]+(?:\\.[0-9]+)+))\\1(?:" +
-      LEADING_NUMBER_SEP + "+|(?=" + LEADING_NUMBER_CJK + "))" +
-    "|[0-9]+" + LEADING_NUMBER_SEP + "+(?![0-9])" +          // 单段编号（"1 施工准备"）
-    "|[一二三四五六七八九十百千零]+" + LEADING_NUMBER_SEP + "+" +
-  ")" + LEADING_NUMBER_SEP + "*"
+    LEADING_NUMBER_SEP +
+    "+|(?=" +
+    LEADING_NUMBER_CJK +
+    "))" +
+    "|[0-9]+" +
+    LEADING_NUMBER_SEP +
+    "+(?![0-9])" + // 单段编号（"1 施工准备"）
+    "|[一二三四五六七八九十百千零]+" +
+    LEADING_NUMBER_SEP +
+    "+" +
+    ")" +
+    LEADING_NUMBER_SEP +
+    "*",
 );
 
 // 整条标题本身就是一个编号（"1" / "1.1" / "1.2.3"）时必须原样返回，
@@ -58,11 +95,7 @@ export function stripOutlineNumbering(title: string): string {
   return stripped || trimmed;
 }
 
-export function formatOutlineTitle(
-  id: string | undefined,
-  level: number,
-  title: string,
-): string {
+export function formatOutlineTitle(id: string | undefined, level: number, title: string): string {
   if (!title || !title.trim()) return title || "";
   const bareTitle = stripOutlineNumbering(title);
   // ✅ R87 FIX-1（P1）：合法性判据收敛到 `utils/outlineNumbering`（与后端
@@ -106,4 +139,3 @@ export function formatOutlineTitle(
   }
   return `${number}${sep}${bareTitle}`;
 }
-

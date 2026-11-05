@@ -20,7 +20,7 @@ import { deriveExportGate } from "../utils/exportCharts";
  * 缺 severity 时按本地表判定，且表内容不漂移。
  */
 describe("exportCharts · deriveExportGate", () => {
-  const noSeverity = (type: string) => ({ type } as any);
+  const noSeverity = (type: string) => ({ type }) as any;
 
   it("未做预检 → 仍放行（仅提示）", () => {
     const r = deriveExportGate({ issues: [], hasPreflight: false, readiness: null } as any);
@@ -69,15 +69,23 @@ describe("exportCharts · deriveExportGate", () => {
   });
 
   it("就绪度未跑 / 过期 / 未放行 均不再阻断导出", () => {
-    expect(deriveExportGate({ issues: [], hasPreflight: true, readiness: null } as any).allowed).toBe(true);
-    expect(deriveExportGate({
-      issues: [], hasPreflight: true,
-      readiness: { has_run: true, released: true, stale: true },
-    } as any).allowed).toBe(true);
-    expect(deriveExportGate({
-      issues: [], hasPreflight: true,
-      readiness: { has_run: true, released: false, stale: false },
-    } as any).allowed).toBe(true);
+    expect(
+      deriveExportGate({ issues: [], hasPreflight: true, readiness: null } as any).allowed,
+    ).toBe(true);
+    expect(
+      deriveExportGate({
+        issues: [],
+        hasPreflight: true,
+        readiness: { has_run: true, released: true, stale: true },
+      } as any).allowed,
+    ).toBe(true);
+    expect(
+      deriveExportGate({
+        issues: [],
+        hasPreflight: true,
+        readiness: { has_run: true, released: false, stale: false },
+      } as any).allowed,
+    ).toBe(true);
   });
 
   it("全部通过 → 放行且无 high 计数", () => {

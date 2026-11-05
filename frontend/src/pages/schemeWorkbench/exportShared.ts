@@ -1,13 +1,20 @@
-
-
 export const statusColor: Record<string, string> = {
-  empty: "default", pending: "processing", generated: "success",
-  expanded: "blue", reviewed: "green",
+  empty: "default",
+  pending: "processing",
+  generated: "success",
+  expanded: "blue",
+  reviewed: "green",
+  // ✅ 2026-11-05 目录占位章节：按规则只登记「另行补充内容」，与失败/为空区分
+  placeholder: "purple",
 };
 
 export const statusText: Record<string, string> = {
-  empty: "待生成", pending: "生成中", generated: "已生成",
-  expanded: "已扩写", reviewed: "已审核",
+  empty: "待生成",
+  pending: "生成中",
+  generated: "已生成",
+  expanded: "已扩写",
+  reviewed: "已审核",
+  placeholder: "另行补充",
 };
 
 /** 导出预检问题类型 → 中文标签（后端 export_check 会返回多种类型，需分别展示）
@@ -84,8 +91,12 @@ export const EXPORT_STAGE_ORDER: Record<string, number> = { charts: 1, docx: 2, 
  * 独立成模块级纯函数（而非内联在 handleExport）便于单测直接断言嵌套语义。
  */
 export function deepMergeExportConfig(store: unknown, validated: unknown): Record<string, unknown> {
-  const base = (store && typeof store === "object" ? store : {}) as Record<string, unknown> | unknown[];
-  const patch = (validated && typeof validated === "object" ? validated : {}) as Record<string, unknown>;
+  const base = (store && typeof store === "object" ? store : {}) as
+    Record<string, unknown> | unknown[];
+  const patch = (validated && typeof validated === "object" ? validated : {}) as Record<
+    string,
+    unknown
+  >;
   const out = (Array.isArray(base) ? [...base] : { ...base }) as Record<string, unknown>;
   for (const key of Object.keys(patch)) {
     const pv = patch[key];

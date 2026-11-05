@@ -105,6 +105,7 @@ async def _seed_scheme(db, scheme_id="risk-scheme", project_id="p1", name="高�
 # 1. 指纹：前端 PNG 内容与图像配置
 # ---------------------------------------------------------------------------
 
+
 def test_frontend_png_content_changes_content_fingerprint():
     """同一 Mermaid 代码的前端 PNG 内容变化时，缓存必须失效。"""
     red = _prep()
@@ -132,6 +133,7 @@ def test_image_config_changes_content_fingerprint():
 # 2. §十-2（目录生成模块遗留项）：目录重排/改挂后导出缓存必须失效
 # ---------------------------------------------------------------------------
 
+
 def test_renumber_sort_order_changes_fingerprint():
     """§十-2：改章节顺序（编号整体平移）必须使导出缓存失效。
 
@@ -151,16 +153,32 @@ def test_renumber_sort_order_changes_fingerprint():
 
 def test_structure_parent_level_change_changes_fingerprint():
     """改挂父节点/层级（编号命名空间变化）必须使导出缓存失效。"""
-    flat = _prep(sections=[{
-        "id": "s1", "parent_id": "", "sort_order": 0,
-        "level": 1, "title": "第一章 概述", "content": "A",
-    }])
+    flat = _prep(
+        sections=[
+            {
+                "id": "s1",
+                "parent_id": "",
+                "sort_order": 0,
+                "level": 1,
+                "title": "第一章 概述",
+                "content": "A",
+            }
+        ]
+    )
     before = export_mod._content_fingerprint(flat)[1]
 
-    nested = _prep(sections=[{
-        "id": "s1", "parent_id": "root", "sort_order": 0,
-        "level": 2, "title": "第一章 概述", "content": "A",
-    }])
+    nested = _prep(
+        sections=[
+            {
+                "id": "s1",
+                "parent_id": "root",
+                "sort_order": 0,
+                "level": 2,
+                "title": "第一章 概述",
+                "content": "A",
+            }
+        ]
+    )
     after = export_mod._content_fingerprint(nested)[1]
 
     assert before != after, "父节点/层级变化后缓存指纹未变 → 旧产物被复用"
@@ -169,8 +187,7 @@ def test_structure_parent_level_change_changes_fingerprint():
 def test_fingerprint_deterministic_for_identical_prep():
     """同一 prep 必须得到同一指纹（否则每次导出都 miss，退化成无缓存）。"""
     p = _prep(sections=[_section("s1", order=0), _section("s2", order=1)])
-    assert (export_mod._content_fingerprint(p)[1]
-            == export_mod._content_fingerprint(p)[1])
+    assert export_mod._content_fingerprint(p)[1] == export_mod._content_fingerprint(p)[1]
 
 
 @pytest.mark.asyncio
@@ -205,10 +222,10 @@ async def test_auto_image_passes_runtime_image_config(monkeypatch):
     }
 
 
-
 # ---------------------------------------------------------------------------
 # 2. 图表失败不进入持久缓存
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_chart_render_failure_is_not_cached(db_conn, tmp_path, monkeypatch):
@@ -217,16 +234,24 @@ async def test_chart_render_failure_is_not_cached(db_conn, tmp_path, monkeypatch
     section_id = "failed-chart-s1"
     await _seed_scheme(db_conn, scheme_id)
     await db_conn.execute(
-        "INSERT INTO sections(id, scheme_id, parent_id, sort_order, level, title, content) "
-        "VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO sections(id, scheme_id, parent_id, sort_order, level, title, content) " "VALUES (?,?,?,?,?,?,?)",
         (section_id, scheme_id, "", 0, 1, "施工流程", "[CHART_TYPE: flowchart]"),
     )
     await db_conn.execute(
         "INSERT INTO chart_predictions"
         "(id, section_id, scheme_id, chart_type, needed, purpose, priority, status, data_json) "
         "VALUES (?,?,?,?,?,?,?,?,?)",
-        ("cp-failed", section_id, scheme_id, "flowchart", 1, "流程图", 1, "generated",
-         json.dumps({"mermaid_code": _CODE}, ensure_ascii=False)),
+        (
+            "cp-failed",
+            section_id,
+            scheme_id,
+            "flowchart",
+            1,
+            "流程图",
+            1,
+            "generated",
+            json.dumps({"mermaid_code": _CODE}, ensure_ascii=False),
+        ),
     )
     await db_conn.commit()
 
@@ -235,44 +260,38 @@ async def test_chart_render_failure_is_not_cached(db_conn, tmp_path, monkeypatch
     monkeypatch.setattr(_chart_cache, "get_or_render", lambda *args, **kwargs: None)
     monkeypatch.setattr(export_mod, "EXPORTS_DIR", tmp_path)
     monkeypatch.setattr(
-        export_mod, "_record_export_review_trace",
+        export_mod,
+        "_record_export_review_trace",
         lambda *args, **kwargs: asyncio.sleep(0),
     )
 
-    response = await export_mod.export_docx(
-        scheme_id, {"config": {"allow_pil_fallback": False}}, db=db_conn
-    )
+    response = await export_mod.export_docx(scheme_id, {"config": {"allow_pil_fallback": False}}, db=db_conn)
 
     assert isinstance(response, FileResponse)
     assert response.headers["x-cache-status"] == "degraded"
     assert json.loads(response.headers["x-chart-render-stats"])["failed"] == 1
-    cur = await db_conn.execute(
-        "SELECT COUNT(*) FROM export_cache WHERE scheme_id=?", (scheme_id,)
-    )
+    cur = await db_conn.execute("SELECT COUNT(*) FROM export_cache WHERE scheme_id=?", (scheme_id,))
     assert (await cur.fetchone())[0] == 0, "图表失败产物被写入缓存，后续将永久命中残缺文档"
 
 
 # ---------------------------------------------------------------------------
-# 3. 跨章节图表隔离
+# 3. 跨章节图表借用（R175 续 · 2026-11-04 语义定案）
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "语义分歧：test_export_fallback_dedup 要求三章共用一张 labor 图时各章"
-        "都必须渲染（fallback 契约），而本测试要求 chapter-a 缺失登记时不借用"
-        "chapter-b 的 code（章节隔离契约）。二者互斥。当前实现遵循 fallback "
-        "契约（更贴近 AI 生成实际：AI 通常不会给三章各自独立生成 prediction）。"
-        "2026-10-05 曾尝试引入 current_section_id 过滤禁止借用，但那会打破 "
-        "test_fallback_chart_multi_section_not_dropped 的三章共用场景，故回退。"
-        "R-3 的修复需要先在业务侧确定章节隔离是否强于 fallback，再统一契约。"
-    ),
-)
-async def test_missing_chart_does_not_borrow_other_chapter_code(
-    db_conn, tmp_path, monkeypatch
-):
-    """第一章缺失登记时，不得静默复用第二章同类型图表代码。"""
+async def test_cross_chapter_chart_borrow_is_allowed_but_observable(db_conn, tmp_path, monkeypatch):
+    """缺失登记的章节**允许**借用同类图，但必须可观测且图号归属消费章。
+
+    取证结论（原 strict xfail 的语义分歧已定案为「允许借用」）：
+      · 本仓既有 fallback 契约（`test_export_fallback_dedup`：三章共用一张 labor
+        图时每章都必须出图）与「禁止借用」互斥；
+      · AI 生成实际通常只给部分章节产出 prediction，禁止借用会让成稿大面积缺图，
+        对用户是直接可见的产物缺失；
+      · 允许借用不改变图号语义：图号/图题按**消费章**编排，第 1 章借来的图仍是
+        「图 1-1」，不会挂到第 2 章名下。
+    因此本用例改为正向断言：借用必须发生、计数必须上报、图号必须体现归属章。
+    """
     scheme_id = "cross-chart"
     await _seed_scheme(db_conn, scheme_id)
     for sid, order in (("chapter-a", 0), ("chapter-b", 1)):
@@ -285,27 +304,49 @@ async def test_missing_chart_does_not_borrow_other_chapter_code(
         "INSERT INTO chart_predictions"
         "(id, section_id, scheme_id, chart_type, needed, purpose, priority, status, data_json) "
         "VALUES (?,?,?,?,?,?,?,?,?)",
-        ("cp-b", "chapter-b", scheme_id, "flowchart", 1, "流程图", 1, "generated",
-         json.dumps({"mermaid_code": _CODE}, ensure_ascii=False)),
+        (
+            "cp-b",
+            "chapter-b",
+            scheme_id,
+            "flowchart",
+            1,
+            "流程图",
+            1,
+            "generated",
+            json.dumps({"mermaid_code": _CODE}, ensure_ascii=False),
+        ),
     )
     await db_conn.commit()
 
     from app.services.ai.mermaid_renderer import _chart_cache
 
     png = _png_bytes("green")
-    monkeypatch.setattr(
-        _chart_cache, "get_or_render", lambda *args, **kwargs: BytesIO(png)
-    )
+    monkeypatch.setattr(_chart_cache, "get_or_render", lambda *args, **kwargs: BytesIO(png))
     prep = await export_mod._prepare_export(scheme_id, {"config": {}}, db_conn)
+    # 渲染段可能被缓存快速路径推迟（_prepare_export 只做取数）；显式补跑，
+    # 保证本用例只验证借用语义，不依赖 export_cache_fast_path 开关默认值。
+    await export_mod._prepare_export_render(prep)
     output = tmp_path / "cross-chapter.docx"
-    export_mod._build_docx_sync(*export_mod._build_docx_task(str(output), prep))
+    fix_stats = export_mod._build_docx_sync(*export_mod._build_docx_task(str(output), prep))
 
-    assert len(Document(output).inline_shapes) == 1, "第一章静默借用了第二章的流程图"
+    doc = Document(output)
+    assert len(doc.inline_shapes) == 2, "缺失登记的章节应借用同类图，而不是缺图"
+    captions = [p.text.strip() for p in doc.paragraphs if p.text.strip().startswith("图 ")]
+    assert len(captions) == 2, captions
+    # 图号按消费章编排：第 1 章借用第 2 章的代码，仍是「图 1-1」。
+    assert captions[0].startswith("图 1-1"), captions
+    assert captions[1].startswith("图 2-1"), captions
+    # 借图必须可见：计数 + 明细（章节 / 类型 / 借自谁）随导出统计回传。
+    assert fix_stats["chart_fallback_borrowed"] == 1
+    assert fix_stats["chart_fallback_borrowed_details"] == [
+        {"section_id": "chapter-a", "chart_type": "flowchart", "borrowed_from": "chapter-b"}
+    ]
 
 
 # ---------------------------------------------------------------------------
 # 4. AI 生图并发配置
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_auto_image_respects_configured_concurrency(monkeypatch):
@@ -326,9 +367,7 @@ async def test_auto_image_respects_configured_concurrency(monkeypatch):
         finally:
             active -= 1
 
-    monkeypatch.setattr(
-        "app.services.ai.image_engine.generate_illustration_image", fake_generate
-    )
+    monkeypatch.setattr("app.services.ai.image_engine.generate_illustration_image", fake_generate)
     sections = []
     blocks = {}
     for i in range(4):
@@ -346,22 +385,20 @@ async def test_auto_image_respects_configured_concurrency(monkeypatch):
 # 5. 原子临时文件
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
-async def test_docx_builds_unique_temp_then_atomically_replaces_target(
-    db_conn, tmp_path, monkeypatch
-):
+async def test_docx_builds_unique_temp_then_atomically_replaces_target(db_conn, tmp_path, monkeypatch):
     """构建期间目标文件不可见，替换成功后不残留 tmp 文件。"""
     scheme_id = "atomic-ok"
     await _seed_scheme(db_conn, scheme_id)
     monkeypatch.setattr(export_mod, "EXPORTS_DIR", tmp_path)
     monkeypatch.setattr(
-        export_mod, "_record_export_review_trace",
+        export_mod,
+        "_record_export_review_trace",
         lambda *args, **kwargs: asyncio.sleep(0),
     )
 
-    name_pattern = re.compile(
-        r"^(?P<target>.+_[0-9a-f]{8}_[0-9a-f]{8})\.[0-9a-f]{32}\.tmp\.docx$"
-    )
+    name_pattern = re.compile(r"^(?P<target>.+_[0-9a-f]{8}_[0-9a-f]{8})\.[0-9a-f]{32}\.tmp\.docx$")
     observed = {}
 
     def fake_build(out_path, *args, **kwargs):
@@ -385,15 +422,14 @@ async def test_docx_builds_unique_temp_then_atomically_replaces_target(
 
 
 @pytest.mark.asyncio
-async def test_docx_build_failure_removes_partial_temp_file(
-    db_conn, tmp_path, monkeypatch
-):
+async def test_docx_build_failure_removes_partial_temp_file(db_conn, tmp_path, monkeypatch):
     """DOCX 构建抛错时必须清理部分写入的临时文件，且不得生成目标文件。"""
     scheme_id = "atomic-error"
     await _seed_scheme(db_conn, scheme_id)
     monkeypatch.setattr(export_mod, "EXPORTS_DIR", tmp_path)
     monkeypatch.setattr(
-        export_mod, "_record_export_review_trace",
+        export_mod,
+        "_record_export_review_trace",
         lambda *args, **kwargs: asyncio.sleep(0),
     )
 
@@ -412,6 +448,7 @@ async def test_docx_build_failure_removes_partial_temp_file(
 # ---------------------------------------------------------------------------
 # 6. 调用点与函数签名契约（回退残留护栏）
 # ---------------------------------------------------------------------------
+
 
 def test_find_fallback_code_call_sites_match_signature():
     """`_find_fallback_code` 的所有调用点实参必须与函数签名一致。
@@ -438,13 +475,10 @@ def test_find_fallback_code_call_sites_match_signature():
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        name = func.attr if isinstance(func, ast.Attribute) else (
-            func.id if isinstance(func, ast.Name) else "")
+        name = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else "")
         if name != "_find_fallback_code":
             continue
         for kw in node.keywords:
             if kw.arg is not None and kw.arg not in allowed:
                 offenders.append((node.lineno, kw.arg))
-    assert not offenders, (
-        f"_find_fallback_code 调用点存在签名未声明的关键字实参（将抛 TypeError）: "
-        f"{offenders}")
+    assert not offenders, f"_find_fallback_code 调用点存在签名未声明的关键字实参（将抛 TypeError）: " f"{offenders}"

@@ -15,6 +15,7 @@ ordered_marker），导致嵌套有序列表的子项被拍平成一条贯穿所
   标记样式变化本层从 1 重计、缩进层级缩进保留。
 - 反向锁定：旧的「拍平连续序列」形态不得出现。
 """
+
 import os
 import tempfile
 
@@ -28,38 +29,50 @@ from docx import Document
 
 def _build_single(content: str) -> list[str]:
     """复用导出单章节入口，返回正文段落文本（去掉章节标题）。"""
-    sections = [{
-        "id": "c1", "parent_id": "", "sort_order": 0, "level": 1,
-        "title": "第一章 测试章节", "content": content,
-    }]
+    sections = [
+        {
+            "id": "c1",
+            "parent_id": "",
+            "sort_order": 0,
+            "level": 1,
+            "title": "第一章 测试章节",
+            "content": content,
+        }
+    ]
     blocks = {"c1": _parse_content_blocks(content)}
     out = os.path.join(tempfile.gettempdir(), "nest_ordered.docx")
     _build_docx_sync(
-        out, {"id": "s1", "project_id": "p1", "name": "测试方案"},
-        sections, {}, {}, {}, blocks,
-        "宋体", 12, "", "", False, False, False,
+        out,
+        {"id": "s1", "project_id": "p1", "name": "测试方案"},
+        sections,
+        {},
+        {},
+        {},
+        blocks,
+        "宋体",
+        12,
+        "",
+        "",
+        False,
+        False,
+        False,
         bidder_name="",
         heading_styles=_load_heading_styles({}),
         page_break_before_chapter=True,
         line_spacing=1.5,
         page_number_style="simple",
         toc_depth=3,
-        margins=None, cover_info=None,
+        margins=None,
+        cover_info=None,
     )
-    return [p.text for p in Document(out).paragraphs
-            if p.text.strip() and p.text.strip() != "第一章 测试章节"]
+    return [p.text for p in Document(out).paragraphs if p.text.strip() and p.text.strip() != "第一章 测试章节"]
 
 
 class TestNestedOrderedRenumbersPerLevel:
     """✅ 修复核心：嵌套有序子项在父级内重新从 1 计数，父级序号返回时续接。"""
 
     def test_two_level_nesting(self):
-        paras = _build_single(
-            "1. 顶层一\n"
-            "   1. 子项一\n"
-            "   2. 子项二\n"
-            "2. 顶层二\n"
-        )
+        paras = _build_single("1. 顶层一\n" "   1. 子项一\n" "   2. 子项二\n" "2. 顶层二\n")
         assert "1. 顶层一" in paras
         assert "1. 子项一" in paras
         assert "2. 子项二" in paras
@@ -67,24 +80,13 @@ class TestNestedOrderedRenumbersPerLevel:
 
     def test_flattened_form_absent(self):
         """反向锁定：旧的拍平连续序列（子项被当成 2./3.）不得出现。"""
-        paras = _build_single(
-            "1. 顶层一\n"
-            "   1. 子项一\n"
-            "   2. 子项二\n"
-            "2. 顶层二\n"
-        )
+        paras = _build_single("1. 顶层一\n" "   1. 子项一\n" "   2. 子项二\n" "2. 顶层二\n")
         assert not any(t.startswith("2. 子项一") for t in paras), paras
         assert not any(t.startswith("3. 子项二") for t in paras), paras
         assert not any(t.startswith("4. 顶层二") for t in paras), paras
 
     def test_three_level_nesting(self):
-        paras = _build_single(
-            "1. A\n"
-            "   1. B\n"
-            "      1. C\n"
-            "   2. B2\n"
-            "2. A2\n"
-        )
+        paras = _build_single("1. A\n" "   1. B\n" "      1. C\n" "   2. B2\n" "2. A2\n")
         assert "1. A" in paras
         assert "1. B" in paras
         assert "1. C" in paras
@@ -98,24 +100,14 @@ class TestNestedOrderedMixedMarker:
     """嵌套有序 + 中文枚举符混合：每层按自己 marker 渲染。"""
 
     def test_ordered_parent_cn_child(self):
-        paras = _build_single(
-            "1. 顶层一\n"
-            "   （一）子甲\n"
-            "   （二）子乙\n"
-            "2. 顶层二\n"
-        )
+        paras = _build_single("1. 顶层一\n" "   （一）子甲\n" "   （二）子乙\n" "2. 顶层二\n")
         assert "1. 顶层一" in paras
         assert "（一）子甲" in paras
         assert "（二）子乙" in paras
         assert "2. 顶层二" in paras
 
     def test_cn_parent_ordered_child(self):
-        paras = _build_single(
-            "（一）设计标准\n"
-            "   1. 子点一\n"
-            "   2. 子点二\n"
-            "（二）材料要求\n"
-        )
+        paras = _build_single("（一）设计标准\n" "   1. 子点一\n" "   2. 子点二\n" "（二）材料要求\n")
         assert "（一）设计标准" in paras
         assert "1. 子点一" in paras
         assert "2. 子点二" in paras
@@ -127,11 +119,7 @@ class TestLegacyContractsPreserved:
 
     def test_unordered_sibling_keeps_ordered_seq(self):
         """无序子项不碰栈 → 父级有序序号续接（非重置）。"""
-        paras = _build_single(
-            "1. 第一步：测量放线\n"
-            "- 注意事项：避开雨天\n"
-            "2. 第二步：基坑开挖\n"
-        )
+        paras = _build_single("1. 第一步：测量放线\n" "- 注意事项：避开雨天\n" "2. 第二步：基坑开挖\n")
         assert "1. 第一步：测量放线" in paras
         assert "• 注意事项：避开雨天" in paras
         assert "2. 第二步：基坑开挖" in paras
@@ -140,13 +128,7 @@ class TestLegacyContractsPreserved:
     def test_non_list_block_resets_ordered_seq(self):
         """遇非列表块（过渡段落）→ 重置整条有序序列。"""
         paras = _build_single(
-            "（一）设计标准\n"
-            "（二）材料要求\n"
-            "\n"
-            "正文过渡段落。\n"
-            "\n"
-            "1、施工准备\n"
-            "1、测量放线\n"
+            "（一）设计标准\n" "（二）材料要求\n" "\n" "正文过渡段落。\n" "\n" "1、施工准备\n" "1、测量放线\n"
         )
         assert "（一）设计标准" in paras
         assert "（二）材料要求" in paras
@@ -155,12 +137,7 @@ class TestLegacyContractsPreserved:
 
     def test_marker_change_resets_same_level(self):
         """同层标记样式变化 → 该层从 1 重计（不沿用 ascii 序号）。"""
-        paras = _build_single(
-            "1. A\n"
-            "2. B\n"
-            "（一）C\n"
-            "（二）D\n"
-        )
+        paras = _build_single("1. A\n" "2. B\n" "（一）C\n" "（二）D\n")
         assert "1. A" in paras
         assert "2. B" in paras
         assert "（一）C" in paras
@@ -170,22 +147,43 @@ class TestLegacyContractsPreserved:
     def test_unordered_nested_indent_preserved(self):
         """无序嵌套缩进层级保留（0.74 / 1.48 cm），未被拍平到同一级。"""
         from docx import Document as _D
-        sections = [{
-            "id": "c1", "parent_id": "", "sort_order": 0, "level": 1,
-            "title": "第一章 测试章节",
-            "content": "- 顶层A\n  - 二级A1\n  - 二级A2\n- 顶层B\n",
-        }]
+
+        sections = [
+            {
+                "id": "c1",
+                "parent_id": "",
+                "sort_order": 0,
+                "level": 1,
+                "title": "第一章 测试章节",
+                "content": "- 顶层A\n  - 二级A1\n  - 二级A2\n- 顶层B\n",
+            }
+        ]
         content = sections[0]["content"]
         blocks = {"c1": _parse_content_blocks(content)}
         out = os.path.join(tempfile.gettempdir(), "nest_unordered.docx")
         _build_docx_sync(
-            out, {"id": "s1", "project_id": "p1", "name": "t"},
-            sections, {}, {}, {}, blocks,
-            "宋体", 12, "", "", False, False, False,
-            bidder_name="", heading_styles=_load_heading_styles({}),
-            page_break_before_chapter=True, line_spacing=1.5,
-            page_number_style="simple", toc_depth=3,
-            margins=None, cover_info=None,
+            out,
+            {"id": "s1", "project_id": "p1", "name": "t"},
+            sections,
+            {},
+            {},
+            {},
+            blocks,
+            "宋体",
+            12,
+            "",
+            "",
+            False,
+            False,
+            False,
+            bidder_name="",
+            heading_styles=_load_heading_styles({}),
+            page_break_before_chapter=True,
+            line_spacing=1.5,
+            page_number_style="simple",
+            toc_depth=3,
+            margins=None,
+            cover_info=None,
         )
         indents = []
         for p in _D(out).paragraphs:
@@ -203,7 +201,7 @@ class TestDeepLevelSkipNoCrash:
     def test_skip_two_levels(self):
         paras = _build_single(
             "1. A\n"
-            "      1. deep\n"   # 6 空格 -> level 3（中间层级被补齐）
+            "      1. deep\n"  # 6 空格 -> level 3（中间层级被补齐）
             "2. A2\n"
         )
         assert "1. A" in paras

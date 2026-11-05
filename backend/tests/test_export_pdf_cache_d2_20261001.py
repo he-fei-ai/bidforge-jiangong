@@ -44,8 +44,7 @@ def _fn(name):
 
 def test_d2_pdf_fingerprint_has_format_suffix():
     src = _fn("export_pdf")
-    assert 'content_hash + "|fmt=pdf"' in src, (
-        "PDF 缓存键缺格式后缀，会与 DOCX 共用同一唯一键互相覆盖（D-2 回退）")
+    assert 'content_hash + "|fmt=pdf"' in src, "PDF 缓存键缺格式后缀，会与 DOCX 共用同一唯一键互相覆盖（D-2 回退）"
 
 
 def test_d2_docx_fingerprint_unchanged():
@@ -75,9 +74,11 @@ def test_d2_degraded_guard_present():
     src = _fn("export_pdf")
     assert "degraded" in src
     # 守卫三条件与 DOCX 同口径
-    for cond in ("render_stats.get(\"failed\", 0) > 0",
-                 "prep.get(\"ai_image_pending\", 0) > 0",
-                 "prep.get(\"ai_image_download_pending\", 0) > 0"):
+    for cond in (
+        'render_stats.get("failed", 0) > 0',
+        'prep.get("ai_image_pending", 0) > 0',
+        'prep.get("ai_image_download_pending", 0) > 0',
+    ):
         assert cond in src, f"坏缓存守卫缺条件: {cond}"
     assert "if not degraded:" in src, "degraded 时仍会写缓存（D-2 回退）"
 

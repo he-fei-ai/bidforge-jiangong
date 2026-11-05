@@ -44,9 +44,7 @@
 
 /** 全角数字 → ASCII 数字（`Number("１２")` 在 JS 里是 NaN，必须先折）。 */
 function toAsciiDigits(s: string): string {
-  return s.replace(/[０-９]/g, (c) =>
-    String.fromCharCode(c.charCodeAt(0) - 0xfee0),
-  );
+  return s.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
 }
 
 /**

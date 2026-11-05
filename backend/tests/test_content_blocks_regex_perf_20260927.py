@@ -20,6 +20,7 @@ cProfile（200 章正文 ×10）显示优化前 `re.__init__._compile` 被调用
 
 复跑：``python -m pytest tests/test_content_blocks_regex_perf_20260927.py -q``
 """
+
 import importlib
 import inspect
 import json
@@ -67,45 +68,45 @@ def _snapshot() -> str:
 
 # 预编译版 ↔ 内联版 的调用点对照表（对拍时据此把模块临时改回旧写法）
 _REVERSE_MAP = [
-    ('_RE_BOLD_WRAP.sub(r"\\1", s, count=1)',
-     're.sub(r"^\\*\\*(.*?)\\*\\*$", r"\\1", s, count=1)'),
-    ("_RE_SENTENCE_TAIL_FULL.search(s_inside)",
-     're.search(r"[。！？.!?；;，,、]\\s*$", s_inside)'),
-    ("_RE_HEADING_NNN.match(s_inside)",
-     're.match(r"^(\\d+\\.\\d+\\.\\d+)\\s+([\\u4e00-\\u9fa5A-Za-z].*)$", s_inside)'),
-    ("_RE_HEADING_DEEP.match(s_inside)",
-     're.match(r"^(\\d+(?:\\.\\d+){3,6})\\s+([\\u4e00-\\u9fa5A-Za-z].*)$", s_inside)'),
-    ("_RE_HEADING_NN.match(s_inside)",
-     're.match(r"^(\\d+\\.\\d+)\\s+([\\u4e00-\\u9fa5A-Za-z].*)$", s_inside)'),
-    ("_RE_HEADING_N.match(s_inside)",
-     're.match(r"^(\\d+)\\s+([\\u4e00-\\u9fa5A-Za-z].*)$", s_inside)'),
-    ('_RE_BOLD_WRAP.sub(r"\\1", text).strip()',
-     're.sub(r"^\\*\\*(.*?)\\*\\*$", r"\\1", text).strip()'),
-    ('_RE_WS_RUN.sub("", str(raw or "").strip())[:limit]',
-     're.sub(r"\\s+", "", str(raw or "").strip())[:limit]'),
-    ('t = _RE_WS_RUN.sub("", str(raw or "").strip())',
-     't = re.sub(r"\\s+", "", str(raw or "").strip())'),
+    ('_RE_BOLD_WRAP.sub(r"\\1", s, count=1)', 're.sub(r"^\\*\\*(.*?)\\*\\*$", r"\\1", s, count=1)'),
+    ("_RE_SENTENCE_TAIL_FULL.search(s_inside)", 're.search(r"[。！？.!?；;，,、]\\s*$", s_inside)'),
+    ("_RE_HEADING_NNN.match(s_inside)", 're.match(r"^(\\d+\\.\\d+\\.\\d+)\\s+([\\u4e00-\\u9fa5A-Za-z].*)$", s_inside)'),
+    (
+        "_RE_HEADING_DEEP.match(s_inside)",
+        're.match(r"^(\\d+(?:\\.\\d+){3,6})\\s+([\\u4e00-\\u9fa5A-Za-z].*)$", s_inside)',
+    ),
+    ("_RE_HEADING_NN.match(s_inside)", 're.match(r"^(\\d+\\.\\d+)\\s+([\\u4e00-\\u9fa5A-Za-z].*)$", s_inside)'),
+    ("_RE_HEADING_N.match(s_inside)", 're.match(r"^(\\d+)\\s+([\\u4e00-\\u9fa5A-Za-z].*)$", s_inside)'),
+    ('_RE_BOLD_WRAP.sub(r"\\1", text).strip()', 're.sub(r"^\\*\\*(.*?)\\*\\*$", r"\\1", text).strip()'),
+    ('_RE_WS_RUN.sub("", str(raw or "").strip())[:limit]', 're.sub(r"\\s+", "", str(raw or "").strip())[:limit]'),
+    ('t = _RE_WS_RUN.sub("", str(raw or "").strip())', 't = re.sub(r"\\s+", "", str(raw or "").strip())'),
     ("_RE_MD_HEADING.match(stripped)", 're.match(r"^(#{1,6})\\s+(.*)", stripped)'),
-    ("_RE_SENTENCE_TAIL.search(_h_text)",
-     're.search(r"[。！？；;，,]\\s*$", _h_text)'),
-    ("_RE_TABLE_SEP.match(tbl_lines[1].strip())",
-     're.match(r"^\\|?\\s*:?-+:?\\s*(\\|\\s*:?-+:?\\s*)*\\|?$", tbl_lines[1].strip())'),
-    ("_RE_CHART_TYPE_TAG.match(line.strip())",
-     're.match(r"^\\[CHART_TYPE:\\s*(\\w+)\\]", line.strip())'),
+    ("_RE_SENTENCE_TAIL.search(_h_text)", 're.search(r"[。！？；;，,]\\s*$", _h_text)'),
+    (
+        "_RE_TABLE_SEP.match(tbl_lines[1].strip())",
+        're.match(r"^\\|?\\s*:?-+:?\\s*(\\|\\s*:?-+:?\\s*)*\\|?$", tbl_lines[1].strip())',
+    ),
+    ("_RE_CHART_TYPE_TAG.match(line.strip())", 're.match(r"^\\[CHART_TYPE:\\s*(\\w+)\\]", line.strip())'),
     # ✅ 2026-10-17：补登 R99 新增的 `_RE_CHART_TYPE_TAG_LOOSE`（形似机器标记的
     #    非法类型行），修复「新增预编译常量未加入对拍表」导致的本护栏自失效。
-    ("_RE_CHART_TYPE_TAG_LOOSE.match(_stripped)",
-     're.match(r"^[\\[【]\\s*CHART_TYPE\\s*[:：]", _stripped)'),
-    ('_RE_QUOTE_PREFIX.sub("", lines[i]).rstrip()',
-     're.sub(r"^\\s*>\\s?", "", lines[i]).rstrip()'),
+    ("_RE_CHART_TYPE_TAG_LOOSE.match(_stripped)", 're.match(r"^[\\[【]\\s*CHART_TYPE\\s*[:：]", _stripped)'),
+    ('_RE_QUOTE_PREFIX.sub("", lines[i]).rstrip()', 're.sub(r"^\\s*>\\s?", "", lines[i]).rstrip()'),
     ("_RE_HR_LINE.match(stripped)", 're.match(r"^([-*_])(\\s*\\1){2,}$", stripped)'),
     ("_RE_UL_BULLET.match(stripped)", 're.match(r"^[-*•·]\\s+(.*)", stripped)'),
     ('s = _RE_INLINE_MD_NOISE.sub("", s)', 's = re.sub(r"[*_`#]", "", s)'),
-    ('s = _RE_TITLE_TAIL_PUNCT.sub("", s)',
-     's = re.sub(r"[\\s、.。：:；;，,]+$", "", s)'),
+    ('s = _RE_TITLE_TAIL_PUNCT.sub("", s)', 's = re.sub(r"[\\s、.。：:；;，,]+$", "", s)'),
     ('return _RE_WS_RUN.sub("", s)', 'return re.sub(r"\\s+", "", s)'),
+    # ✅ 2026-11-05：补登防回归新增的两个预编译常量（孤儿引导语宽判据 /
+    #    字母序子项前缀剥离），修复「新增预编译常量未加入对拍表」护栏失效。
+    (
+        "_RE_LEADIN_BROAD.search(t)",
+        're.search(r"(?:如(?:下|后)(?:图|表)|见(?:下|上)(?:图|表)|如图|图示|流程图如下)\\s*(?:所示)?\\s*[:：。]?\\s*$", t)',
+    ),
+    (
+        '_RE_SUBITEM_ORD_PREFIX.sub("", s, count=1)',
+        're.sub(r"^\\s*[a-zA-Z]\\s*[、.．)）]\\s*", "", s, count=1)',
+    ),
 ]
-
 
 
 class TestNoInlineRegexOnHotPath:
@@ -117,14 +118,10 @@ class TestNoInlineRegexOnHotPath:
         注释里提到 `re.match` 是允许的（判定会先剔除注释行）。
         """
         src = inspect.getsource(cb)
-        code_lines = [ln.split("  #")[0] for ln in src.splitlines()
-                      if not ln.strip().startswith("#")]
+        code_lines = [ln.split("  #")[0] for ln in src.splitlines() if not ln.strip().startswith("#")]
         code = "\n".join(code_lines)
-        offenders = re.findall(
-            r"(?<![_.A-Za-z])re\.(?:match|search|sub|findall|split|fullmatch)\(",
-            code)
-        assert not offenders, (
-            f"content_blocks 出现 {len(offenders)} 处内联正则调用，热路径性能回退")
+        offenders = re.findall(r"(?<![_.A-Za-z])re\.(?:match|search|sub|findall|split|fullmatch)\(", code)
+        assert not offenders, f"content_blocks 出现 {len(offenders)} 处内联正则调用，热路径性能回退"
 
     def test_precompiled_constants_are_patterns(self):
         """新增的 `_RE_*` 必须是已编译对象。"""
@@ -137,8 +134,8 @@ class TestNoInlineRegexOnHotPath:
         """最热函数 `_parse_content_blocks` 自身零内联正则。"""
         src = inspect.getsource(cb._parse_content_blocks)
         assert not re.search(
-            r"(?<![_.A-Za-z])re\.(?:match|search|sub|findall|split)\(", src), \
-            "_parse_content_blocks 出现内联正则调用"
+            r"(?<![_.A-Za-z])re\.(?:match|search|sub|findall|split)\(", src
+        ), "_parse_content_blocks 出现内联正则调用"
 
 
 class TestPrecompiledBehaviourParity:
@@ -150,12 +147,10 @@ class TestPrecompiledBehaviourParity:
         否则「对拍通过」可能只是因为没真正还原到旧写法。
         """
         src = inspect.getsource(cb)
-        body = "\n".join(ln for ln in src.splitlines()
-                         if not ln.strip().startswith("_RE_"))
+        body = "\n".join(ln for ln in src.splitlines() if not ln.strip().startswith("_RE_"))
         # 用正则取名，避免 `s = _RE_X.sub(...)` 这类带赋值前缀的行取错名字
         used = {m for m in re.findall(r"\b(_RE_[A-Z0-9_]+)\.", body)}
-        mapped = {re.match(r"(?:s = |t = |return )?(_RE_[A-Z0-9_]+)\.", a).group(1)
-                  for a, _ in _REVERSE_MAP}
+        mapped = {re.match(r"(?:s = |t = |return )?(_RE_[A-Z0-9_]+)\.", a).group(1) for a, _ in _REVERSE_MAP}
         assert not (used - mapped), f"新增预编译常量未加入对拍表: {used - mapped}"
 
     def test_output_identical_to_inline_version(self):
@@ -187,8 +182,9 @@ class TestPrecompiledBehaviourParity:
         assert old_out, "旧实现快照为空，对拍无效"
         assert new_out == old_out, "预编译改造改变了输出结果"
         # 顺带确认没有污染全局模块表
-        assert sys.modules["app.services.content_blocks"] is cb, \
-            "对拍污染了 sys.modules（会导致身份类断言在同批次失败）"
+        assert (
+            sys.modules["app.services.content_blocks"] is cb
+        ), "对拍污染了 sys.modules（会导致身份类断言在同批次失败）"
 
 
 class TestParseBlocksPerfBudget:
@@ -197,11 +193,20 @@ class TestParseBlocksPerfBudget:
     def test_800_sections_within_budget(self):
         parts = []
         for i in range(800):
-            parts += [f"## {i}.1 工艺流程", f"第{i}章正文内容示例。" * 8,
-                      "```mermaid\ngraph TD\n A-->B\n```", "- 项目A", "- 项目B",
-                      "| 参数 | 数值 |\n| --- | --- |",
-                      f"### {i}.2 验收要求", "1）第一条要求", "2）第二条要求",
-                      "![下图](https://x/y.png)", "**2.3 加粗标题**", "见下图所示："]
+            parts += [
+                f"## {i}.1 工艺流程",
+                f"第{i}章正文内容示例。" * 8,
+                "```mermaid\ngraph TD\n A-->B\n```",
+                "- 项目A",
+                "- 项目B",
+                "| 参数 | 数值 |\n| --- | --- |",
+                f"### {i}.2 验收要求",
+                "1）第一条要求",
+                "2）第二条要求",
+                "![下图](https://x/y.png)",
+                "**2.3 加粗标题**",
+                "见下图所示：",
+            ]
         content = "\n".join(parts)
         cb._parse_content_blocks(content)  # 预热
         t0 = time.perf_counter()
@@ -216,10 +221,19 @@ class TestParseBlocksPerfBudget:
         命中缓存时 `re._compile` 同样会被调用，所以先预热把模式灌进
         `re._cache`，再统计单次解析期间的调用次数。
         """
-        content = "\n".join(["## 1.1 标题", "正文示例。" * 20,
-                             "1.2 准备", "1）要求", "- 列表", "---",
-                             "> 引用", "```mermaid\ngraph TD\n A-->B\n```"])
-        cb._parse_content_blocks(content)          # 预热：灌满 re._cache
+        content = "\n".join(
+            [
+                "## 1.1 标题",
+                "正文示例。" * 20,
+                "1.2 准备",
+                "1）要求",
+                "- 列表",
+                "---",
+                "> 引用",
+                "```mermaid\ngraph TD\n A-->B\n```",
+            ]
+        )
+        cb._parse_content_blocks(content)  # 预热：灌满 re._cache
         calls = {"n": 0}
         original = re._compile
 
@@ -232,5 +246,4 @@ class TestParseBlocksPerfBudget:
             cb._parse_content_blocks(content)
         finally:
             re._compile = original
-        assert calls["n"] == 0, (
-            f"单次解析仍触发 {calls['n']} 次正则缓存查找（优化前为 278）")
+        assert calls["n"] == 0, f"单次解析仍触发 {calls['n']} 次正则缓存查找（优化前为 278）"

@@ -15,7 +15,11 @@ vi.mock("../components/mermaidRuntime", () => ({
   nextMermaidId: vi.fn(() => "test-id"),
 }));
 
-import { deriveExportGate, renderChartsForExport, type ExportGateInput } from "../utils/exportCharts";
+import {
+  deriveExportGate,
+  renderChartsForExport,
+  type ExportGateInput,
+} from "../utils/exportCharts";
 import { ensureMermaid, nextMermaidId } from "../components/mermaidRuntime";
 
 /**
@@ -48,12 +52,24 @@ describe("导出门禁（deriveExportGate · 2026-10-01 起只提示不阻断）
   /** 所有「审核 / 预检未完成」的组合都必须放行 —— 这是本次需求的核心不变式。 */
   const NOT_READY_CASES: Array<[string, ExportGateInput]> = [
     ["未做导出预检", { hasPreflight: false, issues: [], readiness: READY }],
-    ["未做预检且存在 high 问题", { hasPreflight: false, issues: [{ type: "empty_section" }], readiness: null }],
+    [
+      "未做预检且存在 high 问题",
+      { hasPreflight: false, issues: [{ type: "empty_section" }], readiness: null },
+    ],
     ["就绪度缺失", { hasPreflight: true, issues: [], readiness: null }],
     ["就绪度未执行", { hasPreflight: true, issues: [], readiness: { has_run: false } }],
-    ["就绪度已过期", { hasPreflight: true, issues: [], readiness: { has_run: true, released: true, stale: true } }],
-    ["就绪度未放行", { hasPreflight: true, issues: [], readiness: { has_run: true, released: false } }],
-    ["预检有 high 问题", { hasPreflight: true, issues: [{ type: "empty_section" }], readiness: READY }],
+    [
+      "就绪度已过期",
+      { hasPreflight: true, issues: [], readiness: { has_run: true, released: true, stale: true } },
+    ],
+    [
+      "就绪度未放行",
+      { hasPreflight: true, issues: [], readiness: { has_run: true, released: false } },
+    ],
+    [
+      "预检有 high 问题",
+      { hasPreflight: true, issues: [{ type: "empty_section" }], readiness: READY },
+    ],
   ];
 
   it("审核 / 预检未完成（含未预检、未跑总检、过期、未放行、有 high 问题）一律放行", () => {
@@ -69,7 +85,7 @@ describe("导出门禁（deriveExportGate · 2026-10-01 起只提示不阻断）
     for (const type of BACKEND_HIGH_ISSUE_TYPES) {
       const r = deriveExportGate({
         hasPreflight: true,
-        issues: [{ type }],           // 故意不带 severity，走类型兜底分支
+        issues: [{ type }], // 故意不带 severity，走类型兜底分支
         readiness: READY,
       });
       expect(r.highIssueCount, `${type} 应计为 high`).toBe(1);
@@ -90,8 +106,14 @@ describe("导出门禁（deriveExportGate · 2026-10-01 起只提示不阻断）
   });
 
   it("空 issues / null issues 不抛异常且 highIssueCount 为 0", () => {
-    expect(deriveExportGate({ hasPreflight: true, issues: [], readiness: READY })).toMatchObject({ allowed: true, highIssueCount: 0 });
-    expect(deriveExportGate({ hasPreflight: true, issues: null, readiness: READY })).toMatchObject({ allowed: true, highIssueCount: 0 });
+    expect(deriveExportGate({ hasPreflight: true, issues: [], readiness: READY })).toMatchObject({
+      allowed: true,
+      highIssueCount: 0,
+    });
+    expect(deriveExportGate({ hasPreflight: true, issues: null, readiness: READY })).toMatchObject({
+      allowed: true,
+      highIssueCount: 0,
+    });
   });
 
   it("有 high 问题时 reason 带上问题数量，无问题时给出「不受限制」提示", () => {
@@ -216,10 +238,14 @@ describe("renderChartsForExport (P1-5)", () => {
     expect(Array.isArray(out)).toBe(true);
   });
 
-
   it("取消信号会中断尚未完成的 Mermaid 渲染", async () => {
     let resolveRender: ((value: { svg: string }) => void) | undefined;
-    renderSpy.mockImplementationOnce(() => new Promise((resolve) => { resolveRender = resolve; }));
+    renderSpy.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRender = resolve;
+        }),
+    );
     const controller = new AbortController();
     const pending = renderChartsForExport(
       [{ chart_type: "flowchart", mermaid_code: "graph TD\nA-->B" }],
@@ -233,10 +259,12 @@ describe("renderChartsForExport (P1-5)", () => {
   });
 
   it("导出不受限：未预检时仍放行", () => {
-    expect(deriveExportGate({
-      hasPreflight: false,
-      readiness: { has_run: true, released: true },
-    })).toMatchObject({ allowed: true, highIssueCount: 0 });
+    expect(
+      deriveExportGate({
+        hasPreflight: false,
+        readiness: { has_run: true, released: true },
+      }),
+    ).toMatchObject({ allowed: true, highIssueCount: 0 });
   });
 
   it("导出不受限：high 问题按后端类型映射计数但不阻止", () => {
@@ -251,15 +279,22 @@ describe("renderChartsForExport (P1-5)", () => {
   it("导出不受限：就绪度未执行、过期或未放行均放行", () => {
     const base = { hasPreflight: true, issues: [] };
     expect(deriveExportGate({ ...base, readiness: { has_run: false } }).allowed).toBe(true);
-    expect(deriveExportGate({ ...base, readiness: { has_run: true, released: true, stale: true } }).allowed).toBe(true);
-    expect(deriveExportGate({ ...base, readiness: { has_run: true, released: false } }).allowed).toBe(true);
+    expect(
+      deriveExportGate({ ...base, readiness: { has_run: true, released: true, stale: true } })
+        .allowed,
+    ).toBe(true);
+    expect(
+      deriveExportGate({ ...base, readiness: { has_run: true, released: false } }).allowed,
+    ).toBe(true);
   });
 
   it("导出不受限：无 high 问题时 highIssueCount 为 0", () => {
-    expect(deriveExportGate({
-      hasPreflight: true,
-      issues: [{ type: "low_word_count" }, { type: "chart_failed" }],
-      readiness: { has_run: true, released: true, stale: false },
-    })).toMatchObject({ allowed: true, highIssueCount: 0 });
+    expect(
+      deriveExportGate({
+        hasPreflight: true,
+        issues: [{ type: "low_word_count" }, { type: "chart_failed" }],
+        readiness: { has_run: true, released: true, stale: false },
+      }),
+    ).toMatchObject({ allowed: true, highIssueCount: 0 });
   });
 });

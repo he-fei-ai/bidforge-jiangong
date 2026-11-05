@@ -49,9 +49,11 @@ def _fn(name):
         for node in ast.parse(src).body:
             if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == name:
                 hits.append((path, ast.get_source_segment(src, node) or ""))
-    assert len(hits) == 1, (
-        "函数 %s 应在导出模块簇中恰有一处定义，实际 %d 处: %s"
-        % (name, len(hits), [os.path.basename(p) for p, _ in hits]))
+    assert len(hits) == 1, "函数 %s 应在导出模块簇中恰有一处定义，实际 %d 处: %s" % (
+        name,
+        len(hits),
+        [os.path.basename(p) for p, _ in hits],
+    )
     return hits[0][1]
 
 
@@ -59,10 +61,11 @@ def _fn(name):
 # 1. 默认关闭（向后兼容）
 # ---------------------------------------------------------------------------
 
+
 def test_d3_config_default_off():
     from app.config import Settings
-    assert Settings().export_appendix_sources is False, (
-        "补充附录默认必须关闭，否则既有产物形态被改变（D-3 回退）")
+
+    assert Settings().export_appendix_sources is False, "补充附录默认必须关闭，否则既有产物形态被改变（D-3 回退）"
 
 
 def test_d3_loader_returns_empty_when_disabled():
@@ -108,52 +111,70 @@ def test_d3_excludes_stale_extractions():
 #: 故改为锁定**历史参数相对顺序**：清单内参数名与相对次序必须逐字不变，
 #: 新参数只允许出现在其后。两种回归（中段插入 / 改名 / 换序）均仍被拦下。
 _FROZEN_HISTORICAL_PARAMS = (
-    "out_path", "scheme", "roots", "children_map", "chart_lookup",
-    "rendered_bytes", "blocks_cache", "font_name", "font_size",
-    "page_header", "page_footer", "show_page_number", "show_title_page",
-    "show_toc", "bidder_name", "heading_styles", "page_break_before_chapter",
-    "line_spacing", "page_number_style", "toc_depth", "margins", "cover_info",
-    "image_bytes", "global_facts", "chart_fail_placeholder", "heading_border",
+    "out_path",
+    "scheme",
+    "roots",
+    "children_map",
+    "chart_lookup",
+    "rendered_bytes",
+    "blocks_cache",
+    "font_name",
+    "font_size",
+    "page_header",
+    "page_footer",
+    "show_page_number",
+    "show_title_page",
+    "show_toc",
+    "bidder_name",
+    "heading_styles",
+    "page_break_before_chapter",
+    "line_spacing",
+    "page_number_style",
+    "toc_depth",
+    "margins",
+    "cover_info",
+    "image_bytes",
+    "global_facts",
+    "chart_fail_placeholder",
+    "heading_border",
     "appendix_sources",
 )
 
 
 def _build_docx_sync_argnames():
     tree = ast.parse(_src(EX_PATH))
-    fn = [n for n in tree.body
-          if isinstance(n, ast.FunctionDef) and n.name == "_build_docx_sync"][0]
+    fn = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_build_docx_sync"][0]
     return [a.arg for a in fn.args.args]
 
 
 def test_d3_builder_param_is_last():
     """历史位置参数的相对顺序不得改变（既有调用方按位传参，错位即静默串参）。"""
     names = _build_docx_sync_argnames()
-    prefix = tuple(names[:len(_FROZEN_HISTORICAL_PARAMS)])
+    prefix = tuple(names[: len(_FROZEN_HISTORICAL_PARAMS)])
     assert prefix == _FROZEN_HISTORICAL_PARAMS, (
         "历史位置参数相对次序被改动（错位会让 _build_docx_task 按位传参串参）\n"
         f"期望前 {len(_FROZEN_HISTORICAL_PARAMS)} 项：{_FROZEN_HISTORICAL_PARAMS}\n"
-        f"实际：{prefix}")
+        f"实际：{prefix}"
+    )
 
 
 def test_d3_builder_new_params_append_only_after_frozen():
     """新增参数只允许追加在冻结清单之后，且必须带默认值（老调用方不传）。"""
     names = _build_docx_sync_argnames()
-    appended = names[len(_FROZEN_HISTORICAL_PARAMS):]
-    assert set(appended).isdisjoint(_FROZEN_HISTORICAL_PARAMS), (
-        f"新增参数与历史参数重名：{appended}")
+    appended = names[len(_FROZEN_HISTORICAL_PARAMS) :]
+    assert set(appended).isdisjoint(_FROZEN_HISTORICAL_PARAMS), f"新增参数与历史参数重名：{appended}"
     tree = ast.parse(_src(EX_PATH))
-    fn = [n for n in tree.body
-          if isinstance(n, ast.FunctionDef) and n.name == "_build_docx_sync"][0]
+    fn = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_build_docx_sync"][0]
     n_defaults = len(fn.args.defaults)
     first_defaulted = len(fn.args.args) - n_defaults
-    assert all(n in names[first_defaulted:] for n in appended), (
-        f"追加参数必须全部带默认值，否则老调用方按位传参直接 TypeError：{appended}")
+    assert all(
+        n in names[first_defaulted:] for n in appended
+    ), f"追加参数必须全部带默认值，否则老调用方按位传参直接 TypeError：{appended}"
 
 
 def test_d3_builder_param_has_default_none():
     tree = ast.parse(_src(EX_PATH))
-    fn = [n for n in tree.body
-          if isinstance(n, ast.FunctionDef) and n.name == "_build_docx_sync"][0]
+    fn = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_build_docx_sync"][0]
     defaults = {a.arg: i for i, a in enumerate(fn.args.args)}
     n_defaults = len(fn.args.defaults)
     # appendix_sources 及其后所有追加参数都必须带默认值
@@ -178,20 +199,19 @@ def test_d3_task_tuple_appends_at_end():
     assert i_hb < i_app, "元组元素顺序与签名不一致（heading_border 须在 appendix_sources 之前）"
 
     # 反查：签名中 heading_border 之前不得出现元组里的任何后续元素
-    frozen_tail = names[names.index("appendix_sources") + 1:]
+    frozen_tail = names[names.index("appendix_sources") + 1 :]
     for extra in frozen_tail:
-        assert extra not in src[:i_app], (
-            f"元组中 {extra} 出现在 appendix_sources 之前，与签名顺序错位")
+        assert extra not in src[:i_app], f"元组中 {extra} 出现在 appendix_sources 之前，与签名顺序错位"
 
 
 # ---------------------------------------------------------------------------
 # 3. 缓存指纹必须纳入补充附录
 # ---------------------------------------------------------------------------
 
+
 def test_d3_fingerprint_includes_appendix():
     src = _fn("_content_fingerprint")
-    assert "appendix_sources" in src, (
-        "补充附录未纳入内容指纹 → 开关打开后永久命中不含附录的旧产物（D-3 回退）")
+    assert "appendix_sources" in src, "补充附录未纳入内容指纹 → 开关打开后永久命中不含附录的旧产物（D-3 回退）"
 
 
 def test_d3_fingerprint_uses_get_for_safety():
@@ -204,6 +224,7 @@ def test_d3_fingerprint_uses_get_for_safety():
 # 4. 渲染分支受空列表保护（默认不渲染）
 # ---------------------------------------------------------------------------
 
+
 def test_d3_render_guarded_by_truthiness():
     src = _fn("_build_docx_sync")
     assert "if appendix_sources:" in src, "渲染分支必须以空列表为门禁"
@@ -214,7 +235,7 @@ def test_d3_render_has_error_reporting():
     src = _fn("_build_docx_sync")
     i = src.find("参考资料与提取成果")
     assert i > 0
-    tail = src[i:i + 2500]
+    tail = src[i : i + 2500]
     assert "logger.error" in tail
     assert "exc_info=True" in tail
 
@@ -223,13 +244,14 @@ def test_d3_render_has_error_reporting():
 # 5. 我引入的 NameError 不得复现
 # ---------------------------------------------------------------------------
 
+
 def test_d3_no_bare_project_id_in_prepare():
     """_prepare_export 作用域内没有名为 project_id 的局部变量，
     直接传 project_id 会 NameError 并让整条导出链路 500。"""
     src = _fn("_prepare_export")
     assert "_load_appendix_sources(" in src
     i = src.find("_load_appendix_sources(")
-    call = src[i:i + 200]
+    call = src[i : i + 200]
     assert "project_id," not in call, "仍直接引用未定义的 project_id 局部变量"
     assert "scheme" in call
 

@@ -76,7 +76,9 @@ const apiMock = vi.hoisted(() => {
         if (typeof prop !== "string") return undefined;
         return { configurable: true, enumerable: true, value: makeCallable([prop]) };
       },
-      ownKeys() { return []; },
+      ownKeys() {
+        return [];
+      },
     });
   }
 
@@ -86,22 +88,34 @@ const apiMock = vi.hoisted(() => {
 vi.mock("../api", () => apiMock.root);
 vi.mock("../hooks/useSchemeLiveTask", () => ({
   useSchemeLiveTask: () => ({
-    id: null, status: "idle", progress: 0, message: "", task_type: "",
-    control: vi.fn(), refresh: vi.fn(), stop: vi.fn(),
+    id: null,
+    status: "idle",
+    progress: 0,
+    message: "",
+    task_type: "",
+    control: vi.fn(),
+    refresh: vi.fn(),
+    stop: vi.fn(),
   }),
 }));
 
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {},
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
     dispatchEvent: () => false,
   });
 }
 if (!(globalThis as any).ResizeObserver) {
   (globalThis as any).ResizeObserver = class {
-    observe() {} unobserve() {} disconnect() {}
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   };
 }
 
@@ -137,7 +151,7 @@ function renderPage() {
           <Route path="/scheme/:id" element={<SchemeWorkbenchPage />} />
         </Routes>
       </MemoryRouter>
-    </AntdApp>
+    </AntdApp>,
   );
 }
 
@@ -146,8 +160,11 @@ async function gotoExportTab() {
   const tab = tabLabel.closest('[role="tab"]') || tabLabel;
   fireEvent.click(tab);
   await waitFor(() =>
-    expect(Array.from(document.querySelectorAll("button"))
-      .some((b) => (b.textContent || "").includes("导出 DOCX"))).toBe(true)
+    expect(
+      Array.from(document.querySelectorAll("button")).some((b) =>
+        (b.textContent || "").includes("导出 DOCX"),
+      ),
+    ).toBe(true),
   );
 }
 
@@ -162,28 +179,34 @@ function findPresetSelect(): HTMLElement | null {
     const title = c.querySelector(".ant-card-head-title")?.textContent || "";
     return title.trim() === "格式预设";
   });
-  return presetCard?.querySelector(".ant-select-selector") as HTMLElement || null;
+  return (presetCard?.querySelector(".ant-select-selector") as HTMLElement) || null;
 }
 
 async function selectFirstPresetOption(presetName: string) {
   // 等待预设列表接口返回后，"格式预设" Card 内的 Select 已挂载到 DOM。
   // 注意：若 preset.is_default=false，页面不会自动选中，selector 内只显示 placeholder；
   // 所以这里不能断言 selector 文本含 presetName，只能等 Select 存在，然后主动打开下拉去选。
-  const select = await waitFor(() => {
-    const s = findPresetSelect();
-    expect(s, "格式预设 Card 内的 Select 应存在").toBeTruthy();
-    return s!;
-  }, { timeout: 3000 });
+  const select = await waitFor(
+    () => {
+      const s = findPresetSelect();
+      expect(s, "格式预设 Card 内的 Select 应存在").toBeTruthy();
+      return s!;
+    },
+    { timeout: 3000 },
+  );
 
   // AntD v5 Select 用 mousedown 展开（click 不够）；setTimeout(0) 让 rc-virtual-list 渲染 option。
   fireEvent.mouseDown(select);
   await new Promise((r) => setTimeout(r, 0));
-  await waitFor(() => {
-    const options = Array.from(document.querySelectorAll(".ant-select-item-option"));
-    const target = options.find((o) => (o.textContent || "").includes(presetName));
-    expect(target, `下拉里应含「${presetName}」option，实际 ${options.length} 个`).toBeTruthy();
-    fireEvent.click(target!);
-  }, { timeout: 3000 });
+  await waitFor(
+    () => {
+      const options = Array.from(document.querySelectorAll(".ant-select-item-option"));
+      const target = options.find((o) => (o.textContent || "").includes(presetName));
+      expect(target, `下拉里应含「${presetName}」option，实际 ${options.length} 个`).toBeTruthy();
+      fireEvent.click(target!);
+    },
+    { timeout: 3000 },
+  );
 }
 
 // AntD v5 中文按钮会自动插入空格（"保 存"、"删 除"、"刷 新"），
@@ -239,9 +262,12 @@ describe("SchemeWorkbenchPage · 导出格式预设交互（R-1 / R-2 回归网�
 
     // 等第一次 useEffect 触发的 fetchExportPresets 完成，避免它和手动点击的 fetch
     // 相互 abort，导致 loading 状态被中间态干扰
-    await waitFor(() => {
-      expect(apiCalls["exportApi.presets.list"]?.length).toBeGreaterThanOrEqual(1);
-    }, { timeout: 2000 });
+    await waitFor(
+      () => {
+        expect(apiCalls["exportApi.presets.list"]?.length).toBeGreaterThanOrEqual(1);
+      },
+      { timeout: 2000 },
+    );
     // 再等 slowResolve 的 300ms 让 fetch 完成、presetOpLoading 清空
     await new Promise((r) => setTimeout(r, 400));
 
@@ -253,7 +279,7 @@ describe("SchemeWorkbenchPage · 导出格式预设交互（R-1 / R-2 回归网�
         const btn = findButtonByText("刷新", PRESET_CARD)!;
         expect(btn.disabled).toBe(true);
       },
-      { timeout: 1500, interval: 50 }
+      { timeout: 1500, interval: 50 },
     );
     // 等接口返回后 disabled 应消失
     await waitFor(
@@ -261,16 +287,14 @@ describe("SchemeWorkbenchPage · 导出格式预设交互（R-1 / R-2 回归网�
         const btn = findButtonByText("刷新", PRESET_CARD)!;
         expect(btn.disabled).toBe(false);
       },
-      { timeout: 2000 }
+      { timeout: 2000 },
     );
     // 确认确实发起了 API 请求
     expect(apiCalls["exportApi.presets.list"]?.length).toBeGreaterThanOrEqual(1);
   });
 
   it("R-1：点「保存当前为预设」打开 Modal（不再是 window.prompt），输入名称后可提交", async () => {
-    apiDefaults["exportApi.presets.create"] = slowResolve(
-      { data: { id: "p1", name: "预设A" } }
-    );
+    apiDefaults["exportApi.presets.create"] = slowResolve({ data: { id: "p1", name: "预设A" } });
 
     renderPage();
     await gotoExportTab();
@@ -281,11 +305,14 @@ describe("SchemeWorkbenchPage · 导出格式预设交互（R-1 / R-2 回归网�
     fireEvent.click(btn!);
 
     // Modal 出现（AntD 的 modal.confirm 会渲染到 body）
-    await waitFor(() => {
-      const modal = document.body.querySelector(".ant-modal-confirm");
-      const titles = document.body.querySelectorAll(".ant-modal-confirm-title").length;
-      expect(modal || titles > 0).toBeTruthy();
-    }, { timeout: 3000 });
+    await waitFor(
+      () => {
+        const modal = document.body.querySelector(".ant-modal-confirm");
+        const titles = document.body.querySelectorAll(".ant-modal-confirm-title").length;
+        expect(modal || titles > 0).toBeTruthy();
+      },
+      { timeout: 3000 },
+    );
 
     // 弹窗内的 Input 可编辑
     const input = await screen.findByPlaceholderText("请输入格式预设名称");
@@ -295,24 +322,24 @@ describe("SchemeWorkbenchPage · 导出格式预设交互（R-1 / R-2 回归网�
     const okBtn = await waitFor(
       () => {
         const modalBtns = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter(
-          (b) => b.closest(".ant-modal-confirm")
+          (b) => b.closest(".ant-modal-confirm"),
         );
-        const savedBtn = modalBtns.find(
-          (b) => normalizeBtnText(b.textContent) === "保存"
-        );
-        if (!savedBtn) throw new Error(`Modal 内尚无「保存」按钮，实际: ${modalBtns.map(b=>normalizeBtnText(b.textContent)).join("/")}`);
+        const savedBtn = modalBtns.find((b) => normalizeBtnText(b.textContent) === "保存");
+        if (!savedBtn)
+          throw new Error(
+            `Modal 内尚无「保存」按钮，实际: ${modalBtns.map((b) => normalizeBtnText(b.textContent)).join("/")}`,
+          );
         return savedBtn;
       },
-      { timeout: 3000 }
+      { timeout: 3000 },
     );
     fireEvent.click(okBtn);
 
     await waitFor(() => {
       expect(apiCalls["exportApi.presets.create"]?.length).toBeGreaterThanOrEqual(1);
     });
-    const lastCall = apiCalls["exportApi.presets.create"]![
-      apiCalls["exportApi.presets.create"]!.length - 1
-    ];
+    const lastCall =
+      apiCalls["exportApi.presets.create"]![apiCalls["exportApi.presets.create"]!.length - 1];
     expect(lastCall[0]).toBe("s1");
     expect(lastCall[1]).toBe("预设A");
 
@@ -335,10 +362,13 @@ describe("SchemeWorkbenchPage · 导出格式预设交互（R-1 / R-2 回归网�
 
     fireEvent.click(findButtonByText("设为默认", PRESET_CARD)!);
     // 按钮进入 loading/disabled：disabled 是最稳定可靠的信号
-    await waitFor(() => {
-      const btn = findButtonByText("设为默认", PRESET_CARD)!;
-      expect(btn.disabled).toBe(true);
-    }, { timeout: 1500 });
+    await waitFor(
+      () => {
+        const btn = findButtonByText("设为默认", PRESET_CARD)!;
+        expect(btn.disabled).toBe(true);
+      },
+      { timeout: 1500 },
+    );
     expect(apiCalls["exportApi.presets.setDefault"]?.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -367,24 +397,21 @@ describe("SchemeWorkbenchPage · 导出格式预设交互（R-1 / R-2 回归网�
     // 点 Modal 确认按钮（"删除"，在 .ant-modal-confirm 内）
     const okBtn = await waitFor(
       () => {
-        const btn = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
-          .find(
-            (b) =>
-              normalizeBtnText(b.textContent) === "删除" && b.closest(".ant-modal-confirm")
-          );
+        const btn = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+          (b) => normalizeBtnText(b.textContent) === "删除" && b.closest(".ant-modal-confirm"),
+        );
         if (!btn) throw new Error("Modal 内尚无「删除」按钮");
         return btn;
       },
-      { timeout: 2000 }
+      { timeout: 2000 },
     );
     fireEvent.click(okBtn);
 
     await waitFor(() => {
       expect(apiCalls["exportApi.presets.remove"]?.length).toBeGreaterThanOrEqual(1);
     });
-    const lastCall = apiCalls["exportApi.presets.remove"]![
-      apiCalls["exportApi.presets.remove"]!.length - 1
-    ];
+    const lastCall =
+      apiCalls["exportApi.presets.remove"]![apiCalls["exportApi.presets.remove"]!.length - 1];
     expect(lastCall[0]).toBe("s1");
     expect(lastCall[1]).toBe("p1");
   });
@@ -413,15 +440,13 @@ describe("SchemeWorkbenchPage · 导出格式预设交互（R-1 / R-2 回归网�
     // 点 Modal 确认按钮
     const okBtn = await waitFor(
       () => {
-        const btn = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
-          .find(
-            (b) =>
-              normalizeBtnText(b.textContent) === "删除" && b.closest(".ant-modal-confirm")
-          );
+        const btn = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+          (b) => normalizeBtnText(b.textContent) === "删除" && b.closest(".ant-modal-confirm"),
+        );
         if (!btn) throw new Error("Modal 内尚无「删除」按钮");
         return btn;
       },
-      { timeout: 2000 }
+      { timeout: 2000 },
     );
     fireEvent.click(okBtn);
 
@@ -437,7 +462,7 @@ describe("SchemeWorkbenchPage · 导出格式预设交互（R-1 / R-2 回归网�
         expect(setDefaultBtn.disabled).toBe(true);
         expect(deleteBtn.disabled).toBe(true);
       },
-      { timeout: 1500 }
+      { timeout: 1500 },
     );
   });
 });

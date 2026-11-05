@@ -25,6 +25,7 @@ tests/test_inline_charts.py 等锁定）。
 - ``_strip_title_number`` / ``_strip_duplicate_leading_title`` —— 标题清洗
 - ``parse_fence_line`` / ``read_fenced_block`` —— 代码围栏解析/读取
 """
+
 from __future__ import annotations
 
 import json
@@ -37,6 +38,11 @@ from app.services.chart_validators import (
     detect_mermaid_chart_type,
     infer_chart_type_from_payload,
 )
+
+# ✅ 2026-11-05（生成侧防回归第一道闸）：解析唯一入口的前置归一化 ——
+#    字面 \n 粘行 / PDF 分页标记 / 表题与表头粘连行 / 确定性错别字，
+#    在按行切分**之前**统一清除（见 services/content_sanitize.py）。
+from app.services.content_sanitize import normalize_raw_content
 
 # ✅ R76（2026-10-13）：围栏闭合判据唯一事实源。本模块的 parse_fence_line
 #    保留历史签名与 lang 语义（图表三侧的上百处引用 + 既有测试的导入名不动），
@@ -60,7 +66,6 @@ logger = logging.getLogger("content_blocks")
 _pipe_logger = logging.getLogger("chart_pipeline")
 
 MAX_INLINE_CODE_BLOCK_LINES = 500
-
 
 
 INLINE_CHART_FENCE_LANGS = ("mermaid", "chart-json", "ai_image")
@@ -101,8 +106,7 @@ _LEAD_IN_HINT_RE = LEAD_IN_HINT_RE
 ORPHAN_LEAD_IN_RE = LEAD_IN_HINT_RE
 # 私有常量别名（_chart_pipeline 既有 import 名保持不变）。
 _LEAD_IN_MAX_CHARS = LEAD_IN_MAX_CHARS
-_LEAD_IN_TAIL_RE = re.compile(
-    r"(?:如下|如后|见下)?\s*(?:图|表)?\s*(?:所示|如下)?\s*[:：。]?\s*$")
+_LEAD_IN_TAIL_RE = re.compile(r"(?:如下|如后|见下)?\s*(?:图|表)?\s*(?:所示|如下)?\s*[:：。]?\s*$")
 _MERMAID_TITLE_RES = (
     re.compile(r"^\s*%%\s*(?:图题|标题|title)\s*[:：]\s*(.+?)\s*$", re.M),
     re.compile(r"^\s*(?:title|图题)\s*[:：]?\s*(.+?)\s*$", re.M),
@@ -122,10 +126,7 @@ _ORDERED_MARKER_RES: tuple = (
     # 1. / 1) —— ASCII 且必须跟空格，避免 "3.14 是圆周率" 被误切成列表项
     (re.compile(r"^(\d+)\s*[.)]\s+(.+)$"), "ascii"),
 )
-_TABLE_CAPTION_RE = re.compile(
-    r"^表\s*(?:[:：]\s*"
-    r"|[0-9一二三四五六七八九十][0-9.\-–—]*[\s、.：:]+)"
-    r"(\S.*)$")
+_TABLE_CAPTION_RE = re.compile(r"^表\s*(?:[:：]\s*" r"|[0-9一二三四五六七八九十][0-9.\-–—]*[\s、.：:]+)" r"(\S.*)$")
 # ✅ 2026-10-10（文档质量报告 修复6 · 格式问题7）：AI 常返回 HTML `<table>` 而非
 #    GFM 表格，旧实现无法识别，整张表以裸文本（含 <table>/<tr>/<td> 标签）印进交付
 #    DOCX。现把 HTML 表格解析为 GFM 行、复用既有 `type: table` 块与
@@ -182,6 +183,8 @@ def chart_type_tags(text: str) -> set[str]:
         if m:
             out.add(m.group(1))
     return out
+
+
 _RE_QUOTE_PREFIX = re.compile(r"^\s*>\s?")
 _RE_HR_LINE = re.compile(r"^([-*_])(\s*\1){2,}$")
 _RE_UL_BULLET = re.compile(r"^[-*•·]\s+(.*)")
@@ -254,7 +257,6 @@ def _detect_plain_heading(line: str) -> tuple[int, str] | None:
     m = _RE_HEADING_DEEP.match(s_inside)
     if m and _is_reasonable_heading_number(m.group(1)):
         return min(m.group(1).count(".") + 2, 7), m.group(2).strip()
-
 
     # N.N 标题
     m = _RE_HEADING_NN.match(s_inside)
@@ -362,10 +364,7 @@ def _extract_table_caption(blocks: list[dict]) -> str:
 
 
 #: 图题行「图 X-Y 题名」（与表题同构；编号由导出唯一生成）。
-_FIGURE_CAPTION_RE = re.compile(
-    r"^图\s*(?:[:：]\s*"
-    r"|[0-9一二三四五六七八九十][0-9.\-–—]*[\s、.：:]+)"
-    r"(\S.*)$")
+_FIGURE_CAPTION_RE = re.compile(r"^图\s*(?:[:：]\s*" r"|[0-9一二三四五六七八九十][0-9.\-–—]*[\s、.：:]+)" r"(\S.*)$")
 
 
 def _looks_like_figure_title(title: str) -> bool:
@@ -399,8 +398,7 @@ def _extract_figure_caption(blocks: list[dict]) -> str:
     prev = blocks[-1]
     if prev.get("type") != "paragraph":
         return ""
-    text = _RE_BOLD_WRAP.sub(r"\1",
-                            str(prev.get("text") or "").strip()).strip()
+    text = _RE_BOLD_WRAP.sub(r"\1", str(prev.get("text") or "").strip()).strip()
     m = _FIGURE_CAPTION_RE.match(text)
     if not m:
         return ""
@@ -409,6 +407,39 @@ def _extract_figure_caption(blocks: list[dict]) -> str:
         return ""
     blocks.pop()  # 已升格为图题，正文中不再重复输出
     return title
+
+
+def _attach_trailing_figure_captions(blocks: list[dict]) -> list[dict]:
+    """把图表块**下方**紧邻的「图 X-Y 题名」段落升格为该图图题并移除该段落。
+
+    ✅ R179（G-08）：GB/T 交付规范要求图题位于图**下方**，AI 也常按此形态书写。
+    旧实现只吸收块**上方**的题注，块下方的图题随后被
+    ``_drop_dangling_figure_captions`` 当作「有题无图」整段删除 —— 成稿图题
+    回落到载荷/引导语/通用名，用户写的具体图名丢失。
+
+    判据与上方题注吸收完全同源（``_FIGURE_CAPTION_RE`` + ``_looks_like_figure_title``）；
+    显式图题优先于引导语推导出的候选，故命中时直接覆盖块标题。
+    """
+    if not blocks:
+        return blocks
+    out: list[dict] = []
+    i = 0
+    while i < len(blocks):
+        blk = blocks[i]
+        out.append(blk)
+        if blk.get("type") == "chart" and i + 1 < len(blocks):
+            nxt = blocks[i + 1]
+            if nxt.get("type") == "paragraph":
+                text = _RE_BOLD_WRAP.sub(r"\1", str(nxt.get("text") or "").strip()).strip()
+                m = _FIGURE_CAPTION_RE.match(text)
+                if m:
+                    title = m.group(1).strip()
+                    if _looks_like_figure_title(title):
+                        blk["title"] = title
+                        i += 2  # 题注已升格，正文中不再重复输出
+                        continue
+        i += 1
+    return out
 
 
 def _drop_dangling_figure_captions(blocks: list[dict]) -> list[dict]:
@@ -426,13 +457,10 @@ def _drop_dangling_figure_captions(blocks: list[dict]) -> list[dict]:
     kept: list[dict] = []
     for b in blocks:
         if b.get("type") == "paragraph":
-            text = _RE_BOLD_WRAP.sub(r"\1",
-                                    str(b.get("text") or "").strip()).strip()
+            text = _RE_BOLD_WRAP.sub(r"\1", str(b.get("text") or "").strip()).strip()
             m = _FIGURE_CAPTION_RE.match(text)
             if m and _looks_like_figure_title(m.group(1).strip()):
-                logger.warning(
-                    '移除无图可挂的残留图题行（有题无图，不占图号）: %s',
-                    text[:50])
+                logger.warning("移除无图可挂的残留图题行（有题无图，不占图号）: %s", text[:50])
                 continue
         kept.append(b)
     return kept
@@ -483,6 +511,19 @@ def _split_table_block(tbl_lines: list[str]) -> list[list[str]]:
     n = len(tbl_lines)
     sep_idx = [k for k in range(n) if _RE_TABLE_SEP.match(tbl_lines[k])]
     if not sep_idx:
+        # ✅ 2026-11-05（第1轮报告 §10「管道符表残留为文本」形态 B）：
+        #    AI 生成的表漏写 GFM 分隔行（``| --- |``），旧判据整块降级为
+        #    裸文本段落 → 成稿出现 "|测试系统|测试项目|…" 管道符残留。
+        #    补齐条件（保守，不 Fabrication 数据）：
+        #      · ≥2 行、每行列数一致且 ≥2 列 —— 行首已是 ``|``，结构可信；
+        #      · 合成分隔行只是补齐 GFM 语法标记，表头=首行、数据=其余行，
+        #        不发明任何单元格内容；列数不齐或只有 1 行 → 维持降级。
+        if n >= 2:
+            _col_counts = {ln.strip().strip("|").count("|") + 1 for ln in tbl_lines}
+            if len(_col_counts) == 1 and next(iter(_col_counts)) >= 2:
+                _cols = next(iter(_col_counts))
+                logger.info("表格块缺分隔行：已按首行作表头合成分隔行（%d 列 × %d 行）", _cols, n)
+                return [[tbl_lines[0], "|" + " --- |" * _cols, *tbl_lines[1:]]]
         return []
     segments: list[list[str]] = []
     covered = [False] * n
@@ -532,8 +573,14 @@ def _normalize_table_first_cell(lines: list[str]) -> list[str]:
 def _html_unescape(text: str) -> str:
     """还原常见 HTML 实体（不引入 html 库，覆盖表格单元格实际会出现的形态）。"""
     t = _HTML_NBSP_RE.sub(" ", text)
-    t = (t.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-           .replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'"))
+    t = (
+        t.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+    )
 
     def _num(m: "re.Match") -> str:
         try:
@@ -542,10 +589,7 @@ def _html_unescape(text: str) -> str:
             return m.group(0)
 
     t = _HTML_DEC_NUM_RE.sub(_num, t)
-    t = _HTML_DEC_HEX_RE.sub(
-        lambda m: (chr(int(m.group(1), 16))
-                   if len(m.group(1)) <= 6 else m.group(0)),
-        t)
+    t = _HTML_DEC_HEX_RE.sub(lambda m: (chr(int(m.group(1), 16)) if len(m.group(1)) <= 6 else m.group(0)), t)
     return t
 
 
@@ -576,20 +620,28 @@ def _html_table_to_gfm(html_text: str) -> list[str] | None:
         return None
     ncols = max(len(r) for r in rows)
     norm = [r + [""] * (ncols - len(r)) for r in rows]
-    gfm = ["| " + " | ".join(norm[0]) + " |",
-           "| " + " | ".join(["---"] * ncols) + " |"]
+    gfm = ["| " + " | ".join(norm[0]) + " |", "| " + " | ".join(["---"] * ncols) + " |"]
     gfm.extend("| " + " | ".join(r) + " |" for r in norm[1:])
     return gfm
 
 
 def _clean_chart_title(raw, limit: int = 40) -> str:
-    """图题清洗：折叠空白、限长（载荷 title 原样保留语义，不做激进裁剪）。"""
-    return _RE_WS_RUN.sub("", str(raw or "").strip())[:limit]
+    """图题清洗：**折叠**空白（连续空白压成一个空格、保留词间分隔）、限长。
+
+    ★ R175（BUG-175-04）：旧实现 ``_RE_WS_RUN.sub("", ...)`` 是**删除**空白，
+    中英混排图题会被粘成一串（``"Site Layout Plan 施工平面布置"`` →
+    ``"SiteLayoutPlan施工平面布置"``），导出后图题不可读、也不可检索。
+    现保留单个分隔空格（全角空格同样归一为半角单空格）。
+    """
+    return _RE_WS_RUN.sub(" ", str(raw or "")).strip()[:limit]
 
 
 def _title_candidate(raw: str) -> str:
-    """引导语剥尾后的图题候选校验：长度 4~30、不含句读（否则不是名词短语图题）。"""
-    t = _RE_WS_RUN.sub("", str(raw or "").strip())
+    """引导语剥尾后的图题候选校验：长度 4~30、不含句读（否则不是名词短语图题）。
+
+    ★ R175（BUG-175-04）：同 ``_clean_chart_title``，空白**折叠**为单空格而非删除。
+    """
+    t = _RE_WS_RUN.sub(" ", str(raw or "")).strip()
     t = t.strip("“”\"'（）()【】[]：:。，,、;；-—")
     if not (4 <= len(t) <= 30):
         return ""
@@ -618,8 +670,7 @@ def _lead_in_title(blocks: list[dict]) -> str:
     prev = blocks[-1]
     if prev.get("type") != "paragraph":
         return ""
-    text = _RE_BOLD_WRAP.sub(r"\1",
-                            str(prev.get("text") or "").strip()).strip()
+    text = _RE_BOLD_WRAP.sub(r"\1", str(prev.get("text") or "").strip()).strip()
     if not text or len(text) > LEAD_IN_MAX_CHARS or not _LEAD_IN_HINT_RE.search(text):
         return ""
     return _title_candidate(_LEAD_IN_TAIL_RE.sub("", _LEAD_IN_HINT_RE.sub("", text)))
@@ -638,22 +689,86 @@ def _pop_orphan_lead_in_block(blocks: list[dict]) -> bool:
       · 文本 ≤60 字且以"如下图/见下图/如图所示"类引导语收尾。
     与 ``export._pop_orphan_lead_in``、``_chart_pipeline._drop_dangling_lead_in``
     同口径、同一目的：删图必须删引导语。
+
+    ✅ 2026-11-05：判据放宽为 :func:`_is_orphan_lead_in_text`（覆盖
+    "施工流程图如下："这类**不含**"如下/见图/如图"命中词序的变体），
+    修复第1轮报告 §9「施工流程图如下：后图缺失/仅有占位」的悬空引用残留。
     """
     if not blocks:
         return False
     prev = blocks[-1]
     if prev.get("type") != "paragraph":
         return False
-    text = _RE_BOLD_WRAP.sub(r"\1",
-                            str(prev.get("text") or "").strip()).strip()
-    if not text or len(text) > LEAD_IN_MAX_CHARS or not _LEAD_IN_HINT_RE.search(text):
+    text = _RE_BOLD_WRAP.sub(r"\1", str(prev.get("text") or "").strip()).strip()
+    if not _is_orphan_lead_in_text(text):
         return False
     blocks.pop()
     logger.info("图表围栏被跳过：已同步移除其孤儿引导语「%s」", text[:30])
     return True
 
 
-def _parse_content_blocks(content: str) -> list[dict]:
+# ✅ 2026-11-05：孤儿引导语判据（宽于 LEAD_IN_HINT_RE）。
+#    旧正则要求句尾恰为「如下图/见下图/如图/图示」+可选"所示"+标点，
+#    漏掉「施工流程图如下：」「工艺流程如下图。」等**词序不同**的变体
+#    （第1轮报告 Page102-103 实测）。宽判据必须仍含"图/表"字样 ——
+#    「要求如下：」「步骤如下：」是引出**列表**的正当行文，绝不可删。
+_RE_LEADIN_BROAD = re.compile(
+    r"(?:"
+    r"如(?:下|后)(?:图|表)"  # 如下图 / 如下表 / 如后图
+    r"|见(?:下|上)(?:图|表)"  # 见下图 / 见上图
+    r"|如图"  # 如图（含"如图所示"）
+    r"|图示"
+    r"|流程图如下"  # 词序变体：施工流程图如下：
+    r")\s*(?:所示)?\s*[:：。]?\s*$"
+)
+
+
+def _is_orphan_lead_in_text(text: str) -> bool:
+    """判定一段文本是否是「图表引导语」（LEAD_IN_HINT_RE 宽化版，单一出口）。
+
+    宽判据 = 既有 :data:`LEAD_IN_HINT_RE`（句尾"如下图/见下图/如图/图示"）
+    ∪ :data:`_RE_LEADIN_BROAD`（"流程图如下："等词序变体）。
+    长度上限沿用 LEAD_IN_MAX_CHARS（引导语是短句，长段落只可能在行文里
+    恰好以这些词收尾，删除会毁正文）。
+    """
+    t = str(text or "").strip()
+    if not t or len(t) > LEAD_IN_MAX_CHARS:
+        return False
+    return bool(LEAD_IN_HINT_RE.search(t) or _RE_LEADIN_BROAD.search(t))
+
+
+def _drop_leadin_without_visual(blocks: list[dict]) -> list[dict]:
+    """收尾清理：引导语段落之后**没有任何图表/图片**时，删除悬空引导语。
+
+    ✅ 2026-11-05（第1轮报告 §9「施工流程图如下：后无图」根因收口）：
+    既有 ``_pop_orphan_lead_in_block`` 只在「图表围栏被跳过」时触发；
+    源文里压根没有图表块（AI 只写了引导语、忘写围栏，或图表在生成期被
+    上游丢弃）时，引导语照样原样印进成稿 —— 读者看到"流程图如下"翻遍
+    全文无图。现解析收尾统一兜底：
+      · 段落是**纯引导语**（短、以引导语收尾）且其后一块不是
+        chart / image / ai_image → 整段删除（与删图删引导语同口径）；
+      · 长段落（正文里恰好以"如下："收尾）绝不触碰 —— 不做句内裁剪，
+        避免误删实质内容；
+      · 绝不静默：每次删除记 INFO。
+    """
+    out: list[dict] = []
+    for idx, blk in enumerate(blocks):
+        if blk.get("type") != "paragraph":
+            out.append(blk)
+            continue
+        nxt = blocks[idx + 1] if idx + 1 < len(blocks) else None
+        if nxt is not None and nxt.get("type") in ("chart", "image", "ai_image"):
+            out.append(blk)
+            continue
+        text = _RE_BOLD_WRAP.sub(r"\1", str(blk.get("text") or "").strip()).strip()
+        if _is_orphan_lead_in_text(text):
+            logger.info("无图引导语已回收（其后无图表块）：「%s」", text[:30])
+            continue
+        out.append(blk)
+    return out
+
+
+def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list[dict]:
     """解析正文内容为 block 列表。
 
     支持的 block 类型：
@@ -661,9 +776,30 @@ def _parse_content_blocks(content: str) -> list[dict]:
       code / table（GFM）/ chart（mermaid 围栏、chart-json、``[CHART_TYPE: x]``）/
       image（AI 配图：``![说明](http...)``）/ quote（``>`` 引用）/
       hr（``---`` ``***`` ``___`` 分隔线）
+
+    ✅ 2026-11-05（第二轮日志驱动分析 P1）：`diagnostics` 为**可选**汇总字典。
+    传非 None 时，被跳过的 chart-json 块会累计到
+    ``chart_json_skipped`` / ``chart_json_skipped_unclosed``。
+    旧调用方不传 → 行为逐字节不变。为什么需要：这些块被跳过时只写一行
+    INFO（生产日志里 2 处「跳过不可渲染的 chart-json 块」），而导出响应头
+    ``X-Chart-Render-Stats`` 的 failed 仍是 0 —— 成稿缺图却报「失败 0」，
+    用户与排障者都看不到。
     """
     if not content:
         return []
+
+    def _note_chart_json_skip(reason: str) -> None:
+        if diagnostics is None:
+            return
+        diagnostics["chart_json_skipped"] = int(diagnostics.get("chart_json_skipped") or 0) + 1
+        diagnostics[reason] = int(diagnostics.get(reason) or 0) + 1
+
+    # ✅ 2026-11-05（防回归第一道闸）：解析前统一归一化 —— 字面 \n 粘行 /
+    #    PDF 分页标记 / 「第X页共Y页」页脚 / 表题与 GFM 表头粘连行 /
+    #    确定性错别字（峻工→竣工、0.5MQ→0.5MΩ 等）。必须在 split("\n")
+    #    之前执行：任何被转义的换行都会让多行正文以「一整行」形态绕过
+    #    下方全部结构识别，原样印进交付 DOCX。
+    content, _sanitize_stats = normalize_raw_content(content)
     blocks = []
     lines = content.split("\n")
     i = 0
@@ -693,15 +829,17 @@ def _parse_content_blocks(content: str) -> list[dict]:
             if _RE_SENTENCE_TAIL.search(_h_text):
                 blocks.append({"type": "paragraph", "text": _h_text})
             else:
-                blocks.append({
-                    "type": "heading",
-                    "level": len(m_h.group(1)),
-                    "text": _h_text,
-                    # ✅ 编号统一（2026-09-25）：源行号（0 基）—— 落库前正文子标题
-                    #    编号规范化（services/numbering）据其精确重写源行；
-                    #    渲染链路不消费该字段，纯增量信息。
-                    "src_line": i,
-                })
+                blocks.append(
+                    {
+                        "type": "heading",
+                        "level": len(m_h.group(1)),
+                        "text": _h_text,
+                        # ✅ 编号统一（2026-09-25）：源行号（0 基）—— 落库前正文子标题
+                        #    编号规范化（services/numbering）据其精确重写源行；
+                        #    渲染链路不消费该字段，纯增量信息。
+                        "src_line": i,
+                    }
+                )
             i += 1
             continue
         # ✅ 增强：纯文本编号子标题（AI 输出 `2 标题` / `3.1 标题` 格式）
@@ -710,8 +848,7 @@ def _parse_content_blocks(content: str) -> list[dict]:
         plain_h = _detect_plain_heading(line)
         if plain_h:
             lv, txt = plain_h
-            blocks.append({"type": "heading", "level": lv, "text": txt,
-                           "src_line": i})
+            blocks.append({"type": "heading", "level": lv, "text": txt, "src_line": i})
             i += 1
             continue
         # 代码块 ```lang ... ``` / ~~~lang ... ~~~（图表三侧口径统一，2026-09-24 修复）
@@ -737,11 +874,10 @@ def _parse_content_blocks(content: str) -> list[dict]:
             #    导出侧却因超行数上限 break 后判为"未闭合"整块跳过 → 出现在图表清单/预览、
             #    却在导出 DOCX 里凭空消失（幽灵图）。共用扫描器后：closed/recovered 均视为闭合，
             #    正常解析渲染；eof/truncated 才走下方"以句读行还原正文"的未闭合降级。
-            code_lines, _fence_state, i = read_fenced_block(
-                lines, i, open_char=_open_char, open_len=_open_len)
+            code_lines, _fence_state, i = read_fenced_block(lines, i, open_char=_open_char, open_len=_open_len)
             _fence_closed = _fence_state in ("closed", "recovered")
             if not _fence_closed:
-                logger.warning('检测到未闭合的代码块（lang=%s，state=%s）', lang, _fence_state)
+                logger.warning("检测到未闭合的代码块（lang=%s，state=%s）", lang, _fence_state)
                 # ✅ 修复（2026-09-19）：围栏被截断时，"消费至文档末尾"会把截断点
                 #    之后的**正文段落**一并吞进残片（残片随后被跳过 → 正文静默丢失）。
                 #    图表代码行（mermaid 语句 / JSON 片段）与代码行不会以中文句读收尾，
@@ -749,13 +885,12 @@ def _parse_content_blocks(content: str) -> list[dict]:
                 #    段落解析，既不渲染残片、也不丢它后面的正文。对**所有**围栏语言生效；
                 #    其中图表家族围栏仍需保留完整残片交给下游按"解析失败 → 跳过"处理
                 #    （不截断 code_lines），普通代码围栏则只输出真正的代码行，不夹带正文。
-                _cut = next((j for j, _cl in enumerate(code_lines)
-                             if _cl.strip().endswith(("。", "！", "？"))), None)
+                _cut = next((j for j, _cl in enumerate(code_lines) if _cl.strip().endswith(("。", "！", "？"))), None)
                 if _cut is not None:
                     _give_back = len(code_lines) - _cut
                     logger.warning(
-                        "围栏未闭合（lang=%s），残片 %d 行已跳过，"
-                        "其后 %d 行正文已还原为段落", lang, _cut, _give_back)
+                        "围栏未闭合（lang=%s），残片 %d 行已跳过，" "其后 %d 行正文已还原为段落", lang, _cut, _give_back
+                    )
                     if lang.lower() not in _CHART_FENCE_LANGS:
                         code_lines = code_lines[:_cut]
                     i -= _give_back
@@ -772,7 +907,10 @@ def _parse_content_blocks(content: str) -> list[dict]:
                     #    无可渲染的代码语义；宁可不输出，也不把正文当代码印。
                     logger.warning(
                         "围栏未闭合（lang=%s）且其后无中文句读行，无法定位正文起点："
-                        "已整块跳过 %d 行，避免把正文当代码块输出", lang, len(code_lines))
+                        "已整块跳过 %d 行，避免把正文当代码块输出",
+                        lang,
+                        len(code_lines),
+                    )
                     _pop_orphan_lead_in_block(blocks)
                     continue
             if lang.lower() == "mermaid":
@@ -783,8 +921,9 @@ def _parse_content_blocks(content: str) -> list[dict]:
                 #    与登记侧 `_scan_inline_charts` 的"未闭合块不提取"口径一致。
                 if not _fence_closed:
                     logger.warning(
-                        "章节代码块未闭合（lang=mermaid，已消费 %d 行），"
-                        "疑似生成被截断，已跳过（不渲染、不落代码）", len(code_lines))
+                        "章节代码块未闭合（lang=mermaid，已消费 %d 行），" "疑似生成被截断，已跳过（不渲染、不落代码）",
+                        len(code_lines),
+                    )
                     _pop_orphan_lead_in_block(blocks)
                     continue
                 code_text = "\n".join(code_lines).strip()
@@ -812,7 +951,8 @@ def _parse_content_blocks(content: str) -> list[dict]:
                 if not chart_type:
                     logger.info(
                         "导出跳过不可渲染的 mermaid 块（首关键字不在映射表内），"
-                        "与登记侧同口径，避免幽灵图绕过配图上限")
+                        "与登记侧同口径，避免幽灵图绕过配图上限"
+                    )
                     _pop_orphan_lead_in_block(blocks)
                     continue
                 # ✅ 图表同步生成：内联块自带代码，直接携带（不再依赖 chart_predictions 查码）
@@ -825,11 +965,17 @@ def _parse_content_blocks(content: str) -> list[dict]:
                 # ✅ 2026-10-17（文档质量报告 图号问题）：图题优先级补入**源文自写图题**
                 #    —— 若图表块**上方**紧邻段落形似「图 X-Y 题名」，升格为本图图题并
                 #    移除该段落（否则与导出统一生成的图号重号，实测「图 3-1」两处）。
-                blocks.append({"type": "chart", "chart_type": chart_type,
-                               "code": code_text, "inline": True,
-                               "title": _extract_figure_caption(blocks)
-                               or _mermaid_directive_title(code_text)
-                               or _lead_in_title(blocks)})
+                blocks.append(
+                    {
+                        "type": "chart",
+                        "chart_type": chart_type,
+                        "code": code_text,
+                        "inline": True,
+                        "title": _extract_figure_caption(blocks)
+                        or _mermaid_directive_title(code_text)
+                        or _lead_in_title(blocks),
+                    }
+                )
             elif lang.lower() == "chart-json":
                 # ✅ 图表同步生成：JSON 数据型图表块（labor/layout 等），
                 # 类型取 JSON 的 "type" 字段，载荷交渲染引擎（PIL 为其唯一路径）
@@ -850,9 +996,11 @@ def _parse_content_blocks(content: str) -> list[dict]:
                 #    文档承诺「eof/truncated 走未闭合降级」相悖（登记侧现已同口径跳 eof）。
                 if not _fence_closed:
                     logger.warning(
-                        "章节代码块未闭合（lang=chart-json，state=%s），"
-                        "疑似生成被截断，已跳过（不渲染、不落代码）", _fence_state)
+                        "章节代码块未闭合（lang=chart-json，state=%s），" "疑似生成被截断，已跳过（不渲染、不落代码）",
+                        _fence_state,
+                    )
                     _pop_orphan_lead_in_block(blocks)
+                    _note_chart_json_skip("chart_json_skipped_unclosed")
                     continue
                 code_text = "\n".join(code_lines).strip()
                 _cj_obj = None
@@ -873,23 +1021,30 @@ def _parse_content_blocks(content: str) -> list[dict]:
                         _inferred = infer_chart_type_from_payload(_cj_obj)
                         if _inferred and _inferred != _cj_type:
                             logger.info(
-                                "chart-json 的 type=%r 非法/缺失，按载荷结构推断为 %r",
-                                _cj_type or "(无)", _inferred)
+                                "chart-json 的 type=%r 非法/缺失，按载荷结构推断为 %r", _cj_type or "(无)", _inferred
+                            )
                         _cj_type = _inferred
                 if not _cj_type or _cj_type not in PIL_RENDERABLE_CHART_TYPES:
                     logger.info(
-                        "导出跳过不可渲染的 chart-json 块（type=%r），避免渲染失败占位",
-                        _cj_type or "(非JSON对象)")
+                        "导出跳过不可渲染的 chart-json 块（type=%r），避免渲染失败占位", _cj_type or "(非JSON对象)"
+                    )
                     _pop_orphan_lead_in_block(blocks)
+                    _note_chart_json_skip("chart_json_skipped_unrenderable")
                     continue
-                blocks.append({"type": "chart", "chart_type": _cj_type,
-                               "code": code_text, "inline": True,
-                               # ✅ 2026-10-17（文档质量报告 图号问题）：源文自写图题优先
-                               #    （吸收图表块上方「图 X-Y 题名」行，避免图号重号）；
-                               #    载荷 title 次之（AI 按本章语义撰写），缺失时退回引导语
-                               "title": _extract_figure_caption(blocks)
-                               or _clean_chart_title(_cj_obj.get("title"))
-                               or _lead_in_title(blocks)})
+                blocks.append(
+                    {
+                        "type": "chart",
+                        "chart_type": _cj_type,
+                        "code": code_text,
+                        "inline": True,
+                        # ✅ 2026-10-17（文档质量报告 图号问题）：源文自写图题优先
+                        #    （吸收图表块上方「图 X-Y 题名」行，避免图号重号）；
+                        #    载荷 title 次之（AI 按本章语义撰写），缺失时退回引导语
+                        "title": _extract_figure_caption(blocks)
+                        or _clean_chart_title(_cj_obj.get("title"))
+                        or _lead_in_title(blocks),
+                    }
+                )
             elif lang.lower() == "ai_image":
                 # ✅ BUG 修复（2026-09-17）：``ai_image`` 占位块此前落到通用 code 分支 ——
                 #    `{"prompt": "...", "style": "...", "title": "..."}` 被 `_add_code_block`
@@ -900,8 +1055,9 @@ def _parse_content_blocks(content: str) -> list[dict]:
                 #    未闭合的占位块说明生成被截断，提示词 JSON 大概率残缺，跳过。
                 if not _fence_closed:
                     logger.warning(
-                        "章节代码块未闭合（lang=ai_image，state=%s），"
-                        "疑似生成被截断，已跳过（不占图号）", _fence_state)
+                        "章节代码块未闭合（lang=ai_image，state=%s），" "疑似生成被截断，已跳过（不占图号）",
+                        _fence_state,
+                    )
                     _pop_orphan_lead_in_block(blocks)
                     continue
                 ai_title = ""
@@ -911,12 +1067,14 @@ def _parse_content_blocks(content: str) -> list[dict]:
                         ai_title = str(_ai_obj.get("title") or "").strip()
                 except (json.JSONDecodeError, TypeError):
                     pass
-                blocks.append({
-                    "type": "ai_image",
-                    "title": ai_title,
-                    "code": "\n".join(code_lines).strip(),
-                    "inline": True,
-                })
+                blocks.append(
+                    {
+                        "type": "ai_image",
+                        "title": ai_title,
+                        "code": "\n".join(code_lines).strip(),
+                        "inline": True,
+                    }
+                )
             else:
                 # ✅ BUG 修复（2026-09-22）：未闭合围栏经正文还原后可能已无真实代码行
                 #    （残片全部落在被还原的正文里）——此时不产出空代码块，避免交付
@@ -951,12 +1109,13 @@ def _parse_content_blocks(content: str) -> list[dict]:
                     logger.info(
                         "表格块形态重排：源文为分隔行前置/多表粘连等非规范 GFM"
                         "（%d 行 → %d 张表），已按规范序重组渲染",
-                        len(tbl_lines), len(segments))
+                        len(tbl_lines),
+                        len(segments),
+                    )
                 for seg in segments:
                     # ✅ 2026-10-17（文档质量报告 表号问题根因 B）：剥离首行首格 AI 自带的
                     #    「表 X-Y」编号前缀（表号由导出统一生成，否则「表 6-3 表 6-1 …」叠写）
-                    table_block = {"type": "table",
-                                   "lines": _normalize_table_first_cell(seg)}
+                    table_block = {"type": "table", "lines": _normalize_table_first_cell(seg)}
                     # ✅ 新增：吸收紧邻表格上方的「表 X-Y 表名」行作为表题
                     caption = _extract_table_caption(blocks)
                     if caption:
@@ -985,8 +1144,7 @@ def _parse_content_blocks(content: str) -> list[dict]:
                 _gfm = _html_table_to_gfm("\n".join(_html_lines))
                 if _gfm:
                     # ✅ 2026-10-17（根因 B）：与 GFM 表格同口径剥离首格「表 X-Y」编号前缀
-                    _tbl = {"type": "table",
-                            "lines": _normalize_table_first_cell(_gfm)}
+                    _tbl = {"type": "table", "lines": _normalize_table_first_cell(_gfm)}
                     # ✅ 与 GFM 表格同口径：吸收紧邻上方的「表 X-Y 表名」行作表题
                     _cap = _extract_table_caption(blocks)
                     if _cap:
@@ -1010,11 +1168,13 @@ def _parse_content_blocks(content: str) -> list[dict]:
             # ✅ 2026-10-17（文档质量报告 图号问题）：吸收图**上方**的「图 X-Y 题名」行
             #    作为该图图题（alt 缺失时兜底），避免源文自写图题与导出图号重号。
             _img_cap = _extract_figure_caption(blocks)
-            blocks.append({
-                "type": "image",
-                "alt": (m_img.group("alt") or "").strip() or _img_cap,
-                "url": m_img.group("url").strip(),
-            })
+            blocks.append(
+                {
+                    "type": "image",
+                    "alt": (m_img.group("alt") or "").strip() or _img_cap,
+                    "url": m_img.group("url").strip(),
+                }
+            )
             i += 1
             continue
         # 图表标记 [CHART_TYPE: xxx]（R99：半角/全角方括号与冒号皆可）
@@ -1029,9 +1189,7 @@ def _parse_content_blocks(content: str) -> list[dict]:
             #    旧实现按普通段落原样输出 ⇒ 「【CHART_TYPE：】」这类内部标记直接印进
             #    交付 DOCX（AGENTS 反复登记的「机器痕迹泄漏进成稿」同族）。此处整块跳过：
             #    该行本就无图可画，用户从成稿里看到内部标记毫无价值，只会以为方案有瑕疵。
-            logger.warning(
-                '图表标记行格式异常（疑似机器标记，已整块跳过、不原样输出）: %s',
-                _stripped[:80])
+            logger.warning("图表标记行格式异常（疑似机器标记，已整块跳过、不原样输出）: %s", _stripped[:80])
             _pop_orphan_lead_in_block(blocks)
             i += 1
             continue
@@ -1054,12 +1212,14 @@ def _parse_content_blocks(content: str) -> list[dict]:
         # 无序列表: - * • ·
         m_ul = _RE_UL_BULLET.match(stripped)
         if m_ul:
-            blocks.append({
-                "type": "list_item",
-                "ordered": False,
-                "text": m_ul.group(1).strip(),
-                "indent": indent,
-            })
+            blocks.append(
+                {
+                    "type": "list_item",
+                    "ordered": False,
+                    "text": m_ul.group(1).strip(),
+                    "indent": indent,
+                }
+            )
             i += 1
             continue
         # 有序列表: 1. / 1) / 1、 / 1） / （1） / （一）
@@ -1069,14 +1229,16 @@ def _parse_content_blocks(content: str) -> list[dict]:
         matched = _match_ordered_item(stripped)
         if matched:
             num, text, marker = matched
-            blocks.append({
-                "type": "list_item",
-                "ordered": True,
-                "num": num,
-                "text": text,
-                "indent": indent,
-                "marker": marker,
-            })
+            blocks.append(
+                {
+                    "type": "list_item",
+                    "ordered": True,
+                    "num": num,
+                    "text": text,
+                    "indent": indent,
+                    "marker": marker,
+                }
+            )
             i += 1
             continue
         blocks.append({"type": "paragraph", "text": line})
@@ -1085,7 +1247,11 @@ def _parse_content_blocks(content: str) -> list[dict]:
     #    源文自写的「图 X-Y 题名」若无对应图表块（渲染失败/压根未生成），它既不进
     #    图表清单也不占图号，却与导出为真实图表生成的图号**重号**，且成稿呈现「有题
     #    无图」。已挂图的图题在解析期被吸收；此处只删无图可挂的残留（绝不静默：记 WARNING）。
-    return _drop_dangling_figure_captions(blocks)
+    # ✅ 2026-11-05（防回归收尾双清理）：
+    #    ① _drop_dangling_figure_captions —— 删「有题无图」残留图题（既有）；
+    #    ② _drop_leadin_without_visual —— 删「有话无图」悬空引导语（新增，
+    #       覆盖"施工流程图如下："后压根无图表块的形态）。
+    return _drop_leadin_without_visual(_drop_dangling_figure_captions(_attach_trailing_figure_captions(blocks)))
 
 
 def _norm_heading_text(text: str) -> str:
@@ -1101,6 +1267,29 @@ def _norm_heading_text(text: str) -> str:
     s = _RE_INLINE_MD_NOISE.sub("", s)
     s = _RE_TITLE_TAIL_PUNCT.sub("", s)
     return _RE_WS_RUN.sub("", s)
+
+
+# ✅ 2026-11-05（"a、a、"双重前缀根因 · 第1轮报告 §4）：
+#    AI 正文的子标题自带字母序前缀（"a、吊顶与内装接口"），而 E3 降级 /
+#    编号重排路径会**重新分配**同层级序号 —— 源前缀不剥离就会叠出
+#    "a、a、吊顶与内装接口"。strip_outline_numbering 只认数字与中文数字
+#    分支，字母序（a、 / b. / c））不在其列，此处补齐为独立 helper
+#    （不改全局 _STRIP_NUMBER_RE，避免影响目录树等其他消费方）。
+_RE_SUBITEM_ORD_PREFIX = re.compile(r"^\s*[a-zA-Z]\s*[、.．)）]\s*")
+
+
+def strip_subitem_ordinal_prefix(text: str) -> str:
+    """剥离正文子标题/列表项开头残留的字母序前缀（"a、吊顶" → "吊顶"）。
+
+    仅供「编号将被程序重新分配」的路径使用（正文子标题重编号 / 列表项
+    连续重编号）；剥后为空则原样返回（标题本身就是编号时绝不吞正文）。
+    幂等。
+    """
+    s = str(text or "").strip()
+    if not s:
+        return s
+    new = _RE_SUBITEM_ORD_PREFIX.sub("", s, count=1).strip()
+    return new or s
 
 
 def _strip_duplicate_leading_title(blocks: list[dict], *titles: str) -> list[dict]:
@@ -1142,8 +1331,7 @@ def _strip_title_number(title: str) -> str:
 
 def _cn_pure_to_int(cn: str) -> int | None:
     """纯中文数字解析（"一"~"九千九百九十九"）。解析失败返回 None。"""
-    d = {"零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4,
-         "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    d = {"零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
     units = {"十": 10, "百": 100, "千": 1000}
     if not cn:
         return None
@@ -1179,9 +1367,15 @@ def _heading_punct(level: int) -> str:
     return HEADING_STYLE_CONFIG.get(level, HEADING_STYLE_CONFIG[3]).get("punctuation", " ")
 
 
-def _compute_subheading(section_prefix: str, section_level: int,
-                        md_lv: int, sub_counters: dict, pure: str,
-                        sec_id: str = "", has_children: bool = False):
+def _compute_subheading(
+    section_prefix: str,
+    section_level: int,
+    md_lv: int,
+    sub_counters: dict,
+    pure: str,
+    sec_id: str = "",
+    has_children: bool = False,
+):
     """计算正文内 Markdown 子标题的编号文本与 Heading 样式。
 
     sub_counters 为可变 dict（跨多次调用保持状态），记录本节的编号状态：
@@ -1230,10 +1424,14 @@ def _compute_subheading(section_prefix: str, section_level: int,
     # 更浅的标题回跳 → 与基准层同级，续接兄弟序列（旧实现重启计数 → 重复编号）
     if md_lv < base:
         logger.warning(
-            "正文子标题层级不齐（section=%s）：基准层级 H%d 之后出现更浅的 H%d 标题 \"%s\"，"
+            '正文子标题层级不齐（section=%s）：基准层级 H%d 之后出现更浅的 H%d 标题 "%s"，'
             "已按基准层同级续排（避免与本节已编号的子标题重复）。"
             "建议在正文中统一同级标题的 # 数量。",
-            sec_id or "?", base, md_lv, pure or "(空)")
+            sec_id or "?",
+            base,
+            md_lv,
+            pure or "(空)",
+        )
         md_lv = base
 
     # 深度跳跃收敛：不得超过「已有最深非零层级 + 1」，避免中间出现 0 段
@@ -1254,6 +1452,7 @@ def _compute_subheading(section_prefix: str, section_level: int,
     # ✅ E3：has_children=True → 降级为节内 body 命名空间
     if has_children:
         from app.services.numbering import ALPHABET
+
         if rel == 0:
             # 第一层：数字+）（1）/ 2）/ …），Heading L6。
             # rel=0 计数器沿既有的 counts[0] 递增（相对深度 0 的兄弟序列各自占一个数字）。
@@ -1326,10 +1525,13 @@ def parse_fence_line(line: str) -> tuple[str, int, str] | None:
     return _fence_parse_line(line)
 
 
-def read_fenced_block(lines: list[str], body_start: int,
-                      max_lines: int = MAX_INLINE_CODE_BLOCK_LINES,
-                      open_char: str = "`", open_len: int = 3,
-                      ) -> tuple[list[str], str, int]:
+def read_fenced_block(
+    lines: list[str],
+    body_start: int,
+    max_lines: int = MAX_INLINE_CODE_BLOCK_LINES,
+    open_char: str = "`",
+    open_len: int = 3,
+) -> tuple[list[str], str, int]:
     """从开围栏行的下一行 ``body_start`` 起读取一个代码围栏块 —— 图表三侧共用唯一扫描器。
 
     ✅ 根因修复（2026-09-23，超长闭合围栏幽灵图）：登记侧 `_scan_inline_charts` 在
@@ -1362,14 +1564,14 @@ def read_fenced_block(lines: list[str], body_start: int,
             # 命中行数上限：做**有界前视**（再扫最多 max_lines 行）寻找结束围栏。
             _j = i
             _extra = 0
-            while (_j < len(lines)
-                   and not _fence_is_close(lines[_j], open_char, open_len,
-                                           tolerant_length=True)
-                   and _extra <= max_lines):
+            while (
+                _j < len(lines)
+                and not _fence_is_close(lines[_j], open_char, open_len, tolerant_length=True)
+                and _extra <= max_lines
+            ):
                 _j += 1
                 _extra += 1
-            if _j < len(lines) and _fence_is_close(lines[_j], open_char, open_len,
-                                                   tolerant_length=True):
+            if _j < len(lines) and _fence_is_close(lines[_j], open_char, open_len, tolerant_length=True):
                 _extended = code_lines + lines[i:_j]
                 # 防误吞守卫：图表代码行（Mermaid 语句 / JSON）不会以中文句读收尾；
                 # 围栏内混入句读行 = "未闭合块吞正文"，仍按未闭合处理。
@@ -1377,12 +1579,9 @@ def read_fenced_block(lines: list[str], body_start: int,
                 #    （auto_fix 的 swallowed_prose）同一实现，不再两份字面量。
                 if not any(_looks_like_prose(ln) for ln in _extended):
                     return _extended, "recovered", _j + 1
-            _pipe_logger.warning(
-                "内联代码块超过 %d 行且窗口内无干净闭合，判为未闭合（截断点行号=%d）",
-                max_lines, i)
+            _pipe_logger.warning("内联代码块超过 %d 行且窗口内无干净闭合，判为未闭合（截断点行号=%d）", max_lines, i)
             return code_lines, "truncated", i
     # 循环正常结束：要么命中结束围栏（break 退出），要么到达 EOF。
-    if i < len(lines) and _fence_is_close(lines[i], open_char, open_len,
-                                          tolerant_length=True):
+    if i < len(lines) and _fence_is_close(lines[i], open_char, open_len, tolerant_length=True):
         return code_lines, "closed", i + 1
     return code_lines, "eof", len(lines)

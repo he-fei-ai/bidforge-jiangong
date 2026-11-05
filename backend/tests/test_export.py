@@ -7,6 +7,7 @@
 - 验证返回的 block 列表结构（type + 关键字段）
 - 边界用例：空行跳过、表格缺分隔行降级为段落、mermaid 识别为 chart
 """
+
 import pytest
 from app.routers.export import _detect_duplicate_sections, _parse_content_blocks
 
@@ -84,10 +85,12 @@ class TestParseContentBlocksHeading:
     def test_sentence_like_markdown_heading_demoted(self):
         """✅ 2026-09-19：AI 把正文句写成井号标题（句末带句读标点）→ 降级为段落"""
         blocks = _parse_content_blocks("#### 4 作业完成后清理现场，做到工完场清。")
-        assert blocks == [{
-            "type": "paragraph",
-            "text": "4 作业完成后清理现场，做到工完场清。",
-        }]
+        assert blocks == [
+            {
+                "type": "paragraph",
+                "text": "4 作业完成后清理现场，做到工完场清。",
+            }
+        ]
 
     def test_numbered_list_item_not_promoted_to_heading(self):
         """✅ 2026-09-19：编号 + 句末分号的列举条目不得被提升为标题"""
@@ -198,13 +201,22 @@ class TestParseContentBlocksTable:
         blocks = _parse_content_blocks(content)
         assert blocks[0]["type"] == "table"
 
-    def test_table_without_separator_degrades_to_paragraph(self):
-        """缺分隔行 → 降级为段落"""
+    def test_table_without_separator_synthesizes_sep_row(self):
+        """✅ 契约变更（2026-11-05 · 第1轮格式问题报告 §10）：
+
+        旧契约「缺分隔行 → 降级为段落」在第1轮成稿造成大量
+        "|测试系统|测试项目|…" 管道符残留印进交付文档（用户报障）。
+        新契约：≥2 行、行首 ``|``、**每行列数一致且 ≥2 列** → 按首行作表头
+        合成分隔行渲染为真表 —— 合成只补 GFM 语法标记，单元格内容零丢失；
+        单行 / 列数不齐仍降级（见 r104 护栏）。
+        """
         content = "| 列A | 列B |\n| 1 | 2 |"
         blocks = _parse_content_blocks(content)
-        # 两行都成为 paragraph
-        assert all(b["type"] == "paragraph" for b in blocks)
-        assert len(blocks) == 2
+        assert len(blocks) == 1 and blocks[0]["type"] == "table"
+        lines = blocks[0]["lines"]
+        assert lines[0] == "| 列A | 列B |"
+        assert lines[1] == "| --- | --- |"  # 合成分隔行
+        assert lines[2] == "| 1 | 2 |"
 
     def test_indented_table_recognized(self):
         """✅ 回归（2026-09-20）：整表缩进（前导空格）仍应识别为表格
@@ -330,16 +342,14 @@ class TestParseContentBlocksChartJsonEdge:
 
     def test_no_type_key_defaults_labor(self):
         """合法 JSON 对象但无 type 键 → 回落 labor（保留既有出图行为）"""
-        blocks = _parse_content_blocks(
-            '```chart-json\n{"phases":["a","b"],"categories":["x"],"data":[[1],[2]]}\n```')
+        blocks = _parse_content_blocks('```chart-json\n{"phases":["a","b"],"categories":["x"],"data":[[1],[2]]}\n```')
         assert len(blocks) == 1
         assert blocks[0]["type"] == "chart"
         assert blocks[0]["chart_type"] == "labor"
 
     def test_valid_layout_chart_json_renderable(self):
         """合法 layout 载荷 → 正常产出 chart 块"""
-        content = ('```chart-json\n'
-                   '{"type":"layout","zones":[{"id":"z1","name":"A","x":0,"y":0,"w":9,"h":9}]}\n```')
+        content = "```chart-json\n" '{"type":"layout","zones":[{"id":"z1","name":"A","x":0,"y":0,"w":9,"h":9}]}\n```'
         blocks = _parse_content_blocks(content)
         assert len(blocks) == 1
         assert blocks[0]["chart_type"] == "layout"
@@ -455,6 +465,7 @@ class TestParseContentBlocksList:
     def test_ordered_prefix_styles(self):
         """_ordered_prefix：按样式渲染连续序号"""
         from app.routers.export import _ordered_prefix
+
         assert _ordered_prefix(1, "ascii") == "1. "
         assert _ordered_prefix(2, "num_dun") == "2、"
         assert _ordered_prefix(3, "num_paren_r") == "3）"
@@ -473,15 +484,7 @@ class TestParseContentBlocksMixed:
 
     def test_heading_paragraph_code(self):
         """标题 + 段落 + 代码块"""
-        content = (
-            "## 施工方案\n"
-            "\n"
-            "本方案包含以下内容：\n"
-            "\n"
-            "```python\n"
-            "print('hello')\n"
-            "```"
-        )
+        content = "## 施工方案\n" "\n" "本方案包含以下内容：\n" "\n" "```python\n" "print('hello')\n" "```"
         blocks = _parse_content_blocks(content)
         assert len(blocks) == 3
         assert blocks[0]["type"] == "heading"
@@ -629,8 +632,7 @@ class TestParseContentBlocksQuoteAndRule:
         现取 alt / url 两个字段交给导出链路。
         """
         blocks = _parse_content_blocks("![平面布置](http://x/y.png)")
-        assert blocks[0] == {
-            "type": "image", "alt": "平面布置", "url": "http://x/y.png"}
+        assert blocks[0] == {"type": "image", "alt": "平面布置", "url": "http://x/y.png"}
 
     def test_image_requires_http_url(self):
         """非 http(s) 的图片行（如相对路径）仍按段落处理，不做下载"""
@@ -698,35 +700,34 @@ from app.routers.export import _content_fingerprint  # noqa: E402
 
 
 def _prep(sections, chart_fp=(), config=None, fe_codes=(), global_facts=()):
-    return {"sections": sections, "chart_fp": list(chart_fp),
-            "config": config or {}, "fe_codes": list(fe_codes),
-            "global_facts": list(global_facts)}
+    return {
+        "sections": sections,
+        "chart_fp": list(chart_fp),
+        "config": config or {},
+        "fe_codes": list(fe_codes),
+        "global_facts": list(global_facts),
+    }
 
 
 class TestContentFingerprint:
     """✅ BUG 修复：指纹必须覆盖标题 / 层级 / 父级 / 排序，否则改标题会命中旧缓存"""
 
-    SEC = [{"id": "c1", "parent_id": "", "sort_order": 0, "level": 1,
-            "title": "第一章 概述", "content": "正文"}]
+    SEC = [{"id": "c1", "parent_id": "", "sort_order": 0, "level": 1, "title": "第一章 概述", "content": "正文"}]
 
     def test_same_content_same_hash(self):
-        assert _content_fingerprint(_prep(self.SEC))[1] == \
-            _content_fingerprint(_prep([dict(self.SEC[0])]))[1]
+        assert _content_fingerprint(_prep(self.SEC))[1] == _content_fingerprint(_prep([dict(self.SEC[0])]))[1]
 
     def test_title_change_changes_hash(self):
         changed = [dict(self.SEC[0], title="第一章 总述")]
-        assert _content_fingerprint(_prep(self.SEC))[1] != \
-            _content_fingerprint(_prep(changed))[1]
+        assert _content_fingerprint(_prep(self.SEC))[1] != _content_fingerprint(_prep(changed))[1]
 
     def test_sort_order_change_changes_hash(self):
         changed = [dict(self.SEC[0], sort_order=5)]
-        assert _content_fingerprint(_prep(self.SEC))[1] != \
-            _content_fingerprint(_prep(changed))[1]
+        assert _content_fingerprint(_prep(self.SEC))[1] != _content_fingerprint(_prep(changed))[1]
 
     def test_parent_change_changes_hash(self):
         changed = [dict(self.SEC[0], parent_id="other")]
-        assert _content_fingerprint(_prep(self.SEC))[1] != \
-            _content_fingerprint(_prep(changed))[1]
+        assert _content_fingerprint(_prep(self.SEC))[1] != _content_fingerprint(_prep(changed))[1]
 
     def test_config_change_changes_config_hash(self):
         a = _content_fingerprint(_prep(self.SEC, config={"font_size": 12}))
@@ -734,18 +735,23 @@ class TestContentFingerprint:
         assert a[0] != b[0]
 
     def test_frontend_render_signature_matters(self):
-        assert _content_fingerprint(_prep(self.SEC, fe_codes=["graph TD;A-->B"]))[1] != \
-            _content_fingerprint(_prep(self.SEC))[1]
+        assert (
+            _content_fingerprint(_prep(self.SEC, fe_codes=["graph TD;A-->B"]))[1]
+            != _content_fingerprint(_prep(self.SEC))[1]
+        )
 
     def test_chart_data_matters(self):
-        assert _content_fingerprint(_prep(self.SEC, chart_fp=[("c1", "gantt", "{}")]))[1] != \
-            _content_fingerprint(_prep(self.SEC))[1]
+        assert (
+            _content_fingerprint(_prep(self.SEC, chart_fp=[("c1", "gantt", "{}")]))[1]
+            != _content_fingerprint(_prep(self.SEC))[1]
+        )
 
     def test_global_fact_change_changes_hash(self):
         """✅ 修复（2026-09-17）：事实变化必须使内容指纹改变（否则 invalidate_export_cache 形同空转）。"""
         base = _content_fingerprint(_prep(self.SEC))[1]
         with_fact = _content_fingerprint(
-            _prep(self.SEC, global_facts=[dict(gt="工期", title="项目总工期", content="180 天")]))[1]
+            _prep(self.SEC, global_facts=[dict(gt="工期", title="项目总工期", content="180 天")])
+        )[1]
         assert with_fact != base
         # global_facts 缺省时 prep 仍应可计算指纹（兼容旧调用方，不抛 KeyError）
         assert _content_fingerprint(_prep(self.SEC))[1] is not None
@@ -785,4 +791,3 @@ class TestFixStatsThreadIsolation:
         assert captured["stats"].get("formulas") == 1, captured
         # 主线程统计也不应被工作线程的 _log_fix_stats 清零
         assert _log_fix_stats().get("formulas") == 1
-

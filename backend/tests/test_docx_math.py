@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """docx_math 模块单测（pytest 风格）：LaTeX->OMML 转换与乱码清理。"""
+
 import re
 import sys
 from pathlib import Path
@@ -112,6 +113,7 @@ def test_clean_text_no_crash_on_empty():
 # 扫描与摘要
 # ---------------------------------------------------------------------------
 
+
 def test_iter_formulas_mixed():
     text = r"满足 $\frac{N}{\phi A}\le f$，且 $$\sigma = \frac{N}{A}$$ 成立"
     found = list(docx_math.iter_formulas(text))
@@ -121,7 +123,7 @@ def test_iter_formulas_mixed():
 
 
 def test_scan_summarize():
-    text = (r"$\frac{a}{b}$ 应 поверх 添加，遇到" "\ufffd" "和锟斤拷")
+    text = r"$\frac{a}{b}$ 应 поверх 添加，遇到" "\ufffd" "和锟斤拷"
     s = docx_math.scan_issues(text)
     assert s["formulas"] == 1
     assert s["cyrillic"] >= 1
@@ -166,6 +168,47 @@ def test_inline_dollar_normal_still_recognized():
     """正常行内公式（闭 $ 前非空白）行为不变。"""
     found = list(docx_math.iter_formulas(r"公式 $l_{0} = \mu h$ 成立"))
     assert len(found) == 1 and found[0][1] == r"l_{0} = \mu h"
+
+
+# ---------------------------------------------------------------------------
+# 悬空占位框 OMML 结构合法性（2026-11-03 · R175 · BUG-1）
+# ---------------------------------------------------------------------------
+# 背景：旧实现把 m:alignment / m:border 写进 m:boxPr，二者都不在 OMML
+# CT_BoxPr 的合法子元素集内（合法集且有序：opEmu → noBreak → diff → brk →
+# aln → ctrlPr）。WPS 会判定公式部件损坏。此断言锁死结构，防回退。
+_OMML_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+_OMML_BOXPR_ALLOWED = ["opEmu", "noBreak", "diff", "brk", "aln", "ctrlPr"]
+
+
+def test_dangling_placeholder_omml_schema_legal():
+    from lxml import etree
+
+    xml = docx_math.latex_to_omml("N =")
+    root = etree.fromstring(xml.encode("utf-8"))
+    boxpr = root.find(f".//{{{_OMML_NS}}}boxPr")
+    assert boxpr is not None, "悬空运算符结尾应插入 m:box 占位框"
+    tags = [etree.QName(c).localname for c in boxpr]
+    assert tags == _OMML_BOXPR_ALLOWED, f"boxPr 子元素非法/乱序: {tags}"
+    assert "待填" in xml
+
+    # python-docx 的 parse_xml 必须能解析（导出链路真实入口），否则会走兜底
+    from docx.oxml import parse_xml
+
+    assert parse_xml(xml) is not None
+
+
+def test_dangling_placeholder_display_variant_legal():
+    from lxml import etree
+
+    xml = docx_math.latex_to_omml_display("N =")
+    etree.fromstring(xml.encode("utf-8"))
+    assert "<m:oMathPara" in xml and "待填" in xml
+
+
+def test_non_dangling_formula_has_no_placeholder_box():
+    """除悬空运算符情形外不插入占位框（普通公式产物不变）。"""
+    for latex in (r"\frac{a}{b}", "N_{Qk}", r"\sum_{i=1}^{n} x_i"):
+        assert "<m:box>" not in docx_math.latex_to_omml(latex), latex
 
 
 # ---------------------------------------------------------------------------

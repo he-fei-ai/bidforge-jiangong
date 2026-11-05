@@ -1,5 +1,10 @@
 """导出预检·内容审计检测群（audit_content 与 *_detect_* 静态检测器，自 export.py 按导出阶段拆出，facade 延迟绑定，纯搬移零行为变更）"""
 
+import ast
+import hashlib
+import inspect
+import textwrap
+
 import app.routers.export as _sh  # noqa: F401 — facade 命名空间延迟绑定（monkeypatch 兼容）
 from app.services.fence_common import is_fence_close  # ✅ R168：闭合判据唯一事实源（叶子模块，无成环）
 
@@ -138,6 +143,45 @@ def _format_audit_log(audit: dict) -> str:
         return "导出前内容体检：未发现可交付性风险"
     parts = [f"{it['label']} {it['count']} 处" for it in audit["items"]]
     return "导出前内容体检：" + "；".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# ✅ R177（2026-11-04）：审计规则指纹（导出旁车的失效判据）
+# ---------------------------------------------------------------------------
+# 背景：旁车缓存了 `audit_content` 的结论，规则一改就必须让旧结论失效。
+# 此前靠人工 `_AUDIT_SIDECAR_VERSION += 1`，属于"一定会忘"的约定 —— 现改为
+# **对规则本身取指纹**，改规则/改判定代码即自动失效旧旁车。
+#
+# 覆盖面（三者缺一不可，缺任何一个都会让"改规则但指纹不变"成为可能）：
+#   1) 规则表 `_AUDIT_RULES` 的 key / 标签 / 级别 / 正则 pattern / flags；
+#      —— 经 `_sh` 读取，即 `audit_content` 实际使用的那份绑定（运行时替换同样生效）。
+#   2) `audit_content` 的 AST：聚合、去重、排序、`fences_fixed` 分支都在这里。
+#   3) `_count_unclosed_chart_fences` 与 `is_fence_close` 的 AST：未闭合围栏
+#      这条 error 级的全部判定逻辑（含闭合判据唯一事实源）。
+#
+# 为什么用 AST 而不是源码文本：注释/空行/换行风格不影响判定结果，用 AST 可避免
+# 「纯注释提交导致全量旁车失效」；docstring 仍计入 AST（宁可敏感不可漏）。
+# 代价：动态生成/被替换的可调用对象取不到源码时退化为模块名+限定名 —— 同样会
+# 让指纹变化（失效而非错配）。
+
+def _ast_digest(fn) -> str:
+    """函数 AST 的稳定文本（注释与格式不敏感；取不到源码时退化为全名）。"""
+    try:
+        src = textwrap.dedent(inspect.getsource(fn))
+    except (OSError, TypeError):
+        return f"{getattr(fn, '__module__', '')}:{getattr(fn, '__qualname__', repr(fn))}"
+    return ast.dump(ast.parse(src))
+
+
+def audit_rules_fingerprint() -> str:
+    """审计规则自身的稳定指纹（规则数据 + 判定代码），供导出旁车失效判定。"""
+    parts = ["rules"]
+    for key, label, level, rx in _sh._AUDIT_RULES:
+        parts.append(f"{key}|{label}|{level}|{rx.pattern}|{rx.flags}")
+    parts.append("code:" + _ast_digest(audit_content))
+    parts.append("code:" + _ast_digest(_count_unclosed_chart_fences))
+    parts.append("dep:" + _ast_digest(is_fence_close))
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
 def _count_child_namespace_subheadings(blocks: list[dict], section_prefix: str) -> int:

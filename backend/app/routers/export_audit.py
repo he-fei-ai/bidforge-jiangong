@@ -3,6 +3,7 @@
 纯数据处理：图表 code 兜底、编号一致性、重复章节、交叉引用陈旧检测等。
 无 DB / AI / HTTP 依赖，仅依赖正则与少量服务层纯函数。
 """
+
 import logging
 import re
 from datetime import date
@@ -21,9 +22,10 @@ from app.routers._chart_pipeline import INLINE_CHART_FENCE_LANGS
 logger = logging.getLogger("export.audit")
 
 
-def _build_chart_type_index(chart_lookup: dict[tuple[str, str], str],
-                            order_rank: dict[str, int] | None = None,
-                            ) -> dict[str, list[tuple[str, str]]]:
+def _build_chart_type_index(
+    chart_lookup: dict[tuple[str, str], str],
+    order_rank: dict[str, int] | None = None,
+) -> dict[str, list[tuple[str, str]]]:
     """构建 chart_type → [(section_id, code)] 倒排索引（P0-3：O(N²) → O(1) 命中）。
 
     语义与旧实现"遍历 chart_lookup 取第一个同类型非空 code"一致，但**补齐了
@@ -70,11 +72,14 @@ def _find_fallback_code(
     return _ex._find_fallback_code(chart_type_index, chart_type, current_section_id, order_rank)
 
 
-def _resolve_chart_code(block: dict, sec_id: str, chart_type: str,
-                        chart_lookup: dict[tuple[str, str], str],
-                        chart_type_index: dict[str, list[tuple[str, str]]],
-                        order_rank: dict[str, int] | None = None,
-                        ) -> tuple[str, str]:
+def _resolve_chart_code(
+    block: dict,
+    sec_id: str,
+    chart_type: str,
+    chart_lookup: dict[tuple[str, str], str],
+    chart_type_index: dict[str, list[tuple[str, str]]],
+    order_rank: dict[str, int] | None = None,
+) -> tuple[str, str]:
     """图表取码的**唯一出口**：``(code, borrowed_from_section_id)``。
 
     优先级：块自带内联码 > 本章节 chart_predictions 登记 > 同类型兜底借用。
@@ -88,90 +93,10 @@ def _resolve_chart_code(block: dict, sec_id: str, chart_type: str,
     return _ex._resolve_chart_code(block, sec_id, chart_type, chart_lookup, chart_type_index, order_rank)
 
 
-# ✅ 导出器逻辑版本：纳入内容指纹，使渲染/排版逻辑修复后旧缓存放缓。
-#    否则"仅代码修复、正文与配置未变"时会命中旧缓存，导出仍是修复前的文档。
-#    每次修改导出排版逻辑（标题、编号、缓存、样式等）后 +1。
-#    v6：章节自动分页 / 正文行距 / 代码块底纹 / 列表悬挂缩进 / 图题规范化为
-#        「图 X-Y 图名」/ 封面与目录后分页 / 页眉页脚首页独立 /
-#        settings.xml 声明域自动刷新 / 表格表头跨页重复 / 引用块与分隔线 /
-#        PDF 与 DOCX 共用准备逻辑（修复 PDF 丢失 JSON 数据型图表、
-#        以及中文方案名导致 PDF 导出 500）。
-#    v7：表格列宽按内容自适应（不再等宽挤压长文本）/ 图片按原始比例自适应且窄图不放大 /
-#        有序列表编号自动连续（修复 AI 跳号、重复编号）/ 封面支持项目信息表 /
-#        页边距可配置。
-#    v8：中文有序列表 `1、xxx` / `1）xxx`（AI 最常用写法，顿号/右括号后常无空格）
-#        识别为列表项 / 图题字体与字号跟随导出配置 / 导出修复统计改为线程局部
-#        （消除并发导出时的统计串号）。
-#    v9：有序列表标记样式识别与还原（（一）/（1）/ 1、/ 1）不再被拍平成 "1. "）/
-#        有序列表被无序子项打断后序号继续递增（不再从 1 重排）/
-#        表格题注「表 {章号}-{序号} 表名」（自动吸收表上方表名行，表题在表格上方）。
-#    v10：未生成的 AI 配图（```ai_image 占位块）不再作为代码块印进成稿
-#        （旧行为把绘图提示词 JSON 原样输出），改为整块跳过并告警、不占用图号。
-#    v11：图题改为「载荷 title > Mermaid title 指令 > 引导语 > 类型通用名」
-#        （修复「图 4-1 劳动力配置计划」挂在流程图正文之下）；
-#        chart-json 缺/非法 type 时按载荷结构推断（不再静默兜底 labor 导致红字占位）；
-#        未闭合图表围栏（生成截断）整块跳过，不再渲染残片或把源码印进成稿；
-#        新增导出前内容体检（占位符/HTML 残留/LaTeX 空参数/投标用语/未闭合围栏）。
-#    v12：图表渲染失败默认跳过且不占图号（交付文档不再出现红字「渲染失败」段），
-#        新增配置 chart_fail_placeholder=true 恢复 V7.0 占位形态；
-#        "不静默"承诺转移至 X-Chart-Render-Stats / X-Content-Audit / 预检 / 日志。
-#    v13：未闭合围栏的正文还原对**所有**围栏语言生效（修复未闭合 ai_image 围栏
-#        静默吞掉其后正文、未闭合 python/json 围栏把正文当代码块印进成稿）；
-#        单代码块行数上限与登记侧统一为 MAX_INLINE_CODE_BLOCK_LINES（修复 500 行
-#        vs 8000 字符口径分叉导致的幽灵图）；导出前体检改为统计全部未闭合围栏。
-#    v14：剪贴板表格残留（Excel/Word 粘贴带入的 <fcel>/<lcel>/<ucel>/<xc>/<nl>
-#        占位标记与 <table>/<tr>/<td>/<br> 等 HTML 表格标签）导出时降级为可读纯
-#        文本（修复交付文档出现「<br><br><table>&lt;fcel&gt;&lt;nl&gt;</table>」式乱码），
-#        并新增 clipboard_table 体检项供用户回改源文。
-#    v15：新增可选「内容自动改写」开关 auto_rewrite_content（默认关闭，向后兼容）：
-#        在代码围栏外把 HTML 表格转原生 Word 表格、修正 AI 英文串写、合并相邻
-#        完全重复块。仅做无损/低风险的格式与词汇修复，绝不臆造【待补充】/空章节
-#        /截断句等数据（安全敏感专项方案的底线）。
-#    v16：Mermaid 块图题优先级对齐图表需求规格（Mermaid title 指令 > 引导语 >
-#        类型通用名；chart-json 块仍为 载荷 title > 引导语），修复 v11 规格注释
-#        与 2026-09-19 实现反转的规格-实现漂移。
-#    v17：AI 配图（```ai_image 占位块）导出时自动生成真实图片并嵌入（新增开关
-#        ai_image_auto_generate，默认开启；失败占位块仍整块跳过不占图号），
-#        移除对前端「生成配图」人工按钮的依赖（图表全自动生成，无人工生图入口）。
-#    v18：图表围栏读取（_parse_content_blocks）改用与登记侧/改写侧同源的共用扫描器
-#        read_fenced_block，补齐"超长但闭合"（500<行数≤1000、首尾围栏齐全）的有界前视恢复——
-#        修复此类合法图表块被登记入库、却在导出 DOCX 里凭空消失的"幽灵图"（三侧口径分叉）。
-#    v19：编号统一（2026-09-25）：① 附录组标题改用自定义样式（大纲级别 9），
-#        不再进入 TOC 域（修复目录页「有目录项、无编号」孤条目）；② heading 块
-#        新增 src_line 增量字段（配合正文落库前子标题编号规范化，预览=落库=导出）。
-#        版式变化烤进导出缓存，必须整体失效。
-#    v20：图表版式修复（2026-09-25）：① 图片插入尺寸改为「PNG DPI 换算真实物理
-#        尺寸 + 栏宽 16cm / 高度 22cm 双上限等比缩放」（修复纵向长图被撑到
-#        16×93cm 溢出页面、AI 竖版配图同样溢出）；② 图表被跳过（渲染失败 / 去重 /
-#        无代码 / AI 配图未生成）时同步移除其孤儿引导语（修复"见下图"却无图）。
-#        版式变化烤进导出缓存，必须整体失效。
-#    v21：未闭合围栏三侧口径收口（2026-10-03 · 未闭合=不是图）：chart-json / ai_image
-#        解析分支补齐闭合检查（旧实现只看 JSON 可解析+类型白名单，EOF 截断残片
-#        照样渲染占号）；登记侧 _scan_chart_fences_full 同步跳 eof（消除幽灵登记/
-#        绕过配图上限）；解析期跳过的图表围栏同步回收孤儿引导语（与 v20 渲染期
-#        回收同口径）。版式变化烤进导出缓存，必须整体失效。
-#    v22：高风险回归修复（2026-10-05 · 两项 strict xfail 落地）：
-#        ① R-1 前端 PNG 像素指纹（fe_render_pixels）—— 同 code 不同 PNG 字节
-#           不再命中旧 DOCX 缓存；② R-2 ``prep["image_config"]`` 覆盖
-#           ``_image_generation_signature()`` —— 前端 per-request 图像模型/
-#           尺寸变化能触发缓存失效。
-#        修改影响 content_fingerprint 输出，旧缓存（v21）必须整体失效。
-#        ⚠️ R-3（章节隔离借用）曾尝试修复但已回退：test_export_fallback_dedup
-#           与 test_missing_chart_does_not_borrow_other_chapter_code 存在语义
-#           分歧（fallback 契约 vs 章节隔离契约互斥），R-3 保持 strict xfail
-#           记录该分歧，业务侧统一契约后再落地。
-_EXPORTER_VERSION = "22"
-
-
-_CHART_TYPE_MAP = {
-    "gantt": ("gantt_json", "施工进度计划"),
-    "flowchart": ("flowchart_json", "施工流程图"),
-    "architecture": ("architecture_json", "组织架构图"),
-    "labor": ("labor_json", "劳动力配置计划"),
-    "comparison": ("comparison_json", "对比图"),
-    "layout": ("layout_json", "总平面布置图"),
-    "timeline": ("timeline_json", "关键里程碑时间线"),
-}
+# ✅ R175（2026-11-03，技术债 T1）：本文件旧有的 ``_EXPORTER_VERSION = "22"`` 是 export.py
+#    版本号的第二副本（全仓零引用）—— 已删除；版本号唯一事实源在
+#    ``app/routers/export.py::_EXPORTER_VERSION``（当前 v23）。本文件是纯审计工具，
+#    不参与导出缓存版本计算，因此不再持有任何版本号常量。
 
 
 # ---------------------------------------------------------------------------
@@ -182,22 +107,42 @@ _CHART_TYPE_MAP = {
 # ---------------------------------------------------------------------------
 _AUDIT_RULES: tuple[tuple[str, str, str, re.Pattern], ...] = (
     # (key, 人类可读名, 级别, 正则)
-    ("placeholder", "数据占位符（××/xx/【待补充】）", "warn",
-     re.compile(r"××+|(?<![A-Za-z0-9])[xX]{2}(?![A-Za-z0-9])|【待补充")),
-    ("html_tag", "HTML 标签残留（应使用 GFM 表格）", "error",
-     re.compile(r"</?(?:table|thead|tbody|tr|td|th|div|span|p|br)\b[^>]*>", re.I)),
+    (
+        "placeholder",
+        "数据占位符（××/xx/【待补充】）",
+        "warn",
+        re.compile(r"××+|(?<![A-Za-z0-9])[xX]{2}(?![A-Za-z0-9])|【待补充"),
+    ),
+    (
+        "html_tag",
+        "HTML 标签残留（应使用 GFM 表格）",
+        "error",
+        re.compile(r"</?(?:table|thead|tbody|tr|td|th|div|span|p|br)\b[^>]*>", re.I),
+    ),
     # ✅ 新增：Excel/Word 剪贴板表格占位标记（<fcel>/<lcel>/<ucel>/<xc>/<nl>）——
     #    导出渲染时已降级为纯文本（不再印进成稿），此处仍计入体检供用户回改源文。
-    ("clipboard_table", "剪贴板表格残留标记（粘贴表格带入，应改用 GFM 表格）", "error",
-     re.compile(r"</?(?:fcel|lcel|ucel|xc|nl)\s*/?>", re.I)),
+    (
+        "clipboard_table",
+        "剪贴板表格残留标记（粘贴表格带入，应改用 GFM 表格）",
+        "error",
+        re.compile(r"</?(?:fcel|lcel|ucel|xc|nl)\s*/?>", re.I),
+    ),
     ("latex_square", "LaTeX 空参数占位 \\square", "error", re.compile(r"\\square")),
-    ("bidding_terms", "投标场景用语（专项方案不应引用）", "warn",
-     re.compile(r"招标文件|投标文件|评标办法|评分标准|废标条件|投标须知")),
+    (
+        "bidding_terms",
+        "投标场景用语（专项方案不应引用）",
+        "warn",
+        re.compile(r"招标文件|投标文件|评标办法|评分标准|废标条件|投标须知"),
+    ),
     # ✅ R50 新增（2026-10-07）：中英混杂 —— 中文句子里夹连续两个小写英文单词
     #    （如"签署 material acceptance records 后方可"）。规范编号（GB/JGJ 大写）、
     #    化学式（HCHO）、单个英文术语不会误伤。命中即提示用户改回中文。
-    ("mixed_language", "中英混杂（中文段落中夹英文短语）", "warn",
-     re.compile(r"[\u4e00-\u9fa5]\s*[a-z]{4,}(?:\s+[a-z]{3,})+\s*[\u4e00-\u9fa5]")),
+    (
+        "mixed_language",
+        "中英混杂（中文段落中夹英文短语）",
+        "warn",
+        re.compile(r"[\u4e00-\u9fa5]\s*[a-z]{4,}(?:\s+[a-z]{3,})+\s*[\u4e00-\u9fa5]"),
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -232,8 +177,7 @@ _STANDARD_TITLES: dict[str, str] = {
 }
 #: 「编号 + 《名称》」紧跟形态才做配对校验——编号单独出现不校验
 #: （读者自会核对，误报面大）
-_STANDARD_PAIR_RE = re.compile(
-    r"\b((?:GB|JGJ|CJJ)\s*\d{2,5})\s*[《〈]([^》〉\n]{4,60})[》〉]")
+_STANDARD_PAIR_RE = re.compile(r"\b((?:GB|JGJ|CJJ)\s*\d{2,5})\s*[《〈]([^》〉\n]{4,60})[》〉]")
 
 #: 同义术语组（报告实证 4 组；「安全生产」组刻意剔除——正式场合两种
 #: 表述各有语义侧重，不算混用）
@@ -248,8 +192,7 @@ _TERMINOLOGY_MIX_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 #: 工程文档里它是正常表述，检测会满屏误报）
 _FILLER_PATTERNS: tuple[tuple[str, str], ...] = (
     ("高度重视", r"高度重视[^。；\n]{0,12}(?:工作|落实|管理|安全|质量)"),
-    ("进一步提高", r"进一步(?:提高|加强|完善|强化)[^。；\n]{0,10}"
-                   r"(?:水平|能力|管理|工作)"),
+    ("进一步提高", r"进一步(?:提高|加强|完善|强化)[^。；\n]{0,10}" r"(?:水平|能力|管理|工作)"),
     ("切实做好", r"切实(?:做好|加强|落实)[^。；\n]{0,12}"),
     ("奠定基础", r"为[^。；\n]{2,20}奠定(?:了)?(?:坚实|良好)?基础"),
     ("确保万无一失", r"确保[^。；\n]{0,10}万无一失"),
@@ -276,16 +219,19 @@ def _detect_standard_pairing(content: str) -> dict | None:
             found.append(f"{m.group(1)}《{title}》应为《{expected}》")
     if not found:
         return None
-    return {"key": "standard_pairing", "level": "error", "count": len(found),
-            "label": "规范编号与名称不配对（引用错规范，须人工复核）",
-            "sections": found[:3]}
+    return {
+        "key": "standard_pairing",
+        "level": "error",
+        "count": len(found),
+        "label": "规范编号与名称不配对（引用错规范，须人工复核）",
+        "sections": found[:3],
+    }
 
 
 def _norm_ref_text(text: str) -> str:
     """规范名称归一（去空白/标点、全半角统一），供配对比对。"""
     s = str(text or "")
-    s = (s.replace("（", "(").replace("）", ")")
-          .replace("，", ",").replace("、", "").replace("　", ""))
+    s = s.replace("（", "(").replace("）", ")").replace("，", ",").replace("、", "").replace("　", "")
     return re.sub(r"[\s()（）,，.-]+", "", s)
 
 
@@ -298,9 +244,13 @@ def _detect_terminology_mix(content: str) -> dict | None:
             mixed.append(f"{canonical}: " + " / ".join(used))
     if not mixed:
         return None
-    return {"key": "terminology_mix", "level": "info", "count": len(mixed),
-            "label": "同一对象多种叫法（建议全文统一术语）",
-            "sections": mixed[:3]}
+    return {
+        "key": "terminology_mix",
+        "level": "info",
+        "count": len(mixed),
+        "label": "同一对象多种叫法（建议全文统一术语）",
+        "sections": mixed[:3],
+    }
 
 
 def _detect_filler_phrases(content: str) -> dict | None:
@@ -315,9 +265,13 @@ def _detect_filler_phrases(content: str) -> dict | None:
                 samples.append(f"{label}×{cnt}")
     if not total:
         return None
-    return {"key": "filler_phrase", "level": "info", "count": total,
-            "label": "空话套话句式（建议精简为具体措施）",
-            "sections": samples}
+    return {
+        "key": "filler_phrase",
+        "level": "info",
+        "count": total,
+        "label": "空话套话句式（建议精简为具体措施）",
+        "sections": samples,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -329,14 +283,13 @@ def _detect_filler_phrases(content: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 #: 工期声明（只吃「工期/日历天」语境，避免「养护 28 天」「龄期 7 天」误命中）。
-_SCHEDULE_TOTAL_RE = re.compile(
-    r"(?:总工期|建设工期|合同工期|工期)[^，。；\n]{0,8}?(\d{2,4})\s*(?:日历)?天")
+_SCHEDULE_TOTAL_RE = re.compile(r"(?:总工期|建设工期|合同工期|工期)[^，。；\n]{0,8}?(\d{2,4})\s*(?:日历)?天")
 
 #: 里程碑「名称 日期」：名称 ≤16 字（含中文括号/±/斜杠），日期为
 #: 20xx-x-x / 20xx年x月x日 / 20xx.x.x 三种形态。
 _MILESTONE_RE = re.compile(
-    r"([\u4e00-\u9fa5A-Za-z0-9±（）()\s/、－-]{1,16})"
-    r"(20\d{2}[-年/.]\d{1,2}[-月/.]\d{1,2}日?)")
+    r"([\u4e00-\u9fa5A-Za-z0-9±（）()\s/、－-]{1,16})" r"(20\d{2}[-年/.]\d{1,2}[-月/.]\d{1,2}日?)"
+)
 #: 二次结构 / 外架拆除 工序逻辑参照（二次结构及抹灰须在外部脚手架拆除前完成）。
 _MILESTONE_SECOND_STRUCTURE = ("二次结构", "砌体", "抹灰")
 _MILESTONE_SCAFFOLD_DOWN = ("外架", "脚手架拆除", "架体拆除", "塔吊拆除")
@@ -371,9 +324,13 @@ def _detect_schedule_conflicts(content: str) -> dict | None:
     if len(found) <= 1:
         return None
     vals = sorted(found)
-    return {"key": "schedule_conflict", "level": "error", "count": len(vals),
-            "label": "工期声明自相矛盾（正文出现多个不同总工期，须统一为权威值）",
-            "sections": [f"总工期声明：{v}日历天" for v in vals]}
+    return {
+        "key": "schedule_conflict",
+        "level": "error",
+        "count": len(vals),
+        "label": "工期声明自相矛盾（正文出现多个不同总工期，须统一为权威值）",
+        "sections": [f"总工期声明：{v}日历天" for v in vals],
+    }
 
 
 def _detect_milestone_issues(content: str) -> dict | None:
@@ -403,19 +360,21 @@ def _detect_milestone_issues(content: str) -> dict | None:
         if 0 <= gap < 7:
             issues.append(f"{hits[i][0]}→{hits[i + 1][0]} 间隔仅 {gap} 天，过短")
     # ② 工序逻辑：二次结构须在外部脚手架拆除前
-    sec = next((d for n, d in hits
-                if any(k in n for k in _MILESTONE_SECOND_STRUCTURE)), None)
-    demol = next((d for n, d in hits
-                  if any(k in n for k in _MILESTONE_SCAFFOLD_DOWN)), None)
+    sec = next((d for n, d in hits if any(k in n for k in _MILESTONE_SECOND_STRUCTURE)), None)
+    demol = next((d for n, d in hits if any(k in n for k in _MILESTONE_SCAFFOLD_DOWN)), None)
     if sec and demol and sec > demol:
-        issues.append("二次结构/抹灰完成时间晚于外架或塔吊拆除，不合常理"
-                      "（应在此之前完成）")
+        issues.append("二次结构/抹灰完成时间晚于外架或塔吊拆除，不合常理" "（应在此之前完成）")
 
     if not issues:
         return None
-    return {"key": "milestone_issue", "level": "warn", "count": len(issues),
-            "label": "里程碑排期不合理（间隔/工序逻辑，建议核对）",
-            "sections": issues[:3]}
+    return {
+        "key": "milestone_issue",
+        "level": "warn",
+        "count": len(issues),
+        "label": "里程碑排期不合理（间隔/工序逻辑，建议核对）",
+        "sections": issues[:3],
+    }
+
 
 # 图表家族围栏（未闭合即视为生成被截断，残片渲染必失败）——
 # 统一定义在 _chart_pipeline.INLINE_CHART_FENCE_LANGS，避免两端分叉。
@@ -452,18 +411,22 @@ def audit_content(sections: list[dict]) -> dict:
         for key, label, level, rx in _AUDIT_RULES:
             found = len(rx.findall(content))
             if found:
-                slot = hits.setdefault(key, {"key": key, "label": label,
-                                             "level": level, "count": 0,
-                                             "sections": []})
+                slot = hits.setdefault(key, {"key": key, "label": label, "level": level, "count": 0, "sections": []})
                 slot["count"] += found
                 if len(slot["sections"]) < 3 and title not in slot["sections"]:
                     slot["sections"].append(title)
         unclosed = _count_unclosed_chart_fences(content)
         if unclosed:
-            slot = hits.setdefault("unclosed_fence", {
-                "key": "unclosed_fence",
-                "label": "代码围栏未闭合（生成疑似被截断，其后正文有丢失风险）",
-                "level": "error", "count": 0, "sections": []})
+            slot = hits.setdefault(
+                "unclosed_fence",
+                {
+                    "key": "unclosed_fence",
+                    "label": "代码围栏未闭合（生成疑似被截断，其后正文有丢失风险）",
+                    "level": "error",
+                    "count": 0,
+                    "sections": [],
+                },
+            )
             slot["count"] += unclosed
             if len(slot["sections"]) < 3 and title not in slot["sections"]:
                 slot["sections"].append(title)
@@ -473,15 +436,16 @@ def audit_content(sections: list[dict]) -> dict:
     #    （术语混用/规范配对需全文比照：跨章共现单章检不出）。检测型：
     #    只计数定位、绝不改写正文（AGENTS.md §3.1.6）。
     _full_text = "\n".join(str(sec.get("content") or "") for sec in sections)
-    for _probe in (_detect_standard_pairing(_full_text),
-                   _detect_terminology_mix(_full_text),
-                   _detect_filler_phrases(_full_text),
-                   _detect_schedule_conflicts(_full_text),
-                   _detect_milestone_issues(_full_text)):
+    for _probe in (
+        _detect_standard_pairing(_full_text),
+        _detect_terminology_mix(_full_text),
+        _detect_filler_phrases(_full_text),
+        _detect_schedule_conflicts(_full_text),
+        _detect_milestone_issues(_full_text),
+    ):
         if _probe:
             hits[_probe["key"]] = _probe
-    items = sorted(hits.values(),
-                   key=lambda x: (order.get(x["level"], 9), -x["count"]))
+    items = sorted(hits.values(), key=lambda x: (order.get(x["level"], 9), -x["count"]))
     return {"total": sum(x["count"] for x in items), "items": items}
 
 
@@ -567,8 +531,8 @@ _STALE_TBL_REF_RE = re.compile(r"表\s*(\d+-\d+)")
 # 节号引用正则：「第X节」/「第X.X节」/「见X.X节」/「参考X」等
 # 捕获组 1=「第…节」里的纯数字路径；组 2=「见/参考/根据」引导的数字路径
 _STALE_SEC_REF_RE = re.compile(
-    r"第\s*(\d+(?:\.\d+)*)\s*节"
-    r"|(?:见|参考|根据|详见)\s*(?:第)?(\d+(?:\.\d+)+)\s*(?:节|章节)?")
+    r"第\s*(\d+(?:\.\d+)*)\s*节" r"|(?:见|参考|根据|详见)\s*(?:第)?(\d+(?:\.\d+)+)\s*(?:节|章节)?"
+)
 
 
 def _detect_body_subheading_namespace_conflict(sections: list[dict]) -> list[dict]:
@@ -584,9 +548,7 @@ def _detect_body_subheading_namespace_conflict(sections: list[dict]) -> list[dic
     return _ex._detect_body_subheading_namespace_conflict(sections)
 
 
-def _detect_stale_cross_references(
-        sections: list[dict],
-        real_nums: dict[str, set[str]] | None = None) -> list[dict]:
+def _detect_stale_cross_references(sections: list[dict], real_nums: dict[str, set[str]] | None = None) -> list[dict]:
     """预检：正文硬编码的图号/表号/节号与真实分配集合不一致时，报告 stale 引用。
 
     ✅ E6 Tier 1（2026-09-25 · DLV-14）：目录重排/章节增删后，正文里手写的
@@ -615,6 +577,7 @@ def _detect_stale_cross_references(
 # 编号前缀提取（从 export.py 拆出，供 audit 与正文编号共用）
 # ---------------------------------------------------------------------------
 
+
 def _section_number_prefix(full_title: str) -> str:
     """从已格式化的章节标题中提取编号前缀，用于正文内子标题的嵌套编号。
 
@@ -635,6 +598,3 @@ def _cn_numeral_to_int(cn: str) -> str:
     解析失败时返回原字符串（不做静默吞错）。
     """
     return _ex._cn_numeral_to_int(cn)
-
-
-

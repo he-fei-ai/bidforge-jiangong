@@ -1,4 +1,5 @@
 """DOCX 导出路由（增强版 — 图表渲染 + 封面 + 目录 + 标题编号）"""
+
 import asyncio
 import base64
 import hashlib
@@ -9,6 +10,7 @@ import os
 import re
 import socket
 import threading
+import time
 import uuid
 from datetime import datetime
 from io import BytesIO
@@ -17,7 +19,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from app.config import EXPORTS_DIR
 from app.db import get_db, read_db, retry_db_op
@@ -54,6 +56,7 @@ from app.services.placeholder_inventory import (
     build_report_for_scheme,
     build_rerun_plan,
 )
+from app.services.placeholder_sections import is_placeholder_section
 
 logger = logging.getLogger("export")
 router = APIRouter(prefix="/api/v1/schemes/{scheme_id}/export", tags=["export"])
@@ -109,8 +112,7 @@ async def _db_fetch_all(cur, *, what: str, strict: bool = False) -> list:
         return list(await cur.fetchall())
     except Exception as e:  # pragma: no cover - 连接层异常
         if strict:
-            logger.warning("导出：读取 %s 失败（严格读模式 → 抛 DBReadError）: %s",
-                           what, e)
+            logger.warning("导出：读取 %s 失败（严格读模式 → 抛 DBReadError）: %s", what, e)
             raise DBReadError(str(e)) from e
         logger.warning("导出：读取 %s 失败（降级为空结果集）: %s", what, e)
         return []
@@ -134,8 +136,7 @@ async def _db_fetch_one(cur, *, what: str, strict: bool = False):
         return await cur.fetchone()
     except Exception as e:  # pragma: no cover - 连接层异常
         if strict:
-            logger.warning("导出：读取 %s 失败（严格读模式 → 抛 DBReadError）: %s",
-                           what, e)
+            logger.warning("导出：读取 %s 失败（严格读模式 → 抛 DBReadError）: %s", what, e)
             raise DBReadError(str(e)) from e
         logger.warning("导出：读取 %s 失败（降级为无行）: %s", what, e)
         return None
@@ -168,8 +169,7 @@ async def _db_exec(db, sql: str, params=(), *, what: str) -> bool:
     语义错误原样上抛）；SQLite 的 locked 在语句获取写锁**前**抛出、首次尝试
     必未落库，INSERT（uuid 主键）/UPDATE/DELETE 重放均无重复副作用。
     """
-    cur = await retry_db_op(lambda: db.execute(sql, params),
-                            max_retries=4, base_delay=0.1, jitter=0.05)
+    cur = await retry_db_op(lambda: db.execute(sql, params), max_retries=4, base_delay=0.1, jitter=0.05)
     if cur is None:
         logger.warning("导出：写操作 %s 未生效（db.execute 返回 None）", what)
         return False
@@ -180,9 +180,36 @@ def _norm_code(code: str) -> str:
     """规范化 mermaid 代码用于前后端匹配（折叠空白差异）"""
     return " ".join(str(code).split())
 
-def _build_chart_type_index(chart_lookup: dict[tuple[str, str], str],
-                            order_rank: dict[str, int] | None = None,
-                            ) -> dict[str, list[tuple[str, str]]]:
+
+def _compute_doc_order_rank(roots: list, children_map: dict) -> dict[str, int]:
+    """按**文档实际渲染顺序**（同级同键排序 + 深度优先）计算章节 rank。
+
+    ✅ RISK-175-01（R175）：预渲染段 ``_prepare_export_render`` 此前用
+    ``enumerate(sections)``（SQL 扁平序 ``ORDER BY sort_order, level, id``），
+    而写侧 ``_build_docx_sync._rank_order`` 用 DFS 序。父子章节存在时两种
+    口径不同 → 跨章「兜底借图」按错误 rank 选来源，图表被插到错误章节的
+    位置（看起来像"图跑到了下一节"）。现两处共用本函数，口径唯一。
+
+    对**全为根章节**的方案（绝大多数），扁平序与 DFS 序相同 → 产物不变；
+    仅含父子层级时，借图来源可能从"SQL 序前一章"改为"文档序前一章"，
+    即修正为正确的文档顺序。
+    """
+    rank: dict[str, int] = {}
+
+    def _walk(secs):
+        for s in sorted(secs, key=_section_sort_key):
+            if s["id"] not in rank:
+                rank[s["id"]] = len(rank)
+            _walk(children_map.get(s["id"], []))
+
+    _walk(roots)
+    return rank
+
+
+def _build_chart_type_index(
+    chart_lookup: dict[tuple[str, str], str],
+    order_rank: dict[str, int] | None = None,
+) -> dict[str, list[tuple[str, str]]]:
     """构建 chart_type → [(section_id, code)] 倒排索引（P0-3：O(N²) → O(1) 命中）。
 
     语义与旧实现"遍历 chart_lookup 取第一个同类型非空 code"一致，但**补齐了
@@ -249,20 +276,25 @@ def _find_fallback_code(
             if me is not None:
                 # 优先取「排在自己之前且距离最近」的同类图；都排在自己之后时
                 # 取全局第一张（保持"有图总比没图好"的兜底语义）
-                before = [(abs(me - order_rank.get(sid, me)), i, code)
-                          for i, (sid, code) in enumerate(bucket)
-                          if order_rank.get(sid) is not None and order_rank[sid] < me]
+                before = [
+                    (abs(me - order_rank.get(sid, me)), i, code)
+                    for i, (sid, code) in enumerate(bucket)
+                    if order_rank.get(sid) is not None and order_rank[sid] < me
+                ]
                 if before:
                     before.sort()
                     return before[0][2], bucket[before[0][1]][0]
     return bucket[0][1], bucket[0][0]
 
 
-def _resolve_chart_code(block: dict, sec_id: str, chart_type: str,
-                        chart_lookup: dict[tuple[str, str], str],
-                        chart_type_index: dict[str, list[tuple[str, str]]],
-                        order_rank: dict[str, int] | None = None,
-                        ) -> tuple[str, str]:
+def _resolve_chart_code(
+    block: dict,
+    sec_id: str,
+    chart_type: str,
+    chart_lookup: dict[tuple[str, str], str],
+    chart_type_index: dict[str, list[tuple[str, str]]],
+    order_rank: dict[str, int] | None = None,
+) -> tuple[str, str]:
     """图表取码的**唯一出口**：``(code, borrowed_from_section_id)``。
 
     优先级：块自带内联码 > 本章节 chart_predictions 登记 > 同类型兜底借用。
@@ -392,11 +424,9 @@ from app.routers._export_issue_scan import (  # noqa: F401,E402,I001 — 拆分�
     _section_sort_key,
     _stored_outline_number,
     audit_content,
+    audit_rules_fingerprint,
     collect_figure_table_number_superset,
 )
-
-
-
 
 
 @router.post("/check")
@@ -416,12 +446,33 @@ async def export_check(scheme_id: str, db=Depends(get_db)):
     现在两处共用同一份判定逻辑与同一套规则词表（见 ``export_issues_to_findings``），
     导出页能直接看到总检结论，总检也能算进导出预检的问题。
     """
-    result = await collect_export_issues(scheme_id, db)
+    # ✅ B1-1（R176 · 2026-11-04）：预检不得再用「空结果集」冒充「0 问题」。
+    #    旧实现调 ``collect_export_issues()`` 未传 ``strict_read``，DB 读失败被
+    #    ``_db_fetch_all(strict=False)`` 降级为空集 → 页面渲染「预检通过」。
+    #    现改 fail-fast：读失败 → 503 + 机读字段 ``read_degraded``，使「确实无问题」
+    #    （200 且 ``read_degraded=false``）与「没读到数据」（503 且 ``read_degraded=true``）
+    #    在响应体层面可区分；``Retry-After`` 给出可行动的重试建议。
+    try:
+        result = await collect_export_issues(scheme_id, db, strict_read=True)
+    except DBReadError as e:
+        logger.warning("导出预检读取失败（fail-fast，不返回假通过）: scheme=%s err=%s", scheme_id[:8], e)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": ("导出预检未能读取方案数据（数据库连接异常），" "本次结果不代表「无问题」，请稍后重试"),
+                "error": "export_check_read_failed",
+                "read_degraded": True,
+                "retry_after": 5,
+            },
+            headers={"Retry-After": "5"},
+        )
+    # ✅ B1-1：成功路径显式回写「数据完整」——前端据此区分两种语义，
+    #    缺省 False 对既有消费方零影响（加法字段）。
+    result["read_degraded"] = False
     result["preflight_summary"] = await _readiness_preflight_summary(scheme_id, db)
     # ✅ 新增（2026-09-24）：占位符基线落库（监控旁路，失败不阻断预检返回）。
     #    每次预检落一行快照，GET /export/placeholder-history 供趋势对比。
-    await _record_placeholder_baseline(
-        scheme_id, result.get("placeholder_report") or {}, db)
+    await _record_placeholder_baseline(scheme_id, result.get("placeholder_report") or {}, db)
     return result
 
 
@@ -438,8 +489,7 @@ async def placeholder_report(scheme_id: str, db=Depends(get_db)):
     三类占位口径见 ``services/placeholder_inventory.py`` 模块注释。
     只扫描、不篡改正文 —— 补录由用户完成，属「人工补录兜底」层。
     """
-    return await build_report_for_scheme(scheme_id, db,
-                                         occurrence_cap=DEFAULT_OCCURRENCE_CAP)
+    return await build_report_for_scheme(scheme_id, db, occurrence_cap=DEFAULT_OCCURRENCE_CAP)
 
 
 @router.get("/placeholder-rerun-plan")
@@ -483,14 +533,18 @@ async def _record_placeholder_baseline(scheme_id: str, report: dict, db) -> None
             "INSERT INTO placeholder_baselines (id, scheme_id, total,"
             " formatted_total, bare_total, fuzzy_total, field_count, section_count)"
             " VALUES (?,?,?,?,?,?,?,?)",
-            (str(uuid.uuid4()), scheme_id,
-             int(report.get("total") or 0),
-             int(report.get("formatted_total") or 0),
-             int(report.get("bare_total") or 0),
-             int(report.get("fuzzy_total") or 0),
-             int(report.get("field_count") or 0),
-             int(report.get("section_count") or 0)),
-            what="placeholder_baselines 写入")
+            (
+                str(uuid.uuid4()),
+                scheme_id,
+                int(report.get("total") or 0),
+                int(report.get("formatted_total") or 0),
+                int(report.get("bare_total") or 0),
+                int(report.get("fuzzy_total") or 0),
+                int(report.get("field_count") or 0),
+                int(report.get("section_count") or 0),
+            ),
+            what="placeholder_baselines 写入",
+        )
         # 写入端裁剪：只保留最近 N 行（created_at 秒级精度不足，按 rowid 兜底）
         # ⚠️ 仅在 INSERT 生效后才裁剪：否则「写失败 + 裁剪成功」会把历史基线删掉
         # 而本次快照根本没进去，历史趋势被单次失败污染。
@@ -501,11 +555,11 @@ async def _record_placeholder_baseline(scheme_id: str, report: dict, db) -> None
                 " SELECT id FROM placeholder_baselines WHERE scheme_id=?"
                 " ORDER BY created_at DESC, rowid DESC LIMIT ?)",
                 (scheme_id, scheme_id, _PLACEHOLDER_BASELINE_KEEP),
-                what="placeholder_baselines 裁剪")
+                what="placeholder_baselines 裁剪",
+            )
         await db.commit()
     except Exception as e:
-        logger.warning("placeholder_baselines 写入失败（不影响预检返回）: scheme=%s err=%s",
-                       scheme_id, e)
+        logger.warning("placeholder_baselines 写入失败（不影响预检返回）: scheme=%s err=%s", scheme_id, e)
         try:
             await db.rollback()
         except Exception as _re:
@@ -524,17 +578,16 @@ async def placeholder_history(scheme_id: str, limit: int = 20, db=Depends(get_db
         "SELECT total, formatted_total, bare_total, fuzzy_total,"
         " field_count, section_count, created_at FROM placeholder_baselines"
         " WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?",
-        (scheme_id, limit))
+        (scheme_id, limit),
+    )
     # ✅ R13 守卫（2026-09-30 引入，2026-10-06 收敛到 _db_fetch_all 单一出口）：
     #    全局单连接下 db.execute 可能返回 None（连接/事务异常）。本端点是只读
     #    监控旁路，降级为空历史即可，不应 500。
-    rows = [dict(r) for r in await _db_fetch_all(
-        cur, what="placeholder_history")]
+    rows = [dict(r) for r in await _db_fetch_all(cur, what="placeholder_history")]
     return {"scheme_id": scheme_id, "history": rows, "keep": _PLACEHOLDER_BASELINE_KEEP}
 
 
-async def collect_export_issues(scheme_id: str, db, *,
-                                strict_read: bool = False) -> dict:
+async def collect_export_issues(scheme_id: str, db, *, strict_read: bool = False) -> dict:
     """导出预检的核心计算（**不写库**，可被多处复用）。
 
     ✅ G1：此前本计算内联在 ``export_check`` 路由里，就绪度总检无法复用，
@@ -544,10 +597,13 @@ async def collect_export_issues(scheme_id: str, db, *,
 
     Args:
         strict_read: **加法式**开关，缺省 ``False`` 时全部查询沿用 fail-soft
-            （读失败降级为空结果集），**导出页行为逐字不变**。
+            （读失败降级为空结果集）。
             总检侧传 ``True``：把「查询失败」与「确实无行」区分开，抛
             ``DBReadError`` 让 ``compliance._readiness_overview_compute``
             的 ``except`` 真正生效。
+            ✅ B1-1（R176 · 2026-11-04）：导出页 ``export_check`` 也已改为传
+            ``True`` 并捕获 ``DBReadError`` 返回 503（``read_degraded=true``）——
+            旧行为「导出页逐字不变」会把读失败渲染成「预检通过」，属假绿。
 
     ✅ BUG 修复（2026-10-17 · 正文/审核联合审计）：四路查询此前一律
     ``_db_fetch_all(strict=False)`` —— DB 瞬时故障时**静默返回空结果集**，
@@ -569,9 +625,10 @@ async def collect_export_issues(scheme_id: str, db, *,
     cur = await db.execute(
         "SELECT id, parent_id, level, sort_order, title, status, review_status, "
         "word_count, content, outline_json FROM sections"
-        " WHERE scheme_id=? ORDER BY sort_order, level, id", (scheme_id,))
-    sections = [dict(r) for r in await _db_fetch_all(
-        cur, what="collect_export_issues:sections", strict=strict_read)]
+        " WHERE scheme_id=? ORDER BY sort_order, level, id",
+        (scheme_id,),
+    )
+    sections = [dict(r) for r in await _db_fetch_all(cur, what="collect_export_issues:sections", strict=strict_read)]
     section_ids = {s["id"] for s in sections}
     parent_ids = {s["parent_id"] for s in sections if s.get("parent_id")}
     issues = []
@@ -583,55 +640,64 @@ async def collect_export_issues(scheme_id: str, db, *,
     #    现与 preflight 共用 services.preflight_engine.content_coverage_stats
     #    唯一实现（懒导入规避模块级依赖，与本函数既有 services 用法同手法）。
     from app.services.preflight_engine import content_coverage_stats
+
     _cov = content_coverage_stats(sections)
     for s in sections:
         has_children = s["id"] in parent_ids
         wc = s.get("word_count") or 0
         total_words += wc
+        # ✅ 2026-11-05（目录占位章节）：status=placeholder 的章节按规则只登记
+        #    「另行补充内容」，word_count 已置 0；不属于漏生成/低字数/审核缺失，
+        #    也不参与导出预检告警（否则会把规则性跳过误报成内容缺失）。
+        if is_placeholder_section(s):
+            continue
         # 孤立节点：parent_id 非空但指向不存在的父节点
         pid = s.get("parent_id", "")
         if pid and pid not in section_ids:
-            issues.append({"type": "orphan_node", "section_id": s["id"],
-                           "title": s["title"], "parent_id": pid})
+            issues.append({"type": "orphan_node", "section_id": s["id"], "title": s["title"], "parent_id": pid})
         # 空叶子章节（无内容且无子女；✅ R98 判据补 strip，与共用口径对齐
         #    「content 只有空白也算空」）
         if not (s.get("content") or "").strip() and not has_children:
             issues.append({"type": "empty_section", "section_id": s["id"], "title": s["title"]})
         # 状态为 empty 但实际有内容（数据不一致）
         if s.get("status") == "empty" and (s.get("content") or wc > 0):
-            issues.append({"type": "status_inconsistent", "section_id": s["id"],
-                           "title": s["title"], "detail": "status=empty 但有内容"})
+            issues.append(
+                {
+                    "type": "status_inconsistent",
+                    "section_id": s["id"],
+                    "title": s["title"],
+                    "detail": "status=empty 但有内容",
+                }
+            )
         # 低字数叶子章节（可能生成不完整）
         if not has_children and 0 < wc < 100:
-            issues.append({"type": "low_word_count", "section_id": s["id"],
-                           "title": s["title"], "word_count": wc})
+            issues.append({"type": "low_word_count", "section_id": s["id"], "title": s["title"], "word_count": wc})
     # 图表未生成检查
-    cur = await db.execute(
-        "SELECT chart_type, status FROM chart_predictions WHERE scheme_id=?", (scheme_id,))
-    chart_rows = await _db_fetch_all(
-        cur, what="collect_export_issues:chart_predictions", strict=strict_read)
+    cur = await db.execute("SELECT chart_type, status FROM chart_predictions WHERE scheme_id=?", (scheme_id,))
+    chart_rows = await _db_fetch_all(cur, what="collect_export_issues:chart_predictions", strict=strict_read)
     chart_total = len(chart_rows)
     # ✅ 状态口径兼容："generated" 是正文同步图表与 fix-mermaid 的历史写法，
     #    语义上同样是"代码已生成完毕"，必须与 "done" 一并视为已完成，
     #    否则正文里已内嵌的图表会被预检误报为「图表未生成」。
     _DONE_STATUSES = ("done", "generated")
     chart_done = sum(1 for r in chart_rows if r["status"] in _DONE_STATUSES)
-    chart_failed = [dict(r) for r in chart_rows
-                    if r["status"] not in _DONE_STATUSES and r["status"] != "pending"]
+    chart_failed = [dict(r) for r in chart_rows if r["status"] not in _DONE_STATUSES and r["status"] != "pending"]
     # ✅ P0 收尾（对齐 OpenBidKit 图表未生成告警）：正文同步图表登记即 done，
     #    仅 ai_image 在生成前为 pending（占位）。pending 不计入已完成，也不计入
     #    failed（非生成失败），但导出前应提醒用户「有配图尚未生成」，避免导出后
     #    正文缺少图片。这里统一把 pending 记为 chart_ungenerated 告警。
     chart_pending = [dict(r) for r in chart_rows if r["status"] == "pending"]
     for cf in chart_failed:
-        issues.append({"type": "chart_failed", "chart_type": cf["chart_type"],
-                       "status": cf["status"]})
+        issues.append({"type": "chart_failed", "chart_type": cf["chart_type"], "status": cf["status"]})
     for cp in chart_pending:
-        issues.append({"type": "chart_ungenerated", "chart_type": cp["chart_type"],
-                        "status": "pending",
-                        "detail": (
-                            "该图表（AI 配图）正文仅占位；导出时将自动生成真实图片"
-                            "（失败则该图跳过、不占图号）")})
+        issues.append(
+            {
+                "type": "chart_ungenerated",
+                "chart_type": cp["chart_type"],
+                "status": "pending",
+                "detail": ("该图表（AI 配图）正文仅占位；导出时将自动生成真实图片" "（失败则该图跳过、不占图号）"),
+            }
+        )
 
     # ✅ P0-1：章节审核状态检查（generate_content 后自动置 pending）
     #    旧实现导出前无法感知"正文写好但尚未过审"，导致未审核章节混进交付文档。
@@ -640,8 +706,9 @@ async def collect_export_issues(scheme_id: str, db, *,
     review_rejected = 0
     review_missing = 0
     for s in sections:
-        if not s.get("content"):
-            continue  # 未生成正文的章节不参与审核检查
+        # 未生成正文 / 按规则登记为「另行补充内容」的章节不参与审核检查
+        if not s.get("content") or is_placeholder_section(s):
+            continue
         rs = s.get("review_status") or ""
         if rs == "approved":
             continue
@@ -653,14 +720,21 @@ async def collect_export_issues(scheme_id: str, db, *,
             review_missing += 1
     review_unapproved = review_pending + review_rejected + review_missing
     if review_pending:
-        issues.append({"type": "review_pending", "count": review_pending,
-                       "detail": f"{review_pending} 章正文已生成但审核状态为 pending"})
+        issues.append(
+            {
+                "type": "review_pending",
+                "count": review_pending,
+                "detail": f"{review_pending} 章正文已生成但审核状态为 pending",
+            }
+        )
     if review_rejected:
-        issues.append({"type": "review_rejected", "count": review_rejected,
-                       "detail": f"{review_rejected} 章正文审核未通过"})
+        issues.append(
+            {"type": "review_rejected", "count": review_rejected, "detail": f"{review_rejected} 章正文审核未通过"}
+        )
     if review_missing:
-        issues.append({"type": "review_missing", "count": review_missing,
-                       "detail": f"{review_missing} 章正文已生成但无审核记录"})
+        issues.append(
+            {"type": "review_missing", "count": review_missing, "detail": f"{review_missing} 章正文已生成但无审核记录"}
+        )
 
     # ✅ P0-2：bid_analysis_items 必选项完整性检查
     #    目录生成 / 正文生成都消费 bid_analysis 结构化提取结果作为 project_brief，
@@ -673,25 +747,33 @@ async def collect_export_issues(scheme_id: str, db, *,
         cur2 = await db.execute(
             "SELECT item_id, label, status, required FROM bid_analysis_items "
             "WHERE project_id=? AND COALESCE(required,0)=1",
-            (ba_pid,))
-        ba_required = [dict(r) for r in await _db_fetch_all(
-            cur2, what="collect_export_issues:bid_analysis_items", strict=strict_read)]
+            (ba_pid,),
+        )
+        ba_required = [
+            dict(r)
+            for r in await _db_fetch_all(cur2, what="collect_export_issues:bid_analysis_items", strict=strict_read)
+        ]
         ba_total = len(ba_required)
         ba_success = sum(1 for r in ba_required if r["status"] == "success")
         ba_failed = [r for r in ba_required if r["status"] not in ("success", "idle")]
         if ba_total > 0 and ba_success < ba_total:
-            _ba_summary = {"required_total": ba_total, "success": ba_success,
-                           "failed_count": len(ba_failed),
-                           "failed_items": [{"item_id": r["item_id"],
-                                            "label": r["label"],
-                                            "status": r["status"]}
-                                           for r in ba_failed[:10]]}
-            issues.append({
-                "type": "bid_analysis_incomplete",
+            _ba_summary = {
                 "required_total": ba_total,
                 "success": ba_success,
                 "failed_count": len(ba_failed),
-                "detail": f"必选项 {ba_total - ba_success}/{ba_total} 未成功提取"})
+                "failed_items": [
+                    {"item_id": r["item_id"], "label": r["label"], "status": r["status"]} for r in ba_failed[:10]
+                ],
+            }
+            issues.append(
+                {
+                    "type": "bid_analysis_incomplete",
+                    "required_total": ba_total,
+                    "success": ba_success,
+                    "failed_count": len(ba_failed),
+                    "detail": f"必选项 {ba_total - ba_success}/{ba_total} 未成功提取",
+                }
+            )
 
     # ✅ 全局事实门控：统计当前方案可见事实（方案私有 + 项目共享）。
     # 未确认/模拟/冲突/来源过期项均已被正文与导出查询排除，交付前必须显式提示。
@@ -703,8 +785,7 @@ async def collect_export_issues(scheme_id: str, db, *,
     #    门控与注入同口径：注入端排除的事实，预检一定告诫用户。
     #    影响面：仅 is_resolved IS NULL 的行从「不阻断」变为「阻断并提示」，
     #    属于修正漏报（以前漏报更危害），不涉及任何正常事实。
-    _facts_summary = {"total": 0, "unresolved": 0, "simulated": 0,
-                      "conflicted": 0, "stale": 0, "blocked": 0}
+    _facts_summary = {"total": 0, "unresolved": 0, "simulated": 0, "conflicted": 0, "stale": 0, "blocked": 0}
     _facts_status = {"ok": True, "code": "not_checked"}
     try:
         # ✅ BUG 修复（2026-10-11 · 跨模块数据链 R70 · 全局事实交付门控 100% 空转）：
@@ -732,24 +813,33 @@ async def collect_export_issues(scheme_id: str, db, *,
                 "OR COALESCE(has_conflict,0)=1 OR COALESCE(is_stale,0)=1 THEN 1 ELSE 0 END) "
                 "AS blocked "
                 "FROM global_facts WHERE " + FACT_SCOPE_PREDICATE,
-                (scheme_id, ba_pid))
-            frow = await _db_fetch_one(
-                cur, what="collect_export_issues:global_facts 统计",
-                strict=strict_read)
+                (scheme_id, ba_pid),
+            )
+            frow = await _db_fetch_one(cur, what="collect_export_issues:global_facts 统计", strict=strict_read)
             if frow:
                 _facts_summary = {k: int(frow[k] or 0) for k in _facts_summary}
                 _facts_status = {"ok": True, "code": "ok"}
         blocked_fact_count = int((_facts_summary.get("blocked") or 0))
         if blocked_fact_count > 0:
-            issues.append({
-                "type": "global_facts_blocked", "count": blocked_fact_count,
-                "detail": (f"全局事实待处理 {blocked_fact_count} 项："
-                           f"未确认 {_facts_summary['unresolved']}、"
-                           f"模拟 {_facts_summary['simulated']}、"
-                           f"冲突 {_facts_summary['conflicted']}、"
-                           f"来源过期 {_facts_summary['stale']}")})
+            issues.append(
+                {
+                    "type": "global_facts_blocked",
+                    "count": blocked_fact_count,
+                    "detail": (
+                        f"全局事实待处理 {blocked_fact_count} 项："
+                        f"未确认 {_facts_summary['unresolved']}、"
+                        f"模拟 {_facts_summary['simulated']}、"
+                        f"冲突 {_facts_summary['conflicted']}、"
+                        f"来源过期 {_facts_summary['stale']}"
+                    ),
+                }
+            )
     except Exception:
         _facts_status = {"ok": False, "code": "query_failed"}
+        # ✅ B1-1（R176）：严格读模式下不得把「读失败」吞成 not_checked/0 项 ——
+        #    丢给调用方（/check → 503；总检 → failed_sources），否则该路来源静默缺席。
+        if strict_read:
+            raise
         logger.exception("全局事实交付门控检查失败（不阻断其它预检）")
 
     # ✅ 同一级重复编号 / 重复标题检测（长方案分步生成易重复挂接子节点，
@@ -775,10 +865,11 @@ async def collect_export_issues(scheme_id: str, db, *,
     #    目录树异常时该函数返回空集合 = 逐字回退修复前行为。
     try:
         from app.config import settings as _s
+
         if _s.crossref_stale_detect_enabled:
-            issues.extend(_detect_stale_cross_references(
-                sections,
-                real_nums=collect_figure_table_number_superset(sections)))
+            issues.extend(
+                _detect_stale_cross_references(sections, real_nums=collect_figure_table_number_superset(sections))
+            )
     except Exception:
         # 配置缺失 / 函数签名变更等异常 → 静默降级（不阻断预检主流程）
         logger.debug("失效交叉引用预检降级跳过（配置读取异常，不阻断预检）", exc_info=True)
@@ -801,10 +892,20 @@ async def collect_export_issues(scheme_id: str, db, *,
     #    逐条清单走 GET /export/placeholder-report 专用端点。
     try:
         _ph_full = build_placeholder_report(sections)
-        placeholder_report = {k: _ph_full[k] for k in (
-            "total", "formatted_total", "bare_total", "fuzzy_total",
-            "bracket_total",
-            "field_count", "section_count", "by_field", "by_section")}
+        placeholder_report = {
+            k: _ph_full[k]
+            for k in (
+                "total",
+                "formatted_total",
+                "bare_total",
+                "fuzzy_total",
+                "bracket_total",
+                "field_count",
+                "section_count",
+                "by_field",
+                "by_section",
+            )
+        }
     except Exception:  # 清单属旁路审计：失败不阻断预检主流程
         placeholder_report = build_placeholder_report([])
     return {
@@ -819,8 +920,11 @@ async def collect_export_issues(scheme_id: str, db, *,
         "content_audit": content_audit,
         "placeholder_report": placeholder_report,
         "review_summary": {
-            "pending": review_pending, "rejected": review_rejected,
-            "missing": review_missing, "unapproved": review_unapproved},
+            "pending": review_pending,
+            "rejected": review_rejected,
+            "missing": review_missing,
+            "unapproved": review_unapproved,
+        },
         "bid_analysis_summary": _ba_summary,
         "global_facts_summary": _facts_summary,
         "global_facts_status": _facts_status,
@@ -894,7 +998,9 @@ def export_issues_to_findings(issues: list) -> list:
         if rule is None:
             logger.warning(
                 "导出预检 issue 类型 %s 映射到未注册规则 %s，请同步 services/audit_rules.py",
-                "/".join(sorted({str(i.get("type")) for i in items})), rid)
+                "/".join(sorted({str(i.get("type")) for i in items})),
+                rid,
+            )
         # 同一 rule 可能由多个 issue 类型映射而来（review_pending / rejected / missing
         # 都映射 DLV-09），取其中最严重的一档，避免轻微类型把严重问题拉低。
         sevs = [_EXPORT_ISSUE_RULE_MAP[str(i.get("type"))][1] for i in items]
@@ -915,21 +1021,23 @@ def export_issues_to_findings(issues: list) -> list:
             parts.append(f"共 {len(items)} 处")
         if sample_titles:
             parts.append("样例：" + "、".join(f"「{t}」" for t in sample_titles))
-        findings.append({
-            "rule_id": rid,
-            "dimension": (rule.dimension if rule else "deliverability"),
-            "severity": severity,
-            "title": (rule.title if rule else "导出预检问题"),
-            "detail": "；".join(parts) or "导出预检发现问题",
-            "suggestion": (rule.detail if rule else ""),
-            "basis": (rule.basis if rule else ""),
-            "section_id": sections_hit[0] if sections_hit else "",
-            "section_ids": sections_hit[:_EXPORT_FINDING_SECTION_CAP],
-            "section_title": "、".join(sample_titles),
-            "mode": "program",
-            "source": "export_check",
-            "count": len(items),
-        })
+        findings.append(
+            {
+                "rule_id": rid,
+                "dimension": (rule.dimension if rule else "deliverability"),
+                "severity": severity,
+                "title": (rule.title if rule else "导出预检问题"),
+                "detail": "；".join(parts) or "导出预检发现问题",
+                "suggestion": (rule.detail if rule else ""),
+                "basis": (rule.basis if rule else ""),
+                "section_id": sections_hit[0] if sections_hit else "",
+                "section_ids": sections_hit[:_EXPORT_FINDING_SECTION_CAP],
+                "section_title": "、".join(sample_titles),
+                "mode": "program",
+                "source": "export_check",
+                "count": len(items),
+            }
+        )
     return findings
 
 
@@ -947,7 +1055,9 @@ async def _readiness_preflight_summary(scheme_id: str, db) -> dict:
             "SELECT total, grade, verdict, released, blocked, rule_version,"
             " content_fingerprint, created_at"
             " FROM preflight_runs WHERE scheme_id=?"
-            " ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,))
+            " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (scheme_id,),
+        )
         row = await _db_fetch_one(cur, what="_readiness_preflight_summary")
         if not row:
             return {"has_run": False}
@@ -967,8 +1077,9 @@ async def _readiness_preflight_summary(scheme_id: str, db) -> dict:
         return {"has_run": False}
 
 
-async def _record_export_review_trace(db, scheme_id: str, fmt: str,
-                                      round_no: int, filename: str) -> None:
+async def _record_export_review_trace(
+    db, scheme_id: str, fmt: str, round_no: int, filename: str, *, commit: bool = True
+) -> None:
     """✅ G12：导出成稿写回审核留痕（工程可追溯性硬要求）。
 
     背景：导出是整条链路里唯一"内容离开系统"的动作，但此前 export.py 全文件
@@ -979,26 +1090,48 @@ async def _record_export_review_trace(db, scheme_id: str, fmt: str,
     - ``comment`` 含格式 / 导出轮次 / 文件名，可回溯到具体那份文档。
 
     写入失败只记日志并 rollback，**绝不阻塞导出** —— 文件已是用户此刻要的东西。
-    """
-    from app.routers.review import _scheme_project_id, _write_record
 
+    ✅ R176 · D2-3（2026-11-04）：写入主体抽到
+    :func:`_write_export_review_trace`（不提交、异常上抛），本函数保留原
+    「失败只记日志+rollback、绝不阻塞导出」的包装语义；命中路径由
+    :func:`_bump_export_round_and_trace` 复用同一写入主体做单事务。
+    """
     try:
-        cur = await db.execute(
-            "SELECT name, review_status FROM schemes WHERE id=?", (scheme_id,))
-        row = await _db_fetch_one(cur, what="_record_export_review_trace:schemes")
-        status = (row["review_status"] or "") if row else ""
-        name = (row["name"] or "") if row else scheme_id
-        await _write_record(
-            db, scheme_id, "", name, status, status, "系统",
-            f"已导出 {fmt.upper()}（第 {round_no} 轮）：{filename}",
-            await _scheme_project_id(db, scheme_id))
-        await db.commit()
+        await _write_export_review_trace(db, scheme_id, fmt, round_no, filename)
+        if commit:
+            await db.commit()
     except Exception as e:
         logger.warning("导出留痕写入失败（不影响导出结果）: %s", e)
         try:
             await db.rollback()
         except Exception:
             logger.debug("导出留痕写入失败后的回滚也失败（放弃清理）", exc_info=True)
+
+
+async def _write_export_review_trace(db, scheme_id: str, fmt: str, round_no: int, filename: str) -> None:
+    """写入**未提交**的评审留痕记录（异常一律上抛，commit/rollback 由调用方决定）。
+
+    ✅ R176 · D2-3：从 :func:`_record_export_review_trace` 抽出的纯写入段 ——
+    命中路径需要把「轮次自增」与「留痕」放进同一事务，任何一步失败都必须
+    整体回滚，故此处**不得**吞异常（吞掉会让调用方误以为写成功而照常 commit）。
+    """
+    from app.routers.review import _scheme_project_id, _write_record
+
+    cur = await db.execute("SELECT name, review_status FROM schemes WHERE id=?", (scheme_id,))
+    row = await _db_fetch_one(cur, what="_record_export_review_trace:schemes")
+    status = (row["review_status"] or "") if row else ""
+    name = (row["name"] or "") if row else scheme_id
+    await _write_record(
+        db,
+        scheme_id,
+        "",
+        name,
+        status,
+        status,
+        "系统",
+        f"已导出 {fmt.upper()}（第 {round_no} 轮）：{filename}",
+        await _scheme_project_id(db, scheme_id),
+    )
 
 
 # ===================== 导出格式预设库（对标 OpenBidKit export_templates） =====================
@@ -1017,14 +1150,22 @@ async def list_export_presets(scheme_id: str, db=Depends(get_db)):
     pid = await _preset_project_id(db, scheme_id)
     cur = await db.execute(
         "SELECT id, name, config_json, is_default, updated_at FROM export_presets "
-        "WHERE project_id=? ORDER BY is_default DESC, updated_at DESC", (pid,))
+        "WHERE project_id=? ORDER BY is_default DESC, updated_at DESC",
+        (pid,),
+    )
     rows = await _db_fetch_all(cur, what="list_export_presets")
-    return {"presets": [{
-        "id": r["id"], "name": r["name"],
-        "config": json.loads(r["config_json"] or "{}"),
-        "is_default": bool(r["is_default"]),
-        "updated_at": r["updated_at"],
-    } for r in rows]}
+    return {
+        "presets": [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "config": json.loads(r["config_json"] or "{}"),
+                "is_default": bool(r["is_default"]),
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+    }
 
 
 @router.post("/presets")
@@ -1040,8 +1181,10 @@ async def create_export_preset(scheme_id: str, body: dict, db=Depends(get_db)):
     await _db_exec(
         db,
         "INSERT INTO export_presets (id, project_id, name, config_json, is_default, created_at, updated_at) "
-        "VALUES (?,?,?,?,0,?,?)", (preset_id, pid, name, json.dumps(config, ensure_ascii=False), now, now),
-        what="create_export_preset")
+        "VALUES (?,?,?,?,0,?,?)",
+        (preset_id, pid, name, json.dumps(config, ensure_ascii=False), now, now),
+        what="create_export_preset",
+    )
     await db.commit()
     return {"id": preset_id, "name": name, "config": config}
 
@@ -1050,8 +1193,7 @@ async def create_export_preset(scheme_id: str, body: dict, db=Depends(get_db)):
 async def update_export_preset(scheme_id: str, preset_id: str, body: dict, db=Depends(get_db)):
     """更新预设（名称 / 配置）。"""
     pid = await _preset_project_id(db, scheme_id)
-    cur = await db.execute(
-        "SELECT id FROM export_presets WHERE id=? AND project_id=?", (preset_id, pid))
+    cur = await db.execute("SELECT id FROM export_presets WHERE id=? AND project_id=?", (preset_id, pid))
     if not await _db_fetch_one(cur, what="update_export_preset 存在性"):
         raise HTTPException(404, "预设不存在")
     name = (body.get("name") or "").strip()
@@ -1065,8 +1207,12 @@ async def update_export_preset(scheme_id: str, preset_id: str, body: dict, db=De
     sets.append("updated_at=?")
     params.append(datetime.now().isoformat())
     params += [preset_id, pid]
-    await _db_exec(db, f"UPDATE export_presets SET {','.join(sets)} WHERE id=? AND project_id=?",
-                   params, what="update_export_preset")
+    await _db_exec(
+        db,
+        f"UPDATE export_presets SET {','.join(sets)} WHERE id=? AND project_id=?",
+        params,
+        what="update_export_preset",
+    )
     await db.commit()
     return {"ok": True}
 
@@ -1075,14 +1221,18 @@ async def update_export_preset(scheme_id: str, preset_id: str, body: dict, db=De
 async def set_default_export_preset(scheme_id: str, preset_id: str, db=Depends(get_db)):
     """将某预设设为项目默认（同项目其它预设取消默认）。"""
     pid = await _preset_project_id(db, scheme_id)
-    cur = await db.execute(
-        "SELECT id FROM export_presets WHERE id=? AND project_id=?", (preset_id, pid))
+    cur = await db.execute("SELECT id FROM export_presets WHERE id=? AND project_id=?", (preset_id, pid))
     if not await _db_fetch_one(cur, what="set_default_export_preset 存在性"):
         raise HTTPException(404, "预设不存在")
-    await _db_exec(db, "UPDATE export_presets SET is_default=0 WHERE project_id=?",
-                   (pid,), what="set_default_export_preset 清默认")
-    await _db_exec(db, "UPDATE export_presets SET is_default=1 WHERE id=? AND project_id=?",
-                   (preset_id, pid), what="set_default_export_preset 设默认")
+    await _db_exec(
+        db, "UPDATE export_presets SET is_default=0 WHERE project_id=?", (pid,), what="set_default_export_preset 清默认"
+    )
+    await _db_exec(
+        db,
+        "UPDATE export_presets SET is_default=1 WHERE id=? AND project_id=?",
+        (preset_id, pid),
+        what="set_default_export_preset 设默认",
+    )
     await db.commit()
     return {"ok": True}
 
@@ -1091,8 +1241,9 @@ async def set_default_export_preset(scheme_id: str, preset_id: str, db=Depends(g
 async def delete_export_preset(scheme_id: str, preset_id: str, db=Depends(get_db)):
     """删除预设。"""
     pid = await _preset_project_id(db, scheme_id)
-    await _db_exec(db, "DELETE FROM export_presets WHERE id=? AND project_id=?",
-                   (preset_id, pid), what="delete_export_preset")
+    await _db_exec(
+        db, "DELETE FROM export_presets WHERE id=? AND project_id=?", (preset_id, pid), what="delete_export_preset"
+    )
     await db.commit()
     return {"ok": True}
 
@@ -1111,10 +1262,13 @@ from app.services.content_blocks import (  # noqa: F401 — 拆分后保留绑�
     _cn_pure_to_int,
     _compute_subheading,
     _detect_plain_heading,  # noqa: F401  兼容再导出：测试与诊断脚本经 app.routers.export 引用
+    _is_orphan_lead_in_text,
     #                          消除本模块此前的裸 `60` 字面量（同一判据第 3 份副本）。
+    _norm_heading_text,
     _parse_content_blocks,
     _strip_duplicate_leading_title,
     _strip_title_number,
+    strip_subitem_ordinal_prefix,
 )
 
 # ---------------------------------------------------------------------------
@@ -1140,8 +1294,7 @@ def _cn_ordinal(n: int) -> str:
     if n < 20:
         return "十" + _CN_ORDINAL_DIGITS[n % 10]
     if n < 100:
-        return _CN_ORDINAL_DIGITS[n // 10] + "十" + (
-            _CN_ORDINAL_DIGITS[n % 10] if n % 10 else "")
+        return _CN_ORDINAL_DIGITS[n // 10] + "十" + (_CN_ORDINAL_DIGITS[n % 10] if n % 10 else "")
     return str(n)
 
 
@@ -1199,16 +1352,10 @@ def _ensure_list_paragraph_style(doc) -> str:
     return name
 
 
-
-
 # ✅ 2026-10-05（D4 · 死副本清理）：`_TABLE_CAPTION_RE` / `_IMAGE_LINE_RE` /
 # `_MERMAID_TITLE_RES` / `_LEAD_IN_TAIL_RE` 在 T-2 下沉后本模块内**已无任何引用**，
 # 唯一实现均在 services/content_blocks.py（导出侧只消费其解析结果）。
 # 为杜绝「改一处、另一处漂移」，此处本地副本全部删除。
-
-
-
-
 
 
 # ✅ AI 配图：正文内嵌的 Markdown 图片行识别（`_IMAGE_LINE_RE`）已随
@@ -1231,16 +1378,6 @@ def _ensure_list_paragraph_style(doc) -> str:
 #    （`_LEAD_IN_HINT_RE` 改为从 content_blocks 导入）。
 
 
-
-
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # ✅ BUG 修复：正文开头重复章节标题（导出后出现 "1 XXX" + "XXX" 两行）
 # ---------------------------------------------------------------------------
@@ -1248,10 +1385,6 @@ def _ensure_list_paragraph_style(doc) -> str:
 # ✅ 2026-10-05（D4）：唯一实现为 services/content_blocks.py 的
 #    `_HEADING_NUM_PREFIX_RES`（`_strip_duplicate_leading_title` 消费）；
 #    本模块的同名本地副本已无引用，删除。
-
-
-
-
 
 
 # Markdown 行内标记：
@@ -1300,17 +1433,19 @@ from app.routers._export_docx_parts import (  # noqa: F401,E402,I001 — 拆分�
     _image_format_supported,
     _insert_image_with_caption,
     _log_fix_stats,
+    _normalize_delivery_text,
     _pop_orphan_lead_in,
     _read_image_dpi,
     _resolve_layout_preset,
+    _safe_add_run,
     _scheme_form_header,
     _set_margins,
     _set_run_font,
     _strip_leading_table_number,
     _unstack_or_trim_table_rows,
     _write_chart_placeholder_line,
+    _xml_safe_text,
 )
-
 
 
 def _add_word_field(paragraph, instr: str, placeholder: str = "1"):
@@ -1322,6 +1457,7 @@ def _add_word_field(paragraph, instr: str, placeholder: str = "1"):
     """
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
+
     run = paragraph.add_run()
     fld_begin = OxmlElement("w:fldChar")
     fld_begin.set(qn("w:fldCharType"), "begin")
@@ -1358,6 +1494,7 @@ def _add_toc_field(paragraph, depth: int = 3):
     """
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
+
     run = paragraph.add_run()
     fld_begin = OxmlElement("w:fldChar")
     fld_begin.set(qn("w:fldCharType"), "begin")
@@ -1390,12 +1527,33 @@ _PDF_MIME = "application/pdf"
 
 # CT_PPr 为严格序列，w:pBdr / w:shd 必须排在下列元素之前
 _PPR_AFTER_PBDR = (
-    "w:shd", "w:tabs", "w:suppressAutoHyphens", "w:kinsoku", "w:wordWrap",
-    "w:overflowPunct", "w:topLinePunct", "w:autoSpaceDE", "w:autoSpaceDN",
-    "w:bidi", "w:adjustRightInd", "w:snapToGrid", "w:spacing", "w:ind",
-    "w:contextualSpacing", "w:mirrorIndents", "w:suppressOverlap", "w:jc",
-    "w:textDirection", "w:textAlignment", "w:textboxTightWrap", "w:outlineLvl",
-    "w:divId", "w:cnfStyle", "w:rPr", "w:sectPr", "w:pPrChange",
+    "w:shd",
+    "w:tabs",
+    "w:suppressAutoHyphens",
+    "w:kinsoku",
+    "w:wordWrap",
+    "w:overflowPunct",
+    "w:topLinePunct",
+    "w:autoSpaceDE",
+    "w:autoSpaceDN",
+    "w:bidi",
+    "w:adjustRightInd",
+    "w:snapToGrid",
+    "w:spacing",
+    "w:ind",
+    "w:contextualSpacing",
+    "w:mirrorIndents",
+    "w:suppressOverlap",
+    "w:jc",
+    "w:textDirection",
+    "w:textAlignment",
+    "w:textboxTightWrap",
+    "w:outlineLvl",
+    "w:divId",
+    "w:cnfStyle",
+    "w:rPr",
+    "w:sectPr",
+    "w:pPrChange",
 )
 
 
@@ -1403,6 +1561,7 @@ def _set_paragraph_shading(paragraph, fill: str):
     """给段落加底纹（代码块 / 引用块共用）。"""
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
+
     ppr = paragraph._p.get_or_add_pPr()
     if ppr.find(qn("w:shd")) is not None:
         return
@@ -1421,6 +1580,7 @@ def _set_paragraph_borders(paragraph, **sides):
     """
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
+
     ppr = paragraph._p.get_or_add_pPr()
     pbd = ppr.find(qn("w:pBdr"))
     if pbd is None:
@@ -1455,8 +1615,12 @@ def _set_paragraph_borders(paragraph, **sides):
 #   于是必然产出 tcW → vAlign → shd 的非法序列。
 # CT_TcPr 为严格序列，w:shd 必须排在下列元素之前
 _TCPR_AFTER_SHD = (
-    "w:noWrap", "w:tcMar", "w:textDirection", "w:tcFitText",
-    "w:vAlign", "w:hideMark",
+    "w:noWrap",
+    "w:tcMar",
+    "w:textDirection",
+    "w:tcFitText",
+    "w:vAlign",
+    "w:hideMark",
 )
 
 
@@ -1486,44 +1650,380 @@ def _set_cell_shading(cell, fill: str) -> None:
 # 顺序表取自 CT_PPr / CT_RPr / CT_TblPr / CT_TcPr / CT_TrPr / CT_SectPr。
 _STRICT_CT_SEQUENCE: dict[str, tuple[str, ...]] = {
     "pPr": (
-        "pStyle", "keepNext", "keepLines", "pageBreakBefore", "framePr",
-        "widowControl", "numPr", "suppressLineNumbers", "pBdr", "shd", "tabs",
-        "suppressAutoHyphens", "kinsoku", "wordWrap", "overflowPunct",
-        "topLinePunct", "autoSpaceDE", "autoSpaceDN", "bidi", "adjustRightInd",
-        "snapToGrid", "spacing", "ind", "contextualSpacing", "mirrorIndents",
-        "suppressOverlap", "jc", "textDirection", "textAlignment",
-        "textboxTightWrap", "outlineLvl", "divId", "cnfStyle", "rPr", "sectPr",
+        "pStyle",
+        "keepNext",
+        "keepLines",
+        "pageBreakBefore",
+        "framePr",
+        "widowControl",
+        "numPr",
+        "suppressLineNumbers",
+        "pBdr",
+        "shd",
+        "tabs",
+        "suppressAutoHyphens",
+        "kinsoku",
+        "wordWrap",
+        "overflowPunct",
+        "topLinePunct",
+        "autoSpaceDE",
+        "autoSpaceDN",
+        "bidi",
+        "adjustRightInd",
+        "snapToGrid",
+        "spacing",
+        "ind",
+        "contextualSpacing",
+        "mirrorIndents",
+        "suppressOverlap",
+        "jc",
+        "textDirection",
+        "textAlignment",
+        "textboxTightWrap",
+        "outlineLvl",
+        "divId",
+        "cnfStyle",
+        "rPr",
+        "sectPr",
         "pPrChange",
     ),
     "rPr": (
-        "rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike",
-        "dstrike", "outline", "shadow", "emboss", "imprint", "noProof",
-        "snapToGrid", "vanish", "webHidden", "color", "spacing", "w", "kern",
-        "position", "sz", "szCs", "highlight", "u", "effect", "bdr", "shd",
-        "fitText", "vertAlign", "rtl", "cs", "em", "lang", "eastAsianLayout",
-        "specVanish", "oMath",
+        "rStyle",
+        "rFonts",
+        "b",
+        "bCs",
+        "i",
+        "iCs",
+        "caps",
+        "smallCaps",
+        "strike",
+        "dstrike",
+        "outline",
+        "shadow",
+        "emboss",
+        "imprint",
+        "noProof",
+        "snapToGrid",
+        "vanish",
+        "webHidden",
+        "color",
+        "spacing",
+        "w",
+        "kern",
+        "position",
+        "sz",
+        "szCs",
+        "highlight",
+        "u",
+        "effect",
+        "bdr",
+        "shd",
+        "fitText",
+        "vertAlign",
+        "rtl",
+        "cs",
+        "em",
+        "lang",
+        "eastAsianLayout",
+        "specVanish",
+        "oMath",
     ),
     "tblPr": (
-        "tblStyle", "tblpPr", "tblOverlap", "bidiVisual", "tblStyleRowBandSize",
-        "tblStyleColBandSize", "tblW", "jc", "tblCellSpacing", "tblInd",
-        "tblBorders", "shd", "tblLayout", "tblCellMar", "tblLook", "tblCaption",
+        "tblStyle",
+        "tblpPr",
+        "tblOverlap",
+        "bidiVisual",
+        "tblStyleRowBandSize",
+        "tblStyleColBandSize",
+        "tblW",
+        "jc",
+        "tblCellSpacing",
+        "tblInd",
+        "tblBorders",
+        "shd",
+        "tblLayout",
+        "tblCellMar",
+        "tblLook",
+        "tblCaption",
         "tblDescription",
     ),
     "tcPr": (
-        "cnfStyle", "tcW", "gridSpan", "hMerge", "vMerge", "tcBorders", "shd",
-        "noWrap", "tcMar", "textDirection", "tcFitText", "vAlign", "hideMark",
+        "cnfStyle",
+        "tcW",
+        "gridSpan",
+        "hMerge",
+        "vMerge",
+        "tcBorders",
+        "shd",
+        "noWrap",
+        "tcMar",
+        "textDirection",
+        "tcFitText",
+        "vAlign",
+        "hideMark",
     ),
     "trPr": (
-        "cnfStyle", "divId", "gridBefore", "gridAfter", "wBefore", "wAfter",
-        "cantSplit", "trHeight", "tblHeader", "tblCellSpacing", "jc", "hidden",
+        "cnfStyle",
+        "divId",
+        "gridBefore",
+        "gridAfter",
+        "wBefore",
+        "wAfter",
+        "cantSplit",
+        "trHeight",
+        "tblHeader",
+        "tblCellSpacing",
+        "jc",
+        "hidden",
     ),
     "sectPr": (
-        "footnotePr", "endnotePr", "type", "pgSz", "pgMar", "paperSrc",
-        "pgBorders", "lnNumType", "pgNumType", "cols", "formProt", "vAlign",
-        "noEndnote", "titlePg", "textDirection", "bidirectional", "rtlGutter",
-        "docGrid", "printerSettings", "sectPrChange",
+        "footnotePr",
+        "endnotePr",
+        "type",
+        "pgSz",
+        "pgMar",
+        "paperSrc",
+        "pgBorders",
+        "lnNumType",
+        "pgNumType",
+        "cols",
+        "formProt",
+        "vAlign",
+        "noEndnote",
+        "titlePg",
+        "textDirection",
+        "bidirectional",
+        "rtlGutter",
+        "docGrid",
+        "printerSettings",
+        "sectPrChange",
     ),
 }
+
+
+def _export_content_residue(fix_stats: dict | None) -> int:
+    """终稿无法自动消除的格式残留总数（用于缓存闸门与 ``X-Export-Degraded``）。
+
+    计数来源：``_docx_final_lint`` 的第三遍只读扫描；两轮规范化已清零时恒为 0，
+    旧调用方与旧产物零回归（新增键只在 ``_docx_final_lint`` 内写入）。
+    """
+    try:
+        return int((fix_stats or {}).get("lint_residual_total", 0) or 0)
+    except (TypeError, ValueError):  # pragma: no cover - 防御异常统计值
+        return 0
+
+
+def _iter_doc_paragraphs(doc):
+    """遍历正文 + 表格单元格 + 页眉/页脚段落。
+
+    ✅ R179 修复覆盖盲区：旧版只遍历 ``doc.paragraphs``（仅正文顶层），
+    表格单元格与页眉页脚里的 ``===== Page`` / HTML / 双重实体 / LaTeX
+    完全漏检 —— 而第1轮报告的残留恰恰大量出现在表格单元格内。
+    """
+    for para in doc.paragraphs:
+        yield para
+    try:
+        seen = set()
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    key = id(cell._tc)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    for para in cell.paragraphs:
+                        yield para
+    except Exception:  # noqa: BLE001 - python-docx 结构异常（合并/损坏单元格）时停止遍历表格，不阻断导出
+        pass
+    try:
+        for sec in doc.sections:
+            for hf in (sec.header, sec.footer):
+                try:
+                    if hf.is_linked_to_previous:
+                        continue
+                    for para in hf.paragraphs:
+                        yield para
+                except Exception:  # pragma: no cover
+                    continue
+    except Exception:  # noqa: BLE001 - 页眉页脚结构异常时停止遍历，不阻断导出
+        pass
+
+
+def _docx_final_lint(doc) -> dict:
+    """落盘前成稿 lint 守卫（2026-11-05 · 防回归最后一道闸）。
+
+    背景：《机电安装施工组织设计_20261104_第1轮》格式问题报告证明，仅靠
+    源文解析层修复不够 —— 字面 ``\\n``、PDF 分页标记、HTML 标签、Markdown
+    残留可能从**任何旁路**（封面、事实附录、降级块、题注）渗入成稿。
+    本函数在 ``doc.save()`` 之前对全文档段落做一次扫仓：
+
+      自动修复（只做确定性、无格式风险的替换）：
+        · run 文本中的字面 ``\\n`` → 软换行（保留换行意图）；
+        · ``===== Page N =====`` / 「第X页共Y页」残留 → 删除；
+        · 行内 ``<table>`` 等裸 HTML 标签 → 删除（内容保留）；
+        · 非代码段行首 Markdown ``##`` 井号残留 → 删除。
+
+      只告警不修改（无安全的自动修复）：
+        · 非 code 段落含软换行（``<w:br/>``）—— 提示正文可能被压进一段；
+        · 普通段落含 ≥2 个管道符 —— 提示可能的未转换表格文本。
+
+    返回修复/检出计数 dict（并入本次导出的 X-Fix-Stats）。fail-soft：
+    lint 自身异常绝不阻断导出。
+    """
+    stats = {
+        "lint_literal_newline": 0,
+        "lint_page_mark": 0,
+        "lint_html_tag": 0,
+        "lint_md_residue": 0,
+        "lint_soft_break": 0,
+        "lint_pipe_text": 0,
+        # ✅ R179 新增（加法式扩展，既有键语义/取值不变）：
+        #   双重实体 / 残留 LaTeX / 公式分隔符的**自动还原**计数；
+        #   residual_* 为两轮规范化后仍无法消除的残留（非零 → 可见降级）。
+        "lint_entity_residue": 0,
+        "lint_latex_residue": 0,
+        "lint_residual_page": 0,
+        "lint_residual_md": 0,
+        "lint_residual_html": 0,
+        "lint_residual_entity": 0,
+        "lint_residual_latex": 0,
+        "lint_residual_pipe": 0,
+        "lint_duplicate_table_no": 0,
+        "lint_residual_total": 0,
+    }
+    try:
+        from docx.oxml.ns import qn
+
+        # run 内含媒体/域代码时禁止重写 run.text（会摧毁图片/域结构）
+        _RUN_UNSAFE_CHILDREN = (
+            qn("w:drawing"),
+            qn("w:pict"),
+            qn("w:object"),
+            qn("w:fldChar"),
+            qn("w:instrText"),
+            qn("w:footerReference"),
+        )
+        _RE_LIT_NL = re.compile(r"(?<!\\)\\n(?!\\)")
+        _RE_PAGE_RESIDUE = re.compile(r"\s*=+\s*Page\s*\d+\s*=+\s*|\s*第\s*\d+\s*页\s*共\s*\d+\s*页\s*", re.I)
+        _RE_HTML_TAG = re.compile(r"</?(?:table|tr|td|th|tbody|thead|span|div|p)\b[^>]*>", re.I)
+        _RE_MD_HASH = re.compile(r"^\s*#{1,6}\s+")
+        #: `&amp;gt;` / `&amp;lt;` / 更深的 `&amp;amp;gt;` —— 转换链每多一层就多一个 `amp;`。
+        _RE_ENTITY = re.compile(r"&(?:amp;)*(?:gt|lt|amp|nbsp);", re.I)
+        #: 残留 LaTeX：命令名、行内/行间公式分隔符（成稿中不应出现任何 `\命令`）。
+        _RE_LATEX = re.compile(r"\\[A-Za-z]+|\\\(|\\\[")
+        #: 表号重复检测（`表4-1` / `表 4-1` 统一成无空格形态后比较）。
+        _RE_TABLE_NO = re.compile(r"表\s*\d+\s*-\s*\d+")
+
+        # 两轮规范化：第一轮通常已清零；第二轮兜住「替换后再次暴露」的嵌套形态
+        # （如 `&amp;amp;gt;` 需逐层解码、`^{\circ}\mathrm{C}` 需二次命令展开）。
+        for _pass in range(2):
+            for para in _iter_doc_paragraphs(doc):
+                try:
+                    style_name = para.style.name if para.style is not None else ""
+                except Exception:
+                    style_name = ""
+                is_code = "Consolas" in style_name or "code" in style_name.lower()
+
+                p_text = para.text or ""
+                # 只统计一次（两轮规范化会让同一段落在第二遍重复计数）
+                if _pass == 0:
+                    if "\n" in p_text and not is_code:
+                        stats["lint_soft_break"] += 1
+                    if not is_code and p_text.count("|") >= 2:
+                        stats["lint_pipe_text"] += 1
+
+                for run in para.runs:
+                    if any(run._r.find(tag) is not None for tag in _RUN_UNSAFE_CHILDREN):
+                        continue
+                    t = run.text or ""
+                    if not t:
+                        continue
+                    new = t
+                    if _RE_LIT_NL.search(new):
+                        new = _RE_LIT_NL.sub("\n", new)
+                        stats["lint_literal_newline"] += 1
+                    if _RE_PAGE_RESIDUE.search(new):
+                        new = _RE_PAGE_RESIDUE.sub(" ", new)
+                        stats["lint_page_mark"] += 1
+                    if _RE_HTML_TAG.search(new):
+                        new = _RE_HTML_TAG.sub("", new)
+                        stats["lint_html_tag"] += 1
+                    if not is_code and _RE_MD_HASH.match(new):
+                        new = _RE_MD_HASH.sub("", new, count=1)
+                        stats["lint_md_residue"] += 1
+                    if _RE_ENTITY.search(new):
+                        new = _normalize_delivery_text(new, residual=True)
+                        stats["lint_entity_residue"] += 1
+                    if _RE_LATEX.search(new):
+                        new = _normalize_delivery_text(new, residual=True)
+                        stats["lint_latex_residue"] += 1
+                    if new != t:
+                        # run.text setter 会把 \n 转 <w:br/>、\t 转 <w:tab/>，
+                        # run 级 rPr 格式保留（此处 run 已排除媒体/域）。
+                        run.text = new
+
+        # 第三遍只扫描不修改：两轮规范化后仍然命中的，即「无法自动消除的残留」，
+        # 必须计数并触发可见降级（见 _build_docx_sync 的 X-Export-Degraded）。
+        table_nos: dict[str, int] = {}
+        for para in _iter_doc_paragraphs(doc):
+            try:
+                style_name = para.style.name if para.style is not None else ""
+            except Exception:
+                style_name = ""
+            is_code = "Consolas" in style_name or "code" in style_name.lower()
+            p_text = para.text or ""
+            for run in para.runs:
+                t = run.text or ""
+                if not t:
+                    continue
+                if _RE_PAGE_RESIDUE.search(t):
+                    stats["lint_residual_page"] += 1
+                if not is_code and _RE_MD_HASH.match(t):
+                    stats["lint_residual_md"] += 1
+                if _RE_HTML_TAG.search(t):
+                    stats["lint_residual_html"] += 1
+                if _RE_ENTITY.search(t):
+                    stats["lint_residual_entity"] += 1
+                if _RE_LATEX.search(t):
+                    stats["lint_residual_latex"] += 1
+            if not is_code and p_text.count("|") >= 2:
+                stats["lint_residual_pipe"] += 1
+            # 只把**居中的表题段**计入表号重复判定；正文引用（「见表 4-1」）
+            # 重复出现是正常写法，计入会造成每次导出都误判降级。
+            try:
+                _centered = para.alignment is not None and int(para.alignment) == 1
+            except Exception:
+                _centered = False
+            if _centered and p_text.strip().startswith("表"):
+                for m in _RE_TABLE_NO.finditer(p_text):
+                    key = re.sub(r"\s+", "", m.group(0))
+                    table_nos[key] = table_nos.get(key, 0) + 1
+
+        stats["lint_duplicate_table_no"] = sum(1 for v in table_nos.values() if v > 1)
+        stats["lint_residual_total"] = sum(
+            stats[k]
+            for k in (
+                "lint_residual_page",
+                "lint_residual_md",
+                "lint_residual_html",
+                "lint_residual_entity",
+                "lint_residual_latex",
+                "lint_residual_pipe",
+                "lint_duplicate_table_no",
+            )
+        )
+
+        _hit = {k: v for k, v in stats.items() if v}
+        if _hit:
+            logger.warning("导出：落盘前 lint 守卫命中 %s（详见 X-Fix-Stats）", _hit)
+        if stats["lint_residual_total"]:
+            logger.warning(
+                "导出：终稿仍有 %d 处无法自动消除的格式残留（成稿已标记降级，" "frontend 将提示人工核对）",
+                stats["lint_residual_total"],
+            )
+    except Exception:  # pragma: no cover - lint 失败不阻断导出
+        logger.warning("导出：落盘前 lint 守卫执行失败（跳过，不影响成稿）", exc_info=True)
+    return stats
 
 
 def _normalize_ct_sequence(root) -> int:
@@ -1580,7 +2080,9 @@ def _normalize_docx_strict_sequence(doc) -> int:
     if total:
         logger.warning(
             "导出：已修正 %d 处 OOXML 严格序列违例（子元素顺序不符 ECMA-376，"
-            "WPS 会拒绝打开）—— 成稿内容一字不变，仅调整属性元素书写顺序", total)
+            "WPS 会拒绝打开）—— 成稿内容一字不变，仅调整属性元素书写顺序",
+            total,
+        )
     return total
 
 
@@ -1591,6 +2093,7 @@ def _add_code_block(doc, lines: list[str]):
     行首缩进被 Word 折叠、还带 0.74cm 首行缩进），命令行示例会被排成散文。
     """
     from docx.shared import Cm, Pt
+
     p = doc.add_paragraph()
     pf = p.paragraph_format
     pf.left_indent = Cm(0.5)
@@ -1606,13 +2109,16 @@ def _add_code_block(doc, lines: list[str]):
             run.add_break()
         line = raw_line.rstrip()
         lead = len(line) - len(line.lstrip(" \t"))
-        prefix = "".join("\u00a0\u00a0\u00a0\u00a0" if ch == "\t" else "\u00a0"
-                         for ch in line[:lead])
+        prefix = "".join("\u00a0\u00a0\u00a0\u00a0" if ch == "\t" else "\u00a0" for ch in line[:lead])
         run.add_text(prefix + line[lead:])
     _set_paragraph_shading(p, "F2F2F2")
     _set_paragraph_borders(
-        p, top=("single", 4, "D9D9D9"), left=("single", 4, "D9D9D9"),
-        bottom=("single", 4, "D9D9D9"), right=("single", 4, "D9D9D9"))
+        p,
+        top=("single", 4, "D9D9D9"),
+        left=("single", 4, "D9D9D9"),
+        bottom=("single", 4, "D9D9D9"),
+        right=("single", 4, "D9D9D9"),
+    )
     return p
 
 
@@ -1628,6 +2134,7 @@ def _enable_update_fields_on_open(doc) -> None:
     """
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
+
     try:
         settings_el = doc.settings.element
     except Exception:  # pragma: no cover - 极旧版本 python-docx 无 settings
@@ -1637,8 +2144,7 @@ def _enable_update_fields_on_open(doc) -> None:
     el = OxmlElement("w:updateFields")
     el.set(qn("w:val"), "true")
     anchor = None
-    for tag in ("w:hdrShapeDefaults", "w:compat", "w:rsids", "w:shapeDefaults",
-                "w:decimalSymbol", "w:listSeparator"):
+    for tag in ("w:hdrShapeDefaults", "w:compat", "w:rsids", "w:shapeDefaults", "w:decimalSymbol", "w:listSeparator"):
         anchor = settings_el.find(qn(tag))
         if anchor is not None:
             break
@@ -1685,18 +2191,17 @@ def _attachment_disposition(filename: str) -> str:
     （DOCX 走 FileResponse 由 Starlette 自行编码，所以该缺陷长期只暴露在 PDF 链路）。
     """
     from urllib.parse import quote
+
     safe = _safe_filename(filename)
     ascii_fallback = re.sub(r"[^\x20-\x7e]", "_", safe) or "export"
-    return (f'attachment; filename="{ascii_fallback}"; '
-            f"filename*=UTF-8''{quote(safe, safe='')}")
+    return f'attachment; filename="{ascii_fallback}"; ' f"filename*=UTF-8''{quote(safe, safe='')}"
 
 
 # ---------------------------------------------------------------------------
 # 导出文件名规则：专项方案名称 + 导出日期 + 导出轮次
 #   例：某工程基坑支护专项方案_20260916_第3轮.docx
 # ---------------------------------------------------------------------------
-def _build_export_filename(scheme_name: str, ext: str, round_no: int,
-                           when: "datetime | None" = None) -> str:
+def _build_export_filename(scheme_name: str, ext: str, round_no: int, when: "datetime | None" = None) -> str:
     """按「专项方案名称 + 日期 + 导出轮次」生成导出文件名（含扩展名）。
 
     格式：``{方案名称}_{YYYYMMDD}_第{轮次}轮.{ext}``
@@ -1745,10 +2250,28 @@ def _build_export_filename(scheme_name: str, ext: str, round_no: int,
 
 #: 上游模板 / 历史定位遗留的项目名占位关键词（替换时按长度降序，最长优先）
 _TEMPLATE_RESIDUE_TOKENS: tuple[str, ...] = (
-    "招投标项目", "投标项目", "投标标书", "招标文件", "标书编制",
-    "项目名称", "工程名称", "项目名", "工程名",
-    "未命名项目", "新建项目", "测试项目", "示例项目", "模板项目",
-    "未命名", "无标题", "未填写", "待填写", "请填写", "占位", "待定", "暂定",
+    "招投标项目",
+    "投标项目",
+    "投标标书",
+    "招标文件",
+    "标书编制",
+    "项目名称",
+    "工程名称",
+    "项目名",
+    "工程名",
+    "未命名项目",
+    "新建项目",
+    "测试项目",
+    "示例项目",
+    "模板项目",
+    "未命名",
+    "无标题",
+    "未填写",
+    "待填写",
+    "请填写",
+    "占位",
+    "待定",
+    "暂定",
     # ⚠️ 刻意不含 `示例`/`模板`/`项目`/`工程` 这四个泛词：只由它们拼成的名字
     #    （如「示例工程」）可能是真实落库工程名，整串置空会静默吃掉用户数据 ——
     #    残留串要被判掉，靠「招投标/投标/招标」前缀 + 日期时间片段即可。
@@ -1757,12 +2280,12 @@ _TEMPLATE_RESIDUE_TOKENS: tuple[str, ...] = (
 #: 「没有任何语义」的片段：日期 / 时间 / 年份 / 括号提示 / 占位下划线。
 #: 残留串通常 = 占位关键词 + 这些片段（如「招投标项目 2026/10/7 19:56:43」）。
 _TEMPLATE_RESIDUE_FRAG_RE = re.compile(
-    r"\d{4}\s*[-/年.]\s*\d{1,2}\s*[-/月.]\s*\d{1,2}\s*日?"   # 2026/10/7、2026-10-7
-    r"|\d{4}\s*[-/年.]\s*\d{1,2}\s*[-/月.]"                  # 2026/10
-    r"|\d{1,2}:\d{2}(?::\d{2})?"                             # 19:56:43
-    r"|\d{4}"                                                # 单年份
+    r"\d{4}\s*[-/年.]\s*\d{1,2}\s*[-/月.]\s*\d{1,2}\s*日?"  # 2026/10/7、2026-10-7
+    r"|\d{4}\s*[-/年.]\s*\d{1,2}\s*[-/月.]"  # 2026/10
+    r"|\d{1,2}:\d{2}(?::\d{2})?"  # 19:56:43
+    r"|\d{4}"  # 单年份
     r"|【[^】]{0,16}】|\[[^\]]{0,16}\]|（[^）]{0,16}）|\([^)]{0,16}\)"
-    r"|[_＿]{2,}|X{2,}|x{2,}|×{2,}|＊{2,}"                   # ___、XX、××
+    r"|[_＿]{2,}|X{2,}|x{2,}|×{2,}|＊{2,}"  # ___、XX、××
     r'|["\s\u3000\u00a0]+'
 )
 
@@ -1824,8 +2347,7 @@ def _project_name_from_facts(facts: list | None) -> str:
         title = str(item.get("title") or item.get("name") or "")
         if not _PROJECT_NAME_FACT_RE.search(title):
             continue
-        val = _sanitize_template_residue_title(
-            item.get("content") or item.get("value") or "")
+        val = _sanitize_template_residue_title(item.get("content") or item.get("value") or "")
         if val:
             return val
     return ""
@@ -1854,9 +2376,12 @@ async def _bump_export_round(db, scheme_id: str) -> int:
     失败时回退为第 1 轮，绝不阻塞导出主流程。
     """
     try:
-        await _db_exec(db,
+        await _db_exec(
+            db,
             "UPDATE schemes SET export_round = COALESCE(export_round, 0) + 1 WHERE id=?",
-            (scheme_id,), what="_bump_export_round")
+            (scheme_id,),
+            what="_bump_export_round",
+        )
         cur = await db.execute("SELECT export_round FROM schemes WHERE id=?", (scheme_id,))
         row = await _db_fetch_one(cur, what="_bump_export_round 回读")
         await db.commit()
@@ -1871,6 +2396,48 @@ async def _bump_export_round(db, scheme_id: str) -> int:
     return 1
 
 
+async def _bump_export_round_and_trace(db, scheme_id: str, fmt: str, display_name: str) -> tuple[int, str] | None:
+    """缓存命中路径：轮次自增 + 审核留痕 **合并为一个事务**（R176 · D2-3）。
+
+    旧实现是两次独立 commit：先 ``_bump_export_round`` 提交轮次，命中分支再
+    ``_record_export_review_trace`` 提交留痕。中途失败会出现「轮次涨了但留痕
+    丢了」，而 ``export_round`` 是文件名唯一序号 —— 事后无法把某份成稿对应回
+    「第几轮已交付」的审计轨迹，链路断裂且不可自愈。
+
+    现顺序：UPDATE+回读轮次 → INSERT 留痕 → **单次 commit**；任一步异常整体
+    ``rollback`` 并返回 ``None``（调用方据此放弃本次命中、转 503）。
+
+    为什么失败时不降级交付：留痕是 G12 契约（"这份成稿是不是评审后版本"必须
+    可回答），缓存命中只是纯优化；写不进去仍返回 200 等于假报一次未留痕的交付。
+    为什么不转"未命中重建"：重建尾部同样要写缓存行与留痕（还要多付一次全量
+    渲染），DB 写入不可用时只会放大成本、仍可能丢留痕 —— 一次失败不连锁写库。
+
+    轮次与文件名在同一事务内产出：只有 commit 成功，``round_no`` 才是对外承诺
+    的轮次，回滚后不会留下"涨了却没交付"的空号。
+    """
+    try:
+        await _db_exec(
+            db,
+            "UPDATE schemes SET export_round = COALESCE(export_round, 0) + 1 WHERE id=?",
+            (scheme_id,),
+            what="_bump_export_round_and_trace",
+        )
+        cur = await db.execute("SELECT export_round FROM schemes WHERE id=?", (scheme_id,))
+        row = await _db_fetch_one(cur, what="_bump_export_round_and_trace 回读")
+        round_no = int(row[0]) if (row and row[0]) else 1
+        export_filename = _build_export_filename(display_name, fmt, round_no)
+        await _write_export_review_trace(db, scheme_id, fmt, round_no, export_filename)
+        await db.commit()
+        return round_no, export_filename
+    except Exception as e:  # noqa: BLE001 —— 事务失败统一回滚，语义见 docstring
+        logger.warning("缓存命中路径「轮次+留痕」事务失败（整体回滚，本次不交付缓存产物）: %s", e)
+        try:
+            await db.rollback()
+        except Exception:
+            logger.debug("「轮次+留痕」事务回滚也失败（放弃清理）", exc_info=True)
+        return None
+
+
 def _export_name_headers(filename: str, round_no: int) -> dict:
     """把最终导出文件名透传给前端（下载名唯一事实源）。
 
@@ -1879,6 +2446,7 @@ def _export_name_headers(filename: str, round_no: int) -> dict:
     触发 latin-1 编码异常（与 `_attachment_disposition` 同理）。
     """
     from urllib.parse import quote
+
     return {
         "X-Export-Filename": quote(filename, safe=""),
         "X-Export-Round": str(round_no),
@@ -1890,10 +2458,9 @@ def _global_facts_status_headers(status: dict | None) -> dict:
     if not status:
         return {}
     from urllib.parse import quote
+
     return {
-        "X-Global-Facts-Status": quote(
-            json.dumps(status, ensure_ascii=False, separators=(",", ":")),
-            safe=""),
+        "X-Global-Facts-Status": quote(json.dumps(status, ensure_ascii=False, separators=(",", ":")), safe=""),
     }
 
 
@@ -1907,7 +2474,139 @@ def _export_audit_headers(audit: dict) -> dict:
     if not audit or not audit.get("items"):
         return {}
     from urllib.parse import quote
+
     return {"X-Content-Audit": quote(json.dumps(audit, ensure_ascii=False), safe="")}
+
+
+# ---------------------------------------------------------------------------
+# ✅ R176 · D2-2（2026-11-04）：内容体检结果旁车（``<产物>.audit.json``）
+# ---------------------------------------------------------------------------
+# 动机：`audit_content` 在命中路径上是纯浪费（M 档 26.5 ms / L 档 65.7 ms
+# median，安静窗口 §12.2）。旁车把"这一版内容已经体检过"的结论存到产物旁，
+# 命中时直接读回，省掉整轮正则扫描；但**不能**因此不发 X-Content-Audit 头
+# （契约不变，见 `_export_audit_headers`）。
+#
+# 设计约束（缺一不可，改动前先读完）：
+#   1) 同生共死：旁车只与"被缓存行引用的产物"配套。读侧只在
+#      `_cache_row_viable` 通过后才调用；`_prune_export_cache` /
+#      `_gc_orphan_exports` 删产物时连带删旁车（见 `_remove_export_artifact`）。
+#      反向（旁车在、缓存行不在）永不生效 —— 没有行就永远不会走到读旁车。
+#   2) 崩溃安全：旁车自带 `content_hash` + `fences_fixed` + 章节数三重校验。
+#      半截/截断 JSON 解析失败、字段缺失、值不匹配 → 一律**静默回退重算**，
+#      绝不抛错、也绝不把坏数据当结论。
+#   3) 原子性：临时文件写完再 `os.replace`，不会出现半截旁车。
+#   4) 失效：两条**独立**的版本轴，各自只对自己负责——
+#      · `_AUDIT_SIDECAR_VERSION` = **载荷格式版本**：只在旁车结构（字段增删/改名、
+#        `audit` 语义）变更时才 +1；格式没变就别动。
+#      · `audit_rules_fingerprint()` = **审计规则指纹**：规则表（key/标签/级别/
+#        正则与 flags）与三个参与判定的函数（`audit_content` /
+#        `_count_unclosed_chart_fences` / `is_fence_close`）的 AST 摘要。
+#        改规则/改判定代码 → 指纹自动变 → 旧旁车读侧不匹配 → 回退重算。
+#        因此**不再需要**任何人记得手动 bump 版本号（R177 收口）。
+_AUDIT_SIDECAR_VERSION = 1
+_AUDIT_SIDECAR_SUFFIX = ".audit.json"
+
+
+def _audit_sidecar_path(result_path) -> Path:
+    return Path(f"{result_path}{_AUDIT_SIDECAR_SUFFIX}")
+
+
+def _remove_export_artifact(result_path) -> None:
+    """删除产物并连带删除旁车（保留策略 / 孤儿回收的唯一删除出口）。"""
+    try:
+        Path(result_path).unlink(missing_ok=True)  # R177-DELETE-EXEMPT: 唯一删除出口（产物本体）
+    except OSError:
+        pass
+    try:
+        _audit_sidecar_path(result_path).unlink(missing_ok=True)  # R177-DELETE-EXEMPT: 唯一删除出口（配套旁车）
+    except OSError:
+        pass
+
+
+async def _read_audit_sidecar(result_path, prep: dict, content_hash: str):
+    """读旁车；任何不可用情形（缺失/坏 JSON/版本或校验不符）→ ``None``。"""
+    sidecar = _audit_sidecar_path(result_path)
+
+    def _read():
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return None
+            if data.get("v") != _AUDIT_SIDECAR_VERSION:
+                return None
+            if data.get("audit_fp") != audit_rules_fingerprint():
+                return None
+            if data.get("content_hash") != content_hash:
+                return None
+            if int(data.get("fences_fixed") or 0) != int(prep.get("fences_fixed") or 0):
+                return None
+            if int(data.get("sections") or 0) != len(prep.get("sections") or []):
+                return None
+            audit = data.get("audit")
+            if not isinstance(audit, dict) or not isinstance(audit.get("items"), list):
+                return None
+            return audit
+        except Exception as e:
+            # 缺失 / 半截 JSON / 编码损坏 / 字段类型畸形（如 "abc" 转 int 失败）
+            # —— 全部回退重算，绝不把坏数据当结论、也绝不抛给业务
+            logger.warning("审计旁车不可用（回退实时体检）: path=%s err=%s", sidecar.name, e)
+            return None
+
+    # 小文件（KB 级）但落在外置盘（J:）上，偶发抖动可达数十 ms；
+    # 命中路径每请求都会读，故与其它文件 IO 同口径下沉线程池，绝不压事件循环。
+    return await asyncio.to_thread(_read)
+
+
+async def _write_audit_sidecar(result_path, prep: dict, content_hash: str) -> None:
+    """原子写旁车（临时文件 + os.replace）；失败只告警，不影响导出交付。"""
+    audit = prep.get("content_audit")
+    if not isinstance(audit, dict):
+        return
+    sidecar = _audit_sidecar_path(result_path)
+    payload = {
+        "v": _AUDIT_SIDECAR_VERSION,
+        "audit_fp": audit_rules_fingerprint(),
+        "content_hash": content_hash,
+        "fences_fixed": int(prep.get("fences_fixed") or 0),
+        "sections": len(prep.get("sections") or []),
+        "audit": audit,
+    }
+
+    def _write():
+        tmp = sidecar.with_name(f"{sidecar.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, sidecar)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)  # R177-DELETE-EXEMPT: 仅清理本次临时文件
+            except OSError:
+                pass
+
+    try:
+        await asyncio.to_thread(_write)
+    except Exception as e:
+        logger.warning("审计旁车写入失败（不影响导出，下次命中将回退重算）: %s", e)
+
+
+async def _resolve_content_audit(prep: dict, *, content_hash: str, cached_path=None) -> dict:
+    """内容体检的唯一解析出口：优先命中旁车，否则实时重算。
+
+    调用时机：``_prepare_export`` 不再无条件体检；DOCX / PDF 两条链路在
+    **缓存判定之后**各调用一次 —— 命中传 ``cached_path``（可读旁车），
+    未命中不传（必然重算）。命中路径的旁车若不可用，行为与未命中完全相同
+    （重算），因此不存在"命中但少了审计提示"的退化路径。
+    """
+    audit = None
+    if cached_path:
+        audit = await _read_audit_sidecar(cached_path, prep, content_hash)
+    if audit is None:
+        audit = await asyncio.to_thread(
+            audit_content, prep["sections"], fences_fixed=int(prep.get("fences_fixed") or 0)
+        )
+    logger.info("%s", _format_audit_log(audit))
+    return audit
 
 
 # ---------------------------------------------------------------------------
@@ -1916,8 +2615,6 @@ def _export_audit_headers(audit: dict) -> dict:
 # ✅ 2026-10-05（D4 · 死副本清理）：唯一实现为 services/content_blocks.py 的
 #    `_strip_title_number`（已从 content_blocks 导入），其内部委托 numbering 的
 #    `strip_outline_numbering`；本模块此前的 `_TITLE_NUM_STRIP_RES` 副本无任何引用，删除。
-
-
 
 
 def _section_number_prefix(full_title: str) -> str:
@@ -1983,10 +2680,6 @@ def _cn_numeral_to_int(cn: str) -> str:
     return str(val) if val is not None else cn
 
 
-
-
-
-
 def _finalize_heading_runs(paragraph) -> None:
     """✅ 编号统一（2026-09-26）：强制标题段落所有 run 不倾斜。
 
@@ -1996,8 +2689,6 @@ def _finalize_heading_runs(paragraph) -> None:
     """
     for _r in paragraph.runs:
         _r.italic = False
-
-
 
 
 def _get_or_add_appendix_heading_style(doc):
@@ -2012,6 +2703,7 @@ def _get_or_add_appendix_heading_style(doc):
     """
     from docx.enum.style import WD_STYLE_TYPE
     from docx.oxml.ns import qn
+
     name = "Appendix Group Heading"
     # 遍历按名称匹配：python-docx 每次按名查找（doc.styles[name]）都会新建包装
     # 对象（StyleFactory），不能依赖对象同一性；遍历同时天然规避 KeyError 流程。
@@ -2028,6 +2720,166 @@ def _get_or_add_appendix_heading_style(doc):
     ppr.append(ol)
     return style
 
+
+# ---------------------------------------------------------------------------
+# ✅ R179（2026-11-05）：渲染前内容块结构收口（不改解析层，纯渲染期视图）
+# ---------------------------------------------------------------------------
+# 第1轮报告取证的三类结构缺陷都无法在解析层安全修复（解析层归正文生成会话）：
+#   · 标题与正文粘连成一段（"1）国家法律国家法律是…"）；
+#   · 标题段落吞掉整句正文（标题里出现"。"）；
+#   · Markdown 管道符表格带着表题前缀以**普通段落**漏进成稿（首字符不是 ``|``
+#     时解析层不认表格）。
+# 本函数只在渲染前把这类块重组为可渲染结构，**不修改源内容、不写回缓存**。
+_RE_PIPE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+_RE_PIPE_WITH_CAPTION = re.compile(r"^(?P<cap>[^|\n]{1,80}?)\s*\|(?P<rest>.+)\|\s*$")
+_RE_TABLE_CAPTION_LINE = re.compile(r"^\s*表\s*(?:[0-9０-９一二三四五六七八九十]+[0-9.\-–—]*|[：:])")
+_RE_ADHERED_TITLE = re.compile(r"^([\u4e00-\u9fffA-Za-z0-9]{2,14})\1")
+#: 列表项自带的字母序前缀（`a、` / `a.` / `a)`）。渲染层会重新分配编号，
+#: 因此源文里的前缀必须全部剥离 —— 否则出现报告中的 `a、a、` 双写。
+#: 只匹配**字母**前缀，数字前缀交给解析层（避免把「1.5 倍」误判为序号）。
+_RE_LETTER_ORDINAL = re.compile(r"^[a-zA-Z]{1,2}[、.．)）]\s*")
+
+
+def _split_pipe_cells(raw: str) -> list[str]:
+    """按 GFM 竖线切分单元格（先保护转义竖线 ``\\|``）."""
+    safe = raw.replace("\\|", "\x00").strip()
+    if safe.startswith("|"):
+        safe = safe[1:]
+    if safe.endswith("|"):
+        safe = safe[:-1]
+    return [c.replace("\x00", "|").strip() for c in safe.split("|")]
+
+
+def _make_table_block(cells: list[str], caption: str = "", extra_rows: list[list[str]] | None = None) -> dict:
+    """由单元格行合成解析层同构的 ``table`` 块（表头 + 对齐行 + 数据行）。"""
+    n = len(cells)
+    sep = "| " + " | ".join(["---"] * n) + " |"
+    lines = ["| " + " | ".join(cells) + " |", sep]
+    for row in extra_rows or []:
+        lines.append("| " + " | ".join(row) + " |")
+    block = {"type": "table", "lines": lines}
+    if caption:
+        block["caption"] = caption
+    return block
+
+
+def _looks_like_table_caption(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(_RE_TABLE_CAPTION_LINE.match(t)) or (t.endswith("表") and len(t) <= 40)
+
+
+def _normalize_render_blocks(blocks: list[dict]) -> list[dict]:
+    """把粘连标题 / 管道符段落重排为规范块；无坏形态时返回内容等价的新列表。"""
+    out: list[dict] = []
+    i = 0
+    total = len(blocks)
+    while i < total:
+        b = blocks[i]
+        if not isinstance(b, dict):
+            out.append(b)
+            i += 1
+            continue
+        bt = b.get("type")
+
+        # ① 列表项「标题正文粘连」：重复前缀（2~14 字）后还有 ≥8 字正文。
+        if bt == "list_item":
+            txt = str(b.get("text") or "").strip()
+            # ⓪ `a、a、正文` 双写：循环剥离字母序前缀（渲染层会重新编号）。
+            stripped = txt
+            while _RE_LETTER_ORDINAL.match(stripped):
+                _rest = _RE_LETTER_ORDINAL.sub("", stripped, count=1).strip()
+                if not _rest:
+                    break
+                stripped = _rest
+            if stripped != txt:
+                b = dict(b, text=stripped)
+                txt = stripped
+            m = _RE_ADHERED_TITLE.match(txt)
+            if m:
+                rest = txt[m.end() :]
+                if len(rest) >= 8 and rest[0] not in "，。；：、）)":
+                    out.append(dict(b, text=m.group(1)))
+                    out.append({"type": "paragraph", "text": rest})
+                    i += 1
+                    continue
+
+        # ② 标题段落吞正文：标题含句号 → 句号前为标题、其后 ≥8 字降为正文。
+        if bt == "heading":
+            txt = str(b.get("text") or "")
+            if "。" in txt:
+                head, _, rest = txt.partition("。")
+                if head.strip() and len(rest.strip()) >= 8:
+                    out.append(dict(b, text=head.strip()))
+                    out.append({"type": "paragraph", "text": rest.strip()})
+                    i += 1
+                    continue
+
+        if bt == "paragraph":
+            txt = str(b.get("text") or "").strip()
+
+            # ③ 连续纯管道行（首字符为 ``|``）→ 原生表格；吸收紧邻上文表题。
+            if _RE_PIPE_ROW.match(txt):
+                rows: list[list[str]] = []
+                j = i
+                while j < total:
+                    nb = blocks[j]
+                    if not isinstance(nb, dict) or nb.get("type") != "paragraph":
+                        break
+                    ntxt = str(nb.get("text") or "").strip()
+                    if not _RE_PIPE_ROW.match(ntxt):
+                        break
+                    cells = _split_pipe_cells(ntxt)
+                    if len(cells) < 2:
+                        rows = []
+                        break
+                    rows.append(cells)
+                    j += 1
+                if rows and all(len(r) == len(rows[0]) for r in rows):
+                    cap = ""
+                    if (
+                        out
+                        and out[-1].get("type") == "paragraph"
+                        and _looks_like_table_caption(str(out[-1].get("text") or ""))
+                    ):
+                        cap = str(out[-1].get("text") or "").strip()
+                        out.pop()
+                    out.append(_make_table_block(rows[0], cap, rows[1:]))
+                    i = j
+                    continue
+
+            # ④ 「表题前缀 | 表头 | …」段落：后随表格则并入，否则单独成表。
+            mcapb = _RE_PIPE_WITH_CAPTION.match(txt) if "|" in txt else None
+            if mcapb:
+                cells = _split_pipe_cells(mcapb.group("rest"))
+                cap = mcapb.group("cap").strip()
+                if len(cells) >= 2:
+                    nxt = blocks[i + 1] if i + 1 < total else None
+                    if isinstance(nxt, dict) and nxt.get("type") == "table":
+                        nxt_lines = nxt.get("lines") or []
+                        if len(nxt_lines) >= 2:
+                            old_hdr = _split_pipe_cells(nxt_lines[0])
+                            if len(old_hdr) == len(cells):
+                                merged = dict(nxt)
+                                sep = "| " + " | ".join(["---"] * len(cells)) + " |"
+                                merged["lines"] = [
+                                    "| " + " | ".join(cells) + " |",
+                                    sep,
+                                    nxt_lines[0],
+                                    *nxt_lines[2:],
+                                ]
+                                merged["caption"] = cap or nxt.get("caption", "")
+                                out.append(merged)
+                                i += 2
+                                continue
+                    out.append(_make_table_block(cells, cap))
+                    i += 1
+                    continue
+
+        out.append(b)
+        i += 1
+    return out
 
 
 def _build_docx_sync(
@@ -2109,8 +2961,7 @@ def _build_docx_sync(
     style.element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
     # ✅ P0 修复（2026-09-27）：同标题样式，删除 Normal 上残留的主题字体属性，
     #    否则 w:asciiTheme 会反向覆盖上面 style.font.name 写入的显式字体。
-    for _theme_attr in ("w:asciiTheme", "w:hAnsiTheme",
-                        "w:eastAsiaTheme", "w:cstheme"):
+    for _theme_attr in ("w:asciiTheme", "w:hAnsiTheme", "w:eastAsiaTheme", "w:cstheme"):
         if style.element.rPr.rFonts.get(qn(_theme_attr)) is not None:
             del style.element.rPr.rFonts.attrib[qn(_theme_attr)]
     # ✅ 增强：正文行距与段后间距（旧实现完全未设置，长文档通读体验差）
@@ -2137,8 +2988,7 @@ def _build_docx_sync(
         #    这里显式删除四个主题属性，使显式字体真正生效（删除是安全的：
         #    没有主题属性时 Word 直接使用 w:ascii/w:hAnsi/w:eastAsia）。
         _rfonts = h_style.element.rPr.rFonts
-        for _theme_attr in ("w:asciiTheme", "w:hAnsiTheme",
-                            "w:eastAsiaTheme", "w:cstheme"):
+        for _theme_attr in ("w:asciiTheme", "w:hAnsiTheme", "w:eastAsiaTheme", "w:cstheme"):
             if _rfonts.get(qn(_theme_attr)) is not None:
                 del _rfonts.attrib[qn(_theme_attr)]
         # ✅ 增强：标题与后文同页（避免标题孤行落在页尾），并留段前段后间距
@@ -2162,12 +3012,14 @@ def _build_docx_sync(
         title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         # ✅ 2026-10-11（文档质量报告 P0-B）：封面标题走「清洗残留 + 项目名兜底」
         #    的单一出口，避免残留串上封面或标题空白。
-        _set_run_font(title_p.add_run(_display_scheme_name(scheme, global_facts)),
-                      font_name, 28, bold=True)
+        # ✅ BUG 修复（2026-11-03 · R175 · BUG-2）：封面标题/投标人改用
+        #    `_safe_add_run`（先剥 XML 非法控制字符再建 run）——用户表单里
+        #    混入 \x00-\x08 等字符时，旧实现 add_run 抛 ValueError → 整单 500。
+        _set_run_font(_safe_add_run(title_p, _display_scheme_name(scheme, global_facts)), font_name, 28, bold=True)
         if bidder_name:
             bidder_p = doc.add_paragraph()
             bidder_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            _set_run_font(bidder_p.add_run(bidder_name), font_name, 16)
+            _set_run_font(_safe_add_run(bidder_p, bidder_name), font_name, 16)
         date_p = doc.add_paragraph()
         date_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         _set_run_font(date_p.add_run(datetime.now().strftime("%Y年%m月%d日")), font_name, 14)
@@ -2232,7 +3084,7 @@ def _build_docx_sync(
     if page_header:
         hp = sec.header.paragraphs[0]
         hp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        _set_run_font(hp.add_run(page_header), font_name, 9)
+        _set_run_font(_safe_add_run(hp, page_header), font_name, 9)
         _set_paragraph_borders(hp, bottom=("single", 6, "AAAAAA"))
 
     # 页脚
@@ -2240,7 +3092,7 @@ def _build_docx_sync(
         fp = sec.footer.paragraphs[0]
         fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
         if page_footer:
-            _set_run_font(fp.add_run(page_footer), font_name, 9)
+            _set_run_font(_safe_add_run(fp, page_footer), font_name, 9)
             fp.add_run("   ")
         if show_page_number:
             if page_number_style == "page_of_total":
@@ -2261,17 +3113,10 @@ def _build_docx_sync(
     # ✅ 加固（2026-10-06 · D1）：按**实际渲染顺序**给每个章节编号（roots 排序 +
     # 深度优先），用于「兜底借图」时确定性地选**文档顺序上最近的前一张同类图**
     # （旧实现依赖 chart_predictions 行插入顺序，借谁不可控）。
-    order_rank: dict[str, int] = {}
+    # ✅ RISK-175-01（R175）：与预渲染段共用同一排序口径（DFS 文档序）。
+    order_rank: dict[str, int] = _compute_doc_order_rank(roots, children_map)
     # ✅ 加固（D1）：本次构建期间「跨章借图」的 (章节, 类型, 借自) 去重集合
     _BORROWED_CHARTS: set[tuple] = set()
-
-    def _rank_order(secs: list):
-        for _s in sorted(secs, key=_section_sort_key):
-            if _s["id"] not in order_rank:
-                order_rank[_s["id"]] = len(order_rank)
-            _rank_order(children_map.get(_s["id"], []))
-
-    _rank_order(roots)
     # P0-3 性能优化：倒排索引一次构建，write_section 兜底查找从 O(N) 降为 O(1)
     chart_type_index = _build_chart_type_index(chart_lookup, order_rank)
     # 正文首个标题之前不允许分页，否则封面/目录之后会多出一张空白页
@@ -2310,12 +3155,29 @@ def _build_docx_sync(
         if content:
             blocks = blocks_cache.get(sec_id) or _parse_content_blocks(content)
             blocks = _strip_duplicate_leading_title(blocks, title, full_title)
+            # ✅ 2026-11-05（第1轮报告 §12「正文重复/标题重复」根因收口）：
+            #    E3 降级后正文子标题与 DB 章节标题同文本（如章节"3.4 通风空调
+            #    系统施工工艺"的正文里又有内容标题"1）、通风空调系统施工工艺"）
+            #    → 成稿同页出现两个同义标题。既有 _strip_duplicate_leading_title
+            #    只剥【开头连续】重复；此处把**任意位置**与章节标题同文本的
+            #    内容子标题一并剔除（编号由程序统一分配，重复标题无信息量）。
+            _sec_title_norms = {_norm_heading_text(t) for t in (title, full_title, pure_title)}
+            _sec_title_norms.discard("")
+            blocks = [
+                b
+                for b in blocks
+                if not (b.get("type") == "heading" and _norm_heading_text(b.get("text", "")) in _sec_title_norms)
+            ]
+            # ✅ R179：渲染前结构收口（粘连标题拆分 / 管道符段落转原生表格）；
+            #    无坏形态时内容与顺序完全不变（解析层与缓存均不受影响）。
+            blocks = _normalize_render_blocks(blocks)
             sub_counters: dict[int, int] = {}
             # ✅ E3（2026-09-25）：有 DB 子章节 + 配置开启 → 正文子标题降级为节内
             # body 命名空间（1）/ a、…），与 DB 子章节彻底隔离。无子女或配置关
             # 闭 → 保持旧点分编号，由后续计数器前移（L2991+）处理撞号。
             try:
                 from app.config import settings as _s
+
                 _demote = _s.body_subheading_demote_with_children
             except Exception:
                 _demote = True
@@ -2323,10 +3185,13 @@ def _build_docx_sync(
             for block in blocks:
                 if block["type"] == "heading":
                     md_lv = block.get("level", 1)
-                    pure = _strip_title_number(block.get("text", ""))
+                    # ✅ 2026-11-05（"a、a、"双重前缀根因）：源文子标题自带的
+                    #    字母序前缀在重编号前剥离（strip_outline_numbering 不认
+                    #    字母序），否则 E3 降级重新分配的 "a、" 与源前缀叠加。
+                    pure = strip_subitem_ordinal_prefix(_strip_title_number(block.get("text", "")))
                     text, style_lv = _compute_subheading(
-                        section_prefix, level, md_lv, sub_counters, pure, sec_id,
-                        has_children=has_children_demoted)
+                        section_prefix, level, md_lv, sub_counters, pure, sec_id, has_children=has_children_demoted
+                    )
                     block["_fixed_text"] = text
                     block["_heading_style"] = style_lv
 
@@ -2342,7 +3207,7 @@ def _build_docx_sync(
             #    契约全部沿用：① 遇非列表块整栈清空（重置序列）；② 标记样式变化该层从
             #    1 重计；③ 无序子项不碰栈（父级序号续接）；④ 重复/跳号自动连续编号；
             #    ⑤ 中文枚举符外观保留。零新增依赖 / 零数据迁移 / 零配置项。
-            ordered_stack: list[list] = []   # [[marker, seq], ...]，下标 = indent_lvl
+            ordered_stack: list[list] = []  # [[marker, seq], ...]，下标 = indent_lvl
             for block in blocks:
                 if block["type"] != "list_item":
                     # ✅ 遇非列表块 → 重置整条有序序列（沿用既有契约）
@@ -2365,8 +3230,8 @@ def _build_docx_sync(
                         if caption:
                             # ✅ 2026-10-17（表号叠写根因 B）：剥离源文自带「表 X-Y」前缀
                             _add_table_caption(
-                                doc, f"表 {table_num} {_strip_leading_table_number(caption)}",
-                                font_name, font_size)
+                                doc, f"表 {table_num} {_strip_leading_table_number(caption)}", font_name, font_size
+                            )
                         else:
                             # ✅ R51（2026-10-07）：表格无表名行 → 成稿表格裸奔无表题。
                             #    R50 仅补 WARNING 供排障，但用户成稿里 38 张表零编号零表题。
@@ -2375,7 +3240,7 @@ def _build_docx_sync(
                             _tbl_lines = block.get("lines") or []
                             _first = (_tbl_lines[0] if _tbl_lines else "").strip()
                             _auto_caption = ""
-                            if _first and "|" in _first and not re.match(r'^[\|\s\-:]+$', _first):
+                            if _first and "|" in _first and not re.match(r"^[\|\s\-:]+$", _first):
                                 cells = [c.strip() for c in _first.split("|") if c.strip()]
                                 if len(cells) >= 2:
                                     _auto_caption = "、".join(cells[:3])
@@ -2387,20 +3252,22 @@ def _build_docx_sync(
                             #    （首格「表 6-1 …」）→ 拼出的自动表题带编号 → 与导出编号叠写。
                             #    此处剥离首格自带的「表 X-Y」，只保留统一编号。
                             _auto_caption = _strip_leading_table_number(_auto_caption)
-                            _add_table_caption(doc, f"表 {table_num} {_auto_caption}",
-                                               font_name, font_size)
+                            _add_table_caption(doc, f"表 {table_num} {_auto_caption}", font_name, font_size)
                             logger.warning(
                                 "导出：章节 %s 表格无表名行，自动生成表题: 表 %s %s（首行: %s）",
-                                str(sec_id)[:8], table_num, _auto_caption,
-                                _first[:80])
+                                str(sec_id)[:8],
+                                table_num,
+                                _auto_caption,
+                                _first[:80],
+                            )
                         _add_table_from_markup(doc, block["lines"], font_name)
                     elif block["type"] == "chart":
                         chart_type = block["chart_type"]
                         # ✅ 加固（2026-10-06 · D1）：取码收敛到唯一出口
                         #    _resolve_chart_code，并回传「是否跨章借图 + 借自谁」。
                         mermaid_code, borrowed_from = _resolve_chart_code(
-                            block, sec_id, chart_type, chart_lookup,
-                            chart_type_index, order_rank)
+                            block, sec_id, chart_type, chart_lookup, chart_type_index, order_rank
+                        )
                         if mermaid_code:
                             # ✅ BUG 修复：去重键必须包含代码本体 —— 旧实现按 (章节, 类型) 去重，
                             #    同一章节内两张**不同**的同类图表（如两张不同的流程图）会被静默吞掉一张。
@@ -2420,7 +3287,10 @@ def _build_docx_sync(
                             logger.info(
                                 "导出：章节 %s 的 %s 图无本章节登记，兜底借用第 %s 章的同类图"
                                 "（跨章借图会在 X-Chart-Render-Stats 中计入 fallback_borrowed）",
-                                sec_id[:8], chart_type, borrowed_from[:8])
+                                sec_id[:8],
+                                chart_type,
+                                borrowed_from[:8],
+                            )
                         if not mermaid_code:
                             # ✅ 2026-09-25：图表被跳过时同步回收其孤儿引导语
                             #    （"如下图所示："留在成稿里却无图 = 图文不连贯）。
@@ -2450,7 +3320,9 @@ def _build_docx_sync(
                             logger.warning(
                                 "章节 %s 图表渲染失败（type=%s），已跳过且不占用图号"
                                 "（交付文档不写红字占位；传 chart_fail_placeholder=true 可恢复占位）",
-                                sec_id[:8], chart_type)
+                                sec_id[:8],
+                                chart_type,
+                            )
                             # ✅ 2026-09-25：跳过该图 → 回收其孤儿引导语（图文连贯）
                             _pop_orphan_lead_in(doc)
                             continue
@@ -2462,9 +3334,15 @@ def _build_docx_sync(
                         #    插入失败（格式合法但文件损坏等）→ 回退图号 + 回收孤儿引导语，
                         #    避免「占号却无图」的错号（placeholder 模式保留红字、图号照占）。
                         _ok = _add_inline_chart_from_bytes(
-                            doc, chart_type, _chart_bytes,
-                            fig_num, fig_title, font_name, font_size,
-                            placeholder=chart_fail_placeholder)
+                            doc,
+                            chart_type,
+                            _chart_bytes,
+                            fig_num,
+                            fig_title,
+                            font_name,
+                            font_size,
+                            placeholder=chart_fail_placeholder,
+                        )
                         if not _ok and not chart_fail_placeholder:
                             figure_counters[fig_key] = figure_counters.get(fig_key, 0) - 1
                             _pop_orphan_lead_in(doc)
@@ -2479,7 +3357,9 @@ def _build_docx_sync(
                         logger.warning(
                             "章节 %s 存在未生成的 AI 配图占位（%s），本次导出已跳过且不占图号；"
                             "请检查图像模型配置（导出期自动生成失败）",
-                            sec_id[:8], block.get("title") or "未命名")
+                            sec_id[:8],
+                            block.get("title") or "未命名",
+                        )
                         # ✅ 2026-09-25：AI 配图未生成 → 同样回收孤儿引导语
                         _pop_orphan_lead_in(doc)
                     elif block["type"] == "image":
@@ -2498,9 +3378,10 @@ def _build_docx_sync(
                         _img_bytes = (image_bytes or {}).get((block.get("url") or "").strip())
                         if not _chart_ok(_img_bytes):
                             logger.warning(
-                                "章节 %s 存在无位图的 AI 配图引用（%s），本次导出已跳过"
-                                "且不占用图号（避免图号虚跳）",
-                                sec_id[:8], (block.get("alt") or "").strip() or "未命名")
+                                "章节 %s 存在无位图的 AI 配图引用（%s），本次导出已跳过" "且不占用图号（避免图号虚跳）",
+                                sec_id[:8],
+                                (block.get("alt") or "").strip() or "未命名",
+                            )
                             _pop_orphan_lead_in(doc)
                             continue
                         chapter_num = _figure_chapter_num(heading_gen)
@@ -2509,9 +3390,13 @@ def _build_docx_sync(
                         # ✅ 图号虚跳收口（2026-10-03）：插入成功才保留图号；
                         #    插入失败（格式合法但文件损坏）→ 回退图号 + 回收孤儿引导语。
                         _ok = _add_illustration_from_bytes(
-                            doc, _img_bytes,
+                            doc,
+                            _img_bytes,
                             f"{chapter_num}-{figure_counters[fig_key]}",
-                            (block.get("alt") or "").strip(), font_name, font_size)
+                            (block.get("alt") or "").strip(),
+                            font_name,
+                            font_size,
+                        )
                         if not _ok:
                             figure_counters[fig_key] = figure_counters.get(fig_key, 0) - 1
                             _pop_orphan_lead_in(doc)
@@ -2534,7 +3419,7 @@ def _build_docx_sync(
                             # ✅ 分层栈维护：裁剪到当前层、补齐缺失层级（容忍跳级）；
                             #    当前层标记样式变化 → 该层 seq 归 0（视为新序列从 1）
                             if indent_lvl < len(ordered_stack):
-                                ordered_stack = ordered_stack[:indent_lvl + 1]
+                                ordered_stack = ordered_stack[: indent_lvl + 1]
                             while len(ordered_stack) <= indent_lvl:
                                 ordered_stack.append([marker, 0])
                             entry = ordered_stack[indent_lvl]
@@ -2548,8 +3433,19 @@ def _build_docx_sync(
                             prefix = "• "
                         # ✅ 使用 "List Paragraph" 样式（Word 识别为列表项）
                         _lp_style = _ensure_list_paragraph_style(doc)
+                        # ✅ 2026-11-05（第1轮报告 §4「1）国家法律」×2 / "a、a、"根因收口）：
+                        #    导出按序重编号（契约④），源文残留的同类序号前缀必须剥离，
+                        #    否则渲染成 "1）1）国家法律" / "1. a、吊顶" 叠加。
+                        #    只剥两类：① 与本次分配前缀**逐字相同**的数字前缀（必然是
+                        #    AI 双写）；② 字母序前缀（重编号路径不保留源序号）。数字前缀
+                        #    数值不同时不剥 —— 防止误伤 "3、5号楼立面" 这类数字开头的实质内容。
+                        _item_text = str(block.get("text") or "")
+                        if block.get("ordered"):
+                            if _item_text.startswith(prefix):
+                                _item_text = _item_text[len(prefix) :].lstrip()
+                            _item_text = strip_subitem_ordinal_prefix(_item_text)
                         p = doc.add_paragraph(style=_lp_style)
-                        _add_runs_with_inline_format(p, prefix + block["text"])
+                        _add_runs_with_inline_format(p, prefix + _item_text)
                         lpf = p.paragraph_format
                         # ✅ 左缩进：每级 0.74 cm（基础缩进 + 嵌套层级）
                         lpf.left_indent = Cm(0.74 * (indent_lvl + 1))
@@ -2615,7 +3511,7 @@ def _build_docx_sync(
             if level >= 2 and children_map.get(sec_id) and not has_children_demoted:
                 n_sub = _count_child_namespace_subheadings(blocks, section_prefix)
                 if n_sub:
-                    _idx = min(level, 7)   # 子章节层级 = level + 1（0 基索引恰为 level）
+                    _idx = min(level, 7)  # 子章节层级 = level + 1（0 基索引恰为 level）
                     heading_gen.parent_ids[_idx] = sec_id
                     heading_gen.counters[_idx] = n_sub
                     for _i in range(_idx + 1, 8):
@@ -2639,8 +3535,12 @@ def _build_docx_sync(
         except Exception as e:
             st = _fix_stats()
             st["block_render_failed"] = st.get("block_render_failed", 0) + 1
-            logger.error("导出：章节「%s」渲染失败（已跳过该章，其余内容不受影响）: %s",
-                         str(sec.get("title") or "")[:40], e, exc_info=True)
+            logger.error(
+                "导出：章节「%s」渲染失败（已跳过该章，其余内容不受影响）: %s",
+                str(sec.get("title") or "")[:40],
+                e,
+                exc_info=True,
+            )
             return None
 
     for root in sorted(roots, key=_section_sort_key):
@@ -2670,35 +3570,35 @@ def _build_docx_sync(
                 #    会进入 TOC 域（TOC \o "1-N" 收录大纲级别 1~N）且不带任何编号，
                 #    目录页出现「有目录项、无编号」的孤条目。自定义样式继承 Heading 2
                 #    外观，但大纲级别显式压为 9（正文文本），不再进目录。
-                gh = doc.add_paragraph(gt, style=apx_style)
-                _set_run_font(gh.runs[0] if gh.runs else gh.add_run(gt),
-                              font_name, heading_styles[2]["font_size"], bold=True)
+                # ✅ BUG-2（R175）：组标题 gt 来自事实数据，可能含 XML 非法控制字符
+                gh = doc.add_paragraph(style=apx_style)
+                _set_run_font(_safe_add_run(gh, gt), font_name, heading_styles[2]["font_size"], bold=True)
                 tbl = doc.add_table(rows=1, cols=2)
                 try:
                     tbl.style = "Table Grid"
                 except Exception:
-                    logger.debug("附录表格套用 Table Grid 样式失败（保留默认样式）",
-                                 exc_info=True)
+                    logger.debug("附录表格套用 Table Grid 样式失败（保留默认样式）", exc_info=True)
                 hc = tbl.rows[0].cells
-                _set_run_font(hc[0].paragraphs[0].add_run("名称"),
-                              font_name, 10.5, bold=True)
-                _set_run_font(hc[1].paragraphs[0].add_run("取值 / 内容"),
-                              font_name, 10.5, bold=True)
+                _set_run_font(hc[0].paragraphs[0].add_run("名称"), font_name, 10.5, bold=True)
+                _set_run_font(hc[1].paragraphs[0].add_run("取值 / 内容"), font_name, 10.5, bold=True)
                 for f in items:
                     rc = tbl.add_row().cells
-                    _set_run_font(rc[0].paragraphs[0].add_run(str(f.get("title") or "")),
-                                  font_name, 10.5)
-                    _appendix_cell_paragraph(rc[1], str(f.get("content") or ""),
-                                             font_name, first=True)
+                    _set_run_font(_safe_add_run(rc[0].paragraphs[0], str(f.get("title") or "")), font_name, 10.5)
+                    _appendix_cell_paragraph(
+                        rc[1],
+                        str(f.get("content") or ""),
+                        font_name,
+                        first=True,
+                        # ✅ R179：第二列剥离与第一列重复的事实名称前缀（只留取值）
+                        strip_name=str(f.get("title") or ""),
+                    )
         except TypeError as e:
             # ✅ P0 修复（2026-09-27）：TypeError 是**编程错误**（如把 bold 当位置参数
             #    传给 keyword-only 形参），不是"附录渲染不出来"的可恢复异常。
             #    旧实现把它和真正的运行期波动一起降级为 WARNING，于是整张
             #    「项目关键事实」附录静默消失、导出却报"成功"——最隐蔽的一类缺陷。
             #    现按 ERROR 上报，保留原降级（不阻断正文导出）。
-            logger.error(
-                "导出：渲染全局事实附录遇到编程错误（附录将缺失，"
-                "正文不受影响）: %s", e, exc_info=True)
+            logger.error("导出：渲染全局事实附录遇到编程错误（附录将缺失，" "正文不受影响）: %s", e, exc_info=True)
         except Exception as e:
             logger.warning("导出：渲染全局事实附录失败（降级跳过，不影响正文）: %s", e)
 
@@ -2720,49 +3620,50 @@ def _build_docx_sync(
                 items = group.get("items") or []
                 if not items:
                     continue
-                gh = doc.add_paragraph(gtitle, style=apx_style)
-                _set_run_font(gh.runs[0] if gh.runs else gh.add_run(gtitle),
-                              font_name, heading_styles[2]["font_size"], bold=True)
+                gh = doc.add_paragraph(style=apx_style)
+                _set_run_font(_safe_add_run(gh, gtitle), font_name, heading_styles[2]["font_size"], bold=True)
                 tbl = doc.add_table(rows=1, cols=2)
                 try:
                     tbl.style = "Table Grid"
                 except Exception:
-                    logger.debug("附录表格套用 Table Grid 样式失败（保留默认样式）",
-                                 exc_info=True)
+                    logger.debug("附录表格套用 Table Grid 样式失败（保留默认样式）", exc_info=True)
                 hc = tbl.rows[0].cells
-                _set_run_font(hc[0].paragraphs[0].add_run("名称"),
-                              font_name, 10.5, bold=True)
-                _set_run_font(hc[1].paragraphs[0].add_run("内容 / 要点"),
-                              font_name, 10.5, bold=True)
+                _set_run_font(hc[0].paragraphs[0].add_run("名称"), font_name, 10.5, bold=True)
+                _set_run_font(hc[1].paragraphs[0].add_run("内容 / 要点"), font_name, 10.5, bold=True)
                 for it in items:
                     rc = tbl.add_row().cells
-                    _set_run_font(rc[0].paragraphs[0].add_run(str(it.get("name") or "")),
-                                  font_name, 10.5)
-                    _appendix_cell_paragraph(rc[1], str(it.get("value") or ""),
-                                             font_name, first=True)
+                    _set_run_font(_safe_add_run(rc[0].paragraphs[0], str(it.get("name") or "")), font_name, 10.5)
+                    _appendix_cell_paragraph(
+                        rc[1],
+                        str(it.get("value") or ""),
+                        font_name,
+                        first=True,
+                        # ✅ R179：同一重复名称口径，名称列已展示则内容列不再重复
+                        strip_name=str(it.get("name") or ""),
+                    )
         except TypeError as e:
             # 与事实附录同口径：TypeError 是编程错误，按 ERROR 上报（否则附录
             # 静默消失而导出报成功，是最隐蔽的一类缺陷）。
-            logger.error(
-                "导出：渲染补充附录遇到编程错误（附录将缺失，正文不受影响）: %s",
-                e, exc_info=True)
+            logger.error("导出：渲染补充附录遇到编程错误（附录将缺失，正文不受影响）: %s", e, exc_info=True)
         except Exception as e:
             logger.warning("导出：渲染补充附录失败（降级跳过，不影响正文）: %s", e)
 
     # 注意：局部变量勿命名为 `_fix_stats`，否则会遮蔽同名模块级函数
+    # ✅ 2026-11-05：落盘前 lint 守卫（修复/检出计数并入本次统计）
     fix_stats = _log_fix_stats()
+    fix_stats.update(_docx_final_lint(doc))
     # ✅ 加固（D1）：把「本次构建跨章借图」的明细回传给调用方，写进
     #    X-Chart-Render-Stats（前端提示 + 审计）。加法式：dict 里多一个键，
     #    既有渲染统计键语义一字未动。
     borrowed = [
-        {"section_id": sid, "chart_type": ct, "borrowed_from": src}
-        for (sid, ct, src) in sorted(_BORROWED_CHARTS)
+        {"section_id": sid, "chart_type": ct, "borrowed_from": src} for (sid, ct, src) in sorted(_BORROWED_CHARTS)
     ]
     if borrowed:
         logger.warning(
             "导出：本次有 %d 处图表使用了**跨章借图**（该章节没有自己的图表登记，"
             "借用了同类图）—— 成稿图文可能与章节内容不符，请回查对应章节的图表登记",
-            len(borrowed))
+            len(borrowed),
+        )
     # ✅ R109（2026-10-19 · P0）：落盘前统一归一 OOXML 严格序列。
     #    任何手写 XML 的插入位置疏漏（如 w:shd 追加到 w:vAlign 之后）都在此兜住，
     #    否则 WPS 会因 CT_* 序列违例直接拒绝打开整份成稿。
@@ -2775,10 +3676,12 @@ def _build_docx_sync(
         _fsize = out_path.stat().st_size if out_path.exists() else 0
         logger.info(
             "导出：DOCX 已落盘（路径=%s · 大小=%d bytes · 章节数=%d · 表=%d · 图=%d）",
-            out_path, _fsize,
+            out_path,
+            _fsize,
             fix_stats.get("sections", 0) if isinstance(fix_stats, dict) else 0,
             fix_stats.get("tables", 0) if isinstance(fix_stats, dict) else 0,
-            fix_stats.get("figures", 0) if isinstance(fix_stats, dict) else 0)
+            fix_stats.get("figures", 0) if isinstance(fix_stats, dict) else 0,
+        )
     except Exception:
         logger.info("导出：DOCX 已落盘（路径=%s）", out_path)
     if borrowed:
@@ -2833,8 +3736,7 @@ def _load_heading_styles(config: dict) -> dict:
         user_lvl = user.get(str(lvl))
         if isinstance(user_lvl, dict):
             merged.update(user_lvl)
-        merged["font_size"] = _clamp_font_size(merged.get("font_size"),
-                                               _DEFAULT_HEADING_STYLES[lvl]["font_size"])
+        merged["font_size"] = _clamp_font_size(merged.get("font_size"), _DEFAULT_HEADING_STYLES[lvl]["font_size"])
         styles[lvl] = merged
     return styles
 
@@ -2843,7 +3745,7 @@ def _parse_frontend_images(body: dict) -> tuple[dict[str, BytesIO], list[str]]:
     """解析前端提交的 mermaid.js 渲染结果（dataURL → BytesIO）。"""
     fe_images: dict[str, BytesIO] = {}
     fe_codes: list[str] = []
-    for item in (body.get("chart_images") or []):
+    for item in body.get("chart_images") or []:
         try:
             code = str(item.get("mermaid_code", "")).strip()
             png = str(item.get("png", ""))
@@ -2873,7 +3775,8 @@ def _validate_remote_image_url(url: str) -> str:
     hostname = parsed.hostname.rstrip(".").lower()
     try:
         addrinfos = socket.getaddrinfo(
-            hostname, port or (443 if parsed.scheme.lower() == "https" else 80),
+            hostname,
+            port or (443 if parsed.scheme.lower() == "https" else 80),
             type=socket.SOCK_STREAM,
         )
     except OSError as exc:
@@ -2909,22 +3812,18 @@ async def _download_remote_image(
 
     limit = int(max_bytes if max_bytes is not None else _settings.image_download_max_bytes)
     limit = max(1, limit)
-    redirects_left = int(max_redirects if max_redirects is not None
-                          else _settings.image_download_max_redirects)
+    redirects_left = int(max_redirects if max_redirects is not None else _settings.image_download_max_redirects)
     redirects_left = max(0, min(redirects_left, 10))
-    request_timeout = float(timeout if timeout is not None
-                            else _settings.image_download_timeout)
+    request_timeout = float(timeout if timeout is not None else _settings.image_download_timeout)
     current_url = _validate_remote_image_url(url)
-    async with httpx.AsyncClient(
-            timeout=request_timeout, follow_redirects=False, trust_env=False) as client:
+    async with httpx.AsyncClient(timeout=request_timeout, follow_redirects=False, trust_env=False) as client:
         for _ in range(redirects_left + 1):
             async with client.stream("GET", current_url) as response:
                 if response.status_code in {301, 302, 303, 307, 308}:
                     location = response.headers.get("location", "")
                     if not location or _ == redirects_left:
                         raise ValueError("图片 URL 重定向次数超限")
-                    current_url = _validate_remote_image_url(
-                        urljoin(current_url, location))
+                    current_url = _validate_remote_image_url(urljoin(current_url, location))
                     continue
                 if response.status_code != 200:
                     raise ValueError(f"图片下载失败（HTTP {response.status_code}）")
@@ -3015,10 +3914,7 @@ async def _auto_generate_ai_image_blocks(
             # 该占位码首次出现的章节下标（保证按文档顺序分段）
             for i, sec in enumerate(sections):
                 for blk in blocks_cache.get(sec["id"]) or []:
-                    if (
-                        blk.get("type") == "ai_image"
-                        and str(blk.get("code") or "") == code
-                    ):
+                    if blk.get("type") == "ai_image" and str(blk.get("code") or "") == code:
                         return i
             return len(sections)
 
@@ -3026,7 +3922,10 @@ async def _auto_generate_ai_image_blocks(
         if len(groups) > _max_ai:
             logger.info(
                 "AI 配图全局预算生效: 候选 %d 张 → 按文档分段择优保留 %d 张（max_ai_images=%d）",
-                len(groups), len(_keep), _max_ai)
+                len(groups),
+                len(_keep),
+                _max_ai,
+            )
         groups = {c: bs for c, bs in groups.items() if c in _keep}
         if not groups:
             return 0
@@ -3058,9 +3957,7 @@ async def _auto_generate_ai_image_blocks(
         title = str(obj.get("title") or blocks[0].get("title") or "AI 配图")
         async with sem:
             try:
-                url = await generate_illustration_image(
-                    None, prompt, style, "16:9",
-                    _settings.image_provider, _img_cfg)
+                url = await generate_illustration_image(None, prompt, style, "16:9", _settings.image_provider, _img_cfg)
             except Exception as e:
                 logger.warning("AI 配图自动生成异常（导出降级跳过）: %s", e)
                 return
@@ -3073,17 +3970,20 @@ async def _auto_generate_ai_image_blocks(
             block["alt"] = title
 
     await asyncio.gather(*[_gen(c, bs) for c, bs in groups.items()])
-    converted = sum(1 for bs in groups.values() for b in bs
-                    if b["type"] == "image")
+    converted = sum(1 for bs in groups.values() for b in bs if b["type"] == "image")
     logger.info(
-        "AI 配图自动生成: %d/%d 块改写成功，共 %d 个唯一占位码"
-        "（失败占位块导出时跳过、不占图号）",
-        converted, sum(len(bs) for bs in groups.values()), len(groups))
+        "AI 配图自动生成: %d/%d 块改写成功，共 %d 个唯一占位码" "（失败占位块导出时跳过、不占图号）",
+        converted,
+        sum(len(bs) for bs in groups.values()),
+        len(groups),
+    )
     return converted
 
 
 async def _query_global_facts(
-    db, scheme_id: str, status: dict | None = None,
+    db,
+    scheme_id: str,
+    status: dict | None = None,
 ) -> list:
     """读取方案下「可注入正文」的全局事实（与正文/目录生成口径一致：
     has_conflict=0 且已审核确认 is_resolved=1），供导出渲染「项目关键事实」附录。
@@ -3101,14 +4001,14 @@ async def _query_global_facts(
             build_injectable_facts_query,
             resolve_scheme_project_id,
         )
+
         project_id = await resolve_scheme_project_id(db, scheme_id)
         columns = f"{FACTS_GT_COLUMN}, title, content"
         sql, params = build_injectable_facts_query(scheme_id, project_id, columns)
         cur = await db.execute(sql, params)
         facts = [dict(r) for r in await _db_fetch_all(cur, what="_query_global_facts")]
         if status is not None:
-            status.update({"ok": True, "code": "ok" if facts else "empty",
-                           "count": len(facts)})
+            status.update({"ok": True, "code": "ok" if facts else "empty", "count": len(facts)})
         return facts
     except Exception as e:
         if status is not None:
@@ -3117,9 +4017,41 @@ async def _query_global_facts(
         return []
 
 
+def _merge_chart_json_skip_stats(render_stats: dict, parse_diag: dict) -> None:
+    """把「解析期被跳过的 chart-json 块」并入 ``X-Chart-Render-Stats``。
+
+    ✅ 2026-11-05（第二轮日志驱动分析 P1）：旧实现里这些块只写一行 INFO，
+    响应头 failed 仍为 0 —— 生成出来的 DOCX 确实缺图，统计却报「失败 0」，
+    用户与排障者都看不到。口径：
+      · ``chart_json_skipped`` 计入 ``failed``（缺图就是失败，与渲染失败同权重）；
+      · 按原因拆分（未闭合 / 不可渲染）便于定位是生成截断还是模型乱写 type；
+      · 沿用既有坏缓存守卫：failed > 0 → 本次产物不写缓存（否则指纹不变时
+        会一直命中这份缺图产物）。
+    无跳过时**不新增任何键**，旧响应头形状逐字节不变（向后兼容）。
+    """
+    skipped = int(parse_diag.get("chart_json_skipped") or 0)
+    if not skipped:
+        return
+    render_stats["chart_json_skipped"] = skipped
+    render_stats["failed"] = int(render_stats.get("failed") or 0) + skipped
+    unclosed = int(parse_diag.get("chart_json_skipped_unclosed") or 0)
+    unrenderable = int(parse_diag.get("chart_json_skipped_unrenderable") or 0)
+    if unclosed:
+        render_stats["chart_json_skipped_unclosed"] = unclosed
+    if unrenderable:
+        render_stats["chart_json_skipped_unrenderable"] = unrenderable
+    logger.warning(
+        "导出：%d 处 chart-json 块在解析期被跳过（未闭合 %d / 不可渲染 %d），"
+        "已计入图表失败数（成稿缺图且不写缓存）",
+        skipped,
+        unclosed,
+        unrenderable,
+    )
+
+
 def _count_undownloaded_image_blocks(
-    sections: list[dict], blocks_cache: dict[str, list[dict]],
-    image_bytes: dict[str, object]) -> int:
+    sections: list[dict], blocks_cache: dict[str, list[dict]], image_bytes: dict[str, object]
+) -> int:
     """统计「已改写为 image 块、但位图未取回」的配图数量（坏缓存守卫用）。
 
     ✅ P2 修复（2026-09-30 · 残缺文档被写入缓存 → 永久缺图的第二缺口）：
@@ -3152,8 +4084,39 @@ def _count_undownloaded_image_blocks(
     return n
 
 
-async def _prepare_export(scheme_id: str, body: dict, db,
-                          cancel_event: threading.Event | None = None) -> dict:
+# ---------------------------------------------------------------------------
+# ✅ R176 · P1-3（2026-11-04）：事件循环上的**阻塞调用**统一下沉线程池。
+# 参照仓库既有正确模式（``upload_outline.py:243`` 的 ``asyncio.to_thread``），
+# 只包「一次同步调用」，不重构周边逻辑。下列 helper 全部**每次调用新建句柄**
+# （BytesIO / open），因此不存在同一文件句柄或同一 PIL 对象跨线程复用：
+#   · ``_verify_image_bytes``：PIL ``verify()`` 需整图解码校验（CPU）；
+#   · ``_read_path_bytes``：PDF 整文件读；
+#   · PDF 整文件写直接用 ``asyncio.to_thread(Path.write_bytes, ...)``。
+# ---------------------------------------------------------------------------
+def _verify_image_bytes(data) -> None:
+    """PIL 完整性校验（阻塞；调用方必须放在 ``asyncio.to_thread`` 中）。
+
+    ``data`` 是**本次下载独占**的 BytesIO，线程内只读校验、不 seek；
+    返回后由事件循环侧 ``seek(0)`` 交给后续渲染 —— 跨线程不共享读写位置。
+    非法图片抛异常（调用方按「不是合法图片」跳过）。
+    """
+    from PIL import Image as PILImage
+
+    PILImage.open(data).verify()
+
+
+def _read_path_bytes(path) -> bytes:
+    """整文件读（阻塞；调用方必须放在 ``asyncio.to_thread`` 中）。
+
+    ✅ 每次调用在**工作线程内**新建文件句柄，无跨线程句柄复用。
+    """
+    with open(path, "rb") as f:
+        return f.read()
+
+
+async def _prepare_export(
+    scheme_id: str, body: dict, db, cancel_event: threading.Event | None = None, defer_audit: bool = False
+) -> dict:
     """导出前的公共准备：解析配置 → 读取章节与图表 → 预渲染图表图片。
 
     DOCX 与 PDF 两条链路共用，避免"改了一处漏一处"（历史上正是如此丢失了
@@ -3195,8 +4158,7 @@ async def _prepare_export(scheme_id: str, body: dict, db,
     try:
         scheme = await _db_fetch_one(cur, what="_prepare_export:schemes", strict=True)
     except DBReadError as e:
-        raise HTTPException(
-            503, "方案数据读取失败（数据库连接异常），请稍后重试") from e
+        raise HTTPException(503, "方案数据读取失败（数据库连接异常），请稍后重试") from e
     if not scheme:
         raise HTTPException(404, "方案不存在")
     scheme = dict(scheme)
@@ -3206,10 +4168,44 @@ async def _prepare_export(scheme_id: str, body: dict, db,
         # （落库为同级序号 / 拖拽重排为全局序号），同级重复序号时仅按 sort_order
         # 排序的行次不确定 → 章节顺序在两次导出间漂移，且内容指纹随之抖动
         # （缓存永远 miss、重复渲染）。统一加 level、id 作确定性兜底。
-        "SELECT * FROM sections WHERE scheme_id=? ORDER BY sort_order, level, id",
-        (scheme_id,))
-    sections = [dict(r) for r in await _db_fetch_all(
-        cur, what="_prepare_export:sections")]
+        #
+        # ✅ R176 · D2-1（2026-11-04）：由 `SELECT *` 收窄为**命中路径必需列**。
+        #    逐列核对结果（消费方 → 列）：
+        #      · `_export_cache._content_fingerprint` 的 sections 维度：id / parent_id /
+        #        sort_order / level / title / content（六列，缺一即指纹变）；
+        #      · `_prepare_export` 自身：id（nodes / blocks_cache 键）、parent_id
+        #        （建树）、sort_order + level（排序键）、title + content（空章判定、
+        #        自动改写/围栏补齐、audit_content）；
+        #      · `_prepare_export_render` / `_auto_generate_ai_image_blocks`：
+        #        id（blocks_cache 键）+ content（块解析）；
+        #      · `_build_docx_sync.write_section`：id / level / title / content。
+        #    明确**不需要**的四列：status、review_status、word_count、outline_json
+        #    —— 它们只被 `collect_export_issues`（预检 /check）消费，而那里有
+        #    **自己的显式列查询**（见本模块 `SELECT id, parent_id, level, ...`），
+        #    与导出计划无关。故收窄不改变任何消费方语义，指纹逐字节不变
+        #    （回归护栏：tests/test_export_r176_b1_fixes_20261104.py）。
+        "SELECT id, parent_id, sort_order, level, title, content"
+        " FROM sections WHERE scheme_id=? ORDER BY sort_order, level, id",
+        (scheme_id,),
+    )
+    # ✅ BUG 修复（2026-11-03 · R175 · BUG-5）：章节读取改**严格读** + 空章留痕。
+    #    旧实现 fail-soft：数据库读失败 → 空章节集 → 仍照常构建并写入缓存，
+    #    产出一份「只有封面/目录、无正文」的残缺文档且**命中缓存后永久复现**，
+    #    用户侧看到的是「导出成功但文档打不开/没内容」。现：
+    #      · 读失败 → DBReadError → 503（可行动文案，绝不静默落缓存）；
+    #      · 零章节 / 全部为空章 → **明确降级并留痕**：本次仍交付（封面/目录
+    #        本身是可打开的合法文档），但响应头 `X-Export-Degraded:
+    #        empty-sections` + WARNING 日志，且 **不写入缓存**（见 export_docx
+    #        的降级分支）——残缺产物永不被后续命中复用。
+    try:
+        sections = [dict(r) for r in await _db_fetch_all(cur, what="_prepare_export:sections", strict=True)]
+    except DBReadError as e:
+        raise HTTPException(503, "章节数据读取失败（数据库连接异常），请稍后重试") from e
+    _has_content = any((s.get("title") or "").strip() or (s.get("content") or "").strip() for s in sections)
+    if not _has_content:
+        logger.warning(
+            "导出：方案 %s 章节为空或全部为空章 → 本次降级交付（封面/目录），" "不写入导出缓存", str(scheme_id)[:8]
+        )
 
     # ✅ v15 内容自动改写（默认关闭，需显式 config.auto_rewrite_content=true）：
     #    把「只体检不改写」升级为「可选自动改写」——仅做无损/低风险的格式与词汇修复：
@@ -3219,6 +4215,7 @@ async def _prepare_export(scheme_id: str, body: dict, db,
     #    在体检与 blocks 缓存之前执行，确保审计/编号检测/渲染看到同一份正文。
     if bool(config.get("auto_rewrite_content", False)):
         from app.services.content_rewrite import normalize_section_content
+
         _rw = {"tables": 0, "english": 0, "dupes": 0}
         for sec in sections:
             raw = sec.get("content") or ""
@@ -3231,8 +4228,11 @@ async def _prepare_export(scheme_id: str, body: dict, db,
                     _rw[_k] += st.get(_k, 0)
         if any(_rw.values()):
             logger.info(
-                "内容自动改写：HTML 表格转原生 %d 处；英文串写修正 %d 处；"
-                "相邻重复块合并 %d 处", _rw["tables"], _rw["english"], _rw["dupes"])
+                "内容自动改写：HTML 表格转原生 %d 处；英文串写修正 %d 处；" "相邻重复块合并 %d 处",
+                _rw["tables"],
+                _rw["english"],
+                _rw["dupes"],
+            )
 
     # ✅ 修复（2026-09-22，未闭合围栏吞噬正文）：系统已具备纯函数
     #    auto_fix_unclosed_fences（CommonMark 口径、幂等、无损），此前仅被单测覆盖、
@@ -3244,6 +4244,7 @@ async def _prepare_export(scheme_id: str, body: dict, db,
     #    默认关闭确保向后兼容：未开启时导出行为与上版完全一致。
     if bool(config.get("auto_fix_unclosed_fences", False)):
         from app.services.content_utils import auto_fix_unclosed_fences
+
         _fix_total = 0
         for sec in sections:
             raw = sec.get("content") or ""
@@ -3263,16 +4264,22 @@ async def _prepare_export(scheme_id: str, body: dict, db,
 
     # ✅ 修复（2026-09-17）：补齐交付文档的事实维度（此前漏渲染，见 _query_global_facts）
     global_facts_status: dict = {}
-    global_facts = await _query_global_facts(
-        db, scheme_id, status=global_facts_status)
+    global_facts = await _query_global_facts(db, scheme_id, status=global_facts_status)
 
     # ✅ 修复：图表数据纳入内容指纹（旧实现指纹只含正文与配置，
     # 重新编排/删除图表/修复代码后正文未变 → 导出仍命中旧缓存，返回旧图）
     cur = await db.execute(
-        "SELECT section_id, chart_type, data_json FROM chart_predictions WHERE scheme_id=?",
-        (scheme_id,))
-    chart_fp = [(r["section_id"], r["chart_type"], r["data_json"] or "")
-                for r in await _db_fetch_all(cur, what="_prepare_export:chart_predictions")]
+        "SELECT section_id, chart_type, data_json FROM chart_predictions WHERE scheme_id=?", (scheme_id,)
+    )
+    # ✅ BUG-5（R175）：图表登记同样严格读 —— 读失败降级为空集会让图表从产物
+    #    静默消失（却仍按「成功」入缓存），改为 503 可行动错误。
+    try:
+        chart_fp = [
+            (r["section_id"], r["chart_type"], r["data_json"] or "")
+            for r in await _db_fetch_all(cur, what="_prepare_export:chart_predictions", strict=True)
+        ]
+    except DBReadError as e:
+        raise HTTPException(503, "图表登记数据读取失败（数据库连接异常），请稍后重试") from e
 
     # ✅ BUG 修复：读取侧统一走 chart_payload.extract_chart_payload（唯一规范解析器）。
     #    只认 mermaid_code 键的旧写法会让 JSON 数据型图表（architecture/labor/
@@ -3280,6 +4287,7 @@ async def _prepare_export(scheme_id: str, body: dict, db,
     #    该图既进不了 chart_lookup、也拿不到兜底 code，便从文档中静默消失
     #    （与 /charts/list 清单能显示自相矛盾 —— 清单里读的是 data 键）。
     from app.services.chart_payload import extract_chart_payload
+
     chart_lookup: dict[tuple[str, str], str] = {}
     for sid, ct, data_json in chart_fp:
         if not data_json:
@@ -3333,28 +4341,44 @@ async def _prepare_export(scheme_id: str, body: dict, db,
         "children_map": children_map,
         "fe_codes": fe_codes,
         "fe_images": fe_images,
-        "render_stats": {"fe": 0, "backend_ok": 0, "failed": 0,
-                         "fallback_borrowed": 0},
+        "render_stats": {"fe": 0, "backend_ok": 0, "failed": 0, "fallback_borrowed": 0},
         # ✅ R99：由 _prepare_export_render **就地填充**（同一 dict 对象）
         "rendered_bytes": {},
         "image_bytes": {},
         "ai_image_pending": 0,
         "ai_image_download_pending": 0,
         "fences_fixed": _fix_total,
+        # ✅ BUG-5（R175）：零章节/全空章标记 —— 交付时降级且**不写缓存**。
+        "empty_sections": not _has_content,
     }
 
     # ✅ 导出前内容体检（只读、不改正文）：与预检 /check 同口径，
     #    通过响应头 X-Content-Audit 回传前端，并在日志中留痕。
     #    ✅ R99：fences_fixed 只在「本次确实补齐过围栏」时产出提示项，
     #    缺省 0 时与改造前逐字一致。
-    plan["content_audit"] = audit_content(sections, fences_fixed=_fix_total)
-    logger.info("%s", _format_audit_log(plan["content_audit"]))
+    # ✅ R176 · P1-3（2026-11-04）：``audit_content`` 是**纯 CPU 正则扫描**全章节
+    #    正文（安静窗口实测 M 档 26.5 ms / L 档 65.7 ms median），在事件循环上同步
+    #    执行会直接表现为「导出期间其它请求卡住」；现一律下沉线程池执行。
+    # ✅ R176 · D2-2（2026-11-04）：调用时机从「无条件执行」改为「按命中/未命中
+    #    解析」—— 命中路径优先读产物旁的 ``*.audit.json`` 旁车（省掉整轮正则扫描），
+    #    旁车缺失/过期/损坏则回退实时重算。体检结果仍是**必有**的：X-Content-Audit
+    #    响应头是既有契约，命中路径不得静默不发头（见 §10.6 的"不能直接省略"）。
+    #    解析入口统一为 ``_resolve_content_audit``（单一出口），此处只记录输入。
+    #    ``defer_audit`` 保留给"只做前置准备、不出产物"的调用方（测试/诊断）：
+    #    缺省 False = 与改造前逐字一致（立即体检并留痕），两条导出链路显式传
+    #    True 才会延后到缓存判定之后。
+    plan["content_audit"] = None
+    plan["fences_fixed"] = _fix_total
+    if not defer_audit:
+        plan["content_audit"] = await asyncio.to_thread(audit_content, sections, fences_fixed=_fix_total)
+        logger.info("%s", _format_audit_log(plan["content_audit"]))
 
     # ✅ D-3（2026-10-01）：补充附录数据源。默认关闭 → 空列表 → 不渲染。
     # ⚠️ project_id 取自 scheme（本函数作用域内没有名为 project_id 的局部变量，
     #    直接引用会 NameError 并让**整条导出链路 500**）。
     plan["appendix_sources"] = await _load_appendix_sources(
-        db, scheme_id, str((scheme or {}).get("project_id", "") or ""))
+        db, scheme_id, str((scheme or {}).get("project_id", "") or "")
+    )
     plan["config"] = config
     plan["heading_styles"] = _load_heading_styles(config)
     plan["docx_options"] = _build_docx_options(config, _float, _int)
@@ -3404,6 +4428,7 @@ async def _prepare_export_render(plan: dict) -> dict:
     if plan.get("_render_done"):
         return plan
     from app.config import settings as _settings
+
     # ✅ R106 FIX-1：本次导出的取消事件（由 _prepare_export 存入 plan；
     #    缺省 None = 无取消登记，各检查点自动短路，行为逐字不变）。
     _cancel_ev = plan.get("_cancel_event")
@@ -3412,26 +4437,38 @@ async def _prepare_export_render(plan: dict) -> dict:
     sections = plan["sections"]
     chart_lookup = plan["chart_lookup"]
     _blocks_cache = plan["blocks_cache"]
+    # ✅ 2026-11-05（第二轮日志驱动分析 P1）：解析期被跳过的 chart-json 块
+    #    必须计入统计（旧实现只写 INFO，响应头 failed 仍为 0 → 成稿缺图却报「失败 0」）。
+    _parse_diag: dict = plan.setdefault("_parse_diagnostics", {})
     fe_images = plan.get("fe_images") or {}
     allow_pil_fallback = bool(config.get("allow_pil_fallback", False))
-    render_stats: dict = {"fe": 0, "backend_ok": 0, "failed": 0,
-                         # ✅ 加固（D1）：跨章借图计数（由 _build_docx_sync 的
-                         #   fix_stats 合流后写入），缺省键保持既有形状。
-                         "fallback_borrowed": 0}
+    render_stats: dict = {
+        "fe": 0,
+        "backend_ok": 0,
+        "failed": 0,
+        # ✅ 加固（D1）：跨章借图计数（由 _build_docx_sync 的
+        #   fix_stats 合流后写入），缺省键保持既有形状。
+        "fallback_borrowed": 0,
+    }
 
     def _get_cached_blocks(sec_id: str, content: str) -> list[dict]:
         if sec_id not in _blocks_cache:
-            _blocks_cache[sec_id] = _parse_content_blocks(content or "")
+            _blocks_cache[sec_id] = _parse_content_blocks(content or "", diagnostics=_parse_diag)
         return _blocks_cache[sec_id]
 
     # 预收集需要渲染的图表代码（去重）
     # ✅ 图表同步生成：内联块自带代码优先；无内联码的标记块仍走 chart_predictions
     # P0-3 性能优化：倒排索引一次构建，避免每块 O(N) 兜底扫描（O(N²) → O(N)）
     # ✅ 加固（D1）：传入文档顺序 rank，使跨章借图的选择确定化
-    order_rank = {s["id"]: i for i, s in enumerate(sections)}
+    # ✅ RISK-175-01（R175）：改用与写侧同一的 DFS 文档序（旧实现 enumerate(sections)
+    #    是 SQL 扁平序，含父子层级时与写侧不一致 → 跨章借图选源错位）。
+    order_rank = _compute_doc_order_rank(plan.get("roots") or [], plan.get("children_map") or {})
     chart_type_index = _build_chart_type_index(chart_lookup, order_rank)
     seen_codes: set[tuple[str, str]] = set()
     unique_codes: list[tuple[str, str]] = []
+    # ✅ R180（2026-11-05 · 可观测性）：把「图型+代码」映射回章节，供失败明细
+    #    回答「哪一章的哪种图失败了」。旧实现只累加 failed 总数。
+    code_meta: dict[tuple[str, str], dict] = {}
     for sec in sections:
         for block in _get_cached_blocks(sec["id"], sec.get("content") or ""):
             if block["type"] != "chart":
@@ -3442,16 +4479,76 @@ async def _prepare_export_render(plan: dict) -> dict:
             #    三级取码逻辑，既重复又无法观测跨章借图）。
             #    章节顺序即 SQL 的 `ORDER BY sort_order, level, id`，
             #    与渲染端的 `_rank_order`（同键排序 + 深度优先）一致。
-            code, _borrowed = _resolve_chart_code(
-                block, sec["id"], ct, chart_lookup, chart_type_index, order_rank)
+            code, _borrowed = _resolve_chart_code(block, sec["id"], ct, chart_lookup, chart_type_index, order_rank)
             if code and (ct, code) not in seen_codes:
                 seen_codes.add((ct, code))
                 unique_codes.append((ct, code))
+                code_meta[(ct, code)] = {
+                    "section_id": sec["id"],
+                    "section_title": sec.get("title") or "",
+                }
 
     # 预渲染（to_thread 线程池，避免阻塞事件循环）
     # ✅ R99：直接复用 plan 里的同一个 dict（就地填充），
     #    不得新建局部 dict —— 否则渲染结果不会回传到 plan。
     rendered_bytes = plan["rendered_bytes"]
+
+    def _note_no_pil_fallback(ct: str) -> None:
+        """✅ R179（G-06）：记录「无本地渲染兜底」类型的渲染失败，避免静默缺图。
+
+        旧实现只累加 ``failed`` —— 用户在响应头/日志里无法区分「语法坏了」
+        与「本地 PIL 根本不会画、必须依赖 HTTP 引擎」两类失败。新增计数与类型
+        明细为**加法式字段**，默认不出现（0 时不挂键），旧消费端零回归。
+        """
+        try:
+            from app.services.chart_validators import PIL_RENDERABLE_CHART_TYPES
+        except Exception:  # pragma: no cover - 导入失败不应影响导出主流程
+            return
+        if ct in PIL_RENDERABLE_CHART_TYPES:
+            return
+        render_stats["no_pil_fallback"] = render_stats.get("no_pil_fallback", 0) + 1
+        _types = render_stats.setdefault("no_pil_fallback_types", [])
+        if ct not in _types:
+            _types.append(ct)
+            logger.warning(
+                "图表 %s 无本地渲染兜底（PIL 仅支持 %s），HTTP Service 不可用时该图会缺失",
+                ct,
+                sorted(PIL_RENDERABLE_CHART_TYPES),
+            )
+
+    def _note_render_failure(ct: str, code: str, reason: str) -> None:
+        """✅ R180（2026-11-05 · 可观测性）：结构化记录单张图渲染失败。
+
+        旧实现只 ``render_stats["failed"] += 1`` + 一行无图型的 warning，
+        日志里无法回答「哪一章的哪种图、为什么失败、是否占用了图号」。
+        现追加 ``failed_details``（最多 20 条，随 X-Chart-Render-Stats 返回，
+        加法式字段、0 失败时不出现），并打一条**可聚合**的结构化 WARNING：
+        ``chart_render_failure chart_type=... section_id=... code_hash=... reason=... occupies_number=...``。
+        ``occupies_number`` 取 ``chart_fail_placeholder``：True 时插图号占位，
+        False 时整块跳过（不占号、无红字），两者用户可见后果不同。
+        """
+        _meta = code_meta.get((ct, code)) or {}
+        _item = {
+            "chart_type": ct,
+            "section_id": _meta.get("section_id", ""),
+            "section_title": _meta.get("section_title", ""),
+            "code_hash": hashlib.sha1((code or "").encode("utf-8")).hexdigest()[:8],
+            "reason": reason,
+            "occupies_number": bool(config.get("chart_fail_placeholder", False)),
+        }
+        _details = render_stats.setdefault("failed_details", [])
+        if len(_details) < 20 and _item not in _details:
+            _details.append(_item)
+        logger.warning(
+            "chart_render_failure chart_type=%s section_id=%s section_title=%s "
+            "code_hash=%s reason=%s occupies_number=%s",
+            _item["chart_type"],
+            _item["section_id"],
+            _item["section_title"],
+            _item["code_hash"],
+            _item["reason"],
+            _item["occupies_number"],
+        )
 
     async def _render_one(ct: str, code: str):
         # 统一渲染轨：优先采用前端 mermaid.js 渲染的 PNG（与预览所见一致）
@@ -3462,18 +4559,46 @@ async def _prepare_export_render(plan: dict) -> dict:
             return
         try:
             from app.services.ai.mermaid_renderer import _chart_cache
+
             # ✅ 不降级开关透传：allow_pil=False 时 Mermaid 语法载荷在 HTTP Service 失败后
             # 不回退 PIL 自绘（JSON 数据载荷由渲染器内部豁免——PIL 是其唯一路径）
             rendered_bytes[(ct, code)] = await asyncio.to_thread(
-                _chart_cache.get_or_render, code, ct, "png", False, allow_pil_fallback)
+                _chart_cache.get_or_render, code, ct, "png", False, allow_pil_fallback
+            )
             if rendered_bytes[(ct, code)] is not None:
                 render_stats["backend_ok"] += 1
+                # ✅ D-23（R176 · 2026-11-04）：甘特图 >30 任务只渲染前 30 项，
+                #    旧实现仅留日志 —— 用户看到「完整」的横道图而少了一批任务。
+                #    现把截断计数并入 X-Chart-Render-Stats（0 时不挂键）。
+                if ct == "gantt":
+                    from app.services.ai.mermaid_gantt import gantt_truncated_task_count
+
+                    _gt = gantt_truncated_task_count(code)
+                    if _gt:
+                        render_stats["gantt_truncated"] = render_stats.get("gantt_truncated", 0) + _gt
             else:
                 render_stats["failed"] += 1
+                _note_render_failure(ct, code, "render_returned_none")
+                _note_no_pil_fallback(ct)
         except Exception as e:
             logger.warning("图表预渲染失败 (%s): %s", ct, e)
             rendered_bytes[(ct, code)] = None
             render_stats["failed"] += 1
+            _note_render_failure(ct, code, f"exception:{type(e).__name__}")
+            _note_no_pil_fallback(ct)
+
+    # ✅ 2026-11-05（第二轮日志驱动分析 · 图表缓存可观测）：后端渲染轨的
+    #    进程内/磁盘缓存命中计数此前只在 get_stats() 里自用、没有任何出口。
+    #    这里取「渲染前后计数差」，暴露到 X-Chart-Render-Stats：
+    #    cache_hits / cache_misses（本次导出口径，非进程累计）。
+    _cache_counters_before: dict | None = None
+    if unique_codes:
+        try:
+            from app.services.ai.mermaid_renderer import _chart_cache
+
+            _cache_counters_before = _chart_cache.get_counters()
+        except Exception:  # noqa: BLE001 — 统计失败绝不影响导出
+            _cache_counters_before = None
 
     if unique_codes:
         # ✅ 性能优化：并发上限 4（旧实现无上限 gather，图多时线程池打满 + 内存尖峰）
@@ -3490,8 +4615,21 @@ async def _prepare_export_render(plan: dict) -> dict:
         await asyncio.gather(*[_render_one_limited(ct, code) for ct, code in unique_codes])
         logger.info(
             "渲染轨统计: 前端图 %d, 后端 %d, 失败 %d（总计 %d, allow_pil=%s）",
-            render_stats["fe"], render_stats["backend_ok"], render_stats["failed"],
-            len(unique_codes), allow_pil_fallback)
+            render_stats["fe"],
+            render_stats["backend_ok"],
+            render_stats["failed"],
+            len(unique_codes),
+            allow_pil_fallback,
+        )
+        if _cache_counters_before is not None:
+            try:
+                from app.services.ai.mermaid_renderer import _chart_cache
+
+                _after = _chart_cache.get_counters()
+                render_stats["cache_hits"] = max(0, _after["hits"] - _cache_counters_before["hits"])
+                render_stats["cache_misses"] = max(0, _after["misses"] - _cache_counters_before["misses"])
+            except Exception as e:  # noqa: BLE001 — 统计失败不影响导出
+                logger.debug("图表缓存计数读取失败（忽略）: %s", e)
 
     # ✅ R106 FIX-1：图表段与 AI 配图段之间的取消检查点（命中即抛，
     #    后续「计费生图 + 位图下载 + DOCX 构建」全部不再发生）。
@@ -3501,8 +4639,7 @@ async def _prepare_export_render(plan: dict) -> dict:
     #    就地改写为 image 块 —— 随后下面的 URL 收集/下载循环会一并取回位图，
     #    write_section 走既有 image 分支插图与编号。生成失败的块保持占位、
     #    整块跳过（不占图号、无红字）。
-    _ai_converted = await _auto_generate_ai_image_blocks(
-        sections, _blocks_cache, config, cancel_event=_cancel_ev)
+    _ai_converted = await _auto_generate_ai_image_blocks(sections, _blocks_cache, config, cancel_event=_cancel_ev)
     # ✅ R106 FIX-1：AI 配图段后的取消检查点（在飞生图跑完即止，不再下载/构建）。
     _check_export_cancelled(_cancel_ev)
     # ✅ P1 修复（2026-09-27 · 残缺文档被写入缓存 → 永久缺图）：
@@ -3525,8 +4662,10 @@ async def _prepare_export_render(plan: dict) -> dict:
                     _ai_pending += 1
     if _ai_pending:
         logger.warning(
-            "导出：%d 处 AI 配图未生成（占位块残留，成稿将缺图且不写缓存）"
-            "；成功改写 %d 处", _ai_pending, _ai_converted)
+            "导出：%d 处 AI 配图未生成（占位块残留，成稿将缺图且不写缓存）" "；成功改写 %d 处",
+            _ai_pending,
+            _ai_converted,
+        )
 
     #    下载采用有界安全策略：仅 HTTP(S)、拒绝内网目标、限制超时/大小/重定向。
     # ✅ R99：同上，直接复用 plan["image_bytes"]。
@@ -3555,8 +4694,9 @@ async def _prepare_export_render(plan: dict) -> dict:
                     data = BytesIO(raw)
                     # 校验确为图片：厂商偶发返回 HTML 错误页，直接插入会破坏 DOCX
                     try:
-                        from PIL import Image as PILImage
-                        PILImage.open(data).verify()
+                        # ✅ R176 · P1-3：PIL verify() 是整图解码校验（CPU），
+                        #    下沉线程池；data 为本次下载独占，线程内只读。
+                        await asyncio.to_thread(_verify_image_bytes, data)
                     except Exception:
                         logger.warning("AI 配图不是合法图片，已跳过: %s", url[:120])
                         return
@@ -3579,15 +4719,17 @@ async def _prepare_export_render(plan: dict) -> dict:
     #    失败属旧行为（跳过不占图号），不使缓存永久失效。
     _ai_download_pending = 0
     if bool(config.get("ai_image_auto_generate", True)):
-        _ai_download_pending = _count_undownloaded_image_blocks(
-            sections, _blocks_cache, image_bytes)
+        _ai_download_pending = _count_undownloaded_image_blocks(sections, _blocks_cache, image_bytes)
     if _ai_download_pending:
         render_stats["ai_image_download_pending"] = _ai_download_pending
         logger.warning(
-            "导出：%d 处 AI 配图位图下载失败（成稿将缺图且不写缓存），"
-            "已下载 %d/%d 个唯一 URL", _ai_download_pending,
-            len(image_bytes), len(unique_image_urls))
+            "导出：%d 处 AI 配图位图下载失败（成稿将缺图且不写缓存），" "已下载 %d/%d 个唯一 URL",
+            _ai_download_pending,
+            len(image_bytes),
+            len(unique_image_urls),
+        )
 
+    _merge_chart_json_skip_stats(render_stats, _parse_diag)
 
     plan["render_stats"] = render_stats
     plan["ai_image_pending"] = _ai_pending
@@ -3616,20 +4758,19 @@ def _build_docx_options(config: dict, _float, _int) -> dict:
         "toc_depth": max(1, min(_int("toc_depth", 3), 7)),
         # ✅ 增强 v7：封面项目信息表 + 页边距（缺省 None → 走默认行为，向后兼容）
         # ✅ 类型防御：脏预设/直调 API 传入非 dict 时静默忽略，避免构建期 500
-        "cover_info": config.get("cover_info") if isinstance(
-            config.get("cover_info"), dict) else None,
-        "margins": config.get("margins") if isinstance(
-            config.get("margins"), dict) else None,
+        "cover_info": config.get("cover_info") if isinstance(config.get("cover_info"), dict) else None,
+        "margins": config.get("margins") if isinstance(config.get("margins"), dict) else None,
         # ✅ 新增（2026-09-19）：图表渲染失败时的产物形态开关。
         "chart_fail_placeholder": bool(config.get("chart_fail_placeholder", False)),
         # ✅ 2026-09-22 引入：一级章节标题底部边框（章框），默认关闭向后兼容
         "heading_border": bool(config.get("heading_border", False)),
         # ✅ 2026-10-02（第二十三轮）：专项施工方案法定前置表单四开关。
         "scheme_forms": {
-            k: True for k in ("compilation_note", "approval",
-                              "expert_review", "drawing_appendix")
-            if bool((config.get("scheme_forms") or {}).get(k)
-                    if isinstance(config.get("scheme_forms"), dict) else False)
+            k: True
+            for k in ("compilation_note", "approval", "expert_review", "drawing_appendix")
+            if bool(
+                (config.get("scheme_forms") or {}).get(k) if isinstance(config.get("scheme_forms"), dict) else False
+            )
         },
         # ✅ 2026-10-11（《文档生成规则》4.2 导出标准）：版式预设名在此**读取**，
         #    实际覆盖发生在 _build_docx_task → _resolve_layout_preset。
@@ -3641,6 +4782,7 @@ def _export_cache_fast_path_enabled() -> bool:
     """缓存命中快速路径开关（默认开启）；配置不可用时按默认处理，绝不阻断导出。"""
     try:
         from app.config import settings as _fp
+
         return bool(getattr(_fp, "export_cache_fast_path", True))
     except Exception:  # pragma: no cover - 配置不可用时保持默认行为
         return True
@@ -3673,14 +4815,14 @@ async def _load_appendix_sources(db, scheme_id: str, project_id: str) -> list[di
     # ① 知识库条目
     try:
         cur = await db.execute(
-            "SELECT title, usage_text, content FROM knowledge_base "
-            "WHERE project_id=? ORDER BY id LIMIT 200", (project_id,))
+            "SELECT title, usage_text, content FROM knowledge_base " "WHERE project_id=? ORDER BY id LIMIT 200",
+            (project_id,),
+        )
         items = []
         for r in await _db_fetch_all(cur, what="_load_appendix_sources:knowledge_base"):
             d = dict(r)
             val = str(d.get("content") or d.get("usage_text") or "")
-            items.append({"name": str(d.get("title") or ""),
-                          "value": val[:500]})
+            items.append({"name": str(d.get("title") or ""), "value": val[:500]})
         if items:
             groups.append({"title": "知识库条目", "items": items})
     except Exception as e:
@@ -3691,12 +4833,12 @@ async def _load_appendix_sources(db, scheme_id: str, project_id: str) -> list[di
         cur = await db.execute(
             "SELECT extract_type, extract_data FROM doc_extractions "
             "WHERE project_id=? AND status != 'stale' ORDER BY id LIMIT 200",
-            (project_id,))
+            (project_id,),
+        )
         items = []
         for r in await _db_fetch_all(cur, what="_load_appendix_sources:doc_extractions"):
             d = dict(r)
-            items.append({"name": str(d.get("extract_type") or ""),
-                          "value": str(d.get("extract_data") or "")[:500]})
+            items.append({"name": str(d.get("extract_type") or ""), "value": str(d.get("extract_data") or "")[:500]})
         if items:
             groups.append({"title": "解析提取成果", "items": items})
     except Exception as e:
@@ -3715,14 +4857,28 @@ def _build_docx_task(out_path: str, prep: dict) -> tuple:
     """
     o = _resolve_layout_preset(prep.get("config") or {}, prep["docx_options"])
     return (
-        str(out_path), prep["scheme"], prep["roots"], prep["children_map"],
-        prep["chart_lookup"], prep["rendered_bytes"], prep["blocks_cache"],
-        o["font_name"], o["font_size"], o["page_header"], o["page_footer"],
-        o["show_page_number"], o["show_title_page"], o["show_toc"],
-        o["bidder_name"], prep["heading_styles"],
-        o["page_break_before_chapter"], o["line_spacing"],
-        o["page_number_style"], o["toc_depth"],
-        o.get("margins"), o.get("cover_info"),
+        str(out_path),
+        prep["scheme"],
+        prep["roots"],
+        prep["children_map"],
+        prep["chart_lookup"],
+        prep["rendered_bytes"],
+        prep["blocks_cache"],
+        o["font_name"],
+        o["font_size"],
+        o["page_header"],
+        o["page_footer"],
+        o["show_page_number"],
+        o["show_title_page"],
+        o["show_toc"],
+        o["bidder_name"],
+        prep["heading_styles"],
+        o["page_break_before_chapter"],
+        o["line_spacing"],
+        o["page_number_style"],
+        o["toc_depth"],
+        o.get("margins"),
+        o.get("cover_info"),
         prep.get("image_bytes") or {},
         prep.get("global_facts") or [],
         o.get("chart_fail_placeholder", False),
@@ -3752,7 +4908,6 @@ from app.routers._export_cache import (  # noqa: F401,E402,I001 — 拆分兼容
     _prune_export_cache,
     _summarize_numbering_consistency,
 )
-
 
 
 # ✅ P2 收口（2026-10-13）：同「方案 + 格式 + 配置」并发导出的重复成本。
@@ -3839,6 +4994,46 @@ def _export_inflight_snapshot() -> set[str]:
 
 
 # ---------------------------------------------------------------------------
+# ✅ BUG 修复（2026-11-03 · R175 · BUG-6）：「正在读取」租约（读保护）
+# ---------------------------------------------------------------------------
+# FileResponse 是**懒打开**的：handler 返回之后才开始流式读文件。缓存命中的
+# 产物在 DB 里虽有行，但同一方案的新导出会触发 `_prune_export_cache`
+# （保留最近 5 份）—— 若本次命中的是第 6 份以内的旧行、或同一秒插入次序抖动，
+# 该文件可能在流式读取途中被 unlink，用户侧表现为下载中断/0 字节/校验失败。
+# 在飞集合覆盖不到「读」这一段，故补一条**短租约**：命中/交付前登记
+# （path → 过期时间），prune 与孤儿 GC 在租约内一律跳过该路径的删除。
+# 进程内、TTL 到期自动失效；即使登记失败也只会退回旧行为（不阻断交付）。
+_EXPORT_READ_LEASES: dict[str, float] = {}
+_EXPORT_READ_LEASE_TTL_SECONDS = 600  # 与 _ORPHAN_TMP_TTL_SECONDS 同量级
+
+
+def _export_read_lease_register(path) -> None:
+    """登记「本次响应将读取该产物」的短租约（fail-soft）。"""
+    try:
+        key = _export_inflight_key(path)
+        now = time.time()
+        with _EXPORT_INFLIGHT_GUARD:
+            _EXPORT_READ_LEASES[key] = now + _EXPORT_READ_LEASE_TTL_SECONDS
+            # 顺带清过期条目，避免集合随命中次数无限增长
+            for _k in [k for k, exp in _EXPORT_READ_LEASES.items() if exp < now]:
+                _EXPORT_READ_LEASES.pop(_k, None)
+    except Exception:  # noqa: BLE001 - pragma: no cover - 登记失败仅失去保护
+        pass
+
+
+def _export_read_lease_snapshot() -> set[str]:
+    """有效租约路径快照（供 prune / 孤儿 GC 判定），过期条目在此清理。"""
+    try:
+        now = time.time()
+        with _EXPORT_INFLIGHT_GUARD:
+            for _k in [k for k, exp in _EXPORT_READ_LEASES.items() if exp < now]:
+                _EXPORT_READ_LEASES.pop(_k, None)
+            return set(_EXPORT_READ_LEASES)
+    except Exception:  # noqa: BLE001 - pragma: no cover
+        return set()
+
+
+# ---------------------------------------------------------------------------
 # ✅ 导出终局序列收口（2026-10-14 · 遗留建议执行）：
 #    DOCX / PDF 两分支的「写缓存行 → 裁剪 → 提交」与「留痕 → 回收 → 注销」
 #    序列曾各自手写两份，历史缺陷全部源于双写分叉：
@@ -3847,10 +5042,17 @@ def _export_inflight_snapshot() -> set[str]:
 #      · PDF 的提交顺序修复（2026-10-13）只落在 PDF 侧，DOCX 侧口径不同。
 #    现把两段序列各自收敛为单一 helper，两分支只允许传参不同。
 # ---------------------------------------------------------------------------
-async def _persist_export_cache_row(db, *, scheme: dict, scheme_id: str,
-                                    config_hash: str, content_fingerprint: str,
-                                    cache_key: str, out_path: Path,
-                                    what: str) -> None:
+async def _persist_export_cache_row(
+    db,
+    *,
+    scheme: dict,
+    scheme_id: str,
+    config_hash: str,
+    content_fingerprint: str,
+    cache_key: str,
+    out_path: Path,
+    what: str,
+) -> None:
     """写入导出缓存行并执行保留裁剪（INSERT OR IGNORE → commit → prune → commit）。
 
     提交顺序采用 PDF 分支 2026-10-13 修复确立的**双提交**口径：
@@ -3867,14 +5069,23 @@ async def _persist_export_cache_row(db, *, scheme: dict, scheme_id: str,
     在 WAL 下只在获取写锁的语句抛出，重放整段无重复副作用；INSERT OR IGNORE
     天然幂等）；任一段重试耗尽 → rollback + WARNING 点名，**不阻断交付**。
     """
+
     async def _insert_and_commit() -> bool:
         ok = await _db_exec(
             db,
             "INSERT OR IGNORE INTO export_cache (id, project_id, scheme_id, config_hash,"
             " content_fingerprint, cache_key, result_path) VALUES (?,?,?,?,?,?,?)",
-            (str(uuid.uuid4()), scheme.get("project_id", ""), scheme_id, config_hash,
-             content_fingerprint, cache_key, str(out_path)),
-            what=what)
+            (
+                str(uuid.uuid4()),
+                scheme.get("project_id", ""),
+                scheme_id,
+                config_hash,
+                content_fingerprint,
+                cache_key,
+                str(out_path),
+            ),
+            what=what,
+        )
         await db.commit()
         return ok
 
@@ -3883,37 +5094,38 @@ async def _persist_export_cache_row(db, *, scheme: dict, scheme_id: str,
         await db.commit()
 
     try:
-        await retry_db_op(_insert_and_commit, max_retries=4,
-                          base_delay=0.1, jitter=0.05)
+        await retry_db_op(_insert_and_commit, max_retries=4, base_delay=0.1, jitter=0.05)
     except Exception:
         try:
             await db.rollback()
         except Exception:
             # rollback 本身再失败也无可补救，仅放弃缓存行
-            logger.debug("导出缓存行写入失败后的回滚也失败（%s，放弃缓存行）", what,
-                         exc_info=True)
+            logger.debug("导出缓存行写入失败后的回滚也失败（%s，放弃缓存行）", what, exc_info=True)
         logger.warning(
-            "导出缓存行持久化失败（%s），本次产物不落缓存、下次将重新生成；"
-            "交付不受影响", what, exc_info=True)
+            "导出缓存行持久化失败（%s），本次产物不落缓存、下次将重新生成；" "交付不受影响", what, exc_info=True
+        )
         return
     try:
-        await retry_db_op(_prune_and_commit, max_retries=4,
-                          base_delay=0.1, jitter=0.05)
+        await retry_db_op(_prune_and_commit, max_retries=4, base_delay=0.1, jitter=0.05)
     except Exception:
         try:
             await db.rollback()
         except Exception:
             logger.debug("导出缓存裁剪失败后的回滚也失败（%s）", what, exc_info=True)
         # 裁剪失败仅影响保留策略（旧行多留一轮），下一轮导出的裁剪自然自愈
-        logger.warning(
-            "导出缓存裁剪失败（%s），旧缓存行将由下次导出自愈", what,
-            exc_info=True)
+        logger.warning("导出缓存裁剪失败（%s），旧缓存行将由下次导出自愈", what, exc_info=True)
 
 
-async def _finalize_export_delivery(db, *, scheme_id: str, kind: str,
-                                    round_no: int, export_filename: str,
-                                    gc_protect: set[Path] | None = None,
-                                    inflight_path: Path | None = None) -> None:
+async def _finalize_export_delivery(
+    db,
+    *,
+    scheme_id: str,
+    kind: str,
+    round_no: int,
+    export_filename: str,
+    gc_protect: set[Path] | None = None,
+    inflight_path: Path | None = None,
+) -> None:
     """导出交付前的统一收尾：审核留痕 → 孤儿回收 → 解除在飞保护。
 
     三步的顺序是安全契约，不得调换：
@@ -3930,7 +5142,6 @@ async def _finalize_export_delivery(db, *, scheme_id: str, kind: str,
         _export_inflight_unregister(inflight_path)
 
 
-
 def _export_config_hash(body: dict) -> str:
     """仅由请求体配置算出的配置指纹。
 
@@ -3938,15 +5149,16 @@ def _export_config_hash(body: dict) -> str:
     ``md5(json.dumps(_normalize_config(body["config"]), sort_keys=True))``），
     但可在昂贵的 ``_prepare_export`` **之前**算出 ⇒ 能用作并发去重锁的键。
     """
-    return hashlib.md5(json.dumps(
-        _normalize_config((body or {}).get("config", {}) or {}),
-        sort_keys=True).encode()).hexdigest()
+    return hashlib.md5(
+        json.dumps(_normalize_config((body or {}).get("config", {}) or {}), sort_keys=True).encode()
+    ).hexdigest()
 
 
 def _export_dedup_enabled() -> bool:
     """并发去重开关；配置不可用时按默认（开启）处理，绝不阻断导出。"""
     try:
         from app.config import settings as _dedup_settings
+
         return bool(getattr(_dedup_settings, "export_dedup_concurrent", True))
     except Exception:  # pragma: no cover - 配置不可用时保持默认行为
         return True
@@ -3982,8 +5194,9 @@ async def _export_dedup_acquire(key: tuple) -> asyncio.Lock | None:
     _had_peer = _lk.locked()
     await _lk.acquire()
     if _had_peer:
-        logger.info("导出并发去重：format=%s scheme=%s 检测到同键导出在飞，"
-                    "等待其提交缓存后再判定", key[0], str(key[1])[:8])
+        logger.info(
+            "导出并发去重：format=%s scheme=%s 检测到同键导出在飞，" "等待其提交缓存后再判定", key[0], str(key[1])[:8]
+        )
     return _lk
 
 
@@ -4105,40 +5318,66 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         #    指纹材料），渲染段延后到「确认未命中」之后才执行 —— 命中即零渲染。
         #    关闭 `export_cache_fast_path` 时 `_prepare_export` 内部已跑完渲染段，
         #    此处 `if` 判定为假 → 与改造前逐字一致。
-        prep = await _prepare_export(scheme_id, body, db, cancel_event=cancel_ev)
+        prep = await _prepare_export(scheme_id, body, db, cancel_event=cancel_ev, defer_audit=True)
         scheme = prep["scheme"]
         config_hash, content_hash = _content_fingerprint(prep)
 
-        # 导出文件名 = 方案名称 + 导出日期 + 导出轮次（本次导出即一轮，先自增再命名）
-        round_no = await _bump_export_round(db, scheme_id)
         # ✅ 2026-10-11（文档质量报告 P0-B）：下载名与封面标题同一出口，避免
         #    「封面印着模板残留串、下载名却是导出文档」两份署名对不上。
-        export_filename = _build_export_filename(
-            _display_scheme_name(scheme, prep.get("global_facts")), "docx", round_no)
-        name_headers = {**_export_name_headers(export_filename, round_no),
-                        **_export_audit_headers(prep.get("content_audit") or {}),
-                        **_global_facts_status_headers(prep.get("global_facts_status"))}
+        display_name = _display_scheme_name(scheme, prep.get("global_facts"))
 
         # 缓存检查：内容与配置未变时直接返回历史产物（秒级响应）
         cur = await db.execute(
             "SELECT result_path FROM export_cache WHERE scheme_id=? AND config_hash=? AND content_fingerprint=?",
-            (scheme_id, config_hash, content_hash))
+            (scheme_id, config_hash, content_hash),
+        )
         cached = await _db_fetch_one(cur, what="export_docx 缓存查询")
         # ✅ 修复（2026-10-14 · P2）：可用判据收敛到 _cache_row_viable，与
         #    _prune_export_cache 的保留判据同一口径，避免「命中判据/保留判据」分叉。
-        if cached and cached[0] and _cache_row_viable(cached[0]):
+        # ✅ R176 补漏（2026-11-04）：完整性校验（.docx 走 zipfile.testzip() 整包 CRC）
+        #    是同步阻塞，命中分支改由 asyncio.to_thread 执行，不得压事件循环。
+        #    判据与记忆化逻辑一字未改（_cache_row_viable 本体保持原样），
+        #    「坏产物绝不复用」不变；仅首次命中付一次线程切换成本。
+        if cached and cached[0] and await asyncio.to_thread(_cache_row_viable, cached[0]):
             # ✅ R111（P2-5）：缓存命中日志埋点（纯可观测；此前命中态只回
             #    X-Cache-Status 响应头，运维无法从 backend.log 统计命中率）。
-            logger.info(
-                "导出缓存命中（scheme=%s · docx · 秒级返回历史产物）", scheme_id[:8])
-            # ✅ G12：缓存命中同样是「用户拿到了一份文档」，同样落审核留痕
-            await _record_export_review_trace(db, scheme_id, "docx", round_no, export_filename)
+            logger.info("导出缓存命中（scheme=%s · docx · 秒级返回历史产物）", scheme_id[:8])
+            # ✅ R176 · D2-2（2026-11-04）：命中路径优先读旁车，省掉整轮
+            #    `audit_content`；旁车缺失/过期/损坏则无差别回退重算。
+            prep["content_audit"] = await _resolve_content_audit(prep, content_hash=content_hash, cached_path=cached[0])
+            # ✅ R176 · D2-3（2026-11-04）：命中路径只有**一次写库事务** ——
+            #    「轮次自增 + 审核留痕」同一 commit；失败整体回滚且不交付缓存
+            #    产物（转 503），杜绝"round 涨了 trace 丢了"的审计断裂。
+            committed = await _bump_export_round_and_trace(db, scheme_id, "docx", display_name)
+            if committed is None:
+                raise HTTPException(503, "导出审计留痕写入失败：本次缓存命中已整体回滚、未交付文件，" "请稍后重试")
+            round_no, export_filename = committed
+            name_headers = {
+                **_export_name_headers(export_filename, round_no),
+                **_export_audit_headers(prep.get("content_audit") or {}),
+                **_global_facts_status_headers(prep.get("global_facts_status")),
+            }
+            # ✅ BUG-6（R175）：登记读租约 —— FileResponse 懒打开，文件在本响应
+            #    流式读取期间不得被并发 prune 删除。
+            _export_read_lease_register(cached[0])
             # ✅ 契约完整：缓存命中也回传统计/缓存标识响应头，前端统计条行为一致
             return FileResponse(
-                cached[0], filename=export_filename,
-                headers={"X-Chart-Render-Stats": '{"cached":true}',
-                         "X-Cache-Status": "hit", **name_headers},
-                media_type=_DOCX_MIME)
+                cached[0],
+                filename=export_filename,
+                headers={"X-Chart-Render-Stats": '{"cached":true}', "X-Cache-Status": "hit", **name_headers},
+                media_type=_DOCX_MIME,
+            )
+
+        # 未命中：本次导出即一轮（先自增再命名）
+        round_no = await _bump_export_round(db, scheme_id)
+        export_filename = _build_export_filename(display_name, "docx", round_no)
+        # ✅ R176 · D2-2：未命中必然重算体检（无旁车可读）。
+        prep["content_audit"] = await _resolve_content_audit(prep, content_hash=content_hash)
+        name_headers = {
+            **_export_name_headers(export_filename, round_no),
+            **_export_audit_headers(prep.get("content_audit") or {}),
+            **_global_facts_status_headers(prep.get("global_facts_status")),
+        }
 
         # ✅ R99：未命中 → 此时才执行渲染段（图表预渲染 / AI 配图 / 位图下载）。
         await _prepare_export_render(prep)
@@ -4168,11 +5407,11 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
             # ✅ R106 FIX-1：构建线程在段边界命中取消 —— 清理本次临时产物、
             #    注销在飞保护（out_path 从未 replace 出来，不存在成品），
             #    上抛由路由出口转 499。**不写缓存行**（取消产物指纹无效）。
-            tmp_out_path.unlink(missing_ok=True)
+            tmp_out_path.unlink(missing_ok=True)  # R177-DELETE-EXEMPT: 取消时仅清理本次临时产物
             _export_inflight_unregister(_inflight_final)
             raise
         except Exception:
-            tmp_out_path.unlink(missing_ok=True)
+            tmp_out_path.unlink(missing_ok=True)  # R177-DELETE-EXEMPT: 异常时仅清理本次临时产物
             # ✅ R168（2026-11-03 · 资源泄漏收口）：普通异常分支此前只清临时文件、
             #    漏了注销在飞登记 —— 上方注释保存 _inflight_final 正是防「注册键
             #    残留」的，ExportCancelled 分支有注销而本分支没有。失败一次即残留
@@ -4181,6 +5420,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
             _export_inflight_unregister(_inflight_final)
             raise
         import os
+
         # ✅ Windows 竞争窗口：并发同指纹导出时 FileResponse 懒打开目标文件，
         # os.replace 可能抛 WinError 32；重试 3 次后退化为直接使用本次临时产物。
         replaced = False
@@ -4204,34 +5444,76 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
             out_path = tmp_out_path
             cacheable = False
             logger.warning(
-                "DOCX 缓存原子替换 3 次重试均失败（scheme=%s, out=%s），"
-                "本次不写入导出缓存（响应体仍为完整产物）",
-                scheme_id[:8], EXPORTS_DIR.name)
+                "DOCX 缓存原子替换 3 次重试均失败（scheme=%s, out=%s），" "本次不写入导出缓存（响应体仍为完整产物）",
+                scheme_id[:8],
+                EXPORTS_DIR.name,
+            )
 
         # ✅ 坏缓存守卫：存在图表渲染失败 / AI 配图未生成 / 配图位图下载失败时产物含缺图，
         #    不写入缓存——否则 AI 渲染服务恢复后，因内容指纹不变永远命中残缺文档。
-        if (render_stats.get("failed", 0) > 0
-                or prep.get("ai_image_pending", 0) > 0
-                or prep.get("ai_image_download_pending", 0) > 0):
+        # ✅ BUG-5（R175）：空章/全空章同样走降级分支 —— 不写缓存 + 响应头留痕。
+        _empty_sections = bool(prep.get("empty_sections"))
+        # ✅ B1-2（R176 · 2026-11-04）：全局事实查询失败 → 产物缺「项目关键事实」，
+        #    同样不得写缓存（指纹已含 status，但写缓存会让「失败态」长期固化）。
+        _facts_query_failed = (prep.get("global_facts_status") or {}).get("code") == "query_failed"
+        # ✅ R179（2026-11-05）：终稿仍有无法自动消除的格式残留（lint_residual_total）
+        #    → 与空章/缺图同一降级口径：不写缓存 + X-Export-Degraded 留痕，
+        #    明细（各类残留计数）随 X-Fix-Stats 下发。**禁止检测到就静默放过。**
+        _content_residue = _export_content_residue(fix_stats)
+        if (
+            render_stats.get("failed", 0) > 0
+            or prep.get("ai_image_pending", 0) > 0
+            or prep.get("ai_image_download_pending", 0) > 0
+            or _empty_sections
+            or _facts_query_failed
+            or _content_residue > 0
+        ):
             _merge_borrowed_stats(render_stats, fix_stats)
-            headers = {"X-Chart-Render-Stats": json.dumps(
-                           {**render_stats,
-                            "ai_image_pending": prep.get("ai_image_pending", 0),
-                            "ai_image_download_pending": prep.get("ai_image_download_pending", 0)},
-                           ensure_ascii=False),
-                       "X-Cache-Status": "degraded", **name_headers}
+            headers = {
+                # ✅ R180 修复（2026-11-05）：响应头必须 latin-1 可编码（Starlette
+                #    `init_headers` 用 latin-1 编码 header 值）。新增的 fail 明细含
+                #    中文 `section_title`，若 `ensure_ascii=False` 会把中文原样写进
+                #    header → `UnicodeEncodeError` 直接打断 DOCX/PDF 交付。
+                #    `ensure_ascii=True` 只把非 ASCII 转成 `\uXXXX` 转义，
+                #    JSON.parse 后仍是原文，前端消费零影响。
+                "X-Chart-Render-Stats": json.dumps(
+                    {
+                        **render_stats,
+                        "ai_image_pending": prep.get("ai_image_pending", 0),
+                        "ai_image_download_pending": prep.get("ai_image_download_pending", 0),
+                    },
+                    ensure_ascii=True,
+                ),
+                "X-Cache-Status": "degraded",
+                **name_headers,
+            }
+            if _empty_sections:
+                headers["X-Export-Degraded"] = "empty-sections"
+            if _facts_query_failed:
+                _sig = headers.get("X-Export-Degraded")
+                headers["X-Export-Degraded"] = (
+                    f"{_sig},global-facts-query-failed" if _sig else "global-facts-query-failed"
+                )
+            if _content_residue > 0:
+                _sig = headers.get("X-Export-Degraded")
+                headers["X-Export-Degraded"] = f"{_sig},content-residue" if _sig else "content-residue"
             if fix_stats:
                 headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
             # ✅ 收口（2026-10-14）：留痕 → 回收 → 注销 统一走 _finalize_export_delivery
             #    （与 PDF 分支同一实现；GC protect 传 out_path——该文件即将被流式返回，
             #    不得在本次回收；cacheable=False 时本次无缓存行，只能靠这里回收孤儿）。
             await _finalize_export_delivery(
-                db, scheme_id=scheme_id, kind="docx", round_no=round_no,
-                export_filename=export_filename, gc_protect={out_path},
-                inflight_path=_inflight_final)
-            return FileResponse(
-                str(out_path), filename=export_filename,
-                headers=headers, media_type=_DOCX_MIME)
+                db,
+                scheme_id=scheme_id,
+                kind="docx",
+                round_no=round_no,
+                export_filename=export_filename,
+                gc_protect={out_path},
+                inflight_path=_inflight_final,
+            )
+            # ✅ BUG-6（R175）：交付前登记读租约（防并发 prune 删除正在下载的文件）
+            _export_read_lease_register(out_path)
+            return FileResponse(str(out_path), filename=export_filename, headers=headers, media_type=_DOCX_MIME)
 
         # 缓存记录
         # ✅ B5（2026-09-23）：INSERT OR IGNORE + (scheme_id, content_fingerprint) 唯一约束，
@@ -4242,36 +5524,55 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         # ✅ 收口（2026-10-14）：INSERT → commit → prune → commit 收敛为
         #    _persist_export_cache_row（与 PDF 分支同一实现；提交顺序采用 PDF 侧
         #    2026-10-13 确立的双提交口径，详见 helper docstring）。
+        # ✅ B1-3（R176 · 2026-11-04）：写入前用**与命中同一判据**复核产物 ——
+        #    截断/损坏（size>0 但结构不完整）绝不落缓存行，避免坏缓存被长期命中。
+        if cacheable and not _cache_row_viable(str(out_path)):
+            cacheable = False
+            logger.warning("DOCX 产物完整性判据未通过（scheme=%s），本次不写缓存: %s", scheme_id[:8], out_path.name)
         if cacheable:
             await _persist_export_cache_row(
-                db, scheme=scheme, scheme_id=scheme_id, config_hash=config_hash,
+                db,
+                scheme=scheme,
+                scheme_id=scheme_id,
+                config_hash=config_hash,
                 content_fingerprint=content_hash,
                 cache_key=f"{scheme_id}_{config_hash[:8]}",
-                out_path=out_path, what="export_cache 写入(DOCX)")
+                out_path=out_path,
+                what="export_cache 写入(DOCX)",
+            )
+            # ✅ R176 · D2-2：只在「可写缓存」路径写旁车 —— 产物既然不落缓存
+            #    行，旁车也永远不会被读到，写了只会变成孤儿文件。
+            await _write_audit_sidecar(out_path, prep, content_hash)
 
         # ✅ 加固（D1）：把构建期统计到的「跨章借图」并入渲染统计，一并回传
         #    X-Chart-Render-Stats（前端展示 + 用户知情）。加法式合并，既有键不变。
         _merge_borrowed_stats(render_stats, fix_stats)
-        headers = {"X-Chart-Render-Stats": json.dumps(render_stats, ensure_ascii=False),
-                   "X-Cache-Status": "miss", **name_headers}
+        # ✅ R180 修复：header 值须 latin-1 可编码（ensure_ascii=True 让中文标题
+        #    以 \uXXXX 转义出现，JSON.parse 后语义不变）。
+        headers = {
+            "X-Chart-Render-Stats": json.dumps(render_stats, ensure_ascii=True),
+            "X-Cache-Status": "miss",
+            **name_headers,
+        }
         # ✅ R111（P2-5）：缓存未命中日志埋点（纯可观测）。
-        logger.info(
-            "导出缓存未命中（scheme=%s · docx · 本轮全量渲染，产物已写缓存）",
-            scheme_id[:8])
+        logger.info("导出缓存未命中（scheme=%s · docx · 本轮全量渲染，产物已写缓存）", scheme_id[:8])
         if fix_stats:
             headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
         # ✅ G12：导出成稿落一条审核留痕（from_status = to_status，只留痕不改状态机）
         # ✅ 收口（2026-10-14）：留痕 → 回收 → 注销 统一走 _finalize_export_delivery
         #    （protect 传本次产物，避免被当成孤儿删掉）。
         await _finalize_export_delivery(
-            db, scheme_id=scheme_id, kind="docx", round_no=round_no,
-            export_filename=export_filename, gc_protect={out_path},
-            inflight_path=_inflight_final)
-        return FileResponse(
-            str(out_path),
-            filename=export_filename,
-            headers=headers,
-            media_type=_DOCX_MIME)
+            db,
+            scheme_id=scheme_id,
+            kind="docx",
+            round_no=round_no,
+            export_filename=export_filename,
+            gc_protect={out_path},
+            inflight_path=_inflight_final,
+        )
+        # ✅ BUG-6（R175）：交付前登记读租约（防并发 prune 删除正在下载的文件）
+        _export_read_lease_register(out_path)
+        return FileResponse(str(out_path), filename=export_filename, headers=headers, media_type=_DOCX_MIME)
     except asyncio.CancelledError:
         # ✅ R106 FIX-1：客户端断连（关页/abort/切方案）= 停止 —— 置位取消事件，
         #    使失去 awaiter 的构建线程/渲染段在下一检查点退出，不再白烧成本。
@@ -4289,7 +5590,23 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         _export_cancel_deregister(scheme_id, cancel_ev)
 
 
+# ✅ R178（B-9 · 2026-11-05）：PDF 转换的**进程级串行锁**。
+#   Word COM（``win32com.client.Dispatch("Word.Application")``）是**单例**且
+#   **不可重入**：两个并发 PDF 导出会各自 Dispatch 一个 Word 实例争抢同一 COM
+#   服务器，实测表现为间歇性 0x800706BE（RPC 失败 —— 下方注释已记录「4 次中
+#   3 次失败」）与文档损坏。本函数经 ``asyncio.to_thread`` 在**工作线程**中执行
+#   ⇒ 必须用 ``threading.Lock``（跨线程串行），不能用 asyncio.Lock。
+#   PDF 导出本身是低频操作（生产日志 7 天内 0 次），串行化的代价可忽略。
+_PDF_CONVERT_LOCK = threading.Lock()
+
+
 def _convert_docx_to_pdf(docx_path: str, pdf_path: str) -> str:
+    """PDF 转换入口：**进程级串行**（Word COM 单例保护），实际逻辑见内部实现。"""
+    with _PDF_CONVERT_LOCK:
+        return _convert_docx_to_pdf_unlocked(docx_path, pdf_path)
+
+
+def _convert_docx_to_pdf_unlocked(docx_path: str, pdf_path: str) -> str:
     """将 DOCX 转换为 PDF，尝试多种转换策略。
 
     策略优先级：
@@ -4327,6 +5644,7 @@ def _convert_docx_to_pdf(docx_path: str, pdf_path: str) -> str:
     #       CoUninitialize」；配合 3 次重试兜底，把瞬态失败转为重试成功。
     import gc as _gc
     import time as _time
+
     try:
         import pythoncom
         import win32com.client
@@ -4347,22 +5665,27 @@ def _convert_docx_to_pdf(docx_path: str, pdf_path: str) -> str:
             try:
                 _word.DisplayAlerts = 0
             except Exception:
-                logger.debug("Word COM 设置 DisplayAlerts 失败（第 %d 次尝试）",
-                             _attempt, exc_info=True)
+                logger.debug("Word COM 设置 DisplayAlerts 失败（第 %d 次尝试）", _attempt, exc_info=True)
             _doc = _word.Documents.Open(docx_abs, ReadOnly=True)
             try:
                 _doc.Fields.Update()
             except Exception:
                 logger.warning(
-                    "Word COM 更新域失败（PDF 目录/页码可能保留占位文本，"
-                    "第 %d 次尝试 · %s）", _attempt, Path(docx_abs).name, exc_info=True)
+                    "Word COM 更新域失败（PDF 目录/页码可能保留占位文本，" "第 %d 次尝试 · %s）",
+                    _attempt,
+                    Path(docx_abs).name,
+                    exc_info=True,
+                )
             try:
                 for _ti in range(1, _doc.TablesOfContents.Count + 1):
                     _doc.TablesOfContents.Item(_ti).Update()
             except Exception:
                 logger.warning(
                     "Word COM 更新目录失败（PDF 目录可能含占位文本，第 %d 次尝试 · %s）",
-                    _attempt, Path(docx_abs).name, exc_info=True)
+                    _attempt,
+                    Path(docx_abs).name,
+                    exc_info=True,
+                )
             _doc.SaveAs(pdf_abs, FileFormat=17)  # 17 = wdFormatPDF
             _doc.Close(False)
             return pdf_abs
@@ -4377,8 +5700,7 @@ def _convert_docx_to_pdf(docx_path: str, pdf_path: str) -> str:
                     try:
                         _doc.Close(False)
                     except Exception:
-                        logger.debug("Word COM 文档对象清理失败（第 %d 次尝试）",
-                                     _attempt, exc_info=True)
+                        logger.debug("Word COM 文档对象清理失败（第 %d 次尝试）", _attempt, exc_info=True)
             except Exception:  # noqa: BLE001 - 内层已兜底，此处为结构级安全网
                 pass
             try:
@@ -4386,8 +5708,7 @@ def _convert_docx_to_pdf(docx_path: str, pdf_path: str) -> str:
                     try:
                         _word.Quit()
                     except Exception:
-                        logger.debug("Word COM 应用对象清理失败（第 %d 次尝试）",
-                                     _attempt, exc_info=True)
+                        logger.debug("Word COM 应用对象清理失败（第 %d 次尝试）", _attempt, exc_info=True)
             except Exception:  # noqa: BLE001 - 内层已兜底，此处为结构级安全网
                 pass
             try:
@@ -4397,8 +5718,10 @@ def _convert_docx_to_pdf(docx_path: str, pdf_path: str) -> str:
                 _time.sleep(0.3)
             except Exception:
                 logger.debug(
-                    "Word COM 引用释放/GC 清理失败（可能诱发下一次 Dispatch RPC 竞态，"
-                    "第 %d 次尝试）", _attempt, exc_info=True)
+                    "Word COM 引用释放/GC 清理失败（可能诱发下一次 Dispatch RPC 竞态，" "第 %d 次尝试）",
+                    _attempt,
+                    exc_info=True,
+                )
             pythoncom.CoUninitialize()
     if _last_err is not None:
         logger.info("win32com 三次重试均失败，尝试下一策略: %s", _last_err)
@@ -4407,6 +5730,7 @@ def _convert_docx_to_pdf(docx_path: str, pdf_path: str) -> str:
     try:
         import pythoncom
         from docx2pdf import convert
+
         pythoncom.CoInitialize()
         try:
             convert(docx_abs, pdf_abs)
@@ -4425,13 +5749,20 @@ def _convert_docx_to_pdf(docx_path: str, pdf_path: str) -> str:
                 out_dir = str(Path(pdf_abs).parent)
                 subprocess.run(
                     [cmd, "--headless", "--convert-to", "pdf", "--outdir", out_dir, docx_abs],
-                    check=True, capture_output=True, timeout=120,
+                    check=True,
+                    capture_output=True,
+                    timeout=120,
                     # Windows 下 soffice 报错信息可能含中文，显式 utf-8 解码避免 GBK 崩溃
-                    text=True, encoding="utf-8", errors="replace")
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
                 generated = Path(out_dir) / (Path(docx_abs).stem + ".pdf")
                 if generated.exists():
                     if str(generated) != pdf_abs:
-                        shutil.move(str(generated), pdf_abs)
+                        shutil.move(  # R177-DELETE-EXEMPT: 转换工具产出的临时 PDF 归位（非成品目录）
+                            str(generated), pdf_abs
+                        )
                     return pdf_abs
             except Exception as e:
                 logger.info("%s 转换失败: %s", cmd, e)
@@ -4468,7 +5799,7 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
         _lk = await _export_dedup_acquire(("pdf", scheme_id, _export_config_hash(body)))
         import tempfile
 
-        prep = await _prepare_export(scheme_id, body, db, cancel_event=cancel_ev)
+        prep = await _prepare_export(scheme_id, body, db, cancel_event=cancel_ev, defer_audit=True)
         scheme = prep["scheme"]
 
         config_hash, content_hash = _content_fingerprint(prep)
@@ -4480,31 +5811,55 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
         #    **零失效**（无需用户重新导出一遍），是新格式平铺接入的最小改动。
         pdf_content_hash = content_hash + "|fmt=pdf"
 
-        # 导出文件名 = 方案名称 + 导出日期 + 导出轮次（PDF 与 DOCX 共用同一轮次计数，
-        # 这里内部的中间 DOCX 不额外计数，避免一次 PDF 导出消耗两轮）
-        round_no = await _bump_export_round(db, scheme_id)
         # ✅ 2026-10-11（文档质量报告 P0-B）：与 DOCX 同一方案名出口（PDF 走这里）。
-        export_filename = _build_export_filename(
-            _display_scheme_name(scheme, prep.get("global_facts")), "pdf", round_no)
-        name_headers = {**_export_name_headers(export_filename, round_no),
-                        **_export_audit_headers(prep.get("content_audit") or {}),
-                        **_global_facts_status_headers(prep.get("global_facts_status"))}
+        display_name = _display_scheme_name(scheme, prep.get("global_facts"))
 
         # 缓存检查（与 DOCX 同口径：命中则秒级返回，跳过最昂贵的 PDF 转换）
         cur = await db.execute(
             "SELECT result_path FROM export_cache WHERE scheme_id=? AND config_hash=? AND content_fingerprint=?",
-            (scheme_id, config_hash, pdf_content_hash))
+            (scheme_id, config_hash, pdf_content_hash),
+        )
         cached = await _db_fetch_one(cur, what="export_pdf 缓存查询")
         # ✅ 修复（2026-10-14 · P2）：同 DOCX，可用判据收敛到 _cache_row_viable。
-        if cached and cached[0] and _cache_row_viable(cached[0]):
+        # ✅ R176 补漏（2026-11-04）：同 DOCX —— PDF 头尾校验同样下沉线程，
+        #    判据不减（%PDF- 与 %%EOF 都必须满足），坏产物仍不复用。
+        if cached and cached[0] and await asyncio.to_thread(_cache_row_viable, cached[0]):
             # ✅ R111（P2-5）：PDF 缓存命中日志埋点（纯可观测，与 DOCX 同口径）。
-            logger.info(
-                "导出缓存命中（scheme=%s · pdf · 秒级返回历史产物）", scheme_id[:8])
-            await _record_export_review_trace(db, scheme_id, "pdf", round_no, export_filename)
+            logger.info("导出缓存命中（scheme=%s · pdf · 秒级返回历史产物）", scheme_id[:8])
+            # ✅ R176 · D2-2（2026-11-04）：与 DOCX 同口径 —— 命中优先读旁车。
+            prep["content_audit"] = await _resolve_content_audit(
+                prep, content_hash=pdf_content_hash, cached_path=cached[0]
+            )
+            # ✅ R176 · D2-3（2026-11-04）：与 DOCX 同口径 —— 轮次+留痕单事务；
+            #    失败整体回滚并转 503，不交付未留痕的产物。
+            committed = await _bump_export_round_and_trace(db, scheme_id, "pdf", display_name)
+            if committed is None:
+                raise HTTPException(503, "导出审计留痕写入失败：本次缓存命中已整体回滚、未交付文件，" "请稍后重试")
+            round_no, export_filename = committed
+            name_headers = {
+                **_export_name_headers(export_filename, round_no),
+                **_export_audit_headers(prep.get("content_audit") or {}),
+                **_global_facts_status_headers(prep.get("global_facts_status")),
+            }
+            # ✅ BUG-6（R175）：PDF 缓存命中同样登记读租约
+            _export_read_lease_register(cached[0])
             return FileResponse(
-                str(cached[0]), filename=export_filename, media_type=_PDF_MIME,
-                headers={"X-Chart-Render-Stats": '{"cached":true}',
-                         "X-Cache-Status": "hit", **name_headers})
+                str(cached[0]),
+                filename=export_filename,
+                media_type=_PDF_MIME,
+                headers={"X-Chart-Render-Stats": '{"cached":true}', "X-Cache-Status": "hit", **name_headers},
+            )
+
+        # 未命中：本次导出即一轮（PDF 与 DOCX 共用同一轮次计数，中间 DOCX 不额外计数）
+        round_no = await _bump_export_round(db, scheme_id)
+        export_filename = _build_export_filename(display_name, "pdf", round_no)
+        # ✅ R176 · D2-2：未命中必然重算体检（无旁车可读）。
+        prep["content_audit"] = await _resolve_content_audit(prep, content_hash=pdf_content_hash)
+        name_headers = {
+            **_export_name_headers(export_filename, round_no),
+            **_export_audit_headers(prep.get("content_audit") or {}),
+            **_global_facts_status_headers(prep.get("global_facts_status")),
+        }
 
         # ✅ R99（2026-10-17 · 缓存命中快速路径）：与 DOCX 同序 —— 未命中才渲染。
         #    PDF 链的重复成本更高（DOCX 构建 + 一次 Word COM 转换），故收益更大。
@@ -4525,19 +5880,31 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
                 raise HTTPException(501, str(e))
 
             # 读取 PDF 内容返回（临时目录会被清理，所以必须读入内存）
-            with open(tmp_pdf, "rb") as f:
-                pdf_bytes = f.read()
+            # ✅ R176 · P1-3：整文件读（可能数十 MB）下沉线程池；句柄在工作线程内新建。
+            pdf_bytes = await asyncio.to_thread(_read_path_bytes, tmp_pdf)
 
         # ✅ 坏缓存守卫（D-2）：与 DOCX 同口径 —— 图表渲染失败 / AI 配图未生成 /
         #    配图位图下载失败时产物缺图，**不写缓存**，否则服务恢复后因指纹不变
         #    永远命中残缺 PDF（旧实现 PDF 链完全没有这道守卫）。
         render_stats = prep.get("render_stats") or {}
-        degraded = (render_stats.get("failed", 0) > 0
-                    or prep.get("ai_image_pending", 0) > 0
-                    or prep.get("ai_image_download_pending", 0) > 0)
+        # ✅ B1-2（R176 · 2026-11-04）：全局事实查询失败 → 产物缺「项目关键事实」，
+        #    与 DOCX 同口径不写缓存（避免失败态被指纹长期固化）。
+        _facts_query_failed = (prep.get("global_facts_status") or {}).get("code") == "query_failed"
+        # ✅ R179：终稿无法自动消除的格式残留，PDF 与 DOCX 同口径降级。
+        _content_residue = _export_content_residue(fix_stats)
+        degraded = (
+            render_stats.get("failed", 0) > 0
+            or prep.get("ai_image_pending", 0) > 0
+            or prep.get("ai_image_download_pending", 0) > 0
+            # ✅ BUG-5（R175）：空章产物（封面/目录）不写缓存，与 DOCX 同口径
+            or bool(prep.get("empty_sections"))
+            or _facts_query_failed
+            or _content_residue > 0
+        )
 
         if not degraded:
             import os as _os
+
             # 落盘到 EXPORTS_DIR（缓存行只记路径，与 DOCX 一致；临时目录会被清理）
             out_path = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{pdf_content_hash[:8]}.pdf"
             # ✅ BUG 修复（2026-10-14 · P0）：与 DOCX 同口径注册「在飞产物」。
@@ -4555,7 +5922,9 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
             #    失败一律清理 tmp，不留孤儿。
             _tmp_pdf = EXPORTS_DIR / f"{scheme_id}_{config_hash[:8]}_{pdf_content_hash[:8]}.{uuid.uuid4().hex}.tmp.pdf"
             try:
-                _tmp_pdf.write_bytes(pdf_bytes)
+                # ✅ R176 · P1-3：整文件写（可能数十 MB）下沉线程池；
+                #    _tmp_pdf 是本次请求唯一的临时路径，句柄在工作线程内新建。
+                await asyncio.to_thread(_tmp_pdf.write_bytes, pdf_bytes)
                 # ✅ 2026-10-06：顺序治理 —— **先原子替换落盘、再写缓存行**（与 DOCX
                 #    分支同序）。旧实现是「INSERT + commit → os.replace」，替换失败时
                 #    DB 已指向一个**并不存在**的 out_path → 留下一行僵尸缓存
@@ -4576,8 +5945,10 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
                     logger.warning(
                         "PDF 缓存原子替换 3 次重试均失败（scheme=%s, out=%s），"
                         "本次不写入导出缓存（响应体仍为完整 PDF）",
-                        scheme_id[:8], out_path.name)
-                    _tmp_pdf.unlink(missing_ok=True)
+                        scheme_id[:8],
+                        out_path.name,
+                    )
+                    _tmp_pdf.unlink(missing_ok=True)  # R177-DELETE-EXEMPT: 替换失败时仅清理本次临时 PDF
                 else:
                     # ✅ 收口（2026-10-14）：INSERT → commit → prune → commit 收敛为
                     #    _persist_export_cache_row（与 DOCX 分支同一实现）。
@@ -4588,39 +5959,59 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
                     #    只改 PDF 侧：DOCX 现有键逐字不变 → 既有缓存行零失效。
                     #    注意：查缓存走 (scheme_id, config_hash, content_fingerprint)
                     #    三元组，cache_key 不参与命中判定 → 本键名不影响任何命中。
-                    await _persist_export_cache_row(
-                        db, scheme=scheme, scheme_id=scheme_id,
-                        config_hash=config_hash,
-                        content_fingerprint=pdf_content_hash,
-                        cache_key=f"{scheme_id}_{config_hash[:8]}|pdf",
-                        out_path=out_path, what="export_cache 写入(PDF)")
+                    # ✅ B1-3（R176 · 2026-11-04）：写入前复核 PDF 结构完整性
+                    #    （截断/缺 trailer 的产物不得落缓存行，否则会长期被命中）。
+                    if not _cache_row_viable(str(out_path)):
+                        logger.warning(
+                            "PDF 产物完整性判据未通过（scheme=%s），本次不写缓存: %s", scheme_id[:8], out_path.name
+                        )
+                    else:
+                        await _persist_export_cache_row(
+                            db,
+                            scheme=scheme,
+                            scheme_id=scheme_id,
+                            config_hash=config_hash,
+                            content_fingerprint=pdf_content_hash,
+                            cache_key=f"{scheme_id}_{config_hash[:8]}|pdf",
+                            out_path=out_path,
+                            what="export_cache 写入(PDF)",
+                        )
+                        # ✅ R176 · D2-2：与 DOCX 同口径 —— 只在落缓存行时写旁车。
+                        await _write_audit_sidecar(out_path, prep, pdf_content_hash)
             except Exception as e:
                 # 缓存写入失败不得影响本次交付（用户仍拿到完整 PDF）
                 try:
-                    _tmp_pdf.unlink(missing_ok=True)
+                    _tmp_pdf.unlink(missing_ok=True)  # R177-DELETE-EXEMPT: 写缓存失败时仅清理本次临时 PDF
                 except Exception:
-                    logger.debug(
-                        "PDF 临时产物清理失败（.tmp 文件将由孤儿回收兜底）",
-                        exc_info=True)
+                    logger.debug("PDF 临时产物清理失败（.tmp 文件将由孤儿回收兜底）", exc_info=True)
                 logger.warning("PDF 导出缓存写入失败（不影响本次交付）: %s", e, exc_info=True)
 
         from fastapi.responses import Response
+
         # ✅ 加固（D1）：PDF 链路同样合流跨章借图计数（与 DOCX 同口径）
         _merge_borrowed_stats(render_stats, fix_stats)
         # ✅ R111（P2-5）：PDF 缓存未命中日志埋点（纯可观测，与 DOCX 同口径；
         #    degraded 也记——它同样走了全量渲染 + Word 转换）。
         logger.info(
             "导出缓存未命中（scheme=%s · pdf · 本轮全量渲染，产物%s缓存）",
-            scheme_id[:8], "已" if not degraded else "因缺图未写入")
+            scheme_id[:8],
+            "已" if not degraded else "因缺图未写入",
+        )
         headers = {
             "Content-Disposition": _attachment_disposition(export_filename),
-            "X-Chart-Render-Stats": json.dumps(render_stats, ensure_ascii=False),
+            # ✅ R180 修复：同 DOCX，header 值须 latin-1 可编码
+            "X-Chart-Render-Stats": json.dumps(render_stats, ensure_ascii=True),
             # ✅ 与 DOCX 对齐：补 X-Cache-Status，缺图时标记 degraded（旧实现完全没有）
             "X-Cache-Status": "degraded" if degraded else "miss",
             **name_headers,
         }
         if fix_stats:
             headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
+        if _facts_query_failed:
+            headers["X-Export-Degraded"] = "global-facts-query-failed"
+        if _content_residue > 0:
+            _sig = headers.get("X-Export-Degraded")
+            headers["X-Export-Degraded"] = f"{_sig},content-residue" if _sig else "content-residue"
         # ✅ G12：PDF 成稿同样落一条审核留痕
         # ✅ 收口（2026-10-14）：留痕 → 回收 → 注销 统一走 _finalize_export_delivery。
         #    GC 不传 protect：PDF 响应体是**内存字节**，本次产物不再依赖磁盘文件。
@@ -4630,9 +6021,13 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
         #    定义，降级路径（缺图不写缓存）下该变量未绑定，直接引用会抛
         #    UnboundLocalError；None 表示无注册可注销（helper 内部判定）。
         await _finalize_export_delivery(
-            db, scheme_id=scheme_id, kind="pdf", round_no=round_no,
+            db,
+            scheme_id=scheme_id,
+            kind="pdf",
+            round_no=round_no,
             export_filename=export_filename,
-            inflight_path=(out_path if not degraded else None))
+            inflight_path=(out_path if not degraded else None),
+        )
         return Response(
             content=pdf_bytes,
             media_type=_PDF_MIME,
@@ -4660,8 +6055,8 @@ async def cache_status(scheme_id: str, db=Depends(read_db)):
     #    成任意 5 行（刚导出的那份反而被挤掉），前端把「最旧产物」显示为「当前
     #    可复用成果」。与 _prune_export_cache 同口径补 rowid 次序兜底。
     cur = await db.execute(
-        "SELECT * FROM export_cache WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT 5",
-        (scheme_id,))
+        "SELECT * FROM export_cache WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT 5", (scheme_id,)
+    )
     items = []
     for r in await _db_fetch_all(cur, what="cache_status"):
         item = dict(r)

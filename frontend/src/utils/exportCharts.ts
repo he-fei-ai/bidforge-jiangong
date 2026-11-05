@@ -56,13 +56,17 @@ export function deriveExportGate(input: ExportGateInput): ExportGateResult {
   const issues = input.issues || [];
   const highIssueCount = issues.filter((issue) => {
     const severity = String(issue.severity || "").toLowerCase();
-    return severity === "high" || severity === "block"
-      || (!severity && HIGH_EXPORT_ISSUE_TYPES.has(issue.type || ""));
+    return (
+      severity === "high" ||
+      severity === "block" ||
+      (!severity && HIGH_EXPORT_ISSUE_TYPES.has(issue.type || ""))
+    );
   }).length;
 
-  const reason = highIssueCount > 0
-    ? `导出预检提示：仍有 ${highIssueCount} 个高风险问题，建议整改后再交付（不影响导出）`
-    : "导出不受审核与预检状态限制，可随时导出";
+  const reason =
+    highIssueCount > 0
+      ? `导出预检提示：仍有 ${highIssueCount} 个高风险问题，建议整改后再交付（不影响导出）`
+      : "导出不受审核与预检状态限制，可随时导出";
   return { allowed: true, reason, highIssueCount };
 }
 
@@ -230,9 +234,7 @@ export async function renderChartsForExport(
       onProgress?.(done, items.length);
     }
   };
-  await Promise.all(
-    Array.from({ length: Math.min(CONCURRENCY, items.length) }, () => worker())
-  );
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, () => worker()));
 
   return out;
 }

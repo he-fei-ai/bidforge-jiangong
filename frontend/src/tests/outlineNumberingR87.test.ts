@@ -35,12 +35,12 @@ describe("storedIdParts · 非法编号必须 fail-closed（不抢救）", () =>
   // 这批形态在 R87 之前会被「逐段 parseInt 挑数字」抢救成看似合法的序列，
   // 而后端 numbering.stored_id_parts 对同一输入返回 []。
   it.each([
-    "abc1.2",   // -> 曾抢救为 [2]
-    "0.3",      // -> 曾抢救为 [3]
-    "1..2",     // -> 曾抢救为 [1,2]
-    "1.2.x",    // -> 曾抢救为 [1,2]
-    "1.0.2",    // -> 曾抢救为 [1,2]
-    " 3 . 2 ",  // 段内含空格
+    "abc1.2", // -> 曾抢救为 [2]
+    "0.3", // -> 曾抢救为 [3]
+    "1..2", // -> 曾抢救为 [1,2]
+    "1.2.x", // -> 曾抢救为 [1,2]
+    "1.0.2", // -> 曾抢救为 [1,2]
+    " 3 . 2 ", // 段内含空格
     "",
     "第一章",
     "1-2",
@@ -126,7 +126,9 @@ describe("wiring · 页面不得再自持松过滤", () => {
 
   it("页面消费 utils 的合法性判据", async () => {
     const mods = await Promise.all(
-      Object.values(pages).concat(Object.values(pagesTs)).map((l) => l()),
+      Object.values(pages)
+        .concat(Object.values(pagesTs))
+        .map((l) => l()),
     );
     const src = mods.join("\n");
     expect(src).toContain('from "../utils/outlineNumbering"');
@@ -135,7 +137,9 @@ describe("wiring · 页面不得再自持松过滤", () => {
 
   it("旧的「逐段 parseInt 挑数字」松过滤不得回流", async () => {
     const mods = await Promise.all(
-      Object.values(pages).concat(Object.values(pagesTs)).map((l) => l()),
+      Object.values(pages)
+        .concat(Object.values(pagesTs))
+        .map((l) => l()),
     );
     const src = mods.join("\n");
     // 该形态即 R86 从后端 heading_templates 删掉的那份；页面侧同步清除

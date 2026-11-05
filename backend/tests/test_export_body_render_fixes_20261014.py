@@ -19,6 +19,7 @@
    整段被当代码块原样印进交付 DOCX。
    修复：无句读行且非图表围栏时整块跳过，不把正文当代码输出。
 """
+
 from __future__ import annotations
 
 import inspect
@@ -77,9 +78,7 @@ class TestGcSkipsInflight:
         return path
 
     @pytest.mark.asyncio
-    async def test_final_product_protected_while_inflight(self, db_conn,
-                                                          tmp_path,
-                                                          monkeypatch):
+    async def test_final_product_protected_while_inflight(self, db_conn, tmp_path, monkeypatch):
         """非 .tmp. 的最终产物只要处于在飞状态，就不得被当作孤儿删除。
 
         旧实现（无在飞集合）下本用例**必然失败**：该文件既不在 live（DB 无行）、
@@ -96,9 +95,7 @@ class TestGcSkipsInflight:
             E._export_inflight_unregister(p)
 
     @pytest.mark.asyncio
-    async def test_final_product_deleted_after_unregister(self, db_conn,
-                                                          tmp_path,
-                                                          monkeypatch):
+    async def test_final_product_deleted_after_unregister(self, db_conn, tmp_path, monkeypatch):
         """注销后同一文件必须按普通孤儿处理（否则守卫会永久泄漏产物）。"""
         monkeypatch.setattr(E, "EXPORTS_DIR", tmp_path)
         p = self._mk(tmp_path / "s1_aabbccdd_eeff0011.docx")
@@ -109,8 +106,7 @@ class TestGcSkipsInflight:
         assert not p.exists()
 
     @pytest.mark.asyncio
-    async def test_other_scheme_not_protected(self, db_conn, tmp_path,
-                                              monkeypatch):
+    async def test_other_scheme_not_protected(self, db_conn, tmp_path, monkeypatch):
         """在飞保护必须限定在本方案前缀内（不得跨方案误保护）。
 
         注册的是**别的方案**的在飞产物，本方案前缀下的孤儿仍须删除。
@@ -133,24 +129,28 @@ class TestInflightWiredIntoExportPaths:
 
     def test_docx_registers_and_unregisters(self):
         code = _code_only(inspect.getsource(E.export_docx))
-        assert code.count("_export_inflight_register(out_path)") == 1, (
-            "DOCX 必须在 out_path 确定后注册在飞保护（且仅一次）")
+        assert (
+            code.count("_export_inflight_register(out_path)") == 1
+        ), "DOCX 必须在 out_path 确定后注册在飞保护（且仅一次）"
         assert code.count("_inflight_final = out_path") == 1, (
             "注册前须把 out_path 另存为 _inflight_final —— degraded 分支会把 "
-            "out_path 重绑定为 tmp_out_path，若注销时读 out_path 会拿错路径")
-        assert code.count("_finalize_export_delivery(") == 2, (
-            "DOCX 的两条交付路径（degraded 提前返回 + 正常成功）都必须走统一收尾")
-        assert code.count("inflight_path=_inflight_final") == 2, (
-            "两条路径都必须注销注册时另存的 _inflight_final，否则本条注册永久残留")
+            "out_path 重绑定为 tmp_out_path，若注销时读 out_path 会拿错路径"
+        )
+        assert (
+            code.count("_finalize_export_delivery(") == 2
+        ), "DOCX 的两条交付路径（degraded 提前返回 + 正常成功）都必须走统一收尾"
+        assert (
+            code.count("inflight_path=_inflight_final") == 2
+        ), "两条路径都必须注销注册时另存的 _inflight_final，否则本条注册永久残留"
 
     def test_pdf_registers_and_guards_degraded_branch(self):
         """PDF 降级分支不落盘 out_path，注销必须用条件表达式（否则 UnboundLocalError）。"""
         code = _code_only(inspect.getsource(E.export_pdf))
         assert code.count("_export_inflight_register(out_path)") == 1
-        assert code.count("_finalize_export_delivery(") == 1, (
-            "PDF 成功/降级共用尾部，必须恰好一次统一收尾")
-        assert "inflight_path=(out_path if not degraded else None)" in code, (
-            "PDF 注销在飞保护缺 `if not degraded` 守卫 —— 降级路径下 out_path 未绑定")
+        assert code.count("_finalize_export_delivery(") == 1, "PDF 成功/降级共用尾部，必须恰好一次统一收尾"
+        assert (
+            "inflight_path=(out_path if not degraded else None)" in code
+        ), "PDF 注销在飞保护缺 `if not degraded` 守卫 —— 降级路径下 out_path 未绑定"
 
     def test_finalize_helper_holds_order_contract(self):
         """helper 内部：留痕 → 回收 → 注销，顺序不得颠倒；None 表示无注册可注销。"""
@@ -159,12 +159,10 @@ class TestInflightWiredIntoExportPaths:
         i_gc = src.index("_gc_orphan_exports(")
         i_unreg = src.index("_export_inflight_unregister(inflight_path)")
         assert i_trace < i_gc < i_unreg, (
-            "顺序契约被破坏：注销必须在 GC 之后（GC 期间产物仍需受保护），"
-            "GC 必须在留痕之后（留痕可能 commit）")
-        assert "if inflight_path is not None:" in src, (
-            "缺 None 守卫 —— PDF degraded 分支传 None 时会误注销 Path()")
-        assert src.index("protect=gc_protect") > i_trace, (
-            "GC 必须透传调用方的 protect 集合")
+            "顺序契约被破坏：注销必须在 GC 之后（GC 期间产物仍需受保护），" "GC 必须在留痕之后（留痕可能 commit）"
+        )
+        assert "if inflight_path is not None:" in src, "缺 None 守卫 —— PDF degraded 分支传 None 时会误注销 Path()"
+        assert src.index("protect=gc_protect") > i_trace, "GC 必须透传调用方的 protect 集合"
 
     def test_persist_helper_holds_double_commit_contract(self):
         """helper 内部：INSERT → commit → prune → commit（PDF 2026-10-13 口径）。"""
@@ -174,20 +172,19 @@ class TestInflightWiredIntoExportPaths:
         i_prune = src.index("_prune_export_cache(")
         i_c2 = src.index("await db.commit()", i_prune)
         assert i_ins < i_c1 < i_prune < i_c2, (
-            "提交顺序契约被破坏：新行必须先落盘再裁剪，裁剪后再提交 —— "
-            "prune 回滚不得带走新缓存行")
+            "提交顺序契约被破坏：新行必须先落盘再裁剪，裁剪后再提交 —— " "prune 回滚不得带走新缓存行"
+        )
 
     def test_gc_consults_inflight_snapshot(self):
         src = _code_only(inspect.getsource(E._gc_orphan_exports))
-        assert "_export_inflight_snapshot()" in src, (
-            "GC 未读取在飞快照（跨配置并发互删回归）")
+        assert "_export_inflight_snapshot()" in src, "GC 未读取在飞快照（跨配置并发互删回归）"
         assert "in inflight" in src, "在飞路径未参与孤儿判定"
 
     def test_cache_hit_branch_still_never_calls_gc(self):
         """缓存命中分支交付的是历史产物（DB 有行），仍不得调用回收。"""
         src = inspect.getsource(E.export_docx)
         i_hit = src.index('X-Cache-Status": "hit"')
-        assert "_gc_orphan_exports" not in src[:i_hit + 400]
+        assert "_gc_orphan_exports" not in src[: i_hit + 400]
 
 
 # ===========================================================================
@@ -213,10 +210,22 @@ class TestCacheRowViable:
         d.mkdir()
         assert E._cache_row_viable(str(d)) is False
 
-    def test_accepts_non_empty_file(self, tmp_path):
+    def test_accepts_valid_docx(self, tmp_path):
+        # ✅ R175 · BUG-3：可用判据升级为真实完整性校验 —— 仅"非空"不再算可用；
+        #    须是结构完整（可被 zipfile 解析且含 [Content_Types].xml / word/document.xml）
+        #    的 DOCX。此处用 python-docx 生成最小合法产物。
+        from docx import Document
+
         p = tmp_path / "ok.docx"
-        p.write_bytes(b"z")
+        Document().save(str(p))
         assert E._cache_row_viable(str(p)) is True
+
+    def test_rejects_corrupt_zip_with_nonzero_size(self, tmp_path):
+        # ✅ R175 · BUG-3：截断/损坏的 ZIP（size>0）必须判不可用，否则命中后
+        #    直接返回给用户 = 交付一个打不开的 .docx。
+        p = tmp_path / "corrupt.docx"
+        p.write_bytes(b"PK\x03\x04" + b"x" * 64)
+        assert E._cache_row_viable(str(p)) is False
 
     def test_survives_oserror(self):
         # 非法路径在 stat 时可能抛 OSError，判据必须静默降级
@@ -234,7 +243,11 @@ class TestPruneTreatsZeroByteAsStale:
         empty = tmp_path / "s1_empty.docx"
         empty.write_bytes(b"")
         good = tmp_path / "s1_good.docx"
-        good.write_bytes(b"good-bytes")
+        # ✅ R175 · BUG-3：可用判据已升级为 ZIP 完整性校验，fixture 必须是
+        #    真实合法 DOCX（旧的 b"good-bytes" 会被正确判为「损坏」）。
+        from docx import Document
+
+        Document().save(str(good))
         for row_id, fp, path, ts in (
             ("e1", "fp-empty", empty, "2020-01-01 00:00:00"),
             ("g1", "fp-good", good, "2026-01-01 00:00:00"),
@@ -243,16 +256,16 @@ class TestPruneTreatsZeroByteAsStale:
                 "INSERT INTO export_cache (id, project_id, scheme_id, config_hash,"
                 " content_fingerprint, cache_key, result_path, created_at)"
                 " VALUES (?,?,?,?,?,?,?,?)",
-                (row_id, "", "s1", "cfg", fp, "s1_cfg", str(path), ts))
+                (row_id, "", "s1", "cfg", fp, "s1_cfg", str(path), ts),
+            )
         await db_conn.commit()
 
         await E._prune_export_cache(db_conn, "s1", protect_path=good)
 
-        rows = {r[0] for r in await db_conn.execute_fetchall(
-            "SELECT id FROM export_cache WHERE scheme_id='s1'")}
+        rows = {r[0] for r in await db_conn.execute_fetchall("SELECT id FROM export_cache WHERE scheme_id='s1'")}
         assert "e1" not in rows, (
-            "0 字节僵尸缓存行未被判为陈旧（旧实现只查 exists()，"
-            "会占住保留配额把新产物挤出窗口）")
+            "0 字节僵尸缓存行未被判为陈旧（旧实现只查 exists()，" "会占住保留配额把新产物挤出窗口）"
+        )
         assert "g1" in rows, "正常缓存行被误删"
 
     async def test_prune_and_hit_share_one_predicate(self):
@@ -260,12 +273,9 @@ class TestPruneTreatsZeroByteAsStale:
         src = _code_only(inspect.getsource(E.export_docx))
         src += _code_only(inspect.getsource(E.export_pdf))
         prune = _code_only(inspect.getsource(E._prune_export_cache))
-        assert "_cache_row_viable" in src, (
-            "export_docx / export_pdf 的命中判据未走 _cache_row_viable")
-        assert "_cache_row_viable" in prune, (
-            "_prune_export_cache 的保留判据未走 _cache_row_viable")
-        assert "st_size > 0" not in prune, (
-            "保留判据仍在函数内硬编码 size 检查（判据分叉回归）")
+        assert "_cache_row_viable" in src, "export_docx / export_pdf 的命中判据未走 _cache_row_viable"
+        assert "_cache_row_viable" in prune, "_prune_export_cache 的保留判据未走 _cache_row_viable"
+        assert "st_size > 0" not in prune, "保留判据仍在函数内硬编码 size 检查（判据分叉回归）"
 
 
 # ===========================================================================
@@ -284,16 +294,14 @@ class TestUnclosedFenceDoesNotSwallowBody:
             "## 2.3 临时用电措施\n\n"
             "配电箱应按三级配电两级保护设置，具体要求如下：\n"
             "```python\n"
-            "B --> C{\n"                      # 未闭合代码围栏（模拟截断）
+            "B --> C{\n"  # 未闭合代码围栏（模拟截断）
             "- 总配电箱由项目部统一设置\n"
             "- 分配电箱按施工区域就近布置\n"
             "- 开关箱执行一机一闸一漏电保护\n"
         )
         blocks = _parse_content_blocks(content)
         code_blocks = [b for b in blocks if b.get("type") == "code"]
-        assert code_blocks == [], (
-            "未闭合围栏且无句读行时，其后正文被当成代码块输出："
-            f"code blocks = {code_blocks!r}")
+        assert code_blocks == [], "未闭合围栏且无句读行时，其后正文被当成代码块输出：" f"code blocks = {code_blocks!r}"
 
     def test_sentence_boundary_still_restored(self):
         """有句读行时仍按原逻辑把其后正文还给段落解析（行为不回归）。"""
@@ -303,36 +311,23 @@ class TestUnclosedFenceDoesNotSwallowBody:
             "B --> C{\n"
             "1. 组织部署\n"
             "2. 资源配置\n"
-            "本方案由项目经理统一组织。\n"      # 句读行 → 正文起点
+            "本方案由项目经理统一组织。\n"  # 句读行 → 正文起点
             "后续段落继续说明。"
         )
         blocks = _parse_content_blocks(content)
-        text = "".join(str(b.get("text") or "")
-                       + " ".join(b.get("lines") or []) for b in blocks)
-        assert "本方案由项目经理统一组织" in text, (
-            "有句读行的正文还原逻辑被破坏")
+        text = "".join(str(b.get("text") or "") + " ".join(b.get("lines") or []) for b in blocks)
+        assert "本方案由项目经理统一组织" in text, "有句读行的正文还原逻辑被破坏"
 
     def test_chart_fence_unclosed_still_skipped(self):
         """图表家族围栏未闭合仍走「跳过」，不产出图也不产出代码块。"""
-        content = (
-            "## 2.4 施工流程\n\n"
-            "```mermaid\n"
-            "flowchart LR\n"
-            "A[开始] --> B[\n"
-            "- 后续正文条目\n"
-        )
+        content = "## 2.4 施工流程\n\n" "```mermaid\n" "flowchart LR\n" "A[开始] --> B[\n" "- 后续正文条目\n"
         blocks = _parse_content_blocks(content)
         assert not [b for b in blocks if b.get("type") == "chart"]
         assert not [b for b in blocks if b.get("type") == "code"]
 
     def test_closed_fences_unchanged(self):
         """闭合围栏的行为必须完全不变（回归护栏）。"""
-        content = (
-            "```python\n"
-            "x = 1\n"
-            "```\n"
-            "正文段落。"
-        )
+        content = "```python\n" "x = 1\n" "```\n" "正文段落。"
         blocks = _parse_content_blocks(content)
         code = [b for b in blocks if b.get("type") == "code"]
         assert len(code) == 1
@@ -362,12 +357,17 @@ class TestFinalizeExportDeliveryBehavior:
         p = Path("C:/exports/s1_aabbccdd_eeff0011.docx")
         E._export_inflight_register(p)
         await E._finalize_export_delivery(
-            object(), scheme_id="s1", kind="docx", round_no=3,
+            object(),
+            scheme_id="s1",
+            kind="docx",
+            round_no=3,
             export_filename="方案_2026-10-14_第3轮.docx",
-            gc_protect={p}, inflight_path=p)
+            gc_protect={p},
+            inflight_path=p,
+        )
         assert [c[0] for c in calls] == ["trace", "gc"], (
-            "顺序契约：留痕必须先于 GC（GC 判定依赖已提交行），"
-            "注销必须在 GC 之后（GC 期间产物仍需受保护）")
+            "顺序契约：留痕必须先于 GC（GC 判定依赖已提交行），" "注销必须在 GC 之后（GC 期间产物仍需受保护）"
+        )
         assert calls[0][1:] == ("s1", "docx", 3, "方案_2026-10-14_第3轮.docx")
         assert calls[1][2] == {p}, "protect 集合必须原样透传给 GC"
         # 注销在 GC 返回之后生效：集合里该键已被移除
@@ -377,6 +377,7 @@ class TestFinalizeExportDeliveryBehavior:
     async def test_none_inflight_skips_unregister(self, monkeypatch):
         """inflight_path=None（PDF degraded 分支）不得触碰在飞集合 ——
         旧实现靠 `if not degraded:` 守卫，现由 None 判定承担同一防护。"""
+
         async def _trace(*a, **k):
             pass
 
@@ -389,10 +390,9 @@ class TestFinalizeExportDeliveryBehavior:
         sentinel = Path("C:/exports/s1_00000000_11111111.pdf")
         E._export_inflight_register(sentinel)
         await E._finalize_export_delivery(
-            object(), scheme_id="s1", kind="pdf", round_no=1,
-            export_filename="f.pdf", inflight_path=None)
-        assert E._export_inflight_key(sentinel) in E._export_inflight_snapshot(), (
-            "None 注销误伤了无关的在飞注册")
+            object(), scheme_id="s1", kind="pdf", round_no=1, export_filename="f.pdf", inflight_path=None
+        )
+        assert E._export_inflight_key(sentinel) in E._export_inflight_snapshot(), "None 注销误伤了无关的在飞注册"
         E._export_inflight_unregister(sentinel)
 
 
@@ -402,10 +402,20 @@ class TestPersistExportCacheRowBehavior:
     @staticmethod
     def _args(db, tmp_path, **over):
         out = tmp_path / "s1_aabbccdd_eeff0011.docx"
-        out.write_bytes(b"docx-bytes")
-        kw = dict(db=db, scheme={"project_id": "p1"}, scheme_id="s1",
-                  config_hash="aabbccdd" * 8, content_fingerprint="eeff0011" * 8,
-                  cache_key="s1_aabbccdd", out_path=out, what="t")
+        # ✅ R175 · BUG-3：可用判据含 ZIP 完整性校验，fixture 须为真实 DOCX
+        from docx import Document
+
+        Document().save(str(out))
+        kw = dict(
+            db=db,
+            scheme={"project_id": "p1"},
+            scheme_id="s1",
+            config_hash="aabbccdd" * 8,
+            content_fingerprint="eeff0011" * 8,
+            cache_key="s1_aabbccdd",
+            out_path=out,
+            what="t",
+        )
         kw.update(over)
         return kw
 
@@ -415,8 +425,8 @@ class TestPersistExportCacheRowBehavior:
         kw = self._args(db_conn, tmp_path)
         await E._persist_export_cache_row(**kw)
         cur = await db_conn.execute(
-            "SELECT result_path, cache_key, project_id FROM export_cache"
-            " WHERE scheme_id='s1'")
+            "SELECT result_path, cache_key, project_id FROM export_cache" " WHERE scheme_id='s1'"
+        )
         rows = await cur.fetchall()
         assert len(rows) == 1
         assert rows[0]["result_path"] == str(kw["out_path"])
@@ -424,8 +434,7 @@ class TestPersistExportCacheRowBehavior:
         assert rows[0]["project_id"] == "p1"
 
     @pytest.mark.asyncio
-    async def test_new_row_survives_prune_failure(self, db_conn, tmp_path,
-                                                  monkeypatch, caplog):
+    async def test_new_row_survives_prune_failure(self, db_conn, tmp_path, monkeypatch, caplog):
         """双提交语义：prune 抛异常时，新缓存行已在第一次 commit 落盘。
 
         旧 DOCX「INSERT → prune → 单次 commit」口径下本用例必然失败 ——
@@ -445,12 +454,11 @@ class TestPersistExportCacheRowBehavior:
         #    不变，且被强化：调用方不再收到异常，新行仍然存活。
         with caplog.at_level(logging.WARNING):
             await E._persist_export_cache_row(**kw)  # 不应抛
-        cur = await db_conn.execute(
-            "SELECT COUNT(*) FROM export_cache WHERE scheme_id='s1'")
-        assert (await cur.fetchone())[0] == 1, (
-            "prune 失败把已写入的新缓存行一并回滚（双提交契约被破坏）")
-        assert any("裁剪失败" in r.getMessage() for r in caplog.records), \
-            "裁剪段 fail-soft 必须留 WARNING（静默丢失零容忍）"
+        cur = await db_conn.execute("SELECT COUNT(*) FROM export_cache WHERE scheme_id='s1'")
+        assert (await cur.fetchone())[0] == 1, "prune 失败把已写入的新缓存行一并回滚（双提交契约被破坏）"
+        assert any(
+            "裁剪失败" in r.getMessage() for r in caplog.records
+        ), "裁剪段 fail-soft 必须留 WARNING（静默丢失零容忍）"
 
     @pytest.mark.asyncio
     async def test_prune_keeps_at_most_five(self, db_conn, tmp_path, monkeypatch):
@@ -458,17 +466,27 @@ class TestPersistExportCacheRowBehavior:
         monkeypatch.setattr(E, "EXPORTS_DIR", tmp_path)
         for i in range(5):
             fp = tmp_path / f"s1_old{i:04d}_f{i:07d}.docx"
-            fp.write_bytes(b"old")
+            from docx import Document
+
+            Document().save(str(fp))
             await db_conn.execute(
                 "INSERT INTO export_cache (id, project_id, scheme_id, config_hash,"
                 " content_fingerprint, cache_key, result_path, created_at)"
                 " VALUES (?,?,?,?,?,?,?,?)",
-                (f"old{i}", "p1", "s1", f"old{i:04d}", f"f{i:07d}" * 8,
-                 f"s1_old{i:04d}", str(fp), f"2026-10-01 0{i}:00:00"))
+                (
+                    f"old{i}",
+                    "p1",
+                    "s1",
+                    f"old{i:04d}",
+                    f"f{i:07d}" * 8,
+                    f"s1_old{i:04d}",
+                    str(fp),
+                    f"2026-10-01 0{i}:00:00",
+                ),
+            )
         await db_conn.commit()
         await E._persist_export_cache_row(**self._args(db_conn, tmp_path))
-        cur = await db_conn.execute(
-            "SELECT result_path FROM export_cache WHERE scheme_id='s1'")
+        cur = await db_conn.execute("SELECT result_path FROM export_cache WHERE scheme_id='s1'")
         rows = await cur.fetchall()
         assert len(rows) == 5, f"保留策略未生效：{len(rows)} 行"
         # 最旧的 old0 必须被裁掉，本次新行必须保留
@@ -477,13 +495,11 @@ class TestPersistExportCacheRowBehavior:
         assert str(tmp_path / "s1_aabbccdd_eeff0011.docx") in paths
 
     @pytest.mark.asyncio
-    async def test_insert_or_ignore_keeps_existing_row(self, db_conn, tmp_path,
-                                                       monkeypatch):
+    async def test_insert_or_ignore_keeps_existing_row(self, db_conn, tmp_path, monkeypatch):
         """同指纹重复调用（并发导出）只保留一行（B5 唯一约束口径）。"""
         monkeypatch.setattr(E, "EXPORTS_DIR", tmp_path)
         kw = self._args(db_conn, tmp_path)
         await E._persist_export_cache_row(**kw)
         await E._persist_export_cache_row(**kw)
-        cur = await db_conn.execute(
-            "SELECT COUNT(*) FROM export_cache WHERE scheme_id='s1'")
+        cur = await db_conn.execute("SELECT COUNT(*) FROM export_cache WHERE scheme_id='s1'")
         assert (await cur.fetchone())[0] == 1

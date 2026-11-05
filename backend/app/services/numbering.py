@@ -16,6 +16,7 @@
 - 图号 / 表号：「图{章}-{序}」「表{章}-{序}」为独立命名空间，由导出器
   （export.py 的 figure_counters / table_counters）管理，不与本模块混用。
 """
+
 import json
 import logging
 import re
@@ -27,15 +28,41 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # 中文数字（支持 1-30，含 "" 占位以保持索引一致）
 CHINESE_NUMBERS: list[str] = [
-    "", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
-    "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
-    "二十一", "二十二", "二十三", "二十四", "二十五", "二十六", "二十七", "二十八", "二十九", "三十",
+    "",
+    "一",
+    "二",
+    "三",
+    "四",
+    "五",
+    "六",
+    "七",
+    "八",
+    "九",
+    "十",
+    "十一",
+    "十二",
+    "十三",
+    "十四",
+    "十五",
+    "十六",
+    "十七",
+    "十八",
+    "十九",
+    "二十",
+    "二十一",
+    "二十二",
+    "二十三",
+    "二十四",
+    "二十五",
+    "二十六",
+    "二十七",
+    "二十八",
+    "二十九",
+    "三十",
 ]
 
 # 英文小写字母（a-z 之后回到 aa…az，共 52 个）
-ALPHABET: list[str] = [
-    chr(ord("a") + i) if i < 26 else f"a{chr(ord('a') + i - 26)}" for i in range(52)
-]
+ALPHABET: list[str] = [chr(ord("a") + i) if i < 26 else f"a{chr(ord('a') + i - 26)}" for i in range(52)]
 
 # 目录树编号递归最大深度（失控兜底 · 编号域唯一口径；sse_handlers 校验/计数的
 # depth 止损阈值（10/12）语义不同，刻意不并入本常量，强行统一会改变异常输入行为）。
@@ -62,9 +89,9 @@ _CJK_BOUNDARY = r"[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]"
 
 _STRIP_NUMBER_RE = re.compile(
     r"^\s*(?:"
-    r"第\s*[一二三四五六七八九十百千零0-9]+\s*[章节]"   # 第X章 / 第X节 / 第 1 章
-    r"|[（(][一二三四五六七八九十0-9]+[)）]"            # （三） / (3)
-    r"|[0-9]+[)）]"                                     # 1） / 2）
+    r"第\s*[一二三四五六七八九十百千零0-9]+\s*[章节]"  # 第X章 / 第X节 / 第 1 章
+    r"|[（(][一二三四五六七八九十0-9]+[)）]"  # （三） / (3)
+    r"|[0-9]+[)）]"  # 1） / 2）
     # ✅ BUG 修复（2026-09-27 · 标题损坏）：点分编号（1.2 / 1.2.3 …）此前写作
     #    `[0-9]+(?:\.[0-9]+){0,7}[分隔符]+` —— 路径后**没有**分隔符时，
     #    正则引擎会回退成「更短的前缀 + 把点当分隔符」，把标题剥成残句：
@@ -86,7 +113,7 @@ _STRIP_NUMBER_RE = re.compile(
     # 单段编号（"1 施工准备"）：必须带分隔符，且分隔符后不能仍是数字 ——
     # 否则 "1.5m 深" 会被剥成 "5m 深"（把数值/单位剥坏）。
     r"|[0-9]+" + _SEP_CLASS + r"+(?![0-9])"
-    r"|[一二三四五六七八九十百千零]+" + _SEP_CLASS + r"+"   # 一、 / 十二、
+    r"|[一二三四五六七八九十百千零]+" + _SEP_CLASS + r"+"  # 一、 / 十二、
     r")" + _SEP_CLASS + r"*"
 )
 # 纯数字路径型标题（整个标题就是一个编号，如 "1" / "1.1" / "1.2.3"）
@@ -167,8 +194,7 @@ def strip_outline_numbering_all(title: str) -> str:
 #: 正文子项标记（「（1）」「(三)」「1）」）。目录树标题里这类标记是**内容**
 #: 而非章节编号：剥掉就丢了子项归属（"1.2.3（1）细部构造" 剥净成 "细部构造"，
 #: 子项与哪一章无关）。多轮剥章节编号时必须在遇到它之前停下。
-_SUB_ITEM_MARKER_RE = re.compile(
-    r"^\s*(?:[（(][一二三四五六七八九十0-9]+[)）]|[0-9]{1,3}\s*[)）])")
+_SUB_ITEM_MARKER_RE = re.compile(r"^\s*(?:[（(][一二三四五六七八九十0-9]+[)）]|[0-9]{1,3}\s*[)）])")
 
 
 def strip_outline_numbering_tree(title: str) -> str:
@@ -200,9 +226,9 @@ def strip_outline_numbering_tree(title: str) -> str:
     return s
 
 
-def renumber_outline_nodes(nodes: list, *, strip_titles: bool = True,
-                           prefix: str = "", _depth: int = 0,
-                           _path: set | None = None) -> list:
+def renumber_outline_nodes(
+    nodes: list, *, strip_titles: bool = True, prefix: str = "", _depth: int = 0, _path: set | None = None
+) -> list:
     """程序统一重排目录树编号（不信任模型编号）——目录树编号的唯一实现。
 
     同时修复：
@@ -243,8 +269,8 @@ def renumber_outline_nodes(nodes: list, *, strip_titles: bool = True,
         _key = id(node)
         if _key in _path:
             logger.warning(
-                "目录树编号：检测到环引用（节点对象重复出现在当前路径），"
-                "跳过该子树（prefix=%s）", prefix or "root")
+                "目录树编号：检测到环引用（节点对象重复出现在当前路径），" "跳过该子树（prefix=%s）", prefix or "root"
+            )
             continue
         valid_idx += 1
         node_id = f"{prefix}.{valid_idx}" if prefix else str(valid_idx)
@@ -265,9 +291,7 @@ def renumber_outline_nodes(nodes: list, *, strip_titles: bool = True,
             children = node["children"]
         if children:
             _path.add(_key)
-            renumber_outline_nodes(children, strip_titles=strip_titles,
-                                   prefix=node_id, _depth=_depth + 1,
-                                   _path=_path)
+            renumber_outline_nodes(children, strip_titles=strip_titles, prefix=node_id, _depth=_depth + 1, _path=_path)
             _path.discard(_key)
     return nodes
 
@@ -297,33 +321,28 @@ def renumber_section_outline_ids(tree: list) -> list[tuple[str, int, str]]:
     """
     updates: list[tuple[str, int, str]] = []
     if not isinstance(tree, list):
-        logger.warning("章节编号重算：入参 tree 非 list（实际 %s），跳过重算",
-                       type(tree).__name__)
+        logger.warning("章节编号重算：入参 tree 非 list（实际 %s），跳过重算", type(tree).__name__)
         return updates
 
-    def _walk(ns: list, prefix: str = "", depth: int = 0,
-              visited: set[str] | None = None):
+    def _walk(ns: list, prefix: str = "", depth: int = 0, visited: set[str] | None = None):
         if not isinstance(ns, list):
             return
         if depth > _MAX_TREE_DEPTH:
-            logger.warning("章节编号重算：嵌套深度超过 %s，截断子树（prefix=%s）",
-                           _MAX_TREE_DEPTH, prefix)
+            logger.warning("章节编号重算：嵌套深度超过 %s，截断子树（prefix=%s）", _MAX_TREE_DEPTH, prefix)
             return
         if visited is None:
             visited = set()
         idx = 0
         for n in ns:
             if not isinstance(n, dict):
-                logger.warning("章节编号重算：跳过非 dict 节点（实际 %s）",
-                               type(n).__name__)
+                logger.warning("章节编号重算：跳过非 dict 节点（实际 %s）", type(n).__name__)
                 continue
             sid = n.get("id")
             if not isinstance(sid, str) or not sid:
                 logger.warning("章节编号重算：跳过缺少合法 id 的节点")
                 continue
             if sid in visited:
-                logger.warning("章节编号重算：检测到重复/环引用节点 %s，不重复展开",
-                               sid[:8])
+                logger.warning("章节编号重算：检测到重复/环引用节点 %s，不重复展开", sid[:8])
                 continue
             idx += 1
             visited.add(sid)
@@ -345,8 +364,7 @@ def renumber_section_outline_ids(tree: list) -> list[tuple[str, int, str]]:
             try:
                 payload = json.dumps(oj, ensure_ascii=False)
             except (TypeError, ValueError) as e:
-                logger.warning("章节编号重算：节点 %s 的 outline_json 不可序列化，"
-                               "跳过该节点: %s", sid[:8], e)
+                logger.warning("章节编号重算：节点 %s 的 outline_json 不可序列化，" "跳过该节点: %s", sid[:8], e)
                 continue
             updates.append((payload, level, sid))
             children = n.get("children")
@@ -458,9 +476,14 @@ def stored_id_to_prefix(stored_id: str) -> str:
 
 
 def renumber_section_body_subheadings(
-        content: str, section_number: str, section_level: int = 1,
-        section_title: str = "",
-        has_db_children: bool = False) -> tuple[str, list[dict]]:
+    content: str,
+    section_number: str,
+    section_level: int = 1,
+    section_title: str = "",
+    has_db_children: bool = False,
+    *,
+    section_id: str = "",
+) -> tuple[str, list[dict]]:
     """把章节正文内的子标题编号规范化为导出口径（幂等、无损）。
 
     背景（编号统一 · 2026-09-25）：AI 撰写正文时以提示词注入的存储态编号
@@ -485,6 +508,8 @@ def renumber_section_body_subheadings(
         section_title: 本节裸标题（用于剥离正文开头与标题重复的块，与导出同口径）。
         has_db_children: 本节是否有 DB 子章节（用于 E3 降级判定：有子女时正文子标题
             改走节内 body 命名空间 1）/ a、…，与 DB 子章节彻底隔离）。默认 False。
+        section_id: 本节主键（仅用于把「正文子标题层级不齐」告警定位到具体章节；
+            缺省时告警仍输出 section=?，不影响任何编号行为）。
 
     Returns:
         (规范化后正文, changes)；changes 元素为
@@ -505,9 +530,11 @@ def renumber_section_body_subheadings(
     # 任何残余的导入期环（content_blocks 模块级已引用本模块的 ALPHABET）。
     from app.services.content_blocks import (
         _compute_subheading,
+        _norm_heading_text,
         _parse_content_blocks,
         _strip_duplicate_leading_title,
         _strip_title_number,
+        strip_subitem_ordinal_prefix,
     )
 
     lines = content.split("\n")
@@ -526,6 +553,20 @@ def renumber_section_body_subheadings(
     if titles:
         blocks = _strip_duplicate_leading_title(blocks, *titles)
 
+    # ✅ 2026-11-05（R179 · 落库/导出编号同源）：与 export.write_section 同口径，
+    #    把**任意位置**与章节标题同文本的正文子标题排除在编号计数之外。
+    #    导出侧会整块剔除这类重复标题；若落库侧仍给它占号，其后所有子标题
+    #    会整体错位一格 —— 前端预览（读落库正文）与被剔除后的成稿编号不一致。
+    #    此处只跳过计数（不删正文行），保证编号序列与成稿完全一致。
+    _sec_title_norms = {_norm_heading_text(t) for t in (bare_title, full_title, pure_title)}
+    _sec_title_norms.discard("")
+    if _sec_title_norms:
+        blocks = [
+            b
+            for b in blocks
+            if not (b.get("type") == "heading" and _norm_heading_text(b.get("text", "")) in _sec_title_norms)
+        ]
+
     # 第一遍：按导出同款算法为每个标题块计算规范化文本
     sub_counters: dict = {}
     try:
@@ -536,16 +577,29 @@ def renumber_section_body_subheadings(
     _demote = has_db_children
     try:
         from app.config import settings as _s
+
         _demote = has_db_children and _s.body_subheading_demote_with_children
     except Exception as e:
         logger.debug("读取 body_subheading_demote_with_children 失败（按默认降级行为继续）: %s", e)
     for block in blocks:
         if block.get("type") != "heading":
             continue
-        pure = _strip_title_number(block.get("text", ""))
+        # ✅ 2026-11-05（R179 · "a、a、"双重前缀根因同步落库侧）：与
+        #    export.write_section 同口径，先剥离源文自带的字母序前缀再重分配编号。
+        #    旧实现只调用 _strip_title_number（不认字母序），导致
+        #    ① 落库正文出现 "1）、a、吊顶" 双重前缀；
+        #    ② 更深层（rel≥1）子标题每经过一次重规范化（每次拖拽/保存都会
+        #       触发 _renormalize_all_section_contents）就多叠一层 "a、"，无界增长。
+        pure = strip_subitem_ordinal_prefix(_strip_title_number(block.get("text", "")))
         text, _style = _compute_subheading(
-            section_prefix, sec_level, block.get("level", 1), sub_counters,
-            pure, "", has_children=_demote)
+            section_prefix,
+            sec_level,
+            block.get("level", 1),
+            sub_counters,
+            pure,
+            section_id,
+            has_children=_demote,
+        )
         block["_fixed_text"] = text
 
     # 第二遍：把规范化文本精确重写回源行（#-标题保留井号与缩进；纯文本标题整行替换）
@@ -563,7 +617,7 @@ def renumber_section_body_subheadings(
         if not isinstance(src, int) or not (0 <= src < len(lines)):
             continue
         line = lines[src]
-        indent = line[:len(line) - len(line.lstrip())]
+        indent = line[: len(line) - len(line.lstrip())]
         # ✅ D-8c（2026-10-08）：与 content_blocks 解析入口同口径 —— 行首 BOM
         #    不参与 #-标题形态判定（否则 BOM 行会误走纯文本分支重写）。
         _body = line.lstrip().lstrip("\ufeff").lstrip()
@@ -624,9 +678,7 @@ async def load_scheme_section_index(db, scheme_id: str) -> dict:
     meta: dict = {}
     has_children: dict = {}
     try:
-        cur = await db.execute(
-            "SELECT id, outline_json, level, title FROM sections WHERE scheme_id=?",
-            (scheme_id,))
+        cur = await db.execute("SELECT id, outline_json, level, title FROM sections WHERE scheme_id=?", (scheme_id,))
         for r in await cur.fetchall():
             sid = r["id"]
             raw = r["outline_json"] or "{}"
@@ -644,12 +696,12 @@ async def load_scheme_section_index(db, scheme_id: str) -> dict:
                 level = int(r["level"] or 1)
             except (TypeError, ValueError):
                 level = 1
-            meta[sid] = {"number": number, "level": level,
-                         "title": str(r["title"] or "")}
+            meta[sid] = {"number": number, "level": level, "title": str(r["title"] or "")}
         cur = await db.execute(
             "SELECT parent_id, COUNT(*) AS n FROM sections "
             "WHERE scheme_id=? AND COALESCE(parent_id,'')!='' GROUP BY parent_id",
-            (scheme_id,))
+            (scheme_id,),
+        )
         for r in await cur.fetchall():
             has_children[r["parent_id"]] = bool((r["n"] or 0) > 0)
     except Exception as e:  # noqa: BLE001 — 预取失败必须回退逐章查询，不得阻断
@@ -658,8 +710,9 @@ async def load_scheme_section_index(db, scheme_id: str) -> dict:
     return {"meta": meta, "has_children": has_children}
 
 
-def _normalize_from_meta(content: str, info: dict, has_db_children: bool
-                         ) -> tuple[str, bool]:
+def _normalize_from_meta(
+    content: str, info: dict, has_db_children: bool, section_id: str = ""
+) -> tuple[str, bool]:
     """用已预取的元数据执行规范化（纯计算，无 IO）。
 
     与 `normalize_section_content_subheadings` 的查库之后那半段**逐行等价**，
@@ -667,23 +720,63 @@ def _normalize_from_meta(content: str, info: dict, has_db_children: bool
     避免出现第二套实现再次漂移。
     """
     new_content, changes = renumber_section_body_subheadings(
-        content, info["number"], info["level"], info["title"],
-        has_db_children=has_db_children)
+        content,
+        info["number"],
+        info["level"],
+        info["title"],
+        has_db_children=has_db_children,
+        section_id=section_id,
+    )
     return new_content, bool(changes)
+
+
+def normalize_section_contents_from_index(
+    items: list[tuple[str, str]], index: dict
+) -> tuple[list[tuple[str, str, bool]], list[str]]:
+    """批量纯计算规范化（无任何 IO）：供结构重排后在线程池中一次算完。
+
+    ✅ 2026-11-05（第二轮日志驱动分析 P0-1）：`_renormalize_all_section_contents`
+    原先在 async 请求内逐章 `await` 规范化，解析/重编号的**纯 CPU 段**直接占用
+    事件循环（实测 `/sections` 8.6~10.2s、`/sse/tasks` 同期卡 8.6s）。
+    拆出本函数后，调用方用 `asyncio.to_thread` 执行，循环不再被占。
+
+    返回 `(results, fallback_ids)`：
+    - `results`：`[(section_id, 规范化后正文, 是否改写), ...]`，顺序与入参一致；
+    - `fallback_ids`：预取索引里查不到的章节。调用方必须回退到原有的
+      `normalize_section_content_subheadings`（它自带逐章查库兜底），
+      保证「预取失败/脏数据」时行为与旧实现完全一致（fail-soft）。
+    """
+    results: list[tuple[str, str, bool]] = []
+    fallback: list[str] = []
+    if not isinstance(index, dict):
+        index = {}
+    meta = index.get("meta") or {}
+    has_children = index.get("has_children") or {}
+    for section_id, content in items:
+        info = meta.get(section_id)
+        if info is None:
+            fallback.append(section_id)
+            continue
+        new_content, changed = _normalize_from_meta(
+            content, info, bool(has_children.get(section_id, False)), section_id
+        )
+        results.append((section_id, new_content, changed))
+    return results, fallback
 
 
 def _renumber_disabled() -> bool:
     """`content_subheading_renumber` 开关（读取失败时按默认开启，与旧版一致）。"""
     try:
         from app.config import settings
+
         return not settings.content_subheading_renumber
     except Exception:  # pragma: no cover - 配置不可用时按默认开启
         return False
 
 
 async def normalize_section_content_subheadings(
-        db, scheme_id: str, section_id: str, content: str,
-        *, index: dict | None = None) -> tuple[str, bool]:
+    db, scheme_id: str, section_id: str, content: str, *, index: dict | None = None
+) -> tuple[str, bool]:
     """正文落库前规范化 Markdown 子标题编号，返回 (规范化后正文, 是否发生改写)。
 
     与导出 write_section 同算法（renumber_section_body_subheadings），
@@ -714,12 +807,15 @@ async def normalize_section_content_subheadings(
             info = (index.get("meta") or {}).get(section_id)
             if info is not None:
                 return _normalize_from_meta(
-                    content, info,
-                    bool((index.get("has_children") or {}).get(section_id, False)))
+                    content,
+                    info,
+                    bool((index.get("has_children") or {}).get(section_id, False)),
+                    section_id,
+                )
 
         cur = await db.execute(
-            "SELECT outline_json, level, title FROM sections WHERE id=? AND scheme_id=?",
-            (section_id, scheme_id))
+            "SELECT outline_json, level, title FROM sections WHERE id=? AND scheme_id=?", (section_id, scheme_id)
+        )
         rec = await cur.fetchone()
         if rec is None:
             return content, False
@@ -738,20 +834,21 @@ async def normalize_section_content_subheadings(
         except (TypeError, ValueError):
             section_level = 1
         cur = await db.execute(
-            "SELECT COUNT(*) AS n FROM sections WHERE parent_id=? AND scheme_id=?",
-            (section_id, scheme_id))
+            "SELECT COUNT(*) AS n FROM sections WHERE parent_id=? AND scheme_id=?", (section_id, scheme_id)
+        )
         child_row = await cur.fetchone()
         has_db_children = bool(child_row and (child_row["n"] or 0) > 0)
 
         return _normalize_from_meta(
             content,
-            {"number": section_number, "level": section_level,
-             "title": str(rec["title"] or "")},
-            has_db_children)
+            {"number": section_number, "level": section_level, "title": str(rec["title"] or "")},
+            has_db_children,
+            section_id,
+        )
     except Exception as e:  # noqa: BLE001 — 编号规范化绝不能阻断正文落库
         import logging
-        logging.getLogger("numbering").warning(
-            "章节 %s 正文子标题编号规范化失败（保留原文）: %s", section_id[:8], e)
+
+        logging.getLogger("numbering").warning("章节 %s 正文子标题编号规范化失败（保留原文）: %s", section_id[:8], e)
         return content, False
 
 
@@ -759,8 +856,8 @@ async def normalize_section_content_subheadings(
 # 编号一致性显式跨校验器（2026-09-26）
 # ============================================================
 async def validate_section_content_numbering(
-        db, scheme_id: str, section_id: str, content: str,
-        *, index: dict | None = None) -> dict:
+    db, scheme_id: str, section_id: str, content: str, *, index: dict | None = None
+) -> dict:
     """单章落库正文子标题编号 vs 当前 outline 编号 一致性校验（显式跨模块校验器）。
 
     复用 normalize_section_content_subheadings 同一规范化逻辑：若按当前 outline 重算后
@@ -783,19 +880,29 @@ async def validate_section_content_numbering(
     #    「无法判定」误读成「校验通过」。现按承诺显式回传。
     disabled = _renumber_disabled()
     if not content or not content.strip():
-        return {"section_id": section_id, "consistent": True,
-                "skipped": disabled, "changed": False, "diffs": []}
+        return {"section_id": section_id, "consistent": True, "skipped": disabled, "changed": False, "diffs": []}
     try:
         new_content, changed = await normalize_section_content_subheadings(
-            db, scheme_id, section_id, content, index=index)
+            db, scheme_id, section_id, content, index=index
+        )
     except Exception as e:  # noqa: BLE001 — 校验本身不应阻断
-        return {"section_id": section_id, "consistent": False, "skipped": disabled,
-                "changed": True, "diffs": [], "error": str(e)}
+        return {
+            "section_id": section_id,
+            "consistent": False,
+            "skipped": disabled,
+            "changed": True,
+            "diffs": [],
+            "error": str(e),
+        }
     if not changed:
-        return {"section_id": section_id, "consistent": True,
-                "skipped": disabled, "changed": False, "diffs": []}
-    return {"section_id": section_id, "consistent": False, "changed": True,
-            "skipped": disabled, "diffs": _diff_content_lines(content, new_content)}
+        return {"section_id": section_id, "consistent": True, "skipped": disabled, "changed": False, "diffs": []}
+    return {
+        "section_id": section_id,
+        "consistent": False,
+        "changed": True,
+        "skipped": disabled,
+        "diffs": _diff_content_lines(content, new_content),
+    }
 
 
 async def validate_scheme_numbering_consistency(db, scheme_id: str) -> dict:
@@ -808,25 +915,40 @@ async def validate_scheme_numbering_consistency(db, scheme_id: str) -> dict:
     """
     try:
         cur = await db.execute(
-            "SELECT id, content FROM sections WHERE scheme_id=? "
-            "AND COALESCE(content,'')!=''",
-            (scheme_id,))
+            "SELECT id, content FROM sections WHERE scheme_id=? " "AND COALESCE(content,'')!=''", (scheme_id,)
+        )
         rows = await cur.fetchall()
     except Exception as e:  # noqa: BLE001
-        return {"scheme_id": scheme_id, "checked": 0, "mismatched": 0,
-                "consistent": True, "sections": [], "error": str(e)}
+        # ✅ B-08（R175，可信度）：旧实现读取失败即返回 ``consistent=True``
+        #    （fail-open）—— 数据库抖一下，校验器就替用户宣布「编号一致」，
+        #    导出预检拿到的是一份假的绿色结论。改为 fail-closed：明确
+        #    ``consistent=False`` + ``failed=True`` + 错误原因，消费方必须
+        #    把「无法校验」与「校验通过」区分开。
+        logger.warning("编号一致性校验读取章节失败（按未通过处理）: %s", e)
+        return {
+            "scheme_id": scheme_id,
+            "checked": 0,
+            "mismatched": 0,
+            "consistent": False,
+            "failed": True,
+            "sections": [],
+            "error": str(e),
+        }
     index = await load_scheme_section_index(db, scheme_id)
     sections = []
     mismatched = 0
     for r in rows:
-        rep = await validate_section_content_numbering(
-            db, scheme_id, r["id"], r["content"] or "", index=index)
+        rep = await validate_section_content_numbering(db, scheme_id, r["id"], r["content"] or "", index=index)
         sections.append(rep)
         if not rep.get("consistent"):
             mismatched += 1
-    return {"scheme_id": scheme_id, "checked": len(sections),
-            "mismatched": mismatched, "consistent": mismatched == 0,
-            "sections": sections}
+    return {
+        "scheme_id": scheme_id,
+        "checked": len(sections),
+        "mismatched": mismatched,
+        "consistent": mismatched == 0,
+        "sections": sections,
+    }
 
 
 async def repair_scheme_numbering_consistency(db, scheme_id: str) -> dict:
@@ -840,12 +962,11 @@ async def repair_scheme_numbering_consistency(db, scheme_id: str) -> dict:
     """
     from app.services.content_utils import text_word_count
     from app.services.repair_record import create_snapshot
+
     report = await validate_scheme_numbering_consistency(db, scheme_id)
-    drifted = [s for s in report.get("sections", [])
-               if not s.get("consistent") and not s.get("skipped")]
+    drifted = [s for s in report.get("sections", []) if not s.get("consistent") and not s.get("skipped")]
     if not drifted:
-        return {"fixed": 0, "total": report["checked"], "report": report,
-                "snapshot_id": None}
+        return {"fixed": 0, "total": report["checked"], "report": report, "snapshot_id": None}
     # ✅ 性能（2026-09-27）：快照与修复两段各自逐章 SELECT content（各 N 次），
     #    修复段还逐章调 normalize（再 2N 次）。实测 200 章漂移方案合计 >1000 次
     #    execute。这里各用**一次批量查询**取回 content 字典，两段共用。
@@ -856,8 +977,8 @@ async def repair_scheme_numbering_consistency(db, scheme_id: str) -> dict:
             if ids:
                 qs = ",".join("?" * len(ids))
                 cur = await db.execute(
-                    f"SELECT id, content FROM sections WHERE scheme_id=? "
-                    f"AND id IN ({qs})", (scheme_id, *ids))
+                    f"SELECT id, content FROM sections WHERE scheme_id=? " f"AND id IN ({qs})", (scheme_id, *ids)
+                )
                 content_by_id = {r["id"]: (r["content"] or "") for r in await cur.fetchall()}
         except Exception as e:  # noqa: BLE001 — 取不到就回退逐章查询，不阻断修复
             logger.warning("批量读取漂移章节正文失败（回退逐章读取）: %s", e)
@@ -872,17 +993,14 @@ async def repair_scheme_numbering_consistency(db, scheme_id: str) -> dict:
             if sid in content_by_id:
                 content_before = content_by_id[sid]
             else:
-                cur = await db.execute(
-                    "SELECT content FROM sections WHERE id=? AND scheme_id=?",
-                    (sid, scheme_id))
+                cur = await db.execute("SELECT content FROM sections WHERE id=? AND scheme_id=?", (sid, scheme_id))
                 row = await cur.fetchone()
                 if not row:
                     continue
                 content_before = row["content"] or ""
             snap_rows.append({"section_id": sid, "content_before": content_before})
         if snap_rows:
-            snapshot_id = await create_snapshot(
-                db, scheme_id, snap_rows, snapshot_type="numbering_repair")
+            snapshot_id = await create_snapshot(db, scheme_id, snap_rows, snapshot_type="numbering_repair")
     except Exception as e:  # noqa: BLE001 — 快照失败不阻断修复（回退为无版本修复）
         logger.warning("编号修复前快照失败（继续修复，本次无版本记录）: %s", e)
         snapshot_id = None
@@ -897,25 +1015,35 @@ async def repair_scheme_numbering_consistency(db, scheme_id: str) -> dict:
             if sec_id in content_by_id:
                 content = content_by_id[sec_id]
             else:
-                cur = await db.execute(
-                    "SELECT content FROM sections WHERE id=? AND scheme_id=?",
-                    (sec_id, scheme_id))
+                cur = await db.execute("SELECT content FROM sections WHERE id=? AND scheme_id=?", (sec_id, scheme_id))
                 row = await cur.fetchone()
                 if not row:
                     continue
                 content = row["content"] or ""
             new_content, changed = await normalize_section_content_subheadings(
-                db, scheme_id, sec_id, content, index=index)
+                db, scheme_id, sec_id, content, index=index
+            )
             if changed:
                 await db.execute(
                     "UPDATE sections SET content=?, word_count=? WHERE id=? AND scheme_id=?",
-                    (new_content, text_word_count(new_content), sec_id, scheme_id))
+                    (new_content, text_word_count(new_content), sec_id, scheme_id),
+                )
+                # ✅ B-09（R175，闭环）：编号修复同样改写了正文 → 原审核结论
+                #    必须失效（此前只有一致性修复链会重置 review_status，编号
+                #    修复后章节仍挂着 approved，导出的评审结论与正文不一致）。
+                await db.execute(
+                    "UPDATE sections SET review_status='pending' "
+                    "WHERE id=? AND scheme_id=? AND IFNULL(review_status,'')!=''",
+                    (sec_id, scheme_id),
+                )
                 fixed += 1
         except Exception as e:  # noqa: BLE001
             logger.warning("章节 %s 编号修复失败（保留原正文）: %s", sec_id[:8], e)
     await db.commit()
-    return {"fixed": fixed, "total": report["checked"], "report": report,
-            "snapshot_id": snapshot_id}
+    # ✅ B-09（R175）：返回**修复后重新校验**的报告。旧实现回传修复前的
+    #    ``report``，前端展示「仍有 N 处漂移」而正文其实已修好，用户反复点修复。
+    fresh = await validate_scheme_numbering_consistency(db, scheme_id)
+    return {"fixed": fixed, "total": fresh.get("checked", 0), "report": fresh, "snapshot_id": snapshot_id}
 
 
 # ============================================================
@@ -935,14 +1063,14 @@ async def rollback_numbering_version(db, scheme_id: str, snapshot_id: str) -> di
     失败抛 ValueError（路由层转 404/400）。
     """
     from app.services.repair_record import get_snapshot, rollback_snapshot
+
     snap = await get_snapshot(db, snapshot_id)
     if not snap:
         raise ValueError("快照不存在")
     if snap.get("scheme_id") != scheme_id:
         raise ValueError("快照不属于当前方案")
     if snap.get("type") not in _NUMBERING_SNAPSHOT_TYPES:
-        raise ValueError(
-            f"快照类型 {snap.get('type')!r} 不属于编号版本管理，请使用对应模块的回滚端点")
+        raise ValueError(f"快照类型 {snap.get('type')!r} 不属于编号版本管理，请使用对应模块的回滚端点")
     res = await rollback_snapshot(db, snapshot_id, undo_type="numbering_rollback")
     return {**res, "scheme_id": scheme_id, "snapshot_type": snap.get("type")}
 
@@ -959,7 +1087,8 @@ async def list_numbering_versions(db, scheme_id: str, limit: int = 20) -> dict:
             "SELECT id, type, sections, created_at FROM scheme_snapshots "
             "WHERE scheme_id=? AND type IN (?,?) "
             "ORDER BY created_at DESC, rowid DESC LIMIT ?",
-            (scheme_id, *_NUMBERING_SNAPSHOT_TYPES, limit))
+            (scheme_id, *_NUMBERING_SNAPSHOT_TYPES, limit),
+        )
         rows = await cur.fetchall()
     except Exception as e:  # noqa: BLE001
         return {"scheme_id": scheme_id, "versions": [], "error": str(e)}
@@ -969,28 +1098,27 @@ async def list_numbering_versions(db, scheme_id: str, limit: int = 20) -> dict:
             secs = json.loads(r["sections"] or "[]")
         except Exception:  # noqa: BLE001 — 坏行跳过，不影响其余版本展示
             secs = []
-        versions.append({
-            "snapshot_id": r["id"],
-            "type": r["type"],
-            "created_at": r["created_at"],
-            "section_count": len(secs),
-            "section_ids": [s.get("section_id") for s in secs
-                            if isinstance(s, dict) and s.get("section_id")],
-        })
+        versions.append(
+            {
+                "snapshot_id": r["id"],
+                "type": r["type"],
+                "created_at": r["created_at"],
+                "section_count": len(secs),
+                "section_ids": [s.get("section_id") for s in secs if isinstance(s, dict) and s.get("section_id")],
+            }
+        )
     return {"scheme_id": scheme_id, "versions": versions}
 
 
 def _diff_content_lines(old: str, new: str) -> list[dict]:
     """精简 diff：只返回有差异的行（按 difflib  opcode 汇总）。"""
     import difflib
+
     old_lines = old.splitlines()
     new_lines = new.splitlines()
     out = []
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-            None, old_lines, new_lines).get_opcodes():
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old_lines, new_lines).get_opcodes():
         if tag == "equal":
             continue
-        out.append({"tag": tag,
-                    "old": old_lines[i1:i2],
-                    "new": new_lines[j1:j2]})
+        out.append({"tag": tag, "old": old_lines[i1:i2], "new": new_lines[j1:j2]})
     return out

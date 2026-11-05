@@ -11,13 +11,13 @@
 - 若未来有人破坏渲染端修复 → 重新报出；
 - 章自身内容的子标题与其子孙章节的编号碰撞（修复范围外）→ 如实报出。
 """
+
 import pytest
 from app.routers.export import _detect_duplicate_sections
 
 
 def _sec(sid, pid, level, title, content="", sort=0):
-    return {"id": sid, "parent_id": pid, "level": level, "title": title,
-            "content": content, "sort_order": sort}
+    return {"id": sid, "parent_id": pid, "level": level, "title": title, "content": content, "sort_order": sort}
 
 
 class TestDetectDuplicateSections:
@@ -38,8 +38,7 @@ class TestDetectDuplicateSections:
         """
         secs = [
             _sec("a", "", 1, "第一章 工程概况", "第一章导语。"),
-            _sec("p1", "a", 2, "工程基本信息",
-                 "本节概述。\n\n## 项目概况\n\n正文。\n\n## 建筑概况\n\n正文。"),
+            _sec("p1", "a", 2, "工程基本信息", "本节概述。\n\n## 项目概况\n\n正文。\n\n## 建筑概况\n\n正文。"),
             _sec("s1", "p1", 3, "工程规模与结构形式", "规模正文。"),
             _sec("s2", "p1", 3, "脚手架搭设部位与高度", "部位正文。"),
         ]
@@ -65,9 +64,14 @@ class TestDetectDuplicateSections:
         成稿编号唯一 —— 回归护栏：若有人破坏任意一端，此处将重新报出。"""
         secs = [
             _sec("a", "", 1, "第一章 工程概况", ""),
-            _sec("p1", "a", 2, "构造节点与连墙件做法",
-                 "### 剪刀撑设置\n### 斜拉杆布置\n## 连墙件应\n"
-                 "#### 扣件紧固力矩控制\n### 施工质量控制\n### 安全注意事项"),
+            _sec(
+                "p1",
+                "a",
+                2,
+                "构造节点与连墙件做法",
+                "### 剪刀撑设置\n### 斜拉杆布置\n## 连墙件应\n"
+                "#### 扣件紧固力矩控制\n### 施工质量控制\n### 安全注意事项",
+            ),
             _sec("s1", "p1", 3, "剪刀撑设置要求", ""),
             _sec("s2", "p1", 3, "连墙件布置方式", ""),
         ]
@@ -78,8 +82,7 @@ class TestDetectDuplicateSections:
         不再在中间插入 0 段。"""
         secs = [
             _sec("a", "", 1, "第一章"),
-            _sec("p1", "a", 2, "构造节点与连墙件做法",
-                 "### A\n#### B\n## C\n#### D"),
+            _sec("p1", "a", 2, "构造节点与连墙件做法", "### A\n#### B\n## C\n#### D"),
             _sec("s1", "p1", 3, "子节", ""),
         ]
         assert _detect_duplicate_sections(secs) == []
@@ -127,13 +130,14 @@ class TestDetectDuplicateSections:
         且字段契约完整（预检端展示依赖 type/section_id/title/detail）。"""
         secs = [
             _sec("a", "", 1, "第一章 工程概况"),
-            {"id": "b", "parent_id": "a", "level": 1,
-             "title": "仍是一级（脏数据）", "content": "", "sort_order": 1},
+            {"id": "b", "parent_id": "a", "level": 1, "title": "仍是一级（脏数据）", "content": "", "sort_order": 1},
         ]
         res = _detect_duplicate_sections(secs)
         assert len(res) >= 1
         for item in res:
             assert set(item.keys()) >= {"type", "section_id", "title", "detail"}
+
+
 # ============================================================
 # _compute_subheading 相对深度编号（2026-09-20 修复的单测兜底）
 # ============================================================
@@ -148,12 +152,12 @@ class TestComputeSubheadingMixedLevels:
         c = {}
         t1, s1 = _compute_subheading("1", 2, 3, c, "剪刀撑设置")
         t2, s2 = _compute_subheading("1", 2, 4, c, "扣件紧固力矩控制")
-        t3, s3 = _compute_subheading("1", 2, 2, c, "连墙件应")     # 回跳到 ##
+        t3, s3 = _compute_subheading("1", 2, 2, c, "连墙件应")  # 回跳到 ##
         t4, s4 = _compute_subheading("1", 2, 3, c, "施工质量控制")  # 回到 ###
         assert t1 == "1.1 剪刀撑设置"
         assert t2 == "1.1.1 扣件紧固力矩控制"
-        assert t3 == "1.2 连墙件应"          # 旧实现得 "1.1"（与 t1 重复）
-        assert t4 == "1.3 施工质量控制"      # 旧实现得 "1.1.1"（与 t2 重复）
+        assert t3 == "1.2 连墙件应"  # 旧实现得 "1.1"（与 t1 重复）
+        assert t4 == "1.3 施工质量控制"  # 旧实现得 "1.1.1"（与 t2 重复）
         assert (s1, s2, s3, s4) == (3, 4, 3, 3)
 
     def test_deep_jump_no_zero_segment(self):
@@ -163,7 +167,7 @@ class TestComputeSubheadingMixedLevels:
         t2, s2 = _compute_subheading("2", 2, 5, c, "B")
         t3, _ = _compute_subheading("2", 2, 3, c, "C")
         assert t1 == "2.1 A"
-        assert t2 == "2.1.1 B"     # 旧实现得 "2.1.0.1"
+        assert t2 == "2.1.1 B"  # 旧实现得 "2.1.0.1"
         assert t3 == "2.2 C"
         assert s2 == 4
 
