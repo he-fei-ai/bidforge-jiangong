@@ -3,6 +3,7 @@
 由 scripts/_split_mermaid.py 从原 mermaid_renderer.py 自动拆分而来。
 所有公共工具从 .mermaid_common 导入。
 """
+
 from __future__ import annotations
 
 import copy
@@ -37,13 +38,13 @@ logger = logging.getLogger(__name__)
 #   把一行折成 R 行，宽度按 ceil(n/R) 收窄、代价是高度每行 +170px ⇒ 两个上限交叉，
 #   **最优行数存在且可算**（正是 R62 实测那条「先升后降」曲线）。所以行数是算出来的，
 #   不是拍一个「每行最多 6 个」—— 拍出来的数字在 n=8 时过度折行、在 n=30 时又不够。
-_ENV_AUTO_WRAP = "TIMELINE_AUTO_WRAP"           # 缺开；0/false/no/off 回退单行
+_ENV_AUTO_WRAP = "TIMELINE_AUTO_WRAP"  # 缺开；0/false/no/off 回退单行
 _ENV_MAX_ROWS = "TIMELINE_MAX_ROWS_PER_FIGURE"  # 缺 12；0/非法 → 默认
 _FALSY = ("0", "false", "no", "off")
-_MAX_ROWS_DEFAULT = 12       # 再长就该拆成多张图，而不是继续在同一张图里折行
-_WRAP_GAIN = 1.2             # 纸面毫米至少提升 20% 才肯改布局：微收益不值形态变化
-_ROW_PITCH_DESIGN = 170      # 每多一行加的高度（设计 px）：上卡片 70 + 下卡片 70 + 30 呼吸
-_DATE_FONT_DESIGN = 12       # 常驻最小字号（日期档）= 折行决策的**标尺字号**
+_MAX_ROWS_DEFAULT = 12  # 再长就该拆成多张图，而不是继续在同一张图里折行
+_WRAP_GAIN = 1.2  # 纸面毫米至少提升 20% 才肯改布局：微收益不值形态变化
+_ROW_PITCH_DESIGN = 170  # 每多一行加的高度（设计 px）：上卡片 70 + 下卡片 70 + 30 呼吸
+_DATE_FONT_DESIGN = 12  # 常驻最小字号（日期档）= 折行决策的**标尺字号**
 
 
 def _timeline_auto_wrap_enabled() -> bool:
@@ -107,11 +108,11 @@ def plan_timeline_rows(n, *, max_rows=None, gain=_WRAP_GAIN, enabled=None):
     single = _mm(total, 1)
     best_rows, best_cards, best_mm = 1, total, single
     for rows in range(2, top + 1):
-        cards = -(-total // rows)          # ceil：每行卡片上限（末行可不满）
+        cards = -(-total // rows)  # ceil：每行卡片上限（末行可不满）
         if cards < 1:
             continue
         m = _mm(cards, rows)
-        if m > best_mm + 1e-9:             # 严格更好才换 ⇒ 平局保留更少行（形态更保守）
+        if m > best_mm + 1e-9:  # 严格更好才换 ⇒ 平局保留更少行（形态更保守）
             best_rows, best_cards, best_mm = rows, cards, m
     if best_rows > 1 and best_mm >= single * max(1.0, float(gain)):
         return best_rows, best_cards
@@ -253,11 +254,9 @@ def _render_timeline_image_v2(data: dict, scale: float = 2.5) -> BytesIO | None:
     # 每行实际卡片数（末行可不满）；max_cards 决定画布宽，占旧表达式里 `n` 的位置
     per_row = [min(cards_per_row, n - r * cards_per_row) for r in range(rows)]
     max_cards = max(per_row)
-    total_w = max(int(960 * scale),
-                  padding * 2 + max_cards * min_node_w + (max_cards - 1) * card_gap)
+    total_w = max(int(960 * scale), padding * 2 + max_cards * min_node_w + (max_cards - 1) * card_gap)
     # rows=1 时末项为 0 ⇒ 与改造前的 total_h 逐项相同（含 int() 截断口径）
-    total_h = (title_h + padding * 2 + node_h + label_h + desc_max
-               + (rows - 1) * int(_ROW_PITCH_DESIGN * scale))
+    total_h = title_h + padding * 2 + node_h + label_h + desc_max + (rows - 1) * int(_ROW_PITCH_DESIGN * scale)
 
     img = Image.new("RGB", (int(total_w), int(total_h)), "white")
     draw = ImageDraw.Draw(img)
@@ -335,9 +334,7 @@ def _render_timeline_image_v2(data: dict, scale: float = 2.5) -> BytesIO | None:
         box_y = axis_y - int(70 * scale) if is_up else axis_y + int(14 * scale)
 
         # 颜色
-        group_idx = (
-            all_groups.index(m["group"]) if m["group"] in all_groups else i % len(group_colors)
-        )
+        group_idx = all_groups.index(m["group"]) if m["group"] in all_groups else i % len(group_colors)
         border_c, fill_c = group_colors[group_idx % len(group_colors)]
 
         # 连接线（从 box 到 axis）
@@ -491,14 +488,16 @@ def _render_timeline_image_v2(data: dict, scale: float = 2.5) -> BytesIO | None:
     paper_floor_note(
         "时间轴",
         [font_title, font_name, font_date, font_desc, font_axis],
-        img.size[0], img.size[1],
+        img.size[0],
+        img.size[1],
         primary=[font_name],
         # ⚠️ 单行分支的文案是**红线**：① 不许写「单行已是最优形态」（同一句话先说
         #    字太小、再说没办法）；② 也不许把三种成因混成一句「折了不值」——开关被关
         #    时说成收益不够，运维会去调 `_WRAP_GAIN`，而调它根本不起作用（本轮取证表
         #    就是这么撞出来的）。⇒ 一律交 `_single_row_reason()` 分叉说实话。
         suggest=("（%d 事件已折为 %d 行仍不达标，建议减少条目或拆成多张图）" % (n, rows))
-        if rows > 1 else "（%s）" % _single_row_reason(n),
+        if rows > 1
+        else "（%s）" % _single_row_reason(n),
     )
     result_stream = _image_to_stream(img)
     size_kb = len(result_stream.getvalue()) // 1024
@@ -509,6 +508,7 @@ def _render_timeline_image_v2(data: dict, scale: float = 2.5) -> BytesIO | None:
         size_kb,
     )
     return result_stream
+
 
 def _repair_timeline_data(data: dict) -> dict | None:
     """修复时间轴数据：补齐缺失字段，确保渲染器能处理
@@ -569,4 +569,3 @@ def _repair_timeline_data(data: dict) -> dict | None:
         repaired["title"] = "项目关键里程碑时间线"
 
     return repaired
-

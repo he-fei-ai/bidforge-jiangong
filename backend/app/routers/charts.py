@@ -1,4 +1,5 @@
 """图表路由：图表预测 + Mermaid 代码生成 + 图表渲染"""
+
 import asyncio
 import json
 import logging
@@ -28,8 +29,7 @@ logger = logging.getLogger("charts")
 router = APIRouter(prefix="/api/v1/charts", tags=["charts"])
 
 
-async def _guard_chart_target(db, section_id: str, action: str,
-                              prediction_id: str = "") -> None:
+async def _guard_chart_target(db, section_id: str, action: str, prediction_id: str = "") -> None:
     """图表正文写点的生成竞态守卫（✅ R98 · R90 遗留⑦收口）。
 
     本路由前缀不带 scheme_id，先按 section_id（缺省按 prediction_id）反查
@@ -40,26 +40,22 @@ async def _guard_chart_target(db, section_id: str, action: str,
     scheme_id = ""
     try:
         if section_id:
-            cur = await db.execute(
-                "SELECT scheme_id FROM sections WHERE id=?", (section_id,))
+            cur = await db.execute("SELECT scheme_id FROM sections WHERE id=?", (section_id,))
             row = await cur.fetchone() if cur is not None else None
         elif prediction_id:
-            cur = await db.execute(
-                "SELECT scheme_id FROM chart_predictions WHERE id=?",
-                (prediction_id,))
+            cur = await db.execute("SELECT scheme_id FROM chart_predictions WHERE id=?", (prediction_id,))
             row = await cur.fetchone() if cur is not None else None
         else:
             row = None
         if row is not None:
             scheme_id = str(row["scheme_id"] or "")
     except Exception as e:  # noqa: BLE001 - 反查异常不阻断（fail-open 到原链路）
-        logger.debug("图表守卫：%s 反查 scheme_id 失败（跳过拦截）: %s",
-                     (section_id or prediction_id)[:8], e)
+        logger.debug("图表守卫：%s 反查 scheme_id 失败（跳过拦截）: %s", (section_id or prediction_id)[:8], e)
         return
     if scheme_id:
         from app.routers.sections import ensure_no_generation_write
-        ensure_no_generation_write(scheme_id, action)
 
+        ensure_no_generation_write(scheme_id, action)
 
 
 def _infer_payload_type(code: str) -> str:
@@ -106,9 +102,7 @@ async def render_chart(body: dict):
     #    显式合法类型与 Mermaid 语法载荷的行为完全不变（向后兼容）。
     _inferred = _infer_payload_type(mermaid_code)
     if _inferred and _inferred != chart_type:
-        logger.info(
-            "/charts/render：chart_type=%r 与载荷结构不符，按结构纠正为 %r",
-            chart_type, _inferred)
+        logger.info("/charts/render：chart_type=%r 与载荷结构不符，按结构纠正为 %r", chart_type, _inferred)
         chart_type = _inferred
 
     # ✅ R102（2026-10-18 · 日志审计收口）：结构化载荷**非法 JSON**（AI 生成被
@@ -124,20 +118,19 @@ async def render_chart(body: dict):
             json.loads(mermaid_code)
         except (json.JSONDecodeError, TypeError, ValueError):
             logger.warning(
-                "/charts/render：结构化图表载荷不是合法 JSON（疑似生成截断，"
-                "长度=%d），拒绝渲染", len(mermaid_code))
+                "/charts/render：结构化图表载荷不是合法 JSON（疑似生成截断，" "长度=%d），拒绝渲染", len(mermaid_code)
+            )
             raise HTTPException(
-                400,
-                "图表数据载荷不是合法 JSON（疑似内容生成时被截断而损坏），"
-                "无法渲染；请重新生成该图表")
+                400, "图表数据载荷不是合法 JSON（疑似内容生成时被截断而损坏），" "无法渲染；请重新生成该图表"
+            )
 
     try:
         from app.services.ai.mermaid_renderer import _chart_cache
-        img_bytes = await asyncio.to_thread(
-            _chart_cache.get_or_render, mermaid_code, chart_type, "png", skip_http
-        )
+
+        img_bytes = await asyncio.to_thread(_chart_cache.get_or_render, mermaid_code, chart_type, "png", skip_http)
         if img_bytes and len(img_bytes.getvalue()) > 100:
             from fastapi.responses import Response
+
             return Response(content=img_bytes.getvalue(), media_type="image/png")
         else:
             # ✅ P0-3 修复：返回更具体的错误信息，不再只给泛化的"图表渲染失败"
@@ -145,6 +138,7 @@ async def render_chart(body: dict):
             #    并没有该方法 → http_ok 恒为 False，提示永远声称"HTTP Service 不可用"，
             #    把"图表代码语法错误"误导成"渲染服务没部署"。
             from app.services.ai.mermaid_service import get_mermaid_service_client
+
             client = get_mermaid_service_client(timeout=5)
             avail = client.is_available() if hasattr(client, "is_available") else None
             avail_text = {True: "可用", False: "不可用", None: "尚未探测"}.get(avail, "未知")
@@ -159,7 +153,7 @@ async def render_chart(body: dict):
                 500,
                 f"图表渲染失败（chart_type={chart_type}）。"
                 f"渲染后端最近一次探测结果: {avail_text}（skip_http={skip_http}）。"
-                f"{_advice}"
+                f"{_advice}",
             )
     except HTTPException:
         raise
@@ -185,6 +179,7 @@ async def list_chart_types():
 
 
 # ---------- 图表清单 / 定位 / 删除 / 结构化数据 / AI 修复 ----------
+
 
 async def _load_section(db, section_id: str) -> dict | None:
     cur = await db.execute("SELECT * FROM sections WHERE id=?", (section_id,))
@@ -213,7 +208,8 @@ async def list_charts(scheme_id: str, db=Depends(get_db)):
         "SELECT id, title, content, flowchart_json, gantt_json, architecture_json,"
         " labor_json, comparison_json, layout_json, timeline_json"
         " FROM sections WHERE scheme_id=?",
-        (scheme_id,))
+        (scheme_id,),
+    )
     # ✅ R13 守卫（2026-10-04）：charts.py 此前**零个**判空，清单端点在 DB 异常态直接 500。
     #    走 503 而非返回空清单 —— 空清单会让用户以为「本方案没有图表」（同 R39 ① 教训：
     #    把数据库故障伪装成业务空数据，用户看到「尚未扫描/没有图表」却无从排查）。
@@ -225,6 +221,7 @@ async def list_charts(scheme_id: str, db=Depends(get_db)):
 
     # 逐章节缓存"正文内联图表类型集合"（同章节多行共用一次解析，避免重复扫描）
     from app.routers._chart_pipeline import extract_inline_charts
+
     _inline_types_cache: dict[str, set[str]] = {}
 
     def _is_placed(sid: str, content: str, ct: str) -> bool:
@@ -246,8 +243,8 @@ async def list_charts(scheme_id: str, db=Depends(get_db)):
 
     # 1) chart_predictions 表
     cur = await db.execute(
-        "SELECT * FROM chart_predictions WHERE scheme_id=? AND needed=1 ORDER BY priority DESC",
-        (scheme_id,))
+        "SELECT * FROM chart_predictions WHERE scheme_id=? AND needed=1 ORDER BY priority DESC", (scheme_id,)
+    )
     if cur is None:
         logger.warning("图表清单查询失败：db.execute 返回 None（R13，scheme=%s）", scheme_id[:8])
         raise HTTPException(503, "数据库连接暂时不可用，请稍后重试")
@@ -268,21 +265,29 @@ async def list_charts(scheme_id: str, db=Depends(get_db)):
             #    与 chart_payload 文档确立的"读取侧唯一解析器"契约相悖。
             code = extract_chart_payload(p["data_json"])
         content = sec.get("content") or ""
-        items.append({
-            "id": p["id"], "section_id": sid,
-            "section_title": sec.get("title", ""),
-            "chart_type": ct, "chart_label": _CHART_LABELS.get(ct, ct),
-            "title": p.get("purpose") or _CHART_LABELS.get(ct, ct),
-            "priority": p.get("priority", 3), "status": p.get("status", "generated"),
-            "placed": _is_placed(sid, content, ct),
-            "code": code,
-        })
+        items.append(
+            {
+                "id": p["id"],
+                "section_id": sid,
+                "section_title": sec.get("title", ""),
+                "chart_type": ct,
+                "chart_label": _CHART_LABELS.get(ct, ct),
+                "title": p.get("purpose") or _CHART_LABELS.get(ct, ct),
+                "priority": p.get("priority", 3),
+                "status": p.get("status", "generated"),
+                "placed": _is_placed(sid, content, ct),
+                "code": code,
+            }
+        )
 
     # 2) sections 表 *_json 列（兼容历史数据）
     field_map = {
-        "flowchart": "flowchart_json", "gantt": "gantt_json",
-        "architecture": "architecture_json", "labor": "labor_json",
-        "comparison": "comparison_json", "layout": "layout_json",
+        "flowchart": "flowchart_json",
+        "gantt": "gantt_json",
+        "architecture": "architecture_json",
+        "labor": "labor_json",
+        "comparison": "comparison_json",
+        "layout": "layout_json",
         "timeline": "timeline_json",
     }
     for s in _section_rows:
@@ -296,15 +301,20 @@ async def list_charts(scheme_id: str, db=Depends(get_db)):
             # ✅ 与 chart_predictions 分支同一口径：经唯一解析器归一，
             #    历史信封形态（{"mermaid_code": ...}）也能拿到可渲染载荷。
             _norm_code = extract_chart_payload(data) or str(data)
-            items.append({
-                "id": f"{s['id']}:{ct}", "section_id": s["id"],
-                "section_title": s.get("title", ""),
-                "chart_type": ct, "chart_label": _CHART_LABELS.get(ct, ct),
-                "title": _CHART_LABELS.get(ct, ct),
-                "priority": 3, "status": "generated",
-                "placed": _is_placed(s["id"], content, ct),
-                "code": _norm_code,
-            })
+            items.append(
+                {
+                    "id": f"{s['id']}:{ct}",
+                    "section_id": s["id"],
+                    "section_title": s.get("title", ""),
+                    "chart_type": ct,
+                    "chart_label": _CHART_LABELS.get(ct, ct),
+                    "title": _CHART_LABELS.get(ct, ct),
+                    "priority": 3,
+                    "status": "generated",
+                    "placed": _is_placed(s["id"], content, ct),
+                    "code": _norm_code,
+                }
+            )
     return {"items": items}
 
 
@@ -359,6 +369,7 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
                 derived = ""
         if not derived:
             from app.services.chart_validators import detect_mermaid_chart_type
+
             derived = detect_mermaid_chart_type(code, default="")
         if derived:
             chart_type = derived
@@ -370,8 +381,7 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
 
     # ✅ R98（R90 遗留⑦收口）：本端点回写 data_json 并同步重写章节正文内联块，
     #    正文/目录生成在跑时会与生成链路互相覆盖。守卫在 AI 修复调用之前。
-    await _guard_chart_target(db, section_id, "图表代码修复",
-                              prediction_id=prediction_id)
+    await _guard_chart_target(db, section_id, "图表代码修复", prediction_id=prediction_id)
 
     # ✅ BUG 修复：chart_mermaid_fix 提示词含 {scheme_type} 占位符，而旧实现
     #    只传 error/code —— 渲染后系统提示里残留字面量 "{scheme_type}"，模型看到的是
@@ -380,8 +390,8 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
     if section_id:
         try:
             _cur = await db.execute(
-                "SELECT s.type FROM schemes s JOIN sections sec ON sec.scheme_id=s.id"
-                " WHERE sec.id=?", (section_id,))
+                "SELECT s.type FROM schemes s JOIN sections sec ON sec.scheme_id=s.id" " WHERE sec.id=?", (section_id,)
+            )
             _srow = await _cur.fetchone()
             if _srow and _srow["type"]:
                 scheme_type_text = str(_srow["type"])
@@ -410,6 +420,7 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
     #    Mermaid 语法规则），AI 倾向于把 JSON 数据改写成 Mermaid 文本 ——
     #    改写物既非合法数据信封也无法回写，JSON 类错误修复实质必然失败。
     from app.routers._chart_pipeline import _JSON_CHART_TYPES
+
     original_is_json = code.lstrip().startswith(("{", "["))
     # ✅ BUG 修复（与 _validate_inline_chart 对齐）：提示词选择按**载荷形态**分流，
     #    而不是仅凭 chart_type 集合。旧实现 `chart_type in _JSON_CHART_TYPES` 会把
@@ -419,6 +430,7 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
     #    本体形态：带合法 Mermaid 关键字的一律走 Mermaid 修复路径，与校验闭环
     #    （_validate_inline_chart 同样按 code.startswith("{") 分流）保持一致。
     from app.services.chart_validators import first_mermaid_keyword
+
     _looks_mermaid = bool(first_mermaid_keyword(code))
     is_json_fix = original_is_json or (chart_type in _JSON_CHART_TYPES and not _looks_mermaid)
     if is_json_fix and not chart_type:
@@ -451,19 +463,19 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
             fix_attempts = attempt
             if is_json_fix:
                 sys_prompt = render(
-                    _fix_key, error=last_error[:500], code=code,
+                    _fix_key,
+                    error=last_error[:500],
+                    code=code,
                     scheme_type=scheme_type_text,
-                    chart_type=chart_type or "comparison")
+                    chart_type=chart_type or "comparison",
+                )
                 user_hint = _fix_hint
             else:
-                sys_prompt = render(
-                    _fix_key, error=last_error[:500], code=code,
-                    scheme_type=scheme_type_text)
+                sys_prompt = render(_fix_key, error=last_error[:500], code=code, scheme_type=scheme_type_text)
                 user_hint = _fix_hint
             messages = [
                 {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": (
-                    f"{user_hint}（第 {attempt}/{MAX_FIX_ATTEMPTS} 次修复尝试）")},
+                {"role": "user", "content": (f"{user_hint}（第 {attempt}/{MAX_FIX_ATTEMPTS} 次修复尝试）")},
             ]
             # ✅ 2026-09-23 修复：该调用点原先未传 scene（违反「任何新增 AI 调用点
             #    必须显式传 scene」的约定），导致图表修复的调用在 /ai/stats 场景聚合里
@@ -477,7 +489,7 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
             if _sep and _first.strip().lower() in ("json", "mermaid"):
                 cand = _rest.strip()
             elif cand.startswith("mermaid"):
-                cand = cand[len("mermaid"):].strip()
+                cand = cand[len("mermaid") :].strip()
             if not cand:
                 last_error = "修复返回空代码，请重新输出完整代码"
                 continue
@@ -492,11 +504,13 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
             #    候选必须是 JSON 数据形态，否则带错误反馈进入下一轮（3 轮耗尽走
             #    best_effort 降级返回、validated=False，绝不写库）。
             if _json_fix_candidate_rejected(is_json_fix, cand):
-                last_error = ("该图表为 JSON 数据型，修复结果必须返回完整 JSON 数据"
-                              "（严禁 Mermaid 语法），请重新输出")
-                logger.info("JSON 图表修复第 %d/%d 轮返回 Mermaid 文本，拒绝该候选"
-                            "（section=%s）",
-                            attempt, MAX_FIX_ATTEMPTS, (section_id or prediction_id)[:8])
+                last_error = "该图表为 JSON 数据型，修复结果必须返回完整 JSON 数据" "（严禁 Mermaid 语法），请重新输出"
+                logger.info(
+                    "JSON 图表修复第 %d/%d 轮返回 Mermaid 文本，拒绝该候选" "（section=%s）",
+                    attempt,
+                    MAX_FIX_ATTEMPTS,
+                    (section_id or prediction_id)[:8],
+                )
                 continue
             # 校验闭环：按修复后代码的**实际形态**分流（JSON 数据 / Mermaid 语法）
             _vt = chart_type
@@ -507,17 +521,25 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
                     pass
             elif not _vt:
                 from app.services.chart_validators import detect_mermaid_chart_type
+
                 _vt = detect_mermaid_chart_type(cand, default="")
             from app.routers._chart_pipeline import _validate_inline_chart
+
             ok, validated_code = _validate_inline_chart(_vt, cand)
             if ok:
                 fixed = validated_code or cand
                 validated = True
                 break
-            last_error = (f"第 {attempt} 轮修复结果仍未通过语法校验"
-                          f"（{validated_code or '结构非法'}），请修正后重新输出完整代码")
-            logger.info("Mermaid 修复第 %d/%d 轮未通过校验（section=%s）",
-                        attempt, MAX_FIX_ATTEMPTS, (section_id or prediction_id)[:8])
+            last_error = (
+                f"第 {attempt} 轮修复结果仍未通过语法校验"
+                f"（{validated_code or '结构非法'}），请修正后重新输出完整代码"
+            )
+            logger.info(
+                "Mermaid 修复第 %d/%d 轮未通过校验（section=%s）",
+                attempt,
+                MAX_FIX_ATTEMPTS,
+                (section_id or prediction_id)[:8],
+            )
     except Exception as e:
         raise HTTPException(500, f"Mermaid 修复失败: {e}")
 
@@ -529,9 +551,11 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
         #    仍是坏图/未知载荷"的假闭环，导出时依旧渲染失败。
         fixed = best_effort
         validated = False
-        logger.warning("Mermaid 修复 %d 轮均未通过语法校验，降级返回最后一次 AI 输出"
-                       "（section=%s，不写回）",
-                       fix_attempts, (section_id or prediction_id)[:8])
+        logger.warning(
+            "Mermaid 修复 %d 轮均未通过语法校验，降级返回最后一次 AI 输出" "（section=%s，不写回）",
+            fix_attempts,
+            (section_id or prediction_id)[:8],
+        )
     if not fixed:
         raise HTTPException(500, "修复返回空代码")
 
@@ -554,23 +578,22 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
                     #    修复结果**从未写回**（与函数文档承诺相反，前端预览已修复
                     #    而导出仍用旧代码）。补上 id 列。
                     "SELECT id, data_json FROM chart_predictions WHERE id=?",
-                    (prediction_id,))
+                    (prediction_id,),
+                )
                 if cur is None:
                     # ✅ R13 守卫（2026-10-04）：写回是**单事务**语义（任一失败整体
                     #    rollback + written_back=false）。此处抛错会被下方 except 接住，
                     #    按既定 fail-soft 契约返回 200 + written_back=false + WARNING，
                     #    而不是让 AttributeError 冒出去变成 500（也会丢掉 fixed 预览）。
-                    raise RuntimeError(
-                        "R13：db.execute 返回 None（chart_predictions 按 id 回写查询）")
+                    raise RuntimeError("R13：db.execute 返回 None（chart_predictions 按 id 回写查询）")
                 row = await cur.fetchone()
             else:
                 cur = await db.execute(
-                    "SELECT id, data_json FROM chart_predictions "
-                    "WHERE section_id=? AND chart_type=? LIMIT 1",
-                    (section_id, chart_type))
+                    "SELECT id, data_json FROM chart_predictions " "WHERE section_id=? AND chart_type=? LIMIT 1",
+                    (section_id, chart_type),
+                )
                 if cur is None:
-                    raise RuntimeError(
-                        "R13：db.execute 返回 None（chart_predictions 按章节回写查询）")
+                    raise RuntimeError("R13：db.execute 返回 None（chart_predictions 按章节回写查询）")
                 row = await cur.fetchone()
 
             patched = ""
@@ -580,11 +603,9 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
             #    只回写 chart_predictions 时，正文里的旧坏代码原样进入文档 ——
             #    表现为"预览已修复、导出仍是坏图"。
             if row and section_id:
-                cur = await db.execute(
-                    "SELECT content, word_budget FROM sections WHERE id=?", (section_id,))
+                cur = await db.execute("SELECT content, word_budget FROM sections WHERE id=?", (section_id,))
                 if cur is None:
-                    raise RuntimeError(
-                        "R13：db.execute 返回 None（sections 正文回写查询）")
+                    raise RuntimeError("R13：db.execute 返回 None（sections 正文回写查询）")
                 srow = await cur.fetchone()
                 old_content = (srow["content"] or "") if srow else ""
                 if old_content:
@@ -611,6 +632,7 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
                 #    现按 AI 实际返回物重建规范信封：JSON → data 信封，
                 #    文本 → code 信封，两种情况都满足 is_canonical_chart_payload。
                 from app.services.chart_payload import build_chart_envelope
+
                 fixed_data = None
                 if fixed.lstrip().startswith(("{", "[")):
                     try:
@@ -624,29 +646,27 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
                 else:
                     new_payload = build_chart_envelope(code=fixed, title=title, reason=reason)
                 cur = await db.execute(
-                    "UPDATE chart_predictions SET data_json=?, status='generated' WHERE id=?",
-                    (new_payload, row["id"]))
+                    "UPDATE chart_predictions SET data_json=?, status='generated' WHERE id=?", (new_payload, row["id"])
+                )
                 # ✅ R13 守卫（2026-10-04）：写操作返回 None = 语句未执行，但旧行为
                 #    照样置 wrote_back=True → 响应谎报「已写回」而库中仍是坏代码
                 #    （前端显示已修复、下次打开又变回坏图）。走同一 rollback 语义。
                 if cur is None:
-                    raise RuntimeError(
-                        "R13：db.execute 返回 None（chart_predictions 写回 UPDATE）")
+                    raise RuntimeError("R13：db.execute 返回 None（chart_predictions 写回 UPDATE）")
                 wrote_back = True
 
                 if patched and patched != (srow["content"] or ""):
                     from app.services.content_utils import DEFAULT_WORD_BUDGET, text_word_count, word_status_for
+
                     wb = (srow["word_budget"] if srow else None) or DEFAULT_WORD_BUDGET
                     # ✅ 与正文生成/手工保存同一字数口径（剔除图表代码块）
                     wc = text_word_count(patched)
                     cur = await db.execute(
-                        "UPDATE sections SET content=?, word_count=?, word_status=?,"
-                        " updated_at=? WHERE id=?",
-                        (patched, wc, word_status_for(wc, wb),
-                         datetime.now().isoformat(), section_id))
+                        "UPDATE sections SET content=?, word_count=?, word_status=?," " updated_at=? WHERE id=?",
+                        (patched, wc, word_status_for(wc, wb), datetime.now().isoformat(), section_id),
+                    )
                     if cur is None:
-                        raise RuntimeError(
-                            "R13：db.execute 返回 None（sections 正文写回 UPDATE）")
+                        raise RuntimeError("R13：db.execute 返回 None（sections 正文写回 UPDATE）")
                     content_updated = True
                     new_content = patched
                     section_word_count = wc
@@ -664,10 +684,15 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
             new_content = ""
             section_word_count = None
 
-    return {"code": fixed, "written_back": wrote_back,
-            "content_updated": content_updated, "new_content": new_content,
-            "word_count": section_word_count,
-            "validated": validated, "attempts": fix_attempts}
+    return {
+        "code": fixed,
+        "written_back": wrote_back,
+        "content_updated": content_updated,
+        "new_content": new_content,
+        "word_count": section_word_count,
+        "validated": validated,
+        "attempts": fix_attempts,
+    }
 
 
 @router.post("/generate-ai-image")
@@ -697,39 +722,42 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
     #    说明配图已在导出 DOCX 时自动生成；仅显式开启 AI_IMAGE_MANUAL_ENABLED
     #    才恢复手动重试链路（向后兼容）。
     from app.config import settings as _cfg
+
     if not _cfg.ai_image_manual_enabled:
         raise HTTPException(
             409,
             "图表已全自动生成（v17 约束）：AI 配图在导出 DOCX 时自动生成真实图片，"
-            "无需人工触发。如需脚本/手动重试，请设置 AI_IMAGE_MANUAL_ENABLED=true。")
+            "无需人工触发。如需脚本/手动重试，请设置 AI_IMAGE_MANUAL_ENABLED=true。",
+        )
     # ✅ R98（R90 遗留⑦收口）：本端点把 ai_image 块改写为图片链接（重写正文），
     #    生成在跑时与生成链路互相覆盖。守卫在生图成本发生之前。
     await _guard_chart_target(db, section_id, "AI 配图生成")
-    cur = await db.execute(
-        "SELECT id, content, word_budget FROM sections WHERE id=?", (section_id,))
+    cur = await db.execute("SELECT id, content, word_budget FROM sections WHERE id=?", (section_id,))
     # ✅ R13 守卫（2026-10-04）：读路径 fail-closed 503，绝不把 DB 异常伪装成 404
     #    「章节不存在」（否则用户会去重建/找章节，排障方向被带偏）。
     if cur is None:
-        logger.warning("AI 配图章节读取失败：db.execute 返回 None（R13，section=%s）",
-                       section_id[:8])
+        logger.warning("AI 配图章节读取失败：db.execute 返回 None（R13，section=%s）", section_id[:8])
         raise HTTPException(503, "数据库连接暂时不可用，请稍后重试")
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "章节不存在")
-    content = (row["content"] or "")
+    content = row["content"] or ""
     # ✅ BUG 修复：连接 row_factory 是 aiosqlite.Row（= sqlite3.Row），**没有 .get()**
     #    方法；旧实现用字典式取值读取 word_budget 必抛 AttributeError → 该端点恒 500，
     #    「生成配图」全链路不可用。与上一行的下标取值保持一致。
     #    回归守卫见 tests/test_e2e_chain_hardening.py（源码级断言）。
     from app.services.content_utils import DEFAULT_WORD_BUDGET
+
     word_budget = row["word_budget"] or DEFAULT_WORD_BUDGET
 
     from app.routers._chart_pipeline import _rewrite_code_block, extract_inline_charts
+
     _blocks = [(ct, c) for ct, c in extract_inline_charts(content) if ct == "ai_image"]
     if not _blocks:
         raise HTTPException(404, "本章节正文无 AI 配图（ai_image）块")
 
     from app.config import settings
+
     image_config = {
         "image_enabled": settings.image_enabled,
         "image_api_key_enc": settings.image_api_key,
@@ -757,28 +785,28 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
         #    先用文本模型按风格映射扩写为「主体+构图+视角+光照+质感」的完整提示词；
         #    优化失败 / 返回为空时回退原始 prompt，不阻塞生成（与图像生成同语义）。
         try:
-            _opt_sys = render(
-                "ILLUSTRATION_PROMPT_OPTIMIZE", style=_style, section_title=_title)
-            _opt_resp = await chat_with_fallback([
-                {"role": "system", "content": _opt_sys},
-                {"role": "user", "content":
-                    f"原始提示词：{_prompt}\n\n请直接输出优化后的提示词文本。"},
-            ], scene="image_prompt_optimize")
+            _opt_sys = render("ILLUSTRATION_PROMPT_OPTIMIZE", style=_style, section_title=_title)
+            _opt_resp = await chat_with_fallback(
+                [
+                    {"role": "system", "content": _opt_sys},
+                    {"role": "user", "content": f"原始提示词：{_prompt}\n\n请直接输出优化后的提示词文本。"},
+                ],
+                scene="image_prompt_optimize",
+            )
             _optimized = str(_opt_resp or "").strip().strip("`").strip()
             # 剥离误带的语言标签 / 围栏残留
             _f, _sep, _r = _optimized.partition("\n")
             if _sep and _f.strip().lower() in ("text", "prompt"):
                 _optimized = _r.strip()
             if _optimized:
-                logger.info("配图提示词已优化（章节 %s）: %d -> %d 字",
-                            section_id[:8], len(_prompt), len(_optimized))
+                logger.info("配图提示词已优化（章节 %s）: %d -> %d 字", section_id[:8], len(_prompt), len(_optimized))
                 _prompt = _optimized[:600]
         except Exception as e:
-            logger.warning("配图提示词优化失败（使用原始提示词，章节 %s）: %s",
-                           section_id[:8], e)
+            logger.warning("配图提示词优化失败（使用原始提示词，章节 %s）: %s", section_id[:8], e)
         try:
             _url = await generate_illustration_image(
-                None, _prompt, _style, "16:9", settings.image_provider, image_config)
+                None, _prompt, _style, "16:9", settings.image_provider, image_config
+            )
         except Exception as e:
             logger.warning("ai_image 生成异常（章节 %s）: %s", section_id[:8], e)
             _url = None
@@ -793,7 +821,8 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
                 # 'done' 使新生成的配图在严格按 'generated' 过滤的链路上漏统。
                 "UPDATE chart_predictions SET status='generated', data_json=? "
                 "WHERE section_id=? AND chart_type='ai_image' AND status='pending'",
-                (build_chart_envelope(code=_code, title=_title, reason=_url), section_id))
+                (build_chart_envelope(code=_code, title=_title, reason=_url), section_id),
+            )
             if _c is None:
                 # R13：写入未执行（状态仍 pending），走既有 fail-soft → WARNING
                 raise RuntimeError("R13：db.execute 返回 None（ai_image 状态 UPDATE）")
@@ -805,16 +834,16 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
 
     # ✅ 与 fix-mermaid 一致：同步刷新 word_count/word_status，避免正文与统计不一致
     from app.services.content_utils import text_word_count, word_status_for
+
     _wc = text_word_count(new_content)
     _cur = await db.execute(
         "UPDATE sections SET content=?, word_count=?, word_status=?, updated_at=? WHERE id=?",
-        (new_content, _wc, word_status_for(_wc, word_budget),
-         datetime.now().isoformat(), section_id))
+        (new_content, _wc, word_status_for(_wc, word_budget), datetime.now().isoformat(), section_id),
+    )
     # ✅ R13 守卫（2026-10-04）：写入未执行时旧行为照样返回 content_updated=True
     #    （响应谎报，正文下次读仍是旧的）。fail-closed 503。
     if _cur is None:
-        logger.warning("AI 配图正文回写失败：db.execute 返回 None（R13，section=%s）",
-                       section_id[:8])
+        logger.warning("AI 配图正文回写失败：db.execute 返回 None（R13，section=%s）", section_id[:8])
         raise HTTPException(503, "配图已生成但正文回写失败，请稍后重试")
     await db.commit()
     return {"generated": generated, "content_updated": True, "new_content": new_content}

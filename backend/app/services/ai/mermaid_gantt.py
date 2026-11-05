@@ -3,8 +3,10 @@
 由 scripts/_split_mermaid.py 从原 mermaid_renderer.py 自动拆分而来。
 所有公共工具从 .mermaid_common 导入。
 """
+
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timedelta
@@ -24,10 +26,13 @@ from .mermaid_common import (
 logger = logging.getLogger(__name__)
 
 
-
 # Mermaid 甘特图行内的日期 token（2026-01-01 / 2026/1/1）与工期 token（10d / 2w / 1m / 1y）
 _DATE_TOKEN_RE = re.compile(r"^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$")
 _DURATION_TOKEN_RE = re.compile(r"^(\d+)\s*([dwmy])$", re.IGNORECASE)
+
+#: ★ R175（BUG-175-03）：单图最大任务数。超出仅渲染前 N 项；**不再静默截断**——
+#: 渲染前留 WARNING，便于在导出日志里定位「图里任务比数据少」的成因。
+_GANTT_MAX_TASKS = 30
 
 
 def _parse_mermaid_gantt(mermaid_code: str) -> list[dict] | None:
@@ -150,8 +155,7 @@ def _parse_mermaid_gantt(mermaid_code: str) -> list[dict] | None:
         return None
 
     parsed = [
-        {**rt, "start_date": _to_date(rt["start_str"]), "end_date": _to_date(rt.get("end_str"))}
-        for rt in raw_tasks
+        {**rt, "start_date": _to_date(rt["start_str"]), "end_date": _to_date(rt.get("end_str"))} for rt in raw_tasks
     ]
 
     dated = [p["start_date"] for p in parsed if p["start_date"]]
@@ -170,10 +174,7 @@ def _parse_mermaid_gantt(mermaid_code: str) -> list[dict] | None:
             start_off = max(1, int(p["start_day"]))
         elif p["deps"]:
             # ✅ 依赖解析：紧随其全部依赖中结束最晚者之后开始
-            _dep_ends = [
-                _id_end.get(d) for d in p["deps"]
-                if _id_end.get(d) is not None
-            ]
+            _dep_ends = [_id_end.get(d) for d in p["deps"] if _id_end.get(d) is not None]
             start_off = (max(_dep_ends) + 1) if _dep_ends else (cursor + 1)
         else:
             # 未给出日期且无条件依赖 → 顺序顺延，避免重叠
@@ -186,9 +187,9 @@ def _parse_mermaid_gantt(mermaid_code: str) -> list[dict] | None:
             # 写法 ②：由起止日期反推工期（含首尾，故 +1）
             dur = max(1, (p["end_date"] - p["start_date"]).days + 1)
         elif raw_dur is None:
-            dur = 5      # 完全未给出工期信息 → 顺序顺延 5 天
+            dur = 5  # 完全未给出工期信息 → 顺序顺延 5 天
         elif raw_dur <= 0:
-            dur = 1      # 0d / 0 → 当天单点（里程碑），end == start
+            dur = 1  # 0d / 0 → 当天单点（里程碑），end == start
         else:
             dur = raw_dur
         end_off = start_off + dur - 1
@@ -204,6 +205,169 @@ def _parse_mermaid_gantt(mermaid_code: str) -> list[dict] | None:
             }
         )
     return result if result else None
+
+
+def _gantt_value_to_day(v, base) -> int | None:
+    """把 start/end 值转成相对最早日期的天数偏移（整数保持原语义）。"""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return int(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if s.isdigit():
+            return int(s)
+        try:
+            d = datetime.strptime(s[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+        return (d - base).days + 1 if base is not None else 1
+    return None
+
+
+def _apply_gantt_task_budget(raw_tasks: list) -> list:
+    """✅ R175 续（2026-11-04）：甘特任务预算的**唯一判定点**。
+
+    ``> _GANTT_MAX_TASKS`` 时只保留前 N 项并 WARNING 留痕；抛回来的列表是
+    「已经付过预算」的最终集合，调用方（``_gantt_base_date`` /
+    ``_build_gantt_tasks`` / 渲染主流程）只消费，不得再自行切片。
+
+    背景：旧实现 ``mermaid_renderer`` 在 Mermaid 语法路径先把任务截到 30 条，
+    渲染器内部 ``_build_gantt_tasks`` 又按同一上限截一次 —— 「截断的截断」
+    且第二次输入已 ≤30，WARNING 永不触发（丢任务对日志/统计都不可见）。
+    收敛到本函数后，截断只发生一次，且丢多少完全由入参决定。
+    """
+    if not isinstance(raw_tasks, list) or not raw_tasks:
+        return []
+    if len(raw_tasks) > _GANTT_MAX_TASKS:
+        logger.warning(
+            "[PIL v2渲染] 甘特图任务数 %d 超过单图上限 %d，仅渲染前 %d 项"
+            "（其余被截断，导出横道图不体现；如需完整表达请拆分为多张进度图）",
+            len(raw_tasks),
+            _GANTT_MAX_TASKS,
+            _GANTT_MAX_TASKS,
+        )
+    return raw_tasks[:_GANTT_MAX_TASKS]
+
+
+def _gantt_base_date(raw_tasks: list):
+    """取任务 start 中最早的日期串作为基准日（整数值载荷返回 None）。
+
+    入参必须是已过 ``_apply_gantt_task_budget`` 的集合：基准日只服务于
+    实际会被渲染的那批任务，不得在此再切一次（否则上限变更时两处漂移）。
+    """
+    base = None
+    for t in raw_tasks:
+        if not isinstance(t, dict):
+            continue
+        sv = t.get("start") or t.get("start_day") or t.get("from")
+        if isinstance(sv, str):
+            try:
+                d = datetime.strptime(sv.strip()[:10], "%Y-%m-%d")
+            except ValueError:
+                continue
+            if base is None or d < base:
+                base = d
+    return base
+
+
+def _build_gantt_tasks(raw_tasks: list, base_date) -> list[dict]:
+    """归一甘特任务并分配时间窗（★ R175 起为纯函数，供渲染与测试共用）。
+
+    修复三处（BUG-175-03）：
+      · 任务名判据与校验端共用 ``chart_validators.gantt_task_label`` —— 空名任务
+        这里跳过、校验端也剔除，两侧不再「校验通过但渲染必空」；
+      · 预算截断统一走 ``_apply_gantt_task_budget``（唯一判定点，WARNING 留痕），
+        本函数不再自行切片；
+      · 无日期任务**沿时间轴顺延**（``next_free_day`` 游标），不再全部堆到第 1 天
+        形成完全重叠的横道。
+    """
+    from app.services.chart_validators import gantt_task_label
+
+    if not isinstance(raw_tasks, list) or not raw_tasks:
+        return []
+    budgeted = _apply_gantt_task_budget(raw_tasks)
+
+    tasks: list[dict] = []
+    next_free_day = 1
+    for idx, t in enumerate(budgeted):
+        if not isinstance(t, dict):
+            continue
+        name = gantt_task_label(t)
+        if not name:
+            continue
+        start_v = _gantt_value_to_day(t.get("start") or t.get("start_day") or t.get("from"), base_date)
+        auto_started = start_v is None
+        if auto_started:
+            # 无开始日期：沿时间轴顺延，避免所有无名日期任务叠在第 1 天
+            start_v = next_free_day
+        days = t.get("days")
+        end_v = _gantt_value_to_day(t.get("end") or t.get("end_day") or t.get("to"), base_date)
+        if end_v is None:
+            if days is not None:
+                try:
+                    end_v = start_v + int(days) - 1
+                except (TypeError, ValueError):
+                    end_v = start_v
+            else:
+                end_v = start_v
+        end_v = max(start_v, end_v)
+        # 仅「显式给出的起止相同」才算里程碑；自动顺延的默认单日任务不是里程碑
+        is_milestone = bool(t.get("isMilestone")) or (not auto_started and start_v == end_v)
+        deps = t.get("dependencies") or []
+        if not isinstance(deps, list):
+            deps = []
+        tasks.append(
+            {
+                "id": t.get("id") or (idx + 1),
+                "name": name,
+                "start": start_v,
+                "end": end_v,
+                "isMilestone": is_milestone,
+                "dependencies": deps,
+                "critical": bool(t.get("critical")),
+                # BUG 修复：规范化时遗漏 remark 字段，导致下方备注区
+                # `remarks = [t.get("remark") ...]` 永远为空、备注区高度恒为 0 ——
+                # 甘特图备注（如「春节停工」「雨季顺延」）从未被渲染过。此处补回。
+                "remark": str(t.get("remark") or t.get("note") or "").strip(),
+                # ✅ 增强：保留阶段划分（阶段划分是进度计划的关键内容，直接体现
+                # 方案对工期节点的组织能力）。
+                #    旧实现丢弃 section，导出的横道图看不出"准备/主体/收尾"阶段。
+                "section": str(t.get("section") or t.get("phase") or "").strip(),
+            }
+        )
+        next_free_day = max(next_free_day, end_v + 1)
+    return tasks
+
+
+def gantt_truncated_task_count(code: str) -> int:
+    """✅ D-23（R176 · 2026-11-04）：返回该甘特载荷中因超过单图上限被截断的任务数。
+
+    背景：`_build_gantt_tasks` 对 >30 任务只渲染前 30 项，旧实现仅留 WARNING ——
+    图看起来完整，少任务只有日志知道（用户不可见）。本函数与渲染侧**同一上限**
+    `_GANTT_MAX_TASKS`、**同一解析口径**（JSON 的 tasks/items/rows 别名与 Mermaid
+    语法），只计数不渲染，供导出侧并入 `X-Chart-Render-Stats.gantt_truncated`。
+    """
+    if not isinstance(code, str) or not code.strip():
+        return 0
+    raw = None
+    if code.lstrip().startswith(("{", "[")):
+        try:
+            parsed = json.loads(code)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            for key in ("tasks", "items", "rows"):
+                cand = parsed.get(key)
+                if isinstance(cand, list) and cand:
+                    raw = cand
+                    break
+    else:
+        raw = _parse_mermaid_gantt(code)
+    if not isinstance(raw, list):
+        return 0
+    return max(0, len(raw) - _GANTT_MAX_TASKS)
+
 
 @_render_hq
 def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) -> BytesIO | None:
@@ -257,89 +421,18 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
     if not isinstance(raw_tasks, list) or not raw_tasks:
         return None
 
-    # 规范化
-    tasks: list[dict] = []
-
+    # 规范化（★ R175：抽成模块级纯函数 _build_gantt_tasks，校验/渲染/测试共用）
     # ✅ 修复（BUG-2）：任务 start/end 可能是日期串（如 "2026-01-01"，提示词示例即如此），
     #    或只有 days 工期。旧的 int(...) 对日期串抛 ValueError 被吞 → 所有任务塌缩到第 1 天
     #    单天条、进度计划彻底失真；且 "days" 字段从未被读取。现统一把值转成"相对最早日期
     #    的天数偏移"（base 当天=1），整数值保持原绝对天偏移语义，缺 end 时用 days 推导。
-    from datetime import datetime as _dt
-
-    def _gantt_to_day(v, base):
-        if v is None or isinstance(v, bool):
-            return None
-        if isinstance(v, (int, float)):
-            return int(v)
-        if isinstance(v, str):
-            s = v.strip()
-            if s.isdigit():
-                return int(s)
-            try:
-                d = _dt.strptime(s[:10], "%Y-%m-%d")
-            except ValueError:
-                return None
-            return (d - base).days + 1 if base is not None else 1
-        return None
-
-    # 以所有任务的 start 中最早日期串为基准
-    _base_date = None
-    for _t in raw_tasks[:30]:
-        if not isinstance(_t, dict):
-            continue
-        _sv = _t.get("start") or _t.get("start_day") or _t.get("from")
-        if isinstance(_sv, str):
-            try:
-                _d = _dt.strptime(_sv.strip()[:10], "%Y-%m-%d")
-                if _base_date is None or _d < _base_date:
-                    _base_date = _d
-            except ValueError:
-                pass
-
-    for idx, t in enumerate(raw_tasks[:30]):
-        if not isinstance(t, dict):
-            continue
-        name = str(t.get("name") or t.get("task") or t.get("title") or "").strip()
-        if not name:
-            continue
-        start_v = _gantt_to_day(t.get("start") or t.get("start_day") or t.get("from"), _base_date) or 1
-        _end_raw = t.get("end") or t.get("end_day") or t.get("to")
-        _days = t.get("days")
-        _end_v = _gantt_to_day(_end_raw, _base_date)
-        if _end_v is None:
-            if _days is not None:
-                try:
-                    _end_v = start_v + int(_days) - 1
-                except (TypeError, ValueError):
-                    _end_v = start_v
-            else:
-                _end_v = start_v
-        end_v = max(start_v, _end_v)
-        is_milestone = bool(t.get("isMilestone")) or (start_v == end_v)
-        deps = t.get("dependencies") or []
-        if not isinstance(deps, list):
-            deps = []
-        # 关键路径标记
-        is_critical = bool(t.get("critical"))
-        tasks.append(
-            {
-                "id": t.get("id") or (idx + 1),
-                "name": name,
-                "start": start_v,
-                "end": max(start_v, end_v),
-                "isMilestone": is_milestone,
-                "dependencies": deps,
-                "critical": is_critical,
-                # BUG 修复：规范化时遗漏 remark 字段，导致下方备注区
-                # `remarks = [t.get("remark") ...]` 永远为空、备注区高度恒为 0 ——
-                # 甘特图备注（如「春节停工」「雨季顺延」）从未被渲染过。此处补回。
-                "remark": str(t.get("remark") or t.get("note") or "").strip(),
-                # ✅ 增强：保留阶段划分（阶段划分是进度计划的关键内容，直接体现
-                # 方案对工期节点的组织能力）。
-                #    旧实现丢弃 section，导出的横道图看不出"准备/主体/收尾"阶段。
-                "section": str(t.get("section") or t.get("phase") or "").strip(),
-            }
-        )
+    # ★ R175（BUG-175-03）：无日期任务沿时间轴顺延（不再全部堆在第 1 天）；
+    #   >30 任务截断改为留 WARNING；空名任务与校验端共用 gantt_task_label 剔除。
+    # ★ R175 续（2026-11-04）：预算只在这里判一次；基准日与任务构建都只消费
+    #   已裁剪集合，避免「渲染器外截一次、内截一次」的无信号双截断。
+    budgeted_tasks = _apply_gantt_task_budget(raw_tasks)
+    _base_date = _gantt_base_date(budgeted_tasks)
+    tasks = _build_gantt_tasks(budgeted_tasks, _base_date)
 
     if not tasks:
         return None
@@ -355,7 +448,6 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
         total_days = max_end
     if total_days <= 0:
         total_days = max_end or 90
-
 
     # ---- 尺寸 ----
     scale = 2.5
@@ -391,8 +483,7 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
     legend_h = int(50 * scale) if highlight_critical_path else int(40 * scale)
 
     width = table_left * 2 + table_w
-    height = (table_top + header_h + len(row_items) * row_h
-              + remarks_h + legend_h + int(30 * scale))
+    height = table_top + header_h + len(row_items) * row_h + remarks_h + legend_h + int(30 * scale)
 
     # 使用 2.5x 缩放渲染 + @_render_hq 保持原分辨率并添加 300 DPI 元数据
     # 2.5x 渲染 + 不降采样 = 真实超采样抗锯齿，最终 DOCX 插入时 DPI 感知缩放到合适尺寸
@@ -435,9 +526,7 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
     total_label = f"总工期：{total_days}天"
     bbox = draw.textbbox((0, 0), total_label, font=font_small)
     tw = bbox[2] - bbox[0]
-    draw.text(
-        (width - table_left - tw, int(30 * scale)), total_label, fill="#1E3A5F", font=font_small
-    )
+    draw.text((width - table_left - tw, int(30 * scale)), total_label, fill="#1E3A5F", font=font_small)
 
     # ---- 表头 ----
     x = table_left
@@ -484,9 +573,7 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
         draw.line([px, axis_label_top, px, table_top + header_h], fill=border, width=int(1 * scale))
         bbox = draw.textbbox((0, 0), str(mark), font=font_axis)
         tw_m = bbox[2] - bbox[0]
-        draw.text(
-            (px - tw_m / 2, axis_label_top + int(8 * scale)), str(mark), fill=text, font=font_axis
-        )
+        draw.text((px - tw_m / 2, axis_label_top + int(8 * scale)), str(mark), fill=text, font=font_axis)
 
     # ---- 行绘制（阶段带 + 任务行）----
     y = table_top + header_h
@@ -585,9 +672,7 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
             )
             # 编号
             bbox = draw.textbbox((0, 0), "◆", font=font_axis)
-            draw.text(
-                (cx - int(4 * scale), cy - int(8 * scale)), "◆", fill="#7C2D12", font=font_axis
-            )
+            draw.text((cx - int(4 * scale), cy - int(8 * scale)), "◆", fill="#7C2D12", font=font_axis)
         else:
             # 普通任务
             bar_top = y + int(10 * scale)
@@ -639,9 +724,7 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
             # 任务起止文本
             if end_x - start_x > int(80 * scale):
                 label = f"{task['start']}-{task['end']}"
-                text_color = (
-                    "#DC2626" if (highlight_critical_path and task.get("critical")) else "white"
-                )
+                text_color = "#DC2626" if (highlight_critical_path and task.get("critical")) else "white"
                 _draw_text_center(
                     draw,
                     (start_x + int(4 * scale), bar_top, end_x - int(4 * scale), bar_bottom),
@@ -697,10 +780,7 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
                 # 关键路径模式：依赖线颜色根据关键路径状态
                 dep_color = (
                     "#DC2626"
-                    if (
-                        task.get("critical")
-                        or any(t.get("critical") for t in tasks if str(t["id"]) == str(dep_id))
-                    )
+                    if (task.get("critical") or any(t.get("critical") for t in tasks if str(t["id"]) == str(dep_id)))
                     else "#94A3B8"
                 )
                 # 连线阴影
@@ -757,8 +837,7 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
 
     # ---- 外边框 ----
     draw.rectangle(
-        [table_left, table_top, table_left + table_w,
-         table_top + header_h + len(row_items) * row_h],
+        [table_left, table_top, table_left + table_w, table_top + header_h + len(row_items) * row_h],
         outline=border,
         width=int(2 * scale),
     )
@@ -856,7 +935,8 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
     paper_floor_note(
         "甘特图",
         [font_header, font_title, font_body, font_small, font_axis],
-        img.size[0], img.size[1],
+        img.size[0],
+        img.size[1],
         primary=[font_body],
         suggest="（任务行文字是主文字；任务数或工期跨度大时整图会被等比缩小）",
     )
@@ -868,6 +948,7 @@ def _render_gantt_image_v2(plan: dict, highlight_critical_path: bool = False) ->
         size_kb,
     )
     return result_stream
+
 
 def gantt_json_to_mermaid(plan: dict) -> str:
     """将 tasks + dependencies 结构转换为 Mermaid Gantt 代码字符串
@@ -920,26 +1001,20 @@ def gantt_json_to_mermaid(plan: dict) -> str:
                 lines.append(f"    section {section}")
                 current_section = section
 
-            if (
-                isinstance(start_str, str)
-                and isinstance(end_str, str)
-                and start_str.strip()
-                and end_str.strip()
-            ):
+            if isinstance(start_str, str) and isinstance(end_str, str) and start_str.strip() and end_str.strip():
                 lines.append(f"    {name} : {start_str}, {end_str}")
             elif isinstance(start_str, (int, float)):
                 start_day = int(start_str)
                 end_day = int(t.get("end", start_day))
                 start_date = base_date + timedelta(days=start_day - 1)
                 end_date = base_date + timedelta(days=end_day - 1)
-                lines.append(
-                    f'    {name} : {start_date.strftime("%Y-%m-%d")}, {end_date.strftime("%Y-%m-%d")}'
-                )
+                lines.append(f'    {name} : {start_date.strftime("%Y-%m-%d")}, {end_date.strftime("%Y-%m-%d")}')
 
         return "\n".join(lines)
     except Exception as e:
         logger.warning("gantt_json_to_mermaid 转换失败: %s", e)
         return ""
+
 
 def _render_gantt_with_dependencies(plan: dict) -> BytesIO | None:
     """增强版甘特图渲染器（向后兼容别名）
@@ -954,4 +1029,3 @@ def _render_gantt_with_dependencies(plan: dict) -> BytesIO | None:
         BytesIO PNG 图片，失败时返回 None
     """
     return _render_gantt_image_v2(plan, highlight_critical_path=True)
-

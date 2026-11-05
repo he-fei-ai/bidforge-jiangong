@@ -5,14 +5,16 @@ from PIL import Image
 
 
 def test_gantt_duration_header_not_truncated():
-    code = json.dumps({
-        "title": "plan",
-        "totalDays": 230,
-        "tasks": [
-            {"id": 1, "name": "t1", "start": 1, "end": 10},
-            {"id": 5, "name": "t5", "start": 171, "end": 230},
-        ],
-    })
+    code = json.dumps(
+        {
+            "title": "plan",
+            "totalDays": 230,
+            "tasks": [
+                {"id": 1, "name": "t1", "start": 1, "end": 10},
+                {"id": 5, "name": "t5", "start": 171, "end": 230},
+            ],
+        }
+    )
     bio = render_mermaid_to_bytes(code, "gantt", skip_http=True, allow_pil=True)
     assert bio is not None
     bio.seek(0)
@@ -23,14 +25,16 @@ def test_gantt_duration_header_not_truncated():
 
 
 def test_timeline_first_last_card_not_clipped():
-    code = json.dumps({
-        "title": "milestones",
-        "milestones": [
-            {"name": "start", "date": "day1"},
-            {"name": "mid", "date": "day50"},
-            {"name": "end", "date": "day100"},
-        ],
-    })
+    code = json.dumps(
+        {
+            "title": "milestones",
+            "milestones": [
+                {"name": "start", "date": "day1"},
+                {"name": "mid", "date": "day50"},
+                {"name": "end", "date": "day100"},
+            ],
+        }
+    )
     bio = render_mermaid_to_bytes(code, "timeline", skip_http=True, allow_pil=True)
     assert bio is not None
     bio.seek(0)

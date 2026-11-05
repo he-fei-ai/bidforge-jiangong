@@ -11,7 +11,7 @@
  * ⚠️ 验证状态：本机 Node 工具链已卸载，本组件按规范代码逐字移植，
  *    构建 / 类型检查 / vitest 留待 Node 环境恢复后补跑。
  */
-import React from 'react';
+import React from "react";
 
 export interface FlowData {
   title?: string;
@@ -20,7 +20,7 @@ export interface FlowData {
 
 interface Props {
   data: FlowData;
-  direction?: 'vertical' | 'horizontal';
+  direction?: "vertical" | "horizontal";
   nodeWidth?: number;
   nodeHeight?: number;
   gap?: number;
@@ -28,46 +28,46 @@ interface Props {
 
 export const SingleChainFlowChart: React.FC<Props> = ({
   data,
-  direction = 'vertical',
-  nodeWidth = direction === 'vertical' ? 280 : 200,
+  direction = "vertical",
+  nodeWidth = direction === "vertical" ? 280 : 200,
   nodeHeight = 80,
   gap = 40,
 }) => {
-  const isVertical = direction === 'vertical';
+  const isVertical = direction === "vertical";
 
   const containerStyle: React.CSSProperties = {
-    display: 'inline-flex',
-    flexDirection: isVertical ? 'column' : 'row',
-    alignItems: 'center',
+    display: "inline-flex",
+    flexDirection: isVertical ? "column" : "row",
+    alignItems: "center",
     padding: 20,
   };
 
   const nodeStyle: React.CSSProperties = {
-    boxSizing: 'border-box',
+    boxSizing: "border-box",
     width: nodeWidth,
     minHeight: nodeHeight,
-    background: '#f0edff',
-    border: '1px solid #a89aff',
+    background: "#f0edff",
+    border: "1px solid #a89aff",
     borderRadius: 0,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: '16px 24px',
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "16px 24px",
     fontSize: 15,
-    color: '#333333',
+    color: "#333333",
     letterSpacing: 0.5,
-    textAlign: 'center',
+    textAlign: "center",
     lineHeight: 1.4,
     flexShrink: 0,
-    transition: 'box-shadow 0.2s',
+    transition: "box-shadow 0.2s",
   };
 
   const arrowContainerStyle: React.CSSProperties = {
-    width: isVertical ? '100%' : gap,
-    height: isVertical ? gap : '100%',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
+    width: isVertical ? "100%" : gap,
+    height: isVertical ? gap : "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
     flexShrink: 0,
   };
 
@@ -77,7 +77,7 @@ export const SingleChainFlowChart: React.FC<Props> = ({
         <svg
           width="2"
           height={gap}
-          style={{ overflow: 'visible' }}
+          style={{ overflow: "visible" }}
           xmlns="http://www.w3.org/2000/svg"
         >
           <line
@@ -89,10 +89,7 @@ export const SingleChainFlowChart: React.FC<Props> = ({
             strokeWidth="1.5"
             strokeLinecap="round"
           />
-          <polygon
-            points={`0,${gap} -5,${gap - 10} 5,${gap - 10}`}
-            fill="#333333"
-          />
+          <polygon points={`0,${gap} -5,${gap - 10} 5,${gap - 10}`} fill="#333333" />
         </svg>
       );
     } else {
@@ -100,7 +97,7 @@ export const SingleChainFlowChart: React.FC<Props> = ({
         <svg
           width={gap}
           height="2"
-          style={{ overflow: 'visible' }}
+          style={{ overflow: "visible" }}
           xmlns="http://www.w3.org/2000/svg"
         >
           <line
@@ -112,10 +109,7 @@ export const SingleChainFlowChart: React.FC<Props> = ({
             strokeWidth="1.5"
             strokeLinecap="round"
           />
-          <polygon
-            points={`${gap},0 ${gap - 10},-5 ${gap - 10},5`}
-            fill="#333333"
-          />
+          <polygon points={`${gap},0 ${gap - 10},-5 ${gap - 10},5`} fill="#333333" />
         </svg>
       );
     }
@@ -127,20 +121,18 @@ export const SingleChainFlowChart: React.FC<Props> = ({
         <React.Fragment key={i}>
           <div
             style={nodeStyle}
-            onMouseEnter={e => {
+            onMouseEnter={(e) => {
               (e.currentTarget as HTMLDivElement).style.boxShadow =
-                '0 2px 8px rgba(168, 154, 255, 0.3)';
+                "0 2px 8px rgba(168, 154, 255, 0.3)";
             }}
-            onMouseLeave={e => {
-              (e.currentTarget as HTMLDivElement).style.boxShadow = '';
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLDivElement).style.boxShadow = "";
             }}
           >
             {text}
           </div>
 
-          {i < data.steps.length - 1 && (
-            <div style={arrowContainerStyle}>{renderArrow()}</div>
-          )}
+          {i < data.steps.length - 1 && <div style={arrowContainerStyle}>{renderArrow()}</div>}
         </React.Fragment>
       ))}
     </div>

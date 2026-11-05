@@ -1,9 +1,10 @@
-﻿"""AI 配图人工入口门控回归测试（P4，2026-09-23）。
+"""AI 配图人工入口门控回归测试（P4，2026-09-23）。
 
 v17 产品约束：图表全自动生成、无人工生图入口。/charts/generate-ai-image
 为兼容保留端点，默认（ai_image_manual_enabled=False）拒绝人工/脚本触发，
 返回 409 说明已全自动；仅显式开启 AI_IMAGE_MANUAL_ENABLED 才恢复手动链路。
 """
+
 import uuid
 
 import app.config as _cfg
@@ -54,11 +55,9 @@ def test_frontend_manual_wrapper_removed_and_endpoint_retained():
     root = Path(__file__).resolve().parents[2]
     api_ts = root / "frontend" / "src" / "api" / "index.ts"
     assert api_ts.exists(), "前端 api/index.ts 不存在，请人工确认仓库布局"
-    code_lines = [ln for ln in api_ts.read_text(encoding="utf-8").splitlines()
-                  if not ln.strip().startswith("//")]
+    code_lines = [ln for ln in api_ts.read_text(encoding="utf-8").splitlines() if not ln.strip().startswith("//")]
     assert "generateAiImage" not in "\n".join(code_lines)
 
-    charts_src = (root / "backend" / "app" / "routers" / "charts.py").read_text(
-        encoding="utf-8")
+    charts_src = (root / "backend" / "app" / "routers" / "charts.py").read_text(encoding="utf-8")
     assert '@router.post("/generate-ai-image")' in charts_src
     assert "ai_image_manual_enabled" in charts_src

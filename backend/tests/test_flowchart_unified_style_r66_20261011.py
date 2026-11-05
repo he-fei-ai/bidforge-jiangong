@@ -16,6 +16,7 @@
 PNG**，不做公式自证 —— R64 教训）/ C 缓存版本 / D 提示词 parity /
 E 源文件字节体检 / F 定向只在提示词层的反向锁。
 """
+
 from __future__ import annotations
 
 from io import BytesIO
@@ -35,12 +36,12 @@ from PIL import Image
 _AI_DIR = Path(mr.__file__).parent
 
 # ---- R66 新配色 / 被替换的 R65 旧配色（RGB 元组）----
-NEW_FILL = (240, 237, 255)      # #f0edff
-NEW_BORDER = (168, 154, 255)    # #a89aff
+NEW_FILL = (240, 237, 255)  # #f0edff
+NEW_BORDER = (168, 154, 255)  # #a89aff
 NEW_BORDER_DARK = (124, 99, 216)  # #7C63D8
-DARK_GRAY = (51, 51, 51)        # #333333（不变）
-OLD_FILL = (236, 236, 255)      # #ECECFF
-OLD_BORDER = (147, 112, 219)    # #9370DB
+DARK_GRAY = (51, 51, 51)  # #333333（不变）
+OLD_FILL = (236, 236, 255)  # #ECECFF
+OLD_BORDER = (147, 112, 219)  # #9370DB
 OLD_BORDER_DARK = (108, 79, 184)  # #6C4FB8
 
 _SCALE = 2.5
@@ -98,14 +99,8 @@ def _gap(runs):
 
 
 # 单链样例：纯线性、无判定关键词（避开 _DECISION_KEYWORDS 启发式）
-_TD_CODE = (
-    "flowchart TD\n"
-    '    A["测量放线"] --> B["基层清理"]\n'
-)
-_LR_CODE = (
-    "flowchart LR\n"
-    '    A["测量放线"] --> B["基层清理"]\n'
-)
+_TD_CODE = "flowchart TD\n" '    A["测量放线"] --> B["基层清理"]\n'
+_LR_CODE = "flowchart LR\n" '    A["测量放线"] --> B["基层清理"]\n'
 
 
 def _we_payload(direction: str) -> dict:
@@ -128,8 +123,8 @@ def _we_payload(direction: str) -> dict:
 # A · 配色：两套渲染器 × 竖/横 四组合，新色在、旧色（R65 淡紫对）不得残留
 # ==========================================================================
 
-class TestPaletteR66:
 
+class TestPaletteR66:
     def _assert_new_no_old(self, img, *, expect_dark: bool):
         present = _present(img)
         assert NEW_FILL in present, "节点淡紫底 #f0edff 未出现"
@@ -142,11 +137,7 @@ class TestPaletteR66:
         assert OLD_BORDER_DARK not in present, "R65 旧强调边框 #6C4FB8 残留"
 
     def test_v2_vertical_palette(self):
-        code = (
-            "flowchart TD\n"
-            '    A["测量放线"] --> B["关键：基层清理"]\n'
-            '    B --> C["面层安装"]\n'
-        )
+        code = "flowchart TD\n" '    A["测量放线"] --> B["关键：基层清理"]\n' '    B --> C["面层安装"]\n'
         # 「关键：」标签 → highlight 推断 ⇒ 同图覆盖 淡紫底/紫边框/深紫强调 三色
         self._assert_new_no_old(_render_v2(code), expect_dark=True)
 
@@ -155,12 +146,10 @@ class TestPaletteR66:
 
     def test_with_edges_vertical_palette(self):
         # start/end 圆角矩形用深紫强调边框
-        self._assert_new_no_old(
-            _render_we(_we_payload("TD")), expect_dark=True)
+        self._assert_new_no_old(_render_we(_we_payload("TD")), expect_dark=True)
 
     def test_with_edges_horizontal_palette(self):
-        self._assert_new_no_old(
-            _render_we(_we_payload("LR")), expect_dark=True)
+        self._assert_new_no_old(_render_we(_we_payload("LR")), expect_dark=True)
 
 
 # ==========================================================================
@@ -168,8 +157,8 @@ class TestPaletteR66:
 # 「模型 ≠ 产物」是盲的，这里全部读回渲染结果本身）
 # ==========================================================================
 
-class TestSingleChainGeometryR66:
 
+class TestSingleChainGeometryR66:
     # ---- v2（Mermaid 载荷）----
 
     def test_v2_td_node_is_280x80_scaled(self):
@@ -177,8 +166,9 @@ class TestSingleChainGeometryR66:
         # 首节点中心行：单个非白区间，宽 == 280*2.5 = 700px
         runs = _nonwhite_runs(_row(img, 350, 0, img.width))
         assert len(runs) == 1, f"TD 首节点中心行应有 1 个节点区间，实得 {runs}"
-        assert abs(runs[0][1] - runs[0][0] + 1 - 700) <= 6, \
-            f"纵向节点宽应为 280px×2.5=700px，实得 {runs[0][1] - runs[0][0] + 1}"
+        assert (
+            abs(runs[0][1] - runs[0][0] + 1 - 700) <= 6
+        ), f"纵向节点宽应为 280px×2.5=700px，实得 {runs[0][1] - runs[0][0] + 1}"
 
     def test_v2_td_row_gap_is_40_scaled(self):
         img = _render_v2(_TD_CODE)
@@ -219,8 +209,7 @@ class TestSingleChainGeometryR66:
         assert len(col_runs) == 3, f"TD 三节点链应得 3 区间，实得 {col_runs}"
         for s, e in col_runs:
             assert abs(e - s + 1 - 200) <= 6, f"with_edges 纵向节点高应为 200px，实得 {e - s + 1}"
-        assert abs(_gap(col_runs) - 100) <= 6, \
-            f"with_edges 纵向行距应为 100px，实得 {_gap(col_runs)}"
+        assert abs(_gap(col_runs) - 100) <= 6, f"with_edges 纵向行距应为 100px，实得 {_gap(col_runs)}"
 
     def test_with_edges_lr_geometry(self):
         img = _render_we(_we_payload("LR"))
@@ -229,24 +218,25 @@ class TestSingleChainGeometryR66:
         assert len(runs) == 3, f"LR 三节点链应得 3 区间，实得 {runs}"
         for length in _lens(runs):
             assert abs(length - 500) <= 6, f"with_edges 横向节点宽应为 500px，实得 {length}"
-        assert abs(_gap(runs) - 100) <= 6, \
-            f"with_edges 横向列距应为 100px，实得 {_gap(runs)}"
+        assert abs(_gap(runs) - 100) <= 6, f"with_edges 横向列距应为 100px，实得 {_gap(runs)}"
 
 
 # ==========================================================================
 # C · 渲染缓存版本：改外观/尺寸必须踢缓存（R62→R64→R66 第三次应用）
 # ==========================================================================
 
-class TestRendererVersionR66:
 
-    def test_renderer_version_is_7(self):
+class TestRendererVersionR66:
+    def test_renderer_version_at_least_8(self):
         # R67（2026-10-11 流程图渲染可读性）：菱形铺满形状盒 + 文字内接自适应 +
         # 连线分道，菱形版式/连线走向/画布尺寸都变，版本号必须 6→7。
-        assert mr._RENDERER_VERSION == 7, \
-            "R67 改了菱形版式与连线通道，版本号必须 6→7，否则旧缓存图永不失效"
+        # ✅ R178（2026-11-04）：R175 BUG-175-02（字号/画布可读性）把版本 7→8，
+        #    等值断言已过期；改为**下限**断言（再升级不误红，回退才红）。
+        assert mr._RENDERER_VERSION >= 8, "R175 改了字号/画布可读性，版本号必须 ≥8，否则旧缓存图永不失效"
 
     def test_version_appears_exactly_once(self):
         import inspect
+
         assert inspect.getsource(mr).count("_RENDERER_VERSION = ") == 1
 
 
@@ -255,8 +245,8 @@ class TestRendererVersionR66:
 #     （仿 test_chart_prompt_coverage 的锁字面做法；锁**出厂默认**防基线污染）
 # ==========================================================================
 
-class TestPromptDirectionParityR66:
 
+class TestPromptDirectionParityR66:
     def test_generation_prompt_has_dual_direction_rule(self):
         p = get_default_prompt("content_generation_system")
         assert "节点 ≤8 个用 `flowchart LR`" in p, "生成提示词缺「≤8 横向」定向"
@@ -298,7 +288,6 @@ _TOUCHED_TESTS = [
 
 
 class TestR66ByteIntegrity:
-
     @pytest.mark.parametrize("name", _TOUCHED_PROD)
     def test_prod_line_endings_and_no_corruption(self, name):
         raw = (_AI_DIR / name).read_bytes()
@@ -330,24 +319,36 @@ class TestR66ByteIntegrity:
 # F · 反向锁：定向**只在提示词层**，校验/渲染缺省 TD 不变、显式方向原样生效
 # ==========================================================================
 
-class TestDirectionStaysPromptLayerOnlyR66:
 
+class TestDirectionStaysPromptLayerOnlyR66:
     def test_validator_default_stays_td_for_short_chain(self):
         # 5 步短链：若有人把自动定向下沉到校验器，这里会变成 LR → 本护栏打红
-        norm = normalize_flowchart_data({
-            "type": "flowchart",
-            "steps": ["测量放线", "基层清理", "面层安装", "勾缝处理", "验收移交"],
-        })
+        norm = normalize_flowchart_data(
+            {
+                "type": "flowchart",
+                "steps": ["测量放线", "基层清理", "面层安装", "勾缝处理", "验收移交"],
+            }
+        )
         assert norm is not None
         assert norm["direction"] == "TD", "校验器缺省方向被改成了自动定向（应为 TD）"
 
     def test_explicit_lr_payload_is_honored_verbatim(self):
-        norm = normalize_flowchart_data({
-            "type": "flowchart",
-            "direction": "LR",
-            "steps": ["测量放线", "基层清理", "面层安装", "勾缝处理", "验收移交",
-                      "成品保护", "资料归档", "验收移交二"],
-        })
+        norm = normalize_flowchart_data(
+            {
+                "type": "flowchart",
+                "direction": "LR",
+                "steps": [
+                    "测量放线",
+                    "基层清理",
+                    "面层安装",
+                    "勾缝处理",
+                    "验收移交",
+                    "成品保护",
+                    "资料归档",
+                    "验收移交二",
+                ],
+            }
+        )
         assert norm["direction"] == "LR", "显式 LR 被缺省逻辑覆盖（显式方向必须原样生效）"
         mermaid_code = flowchart_json_to_mermaid(norm)
         assert mermaid_code.startswith("flowchart LR")

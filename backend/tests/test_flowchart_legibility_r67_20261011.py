@@ -24,6 +24,7 @@
 / B 连线分道 / C 标签转义清洗 / D 缓存版本与单一实现 / E 字节体检。
 单链不变式：每带 1 条边时加宽量为 0，R66 单链几何逐字保持（B 组锁定）。
 """
+
 from __future__ import annotations
 
 import inspect
@@ -135,7 +136,6 @@ _DIAMOND_CODE = 'flowchart TD\n    A{"质量判定"} --> B["基层清理"]\n'
 
 
 class TestDiamondLayoutR67:
-
     def test_v2_diamond_spans_full_shape_box(self):
         """旧实现 min(w,h)/2 只画 190×190 小方块；现在铺满 200×80 形状盒
         （device 500×200），中心行区间宽应 ≈ 500。"""
@@ -143,20 +143,18 @@ class TestDiamondLayoutR67:
         runs = _nonwhite_runs(_row(img, 350))  # 菱形中心行 y=350
         assert len(runs) == 1, f"菱形中心行应只有 1 个区间，实得 {runs}"
         width = runs[0][1] - runs[0][0] + 1
-        assert abs(width - 200 * _SCALE) <= 8, \
-            f"菱形应铺满形状盒（500px），实得 {width}px（旧实现仅 190px）"
+        assert abs(width - 200 * _SCALE) <= 8, f"菱形应铺满形状盒（500px），实得 {width}px（旧实现仅 190px）"
 
     def test_v2_diamond_center_aligns_with_rect_column(self):
         """菱形必须在列内居中：其视觉中心 x 与同列矩形中心 x 对齐
         （旧实现菱形贴列左缘，错开 (node_w-diamond_w)/2*scale = 100px）。"""
         img = _render_v2(_DIAMOND_CODE)
-        d_runs = _nonwhite_runs(_row(img, 350))       # 菱形（level 0）
-        r_runs = _nonwhite_runs(_row(img, 650))       # 矩形（level 1 中心行）
+        d_runs = _nonwhite_runs(_row(img, 350))  # 菱形（level 0）
+        r_runs = _nonwhite_runs(_row(img, 650))  # 矩形（level 1 中心行）
         assert len(d_runs) == 1 and len(r_runs) == 1, (d_runs, r_runs)
         d_cx = (d_runs[0][0] + d_runs[0][1]) / 2
         r_cx = (r_runs[0][0] + r_runs[0][1]) / 2
-        assert abs(d_cx - r_cx) <= 8, \
-            f"菱形中心 {d_cx} 与同列矩形中心 {r_cx} 应对齐（旧实现错开 100px）"
+        assert abs(d_cx - r_cx) <= 8, f"菱形中心 {d_cx} 与同列矩形中心 {r_cx} 应对齐（旧实现错开 100px）"
 
     def test_v2_diamond_text_stays_inside_shape(self):
         """长标签文字的水平跨度不得超过菱形内接矩形（w/2=250px）——
@@ -164,19 +162,15 @@ class TestDiamondLayoutR67:
         long_label = "CheckBIM -- 通过 不合格判定超长标签压测用例"
         code = f'flowchart TD\n    A{{"{long_label}"}} --> B["基层清理"]\n'
         img = _render_v2(code)
-        extent = max(
-            _dark_span(_row(img, y)) for y in range(300, 401)
-        )  # 文字块垂直居中于 cy=350，取中带扫描
-        assert 0 < extent <= 250 + 24, \
-            f"菱形文字水平跨度 {extent}px 超出内接矩形（≈250px），会溢出轮廓"
+        extent = max(_dark_span(_row(img, y)) for y in range(300, 401))  # 文字块垂直居中于 cy=350，取中带扫描
+        assert 0 < extent <= 250 + 24, f"菱形文字水平跨度 {extent}px 超出内接矩形（≈250px），会溢出轮廓"
 
     def test_with_edges_diamond_text_stays_inside_shape(self):
         payload = {
             "title": "施工流程",
             "direction": "TD",
             "nodes": [
-                {"id": "A", "label": "CheckBIM -- 通过 不合格判定超长标签压测",
-                 "type": "decision"},
+                {"id": "A", "label": "CheckBIM -- 通过 不合格判定超长标签压测", "type": "decision"},
                 {"id": "B", "label": "基层清理", "type": "process"},
             ],
             "edges": [{"from": "A", "to": "B"}],
@@ -185,8 +179,7 @@ class TestDiamondLayoutR67:
         # with_edges TD：row0 顶 = (60+40)*2.5=250，节点高 200 → 中心行 350
         extent = max(_dark_span(_row(img, y)) for y in range(300, 401))
         # 单元格宽 280*2.5=700 → 内接宽 350
-        assert 0 < extent <= 350 + 24, \
-            f"with_edges 菱形文字水平跨度 {extent}px 超出内接矩形（≈350px）"
+        assert 0 < extent <= 350 + 24, f"with_edges 菱形文字水平跨度 {extent}px 超出内接矩形（≈350px）"
 
     def test_diamond_label_helper_never_exceeds_inscribed_box(self):
         """纯函数层：极端长标签在最小字号下也不应产生超宽行。"""
@@ -195,9 +188,9 @@ class TestDiamondLayoutR67:
         img = Image.new("RGB", (800, 200), "white")
         draw = ImageDraw.Draw(img)
         from app.services.ai.mermaid_common import _image_font
+
         font = _image_font(int(16 * _SCALE), bold=True)
-        _draw_diamond_label(
-            draw, 400, 100, 500, 200, "超" * 40, font, "#333333", _SCALE)
+        _draw_diamond_label(draw, 400, 100, 500, 200, "超" * 40, font, "#333333", _SCALE)
         extent = max(_dark_span(_row(img, y)) for y in range(60, 141))
         assert extent > 0, "应画出文字"
         assert extent <= 250, f"内接矩形宽 250px，实得 {extent}px"
@@ -228,15 +221,15 @@ def _lane_clusters(img: Image.Image, y0: int, y1: int, min_run=50):
 
 
 class TestEdgeLanesR67:
-
     def test_v2_parallel_branch_edges_get_distinct_lanes(self):
         """4 条并行边在层间间隙内应出现 4 条彼此分开的横向长线 ——
         旧实现 4 条全部落在 (sy+ey)/2 同一 y 上并轨成 1 条贯穿长轨。"""
         img = _render_v2(_FAN_CODE)
         # row0 节点底 450；加宽后 row1 节点顶 = (100+120+40)*2.5 = 650
         clusters = _lane_clusters(img, 455, 645)
-        assert len(clusters) >= 4, \
-            f"4 条并行边应有 ≥4 条独立通道线，实得 {len(clusters)} 条（并轨={len(clusters) < 4}）"
+        assert (
+            len(clusters) >= 4
+        ), f"4 条并行边应有 ≥4 条独立通道线，实得 {len(clusters)} 条（并轨={len(clusters) < 4}）"
 
     def test_v2_band_gap_grows_for_crowded_band(self):
         """4 条并行边时层间净空应自动加高（row_gap 40 + 加宽 40 design = 200px），
@@ -251,8 +244,7 @@ class TestEdgeLanesR67:
                 node_top = 455 + s
                 break
         assert node_top is not None, f"未探到下一行节点：{runs}"
-        assert node_top >= 630, \
-            f"加宽后下一行节点顶应 ≥630px（旧几何 550px），实得 {node_top}"
+        assert node_top >= 630, f"加宽后下一行节点顶应 ≥630px（旧几何 550px），实得 {node_top}"
 
     def test_v2_single_chain_row_gap_unchanged(self):
         """单链（每带 1 条边）行距必须仍是 R66 的 100px —— 分道不得误伤单链。"""
@@ -289,8 +281,7 @@ class TestEdgeLanesR67:
         }
         img = _render_we(payload)
         clusters = _lane_clusters(img, 455, 645)
-        assert len(clusters) >= 4, \
-            f"with_edges 4 条并行边应有 ≥4 条独立通道线，实得 {len(clusters)}"
+        assert len(clusters) >= 4, f"with_edges 4 条并行边应有 ≥4 条独立通道线，实得 {len(clusters)}"
 
     def test_with_edges_single_chain_row_gap_unchanged(self):
         payload = {
@@ -316,8 +307,8 @@ class TestEdgeLanesR67:
             '    A["施工准备"] --> B["基层清理"]\n'
             '    B --> C["面层安装"]\n'
             '    C --> D["勾缝处理"]\n'
-            '    D --> C\n'   # D、C 不同层 → 这是回退边，走旧直连
-            '    A --> D\n'   # A(层0) → D(层3)：前进边，跨 3 层
+            "    D --> C\n"  # D、C 不同层 → 这是回退边，走旧直连
+            "    A --> D\n"  # A(层0) → D(层3)：前进边，跨 3 层
         )
         img = _render_v2(code)
         # 同层边构造：E、F 同层（A → E → F 且 F → E 的目标因另有入边与 E 同层）
@@ -326,13 +317,12 @@ class TestEdgeLanesR67:
             '    A["施工准备"] --> B["基层清理"]\n'
             '    A --> C["面层安装"]\n'
             '    B --> D["验收移交"]\n'
-            '    C --> D\n'
+            "    C --> D\n"
         )
         img2 = _render_v2(code2)
         # D 在层 2；B/C 在层 1；B→D 与 C→D 均为前进边 → 2 条通道
         clusters = _lane_clusters(img2, 455, 700)
-        assert len(clusters) >= 2, \
-            f"汇聚于同层的 2 条边应各占一条通道，实得 {len(clusters)}"
+        assert len(clusters) >= 2, f"汇聚于同层的 2 条边应各占一条通道，实得 {len(clusters)}"
 
     def test_backward_edge_keeps_direct_routing(self):
         """跨层回退边（目标层更浅）保持旧直连路由 —— 不分带、不绕行。"""
@@ -342,8 +332,7 @@ class TestEdgeLanesR67:
             {"from": "B", "to": "C"},
             {"from": "C", "to": "A"},  # 跨层回退
         ]
-        band_of, _be, _bg, _slot = _plan_edge_lanes(
-            levels, edges, horizontal=False, base_gap=40)
+        band_of, _be, _bg, _slot = _plan_edge_lanes(levels, edges, horizontal=False, base_gap=40)
         assert 0 in band_of and 1 in band_of
         assert 2 not in band_of, "TD 跨层回退边不应分带（保持旧直连路由）"
 
@@ -352,8 +341,8 @@ class TestEdgeLanesR67:
 # C · 标签转义清洗（解析层单一漏斗）
 # ==========================================================================
 
-class TestLabelUnescapeR67:
 
+class TestLabelUnescapeR67:
     def test_diamond_label_backslashes_removed(self):
         """实测样张缺陷：AI 输出 ``N1{CheckBIM -- \\"通过\\"}``，
         标签必须还原为 ``CheckBIM -- "通过"``（无反斜杠、引号成对）。"""
@@ -371,6 +360,7 @@ class TestLabelUnescapeR67:
 
     def test_edge_label_unescaped(self):
         from app.services.ai.mermaid_flowchart import _split_mermaid_edge
+
         edge = _split_mermaid_edge('A -->|\\"通过\\"| B')
         assert edge is not None
         assert edge[1] == "通过", repr(edge)
@@ -393,11 +383,14 @@ class TestLabelUnescapeR67:
 # D · 缓存版本与单一实现
 # ==========================================================================
 
-class TestCacheAndSingleSourceR67:
 
-    def test_renderer_version_is_7(self):
-        assert mr._RENDERER_VERSION == 7, \
-            "R67 改了菱形版式与连线通道，版本号必须 6→7，否则旧缓存图永不失效"
+class TestCacheAndSingleSourceR67:
+    def test_renderer_version_at_least_8(self):
+        # R67：菱形版式与连线通道改动要求 6→7（否则旧缓存图永不失效）。
+        # ✅ R178（2026-11-04）：R175 BUG-175-02 又因字号/画布可读性改动把版本
+        #    7→8，因此这里判“不低于 7”的上界已过期；改为锁“不低于 8”。
+        #    注意这是**下限**断言：后续再升级版本号不需要改这条，只有回退才红。
+        assert mr._RENDERER_VERSION >= 8, "R175 改了字号/画布可读性，版本号必须 ≥8，否则旧缓存图永不失效"
 
     def test_version_assigned_exactly_once(self):
         src = inspect.getsource(mr)
@@ -426,11 +419,10 @@ class TestCacheAndSingleSourceR67:
             {"from": "B", "to": "D"},
             {"from": "C", "to": "B"},  # 同层边
         ]
-        band_of, band_edges, band_gap, slot = _plan_edge_lanes(
-            levels, edges, horizontal=False, base_gap=40)
-        assert band_of[0] == 0 and band_of[1] == 0      # 前进边 → 目标层上方
-        assert band_of[2] == 1                          # B→D → 层1 上方
-        assert band_of[3] == 1                          # 同层边 → 源层(1)下方
+        band_of, band_edges, band_gap, slot = _plan_edge_lanes(levels, edges, horizontal=False, base_gap=40)
+        assert band_of[0] == 0 and band_of[1] == 0  # 前进边 → 目标层上方
+        assert band_of[2] == 1  # B→D → 层1 上方
+        assert band_of[3] == 1  # 同层边 → 源层(1)下方
         assert band_gap[0] == max(40, 3 * LANE_PITCH_DESIGN_PX)
         assert band_gap[1] == max(40, 3 * LANE_PITCH_DESIGN_PX)
         assert sorted(slot[i] for i in (0, 1)) == [0, 1]
@@ -438,10 +430,9 @@ class TestCacheAndSingleSourceR67:
     def test_plan_edge_lanes_lr_backward_uses_bottom_bus(self):
         levels = {"A": 0, "B": 0, "C": 1}
         edges = [{"from": "A", "to": "C"}, {"from": "B", "to": "A"}]
-        band_of, _be, _bg, _slot = _plan_edge_lanes(
-            levels, edges, horizontal=True, base_gap=40)
-        assert band_of[0] == 0      # 前进边
-        assert band_of[1] == -1     # LR 回退边 → 图底母线带
+        band_of, _be, _bg, _slot = _plan_edge_lanes(levels, edges, horizontal=True, base_gap=40)
+        assert band_of[0] == 0  # 前进边
+        assert band_of[1] == -1  # LR 回退边 → 图底母线带
 
 
 # ==========================================================================
@@ -452,7 +443,6 @@ _TOUCHED_PROD = ["mermaid_flowchart.py", "mermaid_renderer.py"]
 
 
 class TestR67ByteIntegrity:
-
     @pytest.mark.parametrize("name", _TOUCHED_PROD)
     def test_prod_line_endings_and_no_corruption(self, name):
         raw = (_AI_DIR / name).read_bytes()

@@ -13,6 +13,7 @@
 - 字体：跨平台字体路径只探测一次（性能回归）
 - 图表清单：历史裸 Mermaid / 规范信封载荷都能拿到可渲染代码
 """
+
 import json
 import os
 from io import BytesIO
@@ -60,13 +61,14 @@ def _open(bio: BytesIO) -> Image.Image:
 
 def _count_color(img: Image.Image, rgb: tuple[int, int, int]) -> int:
     # 用 getcolors 而非已弃用的 getdata（Pillow 14 将移除 getdata）
-    for count, color in (img.convert("RGB").getcolors(maxcolors=1 << 24) or []):
+    for count, color in img.convert("RGB").getcolors(maxcolors=1 << 24) or []:
         if color == rgb:
             return count
     return 0
 
 
 # ---------------- 架构图 ----------------
+
 
 def test_architecture_cycle_does_not_crash():
     """环数据（子节点引用祖先）不应触发 RecursionError，且能正常出图。"""
@@ -114,25 +116,29 @@ def test_architecture_highlight_node_amber_and_layout_passthrough():
     """回归（2026-10-17 样张 v2）：highlight:true 节点必须穿透布局层进入渲染，
     渲染为琥珀金 #FBBF24 + 深藏青文字；根节点恒为深藏青 #1E3A5F；
     金色只允许出现在 highlight 节点上，根节点框内不得有金色。"""
-    tree = {"label": "项目经理部", "children": [
-        {"label": "技术部", "highlight": True},
-        {"label": "质量部"},
-        {"label": "安全部", "highlight": "true"},  # 字符串形态同样按真值解释
-    ]}
+    tree = {
+        "label": "项目经理部",
+        "children": [
+            {"label": "技术部", "highlight": True},
+            {"label": "质量部"},
+            {"label": "安全部", "highlight": "true"},  # 字符串形态同样按真值解释
+        ],
+    }
     nodes, _w, _h = _layout_architecture_tree(tree)
 
     bio = _render_architecture_image_v2(tree)
     assert bio is not None and len(bio.getvalue()) > 100
     img = _open(bio)
-    AMBER = (251, 191, 36)    # #FBBF24 样张取证琥珀金
-    NAVY = (30, 58, 95)       # #1E3A5F 样张取证深藏青（根）
+    AMBER = (251, 191, 36)  # #FBBF24 样张取证琥珀金
+    NAVY = (30, 58, 95)  # #1E3A5F 样张取证深藏青（根）
     assert _count_color(img, AMBER) > 500, "highlight 节点未渲染为琥珀金"
     assert _count_color(img, NAVY) > 500, "根节点未使用深藏青"
     # 金色不得出现在根节点框内（旧「金色根样式」禁令换根对框的精确口径）
     root = next(n for n in nodes if n["depth"] == 0)
     px = img.convert("RGB").load()
     gold_in_root = sum(
-        1 for y in range(int(root["y"] * 2.5) + 56 + 8, int((root["y"] + root["h"]) * 2.5) + 56 - 8)
+        1
+        for y in range(int(root["y"] * 2.5) + 56 + 8, int((root["y"] + root["h"]) * 2.5) + 56 - 8)
         for x in range(int(root["x"] * 2.5) + 8, int((root["x"] + root["w"]) * 2.5) - 8)
         if px[x, y] == AMBER
     )
@@ -151,7 +157,7 @@ def test_flowchart_horizontal_lr_and_doc_palette():
         '    B --> C["装饰装修"]\n'
         '    C --> D{"验收是否通过"}\n'
         '    D -->|通过| E["竣工验收"]\n'
-        '    D -->|不通过| C\n'
+        "    D -->|不通过| C\n"
     )
     bio = _render_flowchart_image_v2(code)
     assert bio is not None and len(bio.getvalue()) > 100
@@ -200,9 +206,7 @@ def test_flowchart_steps_payload_validated_and_rendered():
     assert mermaid_code.startswith("flowchart TD")
     bio = _render_flowchart_image_v2(
         mermaid_code,
-        variant_overrides={
-            n["id"]: n["type"] for n in norm["nodes"] if n["type"] != "process"
-        },
+        variant_overrides={n["id"]: n["type"] for n in norm["nodes"] if n["type"] != "process"},
     )
     assert bio is not None and len(bio.getvalue()) > 100
     img = _open(bio)
@@ -216,17 +220,19 @@ def test_flowchart_steps_payload_validated_and_rendered():
 def test_flowchart_validator_rejects_broken_payload():
     """校验宽进口径下的底线：无节点 / 单节点 / 边端点全部无法解析必须拦截。"""
     assert validate_flowchart_data({"type": "flowchart"})[0] is False
-    assert validate_flowchart_data(
-        {"type": "flowchart", "steps": [{"id": "s1", "label": "只有一步"}]})[0] is False
-    ok, _ = validate_flowchart_data({
-        "type": "flowchart",
-        "steps": ["施工准备", "主体施工", "竣工验收"],
-        "edges": [[0, 1], [1, 2]],  # 下标形态边
-    })
+    assert validate_flowchart_data({"type": "flowchart", "steps": [{"id": "s1", "label": "只有一步"}]})[0] is False
+    ok, _ = validate_flowchart_data(
+        {
+            "type": "flowchart",
+            "steps": ["施工准备", "主体施工", "竣工验收"],
+            "edges": [[0, 1], [1, 2]],  # 下标形态边
+        }
+    )
     assert ok, "字符串节点 + 下标边应放行（渲染器可画）"
 
 
 # ---------------- 甘特图 ----------------
+
 
 def _gantt_plan(remark: str = "") -> dict:
     task = {"id": 1, "name": "基础施工", "start": 1, "end": 10, "critical": True}
@@ -235,16 +241,14 @@ def _gantt_plan(remark: str = "") -> dict:
     return {
         "title": "计划",
         "totalDays": 30,
-        "tasks": [task, {"id": 2, "name": "主体施工", "start": 11, "end": 30,
-                         "dependencies": [1]}],
+        "tasks": [task, {"id": 2, "name": "主体施工", "start": 11, "end": 30, "dependencies": [1]}],
     }
 
 
 def test_gantt_remarks_rendered_in_critical_mode():
     """关键路径模式（带依赖的计划默认走此模式）下备注必须被绘制，而非丢弃留白。"""
     without = _render_gantt_image_v2(_gantt_plan(), highlight_critical_path=True)
-    with_remark = _render_gantt_image_v2(
-        _gantt_plan("春节停工"), highlight_critical_path=True)
+    with_remark = _render_gantt_image_v2(_gantt_plan("春节停工"), highlight_critical_path=True)
     assert without is not None and with_remark is not None
 
     img_without = _open(without)
@@ -279,10 +283,10 @@ def test_gantt_section_band_adds_rows():
 
 # ---------------- 流程图 ----------------
 
+
 def test_flowchart_string_edges_with_index_endpoints_resolved():
     """字符串边使用"下标端点"（"0 --> 1"）时应映射为真实节点 ID，不产生幽灵节点。"""
-    code = flowchart_json_to_mermaid(
-        {"nodes": ["开始", "处理", "结束"], "edges": ["0 --> 1", "1 --> 2"]})
+    code = flowchart_json_to_mermaid({"nodes": ["开始", "处理", "结束"], "edges": ["0 --> 1", "1 --> 2"]})
     assert "N1 --> N2" in code and "N2 --> N3" in code
     assert "0 --> 1" not in code
 
@@ -292,6 +296,7 @@ def test_flowchart_string_edges_with_index_endpoints_resolved():
 
 
 # ---------------- 劳动力图 ----------------
+
 
 def test_labor_invalid_container_does_not_crash():
     """phases/categories 非序列（dict）时不得崩溃：能救则救，救不活则 None。
@@ -308,8 +313,7 @@ def test_labor_invalid_container_does_not_crash():
         bio = _render_labor_image_v2(payload)
         assert bio is not None and len(bio.getvalue()) > 100, payload
     # 数据本身无法识别 → 优雅返回 None（由调用方出占位）
-    assert _render_labor_image_v2(
-        {"phases": ["P1"], "categories": ["x"], "data": []}) is None
+    assert _render_labor_image_v2({"phases": ["P1"], "categories": ["x"], "data": []}) is None
     assert _render_labor_image_v2({"note": "暂无数据"}) is None
 
 
@@ -318,77 +322,83 @@ def test_labor_invalid_container_does_not_crash():
 # phases/categories/data 三件套，形状稍偏就整块消失（校验判非法 → 删块；
 # 或校验通过 → 渲染 None → 导出占位）。现与 architecture 一样收敛到共享归一器。
 
+
 def test_labor_normalize_natural_shapes():
     """AI 产出的各种自然形态都应归一为 phases/categories/data 三件套。"""
     # 工种 → 序列（转置：行 = 阶段，列 = 工种）
-    assert normalize_labor_data(
-        {"data": {"木工": [10, 20], "钢筋工": [5, 8]}}) == {
-            "phases": ["阶段1", "阶段2"],
-            "categories": ["木工", "钢筋工"],
-            "data": [[10.0, 5.0], [20.0, 8.0]],
-        }
+    assert normalize_labor_data({"data": {"木工": [10, 20], "钢筋工": [5, 8]}}) == {
+        "phases": ["阶段1", "阶段2"],
+        "categories": ["木工", "钢筋工"],
+        "data": [[10.0, 5.0], [20.0, 8.0]],
+    }
 
     # ECharts series
-    assert normalize_labor_data(
-        {"series": [{"name": "木工", "data": [10, 20]}]}) == {
-            "phases": ["阶段1", "阶段2"], "categories": ["木工"],
-            "data": [[10.0], [20.0]],
-        }
+    assert normalize_labor_data({"series": [{"name": "木工", "data": [10, 20]}]}) == {
+        "phases": ["阶段1", "阶段2"],
+        "categories": ["木工"],
+        "data": [[10.0], [20.0]],
+    }
 
     # Chart.js datasets（labels 为阶段轴）
-    assert normalize_labor_data({
-        "labels": ["基础", "主体"],
-        "datasets": [{"label": "木工", "data": [10, 20]}],
-    }) == {"phases": ["基础", "主体"], "categories": ["木工"],
-           "data": [[10.0], [20.0]]}
+    assert normalize_labor_data(
+        {
+            "labels": ["基础", "主体"],
+            "datasets": [{"label": "木工", "data": [10, 20]}],
+        }
+    ) == {"phases": ["基础", "主体"], "categories": ["木工"], "data": [[10.0], [20.0]]}
 
     # 行内阶段名：["基础", 10, 5]
-    norm = normalize_labor_data({"categories": ["木工", "钢筋工"],
-                                 "data": [["基础", 10, 5]]})
+    norm = normalize_labor_data({"categories": ["木工", "钢筋工"], "data": [["基础", 10, 5]]})
     assert norm["phases"] == ["基础"]
     assert norm["data"] == [[10.0, 5.0]]
 
     # 阶段 × 工种 计数
     norm = normalize_labor_data({"data": [{"phase": "基础", "木工": 10, "钢筋工": 5}]})
-    assert norm == {"phases": ["基础"], "categories": ["木工", "钢筋工"],
-                    "data": [[10.0, 5.0]]}
+    assert norm == {"phases": ["基础"], "categories": ["木工", "钢筋工"], "data": [[10.0, 5.0]]}
 
     # 工种清单（单阶段）：trades + peak
-    norm = normalize_labor_data({"trades": [{"name": "木工", "peak": 30},
-                                            {"name": "钢筋工", "peak": 18}]})
+    norm = normalize_labor_data({"trades": [{"name": "木工", "peak": 30}, {"name": "钢筋工", "peak": 18}]})
     assert norm["categories"] == ["木工", "钢筋工"]
     assert norm["data"] == [[30.0, 18.0]]
 
     # 阶段对象内嵌工种清单：{"phases":[{"name":..,"workers":[{trade,count}]}]}
     # （修复提示词 chart_json_fix 教出去的形态）
-    assert normalize_labor_data({"phases": [
-        {"name": "基础", "workers": [{"trade": "木工", "count": 10},
-                                     {"trade": "钢筋工", "count": 5}]},
-        {"name": "主体", "workers": [{"trade": "木工", "count": 20},
-                                     {"trade": "钢筋工", "count": 8}]},
-    ]}) == {"phases": ["基础", "主体"], "categories": ["木工", "钢筋工"],
-            "data": [[10.0, 5.0], [20.0, 8.0]]}
+    assert normalize_labor_data(
+        {
+            "phases": [
+                {"name": "基础", "workers": [{"trade": "木工", "count": 10}, {"trade": "钢筋工", "count": 5}]},
+                {"name": "主体", "workers": [{"trade": "木工", "count": 20}, {"trade": "钢筋工", "count": 8}]},
+            ]
+        }
+    ) == {"phases": ["基础", "主体"], "categories": ["木工", "钢筋工"], "data": [[10.0, 5.0], [20.0, 8.0]]}
 
     # 同上，但阶段对象里平铺工种计数
-    assert normalize_labor_data({"phases": [{"name": "基础", "木工": 10, "钢筋工": 5}]}) \
-        == {"phases": ["基础"], "categories": ["木工", "钢筋工"], "data": [[10.0, 5.0]]}
+    assert normalize_labor_data({"phases": [{"name": "基础", "木工": 10, "钢筋工": 5}]}) == {
+        "phases": ["基础"],
+        "categories": ["木工", "钢筋工"],
+        "data": [[10.0, 5.0]],
+    }
 
     # 嵌套包装
-    assert normalize_labor_data({
-        "type": "labor",
-        "data": {"phases": ["基础"], "categories": ["木工"], "data": [[10]]},
-    }) == {"phases": ["基础"], "categories": ["木工"], "data": [[10.0]]}
+    assert normalize_labor_data(
+        {
+            "type": "labor",
+            "data": {"phases": ["基础"], "categories": ["木工"], "data": [[10]]},
+        }
+    ) == {"phases": ["基础"], "categories": ["木工"], "data": [[10.0]]}
 
     # 别名键（time/types）+ 字符串分隔
-    assert normalize_labor_data({
-        "time": "基础,主体", "types": "木工、钢筋工", "data": [[10, 5], [20, 8]],
-    }) == {"phases": ["基础", "主体"], "categories": ["木工", "钢筋工"],
-           "data": [[10.0, 5.0], [20.0, 8.0]]}
+    assert normalize_labor_data(
+        {
+            "time": "基础,主体",
+            "types": "木工、钢筋工",
+            "data": [[10, 5], [20, 8]],
+        }
+    ) == {"phases": ["基础", "主体"], "categories": ["木工", "钢筋工"], "data": [[10.0, 5.0], [20.0, 8.0]]}
 
     # 一维数值序列（单工种 × 各阶段）
     norm = normalize_labor_data({"labels": ["1月", "2月"], "values": [30, 45]})
-    assert norm == {"phases": ["1月", "2月"], "categories": ["劳动力"],
-                    "data": [[30.0], [45.0]]}
+    assert norm == {"phases": ["1月", "2月"], "categories": ["劳动力"], "data": [[30.0], [45.0]]}
 
 
 def test_labor_normalize_unrecognizable_returns_none():
@@ -403,19 +413,16 @@ def test_labor_normalize_unrecognizable_returns_none():
 def test_labor_normalize_keeps_data_on_axis_mismatch():
     """阶段名与数据行数不等时以**数据**为准：补造/裁剪标签，绝不丢数据行。"""
     # 阶段名多于数据行 → 裁剪阶段名（否则渲染器补一整行 0，校验器又判"全 0"非法）
-    norm = normalize_labor_data({"phases": ["基础", "主体", "装修"],
-                                 "categories": ["木工"], "data": [[10], [20]]})
+    norm = normalize_labor_data({"phases": ["基础", "主体", "装修"], "categories": ["木工"], "data": [[10], [20]]})
     assert len(norm["phases"]) == len(norm["data"]) == 2
 
     # 数据行多于阶段名 → 补造阶段名，保住多出来的数据行
-    norm = normalize_labor_data({"phases": ["基础"], "categories": ["木工"],
-                                 "data": [[10], [20], [30]]})
+    norm = normalize_labor_data({"phases": ["基础"], "categories": ["木工"], "data": [[10], [20], [30]]})
     assert len(norm["phases"]) == len(norm["data"]) == 3
     assert norm["data"] == [[10.0], [20.0], [30.0]]
 
     # 矩阵列多于工种 → 补造工种名，而不是丢弃该列
-    norm = normalize_labor_data({"phases": ["基础"], "categories": ["木工"],
-                                 "data": [[10, 5]]})
+    norm = normalize_labor_data({"phases": ["基础"], "categories": ["木工"], "data": [[10, 5]]})
     assert len(norm["categories"]) == 2
     assert norm["data"] == [[10.0, 5.0]]
 
@@ -450,17 +457,17 @@ def test_labor_render_keeps_title_through_normalize():
     a = _render_labor_image_v2({**base, "title": "劳动力投入计划"})
     b = _render_labor_image_v2({**base, "title": "另一个标题"})
     assert a is not None and b is not None
-    assert a.getvalue() != b.getvalue()      # 标题确实参与绘制
+    assert a.getvalue() != b.getvalue()  # 标题确实参与绘制
 
 
 # ---------------- 布局图 / 时间轴：载荷归一（与 labor 同型） ----------------
 # 这两类此前同样是"渲染器能画、校验器判非法" → 正文图表被整块删块。
 # 判据：渲染器读字段的口径必须与校验器判非法的口径来自同一个函数。
 
+
 def test_layout_normalize_fills_missing_zone_name():
     """区域没写 name 时归一为「区域N」（渲染器本来就这么回落）。"""
-    payload = {"type": "layout", "zones": [{"id": "Z1", "description": "办公区"},
-                                           {"id": "Z2", "category": "加工区"}]}
+    payload = {"type": "layout", "zones": [{"id": "Z1", "description": "办公区"}, {"id": "Z2", "category": "加工区"}]}
     norm = normalize_layout_data(payload)
     assert [z["name"] for z in norm["zones"]] == ["区域1", "区域2"]
     # 原有字段必须保留（id / description / category 不能被丢）
@@ -477,8 +484,9 @@ def test_layout_normalize_fills_missing_zone_name():
 
 def test_timeline_normalize_natural_shapes():
     """时间轴的 4 种容器别名 + 无名/无日期 + status 别名都应归一。"""
-    norm = normalize_timeline_data({"events": [{"date": "2026-01-01", "name": "开工"},
-                                               {"date": "2026-06-01", "name": "竣工"}]})
+    norm = normalize_timeline_data(
+        {"events": [{"date": "2026-01-01", "name": "开工"}, {"date": "2026-06-01", "name": "竣工"}]}
+    )
     assert [m["name"] for m in norm["milestones"]] == ["开工", "竣工"]
 
     assert normalize_timeline_data({"points": [{"name": "A"}, {"name": "B"}]}) is not None
@@ -491,12 +499,16 @@ def test_timeline_normalize_natural_shapes():
 
     # status 别名映射
     norm = normalize_timeline_data(
-        {"milestones": [{"name": "A", "date": "D", "status": "done"},
-                        {"name": "B", "date": "D", "status": "进行中"},
-                        {"name": "C", "date": "D", "status": "未开始"},
-                        {"name": "D", "date": "D", "status": "乱写的"}]})
-    assert [m["status"] for m in norm["milestones"][:3]] == [
-        "completed", "in_progress", "pending"]
+        {
+            "milestones": [
+                {"name": "A", "date": "D", "status": "done"},
+                {"name": "B", "date": "D", "status": "进行中"},
+                {"name": "C", "date": "D", "status": "未开始"},
+                {"name": "D", "date": "D", "status": "乱写的"},
+            ]
+        }
+    )
+    assert [m["status"] for m in norm["milestones"][:3]] == ["completed", "in_progress", "pending"]
     # 无法识别的 status 直接丢弃，而不是让整块被判非法
     assert "status" not in norm["milestones"][3]
 
@@ -509,8 +521,7 @@ def test_layout_timeline_validate_render_agree():
     layout_shapes = [
         {"type": "layout", "zones": [{"name": "办公区"}, {"name": "加工区"}]},
         {"type": "layout", "areas": [{"name": "办公区"}, {"name": "加工区"}]},
-        {"type": "layout", "zones": [{"id": "Z1", "description": "办公区"},
-                                     {"id": "Z2", "category": "加工区"}]},
+        {"type": "layout", "zones": [{"id": "Z1", "description": "办公区"}, {"id": "Z2", "category": "加工区"}]},
         {"type": "layout", "zones": [{"label": "办公区"}, {"label": "加工区"}]},
     ]
     for payload in layout_shapes:
@@ -520,24 +531,27 @@ def test_layout_timeline_validate_render_agree():
         assert _render_layout_image_v2(payload) is not None, payload
 
     timeline_shapes = [
-        {"type": "timeline",
-         "milestones": [{"date": "2026-01-01", "name": "开工"},
-                        {"date": "2026-06-01", "name": "竣工"}]},
-        {"type": "timeline", "events": [{"date": "第30天", "name": "基础完成"},
-                                        {"date": "T+90", "name": "主体封顶"}]},
-        {"type": "timeline", "milestones": [{"date": "2026-01-01"},
-                                            {"name": "竣工"}]},
-        {"type": "timeline", "milestones": [{"date": "2026-01-01", "name": "开工",
-                                             "status": "done"},
-                                            {"date": "2026-06-01", "name": "竣工",
-                                             "status": "已完成"}]},
+        {
+            "type": "timeline",
+            "milestones": [{"date": "2026-01-01", "name": "开工"}, {"date": "2026-06-01", "name": "竣工"}],
+        },
+        {"type": "timeline", "events": [{"date": "第30天", "name": "基础完成"}, {"date": "T+90", "name": "主体封顶"}]},
+        {"type": "timeline", "milestones": [{"date": "2026-01-01"}, {"name": "竣工"}]},
+        {
+            "type": "timeline",
+            "milestones": [
+                {"date": "2026-01-01", "name": "开工", "status": "done"},
+                {"date": "2026-06-01", "name": "竣工", "status": "已完成"},
+            ],
+        },
         # ✅ 回归（2026-09-16）：校验器认 items 别名，而渲染器只认
         #    milestones/events/points → `{"type":"timeline","items":[...]}` 校验放行、
         #    渲染返回 None、导出变红字占位。现渲染器统一过 normalize_timeline_data。
-        {"type": "timeline", "items": [{"date": "第1天", "name": "进场"},
-                                       {"date": "第30天", "name": "验收"}]},
-        {"type": "timeline", "items": [{"date": "第1天", "name": "进场", "status": "done"},
-                                       {"date": "第30天", "name": "验收"}]},
+        {"type": "timeline", "items": [{"date": "第1天", "name": "进场"}, {"date": "第30天", "name": "验收"}]},
+        {
+            "type": "timeline",
+            "items": [{"date": "第1天", "name": "进场", "status": "done"}, {"date": "第30天", "name": "验收"}],
+        },
     ]
     for payload in timeline_shapes:
         assert normalize_timeline_data(payload) is not None, payload
@@ -549,28 +563,32 @@ def test_layout_timeline_validate_render_agree():
 
 # ---------------- 甘特图 ----------------
 
+
 def test_gantt_normalize_container_aliases_and_id_fallback():
     """gantt 的 3 种容器别名 + id 回落 + dependencies 可用 name 引用。"""
     # 容器别名：tasks / items / rows
     for key in ("tasks", "items", "rows"):
-        norm = normalize_gantt_plan({key: [{"name": "A", "start": 0, "end": 5},
-                                           {"name": "B", "start": 5, "end": 9}]})
+        norm = normalize_gantt_plan({key: [{"name": "A", "start": 0, "end": 5}, {"name": "B", "start": 5, "end": 9}]})
         assert norm is not None, key
         assert len(norm["tasks"]) == 2, key
 
     # id 缺失 → 依次回落 name/task/title → 序号
-    norm = normalize_gantt_plan({"tasks": [{"name": "进场"}, {"task": "开挖"},
-                                           {"title": "垫层"}, {"start": 0, "end": 1}]})
-    assert [t["id"] for t in norm["tasks"]] == ["进场", "开挖", "垫层", 4]
+    norm = normalize_gantt_plan(
+        {"tasks": [{"name": "进场"}, {"task": "开挖"}, {"title": "垫层"}, {"start": 0, "end": 1}]}
+    )
+    assert [t["id"] for t in norm["tasks"]] == ["进场", "开挖", "垫层"]
+    # ★ R175（BUG-175-03）：无显示名的任务在校验端即剔除（与渲染端同一判据），
+    #   否则会出现「校验通过 → 渲染 None」的错配；全为空名时整块判非法。
+    assert normalize_gantt_plan({"tasks": [{"id": "t1"}]}) is None
+    assert normalize_gantt_plan({"tasks": [{"id": "t1", "name": "  "}]}) is None
 
     # dependencies 允许用任务名引用 → 归一为 id 的字符串形式
-    norm = normalize_gantt_plan({"tasks": [{"id": 1, "name": "施工准备"},
-                                           {"id": 2, "name": "基础工程",
-                                            "dependencies": ["施工准备", 1]}]})
+    norm = normalize_gantt_plan(
+        {"tasks": [{"id": 1, "name": "施工准备"}, {"id": 2, "name": "基础工程", "dependencies": ["施工准备", 1]}]}
+    )
     assert norm["tasks"][1]["dependencies"] == ["1", "1"]
     # 引用不到的依赖直接丢弃，而不是让整块被判非法
-    norm = normalize_gantt_plan({"tasks": [{"id": 1, "name": "A",
-                                            "dependencies": ["不存在的任务"]}]})
+    norm = normalize_gantt_plan({"tasks": [{"id": 1, "name": "A", "dependencies": ["不存在的任务"]}]})
     assert norm["tasks"][0]["dependencies"] == []
 
     # 无法识别的载荷 → None（与渲染侧一致，交给占位/删除链路处理）
@@ -588,20 +606,36 @@ def test_gantt_validate_render_agree():
     而渲染器实测 0.34s 就能画出图。两侧必须同时放行、同时拒绝。
     """
     shapes = [
-        {"type": "gantt", "title": "施工进度计划", "totalDays": 180,
-         "tasks": [{"id": 1, "name": "施工准备", "start": 0, "end": 15, "dependencies": []},
-                   {"id": 2, "name": "基础工程", "start": 15, "end": 60, "dependencies": [1]}]},
-        {"type": "gantt",
-         "items": [{"name": "进场准备", "start": "2026-01-01", "end": "2026-01-20"},
-                   {"name": "主体施工", "start": "2026-01-20", "end": "2026-05-01",
-                    "dependencies": ["进场准备"]}]},
-        {"type": "gantt",
-         "rows": [{"title": "测量放线", "start": 0, "end": 5},
-                  {"title": "土方开挖", "start": 5, "end": 25,
-                   "dependencies": ["测量放线"]}]},
-        {"type": "gantt",
-         "tasks": [{"name": "A", "start": 0, "end": 10},
-                   {"name": "B", "start": 10, "end": 20, "dependencies": ["A"]}]},
+        {
+            "type": "gantt",
+            "title": "施工进度计划",
+            "totalDays": 180,
+            "tasks": [
+                {"id": 1, "name": "施工准备", "start": 0, "end": 15, "dependencies": []},
+                {"id": 2, "name": "基础工程", "start": 15, "end": 60, "dependencies": [1]},
+            ],
+        },
+        {
+            "type": "gantt",
+            "items": [
+                {"name": "进场准备", "start": "2026-01-01", "end": "2026-01-20"},
+                {"name": "主体施工", "start": "2026-01-20", "end": "2026-05-01", "dependencies": ["进场准备"]},
+            ],
+        },
+        {
+            "type": "gantt",
+            "rows": [
+                {"title": "测量放线", "start": 0, "end": 5},
+                {"title": "土方开挖", "start": 5, "end": 25, "dependencies": ["测量放线"]},
+            ],
+        },
+        {
+            "type": "gantt",
+            "tasks": [
+                {"name": "A", "start": 0, "end": 10},
+                {"name": "B", "start": 10, "end": 20, "dependencies": ["A"]},
+            ],
+        },
     ]
     for payload in shapes:
         assert normalize_gantt_plan(payload) is not None, payload
@@ -627,16 +661,23 @@ def test_gantt_invalid_json_payload_does_not_render_garbage():
     """
     from app.services.ai.mermaid_renderer import render_mermaid_to_bytes
 
-    for payload in ({"type": "gantt", "title": "T", "totalDays": 180, "tasks": []},
-                    {"type": "gantt", "title": "T", "note": "只是文字"}):
+    for payload in (
+        {"type": "gantt", "title": "T", "totalDays": 180, "tasks": []},
+        {"type": "gantt", "title": "T", "note": "只是文字"},
+    ):
         code = json.dumps(payload, ensure_ascii=False)
         assert render_mermaid_to_bytes(code, "gantt") is None, payload
 
     # 反向验证：合法载荷仍要出图（别把守卫写死成"一律 None"）
-    good = {"type": "gantt", "title": "进度", "totalDays": 90,
-            "tasks": [{"id": 1, "name": "施工准备", "start": 0, "end": 15},
-                      {"id": 2, "name": "基础施工", "start": 15, "end": 45,
-                       "dependencies": [1]}]}
+    good = {
+        "type": "gantt",
+        "title": "进度",
+        "totalDays": 90,
+        "tasks": [
+            {"id": 1, "name": "施工准备", "start": 0, "end": 15},
+            {"id": 2, "name": "基础施工", "start": 15, "end": 45, "dependencies": [1]},
+        ],
+    }
     assert render_mermaid_to_bytes(json.dumps(good, ensure_ascii=False), "gantt") is not None
 
 
@@ -650,21 +691,25 @@ def test_gantt_is_registered_as_json_chart_type():
 
 # ---------------- 对比图 ----------------
 
+
 def test_comparison_long_labels_and_large_values():
     """超长标签 + 大数值：应正常出图且画布宽度有界（不因数值文本溢出而裁切）。"""
-    bio = _render_comparison_image_v2({
-        "title": "对比",
-        "items": [
-            {"label": "方案甲：超长名称用于验证标签截断逻辑是否生效", "value": 123456.7},
-            {"label": "方案乙", "value": 60},
-        ],
-    })
+    bio = _render_comparison_image_v2(
+        {
+            "title": "对比",
+            "items": [
+                {"label": "方案甲：超长名称用于验证标签截断逻辑是否生效", "value": 123456.7},
+                {"label": "方案乙", "value": 60},
+            ],
+        }
+    )
     assert bio is not None
     w, h = _open(bio).size
     assert 2000 < w < 3000 and h > 300
 
 
 # ---------------- 字体加载性能 ----------------
+
 
 def test_font_path_resolution_cached():
     """字体路径解析应被记忆（跨平台列表只探测一次，避免每次渲染线性扫描）。"""
@@ -677,32 +722,37 @@ def test_font_path_resolution_cached():
 
 # ---------------- 图表清单载荷解析 ----------------
 
+
 async def test_list_charts_parses_all_payload_shapes(db_conn):
     """list_charts 应对齐 chart_payload 唯一解析器：历史裸 Mermaid / 规范信封 / 数据信封
     都能拿到可渲染代码（旧实现只认 JSON 对象，裸 Mermaid 载荷 code 恒为空）。"""
     from app.routers.charts import list_charts
 
     conn = db_conn
-    await conn.execute(
-        "INSERT INTO schemes (id, project_id, name) VALUES ('s1','p1','方案')")
-    await conn.execute(
-        "INSERT INTO sections (id, scheme_id, title, content) "
-        "VALUES ('sec1','s1','章节','正文')")
+    await conn.execute("INSERT INTO schemes (id, project_id, name) VALUES ('s1','p1','方案')")
+    await conn.execute("INSERT INTO sections (id, scheme_id, title, content) " "VALUES ('sec1','s1','章节','正文')")
     rows = [
-        ("c1", "flowchart", "flowchart TD\n    A --> B"),          # 历史裸 Mermaid
-        ("c2", "flowchart", json.dumps({"mermaid_code": "graph TD\n    X --> Y",
-                                        "title": "图", "reason": ""},
-                                       ensure_ascii=False)),        # 规范信封
-        ("c3", "labor", json.dumps({"mermaid_code": "",
-                                    "data": {"phases": ["P1"], "categories": ["a"],
-                                             "data": [[1]]}}, ensure_ascii=False)),  # 数据信封
+        ("c1", "flowchart", "flowchart TD\n    A --> B"),  # 历史裸 Mermaid
+        (
+            "c2",
+            "flowchart",
+            json.dumps({"mermaid_code": "graph TD\n    X --> Y", "title": "图", "reason": ""}, ensure_ascii=False),
+        ),  # 规范信封
+        (
+            "c3",
+            "labor",
+            json.dumps(
+                {"mermaid_code": "", "data": {"phases": ["P1"], "categories": ["a"], "data": [[1]]}}, ensure_ascii=False
+            ),
+        ),  # 数据信封
     ]
     for cid, ct, payload in rows:
         await conn.execute(
             "INSERT INTO chart_predictions "
             "(id, section_id, scheme_id, chart_type, needed, purpose, priority, status, data_json) "
             "VALUES (?,?,?,?,1,?,3,'done',?)",
-            (cid, "sec1", "s1", ct, "x", payload))
+            (cid, "sec1", "s1", ct, "x", payload),
+        )
     await conn.commit()
 
     res = await list_charts("s1", db=conn)

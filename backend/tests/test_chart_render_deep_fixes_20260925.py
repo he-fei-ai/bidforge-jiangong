@@ -20,6 +20,7 @@
    专为引出该图而写的"施工工艺流程如下图所示："仍留在正文 →「见下图」却无图。
    修复：删块/跳过时同步回收该引导语（管线侧与导出侧同口径）。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -33,7 +34,7 @@ import zipfile
 from docx import Document
 from PIL import Image
 
-sys.path.insert(0, r"J:\编程\专项方案工具箱\backend")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.routers._chart_pipeline import (  # noqa: E402
     _drop_dangling_lead_in,
@@ -60,6 +61,7 @@ _EMU_PER_CM = 360000
 # 工具
 # ---------------------------------------------------------------------------
 
+
 def _png(w: int, h: int, dpi: tuple | None = None) -> bytes:
     """生成指定像素尺寸（可选 DPI 元数据）的 PNG 字节流。"""
     buf = io.BytesIO()
@@ -75,8 +77,10 @@ def _docx_drawing_extents(path: str) -> list[tuple[float, float]]:
     """读取 DOCX 中每张内嵌图片的**显示尺寸**（cm）：``[(宽, 高), ...]``。"""
     with zipfile.ZipFile(path) as z:
         xml = z.read("word/document.xml").decode("utf-8")
-    return [(int(m.group(1)) / _EMU_PER_CM, int(m.group(2)) / _EMU_PER_CM)
-            for m in re.finditer(r'<wp:extent\s+cx="(\d+)"\s+cy="(\d+)"', xml)]
+    return [
+        (int(m.group(1)) / _EMU_PER_CM, int(m.group(2)) / _EMU_PER_CM)
+        for m in re.finditer(r'<wp:extent\s+cx="(\d+)"\s+cy="(\d+)"', xml)
+    ]
 
 
 class FakeDb:
@@ -97,14 +101,18 @@ class FakeDb:
         self.rows.append((sql, tuple(params or ())))
         head = sql.lstrip().upper()
         if head.startswith("SELECT"):
+
             class _C:
                 async def fetchall(self):
                     return []
+
             return _C()
+
         # INSERT / DELETE 均返回 Cursor 语义
         class _FakeCur:
             rowcount = 1
             lastrowid = 1
+
         return _FakeCur()
 
     async def commit(self):
@@ -112,26 +120,40 @@ class FakeDb:
 
 
 def _sec(sid, order, title, content):
-    return {"id": sid, "parent_id": "", "level": 1,
-            "sort_order": order, "title": title, "content": content}
+    return {"id": sid, "parent_id": "", "level": 1, "sort_order": order, "title": title, "content": content}
 
 
 def _build(out, sections, rendered_bytes, chart_lookup=None):
     """用最小 prep 组装 DOCX（与 test_export_fallback_dedup 同款调用口径）。"""
-    _build_docx_sync(**{
-        "out_path": out, "scheme": {"name": "回归", "project_id": "P1"},
-        "roots": sections, "children_map": {"": sections},
-        "chart_lookup": chart_lookup or {},
-        "rendered_bytes": rendered_bytes,
-        "blocks_cache": {}, "font_name": "宋体", "font_size": 12,
-        "page_header": "", "page_footer": "", "show_page_number": False,
-        "show_title_page": False, "show_toc": False, "bidder_name": "",
-        "heading_styles": _DEFAULT_HEADING_STYLES,
-        "page_break_before_chapter": True, "line_spacing": 1.15,
-        "page_number_style": "simple", "toc_depth": 3,
-        "margins": None, "cover_info": None, "image_bytes": {},
-        "global_facts": [], "chart_fail_placeholder": False,
-    })
+    _build_docx_sync(
+        **{
+            "out_path": out,
+            "scheme": {"name": "回归", "project_id": "P1"},
+            "roots": sections,
+            "children_map": {"": sections},
+            "chart_lookup": chart_lookup or {},
+            "rendered_bytes": rendered_bytes,
+            "blocks_cache": {},
+            "font_name": "宋体",
+            "font_size": 12,
+            "page_header": "",
+            "page_footer": "",
+            "show_page_number": False,
+            "show_title_page": False,
+            "show_toc": False,
+            "bidder_name": "",
+            "heading_styles": _DEFAULT_HEADING_STYLES,
+            "page_break_before_chapter": True,
+            "line_spacing": 1.15,
+            "page_number_style": "simple",
+            "toc_depth": 3,
+            "margins": None,
+            "cover_info": None,
+            "image_bytes": {},
+            "global_facts": [],
+            "chart_fail_placeholder": False,
+        }
+    )
     return Document(out)
 
 
@@ -147,6 +169,7 @@ def _run(coro):
 # ===========================================================================
 # ① 图片尺寸：DPI 换算 + 宽/高双上限
 # ===========================================================================
+
 
 def test_fit_image_cm_wide_chart_keeps_column_width():
     """宽图（后端实测 flowchart 3300×710@300dpi）仍按 16cm 栏宽插入（无回归）。"""
@@ -170,8 +193,11 @@ def test_fit_image_cm_tall_chart_clamped_by_page_height():
 
 def test_fit_image_cm_dpi_fallback_and_small_image_not_upscaled():
     """无 DPI 元数据（前端 canvas PNG）回退 96dpi；小图不放大。"""
-    assert _fit_image_cm(600, 400, None) == _fit_image_cm(600, 400, 0) \
+    assert (
+        _fit_image_cm(600, 400, None)
+        == _fit_image_cm(600, 400, 0)
         == (round(600 * 2.54 / 96.0, 2), round(400 * 2.54 / 96.0, 2))
+    )
     # 400×200@300dpi 物理尺寸很小 → 保持原尺寸，不拉伸到栏宽
     w_cm, h_cm = _fit_image_cm(400, 200, 300)
     assert w_cm == round(400 * 2.54 / 300, 2) and h_cm == round(200 * 2.54 / 300, 2)
@@ -198,13 +224,11 @@ def test_read_image_dpi_tolerates_dirty_metadata():
 
 def test_docx_chart_sizes_end_to_end(tmp_path):
     """端到端：宽图 16cm 栏宽；纵向长图不溢出页面；图题规范「图 X-Y 图名」。"""
-    wide = "flowchart LR\n  A[\"施工准备\"] --> B[\"成品保护\"]"
-    tall = "flowchart TD\n  A[\"施工准备\"] --> B[\"基层清理\"]\n  B --> C[\"验收\"]"
+    wide = 'flowchart LR\n  A["施工准备"] --> B["成品保护"]'
+    tall = 'flowchart TD\n  A["施工准备"] --> B["基层清理"]\n  B --> C["验收"]'
     sections = [
-        _sec("s1", 0, "第一章 工艺流程",
-             "工艺流程如下图所示：\n\n```mermaid\n" + wide + "\n```\n"),
-        _sec("s2", 1, "第二章 竖向流程",
-             "竖向流程如下图所示：\n\n```mermaid\n" + tall + "\n```\n"),
+        _sec("s1", 0, "第一章 工艺流程", "工艺流程如下图所示：\n\n```mermaid\n" + wide + "\n```\n"),
+        _sec("s2", 1, "第二章 竖向流程", "竖向流程如下图所示：\n\n```mermaid\n" + tall + "\n```\n"),
     ]
     rendered = {
         ("flowchart", wide): io.BytesIO(_png(3300, 710, (300, 300))),
@@ -220,14 +244,14 @@ def test_docx_chart_sizes_end_to_end(tmp_path):
     assert abs(wide_h - 3.44) < 0.05, f"宽图高度应按比例，实际 {wide_h}"
     assert tall_h <= _CHART_MAX_HEIGHT_CM + 0.05, f"长图不得溢出页面，实际 {tall_h}"
     assert tall_w < 5.0, f"长图高度封顶后宽度等比缩小，实际 {tall_w}"
-    captions = [p.text.strip() for p in doc.paragraphs
-                if p.text.strip().startswith("图 ")]
+    captions = [p.text.strip() for p in doc.paragraphs if p.text.strip().startswith("图 ")]
     assert captions == ["图 1-1 工艺流程", "图 2-1 竖向流程"], captions
 
 
 # ===========================================================================
 # ② 长载荷渲染缓存键（不得截断）
 # ===========================================================================
+
 
 def test_render_cache_key_long_payload_not_truncated():
     """反例：9000 字符前缀相同的两张不同图表，旧实现键完全相同（串图）。"""
@@ -247,8 +271,17 @@ def test_render_cache_key_short_payload_keeps_legacy_form():
     assert _code_cache_ident(code) == code
     # ✅ 2026-09-27：键首段新增渲染器版本号（memory LRU 与磁盘缓存同步失效）
     from app.services.ai import mermaid_renderer as _mr
-    assert _render_cache_key(code, "flowchart", 90, "天", 5, False, True) == \
-        (f"v{_mr._RENDERER_VERSION}", "flowchart", code, 90, "天", 5, False, True)
+
+    assert _render_cache_key(code, "flowchart", 90, "天", 5, False, True) == (
+        f"v{_mr._RENDERER_VERSION}",
+        "flowchart",
+        code,
+        90,
+        "天",
+        5,
+        False,
+        True,
+    )
     assert _code_cache_ident(None) == ""
 
 
@@ -256,16 +289,19 @@ def test_render_cache_key_short_payload_keeps_legacy_form():
 # ③ 孤儿引导语 —— 管线侧（删块同时删引导语）
 # ===========================================================================
 
+
 def test_pipeline_removes_orphan_lead_in_on_bad_block():
     """坏块被删 → 其专属引导语一并移除，正文其余部分保留。"""
     db = FakeDb()
-    content = ("本章说明施工顺序。\n"
-               "施工工艺流程如下图所示：\n\n"
-               "```mermaid\n"
-               "graph TD\n"
-               "A-[坏\n"
-               "```\n"
-               "后文继续说明。")
+    content = (
+        "本章说明施工顺序。\n"
+        "施工工艺流程如下图所示：\n\n"
+        "```mermaid\n"
+        "graph TD\n"
+        "A-[坏\n"
+        "```\n"
+        "后文继续说明。"
+    )
     n, new_content = _run(register_inline_charts(db, "scheme-1", "sec-l1", content))
     assert n == 0
     assert "```mermaid" not in new_content
@@ -316,12 +352,13 @@ def test_pipeline_limit_trim_also_drops_second_lead_in():
     db = FakeDb()
     first = "flowchart TD\n    A --> B\n    B --> C"
     second = "flowchart LR\n    C --> D"
-    content = ("第一张流程如下图所示：\n\n"
-               "```mermaid\n" + first + "\n```\n\n"
-               "第二张流程如下图所示：\n\n"
-               "```mermaid\n" + second + "\n```\n")
-    n, new_content = _run(register_inline_charts(
-        db, "scheme-1", "sec-l3", content, enforce_limits=True))
+    content = (
+        "第一张流程如下图所示：\n\n"
+        "```mermaid\n" + first + "\n```\n\n"
+        "第二张流程如下图所示：\n\n"
+        "```mermaid\n" + second + "\n```\n"
+    )
+    n, new_content = _run(register_inline_charts(db, "scheme-1", "sec-l3", content, enforce_limits=True))
     assert n == 1
     assert first in new_content
     assert second not in new_content
@@ -329,21 +366,19 @@ def test_pipeline_limit_trim_also_drops_second_lead_in():
     assert "第一张流程如下图所示：" in new_content
 
 
-
 # ===========================================================================
 # ③ 孤儿引导语 —— 导出侧（跳过图 → 回收段落；正常出图不得误删）
 # ===========================================================================
 
+
 def test_docx_drops_orphan_lead_in_when_render_failed(tmp_path):
     """渲染失败被跳过 → 图与引导语都不进成稿，且不占图号。"""
-    code = "flowchart TD\n  A[\"施工准备\"] --> B[\"基层清理\"]\n"
-    content = ("本章说明施工顺序。\n\n"
-               "施工工艺流程如下图所示：\n\n"
-               "```mermaid\n" + code + "\n```\n\n"
-               "后续说明文字。\n")
+    code = 'flowchart TD\n  A["施工准备"] --> B["基层清理"]\n'
+    content = (
+        "本章说明施工顺序。\n\n" "施工工艺流程如下图所示：\n\n" "```mermaid\n" + code + "\n```\n\n" "后续说明文字。\n"
+    )
     out = os.path.join(str(tmp_path), "orphan.docx")
-    _build(out, [_sec("s1", 0, "第一章 施工工艺", content)],
-           {})                                   # 渲染失败（无字节）
+    _build(out, [_sec("s1", 0, "第一章 施工工艺", content)], {})  # 渲染失败（无字节）
     text = _doc_text(out)
     assert "如下图所示" not in text, "无图就不该留「见下图」的悬空引用"
     assert "图 1-1" not in text
@@ -352,22 +387,22 @@ def test_docx_drops_orphan_lead_in_when_render_failed(tmp_path):
 
 def test_docx_keeps_lead_in_when_chart_rendered(tmp_path):
     """正常出图时引导语与图题都必须保留（不得误删）。"""
-    code = "flowchart LR\n  A[\"施工准备\"] --> B[\"成品保护\"]"
+    code = 'flowchart LR\n  A["施工准备"] --> B["成品保护"]'
     content = "施工工艺流程如下图所示：\n\n```mermaid\n" + code + "\n```\n"
     out = os.path.join(str(tmp_path), "keep.docx")
-    doc = _build(out, [_sec("s1", 0, "第一章 施工工艺", content)],
-                 {("flowchart", code): io.BytesIO(_png(1200, 400, (300, 300)))})
+    doc = _build(
+        out, [_sec("s1", 0, "第一章 施工工艺", content)], {("flowchart", code): io.BytesIO(_png(1200, 400, (300, 300)))}
+    )
     text = _doc_text(out)
     assert "施工工艺流程如下图所示：" in text
     assert len(doc.inline_shapes) == 1
-    captions = [p.text.strip() for p in doc.paragraphs
-                if p.text.strip().startswith("图 ")]
+    captions = [p.text.strip() for p in doc.paragraphs if p.text.strip().startswith("图 ")]
     assert captions == ["图 1-1 施工工艺流程"], captions
 
 
 def test_docx_does_not_drop_prose_when_chart_skipped(tmp_path):
     """范围守卫：跳过图时不得误删普通正文段落。"""
-    code = "flowchart TD\n  A[\"施工准备\"] --> B[\"基层清理\"]\n"
+    code = 'flowchart TD\n  A["施工准备"] --> B["基层清理"]\n'
     content = "各阶段投入如下：\n\n```mermaid\n" + code + "\n```\n"
     out = os.path.join(str(tmp_path), "guard.docx")
     _build(out, [_sec("s1", 0, "第一章 施工工艺", content)], {})
@@ -381,6 +416,7 @@ def test_chart_payload_envelope_roundtrip_untouched():
         extract_chart_payload,
         is_canonical_chart_payload,
     )
+
     env = build_chart_envelope(code="graph TD; A-->B", title="施工流程")
     assert json.loads(env)["mermaid_code"] == "graph TD; A-->B"
     assert extract_chart_payload(env) == "graph TD; A-->B"

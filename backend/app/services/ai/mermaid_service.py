@@ -45,8 +45,7 @@ class MermaidRenderBackend(Enum):
 class MermaidRenderError(Exception):
     """Mermaid 渲染失败的明确异常"""
 
-    def __init__(self, message: str, backend: str = "", code: str = "",
-                 status_code: int = 0):
+    def __init__(self, message: str, backend: str = "", code: str = "", status_code: int = 0):
         self.message = message
         self.backend = backend
         self.code = code
@@ -72,6 +71,7 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
         else:
             import os as _os
             import signal
+
             try:
                 _os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError, AttributeError):
@@ -131,9 +131,7 @@ class MermaidServiceClient:
         # client.get(.../health) 会一直等到读超时（实测 8.3s），
         # 之后每次渲染都要白白付出这个代价 —— 而 Mermaid HTTP 服务本身
         # 属于可选部署。改为：未显式配置即视为未部署，跳过探测。
-        self._docker_url = (
-            docker_url or os.environ.get("MERMAID_SERVICE_URL", "")
-        ).rstrip("/")
+        self._docker_url = (docker_url or os.environ.get("MERMAID_SERVICE_URL", "")).rstrip("/")
         self._railway_url = (railway_url or os.environ.get("MERMAID_RAILWAY_URL", "")).rstrip("/")
         self._mmdc_path = mmdc_path or ""
         self._timeout = timeout
@@ -142,9 +140,7 @@ class MermaidServiceClient:
         # 按事件循环缓存客户端：{id(loop): (loop, client, last_used)}
         # 注意：元组结构为 (loop, client, last_used)，修复此前 (now, client)
         # 与读取端 (loop, client) 不一致导致的 AttributeError
-        self._clients_by_loop: dict[
-            int, tuple[asyncio.AbstractEventLoop, httpx.AsyncClient, float]
-        ] = {}
+        self._clients_by_loop: dict[int, tuple[asyncio.AbstractEventLoop, httpx.AsyncClient, float]] = {}
         self._clients_lock = threading.Lock()
 
         # 内部状态缓存（带时间戳）
@@ -208,11 +204,13 @@ class MermaidServiceClient:
                     if old_loop.is_closed():
                         self._clients_by_loop.pop(k, None)
                         if old_client is not None:
+
                             async def _aclose(c=old_client):
                                 try:
                                     await c.aclose()
                                 except Exception as _e:
                                     logger.debug("[silent-except] mermaid_service.py: line 201 - %s", _e)
+
                             try:
                                 asyncio.get_running_loop().create_task(_aclose())
                             except RuntimeError:
@@ -229,9 +227,7 @@ class MermaidServiceClient:
                 return client
 
         # 无 running loop 的兜底路径（保持旧行为）
-        if self._http_client is None or (
-            self._client_loop is not None and self._client_loop.is_closed()
-        ):
+        if self._http_client is None or (self._client_loop is not None and self._client_loop.is_closed()):
             self._http_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout),
                 follow_redirects=True,
@@ -304,9 +300,7 @@ class MermaidServiceClient:
             self._backend_available[MermaidRenderBackend.DOCKER] = available
             self._backend_cache_time[MermaidRenderBackend.DOCKER] = __import__("time").time()
             if available:
-                logger.info(
-                    "MermaidServiceClient: Docker mermaid-service 可用 (%s)", self._docker_url
-                )
+                logger.info("MermaidServiceClient: Docker mermaid-service 可用 (%s)", self._docker_url)
             else:
                 logger.info(
                     "MermaidServiceClient: Docker mermaid-service 不可用 (HTTP %s)",
@@ -368,7 +362,7 @@ class MermaidServiceClient:
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
-                errors="replace",   # 关键：避免 GBK/CP936 输出触发 UnicodeDecodeError
+                errors="replace",  # 关键：避免 GBK/CP936 输出触发 UnicodeDecodeError
                 timeout=5,
                 shell=sys.platform == "win32",
             )
@@ -378,8 +372,7 @@ class MermaidServiceClient:
             if available:
                 logger.info("MermaidServiceClient: mmdc CLI 可用 (%s)", mmdc)
             else:
-                logger.debug(
-                    "MermaidServiceClient: mmdc CLI 不可用（rc=%s）", result.returncode)
+                logger.debug("MermaidServiceClient: mmdc CLI 不可用（rc=%s）", result.returncode)
             return available
         except Exception as e:
             self._backend_available[MermaidRenderBackend.MMDC] = False
@@ -728,6 +721,7 @@ class MermaidServiceClient:
 
         if loop and loop.is_running():
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(_asyncio.run, self.render_mermaid_via_http(code, theme, scale))
                 return future.result()
@@ -780,4 +774,3 @@ async def close_mermaid_service_client():
     if _client_instance:
         await _client_instance.close()
         _client_instance = None
-

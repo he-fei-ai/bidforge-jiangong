@@ -23,6 +23,7 @@
 代码常量就是本仓反复踩的「同一判据多副本」反模式（R48 引导语第 3 份副本同族）。
 需要它时应先在提示词层收敛出唯一来源，再考虑落代码。
 """
+
 import re
 
 import app.routers._chart_pipeline as CP
@@ -48,18 +49,20 @@ MERMAID_TRUNCATED = "```mermaid\nflowchart TD\n    A --> B"  # 未闭合
 
 
 class TestCountInlineCharts:
-
-    @pytest.mark.parametrize("content,expected", [
-        ("", 0),
-        ("纯文本，没有图表", 0),
-        (MERMAID, 1),
-        (CHART_JSON, 1),
-        (AI_IMAGE, 1),
-        # 同类型多个块也逐块计数（extract_inline_charts 会去重成 1，故不可当计数用）
-        (MERMAID + "\n\n正文\n\n" + MERMAID, 2),
-        # 不同族块同时存在
-        (MERMAID + "\n\n正文\n\n" + CHART_JSON, 2),
-    ])
+    @pytest.mark.parametrize(
+        "content,expected",
+        [
+            ("", 0),
+            ("纯文本，没有图表", 0),
+            (MERMAID, 1),
+            (CHART_JSON, 1),
+            (AI_IMAGE, 1),
+            # 同类型多个块也逐块计数（extract_inline_charts 会去重成 1，故不可当计数用）
+            (MERMAID + "\n\n正文\n\n" + MERMAID, 2),
+            # 不同族块同时存在
+            (MERMAID + "\n\n正文\n\n" + CHART_JSON, 2),
+        ],
+    )
     def test_counts_each_closed_block(self, content, expected):
         assert count_inline_charts(content) == expected
 
@@ -78,19 +81,25 @@ class TestCountInlineCharts:
 
 
 class TestHasInlineChartsParity:
-
     """`has_inline_charts(c) ⟺ count_inline_charts(c) > 0` 必须恒成立。
 
     R49 前两个出口各自遍历 `iter_inline_chart_fences`，存在分叉风险；
     现 `has_inline_charts` 是 `count_inline_charts` 的薄包装，语义必然一致。
     """
 
-    @pytest.mark.parametrize("content", [
-        "", "纯文本", MERMAID, CHART_JSON, AI_IMAGE,
-        MERMAID_TRUNCATED,
-        MERMAID + "\n\n" + MERMAID_TRUNCATED,
-        MERMAID + "\n\n正文\n\n" + CHART_JSON,
-    ])
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "",
+            "纯文本",
+            MERMAID,
+            CHART_JSON,
+            AI_IMAGE,
+            MERMAID_TRUNCATED,
+            MERMAID + "\n\n" + MERMAID_TRUNCATED,
+            MERMAID + "\n\n正文\n\n" + CHART_JSON,
+        ],
+    )
     def test_bool_and_count_agree(self, content):
         assert has_inline_charts(content) is (count_inline_charts(content) > 0)
 
@@ -106,8 +115,8 @@ class TestHasInlineChartsParity:
 # B. chart_drop_label —— 修 R48 遗留缺陷（日志图表类型恒为 "?"）
 # =========================================================================
 
-class TestChartDropLabel:
 
+class TestChartDropLabel:
     def test_record_shape_from_record_chart_drop(self):
         # 真实写入形态：键名是 "type"（不是 chart_type）。
         dropped = []
@@ -116,31 +125,39 @@ class TestChartDropLabel:
         assert chart_drop_label(dropped[0]) == "flowchart/per_section_limit"
 
     def test_legacy_chart_type_key_also_works(self):
-        assert chart_drop_label(
-            {"chart_type": "gantt", "reason": "invalid_json"}) == "gantt/invalid_json"
+        assert chart_drop_label({"chart_type": "gantt", "reason": "invalid_json"}) == "gantt/invalid_json"
 
     def test_type_key_takes_precedence(self):
         # 两个键都在时优先 "type"（与写入侧一致），不得被兜底键覆盖。
-        assert chart_drop_label(
-            {"type": "mermaid", "chart_type": "layout", "reason": "x"}) == "mermaid/x"
+        assert chart_drop_label({"type": "mermaid", "chart_type": "layout", "reason": "x"}) == "mermaid/x"
 
-    @pytest.mark.parametrize("drop,expected", [
-        (None, "?/?"),
-        ({}, "?/?"),
-        ({"type": "", "reason": ""}, "?/?"),
-        ({"type": "   ", "reason": "  "}, "?/?"),
-        ({"type": "gantt"}, "gantt/?"),
-        ({"reason": "insert_failed"}, "?/insert_failed"),
-        ({"type": None, "reason": None}, "?/?"),
-    ])
+    @pytest.mark.parametrize(
+        "drop,expected",
+        [
+            (None, "?/?"),
+            ({}, "?/?"),
+            ({"type": "", "reason": ""}, "?/?"),
+            ({"type": "   ", "reason": "  "}, "?/?"),
+            ({"type": "gantt"}, "gantt/?"),
+            ({"reason": "insert_failed"}, "?/insert_failed"),
+            ({"type": None, "reason": None}, "?/?"),
+        ],
+    )
     def test_missing_or_blank_values_fallback_to_question_mark(self, drop, expected):
         assert chart_drop_label(drop) == expected
 
     def test_all_drops_are_renderable(self):
         # 全枚举冒烟：任何真实删图记录都能渲出「类型/理由」，不丢信息、不抛异常。
-        for reason in ("per_section_limit", "scheme_type_limit", "validation_failed",
-                       "missing_prompt", "empty_envelope", "invalid_json",
-                       "insert_failed", "insert_none"):
+        for reason in (
+            "per_section_limit",
+            "scheme_type_limit",
+            "validation_failed",
+            "missing_prompt",
+            "empty_envelope",
+            "invalid_json",
+            "insert_failed",
+            "insert_none",
+        ):
             label = chart_drop_label({"type": "labor", "reason": reason})
             assert label.startswith("labor/")
             assert label.endswith(reason)
@@ -150,8 +167,8 @@ class TestChartDropLabel:
 # C. 提示词口径：「本节」而非「每章」（零行为变化的文案修正）
 # =========================================================================
 
-class TestPromptWordingParity:
 
+class TestPromptWordingParity:
     """提示词的配图限额单位必须是「本节」，与代码的 per-section_id 计数同口径。
 
     漂移后果：提示词说「每章 1 个」而代码按叶子小节执行 —— 一个一级章挂 N 个二级
@@ -168,8 +185,7 @@ class TestPromptWordingParity:
 
     def test_per_section_limit_says_benjie_not_meizhang(self):
         src = self._SRC
-        assert "本节合计最多 1 个图表块" in src, (
-            "提示词的配图限额单位必须写「本节」（= 代码的 per-section_id）")
+        assert "本节合计最多 1 个图表块" in src, "提示词的配图限额单位必须写「本节」（= 代码的 per-section_id）"
         # 「每章」是漂移形态，不得回流。
         assert "每章合计最多 1 个图表块" not in src
         assert "每章 1 块" not in src
@@ -200,17 +216,15 @@ def test_sse_imports_the_chart_helpers():
 
 
 def test_report_always_sets_chart_count():
-    assert 'report["chart_count"]' in _SSE_SRC, (
-        "chart_count 未写入 report —— 「留下了几张图」将再次不可见")
+    assert 'report["chart_count"]' in _SSE_SRC, "chart_count 未写入 report —— 「留下了几张图」将再次不可见"
 
 
 def test_section_done_carries_chart_yield():
     """`section_done` 事件必须实时下发三键 —— 用户不必等整批结束翻报告。"""
     i = _SSE_SRC.index('"event": "section_done"')
-    block = _SSE_SRC[i:i + 3000]
+    block = _SSE_SRC[i : i + 3000]
     for key in ('"chart_count"', '"charts_dropped_count"', '"charts_dropped"'):
-        assert key in block, (
-            f"section_done 事件未携带 {key} —— 配图产出闭环将再次只在生成结束后可见")
+        assert key in block, f"section_done 事件未携带 {key} —— 配图产出闭环将再次只在生成结束后可见"
 
 
 def test_report_json_redumped_outside_the_drop_branch():
@@ -223,14 +237,14 @@ def test_report_json_redumped_outside_the_drop_branch():
     after = _SSE_SRC[i:]
     m = re.search(r"\n\s*report_json = json\.dumps\(report, ensure_ascii=False\)", after)
     assert m, "chart_count 写入 report 后未重新 json.dumps"
-    snippet = after[:m.start()]
+    snippet = after[: m.start()]
     drop_if = snippet.rfind("if _chart_dropped:")
     if drop_if != -1:
         inner = snippet[drop_if:]
         # 重算语句前的所有 report 赋值都必须不是更深缩进的（即不在 if 分支内）
         assert not re.search(r"\n\s{12,}report\[(\"chart_count\")\]", inner), (
-            "report_json 重算被放回 `if _chart_dropped:` 内部 —— chart_count "
-            "在无删图时不会落库")
+            "report_json 重算被放回 `if _chart_dropped:` 内部 —— chart_count " "在无删图时不会落库"
+        )
 
 
 def test_log_uses_chart_drop_label_not_bare_get():
@@ -240,10 +254,8 @@ def test_log_uses_chart_drop_label_not_bare_get():
     两个方向都要锁：① 裸 get 形态不得回流；② 不得写成模块内不存在的
     `_chart_drop_label`（带下划线会被解析成局部变量 → NameError）。
     """
-    assert "d.get('chart_type'" not in _SSE_SRC, (
-        "删图日志回退为裸 d.get('chart_type') —— 图表类型将再次恒打印 '?'")
-    assert "_chart_drop_label(" not in _SSE_SRC, (
-        "删图日志写成模块内不存在的 _chart_drop_label —— 运行期 NameError")
+    assert "d.get('chart_type'" not in _SSE_SRC, "删图日志回退为裸 d.get('chart_type') —— 图表类型将再次恒打印 '?'"
+    assert "_chart_drop_label(" not in _SSE_SRC, "删图日志写成模块内不存在的 _chart_drop_label —— 运行期 NameError"
     assert "chart_drop_label(d)" in _SSE_SRC
 
 

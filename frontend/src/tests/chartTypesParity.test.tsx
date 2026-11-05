@@ -92,9 +92,15 @@ describe("chart-json 预览的 chart_type 契约", () => {
 
 describe("RENDERABLE_CHART_TYPES 白名单", () => {
   it("恰好覆盖 7 类结构化可渲染图表", () => {
-    expect([...RENDERABLE_CHART_TYPES].sort()).toEqual(
-      ["architecture", "comparison", "flowchart", "gantt", "labor", "layout", "timeline"],
-    );
+    expect([...RENDERABLE_CHART_TYPES].sort()).toEqual([
+      "architecture",
+      "comparison",
+      "flowchart",
+      "gantt",
+      "labor",
+      "layout",
+      "timeline",
+    ]);
   });
 
   it("不含 Mermaid 语法专属类型（不走 PIL 轨）", () => {

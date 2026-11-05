@@ -14,6 +14,7 @@
    `apply_inline_chart_plan` 开头的 DELETE 从不执行 → 正文是新的、登记是旧的。
    现异常分支也做「仅清理」调用。
 """
+
 import asyncio
 import json
 import re
@@ -30,14 +31,18 @@ from app.routers._chart_pipeline import (
 )
 
 VALID_FLOW = "flowchart TD\n    A --> B\n    B --> C"
-VALID_AI = json.dumps({"prompt": "现场平面布置剖面图", "title": "现场平面布置图"},
-                      ensure_ascii=False)
+VALID_AI = json.dumps({"prompt": "现场平面布置剖面图", "title": "现场平面布置图"}, ensure_ascii=False)
 
 # 删图理由封闭枚举 —— 新增理由必须同时进这个集合，否则下面的静态护栏会红。
 DROP_REASONS = {
-    "per_section_limit", "scheme_type_limit", "validation_failed",
-    "missing_prompt", "empty_envelope", "invalid_json",
-    "insert_failed", "insert_none",
+    "per_section_limit",
+    "scheme_type_limit",
+    "validation_failed",
+    "missing_prompt",
+    "empty_envelope",
+    "invalid_json",
+    "insert_failed",
+    "insert_none",
 }
 
 
@@ -57,6 +62,7 @@ class FakeDb:
         class _Cur:
             rowcount = 1
             lastrowid = 1
+
         return _Cur()
 
     async def commit(self):
@@ -64,16 +70,15 @@ class FakeDb:
 
 
 def plan(content, **kw):
-    return build_inline_chart_plan(
-        "scheme-1", "sec-1", content, enforce_limits=True, **kw)
+    return build_inline_chart_plan("scheme-1", "sec-1", content, enforce_limits=True, **kw)
 
 
 # =========================================================================
 # A. _record_chart_drop 本身
 # =========================================================================
 
-class TestRecordChartDrop:
 
+class TestRecordChartDrop:
     def test_none_target_is_noop(self):
         # 不传观测清单 = 旧行为，不抛错、零副作用。
         _record_chart_drop(None, "flowchart", "per_section_limit")
@@ -95,8 +100,8 @@ class TestRecordChartDrop:
 # B. 四条删块理由各自可观测
 # =========================================================================
 
-class TestDropReasons:
 
+class TestDropReasons:
     def test_no_chart_no_drop(self):
         text = "本节正文无任何图表。"
         content, rows = plan(text)
@@ -116,10 +121,8 @@ class TestDropReasons:
 
 
 class TestPerSectionLimit:
-
     def test_second_chart_in_one_section_is_dropped(self):
-        content = "\n\n".join([f"```mermaid\n{VALID_FLOW}\n```",
-                               f"```mermaid\n{VALID_FLOW}\n```"])
+        content = "\n\n".join([f"```mermaid\n{VALID_FLOW}\n```", f"```mermaid\n{VALID_FLOW}\n```"])
         new_content, rows = plan(content, dropped_out=[])
         assert len(rows) == _CHART_PER_SECTION_LIMIT == 1
         # 删掉的块必须真的从正文消失（否则是幽灵图）
@@ -130,13 +133,10 @@ class TestPerSectionLimit:
 
 
 class TestSchemeTypeLimit:
-
     def test_over_scheme_type_limit_is_dropped(self):
         content = f"```mermaid\n{VALID_FLOW}\n```"
-        _limit = _CHART_SCHEME_TYPE_LIMITS.get("flowchart",
-                                                _CHART_SCHEME_TYPE_DEFAULT_LIMIT)
-        new_content, rows = plan(
-            content, dropped_out=[], scheme_type_counts={"flowchart": _limit})
+        _limit = _CHART_SCHEME_TYPE_LIMITS.get("flowchart", _CHART_SCHEME_TYPE_DEFAULT_LIMIT)
+        new_content, rows = plan(content, dropped_out=[], scheme_type_counts={"flowchart": _limit})
         assert rows == []
         assert "mermaid" not in new_content
         out = []
@@ -150,7 +150,6 @@ class TestSchemeTypeLimit:
 
 
 class TestValidationFailed:
-
     def test_unfixable_chart_is_dropped_and_recorded(self):
         # 识别得出图表类型（flowchart）、但语法既不可解析也不可修复 → 删块 + 记理由。
         content = "```mermaid\nflowchart TD\n    ]invalid[[ broken\n```"
@@ -163,7 +162,6 @@ class TestValidationFailed:
 
 
 class TestAiImageMissingPrompt:
-
     def test_ai_image_without_prompt_is_dropped(self):
         payload = json.dumps({"title": "只有标题没有 prompt"}, ensure_ascii=False)
         content = f"配图如下：\n```ai_image\n{payload}\n```\n后续正文。"
@@ -183,12 +181,13 @@ class TestAiImageMissingPrompt:
         assert rows[0][3] == "ai_image"
         assert out == []
 
+
 # =========================================================================
 # C. 不变式加固：「不登记 ⇒ 必删块」（幽灵图防线）
 # =========================================================================
 
-class TestEnvelopeFailureRemovesBlock:
 
+class TestEnvelopeFailureRemovesBlock:
     def test_ai_image_empty_envelope_removes_block(self, monkeypatch):
         # build_chart_envelope 返回空串 = 无法构造登记表 → 该块不能登记，
         # 必须从正文删除。旧实现只 continue，块留在正文里却无登记（幽灵图）。
@@ -211,12 +210,9 @@ class TestEnvelopeFailureRemovesBlock:
         # `empty_envelope` 而不是 `invalid_json`）。这不是给分支制造漏洞，而是把
         # 「未来某次改动绕过扫描器校验」时的兜底行为固定下来：仍必须删块。
         monkeypatch.setattr(CP, "build_chart_envelope", lambda **kw: '{"ok": true}')
-        monkeypatch.setattr(CP, "_validate_inline_chart",
-                            lambda ct, code: (True, code))
-        monkeypatch.setattr(
-            CP, "_scan_chart_fences_full",
-            lambda content: [("gantt", '{"type": "gantt"', 0)])
-        content = "```chart-json\n{\"type\": \"gantt\"\n```\n后续正文。"
+        monkeypatch.setattr(CP, "_validate_inline_chart", lambda ct, code: (True, code))
+        monkeypatch.setattr(CP, "_scan_chart_fences_full", lambda content: [("gantt", '{"type": "gantt"', 0)])
+        content = '```chart-json\n{"type": "gantt"\n```\n后续正文。'
         new_content, rows = plan(content, dropped_out=[])
         assert rows == []
         assert "chart-json" not in new_content, "非法 JSON 必须删块"
@@ -239,25 +235,22 @@ class TestEnvelopeFailureRemovesBlock:
 # D. apply_inline_chart_plan：锁内复核也要上报 + 仅清理路径
 # =========================================================================
 
+
 class _ExecutedCur:
     rowcount = 1
     lastrowid = 1
 
 
 class TestApplyPlanDropObservability:
-
     def _row(self, chart_type="gantt"):
-        return ("id-1", "sec-1", "scheme-1", chart_type, "purpose", 5,
-                "generated", '{"data": {}}')
+        return ("id-1", "sec-1", "scheme-1", chart_type, "purpose", 5, "generated", '{"data": {}}')
 
     def test_insert_limit_skip_is_recorded(self):
         # db 返回 0 行 → live={}；本批内累积超过同类型限额的部分会被复核跳过。
-        _limit = _CHART_SCHEME_TYPE_LIMITS.get("gantt",
-                                                _CHART_SCHEME_TYPE_DEFAULT_LIMIT)
+        _limit = _CHART_SCHEME_TYPE_LIMITS.get("gantt", _CHART_SCHEME_TYPE_DEFAULT_LIMIT)
         rows = [self._row() for _ in range(_limit + 2)]
         out = []
-        run(apply_inline_chart_plan(
-            FakeDb(), "sec-1", rows, None, dropped_out=out))
+        run(apply_inline_chart_plan(FakeDb(), "sec-1", rows, None, dropped_out=out))
         assert len(out) == 1
         assert out[0] == {"type": "gantt", "reason": "scheme_type_limit"}
 
@@ -275,8 +268,7 @@ class TestApplyPlanDropObservability:
         FakeDb.execute = _boom
         try:
             out = []
-            run(apply_inline_chart_plan(
-                db, "sec-1", [self._row() for _ in range(4)], None, dropped_out=out))
+            run(apply_inline_chart_plan(db, "sec-1", [self._row() for _ in range(4)], None, dropped_out=out))
         finally:
             FakeDb.execute = _orig
         assert [o["reason"] for o in out] == ["insert_failed"]
@@ -287,21 +279,18 @@ class TestApplyPlanDropObservability:
         # sse_handlers 图表登记计算失败时的僵尸图清理调用形态。
         db = FakeDb()
         assert run(apply_inline_chart_plan(db, "sec-9", [], None)) is None
-        assert any(s.strip().startswith("DELETE FROM chart_predictions")
-                   for s, _ in db.executed)
+        assert any(s.strip().startswith("DELETE FROM chart_predictions") for s, _ in db.executed)
         assert not any(s.strip().startswith("INSERT") for s, _ in db.executed)
 
     def test_empty_rows_without_content_still_deletes(self):
         db = FakeDb()
         run(apply_inline_chart_plan(db, "sec-9", [], None, dropped_out=[]))
-        assert any(s.strip().startswith("DELETE FROM chart_predictions")
-                   for s, _ in db.executed)
+        assert any(s.strip().startswith("DELETE FROM chart_predictions") for s, _ in db.executed)
 
     def test_no_dropped_out_means_zero_overhead(self):
         # 不传 dropped_out = 旧行为，_note_drop → _record_chart_drop(None,...) 空转。
         db = FakeDb()
         assert run(apply_inline_chart_plan(db, "sec-1", [self._row()], None)) is None
-
 
 
 # =========================================================================
@@ -324,8 +313,7 @@ def _apply_plan_body():
 
 
 def test_every_drop_record_site_has_known_reason():
-    reasons = set(re.findall(
-        r'_record_chart_drop\([^,]+,\s*[^,]+,\s*"([^"]+)"\)', _build_plan_body()))
+    reasons = set(re.findall(r'_record_chart_drop\([^,]+,\s*[^,]+,\s*"([^"]+)"\)', _build_plan_body()))
     assert reasons, "未找到任何 _record_chart_drop 调用"
     unknown = reasons - DROP_REASONS
     assert not unknown, f"出现未登记的删图理由（绕过前端/报告口径）：{sorted(unknown)}"
@@ -353,20 +341,19 @@ def test_every_envelope_empty_branch_deletes_the_block():
         start = body.index(anchor)
         rest = body[start:]
         # 到下一个同级（8 空格）语句为止即为本分支体
-        m = re.search(r"\n        (?:if |else |for |while |return\b)", rest[len(anchor):])
-        block = rest[len(anchor):m.start() + 8] if m else rest[len(anchor):]
-        code_only = "\n".join(
-            ln for ln in block.splitlines() if ln.strip() and not ln.strip().startswith("#"))
+        m = re.search(r"\n        (?:if |else |for |while |return\b)", rest[len(anchor) :])
+        block = rest[len(anchor) : m.start() + 8] if m else rest[len(anchor) :]
+        code_only = "\n".join(ln for ln in block.splitlines() if ln.strip() and not ln.strip().startswith("#"))
         assert "edits[ordinal] = None" in code_only, (
             f"分支 {anchor!r} 内没有删块赋值 —— 该块会留在正文却无 chart_predictions "
-            "登记（幽灵图，且绕过每章≤1 与同类型≤3 限额）")
+            "登记（幽灵图，且绕过每章≤1 与同类型≤3 限额）"
+        )
 
 
 def test_all_four_drop_exits_are_wired():
     """既有删块出口（每章超限/同类型超限/校验失败/缺 prompt）不得被摘掉接线。"""
     body = _build_plan_body()
-    for reason in ("per_section_limit", "scheme_type_limit",
-                   "validation_failed", "missing_prompt"):
+    for reason in ("per_section_limit", "scheme_type_limit", "validation_failed", "missing_prompt"):
         assert f'"{reason}"' in body, f"删图理由 {reason} 的接线被移除"
 
 
@@ -384,8 +371,8 @@ def test_per_section_limit_semantics_documented():
     body = _build_plan_body()
     assert "_CHART_PER_SECTION_LIMIT" in body
     assert "每个 section_id" in body, (
-        "配图上限的口径说明被删掉 —— 提示词的「每章≤1」与代码的 per-section "
-        "计数是两回事，必须写明以免后人误改行为")
+        "配图上限的口径说明被删掉 —— 提示词的「每章≤1」与代码的 per-section " "计数是两回事，必须写明以免后人误改行为"
+    )
 
 
 # =========================================================================
@@ -396,12 +383,12 @@ _SSE_SRC = open(SH.__file__, encoding="utf-8").read()
 
 
 def test_sse_handlers_passes_dropped_out_to_both_plan_functions():
-    assert re.search(r'build_inline_chart_plan\([^)]*dropped_out=\s*_chart_dropped',
-                     _SSE_SRC, re.S), (
-        "build_inline_chart_plan 调用未传 dropped_out —— 删图将再次零可观测")
-    assert re.search(r'apply_inline_chart_plan\([^)]*dropped_out=\s*_chart_dropped',
-                     _SSE_SRC, re.S), (
-        "apply_inline_chart_plan 调用未传 dropped_out —— 锁内复核删图再次不可见")
+    assert re.search(
+        r"build_inline_chart_plan\([^)]*dropped_out=\s*_chart_dropped", _SSE_SRC, re.S
+    ), "build_inline_chart_plan 调用未传 dropped_out —— 删图将再次零可观测"
+    assert re.search(
+        r"apply_inline_chart_plan\([^)]*dropped_out=\s*_chart_dropped", _SSE_SRC, re.S
+    ), "apply_inline_chart_plan 调用未传 dropped_out —— 锁内复核删图再次不可见"
 
 
 def test_charts_dropped_is_written_into_report():
@@ -418,16 +405,16 @@ def test_report_json_redumped_after_drop_collection():
     after = _SSE_SRC[i:]
     assert "json.dumps(report, ensure_ascii=False)" in after, (
         "charts_dropped 写入 report 后未重新 json.dumps —— 落库的 report_json "
-        "不含删图信息（护栏失效，用户仍看不到理由）")
+        "不含删图信息（护栏失效，用户仍看不到理由）"
+    )
 
 
 def test_zombie_chart_cleanup_branch_exists():
     """图表登记计算异常时必须做「仅清理」调用，否则残留上一轮旧登记（僵尸图）。"""
-    assert re.search(
-        r'await\s+apply_inline_chart_plan\(\s*db,\s*section_id,\s*\[\],\s*None\s*\)',
-        _SSE_SRC), (
+    assert re.search(r"await\s+apply_inline_chart_plan\(\s*db,\s*section_id,\s*\[\],\s*None\s*\)", _SSE_SRC), (
         "sse_handlers 缺少图表登记计算失败的仅清理调用 —— 正文落库而 "
-        "chart_predictions 残留上一轮旧值，导出会追加已不在正文里的图")
+        "chart_predictions 残留上一轮旧值，导出会追加已不在正文里的图"
+    )
     # 清理失败不得阻断正文落库
     assert "图表登记清理失败" in _SSE_SRC
 
@@ -440,18 +427,26 @@ def test_lead_in_constants_have_single_source():
     """
     import app.routers.export as EX
     import app.services.content_blocks as CB
+
     assert CB.LEAD_IN_MAX_CHARS == 60
     assert CP.LEAD_IN_MAX_CHARS is CB.LEAD_IN_MAX_CHARS
     assert CB._LEAD_IN_MAX_CHARS is CB.LEAD_IN_MAX_CHARS
     assert hasattr(CB, "ORPHAN_LEAD_IN_RE")
     import glob as _glob
     import os as _os
+
     base = _os.path.dirname(EX.__file__)
     src = open(EX.__file__, encoding="utf-8").read()
     for p in sorted(_glob.glob(_os.path.join(base, "_export_*.py"))):
         src += "\n" + open(p, encoding="utf-8").read()
     # 拆分兼容：长度判定已拆至 _export_docx_parts.py，经 facade 延迟绑定（_sh.LEAD_IN_MAX_CHARS）
-    assert ("len(text) > LEAD_IN_MAX_CHARS" in src
-            or "len(text) > _sh.LEAD_IN_MAX_CHARS" in src), (
-        "export 侧引导语长度判定应引用 LEAD_IN_MAX_CHARS，不得回退为裸 60")
-
+    # ✅ 2026-11-05：export 侧长度判定进一步收敛进 content_blocks._is_orphan_lead_in_text
+    #    （孤儿引导语判据单一出口：LEAD_IN_HINT_RE ∪ _RE_LEADIN_BROAD，长度上限
+    #    LEAD_IN_MAX_CHARS 在 helper 内引用）。export/_export_docx_parts 不再出现
+    #    长度判定字样，护栏改为锁「调用单一出口 + 常量仍在 content_blocks」。
+    assert CB._is_orphan_lead_in_text("施工工艺流程图如下：")
+    assert not CB._is_orphan_lead_in_text("正文" * 200), "超过 LEAD_IN_MAX_CHARS 的长段落不得判为引导语"
+    assert (
+        "_is_orphan_lead_in_text" in src
+    ), "export 侧孤儿引导语判定必须走 content_blocks._is_orphan_lead_in_text 单一出口"
+    assert "len(text) > 60" not in src, "export 侧不得回退为裸 60"

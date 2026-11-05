@@ -3,6 +3,7 @@
 由 scripts/_split_mermaid.py 从原 mermaid_renderer.py 自动拆分而来。
 所有公共工具从 .mermaid_common 导入。
 """
+
 from __future__ import annotations
 
 import logging
@@ -30,11 +31,11 @@ logger = logging.getLogger(__name__)
 #   本切片：① 所有硬切升级为省略号感知（`_fit_text_with_ellipsis`）；② 底部折线图
 #   x 轴工期列在**列变窄时竖排**（图表轴标签拥挤即竖排的惯例），列够宽则回退横排省略号；
 #   ③ 顶部堆叠图/左侧列/图例保持横排省略号（几何/语义不匹配竖排，强行竖排会误导阅读）。
-ENV_LABOR_PHASE_VERTICAL = "LABOR_PHASE_VERTICAL"   # 底部工期列窄时竖排（默认开）
+ENV_LABOR_PHASE_VERTICAL = "LABOR_PHASE_VERTICAL"  # 底部工期列窄时竖排（默认开）
 _LABOR_PHASE_VERTICAL_DEFAULT = True
-_LABOR_VERTICAL_THRESHOLD = 120   # 列宽(px@2.5x) 低于此值才竖排，否则横排省略号
-_LABOR_PHASE_LABEL_H = 130       # 竖排工期列预留竖向带高度（px@2.5x，约容 7 字）
-_LABOR_LEGEND_RESERVE = 36       # 图例占用底部高度（px@2.5x）
+_LABOR_VERTICAL_THRESHOLD = 120  # 列宽(px@2.5x) 低于此值才竖排，否则横排省略号
+_LABOR_PHASE_LABEL_H = 130  # 竖排工期列预留竖向带高度（px@2.5x，约容 7 字）
+_LABOR_LEGEND_RESERVE = 36  # 图例占用底部高度（px@2.5x）
 
 
 def _labor_phase_vertical() -> bool:
@@ -43,7 +44,6 @@ def _labor_phase_vertical() -> bool:
     if raw in ("0", "false", "off", "no"):
         return False
     return _LABOR_PHASE_VERTICAL_DEFAULT
-
 
 
 @_render_hq
@@ -167,8 +167,9 @@ def _render_labor_image_v2(labor_data: dict) -> BytesIO | None:
     # ✅ 竖排工期列：开启时在底部预留竖向带（band），图例下移其下，互不重叠
     _phase_v = _labor_phase_vertical()
     _phase_band = int(_LABOR_PHASE_LABEL_H * scale) if _phase_v else 0
-    total_h = (title_h + padding * 2 + max(left_chart_h, right_chart_h)
-               + _phase_band + int(_LABOR_LEGEND_RESERVE * scale))
+    total_h = (
+        title_h + padding * 2 + max(left_chart_h, right_chart_h) + _phase_band + int(_LABOR_LEGEND_RESERVE * scale)
+    )
 
     img = Image.new("RGB", (total_w, total_h), "white")
     draw = ImageDraw.Draw(img)
@@ -220,9 +221,7 @@ def _render_labor_image_v2(labor_data: dict) -> BytesIO | None:
     # ============== 右 2/3 上：堆叠柱状图 ==============
     right_x0 = padding + left_w + sub_gap
     right_y0 = title_h + padding
-    draw.text(
-        (right_x0, right_y0), "② 各阶段工种分布（堆叠柱状图）", fill="#1E3A5F", font=font_section
-    )
+    draw.text((right_x0, right_y0), "② 各阶段工种分布（堆叠柱状图）", fill="#1E3A5F", font=font_section)
 
     sc_y0 = right_y0 + int(32 * scale)
     sc_h = right_chart_h_each - int(50 * scale)
@@ -293,9 +292,7 @@ def _render_labor_image_v2(labor_data: dict) -> BytesIO | None:
 
     # ============== 右 2/3 下：时段总人数曲线图 ==============
     line_y0 = right_y0 + right_chart_h_each + sub_gap
-    draw.text(
-        (right_x0, line_y0), "③ 各阶段总人数变化（折线图）", fill="#1E3A5F", font=font_section
-    )
+    draw.text((right_x0, line_y0), "③ 各阶段总人数变化（折线图）", fill="#1E3A5F", font=font_section)
 
     lc_y0 = line_y0 + int(32 * scale)
     lc_h = right_chart_h_each - int(50 * scale)
@@ -356,9 +353,16 @@ def _render_labor_image_v2(labor_data: dict) -> BytesIO | None:
         if _phase_v and _col_w_b < _LABOR_VERTICAL_THRESHOLD * scale:
             _draw_text_vertical_center(
                 draw,
-                (x - _col_w_b / 2, lc_y0 + lc_h + int(4 * scale),
-                 x + _col_w_b / 2, total_h - int(_LABOR_LEGEND_RESERVE * scale) - int(6 * scale)),
-                _ph_b, font_value, "#374151", char_gap=int(4 * scale),
+                (
+                    x - _col_w_b / 2,
+                    lc_y0 + lc_h + int(4 * scale),
+                    x + _col_w_b / 2,
+                    total_h - int(_LABOR_LEGEND_RESERVE * scale) - int(6 * scale),
+                ),
+                _ph_b,
+                font_value,
+                "#374151",
+                char_gap=int(4 * scale),
             )
         else:
             _ph_b = _fit_text_with_ellipsis(draw, _ph_b, font_value, _col_w_b - int(4 * scale))
@@ -401,7 +405,8 @@ def _render_labor_image_v2(labor_data: dict) -> BytesIO | None:
     paper_floor_note(
         "劳动力图",
         [font_title, font_section, font_label, font_value, font_axis, font_legend],
-        img.size[0], img.size[1],
+        img.size[0],
+        img.size[1],
         primary=[font_label],
         suggest="（工种名/工期轴是主文字）",
     )
@@ -414,4 +419,3 @@ def _render_labor_image_v2(labor_data: dict) -> BytesIO | None:
         size_kb,
     )
     return result_stream
-

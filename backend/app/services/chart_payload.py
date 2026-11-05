@@ -34,6 +34,7 @@
 `extract_chart_payload()` 仍完整兼容历史遗留形状（裸 Mermaid、裸结构化 JSON、
 旧信封），因此**无需数据迁移**：老行照常可读，新行一律为规范信封。
 """
+
 import json
 
 __all__ = [
@@ -49,13 +50,19 @@ _CODE_KEYS = ("mermaid_code", "mermaid", "code")
 _DATA_KEYS = ("data", "payload", "content")
 # 原生结构化数据自身的特征键（无信封包装时用于识别）
 _STRUCT_HINT_KEYS = (
-    "tasks", "zones", "milestones", "children", "phases",
-    "items", "nodes", "label", "areas",
+    "tasks",
+    "zones",
+    "milestones",
+    "children",
+    "phases",
+    "items",
+    "nodes",
+    "label",
+    "areas",
 )
 
 
-def build_chart_envelope(code: str = "", data=None, *,
-                         title: str = "", reason: str = "") -> str:
+def build_chart_envelope(code: str = "", data=None, *, title: str = "", reason: str = "") -> str:
     """构造图表持久化信封 —— **写入侧唯一构造器**。
 
     与 `extract_chart_payload()` 严格互逆。
@@ -80,13 +87,11 @@ def build_chart_envelope(code: str = "", data=None, *,
         return ""
 
     if code:
-        return json.dumps(
-            {"mermaid_code": code, "title": title or "", "reason": reason or ""},
-            ensure_ascii=False)
+        return json.dumps({"mermaid_code": code, "title": title or "", "reason": reason or ""}, ensure_ascii=False)
 
     return json.dumps(
-        {"mermaid_code": "", "data": data, "title": title or "", "reason": reason or ""},
-        ensure_ascii=False)
+        {"mermaid_code": "", "data": data, "title": title or "", "reason": reason or ""}, ensure_ascii=False
+    )
 
 
 def extract_chart_payload(raw) -> str:
@@ -170,11 +175,8 @@ def chart_payload_shape(raw) -> str:
 
     # 字符串载荷（无论挂在代码键还是数据键下）都是"可渲染文本"，
     # 与 `extract_chart_payload` 的读取优先级保持一致。
-    has_code = any(
-        isinstance(obj.get(k), str) and obj[k].strip()
-        for k in _CODE_KEYS + _DATA_KEYS)
-    has_data = any(
-        isinstance(obj.get(k), (dict, list)) and obj[k] for k in _DATA_KEYS)
+    has_code = any(isinstance(obj.get(k), str) and obj[k].strip() for k in _CODE_KEYS + _DATA_KEYS)
+    has_data = any(isinstance(obj.get(k), (dict, list)) and obj[k] for k in _DATA_KEYS)
 
     # 规范信封：恰好携带一种载荷
     if has_code and not has_data:

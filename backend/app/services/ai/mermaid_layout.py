@@ -3,6 +3,7 @@
 由 scripts/_split_mermaid.py 从原 mermaid_renderer.py 自动拆分而来。
 所有公共工具从 .mermaid_common 导入。
 """
+
 from __future__ import annotations
 
 import copy
@@ -22,7 +23,6 @@ from .mermaid_common import (
 )
 
 logger = logging.getLogger(__name__)
-
 
 
 @_render_hq
@@ -356,7 +356,8 @@ def _render_layout_image_v2(data: dict, title: str = "", scale: float = 2.5) -> 
     paper_floor_note(
         "布局图",
         [font_title, font_zone, font_desc, font_legend],
-        img.size[0], img.size[1],
+        img.size[0],
+        img.size[1],
         primary=[font_zone],
         suggest="（网格 %d×%d，区域名是主文字）" % (cols, rows),
     )
@@ -369,6 +370,7 @@ def _render_layout_image_v2(data: dict, title: str = "", scale: float = 2.5) -> 
         size_kb,
     )
     return _image_to_stream(img)
+
 
 def _repair_layout_data(data: dict) -> dict | None:
     """修复布局图数据：补齐缺失字段，确保渲染器能处理
@@ -477,4 +479,3 @@ def _repair_layout_data(data: dict) -> dict | None:
         repaired["title"] = "施工现场总平面布置图"
 
     return repaired
-

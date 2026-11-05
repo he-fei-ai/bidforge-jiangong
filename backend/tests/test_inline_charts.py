@@ -4,6 +4,7 @@
 - has_inline_charts / _rewrite_code_block / _validate_inline_chart
 - register_inline_charts：登记、mermaid 修复回写正文、修复失败删块、无内联不动作、不 commit（由调用方事务提交）
 """
+
 import asyncio
 import json
 
@@ -17,6 +18,7 @@ from app.routers._chart_pipeline import (
 
 # ---------- 工具 ----------
 
+
 class FakeDb:
     """最小异步 db mock：记录 execute/commit 调用"""
 
@@ -26,6 +28,7 @@ class FakeDb:
 
     async def execute(self, sql, params=None):
         self.rows.append((sql, tuple(params or ())))
+
         # 真实 aiosqlite INSERT 成功时返回 Cursor（有 rowcount 属性），
         # 只有异常/事务冲突才返回 None。测试桩必须与真实语义一致，
         # 否则 F-3 修复（INSERT 返回 None → 视为失败降级 skipped）会让本文件
@@ -33,6 +36,7 @@ class FakeDb:
         class _FakeCur:
             rowcount = 1
             lastrowid = 1
+
         return _FakeCur()
 
     async def commit(self):
@@ -49,8 +53,9 @@ VALID_SEQUENCE = "sequenceDiagram\n    A->>B: hi"
 
 # ---------- extract_inline_charts ----------
 
+
 def test_extract_mermaid_flowchart():
-    content = ("本章方案总体流程如下：\n```mermaid\nflowchart TD\n    A --> B\n```\n其余正文。")
+    content = "本章方案总体流程如下：\n```mermaid\nflowchart TD\n    A --> B\n```\n其余正文。"
     charts = extract_inline_charts(content)
     assert len(charts) == 1
     assert charts[0][0] == "flowchart"
@@ -59,21 +64,21 @@ def test_extract_mermaid_flowchart():
 
 def test_extract_skips_comment_first_line():
     # AI 可能在 mermaid 首行输出 %% 注释 → 应跳过注释行再推断类型
-    content = ("```mermaid\n%% 流程图\nflowchart LR\n    A --> B\n```")
+    content = "```mermaid\n%% 流程图\nflowchart LR\n    A --> B\n```"
     charts = extract_inline_charts(content)
     assert len(charts) == 1
     assert charts[0][0] == "flowchart"
 
 
 def test_extract_chart_json_layout():
-    content = ("总平面布置：\n```chart-json\n{\"type\": \"layout\", \"areas\": [{\"id\": \"a\", \"label\": \"x\", \"x\": 0, \"y\": 0, \"w\": 10, \"h\": 10}]}\n```")
+    content = '总平面布置：\n```chart-json\n{"type": "layout", "areas": [{"id": "a", "label": "x", "x": 0, "y": 0, "w": 10, "h": 10}]}\n```'
     charts = extract_inline_charts(content)
     assert len(charts) == 1
     assert charts[0][0] == "layout"
 
 
 def test_extract_chart_json_unknown_type_ignored():
-    content = "```chart-json\n{\"type\": \"nonsense\", \"x\": 1}\n```"
+    content = '```chart-json\n{"type": "nonsense", "x": 1}\n```'
     assert extract_inline_charts(content) == []
 
 
@@ -90,8 +95,7 @@ def test_extract_unclosed_block_truncated_then_next_block():
 
 
 def test_extract_same_type_dedup_keeps_first():
-    content = ("```mermaid\nflowchart TD\n    A --> B\n```\n"
-               "```mermaid\nflowchart LR\n    C --> D\n```")
+    content = "```mermaid\nflowchart TD\n    A --> B\n```\n" "```mermaid\nflowchart LR\n    C --> D\n```"
     charts = extract_inline_charts(content)
     assert len(charts) == 1
     assert "A --> B" in charts[0][1]
@@ -134,6 +138,7 @@ def test_has_inline_charts_unclosed_fence_not_counted():
 
 # ---------- _rewrite_code_block ----------
 
+
 def test_rewrite_replaces_and_deletes():
     content = "前文\n```mermaid\nflowchart TD\n    A --> B\n```\n后文"
     replaced = _rewrite_code_block(content, "flowchart TD\n    A --> B", "flowchart LR\n    X --> Y")
@@ -150,6 +155,7 @@ def test_rewrite_no_match_unchanged():
 
 
 # ---------- _validate_inline_chart ----------
+
 
 def test_validate_mermaid_valid():
     ok, code = _validate_inline_chart("flowchart", VALID_FLOWCHART)
@@ -183,6 +189,7 @@ def test_mermaid_statement_semicolon_is_legal_and_not_repaired():
 
     # 分号只归一为换行，不进入节点标签：引号内的分号必须原样保留
     from app.services.chart_validators import normalize_mermaid_statements
+
     assert normalize_mermaid_statements('A["准备;验收"] --> B') == 'A["准备;验收"] --> B'
 
 
@@ -202,10 +209,15 @@ def test_validate_layout_json():
 
 
 def test_validate_timeline_json():
-    good = json.dumps({"type": "timeline", "milestones": [
-        {"date": "2026-01-01", "title": "开工"},
-        {"date": "2026-03-01", "title": "竣工"},
-    ]})
+    good = json.dumps(
+        {
+            "type": "timeline",
+            "milestones": [
+                {"date": "2026-01-01", "title": "开工"},
+                {"date": "2026-03-01", "title": "竣工"},
+            ],
+        }
+    )
     ok, code = _validate_inline_chart("timeline", good)
     assert ok is True and code == good
     bad = json.dumps({"type": "timeline", "milestones": [{"date": "2026-01-01", "title": "只有一件"}]})
@@ -219,6 +231,7 @@ def test_validate_bad_json():
 
 
 # ---------- register_inline_charts ----------
+
 
 def test_register_valid_inserts_and_returns_same_content():
     db = FakeDb()
@@ -304,9 +317,11 @@ def test_register_all_invalid_still_clears_stale_rows():
 
 def test_register_multiple_types_dedup():
     db = FakeDb()
-    content = ("```mermaid\n" + VALID_FLOWCHART + "\n```\n"
-               "```mermaid\nsequenceDiagram\n    A->>B: hi\n```\n"
-               "```chart-json\n{\"type\": \"layout\", \"areas\": [{\"id\": \"a\", \"label\": \"x\", \"x\": 0, \"y\": 0, \"w\": 10, \"h\": 10}]}\n```")
+    content = (
+        "```mermaid\n" + VALID_FLOWCHART + "\n```\n"
+        "```mermaid\nsequenceDiagram\n    A->>B: hi\n```\n"
+        '```chart-json\n{"type": "layout", "areas": [{"id": "a", "label": "x", "x": 0, "y": 0, "w": 10, "h": 10}]}\n```'
+    )
     n, new_content = run(register_inline_charts(db, "scheme-1", "sec-5", content))
     assert n == 3  # flowchart / sequence / layout 三类各一个
     assert new_content == content
@@ -314,6 +329,7 @@ def test_register_multiple_types_dedup():
 
 def validate_mermaid_again(code):
     from app.services.ai.image_engine import validate_mermaid
+
     return validate_mermaid(code)[0]
 
 
@@ -325,11 +341,12 @@ def validate_mermaid_again(code):
 # 图表清单少报。现登记消费 `_scan_inline_charts`（全部块），登记仍按类型去重。
 # ===========================================================================
 
+
 def test_scan_inline_charts_returns_all_blocks():
     """扫描层不去重：同类型两块都要返回（供校验/限额使用）。"""
     from app.routers._chart_pipeline import _scan_inline_charts
-    content = ("```mermaid\n" + VALID_FLOWCHART + "\n```\n"
-               "```mermaid\nflowchart LR\n    C --> D\n```")
+
+    content = "```mermaid\n" + VALID_FLOWCHART + "\n```\n" "```mermaid\nflowchart LR\n    C --> D\n```"
     assert len(_scan_inline_charts(content)) == 2
     # 对外清单口径仍去重（保持既有语义）
     assert len(extract_inline_charts(content)) == 1
@@ -339,13 +356,11 @@ def test_register_limits_removes_same_type_extra_block():
     """enforce_limits=True 时，同类型第 2 块应被"每章≤1"上限裁剪出正文。"""
     db = FakeDb()
     second = "flowchart LR\n    C --> D"
-    content = ("```mermaid\n" + VALID_FLOWCHART + "\n```\n正文\n"
-               "```mermaid\n" + second + "\n```")
-    n, new_content = run(register_inline_charts(
-        db, "scheme-1", "sec-dup1", content, enforce_limits=True))
-    assert n == 1                                   # 只登记一个
-    assert second not in new_content                # 第 2 块已从正文移除
-    assert VALID_FLOWCHART in new_content           # 第 1 块保留
+    content = "```mermaid\n" + VALID_FLOWCHART + "\n```\n正文\n" "```mermaid\n" + second + "\n```"
+    n, new_content = run(register_inline_charts(db, "scheme-1", "sec-dup1", content, enforce_limits=True))
+    assert n == 1  # 只登记一个
+    assert second not in new_content  # 第 2 块已从正文移除
+    assert VALID_FLOWCHART in new_content  # 第 1 块保留
     inserts = [r for r in db.rows if r[0].startswith("INSERT")]
     assert len(inserts) == 1
 
@@ -353,11 +368,9 @@ def test_register_limits_removes_same_type_extra_block():
 def test_register_validates_same_type_extra_block_when_no_limits():
     """enforce_limits=False 时，同类型第 2 块仍必须过校验：坏块被删除。"""
     db = FakeDb()
-    bad_second = "graph TD\nA-[坏"       # 非法 Mermaid，修复也不可行
-    content = ("```mermaid\n" + VALID_FLOWCHART + "\n```\n正文\n"
-               "```mermaid\n" + bad_second + "\n```")
-    n, new_content = run(register_inline_charts(
-        db, "scheme-1", "sec-dup2", content, enforce_limits=False))
+    bad_second = "graph TD\nA-[坏"  # 非法 Mermaid，修复也不可行
+    content = "```mermaid\n" + VALID_FLOWCHART + "\n```\n正文\n" "```mermaid\n" + bad_second + "\n```"
+    n, new_content = run(register_inline_charts(db, "scheme-1", "sec-dup2", content, enforce_limits=False))
     assert n == 1
     # 旧实现会把这个坏块原样留在正文里 → 导出时变成「渲染失败」红字占位
     assert bad_second not in new_content
@@ -368,11 +381,9 @@ def test_register_validates_same_type_extra_block_when_no_limits():
 def test_register_same_type_second_block_repair_rewrites_content():
     """同类型第 2 块若可被正则修复，修复结果应回写正文。"""
     db = FakeDb()
-    fixable = "flowchart TD\nA[开始] - B[结束]"     # 缺箭头闭合，repair 可修
-    content = ("```mermaid\n" + VALID_FLOWCHART + "\n```\n正文\n"
-               "```mermaid\n" + fixable + "\n```")
-    n, new_content = run(register_inline_charts(
-        db, "scheme-1", "sec-dup3", content, enforce_limits=False))
+    fixable = "flowchart TD\nA[开始] - B[结束]"  # 缺箭头闭合，repair 可修
+    content = "```mermaid\n" + VALID_FLOWCHART + "\n```\n正文\n" "```mermaid\n" + fixable + "\n```"
+    n, new_content = run(register_inline_charts(db, "scheme-1", "sec-dup3", content, enforce_limits=False))
     assert n == 1
     assert new_content != content
     assert fixable not in new_content
@@ -388,39 +399,36 @@ def test_register_same_type_second_block_repair_rewrites_content():
 # 现与 architecture 同样走共享归一器 normalize_labor_data（校验/渲染两侧同口径）。
 # ===========================================================================
 
+
 def test_validate_labor_natural_shapes_pass():
     """labor 的自然形态应通过校验（旧实现一律判非法 → 删块）。"""
     shapes = [
-        {"type": "labor", "trades": [{"name": "木工", "peak": 30},
-                                     {"name": "钢筋工", "peak": 18}]},
+        {"type": "labor", "trades": [{"name": "木工", "peak": 30}, {"name": "钢筋工", "peak": 18}]},
         {"type": "labor", "data": {"木工": [10, 20], "钢筋工": [5, 8]}},
         {"type": "labor", "series": [{"name": "木工", "data": [10, 20]}]},
-        {"type": "labor", "labels": ["基础", "主体"],
-         "datasets": [{"label": "木工", "data": [10, 20]}]},
+        {"type": "labor", "labels": ["基础", "主体"], "datasets": [{"label": "木工", "data": [10, 20]}]},
         {"type": "labor", "data": [{"phase": "基础", "木工": 10, "钢筋工": 5}]},
     ]
     for payload in shapes:
         code = json.dumps(payload, ensure_ascii=False)
         ok, fixed = _validate_inline_chart("labor", code)
         assert ok is True, (payload, fixed)
-        assert fixed == code          # 校验通过不重写正文（归一只在判定时使用）
+        assert fixed == code  # 校验通过不重写正文（归一只在判定时使用）
 
 
 def test_register_labor_natural_shape_not_deleted():
     """自然形态的 labor 数据块应被登记，而不是从正文删除。"""
     db = FakeDb()
-    code = json.dumps(
-        {"type": "labor", "trades": [{"name": "木工", "peak": 30}]},
-        ensure_ascii=False)
+    code = json.dumps({"type": "labor", "trades": [{"name": "木工", "peak": 30}]}, ensure_ascii=False)
     content = "劳动力投入如下：\n```chart-json\n" + code + "\n```\n后续正文。"
     n, new_content = run(register_inline_charts(db, "scheme-1", "sec-labor1", content))
     assert n == 1
-    assert new_content == content                    # 未被删块
+    assert new_content == content  # 未被删块
     inserts = [r for r in db.rows if r[0].startswith("INSERT")]
     assert len(inserts) == 1
     assert inserts[0][1][3] == "labor"
     payload = json.loads(inserts[0][1][7])
-    assert payload["data"]["type"] == "labor"        # 结构化数据走 data 分支
+    assert payload["data"]["type"] == "labor"  # 结构化数据走 data 分支
     assert payload["data"]["trades"][0]["name"] == "木工"
 
 
@@ -432,16 +440,17 @@ def test_validate_labor_repair_prompt_shape_passes():
     提示词教 ``phases[].workers[{"trade","count"}]``，而校验器若只认顶层三件套，
     则 labor 的 AI 修复**永远不可能成功**（3 轮全废）。归一器必须吃下这个形态。
     """
-    code = json.dumps({
-        "type": "labor",
-        "title": "劳动力配置计划",
-        "phases": [
-            {"name": "施工准备", "workers": [{"trade": "普工", "count": 15},
-                                            {"trade": "管理人员", "count": 6}]},
-            {"name": "主体工程", "workers": [{"trade": "普工", "count": 35},
-                                            {"trade": "管理人员", "count": 12}]},
-        ],
-    }, ensure_ascii=False)
+    code = json.dumps(
+        {
+            "type": "labor",
+            "title": "劳动力配置计划",
+            "phases": [
+                {"name": "施工准备", "workers": [{"trade": "普工", "count": 15}, {"trade": "管理人员", "count": 6}]},
+                {"name": "主体工程", "workers": [{"trade": "普工", "count": 35}, {"trade": "管理人员", "count": 12}]},
+            ],
+        },
+        ensure_ascii=False,
+    )
     ok, fixed = _validate_inline_chart("labor", code)
     assert ok is True, fixed
 
@@ -460,8 +469,7 @@ def test_labor_prompt_shapes_aligned():
     for name, text in (("content_generation_system", gen), ("chart_json_fix", fix)):
         labor_lines = [ln for ln in text.splitlines() if "labor" in ln]
         assert labor_lines, f"{name} 未声明 labor 数据结构"
-        assert any("categories" in ln and "data" in ln for ln in labor_lines), (
-            f"{name} 的 labor 说明未使用三件套矩阵（phases/categories/data）")
-        assert not any("workers" in ln for ln in labor_lines), (
-            f"{name} 的 labor 说明仍在使用 phases[].workers[] 形态")
-
+        assert any(
+            "categories" in ln and "data" in ln for ln in labor_lines
+        ), f"{name} 的 labor 说明未使用三件套矩阵（phases/categories/data）"
+        assert not any("workers" in ln for ln in labor_lines), f"{name} 的 labor 说明仍在使用 phases[].workers[] 形态"

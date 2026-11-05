@@ -3,6 +3,7 @@
 由 scripts/_split_mermaid.py 从原 mermaid_renderer.py 自动拆分而来。
 所有公共工具从 .mermaid_common 导入。
 """
+
 from __future__ import annotations
 
 import logging
@@ -21,7 +22,6 @@ from .mermaid_common import (
 )
 
 logger = logging.getLogger(__name__)
-
 
 
 def _parse_mermaid_pie(code: str) -> dict | None:
@@ -62,6 +62,7 @@ def _parse_mermaid_pie(code: str) -> dict | None:
     if len(items) < 2:
         return None
     return {"type": "comparison", "title": title or "占比对比", "items": items}
+
 
 def _parse_mermaid_xychart(code: str) -> dict | None:
     """解析 Mermaid xychart-beta 柱状图代码为对比图数据（供 v2 渲染器）
@@ -110,6 +111,7 @@ def _parse_mermaid_xychart(code: str) -> dict | None:
     items = [{"label": x_labels[i], "value": bar_values[i]} for i in range(n)]
     return {"type": "comparison", "title": title or "数值对比", "items": items}
 
+
 @_render_hq
 def _render_comparison_image_v2(data: dict) -> BytesIO | None:
     """商业级对比图渲染器 v2：左饼图 + 右柱状图
@@ -142,9 +144,7 @@ def _render_comparison_image_v2(data: dict) -> BytesIO | None:
         # Mermaid pie 数据格式: {"items": [{"label": "A", "value": 30}]}
         items = data.get("items", [])
         if items:
-            rows_data = [
-                {"label": it.get("label", ""), "value": it.get("value", 0)} for it in items
-            ]
+            rows_data = [{"label": it.get("label", ""), "value": it.get("value", 0)} for it in items]
             headers = ["对比项", "数值"]
 
     # ✅ BUG 修复：兼容 {type:comparison, data:[{label,value}]} / {chart:"pie", data:[...]}
@@ -479,7 +479,8 @@ def _render_comparison_image_v2(data: dict) -> BytesIO | None:
     paper_floor_note(
         "对比图",
         [font_title, font_label, font_value, font_pct, font_caption, font_bar_value],
-        img.size[0], img.size[1],
+        img.size[0],
+        img.size[1],
         primary=[font_label],
         suggest="（行标签是主文字，饼/条共用一张画布）",
     )
@@ -491,4 +492,3 @@ def _render_comparison_image_v2(data: dict) -> BytesIO | None:
         size_kb,
     )
     return result_stream
-

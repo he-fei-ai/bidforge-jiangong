@@ -14,6 +14,7 @@
 2. 返回空 dict（fallback 语义）；
 3. apply_inline_chart_plan 在同样条件下仍能写入登记行（不阻断业务）。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -116,9 +117,11 @@ async def test_apply_inline_chart_plan_still_enforces_limit_on_normal_path():
             sql_low = sql.lstrip().upper()
             if sql_low.startswith("SELECT"):
                 # 已存在同类型 10 条 → 远超默认限额
-                return _FakeCursor([
-                    {"chart_type": "timeline", "n": 10},
-                ])
+                return _FakeCursor(
+                    [
+                        {"chart_type": "timeline", "n": 10},
+                    ]
+                )
             if sql_low.startswith("INSERT"):
                 self.rows_after_write.append(params)
             return _FakeCursor([])

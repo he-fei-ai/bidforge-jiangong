@@ -3,6 +3,7 @@
 由 scripts/_split_mermaid.py 从原 mermaid_renderer.py 自动拆分而来。
 所有公共工具从 .mermaid_common 导入。
 """
+
 from __future__ import annotations
 
 import logging
@@ -32,14 +33,14 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # 布局尺寸（单一事实源；单位=设计像素，渲染时统一乘 scale）
 # ============================================================
-NODE_W = 220        # 普通节点宽
-NODE_H = 52         # 普通节点高
-H_GAP = 24          # 兄弟节点水平间距
-V_GAP = 48          # 层间垂直间距
-TOP_PAD = 60        # 首层顶部留白（旧实现内联在 `depth * (h + gap) + 60` 里）
-SIDE_START = 40     # DFS 起始 x（布局后按 min_x 归一到 0，仅影响相对位移）
-CANVAS_PAD_X = 80   # 画布右侧留白
-CANVAS_PAD_Y = 40   # 画布底部留白
+NODE_W = 220  # 普通节点宽
+NODE_H = 52  # 普通节点高
+H_GAP = 24  # 兄弟节点水平间距
+V_GAP = 48  # 层间垂直间距
+TOP_PAD = 60  # 首层顶部留白（旧实现内联在 `depth * (h + gap) + 60` 里）
+SIDE_START = 40  # DFS 起始 x（布局后按 min_x 归一到 0，仅影响相对位移）
+CANVAS_PAD_X = 80  # 画布右侧留白
+CANVAS_PAD_Y = 40  # 画布底部留白
 
 # ✅ L3（叶子层）竖排版式（2026-10-10 ·《架构图 L3 叶子层文字垂直显示优化方案》）
 #   旧版所有节点同尺寸横排：11 个叶子 ≈ 2660 设计像素宽，而导出 DOCX 是按
@@ -48,15 +49,15 @@ CANVAS_PAD_Y = 40   # 画布底部留白
 #   文字自上而下直立排列"（等价 CSS writing-mode: vertical-rl +
 #   text-orientation: upright），画布宽度约减半，字号在纸面上的相对尺寸随之
 #   放大约 2 倍。
-LEAF_VERTICAL_W = 96            # 竖排叶子宽（≈ 横排 220 的 0.44 倍，对应文档 130→60）
-LEAF_VERTICAL_H = 232           # 竖排叶子高（对应文档 50→200）
-LEAF_VERTICAL_GAP = 12          # 竖排叶子水平间距（比横排更紧凑，对应 10→8）
-LEAF_VERTICAL_MIN_DEPTH = 2     # 仅 depth≥2（L3 及更深）的叶子参与竖排；二级保持横排
-LEAF_VERTICAL_THRESHOLD = 6     # 可竖排叶子数 > 6 自动切竖排（≤6 保持横排）
-LEAF_VERTICAL_FONT_SIZE = 15    # 竖排字号**下限**（R60 起会按画布宽自适应放大，见下）
-LEAF_VERTICAL_PAD_X = 6         # 竖排节点内边距（横向，对应文档 padding 左右 6px）
-LEAF_VERTICAL_PAD_Y = 12        # 竖排节点内边距（纵向，对应文档 padding 上下 15px）
-LEAF_VERTICAL_CHAR_GAP = 4      # 竖排字间距（对应文档 letter-spacing: 2px）
+LEAF_VERTICAL_W = 96  # 竖排叶子宽（≈ 横排 220 的 0.44 倍，对应文档 130→60）
+LEAF_VERTICAL_H = 232  # 竖排叶子高（对应文档 50→200）
+LEAF_VERTICAL_GAP = 12  # 竖排叶子水平间距（比横排更紧凑，对应 10→8）
+LEAF_VERTICAL_MIN_DEPTH = 2  # 仅 depth≥2（L3 及更深）的叶子参与竖排；二级保持横排
+LEAF_VERTICAL_THRESHOLD = 6  # 可竖排叶子数 > 6 自动切竖排（≤6 保持横排）
+LEAF_VERTICAL_FONT_SIZE = 15  # 竖排字号**下限**（R60 起会按画布宽自适应放大，见下）
+LEAF_VERTICAL_PAD_X = 6  # 竖排节点内边距（横向，对应文档 padding 左右 6px）
+LEAF_VERTICAL_PAD_Y = 12  # 竖排节点内边距（纵向，对应文档 padding 上下 15px）
+LEAF_VERTICAL_CHAR_GAP = 4  # 竖排字间距（对应文档 letter-spacing: 2px）
 
 # ============================================================
 # ✅ 纸面可读性下限（2026-10-10 · 收口 R59 §9 遗留项①「竖排不是万能解」）
@@ -70,18 +71,18 @@ LEAF_VERTICAL_CHAR_GAP = 4      # 竖排字间距（对应文档 letter-spacing:
 #     ⇒ 只有「字号 ÷ 画布宽」这一个比值决定纸上多大。
 #   ⇒ 最优解不是"限制单图规模"（那会删内容），而是**让字号跟着画布宽走**，
 #     并把「横排会不会印不清」也纳入版式选择。两者都以「纸面毫米数」为唯一标尺。
-ARCH_RENDER_SCALE = 2.5         # 超采样倍数（渲染器内 `scale` 与本常量同源）
-ARCH_OUTPUT_DPI = 300.0         # `_image_to_stream` 写入的 PNG DPI
-PAPER_COLUMN_WIDTH_CM = 16.0    # DOCX 正文栏宽上限（与 export._CHART_MAX_WIDTH_CM 同值）
-PAPER_MAX_HEIGHT_CM = 22.0      # 单图最大高度（与 export._CHART_MAX_HEIGHT_CM 同值）
-PAPER_FONT_MIN_MM = 2.4         # 纸面字号下限 ≈ 6.8pt（中文「小六」2.3~「六号」2.65mm）
-NODE_FONT_BASE = 15             # 横排节点字号（R59 及以前的固定值）
-NODE_FONT_MAX = 18              # 横排节点字号硬上限：220×52 的 box 要能容 2 行
-                                #   `_draw_text_center` 的 line_h = 字高 + 4，
-                                #   2×(18+4) = 44 = NODE_H − 2×4 内边距，19 就会压边框
-LEAF_VERTICAL_FONT_MAX = 28     # 竖排叶子字号上限（96×232 box 在 28 号下容量仍余 12 字）
-TITLE_FONT_BASE = 20            # 标题字号（画在框外，无 box 容量约束）
-TITLE_FONT_MAX = 30             # 标题上限：title_h=56 的标题带里 20+36 富余，视觉上限而已
+ARCH_RENDER_SCALE = 2.5  # 超采样倍数（渲染器内 `scale` 与本常量同源）
+ARCH_OUTPUT_DPI = 300.0  # `_image_to_stream` 写入的 PNG DPI
+PAPER_COLUMN_WIDTH_CM = 16.0  # DOCX 正文栏宽上限（与 export._CHART_MAX_WIDTH_CM 同值）
+PAPER_MAX_HEIGHT_CM = 22.0  # 单图最大高度（与 export._CHART_MAX_HEIGHT_CM 同值）
+PAPER_FONT_MIN_MM = 2.4  # 纸面字号下限 ≈ 6.8pt（中文「小六」2.3~「六号」2.65mm）
+NODE_FONT_BASE = 15  # 横排节点字号（R59 及以前的固定值）
+NODE_FONT_MAX = 18  # 横排节点字号硬上限：220×52 的 box 要能容 2 行
+#   `_draw_text_center` 的 line_h = 字高 + 4，
+#   2×(18+4) = 44 = NODE_H − 2×4 内边距，19 就会压边框
+LEAF_VERTICAL_FONT_MAX = 28  # 竖排叶子字号上限（96×232 box 在 28 号下容量仍余 12 字）
+TITLE_FONT_BASE = 20  # 标题字号（画在框外，无 box 容量约束）
+TITLE_FONT_MAX = 30  # 标题上限：title_h=56 的标题带里 20+36 富余，视觉上限而已
 
 # 运维回退通道（环境变量，无需改代码）：
 #   ARCH_LEAF_VERTICAL=0       整体关闭竖排，逐字回退旧横排版式
@@ -115,23 +116,23 @@ ARCH_DEPTH_COLORS = [
     ("#5B9BD5", "#FFFFFF"),  # 三级
     ("#A9C6E8", "#1E3A5F"),  # 四级及以下
 ]
-ARCH_HIGHLIGHT_FILL = "#FBBF24"   # 琥珀金（样张 highlight 节点）
-ARCH_HIGHLIGHT_TEXT = "#1E3A5F"   # 高亮节点文字 = 深藏青粗体
-ARCH_TITLE_COLOR = "#1E3A5F"      # 左上角标题文字色
-ARCH_EDGE_COLOR = "#64748B"       # 连线/箭头蓝灰
-ARCH_SHADOW_COLOR = "#D5D9DF"     # 节点投影
-ARCH_SHADOW_DX = 4                # 投影右偏移（设计像素）
-ARCH_SHADOW_DY = 5                # 投影下偏移（设计像素）
-ARCH_NODE_RADIUS = 5              # 圆角半径（设计像素）
-ARCH_STROKE_FACTOR = 0.6          # 描边色 = 填充色 × 本系数（逐通道）
-ARCH_STROKE_WIDTH = 2             # 描边宽（设计像素）
-ARCH_ARROW_W = 6                  # 箭头半宽（设计像素）
-ARCH_ARROW_H = 9                  # 箭头高（设计像素）
+ARCH_HIGHLIGHT_FILL = "#FBBF24"  # 琥珀金（样张 highlight 节点）
+ARCH_HIGHLIGHT_TEXT = "#1E3A5F"  # 高亮节点文字 = 深藏青粗体
+ARCH_TITLE_COLOR = "#1E3A5F"  # 左上角标题文字色
+ARCH_EDGE_COLOR = "#64748B"  # 连线/箭头蓝灰
+ARCH_SHADOW_COLOR = "#D5D9DF"  # 节点投影
+ARCH_SHADOW_DX = 4  # 投影右偏移（设计像素）
+ARCH_SHADOW_DY = 5  # 投影下偏移（设计像素）
+ARCH_NODE_RADIUS = 5  # 圆角半径（设计像素）
+ARCH_STROKE_FACTOR = 0.6  # 描边色 = 填充色 × 本系数（逐通道）
+ARCH_STROKE_WIDTH = 2  # 描边宽（设计像素）
+ARCH_ARROW_W = 6  # 箭头半宽（设计像素）
+ARCH_ARROW_H = 9  # 箭头高（设计像素）
 
 
 def _darken(hexc: str, factor: float) -> str:
     """把 #RRGGBB 逐通道乘 factor（样张描边=填充色的加深版，单一公式不逐色手配）。"""
-    r, g, b = (int(hexc[i:i + 2], 16) for i in (1, 3, 5))
+    r, g, b = (int(hexc[i : i + 2], 16) for i in (1, 3, 5))
     return "#%02X%02X%02X" % (int(r * factor), int(g * factor), int(b * factor))
 
 
@@ -156,13 +157,7 @@ def _children_of(node: dict) -> list[dict]:
     非 dict 子项在此直接过滤（旧实现在循环里逐条 `isinstance` 跳过，效果等价：
     子项全部非法时节点按叶子处理）。
     """
-    children = (
-        node.get("children")
-        or node.get("nodes")
-        or node.get("sub_units")
-        or node.get("branches")
-        or []
-    )
+    children = node.get("children") or node.get("nodes") or node.get("sub_units") or node.get("branches") or []
     if not isinstance(children, list):
         return []
     return [c for c in children if isinstance(c, dict)]
@@ -204,8 +199,7 @@ def paper_font_min_mm() -> float:
     try:
         value = float(raw)
     except ValueError:
-        logger.warning("%s 不是数字（%r），按默认 %.1fmm 处理",
-                       ENV_PAPER_FONT_MIN_MM, raw, PAPER_FONT_MIN_MM)
+        logger.warning("%s 不是数字（%r），按默认 %.1fmm 处理", ENV_PAPER_FONT_MIN_MM, raw, PAPER_FONT_MIN_MM)
         return PAPER_FONT_MIN_MM
     return value if value > 0 else 0.0
 
@@ -213,14 +207,16 @@ def paper_font_min_mm() -> float:
 def auto_vertical_enabled() -> bool:
     """「横排印不清就改竖排」的升级开关（默认开；字号下限置 0 时一并失效）。"""
     return _env_flag(ENV_AUTO_VERTICAL, True) and paper_font_min_mm() > 0
+
+
 # ============================================================
 # ✅ 架构图规模预算守卫（2026-10-10 · 收口 R59 §9 遗留项①「限制单张架构图规模」安全切片）
 #   文档明确：AI 侧「单图节点 4~16，超则拆多张」约束已接线（content_checkpoint.py:1129，
 #   DLV-04）；但服务端此前**零检测**——AI 偶尔不拆时，超大图静默渲染成纸面不可读的巨图。
 #   本守卫只做「可观测 + 可配置上限」，不拆分、不丢数据（拆图需改 get_or_render 契约，
 #   跨 7 类图表高风险，列为独立授权轮）。
-ENV_MAX_LEAVES = "ARCH_MAX_LEAVES"      # 单张架构图叶子数上限（默认 24，超则告警建议拆分）
-ENV_MAX_NODES = "ARCH_MAX_NODES"        # 单张架构图节点数上限（默认 60，超则告警建议拆分）
+ENV_MAX_LEAVES = "ARCH_MAX_LEAVES"  # 单张架构图叶子数上限（默认 24，超则告警建议拆分）
+ENV_MAX_NODES = "ARCH_MAX_NODES"  # 单张架构图节点数上限（默认 60，超则告警建议拆分）
 _ARCH_MAX_LEAVES_DEFAULT = 24
 _ARCH_MAX_NODES_DEFAULT = 60
 
@@ -250,9 +246,9 @@ def arch_max_nodes() -> int:
 #   背景：R60 已加「规模预算守卫」（仅告警建议拆分）。本回合落地**真拆图**——
 #   超预算时把架构树按顶层分支分组，每组渲染为子图后**竖向拼接成单张更高 PNG**
 #   返回，契约（单 BytesIO / 单 PNG）不变 ⇒ 缓存/预览/导出/PDF/图号零改动。
-ENV_AUTO_SPLIT = "ARCH_AUTO_SPLIT"          # 超宽自动拆图总开关（默认开）
+ENV_AUTO_SPLIT = "ARCH_AUTO_SPLIT"  # 超宽自动拆图总开关（默认开）
 ENV_SPLIT_MAX_LEAVES = "ARCH_SPLIT_MAX_LEAVES"  # 每组叶子数上限（默认 8）
-ENV_SPLIT_MAX_PARTS = "ARCH_SPLIT_MAX_PARTS"    # 子图数量硬上限（默认 12）
+ENV_SPLIT_MAX_PARTS = "ARCH_SPLIT_MAX_PARTS"  # 子图数量硬上限（默认 12）
 _ARCH_SPLIT_MAX_LEAVES_DEFAULT = 8
 _ARCH_SPLIT_MAX_PARTS_DEFAULT = 12
 
@@ -299,8 +295,8 @@ def _should_split_arch(root: dict) -> bool:
 #   插入宽度只剩 3.25~7.52cm（半个版面凭空浪费）。
 #   ⇒ 份数必须由**纸面毫米**决定而不是由每组叶子数决定；叶子预算继续做**搜索上界 +
 #     每份硬约束**（R60 规模预算守卫与 R61 `_arch_split_max_leaves` 的契约都原样成立）。
-_SPLIT_GAP_DESIGN_PX = 20      # 竖向拼接间隙（设计像素；落图时乘 scale）
-_TITLE_BAND_PX = 56            # 标题带高度（与渲染路径内联的 `title_h = 56` 同值）
+_SPLIT_GAP_DESIGN_PX = 20  # 竖向拼接间隙（设计像素；落图时乘 scale）
+_TITLE_BAND_PX = 56  # 标题带高度（与渲染路径内联的 `title_h = 56` 同值）
 
 
 def _part_geometry(root: dict) -> tuple[int, int, int, int]:
@@ -320,11 +316,11 @@ def _part_geometry(root: dict) -> tuple[int, int, int, int]:
     labels = [n["label"] for n in nodes_pos if n.get("vertical")]
     _min = paper_font_min_mm()
     if labels:
-        px = resolve_leaf_vertical_font_px(w, labels, canvas_h=h,
-                                          title_h=_TITLE_BAND_PX, min_mm=_min)
+        px = resolve_leaf_vertical_font_px(w, labels, canvas_h=h, title_h=_TITLE_BAND_PX, min_mm=_min)
     else:
-        px = resolve_paper_font_px(w, base=NODE_FONT_BASE, ceiling=NODE_FONT_MAX,
-                                   canvas_h=h, title_h=_TITLE_BAND_PX, min_mm=_min)
+        px = resolve_paper_font_px(
+            w, base=NODE_FONT_BASE, ceiling=NODE_FONT_MAX, canvas_h=h, title_h=_TITLE_BAND_PX, min_mm=_min
+        )
     return int(w), int(h + _TITLE_BAND_PX), int(px), len(labels)
 
 
@@ -372,11 +368,10 @@ def _group_branches_balanced(branches: list[dict], parts: int) -> list[list[dict
         hi_i = n - (parts - k)
         cuts.append(min(range(lo, hi_i + 1), key=lambda j: abs(prefix[j] - want)))
     cuts.append(n)
-    return [branches[cuts[k]:cuts[k + 1]] for k in range(parts)]
+    return [branches[cuts[k] : cuts[k + 1]] for k in range(parts)]
 
 
-def plan_architecture_split(root: dict, *, max_leaves: int,
-                            max_parts: int) -> tuple[list[list[dict]], float, float]:
+def plan_architecture_split(root: dict, *, max_leaves: int, max_parts: int) -> tuple[list[list[dict]], float, float]:
     """拆图份数决策：返回 (分组, 该方案交付的最差纸面毫米, 不拆时的纸面毫米)。
 
     纯函数、不绘制、绝不抛。`len(分组) < 2` ⇒ **拆无可拆**，调用方应保持单图。
@@ -390,7 +385,7 @@ def plan_architecture_split(root: dict, *, max_leaves: int,
          拆完还是超限图就没有意义；
       ③ 只在「严格更好」时才拆：搜索域内取毫米最大者，都不如单图就返回空。
     """
-    if not isinstance(root, dict):   # 畸形入参：拆图是增强，不能反过来打挂渲染
+    if not isinstance(root, dict):  # 畸形入参：拆图是增强，不能反过来打挂渲染
         return [], 0.0, 0.0
     branches = _children_of(root)
     if len(branches) < 2:
@@ -400,7 +395,7 @@ def plan_architecture_split(root: dict, *, max_leaves: int,
     if single_mm <= 0:
         return [], 0.0, 0.0
     hi = min(len(_group_branches_by_budget(branches, max_leaves)), max_parts, len(branches))
-    budget_leaves = arch_max_leaves()      # R60 规模预算守卫：拆完每张子图自己也必须达标
+    budget_leaves = arch_max_leaves()  # R60 规模预算守卫：拆完每张子图自己也必须达标
     best_groups: list[list[dict]] = []
     best_mm = 0.0
     for parts in range(2, hi + 1):
@@ -417,8 +412,7 @@ def plan_architecture_split(root: dict, *, max_leaves: int,
         geo = [_part_geometry({"label": "", "children": grp}) for grp in groups]
         if any(w <= 0 or h <= 0 for w, h, _, _ in geo):
             continue
-        mm = delivered_worst_mm([gpx for _, _, gpx, _ in geo],
-                                [(gw, gh) for gw, gh, _, _ in geo], _SPLIT_GAP_DESIGN_PX)
+        mm = delivered_worst_mm([gpx for _, _, gpx, _ in geo], [(gw, gh) for gw, gh, _, _ in geo], _SPLIT_GAP_DESIGN_PX)
         if mm > best_mm + 1e-9:
             best_mm, best_groups = mm, groups
     if best_mm <= single_mm + 1e-9:
@@ -456,8 +450,7 @@ def _render_architecture_split(root: dict) -> BytesIO | None:
     max_parts = _arch_split_max_parts()
 
     # ---- ① 份数决策（纯几何，不绘制） ------------------------------------------
-    groups, plan_mm, single_mm = plan_architecture_split(root, max_leaves=max_leaves,
-                                                        max_parts=max_parts)
+    groups, plan_mm, single_mm = plan_architecture_split(root, max_leaves=max_leaves, max_parts=max_parts)
     if len(groups) < 2:
         # 拆无可拆：拆完不会更好（高度反噬 / 单分支本身超预算）。保持单图，由
         # `_render_architecture_image_v2` 的那一条告警向用户说清还剩多少毫米。
@@ -474,13 +467,15 @@ def _render_architecture_split(root: dict) -> BytesIO | None:
     #      两处都是 R62 合并态复测新撞出的，**不属于** R61 登记的三条未落地项。
     logger.info(
         "架构图超预算，自动拆分为 %d 张子图（不拆 %.2fmm → 拆后 ≥%.2fmm，仍为单张 PNG）",
-        g, single_mm, plan_mm,
+        g,
+        single_mm,
+        plan_mm,
     )
 
     # ---- ③ 渲染子图（递归传 _allow_split=False 防二次拆图） ---------------------
     sub_streams: list[BytesIO] = []
     part_fonts: list[int] = []
-    part_roots: list[dict] = []   # 与 part_fonts 同序：第⑤步取「最差那张」的几何
+    part_roots: list[dict] = []  # 与 part_fonts 同序：第⑤步取「最差那张」的几何
     for k, grp in enumerate(groups, 1):
         part_root = {"label": f"{root_label}（第{k}/{g}部分）", "children": grp}
         part_px = _part_geometry(part_root)[2]
@@ -503,12 +498,10 @@ def _render_architecture_split(root: dict) -> BytesIO | None:
     # ---- ④ 用真实 PNG 尺寸复核（安全网）：预估一旦失守则宁可不拆 ----------------
     #      探针与落图尺寸理论上同源，但归一化/字体度量都可能让二者偏离；「拆图绝不
     #      变差」这条不变量必须靠**真实交付尺寸**成立，而不是靠预估自证。
-    real_sizes = [(im.width / ARCH_RENDER_SCALE, im.height / ARCH_RENDER_SCALE)
-                  for im in sub_imgs]
+    real_sizes = [(im.width / ARCH_RENDER_SCALE, im.height / ARCH_RENDER_SCALE) for im in sub_imgs]
     delivered = review_delivered_mm(part_fonts, real_sizes)
     if delivered <= single_mm:
-        logger.info("架构图拆图复核未通过（交付 %.2fmm ≤ 不拆 %.2fmm），回落单图",
-                    delivered, single_mm)
+        logger.info("架构图拆图复核未通过（交付 %.2fmm ≤ 不拆 %.2fmm），回落单图", delivered, single_mm)
         return None
     gap = int(_SPLIT_GAP_DESIGN_PX * ARCH_RENDER_SCALE)
     width = max(im.width for im in sub_imgs)
@@ -524,8 +517,12 @@ def _render_architecture_split(root: dict) -> BytesIO | None:
     _wa, _ha = stitch_geometry(real_sizes, _SPLIT_GAP_DESIGN_PX)
     logger.info(
         "架构图拆图交付: 份数=%d 整图=%dx%dpx 缩放绑定=%s 最差纸面=%.2fmm（不拆=%.2fmm）",
-        g, width, height, "高" if paper_height_binds(_wa, _ha) else "宽",
-        delivered, single_mm,
+        g,
+        width,
+        height,
+        "高" if paper_height_binds(_wa, _ha) else "宽",
+        delivered,
+        single_mm,
     )
 
     # ---- ⑤ 告警：口径 = 你真的拿到什么（R62：拆完再报，数字才是交付值） --------
@@ -538,7 +535,11 @@ def _render_architecture_split(root: dict) -> BytesIO | None:
     _worst_i = min(range(len(part_fonts)), key=lambda i: part_fonts[i])
     _pw, _ph, _peff, _pnv = _part_geometry(part_roots[_worst_i])
     _msg = compose_readability_warning(
-        _pw, _peff, delivered, _min_mm, _pnv,
+        _pw,
+        _peff,
+        delivered,
+        _min_mm,
+        _pnv,
         architecture_over_budget(root),
         (arch_max_leaves(), arch_max_nodes()),
         delivered_parts=g,
@@ -578,10 +579,7 @@ def architecture_over_budget(root: dict) -> tuple[bool, int, int]:
     return over, leaves, nodes
 
 
-
-
-def paper_font_mm(font_px: float, canvas_w: int, canvas_h: int = 0,
-                  title_h: int = 0) -> float:
+def paper_font_mm(font_px: float, canvas_w: int, canvas_h: int = 0, title_h: int = 0) -> float:
     """估算 DOCX 插入后图内文字的**纸面高度**（mm）。
 
     与 `routers/export.py:_fit_image_cm` 同口径：自然尺寸 = 像素 × 2.54 / DPI，
@@ -591,14 +589,20 @@ def paper_font_mm(font_px: float, canvas_w: int, canvas_h: int = 0,
     # R62 起委派公共层（同一判据不留两份）：双上限口径与 scale/DPI 全部由参数
     # 带下去，本模块的四个常量仍是唯一事实源，护栏逐例对账二者等价。
     return _common_paper_font_mm(
-        font_px, canvas_w, canvas_h, title_h,
-        scale=ARCH_RENDER_SCALE, dpi=ARCH_OUTPUT_DPI,
-        col_cm=PAPER_COLUMN_WIDTH_CM, max_h_cm=PAPER_MAX_HEIGHT_CM,
+        font_px,
+        canvas_w,
+        canvas_h,
+        title_h,
+        scale=ARCH_RENDER_SCALE,
+        dpi=ARCH_OUTPUT_DPI,
+        col_cm=PAPER_COLUMN_WIDTH_CM,
+        max_h_cm=PAPER_MAX_HEIGHT_CM,
     )
 
 
-def resolve_paper_font_px(canvas_w: int, *, base: int, ceiling: int, min_mm: float,
-                          canvas_h: int = 0, title_h: int = 0) -> int:
+def resolve_paper_font_px(
+    canvas_w: int, *, base: int, ceiling: int, min_mm: float, canvas_h: int = 0, title_h: int = 0
+) -> int:
     """把字号抬到「纸面不低于 min_mm」，但**永不改小、永不越过 ceiling**。
 
     `min_mm` 是**必填关键字参数**，刻意不给默认值：默认值只能取「常量」或「环境」
@@ -613,15 +617,14 @@ def resolve_paper_font_px(canvas_w: int, *, base: int, ceiling: int, min_mm: flo
     _min = min_mm
     if _min <= 0 or canvas_w <= 0:
         return base
-    unit = paper_font_mm(1000.0, canvas_w, canvas_h, title_h)   # 每 1000px 字号换多少毫米
+    unit = paper_font_mm(1000.0, canvas_w, canvas_h, title_h)  # 每 1000px 字号换多少毫米
     if unit <= 0:
         return base
     want = int(math.ceil(_min * 1000.0 / unit))
     return int(min(max(want, base), ceiling))
 
 
-def resolve_leaf_vertical_font_px(canvas_w: int, labels, *, min_mm: float,
-                                  canvas_h: int = 0, title_h: int = 0) -> int:
+def resolve_leaf_vertical_font_px(canvas_w: int, labels, *, min_mm: float, canvas_h: int = 0, title_h: int = 0) -> int:
     """竖排叶子字号：纸面下限之上再加一条硬约束 —— **放大不得新增省略号**。
 
     字号越大，「每列字数 × 可容纳列数」越小；不加这条约束，长标签的图会被自适应
@@ -635,12 +638,18 @@ def resolve_leaf_vertical_font_px(canvas_w: int, labels, *, min_mm: float,
     box_w = max(0, LEAF_VERTICAL_W - 2 * LEAF_VERTICAL_PAD_X)
     box_h = max(0, LEAF_VERTICAL_H - 2 * LEAF_VERTICAL_PAD_Y)
     longest = max((len(str(s or "").strip()) for s in labels), default=0)
-    font = resolve_paper_font_px(canvas_w, base=LEAF_VERTICAL_FONT_SIZE,
-                                 ceiling=LEAF_VERTICAL_FONT_MAX, min_mm=min_mm,
-                                 canvas_h=canvas_h, title_h=title_h)
+    font = resolve_paper_font_px(
+        canvas_w,
+        base=LEAF_VERTICAL_FONT_SIZE,
+        ceiling=LEAF_VERTICAL_FONT_MAX,
+        min_mm=min_mm,
+        canvas_h=canvas_h,
+        title_h=title_h,
+    )
     while font > LEAF_VERTICAL_FONT_SIZE:
         _per_col, _max_cols, capacity, _rs, _cs = _vertical_text_capacity(
-            box_w, box_h, max(12, font), LEAF_VERTICAL_CHAR_GAP)
+            box_w, box_h, max(12, font), LEAF_VERTICAL_CHAR_GAP
+        )
         if longest <= capacity:
             break
         font -= 1
@@ -691,26 +700,38 @@ def _build_nodes(root: dict, vertical_mode: bool) -> list[dict]:
         used_ids.add(candidate)
         return candidate
 
-    def _append(node: dict, nid: str, x: float, w: int, h: int, depth: int,
-                has_children: bool, parent_id: str | None, vertical: bool) -> float:
+    def _append(
+        node: dict,
+        nid: str,
+        x: float,
+        w: int,
+        h: int,
+        depth: int,
+        has_children: bool,
+        parent_id: str | None,
+        vertical: bool,
+    ) -> float:
         label = str(node.get("label") or node.get("name") or "").strip()
-        nodes_pos.append({
-            "id": nid,
-            "label": label,
-            "x": x,
-            "y": 0,
-            "w": w,
-            "h": h,
-            "depth": depth,
-            "has_children": has_children,
-            "parent_id": parent_id,
-            "highlight": _is_highlighted(node),
-            "vertical": vertical,
-        })
+        nodes_pos.append(
+            {
+                "id": nid,
+                "label": label,
+                "x": x,
+                "y": 0,
+                "w": w,
+                "h": h,
+                "depth": depth,
+                "has_children": has_children,
+                "parent_id": parent_id,
+                "highlight": _is_highlighted(node),
+                "vertical": vertical,
+            }
+        )
         return x + w
 
-    def _dfs(node: dict, depth: int, x_start: float, parent_id: str | None = None,
-             visited: set | None = None) -> tuple[float, int]:
+    def _dfs(
+        node: dict, depth: int, x_start: float, parent_id: str | None = None, visited: set | None = None
+    ) -> tuple[float, int]:
         """DFS，返回 (本子树右边界, 本子树根节点宽度)。
 
         右边界**不含**尾随间距 —— 由调用方用 `_gap_after()` 补，避免旧实现
@@ -788,8 +809,7 @@ def _assign_rows_y(nodes_pos: list[dict]) -> None:
 
 def _vertical_candidates(nodes: list[dict]) -> int:
     """可竖排叶子数（depth ≥ LEAF_VERTICAL_MIN_DEPTH 且无子节点）—— 唯一口径。"""
-    return sum(1 for n in nodes
-               if not n["has_children"] and n["depth"] >= LEAF_VERTICAL_MIN_DEPTH)
+    return sum(1 for n in nodes if not n["has_children"] and n["depth"] >= LEAF_VERTICAL_MIN_DEPTH)
 
 
 def count_vertical_leaf_candidates(root: dict) -> int:
@@ -801,11 +821,16 @@ def count_vertical_leaf_candidates(root: dict) -> int:
     return _vertical_candidates(_build_nodes(root, False))
 
 
-def compose_readability_warning(canvas_w: int, eff_px: int, eff_mm: float,
-                                min_mm: float, vertical_candidates: int,
-                                budget: tuple[bool, int, int],
-                                caps: tuple[int, int],
-                                delivered_parts: int = 0) -> str:
+def compose_readability_warning(
+    canvas_w: int,
+    eff_px: int,
+    eff_mm: float,
+    min_mm: float,
+    vertical_candidates: int,
+    budget: tuple[bool, int, int],
+    caps: tuple[int, int],
+    delivered_parts: int = 0,
+) -> str:
     """把「纸面字号不足」与「规模超预算」两条诊断合并为**一条**告警文本。
 
     为什么合并：二者是同因一果 —— 树太宽/太大是**因**，DOCX 按 16cm 栏等比缩放后
@@ -840,8 +865,7 @@ def compose_readability_warning(canvas_w: int, eff_px: int, eff_mm: float,
         )
     if over:
         suggest = max(1, (leaves + max_leaves - 1) // max_leaves) if max_leaves > 0 else 1
-        done = ("（本轮已自动拆分为 %d 张子图）" % delivered_parts
-                if delivered_parts >= 2 else "")
+        done = "（本轮已自动拆分为 %d 张子图）" % delivered_parts if delivered_parts >= 2 else ""
         parts.append(
             "架构图超出规模预算（叶子 %d > %d 或 节点 %d > %d），建议拆分为约 %d 张子图%s"
             % (leaves, max_leaves, nodes, max_nodes, suggest, done)
@@ -866,8 +890,7 @@ def horizontal_canvas_width(root: dict) -> int:
     return int(max(n["x"] + n["w"] for n in nodes) + CANVAS_PAD_X)
 
 
-def resolve_leaf_vertical_mode(root: dict, *, min_mm: float | None = None,
-                               auto_vertical: bool | None = None) -> bool:
+def resolve_leaf_vertical_mode(root: dict, *, min_mm: float | None = None, auto_vertical: bool | None = None) -> bool:
     """自动判定本次出图是否启用叶子层竖排。
 
     两条**相互独立、可分别关闭**的判据（用关键字参数注入即可单独回归）：
@@ -889,8 +912,10 @@ def resolve_leaf_vertical_mode(root: dict, *, min_mm: float | None = None,
     return candidates > vertical_leaf_threshold()
 
 
-def _layout_architecture_tree(root: dict, vertical: bool | None = None,
-                              ) -> tuple[list[dict], int, int]:
+def _layout_architecture_tree(
+    root: dict,
+    vertical: bool | None = None,
+) -> tuple[list[dict], int, int]:
     """为架构树节点计算坐标（自顶向下、横向展开）。
 
     `vertical=None`（默认）按叶子数自动选版式；显式传 True/False 锁定版式
@@ -905,6 +930,7 @@ def _layout_architecture_tree(root: dict, vertical: bool | None = None,
     max_x = max((n["x"] + n["w"] for n in nodes_pos), default=0)
     max_y = max((n["y"] + n["h"] for n in nodes_pos), default=0)
     return nodes_pos, int(max_x + CANVAS_PAD_X), int(max_y + CANVAS_PAD_Y)
+
 
 @_render_hq
 def _render_architecture_image_v2(data: dict, *, _allow_split: bool = True) -> BytesIO | None:
@@ -944,7 +970,7 @@ def _render_architecture_image_v2(data: dict, *, _allow_split: bool = True) -> B
 
     # 高度至少包含标题
     title_h = 56
-    canvas_h = height      # 节点区高度；纸面换算要用「节点区 + 标题带」的总高
+    canvas_h = height  # 节点区高度；纸面换算要用「节点区 + 标题带」的总高
     height += title_h
 
     # 使用 2.5x 缩放渲染 + @_render_hq 保持原分辨率并添加 300 DPI 元数据
@@ -958,25 +984,33 @@ def _render_architecture_image_v2(data: dict, *, _allow_split: bool = True) -> B
     #    ③ 竖排叶子不得因放大而新增省略号（`resolve_leaf_vertical_font_px` 内含此约束）。
     _min_mm = paper_font_min_mm()
     _leaf_labels = [n["label"] for n in nodes_pos if n.get("vertical")]
-    font_title_px = resolve_paper_font_px(width, base=TITLE_FONT_BASE, ceiling=TITLE_FONT_MAX,
-                                          canvas_h=canvas_h, title_h=title_h, min_mm=_min_mm)
-    font_node_px = resolve_paper_font_px(width, base=NODE_FONT_BASE, ceiling=NODE_FONT_MAX,
-                                         canvas_h=canvas_h, title_h=title_h, min_mm=_min_mm)
-    font_leaf_px = resolve_leaf_vertical_font_px(width, _leaf_labels, canvas_h=canvas_h,
-                                                 title_h=title_h, min_mm=_min_mm)
+    font_title_px = resolve_paper_font_px(
+        width, base=TITLE_FONT_BASE, ceiling=TITLE_FONT_MAX, canvas_h=canvas_h, title_h=title_h, min_mm=_min_mm
+    )
+    font_node_px = resolve_paper_font_px(
+        width, base=NODE_FONT_BASE, ceiling=NODE_FONT_MAX, canvas_h=canvas_h, title_h=title_h, min_mm=_min_mm
+    )
+    font_leaf_px = resolve_leaf_vertical_font_px(
+        width, _leaf_labels, canvas_h=canvas_h, title_h=title_h, min_mm=_min_mm
+    )
     _eff_px = font_leaf_px if vertical_mode else font_node_px
     _eff_mm = paper_font_mm(_eff_px, width, canvas_h, title_h)
     # 单一告警出口（R60）：字号不足与规模超预算合并成一条，判据本身是纯函数
     # （`compose_readability_warning`），可脱离渲染路径直接变异验证。
-    _msg = compose_readability_warning(width, _eff_px, _eff_mm, _min_mm,
-                                       len(_leaf_labels), architecture_over_budget(root),
-                                       (arch_max_leaves(), arch_max_nodes()))
+    _msg = compose_readability_warning(
+        width,
+        _eff_px,
+        _eff_mm,
+        _min_mm,
+        len(_leaf_labels),
+        architecture_over_budget(root),
+        (arch_max_leaves(), arch_max_nodes()),
+    )
     if _msg and _allow_split:
         # 只有「字号封顶仍印不清」或「超出规模预算」才到这里，普通图不进本分支 ⇒ 零噪音。
         # `_allow_split=False` 即子图递归渲染：告警由父级 `_render_architecture_split`
         # 统一发 1 条，避免 N 张子图各发一条（R60 断言「超预算只告警 1 次」）。
         logger.warning(_msg)
-
 
     font_title = _image_font(int(font_title_px * scale), bold=True)
     font_node = _image_font(int(font_node_px * scale), bold=True)
@@ -1016,9 +1050,7 @@ def _render_architecture_image_v2(data: dict, *, _allow_split: bool = True) -> B
         ex = n["x"] + n["w"] / 2
         ey = n["y"] + title_h
         mid_y = (sy + ey) / 2
-        draw.line(
-            [(sx, sy), (sx, mid_y), (ex, mid_y), (ex, ey)], fill=edge_color, width=int(2 * scale)
-        )
+        draw.line([(sx, sy), (sx, mid_y), (ex, mid_y), (ex, ey)], fill=edge_color, width=int(2 * scale))
         # 子端下箭头：尖端触顶边中点，底边在上方 arrow_h 处
         draw.polygon(
             [(ex, ey), (ex - arrow_w, ey - arrow_h), (ex + arrow_w, ey - arrow_h)],
@@ -1049,14 +1081,18 @@ def _render_architecture_image_v2(data: dict, *, _allow_split: bool = True) -> B
         x, y, w, h = n["x"], n["y"] + title_h, n["w"], n["h"]
         draw.rounded_rectangle(
             [x + shadow_dx, y + shadow_dy, x + w + shadow_dx, y + h + shadow_dy],
-            radius=node_radius, fill=ARCH_SHADOW_COLOR,
+            radius=node_radius,
+            fill=ARCH_SHADOW_COLOR,
         )
     for n in nodes_pos:
         fill_c, text_c, stroke_c = node_style[n["id"]]
         x, y, w, h = n["x"], n["y"] + title_h, n["w"], n["h"]
         draw.rounded_rectangle(
-            [x, y, x + w, y + h], radius=node_radius,
-            fill=fill_c, outline=stroke_c, width=stroke_width,
+            [x, y, x + w, y + h],
+            radius=node_radius,
+            fill=fill_c,
+            outline=stroke_c,
+            width=stroke_width,
         )
         if n.get("vertical"):
             # 叶子竖排：文字自上而下、列自右向左，汉字保持直立

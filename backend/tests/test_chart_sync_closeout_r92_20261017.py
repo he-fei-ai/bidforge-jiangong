@@ -14,6 +14,7 @@ chart_predictions，则前端 PNG 键（旧登记码）与后端内联码（新�
 3. 两条边界判据：numbering 只重写子标题行不动围栏 → **刻意不接线**；services 层
    不得 import routers → repair_agent/repair_record 用注入回调（分层合规锁）。
 """
+
 import asyncio
 import json
 from pathlib import Path
@@ -46,6 +47,7 @@ class FakeDb:
         class _FakeCur:
             rowcount = 1
             lastrowid = 1
+
         return _FakeCur()
 
     async def commit(self):
@@ -66,6 +68,7 @@ VALID_FLOWCHART = "flowchart TD\n    A --> B\n    B --> C"
 
 
 # ---------- 组 A：resync_inline_charts（DB 版唯一出口）行为契约 ----------
+
 
 def test_resync_fence_rewrite_rows_follow_content():
     """核心不变式：围栏内文字改写后重登记 → INSERT 的 mermaid_code 逐字等于最终正文内联码。"""
@@ -128,13 +131,13 @@ def test_register_delegates_to_resync():
 
 # ---------- 组 B：resync_inline_chart_rows（锁外纯计算版）契约 ----------
 
+
 def test_resync_rows_is_pure_no_db():
     """纯计算版不访问 DB：FakeDb 零 execute 调用，产物是 (正文, rows)。"""
     db = FakeDb()
     content = "前文\n```mermaid\n" + VALID_FLOWCHART + "\n```\n后文"
     # 纯函数不接收 db —— 若误加 DB 访问会在无 db 参数时 TypeError，此处仅按签名调用
-    new_content, rows = resync_inline_chart_rows(
-        "sch", "sec-pure", content, enforce_limits=False)
+    new_content, rows = resync_inline_chart_rows("sch", "sec-pure", content, enforce_limits=False)
     assert new_content == content
     assert isinstance(rows, list) and len(rows) == 1
     assert db.rows == []  # 未触碰任何 DB
@@ -150,6 +153,7 @@ def test_resync_rows_matches_db_version_registration():
 
 
 # ---------- 组 C：五个正文裸写点 + 回滚链 接线静态锁 ----------
+
 
 def test_sse_autofix_rewires_chart_rows():
     src = _src("routers/sse_handlers.py")
@@ -200,6 +204,7 @@ def test_sections_shrink_wires_resync():
 
 
 # ---------- 组 D：边界判据（刻意不接线 + 分层合规） ----------
+
 
 def test_numbering_does_not_wire_resync():
     """编号规范化只重写子标题行、不动代码围栏 → 无需重登记（判据锁，防误接）。"""

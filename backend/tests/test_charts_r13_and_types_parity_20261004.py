@@ -22,6 +22,7 @@
    （对齐既有 ``TestExportGateHighSeverityParity`` 的做法；前端测试不便读盘，
    见 AGENTS.md §6「本仓前端未装 @types/node」）。
 """
+
 import ast
 import re
 from pathlib import Path
@@ -40,7 +41,8 @@ FRONT_WB_DIR = REPO_ROOT / "frontend" / "src" / "pages" / "schemeWorkbench"
 def _front_page_sources() -> str:
     """facade 页面 + schemeWorkbench/ 子模块聚合源码（拆分后等价读取范围）。"""
     parts = [FRONT_PAGE.read_text(encoding="utf-8")]
-    for p in sorted(list(FRONT_WB_DIR.glob("*.ts")) + list(FRONT_WB_DIR.glob("*.tsx"))):
+    # ✅ R176（2026-11-04）：覆盖 schemeWorkbench/tabs/ 拆分后的子模块。
+    for p in sorted(list(FRONT_WB_DIR.rglob("*.ts")) + list(FRONT_WB_DIR.rglob("*.tsx"))):
         parts.append(p.read_text(encoding="utf-8"))
     return "\n".join(parts)
 
@@ -71,12 +73,14 @@ class TestChartsR13Guards:
         （同 R39 ①「把故障伪装成业务空数据」的教训）。
         """
         from app.routers.charts import list_charts
+
         with pytest.raises(HTTPException) as ei:
             await list_charts("scheme-r13", db=_NoneDB())
         assert ei.value.status_code == 503
 
     async def test_load_section_none_cursor_is_503(self):
         from app.routers.charts import _load_section
+
         with pytest.raises(HTTPException) as ei:
             await _load_section(_NoneDB(), "sec-r13")
         assert ei.value.status_code == 503
@@ -103,8 +107,7 @@ class TestChartsR13Guards:
             await generate_ai_image({"section_id": "sec-r13"}, db=_NoneDB())
         assert ei.value.status_code == 409
 
-    async def test_fix_mermaid_writeback_none_cursor_fails_soft(
-            self, db_conn, monkeypatch, caplog):
+    async def test_fix_mermaid_writeback_none_cursor_fails_soft(self, db_conn, monkeypatch, caplog):
         """写回路径：SELECT 返回 None → 沿用单事务 fail-soft
 
         （rollback + written_back=false + WARNING），不得让 AttributeError
@@ -120,11 +123,13 @@ class TestChartsR13Guards:
             "INSERT INTO chart_predictions (id, section_id, scheme_id, chart_type,"
             " needed, purpose, priority, status, data_json) VALUES"
             " ('pid-r13','sec1','s1','flowchart',1,'测试',5,'done',?)",
-            (build_chart_envelope(code="graph TD\n    A --> B", title="流程"),))
+            (build_chart_envelope(code="graph TD\n    A --> B", title="流程"),),
+        )
         await db_conn.commit()
 
         async def _fake_chat(messages, **kw):
             return "graph TD\n    A --> B\n    B --> C"
+
         monkeypatch.setattr(charts_mod, "chat_with_fallback", _fake_chat)
 
         class _WriteBackNoneDB:
@@ -146,8 +151,8 @@ class TestChartsR13Guards:
 
         with caplog.at_level(logging.WARNING, logger="app.routers.charts"):
             res = await fix_mermaid(
-                {"code": "graph TD\n    A --> B", "prediction_id": "pid-r13"},
-                db=_WriteBackNoneDB(db_conn))
+                {"code": "graph TD\n    A --> B", "prediction_id": "pid-r13"}, db=_WriteBackNoneDB(db_conn)
+            )
 
         # 响应契约：AI 修复结果照常回传（validated），但写回如实为 false
         assert res["validated"] is True
@@ -155,22 +160,22 @@ class TestChartsR13Guards:
         assert res["written_back"] is False
         assert res["content_updated"] is False
         # 库里必须仍是坏代码（证明没有半截写入 / 没有谎报）
-        cur = await db_conn.execute(
-            "SELECT data_json FROM chart_predictions WHERE id='pid-r13'")
+        cur = await db_conn.execute("SELECT data_json FROM chart_predictions WHERE id='pid-r13'")
         stored = (await cur.fetchone())[0]
         assert "B --> C" not in stored
         # 可诊断性：日志点名 R13，而不是含糊的 'NoneType' AttributeError
-        assert any("R13" in r.message for r in caplog.records), (
-            "写回失败日志未点名 R13，排障时无法区分数据库故障与修复失败")
+        assert any(
+            "R13" in r.message for r in caplog.records
+        ), "写回失败日志未点名 R13，排障时无法区分数据库故障与修复失败"
 
-    async def test_fix_mermaid_unvalidated_result_never_writes(
-            self, db_conn, monkeypatch):
+    async def test_fix_mermaid_unvalidated_result_never_writes(self, db_conn, monkeypatch):
         """未过校验的候选一律不写库（既有契约回归锁，防止本轮守卫改动顺手放宽）。"""
         import app.routers.charts as charts_mod
         from app.routers.charts import fix_mermaid
 
         async def _bad_chat(messages, **kw):
             return "这不是合法的 Mermaid 也不是 JSON"
+
         monkeypatch.setattr(charts_mod, "chat_with_fallback", _bad_chat)
 
         res = await fix_mermaid({"code": "graph TD\n    A --> B"}, db=db_conn)
@@ -203,16 +208,13 @@ class TestEveryCursorAssignIsGuarded:
             return False
 
         def _uses_name(node, name: str) -> bool:
-            return any(isinstance(n, ast.Name) and n.id == name
-                       for n in ast.walk(node))
+            return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(node))
 
         def _is_execute_assign(node) -> bool:
             if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Await):
                 return False
             call = node.value.value
-            return (isinstance(call, ast.Call)
-                    and isinstance(call.func, ast.Attribute)
-                    and call.func.attr == "execute")
+            return isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "execute"
 
         def _ternary_guard(node, name: str) -> bool:
             """`await cur.fetchall() if cur is not None else []` 形态的**行内守卫**。
@@ -225,9 +227,12 @@ class TestEveryCursorAssignIsGuarded:
                 if not isinstance(n, ast.IfExp):
                     continue
                 t = n.test
-                if isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) \
-                        and t.left.id == name \
-                        and any(isinstance(o, (ast.Is, ast.IsNot)) for o in t.ops):
+                if (
+                    isinstance(t, ast.Compare)
+                    and isinstance(t.left, ast.Name)
+                    and t.left.id == name
+                    and any(isinstance(o, (ast.Is, ast.IsNot)) for o in t.ops)
+                ):
                     return True
             return False
 
@@ -253,14 +258,17 @@ class TestEveryCursorAssignIsGuarded:
                 stmt = parent
             if container is None:
                 return False
-            for later in container[container.index(stmt) + 1:]:
+            for later in container[container.index(stmt) + 1 :]:
                 if _ternary_guard(later, name):
                     return True
                 if isinstance(later, ast.If):
                     t = later.test
-                    if isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) \
-                            and t.left.id == name \
-                            and any(isinstance(o, (ast.Is, ast.IsNot)) for o in t.ops):
+                    if (
+                        isinstance(t, ast.Compare)
+                        and isinstance(t.left, ast.Name)
+                        and t.left.id == name
+                        and any(isinstance(o, (ast.Is, ast.IsNot)) for o in t.ops)
+                    ):
                         return True
                     if _uses_name(later, name):
                         return False
@@ -292,11 +300,9 @@ class TestEveryCursorAssignIsGuarded:
         return bad
 
     def test_no_unguarded_execute_in_charts_router(self):
-        src = (REPO_ROOT / "backend" / "app" / "routers" / "charts.py").read_text(
-            encoding="utf-8")
+        src = (REPO_ROOT / "backend" / "app" / "routers" / "charts.py").read_text(encoding="utf-8")
         bad = self._unguarded_assigns(src)
-        assert not bad, (
-            "charts.py 存在未判空的 db.execute 游标赋值（R13 回归）：" + ", ".join(bad))
+        assert not bad, "charts.py 存在未判空的 db.execute 游标赋值（R13 回归）：" + ", ".join(bad)
 
     def test_guard_detector_itself_catches_bare_assign(self):
         """护栏防空转：去掉守卫的样本必须被检出（否则静态锁等于没有）。"""
@@ -341,8 +347,9 @@ class TestEveryCursorAssignIsGuarded:
             "        return []\n"
             "    return rows\n"
         )
-        assert self._unguarded_assigns(use_before_check) == ["L2: cur"], (
-            "先用游标后判空必须被检出（守卫来得太晚 = 形同虚设）")
+        assert self._unguarded_assigns(use_before_check) == [
+            "L2: cur"
+        ], "先用游标后判空必须被检出（守卫来得太晚 = 形同虚设）"
 
 
 # ============================================================
@@ -353,6 +360,7 @@ class TestChartTypesEndpointParity:
 
     async def _payload(self):
         from app.routers.charts import list_chart_types
+
         return await list_chart_types()
 
     async def test_keys_match_all_whitelists(self):
@@ -362,8 +370,8 @@ class TestChartTypesEndpointParity:
         payload = await self._payload()
         keys = {t["key"] for t in payload["types"]}
         assert keys == set(_ALL_CHART_TYPES), (
-            f"/types 端点与登记侧白名单漂移：端点={sorted(keys)} "
-            f"登记侧={sorted(_ALL_CHART_TYPES)}")
+            f"/types 端点与登记侧白名单漂移：端点={sorted(keys)} " f"登记侧={sorted(_ALL_CHART_TYPES)}"
+        )
         assert keys == set(PIL_RENDERABLE_CHART_TYPES)
         assert len(keys) == 7, "7 类图表值域被改动（AGENTS.md §4.3 唯一值域）"
 
@@ -372,8 +380,7 @@ class TestChartTypesEndpointParity:
 
         payload = await self._payload()
         labels = {t["key"]: t["label"] for t in payload["types"]}
-        assert labels == CHART_TYPE_LABELS, (
-            f"/types 中文名与 CHART_TYPE_LABELS 漂移：{labels} vs {CHART_TYPE_LABELS}")
+        assert labels == CHART_TYPE_LABELS, f"/types 中文名与 CHART_TYPE_LABELS 漂移：{labels} vs {CHART_TYPE_LABELS}"
 
     async def test_descriptions_non_empty_and_unique(self):
         payload = await self._payload()
@@ -385,14 +392,15 @@ class TestChartTypesEndpointParity:
         """前端 `chartTypes.ts::RENDERABLE_CHART_TYPES` 必须与后端同 7 类
         （端点自身与后端一致性由上面两条断言传递保证，三者两两同值）。"""
         src = FRONT_CHART_TYPES.read_text(encoding="utf-8")
-        m = re.search(r"RENDERABLE_CHART_TYPES[^=]*=\s*new Set\(\[(.*?)\]\)",
-                      src, re.S)
+        m = re.search(r"RENDERABLE_CHART_TYPES[^=]*=\s*new Set\(\[(.*?)\]\)", src, re.S)
         assert m, "未在 chartTypes.ts 找到 RENDERABLE_CHART_TYPES 定义"
         front_keys = set(re.findall(r'"([a-z_]+)"', m.group(1)))
 
         from app.routers._chart_pipeline import _ALL_CHART_TYPES
-        assert front_keys == set(_ALL_CHART_TYPES), (
-            f"前后端白名单漂移：前端={sorted(front_keys)} 后端={sorted(_ALL_CHART_TYPES)}")
+
+        assert front_keys == set(
+            _ALL_CHART_TYPES
+        ), f"前后端白名单漂移：前端={sorted(front_keys)} 后端={sorted(_ALL_CHART_TYPES)}"
 
 
 # ============================================================
@@ -404,8 +412,7 @@ class TestExportIssueLabelParity:
     @staticmethod
     def _frontend_labels() -> dict[str, str]:
         src = _front_page_sources()
-        m = re.search(
-            r"const EXPORT_ISSUE_LABEL[^=]*=\s*\{(.*?)\n\};", src, re.S)
+        m = re.search(r"const EXPORT_ISSUE_LABEL[^=]*=\s*\{(.*?)\n\};", src, re.S)
         assert m, "未在 SchemeWorkbenchPage.tsx（含 schemeWorkbench/ 子模块）找到 EXPORT_ISSUE_LABEL 定义"
         pairs = re.findall(r'([A-Za-z_][A-Za-z0-9_]*)\s*:\s*"([^"]*)"', m.group(1))
         return dict(pairs)
@@ -415,8 +422,7 @@ class TestExportIssueLabelParity:
 
         labels = self._frontend_labels()
         missing = set(_EXPORT_ISSUE_RULE_MAP) - set(labels)
-        assert not missing, (
-            "导出预检问题类型缺中文标签（界面会显示英文裸代号）：" + ", ".join(sorted(missing)))
+        assert not missing, "导出预检问题类型缺中文标签（界面会显示英文裸代号）：" + ", ".join(sorted(missing))
 
     def test_no_frontend_dead_labels(self):
         """✅ R168 反向棘轮：前端不得残留后端不产出的死标签。
@@ -429,9 +435,9 @@ class TestExportIssueLabelParity:
 
         labels = self._frontend_labels()
         extra = set(labels) - set(_EXPORT_ISSUE_RULE_MAP)
-        assert not extra, (
-            "导出预检问题标签含后端不产出的死键（不可达翻译，应随类型摘除同步删除）："
-            + ", ".join(sorted(extra)))
+        assert not extra, "导出预检问题标签含后端不产出的死键（不可达翻译，应随类型摘除同步删除）：" + ", ".join(
+            sorted(extra)
+        )
 
     def test_labels_are_chinese(self):
         """标签必须是中文 —— 防止用英文代号「补全」使 parity 形同虚设。"""

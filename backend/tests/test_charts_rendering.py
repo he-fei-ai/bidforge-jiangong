@@ -1,4 +1,5 @@
 """图表渲染模块测试 — 覆盖 BUG-A~E 修复及增强"""
+
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 # ---------- BUG-A: charts.py skip_http 参数传递 ----------
+
 
 def test_skip_http_passed_to_get_or_render():
     """BUG-A: render_chart API 的 skip_http 参数应传递到 get_or_render"""
@@ -46,6 +48,7 @@ def test_skip_http_default_false():
 
 # ---------- BUG-B: ChartCache.set() 覆写时 total_size 同步 ----------
 
+
 def test_cache_overwrite_updates_total_size():
     """BUG-B: 覆写已缓存条目时 total_size 应按差值调整"""
     from app.services.ai.mermaid_renderer import ChartCache
@@ -81,6 +84,7 @@ def test_cache_overwrite_multiple_keys():
 
 # ---------- BUG-C: ChartCache.get() misses 计数器线程安全 ----------
 
+
 def test_cache_get_miss_increments_misses():
     """BUG-C: 缓存未命中时 misses 应正确递增"""
     from app.services.ai.mermaid_renderer import ChartCache
@@ -110,6 +114,7 @@ def test_cache_get_hit_increments_hits():
 
 
 # ---------- BUG-D: flowchart_json_to_mermaid 决策节点引号 ----------
+
 
 def test_decision_node_has_quoted_label():
     """BUG-D: 决策节点标签应加引号，与其他节点类型一致"""
@@ -149,6 +154,7 @@ def test_decision_node_label_with_special_chars():
 
 # ---------- BUG-E: mermaid_layout.py 不再调用 img.tobytes() ----------
 
+
 def test_layout_render_does_not_call_tobytes():
     """BUG-E: 布局图渲染不应调用 img.tobytes()（内存浪费）"""
     from app.services.ai.mermaid_layout import _render_layout_image_v2
@@ -167,6 +173,7 @@ def test_layout_render_does_not_call_tobytes():
 
 
 # ---------- 死代码清理验证 ----------
+
 
 def test_flowchart_render_no_dead_code():
     """验证流程图渲染不因死代码移除而报错"""
@@ -229,6 +236,7 @@ def test_gantt_render_no_dead_code():
 
 # ---------- ChartCache 综合测试 ----------
 
+
 def test_cache_clear_resets_total_size():
     """ChartCache.clear() 应重置 total_size"""
     from app.services.ai.mermaid_renderer import ChartCache
@@ -280,9 +288,11 @@ def test_cache_chart_type_in_key():
 
 # ---------- render_mermaid_to_bytes 基硜测试 ----------
 
+
 def test_render_empty_code_returns_none():
     """空代码应返回 None"""
     from app.services.ai.mermaid_renderer import render_mermaid_to_bytes
+
     assert render_mermaid_to_bytes("", "flowchart") is None
     assert render_mermaid_to_bytes(None, "flowchart") is None
     assert render_mermaid_to_bytes("   ", "flowchart") is None
@@ -291,6 +301,7 @@ def test_render_empty_code_returns_none():
 def test_render_flowchart_skip_http():
     """skip_http=True 时应跳过 HTTP Service，直接走 PIL v2"""
     from app.services.ai.mermaid_renderer import render_mermaid_to_bytes
+
     code = 'flowchart TD\n    A["开始"] --> B["结束"]'
     result = render_mermaid_to_bytes(code, "flowchart", skip_http=True)
     assert result is not None
@@ -300,11 +311,14 @@ def test_render_flowchart_skip_http():
 def test_render_gantt_skip_http():
     """甘特图 skip_http=True 时应走 PIL v2"""
     from app.services.ai.mermaid_renderer import render_mermaid_to_bytes
-    code = json.dumps({
-        "title": "测试",
-        "totalDays": 10,
-        "tasks": [{"id": 1, "name": "任务A", "start": 1, "end": 5}],
-    })
+
+    code = json.dumps(
+        {
+            "title": "测试",
+            "totalDays": 10,
+            "tasks": [{"id": 1, "name": "任务A", "start": 1, "end": 5}],
+        }
+    )
     result = render_mermaid_to_bytes(code, "gantt", skip_http=True)
     assert result is not None
     assert len(result.getvalue()) > 100
@@ -313,10 +327,13 @@ def test_render_gantt_skip_http():
 def test_render_architecture_skip_http():
     """架构图 skip_http=True 时应走 PIL v2"""
     from app.services.ai.mermaid_renderer import render_mermaid_to_bytes
-    code = json.dumps({
-        "label": "项目部",
-        "children": [{"label": "技术部"}, {"label": "安全部"}],
-    })
+
+    code = json.dumps(
+        {
+            "label": "项目部",
+            "children": [{"label": "技术部"}, {"label": "安全部"}],
+        }
+    )
     result = render_mermaid_to_bytes(code, "architecture", skip_http=True)
     assert result is not None
     assert len(result.getvalue()) > 100
@@ -325,13 +342,16 @@ def test_render_architecture_skip_http():
 def test_render_comparison_skip_http():
     """对比图 skip_http=True 时应走 PIL v2"""
     from app.services.ai.mermaid_renderer import render_mermaid_to_bytes
-    code = json.dumps({
-        "title": "方案对比",
-        "items": [
-            {"label": "方案A", "value": 40},
-            {"label": "方案B", "value": 60},
-        ],
-    })
+
+    code = json.dumps(
+        {
+            "title": "方案对比",
+            "items": [
+                {"label": "方案A", "value": 40},
+                {"label": "方案B", "value": 60},
+            ],
+        }
+    )
     result = render_mermaid_to_bytes(code, "comparison", skip_http=True)
     assert result is not None
     assert len(result.getvalue()) > 100
@@ -340,10 +360,13 @@ def test_render_comparison_skip_http():
 def test_render_layout_skip_http():
     """布局图 skip_http=True 时应走 PIL v2"""
     from app.services.ai.mermaid_renderer import render_mermaid_to_bytes
-    code = json.dumps({
-        "title": "总平面布置",
-        "zones": [{"name": "办公区", "category": "办公区"}],
-    })
+
+    code = json.dumps(
+        {
+            "title": "总平面布置",
+            "zones": [{"name": "办公区", "category": "办公区"}],
+        }
+    )
     result = render_mermaid_to_bytes(code, "layout", skip_http=True)
     assert result is not None
     assert len(result.getvalue()) > 100
@@ -352,10 +375,13 @@ def test_render_layout_skip_http():
 def test_render_timeline_skip_http():
     """时间轴 skip_http=True 时应走 PIL v2"""
     from app.services.ai.mermaid_renderer import render_mermaid_to_bytes
-    code = json.dumps({
-        "title": "里程碑",
-        "milestones": [{"name": "开工", "date": "第1天"}],
-    })
+
+    code = json.dumps(
+        {
+            "title": "里程碑",
+            "milestones": [{"name": "开工", "date": "第1天"}],
+        }
+    )
     result = render_mermaid_to_bytes(code, "timeline", skip_http=True)
     assert result is not None
     assert len(result.getvalue()) > 100
@@ -364,18 +390,22 @@ def test_render_timeline_skip_http():
 def test_render_labor_skip_http():
     """劳动力图 skip_http=True 时应走 PIL v2"""
     from app.services.ai.mermaid_renderer import render_mermaid_to_bytes
-    code = json.dumps({
-        "title": "劳动力配置",
-        "phases": ["基础", "主体"],
-        "categories": ["钢筋工", "木工"],
-        "data": [[10, 5], [20, 8]],
-    })
+
+    code = json.dumps(
+        {
+            "title": "劳动力配置",
+            "phases": ["基础", "主体"],
+            "categories": ["钢筋工", "木工"],
+            "data": [[10, 5], [20, 8]],
+        }
+    )
     result = render_mermaid_to_bytes(code, "labor", skip_http=True)
     assert result is not None
     assert len(result.getvalue()) > 100
 
 
 # ---------- BUG-2: 流程图 JSON 节点经 flowchart_json_to_mermaid 不应超宽 ----------
+
 
 def test_flowchart_chain_not_superwide():
     """BUG-2: 字符串节点列表经 flowchart_json_to_mermaid 生成的「独立定义行 + 纯 ID 边」
@@ -393,8 +423,11 @@ def test_flowchart_chain_not_superwide():
     chain_data = {
         "nodes": ["施工准备", "测量放线", "基础施工", "主体施工", "装饰装修", "竣工验收"],
         "edges": [
-            {"from": 0, "to": 1}, {"from": 1, "to": 2}, {"from": 2, "to": 3},
-            {"from": 3, "to": 4}, {"from": 4, "to": 5},
+            {"from": 0, "to": 1},
+            {"from": 1, "to": 2},
+            {"from": 2, "to": 3},
+            {"from": 3, "to": 4},
+            {"from": 4, "to": 5},
         ],
     }
     code = flowchart_json_to_mermaid(chain_data)
@@ -417,14 +450,18 @@ def test_flowchart_chain_not_superwide():
 
 # ---------- BUG-3: 0 基索引边（from=0）不应被静默丢弃 ----------
 
+
 def test_flowchart_zero_index_edge_not_dropped():
     """BUG-3: 旧逻辑 `if f and t:` 会把 from=0 误判为 Falsy 从而静默丢弃首条边
     （{'from':0,'to':1} 被漏掉），导致拓扑断裂。修复后首条边应保留且边数与输入一致。"""
     from app.services.ai.mermaid_flowchart import flowchart_json_to_mermaid
 
     edges = [
-        {"from": 0, "to": 1}, {"from": 1, "to": 2},
-        {"from": 2, "to": 3}, {"from": 3, "to": 4}, {"from": 4, "to": 5},
+        {"from": 0, "to": 1},
+        {"from": 1, "to": 2},
+        {"from": 2, "to": 3},
+        {"from": 3, "to": 4},
+        {"from": 4, "to": 5},
     ]
     data = {"nodes": ["A", "B", "C", "D", "E", "F"], "edges": edges}
     result = flowchart_json_to_mermaid(data)

@@ -1,4 +1,5 @@
 """回归测试：流程图边语法增强（2026-09-13）与甘特 JSON 分流修复"""
+
 import json
 from io import BytesIO
 from unittest.mock import patch
@@ -7,8 +8,10 @@ import pytest
 
 # ---------- 流程图边解析：中段标签 / 虚线 / 粗线 / 分号 ----------
 
+
 def _parse(code):
     from app.services.ai.mermaid_flowchart import _parse_flowchart_structure
+
     return _parse_flowchart_structure(code)
 
 
@@ -16,7 +19,7 @@ def test_mid_edge_label_no_ghost_node():
     """BUG: `A5 -- "否" --> A3` 此前把 `A5 -- "否"` 注册成幽灵节点、边丢失。
     修复后 from=A5、label=否、to=A3，且无幽灵节点。"""
     s = _parse(
-        'flowchart TD\n'
+        "flowchart TD\n"
         '    A1["施工准备"] --> A2["钢筋绑扎"]\n'
         '    A2 --> A3["模板安装"]\n'
         '    A3 --> A4["混凝土浇筑"]\n'
@@ -35,11 +38,7 @@ def test_mid_edge_label_no_ghost_node():
 
 def test_mid_edge_label_chinese_quotes_and_no_space():
     """中文引号 `--“验收”-->` 与无空格 `--"否"-->` 均应正确剥离引号。"""
-    s = _parse(
-        'flowchart TD\n'
-        '    A --“验收”--> B\n'
-        '    B --"否"--> C\n'
-    )
+    s = _parse("flowchart TD\n" "    A --“验收”--> B\n" '    B --"否"--> C\n')
     labels = {(e["from"], e["to"]): e["label"] for e in s["edges"]}
     assert labels[("A", "B")] == "验收"
     assert labels[("B", "C")] == "否"
@@ -48,7 +47,7 @@ def test_mid_edge_label_chinese_quotes_and_no_space():
 def test_dotted_and_thick_edges():
     """虚线 -.-> / 带标签虚线 -. 文本 .-> / 粗线 ==> / 无箭头 --- 均应解析。"""
     s = _parse(
-        'flowchart LR\n'
+        "flowchart LR\n"
         '    A["入场"] -.-> B["测量"]\n'
         '    B -. 复测 .-> C["放线"]\n'
         '    C == 是 ==> D["复核"]\n'
@@ -66,7 +65,7 @@ def test_dotted_and_thick_edges():
 def test_chain_with_mid_label():
     """链式连线 + 中段标签组合：`B -- "合格" --> C` 与 `C --> D --> E`。"""
     s = _parse(
-        'flowchart TD\n'
+        "flowchart TD\n"
         '    A["开始"] --> B["处理"]\n'
         '    B -- "合格" --> C["结束"]\n'
         '    C --> D["归档"] --> E["完成"]\n'
@@ -95,6 +94,7 @@ def test_pipe_label_regression():
 
 # ---------- 甘特 JSON 载荷分流 ----------
 
+
 def test_gantt_json_not_parsed_as_mermaid_syntax():
     """BUG: `{"type":"gantt","tasks":[...]}` 因含 "gantt" 字样被 _parse_mermaid_gantt
     误解析（任务名变 `{"type"`、总工期错成默认 90）。修复后 JSON 载荷必须跳过
@@ -106,10 +106,8 @@ def test_gantt_json_not_parsed_as_mermaid_syntax():
         "title": "施工进度计划",
         "totalDays": 180,
         "tasks": [
-            {"id": 1, "name": "施工准备", "start": 1, "end": 30,
-             "dependencies": [], "isMilestone": False},
-            {"id": 2, "name": "竣工验收", "start": 176, "end": 180,
-             "dependencies": [1], "isMilestone": True},
+            {"id": 1, "name": "施工准备", "start": 1, "end": 30, "dependencies": [], "isMilestone": False},
+            {"id": 2, "name": "竣工验收", "start": 176, "end": 180, "dependencies": [1], "isMilestone": True},
         ],
     }
     code = json.dumps(payload, ensure_ascii=False)
@@ -142,17 +140,27 @@ def test_gantt_json_not_parsed_as_mermaid_syntax():
 # 证据：`_diagnostics/_chart_shape_audit.py`「items 别名+日期串」「rows 别名」两例。
 _GANTT_ALIAS_PAYLOADS = [
     pytest.param(
-        {"type": "gantt", "title": "进度计划",
-         "items": [{"name": "进场准备", "start": "2026-01-01", "end": "2026-01-20"},
-                   {"name": "主体施工", "start": "2026-01-20", "end": "2026-05-01",
-                    "dependencies": ["进场准备"]}]},
-        id="items-alias-with-date-strings"),
+        {
+            "type": "gantt",
+            "title": "进度计划",
+            "items": [
+                {"name": "进场准备", "start": "2026-01-01", "end": "2026-01-20"},
+                {"name": "主体施工", "start": "2026-01-20", "end": "2026-05-01", "dependencies": ["进场准备"]},
+            ],
+        },
+        id="items-alias-with-date-strings",
+    ),
     pytest.param(
-        {"type": "gantt", "title": "进度计划",
-         "rows": [{"title": "测量放线", "start": 0, "end": 5},
-                  {"title": "土方开挖", "start": 5, "end": 25,
-                   "dependencies": ["测量放线"]}]},
-        id="rows-alias"),
+        {
+            "type": "gantt",
+            "title": "进度计划",
+            "rows": [
+                {"title": "测量放线", "start": 0, "end": 5},
+                {"title": "土方开挖", "start": 5, "end": 25, "dependencies": ["测量放线"]},
+            ],
+        },
+        id="rows-alias",
+    ),
 ]
 
 
@@ -190,13 +198,13 @@ def test_gantt_tasks_key_still_preferred_over_aliases():
     from app.services.ai import mermaid_renderer as MR
 
     payload = {
-        "type": "gantt", "title": "进度计划",
+        "type": "gantt",
+        "title": "进度计划",
         "tasks": [{"id": 1, "name": "规范任务", "start": 1, "end": 10}],
         # 同载荷里同时给出别名容器时，tasks 必须是唯一生效来源
         "items": [{"name": "不应生效", "start": "2026-01-01", "end": "2026-02-01"}],
     }
-    buf = MR.render_mermaid_to_bytes(json.dumps(payload, ensure_ascii=False),
-                                    "gantt", skip_http=True)
+    buf = MR.render_mermaid_to_bytes(json.dumps(payload, ensure_ascii=False), "gantt", skip_http=True)
     assert isinstance(buf, BytesIO) and len(buf.getvalue()) > 1000
 
 
@@ -206,18 +214,19 @@ def test_gantt_mermaid_with_init_block():
 
     code = (
         '%%{init: {"gantt": {"useWidth": false}}}%%\n'
-        'gantt\n'
-        '    title 专项施工进度\n'
-        '    dateFormat YYYY-MM-DD\n'
-        '    section 准备\n'
-        '    场地平整 : 2026-03-01, 20d\n'
-        '    结构封顶 : milestone, 2026-06-25, 0d\n'
+        "gantt\n"
+        "    title 专项施工进度\n"
+        "    dateFormat YYYY-MM-DD\n"
+        "    section 准备\n"
+        "    场地平整 : 2026-03-01, 20d\n"
+        "    结构封顶 : milestone, 2026-06-25, 0d\n"
     )
     buf = MR.render_mermaid_to_bytes(code, "gantt", skip_http=True, duration=120)
     assert buf is not None and len(buf.getvalue()) > 1000
 
 
 # ---------- 边标签避让（渲染输出） ----------
+
 
 def test_back_edge_label_rendered():
     """回边 `A5 -- "否" --> A3` 的标签"否"必须出现在输出图上
@@ -226,7 +235,7 @@ def test_back_edge_label_rendered():
     from PIL import Image
 
     code = (
-        'flowchart TD\n'
+        "flowchart TD\n"
         '    A1["施工准备"] --> A2["钢筋绑扎"]\n'
         '    A2 --> A3["模板安装"]\n'
         '    A3 --> A4["混凝土浇筑"]\n'
@@ -247,26 +256,37 @@ def test_back_edge_label_rendered():
 #   · 校验通过 + 渲染返回 None = ⚠ 占位型错配（导出只剩红字[渲染失败]）
 # 下列用例把每一处修复锁成不变量：**放行 ⇔ 必出图**。
 
+
 def _validate(ct, code):
     from app.routers._chart_pipeline import _validate_inline_chart
+
     return _validate_inline_chart(ct, code)
 
 
 def _renders(ct, code) -> bool:
     from app.services.ai import mermaid_renderer as MR
+
     buf = MR.render_mermaid_to_bytes(code, ct, skip_http=True)
     return buf is not None and len(buf.getvalue()) > 100
 
 
-@pytest.mark.parametrize("payload", [
-    {"type": "comparison", "title": "占比",
-     "items": [{"label": "A", "value": 40}, {"label": "B", "value": 60}]},
-    {"type": "comparison", "headers": ["方案", "费用"],
-     "rows": [{"方案": "A", "费用": 80}, {"方案": "B", "费用": 120}]},
-    {"type": "comparison", "headers": ["方案", "材料费", "人工费"],
-     "rows": [{"label": "A", "values": [80, 50]}, {"label": "B", "values": [60, 70]}]},
-    {"type": "comparison", "data": [{"name": "A", "value": 30}, {"name": "B", "value": 70}]},
-])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "comparison", "title": "占比", "items": [{"label": "A", "value": 40}, {"label": "B", "value": 60}]},
+        {
+            "type": "comparison",
+            "headers": ["方案", "费用"],
+            "rows": [{"方案": "A", "费用": 80}, {"方案": "B", "费用": 120}],
+        },
+        {
+            "type": "comparison",
+            "headers": ["方案", "材料费", "人工费"],
+            "rows": [{"label": "A", "values": [80, 50]}, {"label": "B", "values": [60, 70]}],
+        },
+        {"type": "comparison", "data": [{"name": "A", "value": 30}, {"name": "B", "value": 70}]},
+    ],
+)
 def test_comparison_validator_and_renderer_agree(payload):
     """comparison 四种自然形态：校验放行 ⇔ 渲染出图（两侧共用归一器）。"""
     code = json.dumps(payload, ensure_ascii=False)
@@ -275,11 +295,14 @@ def test_comparison_validator_and_renderer_agree(payload):
     assert _renders("comparison", code) is True
 
 
-@pytest.mark.parametrize("payload", [
-    {"type": "comparison", "title": "方案比选"},
-    {"type": "comparison", "note": "暂无数据"},
-    {"type": "comparison", "items": [{"label": "A", "value": 0}, {"label": "B", "value": 0}]},
-])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "comparison", "title": "方案比选"},
+        {"type": "comparison", "note": "暂无数据"},
+        {"type": "comparison", "items": [{"label": "A", "value": 0}, {"label": "B", "value": 0}]},
+    ],
+)
 def test_comparison_unrenderable_payload_rejected_by_pipeline(payload):
     """渲染不出的 comparison 载荷必须在**管线侧被拒**。
 
@@ -294,9 +317,10 @@ def test_comparison_unrenderable_payload_rejected_by_pipeline(payload):
 
 def test_architecture_duplicate_sibling_labels_kept_and_rendered():
     """同级重名不再删整张架构图（降级为告警），且必然出图。"""
-    payload = {"type": "architecture",
-               "root": {"label": "项目部",
-                        "children": [{"label": "技术组"}, {"label": "技术组"}]}}
+    payload = {
+        "type": "architecture",
+        "root": {"label": "项目部", "children": [{"label": "技术组"}, {"label": "技术组"}]},
+    }
     code = json.dumps(payload, ensure_ascii=False)
     ok, _ = _validate("architecture", code)
     assert ok is True
@@ -305,26 +329,32 @@ def test_architecture_duplicate_sibling_labels_kept_and_rendered():
 
 def test_labor_single_zero_phase_kept_all_zero_rejected():
     """单个阶段全 0 → 保留出图；所有阶段全 0（整图无数值信息）→ 拒绝。"""
-    one_zero = {"type": "labor", "phases": ["准备", "主体"],
-                "categories": ["普工", "钢筋工"], "data": [[0, 0], [30, 20]]}
+    one_zero = {
+        "type": "labor",
+        "phases": ["准备", "主体"],
+        "categories": ["普工", "钢筋工"],
+        "data": [[0, 0], [30, 20]],
+    }
     code = json.dumps(one_zero, ensure_ascii=False)
     ok, _ = _validate("labor", code)
     assert ok is True
     assert _renders("labor", code) is True
 
-    all_zero = {"type": "labor", "phases": ["准备", "主体"],
-                "categories": ["普工", "钢筋工"], "data": [[0, 0], [0, 0]]}
+    all_zero = {"type": "labor", "phases": ["准备", "主体"], "categories": ["普工", "钢筋工"], "data": [[0, 0], [0, 0]]}
     assert _validate("labor", json.dumps(all_zero, ensure_ascii=False))[0] is False
 
 
-@pytest.mark.parametrize("code", [
-    # 单行分号（旧实现：`graph` 行整体被跳过 → 节点数算成 0 → 判"节点数不足"→ 删块）
-    'flowchart TD; A["准备"] --> B["施工"]; B --> C["验收"]',
-    # 行末分号
-    'flowchart TD\n    A["准备"] --> B["施工"];\n    B --> C["验收"]',
-    # 首部 %% 注释
-    '%% 施工流程\nflowchart TD\n    A["准备"] --> B["施工"]\n    B --> C["验收"]',
-])
+@pytest.mark.parametrize(
+    "code",
+    [
+        # 单行分号（旧实现：`graph` 行整体被跳过 → 节点数算成 0 → 判"节点数不足"→ 删块）
+        'flowchart TD; A["准备"] --> B["施工"]; B --> C["验收"]',
+        # 行末分号
+        'flowchart TD\n    A["准备"] --> B["施工"];\n    B --> C["验收"]',
+        # 首部 %% 注释
+        '%% 施工流程\nflowchart TD\n    A["准备"] --> B["施工"]\n    B --> C["验收"]',
+    ],
+)
 def test_mermaid_statement_and_comment_forms_kept_and_rendered(code):
     """分号 / 首部注释写法：校验放行 **且** 必出图（两侧共用归一实现）。"""
     ok, _ = _validate("flowchart", code)
@@ -341,8 +371,7 @@ def test_renderer_normalizes_statement_separator_after_unwrap():
     from app.services.ai import mermaid_renderer as MR
 
     inner = 'flowchart TD; A["施工准备"] --> B["主体施工"]; B --> C["竣工验收"]'
-    buf = MR.render_mermaid_to_bytes(json.dumps({"code": inner}, ensure_ascii=False),
-                                    "flowchart", skip_http=True)
+    buf = MR.render_mermaid_to_bytes(json.dumps({"code": inner}, ensure_ascii=False), "flowchart", skip_http=True)
     assert buf is not None and len(buf.getvalue()) > 1000
 
 

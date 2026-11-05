@@ -6,6 +6,7 @@
      1. 空输入改为 DEBUG 级日志（业务语义不变，仍返回 None）；
      2. 新增模块级 LRU 渲染缓存（同参数命中即返回，跳过 PIL v2 CPU 密集路径）。
 """
+
 from __future__ import annotations
 
 import logging
@@ -19,12 +20,10 @@ def test_empty_input_returns_none_without_warning(caplog):
     caplog.set_level(logging.DEBUG)
     result = mermaid_renderer.render_mermaid_to_bytes("", "flowchart")
     assert result is None
-    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING
-                and "空输入" in r.getMessage()]
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING and "空输入" in r.getMessage()]
     assert not warnings, f"空输入不应产生 WARNING 日志，实际: {[r.getMessage() for r in warnings]}"
     # DEBUG 级应该有记录（业务可观测性保留）
-    debugs = [r for r in caplog.records if r.levelno == logging.DEBUG
-              and "空输入" in r.getMessage()]
+    debugs = [r for r in caplog.records if r.levelno == logging.DEBUG and "空输入" in r.getMessage()]
     assert debugs, "空输入应至少产生一条 DEBUG 日志（保留可观测性）"
 
 
@@ -80,9 +79,12 @@ def test_render_cache_cleared_by_clear():
     r1 = mermaid_renderer.render_mermaid_to_bytes(code, "flowchart")
     if r1 is None:
         pytest.skip("当前环境下 flowchart 渲染失败")
-    assert mermaid_renderer._render_cache.get(
-        mermaid_renderer._render_cache_key(code, "flowchart", 90, "天", 5, False, True)
-    ) is not None, "首次渲染后应写入缓存"
+    assert (
+        mermaid_renderer._render_cache.get(
+            mermaid_renderer._render_cache_key(code, "flowchart", 90, "天", 5, False, True)
+        )
+        is not None
+    ), "首次渲染后应写入缓存"
     mermaid_renderer.clear_render_cache()
     assert len(mermaid_renderer._render_cache) == 0, "clear 后缓存应清空"
 
@@ -93,11 +95,13 @@ def test_render_cache_lru_eviction():
     # 直接写入超过容量的条目，验证淘汰逻辑（避免真渲染导致性能问题）
     max_size = mermaid_renderer._RENDER_CACHE_MAX
     from io import BytesIO
+
     for i in range(max_size + 10):
         key = ("flowchart", f"code-{i}", 90, "天", 5, False, True)
         mermaid_renderer._render_cache_put(key, BytesIO(b"png-bytes-" + str(i).encode()))
-    assert len(mermaid_renderer._render_cache) == max_size, \
-        f"缓存应限制在 {max_size} 项，实际 {len(mermaid_renderer._render_cache)}"
+    assert (
+        len(mermaid_renderer._render_cache) == max_size
+    ), f"缓存应限制在 {max_size} 项，实际 {len(mermaid_renderer._render_cache)}"
     # 最老的条目（code-0）应被淘汰
     old_key = ("flowchart", "code-0", 90, "天", 5, False, True)
     assert old_key not in mermaid_renderer._render_cache, "最老条目应被淘汰"

@@ -9,6 +9,7 @@
 - charts.fix_mermaid：修复结果写回必须保持 chart_payload 载荷形状契约
   （数据信封不得被覆盖成"双载荷 unknown"形态）。
 """
+
 import json
 import uuid
 
@@ -59,10 +60,7 @@ class TestGanttNumericAxis:
     def test_date_axis_unaffected(self):
         """dateFormat YYYY-MM-DD 场景行为不得回归。"""
         code = (
-            "gantt\n"
-            "    dateFormat YYYY-MM-DD\n"
-            "    准备 :a1, 2026-01-01, 10d\n"
-            "    基础 :a2, 2026-01-11, 5d\n"
+            "gantt\n" "    dateFormat YYYY-MM-DD\n" "    准备 :a1, 2026-01-01, 10d\n" "    基础 :a2, 2026-01-11, 5d\n"
         )
         tasks = _parse_mermaid_gantt(code)
         assert tasks is not None
@@ -83,7 +81,8 @@ class TestGanttNumericAxis:
 class TestRewriteCodeBlockUnclosed:
     def test_unclosed_block_preserved_and_no_fence_added(self):
         from app.routers._chart_pipeline import _rewrite_code_block
-        content = "正文段落\n```mermaid\nflowchart TD\n    A --> B\n```\n结尾段\n```chart-json\n{\"type\": \"labor\""
+
+        content = '正文段落\n```mermaid\nflowchart TD\n    A --> B\n```\n结尾段\n```chart-json\n{"type": "labor"'
         result = _rewrite_code_block(content, "不存在的代码", "新代码")
         # 无匹配 → 正文不变（未闭合块既不被吞噬也不补围栏）
         assert result == content
@@ -95,10 +94,9 @@ class TestRewriteCodeBlockUnclosed:
         真正的"未闭合"判定是行数超限。
         """
         from app.routers._chart_pipeline import _rewrite_code_block
-        content = (
-            "```mermaid\nflowchart TD\n    A --> B\n```\n"
-            "中间正文\n"
-            "```chart-json\n" + "\n".join(f"line{i}" for i in range(600))
+
+        content = "```mermaid\nflowchart TD\n    A --> B\n```\n" "中间正文\n" "```chart-json\n" + "\n".join(
+            f"line{i}" for i in range(600)
         )
         # 删除前面的合法块后，未闭合块与"中间正文"必须原样保留
         result = _rewrite_code_block(content, "flowchart TD\n    A --> B", None)
@@ -110,9 +108,9 @@ class TestRewriteCodeBlockUnclosed:
 
     def test_closed_block_still_replaced(self):
         from app.routers._chart_pipeline import _rewrite_code_block
+
         content = "```mermaid\nflowchart TD\n    A --> B\n```\n正文"
-        result = _rewrite_code_block(
-            content, "flowchart TD\n    A --> B", "flowchart LR\n    X --> Y")
+        result = _rewrite_code_block(content, "flowchart TD\n    A --> B", "flowchart LR\n    X --> Y")
         assert "flowchart LR" in result and "正文" in result
 
 
@@ -124,7 +122,8 @@ async def _seed_chart(db, data_json: str, chart_type: str = "labor") -> str:
     await db.execute(
         "INSERT INTO chart_predictions (id, section_id, scheme_id, chart_type,"
         " needed, purpose, priority, status, data_json) VALUES (?,?,?,?,1,?,?,?,?)",
-        (pid, "sec1", "s1", chart_type, "测试", 5, "done", data_json))
+        (pid, "sec1", "s1", chart_type, "测试", 5, "done", data_json),
+    )
     await db.commit()
     return pid
 
@@ -137,22 +136,24 @@ class TestFixMermaidPayloadShape:
         from app.routers.charts import fix_mermaid
 
         old = build_chart_envelope(
-            data={"type": "labor", "phases": ["准备"], "categories": ["普工"],
-                  "data": [[2]]},
-            title="劳动力配置", reason="测试")
+            data={"type": "labor", "phases": ["准备"], "categories": ["普工"], "data": [[2]]},
+            title="劳动力配置",
+            reason="测试",
+        )
         pid = await _seed_chart(db_conn, old, chart_type="labor")
 
-        fixed = json.dumps({"type": "labor", "phases": ["准备", "主体"],
-                            "categories": ["普工"], "data": [[2], [8]]},
-                           ensure_ascii=False)
+        fixed = json.dumps(
+            {"type": "labor", "phases": ["准备", "主体"], "categories": ["普工"], "data": [[2], [8]]},
+            ensure_ascii=False,
+        )
+
         async def _fake_chat(messages, **kw):
             return f"```json\n{fixed}\n```"
+
         monkeypatch.setattr(charts_mod, "chat_with_fallback", _fake_chat)
 
-        await fix_mermaid({"code": '{"type":"labor"}', "prediction_id": pid,
-                           "chart_type": "labor"}, db_conn)
-        cur = await db_conn.execute(
-            "SELECT data_json FROM chart_predictions WHERE id=?", (pid,))
+        await fix_mermaid({"code": '{"type":"labor"}', "prediction_id": pid, "chart_type": "labor"}, db_conn)
+        cur = await db_conn.execute("SELECT data_json FROM chart_predictions WHERE id=?", (pid,))
         stored = (await cur.fetchone())[0]
         assert chart_payload_shape(stored) == "envelope:data"
         assert is_canonical_chart_payload(stored)
@@ -172,12 +173,11 @@ class TestFixMermaidPayloadShape:
 
         async def _fake_chat(messages, **kw):
             return "graph TD\n    A --> B\n    B --> C"
+
         monkeypatch.setattr(charts_mod, "chat_with_fallback", _fake_chat)
 
-        await fix_mermaid({"code": "graph TD\n    A --> B", "prediction_id": pid},
-                          db_conn)
-        cur = await db_conn.execute(
-            "SELECT data_json FROM chart_predictions WHERE id=?", (pid,))
+        await fix_mermaid({"code": "graph TD\n    A --> B", "prediction_id": pid}, db_conn)
+        cur = await db_conn.execute("SELECT data_json FROM chart_predictions WHERE id=?", (pid,))
         stored = (await cur.fetchone())[0]
         assert chart_payload_shape(stored) == "envelope:mermaid"
         assert is_canonical_chart_payload(stored)
@@ -189,17 +189,17 @@ class TestFixMermaidPayloadShape:
         from app.routers.charts import fix_mermaid
 
         old = build_chart_envelope(
-            data={"type": "labor", "phases": ["P"], "categories": ["C"], "data": [[1]]},
-            title="劳动力")
+            data={"type": "labor", "phases": ["P"], "categories": ["C"], "data": [[1]]}, title="劳动力"
+        )
         pid = await _seed_chart(db_conn, old, chart_type="labor")
 
         async def _fake_chat(messages, **kw):
             return "graph TD\n    A --> B"
+
         monkeypatch.setattr(charts_mod, "chat_with_fallback", _fake_chat)
 
         await fix_mermaid({"code": '{"type":"labor"}', "prediction_id": pid}, db_conn)
-        cur = await db_conn.execute(
-            "SELECT data_json FROM chart_predictions WHERE id=?", (pid,))
+        cur = await db_conn.execute("SELECT data_json FROM chart_predictions WHERE id=?", (pid,))
         stored = (await cur.fetchone())[0]
         assert chart_payload_shape(stored) != "unknown"
         assert is_canonical_chart_payload(stored)

@@ -8,6 +8,7 @@
 4. 甘特图备注区丢失 + 依赖 ID 类型不匹配导致依赖箭头缺失
 5. 流程图 v2 箭头几何未随 2.5x 超采样缩放
 """
+
 import json
 from io import BytesIO
 
@@ -158,9 +159,7 @@ def test_flowchart_arrow_scaled_with_supersample():
     否则箭头底边仅约 14px、几乎与 5px 线宽重合，看不出方向。"""
     from app.services.ai.mermaid_flowchart import _render_flowchart_image_v2
 
-    img = Image.open(
-        _render_flowchart_image_v2('flowchart TD\n    A["开始"] --> B["结束"]')
-    ).convert("RGB")
+    img = Image.open(_render_flowchart_image_v2('flowchart TD\n    A["开始"] --> B["结束"]')).convert("RGB")
     arrow_color = (51, 51, 51)  # #333333（2026-10-11 统一样张后连线色）
 
     # 两节点之间的连线段（A 底边 y≈390，B 顶边 y≈530）内，找箭头色最长连续横向宽度
@@ -217,9 +216,7 @@ def test_mermaid_keyword_map_is_single_source_of_truth():
         assert detect_mermaid_chart_type(keyword, default="") == expected, keyword
 
     # 注释行必须跳过；未知关键字返回 default
-    assert detect_mermaid_chart_type(
-        "%%{init: {'theme':'neutral'}}%%\nsequenceDiagram\n  A->>B: hi"
-    ) == "sequence"
+    assert detect_mermaid_chart_type("%%{init: {'theme':'neutral'}}%%\nsequenceDiagram\n  A->>B: hi") == "sequence"
     assert detect_mermaid_chart_type("unknownDiagram\n  x", default="") == ""
 
 
@@ -242,8 +239,7 @@ def test_validate_mermaid_accepts_full_keyword_set():
         assert ok is True, f"{code.splitlines()[0]} 被判为非法: {msg}"
 
     # 首行注释不应导致类型判定全部落空
-    ok, msg = validate_mermaid(
-        "%% 施工流程\nflowchart LR\n    A --> B\n    B --> C")
+    ok, msg = validate_mermaid("%% 施工流程\nflowchart LR\n    A --> B\n    B --> C")
     assert ok is True, f"注释开头的流程图被判为非法: {msg}"
 
     # 真正不支持的仍是失败
@@ -271,15 +267,20 @@ def test_validate_inline_chart_accepts_labor_and_architecture_json():
     必然失败 → 触发"校验失败删块"，AI 生成的劳动力图/架构图数据被整块删除。"""
     from app.routers._chart_pipeline import _validate_inline_chart
 
-    labor = json.dumps({
-        "type": "labor", "phases": ["基础"], "categories": ["钢筋工"], "data": [[10]],
-    }, ensure_ascii=False)
+    labor = json.dumps(
+        {
+            "type": "labor",
+            "phases": ["基础"],
+            "categories": ["钢筋工"],
+            "data": [[10]],
+        },
+        ensure_ascii=False,
+    )
     ok, code = _validate_inline_chart("labor", labor)
     assert ok is True and code == labor
 
     # 渲染器认识的"字符串根 + nodes 列表"形态（校验器此前只认顶层 label/name）
-    arch = json.dumps({"type": "architecture", "root": "项目部",
-                       "nodes": [{"label": "工程部"}]}, ensure_ascii=False)
+    arch = json.dumps({"type": "architecture", "root": "项目部", "nodes": [{"label": "工程部"}]}, ensure_ascii=False)
     ok, code = _validate_inline_chart("architecture", arch)
     assert ok is True and code == arch
 
@@ -290,13 +291,14 @@ def test_validate_inline_chart_keeps_mermaid_pie():
     Mermaid 语法的饼图会被当成 JSON 解析失败而删块。"""
     from app.routers._chart_pipeline import _validate_inline_chart
 
-    pie = "pie title 方案比选\n    \"方案A\" : 40\n    \"方案B\" : 60"
+    pie = 'pie title 方案比选\n    "方案A" : 40\n    "方案B" : 60'
     ok, code = _validate_inline_chart("comparison", pie)
     assert ok is True, "Mermaid 饼图被误判为 JSON 载荷"
     assert code == pie
 
-    cmp_json = json.dumps({"type": "comparison", "items": [
-        {"label": "方案A", "value": 40}, {"label": "方案B", "value": 60}]})
+    cmp_json = json.dumps(
+        {"type": "comparison", "items": [{"label": "方案A", "value": 40}, {"label": "方案B", "value": 60}]}
+    )
     ok, _ = _validate_inline_chart("comparison", cmp_json)
     assert ok is True
 
@@ -307,14 +309,19 @@ async def test_register_inline_charts_writes_canonical_envelope(db_conn):
     from app.routers._chart_pipeline import register_inline_charts
     from app.services.chart_payload import chart_payload_shape, extract_chart_payload
 
-    labor = json.dumps({
-        "type": "labor", "title": "劳动力配置",
-        "phases": ["基础阶段"], "categories": ["钢筋工"], "data": [[10]],
-    }, ensure_ascii=False)
-    arch = json.dumps({"type": "architecture", "root": "项目部",
-                       "nodes": [{"label": "工程部"}]}, ensure_ascii=False)
+    labor = json.dumps(
+        {
+            "type": "labor",
+            "title": "劳动力配置",
+            "phases": ["基础阶段"],
+            "categories": ["钢筋工"],
+            "data": [[10]],
+        },
+        ensure_ascii=False,
+    )
+    arch = json.dumps({"type": "architecture", "root": "项目部", "nodes": [{"label": "工程部"}]}, ensure_ascii=False)
     content = (
-        '正文\n```mermaid\nflowchart TD\n    A --> B\n    B --> C\n```\n\n'
+        "正文\n```mermaid\nflowchart TD\n    A --> B\n    B --> C\n```\n\n"
         f"```chart-json\n{labor}\n```\n\n"
         f"```chart-json\n{arch}\n```"
     )
@@ -322,8 +329,7 @@ async def test_register_inline_charts_writes_canonical_envelope(db_conn):
     assert n == 3, f"登记数不符（正文块被误删？）实际 {n}；正文={new_content!r}"
     assert new_content == content, "校验通过不应改动正文"
 
-    cur = await db_conn.execute(
-        "SELECT chart_type, data_json FROM chart_predictions WHERE section_id='c1'")
+    cur = await db_conn.execute("SELECT chart_type, data_json FROM chart_predictions WHERE section_id='c1'")
     payloads = {r["chart_type"]: r["data_json"] for r in await cur.fetchall()}
     assert chart_payload_shape(payloads["flowchart"]) == "envelope:mermaid"
     assert chart_payload_shape(payloads["labor"]) == "envelope:data"
@@ -375,15 +381,18 @@ def test_flowchart_chained_edges_parsed():
     右半段被注册成幽灵节点 `B["基础"] --> C["竣工"]`，B→C 的边被丢弃。"""
     from app.services.ai.mermaid_flowchart import _parse_flowchart_structure
 
-    parsed = _parse_flowchart_structure(
-        'flowchart TD\n    A["开工"] --> B["基础"] --> C["竣工"]')
-    assert [n["id"] for n in parsed["nodes"]] == ["A", "B", "C"], \
-        f"节点 ID 解析异常: {[n['id'] for n in parsed['nodes']]}"
-    assert {n["id"]: n["label"] for n in parsed["nodes"]} == \
-        {"A": "开工", "B": "基础", "C": "竣工"}, \
-        f"节点标签解析异常: {[(n['id'], n['label']) for n in parsed['nodes']]}"
-    assert {(e["from"], e["to"]) for e in parsed["edges"]} == {("A", "B"), ("B", "C")}, \
-        f"边解析异常: {parsed['edges']}"
+    parsed = _parse_flowchart_structure('flowchart TD\n    A["开工"] --> B["基础"] --> C["竣工"]')
+    assert [n["id"] for n in parsed["nodes"]] == [
+        "A",
+        "B",
+        "C",
+    ], f"节点 ID 解析异常: {[n['id'] for n in parsed['nodes']]}"
+    assert {n["id"]: n["label"] for n in parsed["nodes"]} == {
+        "A": "开工",
+        "B": "基础",
+        "C": "竣工",
+    }, f"节点标签解析异常: {[(n['id'], n['label']) for n in parsed['nodes']]}"
+    assert {(e["from"], e["to"]) for e in parsed["edges"]} == {("A", "B"), ("B", "C")}, f"边解析异常: {parsed['edges']}"
 
 
 def test_flowchart_reversed_directions_are_honored():
@@ -402,8 +411,7 @@ def test_flowchart_reversed_directions_are_honored():
 # ---------- 10. 架构图根节点样式 ----------
 
 
-def _count_color_in_node(img, node: dict, color: tuple, scale: float = 2.5,
-                         title_h: int = 56) -> int:
+def _count_color_in_node(img, node: dict, color: tuple, scale: float = 2.5, title_h: int = 56) -> int:
     x0 = int(node["x"] * scale) + 8
     y0 = int(node["y"] * scale) + title_h + 8
     x1 = int((node["x"] + node["w"]) * scale) - 8
@@ -423,10 +431,13 @@ def test_architecture_root_node_gets_root_style():
     from app.services.ai.mermaid_architecture import _layout_architecture_tree, _render_architecture_image_v2
     from PIL import Image
 
-    tree = {"label": "项目部", "children": [
-        {"label": "工程部", "children": [{"label": "土建组"}, {"label": "安装组"}]},
-        {"label": "安质部", "children": [{"label": "安全组"}, {"label": "质量组"}]},
-    ]}
+    tree = {
+        "label": "项目部",
+        "children": [
+            {"label": "工程部", "children": [{"label": "土建组"}, {"label": "安装组"}]},
+            {"label": "安质部", "children": [{"label": "安全组"}, {"label": "质量组"}]},
+        ],
+    }
     nodes, _, _ = _layout_architecture_tree(tree)
     assert nodes[0]["depth"] != 0, "测试前提不成立：布局已不是后序"
     root = next(n for n in nodes if n["depth"] == 0)
@@ -459,8 +470,7 @@ def test_chart_cache_restores_state_from_disk(tmp_path):
 
     reopened = ChartCache(cache_dir=str(tmp_path))
     assert reopened._stats["total_size"] == on_disk, "重启后未按磁盘占用恢复 total_size"
-    assert len([k for k in reopened._access_order if not k.endswith(".fmt")]) == 3, \
-        "重启后未恢复 LRU 顺序"
+    assert len([k for k in reopened._access_order if not k.endswith(".fmt")]) == 3, "重启后未恢复 LRU 顺序"
 
 
 def test_chart_cache_get_reads_get_or_render_entry(monkeypatch, tmp_path):
@@ -520,8 +530,7 @@ def test_gantt_after_dependency_resolved():
     assert by_name["基础工程"]["end"] == 45, f"after 依赖未解析: {by_name['基础工程']}"
     assert by_name["主体施工"]["start"] == 46, f"after 依赖未解析: {by_name['主体施工']}"
     # 里程碑（0d）应 end == start
-    assert by_name["竣工验收"]["start"] == by_name["竣工验收"]["end"] == 106, \
-        f"里程碑工期错误: {by_name['竣工验收']}"
+    assert by_name["竣工验收"]["start"] == by_name["竣工验收"]["end"] == 106, f"里程碑工期错误: {by_name['竣工验收']}"
 
 
 def test_gantt_after_dependency_renders_valid_png():
@@ -547,7 +556,7 @@ def test_gantt_after_dependency_renders_valid_png():
 
 # ---------- 10. 图表清单 placed 语义（正文同步内联） ----------
 
-_VALID_FLOW = "flowchart TD\n    A[\"开工\"] --> B[\"施工\"]\n    B --> C[\"验收\"]"
+_VALID_FLOW = 'flowchart TD\n    A["开工"] --> B["施工"]\n    B --> C["验收"]'
 
 
 async def test_list_charts_placed_detects_inline_block(db_conn):
@@ -558,12 +567,12 @@ async def test_list_charts_placed_detects_inline_block(db_conn):
     from app.routers.charts import list_charts
 
     content = f"工艺流程：\n```mermaid\n{_VALID_FLOW}\n```\n"
-    n, content = await register_inline_charts(
-        db_conn, "scheme-placed", "sec-placed", content)
+    n, content = await register_inline_charts(db_conn, "scheme-placed", "sec-placed", content)
     assert n == 1
     await db_conn.execute(
         "INSERT INTO sections (id, scheme_id, title, content) VALUES (?,?,?,?)",
-        ("sec-placed", "scheme-placed", "工艺", content))
+        ("sec-placed", "scheme-placed", "工艺", content),
+    )
     await db_conn.commit()
 
     data = await list_charts("scheme-placed", db=db_conn)
@@ -580,11 +589,21 @@ async def test_list_charts_placed_false_without_inline_block(db_conn):
     await db_conn.execute(
         "INSERT INTO chart_predictions (id, section_id, scheme_id, chart_type,"
         " needed, purpose, priority, status, data_json) VALUES (?,?,?,?,1,?,?,?,?)",
-        ("p1", "sec-none", "scheme-none", "flowchart", "正文同步生成", 5, "done",
-         build_chart_envelope(code=_VALID_FLOW)))
+        (
+            "p1",
+            "sec-none",
+            "scheme-none",
+            "flowchart",
+            "正文同步生成",
+            5,
+            "done",
+            build_chart_envelope(code=_VALID_FLOW),
+        ),
+    )
     await db_conn.execute(
         "INSERT INTO sections (id, scheme_id, title, content) VALUES (?,?,?,?)",
-        ("sec-none", "scheme-none", "无图章节", "纯文字，没有图。"))
+        ("sec-none", "scheme-none", "无图章节", "纯文字，没有图。"),
+    )
     await db_conn.commit()
 
     data = await list_charts("scheme-none", db=db_conn)
@@ -599,11 +618,21 @@ async def test_list_charts_placed_legacy_marker(db_conn):
     await db_conn.execute(
         "INSERT INTO chart_predictions (id, section_id, scheme_id, chart_type,"
         " needed, purpose, priority, status, data_json) VALUES (?,?,?,?,1,?,?,?,?)",
-        ("p2", "sec-mark", "scheme-mark", "gantt", "历史", 5, "done",
-         build_chart_envelope(code="gantt\n    dateFormat X\n    A :a1, 0, 5")))
+        (
+            "p2",
+            "sec-mark",
+            "scheme-mark",
+            "gantt",
+            "历史",
+            5,
+            "done",
+            build_chart_envelope(code="gantt\n    dateFormat X\n    A :a1, 0, 5"),
+        ),
+    )
     await db_conn.execute(
         "INSERT INTO sections (id, scheme_id, title, content) VALUES (?,?,?,?)",
-        ("sec-mark", "scheme-mark", "进度", "前文\n\n[CHART_TYPE: gantt]\n"))
+        ("sec-mark", "scheme-mark", "进度", "前文\n\n[CHART_TYPE: gantt]\n"),
+    )
     await db_conn.commit()
 
     data = await list_charts("scheme-mark", db=db_conn)

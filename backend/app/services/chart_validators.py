@@ -54,8 +54,7 @@ def count_all_nodes(node: dict) -> int:
     return count
 
 
-def _coerce_arch_children(node: dict, _seen: set | None = None,
-                          _depth: int = 0) -> dict:
+def _coerce_arch_children(node: dict, _seen: set | None = None, _depth: int = 0) -> dict:
     """把架构树节点的子节点列表规范为统一的 ``children`` 列表（元素均为 dict）。
 
     兼容三类弱模型/历史产出（此前渲染器与校验器口径不一致，导致静默丢节点）：
@@ -126,9 +125,7 @@ def normalize_architecture_tree(data: Any) -> dict | None:
     if not (data.get("label") or data.get("name") or data.get("children")):
         for key in ("root", "tree", "data", "node"):
             nested = data.get(key)
-            if isinstance(nested, dict) and (
-                nested.get("label") or nested.get("name") or nested.get("children")
-            ):
+            if isinstance(nested, dict) and (nested.get("label") or nested.get("name") or nested.get("children")):
                 root = nested
                 break
         if not (root.get("label") or root.get("name") or root.get("children")):
@@ -207,11 +204,13 @@ def normalize_flowchart_data(data: Any) -> dict | None:
                 nid = f"{nid}#{suffix}"
             seen_ids.add(nid)
             idx_to_id[str(i)] = nid
-            nodes.append({
-                "id": nid,
-                "label": str(node.get("label") or node.get("name") or nid),
-                "type": _norm_variant(node.get("variant") or node.get("type")),
-            })
+            nodes.append(
+                {
+                    "id": nid,
+                    "label": str(node.get("label") or node.get("name") or nid),
+                    "type": _norm_variant(node.get("variant") or node.get("type")),
+                }
+            )
         else:
             nid = f"N{i + 1}"
             seen_ids.add(nid)
@@ -224,7 +223,7 @@ def normalize_flowchart_data(data: Any) -> dict | None:
     if not (isinstance(edges_raw, list) and edges_raw):
         edges_raw = data.get("links")
     edges: list[dict] = []
-    for edge in (edges_raw or []):
+    for edge in edges_raw or []:
         if isinstance(edge, dict):
             f = edge.get("from", edge.get("from_"))
             t = edge.get("to")
@@ -237,13 +236,14 @@ def normalize_flowchart_data(data: Any) -> dict | None:
             t_rest = parts[1].strip()
             label = ""
             if t_rest.startswith("|") and "|" in t_rest:
-                label = t_rest[1:t_rest.index("|")]
-                t_rest = t_rest[t_rest.index("|") + 1:]
+                label = t_rest[1 : t_rest.index("|")]
+                t_rest = t_rest[t_rest.index("|") + 1 :]
             f, t = f, t_rest.rstrip(";").strip()
         else:
             continue
         if f in (None, "") or t in (None, ""):
             continue
+
         # 端点解析：精确 id → 数字下标 → 丢弃（渲染器同样会跳过未知端点）
         def _resolve(v: Any) -> str | None:
             s = str(v)
@@ -356,9 +356,7 @@ def validate_architecture_tree(data: Any, subtype: str = None) -> tuple[bool, li
         if level not in labels_by_level:
             labels_by_level[level] = set()
         if label in labels_by_level[level]:
-            logger.warning(
-                "架构图同级重复标签: '%s'（层级 %s）—— 保留出图，建议后续修正",
-                label, level)
+            logger.warning("架构图同级重复标签: '%s'（层级 %s）—— 保留出图，建议后续修正", label, level)
         labels_by_level[level].add(label)
 
     # 节点数量区间检查（根据subtype）
@@ -538,19 +536,44 @@ _LABOR_AXIS_KEYS = ("phases", "stages", "time", "categories", "types")
 
 # 阶段对象里「不是工种计数」的键：平铺形态下必须跳过，
 # 否则 {"name":"基础","workers":[...]} 会把 name 当成一个工种。
-_LABOR_PHASE_META_KEYS = frozenset({
-    "name", "label", "title", "workers", "trades", "items",
-    "desc", "description", "remark", "note", "phase", "stage", "id",
-})
+_LABOR_PHASE_META_KEYS = frozenset(
+    {
+        "name",
+        "label",
+        "title",
+        "workers",
+        "trades",
+        "items",
+        "desc",
+        "description",
+        "remark",
+        "note",
+        "phase",
+        "stage",
+        "id",
+    }
+)
 
 # 时间轴 status 别名 → 规范值（渲染器与校验器只认规范值）
 _TIMELINE_STATUS_ALIASES = {
-    "completed": "completed", "complete": "completed", "done": "completed",
-    "finished": "completed", "已完成": "completed", "完成": "completed",
-    "in_progress": "in_progress", "inprogress": "in_progress", "doing": "in_progress",
-    "ongoing": "in_progress", "进行中": "in_progress", "实施中": "in_progress",
-    "pending": "pending", "todo": "pending", "not_started": "pending",
-    "未开始": "pending", "待开始": "pending", "计划中": "pending",
+    "completed": "completed",
+    "complete": "completed",
+    "done": "completed",
+    "finished": "completed",
+    "已完成": "completed",
+    "完成": "completed",
+    "in_progress": "in_progress",
+    "inprogress": "in_progress",
+    "doing": "in_progress",
+    "ongoing": "in_progress",
+    "进行中": "in_progress",
+    "实施中": "in_progress",
+    "pending": "pending",
+    "todo": "pending",
+    "not_started": "pending",
+    "未开始": "pending",
+    "待开始": "pending",
+    "计划中": "pending",
 }
 
 
@@ -579,8 +602,7 @@ def _as_str_list(value: Any) -> list[str]:
         out: list[str] = []
         for v in value:
             if isinstance(v, dict):
-                t = (v.get("name") or v.get("label") or v.get("title")
-                     or v.get("trade") or v.get("type"))
+                t = v.get("name") or v.get("label") or v.get("title") or v.get("trade") or v.get("type")
                 if t is not None and str(t).strip():
                     out.append(str(t).strip())
             elif v is not None and str(v).strip():
@@ -589,15 +611,13 @@ def _as_str_list(value: Any) -> list[str]:
     return []
 
 
-def _align_labor_axes(phases: list, categories: list,
-                      matrix: list) -> dict | None:
+def _align_labor_axes(phases: list, categories: list, matrix: list) -> dict | None:
     """对齐 labor 三件套的轴长度：**一律以数据为准**，绝不丢数据行/列。
 
     AI 常写出「阶段名数量 ≠ 数据行数」「工种数 ≠ 矩阵列数」。旧实现直接按
     `phases[i]` 取名字（越界 IndexError），或让渲染器截断多余行（数据静默丢失）。
     """
-    rows = [[_to_float(v, 0.0) or 0.0 for v in r]
-            for r in matrix if isinstance(r, (list, tuple)) and r]
+    rows = [[_to_float(v, 0.0) or 0.0 for v in r] for r in matrix if isinstance(r, (list, tuple)) and r]
     if not rows:
         return None
 
@@ -617,7 +637,7 @@ def _align_labor_axes(phases: list, categories: list,
     names = list(phases)
     for i in range(len(names), len(rows)):
         names.append(f"阶段{i + 1}")
-    names = names[:len(rows)]
+    names = names[: len(rows)]
 
     return {"phases": names, "categories": cats, "data": rows}
 
@@ -667,8 +687,7 @@ def normalize_labor_data(data: Any) -> dict | None:
             if isinstance(workers, list) and workers:
                 for w in workers:
                     if isinstance(w, dict):
-                        wn = (w.get("trade") or w.get("name") or w.get("label")
-                              or w.get("type"))
+                        wn = w.get("trade") or w.get("name") or w.get("label") or w.get("type")
                         wv = w.get("count")
                         if wv is None:
                             wv = w.get("value")
@@ -692,8 +711,7 @@ def normalize_labor_data(data: Any) -> dict | None:
             if not row:
                 continue
             nm = p.get("name") or p.get("label") or p.get("title")
-            names.append(str(nm).strip() if nm is not None and str(nm).strip()
-                         else f"阶段{i + 1}")
+            names.append(str(nm).strip() if nm is not None and str(nm).strip() else f"阶段{i + 1}")
             for k in row:
                 if k not in categories:
                     categories.append(k)
@@ -718,8 +736,7 @@ def normalize_labor_data(data: Any) -> dict | None:
                 nm = r.get("phase") or r.get("stage") or r.get("name") or r.get("label")
                 if nm is None and i < len(phases):
                     nm = phases[i]
-                names.append(str(nm).strip() if nm is not None and str(nm).strip()
-                             else f"阶段{i + 1}")
+                names.append(str(nm).strip() if nm is not None and str(nm).strip() else f"阶段{i + 1}")
                 for k in row:
                     if k not in categories:
                         categories.append(k)
@@ -773,8 +790,7 @@ def normalize_labor_data(data: Any) -> dict | None:
                 cols.append([_to_float(v, 0.0) or 0.0 for v in series])
             if cats and cols:
                 n = max(len(c) for c in cols)
-                matrix = [[cols[j][i] if i < len(cols[j]) else 0.0
-                           for j in range(len(cols))] for i in range(n)]
+                matrix = [[cols[j][i] if i < len(cols[j]) else 0.0 for j in range(len(cols))] for i in range(n)]
                 return _align_labor_axes(list(phases), cats, matrix)
 
     # ⑤ ECharts series / Chart.js datasets（labels 为阶段轴）
@@ -794,8 +810,7 @@ def normalize_labor_data(data: Any) -> dict | None:
         if cats and cols:
             n = max(len(c) for c in cols)
             names = list(phases) or _as_str_list(data.get("labels"))
-            matrix = [[cols[j][i] if i < len(cols[j]) else 0.0
-                       for j in range(len(cols))] for i in range(n)]
+            matrix = [[cols[j][i] if i < len(cols[j]) else 0.0 for j in range(len(cols))] for i in range(n)]
             return _align_labor_axes(names, cats, matrix)
 
     # ⑥ labels + values 一维序列（单工种 × 各阶段）
@@ -899,8 +914,7 @@ def normalize_timeline_data(data: Any) -> dict | None:
             date = m.get("day")
         item["date"] = str(date).strip() if date is not None else ""
         status = m.get("status")
-        mapped = (_TIMELINE_STATUS_ALIASES.get(str(status).strip().lower())
-                  if status else None)
+        mapped = _TIMELINE_STATUS_ALIASES.get(str(status).strip().lower()) if status else None
         if mapped:
             item["status"] = mapped
         else:
@@ -911,10 +925,27 @@ def normalize_timeline_data(data: Any) -> dict | None:
     return {"milestones": out}
 
 
+def gantt_task_label(task: Any) -> str:
+    """取甘特任务的「显示名」（name / task / title 三别名，去首尾空白）。
+
+    ★ R175（BUG-175-03）：这是**校验端与渲染端唯一共享的任务有效性判据** ——
+    渲染器（mermaid_gantt._render_gantt_image_v2）按此取名字，空名任务直接跳过；
+    校验端（normalize_gantt_plan）必须用同一函数在同一位置剔除，否则会出现
+    「校验通过 → 渲染必空 → 导出红字占位/静默丢图」的错配。
+    """
+    if not isinstance(task, dict):
+        return ""
+    return str(task.get("name") or task.get("task") or task.get("title") or "").strip()
+
+
 def normalize_gantt_plan(plan: Any) -> dict | None:
     """把甘特图计划归一为 `{"tasks": [...]}`。
 
     - 容器别名 tasks / items / rows；
+    - ★ R175（BUG-175-03）：**无显示名（name/task/title 全空）的任务直接剔除** ——
+      渲染器无法为无名任务画横道（旧实现 `if not name: continue`），校验端若仍放行，
+      就会出现「校验通过、渲染返回 None」的错配（如 `{"tasks":[{"id":"t1"}]}`）。
+      剔除后若一个任务都不剩，返回 None（校验判非法、块在生成期即被删除，不占图号）。
     - 任务 id 缺失时依次回落 name / task / title → 1-based 序号；
     - `dependencies` 支持用**任务名**引用（AI 常这么写）→ 归一为 id 的字符串形式
       （渲染器按 `str(task["id"])` 连线，name 形式的引用此前连不出箭头）；
@@ -942,6 +973,9 @@ def normalize_gantt_plan(plan: Any) -> dict | None:
     out: list = []
     for idx, t in enumerate(tasks):
         if not isinstance(t, dict):
+            continue
+        # ★ R175：无名任务校验端即剔除（与渲染端同一判据，见 gantt_task_label）
+        if not gantt_task_label(t):
             continue
         tid = t.get("id")
         if tid is None or (isinstance(tid, str) and not tid.strip()):
@@ -1139,9 +1173,7 @@ def validate_timeline_data(data: Any) -> tuple[bool, list[str]]:
                 )
             status = m.get("status")
             if status and status not in valid_statuses:
-                errors.append(
-                    f"timeline.milestones[{i}] status 应为 completed/in_progress/pending，实际: {status}"
-                )
+                errors.append(f"timeline.milestones[{i}] status 应为 completed/in_progress/pending，实际: {status}")
 
     except (json.JSONDecodeError, TypeError) as e:
         errors.append(f"数据解析失败: {e!s}")
@@ -1200,8 +1232,8 @@ def validate_labor_data(data: Any) -> tuple[bool, list[str]]:
             errors.append("所有阶段的工种人数均为0，图表无数值信息")
         elif _zero_phases:
             logger.warning(
-                "劳动力图含全 0 阶段（%s）—— 保留出图，建议后续修正",
-                "、".join(str(p) for p in _zero_phases[:3]))
+                "劳动力图含全 0 阶段（%s）—— 保留出图，建议后续修正", "、".join(str(p) for p in _zero_phases[:3])
+            )
 
         # 检查总人数非负（隐含，因为都是非负值，但显式检查更清晰）
         total = sum(sum(row) for row in matrix)
@@ -1260,7 +1292,7 @@ def normalize_comparison_data(data: Any) -> dict | None:
             headers = ["对比项", "数值"]
 
     # ✅ 兼容 {type:comparison, data:[{label,value}]} 饼图 JSON 形态
-    #（前端 jsonToMermaid 与导出裸 JSON 路径都会把该形态交给对比图渲染器）
+    # （前端 jsonToMermaid 与导出裸 JSON 路径都会把该形态交给对比图渲染器）
     if not rows_data and "data" in data:
         items = data.get("data", []) or []
         if isinstance(items, list) and items:
@@ -1303,7 +1335,8 @@ def normalize_comparison_data(data: Any) -> dict | None:
                 if value > 0:
                     detail = [
                         {"name": str(headers[idx + 1]), "value": n}
-                        for idx, n in enumerate(nums) if idx + 1 < len(headers)
+                        for idx, n in enumerate(nums)
+                        if idx + 1 < len(headers)
                     ]
                     parsed.append({"label": label, "value": value, "detail": detail})
             continue
@@ -1328,6 +1361,8 @@ def normalize_comparison_data(data: Any) -> dict | None:
         "title": str(data.get("title") or "").strip(),
         "items": parsed,
     }
+
+
 def validate_comparison_data(data: Any) -> tuple[bool, list[str]]:
     """验证 comparison（比选 / 占比）载荷（v3.2 规范）。
 
@@ -1830,16 +1865,43 @@ async def with_timeout(coro, timeout: int = 30, error_msg: str = "AI调用超时
 # 分号 → `flowchart TD; A-->B; B-->C`（单行分号写法）被整行跳过、节点数算成 0，
 # 判为「节点数不足」→ 修复失败 → 整块从正文删除（实测 2 例，见
 # `_diagnostics/_chart_shape_audit.py` 的 flowchart 形态）。
+def _strip_yaml_frontmatter(code: str) -> str:
+    """剥离 Mermaid YAML frontmatter（首个非空行 ``---`` 到闭合 ``---``）。
+
+    ✅ R179（G-05）：Mermaid 官方支持图块前置 frontmatter（``---\\ntitle: ...\\n---``），
+    AI 偶尔会照抄。旧实现只跳空行与 ``%%`` 注释，首个「关键字」于是变成 ``---``
+    ⇒ 类型判空、校验报「不支持的行 '---'」⇒ **带 frontmatter 的图块被整块删除**。
+    仅在首个有效行确为 ``---`` 且存在闭合行时剥离；无闭合时原样返回（绝不误吞
+    正文本就存在的分隔线形态）。前导注释保留，由 ``strip_leading_mermaid_comments``
+    继续清理。
+    """
+    s = str(code or "")
+    if not s:
+        return s
+    lines = s.split("\n")
+    i = 0
+    while i < len(lines) and (not lines[i].strip() or lines[i].strip().startswith("%%")):
+        i += 1
+    if i >= len(lines) or lines[i].strip() != "---":
+        return s
+    for j in range(i + 1, len(lines)):
+        if lines[j].strip() == "---":
+            return "\n".join(lines[:i] + lines[j + 1 :]).strip()
+    return s
+
+
 def strip_leading_mermaid_comments(code: str) -> str:
     """去掉 Mermaid 代码开头的空行与 ``%%`` 注释行（含 ``%%{init: ...}%%``）。
 
     AI 常在首行输出 ``%% 流程图`` 或 ``%%{init: ...}%%``，而下游解析与图表类型判定
     普遍使用 ``code.startswith("graph"/"gantt"/...)``，一旦以注释开头则所有分支落空
     （实测 gantt 会因此多画一行垃圾任务）。
+
+    ✅ R179：同时剥离 YAML frontmatter（见 ``_strip_yaml_frontmatter``）。
     """
     if not code:
         return ""
-    lines = str(code).split("\n")
+    lines = _strip_yaml_frontmatter(code).split("\n")
     i = 0
     while i < len(lines):
         s = lines[i].strip()
@@ -1883,8 +1945,12 @@ def normalize_mermaid_statements(code: str) -> str:
 # 消除两份独立词表漂移；顺序敏感：先命中先返回，勿随意重排）
 # ============================================================
 CHART_TYPE_LABELS = {
-    "flowchart": "流程图", "gantt": "甘特图", "architecture": "组织架构图",
-    "labor": "劳动力配置图", "comparison": "对比图", "layout": "总平面布置图",
+    "flowchart": "流程图",
+    "gantt": "甘特图",
+    "architecture": "组织架构图",
+    "labor": "劳动力配置图",
+    "comparison": "对比图",
+    "layout": "总平面布置图",
     "timeline": "时间轴",
 }
 
@@ -1929,17 +1995,24 @@ MERMAID_KEYWORD_TO_CHART_TYPE: dict[str, str] = {
 
 # 具备原生 PIL 渲染器的 7 类；其余类型只有 mermaid 原生引擎（前端 mermaid.js /
 # HTTP Service）能够渲染，PIL 兜底时必然产出占位提示。
-PIL_RENDERABLE_CHART_TYPES: frozenset[str] = frozenset({
-    "flowchart", "gantt", "architecture", "labor",
-    "comparison", "layout", "timeline",
-})
+PIL_RENDERABLE_CHART_TYPES: frozenset[str] = frozenset(
+    {
+        "flowchart",
+        "gantt",
+        "architecture",
+        "labor",
+        "comparison",
+        "layout",
+        "timeline",
+    }
+)
 
 
 def first_mermaid_keyword(code: str) -> str:
-    """取 Mermaid 代码的首个有效关键字（小写，跳过空行与 ``%%`` 注释行）。"""
+    """取 Mermaid 代码的首个有效关键字（小写，跳过空行/``%%`` 注释/YAML frontmatter）。"""
     if not code:
         return ""
-    for raw in str(code).split("\n"):
+    for raw in _strip_yaml_frontmatter(code).split("\n"):
         toks = raw.strip().split()
         if not toks or toks[0].startswith("%%"):
             continue
@@ -1986,8 +2059,24 @@ def infer_chart_type_from_payload(payload) -> str:
         return "layout"
     if _has("steps") or _has("nodes") or _has("edges"):
         return "flowchart"
-    # 劳动力四合一图：phases + categories + data 三键齐备（items/labels 为别名形态）
-    if (_has("phases") or _has("categories")) and (_has("data") or _has("rows")):
+    # ✅ R179（G-04）：劳动力图判据必须与 ``normalize_labor_data`` 的别名表**同源**
+    #    （``_LABOR_AXIS_KEYS`` + trades / labels+values / series 形态）。旧实现只认
+    #    ``(phases|categories) and (data|rows)``，而渲染器支持
+    #    ``{"trades":[...]}``、``{"stages":[{"workers":[...]}]}``、``time/types`` 等
+    #    自然形态 —— 「渲染器能画、推断判空」导致缺 ``type`` 的 labor 块在登记与
+    #    导出两侧被整块丢弃（实测推断返回空串）。
+    _has_labor_axis = any(_has(k) for k in _LABOR_AXIS_KEYS)
+    _has_labor_values = any(_has(k) for k in ("data", "rows", "series", "datasets"))
+    # 阶段对象形态（normalize_labor_data case ②）：phases/stages 为 dict 列表
+    _raw_phases = payload.get("phases") or payload.get("stages")
+    _labor_phase_objects = (
+        isinstance(_raw_phases, (list, tuple)) and bool(_raw_phases) and isinstance(_raw_phases[0], dict)
+    )
+    if (
+        _has("trades")
+        or (_has_labor_axis and (_has_labor_values or _labor_phase_objects))
+        or (_has("labels") and (_has("values") or _has("series") or _has("datasets")))
+    ):
         return "labor"
     if _has("tasks") or _has("milestones") or _has("events"):
         # milestones/events 更接近时间轴；tasks 是甘特

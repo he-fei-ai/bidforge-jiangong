@@ -18,6 +18,7 @@
 所有拆分前可用的内部函数（_render_xxx_image_v2、_parse_xxx、_repair_xxx_data 等）
 均通过 re-export 暴露，import 路径不变。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -56,8 +57,7 @@ def _get_render_loop() -> asyncio.AbstractEventLoop:
                     asyncio.set_event_loop(_loop)
                     _loop.run_forever()
 
-                threading.Thread(
-                    target=_run_loop, name="mermaid-render-loop", daemon=True).start()
+                threading.Thread(target=_run_loop, name="mermaid-render-loop", daemon=True).start()
                 _RENDER_LOOP = _loop
     return _RENDER_LOOP
 
@@ -105,8 +105,7 @@ def _code_cache_ident(mermaid_code) -> str:
     s = str(mermaid_code)
     if len(s) <= 8192:
         return s
-    return "sha1:" + hashlib.sha1(
-        s.encode("utf-8", "surrogatepass")).hexdigest()
+    return "sha1:" + hashlib.sha1(s.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 # ✅ 深度审查修复（2026-09-20）：渲染器缓存版本号。
@@ -137,12 +136,16 @@ def _code_cache_ident(mermaid_code) -> str:
 #   连线分道（间隙按边数加高），菱形版式、连线走向与画布尺寸都变；
 #   不升版本则历史方案继续从缓存拿 R66 旧图（小方块菱形 + 共线长轨）。
 #   故版本号 6 -> 7。
-_RENDERER_VERSION = 7
+# ✅ R175（2026-11-03 · BUG-175-02）：R94 架构样张 v2（组织架构图版式/拆图样张重排）
+#   早已改变 PNG 产物，但版本号一直停在 7 —— 存量缓存里的旧架构图会**永久命中**，
+#   修复在生产上等于从未生效；且旧图会被烤进导出 DOCX 的二进制缓存。
+#   本次升级同时覆盖同批修复（BUG-175-01 缓存轨道键变更）。故版本号 7 -> 8。
+_RENDERER_VERSION = 8
 
 
-def _render_cache_key(mermaid_code: str, chart_type: str,
-                     duration: int, unit: str, tick: int,
-                     skip_http: bool, allow_pil: bool) -> tuple:
+def _render_cache_key(
+    mermaid_code: str, chart_type: str, duration: int, unit: str, tick: int, skip_http: bool, allow_pil: bool
+) -> tuple:
     """构造缓存键。仅用可 hash 的元组，避免对 BytesIO 做 hash。
 
     ✅ P1 修复（2026-09-27）：键首段为 ``_RENDERER_VERSION`` —— 渲染器
@@ -152,7 +155,11 @@ def _render_cache_key(mermaid_code: str, chart_type: str,
         f"v{_RENDERER_VERSION}",
         chart_type,
         _code_cache_ident(mermaid_code),
-        duration, unit, tick, skip_http, allow_pil,
+        duration,
+        unit,
+        tick,
+        skip_http,
+        allow_pil,
     )
 
 
@@ -248,8 +255,9 @@ def render_mermaid_to_bytes(
     _cache_key = _render_cache_key(code, chart_type, duration, unit, tick, skip_http, allow_pil)
     _cached = _render_cache_get(_cache_key)
     if _cached is not None:
-        logger.debug("[渲染] 缓存命中 chart_type=%s code长度=%d 耗时=%.3fs",
-                     chart_type, len(code), _time.perf_counter() - _t0)
+        logger.debug(
+            "[渲染] 缓存命中 chart_type=%s code长度=%d 耗时=%.3fs", chart_type, len(code), _time.perf_counter() - _t0
+        )
         return _cached
 
     # ⚠️ 语句分隔符归一已**下移**到「载荷归一化（包装器解包）」之后：
@@ -324,8 +332,10 @@ def render_mermaid_to_bytes(
         #    不可用。此处显式记 WARNING，让根因在渲染日志第一现场可见。
         if code.lstrip().startswith("{"):
             logger.warning(
-                "[渲染] JSON 数据载荷非法（疑似生成截断，长度=%d，chart_type=%s），"
-                "后续渲染策略对损坏数据必然失败", len(code), chart_type)
+                "[渲染] JSON 数据载荷非法（疑似生成截断，长度=%d，chart_type=%s），" "后续渲染策略对损坏数据必然失败",
+                len(code),
+                chart_type,
+            )
         pass
 
     # ✅ Mermaid 语法载荷归一（校验侧与渲染侧**共用同一实现**，见
@@ -386,9 +396,7 @@ def render_mermaid_to_bytes(
     # BUG-E-02 修复：skip_http=True 时完全跳过 HTTP Service 路径
     # 在本地开发环境中 HTTP Service 通常不可用，每图尝试 30s 超时严重拖慢导出
     if skip_http:
-        logger.info(
-            "[渲染] Level 1.5 跳过: skip_http=True, 直接走 PIL v2 (chart_type=%s)", chart_type
-        )
+        logger.info("[渲染] Level 1.5 跳过: skip_http=True, 直接走 PIL v2 (chart_type=%s)", chart_type)
     # V6.1: HTTP Service 仅接受 Mermaid 语法。JSON 数据载荷（architecture/labor 的
     # 原生数据、layout/timeline 解包后的 zones/milestones）对 HTTP 服务必然失败，
     # 此类类型的第一优先方案即 PIL v2 商业级渲染器（唯一的原生渲染路径）。
@@ -410,9 +418,7 @@ def render_mermaid_to_bytes(
             logger.info("[渲染] Level 1.5 重试第 %d 次 (chart_type=%s)", _retry + 1, chart_type)
         _remaining = _http_total_budget - (_time.perf_counter() - _http_attempt_start)
         if _remaining <= 0:
-            logger.warning(
-                "[渲染] Level 1.5 总预算耗尽（%.1fs），放弃后续 HTTP 尝试", _http_total_budget
-            )
+            logger.warning("[渲染] Level 1.5 总预算耗尽（%.1fs），放弃后续 HTTP 尝试", _http_total_budget)
             break
         try:
             _render_coro = asyncio.wait_for(
@@ -450,6 +456,11 @@ def render_mermaid_to_bytes(
                     chart_type,
                     _retry + 1,
                 )
+                # ✅ R179（D-03）：HTTP 成功路径也必须回填进程内 LRU。
+                #    旧实现直接 return，只有 PIL 分支写 ``_render_cache`` —— 同一进程
+                #    内第二次调用 ``render_mermaid_to_bytes`` 仍会重新走 HTTP（数秒/次），
+                #    而 ChartCache 之外的直接调用方（/charts/render 等）没有磁盘缓存兜底。
+                _render_cache_put(_cache_key, BytesIO(_http_bytes))
                 return BytesIO(_http_bytes)
             else:
                 logger.warning(
@@ -480,8 +491,9 @@ def render_mermaid_to_bytes(
     _is_json_payload = code.lstrip().startswith("{")
     if not allow_pil and not _is_json_payload:
         logger.warning(
-            "[渲染] 不降级模式: HTTP Service 失败且 allow_pil=False, "
-            "Mermaid 载荷不回退 PIL (chart_type=%s)", chart_type)
+            "[渲染] 不降级模式: HTTP Service 失败且 allow_pil=False, " "Mermaid 载荷不回退 PIL (chart_type=%s)",
+            chart_type,
+        )
         return None
 
     # ---------- Level 2 (PIL v2): 商业级渲染器（零外部依赖，始终可用）----------
@@ -490,12 +502,7 @@ def render_mermaid_to_bytes(
     try:
         # === 流程图（支持 mermaid 语法 + JSON 节点列表 + steps/edges 变体载荷）===
         if chart_type == "flowchart":
-            if (
-                code.startswith("flowchart")
-                or code.startswith("graph")
-                or code.startswith("%%{")
-                or "-->" in code
-            ):
+            if code.startswith("flowchart") or code.startswith("graph") or code.startswith("%%{") or "-->" in code:
                 _level2_result = _render_flowchart_image_v2(code)
             if _level2_result is None:
                 _plain_nodes: list[str] | None = None
@@ -507,6 +514,7 @@ def render_mermaid_to_bytes(
                         #    归一（steps→nodes、variant→type、下标端点解析）后再转换，
                         #    显式 variant 经 variant_overrides 传给渲染器（优先于自动推断）。
                         from app.services.chart_validators import normalize_flowchart_data
+
                         parsed = normalize_flowchart_data(parsed) or parsed
                         nodes = parsed.get("nodes", [])
                         # 条件放宽：仅有 nodes 也能走完整渲染链路（函数内部自动补 edges）
@@ -517,8 +525,7 @@ def render_mermaid_to_bytes(
                                 _overrides = {
                                     n["id"]: n["type"]
                                     for n in nodes
-                                    if isinstance(n, dict)
-                                    and n.get("type") not in (None, "", "process")
+                                    if isinstance(n, dict) and n.get("type") not in (None, "", "process")
                                 }
                                 _level2_result = _render_flowchart_image_v2(
                                     _edges_mermaid, variant_overrides=_overrides or None
@@ -535,8 +542,7 @@ def render_mermaid_to_bytes(
                 # 最终防线：纯节点列表 → 构造顺序连线 Mermaid → v2 商业级渲染
                 if _level2_result is None and _plain_nodes and len(_plain_nodes) >= 2:
                     _seq_code = "flowchart TD\n    " + " --> ".join(
-                        f'N{i}["{str(n).replace(chr(34), chr(39))}"]'
-                        for i, n in enumerate(_plain_nodes, 1)
+                        f'N{i}["{str(n).replace(chr(34), chr(39))}"]' for i, n in enumerate(_plain_nodes, 1)
                     )
                     _level2_result = _render_flowchart_image_v2(_seq_code)
 
@@ -566,7 +572,10 @@ def render_mermaid_to_bytes(
                                 # ✅ 透传阶段划分（`section xxx`），供渲染器绘制阶段带
                                 "section": t.get("section", ""),
                             }
-                            for idx, t in enumerate(tasks[:30])
+                            # ✅ R175 续（2026-11-04）：不在生成侧截断；把完整任务列表
+                            #    交给渲染器，由 mermaid_gantt._apply_gantt_task_budget
+                            #    统一判定预算并 WARNING 留痕（避免无信号的双截断）。
+                            for idx, t in enumerate(tasks)
                         ],
                     }
                     _level2_result = _render_gantt_image_v2(plan)
@@ -595,9 +604,7 @@ def render_mermaid_to_bytes(
                                 break
                     if raw_tasks:
                         has_enhanced = any(
-                            isinstance(t, dict)
-                            and (t.get("id") or t.get("dependencies")
-                                 or t.get("critical"))
+                            isinstance(t, dict) and (t.get("id") or t.get("dependencies") or t.get("critical"))
                             for t in raw_tasks
                         )
                         if has_enhanced:
@@ -628,7 +635,10 @@ def render_mermaid_to_bytes(
                                     "dependencies": [],
                                     "isMilestone": t["start"] == t["end"],
                                 }
-                                for idx, t in enumerate(tasks[:30])
+                                # ✅ R175 续（2026-11-04）：不在生成侧截断；把完整任务列表
+                                #    交给渲染器，由 mermaid_gantt._apply_gantt_task_budget
+                                #    统一判定预算并 WARNING 留痕（避免无信号的双截断）。
+                                for idx, t in enumerate(tasks)
                             ],
                         }
                         _level2_result = _render_gantt_image_v2(plan)
@@ -650,9 +660,7 @@ def render_mermaid_to_bytes(
                             root_node = nested
                             break
                     # 兼容 {type: "architecture", root: "xxx", nodes: [...]} 格式
-                    if not (
-                        root_node.get("label") or root_node.get("name") or root_node.get("children")
-                    ):
+                    if not (root_node.get("label") or root_node.get("name") or root_node.get("children")):
                         nodes_list = parsed.get("nodes")
                         if isinstance(nodes_list, list) and nodes_list:
                             root_node = {
@@ -750,6 +758,16 @@ def render_mermaid_to_bytes(
         return _level2_result
 
     elapsed = _time.perf_counter() - _t0
+    if chart_type == "gantt":
+        # ★ R175（BUG-175-03）：JSON 型甘特图**没有 HTTP 原生引擎**（mermaid 服务只吃
+        #   Mermaid 语法，chart-json 载荷在 Level 1.5 就被跳过），PIL v2 是唯一路径。
+        #   失败时必须留可观测痕迹，且语义是「渲染失败」——调用方按失败处理：
+        #   跳过插图、不占用图号；不得改写成红字占位（占位会消耗一个图号）。
+        logger.warning(
+            "[图表降级] 甘特图渲染失败（chart-json 载荷无 HTTP 兜底，PIL v2 未出图）；"
+            "按渲染失败处理：跳过插图、不占用图号，禁止红字占位 chart_type=%s",
+            chart_type,
+        )
     logger.warning("[渲染] 全部渲染策略失败 chart_type=%s 耗时=%.2fs", chart_type, elapsed)
     logger.warning("[渲染] 建议检查: 1)HTTP服务是否可用 2)PIL v2渲染器是否正常")
     return None
@@ -789,6 +807,7 @@ class ChartCache:
         # ✅ 修复：默认用绝对路径（基于 app.config），避免依赖启动 CWD 导致缓存失效
         if not cache_dir:
             from app.config import CHARTS_DIR
+
             cache_dir = str(CHARTS_DIR)
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -837,9 +856,7 @@ class ChartCache:
             self._stats["total_size"] = total
 
     @staticmethod
-    def _cache_key(chart_type: str, mermaid_code: str,
-                   allow_pil: bool | None = None,
-                   skip_http: bool = False) -> str:
+    def _cache_key(chart_type: str, mermaid_code: str, allow_pil: bool | None = None, skip_http: bool = False) -> str:
         """缓存 key = chart_type + payload (+ allow_pil) (+ skip_http)。
 
         ✅ BUG 修复：get()/set() 与 get_or_render() 此前各用一套 key 规则 ——
@@ -864,8 +881,14 @@ class ChartCache:
         material += f":http={int(not bool(skip_http))}"
         return hashlib.md5(material.encode()).hexdigest()
 
-    def get(self, mermaid_code: str, fmt: str = "png", chart_type: str = "",
-            allow_pil: bool | None = None) -> Path | None:
+    def get(
+        self,
+        mermaid_code: str,
+        fmt: str = "png",
+        chart_type: str = "",
+        allow_pil: bool | None = None,
+        skip_http: bool = False,
+    ) -> Path | None:
         """获取缓存的图表
 
         Args:
@@ -874,12 +897,16 @@ class ChartCache:
             chart_type: 图表类型（拼入缓存 key，避免同 payload 不同类型互踩）
             allow_pil: 与 get_or_render 对齐的降级开关段；传 True/False 才能读到
                        get_or_render 写入的缓存，None（默认）为独立命名空间
+            skip_http: ★ R175（BUG-175-01）渲染轨道段。``get_or_render`` 的缓存键
+                       同时包含 ``http=0/1``（skip_http 决定走 PIL 还是 HTTP），
+                       读取侧必须用**同一取值**才能命中自身写入的条目；
+                       不传（默认 False）等价于 HTTP 轨道。
 
         Returns:
             缓存文件路径，未命中返回 None
         """
         # BUG修复：原 key 只含 payload MD5，同一 payload 以不同 chart_type 渲染会互踩缓存
-        cache_key = self._cache_key(chart_type, mermaid_code, allow_pil)
+        cache_key = self._cache_key(chart_type, mermaid_code, allow_pil, skip_http)
         cache_path = self.cache_dir / f"{cache_key}.{fmt}"
         if cache_path.exists():
             with self._lock:
@@ -887,6 +914,7 @@ class ChartCache:
                 # BUG-FIX-49 修复：get() 命中时未刷新 _access_order 时间戳，
                 # 导致频繁访问的热点缓存被 LRU 误判为"最久未访问"而错误淘汰。
                 import time as _time
+
                 self._access_order[cache_key] = _time.time()
                 return cache_path
         # BUG 修复：misses 计数器操作需在锁内，避免并发丢失更新
@@ -895,8 +923,13 @@ class ChartCache:
         return None
 
     def set(
-        self, mermaid_code: str, content: bytes, fmt: str = "png",
-        chart_type: str = "", allow_pil: bool | None = None,
+        self,
+        mermaid_code: str,
+        content: bytes,
+        fmt: str = "png",
+        chart_type: str = "",
+        allow_pil: bool | None = None,
+        skip_http: bool = False,
     ) -> Path:
         """缓存图表
 
@@ -907,6 +940,11 @@ class ChartCache:
             chart_type: 图表类型（与 get() 的 key 规则一致）
             allow_pil: 拼入缓存 key（与 get_or_render 读取 key 一致）；
                        None 表示不拼入（兼容直接 set/get 的调用方）
+            skip_http: ★ R175（BUG-175-01）渲染轨道段，必须与读取侧同口径。
+                       缺失该段时 ``get_or_render(skip_http=True)`` 的结果会被写进
+                       ``http=1`` 槽：① 自己下次读不到（每次重渲染）；② 污染 HTTP
+                       轨道（HTTP 原生图与 PIL 自绘图串用）；③ follower 读
+                       ``http=0`` 永远 miss → 假失败。
 
         Returns:
             缓存文件路径
@@ -914,7 +952,7 @@ class ChartCache:
 
         # ✅ key 规则统一到 _cache_key（get / set / get_or_render 三者必须一致，
         # 否则写入路径与读取路径对不上，缓存永远 miss）
-        cache_key = self._cache_key(chart_type, mermaid_code, allow_pil)
+        cache_key = self._cache_key(chart_type, mermaid_code, allow_pil, skip_http)
         cache_path = self.cache_dir / f"{cache_key}.{fmt}"
         with self._lock:
             # V2.0 新增：LRU 淘汰 - 当总大小超限时，按访问最久顺序清理最早条目
@@ -977,8 +1015,9 @@ class ChartCache:
                 # BUG-FIX-32 修复：同步删除对应的 .fmt 元数据 key
                 self._access_order.pop(f"{oldest_key}.fmt", None)
 
-    def get_or_render(self, mermaid_code: str, chart_type: str, fmt: str = "png",
-                      skip_http: bool = False, allow_pil: bool = True) -> BytesIO | None:
+    def get_or_render(
+        self, mermaid_code: str, chart_type: str, fmt: str = "png", skip_http: bool = False, allow_pil: bool = True
+    ) -> BytesIO | None:
         """获取缓存或渲染新图表（线程安全，V1.1 新增）
 
         Args:
@@ -1027,9 +1066,7 @@ class ChartCache:
             #    超时后 follower 降级为自行渲染。
             _signaled = waiter.wait(timeout=120.0)
             if not _signaled:
-                logger.warning(
-                    "ChartCache: 等待同图渲染超时（120s），降级为自行渲染 %s",
-                    cache_key[:12])
+                logger.warning("ChartCache: 等待同图渲染超时（120s），降级为自行渲染 %s", cache_key[:12])
             with self._lock:
                 if cache_path.exists():
                     self._stats["hits"] += 1
@@ -1046,16 +1083,19 @@ class ChartCache:
 
         try:
             # 锁外渲染（render_mermaid_to_bytes 可能耗时数秒到20秒）
-            result = render_mermaid_to_bytes(mermaid_code, chart_type,
-                                             skip_http=skip_http, allow_pil=allow_pil)
+            result = render_mermaid_to_bytes(mermaid_code, chart_type, skip_http=skip_http, allow_pil=allow_pil)
             if result:
                 content = result.getvalue()
                 # 渲染完成后再加锁写入
                 # BUG-FIX-50 修复：原直接 write_bytes 未调用 _evict_if_needed，
                 # 也未更新 _access_order 和 _stats["total_size"]，导致缓存可能
                 # 超 500MB 上限且统计失真。改为调用 set() 方法的完整逻辑。
-                self.set(mermaid_code, content, fmt=fmt, chart_type=chart_type,
-                         allow_pil=allow_pil)
+                # ★ R175（BUG-175-01）：写入必须带上 skip_http，与上方 cache_key 同口径。
+                #   漏传时全部结果被写进 http=1 槽 —— 自身永不命中、HTTP/PIL 跨轨污染、
+                #   follower 读 http=0 恒 miss 而假失败（详见 set() 的 skip_http 说明）。
+                self.set(
+                    mermaid_code, content, fmt=fmt, chart_type=chart_type, allow_pil=allow_pil, skip_http=skip_http
+                )
                 with self._lock:
                     self._stats["misses"] += 1
                 return BytesIO(content)
@@ -1109,6 +1149,17 @@ class ChartCache:
                     logger.debug("[silent-except] mermaid_renderer.py: line 676 - %s", _e)
             logger.info("ChartCache: 已清理 %d 个过期缓存（>%d天）", count, max_age_days)
 
+    def get_counters(self) -> dict:
+        """轻量命中计数快照（不扫磁盘目录）。
+
+        供导出链路统计「本次导出的后端图表缓存命中数」：``get_stats()``
+        为了 file_count/total_size 要 glob 两次并 stat 每个文件，在一次
+        导出里前后各调一次代价不必要；本方法只读内存计数（加锁保证与
+        渲染线程一致）。
+        """
+        with self._lock:
+            return {"hits": int(self._stats["hits"]), "misses": int(self._stats["misses"])}
+
     def get_stats(self) -> dict:
         """获取缓存统计信息
 
@@ -1153,21 +1204,20 @@ class ChartCache:
                         cache_key = f.stem
                         self._access_order.pop(cache_key, None)
                         self._access_order.pop(f"{cache_key}.fmt", None)
-                        self._stats["total_size"] = max(
-                            0, self._stats["total_size"] - st.st_size)
+                        self._stats["total_size"] = max(0, self._stats["total_size"] - st.st_size)
             except Exception as _e:
                 logger.debug("[silent-except] mermaid_renderer.py: cleanup_old_files - %s", _e)
         if count > 0:
             logger.info("ChartCache: 清理了 %d 个超过 %d 天的缓存文件", count, max_age_days)
         return count
 
+
 def render_mermaid(mermaid_code: str, chart_type: str = "flowchart") -> str:
     """兼容接口：返回 Mermaid 源码（不实际渲染）。
-    
+
     完整渲染请使用 render_mermaid_to_bytes()。该函数保留仅为向后兼容。
     """
     return mermaid_code
-
 
 
 # ============================================================
@@ -1228,4 +1278,3 @@ from .mermaid_timeline import (  # noqa: F401
 )
 
 _chart_cache = ChartCache()
-

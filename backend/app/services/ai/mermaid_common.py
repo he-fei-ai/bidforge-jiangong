@@ -3,6 +3,7 @@
 由 scripts/_split_mermaid.py 从原 mermaid_renderer.py 自动拆分而来。
 任何图表子模块（flowchart / gantt / ...）应从本模块导入共享工具。
 """
+
 from __future__ import annotations
 
 import functools
@@ -14,10 +15,7 @@ from io import BytesIO
 try:
     from PIL import Image, ImageFont
 except ImportError:
-    raise ImportError(
-        "PIL/Pillow 未安装，Mermaid图表渲染功能不可用。"
-        "请运行: pip install Pillow"
-    )
+    raise ImportError("PIL/Pillow 未安装，Mermaid图表渲染功能不可用。" "请运行: pip install Pillow")
 
 
 logger = logging.getLogger(__name__)
@@ -70,6 +68,7 @@ def _resolve_font_paths(bold: bool = False) -> list[str]:
         return _DEFAULT_BOLD_FONT_PATHS + _DEFAULT_FONT_PATHS
     return list(_DEFAULT_FONT_PATHS)
 
+
 def _auto_detect_chinese_font() -> list[str]:
     """自动检测系统中可用的中文字体，返回发现的字体路径列表。
 
@@ -100,10 +99,7 @@ def _auto_detect_chinese_font() -> list[str]:
             if os.path.isdir(d):
                 try:
                     for f in os.listdir(d):
-                        if any(
-                            kw in f.lower()
-                            for kw in ["stheit", "songti", "pingfang", "noto", "cjk"]
-                        ):
+                        if any(kw in f.lower() for kw in ["stheit", "songti", "pingfang", "noto", "cjk"]):
                             detected.append(os.path.join(d, f))
                 except Exception:
                     continue
@@ -114,14 +110,12 @@ def _auto_detect_chinese_font() -> list[str]:
                 try:
                     for root, dirs, files in os.walk(d):
                         for f in files:
-                            if any(
-                                kw in f.lower()
-                                for kw in ["noto", "cjk", "wqy", "droid", "chinese", "hans", "sc"]
-                            ):
+                            if any(kw in f.lower() for kw in ["noto", "cjk", "wqy", "droid", "chinese", "hans", "sc"]):
                                 detected.append(os.path.join(root, f))
                 except Exception:
                     continue
     return detected
+
 
 # 字体路径解析缓存：key = (是否粗体, FONT_PATH 环境变量原文) → 可用字体路径 or None
 # ✅ 性能修复：默认字体列表是**跨平台**的（macOS/Linux/Windows 混排），本地机器上
@@ -196,6 +190,7 @@ def _image_font(size: int, bold: bool = False):
     except Exception:
         return None
 
+
 def _render_hq(func):
     """Decorator: 高保真输出 — 固定 300 DPI 元数据，不降采样
 
@@ -244,6 +239,7 @@ def _render_hq(func):
 
     return wrapper
 
+
 def _image_to_stream(image: Image.Image) -> BytesIO:
     """将 PIL Image 保存为 PNG 字节流（增强：300 DPI + 优化）"""
     buf = BytesIO()
@@ -254,13 +250,16 @@ def _image_to_stream(image: Image.Image) -> BytesIO:
     buf.seek(0)
     return buf
 
+
 def _text_width(draw, text: str, font) -> int:
     bbox = draw.textbbox((0, 0), text, font=font)
     return bbox[2] - bbox[0]
 
+
 def _text_height(draw, text: str, font) -> int:
     bbox = draw.textbbox((0, 0), text, font=font)
     return bbox[3] - bbox[1]
+
 
 def _draw_text_center(draw, box, text: str, font, fill: str, max_lines: int | None = None):
     x1, y1, x2, y2 = box
@@ -273,6 +272,7 @@ def _draw_text_center(draw, box, text: str, font, fill: str, max_lines: int | No
         text_w = bbox[2] - bbox[0]
         draw.text((x1 + (x2 - x1 - text_w) / 2, y), line, fill=fill, font=font)
         y += line_h
+
 
 def _wrap_text(draw, text: str, font, max_width: int, max_lines: int | None = None) -> list[str]:
     text = str(text or "").strip()
@@ -295,14 +295,15 @@ def _wrap_text(draw, text: str, font, max_width: int, max_lines: int | None = No
         lines[-1] = _fit_text_with_ellipsis(draw, lines[-1], font, max_width)
     return lines[:max_lines] if max_lines else lines
 
+
 def _fit_text_with_ellipsis(draw, text: str, font, max_width: int) -> str:
     value = text
     while value and _text_width(draw, f"{value}...", font) > max_width:
         value = value[:-1]
     return f"{value}..." if value else "..."
 
-def _vertical_text_capacity(box_w: int, box_h: int, char_h: int,
-                            char_gap: int = 4) -> tuple[int, int, int, int, int]:
+
+def _vertical_text_capacity(box_w: int, box_h: int, char_h: int, char_gap: int = 4) -> tuple[int, int, int, int, int]:
     """竖排排版的行列几何 —— 返回 (每列字数, 可容纳列数, 总容量, 纵向步进, 横向步进)。
 
     刻意从 `_draw_text_vertical_center` 里抽出并**共用同一公式**：字号自适应需要
@@ -310,8 +311,8 @@ def _vertical_text_capacity(box_w: int, box_h: int, char_h: int,
     「自适应以为装得下、真正绘制仍被省略号收口」的假绿。
     """
     gap = max(0, int(char_gap))
-    row_step = char_h + gap                  # 纵向步进：字高 + letter-spacing
-    col_step = char_h + max(2, gap // 2)     # 横向步进：列间距（字宽方向）
+    row_step = char_h + gap  # 纵向步进：字高 + letter-spacing
+    col_step = char_h + max(2, gap // 2)  # 横向步进：列间距（字宽方向）
     per_col = max(1, (box_h + gap) // row_step) if box_h > 0 else 1
     max_cols = max(1, box_w // col_step) if box_w > 0 else 1
     return per_col, max_cols, per_col * max_cols, row_step, col_step
@@ -339,14 +340,12 @@ def _draw_text_vertical_center(draw, box, text: str, font, fill: str, char_gap: 
     box_h = max(0, int(y2 - y1))
     char_h = max(12, _text_height(draw, "国", font))
     gap = max(0, int(char_gap))
-    per_col, _max_cols, capacity, row_step, col_step = _vertical_text_capacity(
-        box_w, box_h, char_h, gap
-    )
+    per_col, _max_cols, capacity, row_step, col_step = _vertical_text_capacity(box_w, box_h, char_h, gap)
     if len(text) > capacity:
         text = f"{text[:max(1, capacity - 1)]}…"
-    columns = [text[i:i + per_col] for i in range(0, len(text), per_col)]
+    columns = [text[i : i + per_col] for i in range(0, len(text), per_col)]
     group_w = len(columns) * col_step
-    right = x1 + (box_w + group_w) / 2       # 首列（最右列）的右边界
+    right = x1 + (box_w + group_w) / 2  # 首列（最右列）的右边界
     for idx, column in enumerate(columns):
         center_x = right - col_step * idx - col_step / 2
         total_h = len(column) * row_step - gap
@@ -392,10 +391,10 @@ def _build_gantt_marks(duration: int, requested_tick: int, max_columns: int = 18
 #     纸面字号(mm) = 字号px × scale × 2.54 / DPI × fit × 10
 #   scale 与 DPI 在宽度受限时分子分母同现、互相约掉 ⇒ 只剩「字号 ÷ 画布宽」一个比值；
 #   但**高度受限时该约简不成立**，必须带上 canvas_h —— 这正是 R61 缺的那一半。
-PAPER_SCALE_DEFAULT = 2.5       # 各渲染器统一 scale=2.5 超采样
-PAPER_DPI_DEFAULT = 300.0       # `_image_to_stream` 写入的 PNG DPI
-PAPER_COLUMN_WIDTH_CM = 16.0    # DOCX 正文栏宽上限（export._CHART_MAX_WIDTH_CM）
-PAPER_MAX_HEIGHT_CM = 22.0      # 单图最大高度（export._CHART_MAX_HEIGHT_CM）
+PAPER_SCALE_DEFAULT = 2.5  # 各渲染器统一 scale=2.5 超采样
+PAPER_DPI_DEFAULT = 300.0  # `_image_to_stream` 写入的 PNG DPI
+PAPER_COLUMN_WIDTH_CM = 16.0  # DOCX 正文栏宽上限（export._CHART_MAX_WIDTH_CM）
+PAPER_MAX_HEIGHT_CM = 22.0  # 单图最大高度（export._CHART_MAX_HEIGHT_CM）
 # ✅ R64：纸面字号**下限**的唯一读数落在这里。此前只有架构图自带一份 2.4mm
 #    （R60），其余 PIL 渲染器对「印到纸上多大字」完全无感 —— 时间轴 24 事件
 #    印到纸上只有 0.38mm（名称档）/ 0.28mm（最小档；R60 单档口径记的是
@@ -408,10 +407,17 @@ PAPER_FONT_MIN_MM = 2.4
 ENV_PAPER_FONT_MIN = ("CHART_PAPER_MIN_MM", "ARCH_LEAF_PAPER_MIN_MM")
 
 
-def paper_font_mm(font_px: float, canvas_w: int, canvas_h: int = 0, title_h: int = 0,
-                  *, scale: float = PAPER_SCALE_DEFAULT, dpi: float = PAPER_DPI_DEFAULT,
-                  col_cm: float = PAPER_COLUMN_WIDTH_CM,
-                  max_h_cm: float = PAPER_MAX_HEIGHT_CM) -> float:
+def paper_font_mm(
+    font_px: float,
+    canvas_w: int,
+    canvas_h: int = 0,
+    title_h: int = 0,
+    *,
+    scale: float = PAPER_SCALE_DEFAULT,
+    dpi: float = PAPER_DPI_DEFAULT,
+    col_cm: float = PAPER_COLUMN_WIDTH_CM,
+    max_h_cm: float = PAPER_MAX_HEIGHT_CM,
+) -> float:
     """DOCX 插入后图内文字的**纸面高度**（mm），宽/高**双上限**取更紧者。
 
     `canvas_h=0` → 只看宽度（等价 R60 之前的单上限口径）；`title_h` 是标题带高度，
@@ -419,7 +425,7 @@ def paper_font_mm(font_px: float, canvas_w: int, canvas_h: int = 0, title_h: int
     """
     if canvas_w <= 0 or font_px <= 0 or scale <= 0 or dpi <= 0:
         return 0.0
-    per_px = scale * 2.54 / dpi * 10.0          # 1 图内像素 → 多少纸上毫米
+    per_px = scale * 2.54 / dpi * 10.0  # 1 图内像素 → 多少纸上毫米
     fit = 1.0
     w_cm = canvas_w * per_px / 10.0
     if w_cm > col_cm:
@@ -442,9 +448,9 @@ def stitch_geometry(sizes, gap: int) -> tuple[int, int]:
     return max(w for w, _ in pts), sum(h for _, h in pts) + int(gap) * (len(pts) - 1)
 
 
-def paper_height_binds(canvas_w: int, canvas_h: int,
-                       *, col_cm: float = PAPER_COLUMN_WIDTH_CM,
-                       max_h_cm: float = PAPER_MAX_HEIGHT_CM) -> bool:
+def paper_height_binds(
+    canvas_w: int, canvas_h: int, *, col_cm: float = PAPER_COLUMN_WIDTH_CM, max_h_cm: float = PAPER_MAX_HEIGHT_CM
+) -> bool:
     """整图插入时是否由「高上限」决定缩放（即拆图换来的高度已反噬宽度收益）。
 
     整数交叉相乘（`h/w > max_h/col` ⇔ `h*col > w*max_h`），避免浮点边界抖动。
@@ -485,8 +491,7 @@ def font_px(font) -> int:
         return 0
 
 
-def paper_floor_note(label, fonts, canvas_w, canvas_h=0, *, log=None,
-                     suggest="", primary=None):
+def paper_floor_note(label, fonts, canvas_w, canvas_h=0, *, log=None, suggest="", primary=None):
     """把「这张图印到纸上多大字」写进日志：info 记**最差档**，warning 判**主文字档**。
 
     · `fonts`：本图真正用于绘制的 PIL 字体对象（口径来源见 `font_px`）；
@@ -516,15 +521,25 @@ def paper_floor_note(label, fonts, canvas_w, canvas_h=0, *, log=None,
     main = min(judge) if judge else worst
     floor = paper_floor_mm()
     try:
-        lg.info("[纸面可读性] %s：画布 %dx%dpx，最差字号 %dpx → 纸面 %.2fmm，"
-                "主文字 → %.2fmm（下限 %.2fmm）",
-                label, lw, lh, px[vals.index(worst)], worst, main, floor)
+        lg.info(
+            "[纸面可读性] %s：画布 %dx%dpx，最差字号 %dpx → 纸面 %.2fmm，" "主文字 → %.2fmm（下限 %.2fmm）",
+            label,
+            lw,
+            lh,
+            px[vals.index(worst)],
+            worst,
+            main,
+            floor,
+        )
         if 0 < floor and main < floor - 1e-6:
             lg.warning(
-                "[纸面可读性] %s 主文字印到纸上只有 %.2fmm，低于下限 %.2fmm，"
-                "建议减少条目或拆分图片%s",
-                label, main, floor, suggest)
-    except Exception as e:                                 # 播报失败绝不连累出图
+                "[纸面可读性] %s 主文字印到纸上只有 %.2fmm，低于下限 %.2fmm，" "建议减少条目或拆分图片%s",
+                label,
+                main,
+                floor,
+                suggest,
+            )
+    except Exception as e:  # 播报失败绝不连累出图
         try:
             lg.debug("纸面可读性播报失败（不连累出图，label=%s）: %s", label, e)
         except Exception:  # noqa: BLE001 - 播报器本身炸了也不能从这里再抛（护栏 test_note_never_propagates_logger_failure）

@@ -3,6 +3,7 @@
 由 scripts/_split_mermaid.py 从原 mermaid_renderer.py 自动拆分而来。
 所有公共工具从 .mermaid_common 导入。
 """
+
 from __future__ import annotations
 
 import logging
@@ -23,7 +24,6 @@ from .mermaid_common import (
 )
 
 logger = logging.getLogger(__name__)
-
 
 
 # 决策节点关键词（中英双语启发式判定）
@@ -86,6 +86,7 @@ def _parse_mermaid_flowchart(mermaid_code: str) -> list[str] | None:
             continue
     return nodes if len(nodes) >= 2 else None
 
+
 def _is_decision_label(label: str) -> bool:
     """根据标签内容启发式判断是否为决策节点（菱形）。"""
     if not label:
@@ -97,6 +98,7 @@ def _is_decision_label(label: str) -> bool:
         if kw in label:
             return True
     return False
+
 
 def _extract_mermaid_node_label_raw(nid: str) -> str | None:
     """从 Mermaid 节点定义中提取可读标签（原始形态，不清洗转义）。
@@ -213,6 +215,7 @@ def _register_node_if_match(line: str, nodes_map: dict) -> None:
         "shape": "diamond" if ("{" in line) else "rect",
     }
 
+
 def _strip_mermaid_node_brackets(nid: str) -> str:
     """从 Mermaid 节点定义中提取纯 ID 名称（去除方括号/圆括号/大括号包裹的标签部分）。
 
@@ -238,8 +241,9 @@ def _strip_mermaid_node_brackets(nid: str) -> str:
     # 2026-09-13：兼容行尾分号/逗号（AI 常见输出 A --> B;）
     return re.sub(r"[\s;,]+$", "", nid) or nid
 
+
 _ESCAPES = (
-    ("\\\"", '"'),
+    ('\\"', '"'),
     ("\\'", "'"),
     ("\\\\", "\\"),
 )
@@ -343,9 +347,7 @@ def _split_mermaid_edge(line: str) -> tuple[str, str | None, str] | None:
     # 1) 统一正则解析（覆盖中段标签、虚线/粗线变体、管道标签）
     m = _EDGE_LINE_RE.match(line)
     if m:
-        edge_label = _clean_edge_label(
-            m.group("l1") or m.group("l2") or m.group("l3")
-        )
+        edge_label = _clean_edge_label(m.group("l1") or m.group("l2") or m.group("l3"))
         to_raw = m.group("to").strip()
         # 管道标签 -->|文本| B：正则的 to 部分会携带，需再剥离
         pm = re.match(r"^\s*\|([^|]*)\|\s*(.*)$", to_raw)
@@ -399,6 +401,7 @@ def _split_mermaid_edge(line: str) -> tuple[str, str | None, str] | None:
         return None
 
     return from_id, edge_label, to_id
+
 
 def _parse_flowchart_structure(mermaid_code: str) -> dict:
     """解析 Mermaid 流程图，提取节点、连线、决策分支、并行/汇合结构。
@@ -532,9 +535,7 @@ def _parse_flowchart_structure(mermaid_code: str) -> dict:
     if len(_ends) == 1 and nodes_map[_ends[0]]["type"] == "process":
         nodes_map[_ends[0]]["type"] = "end"
     for _n in nodes_map.values():
-        if _n["type"] == "process" and any(
-            kw in str(_n.get("label") or "") for kw in ("关键", "重点", "核心")
-        ):
+        if _n["type"] == "process" and any(kw in str(_n.get("label") or "") for kw in ("关键", "重点", "核心")):
             _n["type"] = "highlight"
 
     return {
@@ -542,6 +543,7 @@ def _parse_flowchart_structure(mermaid_code: str) -> dict:
         "nodes": list(nodes_map.values()),
         "edges": edges,
     }
+
 
 LANE_PITCH_DESIGN_PX = 16  # design px：每条边在通道带内的最小占位（连线宽的 8 倍）
 
@@ -598,11 +600,14 @@ def _plan_edge_lanes(
     band_gap: dict[int, float] = {}
     edge_slot: dict[int, int] = {}
     for b, idxs in band_edges.items():
-        idxs.sort(key=lambda i: (
-            levels.get(edges[i]["from"], 0),
-            levels.get(edges[i]["to"], 0),
-            str(edges[i]["from"]), str(edges[i]["to"]),
-        ))
+        idxs.sort(
+            key=lambda i: (
+                levels.get(edges[i]["from"], 0),
+                levels.get(edges[i]["to"], 0),
+                str(edges[i]["from"]),
+                str(edges[i]["to"]),
+            )
+        )
         for k, i in enumerate(idxs):
             edge_slot[i] = k
         band_gap[b] = max(base_gap, (len(idxs) + 1) * lane_pitch)
@@ -673,9 +678,7 @@ def _draw_diamond_label(
 
 
 @_render_hq
-def _render_flowchart_image_v2(
-    mermaid_code: str, variant_overrides: dict[str, str] | None = None
-) -> BytesIO | None:
+def _render_flowchart_image_v2(mermaid_code: str, variant_overrides: dict[str, str] | None = None) -> BytesIO | None:
     """商业级流程图渲染器 v2
 
     特性：
@@ -717,7 +720,6 @@ def _render_flowchart_image_v2(
 
     direction = parsed["direction"]
     decision_ids = {n["id"] for n in nodes if n["type"] == "decision"}
-
 
     # ---- 尺寸参数 ----
     # ✅ R66（2026-10-11 流程图统一样式规范 · 双模式）：单链几何按方向取参 ——
@@ -820,9 +822,7 @@ def _render_flowchart_image_v2(
     # _level_span（col_w/row_h）本身已含基准间距（R66 几何），通道带只叠加
     # 「超出基准的部分」—— 单链（每带 1 条边）加宽量为 0，几何与 R66 逐字一致。
     _level_span = col_w if is_horizontal else row_h
-    _band_extra = {
-        _b: max(0.0, _g - _base_gap) for _b, _g in _band_gap.items()
-    }
+    _band_extra = {_b: max(0.0, _g - _base_gap) for _b, _g in _band_gap.items()}
     _coord: list[float] = [0.0] * (max_level + 1)
     for _lv in range(1, max_level + 1):
         _coord[_lv] = _coord[_lv - 1] + _level_span + _band_extra.get(_lv - 1, 0.0)
@@ -880,12 +880,7 @@ def _render_flowchart_image_v2(
             start_x = (padding + _level_offset(lv)) * scale
             for i, nid in enumerate(ids):
                 x = start_x
-                y = (
-                    title_h * scale
-                    + padding * scale
-                    + (max_rows - n_in_level) * row_h * scale / 2
-                    + i * row_h * scale
-                )
+                y = title_h * scale + padding * scale + (max_rows - n_in_level) * row_h * scale / 2 + i * row_h * scale
                 w = diamond_w * scale if nid in decision_ids else node_w * scale
                 h = diamond_h * scale if nid in decision_ids else node_h * scale
                 if nid in decision_ids:
@@ -940,14 +935,12 @@ def _render_flowchart_image_v2(
         if is_horizontal:
             # LR：竖向通道 x，位于第 band 列节点右缘与 band+1 列节点左缘之间
             inter = (col_w - node_w) + extra_b
-            return ((padding + _coord[band] + node_w + frac * inter) * scale,
-                    "x", False)
+            return ((padding + _coord[band] + node_w + frac * inter) * scale, "x", False)
         # TD：横向通道 y，位于第 band 行节点底与下一行节点顶之间的净空内。
         # 同层边（band = 源层号）的通道即其绕行母线 —— 箭头朝上进入目标底边。
         is_bus = levels.get(edges[ei]["from"]) == levels.get(edges[ei]["to"])
         inter = (row_h - node_h) + extra_b
-        return ((title_h + padding + _coord[band] + node_h + frac * inter) * scale,
-                "y", is_bus)
+        return ((title_h + padding + _coord[band] + node_h + frac * inter) * scale, "y", is_bus)
 
     for _ei, e in enumerate(edges):
         if e["from"] not in positions or e["to"] not in positions:
@@ -980,9 +973,7 @@ def _render_flowchart_image_v2(
         # 同层边（通道带标记为母线）与 LR 几何异常回退边走绕行母线；
         # TD 跨层回退边不带通道，保持旧直连路由。
         _to_bus = _lane is not None and _lane[2]
-        _backward_h = is_horizontal and (
-            _to_bus or ex < sx - int(4 * scale)
-        )
+        _backward_h = is_horizontal and (_to_bus or ex < sx - int(4 * scale))
         _backward_v = (not is_horizontal) and _to_bus
         if _backward_h:
             _cx_f = fx + fw / 2
@@ -995,10 +986,10 @@ def _render_flowchart_image_v2(
         # 于是 2.5x 画布上箭头仅约 14px 而线宽已达 5px —— 箭头几乎与线条重合、看不出
         # 方向；与同文件 _render_flowchart_with_edges（几何全部按 scale 缩放）风格割裂。
         # 统一乘 scale，保证任意缩放比例下箭头比例正确、粗细协调。
-        arrow_len = int(14 * scale)   # 箭头长度（沿连线方向）
-        arrow_half = int(7 * scale)   # 箭头半宽
-        tip_gap = int(2 * scale)      # 箭头尖端回缩，避免盖住节点边框
-        stub = int(8 * scale)         # 折线在节点边缘前的停靠距离
+        arrow_len = int(14 * scale)  # 箭头长度（沿连线方向）
+        arrow_half = int(7 * scale)  # 箭头半宽
+        tip_gap = int(2 * scale)  # 箭头尖端回缩，避免盖住节点边框
+        stub = int(8 * scale)  # 折线在节点边缘前的停靠距离
         if _backward_h:
             if _lane is not None and _lane[1] == "y":
                 bus_y = _lane[0]
@@ -1063,14 +1054,12 @@ def _render_flowchart_image_v2(
                 label_y = bus_y - int(20 * scale)
                 _along_x = True
             elif is_horizontal:
-                label_x = (_lane[0] if _lane is not None else (sx + ex) / 2) \
-                    - int(14 * scale)
+                label_x = (_lane[0] if _lane is not None else (sx + ex) / 2) - int(14 * scale)
                 label_y = (sy + ey) / 2 - int(16 * scale)
                 _along_x = True
             else:
                 label_x = (sx + ex) / 2 - int(14 * scale)
-                label_y = (_lane[0] if _lane is not None
-                           else sy + (ey - sy) / 2) - int(10 * scale)
+                label_y = (_lane[0] if _lane is not None else sy + (ey - sy) / 2) - int(10 * scale)
                 _along_x = False
             bbox = draw.textbbox((0, 0), e["label"], font=font_edge)
             tw_l = bbox[2] - bbox[0] + int(8 * scale)
@@ -1085,8 +1074,7 @@ def _render_flowchart_image_v2(
 
             def _overlaps_any(b):
                 for _nx, _ny, _nw, _nh in _node_boxes:
-                    if not (b[2] <= _nx or b[0] >= _nx + _nw
-                            or b[3] <= _ny or b[1] >= _ny + _nh):
+                    if not (b[2] <= _nx or b[0] >= _nx + _nw or b[3] <= _ny or b[1] >= _ny + _nh):
                         return True
                 return False
 
@@ -1099,8 +1087,7 @@ def _render_flowchart_image_v2(
                         _ny = label_y + _sign * _d * _step if not _along_x else label_y
                         _nx = label_x + _sign * _d * _step if _along_x else label_x
                         _cand = [_nx - _lp, _ny - _lp, _nx + tw_l, _ny + th_l]
-                        if (_cand[1] < 0 or _cand[3] > img.height
-                                or _cand[0] < 0 or _cand[2] > img.width):
+                        if _cand[1] < 0 or _cand[3] > img.height or _cand[0] < 0 or _cand[2] > img.width:
                             continue
                         if not _overlaps_any(_cand):
                             _dist = abs(_ny - label_y) if not _along_x else abs(_nx - label_x)
@@ -1223,7 +1210,8 @@ def _render_flowchart_image_v2(
     paper_floor_note(
         "流程图",
         [font_title, font_node, font_edge, font_caption],
-        img.size[0], img.size[1],
+        img.size[0],
+        img.size[1],
         primary=[font_node],
         suggest="（节点标签是主文字；分支多或层级深时图会被等比缩小）",
     )
@@ -1235,6 +1223,7 @@ def _render_flowchart_image_v2(
         size_kb,
     )
     return result_stream
+
 
 def flowchart_json_to_mermaid(data: dict) -> str:
     """将 nodes + edges 结构转换为 Mermaid 流程图代码字符串
@@ -1289,9 +1278,7 @@ def flowchart_json_to_mermaid(data: dict) -> str:
         # AI 也常用数字字符串作节点 ID（如 "1"、"2"），旧逻辑会把真实 ID
         # 误当数组下标改写，产生错误拓扑（自环/错边）。
         node_ids = {n["id"] for n in norm_nodes}
-        idx_to_id: dict[str, str] = {
-            str(i): n["id"] for i, n in enumerate(norm_nodes)
-        }
+        idx_to_id: dict[str, str] = {str(i): n["id"] for i, n in enumerate(norm_nodes)}
 
         def _resolve_endpoint(v: Any) -> str:
             s = str(v)
@@ -1332,20 +1319,15 @@ def flowchart_json_to_mermaid(data: dict) -> str:
                     t_raw = parts[1].strip()
                     elabel = ""
                     if t_raw.startswith("|") and "|" in t_raw:
-                        elabel = t_raw[1:t_raw.index("|")]
-                        t_raw = t_raw[t_raw.index("|") + 1:]
+                        elabel = t_raw[1 : t_raw.index("|")]
+                        t_raw = t_raw[t_raw.index("|") + 1 :]
                     t_raw = t_raw.strip().rstrip(";").strip()
-                    norm_edges.append(
-                        {"from": f, "to": _resolve_endpoint(t_raw), "label": elabel})
+                    norm_edges.append({"from": f, "to": _resolve_endpoint(t_raw), "label": elabel})
 
         # === 无有效 edges 时自动生成顺序连线 ===
         if not norm_edges:
             for i in range(len(norm_nodes) - 1):
-                norm_edges.append({
-                    "from": norm_nodes[i]["id"],
-                    "to": norm_nodes[i + 1]["id"],
-                    "label": ""
-                })
+                norm_edges.append({"from": norm_nodes[i]["id"], "to": norm_nodes[i + 1]["id"], "label": ""})
 
         # === 生成 Mermaid 代码 ===
         # BUG-FIX-34 修复：原硬编码 "flowchart TD"，丢弃 data 中的 direction 字段，
@@ -1386,13 +1368,15 @@ def flowchart_json_to_mermaid(data: dict) -> str:
 
         logger.info(
             "[flowchart_json_to_mermaid] 转换成功: nodes=%d edges=%d (edges_source=%s)",
-            len(norm_nodes), len(norm_edges),
-            "auto_generated" if not edges_valid else "user_provided"
+            len(norm_nodes),
+            len(norm_edges),
+            "auto_generated" if not edges_valid else "user_provided",
         )
         return "\n".join(lines)
     except Exception as e:
         logger.warning("flowchart_json_to_mermaid 转换失败: %s", e)
         return ""
+
 
 @_render_hq
 def _render_flowchart_with_edges(data: dict) -> BytesIO | None:
@@ -1425,11 +1409,13 @@ def _render_flowchart_with_edges(data: dict) -> BytesIO | None:
                 nodes.append({"id": f"N{i+1}", "label": node, "type": "process"})
             elif isinstance(node, dict):
                 nid = node.get("id") or f"N{i+1}"
-                nodes.append({
-                    "id": nid,
-                    "label": node.get("label") or nid,
-                    "type": node.get("type", "process"),
-                })
+                nodes.append(
+                    {
+                        "id": nid,
+                        "label": node.get("label") or nid,
+                        "type": node.get("type", "process"),
+                    }
+                )
             else:
                 nodes.append({"id": f"N{i+1}", "label": str(node), "type": "process"})
 
@@ -1470,12 +1456,11 @@ def _render_flowchart_with_edges(data: dict) -> BytesIO | None:
                     t_raw = parts[1].strip()
                     elabel = ""
                     if t_raw.startswith("|") and "|" in t_raw:
-                        elabel = t_raw[1:t_raw.index("|")]
-                        t_raw = t_raw[t_raw.index("|") + 1:]
+                        elabel = t_raw[1 : t_raw.index("|")]
+                        t_raw = t_raw[t_raw.index("|") + 1 :]
                     t_raw = t_raw.strip().rstrip(";").strip()
                     if f and t_raw:
-                        edges.append(
-                            {"from": f, "to": _resolve_ep(t_raw), "label": elabel})
+                        edges.append({"from": f, "to": _resolve_ep(t_raw), "label": elabel})
 
         # === 无 edges 时自动生成顺序连线 ===
         if not edges:
@@ -1581,13 +1566,10 @@ def _render_flowchart_with_edges(data: dict) -> BytesIO | None:
             lane_pitch=int(LANE_PITCH_DESIGN_PX * scale),
         )
         _level_span = col_w if is_lr else row_h
-        _band_extra = {
-            _b: max(0.0, _g - _base_gap) for _b, _g in _band_gap.items()
-        }
+        _band_extra = {_b: max(0.0, _g - _base_gap) for _b, _g in _band_gap.items()}
         _coord: list[float] = [0.0] * (max_level + 1)
         for _lv in range(1, max_level + 1):
-            _coord[_lv] = _coord[_lv - 1] + _level_span + _band_extra.get(
-                _lv - 1, 0.0)
+            _coord[_lv] = _coord[_lv - 1] + _level_span + _band_extra.get(_lv - 1, 0.0)
         _content_span = _coord[max_level] + _level_span
         # 末层之后仍有通道带（TD 末层出发的同层/回退边、LR 图底母线）→ 图底预留
         _tail_gap = _band_gap.get(max_level if not is_lr else -1, 0.0)
@@ -1655,8 +1637,7 @@ def _render_flowchart_with_edges(data: dict) -> BytesIO | None:
                 return padding + _coord[band] + node_w + frac * inter, "x", False
             is_bus = levels.get(edges[ei]["from"]) == levels.get(edges[ei]["to"])
             inter = (row_h - node_h) + extra_b
-            return title_h + padding + _coord[band] + node_h + frac * inter, \
-                "y", is_bus
+            return title_h + padding + _coord[band] + node_h + frac * inter, "y", is_bus
 
         for _ei, e in enumerate(edges):
             f, t = e.get("from", ""), e.get("to", "")
@@ -1680,8 +1661,7 @@ def _render_flowchart_with_edges(data: dict) -> BytesIO | None:
                         bus_y = max(fy + fh, ty + th) + int(30 * scale)
                     cx_f, cx_t = fx + fw / 2, tx + tw / 2
                     bot_t = ty + th
-                    path = [(cx_f, fy + fh), (cx_f, bus_y), (cx_t, bus_y),
-                            (cx_t, bot_t + int(8 * scale))]
+                    path = [(cx_f, fy + fh), (cx_f, bus_y), (cx_t, bus_y), (cx_t, bot_t + int(8 * scale))]
                     draw.line(path, fill=arrow_color, width=int(2 * scale))
                     draw.polygon(
                         [
@@ -1693,17 +1673,14 @@ def _render_flowchart_with_edges(data: dict) -> BytesIO | None:
                     )
                     label_anchor = ("y", bus_y, (cx_f + cx_t) / 2)
                 else:
-                    mid_x = lane[0] if lane is not None and not lane[2] \
-                        else (sx + ex) / 2
-                    path = [(sx, sy), (mid_x, sy), (mid_x, ey),
-                            (ex - int(8 * scale), ey)]
+                    mid_x = lane[0] if lane is not None and not lane[2] else (sx + ex) / 2
+                    path = [(sx, sy), (mid_x, sy), (mid_x, ey), (ex - int(8 * scale), ey)]
                     draw.line(path, fill=arrow_color, width=int(2 * scale))
                     # 箭头朝左
                     arrow_tip = (ex - int(2 * scale), ey)
                     arrow_base1 = (ex + int(10 * scale), ey - int(5 * scale))
                     arrow_base2 = (ex + int(10 * scale), ey + int(5 * scale))
-                    draw.polygon([arrow_tip, arrow_base1, arrow_base2],
-                                 fill=arrow_color)
+                    draw.polygon([arrow_tip, arrow_base1, arrow_base2], fill=arrow_color)
                     label_anchor = ("x", mid_x, (sy + ey) / 2)
             else:
                 # 上下布局：源点取底部中点，目标点取顶部中点，折线纵向走
@@ -1716,8 +1693,7 @@ def _render_flowchart_with_edges(data: dict) -> BytesIO | None:
                     # 同层边：走源层下方专用母线，箭头朝上进入目标底边
                     bus_y = lane[0]
                     bot_t = ty + th
-                    path = [(sx, sy), (sx, bus_y), (ex, bus_y),
-                            (ex, bot_t + int(8 * scale))]
+                    path = [(sx, sy), (sx, bus_y), (ex, bus_y), (ex, bot_t + int(8 * scale))]
                     draw.line(path, fill=arrow_color, width=int(2 * scale))
                     draw.polygon(
                         [
@@ -1730,10 +1706,8 @@ def _render_flowchart_with_edges(data: dict) -> BytesIO | None:
                     label_anchor = ("y", bus_y, (sx + ex) / 2)
                 else:
                     # 折线路径（带拐点）；R67：水平段落在该边自己的通道上
-                    mid_y = lane[0] if lane is not None and not lane[2] \
-                        else (sy + ey) / 2
-                    path = [(sx, sy), (sx, mid_y), (ex, mid_y),
-                            (ex, ey - int(8 * scale))]
+                    mid_y = lane[0] if lane is not None and not lane[2] else (sy + ey) / 2
+                    path = [(sx, sy), (sx, mid_y), (ex, mid_y), (ex, ey - int(8 * scale))]
 
                     draw.line(path, fill=arrow_color, width=int(2 * scale))
 
@@ -1741,8 +1715,7 @@ def _render_flowchart_with_edges(data: dict) -> BytesIO | None:
                     arrow_tip = (ex, ey - int(2 * scale))
                     arrow_base1 = (ex - int(5 * scale), ey - int(12 * scale))
                     arrow_base2 = (ex + int(5 * scale), ey - int(12 * scale))
-                    draw.polygon([arrow_tip, arrow_base1, arrow_base2],
-                                 fill=arrow_color)
+                    draw.polygon([arrow_tip, arrow_base1, arrow_base2], fill=arrow_color)
                     label_anchor = ("y", mid_y, (sx + ex) / 2)
 
             # 在箭头中间位置绘制 label 文本
@@ -1805,14 +1778,18 @@ def _render_flowchart_with_edges(data: dict) -> BytesIO | None:
             if style["shape"] == "diamond":
                 # ✅ R67：菱形文字按内接矩形自适应，绝不越出菱形轮廓
                 _draw_diamond_label(
-                    draw, x + w / 2, y + h / 2, w, h,
-                    label, font_node, "#333333", scale,
+                    draw,
+                    x + w / 2,
+                    y + h / 2,
+                    w,
+                    h,
+                    label,
+                    font_node,
+                    "#333333",
+                    scale,
                 )
             else:
-                _draw_text_center(
-                    draw, (x + 4, y + 4, x + w - 4, y + h - 4),
-                    label, font_node, "#333333", max_lines=2
-                )
+                _draw_text_center(draw, (x + 4, y + 4, x + w - 4, y + h - 4), label, font_node, "#333333", max_lines=2)
 
         # ---- 图例 ----
         legend_y = total_h - 24
@@ -1847,7 +1824,8 @@ def _render_flowchart_with_edges(data: dict) -> BytesIO | None:
         paper_floor_note(
             "流程图",
             [font_title, font_node, font_edge, font_caption],
-            img.size[0], img.size[1],
+            img.size[0],
+            img.size[1],
             primary=[font_node],
             suggest="（节点标签是主文字；分支多或层级深时图会被等比缩小）",
         )
@@ -1855,4 +1833,3 @@ def _render_flowchart_with_edges(data: dict) -> BytesIO | None:
     except Exception as e:
         logger.warning("_render_flowchart_with_edges 渲染失败: %s", e)
         return None
-
