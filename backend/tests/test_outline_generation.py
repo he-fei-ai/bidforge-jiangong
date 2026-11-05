@@ -6,6 +6,7 @@
 - sections._build_tree（children 排序）
 - sections.save_outline（空 outline 拒绝）
 """
+
 import json
 
 import pytest
@@ -15,6 +16,7 @@ from app.routers.sse_handlers import _count_nodes, _validate_outline
 # ============================================================
 # _validate_outline
 # ============================================================
+
 
 class TestValidateOutline:
     def test_empty_outline(self):
@@ -30,11 +32,7 @@ class TestValidateOutline:
         assert "outline 为空或格式错误" in issues
 
     def test_valid_outline(self):
-        outline = [
-            {"title": "第一章", "children": [
-                {"title": "1.1", "children": []}
-            ]}
-        ]
+        outline = [{"title": "第一章", "children": [{"title": "1.1", "children": []}]}]
         issues = _validate_outline({"outline": outline})
         assert issues == []
 
@@ -94,13 +92,7 @@ class TestValidateOutline:
         assert any("节点总数超过上限" in i for i in issues)
 
     def test_nested_validation(self):
-        outline = [
-            {"title": "第一章", "children": [
-                {"title": "1.1", "children": [
-                    {"title": "", "children": []}
-                ]}
-            ]}
-        ]
+        outline = [{"title": "第一章", "children": [{"title": "1.1", "children": [{"title": "", "children": []}]}]}]
         issues = _validate_outline({"outline": outline})
         assert any("title 为空" in i for i in issues)
 
@@ -108,6 +100,7 @@ class TestValidateOutline:
 # ============================================================
 # _count_nodes
 # ============================================================
+
 
 class TestCountNodes:
     def test_empty(self):
@@ -118,13 +111,7 @@ class TestCountNodes:
         assert _count_nodes(nodes) == 3
 
     def test_nested(self):
-        nodes = [
-            {"title": "a", "children": [
-                {"title": "b", "children": [
-                    {"title": "c"}
-                ]}
-            ]}
-        ]
+        nodes = [{"title": "a", "children": [{"title": "b", "children": [{"title": "c"}]}]}]
         assert _count_nodes(nodes) == 3
 
     def test_deep_protection(self):
@@ -142,6 +129,7 @@ class TestCountNodes:
 # _build_tree（需要 db fixture）
 # ============================================================
 
+
 @pytest.mark.asyncio
 class TestBuildTree:
     async def test_tree_structure(self, db_conn):
@@ -154,19 +142,23 @@ class TestBuildTree:
 
         await db_conn.execute(
             "INSERT INTO schemes (id, project_id, name, type, word_budget) VALUES (?,?,?,?,?)",
-            (scheme_id, project_id, "test", "test", 10000))
+            (scheme_id, project_id, "test", "test", 10000),
+        )
         s1 = str(uuid.uuid4())
         s2 = str(uuid.uuid4())
         s3 = str(uuid.uuid4())
         await db_conn.execute(
             "INSERT INTO sections (id, scheme_id, project_id, parent_id, title, level, sort_order) VALUES (?,?,?,?,?,?,?)",
-            (s1, scheme_id, project_id, "", "第一章", 1, 0))
+            (s1, scheme_id, project_id, "", "第一章", 1, 0),
+        )
         await db_conn.execute(
             "INSERT INTO sections (id, scheme_id, project_id, parent_id, title, level, sort_order) VALUES (?,?,?,?,?,?,?)",
-            (s2, scheme_id, project_id, s1, "1.1", 2, 1))
+            (s2, scheme_id, project_id, s1, "1.1", 2, 1),
+        )
         await db_conn.execute(
             "INSERT INTO sections (id, scheme_id, project_id, parent_id, title, level, sort_order) VALUES (?,?,?,?,?,?,?)",
-            (s3, scheme_id, project_id, s1, "1.2", 2, 0))
+            (s3, scheme_id, project_id, s1, "1.2", 2, 0),
+        )
         await db_conn.commit()
 
         tree = await _build_tree(db_conn, scheme_id)
@@ -185,7 +177,8 @@ class TestBuildTree:
         project_id = str(uuid.uuid4())
         await db_conn.execute(
             "INSERT INTO schemes (id, project_id, name, type, word_budget) VALUES (?,?,?,?,?)",
-            (scheme_id, project_id, "test", "test", 10000))
+            (scheme_id, project_id, "test", "test", 10000),
+        )
         await db_conn.commit()
 
         tree = await _build_tree(db_conn, scheme_id)
@@ -195,6 +188,7 @@ class TestBuildTree:
 # ============================================================
 # save_outline（空 outline 拒绝）
 # ============================================================
+
 
 @pytest.mark.asyncio
 class TestSaveOutline:
@@ -208,7 +202,8 @@ class TestSaveOutline:
         project_id = str(uuid.uuid4())
         await db_conn.execute(
             "INSERT INTO schemes (id, project_id, name, type, word_budget) VALUES (?,?,?,?,?)",
-            (scheme_id, project_id, "test", "test", 10000))
+            (scheme_id, project_id, "test", "test", 10000),
+        )
         await db_conn.commit()
 
         # 契约（2026-09）：空数组 = 清空全部目录（前端"清除所有目录"依赖此行为）
@@ -227,7 +222,8 @@ class TestSaveOutline:
         project_id = str(uuid.uuid4())
         await db_conn.execute(
             "INSERT INTO schemes (id, project_id, name, type, word_budget) VALUES (?,?,?,?,?)",
-            (scheme_id, project_id, "test", "test", 10000))
+            (scheme_id, project_id, "test", "test", 10000),
+        )
         await db_conn.commit()
 
         with pytest.raises(HTTPException) as exc_info:
@@ -239,9 +235,11 @@ class TestSaveOutline:
 # simple_parse_outline（降级目录识别）
 # ============================================================
 
+
 class TestSimpleParseOutline:
     def test_arabic_chapter(self):
         from app.services.file_parser import simple_parse_outline
+
         out = simple_parse_outline("第1章 工程概况\n第2章 施工计划")
         assert len(out) == 2
         assert out[0]["level"] == 1
@@ -249,6 +247,7 @@ class TestSimpleParseOutline:
 
     def test_arabic_section(self):
         from app.services.file_parser import simple_parse_outline
+
         out = simple_parse_outline("第3节 边坡支护\n1.1 测量放线")
         # 第3节 -> level1；1.1 -> level2（挂到最近一级下）
         assert out[0]["title"] == "边坡支护"
@@ -258,6 +257,7 @@ class TestSimpleParseOutline:
 
     def test_page_marker_skipped(self):
         from app.services.file_parser import simple_parse_outline
+
         text = "第一章 工程概况\n第 12 页\n1.1 项目背景\n- 13 -\n1.2 地质条件"
         out = simple_parse_outline(text)
         titles = [n["title"] for n in out]
@@ -269,6 +269,7 @@ class TestSimpleParseOutline:
 
     def test_dotted_subsection(self):
         from app.services.file_parser import simple_parse_outline
+
         out = simple_parse_outline("1. 总则\n1.1 施工准备\n1.2 资源配置")
         # 1. -> level1；1.1/1.2 -> level2（挂在 1. 下）
         assert out[0]["title"] == "总则"
@@ -277,9 +278,11 @@ class TestSimpleParseOutline:
         assert out[0]["children"][0]["level"] == 2
         assert out[0]["children"][1]["level"] == 2
 
+
 # ============================================================
 # 2026-09-13 目录生成模块增强轮次
 # ============================================================
+
 
 class TestParseAndValidateRobustness:
     """BUG-1 修复：validate_fn 异常应转为 issues 进入修复轮，而非直接炸任务"""
@@ -288,9 +291,8 @@ class TestParseAndValidateRobustness:
         # 模型返回顶层数组时，校验器 obj.get(...) 抛 AttributeError——
         # 旧实现异常沿调用链传播炸掉整个任务；现应转为 issues 返回
         from app.services.ai.json_response import parse_and_validate
-        obj, issues = parse_and_validate(
-            '[{"title": "x"}]',
-            lambda o: [] if o.get("outline") else ["缺少 outline"])
+
+        obj, issues = parse_and_validate('[{"title": "x"}]', lambda o: [] if o.get("outline") else ["缺少 outline"])
         assert obj is not None
         assert issues, "校验器异常应转为 issues"
         assert "顶层结构非预期" in issues[0]
@@ -299,15 +301,17 @@ class TestParseAndValidateRobustness:
         # 裸标量（非 {} / []）由 extract_json 判为"未找到 JSON 结构"，
         # parse_and_validate 自身不得抛出未处理异常
         from app.services.ai.json_response import parse_and_validate
+
         obj, issues = parse_and_validate('"just a string"', lambda o: o.get("k", []))
         assert obj is None
         assert issues == ["输出中未找到 JSON 结构"]
 
     def test_normal_path_unaffected(self):
         from app.services.ai.json_response import parse_and_validate
+
         obj, issues = parse_and_validate(
-            '{"outline": [{"title": "a", "children": []}]}',
-            lambda o: [] if o.get("outline") else ["缺少 outline"])
+            '{"outline": [{"title": "a", "children": []}]}', lambda o: [] if o.get("outline") else ["缺少 outline"]
+        )
         assert obj is not None and issues == []
 
 
@@ -342,6 +346,7 @@ class TestOutlineReviewTimeouts:
 
     def test_constants_exist_and_relaxed(self):
         from app.routers import sse_handlers
+
         assert sse_handlers.OUTLINE_REVIEW_TIMEOUT >= 60
         assert sse_handlers.OUTLINE_FIX_TIMEOUT >= 120
 
@@ -351,15 +356,17 @@ class TestOutlineSkeletonEnhancement:
 
     def test_skeleton_includes_truncated_description(self):
         from app.routers.sse_handlers import _outline_skeleton
-        sk = _outline_skeleton([
-            {"title": "工程概况", "description": "x" * 100,
-             "children": [{"title": "1.1", "description": "y" * 80}]}])
+
+        sk = _outline_skeleton(
+            [{"title": "工程概况", "description": "x" * 100, "children": [{"title": "1.1", "description": "y" * 80}]}]
+        )
         assert sk[0]["description"] == "x" * 60
         assert sk[0]["children"][0]["description"] == "y" * 60
         assert sk[0]["children"][0]["title"] == "1.1"
 
     def test_skeleton_omits_empty_description(self):
         from app.routers.sse_handlers import _outline_skeleton
+
         sk = _outline_skeleton([{"title": "a", "description": ""}])
         assert "description" not in sk[0]
 
@@ -367,6 +374,7 @@ class TestOutlineSkeletonEnhancement:
         import json as _json
 
         from app.routers.sse_handlers import _outline_skeleton
+
         sk = _outline_skeleton([{"title": "a", "children": [{"title": "b"}]}], max_nodes=1)
         # 预算耗尽也应输出合法 JSON（可序列化、结构完整）
         assert _json.loads(_json.dumps(sk, ensure_ascii=False)) == sk

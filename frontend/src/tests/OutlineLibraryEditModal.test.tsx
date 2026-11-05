@@ -19,14 +19,21 @@ import { App } from "antd";
 
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
   });
 }
 if (!(globalThis as any).ResizeObserver) {
   (globalThis as any).ResizeObserver = class {
-    observe() {} unobserve() {} disconnect() {}
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   };
 }
 
@@ -53,13 +60,13 @@ import { clearActivity, getActivityItems } from "../utils/activityCenter";
 const bodyText = () => document.body.textContent || "";
 function bodyBtn(text: string): HTMLButtonElement | null {
   const norm = (s: string) => (s || "").replace(/\s+/g, "");
-  return Array.from(document.body.querySelectorAll("button")).find(
-    (b) => norm(b.textContent).includes(norm(text)),
+  return Array.from(document.body.querySelectorAll("button")).find((b) =>
+    norm(b.textContent).includes(norm(text)),
   ) as HTMLButtonElement | null;
 }
 function clickTab(label: string) {
-  const tab = Array.from(document.body.querySelectorAll(".ant-tabs-tab")).find(
-    (t) => (t.textContent || "").includes(label),
+  const tab = Array.from(document.body.querySelectorAll(".ant-tabs-tab")).find((t) =>
+    (t.textContent || "").includes(label),
   );
   if (tab) fireEvent.click(tab);
 }
@@ -73,15 +80,23 @@ beforeEach(() => {
 // 隔离：每个用例结束后卸载，避免 antd Modal 默认 destroyOnClose=false 导致多份弹窗
 // 在 document.body 中累积，干扰 bodyBtn / 树节点查询。
 let mounted: ReturnType<typeof render> | null = null;
-afterEach(() => { mounted?.unmount(); mounted = null; });
+afterEach(() => {
+  mounted?.unmount();
+  mounted = null;
+});
 
 function setup(open: boolean, libraryId?: string | null, maxUploadBytes?: number) {
   const onClose = vi.fn();
   const onSaved = vi.fn();
   const utils = render(
     <App>
-      <OutlineLibraryEditModal open={open} libraryId={libraryId} onClose={onClose} onSaved={onSaved}
-        maxUploadBytes={maxUploadBytes} />
+      <OutlineLibraryEditModal
+        open={open}
+        libraryId={libraryId}
+        onClose={onClose}
+        onSaved={onSaved}
+        maxUploadBytes={maxUploadBytes}
+      />
     </App>,
   );
   mounted = utils;
@@ -111,11 +126,15 @@ describe("OutlineLibraryEditModal · 导入目录上传上限（D3 收敛）", (
     apiMock.uploadOutlineApi.parse.mockClear();
     fireEvent.change(fileInput(), {
       target: {
-        files: [withSize(new File(["x"], "big.pdf", { type: "application/pdf" }), 30 * 1024 * 1024 + 1)],
+        files: [
+          withSize(new File(["x"], "big.pdf", { type: "application/pdf" }), 30 * 1024 * 1024 + 1),
+        ],
       },
     });
     await waitFor(() =>
-      expect(getActivityItems().some((i) => i.text.includes("文件过大，请上传 30MB 以内的文件"))).toBe(true),
+      expect(
+        getActivityItems().some((i) => i.text.includes("文件过大，请上传 30MB 以内的文件")),
+      ).toBe(true),
     );
     expect(apiMock.uploadOutlineApi.parse).not.toHaveBeenCalled();
   });
@@ -126,7 +145,9 @@ describe("OutlineLibraryEditModal · 导入目录上传上限（D3 收敛）", (
     apiMock.uploadOutlineApi.parse.mockClear();
     fireEvent.change(fileInput(), {
       target: {
-        files: [withSize(new File(["x"], "mid.pdf", { type: "application/pdf" }), 40 * 1024 * 1024)],
+        files: [
+          withSize(new File(["x"], "mid.pdf", { type: "application/pdf" }), 40 * 1024 * 1024),
+        ],
       },
     });
     await waitFor(() => expect(apiMock.uploadOutlineApi.parse).toHaveBeenCalled());
@@ -138,11 +159,15 @@ describe("OutlineLibraryEditModal · 导入目录上传上限（D3 收敛）", (
     apiMock.uploadOutlineApi.parse.mockClear();
     fireEvent.change(fileInput(), {
       target: {
-        files: [withSize(new File(["x"], "mid.pdf", { type: "application/pdf" }), 11 * 1024 * 1024)],
+        files: [
+          withSize(new File(["x"], "mid.pdf", { type: "application/pdf" }), 11 * 1024 * 1024),
+        ],
       },
     });
     await waitFor(() =>
-      expect(getActivityItems().some((i) => i.text.includes("文件过大，请上传 10MB 以内的文件"))).toBe(true),
+      expect(
+        getActivityItems().some((i) => i.text.includes("文件过大，请上传 10MB 以内的文件")),
+      ).toBe(true),
     );
     expect(apiMock.uploadOutlineApi.parse).not.toHaveBeenCalled();
   });
@@ -175,9 +200,13 @@ describe("OutlineLibraryEditModal · 保存校验与链路", () => {
   it("空树保存：拦截，不调用 api.create / onSaved，并提示章节为空", async () => {
     const { onSaved } = setup(true);
     // 表单校验（名称必填）先于空树校验，先填名称再点保存
-    const nameInput = document.body.querySelector('input[placeholder*="深基坑"]') as HTMLInputElement;
+    const nameInput = document.body.querySelector(
+      'input[placeholder*="深基坑"]',
+    ) as HTMLInputElement;
     fireEvent.change(nameInput, { target: { value: "测试标准目录" } });
-    await act(async () => { fireEvent.click(bodyBtn("保存")!); });
+    await act(async () => {
+      fireEvent.click(bodyBtn("保存")!);
+    });
     expect(apiMock.outlineLibraryApi.create).not.toHaveBeenCalled();
     expect(onSaved).not.toHaveBeenCalled();
     expect(getActivityItems().some((i) => i.text.includes("目录章节为空"))).toBe(true);
@@ -194,13 +223,17 @@ describe("OutlineLibraryEditModal · 保存校验与链路", () => {
 
   it("填写名称 + 有章节后保存：调用 api.create 并上抛 onSaved", async () => {
     const { onSaved } = setup(true);
-    const nameInput = document.body.querySelector('input[placeholder*="深基坑"]') as HTMLInputElement;
+    const nameInput = document.body.querySelector(
+      'input[placeholder*="深基坑"]',
+    ) as HTMLInputElement;
     expect(nameInput).toBeTruthy();
     fireEvent.change(nameInput, { target: { value: "测试标准目录" } });
     clickTab("目录章节");
     fireEvent.click(bodyBtn("新增一级章节")!);
     expect(bodyText()).toContain("新章节");
-    await act(async () => { fireEvent.click(bodyBtn("保存")!); });
+    await act(async () => {
+      fireEvent.click(bodyBtn("保存")!);
+    });
     expect(apiMock.outlineLibraryApi.create).toHaveBeenCalledTimes(1);
     expect(onSaved).toHaveBeenCalledTimes(1);
   });
@@ -235,7 +268,8 @@ describe("OutlineLibraryEditModal · 编辑保存（目录名称修改 + 清空�
     apiMock.outlineLibraryApi.get.mockResolvedValueOnce({
       data: {
         // 历史库：无 type/engineering_type/profession（无分类）
-        id: "lib-9", name: "旧名称",
+        id: "lib-9",
+        name: "旧名称",
         outline_json: JSON.stringify([
           { id: "1", title: "第一章 工程概况", level: 1, children: [] },
         ]),
@@ -250,14 +284,18 @@ describe("OutlineLibraryEditModal · 编辑保存（目录名称修改 + 清空�
     expect(nameInput).toBeTruthy();
     expect(nameInput.value).toBe("旧名称");
     fireEvent.change(nameInput, { target: { value: "深基坑新目录" } });
-    await act(async () => { fireEvent.click(bodyBtn("保存")!); });
+    await act(async () => {
+      fireEvent.click(bodyBtn("保存")!);
+    });
     await waitFor(() => {
       expect(apiMock.outlineLibraryApi.update).toHaveBeenCalledTimes(1);
     });
     // 不应误走创建分支
     expect(apiMock.outlineLibraryApi.create).not.toHaveBeenCalled();
     expect(onSaved).toHaveBeenCalledTimes(1);
-    const payload = (apiMock.outlineLibraryApi.update.mock.calls[0] as unknown as [string, Record<string, any>])[1];
+    const payload = (
+      apiMock.outlineLibraryApi.update.mock.calls[0] as unknown as [string, Record<string, any>]
+    )[1];
     expect(payload.name).toBe("深基坑新目录");
     // 清空的 Select 字段显式传空串（修复点：undefined 不再被 axios 丢弃）
     expect(payload.type).toBe("");
@@ -290,12 +328,8 @@ describe("OutlineLibraryEditModal · 导入目录 fallback id 唯一性（D2）"
     apiMock.uploadOutlineApi.parse.mockResolvedValueOnce({
       data: {
         outline: [
-          { title: "第一章", level: 1, children: [
-            { title: "甲子节", level: 2, children: [] },
-          ] },
-          { title: "第二章", level: 1, children: [
-            { title: "乙子节", level: 2, children: [] },
-          ] },
+          { title: "第一章", level: 1, children: [{ title: "甲子节", level: 2, children: [] }] },
+          { title: "第二章", level: 1, children: [{ title: "乙子节", level: 2, children: [] }] },
         ],
         file_name: "x.pdf",
       },
@@ -316,12 +350,14 @@ describe("OutlineLibraryEditModal · 导入目录 fallback id 唯一性（D2）"
 
     // 章节编辑面板必须显示「乙子节」，而不是 id 冲突时被 findNode 命中的「甲子节」
     await waitFor(() => {
-      const input = Array.from(document.querySelectorAll<HTMLInputElement>("input"))
-        .find((i) => i.value === "乙子节");
+      const input = Array.from(document.querySelectorAll<HTMLInputElement>("input")).find(
+        (i) => i.value === "乙子节",
+      );
       expect(input).toBeTruthy();
     });
-    const wrong = Array.from(document.querySelectorAll<HTMLInputElement>("input"))
-      .find((i) => i.value === "甲子节");
+    const wrong = Array.from(document.querySelectorAll<HTMLInputElement>("input")).find(
+      (i) => i.value === "甲子节",
+    );
     expect(wrong).toBeFalsy();
   });
 });
@@ -403,7 +439,9 @@ describe("OutlineLibraryEditModal · 导入空结果不覆盖当前树（R72 · 
     });
     // 如实回传后端原因（进 activity 警告）
     await waitFor(() =>
-      expect(getActivityItems().some((i) => i.text.includes("未从文件中解析到有效文本"))).toBe(true),
+      expect(getActivityItems().some((i) => i.text.includes("未从文件中解析到有效文本"))).toBe(
+        true,
+      ),
     );
     // 关键：当前树未被清空（仍「共 1 个章节」，不是「共 0」也不是「暂无目录」）
     expect(bodyText()).toContain("共 1 个章节");

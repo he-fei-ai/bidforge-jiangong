@@ -22,6 +22,7 @@
 - 受 ``settings.outline_title_fix``（默认 True）控制；置 False 即逐字回到本项
   引入前：不发这次小调用。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -42,6 +43,9 @@ from app.services.outline_quality import (
     detect_generic_titles,
     detect_generic_titles_for_write,
 )
+
+# ✅ R179：上下文截断统一走带留痕的实现（超限时写日志 + 计入截断指标）。
+from app.services.prompt_material_guard import clip_text
 
 logger = logging.getLogger("outline_title_fix")
 
@@ -64,11 +68,10 @@ def _outline_path_index(outline: list) -> dict[str, dict]:
     idx: dict[str, dict] = {}
 
     def _walk(nodes: list, prefix: str, parent_title: str) -> None:
-        siblings = [str(n.get("title") or "").strip()
-                    for n in (nodes or []) if isinstance(n, dict)]
+        siblings = [str(n.get("title") or "").strip() for n in (nodes or []) if isinstance(n, dict)]
         siblings = [t for t in siblings if t]
         k = 0
-        for n in (nodes or []):
+        for n in nodes or []:
             if not isinstance(n, dict):
                 continue
             k += 1
@@ -86,7 +89,7 @@ def _build_title_fix_items(outline: list, hits: list[dict]) -> str:
     """把占位节点连同上下文（上级章 / 同级兄弟 / 原说明）摊平成提示词清单。"""
     idx = _outline_path_index(outline)
     lines: list[str] = []
-    for h in hits[:40]:          # 体量红线：单次调用最多带 40 条
+    for h in hits[:40]:  # 体量红线：单次调用最多带 40 条
         path = str(h.get("path") or "")
         info = idx.get(path)
         if not info:
@@ -97,7 +100,8 @@ def _build_title_fix_items(outline: list, hits: list[dict]) -> str:
         lines.append(
             f"- path={path}｜层级 L{str(path).count('.') + 1}｜上级章节「{info['parent'] or '（一级）'}」"
             f"｜当前标题「{h.get('title')}」（类型 {h.get('kind')}）"
-            f"｜同级兄弟：{sib or '（无）'}｜原说明：{desc or '（无）'}")
+            f"｜同级兄弟：{sib or '（无）'}｜原说明：{desc or '（无）'}"
+        )
     return "\n".join(lines)
 
 
@@ -150,10 +154,11 @@ def _title_fix_validate_fn(o) -> list[str]:
     ups = o.get("updates")
     if not isinstance(ups, list) or not ups:
         return ["updates 必须为非空数组"]
-    bad = [u for u in ups
-           if not isinstance(u, dict)
-           or not str(u.get("path") or "").strip()
-           or not str(u.get("title") or "").strip()]
+    bad = [
+        u
+        for u in ups
+        if not isinstance(u, dict) or not str(u.get("path") or "").strip() or not str(u.get("title") or "").strip()
+    ]
     return [f"存在 {len(bad)} 个缺 path/title 的非法改写项"] if bad else []
 
 
@@ -179,6 +184,7 @@ def _apply_title_updates(outline: list, updates: list) -> tuple[list, int, list]
     try:
         from app.services.outline_quality import is_generic_title
     except Exception:  # pragma: no cover - 判据不可用时不做语义拒绝，只做形态校验
+
         def is_generic_title(_t: str) -> bool:
             return False
 
@@ -186,7 +192,8 @@ def _apply_title_updates(outline: list, updates: list) -> tuple[list, int, list]
         # 归一化与检出侧共用同一把尺子（先剥「（N）」计数后缀再去空白/标点）
         from app.services.outline_quality import _norm as _q_norm
     except Exception:  # pragma: no cover - 归一化不可用时退化为 strip
-        def _q_norm(t: str) -> str:      # type: ignore[no-redef]
+
+        def _q_norm(t: str) -> str:  # type: ignore[no-redef]
             return str(t or "").strip()
 
     try:
@@ -202,7 +209,8 @@ def _apply_title_updates(outline: list, updates: list) -> tuple[list, int, list]
         #    故不能用它）。
         from app.services.numbering import strip_outline_numbering_tree as _strip_num
     except Exception:  # pragma: no cover - 唯一实现不可用时退化为原样（不误杀）
-        def _strip_num(t: str) -> str:   # type: ignore[no-redef]
+
+        def _strip_num(t: str) -> str:  # type: ignore[no-redef]
             return str(t or "")
 
     try:
@@ -211,6 +219,7 @@ def _apply_title_updates(outline: list, updates: list) -> tuple[list, int, list]
         #    语义拒绝全部让位给形态校验，绝不把外科式重写整体关掉）
         from app.services.outline_quality import has_trailing_counter_suffix as _counter_suffix
     except Exception:  # pragma: no cover - 判据不可用时不新增拒绝
+
         def _counter_suffix(_t: str) -> bool:  # type: ignore[no-redef]
             return False
 
@@ -240,8 +249,7 @@ def _apply_title_updates(outline: list, updates: list) -> tuple[list, int, list]
             continue
         # ✅ R73b F4：换行不进标题（目录树/导出标题行/编号折行都会被它打坏）
         if "\n" in new_title or "\r" in new_title:
-            rejected.append({"path": path, "title": new_title[:20],
-                             "reason": "新标题含换行"})
+            rejected.append({"path": path, "title": new_title[:20], "reason": "新标题含换行"})
             continue
         # ✅ R73b F4：剥离内嵌编号后再进入后续判定（剥完为空/仍泛化都会被拒）
         new_title = str(_strip_num(new_title) or "").strip()
@@ -263,8 +271,7 @@ def _apply_title_updates(outline: list, updates: list) -> tuple[list, int, list]
         #    落库。宁可不改（复检如实报残留 → 转人工），不可改出一个带
         #    编号冲突后缀的标题。
         if _counter_suffix(new_title):
-            rejected.append({"path": path, "title": new_title[:20],
-                             "reason": "新标题带（N）编号冲突后缀"})
+            rejected.append({"path": path, "title": new_title[:20], "reason": "新标题带（N）编号冲突后缀"})
             continue
         info = tree_idx.get(path)
         if not info:
@@ -275,8 +282,7 @@ def _apply_title_updates(outline: list, updates: list) -> tuple[list, int, list]
         parent_path = path.rsplit(".", 1)[0] if "." in path else ""
         taken = batch_taken.setdefault(parent_path, set())
         cand = _norm(new_title)
-        clash = [_norm(t) for t in info["siblings"]
-                 if _norm(t) and _norm(t) != _norm(old_title)]
+        clash = [_norm(t) for t in info["siblings"] if _norm(t) and _norm(t) != _norm(old_title)]
         if cand in taken or cand in clash:
             rejected.append({"path": path, "title": new_title, "reason": "与同级标题重名"})
             continue
@@ -288,12 +294,19 @@ def _apply_title_updates(outline: list, updates: list) -> tuple[list, int, list]
 
 
 async def _try_outline_title_fix(
-    outline: list, hits: list[dict], *,
-    scheme_name: str = "", scheme_type: str = "",
-    project_brief: str = "", project_facts: str = "",
-    construction_scope: str = "", requirements: str = "",
-    scheme_basis: str = "", standards_text: str = "",
-    _collect=None, _render=None,
+    outline: list,
+    hits: list[dict],
+    *,
+    scheme_name: str = "",
+    scheme_type: str = "",
+    project_brief: str = "",
+    project_facts: str = "",
+    construction_scope: str = "",
+    requirements: str = "",
+    scheme_basis: str = "",
+    standards_text: str = "",
+    _collect=None,
+    _render=None,
 ) -> list | None:
     """外科式标题重写：只把占位节点连同上下文送给模型，换回具体标题。
 
@@ -358,8 +371,9 @@ async def _try_outline_title_fix(
                 scheme_name=scheme_name,
                 scheme_type=scheme_type,
                 construction_scope=construction_scope,
-                project_brief=(project_brief or "")[:1500],
-                project_facts=(project_facts or "")[:PROJECT_FACTS_LIMIT_OUTLINE],
+                # ✅ R179：硬切片改为带日志/指标的可见截断（超限时留痕）。
+                project_brief=clip_text(project_brief or "", 1500, "目录标题修复-project_brief"),
+                project_facts=clip_text(project_facts or "", PROJECT_FACTS_LIMIT_OUTLINE, "目录标题修复-project_facts"),
                 scheme_basis=scheme_basis,
                 standards_text=standards_text,
                 requirements=requirements,
@@ -371,17 +385,20 @@ async def _try_outline_title_fix(
                 _collect(
                     [{"role": "system", "content": prompt}],
                     _title_fix_validate_fn,
-                    json_mode=True, temperature=0.2, scene="outline_fix",
+                    json_mode=True,
+                    temperature=0.2,
+                    scene="outline_fix",
                     repair_key=OUTLINE_REPAIR_KEY,
-                    max_tokens=OUTLINE_FIX_MAX_TOKENS),
-                timeout=OUTLINE_FIX_TIMEOUT)
+                    max_tokens=OUTLINE_FIX_MAX_TOKENS,
+                ),
+                timeout=OUTLINE_FIX_TIMEOUT,
+            )
             updates = obj.get("updates") if isinstance(obj, dict) else None
             if not isinstance(updates, list) or not updates:
                 if attempt == 1:
                     return None
                 break
-            tree, applied, rejected = _apply_title_updates(
-                outline if tree is None else tree, updates)
+            tree, applied, rejected = _apply_title_updates(outline if tree is None else tree, updates)
             applied_total += applied
             # 残留 = 首试基线里仍未被改掉的条目（用程序自己的检出判据复判，
             # 而不是只信上一轮的红线拒绝列表 —— 模型可能「改了一个仍是占位名的
@@ -394,8 +411,7 @@ async def _try_outline_title_fix(
                     items = _build_title_fix_items(tree, _still)
                     if not items:
                         break
-                _why = [f"path={r.get('path')}「{r.get('title')}」→ {r.get('reason')}"
-                        for r in (rejected or [])]
+                _why = [f"path={r.get('path')}「{r.get('title')}」→ {r.get('reason')}" for r in (rejected or [])]
                 if _still:
                     _why.insert(0, f"（上一轮后目录仍有 {len(_still)} 处泛化标题未被修正）")
                 feedback = "\n".join(_why) if _why else ""
@@ -404,23 +420,32 @@ async def _try_outline_title_fix(
             if not feedback:
                 break
         except asyncio.TimeoutError:
-            logger.warning("占位标题重写超时（%ds，第 %d/%d 轮），回退原链路（scheme=%s）",
-                           OUTLINE_FIX_TIMEOUT, attempt, _total, scheme_name)
+            logger.warning(
+                "占位标题重写超时（%ds，第 %d/%d 轮），回退原链路（scheme=%s）",
+                OUTLINE_FIX_TIMEOUT,
+                attempt,
+                _total,
+                scheme_name,
+            )
             return None
-        except Exception as e:      # noqa: BLE001
-            logger.warning("占位标题重写失败（scheme=%s，第 %d/%d 轮）: %s，回退原链路",
-                           scheme_name, attempt, _total, e)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "占位标题重写失败（scheme=%s，第 %d/%d 轮）: %s，回退原链路", scheme_name, attempt, _total, e
+            )
             return None
 
     if tree is None or not applied_total:
-        logger.info("占位标题重写未生效（%d 轮全被保守红线拒绝），残留 %d 条待人工核对",
-                    _total, len(hits))
+        logger.info("占位标题重写未生效（%d 轮全被保守红线拒绝），残留 %d 条待人工核对", _total, len(hits))
         return None
     _left = detect_generic_titles_for_write(tree)
     if _left:
-        logger.info("占位标题重写收敛后仍有 %d 处残留（已落地 %d 条，共 %d 轮）：%s",
-                    len(_left), applied_total, _total,
-                    [h.get("title") for h in _left[:5]])
+        logger.info(
+            "占位标题重写收敛后仍有 %d 处残留（已落地 %d 条，共 %d 轮）：%s",
+            len(_left),
+            applied_total,
+            _total,
+            [h.get("title") for h in _left[:5]],
+        )
     return tree
 
 
@@ -447,8 +472,12 @@ def _tree_shape(nodes) -> tuple:
 
 
 async def autofix_generic_titles_on_save(
-    outline: list, hits: list[dict], *,
-    scheme_name: str = "", scheme_type: str = "", context: str = "",
+    outline: list,
+    hits: list[dict],
+    *,
+    scheme_name: str = "",
+    scheme_type: str = "",
+    context: str = "",
 ) -> tuple[list, list[dict], int]:
     """落库前自动外科式重写占位标题（**单一实现**，目录写路径共用）。
 
@@ -475,23 +504,25 @@ async def autofix_generic_titles_on_save(
     try:
         _before = len(hits)
         _shape_before = _tree_shape(outline)
-        _fixed = await _try_outline_title_fix(
-            outline, hits, scheme_name=scheme_name, scheme_type=scheme_type)
+        _fixed = await _try_outline_title_fix(outline, hits, scheme_name=scheme_name, scheme_type=scheme_type)
         if _fixed is None:
             return outline, hits, 0
         if not isinstance(_fixed, list) or _tree_shape(_fixed) != _shape_before:
             logger.warning(
-                "目录落库前自动重写返回的结构与输入不一致（疑似增删节点），"
-                "已丢弃改写结果、按原样保存（context=%s）", context or "-")
+                "目录落库前自动重写返回的结构与输入不一致（疑似增删节点），" "已丢弃改写结果、按原样保存（context=%s）",
+                context or "-",
+            )
             return outline, hits, 0
         _left = detect_generic_titles(_fixed)
         _count = max(0, _before - len(_left))
         logger.info(
             "目录落库前自动重写占位标题%s：%d 处 → 残留 %d 处（自动改写 %d 条）",
             f"（{context}）" if context else "",
-            _before, len(_left), _count)
+            _before,
+            len(_left),
+            _count,
+        )
         return _fixed, _left, _count
-    except Exception as e:      # noqa: BLE001 - 自动修复失败不得阻断保存
-        logger.warning("目录落库前自动重写失败（按原样保存，context=%s）: %s",
-                       context or "-", e, exc_info=True)
+    except Exception as e:  # noqa: BLE001 - 自动修复失败不得阻断保存
+        logger.warning("目录落库前自动重写失败（按原样保存，context=%s）: %s", context or "-", e, exc_info=True)
         return outline, hits, 0

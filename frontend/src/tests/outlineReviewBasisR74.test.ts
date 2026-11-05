@@ -21,12 +21,19 @@ import { summarizeOutlineReviewBasis } from "../pages/SchemeWorkbenchPage";
 const RAW: Record<string, string> = Object.fromEntries(
   Object.entries(
     import.meta.glob("../**/*.{ts,tsx}", {
-      query: "?raw", import: "default", eager: true,
+      query: "?raw",
+      import: "default",
+      eager: true,
     }) as Record<string, string>,
   ).map(([k, v]) => [k.replace(/^\.\.\//, "").replace(/^\.\//, "tests/"), v]),
 );
 
 const PAGE = RAW["pages/SchemeWorkbenchPage.tsx"];
+// ✅ G12（2026-11-04）：定义迁至 reviewShared.ts；三处消费点随目录生成主链
+//    迁至 useOutlineGeneration.tsx（函数体逐字搬运）。锚点按职责拆到两个文件，
+//    仍逐点计数（少一处即红）。
+const DEFINITION_FILE = RAW["pages/schemeWorkbench/reviewShared.ts"];
+const GEN = RAW["pages/schemeWorkbench/useOutlineGeneration.tsx"];
 
 describe("R74·G1 A组 · summarizeOutlineReviewBasis 纯函数", () => {
   it("programmatic（覆盖全过）：报程序化预检且明示未经完整 AI 审核", () => {
@@ -56,9 +63,9 @@ describe("R74·G1 A组 · summarizeOutlineReviewBasis 纯函数", () => {
 
   it("无 review_mode / 非 programmatic 开头 → 报 AI 审核链路", () => {
     expect(summarizeOutlineReviewBasis({}).logs[0]).toContain("AI 审核链路");
-    expect(
-      summarizeOutlineReviewBasis({ review_mode: "ai_full" }).logs[0],
-    ).toContain("AI 审核链路");
+    expect(summarizeOutlineReviewBasis({ review_mode: "ai_full" }).logs[0]).toContain(
+      "AI 审核链路",
+    );
   });
 
   it("suggestions 逐条列出，脏元素（null/非串/空白）逐个过滤不抛", () => {
@@ -92,35 +99,36 @@ describe("R74·G1 B组 · 三处消费点静态接线锁", () => {
 
   it("前提：能取到被测文件源码（防 glob 空跑成常绿）", () => {
     expect(PAGE).toBeTruthy();
-    expect(PAGE).toContain("export function summarizeOutlineReviewBasis");
+    expect(DEFINITION_FILE).toContain("export function summarizeOutlineReviewBasis");
+    expect(GEN).toBeTruthy();
   });
 
-  it("全页恰好 3 处调用（在线 completed / 刷新接管 / 断线重挂，一处都不能少）", () => {
-    const n = PAGE.split(CALL).length - 1;
-    // 减去定义处自身不带调用括号的干扰：export function 行也是 `summarizeOutlineReviewBasis(`
-    expect(n).toBe(4); // 1 定义 + 3 消费点
+  it("三处调用都在生成链（在线 completed / 刷新接管 / 断线重挂，一处都不能少）", () => {
+    // 正文链重挂收尾仍在页面（1 处），目录链两处随 G12 进 hook —— 计数跨两文件，
+    // 任一消费点被摘掉都会掉到 2 并红。
+    const n = (PAGE + "\n" + GEN).split(CALL).length - 1;
+    expect(n).toBe(3); // 3 消费点（定义在 reviewShared，不在页面/hook）
   });
 
   it("completed 分支：消费点位于质量摘要之后、开闸确认之前（同口径顺序）", () => {
-    const qi = PAGE.indexOf("summarizeOutlineQuality(evt.review)");
-    const ri = PAGE.indexOf("summarizeOutlineReviewBasis(evt.review)");
-    const gi = PAGE.indexOf("openOutlineGate(evt.outline)", ri);
+    const qi = GEN.indexOf("summarizeOutlineQuality(evt.review)");
+    const ri = GEN.indexOf("summarizeOutlineReviewBasis(evt.review)");
+    const gi = GEN.indexOf("openOutlineGate(evt.outline)", ri);
     expect(qi).toBeGreaterThan(-1);
     expect(ri).toBeGreaterThan(qi);
     expect(gi).toBeGreaterThan(ri);
   });
 
   it("两条 checkpoint 恢复路径都必须消费 ckpt.review", () => {
-    const n = PAGE.split("summarizeOutlineReviewBasis(ckpt.review)").length - 1;
+    const n = (PAGE + "\n" + GEN).split("summarizeOutlineReviewBasis(ckpt.review)").length - 1;
     expect(n).toBe(2);
   });
 
-  it("反向锚：摘除全部消费点（只留定义）后，接线判据必须归零（证明扫描在守）", () => {
-    const stripped = PAGE
-      .split("\n")
+  it("反向锚：摘除全部消费点后，接线判据必须归零（证明扫描在守）", () => {
+    const stripped = GEN.split("\n")
       .filter((line) => !line.trim().startsWith(CALL))
       .join("\n");
-    expect(stripped).toContain("export function summarizeOutlineReviewBasis");
-    expect(stripped.split(CALL).length - 1).toBe(1); // 只剩定义自身
+    expect(stripped.split(CALL).length - 1).toBe(0); // 消费点清零
+    expect(DEFINITION_FILE).toContain("export function summarizeOutlineReviewBasis");
   });
 });

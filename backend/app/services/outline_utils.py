@@ -5,6 +5,7 @@
 四级及更深节点在落库前被裁剪，其标题并入父节点的 description，
 避免内容线索丢失。
 """
+
 from __future__ import annotations
 
 import copy
@@ -51,6 +52,7 @@ def normalize_outline(outline: list[dict], max_depth: int = MAX_OUTLINE_DEPTH) -
     clamped = clamp_outline_depth(outline, max_depth)
     try:
         from app.services.ai.json_response import renumber_outline
+
         renumber_outline(clamped)
     except Exception as e:  # pragma: no cover - renumber 失败不应阻断主流程
         logger.warning("目录重排编号失败（保留裁剪结果）: %s", e)
@@ -95,16 +97,20 @@ def normalize_outline_json(payload, default: str = "[]") -> str:
 
 
 def _collect_descendant_titles(node: dict) -> list[str]:
-    """递归收集节点及其所有后代的标题（用于深度裁剪时保留内容线索）。
+    """递归收集节点及其所有后代的标题/说明（用于深度裁剪时保留内容线索）。
 
     ✅ BUG 修复：旧实现只收集直接子节点标题，孙节点及更深层标题全部丢失。
     例如 L3 节点下有 L4 子节，L4 下又有 L5 细项，旧实现只保留 L4 标题，
     L5 细项标题丢失，导致裁剪后内容线索不完整。
+    ✅ 2026-11-05：标题后附 description（若有），确保折叠为段首引导时
+    原有文字内容不丢失。
     """
     titles = []
     title = str(node.get("title") or "").strip()
-    if title:
-        titles.append(title)
+    desc = str(node.get("description") or "").strip()
+    text = f"{title}：{desc}" if title and desc else (title or desc)
+    if text:
+        titles.append(text)
     children = node.get("children") or []
     if isinstance(children, list):
         for c in children:
@@ -114,17 +120,25 @@ def _collect_descendant_titles(node: dict) -> list[str]:
 
 
 def _strip_prev_merge(desc: str) -> str:
-    """去掉 description 末尾已存在的"（含：...）"（或裸"含：..."）合并后缀。
+    """去掉 description 末尾已存在的合并/折叠后缀（历史与现行两种写法）。
 
     ✅ BUG-O3 增强：旧实现只在 `desc.endswith("）") and "（含：" in desc` 时替换，
     若描述后面又追加过其它内容（或被截断），判断失效 → 反复裁剪会叠加出
     "原描述（含：A）（含：B）"。改为用正则锚定末尾，覆盖两种历史写法。
+    ✅ 2026-11-05（L4 折叠口径）：新增「（1）A；（2）B」段首引导后缀的剥离，
+    同样保证重复裁剪不叠加。
     """
     m = _MERGE_SUFFIX_RE.search(desc)
     if m:
-        return desc[:m.start()].rstrip()
+        return desc[: m.start()].rstrip()
     if _BARE_MERGE_RE.match(desc):
         return ""
+    idx = desc.find("；（1）")
+    tail = desc if desc.startswith("（1）") else (desc[idx + 1:] if idx >= 0 else "")
+    if tail:
+        parts = tail.split("；")
+        if all(re.match(r"^（\d+）", p) for p in parts):
+            return desc[:idx] if idx >= 0 else ""
     return desc
 
 
@@ -154,10 +168,13 @@ def _clamp_nodes(nodes: list, level: int, max_depth: int) -> list:
                     if t not in seen:
                         seen.add(t)
                         unique_titles.append(t)
-                merged = "；".join(unique_titles)
-                if merged:
+                if unique_titles:
+                    # ✅ 2026-11-05（L4 及以下折叠）：标题+说明改写为父级 L3 的
+                    #    「（1）（2）」段首引导，供正文生成在同一节内分层展开；
+                    #    不用「（含：…）」形式，以免模型再当作标题层级输出。
                     desc = _strip_prev_merge(str(node.get("description", "")).strip())
-                    node["description"] = f"{desc}（含：{merged}）" if desc else f"含：{merged}"
+                    lead = "；".join(f"（{i}）{t}" for i, t in enumerate(unique_titles, 1))
+                    node["description"] = f"{desc}；{lead}" if desc else lead
             node["children"] = []
             result.append(node)
         else:

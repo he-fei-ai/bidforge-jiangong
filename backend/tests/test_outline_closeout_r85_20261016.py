@@ -20,6 +20,7 @@
   · 每条锁都配**反例**（合法标题必须不误伤），否则「判据越宽越严」会变成
     恒失败逼后人改松。
 """
+
 import ast
 import json
 import re
@@ -56,18 +57,46 @@ APP_DIR = Path(__file__).resolve().parents[1] / "app"
 
 #: 必须判为占位的形态（用户症状 + AI 换写逃逸的同族变体）
 GENERIC_MUST = [
-    "专项6", "专项方案6", "专项六", "专项措施6", "措施3", "内容2",
-    "要点一", "内容十二", "专项", "措施", "内容", "要点",
-    "总体实施策划", "总体实施策划（2）", "总体实施策划（三）",
-    "专项6（2）", "其他", "有关要求",
+    "专项6",
+    "专项方案6",
+    "专项六",
+    "专项措施6",
+    "措施3",
+    "内容2",
+    "要点一",
+    "内容十二",
+    "专项",
+    "措施",
+    "内容",
+    "要点",
+    "总体实施策划",
+    "总体实施策划（2）",
+    "总体实施策划（三）",
+    "专项6（2）",
+    "其他",
+    "有关要求",
 ]
 
 #: 必须**不**误伤的合法标题（每条都在既有生产语料/护栏里出现过）
 GENERIC_MUST_NOT = [
-    "专项施工方案", "专项方案编制依据", "监测措施", "施工要求", "技术要求",
-    "安全要求", "应急预案", "6项施工措施", "深基坑支护（2）", "施工工艺技术",
-    "工程概况", "安全生产管理", "内容简介说明", "3D打印施工方案",
-    "十二层平面布置", "编制依据", "工程概述", "质量保证措施",
+    "专项施工方案",
+    "专项方案编制依据",
+    "监测措施",
+    "施工要求",
+    "技术要求",
+    "安全要求",
+    "应急预案",
+    "6项施工措施",
+    "深基坑支护（2）",
+    "施工工艺技术",
+    "工程概况",
+    "安全生产管理",
+    "内容简介说明",
+    "3D打印施工方案",
+    "十二层平面布置",
+    "编制依据",
+    "工程概述",
+    "质量保证措施",
 ]
 
 
@@ -85,8 +114,7 @@ class TestBugAStemOrdinalCoverage:
 
     def test_detect_generic_titles_sees_variants(self):
         """端到端：检出出口必须真的报出（防 is_generic_title 与 detect 分叉）。"""
-        hits = detect_generic_titles([{"title": t, "children": []}
-                                     for t in ("专项方案6", "专项六", "措施3")])
+        hits = detect_generic_titles([{"title": t, "children": []} for t in ("专项方案6", "专项六", "措施3")])
         assert {h["title"] for h in hits} == {"专项方案6", "专项六", "措施3"}, hits
         assert all(h["kind"] == "generic" for h in hits), hits
 
@@ -98,17 +126,15 @@ class TestBugAStemOrdinalCoverage:
         """
         src = (APP_DIR / "services" / "outline_quality.py").read_text(encoding="utf-8")
         tree = ast.parse(src)
-        fn = next(n for n in ast.walk(tree)
-                  if isinstance(n, ast.FunctionDef) and n.name == "is_generic_title")
-        called = {c.func.id for c in ast.walk(fn)
-                  if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
-        assert "_is_stem_ordinal_generic" in called, (
-            "is_generic_title 不再消费结构判据 ⇒ 泛化变体逃逸回 R85 前的缺口")
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "is_generic_title")
+        called = {c.func.id for c in ast.walk(fn) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+        assert "_is_stem_ordinal_generic" in called, "is_generic_title 不再消费结构判据 ⇒ 泛化变体逃逸回 R85 前的缺口"
 
     def test_stem_regex_is_fully_anchored(self):
         """结构正则必须**全串锚定** —— 这是「合法复合标题结构上不可能命中」
         的唯一依据（去掉 `^…$` 即退化成子串模糊匹配）。"""
         from app.services.outline_quality import GENERIC_STEM_ORDINAL_RE as rx
+
         pat = rx.pattern
         assert pat.startswith("^"), pat
         assert pat.endswith("$"), pat
@@ -121,28 +147,45 @@ class TestBugAStemOrdinalCoverage:
         可能构成正常章节名的词）。"""
         assert GENERIC_BARE_STEMS == {"专项", "措施", "内容", "要点", "其它", "其他"}
         for w in ("要求", "说明", "方法", "步骤", "流程", "工序", "安排", "保障"):
-            assert w not in GENERIC_BARE_STEMS, (
-                f"裸词干白名单收进了 {w!r} —— 该词可能构成正常章节名，只应带序号时判占位")
+            assert (
+                w not in GENERIC_BARE_STEMS
+            ), f"裸词干白名单收进了 {w!r} —— 该词可能构成正常章节名，只应带序号时判占位"
 
 
 # ====================================================================
 # B 组 · BUG-B：「（N）」编号冲突后缀值域
 # ====================================================================
 
+
 class TestBugBCounterSuffixDomain:
     """BUG-B：中文数字与 4 位数字此前**同时逃过检测侧与回写红线**。"""
 
-    @pytest.mark.parametrize("title", [
-        "监测措施（2）", "监测措施（三）", "监测措施（1234）",
-        "监测措施(一)", "总体实施策划（三）", "专项6（2）",
-    ])
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "监测措施（2）",
+            "监测措施（三）",
+            "监测措施（1234）",
+            "监测措施(一)",
+            "总体实施策划（三）",
+            "专项6（2）",
+        ],
+    )
     def test_suffix_detected(self, title):
         assert has_trailing_counter_suffix(title) is True, title
 
-    @pytest.mark.parametrize("title", [
-        "按第（3）条执行", "深基坑支护（2）不叫冲突", "施工方案（三）措施",
-        "洞口（2）围护", "锚杆（12）拉结", "", "无括号标题",
-    ])
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "按第（3）条执行",
+            "深基坑支护（2）不叫冲突",
+            "施工方案（三）措施",
+            "洞口（2）围护",
+            "锚杆（12）拉结",
+            "",
+            "无括号标题",
+        ],
+    )
     def test_non_trailing_not_detected(self, title):
         """反例锁：只认**整组位于标题末尾**的形态，绝不匹配正文中的括号数字
         （「施工方案（三）措施」这类括号数字出现在标题中间 ⇒ 不是消歧后缀）。"""
@@ -156,9 +199,9 @@ class TestBugBCounterSuffixDomain:
 
     def test_detect_reports_chinese_numeral_conflict(self):
         """端到端：碰撞判定必须能吃到中文数字后缀（旧实现恒 MISS）。"""
-        hits = detect_generic_titles([
-            {"title": "钢内支撑安装", "children": []},
-            {"title": "钢内支撑安装（三）", "children": []}])
+        hits = detect_generic_titles(
+            [{"title": "钢内支撑安装", "children": []}, {"title": "钢内支撑安装（三）", "children": []}]
+        )
         assert [h["kind"] for h in hits] == ["conflict_suffix"], hits
 
     def test_suffix_regex_value_domain(self):
@@ -169,6 +212,7 @@ class TestBugBCounterSuffixDomain:
         from app.services.outline_quality import (
             _TRAILING_COUNTER_SUFFIX_RE as rx,
         )
+
         pat = rx.pattern
         assert "\\d{1,4}" in pat or "{4}" in pat, pat
         for ch in ("一", "三", "十"):
@@ -179,8 +223,7 @@ class TestBugBCounterSuffixDomain:
         「深基坑支护（2）」这类合法部位限定标题；回写侧只看形态。
         本锁防止后人「顺手统一」而把检测侧放宽 ⇒ 合法标题开始被误报。
         """
-        assert detect_generic_titles(
-            [{"title": "深基坑支护（2）", "children": []}]) == []
+        assert detect_generic_titles([{"title": "深基坑支护（2）", "children": []}]) == []
         # 但回写红线（单一形态判据）必须照收
         assert has_trailing_counter_suffix("深基坑支护（2）") is True
 
@@ -188,6 +231,7 @@ class TestBugBCounterSuffixDomain:
 # ====================================================================
 # C 组 · BUG-C：duplicate_scheme 必须重排副本编号
 # ====================================================================
+
 
 async def _seed_tied_sort_order(db, pid, sid, titles=("A 章", "B 章")):
     """造 `sort_order` 并列 —— 历史脏数据 / 外部脚本直改的真实形态。
@@ -200,15 +244,25 @@ async def _seed_tied_sort_order(db, pid, sid, titles=("A 章", "B 章")):
             "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
             " level, sort_order, status, outline_json, word_budget)"
             " VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (str(uuid.uuid4()), sid, pid, "", title, 1, 0, "empty",
-             json.dumps({"id": str(i + 1), "level": 1}, ensure_ascii=False), 1500))
+            (
+                str(uuid.uuid4()),
+                sid,
+                pid,
+                "",
+                title,
+                1,
+                0,
+                "empty",
+                json.dumps({"id": str(i + 1), "level": 1}, ensure_ascii=False),
+                1500,
+            ),
+        )
     await db.commit()
 
 
 async def _positions_and_ids(db, sid):
     tree = await _build_tree(db, sid)
-    return [(n["title"], json.loads(n.get("outline_json") or "{}").get("id"))
-            for n in tree]
+    return [(n["title"], json.loads(n.get("outline_json") or "{}").get("id")) for n in tree]
 
 
 class TestBugCDuplicateSchemeRenumbers:
@@ -225,18 +279,16 @@ class TestBugCDuplicateSchemeRenumbers:
         await db.execute("INSERT INTO projects (id,name) VALUES (?,?)", (pid, "P"))
         sid = str(uuid.uuid4())
         await db.execute(
-            "INSERT INTO schemes (id,project_id,name,type) VALUES (?,?,?,?)",
-            (sid, pid, "源方案", "基坑支护与降水"))
+            "INSERT INTO schemes (id,project_id,name,type) VALUES (?,?,?,?)", (sid, pid, "源方案", "基坑支护与降水")
+        )
         await _seed_tied_sort_order(db, pid, sid)
 
-        new_id = (await _schemes.duplicate_scheme(
-            db=db, project_id=pid, scheme_id=sid))["id"]
+        new_id = (await _schemes.duplicate_scheme(db=db, project_id=pid, scheme_id=sid))["id"]
 
         pairs = await _positions_and_ids(db, new_id)
         assert len(pairs) == 2, pairs
         # 不变式：第 k 个位置的章节，编号必须是 "k"
-        assert [i for _, i in pairs] == ["1", "2"], (
-            f"副本编号与自身位置不一致（复制后即错）：{pairs}")
+        assert [i for _, i in pairs] == ["1", "2"], f"副本编号与自身位置不一致（复制后即错）：{pairs}"
 
     @pytest.mark.asyncio
     async def test_copy_of_clean_scheme_is_unchanged(self, db_conn):
@@ -247,20 +299,30 @@ class TestBugCDuplicateSchemeRenumbers:
         await db.execute("INSERT INTO projects (id,name) VALUES (?,?)", (pid, "P"))
         sid = str(uuid.uuid4())
         await db.execute(
-            "INSERT INTO schemes (id,project_id,name,type) VALUES (?,?,?,?)",
-            (sid, pid, "源方案", "基坑支护与降水"))
+            "INSERT INTO schemes (id,project_id,name,type) VALUES (?,?,?,?)", (sid, pid, "源方案", "基坑支护与降水")
+        )
         for i, title in enumerate(("第一章", "第二章", "第三章")):
             await db.execute(
                 "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
                 " level, sort_order, status, outline_json, word_budget)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (str(uuid.uuid4()), sid, pid, "", title, 1, i, "empty",
-                 json.dumps({"id": str(i + 1), "level": 1}), 1500))
+                (
+                    str(uuid.uuid4()),
+                    sid,
+                    pid,
+                    "",
+                    title,
+                    1,
+                    i,
+                    "empty",
+                    json.dumps({"id": str(i + 1), "level": 1}),
+                    1500,
+                ),
+            )
         await db.commit()
         src = await _positions_and_ids(db, sid)
 
-        new_id = (await _schemes.duplicate_scheme(
-            db=db, project_id=pid, scheme_id=sid))["id"]
+        new_id = (await _schemes.duplicate_scheme(db=db, project_id=pid, scheme_id=sid))["id"]
         cp = await _positions_and_ids(db, new_id)
 
         assert cp == src, f"干净方案的复制结果必须逐字一致：{src} -> {cp}"
@@ -269,13 +331,12 @@ class TestBugCDuplicateSchemeRenumbers:
         """静态接线锁（AST 锁真实调用，不锁「源码含字符串」）。"""
         src = (APP_DIR / "routers" / "schemes.py").read_text(encoding="utf-8")
         tree = ast.parse(src)
-        fn = next(n for n in ast.walk(tree)
-                  if isinstance(n, ast.AsyncFunctionDef)
-                  and n.name == "duplicate_scheme")
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "duplicate_scheme")
         names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
         attrs = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
-        assert "renumber_sections_after_reorder" in (names | attrs), (
-            "duplicate_scheme 不再重排编号 ⇒ 副本一落库即带错号（R85 BUG-C 复发）")
+        assert "renumber_sections_after_reorder" in (
+            names | attrs
+        ), "duplicate_scheme 不再重排编号 ⇒ 副本一落库即带错号（R85 BUG-C 复发）"
 
     def test_renumber_is_wired_before_commit(self):
         """重排必须在 `commit()` **之前**调用，否则编号写不进去（同连接
@@ -291,6 +352,7 @@ class TestBugCDuplicateSchemeRenumbers:
 # ====================================================================
 # D 组 · BUG-D：标题写入路径的剥离档位统一
 # ====================================================================
+
 
 class TestBugDTitleStripCaliber:
     """BUG-D：`create_section` / `update_section` 此前用**单轮档**剥离。
@@ -311,21 +373,20 @@ class TestBugDTitleStripCaliber:
         sid_a, sid_b = str(uuid.uuid4()), str(uuid.uuid4())
         for sid, name in ((sid_a, "SA"), (sid_b, "SB")):
             await db.execute(
-                "INSERT INTO schemes (id,project_id,name,type) VALUES (?,?,?,?)",
-                (sid, pid, name, "基坑支护与降水"))
+                "INSERT INTO schemes (id,project_id,name,type) VALUES (?,?,?,?)", (sid, pid, name, "基坑支护与降水")
+            )
 
-        r = await create_section(scheme_id=sid_a,
-                                 data=SectionCreate(title=self.DIRTY), db=db)
+        r = await create_section(scheme_id=sid_a, data=SectionCreate(title=self.DIRTY), db=db)
         cur = await db.execute("SELECT title FROM sections WHERE id=?", (r["id"],))
         t_create = (await cur.fetchone())["title"]
 
         await _save_outline_to_db(db, sid_b, [{"title": self.DIRTY, "children": []}])
-        cur = await db.execute(
-            "SELECT title FROM sections WHERE scheme_id=? ORDER BY sort_order", (sid_b,))
+        cur = await db.execute("SELECT title FROM sections WHERE scheme_id=? ORDER BY sort_order", (sid_b,))
         t_save = (await cur.fetchone())["title"]
 
-        assert t_create == t_save == "工程概况", (
-            f"两条落库路径标题形态分叉：create={t_create!r} save-outline={t_save!r}")
+        assert (
+            t_create == t_save == "工程概况"
+        ), f"两条落库路径标题形态分叉：create={t_create!r} save-outline={t_save!r}"
 
     @pytest.mark.asyncio
     async def test_update_section_strips_fully(self, db_conn):
@@ -334,19 +395,27 @@ class TestBugDTitleStripCaliber:
         await db.execute("INSERT INTO projects (id,name) VALUES (?,?)", (pid, "P"))
         sid = str(uuid.uuid4())
         await db.execute(
-            "INSERT INTO schemes (id,project_id,name,type) VALUES (?,?,?,?)",
-            (sid, pid, "S", "基坑支护与降水"))
-        r = await create_section(scheme_id=sid,
-                                 data=SectionCreate(title="干净标题"), db=db)
-        await update_section(scheme_id=sid, section_id=r["id"],
-                             data=SectionUpdate(title="第2章 2.3 支护施工"), db=db)
+            "INSERT INTO schemes (id,project_id,name,type) VALUES (?,?,?,?)", (sid, pid, "S", "基坑支护与降水")
+        )
+        r = await create_section(scheme_id=sid, data=SectionCreate(title="干净标题"), db=db)
+        await update_section(scheme_id=sid, section_id=r["id"], data=SectionUpdate(title="第2章 2.3 支护施工"), db=db)
         cur = await db.execute("SELECT title FROM sections WHERE id=?", (r["id"],))
         assert (await cur.fetchone())["title"] == "支护施工"
 
-    @pytest.mark.parametrize("title", [
-        "专项施工方案", "深基坑支护施工", "工程概况", "监测措施",
-        "3D打印施工方案", "十二层平面布置", "2023年规范", "1.1", "1.2.3",
-    ])
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "专项施工方案",
+            "深基坑支护施工",
+            "工程概况",
+            "监测措施",
+            "3D打印施工方案",
+            "十二层平面布置",
+            "2023年规范",
+            "1.1",
+            "1.2.3",
+        ],
+    )
     def test_clean_titles_are_identity(self, title):
         """对**已干净**标题，tree 档剥离必须是恒等变换 ⇒ 前端单轮剥离、
         导出剥净档与既有护栏全部不受影响（零回归的判据）。"""
@@ -361,19 +430,19 @@ class TestBugDTitleStripCaliber:
         存在还会互相遮蔽并触发 F811 —— 「同一判据两份副本」的典型形态。
         """
         src = (APP_DIR / "routers" / "sections.py").read_text(encoding="utf-8")
-        assert "strip_outline_numbering_tree as strip_outline_numbering" in src, (
-            "sections.py 的标题剥离档位被改回单轮档 ⇒ R85 BUG-D 复发")
+        assert (
+            "strip_outline_numbering_tree as strip_outline_numbering" in src
+        ), "sections.py 的标题剥离档位被改回单轮档 ⇒ R85 BUG-D 复发"
         tree = ast.parse(src)
         for n in ast.walk(tree):
-            if isinstance(n, ast.ImportFrom) and n.module and (
-                    "numbering" in n.module or "json_response" in n.module):
+            if isinstance(n, ast.ImportFrom) and n.module and ("numbering" in n.module or "json_response" in n.module):
                 for a in n.names:
                     assert a.name != "strip_outline_numbering", (
-                        f"sections.py 从 {n.module} 直接导入单轮档 "
-                        f"strip_outline_numbering（会绕开 tree 档）")
-                    assert not (a.name == "strip_outline_numbering_tree"
-                                and a.asname != "strip_outline_numbering"), (
-                        "tree 档别名名被改，标题写入路径口径不可辨")
+                        f"sections.py 从 {n.module} 直接导入单轮档 " f"strip_outline_numbering（会绕开 tree 档）"
+                    )
+                    assert not (
+                        a.name == "strip_outline_numbering_tree" and a.asname != "strip_outline_numbering"
+                    ), "tree 档别名名被改，标题写入路径口径不可辨"
 
     def test_prompt_section_title_is_clean(self):
         """跨模块锁：`{section_title}` 是 DB 标题的**原样**注入通道 ——
@@ -382,31 +451,43 @@ class TestBugDTitleStripCaliber:
         src = (APP_DIR / "routers" / "sse_handlers.py").read_text(encoding="utf-8")
         tree = ast.parse(src)
         # 找所有把 leaf["title"] / node["title"] 赋给 section_title 的位置
-        hits = [n for n in ast.walk(tree)
-                if isinstance(n, ast.keyword) and n.arg == "section_title"]
+        hits = [n for n in ast.walk(tree) if isinstance(n, ast.keyword) and n.arg == "section_title"]
         assert hits, "未找到 section_title 注入点（提示词接线被摘？）"
         # 注入本身允许原样（DB 侧已剥净），但必须存在剥净的写入侧保证
         assert "strip_outline_numbering_tree as strip_outline_numbering" in (
-            (APP_DIR / "routers" / "sections.py").read_text(encoding="utf-8"))
+            (APP_DIR / "routers" / "sections.py").read_text(encoding="utf-8")
+        )
 
 
 # ====================================================================
 # E 组 · 不变式：编号唯一事实源与字节体检
 # ====================================================================
 
+
 class TestInvariants:
     def test_renumber_is_position_derived(self):
         """`renumber_section_outline_ids` 必须按**位置**派生 id
         （R85 BUG-C 的修复依赖这条不变式）。"""
-        tree = [{"id": "77", "level": 1, "title": "A",
-                 "children": [{"id": "88", "level": 1, "title": "A1", "children": []}]}]
+        tree = [
+            {
+                "id": "77",
+                "level": 1,
+                "title": "A",
+                "children": [{"id": "88", "level": 1, "title": "A1", "children": []}],
+            }
+        ]
         ups = renumber_section_outline_ids(tree)
         got = {u[2]: (json.loads(u[0]).get("id"), u[1]) for u in ups}
         assert set(got.values()) == {("1", 1), ("1.1", 2)}, got
 
-    @pytest.mark.parametrize("rel", [
-        "services/outline_quality.py", "routers/sections.py", "routers/schemes.py",
-    ])
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "services/outline_quality.py",
+            "routers/sections.py",
+            "routers/schemes.py",
+        ],
+    )
     def test_byte_health(self, rel):
         """字节体检：BOM=False / U+FFFD=0 / 孤立 CR=0（AGENTS §5.14 R57/R58）。"""
         p = APP_DIR / rel
@@ -421,17 +502,20 @@ class TestInvariants:
         """追加符号不得与模块既有名字撞名（R65 同族教训）。"""
         for rel in ("services/outline_quality.py",):
             tree = ast.parse((APP_DIR / rel).read_text(encoding="utf-8"))
-            names = [t.id for n in tree.body
-                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                     for t in n.body if isinstance(t, ast.Name)
-                     and isinstance(t.ctx, ast.Store)]
-            assert len(names) == len(set(names)), (
-                f"{rel} 顶层重名：{[n for n in names if names.count(n) > 1]}")
+            names = [
+                t.id
+                for n in tree.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                for t in n.body
+                if isinstance(t, ast.Name) and isinstance(t.ctx, ast.Store)
+            ]
+            assert len(names) == len(set(names)), f"{rel} 顶层重名：{[n for n in names if names.count(n) > 1]}"
 
 
 # ====================================================================
 # F 组 · 提示词纪律（渲染后判定，不是源码字符串匹配）
 # ====================================================================
+
 
 class TestPromptDisciplineRendered:
     """占位/冲突纪律必须**真的下发到模型**（R73b F4 的教训：源码含字符串
@@ -444,16 +528,28 @@ class TestPromptDisciplineRendered:
 
     #: (prompt key, 变量实参)
     TITLE_WRITING_KEYS = [
-        ("outline_patch_system", dict(
-            scheme_name="基坑支护", scheme_type="深基坑", project_brief="",
-            project_facts="", chapter_titles="编制依据", missing_items="施工计划")),
+        (
+            "outline_patch_system",
+            dict(
+                scheme_name="基坑支护",
+                scheme_type="深基坑",
+                project_brief="",
+                project_facts="",
+                chapter_titles="编制依据",
+                missing_items="施工计划",
+            ),
+        ),
         ("outline_recognition_system", dict(raw_text="目录：专项6 总体实施策划（2）")),
-        ("outline_title_fix_system", dict(
-            scheme_name="基坑支护", scheme_type="深基坑", project_brief="",
-            project_facts="", broken_items="专项6")),
-        ("outline_adjust_system", dict(
-            current_outline="[]", instruction="调整", scheme_name="基坑支护",
-            scheme_type="深基坑")),
+        (
+            "outline_title_fix_system",
+            dict(
+                scheme_name="基坑支护", scheme_type="深基坑", project_brief="", project_facts="", broken_items="专项6"
+            ),
+        ),
+        (
+            "outline_adjust_system",
+            dict(current_outline="[]", instruction="调整", scheme_name="基坑支护", scheme_type="深基坑"),
+        ),
     ]
 
     #: 纪律行的**判别性**特征：同一行内同时出现「（N）」与一个**禁止/改写**
@@ -463,24 +559,22 @@ class TestPromptDisciplineRendered:
     _NEGATIONS = ("严禁", "不得", "禁止", "必须改写", "绝不准", "不能")
 
     def _discipline_lines(self, text: str) -> list[str]:
-        return [ln for ln in text.splitlines()
-                if "（N）" in ln and any(n in ln for n in self._NEGATIONS)]
+        return [ln for ln in text.splitlines() if "（N）" in ln and any(n in ln for n in self._NEGATIONS)]
 
-    @pytest.mark.parametrize("key,vars_", TITLE_WRITING_KEYS,
-                             ids=[k for k, _ in TITLE_WRITING_KEYS])
+    @pytest.mark.parametrize("key,vars_", TITLE_WRITING_KEYS, ids=[k for k, _ in TITLE_WRITING_KEYS])
     def test_rendered_prompt_forbids_generic_and_suffix(self, key, vars_):
         from app.services.ai.prompts._registry import render
+
         text = render(key, **vars_)
         assert len(text) > 100, f"{key} 渲染结果异常短（判据可能空转）"
         # 判别性判据：必须存在「同一条规则行」既点名「（N）」冲突后缀、
         # 又下达禁止/改写指令（只看单个词会被残留句骗过 —— 见 M5 教训）
         lines = self._discipline_lines(text)
-        assert lines, (
-            f"{key} 渲染后**没有**「（N）」编号冲突后缀的禁止/改写规则行"
-            f"（静默回归）")
+        assert lines, f"{key} 渲染后**没有**「（N）」编号冲突后缀的禁止/改写规则行" f"（静默回归）"
         # 泛化/占位必须与该规则行**同行**出现（而不是散落在别处）
-        assert any(("泛化" in ln) or ("占位" in ln) for ln in lines), (
-            f"{key} 的「（N）」规则行未同时点名泛化/占位标题：{lines}")
+        assert any(
+            ("泛化" in ln) or ("占位" in ln) for ln in lines
+        ), f"{key} 的「（N）」规则行未同时点名泛化/占位标题：{lines}"
 
     def test_discipline_judgment_is_discriminating(self):
         """判据自证（防空转 / 防假护栏）：把纪律行删掉后，本判据必须变红。
@@ -492,18 +586,18 @@ class TestPromptDisciplineRendered:
             "1. 识别编号规则：1、1.1\n"
             "2. 返回 JSON\n"
             '3. 不得使用"（N）"编号冲突后缀；原始文本里的"专项6""其他"'
-            '这类占位名**必须改写为具体名称**\n'
+            "这类占位名**必须改写为具体名称**\n"
         )
         assert self._discipline_lines(sample), "判据对真实样例不生效"
         # 删掉纪律行（只留含「占位」的残留句）⇒ 必须不再命中
         stripped = "1. 识别编号规则：1、1.1\n2. 原始文本里若写的是这类占位名\n"
-        assert not self._discipline_lines(stripped), (
-            "判据被残留句骗过（假护栏）—— 这正是 A/B M5 漏抓的原因")
+        assert not self._discipline_lines(stripped), "判据被残留句骗过（假护栏）—— 这正是 A/B M5 漏抓的原因"
 
     def test_registry_entry_exists_for_every_key(self):
         """防空转：断言 key 真的在注册表里（否则 render 会抛，测试变成
         「错误类型断言」而非有效判据）。"""
         from app.services.ai.prompts import _registry
+
         for key, _ in self.TITLE_WRITING_KEYS:
             assert key in _registry._ALL_PROMPTS, f"{key} 未注册"
 
@@ -511,6 +605,7 @@ class TestPromptDisciplineRendered:
 # ====================================================================
 # G 组 · 端到端：占位闸门真的拦住「改写成变体占位名」这条复发路径
 # ====================================================================
+
 
 class TestEndToEndSurgicalFixRejectsVariants:
     """**本轮最关键的一组**：R85 之前的 6 份护栏全部只测 `is_generic_title`
@@ -528,9 +623,9 @@ class TestEndToEndSurgicalFixRejectsVariants:
     @pytest.mark.parametrize("variant", EVASIONS)
     def test_variant_is_rejected_by_write_path(self, variant):
         from app.routers.sse_handlers import _apply_title_updates
+
         tree = [{"title": "专项6", "description": "占位", "children": []}]
-        out, applied, rejected = _apply_title_updates(
-            tree, [{"path": "1", "title": variant}])
+        out, applied, rejected = _apply_title_updates(tree, [{"path": "1", "title": variant}])
         assert applied == 0, f"{variant!r} 被写回目录（占位名复发）"
         assert len(rejected) == 1, rejected
         assert out[0]["title"] == "专项6", "拒收时**不得**改动原节点"
@@ -545,17 +640,17 @@ class TestEndToEndSurgicalFixRejectsVariants:
     def test_chinese_numeral_suffix_rejected_by_write_path(self):
         """BUG-B 端到端：中文数字后缀必须在**回写面**被拒（此前双侧漏网）。"""
         from app.routers.sse_handlers import _apply_title_updates
+
         tree = [{"title": "专项6", "children": []}]
-        _, applied, rejected = _apply_title_updates(
-            tree, [{"path": "1", "title": "钢内支撑安装（三）"}])
+        _, applied, rejected = _apply_title_updates(tree, [{"path": "1", "title": "钢内支撑安装（三）"}])
         assert applied == 0, "带中文数字冲突后缀的标题被写回目录"
         assert "（N）" in rejected[0]["reason"], rejected
 
     def test_clean_title_is_still_accepted(self):
         """反向锁：判据**不得**宽到把合法改写一并拒掉（否则功能全灭）。"""
         from app.routers.sse_handlers import _apply_title_updates
+
         tree = [{"title": "专项6", "children": []}]
-        out, applied, rejected = _apply_title_updates(
-            tree, [{"path": "1", "title": "钢内支撑安装"}])
+        out, applied, rejected = _apply_title_updates(tree, [{"path": "1", "title": "钢内支撑安装"}])
         assert applied == 1 and not rejected, (applied, rejected)
         assert out[0]["title"] == "钢内支撑安装"

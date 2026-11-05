@@ -13,6 +13,7 @@
    导致第 2、3 个库整份丢失。这里改为每个库单独渲染并各自限长；
 3. **可只取子树**：二三级目录生成时只需当前章对应的目录库分支。
 """
+
 from __future__ import annotations
 
 import json
@@ -261,12 +262,14 @@ async def load_library_trees(
     for lib in libs:
         nodes = parse_outline(lib.get("outline_json"))
         if nodes:
-            trees.append({
-                "id": lib["id"],
-                "name": lib.get("name", "未命名目录"),
-                "version": lib.get("version") or "",
-                "nodes": nodes,
-            })
+            trees.append(
+                {
+                    "id": lib["id"],
+                    "name": lib.get("name", "未命名目录"),
+                    "version": lib.get("version") or "",
+                    "nodes": nodes,
+                }
+            )
     return trees
 
 
@@ -300,5 +303,4 @@ async def bump_ref_count(db, library_ids: list[str]) -> None:
     for lid in library_ids or []:
         if not lid:
             continue
-        await db.execute(
-            "UPDATE outline_library SET ref_count=ref_count+1 WHERE id=?", (lid,))
+        await db.execute("UPDATE outline_library SET ref_count=ref_count+1 WHERE id=?", (lid,))

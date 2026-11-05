@@ -11,6 +11,7 @@
 - sections.reorder_sections body 类型防御（非 list → 400，非字符串元素过滤）
 - schemes.delete_scheme 断开 uploaded_outlines 悬挂引用（记录不删、引用置空）
 """
+
 import inspect
 import json
 import uuid
@@ -23,26 +24,23 @@ from fastapi import HTTPException
 # 夹具辅助
 # ============================================================
 async def _seed_project_scheme(db, sid="s1", pid="p1"):
-    await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)",
-                     (pid, "测试项目"))
-    await db.execute(
-        "INSERT OR IGNORE INTO schemes (id, project_id, name) VALUES (?,?,?)",
-        (sid, pid, "测试方案"))
+    await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)", (pid, "测试项目"))
+    await db.execute("INSERT OR IGNORE INTO schemes (id, project_id, name) VALUES (?,?,?)", (sid, pid, "测试方案"))
     await db.commit()
 
 
-async def _seed_task(db, task_id="t1", task_type="outline_generation",
-                     scheme_id="s1", status="running"):
+async def _seed_task(db, task_id="t1", task_type="outline_generation", scheme_id="s1", status="running"):
     await db.execute(
         "INSERT INTO task_registry (id, task_type, project_id, scheme_id,"
         " status, progress, checkpoint_json) VALUES (?,?,?,?,?,?,?)",
-        (task_id, task_type, "p1", scheme_id, status, 0.0, "{}"))
+        (task_id, task_type, "p1", scheme_id, status, 0.0, "{}"),
+    )
     await db.commit()
 
 
 def _parse_sse(line: str) -> dict:
     assert line.startswith("data: ")
-    return json.loads(line[len("data: "):])
+    return json.loads(line[len("data: ") :])
 
 
 # ============================================================
@@ -52,9 +50,9 @@ class TestFinishStoppedWithPartial:
     async def test_stopped_carries_outline_and_saves_checkpoint(self, db_conn):
         """目录已生成后用户点停止：成果必须同时出现在事件与 checkpoint 中。"""
         import app.routers.sse_handlers as sh
+
         await _seed_task(db_conn, "t_stop1")
-        outline = [{"title": "第一章 工程概况", "children": []},
-                   {"title": "第二章 施工部署", "children": []}]
+        outline = [{"title": "第一章 工程概况", "children": []}, {"title": "第二章 施工部署", "children": []}]
         holder = {"outline": outline, "failed_chapters": ["第三章"]}
 
         line = await sh._finish_stopped_with_partial("t_stop1", holder)
@@ -68,8 +66,7 @@ class TestFinishStoppedWithPartial:
         assert holder["outline"] == []
 
         # checkpoint 落库（kind + 成果字段），供断线重挂 task_status 回传
-        cur = await db_conn.execute(
-            "SELECT status, checkpoint_json FROM task_registry WHERE id=?", ("t_stop1",))
+        cur = await db_conn.execute("SELECT status, checkpoint_json FROM task_registry WHERE id=?", ("t_stop1",))
         row = await cur.fetchone()
         assert row["status"] == "stopped"
         ckpt = json.loads(row["checkpoint_json"])
@@ -80,6 +77,7 @@ class TestFinishStoppedWithPartial:
     async def test_stopped_without_outline_emits_bare_event(self, db_conn):
         """生成尚未产出目录（holder 为空）：不写 checkpoint，任务仍正确置终态。"""
         import app.routers.sse_handlers as sh
+
         await _seed_task(db_conn, "t_stop2")
         holder = {"outline": [], "failed_chapters": []}
 
@@ -88,8 +86,7 @@ class TestFinishStoppedWithPartial:
         assert evt["event"] == "stopped"
         assert "outline" not in evt
 
-        cur = await db_conn.execute(
-            "SELECT status, checkpoint_json FROM task_registry WHERE id=?", ("t_stop2",))
+        cur = await db_conn.execute("SELECT status, checkpoint_json FROM task_registry WHERE id=?", ("t_stop2",))
         row = await cur.fetchone()
         assert row["status"] == "stopped"
         assert json.loads(row["checkpoint_json"]) == {}, "无成果不得覆盖 checkpoint"
@@ -98,6 +95,7 @@ class TestFinishStoppedWithPartial:
         """收尾顺序契约：checkpoint 落库必须发生在 finish_task 置终态之前
         （杜绝「DB 已终态但成果未写入」的断线重挂空窗）。"""
         import app.routers.sse_handlers as sh
+
         order = []
         real_save = sh._save_outline_checkpoint
 
@@ -112,7 +110,8 @@ class TestFinishStoppedWithPartial:
         monkeypatch.setattr(sh, "finish_task", fake_finish)
         await _seed_task(db_conn, "t_stop3")
         await sh._finish_stopped_with_partial(
-            "t_stop3", {"outline": [{"title": "A", "children": []}], "failed_chapters": []})
+            "t_stop3", {"outline": [{"title": "A", "children": []}], "failed_chapters": []}
+        )
         assert order == ["checkpoint", "finish"]
 
 
@@ -127,37 +126,49 @@ class TestGenerateOutlineStoppedBranches:
         （不带 outline、不写 checkpoint），目录已生成时用户点停止成果确定性丢失。
         """
         import app.routers.sse_handlers as sh
+
         src = inspect.getsource(sh.generate_outline)
         # 归一化空格后，裸 stopped SSE 行（'event':'stopped'）不允许再出现在该路由内
         normalized = src.replace("'event': 'stopped'", "'event':'stopped'")
-        assert "'event':'stopped'" not in normalized, \
-            "generate_outline 内禁止裸 stopped 事件（成果必须经 _finish_stopped_with_partial 下发）"
-        assert normalized.count("_finish_stopped_with_partial") >= 5, \
-            "短方案 3 分支 + 长方案入口 + CancelledError 共 5 处 stopped 出口"
+        assert (
+            "'event':'stopped'" not in normalized
+        ), "generate_outline 内禁止裸 stopped 事件（成果必须经 _finish_stopped_with_partial 下发）"
+        assert (
+            normalized.count("_finish_stopped_with_partial") >= 5
+        ), "短方案 3 分支 + 长方案入口 + CancelledError 共 5 处 stopped 出口"
 
 
 # ============================================================
 # 3. task_status 内存终态窗口补挂 checkpoint（BUG B）
 # ============================================================
 class TestTaskStatusMemoryTerminalCheckpoint:
-    async def test_terminal_memory_state_attaches_outline_result(
-            self, db_conn, monkeypatch):
+    async def test_terminal_memory_state_attaches_outline_result(self, db_conn, monkeypatch):
         """finish_task 已置终态、尚未 pop 的窗口内，重挂的前端必须拿到 outline_result。"""
         import app.routers.sse_handlers as sh
         import app.services.ai.task_registry as tr
 
         await _seed_task(db_conn, "t_mem")
-        ckpt = {"kind": "outline_result", "event": "stopped",
-                "outline": [{"title": "第一章", "children": []}], "failed_count": 0}
+        ckpt = {
+            "kind": "outline_result",
+            "event": "stopped",
+            "outline": [{"title": "第一章", "children": []}],
+            "failed_count": 0,
+        }
         await db_conn.execute(
             "UPDATE task_registry SET status='stopped', checkpoint_json=? WHERE id=?",
-            (json.dumps(ckpt, ensure_ascii=False), "t_mem"))
+            (json.dumps(ckpt, ensure_ascii=False), "t_mem"),
+        )
         await db_conn.commit()
 
         monkeypatch.setattr(sh, "get_read_conn", lambda: _conn_ctx(db_conn))
         monkeypatch.setattr(sh, "release_read_conn", _noop_release)
-        tr._tasks["t_mem"] = {"type": "outline_generation", "status": "stopped",
-                              "progress": 1.0, "message": "用户已停止", "scheme_id": "s1"}
+        tr._tasks["t_mem"] = {
+            "type": "outline_generation",
+            "status": "stopped",
+            "progress": 1.0,
+            "message": "用户已停止",
+            "scheme_id": "s1",
+        }
         res = await sh.task_status("t_mem")
         assert res["live"] is True
         assert res["status"] == "stopped"
@@ -172,8 +183,13 @@ class TestTaskStatusMemoryTerminalCheckpoint:
             raise AssertionError("running 状态不应读 DB checkpoint")
 
         monkeypatch.setattr(sh, "get_read_conn", boom)
-        tr._tasks["t_run"] = {"type": "outline_generation", "status": "running",
-                              "progress": 0.3, "message": "生成中", "scheme_id": "s1"}
+        tr._tasks["t_run"] = {
+            "type": "outline_generation",
+            "status": "running",
+            "progress": 0.3,
+            "message": "生成中",
+            "scheme_id": "s1",
+        }
         res = await sh.task_status("t_run")
         assert res["status"] == "running"
         assert "outline_result" not in res
@@ -181,8 +197,10 @@ class TestTaskStatusMemoryTerminalCheckpoint:
 
 def _conn_ctx(conn):
     """把测试连接包成 awaitable（与 get_read_conn 返回协程的口径一致）。"""
+
     async def _get():
         return conn
+
     return _get()
 
 
@@ -196,6 +214,7 @@ async def _noop_release(conn):
 class TestReorderDefense:
     async def test_non_list_order_rejected(self, db_conn):
         import app.routers.sections as sec
+
         await _seed_project_scheme(db_conn)
         with pytest.raises(HTTPException) as ei:
             await sec.reorder_sections("s1", {"order": "abc"}, db=db_conn)
@@ -205,10 +224,12 @@ class TestReorderDefense:
     async def test_invalid_elements_filtered(self, db_conn):
         """列表内的 None/数字/空串被过滤，合法 id 正常排序且不报错。"""
         import app.routers.sections as sec
+
         await _seed_project_scheme(db_conn)
         await db_conn.execute(
             "INSERT INTO sections (id, scheme_id, title, parent_id, level, sort_order, outline_json)"
-            " VALUES ('sec1','s1','第一章','',1,9,'{\"id\": \"1\"}')")
+            " VALUES ('sec1','s1','第一章','',1,9,'{\"id\": \"1\"}')"
+        )
         await db_conn.commit()
         res = await sec.reorder_sections("s1", {"order": ["sec1", None, 5, ""]}, db=db_conn)
         assert res.get("ok") is not False
@@ -222,17 +243,18 @@ class TestReorderDefense:
 class TestSchemeDeleteUploadRefs:
     async def test_uploaded_outline_reference_detached(self, db_conn):
         import app.routers.schemes as sch
+
         await _seed_project_scheme(db_conn)
         rid = str(uuid.uuid4())
         await db_conn.execute(
-            "INSERT INTO uploaded_outlines (id, project_id, scheme_id, status)"
-            " VALUES (?, 'p1', 's1', 'saved')", (rid,))
+            "INSERT INTO uploaded_outlines (id, project_id, scheme_id, status)" " VALUES (?, 'p1', 's1', 'saved')",
+            (rid,),
+        )
         await db_conn.commit()
 
         await sch.delete_scheme(project_id="p1", scheme_id="s1", db=db_conn)
 
-        cur = await db_conn.execute(
-            "SELECT scheme_id, status FROM uploaded_outlines WHERE id=?", (rid,))
+        cur = await db_conn.execute("SELECT scheme_id, status FROM uploaded_outlines WHERE id=?", (rid,))
         row = await cur.fetchone()
         assert row is not None, "上传记录是项目级素材，不得随方案删除"
         assert row["scheme_id"] == "", "悬挂引用必须断开，否则统计/查询指向已删方案"

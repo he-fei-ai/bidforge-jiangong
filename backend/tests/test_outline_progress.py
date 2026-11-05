@@ -15,6 +15,7 @@
     phase_cb 阶段回调与异常隔离
 - OUTLINE_STEPWISE_MIN_WORDS 常量（原为内联魔数 50000）
 """
+
 import json
 import time
 
@@ -77,8 +78,7 @@ class TestOutlineProgress:
         """刚进入某阶段（elapsed=0）时进度等于该阶段的 base。"""
         for ph in ("prepare", "draft", "level1", "review", "fix"):
             st = self._st(ph)
-            assert sh._outline_progress(st) == pytest.approx(
-                sh._OUTLINE_PHASE_MODEL[ph]["base"], abs=1e-6), ph
+            assert sh._outline_progress(st) == pytest.approx(sh._OUTLINE_PHASE_MODEL[ph]["base"], abs=1e-6), ph
 
     def test_phase_fill_capped_at_85_percent(self):
         """阶段内渐近填充封顶 85%，给「阶段完成」留出可见跳变。"""
@@ -92,8 +92,7 @@ class TestOutlineProgress:
 
     def test_fill_is_monotonic_within_phase(self):
         """阶段内进度随耗时单调不减（draft 是最耗时的阶段，必须持续前进）。"""
-        vals = [sh._outline_progress(self._st("draft", elapsed=e))
-                for e in (0, 10, 30, 60, 120, 300)]
+        vals = [sh._outline_progress(self._st("draft", elapsed=e)) for e in (0, 10, 30, 60, 120, 300)]
         assert vals == sorted(vals), vals
         assert vals[0] < vals[-1]
 
@@ -109,8 +108,7 @@ class TestOutlineProgress:
         """当前章 AI 调用期间（最长 180s）进度条仍缓慢前进，且不超过下一格。"""
         st0 = self._st("sublevels", elapsed=0.0, sub_total=10, sub_done=3)
         st1 = self._st("sublevels", elapsed=sh.OUTLINE_CHAPTER_EXPECT, sub_total=10, sub_done=3)
-        st2 = self._st("sublevels", elapsed=sh.OUTLINE_CHAPTER_EXPECT * 100,
-                       sub_total=10, sub_done=3)
+        st2 = self._st("sublevels", elapsed=sh.OUTLINE_CHAPTER_EXPECT * 100, sub_total=10, sub_done=3)
         p0, p1, p2 = (sh._outline_progress(s) for s in (st0, st1, st2))
         assert p0 < p1
         # 封顶后不再增长，且不超过「本章完成」的刻度（done+1）
@@ -129,9 +127,14 @@ class TestOutlineProgress:
         m = sh._OUTLINE_PHASE_MODEL["sublevels"]
         # 第 3 章耗时 200s（远超 OUTLINE_CHAPTER_EXPECT=45）后完成：
         # 生产代码在 sub_done=i+1 的同一时刻把 chapter_started_at 重置为「现在」。
-        st = {"phase": "sublevels", "phase_started_at": now - 200,
-              "chapter_started_at": now, "started_at": now - 200,
-              "sub_total": 10, "sub_done": 3}
+        st = {
+            "phase": "sublevels",
+            "phase_started_at": now - 200,
+            "chapter_started_at": now,
+            "started_at": now - 200,
+            "sub_total": 10,
+            "sub_done": 3,
+        }
         expect = round(m["base"] + m["span"] * (3 / 10), 4)
         assert sh._outline_progress(st) == pytest.approx(expect, abs=1e-4)
 
@@ -139,9 +142,14 @@ class TestOutlineProgress:
         """反向断言：不重置计时基准时会明显过冲 —— 守住这个坑，防止回归。"""
         now = time.monotonic()
         m = sh._OUTLINE_PHASE_MODEL["sublevels"]
-        st = {"phase": "sublevels", "phase_started_at": now - 200,
-              "chapter_started_at": now - 200, "started_at": now - 200,
-              "sub_total": 10, "sub_done": 3}
+        st = {
+            "phase": "sublevels",
+            "phase_started_at": now - 200,
+            "chapter_started_at": now - 200,
+            "started_at": now - 200,
+            "sub_total": 10,
+            "sub_done": 3,
+        }
         correct = m["base"] + m["span"] * (3 / 10)
         assert sh._outline_progress(st) > correct + 0.02
 
@@ -151,11 +159,10 @@ class TestOutlineProgress:
 
     def test_unknown_phase_falls_back_to_prepare(self):
         st = self._st("nonsense")
-        assert sh._outline_progress(st) == pytest.approx(
-            sh._OUTLINE_PHASE_MODEL["prepare"]["base"], abs=1e-6)
+        assert sh._outline_progress(st) == pytest.approx(sh._OUTLINE_PHASE_MODEL["prepare"]["base"], abs=1e-6)
 
     def test_never_exceeds_one(self):
-        st = self._st("fix", elapsed=10 ** 6, sub_total=1, sub_done=1)
+        st = self._st("fix", elapsed=10**6, sub_total=1, sub_done=1)
         assert sh._outline_progress(st) <= 1.0
 
     def test_empty_state_is_safe(self):
@@ -175,16 +182,26 @@ class TestOutlinePhaseLabel:
 class TestSnapshotOutlineStats:
     def _st(self, phase="draft", **kw):
         now = time.monotonic()
-        st = {"phase": phase, "phase_started_at": now, "chapter_started_at": now,
-              "started_at": now - 12.0}
+        st = {"phase": phase, "phase_started_at": now, "chapter_started_at": now, "started_at": now - 12.0}
         st.update(kw)
         return st
 
     def test_field_shape_matches_content_stats(self):
         """字段与正文 _snapshot_stats 同构，前端可复用同一套展示逻辑。"""
         s = sh._snapshot_outline_stats(self._st())
-        for key in ("elapsed_ms", "eta_ms", "done", "total", "failed", "words",
-                    "concurrency", "running", "phase", "phase_label", "progress"):
+        for key in (
+            "elapsed_ms",
+            "eta_ms",
+            "done",
+            "total",
+            "failed",
+            "words",
+            "concurrency",
+            "running",
+            "phase",
+            "phase_label",
+            "progress",
+        ):
             assert key in s, key
         assert s["elapsed_ms"] >= 12000
         assert s["phase"] == "draft"
@@ -203,8 +220,14 @@ class TestSnapshotOutlineStats:
     def test_eta_extrapolates_from_done_chapters(self):
         """分步链路：done>0 时按「已耗时 / 已完成章数」外推剩余章节。"""
         now = time.monotonic()
-        st = {"phase": "sublevels", "phase_started_at": now, "chapter_started_at": now,
-              "started_at": now - 60.0, "sub_total": 10, "sub_done": 2}
+        st = {
+            "phase": "sublevels",
+            "phase_started_at": now,
+            "chapter_started_at": now,
+            "started_at": now - 60.0,
+            "sub_total": 10,
+            "sub_done": 2,
+        }
         s = sh._snapshot_outline_stats(st)
         # 已耗时 60s 完成 2 章 → 剩余 8 章约 240s
         assert 200_000 <= s["eta_ms"] <= 300_000
@@ -212,11 +235,16 @@ class TestSnapshotOutlineStats:
     def test_eta_uses_phase_expect_before_first_chapter(self):
         """首章（done=0）时按当前阶段预期耗时外推本阶段剩余时间。"""
         now = time.monotonic()
-        st = {"phase": "review", "phase_started_at": now, "chapter_started_at": now,
-              "started_at": now, "sub_total": 5, "sub_done": 0}
+        st = {
+            "phase": "review",
+            "phase_started_at": now,
+            "chapter_started_at": now,
+            "started_at": now,
+            "sub_total": 5,
+            "sub_done": 0,
+        }
         s = sh._snapshot_outline_stats(st)
-        assert s["eta_ms"] == pytest.approx(
-            sh._OUTLINE_PHASE_MODEL["review"]["expect"] * 1000, rel=0.1)
+        assert s["eta_ms"] == pytest.approx(sh._OUTLINE_PHASE_MODEL["review"]["expect"] * 1000, rel=0.1)
 
     def test_eta_during_review_uses_stage_remaining(self):
         """✅ 语义变更（2026-09-16）：章节全部完成后进入审核/修复阶段，ETA 不再消失。
@@ -226,24 +254,43 @@ class TestSnapshotOutlineStats:
         还要等多久。现改为：无章节样本时按当前阶段（校准后）预期耗时给阶段剩余。
         """
         now = time.monotonic()
-        st = {"phase": "review", "phase_started_at": now, "chapter_started_at": now,
-              "started_at": now, "sub_total": 5, "sub_done": 5}
+        st = {
+            "phase": "review",
+            "phase_started_at": now,
+            "chapter_started_at": now,
+            "started_at": now,
+            "sub_total": 5,
+            "sub_done": 5,
+        }
         assert sh._snapshot_outline_stats(st)["eta_ms"] == pytest.approx(
-            sh._OUTLINE_PHASE_MODEL["review"]["expect"] * 1000, rel=0.1)
+            sh._OUTLINE_PHASE_MODEL["review"]["expect"] * 1000, rel=0.1
+        )
 
     def test_no_eta_when_stage_time_exhausted(self):
         """阶段耗时已超出预期（无处可估）→ 返回 None，不给出误导性的 0/负值。"""
         now = time.monotonic()
-        st = {"phase": "review", "phase_started_at": now - 10 ** 4,
-              "chapter_started_at": now, "started_at": now - 10 ** 4,
-              "sub_total": 5, "sub_done": 5}
+        st = {
+            "phase": "review",
+            "phase_started_at": now - 10**4,
+            "chapter_started_at": now,
+            "started_at": now - 10**4,
+            "sub_total": 5,
+            "sub_done": 5,
+        }
         assert sh._snapshot_outline_stats(st)["eta_ms"] is None
 
     def test_no_eta_after_progress_complete(self):
         """进度已到 100%（last_p=1.0）→ 无剩余，避免「100% 还要等很久」。"""
         now = time.monotonic()
-        st = {"phase": "fix", "phase_started_at": now, "chapter_started_at": now,
-              "started_at": now, "sub_total": 0, "sub_done": 0, "last_p": 1.0}
+        st = {
+            "phase": "fix",
+            "phase_started_at": now,
+            "chapter_started_at": now,
+            "started_at": now,
+            "sub_total": 0,
+            "sub_done": 0,
+            "last_p": 1.0,
+        }
         assert sh._snapshot_outline_stats(st)["eta_ms"] is None
 
     def test_never_raises_on_bad_input(self):
@@ -256,10 +303,11 @@ class TestSnapshotOutlineStats:
 def _wide_outline(n_children: int, n_roots: int = 1):
     """构造节点总数 = n_roots × (1 + n_children) 的目录。"""
     return [
-        {"title": f"章{r}", "description": "", "children": [
-            {"title": f"节{r}-{c}", "description": "", "children": []}
-            for c in range(n_children)
-        ]}
+        {
+            "title": f"章{r}",
+            "description": "",
+            "children": [{"title": f"节{r}-{c}", "description": "", "children": []} for c in range(n_children)],
+        }
         for r in range(n_roots)
     ]
 
@@ -267,7 +315,7 @@ def _wide_outline(n_children: int, n_roots: int = 1):
 class TestValidateOutlineMaxNodes:
     def test_default_limit_still_500(self):
         """生成链路默认上限保持 500（防止模型无限输出）。"""
-        ol = _wide_outline(600)   # 601 节点
+        ol = _wide_outline(600)  # 601 节点
         assert any("500" in s for s in sh._validate_outline({"outline": ol}, strict_depth=False))
 
     def test_limit_is_configurable(self):
@@ -281,8 +329,8 @@ class TestValidateOutlineMaxNodes:
     def test_fix_validate_fn_accepts_large_full_outline(self):
         """BUG 修复：长方案完整目录（30 章 × 21 节点 = 630）此前会被判非法，
         导致修复结果整份丢弃、"按审核建议修复" 空转。"""
-        big = _wide_outline(20, n_roots=30)     # 630 节点
-        assert sh._outline_validate_fn({"outline": big}) != []      # 生成链路：超限
+        big = _wide_outline(20, n_roots=30)  # 630 节点
+        assert sh._outline_validate_fn({"outline": big}) != []  # 生成链路：超限
         assert sh._outline_fix_validate_fn({"outline": big}) == []  # 修复链路：放行
 
     def test_fix_validate_fn_still_rejects_broken_structure(self):
@@ -333,8 +381,7 @@ class TestReviewSemantics:
         此处显式关闭属**测试范围界定**，不是掩盖缺陷。"""
         monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False)
 
-    async def _run(self, monkeypatch, review_obj, fix_obj=None, phase_cb=None,
-                   phase_cb_raises=False):
+    async def _run(self, monkeypatch, review_obj, fix_obj=None, phase_cb=None, phase_cb_raises=False):
         calls = []
 
         async def fake_collect(messages, validate_fn=None, **kwargs):
@@ -348,22 +395,29 @@ class TestReviewSemantics:
 
         cb = phase_cb
         if phase_cb_raises:
-            def cb(_phase):            # noqa: F811
+
+            def cb(_phase):  # noqa: F811
                 raise RuntimeError("回调炸了")
 
         outline = [{"title": "工程概况", "description": "", "children": []}]
         res = await sh._review_and_fix_outline(
-            outline, "深基坑", True, "摘要", scheme_name="方案",
-            project_facts="", requirements="", phase_cb=cb)
+            outline, "深基坑", True, "摘要", scheme_name="方案", project_facts="", requirements="", phase_cb=cb
+        )
         return res, calls
 
     async def test_missing_passed_with_suggestions_triggers_fix(self, monkeypatch):
         """BUG 修复：旧实现 passed 缺失 → default=True → 一律视为通过，
         审核形同虚设。现在「缺失但给了建议」按不通过处理。"""
-        fixed = {"outline": [{"title": "工程概况", "description": "d", "children": [
-            {"title": "监测方案", "description": "d", "children": []}]}]}
-        (_outline, review), calls = await self._run(
-            monkeypatch, {"suggestions": ["补充监测方案章节"]}, fixed)
+        fixed = {
+            "outline": [
+                {
+                    "title": "工程概况",
+                    "description": "d",
+                    "children": [{"title": "监测方案", "description": "d", "children": []}],
+                }
+            ]
+        }
+        (_outline, review), calls = await self._run(monkeypatch, {"suggestions": ["补充监测方案章节"]}, fixed)
         assert len(calls) == 2, "应触发修复轮"
         assert review["passed"] is True
         # ✅ 语义变更（2026-09-16）：修复成功后**保留**原始审核建议（追加而非覆盖），
@@ -381,8 +435,7 @@ class TestReviewSemantics:
         """BUG 修复：判不通过却没给建议时，旧实现静默跳过修复、
         用户拿到未修正的目录且看不到原因。现注入兜底建议并执行修复。"""
         fixed = {"outline": [{"title": "工程概况", "children": []}]}
-        (_outline, review), calls = await self._run(
-            monkeypatch, {"passed": False}, fixed)
+        (_outline, review), calls = await self._run(monkeypatch, {"passed": False}, fixed)
         assert len(calls) == 2, "应触发修复轮"
         # ✅ 语义变更（2026-09-16）：保留兜底建议 + 修复结论
         assert review["suggestions"][0] == "✅ 已根据审核意见自动修复"
@@ -391,20 +444,21 @@ class TestReviewSemantics:
     async def test_string_false_still_triggers_fix(self, monkeypatch):
         """回归：弱模型把 passed 写成字符串 "false" 仍须判不通过。"""
         fixed = {"outline": [{"title": "工程概况", "children": []}]}
-        (_outline, review), calls = await self._run(
-            monkeypatch, {"passed": "false", "suggestions": "补验收"}, fixed)
+        (_outline, review), calls = await self._run(monkeypatch, {"passed": "false", "suggestions": "补验收"}, fixed)
         assert len(calls) == 2
         assert review["passed"] is True
 
     async def test_review_timeout_skips_and_passes(self, monkeypatch):
         """审核超时 → 跳过审核直接完成（不消耗修复轮）。"""
+
         async def fake_collect(messages, validate_fn=None, **kwargs):
             raise RuntimeError("timeout-ish")
 
         monkeypatch.setattr(sh, "render", lambda *a, **k: "PROMPT")
         monkeypatch.setattr(sh, "collect_json_response", fake_collect)
         _outline, review = await sh._review_and_fix_outline(
-            [{"title": "工程概况", "children": []}], "深基坑", True, "摘要")
+            [{"title": "工程概况", "children": []}], "深基坑", True, "摘要"
+        )
         assert review["passed"] is True
         assert isinstance(review["suggestions"], list)
 
@@ -417,30 +471,27 @@ class TestReviewSemantics:
         """阶段回调顺序：review（审核开始）→ fix（修复开始）。"""
         seen = []
         fixed = {"outline": [{"title": "工程概况", "children": []}]}
-        await self._run(monkeypatch, {"passed": False, "suggestions": ["补验收"]},
-                        fixed, phase_cb=seen.append)
+        await self._run(monkeypatch, {"passed": False, "suggestions": ["补验收"]}, fixed, phase_cb=seen.append)
         assert seen == ["review", "fix"]
 
     async def test_phase_cb_only_review_when_no_fix(self, monkeypatch):
         seen = []
-        await self._run(monkeypatch, {"passed": True, "suggestions": []},
-                        phase_cb=seen.append)
+        await self._run(monkeypatch, {"passed": True, "suggestions": []}, phase_cb=seen.append)
         assert seen == ["review"]
 
     async def test_phase_cb_exception_does_not_break_review(self, monkeypatch):
         """回调异常必须被隔离，绝不能把整次目录生成打成失败。"""
         fixed = {"outline": [{"title": "工程概况", "children": []}]}
         (_outline, review), calls = await self._run(
-            monkeypatch, {"passed": False, "suggestions": ["补验收"]},
-            fixed, phase_cb_raises=True)
+            monkeypatch, {"passed": False, "suggestions": ["补验收"]}, fixed, phase_cb_raises=True
+        )
         assert len(calls) == 2
         assert review["passed"] is True
 
     async def test_fix_uses_relaxed_validator(self, monkeypatch):
         """修复轮必须使用放宽节点上限的校验函数（长方案完整目录 > 500 节点）。"""
-        big_fix = {"outline": _wide_outline(20, n_roots=30)}   # 630 节点
-        (outline, review), calls = await self._run(
-            monkeypatch, {"passed": False, "suggestions": ["补齐"]}, big_fix)
+        big_fix = {"outline": _wide_outline(20, n_roots=30)}  # 630 节点
+        (outline, review), calls = await self._run(monkeypatch, {"passed": False, "suggestions": ["补齐"]}, big_fix)
         assert calls[1] is sh._outline_fix_validate_fn
         assert review["passed"] is True
         assert len(outline) == 30, "修复结果应被接受并落库（旧实现会被判非法丢弃）"
@@ -466,10 +517,11 @@ def test_review_skeleton_balanced_sampling():
     尾部章节的重复/遗漏/错位对审核完全不可见。
     """
     chapters = [
-        {"title": f"章{r}", "description": "", "children": [
-            {"title": f"章{r}-节{c}", "description": "", "children": []}
-            for c in range(20)
-        ]}
+        {
+            "title": f"章{r}",
+            "description": "",
+            "children": [{"title": f"章{r}-节{c}", "description": "", "children": []} for c in range(20)],
+        }
         for r in range(30)
     ]  # 30 × 21 = 630 节点 > 150
     sk = sh._outline_skeleton(chapters)
@@ -482,28 +534,32 @@ def test_review_skeleton_balanced_sampling():
 
 def test_review_skeleton_balanced_reallocates_unused_budget():
     """无子树的前序章应把预算归还总池，让后面有内容的章多分节点。"""
-    chapters = (
-        [{"title": f"空章{i}", "description": "", "children": []} for i in range(20)]
-        + [{"title": f"实章{i}", "description": "", "children": [
-            {"title": f"实章{i}-节{c}", "description": "", "children": []}
-            for c in range(30)
-        ]} for i in range(20)]
-    )  # 20 + 20 × 31 = 640 节点 > 150
+    chapters = [{"title": f"空章{i}", "description": "", "children": []} for i in range(20)] + [
+        {
+            "title": f"实章{i}",
+            "description": "",
+            "children": [{"title": f"实章{i}-节{c}", "description": "", "children": []} for c in range(30)],
+        }
+        for i in range(20)
+    ]  # 20 + 20 × 31 = 640 节点 > 150
     sk = sh._outline_skeleton(chapters)
     assert len(sk) == 40, "所有一级章标题都应保留"
     real = [c for c in sk if c["title"].startswith("实章")]
-    assert all(c.get("children") for c in real), \
-        "前序空章归还的预算应让尾部实章都有子节点被审核"
+    assert all(c.get("children") for c in real), "前序空章归还的预算应让尾部实章都有子节点被审核"
     assert sh._count_nodes(sk) <= 150
 
 
 def test_review_skeleton_small_outline_untouched():
     """未超预算的目录应完整保留（走原全量路径）。"""
     chapters = [
-        {"title": "章1", "description": "说明", "children": [
-            {"title": "1.1", "description": "", "children": []},
-            {"title": "1.2", "description": "", "children": []},
-        ]},
+        {
+            "title": "章1",
+            "description": "说明",
+            "children": [
+                {"title": "1.1", "description": "", "children": []},
+                {"title": "1.2", "description": "", "children": []},
+            ],
+        },
         {"title": "章2", "description": "", "children": []},
     ]
     sk = sh._outline_skeleton(chapters)

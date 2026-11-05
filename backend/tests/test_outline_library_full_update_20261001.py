@@ -15,6 +15,7 @@
    并发重入不产生重复行；
 8. 自动匹配断链修复：类别码→预置中文 type 映射、逗号拆分。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -40,35 +41,59 @@ from app.services.scheme_classification import HAZARD_CATEGORIES
 #: 本次新增的 26 个逐型式模板键（§1 六大类拆分）
 NEW_KEYS = [
     # 脚手架族（9）
-    "scaffold_ground", "scaffold_attached", "scaffold_cantilever",
-    "scaffold_gate", "scaffold_cuplock", "scaffold_disc", "scaffold_gondola",
-    "scaffold_unload_platform", "scaffold_work_platform",
+    "scaffold_ground",
+    "scaffold_attached",
+    "scaffold_cantilever",
+    "scaffold_gate",
+    "scaffold_cuplock",
+    "scaffold_disc",
+    "scaffold_gondola",
+    "scaffold_unload_platform",
+    "scaffold_work_platform",
     # 模板支撑族（2）+ 起重族（2）
-    "formwork_tall", "formwork_disc", "tower_crane", "construction_hoist",
+    "formwork_tall",
+    "formwork_disc",
+    "tower_crane",
+    "construction_hoist",
     # 拆除族（3）
-    "demolition_manual", "demolition_machine", "demolition_blast",
+    "demolition_manual",
+    "demolition_machine",
+    "demolition_blast",
     # 其他危大族（10）
-    "curtain_wall", "steel_structure", "grid_structure", "prestress",
-    "manual_dig_pile", "slope", "underground_excavation", "pipe_jacking",
-    "underwater", "new_tech",
+    "curtain_wall",
+    "steel_structure",
+    "grid_structure",
+    "prestress",
+    "manual_dig_pile",
+    "slope",
+    "underground_excavation",
+    "pipe_jacking",
+    "underwater",
+    "new_tech",
 ]
 
 #: 九大章节标准一级标题（与 builder 产出一致；第 9 章本仓口径为「计算书及相关图纸」）
 NINE_CHAPTERS_TITLES = [
-    "工程概况", "编制依据", "施工计划", "施工工艺技术", "施工安全保证措施",
-    "施工管理及作业人员配备和分工", "验收要求", "应急处置措施", "计算书及相关图纸",
+    "工程概况",
+    "编制依据",
+    "施工计划",
+    "施工工艺技术",
+    "施工安全保证措施",
+    "施工管理及作业人员配备和分工",
+    "验收要求",
+    "应急处置措施",
+    "计算书及相关图纸",
 ]
 
 
 # ---------------------------------------------------------------- 1. 注册表 parity
 
+
 class TestRegistryParity:
     def test_three_tables_parity(self):
         """BUILDERS / TEMPLATE_META / _TEMPLATE_NAMES 键集合必须一致。"""
-        assert set(BUILDERS) == set(TEMPLATE_META), \
-            "存在无 meta 的 builder 或有 meta 无 builder 的死模板"
-        assert set(BUILDERS) == set(_TEMPLATE_NAMES), \
-            "存在无中文名的 builder（列表/下拉将显示异常）"
+        assert set(BUILDERS) == set(TEMPLATE_META), "存在无 meta 的 builder 或有 meta 无 builder 的死模板"
+        assert set(BUILDERS) == set(_TEMPLATE_NAMES), "存在无中文名的 builder（列表/下拉将显示异常）"
 
     def test_rules_targets_all_alive(self):
         """RULES 的目标键必须全部在 BUILDERS 中（防死路由）。"""
@@ -90,6 +115,7 @@ class TestRegistryParity:
 
 # ---------------------------------------------------------------- 2. 九章骨架
 
+
 class TestNineChapterSkeleton:
     @pytest.mark.parametrize("key", NEW_KEYS)
     def test_new_builder_exactly_nine_chapters(self, key):
@@ -108,22 +134,24 @@ class TestNineChapterSkeleton:
         for ch in BUILDERS[key]():
             kids = ch.get("children") or []
             assert kids, f"{key}/{ch['title']} 缺二级目录"
-            assert any(k.get("children") for k in kids), \
-                f"{key}/{ch['title']} 缺三级目录"
+            assert any(k.get("children") for k in kids), f"{key}/{ch['title']} 缺三级目录"
 
     def test_max_depth_three_all_builders(self):
         """全部 builder 深度 ≤3（MAX_OUTLINE_DEPTH=3，前端按三级渲染）。"""
+
         def depth(nodes, d=1):
             m = d
             for n in nodes or []:
                 if n.get("children"):
                     m = max(m, depth(n["children"], d + 1))
             return m
+
         for key, builder in BUILDERS.items():
             assert depth(builder()) <= 3, f"{key} 目录深度超过 3 级"
 
 
 # ---------------------------------------------------------------- 3. builder 无状态
+
 
 class TestBuilderStateless:
     """内建模板库是「每次调用现场构建」的纯函数 —— 本仓目录库无内存缓存层，
@@ -135,8 +163,7 @@ class TestBuilderStateless:
             a, b = builder(), builder()
             assert a is not b and a[0] is not b[0], f"{key} 两次调用共享对象"
             a[0]["title"] = "__MUTATED__"
-            assert builder()[0]["title"] != "__MUTATED__", \
-                f"{key} 返回值被调用间共享（可变状态泄漏）"
+            assert builder()[0]["title"] != "__MUTATED__", f"{key} 返回值被调用间共享（可变状态泄漏）"
 
     def test_build_outline_via_registry(self):
         """build_outline 委托 BUILDERS 且未注册键兜底不抛错。"""
@@ -216,6 +243,7 @@ class TestRouting:
 
 # ---------------------------------------------------------------- 5. 编制依据四层
 
+
 class TestMetaLayers:
     @pytest.mark.parametrize("key", NEW_KEYS)
     def test_basis_four_layers(self, key):
@@ -230,8 +258,9 @@ class TestMetaLayers:
     def test_applicable_and_risk(self, key):
         meta = TEMPLATE_META[key]
         assert meta["applicable"].startswith("适用"), f"{key} 适用条件未以适用范围开头"
-        assert ("不适用" in meta["applicable"] or "论证" in meta["applicable"]
-                or "危大" in meta["applicable"]), f"{key} 缺判定要件"
+        assert (
+            "不适用" in meta["applicable"] or "论证" in meta["applicable"] or "危大" in meta["applicable"]
+        ), f"{key} 缺判定要件"
         assert meta["risk"] in ("危大工程", "超过一定规模危大工程")
 
     def test_get_meta_shape(self):
@@ -241,6 +270,7 @@ class TestMetaLayers:
 
 
 # ---------------------------------------------------------------- 6. seed 清单静态
+
 
 class TestSeedCatalogStatic:
     def test_no_duplicate_scheme_names(self):
@@ -259,9 +289,14 @@ class TestSeedCatalogStatic:
         """§7.1 补齐全部类型：26 个新型式代表名都应在预置清单内
         （兼容探针名中的既有条目除外）。"""
         all_names = {n for v in SCHEME_CATALOG.values() for n in v}
-        legacy_probe = {"落地脚手架专项施工方案", "高大支模专项施工方案",
-                        "超限梁模板支撑专项施工方案", "塔吊安装专项施工方案",
-                        "人货电梯安装与拆卸专项施工方案", "建筑幕墙安装专项施工方案"}
+        legacy_probe = {
+            "落地脚手架专项施工方案",
+            "高大支模专项施工方案",
+            "超限梁模板支撑专项施工方案",
+            "塔吊安装专项施工方案",
+            "人货电梯安装与拆卸专项施工方案",
+            "建筑幕墙安装专项施工方案",
+        }
         for name in ROUTE_PROBES:
             if name in legacy_probe:
                 continue
@@ -270,9 +305,11 @@ class TestSeedCatalogStatic:
 
 # ---------------------------------------------------------------- 7. seed 端到端
 
+
 @pytest.fixture
 def seed_env(monkeypatch, db_conn):
     """把 seed_data 的 init_db/get_conn 重定向到内存测试库。"""
+
     async def _noop_init_db():
         return None
 
@@ -288,8 +325,8 @@ class TestSeedEndToEnd:
     @staticmethod
     async def _count_rows(conn):
         cur = await conn.execute(
-            "SELECT COUNT(*) c, COUNT(DISTINCT name) dn FROM outline_library"
-            " WHERE source='预置清单'")
+            "SELECT COUNT(*) c, COUNT(DISTINCT name) dn FROM outline_library" " WHERE source='预置清单'"
+        )
         r = await cur.fetchone()
         return r["c"], r["dn"]
 
@@ -313,8 +350,8 @@ class TestSeedEndToEnd:
         conn = seed_env
         await seed_data.seed_catalog()
         cur = await conn.execute(
-            "SELECT name, outline_json, version, basis FROM outline_library"
-            " WHERE source='预置清单'")
+            "SELECT name, outline_json, version, basis FROM outline_library" " WHERE source='预置清单'"
+        )
         rows = await cur.fetchall()
         assert rows
         for row in rows:
@@ -328,36 +365,32 @@ class TestSeedEndToEnd:
         await seed_data.seed_catalog()
         # 模拟历史遗留：不在当前清单的旧版本预置条目
         await conn.execute(
-            "INSERT INTO outline_library (id, name, type, version, source,"
-            " outline_json) VALUES (?,?,?,?,?,?)",
-            (uuid.uuid4().hex, "已下线旧条目标准目录", "临时设施", "v1.0",
-             "预置清单", "[]"))
+            "INSERT INTO outline_library (id, name, type, version, source," " outline_json) VALUES (?,?,?,?,?,?)",
+            (uuid.uuid4().hex, "已下线旧条目标准目录", "临时设施", "v1.0", "预置清单", "[]"),
+        )
         await conn.commit()
         r = await seed_data.seed_catalog()
         assert r["removed"] >= 1
-        cur = await conn.execute(
-            "SELECT COUNT(*) c FROM outline_library WHERE name='已下线旧条目标准目录'")
+        cur = await conn.execute("SELECT COUNT(*) c FROM outline_library WHERE name='已下线旧条目标准目录'")
         assert (await cur.fetchone())["c"] == 0
 
     async def test_concurrent_seed_no_duplicates(self, seed_env):
         """并发重入（同进程 gather）经重入锁串行化 → 不产生重复行。"""
         conn = seed_env
-        r_a, r_b = await asyncio.gather(
-            seed_data.seed_catalog(), seed_data.seed_catalog())
+        r_a, r_b = await asyncio.gather(seed_data.seed_catalog(), seed_data.seed_catalog())
         total = sum(len(v) for v in SCHEME_CATALOG.values())
-        assert r_a["inserted"] + r_b["inserted"] == total, \
-            "两路并发各自全量插入 = 重入锁失效"
+        assert r_a["inserted"] + r_b["inserted"] == total, "两路并发各自全量插入 = 重入锁失效"
         c, dn = await self._count_rows(conn)
         assert c == dn == total
 
 
 # ---------------------------------------------------------------- 8. 自动匹配断链
 
+
 class TestCategoryAutoMatch:
     def test_map_covers_six_hazard_categories(self):
         codes = {c["id"] for c in HAZARD_CATEGORIES}
-        assert set(oref.CATEGORY_CODE_TO_SEED_TYPES) == codes, \
-            "类别码映射与六大类权威定义不一致（parity 护栏）"
+        assert set(oref.CATEGORY_CODE_TO_SEED_TYPES) == codes, "类别码映射与六大类权威定义不一致（parity 护栏）"
 
     def test_mapped_types_exist_in_seed_catalog(self):
         cats = set(SCHEME_CATALOG)
@@ -371,10 +404,16 @@ class TestCategoryAutoMatch:
         lid = uuid.uuid4().hex
         outline = [{"title": "工程概况", "description": "d", "children": []}]
         await db_conn.execute(
-            "INSERT INTO outline_library (id, name, type, outline_json,"
-            " review_status, source) VALUES (?,?,?,?,?,?)",
-            (lid, "落地式钢管脚手架专项施工方案标准目录", "脚手架",
-             json.dumps(outline, ensure_ascii=False), "已通过", "预置清单"))
+            "INSERT INTO outline_library (id, name, type, outline_json," " review_status, source) VALUES (?,?,?,?,?,?)",
+            (
+                lid,
+                "落地式钢管脚手架专项施工方案标准目录",
+                "脚手架",
+                json.dumps(outline, ensure_ascii=False),
+                "已通过",
+                "预置清单",
+            ),
+        )
         await db_conn.commit()
         text, hits = await oref.build_category_reference_outline(db_conn, ["scaffold"])
         assert hits == [lid] and "脚手架" in text
@@ -383,13 +422,11 @@ class TestCategoryAutoMatch:
         """多类别码一次传入均命中；原始 type 值（如中文「基坑工程」）向后兼容。"""
         for name, typ in (("A库", "脚手架"), ("B库", "基坑与土方"), ("C库", "基坑工程")):
             await db_conn.execute(
-                "INSERT INTO outline_library (id, name, type, outline_json,"
-                " review_status) VALUES (?,?,?,?,?)",
-                (uuid.uuid4().hex, name, typ,
-                 json.dumps([{"title": "工程概况", "children": []}]), "已通过"))
+                "INSERT INTO outline_library (id, name, type, outline_json," " review_status) VALUES (?,?,?,?,?)",
+                (uuid.uuid4().hex, name, typ, json.dumps([{"title": "工程概况", "children": []}]), "已通过"),
+            )
         await db_conn.commit()
-        _t, hits = await oref.build_category_reference_outline(
-            db_conn, ["scaffold", "foundation_pit"])
+        _t, hits = await oref.build_category_reference_outline(db_conn, ["scaffold", "foundation_pit"])
         assert len(hits) == 2, "多类别应同时命中两型预置库"
         _t, hits = await oref.build_category_reference_outline(db_conn, ["基坑工程"])
         assert len(hits) == 1, "非映射码必须按原始 type 兜底匹配（旧行为）"
@@ -398,8 +435,8 @@ class TestCategoryAutoMatch:
         """源码护栏：bid_analysis 写入的 hazard_category 是逗号连接多码，
         sse_handlers 必须 split(',') 后再传（旧代码整串当单码恒不命中）。"""
         import app.routers.sse_handlers as sh
+
         src = inspect.getsource(sh)
         idx = src.index("scheme_auto_match_outline")
-        seg = src[idx:src.index("bump_ref_count", idx)]
-        assert 'split(",")' in seg, \
-            "hazard_category 逗号拆分丢失：多类别方案将再次恒不命中"
+        seg = src[idx : src.index("bump_ref_count", idx)]
+        assert 'split(",")' in seg, "hazard_category 逗号拆分丢失：多类别方案将再次恒不命中"

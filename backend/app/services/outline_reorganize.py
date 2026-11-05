@@ -14,6 +14,7 @@
   - 识别结果中无法对应到任何标准章节的内容，归入「补充章节」，避免内容丢失；
   - 输出结构与软件生成 / 标准模板完全一致（再经 normalize_outline 三级裁剪即可落库）。
 """
+
 from __future__ import annotations
 
 import copy
@@ -38,61 +39,158 @@ logger = logging.getLogger("outline_reorganize")
 # ---------------------------------------------------------------------------
 CHAPTER_ALIASES: dict[str, list[str]] = {
     "工程概况": [
-        "工程概况", "工程简介", "工程简况", "工程概述", "工程情况", "项目概况",
-        "工程建设概况", "项目简介", "工程基本情况", "工程基本概况", "工程总概况",
-        "工程主要概况", "工程综述", "项目基本情况", "项目概述", "综合概况",
+        "工程概况",
+        "工程简介",
+        "工程简况",
+        "工程概述",
+        "工程情况",
+        "项目概况",
+        "工程建设概况",
+        "项目简介",
+        "工程基本情况",
+        "工程基本概况",
+        "工程总概况",
+        "工程主要概况",
+        "工程综述",
+        "项目基本情况",
+        "项目概述",
+        "综合概况",
         # ✅ BUG 修复（2026-09-16）：下列 4 个别名原写在**重复的 `"工程概况"` 键**
         #    里（同一个 dict 字面量出现两次同名键）—— Python 会静默丢弃前一个定义，
         #    后续维护者在第一处增删别名将完全没有效果。此处合并为唯一一份。
-        "概况", "基本情况", "设计概况", "项目情况",
+        "概况",
+        "基本情况",
+        "设计概况",
+        "项目情况",
     ],
     "编制依据": [
-        "编制依据", "编制说明", "编制原则", "编制根据", "编制基础", "依据",
-        "编制范围", "编制目的",
+        "编制依据",
+        "编制说明",
+        "编制原则",
+        "编制根据",
+        "编制基础",
+        "依据",
+        "编制范围",
+        "编制目的",
     ],
     "施工计划": [
-        "施工计划", "施工部署", "施工安排", "总体施工部署", "施工总体部署",
-        "总体部署", "施工进度计划", "施工进度安排", "进度计划", "进度安排",
-        "施工总体安排", "施工组织", "施工总体筹划",
+        "施工计划",
+        "施工部署",
+        "施工安排",
+        "总体施工部署",
+        "施工总体部署",
+        "总体部署",
+        "施工进度计划",
+        "施工进度安排",
+        "进度计划",
+        "进度安排",
+        "施工总体安排",
+        "施工组织",
+        "施工总体筹划",
     ],
     "施工工艺技术": [
-        "施工工艺技术", "施工工艺", "施工方法", "施工技术方案", "施工技术",
-        "主要施工方法", "施工技术要求", "施工工艺要求", "施工工艺及方法",
-        "施工要点", "工艺流程",
+        "施工工艺技术",
+        "施工工艺",
+        "施工方法",
+        "施工技术方案",
+        "施工技术",
+        "主要施工方法",
+        "施工技术要求",
+        "施工工艺要求",
+        "施工工艺及方法",
+        "施工要点",
+        "工艺流程",
     ],
     "施工安全保证措施": [
-        "施工安全保证措施", "安全保证措施", "安全保障措施", "安全措施",
-        "安全生产保证措施", "施工安全", "安全保证", "安全保障", "安全保证体系",
-        "安全管理措施", "安全施工",
+        "施工安全保证措施",
+        "安全保证措施",
+        "安全保障措施",
+        "安全措施",
+        "安全生产保证措施",
+        "施工安全",
+        "安全保证",
+        "安全保障",
+        "安全保证体系",
+        "安全管理措施",
+        "安全施工",
     ],
     "人员分工": [
-        "人员分工", "人员配备和分工", "施工管理人员", "作业人员配备",
-        "作业人员配备和分工", "劳动力计划", "劳动力安排", "人员配备",
-        "作业人员", "劳动力", "施工人员配置", "人员配置", "人员组织",
-        "施工管理及作业人员", "施工管理人员及作业人员",
+        "人员分工",
+        "人员配备和分工",
+        "施工管理人员",
+        "作业人员配备",
+        "作业人员配备和分工",
+        "劳动力计划",
+        "劳动力安排",
+        "人员配备",
+        "作业人员",
+        "劳动力",
+        "施工人员配置",
+        "人员配置",
+        "人员组织",
+        "施工管理及作业人员",
+        "施工管理人员及作业人员",
     ],
     "验收要求": [
-        "验收要求", "质量验收", "验收标准", "检查验收", "验收", "质量验收要求",
-        "质量要求与验收", "质量验收标准", "验收标准及方法",
+        "验收要求",
+        "质量验收",
+        "验收标准",
+        "检查验收",
+        "验收",
+        "质量验收要求",
+        "质量要求与验收",
+        "质量验收标准",
+        "验收标准及方法",
     ],
     "应急处置措施": [
-        "应急处置措施", "应急预案", "应急救援", "应急响应", "事故应急处置",
-        "应急", "突发", "应急准备与响应", "应急保障措施", "事故应急处理",
+        "应急处置措施",
+        "应急预案",
+        "应急救援",
+        "应急响应",
+        "事故应急处置",
+        "应急",
+        "突发",
+        "应急准备与响应",
+        "应急保障措施",
+        "事故应急处理",
     ],
     "计算书及相关图纸": [
-        "计算书", "计算书及图纸", "计算书与相关图纸", "计算", "相关图纸",
-        "施工图纸", "附图", "计算书及附图", "设计计算",
+        "计算书",
+        "计算书及图纸",
+        "计算书与相关图纸",
+        "计算",
+        "相关图纸",
+        "施工图纸",
+        "附图",
+        "计算书及附图",
+        "设计计算",
     ],
     "监测方案": [
-        "监测方案", "施工监测", "监测", "监控量测", "监测监控",
-        "变形监测", "施工监测方案", "监测与监控",
+        "监测方案",
+        "施工监测",
+        "监测",
+        "监控量测",
+        "监测监控",
+        "变形监测",
+        "施工监测方案",
+        "监测与监控",
     ],
     "绿色施工": [
-        "绿色施工", "环境保护", "环保", "节能减排", "绿色施工与环境保护",
+        "绿色施工",
+        "环境保护",
+        "环保",
+        "节能减排",
+        "绿色施工与环境保护",
     ],
     "质量保证": [
-        "质量保证", "质量目标", "质量计划", "质量控制", "质量措施", "质量保证措施",
-        "创优", "质量通病",
+        "质量保证",
+        "质量目标",
+        "质量计划",
+        "质量控制",
+        "质量措施",
+        "质量保证措施",
+        "创优",
+        "质量通病",
     ],
 }
 
@@ -174,7 +272,7 @@ def _bigrams(s: str) -> set[str]:
     s = re.sub(r"\s+", "", s or "")
     if len(s) <= 1:
         return {s}
-    return {s[i:i + 2] for i in range(len(s) - 1)}
+    return {s[i : i + 2] for i in range(len(s) - 1)}
 
 
 def _title_sim(a: str, b: str) -> float:
@@ -186,8 +284,9 @@ def _title_sim(a: str, b: str) -> float:
     return inter / len(sa | sb)
 
 
-def _match_node(std_title: str, candidates: list[dict], used: set[int],
-                 min_score: float = 0.34) -> tuple[dict | None, float]:
+def _match_node(
+    std_title: str, candidates: list[dict], used: set[int], min_score: float = 0.34
+) -> tuple[dict | None, float]:
     """在 candidates 中为某个标准章节挑选最匹配的真实章节。
 
     命中规则（优先级）：
@@ -219,8 +318,7 @@ def _match_node(std_title: str, candidates: list[dict], used: set[int],
     return None, best_score
 
 
-def _mk_node(title: str, desc: str = "", children: list | None = None,
-             rec_desc: str = "") -> dict:
+def _mk_node(title: str, desc: str = "", children: list | None = None, rec_desc: str = "") -> dict:
     """构造标准节点：标准 description 为主，识别出的真实说明追加其后（不覆盖）"""
     d = (desc or "").strip()
     rd = (rec_desc or "").strip()
@@ -272,8 +370,7 @@ def _with_loose(desc: str, loose: list[str]) -> str:
     return f"{desc}（含：{merged}）" if desc else f"含：{merged}"
 
 
-def _reorg_children(recognized_children: list, std_children: list,
-                    used: set[int], depth: int) -> list:
+def _reorg_children(recognized_children: list, std_children: list, used: set[int], depth: int) -> list:
     """把真实子章节归位到标准子章节之下（递归，输出 <=MAX_OUTLINE_DEPTH 级）
 
     ✅ BUG 修复（2026-09-16）：旧实现只在**标准骨架存在对应子章节**时才保留
@@ -292,16 +389,16 @@ def _reorg_children(recognized_children: list, std_children: list,
             kids = _reorg_children(m.get("children", []), sc.get("children", []), used, depth + 1)
             # 归位完成后仍未消费的真实子章节 → 标题并入描述（宁并入，不丢弃）
             loose = _loose_titles(m.get("children", []), used)
-            out.append(_mk_node(sc["title"], _with_loose(sc.get("description", ""), loose),
-                                kids, m.get("description", "")))
+            out.append(
+                _mk_node(sc["title"], _with_loose(sc.get("description", ""), loose), kids, m.get("description", ""))
+            )
         else:
             # 标准子章节未匹配到真实章节：保留标准骨架
             out.append(_mk_node(sc["title"], sc.get("description", ""), _clone(sc.get("children", []))))
     return out
 
 
-def reorganize_to_standard(recognized: list, scheme_name: str,
-                           preserve_unmatched: bool = True) -> dict:
+def reorganize_to_standard(recognized: list, scheme_name: str, preserve_unmatched: bool = True) -> dict:
     """把识别出的目录整理成与软件生成标准相同的结构。
 
     Args:
@@ -337,8 +434,9 @@ def reorganize_to_standard(recognized: list, scheme_name: str,
             # ✅ 兜底（2026-09-16）：该章下未被归位的真实子章节，标题并入描述，
             #    避免"标准骨架没有对应分支"时用户内容静默丢失
             loose = _loose_titles(m.get("children", []), used)
-            out.append(_mk_node(sc["title"], _with_loose(sc.get("description", ""), loose),
-                                kids, m.get("description", "")))
+            out.append(
+                _mk_node(sc["title"], _with_loose(sc.get("description", ""), loose), kids, m.get("description", ""))
+            )
         else:
             report["kept_standard_skeleton"] += 1
             out.append(_mk_node(sc["title"], sc.get("description", ""), _clone(sc.get("children", []))))
@@ -351,15 +449,14 @@ def reorganize_to_standard(recognized: list, scheme_name: str,
             host, score = _match_node(ex.get("title") or "", out, set())
             if host and score >= 0.34:
                 host["children"].append(
-                    _mk_node(ex["title"], "", _clone(ex.get("children", [])), ex.get("description", "")))
+                    _mk_node(ex["title"], "", _clone(ex.get("children", [])), ex.get("description", ""))
+                )
             else:
-                appendix.append(
-                    _mk_node(ex["title"], ex.get("description", ""), _clone(ex.get("children", []))))
+                appendix.append(_mk_node(ex["title"], ex.get("description", ""), _clone(ex.get("children", []))))
         if appendix:
-            out.append(_mk_node(
-                "补充章节（导入补充）",
-                "导入文档中未对应到标准章节的其它内容，已保留以免丢失",
-                appendix))
+            out.append(
+                _mk_node("补充章节（导入补充）", "导入文档中未对应到标准章节的其它内容，已保留以免丢失", appendix)
+            )
             report["appended_extras"] = len(appendix)
 
     return {"outline": out, "report": report, "template": template_key}

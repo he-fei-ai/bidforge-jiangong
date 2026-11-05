@@ -3,6 +3,7 @@
 HeadingNumberingGenerator：静态方法版，支持七级标题编号生成、反向检测、内容规范化。
 依赖 heading_templates 中的共享常量与模板系统。
 """
+
 from __future__ import annotations
 
 import re
@@ -44,10 +45,7 @@ class HeadingNumberingGenerator:
         if level == 5:
             # ✅ 2026-09-23 对齐：L5 由旧「（X）」改为十进制 X.X.X.X
             #    （与 V2 / HEADING_STYLE_CONFIG / 前端树一致），format_heading 补顿号。
-            return (
-                f"{counters[1] or 1}.{counters[2] or 1}."
-                f"{counters[3] or 1}.{counters[4] or 1}"
-            )
+            return f"{counters[1] or 1}.{counters[2] or 1}." f"{counters[3] or 1}.{counters[4] or 1}"
         return ""
 
     @classmethod

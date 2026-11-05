@@ -32,10 +32,9 @@ function mkTask(over: Record<string, any> = {}) {
 
 describe("findRecentOutlineTaskImpl（超时后按方案检索可重挂任务）", () => {
   it("命中：最近的 running 目录任务返回其 id", async () => {
-    const got = await findRecentOutlineTaskImpl(
-      async () => ({ tasks: [mkTask()] }),
-      { nowMs: NOW },
-    );
+    const got = await findRecentOutlineTaskImpl(async () => ({ tasks: [mkTask()] }), {
+      nowMs: NOW,
+    });
     expect(got).toBe("t1");
   });
 
@@ -54,10 +53,9 @@ describe("findRecentOutlineTaskImpl（超时后按方案检索可重挂任务）
 
   it("终态任务不重挂", async () => {
     for (const status of ["completed", "failed", "stopped"]) {
-      const got = await findRecentOutlineTaskImpl(
-        async () => ({ tasks: [mkTask({ status })] }),
-        { nowMs: NOW },
-      );
+      const got = await findRecentOutlineTaskImpl(async () => ({ tasks: [mkTask({ status })] }), {
+        nowMs: NOW,
+      });
       expect(got, `status=${status} 不应重挂`).toBeNull();
     }
   });
@@ -89,10 +87,7 @@ describe("findRecentOutlineTaskImpl（超时后按方案检索可重挂任务）
   it("多条任务时按列表顺序取第一条可重挂者（后端按 created_at DESC 排序）", async () => {
     const got = await findRecentOutlineTaskImpl(
       async () => ({
-        tasks: [
-          mkTask({ id: "new", status: "failed" }),
-          mkTask({ id: "old" }),
-        ],
+        tasks: [mkTask({ id: "new", status: "failed" }), mkTask({ id: "old" })],
       }),
       { nowMs: NOW },
     );

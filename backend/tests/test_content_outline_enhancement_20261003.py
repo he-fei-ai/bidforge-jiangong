@@ -16,9 +16,11 @@ P0-2  同一份要素清单注入**目录生成**提示词（正文只按目录�
 判据纪律：本文件只做「行为断言 + 判据同源断言」，**不锁正则字面量**
 （见 AGENTS.md §4.28 关于 `周边`/`月末` 刻意不收的取舍）。
 """
+
 from __future__ import annotations
 
 import io
+import re
 from pathlib import Path
 
 import pytest
@@ -41,15 +43,26 @@ def _src(rel: str) -> str:
 # ---------------------------------------------------------------------------
 #: 旧判据（content_checkpoint 自带副本）**收不到**的形态 —— 本轮收敛后必须全部检出
 NEWLY_DETECTABLE = [
-    "【待完善】", "【待确定】", "【待补录】", "【待补】",
-    "【略】", "【】",
-    "[待完善]", "[待确定]", "[待确认]", "[待补录]",
-    "[待定]", "[数值]", "[参数]", "[TBD]", "[]",
-    "TBD", "N/A",
+    "【待完善】",
+    "【待确定】",
+    "【待补录】",
+    "【待补】",
+    "【略】",
+    "【】",
+    "[待完善]",
+    "[待确定]",
+    "[待确认]",
+    "[待补录]",
+    "[待定]",
+    "[数值]",
+    "[参数]",
+    "[TBD]",
+    "[]",
+    "TBD",
+    "N/A",
 ]
 #: 旧判据**本就能收**的形态（不得回退）
-LEGACY_FORMS = ["【待补充：宽度】", "【待补充】", "【待填写】",
-                "【待定】", "【待确认】", "[待补充]", "××"]
+LEGACY_FORMS = ["【待补充：宽度】", "【待补充】", "【待填写】", "【待定】", "【待确认】", "[待补充]", "××"]
 #: 「只报不改」形态（上下文不明，自动改写会误伤正常正文）
 NON_REWRITABLE_FORMS = ["××", "TBD", "N/A"]
 
@@ -59,8 +72,7 @@ def _assert_detected(form: str) -> None:
     hits = cf.scan_placeholder_marks(text)
     assert hits, f"检测侧漏检占位标记 {form!r}"
     findings = cc.checkpoint_selfcheck(text, chapter_key="")
-    assert any(f["rule_id"] == "CON-04" for f in findings), (
-        f"自检侧漏报占位标记 {form!r}（与检测侧口径不一致）")
+    assert any(f["rule_id"] == "CON-04" for f in findings), f"自检侧漏报占位标记 {form!r}（与检测侧口径不一致）"
 
 
 # ===========================================================================
@@ -88,9 +100,8 @@ class TestPlaceholderCriteriaSingleSource:
         nrm = cf.placeholder_nonrewritable_patterns()
         assert rw and nrm, "两个子集都不应为空"
         all_pats = [rx.pattern for rx, _k, _w in cf.PLACEHOLDER_MARK_PATTERNS]
-        part_pats = ([rx.pattern for rx in rw] + [rx.pattern for rx in nrm])
-        assert sorted(all_pats) == sorted(part_pats), (
-            "两个子集合并后必须与全表多重集合相等，否则收敛判据后丢形态/重复")
+        part_pats = [rx.pattern for rx in rw] + [rx.pattern for rx in nrm]
+        assert sorted(all_pats) == sorted(part_pats), "两个子集合并后必须与全表多重集合相等，否则收敛判据后丢形态/重复"
         assert not (set(rw) & set(nrm)), "可改写与只报不改不得有交集"
         assert sum(1 for _r, _k, w in cf.PLACEHOLDER_MARK_PATTERNS if w) == len(rw)
 
@@ -99,7 +110,8 @@ class TestPlaceholderCriteriaSingleSource:
         expect = [rx for rx, _k, _w in cf.PLACEHOLDER_MARK_PATTERNS]
         assert list(cc._PLACEHOLDER_RES) == expect, (
             "content_checkpoint._PLACEHOLDER_RES 必须由 PLACEHOLDER_MARK_PATTERNS "
-            "派生；若此处自带副本，分叉会重新出现")
+            "派生；若此处自带副本，分叉会重新出现"
+        )
 
     def test_no_local_placeholder_regex_copy_in_checkpoint(self):
         """content_checkpoint 不得再自带「【待补充/待确认/待定】」字面量正则。
@@ -109,16 +121,14 @@ class TestPlaceholderCriteriaSingleSource:
         不用纯文本匹配整文件（注释与文档字符串里必然提到这些字样）。
         """
         src = _src("services/content_checkpoint.py")
-        needle = "tuple(\n    rx for rx, _kind, _rw in PLACEHOLDER_MARK_PATTERNS\n)"
-        assert needle in src, (
-            "_PLACEHOLDER_RES 必须是 PLACEHOLDER_MARK_PATTERNS 的推导式派生；"
-            "改回手写正则列表 = 判据重新分叉")
+        assert re.search(r"tuple\(\s*rx for rx, _kind, _rw in PLACEHOLDER_MARK_PATTERNS\s*\)", src), (
+            "_PLACEHOLDER_RES 必须是 PLACEHOLDER_MARK_PATTERNS 的推导式派生；" "改回手写正则列表 = 判据重新分叉"
+        )
         # 反面：旧的窄口径字面量不得出现在任何 re.compile 参数里
         import re as _re
-        for m in _re.finditer(r"re\.compile\((.{0,200}?)\)\s*(?:\n|#)", src,
-                              flags=_re.S):
-            assert "待确认" not in m.group(1), (
-                f"content_checkpoint 内出现自带占位正则副本: {m.group(0)[:60]}")
+
+        for m in _re.finditer(r"re\.compile\((.{0,200}?)\)\s*(?:\n|#)", src, flags=_re.S):
+            assert "待确认" not in m.group(1), f"content_checkpoint 内出现自带占位正则副本: {m.group(0)[:60]}"
 
     def test_legacy_forms_still_detected(self):
         """收敛判据不得导致旧形态漏检（回归护栏）。"""
@@ -135,10 +145,8 @@ class TestPlaceholderCriteriaSingleSource:
         for form in NEWLY_DETECTABLE + LEGACY_FORMS:
             text = f"某节施工说明。{form}。后续按现场情况组织。"
             scan_hit = bool(cf.scan_placeholder_marks(text))
-            self_hit = any(f["rule_id"] == "CON-04"
-                           for f in cc.checkpoint_selfcheck(text))
-            assert scan_hit == self_hit, (
-                f"占位标记判据分叉：{form!r} 检测侧={scan_hit} 自检侧={self_hit}")
+            self_hit = any(f["rule_id"] == "CON-04" for f in cc.checkpoint_selfcheck(text))
+            assert scan_hit == self_hit, f"占位标记判据分叉：{form!r} 检测侧={scan_hit} 自检侧={self_hit}"
 
 
 # ===========================================================================
@@ -148,12 +156,22 @@ class TestRewritePlaceholderMarks:
     """改写侧共用同一份正则表：可改写子集改写、只报不改子集报 pending。"""
 
     def test_rewrites_all_rewritable_forms(self):
-        for form in ["【待补充：宽度】", "【待补充】", "【待定】",
-                     "【待完善】", "【待补录】", "【待确定】", "【略】",
-                     "【】", "[待补充]", "[待定]", "[数值]", "[TBD]"]:
+        for form in [
+            "【待补充：宽度】",
+            "【待补充】",
+            "【待定】",
+            "【待完善】",
+            "【待补录】",
+            "【待确定】",
+            "【略】",
+            "【】",
+            "[待补充]",
+            "[待定]",
+            "[数值]",
+            "[TBD]",
+        ]:
             new_text, fixes = cc.rewrite_placeholder_marks(f"此处{form}。")
-            assert "【" not in new_text and "[" not in new_text, (
-                f"改写后仍残留括号占位标记：{form!r} → {new_text!r}")
+            assert "【" not in new_text and "[" not in new_text, f"改写后仍残留括号占位标记：{form!r} → {new_text!r}"
             fixed = [f for f in fixes if f.get("fixable") and f.get("fixed")]
             assert fixed, f"可改写形态 {form!r} 未产生 fixable 记录"
 
@@ -162,19 +180,16 @@ class TestRewritePlaceholderMarks:
         for form in NON_REWRITABLE_FORMS:
             original = f"此处{form}。"
             new_text, fixes = cc.rewrite_placeholder_marks(original)
-            assert new_text == original, (
-                f"只报不改形态 {form!r} 不应被改写：{new_text!r}")
+            assert new_text == original, f"只报不改形态 {form!r} 不应被改写：{new_text!r}"
             pending = [f for f in fixes if not f.get("fixable")]
             assert pending, f"只报不改形态 {form!r} 未报出 pending 记录"
 
     def test_idempotent(self):
-        text = ("深度【待定】m、宽度【待补充：宽度】mm、堆放区面积"
-                "【待补充：堆放区面积】平方米，另有【待完善】项。")
+        text = "深度【待定】m、宽度【待补充：宽度】mm、堆放区面积" "【待补充：堆放区面积】平方米，另有【待完善】项。"
         once, _ = cc.rewrite_placeholder_marks(text)
         twice, fixes2 = cc.rewrite_placeholder_marks(once)
         assert twice == once, "改写不幂等（第二次调用仍改动正文）"
-        assert not [f for f in fixes2 if f.get("fixable")], (
-            "第二次改写不得再产出 fixable 记录")
+        assert not [f for f in fixes2 if f.get("fixable")], "第二次改写不得再产出 fixable 记录"
 
     def test_adjacent_marks_not_swallowed(self):
         """回归护栏：相邻两个占位标记不得被当成一个（会吞掉中间正常正文）。"""
@@ -182,20 +197,19 @@ class TestRewritePlaceholderMarks:
         hits = cf.scan_placeholder_marks(text)
         assert len(hits) == 2, f"相邻占位标记应检出 2 处，实际 {len(hits)}"
         new_text, _ = cc.rewrite_placeholder_marks(text)
-        assert "宽度" in new_text, (
-            f"中间正常正文被吞掉：{new_text!r}")
+        assert "宽度" in new_text, f"中间正常正文被吞掉：{new_text!r}"
 
     def test_trailing_unit_preserved(self):
         """改写后紧随的单位收进括号注记，不遗留孤立单位。"""
-        for text, unit in [("面积【待补充：面积】平方米", "平方米"),
-                           ("每周清运不少于【待补充：频次】次", "次"),
-                           ("深度【待定】m", "m"),
-                           ("高度【待定】米", "米")]:
+        for text, unit in [
+            ("面积【待补充：面积】平方米", "平方米"),
+            ("每周清运不少于【待补充：频次】次", "次"),
+            ("深度【待定】m", "m"),
+            ("高度【待定】米", "米"),
+        ]:
             new_text, _ = cc.rewrite_placeholder_marks(text)
-            assert unit in new_text, (
-                f"单位 {unit!r} 未保留：{new_text!r}")
-            assert f"确定{unit}" not in new_text, (
-                f"遗留孤立单位（未收进括号注记）：{new_text!r}")
+            assert unit in new_text, f"单位 {unit!r} 未保留：{new_text!r}"
+            assert f"确定{unit}" not in new_text, f"遗留孤立单位（未收进括号注记）：{new_text!r}"
 
     def test_cix_ri_word_not_absorbed_as_unit(self):
         """`次` 不得被吸收进「次日」（next day）—— 这是刻意的守卫取舍。"""
@@ -205,7 +219,7 @@ class TestRewritePlaceholderMarks:
         assert "（次）" not in new_text, f"误把「次日」的「次」当单位：{new_text!r}"
 
     def test_fence_blocks_untouched(self):
-        fenced = "前文。\n```json\n{\"k\": \"【待补充：x】\"}\n```\n后文【待定】。"
+        fenced = '前文。\n```json\n{"k": "【待补充：x】"}\n```\n后文【待定】。'
         new_text, fixes = cc.rewrite_placeholder_marks(fenced)
         assert "【待补充：x】" in new_text, "围栏代码块内的占位标记不得改写"
         assert "【待定】" not in new_text, "围栏外的占位标记应正常改写"
@@ -231,6 +245,7 @@ class TestChapterRequiredElements:
         ``NINE_CHAPTERS.base_fields``（后者还被字段覆盖率校验消费）。
         """
         from app.services.scheme_classification import required_fields_for_chapter
+
         for ch in NINE_CHAPTERS:
             key = ch["key"]
             if key == "emergency":
@@ -239,29 +254,28 @@ class TestChapterRequiredElements:
                 # R52（2026-10-07）：base_fields 尾部追加了「响应时限」
                 # （一致性主题键对齐），切片与长度断言改为**动态**，
                 # 杜绝「写死元素个数」的锚点在要素扩充时误红。
-                assert elems[:len(base)] == base, (
-                    "emergency 章前 N 项必须仍是原 base_fields")
-                assert len(elems) == len(base) + 1 and "事故类型分组" in elems[-1], (
-                    "F6 开启时应在 base_fields 之后追加 1 条分组结构要素")
-                assert required_fields_for_chapter(key) == list(ch["base_fields"]), (
-                    "校验层口径不得被 F6 注入污染")
+                assert elems[: len(base)] == base, "emergency 章前 N 项必须仍是原 base_fields"
+                assert (
+                    len(elems) == len(base) + 1 and "事故类型分组" in elems[-1]
+                ), "F6 开启时应在 base_fields 之后追加 1 条分组结构要素"
+                assert required_fields_for_chapter(key) == list(ch["base_fields"]), "校验层口径不得被 F6 注入污染"
                 continue
             assert cc.chapter_required_elements(key) == required_fields_for_chapter(key)
-            assert cc.chapter_required_elements(key) == list(ch["base_fields"]), (
-                f"章节 {key} 的要素清单应与 base_fields 完全一致")
+            assert cc.chapter_required_elements(key) == list(
+                ch["base_fields"]
+            ), f"章节 {key} 的要素清单应与 base_fields 完全一致"
 
     def test_category_fields_appended_in_order(self):
         """命中危大类别时：base_fields 在前、类别追加在后。"""
         base = cc.chapter_required_elements("overview")
         with_cat = cc.chapter_required_elements("overview", "深基坑支护与降水工程")
         assert len(with_cat) > len(base), "危大类别未追加专属要素"
-        assert with_cat[:len(base)] == base, "追加不得改动 base_fields 顺序"
-        assert with_cat[len(base):], "危大类别追加要素为空"
+        assert with_cat[: len(base)] == base, "追加不得改动 base_fields 顺序"
+        assert with_cat[len(base) :], "危大类别追加要素为空"
         assert len(with_cat) == len(set(with_cat)), "合并后出现重复要素"
 
     def test_dedup_when_multiple_categories_share_field(self):
-        elements = cc.chapter_required_elements(
-            "overview", "深基坑支护与降水工程专项施工方案")
+        elements = cc.chapter_required_elements("overview", "深基坑支护与降水工程专项施工方案")
         assert elements and len(elements) == len(set(elements))
 
     def test_unknown_or_empty_key_returns_empty(self):
@@ -287,17 +301,14 @@ class TestChapterElementBlockInjection:
         assert "严禁留占位标记" in blk, "必须重申「不留占位标记」红线"
 
     def test_switch_off_returns_empty_string(self):
-        assert cc.build_chapter_element_block(
-            "safety", "某深基坑工程", include_elements=False) == ""
+        assert cc.build_chapter_element_block("safety", "某深基坑工程", include_elements=False) == ""
 
     def test_unknown_chapter_returns_empty(self):
         assert cc.build_chapter_element_block("no_such_chapter") == ""
 
     def test_checkpoint_block_appends_elements_when_enabled(self):
-        on = cc.build_chapter_checkpoint_block(
-            "safety", scheme_name="某深基坑工程", include_elements=True)
-        off = cc.build_chapter_checkpoint_block(
-            "safety", scheme_name="某深基坑工程", include_elements=False)
+        on = cc.build_chapter_checkpoint_block("safety", scheme_name="某深基坑工程", include_elements=True)
+        off = cc.build_chapter_checkpoint_block("safety", scheme_name="某深基坑工程", include_elements=False)
         assert "本章必含要素清单" in on, "开关打开时未追加要素清单"
         assert "本章必含要素清单" not in off, "开关关闭时仍追加要素清单"
         assert len(on) > len(off)
@@ -311,10 +322,8 @@ class TestChapterElementBlockInjection:
 
     def test_hazard_only_requirement_unaffected_by_elements(self):
         """要素追加不得改变 hazard_only 要求（STD-04）的门控行为。"""
-        non_hazard = cc.build_chapter_checkpoint_block(
-            "basis", is_hazardous=False, include_elements=False)
-        hazard = cc.build_chapter_checkpoint_block(
-            "basis", is_hazardous=True, include_elements=False)
+        non_hazard = cc.build_chapter_checkpoint_block("basis", is_hazardous=False, include_elements=False)
+        hazard = cc.build_chapter_checkpoint_block("basis", is_hazardous=True, include_elements=False)
         assert "STD-04" not in non_hazard
         assert "STD-04" in hazard
 
@@ -322,12 +331,10 @@ class TestChapterElementBlockInjection:
         """正文链路必须把开关与方案名透传给要素追加（否则增强永不生效）。"""
         src = _src("routers/sse_handlers.py")
         assert "content_chapter_elements_inject" in src, "正文链路未读取要素注入开关"
-        call_site = src[src.find("build_chapter_checkpoint_block("):]
+        call_site = src[src.find("build_chapter_checkpoint_block(") :]
         assert call_site, "正文链路未调用 build_chapter_checkpoint_block"
-        assert "include_elements=" in call_site[:1200], (
-            "build_chapter_checkpoint_block 调用点未透传 include_elements")
-        assert "scheme_name=" in call_site[:1200], (
-            "build_chapter_checkpoint_block 调用点未透传 scheme_name")
+        assert "include_elements=" in call_site[:1200], "build_chapter_checkpoint_block 调用点未透传 include_elements"
+        assert "scheme_name=" in call_site[:1200], "build_chapter_checkpoint_block 调用点未透传 scheme_name"
 
 
 # ===========================================================================
@@ -345,25 +352,24 @@ class TestOutlineElementBlock:
     def test_elements_come_from_same_source(self):
         """目录侧与正文侧必须取同一份要素清单（防止两侧清单分叉）。"""
         from app.services.scheme_classification import required_fields_for_chapter
+
         blk = ocp.build_outline_element_block("")
         for ch in NINE_CHAPTERS:
             fields = required_fields_for_chapter(ch["key"])
             assert fields, f"章节 {ch['key']} 无 base_fields"
             for field in fields:
-                assert field in blk, (
-                    f"目录侧未列出 {ch['title']} 的要素 {field}")
+                assert field in blk, f"目录侧未列出 {ch['title']} 的要素 {field}"
 
     def test_switch_off_returns_empty_string(self):
-        assert ocp.build_outline_element_block(
-            "某深基坑工程", include_elements=False) == ""
+        assert ocp.build_outline_element_block("某深基坑工程", include_elements=False) == ""
 
     def test_outline_checkpoint_kwargs_appends_elements(self, monkeypatch):
         from app.routers import sse_handlers as sh
+
         kwargs_on = sh._outline_checkpoint_kwargs(scheme_name="某深基坑工程")
         assert kwargs_on, "开关默认开启时应注入 outline_checkpoint_block"
         assert "九大章节必含要素" in kwargs_on["outline_checkpoint_block"]
-        monkeypatch.setattr(sh.settings, "content_chapter_elements_inject",
-                            False, raising=False)
+        monkeypatch.setattr(sh.settings, "content_chapter_elements_inject", False, raising=False)
         kwargs_off = sh._outline_checkpoint_kwargs(scheme_name="某深基坑工程")
         assert kwargs_off, "要素开关关闭不应连带关掉检查点块"
         assert "九大章节必含要素" not in kwargs_off["outline_checkpoint_block"]
@@ -371,15 +377,14 @@ class TestOutlineElementBlock:
     def test_outline_checkpoint_kwargs_master_switch_off(self, monkeypatch):
         """旧总开关关闭时整段不注入（既有向后兼容契约）。"""
         from app.routers import sse_handlers as sh
-        monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False,
-                            raising=False)
+
+        monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False, raising=False)
         assert sh._outline_checkpoint_kwargs(scheme_name="某深基坑工程") == {}
 
     def test_outline_template_has_checkpoint_placeholder(self):
         """目录模板必须存在 {outline_checkpoint_block} 占位符（唯一接线锚点）。"""
         src = _src("services/ai/prompts/outline.py")
-        assert "{outline_checkpoint_block}" in src, (
-            "目录模板缺 {outline_checkpoint_block} 占位符，注入无处落地")
+        assert "{outline_checkpoint_block}" in src, "目录模板缺 {outline_checkpoint_block} 占位符，注入无处落地"
 
     def test_standards_text_injected_into_both_prompts(self):
         """P1-2 接线：目录模板与正文模板都须有 {standards_text} 占位符。"""
@@ -407,8 +412,7 @@ class TestRegulationsFlow:
             assert reg in txt, f"法规 {reg} 未进入生成提示词文本"
 
     def test_include_regulations_false_excludes_all(self):
-        txt = sr.get_standards_text(
-            scheme_name="某深基坑工程", include_regulations=False)
+        txt = sr.get_standards_text(scheme_name="某深基坑工程", include_regulations=False)
         for reg in sr.REGULATIONS:
             assert reg not in txt, f"开关关闭后仍出现法规 {reg}"
 
@@ -421,13 +425,8 @@ class TestRegulationsFlow:
             lines = [l for l in txt.splitlines() if doc in l]
             assert lines, f"文号 {doc} 未出现在提示词中"
             tail = lines[0].split(doc)[-1]
-            assert "（" not in tail and "(" not in tail, (
-                f"文号后不应追加带括号的说明：{lines[0]}")
+            assert "（" not in tail and "(" not in tail, f"文号后不应追加带括号的说明：{lines[0]}"
 
     def test_stale_reference_comments_removed(self):
         """facts_extractor 不得再声称「正文侧按三级策略标注【待补充】」。"""
-        assert "三级策略标注" not in _src("services/facts_extractor.py"), (
-            "残留过期的占位策略描述")
-
-
-
+        assert "三级策略标注" not in _src("services/facts_extractor.py"), "残留过期的占位策略描述"

@@ -7,6 +7,7 @@
 
 原有 import 路径 `from app.services.ai.heading_standard import ...` 继续有效。
 """
+
 from app.services.ai.heading_templates import (
     ALPHABET,
     CHINESE_NUMBERS,

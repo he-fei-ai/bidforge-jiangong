@@ -59,27 +59,31 @@ def _apply_prompt_context_budget(text: str) -> str:
 
 
 def _guard_external_material(text: str) -> str:
-    """对外部资料段落加"只读数据"围栏并做凭据脱敏（prompt_injection_defense 开启时）。
+    """对外部资料段落加"只读数据"围栏并做凭据脱敏。
 
-    ✅ **默认关闭**：绝不影响既有生成行为。
+    ✅ R175（2026-11-03 · BUG-1/BUG-3 收敛）：不再在本函数内各自判断两个
+    开关、各自调用两个底层函数，改为统一走
+    ``services.prompt_material_guard.govern_text``（唯一事实源）。
+    覆盖范围也扩大：旧实现只在 ``prompt_injection_defense`` 开启时脱敏，
+    现在 ``prompt_redact_sensitive`` 单独开启也会脱敏。
+
+    ✅ 默认双关：绝不影响既有生成行为（未开启时逐字节返回原文）。
     只加围栏 + 告警，**不改写资料正文** —— 与「数据真实性红线」一致
-    （资料被改写就等于伪造了用户上传的内容）。
+    （资料被改写就等于伪造了用户上传的内容）；脱敏只替换凭据形态片段。
     """
-    if not getattr(_sh.settings, "prompt_injection_defense", False) or not text:
+    if not text:
         return text
     try:
-        from app.services.prompt_governance import (
-            guard_external_segments,
-            redact_sensitive,
+        from app.services.prompt_material_guard import (
+            govern_text,
+            injection_defense_enabled,
+            redaction_enabled,
         )
-        # ✅ 顺序：先加围栏（标注"这是只读资料"），再脱敏凭据。
-        #    脱敏放最后 —— 只动凭据形态的片段（sk-/api_key= 等），
-        #    **不碰 GB/JGJ 等标准编号**（误伤会污染技术依据）。
-        guarded = guard_external_segments(text)
-        _redacted, _n = redact_sensitive(guarded)
-        if _n:
-            _sh.logger.warning("外部资料中检出 %d 处疑似凭据，已脱敏", _n)
-        return _redacted
+        if not injection_defense_enabled() and not redaction_enabled():
+            return text
+        # 预算由紧随其后的 _apply_prompt_context_budget 统一处理（同一开关），
+        # 此处只做「围栏 → 脱敏」，避免重复截断。
+        return govern_text(text, budget=False)
     except Exception:
         _sh.logger.warning("外部资料防护失败（使用原文继续）", exc_info=True)
         return text
@@ -888,12 +892,18 @@ async def _try_outline_patch(
     if not missing:
         return None
     try:
+        # ✅ R179：硬切片改为带留痕的截断（超限时写日志 + 计入截断指标），
+        #    避免 project_brief/project_facts 被悄悄丢弃且无人可查。
+        from app.services.prompt_material_guard import clip_text
+
         prompt = _sh.render(
             "outline_patch_system",
             scheme_name=scheme_name,
             scheme_type=scheme_type,
-            project_brief=(project_brief or "")[:1500],
-            project_facts=(project_facts or "")[:_sh.PROJECT_FACTS_LIMIT_OUTLINE],
+            project_brief=clip_text(project_brief or "", 1500, "目录补齐-project_brief"),
+            project_facts=clip_text(
+                project_facts or "", _sh.PROJECT_FACTS_LIMIT_OUTLINE, "目录补齐-project_facts"
+            ),
             chapter_titles="; ".join(
                 str(n.get("title") or "") for n in (outline or [])
                 if isinstance(n, dict))[:2000],
@@ -1343,13 +1353,18 @@ async def _review_and_fix_outline(
             _orig_json = _sh._compact_outline_json(outline)
             _sh.logger.info("目录修复轮输入：原目录 %d 节点 / 压缩后 %d 字符",
                         _sh._count_nodes(outline), len(_orig_json))
+            # ✅ R179：同 _try_outline_patch，硬切片改为带日志/指标的可见截断。
+            from app.services.prompt_material_guard import clip_text
+
             fix_prompt = _sh.render("outline_feedback_system",
                                 original_outline=_orig_json,
                                 review_suggestions="; ".join(suggestions),
                                 scheme_name=scheme_name,
                                 scheme_type=scheme_type,
-                                project_brief=(project_brief or "")[:1500],
-                                project_facts=(project_facts or "")[:_sh.PROJECT_FACTS_LIMIT_OUTLINE])
+                                project_brief=clip_text(project_brief or "", 1500, "目录修复-project_brief"),
+                                project_facts=clip_text(
+                                    project_facts or "", _sh.PROJECT_FACTS_LIMIT_OUTLINE,
+                                    "目录修复-project_facts"))
             return await _sh.collect_json_response(
                 [{"role": "system", "content": fix_prompt}],
                 _sh._outline_fix_validate_fn,
@@ -1413,7 +1428,9 @@ async def _review_and_fix_outline(
 # ---------- 目录生成 ----------
 
 async def _build_structured_brief(db, project_id: str, raw_brief: str,
-                                  max_chars: int = 4000, basis=None) -> str:
+                                  max_chars: int = 4000, basis=None, *,
+                                  degraded_out: list | None = None,
+                                  degraded_stage: str = "outline.assemble.structured_brief") -> str:
     """构建目录生成用的「项目摘要」：优先消费结构化提取成果，回退原始摘录。
 
     数据来源：bid_analysis_items（「结构化提取」18 项的 success 结果），
@@ -1462,12 +1479,30 @@ async def _build_structured_brief(db, project_id: str, raw_brief: str,
         #    **边界感知**截断（truncate_to_boundary），不再硬切 —— 硬切会把
         #    小节或 ``` 围栏切成两半，模型看到半截代码块会当成坏数据忽略。
         from app.utils.text_splitter import truncate_to_boundary
+        _before_len = len(structured)
         structured, rep = _sh._budgeted_truncate_sections(structured, max_chars)
         structured = truncate_to_boundary(structured, max_chars)
         if rep.get("truncated_sections"):
             _sh.logger.info("结构化项目摘要按小节比例截断：%d/%d 小节被截（预算 %d 字）",
                         rep["truncated_sections"], rep["sections"], max_chars)
-        appendix = f"\n\n【原始资料摘录】\n{raw_brief[:800]}" if raw_brief.strip() else ""
+        # ✅ D-39（R176）：截断不能只留日志 —— 结构性摘要被切短必须进 SSE。
+        if len(structured) < _before_len:
+            _sh._record_context_degraded(
+                degraded_out, field="structured_brief", stage=degraded_stage,
+                original_chars=_before_len, kept_chars=len(structured),
+                segment_id="structured_brief")
+        appendix = ""
+        if raw_brief.strip():
+            _appendix_src = raw_brief
+            _appendix_kept = raw_brief[:800]
+            appendix = f"\n\n【原始资料摘录】\n{_appendix_kept}"
+            if len(_appendix_kept) < len(_appendix_src):
+                _sh._record_context_degraded(
+                    degraded_out, field="raw_brief_appendix",
+                    stage=degraded_stage,
+                    original_chars=len(_appendix_src),
+                    kept_chars=len(_appendix_kept),
+                    segment_id="raw_brief_appendix")
         # ⚠️ 不得在此再做 `[:max_chars+900]` 硬切片 —— 那会把刚按比例
         #    分配好的尾部小节再次砍掉（比例截断等于白做）。此处直接拼接。
         return structured + appendix

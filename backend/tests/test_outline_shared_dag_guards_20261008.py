@@ -21,6 +21,7 @@
 
 **零源码改动**：全部断言锁定既有实现契约，不改变任何行为。
 """
+
 from __future__ import annotations
 
 from app.services.numbering import renumber_outline_nodes

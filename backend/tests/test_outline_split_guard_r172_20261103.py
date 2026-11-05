@@ -25,8 +25,7 @@ SPLIT_MODULES = ("app.routers._sse_outline_build", "app.routers._sse_outline_rev
 
 def _fn_names(path: Path) -> list[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    return [n.name for n in tree.body
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    return [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
 
 
 def _imports_from(path: Path, module: str) -> list[str]:
@@ -72,9 +71,7 @@ class TestSplitIntegrity:
             # 未定义在任何地方的名字直接失败；定义在别处（如常量）由下一条护栏兜底。
             src = path.read_text(encoding="utf-8")
             for name in imported:
-                assert name in defined or name in src, (
-                    f"sse_handlers 从 {module} 转发了不存在的名字：{name}"
-                )
+                assert name in defined or name in src, f"sse_handlers 从 {module} 转发了不存在的名字：{name}"
 
     def test_split_modules_do_not_import_each_other(self):
         """兄弟模块互相 import 会制造难以诊断的导入顺序问题（本仓已有循环导入先例）。"""

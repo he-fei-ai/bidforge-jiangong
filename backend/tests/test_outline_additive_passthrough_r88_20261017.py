@@ -24,6 +24,7 @@ R88 护栏 · 加法式回传键的**唯一透传口径**（FIX-8 + FIX-9）
 ⚠️ 本文件刻意**不含**「端点必须带 generic_residual 的 HTTP 层断言」以外的行为变更，
    也不改动 `_save_outline_to_db` 的任何产出 —— 纯消费侧口径收敛。
 """
+
 from __future__ import annotations
 
 import ast
@@ -38,7 +39,7 @@ from app.routers.sections import (
     passthrough_additive,
 )
 
-APP = Path(__file__).resolve().parents[1] / "app"   # tests/ -> backend/ -> backend/app
+APP = Path(__file__).resolve().parents[1] / "app"  # tests/ -> backend/ -> backend/app
 LIB_PY = APP / "routers" / "outline_library.py"
 SECTIONS_PY = APP / "routers" / "sections.py"
 
@@ -48,8 +49,13 @@ class TestPassthroughSemantics:
     """A. 纯函数语义：这是「漏字段」的根治点，语义必须比白名单更严谨。"""
 
     def test_picks_every_additive_key(self):
-        r = {"cleared_content_sections": 3, "generic_residual": [{"x": 1}],
-             "roots_locked": True, "ok": True, "count": 9}
+        r = {
+            "cleared_content_sections": 3,
+            "generic_residual": [{"x": 1}],
+            "roots_locked": True,
+            "ok": True,
+            "count": 9,
+        }
         assert passthrough_additive(r) == {
             "cleared_content_sections": 3,
             "generic_residual": [{"x": 1}],
@@ -61,13 +67,11 @@ class TestPassthroughSemantics:
 
     def test_partial_result_is_forwarded_not_defaulted(self):
         """只有 generic_residual 时**必须**带出去（这正是本轮漏的那一个键）。"""
-        assert passthrough_additive({"generic_residual": [{"t": "专项6"}]}) == {
-            "generic_residual": [{"t": "专项6"}]}
+        assert passthrough_additive({"generic_residual": [{"t": "专项6"}]}) == {"generic_residual": [{"t": "专项6"}]}
 
     def test_false_and_zero_are_preserved(self):
         """`if result.get(k)` 形态会把 0 / False 当缺省丢掉 —— 计数类字段是真信息。"""
-        assert passthrough_additive({"cleared_content_sections": 0}) == {
-            "cleared_content_sections": 0}
+        assert passthrough_additive({"cleared_content_sections": 0}) == {"cleared_content_sections": 0}
 
     def test_none_is_treated_as_absent(self):
         """None 表示「该出口没产出」，不得把 None 透传给前端当值。"""
@@ -75,8 +79,7 @@ class TestPassthroughSemantics:
 
     def test_non_additive_keys_never_leak(self):
         """反向：ok/count/tree 不在清单里，就绝不能被顺手带出去（避免撑大响应）。"""
-        out = passthrough_additive({"ok": True, "count": 1, "tree": [{"t": "a"}],
-                                   "note": "x"})
+        out = passthrough_additive({"ok": True, "count": 1, "tree": [{"t": "a"}], "note": "x"})
         assert set(out) == set()
 
     def test_never_raises_on_missing_key(self):
@@ -104,19 +107,21 @@ BASE_KEYS = {"ok", "count", "tree"}
 def _save_outline_additive_keys() -> set[str]:
     """AST 扫 `_save_outline_to_db` 全部返回出口实际产出的加法式键。"""
     tree = ast.parse(SECTIONS_PY.read_bytes().decode("utf-8"))
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.AsyncFunctionDef) and n.name == "_save_outline_to_db")
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_save_outline_to_db")
     keys: set[str] = set()
     for n in ast.walk(fn):
         # <dict>["k"] = ...      （判据看**目标**，不看右值）
         if isinstance(n, ast.Assign):
             t = n.targets[0]
-            if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) \
-                    and t.value.id in _RESULT_DICTS and isinstance(t.slice, ast.Constant):
+            if (
+                isinstance(t, ast.Subscript)
+                and isinstance(t.value, ast.Name)
+                and t.value.id in _RESULT_DICTS
+                and isinstance(t.slice, ast.Constant)
+            ):
                 keys.add(t.slice.value)
         # attach_generic_residual(result, ...) → 单一出口挂载（注释声称的键）
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
-                and n.func.id == "attach_generic_residual":
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "attach_generic_residual":
             keys.add("generic_residual")
     return keys - BASE_KEYS
 
@@ -135,13 +140,15 @@ class TestKeyListCoversProducer:
         missing = produced - set(SAVE_OUTLINE_ADDITIVE_KEYS)
         assert not missing, (
             f"_save_outline_to_db 新产出加法式键 {sorted(missing)}，"
-            f"必须登记进 sections.SAVE_OUTLINE_ADDITIVE_KEYS，否则套用目录库链路静默丢字段")
+            f"必须登记进 sections.SAVE_OUTLINE_ADDITIVE_KEYS，否则套用目录库链路静默丢字段"
+        )
 
     def test_declared_keys_are_actually_produced(self):
         """反向：清单里不得有生产方根本不产出的键（否则是死条目，误导后人）。"""
         produced = _save_outline_additive_keys()
-        assert not (set(SAVE_OUTLINE_ADDITIVE_KEYS) - produced), (
-            "SAVE_OUTLINE_ADDITIVE_KEYS 含生产方不产出的键 —— 死条目")
+        assert not (
+            set(SAVE_OUTLINE_ADDITIVE_KEYS) - produced
+        ), "SAVE_OUTLINE_ADDITIVE_KEYS 含生产方不产出的键 —— 死条目"
 
     def test_generic_residual_is_registered(self):
         """本轮漏的就是它，显式锁一条避免日后被「清理」掉。"""
@@ -177,9 +184,11 @@ class TestNoHandWrittenPickingReturns:
     def test_uses_passthrough_additive(self):
         src = LIB_PY.read_bytes().decode("utf-8")
         fn = _apply_fn()
-        called = [n for n in ast.walk(fn)
-                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                  and n.func.id == "passthrough_additive"]
+        called = [
+            n
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "passthrough_additive"
+        ]
         assert called, "apply_library_and_save 必须经 sections.passthrough_additive 透传"
 
     def test_returns_dict_has_no_manual_result_subscript(self):
@@ -189,20 +198,31 @@ class TestNoHandWrittenPickingReturns:
         加法式增量，硬禁会逼着后人把正经字段也塞进 helper，反而更糟。
         """
         ret = _returns_dict(_apply_fn())
-        picks = [n.slice.value for n in ast.walk(ret)
-                 if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)
-                 and n.value.id == "result" and isinstance(n.slice, ast.Constant)]
+        picks = [
+            n.slice.value
+            for n in ast.walk(ret)
+            if isinstance(n, ast.Subscript)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == "result"
+            and isinstance(n.slice, ast.Constant)
+        ]
         illegal = sorted(set(picks) & set(SAVE_OUTLINE_ADDITIVE_KEYS))
         assert illegal == [], (
             f"返回体仍在手写挑选加法式键 {illegal} —— 白名单每加一个新键就漏一次"
-            f"（generic_residual 就是这么丢的）；改用 passthrough_additive")
+            f"（generic_residual 就是这么丢的）；改用 passthrough_additive"
+        )
 
     def test_base_contract_keys_stay_readable(self):
         """反向锁：count / tree 必须仍按名直取（防止后来者把骨架也塞进 helper）。"""
         ret = _returns_dict(_apply_fn())
-        picks = {n.slice.value for n in ast.walk(ret)
-                 if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)
-                 and n.value.id == "result" and isinstance(n.slice, ast.Constant)}
+        picks = {
+            n.slice.value
+            for n in ast.walk(ret)
+            if isinstance(n, ast.Subscript)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == "result"
+            and isinstance(n.slice, ast.Constant)
+        }
         assert {"count", "tree"} <= picks
 
     def test_splat_is_unconditional(self):
@@ -213,19 +233,21 @@ class TestNoHandWrittenPickingReturns:
         for k in ret.keys:
             if isinstance(k, ast.Dict):
                 for v in k.values:
-                    if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) \
-                            and v.func.id == "passthrough_additive":
+                    if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == "passthrough_additive":
                         splats.append(k)
         # 允许裸 **（unpacking node 为 None）或 dict-splat 两种落法
-        assert splats or any(k is None for k in ret.keys), \
-            "透传未以 ** 展开（会被当成普通值键丢弃）"
+        assert splats or any(k is None for k in ret.keys), "透传未以 ** 展开（会被当成普通值键丢弃）"
 
     def test_no_dead_import_of_passthrough(self):
         """导入必须真被用（AST ImportFrom + 真实调用），防「import 了但没用」。"""
         tree = _lib_ast()
-        imports = [n for n in ast.walk(tree)
-                   if isinstance(n, ast.ImportFrom) and n.module == "app.routers.sections"
-                   and any(a.name == "passthrough_additive" for a in n.names)]
+        imports = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.ImportFrom)
+            and n.module == "app.routers.sections"
+            and any(a.name == "passthrough_additive" for a in n.names)
+        ]
         assert imports, "未从 sections 导入 passthrough_additive"
 
 
@@ -234,8 +256,7 @@ async def _seed_library(conn, name: str, tree: list[dict]) -> str:
     """db_conn 是 aiosqlite 连接 ⇒ execute 是协程，必须 await。"""
     lib_id = "lib_" + uuid.uuid4().hex[:8]
     await conn.execute(
-        "INSERT INTO outline_library (id, name, outline_json, source, review_status) "
-        "VALUES (?,?,?,?,?)",
+        "INSERT INTO outline_library (id, name, outline_json, source, review_status) " "VALUES (?,?,?,?,?)",
         (lib_id, name, json.dumps(tree, ensure_ascii=False), "测试", "已通过"),
     )
     return lib_id
@@ -246,9 +267,7 @@ async def _seed_scheme(conn) -> str:
     pid = "proj_" + uuid.uuid4().hex[:8]
     await conn.execute("INSERT INTO projects (id, name) VALUES (?,?)", (pid, "套用测试项目"))
     sid = uuid.uuid4().hex[:8]
-    await conn.execute(
-        "INSERT INTO schemes (id, name, project_id) VALUES (?,?,?)",
-        (sid, "套用测试方案", pid))
+    await conn.execute("INSERT INTO schemes (id, name, project_id) VALUES (?,?,?)", (sid, "套用测试方案", pid))
     return sid
 
 
@@ -264,17 +283,20 @@ class TestLibraryApplyEndToEnd:
         自然消失，断言就退化成对第三方模型输出的依赖 —— 离线必失败、在线恰好
         通过，结论不稳定且测不到本组要锁的东西。自动重写本身由 R89 护栏单独覆盖。
         """
-        monkeypatch.setattr(settings, "outline_autofix_generic_on_save", False,
-                            raising=False)
+        monkeypatch.setattr(settings, "outline_autofix_generic_on_save", False, raising=False)
 
     @pytest.mark.asyncio
     async def test_placeholder_title_reaches_response(self, db_conn):
         from app.routers import outline_library as ol
 
         tree = [
-            {"id": "1", "title": "工程概况", "children": [
-                {"id": "1.1", "title": "专项6", "children": []},
-            ]},
+            {
+                "id": "1",
+                "title": "工程概况",
+                "children": [
+                    {"id": "1.1", "title": "专项6", "children": []},
+                ],
+            },
         ]
         lib_id = await _seed_library(db_conn, "含占位标题的库", tree)
         sid = await _seed_scheme(db_conn)
@@ -282,8 +304,7 @@ class TestLibraryApplyEndToEnd:
         res = await ol.apply_library_and_save(lib_id, {"scheme_id": sid}, db=db_conn)
 
         assert res["ok"] is True
-        assert "generic_residual" in res, \
-            "套用目录库命中占位标题时必须回传明细（修复前该键被白名单丢弃）"
+        assert "generic_residual" in res, "套用目录库命中占位标题时必须回传明细（修复前该键被白名单丢弃）"
         assert res["generic_residual"], "检出占位标题 ⇒ 明细不得为空"
         titles = [h.get("title") for h in res["generic_residual"]]
         assert any("专项6" in (t or "") for t in titles), f"明细应含占位标题，实际 {titles}"
@@ -293,8 +314,9 @@ class TestLibraryApplyEndToEnd:
         """E. 零回归：干净树**不得**多出空键（加法式，不污染既有消费方）。"""
         from app.routers import outline_library as ol
 
-        tree = [{"id": "1", "title": "工程概况", "children": [
-            {"id": "1.1", "title": "周边环境与施工条件", "children": []}]}]
+        tree = [
+            {"id": "1", "title": "工程概况", "children": [{"id": "1.1", "title": "周边环境与施工条件", "children": []}]}
+        ]
         lib_id = await _seed_library(db_conn, "干净库", tree)
         sid = await _seed_scheme(db_conn)
 
@@ -312,8 +334,7 @@ class TestLibraryApplyEndToEnd:
         from app.routers import outline_library as ol
 
         def _mk(title: str):
-            return [{"id": "1", "title": "工程概况", "children": [
-                {"id": "1.1", "title": title, "children": []}]}]
+            return [{"id": "1", "title": "工程概况", "children": [{"id": "1.1", "title": title, "children": []}]}]
 
         lib_ok = await _seed_library(db_conn, "干净库A", _mk("周边环境与施工条件"))
         lib_bad = await _seed_library(db_conn, "占位库A", _mk("专项6"))

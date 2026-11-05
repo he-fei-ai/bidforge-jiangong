@@ -14,24 +14,30 @@
  *      （守护块内的 ckpt.event 已由 if (ckpt?.outline && …) 短路保护，不在禁止之列）。
  */
 import { describe, it, expect } from "vitest";
-import pageSource from "../pages/SchemeWorkbenchPage.tsx?raw";
+// ✅ G12（2026-11-04）：doGenerateOutline 的 stopped 收尾分支随目录生成主链
+//    逐字迁至 useOutlineGeneration.tsx，源码锚点同步改指该 hook 文件。
+import genSource from "../pages/schemeWorkbench/useOutlineGeneration.tsx?raw";
 
-const src: string = pageSource;
+const src: string = genSource;
 
 describe("SchemeWorkbenchPage stopped 收尾分支可选链护栏", () => {
   it("无成果提示必须使用可选链 ckpt?.event", () => {
-    expect(src).toContain('msg.info(ckpt?.event === "error"');
+    expect(src).toMatch(/msg\.info\(\s*ckpt\?\.event === "error"/);
   });
 
   it("禁止裸 ckpt.event 访问回潮（ckpt 可能为 undefined）", () => {
     // 守护块（if (ckpt?.outline && …)）内的 ckpt.event 是安全的，
     // 但 else 兜底提示处 ckpt 必为 undefined/无 outline，必须用可选链
-    expect(src).not.toMatch(/msg\.info\(ckpt\.event/);
+    expect(src).not.toMatch(/msg\.info\(\s*ckpt\.event/);
   });
 
   it("stopped 收尾分支的 ckpt 取自 fin.outline_result 且先经 outline 非空守护", () => {
     // 锁定该分支结构：const ckpt = fin.outline_result → if (ckpt?.outline && …) → else 提示
-    const re = /fin\?\.status === "stopped"[\s\S]{0,400}?const ckpt = fin\.outline_result;[\s\S]{0,120}?if \(ckpt\?\.outline &&/;
-    expect(re.test(src), "stopped 分支必须保持「先取 checkpoint、非空守护、else 兜底提示」结构").toBe(true);
+    const re =
+      /fin\?\.status === "stopped"[\s\S]{0,400}?const ckpt = fin\.outline_result;[\s\S]{0,120}?if \(ckpt\?\.outline &&/;
+    expect(
+      re.test(src),
+      "stopped 分支必须保持「先取 checkpoint、非空守护、else 兜底提示」结构",
+    ).toBe(true);
   });
 });

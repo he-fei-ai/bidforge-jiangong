@@ -1,4 +1,5 @@
 """上传目录识别路由"""
+
 import asyncio
 import json
 import logging
@@ -105,8 +106,9 @@ async def _r13(cur, what: str):
     return cur
 
 
-def _r13_write(cur, what: str, *, expected: int = 1, status: int = 503,
-               message: str = "服务暂时不可用，请稍后重试") -> int:
+def _r13_write(
+    cur, what: str, *, expected: int = 1, status: int = 503, message: str = "服务暂时不可用，请稍后重试"
+) -> int:
     """R13 写生效性第二层（2026-10-08 深化）：游标非 None 但影响行数 ≠ 预期。
 
     `_r13` 只拦「语句根本没执行」（None 游标 → 503）；本函数拦「执行了、但一行
@@ -129,18 +131,19 @@ def _r13_write(cur, what: str, *, expected: int = 1, status: int = 503,
         raise HTTPException(503, "服务暂时不可用，请稍后重试")
     affected = safe_rowcount(cur, what=what)
     if affected != expected:
-        logger.warning("%s：预期影响 %d 行，实际 %d 行（并发变更或写未生效），本次请求中止",
-                       what, expected, affected)
+        logger.warning("%s：预期影响 %d 行，实际 %d 行（并发变更或写未生效），本次请求中止", what, expected, affected)
         raise HTTPException(status, message)
     return affected
 
 
 @router.post("/parse")
-async def parse_outline(file: UploadFile = File(...),
-                        scheme_name: str = Query(""),
-                        reorganize: bool = Query(False),
-                        project_id: str = Query(""),
-                        db=Depends(get_db)):
+async def parse_outline(
+    file: UploadFile = File(...),
+    scheme_name: str = Query(""),
+    reorganize: bool = Query(False),
+    project_id: str = Query(""),
+    db=Depends(get_db),
+):
     """上传文件并识别目录结构。
 
     ✅ BUG 修复（2026-09-16）：前端 `uploadOutlineApi.parse(file, {scheme_name,
@@ -171,9 +174,7 @@ async def parse_outline(file: UploadFile = File(...),
     #    str() 化得到假值，非字符串一律按「未提供」处理。
     _pid = project_id.strip() if isinstance(project_id, str) else ""
     if _pid:
-        _cur = await _r13(
-            await db.execute("SELECT id FROM projects WHERE id=?", (_pid,)),
-            "目录识别：项目存在性检查")
+        _cur = await _r13(await db.execute("SELECT id FROM projects WHERE id=?", (_pid,)), "目录识别：项目存在性检查")
         if not await _cur.fetchone():
             raise HTTPException(404, "项目不存在，无法建立上传记录归属链")
     # ✅ BUG 修复（历史）：旧实现一次性 await file.read() 无任何大小上限，
@@ -194,9 +195,8 @@ async def parse_outline(file: UploadFile = File(...),
             if total > MAX_UPLOAD_BYTES:
                 _mb = MAX_UPLOAD_BYTES // (1024 * 1024)
                 raise HTTPException(
-                    413,
-                    f"文件过大，请上传 {_mb}MB 以内的文件"
-                    if _mb else "文件过大，请上传更小的文件")
+                    413, f"文件过大，请上传 {_mb}MB 以内的文件" if _mb else "文件过大，请上传更小的文件"
+                )
             chunks.append(chunk)
     finally:
         await file.close()
@@ -209,15 +209,12 @@ async def parse_outline(file: UploadFile = File(...),
     if not content:
         raise HTTPException(400, "空文件，请上传有效内容")
     if ftype and ftype not in SUPPORTED_EXTENSIONS:
-        raise HTTPException(
-            400, f"不支持的文件格式（.{ftype}），支持："
-            f"{', '.join(sorted(SUPPORTED_EXTENSIONS))}")
+        raise HTTPException(400, f"不支持的文件格式（.{ftype}），支持：" f"{', '.join(sorted(SUPPORTED_EXTENSIONS))}")
 
     # ✅ 与「项目资料上传」同一口径：拒绝扩展名与真实内容不符的文件。
     #    旧实现完全不校验，把任意文件改名为 .docx 即可进入解析流程。
     if content and not signature_valid(ftype, content[:16]):
-        raise HTTPException(
-            400, f"文件内容与扩展名（{ftype.upper()}）不符，请检查文件后重新上传")
+        raise HTTPException(400, f"文件内容与扩展名（{ftype.upper()}）不符，请检查文件后重新上传")
 
     try:
         # ✅ BUG 修复：改用带诊断的解析入口。旧实现用 parse_file_content（只返回
@@ -240,8 +237,7 @@ async def parse_outline(file: UploadFile = File(...),
         #    asyncio.to_thread，本路由是**唯一漏改点**。
         #    现与姊妹链路对齐：解析整体挪进线程池，事件循环保持可响应。
         #    （解析本身仍是同步函数，语义与返回契约完全不变。）
-        raw_text, diag = await asyncio.to_thread(
-            parse_file_content_ex, content, fname)
+        raw_text, diag = await asyncio.to_thread(parse_file_content_ex, content, fname)
     except ParseError as e:
         # ✅ 修复（2026-09-17）：解析不可恢复失败（缺依赖/OCR引擎/损坏）用用户可读
         #    文案，与 global-facts 解析路径口径一致；不把底层堆栈/路径泄露给客户端。
@@ -259,8 +255,7 @@ async def parse_outline(file: UploadFile = File(...),
     #    文本、OCR 噪声惩罚失效，列表 file_type 与实际解析类型不一致。现以前者为准。
     _sniffed_ftype = str(diag.get("file_type") or "").strip().lower()
     if _sniffed_ftype and _sniffed_ftype != ftype:
-        logger.info("目录识别：文件 %s 真实类型 %s（后缀推导为 %s）",
-                    fname, _sniffed_ftype, ftype or "无")
+        logger.info("目录识别：文件 %s 真实类型 %s（后缀推导为 %s）", fname, _sniffed_ftype, ftype or "无")
         ftype = _sniffed_ftype
 
     # ✅ BUG-O10 修复：根据实际识别质量计算 confidence（旧实现硬编码 0.6/0.8）
@@ -271,16 +266,31 @@ async def parse_outline(file: UploadFile = File(...),
     is_image = ftype in ("png", "jpg", "jpeg", "bmp", "tiff")
     outline = simple_parse_outline(raw_text)
     used_ai = False
+    # ✅ R176 B2-2（2026-11-04）：AI 兜底正文被截掉的字符数（未走 AI 兜底或未截断为 0）。
+    #    旧实现 raw_text[:6000] 截断完全无痕，用户误以为整份文件都参与了识别。
+    ai_text_truncated = 0
     if not _outline_seems_valid(outline) and raw_text and len(raw_text) > 50:
         try:
-            sys_prompt = render("outline_recognition_system", raw_text=raw_text[:6000])
+            # ✅ R175（2026-11-03 · BUG-1 接线）：上传文档正文是外部不可信原文，
+            #   截断前先统一治理（围栏 → 凭据脱敏；预算由截断本身承担）。
+            #   三个开关默认关闭时 raw_text[:6000] 与修复前完全一致。
+            from app.services.prompt_material_guard import govern_blob
+
+            _ai_raw = raw_text[:6000]
+            # 截断口径：以「实际送入 AI 的原文片段」为准（治理不改长度预算），
+            # 供响应回传「有多少原文没参与识别」。
+            ai_text_truncated = max(0, len(raw_text) - len(_ai_raw))
+            sys_prompt = render(
+                "outline_recognition_system", raw_text=govern_blob(_ai_raw, "上传目录识别正文", budget=False)
+            )
             # ✅ 修复（2026-09-24）：补 scene —— 旧实现未传，该 AI 兜底调用的
             #    消耗在 /ai/stats 的场景聚合里不可见，也无法单独指定模型。
             obj, _ = await collect_json_response(
                 [{"role": "system", "content": sys_prompt}],
                 lambda o: [] if o.get("outline") else ["缺少 outline"],
                 scene="outline_recognition",
-                repair_key=OUTLINE_REPAIR_KEY)
+                repair_key=OUTLINE_REPAIR_KEY,
+            )
             ai_outline = obj.get("outline", [])
             if _outline_seems_valid(ai_outline):
                 outline = ai_outline
@@ -298,12 +308,12 @@ async def parse_outline(file: UploadFile = File(...),
     if reorganize and isinstance(outline, list) and outline:
         try:
             from app.services.outline_reorganize import reorganize_to_standard
+
             _reorg = reorganize_to_standard(outline, scheme_name or fname)
             if isinstance(_reorg, dict) and _reorg.get("outline"):
                 outline = _reorg["outline"]
                 reorganize_report = dict(_reorg.get("report") or {})
-                reorganize_report["template"] = (
-                    _reorg.get("template") or reorganize_report.get("template") or "")
+                reorganize_report["template"] = _reorg.get("template") or reorganize_report.get("template") or ""
         except Exception:
             logger.warning("上传目录整理为标准结构失败（保留识别结果）", exc_info=True)
 
@@ -315,6 +325,7 @@ async def parse_outline(file: UploadFile = File(...),
     if isinstance(outline, list) and outline:
         try:
             from app.services.outline_utils import normalize_outline
+
             _normalized = normalize_outline(outline)
             if _normalized:
                 outline = _normalized
@@ -345,12 +356,29 @@ async def parse_outline(file: UploadFile = File(...),
         await db.execute(
             "INSERT INTO uploaded_outlines (id, project_id, file_name, file_type, raw_text, parsed_json, confidence, status, parse_warnings)"
             " VALUES (?,?,?,?,?,?,?,?,?)",
-            (rid, _pid, fname, ftype, raw_text[:5000], json.dumps({"outline": outline}, ensure_ascii=False),
-             confidence, "parsed", dump_parse_warnings(parse_warnings))),
-        "目录识别保存上传记录")
+            (
+                rid,
+                _pid,
+                fname,
+                ftype,
+                raw_text[:5000],
+                json.dumps({"outline": outline}, ensure_ascii=False),
+                confidence,
+                "parsed",
+                dump_parse_warnings(parse_warnings),
+            ),
+        ),
+        "目录识别保存上传记录",
+    )
     await db.commit()
 
     result = {"id": rid, "outline": outline, "confidence": confidence, "file_name": fname}
+    # ✅ R176 B2-2（2026-11-04）：加法式回传「AI 兜底是否生效」与「兜底正文被截掉多少」。
+    #    旧实现两个事实都无痕：用户既不知道规则法失败后 AI 是否接管，也不知道
+    #    长文档只有前 6000 字参与了 AI 识别。旧字段一个不删；未走 AI 兜底时
+    #    truncated_chars=0 / used_ai_fallback=false，与修复前响应逐字兼容（仅多两键）。
+    result["truncated_chars"] = int(ai_text_truncated)
+    result["used_ai_fallback"] = bool(used_ai)
     # ✅ 解析诊断回传（与 /global-facts/documents/{id}/parse 口径一致）：
     #    解析成功但内容不完整（PDF 截页、表格截行、OCR 兜底、加密 PDF）时，
     #    前端必须能把「识别结果可能不完整」如实告知用户。
@@ -382,7 +410,8 @@ async def parse_outline(file: UploadFile = File(...),
         result["warning"] = (
             "未从文件中解析到有效文本（可能是空白文件、扫描件或已损坏）；"
             "若为扫描件，请确认 OCR 引擎可用"
-            "（打开 /api/v1/diagnostics/capabilities 查看启用方法）")
+            "（打开 /api/v1/diagnostics/capabilities 查看启用方法）"
+        )
     return result
 
 
@@ -402,12 +431,11 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     #    list_documents / _load_doc 同口径：503 = 可重试）。
     cur = await _r13(
         await db.execute("SELECT id FROM uploaded_outlines WHERE id=?", (upload_id,)),
-        "save-as-outline：上传记录存在性检查")
+        "save-as-outline：上传记录存在性检查",
+    )
     if not await cur.fetchone():
         raise HTTPException(404, "上传记录不存在")
-    cur = await _r13(
-        await db.execute(_fe.SCHEME_PROJECT_ID_SQL, (scheme_id,)),
-        "save-as-outline：方案存在性检查")
+    cur = await _r13(await db.execute(_fe.SCHEME_PROJECT_ID_SQL, (scheme_id,)), "save-as-outline：方案存在性检查")
     srow = await cur.fetchone()
     if not srow:
         raise HTTPException(404, "方案不存在")
@@ -419,25 +447,64 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     #    （正文被删、刚生成的目录被覆盖）。旧实现完全无守卫，
     #    前端 disabled 只挡主路径，接口层必须兜底直连调用 / 多标签页并发。
     from app.routers.sections import content_generation_in_progress, outline_generation_in_progress
+
     if content_generation_in_progress(scheme_id):
         raise HTTPException(
-            409, "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再保存目录——"
-                 "整表重建会与生成结果互相覆盖")
+            409, "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再保存目录——" "整表重建会与生成结果互相覆盖"
+        )
     if outline_generation_in_progress(scheme_id):
-        raise HTTPException(
-            409, "本方案目录正在后台生成中，请等待生成完成（或先停止任务）后再保存目录")
+        raise HTTPException(409, "本方案目录正在后台生成中，请等待生成完成（或先停止任务）后再保存目录")
 
     # 写入 sections 表
     # ✅ 目录限三级 + 统一重排编号：上传识别结果落库前统一规范化
     from app.services.outline_utils import normalize_outline
+
+    # ✅ R177（B-1 · P1 · 2026-11-05）：**类型闸门** —— 与 save-outline 手动链路
+    #    （sections.py:1099-1100）逐字同口径。
+    #    此前本路径只有「空值判据」（`if not outline`）：非数组但 truthy 的载荷
+    #    （如 `{"a": 1}` / `"abc"`）会绕过它；而 `normalize_outline` 对非 list
+    #    **原样返回**（outline_utils.py:50-51）→ 后续 `collect_rows` 遍历 dict
+    #    只取到 key 字符串、全部被 `isinstance(node, dict)` 跳过 → 收集到 0 个
+    #    节点 → `final_section_ids` 为空 → `to_delete = 旧章节全集`
+    #    → **整表 DELETE 掉该方案所有章节（含已生成正文）并返回 200**
+    #    （破坏性副作用发生在「成功」路径上，且响应里 cleared_content_sections
+    #    为 0 —— 用户完全看不出正文被清空）。
+    #    现补类型闸门：非数组一律 400，且必须早于任何写操作。
+    if not isinstance(outline, list):
+        raise HTTPException(400, "outline 必须是数组")
+
     outline = normalize_outline(outline)
     if not outline:
         raise HTTPException(400, "outline 节点格式非法（应为对象数组）")
 
+    # ✅ R175 G-3 补接线（2026-11-03）：空壳一级章闸门 —— 本路径此前不经该闸门
+    #    （自建 DELETE/INSERT、不走 `_save_outline_to_db`，与 R89 G1 修复前的
+    #    占位标题闸门缺口同型），「已有多级结构却仍有 children=[] 一级章」的
+    #    混合形态树会静默落库。现与 save-outline 手动链路**同一判据、同一口径**：
+    #    判据复用 `sections._detect_empty_top_chapters` 单一实现（只判一级；
+    #    全平铺目录=合法短目录不报；二级/三级末级节点不参与判据）。
+    #    与占位标题闸门同位（在标题快照/AI 重写**之前**，拒绝的树不浪费 AI 调用）。
+    #    逃生舱与 save-outline 一致：body 传 allow_empty_chapters=true 显式按
+    #    部分成果保存，响应加法式回传 empty_top_chapters 明细（不静默）。
+    from app.routers.sections import _detect_empty_top_chapters
+
+    _allow_empty = bool(body.get("allow_empty_chapters"))
+    _empty_tops = _detect_empty_top_chapters(outline)
+    if _empty_tops and not _allow_empty:
+        _names = "、".join(
+            f"第{x['index'] + 1}章「{x['title']}」" if x["title"] else f"第{x['index'] + 1}章" for x in _empty_tops[:5]
+        )
+        raise HTTPException(
+            400,
+            f"上传目录存在 {len(_empty_tops)} 个无子章节的一级章（{_names}"
+            f"{'等' if len(_empty_tops) > 5 else ''}）：请为其补充二级章节或删除该章后"
+            "重新保存；如确需按此结构保存，请在请求体中传 allow_empty_chapters=true。",
+        )
+
     import re as _re
 
     def _norm_title(t: str) -> str:
-        return _re.sub(r'\s+', '', str(t or '')).strip()
+        return _re.sub(r"\s+", "", str(t or "")).strip()
 
     # ✅ 遗留问题 1 修复（R101）：自动改写会**改标题**，而下方正文保留按
     #    「归一化标题相等」匹配旧章节 ⇒ 改写后的标题在旧库里找不到同名行，
@@ -477,19 +544,25 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     #    `collect_rows`（会捕获标题快照）**之前**—— 此时尚未开启写事务
     #    （上方只有读），AI 调用不占写锁。
     _generic_autofixed = 0
+    # ✅ D-09（R176 · 2026-11-04）：与 `sections._save_outline_to_db` 同口径 ——
+    #    自动改写失败此前只进日志，用户拿到「保存成功」却不知道占位标题仍在。
+    #    加法式回传 `generic_autofix_failed=true`（仅失败时有该键）。
+    _generic_autofix_failed = False
     try:
         from app.config import settings
+
         if getattr(settings, "outline_check_generic_titles", True):
             from app.services.outline_quality import detect_generic_titles_for_write
             from app.services.outline_title_fix import autofix_generic_titles_on_save
+
             _hits = detect_generic_titles_for_write(outline, context="upload-outline")
             if _hits:
                 outline, _hits, _generic_autofixed = await autofix_generic_titles_on_save(
-                    outline, _hits,
-                    context=f"upload-outline upload={upload_id[:8]}")
-    except Exception as _e:      # noqa: BLE001 - 自动修复失败不得阻断保存
-        logger.warning("上传目录保存：占位标题自动重写失败（按原样保存）: %s",
-                       _e, exc_info=True)
+                    outline, _hits, context=f"upload-outline upload={upload_id[:8]}"
+                )
+    except Exception as _e:  # noqa: BLE001 - 自动修复失败不得阻断保存
+        _generic_autofix_failed = True
+        logger.warning("上传目录保存：占位标题自动重写失败（按原样保存）: %s", _e, exc_info=True)
 
     # ✅ BUG 修复：标题匹配保留已有章节正文内容。
     # 旧实现无条件 DELETE FROM sections + INSERT，导致重新上传目录时
@@ -506,8 +579,10 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
             #    在真实兜底）。补入该列使结构桶按声明语义生效。
             "SELECT id, title, content, word_count, status, word_budget, parent_id, level"
             " FROM sections WHERE scheme_id=? ORDER BY sort_order, created_at",
-            (scheme_id,)),
-        "save-as-outline：既有章节预取")
+            (scheme_id,),
+        ),
+        "save-as-outline：既有章节预取",
+    )
     # ✅ R13（2026-10-08）：**不得** fail-soft 成空列表 —— existing_rows 为空时
     #    下方标题匹配全部落空：所有旧章节按「新章节」INSERT（同 scheme 出现
     #    两套重复目录）、旧行又因不在 old_ids 里而不会被删除/保留，
@@ -528,8 +603,7 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
         if not nt:
             continue
         existing_by_title.setdefault(nt, []).append(er)
-        existing_by_parent_level.setdefault(
-            (er.get("parent_id") or "", int(er.get("level") or 1)), []).append(er)
+        existing_by_parent_level.setdefault((er.get("parent_id") or "", int(er.get("level") or 1)), []).append(er)
         existing_by_level.setdefault(int(er.get("level") or 1), []).append(er)
 
     # 旧章节的标题路径索引（id -> 归一化标题元组），由旧树 parent 关系一次性构建
@@ -591,8 +665,7 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     new_inserts: list[tuple] = []
     counter = {"n": 0}
 
-    def collect_rows(nodes: list, parent_id: str, path_parts: tuple,
-                     idx_path: tuple = ()):
+    def collect_rows(nodes: list, parent_id: str, path_parts: tuple, idx_path: tuple = ()):
         nonlocal preserved_count
         for i, node in enumerate(nodes):
             if not isinstance(node, dict):
@@ -613,10 +686,12 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
                 # 所有桶统一按「归一化标题相等」过滤（见 _take_from），
                 # 避免新标题「保留」不同标题的旧章节导致误保留 + 孤儿漏删。
                 parent_key = (parent_id, int(node.get("level", 1)))
-                for bucket in (existing_by_path.get(cur_path),
-                               existing_by_parent_level.get(parent_key),
-                               existing_by_level.get(int(node.get("level", 1))),
-                               existing_by_title.get(mnt)):
+                for bucket in (
+                    existing_by_path.get(cur_path),
+                    existing_by_parent_level.get(parent_key),
+                    existing_by_level.get(int(node.get("level", 1))),
+                    existing_by_title.get(mnt),
+                ):
                     matched = _take_from(bucket, mnt)
                     if matched is not None:
                         break
@@ -628,9 +703,8 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
             if confidence is None:
                 confidence = 1.0
             outline_json = json.dumps(
-                {"id": node.get("id"), "level": node.get("level", 1),
-                 "confidence": confidence},
-                ensure_ascii=False)
+                {"id": node.get("id"), "level": node.get("level", 1), "confidence": confidence}, ensure_ascii=False
+            )
             # 节点未携带 word_budget 时沿用已有预算（避免重置用户设置）
             raw_budget = node.get("word_budget")
             if isinstance(raw_budget, (int, float)) and raw_budget > 0:
@@ -646,27 +720,48 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
                 if old_path and old_path != (path_parts + (mnt,)):
                     logger.info(
                         "上传目录保存：同名章节跨路径匹配 title=%s old=%s new=%s（按层级兜底）",
-                        title, " > ".join(old_path), " > ".join(path_parts + (mnt,)))
+                        title,
+                        " > ".join(old_path),
+                        " > ".join(path_parts + (mnt,)),
+                    )
                 preserved_count += 1
                 final_section_ids.add(sid)
-                updates.append((
-                    title, node.get("description", ""), node.get("level", 1),
-                    parent_id, word_budget, outline_json,
-                    i, datetime.now().isoformat(), sid))
+                updates.append(
+                    (
+                        title,
+                        node.get("description", ""),
+                        node.get("level", 1),
+                        parent_id,
+                        word_budget,
+                        outline_json,
+                        i,
+                        datetime.now().isoformat(),
+                        sid,
+                    )
+                )
             else:
                 # 新章节：插入空记录
                 sid = str(uuid.uuid4())
                 final_section_ids.add(sid)
-                new_inserts.append((
-                    sid, scheme_id, project_id, parent_id, title,
-                    node.get("description", ""), node.get("level", 1), i,
-                    "empty", outline_json, word_budget))
+                new_inserts.append(
+                    (
+                        sid,
+                        scheme_id,
+                        project_id,
+                        parent_id,
+                        title,
+                        node.get("description", ""),
+                        node.get("level", 1),
+                        i,
+                        "empty",
+                        outline_json,
+                        word_budget,
+                    )
+                )
             counter["n"] += 1
             children = node.get("children")
             if isinstance(children, list) and children:
-                collect_rows(children, sid,
-                             path_parts + ((mnt,) if mnt else ()),
-                             idx_path + (i,))
+                collect_rows(children, sid, path_parts + ((mnt,) if mnt else ()), idx_path + (i,))
 
     collect_rows(outline, "", ())
 
@@ -703,8 +798,8 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
 
         full_delete_ids = _collect_subtree(to_delete)
         cleared_content = sum(
-            1 for er in existing_rows
-            if er["id"] in full_delete_ids and str(er.get("content") or "").strip())
+            1 for er in existing_rows if er["id"] in full_delete_ids and str(er.get("content") or "").strip()
+        )
         placeholders = ",".join("?" * len(full_delete_ids))
         # ✅ R13 写路径（2026-10-08）：DELETE 未生效却继续 commit → 被删章节
         #    （含已生成正文）原样留在库里，与新 INSERT 的章节叠加成两套重复
@@ -714,20 +809,20 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
         #    行，命中 0 行是正常情况，预期行数在这里不可知（只保留 None 判空）。
         await _r13(
             await db.execute(
-                f"DELETE FROM chart_predictions WHERE section_id IN ({placeholders})",
-                list(full_delete_ids)),
-            "save-as-outline：级联清理图表预测")
+                f"DELETE FROM chart_predictions WHERE section_id IN ({placeholders})", list(full_delete_ids)
+            ),
+            "save-as-outline：级联清理图表预测",
+        )
         # ✅ 深化（2026-10-08 · 零行/少行写）：sections 的 ID 全部来自本事务
         #    稍早的预取，DELETE 命中数 < 预期 = 期间被并发删除 —— 预取快照已过期，
         #    标题匹配/保留判定不再可信，继续重建会把基于旧结构的半套结果提交。
         _r13_write(
-            await db.execute(
-                f"DELETE FROM sections WHERE id IN ({placeholders})",
-                list(full_delete_ids)),
+            await db.execute(f"DELETE FROM sections WHERE id IN ({placeholders})", list(full_delete_ids)),
             "save-as-outline：删除未复用旧章节",
             expected=len(full_delete_ids),
             status=409,
-            message="目录章节在保存期间被并发修改，本次保存已中止，请刷新后重试")
+            message="目录章节在保存期间被并发修改，本次保存已中止，请刷新后重试",
+        )
 
     # 批量更新匹配章节（结构字段，保留正文）
     if updates:
@@ -739,11 +834,13 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
             await db.executemany(
                 "UPDATE sections SET title=?, description=?, level=?, parent_id=?,"
                 " word_budget=?, outline_json=?, sort_order=?, updated_at=? WHERE id=?",
-                updates),
+                updates,
+            ),
             "save-as-outline：更新匹配章节结构字段",
             expected=len(updates),
             status=409,
-            message="目录章节在保存期间被并发修改，本次保存已中止，请刷新后重试")
+            message="目录章节在保存期间被并发修改，本次保存已中止，请刷新后重试",
+        )
 
     # 批量插入新章节
     if new_inserts:
@@ -755,22 +852,26 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
                 "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
                 " description, level, sort_order, status, outline_json, word_budget)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                new_inserts),
+                new_inserts,
+            ),
             "save-as-outline：插入新章节",
             expected=len(new_inserts),
             status=503,
-            message="服务暂时不可用，章节写入未完整生效，请稍后重试")
+            message="服务暂时不可用，章节写入未完整生效，请稍后重试",
+        )
 
     # ✅ 深化（2026-10-08 · 零行写）：方案在存在性检查后被并发删除时，
     #    UPDATE 命中 0 行 —— 章节已重建却无人认领（孤儿目录）。中止回滚。
     _r13_write(
         await db.execute(
             "UPDATE schemes SET outline_source='上传识别', status='目录已确认', updated_at=? WHERE id=?",
-            (datetime.now().isoformat(), scheme_id)),
+            (datetime.now().isoformat(), scheme_id),
+        ),
         "save-as-outline：回写方案目录来源/状态",
         expected=1,
         status=404,
-        message="方案不存在（可能已被删除），本次保存已中止")
+        message="方案不存在（可能已被删除），本次保存已中止",
+    )
     # ✅ 链路断裂修复（2026-10-03）：同步回写 project_id（取自方案反查）——
     #    否则历史/无项目上下文入口产生的空 project_id 记录在方案保存后
     #    仍不被删项目级联覆盖（R32 的显式 DELETE 按 project_id 匹配 0 行）。
@@ -779,24 +880,29 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     _r13_write(
         await db.execute(
             "UPDATE uploaded_outlines SET scheme_id=?, project_id=?, status='saved' WHERE id=?",
-            (scheme_id, project_id or "", upload_id)),
+            (scheme_id, project_id or "", upload_id),
+        ),
         "save-as-outline：回写上传记录归属链",
         expected=1,
         status=404,
-        message="上传记录不存在（可能已被删除），本次保存已中止")
+        message="上传记录不存在（可能已被删除），本次保存已中止",
+    )
     # ✅ 整表重建后作废一致性扫描缓存（与 /save-outline 同口径，2026-09-23）
     from app.routers.sections import invalidate_consistency_scan_cache
+
     await invalidate_consistency_scan_cache(db, scheme_id)
     # ✅ 编号统一（2026-09-26 · D4 口径补齐）：本接口同样会改变保留章节的编号
     #    （标题匹配命中后按新位置重排），必须按新编号重规范化已落库正文的子标题，
     #    否则与 create/delete/reorder/save-outline 四处漂移。
     from app.routers.sections import _renormalize_all_section_contents
+
     await _renormalize_all_section_contents(db, scheme_id)
     await db.commit()
     # ✅ BUG 修复（2026-10-04 · 缓存漏失效）：整表重建改变章节树与编号，
     #    旧 export_cache 行与磁盘产物成为孤儿，口径与 /save-outline 一致。
     try:
         from app.services.facts_extractor import invalidate_export_cache
+
         await invalidate_export_cache(db, scheme_id)
     except Exception as _e:  # noqa: BLE001
         logger.warning("上传目录保存：导出缓存失效失败（不影响保存结果）: %s", _e)
@@ -807,20 +913,27 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     #    ⇒ 用户上传的文档里若本身就写着「专项6」「总体实施策划（2）」，
     #    会**原样落库**且前端零感知。R85 已在提示词侧补了识别纪律
     #    （`outline_recognition_system` 规则 6），程序侧闸门补上后形成双层。
-    result = attach_generic_residual(result, outline, scheme_id=scheme_id,
-                                     context="upload-outline")
+    result = attach_generic_residual(result, outline, scheme_id=scheme_id, context="upload-outline")
     # ✅ R89 G1 补接线（本轮）：加法式回传「自动改写了几条占位标题」（>0 才挂）——
     #    否则自动重写静默生效，用户以为目录原样保存，实际章节名已变。
     #    与 `sections._save_outline_to_db` 的回传键**同名同形态**，前端一处消费。
     if _generic_autofixed:
         result["generic_autofixed"] = _generic_autofixed
+    if _generic_autofix_failed:
+        # ✅ D-09：自动改写未执行（异常/超时）→ 原样落库，必须让用户看到。
+        result["generic_autofix_failed"] = True
+    # ✅ R175 G-3：逃生舱（allow_empty_chapters=true）放行时加法式回传空壳一级章
+    #    明细（与 sections._save_outline_to_db 同键同形态，前端一处消费、不静默）。
+    if _empty_tops:
+        result["empty_top_chapters"] = _empty_tops
     if preserved_count:
         result["preserved_content"] = preserved_count
         result["note"] = f"已通过标题匹配保留 {preserved_count} 个章节的已有正文内容"
     if cleared_content:
         result["cleared_content_sections"] = cleared_content
-        result["note"] = ((result.get("note", "") + "；") if result.get("note") else "") + \
-            f"另有 {cleared_content} 个未匹配章节的已生成正文被清除"
+        result["note"] = (
+            (result.get("note", "") + "；") if result.get("note") else ""
+        ) + f"另有 {cleared_content} 个未匹配章节的已生成正文被清除"
     return result
 
 
@@ -831,6 +944,7 @@ async def save_as_library(upload_id: str, body: dict, db=Depends(get_db)):
     # ✅ BUG 修复：入库前统一规范化（三级裁剪 + 编号重排），
     #    与「保存为方案目录」路径保持一致，避免目录库存入 4+ 级/内嵌编号的脏数据。
     from app.services.outline_utils import normalize_outline_json
+
     raw_outline = body.get("outline", [])
     outline_json = normalize_outline_json(raw_outline)
     # ✅ PRD 9.2：保存前必须通过层级校验；空目录 / 全是非法节点时明确拒绝，
@@ -848,7 +962,8 @@ async def save_as_library(upload_id: str, body: dict, db=Depends(get_db)):
     #    空 outline 的 400 优先级更高，故放到该检查之后。
     cur = await _r13(
         await db.execute("SELECT id FROM uploaded_outlines WHERE id=?", (upload_id,)),
-        "save-as-library：上传记录存在性检查")
+        "save-as-library：上传记录存在性检查",
+    )
     if not await cur.fetchone():
         raise HTTPException(404, "上传记录不存在")
     lid = str(uuid.uuid4())
@@ -862,18 +977,20 @@ async def save_as_library(upload_id: str, body: dict, db=Depends(get_db)):
     #    （目录库列表出现无法追溯来源的「上传识别」条目）。
     _r13_write(
         await db.execute(
-            "INSERT INTO outline_library (id, name, source, outline_json, review_status)"
-            " VALUES (?,?,?,?,?)",
-            (lid, name, "上传识别", outline_json, "待审核")),
+            "INSERT INTO outline_library (id, name, source, outline_json, review_status)" " VALUES (?,?,?,?,?)",
+            (lid, name, "上传识别", outline_json, "待审核"),
+        ),
         "save-as-library：写入目录库",
         expected=1,
         status=503,
-        message="服务暂时不可用，目录库写入未生效，请稍后重试")
+        message="服务暂时不可用，目录库写入未生效，请稍后重试",
+    )
     _r13_write(
         await db.execute("UPDATE uploaded_outlines SET status='library_saved' WHERE id=?", (upload_id,)),
         "save-as-library：回写上传记录状态",
         expected=1,
         status=404,
-        message="上传记录不存在（可能已被删除），本次保存已中止")
+        message="上传记录不存在（可能已被删除），本次保存已中止",
+    )
     await db.commit()
     return {"id": lid, "ok": True}

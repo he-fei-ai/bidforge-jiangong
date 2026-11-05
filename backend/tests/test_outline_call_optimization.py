@@ -17,6 +17,7 @@
 4. D 默认 merge_k=1 时与旧行为逐字一致（单章单元委托 _fetch_chapter_children）；
 5. 批量单元缺章/失败按章回退单章调用，绝不整批判死。
 """
+
 import inspect
 import json
 
@@ -30,8 +31,13 @@ async def _push_stats():
 
 
 def _mk_outline():
-    return [{"title": "工程概况", "description": "x" * 100, "children": [
-        {"title": "工程概况说明", "description": "y" * 100, "children": []}]}]
+    return [
+        {
+            "title": "工程概况",
+            "description": "x" * 100,
+            "children": [{"title": "工程概况说明", "description": "y" * 100, "children": []}],
+        }
+    ]
 
 
 # ============================================================
@@ -59,7 +65,6 @@ class TestJsonModeCallSites:
     def test_patch_and_batch_sites(self):
         assert 'scene="outline_fix"' in inspect.getsource(sh._try_outline_patch)
         assert 'scene="outline_sublevel"' in inspect.getsource(sh._fetch_unit_children)
-
 
 
 # ============================================================
@@ -92,13 +97,18 @@ class TestMergedReviewFix:
 
     async def test_fixed_outline_adopted_without_second_call(self, monkeypatch):
         """审核轮携带合法 fixed_outline → 直接采用，不再发起独立修复调用。"""
-        review = {"passed": False, "suggestions": ["补监测方案"],
-                  "fixed_outline": [
-                      {"title": "工程概况", "description": "", "children": []},
-                      {"title": "监测方案", "description": "新增", "children": []}]}
+        review = {
+            "passed": False,
+            "suggestions": ["补监测方案"],
+            "fixed_outline": [
+                {"title": "工程概况", "description": "", "children": []},
+                {"title": "监测方案", "description": "新增", "children": []},
+            ],
+        }
         calls = self._mk(monkeypatch, review)
         outline, review_obj = await sh._review_and_fix_outline(
-            _mk_outline(), "深基坑", True, "摘要", scheme_name="方案")
+            _mk_outline(), "深基坑", True, "摘要", scheme_name="方案"
+        )
         assert len(calls) == 1, "合并修复不得再发起第二次 AI 调用"
         assert review_obj["passed"] is True
         assert review_obj["suggestions"][0] == "✅ 已根据审核意见自动修复（审核轮合并输出）"
@@ -107,41 +117,43 @@ class TestMergedReviewFix:
 
     async def test_fixed_outline_preserves_original_descriptions(self, monkeypatch):
         """模型带回的是骨架截断版描述（60 字）→ 合并时必须恢复原文。"""
-        review = {"passed": False, "suggestions": ["补监测"],
-                  "fixed_outline": [
-                      {"title": "工程概况", "description": "x" * 60, "children": [
-                          {"title": "工程概况说明", "description": "y" * 60,
-                           "children": []}]},
-                      {"title": "监测方案", "description": "新章", "children": []}]}
+        review = {
+            "passed": False,
+            "suggestions": ["补监测"],
+            "fixed_outline": [
+                {
+                    "title": "工程概况",
+                    "description": "x" * 60,
+                    "children": [{"title": "工程概况说明", "description": "y" * 60, "children": []}],
+                },
+                {"title": "监测方案", "description": "新章", "children": []},
+            ],
+        }
         calls = self._mk(monkeypatch, review)
-        outline, _ = await sh._review_and_fix_outline(
-            _mk_outline(), "深基坑", True, "摘要", scheme_name="方案")
+        outline, _ = await sh._review_and_fix_outline(_mk_outline(), "深基坑", True, "摘要", scheme_name="方案")
         assert len(calls) == 1
         assert outline[0]["description"] == "x" * 100, "截断描述必须恢复为原文"
         assert outline[0]["children"][0]["description"] == "y" * 100
 
     async def test_degraded_fixed_outline_falls_back_to_fix_call(self, monkeypatch):
         """fixed_outline 节点数远低于原目录（退化）→ 回退独立修复调用。"""
-        review = {"passed": False, "suggestions": ["重写"],
-                  "fixed_outline": [{"title": "示例", "children": []}]}
+        review = {"passed": False, "suggestions": ["重写"], "fixed_outline": [{"title": "示例", "children": []}]}
         # 原目录 5 节点（退化阈值 int(5*0.8)=4），fixed 仅 1 节点 → 判退化
-        big_orig = [{"title": f"章{i}", "description": "d", "children": []}
-                    for i in range(5)]
+        big_orig = [{"title": f"章{i}", "description": "d", "children": []} for i in range(5)]
         fix = {"outline": [dict(n) for n in big_orig]}  # 5 节点，过退化护栏
         calls = self._mk(monkeypatch, review, fix)
-        _outline, review_obj = await sh._review_and_fix_outline(
-            big_orig, "深基坑", True, "摘要", scheme_name="方案")
+        _outline, review_obj = await sh._review_and_fix_outline(big_orig, "深基坑", True, "摘要", scheme_name="方案")
         assert len(calls) == 2, "退化时必须回退独立修复调用"
         assert review_obj["suggestions"][0] == "✅ 已根据审核意见自动修复"
 
     async def test_invalid_fixed_outline_falls_back(self, monkeypatch):
         """fixed_outline 结构非法（缺 title）→ 回退独立修复调用。"""
-        review = {"passed": False, "suggestions": ["补齐"],
-                  "fixed_outline": [{"children": []}, {"children": []}]}
+        review = {"passed": False, "suggestions": ["补齐"], "fixed_outline": [{"children": []}, {"children": []}]}
         fix = {"outline": _mk_outline()}
         calls = self._mk(monkeypatch, review, fix)
         _outline, review_obj = await sh._review_and_fix_outline(
-            _mk_outline(), "深基坑", True, "摘要", scheme_name="方案")
+            _mk_outline(), "深基坑", True, "摘要", scheme_name="方案"
+        )
         assert len(calls) == 2
         assert review_obj["passed"] is True
 
@@ -151,11 +163,10 @@ class TestMergedReviewFix:
         fix = {"outline": _mk_outline()}
         calls = self._mk(monkeypatch, review, fix)
         _outline, review_obj = await sh._review_and_fix_outline(
-            _mk_outline(), "深基坑", True, "摘要", scheme_name="方案")
+            _mk_outline(), "深基坑", True, "摘要", scheme_name="方案"
+        )
         assert len(calls) == 2
         assert review_obj["suggestions"][0] == "✅ 已根据审核意见自动修复"
-
-
 
 
 # ============================================================
@@ -170,21 +181,18 @@ class TestRequirementsCoverage:
         monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False)
 
     def test_split_items_strips_numbering(self):
-        items = sh._split_requirement_items(
-            "1. 工程概况及特点\n2）施工部署与进度计划\n- 安全保证措施\n短\n")
+        items = sh._split_requirement_items("1. 工程概况及特点\n2）施工部署与进度计划\n- 安全保证措施\n短\n")
         assert items == ["工程概况及特点", "施工部署与进度计划", "安全保证措施"]
 
     def test_covered_by_lcs(self):
         outline = [{"title": "施工进度计划及保证措施", "children": []}]
-        covered, missing = sh._check_requirements_coverage(
-            "施工进度计划", outline)
+        covered, missing = sh._check_requirements_coverage("施工进度计划", outline)
         assert covered and missing == []
 
     def test_covered_by_segment(self):
         """并列条目按片段匹配：「计算书」片段（≥3字）命中「计算书及相关图纸」。"""
         outline = [{"title": "计算书及相关图纸", "children": []}]
-        covered, _ = sh._check_requirements_coverage(
-            "计算书、相关图纸", outline)
+        covered, _ = sh._check_requirements_coverage("计算书、相关图纸", outline)
         assert covered
 
     def test_uncertain_pushes_to_missing(self):
@@ -192,30 +200,51 @@ class TestRequirementsCoverage:
         绝不因误判覆盖而放过真实缺失）。「计算书」前后被长修饰包裹时
         （公共子串仅 3 字）仍判缺失 → 走外科补齐/AI 审核。"""
         outline = [{"title": "计算书及相关图纸", "children": []}]
-        covered, missing = sh._check_requirements_coverage(
-            "深基坑支护设计计算书", outline)
+        covered, missing = sh._check_requirements_coverage("深基坑支护设计计算书", outline)
         assert not covered and missing
 
     def test_missing_reported(self):
         outline = [{"title": "工程概况", "children": []}]
-        covered, missing = sh._check_requirements_coverage(
-            "监测方案与预警值设置", outline)
+        covered, missing = sh._check_requirements_coverage("监测方案与预警值设置", outline)
         assert not covered and missing == ["监测方案与预警值设置"]
 
     def test_dangerous_required_chapters(self):
         """危大工程：10 个必备章关键词逐一检查，缺「监测」即报缺失。"""
-        outline = [{"title": t, "children": []} for t in (
-            "工程概况", "编制依据", "施工计划", "施工工艺技术", "安全保证措施",
-            "人员分工", "验收要求", "应急处置措施", "计算书及相关图纸")]
+        outline = [
+            {"title": t, "children": []}
+            for t in (
+                "工程概况",
+                "编制依据",
+                "施工计划",
+                "施工工艺技术",
+                "安全保证措施",
+                "人员分工",
+                "验收要求",
+                "应急处置措施",
+                "计算书及相关图纸",
+            )
+        ]
         covered, missing = sh._check_requirements_coverage("", outline, True)
         assert not covered
         assert any("监测" in m for m in missing)
 
 
 def _dangerous_full_outline():
-    return [{"title": t, "children": []} for t in (
-        "工程概况", "编制依据", "施工计划", "施工工艺技术", "安全保证措施",
-        "人员分工", "验收要求", "应急处置措施", "计算书及相关图纸", "监测方案")]
+    return [
+        {"title": t, "children": []}
+        for t in (
+            "工程概况",
+            "编制依据",
+            "施工计划",
+            "施工工艺技术",
+            "安全保证措施",
+            "人员分工",
+            "验收要求",
+            "应急处置措施",
+            "计算书及相关图纸",
+            "监测方案",
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -230,8 +259,8 @@ class TestProgrammaticPrecheck:
 
         monkeypatch.setattr(sh, "collect_json_response", fake_collect)
         outline, review = await sh._review_and_fix_outline(
-            _dangerous_full_outline(), "深基坑", True, "摘要",
-            requirements="1. 工程概况\n2. 监测方案")
+            _dangerous_full_outline(), "深基坑", True, "摘要", requirements="1. 工程概况\n2. 监测方案"
+        )
         assert calls == [], "全过时不得发起任何 AI 调用"
         assert review["passed"] is True
         assert review["review_mode"] == "programmatic"
@@ -254,17 +283,21 @@ class TestProgrammaticPrecheck:
             calls.append(kwargs)
             assert validate_fn is sh._outline_patch_validate_fn
             assert kwargs.get("scene") == "outline_fix"
-            obj = {"new_chapters": [{
-                "title": "监测方案", "description": "监测点布置与预警",
-                "insert_after": "安全保证措施",
-                "children": [{"title": "监测点布置", "children": []}]}]}
+            obj = {
+                "new_chapters": [
+                    {
+                        "title": "监测方案",
+                        "description": "监测点布置与预警",
+                        "insert_after": "安全保证措施",
+                        "children": [{"title": "监测点布置", "children": []}],
+                    }
+                ]
+            }
             return obj, json.dumps(obj, ensure_ascii=False)
 
         monkeypatch.setattr(sh, "collect_json_response", fake_collect)
-        base = [{"title": "工程概况", "children": []},
-                {"title": "安全保证措施", "children": []}]
-        outline, review = await sh._review_and_fix_outline(
-            base, "房建", False, "摘要", requirements="监测方案与预警")
+        base = [{"title": "工程概况", "children": []}, {"title": "安全保证措施", "children": []}]
+        outline, review = await sh._review_and_fix_outline(base, "房建", False, "摘要", requirements="监测方案与预警")
         assert len(calls) == 1, "外科式补齐只应发起 1 次 AI 调用"
         assert review["review_mode"] == "programmatic+surgical"
         titles = [n["title"] for n in outline]
@@ -277,14 +310,13 @@ class TestProgrammaticPrecheck:
         async def fake_collect(messages, validate_fn=None, **kwargs):
             calls.append(validate_fn)
             if len(calls) == 1:
-                raise RuntimeError("AI 挂了")   # 外科式补齐失败
+                raise RuntimeError("AI 挂了")  # 外科式补齐失败
             return {"passed": True, "suggestions": []}, "{}"
 
         monkeypatch.setattr(sh, "render", lambda *a, **k: "PROMPT")
         monkeypatch.setattr(sh, "collect_json_response", fake_collect)
         base = [{"title": "工程概况", "children": []}]
-        _outline, review = await sh._review_and_fix_outline(
-            base, "房建", False, "摘要", requirements="监测方案与预警")
+        _outline, review = await sh._review_and_fix_outline(base, "房建", False, "摘要", requirements="监测方案与预警")
         assert len(calls) == 2, "补齐失败必须回退到完整 AI 审核"
         assert review["passed"] is True
         assert "review_mode" not in review
@@ -300,9 +332,7 @@ class TestProgrammaticPrecheck:
 
         monkeypatch.setattr(sh, "render", lambda *a, **k: "PROMPT")
         monkeypatch.setattr(sh, "collect_json_response", fake_collect)
-        await sh._review_and_fix_outline(
-            _dangerous_full_outline(), "深基坑", True, "摘要",
-            requirements="工程概况")
+        await sh._review_and_fix_outline(_dangerous_full_outline(), "深基坑", True, "摘要", requirements="工程概况")
         assert len(calls) == 1, "always 模式必须照旧走 AI 审核"
 
     async def test_no_requirements_keeps_ai_review(self, monkeypatch):
@@ -315,17 +345,16 @@ class TestProgrammaticPrecheck:
 
         monkeypatch.setattr(sh, "render", lambda *a, **k: "PROMPT")
         monkeypatch.setattr(sh, "collect_json_response", fake_collect)
-        await sh._review_and_fix_outline(
-            _dangerous_full_outline(), "深基坑", True, "摘要", requirements="")
+        await sh._review_and_fix_outline(_dangerous_full_outline(), "深基坑", True, "摘要", requirements="")
         assert len(calls) == 1
 
     async def test_merge_patch_appends_when_no_match(self):
         outline = [{"title": "工程概况", "children": []}]
-        merged = sh._merge_patch_chapters(outline, [
-            {"title": "监测方案", "insert_after": "不存在的章", "children": []}])
+        merged = sh._merge_patch_chapters(
+            outline, [{"title": "监测方案", "insert_after": "不存在的章", "children": []}]
+        )
         assert [n["title"] for n in merged] == ["工程概况", "监测方案"]
         assert merged[0]["id"] == "1" and merged[1]["id"] == "2"
-
 
 
 # ============================================================
@@ -338,13 +367,11 @@ class TestBatchConfig:
         assert s.outline_review_mode == "auto"
 
     def test_module_constant_follows_settings(self):
-        assert sh.OUTLINE_CHAPTER_BATCH_SIZE == max(
-            1, int(Settings().outline_chapter_batch_size))
+        assert sh.OUTLINE_CHAPTER_BATCH_SIZE == max(1, int(Settings().outline_chapter_batch_size))
         assert sh.OUTLINE_REVIEW_MODE == Settings().outline_review_mode
 
     def test_batch_validator(self):
-        assert sh._sublevel_batch_validate_fn({"chapters": [
-            {"chapter_id": "1", "outline": []}]}) == []
+        assert sh._sublevel_batch_validate_fn({"chapters": [{"chapter_id": "1", "outline": []}]}) == []
         assert sh._sublevel_batch_validate_fn({"chapters": []})
         assert sh._sublevel_batch_validate_fn({"chapters": [{"chapter_id": "1"}]})
         assert sh._sublevel_batch_validate_fn({})
@@ -364,6 +391,7 @@ class TestFetchUnitChildren:
 
             async def _coro():
                 return result, "raw"
+
             return _coro()
 
         monkeypatch.setattr(sh, "collect_json_response", fake_collect)
@@ -375,25 +403,36 @@ class TestFetchUnitChildren:
         outline = [{"title": "1.1", "children": []}]
         calls = self._mk(monkeypatch, [{"outline": outline}])
         status, per = await sh._fetch_unit_children(
-            [(0, {"title": "第1章"})], batch_prompt=[{"role": "system", "content": "x"}],
-            single_prompts=None, task_id="t", sem=None, timeout=1,
-            push_stats=_push_stats)
+            [(0, {"title": "第1章"})],
+            batch_prompt=[{"role": "system", "content": "x"}],
+            single_prompts=None,
+            task_id="t",
+            sem=None,
+            timeout=1,
+            push_stats=_push_stats,
+        )
         assert status == "ok"
         assert per == [("ok", outline)]
         assert calls[0]["kwargs"]["scene"] == "outline_sublevel"
 
     async def test_multi_chapter_unit_one_call(self, monkeypatch):
         """merge_k>1：2 章合并为 1 次批量调用（chapter_id 归位）。"""
-        batch_obj = {"chapters": [
-            {"chapter_id": "1", "outline": [{"title": "1.1", "children": []}]},
-            {"chapter_id": "2", "outline": [{"title": "2.1", "children": []}]}]}
+        batch_obj = {
+            "chapters": [
+                {"chapter_id": "1", "outline": [{"title": "1.1", "children": []}]},
+                {"chapter_id": "2", "outline": [{"title": "2.1", "children": []}]},
+            ]
+        }
         calls = self._mk(monkeypatch, [batch_obj])
         status, per = await sh._fetch_unit_children(
             [(0, {"title": "A"}), (1, {"title": "B"})],
             batch_prompt=[{"role": "system", "content": "batch"}],
-            single_prompts=[[{"role": "system", "content": "s1"}],
-                            [{"role": "system", "content": "s2"}]],
-            task_id="t", sem=None, timeout=1, push_stats=_push_stats)
+            single_prompts=[[{"role": "system", "content": "s1"}], [{"role": "system", "content": "s2"}]],
+            task_id="t",
+            sem=None,
+            timeout=1,
+            push_stats=_push_stats,
+        )
         assert status == "ok"
         assert len(calls) == 1, "2 章应合并为 1 次 AI 调用"
         assert calls[0]["kwargs"]["scene"] == "outline_sublevel"
@@ -402,16 +441,18 @@ class TestFetchUnitChildren:
 
     async def test_missing_chapter_falls_back_to_single(self, monkeypatch):
         """批量响应缺章 → 该章回退单章调用（不丢章、不整批判死）。"""
-        batch_obj = {"chapters": [
-            {"chapter_id": "1", "outline": [{"title": "1.1", "children": []}]}]}
+        batch_obj = {"chapters": [{"chapter_id": "1", "outline": [{"title": "1.1", "children": []}]}]}
         single_obj = {"outline": [{"title": "2.1", "children": []}]}
         calls = self._mk(monkeypatch, [batch_obj, single_obj])
         status, per = await sh._fetch_unit_children(
             [(0, {"title": "A"}), (1, {"title": "B"})],
             batch_prompt=[{"role": "system", "content": "batch"}],
-            single_prompts=[[{"role": "system", "content": "s1"}],
-                            [{"role": "system", "content": "s2"}]],
-            task_id="t", sem=None, timeout=1, push_stats=_push_stats)
+            single_prompts=[[{"role": "system", "content": "s1"}], [{"role": "system", "content": "s2"}]],
+            task_id="t",
+            sem=None,
+            timeout=1,
+            push_stats=_push_stats,
+        )
         assert status == "ok"
         assert len(calls) == 2, "批量 1 次 + 缺章单章兜底 1 次"
         assert per[0][0] == "ok" and per[1][0] == "ok"
@@ -419,17 +460,24 @@ class TestFetchUnitChildren:
 
     async def test_batch_failure_falls_back_per_chapter(self, monkeypatch):
         """批量整体失败（首试+重试）→ 逐章回退单章调用。"""
-        calls = self._mk(monkeypatch, [
-            Exception("boom1"), Exception("boom2"),          # 批量两试全挂
-            {"outline": [{"title": "1.1", "children": []}]},  # 单章兜底1
-            {"outline": [{"title": "2.1", "children": []}]},  # 单章兜底2
-        ])
+        calls = self._mk(
+            monkeypatch,
+            [
+                Exception("boom1"),
+                Exception("boom2"),  # 批量两试全挂
+                {"outline": [{"title": "1.1", "children": []}]},  # 单章兜底1
+                {"outline": [{"title": "2.1", "children": []}]},  # 单章兜底2
+            ],
+        )
         status, per = await sh._fetch_unit_children(
             [(0, {"title": "A"}), (1, {"title": "B"})],
             batch_prompt=[{"role": "system", "content": "batch"}],
-            single_prompts=[[{"role": "system", "content": "s1"}],
-                            [{"role": "system", "content": "s2"}]],
-            task_id="t", sem=None, timeout=1, push_stats=_push_stats)
+            single_prompts=[[{"role": "system", "content": "s1"}], [{"role": "system", "content": "s2"}]],
+            task_id="t",
+            sem=None,
+            timeout=1,
+            push_stats=_push_stats,
+        )
         assert status == "ok"
         assert len(calls) == 4
         assert all(s == "ok" for s, _ in per)
@@ -439,11 +487,15 @@ class TestFetchUnitChildren:
         calls = self._mk(monkeypatch, [], stopped_fn=lambda task_id: True)
         status, per = await sh._fetch_unit_children(
             [(0, {"title": "A"}), (1, {"title": "B"})],
-            batch_prompt=[], single_prompts=None,
-            task_id="t", sem=None, timeout=1, push_stats=_push_stats)
+            batch_prompt=[],
+            single_prompts=None,
+            task_id="t",
+            sem=None,
+            timeout=1,
+            push_stats=_push_stats,
+        )
         assert status == "stopped" and per == []
         assert calls == [], "停止后不得启动 AI 调用"
-
 
 
 # ============================================================
@@ -454,14 +506,21 @@ class TestSceneAudit:
     async def test_log_audit_writes_scene(self, db_conn):
         """_log_audit 写入的 scene 必须随批量落库持久化。"""
         import app.services.ai.provider_factory as pf
+
         pf._audit_buffer.clear()
         pf._audit_last_flush["ts"] = 1e18  # 阻止 10s 兜底自动 flush
-        await pf._log_audit("deepseek", "deepseek-chat", "chat", 1.5, True,
-                            prompt_tokens=120, completion_tokens=45,
-                            scene="outline_review")
+        await pf._log_audit(
+            "deepseek",
+            "deepseek-chat",
+            "chat",
+            1.5,
+            True,
+            prompt_tokens=120,
+            completion_tokens=45,
+            scene="outline_review",
+        )
         await pf.flush_audit_buffer()
-        cur = await db_conn.execute(
-            "SELECT scene, prompt_tokens FROM ai_audit_logs")
+        cur = await db_conn.execute("SELECT scene, prompt_tokens FROM ai_audit_logs")
         row = await cur.fetchone()
         assert row["scene"] == "outline_review"
         assert row["prompt_tokens"] == 120
@@ -475,6 +534,7 @@ class TestSceneAudit:
     async def test_collect_json_response_forwards_scene(self, monkeypatch):
         """collect_json_response 必须把 scene 透传给 chat_with_fallback。"""
         from app.services.ai import json_response as jr
+
         captured = []
 
         async def fake_chat(messages, **kwargs):
@@ -482,28 +542,30 @@ class TestSceneAudit:
             return '{"outline": []}'
 
         monkeypatch.setattr(jr, "chat_with_fallback", fake_chat)
-        obj, _raw = await jr.collect_json_response(
-            [{"role": "system", "content": "x"}], scene="outline_draft")
+        obj, _raw = await jr.collect_json_response([{"role": "system", "content": "x"}], scene="outline_draft")
         assert captured and captured[0].get("scene") == "outline_draft"
 
     async def test_stats_by_scene(self, db_conn):
         """/ai/stats 返回 by_scene 聚合（仅统计打了 scene 标记的 chat 调用）。"""
         from app.routers.ai_config import usage as usage_mod
+
         await db_conn.execute(
             "INSERT INTO ai_audit_logs (id, provider_name, model, action,"
             " prompt_tokens, completion_tokens, cached_tokens, duration, success, scene)"
-            " VALUES ('sc1','deepseek','m','chat',100,50,0,1.0,1,'outline_draft')")
+            " VALUES ('sc1','deepseek','m','chat',100,50,0,1.0,1,'outline_draft')"
+        )
         await db_conn.execute(
             "INSERT INTO ai_audit_logs (id, provider_name, model, action,"
             " prompt_tokens, completion_tokens, cached_tokens, duration, success, scene)"
-            " VALUES ('sc2','deepseek','m','chat',10,5,0,0.5,1,'outline_draft')")
+            " VALUES ('sc2','deepseek','m','chat',10,5,0,0.5,1,'outline_draft')"
+        )
         await db_conn.execute(
             "INSERT INTO ai_audit_logs (id, provider_name, model, action,"
             " duration, success, scene)"
-            " VALUES ('sc3','deepseek','m','chat',0.5,1,'')")
+            " VALUES ('sc3','deepseek','m','chat',0.5,1,'')"
+        )
         await db_conn.commit()
         res = await usage_mod.ai_stats(days=30, db=db_conn)
         assert "by_scene" in res
         row = [r for r in res["by_scene"] if r["scene"] == "outline_draft"]
         assert row and row[0]["calls"] == 2 and row[0]["tokens"] == 165
-

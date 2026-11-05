@@ -22,6 +22,7 @@ r"""解析提取 / 目录生成模块 · 深度探查修复护栏（2026-09-27 �
    docstring 承诺 `content_subheading_renumber=False` 时 `skipped=True`，
    实际 `skipped` 恒 False（消费方把「无法判定」误读成「校验通过」）。现显式回传。
 """
+
 import json
 import re
 from pathlib import Path
@@ -43,41 +44,44 @@ from app.services.numbering import (
 class TestStripOutlineNumberingNumericPath:
     """点分编号 / 单段编号 / 年份的剥离边界（后端唯一实现）。"""
 
-    @pytest.mark.parametrize("raw,want", [
-        # —— 本次修复（修复前分别得到 "3（1）细部构造" / "1钢筋工程"）——
-        ("1.2.3（1）细部构造", "（1）细部构造"),
-        ("2.4.1钢筋工程", "钢筋工程"),
-        ("1.2.3（1）", "（1）"),
-        ("3.2.4.5钢筋", "钢筋"),
-        # 路径后带分隔符：与旧行为一致
-        ("5.1.1.1 深基坑", "深基坑"),
-        ("2.1 相关法律法规", "相关法律法规"),
-        ("1.0 零级", "零级"),
-        # 「第 X 章」允许空格（AI/粘贴文本常见）
-        ("第 3 章 施工计划", "施工计划"),
-        ("第 一 章 工程概况", "工程概况"),
-        # 单段编号：必须有分隔符
-        ("1 施工准备", "施工准备"),
-        ("3 资源配置", "资源配置"),
-        ("1）施工工艺", "施工工艺"),
-        ("一、安全保证", "安全保证"),
-        ("十二、安全保证", "安全保证"),
-        # 非编号：数值 + 单位 / 年份 / 编号前缀型词
-        ("1.5m 深", "1.5m 深"),
-        ("2023 年度安全生产计划", "2023 年度安全生产计划"),
-        ("2024年施工计划", "2024年施工计划"),
-        ("2023年规范", "2023年规范"),
-        ("表2-1 材料表", "表2-1 材料表"),
-        ("图3-2 布置图", "图3-2 布置图"),
-        ("3D打印施工方案", "3D打印施工方案"),
-        # 标题本身即编号 / 空标题 / 首尾空白
-        ("1.1", "1.1"),
-        ("1.2.3", "1.2.3"),
-        ("1.2.3.4.5.6.7.8", "1.2.3.4.5.6.7.8"),
-        ("第一章", "第一章"),
-        ("", ""),
-        (" 2.1 ", "2.1"),
-    ])
+    @pytest.mark.parametrize(
+        "raw,want",
+        [
+            # —— 本次修复（修复前分别得到 "3（1）细部构造" / "1钢筋工程"）——
+            ("1.2.3（1）细部构造", "（1）细部构造"),
+            ("2.4.1钢筋工程", "钢筋工程"),
+            ("1.2.3（1）", "（1）"),
+            ("3.2.4.5钢筋", "钢筋"),
+            # 路径后带分隔符：与旧行为一致
+            ("5.1.1.1 深基坑", "深基坑"),
+            ("2.1 相关法律法规", "相关法律法规"),
+            ("1.0 零级", "零级"),
+            # 「第 X 章」允许空格（AI/粘贴文本常见）
+            ("第 3 章 施工计划", "施工计划"),
+            ("第 一 章 工程概况", "工程概况"),
+            # 单段编号：必须有分隔符
+            ("1 施工准备", "施工准备"),
+            ("3 资源配置", "资源配置"),
+            ("1）施工工艺", "施工工艺"),
+            ("一、安全保证", "安全保证"),
+            ("十二、安全保证", "安全保证"),
+            # 非编号：数值 + 单位 / 年份 / 编号前缀型词
+            ("1.5m 深", "1.5m 深"),
+            ("2023 年度安全生产计划", "2023 年度安全生产计划"),
+            ("2024年施工计划", "2024年施工计划"),
+            ("2023年规范", "2023年规范"),
+            ("表2-1 材料表", "表2-1 材料表"),
+            ("图3-2 布置图", "图3-2 布置图"),
+            ("3D打印施工方案", "3D打印施工方案"),
+            # 标题本身即编号 / 空标题 / 首尾空白
+            ("1.1", "1.1"),
+            ("1.2.3", "1.2.3"),
+            ("1.2.3.4.5.6.7.8", "1.2.3.4.5.6.7.8"),
+            ("第一章", "第一章"),
+            ("", ""),
+            (" 2.1 ", "2.1"),
+        ],
+    )
     def test_strip_cases(self, raw, want):
         assert strip_outline_numbering(raw) == want
 
@@ -113,9 +117,12 @@ class TestStripOutlineNumberingNumericPath:
 
     def test_renumber_outline_nodes_keeps_leaf_title_intact(self):
         """目录树重排编号时，标题剥离不得损坏（id 由位置推导，标题保持裸标题）。"""
-        nodes = [{"title": "第一章 工程概况", "children": [
-            {"title": "1.1 编制依据", "children": [
-                {"title": "1.2.3（1）细部构造", "children": []}]}]}]
+        nodes = [
+            {
+                "title": "第一章 工程概况",
+                "children": [{"title": "1.1 编制依据", "children": [{"title": "1.2.3（1）细部构造", "children": []}]}],
+            }
+        ]
         renumber_outline_nodes(nodes)
         leaf = nodes[0]["children"][0]["children"][0]
         assert leaf["title"] == "（1）细部构造"
@@ -123,13 +130,11 @@ class TestStripOutlineNumberingNumericPath:
         assert leaf["level"] == 3
 
 
-
 # ============================================================
 # 2. md_structured：未知页引用不得让解析产物整批丢失
 # ============================================================
 _MD_UNKNOWN_PAGE = "<!-- page:1 -->\n基坑深度 12.5 米\n\n[IMAGE: scan.png, page:99]\n"
-_MD_KNOWN_PAGE = ("<!-- page:1 -->\n甲页内容\n\n[IMAGE: a.png, page:2]\n"
-                  "<!-- page:2 -->\n乙页内容\n")
+_MD_KNOWN_PAGE = "<!-- page:1 -->\n甲页内容\n\n[IMAGE: a.png, page:2]\n" "<!-- page:2 -->\n乙页内容\n"
 
 
 class TestMdStructuredUnknownPageRef:
@@ -163,8 +168,7 @@ class TestMdStructuredUnknownPageRef:
 
     def test_page_count_not_inflated_by_ref(self):
         """page_count 不得被引用页号虚增（曾出现 3 页文档报 99 页）。"""
-        md = ("<!-- page:1 -->\nA\n<!-- page:2 -->\nB\n<!-- page:3 -->\nC\n\n"
-              "[IMAGE: x.png, page:500]\n")
+        md = "<!-- page:1 -->\nA\n<!-- page:2 -->\nB\n<!-- page:3 -->\nC\n\n" "[IMAGE: x.png, page:500]\n"
         st = parse_markdown_structured(md, doc_id="D4")
         assert st["page_count"] == 3
 
@@ -176,15 +180,16 @@ class TestValidateNumberingSkippedContract:
     async def test_skipped_true_when_switch_disabled(self, db_conn, monkeypatch):
         """content_subheading_renumber=False 时校验被跳过 → skipped=True。"""
         from app.config import settings
+
         monkeypatch.setattr(settings, "content_subheading_renumber", False)
-        rep = await validate_section_content_numbering(
-            db_conn, "s1", "sec1", "## 1.1 子标题\n\n正文\n")
+        rep = await validate_section_content_numbering(db_conn, "s1", "sec1", "## 1.1 子标题\n\n正文\n")
         assert rep["skipped"] is True
         # 与既有消费方口径一致：视为通过（不产生漂移清单）
         assert rep["consistent"] is True
 
     async def test_skipped_false_when_switch_enabled(self, db_conn, monkeypatch):
         from app.config import settings
+
         monkeypatch.setattr(settings, "content_subheading_renumber", True)
         rep = await validate_section_content_numbering(db_conn, "s1", "sec1", "")
         assert rep["skipped"] is False
@@ -202,11 +207,8 @@ class TestSectionTreeSiblingOrderDeterminism:
     """
 
     async def _base(self, db, rows):
-        await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)",
-                         ("p1", "项目"))
-        await db.execute(
-            "INSERT OR IGNORE INTO schemes (id, project_id, name) VALUES (?,?,?)",
-            ("s1", "p1", "方案"))
+        await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)", ("p1", "项目"))
+        await db.execute("INSERT OR IGNORE INTO schemes (id, project_id, name) VALUES (?,?,?)", ("s1", "p1", "方案"))
         for nid, parent, title, so in rows:
             level = 2 if parent else 1
             oj = {"id": "1.1"} if parent else {"id": "1"}
@@ -214,24 +216,24 @@ class TestSectionTreeSiblingOrderDeterminism:
                 "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
                 " level, sort_order, status, outline_json, word_budget)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (nid, "s1", "p1", parent, title, level, so, "empty",
-                 json.dumps(oj, ensure_ascii=False), 1500))
+                (nid, "s1", "p1", parent, title, level, so, "empty", json.dumps(oj, ensure_ascii=False), 1500),
+            )
         await db.commit()
 
     async def test_tied_root_sort_order_ordered_by_id(self, db_conn):
         # 故意先插 id 大的：若只按 sort_order 排序，结果会随 SQL 顺序变化
         await self._base(db_conn, [("zz", "", "后插", 0), ("aa", "", "先插", 0)])
         from app.routers.sections import _build_tree
+
         first = [n["id"] for n in await _build_tree(db_conn, "s1")]
         second = [n["id"] for n in await _build_tree(db_conn, "s1")]
         assert first == ["aa", "zz"]
         assert second == first
 
     async def test_tied_children_sort_order_ordered_by_id(self, db_conn):
-        await self._base(db_conn, [("r1", "", "章", 0),
-                                   ("c2", "r1", "子二", 0),
-                                   ("c1", "r1", "子一", 0)])
+        await self._base(db_conn, [("r1", "", "章", 0), ("c2", "r1", "子二", 0), ("c1", "r1", "子一", 0)])
         from app.routers.sections import _build_tree
+
         tree = await _build_tree(db_conn, "s1")
         assert [c["id"] for c in tree[0]["children"]] == ["c1", "c2"]
 
@@ -240,6 +242,7 @@ class TestSectionTreeSiblingOrderDeterminism:
         await self._base(db_conn, [("zz", "", "B", 0), ("aa", "", "A", 0)])
         from app.routers.sections import _build_tree
         from app.services.numbering import renumber_section_outline_ids
+
         updates = renumber_section_outline_ids(await _build_tree(db_conn, "s1"))
         # 元组顺序：(outline_json, level, section_id)
         assert [u[2] for u in updates] == ["aa", "zz"]
@@ -264,8 +267,7 @@ def _count_executes(db):
     return state
 
 
-_BODY = "\n".join(["### 1.1 施工准备", "本段为正文内容示例。" * 5,
-                   "### 2.3 验收要求", "- 要点一", "- 要点二"])
+_BODY = "\n".join(["### 1.1 施工准备", "本段为正文内容示例。" * 5, "### 2.3 验收要求", "- 要点一", "- 要点二"])
 
 
 class TestRenormalizeAllSectionContentsPerf:
@@ -281,18 +283,15 @@ class TestRenormalizeAllSectionContentsPerf:
     """
 
     async def _seed(self, db, n):
-        await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)",
-                         ("p1", "项目"))
-        await db.execute(
-            "INSERT OR IGNORE INTO schemes (id, project_id, name) VALUES (?,?,?)",
-            ("s1", "p1", "方案"))
+        await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)", ("p1", "项目"))
+        await db.execute("INSERT OR IGNORE INTO schemes (id, project_id, name) VALUES (?,?,?)", ("s1", "p1", "方案"))
         for i in range(n):
             await db.execute(
                 "INSERT OR REPLACE INTO sections (id, scheme_id, project_id, title,"
                 " level, sort_order, outline_json, content)"
                 " VALUES (?,?,?,?,?,?,?,?)",
-                (f"sec{i}", "s1", "p1", f"第{i + 1}章", 1, i,
-                 json.dumps({"id": str(i + 1)}), _BODY))
+                (f"sec{i}", "s1", "p1", f"第{i + 1}章", 1, i, json.dumps({"id": str(i + 1)}), _BODY),
+            )
         await db.commit()
 
     async def test_query_count_is_constant_not_linear(self, db_conn):
@@ -318,11 +317,10 @@ class TestRenormalizeAllSectionContentsPerf:
         from app.services.numbering import load_scheme_section_index, normalize_section_content_subheadings
 
         await self._seed(db_conn, 3)
-        a, ca = await normalize_section_content_subheadings(
-            db_conn, "s1", "sec1", _BODY)
+        a, ca = await normalize_section_content_subheadings(db_conn, "s1", "sec1", _BODY)
         b, cb = await normalize_section_content_subheadings(
-            db_conn, "s1", "sec1", _BODY,
-            index=await load_scheme_section_index(db_conn, "s1"))
+            db_conn, "s1", "sec1", _BODY, index=await load_scheme_section_index(db_conn, "s1")
+        )
         assert a == b and ca == cb
 
     async def test_still_renormalizes_content(self, db_conn):
@@ -333,25 +331,22 @@ class TestRenormalizeAllSectionContentsPerf:
         """
         from app.routers.sections import _renormalize_all_section_contents
 
+        await db_conn.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)", ("p1", "项目"))
         await db_conn.execute(
-            "INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)",
-            ("p1", "项目"))
-        await db_conn.execute(
-            "INSERT OR IGNORE INTO schemes (id, project_id, name) VALUES (?,?,?)",
-            ("s1", "p1", "方案"))
+            "INSERT OR IGNORE INTO schemes (id, project_id, name) VALUES (?,?,?)", ("s1", "p1", "方案")
+        )
         await db_conn.execute(
             "INSERT OR REPLACE INTO sections (id, scheme_id, project_id, title,"
             " level, sort_order, outline_json, content)"
             " VALUES (?,?,?,?,?,?,?,?)",
-            ("x1", "s1", "p1", "现场布置", 2, 0,
-             json.dumps({"id": "2.1"}), "### 3.1 子标题\n\n正文段落。\n"))
+            ("x1", "s1", "p1", "现场布置", 2, 0, json.dumps({"id": "2.1"}), "### 3.1 子标题\n\n正文段落。\n"),
+        )
         await db_conn.commit()
 
         await _renormalize_all_section_contents(db_conn, "s1")
         cur = await db_conn.execute("SELECT content FROM sections WHERE id='x1'")
         row = await cur.fetchone()
-        assert "### 3.1 子标题" not in (row["content"] or ""), \
-            "子标题编号未被重算，N+1 优化把功能改坏了"
+        assert "### 3.1 子标题" not in (row["content"] or ""), "子标题编号未被重算，N+1 优化把功能改坏了"
         assert "子标题" in (row["content"] or "")
 
     async def test_prefetch_failure_falls_back(self, db_conn, monkeypatch):
@@ -373,25 +368,22 @@ class TestRenormalizeAllSectionContentsPerf:
 # 6. 前后端剥离编号正则的可执行等价护栏（AGENTS.md §4.10 纪律落地）
 # ============================================================
 # 前端路径（相对本文件：backend/tests → parents[2] = 仓库根 → frontend/src/pages）
-_FRONTEND_PAGE_TS = (
-    Path(__file__).resolve().parents[2]
-    / "frontend" / "src" / "pages" / "SchemeWorkbenchPage.tsx"
-)
+_FRONTEND_PAGE_TS = Path(__file__).resolve().parents[2] / "frontend" / "src" / "pages" / "SchemeWorkbenchPage.tsx"
 
 # 大文件拆分后：LEADING_NUMBER_* / stripOutlineNumbering 迁入
 # pages/schemeWorkbench/outlineNumbering.ts —— 聚合读取，逐字节 parity 语义不变。
-_FRONTEND_WB_GLOB = (
-    Path(__file__).resolve().parents[2]
-    / "frontend" / "src" / "pages" / "schemeWorkbench"
-)
+_FRONTEND_WB_GLOB = Path(__file__).resolve().parents[2] / "frontend" / "src" / "pages" / "schemeWorkbench"
 
 
 def _frontend_ts_sources() -> str:
     parts = [_FRONTEND_PAGE_TS.read_text(encoding="utf-8")]
-    for p in sorted(list(_FRONTEND_WB_GLOB.glob("*.ts"))
-                    + list(_FRONTEND_WB_GLOB.glob("*.tsx"))):
+    # R176：拆分仍在继续（含 tabs/ 子目录）—— 递归 + 非空兜底。
+    wb_files = sorted(list(_FRONTEND_WB_GLOB.rglob("*.ts")) + list(_FRONTEND_WB_GLOB.rglob("*.tsx")))
+    assert wb_files, f"拆分目录未被递归扫描到（0 个 ts/tsx）：{_FRONTEND_WB_GLOB}"
+    for p in wb_files:
         parts.append(p.read_text(encoding="utf-8"))
     return "\n".join(parts)
+
 
 # JS 字符串字面量内的转义捕获（详见 TestLeadingNumberRegexFrontendParity._extract）
 _U_ESC = re.compile(r"\\u([0-9a-fA-F]{4})")
@@ -437,8 +429,8 @@ class TestLeadingNumberRegexFrontendParity:
         # 块内 token = 字符串字面量 | 直接引用的常量名；按源码顺序还原 JS 运行时串
         src = "".join(
             self._js_value(lit) if lit else consts.get(ident, "")
-            for lit, ident in re.findall(
-                r'"((?:\\.|[^"\\])*)"|([A-Za-z_][A-Za-z0-9_]*)', block))
+            for lit, ident in re.findall(r'"((?:\\.|[^"\\])*)"|([A-Za-z_][A-Za-z0-9_]*)', block)
+        )
         return sep, cjk, src
 
     def test_char_classes_match_backend_constants(self):
@@ -447,9 +439,11 @@ class TestLeadingNumberRegexFrontendParity:
         ts = _frontend_ts_sources()
         sep, cjk, _ = self._extract(ts)
         from app.services.numbering import _CJK_BOUNDARY, _SEP_CLASS
+
         assert sep == _SEP_CLASS, f"前端 SEP={sep!r} ≠ 后端 _SEP_CLASS={_SEP_CLASS!r}"
-        assert self._decode(cjk) == self._decode(_CJK_BOUNDARY), \
-            f"前端 CJK={cjk!r} ≠ 后端 _CJK_BOUNDARY={_CJK_BOUNDARY!r}"
+        assert self._decode(cjk) == self._decode(
+            _CJK_BOUNDARY
+        ), f"前端 CJK={cjk!r} ≠ 后端 _CJK_BOUNDARY={_CJK_BOUNDARY!r}"
 
     def test_full_regex_matches_backend_source(self):
         if not _FRONTEND_PAGE_TS.exists():
@@ -457,10 +451,12 @@ class TestLeadingNumberRegexFrontendParity:
         ts = _frontend_ts_sources()
         _, _, src = self._extract(ts)
         from app.services.numbering import _STRIP_NUMBER_RE
+
         assert self._decode(src) == self._decode(_STRIP_NUMBER_RE.pattern), (
             "前端 LEADING_NUMBER_RE 与后端 _STRIP_NUMBER_RE 已漂移。"
             "规则：改 numbering.py::_STRIP_NUMBER_RE 必须同步改前端"
-            " LEADING_NUMBER_RE（字符类与分支顺序逐字符一致）。")
+            " LEADING_NUMBER_RE（字符类与分支顺序逐字符一致）。"
+        )
 
     def test_strip_behavior_battery_parity(self):
         if not _FRONTEND_PAGE_TS.exists():
@@ -468,17 +464,44 @@ class TestLeadingNumberRegexFrontendParity:
         ts = _frontend_ts_sources()
         _, _, src = self._extract(ts)
         from app.services.numbering import _STRIP_NUMBER_RE
+
         js_re = re.compile(self._decode(src))
         battery = [
-            "1.2.3（1）细部构造", "2.4.1钢筋工程", "3.2.4.5钢筋",
-            "1.2.3（1）", "5.1.1.1 深基坑", "2.1 相关法律法规", "1.0 零级",
-            "第 3 章 施工计划", "第 一 章 工程概况", "1 施工准备",
-            "3 资源配置", "1）施工工艺", "一、安全保证", "十二、安全保证",
-            "1.5m 深", "2023 年度安全生产计划", "2024年施工计划",
-            "2023年规范", "表2-1 材料表", "图3-2 布置图", "3D打印施工方案",
-            "1.1", "1.2.3", "1.2.3.4.5.6.7.8", "第一章", "",
-            " 2.1 ", "9月施工计划", "0.5t 平台", "1、施工", "（三）施工组织",
-            "第一章 第一章 工程概况", "ⅰ. 总则", "a. 施工部署", "第二节 材料",
+            "1.2.3（1）细部构造",
+            "2.4.1钢筋工程",
+            "3.2.4.5钢筋",
+            "1.2.3（1）",
+            "5.1.1.1 深基坑",
+            "2.1 相关法律法规",
+            "1.0 零级",
+            "第 3 章 施工计划",
+            "第 一 章 工程概况",
+            "1 施工准备",
+            "3 资源配置",
+            "1）施工工艺",
+            "一、安全保证",
+            "十二、安全保证",
+            "1.5m 深",
+            "2023 年度安全生产计划",
+            "2024年施工计划",
+            "2023年规范",
+            "表2-1 材料表",
+            "图3-2 布置图",
+            "3D打印施工方案",
+            "1.1",
+            "1.2.3",
+            "1.2.3.4.5.6.7.8",
+            "第一章",
+            "",
+            " 2.1 ",
+            "9月施工计划",
+            "0.5t 平台",
+            "1、施工",
+            "（三）施工组织",
+            "第一章 第一章 工程概况",
+            "ⅰ. 总则",
+            "a. 施工部署",
+            "第二节 材料",
         ]
         for t in battery:
             a = _STRIP_NUMBER_RE.sub("", t, count=1)

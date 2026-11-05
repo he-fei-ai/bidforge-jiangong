@@ -28,6 +28,7 @@
          保留的部分成果」与「AI 异常后保留的部分成果」。
          修复：白名单补齐 event / partial（与 content_generation 的 event 对齐）。
 """
+
 import asyncio
 import inspect
 import json
@@ -44,14 +45,17 @@ from fastapi import HTTPException
 # ---------------------------------------------------------------------------
 class _TaskSeeder:
     @staticmethod
-    def add(scheme_id: str = "sc1", *, task_type: str = "outline_generation",
-            status: str = "running") -> str:
+    def add(scheme_id: str = "sc1", *, task_type: str = "outline_generation", status: str = "running") -> str:
         """往 task_registry 内存态塞一个任务条目（与 G12 测试同一形状）。"""
         tid = f"t-{task_type}-{scheme_id}-{status}"
         tr._tasks[tid] = {
-            "type": task_type, "status": status, "scheme_id": scheme_id,
-            "progress": 0.5, "message": "",
-            "pause_event": asyncio.Event(), "stop_event": asyncio.Event(),
+            "type": task_type,
+            "status": status,
+            "scheme_id": scheme_id,
+            "progress": 0.5,
+            "message": "",
+            "pause_event": asyncio.Event(),
+            "stop_event": asyncio.Event(),
             "child_tasks": set(),
         }
         return tid
@@ -66,16 +70,15 @@ async def _seed_scheme(db, scheme_id: str = "sc1") -> None:
     await db.execute("INSERT INTO projects (id, name) VALUES (?, ?)", ("p1", "项目A"))
     await db.execute(
         "INSERT INTO schemes (id, project_id, name, type) VALUES (?, ?, ?, ?)",
-        (scheme_id, "p1", "深基坑专项方案", "深基坑"))
+        (scheme_id, "p1", "深基坑专项方案", "深基坑"),
+    )
     await db.execute(
         "INSERT INTO sections (id, scheme_id, project_id, parent_id, title, level,"
         " status, content, word_count, word_budget, sort_order) VALUES"
         " (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("s1", scheme_id, "p1", "", "第一章 工程概况", 1, "generated",
-         "旧正文内容", 100, 1500, 0))
-    await db.execute(
-        "UPDATE schemes SET outline_source=?, status=? WHERE id=?",
-        ("ai", "已完成", scheme_id))
+        ("s1", scheme_id, "p1", "", "第一章 工程概况", 1, "generated", "旧正文内容", 100, 1500, 0),
+    )
+    await db.execute("UPDATE schemes SET outline_source=?, status=? WHERE id=?", ("ai", "已完成", scheme_id))
     await db.commit()
 
 
@@ -126,12 +129,9 @@ class TestOutlineGenerationGuard:
 
     def test_delegates_to_single_entry(self):
         """两类守卫必须共用 _scheme_task_status_in_progress，禁止各写一份遍历。"""
-        assert "outline_generation" in inspect.getsource(
-            sec.outline_generation_in_progress)
-        assert "_scheme_task_status_in_progress" in inspect.getsource(
-            sec.outline_generation_in_progress)
-        assert "_scheme_task_status_in_progress" in inspect.getsource(
-            sec.content_generation_in_progress)
+        assert "outline_generation" in inspect.getsource(sec.outline_generation_in_progress)
+        assert "_scheme_task_status_in_progress" in inspect.getsource(sec.outline_generation_in_progress)
+        assert "_scheme_task_status_in_progress" in inspect.getsource(sec.content_generation_in_progress)
 
 
 # ---------------------------------------------------------------------------
@@ -165,8 +165,7 @@ async def test_save_outline_allowed_when_tasks_are_terminal(db_conn):
     await _seed_scheme(db_conn)
     _TaskSeeder.add(task_type="content_generation", status="stopped")
     _TaskSeeder.add(task_type="outline_generation", status="completed")
-    res = await sec.save_outline(
-        "sc1", {"outline": [{"title": "第一章 工程概况", "children": []}]}, db_conn)
+    res = await sec.save_outline("sc1", {"outline": [{"title": "第一章 工程概况", "children": []}]}, db_conn)
     assert res["ok"] is True
 
 
@@ -186,11 +185,14 @@ async def test_save_outline_guard_runs_before_parsing(db_conn):
 def test_apply_and_save_imports_and_checks_guard():
     """apply-and-save 是「整表重建 sections」的第二个入口，必须接入同一守卫。"""
     from app.routers.outline_library import apply_library_and_save
+
     src = inspect.getsource(apply_library_and_save)
     assert "content_generation_in_progress" in src, (
-        "apply-and-save 必须接入 content_generation_in_progress —— "
-        "它同样会级联 DELETE 正在被正文生成写的章节")
+        "apply-and-save 必须接入 content_generation_in_progress —— " "它同样会级联 DELETE 正在被正文生成写的章节"
+    )
     assert "409" in src
+
+
 # ---------------------------------------------------------------------------
 # G13-4：清空目录后的状态口径
 # ---------------------------------------------------------------------------
@@ -201,17 +203,15 @@ async def test_clear_outline_resets_status_and_source(db_conn):
     旧实现写成「目录已确认」—— 编译状态语义与「方案里一个章节都没有」直接冲突，
     前端头部 Tag 与 review 端点 scheme_status 会同时误判「目录已就绪」。
     """
-    await _seed_scheme(db_conn)   # 预置 outline_source='ai' / status='已完成'
+    await _seed_scheme(db_conn)  # 预置 outline_source='ai' / status='已完成'
     res = await sec.save_outline("sc1", {"outline": []}, db_conn)
     assert res["ok"] is True and res["count"] == 0 and res["tree"] == []
     # ✅ 2026-09-26 新增字段：清空目录同样是「正文批量丢失」，必须量化告知
     #    （seed 内有 1 个带正文的章节）。旧实现只回 {ok,count,tree}，用户在
     #    前端看不到任何提示，正文静默消失且不可恢复。
-    assert res.get("cleared_content_sections") == 1, (
-        "清空目录必须回传被清除正文的章节数，供前端明示用户")
+    assert res.get("cleared_content_sections") == 1, "清空目录必须回传被清除正文的章节数，供前端明示用户"
 
-    cur = await db_conn.execute(
-        "SELECT status, outline_source FROM schemes WHERE id=?", ("sc1",))
+    cur = await db_conn.execute("SELECT status, outline_source FROM schemes WHERE id=?", ("sc1",))
     row = dict(await cur.fetchone())
     assert row["status"] == sec.OUTLINE_EMPTY_STATUS
     assert row["outline_source"] == "", "来源已随目录一起删除，保留旧来源会溯源失真"
@@ -230,8 +230,7 @@ async def test_clear_outline_also_deletes_sections_and_charts(db_conn):
 async def test_save_nonempty_outline_keeps_confirmed_status(db_conn):
     """非空目录落库后仍统一置「目录已确认」（语义正确，保持既有行为）。"""
     await _seed_scheme(db_conn)
-    await sec.save_outline(
-        "sc1", {"outline": [{"title": "第一章 工程概况", "children": []}]}, db_conn)
+    await sec.save_outline("sc1", {"outline": [{"title": "第一章 工程概况", "children": []}]}, db_conn)
     cur = await db_conn.execute("SELECT status FROM schemes WHERE id=?", ("sc1",))
     row = dict(await cur.fetchone())
     assert row["status"] == sec.OUTLINE_SAVED_STATUS
@@ -241,6 +240,8 @@ def test_empty_status_constants_are_distinct():
     """两个状态常量必须不同值 —— 否则「清空」与「已保存」无法区分。"""
     assert sec.OUTLINE_EMPTY_STATUS != sec.OUTLINE_SAVED_STATUS
     assert sec.OUTLINE_EMPTY_STATUS == "目录待生成"
+
+
 # ---------------------------------------------------------------------------
 # G13-5：outline_result checkpoint 白名单
 # ---------------------------------------------------------------------------
@@ -275,8 +276,7 @@ class TestOutlineCheckpointContract:
 
     def test_attach_still_filters_unknown_fields(self):
         """白名单语义不变：未登记的字段仍然不泄漏。"""
-        ckpt = {"kind": "outline_result", "event": "completed",
-                "prompt_debug": "system prompt 明文", "outline": []}
+        ckpt = {"kind": "outline_result", "event": "completed", "prompt_debug": "system prompt 明文", "outline": []}
         row = {"task_type": "outline_generation", "checkpoint_json": json.dumps(ckpt)}
         result: dict = {}
         sh._attach_checkpoint_result(row, result)
@@ -285,8 +285,10 @@ class TestOutlineCheckpointContract:
 
     def test_attach_skips_mismatched_kind(self):
         """kind 不匹配的 checkpoint 不附加（防跨任务类型串扰）。"""
-        row = {"task_type": "outline_generation",
-               "checkpoint_json": json.dumps({"kind": "content_result", "outline": []})}
+        row = {
+            "task_type": "outline_generation",
+            "checkpoint_json": json.dumps({"kind": "content_result", "outline": []}),
+        }
         result: dict = {}
         sh._attach_checkpoint_result(row, result)
         assert result == {}
@@ -294,7 +296,7 @@ class TestOutlineCheckpointContract:
     def test_attach_skips_empty_checkpoint(self):
         """checkpoint_json 为空 / None 时静默跳过，不抛异常。"""
         result: dict = {}
-        sh._attach_checkpoint_result(
-            {"task_type": "outline_generation", "checkpoint_json": None}, result)
+        sh._attach_checkpoint_result({"task_type": "outline_generation", "checkpoint_json": None}, result)
         assert result == {}
+
     assert sec.OUTLINE_SAVED_STATUS == "目录已确认"

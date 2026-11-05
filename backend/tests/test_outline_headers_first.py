@@ -14,6 +14,7 @@
 4. 功能级：装配在 SSE 流内真实执行 —— 短方案全链路产出 connecting +
    completed 事件，装配产物（编制要求）确实注入提示词。
 """
+
 import inspect
 import json
 import uuid
@@ -25,8 +26,7 @@ from fastapi import HTTPException
 
 def _src_before_assemble() -> str:
     """generate_outline 源码中 _assemble_context 定义之前的部分（路由体前段）。"""
-    return inspect.getsource(sh.generate_outline).split(
-        "async def _assemble_context", 1)[0]
+    return inspect.getsource(sh.generate_outline).split("async def _assemble_context", 1)[0]
 
 
 def _assemble_ctx_src() -> str:
@@ -37,13 +37,11 @@ def _assemble_ctx_src() -> str:
     event_stream 之间）。
     """
     src = inspect.getsource(sh.generate_outline)
-    return src.split("async def _assemble_context", 1)[1].split(
-        "async def event_stream", 1)[0]
+    return src.split("async def _assemble_context", 1)[1].split("async def event_stream", 1)[0]
 
 
 def _event_stream_src() -> str:
-    return inspect.getsource(sh.generate_outline).split(
-        "async def event_stream", 1)[1]
+    return inspect.getsource(sh.generate_outline).split("async def event_stream", 1)[1]
 
 
 # ============================================================
@@ -52,33 +50,45 @@ def _event_stream_src() -> str:
 class TestHeadersFirstSourceLock:
     def test_404_check_stays_in_route_body(self):
         body = _src_before_assemble()
-        assert "HTTPException(404" in body, \
-            "方案 404 校验必须保留在路由体（HTTP 状态语义，前端依赖）"
+        assert "HTTPException(404" in body, "方案 404 校验必须保留在路由体（HTTP 状态语义，前端依赖）"
 
     def test_assembly_awaits_not_before_stream(self):
         """装配类 await 不得出现在 event_stream 之前（旧实现响应头被
         串行 DB 装配阻塞，DB 锁竞争下最坏远超前端 30s 建连超时）。"""
         body = _src_before_assemble()
-        for fragment in ("_build_structured_brief(", "build_reference_outline(",
-                         "bump_ref_count(", "load_parsed_texts(",
-                         "_build_facts_text(", "_build_knowledge_text("):
-            assert fragment not in body, \
-                f"装配调用 {fragment} 不得留在 event_stream 之前的路由体"
+        for fragment in (
+            "_build_structured_brief(",
+            "build_reference_outline(",
+            "bump_ref_count(",
+            "load_parsed_texts(",
+            "_build_facts_text(",
+            "_build_knowledge_text(",
+        ):
+            assert fragment not in body, f"装配调用 {fragment} 不得留在 event_stream 之前的路由体"
 
     def test_assembly_in_assemble_context_and_called_in_stream(self):
         ctx = _assemble_ctx_src()
-        for fragment in ("_build_structured_brief(", "build_reference_outline(",
-                         "bump_ref_count(", "load_parsed_texts(",
-                         "_build_facts_text(", "_build_knowledge_text("):
+        for fragment in (
+            "_build_structured_brief(",
+            "build_reference_outline(",
+            "bump_ref_count(",
+            "load_parsed_texts(",
+            "_build_facts_text(",
+            "_build_knowledge_text(",
+        ):
             assert fragment in ctx, f"装配调用 {fragment} 必须移入 _assemble_context"
         stream = _event_stream_src()
-        assert "await _assemble_context()" in stream, \
-            "event_stream 必须在流内调用 _assemble_context（响应头先行）"
+        assert "await _assemble_context()" in stream, "event_stream 必须在流内调用 _assemble_context（响应头先行）"
         # 解包还原同名局部变量（下游引用零改动的契约）
-        for name in ("project_brief", "reference_outline", "requirements_text",
-                     "project_facts", "construction_scope", "_audit_outline_inputs"):
-            assert name in stream.split("_set_phase", 1)[0], \
-                f"event_stream 必须解包还原局部变量 {name}"
+        for name in (
+            "project_brief",
+            "reference_outline",
+            "requirements_text",
+            "project_facts",
+            "construction_scope",
+            "_audit_outline_inputs",
+        ):
+            assert name in stream.split("_set_phase", 1)[0], f"event_stream 必须解包还原局部变量 {name}"
 
 
 # ============================================================
@@ -87,19 +97,15 @@ class TestHeadersFirstSourceLock:
 class TestAssemblyRunsInsideStream:
     async def _seed(self, db_conn):
         sid, pid = uuid.uuid4().hex, uuid.uuid4().hex
+        await db_conn.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)", (pid, "测试项目"))
         await db_conn.execute(
-            "INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)",
-            (pid, "测试项目"))
-        await db_conn.execute(
-            "INSERT OR IGNORE INTO schemes (id, project_id, name, config_json)"
-            " VALUES (?,?,?,?)",
-            (sid, pid, "深基坑支护方案",
-             json.dumps({"requirements": "必须包含监测章节"})))
+            "INSERT OR IGNORE INTO schemes (id, project_id, name, config_json)" " VALUES (?,?,?,?)",
+            (sid, pid, "深基坑支护方案", json.dumps({"requirements": "必须包含监测章节"})),
+        )
         await db_conn.commit()
         return sid
 
-    async def test_short_scheme_full_path_emits_completed(
-            self, db_conn, monkeypatch):
+    async def test_short_scheme_full_path_emits_completed(self, db_conn, monkeypatch):
         """短方案全链路：connecting → draft progress → completed，
         装配产物（编制要求）真实注入提示词 —— 证明装配移入流内后
         行为与旧实现等价。"""
@@ -108,14 +114,11 @@ class TestAssemblyRunsInsideStream:
 
         async def fake_collect(messages, validate_fn=None, **kwargs):
             seen_prompts.append((messages, kwargs))
-            outline = [{"title": "第一章 工程概况", "description": "d",
-                        "children": []}]
+            outline = [{"title": "第一章 工程概况", "description": "d", "children": []}]
             if kwargs.get("scene") == "outline_draft":
-                return ({"outline": outline},
-                        json.dumps({"outline": outline}, ensure_ascii=False))
+                return ({"outline": outline}, json.dumps({"outline": outline}, ensure_ascii=False))
             # 审核/修复轮：直接通过，不再追加调用
-            return ({"passed": True, "suggestions": []},
-                    json.dumps({"passed": True}, ensure_ascii=False))
+            return ({"passed": True, "suggestions": []}, json.dumps({"passed": True}, ensure_ascii=False))
 
         monkeypatch.setattr(sh, "render", lambda *a, **k: "PROMPT")
         monkeypatch.setattr(sh, "collect_json_response", fake_collect)
@@ -124,16 +127,17 @@ class TestAssemblyRunsInsideStream:
         chunks = []
         async for chunk in resp.body_iterator:
             chunks.append(chunk if isinstance(chunk, str) else chunk.decode("utf-8"))
-        events = [json.loads(line[len("data: "):])
-                  for line in "".join(chunks).splitlines()
-                  if line.startswith("data: ")]
+        events = [
+            json.loads(line[len("data: ") :]) for line in "".join(chunks).splitlines() if line.startswith("data: ")
+        ]
         names = [e.get("event") for e in events]
         assert "connecting" in names
         assert "completed" in names, f"短方案必须以 completed 收尾，实际事件序列: {names}"
         completed = next(e for e in events if e.get("event") == "completed")
         # 审核/修复链路会规范化章节标题（剥离「第X章」编号），故用包含断言
-        assert any("工程概况" in n.get("title", "") for n in completed["outline"]), \
-            f"completed 必须携带生成的目录，实际: {completed['outline']}"
+        assert any(
+            "工程概况" in n.get("title", "") for n in completed["outline"]
+        ), f"completed 必须携带生成的目录，实际: {completed['outline']}"
         # 装配产物注入提示词（config.requirements 在流内装配进 user_prompt）
         prompts = json.dumps(seen_prompts, ensure_ascii=False)
         assert "编制要求" in prompts

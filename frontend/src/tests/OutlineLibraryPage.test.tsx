@@ -19,14 +19,21 @@ import { App as AntdApp } from "antd";
 
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
   });
 }
 if (!(globalThis as any).ResizeObserver) {
   (globalThis as any).ResizeObserver = class {
-    observe() {} unobserve() {} disconnect() {}
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   };
 }
 
@@ -60,24 +67,43 @@ vi.mock("../api", () => apiMock);
 // 编辑弹窗为独立组件（已有专门测试文件），此处 mock 为探针以隔离并断言接线
 vi.mock("../components/OutlineLibraryEditModal", () => ({
   default: ({ open, libraryId, maxUploadBytes }: any) =>
-    open
-      ? <div data-testid="edit-modal" data-library-id={libraryId ?? ""}
-             data-max-upload-bytes={String(maxUploadBytes ?? "")} />
-      : null,
+    open ? (
+      <div
+        data-testid="edit-modal"
+        data-library-id={libraryId ?? ""}
+        data-max-upload-bytes={String(maxUploadBytes ?? "")}
+      />
+    ) : null,
 }));
 
 import OutlineLibraryPage from "../pages/OutlineLibraryPage";
 
 const ITEMS = [
   {
-    id: "lib-1", name: "深基坑标准目录", type: "专项施工方案", profession: "土建",
-    version: "v1.0", review_status: "待审核", ref_count: 2, source: "预置清单",
-    updated_at: "2026-09-20T10:00:00", applicable_conditions: "", basis: "",
+    id: "lib-1",
+    name: "深基坑标准目录",
+    type: "专项施工方案",
+    profession: "土建",
+    version: "v1.0",
+    review_status: "待审核",
+    ref_count: 2,
+    source: "预置清单",
+    updated_at: "2026-09-20T10:00:00",
+    applicable_conditions: "",
+    basis: "",
   },
   {
-    id: "lib-2", name: "脚手架标准目录", type: "专项施工方案", profession: "土建",
-    version: "v2.0", review_status: "已通过", ref_count: 5, source: "手动创建",
-    updated_at: "2026-09-19T08:00:00", applicable_conditions: "", basis: "",
+    id: "lib-2",
+    name: "脚手架标准目录",
+    type: "专项施工方案",
+    profession: "土建",
+    version: "v2.0",
+    review_status: "已通过",
+    ref_count: 5,
+    source: "手动创建",
+    updated_at: "2026-09-19T08:00:00",
+    applicable_conditions: "",
+    basis: "",
   },
 ];
 
@@ -92,7 +118,11 @@ beforeEach(() => {
   apiMock.outlineLibraryApi.delete.mockResolvedValue({ data: { ok: true } });
   apiMock.outlineLibraryApi.duplicate.mockResolvedValue({ data: { id: "lib-3", name: "副本" } });
   apiMock.systemApi.uploadLimits.mockResolvedValue({
-    data: { max_upload_bytes: 50 * 1024 * 1024, max_files_per_request: 20, max_total_bytes: 200 * 1024 * 1024 },
+    data: {
+      max_upload_bytes: 50 * 1024 * 1024,
+      max_files_per_request: 20,
+      max_total_bytes: 200 * 1024 * 1024,
+    },
   });
 });
 
@@ -103,13 +133,13 @@ function bodyText() {
 }
 function bodyBtn(text: string): HTMLButtonElement | null {
   const norm = (s: string) => (s || "").replace(/\s+/g, "");
-  return Array.from(document.body.querySelectorAll("button")).find(
-    (b) => norm(b.textContent || "").includes(norm(text)),
+  return Array.from(document.body.querySelectorAll("button")).find((b) =>
+    norm(b.textContent || "").includes(norm(text)),
   ) as HTMLButtonElement | null;
 }
 function iconBtn(iconClass: string): HTMLButtonElement | null {
-  return Array.from(document.body.querySelectorAll("button")).find(
-    (b) => b.querySelector(iconClass),
+  return Array.from(document.body.querySelectorAll("button")).find((b) =>
+    b.querySelector(iconClass),
   ) as HTMLButtonElement | null;
 }
 function linkBtn(text: string): HTMLAnchorElement | null {
@@ -120,12 +150,14 @@ function linkBtn(text: string): HTMLAnchorElement | null {
 /** 点击 antd 确认弹窗的「确定/删除/回滚」等 OK 按钮（danger okType 的 OK 不是 ant-btn-primary，须按文本找） */
 async function confirmOk(okText: string) {
   await waitFor(() => {
-    const ok = Array.from(document.body.querySelectorAll(".ant-modal-confirm button"))
-      .find((b) => (b.textContent || "").replace(/\s+/g, "").includes(okText));
+    const ok = Array.from(document.body.querySelectorAll(".ant-modal-confirm button")).find((b) =>
+      (b.textContent || "").replace(/\s+/g, "").includes(okText),
+    );
     expect(ok).toBeTruthy();
   });
-  const ok = Array.from(document.body.querySelectorAll(".ant-modal-confirm button"))
-    .find((b) => (b.textContent || "").replace(/\s+/g, "").includes(okText))!;
+  const ok = Array.from(document.body.querySelectorAll(".ant-modal-confirm button")).find((b) =>
+    (b.textContent || "").replace(/\s+/g, "").includes(okText),
+  )!;
   fireEvent.click(ok);
 }
 
@@ -178,7 +210,8 @@ describe("OutlineLibraryPage（目录库页面）", () => {
     await confirmOk("确定");
     await waitFor(() => {
       expect(apiMock.outlineLibraryApi.batchReview).toHaveBeenCalledWith({
-        ids: ["lib-1", "lib-2"], status: "已通过",
+        ids: ["lib-1", "lib-2"],
+        status: "已通过",
       });
     });
     // 成功后清空选择：批量操作条消失

@@ -20,6 +20,7 @@ C4 遗留④ —— 分步生成并发窗口
 C3 遗留② —— 跨用例配置污染与 stale 断言
     由被修的两个测试用例自身回归验证（见对应文件），本文件不重复登记。
 """
+
 import asyncio
 import inspect
 import json
@@ -59,8 +60,7 @@ CONTRACT_TABLE = [
     ("第一章 1 基本情况", "1 基本情况", "基本情况", "基本情况"),
     ("第一章 第一章 工程概况", "第一章 工程概况", "工程概况", "工程概况"),
     ("第3章 2.4.1钢筋工程", "2.4.1钢筋工程", "钢筋工程", "钢筋工程"),
-    ("第1章 2 施工准备 3 质量控制", "2 施工准备 3 质量控制",
-     "施工准备 3 质量控制", "施工准备 3 质量控制"),
+    ("第1章 2 施工准备 3 质量控制", "2 施工准备 3 质量控制", "施工准备 3 质量控制", "施工准备 3 质量控制"),
     #  ⚠️ 已知边界（刻意接受）：正则锚定在行首，故只有**连续前缀**会被剥掉
     #    （「第1章 2 」剥尽、「3 质量控制」因不在行首而原样保留）。这比「剥掉句中
     #    的子项序数」更安全，且树档与剥净档在该类输入上逐字一致。
@@ -77,9 +77,7 @@ CONTRACT_TABLE = [
 class TestStripNumberingTierContract:
     """三档剥离的行为契约：单轮逐字不变、tree 档只在未收敛时多剥且守标记闸门。"""
 
-    @pytest.mark.parametrize(
-        "title,single,tree,all_", CONTRACT_TABLE,
-        ids=[c[0] for c in CONTRACT_TABLE])
+    @pytest.mark.parametrize("title,single,tree,all_", CONTRACT_TABLE, ids=[c[0] for c in CONTRACT_TABLE])
     def test_three_tier_contract_table(self, title, single, tree, all_):
         assert strip_outline_numbering(title) == single, title
         assert strip_outline_numbering_tree(title) == tree, title
@@ -96,14 +94,18 @@ class TestStripNumberingTierContract:
         # 判别力：单轮未收敛 且 首轮不是子项标记（marker 闸门触发）⇔ tree 多剥；
         # 单轮已收敛，或首轮即被 marker 闸门拦下（"1.2.3（1）细部构造"），
         # 都必须逐字等于单轮结果。
-        assert (strip_outline_numbering(first) != first
-                and not _SUB_ITEM_MARKER_RE.match(first)) == (
-            strip_outline_numbering_tree(title) != first), (
-            f"多重章节前缀必须继续剥净、已收敛/子项标记必须逐字不动: {title!r}")
+        assert (strip_outline_numbering(first) != first and not _SUB_ITEM_MARKER_RE.match(first)) == (
+            strip_outline_numbering_tree(title) != first
+        ), f"多重章节前缀必须继续剥净、已收敛/子项标记必须逐字不动: {title!r}"
 
-    @pytest.mark.parametrize("title", [
-        "第1章 1.1 工程概况", "第一章 1 基本情况", "第1章 1.1 工程概况",
-    ])
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "第1章 1.1 工程概况",
+            "第一章 1 基本情况",
+            "第1章 1.1 工程概况",
+        ],
+    )
     def test_tree_is_idempotent(self, title):
         once = strip_outline_numbering_tree(title)
         assert strip_outline_numbering_tree(once) == once, title
@@ -125,8 +127,9 @@ class TestStripNumberingTierContract:
         # 剥离后编号必须由位置派生（编号唯一事实源），不再沿用标题里的残留编号
         assert [n["id"] for n in out] == ["1", "2", "3"]
         for n in out:
-            assert not re.match(r"^(第\s*[一二三四五六七八九十0-9]+\s*[章节]|[0-9]+(\.[0-9]+)+\s)",
-                                n["title"]), f"落库标题仍带章节编号: {n['title']}"
+            assert not re.match(
+                r"^(第\s*[一二三四五六七八九十0-9]+\s*[章节]|[0-9]+(\.[0-9]+)+\s)", n["title"]
+            ), f"落库标题仍带章节编号: {n['title']}"
 
     def test_renumber_outline_nodes_keeps_subitem_marker(self):
         """反向锁：子项标记是内容不是章节编号，tree 档不得吃掉。
@@ -159,8 +162,8 @@ class TestChapterAliasTable:
         for grp, toks in orz.CHAPTER_ALIASES.items():
             for t in toks:
                 assert t not in seen, (
-                    f"别名 {t!r} 同时登记在 {seen[t]!r} 与 {grp!r}，"
-                    "后写者会静默覆盖前者 → 目录被归错组")
+                    f"别名 {t!r} 同时登记在 {seen[t]!r} 与 {grp!r}，" "后写者会静默覆盖前者 → 目录被归错组"
+                )
                 seen[t] = grp
 
     def test_no_duplicate_alias_within_a_group(self):
@@ -171,8 +174,8 @@ class TestChapterAliasTable:
 
     def test_lookup_covers_every_registered_alias(self):
         assert len(orz._ALIAS_LOOKUP) == sum(
-            len(v) for v in orz.CHAPTER_ALIASES.values()), (
-            "组内去重后条目数应等于唯一键数")
+            len(v) for v in orz.CHAPTER_ALIASES.values()
+        ), "组内去重后条目数应等于唯一键数"
 
     def test_sorted_by_length_descending(self):
         lens = [len(t) for t in orz._ALIAS_SORTED]
@@ -205,9 +208,8 @@ _WINDOW_SRC_RE = {
     "step_is_window_times_merge_k": re.compile(r"_round_step\s*=\s*max\(1,\s*_window\)\s*\*\s*_merge_k"),
     "loop_steps_by_round": re.compile(r"for\s+batch_start\s+in\s+range\(0,\s*_total,\s*_round_step\)"),
     "window_bounded_fill": re.compile(r"while\s+_u\s*<\s*_total\s+and\s+len\(_window_units\)\s*<\s*_window"),
-    "order_preserving_gather": re.compile(r"results\s*=\s*await\s+asyncio\.gather\(\*\["),
-    "semaphore_licensed_by_concurrency": re.compile(
-        r"asyncio\.Semaphore\(OUTLINE_CHAPTER_CONCURRENCY\)"),
+    "order_preserving_gather": re.compile(r"results\s*=\s*await\s+asyncio\.gather\(\s*\*\["),
+    "semaphore_licensed_by_concurrency": re.compile(r"asyncio\.Semaphore\(OUTLINE_CHAPTER_CONCURRENCY\)"),
 }
 
 
@@ -223,16 +225,18 @@ class TestConcurrencyWindowInvariant:
         """_window 从派生到窗口填充之间不得被重新赋值（改了宽度但没改步进取整
         是最阴的回归形态：步进取整和实际填充量会脱钩）。"""
         src = inspect.getsource(sh.generate_outline)
-        reassigns = re.findall(r"(?m)^\s*_window\s*=\s*(?!\s*max\(1,\s*OUTLINE_CHAPTER_CONCURRENCY\))",
-                               src)
+        reassigns = re.findall(r"(?m)^\s*_window\s*=\s*(?!\s*max\(1,\s*OUTLINE_CHAPTER_CONCURRENCY\))", src)
         assert not reassigns, f"_window 被重复赋值: {reassigns}"
 
-    @pytest.mark.parametrize("window,merge_k,total", [
-        (4, 2, 9),    # 窗口内多个完整单元 + 末轮残余
-        (1, 2, 5),    # 串行档：峰值必须恰好 1
-    ], ids=["w4xk2_t9", "w1xk2_t5"])
-    async def test_window_width_is_the_actual_concurrency(
-            self, db_conn, monkeypatch, window, merge_k, total):
+    @pytest.mark.parametrize(
+        "window,merge_k,total",
+        [
+            (4, 2, 9),  # 窗口内多个完整单元 + 末轮残余
+            (1, 2, 5),  # 串行档：峰值必须恰好 1
+        ],
+        ids=["w4xk2_t9", "w1xk2_t5"],
+    )
+    async def test_window_width_is_the_actual_concurrency(self, db_conn, monkeypatch, window, merge_k, total):
         """实测峰值同时执行数 == _window，且单元总数 == ⌈total / _merge_k⌉。
 
         旧实现只靠 asyncio.Semaphore 表达并发，而信号量在 _fetch_unit_children
@@ -247,9 +251,17 @@ class TestConcurrencyWindowInvariant:
         depth = {"now": 0, "peak": 0}
         calls = []
 
-        async def fake_fetch_unit(unit_chapters, *, batch_prompt=None,
-                                  single_prompts=None, task_id=None, sem=None,
-                                  timeout=60, push_stats=None, **kw):
+        async def fake_fetch_unit(
+            unit_chapters,
+            *,
+            batch_prompt=None,
+            single_prompts=None,
+            task_id=None,
+            sem=None,
+            timeout=60,
+            push_stats=None,
+            **kw,
+        ):
             calls.extend(i for i, _ in unit_chapters)
             depth["now"] += 1
             depth["peak"] = max(depth["peak"], depth["now"])
@@ -262,48 +274,40 @@ class TestConcurrencyWindowInvariant:
             # per 与单元章数等长（真实契约：(unit_status, per) 且
             # per[i] = (st, children)）；每章给出 1 个小节，避免触发
             # 「占位/泛化标题」护栏（空 children 会被记 9 处占位标题）
-            per = [("ok", [{"title": f"第{i + 1}章-小节{i + 1}.1",
-                            "children": []}])
-                   for i, _ in unit_chapters]
+            per = [("ok", [{"title": f"第{i + 1}章-小节{i + 1}.1", "children": []}]) for i, _ in unit_chapters]
             return "ok", per
 
         async def fake_collect(messages, validate_fn=None, **kwargs):
-            outline = [{"title": f"第{i}章", "description": "", "children": []}
-                       for i in range(1, total + 1)]
-            return ({"outline": outline},
-                    json.dumps({"outline": outline}, ensure_ascii=False))
+            outline = [{"title": f"第{i}章", "description": "", "children": []} for i in range(1, total + 1)]
+            return ({"outline": outline}, json.dumps({"outline": outline}, ensure_ascii=False))
 
         monkeypatch.setattr(sh, "_fetch_unit_children", fake_fetch_unit)
         monkeypatch.setattr(sh, "collect_json_response", fake_collect)
 
         sid, pid = uuid.uuid4().hex, uuid.uuid4().hex
+        await db_conn.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)", (pid, "测试项目"))
         await db_conn.execute(
-            "INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)", (pid, "测试项目"))
-        await db_conn.execute(
-            "INSERT OR IGNORE INTO schemes (id, project_id, name, word_budget,"
-            " config_json) VALUES (?,?,?,?,?)",
-            (sid, pid, "长方案-并发桩", 10000, json.dumps({}, ensure_ascii=False)))
+            "INSERT OR IGNORE INTO schemes (id, project_id, name, word_budget," " config_json) VALUES (?,?,?,?,?)",
+            (sid, pid, "长方案-并发桩", 10000, json.dumps({}, ensure_ascii=False)),
+        )
         await db_conn.commit()
 
         resp = await sh.generate_outline(sid, None, db_conn)
         out = []
         async for chunk in resp.body_iterator:
-            for line in (chunk if isinstance(chunk, str)
-                         else chunk.decode("utf-8")).splitlines():
+            for line in (chunk if isinstance(chunk, str) else chunk.decode("utf-8")).splitlines():
                 if line.startswith("data: "):
-                    out.append(json.loads(line[len("data: "):]))
+                    out.append(json.loads(line[len("data: ") :]))
 
-        assert [e["event"] for e in out][-1] == "completed", (
-            f"长方案应以 completed 收尾: {[e['event'] for e in out]}")
-        assert sorted(calls) == list(range(total)), (
-            f"每章恰好一次单元调用（0 基章序号），实际 {sorted(calls)}")
-        assert depth["peak"] == window, (
-            f"窗口宽度 {window} 必须是实际并发数，实测峰值 {depth['peak']}")
+        assert [e["event"] for e in out][-1] == "completed", f"长方案应以 completed 收尾: {[e['event'] for e in out]}"
+        assert sorted(calls) == list(range(total)), f"每章恰好一次单元调用（0 基章序号），实际 {sorted(calls)}"
+        assert depth["peak"] == window, f"窗口宽度 {window} 必须是实际并发数，实测峰值 {depth['peak']}"
 
     async def test_semaphore_licence_matches_window(self, db_conn, monkeypatch):
         """信号量许可数必须 == 配置并发度（与 _window 同口径），不得各自取值。"""
         monkeypatch.setattr(sh, "OUTLINE_CHAPTER_CONCURRENCY", 3)
         src = inspect.getsource(sh.generate_outline)
         m = re.search(r"asyncio\.Semaphore\(([^)]+)\)", src)
-        assert m and m.group(1).strip() == "OUTLINE_CHAPTER_CONCURRENCY", (
-            f"信号量许可必须直接由配置并发度派生，实测: {m.group(1) if m else None}")
+        assert (
+            m and m.group(1).strip() == "OUTLINE_CHAPTER_CONCURRENCY"
+        ), f"信号量许可必须直接由配置并发度派生，实测: {m.group(1) if m else None}"

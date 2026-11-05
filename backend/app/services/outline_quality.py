@@ -18,6 +18,7 @@
 - 「冗余章节」只**报告**不删除（删章节是不可逆的用户数据变更）；
 - 命中判定一律**偏宽**：宁可少报缺失，也不误触发一次外科补齐 AI 调用。
 """
+
 from __future__ import annotations
 
 import logging
@@ -32,10 +33,32 @@ logger = logging.getLogger("outline_quality")
 #: 与 ``sse_handlers._DANGEROUS_REQUIRED_KEYWORDS``（危大 10 章）互补而不重复：
 #: 本表只用于"冗余候选"报告，不参与缺失判定。
 GENERIC_CHAPTER_HINTS: tuple[str, ...] = (
-    "工程概况", "工程概述", "编制依据", "施工计划", "施工部署", "施工总平面",
-    "施工工艺", "工艺技术", "安全保证", "安全保障", "人员分工", "组织机构",
-    "验收", "应急", "计算书", "图纸", "监测", "质量保证", "质量管理",
-    "环保", "文明施工", "成本", "进度计划", "风险管理", "新技术", "BIM",
+    "工程概况",
+    "工程概述",
+    "编制依据",
+    "施工计划",
+    "施工部署",
+    "施工总平面",
+    "施工工艺",
+    "工艺技术",
+    "安全保证",
+    "安全保障",
+    "人员分工",
+    "组织机构",
+    "验收",
+    "应急",
+    "计算书",
+    "图纸",
+    "监测",
+    "质量保证",
+    "质量管理",
+    "环保",
+    "文明施工",
+    "成本",
+    "进度计划",
+    "风险管理",
+    "新技术",
+    "BIM",
 )
 
 #: 名称维度 → 中文标签（报告与提示词共用，避免两处各写一份）
@@ -106,8 +129,8 @@ def _canon(text: str) -> str:
 #: （`_TRAILING_COUNTER_SUFFIX_RE` 共用同一字符表）。两个判据声明的意图就是
 #: 「中文数字序号」，补全值域只是兑现声明，不改变任何已命中形态的结论。
 _CN_ORDINAL_CHARS = "一二三四五六七八九十零百千两"
-_TRAILING_COUNTER_SUFFIX_RE = re.compile(
-    rf"[（(]\s*(?:\d{{1,4}}|[{_CN_ORDINAL_CHARS}]{{1,3}})\s*[)）]\s*$")
+_TRAILING_COUNTER_SUFFIX_RE = re.compile(rf"[（(]\s*(?:\d{{1,4}}|[{_CN_ORDINAL_CHARS}]{{1,3}})\s*[)）]\s*$")
+
 
 def _norm(text: str) -> str:
     return _STRIP_RE.sub("", _TRAILING_COUNTER_SUFFIX_RE.sub("", _canon(text)))
@@ -142,33 +165,57 @@ def has_trailing_counter_suffix(title: str) -> bool:
 #: 判定刻意偏保守（精确锚定，绝不按子串模糊匹配），避免误伤「专项施工方案」
 #: 等合法标题。
 GENERIC_TITLE_PATTERNS: tuple[re.Pattern, ...] = (
-    re.compile(r"^专项\d+$"),                       # 专项6 / 专项12
-    re.compile(r"^总体实施策划"),                     # 总体实施策划（2）
-    re.compile(r"^主要内容$"), re.compile(r"^主要内容[（(]"),
-    re.compile(r"^其他$"), re.compile(r"^其他内容$"), re.compile(r"^其他章节$"),
-    re.compile(r"^其它$"), re.compile(r"^其它内容$"),
-    re.compile(r"^通用$"), re.compile(r"^通用要求$"), re.compile(r"^通用内容$"),
-    re.compile(r"^未命名$"), re.compile(r"^无名$"), re.compile(r"^无标题$"),
-    re.compile(r"^空白$"), re.compile(r"^占位$"),
-    re.compile(r"^示例$"), re.compile(r"^样例$"), re.compile(r"^模板$"),
-    re.compile(r"^待定$"), re.compile(r"^暂定$"),
-    re.compile(r"^补充$"), re.compile(r"^补充内容$"), re.compile(r"^相关章节$"),
-    re.compile(r"^未填写$"), re.compile(r"^默认章节?$"), re.compile(r"^临时$"),
-    re.compile(r"^测试章节?$"), re.compile(r"^新建章节?$"), re.compile(r"^新建$"),
+    re.compile(r"^专项\d+$"),  # 专项6 / 专项12
+    re.compile(r"^总体实施策划"),  # 总体实施策划（2）
+    re.compile(r"^主要内容$"),
+    re.compile(r"^主要内容[（(]"),
+    re.compile(r"^其他$"),
+    re.compile(r"^其他内容$"),
+    re.compile(r"^其他章节$"),
+    re.compile(r"^其它$"),
+    re.compile(r"^其它内容$"),
+    re.compile(r"^通用$"),
+    re.compile(r"^通用要求$"),
+    re.compile(r"^通用内容$"),
+    re.compile(r"^未命名$"),
+    re.compile(r"^无名$"),
+    re.compile(r"^无标题$"),
+    re.compile(r"^空白$"),
+    re.compile(r"^占位$"),
+    re.compile(r"^示例$"),
+    re.compile(r"^样例$"),
+    re.compile(r"^模板$"),
+    re.compile(r"^待定$"),
+    re.compile(r"^暂定$"),
+    re.compile(r"^补充$"),
+    re.compile(r"^补充内容$"),
+    re.compile(r"^相关章节$"),
+    re.compile(r"^未填写$"),
+    re.compile(r"^默认章节?$"),
+    re.compile(r"^临时$"),
+    re.compile(r"^测试章节?$"),
+    re.compile(r"^新建章节?$"),
+    re.compile(r"^新建$"),
     re.compile(r"^第\d+[章节](?:占位|示例|测试)?$"),
-    re.compile(r"^章节\d+$"), re.compile(r"^小节\d+$"),
+    re.compile(r"^章节\d+$"),
+    re.compile(r"^小节\d+$"),
     re.compile(r"^无标题章节?$"),
     # ✅ 2026-10-13：纯语义空话标题（「有关要求」类）—— AGENTS.md 遗留项①收口。
     #    这类标题不携带任何具体施工内容信息，AI 用来填充目录结构，命中即视为占位。
-    re.compile(r"^有关要求$"),          # 有关要求 / 有关要求（2）
-    re.compile(r"^要求$"),               # 仅「要求」无修饰（技术要求/安全要求 不算）
-    re.compile(r"^等等$"),               # 等等
-    re.compile(r"^若干"),                # 若干 / 若干要求 / 若干说明
-    re.compile(r"^其他要求$"), re.compile(r"^其他措施$"),
-    re.compile(r"^其他说明$"), re.compile(r"^其他补充$"),
-    re.compile(r"^相关措施$"), re.compile(r"^相关说明$"),
-    re.compile(r"^相关补充$"), re.compile(r"^相关内容$"),
-    re.compile(r"^补充说明$"), re.compile(r"^补充要求$"),
+    re.compile(r"^有关要求$"),  # 有关要求 / 有关要求（2）
+    re.compile(r"^要求$"),  # 仅「要求」无修饰（技术要求/安全要求 不算）
+    re.compile(r"^等等$"),  # 等等
+    re.compile(r"^若干"),  # 若干 / 若干要求 / 若干说明
+    re.compile(r"^其他要求$"),
+    re.compile(r"^其他措施$"),
+    re.compile(r"^其他说明$"),
+    re.compile(r"^其他补充$"),
+    re.compile(r"^相关措施$"),
+    re.compile(r"^相关说明$"),
+    re.compile(r"^相关补充$"),
+    re.compile(r"^相关内容$"),
+    re.compile(r"^补充说明$"),
+    re.compile(r"^补充要求$"),
     re.compile(r"^补充措施$"),
     # 英文等价（AI 偶发英文占位标题）
     re.compile(r"^etc", re.IGNORECASE),
@@ -217,8 +264,7 @@ GENERIC_STEM_ORDINAL_RE = re.compile(
     rf"(?:\d{{1,3}}|[{_CN_ORDINAL_CHARS}]{{1,3}})?$"
 )
 #: 裸词干白名单（无序号也判占位的**封闭**集合；刻意不含「要求/说明/方法」等）
-GENERIC_BARE_STEMS: frozenset[str] = frozenset(
-    {"专项", "措施", "内容", "要点", "其它", "其他"})
+GENERIC_BARE_STEMS: frozenset[str] = frozenset({"专项", "措施", "内容", "要点", "其它", "其他"})
 
 # ============================================================================
 # ✅ R89（2026-10-17 · 用户投诉形态复发收口）
@@ -251,19 +297,25 @@ GENERIC_BARE_STEMS: frozenset[str] = frozenset(
 #: 只收「单独成句即不含任何施工信息」的词，刻意不收「部署/方案/要求」等
 #: 可能构成正常章节名的通用词。
 GENERIC_BARE_WORDS_R89: frozenset[str] = frozenset(
-    {"章节", "小节", "总体方案", "总体部署", "专项部署",
-     "总体策划", "部署安排", "总体部署安排"})
+    {"章节", "小节", "总体方案", "总体部署", "专项部署", "总体策划", "部署安排", "总体部署安排"}
+)
 
 #: 「总体…」族泛化前缀（与既有 `^总体实施策划` 同族：只写「总体+泛化词」，
 #: 不含具体施工对象/工序）。
 GENERIC_TITLE_PATTERNS_R89: tuple[re.Pattern, ...] = tuple(
-    re.compile(rf"^{w}$") for w in sorted(GENERIC_BARE_WORDS_R89)) + (
-    re.compile(r"^总体实施策划"),          # 既有 R2，此处显式复述以便整族一起门控
-    re.compile(r"^总体方案"), re.compile(r"^总体部署"),
-    re.compile(r"^总体策划"), re.compile(r"^总体安排"),
-    re.compile(r"^总体布置"), re.compile(r"^总体技术"),
-    re.compile(r"^专项部署"), re.compile(r"^专项安排"),
-    re.compile(r"^专项内容"), re.compile(r"^部署安排"),
+    re.compile(rf"^{w}$") for w in sorted(GENERIC_BARE_WORDS_R89)
+) + (
+    re.compile(r"^总体实施策划"),  # 既有 R2，此处显式复述以便整族一起门控
+    re.compile(r"^总体方案"),
+    re.compile(r"^总体部署"),
+    re.compile(r"^总体策划"),
+    re.compile(r"^总体安排"),
+    re.compile(r"^总体布置"),
+    re.compile(r"^总体技术"),
+    re.compile(r"^专项部署"),
+    re.compile(r"^专项安排"),
+    re.compile(r"^专项内容"),
+    re.compile(r"^部署安排"),
 )
 
 #: ✅ R89：「泛化词干 + 序号 + 描述性长尾」逃逸形态。
@@ -286,7 +338,8 @@ GENERIC_STEM_ORDINAL_TAIL_RE = re.compile(
     r"|保障|安排|其它|其他)"
     rf"(?:\d{{1,3}}|[{_CN_ORDINAL_CHARS}]{{1,3}})"
     r"[^\u4e00-\u9fff0-9A-Za-z]{0,3}"
-    r"[\u4e00-\u9fff]{2,}$")
+    r"[\u4e00-\u9fff]{2,}$"
+)
 
 #: R89 判据总闸默认值（实际读取 config.outline_generic_extended_patterns）
 _R89_GENERIC_DEFAULT = True
@@ -296,8 +349,8 @@ def _r89_extended_on() -> bool:
     """R89 扩展判据是否启用（配置不可用时按**开启**处理 —— 补齐漏检，不静默放过）。"""
     try:
         from app.config import settings
-        return bool(getattr(settings, "outline_generic_extended_patterns",
-                            _R89_GENERIC_DEFAULT))
+
+        return bool(getattr(settings, "outline_generic_extended_patterns", _R89_GENERIC_DEFAULT))
     except Exception:
         return _R89_GENERIC_DEFAULT
 
@@ -311,7 +364,6 @@ def _is_generic_r89(norm: str) -> bool:
     if GENERIC_STEM_ORDINAL_TAIL_RE.match(norm):
         return True
     return any(pat.search(norm) for pat in GENERIC_TITLE_PATTERNS_R89)
-
 
 
 def _is_stem_ordinal_generic(norm: str) -> bool:
@@ -440,8 +492,9 @@ def collect_titles(outline: list, *, max_level: int | None = None) -> list[dict]
             path = f"{parent_path}.{valid_idx}" if parent_path else str(valid_idx)
             title = str(n.get("title") or "").strip()
             if (max_level is None or level <= max_level) and title:
-                out.append({"level": level, "path": path, "title": title,
-                            "text": f"{title} {str(n.get('description') or '')}"})
+                out.append(
+                    {"level": level, "path": path, "title": title, "text": f"{title} {str(n.get('description') or '')}"}
+                )
             _walk(n.get("children") or [], level + 1, path)
 
     _walk(outline or [], 1, "")
@@ -477,8 +530,7 @@ def _keyword_hits(kw: str, entries: list[dict]) -> list[str]:
     for e in entries:
         t = _norm(e.get("title") or "")
         d = _norm(e.get("text") or "")
-        if (k and (k in t or (d and k in d))) or _common_run(k, t) >= 2 \
-                or (d and _common_run(k, d) >= 3):
+        if (k and (k in t or (d and k in d))) or _common_run(k, t) >= 2 or (d and _common_run(k, d) >= 3):
             hits.append(e["path"])
     return hits
 
@@ -502,14 +554,26 @@ def analyze_name_coverage(basis, outline: list) -> dict:
     供调用方喂给外科式补齐（``_try_outline_patch``）——这是要求四的**唯一出口**。
     """
     if basis is None:
-        return {"evaluated": False, "dimensions": dict(DIMENSION_LABELS),
-                "matrix": [], "missing": [], "covered": True, "total_items": 0}
+        return {
+            "evaluated": False,
+            "dimensions": dict(DIMENSION_LABELS),
+            "matrix": [],
+            "missing": [],
+            "covered": True,
+            "total_items": 0,
+        }
     dims = {k: list(getattr(basis, k, None) or []) for k in DIMENSION_LABELS}
     total = sum(len(v) for v in dims.values())
     if total == 0:
         # 名称里没有可解析维度 → 无法评估（**不得**据此判目录不合规）
-        return {"evaluated": False, "dimensions": dict(DIMENSION_LABELS),
-                "matrix": [], "missing": [], "covered": True, "total_items": 0}
+        return {
+            "evaluated": False,
+            "dimensions": dict(DIMENSION_LABELS),
+            "matrix": [],
+            "missing": [],
+            "covered": True,
+            "total_items": 0,
+        }
 
     entries = collect_titles(outline)
     matrix: list[dict] = []
@@ -517,12 +581,17 @@ def analyze_name_coverage(basis, outline: list) -> dict:
     for dim, items in dims.items():
         for it in items:
             hits = _keyword_hits(it, entries) if entries else []
-            matrix.append({"dim": dim, "item": it, "hits": hits,
-                           "covered": bool(hits)})
+            matrix.append({"dim": dim, "item": it, "hits": hits, "covered": bool(hits)})
             if not hits:
                 missing.append(f"{DIMENSION_LABELS[dim]}·{it}")
-    return {"evaluated": True, "dimensions": dict(DIMENSION_LABELS), "matrix": matrix,
-            "missing": missing, "covered": not missing, "total_items": total}
+    return {
+        "evaluated": True,
+        "dimensions": dict(DIMENSION_LABELS),
+        "matrix": matrix,
+        "missing": missing,
+        "covered": not missing,
+        "total_items": total,
+    }
 
 
 def find_redundant_titles(basis, outline: list) -> list[dict]:
@@ -581,15 +650,20 @@ def check_outline_continuity(outline: list) -> dict:
     #    下方只读局部变量，不再引用可能未绑定的模块名。
     try:
         from app.config import settings
+
         check_fmt = bool(settings.outline_check_title_format)
         check_generic = bool(getattr(settings, "outline_check_generic_titles", True))
     except Exception:  # 配置不可用时按开启处理（补齐漏检）
         check_fmt = True
         check_generic = True
     issues: dict[str, list] = {
-        "level_gaps": [], "empty_parents": [],
-        "duplicate_titles": [], "numbering_mismatch": [],
-        "dash_titles": [], "empty_titles": [], "generic_titles": [],
+        "level_gaps": [],
+        "empty_parents": [],
+        "duplicate_titles": [],
+        "numbering_mismatch": [],
+        "dash_titles": [],
+        "empty_titles": [],
+        "generic_titles": [],
     }
     seen: dict[str, str] = {}
     counter = {"nodes": 0, "max_level": 0}
@@ -615,18 +689,15 @@ def check_outline_continuity(outline: list) -> dict:
         if key and key not in seen:
             seen[key] = path
         elif key:
-            issues["duplicate_titles"].append(
-                {"path": path, "title": title, "first": seen[key]})
+            issues["duplicate_titles"].append({"path": path, "title": title, "first": seen[key]})
         nid = str(node.get("id") or "").strip()
         if nid and _DOT_ID_RE.fullmatch(nid) and nid != path:
-            issues["numbering_mismatch"].append(
-                {"path": path, "id": nid, "expected": path, "title": title})
+            issues["numbering_mismatch"].append({"path": path, "id": nid, "expected": path, "title": title})
         children = node.get("children")
         if isinstance(children, list) and children:
             _visit_children(children, level + 1, path, title)
 
-    def _visit_children(children: list, level: int, parent_path: str,
-                        parent_title: str) -> None:
+    def _visit_children(children: list, level: int, parent_path: str, parent_title: str) -> None:
         valid = 0
         # ✅ BUG 修复（2026-10-07 · 编号错位误报）：位置路径必须与
         #    numbering.renumber_outline_nodes 的占号口径一致 —— 后者只对
@@ -648,12 +719,11 @@ def check_outline_continuity(outline: list) -> dict:
             declared = c.get("level")
             if isinstance(declared, int) and declared and declared != level:
                 issues["level_gaps"].append(
-                    {"path": cpath, "title": ctitle, "parent": parent_title,
-                     "declared": declared, "expected": level})
+                    {"path": cpath, "title": ctitle, "parent": parent_title, "declared": declared, "expected": level}
+                )
             _visit(c, level, cpath)
         if valid == 0 and children:
-            issues["empty_parents"].append(
-                {"path": parent_path, "count": len(children)})
+            issues["empty_parents"].append({"path": parent_path, "count": len(children)})
 
     # 顶层同样按 dict 项连续计数（旧实现 str(i+1) 含非 dict 位置，与 renumber 漂移）
     top_idx = 0
@@ -724,13 +794,11 @@ def render_continuity_notice(report: dict) -> str:
     if not isinstance(counts, dict):
         # 兼容手造/旧式报告（只带 issues 列表、不带 issue_counts）
         counts = {k: len(report.get(k) or []) for k in labels}
-    parts = [f"{labels[k]} {int(counts.get(k) or 0)} 处"
-             for k in labels if counts.get(k)]
+    parts = [f"{labels[k]} {int(counts.get(k) or 0)} 处" for k in labels if counts.get(k)]
     # 兜底：新增缺陷类若忘了登记标签，绝不等于可以不播报（防「检出却零呈现」）
     unlabeled = [k for k, v in counts.items() if k not in labels and v]
     if unlabeled:
-        parts.append("其它问题 " + "、".join(
-            f"{k} {int(counts[k])} 处" for k in unlabeled) + "（标签待补，请反馈）")
+        parts.append("其它问题 " + "、".join(f"{k} {int(counts[k])} 处" for k in unlabeled) + "（标签待补，请反馈）")
     if not parts:
         # 理论上不可达（ok=False 必然有非空 issues）；兼做诚实现式，绝不空转
         return "目录连续性校验未通过（未提供问题明细，请查看完整报告）"
@@ -783,41 +851,61 @@ def check_structure_standards(outline: list) -> dict:
         chapters = [n for n in (outline or []) if isinstance(n, dict)]
         max_depth = _max_depth(chapters)
     except Exception:  # pragma: no cover - 防御：脏结构不得炸掉质量报告
-        return {"evaluated": False, "chapters": 0, "max_depth": 0,
-                "recommended_chapters": OUTLINE_CHAPTER_RECOMMENDED,
-                "warnings": []}
+        return {
+            "evaluated": False,
+            "chapters": 0,
+            "max_depth": 0,
+            "recommended_chapters": OUTLINE_CHAPTER_RECOMMENDED,
+            "warnings": [],
+        }
 
     if not chapters:
-        return {"evaluated": False, "chapters": 0, "max_depth": 0,
-                "recommended_chapters": OUTLINE_CHAPTER_RECOMMENDED,
-                "warnings": []}
+        return {
+            "evaluated": False,
+            "chapters": 0,
+            "max_depth": 0,
+            "recommended_chapters": OUTLINE_CHAPTER_RECOMMENDED,
+            "warnings": [],
+        }
 
     n_ch = len(chapters)
     if not (OUTLINE_CHAPTER_MIN <= n_ch <= OUTLINE_CHAPTER_MAX):
-        warnings.append({
-            "kind": "chapter_count", "count": n_ch,
-            "allowed": [OUTLINE_CHAPTER_MIN, OUTLINE_CHAPTER_MAX],
-            "message": f"一级章节共 {n_ch} 章，超出规范区间 "
-                       f"{OUTLINE_CHAPTER_MIN}-{OUTLINE_CHAPTER_MAX} 章"})
+        warnings.append(
+            {
+                "kind": "chapter_count",
+                "count": n_ch,
+                "allowed": [OUTLINE_CHAPTER_MIN, OUTLINE_CHAPTER_MAX],
+                "message": f"一级章节共 {n_ch} 章，超出规范区间 " f"{OUTLINE_CHAPTER_MIN}-{OUTLINE_CHAPTER_MAX} 章",
+            }
+        )
     if max_depth > OUTLINE_MAX_DEPTH:
-        warnings.append({
-            "kind": "max_depth", "depth": max_depth,
-            "allowed": OUTLINE_MAX_DEPTH,
-            "message": f"目录最深 {max_depth} 级，超出规范上限 "
-                       f"{OUTLINE_MAX_DEPTH} 级"})
+        warnings.append(
+            {
+                "kind": "max_depth",
+                "depth": max_depth,
+                "allowed": OUTLINE_MAX_DEPTH,
+                "message": f"目录最深 {max_depth} 级，超出规范上限 " f"{OUTLINE_MAX_DEPTH} 级",
+            }
+        )
     for idx, ch in enumerate(chapters, 1):
         children = ch.get("children")
         n_sec = len(children) if isinstance(children, list) else 0
         if 0 < n_sec and not (OUTLINE_SECTION_MIN <= n_sec <= OUTLINE_SECTION_MAX):
-            warnings.append({
-                "kind": "section_count", "path": str(idx),
-                "title": str(ch.get("title") or "").strip(),
-                "count": n_sec,
-                "allowed": [OUTLINE_SECTION_MIN, OUTLINE_SECTION_MAX],
-                "message": f"第 {idx} 章二级节数 {n_sec}，超出规范区间 "
-                           f"{OUTLINE_SECTION_MIN}-{OUTLINE_SECTION_MAX} 节"})
+            warnings.append(
+                {
+                    "kind": "section_count",
+                    "path": str(idx),
+                    "title": str(ch.get("title") or "").strip(),
+                    "count": n_sec,
+                    "allowed": [OUTLINE_SECTION_MIN, OUTLINE_SECTION_MAX],
+                    "message": f"第 {idx} 章二级节数 {n_sec}，超出规范区间 "
+                    f"{OUTLINE_SECTION_MIN}-{OUTLINE_SECTION_MAX} 节",
+                }
+            )
     return {
-        "evaluated": True, "chapters": n_ch, "max_depth": max_depth,
+        "evaluated": True,
+        "chapters": n_ch,
+        "max_depth": max_depth,
         "recommended_chapters": OUTLINE_CHAPTER_RECOMMENDED,
         "warnings": warnings,
     }
@@ -839,13 +927,13 @@ def render_structure_notice(report: dict) -> str:
     """结构规范建议的一句话摘要（无建议返回空串）。"""
     if not report or not report.get("warnings"):
         return ""
-    return "目录结构规范建议：" + "；".join(
-        str(w.get("message") or "") for w in report["warnings"][:6])
+    return "目录结构规范建议：" + "；".join(str(w.get("message") or "") for w in report["warnings"][:6])
 
 
 # ============================================================================
 # R86（L5）· 写路径共用占位闸门 —— **单一出口**
 # ============================================================================
+
 
 def detect_generic_titles_for_write(outline: list, *, context: str = "") -> list[dict]:
     """目录**写路径**共用的占位/泛化标题检测（加法式，单一出口，fail-soft）。
@@ -866,6 +954,7 @@ def detect_generic_titles_for_write(outline: list, *, context: str = "") -> list
     """
     try:
         from app.config import settings
+
         if not getattr(settings, "outline_check_generic_titles", True):
             return []
     except Exception:  # noqa: BLE001 - 配置读不到即按默认开，不阻断写路径
@@ -873,14 +962,15 @@ def detect_generic_titles_for_write(outline: list, *, context: str = "") -> list
     try:
         return detect_generic_titles(outline)
     except Exception:  # noqa: BLE001 - 检测失败不得阻断保存
-        logger.warning("目录占位标题检测失败（不影响保存）%s",  # 单占位符 + exc_info
-                       f"[{context}]" if context else "",
-                       exc_info=True)
+        logger.warning(
+            "目录占位标题检测失败（不影响保存）%s",  # 单占位符 + exc_info
+            f"[{context}]" if context else "",
+            exc_info=True,
+        )
         return []
 
 
-def attach_generic_residual(result: dict, outline: list, *, scheme_id: str = "",
-                            context: str = "") -> dict:
+def attach_generic_residual(result: dict, outline: list, *, scheme_id: str = "", context: str = "") -> dict:
     """把占位残留**加法式**挂到写路径响应体（唯一回传形态）。
 
     与 ``_save_outline_to_db`` 的回传形态逐字一致：仅当确有残留时才加
@@ -894,5 +984,6 @@ def attach_generic_residual(result: dict, outline: list, *, scheme_id: str = "",
             "目录写入%s：检出 %d 个占位/泛化标题（已保存，建议人工核对）：%s",
             f"（{context} scheme={scheme_id[:8]}）" if scheme_id else f"（{context}）",
             len(hits),
-            "、".join(str(h.get("title") or "")[:20] for h in hits[:10]))
+            "、".join(str(h.get("title") or "")[:20] for h in hits[:10]),
+        )
     return result

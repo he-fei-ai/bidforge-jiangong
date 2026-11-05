@@ -2,8 +2,13 @@
 
 HeadingNumberingGeneratorV2：实例化版，维护计数器+父级ID状态，支持八级标题，
 每级在父级变更时自动重置。适用于流式生成场景：DOCX 导出、实时正文生成。
-依赖 heading_templates 中的共享常量。
+
+✅ 口径确认（2026-11-05）：**二级编号每章重置为 1 是既定正确行为**。
+《L3以下“少目录、多正文”编制标准》只要求 L3 = L2.序号（如 1.1、11.1/11.2），
+不要求 L2 全文连续；后者仅是标准文档示例中的一种写法。请勿把“L2 全文连续”
+当作缺陷去改本类的重置语义（会影响导出样式、正文 subheading 与前端展示）。
 """
+
 from __future__ import annotations
 
 from app.services.ai.heading_templates import HEADING_MANAGED_LEVELS, HEADING_STYLE_CONFIG

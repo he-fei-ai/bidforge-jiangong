@@ -120,18 +120,40 @@ def _fmt_duration(ms) -> str:
     return f"{hours}小时{m}分" if m else f"{hours}小时"
 
 
+def _done_counters(processed, failed) -> dict:
+    """统一章节计数的单一口径（R175 BUG-4）。
+
+    done       = 已**成功**落库的章节数；
+    processed  = 已处理章节数（成功 + 失败，进度折算与 ETA 沿用此值）；
+    failed     = 失败章节数。
+
+    此前运行期进度事件 `done` 含失败、终态 checkpoint `done` 只含成功，
+    同一任务在进度卡与终态消息/重挂摘要里会出现两个数字。现统一为：
+    对外 `done` 恒为成功数，另以 `processed` 表达已处理总数。
+    """
+    def _int(v):
+        try:
+            return max(0, int(v or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    p = _int(processed)
+    f = min(_int(failed), p)
+    return {"done": p - f, "processed": p, "failed": f}
+
+
 def _snapshot_stats(prog: dict, paused_ms: float = 0.0) -> dict:
     """构造运行统计快照（供 stats 事件与心跳通道使用，绝不抛异常）。
 
     字段口径：
       elapsed_ms  本次任务已耗时；eta_ms 线性外推的剩余耗时（无法预估时为 None）
-      done/total  已处理章节数 / 总章节数；failed 其中失败数
+      done/total  已成功章节数 / 总章节数；processed 已处理（含失败）；failed 失败数
       words       已落库正文累计字数
       avg_section_ms 已完成章节的平均实测耗时（无样本为 None）
       running     进行中章节列表（标题 + 当前阶段 + 该章已耗时）
       concurrency 当前并发档位
       phase       阶段标识（prepare/sections/consistency）+ 中文标签
-      progress    折算后的总进度（与 progress 事件同口径）
+      progress    折算后的总进度（与 progress 事件同口径，且经单调护栏）
 
     ✅ B1（2026-09-20）paused_ms：协作式暂停**不打断在飞 AI 调用**，
     暂停期间 stats 仍持续推送。若不扣除暂停时长，进度卡的「已耗时」会
@@ -195,19 +217,24 @@ def _snapshot_stats(prog: dict, paused_ms: float = 0.0) -> dict:
             # 至少按 1s 估算：首个统计点（耗时≈0）不应给出 0 或天量 ETA
             section_elapsed_ms = max(section_elapsed_ms, 1000)
             eta_ms = int(section_elapsed_ms / effective * (total - effective))
+        counts = _done_counters(done, prog.get("failed", 0))
         return {
             "elapsed_ms": elapsed_ms,
             "eta_ms": eta_ms,
-            "done": done,
+            "done": counts["done"],
+            "processed": counts["processed"],
             "total": total,
-            "failed": prog.get("failed", 0),
+            "failed": counts["failed"],
             "words": prog.get("words", 0),
             "avg_section_ms": avg_section_ms,
             "running": running,
             "concurrency": prog.get("concurrency", 0),
             "phase": prog.get("phase", ""),
             "phase_label": prog.get("phase_label", ""),
-            "progress": _sh._weighted_progress(prog),
+            # R175 BUG-3：心跳快照与 progress 事件共用单调护栏，
+            # 防止 running 移除与 done 自增之间的窗口让进度条回退。
+            "progress": _sh._monotonic_progress(
+                prog.get("progress_max", 0.0), _sh._weighted_progress(prog)),
         }
     except Exception:
         # 统计只服务于展示，任何异常都不允许影响生成主流程
@@ -686,8 +713,15 @@ def _budgeted_truncate_sections(text: str, budget: int) -> tuple[str, dict]:
     return out, {"sections": len(sections), "truncated_sections": truncated}
 
 
-async def _load_knowledge_rows(db, scheme_id: str) -> list[dict]:
-    """加载方案可用的知识库条目行（专属 + 项目共享），一次查询供逐章内存过滤。"""
+async def _load_knowledge_rows(db, scheme_id: str,
+                               degraded_out: list | None = None,
+                               degraded_stage: str = "outline.assemble.knowledge_text") -> list[dict]:
+    """加载方案可用的知识库条目行（专属 + 项目共享），一次查询供逐章内存过滤。
+
+    ✅ D-39（R176）：查询异常此前只落 WARNING 日志，用户看到的是「没有知识库
+    素材」而不是「素材读取失败」。失败时登记 `context_degraded`（segment_failed），
+    正常（含确实无素材）路径不产生任何记录。
+    """
     try:
         cur = await db.execute(_sh._fe.SCHEME_PROJECT_ID_SQL, (scheme_id,))
         row = await cur.fetchone()
@@ -701,6 +735,10 @@ async def _load_knowledge_rows(db, scheme_id: str) -> list[dict]:
         return [dict(r) for r in await cur.fetchall()]
     except Exception as e:  # 表缺失等异常不应阻断生成
         _sh.logger.warning("加载项目知识库素材失败（降级为无）: %s", e)
+        _sh._record_context_degraded(
+            degraded_out, field="knowledge_rows", stage=degraded_stage,
+            original_chars=0, kept_chars=0,
+            reason=_sh.CONTEXT_DEGRADED_SEGMENT, segment_id="knowledge_rows")
         return []
 
 
@@ -723,7 +761,9 @@ def _filter_knowledge_rows(rows: list[dict], leaf: dict) -> list[dict]:
 
 
 async def _build_knowledge_text(db, scheme_id: str,
-                                relevant_to: dict | None = None) -> str:
+                                relevant_to: dict | None = None,
+                                degraded_out: list | None = None,
+                                degraded_stage: str = "outline.assemble.knowledge_text") -> str:
     """构建「项目知识库素材」文本（knowledge_base 表，产品需求 §3.9）。
 
     查询范围：该方案的专属条目（scheme_id=当前方案）+ 项目共享条目（scheme_id=''）。
@@ -734,10 +774,16 @@ async def _build_knowledge_text(db, scheme_id: str,
     企业制度库无差别注入每一章，浪费 token 并稀释指令）。
     """
     from app.routers.knowledge import build_knowledge_text
-    rows = await _sh._load_knowledge_rows(db, scheme_id)
+    rows = await _sh._load_knowledge_rows(
+        db, scheme_id, degraded_out=degraded_out, degraded_stage=degraded_stage)
     if relevant_to is not None:
         rows = _sh._filter_knowledge_rows(rows, relevant_to)
-    return build_knowledge_text(rows)
+    _kn_stats: dict = {}
+    text = build_knowledge_text(rows, stats_out=_kn_stats)
+    # ✅ D-39（R176）：单条 500 / 总量 3000 的硬切进统一降级簿记。
+    _sh._record_knowledge_budget(
+        degraded_out, _kn_stats, stage=degraded_stage, field="knowledge_text")
+    return text
 
 
 # ---------- 辅助：递归构建 parent_chain ----------

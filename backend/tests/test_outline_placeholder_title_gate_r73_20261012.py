@@ -25,6 +25,7 @@
 
 运行：pytest tests/test_outline_placeholder_title_gate_r73_20261012.py -q
 """
+
 from __future__ import annotations
 
 import copy
@@ -40,11 +41,15 @@ from app.services.outline_quality import collect_titles, detect_generic_titles
 # 一级标题齐备（覆盖编制要求），但二级位全是占位泛化名 —— 正是用户报的形态
 PLACEHOLDER_OUTLINE = [
     {"title": "工程概况", "description": "项目总体说明", "children": []},
-    {"title": "基坑支护施工", "description": "支护体系实施", "children": [
-        {"title": "专项6", "description": "占位", "children": []},
-        {"title": "总体实施策划（2）", "description": "占位", "children": []},
-        {"title": "总体实施策划（3）", "description": "占位", "children": []},
-    ]},
+    {
+        "title": "基坑支护施工",
+        "description": "支护体系实施",
+        "children": [
+            {"title": "专项6", "description": "占位", "children": []},
+            {"title": "总体实施策划（2）", "description": "占位", "children": []},
+            {"title": "总体实施策划（3）", "description": "占位", "children": []},
+        ],
+    },
     {"title": "安全保证措施", "description": "措施", "children": []},
 ]
 
@@ -75,8 +80,7 @@ def _titles(tree):
     return [str(e.get("title") or "") for e in collect_titles(tree)]
 
 
-def _fake_ai(monkeypatch, seen, *, title_fix_ok=True, patch_ok=True,
-             review=None, fix=None):
+def _fake_ai(monkeypatch, seen, *, title_fix_ok=True, patch_ok=True, review=None, fix=None):
     """按校验函数分派的假 AI；记录调用序列（scene）。
 
     ⚠️ `_title_fix_validate_fn` 用 getattr 取：修复前该函数不存在时，本夹具
@@ -91,15 +95,21 @@ def _fake_ai(monkeypatch, seen, *, title_fix_ok=True, patch_ok=True,
         if title_fix_vf is not None and validate_fn is title_fix_vf:
             if not title_fix_ok:
                 raise RuntimeError("标题重写不可用（用例刻意制造）")
-            obj = {"updates": [{"path": p, "title": t}
-                               for p, t in TITLE_UPDATES.items()]}
+            obj = {"updates": [{"path": p, "title": t} for p, t in TITLE_UPDATES.items()]}
             return obj, json.dumps(obj, ensure_ascii=False)
         if validate_fn is sh._outline_patch_validate_fn:
             if not patch_ok:
                 raise RuntimeError("外科补齐不可用")
-            obj = {"new_chapters": [{
-                "title": "监测方案", "description": "监测点布置与预警",
-                "insert_after": "安全保证措施", "children": []}]}
+            obj = {
+                "new_chapters": [
+                    {
+                        "title": "监测方案",
+                        "description": "监测点布置与预警",
+                        "insert_after": "安全保证措施",
+                        "children": [],
+                    }
+                ]
+            }
             return obj, json.dumps(obj, ensure_ascii=False)
         if validate_fn is sh._outline_fix_validate_fn:
             if fix is None:
@@ -121,13 +131,10 @@ class TestEarlyExitGate:
         seen = []
         _fake_ai(monkeypatch, seen)
 
-        outline, review = await sh._review_and_fix_outline(
-            _outline(), "基坑", False, "摘要", requirements=REQUIREMENTS)
+        outline, review = await sh._review_and_fix_outline(_outline(), "基坑", False, "摘要", requirements=REQUIREMENTS)
 
-        assert review.get("review_mode") != "programmatic", (
-            "含占位标题时严禁以 programmatic 早退宣称通过（根因 A）")
-        assert detect_generic_titles(outline) == [], (
-            f"占位标题应被改写，实际标题：{_titles(outline)}")
+        assert review.get("review_mode") != "programmatic", "含占位标题时严禁以 programmatic 早退宣称通过（根因 A）"
+        assert detect_generic_titles(outline) == [], f"占位标题应被改写，实际标题：{_titles(outline)}"
         assert "专项6" not in _titles(outline)
         assert "总体实施策划（2）" not in _titles(outline)
         assert review.get("passed") is True
@@ -136,14 +143,14 @@ class TestEarlyExitGate:
         """向后兼容红线：无占位标题时逐字保持旧的 0 调用早退（省 1~2 次调用）。"""
         seen = []
         _fake_ai(monkeypatch, seen)
-        clean = [{"title": "工程概况", "children": []},
-                 {"title": "基坑支护施工", "children": [
-                     {"title": "灌注桩支护施工", "children": []}]},
-                 {"title": "安全保证措施", "children": []}]
+        clean = [
+            {"title": "工程概况", "children": []},
+            {"title": "基坑支护施工", "children": [{"title": "灌注桩支护施工", "children": []}]},
+            {"title": "安全保证措施", "children": []},
+        ]
         assert detect_generic_titles(clean) == []
 
-        _out, review = await sh._review_and_fix_outline(
-            clean, "基坑", False, "摘要", requirements=REQUIREMENTS)
+        _out, review = await sh._review_and_fix_outline(clean, "基坑", False, "摘要", requirements=REQUIREMENTS)
 
         assert seen == [], "干净目录不得被拖进任何 AI 调用（旧行为红线）"
         assert review["review_mode"] == "programmatic"
@@ -159,12 +166,10 @@ class TestEarlyExitGate:
         """
         seen = []
         _fake_ai(monkeypatch, seen)
-        monkeypatch.setattr(sh.settings, "outline_check_generic_titles", False,
-                            raising=False)
+        monkeypatch.setattr(sh.settings, "outline_check_generic_titles", False, raising=False)
         monkeypatch.setattr(sh, "_detect_duplicate_titles", lambda _t: [])
 
-        _out, review = await sh._review_and_fix_outline(
-            _outline(), "基坑", False, "摘要", requirements=REQUIREMENTS)
+        _out, review = await sh._review_and_fix_outline(_outline(), "基坑", False, "摘要", requirements=REQUIREMENTS)
 
         assert review.get("review_mode") == "programmatic"
         assert seen == [], "关闭开关后不应新增任何 AI 调用（可回退红线）"
@@ -180,14 +185,14 @@ class TestSurgicalExitGate:
         _fake_ai(monkeypatch, seen)
 
         outline, review = await sh._review_and_fix_outline(
-            _outline(), "基坑", False, "摘要",
-            requirements=REQUIREMENTS + "\n4. 监测方案")
+            _outline(), "基坑", False, "摘要", requirements=REQUIREMENTS + "\n4. 监测方案"
+        )
 
         assert "监测方案" in _titles(outline), "外科补齐应先补上缺章"
-        assert detect_generic_titles(outline) == [], (
-            f"补齐出口仍残留占位标题：{_titles(outline)}")
-        assert str(review.get("review_mode", "")).endswith("titled"), (
-            f"补齐 + 标题重写的出口应带 titled 口径，实际：{review.get('review_mode')}")
+        assert detect_generic_titles(outline) == [], f"补齐出口仍残留占位标题：{_titles(outline)}"
+        assert str(review.get("review_mode", "")).endswith(
+            "titled"
+        ), f"补齐 + 标题重写的出口应带 titled 口径，实际：{review.get('review_mode')}"
         assert "outline_fix" in seen, "标题重写复用 outline_fix 场景归因"
 
 
@@ -198,20 +203,21 @@ class TestResidualHonesty:
     async def test_residual_generic_is_not_reported_as_passed(self, monkeypatch):
         """AI 回传的 fixed_outline 仍含占位 ⇒ passed=False + 透明人工核对警告。"""
         residual = copy.deepcopy(PLACEHOLDER_OUTLINE)
-        residual[1]["children"][0]["title"] = "灌注桩支护施工"   # 只改掉一个
+        residual[1]["children"][0]["title"] = "灌注桩支护施工"  # 只改掉一个
 
         seen = []
-        _fake_ai(monkeypatch, seen, title_fix_ok=False,
-                 review={"passed": False, "suggestions": ["占位请改"],
-                         "fixed_outline": copy.deepcopy(residual)})
+        _fake_ai(
+            monkeypatch,
+            seen,
+            title_fix_ok=False,
+            review={"passed": False, "suggestions": ["占位请改"], "fixed_outline": copy.deepcopy(residual)},
+        )
         monkeypatch.setattr(sh, "OUTLINE_REVIEW_MODE", "always")
 
-        outline, review = await sh._review_and_fix_outline(
-            _outline(), "基坑", False, "摘要")
+        outline, review = await sh._review_and_fix_outline(_outline(), "基坑", False, "摘要")
 
         assert detect_generic_titles(outline), "夹具设计前提：修复后确有残留"
-        assert review.get("passed") is False, (
-            "残留占位标题却报 passed=True 即根因 B（结论不准确）")
+        assert review.get("passed") is False, "残留占位标题却报 passed=True 即根因 B（结论不准确）"
         assert int(review.get("generic_residual") or 0) >= 1
         sugg = " ".join(review.get("suggestions") or [])
         assert ("人工" in sugg) or ("核对" in sugg), f"应给出可核对的透明警告：{sugg}"
@@ -220,18 +226,18 @@ class TestResidualHonesty:
     async def test_clean_fix_result_still_reports_passed(self, monkeypatch):
         """修复后干净 ⇒ 保持 passed=True 与旧的「已自动修复」文案（不误伤）。"""
         corrected = copy.deepcopy(PLACEHOLDER_OUTLINE)
-        for i, t in enumerate(("灌注桩支护施工", "钢内支撑安装与拆除",
-                               "冠梁与混凝土腰梁施工")):
+        for i, t in enumerate(("灌注桩支护施工", "钢内支撑安装与拆除", "冠梁与混凝土腰梁施工")):
             corrected[1]["children"][i]["title"] = t
 
         seen = []
-        _fake_ai(monkeypatch, seen,
-                 review={"passed": False, "suggestions": ["占位请改"],
-                         "fixed_outline": copy.deepcopy(corrected)})
+        _fake_ai(
+            monkeypatch,
+            seen,
+            review={"passed": False, "suggestions": ["占位请改"], "fixed_outline": copy.deepcopy(corrected)},
+        )
         monkeypatch.setattr(sh, "OUTLINE_REVIEW_MODE", "always")
 
-        outline, review = await sh._review_and_fix_outline(
-            _outline(), "基坑", False, "摘要")
+        outline, review = await sh._review_and_fix_outline(_outline(), "基坑", False, "摘要")
 
         assert detect_generic_titles(outline) == []
         assert review.get("passed") is True
@@ -244,12 +250,14 @@ class TestResidualHonesty:
 class TestApplyTitleUpdates:
     def test_applies_valid_updates_only(self):
         tree, applied, rejected = sh._apply_title_updates(
-            _outline(), [
+            _outline(),
+            [
                 {"path": "2.1", "title": "灌注桩支护施工"},
-                {"path": "2.9", "title": "不存在的节点"},        # 路径不存在
-                {"path": "2.2", "title": "专项7"},               # 新标题自身仍泛化
-                {"path": "2.3", "title": "灌注桩支护施工"},       # 与兄弟重名
-            ])
+                {"path": "2.9", "title": "不存在的节点"},  # 路径不存在
+                {"path": "2.2", "title": "专项7"},  # 新标题自身仍泛化
+                {"path": "2.3", "title": "灌注桩支护施工"},  # 与兄弟重名
+            ],
+        )
         assert applied == 1
         titles = _titles(tree)
         assert "灌注桩支护施工" in titles
@@ -262,20 +270,17 @@ class TestApplyTitleUpdates:
         src = _outline()
         snapshot = json.dumps(src, ensure_ascii=False, sort_keys=True)
         sh._apply_title_updates(src, [{"path": "2.1", "title": "灌注桩支护施工"}])
-        assert json.dumps(src, ensure_ascii=False, sort_keys=True) == snapshot, (
-            "纯函数：绝不就地改坏调用方持有的目录")
+        assert json.dumps(src, ensure_ascii=False, sort_keys=True) == snapshot, "纯函数：绝不就地改坏调用方持有的目录"
 
     def test_rename_leaves_numbering_untouched(self):
         """标题改写不改变位置路径 ⇒ 无需重算编号（位置是编号唯一事实源）。"""
-        tree, _a, _r = sh._apply_title_updates(
-            _outline(), [{"path": "2.1", "title": "灌注桩支护施工"}])
-        assert [e["path"] for e in collect_titles(tree)] == [
-            "1", "2", "2.1", "2.2", "2.3", "3"]
+        tree, _a, _r = sh._apply_title_updates(_outline(), [{"path": "2.1", "title": "灌注桩支护施工"}])
+        assert [e["path"] for e in collect_titles(tree)] == ["1", "2", "2.1", "2.2", "2.3", "3"]
 
     def test_malformed_updates_never_raise(self):
         tree, applied, rejected = sh._apply_title_updates(
-            _outline(), [None, "x", {}, {"path": 2.1},
-                         {"path": "2.1", "title": "   "}])
+            _outline(), [None, "x", {}, {"path": 2.1}, {"path": "2.1", "title": "   "}]
+        )
         assert applied == 0 and len(rejected) == 5
         assert _titles(tree) == _titles(PLACEHOLDER_OUTLINE)
 
@@ -289,11 +294,13 @@ class TestPromptContract:
             _ALL_PROMPTS,
             PROMPT_VARIABLE_CONTRACTS,
         )
+
         assert "outline_title_fix_system" in _ALL_PROMPTS
         assert "outline_title_fix_system" in PROMPT_VARIABLE_CONTRACTS
 
     def test_template_states_rules(self):
         from app.services.ai.prompts._registry import _ALL_PROMPTS
+
         text = _ALL_PROMPTS["outline_title_fix_system"]["default_content"]
         assert "{broken_items}" in text
         assert "（N）" in text
@@ -301,6 +308,7 @@ class TestPromptContract:
 
     def test_contract_drift_guard_clean(self):
         from app.services.ai.prompts._registry import check_prompt_variables
+
         assert check_prompt_variables() == []
 
 
@@ -310,4 +318,5 @@ class TestPromptContract:
 class TestConfigDefaults:
     def test_default_on(self):
         from app.config import Settings
+
         assert Settings().outline_title_fix is True

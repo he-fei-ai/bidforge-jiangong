@@ -13,6 +13,7 @@
 3. 要求四（全面性）：``analyze_name_coverage`` / ``find_redundant_titles``，
    且缺口能并入 ``_check_requirements_coverage`` 的 missing → 复用外科式补齐。
 """
+
 import app.routers.sse_handlers as sh
 import pytest
 
@@ -36,21 +37,17 @@ BASIS = parse_scheme_basis("基坑支护及土方开挖专项施工方案")
 class TestSchemeNameLine:
     def test_name_only_triggers_dangerous(self):
         """名称写「深基坑支护」而 type 选「其它」→ 必须判危大（修复前为 False）。"""
-        assert sh._scheme_is_dangerous(
-            {"name": "深基坑支护专项施工方案", "type": "其它"}) is True
+        assert sh._scheme_is_dangerous({"name": "深基坑支护专项施工方案", "type": "其它"}) is True
 
     def test_type_still_wins(self):
-        assert sh._scheme_is_dangerous(
-            {"name": "装饰装修专项施工方案", "type": "深基坑"}) is True
+        assert sh._scheme_is_dangerous({"name": "装饰装修专项施工方案", "type": "深基坑"}) is True
 
     def test_no_false_positive_on_plain_name(self):
-        assert sh._scheme_is_dangerous(
-            {"name": "装饰装修专项施工方案", "type": "其它"}) is False
+        assert sh._scheme_is_dangerous({"name": "装饰装修专项施工方案", "type": "其它"}) is False
 
     def test_switch_off_falls_back_to_type_only(self, monkeypatch):
         monkeypatch.setattr(sh.settings, "outline_name_basis", False, raising=False)
-        assert sh._scheme_is_dangerous(
-            {"name": "深基坑支护专项施工方案", "type": "其它"}) is False
+        assert sh._scheme_is_dangerous({"name": "深基坑支护专项施工方案", "type": "其它"}) is False
 
     def test_basis_obj_respects_switch(self, monkeypatch):
         monkeypatch.setattr(sh.settings, "outline_name_basis", False, raising=False)
@@ -106,10 +103,8 @@ class TestRelevanceFrontLoad:
         assert groups[0] == "技术参数"
         assert len(groups) == len(rows), "一条都不能少"
         # 同一组必须连续（否则 _render_facts_text 会渲染出重复 "### 组名"）
-        blocks = [groups[0]] + [groups[i] for i in range(1, len(groups))
-                                 if groups[i] != groups[i - 1]]
+        blocks = [groups[0]] + [groups[i] for i in range(1, len(groups)) if groups[i] != groups[i - 1]]
         assert set(blocks) == {"技术参数", "商务信息"} and len(blocks) == 2, groups
-
 
 
 # ===========================================================================
@@ -117,8 +112,12 @@ class TestRelevanceFrontLoad:
 # ===========================================================================
 class TestContinuity:
     CLEAN = [
-        {"title": "工程概况", "id": "1", "level": 1,
-         "children": [{"title": "概况与特点", "id": "1.1", "level": 2, "children": []}]},
+        {
+            "title": "工程概况",
+            "id": "1",
+            "level": 1,
+            "children": [{"title": "概况与特点", "id": "1.1", "level": 2, "children": []}],
+        },
         {"title": "施工工艺", "id": "2", "level": 1, "children": []},
     ]
 
@@ -128,8 +127,7 @@ class TestContinuity:
         assert r["nodes"] == 3 and r["max_level"] == 2
 
     def test_level_gap_detected(self):
-        tree = [{"title": "A", "level": 1,
-                 "children": [{"title": "B", "level": 3, "children": []}]}]
+        tree = [{"title": "A", "level": 1, "children": [{"title": "B", "level": 3, "children": []}]}]
         r = check_outline_continuity(tree)
         assert r["ok"] is False
         assert r["level_gaps"][0]["declared"] == 3 and r["level_gaps"][0]["expected"] == 2
@@ -137,13 +135,13 @@ class TestContinuity:
     def test_numbering_mismatch_detected(self):
         tree = [{"title": "A", "id": "7", "level": 1, "children": []}]
         r = check_outline_continuity(tree)
-        assert r["numbering_mismatch"] == [
-            {"path": "1", "id": "7", "expected": "1", "title": "A"}]
+        assert r["numbering_mismatch"] == [{"path": "1", "id": "7", "expected": "1", "title": "A"}]
 
     def test_duplicate_titles_detected(self):
-        tree = [{"title": "施工部署", "children": []},
-                {"title": "施工准备", "children": [
-                    {"title": "施工部署", "children": []}]}]
+        tree = [
+            {"title": "施工部署", "children": []},
+            {"title": "施工准备", "children": [{"title": "施工部署", "children": []}]},
+        ]
         r = check_outline_continuity(tree)
         assert len(r["duplicate_titles"]) == 1
         assert r["duplicate_titles"][0]["first"] == "1"
@@ -158,8 +156,7 @@ class TestContinuity:
         assert check_outline_continuity(None)["nodes"] == 0
 
     def test_notice_renders_chinese(self):
-        tree = [{"title": "A", "level": 1,
-                 "children": [{"title": "B", "level": 3, "children": []}]}]
+        tree = [{"title": "A", "level": 1, "children": [{"title": "B", "level": 3, "children": []}]}]
         assert "层级跳级" in render_continuity_notice(check_outline_continuity(tree))
         assert render_continuity_notice({"ok": True}) == ""
 
@@ -170,8 +167,7 @@ class TestContinuity:
 class TestNameCoverage:
     OUTLINE = [
         {"title": "工程概况", "children": []},
-        {"title": "土方开挖及支护施工", "children": [
-            {"title": "分层分段开挖", "children": []}]},
+        {"title": "土方开挖及支护施工", "children": [{"title": "分层分段开挖", "children": []}]},
     ]
 
     def test_covered_when_keywords_land_anywhere(self):
@@ -199,11 +195,8 @@ class TestNameCoverage:
         assert find_redundant_titles(BASIS, self.OUTLINE) == []
 
     def test_unrelated_chapter_reported_as_redundant(self):
-        tree = [{"title": "工程概况", "children": []},
-                {"title": "精装包厢软包施工", "children": []}]
-        assert [r["title"] for r in find_redundant_titles(BASIS, tree)] == \
-            ["精装包厢软包施工"]
-
+        tree = [{"title": "工程概况", "children": []}, {"title": "精装包厢软包施工", "children": []}]
+        assert [r["title"] for r in find_redundant_titles(BASIS, tree)] == ["精装包厢软包施工"]
 
 
 class TestCoverageWiredIntoRequirementsCheck:
@@ -211,7 +204,8 @@ class TestCoverageWiredIntoRequirementsCheck:
 
     def test_name_gaps_merged_into_missing(self):
         covered, missing = sh._check_requirements_coverage(
-            "", [{"title": "工程概况", "children": []}], False, basis=BASIS)
+            "", [{"title": "工程概况", "children": []}], False, basis=BASIS
+        )
         assert covered is False
         assert any("施工工序" in m for m in missing)
 
@@ -220,23 +214,28 @@ class TestCoverageWiredIntoRequirementsCheck:
         #    本组用例测「方案名称维度覆盖」，故隔离九大法定章节检查。
         monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False)
         covered, missing = sh._check_requirements_coverage(
-            "", [{"title": "工程概况", "children": []},
-                 {"title": "基坑支护施工", "children": [
-                     {"title": "土方开挖", "children": []}]}],
-            False, basis=BASIS)
+            "",
+            [
+                {"title": "工程概况", "children": []},
+                {"title": "基坑支护施工", "children": [{"title": "土方开挖", "children": []}]},
+            ],
+            False,
+            basis=BASIS,
+        )
         assert covered is True, missing
 
     def test_basis_none_keeps_legacy_behaviour(self):
         covered, missing = sh._check_requirements_coverage(
-            "必须包含监测方案", [{"title": "工程概况", "children": []}], False)
+            "必须包含监测方案", [{"title": "工程概况", "children": []}], False
+        )
         assert covered is False and "必须包含监测方案" in missing
 
     def test_switch_off_disables_name_check(self, monkeypatch):
-        monkeypatch.setattr(sh.settings, "outline_name_coverage_check", False,
-                            raising=False)
+        monkeypatch.setattr(sh.settings, "outline_name_coverage_check", False, raising=False)
         monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False)
         covered, missing = sh._check_requirements_coverage(
-            "", [{"title": "工程概况", "children": []}], False, basis=BASIS)
+            "", [{"title": "工程概况", "children": []}], False, basis=BASIS
+        )
         assert covered is True and missing == []
 
 
@@ -246,13 +245,14 @@ class TestQualityReportAttached:
     def test_report_written_into_review_obj(self):
         review = {"passed": True, "suggestions": ["原建议"]}
         rep = sh._attach_quality_report(
-            [{"title": "工程概况", "level": 1, "children": [
-                {"title": "概况", "level": 3, "children": []}]}], BASIS, review)
+            [{"title": "工程概况", "level": 1, "children": [{"title": "概况", "level": 3, "children": []}]}],
+            BASIS,
+            review,
+        )
         # ✅ 2026-10-11（引入目录结构规范）：报告新增 structure 建议键。
         #    契约同步扩展为四键；结构建议**不得**翻转 continuity.ok（本例
         #    continuity 因层级跳级仍为 False，与 structure 无关）。
-        assert set(rep) == {"continuity", "structure", "name_coverage",
-                            "redundant_titles"}
+        assert set(rep) == {"continuity", "structure", "name_coverage", "redundant_titles"}
         assert rep["continuity"]["ok"] is False
         assert rep["structure"]["evaluated"] is True
         assert "chapter_count" in {w["kind"] for w in rep["structure"]["warnings"]}
@@ -352,11 +352,11 @@ def test_services_never_import_routers():
                 known.append(f"{rel} {hit}")
             else:
                 leaks.append(f"{p.relative_to(ROOT)} {hit}")
-    assert not leaks, ("services 层不得新增对 routers 的依赖（层级倒置）：\n  "
-                       + "\n  ".join(leaks))
+    assert not leaks, "services 层不得新增对 routers 的依赖（层级倒置）：\n  " + "\n  ".join(leaks)
     # 已登记项必须仍然存在（登记表不得过期/失效），数量与登记一致
-    assert len(known) == len(KNOWN_LAYER_LEAKS), (
-        f"KNOWN_LAYER_LEAKS 已过期：实际 {len(known)} 处，登记 {len(KNOWN_LAYER_LEAKS)} 处")
+    assert len(known) == len(
+        KNOWN_LAYER_LEAKS
+    ), f"KNOWN_LAYER_LEAKS 已过期：实际 {len(known)} 处，登记 {len(KNOWN_LAYER_LEAKS)} 处"
 
 
 def test_content_blocks_is_the_single_implementation():
@@ -391,8 +391,7 @@ def test_moved_functions_behave_identically():
     blocks = _parse_content_blocks(content)
     assert [b["type"] for b in blocks if b["type"] == "heading"] == ["heading"] * 2
     counters: dict = {}
-    text, style = _compute_subheading("2", 1, 2, counters, "材料要求", "",
-                                      has_children=False)
+    text, style = _compute_subheading("2", 1, 2, counters, "材料要求", "", has_children=False)
     assert text.startswith("2.") and style, (text, style)
     # 有 DB 子章节时降级到 body 命名空间（与导出 parity 硬约束）
     text2, _ = _compute_subheading("2", 1, 2, {}, "材料要求", "", has_children=True)
@@ -438,25 +437,29 @@ class TestAllLevelRelaxedMatching:
 
     def test_deep_title_satisfies_requirement(self, monkeypatch):
         from app.routers import sse_handlers as _sh
+
         monkeypatch.setattr(_sh.settings, "outline_checkpoint_check", False)
         covered, missing = _sh._check_requirements_coverage(
-            "深基坑开挖支护专项方案", [{"title": "工程概况", "children": [
-                {"title": "深基坑开挖支护要点", "children": []}]}])
+            "深基坑开挖支护专项方案",
+            [{"title": "工程概况", "children": [{"title": "深基坑开挖支护要点", "children": []}]}],
+        )
         assert covered is True, missing
 
     def test_dangerous_chapter_still_requires_l1(self):
         """危大必备是**结构性**要求：二级标题提到「监测」不算有独立监测方案章。"""
         covered, missing = sh._check_requirements_coverage(
-            "", [{"title": "工程概况", "children": [
-                {"title": "监测数据采集", "children": []}]}], True)
+            "", [{"title": "工程概况", "children": [{"title": "监测数据采集", "children": []}]}], True
+        )
         assert covered is False
         assert any("监测方案" in m for m in missing), missing
 
     def test_l1_hit_still_covers(self, monkeypatch):
         from app.routers import sse_handlers as _sh
+
         monkeypatch.setattr(_sh.settings, "outline_checkpoint_check", False)
         covered, _ = _sh._check_requirements_coverage(
-            "必须包含计算书及图纸", [{"title": "计算书及相关图纸", "children": []}])
+            "必须包含计算书及图纸", [{"title": "计算书及相关图纸", "children": []}]
+        )
         assert covered is True
 
 
@@ -465,23 +468,29 @@ class TestNodeCapConfigurable:
 
     def test_default_matches_legacy(self):
         from app.config import Settings
+
         assert Settings().outline_generate_max_nodes == 500
         assert sh.OUTLINE_GENERATE_MAX_NODES == 500
 
     def test_bound_to_constant(self):
-        assert sh.OUTLINE_GENERATE_MAX_NODES == int(
-            sh.settings.outline_generate_max_nodes)
+        assert sh.OUTLINE_GENERATE_MAX_NODES == int(sh.settings.outline_generate_max_nodes)
 
     def test_under_limit_passes(self):
-        big = {"outline": [{"title": f"章{i}", "children": [
-            {"title": f"节{i}-{j}", "children": []} for j in range(3)]}
-            for i in range(20)]}      # 80 节点
+        big = {
+            "outline": [
+                {"title": f"章{i}", "children": [{"title": f"节{i}-{j}", "children": []} for j in range(3)]}
+                for i in range(20)
+            ]
+        }  # 80 节点
         assert sh._outline_validate_fn(big) == []
 
     def test_over_limit_flagged(self):
-        big = {"outline": [{"title": f"章{i}", "children": [
-            {"title": f"节{i}-{j}", "children": []} for j in range(30)]}
-            for i in range(20)]}      # 620 节点 > 500
+        big = {
+            "outline": [
+                {"title": f"章{i}", "children": [{"title": f"节{i}-{j}", "children": []} for j in range(30)]}
+                for i in range(20)
+            ]
+        }  # 620 节点 > 500
         issues = sh._outline_validate_fn(big)
         assert issues, "超过 500 节点必须被判非法（与修复前一致）"
 
@@ -491,12 +500,14 @@ class TestKeywordLibraryDiscipline:
 
     def test_no_single_char_keywords(self):
         from app.services import scheme_basis as sb
+
         for lib_name in ("PROCESS_KEYWORDS", "TECHNIQUE_KEYWORDS", "OBJECT_KEYWORDS"):
             for kw in getattr(sb, lib_name):
                 assert len(str(kw).strip()) >= 2, f"{lib_name} 含单字词：{kw!r}"
 
     def test_no_duplicates_within_library(self):
         from app.services import scheme_basis as sb
+
         for lib_name in ("PROCESS_KEYWORDS", "TECHNIQUE_KEYWORDS", "OBJECT_KEYWORDS"):
             kws = [str(k) for k in getattr(sb, lib_name)]
             assert len(kws) == len(set(kws)), f"{lib_name} 有重复条目"
@@ -516,4 +527,3 @@ class TestKeywordLibraryDiscipline:
     def test_technique_bearing_name_matches_all_dimensions(self):
         b = parse_scheme_basis("地下连续墙深基坑支护专项施工方案")
         assert b.techniques and b.process_steps and b.objects, b.as_dict()
-

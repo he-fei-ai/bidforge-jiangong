@@ -15,6 +15,7 @@
   ③ **fail-soft**：重写抛异常时保存照常成功、标题原样、只回传 residual；
   ④ 两条写路径共用**同一实现**（源码级锁，防再次分叉出第二份内联逻辑）。
 """
+
 from __future__ import annotations
 
 import copy
@@ -30,9 +31,12 @@ from app.services import outline_title_fix as O
 # ---------------------------------------------------------------------------
 
 _RAW_TREE = [
-    {"title": "第一章 工程概况", "children": [
-        {"title": "专项6", "children": []},
-    ]},
+    {
+        "title": "第一章 工程概况",
+        "children": [
+            {"title": "专项6", "children": []},
+        ],
+    },
 ]
 
 
@@ -41,11 +45,11 @@ async def _seed(db) -> tuple[str, str]:
     sid = uuid.uuid4().hex[:8]
     rid = uuid.uuid4().hex[:8]
     await db.execute("INSERT INTO projects (id, name) VALUES (?,?)", (pid, "p"))
-    await db.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)",
-                     (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", (sid, pid, "s"))
     await db.execute(
-        "INSERT INTO uploaded_outlines (id, project_id, file_name, status)"
-        " VALUES (?,?,?,?)", (rid, pid, "x.txt", "parsed"))
+        "INSERT INTO uploaded_outlines (id, project_id, file_name, status)" " VALUES (?,?,?,?)",
+        (rid, pid, "x.txt", "parsed"),
+    )
     await db.commit()
     return pid, sid + "|" + rid
 
@@ -61,16 +65,13 @@ def _rename(tree: list, old: str, new: str) -> None:
 
 @pytest.fixture
 def _autofix_on(monkeypatch):
-    monkeypatch.setattr(settings, "outline_autofix_generic_on_save", True,
-                        raising=False)
-    monkeypatch.setattr(settings, "outline_check_generic_titles", True,
-                        raising=False)
+    monkeypatch.setattr(settings, "outline_autofix_generic_on_save", True, raising=False)
+    monkeypatch.setattr(settings, "outline_check_generic_titles", True, raising=False)
 
 
 @pytest.fixture
 def _autofix_off(monkeypatch):
-    monkeypatch.setattr(settings, "outline_autofix_generic_on_save", False,
-                        raising=False)
+    monkeypatch.setattr(settings, "outline_autofix_generic_on_save", False, raising=False)
 
 
 class _FixedTracker:
@@ -98,9 +99,9 @@ async def _section_titles(db, sid: str) -> list[str]:
 # ① 上传路径接线
 # ---------------------------------------------------------------------------
 
+
 class TestUploadPathWiresAutofix:
-    async def test_autofix_applied_and_reported(self, db_conn, _autofix_on,
-                                               monkeypatch):
+    async def test_autofix_applied_and_reported(self, db_conn, _autofix_on, monkeypatch):
         from app.routers import upload_outline as uo
 
         tracker = _FixedTracker()
@@ -108,20 +109,15 @@ class TestUploadPathWiresAutofix:
         __pid, pair = await _seed(db_conn)
         sid, rid = pair.split("|")
 
-        res = await uo.save_as_outline(
-            rid, {"scheme_id": sid, "outline": copy.deepcopy(_RAW_TREE)},
-            db=db_conn)
+        res = await uo.save_as_outline(rid, {"scheme_id": sid, "outline": copy.deepcopy(_RAW_TREE)}, db=db_conn)
 
         assert tracker.calls == 1, "上传路径必须真的调用自动重写（修复前为 0）"
         assert res["ok"] is True
-        assert res.get("generic_autofixed") == 1, \
-            "改写成功后必须加法式回传条数（否则自动改写对用户静默）"
+        assert res.get("generic_autofixed") == 1, "改写成功后必须加法式回传条数（否则自动改写对用户静默）"
         assert "generic_residual" not in res, "残留已清零 ⇒ 不得再多回该键"
-        assert "基坑支护施工" in await _section_titles(db_conn, sid), \
-            "改写后的标题必须真的落库"
+        assert "基坑支护施工" in await _section_titles(db_conn, sid), "改写后的标题必须真的落库"
 
-    async def test_no_residual_means_no_extra_key(self, db_conn, _autofix_on,
-                                                  monkeypatch):
+    async def test_no_residual_means_no_extra_key(self, db_conn, _autofix_on, monkeypatch):
         """干净目录：零 AI 调用、响应不多任何键（成本与兼容红线）。"""
         from app.routers import upload_outline as uo
 
@@ -129,11 +125,9 @@ class TestUploadPathWiresAutofix:
         monkeypatch.setattr(O, "_try_outline_title_fix", tracker)
         __pid, pair = await _seed(db_conn)
         sid, rid = pair.split("|")
-        clean = [{"title": "工程概况", "children": [
-            {"title": "周边环境与施工条件", "children": []}]}]
+        clean = [{"title": "工程概况", "children": [{"title": "周边环境与施工条件", "children": []}]}]
 
-        res = await uo.save_as_outline(
-            rid, {"scheme_id": sid, "outline": clean}, db=db_conn)
+        res = await uo.save_as_outline(rid, {"scheme_id": sid, "outline": clean}, db=db_conn)
 
         assert tracker.calls == 0, "检出为空 ⇒ 必须零 AI 调用"
         assert "generic_autofixed" not in res
@@ -144,10 +138,9 @@ class TestUploadPathWiresAutofix:
 # ② 加法式 / 开关回退
 # ---------------------------------------------------------------------------
 
+
 class TestUploadPathAdditive:
-    async def test_flag_off_keeps_original_and_residual_only(self, db_conn,
-                                                             _autofix_off,
-                                                             monkeypatch):
+    async def test_flag_off_keeps_original_and_residual_only(self, db_conn, _autofix_off, monkeypatch):
         from app.routers import upload_outline as uo
 
         tracker = _FixedTracker()
@@ -155,14 +148,11 @@ class TestUploadPathAdditive:
         __pid, pair = await _seed(db_conn)
         sid, rid = pair.split("|")
 
-        res = await uo.save_as_outline(
-            rid, {"scheme_id": sid, "outline": copy.deepcopy(_RAW_TREE)},
-            db=db_conn)
+        res = await uo.save_as_outline(rid, {"scheme_id": sid, "outline": copy.deepcopy(_RAW_TREE)}, db=db_conn)
 
         assert tracker.calls == 0, "开关关闭即逐字回到 R89 之前：不发起重写"
         assert res["ok"] is True
-        assert "generic_autofixed" not in res, \
-            "开关关闭时不得多回键（加法式向后兼容）"
+        assert "generic_autofixed" not in res, "开关关闭时不得多回键（加法式向后兼容）"
         assert res.get("generic_residual"), "只检出、只回传的旧口径必须保留"
         assert "专项6" in await _section_titles(db_conn, sid), "标题必须原样落库"
 
@@ -171,9 +161,9 @@ class TestUploadPathAdditive:
 # ③ fail-soft
 # ---------------------------------------------------------------------------
 
+
 class TestUploadPathFailSoft:
-    async def test_exception_does_not_block_save(self, db_conn, _autofix_on,
-                                                 monkeypatch):
+    async def test_exception_does_not_block_save(self, db_conn, _autofix_on, monkeypatch):
         from app.routers import upload_outline as uo
 
         tracker = _FixedTracker(exc=RuntimeError("模型超时"))
@@ -181,9 +171,7 @@ class TestUploadPathFailSoft:
         __pid, pair = await _seed(db_conn)
         sid, rid = pair.split("|")
 
-        res = await uo.save_as_outline(
-            rid, {"scheme_id": sid, "outline": copy.deepcopy(_RAW_TREE)},
-            db=db_conn)
+        res = await uo.save_as_outline(rid, {"scheme_id": sid, "outline": copy.deepcopy(_RAW_TREE)}, db=db_conn)
 
         assert res["ok"] is True, "自动修复失败绝不阻断保存"
         assert "generic_autofixed" not in res
@@ -194,6 +182,7 @@ class TestUploadPathFailSoft:
 # ---------------------------------------------------------------------------
 # ④ 单一实现 + 共用锁
 # ---------------------------------------------------------------------------
+
 
 class TestSingleImplementation:
     async def test_shared_fn_skips_empty_hits(self, monkeypatch):
@@ -221,17 +210,16 @@ class TestSingleImplementation:
         save_src = inspect.getsource(sections._save_outline_to_db)
         assert "autofix_generic_titles_on_save" in save_src
         up_src = inspect.getsource(uo.save_as_outline)
-        assert "autofix_generic_titles_on_save" in up_src, \
-            "上传路径必须与 save-outline 共用同一实现（R101 修复的核心）"
+        assert "autofix_generic_titles_on_save" in up_src, "上传路径必须与 save-outline 共用同一实现（R101 修复的核心）"
         assert "detect_generic_titles_for_write" in up_src
 
-    async def test_structure_mismatch_discards_fix(self, _autofix_on,
-                                                   monkeypatch):
+    async def test_structure_mismatch_discards_fix(self, _autofix_on, monkeypatch):
         """结构指纹守卫：改写结果增删了节点 ⇒ 整条丢弃。
 
         否则 upload 路径「按子节点索引路径还原改写前标题」会整体错位，
         把正文张冠李戴到别的章节上 —— 比丢失更糟。
         """
+
         class _BadTracker:
             calls = 0
 
@@ -240,27 +228,25 @@ class TestSingleImplementation:
                 bad = copy.deepcopy(outline)
                 for n in bad:
                     if isinstance(n, dict) and (n.get("children") or []):
-                        n["children"].append({"title": "凭空多出的节点",
-                                              "children": []})
+                        n["children"].append({"title": "凭空多出的节点", "children": []})
                         break
                 return bad
 
         blob = _BadTracker()
         monkeypatch.setattr(O, "_try_outline_title_fix", blob)
-        tree = [{"title": "工程概况", "children": [
-            {"title": "专项6", "children": []}]}]
+        tree = [{"title": "工程概况", "children": [{"title": "专项6", "children": []}]}]
         hits = [{"path": "1.1", "title": "专项6", "kind": "generic"}]
 
         out, out_hits, n = await O.autofix_generic_titles_on_save(tree, hits)
 
         assert blob.calls == 1
-        assert (out, out_hits, n) == (tree, hits, 0), \
-            "结构错位的改写结果必须整条丢弃、按原样保存"
+        assert (out, out_hits, n) == (tree, hits, 0), "结构错位的改写结果必须整条丢弃、按原样保存"
 
 
 # ---------------------------------------------------------------------------
 # ⑤ 遗留问题 1：自动改写标题**不得**再导致正文丢失
 # ---------------------------------------------------------------------------
+
 
 class TestContentPreservedAcrossAutofix:
     """修复前：自动改写把「专项6」改成具体名后，新标题在旧库找不到同名行，
@@ -271,8 +257,7 @@ class TestContentPreservedAcrossAutofix:
     与展示/落库标题解耦 ⇒ 标题换成具体名、正文原样保留。
     """
 
-    async def test_content_survives_rename(self, db_conn, _autofix_on,
-                                           monkeypatch):
+    async def test_content_survives_rename(self, db_conn, _autofix_on, monkeypatch):
         from app.routers import upload_outline as uo
         from app.services.outline_utils import normalize_outline
 
@@ -287,27 +272,22 @@ class TestContentPreservedAcrossAutofix:
         await db_conn.execute(
             "INSERT INTO sections (id, scheme_id, project_id, title, content,"
             " level, sort_order) VALUES ('s1',?,?,?,?,'2',0)",
-            (sid, _pid, old_title, "已生成正文"))
+            (sid, _pid, old_title, "已生成正文"),
+        )
         await db_conn.commit()
 
-        res = await uo.save_as_outline(
-            rid, {"scheme_id": sid, "outline": copy.deepcopy(_RAW_TREE)},
-            db=db_conn)
+        res = await uo.save_as_outline(rid, {"scheme_id": sid, "outline": copy.deepcopy(_RAW_TREE)}, db=db_conn)
 
         assert tracker.calls == 1
         assert res.get("generic_autofixed") == 1
-        assert res.get("preserved_content") == 1, \
-            "改写标题后必须仍按「改写前标题」命中旧章节（遗留问题 1 的核心）"
+        assert res.get("preserved_content") == 1, "改写标题后必须仍按「改写前标题」命中旧章节（遗留问题 1 的核心）"
         assert "cleared_content_sections" not in res, "不得再丢正文"
-        cur = await db_conn.execute(
-            "SELECT title, content FROM sections WHERE id='s1'")
+        cur = await db_conn.execute("SELECT title, content FROM sections WHERE id='s1'")
         row = await cur.fetchone()
         assert row["title"] == "基坑支护施工", "落库标题应为改写后的具体名"
         assert row["content"] == "已生成正文", "正文必须完整保留"
 
-    async def test_unmatched_placeholder_still_inserted(self, db_conn,
-                                                        _autofix_on,
-                                                        monkeypatch):
+    async def test_unmatched_placeholder_still_inserted(self, db_conn, _autofix_on, monkeypatch):
         """反向：本次新引入的占位标题在旧库无同名行 ⇒ 不得被误保留。"""
         from app.routers import upload_outline as uo
 
@@ -316,16 +296,12 @@ class TestContentPreservedAcrossAutofix:
         _pid, pair = await _seed(db_conn)
         sid, rid = pair.split("|")
 
-        res = await uo.save_as_outline(
-            rid, {"scheme_id": sid, "outline": copy.deepcopy(_RAW_TREE)},
-            db=db_conn)
+        res = await uo.save_as_outline(rid, {"scheme_id": sid, "outline": copy.deepcopy(_RAW_TREE)}, db=db_conn)
 
         assert res.get("preserved_content") in (None, 0), "旧库无同名章节可保留"
         assert res.get("generic_autofixed") == 1
 
-    async def test_no_rewrite_keeps_legacy_title_matching(self, db_conn,
-                                                          _autofix_off,
-                                                          monkeypatch):
+    async def test_no_rewrite_keeps_legacy_title_matching(self, db_conn, _autofix_off, monkeypatch):
         """开关关闭（未改写）时，匹配身份与标题同源 ⇒ 旧行为逐字不变。"""
         from app.routers import upload_outline as uo
         from app.services.outline_utils import normalize_outline
@@ -340,17 +316,15 @@ class TestContentPreservedAcrossAutofix:
         await db_conn.execute(
             "INSERT INTO sections (id, scheme_id, project_id, title, content,"
             " level, sort_order) VALUES ('s1',?,?,?,?,'2',0)",
-            (sid, _pid, old_title, "旧正文"))
+            (sid, _pid, old_title, "旧正文"),
+        )
         await db_conn.commit()
 
-        res = await uo.save_as_outline(
-            rid, {"scheme_id": sid, "outline": copy.deepcopy(_RAW_TREE)},
-            db=db_conn)
+        res = await uo.save_as_outline(rid, {"scheme_id": sid, "outline": copy.deepcopy(_RAW_TREE)}, db=db_conn)
 
         assert tracker.calls == 0
         assert res.get("preserved_content") == 1
-        cur = await db_conn.execute(
-            "SELECT title, content FROM sections WHERE id='s1'")
+        cur = await db_conn.execute("SELECT title, content FROM sections WHERE id='s1'")
         row = await cur.fetchone()
         assert row["title"] == old_title, "未改写 ⇒ 标题原样"
         assert row["content"] == "旧正文"

@@ -63,11 +63,15 @@ export const OutlineNodeBudgetPanel = memo(function OutlineNodeBudgetPanel({
         borderRadius: 4,
       }}
     >
-      <Text strong style={{ fontSize: 12 }}>📏 字数预算</Text>
+      <Text strong style={{ fontSize: 12 }}>
+        📏 字数预算
+      </Text>
       <Text ellipsis style={{ fontSize: 12, fontWeight: 600, maxWidth: 240 }}>
         {formatOutlineTitle(node.outlineId || node.key, node.level, node.title)}
       </Text>
-      <Text type="secondary" style={{ fontSize: 11 }}>L{node.level}</Text>
+      <Text type="secondary" style={{ fontSize: 11 }}>
+        L{node.level}
+      </Text>
       {/* addonAfter 已废弃，改用 Space.Compact + Space.Addon（antd v5.29+） */}
       <Space.Compact size="small" style={{ width: 116 }}>
         <InputNumber

@@ -30,6 +30,7 @@ F. **内容侧 STD-02/STD-05 编号级自检**：编制依据章须含 GB 55xxx 
 ⚠️ 判据指向（AGENTS §5.14）：对 ``sse_handlers`` 的断言走**源码扫描**且锚定
 真正生效的那段装配代码，不做「碰巧含关键字的一切字符串」的全文件匹配。
 """
+
 from __future__ import annotations
 
 import random
@@ -65,21 +66,40 @@ SSE_HANDLERS = REPO_ROOT / "app" / "routers" / "sse_handlers.py"
 _LEGACY_ONLY_WORDS = ("工程概述", "施工部署", "组织机构")
 
 _TITLE_POOL = [
-    "工程概况", "编制依据", "施工计划", "施工工艺技术", "安全保证措施",
-    "人员分工", "验收要求", "应急处置措施", "计算书及相关图纸", "监测方案",
-    "工程概述", "施工部署", "组织机构", "图纸", "附图与节点详图",
-    "施工准备", "质量保证", "环保文明施工", "施工计划与进度", "现场平面布置",
-    "人员配备与分工", "监测监控", "边坡支护", "计算书及验算", "应急预案",
+    "工程概况",
+    "编制依据",
+    "施工计划",
+    "施工工艺技术",
+    "安全保证措施",
+    "人员分工",
+    "验收要求",
+    "应急处置措施",
+    "计算书及相关图纸",
+    "监测方案",
+    "工程概述",
+    "施工部署",
+    "组织机构",
+    "图纸",
+    "附图与节点详图",
+    "施工准备",
+    "质量保证",
+    "环保文明施工",
+    "施工计划与进度",
+    "现场平面布置",
+    "人员配备与分工",
+    "监测监控",
+    "边坡支护",
+    "计算书及验算",
+    "应急预案",
 ]
 
 
 def _audit_missing(titles: list[str], scheme_name: str) -> set[str]:
     """审核侧对同一组标题会报「章节缺失」的 rule_id 集合。"""
-    secs = [{"id": str(i), "title": t, "content": "占位正文", "parent_id": None}
-            for i, t in enumerate(titles)]
-    ctx = PreflightContext(scheme_id="x", scheme_name=scheme_name,
-                           scheme_type="施工组织设计", word_budget=30000,
-                           sections=secs)
+    secs = [{"id": str(i), "title": t, "content": "占位正文", "parent_id": None} for i, t in enumerate(titles)]
+    ctx = PreflightContext(
+        scheme_id="x", scheme_name=scheme_name, scheme_type="施工组织设计", word_budget=30000, sections=secs
+    )
     out: set[str] = set()
     for f in check_completeness(ctx):
         # CMP-09 的追加条款（无计算过程）是**正文侧**判定，目录阶段无从判
@@ -98,16 +118,22 @@ def _audit_missing(titles: list[str], scheme_name: str) -> set[str]:
 
 def _outline_missing(titles: list[str], scheme_name: str) -> set[str]:
     ol = [{"title": t} for t in titles]
-    return {f["rule_id"] for f in ocp.check_outline_chapters(
-        ol, is_hazardous=True,
-        need_monitor=ocp.needs_monitor_chapter(scheme_name, ""))}
+    return {
+        f["rule_id"]
+        for f in ocp.check_outline_chapters(
+            ol, is_hazardous=True, need_monitor=ocp.needs_monitor_chapter(scheme_name, "")
+        )
+    }
 
 
 def _sse_source() -> str:
     return SSE_HANDLERS.read_text(encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # A. 判据同源（核心不变量）
 # ---------------------------------------------------------------------------
+
 
 class TestParityWithAudit:
     """目录侧判据必须是审核侧判据的**子集**（不漏放行 = 能真正降低预检问题）。"""
@@ -120,7 +146,7 @@ class TestParityWithAudit:
         会产生假缺项、白跑外科补齐。
         """
         rnd = random.Random(20261002)
-        nm = "深基坑支护专项施工方案"      # 基坑类 → 需监测（与预检同门控）
+        nm = "深基坑支护专项施工方案"  # 基坑类 → 需监测（与预检同门控）
         over: list = []
         for _ in range(2000):
             titles = rnd.sample(_TITLE_POOL, rnd.randint(0, 13))
@@ -134,33 +160,47 @@ class TestParityWithAudit:
 
         A/B 对照：这正是生产库 CMP-01/03/06 high 的成因。
         """
-        titles = ["工程概述", "编制依据", "施工部署", "组织机构", "施工工艺技术",
-                  "安全保证措施", "验收要求", "应急处置措施", "计算书及相关图纸"]
+        titles = [
+            "工程概述",
+            "编制依据",
+            "施工部署",
+            "组织机构",
+            "施工工艺技术",
+            "安全保证措施",
+            "验收要求",
+            "应急处置措施",
+            "计算书及相关图纸",
+        ]
         assert {"CMP-01", "CMP-03", "CMP-06"} <= _outline_missing(titles, "装饰装修")
         assert {"CMP-01", "CMP-03", "CMP-06"} <= _audit_missing(titles, "装饰装修")
 
     def test_production_scenario_non_hazardous_is_checked(self):
         """生产库场景：非危大专项方案同样受九章检查（门控对齐）。"""
         titles = ["施工准备", "质量保证措施", "环保文明施工"]
-        missing = ocp.outline_coverage_missing(
-            [{"title": t} for t in titles], is_hazardous=False)
+        missing = ocp.outline_coverage_missing([{"title": t} for t in titles], is_hazardous=False)
         assert len(missing) >= 8, "非危大方案也必须检查九大法定章节"
 
     def test_complete_outline_passes(self):
         """完整目录零 findings（不得把正常目录判成缺失）。"""
-        titles = ["工程概况", "编制依据", "施工计划", "施工工艺技术",
-                  "安全保证措施", "人员分工", "验收要求", "应急处置措施",
-                  "计算书及相关图纸", "监测方案", "附图与节点详图"]
-        assert ocp.check_outline_chapters([{"title": t} for t in titles],
-                                          is_hazardous=True,
-                                          need_monitor=True) == []
+        titles = [
+            "工程概况",
+            "编制依据",
+            "施工计划",
+            "施工工艺技术",
+            "安全保证措施",
+            "人员分工",
+            "验收要求",
+            "应急处置措施",
+            "计算书及相关图纸",
+            "监测方案",
+            "附图与节点详图",
+        ]
+        assert ocp.check_outline_chapters([{"title": t} for t in titles], is_hazardous=True, need_monitor=True) == []
 
     def test_second_level_titles_count(self):
         """二级/三级标题命中也算覆盖（与 preflight 全层级扫描同口径）。"""
-        ol = [{"title": "一、总体说明", "children": [
-            {"title": "1.1 工程概况与周边环境", "children": []}]}]
-        rids = {f["rule_id"] for f in ocp.check_outline_chapters(
-            ol, is_hazardous=False)}
+        ol = [{"title": "一、总体说明", "children": [{"title": "1.1 工程概况与周边环境", "children": []}]}]
+        rids = {f["rule_id"] for f in ocp.check_outline_chapters(ol, is_hazardous=False)}
         assert "CMP-01" not in rids, "二级标题含法定关键词即算覆盖"
 
     def test_empty_outline_reports_all(self):
@@ -168,20 +208,23 @@ class TestParityWithAudit:
 
         非危大 = 九章 CMP + TRC-03（附图 / 节点详图）；SAF-06 监测章不参与。
         """
-        rids = {f["rule_id"] for f in ocp.check_outline_chapters(
-            [], is_hazardous=False)}
+        rids = {f["rule_id"] for f in ocp.check_outline_chapters([], is_hazardous=False)}
         assert rids == {f"CMP-{i:02d}" for i in range(1, 10)} | {"TRC-03"}
 
     def test_fail_soft_on_internal_error(self, monkeypatch):
         """内部异常降级为已收集结论，绝不抛业务异常。"""
+
         def boom(*_a, **_k):
             raise RuntimeError("注入异常")
+
         monkeypatch.setattr(ocp, "collect_titles", boom)
         assert ocp.check_outline_chapters([{"title": "工程概况"}]) == []
+
 
 # ---------------------------------------------------------------------------
 # B. 分叉方向锁死
 # ---------------------------------------------------------------------------
+
 
 class TestNoForkReintroduction:
     """旧目录侧独有的词不得回流进判据（并集方向搞反会让分叉固化）。"""
@@ -189,8 +232,7 @@ class TestNoForkReintroduction:
     @pytest.mark.parametrize("word", _LEGACY_ONLY_WORDS)
     def test_legacy_only_word_not_in_any_keywords(self, word):
         for spec in ocp.required_chapter_specs(True, need_monitor=True):
-            assert word not in spec["keywords"], (
-                f"「{word}」是旧目录侧独有的词（审核侧不认），不得进入判据")
+            assert word not in spec["keywords"], f"「{word}」是旧目录侧独有的词（审核侧不认），不得进入判据"
 
     def test_keywords_superset_of_audit_registry(self):
         """每条必备章节的判据 ⊇ 审核注册表关键词（方向只能是「更宽」）。"""
@@ -199,21 +241,22 @@ class TestNoForkReintroduction:
             if rule is None or not rule.keywords:
                 continue
             for kw in rule.keywords:
-                assert kw in spec["keywords"], (
-                    f"{spec['rule_id']} 判据漏了注册表关键词 {kw}")
+                assert kw in spec["keywords"], f"{spec['rule_id']} 判据漏了注册表关键词 {kw}"
 
     def test_engine_predicates_not_registered_for_cmp(self):
         """CMP-* 不得并入引擎常量（CMP-09 会因此被目录侧多报）。"""
         for rid in ocp._ENGINE_PREDICATE_KEYWORDS:
             assert not rid.startswith("CMP-"), (
-                f"{rid} 的标题匹配由 check_completeness 直接读注册表 keywords，"
-                f"并入引擎常量会让目录侧判据宽于审核侧")
+                f"{rid} 的标题匹配由 check_completeness 直接读注册表 keywords，" f"并入引擎常量会让目录侧判据宽于审核侧"
+            )
 
     def test_audit_rules_keywords_cover_engine_predicates(self):
         """audit_rules 注册表已按引擎实际谓词补齐（防下游按注册表推导时分叉）。"""
         pairs = {
-            "SAF-03": SAF03_TITLE_KEYWORDS, "SAF-04": SAF04_TITLE_KEYWORDS,
-            "SAF-05": SAF05_TITLE_KEYWORDS, "SAF-06": SAF06_MONITOR_TITLE_KEYWORDS,
+            "SAF-03": SAF03_TITLE_KEYWORDS,
+            "SAF-04": SAF04_TITLE_KEYWORDS,
+            "SAF-05": SAF05_TITLE_KEYWORDS,
+            "SAF-06": SAF06_MONITOR_TITLE_KEYWORDS,
             "TRC-03": TRC03_TITLE_KEYWORDS,
         }
         for rid, engine_kw in pairs.items():
@@ -221,9 +264,11 @@ class TestNoForkReintroduction:
             missing = [k for k in engine_kw if k not in rule_kw]
             assert not missing, f"{rid} 注册表漏登记引擎谓词：{missing}"
 
+
 # ---------------------------------------------------------------------------
 # C. 门控对齐 + 开关回退
 # ---------------------------------------------------------------------------
+
 
 class TestGateAlignment:
     def test_default_switch_on(self):
@@ -231,31 +276,37 @@ class TestGateAlignment:
 
     def test_kwargs_empty_when_switch_off(self, monkeypatch):
         from app.routers import sse_handlers as sh
+
         monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False)
         assert sh._outline_checkpoint_kwargs("深基坑", "深基坑", True) == {}
 
     def test_kwargs_non_empty_when_on(self):
         from app.routers import sse_handlers as sh
+
         kw = sh._outline_checkpoint_kwargs("深基坑支护专项施工方案", "深基坑", True)
         assert set(kw) == {"outline_checkpoint_block"}
         assert "审核检查点前置要求" in kw["outline_checkpoint_block"]
 
     def test_kwargs_fail_soft(self, monkeypatch):
         from app.routers import sse_handlers as sh
+
         def boom(**_k):
             raise RuntimeError("注入异常")
+
         monkeypatch.setattr(sh._ocp, "build_outline_checkpoint_block", boom)
         assert sh._outline_checkpoint_kwargs("深基坑", "深基坑", True) == {}
 
     def test_non_hazardous_still_checked_in_coverage(self):
         """九章检查对非危大方案恒定参与（不再要求填写编制要求）。"""
         from app.routers import sse_handlers as sh
+
         ol = [{"title": "施工准备"}, {"title": "质量保证"}]
         _cov, missing = sh._check_requirements_coverage("", ol, False, basis=None)
         assert any("法定必备章节" in m for m in missing)
 
     def test_switch_off_disables_nine_chapter_check(self, monkeypatch):
         from app.routers import sse_handlers as sh
+
         monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False)
         ol = [{"title": "施工准备"}, {"title": "质量保证"}]
         _cov, missing = sh._check_requirements_coverage("", ol, False, basis=None)
@@ -264,22 +315,36 @@ class TestGateAlignment:
     def test_dangerous_ten_chapter_check_preserved(self):
         """危大 10 章的**结构性**检查未被本轮削弱。"""
         from app.routers import sse_handlers as sh
-        ol = [{"title": t} for t in (
-            "工程概况", "编制依据", "施工计划", "施工工艺技术", "安全保证措施",
-            "人员分工", "验收要求", "应急处置措施", "计算书及相关图纸", "监测方案")]
-        _cov, missing = sh._check_requirements_coverage(
-            "", ol, True, basis=None)
+
+        ol = [
+            {"title": t}
+            for t in (
+                "工程概况",
+                "编制依据",
+                "施工计划",
+                "施工工艺技术",
+                "安全保证措施",
+                "人员分工",
+                "验收要求",
+                "应急处置措施",
+                "计算书及相关图纸",
+                "监测方案",
+            )
+        ]
+        _cov, missing = sh._check_requirements_coverage("", ol, True, basis=None)
         assert not any("危大工程必备章节" in m for m in missing)
 
     def test_dangerous_alias_derived_from_single_source(self):
         """_DANGEROUS_REQUIRED_KEYWORDS 已由唯一出口派生（不再是独立副本）。"""
         from app.routers import sse_handlers as sh
+
         assert sh._DANGEROUS_REQUIRED_KEYWORDS == sh._dangerous_required_keywords()
 
 
 # ---------------------------------------------------------------------------
 # D. 监测章节类别门控
 # ---------------------------------------------------------------------------
+
 
 class TestMonitorGate:
     def test_pit_scheme_requires_monitor(self):
@@ -294,43 +359,64 @@ class TestMonitorGate:
         assert set(ocp._pf.MONITOR_CATEGORIES) == set(MONITOR_CATEGORIES)
 
     def test_non_monitor_category_no_saf06(self):
-        ol = [{"title": t} for t in (
-            "工程概况", "编制依据", "施工计划", "施工工艺技术", "安全保证措施",
-            "人员分工", "验收要求", "应急处置措施", "计算书及相关图纸")]
-        rids = {f["rule_id"] for f in ocp.check_outline_chapters(
-            ol, is_hazardous=True, need_monitor=False)}
+        ol = [
+            {"title": t}
+            for t in (
+                "工程概况",
+                "编制依据",
+                "施工计划",
+                "施工工艺技术",
+                "安全保证措施",
+                "人员分工",
+                "验收要求",
+                "应急处置措施",
+                "计算书及相关图纸",
+            )
+        ]
+        rids = {f["rule_id"] for f in ocp.check_outline_chapters(ol, is_hazardous=True, need_monitor=False)}
         assert "SAF-06" not in rids
 
     def test_monitor_category_requires_saf06(self):
-        ol = [{"title": t} for t in (
-            "工程概况", "编制依据", "施工计划", "施工工艺技术", "安全保证措施",
-            "人员分工", "验收要求", "应急处置措施", "计算书及相关图纸")]
-        rids = {f["rule_id"] for f in ocp.check_outline_chapters(
-            ol, is_hazardous=True, need_monitor=True)}
+        ol = [
+            {"title": t}
+            for t in (
+                "工程概况",
+                "编制依据",
+                "施工计划",
+                "施工工艺技术",
+                "安全保证措施",
+                "人员分工",
+                "验收要求",
+                "应急处置措施",
+                "计算书及相关图纸",
+            )
+        ]
+        rids = {f["rule_id"] for f in ocp.check_outline_chapters(ol, is_hazardous=True, need_monitor=True)}
         assert "SAF-06" in rids
+
+
 # ---------------------------------------------------------------------------
 # E. 接线（源码静态锁）
 # ---------------------------------------------------------------------------
+
 
 class TestWiring:
     def test_three_render_sites_inject(self):
         """三处渲染点（短方案 / 分步一级 / 目录审核）都注入检查点块。"""
         src = _sse_source()
-        assert src.count("_outline_checkpoint_kwargs(") >= 4, (
-            "短方案 / level1 / review 三处渲染 + 1 处定义")
+        assert src.count("_outline_checkpoint_kwargs(") >= 4, "短方案 / level1 / review 三处渲染 + 1 处定义"
 
     def test_kwargs_unpacked_last(self):
         """`**` 必须置于所有关键字实参之后（否则 SyntaxError）。"""
         src = _sse_source()
-        for m in re.finditer(r"render\(\"outline_\w+\"", src):
-            seg = src[m.start():m.start() + 1400]
+        for m in re.finditer(r'render\(\s*"outline_\w+"', src):
+            seg = src[m.start() : m.start() + 2000]
             kw = seg.find("**_outline_checkpoint_kwargs(")
             if kw < 0:
                 continue
-            tail = seg[kw + len("**_outline_checkpoint_kwargs("):]
+            tail = seg[kw + len("**_outline_checkpoint_kwargs(") :]
             close = tail.find("))")
-            assert not re.search(r"\w+=", tail[:close]), (
-                "检查点 kwargs 之后仍有具名实参 → 顺序非法")
+            assert not re.search(r"\w+=", tail[:close]), "检查点 kwargs 之后仍有具名实参 → 顺序非法"
             return
         pytest.fail("未找到 outline_* 的 render 调用点")
 
@@ -339,37 +425,43 @@ class TestWiring:
         assert "outline_checkpoint_check: bool = True" in src
 
     def test_variable_contract_registered(self):
-        src = (REPO_ROOT / "app" / "services" / "ai" / "prompts"
-               / "_registry.py").read_text(encoding="utf-8")
-        for key in ("outline_short_system", "outline_level1_system",
-                    "outline_review_system"):
+        src = (REPO_ROOT / "app" / "services" / "ai" / "prompts" / "_registry.py").read_text(encoding="utf-8")
+        for key in ("outline_short_system", "outline_level1_system", "outline_review_system"):
             block = src.split(f'"{key}": [', 1)[1].split("]", 1)[0]
             assert "outline_checkpoint_block" in block, f"{key} 未登记变量契约"
 
     def test_prompt_placeholder_on_own_line(self):
         """占位符须独占一行（未传时整行丢弃 = 逐字回退）。"""
-        src = (REPO_ROOT / "app" / "services" / "ai" / "prompts"
-               / "outline.py").read_text(encoding="utf-8")
+        src = (REPO_ROOT / "app" / "services" / "ai" / "prompts" / "outline.py").read_text(encoding="utf-8")
         for line in src.splitlines():
             if "outline_checkpoint_block" in line:
-                assert line.strip() == "{outline_checkpoint_block}", (
-                    f"占位符未独占一行，回退时会留下孤行：{line!r}")
+                assert line.strip() == "{outline_checkpoint_block}", f"占位符未独占一行，回退时会留下孤行：{line!r}"
 
     def test_prompt_renders_and_block_absent_when_off(self, monkeypatch):
         from app.routers import sse_handlers as sh
         from app.services.ai.prompts import render
-        base = dict(scheme_name="深基坑支护专项施工方案", scheme_type="深基坑",
-                    construction_scope="", scheme_basis="", standards_text="",
-                    project_facts="")
-        on = render("outline_short_system", **base,
-                    **sh._outline_checkpoint_kwargs(
-                        base["scheme_name"], base["scheme_type"], True))
+
+        base = dict(
+            scheme_name="深基坑支护专项施工方案",
+            scheme_type="深基坑",
+            construction_scope="",
+            scheme_basis="",
+            standards_text="",
+            project_facts="",
+        )
+        on = render(
+            "outline_short_system",
+            **base,
+            **sh._outline_checkpoint_kwargs(base["scheme_name"], base["scheme_type"], True),
+        )
         assert "审核检查点前置要求" in on
         assert "{outline_checkpoint_block}" not in on
         monkeypatch.setattr(sh.settings, "outline_checkpoint_check", False)
-        off = render("outline_short_system", **base,
-                     **sh._outline_checkpoint_kwargs(
-                         base["scheme_name"], base["scheme_type"], True))
+        off = render(
+            "outline_short_system",
+            **base,
+            **sh._outline_checkpoint_kwargs(base["scheme_name"], base["scheme_type"], True),
+        )
         assert "审核检查点前置要求" not in off, "关闭开关后不得残留检查点段"
         assert "{outline_checkpoint_block}" not in off
 
@@ -377,55 +469,85 @@ class TestWiring:
         """目录审核提示词与生成提示词共用同一份清单（同一词表）。"""
         from app.routers import sse_handlers as sh
         from app.services.ai.prompts import render
+
         kw = sh._outline_checkpoint_kwargs("深基坑支护专项施工方案", "深基坑", True)
-        p = render("outline_review_system", scheme_name="深基坑支护专项施工方案",
-                   scheme_type="深基坑", construction_scope="", scheme_basis="",
-                   is_dangerous="是", project_facts="", outline_json="[]", **kw)
+        p = render(
+            "outline_review_system",
+            scheme_name="深基坑支护专项施工方案",
+            scheme_type="深基坑",
+            construction_scope="",
+            scheme_basis="",
+            is_dangerous="是",
+            project_facts="",
+            outline_json="[]",
+            **kw,
+        )
         assert "审核检查点前置要求" in p
         for spec in ocp.required_chapter_specs(True, need_monitor=True):
             assert spec["rule_id"] in p
+
+
 # ---------------------------------------------------------------------------
 # F. 内容侧 STD-02 / STD-05 编号级自检
 # ---------------------------------------------------------------------------
+
 
 class TestBasisStandardSelfcheck:
     """编制依据章须含标准**编号**（词级检查不足，预检判的是编号）。"""
 
     def test_compliant_basis_passes(self):
-        assert _basis_standard_findings(
-            "依据 GB 55034-2022 与 GB 50210-2018 编制。",
-            scheme_name="装饰装修专项施工方案", scheme_type="施工组织设计") == []
+        assert (
+            _basis_standard_findings(
+                "依据 GB 55034-2022 与 GB 50210-2018 编制。",
+                scheme_name="装饰装修专项施工方案",
+                scheme_type="施工组织设计",
+            )
+            == []
+        )
 
     def test_missing_mandatory_code_reported(self):
-        rids = {f["rule_id"] for f in _basis_standard_findings(
-            "依据 GB 50210-2018 编制。",
-            scheme_name="装饰装修专项施工方案", scheme_type="施工组织设计")}
+        rids = {
+            f["rule_id"]
+            for f in _basis_standard_findings(
+                "依据 GB 50210-2018 编制。", scheme_name="装饰装修专项施工方案", scheme_type="施工组织设计"
+            )
+        }
         assert "STD-02" in rids
 
     def test_missing_category_code_reported(self):
-        rids = {f["rule_id"] for f in _basis_standard_findings(
-            "依据 GB 55034-2022 编制。",
-            scheme_name="装饰装修专项施工方案", scheme_type="施工组织设计")}
+        rids = {
+            f["rule_id"]
+            for f in _basis_standard_findings(
+                "依据 GB 55034-2022 编制。", scheme_name="装饰装修专项施工方案", scheme_type="施工组织设计"
+            )
+        }
         assert "STD-05" in rids
 
     def test_no_context_skips_std05(self):
         """无方案上下文时跳过 STD-05（无法判类别就不猜），STD-02 照常。"""
-        rids = {f["rule_id"] for f in _basis_standard_findings(
-            "依据 GB 55034-2022 编制。")}
+        rids = {f["rule_id"] for f in _basis_standard_findings("依据 GB 55034-2022 编制。")}
         assert "STD-05" not in rids
         assert "STD-02" not in rids
 
     def test_bare_code_regex_cannot_be_reused(self):
         """A/B 对照：裸编号检测器提取不到带年号编号（不能用于「有没有引用」）。"""
         assert not _BARE_CODE_RE.search("GB 55034-2022")
-        assert _basis_standard_findings(
-            "依据 GB 55034-2022 与 GB 50210-2018 编制。",
-            scheme_name="装饰装修专项施工方案", scheme_type="施工组织设计") == []
+        assert (
+            _basis_standard_findings(
+                "依据 GB 55034-2022 与 GB 50210-2018 编制。",
+                scheme_name="装饰装修专项施工方案",
+                scheme_type="施工组织设计",
+            )
+            == []
+        )
 
     def test_wired_into_selfcheck_for_basis_chapter(self):
         f = checkpoint_selfcheck(
-            "本章依据 GB 50210-2018 编制。", chapter_key="basis",
-            scheme_name="装饰装修专项施工方案", scheme_type="施工组织设计")
+            "本章依据 GB 50210-2018 编制。",
+            chapter_key="basis",
+            scheme_name="装饰装修专项施工方案",
+            scheme_type="施工组织设计",
+        )
         assert "STD-02" in {x["rule_id"] for x in f}
 
     def test_selfcheck_forwards_scheme_context_to_basis_check(self):
@@ -439,15 +561,21 @@ class TestBasisStandardSelfcheck:
         STD-05，让断链必然暴露。
         """
         f = checkpoint_selfcheck(
-            "依据 GB 55034-2022 编制。", chapter_key="basis",
-            scheme_name="装饰装修专项施工方案", scheme_type="施工组织设计")
+            "依据 GB 55034-2022 编制。",
+            chapter_key="basis",
+            scheme_name="装饰装修专项施工方案",
+            scheme_type="施工组织设计",
+        )
         assert "STD-05" in {x["rule_id"] for x in f}
 
     def test_not_wired_for_other_chapters(self):
         """仅编制依据章启用（其它章不报 STD-02/STD-05）。"""
         f = checkpoint_selfcheck(
-            "本章依据 GB 50210-2018 编制。", chapter_key="technique",
-            scheme_name="装饰装修专项施工方案", scheme_type="施工组织设计")
+            "本章依据 GB 50210-2018 编制。",
+            chapter_key="technique",
+            scheme_name="装饰装修专项施工方案",
+            scheme_type="施工组织设计",
+        )
         assert not {"STD-02", "STD-05"} & {x["rule_id"] for x in f}
 
     def test_selfcheck_backward_compatible_defaults(self):
@@ -457,7 +585,7 @@ class TestBasisStandardSelfcheck:
     def test_call_site_passes_scheme_context(self):
         """接线：sse_handlers 必须传方案名/类型（否则 STD-05 永远跳过）。"""
         src = _sse_source()
-        seg = src[src.find("checkpoint_selfcheck("):][:900]
+        seg = src[src.find("checkpoint_selfcheck(") :][:900]
         assert "scheme_name=" in seg and "scheme_type=" in seg
 
     def test_block_states_title_keyword_rule(self):

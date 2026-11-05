@@ -16,6 +16,7 @@
 测试策略：直接调用路由/服务函数 + 内存 sqlite（conftest.db_conn），
 纯函数用例无需 db；asyncio_mode=auto（pyproject.toml）。
 """
+
 import inspect
 import uuid
 
@@ -44,9 +45,7 @@ class TestCreateSectionStripsTitleNumber:
     async def _seed_scheme(self, db):
         pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
         await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)", (pid, "项目"))
-        await db.execute(
-            "INSERT OR IGNORE INTO schemes (id, project_id, name) VALUES (?,?,?)",
-            (sid, pid, "方案"))
+        await db.execute("INSERT OR IGNORE INTO schemes (id, project_id, name) VALUES (?,?,?)", (sid, pid, "方案"))
         await db.commit()
         return sid
 
@@ -62,7 +61,7 @@ class TestCreateSectionStripsTitleNumber:
         assert await self._title_of(db_conn, r["id"]) == "编制依据"
 
     async def test_strip_chinese_bracket_number(self, db_conn):
-        """"（三）设计标准" → 落库 "设计标准"（（X）为无歧义结构直接剥离）"""
+        """ "（三）设计标准" → 落库 "设计标准"（（X）为无歧义结构直接剥离）"""
         sid = await self._seed_scheme(db_conn)
         r = await create_section(sid, SectionCreate(title="（三）设计标准"), db=db_conn)
         assert await self._title_of(db_conn, r["id"]) == "设计标准"
@@ -87,8 +86,6 @@ class TestCreateSectionStripsTitleNumber:
         # 整体即纯数字路径 → 原样返回（不得只剥半截 "1.1" → "1"）
         assert strip_outline_numbering("1.1") == "1.1"
         assert strip_outline_numbering("1.2.3") == "1.2.3"
-
-
 
 
 # ============================================================
@@ -117,7 +114,7 @@ class TestNumberingNamespaceUnified:
         for id_str, level, title, expected in cases:
             # 前端口径：slice(-(level-1)) 后 ".".join
             parts = id_str.split(".")[1:] if level >= 2 else id_str.split(".")
-            assert ".".join(parts[-(level - 1):]) + ("、" if level == 5 else " ") + title == expected
+            assert ".".join(parts[-(level - 1) :]) + ("、" if level == 5 else " ") + title == expected
             assert format_heading_by_id(id_str, level, title) == expected
 
     def test_v2_counter_matches_id_template(self):
@@ -161,6 +158,7 @@ class TestNumberingNamespaceUnified:
         level, _ = HeadingNumberingGenerator.detect_level("1.1.1.1.1 过深标题")
         assert level != 5
 
+
 # ============================================================
 # BUG-C：build_heading_spec_prompt 与生成器对齐
 # ============================================================
@@ -179,6 +177,7 @@ class TestSpecPromptAligned:
     def test_punctuation_rule_matches_style_config(self):
         """分隔符规则与 HEADING_STYLE_CONFIG 一致：L1~L4 空格、L5~L7 顿号"""
         from app.services.ai.heading_templates import HEADING_STYLE_CONFIG
+
         assert HEADING_STYLE_CONFIG[2]["punctuation"] == " "
         assert HEADING_STYLE_CONFIG[3]["punctuation"] == " "
         assert HEADING_STYLE_CONFIG[4]["punctuation"] == " "
@@ -205,9 +204,7 @@ class TestContentPromptAlignedWithExport:
         tpl = get_default_prompt("content_generation_system")
         assert tpl, "content_generation_system 出厂模板不应为空"
         # 模板保留占位符（文案运行时注入，两种命名空间按需选择）
-        assert "{subheading_rule}" in tpl, (
-            "模板应保留 {subheading_rule} 占位符供运行时条件注入"
-        )
+        assert "{subheading_rule}" in tpl, "模板应保留 {subheading_rule} 占位符供运行时条件注入"
         assert "（一） 标题（中文数字加全角括号）" not in tpl
 
         # ✅ 2026-09-26：文案已从 generate_content 内部迁到
@@ -218,8 +215,11 @@ class TestContentPromptAlignedWithExport:
         normal = build_subheading_rule(has_db_children=False)
         assert "- 二级小标题：1.1 标题" in normal
         assert "- 三级小标题：1.1.1 标题" in normal
-        assert "- 四级小标题：1.1.1.1 标题" in normal
-        assert "- 五级小标题：1.1.1.1.1 标题" in normal
+        # ✅ 2026-11-05（二次口径）：L4 及以下不再是标题层级，一律折叠为
+        #    「（1）（2）」段首引导，提示词不得再给出四级小标题示例。
+        assert "- 四级小标题" not in normal
+        assert "四级及更深" in normal and "段首序号" in normal
+        assert "- 五级小标题" not in normal
         # 旧断号示例（第 2 节从 2 起）不得回归
         assert "小标题从 2、2.1、2.1.1 起" not in normal
         # E3：body 命名空间分支必须与降级开关同在（否则正文/子章节撞号无提示）
@@ -237,17 +237,20 @@ class TestContentPromptAlignedWithExport:
         AI 收不到编号规范只能自由发挥。本用例锁定「占位符不再残留」。
         """
         from app.services.ai.prompts._registry import render as _render
+
         for has_children in (False, True):
             out = _render(
                 "content_generation_system",
-                scheme_name="X", scheme_type="Y",
-                section_number="1.1", standards_text="",
-                subheading_rule=build_subheading_rule(
-                    has_db_children=has_children))
+                scheme_name="X",
+                scheme_type="Y",
+                section_number="1.1",
+                standards_text="",
+                subheading_rule=build_subheading_rule(has_db_children=has_children),
+            )
             assert "{subheading_rule}" not in out, "占位符未被替换"
             i = out.find("章节内部小标题编号规范")
             assert i != -1, "提示词应保留小标题规范小节标题"
-            seg = out[i:i + 200]
+            seg = out[i : i + 200]
             # 规范标题之后必须紧跟实质内容，不能是空行
             body = seg.split("：", 1)[1].lstrip() if "：" in seg else ""
             assert body.strip(), f"小标题规范内容为空（has_children={has_children}）"
@@ -265,4 +268,3 @@ class TestContentPromptAlignedWithExport:
         assert text2 == "2.1 管理体系"
         text3, _ = _compute_subheading("2", 1, 3, counters, "组织机构", "sec-2")
         assert text3 == "2.1.1 组织机构"
-

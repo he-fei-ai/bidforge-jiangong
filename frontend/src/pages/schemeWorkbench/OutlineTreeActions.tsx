@@ -1,10 +1,22 @@
 import { sectionsApi } from "../../api";
 import { type TreeNode } from "./outlineTreeModel.ts";
-import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, CaretRightOutlined, StopOutlined } from "@ant-design/icons";
+import {
+  ArrowDownOutlined,
+  ArrowRightOutlined,
+  ArrowUpOutlined,
+  CaretRightOutlined,
+  StopOutlined,
+} from "@ant-design/icons";
 import { Button, Space, Tooltip } from "antd";
 
 export function OutlineTreeActions({
-  selected, moveFlags, showNext, onAddChild, onMove, onDelete, onNextStep,
+  selected,
+  moveFlags,
+  showNext,
+  onAddChild,
+  onMove,
+  onDelete,
+  onNextStep,
 }: {
   selected: TreeNode | null;
   moveFlags: Record<string, { up: boolean; down: boolean }>;
@@ -17,12 +29,7 @@ export function OutlineTreeActions({
   return (
     <Space size={4}>
       {showNext && (
-        <Button
-          size="small"
-          type="link"
-          icon={<ArrowRightOutlined />}
-          onClick={onNextStep}
-        >
+        <Button size="small" type="link" icon={<ArrowRightOutlined />} onClick={onNextStep}>
           下一步：全局事实
         </Button>
       )}
@@ -57,13 +64,7 @@ export function OutlineTreeActions({
         </Button>
       </Tooltip>
       <Tooltip title="删除选中节点">
-        <Button
-          size="small"
-          danger
-          icon={<StopOutlined />}
-          disabled={!selected}
-          onClick={onDelete}
-        >
+        <Button size="small" danger icon={<StopOutlined />} disabled={!selected} onClick={onDelete}>
           删除
         </Button>
       </Tooltip>

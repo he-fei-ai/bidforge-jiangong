@@ -13,6 +13,7 @@
 5. 并发数配置化：OUTLINE_CHAPTER_CONCURRENCY 来自 Settings.outline_chapter_concurrency，
    <=0 视为 1（串行）。
 """
+
 import asyncio
 import inspect
 
@@ -49,6 +50,7 @@ class TestFetchChapterChildren:
 
             async def _coro():
                 return result, "raw"
+
             return _coro()
 
         async def fake_wait_resume(task_id):
@@ -58,67 +60,110 @@ class TestFetchChapterChildren:
 
         monkeypatch.setattr(sh, "collect_json_response", fake_collect)
         monkeypatch.setattr(sh, "wait_resume", fake_wait_resume)
-        monkeypatch.setattr(
-            sh, "is_stopped", stopped_fn or (lambda task_id: False))
+        monkeypatch.setattr(sh, "is_stopped", stopped_fn or (lambda task_id: False))
         return calls
 
     async def test_ok_returns_children(self, monkeypatch):
         outline = [{"title": "1.1", "children": []}]
         self._mk(monkeypatch, ai_results=[{"outline": outline}])
         status, children = await sh._fetch_chapter_children(
-            0, {"title": "第1章"}, sub_prompt=[{"role": "system", "content": "x"}],
-            task_id="t", sem=None, validate_fn=lambda o: [],
-            timeout=1, push_stats=_push_stats)
+            0,
+            {"title": "第1章"},
+            sub_prompt=[{"role": "system", "content": "x"}],
+            task_id="t",
+            sem=None,
+            validate_fn=lambda o: [],
+            timeout=1,
+            push_stats=_push_stats,
+        )
         assert status == "ok"
         assert children == outline
 
     async def test_empty_outline_coerced_to_list(self, monkeypatch):
         self._mk(monkeypatch, ai_results=[{"outline": None}])
         status, children = await sh._fetch_chapter_children(
-            0, {"title": "x"}, sub_prompt=[], task_id="t", sem=None,
-            validate_fn=lambda o: [], timeout=1, push_stats=_push_stats)
+            0,
+            {"title": "x"},
+            sub_prompt=[],
+            task_id="t",
+            sem=None,
+            validate_fn=lambda o: [],
+            timeout=1,
+            push_stats=_push_stats,
+        )
         assert status == "ok" and children == []
 
     async def test_retry_once_then_ok(self, monkeypatch):
         outline = [{"title": "2.1", "children": []}]
         self._mk(monkeypatch, ai_results=[Exception("boom"), {"outline": outline}])
         status, children = await sh._fetch_chapter_children(
-            1, {"title": "第2章"}, sub_prompt=[], task_id="t", sem=None,
-            validate_fn=lambda o: [], timeout=1, push_stats=_push_stats)
+            1,
+            {"title": "第2章"},
+            sub_prompt=[],
+            task_id="t",
+            sem=None,
+            validate_fn=lambda o: [],
+            timeout=1,
+            push_stats=_push_stats,
+        )
         assert status == "ok" and children == outline
 
     async def test_double_fail_is_failed(self, monkeypatch):
         calls = self._mk(monkeypatch, ai_results=[Exception("e1"), Exception("e2")])
         status, children = await sh._fetch_chapter_children(
-            0, {"title": "x"}, sub_prompt=[], task_id="t", sem=None,
-            validate_fn=lambda o: [], timeout=1, push_stats=_push_stats)
+            0,
+            {"title": "x"},
+            sub_prompt=[],
+            task_id="t",
+            sem=None,
+            validate_fn=lambda o: [],
+            timeout=1,
+            push_stats=_push_stats,
+        )
         assert status == "failed" and children == []
         assert len(calls) == 2, "必须且仅重试一次"
 
     async def test_stopped_before_start_skips_ai(self, monkeypatch):
         calls = self._mk(monkeypatch, ai_results=[], stopped_fn=lambda tid: True)
         status, children = await sh._fetch_chapter_children(
-            0, {"title": "x"}, sub_prompt=[], task_id="t", sem=None,
-            validate_fn=lambda o: [], timeout=1, push_stats=_push_stats)
+            0,
+            {"title": "x"},
+            sub_prompt=[],
+            task_id="t",
+            sem=None,
+            validate_fn=lambda o: [],
+            timeout=1,
+            push_stats=_push_stats,
+        )
         assert status == "stopped" and children == []
         assert calls == [], "已停止后不得再发起 AI 调用"
 
     async def test_stopped_while_queuing_skips_ai(self, monkeypatch):
         """排队等到许可后发现已停止 → 不启动 AI（信号量后的复检）。"""
         flag = {"stopped": False}
-        calls = self._mk(monkeypatch, ai_results=[{"outline": []}],
-                         stopped_fn=lambda tid: flag["stopped"])
+        calls = self._mk(monkeypatch, ai_results=[{"outline": []}], stopped_fn=lambda tid: flag["stopped"])
         sem = asyncio.Semaphore(1)
+
         # 先占住唯一许可，让目标协程停在 async with sem 上；随后置停止再放行
         async def _holder():
             async with sem:
                 await asyncio.sleep(0.02)
                 flag["stopped"] = True
+
         holder = asyncio.create_task(_holder())
         await asyncio.sleep(0.005)
-        t = asyncio.create_task(sh._fetch_chapter_children(
-            0, {"title": "x"}, sub_prompt=[], task_id="t", sem=sem,
-            validate_fn=lambda o: [], timeout=1, push_stats=_push_stats))
+        t = asyncio.create_task(
+            sh._fetch_chapter_children(
+                0,
+                {"title": "x"},
+                sub_prompt=[],
+                task_id="t",
+                sem=sem,
+                validate_fn=lambda o: [],
+                timeout=1,
+                push_stats=_push_stats,
+            )
+        )
         status, _ = await t
         await holder
         assert status == "stopped"
@@ -138,9 +183,18 @@ class TestFetchChapterChildren:
 
         self._mk(monkeypatch, ai_results=[{"outline": []}], wait_gate=gate)
         sem = asyncio.Semaphore(1)
-        t = asyncio.create_task(sh._fetch_chapter_children(
-            0, {"title": "x"}, sub_prompt=[], task_id="t", sem=sem,
-            validate_fn=lambda o: [], timeout=1, push_stats=_push_stats))
+        t = asyncio.create_task(
+            sh._fetch_chapter_children(
+                0,
+                {"title": "x"},
+                sub_prompt=[],
+                task_id="t",
+                sem=sem,
+                validate_fn=lambda o: [],
+                timeout=1,
+                push_stats=_push_stats,
+            )
+        )
         await asyncio.sleep(0.02)
         assert not sem.locked(), "暂停期间许可被占住（闸门必须排在信号量之前）"
         release.set()
@@ -155,11 +209,10 @@ class TestStepwiseOrchestrationGuards:
     def test_gate_precedes_semaphore(self):
         src = inspect.getsource(sh._fetch_chapter_children)
         # 跳过 docstring（其中引用了旧式反例「先 async with sem 再 wait_resume」）
-        body = src[src.index('"""', src.index('"""') + 3) + 3:]
+        body = src[src.index('"""', src.index('"""') + 3) + 3 :]
         # 拆分兼容：函数下沉 _sse_outline_build.py 后，wait_resume 经 _sh. 延迟
         # 绑定调用（``await _sh.wait_resume(task_id)``），故锚点不带 await 前缀。
-        assert body.index("wait_resume(task_id)") < body.index("async with sem:"), \
-            "暂停闸门必须排在并发信号量之前"
+        assert body.index("wait_resume(task_id)") < body.index("async with sem:"), "暂停闸门必须排在并发信号量之前"
 
     def test_gather_not_as_completed(self):
         """结果必须按 i 归位（gather 保序），不得改用 as_completed 完成序归位。"""
@@ -173,12 +226,11 @@ class TestStepwiseOrchestrationGuards:
 
     def test_batch_uses_pause_gate(self):
         src = inspect.getsource(sh.generate_outline)
-        seg = src[src.index("for batch_start in range("):]
+        seg = src[src.index("for batch_start in range(") :]
         gate_at = seg.index("await wait_resume(task_id)")
         stop_at = seg.index("if is_stopped(task_id)", gate_at)
         gather_at = seg.index("results = await asyncio.gather(")
-        assert gate_at < stop_at < gather_at, \
-            "批间循环必须先过暂停闸门 + 停止检查，再发起并发 gather"
+        assert gate_at < stop_at < gather_at, "批间循环必须先过暂停闸门 + 停止检查，再发起并发 gather"
 
 
 # ============================================================
@@ -191,8 +243,7 @@ class TestConcurrencyConfig:
         assert Settings().outline_chapter_concurrency == 2
 
     def test_module_constant_follows_settings(self):
-        assert sh.OUTLINE_CHAPTER_CONCURRENCY == max(
-            1, int(Settings().outline_chapter_concurrency))
+        assert sh.OUTLINE_CHAPTER_CONCURRENCY == max(1, int(Settings().outline_chapter_concurrency))
 
     def test_non_positive_clamped_to_serial(self):
         s = Settings(outline_chapter_concurrency=0)

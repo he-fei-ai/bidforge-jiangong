@@ -49,6 +49,7 @@
 - **services 分层**：禁止 import routers；被 ``routers/sse_handlers.py`` 与
   ``services/ai/prompts/outline.py`` 共同消费。
 """
+
 from __future__ import annotations
 
 import logging
@@ -66,7 +67,6 @@ from app.services.scheme_classification import (
 )
 
 logger = logging.getLogger("outline_checkpoint")
-
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +213,7 @@ def needs_monitor_chapter(scheme_name: str = "", scheme_type: str = "") -> bool:
     """
     try:
         from app.services.standards_registry import match_categories
+
         cats = set(match_categories(scheme_name, scheme_type))
         return bool(cats & _pf.MONITOR_CATEGORIES)
     except Exception:  # pragma: no cover - 纯派生，异常时保守要求
@@ -225,18 +226,14 @@ def _spec_of(rule_id: str) -> dict:
     rule = get_rule(rule_id)
     return {
         "rule_id": rule_id,
-        "name": _CHAPTER_DISPLAY_NAMES.get(
-            rule_id, rule.title if rule else rule_id),
+        "name": _CHAPTER_DISPLAY_NAMES.get(rule_id, rule.title if rule else rule_id),
         "keywords": _keywords_of(rule_id),
         "severity": rule.severity if rule is not None else "medium",
-        "hazard_only": rule_id in _HAZARD_STRUCTURAL_RULE_IDS
-                      and rule_id not in _ALWAYS_REQUIRED_RULE_IDS,
+        "hazard_only": rule_id in _HAZARD_STRUCTURAL_RULE_IDS and rule_id not in _ALWAYS_REQUIRED_RULE_IDS,
     }
 
 
-def required_chapter_specs(
-        is_hazardous: bool = False, *,
-        need_monitor: bool | None = None) -> list[dict]:
+def required_chapter_specs(is_hazardous: bool = False, *, need_monitor: bool | None = None) -> list[dict]:
     """必备章节 spec 列表（提示词渲染与程序化自检共用同一份）。
 
     组成（顺序固定）：
@@ -259,9 +256,7 @@ def required_chapter_specs(
     """
     if need_monitor is None:
         need_monitor = bool(is_hazardous)
-    specs: list[dict] = [_spec_of(rid)
-                         for rid in _ALWAYS_REQUIRED_RULE_IDS
-                         + _EXTRA_REQUIRED_RULE_IDS]
+    specs: list[dict] = [_spec_of(rid) for rid in _ALWAYS_REQUIRED_RULE_IDS + _EXTRA_REQUIRED_RULE_IDS]
     if is_hazardous and need_monitor:
         specs.insert(len(_ALWAYS_REQUIRED_RULE_IDS), _spec_of("SAF-06"))
     return specs
@@ -275,13 +270,13 @@ def dangerous_required_keywords() -> tuple[tuple[str, tuple[str, ...]], ...]:
     九大法定章节（简写）+ 「监测方案」—— 由
     ``tests/test_classification_parity_20261001.py`` 锁定，不得改动。
     """
-    return tuple((_CHAPTER_DISPLAY_NAMES[rid], _keywords_of(rid))
-                 for rid in _HAZARD_STRUCTURAL_RULE_IDS)
+    return tuple((_CHAPTER_DISPLAY_NAMES[rid], _keywords_of(rid)) for rid in _HAZARD_STRUCTURAL_RULE_IDS)
 
 
 # ---------------------------------------------------------------------------
 # 二、程序化自检：目录是否覆盖必备法定章节
 # ---------------------------------------------------------------------------
+
 
 def _matched_titles(titles: list[str], keywords: tuple[str, ...]) -> list[str]:
     """标题命中判定 —— **与 preflight_engine.check_completeness 逐字同谓词**。
@@ -292,8 +287,9 @@ def _matched_titles(titles: list[str], keywords: tuple[str, ...]) -> list[str]:
     return [t for t in titles if any(kw in t for kw in keywords)]
 
 
-def check_outline_chapters(outline: list, *, is_hazardous: bool = False,
-                          need_monitor: bool | None = None) -> list[dict]:
+def check_outline_chapters(
+    outline: list, *, is_hazardous: bool = False, need_monitor: bool | None = None
+) -> list[dict]:
     """检查目录是否覆盖必备法定章节，返回 findings（rule_id 与预检同词表）。
 
     与 ``preflight_engine.check_completeness`` 的差异（**刻意**）：
@@ -309,9 +305,11 @@ def check_outline_chapters(outline: list, *, is_hazardous: bool = False,
     """
     findings: list[dict] = []
     try:
-        titles = [str(e.get("title") or "").strip()
-                  for e in collect_titles(outline or [])
-                  if str(e.get("title") or "").strip()]
+        titles = [
+            str(e.get("title") or "").strip()
+            for e in collect_titles(outline or [])
+            if str(e.get("title") or "").strip()
+        ]
         for spec in required_chapter_specs(is_hazardous, need_monitor=need_monitor):
             kws = spec["keywords"]
             if not kws:
@@ -320,30 +318,31 @@ def check_outline_chapters(outline: list, *, is_hazardous: bool = False,
                 continue
             if _matched_titles(titles, kws):
                 continue
-            findings.append({
-                "rule_id": spec["rule_id"],
-                "checkpoint": f"目录缺少「{spec['name']}」章节",
-                # ✅ 供 outline_coverage_missing / 前端按名消费：不要从 checkpoint
-                # 字符串里反解名称（改一次措辞就断链，AGENTS.md §5.14 同类教训）。
-                "name": spec["name"],
-                "severity": "high" if spec["severity"] in ("block", "high") else "medium",
-                "source": "outline_selfcheck",
-                "message": f"目录中未找到与「{spec['name']}」相关的章节"
-                           f"（审核按标题关键词匹配：{'/'.join(kws[:4])}）",
-                "suggestion": f"增设「{spec['name']}」一级章节，标题中包含"
-                              f"{' 或 '.join(kws[:3])}等关键词",
-            })
+            findings.append(
+                {
+                    "rule_id": spec["rule_id"],
+                    "checkpoint": f"目录缺少「{spec['name']}」章节",
+                    # ✅ 供 outline_coverage_missing / 前端按名消费：不要从 checkpoint
+                    # 字符串里反解名称（改一次措辞就断链，AGENTS.md §5.14 同类教训）。
+                    "name": spec["name"],
+                    "severity": "high" if spec["severity"] in ("block", "high") else "medium",
+                    "source": "outline_selfcheck",
+                    "message": f"目录中未找到与「{spec['name']}」相关的章节"
+                    f"（审核按标题关键词匹配：{'/'.join(kws[:4])}）",
+                    "suggestion": f"增设「{spec['name']}」一级章节，标题中包含" f"{' 或 '.join(kws[:3])}等关键词",
+                }
+            )
     except Exception as exc:  # fail-soft：自检异常不阻断目录生成
         logger.warning("目录检查点自检异常（忽略）: %s", exc, exc_info=True)
     return findings
 
 
-def outline_coverage_missing(outline: list, *, is_hazardous: bool = False,
-                            need_monitor: bool | None = None) -> list[str]:
+def outline_coverage_missing(
+    outline: list, *, is_hazardous: bool = False, need_monitor: bool | None = None
+) -> list[str]:
     """缺失的必备章节名列表（供外科式补齐链路复用，返回去重保序的展示名）。"""
     missing: list[str] = []
-    for f in check_outline_chapters(outline, is_hazardous=is_hazardous,
-                                    need_monitor=need_monitor):
+    for f in check_outline_chapters(outline, is_hazardous=is_hazardous, need_monitor=need_monitor):
         name = (f.get("name") or "").strip()
         if name and name not in missing:
             missing.append(name)
@@ -362,9 +361,8 @@ _OUTLINE_CHECKPOINT_HEADER = (
 
 
 def build_outline_checkpoint_block(
-        scheme_name: str = "", scheme_type: str = "",
-        is_hazardous: bool | None = None,
-        need_monitor: bool | None = None) -> str:
+    scheme_name: str = "", scheme_type: str = "", is_hazardous: bool | None = None, need_monitor: bool | None = None
+) -> str:
     """目录生成 system 级「检查点 → 生成约束」段落。
 
     与 :func:`content_checkpoint.build_content_system_checkpoint_block` 的关系：
@@ -387,14 +385,14 @@ def build_outline_checkpoint_block(
         is_hazardous = is_hazardous_scheme(scheme_name, scheme_type)
     if need_monitor is None:
         need_monitor = needs_monitor_chapter(scheme_name, scheme_type)
-    specs = [s for s in required_chapter_specs(
-        is_hazardous, need_monitor=need_monitor) if s["keywords"]]
+    specs = [s for s in required_chapter_specs(is_hazardous, need_monitor=need_monitor) if s["keywords"]]
     if not specs:
         return ""
     lines = [_OUTLINE_CHECKPOINT_HEADER]
     lines.append(
         "1. **必备法定章节齐备**：下列每一项都必须有**独立的一级章节**，"
-        "不得合并、不得用二级小节代替（缺一项即被预检判为内容不完整）：")
+        "不得合并、不得用二级小节代替（缺一项即被预检判为内容不完整）："
+    )
     for spec in specs:
         kw_txt = " / ".join(spec["keywords"][:4])
         lines.append(f"   - {spec['name']}（{spec['rule_id']}）——标题须含：{kw_txt}")
@@ -402,21 +400,23 @@ def build_outline_checkpoint_block(
         "2. **标题必须带法定关键词**：审核预检按**标题关键词**匹配判定上述章节"
         "是否存在，标题里没有上列关键词就等于没有该章。允许在法定词后补充本工程"
         "特征（如「工程概况与基坑周边环境」），但**不得改写掉法定词本身**"
-        "（写「工程概述」不算「工程概况」，会被判缺失）。")
+        "（写「工程概述」不算「工程概况」，会被判缺失）。"
+    )
     lines.append(
         "3. **不得出现无关章节**：不得凭空添加与本专项方案无关的章节"
         "（如非本方案对象的装饰 / 机电 / 土建章节），也不得把投标场景内容"
-        "（招标文件、评分办法、商务报价）编成章节。")
+        "（招标文件、评分办法、商务报价）编成章节。"
+    )
     if need_monitor:
         lines.append(
             "4. **监测方案附加要求**：本工程属需监测的危大类别，除九大法定章节外还须"
             "有独立的「监测监控方案」章节（明确监测项目、点位布置、监测频次与"
-            "预警值），且「计算书及相关图纸」章节须能引出平面布置图 / 节点详图。")
+            "预警值），且「计算书及相关图纸」章节须能引出平面布置图 / 节点详图。"
+        )
     return "\n".join(lines) + "\n"
 
 
-def build_outline_element_block(scheme_name: str = "", scheme_type: str = "",
-                                include_elements: bool = True) -> str:
+def build_outline_element_block(scheme_name: str = "", scheme_type: str = "", include_elements: bool = True) -> str:
     """目录生成侧「九大章节 · 本章必含要素」段落（无命中返回空串 = 不注入）。
 
     ⚠️ **为什么目录侧也要注入**：正文生成**只按目录给的标题写**。目录里若没有
@@ -457,13 +457,15 @@ def build_outline_element_block(scheme_name: str = "", scheme_type: str = "",
         lines.append(f"- **{title}**：" + "、".join(elements))
     lines.append(
         "（要素只决定「目录里要有落点」；具体写法与数据由正文生成按"
-        "「模糊生成规则」完成，缺失数据用条件式表述写完整，不留占位标记。）")
+        "「模糊生成规则」完成，缺失数据用条件式表述写完整，不留占位标记。）"
+    )
     return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------
 # 四、自检：锚点合法性
 # ---------------------------------------------------------------------------
+
 
 def validate_outline_anchoring() -> list[str]:
     """必备章节 spec 引用的每个 rule_id 必须存在于 audit_rules 注册表。

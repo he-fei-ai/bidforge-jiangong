@@ -32,6 +32,7 @@ REVIEW_STATUSES = ("待审核", "已通过", "已停用")
 def _normalize_outline(raw) -> str:
     """入库前统一规范化（三级裁剪 + 编号重排 + 解包 {"outline": [...]}）"""
     from app.services.outline_utils import normalize_outline_json
+
     return normalize_outline_json(raw)
 
 
@@ -65,13 +66,12 @@ async def library_stats():
             " SUM(CASE WHEN review_status='已通过' THEN 1 ELSE 0 END) AS approved,"
             " SUM(CASE WHEN review_status='待审核' THEN 1 ELSE 0 END) AS pending,"
             " SUM(CASE WHEN review_status='已停用' THEN 1 ELSE 0 END) AS disabled,"
-            " COALESCE(SUM(ref_count),0) AS ref_total FROM outline_library")
+            " COALESCE(SUM(ref_count),0) AS ref_total FROM outline_library"
+        )
         row = dict(await cur.fetchone())
-        cur = await conn.execute(
-            "SELECT COUNT(DISTINCT type) AS c FROM outline_library WHERE type<>''")
+        cur = await conn.execute("SELECT COUNT(DISTINCT type) AS c FROM outline_library WHERE type<>''")
         row["categories"] = (await cur.fetchone())["c"]
-        cur = await conn.execute(
-            "SELECT COUNT(*) AS c FROM outline_library WHERE source='预置清单'")
+        cur = await conn.execute("SELECT COUNT(*) AS c FROM outline_library WHERE source='预置清单'")
         row["preset"] = (await cur.fetchone())["c"]
         return row
     finally:
@@ -87,7 +87,8 @@ async def library_filters():
         async def facet(col: str):
             cur = await conn.execute(
                 f"SELECT {col} AS v, COUNT(*) AS c FROM outline_library"
-                f" WHERE {col}<>'' GROUP BY {col} ORDER BY c DESC")
+                f" WHERE {col}<>'' GROUP BY {col} ORDER BY c DESC"
+            )
             return [{"value": r["v"], "count": r["c"]} for r in await cur.fetchall()]
 
         return {
@@ -105,6 +106,7 @@ async def library_filters():
 async def list_standard_templates():
     """列出可用的行业标准目录模板（供『套用标准模板』下拉使用）"""
     from app.services.outline_templates import list_templates
+
     return {"items": list_templates()}
 
 
@@ -113,6 +115,7 @@ async def get_standard_template(key: str):
     """取某个行业标准模板的完整目录树 + 编制依据 / 适用条件"""
     from app.services.ai.json_response import renumber_outline
     from app.services.outline_templates import BUILDERS, TEMPLATE_META
+
     if key not in BUILDERS:
         raise HTTPException(404, "模板不存在")
     meta = TEMPLATE_META.get(key, {})
@@ -152,9 +155,13 @@ async def list_library(
     """
     where = " WHERE 1=1"
     params: list = []
-    for col, val in [("type", type), ("engineering_type", engineering_type),
-                     ("profession", profession), ("review_status", review_status),
-                     ("source", source)]:
+    for col, val in [
+        ("type", type),
+        ("engineering_type", engineering_type),
+        ("profession", profession),
+        ("review_status", review_status),
+        ("source", source),
+    ]:
         if val:
             where += f" AND {col}=?"
             params.append(val)
@@ -167,8 +174,7 @@ async def list_library(
 
     order_sql = "DESC" if str(order).lower() != "asc" else "ASC"
     sort_col = _SORTABLE.get(sort_by, "ref_count")
-    sql = (f"SELECT {_LIST_COLS} FROM outline_library{where}"
-           f" ORDER BY {sort_col} {order_sql}, updated_at DESC")
+    sql = f"SELECT {_LIST_COLS} FROM outline_library{where}" f" ORDER BY {sort_col} {order_sql}, updated_at DESC"
     if page_size and page_size > 0:
         page = max(1, page)
         sql += " LIMIT ? OFFSET ?"
@@ -184,6 +190,7 @@ async def create_library(data: OutlineLibraryCreate, db=Depends(get_db)):
     # ✅ BUG 修复：入库前统一规范化（三级裁剪 + 编号重排），
     #    保证新建目录库与上传识别/套用路径产出一致的目录结构。
     from app.services.outline_utils import normalize_outline_json
+
     outline_json = normalize_outline_json(data.outline_json)
     # ✅ 与上传识别入库（save_as_library）口径一致：拒绝空目录库。
     #    旧实现在 outline_json 非法（如 {"foo": 1} / "[]" / 节点全是字符串）时
@@ -198,10 +205,20 @@ async def create_library(data: OutlineLibraryCreate, db=Depends(get_db)):
     await db.execute(
         "INSERT INTO outline_library (id, name, type, engineering_type, profession, applicable_conditions, basis, outline_json, tags, source, review_status)"
         " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (lid, data.name, data.type, data.engineering_type, data.profession,
-         data.applicable_conditions, data.basis,
-         outline_json, data.tags,
-         data.source, "待审核"))
+        (
+            lid,
+            data.name,
+            data.type,
+            data.engineering_type,
+            data.profession,
+            data.applicable_conditions,
+            data.basis,
+            outline_json,
+            data.tags,
+            data.source,
+            "待审核",
+        ),
+    )
     await db.commit()
     cur = await db.execute("SELECT * FROM outline_library WHERE id=?", (lid,))
     return dict(await cur.fetchone())
@@ -215,7 +232,9 @@ async def get_library(library_id: str, db=Depends(get_db)):
         raise HTTPException(404, "目录库不存在")
     item = dict(row)
     # 版本列表（附带节点数，便于 UI 直接对比各版本规模）
-    cur = await db.execute("SELECT * FROM outline_library_versions WHERE library_id=? ORDER BY created_at DESC", (library_id,))
+    cur = await db.execute(
+        "SELECT * FROM outline_library_versions WHERE library_id=? ORDER BY created_at DESC", (library_id,)
+    )
     versions = [dict(r) for r in await cur.fetchall()]
     for v in versions:
         try:
@@ -230,7 +249,6 @@ async def get_library(library_id: str, db=Depends(get_db)):
     return item
 
 
-
 @router.patch("/{library_id}")
 async def update_library(library_id: str, data: OutlineLibraryUpdate, db=Depends(get_db)):
     # ✅ BUG 修复：旧实现不校验存在性，id 不存在时也返回 ok=True，
@@ -242,6 +260,7 @@ async def update_library(library_id: str, data: OutlineLibraryUpdate, db=Depends
     # ✅ BUG 修复：编辑保存的目录同样走规范化，避免绕过三裁剪/重编号写入脏结构。
     if "outline_json" in fields:
         from app.services.outline_utils import normalize_outline_json
+
         fields["outline_json"] = normalize_outline_json(fields["outline_json"])
         # ✅ 修复（2026-09-17）：编辑保存同样校验非空，与 create_library 口径一致，
         #    避免把目录库静默清空成脏数据（点进去空白、套用后方案目录被清空无提示）。
@@ -286,8 +305,8 @@ async def batch_review(body: dict, db=Depends(get_db)):
     affected = 0
     for lid in ids:
         cur = await db.execute(
-            "UPDATE outline_library SET review_status=?, updated_at=? WHERE id=?",
-            (status, now, lid))
+            "UPDATE outline_library SET review_status=?, updated_at=? WHERE id=?", (status, now, lid)
+        )
         # R13：循环内逐条 UPDATE，任一条 execute() 返回 None 都会让整个批量端点 500
         affected += safe_rowcount(cur, what=f"目录库审核状态更新 id={lid}")
     await db.commit()
@@ -304,8 +323,10 @@ async def review_library(library_id: str, body: dict, db=Depends(get_db)):
     cur = await db.execute("SELECT id FROM outline_library WHERE id=?", (library_id,))
     if not await cur.fetchone():
         raise HTTPException(404, "目录库不存在")
-    await db.execute("UPDATE outline_library SET review_status=?, updated_at=? WHERE id=?",
-                     (status, datetime.now().isoformat(), library_id))
+    await db.execute(
+        "UPDATE outline_library SET review_status=?, updated_at=? WHERE id=?",
+        (status, datetime.now().isoformat(), library_id),
+    )
     await db.commit()
     return {"ok": True, "review_status": status}
 
@@ -321,11 +342,13 @@ async def new_version(library_id: str, body: dict, db=Depends(get_db)):
     vid = str(uuid.uuid4())
     await db.execute(
         "INSERT INTO outline_library_versions (id, library_id, version, outline_json) VALUES (?,?,?,?)",
-        (vid, library_id, old_ver or "v1.0", old_json))
+        (vid, library_id, old_ver or "v1.0", old_json),
+    )
     # 更新为新版本
     new_ver = body.get("version") or "v2.0"
     # ✅ BUG 修复：新版本目录同样规范化，保证版本间结构口径一致。
     from app.services.outline_utils import normalize_outline_json
+
     new_json = normalize_outline_json(body.get("outline_json", old_json))
     # ✅ 修复（2026-09-17）：新版本同样校验非空，避免版本推进把目录库静默清空。
     try:
@@ -334,8 +357,10 @@ async def new_version(library_id: str, body: dict, db=Depends(get_db)):
         _new_nodes = []
     if not isinstance(_new_nodes, list) or not _new_nodes:
         raise HTTPException(400, "新版本目录内容为空或格式非法（应为非空节点数组），无法保存")
-    await db.execute("UPDATE outline_library SET version=?, outline_json=?, review_status='待审核', updated_at=? WHERE id=?",
-                     (new_ver, new_json, datetime.now().isoformat(), library_id))
+    await db.execute(
+        "UPDATE outline_library SET version=?, outline_json=?, review_status='待审核', updated_at=? WHERE id=?",
+        (new_ver, new_json, datetime.now().isoformat(), library_id),
+    )
     await db.commit()
     return {"ok": True, "version": new_ver}
 
@@ -356,12 +381,13 @@ async def restore_version(library_id: str, body: dict, db=Depends(get_db)):
     version = (body or {}).get("version", "")
     if version_id:
         cur = await db.execute(
-            "SELECT * FROM outline_library_versions WHERE id=? AND library_id=?",
-            (version_id, library_id))
+            "SELECT * FROM outline_library_versions WHERE id=? AND library_id=?", (version_id, library_id)
+        )
     elif version:
         cur = await db.execute(
-            "SELECT * FROM outline_library_versions WHERE version=? AND library_id=?"
-            " ORDER BY created_at DESC", (version, library_id))
+            "SELECT * FROM outline_library_versions WHERE version=? AND library_id=?" " ORDER BY created_at DESC",
+            (version, library_id),
+        )
     else:
         raise HTTPException(400, "缺少 version_id 或 version")
     target = await cur.fetchone()
@@ -372,22 +398,25 @@ async def restore_version(library_id: str, body: dict, db=Depends(get_db)):
     # 归档当前版本（同版本号幂等去重，避免重复回滚产生大量冗余归档）
     cur = await db.execute(
         "SELECT id FROM outline_library_versions WHERE library_id=? AND version=?",
-        (library_id, lib.get("version") or "v1.0"))
+        (library_id, lib.get("version") or "v1.0"),
+    )
     if not await cur.fetchone():
         await db.execute(
-            "INSERT INTO outline_library_versions (id, library_id, version, outline_json)"
-            " VALUES (?,?,?,?)",
-            (str(uuid.uuid4()), library_id, lib.get("version") or "v1.0",
-             lib.get("outline_json") or "[]"))
+            "INSERT INTO outline_library_versions (id, library_id, version, outline_json)" " VALUES (?,?,?,?)",
+            (str(uuid.uuid4()), library_id, lib.get("version") or "v1.0", lib.get("outline_json") or "[]"),
+        )
 
     await db.execute(
-        "UPDATE outline_library SET outline_json=?, version=?, review_status='待审核', updated_at=?"
-        " WHERE id=?",
-        (target.get("outline_json") or "[]", target.get("version") or lib.get("version"),
-         datetime.now().isoformat(), library_id))
+        "UPDATE outline_library SET outline_json=?, version=?, review_status='待审核', updated_at=?" " WHERE id=?",
+        (
+            target.get("outline_json") or "[]",
+            target.get("version") or lib.get("version"),
+            datetime.now().isoformat(),
+            library_id,
+        ),
+    )
     await db.commit()
-    return {"ok": True, "version": target.get("version"),
-            "note": "已回滚至该版本，回滚前的当前版本已归档"}
+    return {"ok": True, "version": target.get("version"), "note": "已回滚至该版本，回滚前的当前版本已归档"}
 
 
 @router.post("/from-scheme")
@@ -411,7 +440,9 @@ async def create_from_scheme(body: dict, db=Depends(get_db)):
 
     cur = await db.execute(
         "SELECT id, parent_id, title, description, level, sort_order, word_budget"
-        " FROM sections WHERE scheme_id=? ORDER BY sort_order, level", (scheme_id,))
+        " FROM sections WHERE scheme_id=? ORDER BY sort_order, level",
+        (scheme_id,),
+    )
     rows = [dict(r) for r in await cur.fetchall()]
     if not rows:
         raise HTTPException(400, "该方案暂无目录，无法存为目录库")
@@ -451,15 +482,22 @@ async def create_from_scheme(body: dict, db=Depends(get_db)):
         "INSERT INTO outline_library (id, name, type, engineering_type, profession,"
         " applicable_conditions, basis, outline_json, tags, version, source,"
         " review_status, ref_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (new_id, name,
-         (body or {}).get("type") or scheme.get("type") or "",
-         (body or {}).get("engineering_type") or "",
-         (body or {}).get("profession") or scheme.get("profession") or "",
-         (body or {}).get("applicable_conditions") or "",
-         (body or {}).get("basis") or "",
-         _normalize_outline(outline),
-         (body or {}).get("tags") or f"{scheme.get('type') or ''},方案沉淀".strip(","),
-         "v1.0", "方案沉淀", "待审核", 0))
+        (
+            new_id,
+            name,
+            (body or {}).get("type") or scheme.get("type") or "",
+            (body or {}).get("engineering_type") or "",
+            (body or {}).get("profession") or scheme.get("profession") or "",
+            (body or {}).get("applicable_conditions") or "",
+            (body or {}).get("basis") or "",
+            _normalize_outline(outline),
+            (body or {}).get("tags") or f"{scheme.get('type') or ''},方案沉淀".strip(","),
+            "v1.0",
+            "方案沉淀",
+            "待审核",
+            0,
+        ),
+    )
     await db.commit()
     cur = await db.execute(f"SELECT {_LIST_COLS} FROM outline_library WHERE id=?", (new_id,))
     return dict(await cur.fetchone())
@@ -482,10 +520,23 @@ async def duplicate_library(library_id: str, body: dict | None = None, db=Depend
         "INSERT INTO outline_library (id, name, type, engineering_type, profession,"
         " applicable_conditions, basis, outline_json, tags, version, source,"
         " review_status, ref_count, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (new_id, name, src.get("type", ""), src.get("engineering_type", ""),
-         src.get("profession", ""), src.get("applicable_conditions", ""),
-         src.get("basis", ""), src.get("outline_json") or "[]", src.get("tags", ""),
-         "v1.0", "复制", "待审核", 0, src.get("created_by", "")))
+        (
+            new_id,
+            name,
+            src.get("type", ""),
+            src.get("engineering_type", ""),
+            src.get("profession", ""),
+            src.get("applicable_conditions", ""),
+            src.get("basis", ""),
+            src.get("outline_json") or "[]",
+            src.get("tags", ""),
+            "v1.0",
+            "复制",
+            "待审核",
+            0,
+            src.get("created_by", ""),
+        ),
+    )
     await db.commit()
     cur = await db.execute(f"SELECT {_LIST_COLS} FROM outline_library WHERE id=?", (new_id,))
     return dict(await cur.fetchone())
@@ -498,12 +549,14 @@ def _render_outline_text(nodes, prefix: str = "") -> list[str]:
     避免两处各写一遍导致"导出的文本"与"喂给模型的文本"不一致）。
     """
     from app.services.outline_reference import render_outline_text
+
     return render_outline_text(nodes, prefix).splitlines()
 
 
 def _render_outline_md(nodes, level: int = 1) -> list[str]:
     """把目录树渲染为 Markdown（标题层级 + 描述引用）"""
     from app.services.outline_reference import render_outline_md
+
     return render_outline_md(nodes, level).splitlines()
 
 
@@ -533,17 +586,26 @@ async def export_library(
     ext = {"text": "txt", "markdown": "md", "json": "json"}[format]
     if format == "json":
         content = json.dumps(
-            {"name": item["name"], "type": item.get("type", ""),
-             "version": item.get("version", ""), "basis": item.get("basis", ""),
-             "applicable_conditions": item.get("applicable_conditions", ""),
-             "outline": outline},
-            ensure_ascii=False, indent=2)
+            {
+                "name": item["name"],
+                "type": item.get("type", ""),
+                "version": item.get("version", ""),
+                "basis": item.get("basis", ""),
+                "applicable_conditions": item.get("applicable_conditions", ""),
+                "outline": outline,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
     elif format == "markdown":
-        head = [f"# {item['name']}", "",
-                f"- 分类：{item.get('type', '') or '-'}",
-                f"- 版本：{item.get('version', '')}",
-                f"- 工程类型：{item.get('engineering_type', '') or '-'}",
-                f"- 专业：{item.get('profession', '') or '-'}"]
+        head = [
+            f"# {item['name']}",
+            "",
+            f"- 分类：{item.get('type', '') or '-'}",
+            f"- 版本：{item.get('version', '')}",
+            f"- 工程类型：{item.get('engineering_type', '') or '-'}",
+            f"- 专业：{item.get('profession', '') or '-'}",
+        ]
         if item.get("applicable_conditions"):
             head.append(f"- 适用条件：{item['applicable_conditions']}")
         if item.get("basis"):
@@ -551,8 +613,7 @@ async def export_library(
         head += ["", "---", ""]
         content = "\n".join(head + _render_outline_md(outline))
     else:
-        head = [item["name"],
-                f"分类：{item.get('type', '') or '-'}    版本：{item.get('version', '')}"]
+        head = [item["name"], f"分类：{item.get('type', '') or '-'}    版本：{item.get('version', '')}"]
         if item.get("applicable_conditions"):
             head.append(f"适用条件：{item['applicable_conditions']}")
         if item.get("basis"):
@@ -577,7 +638,9 @@ async def apply_to_scheme(library_id: str, body: dict, db=Depends(get_db)):
     前端已统一改用 /apply-and-save 一步套用；本端点保留仅为兼容旧调用方，
     不再累加引用计数。
     """
-    cur = await db.execute("SELECT outline_json FROM outline_library WHERE id=? AND review_status='已通过'", (library_id,))
+    cur = await db.execute(
+        "SELECT outline_json FROM outline_library WHERE id=? AND review_status='已通过'", (library_id,)
+    )
     row = await cur.fetchone()
     if not row:
         raise HTTPException(400, "目录库不存在或未审核通过")
@@ -603,7 +666,8 @@ async def apply_library_and_save(library_id: str, body: dict, db=Depends(get_db)
 
     cur = await db.execute(
         "SELECT id, name, outline_json, source FROM outline_library WHERE id=? AND review_status='已通过'",
-        (library_id,))
+        (library_id,),
+    )
     row = await cur.fetchone()
     if not row:
         raise HTTPException(400, "目录库不存在或未审核通过")
@@ -625,19 +689,22 @@ async def apply_library_and_save(library_id: str, body: dict, db=Depends(get_db)
     # 与 /save-outline 同样会级联 DELETE 正在被正文生成写的章节。前端虽已用
     # disabled={generating} 挡主路径，但接口层必须兜底（直连调用 / 多标签页）。
     from app.routers.sections import content_generation_in_progress, outline_generation_in_progress
+
     if content_generation_in_progress(scheme_id):
         raise HTTPException(
-            409, "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再套用目录库——"
-                 "套用会整表重建章节，与生成结果互相覆盖")
+            409,
+            "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再套用目录库——"
+            "套用会整表重建章节，与生成结果互相覆盖",
+        )
     # ✅ BUG 修复（2026-09-22）：旧实现只拦正文生成、不拦目录生成 ——
     #    与 /save-outline 的双守卫口径不一致（注释也声明应共用口径）。
     #    目录生成 SSE 完成后的「一级目录确认闸门」会把刚套用的目录整表覆盖。
     if outline_generation_in_progress(scheme_id):
-        raise HTTPException(
-            409, "本方案目录正在后台生成中，请等待生成完成（或先停止任务）后再套用目录库")
+        raise HTTPException(409, "本方案目录正在后台生成中，请等待生成完成（或先停止任务）后再套用目录库")
 
     # 复用 sections 模块的核心保存逻辑（智能保留已有正文）
     from app.routers.sections import _save_outline_to_db, passthrough_additive
+
     result = await _save_outline_to_db(db, scheme_id, outline_data, source="目录库")
 
     # 更新引用计数

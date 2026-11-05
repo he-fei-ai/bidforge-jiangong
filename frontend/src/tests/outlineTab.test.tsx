@@ -83,9 +83,7 @@ const GATE_OUTLINE = [
 
 function setupGate() {
   const selectedRef: { current: number[] } = { current: [0, 1, 2] };
-  const utils = render(
-    <OutlineGateList outline={GATE_OUTLINE} selectedRef={selectedRef} />,
-  );
+  const utils = render(<OutlineGateList outline={GATE_OUTLINE} selectedRef={selectedRef} />);
   const checkboxes = () =>
     Array.from(utils.container.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
   return { ...utils, selectedRef, checkboxes };
@@ -125,7 +123,10 @@ describe("OutlineGateList（一级目录确认闸门）", () => {
   it("描述非空时展示（截断 60 字符内原样）", () => {
     const { getByText, queryByText } = render(
       <OutlineGateList
-        outline={[{ title: "A", description: "desc-A" }, { title: "B", description: "" }]}
+        outline={[
+          { title: "A", description: "desc-A" },
+          { title: "B", description: "" },
+        ]}
         selectedRef={{ current: [0, 1] }}
       />,
     );
@@ -173,9 +174,7 @@ describe("GenerationProgressCard（生成进度卡）", () => {
 
   it("目录失败数取「后端 stats / 本地日志」较大值", () => {
     const { getByText } = render(
-      <GenerationProgressCard
-        {...baseProgressProps({ stats: { failed: 3 } })}
-      />,
+      <GenerationProgressCard {...baseProgressProps({ stats: { failed: 3 } })} />,
     );
     expect(getByText("失败 3")).toBeTruthy();
   });
@@ -208,8 +207,9 @@ describe("GenerationProgressCard（生成进度卡）", () => {
         })}
       />,
     );
-    const rendered = Array.from(container.querySelectorAll(".ant-list-item"))
-      .map((el) => el.textContent || "");
+    const rendered = Array.from(container.querySelectorAll(".ant-list-item")).map(
+      (el) => el.textContent || "",
+    );
     // 断言是「顺序」而非仅存在：倒序改造不能把最新一条压到滚动区底部
     expect(rendered[0]).toContain("第三条日志");
     expect(rendered[1]).toContain("第二条日志");
@@ -243,8 +243,12 @@ describe("GenerationProgressCard（生成进度卡）", () => {
           stats: { words: 1234, concurrency: 3 },
           sectionLogs: [
             {
-              section_id: "s1", title: "第一章 工程概况", status: "running",
-              stage: "draft", stage_label: "起草中", time: 1,
+              section_id: "s1",
+              title: "第一章 工程概况",
+              status: "running",
+              stage: "draft",
+              stage_label: "起草中",
+              time: 1,
             },
           ],
         })}
@@ -258,9 +262,7 @@ describe("GenerationProgressCard（生成进度卡）", () => {
 
   it("进度异常态：失败且 progress>=1 时进度条标红（status=exception）", () => {
     const { container } = render(
-      <GenerationProgressCard
-        {...baseProgressProps({ progress: 1, stats: { failed: 5 } })}
-      />,
+      <GenerationProgressCard {...baseProgressProps({ progress: 1, stats: { failed: 5 } })} />,
     );
     expect(container.querySelector(".ant-progress-status-exception")).toBeTruthy();
   });
@@ -271,8 +273,13 @@ describe("GenerationProgressCard（生成进度卡）", () => {
 // ============================================================
 function mkNode(key: string, title: string, children: TreeNode[] = []): TreeNode {
   return {
-    key, title, level: 1, status: "empty", word_count: 0,
-    word_budget: 1500, children,
+    key,
+    title,
+    level: 1,
+    status: "empty",
+    word_count: 0,
+    word_budget: 1500,
+    children,
   };
 }
 
@@ -310,16 +317,15 @@ describe("目录树纯逻辑（模块级导出）", () => {
   });
 
   it("flattenTreeKeys：深度优先收集全部 key（/reorder 全量重排的 order 来源）", () => {
-    const tree = [
-      mkNode("1", "A", [mkNode("1.1", "A1")]),
-      mkNode("2", "B"),
-    ];
+    const tree = [mkNode("1", "A", [mkNode("1.1", "A1")]), mkNode("2", "B")];
     expect(flattenTreeKeys(tree)).toEqual(["1", "1.1", "2"]);
   });
 
   it("hasDeepOutlineNodes：三级为上限，四级及以上命中", () => {
     const three = [mkNode("1", "A", [mkNode("1.1", "B", [mkNode("1.1.1", "C")])])];
-    const four = [mkNode("1", "A", [mkNode("1.1", "B", [mkNode("1.1.1", "C", [mkNode("1.1.1.1", "D")])])])];
+    const four = [
+      mkNode("1", "A", [mkNode("1.1", "B", [mkNode("1.1.1", "C", [mkNode("1.1.1.1", "D")])])]),
+    ];
     expect(hasDeepOutlineNodes(three)).toBe(false);
     expect(hasDeepOutlineNodes(four)).toBe(true);
   });
@@ -349,8 +355,12 @@ describe("目录树纯逻辑（模块级导出）", () => {
     expect(out.map((n) => n.key)).toEqual(["s1", "local_new", "s2", "s3"]);
     // 用户可见展示编号：新节点立即拿到「第二章」，原 2/3 章顺延为三/四章
     expect(formatOutlineTitle(out[1].outlineId, out[1].level, out[1].title)).toBe("第二章 新章节");
-    expect(formatOutlineTitle(out[2].outlineId, out[2].level, out[2].title)).toBe("第三章 编制依据");
-    expect(formatOutlineTitle(out[3].outlineId, out[3].level, out[3].title)).toBe("第四章 施工计划");
+    expect(formatOutlineTitle(out[2].outlineId, out[2].level, out[2].title)).toBe(
+      "第三章 编制依据",
+    );
+    expect(formatOutlineTitle(out[3].outlineId, out[3].level, out[3].title)).toBe(
+      "第四章 施工计划",
+    );
   });
 
   it("addChildNode：根级追加的无 outlineId 新节点立即获得连续编号（不再无编号显示）", () => {
@@ -383,7 +393,8 @@ describe("目录树纯逻辑（模块级导出）", () => {
     ];
     // removeNode(tree, "s2")
     const remove = (ns: TreeNode[], key: string): TreeNode[] =>
-      ns.filter((n) => n.key !== key)
+      ns
+        .filter((n) => n.key !== key)
         .map((n) => ({ ...n, children: n.children ? remove(n.children, key) : [] }));
     const out = renumberTreeLocally(remove(tree, "s2"));
     expect(out.map((n) => n.outlineId)).toEqual(["1", "2"]);
@@ -413,8 +424,8 @@ function setupActions(over: Partial<Parameters<typeof OutlineTreeActions>[0]> = 
   const btnByText = (text: string) => {
     // 中文 Button 文本含空格，须空白归一
     const norm = (s: string) => (s || "").replace(/\s+/g, "");
-    return Array.from(utils.container.querySelectorAll("button")).find(
-      (b) => norm(b.textContent || "").includes(norm(text)),
+    return Array.from(utils.container.querySelectorAll("button")).find((b) =>
+      norm(b.textContent || "").includes(norm(text)),
     ) as HTMLButtonElement;
   };
   return { ...utils, props, btnByText };
@@ -507,7 +518,6 @@ describe("模块导出完整性回归锁（防 swap-revert 回退）", () => {
   });
 });
 
-
 // ============================================================
 // 未落库本地节点判定（isUnsavedLocalKey / hasUnsavedLocalNodes）
 // ============================================================
@@ -564,8 +574,6 @@ describe("hasUnsavedLocalNodes（全树递归，覆盖 upload_ 前缀回归）",
     expect(hasUnsavedLocalNodes(undefined as unknown as TreeNode[])).toBe(false);
   });
 });
-
-
 
 // ============================================================
 // 目录树 ↔ outline 结构互转（可测性重构：组件内闭包 → 模块级导出）
@@ -839,8 +847,6 @@ describe("AI 调整目录的 __original_id 贯通（保住已生成正文）", (
   });
 });
 
-
-
 // ============================================================
 // 断线重挂「部分成果」弹窗文案（buildPartialOutlineHint）
 // ============================================================
@@ -879,8 +885,6 @@ describe("buildPartialOutlineHint（部分成果弹窗文案）", () => {
   });
 });
 
-
-
 // ============================================================
 // OutlineNodeBudgetPanel · 选中章节字数预算编辑（2026-09-21 功能缺口补齐）
 // ============================================================
@@ -900,9 +904,7 @@ describe("OutlineNodeBudgetPanel（字数预算编辑面板）", () => {
   });
 
   function setupBudget(node: TreeNode = mkNode(), onBudgetChange = vi.fn()) {
-    const utils = render(
-      <OutlineNodeBudgetPanel node={node} onBudgetChange={onBudgetChange} />,
-    );
+    const utils = render(<OutlineNodeBudgetPanel node={node} onBudgetChange={onBudgetChange} />);
     const input = () =>
       utils.container.querySelector('input[aria-label="字数预算"]') as HTMLInputElement;
     return { ...utils, onBudgetChange, input };
@@ -940,70 +942,65 @@ describe("OutlineNodeBudgetPanel（字数预算编辑面板）", () => {
     expect(low.onBudgetChange).toHaveBeenCalledWith("sec-1", WORD_BUDGET_MIN);
     expect(low.input().value).toBe(String(WORD_BUDGET_MIN));
 
+    // ============================================================
+    // outlineToTreeNode · 临时节点 key 唯一性（2026-09-26 回归锁）
+    // ------------------------------------------------------------
+    // ✅ BUG 修复回归锁：旧实现 key = `upload_${Date.now()}_${i}`，i 只是同父内序号。
+    // 整棵树在同一个 `Date.now()` 毫秒内构造完（性能优化后更快），于是
+    // 「第1章的第1个子节」与「第2章的第1个子节」得到**完全相同的 key**。
+    // 后果：renameInNode / updateNodeFields 按 key 匹配所有节点 → 改一个标题另一个
+    // 跟着改；findSectionById 只返回首个命中 → 改名/删除/字数预算作用在错误章节。
+    // 以下用例钉住「全树 key 唯一」与「同一棵树重复构造 key 稳定」两条不变式。
+    describe("outlineToTreeNode（导入识别 / AI 调整结果 → 本地树）", () => {
+      const RECOG = [
+        { id: "1", title: "第一章", children: [{ id: "1.1", title: "一节" }] },
+        { id: "2", title: "第二章", children: [{ id: "2.1", title: "二节" }] },
+        { id: "3", title: "第三章", children: [{ id: "3.1", title: "三节" }] },
+      ];
 
+      const collect = (nodes: TreeNode[], out: string[] = []): string[] => {
+        for (const n of nodes) {
+          out.push(n.key);
+          if (n.children?.length) collect(n.children, out);
+        }
+        return out;
+      };
 
-// ============================================================
-// outlineToTreeNode · 临时节点 key 唯一性（2026-09-26 回归锁）
-// ------------------------------------------------------------
-// ✅ BUG 修复回归锁：旧实现 key = `upload_${Date.now()}_${i}`，i 只是同父内序号。
-// 整棵树在同一个 `Date.now()` 毫秒内构造完（性能优化后更快），于是
-// 「第1章的第1个子节」与「第2章的第1个子节」得到**完全相同的 key**。
-// 后果：renameInNode / updateNodeFields 按 key 匹配所有节点 → 改一个标题另一个
-// 跟着改；findSectionById 只返回首个命中 → 改名/删除/字数预算作用在错误章节。
-// 以下用例钉住「全树 key 唯一」与「同一棵树重复构造 key 稳定」两条不变式。
-describe("outlineToTreeNode（导入识别 / AI 调整结果 → 本地树）", () => {
-  const RECOG = [
-    { id: "1", title: "第一章", children: [{ id: "1.1", title: "一节" }] },
-    { id: "2", title: "第二章", children: [{ id: "2.1", title: "二节" }] },
-    { id: "3", title: "第三章", children: [{ id: "3.1", title: "三节" }] },
-  ];
+      it("纯数字展示编号一律回落 upload_ 临时 key（绝不充当 DB 主键）", () => {
+        const tree = outlineToTreeNode(RECOG);
+        expect(collect(tree).every((k) => k.startsWith("upload_"))).toBe(true);
+      });
 
-  const collect = (nodes: TreeNode[], out: string[] = []): string[] => {
-    for (const n of nodes) {
-      out.push(n.key);
-      if (n.children?.length) collect(n.children, out);
-    }
-    return out;
-  };
+      it("全树 key 唯一：不同父节点下的同序子节不再撞 key", () => {
+        const keys = collect(outlineToTreeNode(RECOG));
+        expect(keys.length).toBe(6);
+        expect(new Set(keys).size).toBe(6);
+        // 显式钉住历史撞车形态：1.1 与 2.1 的临时 key 必须不同
+        expect(keys[1]).not.toBe(keys[3]);
+      });
 
-  it("纯数字展示编号一律回落 upload_ 临时 key（绝不充当 DB 主键）", () => {
-    const tree = outlineToTreeNode(RECOG);
-    expect(collect(tree).every((k) => k.startsWith("upload_"))).toBe(true);
-  });
+      it("key 稳定：同一棵树重复构造得到同一批 key（位置派生，非时间戳）", () => {
+        const a = collect(outlineToTreeNode(RECOG));
+        const b = collect(outlineToTreeNode(RECOG));
+        expect(a).toEqual(b);
+      });
 
-  it("全树 key 唯一：不同父节点下的同序子节不再撞 key", () => {
-    const keys = collect(outlineToTreeNode(RECOG));
-    expect(keys.length).toBe(6);
-    expect(new Set(keys).size).toBe(6);
-    // 显式钉住历史撞车形态：1.1 与 2.1 的临时 key 必须不同
-    expect(keys[1]).not.toBe(keys[3]);
-  });
+      it("__original_id 优先作 key（AI 调整目录保住正文），新章才回落 upload_", () => {
+        const tree = outlineToTreeNode([
+          { id: "1", title: "工程概况", __original_id: "uuid-a" },
+          { id: "2", title: "新增章" },
+        ]);
+        expect(tree[0].key).toBe("uuid-a");
+        expect(tree[0].__original_id).toBe("uuid-a");
+        expect(tree[1].key.startsWith("upload_")).toBe(true);
+        expect(tree[1].__original_id).toBeUndefined();
+      });
 
-  it("key 稳定：同一棵树重复构造得到同一批 key（位置派生，非时间戳）", () => {
-    const a = collect(outlineToTreeNode(RECOG));
-    const b = collect(outlineToTreeNode(RECOG));
-    expect(a).toEqual(b);
-  });
-
-  it("__original_id 优先作 key（AI 调整目录保住正文），新章才回落 upload_", () => {
-    const tree = outlineToTreeNode([
-      { id: "1", title: "工程概况", __original_id: "uuid-a" },
-      { id: "2", title: "新增章" },
-    ]);
-    expect(tree[0].key).toBe("uuid-a");
-    expect(tree[0].__original_id).toBe("uuid-a");
-    expect(tree[1].key.startsWith("upload_")).toBe(true);
-    expect(tree[1].__original_id).toBeUndefined();
-  });
-
-  it("非纯数字 id（识别结果的 n1/UUID）原样作 key（既有行为不变）", () => {
-    const tree = outlineToTreeNode([{ id: "n1", title: "识别章" }]);
-    expect(tree[0].key).toBe("n1");
-  });
-});
-
-
-
+      it("非纯数字 id（识别结果的 n1/UUID）原样作 key（既有行为不变）", () => {
+        const tree = outlineToTreeNode([{ id: "n1", title: "识别章" }]);
+        expect(tree[0].key).toBe("n1");
+      });
+    });
 
     const high = setupBudget();
     fireEvent.change(high.input(), { target: { value: "999999" } });
@@ -1062,4 +1059,3 @@ describe("outlineToTreeNode（导入识别 / AI 调整结果 → 本地树）", 
     expect(input().value).toBe("1200");
   });
 });
-

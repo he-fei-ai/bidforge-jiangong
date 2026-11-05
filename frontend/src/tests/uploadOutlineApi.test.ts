@@ -94,10 +94,11 @@ describe("uploadOutlineApi.parse 契约", () => {
 
   it("全参数组合：query 顺序稳定 scheme_name → reorganize → project_id", async () => {
     await uploadOutlineApi.parse(makeFile(), {
-      scheme_name: "n", reorganize: true, project_id: "p1",
+      scheme_name: "n",
+      reorganize: true,
+      project_id: "p1",
     });
-    expect(last().url).toBe(
-      "/upload-outline/parse?scheme_name=n&reorganize=true&project_id=p1");
+    expect(last().url).toBe("/upload-outline/parse?scheme_name=n&reorganize=true&project_id=p1");
   });
 });
 

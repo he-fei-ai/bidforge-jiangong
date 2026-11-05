@@ -42,6 +42,7 @@
 
 本文件不引入任何新配置项，也不修改任何既有源码；仅锁定行为契约。
 """
+
 from __future__ import annotations
 
 import inspect
@@ -60,6 +61,7 @@ import pytest
 def _app_available() -> bool:
     try:
         import app.services.numbering  # noqa: F401
+
         return True
     except BaseException:
         return False
@@ -109,17 +111,13 @@ class TestOutlineTreeDepthAndSync:
         node, walked = out[0], []
         for i in range(DEPTH + 1):
             walked.append(node.get("id"))
-            assert node.get("id") == "1." * i + "1", (
-                f"第 {i} 层编号与深度不对齐: {node.get('id')!r}（D-1 多级编号失步）"
-            )
-            assert node.get("level") == i + 1, (
-                f"第 {i} 层 level 与深度不对齐: {node.get('level')!r}（D-2 层级错位）"
-            )
+            assert (
+                node.get("id") == "1." * i + "1"
+            ), f"第 {i} 层编号与深度不对齐: {node.get('id')!r}（D-1 多级编号失步）"
+            assert node.get("level") == i + 1, f"第 {i} 层 level 与深度不对齐: {node.get('level')!r}（D-2 层级错位）"
             if i < DEPTH:
                 node = node["children"][0]
-        assert len(walked) == DEPTH + 1 and all(walked), (
-            f"深层节点存在无编号（递归被截断）: 共遍历 {len(walked)} 层"
-        )
+        assert len(walked) == DEPTH + 1 and all(walked), f"深层节点存在无编号（递归被截断）: 共遍历 {len(walked)} 层"
 
     def test_five_level_tree_level_equals_id_depth(self):
         """D-2：5 级树整体校验 ``level == len(id.split('.'))``。
@@ -135,10 +133,11 @@ class TestOutlineTreeDepthAndSync:
             nodes = []
             for i in range(3):
                 sid = f"{prefix}.{i + 1}"
-                node = {"id": f"r{prefix}_{i}",
-                        "outline_json": json.dumps(
-                            {"id": "旧编号", "confidence": 0.7}),
-                        "children": []}
+                node = {
+                    "id": f"r{prefix}_{i}",
+                    "outline_json": json.dumps({"id": "旧编号", "confidence": 0.7}),
+                    "children": [],
+                }
                 if depth > 1:
                     node["children"] = build(depth - 1, sid)
                 nodes.append(node)
@@ -149,8 +148,7 @@ class TestOutlineTreeDepthAndSync:
         for outline_json, level, _section_id in updates:
             oid = json.loads(outline_json)["id"]
             assert level == len(oid.split(".")), (
-                f"level={level} 与编号深度 {len(oid.split('.'))} 不一致"
-                f"（D-2）: {oid}"
+                f"level={level} 与编号深度 {len(oid.split('.'))} 不一致" f"（D-2）: {oid}"
             )
 
     def test_confidence_preserved_through_five_levels(self):
@@ -158,14 +156,19 @@ class TestOutlineTreeDepthAndSync:
         from app.services.numbering import renumber_section_outline_ids
 
         tree = [
-            {"id": "a", "outline_json": json.dumps(
-                {"id": "9", "confidence": 0.95, "note": "人工标注"}), "children": [
-                {"id": "b", "outline_json": json.dumps(
-                    {"id": "9.1", "confidence": 0.6}), "children": [
-                    {"id": "c", "outline_json": json.dumps({"id": "9.1.1"}),
-                     "children": []},
-                ]},
-            ]},
+            {
+                "id": "a",
+                "outline_json": json.dumps({"id": "9", "confidence": 0.95, "note": "人工标注"}),
+                "children": [
+                    {
+                        "id": "b",
+                        "outline_json": json.dumps({"id": "9.1", "confidence": 0.6}),
+                        "children": [
+                            {"id": "c", "outline_json": json.dumps({"id": "9.1.1"}), "children": []},
+                        ],
+                    },
+                ],
+            },
         ]
         updates = renumber_section_outline_ids(tree)
         assert len(updates) == 3
@@ -189,11 +192,14 @@ class TestRenumbrAfterTitleEdit:
 
     @staticmethod
     def _siblings(n: int) -> list:
-        return [{"id": f"s{i}", "outline_json": json.dumps({"id": "旧"}),
-                 "children": [{"id": f"s{i}_c",
-                               "outline_json": json.dumps({"id": "旧"}),
-                               "children": []}]}
-                for i in range(n)]
+        return [
+            {
+                "id": f"s{i}",
+                "outline_json": json.dumps({"id": "旧"}),
+                "children": [{"id": f"s{i}_c", "outline_json": json.dumps({"id": "旧"}), "children": []}],
+            }
+            for i in range(n)
+        ]
 
     def test_insert_at_front_cascades_all_numbers(self):
         """D-3a：在第 0 位插入新节点，原有节点整体 +1 平移。"""
@@ -207,9 +213,17 @@ class TestRenumbrAfterTitleEdit:
         #    updates 为 DFS 序（父 → 子）。原期望 ids[1:5]==["2","3","4","5"]
         #    漏算了子节点条目，与自己的测试桩矛盾（探针锚定真实输出后修正）。
         #    级联语义不变：新节点成为 "1"，原有节点及其子节点整体 +1 平移。
-        assert ids == ["1", "2", "2.1", "3", "3.1", "4", "4.1", "5", "5.1"], (
-            f"插入后原有节点未级联平移（标题修改后编号未重算）: {ids}"
-        )
+        assert ids == [
+            "1",
+            "2",
+            "2.1",
+            "3",
+            "3.1",
+            "4",
+            "4.1",
+            "5",
+            "5.1",
+        ], f"插入后原有节点未级联平移（标题修改后编号未重算）: {ids}"
 
     def test_delete_middle_cascades_remainder(self):
         """D-3b：删除中间节点，其后节点必须回补（不得断号 / 重复）。"""
@@ -220,9 +234,16 @@ class TestRenumbrAfterTitleEdit:
         ids = [json.loads(u[0])["id"] for u in renumber_section_outline_ids(tree)]
         # ✅ 期望值修正（2026-10-08）：同 D-3a —— 含子节点的 DFS 全序
         #    （每个节点 1 个子节点，共 8 条 updates）。
-        assert ids == ["1", "1.1", "2", "2.1", "3", "3.1", "4", "4.1"], (
-            f"删除中间节点后出现断号或重复（含子节点回补）: {ids}"
-        )
+        assert ids == [
+            "1",
+            "1.1",
+            "2",
+            "2.1",
+            "3",
+            "3.1",
+            "4",
+            "4.1",
+        ], f"删除中间节点后出现断号或重复（含子节点回补）: {ids}"
 
     def test_child_reparent_resyncs_level_and_number(self):
         """D-3c：子节点改挂到另一父节点后，编号与 level 必须按新位置重算。"""
@@ -230,18 +251,15 @@ class TestRenumbrAfterTitleEdit:
 
         a = {"id": "a", "outline_json": json.dumps({"id": "1"}), "children": []}
         b = {"id": "b", "outline_json": json.dumps({"id": "2"}), "children": []}
-        child = {"id": "c", "outline_json": json.dumps({"id": "1.1"}),
-                 "children": []}
+        child = {"id": "c", "outline_json": json.dumps({"id": "1.1"}), "children": []}
         tree = [a, b]
-        a["children"] = []          # 从 a 下摘走
-        b["children"] = [child]     # 挂到 b 下
+        a["children"] = []  # 从 a 下摘走
+        b["children"] = [child]  # 挂到 b 下
         updates = renumber_section_outline_ids(tree)
         by_section = {u[2]: (json.loads(u[0])["id"], u[1]) for u in updates}
         assert by_section["a"] == ("1", 1)
         assert by_section["b"] == ("2", 1)
-        assert by_section["c"] == ("2.1", 2), (
-            f"子节点改挂后编号/层级未同步: {by_section['c']}"
-        )
+        assert by_section["c"] == ("2.1", 2), f"子节点改挂后编号/层级未同步: {by_section['c']}"
 
     def test_invalid_section_number_is_noop_not_crash(self):
         """D-8a：空数据 / 非法章节号不得抛错，必须原样返回。
@@ -264,31 +282,29 @@ class TestRenumbrAfterTitleEdit:
         content = "## 总体安排\n"
         for bad in ("", None, "6fa8-uuid", "abc", -1, 3.5):
             new, changes = renumber_section_body_subheadings(content, bad, 2)
-            assert new == content and changes == [], (
-                f"非法章节号 {bad!r} 未走 no-op 分支"
-            )
+            assert new == content and changes == [], f"非法章节号 {bad!r} 未走 no-op 分支"
 
         # 单一判据护栏：类型不符 / 形态不符 / 0 号段一律非法（不得放宽）
-        for bad in ("", None, "6fa8-uuid", "abc", -1, 3.5, "abc1.2", 0, True,
-                    ["1.2"], {"id": 3}):
+        for bad in ("", None, "6fa8-uuid", "abc", -1, 3.5, "abc1.2", 0, True, ["1.2"], {"id": 3}):
             assert _stored_id_parts(bad) == [], f"非法编号 {bad!r} 未被判非法"
-            assert stored_id_to_prefix(bad) == "" and \
-                stored_id_to_display(bad) == "", (
-                    f"非法编号 {bad!r} 仍被折算出编号（松过滤回流）")
+            assert (
+                stored_id_to_prefix(bad) == "" and stored_id_to_display(bad) == ""
+            ), f"非法编号 {bad!r} 仍被折算出编号（松过滤回流）"
 
         # 合法形态不得因判据收紧而回归
         assert stored_id_to_prefix("3.2") == "2"
         assert stored_id_to_prefix("1") == "1"
-        assert stored_id_to_prefix(3) == "3"          # int 形态（JSON {"id": 3}）
+        assert stored_id_to_prefix(3) == "3"  # int 形态（JSON {"id": 3}）
         assert stored_id_to_display("3.2.4") == "2.4"
         assert stored_id_to_display("1") == "第一章"
 
         # 静态防分叉：两个派生函数不得各自保留判据副本
         import app.services.numbering as nb
-        bodies = inspect.getsource(nb.stored_id_to_display) + \
-            inspect.getsource(nb.stored_id_to_prefix)
-        assert "isdigit" not in bodies and "_DOT_PATH_RE" not in bodies, (
-            "D-8a：判据重新分叉为两份实现（应只走 _stored_id_parts）")
+
+        bodies = inspect.getsource(nb.stored_id_to_display) + inspect.getsource(nb.stored_id_to_prefix)
+        assert (
+            "isdigit" not in bodies and "_DOT_PATH_RE" not in bodies
+        ), "D-8a：判据重新分叉为两份实现（应只走 _stored_id_parts）"
         assert "_stored_id_parts" in bodies, "D-8a：判据唯一出口被摘掉"
 
     def test_empty_tree_and_all_empty_titles(self):
@@ -299,12 +315,9 @@ class TestRenumbrAfterTitleEdit:
         nodes = [{"title": "", "children": None}, {"title": None}, None]
         out = renumber_outline_nodes(nodes)
         kept = [n for n in out if isinstance(n, dict)]
-        assert all(isinstance(n.get("children"), list) for n in kept), (
-            "children 未规范化为 list（空数据分支缺陷）"
-        )
+        assert all(isinstance(n.get("children"), list) for n in kept), "children 未规范化为 list（空数据分支缺陷）"
         # DB 侧：outline_json 为 None 的节点仍需产出重排条目
-        updates = renumber_section_outline_ids(
-            [{"id": "x", "outline_json": None, "children": []}])
+        updates = renumber_section_outline_ids([{"id": "x", "outline_json": None, "children": []}])
         assert len(updates) == 1 and json.loads(updates[0][0])["id"] == "1"
 
 
@@ -323,26 +336,20 @@ class TestNumberingNamespaceIsolation:
     @staticmethod
     def _call(rel_levels, has_children=True):
         from app.routers.export import _compute_subheading
+
         sub: dict = {}
         outs = []
         for rel in rel_levels:
-            text, style = _compute_subheading("2", 2, rel, sub, f"T{rel}",
-                                              sec_id="sec-1",
-                                              has_children=has_children)
+            text, style = _compute_subheading("2", 2, rel, sub, f"T{rel}", sec_id="sec-1", has_children=has_children)
             outs.append((text, style))
         return outs
 
     def test_no_dot_numbering_when_demoting(self):
         """D-7a：降级开启时，rel 1..6 全部输出不得含『数字.数字』点分编号。"""
         outs = self._call([1, 2, 3, 4, 5, 6], has_children=True)
-        dotted = [t for t, _ in outs
-                  if "." in t.split()[0].strip("、）")]
-        assert not dotted, (
-            f"降级后仍产出点分编号（与 DB 子章节命名空间冲突）: {dotted}"
-        )
-        assert all(s in (6, 7) for _, s in outs), (
-            f"降级样式越界（会与章节级 Heading 撞样式）: {[s for _, s in outs]}"
-        )
+        dotted = [t for t, _ in outs if "." in t.split()[0].strip("、）")]
+        assert not dotted, f"降级后仍产出点分编号（与 DB 子章节命名空间冲突）: {dotted}"
+        assert all(s in (6, 7) for _, s in outs), f"降级样式越界（会与章节级 Heading 撞样式）: {[s for _, s in outs]}"
 
     def test_demote_toggle_is_the_single_switch(self):
         """D-7b：同一输入，降级开关两侧输出差异必须完全由该开关决定。"""
@@ -372,15 +379,18 @@ class TestOutlineStepGenerationState:
         import asyncio
 
         import app.services.ai.task_registry as tr
+
         tr._tasks[tid] = {
-            "type": task_type, "status": "running", "scheme_id": "sc1",
-            "pause_event": asyncio.Event(), "stop_event": asyncio.Event(),
+            "type": task_type,
+            "status": "running",
+            "scheme_id": "sc1",
+            "pause_event": asyncio.Event(),
+            "stop_event": asyncio.Event(),
             "child_tasks": set(),
         }
 
     @pytest.mark.asyncio
-    async def test_outline_generation_task_popped_when_db_write_fails(
-            self, db_conn, monkeypatch):
+    async def test_outline_generation_task_popped_when_db_write_fails(self, db_conn, monkeypatch):
         """D-4：outline_generation 终态写库失败时，_tasks 仍必须清理。
 
         与 G12-5 相同的失败模式（``database is locked`` / 镜像损坏），
@@ -397,13 +407,10 @@ class TestOutlineStepGenerationState:
 
         monkeypatch.setattr(tr, "get_conn", _boom)
         await tr.finish_task(tid, "stopped", "用户已停止")
-        assert tid not in tr._tasks, (
-            "目录生成任务终态写库失败后仍残留 _tasks（D-4，与 G12-5 同源）"
-        )
+        assert tid not in tr._tasks, "目录生成任务终态写库失败后仍残留 _tasks（D-4，与 G12-5 同源）"
 
     @pytest.mark.asyncio
-    async def test_outline_generation_task_popped_when_broadcast_fails(
-            self, db_conn, monkeypatch):
+    async def test_outline_generation_task_popped_when_broadcast_fails(self, db_conn, monkeypatch):
         """D-4 广播失败分支：同样不得残留。"""
         import app.services.ai.task_registry as tr
 
@@ -418,8 +425,7 @@ class TestOutlineStepGenerationState:
         assert tid not in tr._tasks
 
     @pytest.mark.asyncio
-    async def test_terminal_persistence_failure_is_idempotent(
-            self, db_conn, monkeypatch):
+    async def test_terminal_persistence_failure_is_idempotent(self, db_conn, monkeypatch):
         """D-4 附属：DB 锁竞争下 finish_task 重复调用必须幂等且不残留。"""
         import app.services.ai.task_registry as tr
 
@@ -434,8 +440,7 @@ class TestOutlineStepGenerationState:
         await tr.finish_task(tid, "failed", "落库失败")  # 重复调用必须幂等
         assert tid not in tr._tasks
 
-    async def test_update_progress_entrypoint_exists_and_fails_soft(
-            self, monkeypatch, caplog):
+    async def test_update_progress_entrypoint_exists_and_fails_soft(self, monkeypatch, caplog):
         """D-5：分步生成进度落库入口必须存在，且写库失败不得向外抛错。
 
         依据：``app/db.py`` 头部注释记录的真实生产事故「task_registry
@@ -463,19 +468,25 @@ class TestOutlineStepGenerationState:
         self._add_task(tid)
         # 按真实签名构造最小调用：必填参数全部补齐，可选用默认值
         sig = inspect.signature(tr.update_progress)
-        dummies = {"task_id": tid, "id": tid, "tid": tid, "progress": 42.0,
-                   "message": "", "event": "progress", "force": True}
+        dummies = {
+            "task_id": tid,
+            "id": tid,
+            "tid": tid,
+            "progress": 42.0,
+            "message": "",
+            "event": "progress",
+            "force": True,
+        }
         kwargs: dict = {}
         for name, p in sig.parameters.items():
             if p.default is not inspect.Parameter.empty:
                 continue
-            if p.kind not in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD,
-                              p.KEYWORD_ONLY):
+            if p.kind not in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY):
                 continue
             if name not in dummies:
                 pytest.fail(
-                    f"D-5：update_progress 出现未预期的必填参数 {name!r}，"
-                    "请补齐测试桩后再验证 fail-soft（禁止跳过）")
+                    f"D-5：update_progress 出现未预期的必填参数 {name!r}，" "请补齐测试桩后再验证 fail-soft（禁止跳过）"
+                )
             kwargs[name] = dummies[name]
         assert "task_id" in kwargs and "progress" in kwargs
 
@@ -489,9 +500,9 @@ class TestOutlineStepGenerationState:
         # fail-soft 三要素：① 不抛（能走到这里即通过）；② 内存态仍更新
         # （SSE 广播链不中断）；③ 失败落结构化 WARNING 可观测。
         assert tr._tasks[tid]["progress"] == 42.0
-        assert any("落库失败" in r.getMessage() for r in caplog.records), (
-            "D-5：进度落库失败未落 WARNING（静默吞掉，排障不可见）"
-        )
+        assert any(
+            "落库失败" in r.getMessage() for r in caplog.records
+        ), "D-5：进度落库失败未落 WARNING（静默吞掉，排障不可见）"
 
 
 # ============================================================
@@ -512,9 +523,14 @@ class TestCrossModuleOutlineHandoff:
     def _outline() -> list:
         return [
             {"id": "1", "title": "工程概况", "level": 1, "children": []},
-            {"id": "2", "title": "编制依据", "level": 1, "children": [
-                {"id": "2.1", "title": "法规依据", "level": 2, "children": []},
-            ]},
+            {
+                "id": "2",
+                "title": "编制依据",
+                "level": 1,
+                "children": [
+                    {"id": "2.1", "title": "法规依据", "level": 2, "children": []},
+                ],
+            },
         ]
 
     def test_valid_outline_result_is_attached(self):
@@ -531,12 +547,18 @@ class TestCrossModuleOutlineHandoff:
         import app.routers.sse_handlers as sh
 
         outline = self._outline()
-        row = {"task_type": "outline_generation",
-               "checkpoint_json": json.dumps({
-                   "kind": "outline_result", "outline": outline,
-                   "event": "completed",
-                   # 内部字段：白名单必须过滤掉，不得回传给前端
-                   "_internal_debug": "必须不出现"})}
+        row = {
+            "task_type": "outline_generation",
+            "checkpoint_json": json.dumps(
+                {
+                    "kind": "outline_result",
+                    "outline": outline,
+                    "event": "completed",
+                    # 内部字段：白名单必须过滤掉，不得回传给前端
+                    "_internal_debug": "必须不出现",
+                }
+            ),
+        }
         result: dict = {}
         sh._attach_checkpoint_result(row, result)
         assert result, (
@@ -544,11 +566,9 @@ class TestCrossModuleOutlineHandoff:
             "跨模块传递丢失 —— _attach_checkpoint_result 正向消费路径未接线。"
         )
         payload = result["outline_result"]
-        assert payload.get("outline") == outline, (
-            "D-6：outline 载荷被改写或压扁，目录结构丢失")
+        assert payload.get("outline") == outline, "D-6：outline 载荷被改写或压扁，目录结构丢失"
         assert payload.get("event") == "completed", "D-6：event 字段被过滤"
-        assert "_internal_debug" not in payload, (
-            "D-6：内部字段未经白名单过滤，直接泄漏给前端")
+        assert "_internal_debug" not in payload, "D-6：内部字段未经白名单过滤，直接泄漏给前端"
 
     def test_cross_kind_checkpoint_is_skipped_by_design(self):
         """D-6 附属：跨 task_type 的 checkpoint 必须跳过（防止「放松」误修）。
@@ -559,30 +579,36 @@ class TestCrossModuleOutlineHandoff:
         """
         import app.routers.sse_handlers as sh
 
-        row = {"task_type": "content_generation",
-               "checkpoint_json": json.dumps({
-                   "kind": "outline_result", "outline": self._outline()})}
+        row = {
+            "task_type": "content_generation",
+            "checkpoint_json": json.dumps({"kind": "outline_result", "outline": self._outline()}),
+        }
         result: dict = {}
         sh._attach_checkpoint_result(row, result)
-        assert result == {}, (
-            "content_generation 任务不应收到 outline_result（跨类型泄漏）")
+        assert result == {}, "content_generation 任务不应收到 outline_result（跨类型泄漏）"
 
     def test_handoff_preserves_titles_and_numbering(self):
         """D-6 附属：附上后的结构必须保留编号形态与节点文本（不得被压扁）。"""
         import app.routers.sse_handlers as sh
 
-        outline = [{"id": "3.2", "title": "进度计划", "level": 2, "children": [
-            {"id": "3.2.1", "title": "总体安排", "level": 3, "children": []}]}]
-        row = {"task_type": "outline_generation",
-               "checkpoint_json": json.dumps(
-                   {"kind": "outline_result", "outline": outline})}
+        outline = [
+            {
+                "id": "3.2",
+                "title": "进度计划",
+                "level": 2,
+                "children": [{"id": "3.2.1", "title": "总体安排", "level": 3, "children": []}],
+            }
+        ]
+        row = {
+            "task_type": "outline_generation",
+            "checkpoint_json": json.dumps({"kind": "outline_result", "outline": outline}),
+        }
         result: dict = {}
         sh._attach_checkpoint_result(row, result)
         # 不再 pytest.skip：正向路径已按合法配对接线，空结果即真缺陷
         assert result, "D-6：正向路径未接线（outline_result 被静默丢弃）"
         # 注意：result 是调用方传入的累积 dict（原地写入），不能再 json.loads
-        assert result["outline_result"]["outline"] == outline, (
-            "D-6：目录结构在传递中被改写")
+        assert result["outline_result"]["outline"] == outline, "D-6：目录结构在传递中被改写"
         blob = json.dumps(result, ensure_ascii=False)
         assert "进度计划" in blob and "总体安排" in blob, "目录节点文本丢失"
         assert "3.2" in blob or "3.2.1" in blob, "目录编号形态丢失"
@@ -618,9 +644,7 @@ class TestEncodingAndLargePayload:
 
         content = "\ufeff## 总体安排\n\n## 资源配置\n"
         new, _ = renumber_section_body_subheadings(content, "3.2", 2, "进度计划")
-        assert "2.1" in new and "2.2" in new, (
-            f"D-8c：BOM 导致标题未被编号（编号未重算）: {new[:80]!r}"
-        )
+        assert "2.1" in new and "2.2" in new, f"D-8c：BOM 导致标题未被编号（编号未重算）: {new[:80]!r}"
 
     def test_crlf_line_endings_keep_changes_line_accurate(self):
         """D-8d：CRLF 换行下 changes[].line 必须仍是准确的 1 基行号。
@@ -633,15 +657,12 @@ class TestEncodingAndLargePayload:
 
         crlf = "## 总体安排\r\n\r\n正文段落。\r\n\r\n## 资源配置\r\n"
         lf = crlf.replace("\r\n", "\n")
-        _, changes_crlf = renumber_section_body_subheadings(
-            crlf, "3.2", 2, "进度计划")
+        _, changes_crlf = renumber_section_body_subheadings(crlf, "3.2", 2, "进度计划")
         _, changes_lf = renumber_section_body_subheadings(lf, "3.2", 2, "进度计划")
         assert len(changes_crlf) == len(changes_lf) == 2, (
-            f"CRLF 与 LF 识别出的标题数不一致: "
-            f"{len(changes_crlf)} vs {len(changes_lf)}"
+            f"CRLF 与 LF 识别出的标题数不一致: " f"{len(changes_crlf)} vs {len(changes_lf)}"
         )
-        assert [c["line"] for c in changes_crlf] == \
-               [c["line"] for c in changes_lf], "CRLF 下行号偏移（D-8d）"
+        assert [c["line"] for c in changes_crlf] == [c["line"] for c in changes_lf], "CRLF 下行号偏移（D-8d）"
 
     def test_fullwidth_digit_heading_is_numbered(self):
         """D-8e：全角数字标题（如『２ 总体安排』）必须能被规范化。
@@ -668,8 +689,7 @@ class TestEncodingAndLargePayload:
         body = ("### 子标题{}\n\n" + "正文段落。" * 80 + "\n\n") * 300
         content = "## 总体安排\n\n" + body
         once, _ = renumber_section_body_subheadings(content, "3.2", 2, "进度计划")
-        twice, changes2 = renumber_section_body_subheadings(
-            once, "3.2", 2, "进度计划")
+        twice, changes2 = renumber_section_body_subheadings(once, "3.2", 2, "进度计划")
         assert twice == once, "超长正文规范化不幂等（二次运行仍在改）"
         assert changes2 == [], f"超长正文二次运行仍有 {len(changes2)} 处改动"
 
@@ -677,15 +697,7 @@ class TestEncodingAndLargePayload:
         """D-8g：围栏内 unicode / 全角标题一律不动（既有护栏的编码变体）。"""
         from app.services.numbering import renumber_section_body_subheadings
 
-        content = (
-            "```markdown\n＃＃ 围栏内全角井号\n## 围栏内标题\n```\n\n"
-            "## 真标题\n"
-        )
+        content = "```markdown\n＃＃ 围栏内全角井号\n## 围栏内标题\n```\n\n" "## 真标题\n"
         new, changes = renumber_section_body_subheadings(content, "3.2", 2, "进度计划")
         assert "＃＃ 围栏内全角井号" in new and "## 围栏内标题" in new
         assert len(changes) == 1
-
-
-
-
-

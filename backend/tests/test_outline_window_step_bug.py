@@ -46,6 +46,7 @@ _merge_k=1 这一档）；一旦用户把 ``outline_chapter_batch_size`` 调大�
 就成了 `'1'`，才确认是桩而非源码。教训：**桩必须锚定真实契约（两种形态都要
 覆盖），而不是只覆盖自己预期的那一种**；一旦断言失败，先证伪桩再指控源码。
 """
+
 import asyncio
 import json
 import re
@@ -58,12 +59,11 @@ import pytest
 async def _seed_long_scheme(db_conn, name="长方案-桩", word_budget=10000) -> str:
     """落一个长方案（word_budget > outline_stepwise_min_words → 走分步链路）。"""
     sid, pid = uuid.uuid4().hex, uuid.uuid4().hex
+    await db_conn.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)", (pid, "测试项目"))
     await db_conn.execute(
-        "INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)", (pid, "测试项目"))
-    await db_conn.execute(
-        "INSERT OR IGNORE INTO schemes (id, project_id, name, word_budget,"
-        " config_json) VALUES (?,?,?,?,?)",
-        (sid, pid, name, word_budget, json.dumps({}, ensure_ascii=False)))
+        "INSERT OR IGNORE INTO schemes (id, project_id, name, word_budget," " config_json) VALUES (?,?,?,?,?)",
+        (sid, pid, name, word_budget, json.dumps({}, ensure_ascii=False)),
+    )
     await db_conn.commit()
     return sid
 
@@ -90,13 +90,12 @@ def _patch_ai(monkeypatch, unit_delay: float = 0.01, total_chapters: int = 6):
     async def fake_collect(messages, validate_fn=None, **kwargs):
         scene = kwargs.get("scene")
         if scene == "outline_level1":
-            outline = [{"title": f"第{i}章", "description": f"desc{i}",
-                        "children": []} for i in range(1, total_chapters + 1)]
-            return ({"outline": outline},
-                    json.dumps({"outline": outline}, ensure_ascii=False))
+            outline = [
+                {"title": f"第{i}章", "description": f"desc{i}", "children": []} for i in range(1, total_chapters + 1)
+            ]
+            return ({"outline": outline}, json.dumps({"outline": outline}, ensure_ascii=False))
         if scene != "outline_sublevel":
-            return ({"passed": True, "suggestions": []},
-                    json.dumps({"passed": True}, ensure_ascii=False))
+            return ({"passed": True, "suggestions": []}, json.dumps({"passed": True}, ensure_ascii=False))
 
         ids: list[int] = []
         # ⚠️ messages 有两种真实形态（与生产契约一致，二者都必须正确识别，
@@ -120,8 +119,7 @@ def _patch_ai(monkeypatch, unit_delay: float = 0.01, total_chapters: int = 6):
         else:
             content = ""
         if content.startswith("CHAPTERS:"):
-            ids = [int(x) for x in content.removeprefix("CHAPTERS:").split(",")
-                   if x.strip()]
+            ids = [int(x) for x in content.removeprefix("CHAPTERS:").split(",") if x.strip()]
         elif content.strip().isdigit():
             ids = [int(content)]
         assert ids, f"无法从单元提示词还原章号: {messages!r:.200}"
@@ -131,14 +129,14 @@ def _patch_ai(monkeypatch, unit_delay: float = 0.01, total_chapters: int = 6):
         return_obj = None
         if content.startswith("CHAPTERS:"):
             # 批量单元 → 按 chapter_id 归位的 {"chapters": [...]} 契约
-            return_obj = {"chapters": [
-                {"chapter_id": str(cid),
-                 "outline": [{"title": f"第{cid}章-小节{cid}.1", "children": []}]}
-                for cid in ids]}
+            return_obj = {
+                "chapters": [
+                    {"chapter_id": str(cid), "outline": [{"title": f"第{cid}章-小节{cid}.1", "children": []}]}
+                    for cid in ids
+                ]
+            }
         else:
-            return_obj = {"outline": [
-                {"title": f"第{cid}章-小节{cid}.1", "children": []}
-                for cid in ids]}
+            return_obj = {"outline": [{"title": f"第{cid}章-小节{cid}.1", "children": []} for cid in ids]}
         return (return_obj, json.dumps(return_obj, ensure_ascii=False))
 
     monkeypatch.setattr(sh, "render", fake_render)
@@ -153,7 +151,7 @@ async def _run_stream(scheme_id, db_conn):
         text = chunk if isinstance(chunk, str) else chunk.decode("utf-8")
         for line in text.splitlines():
             if line.startswith("data: "):
-                out.append(json.loads(line[len("data: "):]))
+                out.append(json.loads(line[len("data: ") :]))
     return out
 
 
@@ -166,25 +164,22 @@ async def _run_stream(scheme_id, db_conn):
 #   ③ _window > _merge_k       —— 验证不是「只要 _merge_k <= _window 就安全」；
 #   ④ 章数非整轮倍数           —— 末轮残余单元不得被上一轮重复覆盖、也不得漏掉。
 GRID = [
-    (1, 1, 5),    # 出厂默认档：两者皆 1（回归基线，旧步进恰好正确）
-    (2, 2, 6),    # 两者相等 + 整轮倍数
-    (2, 3, 7),    # _merge_k > _window + 非整轮倍数
-    (3, 2, 9),    # _window > _merge_k + 整轮倍数
-    (2, 5, 12),   # _merge_k 远大于 _window + 整轮倍数
-    (3, 3, 8),    # 两者相等 + 非整轮倍数
-    (1, 4, 10),   # _window=1 串行 + 大 _merge_k
-    (4, 2, 11),   # _window > _merge_k + 非整轮倍数
+    (1, 1, 5),  # 出厂默认档：两者皆 1（回归基线，旧步进恰好正确）
+    (2, 2, 6),  # 两者相等 + 整轮倍数
+    (2, 3, 7),  # _merge_k > _window + 非整轮倍数
+    (3, 2, 9),  # _window > _merge_k + 整轮倍数
+    (2, 5, 12),  # _merge_k 远大于 _window + 整轮倍数
+    (3, 3, 8),  # 两者相等 + 非整轮倍数
+    (1, 4, 10),  # _window=1 串行 + 大 _merge_k
+    (4, 2, 11),  # _window > _merge_k + 非整轮倍数
 ]
 
 
 class TestWindowStepWithBatchMerge:
     """窗口 × 单元合并下的步进不变量（每章恰好处理一次）。"""
 
-    @pytest.mark.parametrize(
-        "_window,_merge_k,total", GRID,
-        ids=[f"w{w}xk{k}_t{t}" for w, k, t in GRID])
-    async def test_each_chapter_processed_exactly_once(
-            self, db_conn, monkeypatch, _window, _merge_k, total):
+    @pytest.mark.parametrize("_window,_merge_k,total", GRID, ids=[f"w{w}xk{k}_t{t}" for w, k, t in GRID])
+    async def test_each_chapter_processed_exactly_once(self, db_conn, monkeypatch, _window, _merge_k, total):
         """每轮实际覆盖 _window × _merge_k 章，外层步进必须取整轮覆盖量。
 
         旧实现写成 ``range(0, _total, _window)``：当 ``_merge_k == 1`` 时步进
@@ -202,18 +197,18 @@ class TestWindowStepWithBatchMerge:
         events = await _run_stream(sid, db_conn)
         names = [e["event"] for e in events]
         assert names[-1] == "completed", (
-            f"长方案应以 completed 收尾: {names} / "
-            f"{[e.get('message') for e in events if e['event'] == 'error']}")
+            f"长方案应以 completed 收尾: {names} / " f"{[e.get('message') for e in events if e['event'] == 'error']}"
+        )
 
         # 核心断言：每章恰好一次子目录调用（无重复、无漏章）
-        assert sorted(stats["unit_calls"]) == list(range(1, total + 1)), (
-            f"每章恰好一次子目录调用（无重复、无漏章），实际 {stats['unit_calls']}")
+        assert sorted(stats["unit_calls"]) == list(
+            range(1, total + 1)
+        ), f"每章恰好一次子目录调用（无重复、无漏章），实际 {stats['unit_calls']}"
 
         # 交付态：completed 事件的章序必须严格递增且无重复
         done = [e for e in events if e["event"] == "completed"][0]
         titles = [c["title"] for c in done["outline"]]
-        assert titles == [f"第{i}章" for i in range(1, total + 1)], (
-            f"章序必须严格递增且无重复：{titles}")
+        assert titles == [f"第{i}章" for i in range(1, total + 1)], f"章序必须严格递增且无重复：{titles}"
         assert len(titles) == len(set(titles)), f"目录出现重复章节：{titles}"
         assert done.get("failed_chapters", []) == []
 
@@ -228,7 +223,5 @@ class TestWindowStepWithBatchMerge:
         import inspect
 
         src = inspect.getsource(sh.generate_outline)
-        assert "_round_step = max(1, _window) * _merge_k" in src, (
-            "窗口外层步进必须取整轮覆盖量 _window × _merge_k")
-        assert "range(0, _total, _round_step)" in src, (
-            "窗口外层循环必须按 _round_step 步进")
+        assert "_round_step = max(1, _window) * _merge_k" in src, "窗口外层步进必须取整轮覆盖量 _window × _merge_k"
+        assert "range(0, _total, _round_step)" in src, "窗口外层循环必须按 _round_step 步进"

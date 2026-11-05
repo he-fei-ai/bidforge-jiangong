@@ -8,6 +8,7 @@ renumber_sections_after_reorder 构成同表写写竞态。
 
 守卫口径：只拦 running/paused；终态残留不误拦（对齐 G12-4 / G13-2）。
 """
+
 import uuid
 
 import app.db as _appdb
@@ -31,8 +32,7 @@ async def ctx(tmp_path):
     db = await get_conn()
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-                     (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.commit()
     yield db, sid
     await db.execute("DELETE FROM sections WHERE scheme_id=?", (sid,))
@@ -50,8 +50,8 @@ async def _seed_section(db, sid, pid, title="工程概况") -> str:
         "INSERT INTO sections (id, scheme_id, project_id, title, level,"
         " sort_order, status, outline_json, word_budget)"
         " VALUES (?,?,?,?,?,?,?,?,?)",
-        (nid, sid, pid, title, 1, 0, "empty",
-         '{"id": "1", "confidence": 0.9}', 1500))
+        (nid, sid, pid, title, 1, 0, "empty", '{"id": "1", "confidence": 0.9}', 1500),
+    )
     await db.commit()
     return nid
 
@@ -73,8 +73,7 @@ class TestOutlineGuardOnSectionEndpoints:
         tid = await register_task("outline_generation", "", sid)
         try:
             with pytest.raises(HTTPException) as ei:
-                await update_section(
-                    sid, nid, SectionUpdate(title="改名"), db)
+                await update_section(sid, nid, SectionUpdate(title="改名"), db)
             assert ei.value.status_code == 409
         finally:
             await finish_task(tid, "completed")
@@ -109,8 +108,7 @@ class TestOutlineGuardOnSectionEndpoints:
         await finish_task(tid, "completed")
         created = await create_section(sid, SectionCreate(title="新章"), db)
         assert created.get("id")
-        updated = await update_section(
-            sid, nid, SectionUpdate(title="改名后"), db)
+        updated = await update_section(sid, nid, SectionUpdate(title="改名后"), db)
         assert updated.get("ok") is True
         deleted = await delete_section(sid, nid, db)
         assert deleted.get("ok") is True
@@ -119,8 +117,8 @@ class TestOutlineGuardOnSectionEndpoints:
             "INSERT INTO sections (id, scheme_id, project_id, title, level,"
             " sort_order, status, outline_json, word_budget)"
             " VALUES (?,?,?,?,?,?,?,?,?)",
-            (nid2, sid, "proj", "工程概况", 1, 0, "empty",
-             '{"id": "1", "confidence": 0.9}', 1500))
+            (nid2, sid, "proj", "工程概况", 1, 0, "empty", '{"id": "1", "confidence": 0.9}', 1500),
+        )
         await db.commit()
         reordered = await reorder_sections(sid, {"order": [nid2, created["id"]]}, db)
         assert reordered.get("ok") is True

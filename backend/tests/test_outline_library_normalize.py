@@ -5,6 +5,7 @@ update_library / new_version）此前直接落库原始 JSON，未做三级裁�
 导致目录库可能出现 4+ 级节点、标题内嵌编号等脏数据。
 现统一经 normalize_outline_json 收口。
 """
+
 import json
 import uuid
 
@@ -39,8 +40,7 @@ class TestNormalizeOutlineJson:
         assert lv1["title"] == "层级1"
 
     def test_unwraps_dict_payload(self):
-        out = json.loads(normalize_outline_json(
-            {"outline": [{"title": "第一章 工程概况", "children": []}]}))
+        out = json.loads(normalize_outline_json({"outline": [{"title": "第一章 工程概况", "children": []}]}))
         assert out[0]["title"] == "工程概况"
 
     def test_accepts_json_string(self):
@@ -70,14 +70,12 @@ class TestNormalizeOutlineJson:
 class TestSaveAsLibraryNormalizes:
     async def test_stored_outline_is_normalized(self, db_conn):
         from app.routers.upload_outline import save_as_library
-        await db_conn.execute(
-            "INSERT INTO uploaded_outlines (id, file_name, status) VALUES ('u9','z.docx','parsed')")
+
+        await db_conn.execute("INSERT INTO uploaded_outlines (id, file_name, status) VALUES ('u9','z.docx','parsed')")
         await db_conn.commit()
 
-        res = await save_as_library(
-            "u9", {"name": "测试库", "outline": _deep5()}, db_conn)
-        cur = await db_conn.execute(
-            "SELECT outline_json FROM outline_library WHERE id=?", (res["id"],))
+        res = await save_as_library("u9", {"name": "测试库", "outline": _deep5()}, db_conn)
+        cur = await db_conn.execute("SELECT outline_json FROM outline_library WHERE id=?", (res["id"],))
         stored = json.loads((await cur.fetchone())[0])
         assert stored[0]["id"] == "1"
         assert stored[0]["title"] == "层级1"
@@ -87,8 +85,8 @@ class TestSaveAsLibraryNormalizes:
         """PRD 9.2：空目录不得沉淀为目录库。"""
         from app.routers.upload_outline import save_as_library
         from fastapi import HTTPException
-        await db_conn.execute(
-            "INSERT INTO uploaded_outlines (id, file_name, status) VALUES ('u10','z.docx','parsed')")
+
+        await db_conn.execute("INSERT INTO uploaded_outlines (id, file_name, status) VALUES ('u10','z.docx','parsed')")
         await db_conn.commit()
         with pytest.raises(HTTPException) as ei:
             await save_as_library("u10", {"name": "空库", "outline": []}, db_conn)
@@ -97,8 +95,8 @@ class TestSaveAsLibraryNormalizes:
     async def test_all_invalid_nodes_rejected(self, db_conn):
         from app.routers.upload_outline import save_as_library
         from fastapi import HTTPException
-        await db_conn.execute(
-            "INSERT INTO uploaded_outlines (id, file_name, status) VALUES ('u11','z.docx','parsed')")
+
+        await db_conn.execute("INSERT INTO uploaded_outlines (id, file_name, status) VALUES ('u11','z.docx','parsed')")
         await db_conn.commit()
         with pytest.raises(HTTPException) as ei:
             await save_as_library("u11", {"name": "坏库", "outline": ["bad", 1]}, db_conn)
@@ -113,8 +111,8 @@ class TestCreateLibraryNormalizes:
     async def test_create_normalizes_outline_json(self, db_conn):
         from app.models import OutlineLibraryCreate
         from app.routers.outline_library import create_library
-        data = OutlineLibraryCreate(
-            name="库A", outline_json=json.dumps(_deep5(), ensure_ascii=False))
+
+        data = OutlineLibraryCreate(name="库A", outline_json=json.dumps(_deep5(), ensure_ascii=False))
         created = await create_library(data, db_conn)
         stored = json.loads(created["outline_json"])
         assert stored[0]["id"] == "1"
@@ -129,29 +127,27 @@ class TestCreateLibraryNormalizes:
         from app.models import OutlineLibraryCreate
         from app.routers.outline_library import create_library
         from fastapi import HTTPException
+
         for bad in ("[]", "not-json", '{"foo": 1}', '["bad", 1]'):
             with pytest.raises(HTTPException) as ei:
-                await create_library(
-                    OutlineLibraryCreate(name="空库", outline_json=bad), db_conn)
+                await create_library(OutlineLibraryCreate(name="空库", outline_json=bad), db_conn)
             assert ei.value.status_code == 400, bad
-        cur = await db_conn.execute(
-            "SELECT COUNT(*) FROM outline_library WHERE name='空库'")
+        cur = await db_conn.execute("SELECT COUNT(*) FROM outline_library WHERE name='空库'")
         assert (await cur.fetchone())[0] == 0
 
     async def test_new_version_normalizes(self, db_conn):
         from app.routers.outline_library import new_version
+
         lid = str(uuid.uuid4())
         await db_conn.execute(
             "INSERT INTO outline_library (id, name, outline_json, version, review_status)"
             " VALUES (?,?,?,'v1.0','已通过')",
-            (lid, "库B", json.dumps([{"title": "旧", "children": []}], ensure_ascii=False)))
+            (lid, "库B", json.dumps([{"title": "旧", "children": []}], ensure_ascii=False)),
+        )
         await db_conn.commit()
 
-        await new_version(lid, {"version": "v2.0",
-                                "outline_json": json.dumps(_deep5(), ensure_ascii=False)},
-                          db_conn)
-        cur = await db_conn.execute(
-            "SELECT outline_json FROM outline_library WHERE id=?", (lid,))
+        await new_version(lid, {"version": "v2.0", "outline_json": json.dumps(_deep5(), ensure_ascii=False)}, db_conn)
+        cur = await db_conn.execute("SELECT outline_json FROM outline_library WHERE id=?", (lid,))
         stored = json.loads((await cur.fetchone())[0])
         assert stored[0]["id"] == "1"
         assert stored[0]["level"] == 1

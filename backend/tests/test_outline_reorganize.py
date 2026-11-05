@@ -1,4 +1,5 @@
 """目录整理为标准结构服务测试"""
+
 import json
 
 import pytest
@@ -45,10 +46,22 @@ def test_strip_number_matches_canonical():
     from app.services.numbering import strip_outline_numbering
 
     cases = [
-        "十二层平面布置", "三层梁板施工", "十个人", "2层作业平台",
-        "一、编制依据", "第五章 施工计划", "1.2.3钢筋工程", "2024年度计划",
-        "（一）编制说明", "五、安全保障", "1.1 项目概况", "第3章 施工工艺",
-        "1.2.3", "", "   ", "钻孔灌注桩",
+        "十二层平面布置",
+        "三层梁板施工",
+        "十个人",
+        "2层作业平台",
+        "一、编制依据",
+        "第五章 施工计划",
+        "1.2.3钢筋工程",
+        "2024年度计划",
+        "（一）编制说明",
+        "五、安全保障",
+        "1.1 项目概况",
+        "第3章 施工工艺",
+        "1.2.3",
+        "",
+        "   ",
+        "钻孔灌注桩",
     ]
     for c in cases:
         assert _strip_number(c) == strip_outline_numbering(c), f"剥离口径分叉: {c!r}"
@@ -75,14 +88,22 @@ def test_group_of():
 def test_preserves_standard_framework():
     """导入野路子目录，整理后仍保留标准 9 章框架 + 编写要点"""
     raw = [
-        {"title": "一、工程简介", "level": 2, "children": [
-            {"title": "1.1 项目概况", "level": 3, "children": []},
-        ]},
+        {
+            "title": "一、工程简介",
+            "level": 2,
+            "children": [
+                {"title": "1.1 项目概况", "level": 3, "children": []},
+            ],
+        },
         {"title": "二、编制说明", "level": 2, "children": []},
         {"title": "三、施工总体部署", "level": 2, "children": []},
-        {"title": "四、主要施工方法", "level": 2, "children": [
-            {"title": "4.1 钻孔灌注桩", "level": 3, "children": []},
-        ]},
+        {
+            "title": "四、主要施工方法",
+            "level": 2,
+            "children": [
+                {"title": "4.1 钻孔灌注桩", "level": 3, "children": []},
+            ],
+        },
         {"title": "五、安全保障", "level": 2, "children": []},
         {"title": "六、项目信息化管理（BIM）", "level": 2, "children": []},
     ]
@@ -90,8 +111,16 @@ def test_preserves_standard_framework():
     out = res["outline"]
     tops = [n["title"] for n in out]
     # 标准顶层 9 章必须全在（监测方案是子章，不入顶层）
-    for must in ["工程概况", "编制依据", "施工计划", "施工工艺技术",
-                 "施工安全保证措施", "验收要求", "应急处置措施", "计算书及相关图纸"]:
+    for must in [
+        "工程概况",
+        "编制依据",
+        "施工计划",
+        "施工工艺技术",
+        "施工安全保证措施",
+        "验收要求",
+        "应急处置措施",
+        "计算书及相关图纸",
+    ]:
         assert any(must in t for t in tops), f"标准章节缺失: {must}"
     # 监测方案子章保留在施工安全保证措施下
     safety = next(n for n in out if n["title"].startswith("施工安全保证措施"))
@@ -119,11 +148,15 @@ def test_unmatched_children_titles_merged_not_dropped():
     旧实现在 `_reorg_children` 里只保留"能对上标准骨架"的真实子章节，
     标准模板只到三级、用户上传的是四级时，最细一层标题整体消失。
     """
-    raw = [{"title": "第五章 安全保障", "children": [
-        {"title": "5.1 安全技术交底流程", "children": [
-            {"title": "交底记录归档要求", "children": []}]},
-        {"title": "5.2 危险源辨识清单", "children": []},
-    ]}]
+    raw = [
+        {
+            "title": "第五章 安全保障",
+            "children": [
+                {"title": "5.1 安全技术交底流程", "children": [{"title": "交底记录归档要求", "children": []}]},
+                {"title": "5.2 危险源辨识清单", "children": []},
+            ],
+        }
+    ]
     res = reorganize_to_standard(raw, "深基坑工程专项施工方案")
     flat = json.dumps(res["outline"], ensure_ascii=False)
     assert "安全技术交底流程" in flat
@@ -133,10 +166,17 @@ def test_unmatched_children_titles_merged_not_dropped():
 
 def test_reorganize_output_never_exceeds_three_levels():
     """整理结果本身仍受三级约束（深层内容以并入描述的方式保留）。"""
-    raw = [{"title": "第一章 工程概况", "children": [
-        {"title": "1.1 工程基本情况", "children": [
-            {"title": "1.1.1 建设规模", "children": [
-                {"title": "建筑面积", "children": []}]}]}]}]
+    raw = [
+        {
+            "title": "第一章 工程概况",
+            "children": [
+                {
+                    "title": "1.1 工程基本情况",
+                    "children": [{"title": "1.1.1 建设规模", "children": [{"title": "建筑面积", "children": []}]}],
+                }
+            ],
+        }
+    ]
     res = reorganize_to_standard(raw, "深基坑工程专项施工方案")
 
     def depth(nodes, d=1):

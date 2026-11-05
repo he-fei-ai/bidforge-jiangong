@@ -39,6 +39,7 @@ r"""解析提取 / 目录生成模块 · 深度探查修复护栏（2026-09-29 �
    None 加守卫，`document_completeness` 与 `project_documents_index` 两处漏改 →
    命中即 AttributeError → 500（前者是「解析质量体检」入口，后者是前端资料列表数据源）。
 """
+
 import json
 import uuid
 
@@ -84,8 +85,7 @@ class TestSublevelValidateFnNullTitle:
 
     def test_mixed_batch_reports_bad_count(self):
         """混合批：1 个合法 + 2 个缺标题 → 报错且点出数量（便于 AI 修复轮定向重试）。"""
-        errs = _sublevel_validate_fn({
-            "outline": [{"title": "工程概况"}, {"title": None}, {"title": "  "}]})
+        errs = _sublevel_validate_fn({"outline": [{"title": "工程概况"}, {"title": None}, {"title": "  "}]})
         assert errs and "2 个" in errs[0]
 
     def test_null_and_missing_key_equivalent(self):
@@ -101,15 +101,13 @@ class TestMergeUnitResultsNullTitle:
     @staticmethod
     def _run(level1, per):
         full, prior, failed = [], [], []
-        stopped, added = _merge_unit_results(
-            level1, list(range(len(level1))), per, full, prior, failed)
+        stopped, added = _merge_unit_results(level1, list(range(len(level1))), per, full, prior, failed)
         return stopped, added, full, prior, failed
 
     def test_null_sub_title_does_not_raise(self):
         """修复前：`_sub['title'].strip()` 对 None 调方法 → AttributeError。"""
         level1 = [{"title": "工程概况"}]
-        per = [("success", [{"title": None, "description": "d"},
-                            {"title": "工程性质", "description": "d"}])]
+        per = [("success", [{"title": None, "description": "d"}, {"title": "工程性质", "description": "d"}])]
         stopped, added, full, prior, failed = self._run(level1, per)
         assert stopped is False and failed == []
         assert prior == ["工程概况 / 工程性质"], "合法子节保留、null 子节跳过"
@@ -157,12 +155,21 @@ class TestOutlineServicesNullTitle:
 
     def test_clamp_null_descendant_title_not_merged_as_none(self):
         """深度裁剪把后代标题并入父节点 description —— null 不得以 "None" 落入目录树。"""
-        tree = [{"title": "一级", "description": "d", "children": [
-            {"title": "二级", "description": "e", "children": [
-                {"title": None, "description": "x"}, {"title": "细项A"}]}]}]
+        tree = [
+            {
+                "title": "一级",
+                "description": "d",
+                "children": [
+                    {
+                        "title": "二级",
+                        "description": "e",
+                        "children": [{"title": None, "description": "x"}, {"title": "细项A"}],
+                    }
+                ],
+            }
+        ]
         clamp_outline_depth(tree)
-        assert "None" not in json.dumps(tree, ensure_ascii=False), \
-            "null 标题不得以字面量 'None' 落入目录树"
+        assert "None" not in json.dumps(tree, ensure_ascii=False), "null 标题不得以字面量 'None' 落入目录树"
 
     def test_clamp_still_merges_real_deep_titles(self):
         """回归：真实深层标题仍被并入父节点（内容线索不丢）。
@@ -170,10 +177,23 @@ class TestOutlineServicesNullTitle:
         树深 4 级、上限 3 级：第 4 级标题应被并入第 3 级父节点的描述，
         既不留空壳、也不丢标题。
         """
-        tree = [{"title": "一级", "children": [
-            {"title": "二级", "children": [
-                {"title": "三级A", "description": "原有描述",
-                 "children": [{"title": "四级A1"}, {"title": "四级A2"}]}]}]}]
+        tree = [
+            {
+                "title": "一级",
+                "children": [
+                    {
+                        "title": "二级",
+                        "children": [
+                            {
+                                "title": "三级A",
+                                "description": "原有描述",
+                                "children": [{"title": "四级A1"}, {"title": "四级A2"}],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
         clamp_outline_depth(tree)
         l3 = tree[0]["children"][0]["children"][0]
         assert l3.get("children") == [], "超深子树必须被裁剪"
@@ -183,17 +203,19 @@ class TestOutlineServicesNullTitle:
 
     def test_clamp_depth_limit_unchanged(self):
         """回归：目录深度唯一事实源仍为 MAX_OUTLINE_DEPTH。"""
-        tree = [{"title": "1", "children": [
-            {"title": "1.1", "children": [
-                {"title": "1.1.1", "children": [{"title": "1.1.1.1"}]}]}]}]
+        tree = [
+            {
+                "title": "1",
+                "children": [{"title": "1.1", "children": [{"title": "1.1.1", "children": [{"title": "1.1.1.1"}]}]}],
+            }
+        ]
         clamp_outline_depth(tree)
         node = tree[0]
         for _ in range(MAX_OUTLINE_DEPTH - 1):
             assert node["children"], "前三级必须保留"
             node = node["children"][0]
         assert node.get("children") == [], "超深子树必须被裁剪"
-        assert "1.1.1.1" in json.dumps(tree, ensure_ascii=False), \
-            "被裁剪的标题必须并入父节点，不得丢失"
+        assert "1.1.1.1" in json.dumps(tree, ensure_ascii=False), "被裁剪的标题必须并入父节点，不得丢失"
 
 
 # ============================================================
@@ -215,10 +237,13 @@ class TestJsonSentinelMissing:
         assert is_missing_result('{"a": "没有提及", "b": ""}', "json") is True
         assert is_missing_result('{"a": null, "b": "无", "c": []}', "json") is True
 
-    @pytest.mark.parametrize("raw", [
-        '{"项目名称": "某项目", "建筑面积": 1000}',
-        '{"a": 1, "b": [2]}',
-    ])
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            '{"项目名称": "某项目", "建筑面积": 1000}',
+            '{"a": 1, "b": [2]}',
+        ],
+    )
     def test_valid_json_not_missing(self, raw):
         """回归：真实内容不被误判。"""
         assert is_missing_result(raw, "json") is False
@@ -240,26 +265,28 @@ class TestSentinelNotEmittedDownstream:
     """哨兵项不得以「只有标题、没有键值」的空小节进入下游提示词。"""
 
     def test_empty_json_sentinel_skipped(self):
-        items = {"projectBasicInfo": {
-            "status": "success", "output_type": "json",
-            "content": "{}", "label": "项目基本信息"}}
+        items = {
+            "projectBasicInfo": {"status": "success", "output_type": "json", "content": "{}", "label": "项目基本信息"}
+        }
         text = format_downstream_context(items)
-        assert "## 项目基本信息" not in text, \
-            "空壳 JSON 不得产出「只有标题没有内容」的小节"
+        assert "## 项目基本信息" not in text, "空壳 JSON 不得产出「只有标题没有内容」的小节"
 
     def test_valid_json_still_emitted(self):
-        items = {"projectBasicInfo": {
-            "status": "success", "output_type": "json",
-            "content": json.dumps({"项目名称": "某项目"}, ensure_ascii=False),
-            "label": "项目基本信息"}}
+        items = {
+            "projectBasicInfo": {
+                "status": "success",
+                "output_type": "json",
+                "content": json.dumps({"项目名称": "某项目"}, ensure_ascii=False),
+                "label": "项目基本信息",
+            }
+        }
         text = format_downstream_context(items)
         assert "## 项目基本信息" in text and "项目名称" in text
 
     @pytest.mark.parametrize("content", ["{}", '{"a": "没有提及"}'])
     def test_success_status_alone_not_enough_to_green_light(self, content):
         """status='success' 不能单独放行缺失内容（三重假绿的共同前置）。"""
-        assert is_missing_result(content, "json"), \
-            f"status=success 仍必须识别出缺失内容：{content!r}"
+        assert is_missing_result(content, "json"), f"status=success 仍必须识别出缺失内容：{content!r}"
         assert not is_missing_result('{"a": "有值"}', "json")
 
     def test_markdown_sentinel_const_unchanged(self):
@@ -277,28 +304,23 @@ async def scheme_ctx(db_conn):
     db = db_conn
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id, project_id, name) VALUES(?,?,?)", (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id, project_id, name) VALUES(?,?,?)", (sid, pid, "s"))
     l1, l2, l3 = (uuid.uuid4().hex for _ in range(3))
-    for _id, _parent, _title, _lv in ((l1, None, "工程概况", 1),
-                                      (l2, l1, "工程性质", 2),
-                                      (l3, l2, "规模标准", 3)):
+    for _id, _parent, _title, _lv in ((l1, None, "工程概况", 1), (l2, l1, "工程性质", 2), (l3, l2, "规模标准", 3)):
         await db.execute(
             "INSERT INTO sections(id, scheme_id, project_id, parent_id, title,"
             " level, sort_order) VALUES(?,?,?,?,?,?,?)",
-            (_id, sid, pid, _parent, _title, _lv, 1))
+            (_id, sid, pid, _parent, _title, _lv, 1),
+        )
     other_sid = uuid.uuid4().hex
-    await db.execute(
-        "INSERT INTO schemes(id, project_id, name) VALUES(?,?,?)",
-        (other_sid, pid, "s2"))
+    await db.execute("INSERT INTO schemes(id, project_id, name) VALUES(?,?,?)", (other_sid, pid, "s2"))
     other_sec = uuid.uuid4().hex
     await db.execute(
-        "INSERT INTO sections(id, scheme_id, project_id, parent_id, title,"
-        " level, sort_order) VALUES(?,?,?,?,?,?,?)",
-        (other_sec, other_sid, pid, None, "别方案章节", 1, 1))
+        "INSERT INTO sections(id, scheme_id, project_id, parent_id, title," " level, sort_order) VALUES(?,?,?,?,?,?,?)",
+        (other_sec, other_sid, pid, None, "别方案章节", 1, 1),
+    )
     await db.commit()
-    return {"db": db, "scheme_id": sid, "project_id": pid, "l1": l1, "l2": l2,
-            "l3": l3, "other_section_id": other_sec}
+    return {"db": db, "scheme_id": sid, "project_id": pid, "l1": l1, "l2": l2, "l3": l3, "other_section_id": other_sec}
 
 
 @pytest.mark.asyncio
@@ -308,13 +330,11 @@ class TestCreateSectionParentGuard:
     async def test_valid_parent_accepted(self, scheme_ctx):
         from app.models import SectionCreate
         from app.routers.sections import create_section
+
         c = scheme_ctx
-        out = await create_section(c["scheme_id"], SectionCreate(title="工程地点",
-                                                                 parent_id=c["l1"]),
-                                   c["db"])
+        out = await create_section(c["scheme_id"], SectionCreate(title="工程地点", parent_id=c["l1"]), c["db"])
         assert out["id"]
-        cur = await c["db"].execute(
-            "SELECT parent_id, level FROM sections WHERE id=?", (out["id"],))
+        cur = await c["db"].execute("SELECT parent_id, level FROM sections WHERE id=?", (out["id"],))
         row = await cur.fetchone()
         assert row["parent_id"] == c["l1"] and row["level"] == 2
 
@@ -322,55 +342,51 @@ class TestCreateSectionParentGuard:
         """修复前：任意 UUID 原样入库 → 悬挂引用，章节被 _build_tree 当孤儿挂根。"""
         from app.models import SectionCreate
         from app.routers.sections import create_section
+
         c = scheme_ctx
         bogus = uuid.uuid4().hex
         with pytest.raises(HTTPException) as ei:
-            await create_section(c["scheme_id"],
-                                 SectionCreate(title="孤儿", parent_id=bogus), c["db"])
+            await create_section(c["scheme_id"], SectionCreate(title="孤儿", parent_id=bogus), c["db"])
         assert ei.value.status_code == 400
-        cur = await c["db"].execute(
-            "SELECT COUNT(*) AS n FROM sections WHERE parent_id=?", (bogus,))
+        cur = await c["db"].execute("SELECT COUNT(*) AS n FROM sections WHERE parent_id=?", (bogus,))
         assert (await cur.fetchone())["n"] == 0, "不得产生悬挂父引用"
 
     async def test_cross_scheme_parent_rejected(self, scheme_ctx):
         """修复前：跨方案 parent_id 无拦截 → 跨方案篡改 + 悬挂引用。"""
         from app.models import SectionCreate
         from app.routers.sections import create_section
+
         c = scheme_ctx
         with pytest.raises(HTTPException) as ei:
-            await create_section(c["scheme_id"],
-                                 SectionCreate(title="越权",
-                                               parent_id=c["other_section_id"]), c["db"])
+            await create_section(c["scheme_id"], SectionCreate(title="越权", parent_id=c["other_section_id"]), c["db"])
         assert ei.value.status_code == 400
         cur = await c["db"].execute(
-            "SELECT COUNT(*) AS n FROM sections"
-            " WHERE scheme_id=? AND parent_id=?",
-            (c["scheme_id"], c["other_section_id"]))
+            "SELECT COUNT(*) AS n FROM sections" " WHERE scheme_id=? AND parent_id=?",
+            (c["scheme_id"], c["other_section_id"]),
+        )
         assert (await cur.fetchone())["n"] == 0, "跨方案父节点不得被引用"
 
     async def test_depth_limit_enforced(self, scheme_ctx):
         """修复前：三级下新增落库四级，前端按三级渲染 → 数据与展示分叉。"""
         from app.models import SectionCreate
         from app.routers.sections import create_section
+
         c = scheme_ctx
         with pytest.raises(HTTPException) as ei:
-            await create_section(c["scheme_id"],
-                                 SectionCreate(title="越界", parent_id=c["l3"]), c["db"])
+            await create_section(c["scheme_id"], SectionCreate(title="越界", parent_id=c["l3"]), c["db"])
         assert ei.value.status_code == 400
         assert f"{MAX_OUTLINE_DEPTH} 级" in str(ei.value.detail)
-        cur = await c["db"].execute(
-            "SELECT MAX(level) AS m FROM sections WHERE scheme_id=?", (c["scheme_id"],))
-        assert (await cur.fetchone())["m"] == MAX_OUTLINE_DEPTH, \
-            "不得超过目录深度唯一事实源"
+        cur = await c["db"].execute("SELECT MAX(level) AS m FROM sections WHERE scheme_id=?", (c["scheme_id"],))
+        assert (await cur.fetchone())["m"] == MAX_OUTLINE_DEPTH, "不得超过目录深度唯一事实源"
 
     async def test_root_creation_unchanged(self, scheme_ctx):
         """回归：不带 parent_id 的一级新增行为不变（向后兼容）。"""
         from app.models import SectionCreate
         from app.routers.sections import create_section
+
         c = scheme_ctx
         out = await create_section(c["scheme_id"], SectionCreate(title="新章"), c["db"])
-        cur = await c["db"].execute(
-            "SELECT parent_id, level, title FROM sections WHERE id=?", (out["id"],))
+        cur = await c["db"].execute("SELECT parent_id, level, title FROM sections WHERE id=?", (out["id"],))
         row = await cur.fetchone()
         assert row["parent_id"] in (None, "") and row["level"] == 1
         assert row["title"] == "新章"
@@ -379,26 +395,23 @@ class TestCreateSectionParentGuard:
         """回归：标题内嵌编号仍按统一口径剥离（避免落库后二次编号）。"""
         from app.models import SectionCreate
         from app.routers.sections import create_section
+
         c = scheme_ctx
-        out = await create_section(
-            c["scheme_id"], SectionCreate(title="2.1 工程地点",
-                                          parent_id=c["l1"]), c["db"])
-        cur = await c["db"].execute(
-            "SELECT title FROM sections WHERE id=?", (out["id"],))
+        out = await create_section(c["scheme_id"], SectionCreate(title="2.1 工程地点", parent_id=c["l1"]), c["db"])
+        cur = await c["db"].execute("SELECT title FROM sections WHERE id=?", (out["id"],))
         assert (await cur.fetchone())["title"] == "工程地点"
 
     async def test_new_section_gets_numbering(self, scheme_ctx):
         """回归：新建章节立即纳入编号命名空间（不得把 UUID 注入提示词）。"""
         from app.models import SectionCreate
         from app.routers.sections import create_section
+
         c = scheme_ctx
         out = await create_section(c["scheme_id"], SectionCreate(title="新章"), c["db"])
-        cur = await c["db"].execute(
-            "SELECT outline_json FROM sections WHERE id=?", (out["id"],))
+        cur = await c["db"].execute("SELECT outline_json FROM sections WHERE id=?", (out["id"],))
         raw = (await cur.fetchone())["outline_json"] or ""
         assert raw, "新建章节必须立即写入编号"
         assert out["id"] not in raw, "编号列不得写入 UUID 主键"
-
 
 
 # ============================================================
@@ -423,6 +436,7 @@ class TestMoveSectionDepthGuard:
         """修复前：移动成功 + renumber 写成 level=4 → 界面不可见。"""
         from app.models import SectionUpdate
         from app.routers.sections import update_section
+
         c = scheme_ctx
         sid, pid, db = c["scheme_id"], c["project_id"], c["db"]
         # 再造一个一级章节作为被移动者
@@ -430,7 +444,8 @@ class TestMoveSectionDepthGuard:
         await db.execute(
             "INSERT INTO sections(id, scheme_id, project_id, parent_id, title,"
             " level, sort_order) VALUES(?,?,?,?,?,?,?)",
-            (moved, sid, pid, None, "被移动的章", 1, 2))
+            (moved, sid, pid, None, "被移动的章", 1, 2),
+        )
         await db.commit()
 
         with pytest.raises(HTTPException) as ei:
@@ -442,13 +457,15 @@ class TestMoveSectionDepthGuard:
         """被拒的移动不得改动任何 level / 不得新增章节（校验必须在写入前）。"""
         from app.models import SectionUpdate
         from app.routers.sections import update_section
+
         c = scheme_ctx
         sid, db = c["scheme_id"], c["db"]
         moved = uuid.uuid4().hex
         await db.execute(
             "INSERT INTO sections(id, scheme_id, project_id, parent_id, title,"
             " level, sort_order) VALUES(?,?,?,?,?,?,?)",
-            (moved, sid, uuid.uuid4().hex, None, "被移动的章", 1, 2))
+            (moved, sid, uuid.uuid4().hex, None, "被移动的章", 1, 2),
+        )
         await db.commit()
         cur = await db.execute("SELECT id, level FROM sections")
         before = {r["id"]: r["level"] for r in await cur.fetchall()}
@@ -464,17 +481,18 @@ class TestMoveSectionDepthGuard:
         """回归：三级以内的移动必须放行（新校验不得误伤合法操作）。"""
         from app.models import SectionUpdate
         from app.routers.sections import update_section
+
         c = scheme_ctx
         sid, db = c["scheme_id"], c["db"]
         moved = uuid.uuid4().hex
         await db.execute(
             "INSERT INTO sections(id, scheme_id, project_id, parent_id, title,"
             " level, sort_order) VALUES(?,?,?,?,?,?,?)",
-            (moved, sid, uuid.uuid4().hex, None, "被移动的章", 1, 2))
+            (moved, sid, uuid.uuid4().hex, None, "被移动的章", 1, 2),
+        )
         await db.commit()
         await update_section(sid, moved, SectionUpdate(parent_id=c["l2"]), db)
-        cur = await db.execute(
-            "SELECT level, parent_id FROM sections WHERE id=?", (moved,))
+        cur = await db.execute("SELECT level, parent_id FROM sections WHERE id=?", (moved,))
         r = await cur.fetchone()
         assert r["level"] == 3 and r["parent_id"] == c["l2"]
 
@@ -482,6 +500,7 @@ class TestMoveSectionDepthGuard:
         """回归：移到顶层、向浅层移动均不得被误拦。"""
         from app.models import SectionUpdate
         from app.routers.sections import update_section
+
         c = scheme_ctx
         sid, db = c["scheme_id"], c["db"]
         # l3(level 3) 移到顶层 → level 1
@@ -497,14 +516,14 @@ class TestMoveSectionDepthGuard:
         """回归：新增深度校验不得削弱既有的环检测 / 存在性校验。"""
         from app.models import SectionUpdate
         from app.routers.sections import update_section
+
         c = scheme_ctx
         sid, db = c["scheme_id"], c["db"]
         with pytest.raises(HTTPException) as ei:
             await update_section(sid, c["l1"], SectionUpdate(parent_id=c["l2"]), db)
         assert ei.value.status_code == 400 and "循环" in ei.value.detail
         with pytest.raises(HTTPException) as ei2:
-            await update_section(
-                sid, c["l1"], SectionUpdate(parent_id=uuid.uuid4().hex), db)
+            await update_section(sid, c["l1"], SectionUpdate(parent_id=uuid.uuid4().hex), db)
         assert ei2.value.status_code == 400 and "不存在" in ei2.value.detail
 
     async def test_depth_guard_message_single_sourced(self, scheme_ctx):
@@ -512,9 +531,11 @@ class TestMoveSectionDepthGuard:
         import inspect
 
         from app.routers import sections as _sec
+
         assert inspect.getsource(_sec).count("_DEPTH_EXCEEDED_MSG") >= 3
-        assert inspect.getsource(_sec.update_section).count(
-            "_DEPTH_EXCEEDED_MSG") >= 1, "update_section 必须引用共享深度文案"
+        assert (
+            inspect.getsource(_sec.update_section).count("_DEPTH_EXCEEDED_MSG") >= 1
+        ), "update_section 必须引用共享深度文案"
 
 
 # ============================================================
@@ -528,29 +549,30 @@ class TestClearOutlineInvalidatesScanCache:
     async def _seed(db, sid, pid):
         sec = uuid.uuid4().hex
         await db.execute(
-            "INSERT INTO sections(id, scheme_id, project_id, title, level, sort_order)"
-            " VALUES(?,?,?,?,?,?)", (sec, sid, pid, "工程概况", 1, 1))
+            "INSERT INTO sections(id, scheme_id, project_id, title, level, sort_order)" " VALUES(?,?,?,?,?,?)",
+            (sec, sid, pid, "工程概况", 1, 1),
+        )
         await db.execute(
             "INSERT INTO consistency_scan_cache(section_id, scheme_id, content_hash,"
             " context_hash, rows_json) VALUES(?,?,?,?,?)",
-            (sec, sid, "fp1", "ctx1", "[]"))
+            (sec, sid, "fp1", "ctx1", "[]"),
+        )
         await db.commit()
         return sec
 
     @staticmethod
     async def _cache_count(db, sid):
-        cur = await db.execute(
-            "SELECT COUNT(*) AS n FROM consistency_scan_cache WHERE scheme_id=?", (sid,))
+        cur = await db.execute("SELECT COUNT(*) AS n FROM consistency_scan_cache WHERE scheme_id=?", (sid,))
         return (await cur.fetchone())["n"]
 
     async def test_empty_outline_clears_cache(self, db_conn):
         """修复前：空分支漏调 invalidate → 被删章节的扫描行孤儿残留。"""
         from app.routers.sections import save_outline
+
         db = db_conn
         pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
         await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-        await db.execute(
-            "INSERT INTO schemes(id, project_id, name) VALUES(?,?,?)", (sid, pid, "s"))
+        await db.execute("INSERT INTO schemes(id, project_id, name) VALUES(?,?,?)", (sid, pid, "s"))
         await db.commit()
         await self._seed(db, sid, pid)
         assert await self._cache_count(db, sid) == 1
@@ -561,27 +583,27 @@ class TestClearOutlineInvalidatesScanCache:
     async def test_non_empty_outline_still_clears_cache(self, db_conn):
         """回归：非空分支的既有失效行为不被破坏。"""
         from app.routers.sections import save_outline
+
         db = db_conn
         pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
         await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-        await db.execute(
-            "INSERT INTO schemes(id, project_id, name) VALUES(?,?,?)", (sid, pid, "s"))
+        await db.execute("INSERT INTO schemes(id, project_id, name) VALUES(?,?,?)", (sid, pid, "s"))
         await db.commit()
         await self._seed(db, sid, pid)
-        await save_outline(sid, {"outline": [{"title": "工程概况"},
-                                             {"title": "施工方法"}]}, db)
+        await save_outline(sid, {"outline": [{"title": "工程概况"}, {"title": "施工方法"}]}, db)
         assert await self._cache_count(db, sid) == 0
 
     async def test_clear_outline_does_not_touch_other_scheme_cache(self, db_conn):
         """回归：缓存作废必须按 scheme 隔离，不得误删其它方案。"""
         from app.routers.sections import save_outline
+
         db = db_conn
         pid = uuid.uuid4().hex
         await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
         sid, sid2 = uuid.uuid4().hex, uuid.uuid4().hex
         await db.execute(
-            "INSERT INTO schemes(id, project_id, name)"
-            " VALUES(?,?,?), (?, ?, ?)", (sid, pid, "s", sid2, pid, "s2"))
+            "INSERT INTO schemes(id, project_id, name)" " VALUES(?,?,?), (?, ?, ?)", (sid, pid, "s", sid2, pid, "s2")
+        )
         await db.commit()
         await self._seed(db, sid, pid)
         await self._seed(db, sid2, pid)
@@ -598,6 +620,7 @@ async def extract_ctx(db_conn, tmp_path, monkeypatch):
     """提取层物化用例：重定向磁盘存储根 + 建项目/文档行。"""
     import app.routers.global_facts as gf
     import app.services.doc_pipeline.doc_storage as ds
+
     uploads = tmp_path / "uploads"
     docs_root = tmp_path / "projects"
     monkeypatch.setattr(gf, "FACT_UPLOADS_DIR", uploads)
@@ -607,22 +630,21 @@ async def extract_ctx(db_conn, tmp_path, monkeypatch):
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     doc_id = uuid.uuid4().hex
     await db.execute(
-        "INSERT INTO project_documents(id, project_id, file_name, parse_status,"
-        " parsed_markdown) VALUES(?,?,?,?,?)",
-        (doc_id, pid, "a.docx", "success", "正文"))
+        "INSERT INTO project_documents(id, project_id, file_name, parse_status," " parsed_markdown) VALUES(?,?,?,?,?)",
+        (doc_id, pid, "a.docx", "success", "正文"),
+    )
     await db.commit()
     return {"db": db, "project_id": pid, "doc_id": doc_id}
 
 
-def _insert_item(db, project_id, item_id, content, output_type="json",
-                 label="项目基本信息", required=1):
+def _insert_item(db, project_id, item_id, content, output_type="json", label="项目基本信息", required=1):
     """插入一条 bid_analysis_items（sync_extract_layer 的唯一物化来源）。"""
     return db.execute(
         "INSERT INTO bid_analysis_items(id, project_id, item_id, label,"
         " output_type, required, status, content, sort_order, source)"
         " VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (f"{project_id}_{item_id}", project_id, item_id, label,
-         output_type, required, "success", content, 1, "ai"))
+        (f"{project_id}_{item_id}", project_id, item_id, label, output_type, required, "success", content, 1, "ai"),
+    )
 
 
 @pytest.mark.asyncio
@@ -632,56 +654,63 @@ class TestSyncExtractLayerSentinel:
     async def test_empty_json_sentinel_not_materialized(self, extract_ctx):
         """修复前：status='success' 即物化 → 空壳 JSON 计入字段覆盖率。"""
         from app.services.doc_pipeline import pipeline
+
         c = extract_ctx
         await _insert_item(c["db"], c["project_id"], "projectBasicInfo", "{}")
         await c["db"].commit()
-        res = await pipeline.sync_extract_layer(
-            c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
-        assert res["written_types"] == [], \
-            f"失败哨兵不得物化：written_types={res['written_types']}"
-        cur = await c["db"].execute(
-            "SELECT COUNT(*) AS n FROM doc_extractions WHERE doc_id=?",
-            (c["doc_id"],))
+        res = await pipeline.sync_extract_layer(c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
+        assert res["written_types"] == [], f"失败哨兵不得物化：written_types={res['written_types']}"
+        cur = await c["db"].execute("SELECT COUNT(*) AS n FROM doc_extractions WHERE doc_id=?", (c["doc_id"],))
         assert (await cur.fetchone())["n"] == 0, "doc_extractions 不得出现哨兵行"
 
     async def test_valid_json_still_materialized(self, extract_ctx):
         """回归：真实 JSON 提取结果仍正常物化。"""
         from app.services.doc_pipeline import pipeline
+
         c = extract_ctx
-        await _insert_item(c["db"], c["project_id"], "projectBasicInfo",
-                           json.dumps({"project_name": "某项目"}, ensure_ascii=False))
+        await _insert_item(
+            c["db"], c["project_id"], "projectBasicInfo", json.dumps({"project_name": "某项目"}, ensure_ascii=False)
+        )
         await c["db"].commit()
-        res = await pipeline.sync_extract_layer(
-            c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
+        res = await pipeline.sync_extract_layer(c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
         assert "project_info" in res["written_types"]
         cur = await c["db"].execute(
-            "SELECT status FROM doc_extractions"
-            " WHERE doc_id=? AND extract_type='project_info'", (c["doc_id"],))
+            "SELECT status FROM doc_extractions" " WHERE doc_id=? AND extract_type='project_info'", (c["doc_id"],)
+        )
         assert (await cur.fetchone())["status"] == "success"
 
     async def test_markdown_sentinel_not_materialized(self, extract_ctx):
         """回归：markdown 的「未提取到」哨兵同样不得物化（既有语义）。"""
         from app.services.doc_pipeline import pipeline
+
         c = extract_ctx
-        await _insert_item(c["db"], c["project_id"], "overviewParams",
-                           MARKDOWN_MISSING_RESULT, output_type="markdown",
-                           label="工程概况")
+        await _insert_item(
+            c["db"],
+            c["project_id"],
+            "overviewParams",
+            MARKDOWN_MISSING_RESULT,
+            output_type="markdown",
+            label="工程概况",
+        )
         await c["db"].commit()
-        res = await pipeline.sync_extract_layer(
-            c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
+        res = await pipeline.sync_extract_layer(c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
         assert "engineering" not in res["written_types"]
 
     async def test_partial_batch_filters_only_sentinel(self, extract_ctx):
         """一批解析项中混有哨兵时，只过滤哨兵项，有效项照常物化。"""
         from app.services.doc_pipeline import pipeline
+
         c = extract_ctx
         await _insert_item(c["db"], c["project_id"], "projectBasicInfo", "{}")
-        await _insert_item(c["db"], c["project_id"], "schemeBasicInfo",
-                           json.dumps({"project_name": "某项目"}, ensure_ascii=False),
-                           label="方案基本信息")
+        await _insert_item(
+            c["db"],
+            c["project_id"],
+            "schemeBasicInfo",
+            json.dumps({"project_name": "某项目"}, ensure_ascii=False),
+            label="方案基本信息",
+        )
         await c["db"].commit()
-        res = await pipeline.sync_extract_layer(
-            c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
+        res = await pipeline.sync_extract_layer(c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
         assert "project_info" in res["written_types"]
         assert res["item_count"] == 1, f"item_count 应只统计有效项：{res}"
 
@@ -692,82 +721,78 @@ class TestStaleExtractionMarking:
 
     async def _write_then_clear(self, extract_ctx):
         from app.services.doc_pipeline import pipeline
+
         c = extract_ctx
-        await _insert_item(c["db"], c["project_id"], "projectBasicInfo",
-                           json.dumps({"project_name": "某项目"}, ensure_ascii=False))
+        await _insert_item(
+            c["db"], c["project_id"], "projectBasicInfo", json.dumps({"project_name": "某项目"}, ensure_ascii=False)
+        )
         await c["db"].commit()
-        first = await pipeline.sync_extract_layer(
-            c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
+        first = await pipeline.sync_extract_layer(c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
         await c["db"].execute(
             "UPDATE bid_analysis_items SET status='idle', content=''"
             " WHERE project_id=? AND item_id='projectBasicInfo'",
-            (c["project_id"],))
+            (c["project_id"],),
+        )
         await c["db"].commit()
-        second = await pipeline.sync_extract_layer(
-            c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
+        second = await pipeline.sync_extract_layer(c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
         cur = await c["db"].execute(
-            "SELECT status, extract_data FROM doc_extractions"
-            " WHERE doc_id=? AND extract_type='project_info'", (c["doc_id"],))
+            "SELECT status, extract_data FROM doc_extractions" " WHERE doc_id=? AND extract_type='project_info'",
+            (c["doc_id"],),
+        )
         return c, first, second, await cur.fetchone()
 
     async def test_cleared_source_marked_stale(self, extract_ctx):
         """修复前：旧行保持 status='success' + 旧内容 → 过期结果仍报成功。"""
         _, _, _, row = await self._write_then_clear(extract_ctx)
         assert row is not None, "提取层行应保留以便回溯"
-        assert row["status"] == "stale", \
-            f"清空解析项后必须标记陈旧，实际 status={row['status']!r}"
+        assert row["status"] == "stale", f"清空解析项后必须标记陈旧，实际 status={row['status']!r}"
         assert row["extract_data"], "陈旧行必须保留原始数据（不物理删除）"
 
     async def test_stale_extract_status_reflects_empty(self, extract_ctx):
         """修复前：extract_status='pending' 与表内 success 行自相矛盾。"""
         from app.services.doc_pipeline import pipeline
+
         c = extract_ctx
-        await _insert_item(c["db"], c["project_id"], "projectBasicInfo",
-                           json.dumps({"project_name": "某项目"}, ensure_ascii=False))
+        await _insert_item(
+            c["db"], c["project_id"], "projectBasicInfo", json.dumps({"project_name": "某项目"}, ensure_ascii=False)
+        )
         await c["db"].commit()
-        await pipeline.sync_extract_layer(
-            c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
-        await c["db"].execute(
-            "DELETE FROM bid_analysis_items WHERE project_id=?", (c["project_id"],))
+        await pipeline.sync_extract_layer(c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
+        await c["db"].execute("DELETE FROM bid_analysis_items WHERE project_id=?", (c["project_id"],))
         await c["db"].commit()
-        res = await pipeline.sync_extract_layer(
-            c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
-        cur = await c["db"].execute(
-            "SELECT extract_status FROM project_documents WHERE id=?",
-            (c["doc_id"],))
+        res = await pipeline.sync_extract_layer(c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
+        cur = await c["db"].execute("SELECT extract_status FROM project_documents WHERE id=?", (c["doc_id"],))
         assert res["extract_status"] == "pending"
         assert (await cur.fetchone())["extract_status"] == "pending"
 
     async def test_stale_not_counted_in_completeness(self, extract_ctx):
         """修复前：被清空的 project_info 仍以旧内容计入字段覆盖率。"""
         from app.services.doc_pipeline import pipeline
+
         c, _, _, _row = await self._write_then_clear(extract_ctx)
-        report = await pipeline.build_completeness_report(
-            c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
+        report = await pipeline.build_completeness_report(c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
         fc = report.get("field_coverage")
-        assert fc in (None, 0, 0.0), \
-            f"陈旧提取层不得计入字段覆盖率，实际 field_coverage={fc!r}"
+        assert fc in (None, 0, 0.0), f"陈旧提取层不得计入字段覆盖率，实际 field_coverage={fc!r}"
 
     async def test_stale_can_be_revived(self, extract_ctx):
         """回归：重新提取后陈旧行必须恢复为 success（不是单向劣化）。"""
         from app.services.doc_pipeline import pipeline
+
         c = extract_ctx
         await _insert_item(c["db"], c["project_id"], "projectBasicInfo", "{}")
         await c["db"].commit()
-        res = await pipeline.sync_extract_layer(
-            c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
+        res = await pipeline.sync_extract_layer(c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
         assert res["extract_status"] == "pending"
         await c["db"].execute(
             "UPDATE bid_analysis_items SET content=?, status='success'"
             " WHERE project_id=? AND item_id='projectBasicInfo'",
-            (json.dumps({"project_name": "某项目"}, ensure_ascii=False),
-             c["project_id"]))
+            (json.dumps({"project_name": "某项目"}, ensure_ascii=False), c["project_id"]),
+        )
         await c["db"].commit()
-        res2 = await pipeline.sync_extract_layer(
-            c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
+        res2 = await pipeline.sync_extract_layer(c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
         cur = await c["db"].execute(
-            "SELECT status FROM doc_extractions"
-            " WHERE doc_id=? AND extract_type='project_info'", (c["doc_id"],))
+            "SELECT status FROM doc_extractions" " WHERE doc_id=? AND extract_type='project_info'", (c["doc_id"],)
+        )
         assert res2["extract_status"] == "success"
         assert (await cur.fetchone())["status"] == "success"
 
@@ -775,31 +800,33 @@ class TestStaleExtractionMarking:
         """回归：预留类别（boq）历史行不得被陈旧化语义波及。"""
         from app.services.doc_pipeline import doc_storage as ds
         from app.services.doc_pipeline import pipeline
+
         c = extract_ctx
         assert "boq" in ds.RESERVED_EXTRACT_TYPES
         await c["db"].execute(
             "INSERT INTO doc_extractions(extraction_id, doc_id, project_id,"
             " extract_type, extract_data, status) VALUES(?,?,?,?,?,?)",
-            (uuid.uuid4().hex, c["doc_id"], c["project_id"], "boq", "{}", "success"))
+            (uuid.uuid4().hex, c["doc_id"], c["project_id"], "boq", "{}", "success"),
+        )
         await c["db"].commit()
-        await pipeline.sync_extract_layer(
-            c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
+        await pipeline.sync_extract_layer(c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
         cur = await c["db"].execute(
-            "SELECT status FROM doc_extractions"
-            " WHERE doc_id=? AND extract_type='boq'", (c["doc_id"],))
-        assert (await cur.fetchone())["status"] == "success", \
-            "预留类别的历史行不得被标记陈旧"
+            "SELECT status FROM doc_extractions" " WHERE doc_id=? AND extract_type='boq'", (c["doc_id"],)
+        )
+        assert (await cur.fetchone())["status"] == "success", "预留类别的历史行不得被标记陈旧"
 
     async def test_stale_marking_is_idempotent(self, extract_ctx):
         """回归：连续多轮空物化不报错、状态稳定且只有一行。"""
         from app.services.doc_pipeline import pipeline
+
         c, _first, _second, _row = await self._write_then_clear(extract_ctx)
-        third = await pipeline.sync_extract_layer(
-            c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
+        third = await pipeline.sync_extract_layer(c["db"], doc_id=c["doc_id"], project_id=c["project_id"])
         cur = await c["db"].execute(
             "SELECT status, COUNT(*) AS n FROM doc_extractions"
             " WHERE doc_id=? AND extract_type='project_info'"
-            " GROUP BY status", (c["doc_id"],))
+            " GROUP BY status",
+            (c["doc_id"],),
+        )
         rows = await cur.fetchall()
         assert third["extract_status"] == "pending"
         assert len(rows) == 1 and rows[0]["n"] == 1
@@ -845,9 +872,9 @@ async def doc_ctx(db_conn):
     pid, doc_id = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await db.execute(
-        "INSERT INTO project_documents(id, project_id, file_name, parse_status,"
-        " parsed_markdown) VALUES(?,?,?,?,?)",
-        (doc_id, pid, "a.docx", "success", "第一章 工程概况"))
+        "INSERT INTO project_documents(id, project_id, file_name, parse_status," " parsed_markdown) VALUES(?,?,?,?,?)",
+        (doc_id, pid, "a.docx", "success", "第一章 工程概况"),
+    )
     await db.commit()
     return {"db": db, "project_id": pid, "doc_id": doc_id}
 
@@ -859,6 +886,7 @@ class TestDocPipelineRouteR13Guard:
     async def test_completeness_fail_soft_on_none(self, doc_ctx):
         """修复前：`row = await cur.fetchone()` → AttributeError → 500。"""
         from app.routers.doc_pipeline import document_completeness
+
         c = doc_ctx
         fake = _R13Db(c["db"], ["doc_validation_reports"])
         out = await document_completeness(c["doc_id"], True, fake)
@@ -869,13 +897,17 @@ class TestDocPipelineRouteR13Guard:
     async def test_completeness_returns_cache_when_available(self, doc_ctx):
         """回归：缓存命中分支行为不变。"""
         from app.routers.doc_pipeline import document_completeness
+
         c = doc_ctx
         await c["db"].execute(
-            "INSERT INTO doc_validation_reports(id, doc_id, kind, report_json)"
-            " VALUES(?,?,?,?)",
-            (uuid.uuid4().hex, c["doc_id"], "completeness",
-             json.dumps({"quality_score": 0.5, "parsed_pages": 3},
-                        ensure_ascii=False)))
+            "INSERT INTO doc_validation_reports(id, doc_id, kind, report_json)" " VALUES(?,?,?,?)",
+            (
+                uuid.uuid4().hex,
+                c["doc_id"],
+                "completeness",
+                json.dumps({"quality_score": 0.5, "parsed_pages": 3}, ensure_ascii=False),
+            ),
+        )
         await c["db"].commit()
         out = await document_completeness(c["doc_id"], False, c["db"])
         assert out.get("quality_score") == 0.5
@@ -884,6 +916,7 @@ class TestDocPipelineRouteR13Guard:
     async def test_documents_index_fail_soft_on_none(self, doc_ctx):
         """修复前：`[dict(r) for r in await cur.fetchall()]` → AttributeError → 500。"""
         from app.routers.doc_pipeline import project_documents_index
+
         c = doc_ctx
         fake = _R13Db(c["db"], ["project_documents"])
         out = await project_documents_index(c["project_id"], fake)
@@ -894,12 +927,13 @@ class TestDocPipelineRouteR13Guard:
     async def test_documents_index_normal_path_unchanged(self, doc_ctx):
         """回归：正常路径仍返回项目全部文档 + 磁盘索引合并。"""
         from app.routers.doc_pipeline import project_documents_index
+
         c = doc_ctx
         for i in range(2):
             await c["db"].execute(
-                "INSERT INTO project_documents(id, project_id, file_name,"
-                " parse_status) VALUES(?,?,?,?)",
-                (uuid.uuid4().hex, c["project_id"], f"a{i}.docx", "success"))
+                "INSERT INTO project_documents(id, project_id, file_name," " parse_status) VALUES(?,?,?,?)",
+                (uuid.uuid4().hex, c["project_id"], f"a{i}.docx", "success"),
+            )
         await c["db"].commit()
         out = await project_documents_index(c["project_id"], c["db"])
         assert out["count"] == 3 and len(out["documents"]) == 3
@@ -909,25 +943,21 @@ class TestDocPipelineRouteR13Guard:
         """回归：磁盘索引里的孤儿条目（DB 已无行）仍如实回传。"""
         from app.routers.doc_pipeline import project_documents_index
         from app.services.doc_pipeline.doc_storage import update_index
+
         c = doc_ctx
         # 直接写磁盘索引里一个 DB 中不存在的 doc_id，构造孤儿条目
         from app.services.doc_pipeline.doc_storage import update_index
+
         update_index(c["project_id"], {"doc_id": uuid.uuid4().hex})
         out = await project_documents_index(c["project_id"], c["db"])
-        assert len(out["orphan_disk_entries"]) == 1, \
-            "孤儿磁盘条目必须回传，便于人工排查"
+        assert len(out["orphan_disk_entries"]) == 1, "孤儿磁盘条目必须回传，便于人工排查"
 
     async def test_load_doc_none_gives_503(self, doc_ctx):
         """既有守卫回归：`_load_doc` 命中 None 时返回 503（前端可重试）。"""
         from app.routers.doc_pipeline import document_status
+
         c = doc_ctx
         fake = _R13Db(c["db"], ["project_documents"])
         with pytest.raises(HTTPException) as ei:
             await document_status(c["doc_id"], fake)
         assert ei.value.status_code == 503
-
-
-
-
-
-

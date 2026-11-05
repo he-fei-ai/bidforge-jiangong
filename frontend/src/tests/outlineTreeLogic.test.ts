@@ -220,15 +220,15 @@ describe("findFirstContentDescendant", () => {
     expect(findFirstContentDescendant(tree)?.key).toBe("a2");
   });
   it("全无正文返回 null", () => {
-    expect(findFirstContentDescendant(node({ key: "a", children: [node({ key: "a1" })] }))).toBeNull();
+    expect(
+      findFirstContentDescendant(node({ key: "a", children: [node({ key: "a1" })] })),
+    ).toBeNull();
   });
 });
 
 describe("updateNodeFields（不可变更新）", () => {
   it("只改目标节点、返回新数组、不突变原树", () => {
-    const tree: TreeNode[] = [
-      node({ key: "a", children: [node({ key: "a1", word_count: 1 })] }),
-    ];
+    const tree: TreeNode[] = [node({ key: "a", children: [node({ key: "a1", word_count: 1 })] })];
     const next = updateNodeFields(tree, "a1", { word_count: 99, status: "done" });
     expect(next[0].children![0].word_count).toBe(99);
     expect(next[0].children![0].status).toBe("done");
@@ -322,8 +322,11 @@ describe("summarizeUploadOutlineResult（识别结果诊断）", () => {
       file_name: "f.docx",
       reorganized: true,
       reorganize_report: {
-        template: "t", standard_chapters: 5, matched_chapters: 4,
-        kept_standard_skeleton: 1, appended_extras: 0,
+        template: "t",
+        standard_chapters: 5,
+        matched_chapters: 4,
+        kept_standard_skeleton: 1,
+        appended_extras: 0,
       },
     });
     expect(r.ok).toBe(true);

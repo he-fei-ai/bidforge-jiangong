@@ -10,6 +10,7 @@
 4. AI 调用异常 → 502；
 5. 校验函数 _adjust_outline_validate_fn 单元（反例回归）。
 """
+
 import uuid
 
 import app.routers.sections as sec
@@ -21,8 +22,8 @@ async def _seed_scheme(db) -> str:
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await db.execute(
-        "INSERT INTO schemes(id,project_id,name,status) VALUES(?,?,?,?)",
-        (sid, pid, "深基坑专项方案", "目录已确认"))
+        "INSERT INTO schemes(id,project_id,name,status) VALUES(?,?,?,?)", (sid, pid, "深基坑专项方案", "目录已确认")
+    )
     await db.commit()
     return sid
 
@@ -32,7 +33,8 @@ async def _seed_section(db, sid, sec_id, title, level=1, parent_id="", sort=0):
         "INSERT INTO sections (id, scheme_id, parent_id, title, level, status,"
         " word_count, word_budget, review_status, sort_order)"
         " VALUES (?,?,?,?,?, 'generated', 100, 1500, 'pending', ?)",
-        (sec_id, sid, parent_id, title, level, sort))
+        (sec_id, sid, parent_id, title, level, sort),
+    )
     await db.commit()
 
 
@@ -42,6 +44,7 @@ def _patch_ai(monkeypatch, obj):
         if issues:
             raise ValueError("校验不通过: " + ";".join(issues))
         return obj, ""
+
     monkeypatch.setattr(sec, "collect_json_response", fake)
 
 
@@ -76,8 +79,7 @@ async def test_adjust_outline_preserves_ids_and_drops_hallucination(db_conn, mon
 
     ai_obj = {
         "outline": [
-            {"id": "R1", "title": "工程概况（改）",
-             "children": [{"id": "C1", "title": "项目简介"}]},
+            {"id": "R1", "title": "工程概况（改）", "children": [{"id": "C1", "title": "项目简介"}]},
             {"title": "新增：监测方案", "children": []},
             {"id": "FAKE_ID", "title": "幻觉 id 的章"},
         ],
@@ -106,11 +108,15 @@ async def test_adjust_outline_clamps_depth_to_three(db_conn, monkeypatch):
     sid = await _seed_scheme(db_conn)
     await _seed_section(db_conn, sid, "R1", "工程概况", level=1, sort=0)
     deep = {
-        "outline": [{
-            "id": "R1", "title": "工程概况", "children": [{
-                "title": "二级", "children": [{
-                    "title": "三级", "children": [{"title": "四级应被裁掉"}]}]}]
-        }],
+        "outline": [
+            {
+                "id": "R1",
+                "title": "工程概况",
+                "children": [
+                    {"title": "二级", "children": [{"title": "三级", "children": [{"title": "四级应被裁掉"}]}]}
+                ],
+            }
+        ],
         "summary": "x",
     }
     _patch_ai(monkeypatch, deep)
@@ -128,6 +134,7 @@ async def test_adjust_outline_ai_failure_maps_502(db_conn, monkeypatch):
 
     async def boom(messages, validate_fn, **kwargs):
         raise RuntimeError("provider down")
+
     monkeypatch.setattr(sec, "collect_json_response", boom)
 
     with pytest.raises(HTTPException) as ei:
@@ -139,9 +146,7 @@ def test_adjust_outline_validate_fn_unit():
     assert sec._adjust_outline_validate_fn({"outline": []}) != []
     assert sec._adjust_outline_validate_fn({}) != []
     assert sec._adjust_outline_validate_fn({"outline": ["字符串节点"]}) != []
-    assert sec._adjust_outline_validate_fn(
-        {"outline": [{"title": "  "}]}
-    ) != []
+    assert sec._adjust_outline_validate_fn({"outline": [{"title": "  "}]}) != []
     assert sec._adjust_outline_validate_fn({"outline": [{"title": "合格章"}]}) == []
 
 
@@ -165,10 +170,9 @@ class TestAdjustThenSavePreservesContent:
         await _seed_section(db_conn, sid, "R1", "工程概况", level=1, sort=0)
         # 模拟前端提交：id=展示编号、__original_id=真实主键
         await sec._save_outline_to_db(
-            db_conn, sid, [{"id": "1", "__original_id": "R1", "title": "工程概况",
-                            "children": []}])
-        cur = await db_conn.execute(
-            "SELECT id, title FROM sections WHERE scheme_id=?", (sid,))
+            db_conn, sid, [{"id": "1", "__original_id": "R1", "title": "工程概况", "children": []}]
+        )
+        cur = await db_conn.execute("SELECT id, title FROM sections WHERE scheme_id=?", (sid,))
         rows = await cur.fetchall()
         assert len(rows) == 1
         assert rows[0]["id"] == "R1", [dict(r) for r in rows]
@@ -178,25 +182,26 @@ class TestAdjustThenSavePreservesContent:
         sid = await _seed_scheme(db_conn)
         await _seed_section(db_conn, sid, "R1", "工程概况", level=1, sort=0)
         await _seed_section(db_conn, sid, "R2", "施工工艺", level=1, sort=1)
-        await db_conn.execute(
-            "UPDATE sections SET content='工程概况正文,不可丢失' WHERE id='R1'")
-        await db_conn.execute(
-            "UPDATE sections SET content='施工工艺正文,不可丢失' WHERE id='R2'")
+        await db_conn.execute("UPDATE sections SET content='工程概况正文,不可丢失' WHERE id='R1'")
+        await db_conn.execute("UPDATE sections SET content='施工工艺正文,不可丢失' WHERE id='R2'")
         await db_conn.commit()
 
-        _patch_ai(monkeypatch, {
-            "outline": [
-                {"id": "R1", "title": "工程概况（已改名）", "children": []},
-                {"id": "R2", "title": "施工工艺", "children": []},
-            ],
-            "summary": "仅改第一章标题",
-        })
+        _patch_ai(
+            monkeypatch,
+            {
+                "outline": [
+                    {"id": "R1", "title": "工程概况（已改名）", "children": []},
+                    {"id": "R2", "title": "施工工艺", "children": []},
+                ],
+                "summary": "仅改第一章标题",
+            },
+        )
         res = await sec.adjust_outline(sid, {"instruction": "改第一章标题"}, db=db_conn)
         await sec._save_outline_to_db(db_conn, sid, res["outline"])
 
         cur = await db_conn.execute(
-            "SELECT id, title, content FROM sections WHERE scheme_id=? ORDER BY sort_order",
-            (sid,))
+            "SELECT id, title, content FROM sections WHERE scheme_id=? ORDER BY sort_order", (sid,)
+        )
         rows = {r["id"]: dict(r) for r in await cur.fetchall()}
         assert set(rows) == {"R1", "R2"}, rows
         assert rows["R1"]["title"] == "工程概况（已改名）"
@@ -210,19 +215,22 @@ class TestAdjustThenSavePreservesContent:
         await db_conn.execute("UPDATE sections SET content='原有正文' WHERE id='R1'")
         await db_conn.commit()
 
-        _patch_ai(monkeypatch, {
-            "outline": [
-                {"id": "R1", "title": "工程概况", "children": []},
-                {"title": "新增：监测方案", "children": []},
-            ],
-            "summary": "新增一章",
-        })
+        _patch_ai(
+            monkeypatch,
+            {
+                "outline": [
+                    {"id": "R1", "title": "工程概况", "children": []},
+                    {"title": "新增：监测方案", "children": []},
+                ],
+                "summary": "新增一章",
+            },
+        )
         res = await sec.adjust_outline(sid, {"instruction": "新增监测方案章"}, db=db_conn)
         await sec._save_outline_to_db(db_conn, sid, res["outline"])
 
         cur = await db_conn.execute(
-            "SELECT id, title, content FROM sections WHERE scheme_id=? ORDER BY sort_order",
-            (sid,))
+            "SELECT id, title, content FROM sections WHERE scheme_id=? ORDER BY sort_order", (sid,)
+        )
         rows = [dict(r) for r in await cur.fetchall()]
         assert len(rows) == 2
         assert rows[0]["content"] == "原有正文"
@@ -235,10 +243,8 @@ class TestAdjustThenSavePreservesContent:
         await db_conn.execute("UPDATE sections SET content='原有正文' WHERE id='R1'")
         await db_conn.commit()
 
-        await sec._save_outline_to_db(
-            db_conn, sid, [{"id": "R1", "title": "工程概况", "children": []}])
-        cur = await db_conn.execute(
-            "SELECT id, content FROM sections WHERE scheme_id=?", (sid,))
+        await sec._save_outline_to_db(db_conn, sid, [{"id": "R1", "title": "工程概况", "children": []}])
+        cur = await db_conn.execute("SELECT id, content FROM sections WHERE scheme_id=?", (sid,))
         rows = await cur.fetchall()
         assert len(rows) == 1
         assert rows[0]["id"] == "R1"

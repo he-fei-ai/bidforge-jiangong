@@ -18,6 +18,7 @@
    长方案分步路径（word_budget ≥ OUTLINE_STEPWISE_MIN_WORDS，章节最多最易缺章）
    漏挂 —— 前端对长方案永远拿不到质量自检结果。接线契约测试锁定两条路径都必须挂。
 """
+
 import inspect
 
 import app.routers.sse_handlers as sh
@@ -44,12 +45,15 @@ class TestContinuityNumberingParity:
     def test_non_dict_nested_children_do_not_occupy_slots(self):
         # 嵌套层：第一章的 children 中混有非 dict 项，后续合法子节点不得误报
         outline = [
-            {"title": "工程概况", "children": [
-                {"title": "项目简介", "children": []},
-                None,
-                "残片",
-                {"title": "建设条件", "children": []},
-            ]},
+            {
+                "title": "工程概况",
+                "children": [
+                    {"title": "项目简介", "children": []},
+                    None,
+                    "残片",
+                    {"title": "建设条件", "children": []},
+                ],
+            },
             {"title": "编制依据", "children": []},
         ]
         renumber_outline(outline)
@@ -76,14 +80,23 @@ class TestContinuityNumberingParity:
     def test_clean_renumbered_tree_has_no_mismatch(self):
         # 常规干净树（三级）renumber 后连续性应完全通过
         outline = [
-            {"title": "第一章 工程概况", "children": [
-                {"title": "1.1 项目简介", "children": [
-                    {"title": "1.1.1 参建单位", "children": []},
-                ]},
-            ]},
-            {"title": "第二章 编制依据", "children": [
-                {"title": "法规", "children": []},
-            ]},
+            {
+                "title": "第一章 工程概况",
+                "children": [
+                    {
+                        "title": "1.1 项目简介",
+                        "children": [
+                            {"title": "1.1.1 参建单位", "children": []},
+                        ],
+                    },
+                ],
+            },
+            {
+                "title": "第二章 编制依据",
+                "children": [
+                    {"title": "法规", "children": []},
+                ],
+            },
         ]
         renumber_outline(outline)
         rep = check_outline_continuity(outline)

@@ -1,6 +1,7 @@
 import { type GenStats, type SectionLogItem } from "../../utils/contentEvents";
 import { MAX_OUTLINE_DEPTH } from "../../utils/outlineConstants";
 import { statsEqual } from "./statsFormat.ts";
+import type { OutlineNodeInput } from "./workbenchTypes.ts";
 import { Alert, Tag, Tree } from "antd";
 import { memo } from "react";
 
@@ -36,6 +37,40 @@ export type TreeNode = {
   facts_stale?: boolean;
   children?: TreeNode[];
 };
+
+/**
+ * ✅ 2026-11-04 拆分：页面内联 `buildTree` 原位搬到本模块（函数体逐字搬运）。
+ * REST/outline_json 形状 → 渲染树 TreeNode 的唯一映射入口。
+ */
+export function buildTree(nodes: OutlineNodeInput[]): TreeNode[] {
+  return nodes.map((n) => {
+    // ✅ 从 outline_json 里提取后端权威编号（点分路径，如 "1"/"1.1"/"1.1.1"）
+    // 这是目录树编号正确显示的关键 —— UUID 无点号无法解析
+    let outlineId: string | undefined;
+    try {
+      const oj = typeof n.outline_json === "string" ? JSON.parse(n.outline_json) : n.outline_json;
+      if (oj?.id && /^\d+(\.\d+)*$/.test(String(oj.id))) {
+        outlineId = String(oj.id);
+      }
+    } catch {
+      /* ignore */
+    }
+    return {
+      key: n.id as string,
+      title: n.title!,
+      level: n.level!,
+      status: n.status!,
+      word_count: n.word_count || 0,
+      word_budget: n.word_budget || 0,
+      content: n.content,
+      description: n.description || "",
+      outlineId,
+      // ✅ 2026-09-29：事实变更失效标记（后端 _build_tree 读侧派生）
+      facts_stale: !!n.facts_stale,
+      children: n.children ? buildTree(n.children) : [],
+    };
+  });
+}
 
 // SectionLogItem / GenStats 类型已抽离至 utils/contentEvents.ts（与纯函数同源，
 // 供组件级测试独立引用），页面统一从该处导入，避免类型定义双份漂移。
@@ -144,7 +179,10 @@ export function treeNodesWithContent(nodes: TreeNode[]): number {
 export function outlineTreeDepth(nodes: TreeNode[]): number {
   let max = 0;
   let guard = 0;
-  const stack: { node: TreeNode; level: number }[] = (nodes || []).map((n) => ({ node: n, level: 1 }));
+  const stack: { node: TreeNode; level: number }[] = (nodes || []).map((n) => ({
+    node: n,
+    level: 1,
+  }));
   while (stack.length && guard++ < 50000) {
     const { node, level } = stack.pop()!;
     if (level > max) max = level;
@@ -157,7 +195,7 @@ export function outlineTreeDepth(nodes: TreeNode[]): number {
 export function updateNodeFields(
   nodes: TreeNode[],
   key: string,
-  fields: Partial<TreeNode>
+  fields: Partial<TreeNode>,
 ): TreeNode[] {
   return nodes.map((n) => {
     if (n.key === key) return { ...n, ...fields };
@@ -205,7 +243,10 @@ export function countOutline(outline: unknown, depth = 0): number {
   const rows = outline as unknown[] | null | undefined;
   if (!rows?.length) return 0;
   return rows.reduce<number>(
-    (acc, n) => acc + 1 + countOutline((n as OutlineDirtyRow | null | undefined)?.children || [], depth + 1), 0);
+    (acc, n) =>
+      acc + 1 + countOutline((n as OutlineDirtyRow | null | undefined)?.children || [], depth + 1),
+    0,
+  );
 }
 
 /** 把后端「整理为标准结构」报告折算成人话（匹配/补全/补充章节统计） */
@@ -228,7 +269,6 @@ export function describeReorganizeReport(report: unknown): string {
   if (extras > 0) bits.push(`${extras} 章归入「补充章节」`);
   return `已按标准章节骨架整理${tpl}：${bits.join("，")}`;
 }
-
 
 export type UploadOutlineSummary = {
   /** 是否得到可应用的目录（outline 非空）——空结果时绝不替换用户当前目录树 */
@@ -280,10 +320,19 @@ export function summarizeUploadOutlineResult(data: unknown): UploadOutlineSummar
 
   // 空结果：以「不替换目录树」为前提，如实回传后端给出的失败原因
   if (nodeCount === 0) {
-    const warn = typeof d.warning === "string" && d.warning.trim()
-      ? d.warning.trim()
-      : "未识别到目录结构，请检查文件是否为扫描件（需 OCR）或格式是否受支持";
-    return { ok: false, level: "warning", message: warn, notices, outline: [], nodeCount: 0, reorganized };
+    const warn =
+      typeof d.warning === "string" && d.warning.trim()
+        ? d.warning.trim()
+        : "未识别到目录结构，请检查文件是否为扫描件（需 OCR）或格式是否受支持";
+    return {
+      ok: false,
+      level: "warning",
+      message: warn,
+      notices,
+      outline: [],
+      nodeCount: 0,
+      reorganized,
+    };
   }
 
   // 非空但原文被截断（raw_text_truncated / parse_truncated）：仍可用，补充告警
@@ -325,11 +374,7 @@ export function flattenTreeKeys(nodes: TreeNode[]): string[] {
  * - 已在同层首/尾（无相邻 sibling）时返回 null（调用方据此禁用按钮，不触发移动）。
  * 仅交换兄弟顺序、不改层级与父子关系，符合"上下移动章节"语义。
  */
-export function moveSiblingInTree(
-  nodes: TreeNode[],
-  key: string,
-  dir: -1 | 1,
-): TreeNode[] | null {
+export function moveSiblingInTree(nodes: TreeNode[], key: string, dir: -1 | 1): TreeNode[] | null {
   const idx = nodes.findIndex((n) => n.key === key);
   if (idx !== -1) {
     if (idx + dir < 0 || idx + dir >= nodes.length) return null;
@@ -351,7 +396,9 @@ export function moveSiblingInTree(
 /** 检测目录树中是否存在超过 3 级的深层节点（后端落库时会被裁剪合并） */
 export function hasDeepOutlineNodes(nodes: TreeNode[], depth = 1): boolean {
   if (depth > MAX_OUTLINE_DEPTH) return true;
-  return nodes.some((n) => (n.children?.length || 0) > 0 && hasDeepOutlineNodes(n.children!, depth + 1));
+  return nodes.some(
+    (n) => (n.children?.length || 0) > 0 && hasDeepOutlineNodes(n.children!, depth + 1),
+  );
 }
 
 /**
@@ -471,7 +518,11 @@ export function renumberOutline(outline: OutlineRow[], parentKey = ""): OutlineR
  */
 export const _PURE_NUMERIC_ID_RE = /^\d+(?:\.\d+)*$/;
 
-export function outlineToTreeNode(outline: OutlineDirtyRow[], parentPath = "", parentLevel = 0): TreeNode[] {
+export function outlineToTreeNode(
+  outline: OutlineDirtyRow[],
+  parentPath = "",
+  parentLevel = 0,
+): TreeNode[] {
   return (outline || []).map((n, i) => {
     const level = n.level || parentLevel + 1;
     const outlineId = parentPath ? `${parentPath}.${i + 1}` : String(i + 1);
@@ -480,8 +531,7 @@ export function outlineToTreeNode(outline: OutlineDirtyRow[], parentPath = "", p
     //    编号而非主键 —— 后端 renumber 的产物必然落在此形态，必须走 upload_ 分支。
     const rawId = n.id == null ? "" : String(n.id);
     const isNumericId = _PURE_NUMERIC_ID_RE.test(rawId);
-    const key = n.__original_id
-      || (rawId && !isNumericId ? rawId : `upload_${outlineId}`);
+    const key = n.__original_id || (rawId && !isNumericId ? rawId : `upload_${outlineId}`);
     return {
       key,
       // 透传 __original_id，供 treeToOutline 原样回传给后端匹配正文
@@ -493,7 +543,9 @@ export function outlineToTreeNode(outline: OutlineDirtyRow[], parentPath = "", p
       word_budget: n.word_budget || 1200,
       description: n.description || "",
       outlineId,
-      children: hasChildren ? outlineToTreeNode(n.children as OutlineDirtyRow[], outlineId, level) : [],
+      children: hasChildren
+        ? outlineToTreeNode(n.children as OutlineDirtyRow[], outlineId, level)
+        : [],
     };
   });
 }
@@ -502,7 +554,11 @@ export function outlineToTreeNode(outline: OutlineDirtyRow[], parentPath = "", p
  * 本地重算展示用编号（outlineId/level）：拖拽/移动后即时刷新，
  * 仅改展示字段，不动 key 与正文数据。
  */
-export function renumberTreeLocally(nodes: TreeNode[], parentPath = "", parentLevel = 0): TreeNode[] {
+export function renumberTreeLocally(
+  nodes: TreeNode[],
+  parentPath = "",
+  parentLevel = 0,
+): TreeNode[] {
   return nodes.map((n, i) => {
     const level = parentLevel + 1;
     const outlineId = parentPath ? `${parentPath}.${i + 1}` : String(i + 1);
@@ -561,7 +617,6 @@ export function buildPartialOutlineHint(opts: {
     tone: isErr ? "warning" : "info",
   };
 }
-
 
 export function findSectionById(nodes: TreeNode[], key: string): TreeNode | null {
   for (const n of nodes) {

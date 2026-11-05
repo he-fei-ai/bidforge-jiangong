@@ -15,6 +15,7 @@
 | D-9 | 前序章节上下文按字符硬截断（半截标题）且保留最早内容 | TestJoinTailBudget |
 | D-10 | 客户端断开（GeneratorExit）不写 checkpoint → 部分成果确定性丢失 | TestPartialCheckpoint |
 """
+
 import json
 import time
 
@@ -37,8 +38,14 @@ class TestOutlineEta:
         「按阶段预期耗时外推」整段不可达 → 开局永远没有「预计剩余」。
         """
         now = _now()
-        st = {"phase": "draft", "started_at": now - 30, "phase_started_at": now - 30,
-              "chapter_started_at": now - 30, "sub_total": 0, "sub_done": 0}
+        st = {
+            "phase": "draft",
+            "started_at": now - 30,
+            "phase_started_at": now - 30,
+            "chapter_started_at": now - 30,
+            "sub_total": 0,
+            "sub_done": 0,
+        }
         eta = sh._snapshot_outline_stats(st)["eta_ms"]
         assert eta is not None, "短方案链路必须给出阶段剩余时间"
         # 已耗时 30s、预期 55s → 剩余约 25s
@@ -51,39 +58,69 @@ class TestOutlineEta:
         共 10 章。旧口径 600/2×8 = 2400s；新口径 200/2×8 = 800s。
         """
         now = _now()
-        st = {"phase": "sublevels", "started_at": now - 600, "phase_started_at": now - 200,
-              "chapter_started_at": now, "sub_started_at": now - 200,
-              "sub_total": 10, "sub_done": 2}
+        st = {
+            "phase": "sublevels",
+            "started_at": now - 600,
+            "phase_started_at": now - 200,
+            "chapter_started_at": now,
+            "sub_started_at": now - 200,
+            "sub_total": 10,
+            "sub_done": 2,
+        }
         eta = sh._snapshot_outline_stats(st)["eta_ms"]
         assert eta == pytest.approx(800_000, rel=0.05)
 
     def test_stepwise_eta_counts_current_chapter_partial(self):
         """进行中章节的已投入时间应减小 ETA（与进度条同源）。"""
         now = _now()
-        base = {"phase": "sublevels", "started_at": now - 100, "phase_started_at": now - 100,
-                "sub_started_at": now - 100, "sub_total": 10, "sub_done": 2}
+        base = {
+            "phase": "sublevels",
+            "started_at": now - 100,
+            "phase_started_at": now - 100,
+            "sub_started_at": now - 100,
+            "sub_total": 10,
+            "sub_done": 2,
+        }
         idle = sh._snapshot_outline_stats({**base, "chapter_started_at": now})["eta_ms"]
-        working = sh._snapshot_outline_stats(
-            {**base, "chapter_started_at": now - sh.OUTLINE_CHAPTER_EXPECT})["eta_ms"]
+        working = sh._snapshot_outline_stats({**base, "chapter_started_at": now - sh.OUTLINE_CHAPTER_EXPECT})["eta_ms"]
         assert working < idle
 
     def test_eta_present_during_review_phase(self):
         """✅ D-3：审核/修复阶段（章节已完成）仍有 ETA，不再返回 None。"""
         now = _now()
-        st = {"phase": "review", "started_at": now, "phase_started_at": now,
-              "chapter_started_at": now, "sub_total": 5, "sub_done": 5}
+        st = {
+            "phase": "review",
+            "started_at": now,
+            "phase_started_at": now,
+            "chapter_started_at": now,
+            "sub_total": 5,
+            "sub_done": 5,
+        }
         assert sh._snapshot_outline_stats(st)["eta_ms"] is not None
 
     def test_eta_none_when_progress_complete(self):
         now = _now()
-        st = {"phase": "fix", "started_at": now, "phase_started_at": now,
-              "chapter_started_at": now, "sub_total": 0, "sub_done": 0, "last_p": 1.0}
+        st = {
+            "phase": "fix",
+            "started_at": now,
+            "phase_started_at": now,
+            "chapter_started_at": now,
+            "sub_total": 0,
+            "sub_done": 0,
+            "last_p": 1.0,
+        }
         assert sh._snapshot_outline_stats(st)["eta_ms"] is None
 
     def test_eta_never_raises_on_dirty_input(self):
-        dirty = {"phase": "sublevels", "started_at": "bad", "phase_started_at": None,
-                 "chapter_started_at": "x", "sub_started_at": "y",
-                 "sub_total": "7", "sub_done": "3"}
+        dirty = {
+            "phase": "sublevels",
+            "started_at": "bad",
+            "phase_started_at": None,
+            "chapter_started_at": "x",
+            "sub_started_at": "y",
+            "sub_total": "7",
+            "sub_done": "3",
+        }
         assert isinstance(sh._snapshot_outline_stats(dirty), dict)
 
 
@@ -119,23 +156,44 @@ class TestMonotonicPush:
         """✅ D-5：sublevels 的 force=0.3 之后，第 1 章完成时模型折算值 ≈0.295，
         旧实现把该值直接写进 progress 事件 → 前端进度条从 30% 倒退到 29%。"""
         now = _now()
-        st = {"phase": "sublevels", "phase_started_at": now, "chapter_started_at": now,
-              "started_at": now, "sub_total": 10, "sub_done": 1, "last_p": 0.3}
+        st = {
+            "phase": "sublevels",
+            "phase_started_at": now,
+            "chapter_started_at": now,
+            "started_at": now,
+            "sub_total": 10,
+            "sub_done": 1,
+            "last_p": 0.3,
+        }
         assert sh._outline_push_value(st) == 0.3
         assert st["last_p"] == 0.3
 
     def test_takes_larger_value_and_updates_last_p(self):
         now = _now()
-        st = {"phase": "sublevels", "phase_started_at": now, "chapter_started_at": now,
-              "started_at": now, "sub_total": 10, "sub_done": 9, "last_p": 0.3}
+        st = {
+            "phase": "sublevels",
+            "phase_started_at": now,
+            "chapter_started_at": now,
+            "started_at": now,
+            "sub_total": 10,
+            "sub_done": 9,
+            "last_p": 0.3,
+        }
         p = sh._outline_push_value(st)
         assert p > 0.3
         assert st["last_p"] == p
 
     def test_never_exceeds_one(self):
         now = _now()
-        st = {"phase": "fix", "phase_started_at": now, "chapter_started_at": now,
-              "started_at": now, "sub_total": 1, "sub_done": 1, "last_p": 0.99}
+        st = {
+            "phase": "fix",
+            "phase_started_at": now,
+            "chapter_started_at": now,
+            "started_at": now,
+            "sub_total": 1,
+            "sub_done": 1,
+            "last_p": 0.99,
+        }
         assert sh._outline_push_value(st) <= 1.0
 
 
@@ -156,9 +214,9 @@ class TestExpectCalibration:
         st = {}
         sh._calibrate_outline_expect(st, "draft", 300.0)
         v = st["stage_expect"]["draft"]
-        assert 55.0 < v < 300.0                      # 朝实测值移动
+        assert 55.0 < v < 300.0  # 朝实测值移动
         assert v == pytest.approx(0.7 * 55.0 + 0.3 * 300.0, rel=1e-6)
-        sh._calibrate_outline_expect(st, "draft", 10 ** 6)   # 极端样本被钳制
+        sh._calibrate_outline_expect(st, "draft", 10**6)  # 极端样本被钳制
         assert st["stage_expect"]["draft"] <= sh._OUTLINE_EXPECT_MAX
 
     def test_tiny_sample_is_ignored(self):
@@ -188,13 +246,20 @@ class TestExpectCalibration:
     def test_progress_still_monotonic_across_calibrated_transition(self):
         """校准改变了 expect，但阶段内取值恒定 ⇒ 跨阶段进度仍单调不减。"""
         now = _now()
-        st = {"phase": "level1", "phase_started_at": now - 20, "chapter_started_at": now,
-              "started_at": now - 20, "sub_total": 0, "sub_done": 0, "last_p": 0.0}
+        st = {
+            "phase": "level1",
+            "phase_started_at": now - 20,
+            "chapter_started_at": now,
+            "started_at": now - 20,
+            "sub_total": 0,
+            "sub_done": 0,
+            "last_p": 0.0,
+        }
         vals = [sh._outline_push_value(st)]
-        for elapsed in (1.0, 5.0, 30.0):          # level1 阶段内推进
+        for elapsed in (1.0, 5.0, 30.0):  # level1 阶段内推进
             st["phase_started_at"] = now - elapsed
             vals.append(sh._outline_push_value(st))
-        sh._advance_outline_phase(st, "sublevels")   # 生产写法：force=0.3 的切换
+        sh._advance_outline_phase(st, "sublevels")  # 生产写法：force=0.3 的切换
         st["sub_total"] = 4
         for done in (1, 2, 3, 4):
             st["sub_done"] = done
@@ -209,33 +274,45 @@ class TestExpectCalibration:
 class TestCompactOutlineJson:
     @staticmethod
     def _outline(n=10):
-        return [{
-            "id": str(i), "level": 1, "title": f"第{i}章", "description": "说明" * 60,
-            "children": [{"id": f"{i}.1", "level": 2, "title": "小节",
-                          "description": "d", "children": []}],
-        } for i in range(1, n + 1)]
+        return [
+            {
+                "id": str(i),
+                "level": 1,
+                "title": f"第{i}章",
+                "description": "说明" * 60,
+                "children": [{"id": f"{i}.1", "level": 2, "title": "小节", "description": "d", "children": []}],
+            }
+            for i in range(1, n + 1)
+        ]
 
     def test_strips_noise_and_stays_valid_json(self):
         node = json.loads(sh._compact_outline_json(self._outline()))["outline"][0]
         assert "id" not in node and "level" not in node
         assert node["title"] == "第1章"
         assert "children" in node
-        assert "children" not in node["children"][0]   # 空 children 不输出
-        assert len(node["description"]) == 80          # 描述被截断
+        assert "children" not in node["children"][0]  # 空 children 不输出
+        assert len(node["description"]) == 80  # 描述被截断
 
     def test_much_smaller_than_raw_dumps(self):
         """✅ D-7：压缩只删「对模型无用的字段」，实测约为原 JSON 的 0.63~0.66。
 
         旧实现把完整目录 JSON 塞进修复提示词，长方案 1200 节点可达十万字符级。
         """
-        raw = self._outline(30)          # 长描述场景（截断收益最大）
+        raw = self._outline(30)  # 长描述场景（截断收益最大）
         assert len(sh._compact_outline_json(raw)) < len(json.dumps(raw, ensure_ascii=False)) * 0.7
-        short = [{"id": str(i), "level": 1, "title": f"第{i}章", "description": "说明" * 15,
-                  "children": [{"id": f"{i}.1", "level": 2, "title": "小节标题",
-                                "description": "说明若干字", "children": []}]}
-                 for i in range(1, 31)]
-        ratio = (len(sh._compact_outline_json(short))
-                 / len(json.dumps(short, ensure_ascii=False)))
+        short = [
+            {
+                "id": str(i),
+                "level": 1,
+                "title": f"第{i}章",
+                "description": "说明" * 15,
+                "children": [
+                    {"id": f"{i}.1", "level": 2, "title": "小节标题", "description": "说明若干字", "children": []}
+                ],
+            }
+            for i in range(1, 31)
+        ]
+        ratio = len(sh._compact_outline_json(short)) / len(json.dumps(short, ensure_ascii=False))
         assert ratio < 0.75, f"压缩比 {ratio:.3f} 高于预期"
 
     def test_dirty_nodes_do_not_raise(self):
@@ -281,7 +358,7 @@ class TestJoinTailBudget:
         items = [f"第{i}章 / 小节标题{i}" for i in range(1, 21)]
         out = sh._join_tail_budget(items, 60)
         assert len(out) <= 60
-        assert "第20章" in out                 # 最近的章节被保留
+        assert "第20章" in out  # 最近的章节被保留
         assert "第1章 / 小节标题1" not in out
 
     def test_never_cuts_a_title_in_half(self):
@@ -305,6 +382,7 @@ class TestPartialCheckpoint:
     @pytest.fixture
     async def ctx(self, tmp_path):
         import app.db as _appdb
+
         _appdb.DB_PATH = tmp_path / "audit.sqlite"
         await _appdb.init_db()
         yield _appdb
@@ -312,9 +390,9 @@ class TestPartialCheckpoint:
 
     async def test_partial_outline_is_recoverable(self, ctx):
         from app.services.ai.task_registry import finish_task, register_task
+
         tid = await register_task("outline_generation", "p", "s")
-        outline = [{"title": "工程概况",
-                    "children": [{"title": "现场条件", "children": []}]}]
+        outline = [{"title": "工程概况", "children": [{"title": "现场条件", "children": []}]}]
         assert await sh._checkpoint_partial_outline(tid, outline, ["第2章"]) is True
         ckpt = await sh._load_outline_checkpoint(tid)
         assert ckpt is not None and ckpt["kind"] == "outline_result"
@@ -325,6 +403,7 @@ class TestPartialCheckpoint:
 
     async def test_empty_results_write_nothing(self, ctx):
         from app.services.ai.task_registry import finish_task, register_task
+
         tid = await register_task("outline_generation", "p", "s")
         assert await sh._checkpoint_partial_outline(tid, [], []) is False
         assert await sh._load_outline_checkpoint(tid) is None
@@ -333,6 +412,7 @@ class TestPartialCheckpoint:
     async def test_failed_chapters_alone_are_still_saved(self, ctx):
         """只有失败清单、没有目录时也要落库（前端可提示"哪几章失败"）。"""
         from app.services.ai.task_registry import finish_task, register_task
+
         tid = await register_task("outline_generation", "p", "s")
         assert await sh._checkpoint_partial_outline(tid, [], ["第1章"]) is True
         ckpt = await sh._load_outline_checkpoint(tid)

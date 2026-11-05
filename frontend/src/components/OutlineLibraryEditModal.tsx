@@ -1,9 +1,33 @@
 import { useState, useEffect, useCallback } from "react";
-import {App, Modal, Form, Input, Select, Tree, Button, Space, message,
-  Card, Tag, Empty, Tooltip, Upload, Typography, Tabs, Alert, Popconfirm,} from "antd";
 import {
-  CaretRightOutlined, StopOutlined, UploadOutlined, EditOutlined,
-  SaveOutlined, PlusOutlined, ArrowUpOutlined, ArrowDownOutlined,
+  App,
+  Modal,
+  Form,
+  Input,
+  Select,
+  Tree,
+  Button,
+  Space,
+  message,
+  Card,
+  Tag,
+  Empty,
+  Tooltip,
+  Upload,
+  Typography,
+  Tabs,
+  Alert,
+  Popconfirm,
+} from "antd";
+import {
+  CaretRightOutlined,
+  StopOutlined,
+  UploadOutlined,
+  EditOutlined,
+  SaveOutlined,
+  PlusOutlined,
+  ArrowUpOutlined,
+  ArrowDownOutlined,
 } from "@ant-design/icons";
 import { outlineLibraryApi, uploadOutlineApi } from "../api";
 // ✅ R72（2026-10-12）：复用工作台导出的「识别结果诊断」纯函数（单一事实口径）。
@@ -14,7 +38,12 @@ import { outlineLibraryApi, uploadOutlineApi } from "../api";
 //    （SchemeWorkbenchPage 不 import 本弹窗 → 无循环依赖；测试也从同一页面取该函数）
 import { summarizeUploadOutlineResult } from "../pages/SchemeWorkbenchPage";
 import { useAntdMessageHub } from "../utils/activityCenter";
-import { UPLOAD_FILE_ACCEPT, partitionUploadFiles, resolveMaxUploadBytes, formatUploadLimitMb } from "../utils/uploadAccept";
+import {
+  UPLOAD_FILE_ACCEPT,
+  partitionUploadFiles,
+  resolveMaxUploadBytes,
+  formatUploadLimitMb,
+} from "../utils/uploadAccept";
 import { MAX_OUTLINE_DEPTH } from "../utils/outlineConstants";
 
 import type { TreeDataNode, TreeProps } from "antd";
@@ -23,10 +52,25 @@ const { Text } = Typography;
 
 /** 方案分类兜底候选（实际还会并入库内已有分类） */
 const DEFAULT_TYPES = [
-  "深基坑", "高支模", "脚手架", "塔吊", "施工电梯", "临时用电",
-  "消防", "安全文明", "绿色施工", "质量创优", "进度计划",
-  "应急预案", "施工组织设计", "钢结构吊装", "降水", "土方开挖",
-  "模板工程", "混凝土工程", "有限空间",
+  "深基坑",
+  "高支模",
+  "脚手架",
+  "塔吊",
+  "施工电梯",
+  "临时用电",
+  "消防",
+  "安全文明",
+  "绿色施工",
+  "质量创优",
+  "进度计划",
+  "应急预案",
+  "施工组织设计",
+  "钢结构吊装",
+  "降水",
+  "土方开挖",
+  "模板工程",
+  "混凝土工程",
+  "有限空间",
 ];
 
 /** /outline-library/templates 行（行业标准模板，前端只消费 key/name/risk） */
@@ -66,7 +110,13 @@ type Props = {
   maxUploadBytes?: number;
 };
 
-export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSaved, maxUploadBytes }: Props) {
+export default function OutlineLibraryEditModal({
+  open,
+  libraryId,
+  onClose,
+  onSaved,
+  maxUploadBytes,
+}: Props) {
   const { message: _antdMsg, modal } = App.useApp();
   const msg = useAntdMessageHub(_antdMsg, "目录库");
   const [form] = Form.useForm();
@@ -91,10 +141,12 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
   // 打开时拉取模板清单与库内已有分类
   useEffect(() => {
     if (!open) return;
-    outlineLibraryApi.templates()
+    outlineLibraryApi
+      .templates()
       .then(({ data }) => setTemplates(data.items || []))
       .catch(() => setTemplates([]));
-    outlineLibraryApi.filters()
+    outlineLibraryApi
+      .filters()
       .then(({ data }) => {
         // filters 响应是「筛选项 key → { value, count }[]」的动态字典，前端只消费 type 的 value
         const fromDb = ((data as { type?: { value: string }[] }).type || []).map((t) => t.value);
@@ -127,7 +179,9 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
       let outline: OutlineNode[] = [];
       try {
         outline = JSON.parse(data.outline_json || "[]");
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
       setTree(outline);
       setExpandedKeys(collectAllKeys(outline));
     } catch (e: unknown) {
@@ -170,7 +224,10 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
   function maxTreeDepth(nodes: OutlineNode[]): number {
     let max = 0;
     let guard = 0;
-    const stack: { node: OutlineNode; level: number }[] = (nodes || []).map((n) => ({ node: n, level: 1 }));
+    const stack: { node: OutlineNode; level: number }[] = (nodes || []).map((n) => ({
+      node: n,
+      level: 1,
+    }));
     while (stack.length && guard++ < 20000) {
       const { node, level } = stack.pop()!;
       if (level > max) max = level;
@@ -181,9 +238,7 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
 
   function addChildNode(parentId?: string) {
     const newId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const newLevel = parentId
-      ? (findNode(tree, parentId)?.level || 0) + 1
-      : 1;
+    const newLevel = parentId ? (findNode(tree, parentId)?.level || 0) + 1 : 1;
     // ✅ BUG 修复：目录硬性限三级（后端 normalize_outline_json 会把四级及更深
     //    节点裁剪、标题并入父描述），在三级章节下继续添加子章节会导致
     //    "保存成功后节点凭空消失"。与方案工作台的新增子章节入口保持一致，入口拦截。
@@ -264,11 +319,7 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
    * 已在同层首/尾时返回 null（按钮据此禁用）。目录库为整体保存，
    * 移动仅更新本地树，待用户点「保存」时随 outline_json 一并落库。
    */
-  function moveSiblingInTree(
-    nodes: OutlineNode[],
-    id: string,
-    dir: -1 | 1,
-  ): OutlineNode[] | null {
+  function moveSiblingInTree(nodes: OutlineNode[], id: string, dir: -1 | 1): OutlineNode[] | null {
     const idx = nodes.findIndex((n) => n.id === id);
     if (idx !== -1) {
       if (idx + dir < 0 || idx + dir >= nodes.length) return null;
@@ -347,7 +398,11 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
       return;
     }
 
-    const loop = (data: OutlineNode[], key: string, callback: (node: OutlineNode, i: number, arr: OutlineNode[]) => void) => {
+    const loop = (
+      data: OutlineNode[],
+      key: string,
+      callback: (node: OutlineNode, i: number, arr: OutlineNode[]) => void,
+    ) => {
       for (let i = 0; i < data.length; i++) {
         if (data[i].id === key) {
           return callback(data[i], i, data);
@@ -425,12 +480,8 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
             />
           ) : (
             <>
-              <span style={{ fontWeight: node.level === 1 ? 600 : 400 }}>
-                {node.title}
-              </span>
-              <span style={{ fontSize: 11, color: "#999" }}>
-                (L{node.level})
-              </span>
+              <span style={{ fontWeight: node.level === 1 ? 600 : 400 }}>{node.title}</span>
+              <span style={{ fontSize: 11, color: "#999" }}>(L{node.level})</span>
               {node.description ? (
                 <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }} ellipsis>
                   {node.description}
@@ -525,7 +576,11 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
   };
 
   /** ✅ 导入 / 套用模板时保留 description（旧实现丢弃，会把编写要点清空） */
-  function importToTree(outline: OutlineImportNode[], parentLevel = 0, parentPath = ""): OutlineNode[] {
+  function importToTree(
+    outline: OutlineImportNode[],
+    parentLevel = 0,
+    parentPath = "",
+  ): OutlineNode[] {
     return outline.map((n, i) => {
       const level = n.level || parentLevel + 1;
       // ✅ BUG 修复（2026-10-05 · D2，与方案工作台 BUG-15 同类）：
@@ -562,7 +617,8 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
       setSelectedKey(null);
       const cur = form.getFieldsValue();
       const patch: Record<string, string> = {};
-      if (!cur.applicable_conditions && data.applicable) patch.applicable_conditions = data.applicable;
+      if (!cur.applicable_conditions && data.applicable)
+        patch.applicable_conditions = data.applicable;
       if (!cur.basis && data.basis) patch.basis = data.basis;
       if (Object.keys(patch).length) form.setFieldsValue(patch);
       setActiveTab("outline");
@@ -623,25 +679,54 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
           <Form.Item name="name" label="名称" rules={[{ required: true }]}>
             <Input placeholder="如：深基坑专项方案标准目录" />
           </Form.Item>
-          <Form.Item name="type" label="方案类型"
-            extra="可从库内已有分类中选择，也可直接输入新分类">
-            <Select allowClear showSearch
-              options={typeOptions.map(t => ({ label: t, value: t }))} />
+          <Form.Item
+            name="type"
+            label="方案类型"
+            extra="可从库内已有分类中选择，也可直接输入新分类"
+          >
+            <Select
+              allowClear
+              showSearch
+              options={typeOptions.map((t) => ({ label: t, value: t }))}
+            />
           </Form.Item>
           <Form.Item name="engineering_type" label="工程类型">
-            <Select options={["房建", "市政", "公路", "水利", "轨道交通"].map(t => ({ label: t, value: t }))} allowClear />
+            <Select
+              options={["房建", "市政", "公路", "水利", "轨道交通"].map((t) => ({
+                label: t,
+                value: t,
+              }))}
+              allowClear
+            />
           </Form.Item>
           <Form.Item name="profession" label="专业">
-            <Select options={["土建", "机电", "安全", "装饰", "质量", "市政"].map(t => ({ label: t, value: t }))} allowClear />
+            <Select
+              options={["土建", "机电", "安全", "装饰", "质量", "市政"].map((t) => ({
+                label: t,
+                value: t,
+              }))}
+              allowClear
+            />
           </Form.Item>
-          <Form.Item name="applicable_conditions" label="适用条件"
-            extra="如：适用于开挖深度≥3m 的基坑工程；套用标准模板时自动填充">
-            <Input.TextArea rows={2} placeholder="如：适用于深度超过 3m 的基坑开挖、支护、降水工程" />
+          <Form.Item
+            name="applicable_conditions"
+            label="适用条件"
+            extra="如：适用于开挖深度≥3m 的基坑工程；套用标准模板时自动填充"
+          >
+            <Input.TextArea
+              rows={2}
+              placeholder="如：适用于深度超过 3m 的基坑开挖、支护、降水工程"
+            />
           </Form.Item>
-          <Form.Item name="basis" label="编制依据"
-            extra="建议填写具体规范编号与名称；套用标准模板时自动填充">
-            <Input.TextArea rows={3}
-              placeholder="如：JGJ 120-2012《建筑基坑支护技术规程》、GB 50497-2019《建筑基坑工程监测技术标准》" />
+          <Form.Item
+            name="basis"
+            label="编制依据"
+            extra="建议填写具体规范编号与名称；套用标准模板时自动填充"
+          >
+            <Input.TextArea
+              rows={3}
+              placeholder="如：JGJ 120-2012《建筑基坑支护技术规程》、GB 50497-2019《建筑基坑工程监测技术标准》"
+            />
           </Form.Item>
           <Form.Item name="tags" label="标签" extra="多个标签用逗号分隔，用于搜索命中">
             <Input placeholder="如：基坑,危大工程,房建" />
@@ -654,7 +739,11 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
       label: (
         <Space size={4}>
           目录章节
-          {tree.length > 0 && <Tag color="blue" style={{ marginInlineStart: 0 }}>{countNodes(tree)}</Tag>}
+          {tree.length > 0 && (
+            <Tag color="blue" style={{ marginInlineStart: 0 }}>
+              {countNodes(tree)}
+            </Tag>
+          )}
         </Space>
       ),
       children: (
@@ -667,13 +756,15 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
                 //    绕过。与工作台上传入口同口径，先按扩展名白名单 + 大小上限
                 //    拦截，避免非法文件整份传完才被后端 400 拒绝。
                 const { accepted, rejected } = partitionUploadFiles(
-                  [file], resolveMaxUploadBytes(maxUploadBytes));
+                  [file],
+                  resolveMaxUploadBytes(maxUploadBytes),
+                );
                 if (rejected.length > 0) {
                   const byType = rejected.filter((r) => r.reason === "type");
                   const bySize = rejected.filter((r) => r.reason === "size");
                   if (byType.length > 0) {
                     msg.error(
-                      `不支持的文件类型，已忽略：${byType.map((r) => r.file.name).join("、")}`
+                      `不支持的文件类型，已忽略：${byType.map((r) => r.file.name).join("、")}`,
                     );
                   }
                   if (bySize.length > 0) {
@@ -690,10 +781,7 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
                 导入目录（智能识别）
               </Button>
             </Upload>
-            <Button
-              icon={<PlusOutlined />}
-              onClick={() => addChildNode()}
-            >
+            <Button icon={<PlusOutlined />} onClick={() => addChildNode()}>
               新增一级章节
             </Button>
             <Tooltip title="新增子章节到选中节点">
@@ -718,9 +806,13 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
           </Space>
 
           <Space style={{ marginBottom: 12 }} wrap>
-            <Text type="secondary" style={{ fontSize: 12 }}>套用行业标准模板：</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              套用行业标准模板：
+            </Text>
             <Select
-              allowClear showSearch placeholder="选择模板"
+              allowClear
+              showSearch
+              placeholder="选择模板"
               style={{ width: 280 }}
               value={tplKey}
               loading={tplLoading}
@@ -738,9 +830,15 @@ export default function OutlineLibraryEditModal({ open, libraryId, onClose, onSa
                 okText="清空"
                 okButtonProps={{ danger: true }}
                 cancelText="取消"
-                onConfirm={() => { setTree([]); setSelectedKey(null); setExpandedKeys([]); }}
+                onConfirm={() => {
+                  setTree([]);
+                  setSelectedKey(null);
+                  setExpandedKeys([]);
+                }}
               >
-                <Button danger size="small">清空目录</Button>
+                <Button danger size="small">
+                  清空目录
+                </Button>
               </Popconfirm>
             )}
             <Text type="secondary" style={{ fontSize: 12 }}>

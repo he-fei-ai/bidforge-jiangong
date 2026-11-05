@@ -27,7 +27,13 @@ describe("summarizeOutlineQuality（目录生成后校验报告）", () => {
 
   it("全面性缺口 → warn 并列出未覆盖的方案名称维度", () => {
     const r = summarizeOutlineQuality({
-      quality: { name_coverage: { evaluated: true, covered: false, missing: ["施工工序·支护", "施工对象·基坑"] } },
+      quality: {
+        name_coverage: {
+          evaluated: true,
+          covered: false,
+          missing: ["施工工序·支护", "施工对象·基坑"],
+        },
+      },
     });
     expect(r.level).toBe("warn");
     expect(r.message).toContain("方案名称涉及但目录未覆盖");
@@ -99,8 +105,12 @@ describe("summarizeOutlineQuality（目录生成后校验报告）", () => {
   });
 
   it("脏数据不抛（字段类型错、null、超长列表）", () => {
-    expect(() => summarizeOutlineQuality({ quality: { name_coverage: { missing: "x" } } })).not.toThrow();
-    expect(() => summarizeOutlineQuality({ quality: { redundant_titles: [null, 1] } })).not.toThrow();
+    expect(() =>
+      summarizeOutlineQuality({ quality: { name_coverage: { missing: "x" } } }),
+    ).not.toThrow();
+    expect(() =>
+      summarizeOutlineQuality({ quality: { redundant_titles: [null, 1] } }),
+    ).not.toThrow();
     const long = summarizeOutlineQuality({
       quality: { name_coverage: { evaluated: true, missing: new Array(30).fill("项") } },
     });

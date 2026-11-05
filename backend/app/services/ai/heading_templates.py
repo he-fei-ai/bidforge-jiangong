@@ -5,6 +5,7 @@
 - 模板化编号系统：DEFAULT_NUMBERING_TEMPLATES / format_outline_number_by_template / format_heading_by_id
 - 标题规范提示词生成：build_heading_spec_prompt
 """
+
 from __future__ import annotations
 
 import re
@@ -38,22 +39,89 @@ from app.services.numbering import (  # noqa: E402, F401
 #   所有标题字体不得倾斜（italic=False）
 # ============================================================
 HEADING_STYLE_CONFIG: dict[int, dict] = {
-    1: {"prefix": "第", "suffix": "章", "number_format": "chinese", "punctuation": " ",
-        "font_size": 14, "font_name": "宋体", "bold": True, "italic": False},
-    2: {"prefix": "", "suffix": "", "number_format": "digit", "punctuation": " ",
-        "font_size": 14, "font_name": "宋体", "bold": True, "italic": False},
-    3: {"prefix": "", "suffix": "", "number_format": "digit_dot", "punctuation": " ",
-        "font_size": 14, "font_name": "宋体", "bold": True, "italic": False},
-    4: {"prefix": "", "suffix": "", "number_format": "digit_dot_dot", "punctuation": " ",
-        "font_size": 14, "font_name": "宋体", "bold": True, "italic": False},
-    5: {"prefix": "", "suffix": "", "number_format": "digit_dot_dot_dot", "punctuation": "、",
-        "font_size": 14, "font_name": "宋体", "bold": True, "italic": False},
-    6: {"prefix": "", "suffix": "）", "number_format": "digit_parenthesis", "punctuation": "、",
-        "font_size": 12, "font_name": "宋体", "bold": False, "italic": False, "body_style": True},
-    7: {"prefix": "", "suffix": "", "number_format": "alpha", "punctuation": "、",
-        "font_size": 12, "font_name": "宋体", "bold": False, "italic": False, "body_style": True},
-    8: {"prefix": "", "suffix": "", "number_format": "alpha_alpha", "punctuation": "、",
-        "font_size": 12, "font_name": "宋体", "bold": False, "italic": False, "body_style": True},
+    1: {
+        "prefix": "第",
+        "suffix": "章",
+        "number_format": "chinese",
+        "punctuation": " ",
+        "font_size": 14,
+        "font_name": "宋体",
+        "bold": True,
+        "italic": False,
+    },
+    2: {
+        "prefix": "",
+        "suffix": "",
+        "number_format": "digit",
+        "punctuation": " ",
+        "font_size": 14,
+        "font_name": "宋体",
+        "bold": True,
+        "italic": False,
+    },
+    3: {
+        "prefix": "",
+        "suffix": "",
+        "number_format": "digit_dot",
+        "punctuation": " ",
+        "font_size": 14,
+        "font_name": "宋体",
+        "bold": True,
+        "italic": False,
+    },
+    4: {
+        "prefix": "",
+        "suffix": "",
+        "number_format": "digit_dot_dot",
+        "punctuation": " ",
+        "font_size": 14,
+        "font_name": "宋体",
+        "bold": True,
+        "italic": False,
+    },
+    5: {
+        "prefix": "",
+        "suffix": "",
+        "number_format": "digit_dot_dot_dot",
+        "punctuation": "、",
+        "font_size": 14,
+        "font_name": "宋体",
+        "bold": True,
+        "italic": False,
+    },
+    6: {
+        "prefix": "",
+        "suffix": "）",
+        "number_format": "digit_parenthesis",
+        "punctuation": "、",
+        "font_size": 12,
+        "font_name": "宋体",
+        "bold": False,
+        "italic": False,
+        "body_style": True,
+    },
+    7: {
+        "prefix": "",
+        "suffix": "",
+        "number_format": "alpha",
+        "punctuation": "、",
+        "font_size": 12,
+        "font_name": "宋体",
+        "bold": False,
+        "italic": False,
+        "body_style": True,
+    },
+    8: {
+        "prefix": "",
+        "suffix": "",
+        "number_format": "alpha_alpha",
+        "punctuation": "、",
+        "font_size": 12,
+        "font_name": "宋体",
+        "bold": False,
+        "italic": False,
+        "body_style": True,
+    },
 }
 
 # 七级标题正则（用于从文本反向检测层级）
@@ -73,15 +141,51 @@ HEADING_REGEX_PATTERNS: list[tuple[str, int, int]] = [
 
 # 圈码数字
 CIRCLED_NUMBERS: dict[int, str] = {
-    1: "①", 2: "②", 3: "③", 4: "④", 5: "⑤", 6: "⑥", 7: "⑦", 8: "⑧",
-    9: "⑨", 10: "⑩", 11: "⑪", 12: "⑫", 13: "⑬", 14: "⑭", 15: "⑮", 16: "⑯",
-    17: "⑰", 18: "⑱", 19: "⑲", 20: "⑳",
+    1: "①",
+    2: "②",
+    3: "③",
+    4: "④",
+    5: "⑤",
+    6: "⑥",
+    7: "⑦",
+    8: "⑧",
+    9: "⑨",
+    10: "⑩",
+    11: "⑪",
+    12: "⑫",
+    13: "⑬",
+    14: "⑭",
+    15: "⑮",
+    16: "⑯",
+    17: "⑰",
+    18: "⑱",
+    19: "⑲",
+    20: "⑳",
 }
 
 # 罗马数字
 ROMAN_NUMBERS: list[str] = [
-    "", "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x",
-    "xi", "xii", "xiii", "xiv", "xv", "xvi", "xvii", "xviii", "xix", "xx",
+    "",
+    "i",
+    "ii",
+    "iii",
+    "iv",
+    "v",
+    "vi",
+    "vii",
+    "viii",
+    "ix",
+    "x",
+    "xi",
+    "xii",
+    "xiii",
+    "xiv",
+    "xv",
+    "xvi",
+    "xvii",
+    "xviii",
+    "xix",
+    "xx",
 ]
 ROMAN_NUMBERS_UPPER: list[str] = [s.upper() for s in ROMAN_NUMBERS]
 
@@ -135,7 +239,7 @@ def _replace_last_n(m: re.Match, parts: list[int]) -> str:
 def _replace_tail_n(m: re.Match, parts: list[int]) -> str:
     n = int(m.group(1))
     if len(parts) >= n:
-        return ".".join(str(p) for p in parts[n - 1:])
+        return ".".join(str(p) for p in parts[n - 1 :])
     return str(parts[-1] if parts else 1)
 
 
@@ -173,7 +277,8 @@ def format_outline_number_by_template(id_str: str, template: str) -> str:
 
 def get_heading_template(level: int) -> dict[str, str]:
     return DEFAULT_NUMBERING_TEMPLATES.get(
-        level, DEFAULT_NUMBERING_TEMPLATES.get(3, {"numbering_format": "custom", "numbering_template": "{tail}"}))
+        level, DEFAULT_NUMBERING_TEMPLATES.get(3, {"numbering_format": "custom", "numbering_template": "{tail}"})
+    )
 
 
 def format_heading_by_id(id_str: str, level: int, title: str, custom_template: str | None = None) -> str:
@@ -263,9 +368,9 @@ _SUBHEADING_RULE_DEMOTED = """\
 _SUBHEADING_RULE_NORMAL = """\
 - 二级小标题：1.1 标题
 - 三级小标题：1.1.1 标题
-- 四级小标题：1.1.1.1 标题
-- 五级小标题：1.1.1.1.1 标题
-（按本节编号顺延编号，小标题从 1、1.1、1.1.1 起，不得跳号或重复）"""
+（按本节编号顺延编号，小标题从 1、1.1 起，不得跳号或重复；
+四级及更深**一律不设标题**，改用“（1）（2）”段首序号或加粗提示语在同一段内
+展开；被折叠的层级原文字内容必须保留，不得只写标题或一句话）"""
 
 
 def build_subheading_rule(has_db_children: bool = False) -> str:
@@ -280,8 +385,8 @@ def build_subheading_rule(has_db_children: bool = False) -> str:
     """
     try:
         from app.config import settings
-        demote = bool(has_db_children) and bool(
-            settings.body_subheading_demote_with_children)
+
+        demote = bool(has_db_children) and bool(settings.body_subheading_demote_with_children)
     except Exception:  # pragma: no cover - 配置不可用时按默认开启
         demote = bool(has_db_children)
     return _SUBHEADING_RULE_DEMOTED if demote else _SUBHEADING_RULE_NORMAL

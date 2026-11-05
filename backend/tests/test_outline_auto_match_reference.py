@@ -13,6 +13,7 @@
 3. 开关关闭（默认 False）：类别匹配函数完全不参与，reference_outline
    与用户选库文本逐字一致（旧行为不变，向后兼容）。
 """
+
 import json
 import uuid
 
@@ -23,13 +24,11 @@ import app.services.outline_reference as oref
 async def _seed_scheme(db_conn, hazard_category: str) -> str:
     """落一个短方案（带 hazard_category），返回 scheme_id。"""
     sid, pid = uuid.uuid4().hex, uuid.uuid4().hex
+    await db_conn.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)", (pid, "测试项目"))
     await db_conn.execute(
-        "INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)",
-        (pid, "测试项目"))
-    await db_conn.execute(
-        "INSERT OR IGNORE INTO schemes (id, project_id, name, config_json,"
-        " hazard_category) VALUES (?,?,?,?,?)",
-        (sid, pid, "深基坑支护方案", json.dumps({}), hazard_category))
+        "INSERT OR IGNORE INTO schemes (id, project_id, name, config_json," " hazard_category) VALUES (?,?,?,?,?)",
+        (sid, pid, "深基坑支护方案", json.dumps({}), hazard_category),
+    )
     await db_conn.commit()
     return sid
 
@@ -71,10 +70,8 @@ def _patch_generation(monkeypatch):
         seen_prompts.append(messages)
         outline = [{"title": "工程概况", "description": "d", "children": []}]
         if kwargs.get("scene") == "outline_draft":
-            return ({"outline": outline},
-                    json.dumps({"outline": outline}, ensure_ascii=False))
-        return ({"passed": True, "suggestions": []},
-                json.dumps({"passed": True}, ensure_ascii=False))
+            return ({"outline": outline}, json.dumps({"outline": outline}, ensure_ascii=False))
+        return ({"passed": True, "suggestions": []}, json.dumps({"passed": True}, ensure_ascii=False))
 
     monkeypatch.setattr(sh, "collect_json_response", fake_collect)
     return seen_prompts
@@ -85,21 +82,17 @@ async def _run_stream(scheme_id, db_conn) -> list[str]:
     chunks = []
     async for chunk in resp.body_iterator:
         chunks.append(chunk if isinstance(chunk, str) else chunk.decode("utf-8"))
-    events = [json.loads(line[len("data: "):])
-              for line in "".join(chunks).splitlines()
-              if line.startswith("data: ")]
+    events = [json.loads(line[len("data: ") :]) for line in "".join(chunks).splitlines() if line.startswith("data: ")]
     return [e.get("event") for e in events]
 
 
 class TestAutoMatchReferenceInjection:
-    async def test_enabled_appends_category_ref_to_prompt(
-            self, db_conn, monkeypatch):
+    async def test_enabled_appends_category_ref_to_prompt(self, db_conn, monkeypatch):
         """开关开启：类别参考必须与用户选库参考一同进入 draft 提示词，
         不允许被用户选库结果覆盖（旧 BUG 的回归锁）。"""
         monkeypatch.setattr(sh.settings, "scheme_auto_match_outline", True)
         sid = await _seed_scheme(db_conn, "基坑工程")
-        bumps, cat_calls = _patch_reference_sources(
-            monkeypatch, "CATEGORY_REF_TEXT", ["lib-cat-1"])
+        bumps, cat_calls = _patch_reference_sources(monkeypatch, "CATEGORY_REF_TEXT", ["lib-cat-1"])
         seen_prompts = _patch_generation(monkeypatch)
 
         names = await _run_stream(sid, db_conn)
@@ -109,13 +102,13 @@ class TestAutoMatchReferenceInjection:
         assert cat_calls == [["基坑工程"]]
         # draft 提示词（messages）同时含两段参考
         prompts = json.dumps(seen_prompts, ensure_ascii=False)
-        assert "USER_REF_TEXT" in prompts and "CATEGORY_REF_TEXT" in prompts, \
-            f"类别参考必须增量注入 draft 提示词，实际: {prompts[:400]}"
+        assert (
+            "USER_REF_TEXT" in prompts and "CATEGORY_REF_TEXT" in prompts
+        ), f"类别参考必须增量注入 draft 提示词，实际: {prompts[:400]}"
         # 命中的类别库如实计数
         assert ["lib-cat-1"] in bumps
 
-    async def test_category_ref_missing_keeps_user_ref_only(
-            self, db_conn, monkeypatch):
+    async def test_category_ref_missing_keeps_user_ref_only(self, db_conn, monkeypatch):
         """开关开启但类别库未命中（空文本）：不追加、不计数，
         reference_outline 保持用户选库文本原样。"""
         monkeypatch.setattr(sh.settings, "scheme_auto_match_outline", True)
@@ -130,8 +123,7 @@ class TestAutoMatchReferenceInjection:
         assert "CATEGORY_REF_TEXT" not in prompts
         assert not bumps, "类别库未命中（空文本）时不得计数"
 
-    async def test_disabled_skips_category_matching(
-            self, db_conn, monkeypatch):
+    async def test_disabled_skips_category_matching(self, db_conn, monkeypatch):
         """开关关闭（默认）：类别匹配完全不参与，行为与旧实现逐字一致。"""
         monkeypatch.setattr(sh.settings, "scheme_auto_match_outline", False)
         sid = await _seed_scheme(db_conn, "基坑工程")
@@ -142,5 +134,4 @@ class TestAutoMatchReferenceInjection:
         assert "completed" in names
         prompts = json.dumps(seen_prompts, ensure_ascii=False)
         assert "USER_REF_TEXT" in prompts, "用户选库参考必须注入（旧行为）"
-        assert "CATEGORY_REF_TEXT" not in prompts, \
-            "开关关闭时类别参考绝不得进入提示词（向后兼容锁）"
+        assert "CATEGORY_REF_TEXT" not in prompts, "开关关闭时类别参考绝不得进入提示词（向后兼容锁）"

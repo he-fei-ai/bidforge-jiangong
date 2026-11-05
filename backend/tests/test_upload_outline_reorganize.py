@@ -5,6 +5,7 @@
 query 参数静默忽略，于是「整理为标准结构」以及 services/outline_reorganize.py
 这套实现（含 4 个单测）从未被任何路由调用。本轮接线后按参数生效。
 """
+
 import inspect
 import io
 import json
@@ -15,14 +16,16 @@ from starlette.datastructures import UploadFile
 
 #: 6 个顶层章节（用「第X章」编号 ⇒ 规则法解析为同级顶层节点；
 #: 节点数 >= 5 ⇒ 视为有效识别，不会触发 AI 兜底调用）
-_SAMPLE = "\n".join([
-    "第一章 工程简介",
-    "第二章 编制说明",
-    "第三章 施工总体部署",
-    "第四章 主要施工方法",
-    "第五章 安全保障",
-    "第六章 BIM 应用管理",
-])
+_SAMPLE = "\n".join(
+    [
+        "第一章 工程简介",
+        "第二章 编制说明",
+        "第三章 施工总体部署",
+        "第四章 主要施工方法",
+        "第五章 安全保障",
+        "第六章 BIM 应用管理",
+    ]
+)
 
 
 def _upload(name: str = "outline.txt", text: str = _SAMPLE) -> UploadFile:
@@ -58,8 +61,7 @@ class TestReorganizeParam:
 
     async def test_true_rebuilds_to_standard_framework(self, db_conn):
         """reorganize=true：归位到标准章节骨架 + 返回归位报告。"""
-        res = await _parse(db_conn, scheme_name="深基坑工程专项施工方案",
-                           reorganize=True)
+        res = await _parse(db_conn, scheme_name="深基坑工程专项施工方案", reorganize=True)
         assert res.get("reorganized") is True
         report = res.get("reorganize_report") or {}
         assert report.get("matched_chapters", 0) >= 3, report
@@ -70,15 +72,13 @@ class TestReorganizeParam:
 
     async def test_unmatched_content_is_not_lost(self, db_conn):
         """✅ 内容不丢失：无法归位的真实章节（BIM）以标题形式并入描述。"""
-        res = await _parse(db_conn, scheme_name="深基坑工程专项施工方案",
-                           reorganize=True)
+        res = await _parse(db_conn, scheme_name="深基坑工程专项施工方案", reorganize=True)
         flat = json.dumps(res["outline"], ensure_ascii=False)
         assert "BIM" in flat, "未归位的用户章节标题必须保留（并入描述或补充章节）"
 
     async def test_reorganize_result_is_normalized_to_three_levels(self, db_conn):
         """整理结果同样经过三级裁剪 + 编号重排（预览所见 == 落库所得）。"""
-        res = await _parse(db_conn, scheme_name="深基坑工程专项施工方案",
-                           reorganize=True)
+        res = await _parse(db_conn, scheme_name="深基坑工程专项施工方案", reorganize=True)
 
         def depth(nodes, d=1):
             if not nodes:
@@ -86,15 +86,12 @@ class TestReorganizeParam:
             return max(depth(n.get("children") or [], d + 1) for n in nodes)
 
         assert depth(res["outline"]) <= 3
-        assert res["outline"][0]["id"] == "1"       # 编号已重排
+        assert res["outline"][0]["id"] == "1"  # 编号已重排
 
     async def test_upload_record_stores_normalized_payload(self, db_conn):
         """上传记录里的 parsed_json 与响应一致（避免"预览一套、落库一套"）。"""
-        res = await _parse(db_conn, scheme_name="深基坑工程专项施工方案",
-                           reorganize=True)
-        cur = await db_conn.execute(
-            "SELECT parsed_json, confidence FROM uploaded_outlines WHERE id=?",
-            (res["id"],))
+        res = await _parse(db_conn, scheme_name="深基坑工程专项施工方案", reorganize=True)
+        cur = await db_conn.execute("SELECT parsed_json, confidence FROM uploaded_outlines WHERE id=?", (res["id"],))
         row = await cur.fetchone()
         assert row is not None
         stored = json.loads(row[0])["outline"]
