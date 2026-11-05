@@ -10,6 +10,7 @@
    不落真实库）：库读取、DB 异常降级；
 4. collect_export_issues 附带 placeholder_report 精简键（additive，向后兼容）。
 """
+
 import pytest
 from app.services.placeholder_inventory import (
     build_placeholder_report,
@@ -22,11 +23,9 @@ from app.services.placeholder_inventory import (
 # 一、单章逐条扫描
 # ===========================================================================
 class TestScanOccurrences:
-
     def test_formatted_half_and_full_width_colon(self):
         """规范占位：半角/全角冒号、两端空白均容忍，字段名原样保留"""
-        hits = scan_occurrences("基础埋深【待补充:基础埋深】（以勘察报告为准）。"
-                                "桩长【待补充： 桩长 】未定。")
+        hits = scan_occurrences("基础埋深【待补充:基础埋深】（以勘察报告为准）。" "桩长【待补充： 桩长 】未定。")
         assert [h["field"] for h in hits] == ["基础埋深", "桩长"]
         assert all(h["kind"] == "formatted" for h in hits)
 
@@ -63,19 +62,19 @@ class TestScanOccurrences:
 # 二、多章聚合
 # ===========================================================================
 def _sec(sid, title, content, sort_order=0):
-    return {"id": sid, "title": title, "content": content,
-            "sort_order": sort_order, "level": 1, "status": "generated"}
+    return {"id": sid, "title": title, "content": content, "sort_order": sort_order, "level": 1, "status": "generated"}
 
 
 class TestBuildPlaceholderReport:
-
     def test_grouping_and_sorting(self):
         """按字段 / 按章节聚合；次数降序，同数次按名称升序（确定性输出）"""
-        report = build_placeholder_report([
-            _sec("a", "工程概况", "深度【待补充：基坑深度】，埋深【待补充:基础埋深】"),
-            _sec("b", "基坑支护", "深度【待补充：基坑深度】。"),
-            _sec("c", "监测方案", "无占位符的正文"),
-        ])
+        report = build_placeholder_report(
+            [
+                _sec("a", "工程概况", "深度【待补充：基坑深度】，埋深【待补充:基础埋深】"),
+                _sec("b", "基坑支护", "深度【待补充：基坑深度】。"),
+                _sec("c", "监测方案", "无占位符的正文"),
+            ]
+        )
         assert report["total"] == 3 and report["formatted_total"] == 3
         assert report["field_count"] == 2 and report["section_count"] == 2
         by_field = {e["field"]: e for e in report["by_field"]}
@@ -89,10 +88,8 @@ class TestBuildPlaceholderReport:
 
     def test_kind_totals_split(self):
         """三类占位分口径计数：formatted / bare / fuzzy"""
-        report = build_placeholder_report([
-            _sec("a", "s", "【待补充：桩长】与【待补充】与 ×× 与【待填写】")])
-        assert (report["formatted_total"], report["bare_total"],
-                report["fuzzy_total"]) == (1, 2, 1)
+        report = build_placeholder_report([_sec("a", "s", "【待补充：桩长】与【待补充】与 ×× 与【待填写】")])
+        assert (report["formatted_total"], report["bare_total"], report["fuzzy_total"]) == (1, 2, 1)
         assert report["total"] == 4
 
     def test_occurrence_cap_truncation(self):
@@ -101,7 +98,7 @@ class TestBuildPlaceholderReport:
         report = build_placeholder_report(secs, occurrence_cap=3)
         assert len(report["occurrences"]) == 3
         assert report["truncated"] is True
-        assert report["total"] == 5          # 聚合计数不受 cap 影响
+        assert report["total"] == 5  # 聚合计数不受 cap 影响
         assert report["field_count"] == 1
 
     def test_illegal_and_empty_sections(self):
@@ -122,7 +119,8 @@ async def _seed_sections(db_conn, scheme_id="s1"):
         "('a',?, '工程概况',1,1,'generated','深度【待补充：基坑深度】'),"
         "('b',?, '基坑支护',1,2,'generated','桩长【待补充：桩长】，桩径 ××mm'),"
         "('c',?, '监测方案',1,3,'generated','正常正文')",
-        (scheme_id, scheme_id, scheme_id))
+        (scheme_id, scheme_id, scheme_id),
+    )
     await db_conn.commit()
 
 
@@ -149,6 +147,7 @@ async def test_build_report_for_scheme(db_conn):
 async def test_placeholder_report_endpoint(db_conn):
     """GET /export/placeholder-report 端点函数直调：含逐条 occurrences 定位信息"""
     from app.routers.export import placeholder_report as endpoint
+
     await _seed_sections(db_conn)
     data = await endpoint("s1", db=db_conn)
     assert data["total"] == 3
@@ -168,11 +167,12 @@ async def test_build_report_for_scheme_degrades_on_db_error():
 async def test_collect_export_issues_includes_placeholder_report(db_conn):
     """导出预检附带 placeholder_report 精简键（additive，既有键不受影响）"""
     from app.routers.export import collect_export_issues
+
     await _seed_sections(db_conn)
     data = await collect_export_issues("s1", db_conn)
     pr = data["placeholder_report"]
     assert pr["total"] == 3 and pr["formatted_total"] == 2
     assert {"by_field", "by_section"} <= set(pr)
-    assert "occurrences" not in pr     # 精简版不带逐条记录（响应体控制）
+    assert "occurrences" not in pr  # 精简版不带逐条记录（响应体控制）
     # 既有键不受影响（向后兼容）
     assert {"issues", "section_count", "content_audit", "review_summary"} <= set(data)

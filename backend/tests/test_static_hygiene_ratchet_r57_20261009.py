@@ -19,6 +19,7 @@ backend），结果推翻了「lint 门禁全绿」的假设：**HEAD 工作树�
 （实测 --select E4 把已 ignore 的 E402 报出 50 条）。所以 A 组必须复用仓库配置，
 否则会把「刻意放宽的兼容写法」误报成缺陷 —— 与 R55「判据必须能判别」同族。
 """
+
 import ast
 import io
 import os
@@ -38,8 +39,7 @@ DEFECT_CODES = ("F401", "F601", "F811", "F821")
 # 2026-10-09 实测存量；只准下降，任何新增都会红
 I001_BASELINE = 68
 
-_RUFF = shutil.which("ruff") or (
-    "ok" if __import__("importlib").util.find_spec("ruff") else None)
+_RUFF = shutil.which("ruff") or ("ok" if __import__("importlib").util.find_spec("ruff") else None)
 
 
 def _py_files(root):
@@ -67,7 +67,7 @@ def _tree(path):
 # A0 · 字节形态普查（app 硬零 / 历史存量棘轮）
 # ===========================================================================
 _FE_SRC = os.path.abspath(os.path.join(_BE, os.pardir, "frontend", "src"))
-BOM_BASELINE = {"tests": 4, "frontend_src": 8}
+BOM_BASELINE = {"tests": 0, "frontend_src": 7}
 
 
 def _files_with_exts(root, exts):
@@ -82,17 +82,21 @@ def _files_with_exts(root, exts):
 
 
 def _bom_files(root, exts=(".py", ".ts", ".tsx")):
-    return [os.path.relpath(p, _BE) for p in _files_with_exts(root, exts)
-            if io.open(p, "rb").read(3) == b"\xef\xbb\xbf"]
+    return [
+        os.path.relpath(p, _BE) for p in _files_with_exts(root, exts) if io.open(p, "rb").read(3) == b"\xef\xbb\xbf"
+    ]
 
 
 class TestByteShapeCensus:
-
-    def test_production_app_has_no_bom(self):
+    def test_production_app_has_no_bom(self, tmp_path):
         """生产代码（app/）必须零 BOM —— 那里 162 个文件本来就是干净的。"""
         assert _bom_files(_APP, (".py",)) == []
-        # 判别力自证：普查器必须真能看见 BOM（否则上面那条是空集恒绿）
-        assert len(_bom_files(_TESTS)) == BOM_BASELINE["tests"]
+        # 判别力自证：普查器必须真能看见 BOM（否则上面那条是空集恒绿）。
+        # 存量 BOM 已被格式化清除，故改用合成探针自证。
+        probe = tmp_path / "bom_probe.py"
+        probe.write_bytes(b"\xef\xbb\xbf" + b"def f():\n    return 1\n")
+        hits = [p for p in _files_with_exts(str(tmp_path), (".py",)) if io.open(p, "rb").read(3) == b"\xef\xbb\xbf"]
+        assert hits == [str(probe)]
 
     def test_legacy_bom_debt_does_not_grow(self):
         """历史存量按棘轮：只准降不准升（12 个 BOM 经 git show HEAD 逐字节核对，
@@ -132,7 +136,7 @@ def _ruff_codes(blob: str):
         i = st.find(".py:")
         if i < 0:
             continue
-        rest = st[i + 4:]
+        rest = st[i + 4 :]
         parts = rest.split(": ", 1)
         if len(parts) < 2:
             continue
@@ -144,15 +148,19 @@ def _ruff_codes(blob: str):
 
 @pytest.mark.skipif(not _RUFF, reason="环境未安装 ruff（CI 会 pip install ruff==0.16.2）")
 class TestRuffRatchet:
-
     @staticmethod
     def _run():
         # --no-cache：J 盘 .ruff_cache 写入偶发「拒绝访问」（AGENTS R54 记录），
         # 缓存只影响速度不影响判定，禁用可让护栏在任何机器上口径一致。
-        return subprocess.run([sys.executable, "-m", "ruff", "check", ".",
-                               "--no-cache", "--output-format=concise"],
-                              cwd=_BE, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=600)
+        return subprocess.run(
+            [sys.executable, "-m", "ruff", "check", ".", "--no-cache", "--output-format=concise"],
+            cwd=_BE,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+        )
 
     def test_defect_rules_are_zero(self):
         r = self._run()
@@ -173,17 +181,17 @@ class TestRuffRatchet:
         #    棘轮语义保留：n 不得超过基线；超过即红。
         codes = _ruff_codes((r.stdout or "") + (r.stderr or ""))
         n = len([c for c in codes if c == "I001"])
-        assert n <= I001_BASELINE, (
-            "I001 存量 %d 超过基线 %d（棘轮只准降不准升）"
-            % (n, I001_BASELINE))
+        assert n <= I001_BASELINE, "I001 存量 %d 超过基线 %d（棘轮只准降不准升）" % (n, I001_BASELINE)
 
     def test_parser_reads_relative_path_lines(self):
         """判别力自证：按 ruff 真实 concise 形态（相对路径 + 反斜杠分隔）喂一行。"""
         sep = chr(92)
-        sample = ("app" + sep + "main.py:46:5: I001 [*] Import block is un-sorted "
-                  "or un-formatted\n"
-                  "tests" + sep + "t.py:1:1: F401 [*] `x` imported but unused\n"
-                  "Found 2 errors.\n")
+        sample = (
+            "app" + sep + "main.py:46:5: I001 [*] Import block is un-sorted "
+            "or un-formatted\n"
+            "tests" + sep + "t.py:1:1: F401 [*] `x` imported but unused\n"
+            "Found 2 errors.\n"
+        )
         assert _ruff_codes(sample) == ["I001", "F401"]
 
 
@@ -191,7 +199,6 @@ class TestRuffRatchet:
 # B · 同名顶层定义（F811 形态的通用判据，不依赖 ruff）
 # ===========================================================================
 class TestNoDuplicateTopLevelDefs:
-
     @staticmethod
     def _dups(path):
         tree = _tree(path)
@@ -199,13 +206,14 @@ class TestNoDuplicateTopLevelDefs:
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 if node.name in seen:
-                    out.append("%s: %s@%d 与 @%d 重名" %
-                               (os.path.basename(path), node.name, node.lineno, seen[node.name]))
+                    out.append(
+                        "%s: %s@%d 与 @%d 重名" % (os.path.basename(path), node.name, node.lineno, seen[node.name])
+                    )
                 seen[node.name] = node.lineno
             elif isinstance(node, ast.Assign):
                 for tgt in node.targets:
                     if isinstance(tgt, ast.Name) and tgt.id in seen:
-                        pass          # 模块级重新赋值太常见，不在本判据范围
+                        pass  # 模块级重新赋值太常见，不在本判据范围
         return out
 
     def test_app_has_no_duplicate_top_level_defs(self):
@@ -216,7 +224,7 @@ class TestNoDuplicateTopLevelDefs:
 
     def test_detector_can_see_the_original_defect(self):
         """判别力自证：把 R57 修掉的形态注回一段源码，扫描器必须报出来。"""
-        src = "def f():\n    return 1\n\n\ndef f():\n    \"\"\"只有 docstring\"\"\"\n"
+        src = 'def f():\n    return 1\n\n\ndef f():\n    """只有 docstring"""\n'
         tree = ast.parse(src)
         seen, dups = {}, []
         for node in tree.body:
@@ -231,7 +239,6 @@ class TestNoDuplicateTopLevelDefs:
 # C · 重复字典键字面量（F601 形态的通用判据）
 # ===========================================================================
 class TestNoDuplicateDictKeyLiterals:
-
     @staticmethod
     def _dup_keys_in(tree):
         out = []
@@ -241,7 +248,7 @@ class TestNoDuplicateDictKeyLiterals:
             seen = set()
             for k in node.keys:
                 if k is None:
-                    continue                      # {**other} 展开
+                    continue  # {**other} 展开
                 try:
                     val = ast.literal_eval(k)
                     hashable = True
@@ -273,12 +280,10 @@ class TestNoDuplicateDictKeyLiterals:
 # D · resolve_chunk_size 只剩一份，且真的有返回值
 # ===========================================================================
 class TestChunkSizeResolverIsSingleAndLive:
-
     def test_single_definition(self):
         p = os.path.join(_APP, "services", "facts_extractor.py")
         tree = _tree(p)
-        defs = [n for n in tree.body
-                if isinstance(n, ast.FunctionDef) and n.name == "resolve_chunk_size"]
+        defs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "resolve_chunk_size"]
         assert len(defs) == 1, [d.lineno for d in defs]
 
     def test_body_is_not_docstring_only(self):
@@ -286,8 +291,7 @@ class TestChunkSizeResolverIsSingleAndLive:
         光锁「定义只有一份」锁不住「留下的那份是空壳」这一半。"""
         p = os.path.join(_APP, "services", "facts_extractor.py")
         tree = _tree(p)
-        fn = [n for n in tree.body
-              if isinstance(n, ast.FunctionDef) and n.name == "resolve_chunk_size"][0]
+        fn = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "resolve_chunk_size"][0]
         assert len(fn.body) > 1 or not isinstance(fn.body[0], ast.Expr)
         assert any(isinstance(n, ast.Return) for n in ast.walk(fn)), "无 return → 恒返 None"
 
@@ -297,6 +301,7 @@ class TestChunkSizeResolverIsSingleAndLive:
         sys.path.insert(0, _BE)
         try:
             from app.services import facts_extractor as fe
+
             assert fe.resolve_chunk_size() == fe.CHUNK_SIZE
             assert fe.resolve_chunk_size(1234) == 1234
         finally:

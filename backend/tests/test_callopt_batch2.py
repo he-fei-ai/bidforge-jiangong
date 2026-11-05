@@ -7,6 +7,7 @@
       探测成功自动接回（冷却清除）
   O3  思考吞噬重试：finish_reason=length 且正文为空 → 翻倍 max_tokens 重试一次
 """
+
 import time
 
 import app.services.ai.provider_factory as pf
@@ -21,11 +22,10 @@ class _FakeProvider:
     last_finish_reason = ""
 
     def __init__(self, *, behavior, built_mt=0):
-        self.behavior = behavior      # "ok" / "fail:402" / "thinking"
+        self.behavior = behavior  # "ok" / "fail:402" / "thinking"
         self.built_mt = built_mt
         self.chat_calls = 0
-        self.last_usage = {"prompt_tokens": 10, "completion_tokens": 5,
-                           "cached_tokens": 0}
+        self.last_usage = {"prompt_tokens": 10, "completion_tokens": 5, "cached_tokens": 0}
         self.name = "fake"
         self.model = "m"
 
@@ -38,7 +38,8 @@ class _FakeProvider:
         if self.behavior == "thinking":
             raise RuntimeError(
                 f"推理模型把 max_tokens({self.built_mt}) 全部消耗在思考过程"
-                f"（finish_reason=length），正文为空：请调大 max_tokens 或改用非推理模型")
+                f"（finish_reason=length），正文为空：请调大 max_tokens 或改用非推理模型"
+            )
         raise RuntimeError("boom")
 
 
@@ -72,9 +73,15 @@ def _wire_single(monkeypatch, provider_factory_fn, *, max_tokens=4096):
     built = []
 
     async def _cfg():
-        return {"provider_name": "p1", "api_key": "k", "base_url": "https://x",
-                "model": "m", "max_tokens": max_tokens, "temperature": 0.7,
-                "timeout": 60}
+        return {
+            "provider_name": "p1",
+            "api_key": "k",
+            "base_url": "https://x",
+            "model": "m",
+            "max_tokens": max_tokens,
+            "temperature": 0.7,
+            "timeout": 60,
+        }
 
     async def _chain():
         return []
@@ -93,8 +100,12 @@ def _wire_single(monkeypatch, provider_factory_fn, *, max_tokens=4096):
 
 class TestQuotaErrorClassification:
     def test_quota_errors(self):
-        for msg in ('HTTP 429: rate limit', "HTTP 402: Insufficient Balance",
-                    "HTTP 403: no valid authorization", "HTTP 404: Not Found"):
+        for msg in (
+            "HTTP 429: rate limit",
+            "HTTP 402: Insufficient Balance",
+            "HTTP 403: no valid authorization",
+            "HTTP 404: Not Found",
+        ):
             assert pf._is_quota_error(RuntimeError(msg)) is True
 
     def test_transient_errors_not_quota(self):
@@ -102,13 +113,13 @@ class TestQuotaErrorClassification:
             assert pf._is_quota_error(RuntimeError(msg)) is False
 
     def test_thinking_exhausted(self):
-        e = RuntimeError("推理模型把 max_tokens(1536) 全部消耗在思考过程"
-                         "（finish_reason=length），正文为空：请调大 max_tokens")
+        e = RuntimeError(
+            "推理模型把 max_tokens(1536) 全部消耗在思考过程" "（finish_reason=length），正文为空：请调大 max_tokens"
+        )
         assert pf._is_thinking_exhausted(e) is True
         assert pf._is_thinking_exhausted(RuntimeError("HTTP 500")) is False
         # 空正文但非 length（内容过滤）不算思考吞噬
-        assert pf._is_thinking_exhausted(
-            RuntimeError("厂商返回空 content（finish_reason=stop）")) is False
+        assert pf._is_thinking_exhausted(RuntimeError("厂商返回空 content（finish_reason=stop）")) is False
 
 
 class TestQuotaCooldownState:
@@ -124,10 +135,10 @@ class TestQuotaCooldownState:
         """冷却中每 probe_every 秒放行一次探测。"""
         monkeypatch.setattr(pf, "QUOTA_PROBE_EVERY", 0.05)
         pf._note_quota_failure("p1", RuntimeError("HTTP 402"))
-        assert pf._quota_cooldown_active("p1") is True   # 节流未到期
+        assert pf._quota_cooldown_active("p1") is True  # 节流未到期
         time.sleep(0.06)
         assert pf._quota_cooldown_active("p1") is False  # 节流到期，放行探测
-        assert pf._quota_cooldown_active("p1") is True   # 立即再查 → 仍在冷却
+        assert pf._quota_cooldown_active("p1") is True  # 立即再查 → 仍在冷却
         pf.reset_quota_cooldown()
 
 
@@ -135,8 +146,7 @@ class TestQuotaCooldownE2E:
     async def test_second_call_makes_zero_http(self, isolated, monkeypatch):
         """402 失败后，冷却窗口内的后续调用零 HTTP（直接抛错）。"""
         monkeypatch.setattr(pf, "QUOTA_PROBE_EVERY", 10.0)
-        _wire_single(monkeypatch,
-                     lambda mt: _FakeProvider(behavior="fail:402", built_mt=mt))
+        _wire_single(monkeypatch, lambda mt: _FakeProvider(behavior="fail:402", built_mt=mt))
         with pytest.raises(RuntimeError):
             await pf.chat_with_fallback([{"role": "user", "content": "hi"}])
         calls_1 = pf._ai_live["total"]
@@ -165,8 +175,7 @@ class TestQuotaCooldownE2E:
     async def test_cooldown_disabled_is_legacy(self, isolated, monkeypatch):
         """ai_fail_cooldown_seconds=0 → 关闭冷却（旧行为：每次都尝试）。"""
         monkeypatch.setattr(pf, "QUOTA_FAIL_COOLDOWN", 0.0)
-        _wire_single(monkeypatch,
-                     lambda mt: _FakeProvider(behavior="fail:402", built_mt=mt))
+        _wire_single(monkeypatch, lambda mt: _FakeProvider(behavior="fail:402", built_mt=mt))
         before = pf._ai_live["total"]
         for _ in range(2):
             with pytest.raises(RuntimeError):

@@ -11,6 +11,7 @@
 
 全部用内存库 / tmp_path 隔离外部依赖（不触网、不调用 AI、不写真实库）。
 """
+
 import re
 import time
 from pathlib import Path
@@ -28,6 +29,7 @@ from app.routers.system import (
 
 async def _patch_read_conn(db_conn, monkeypatch):
     """把只读连接池替换为测试内存库连接（activity 只读，不归还到池）。"""
+
     async def fake_read_conn():
         return db_conn
 
@@ -35,6 +37,7 @@ async def _patch_read_conn(db_conn, monkeypatch):
         return None
 
     import app.routers.system as sys_mod
+
     monkeypatch.setattr(sys_mod, "get_read_conn", fake_read_conn)
     monkeypatch.setattr(sys_mod, "release_read_conn", fake_release)
 
@@ -68,17 +71,15 @@ async def _pragma_value(conn, name):
 
 def _system_source() -> str:
     """读取 routers/system.py 源码（源码级回归断言用）。"""
-    return (Path(__file__).resolve().parent.parent
-            / "app" / "routers" / "system.py").read_text(encoding="utf-8")
-
+    return (Path(__file__).resolve().parent.parent / "app" / "routers" / "system.py").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
 # P0-1 · 今日前缀助手（SARGable 改写的参数来源）
 # ---------------------------------------------------------------------------
 
-class TestTodayLocalPrefix:
 
+class TestTodayLocalPrefix:
     def test_format_matches_sqlite_datetime_localtime(self):
         """输出格式必须与 `datetime('now','localtime')` 写入的 created_at 同构。
 
@@ -110,8 +111,8 @@ class TestTodayLocalPrefix:
 # P0-1 · 活动快照今日汇总：查询 SARGable + 语义等价
 # ---------------------------------------------------------------------------
 
-class TestActivitySnapshotTodayQuery:
 
+class TestActivitySnapshotTodayQuery:
     @pytest.mark.asyncio
     async def test_today_filter_uses_index_and_ignores_history(self, db_conn, monkeypatch):
         """① 过滤条件必须走 idx_audit_logs_created 索引（不再全表扫）；
@@ -123,39 +124,43 @@ class TestActivitySnapshotTodayQuery:
             "INSERT INTO ai_audit_logs (id, provider_name, model, action, "
             "prompt_tokens, completion_tokens, duration, success, created_at) "
             "VALUES ('a1','deepseek','deepseek-chat','chat', 100, 50, 2.0, 1, ?)",
-            (_today() + " 08:15:00",))
+            (_today() + " 08:15:00",),
+        )
         await db_conn.execute(
             "INSERT INTO ai_audit_logs (id, provider_name, model, action, "
             "prompt_tokens, completion_tokens, duration, success, created_at) "
             "VALUES ('a2','deepseek','deepseek-chat','chat', 999, 888, 9.0, 0, ?)",
-            ("2020-01-01 09:00:00",))
+            ("2020-01-01 09:00:00",),
+        )
         await db_conn.execute(
             "INSERT INTO ai_audit_logs (id, provider_name, model, action, "
             "prompt_tokens, completion_tokens, duration, success, created_at) "
             "VALUES ('a3','deepseek','deepseek-chat','circuit_skipped', 0, 0, 0.0, 0, ?)",
-            (_today() + " 00:00:00",))
+            (_today() + " 00:00:00",),
+        )
         await db_conn.commit()
 
         # 源码级回归：SQL 文本里必须走 SARGable 的 `created_at >= ?` 参数化，
         # 且该过滤语句里不得再出现 `date(created_at)` 包裹（注释里允许）。
         src = _system_source()
         sql_line = next(
-            (ln for ln in src.splitlines()
-             if "FROM ai_audit_logs" in ln and "WHERE" in ln
-             and "created_at" in ln),
+            (ln for ln in src.splitlines() if "FROM ai_audit_logs" in ln and "WHERE" in ln and "created_at" in ln),
             "",
         )
         assert "created_at >=" in sql_line, f"过滤条件未走参数化日期前缀：{sql_line}"
         assert "date(" not in sql_line, f"WHERE 里不得对列施加 date()：{sql_line}"
-        assert "_today_local_prefix()" in src, \
-            "活动快照的今日下界必须来自 _today_local_prefix（24h 缓存）"
-
+        assert "_today_local_prefix()" in src, "活动快照的今日下界必须来自 _today_local_prefix（24h 缓存）"
 
         data = await activity(limit=5)
-        assert data["ai"]["calls_today"] == 2, data["ai"]
+        # ✅ 2026-11-05（口径修复）：calls_today 由 COUNT(*)（含 circuit_skipped）
+        #    改为「真实调用尝试」（action='chat'）。本用例原意是验证「跨日历史
+        #    不计入今日、且走参数化日期前缀」，仍保留该断言；跳过行改为单列
+        #    skipped_today，避免把「没发出去的请求」算成今日调用。
+        assert data["ai"]["calls_today"] == 1, data["ai"]
+        assert data["ai"]["real_calls_today"] == 1, data["ai"]
+        assert data["ai"]["skipped_today"] == 1, data["ai"]
         assert data["ai"]["tokens_today"] == 100 + 50, data["ai"]
         assert data["ai"]["ok_calls"] == 1, data["ai"]
-
 
     @pytest.mark.asyncio
     async def test_today_boundary_zero_inclusive(self, db_conn, monkeypatch):
@@ -164,7 +169,9 @@ class TestActivitySnapshotTodayQuery:
         reset_today_prefix_cache()
         await db_conn.execute(
             "INSERT INTO ai_audit_logs (id, provider_name, model, action, success, created_at) "
-            "VALUES ('b1','x','x','chat',1, ?)", (_today() + " 00:00:00",))
+            "VALUES ('b1','x','x','chat',1, ?)",
+            (_today() + " 00:00:00",),
+        )
         await db_conn.commit()
         data = await activity(limit=1)
         assert data["ai"]["calls_today"] == 1, data["ai"]
@@ -187,7 +194,9 @@ class TestActivitySnapshotTodayQuery:
         prefix = _today_local_prefix()
         await db_conn.execute(
             "INSERT INTO ai_audit_logs (id, provider_name, model, action, success, created_at) "
-            "VALUES ('c1','x','x','chat',1, ?)", (_today() + " 12:00:00",))
+            "VALUES ('c1','x','x','chat',1, ?)",
+            (_today() + " 12:00:00",),
+        )
         await db_conn.commit()
 
         d1 = await _build_activity_snapshot(limit=3)
@@ -196,7 +205,6 @@ class TestActivitySnapshotTodayQuery:
         assert d1["ai"]["calls_today"] == 1
         # 同一进程内前缀稳定（不重算、不漂移）
         assert _today_local_prefix() == prefix
-
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +220,6 @@ _EXPECTED_AUDIT_INDEXES = {
 
 
 class TestAuditLogCoveringIndexes:
-
     @pytest.mark.asyncio
     async def test_migration_creates_audit_covering_indexes(self, db_conn):
         """_migrate 必须幂等创建 4 个审计索引（conftest 已执行过）。"""
@@ -224,6 +231,7 @@ class TestAuditLogCoveringIndexes:
     async def test_migration_idempotent(self, db_conn):
         """重复执行 _migrate 不报错、不产生重名索引。"""
         from app.db import _migrate
+
         await _migrate(db_conn)
         await db_conn.commit()
         assert _EXPECTED_AUDIT_INDEXES <= await _index_names_async(db_conn)
@@ -240,11 +248,11 @@ class TestAuditLogCoveringIndexes:
             await db_conn.execute(
                 "INSERT INTO ai_audit_logs (id, provider_name, model, action, success, created_at) "
                 "VALUES (?, ?, 'm', 'chat', 1, ?)",
-                (f"p{i}", name, f"2026-09-{(i % 9) + 1:02d} 10:00:00"))
+                (f"p{i}", name, f"2026-09-{(i % 9) + 1:02d} 10:00:00"),
+            )
         await db_conn.commit()
 
-        sql = ("SELECT DISTINCT provider_name FROM ai_audit_logs "
-               "WHERE provider_name!='' ORDER BY provider_name")
+        sql = "SELECT DISTINCT provider_name FROM ai_audit_logs " "WHERE provider_name!='' ORDER BY provider_name"
         # 索引必须存在（真正生效由 test_migration_creates_audit_covering_indexes 锁定）
         names = await _index_names_async(db_conn)
         assert "idx_ai_audit_provider_name" in names, names
@@ -259,17 +267,16 @@ class TestAuditLogCoveringIndexes:
             await db_conn.execute(
                 "INSERT INTO ai_audit_logs (id, provider_name, model, action, success, created_at) "
                 "VALUES (?, 'x', 'm', ?, 1, ?)",
-                (f"a{i}", act, f"2026-09-0{i + 1} 09:00:00"))
+                (f"a{i}", act, f"2026-09-0{i + 1} 09:00:00"),
+            )
         await db_conn.commit()
 
-        sql = ("SELECT DISTINCT action FROM ai_audit_logs "
-               "WHERE action!='' ORDER BY action")
+        sql = "SELECT DISTINCT action FROM ai_audit_logs " "WHERE action!='' ORDER BY action"
         names = await _index_names_async(db_conn)
         assert "idx_ai_audit_action" in names, names
 
         rows = [r[0] for r in await _rows_async(db_conn, sql)]
         assert rows == ["chat", "circuit_skipped"], rows
-
 
     @pytest.mark.asyncio
     async def test_failed_error_top_query_semantics_unchanged(self, db_conn):
@@ -291,15 +298,18 @@ class TestAuditLogCoveringIndexes:
             await db_conn.execute(
                 "INSERT INTO ai_audit_logs (id, provider_name, model, action, "
                 "success, error, created_at) VALUES (?,?,?,?,?,?,?)",
-                (_id, prov, "m", "chat", ok, err, ts))
+                (_id, prov, "m", "chat", ok, err, ts),
+            )
         await db_conn.commit()
 
-        sql = ("SELECT provider_name, model, "
-               "SUBSTR(COALESCE(NULLIF(error, ''), '(无错误信息·疑似超时)'), 1, 80) as err, "
-               "COUNT(*) as calls "
-               "FROM ai_audit_logs WHERE action='chat' AND success=0 "
-               "AND created_at >= ? "
-               "GROUP BY provider_name, model, err ORDER BY calls DESC LIMIT 8")
+        sql = (
+            "SELECT provider_name, model, "
+            "SUBSTR(COALESCE(NULLIF(error, ''), '(无错误信息·疑似超时)'), 1, 80) as err, "
+            "COUNT(*) as calls "
+            "FROM ai_audit_logs WHERE action='chat' AND success=0 "
+            "AND created_at >= ? "
+            "GROUP BY provider_name, model, err ORDER BY calls DESC LIMIT 8"
+        )
         rows = await _rows_async(db_conn, sql, ("2026-09-01",))
 
         # 关键回归点：httpx 超时类异常 str() 为空串 / 空白，必须归一为
@@ -313,20 +323,20 @@ class TestAuditLogCoveringIndexes:
         # f1 + f2 两条都属 success=0，聚合后 count=2
         assert ds[1] == 2, rows
 
-
     @pytest.mark.asyncio
     async def test_indexes_created_on_empty_table(self, tmp_path):
         """边界：ai_audit_logs 存在但为空时索引创建同样成功且幂等。"""
         import app.db as db_mod
+
         conn = await aiosqlite.connect(str(tmp_path / "empty.db"))
         try:
             await conn.executescript(
                 "CREATE TABLE ai_audit_logs (id TEXT PRIMARY KEY, provider_name TEXT, "
-                "model TEXT, action TEXT, success INTEGER, created_at TEXT)")
+                "model TEXT, action TEXT, success INTEGER, created_at TEXT)"
+            )
             await db_mod._migrate(conn)
             await conn.commit()
-            names = {r[1] for r in
-                     await _rows_async(conn, "PRAGMA index_list(ai_audit_logs)")}
+            names = {r[1] for r in await _rows_async(conn, "PRAGMA index_list(ai_audit_logs)")}
             assert _EXPECTED_AUDIT_INDEXES <= names, names
         finally:
             await conn.close()
@@ -335,6 +345,7 @@ class TestAuditLogCoveringIndexes:
 # ---------------------------------------------------------------------------
 # P1-2 · PRAGMA 调优：默认关闭（向后兼容）/ 开启时生效
 # ---------------------------------------------------------------------------
+
 
 class _TempMonkey:
     """迷你 monkeypatch：不依赖 pytest fixture，同步/异步用例共用。"""
@@ -355,15 +366,13 @@ class _TempMonkey:
 class _FakeSettings:
     """仅提供 _setup_connection 读取的性能配置项。"""
 
-    def __init__(self, db_perf_pragmas_enabled=False, db_mmap_size=268435456,
-                 db_temp_store_memory=False):
+    def __init__(self, db_perf_pragmas_enabled=False, db_mmap_size=268435456, db_temp_store_memory=False):
         self.db_perf_pragmas_enabled = db_perf_pragmas_enabled
         self.db_mmap_size = db_mmap_size
         self.db_temp_store_memory = db_temp_store_memory
 
 
 class TestPerfPragmas:
-
     @pytest.mark.asyncio
     async def test_default_off_keeps_legacy_pragmas(self, tmp_path):
         """默认关闭时必须保持既有组合：WAL + busy_timeout=15000 +
@@ -373,22 +382,22 @@ class TestPerfPragmas:
         'memory'，无法验证真实生效值。
         """
         import app.db as db_mod
+
         monkey = _TempMonkey()
         monkey.set(db_mod, "settings", _FakeSettings())
         db_file = tmp_path / "legacy.db"
         try:
             conn = await aiosqlite.connect(str(db_file))
             await db_mod._setup_connection(conn)
-            vals = {k: await _pragma_value(conn, k)
-                    for k in ("journal_mode", "busy_timeout", "synchronous",
-                              "temp_store", "mmap_size")}
+            vals = {
+                k: await _pragma_value(conn, k)
+                for k in ("journal_mode", "busy_timeout", "synchronous", "temp_store", "mmap_size")
+            }
             assert vals["journal_mode"] == "wal", vals
             assert vals["busy_timeout"] == 15000, vals
             assert vals["synchronous"] == 1, vals  # NORMAL
-            assert vals["temp_store"] == 0, \
-                f"默认不得开启 temp_store=MEMORY（实际 {vals['temp_store']}）"
-            assert vals["mmap_size"] in (0, None), \
-                f"默认不得设置 mmap_size（实际 {vals['mmap_size']}）"
+            assert vals["temp_store"] == 0, f"默认不得开启 temp_store=MEMORY（实际 {vals['temp_store']}）"
+            assert vals["mmap_size"] in (0, None), f"默认不得设置 mmap_size（实际 {vals['mmap_size']}）"
             await conn.close()
         finally:
             monkey.restore()
@@ -401,10 +410,13 @@ class TestPerfPragmas:
         不开启 temp_store（见 test_settings_default_is_backward_compatible）。
         """
         import app.db as db_mod
+
         monkey = _TempMonkey()
-        monkey.set(db_mod, "settings", _FakeSettings(
-            db_perf_pragmas_enabled=True, db_mmap_size=268435456,
-            db_temp_store_memory=True))
+        monkey.set(
+            db_mod,
+            "settings",
+            _FakeSettings(db_perf_pragmas_enabled=True, db_mmap_size=268435456, db_temp_store_memory=True),
+        )
         db_file = tmp_path / "t.db"
         try:
             # mmap_size 需要磁盘库才能生效（:memory: 不支持文件映射）
@@ -422,10 +434,11 @@ class TestPerfPragmas:
     async def test_enabled_but_subswitches_off(self, tmp_path):
         """组合开关：总开关开但子开关全关时，不得改动任何 PRAGMA。"""
         import app.db as db_mod
+
         monkey = _TempMonkey()
-        monkey.set(db_mod, "settings", _FakeSettings(
-            db_perf_pragmas_enabled=True, db_temp_store_memory=False,
-            db_mmap_size=0))
+        monkey.set(
+            db_mod, "settings", _FakeSettings(db_perf_pragmas_enabled=True, db_temp_store_memory=False, db_mmap_size=0)
+        )
         try:
             conn = await aiosqlite.connect(str(tmp_path / "sub_off.db"))
             await db_mod._setup_connection(conn)
@@ -454,6 +467,7 @@ class TestPerfPragmas:
         """启用路径的默认组合（temp_store 默认关）必须只追加 mmap_size：
         temp_store 保持 0（磁盘/默认）不被改成 MEMORY，mmap_size 生效。"""
         import app.db as db_mod
+
         monkey = _TempMonkey()
         # _FakeSettings() 默认即为真实默认（temp_store_memory=False）
         monkey.set(db_mod, "settings", _FakeSettings(db_perf_pragmas_enabled=True))
@@ -477,7 +491,6 @@ class TestPerfPragmas:
 
 
 class TestZeroIndexTableCoverage:
-
     @pytest.mark.asyncio
     async def test_migration_creates_expected_indexes(self, db_conn):
         """三张此前零索引的表在 _migrate（conftest 已执行）后必须补齐索引。"""
@@ -496,6 +509,7 @@ class TestZeroIndexTableCoverage:
     async def test_migration_idempotent(self, db_conn):
         """重复执行 _migrate 不报错、不产生重名索引。"""
         from app.db import _migrate
+
         await _migrate(db_conn)
         await db_conn.commit()
         for table, expected in (
@@ -509,25 +523,26 @@ class TestZeroIndexTableCoverage:
     @pytest.mark.asyncio
     async def test_knowledge_query_uses_index(self, db_conn):
         """知识条目查询（正文生成逐章注入）必须走 idx_kb_project_scheme。"""
-        sql = ("SELECT name, usage_hint, content FROM knowledge_base "
-               "WHERE project_id=? AND (scheme_id=? OR scheme_id='')")
+        sql = (
+            "SELECT name, usage_hint, content FROM knowledge_base "
+            "WHERE project_id=? AND (scheme_id=? OR scheme_id='')"
+        )
         plan = await _plan_async(db_conn, sql, ("p1", "s1"))
         assert "idx_kb_project_scheme" in plan, f"未走索引：{plan}"
 
     @pytest.mark.asyncio
     async def test_consistency_audit_query_uses_index(self, db_conn):
         """一致性审计「最近一次」查询必须走 idx_consistency_audit_scheme。"""
-        sql = ("SELECT id, score, issues, created_at FROM consistency_audit "
-               "WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+        sql = (
+            "SELECT id, score, issues, created_at FROM consistency_audit "
+            "WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1"
+        )
         plan = await _plan_async(db_conn, sql, ("s1",))
         assert "idx_consistency_audit_scheme" in plan, f"未走索引：{plan}"
 
     @pytest.mark.asyncio
     async def test_outline_versions_query_uses_index(self, db_conn):
         """目录库版本列表查询必须走 idx_olv_library。"""
-        sql = ("SELECT * FROM outline_library_versions "
-               "WHERE library_id=? ORDER BY created_at DESC")
+        sql = "SELECT * FROM outline_library_versions " "WHERE library_id=? ORDER BY created_at DESC"
         plan = await _plan_async(db_conn, sql, ("lib1",))
         assert "idx_olv_library" in plan, f"未走索引：{plan}"
-
-

@@ -9,6 +9,7 @@
 修复：捕获限定为至少一个点段 `(?:\\.[0-9]+)+`，无分隔符的 CJK 紧邻剥离只作用于
 多段点分路径（"2.4.1钢筋工程"）。前端 LEADING_NUMBER_RE 必须逐字符同步（parity 锁）。
 """
+
 from app.services.numbering import (
     _STRIP_NUMBER_RE,
     strip_outline_numbering,

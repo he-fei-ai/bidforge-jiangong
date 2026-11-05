@@ -6,6 +6,7 @@ P1-2: sensetime 思考吞噬翻倍失败后 provider 短时冷却（避免降级
 
 承接 R109 §五登记的 2 项 P1。
 """
+
 from __future__ import annotations
 
 import ast
@@ -20,10 +21,12 @@ PF_PATH = BACKEND / "app" / "services" / "ai" / "provider_factory.py"
 
 # ---------- fixtures: 每个测试前重置模块级状态 ----------
 
+
 @pytest.fixture(autouse=True)
 def _reset_r110_state():
     """每个测试前清空 thinking-dead 与 all-circuit-fast-fail 状态。"""
     from app.services.ai import provider_factory as pf
+
     pf.reset_thinking_dead()
     pf.reset_all_circuit_fast_fail()
     yield
@@ -35,11 +38,13 @@ def _reset_r110_state():
 # P1-2: thinking-dead cooldown（思考吞噬翻倍失败后 provider 短时冷却）
 # =====================================================================
 
+
 class TestThinkingDeadHelpers:
     """_note_thinking_dead / _is_thinking_dead / clear_thinking_dead 单元契约。"""
 
     def test_note_marks_provider(self):
         from app.services.ai.provider_factory import _is_thinking_dead, _note_thinking_dead
+
         assert not _is_thinking_dead("sensetime")
         _note_thinking_dead("sensetime")
         assert _is_thinking_dead("sensetime")
@@ -48,6 +53,7 @@ class TestThinkingDeadHelpers:
 
     def test_clear_specific_provider(self):
         from app.services.ai.provider_factory import _is_thinking_dead, _note_thinking_dead, clear_thinking_dead
+
         _note_thinking_dead("sensetime")
         _note_thinking_dead("deepseek")
         clear_thinking_dead("sensetime")
@@ -56,6 +62,7 @@ class TestThinkingDeadHelpers:
 
     def test_clear_all(self):
         from app.services.ai.provider_factory import _is_thinking_dead, _note_thinking_dead, clear_thinking_dead
+
         _note_thinking_dead("sensetime")
         _note_thinking_dead("deepseek")
         clear_thinking_dead()
@@ -65,6 +72,7 @@ class TestThinkingDeadHelpers:
     def test_ttl_expiry(self, monkeypatch):
         """冷却到期后 _is_thinking_dead 返回 False 并清理过期项。"""
         from app.services.ai import provider_factory as pf
+
         # 用极短 TTL 标记
         pf._thinking_dead_until["sensetime"] = time.time() - 0.001  # 已过期
         assert not pf._is_thinking_dead("sensetime")
@@ -74,6 +82,7 @@ class TestThinkingDeadHelpers:
     def test_disabled_when_cooldown_zero(self, monkeypatch):
         """THINKING_DEAD_COOLDOWN=0 时 _note_thinking_dead 空操作。"""
         from app.services.ai import provider_factory as pf
+
         monkeypatch.setattr(pf, "THINKING_DEAD_COOLDOWN", 0.0)
         pf._note_thinking_dead("sensetime")
         assert not pf._is_thinking_dead("sensetime")
@@ -81,6 +90,7 @@ class TestThinkingDeadHelpers:
 
     def test_empty_pname_is_noop(self):
         from app.services.ai.provider_factory import _note_thinking_dead
+
         _note_thinking_dead("")  # 不应抛
         _note_thinking_dead(None)  # type: ignore[arg-type]
 
@@ -101,20 +111,26 @@ class TestGateCandidatesSkipsThinkingDead:
     def _mock_gate_deps(self, monkeypatch):
         """桩掉 _gate_candidates 的 DB/异步依赖避免挂起。"""
         from app.services.ai import provider_factory as pf
+
         async def _no_disabled():
             return set()
+
         monkeypatch.setattr(pf, "resolve_disabled_providers", _no_disabled)
+
         async def _no_audit(*a, **k):
             pass
+
         monkeypatch.setattr(pf, "_log_audit", _no_audit)
 
     @pytest.mark.asyncio
     async def test_thinking_dead_provider_skipped(self):
         from app.services.ai.provider_factory import _gate_candidates, _note_thinking_dead
+
         _note_thinking_dead("sensetime")
         # 全部候选处于思考吞噬冷却 → gate 抛「所有 AI 提供商调用失败」，
         # 末条错误信息点名「思考吞噬冷却」。
         import pytest as _pt
+
         with _pt.raises(RuntimeError) as ei:
             await _gate_candidates([self._candidate("sensetime")], "test")
         assert "思考吞噬" in str(ei.value)
@@ -122,6 +138,7 @@ class TestGateCandidatesSkipsThinkingDead:
     @pytest.mark.asyncio
     async def test_non_dead_provider_passes(self):
         from app.services.ai.provider_factory import _gate_candidates
+
         usable, err = await _gate_candidates([self._candidate("agnes")], "test")
         assert len(usable) == 1
         assert usable[0]["provider_name"] == "agnes"
@@ -129,6 +146,7 @@ class TestGateCandidatesSkipsThinkingDead:
     @pytest.mark.asyncio
     async def test_mix_dead_and_alive(self):
         from app.services.ai.provider_factory import _gate_candidates, _note_thinking_dead
+
         _note_thinking_dead("sensetime")
         cands = [self._candidate("sensetime"), self._candidate("agnes")]
         usable, _ = await _gate_candidates(cands, "test")
@@ -156,31 +174,36 @@ class TestCallOneCandidateNotesThinkingDead:
             "max_tokens": 1536,
             "temperature": 0.7,
         }
+
         # 桩 _build_provider 返回简单对象（只需 last_finish_reason 属性）
         class _FakeProv:
             last_finish_reason = "length"
-        monkeypatch.setattr(pf, "_build_provider",
-                            lambda *a, **k: _FakeProv())
+
+        monkeypatch.setattr(pf, "_build_provider", lambda *a, **k: _FakeProv())
 
         # 桩 _call_provider 恒抛思考吞噬异常
         async def _always_thinking_exhausted(*a, **k):
             raise RuntimeError("finish_reason=length，正文为空")
+
         monkeypatch.setattr(pf, "_call_provider", _always_thinking_exhausted)
 
         # 桩 audit 日志、熔断器、并发控制器、实时状态避免副作用与死锁
         async def _no_audit(*a, **k):
             pass
+
         monkeypatch.setattr(pf, "_log_audit", _no_audit)
         monkeypatch.setattr(pf.circuit_breaker, "record_failure", lambda *a, **k: None)
 
         class _NoOpSem:
             async def __aenter__(self):
                 return self
+
             async def __aexit__(self, *a):
                 return False
 
         class _NoOpCtrl:
             """桩并发控制器：信号量直通 + 采样/调整空操作。"""
+
             semaphore = _NoOpSem()
 
             def record(self, *a, **k):
@@ -188,18 +211,28 @@ class TestCallOneCandidateNotesThinkingDead:
 
             def adjust_concurrency(self, *a, **k):
                 pass
+
         monkeypatch.setattr(pf, "concurrency_controller", _NoOpCtrl())
         monkeypatch.setattr(pf, "_ai_live_lock", threading.Lock())
-        monkeypatch.setattr(pf, "_ai_live", {
-            "in_flight": 0, "total": 0, "failed": 0,
-            "last_provider": "", "last_model": "", "last_ok": True,
-            "last_duration": 0.0, "last_at": 0.0,
-        })
+        monkeypatch.setattr(
+            pf,
+            "_ai_live",
+            {
+                "in_flight": 0,
+                "total": 0,
+                "failed": 0,
+                "last_provider": "",
+                "last_model": "",
+                "last_ok": True,
+                "last_duration": 0.0,
+                "last_at": 0.0,
+            },
+        )
         monkeypatch.setattr(pf, "_ab", type("X", (), {"notify": lambda *a: None})())
 
         result, err = await pf._attempt_candidate(
-            c, [], temperature=0.7, json_mode=False, max_tokens=1536,
-            req_timeout=30, scene="test", extra_body=None)
+            c, [], temperature=0.7, json_mode=False, max_tokens=1536, req_timeout=30, scene="test", extra_body=None
+        )
         # 翻倍重试一次后仍失败 → 返回空 + 异常
         assert result == ""
         assert err is not None
@@ -226,29 +259,37 @@ class TestCallOneCandidateNotesThinkingDead:
             "max_tokens": 1536,
             "temperature": 0.7,
         }
+
         class _FakeProv:
             last_finish_reason = "stop"
+
         monkeypatch.setattr(pf, "_build_provider", lambda *a, **k: _FakeProv())
 
         async def _success(*a, **k):
             return "正文内容"
+
         monkeypatch.setattr(pf, "_call_provider", _success)
+
         async def _no_audit(*a, **k):
             pass
+
         monkeypatch.setattr(pf, "_log_audit", _no_audit)
         monkeypatch.setattr(pf.circuit_breaker, "record_success", lambda *a, **k: None)
         monkeypatch.setattr(pf, "_note_quota_success", lambda *a, **k: None)
-        monkeypatch.setattr(pf, "extract_usage", lambda *a, **k: {
-            "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0})
+        monkeypatch.setattr(
+            pf, "extract_usage", lambda *a, **k: {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
+        )
 
         class _NoOpSem:
             async def __aenter__(self):
                 return self
+
             async def __aexit__(self, *a):
                 return False
 
         class _NoOpCtrl:
             """桩并发控制器：信号量直通 + 采样/调整空操作。"""
+
             semaphore = _NoOpSem()
 
             def record(self, *a, **k):
@@ -256,18 +297,28 @@ class TestCallOneCandidateNotesThinkingDead:
 
             def adjust_concurrency(self, *a, **k):
                 pass
+
         monkeypatch.setattr(pf, "concurrency_controller", _NoOpCtrl())
         monkeypatch.setattr(pf, "_ai_live_lock", threading.Lock())
-        monkeypatch.setattr(pf, "_ai_live", {
-            "in_flight": 0, "total": 0, "failed": 0,
-            "last_provider": "", "last_model": "", "last_ok": True,
-            "last_duration": 0.0, "last_at": 0.0,
-        })
+        monkeypatch.setattr(
+            pf,
+            "_ai_live",
+            {
+                "in_flight": 0,
+                "total": 0,
+                "failed": 0,
+                "last_provider": "",
+                "last_model": "",
+                "last_ok": True,
+                "last_duration": 0.0,
+                "last_at": 0.0,
+            },
+        )
         monkeypatch.setattr(pf, "_ab", type("X", (), {"notify": lambda *a: None})())
 
         result, err = await pf._attempt_candidate(
-            c, [], temperature=0.7, json_mode=False, max_tokens=1536,
-            req_timeout=30, scene="test", extra_body=None)
+            c, [], temperature=0.7, json_mode=False, max_tokens=1536, req_timeout=30, scene="test", extra_body=None
+        )
         assert result == "正文内容"
         assert err is None
         # ✅ 成功后 thinking-dead 已清除
@@ -278,22 +329,26 @@ class TestCallOneCandidateNotesThinkingDead:
 # P1-1: all-circuit-fast-fail（跨章全熔断快速失败）
 # =====================================================================
 
+
 class TestAllCircuitFastFail:
     """_record_all_circuit_outcome / _is_all_circuit_fast_fail 契约。"""
 
     def test_below_threshold_not_active(self):
         from app.services.ai.provider_factory import _is_all_circuit_fast_fail, _record_all_circuit_outcome
+
         _record_all_circuit_outcome(success=False)
         assert not _is_all_circuit_fast_fail()  # 仅 1 次，未达阈值 2
 
     def test_activates_at_threshold(self):
         from app.services.ai.provider_factory import _is_all_circuit_fast_fail, _record_all_circuit_outcome
+
         _record_all_circuit_outcome(success=False)
         _record_all_circuit_outcome(success=False)
         assert _is_all_circuit_fast_fail()
 
     def test_success_resets(self):
         from app.services.ai.provider_factory import _is_all_circuit_fast_fail, _record_all_circuit_outcome
+
         _record_all_circuit_outcome(success=False)
         _record_all_circuit_outcome(success=False)
         assert _is_all_circuit_fast_fail()
@@ -306,6 +361,7 @@ class TestAllCircuitFastFail:
             _record_all_circuit_outcome,
             reset_all_circuit_fast_fail,
         )
+
         _record_all_circuit_outcome(success=False)
         _record_all_circuit_outcome(success=False)
         reset_all_circuit_fast_fail()
@@ -313,6 +369,7 @@ class TestAllCircuitFastFail:
 
     def test_disabled_when_threshold_zero(self, monkeypatch):
         from app.services.ai import provider_factory as pf
+
         monkeypatch.setattr(pf, "ALL_CIRCUIT_FAST_FAIL_THRESHOLD", 0)
         # threshold=0 时 _record_all_circuit_outcome 空操作
         pf._record_all_circuit_outcome(success=False)
@@ -337,16 +394,21 @@ class TestGateCandidatesFastFail:
     def _mock_gate_deps(self, monkeypatch):
         """桩掉 _gate_candidates 的 DB/异步依赖避免挂起。"""
         from app.services.ai import provider_factory as pf
+
         async def _no_disabled():
             return set()
+
         monkeypatch.setattr(pf, "resolve_disabled_providers", _no_disabled)
+
         async def _no_audit(*a, **k):
             pass
+
         monkeypatch.setattr(pf, "_log_audit", _no_audit)
 
     @pytest.mark.asyncio
     async def test_raises_when_fast_fail_active(self):
         from app.services.ai.provider_factory import _gate_candidates, _record_all_circuit_outcome
+
         # 激活快速失败
         _record_all_circuit_outcome(success=False)
         _record_all_circuit_outcome(success=False)
@@ -356,6 +418,7 @@ class TestGateCandidatesFastFail:
     @pytest.mark.asyncio
     async def test_does_not_raise_when_inactive(self):
         from app.services.ai.provider_factory import _gate_candidates
+
         # 未激活 → 正常 gate（候选有 key → 放行）
         usable, _ = await _gate_candidates([self._candidate()], "test")
         assert len(usable) == 1
@@ -364,6 +427,7 @@ class TestGateCandidatesFastFail:
 # =====================================================================
 # AST 静态锁：接线必须在位（防后人误删）
 # =====================================================================
+
 
 def _src():
     return PF_PATH.read_text(encoding="utf-8")
@@ -378,8 +442,7 @@ class TestStaticWiringP1_2:
         # 找 _attempt_candidate 函数
         target = None
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
-                    node.name == "_attempt_candidate":
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_attempt_candidate":
                 target = node
                 break
         assert target is not None, "_attempt_candidate 函数不存在"
@@ -398,8 +461,7 @@ class TestStaticWiringP1_2:
         tree = ast.parse(_src())
         target = None
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
-                    node.name == "_gate_candidates":
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_gate_candidates":
                 target = node
                 break
         assert target is not None
@@ -417,8 +479,7 @@ class TestStaticWiringP1_2:
         tree = ast.parse(_src())
         target = None
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
-                    node.name == "_attempt_candidate":
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_attempt_candidate":
                 target = node
                 break
         assert target is not None
@@ -440,8 +501,7 @@ class TestStaticWiringP1_1:
         tree = ast.parse(_src())
         target = None
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
-                    node.name == "_gate_candidates":
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_gate_candidates":
                 target = node
                 break
         assert target is not None
@@ -459,8 +519,7 @@ class TestStaticWiringP1_1:
         tree = ast.parse(_src())
         target = None
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
-                    node.name == "_gate_candidates":
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_gate_candidates":
                 target = node
                 break
         assert target is not None
@@ -483,31 +542,65 @@ class TestStaticWiringP1_1:
         assert have_true and have_false, (
             f"_gate_candidates 内 _record_all_circuit_outcome 调用不完整"
             f"（total={len(calls)} true={have_true} false={have_false}，"
-            "须含 success=True 与 success=False 两处）")
+            "须含 success=True 与 success=False 两处）"
+        )
 
-    def test_record_success_in_chat_with_fallback(self):
-        """chat_with_fallback 成功路径必须调 _record_all_circuit_outcome(success=True)。"""
-        tree = ast.parse(_src())
-        target = None
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
-                    node.name == "chat_with_fallback":
-                target = node
-                break
-        assert target is not None
-        found = False
-        for node in ast.walk(target):
-            if isinstance(node, ast.Call):
-                f = node.func
-                if isinstance(f, ast.Name) and f.id == "_record_all_circuit_outcome":
-                    found = True
-                    break
-        assert found, "chat_with_fallback 成功路径未调 _record_all_circuit_outcome"
+    async def test_record_success_in_chat_with_fallback(self, monkeypatch, db_conn):
+        """chat_with_fallback 成功路径必须把「全链成功」写回熔断统计（行为锁）。
+
+        ✅ R178（2026-11-04）：旧断言锁的是「``_record_all_circuit_outcome``
+        字面出现在 ``chat_with_fallback`` 函数体内」。R176（降级可见性）把编排
+        下沉到 ``_chat_with_fallback_result``，调用随迁到那里，而
+        ``chat_with_fallback`` 只做转发 —— 旧断言因此误红，但契约（成功一次
+        即重置全链失败计数）并未改变。
+        现改为**真实驱动**一次成功调用并断言记录被写回，比源码形状断言更强。
+        """
+        from app.services.ai import provider_factory as pf
+
+        recorded: list[bool] = []
+
+        class _Fake:
+            name, model, temperature = "fake", "m", 0.7
+            last_usage: dict = {}
+            last_finish_reason = ""
+
+            async def chat(self, messages, **kw):
+                return "成功答案"
+
+        cand = {
+            "provider_name": "fake",
+            "api_key": "k",
+            "base_url": "http://x",
+            "model": "m",
+            "max_tokens": 100,
+            "temperature": 0.7,
+            "request_mode": "normal",
+        }
+
+        async def _resolve(ai_config=None, scene=""):
+            return {"provider_name": "fake", "model": "m"}
+
+        async def _build(cfg):
+            return [cand]
+
+        async def _gate(cands, scene):
+            return cands, None
+
+        monkeypatch.setattr(pf, "_resolve_chat_config", _resolve)
+        monkeypatch.setattr(pf, "_build_candidates", _build)
+        monkeypatch.setattr(pf, "_gate_candidates", _gate)
+        monkeypatch.setattr(pf, "_build_provider", lambda name, *a, **kw: _Fake())
+        monkeypatch.setattr(pf, "_record_all_circuit_outcome", lambda success: recorded.append(success))
+
+        text = await pf.chat_with_fallback([{"role": "user", "content": "hi"}])
+        assert text == "成功答案"
+        assert recorded == [True], "chat_with_fallback 成功路径必须写回全链成功（success=True）"
 
 
 # =====================================================================
 # 配置项登记锁
 # =====================================================================
+
 
 class TestConfigDeclaration:
     """新增配置项必须在 config.py 声明（环境变量可配）。"""
@@ -520,6 +613,7 @@ class TestConfigDeclaration:
 
     def test_defaults_match_design(self):
         from app.config import settings
+
         assert getattr(settings, "ai_thinking_dead_cooldown", None) == 60.0
         assert getattr(settings, "ai_all_circuit_fast_fail_threshold", None) == 2
         assert getattr(settings, "ai_all_circuit_fast_fail_cooldown", None) == 60.0
@@ -527,4 +621,5 @@ class TestConfigDeclaration:
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(pytest.main([__file__, "-v"]))

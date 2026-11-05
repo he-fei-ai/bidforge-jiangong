@@ -9,6 +9,7 @@
 
 同时看护 `app/db.py` 的 WAL 自愈入口类型韧性（`DB_PATH` 被覆写为 str 时不得崩溃）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -56,8 +57,8 @@ def test_prompt_template_strings_have_no_control_chars():
                     if ch in node.value:
                         i = node.value.find(ch)
                         hits.append(
-                            f"{p.name}@{node.lineno} 含 {ch!r}: "
-                            f"...{node.value[max(0, i - 15):i + 15]!r}...")
+                            f"{p.name}@{node.lineno} 含 {ch!r}: " f"...{node.value[max(0, i - 15):i + 15]!r}..."
+                        )
     assert not hits, "模板字符串含控制字符：\n" + "\n".join(hits)
 
 
@@ -86,9 +87,11 @@ def test_content_generation_system_latex_is_double_escaped_in_source():
 # app/db.py 类型韧性（WAL 自愈入口）
 # ---------------------------------------------------------------------------
 
+
 def test_db_as_path_normalizes_str_and_path():
     """_as_path 必须把 str 与 Path 统一归一为 pathlib.Path。"""
     from app.db import _as_path
+
     assert isinstance(_as_path("C:/tmp/x.db"), Path)
     assert isinstance(_as_path(r"C:\tmp\y.db"), Path)
     p = Path("C:/tmp/z.db")

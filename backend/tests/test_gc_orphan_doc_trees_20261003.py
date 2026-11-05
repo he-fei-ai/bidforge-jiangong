@@ -3,6 +3,7 @@
 覆盖：分类纯函数 / 孤儿行查询 / 回收站移动+manifest / 硬删 / main 端到端
 （dry-run 零改动、trash 模式可回退、硬删模式、超量硬上限拒绝）/ 零运行时挂钩静态锁。
 """
+
 import json
 import sqlite3
 import uuid
@@ -42,14 +43,14 @@ def test_find_orphan_uploaded_outlines():
     conn.execute("CREATE TABLE projects(id TEXT PRIMARY KEY)")
     conn.execute("CREATE TABLE schemes(id TEXT PRIMARY KEY)")
     conn.execute(
-        "CREATE TABLE uploaded_outlines(id TEXT PRIMARY KEY,"
-        " project_id TEXT DEFAULT '', scheme_id TEXT DEFAULT '')")
+        "CREATE TABLE uploaded_outlines(id TEXT PRIMARY KEY," " project_id TEXT DEFAULT '', scheme_id TEXT DEFAULT '')"
+    )
     conn.execute("INSERT INTO projects VALUES('p1')")
     conn.execute("INSERT INTO schemes VALUES('s1')")
     for rid, pid, sid in [
         ("r_live", "p1", ""),
         ("r_dead", "gone", ""),
-        ("r_pending", "", ""),          # 空 project_id = 合法待关联态，保留
+        ("r_pending", "", ""),  # 空 project_id = 合法待关联态，保留
         ("r_rescuable", "gone", "s1"),  # scheme 仍存活可反查恢复，保留
     ]:
         conn.execute("INSERT INTO uploaded_outlines VALUES(?,?,?)", (rid, pid, sid))
@@ -117,8 +118,8 @@ def env(tmp_path, monkeypatch):
     conn.execute("CREATE TABLE projects(id TEXT PRIMARY KEY)")
     conn.execute("CREATE TABLE schemes(id TEXT PRIMARY KEY)")
     conn.execute(
-        "CREATE TABLE uploaded_outlines(id TEXT PRIMARY KEY,"
-        " project_id TEXT DEFAULT '', scheme_id TEXT DEFAULT '')")
+        "CREATE TABLE uploaded_outlines(id TEXT PRIMARY KEY," " project_id TEXT DEFAULT '', scheme_id TEXT DEFAULT '')"
+    )
     conn.execute("INSERT INTO projects VALUES('p1')")
     conn.execute("INSERT INTO uploaded_outlines VALUES('r_dead','gone','')")
     conn.commit()
@@ -187,6 +188,7 @@ def test_no_runtime_wiring():
     """零运行时挂钩锁：app/ 内不得 import 本工具（GC 只离线执行，
     删除项目时的实时清理由 doc_storage.delete_project_docs_root 负责）。"""
     import app
+
     app_root = Path(app.__file__).parent
     hits = [
         str(p.relative_to(app_root.parent))

@@ -16,6 +16,7 @@
 判据纪律（AGENTS §5.14/§5.15）：功能实证为主，AST/源码锁只锚调用形态与结构；
 模块全局（streak、水印、连击阈值）一律快照/复位 fixture，防跨用例污染。
 """
+
 from __future__ import annotations
 
 import ast
@@ -73,6 +74,7 @@ def _src(fn) -> str:
 # ===========================================================================
 # A 组 · retry_db_op jitter 参数契约
 # ===========================================================================
+
 
 class TestRetryDbOpJitter:
     @pytest.fixture
@@ -134,6 +136,7 @@ class TestRetryDbOpJitter:
 # B 组 · _chart_pipeline DELETE 接重试（P0-1）
 # ===========================================================================
 
+
 class _FlakyExecute:
     """前 fail_times 次 execute 抛 exc，之后成功返回哨兵。"""
 
@@ -153,8 +156,10 @@ class _FlakyExecute:
 class TestChartDeleteRetry:
     async def test_delete_locked_then_success_survives(self, monkeypatch):
         """功能实证：DELETE 首跳 locked → retry_db_op 重放 → 函数正常返回。"""
+
         async def no_sleep(_d):
             return None
+
         monkeypatch.setattr(DB.asyncio, "sleep", no_sleep)
         db = _FlakyExecute(fail_times=1)
         out = await CP.apply_inline_chart_plan(db, "sec-1", [], "正文原样")
@@ -171,10 +176,8 @@ class TestChartDeleteRetry:
             if isinstance(n, ast.Call):
                 f = n.func
                 fname = f.id if isinstance(f, ast.Name) else getattr(f, "attr", "")
-                consts = [c.value for c in ast.walk(n)
-                          if isinstance(c, ast.Constant) and isinstance(c.value, str)]
-                has_del = any(str(v).startswith("DELETE FROM chart_predictions")
-                              for v in consts)
+                consts = [c.value for c in ast.walk(n) if isinstance(c, ast.Constant) and isinstance(c.value, str)]
+                has_del = any(str(v).startswith("DELETE FROM chart_predictions") for v in consts)
                 if fname == "retry_db_op" and has_del:
                     wrapped = True
                 if fname == "execute" and has_del:
@@ -185,8 +188,7 @@ class TestChartDeleteRetry:
         # 裸调用判定：retry_db_op 之外的 execute(DELETE) 不允许存在
         retry_subtrees: set = set()
         for n in ast.walk(fn):
-            if isinstance(n, ast.Call) and (
-                (isinstance(n.func, ast.Name) and n.func.id == "retry_db_op")):
+            if isinstance(n, ast.Call) and (isinstance(n.func, ast.Name) and n.func.id == "retry_db_op"):
                 for m in ast.walk(n):
                     retry_subtrees.add(id(m))
         for n in ast.walk(fn):
@@ -199,8 +201,7 @@ class TestChartDeleteRetry:
             fname = f.id if isinstance(f, ast.Name) else getattr(f, "attr", "")
             if fname != "execute" or id(n) in retry_subtrees:
                 continue
-            consts = [c.value for c in ast.walk(n)
-                      if isinstance(c, ast.Constant) and isinstance(c.value, str)]
+            consts = [c.value for c in ast.walk(n) if isinstance(c, ast.Constant) and isinstance(c.value, str)]
             if any(str(v).startswith("DELETE FROM chart_predictions") for v in consts):
                 bare = True
         assert not bare, "存在 retry_db_op 之外的裸 DELETE（半接线=没接）"
@@ -209,6 +210,7 @@ class TestChartDeleteRetry:
 # ===========================================================================
 # C 组 · task_control 503 分流 + _persist_section 接线锁（P0-2）
 # ===========================================================================
+
 
 class TestTaskControl503:
     async def test_locked_lands_503_with_retry_after(self, db_conn, monkeypatch):
@@ -222,11 +224,11 @@ class TestTaskControl503:
         with pytest.raises(M.__dict__.get("HTTPException") or Exception) as ei:
             await S.task_control(tid, {"action": "stop"})
         from fastapi import HTTPException
+
         exc = ei.value
         assert isinstance(exc, HTTPException), "锁耗尽必须是 503，不是裸异常直穿"
         assert exc.status_code == 503
-        assert (exc.headers or {}).get("Retry-After") == "2", \
-            "Retry-After 缺失则前端 tasksApi.control 的重试节拍无依据"
+        assert (exc.headers or {}).get("Retry-After") == "2", "Retry-After 缺失则前端 tasksApi.control 的重试节拍无依据"
 
     async def test_non_lock_error_passes_through(self, db_conn, monkeypatch):
         tid = await TR.register_task("content_generation", scheme_id="s1")
@@ -236,6 +238,7 @@ class TestTaskControl503:
 
         monkeypatch.setattr(TR, "set_task_status", boom)
         from fastapi import HTTPException
+
         with pytest.raises(RuntimeError):
             await S.task_control(tid, {"action": "stop"})
 
@@ -247,10 +250,11 @@ class TestTaskControl503:
         seg = seg.split("retry_db_op", 1)[1]
         assert "UPDATE sections SET content=" in src, "闭包内必须含正文 UPDATE"
         assert "retry_db_op(_persist_content_once" in src.replace(" ", "").replace(
-            "retry_db_op(_persist_content_once", "retry_db_op(_persist_content_once"), \
-            "闭包未接 retry_db_op"
-        assert "retry_db_op(_persist_content_once" in "".join(src.split()), \
-            "_persist_content_once 未作为 retry_db_op 实参"
+            "retry_db_op(_persist_content_once", "retry_db_op(_persist_content_once"
+        ), "闭包未接 retry_db_op"
+        assert "retry_db_op(_persist_content_once" in "".join(
+            src.split()
+        ), "_persist_content_once 未作为 retry_db_op 实参"
 
     async def test_chart_apply_failure_degrades_not_kills_content(self):
         """源码锁：apply_inline_chart_plan 调用被 try/except 包住，失败置
@@ -269,6 +273,7 @@ class TestTaskControl503:
 # ===========================================================================
 # D 组 · set_task_status 预算加重（P0-2 后端侧）
 # ===========================================================================
+
 
 class TestSetTaskStatusBudget:
     async def test_control_write_budget_5_with_jitter(self, db_conn, monkeypatch):
@@ -290,6 +295,7 @@ class TestSetTaskStatusBudget:
 # ===========================================================================
 # E 组 · export._db_exec 重试 + 缓存行 fail-soft（P0-3）
 # ===========================================================================
+
 
 class _FakeExportDB:
     def __init__(self, commit_fail_times: int = 0, exec_fail_times: int = 0):
@@ -320,14 +326,14 @@ class _FakeExportDB:
 def fast_retry(monkeypatch):
     async def no_sleep(_d):
         return None
+
     monkeypatch.setattr(DB.asyncio, "sleep", no_sleep)
 
 
 class TestExportDbExec:
     async def test_locked_execute_replays(self, fast_retry):
         db = _FakeExportDB(exec_fail_times=1)
-        ok = await E._db_exec(db, "UPDATE export_presets SET x=1 WHERE id=?", (),
-                              what="t")
+        ok = await E._db_exec(db, "UPDATE export_presets SET x=1 WHERE id=?", (), what="t")
         assert ok is True
         assert len(db.sqls) == 2, "_db_exec 自称写路径唯一出口，锁瞬态必须在此重试"
 
@@ -345,9 +351,15 @@ class TestPersistExportCacheRow:
         db = _FakeExportDB(commit_fail_times=99)
         with caplog.at_level(logging.WARNING):
             await E._persist_export_cache_row(
-                db, scheme={"project_id": "p1"}, scheme_id="s1",
-                config_hash="h", content_fingerprint="f", cache_key="k",
-                out_path=Path("out.docx"), what="缓存行")
+                db,
+                scheme={"project_id": "p1"},
+                scheme_id="s1",
+                config_hash="h",
+                content_fingerprint="f",
+                cache_key="k",
+                out_path=Path("out.docx"),
+                what="缓存行",
+            )
         assert db.rollbacks >= 1, "重试耗尽必须回滚半开事务"
         assert "缓存行持久化失败" in caplog.text
 
@@ -361,9 +373,15 @@ class TestPersistExportCacheRow:
         monkeypatch.setattr(E, "_prune_export_cache", boom)
         with caplog.at_level(logging.WARNING):
             await E._persist_export_cache_row(
-                db, scheme={"project_id": "p1"}, scheme_id="s1",
-                config_hash="h", content_fingerprint="f", cache_key="k",
-                out_path=Path("out.docx"), what="缓存行")
+                db,
+                scheme={"project_id": "p1"},
+                scheme_id="s1",
+                config_hash="h",
+                content_fingerprint="f",
+                cache_key="k",
+                out_path=Path("out.docx"),
+                what="缓存行",
+            )
         assert any("INSERT OR IGNORE INTO export_cache" in s for s in db.sqls)
         assert "缓存裁剪失败" in caplog.text, "裁剪失败必须留痕但不阻断"
 
@@ -376,6 +394,7 @@ class TestPersistExportCacheRow:
         db = _FakeExportDB()
         monkey_prune = db  # noqa
         import app.routers.export as _E
+
         orig = _E._prune_export_cache
 
         async def prune(conn, scheme_id, protect_path=None):
@@ -385,9 +404,15 @@ class TestPersistExportCacheRow:
         _E._prune_export_cache = prune
         try:
             await E._persist_export_cache_row(
-                db, scheme={"project_id": "p1"}, scheme_id="s1",
-                config_hash="h", content_fingerprint="f", cache_key="k",
-                out_path=Path("out.docx"), what="缓存行")
+                db,
+                scheme={"project_id": "p1"},
+                scheme_id="s1",
+                config_hash="h",
+                content_fingerprint="f",
+                cache_key="k",
+                out_path=Path("out.docx"),
+                what="缓存行",
+            )
         finally:
             _E._prune_export_cache = orig
         assert db.commits == 2, "双提交口径（新行先落盘再裁剪）不得回退"
@@ -398,10 +423,10 @@ class TestPersistExportCacheRow:
 # F 组 · provider_factory：缺列分流 / 审计锁上抛 / save 重试 / 确定性死配置
 # ===========================================================================
 
+
 class TestMissingColumnPredicate:
     def test_contract(self):
-        assert PF._is_missing_column_error(
-            _locked("table ai_audit_logs has no column named config_id"))
+        assert PF._is_missing_column_error(_locked("table ai_audit_logs has no column named config_id"))
         assert PF._is_missing_column_error(_locked("no such column: updated_at"))
         assert not PF._is_missing_column_error(_locked("database is locked"))
         assert not PF._is_missing_column_error(ValueError("行宽守卫"))
@@ -409,7 +434,7 @@ class TestMissingColumnPredicate:
 
 class _RecordingConn:
     def __init__(self, fail_map):
-        self.fail_map = fail_map      # SQL 前缀 → 抛的异常（每次命中后移除可模拟成功）
+        self.fail_map = fail_map  # SQL 前缀 → 抛的异常（每次命中后移除可模拟成功）
         self.calls: list[tuple[str, int]] = []
         self.commits = 0
 
@@ -441,31 +466,40 @@ def fake_wtx(monkeypatch):
                 yield conn
             except BaseException:
                 raise
+
         monkeypatch.setattr(PF, "write_tx_conn", _wtx)
         return conn
+
     return install
 
 
 class TestAuditFlushTriage:
     async def test_locked_raises_without_degrade(self, fake_wtx, monkeypatch):
         """锁瞬态必须**原样上抛**给外层 retry_db_op——绝不进缺列降级链（P1-2 误诊根因）。"""
-        conn = fake_wtx(_RecordingConn(
-            {"INSERT INTO ai_audit_logs": _locked()}))
+        conn = fake_wtx(_RecordingConn({"INSERT INTO ai_audit_logs": _locked()}))
         rows = [("i1", "p", "m", "a", 1, 2, 3, 0.5, 0, "e", "s", "cid", "url")]
         with pytest.raises(sqlite3.OperationalError):
             await PF._flush_audit_rows_once(rows)
         assert len(conn.calls) == 1, "锁错后不得尝试任何降级语句"
 
     async def test_true_missing_column_degrades(self, fake_wtx):
-        """真缺列（no column named）→ 降到 NO_IDENTITY 并成功提交。"""
-        conn = fake_wtx(_RecordingConn({
-            PF._AUDIT_INSERT_FULL: _locked(
-                "table ai_audit_logs has no column named config_id")}))
+        """真缺列（no column named）→ 逐级降到 NO_IDENTITY 并成功提交。"""
+        conn = fake_wtx(
+            _RecordingConn(
+                {
+                    # 2026-11-05（方案 B）：第一级写入由 13 列扩到 16 列
+                    # （error_class/attempt_count/attempts_json），旧库这两条
+                    # 带配置身份的语句都会因缺列失败，最终降到 11 列。
+                    PF._AUDIT_INSERT_RICH: _locked("table ai_audit_logs has no column named error_class"),
+                    PF._AUDIT_INSERT_FULL: _locked("table ai_audit_logs has no column named config_id"),
+                }
+            )
+        )
         rows = [("i1", "p", "m", "a", 1, 2, 3, 0.5, 1, "", "s", "cid", "url")]
         await PF._flush_audit_rows_once(rows)
-        assert len(conn.calls) == 2
-        assert conn.calls[1][0] == PF._AUDIT_INSERT_NO_IDENTITY
-        assert conn.calls[1][1] == 1 and conn.commits == 1
+        assert len(conn.calls) == 3
+        assert conn.calls[2][0] == PF._AUDIT_INSERT_NO_IDENTITY
+        assert conn.calls[2][1] == 1 and conn.commits == 1
 
     async def test_flush_buffer_wires_retry(self):
         """接线锁：_flush_audit_buffer 必须经 retry_db_op 调 rows_once（分流的前提）。"""
@@ -476,9 +510,9 @@ class TestAuditFlushTriage:
         """旧行宽 ProgrammingError（绑定数≠占位符数）→ 维持按行宽逐级降级，
         不上抛终结降级链——溢出队列可能残留跨版本 11/10 元组旧行，
         上抛会让该批永远回灌并拖死同队列新批次（R24 既有护栏重锚先例）。"""
-        conn = fake_wtx(_RecordingConn({
-            PF._AUDIT_INSERT_FULL: sqlite3.ProgrammingError(
-                "Incorrect number of bindings supplied")}))
+        conn = fake_wtx(
+            _RecordingConn({PF._AUDIT_INSERT_RICH: sqlite3.ProgrammingError("Incorrect number of bindings supplied")})
+        )
         rows = [("i1", "p", "m", "a", 1, 2, 3, 0.5, 1, "", "s")]  # 11 元组旧行宽
         await PF._flush_audit_rows_once(rows)
         assert len(conn.calls) == 2
@@ -487,10 +521,33 @@ class TestAuditFlushTriage:
 
 
 class TestSaveAiConfigRetry:
+    @pytest.fixture(autouse=True)
+    def _hermetic_dns(self, monkeypatch):
+        """只把 SSRF 守卫**解析入口**固定为公网地址（R178 · 2026-11-04）。
+
+        R175 起 ``normalize_base_url`` 会对主机名做实时 DNS 解析并拒绝任何
+        落入内网/回环/链路本地的结果（fail-closed）。本机网络对
+        ``api.openai.com`` 的解析并不稳定（20 分钟内实测出现过
+        45.114.11.25 / 103.97.176.73 / 75.126.115.192 三种回答），一旦某次解析
+        命中被投毒/内网地址，这组「DB 锁重放」用例就会以完全无关的
+        ValueError 误红（R178 首轮 2 例、次轮 0 例即为该抖动）。
+
+        ⚠️ 只桩 ``socket.getaddrinfo``（网络入口），**不桩判定函数本身**：
+        ``_host_is_forbidden`` / 字面 IP / 私有网段判据照常执行，否则守卫被
+        整体摘掉也不会有任何用例失败。字面 IP 与协议校验同样保留。
+        """
+        monkeypatch.setattr(
+            PF.socket,
+            "getaddrinfo",
+            lambda *_a, **_k: [(PF.socket.AF_INET, PF.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+        )
+
     async def test_locked_first_attempt_replays_whole_tx(self, db_conn, monkeypatch):
         """P0-4：write_tx_conn 首试 execute 抛 locked → retry_db_op 重放整事务 → 落库成功。"""
+
         async def no_sleep(_d):
             return None
+
         monkeypatch.setattr(DB.asyncio, "sleep", no_sleep)
 
         orig_wtx = PF.write_tx_conn
@@ -502,20 +559,23 @@ class TestSaveAiConfigRetry:
         async def flaky_wtx():
             state["n"] += 1
             if state["n"] == 1:
+
                 class _Bad:
                     async def execute(self, *a, **k):
                         raise _locked()
+
                     async def commit(self):
                         raise _locked()
+
                 yield _Bad()
                 return
             async with orig_wtx() as conn:
                 yield conn
 
         monkeypatch.setattr(PF, "write_tx_conn", flaky_wtx)
-        cid = await PF.save_ai_config({
-            "provider_name": "openai", "model": "gpt-test",
-            "plan": "payg", "base_url": "https://api.openai.com/v1"})
+        cid = await PF.save_ai_config(
+            {"provider_name": "openai", "model": "gpt-test", "plan": "payg", "base_url": "https://api.openai.com/v1"}
+        )
         assert state["n"] == 2, "锁瞬态必须整事务重放（每次尝试独立连接）"
         conn = await DB.get_conn()
         cur = await conn.execute("SELECT id FROM ai_config WHERE id=?", (cid,))
@@ -525,11 +585,16 @@ class TestSaveAiConfigRetry:
         """保存即视为用户改过配置 → 确定性死连击清零。"""
         key = "cfg:cid-reset"
         monkeypatch.setitem(PF._det_dead_streak, key, PF.DET_DEAD_STREAK_THRESHOLD)
-        cid = await PF.save_ai_config({
-            "id": "cid-reset",
-            "provider_name": "openai", "model": "gpt-test",
-            "plan": "payg", "base_url": "https://api.openai.com/v1",
-            "is_active": False})
+        cid = await PF.save_ai_config(
+            {
+                "id": "cid-reset",
+                "provider_name": "openai",
+                "model": "gpt-test",
+                "plan": "payg",
+                "base_url": "https://api.openai.com/v1",
+                "is_active": False,
+            }
+        )
         assert key not in PF._det_dead_streak
 
 
@@ -552,16 +617,16 @@ class TestDeterministicDeadStreak:
 
     async def _audit_fail(self, error: str, cid: str, monkeypatch, ok: bool = False):
         monkeypatch.setattr(PF, "_flush_audit_buffer", _noop_flush)
-        await PF._log_audit("volcengine", "m1", "chat", 0.1, ok,
-                            error=error, config_id=cid)
+        await PF._log_audit("volcengine", "m1", "chat", 0.1, ok, error=error, config_id=cid)
 
     async def test_three_consecutive_404_marks_dead(self, monkeypatch):
         err = "Error code: 404 - {'error': {'code': 'UnsupportedModel'}}"
         for _ in range(3):
             await self._audit_fail(err, "cA", monkeypatch)
         assert PF._det_dead_streak["cfg:cA"] == 3
-        assert PF._is_dead_provider("volcengine", "m1", "cA", "") is True, \
-            "连续 3 次确定性 404 必须运行期判死（不必等统计口径攒样本）"
+        assert (
+            PF._is_dead_provider("volcengine", "m1", "cA", "") is True
+        ), "连续 3 次确定性 404 必须运行期判死（不必等统计口径攒样本）"
 
     async def test_success_resets_and_revives(self, monkeypatch):
         err = "Error code: 404 - UnsupportedModel"
@@ -596,22 +661,23 @@ async def _noop_flush():
 # G 组 · prompts._cache 表级水印（P1-1 重载风暴）
 # ===========================================================================
 
+
 @pytest.fixture
 def prompt_db(tmp_path):
     import sqlite3 as _s3
+
     path = str(tmp_path / "prompts_audit.db")
     conn = _s3.connect(path)
     conn.execute(
         "CREATE TABLE prompt_templates (key TEXT PRIMARY KEY, content TEXT,"
-        " updated_at TEXT DEFAULT (datetime('now','localtime')))")
+        " updated_at TEXT DEFAULT (datetime('now','localtime')))"
+    )
     conn.execute("CREATE TABLE other_table (x)")
-    conn.execute("INSERT INTO prompt_templates (key, content, updated_at)"
-                 " VALUES ('K1', 'v1', 't0')")
+    conn.execute("INSERT INTO prompt_templates (key, content, updated_at)" " VALUES ('K1', 'v1', 't0')")
     conn.commit()
     conn.close()
 
-    snap = (PC._prompt_cache, PC._loaded_db_path, PC._loaded_db_mtime,
-            PC._loaded_db_watermark, PC._watermark_probe_ts)
+    snap = (PC._prompt_cache, PC._loaded_db_path, PC._loaded_db_mtime, PC._loaded_db_watermark, PC._watermark_probe_ts)
     PC._prompt_cache = None
     PC._loaded_db_path = None
     PC._loaded_db_mtime = None
@@ -639,17 +705,18 @@ def loads_counter(monkeypatch):
 def _bump_mtime(path, ahead=10.0):
     st = Path(path).stat()
     import os
+
     os.utime(path, (st.st_atime + ahead, st.st_mtime + ahead))
 
 
 class TestPromptCacheWatermark:
-    async def test_other_table_bump_no_reload(self, prompt_db, monkeypatch,
-                                              loads_counter):
+    async def test_other_table_bump_no_reload(self, prompt_db, monkeypatch, loads_counter):
         """他表写入 bump 库 mtime + 水印未变 → **不重载**（1004 条 INFO 风暴根因）。"""
         monkeypatch.setattr(PC, "_current_db_path", lambda: prompt_db)
         PC._get_prompt_cache()
         assert loads_counter["n"] == 1
         import sqlite3
+
         conn = sqlite3.connect(prompt_db)
         conn.execute("INSERT INTO other_table VALUES (1)")
         conn.commit()
@@ -666,9 +733,9 @@ class TestPromptCacheWatermark:
         PC._get_prompt_cache()
         assert loads_counter["n"] == 1
         import sqlite3
+
         conn = sqlite3.connect(prompt_db)
-        conn.execute("UPDATE prompt_templates SET content='v2',"
-                     " updated_at='t9' WHERE key='K1'")
+        conn.execute("UPDATE prompt_templates SET content='v2'," " updated_at='t9' WHERE key='K1'")
         conn.commit()
         conn.close()
         _bump_mtime(prompt_db)
@@ -677,8 +744,7 @@ class TestPromptCacheWatermark:
         assert loads_counter["n"] == 2, "水印变更必须重载"
         assert cache["K1"] == "v2"
 
-    async def test_no_watermark_falls_back_legacy(self, prompt_db, monkeypatch,
-                                                  loads_counter):
+    async def test_no_watermark_falls_back_legacy(self, prompt_db, monkeypatch, loads_counter):
         """水印无法记录（None）→ 逐字回退旧行为：mtime 变新即重载。"""
         monkeypatch.setattr(PC, "_current_db_path", lambda: prompt_db)
         PC._get_prompt_cache()
@@ -694,6 +760,7 @@ class TestPromptCacheWatermark:
         PC._get_prompt_cache()
         assert loads_counter["n"] == 1
         import sqlite3
+
         # ① 先做一次真实探测建立基线：他表写入 bump mtime → 探测 → 水印未变
         #    不重载，且把 _watermark_probe_ts 推到当前时刻（进入节流窗口）。
         conn = sqlite3.connect(prompt_db)
@@ -707,8 +774,7 @@ class TestPromptCacheWatermark:
         # ② prompt_templates 真变更 + bump mtime，但仍在探测节流窗口内
         #    → 不重新探测、不重载（变更可见延迟 ≤ 窗口，非丢失）。
         conn = sqlite3.connect(prompt_db)
-        conn.execute("UPDATE prompt_templates SET content='v3', updated_at='tX'"
-                     " WHERE key='K1'")
+        conn.execute("UPDATE prompt_templates SET content='v3', updated_at='tX'" " WHERE key='K1'")
         conn.commit()
         conn.close()
         _bump_mtime(prompt_db)
@@ -732,6 +798,7 @@ class TestPromptCacheWatermark:
 # H 组 · main P2-1 测试流量文件日志隔离
 # ===========================================================================
 
+
 class TestFileLogGuard:
     def test_pytest_process_skips(self, monkeypatch):
         assert M._should_skip_file_log() is True, "本测试进程内 pytest 必在 sys.modules"
@@ -741,8 +808,7 @@ class TestFileLogGuard:
         monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         monkeypatch.delenv("ALLOW_FILE_LOG_IN_TESTCLIENT", raising=False)
         monkeypatch.setitem(sys.modules, "starlette.testclient", None)
-        assert M._should_skip_file_log() is True, \
-            "TestClient 独立脚本（非 pytest）必须被拦——生产日志污染源"
+        assert M._should_skip_file_log() is True, "TestClient 独立脚本（非 pytest）必须被拦——生产日志污染源"
 
     def test_env_escape_hatch(self, monkeypatch):
         monkeypatch.delitem(sys.modules, "pytest", raising=False)
@@ -788,9 +854,13 @@ class TestFileLogGuard:
 # ===========================================================================
 
 _TOUCHED = [
-    "db.py", "routers/_chart_pipeline.py", "routers/sse_handlers.py",
-    "routers/export.py", "services/ai/task_registry.py",
-    "services/ai/provider_factory.py", "services/ai/prompts/_cache.py",
+    "db.py",
+    "routers/_chart_pipeline.py",
+    "routers/sse_handlers.py",
+    "routers/export.py",
+    "services/ai/task_registry.py",
+    "services/ai/provider_factory.py",
+    "services/ai/prompts/_cache.py",
     "main.py",
 ]
 
@@ -800,14 +870,13 @@ class TestByteHealth:
     def test_bytes_clean(self, rel):
         raw = (APP_DIR / rel).read_bytes()
         assert not raw.startswith(b"\xef\xbb\xbf"), f"{rel} 不得带 UTF-8 BOM"
-        assert raw.count("\r".encode()) == raw.count("\r\n".encode()), \
-            f"{rel} 存在孤立 CR"
+        assert raw.count("\r".encode()) == raw.count("\r\n".encode()), f"{rel} 存在孤立 CR"
         assert "\ufffd".encode() not in raw, f"{rel} 存在 U+FFFD 替换符"
 
     def test_frontend_sse_literals_intact(self):
         """R108 事故回归锁：前端 SSE 解析字面量绝不允许再被转义管道写坏。"""
         fe = (APP_DIR.parent.parent / "frontend" / "src" / "api" / "index.ts").read_bytes()
-        assert b'block.replace(/\\r\\n/g, "\\n").replace(/\\r/g, "\\n")' in fe, \
-            "parseSseEventBlock 归一字面量断裂 = SSE 解析全废"
-        assert b'const separator = /\\r\\n\\r\\n|\\n\\n|\\r\\r/;' in fe, \
-            "SSE separator 字面量断裂 = 流式解析全废"
+        assert (
+            b'block.replace(/\\r\\n/g, "\\n").replace(/\\r/g, "\\n")' in fe
+        ), "parseSseEventBlock 归一字面量断裂 = SSE 解析全废"
+        assert b"const separator = /\\r\\n\\r\\n|\\n\\n|\\r\\r/;" in fe, "SSE separator 字面量断裂 = 流式解析全废"

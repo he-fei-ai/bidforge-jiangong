@@ -8,6 +8,7 @@
   DB / GC 函数，断言调用次数 == 方案数、异常不炸）；
   ② 静态锁（lifespan 真调了该 helper、helper 内 SQL 正确、无定时任务）。
 """
+
 from __future__ import annotations
 
 import inspect
@@ -46,14 +47,15 @@ async def test_startup_gc_called_once_per_scheme(monkeypatch):
     # 两个方案在 export_cache 里有行
     monkeypatch.setattr(E, "_gc_orphan_exports", _fake_gc)
     fake_db = _FakeDB([("scheme-A",), ("scheme-B",)])
+
     async def _fake_get_conn():
         return fake_db
+
     monkeypatch.setattr(db_mod, "get_conn", _fake_get_conn)
 
     await main_mod._run_startup_orphan_export_gc()
 
-    assert sorted(calls) == ["scheme-A", "scheme-B"], (
-        f"启动期 GC 调用次数 != 方案数：calls={calls}")
+    assert sorted(calls) == ["scheme-A", "scheme-B"], f"启动期 GC 调用次数 != 方案数：calls={calls}"
 
 
 @pytest.mark.asyncio
@@ -69,15 +71,16 @@ async def test_startup_gc_single_scheme_failure_does_not_abort_loop(monkeypatch)
 
     monkeypatch.setattr(E, "_gc_orphan_exports", _flaky_gc)
     fake_db = _FakeDB([("scheme-A",), ("scheme-B",), ("scheme-C",)])
+
     async def _fake_get_conn2():
         return fake_db
+
     monkeypatch.setattr(db_mod, "get_conn", _fake_get_conn2)
 
     # 不应抛异常（内部 try/except 兜住 scheme-B 的失败）
     await main_mod._run_startup_orphan_export_gc()
 
-    assert calls == ["scheme-A", "scheme-B", "scheme-C"], (
-        f"单方案失败不应中断循环：calls={calls}")
+    assert calls == ["scheme-A", "scheme-B", "scheme-C"], f"单方案失败不应中断循环：calls={calls}"
 
 
 @pytest.mark.asyncio
@@ -88,12 +91,12 @@ async def test_startup_gc_exception_does_not_break_lifespan(monkeypatch):
     except Exception: logger.warning(...)``。这里让 helper 抛，验证外层
     catch 路径真能吞掉（与 lifespan 源码逐字同构）。
     """
+
     async def _boom(db, scheme_id, protect=None):
         raise RuntimeError("disk full during startup GC")
 
     monkeypatch.setattr(E, "_gc_orphan_exports", _boom)
-    monkeypatch.setattr(db_mod, "get_conn",
-                        lambda: _FakeDB([("scheme-X",)]))
+    monkeypatch.setattr(db_mod, "get_conn", lambda: _FakeDB([("scheme-X",)]))
 
     # 直接调 helper —— helper 内部对单方案 try/except，所以这里不抛；
     # 模拟「helper 整体抛」的极端情况（如 get_conn 本身炸），由 lifespan 外层兜。
@@ -116,13 +119,11 @@ class TestStartupGcStaticLock:
 
     def test_lifespan_calls_gc_helper(self):
         src = inspect.getsource(main_mod.lifespan)
-        assert "_run_startup_orphan_export_gc" in src, (
-            "lifespan 必须调用 _run_startup_orphan_export_gc()")
+        assert "_run_startup_orphan_export_gc" in src, "lifespan 必须调用 _run_startup_orphan_export_gc()"
         # 外层 fail-soft 包裹
         i = src.index("_run_startup_orphan_export_gc")
-        window = src[max(0, i - 200):i + 200]
-        assert "try" in window and "except Exception" in window, (
-            "lifespan 里调 helper 必须包 try/except，fail-soft")
+        window = src[max(0, i - 200) : i + 200]
+        assert "try" in window and "except Exception" in window, "lifespan 里调 helper 必须包 try/except，fail-soft"
 
     def test_helper_uses_distinct_scheme_id_query(self):
         src = inspect.getsource(main_mod._run_startup_orphan_export_gc)

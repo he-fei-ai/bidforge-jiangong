@@ -9,6 +9,7 @@
 2. 轮转失败（OSError/PermissionError）时降级为追加写，不抛异常、不丢记录；
 3. 降级后持续追加写（后续记录继续可见），且 stderr 只告警一次。
 """
+
 import logging
 import os
 import uuid
@@ -20,8 +21,7 @@ from app.utils.safe_log_handler import SafeRotatingFileHandler
 def _make_logger(tmp_path, max_bytes):
     """构造隔离的 logger + handler（propagate=False，不污染全局日志）。"""
     log_path = tmp_path / "app.log"
-    handler = SafeRotatingFileHandler(
-        str(log_path), maxBytes=max_bytes, backupCount=3, encoding="utf-8")
+    handler = SafeRotatingFileHandler(str(log_path), maxBytes=max_bytes, backupCount=3, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(message)s"))
     logger = logging.getLogger(f"safe-rot-{uuid.uuid4().hex}")
     logger.setLevel(logging.INFO)
@@ -74,6 +74,7 @@ def test_rollover_failure_degrades_to_append_no_loss_no_raise(tmp_path, capsys):
             # Windows 真实事故：rename 因句柄占用抛 PermissionError（OSError 子类）
             def _deny(src, dst):
                 raise PermissionError(32, "另一个程序正在使用此文件，进程无法访问。")
+
             mp.setattr(os, "rename", _deny)
             mp.setattr(os, "replace", _deny)
             # 超过 max_bytes 触发轮转尝试 → 应降级而不是把记录全部丢弃

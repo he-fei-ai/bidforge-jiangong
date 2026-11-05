@@ -14,6 +14,7 @@
     不用本轮闭式自证（闭式若失真，这组护栏仍会红）
   E 源文件字节体检 + 单告警点 AST（R60 契约回归）
 """
+
 import ast
 import io
 import logging
@@ -37,9 +38,17 @@ _ARCH_LOGGER = "app.services.ai.mermaid_architecture"
 # 公共夹具
 # ==========================================================================
 def _clean_env(monkeypatch):
-    for k in (ma.ENV_AUTO_VERTICAL, ma.ENV_PAPER_FONT_MIN_MM, ma.ENV_VERTICAL_SWITCH,
-              ma.ENV_VERTICAL_THRESHOLD, ma.ENV_MAX_LEAVES, ma.ENV_MAX_NODES,
-              ma.ENV_AUTO_SPLIT, ma.ENV_SPLIT_MAX_LEAVES, ma.ENV_SPLIT_MAX_PARTS):
+    for k in (
+        ma.ENV_AUTO_VERTICAL,
+        ma.ENV_PAPER_FONT_MIN_MM,
+        ma.ENV_VERTICAL_SWITCH,
+        ma.ENV_VERTICAL_THRESHOLD,
+        ma.ENV_MAX_LEAVES,
+        ma.ENV_MAX_NODES,
+        ma.ENV_AUTO_SPLIT,
+        ma.ENV_SPLIT_MAX_LEAVES,
+        ma.ENV_SPLIT_MAX_PARTS,
+    ):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -90,8 +99,7 @@ def render_and_watch(data, split, monkeypatch):
     with Image.open(io.BytesIO(stream.getvalue())) as im:
         size = im.size
         dpi = (im.info.get("dpi") or (300.0, 300.0))[0]
-    return {"size": size, "dpi": dpi, "bytes": stream.getvalue(),
-            "fonts_per_image": fonts_per_image}, fonts_per_image
+    return {"size": size, "dpi": dpi, "bytes": stream.getvalue(), "fonts_per_image": fonts_per_image}, fonts_per_image
 
 
 def paper_mm(obs):
@@ -109,15 +117,17 @@ def paper_mm(obs):
 # A · 公共纸面层（mermaid_common）—— 闭式必须与真实导出函数逐例相等
 # ==========================================================================
 class TestSharedPaperLayer:
-
-    @pytest.mark.parametrize("w_px,h_px", [
-        (2000, 400),                     # 宽绑
-        (600, 900),                      # 双上限都不绑
-        (5000, 6000),                    # 高绑（拆图堆叠后的典型形态）
-        (int(1148 * SCALE), int(2412 * SCALE)),
-        (int(2870 * SCALE), int(6030 * SCALE)),
-        (int(2240 * SCALE), int(1196 * SCALE)),
-    ])
+    @pytest.mark.parametrize(
+        "w_px,h_px",
+        [
+            (2000, 400),  # 宽绑
+            (600, 900),  # 双上限都不绑
+            (5000, 6000),  # 高绑（拆图堆叠后的典型形态）
+            (int(1148 * SCALE), int(2412 * SCALE)),
+            (int(2870 * SCALE), int(6030 * SCALE)),
+            (int(2240 * SCALE), int(1196 * SCALE)),
+        ],
+    )
     def test_paper_font_mm_equals_real_fit(self, w_px, h_px):
         font_px = 28.0
         w_cm, _h_cm = _fit_image_cm(w_px, h_px, DPI)
@@ -142,8 +152,7 @@ class TestSharedPaperLayer:
         assert stacked == pytest.approx(only_w / 3, rel=1e-6), "3 倍余量应恰为 1/3"
         assert mc.paper_height_binds(w, h) is True
 
-    @pytest.mark.parametrize("font_px,w,h", [(0, 10, 10), (-3, 10, 10), (10, 0, 10),
-                                             (10, -5, 10)])
+    @pytest.mark.parametrize("font_px,w,h", [(0, 10, 10), (-3, 10, 10), (10, 0, 10), (10, -5, 10)])
     def test_illegal_inputs_return_zero_not_raise(self, font_px, w, h):
         assert mc.paper_font_mm(font_px, w, h) == 0.0
 
@@ -175,8 +184,7 @@ class TestSharedPaperLayer:
 
     def test_more_parts_is_not_always_better(self):
         """「拆得越多越窄」的反例：曲线先升后降，R61 的隐含假设就错在这里。"""
-        curve = {g: mc.delivered_worst_mm([28] * g, [(500 + 1600 // g, 600)] * g, GAP)
-                 for g in (2, 3, 4, 6, 8)}
+        curve = {g: mc.delivered_worst_mm([28] * g, [(500 + 1600 // g, 600)] * g, GAP) for g in (2, 3, 4, 6, 8)}
         best = max(curve, key=lambda g: curve[g])
         assert best in (2, 3, 4), f"最多份数竟最优，用例失去意义：{curve}"
         assert curve[8] < curve[best]
@@ -186,32 +194,34 @@ class TestSharedPaperLayer:
 # B · 单一事实源：架构图的同名函数必须委派公共层
 # ==========================================================================
 class TestSingleSourceOfTruth:
-
     def test_architecture_delegates_to_common(self):
         assert mc.paper_font_mm is ma._common_paper_font_mm
 
     def test_constants_match_common_defaults(self):
-        assert (ma.PAPER_COLUMN_WIDTH_CM, ma.PAPER_MAX_HEIGHT_CM) == \
-               (mc.PAPER_COLUMN_WIDTH_CM, mc.PAPER_MAX_HEIGHT_CM)
-        assert (ma.ARCH_RENDER_SCALE, ma.ARCH_OUTPUT_DPI) == \
-               (mc.PAPER_SCALE_DEFAULT, mc.PAPER_DPI_DEFAULT)
+        assert (ma.PAPER_COLUMN_WIDTH_CM, ma.PAPER_MAX_HEIGHT_CM) == (mc.PAPER_COLUMN_WIDTH_CM, mc.PAPER_MAX_HEIGHT_CM)
+        assert (ma.ARCH_RENDER_SCALE, ma.ARCH_OUTPUT_DPI) == (mc.PAPER_SCALE_DEFAULT, mc.PAPER_DPI_DEFAULT)
 
     @pytest.mark.parametrize("w,h", [(900, 400), (4424, 588), (1148, 2412), (2240, 1196)])
     def test_delegation_is_value_identical(self, w, h):
         for title_h in (0, 56):
             assert ma.paper_font_mm(28, w, h, title_h) == mc.paper_font_mm(
-                28, w, h, title_h, scale=SCALE, dpi=DPI,
-                col_cm=ma.PAPER_COLUMN_WIDTH_CM, max_h_cm=ma.PAPER_MAX_HEIGHT_CM)
+                28,
+                w,
+                h,
+                title_h,
+                scale=SCALE,
+                dpi=DPI,
+                col_cm=ma.PAPER_COLUMN_WIDTH_CM,
+                max_h_cm=ma.PAPER_MAX_HEIGHT_CM,
+            )
 
     def test_export_caps_are_the_truth(self):
         """双上限数值必须与导出侧同源；export 改了这里就必须跟着改（否则闭式失真）。"""
         import inspect
 
         sig = inspect.signature(_fit_image_cm)
-        assert sig.parameters["max_w"].default == mc.PAPER_COLUMN_WIDTH_CM, \
-            "导出宽上限已变，本轮常量需同步"
-        assert sig.parameters["max_h"].default == mc.PAPER_MAX_HEIGHT_CM, \
-            "导出高上限已变，本轮闭式会系统性高估拆图收益"
+        assert sig.parameters["max_w"].default == mc.PAPER_COLUMN_WIDTH_CM, "导出宽上限已变，本轮常量需同步"
+        assert sig.parameters["max_h"].default == mc.PAPER_MAX_HEIGHT_CM, "导出高上限已变，本轮闭式会系统性高估拆图收益"
         src = inspect.getsource(_fit_image_cm)
         # 两条夹紧分支都必须在位：只剩宽夹紧，就是 R62 之前的世界
         assert "max_w / w_cm" in src and "max_h / h_cm" in src, src
@@ -240,7 +250,6 @@ class TestSingleSourceOfTruth:
 # C · 拆图决策纯函数
 # ==========================================================================
 class TestSplitPlanner:
-
     def test_single_branch_over_budget_cannot_split(self):
         """1 个超重分支：顶层没有第二支可分 ⇒ 如实返回「拆无可拆」（R61 遗留①）。"""
         root = {"label": "项目部", "children": [_branch(0, 30)]}
@@ -266,8 +275,7 @@ class TestSplitPlanner:
     def test_every_part_within_size_budget(self):
         """拆完每张子图自己也必须过 R60 预算守卫，否则拆图没达成目的。"""
         for nb, nl in [(5, 8), (4, 10), (6, 6), (12, 4)]:
-            groups, _, _ = ma.plan_architecture_split(_root(nb, nl), max_leaves=8,
-                                                      max_parts=12)
+            groups, _, _ = ma.plan_architecture_split(_root(nb, nl), max_leaves=8, max_parts=12)
             for grp in groups:
                 leaves = sum(ma._arch_counts(b)[0] for b in grp)
                 assert leaves <= ma.arch_max_leaves(), (nb, nl, leaves)
@@ -275,8 +283,7 @@ class TestSplitPlanner:
     def test_plan_is_strictly_better_than_not_splitting(self):
         """判据③：返回的方案毫米必须 > 不拆毫米；否则只能返回空组。"""
         for nb, nl in [(4, 7), (4, 10), (6, 6), (8, 6), (2, 15), (12, 4), (3, 20)]:
-            groups, mm, single = ma.plan_architecture_split(_root(nb, nl), max_leaves=8,
-                                                            max_parts=12)
+            groups, mm, single = ma.plan_architecture_split(_root(nb, nl), max_leaves=8, max_parts=12)
             if not groups:
                 continue
             assert len(groups) >= 2 and mm > single, (nb, nl, mm, single)
@@ -292,16 +299,11 @@ class TestSplitPlanner:
         br = _root(4, 10)["children"]
         greedy = len(ma._group_branches_by_budget(br, 8))
         assert greedy >= 3, f"夹具已失效：步长 8 下本该多组，实际 {greedy}"
-        groups, mm, single = ma.plan_architecture_split(_root(4, 10),
-                                                        max_leaves=8, max_parts=12)
-        assert 2 <= len(groups) < greedy, (
-            f"份数仍由分组步长说了算：{len(groups)} vs 贪心 {greedy}")
+        groups, mm, single = ma.plan_architecture_split(_root(4, 10), max_leaves=8, max_parts=12)
+        assert 2 <= len(groups) < greedy, f"份数仍由分组步长说了算：{len(groups)} vs 贪心 {greedy}"
         assert mm > single
-        over = [ma._part_geometry({"label": "", "children": g})
-                for g in ma._group_branches_balanced(br, greedy)]
-        worse = ma.delivered_worst_mm([o[2] for o in over],
-                                       [(o[0], o[1]) for o in over],
-                                       ma._SPLIT_GAP_DESIGN_PX)
+        over = [ma._part_geometry({"label": "", "children": g}) for g in ma._group_branches_balanced(br, greedy)]
+        worse = ma.delivered_worst_mm([o[2] for o in over], [(o[0], o[1]) for o in over], ma._SPLIT_GAP_DESIGN_PX)
         assert mm > worse, f"少拆不是拍脑袋：{greedy} 张本应更差（{worse} vs {mm}）"
 
     def test_budget_guard_is_consulted_by_planner(self, monkeypatch):
@@ -310,10 +312,9 @@ class TestSplitPlanner:
         root = _root(4, 10)
         base, _, _ = ma.plan_architecture_split(root, max_leaves=8, max_parts=12)
         assert len(base) >= 2, "前提：默认预算下本该出多张"
-        monkeypatch.setattr(ma, "arch_max_leaves", lambda: 4)   # 单分支已 10 叶
+        monkeypatch.setattr(ma, "arch_max_leaves", lambda: 4)  # 单分支已 10 叶
         denied, mm, _ = ma.plan_architecture_split(root, max_leaves=8, max_parts=12)
-        assert denied == [] and mm == 0.0, (
-            "预算守卫失效：会交付超出规模预算的子图，拆图本身就没有意义")
+        assert denied == [] and mm == 0.0, "预算守卫失效：会交付超出规模预算的子图，拆图本身就没有意义"
 
     def test_groups_are_contiguous_order_preserving_lossless(self):
         root = _root(7, 5)
@@ -336,9 +337,7 @@ class TestSplitPlanner:
         等权分支下这条边界**碰巧**不会被越过 —— 所以只喂等权夹具的护栏是假覆盖
         （A/B M7 实测全绿）。[1,1,1,1,96] 切 3 份时，第二刀会跳到末尾 ⇒ 末组为空。
         """
-        br = [_branch(i, 1) for i in range(4)] + [{"label": "肥",
-                                                   "children": [{"label": f"z{i}"}
-                                                                for i in range(96)]}]
+        br = [_branch(i, 1) for i in range(4)] + [{"label": "肥", "children": [{"label": f"z{i}"} for i in range(96)]}]
         for parts in (2, 3, 4, 5):
             got = ma._group_branches_balanced(br, parts)
             assert len(got) == parts, (parts, [len(g) for g in got])
@@ -346,8 +345,10 @@ class TestSplitPlanner:
             assert sum(len(g) for g in got) == len(br)
 
     def test_balanced_partition_prefers_leaf_balance(self):
-        br = [{"label": "肥", "children": [{"label": f"x{i}"} for i in range(20)]},
-              {"label": "瘦", "children": [{"label": "y"}]}]
+        br = [
+            {"label": "肥", "children": [{"label": f"x{i}"} for i in range(20)]},
+            {"label": "瘦", "children": [{"label": "y"}]},
+        ]
         got = ma._group_branches_balanced(br, 2)
         assert [len(g) for g in got] == [1, 1], "重量悬殊时不该把两支塞进同一组"
 
@@ -361,9 +362,9 @@ class TestSplitPlanner:
         assert len(root["children"]) == 6
         assert ast.dump(ast.parse(str(sorted(root.keys())))) == before
 
-    @pytest.mark.parametrize("bad", [None, [], "x", 7, {"label": "空"},
-                                     {"children": "不是列表"},
-                                     {"children": [None, 3]}])
+    @pytest.mark.parametrize(
+        "bad", [None, [], "x", 7, {"label": "空"}, {"children": "不是列表"}, {"children": [None, 3]}]
+    )
     def test_illegal_root_never_raises(self, bad):
         groups, mm, single = ma.plan_architecture_split(bad, max_leaves=8, max_parts=12)
         assert groups == [] and mm == 0.0
@@ -376,7 +377,6 @@ OVER_BUDGET_CASES = [(4, 7), (4, 10), (6, 6), (8, 6), (2, 15), (12, 4), (3, 20),
 
 
 class TestSplitNeverWorseEndToEnd:
-
     @pytest.mark.parametrize("nb,nl", OVER_BUDGET_CASES)
     def test_delivered_not_worse_than_single(self, nb, nl, monkeypatch):
         """本轮唯一的硬指标：交付图最差落墨字号的纸面毫米 ≥ 不拆时的毫米。
@@ -392,7 +392,8 @@ class TestSplitNeverWorseEndToEnd:
         mm_after = paper_mm(split)
         assert mm_after + 1e-6 >= mm_before, (
             f"{nb}枝×{nl}叶：拆图后 {mm_after:.2f}mm 反而小于不拆 {mm_before:.2f}mm"
-            f"（交付 {split['size'][0]}x{split['size'][1]}px）—— 22cm 高上限二次缩放又回来了")
+            f"（交付 {split['size'][0]}x{split['size'][1]}px）—— 22cm 高上限二次缩放又回来了"
+        )
 
     def test_multi_part_delivery_is_actually_multi(self, monkeypatch):
         """护栏不能靠「没拆」蒙过不变量：默认配置下确实出了多张子图。"""
@@ -434,13 +435,12 @@ class TestSplitNeverWorseEndToEnd:
         monkeypatch.setenv(ma.ENV_AUTO_SPLIT, "1")
         split_bytes = ma._render_architecture_image_v2(data).getvalue()
         assert split_bytes != ref, "前提失效：该配置本应触发拆图"
-        assert (Image.open(io.BytesIO(split_bytes)).size[0]
-                < Image.open(io.BytesIO(ref)).size[0]), "拆图应当更窄"
+        assert Image.open(io.BytesIO(split_bytes)).size[0] < Image.open(io.BytesIO(ref)).size[0], "拆图应当更窄"
         # ③ 人为把复核毫米压成 0 ⇒ 第④步必须否决这次拆分，逐字节回到不拆
         # 只摘复核：决策侧必须仍然给出多张，否则本用例退化成「第①步否决」的重复
         kept = ma.plan_architecture_split(
-            data["root"], max_leaves=ma._arch_split_max_leaves(),
-            max_parts=ma._arch_split_max_parts())
+            data["root"], max_leaves=ma._arch_split_max_leaves(), max_parts=ma._arch_split_max_parts()
+        )
         assert len(kept[0]) >= 2, "前提失效：决策本身已被误伤"
         monkeypatch.setattr(ma, "review_delivered_mm", lambda *a, **k: 0.0)
         got = ma._render_architecture_image_v2(data).getvalue()
@@ -450,11 +450,9 @@ class TestSplitNeverWorseEndToEnd:
         _clean_env(monkeypatch)
         data = _data(4, 10)
         monkeypatch.setenv(ma.ENV_AUTO_SPLIT, "0")
-        ref_size = Image.open(io.BytesIO(
-            ma._render_architecture_image_v2(data).getvalue())).size
+        ref_size = Image.open(io.BytesIO(ma._render_architecture_image_v2(data).getvalue())).size
         monkeypatch.setenv(ma.ENV_AUTO_SPLIT, "1")
-        monkeypatch.setattr(ma, "plan_architecture_split",
-                            lambda root, **kw: ([], 0.0, 1.0))
+        monkeypatch.setattr(ma, "plan_architecture_split", lambda root, **kw: ([], 0.0, 1.0))
         got = ma._render_architecture_image_v2(data)
         assert Image.open(io.BytesIO(got.getvalue())).size == ref_size
 
@@ -464,8 +462,7 @@ class TestSplitNeverWorseEndToEnd:
         monkeypatch.setenv(ma.ENV_AUTO_SPLIT, "1")
         caplog.set_level(logging.WARNING, logger=_ARCH_LOGGER)
         assert ma._render_architecture_image_v2(_data(4, 10)) is not None
-        warns = [r for r in caplog.records
-                 if r.levelno == logging.WARNING and "架构图" in r.getMessage()]
+        warns = [r for r in caplog.records if r.levelno == logging.WARNING and "架构图" in r.getMessage()]
         assert len(warns) == 1, [r.getMessage() for r in warns]
         msg = warns[0].getMessage()
         for lit in ("纸面字号仅", "架构图超出规模预算", "建议拆分"):
@@ -493,15 +490,15 @@ class TestSplitNeverWorseEndToEnd:
         caplog.set_level(logging.WARNING, logger=_ARCH_LOGGER)
         assert ma._render_architecture_image_v2(data) is not None
 
-        warns = [r.getMessage() for r in caplog.records
-                 if r.levelno == logging.WARNING and "架构图" in r.getMessage()]
+        warns = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "架构图" in r.getMessage()]
         assert len(warns) == 1, warns
         assert len(seen.get("fonts", [])) >= 2, "前提失效：这次渲染根本没拆"
         expected = real_outlet(seen["fonts"], seen["sizes"])
         reported = re.search(r"纸面字号仅 ([\d.]+)mm", warns[0])
         assert reported, warns[0]
-        assert float(reported.group(1)) == pytest.approx(expected, abs=5e-3), (
-            f"告警报 {reported.group(1)}mm，实际交付 {expected:.2f}mm —— 文案还在用整树口径")
+        assert float(reported.group(1)) == pytest.approx(
+            expected, abs=5e-3
+        ), f"告警报 {reported.group(1)}mm，实际交付 {expected:.2f}mm —— 文案还在用整树口径"
         assert "本轮已自动拆分为" in warns[0], warns[0]
 
     def test_veto_path_warns_exactly_once(self, monkeypatch, caplog):
@@ -514,19 +511,17 @@ class TestSplitNeverWorseEndToEnd:
         _clean_env(monkeypatch)
         data = _data(4, 10)
         w, h, eff, _nv = ma._part_geometry(data["root"])
-        whole_mm = ma.paper_font_mm(eff, w, h)          # 整树（不拆）口径
+        whole_mm = ma.paper_font_mm(eff, w, h)  # 整树（不拆）口径
         monkeypatch.setattr(ma, "review_delivered_mm", lambda *a, **k: 0.0)
         monkeypatch.setenv(ma.ENV_AUTO_SPLIT, "1")
         caplog.set_level(logging.WARNING, logger=_ARCH_LOGGER)
         assert ma._render_architecture_image_v2(data) is not None
 
-        warns = [r.getMessage() for r in caplog.records
-                 if r.levelno == logging.WARNING and "架构图" in r.getMessage()]
+        warns = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "架构图" in r.getMessage()]
         assert len(warns) == 1, warns
         assert "本轮已自动拆分为" not in warns[0], warns[0]
         reported = re.search(r"纸面字号仅 ([\d.]+)mm", warns[0])
-        assert reported and float(reported.group(1)) == pytest.approx(whole_mm, abs=5e-3), \
-            warns[0]
+        assert reported and float(reported.group(1)) == pytest.approx(whole_mm, abs=5e-3), warns[0]
 
     def test_delivery_log_reports_scaling_binding(self, monkeypatch, caplog):
         """「缩放绑定=高/宽」必须落进 info：这条边曾经只能靠人工复测发现。"""
@@ -540,7 +535,6 @@ class TestSplitNeverWorseEndToEnd:
 
 
 class TestR62ByteIntegrity:
-
     FILES = ("mermaid_common.py", "mermaid_architecture.py")
 
     @pytest.mark.parametrize("name", FILES)
@@ -576,12 +570,16 @@ class TestR62ByteIntegrity:
 
 def _func(name):
     tree = ast.parse(Path(ma.__file__).read_text(encoding="utf-8"))
-    return next(n for n in tree.body
-                if isinstance(n, ast.FunctionDef) and n.name == name)
+    return next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
 
 
 def _warning_calls(fn):
-    return sum(1 for n in ast.walk(fn)
-               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-               and n.func.attr == "warning"
-               and isinstance(n.func.value, ast.Name) and n.func.value.id == "logger")
+    return sum(
+        1
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "warning"
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == "logger"
+    )

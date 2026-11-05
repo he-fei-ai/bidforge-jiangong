@@ -32,6 +32,7 @@ NINE_CHAPTERS 的标题重叠），但**没有任何断言**保证它们不漂�
 
 测试策略：纯断言，零 AI、零 DB。
 """
+
 from __future__ import annotations
 
 import os
@@ -53,19 +54,28 @@ from app.services.scheme_classification import (  # noqa: E402
 # 护栏的「期望值」写死在此处，而不是从代码里再推导一遍（否则仍是单一来源）
 # ---------------------------------------------------------------------------
 #: 六大类 category_id（代码侧标识）
-EXPECTED_HAZARD_CATEGORY_IDS: frozenset[str] = frozenset({
-    "foundation_pit",   # 基坑工程
-    "formwork",         # 模板工程及支撑体系
-    "hoisting",         # 起重机械安装拆卸工程
-    "scaffold",         # 脚手架工程
-    "demolition",       # 拆除工程
-    "other",            # 其他（幕墙 / 钢结构 / 预应力 / 暗挖 / 有限空间等）
-})
+EXPECTED_HAZARD_CATEGORY_IDS: frozenset[str] = frozenset(
+    {
+        "foundation_pit",  # 基坑工程
+        "formwork",  # 模板工程及支撑体系
+        "hoisting",  # 起重机械安装拆卸工程
+        "scaffold",  # 脚手架工程
+        "demolition",  # 拆除工程
+        "other",  # 其他（幕墙 / 钢结构 / 预应力 / 暗挖 / 有限空间等）
+    }
+)
 
 #: 九大章节 key（住建部令 37 号第十七条）
 EXPECTED_NINE_CHAPTER_KEYS: tuple[str, ...] = (
-    "overview", "basis", "plan", "technique", "safety",
-    "personnel", "acceptance", "emergency", "calc_drawings",
+    "overview",
+    "basis",
+    "plan",
+    "technique",
+    "safety",
+    "personnel",
+    "acceptance",
+    "emergency",
+    "calc_drawings",
 )
 
 #: 危大 10 章 = 九大章节 + 本仓额外加的「监测方案」（不在 31 号文九章内）
@@ -77,8 +87,15 @@ EXTRA_DANGEROUS_CHAPTER = "监测方案"
 #: 的子串 —— 用子串判定会把**正确**的简称判成缺陷，后人只会把护栏改松。
 #: 顺序仍由下标锁定：调换顺序会让预检把「安全」错配到「施工工艺」。
 EXPECTED_DANGEROUS_CHAPTER_LABELS: tuple[str, ...] = (
-    "工程概况", "编制依据", "施工计划", "施工工艺技术", "安全保证措施",
-    "人员分工", "验收要求", "应急处置措施", "计算书及相关图纸",
+    "工程概况",
+    "编制依据",
+    "施工计划",
+    "施工工艺技术",
+    "安全保证措施",
+    "人员分工",
+    "验收要求",
+    "应急处置措施",
+    "计算书及相关图纸",
 )
 
 
@@ -94,10 +111,10 @@ def _sub_ids() -> set:
 # 1. 危大六大类：分类本身（a）
 # ---------------------------------------------------------------------------
 
+
 def test_hazard_categories_are_exactly_six():
     assert len(HAZARD_CATEGORIES) == 6
-    assert _cat_ids() == set(EXPECTED_HAZARD_CATEGORY_IDS), (
-        f"危大六大类 id 漂移：{sorted(_cat_ids())}")
+    assert _cat_ids() == set(EXPECTED_HAZARD_CATEGORY_IDS), f"危大六大类 id 漂移：{sorted(_cat_ids())}"
 
 
 def test_hazard_category_ids_unique():
@@ -114,15 +131,19 @@ def test_hazard_subcategory_ids_globally_unique():
 def test_hazard_subcategory_prefix_matches_parent():
     """子类 id 前缀必须能反推所属大类（``fp_`` → ``foundation_pit``）。"""
     prefix_map = {
-        "fp": "foundation_pit", "fw": "formwork", "ho": "hoisting",
-        "sc": "scaffold", "dm": "demolition", "ot": "other",
+        "fp": "foundation_pit",
+        "fw": "formwork",
+        "ho": "hoisting",
+        "sc": "scaffold",
+        "dm": "demolition",
+        "ot": "other",
     }
     for c in HAZARD_CATEGORIES:
         for s in c.get("subs") or []:
             prefix = str(s["id"]).split("_", 1)[0]
             assert prefix_map.get(prefix) == c["id"], (
-                f"子类 {s['id']!r} 的前缀 {prefix!r} 与所属大类 "
-                f"{c['id']!r} 不符")
+                f"子类 {s['id']!r} 的前缀 {prefix!r} 与所属大类 " f"{c['id']!r} 不符"
+            )
 
 
 def test_hazard_categories_have_name_standards_and_subs():
@@ -135,8 +156,7 @@ def test_hazard_categories_have_name_standards_and_subs():
     """
     for c in HAZARD_CATEGORIES:
         assert c.get("name"), f"六大类 {c['id']} 缺中文名（前端展示用）"
-        assert isinstance(c.get("standards"), list), \
-            f"六大类 {c['id']} 的 standards 字段类型错误（应为 list）"
+        assert isinstance(c.get("standards"), list), f"六大类 {c['id']} 的 standards 字段类型错误（应为 list）"
         assert c.get("subs"), f"六大类 {c['id']} 缺子类（无法做阈值判定）"
         for s in c["subs"]:
             assert s.get("name"), f"子类 {s['id']} 缺中文名"
@@ -147,12 +167,12 @@ def test_hazard_categories_have_name_standards_and_subs():
 # 2. 六类 ↔ 九章 category_fields（a ↔ b）
 # ---------------------------------------------------------------------------
 
+
 def test_nine_chapters_exactly_nine_and_ordered():
     assert len(NINE_CHAPTERS) == 9
     keys = tuple(c["key"] for c in NINE_CHAPTERS)
     assert keys == EXPECTED_NINE_CHAPTER_KEYS, f"九大章节 key 漂移：{keys}"
-    assert [c["chapter"] for c in NINE_CHAPTERS] == list(range(1, 10)), \
-        "九大章节编号必须连续 1..9"
+    assert [c["chapter"] for c in NINE_CHAPTERS] == list(range(1, 10)), "九大章节编号必须连续 1..9"
 
 
 def test_chapter_titles_unique_and_non_empty():
@@ -168,7 +188,8 @@ def test_category_fields_keys_equal_six_categories(chapter_index):
     assert set(fields) == set(EXPECTED_HAZARD_CATEGORY_IDS), (
         f"第 {NINE_CHAPTERS[chapter_index]['chapter']} 章 category_fields "
         f"键与危大六大类不一致：多 {sorted(set(fields) - _cat_ids())}、"
-        f"少 {sorted(_cat_ids() - set(fields))}")
+        f"少 {sorted(_cat_ids() - set(fields))}"
+    )
 
 
 def test_every_category_has_fields_in_overview_and_basis():
@@ -176,18 +197,17 @@ def test_every_category_has_fields_in_overview_and_basis():
     for idx in (0, 1):
         fields = NINE_CHAPTERS[idx].get("category_fields") or {}
         for cat_id in EXPECTED_HAZARD_CATEGORY_IDS:
-            assert fields.get(cat_id), (
-                f"第 {NINE_CHAPTERS[idx]['chapter']} 章缺 {cat_id} 的字段清单")
+            assert fields.get(cat_id), f"第 {NINE_CHAPTERS[idx]['chapter']} 章缺 {cat_id} 的字段清单"
 
 
 # ---------------------------------------------------------------------------
 # 3. 阈值表（d）必须挂在已声明子类（a）之下
 # ---------------------------------------------------------------------------
 
+
 def test_threshold_keys_are_declared_subcategories():
     orphans = sorted(set(HAZARD_THRESHOLDS) - _sub_ids())
-    assert not orphans, (
-        f"阈值表存在游离于六大类之外的键（改了阈值却查不到所属分类）：{orphans}")
+    assert not orphans, f"阈值表存在游离于六大类之外的键（改了阈值却查不到所属分类）：{orphans}"
 
 
 def test_every_threshold_can_reach_hazard_and_oversize():
@@ -206,14 +226,13 @@ def test_every_threshold_can_reach_hazard_and_oversize():
     （有参数却什么都不判）。
     """
     for key, rule in HAZARD_THRESHOLDS.items():
-        is_empty_rule = (not rule.get("params")
-                         and not rule.get("hazard_when")
-                         and not rule.get("oversize_when"))
+        is_empty_rule = not rule.get("params") and not rule.get("hazard_when") and not rule.get("oversize_when")
         if is_empty_rule:
-            continue   # 非参数型危大，由 evaluate_hazard_level 显式分支处理
+            continue  # 非参数型危大，由 evaluate_hazard_level 显式分支处理
         assert rule.get("params"), f"{key} 声明了条件却未声明 params"
-        assert rule.get("hazard_when") or rule.get("hazard_always"), \
-            f"{key} 有 params 却既无 hazard_when 也无 hazard_always"
+        assert rule.get("hazard_when") or rule.get(
+            "hazard_always"
+        ), f"{key} 有 params 却既无 hazard_when 也无 hazard_always"
         assert rule.get("oversize_when"), f"{key} 缺 oversize_when（判不出超规模）"
 
 
@@ -223,9 +242,8 @@ def test_oversize_threshold_never_looser_than_hazard():
         for hz in rule["hazard_when"]:
             for os_ in rule["oversize_when"]:
                 if hz[0] != os_[0]:
-                    continue      # 不同参数，逐参数不交叉比较
-                assert os_[2] >= hz[2], (
-                    f"{key}.{hz[0]} 超规模阈值 {os_[2]} < 危大阈值 {hz[2]}")
+                    continue  # 不同参数，逐参数不交叉比较
+                assert os_[2] >= hz[2], f"{key}.{hz[0]} 超规模阈值 {os_[2]} < 危大阈值 {hz[2]}"
 
 
 def test_all_threshold_conditions_use_closed_interval():
@@ -238,8 +256,8 @@ def test_all_threshold_conditions_use_closed_interval():
         for field in ("hazard_when", "oversize_when"):
             for clause in rule[field]:
                 assert clause[1] == ">=", (
-                    f"{key}.{field} 使用了开区间 {clause[1]!r}："
-                    f"部文为「及以上」，恰好等于阈值会漏判")
+                    f"{key}.{field} 使用了开区间 {clause[1]!r}：" f"部文为「及以上」，恰好等于阈值会漏判"
+                )
 
 
 def test_threshold_params_all_declared():
@@ -248,13 +266,13 @@ def test_threshold_params_all_declared():
         declared = set(rule["params"])
         for field in ("hazard_when", "oversize_when"):
             for clause in rule[field]:
-                assert clause[0] in declared, (
-                    f"{key}.{field} 引用了未声明参数 {clause[0]!r}")
+                assert clause[0] in declared, f"{key}.{field} 引用了未声明参数 {clause[0]!r}"
 
 
 # ---------------------------------------------------------------------------
 # 4. 危大 10 章（c）↔ 九大章节
 # ---------------------------------------------------------------------------
+
 
 def test_dangerous_required_keywords_has_ten_chapters():
     assert len(_DANGEROUS_REQUIRED_KEYWORDS) == 10
@@ -270,16 +288,16 @@ def test_dangerous_chapters_align_with_nine_chapters_plus_one():
     """
     nine_titles = [c["title"] for c in NINE_CHAPTERS]
     labels = [label for label, _kw in _DANGEROUS_REQUIRED_KEYWORDS]
-    assert labels[-1] == EXTRA_DANGEROUS_CHAPTER, (
-        f"第 10 章应为 {EXTRA_DANGEROUS_CHAPTER}（本仓额外章），实际 {labels[-1]}")
+    assert (
+        labels[-1] == EXTRA_DANGEROUS_CHAPTER
+    ), f"第 10 章应为 {EXTRA_DANGEROUS_CHAPTER}（本仓额外章），实际 {labels[-1]}"
     assert tuple(labels[:9]) == EXPECTED_DANGEROUS_CHAPTER_LABELS, (
-        f"危大 10 章标签序列已漂移。\n实际：{labels[:9]}\n"
-        f"期望：{list(EXPECTED_DANGEROUS_CHAPTER_LABELS)}")
+        f"危大 10 章标签序列已漂移。\n实际：{labels[:9]}\n" f"期望：{list(EXPECTED_DANGEROUS_CHAPTER_LABELS)}"
+    )
     assert len(nine_titles) == 9
 
 
 def test_dangerous_chapter_keywords_never_empty():
     for label, keywords in _DANGEROUS_REQUIRED_KEYWORDS:
         assert keywords, f"「{label}」缺关键词 → 预检永远判为缺失"
-        assert all(str(k).strip() for k in keywords), \
-            f"「{label}」存在空关键词"
+        assert all(str(k).strip() for k in keywords), f"「{label}」存在空关键词"

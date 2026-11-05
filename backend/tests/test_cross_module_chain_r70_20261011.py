@@ -15,8 +15,10 @@
 否则退到 **ast.Constant / 源码结构断言**，且断言锚点选「改回旧写法必然失败」的位置。
 零 AI、零网络。
 """
+
 import ast
 import inspect
+import re
 import sqlite3
 
 import pytest
@@ -31,6 +33,7 @@ def _src_of(path: str) -> str:
 
 def _app_path(*parts: str) -> str:
     import os
+
     return os.path.join(BACKEND, "app", *parts)
 
 
@@ -45,15 +48,13 @@ class TestPlanJsonNotWiped:
 
     def test_persist_sql_preserves_previous_plan_on_empty(self):
         src = _src_of(_app_path("routers", "sse_handlers.py"))
-        assert self._SQL_FRAGMENT in src, (
-            "落库 UPDATE 必须在 plan_json 为空时保留原列（避免被空串抹除）")
+        assert self._SQL_FRAGMENT in src, "落库 UPDATE 必须在 plan_json 为空时保留原列（避免被空串抹除）"
         assert "SET content=?, word_count=?, word_status=?" in src
 
     def test_no_unconditional_plan_json_assignment(self):
         """旧写法 ``plan_json=? ``（无条件覆盖）不得再出现。"""
         src = _src_of(_app_path("routers", "sse_handlers.py"))
-        assert "plan_json=? \"" not in src, (
-            "仍存在无条件 SET plan_json=?，空串会抹掉上一轮编排决策")
+        assert 'plan_json=? "' not in src, "仍存在无条件 SET plan_json=?，空串会抹掉上一轮编排决策"
 
     def test_sqlite_semantics_empty_keeps_old_value(self):
         """真跑一遍该 SQL：空串保留旧值，非空覆盖。"""
@@ -62,20 +63,24 @@ class TestPlanJsonNotWiped:
             "CREATE TABLE sections (id TEXT PRIMARY KEY, content TEXT, "
             "word_count INTEGER, word_status TEXT, status TEXT, updated_at TEXT, "
             "last_generation_standard TEXT, last_generation_report TEXT, "
-            "plan_json TEXT)")
+            "plan_json TEXT)"
+        )
         con.execute("INSERT INTO sections (id, plan_json) VALUES ('s1', '{\"keep\":1}')")
-        upd = ("UPDATE sections SET content=?, word_count=?, word_status=?, "
-               "status='generated', updated_at=?, "
-               "last_generation_standard=?, last_generation_report=?, "
-               + self._SQL_FRAGMENT + " WHERE id=?")
+        upd = (
+            "UPDATE sections SET content=?, word_count=?, word_status=?, "
+            "status='generated', updated_at=?, "
+            "last_generation_standard=?, last_generation_report=?, " + self._SQL_FRAGMENT + " WHERE id=?"
+        )
         # 空串 → 保留
         con.execute(upd, ("正文", 10, "ok", "t", "std", "{}", "", "", "s1"))
-        assert con.execute("SELECT plan_json FROM sections WHERE id='s1'").fetchone()[0] \
-            == '{"keep":1}', "空 plan_json 必须保留上一轮编排决策"
+        assert (
+            con.execute("SELECT plan_json FROM sections WHERE id='s1'").fetchone()[0] == '{"keep":1}'
+        ), "空 plan_json 必须保留上一轮编排决策"
         # 非空 → 覆盖
         con.execute(upd, ("正文2", 12, "ok", "t", "std", "{}", '{"new":2}', '{"new":2}', "s1"))
-        assert con.execute("SELECT plan_json FROM sections WHERE id='s1'").fetchone()[0] \
-            == '{"new":2}', "非空 plan_json 必须正常覆盖"
+        assert (
+            con.execute("SELECT plan_json FROM sections WHERE id='s1'").fetchone()[0] == '{"new":2}'
+        ), "非空 plan_json 必须正常覆盖"
         con.close()
 
 
@@ -85,14 +90,16 @@ class TestPlanJsonNotWiped:
 class TestTerminalDoneAlignment:
     def test_completed_done_uses_success_count(self):
         from app.routers import sse_handlers
+
         src = inspect.getsource(sse_handlers.generate_content)
-        block = src[src.index("completed_payload = {"):]
-        block = block[:block.index("yield f\"data:")]
-        assert "'done': len(done_ids)" in block
-        assert "'done': total" not in block
+        block = src[src.index("completed_payload = {") :]
+        block = block[: block.index('yield f"data:')]
+        assert re.search(r"['\"]done['\"]:\s*len\(done_ids\)", block)
+        assert not re.search(r"['\"]done['\"]:\s*total\b", block)
 
     def test_checkpoint_done_increments_only_on_success(self):
         from app.routers import sse_handlers
+
         src = inspect.getsource(sse_handlers.generate_content)
         assert '_ckpt["done"] = _ckpt.get("done", 0) + 1' in src
 
@@ -103,29 +110,36 @@ class TestTerminalDoneAlignment:
 class TestExportFingerprintCoversServerSwitch:
     def _fingerprint(self) -> str:
         from app.routers.export import _content_fingerprint
+
         prep = {
-            "config": {}, "fe_codes": [], "chart_fp": [], "sections": [],
-            "scheme": {}, "fe_images": {}, "image_config": {},
-            "global_facts": [], "appendix_sources": [], "global_facts_status": {},
+            "config": {},
+            "fe_codes": [],
+            "chart_fp": [],
+            "sections": [],
+            "scheme": {},
+            "fe_images": {},
+            "image_config": {},
+            "global_facts": [],
+            "appendix_sources": [],
+            "global_facts_status": {},
         }
         return _content_fingerprint(prep)[1]
 
     def test_demote_switch_changes_fingerprint(self, monkeypatch):
         """切换 body_subheading_demote_with_children 必须改变指纹（否则命中旧产物）。"""
         from app.config import settings
-        monkeypatch.setattr(settings, "body_subheading_demote_with_children",
-                            True, raising=False)
+
+        monkeypatch.setattr(settings, "body_subheading_demote_with_children", True, raising=False)
         fp_on = self._fingerprint()
-        monkeypatch.setattr(settings, "body_subheading_demote_with_children",
-                            False, raising=False)
+        monkeypatch.setattr(settings, "body_subheading_demote_with_children", False, raising=False)
         fp_off = self._fingerprint()
-        assert fp_on != fp_off, (
-            "切换正文子标题降级开关后指纹未变 → 会命中降级前的旧缓存产物")
+        assert fp_on != fp_off, "切换正文子标题降级开关后指纹未变 → 会命中降级前的旧缓存产物"
 
     def test_fingerprint_source_contains_demote_key(self):
         # 拆分兼容：_content_fingerprint 已拆至 _export_cache.py，聚合读取
         import glob as _glob
         import os as _os
+
         p = _app_path("routers", "export.py")
         src = _src_of(p)
         for q in sorted(_glob.glob(_os.path.join(_os.path.dirname(p), "_export_*.py"))):
@@ -141,14 +155,14 @@ class TestExportFactsGateDefined:
         # ⚠️ 判据必须锚 **ast.Name**（真实代码引用），不能锚源码全文 ——
         #    本轮修复注释里就写着这个名字，全文匹配必然自撞（§5.14 同族教训）。
         tree = ast.parse(_src_of(_app_path("routers", "export.py")))
-        hits = [n.lineno for n in ast.walk(tree)
-                if isinstance(n, ast.Name) and n.id == "scheme_row"]
+        hits = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == "scheme_row"]
         assert hits == [], (
-            f"export.py 仍引用从未赋值的 scheme_row（行 {hits}）—— NameError 会被 "
-            "try 吞掉，全局事实交付门控静默失效")
+            f"export.py 仍引用从未赋值的 scheme_row（行 {hits}）—— NameError 会被 " "try 吞掉，全局事实交付门控静默失效"
+        )
 
     def test_gate_reuses_single_source_project_lookup(self):
         from app.routers import export
+
         src = inspect.getsource(export.collect_export_issues)
         assert "resolve_scheme_project_id" in src, "必须走服务层单一出口反查项目"
         assert "if ba_pid:" in src, "门控必须以反查到的项目 ID 为条件"
@@ -161,15 +175,14 @@ class TestExportFactsGateDefined:
 class TestListFactsScopeHardening:
     def test_no_direct_trust_of_caller_project_id(self):
         from app.routers import global_facts as gf
+
         src = inspect.getsource(gf.list_facts)
-        assert "real_pid = project_id.strip()" not in src, (
-            "不得直接信任调用方传入的 project_id 展开共享事实作用域")
+        assert "real_pid = project_id.strip()" not in src, "不得直接信任调用方传入的 project_id 展开共享事实作用域"
         assert "_scheme_project_id" in src, "必须反查方案实际所属项目"
 
     def test_mismatch_is_overridden_and_logged(self):
         src = _src_of(_app_path("routers", "global_facts.py"))
-        assert "list_facts 作用域校正" in src, (
-            "传入 project_id 与反查值不一致时必须校正并留 WARNING 日志")
+        assert "list_facts 作用域校正" in src, "传入 project_id 与反查值不一致时必须校正并留 WARNING 日志"
 
 
 # ===========================================================================
@@ -177,8 +190,9 @@ class TestListFactsScopeHardening:
 # ===========================================================================
 class TestOutlineQualitySettingsFailSafe:
     def _out(self):
-        return [{"id": "1", "title": "工程概况", "level": 1,
-                 "children": [{"id": "1.1", "title": "编制依据", "level": 2}]}]
+        return [
+            {"id": "1", "title": "工程概况", "level": 1, "children": [{"id": "1.1", "title": "编制依据", "level": 2}]}
+        ]
 
     def test_no_bare_settings_reference_outside_try(self):
         src = _src_of(_app_path("services", "outline_quality.py"))
@@ -187,19 +201,19 @@ class TestOutlineQualitySettingsFailSafe:
         # 故剩下的每个 Name 都是业务代码里的真实引用。
         # 但 try 块内的引用是**受保护**的（那正是集中读取配置的地方），
         # 只有落在 try 之外的才会在 import 失败时变成 NameError。
-        guarded = [(n.lineno, n.end_lineno) for n in ast.walk(tree)
-                   if isinstance(n, ast.Try)]
+        guarded = [(n.lineno, n.end_lineno) for n in ast.walk(tree) if isinstance(n, ast.Try)]
 
         def _in_try(lineno: int) -> bool:
             return any(a <= lineno <= b for a, b in guarded)
 
-        names = [n.lineno for n in ast.walk(tree)
-                 if isinstance(n, ast.Name) and n.id == "settings"
-                 and not _in_try(n.lineno)]
+        names = [
+            n.lineno for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == "settings" and not _in_try(n.lineno)
+        ]
         assert not names, (
             f"outline_quality.py 在 try 保护范围外仍于 {names} 行裸引用 settings；"
             "配置导入失败时 except 分支不绑定该名字 → NameError，"
-            "目录质量校验整体崩溃（fail-soft 反噬）")
+            "目录质量校验整体崩溃（fail-soft 反噬）"
+        )
 
     def test_settings_import_failure_does_not_crash(self, monkeypatch):
         """``from app.config import settings`` **本身失败**时不得抛 NameError。
@@ -222,12 +236,11 @@ class TestOutlineQualitySettingsFailSafe:
 
     def test_generic_title_check_still_active_by_default(self):
         from app.services import outline_quality as oq
+
         rep = oq.check_outline_continuity(self._out())
         # 返回结构：issues 的各类键被 **展开到顶层**，同时有 issue_counts 汇总
-        assert "generic_titles" in rep, (
-            "泛化标题检测默认必须仍在跑（配置读取集中化后不得被跳过）")
-        assert "generic_titles" in rep.get("issue_counts", {}), (
-            "issue_counts 必须包含 generic_titles 计数")
+        assert "generic_titles" in rep, "泛化标题检测默认必须仍在跑（配置读取集中化后不得被跳过）"
+        assert "generic_titles" in rep.get("issue_counts", {}), "issue_counts 必须包含 generic_titles 计数"
 
 
 # ===========================================================================
@@ -237,6 +250,7 @@ class TestParsedCharsSingleSource:
     def test_alias_points_to_write_side(self):
         from app.routers import global_facts as gf
         from app.routers import global_facts_docs as gfd
+
         assert gf.MAX_PARSED_CHARS == gfd.MAX_PARSED_CHARS
         assert gf.MAX_PARSED_CHARS >= 400_000
 
@@ -263,6 +277,7 @@ class TestSafetyCriticalBridgeParity:
 
     def test_bridge_uses_heuristic_not_only_column(self):
         from app.services import facts_extractor as fe
+
         src = inspect.getsource(fe.load_resolved_facts_for_scope)
         # 旧写法：直接 bool(r.get("is_safety_critical") or 0)
         assert '"is_safety_critical": bool(r.get("is_safety_critical") or 0)' not in src
@@ -273,10 +288,16 @@ class TestSafetyCriticalBridgeParity:
         from app.services.facts_extractor import _bridge_safety_critical
 
         # 库列为 0、但名称命中安全关键白名单 → 必须判 True
-        row = {"is_safety_critical": 0, "title": "基坑开挖深度",
-               "content": "基坑开挖深度 8.5m", "fact_key": "", "id": "f1"}
-        assert _bridge_safety_critical(row, "基坑开挖深度", "8.5m") is True, (
-            "启发式命中的安全关键事实不得因库列为 0 而被漏标")
+        row = {
+            "is_safety_critical": 0,
+            "title": "基坑开挖深度",
+            "content": "基坑开挖深度 8.5m",
+            "fact_key": "",
+            "id": "f1",
+        }
+        assert (
+            _bridge_safety_critical(row, "基坑开挖深度", "8.5m") is True
+        ), "启发式命中的安全关键事实不得因库列为 0 而被漏标"
 
     def test_bridge_falls_back_to_column_when_heuristic_raises(self):
         """启发式异常时回退库列，绝不丢掉已有信号（fail-soft 方向正确）。"""
@@ -295,6 +316,7 @@ class TestSafetyCriticalBridgeParity:
         """两侧必须都是「启发式 or 列」，而不是一侧 or、一侧只看列。"""
         from app.routers import global_facts as gf
         from app.services import facts_extractor as fe
+
         gf_src = inspect.getsource(gf.list_facts)
         fe_src = inspect.getsource(fe._bridge_safety_critical)
         assert "is_safety_critical_name(" in gf_src
@@ -308,24 +330,31 @@ class TestSafetyCriticalBridgeParity:
 class TestProgressModelSingleSource:
     """sse_handlers 曾把已抽到 content_progress 的 5 个常量又各定义一份。"""
 
-    _NAMES = ("_SECTION_PHASE_MAX", "_STAGE_FILL_MAX", "_STAGE_LABELS",
-              "_STAGE_MODEL", "_STATS_PUSH_INTERVAL")
+    _NAMES = ("_SECTION_PHASE_MAX", "_STAGE_FILL_MAX", "_STAGE_LABELS", "_STAGE_MODEL", "_STATS_PUSH_INTERVAL")
 
     def test_no_local_redefinition_in_sse_handlers(self):
         tree = ast.parse(_src_of(_app_path("routers", "sse_handlers.py")))
-        bad = [t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
-               for t in n.targets if isinstance(t, ast.Name) and t.id in self._NAMES]
+        bad = [
+            t.id
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Assign)
+            for t in n.targets
+            if isinstance(t, ast.Name) and t.id in self._NAMES
+        ]
         assert bad == [], f"sse_handlers 不得再自行定义进度常量：{bad}"
 
     def test_values_are_identical_objects(self):
         """必须是**同一个对象**（别名），不是「值相等的两份」。"""
         from app.routers import sse_handlers as sh
         from app.services import content_progress as cp
-        pairs = [(sh._STAGE_MODEL, cp.STAGE_MODEL),
-                 (sh._STAGE_FILL_MAX, cp.STAGE_FILL_MAX),
-                 (sh._STAGE_LABELS, cp.STAGE_LABELS),
-                 (sh._SECTION_PHASE_MAX, cp.SECTION_PHASE_MAX),
-                 (sh._STATS_PUSH_INTERVAL, cp.STATS_PUSH_INTERVAL)]
+
+        pairs = [
+            (sh._STAGE_MODEL, cp.STAGE_MODEL),
+            (sh._STAGE_FILL_MAX, cp.STAGE_FILL_MAX),
+            (sh._STAGE_LABELS, cp.STAGE_LABELS),
+            (sh._SECTION_PHASE_MAX, cp.SECTION_PHASE_MAX),
+            (sh._STATS_PUSH_INTERVAL, cp.STATS_PUSH_INTERVAL),
+        ]
         for a, b in pairs:
             assert a == b, "两侧取值必须相等"
         assert sh._STAGE_MODEL is cp.STAGE_MODEL
@@ -334,9 +363,9 @@ class TestProgressModelSingleSource:
     def test_stage_model_shape_preserved(self):
         """收敛不得改变模型形状（span 合计 1.0、阶段间 base+span 连续）。"""
         from app.routers.sse_handlers import _STAGE_MODEL
+
         assert sum(m["span"] for m in _STAGE_MODEL.values()) == pytest.approx(1.0)
-        assert (_STAGE_MODEL["persist"]["base"]
-                + _STAGE_MODEL["persist"]["span"]) == pytest.approx(1.0)
+        assert (_STAGE_MODEL["persist"]["base"] + _STAGE_MODEL["persist"]["span"]) == pytest.approx(1.0)
 
 
 # ===========================================================================
@@ -345,6 +374,7 @@ class TestProgressModelSingleSource:
 class TestOverviewFingerprintComputedOnce:
     def test_compute_accepts_fingerprint_param(self):
         from app.routers import compliance as cpl
+
         sig = inspect.signature(cpl._readiness_overview_compute)
         assert "fingerprint" in sig.parameters
         # 默认 None → 既有调用方（review_autofix 三处）行为逐字不变
@@ -352,15 +382,15 @@ class TestOverviewFingerprintComputedOnce:
 
     def test_overview_passes_it_down(self):
         from app.routers import compliance as cpl
+
         src = inspect.getsource(cpl.readiness_overview)
-        assert "fingerprint=fingerprint" in src, (
-            "readiness_overview 必须把已算好的指纹传下去（否则仍是两次全表扫描）")
+        assert "fingerprint=fingerprint" in src, "readiness_overview 必须把已算好的指纹传下去（否则仍是两次全表扫描）"
 
     def test_persisted_fingerprint_reuses_param(self):
         from app.routers import compliance as cpl
+
         src = inspect.getsource(cpl._readiness_overview_compute)
-        assert "fingerprint is not None" in src, (
-            "落库指纹必须优先复用传入值，杜绝「缓存键用 A、落库用 B」的口径分裂")
+        assert "fingerprint is not None" in src, "落库指纹必须优先复用传入值，杜绝「缓存键用 A、落库用 B」的口径分裂"
 
 
 # ===========================================================================
@@ -369,16 +399,15 @@ class TestOverviewFingerprintComputedOnce:
 class TestFailedSourcesSurfaced:
     def test_failed_sources_in_payload(self):
         from app.routers import compliance as cpl
+
         src = inspect.getsource(cpl._readiness_overview_compute)
         assert '"failed_sources": failed_sources' in src
 
     def test_all_five_ai_sources_report_failure(self):
         """六路来源中五路走 try/except，每一路失败都要上报，不得只打日志。"""
         src = _src_of(_app_path("routers", "compliance.py"))
-        for name in ("export_check", "compliance", "consistency",
-                     "consistency_scan", "expert_review"):
-            assert f'failed_sources.append("{name}")' in src, (
-                f"{name} 读取失败未上报，前端无从得知该来源未参与评分")
+        for name in ("export_check", "compliance", "consistency", "consistency_scan", "expert_review"):
+            assert f'failed_sources.append("{name}")' in src, f"{name} 读取失败未上报，前端无从得知该来源未参与评分"
 
     def test_stale_ai_sources_semantics_untouched(self):
         """stale_ai_sources 仍只表示「正文已变 → 结论过期」，不得混入失败。"""
@@ -401,6 +430,7 @@ class TestPreflightEngineErrorFlagged:
         """异常条目必须保持 rule_id 为空 —— 空 rule_id **不参与去重**，
         多个检查项同时异常时才会逐条保留（改成固定规则号会被塌缩成一条）。"""
         from app.services import preflight_engine as pe
+
         src = inspect.getsource(pe.run_preflight)
         assert '"rule_id": ""' in src
         assert "if not rid:" in src, "空 rule_id 保留全部的分支必须还在"
@@ -420,23 +450,28 @@ class TestRetryDbLockedNoDeadTail:
         #    本轮修复注释里逐字写着 `return await factory()`，全文匹配必自撞
         #    （与 export.py 的 scheme_row 同一类陷阱，§5.14 同族）。
         from app.routers import sse_checkpoint as sc
+
         tree = ast.parse(inspect.getsource(sc._retry_db_locked))
-        bad = [n.lineno for n in ast.walk(tree)
-               if isinstance(n, ast.Return)
-               and isinstance(n.value, ast.Await)
-               and isinstance(n.value.value, ast.Call)
-               and isinstance(n.value.value.func, ast.Name)
-               and n.value.value.func.id == "factory"]
+        bad = [
+            n.lineno
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Return)
+            and isinstance(n.value, ast.Await)
+            and isinstance(n.value.value, ast.Call)
+            and isinstance(n.value.value.func, ast.Name)
+            and n.value.value.func.id == "factory"
+        ]
         # 循环体内的 return 是正常成功路径，只禁止**循环之后**的尾巴
-        loop_line = next(n.end_lineno for n in ast.walk(tree)
-                         if isinstance(n, ast.For))
+        loop_line = next(n.end_lineno for n in ast.walk(tree) if isinstance(n, ast.For))
         tail = [ln for ln in bad if ln > loop_line]
         assert tail == [], (
             f"重试循环之后仍存在 return await factory()（行 {tail}）—— "
-            "与 docstring「总尝试次数 = 1 + max_retries」矛盾，且该行不可达")
+            "与 docstring「总尝试次数 = 1 + max_retries」矛盾，且该行不可达"
+        )
 
     def test_attempts_count_matches_docstring(self):
         from app.routers import sse_checkpoint as sc
+
         src = inspect.getsource(sc._retry_db_locked)
         assert "for i in range(attempts + 1)" in src
         assert "总尝试次数 = 1 + max_retries" in src
@@ -448,6 +483,7 @@ class TestRetryDbLockedNoDeadTail:
 class TestOutlineDepthSemantics:
     def test_hard_cap_is_single_source(self):
         from app.services.outline_utils import MAX_OUTLINE_DEPTH
+
         assert MAX_OUTLINE_DEPTH == 3
 
         def _defs(rel):
@@ -460,22 +496,23 @@ class TestOutlineDepthSemantics:
             return n
 
         assert _defs(("services", "outline_utils.py")) == 1
-        assert _defs(("services", "outline_reorganize.py")) == 0, (
-            "outline_reorganize 曾重新定义过该常量，不得再出现第二份")
+        assert (
+            _defs(("services", "outline_reorganize.py")) == 0
+        ), "outline_reorganize 曾重新定义过该常量，不得再出现第二份"
 
     def test_alert_line_is_not_below_hard_cap(self):
         """规范告警线必须 ≥ 落库硬上限，否则合法目录会被判违规（误报）。"""
         from app.services.outline_quality import OUTLINE_MAX_DEPTH
         from app.services.outline_utils import MAX_OUTLINE_DEPTH
+
         assert OUTLINE_MAX_DEPTH >= MAX_OUTLINE_DEPTH, (
-            f"告警线 {OUTLINE_MAX_DEPTH} 低于硬上限 {MAX_OUTLINE_DEPTH}："
-            "落库允许的深度会被规范检查判为越界")
+            f"告警线 {OUTLINE_MAX_DEPTH} 低于硬上限 {MAX_OUTLINE_DEPTH}：" "落库允许的深度会被规范检查判为越界"
+        )
 
     def test_known_limitation_documented(self):
         """告警在裁剪后调用时恒不触发 —— 这一已知限制必须写在常量注释里。"""
         src = _src_of(_app_path("services", "outline_quality.py"))
-        assert "恒不触发" in src, (
-            "必须记录：OUTLINE_MAX_DEPTH 告警仅在裁剪前的原始目录上才有意义")
+        assert "恒不触发" in src, "必须记录：OUTLINE_MAX_DEPTH 告警仅在裁剪前的原始目录上才有意义"
 
 
 # ===========================================================================
@@ -486,17 +523,20 @@ class TestReviewProgressSemantics:
         """progress 是 approved_progress 的**遗留别名**（通过率），
         不是「评审进度」；审完率必须看 reviewed_progress。"""
         from app.routers import review as rv
+
         src = inspect.getsource(rv.review_summary)
         assert "round(approved / total * 100, 1)" in src
-        assert src.count("round(approved / total * 100, 1)") == 2, (
-            "progress 与 approved_progress 必须同为通过率口径（遗留别名关系）")
+        assert (
+            src.count("round(approved / total * 100, 1)") == 2
+        ), "progress 与 approved_progress 必须同为通过率口径（遗留别名关系）"
         assert "round(reviewed / total * 100, 1)" in src
 
     def test_reviewed_all_means_all_reviewed_not_all_approved(self):
         from app.routers import review as rv
+
         src = inspect.getsource(rv.review_summary)
         assert "reviewed_all = total > 0 and reviewed == total" in src
-        assert "reviewed = total - counts.get(\"\", 0)" in src
+        assert 'reviewed = total - counts.get("", 0)' in src
 
 
 # ===========================================================================
@@ -512,17 +552,26 @@ class TestStatsPingProtocolParity:
         """同一页面三处 SSE 消费点的事件白名单必须一致，
         否则 stats 只在某些入口被静默丢弃（症状只在一个入口出现，极难排查）。"""
         import os
+
         fe = os.path.join(BACKEND, "..", "frontend", "src")
-        page = os.path.join(fe, "pages", "SchemeWorkbenchPage.tsx")
-        with open(page, encoding="utf-8") as f:
-            src = f.read()
+        pages = os.path.join(fe, "pages")
+        page = os.path.join(pages, "SchemeWorkbenchPage.tsx")
+        parts = [_src_of(page)]
+        # R176：页面正按批拆分（含 tabs/）—— 三个 SSE 消费点已迁至
+        # pages/schemeWorkbench/*.ts(x)；固定只读 facade 会把计数从 3 静默降到 1。
+        wb = os.path.join(pages, "schemeWorkbench")
+        wb_files = []
+        for dirpath, _dirs, fnames in os.walk(wb):
+            wb_files += [os.path.join(dirpath, n) for n in sorted(fnames) if n.endswith((".ts", ".tsx"))]
+        assert wb_files, f"拆分目录未被递归扫描到（0 个 ts/tsx）：{wb}"
+        parts += [_src_of(p) for p in wb_files]
+        src = "\n".join(parts)
         both = src.count('evt.event === "stats" || evt.event === "ping"')
         # 目录分支 + 正文分支 + facts 分支 = 3 处（钩子里的 useContentGeneration 另算）
-        assert both >= 3, (
-            f"仍有消费点只认 ping 不认 stats（当前双认处数={both}）")
+        assert both >= 3, f"仍有消费点只认 ping 不认 stats（当前双认处数={both}）"
         assert 'evt.event === "ping")' not in src.replace(
-            'evt.event === "stats" || evt.event === "ping")', ""), (
-            "存在只匹配 ping 的分支，stats 到达时被静默丢弃")
+            'evt.event === "stats" || evt.event === "ping")', ""
+        ), "存在只匹配 ping 的分支，stats 到达时被静默丢弃"
 
 
 # ===========================================================================
@@ -533,6 +582,7 @@ class TestSingleSourceCrossModule:
         """作用域谓词只允许在 facts_extractor 定义一次（R69 + R70 第四份副本）。"""
         hits = []
         import os
+
         app_dir = _app_path()
         for root, _, files in os.walk(app_dir):
             if "__pycache__" in root:
@@ -545,9 +595,10 @@ class TestSingleSourceCrossModule:
                 for node in ast.walk(tree):
                     if isinstance(node, ast.Assign):
                         for t in node.targets:
-                            if isinstance(t, ast.Name) and \
-                                    t.id in ("FACT_SCOPE_PREDICATE",
-                                             "FACT_SCOPE_SHARED_FRAGMENT"):
+                            if isinstance(t, ast.Name) and t.id in (
+                                "FACT_SCOPE_PREDICATE",
+                                "FACT_SCOPE_SHARED_FRAGMENT",
+                            ):
                                 hits.append((os.path.relpath(p, app_dir), t.id))
         assert len(hits) == 2, f"作用域谓词定义处应为 2（半句+全范围），实际：{hits}"
         assert all("facts_extractor" in h[0] for h in hits), hits
@@ -563,6 +614,7 @@ class TestSingleSourceCrossModule:
         #    （与 export.py 的 scheme_row、_retry_db_locked 的死代码尾巴同族）。
         offenders = []
         import os
+
         app_dir = _app_path()
         for root, _, files in os.walk(app_dir):
             if "__pycache__" in root:
@@ -579,14 +631,17 @@ class TestSingleSourceCrossModule:
                     if not isinstance(n, ast.Tuple):
                         continue
                     elts = n.elts
-                    if (len(elts) == 2 and all(isinstance(e, ast.Name) for e in elts)
-                            and all(e.id == "scheme_id" for e in elts)):
+                    if (
+                        len(elts) == 2
+                        and all(isinstance(e, ast.Name) for e in elts)
+                        and all(e.id == "scheme_id" for e in elts)
+                    ):
                         offenders.append((os.path.relpath(p, app_dir), n.lineno))
-        assert offenders == [], (
-            f"以下位置把 scheme_id 当 project_id 传给作用域谓词：{offenders}")
+        assert offenders == [], f"以下位置把 scheme_id 当 project_id 传给作用域谓词：{offenders}"
 
     def test_all_modules_share_predicate_values(self):
         from app.routers.global_facts import _FACT_SCOPE_PREDICATE
         from app.services.facts_extractor import FACT_SCOPE_PREDICATE, FACT_SCOPE_SHARED_FRAGMENT
+
         assert _FACT_SCOPE_PREDICATE == FACT_SCOPE_PREDICATE
         assert FACT_SCOPE_SHARED_FRAGMENT in FACT_SCOPE_PREDICATE

@@ -10,6 +10,7 @@
 
 判据指向「真正下发给模型/落库的那份数据」，不做碰巧含关键字的宽匹配（§4.22 教训）。
 """
+
 from __future__ import annotations
 
 import inspect
@@ -32,8 +33,14 @@ from app.services.content_trace import GENERATION_FUZZY, build_trace
 
 #: 需求文档三.2 列出的八类（顺序即文档顺序），label 必须一字不差
 _REQUIRED_LABELS: tuple[str, ...] = (
-    "数值类", "名称类", "时间类", "数量类", "承诺类", "技术参数类",
-    "材料规格类", "工序流程类",
+    "数值类",
+    "名称类",
+    "时间类",
+    "数量类",
+    "承诺类",
+    "技术参数类",
+    "材料规格类",
+    "工序流程类",
 )
 
 
@@ -72,18 +79,17 @@ class TestPromptTableSingleSource:
         for c in FUZZY_CATEGORIES.values():
             assert f"| {c['label']} |" in s, c["label"]
         # 表体行数 = 类别数（不多渲染、不少渲染）
-        body_rows = [ln for ln in s.splitlines()
-                     if ln.startswith("| ") and "---" not in ln
-                     and "类别 |" not in ln]
+        body_rows = [ln for ln in s.splitlines() if ln.startswith("| ") and "---" not in ln and "类别 |" not in ln]
         assert len(body_rows) == len(FUZZY_CATEGORIES)
 
     def test_block_no_longer_hardcodes_category_tuple(self):
         """build_fuzzy_rules_block 不得回退为硬编码类别元组（表/文案分叉根因）。"""
         src = inspect.getsource(build_fuzzy_rules_block)
-        assert 'for key, c in FUZZY_CATEGORIES.items():' in src
+        assert "for key, c in FUZZY_CATEGORIES.items():" in src
 
     def test_injected_into_both_standards(self):
         from app.services.content_standard import FUZZY, PRECISE
+
         for std in (PRECISE, FUZZY):
             s = build_fuzzy_rules_for_standard(std)
             for label in _REQUIRED_LABELS:
@@ -93,6 +99,7 @@ class TestPromptTableSingleSource:
 # ---------------------------------------------------------------------------
 # 2. 新类别检测器：正/负样本与归类优先级
 # ---------------------------------------------------------------------------
+
 
 class TestMaterialDetector:
     def test_positive_samples(self):
@@ -134,6 +141,7 @@ class TestDetectorCoverage:
     def test_every_detectable_category_has_detector(self):
         """除登记在 UNDETECTABLE 的类别外，每类都必须有检测正则（防哑类别）。"""
         import app.services.content_fuzzy as cf
+
         for key in FUZZY_CATEGORIES:
             if key in FUZZY_UNDETECTABLE and key != "promise":
                 continue
@@ -146,8 +154,7 @@ class TestDetectorCoverage:
         对 4 键字典解包必抛 ValueError → 被外层 except 吞掉 → 只要有第二处
         候选命中，detect_fuzzy_expressions 就返回空表，内部标记全部丢失。
         """
-        body = ("钢筋强度应符合现行规范要求，底板厚度约 200mm，"
-                "支架搭设按标准施工工艺组织。")
+        body = "钢筋强度应符合现行规范要求，底板厚度约 200mm，" "支架搭设按标准施工工艺组织。"
         cats = {h["category"] for h in detect_fuzzy_expressions(body)}
         assert {"material", "number", "process"} <= cats, cats
 
@@ -162,13 +169,12 @@ class TestDetectorCoverage:
 # 3. 内部标记：新类别进入 trace 口径（category/data_source/fuzzy_reason 同源）
 # ---------------------------------------------------------------------------
 
+
 class TestTraceCarriesNewCategories:
     def test_material_hit_traceable(self):
         body = "主体材料品种、规格符合设计要求。"
-        trace = build_trace(scanned=body,
-                            fuzzy_expressions=detect_fuzzy_expressions(body))
-        items = [i for i in trace["items"]
-                 if i["generation_type"] == GENERATION_FUZZY]
+        trace = build_trace(scanned=body, fuzzy_expressions=detect_fuzzy_expressions(body))
+        items = [i for i in trace["items"] if i["generation_type"] == GENERATION_FUZZY]
         assert items
         assert items[0]["category"] == "material"
         assert items[0]["data_source"] == FUZZY_CATEGORIES["material"]["data_source"]
@@ -185,6 +191,7 @@ class TestTraceCarriesNewCategories:
 # 4. 自检 + 确定性自动修复默认开启（需求目标一「生成即完整」）
 # ---------------------------------------------------------------------------
 
+
 class TestSelfcheckDefaultsOn:
     def test_config_defaults(self):
         s = Settings()
@@ -200,14 +207,14 @@ class TestSelfcheckDefaultsOn:
 
     def test_sse_fallback_defaults_match_config(self):
         """接线处 getattr 兜底值必须与 config 默认一致（两处分叉=静默失效）。"""
-        src = (Path(__file__).resolve().parents[1]
-               / "app" / "routers" / "sse_handlers.py").read_text(encoding="utf-8")
+        src = (Path(__file__).resolve().parents[1] / "app" / "routers" / "sse_handlers.py").read_text(encoding="utf-8")
         assert 'getattr(settings, "content_selfcheck", True)' in src
         assert 'getattr(settings, "content_selfcheck_autofix", True)' in src
 
     def test_autofix_rewrites_placeholder_deterministically(self):
         """自动修复动作本身：占位标记改写后正文不再残留【待补充】，且幂等。"""
         from app.services.content_checkpoint import rewrite_placeholder_marks
+
         text = "支护桩直径【待补充】，桩间距按设计确定。"
         fixed, actions = rewrite_placeholder_marks(text)
         assert "【待补充" not in fixed

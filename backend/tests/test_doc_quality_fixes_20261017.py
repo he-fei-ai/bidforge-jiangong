@@ -12,6 +12,7 @@ B. 《导出文档发现的问题.docx》—— 组织架构图**根节点空框
 每条修复都配「还原旧行为即失败」的反向对照断言（AGENTS §4.22.8 教训：只锚定真正
 生效的那段代码，不靠"碰巧含关键字的一切字符串"）。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -36,6 +37,7 @@ from app.services.docx_math import (
 # ===========================================================================
 # A1. HTML 实体还原（「当跨度&gt;2m 时」类残留）
 # ===========================================================================
+
 
 class TestHtmlEntities:
     def test_common_entities_decoded(self):
@@ -70,6 +72,7 @@ class TestHtmlEntities:
 # A2. 带边界空白的 `$ x $` → `$x$`（使 LaTeX 落回严格形态转 OMML）
 # ===========================================================================
 
+
 class TestSpacedInlineMath:
     def test_boundary_spaces_removed(self):
         assert normalize_spaced_inline_math("$ \\gamma_c = 25 $") == "$\\gamma_c = 25$"
@@ -96,6 +99,7 @@ class TestSpacedInlineMath:
 # A3. 中英混排误植词还原（公式跨度外）
 # ===========================================================================
 
+
 class TestEnglishResidue:
     def test_residue_words_mapped(self):
         assert fix_english_residue("steel tube 与 plywood") == "钢管 与 胶合板"
@@ -119,6 +123,7 @@ class TestEnglishResidue:
 # A4. 表题叠写修复（根因 A：顿号表题；根因 B：首格自带编号）
 # ===========================================================================
 
+
 class TestTableCaptionDedup:
     def test_dunhao_table_title_accepted(self):
         """含顿号的真实表题必须被接受（旧实现把「、」当句读拒绝）。"""
@@ -131,17 +136,13 @@ class TestTableCaptionDedup:
         assert _looks_like_table_title("表所列参数，详见表注") is False
 
     def test_strip_leading_table_number(self):
-        assert _strip_leading_table_number("表 6-1 木工班组劳动力配置计划") \
-            == "木工班组劳动力配置计划"
-        assert _strip_leading_table_number("表6-3 特种作业人员管理流程") \
-            == "特种作业人员管理流程"
+        assert _strip_leading_table_number("表 6-1 木工班组劳动力配置计划") == "木工班组劳动力配置计划"
+        assert _strip_leading_table_number("表6-3 特种作业人员管理流程") == "特种作业人员管理流程"
         # 非「表 X-Y」开头 → 原样返回
         assert _strip_leading_table_number("序号") == "序号"
 
     def test_normalize_first_cell(self):
-        lines = ["| 表 6-1 木工班组劳动力配置计划 | 工种 |",
-                 "| --- | --- |",
-                 "| 1 | 木工 |"]
+        lines = ["| 表 6-1 木工班组劳动力配置计划 | 工种 |", "| --- | --- |", "| 1 | 木工 |"]
         out = _normalize_table_first_cell(lines)
         assert out[0].split("|")[1].strip() == "木工班组劳动力配置计划"
         assert out[1:] == lines[1:]
@@ -158,8 +159,7 @@ class TestTableCaptionDedup:
         tbl = [b for b in blocks if b["type"] == "table"][0]
         assert tbl["caption"] == "木工班组劳动力配置计划、工种、准备阶段"
         assert "表 6-1" not in tbl["lines"][0]
-        assert not any(b["type"] == "paragraph" and "表 6-1" in b.get("text", "")
-                       for b in blocks)
+        assert not any(b["type"] == "paragraph" and "表 6-1" in b.get("text", "") for b in blocks)
 
     def test_revert_no_strip_keeps_stacked_number(self):
         """反向对照：不剥离时首格仍带「表 6-1」→ 与导出表号叠写。"""
@@ -171,6 +171,7 @@ class TestTableCaptionDedup:
 # ===========================================================================
 # A5. 图题重号 / 有题无图
 # ===========================================================================
+
 
 class TestFigureCaption:
     def test_absorb_caption_above_chart(self):
@@ -185,17 +186,14 @@ class TestFigureCaption:
             {"type": "paragraph", "text": "图 9-1 支撑平面布置图"},
         ]
         kept = _drop_dangling_figure_captions(blocks)
-        assert not any(b["type"] == "paragraph" and "图 9-1" in b.get("text", "")
-                       for b in kept)
-        assert any(b["type"] == "paragraph" and b.get("text") == "正文说明。"
-                   for b in kept)
+        assert not any(b["type"] == "paragraph" and "图 9-1" in b.get("text", "") for b in kept)
+        assert any(b["type"] == "paragraph" and b.get("text") == "正文说明。" for b in kept)
 
     def test_legit_reference_kept(self):
         """正文里的图号引用（非独立图题句）不得被删。"""
         assert _looks_like_figure_title("所示内容") is False
         assert _looks_like_figure_title("了一些参数") is False
-        kept = _drop_dangling_figure_captions(
-            [{"type": "paragraph", "text": "详见图 3-1 所示内容"}])
+        kept = _drop_dangling_figure_captions([{"type": "paragraph", "text": "详见图 3-1 所示内容"}])
         assert len(kept) == 1
 
     def test_long_caption_rejected(self):
@@ -212,10 +210,9 @@ class TestFigureCaption:
 # B1. 组织架构图根节点空框（有子节点、无标签）
 # ===========================================================================
 
+
 class TestArchitectureRootLabel:
-    CHILDREN = [{"label": "总监理工程师",
-                 "children": [{"label": "专业监理工程师"}]},
-                {"label": "建设单位代表"}]
+    CHILDREN = [{"label": "总监理工程师", "children": [{"label": "专业监理工程师"}]}, {"label": "建设单位代表"}]
 
     def test_children_only_root_gets_default_label(self):
         """根节点只有 children、无 label/name → 旧实现渲染空框。"""
@@ -224,23 +221,21 @@ class TestArchitectureRootLabel:
         assert (root.get("label") or root.get("name") or "").strip() != ""
 
     def test_payload_title_preferred(self):
-        root = normalize_architecture_tree(
-            {"title": "模板工程验收组织架构", "children": self.CHILDREN})
+        root = normalize_architecture_tree({"title": "模板工程验收组织架构", "children": self.CHILDREN})
         assert root["label"] == "模板工程验收组织架构"
 
     def test_nested_empty_label_root(self):
-        root = normalize_architecture_tree(
-            {"root": {"label": "", "children": self.CHILDREN}})
+        root = normalize_architecture_tree({"root": {"label": "", "children": self.CHILDREN}})
         assert root is not None
         assert (root.get("label") or "").strip() != ""
 
     def test_existing_label_untouched(self):
-        root = normalize_architecture_tree(
-            {"label": "项目部", "children": self.CHILDREN})
+        root = normalize_architecture_tree({"label": "项目部", "children": self.CHILDREN})
         assert root["label"] == "项目部"
 
     def test_layout_root_node_has_text(self):
         from app.services.ai.mermaid_architecture import _layout_architecture_tree
+
         root = normalize_architecture_tree({"children": self.CHILDREN})
         nodes, _w, _h = _layout_architecture_tree(root)
         tops = [n for n in nodes if n["depth"] == 0]
@@ -249,6 +244,7 @@ class TestArchitectureRootLabel:
 
     def test_render_produces_image(self):
         from app.services.ai.mermaid_architecture import _render_architecture_image_v2
+
         bio = _render_architecture_image_v2({"children": self.CHILDREN})
         assert bio is not None and len(bio.getvalue()) > 100
 
@@ -268,20 +264,29 @@ class TestArchitectureRootLabel:
 #: 在空白分隔列后**又塞了第二条记录**（序号 2 模板工）。
 _EXHIBIT_ROWS = [
     ["序号", "工种", "计划人数", "主要职责", "进场时间安排", "", "", "", "", "", ""],
-    ["1", "木工班长", "2", "负责现场技术交底、质量把控及进度协调", "计划开工前14天",
-     "", "2", "模板工", "15", "负责模板拼装、加固、拆除及现场清理", "首批材料进场后1天"],
-    ["3", "测量工", "2", "负责模板位置放线、标高控制及垂直度校正", "同步进场",
-     "", "", "", "", "", ""],
-    ["4", "架子工", "6", "负责支撑体系搭设、验收及日常维护", "首批材料进场后1天",
-     "", "", "", "", "", ""],
-    ["6", "安全员", "1", "负责现场模板支设安全监督检查", "全程驻场",
-     "", "", "", "", "", ""],
+    [
+        "1",
+        "木工班长",
+        "2",
+        "负责现场技术交底、质量把控及进度协调",
+        "计划开工前14天",
+        "",
+        "2",
+        "模板工",
+        "15",
+        "负责模板拼装、加固、拆除及现场清理",
+        "首批材料进场后1天",
+    ],
+    ["3", "测量工", "2", "负责模板位置放线、标高控制及垂直度校正", "同步进场", "", "", "", "", "", ""],
+    ["4", "架子工", "6", "负责支撑体系搭设、验收及日常维护", "首批材料进场后1天", "", "", "", "", "", ""],
+    ["6", "安全员", "1", "负责现场模板支设安全监督检查", "全程驻场", "", "", "", "", "", ""],
 ]
 
 
 class TestUnstackTableRows:
     def test_exhibit_rows_restored_to_five_columns(self):
         from app.routers.export import _unstack_or_trim_table_rows
+
         out = _unstack_or_trim_table_rows(_EXHIBIT_ROWS)
         assert max(len(r) for r in out) == 5
         assert len(out) == len(_EXHIBIT_ROWS) + 1  # 侧叠的第二条记录升为独立行
@@ -291,11 +296,13 @@ class TestUnstackTableRows:
 
     def test_normal_table_unchanged(self):
         from app.routers.export import _unstack_or_trim_table_rows
+
         rows = [["A", "B", "C"], ["1", "2", "3"], ["4", "5", "6"]]
         assert _unstack_or_trim_table_rows(rows) == rows
 
     def test_trailing_empty_column_trimmed(self):
         from app.routers.export import _unstack_or_trim_table_rows
+
         rows = [["A", "B", ""], ["1", "2", ""], ["3", "4", ""]]
         out = _unstack_or_trim_table_rows(rows)
         assert all(len(r) == 2 for r in out)
@@ -303,17 +310,20 @@ class TestUnstackTableRows:
     def test_two_named_blocks_not_unstacked(self):
         """两个列块表头都有名称（合并表头风格）→ 保守不动。"""
         from app.routers.export import _unstack_or_trim_table_rows
-        rows = [["项目", "数量", "", "规格", "备注"],
-                ["甲", "1", "", "R1", "x"]]
+
+        rows = [["项目", "数量", "", "规格", "备注"], ["甲", "1", "", "R1", "x"]]
         assert _unstack_or_trim_table_rows(rows) == rows
 
     def test_docx_table_has_five_columns(self):
         """端到端：经渲染器产出的 Word 表格为 5 列 × 5 行（不再撑成 11 列）。"""
         from app.routers.export import _add_table_from_markup
         from docx import Document
-        lines = (["| " + " | ".join(r) + " |" for r in _EXHIBIT_ROWS[:1]]
-                 + ["| " + " | ".join([""] * 11) + " |"]
-                 + ["| " + " | ".join(r) + " |" for r in _EXHIBIT_ROWS[1:]])
+
+        lines = (
+            ["| " + " | ".join(r) + " |" for r in _EXHIBIT_ROWS[:1]]
+            + ["| " + " | ".join([""] * 11) + " |"]
+            + ["| " + " | ".join(r) + " |" for r in _EXHIBIT_ROWS[1:]]
+        )
         doc = Document()
         _add_table_from_markup(doc, lines, "宋体")
         tbl = doc.tables[0]
@@ -323,15 +333,23 @@ class TestUnstackTableRows:
 
     def test_fix_stat_key_registered(self):
         from app.routers.export import _FIX_STATS_KEYS
+
         assert "table_unstacked" in _FIX_STATS_KEYS
-        for k in ("block_render_failed", "table_truncated", "fences_fixed",
-                  "html_entities", "en_residue", "latex_residue"):
+        for k in (
+            "block_render_failed",
+            "table_truncated",
+            "fences_fixed",
+            "html_entities",
+            "en_residue",
+            "latex_residue",
+        ):
             assert k in _FIX_STATS_KEYS
 
 
 # ===========================================================================
 # A6. 数据矛盾维度补全（用工年龄 / 缺陷责任期 / 板厚 / 壁厚 / 拆模强度）
 # ===========================================================================
+
 
 class TestConsistencyTopics:
     NEW = ("用工年龄", "缺陷责任期", "模板面板厚度", "钢管壁厚", "拆模强度")
@@ -348,12 +366,9 @@ class TestConsistencyTopics:
     def test_age_contradiction_detected(self):
         """报告实证：四处用工年龄口径不一（一般 55/60、危大 60/55）。"""
         sections = [
-            {"id": "p21", "title": "劳动力", "content":
-             "劳务用工年龄上限一般控制在55周岁，危大工程岗位控制在60周岁。"},
-            {"id": "p72", "title": "劳动力", "content":
-             "一般作业人员年龄不超过55周岁。"},
-            {"id": "ap", "title": "附录", "content":
-             "农民工用工年龄上限：一般60周岁，危大工程55周岁。"},
+            {"id": "p21", "title": "劳动力", "content": "劳务用工年龄上限一般控制在55周岁，危大工程岗位控制在60周岁。"},
+            {"id": "p72", "title": "劳动力", "content": "一般作业人员年龄不超过55周岁。"},
+            {"id": "ap", "title": "附录", "content": "农民工用工年龄上限：一般60周岁，危大工程55周岁。"},
         ]
         cands = CS.program_prescan(sections)
         aged = {c["topic"]: c["value"] for c in cands if "用工年龄" in c["topic"]}
@@ -384,9 +399,11 @@ class TestConsistencyTopics:
 # A7. 导出侧表题编号剥离（export._strip_leading_table_number）
 # ===========================================================================
 
+
 class TestExportTableCaptionStrip:
     def test_export_strip_helper(self):
         from app.routers.export import _strip_leading_table_number as strip
+
         assert strip("表 6-3 表 6-1 木工班组劳动力配置计划") == "表 6-1 木工班组劳动力配置计划"
         assert strip("序号") == "序号"
 

@@ -18,6 +18,7 @@ F 审核预检 DLV-16：聚合 1 条、无预算沉默、容差带随 settings�
   注册表/引擎产出集/版本 bump/autofix 文案四处同步。
 G 提示词契约与模块级重名体检（R65 教训：往老模块追加名字先 grep）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -68,8 +69,7 @@ _SRC = {
 # ===========================================================================
 class TestTierConstants:
     def test_four_tiers_exact(self):
-        assert cu.WORD_BUDGET_TIERS == {
-            "brief": 800, "standard": 1200, "detailed": 2000, "ultra": 2500}
+        assert cu.WORD_BUDGET_TIERS == {"brief": 800, "standard": 1200, "detailed": 2000, "ultra": 2500}
         assert cu.WORD_BUDGET_DEFAULT_TIER == "standard"
 
     def test_default_budget_equals_standard_tier(self):
@@ -79,13 +79,30 @@ class TestTierConstants:
     def test_leaf_floor_is_300(self):
         assert cu.LEAF_MIN_WORD_BUDGET == 300
 
-    @pytest.mark.parametrize("raw,expect", [
-        ("brief", 800), ("STANDARD", 1200), (" detailed ", 2000), ("ultra", 2500),
-        (800, 800), ("2500", 2500), (1200.0, 1200),
-        (None, None), ("", None), ("   ", None), (True, None), (False, None),
-        (750, None), ("999", None), (0, None), (-800, None),
-        ("cheap", None), ({}, None), (["brief"], None),
-    ])
+    @pytest.mark.parametrize(
+        "raw,expect",
+        [
+            ("brief", 800),
+            ("STANDARD", 1200),
+            (" detailed ", 2000),
+            ("ultra", 2500),
+            (800, 800),
+            ("2500", 2500),
+            (1200.0, 1200),
+            (None, None),
+            ("", None),
+            ("   ", None),
+            (True, None),
+            (False, None),
+            (750, None),
+            ("999", None),
+            (0, None),
+            (-800, None),
+            ("cheap", None),
+            ({}, None),
+            (["brief"], None),
+        ],
+    )
     def test_resolve_tier_tolerant_and_strict(self, raw, expect):
         assert cu.resolve_word_budget_tier(raw) == expect
 
@@ -98,11 +115,11 @@ class TestTierConstants:
         assert "word_budget INTEGER DEFAULT 1200" in _SRC["schema_sql"]
         assert "word_budget INTEGER DEFAULT 1500" not in _SRC["schema_sql"]
 
-    @pytest.mark.parametrize("key", [
-        "sections", "upload_outline", "charts", "schemes", "review_autofix"])
+    @pytest.mark.parametrize("key", ["sections", "upload_outline", "charts", "schemes", "review_autofix"])
     def test_no_1500_literal_near_word_budget(self, key):
-        assert not re.search(r"word_budget[^\n]{0,60}\b1500\b", _SRC[key]), (
-            f"{key}.py 仍有 1500 字面量预算，应改用 DEFAULT_WORD_BUDGET")
+        assert not re.search(
+            r"word_budget[^\n]{0,60}\b1500\b", _SRC[key]
+        ), f"{key}.py 仍有 1500 字面量预算，应改用 DEFAULT_WORD_BUDGET"
 
     def test_routers_use_single_source_constant(self):
         for key in ("sections", "upload_outline", "charts", "schemes", "review_autofix"):
@@ -123,8 +140,10 @@ class TestToleranceAndHint:
     @pytest.mark.parametrize("b", [800, 1000, 1200, 1500, 2000, 2500, 3000])
     def test_hint_equals_old_hardcoded_formula(self, b):
         # 旧实现：int(b*0.9) / int(b*1.1) / int(b*1.2) 硬编码 —— 新公式必须逐字相等
-        expected = (f"{b}字（可接受 0.9~1.1 倍即 {int(b * 0.9)}~{int(b * 1.1)} 字；"
-                    f"硬上限 {int(b * 1.2)} 字，超出即视为不合格）")
+        expected = (
+            f"{b}字（可接受 0.9~1.1 倍即 {int(b * 0.9)}~{int(b * 1.1)} 字；"
+            f"硬上限 {int(b * 1.2)} 字，超出即视为不合格）"
+        )
         assert _word_budget_hint(b) == expected
 
     def test_hint_configurable_tolerance(self, monkeypatch):
@@ -137,11 +156,17 @@ class TestToleranceAndHint:
     def test_hint_empty_for_no_budget(self, b):
         assert _word_budget_hint(b) == ""
 
-    @pytest.mark.parametrize("wc,wb,in_band", [
-        (900, 1000, True), (1100, 1000, True),        # 边界恰在 0.9/1.1
-        (890, 1000, False), (1111, 1000, False),      # 带外
-        (1080, 1200, True), (1320, 1200, True),       # 档位标准边界
-    ])
+    @pytest.mark.parametrize(
+        "wc,wb,in_band",
+        [
+            (900, 1000, True),
+            (1100, 1000, True),  # 边界恰在 0.9/1.1
+            (890, 1000, False),
+            (1111, 1000, False),  # 带外
+            (1080, 1200, True),
+            (1320, 1200, True),  # 档位标准边界
+        ],
+    )
     def test_deviation_band_edges(self, wc, wb, in_band):
         dev = cu.word_deviation_of(wc, wb)
         assert dev["within_band"] is in_band
@@ -205,11 +230,11 @@ class TestWordAuditSummary:
 class TestContinuationRuntime:
     def _call(self, wc, budget, floor=0, count=1, passes=0, rounds=2):
         return cr.should_continue_round(
-            wc=wc, word_budget=budget, continue_count=count,
-            min_passes=passes, max_rounds=rounds, min_floor_chars=floor)
+            wc=wc, word_budget=budget, continue_count=count, min_passes=passes, max_rounds=rounds, min_floor_chars=floor
+        )
 
     def test_default_equals_legacy_80pct(self):
-        assert self._call(1199, 1500) is True    # 旧阈值 0.8×1500=1200
+        assert self._call(1199, 1500) is True  # 旧阈值 0.8×1500=1200
         assert self._call(1200, 1500) is False
 
     def test_floor_invisible_when_80pct_exceeds_it(self):
@@ -230,14 +255,20 @@ class TestContinuationRuntime:
 
     def test_cap_factor_default_byte_compat(self):
         msgs = cr.build_continuation_messages(
-            user_ctx="ctx", cont_tail="tail", wc=500, word_budget=1200,
-            cont_prompt="p", eff_standard="precise")
+            user_ctx="ctx", cont_tail="tail", wc=500, word_budget=1200, cont_prompt="p", eff_standard="precise"
+        )
         assert "总字数上限为 1320 字" in msgs[3]["content"]
 
     def test_cap_factor_follows_tolerance(self):
         msgs = cr.build_continuation_messages(
-            user_ctx="ctx", cont_tail="tail", wc=500, word_budget=1200,
-            cont_prompt="p", eff_standard="precise", total_cap_factor=1.2)
+            user_ctx="ctx",
+            cont_tail="tail",
+            wc=500,
+            word_budget=1200,
+            cont_prompt="p",
+            eff_standard="precise",
+            total_cap_factor=1.2,
+        )
         assert "总字数上限为 1440 字" in msgs[3]["content"]
 
 
@@ -249,8 +280,7 @@ class TestSseWiringSource:
         assert 'resolve_word_budget_tier(body.get("word_budget_tier"))' in _SRC["sse"]
 
     def test_auto_shrink_conditional_default(self):
-        assert ("_shrink_default = word_budget_tier is not None "
-                "or word_budget_override is not None") in _SRC["sse"]
+        assert ("_shrink_default = word_budget_tier is not None " "or word_budget_override is not None") in _SRC["sse"]
         assert 'body.get("auto_shrink_over"), default=_shrink_default' in _SRC["sse"]
 
     def test_tier_floor_and_persistence(self):
@@ -260,8 +290,7 @@ class TestSseWiringSource:
     def test_legacy_allocation_floor_at_apply(self):
         # 真实源码是跨行调用：去尽一切空白后匹配，防格式漂移造成假失配
         flat = re.sub(r"\s+", "", _SRC["sse"])
-        assert ('max(u["alloc"].get(lf["id"],word_budget_override),'
-                'LEAF_MIN_WORD_BUDGET)') in flat
+        assert ('max(u["alloc"].get(lf["id"],word_budget_override),' "LEAF_MIN_WORD_BUDGET)") in flat
 
     def test_apply_fn_itself_untouched_by_floor(self):
         # 守恒契约由既有性能测试锁死（total_budget=100），下限绝不能进这个函数
@@ -281,18 +310,20 @@ class TestSseWiringSource:
             assert k in _SRC["sse"], k
 
     def test_word_audit_in_checkpoint_and_completed(self):
-        assert "completed_payload['word_audit'] = word_audit_summary(" in _SRC["sse"]
+        assert re.search(
+            r"completed_payload\[\s*['\"]word_audit['\"]\s*\]\s*=\s*word_audit_summary\(",
+            _SRC["sse"],
+        )
         # B1 拆分：终态 checkpoint 侧的调用随拼装点下沉到 content_payloads，
         # 两处（在线 completed 载荷 + checkpoint 回填）合计仍须 ≥ 2。
-        assert (_SRC["sse"].count("word_audit_summary(")
-                + _SRC["content_payloads"].count("word_audit_summary(")) >= 2
+        assert (_SRC["sse"].count("word_audit_summary(") + _SRC["content_payloads"].count("word_audit_summary(")) >= 2
         # _CHECKPOINT_KINDS[kind] = (结果名, 字段白名单元组)
         assert "word_audit" in _CHECKPOINT_KINDS["content_generation"][1]
 
     def test_schema_parity_and_ts_regen(self):
         assert "word_audit" in cs.CHECKPOINT_KINDS["content_generation"][1]
         assert cs.CHECKPOINT_FIELD_TYPES["content_result"]["word_audit"] == "dict"
-        ts = (_BACKEND.parent / "frontend" / "src" / "types" / "checkpointSchema.ts")
+        ts = _BACKEND.parent / "frontend" / "src" / "types" / "checkpointSchema.ts"
         assert ts.exists() and "word_audit" in ts.read_text(encoding="utf-8")
 
 
@@ -300,9 +331,17 @@ class TestSseWiringSource:
 # F 审核预检 DLV-16
 # ===========================================================================
 def _leaf(sec_id, title, wc, wb, content="x"):
-    return {"id": sec_id, "parent_id": "p", "title": title, "content": content * wc,
-            "word_count": wc, "level": 3, "word_budget": wb, "status": "done",
-            "sort_order": int(sec_id) if sec_id.isdigit() else 1}
+    return {
+        "id": sec_id,
+        "parent_id": "p",
+        "title": title,
+        "content": content * wc,
+        "word_count": wc,
+        "level": 3,
+        "word_budget": wb,
+        "status": "done",
+        "sort_order": int(sec_id) if sec_id.isdigit() else 1,
+    }
 
 
 def _dlv16(findings):
@@ -311,10 +350,19 @@ def _dlv16(findings):
 
 class TestPreflightDlv16:
     def test_aggregates_to_single_finding(self):
-        secs = [{"id": "p", "parent_id": "", "title": "父", "content": "",
-                 "word_count": 0, "level": 1, "word_budget": 0, "sort_order": 0}]
-        secs += [_leaf("1", "超纲A", 2100, 1200), _leaf("2", "低限B", 250, 1200),
-                 _leaf("3", "达标C", 1150, 1200)]
+        secs = [
+            {
+                "id": "p",
+                "parent_id": "",
+                "title": "父",
+                "content": "",
+                "word_count": 0,
+                "level": 1,
+                "word_budget": 0,
+                "sort_order": 0,
+            }
+        ]
+        secs += [_leaf("1", "超纲A", 2100, 1200), _leaf("2", "低限B", 250, 1200), _leaf("3", "达标C", 1150, 1200)]
         d = _dlv16(check_deliverability(PreflightContext(scheme_id="s", sections=secs)))
         assert len(d) == 1  # 问题数不随偏离章节数膨胀
         assert "偏离目标容差带" in d[0]["detail"]
@@ -325,26 +373,50 @@ class TestPreflightDlv16:
         assert "达标C" not in ev
 
     def test_silent_without_budget(self):
-        secs = [{"id": "1", "parent_id": "", "title": "T", "content": "x" * 3000,
-                 "word_count": 3000, "level": 3, "sort_order": 1}]
-        assert _dlv16(check_deliverability(
-            PreflightContext(scheme_id="s", sections=secs))) == []
+        secs = [
+            {
+                "id": "1",
+                "parent_id": "",
+                "title": "T",
+                "content": "x" * 3000,
+                "word_count": 3000,
+                "level": 3,
+                "sort_order": 1,
+            }
+        ]
+        assert _dlv16(check_deliverability(PreflightContext(scheme_id="s", sections=secs))) == []
 
     def test_silent_when_all_in_band(self):
         secs = [_leaf("1", "A", 1200, 1200), _leaf("2", "B", 1080, 1200)]
-        assert _dlv16(check_deliverability(
-            PreflightContext(scheme_id="s", sections=secs))) == []
+        assert _dlv16(check_deliverability(PreflightContext(scheme_id="s", sections=secs))) == []
 
     def test_parents_never_judged(self):
         # p1 有 children 且字数严重超纲（3000 vs 1200）——**不得**被 DLV-16 判定；
         # 叶子 c1 恰在带内 ⇒ 整场景无 DLV-16。若判据错把父章节拉进来说明
         # has_children 过滤失效。
-        secs = [{"id": "1", "parent_id": "", "title": "父", "content": "x" * 3000,
-                 "word_count": 3000, "level": 1, "word_budget": 1200, "sort_order": 0},
-                {"id": "2", "parent_id": "1", "title": "子", "content": "y" * 1200,
-                 "word_count": 1200, "level": 2, "word_budget": 1200, "sort_order": 1}]
-        assert _dlv16(check_deliverability(
-            PreflightContext(scheme_id="s", sections=secs))) == []
+        secs = [
+            {
+                "id": "1",
+                "parent_id": "",
+                "title": "父",
+                "content": "x" * 3000,
+                "word_count": 3000,
+                "level": 1,
+                "word_budget": 1200,
+                "sort_order": 0,
+            },
+            {
+                "id": "2",
+                "parent_id": "1",
+                "title": "子",
+                "content": "y" * 1200,
+                "word_count": 1200,
+                "level": 2,
+                "word_budget": 1200,
+                "sort_order": 1,
+            },
+        ]
+        assert _dlv16(check_deliverability(PreflightContext(scheme_id="s", sections=secs))) == []
 
     def test_evidence_capped_at_10(self):
         secs = [_leaf(str(i), f"S{i}", 2100, 1200) for i in range(1, 13)]
@@ -356,11 +428,9 @@ class TestPreflightDlv16:
     def test_tolerance_driven_from_settings(self, monkeypatch):
         monkeypatch.setattr(settings, "word_budget_tolerance", 0.2)
         secs = [_leaf("1", "1.15倍", 1380, 1200)]
-        assert _dlv16(check_deliverability(
-            PreflightContext(scheme_id="s", sections=secs))) == []
+        assert _dlv16(check_deliverability(PreflightContext(scheme_id="s", sections=secs))) == []
         monkeypatch.setattr(settings, "word_budget_tolerance", 0.1)
-        assert len(_dlv16(check_deliverability(
-            PreflightContext(scheme_id="s", sections=secs)))) == 1
+        assert len(_dlv16(check_deliverability(PreflightContext(scheme_id="s", sections=secs)))) == 1
 
     def test_registry_and_emitted_set_and_autofix(self):
         rule = get_rule("DLV-16")
@@ -389,9 +459,9 @@ class TestPromptContractsAndShadowing:
         assert "写完后自检一遍字数" in src
         assert "不少于 300 字（三级目录正文下限）" in src
 
-    @pytest.mark.parametrize("fname", [
-        "services/content_utils.py", "services/content_runtime.py",
-        "services/preflight_engine.py"])
+    @pytest.mark.parametrize(
+        "fname", ["services/content_utils.py", "services/content_runtime.py", "services/preflight_engine.py"]
+    )
     def test_no_duplicate_module_level_names(self, fname):
         path = _BACKEND / "app" / fname
         tree = ast.parse(path.read_text(encoding="utf-8"))

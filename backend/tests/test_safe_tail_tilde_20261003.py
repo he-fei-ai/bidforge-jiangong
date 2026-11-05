@@ -11,6 +11,7 @@
 - 文末块「未闭合」（尾片段围栏数为奇数）→ 整块丢弃，宁缺勿滥；
 - 切点落在代码块「之前」（围栏数为偶数）→ 块作为「前文结尾」保留，不得误删。
 """
+
 import pytest
 from app.routers.sse_handlers import _safe_tail
 
@@ -25,10 +26,10 @@ def test_safe_tail_skips_block_when_cut_inside(open_marker, close_marker):
     # 短前缀 + 块落在尾部 limit 窗口内、且在切点之前 ⇒ 切点落在块「内部」（奇偶=1）
     text = "X" * 10 + "\n" + open_marker + "\ngraph TD\n A-->B\n" + close_marker + "\n后续散文内容here"
     tail = _safe_tail(text, limit=30)
-    assert "后续散文内容" in tail          # 闭合围栏之后的散文得到保留
-    assert "graph TD" not in tail          # 块内图表代码被跳过
-    assert open_marker not in tail         # 开围栏被跳过
-    assert close_marker not in tail        # 闭围栏被跳过
+    assert "后续散文内容" in tail  # 闭合围栏之后的散文得到保留
+    assert "graph TD" not in tail  # 块内图表代码被跳过
+    assert open_marker not in tail  # 开围栏被跳过
+    assert close_marker not in tail  # 闭围栏被跳过
 
 
 @pytest.mark.parametrize("open_marker,close_marker", [(OPEN_BT, CLOSE_BT), (OPEN_TL, CLOSE_TL)])
@@ -45,8 +46,8 @@ def test_safe_tail_keeps_block_when_cut_before(open_marker, close_marker):
     # 块位于切点「之前」（奇偶=0）：块作为前文结尾保留，不得误删
     text = "长前缀散文" * 4 + "\n" + open_marker + "\ngraph TD\n A-->B\n" + close_marker + "\n收尾散文。"
     tail = _safe_tail(text, limit=200)
-    assert open_marker in tail               # 开围栏保留
-    assert "graph TD" in tail                # 块内代码作为上下文保留
+    assert open_marker in tail  # 开围栏保留
+    assert "graph TD" in tail  # 块内代码作为上下文保留
     assert "收尾散文" in tail
 
 

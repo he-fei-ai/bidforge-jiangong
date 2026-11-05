@@ -36,12 +36,13 @@ def _src(path):
 # A-1：提取预算与解析/落库三级对齐
 # ---------------------------------------------------------------------------
 
+
 def test_a1_config_default_raised():
     """默认预算必须 ≥ 400000（与 MAX_PARSED_CHARS 对齐）。"""
     from app.config import Settings
+
     s = Settings()
-    assert s.bid_analysis_segment_budget >= 400000, (
-        "18 项提取预算仍低于解析能力，中后段文档会被整份跳过（A-1 回退）")
+    assert s.bid_analysis_segment_budget >= 400000, "18 项提取预算仍低于解析能力，中后段文档会被整份跳过（A-1 回退）"
 
 
 def test_a1_module_fallback_matches_config():
@@ -81,8 +82,8 @@ def test_a1_budget_ge_parsed_chars_cap():
     cap = gf_mod.MAX_PARSED_CHARS
     assert cap >= 400_000, f"入库上限回退：{cap}"
     # 单一事实源：两个命名空间必须是同一个值（别名关系，不再是两份字面量）
-    assert gfd_mod.MAX_PARSED_CHARS == cap, (
-        "MAX_PARSED_CHARS 出现两份不同取值（global_facts 未指向写侧单一事实源）")
+    assert gfd_mod.MAX_PARSED_CHARS == cap, "MAX_PARSED_CHARS 出现两份不同取值（global_facts 未指向写侧单一事实源）"
+
     # 字面量只允许出现在写侧一处
     def _literal_defs(path):
         out = 0
@@ -95,9 +96,9 @@ def test_a1_budget_ge_parsed_chars_cap():
         return out
 
     assert _literal_defs(GF_PATH) == 0, "global_facts.py 不得再自行定义该上限"
-    assert _literal_defs(os.path.join(BACKEND, "app", "routers",
-                                      "global_facts_docs.py")) == 1, (
-        "global_facts_docs.py 必须是该上限的唯一定义处")
+    assert (
+        _literal_defs(os.path.join(BACKEND, "app", "routers", "global_facts_docs.py")) == 1
+    ), "global_facts_docs.py 必须是该上限的唯一定义处"
     assert Settings().bid_analysis_segment_budget >= 400000
 
 
@@ -105,16 +106,15 @@ def test_a1_budget_ge_parsed_chars_cap():
 # A-4：消除静默 except: pass
 # ---------------------------------------------------------------------------
 
+
 def test_a4_parse_status_recheck_no_longer_silent():
     src = _src(GF_PATH)
-    assert "复核文档 %s 解析状态失败" in src, (
-        "批量解析复核路径仍为静默 except pass（A-4 回退）")
+    assert "复核文档 %s 解析状态失败" in src, "批量解析复核路径仍为静默 except pass（A-4 回退）"
 
 
 def test_a4_safety_col_probe_no_longer_silent():
     src = _src(GF_PATH)
-    assert "探测 global_facts.is_safety_critical 列失败" in src, (
-        "安全列探测仍为静默 except pass（A-4 回退）")
+    assert "探测 global_facts.is_safety_critical 列失败" in src, "安全列探测仍为静默 except pass（A-4 回退）"
 
 
 def test_a4_recheck_logs_with_traceback():
@@ -122,7 +122,7 @@ def test_a4_recheck_logs_with_traceback():
     src = _src(GF_PATH)
     i = src.find("复核文档 %s 解析状态失败")
     assert i > 0
-    tail = src[i:i + 400]
+    tail = src[i : i + 400]
     assert "exc_info=True" in tail
 
 
@@ -130,24 +130,25 @@ def test_a4_recheck_logs_with_traceback():
 # A-9：高频失败点保留堆栈
 # ---------------------------------------------------------------------------
 
+
 def test_a9_segment_exception_has_traceback():
     src = _src(BA_PATH)
     assert "分段 %d 提取异常" in src
-    assert 'logger.warning("分段 %d 提取异常: %s", i, pr, exc_info=pr)' in src, (
-        "分段提取异常仍无堆栈（A-9 回退）")
+    assert 'logger.warning("分段 %d 提取异常: %s", i, pr, exc_info=pr)' in src, "分段提取异常仍无堆栈（A-9 回退）"
 
 
 def test_a9_pymupdf_failure_has_traceback():
     src = _src(FP_PATH)
     i = src.find("PyMuPDF 解析失败")
     assert i > 0, "未找到 PyMuPDF 失败日志点"
-    tail = src[i:i + 300]
+    tail = src[i : i + 300]
     assert "exc_info=True" in tail, "PDF 主通道失败仍无堆栈（A-9 回退）"
 
 
 # ---------------------------------------------------------------------------
 # D-1：export_docx 编号守卫必须早于 _prepare_export
 # ---------------------------------------------------------------------------
+
 
 def _first_call_line(src, funcname):
     tree = ast.parse(src)
@@ -180,7 +181,8 @@ def test_d1_guard_precedes_prepare_in_source():
     assert prep_line is not None, "export_docx 缺少 _prepare_export"
     assert guard_line < prep_line, (
         f"编号守卫({guard_line}) 必须早于 _prepare_export({prep_line})，"
-        "否则严格模式 409 时 AI 生图已计费（D-1 回退）")
+        "否则严格模式 409 时 AI 生图已计费（D-1 回退）"
+    )
 
 
 def test_d1_pdf_also_guarded_before_prepare():
@@ -206,6 +208,7 @@ def test_d1_pdf_also_guarded_before_prepare():
 # ---------------------------------------------------------------------------
 # 结构性完整性
 # ---------------------------------------------------------------------------
+
 
 def test_all_changed_files_parse():
     for p in (CFG_PATH, BA_PATH, GF_PATH, FP_PATH, EX_PATH):

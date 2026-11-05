@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """R109 closeout guards: P0 on_end wiring + P1 HTTP 401 non-retryable."""
+
 from __future__ import annotations
 
 import ast
@@ -13,10 +14,12 @@ BACKEND = Path(__file__).resolve().parent.parent
 
 # ---------- P1: HTTP 401 is non-retryable ----------
 
+
 def test_http_401_is_non_retryable():
     """HTTP 401 (令牌失效) must be treated as permanent, not transient."""
     from app.services.ai.provider_factory import is_non_retryable_error
-    assert is_non_retryable_error("HTTP 401: {\"error\":{\"message\":\"该令牌状态不可用\"}}")
+
+    assert is_non_retryable_error('HTTP 401: {"error":{"message":"该令牌状态不可用"}}')
     assert is_non_retryable_error("HTTP 401 Unauthorized")
     # Existing codes still covered
     assert is_non_retryable_error("HTTP 402 quota_exceeded")
@@ -33,10 +36,12 @@ def test_http_401_is_non_retryable():
 def test_401_triggers_quota_cooldown():
     """401 must flow into quota cooldown (via _is_quota_error)."""
     from app.services.ai.provider_factory import _is_quota_error
+
     assert _is_quota_error("HTTP 401: token expired")
 
 
 # ---------- P0: on_end wired on content + facts chains ----------
+
 
 def _find_with_heartbeat_calls(tree):
     """Return list of (lineno, has_on_end, stats_provider_arg)."""
@@ -74,10 +79,12 @@ def test_content_holder_task_id_set():
 def test_stream_end_guard_exists():
     """_stream_end_guard must still exist and return a callable."""
     from app.routers.sse_handlers import _stream_end_guard
+
     guard = _stream_end_guard({"task_id": "test-x"})
     assert callable(guard)
 
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(pytest.main([__file__, "-v"]))

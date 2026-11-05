@@ -13,6 +13,7 @@ AI 侧「单图节点 4~16，超则拆多张」约束已接线（content_checkpo
   D 渲染集成：超限时结构化告警发出 + 图仍按完整数据产出（不丢数据）
   E 字节体检：源文件 CRLF 未被文本工具改坏 + 新增符号 parity 锁
 """
+
 import ast
 import os
 import py_compile
@@ -31,10 +32,12 @@ def _deep_leaf_tree(leaf_count: int, group_size: int = 3) -> dict:
     groups, remaining, gi = [], leaf_count, 0
     while remaining > 0:
         k = min(group_size, remaining)
-        groups.append({
-            "label": f"部门{gi}",
-            "children": [{"label": f"组{gi}{j}"} for j in range(k)],
-        })
+        groups.append(
+            {
+                "label": f"部门{gi}",
+                "children": [{"label": f"组{gi}{j}"} for j in range(k)],
+            }
+        )
         remaining -= k
         gi += 1
     return {"label": "质量管控体系", "children": groups}
@@ -42,14 +45,20 @@ def _deep_leaf_tree(leaf_count: int, group_size: int = 3) -> dict:
 
 def _mixed_depth_tree() -> dict:
     """深度混合树：depth=1 直属叶子 + depth=2 叶子/内部节点 + depth=3 叶子。"""
-    return {"label": "质量管控体系", "children": [
-        {"label": "直属专员"},
-        {"label": "部门A", "children": [{"label": f"A{i}组"} for i in range(4)]},
-        {"label": "部门B", "children": [{"label": f"B{i}组"} for i in range(4)]},
-        {"label": "部门C", "children": [
-            {"label": "C分部", "children": [{"label": "C1组"}, {"label": "C2组"}]},
-        ]},
-    ]}
+    return {
+        "label": "质量管控体系",
+        "children": [
+            {"label": "直属专员"},
+            {"label": "部门A", "children": [{"label": f"A{i}组"} for i in range(4)]},
+            {"label": "部门B", "children": [{"label": f"B{i}组"} for i in range(4)]},
+            {
+                "label": "部门C",
+                "children": [
+                    {"label": "C分部", "children": [{"label": "C1组"}, {"label": "C2组"}]},
+                ],
+            },
+        ],
+    }
 
 
 def _set_env(key: str, value: str | None):
@@ -63,17 +72,25 @@ def _set_env(key: str, value: str | None):
 # A · 配置化上限
 # ==========================================================================
 class TestBudgetConfig:
-
     def test_defaults_without_env(self):
         _set_env("ARCH_MAX_LEAVES", None)
         _set_env("ARCH_MAX_NODES", None)
         assert ma.arch_max_leaves() == 24
         assert ma.arch_max_nodes() == 60
 
-    @pytest.mark.parametrize("raw,expected", [
-        ("1", 1), ("8", 8), ("100", 100),
-        ("0", 24), ("-5", 24), ("abc", 24), ("", 24), ("  12  ", 12),
-    ])
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("1", 1),
+            ("8", 8),
+            ("100", 100),
+            ("0", 24),
+            ("-5", 24),
+            ("abc", 24),
+            ("", 24),
+            ("  12  ", 12),
+        ],
+    )
     def test_leaf_threshold_env_and_fallback(self, raw, expected):
         _set_env("ARCH_MAX_LEAVES", raw)
         try:
@@ -81,9 +98,16 @@ class TestBudgetConfig:
         finally:
             _set_env("ARCH_MAX_LEAVES", None)
 
-    @pytest.mark.parametrize("raw,expected", [
-        ("1", 1), ("80", 80), ("0", 60), ("-1", 60), ("x", 60),
-    ])
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("1", 1),
+            ("80", 80),
+            ("0", 60),
+            ("-1", 60),
+            ("x", 60),
+        ],
+    )
     def test_node_threshold_env_and_fallback(self, raw, expected):
         _set_env("ARCH_MAX_NODES", raw)
         try:
@@ -96,7 +120,6 @@ class TestBudgetConfig:
 # B · 纯函数计数（复用 _build_nodes 单一遍历口径）
 # ==========================================================================
 class TestBudgetCounting:
-
     def test_deep_leaf_tree_count(self):
         # 10 组 × 3 叶 = 30 叶；节点 = 1 根 + 10 组 + 30 叶 = 41
         t = _deep_leaf_tree(30, group_size=3)
@@ -116,7 +139,7 @@ class TestBudgetCounting:
         ring["children"] = [ring]
         leaves = ma.architecture_leaf_count(ring)
         nodes = ma.architecture_node_count(ring)
-        assert leaves == 1                       # 环被截断为一个叶子
+        assert leaves == 1  # 环被截断为一个叶子
         # 与真正出图节点数完全一致（单一口径）：根 + 截断叶 = 2
         assert nodes == len(ma._layout_architecture_tree(ring)[0])
 
@@ -140,15 +163,13 @@ class TestBudgetCounting:
         for t in (_deep_leaf_tree(9), _mixed_depth_tree()):
             nodes, _w, _h = ma._layout_architecture_tree(t)
             assert ma.architecture_node_count(t) == len(nodes)
-            assert ma.architecture_leaf_count(t) == sum(
-                1 for n in nodes if not n["has_children"])
+            assert ma.architecture_leaf_count(t) == sum(1 for n in nodes if not n["has_children"])
 
 
 # ==========================================================================
 # C · 超预算判定
 # ==========================================================================
 class TestBudgetOver:
-
     def test_within_budget_by_leaves(self):
         _set_env("ARCH_MAX_LEAVES", None)
         _set_env("ARCH_MAX_NODES", None)
@@ -173,11 +194,14 @@ class TestBudgetOver:
         _set_env("ARCH_MAX_NODES", "5")
         try:
             # 2 组各 1 叶 = 2 叶，但节点 = 1+2+2 = 5，加一个直属叶变 6 → 超
-            t = {"label": "根", "children": [
-                {"label": "a", "children": [{"label": "a1"}]},
-                {"label": "b", "children": [{"label": "b1"}]},
-                {"label": "c"},
-            ]}
+            t = {
+                "label": "根",
+                "children": [
+                    {"label": "a", "children": [{"label": "a1"}]},
+                    {"label": "b", "children": [{"label": "b1"}]},
+                    {"label": "c"},
+                ],
+            }
             # 叶子 3，节点 6 > 5 → 超（且叶不超）
             over, leaves, nodes = ma.architecture_over_budget(t)
             assert over is True and leaves == 3 and nodes == 6
@@ -200,9 +224,9 @@ class TestBudgetOver:
 # D · 渲染集成：超限告警 + 不丢数据
 # ==========================================================================
 class TestBudgetRenderIntegration:
-
     def test_over_budget_emits_warning_and_still_renders(self, caplog):
         import logging
+
         _set_env("ARCH_MAX_LEAVES", "5")
         try:
             caplog.set_level(logging.WARNING, logger="app.services.ai.mermaid_architecture")
@@ -219,6 +243,7 @@ class TestBudgetRenderIntegration:
 
     def test_within_budget_no_budget_warning(self, caplog):
         import logging
+
         caplog.set_level(logging.WARNING, logger="app.services.ai.mermaid_architecture")
         small = _deep_leaf_tree(6)  # 默认上限 24，不超
         stream = ma._render_architecture_image_v2(small)
@@ -231,7 +256,6 @@ class TestBudgetRenderIntegration:
 # E · 字节体检 + 符号 parity 锁
 # ==========================================================================
 class TestBudgetByteIntegrity:
-
     def test_no_lone_cr_or_bare_lf(self):
         data = _TARGET.read_bytes()
         # 孤立 CR：去掉所有 \r\n 后不得残留 \r（CRLF 仓库的文本编辑坑）
@@ -249,9 +273,13 @@ class TestBudgetByteIntegrity:
 
     def test_new_symbols_present(self):
         # parity 锁：新增公共符号必须都在，防止重构误删
-        for sym in ("arch_max_leaves", "arch_max_nodes",
-                    "architecture_leaf_count", "architecture_node_count",
-                    "architecture_over_budget"):
+        for sym in (
+            "arch_max_leaves",
+            "arch_max_nodes",
+            "architecture_leaf_count",
+            "architecture_node_count",
+            "architecture_over_budget",
+        ):
             assert hasattr(ma, sym), f"缺失公共符号 {sym}"
 
     def test_ast_parses(self):

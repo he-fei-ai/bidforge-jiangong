@@ -20,8 +20,10 @@
 6. 「测试连接」按所选请求方式优先探测 + 另一种方式兜底
 7. 导入导出与 /ai/health 贯通 request_mode
 """
+
 import contextlib
 import json
+import logging
 
 import app.services.ai.provider_factory as pf
 import pytest
@@ -36,9 +38,11 @@ from app.services.crypto import encrypt_api_key
 @pytest.fixture(autouse=True)
 def patch_write_tx_conn(db_conn, monkeypatch):
     """save_ai_config 走 write_tx_conn（独立写池），测试里指向内存连接。"""
+
     @contextlib.asynccontextmanager
     async def _fake():
         yield db_conn
+
     monkeypatch.setattr(pf, "write_tx_conn", _fake)
 
 
@@ -56,25 +60,42 @@ def reset_ai_caches():
     pf.reset_quota_cooldown()
 
 
-async def _insert(db, cid, provider="openai", model="gpt-4o", is_active=0,
-                  priority=0, key="sk-test", base_url="https://api.test.com/v1",
-                  request_mode="normal"):
+async def _insert(
+    db,
+    cid,
+    provider="openai",
+    model="gpt-4o",
+    is_active=0,
+    priority=0,
+    key="sk-test",
+    base_url="https://api.test.com/v1",
+    request_mode="normal",
+):
     await db.execute(
         "INSERT INTO ai_config (id, provider_name, plan, api_key_encrypted, base_url,"
         " model, is_active, priority, remark, timeout, concurrency, request_mode)"
         " VALUES (?,?,?,?,?,?,?,?,?,60,4,?)",
-        (cid, provider, "pay_as_you_go", encrypt_api_key(key), base_url, model,
-         is_active, priority, "", request_mode))
+        (cid, provider, "pay_as_you_go", encrypt_api_key(key), base_url, model, is_active, priority, "", request_mode),
+    )
     await db.commit()
 
 
 def _payload(**over):
     data = {
-        "id": "", "provider_name": "deepseek", "plan": "pay_as_you_go",
-        "api_key": "sk-abc", "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat", "max_tokens": 8192, "temperature": 0.7,
-        "timeout": 900, "concurrency": 4, "is_active": True,
-        "priority": None, "remark": "", "request_mode": "normal",
+        "id": "",
+        "provider_name": "deepseek",
+        "plan": "pay_as_you_go",
+        "api_key": "sk-abc",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "max_tokens": 8192,
+        "temperature": 0.7,
+        "timeout": 900,
+        "concurrency": 4,
+        "is_active": True,
+        "priority": None,
+        "remark": "",
+        "request_mode": "normal",
     }
     data.update(over)
     return data
@@ -89,8 +110,7 @@ class _FakeProvider:
     last_usage: dict = {}
     last_finish_reason = ""
 
-    def __init__(self, *, stream_pieces=None, stream_err=None,
-                 chat_text="CHAT", chat_err=None):
+    def __init__(self, *, stream_pieces=None, stream_err=None, chat_text="CHAT", chat_err=None):
         self.stream_pieces = list(stream_pieces or [])
         self.stream_err = stream_err
         self.chat_text = chat_text
@@ -143,39 +163,41 @@ class TestNormalizeRequestMode:
 class TestSaveRequestMode:
     async def test_default_is_normal(self, db_conn):
         cid = await pf.save_ai_config(_payload(request_mode=""))
-        cur = await db_conn.execute(
-            "SELECT request_mode FROM ai_config WHERE id=?", (cid,))
+        cur = await db_conn.execute("SELECT request_mode FROM ai_config WHERE id=?", (cid,))
         assert (await cur.fetchone())[0] == "normal"
 
     async def test_stream_is_persisted(self, db_conn):
         cid = await pf.save_ai_config(_payload(request_mode="stream"))
-        cur = await db_conn.execute(
-            "SELECT request_mode FROM ai_config WHERE id=?", (cid,))
+        cur = await db_conn.execute("SELECT request_mode FROM ai_config WHERE id=?", (cid,))
         assert (await cur.fetchone())[0] == "stream"
 
     async def test_dirty_value_normalized_on_write(self, db_conn):
         cid = await pf.save_ai_config(_payload(request_mode="SSE"))
-        cur = await db_conn.execute(
-            "SELECT request_mode FROM ai_config WHERE id=?", (cid,))
+        cur = await db_conn.execute("SELECT request_mode FROM ai_config WHERE id=?", (cid,))
         assert (await cur.fetchone())[0] == "normal"
 
     async def test_update_switches_mode(self, db_conn):
         await _insert(db_conn, "c1", is_active=1, request_mode="normal")
         await pf.save_ai_config(_payload(id="c1", request_mode="stream"))
-        cur = await db_conn.execute(
-            "SELECT request_mode FROM ai_config WHERE id='c1'")
+        cur = await db_conn.execute("SELECT request_mode FROM ai_config WHERE id='c1'")
         assert (await cur.fetchone())[0] == "stream"
 
     async def test_route_passes_request_mode(self, db_conn):
         """路由层不能把新字段吞掉（Pydantic 模型缺字段时会被静默丢弃）。"""
         res = await ai_router.save_config(
-            AIConfigIn(id="", provider_name="deepseek", plan="pay_as_you_go",
-                       api_key="sk-x", base_url="https://api.deepseek.com/v1",
-                       model="deepseek-chat", is_active=True,
-                       request_mode="stream"),
-            db=db_conn)
-        cur = await db_conn.execute(
-            "SELECT request_mode FROM ai_config WHERE id=?", (res["id"],))
+            AIConfigIn(
+                id="",
+                provider_name="deepseek",
+                plan="pay_as_you_go",
+                api_key="sk-x",
+                base_url="https://api.deepseek.com/v1",
+                model="deepseek-chat",
+                is_active=True,
+                request_mode="stream",
+            ),
+            db=db_conn,
+        )
+        cur = await db_conn.execute("SELECT request_mode FROM ai_config WHERE id=?", (res["id"],))
         assert (await cur.fetchone())[0] == "stream"
 
 
@@ -184,10 +206,8 @@ class TestSaveRequestMode:
 # ===========================================================================
 class TestFallbackChainCarriesMode:
     async def test_each_candidate_has_own_mode(self, db_conn):
-        await _insert(db_conn, "main", provider="openai", is_active=1,
-                      request_mode="stream")
-        await _insert(db_conn, "alt", provider="deepseek", priority=1,
-                      request_mode="normal")
+        await _insert(db_conn, "main", provider="openai", is_active=1, request_mode="stream")
+        await _insert(db_conn, "alt", provider="deepseek", priority=1, request_mode="normal")
         chain = await pf._fallback_chain()
         alt = next(c for c in chain if c["provider_name"] == "deepseek")
         assert alt["request_mode"] == "normal"
@@ -195,8 +215,7 @@ class TestFallbackChainCarriesMode:
     async def test_legacy_rows_default_to_normal(self, db_conn):
         """旧库行 request_mode 为 NULL/空时，不能把 None 传下去。"""
         await _insert(db_conn, "main", is_active=1)
-        await db_conn.execute(
-            "UPDATE ai_config SET request_mode='' WHERE id='main'")
+        await db_conn.execute("UPDATE ai_config SET request_mode='' WHERE id='main'")
         await db_conn.commit()
         pf.invalidate_config_cache()
         cfg = await pf._load_active_config()
@@ -228,8 +247,7 @@ class TestChatDispatchByMode:
     async def test_stream_failure_falls_back_to_chat(self, db_conn, monkeypatch):
         """平台不支持 stream 时，勾了流式也要能正常生成（不应成为可用性开关）。"""
         await _insert(db_conn, "main", is_active=1, request_mode="stream")
-        fake = _FakeProvider(stream_err=RuntimeError("HTTP 400: stream not supported"),
-                             chat_text="回退成功")
+        fake = _FakeProvider(stream_err=RuntimeError("HTTP 400: stream not supported"), chat_text="回退成功")
         monkeypatch.setattr(pf, "_build_provider", lambda *a, **k: fake)
         out = await pf.chat_with_fallback([{"role": "user", "content": "hi"}])
         assert out == "回退成功"
@@ -246,16 +264,14 @@ class TestChatDispatchByMode:
     async def test_both_paths_fail_raises(self, db_conn, monkeypatch):
         monkeypatch.setattr(pf.settings, "agnes_api_key", "")
         await _insert(db_conn, "main", is_active=1, request_mode="stream")
-        fake = _FakeProvider(stream_err=RuntimeError("HTTP 500: boom"),
-                             chat_err=RuntimeError("HTTP 500: boom"))
+        fake = _FakeProvider(stream_err=RuntimeError("HTTP 500: boom"), chat_err=RuntimeError("HTTP 500: boom"))
         monkeypatch.setattr(pf, "_build_provider", lambda *a, **k: fake)
         with pytest.raises(RuntimeError):
             await pf.chat_with_fallback([{"role": "user", "content": "hi"}])
 
     async def test_stream_json_mode_truncated_hint(self, db_conn, monkeypatch):
         """流式被 max_tokens 截断且正文为空时，提示要指向真正的原因。"""
-        provider = pf._build_provider("deepseek", "sk-x",
-                                     "https://api.deepseek.com/v1", "m")
+        provider = pf._build_provider("deepseek", "sk-x", "https://api.deepseek.com/v1", "m")
         provider.last_finish_reason = "length"
 
         async def _empty_stream(messages, **kw):
@@ -264,8 +280,9 @@ class TestChatDispatchByMode:
 
         provider.stream = _empty_stream  # type: ignore[assignment]
         with pytest.raises(RuntimeError) as ei:
-            await pf._collect_stream(provider, [{"role": "user", "content": "x"}],
-                                     temperature=None, json_mode=False, max_tokens=8)
+            await pf._collect_stream(
+                provider, [{"role": "user", "content": "x"}], temperature=None, json_mode=False, max_tokens=8
+            )
         assert "max_tokens" in str(ei.value)
 
 
@@ -281,10 +298,13 @@ class _FakeStreamResp:
     def raise_for_status(self):
         if self.status_code >= 400:
             import httpx
+
             req = httpx.Request("POST", "https://api.test.com/v1/chat/completions")
             raise httpx.HTTPStatusError(
-                f"HTTP {self.status_code}", request=req,
-                response=httpx.Response(self.status_code, request=req, text=self.text))
+                f"HTTP {self.status_code}",
+                request=req,
+                response=httpx.Response(self.status_code, request=req, text=self.text),
+            )
 
     async def aiter_lines(self):
         for line in self._lines:
@@ -325,34 +345,47 @@ class TestProviderStreamEnhancements:
     @staticmethod
     def _provider(monkeypatch, responses):
         from app.services.ai.providers import openai_compatible as oc
+
         fake = _FakeHttpClient(responses)
         monkeypatch.setattr(oc, "get_async_client", lambda *a, **k: fake)
-        provider = oc.OpenAICompatibleProvider("sk-x", "https://api.test.com/v1", "m",
-                                               max_tokens=100, temperature=0.7)
+        provider = oc.OpenAICompatibleProvider("sk-x", "https://api.test.com/v1", "m", max_tokens=100, temperature=0.7)
         return provider, fake
 
     async def test_collects_pieces_and_usage(self, monkeypatch):
-        provider, fake = self._provider(monkeypatch, [_FakeStreamResp(_sse(
-            {"choices": [{"delta": {"content": "你"}}]},
-            {"choices": [{"delta": {"content": "好"}}]},
-            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
-            {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 2,
-                                      "prompt_tokens_details": {"cached_tokens": 3}}},
-        ))])
+        provider, fake = self._provider(
+            monkeypatch,
+            [
+                _FakeStreamResp(
+                    _sse(
+                        {"choices": [{"delta": {"content": "你"}}]},
+                        {"choices": [{"delta": {"content": "好"}}]},
+                        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+                        {
+                            "choices": [],
+                            "usage": {
+                                "prompt_tokens": 10,
+                                "completion_tokens": 2,
+                                "prompt_tokens_details": {"cached_tokens": 3},
+                            },
+                        },
+                    )
+                )
+            ],
+        )
         pieces = [p async for p in provider.stream([{"role": "user", "content": "x"}])]
         assert "".join(pieces) == "你好"
         assert provider.last_finish_reason == "stop"
         # ✅ usage 帧的 choices 为空数组，旧实现 IndexError 直接吞掉 → 用量恒为 0
-        assert provider.last_usage == {"prompt_tokens": 10, "completion_tokens": 2,
-                                       "cached_tokens": 3}
+        assert provider.last_usage == {"prompt_tokens": 10, "completion_tokens": 2, "cached_tokens": 3}
 
     async def test_overrides_are_forwarded(self, monkeypatch):
         """max_tokens / temperature / json_mode 覆盖必须生效（与 chat 口径一致）。"""
-        provider, fake = self._provider(monkeypatch, [
-            _FakeStreamResp(_sse({"choices": [{"delta": {"content": "ok"}}]}))])
-        async for _ in provider.stream([{"role": "user", "content": "x"}],
-                                       temperature=0.2, max_tokens=1234,
-                                       json_mode=True):
+        provider, fake = self._provider(
+            monkeypatch, [_FakeStreamResp(_sse({"choices": [{"delta": {"content": "ok"}}]}))]
+        )
+        async for _ in provider.stream(
+            [{"role": "user", "content": "x"}], temperature=0.2, max_tokens=1234, json_mode=True
+        ):
             pass
         payload = fake.payloads[0]
         assert payload["max_tokens"] == 1234
@@ -363,10 +396,13 @@ class TestProviderStreamEnhancements:
 
     async def test_drops_stream_options_when_platform_rejects_it(self, monkeypatch):
         """stream_options 是可选参数：平台 400 时去掉重试，而不是判死流式。"""
-        provider, fake = self._provider(monkeypatch, [
-            _FakeStreamResp([], status_code=400),
-            _FakeStreamResp(_sse({"choices": [{"delta": {"content": "ok"}}]})),
-        ])
+        provider, fake = self._provider(
+            monkeypatch,
+            [
+                _FakeStreamResp([], status_code=400),
+                _FakeStreamResp(_sse({"choices": [{"delta": {"content": "ok"}}]})),
+            ],
+        )
         pieces = [p async for p in provider.stream([{"role": "user", "content": "x"}])]
         assert "".join(pieces) == "ok"
         assert len(fake.payloads) == 2
@@ -374,9 +410,9 @@ class TestProviderStreamEnhancements:
         assert "stream_options" not in fake.payloads[1]
 
     async def test_other_400_is_not_swallowed(self, monkeypatch):
-        provider, fake = self._provider(monkeypatch, [
-            _FakeStreamResp([], status_code=401)])
+        provider, fake = self._provider(monkeypatch, [_FakeStreamResp([], status_code=401)])
         import httpx
+
         with pytest.raises(httpx.HTTPStatusError):
             async for _ in provider.stream([{"role": "user", "content": "x"}]):
                 pass
@@ -390,8 +426,7 @@ class TestProbeRespectsRequestMode:
     @staticmethod
     def _patch(monkeypatch, provider):
         async def _pre_ok(url):
-            return {"ok": True, "step": "ok", "host": "api.test.com",
-                    "ip": "1.2.3.4", "port": 443}
+            return {"ok": True, "step": "ok", "host": "api.test.com", "ip": "1.2.3.4", "port": 443}
 
         monkeypatch.setattr(ai_router.connectivity, "_dns_precheck_async", _pre_ok)
         monkeypatch.setattr(ai_router.models, "_dns_precheck_async", _pre_ok)
@@ -401,9 +436,15 @@ class TestProbeRespectsRequestMode:
         fake = _FakeProvider(chat_text="ok", stream_pieces=["stream-ok"])
         self._patch(monkeypatch, fake)
         res = await ai_router.test_config(
-            AIConfigTest(provider_name="custom", base_url="https://api.test.com/v1",
-                         model="m", api_key="sk-x", request_mode="normal"),
-            db=db_conn)
+            AIConfigTest(
+                provider_name="custom",
+                base_url="https://api.test.com/v1",
+                model="m",
+                api_key="sk-x",
+                request_mode="normal",
+            ),
+            db=db_conn,
+        )
         assert res["ok"] is True
         assert res["mode"] == "chat_probe"
         assert res["request_mode"] == "normal"
@@ -413,9 +454,15 @@ class TestProbeRespectsRequestMode:
         fake = _FakeProvider(chat_text="chat-ok", stream_pieces=["stream-ok"])
         self._patch(monkeypatch, fake)
         res = await ai_router.test_config(
-            AIConfigTest(provider_name="custom", base_url="https://api.test.com/v1",
-                         model="m", api_key="sk-x", request_mode="stream"),
-            db=db_conn)
+            AIConfigTest(
+                provider_name="custom",
+                base_url="https://api.test.com/v1",
+                model="m",
+                api_key="sk-x",
+                request_mode="stream",
+            ),
+            db=db_conn,
+        )
         assert res["ok"] is True
         assert res["mode"] == "stream_probe"
         assert res["request_mode"] == "stream"
@@ -423,13 +470,18 @@ class TestProbeRespectsRequestMode:
 
     async def test_normal_failure_falls_back_to_stream(self, db_conn, monkeypatch):
         """普通请求被平台限制时，用流式探测成功并提示改配置。"""
-        fake = _FakeProvider(chat_err=RuntimeError("HTTP 400: non-stream not allowed"),
-                             stream_pieces=["stream-ok"])
+        fake = _FakeProvider(chat_err=RuntimeError("HTTP 400: non-stream not allowed"), stream_pieces=["stream-ok"])
         self._patch(monkeypatch, fake)
         res = await ai_router.test_config(
-            AIConfigTest(provider_name="custom", base_url="https://api.test.com/v1",
-                         model="m", api_key="sk-x", request_mode="normal"),
-            db=db_conn)
+            AIConfigTest(
+                provider_name="custom",
+                base_url="https://api.test.com/v1",
+                model="m",
+                api_key="sk-x",
+                request_mode="normal",
+            ),
+            db=db_conn,
+        )
         assert res["ok"] is True
         assert res["mode"] == "stream_probe"
         assert "普通" in res["warning"]
@@ -439,30 +491,36 @@ class TestProbeRespectsRequestMode:
         fake = _FakeProvider(chat_text="chat-ok", stream_pieces=["stream-ok"])
         self._patch(monkeypatch, fake)
         res = await ai_router.test_config(
-            AIConfigTest(provider_name="custom", base_url="https://api.test.com/v1",
-                         model="m", api_key="sk-x"),
-            db=db_conn)
+            AIConfigTest(provider_name="custom", base_url="https://api.test.com/v1", model="m", api_key="sk-x"),
+            db=db_conn,
+        )
         assert res["mode"] == "stream_probe"
 
     async def test_mode_read_from_db_when_not_supplied(self, db_conn, monkeypatch):
         """编辑已有配置时前端没带请求方式 → 用库里存的那一条。"""
-        await _insert(db_conn, "c1", request_mode="normal",
-                      base_url="https://api.test.com/v1", model="m")
+        await _insert(db_conn, "c1", request_mode="normal", base_url="https://api.test.com/v1", model="m")
         fake = _FakeProvider(chat_text="ok", stream_pieces=["stream-ok"])
         self._patch(monkeypatch, fake)
-        res = await ai_router.test_config(
-            AIConfigTest(config_id="c1", api_key="sk-x"), db=db_conn)
+        res = await ai_router.test_config(AIConfigTest(config_id="c1", api_key="sk-x"), db=db_conn)
         assert res["mode"] == "chat_probe"
 
     async def test_explicit_stream_failure_reports_stream_error(self, db_conn, monkeypatch):
         """显式选了流式：两条路都失败时，以流式错误为准（那才是实际链路）。"""
-        fake = _FakeProvider(stream_err=RuntimeError("HTTP 402: Insufficient Balance"),
-                             chat_err=RuntimeError("HTTP 400: model not exist"))
+        fake = _FakeProvider(
+            stream_err=RuntimeError("HTTP 402: Insufficient Balance"),
+            chat_err=RuntimeError("HTTP 400: model not exist"),
+        )
         self._patch(monkeypatch, fake)
         res = await ai_router.test_config(
-            AIConfigTest(provider_name="custom", base_url="https://api.test.com/v1",
-                         model="m", api_key="sk-x", request_mode="stream"),
-            db=db_conn)
+            AIConfigTest(
+                provider_name="custom",
+                base_url="https://api.test.com/v1",
+                model="m",
+                api_key="sk-x",
+                request_mode="stream",
+            ),
+            db=db_conn,
+        )
         assert res["ok"] is False
         assert res["category"] == "balance"
         assert "402" in res["raw"]
@@ -478,36 +536,48 @@ class TestImportExportAndHealth:
         assert res["items"][0]["request_mode"] == "stream"
 
     async def test_import_normalizes_and_persists(self, db_conn):
-        body = ConfigImportIn(items=[{
-            "provider_name": "zhipu", "model": "glm-4-plus",
-            "base_url": "https://open.bigmodel.cn/api/paas/v4",
-            "request_mode": "stream",
-        }])
+        body = ConfigImportIn(
+            items=[
+                {
+                    "provider_name": "zhipu",
+                    "model": "glm-4-plus",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                    "request_mode": "stream",
+                }
+            ]
+        )
         await ai_router.import_config(body, db=db_conn)
-        cur = await db_conn.execute(
-            "SELECT request_mode FROM ai_config WHERE provider_name='zhipu'")
+        cur = await db_conn.execute("SELECT request_mode FROM ai_config WHERE provider_name='zhipu'")
         assert (await cur.fetchone())[0] == "stream"
 
     async def test_import_legacy_file_without_mode(self, db_conn):
         """旧版本导出的文件没有该字段 → 默认普通请求，不能写 NULL。"""
-        body = ConfigImportIn(items=[{
-            "provider_name": "zhipu", "model": "glm-4-plus",
-            "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        }])
+        body = ConfigImportIn(
+            items=[
+                {
+                    "provider_name": "zhipu",
+                    "model": "glm-4-plus",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                }
+            ]
+        )
         await ai_router.import_config(body, db=db_conn)
-        cur = await db_conn.execute(
-            "SELECT request_mode FROM ai_config WHERE provider_name='zhipu'")
+        cur = await db_conn.execute("SELECT request_mode FROM ai_config WHERE provider_name='zhipu'")
         assert (await cur.fetchone())[0] == "normal"
 
     async def test_import_dirty_mode_normalized(self, db_conn):
-        body = ConfigImportIn(items=[{
-            "provider_name": "zhipu", "model": "glm-4-plus",
-            "base_url": "https://open.bigmodel.cn/api/paas/v4",
-            "request_mode": "SSE-please",
-        }])
+        body = ConfigImportIn(
+            items=[
+                {
+                    "provider_name": "zhipu",
+                    "model": "glm-4-plus",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                    "request_mode": "SSE-please",
+                }
+            ]
+        )
         await ai_router.import_config(body, db=db_conn)
-        cur = await db_conn.execute(
-            "SELECT request_mode FROM ai_config WHERE provider_name='zhipu'")
+        cur = await db_conn.execute("SELECT request_mode FROM ai_config WHERE provider_name='zhipu'")
         assert (await cur.fetchone())[0] == "normal"
 
     async def test_health_reports_request_mode(self, db_conn):
@@ -531,3 +601,82 @@ class TestImportExportAndHealth:
         monkeypatch.setattr(ai_router.connectivity, "_dns_precheck_async", _fake)
         res = await ai_router.precheck_all(db=db_conn)
         assert res["items"][0]["request_mode"] == "stream"
+
+
+# ===========================================================================
+# 6. R176 B2-1：流式分片解析跳过统计（provider 层回传）
+# ===========================================================================
+class TestStreamParseSkippedStats:
+    @staticmethod
+    def _provider(monkeypatch, responses):
+        from app.services.ai.providers import openai_compatible as oc
+
+        fake = _FakeHttpClient(responses)
+        monkeypatch.setattr(oc, "get_async_client", lambda *a, **k: fake)
+        return oc.OpenAICompatibleProvider("sk-x", "https://api.test.com/v1", "m", max_tokens=100, temperature=0.7)
+
+    async def test_mixed_bad_and_good_chunks_count_and_keep_content(self, monkeypatch, caplog):
+        """非法分片被跳过但正常内容不受影响；计数与首个原因如实回传。"""
+        provider = self._provider(
+            monkeypatch,
+            [
+                _FakeStreamResp(
+                    [
+                        "data: {not json",  # 非法
+                        'data: {"choices": [{"delta": {"content": "甲"}}]}',  # 正常
+                        "data: oops",  # 非法
+                        'data: {"choices": [{"delta": {"content": "乙"}}]}',  # 正常
+                        "data: [DONE]",
+                    ]
+                )
+            ],
+        )
+        with caplog.at_level(logging.WARNING, logger="ai_provider"):
+            pieces = [p async for p in provider.stream([{"role": "user", "content": "x"}])]
+        assert "".join(pieces) == "甲乙"
+        assert provider.last_stream_parse_skipped == 2
+        assert provider.last_stream_parse_skipped_reason
+        assert "首条非法 SSE 分片" in provider.last_stream_parse_skipped_reason
+        # 流结束时有一条 WARNING 可见信号（无跳过时不打日志，见下一用例）
+        assert any("2 条分片解析失败被跳过" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+
+    async def test_clean_stream_reports_zero(self, monkeypatch):
+        """无非法分片：计数 0、原因为空串（不误报）。"""
+        provider = self._provider(monkeypatch, [_FakeStreamResp(_sse({"choices": [{"delta": {"content": "ok"}}]}))])
+        async for _ in provider.stream([{"role": "user", "content": "x"}]):
+            pass
+        assert provider.last_stream_parse_skipped == 0
+        assert provider.last_stream_parse_skipped_reason == ""
+
+    async def test_empty_data_frame_is_keepalive_not_skip(self, monkeypatch):
+        """纯 `data:` 空帧是保活，不计入解析失败。"""
+        provider = self._provider(
+            monkeypatch,
+            [
+                _FakeStreamResp(
+                    [
+                        "data:",
+                        'data: {"choices": [{"delta": {"content": "ok"}}]}',
+                        "data: [DONE]",
+                    ]
+                )
+            ],
+        )
+        pieces = [p async for p in provider.stream([{"role": "user", "content": "x"}])]
+        assert "".join(pieces) == "ok"
+        assert provider.last_stream_parse_skipped == 0
+
+    async def test_counter_resets_between_calls(self, monkeypatch):
+        """第二次调用必须重置统计，不能把上一次的跳过数累计过来。"""
+        provider = self._provider(
+            monkeypatch,
+            [
+                _FakeStreamResp(["data: {bad", 'data: {"choices": [{"delta": {"content": "a"}}]}', "data: [DONE]"]),
+                _FakeStreamResp(_sse({"choices": [{"delta": {"content": "b"}}]})),
+            ],
+        )
+        _ = [p async for p in provider.stream([{"role": "user", "content": "x"}])]
+        assert provider.last_stream_parse_skipped == 1
+        _ = [p async for p in provider.stream([{"role": "user", "content": "x"}])]
+        assert provider.last_stream_parse_skipped == 0
+        assert provider.last_stream_parse_skipped_reason == ""

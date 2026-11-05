@@ -7,6 +7,7 @@
 - 今日 AI 审计汇总可统计；
 - SSE 流连接建立即推快照，任务变更触发刷新。
 """
+
 import time
 
 import pytest
@@ -46,18 +47,20 @@ async def test_activity_merges_live_task_and_ai_stats(db_conn, monkeypatch):
     """DB 任务行 + 内存实时态合并；scheme 名带出；今日 AI 汇总正确。"""
     await _patch_read_conn(db_conn, monkeypatch)
 
-    await db_conn.execute(
-        "INSERT INTO schemes (id, project_id, name) VALUES ('s1', 'p1', '测试方案')")
+    await db_conn.execute("INSERT INTO schemes (id, project_id, name) VALUES ('s1', 'p1', '测试方案')")
     await db_conn.execute(
         "INSERT INTO task_registry (id, task_type, project_id, scheme_id, status, progress)"
-        " VALUES ('t1', 'content_generation', 'p1', 's1', 'running', 0.1)")
+        " VALUES ('t1', 'content_generation', 'p1', 's1', 'running', 0.1)"
+    )
     await db_conn.execute(
         "INSERT INTO ai_audit_logs (id, provider_name, model, action, duration, success)"
-        " VALUES ('a1', 'deepseek', 'deepseek-chat', 'chat', 2.5, 1)")
+        " VALUES ('a1', 'deepseek', 'deepseek-chat', 'chat', 2.5, 1)"
+    )
     await db_conn.commit()
 
     # 模拟运行中任务的内存实时态（DB 里的 progress=0.1 应被内存 0.42 覆盖）
     import app.services.ai.task_registry as tr
+
     tr._tasks["t1"] = {
         "type": "content_generation",
         "status": "running",
@@ -75,9 +78,9 @@ async def test_activity_merges_live_task_and_ai_stats(db_conn, monkeypatch):
     t = running[0]
     assert t["id"] == "t1"
     assert t["scheme_name"] == "测试方案"
-    assert t["progress"] == 0.42          # 内存实时态优先于 DB
+    assert t["progress"] == 0.42  # 内存实时态优先于 DB
     assert t["live"] is True
-    assert t["elapsed"] >= 29             # 已耗时按内存 started_at 计算
+    assert t["elapsed"] >= 29  # 已耗时按内存 started_at 计算
     assert t["stats"]["done"] == 2
 
     ai = data["ai"]
@@ -105,14 +108,15 @@ async def test_activity_stream_initial_snapshot_and_task_update(db_conn, monkeyp
     """SSE 流建立时推送当前快照；任务状态变化触发二次刷新。"""
     await _patch_read_conn(db_conn, monkeypatch)
 
-    await db_conn.execute(
-        "INSERT INTO schemes (id, project_id, name) VALUES ('s1', 'p1', '测试方案')")
+    await db_conn.execute("INSERT INTO schemes (id, project_id, name) VALUES ('s1', 'p1', '测试方案')")
     await db_conn.execute(
         "INSERT INTO task_registry (id, task_type, project_id, scheme_id, status, progress)"
-        " VALUES ('t1', 'content_generation', 'p1', 's1', 'running', 0.1)")
+        " VALUES ('t1', 'content_generation', 'p1', 's1', 'running', 0.1)"
+    )
     await db_conn.commit()
 
     import app.services.ai.task_registry as tr
+
     tr._tasks["t1"] = {
         "type": "content_generation",
         "status": "running",
@@ -138,6 +142,7 @@ async def test_activity_stream_initial_snapshot_and_task_update(db_conn, monkeyp
 
         assert len(chunks) == 1
         import json
+
         first = json.loads(chunks[0].split("data: ", 1)[1])
         assert first["event"] == "snapshot"
         assert len(first["data"]["tasks"]["running"]) == 1
@@ -146,6 +151,7 @@ async def test_activity_stream_initial_snapshot_and_task_update(db_conn, monkeyp
         # 触发任务更新广播，应产生第二个快照
         tr._tasks["t1"]["progress"] = 0.88
         from app.services import activity_broadcaster as ab
+
         ab.notify()
 
         async for chunk in resp.body_iterator:
@@ -166,8 +172,7 @@ async def test_upload_limits_defaults():
     from app.routers.system import upload_limits
 
     data = await upload_limits()
-    assert set(data.keys()) == {
-        "max_upload_bytes", "max_files_per_request", "max_total_bytes"}
+    assert set(data.keys()) == {"max_upload_bytes", "max_files_per_request", "max_total_bytes"}
     assert data["max_upload_bytes"] == 30 * 1024 * 1024
     assert data["max_files_per_request"] == 20
     assert data["max_total_bytes"] == 200 * 1024 * 1024
@@ -196,6 +201,72 @@ async def test_upload_limits_reflect_runtime_authority(monkeypatch):
     assert data["max_total_bytes"] == 99 * 1024 * 1024
 
 
+# ===========================================================================
+# R176 B2-4：活动快照部分来源可见（partial_sources）
+# ===========================================================================
+class _FailOnSql:
+    """包装只读连接：指定 SQL 片段命中时抛错，模拟单个来源读取失败。"""
+
+    def __init__(self, inner, tokens):
+        self._inner = inner
+        self._tokens = list(tokens)
+
+    async def execute(self, sql, *args, **kwargs):
+        for tok in self._tokens:
+            if tok in sql:
+                raise RuntimeError(f"injected failure: {tok}")
+        return await self._inner.execute(sql, *args, **kwargs)
+
+
+async def _patch_read_conn_with_failures(db_conn, monkeypatch, tokens):
+    from app.routers import system as sys_mod
+
+    async def fake_read_conn():
+        return _FailOnSql(db_conn, tokens)
+
+    async def fake_release(_conn):
+        return None
+
+    monkeypatch.setattr(sys_mod, "get_read_conn", fake_read_conn)
+    monkeypatch.setattr(sys_mod, "release_read_conn", fake_release)
+
+
+@pytest.mark.asyncio
+async def test_activity_partial_sources_empty_when_all_ok(db_conn, monkeypatch):
+    """契约锁死：全部来源读取成功时该键**始终存在**，值为空列表。"""
+    await _patch_read_conn(db_conn, monkeypatch)
+
+    data = await activity(limit=5)
+    assert "partial_sources" in data
+    assert data["partial_sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_activity_partial_sources_single_failed_source(db_conn, monkeypatch):
+    """单个来源失败：只登记该来源 token（不误报其余两个）。"""
+    await _patch_read_conn_with_failures(db_conn, monkeypatch, ["FROM project_documents"])
+
+    data = await activity(limit=5)
+    assert data["partial_sources"] == ["documents"]
+    # fail-soft：其余来源仍给出正常零值，状态栏不因单源失败而 500
+    assert data["documents"]["total"] == 0
+    assert data["tasks"]["running"] == []
+
+
+@pytest.mark.asyncio
+async def test_activity_partial_sources_all_failed(db_conn, monkeypatch):
+    """三类来源全部失败：三个 token 全部登记，且响应仍是合法空态。"""
+    await _patch_read_conn_with_failures(
+        db_conn, monkeypatch, ["FROM task_registry", "FROM ai_audit_logs", "FROM project_documents"]
+    )
+
+    data = await activity(limit=5)
+    assert set(data["partial_sources"]) == {"tasks", "ai_today", "documents"}
+    assert data["tasks"]["recent"] == []
+    assert data["ai"]["calls_today"] == 0
+    assert data["documents"]["failure_rate"] is None
+
+
 @pytest.mark.asyncio
 async def test_upload_limits_does_not_read_settings_directly(monkeypatch):
     """✅ R73 续作 G5：端点不得再独立读 ``settings.upload_*``（防第三份副本回流）。
@@ -209,5 +280,6 @@ async def test_upload_limits_does_not_read_settings_directly(monkeypatch):
     monkeypatch.setattr(sys_mod.settings, "upload_max_bytes", 5 * 1024 * 1024)
     data = await sys_mod.upload_limits()
     # 仍反映 gf.MAX_UPLOAD_BYTES 的当前值（30MB 默认，未被 settings monkeypatch 影响）
-    assert data["max_upload_bytes"] == 30 * 1024 * 1024, (
-        "端点仍在独立读 settings.upload_max_bytes（G5 未收敛：应透传 gf.MAX_UPLOAD_BYTES）")
+    assert (
+        data["max_upload_bytes"] == 30 * 1024 * 1024
+    ), "端点仍在独立读 settings.upload_max_bytes（G5 未收敛：应透传 gf.MAX_UPLOAD_BYTES）"

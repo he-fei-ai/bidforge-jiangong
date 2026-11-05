@@ -20,6 +20,7 @@
     只有 stop 才取消子任务。
   - `set_task_status` 只对 running/paused 生效（终态不可回写），必须返回是否真的迁移。
 """
+
 import asyncio
 
 import app.routers.sse_handlers as sh
@@ -147,7 +148,8 @@ class TestPauseGateBeforeSemaphore:
 
         assert sem._value == 2, (
             f"暂停期间必须释放全部并发许可（期望 2，实测 {sem._value}）——"
-            "占着许可会让同进程内其它方案的生成任务被饿死")
+            "占着许可会让同进程内其它方案的生成任务被饿死"
+        )
 
         request_control(tid, "resume")
         await asyncio.sleep(_AI_SLEEP * 5)
@@ -164,9 +166,7 @@ class TestPauseGateBeforeSemaphore:
         sem = asyncio.Semaphore(2)
         log: dict = {"done": [], "cancelled": [], "running": {}}
 
-        children = [
-            asyncio.create_task(self._worker(tid, i, sem, log, gate_before_sem=False))
-            for i in range(6)]
+        children = [asyncio.create_task(self._worker(tid, i, sem, log, gate_before_sem=False)) for i in range(6)]
         for t in children:
             register_child_task(tid, t)
 
@@ -195,7 +195,7 @@ class TestPauseGateBeforeSemaphore:
 
         src = inspect.getsource(sh)
         start = src.index("async def guarded_gen")
-        body = src[start:start + 1200]
+        body = src[start : start + 1200]
         i_gate = body.index("wait_resume")
         i_work = body.index("gen_one(")
         assert i_gate < i_work, "暂停闸门必须排在消费 gen_one 之前"
@@ -208,16 +208,14 @@ class TestPauseGateBeforeSemaphore:
         #        这是「严格 DFS 启动序」的载体（信号量 FIFO 放行）。
         #    因此旧的"不得出现 async with / 不得引用 _run_semaphore"两条断言
         #    与现行实现直接冲突，改为锁定现行口径的关键不变量。
-        assert "async with _run_semaphore" in body, (
-            "guarded_gen 应持有每任务信号量（FIFO 放行保证 DFS 启动序）")
+        assert "async with _run_semaphore" in body, "guarded_gen 应持有每任务信号量（FIFO 放行保证 DFS 启动序）"
         # 闸门顺序不变量：wait_resume 必须在 async with 之前
         i_sem = body.index("async with _run_semaphore")
-        assert i_gate < i_sem, (
-            "暂停闸门必须排在信号量之前（否则暂停期间白占并发许可，"
-            "同进程其它方案被饿死）")
+        assert i_gate < i_sem, "暂停闸门必须排在信号量之前（否则暂停期间白占并发许可，" "同进程其它方案被饿死）"
         # 仍禁止使用全局自适应信号量（会脱离用户档位）
-        assert "concurrency_controller.semaphore" not in body, (
-            "guarded_gen 不得再使用全局自适应信号量（会脱离用户档位）")
+        assert (
+            "concurrency_controller.semaphore" not in body
+        ), "guarded_gen 不得再使用全局自适应信号量（会脱离用户档位）"
 
     async def test_stop_skips_unstarted_sections(self, db_conn):
         """停止后尚未开始（未抢到许可）的章节直接跳过，且不算失败。"""
@@ -318,4 +316,5 @@ class _ConnFactory:
     def __await__(self):
         async def _ret():
             return self._conn
+
         return _ret().__await__()

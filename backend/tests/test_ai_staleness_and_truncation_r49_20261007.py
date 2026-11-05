@@ -19,6 +19,7 @@ P1 截断正文被静默接受
     可观测，并按 ai_reasoning_max_tokens 上限翻倍 max_tokens 重试一次
     （严格一次，仍截断/失败时返回已获取的较长正文）。
 """
+
 from __future__ import annotations
 
 import json
@@ -69,15 +70,16 @@ async def ov_db(tmp_path):
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await db.execute(
-        "INSERT INTO schemes(id,project_id,name,status,word_budget)"
-        " VALUES(?,?,?,?,0)", (sid, pid, "深基坑支护专项方案", "目录已确认"))
+        "INSERT INTO schemes(id,project_id,name,status,word_budget)" " VALUES(?,?,?,?,0)",
+        (sid, pid, "深基坑支护专项方案", "目录已确认"),
+    )
     await db.execute(
         "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
         " description, level, status, word_count, word_budget, content,"
         " review_status, sort_order)"
         " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, sid, "", "", "一、工程概况", "", 1,
-         "generated", 200, 0, "本工程概况正文" * 50, "", 0))
+        (uuid.uuid4().hex, sid, "", "", "一、工程概况", "", 1, "generated", 200, 0, "本工程概况正文" * 50, "", 0),
+    )
     await db.commit()
     yield db, sid
     await close_db()
@@ -88,14 +90,29 @@ async def _insert_ai_row(db, sid, *, fingerprint="", batch_id=None):
         "INSERT INTO compliance_check (id, scheme_id, project_id, check_type,"
         " rule_id, item, severity, result, batch_id, created_at,"
         " content_fingerprint) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, sid, "", "compliance", "SAF-02", "专项安全技术措施",
-         "high", json.dumps({"hit": False, "rule_id": "SAF-02",
-                            "item": "专项安全技术措施",
-                            "severity": "high",
-                            "evidence": "旧正文证据（已不存在）"},
-                            ensure_ascii=False),
-         batch_id or uuid.uuid4().hex, datetime.now().isoformat(timespec="seconds"),
-         fingerprint))
+        (
+            uuid.uuid4().hex,
+            sid,
+            "",
+            "compliance",
+            "SAF-02",
+            "专项安全技术措施",
+            "high",
+            json.dumps(
+                {
+                    "hit": False,
+                    "rule_id": "SAF-02",
+                    "item": "专项安全技术措施",
+                    "severity": "high",
+                    "evidence": "旧正文证据（已不存在）",
+                },
+                ensure_ascii=False,
+            ),
+            batch_id or uuid.uuid4().hex,
+            datetime.now().isoformat(timespec="seconds"),
+            fingerprint,
+        ),
+    )
     await db.commit()
 
 
@@ -103,11 +120,27 @@ async def _insert_consistency_audit(db, sid, *, fingerprint=""):
     await db.execute(
         "INSERT INTO consistency_audit (id, project_id, scheme_id, score,"
         " content_fingerprint, issues, created_at) VALUES (?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, "", sid, 90.0, fingerprint,
-         json.dumps([{"dimension": "与项目关键事实一致", "severity": "medium",
-                      "fact": "旧事实", "content_quote": "旧引文",
-                      "section_title": "抹灰底层及接茬验收"}], ensure_ascii=False),
-         datetime.now().isoformat(timespec="seconds")))
+        (
+            uuid.uuid4().hex,
+            "",
+            sid,
+            90.0,
+            fingerprint,
+            json.dumps(
+                [
+                    {
+                        "dimension": "与项目关键事实一致",
+                        "severity": "medium",
+                        "fact": "旧事实",
+                        "content_quote": "旧引文",
+                        "section_title": "抹灰底层及接茬验收",
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            datetime.now().isoformat(timespec="seconds"),
+        ),
+    )
     await db.commit()
 
 
@@ -118,8 +151,7 @@ class TestOverviewSkipsStaleAiRows:
         payload = await _readiness_overview_compute(db, sid, persist=False)
         assert "compliance" not in payload["sources"], payload["sources"]
         assert payload["stale_ai_sources"] == ["compliance"]
-        assert not [f for f in payload["findings"]
-                    if f["rule_id"] == "SAF-02"], "过期结论不得计入评分"
+        assert not [f for f in payload["findings"] if f["rule_id"] == "SAF-02"], "过期结论不得计入评分"
 
     async def test_fresh_batch_included(self, ov_db):
         db, sid = ov_db
@@ -154,8 +186,7 @@ class TestOverviewSkipsStaleAiRows:
         payload = await _readiness_overview_compute(db, sid, persist=False)
         assert "consistency" not in payload["sources"]
         assert "consistency" in payload["stale_ai_sources"]
-        assert not [f for f in payload["findings"]
-                    if f["rule_id"].startswith("CON-04")]
+        assert not [f for f in payload["findings"] if f["rule_id"].startswith("CON-04")]
 
     async def test_fresh_consistency_audit_included(self, ov_db):
         db, sid = ov_db
@@ -177,8 +208,7 @@ class _FakeProvider:
         self.behavior = behavior
         self.built_mt = built_mt
         self.chat_calls = 0
-        self.last_usage = {"prompt_tokens": 10, "completion_tokens": 5,
-                           "cached_tokens": 0}
+        self.last_usage = {"prompt_tokens": 10, "completion_tokens": 5, "cached_tokens": 0}
         self.name = "fake"
         self.model = "m"
 
@@ -221,9 +251,15 @@ def _wire_single(monkeypatch, provider_factory_fn, *, max_tokens=4096):
     built = []
 
     async def _cfg():
-        return {"provider_name": "p1", "api_key": "k", "base_url": "https://x",
-                "model": "m", "max_tokens": max_tokens, "temperature": 0.7,
-                "timeout": 60}
+        return {
+            "provider_name": "p1",
+            "api_key": "k",
+            "base_url": "https://x",
+            "model": "m",
+            "max_tokens": max_tokens,
+            "temperature": 0.7,
+            "timeout": 60,
+        }
 
     async def _chain():
         return []
@@ -241,23 +277,19 @@ def _wire_single(monkeypatch, provider_factory_fn, *, max_tokens=4096):
 
 
 class TestPartialTruncationRetry:
-    async def test_truncated_retries_with_doubled_max_tokens(self, isolated,
-                                                             monkeypatch, caplog):
+    async def test_truncated_retries_with_doubled_max_tokens(self, isolated, monkeypatch, caplog):
         monkeypatch.setattr(settings, "ai_retry_on_partial_truncation", True)
         monkeypatch.setattr(settings, "ai_reasoning_max_tokens", 4096)
 
         def _factory(mt):
-            return _FakeProvider(behavior="truncated" if mt < 4096 else "full",
-                                 built_mt=mt)
+            return _FakeProvider(behavior="truncated" if mt < 4096 else "full", built_mt=mt)
 
         built = _wire_single(monkeypatch, _factory, max_tokens=2048)
-        with caplog.at_level(logging.WARNING,
-                             logger="app.services.ai.provider_factory"):
+        with caplog.at_level(logging.WARNING, logger="app.services.ai.provider_factory"):
             out = await pf.chat_with_fallback([{"role": "user", "content": "hi"}])
         assert out == "完整正文内容（未被截断）"
         assert built == [2048, 4096], "必须先以原 max_tokens 尝试，截断后翻倍重试一次"
-        assert any("正文疑似被 max_tokens 截断" in r.message for r in caplog.records), \
-            "截断必须可观测（WARNING）"
+        assert any("正文疑似被 max_tokens 截断" in r.message for r in caplog.records), "截断必须可观测（WARNING）"
 
     async def test_disabled_is_legacy(self, isolated, monkeypatch):
         """ai_retry_on_partial_truncation=False → 不重试（旧行为，仅告警）。"""
@@ -282,8 +314,7 @@ class TestPartialTruncationRetry:
         assert out == "完整正文内容（未被截断）"
         assert built == [2048], "正常结束不得触发重试"
 
-    async def test_only_one_retry_even_if_still_truncated(self, isolated,
-                                                          monkeypatch):
+    async def test_only_one_retry_even_if_still_truncated(self, isolated, monkeypatch):
         """达到上限后不再重试（不做二重放大），返回已获取的较长正文。"""
         monkeypatch.setattr(settings, "ai_retry_on_partial_truncation", True)
         monkeypatch.setattr(settings, "ai_reasoning_max_tokens", 4096)
@@ -296,8 +327,7 @@ class TestPartialTruncationRetry:
         assert out == "半截正文内容"
         assert built == [2048, 4096], "翻倍重试一次后必须停止"
 
-    async def test_retry_failure_returns_best_partial(self, isolated,
-                                                      monkeypatch):
+    async def test_retry_failure_returns_best_partial(self, isolated, monkeypatch):
         """截断重试后失败：返回已拿到的半截正文，而不是丢弃它去降级下一候选。"""
         monkeypatch.setattr(settings, "ai_retry_on_partial_truncation", True)
         monkeypatch.setattr(settings, "ai_reasoning_max_tokens", 4096)

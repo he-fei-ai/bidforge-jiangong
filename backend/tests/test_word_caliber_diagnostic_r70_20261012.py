@@ -23,6 +23,7 @@ E **反向锁**（本轮最关键）：全仓 app/** 中 `readable_word_count` /
   （易标报告 §10 薄弱点 1 与本仓 R55/R62 反复警告的同族反例）。
 F 字节体检：触碰文件 CR==LF / 无 BOM / 无 U+FFFD / AST 无重复顶层名。
 """
+
 from __future__ import annotations
 
 import ast
@@ -66,9 +67,7 @@ def _consumer_sites() -> set[tuple[str, str]]:
             if not isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             for call in ast.walk(top):
-                if (isinstance(call, ast.Call)
-                        and isinstance(call.func, ast.Name)
-                        and call.func.id in DIAGNOSTICS):
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in DIAGNOSTICS:
                     sites.add((p.relative_to(_APP).as_posix(), top.name))
     return sites
 
@@ -83,15 +82,13 @@ class TestReadableWordCount:
         assert readable_word_count("基坑支护采用放坡，坡比1:1.2。") == 12
 
     def test_fenced_block_stripped(self):
-        fenced = ("流程如下：\n\n```mermaid\nflowchart TD\n"
-                  "  A[开挖] --> B[支护]\n```\n")
+        fenced = "流程如下：\n\n```mermaid\nflowchart TD\n" "  A[开挖] --> B[支护]\n```\n"
         assert text_word_count(fenced) == 7
         assert readable_word_count(fenced) == 4
 
     def test_image_and_url_not_counted(self):
         assert readable_word_count("现场见下图 ![示意图](/uploads/a.png) 所示。") == 7
-        assert readable_word_count(
-            "依据 https://example.com/very/long/path/here 执行。") == 4
+        assert readable_word_count("依据 https://example.com/very/long/path/here 执行。") == 4
 
     def test_link_anchor_kept(self):
         # 链接只剔目标地址，锚文字是用户读到的内容 ⇒ 保留
@@ -102,8 +99,7 @@ class TestReadableWordCount:
         assert readable_word_count("GB50007 与 JGJ120-2012 并行适用，共 3 条。") == 10
 
     def test_table_and_list_markers_dropped(self):
-        assert readable_word_count(
-            "| 工序 | 天数 |\n|---|---|\n| 开挖 | 5 |\n| 支护 | 3 |\n") == 10
+        assert readable_word_count("| 工序 | 天数 |\n|---|---|\n| 开挖 | 5 |\n| 支护 | 3 |\n") == 10
         assert readable_word_count("### 3.1 施工部署\n\n- 第一项\n- 第二项\n") == 11
 
     def test_html_and_inline_code_dropped(self):
@@ -128,9 +124,11 @@ class TestReadableWordCount:
 
     def test_readable_never_exceeds_text_for_prose(self):
         # 包含关系：可读口径是字符口径的子集计数，散文场景不可能更大
-        for body in ("基坑支护采用放坡，坡比1:1.2。",
-                     "| 工序 | 天数 |\n|---|---|\n| 开挖 | 5 |\n",
-                     "现场见下图 ![示意图](/uploads/a.png) 所示。"):
+        for body in (
+            "基坑支护采用放坡，坡比1:1.2。",
+            "| 工序 | 天数 |\n|---|---|\n| 开挖 | 5 |\n",
+            "现场见下图 ![示意图](/uploads/a.png) 所示。",
+        ):
             assert readable_word_count(body) <= text_word_count(body), body
 
 
@@ -140,19 +138,19 @@ class TestReadableWordCount:
 class TestSingleSourceAndNoDeadCode:
     def test_normalize_reuses_fence_source_of_truth(self):
         tree = ast.parse(_SRC["content_utils"])
-        fn = next(n for n in tree.body
-                  if isinstance(n, ast.FunctionDef) and n.name == "_normalize_for_readable")
-        called = {c.func.id for c in ast.walk(fn)
-                  if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_normalize_for_readable")
+        called = {c.func.id for c in ast.walk(fn) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
         assert "strip_fenced_code_blocks" in called, "围栏必须复用唯一事实源"
 
     def test_diagnostics_define_no_fence_pattern(self):
         # 「剔围栏」只有一个事实源；诊断常量不得自带围栏模式（否则是第二口径的雏形）
         tree = ast.parse(_SRC["content_utils"])
         for node in tree.body:
-            if (isinstance(node, ast.Assign)
-                    and isinstance(node.targets[0], ast.Name)
-                    and node.targets[0].id.startswith("_RW_")):
+            if (
+                isinstance(node, ast.Assign)
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id.startswith("_RW_")
+            ):
                 for const in ast.walk(node.value):
                     if isinstance(const, ast.Constant) and isinstance(const.value, str):
                         assert "```" not in const.value
@@ -161,8 +159,7 @@ class TestSingleSourceAndNoDeadCode:
     def test_word_like_count_removed_no_dead_code(self):
         assert "word_like_count" not in _SRC["content_utils"]
         assert "_RW_CJK_PUNCT_RE" not in _SRC["content_utils"]
-        names = [n.name for n in ast.parse(_SRC["content_utils"]).body
-                 if isinstance(n, ast.FunctionDef)]
+        names = [n.name for n in ast.parse(_SRC["content_utils"]).body if isinstance(n, ast.FunctionDef)]
         assert "readable_word_count" in names and "has_cjk" in names
         assert len(names) == len(set(names)), f"顶层重名：{names}"
 
@@ -172,30 +169,54 @@ class TestSingleSourceAndNoDeadCode:
 # ===========================================================================
 class TestExistingConclusionsUnchanged:
     def test_word_audit_summary_keys_locked(self):
-        rep = word_audit_summary([
-            {"section_id": "1", "title": "A", "level": 3, "word_budget": 1200,
-             "word_count": 1200}])
-        assert set(rep) == {"total", "in_band", "under_band", "over", "under",
-                            "below_leaf_floor", "mean_ratio", "median_ratio",
-                            "max_ratio", "items"}
-        assert set(rep["items"][0]) == {"section_id", "title", "level",
-                                        "word_budget", "word_count", "deviation",
-                                        "ratio", "within_band", "word_status"}
+        rep = word_audit_summary(
+            [{"section_id": "1", "title": "A", "level": 3, "word_budget": 1200, "word_count": 1200}]
+        )
+        assert set(rep) == {
+            "total",
+            "in_band",
+            "under_band",
+            "over",
+            "under",
+            "below_leaf_floor",
+            "mean_ratio",
+            "median_ratio",
+            "max_ratio",
+            "items",
+        }
+        assert set(rep["items"][0]) == {
+            "section_id",
+            "title",
+            "level",
+            "word_budget",
+            "word_count",
+            "deviation",
+            "ratio",
+            "within_band",
+            "word_status",
+        }
         # 绝不含 readable_* —— rows 契约不带 content，汇总层拿不到正文
         assert not any(k.startswith("readable") for k in rep)
         assert not any(k.startswith("readable") for k in rep["items"][0])
 
     def _leaf(self, sec_id, title, wc, wb, content):
-        return {"id": sec_id, "parent_id": "p", "title": title, "content": content,
-                "word_count": wc, "level": 3, "word_budget": wb, "status": "done",
-                "sort_order": int(sec_id)}
+        return {
+            "id": sec_id,
+            "parent_id": "p",
+            "title": title,
+            "content": content,
+            "word_count": wc,
+            "level": 3,
+            "word_budget": wb,
+            "status": "done",
+            "sort_order": int(sec_id),
+        }
 
     def _ctx(self, secs):
         return PreflightContext(scheme_id="s", sections=secs)
 
     def _dlv16(self, secs):
-        found = [f for f in check_deliverability(self._ctx(secs))
-                 if f["rule_id"] == "DLV-16"]
+        found = [f for f in check_deliverability(self._ctx(secs)) if f["rule_id"] == "DLV-16"]
         assert len(found) == 1
         return "\n".join(found[0]["evidence"])
 
@@ -206,16 +227,16 @@ class TestExistingConclusionsUnchanged:
         assert "按可读字数" not in ev
 
     def test_cjk_fixture_only_appends_reading(self):
-        body = "基坑支护采用放坡，坡比1:1.2。" * 200   # 字符口径 3400 / 可读 2400
+        body = "基坑支护采用放坡，坡比1:1.2。" * 200  # 字符口径 3400 / 可读 2400
         assert text_word_count(body) == 3400 and readable_word_count(body) == 2400
         ev = self._dlv16([self._leaf("1", "中文章", 3400, 1200, body)])
-        assert "实际 3400/目标 1200 字" in ev          # 判定读数仍是字符口径
-        assert "超目标 283%" in ev                     # 结论一字未动
+        assert "实际 3400/目标 1200 字" in ev  # 判定读数仍是字符口径
+        assert "超目标 283%" in ev  # 结论一字未动
         assert "按可读字数约 2400 字" in ev
 
     def test_reading_equals_count_then_omitted(self):
         # 两口径恰好相等时不追加（避免"按可读字数约 N 字"变成噪音）
-        body = "基坑支护"          # 4 字且无标点 ⇒ text == readable == 4
+        body = "基坑支护"  # 4 字且无标点 ⇒ text == readable == 4
         assert text_word_count(body) == readable_word_count(body) == 4
         ev = self._dlv16([self._leaf("1", "短章", 4, 1200, body)])
         assert "低于 300 字下限" in ev and "按可读字数" not in ev
@@ -243,8 +264,7 @@ class TestWiring:
         assert _SRC["preflight"].count("_rw_txt") == 4
 
     def test_auto_shrink_default_untouched(self):
-        assert ("_shrink_default = word_budget_tier is not None "
-                "or word_budget_override is not None") in _SRC["sse"]
+        assert ("_shrink_default = word_budget_tier is not None " "or word_budget_override is not None") in _SRC["sse"]
         # R66 旧论据已订正：注释不得再单独宣称"系统性超写（实测均值 136.9%）"
         assert "系统性超写（实测均值 136.9%）" not in _SRC["sse"]
         assert "含标点字符口径" in _SRC["sse"]
@@ -259,8 +279,14 @@ class TestDiagnosticsNeverJudge:
         assert _consumer_sites() == ALLOWED_CONSUMERS
 
     def test_no_judgment_function_references_diagnostics(self):
-        forbidden = {"word_status_for", "word_deviation_of", "word_audit_summary",
-                     "_should_auto_shrink", "should_continue_round", "_continue_if_needed"}
+        forbidden = {
+            "word_status_for",
+            "word_deviation_of",
+            "word_audit_summary",
+            "_should_auto_shrink",
+            "should_continue_round",
+            "_continue_if_needed",
+        }
         for _file, fn in _consumer_sites():
             assert fn not in forbidden, f"诊断读数进入判定函数：{fn}"
 
@@ -284,8 +310,11 @@ class TestDiagnosticsNeverJudge:
                     targets = [node.target]
                 for t in targets:
                     if t.id == "word_count" and node.value is not None:
-                        ids = {c.func.id for c in ast.walk(node.value)
-                               if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+                        ids = {
+                            c.func.id
+                            for c in ast.walk(node.value)
+                            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                        }
                         assert not (ids & DIAGNOSTICS), f"{p}:{t.lineno} 用诊断读数落库"
 
 
@@ -294,8 +323,7 @@ class TestDiagnosticsNeverJudge:
 # ===========================================================================
 class TestByteHealth:
     def test_touched_files_are_clean(self):
-        for rel in ("services/content_utils.py", "services/preflight_engine.py",
-                    "routers/sse_handlers.py"):
+        for rel in ("services/content_utils.py", "services/preflight_engine.py", "routers/sse_handlers.py"):
             raw = (_APP / rel).read_bytes()
             text = raw.decode("utf-8")
             assert raw[:3] != b"\xef\xbb\xbf", f"{rel} 不得有 BOM"

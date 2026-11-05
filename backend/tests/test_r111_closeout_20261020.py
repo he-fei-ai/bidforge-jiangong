@@ -10,6 +10,7 @@
 P2-3（字数 2× 截断）与 P2-4（SSE 进度跳变）属行为变更大项，**刻意登记不落地**
 （本文件锁「未回流」判据，防后人误当漏修补上）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -27,6 +28,7 @@ def _src(rel: str) -> str:
 # =====================================================================
 # P2-1 · 保存配置去重提示
 # =====================================================================
+
 
 class TestConfigSaveDuplicateHint:
     SRC = "app/routers/ai_config/config.py"
@@ -48,7 +50,7 @@ class TestConfigSaveDuplicateHint:
         src = _src(self.SRC)
         # 提示之后必须继续走 after_row / 审计 / return，不得 raise
         i = src.find("duplicate_hint = ")
-        tail = src[i:i + 400]
+        tail = src[i : i + 400]
         assert "duplicate_hint" in tail
         # 不得出现因重复而 400/409 的形态
         assert "duplicate_hint" not in tail.split("\nraise")[0] or "raise HTTPException" not in tail
@@ -58,7 +60,7 @@ class TestConfigSaveDuplicateHint:
         src = _src(self.SRC)
         i = src.find("SELECT id FROM ai_config WHERE provider_name=? AND model=?")
         assert i > 0
-        seg = src[i:i + 200]
+        seg = src[i : i + 200]
         assert "base_url" in seg
         assert "api_key" not in seg
 
@@ -66,6 +68,7 @@ class TestConfigSaveDuplicateHint:
 # =====================================================================
 # P2-2 · 死配置报告门槛透明化
 # =====================================================================
+
 
 class TestDeadConfigReportTransparency:
     SRC = "app/services/ai/provider_factory.py"
@@ -86,9 +89,11 @@ class TestDeadConfigReportTransparency:
     def test_no_behavior_change(self):
         """纯可观测：报告函数体不得新增剔除/写库/冷却操作。"""
         tree = ast.parse(_src(self.SRC))
-        fn = next(n for n in ast.walk(tree)
-                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                  and n.name == "report_dead_configs_at_startup")
+        fn = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "report_dead_configs_at_startup"
+        )
         # 函数内除 logger/append/continue/return/for 外不得有写库/剔除调用
         bad_calls = set()
         for node in ast.walk(fn):
@@ -102,6 +107,7 @@ class TestDeadConfigReportTransparency:
 # =====================================================================
 # P2-5 · 导出缓存命中/未命中日志埋点
 # =====================================================================
+
 
 class TestExportCacheLogging:
     SRC = "app/routers/export.py"
@@ -121,22 +127,34 @@ class TestExportCacheLogging:
                 if i < 0:
                     break
                 # 前 200 字符内必须是 logger.info（不得 WARNING）
-                seg = src[max(0, i - 200):i]
-                assert "logger.info" in seg and "logger.warning" not in seg[seg.rfind("logger"):] , \
-                    f"{marker} 埋点级别应为 INFO"
+                seg = src[max(0, i - 200) : i]
+                assert (
+                    "logger.info" in seg and "logger.warning" not in seg[seg.rfind("logger") :]
+                ), f"{marker} 埋点级别应为 INFO"
                 i += 1
 
-    def test_hit_log_before_trace_recording(self):
-        """命中埋点必须在 _record_export_review_trace 之前（先留痕命中态再落审核）。"""
+    def test_hit_log_before_atomic_trace_write(self):
+        """命中埋点必须在「轮次 + 留痕」事务之前（先记录命中态再落审核）。
+
+        ✅ R176 · D2-3（2026-11-04）：命中路径改为
+        ``_bump_export_round_and_trace`` 单事务写入，旧的直接
+        ``_record_export_review_trace`` 调用点已并入该 helper。
+        """
         src = _src(self.SRC)
-        hit = src.find("导出缓存命中")
-        trace = src.find("_record_export_review_trace", hit)
-        assert hit < trace
+        i = 0
+        while True:
+            hit = src.find("导出缓存命中", i)
+            if hit < 0:
+                break
+            trace = src.find("_bump_export_round_and_trace", hit)
+            assert trace > hit, "命中埋点必须在留痕事务调用之前"
+            i = hit + 1
 
 
 # =====================================================================
 # P2-6 · dashscope 渠道卫生
 # =====================================================================
+
 
 class TestDashscopeChannelHygiene:
     SRC = "app/services/ai/image_engine.py"
@@ -166,6 +184,7 @@ class TestDashscopeChannelHygiene:
 # P2-7 · 事实单段确定性永久错误不重试
 # =====================================================================
 
+
 class TestFactsChunkPermanentNoRetry:
     SRC = "app/services/facts_extractor.py"
 
@@ -178,7 +197,7 @@ class TestFactsChunkPermanentNoRetry:
         assert "is_non_retryable_error" in src
         j = src.find("if _permanent:")
         assert j > 0
-        assert "break" in src[j:j + 400]
+        assert "break" in src[j : j + 400]
 
     def test_uses_provider_factory_single_source(self):
         """判据必须委托 provider_factory.is_non_retryable_error（单一事实源）。"""
@@ -190,7 +209,7 @@ class TestFactsChunkPermanentNoRetry:
         src = _src(self.SRC)
         i = src.find("_permanent = is_non_retryable_error(e)")
         assert i > 0
-        seg = src[i:i + 500]
+        seg = src[i : i + 500]
         assert "except Exception" in seg and "_permanent = False" in seg
 
     def test_rate_limit_not_in_permanent_set(self):
@@ -206,30 +225,36 @@ class TestFactsChunkPermanentNoRetry:
         """
         src_pf = _src("app/services/ai/provider_factory.py")
         tree = ast.parse(src_pf)
-        fn = next(n for n in ast.walk(tree)
-                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                  and n.name == "is_non_retryable_error")
+        fn = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "is_non_retryable_error"
+        )
         # 剥掉 docstring（函数体首节点）与注释级字符串，只留判定逻辑字面量
         body = list(fn.body)
-        if body and isinstance(body[0], ast.Expr) and \
-                isinstance(body[0].value, (ast.Constant, ast.JoinedStr)):
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, (ast.Constant, ast.JoinedStr)):
             body = body[1:]
-        strs = [n.value for sub in body
-                for n in ast.walk(sub)
-                if isinstance(n, ast.Constant) and isinstance(n.value, str)]
-        assert not any("429" in s for s in strs), \
-            "429 被写入永久错误判定字面量（回归 R109 退避路径）"
+        strs = [
+            n.value for sub in body for n in ast.walk(sub) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        ]
+        assert not any("429" in s for s in strs), "429 被写入永久错误判定字面量（回归 R109 退避路径）"
         # 行为实证：429 必须判可重试；401/402/403/404 必须判永久（R109 判据不回流）
         from app.services.ai.provider_factory import is_non_retryable_error
+
         assert not is_non_retryable_error("HTTP 429 rate limit")
-        for code in ("HTTP 401: invalid token", "HTTP 402 Insufficient Balance",
-                     "HTTP 403 forbidden", "HTTP 404 InvalidEndpointOrModel.NotFound"):
+        for code in (
+            "HTTP 401: invalid token",
+            "HTTP 402 Insufficient Balance",
+            "HTTP 403 forbidden",
+            "HTTP 404 InvalidEndpointOrModel.NotFound",
+        ):
             assert is_non_retryable_error(code), f"{code} 未判永久（R109 判据回流）"
 
 
 # =====================================================================
 # 高危项登记锁（P2-3 / P2-4 刻意不落地，防误修）
 # =====================================================================
+
 
 class TestDeferredItemsStayRegistered:
     """P2-3 字数 2× 截断 / P2-4 SSE 进度跳变：行为变更大，本轮**只登记不落地**。
@@ -248,10 +273,10 @@ class TestDeferredItemsStayRegistered:
         """SSE 正文进度计算仍走既有 done/total 线性口径（P2-4 登记项未落地）。"""
         src = _src("app/routers/sse_handlers.py")
         # 既有口径锚：章节完成比例 = 已完成 / 总数（不得出现 95→100 特判跳变代码）
-        assert "0.95" not in src and "95%→100" not in src, \
-            "SSE 进度 95% 特判回流（P2-4 登记项被误修）"
+        assert "0.95" not in src and "95%→100" not in src, "SSE 进度 95% 特判回流（P2-4 登记项被误修）"
 
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(pytest.main([__file__, "-v"]))

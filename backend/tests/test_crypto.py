@@ -11,6 +11,7 @@ A. 密钥来源与回退（FERNET_KEY > data/secret_key.key > 兜底）
 B. 持久化密钥文件（落盘 / 复用 / 空文件 / 只读盘降级）；
 C. 加解密与格式判定（encrypt / decrypt / is_encrypted 的边界与不抛异常承诺）。
 """
+
 import pytest
 from app.services import crypto
 from cryptography.fernet import Fernet
@@ -55,20 +56,18 @@ class TestKeySource:
     def test_invalid_env_key_falls_back_to_persistent_key(self, key_file, monkeypatch):
         """✅ 加固点：FERNET_KEY 非法不得丢掉库里已存的密文。"""
         monkeypatch.setattr(crypto.settings, "fernet_key", "", raising=False)
-        token = crypto.encrypt_api_key("sk-kept")     # 用持久化密钥加密
+        token = crypto.encrypt_api_key("sk-kept")  # 用持久化密钥加密
 
         # 运维把 FERNET_KEY 写错（典型事故）→ 必须仍能用持久化密钥解开
         crypto._fernet = None
-        monkeypatch.setattr(crypto.settings, "fernet_key", "not-a-valid-key",
-                            raising=False)
+        monkeypatch.setattr(crypto.settings, "fernet_key", "not-a-valid-key", raising=False)
         assert crypto.decrypt_api_key(token) == "sk-kept"
 
     def test_invalid_env_key_does_not_crash_encryption(self, key_file, monkeypatch):
         monkeypatch.setattr(crypto.settings, "fernet_key", "!!!", raising=False)
         assert crypto.decrypt_api_key(crypto.encrypt_api_key("sk-x")) == "sk-x"
 
-    def test_corrupted_persistent_file_falls_back_without_crash(
-            self, key_file, monkeypatch):
+    def test_corrupted_persistent_file_falls_back_without_crash(self, key_file, monkeypatch):
         """持久化文件被手工改坏 → 兜底临时密钥，功能可用（仅重启后需重填）"""
         key_file.parent.mkdir(parents=True, exist_ok=True)
         key_file.write_text("garbage-not-a-key", encoding="utf-8")
@@ -102,7 +101,7 @@ class TestPersistentKeyFile:
     def test_unwritable_path_returns_temp_key(self, tmp_path, monkeypatch):
         """只读盘 / 目录不可建 → 返回临时密钥而不抛异常（功能仍可用）。"""
         blocker = tmp_path / "blocker"
-        blocker.write_text("x", encoding="utf-8")     # 同名普通文件挡住 mkdir
+        blocker.write_text("x", encoding="utf-8")  # 同名普通文件挡住 mkdir
         monkeypatch.setattr(crypto, "_KEY_FILE", blocker / "sub" / "secret.key")
 
         key = crypto._load_or_create_persistent_key()
@@ -112,8 +111,7 @@ class TestPersistentKeyFile:
         assert crypto.decrypt_api_key(crypto.encrypt_api_key("sk-x")) == "sk-x"
 
     def test_key_file_not_created_when_env_key_used(self, key_file, monkeypatch):
-        monkeypatch.setattr(crypto.settings, "fernet_key",
-                            Fernet.generate_key().decode(), raising=False)
+        monkeypatch.setattr(crypto.settings, "fernet_key", Fernet.generate_key().decode(), raising=False)
         crypto.encrypt_api_key("sk-x")
         assert not key_file.exists()
 
@@ -127,8 +125,7 @@ class TestEncryptDecrypt:
         assert crypto.decrypt_api_key("") == ""
 
     def test_roundtrip_with_unicode_and_special_chars(self, key_file):
-        for raw in ("sk-abc123", "含中文的密钥", "a b\tc\n", "x" * 500,
-                    "sk-!@#$%^&*()_+-=[]{}|;:'\",.<>?/"):
+        for raw in ("sk-abc123", "含中文的密钥", "a b\tc\n", "x" * 500, "sk-!@#$%^&*()_+-=[]{}|;:'\",.<>?/"):
             enc = crypto.encrypt_api_key(raw)
             assert enc != raw
             assert crypto.decrypt_api_key(enc) == raw
@@ -142,8 +139,7 @@ class TestEncryptDecrypt:
         enc = crypto.encrypt_api_key("sk-secret")
 
         crypto._fernet = None
-        monkeypatch.setattr(crypto.settings, "fernet_key",
-                            Fernet.generate_key().decode(), raising=False)
+        monkeypatch.setattr(crypto.settings, "fernet_key", Fernet.generate_key().decode(), raising=False)
         assert crypto.decrypt_api_key(enc) == "", "换密钥后解不开应返回空串（前端据此提示重新填写）"
 
 

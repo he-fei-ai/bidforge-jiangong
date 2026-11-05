@@ -15,6 +15,7 @@
 
 设计约束（沿用本仓惯例）：零新增依赖、零数据迁移、零新增配置项。
 """
+
 import re
 import uuid
 from pathlib import Path
@@ -51,28 +52,39 @@ class TestConflictIdSchemeScoped:
         from app.services.consistency_scanner import _conflict_id_prefix, merge_conflicts
 
         assert _conflict_id_prefix("") == ""
-        rows = [{
-            "conflict_type": "numeric", "topic": "项目总工期", "value": "120 日历天",
-            "text": "t", "position": 1,
-            "section_occurrences": [{"section_id": "S1", "section_title": "S1",
-                                     "text": "t", "position": 0, "value": "120 日历天"}],
-            "source": "ai_scan",
-        }]
+        rows = [
+            {
+                "conflict_type": "numeric",
+                "topic": "项目总工期",
+                "value": "120 日历天",
+                "text": "t",
+                "position": 1,
+                "section_occurrences": [
+                    {"section_id": "S1", "section_title": "S1", "text": "t", "position": 0, "value": "120 日历天"}
+                ],
+                "source": "ai_scan",
+            }
+        ]
         out = merge_conflicts(rows, [])
-        assert out[0]["id"] == "C001", (
-            f"不传 scheme_id 时必须仍是 C001，实际 {out[0]['id']}")
+        assert out[0]["id"] == "C001", f"不传 scheme_id 时必须仍是 C001，实际 {out[0]['id']}"
 
     def test_merge_conflicts_with_scheme_id_is_scoped(self):
         from app.services.consistency_scanner import _conflict_id_prefix, merge_conflicts
 
         def _row(sid):
-            return [{
-                "conflict_type": "numeric", "topic": "项目总工期", "value": "120 日历天",
-                "text": "t", "position": 1,
-                "section_occurrences": [{"section_id": sid, "section_title": sid,
-                                         "text": "t", "position": 0, "value": "120 日历天"}],
-                "source": "ai_scan",
-            }]
+            return [
+                {
+                    "conflict_type": "numeric",
+                    "topic": "项目总工期",
+                    "value": "120 日历天",
+                    "text": "t",
+                    "position": 1,
+                    "section_occurrences": [
+                        {"section_id": sid, "section_title": sid, "text": "t", "position": 0, "value": "120 日历天"}
+                    ],
+                    "source": "ai_scan",
+                }
+            ]
 
         out_a = merge_conflicts(_row("S1"), [], scheme_id="scheme-A")
         out_b = merge_conflicts(_row("S1"), [], scheme_id="scheme-B")
@@ -84,26 +96,33 @@ class TestConflictIdSchemeScoped:
         from app.services.consistency_scanner import merge_conflicts, persist_conflicts
 
         def _row(sid):
-            return [{
-                "conflict_type": "numeric", "topic": "项目总工期", "value": "120 日历天",
-                "text": f"{sid} 的正文", "position": 1,
-                "section_occurrences": [{"section_id": f"sec-{sid}", "section_title": "ch1",
-                                         "text": f"{sid} 的正文", "position": 0,
-                                         "value": "120 日历天"}],
-                "source": "ai_scan",
-            }]
+            return [
+                {
+                    "conflict_type": "numeric",
+                    "topic": "项目总工期",
+                    "value": "120 日历天",
+                    "text": f"{sid} 的正文",
+                    "position": 1,
+                    "section_occurrences": [
+                        {
+                            "section_id": f"sec-{sid}",
+                            "section_title": "ch1",
+                            "text": f"{sid} 的正文",
+                            "position": 0,
+                            "value": "120 日历天",
+                        }
+                    ],
+                    "source": "ai_scan",
+                }
+            ]
 
-        await persist_conflicts(db_conn, "scheme-A", "scan-A",
-                                merge_conflicts(_row("A"), [], scheme_id="scheme-A"))
-        await persist_conflicts(db_conn, "scheme-B", "scan-B",
-                                merge_conflicts(_row("B"), [], scheme_id="scheme-B"))
+        await persist_conflicts(db_conn, "scheme-A", "scan-A", merge_conflicts(_row("A"), [], scheme_id="scheme-A"))
+        await persist_conflicts(db_conn, "scheme-B", "scan-B", merge_conflicts(_row("B"), [], scheme_id="scheme-B"))
 
-        cur = await db_conn.execute(
-            "SELECT scheme_id, scan_id, occurrences FROM consistency_conflicts")
+        cur = await db_conn.execute("SELECT scheme_id, scan_id, occurrences FROM consistency_conflicts")
         rows = [dict(r) for r in await cur.fetchall()]
         by_scheme = {r["scheme_id"]: r for r in rows}
-        assert set(by_scheme) == {"scheme-A", "scheme-B"}, (
-            f"两方案的冲突必须各自存在，实际落库: {sorted(by_scheme)}")
+        assert set(by_scheme) == {"scheme-A", "scheme-B"}, f"两方案的冲突必须各自存在，实际落库: {sorted(by_scheme)}"
         assert by_scheme["scheme-A"]["scan_id"] == "scan-A"
         assert by_scheme["scheme-B"]["scan_id"] == "scan-B"
         assert "B 的正文" not in (by_scheme["scheme-A"]["occurrences"] or "")
@@ -112,8 +131,7 @@ class TestConflictIdSchemeScoped:
         src = _src("services/consistency_scanner.py")
         m = re.search(r"ON CONFLICT\(id\) DO UPDATE SET(.{0,240})", src, re.S)
         assert m, "未找到 persist_conflicts 的 upsert 语句"
-        assert "scheme_id=excluded.scheme_id" in m.group(1), (
-            "DO UPDATE 必须更新 scheme_id")
+        assert "scheme_id=excluded.scheme_id" in m.group(1), "DO UPDATE 必须更新 scheme_id"
 
 
 # ===========================================================================
@@ -128,8 +146,7 @@ class TestComplianceCheckDefaultChecklist:
         db = await get_conn()
         pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
         await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-        await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-                         (sid, pid, "s"))
+        await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
         await db.commit()
         yield sid
         await close_db()
@@ -151,18 +168,14 @@ class TestComplianceCheckDefaultChecklist:
         monkeypatch.setattr(cc, "_load_facts_prompt_text", _fake_facts)
 
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver",
-                timeout=30.0) as client:
-            resp = await client.post("/api/v1/compliance/check",
-                                     json={"scheme_id": cc_db})
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0) as client:
+            resp = await client.post("/api/v1/compliance/check", json={"scheme_id": cc_db})
         assert resp.status_code == 200, f"{resp.status_code}: {resp.text[:300]}"
         system = captured.get("system", "")
         titles = [r.title for r in cc.ai_rules()]
         assert titles, "ai_rules() 不得为空"
         assert "[]" not in system, "提示词里仍出现空清单字面量"
-        assert any(t in system for t in titles), (
-            f"自由清单为空时必须回退 AI 规则全集，提示词尾部: {system[-300:]}")
+        assert any(t in system for t in titles), f"自由清单为空时必须回退 AI 规则全集，提示词尾部: {system[-300:]}"
 
 
 # ===========================================================================
@@ -176,13 +189,11 @@ class TestFactsGenerationReentrancyGuard:
         sid = "scheme-X"
         tr._tasks.clear()
         assert facts_generation_in_progress(sid) is None
-        tr._tasks["t1"] = {"type": "facts_generation", "scheme_id": sid,
-                           "status": "running"}
+        tr._tasks["t1"] = {"type": "facts_generation", "scheme_id": sid, "status": "running"}
         assert facts_generation_in_progress(sid) == "running"
         tr._tasks["t1"]["status"] = "completed"
         assert facts_generation_in_progress(sid) is None, "终态任务不得阻塞重入"
-        tr._tasks["t2"] = {"type": "facts_generation", "scheme_id": "other",
-                           "status": "running"}
+        tr._tasks["t2"] = {"type": "facts_generation", "scheme_id": "other", "status": "running"}
         assert facts_generation_in_progress(sid) is None, "其它方案的任务不得误伤"
         tr._tasks.clear()
 
@@ -194,8 +205,7 @@ class TestFactsGenerationReentrancyGuard:
         db = await get_conn()
         pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
         await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-        await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-                         (sid, pid, "s"))
+        await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
         await db.commit()
         yield sid
         await close_db()
@@ -205,17 +215,12 @@ class TestFactsGenerationReentrancyGuard:
         import app.services.ai.task_registry as tr
 
         tr._tasks.clear()
-        tr._tasks["running-one"] = {"type": "facts_generation",
-                                    "scheme_id": gf_db, "status": "running"}
+        tr._tasks["running-one"] = {"type": "facts_generation", "scheme_id": gf_db, "status": "running"}
         try:
             transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(
-                    transport=transport, base_url="http://testserver",
-                    timeout=30.0) as client:
-                resp = await client.post(
-                    f"/api/v1/sse/generate-facts/{gf_db}", json={})
-            assert resp.status_code == 409, (
-                f"同型任务在跑时重入必须 409，实际 {resp.status_code}")
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0) as client:
+                resp = await client.post(f"/api/v1/sse/generate-facts/{gf_db}", json={})
+            assert resp.status_code == 409, f"同型任务在跑时重入必须 409，实际 {resp.status_code}"
         finally:
             tr._tasks.clear()
 
@@ -224,12 +229,9 @@ class TestFactsGenerationReentrancyGuard:
 
         tr._tasks.clear()
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver",
-                timeout=30.0) as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0) as client:
             resp = await client.post(f"/api/v1/sse/generate-facts/{gf_db}", json={})
-        assert resp.status_code == 200, (
-            f"无在跑任务时应正常放行，实际 {resp.status_code}")
+        assert resp.status_code == 200, f"无在跑任务时应正常放行，实际 {resp.status_code}"
 
 
 # ===========================================================================
@@ -240,8 +242,7 @@ class TestDocPipelineNoneCursorGuards:
         from app.services.doc_pipeline import pipeline
 
         store = pipeline.store
-        for name in ("write_parsed_layer", "write_meta", "update_index",
-                     "write_semantic_index"):
+        for name in ("write_parsed_layer", "write_meta", "update_index", "write_semantic_index"):
             if hasattr(store, name):
                 monkeypatch.setattr(store, name, lambda *a, **k: None)
         monkeypatch.setattr(store, "read_meta", lambda *a, **k: {})
@@ -268,9 +269,15 @@ class TestDocPipelineNoneCursorGuards:
         proxy = _NoneOnceDb(db_conn)
         try:
             res = await pipeline.ingest_parse_result(
-                db=proxy, doc_id="doc-1", project_id="proj-1", file_name="a.txt",
-                markdown="# 标题\n正文内容", page_count=1, parse_duration_s=0.1,
-                parse_engine="test")
+                db=proxy,
+                doc_id="doc-1",
+                project_id="proj-1",
+                file_name="a.txt",
+                markdown="# 标题\n正文内容",
+                page_count=1,
+                parse_duration_s=0.1,
+                parse_engine="test",
+            )
         except AttributeError as e:
             pytest.fail(f"db.execute 返回 None 时仍抛 AttributeError（R13 漏改）: {e}")
         assert proxy.none_hits >= 1, "变异守卫：本用例必须真的命中 None 分支"
@@ -280,10 +287,11 @@ class TestDocPipelineNoneCursorGuards:
         src = _src("routers/doc_pipeline.py")
         idx = src.find("async def document_freshness")
         assert idx > 0
-        body = src[idx:idx + 3000]
+        body = src[idx : idx + 3000]
         assert "UPDATE project_documents SET status=?" in body
-        assert re.search(r"_\w+\s*=\s*await db\.execute\(\s*\"UPDATE project_documents",
-                         body), "freshness 写路径未先把 execute 返回值接住"
+        assert re.search(
+            r"_\w+\s*=\s*await db\.execute\(\s*\"UPDATE project_documents", body
+        ), "freshness 写路径未先把 execute 返回值接住"
         assert re.search(r"if\s+_\w+\s+is None", body), "freshness 写路径未判空"
 
 
@@ -294,8 +302,7 @@ class TestDownstreamInvalidationOnFinish:
     def test_both_finish_paths_call_invalidation(self):
         src = _src("routers/bid_analysis.py")
         calls = len(re.findall(r"_safe_invalidate_downstream\(", src))
-        assert calls >= 3, (
-            f"_safe_invalidate_downstream 出现 {calls} 次（应为 定义1 + 收尾2）")
+        assert calls >= 3, f"_safe_invalidate_downstream 出现 {calls} 次（应为 定义1 + 收尾2）"
 
     async def test_wrapper_is_fail_soft(self, db_conn, monkeypatch):
         from app.routers import bid_analysis as ba
@@ -344,13 +351,12 @@ class TestOutlineRebuildInvalidatesExportCache:
         src = _src("routers/sections.py")
         idx = src.find("async def _save_outline_to_db")
         assert idx > 0
-        body = src[idx:idx + 40000]
+        body = src[idx : idx + 40000]
         nxt = body.find("\nasync def ", 10)
         if nxt > 0:
             body = body[:nxt]
         assert "invalidate_consistency_scan_cache(db, scheme_id)" in body
-        assert "invalidate_export_cache" in body, (
-            "_save_outline_to_db 未失效导出缓存")
+        assert "invalidate_export_cache" in body, "_save_outline_to_db 未失效导出缓存"
 
 
 # ===========================================================================
@@ -360,15 +366,14 @@ class TestListFactsDocstring:
     def test_route_has_docstring(self):
         from app.routers.global_facts import list_facts
 
-        assert list_facts.__doc__, (
-            "list_facts.__doc__ 为 None：docstring 被写在函数体内")
+        assert list_facts.__doc__, "list_facts.__doc__ 为 None：docstring 被写在函数体内"
 
     def test_no_stray_string_literal_after_param_normalization(self):
         src = _src("routers/global_facts.py")
         idx = src.find("async def list_facts")
         assert idx > 0
-        body = src[idx:idx + 2500]
-        tail = body[body.find("offset = 0"):]
+        body = src[idx : idx + 2500]
+        tail = body[body.find("offset = 0") :]
         assert "查询全局事实" not in tail, "函数体内仍残留 docstring 副本"
 
 
@@ -379,18 +384,24 @@ class TestMergeFindingsKeepsEvidence:
     @staticmethod
     def _f(severity, evidence, section_ids=None, source="x"):
         return {
-            "rule_id": "DLV-01", "dimension": "deliverability", "severity": severity,
-            "title": "交付物缺失", "detail": "d", "evidence": list(evidence),
-            "section_ids": list(section_ids or []), "source": source,
-            "suggestion": "", "basis": "", "mode": "program",
+            "rule_id": "DLV-01",
+            "dimension": "deliverability",
+            "severity": severity,
+            "title": "交付物缺失",
+            "detail": "d",
+            "evidence": list(evidence),
+            "section_ids": list(section_ids or []),
+            "source": source,
+            "suggestion": "",
+            "basis": "",
+            "mode": "program",
         }
 
     def test_dropped_evidence_is_merged_not_discarded(self):
         from app.services.audit_scoring import merge_findings
 
         high = self._f("high", ["程序侧证据"], ["S1"], source="preflight")
-        low = self._f("medium", ["导出侧第 1 章", "导出侧第 2 章"], ["S1", "S2"],
-                      source="export_check")
+        low = self._f("medium", ["导出侧第 1 章", "导出侧第 2 章"], ["S1", "S2"], source="export_check")
         out = merge_findings([high], [low])
         assert len(out) == 1, "同 rule_id 仍必须去重为一条"
         kept = out[0]

@@ -8,6 +8,7 @@
 
 本护栏从源文件静态提取两端字段名集合，做双向相等断言。
 """
+
 import re
 from pathlib import Path
 
@@ -30,6 +31,7 @@ def _extract_backend_governance_fields(src: str) -> set[str]:
     用 AST 遍历而非正则，避免注释/字符串中的同名标识符误判。
     """
     import ast
+
     tree = ast.parse(src)
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == "GovernanceSettings":
@@ -72,10 +74,7 @@ class TestGovernanceFieldParity:
         """后端 Pydantic 模型字段 = 期望集合。"""
         src = BACKEND_SRC.read_text(encoding="utf-8")
         fields = _extract_backend_governance_fields(src)
-        assert fields == EXPECTED_FIELDS, (
-            f"后端 GovernanceSettings 字段漂移：期望 {EXPECTED_FIELDS}，"
-            f"实际 {fields}"
-        )
+        assert fields == EXPECTED_FIELDS, f"后端 GovernanceSettings 字段漂移：期望 {EXPECTED_FIELDS}，" f"实际 {fields}"
 
     def test_frontend_interface_has_expected_fields(self):
         """前端 TypeScript 接口字段 = 期望集合。"""
@@ -83,10 +82,7 @@ class TestGovernanceFieldParity:
             pytest.skip("前端源文件不存在（可能未 checkout）")
         src = FRONTEND_SRC.read_text(encoding="utf-8")
         fields = _extract_frontend_governance_fields(src)
-        assert fields == EXPECTED_FIELDS, (
-            f"前端 GovernanceSettings 字段漂移：期望 {EXPECTED_FIELDS}，"
-            f"实际 {fields}"
-        )
+        assert fields == EXPECTED_FIELDS, f"前端 GovernanceSettings 字段漂移：期望 {EXPECTED_FIELDS}，" f"实际 {fields}"
 
     def test_frontend_and_backend_fields_match(self):
         """前后端字段集合双向相等（一条断言锁定两端同步）。"""
@@ -94,21 +90,18 @@ class TestGovernanceFieldParity:
             pytest.skip("前端源文件不存在")
         be = _extract_backend_governance_fields(BACKEND_SRC.read_text(encoding="utf-8"))
         fe = _extract_frontend_governance_fields(FRONTEND_SRC.read_text(encoding="utf-8"))
-        assert be == fe, (
-            f"前后端 GovernanceSettings 字段不一致："
-            f"后端 {be} vs 前端 {fe}"
-        )
+        assert be == fe, f"前后端 GovernanceSettings 字段不一致：" f"后端 {be} vs 前端 {fe}"
 
     def test_get_and_put_return_same_fields(self):
         """GET 与 PUT 返回体字段集合 = 期望集合（API 契约对称）。"""
         import inspect
 
         from app.routers import system as sys_mod
+
         # governance_get 返回 dict，字段在源码里硬编码
         get_src = inspect.getsource(sys_mod.governance_get)
         get_fields = set(re.findall(r'"(\w+)"\s*:', get_src))
         # governance_put 返回 governance_get 的同构（docstring 明写）
         assert EXPECTED_FIELDS.issubset(get_fields), (
-            f"GET 返回体缺字段：期望 {EXPECTED_FIELDS}，"
-            f"GET 源码里的字段 {get_fields}"
+            f"GET 返回体缺字段：期望 {EXPECTED_FIELDS}，" f"GET 源码里的字段 {get_fields}"
         )

@@ -35,6 +35,7 @@
   strict 0.12 / relaxed 0.25 / min 0.35 / max 1.1、围栏与代理对保护
 - client/electron/utils/segmentedAiResultMerger.cjs ：分段结果 AI 合并
 """
+
 from __future__ import annotations
 
 import ast
@@ -114,12 +115,14 @@ class TestDomainRegistry:
     def test_bid_response_required_ids_are_the_six_expected(self):
         """易标 6 个必选项（技术评分项属技术方案编制的主要依据）。"""
         expected = {
-            "projectOverview", "techRequirements", "projectInfo",
-            "partAInfo", "deliveryAndServiceRequirements",
+            "projectOverview",
+            "techRequirements",
+            "projectInfo",
+            "partAInfo",
+            "deliveryAndServiceRequirements",
             "responseFileRequirements",
         }
-        got = {it["item_id"] for it in get_items_by_domain("bid_response")
-               if it["required"]}
+        got = {it["item_id"] for it in get_items_by_domain("bid_response") if it["required"]}
         assert got == expected
 
     def test_groups_cover_every_item(self):
@@ -129,8 +132,7 @@ class TestDomainRegistry:
             groups = get_groups_by_domain(domain)
             grouped = [it["item_id"] for g in groups for it in g["items"]]
             assert len(grouped) == len(set(grouped)), f"{domain}: 分组重复归属"
-            assert set(grouped) == {it["item_id"] for it in items}, (
-                f"{domain}: 分组未覆盖全部项")
+            assert set(grouped) == {it["item_id"] for it in items}, f"{domain}: 分组未覆盖全部项"
 
     def test_get_item_domain_is_single_source(self):
         for domain in EXTRACTION_DOMAINS:
@@ -162,15 +164,15 @@ class TestPrimaryKeyFormat:
             assert build_item_pk("p1", "projectInfo", bad) == "p1_projectInfo"
 
     def test_bid_response_pk_format(self):
-        assert build_item_pk("p1", "projectInfo", "bid_response") == \
-            "p1__bid_response__projectInfo"
+        assert build_item_pk("p1", "projectInfo", "bid_response") == "p1__bid_response__projectInfo"
 
     def test_parse_roundtrip(self):
-        assert parse_item_pk(
-            build_item_pk("p1", "projectInfo", "bid_response")) == \
-            ("p1", "projectInfo", "bid_response")
-        assert parse_item_pk("p1_projectBasicInfo") == \
-            ("p1", "projectBasicInfo", "scheme")
+        assert parse_item_pk(build_item_pk("p1", "projectInfo", "bid_response")) == (
+            "p1",
+            "projectInfo",
+            "bid_response",
+        )
+        assert parse_item_pk("p1_projectBasicInfo") == ("p1", "projectBasicInfo", "scheme")
         assert parse_item_pk("") == ("", "", "scheme")
         assert parse_item_pk("_") == ("", "", "scheme")
 
@@ -199,12 +201,10 @@ class TestNoBarePkConstructionInRouter:
         offenders = []
         for node in ast.walk(tree):
             if isinstance(node, ast.JoinedStr):
-                text = "".join(
-                    v.value for v in node.values if isinstance(v, ast.Constant))
+                text = "".join(v.value for v in node.values if isinstance(v, ast.Constant))
                 if "project_id}_{item_id}" in text:
                     offenders.append(node.lineno)
-        assert not offenders, (
-            "路由层仍有裸主键拼接（行 %s），必须改用 build_item_pk" % offenders)
+        assert not offenders, "路由层仍有裸主键拼接（行 %s），必须改用 build_item_pk" % offenders
 
 
 # =========================================================================
@@ -280,12 +280,10 @@ class TestTechnicalScoreItems:
     """
 
     def _doc(self, section_body: str, extra: str = "") -> str:
-        return (f"## {TECH_SCORE_ITEMS_HEADING}\n\n{section_body}\n\n"
-                f"## 技术评分要求\n\n{extra or 'y'}")
+        return f"## {TECH_SCORE_ITEMS_HEADING}\n\n{section_body}\n\n" f"## 技术评分要求\n\n{extra or 'y'}"
 
     def test_section_body_partial_missing_is_missing(self):
-        assert is_missing_technical_score_items(
-            self._doc(PARTIAL_MISSING_TEXT)) is True
+        assert is_missing_technical_score_items(self._doc(PARTIAL_MISSING_TEXT)) is True
 
     def test_section_body_with_content_is_not_missing(self):
         assert is_missing_technical_score_items(self._doc("- 方案合理性：10 分")) is False
@@ -319,9 +317,16 @@ class TestSegmentStrategy:
 
     def _long_text(self) -> str:
         # 混合自然边界，覆盖 5 组边界优先级（标题/空行、换行、句末、分号、逗号）
-        return ("# 一、总则\n" + "甲。" * 200 + "\n\n"
-                + "乙，乙，乙；丙。" * 150 + "\n\n"
-                + "# 二、细则\n" + "丁，丁，丁。" * 250 + "\n") * 40
+        return (
+            "# 一、总则\n"
+            + "甲。" * 200
+            + "\n\n"
+            + "乙，乙，乙；丙。" * 150
+            + "\n\n"
+            + "# 二、细则\n"
+            + "丁，丁，丁。" * 250
+            + "\n"
+        ) * 40
 
     def test_default_matches_old_sliding_window_exactly(self):
         """默认参数下行为必须与旧滑动窗口**逐字一致**（向后兼容护栏）。"""
@@ -346,13 +351,13 @@ class TestSegmentStrategy:
         """context_length_limit<=0 必须回退旧滑动窗口（避免 0 段上限的退化切分）。"""
         text = self._long_text()
         for bad in (0, -1):
-            assert split_for_analysis(text, even=True, context_length_limit=bad) == \
-                split_for_analysis(text, chunk_size=16000, overlap=500)
+            assert split_for_analysis(text, even=True, context_length_limit=bad) == split_for_analysis(
+                text, chunk_size=16000, overlap=500
+            )
 
     def test_even_mode_falls_back_when_below_limit(self):
         """文本短于段上限 → 单段原样返回；空文本 → 空清单。"""
-        assert split_for_analysis("短文本", even=True,
-                                  context_length_limit=1000) == ["短文本"]
+        assert split_for_analysis("短文本", even=True, context_length_limit=1000) == ["短文本"]
         assert split_for_analysis("", even=True, context_length_limit=1000) == []
 
     def test_even_mode_no_tail_collapse(self):
@@ -377,8 +382,7 @@ class TestSegmentStrategy:
         limit = 2000
         segment_limit = max(1, int(limit * 0.8))
         expected = max(1, -(-len(text) // segment_limit))
-        assert len(split_for_analysis(text, even=True,
-                                      context_length_limit=limit)) == expected
+        assert len(split_for_analysis(text, even=True, context_length_limit=limit)) == expected
 
     def test_even_mode_never_splits_fence(self):
         """任何切点都不得落在代码围栏内部（否则表格/代码块被切断）。"""
@@ -422,8 +426,8 @@ class TestSegmentStrategy:
         """_split_tender_text 是唯一入口：关闭走滑动窗口，开启走均分，
         limit<=0 时即便开关打开也回退（避免退化切分）。"""
         from app.config import settings
-        text = ("# 一、总则\n" + "甲。" * 200 + "\n\n"
-                + "乙，乙，乙。" * 150 + "\n") * 40
+
+        text = ("# 一、总则\n" + "甲。" * 200 + "\n\n" + "乙，乙，乙。" * 150 + "\n") * 40
         orig_even = settings.bid_analysis_segment_even
         orig_limit = settings.bid_analysis_segment_context_limit
         try:
@@ -432,8 +436,7 @@ class TestSegmentStrategy:
 
             settings.bid_analysis_segment_even = True
             settings.bid_analysis_segment_context_limit = 2000
-            assert ba._split_tender_text(text) == split_for_analysis(
-                text, even=True, context_length_limit=2000)
+            assert ba._split_tender_text(text) == split_for_analysis(text, even=True, context_length_limit=2000)
 
             settings.bid_analysis_segment_context_limit = 0
             assert ba._split_tender_text(text) == split_for_analysis(text)
@@ -444,6 +447,7 @@ class TestSegmentStrategy:
     def test_concurrency_helpers_are_config_driven(self):
         """并发/重试/预算必须来自配置，且下限保护（不得为 0 导致死锁或空转）。"""
         from app.config import settings
+
         # ✅ 2026-10-16（测试卫生）：finally 原先写死
         # `settings.bid_analysis_segment_budget = 30000` —— 那不是恢复而是**遗留
         # 污染**（本用例从头到尾没改过预算，断言 457 需要的是默认 400000）。
@@ -452,12 +456,18 @@ class TestSegmentStrategy:
         # （test_import_parse_r79_closeout_20261015::TestMaxDocCharsConfig
         #   ::test_default_budget_unchanged 即因此在全量跑中失败、隔离跑通过）。
         # 改为快照-恢复，与被改动的每项一一对应，绝不多写、绝不写死。
-        _orig = (settings.bid_analysis_item_concurrency,
-                 settings.bid_analysis_segment_concurrency,
-                 settings.bid_analysis_item_retries)
+        _orig = (
+            settings.bid_analysis_item_concurrency,
+            settings.bid_analysis_segment_concurrency,
+            settings.bid_analysis_item_retries,
+        )
         try:
-            assert ba._item_concurrency() == 2
-            assert ba._segment_concurrency() == 3
+            # ✅ 2026-11-05：并发默认值统一由 config.py 下发（item 1 / segment 2，
+            #    见 settings 注释「方案 A · 降低并发」）。此处按「活配置值」断言，
+            #    不再写死旧默认 2/3 —— 避免配置层调整默认后本用例误报。
+            assert ba._item_concurrency() == settings.bid_analysis_item_concurrency
+            assert ba._segment_concurrency() == settings.bid_analysis_segment_concurrency
+            assert ba._item_concurrency() >= 1 and ba._segment_concurrency() >= 1
             assert ba._item_retries() == 2
             settings.bid_analysis_item_concurrency = 0
             assert ba._item_concurrency() == 1, "并发下限必须为 1"
@@ -467,9 +477,11 @@ class TestSegmentStrategy:
             assert ba._item_retries() == 0, "重试下限必须为 0"
             assert ba._MAX_DOC_CHARS == settings.bid_analysis_segment_budget
         finally:
-            (settings.bid_analysis_item_concurrency,
-             settings.bid_analysis_segment_concurrency,
-             settings.bid_analysis_item_retries) = _orig
+            (
+                settings.bid_analysis_item_concurrency,
+                settings.bid_analysis_segment_concurrency,
+                settings.bid_analysis_item_retries,
+            ) = _orig
 
 
 # =========================================================================
@@ -479,14 +491,12 @@ async def _seed_project(db, pid: str) -> str:
     """建一个项目 + 方案，返回 scheme_id。"""
     sid = uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-                     (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.commit()
     return sid
 
 
-async def _seed_item(db, pid: str, item_id: str, status: str = "success",
-                     domain: str = "scheme") -> None:
+async def _seed_item(db, pid: str, item_id: str, status: str = "success", domain: str = "scheme") -> None:
     """按域主键插入一条解析项行（模拟上一轮已落库的结果）。"""
     def_ = get_item_def(item_id) or {}
     pk = build_item_pk(pid, item_id, domain)
@@ -495,9 +505,21 @@ async def _seed_item(db, pid: str, item_id: str, status: str = "success",
         "(id, project_id, scheme_id, item_id, label, output_type, required, "
         "status, content, error, sort_order, domain) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (pk, pid, "", item_id, def_.get("label", item_id),
-         def_.get("output_type", "markdown"), int(def_.get("required", 0)),
-         status, "内容", "", int(def_.get("sort_order", 0)), domain))
+        (
+            pk,
+            pid,
+            "",
+            item_id,
+            def_.get("label", item_id),
+            def_.get("output_type", "markdown"),
+            int(def_.get("required", 0)),
+            status,
+            "内容",
+            "",
+            int(def_.get("sort_order", 0)),
+            domain,
+        ),
+    )
     await db.commit()
 
 
@@ -547,66 +569,64 @@ class TestSkipDone:
         pid = uuid.uuid4().hex
         await _seed_project(db, pid)
         await _seed_item(db, pid, "resourceAllocation", "success")
-        cfg = AnalysisConfig(mode="item", selected_item_ids=["resourceAllocation"],
-                            skip_done=True)
+        cfg = AnalysisConfig(mode="item", selected_item_ids=["resourceAllocation"], skip_done=True)
         items = await cfg.get_task_items_async(db, pid)
         assert [it["item_id"] for it in items] == ["resourceAllocation"]
 
-
     @pytest.mark.asyncio
     async def test_skip_done_fails_open_on_db_error(self, db_conn):
-        u"""查库异常必须 fail-open 为全量执行 —— 绝不因查库失败静默跳过重跑。"""
+        """查库异常必须 fail-open 为全量执行 —— 绝不因查库失败静默跳过重跑。"""
         db = db_conn
         pid = uuid.uuid4().hex
         await _seed_project(db, pid)
-        await _seed_item(db, pid, u'projectBasicInfo', u'success')
+        await _seed_item(db, pid, "projectBasicInfo", "success")
 
         class _BrokenDb:
             async def execute(self, *a, **k):
-                raise RuntimeError(u'模拟数据库不可用')
+                raise RuntimeError("模拟数据库不可用")
 
-        cfg = AnalysisConfig(mode=u'key', skip_done=True)
+        cfg = AnalysisConfig(mode="key", skip_done=True)
         items = await cfg.get_task_items_async(_BrokenDb(), pid)
-        assert [it[u'item_id'] for it in items] == REQUIRED_ITEM_IDS
+        assert [it["item_id"] for it in items] == REQUIRED_ITEM_IDS
 
     @pytest.mark.asyncio
     async def test_skip_done_requires_db_and_project_id(self, db_conn):
-        u"""缺 db 或 project_id 时不得跳过（等价于未开启）。"""
-        cfg = AnalysisConfig(mode=u'key', skip_done=True)
-        assert [it[u'item_id'] for it in cfg.get_task_items()] == REQUIRED_ITEM_IDS
+        """缺 db 或 project_id 时不得跳过（等价于未开启）。"""
+        cfg = AnalysisConfig(mode="key", skip_done=True)
+        assert [it["item_id"] for it in cfg.get_task_items()] == REQUIRED_ITEM_IDS
         # 缺 project_id：查询直接短路 → 全量
-        assert [it[u'item_id'] for it in
-                await cfg.get_task_items_async(db_conn, u'')] == REQUIRED_ITEM_IDS
+        assert [it["item_id"] for it in await cfg.get_task_items_async(db_conn, "")] == REQUIRED_ITEM_IDS
         # 缺 db：同样短路
-        assert [it[u'item_id'] for it in
-                await cfg.get_task_items_async(None, u'p1')] == REQUIRED_ITEM_IDS
+        assert [it["item_id"] for it in await cfg.get_task_items_async(None, "p1")] == REQUIRED_ITEM_IDS
 
     @pytest.mark.asyncio
     async def test_skip_done_domain_isolated(self, db_conn):
-        u"""域间隔离：两域的成功项互不影响。"""
+        """域间隔离：两域的成功项互不影响。"""
         db = db_conn
         pid = uuid.uuid4().hex
         await _seed_project(db, pid)
-        await _seed_item(db, pid, u'projectBasicInfo', u'success', u'scheme')
-        await _seed_item(db, pid, u'projectInfo', u'success', u'bid_response')
+        await _seed_item(db, pid, "projectBasicInfo", "success", "scheme")
+        await _seed_item(db, pid, "projectInfo", "success", "bid_response")
 
-        scheme_ids = [it[u'item_id'] for it in
-                      await AnalysisConfig(mode=u'key', skip_done=True)
-                      .get_task_items_async(db, pid)]
-        assert u'projectBasicInfo' not in scheme_ids
+        scheme_ids = [
+            it["item_id"] for it in await AnalysisConfig(mode="key", skip_done=True).get_task_items_async(db, pid)
+        ]
+        assert "projectBasicInfo" not in scheme_ids
 
-        br_ids = [it[u'item_id'] for it in
-                  await AnalysisConfig(mode=u'key', domain=u'bid_response',
-                                       skip_done=True)
-                  .get_task_items_async(db, pid)]
-        assert u'projectInfo' not in br_ids
-        assert u'projectBasicInfo' not in br_ids, u'scheme 域项不得出现在 bid_response 域'
+        br_ids = [
+            it["item_id"]
+            for it in await AnalysisConfig(mode="key", domain="bid_response", skip_done=True).get_task_items_async(
+                db, pid
+            )
+        ]
+        assert "projectInfo" not in br_ids
+        assert "projectBasicInfo" not in br_ids, "scheme 域项不得出现在 bid_response 域"
 
     def test_skip_done_query_uses_domain_column(self):
-        u"""续跑查询必须带 domain 条件（静态护栏）。"""
+        """续跑查询必须带 domain 条件（静态护栏）。"""
         src = inspect.getsource(fetch_success_item_ids)
-        assert u'domain=?' in src, u'查询必须按域过滤，否则两域成功项互相串'
-        assert u"status='success'" in src
+        assert "domain=?" in src, "查询必须按域过滤，否则两域成功项互相串"
+        assert "status='success'" in src
 
 
 # =========================================================================
@@ -615,41 +635,42 @@ class TestSkipDone:
 class TestRouteContract:
     @pytest.mark.asyncio
     async def test_items_default_returns_scheme_shape(self, db_conn):
-        u"""默认无参调用必须与旧版契约逐字一致（前端依赖）。"""
+        """默认无参调用必须与旧版契约逐字一致（前端依赖）。"""
         res = await ba.list_analysis_items()
         # ⚠️ 2026-10-01 定位切换：techScoring（技术评分要求）已下线 →
         #    18 项 / 17 必选 / 1 可选 / 13 分组（原 19 / 17 / 2 / 14）。
-        assert res[u'total'] == 18
-        assert res[u'required_count'] == 17
-        assert res[u'optional_count'] == 1
-        assert res[u'group_count'] == 13
-        assert res[u'required_item_ids'] == REQUIRED_ITEM_IDS
-        assert res[u'items'] == [dict(it) for it in ANALYSIS_ITEMS]
-        assert res[u'groups'] == ba.get_groups()
-        assert res[u'domain'] == u'scheme'
-        assert res[u'domain_unknown'] is False
+        assert res["total"] == 18
+        assert res["required_count"] == 17
+        assert res["optional_count"] == 1
+        assert res["group_count"] == 13
+        assert res["required_item_ids"] == REQUIRED_ITEM_IDS
+        assert res["items"] == [dict(it) for it in ANALYSIS_ITEMS]
+        assert res["groups"] == ba.get_groups()
+        assert res["domain"] == "scheme"
+        assert res["domain_unknown"] is False
 
     @pytest.mark.asyncio
     async def test_items_domain_unknown_fails_closed(self, db_conn):
-        u"""未知域必须返回空清单 + domain_unknown，不得静默回退到 scheme。"""
-        res = await ba.list_analysis_items(u'no_such_domain')
-        assert res[u'items'] == [] and res[u'groups'] == []
-        assert res[u'total'] == 0 and res[u'domain_unknown'] is True
-        assert res[u'domain'] == u'no_such_domain'
+        """未知域必须返回空清单 + domain_unknown，不得静默回退到 scheme。"""
+        res = await ba.list_analysis_items("no_such_domain")
+        assert res["items"] == [] and res["groups"] == []
+        assert res["total"] == 0 and res["domain_unknown"] is True
+        assert res["domain"] == "no_such_domain"
 
     @pytest.mark.asyncio
     async def test_items_bid_response_disabled_returns_404(self, db_conn, monkeypatch):
-        u"""招标响应域未启用时必须 404，而非返回一套无法执行的清单。"""
+        """招标响应域未启用时必须 404，而非返回一套无法执行的清单。"""
         from app.config import settings
         from fastapi import HTTPException
-        monkeypatch.setattr(settings, u'bid_response_domain_enabled', False, raising=False)
+
+        monkeypatch.setattr(settings, "bid_response_domain_enabled", False, raising=False)
         with pytest.raises(HTTPException) as exc:
-            await ba.list_analysis_items(u'bid_response')
+            await ba.list_analysis_items("bid_response")
         assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
     async def test_items_bid_response_hard_retired(self, db_conn, monkeypatch):
-        u"""⚠️ 2026-10-01 定位切换：招标响应域是**硬门禁**，不是软开关。
+        """⚠️ 2026-10-01 定位切换：招标响应域是**硬门禁**，不是软开关。
 
         原用例名为 ``_enabled_after_flag``，断言打开
         ``bid_response_domain_enabled=True`` 就能拿到 18 项招标响应清单 ——
@@ -659,31 +680,32 @@ class TestRouteContract:
         """
         from app.config import settings
         from fastapi import HTTPException
+
         for flag in (False, True):
-            monkeypatch.setattr(settings, u'bid_response_domain_enabled',
-                                flag, raising=False)
+            monkeypatch.setattr(settings, "bid_response_domain_enabled", flag, raising=False)
             with pytest.raises(HTTPException) as exc:
-                await ba.list_analysis_items(u'bid_response')
+                await ba.list_analysis_items("bid_response")
             assert exc.value.status_code == 404
-            assert u'专项施工方案' in (exc.value.detail or '')
-            assert u'已下线' in (exc.value.detail or '')
+            assert "专项施工方案" in (exc.value.detail or "")
+            assert "已下线" in (exc.value.detail or "")
 
     @pytest.mark.asyncio
     async def test_items_single_item_additive_keys(self, db_conn):
-        u"""单项定义加法式新增 domain / fields 两键，旧字段全部保留。
+        """单项定义加法式新增 domain / fields 两键，旧字段全部保留。
 
         ⚠️ 2026-10-01：原用例用 ``projectInfo``（属招标响应域）作样本；
         该域下线后改用一个 scheme 域项，并单独断言招标响应域项返回 404。
         """
-        res = await ba.get_analysis_item(u'projectBasicInfo')
-        assert res[u'domain'] == u'scheme'
-        assert res[u'fields'] == get_item_fields(u'projectBasicInfo')
-        assert res[u'item_id'] == u'projectBasicInfo'
-        assert res[u'label'] == u'项目级基本信息'
-        assert res[u'required'] == 1
+        res = await ba.get_analysis_item("projectBasicInfo")
+        assert res["domain"] == "scheme"
+        assert res["fields"] == get_item_fields("projectBasicInfo")
+        assert res["item_id"] == "projectBasicInfo"
+        assert res["label"] == "项目级基本信息"
+        assert res["required"] == 1
 
         from fastapi import HTTPException
-        for retired_id in (u'projectInfo', u'techRequirements', u'businessScoring'):
+
+        for retired_id in ("projectInfo", "techRequirements", "businessScoring"):
             with pytest.raises(HTTPException) as exc:
                 await ba.get_analysis_item(retired_id)
             assert exc.value.status_code == 404
@@ -691,148 +713,147 @@ class TestRouteContract:
     @pytest.mark.asyncio
     async def test_items_single_item_cross_domain_404(self, db_conn):
         from fastapi import HTTPException
+
         with pytest.raises(HTTPException) as exc:
-            await ba.get_analysis_item(u'projectInfo', domain=u'scheme')
+            await ba.get_analysis_item("projectInfo", domain="scheme")
         assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
     async def test_items_single_item_unknown_404(self, db_conn):
         from fastapi import HTTPException
+
         with pytest.raises(HTTPException) as exc:
-            await ba.get_analysis_item(u'no_such_item')
+            await ba.get_analysis_item("no_such_item")
         assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
     async def test_domains_endpoint_reflects_setting(self, db_conn, monkeypatch):
         from app.config import settings
-        monkeypatch.setattr(settings, u'bid_response_domain_enabled', False, raising=False)
+
+        monkeypatch.setattr(settings, "bid_response_domain_enabled", False, raising=False)
         res = await ba.list_extraction_domains()
-        by_name = {d[u'domain']: d for d in res[u'domains']}
-        assert by_name[u'scheme'][u'enabled'] is True
-        assert by_name[u'scheme'][u'total'] == 18
-        assert by_name[u'scheme'][u'required_count'] == 17
-        assert by_name[u'bid_response'][u'enabled'] is False
-        assert by_name[u'bid_response'][u'total'] == 18
-        assert by_name[u'bid_response'][u'required_count'] == 6
+        by_name = {d["domain"]: d for d in res["domains"]}
+        assert by_name["scheme"]["enabled"] is True
+        assert by_name["scheme"]["total"] == 18
+        assert by_name["scheme"]["required_count"] == 17
+        assert by_name["bid_response"]["enabled"] is False
+        assert by_name["bid_response"]["total"] == 18
+        assert by_name["bid_response"]["required_count"] == 6
 
         # ⚠️ 2026-10-01 定位切换：招标响应域是**硬门禁**下线，不是软开关。
         # 显式把 bid_response_domain_enabled 设为 True 也不得让它复活 ——
         # 否则用户「配一下就能跑评标方法/商务条款提取」，与专项方案定位相悖。
-        monkeypatch.setattr(settings, u'bid_response_domain_enabled', True, raising=False)
+        monkeypatch.setattr(settings, "bid_response_domain_enabled", True, raising=False)
         res2 = await ba.list_extraction_domains()
-        by_name2 = {d[u'domain']: d for d in res2[u'domains']}
-        assert by_name2[u'scheme'][u'enabled'] is True
-        assert by_name2[u'bid_response'][u'enabled'] is False, (
-            "招标响应域不得被配置开关复活")
-        assert by_name2[u'bid_response'][u'retired'] is True
-        assert u'专项施工方案' in by_name2[u'bid_response'][u'retired_reason']
+        by_name2 = {d["domain"]: d for d in res2["domains"]}
+        assert by_name2["scheme"]["enabled"] is True
+        assert by_name2["bid_response"]["enabled"] is False, "招标响应域不得被配置开关复活"
+        assert by_name2["bid_response"]["retired"] is True
+        assert "专项施工方案" in by_name2["bid_response"]["retired_reason"]
 
     @pytest.mark.asyncio
     async def test_domains_endpoint_never_404(self, db_conn):
-        u"""域清单端点不得抛异常（前端据此渲染域切换器）。"""
+        """域清单端点不得抛异常（前端据此渲染域切换器）。"""
         res = await ba.list_extraction_domains()
-        assert isinstance(res[u'domains'], list) and len(res[u'domains']) == 2
+        assert isinstance(res["domains"], list) and len(res["domains"]) == 2
 
 
 class TestDomainMigration:
-    u"""domain 列的迁移与旧库兼容（旧数据零迁移）。"""
+    """domain 列的迁移与旧库兼容（旧数据零迁移）。"""
 
     @pytest.mark.asyncio
     async def test_domain_column_exists_after_migrate(self, db_conn):
-        cur = await db_conn.execute(u'PRAGMA table_info(bid_analysis_items)')
-        names = {dict(r)[u'name'] for r in await cur.fetchall()}
-        assert u'domain' in names, u'_migrate 必须为 bid_analysis_items 补 domain 列'
+        cur = await db_conn.execute("PRAGMA table_info(bid_analysis_items)")
+        names = {dict(r)["name"] for r in await cur.fetchall()}
+        assert "domain" in names, "_migrate 必须为 bid_analysis_items 补 domain 列"
 
     @pytest.mark.asyncio
     async def test_domain_column_default_is_scheme(self, db_conn):
-        u"""不带 domain 的 INSERT 必须落 scheme（旧数据零迁移）。"""
+        """不带 domain 的 INSERT 必须落 scheme（旧数据零迁移）。"""
         await db_conn.execute(
-            u'INSERT INTO bid_analysis_items (id, project_id, item_id) VALUES (?,?,?)',
-            (u'p1_x', u'p1', u'x'))
+            "INSERT INTO bid_analysis_items (id, project_id, item_id) VALUES (?,?,?)", ("p1_x", "p1", "x")
+        )
         await db_conn.commit()
-        cur = await db_conn.execute(
-            u'SELECT domain FROM bid_analysis_items WHERE id=?', (u'p1_x',))
+        cur = await db_conn.execute("SELECT domain FROM bid_analysis_items WHERE id=?", ("p1_x",))
         row = await cur.fetchone()
-        assert row is not None and row[u'domain'] == u'scheme'
+        assert row is not None and row["domain"] == "scheme"
 
     def test_schema_sql_declares_domain_column(self):
         from app.schema_sql import SCHEMA_SQL
+
         assert "domain TEXT DEFAULT 'scheme'" in SCHEMA_SQL
         assert "idx_bid_analysis_project_domain" in SCHEMA_SQL
 
     @pytest.mark.asyncio
     async def test_update_item_status_writes_domain(self, db_conn):
-        u"""AI 写路径写域，scheme 域主键保持旧格式。"""
+        """AI 写路径写域，scheme 域主键保持旧格式。"""
         pid = uuid.uuid4().hex
         await _seed_project(db_conn, pid)
-        await ba._update_item_status(
-            db_conn, pid, u'projectBasicInfo', u'success', content=u'内容')
-        cur = await db_conn.execute(
-            u'SELECT id, domain FROM bid_analysis_items WHERE project_id=?', (pid,))
+        await ba._update_item_status(db_conn, pid, "projectBasicInfo", "success", content="内容")
+        cur = await db_conn.execute("SELECT id, domain FROM bid_analysis_items WHERE project_id=?", (pid,))
         row = await cur.fetchone()
         assert row is not None
-        assert row[u'id'] == u'%s_projectBasicInfo' % pid, u'scheme 域主键格式被改动了'
-        assert row[u'domain'] == u'scheme'
+        assert row["id"] == "%s_projectBasicInfo" % pid, "scheme 域主键格式被改动了"
+        assert row["domain"] == "scheme"
 
     @pytest.mark.asyncio
     async def test_update_item_status_auto_derives_domain(self, db_conn):
-        u"""不传 domain 时按 item_id 自动派生（6 处调用点零改动也正确落库）。"""
+        """不传 domain 时按 item_id 自动派生（6 处调用点零改动也正确落库）。"""
         pid = uuid.uuid4().hex
         await _seed_project(db_conn, pid)
-        await ba._update_item_status(
-            db_conn, pid, u'projectInfo', u'success', content=u'{}')
-        cur = await db_conn.execute(
-            u'SELECT id, domain FROM bid_analysis_items WHERE project_id=?', (pid,))
+        await ba._update_item_status(db_conn, pid, "projectInfo", "success", content="{}")
+        cur = await db_conn.execute("SELECT id, domain FROM bid_analysis_items WHERE project_id=?", (pid,))
         row = await cur.fetchone()
         assert row is not None
-        assert row[u'id'] == u'%s__bid_response__projectInfo' % pid
-        assert row[u'domain'] == u'bid_response'
+        assert row["id"] == "%s__bid_response__projectInfo" % pid
+        assert row["domain"] == "bid_response"
 
 
 # =========================================================================
 # 八、下游「提取即消费」
 # =========================================================================
 class TestDownstreamConsumption:
-    u"""format_downstream_context 必须覆盖两域全部有效项（AGENTS.md §4.4）。"""
+    """format_downstream_context 必须覆盖两域全部有效项（AGENTS.md §4.4）。"""
 
     @staticmethod
-    def _item(item_id, content, status=u'success', output_type=u'markdown'):
+    def _item(item_id, content, status="success", output_type="markdown"):
         def_ = get_item_def(item_id) or {}
-        return {u'item_id': item_id, u'label': def_.get(u'label', item_id),
-                u'status': status, u'content': content,
-                u'output_type': output_type}
+        return {
+            "item_id": item_id,
+            "label": def_.get("label", item_id),
+            "status": status,
+            "content": content,
+            "output_type": output_type,
+        }
 
     def test_scheme_domain_order_unchanged(self):
-        u"""scheme 域输出顺序必须与旧版（ANALYSIS_ITEMS 顺序）逐字一致。"""
+        """scheme 域输出顺序必须与旧版（ANALYSIS_ITEMS 顺序）逐字一致。"""
         items = {}
         for it in ANALYSIS_ITEMS:
-            items[it[u'item_id']] = self._item(it[u'item_id'], u'内容-' + it[u'item_id'])
+            items[it["item_id"]] = self._item(it["item_id"], "内容-" + it["item_id"])
         out = svc.format_downstream_context(items)
-        order = [ln.split(u'## ')[-1] for ln in out.split(u'\n')
-                 if ln.startswith(u'## ')]
-        assert order == [it[u'label'] for it in ANALYSIS_ITEMS]
+        order = [ln.split("## ")[-1] for ln in out.split("\n") if ln.startswith("## ")]
+        assert order == [it["label"] for it in ANALYSIS_ITEMS]
 
     def test_bid_response_items_are_emitted(self):
-        u"""招标响应域的项也必须被下发（否则下游拿不到项目信息等）。"""
-        items = {u'projectInfo': self._item(
-            u'projectInfo', u'{"project_name": "XX工程"}', output_type=u'json')}
+        """招标响应域的项也必须被下发（否则下游拿不到项目信息等）。"""
+        items = {"projectInfo": self._item("projectInfo", '{"project_name": "XX工程"}', output_type="json")}
         out = svc.format_downstream_context(items)
-        assert u'项目信息' in out
-        assert u'XX工程' in out
+        assert "项目信息" in out
+        assert "XX工程" in out
 
     def test_missing_result_not_emitted(self):
-        u"""缺失项不得下发（沿用 is_missing_result 唯一口径）。"""
-        items = {u'projectBasicInfo': self._item(
-            u'projectBasicInfo', MARKDOWN_MISSING_RESULT)}
+        """缺失项不得下发（沿用 is_missing_result 唯一口径）。"""
+        items = {"projectBasicInfo": self._item("projectBasicInfo", MARKDOWN_MISSING_RESULT)}
         out = svc.format_downstream_context(items)
-        assert u'项目级基本信息' not in out
+        assert "项目级基本信息" not in out
 
     def test_unknown_item_id_fallback_still_emitted(self):
-        u"""不在任何域清单内的脏数据项仍兜底下发（历史行为不变）。"""
-        items = {u'legacy_unknown': self._item(u'legacy_unknown', u'历史脏数据')}
+        """不在任何域清单内的脏数据项仍兜底下发（历史行为不变）。"""
+        items = {"legacy_unknown": self._item("legacy_unknown", "历史脏数据")}
         out = svc.format_downstream_context(items)
-        assert u'历史脏数据' in out
+        assert "历史脏数据" in out
 
     def test_empty_items_yields_header_only(self):
         out = svc.format_downstream_context({})
-        assert u'提取项目结果' in out
+        assert "提取项目结果" in out

@@ -18,6 +18,7 @@
   4. 被拒绝的协程不"消耗"许可（sem._value 不减少），记账一致；
   5. resume / stop 不触发 reject_waiters（该行为只属于 pause）。
 """
+
 import asyncio
 from types import SimpleNamespace
 

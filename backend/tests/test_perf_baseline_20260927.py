@@ -13,6 +13,7 @@
 
 复跑：``python -m pytest tests/test_perf_baseline_20260927.py -q``
 """
+
 import time
 
 # 宽松预算（秒）。见各用例注释。
@@ -39,13 +40,13 @@ def _elapsed(fn, *a, **k):
 # 1. 目录编号重排（目录生成 / 拖拽排序的共同入口）
 # ============================================================
 
+
 def _mk_tree(depth, width, prefix=""):
     out = []
     for i in range(width):
         nid = f"{prefix}.{i + 1}" if prefix else str(i + 1)
         node = {"id": nid, "title": f"章节{i + 1}标题", "level": 1}
-        node["children"] = (_mk_tree(depth - 1, width, nid)
-                            if depth > 1 else [])
+        node["children"] = _mk_tree(depth - 1, width, nid) if depth > 1 else []
         out.append(node)
     return out
 
@@ -57,7 +58,8 @@ def test_renumber_outline_nodes_perf():
     若守卫被去掉，遇到环形 children 会直接爆栈。
     """
     from app.services.numbering import renumber_outline_nodes
-    tree = _mk_tree(depth=3, width=20)   # 20 + 400 + 8000
+
+    tree = _mk_tree(depth=3, width=20)  # 20 + 400 + 8000
     dt = _elapsed(renumber_outline_nodes, tree)
     assert dt < _BUDGET["renumber"], f"重排 8k+ 节点耗时 {dt:.3f}s"
     assert [n["id"] for n in tree] == [str(i) for i in range(1, 21)]
@@ -66,6 +68,7 @@ def test_renumber_outline_nodes_perf():
 def test_renumber_guards_against_cycles():
     """反例：自引用须被 _path 环守卫终止（不得 RecursionError）；60 级合法深链在 _MAX_TREE_DEPTH=200 内**完整编号**（2026-10-08 D-1：旧上限 20 会静默截断 → 现不截断）。"""
     from app.services.numbering import renumber_outline_nodes
+
     node = {"id": "1", "title": "A"}
     node["children"] = [node]
     renumber_outline_nodes([node])
@@ -87,14 +90,14 @@ def test_renumber_guards_against_cycles():
 # 2. 正文块解析（导出与正文落库共用的最热路径）
 # ============================================================
 
+
 def test_parse_content_blocks_perf():
     """2000+ 段正文的块解析（围栏/表格/列表识别）必须秒级。"""
     from app.services.content_blocks import _parse_content_blocks
+
     body = []
     for i in range(500):
-        body += [f"## {i + 1} 小节标题",
-                 f"这是第 {i + 1} 段的正文内容。" * 4,
-                 "- 列表项 A", "- 列表项 B"]
+        body += [f"## {i + 1} 小节标题", f"这是第 {i + 1} 段的正文内容。" * 4, "- 列表项 A", "- 列表项 B"]
     content = "\n".join(body)
     dt = _elapsed(_parse_content_blocks, content)
     assert dt < _BUDGET["parse_blocks"], f"2000 段解析耗时 {dt:.3f}s"
@@ -105,6 +108,7 @@ def test_parse_content_blocks_perf():
 # 3. 事实预算分配（本轮改动点：新增一次 O(n) 预处理 + 比例分配）
 # ============================================================
 
+
 def test_render_facts_text_perf():
     """5000 条事实的渲染必须秒级，且**不因分配器引入二次方**。
 
@@ -112,6 +116,7 @@ def test_render_facts_text_perf():
     渲染循环 O(n) —— 整体 O(n)。分配器若被塞进循环即退化为 O(n^2)。
     """
     from app.routers.sse_handlers import _render_facts_text
+
     rows = [(f"组{i % 20}", f"t{i}", "甲" * 200, 0.9) for i in range(5000)]
     dt = _elapsed(_render_facts_text, rows, max_total=6000, per_fact=300)
     assert dt < _BUDGET["facts_text"], f"5000 条事实渲染耗时 {dt:.3f}s"
@@ -120,6 +125,7 @@ def test_render_facts_text_perf():
 def test_allocate_char_budgets_linear():
     """比例分配器：2 万个分节必须线性完成。"""
     from app.routers.sse_handlers import _allocate_char_budgets
+
     dt = _elapsed(_allocate_char_budgets, [100] * 20000, 100000)
     assert dt < _BUDGET["allocate"], f"2 万分节分配耗时 {dt:.3f}s"
     # 确定性：未超预算时是恒等映射
@@ -131,6 +137,7 @@ def test_allocate_char_budgets_linear():
 def test_facts_text_budget_is_hard_cap():
     """硬上限：任何 max_total 下输出都不得超过（提示词长度是契约）。"""
     from app.routers.sse_handlers import _render_facts_text
+
     for n, body, budget in ((200, 100, 500), (50, 300, 1000), (500, 200, 2000)):
         rows = [(f"g{i % 7}", f"t{i}", "甲" * body, 0.9) for i in range(n)]
         out = _render_facts_text(rows, max_total=budget, per_fact=300)
@@ -141,11 +148,12 @@ def test_facts_text_budget_is_hard_cap():
 # 4. 编号转换（目录生成 / 正文 / 导出三模块的公共口径）
 # ============================================================
 
+
 def test_numbering_conversion_perf():
     """10 万次存储态→展示态转换必须秒级（导出逐标题调用）。"""
     from app.services.numbering import stored_id_to_display, stored_id_to_prefix
-    ids = ["1", "12", "1.2", "12.34", "1.2.3", "1.2.3.4",
-           "1.2.3.4.5.6.7"] * 15000
+
+    ids = ["1", "12", "1.2", "12.34", "1.2.3", "1.2.3.4", "1.2.3.4.5.6.7"] * 15000
     t0 = time.perf_counter()
     for sid in ids:
         stored_id_to_display(sid)
@@ -166,18 +174,27 @@ def test_figure_chapter_num_perf():
         _figure_chapter_num(_Gen())
     dt = time.perf_counter() - t0
     assert dt < _BUDGET["figure_chapter"], f"10 万次耗时 {dt:.3f}s"
-    assert _figure_chapter_num(_Gen()) == 3   # 含 L1 时与旧实现一致
+    assert _figure_chapter_num(_Gen()) == 3  # 含 L1 时与旧实现一致
 
 
 # ============================================================
 # 5. 标题剥号（导出 + 落库双侧调用）
 # ============================================================
 
+
 def test_strip_outline_numbering_perf():
     from app.services.numbering import strip_outline_numbering
-    titles = ["第一章 工程概况", "2.1 相关法律法规", "3.2.4 计算书",
-              "（一）基本规定", "1）现场管理", "十二、应急预案",
-              "2023年版规范 第3.4.5条", "普通标题无编号"] * 6000
+
+    titles = [
+        "第一章 工程概况",
+        "2.1 相关法律法规",
+        "3.2.4 计算书",
+        "（一）基本规定",
+        "1）现场管理",
+        "十二、应急预案",
+        "2023年版规范 第3.4.5条",
+        "普通标题无编号",
+    ] * 6000
     t0 = time.perf_counter()
     for t in titles:
         strip_outline_numbering(t)
@@ -192,12 +209,13 @@ def test_strip_outline_numbering_perf():
 # 6. 图表缓存键（本轮改动：键首段新增版本号）
 # ============================================================
 
+
 def test_chart_cache_key_perf():
     """5000 次缓存键构造（含长载荷 sha1 分支）必须秒级。"""
     from app.services.ai import mermaid_renderer as mr
+
     short = "graph TD; A-->B;"
-    long_payload = "graph TD\n" + "\n".join(
-        f"  N{i}-->N{i + 1}" for i in range(2000))
+    long_payload = "graph TD\n" + "\n".join(f"  N{i}-->N{i + 1}" for i in range(2000))
     t0 = time.perf_counter()
     for _ in range(5000):
         mr._render_cache_key(short, "flowchart", 90, "天", 5, False, True)
@@ -213,11 +231,13 @@ def test_chart_cache_key_perf():
 # 7. 回归风险：本轮改动是否引入额外的全表扫描 / N+1
 # ============================================================
 
+
 def test_fact_dimension_derivation_is_not_n_plus_one():
     """反例：事实行级派生不得逐行查库（N 条事实 = N 次往返）。"""
     import inspect
 
     from app.routers import global_facts as gf
+
     assert "await db.execute" not in inspect.getsource(gf._fact_dimension_fields)
 
 
@@ -231,19 +251,16 @@ def test_render_facts_text_allocates_once():
     import inspect
 
     from app.routers import sse_handlers as sh
-    assert inspect.getsource(sh._render_facts_text).count(
-        "_allocate_char_budgets(") == 2
 
+    assert inspect.getsource(sh._render_facts_text).count("_allocate_char_budgets(") == 2
 
 
 def test_subheading_renumber_200_sections():
     """200 章的正文子标题编号规范化（落库前必跑）总量必须可控。"""
     from app.services.numbering import renumber_section_body_subheadings
+
     total = 0.0
     for i in range(200):
-        content = "\n".join(
-            [f"### {i + 1}.{j + 1} 小标题" for j in range(10)]
-            + [f"正文段落 {j}。" for j in range(20)])
-        total += _elapsed(renumber_section_body_subheadings,
-                          content, f"1.{i + 1}", 2, f"章节{i + 1}")
+        content = "\n".join([f"### {i + 1}.{j + 1} 小标题" for j in range(10)] + [f"正文段落 {j}。" for j in range(20)])
+        total += _elapsed(renumber_section_body_subheadings, content, f"1.{i + 1}", 2, f"章节{i + 1}")
     assert total < _BUDGET["subheading"], f"200 章规范化总耗时 {total:.3f}s"

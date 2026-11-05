@@ -18,9 +18,11 @@ F7d SchemeWorkbenchPage         let nameRef 只改 .current → eslint prefer-co
 层互补 —— 按 R49 结论，形态锁与端到端执行两层缺一不可：前者在任何机器都能红，
 后者抓「语法合法但跑不起来」。
 """
+
 import importlib.util
 import io
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -45,7 +47,6 @@ def _src(p: Path) -> str:
 # A · 状态 → 操作按钮映射：跨文件 parity（契约漂移在 CI 之前就该红）
 # ===========================================================================
 class TestReviewStatusActionParity:
-
     def test_next_actions_keys_equal_review_status_union(self):
         """NEXT_ACTIONS 的键必须与 ReviewStatus 联合类型**完全一致**。
 
@@ -54,7 +55,7 @@ class TestReviewStatusActionParity:
         """
         t = _src(TYPES_AUDIT)
         i = t.index("ReviewStatus =")
-        decl = t[i:t.index(";", i)]
+        decl = t[i : t.index(";", i)]
         # 必须先剥掉左侧声明名：首个成员是**空串字面量**，按 | 切时它和
         # 'ReviewStatus =' 同处第一段（'ReviewStatus = ""'），不以引号开头 → 被
         # 静默丢弃 → 契约外的比对反而"通过"。首跑就是这里少了 ""。
@@ -68,14 +69,18 @@ class TestReviewStatusActionParity:
 
         c = _src(COMPONENT)
         j = c.index("const NEXT_ACTIONS")
-        block = c[j:c.index("};", j)]
+        block = c[j : c.index("};", j)]
         keys = set()
         for line in block.splitlines():
             line = line.strip()
             if line.startswith('"":') or line.startswith('"'):
                 keys.add(line.split(":")[0].strip().strip('"'))
-            elif line.startswith("pending:") or line.startswith("reviewing:") \
-                    or line.startswith("approved:") or line.startswith("rejected:"):
+            elif (
+                line.startswith("pending:")
+                or line.startswith("reviewing:")
+                or line.startswith("approved:")
+                or line.startswith("rejected:")
+            ):
                 keys.add(line.split(":")[0].strip())
         assert keys == union, (keys, union)
 
@@ -101,7 +106,7 @@ class TestReviewStatusActionParity:
         assert '(NEXT_ACTIONS[r.review_status ?? ""] || [])' in c, "兜底空数组被摘掉"
         s = _src(T_WORKFLOW)
         assert 'const ACTION_LABELS: string[] = ["开始审核", "通过", "驳回", "复审驳回", "整改后通过"];' in s
-        assert 'expect(skipped.filter((t) => ACTION_LABELS.includes(t))).toEqual([]);' in s
+        assert "expect(skipped.filter((t) => ACTION_LABELS.includes(t))).toEqual([]);" in s
         # 「重置」入口：review_status 非空的四种行都要锁
         assert s.count('toContain("重置")') >= 4
 
@@ -126,14 +131,12 @@ def _comma_operator_hits(root: Path):
             lines = _src(p).splitlines()
             for i, ln in enumerate(lines[:-1]):
                 st = ln.strip()
-                if st.endswith("),") and "expect(" in st and \
-                        lines[i + 1].strip().startswith('"'):
+                if st.endswith("),") and "expect(" in st and lines[i + 1].strip().startswith('"'):
                     hits.append("%s:%d" % (p.name, i + 1))
     return hits
 
 
 class TestNoCommaOperatorAssertions:
-
     def test_frontend_has_zero_comma_operator_expect(self):
         """`expect(...).toBe(true), "说明";` 语法合法（逗号运算符），断言仍执行，
         但说明文字成为永不显示的死代码，且 eslint no-unused-expressions 判 error
@@ -145,13 +148,21 @@ class TestNoCommaOperatorAssertions:
         s = _src(T_READY)
         # 锁整行而非尾片段：同一模式在本文件出现 3 次（overviewCalls / calls 两处），
         # 短锚点的 count==1 是护栏写错，不是产品有问题。
-        assert s.count(
-            'expect(overviewCalls.some((c) => c[0] === "s1" '
-            '&& c[1] === true)).toBe(true);') == 1
+        assert s.count('expect(overviewCalls.some((c) => c[0] === "s1" ' "&& c[1] === true)).toBe(true);") == 1
         # 只锁「以逗号运算符收尾的**代码行**」，不锁裸子串 —— 本文件 524 行的
         # 注释里逐字引用了旧写法作反例，子串锁会把它判成回流（首跑第二轮的假阳性）。
-        bad = [ln.strip() for ln in s.splitlines()
-               if ln.strip().endswith(').toBe(true),')]
+        bad = []
+        for ln in s.splitlines():
+            st = ln.strip()
+            if st.startswith(("//", "*", "/*")):
+                continue
+            if ").toBe(true)," not in st:
+                continue
+            # 只认「逗号运算符后跟字符串说明」的真形态：Prettier 会给多行实参补尾逗号，
+            # 行尾 `),` 不再等价于逗号运算符（R179 格式重排后的必要区分）。
+            rest = st.split(").toBe(true),", 1)[1].strip()
+            if rest.startswith(("'", '"')):
+                bad.append(st)
         assert bad == [], bad
 
 
@@ -159,9 +170,7 @@ class TestNoCommaOperatorAssertions:
 # C · 字节与接线：R57 触碰的 4 个前端文件
 # ===========================================================================
 class TestR57ByteAndWiring:
-
-    @pytest.mark.parametrize("path", [str(p) for p in T_TOUCHED],
-                             ids=[p.name for p in T_TOUCHED])
+    @pytest.mark.parametrize("path", [str(p) for p in T_TOUCHED], ids=[p.name for p in T_TOUCHED])
     def test_no_lone_cr_no_bom_no_replacement_char(self, path):
         b = io.open(path, "rb").read()
         assert b.count(b"\r") == 0, "%s 混入 CR（本仓这些文件是纯 LF）" % path
@@ -174,10 +183,10 @@ class TestR57ByteAndWiring:
         大文件拆分后 nameRef 迁入 pages/schemeWorkbench/useExportPresets.tsx ——
         聚合 facade + 子模块读取，断言阈值不变（仍恰好 1 处 const 定义）。"""
         wb = _FE / "pages" / "schemeWorkbench"
-        s = "\n".join(
-            [_src(P_WORKBENCH)]
-            + [_src(p) for p in sorted(list(wb.glob("*.ts")) + list(wb.glob("*.tsx")))]
-        )
+        # R176：拆分仍在继续（含 tabs/ 子目录）—— 递归 + 非空兜底。
+        wb_files = sorted(list(wb.rglob("*.ts")) + list(wb.rglob("*.tsx")))
+        assert wb_files, f"拆分目录未被递归扫描到（0 个 ts/tsx）：{wb}"
+        s = "\n".join([_src(P_WORKBENCH)] + [_src(p) for p in wb_files])
         assert s.count("let nameRef") == 0
         assert s.count('const nameRef: { current: string } = { current: "" };') == 1
 
@@ -204,7 +213,6 @@ def _load_closeout_module():
 
 
 class TestNodeResolver:
-
     def test_env_var_wins_over_path_and_probes(self, monkeypatch):
         m = _load_closeout_module()
         seen = []
@@ -213,7 +221,7 @@ class TestNodeResolver:
         monkeypatch.setattr(m.shutil, "which", lambda _n: "C:\\fake\\path-node.exe")
         monkeypatch.setattr(m.glob, "glob", lambda _p: ["C:\\fake\\probe-node.exe"])
         assert m._resolve_frontend_node() == "C:\\fake\\env-node.exe"
-        assert seen == ["C:\\fake\\env-node.exe"]          # 命中即止，不多探
+        assert seen == ["C:\\fake\\env-node.exe"]  # 命中即止，不多探
 
     def test_path_wins_over_probes(self, monkeypatch):
         m = _load_closeout_module()
@@ -252,18 +260,17 @@ class TestNodeResolver:
         """门控判据本身：有 node 无依赖（CI backend job 的真实形态）必须 **False**
         —— 这一条才是「退回只看 node」能被抓住的地方。"""
         m = _load_closeout_module()
-        assert m._fe_ready("", m._FE_DIR) is False                 # 无 node
+        assert m._fe_ready("", m._FE_DIR) is False  # 无 node
         assert m._fe_ready("C:\\fake\\node.exe", tmp_path) is False  # 有 node、无 node_modules
-        real_deps = all((m._FE_DIR / "node_modules" / s).exists()
-                        for s in m._FE_SCRIPTS)
+        real_deps = all((m._FE_DIR / "node_modules" / s).exists() for s in m._FE_SCRIPTS)
         assert m._fe_ready("C:\\fake\\node.exe", m._FE_DIR) is real_deps
-        assert m._FE_READY is m._fe_ready(m._NODE, m._FE_DIR)       # 落库值 = 纯函数值
+        assert m._FE_READY is m._fe_ready(m._NODE, m._FE_DIR)  # 落库值 = 纯函数值
 
     def test_gate_source_locks_fe_ready_not_node(self):
         """门控文本必须挂在 _FE_READY 上；直接挂 _NODE 的写法不得回流。"""
         s = _src(CLOSEOUT)
         assert "_FE_READY = _fe_ready(_NODE, _FE_DIR)" in s
-        assert "@pytest.mark.skipif(not _FE_READY," in s
+        assert re.search(r"@pytest\.mark\.skipif\(\s*not _FE_READY,", s)
         assert "skipif(not _NODE" not in s
 
     def test_skip_condition_requires_node_modules_too(self):
@@ -271,19 +278,16 @@ class TestNodeResolver:
         node，三个真跑用例会当场失败而非 skip。门控必须是 _FE_READY。"""
         m = _load_closeout_module()
         cls = m.TestFrontendRealExecution
-        marks = [mk for mk in getattr(cls, "pytestmark", [])
-                 if mk.name == "skipif"]
+        marks = [mk for mk in getattr(cls, "pytestmark", []) if mk.name == "skipif"]
         assert len(marks) == 1
         # skipif 的条件是**位置参数**（Mark(name, args=(cond,), kwargs 只有 reason），
         # 不在 kwargs["condition"] —— 取错位置拿到 None，会把「门控写错」误报成
         # 「门控缺失」。
         cond = marks[0].args[0]
         assert cond is (not m._FE_READY), "skipif 条件必须是 _FE_READY 的取反"
-        expected = bool(m._NODE) and all(
-            (m._FE_DIR / "node_modules" / s).exists() for s in m._FE_SCRIPTS)
+        expected = bool(m._NODE) and all((m._FE_DIR / "node_modules" / s).exists() for s in m._FE_SCRIPTS)
         assert m._FE_READY == expected
         # 关键分歧点（CI backend job 有 node、无 node_modules）：必须 skip 而非失败，
         # 所以 _FE_READY 绝不能只看 _NODE。此处不假设本机一定有依赖。
         if m._NODE and not m._FE_READY:
-            assert any(not (m._FE_DIR / "node_modules" / s).exists()
-                       for s in m._FE_SCRIPTS)
+            assert any(not (m._FE_DIR / "node_modules" / s).exists() for s in m._FE_SCRIPTS)

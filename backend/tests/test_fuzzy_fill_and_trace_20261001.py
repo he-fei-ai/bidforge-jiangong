@@ -6,6 +6,7 @@
 二、内部标记（可追溯性）—— 只落库、不落正文：标记在 ``trace`` 键里，
    ``sections.content`` 与导出 DOCX 均查不到。
 """
+
 import json
 
 import pytest
@@ -67,24 +68,40 @@ def _trace_inputs(body, facts):
     for row in facts:
         title, ftext = str(row[1] or ""), str(row[2] or "")
         joined = f"{title} {ftext}"
-        fnum += [{"value": t["value"], "unit": t["unit"], "title": title}
-                 for t in extract_number_tokens(joined)]
-        fmod += [{"token": t["token"], "title": title}
-                 for t in extract_model_tokens(joined)]
+        fnum += [{"value": t["value"], "unit": t["unit"], "title": title} for t in extract_number_tokens(joined)]
+        fmod += [{"token": t["token"], "title": title} for t in extract_model_tokens(joined)]
     scanned = strip_code_blocks(body)
-    return dict(scanned=scanned, fact_numbers=fnum, fact_models=fmod,
-                body_numbers=extract_number_tokens(scanned),
-                body_models=extract_model_tokens(scanned),
-                fuzzy_expressions=detect_fuzzy_expressions(scanned))
+    return dict(
+        scanned=scanned,
+        fact_numbers=fnum,
+        fact_models=fmod,
+        body_numbers=extract_number_tokens(scanned),
+        body_models=extract_model_tokens(scanned),
+        fuzzy_expressions=detect_fuzzy_expressions(scanned),
+    )
 
 
-def _trace_row(section_id="a", section_title="第一章",
-               gtype=GENERATION_FUZZY, category="number", severity="warn"):
+def _trace_row(section_id="a", section_title="第一章", gtype=GENERATION_FUZZY, category="number", severity="warn"):
     """构造一条合法 trace 条目（键集合严格等于 TRACE_ITEM_KEYS）。"""
-    return dict(zip(TRACE_ITEM_KEYS, [
-        "tr-0001", section_id, section_title, "L1 P1", 0, 5, "…约 13m…",
-        gtype, category, "行业惯例与设计允许范围", "事实未给出该数值", severity,
-    ]))
+    return dict(
+        zip(
+            TRACE_ITEM_KEYS,
+            [
+                "tr-0001",
+                section_id,
+                section_title,
+                "L1 P1",
+                0,
+                5,
+                "…约 13m…",
+                gtype,
+                category,
+                "行业惯例与设计允许范围",
+                "事实未给出该数值",
+                severity,
+            ],
+        )
+    )
 
 
 class TestFuzzyCategoryTable:
@@ -105,8 +122,7 @@ class TestFuzzyCategoryTable:
             assert c["reason"], f"{key} 缺 reason"
 
     def test_category_keys_are_stable_vocabulary(self):
-        assert set(FUZZY_CATEGORIES) == {"number", "name", "time", "quantity",
-                                          "promise", "tech", "material", "process"}
+        assert set(FUZZY_CATEGORIES) == {"number", "name", "time", "quantity", "promise", "tech", "material", "process"}
 
     def test_every_category_forbids_fabrication(self):
         for c in FUZZY_CATEGORIES.values():
@@ -199,10 +215,19 @@ class TestScanPlaceholderMarks:
 
 
 class TestScanVagueStatements:
-    @pytest.mark.parametrize("text", [
-        "此处省略。", "此处略。", "具体细节另见。", "详见附件。",
-        "详见相关章节。", "后续补充。", "待后续完善。", "另有章节介绍。",
-    ])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "此处省略。",
+            "此处略。",
+            "具体细节另见。",
+            "详见附件。",
+            "详见相关章节。",
+            "后续补充。",
+            "待后续完善。",
+            "另有章节介绍。",
+        ],
+    )
     def test_each_vague_rule_has_a_hit(self, text):
         hits = scan_vague_statements(text)
         assert hits, text
@@ -329,9 +354,9 @@ class TestRegistryPromptsInjected:
 
     def test_generation_system_injected(self):
         from app.services.ai.prompts._registry import get_default_prompt
+
         t = get_default_prompt("content_generation_system")
-        for phrase in ("模糊生成规则", "分级生成策略",
-                       "禁止占位标记与空话", "数据真实性红线"):
+        for phrase in ("模糊生成规则", "分级生成策略", "禁止占位标记与空话", "数据真实性红线"):
             assert phrase in t, phrase
         assert "<<FUZZY_FILL>>" not in t
         assert "【待补充：参数名】" not in t
@@ -344,23 +369,28 @@ class TestRegistryPromptsInjected:
 # 内部标记（可追溯性）：build_trace / collect_scheme_trace
 # ============================================================
 class TestBuildTrace:
-
     def test_trace_structure_and_summary_keys(self):
-        tr = build_trace(scanned="", standard=PRECISE,
-                         section_id="s1", section_title="基坑工程")
+        tr = build_trace(scanned="", standard=PRECISE, section_id="s1", section_title="基坑工程")
         assert tr["available"] is True
-        for k in ("available", "degraded", "standard", "section_id",
-                  "section_title", "items", "summary"):
+        for k in ("available", "degraded", "standard", "section_id", "section_title", "items", "summary"):
             assert k in tr, k
-        for k in ("total", "precise_count", "fuzzy_count", "warn_count",
-                  "error_count", "placeholder_residue_count", "by_category",
-                  "by_reason", "truncated"):
+        for k in (
+            "total",
+            "precise_count",
+            "fuzzy_count",
+            "warn_count",
+            "error_count",
+            "placeholder_residue_count",
+            "by_category",
+            "by_reason",
+            "truncated",
+        ):
             assert k in tr["summary"], k
 
     def test_precise_number_backed_by_fact(self):
-        tr = build_trace(standard=PRECISE, section_id="s1",
-                         section_title="基坑工程",
-                         **_trace_inputs("基坑深度 12.5m。", [_fact()]))
+        tr = build_trace(
+            standard=PRECISE, section_id="s1", section_title="基坑工程", **_trace_inputs("基坑深度 12.5m。", [_fact()])
+        )
         assert tr["summary"]["precise_count"] >= 1
         it = next(i for i in tr["items"] if i["generation_type"] == GENERATION_PRECISE)
         assert "全局事实" in it["data_source"]
@@ -369,18 +399,14 @@ class TestBuildTrace:
         assert it["section_id"] == "s1"
 
     def test_unbacked_number_is_warn(self):
-        tr = build_trace(standard=FUZZY,
-                         **_trace_inputs("基坑深度 13.2m。",
-                                         [_fact("设备", "桩基", "桩径 800mm")]))
+        tr = build_trace(standard=FUZZY, **_trace_inputs("基坑深度 13.2m。", [_fact("设备", "桩基", "桩径 800mm")]))
         fuzzy = [i for i in tr["items"] if i["generation_type"] == GENERATION_FUZZY]
         assert fuzzy
         assert any(i["severity"] == "warn" for i in fuzzy)
         assert any("编造" in i["fuzzy_reason"] for i in fuzzy)
 
     def test_unbacked_model_is_fuzzy(self):
-        tr = build_trace(standard=FUZZY,
-                         **_trace_inputs("采用 QTZ63 塔吊。",
-                                         [_fact("设备", "塔吊", "塔吊 QTZ80")]))
+        tr = build_trace(standard=FUZZY, **_trace_inputs("采用 QTZ63 塔吊。", [_fact("设备", "塔吊", "塔吊 QTZ80")]))
         assert any(i["generation_type"] == GENERATION_FUZZY for i in tr["items"])
 
     def test_placeholder_residue_is_error(self):
@@ -422,16 +448,30 @@ class TestBuildTrace:
 
 
 class TestCollectSchemeTrace:
-
     def test_aggregates_across_sections(self):
         secs = [
-            {"id": "a", "title": "第一章", "last_generation_report": json.dumps(
-                {"trace": {"items": [_trace_row()], "summary": {
-                    "total": 1, "precise_count": 0, "fuzzy_count": 1,
-                    "warn_count": 1, "error_count": 0,
-                    "placeholder_residue_count": 0,
-                    "by_category": {"number": 1}, "by_reason": {},
-                    "truncated": False}}})},
+            {
+                "id": "a",
+                "title": "第一章",
+                "last_generation_report": json.dumps(
+                    {
+                        "trace": {
+                            "items": [_trace_row()],
+                            "summary": {
+                                "total": 1,
+                                "precise_count": 0,
+                                "fuzzy_count": 1,
+                                "warn_count": 1,
+                                "error_count": 0,
+                                "placeholder_residue_count": 0,
+                                "by_category": {"number": 1},
+                                "by_reason": {},
+                                "truncated": False,
+                            },
+                        }
+                    }
+                ),
+            },
             {"id": "b", "title": "第二章", "last_generation_report": ""},
         ]
         out = collect_scheme_trace(secs)
@@ -444,16 +484,31 @@ class TestCollectSchemeTrace:
         assert out["sections"][0]["total"] == 1
 
     def test_item_cap_enforced(self):
-        secs = [{"id": str(i), "title": f"第{i}章",
-                 "last_generation_report": json.dumps(
-                     {"trace": {"items": [_trace_row(section_id=str(i))],
-                                "summary": {"total": 1, "precise_count": 0,
-                                            "fuzzy_count": 1, "warn_count": 1,
-                                            "error_count": 0,
-                                            "placeholder_residue_count": 0,
-                                            "by_category": {"number": 1},
-                                            "by_reason": {}, "truncated": False}}})}
-                for i in range(10)]
+        secs = [
+            {
+                "id": str(i),
+                "title": f"第{i}章",
+                "last_generation_report": json.dumps(
+                    {
+                        "trace": {
+                            "items": [_trace_row(section_id=str(i))],
+                            "summary": {
+                                "total": 1,
+                                "precise_count": 0,
+                                "fuzzy_count": 1,
+                                "warn_count": 1,
+                                "error_count": 0,
+                                "placeholder_residue_count": 0,
+                                "by_category": {"number": 1},
+                                "by_reason": {},
+                                "truncated": False,
+                            },
+                        }
+                    }
+                ),
+            }
+            for i in range(10)
+        ]
         out = collect_scheme_trace(secs, item_cap=5)
         assert out["total"] == 5
         assert out["truncated"] is True
@@ -465,12 +520,10 @@ class TestCollectSchemeTrace:
         assert out["total"] == 0
 
 
-
 # ============================================================
 # standard_report：新 issue 类型 + trace 输出
 # ============================================================
 class TestReportNewIssueTypes:
-
     def test_placeholder_mark_is_error_issue(self):
         rep = standard_report("地下水位见【待补充：地勘报告】。", PRECISE, [_fact()])
         marks = [i for i in rep["issues"] if i["type"] == "placeholder_mark"]
@@ -505,17 +558,34 @@ class TestReportNewIssueTypes:
 
     def test_new_stats_keys_present_in_both_paths(self):
         rep = standard_report("基坑深度 12.5m。", PRECISE, [_fact()])
-        for k in ("placeholders", "placeholder_marks", "vague_statements",
-                  "missing_reveals", "fabricated_dates", "fuzzy_expressions",
-                  "trace_items", "trace_precise", "trace_fuzzy"):
+        for k in (
+            "placeholders",
+            "placeholder_marks",
+            "vague_statements",
+            "missing_reveals",
+            "fabricated_dates",
+            "fuzzy_expressions",
+            "trace_items",
+            "trace_precise",
+            "trace_fuzzy",
+        ):
             assert k in rep["stats"], k
         # 降级路径同样给出完整字段（防前端分支处理）
         er = _empty_report(PRECISE)
         assert er["trace_available"] is False
         assert er["trace"]["available"] is False
-        for k in ("placeholders", "placeholder_marks", "vague_statements",
-                  "missing_reveals", "fabricated_dates", "fuzzy_expressions",
-                  "trace_items", "trace_precise", "trace_fuzzy", "degraded"):
+        for k in (
+            "placeholders",
+            "placeholder_marks",
+            "vague_statements",
+            "missing_reveals",
+            "fabricated_dates",
+            "fuzzy_expressions",
+            "trace_items",
+            "trace_precise",
+            "trace_fuzzy",
+            "degraded",
+        ):
             assert k in er["stats"], k
 
     def test_report_carries_trace(self):
@@ -525,8 +595,7 @@ class TestReportNewIssueTypes:
         assert rep["stats"]["trace_items"] == len(rep["trace"]["items"])
 
     def test_section_id_and_title_flow_into_trace(self):
-        rep = standard_report("基坑深度 12.5m。", PRECISE, [_fact()],
-                              section_id="s9", section_title="基坑工程")
+        rep = standard_report("基坑深度 12.5m。", PRECISE, [_fact()], section_id="s9", section_title="基坑工程")
         assert rep["trace"]["section_id"] == "s9"
         assert rep["trace"]["section_title"] == "基坑工程"
         for it in rep["trace"]["items"]:
@@ -538,15 +607,12 @@ class TestReportNewIssueTypes:
 # 关键不变式：标记只落库、不落正文（导出文档看不到）
 # ============================================================
 class TestTraceNeverLeaksIntoContent:
-
     def test_content_text_unchanged_after_report(self):
         """报告（含 trace）派生自正文但绝不修改正文 —— 落库正文即原始正文。"""
         body = "基坑深度 12.5m，基坑支护采用灌注桩。地下水位见【待补充：地勘报告】。"
-        rep = standard_report(body, PRECISE, [_fact()], section_id="s1",
-                              section_title="基坑工程")
+        rep = standard_report(body, PRECISE, [_fact()], section_id="s1", section_title="基坑工程")
         assert rep["trace"]["items"]
-        for leak in ("generation_type", "fuzzy_reason", "data_source",
-                     "tr-", "placeholder_residue", "char_start"):
+        for leak in ("generation_type", "fuzzy_reason", "data_source", "tr-", "placeholder_residue", "char_start"):
             assert leak not in body
 
     def test_marker_strings_not_written_to_content(self):
@@ -561,6 +627,7 @@ class TestTraceNeverLeaksIntoContent:
         import inspect
 
         from app.routers import export as export_router
+
         export_src = inspect.getsource(export_router)
         assert "last_generation_report" not in export_src
 
@@ -569,6 +636,7 @@ class TestTraceNeverLeaksIntoContent:
         import inspect
 
         from app.routers import sections as sec
+
         src = inspect.getsource(sec.scheme_report_trace)
         assert "SELECT" in src
         assert "UPDATE" not in src and "INSERT" not in src
@@ -578,7 +646,6 @@ class TestTraceNeverLeaksIntoContent:
 # 历史回归：数值/型号提取不受本轮改动影响
 # ============================================================
 class TestLegacyExtractorsUnchanged:
-
     def test_number_tokens(self):
         toks = extract_number_tokens("基坑深度 12.5m，厚 200mm，工期 450 日历天。")
         vals = {t["value"] for t in toks}
@@ -593,8 +660,7 @@ class TestLegacyExtractorsUnchanged:
         out = strip_code_blocks("正文 ```mermaid\nA-->B|13m|\n``` 后续")
         assert "mermaid" not in out and "后续" in out
 
-
     def test_prompt_markers_replaced_at_registration(self):
         from app.services.ai.prompts import content as c
-        assert "模糊生成规则" in c._FUZZY_FILL_SECTION
 
+        assert "模糊生成规则" in c._FUZZY_FILL_SECTION

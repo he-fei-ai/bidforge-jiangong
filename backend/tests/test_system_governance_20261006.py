@@ -4,6 +4,7 @@
 - PUT 写回进程内 settings；GET 随后读到新值。
 - 不开启时行为与现状完全一致（不修改任何提示词构建路径）。
 """
+
 from __future__ import annotations
 
 import pytest

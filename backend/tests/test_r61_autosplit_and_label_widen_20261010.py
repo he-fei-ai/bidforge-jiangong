@@ -8,6 +8,7 @@
     几何是「宽而矮」，竖排会破坏语义；正确修复 = 加宽标签容器预留宽度 + 省略号兜底
     （不换行、不竖排）。
 """
+
 from __future__ import annotations
 
 import io
@@ -43,10 +44,15 @@ def _set_env(name, value):
 def _clean_arch_env():
     """清掉所有架构图相关 env，保证用例从默认值出发（互相不污染）。"""
     for k in (
-        ma.ENV_MAX_LEAVES, ma.ENV_MAX_NODES, ma.ENV_AUTO_SPLIT,
-        ma.ENV_SPLIT_MAX_LEAVES, ma.ENV_SPLIT_MAX_PARTS,
-        ma.ENV_VERTICAL_SWITCH, ma.ENV_VERTICAL_THRESHOLD,
-        ma.ENV_PAPER_FONT_MIN_MM, ma.ENV_AUTO_VERTICAL,
+        ma.ENV_MAX_LEAVES,
+        ma.ENV_MAX_NODES,
+        ma.ENV_AUTO_SPLIT,
+        ma.ENV_SPLIT_MAX_LEAVES,
+        ma.ENV_SPLIT_MAX_PARTS,
+        ma.ENV_VERTICAL_SWITCH,
+        ma.ENV_VERTICAL_THRESHOLD,
+        ma.ENV_PAPER_FONT_MIN_MM,
+        ma.ENV_AUTO_VERTICAL,
     ):
         _set_env(k, None)
 
@@ -70,7 +76,6 @@ def _data(nb: int, lp: int) -> dict:
 # A · 架构图超宽自动拆图：判定 / 几何 / 契约
 # ==========================================================================
 class TestArchAutoSplitDecision:
-
     def test_under_budget_no_split(self):
         """不超预算 ⇒ 判定为不拆（2 分支 × 3 叶 = 6 叶 < 默认上限 24）。"""
         _clean_arch_env()
@@ -136,8 +141,8 @@ class TestArchAutoSplitGeometry:
             root = normalize_architecture_tree(_data(4, 10))
             assert root is not None, "夹具已失效"
             groups, mm, single = ma.plan_architecture_split(
-                root, max_leaves=ma._arch_split_max_leaves(),
-                max_parts=ma._arch_split_max_parts())
+                root, max_leaves=ma._arch_split_max_leaves(), max_parts=ma._arch_split_max_parts()
+            )
             parts = len(groups)
             assert parts >= 2, f"该配置本应真的拆图，实际份数={parts}（用例空转）"
             assert mm > single, f"拆图只在严格更好时发生：{mm} vs 不拆 {single}"
@@ -153,14 +158,13 @@ class TestArchAutoSplitGeometry:
             part_h = []
             for k, grp in enumerate(groups, 1):
                 ps = ma._render_architecture_image_v2(
-                    {"label": f"{root_label}（第{k}/{parts}部分）", "children": grp},
-                    _allow_split=False)
+                    {"label": f"{root_label}（第{k}/{parts}部分）", "children": grp}, _allow_split=False
+                )
                 assert ps is not None, f"第 {k}/{parts} 张子图渲染失败"
                 part_h.append(Image.open(ps).height)
             expect = sum(part_h) + gap * (parts - 1)
             assert height == expect, (
-                f"交付堆叠必须与决策份数逐张对齐（{parts} 张，各高 {part_h}）："
-                f"应为 {expect}，实际 {height}"
+                f"交付堆叠必须与决策份数逐张对齐（{parts} 张，各高 {part_h}）：" f"应为 {expect}，实际 {height}"
             )
         finally:
             _set_env(ma.ENV_SPLIT_MAX_LEAVES, None)
@@ -228,9 +232,7 @@ class TestArchAutoSplitBehaviorFlip:
         monkeypatch.setattr(ma, "_arch_autosplit_enabled", lambda: True)
         on_w, on_h = self._size(4, 10)
         _set_env(ma.ENV_AUTO_SPLIT, None)
-        assert off_w > on_w and off_h < on_h, (
-            "env 关闭应回退单图（更宽更矮）；强制开启应拆图（更窄更高）"
-        )
+        assert off_w > on_w and off_h < on_h, "env 关闭应回退单图（更宽更矮）；强制开启应拆图（更窄更高）"
 
     def test_m2_group_size_flips_part_count(self, monkeypatch):
         """每组叶子上限放大到 100 ⇒ 全部分支落进 1 组 ⇒ 拼接近似等于单图。"""
@@ -257,12 +259,15 @@ class TestArchAutoSplitBehaviorFlip:
 # C · 三图标签加宽（非竖排修复）几何锁
 # ==========================================================================
 class TestChartLabelWiden:
-
     def test_comparison_label_slot_wider(self):
         """对比图标签槽 120→160、柱区 480→540 ⇒ 画布宽 = (75+850+100+1350) = 2450。"""
         stream = mc._render_comparison_image_v2(
-            {"rows": [{"label": "超长方案名称用于验证加宽后显示更多字符", "value": 30},
-                      {"label": "方案B", "value": 70}]}
+            {
+                "rows": [
+                    {"label": "超长方案名称用于验证加宽后显示更多字符", "value": 30},
+                    {"label": "方案B", "value": 70},
+                ]
+            }
         )
         assert stream is not None
         assert Image.open(stream).size == (2450, Image.open(stream).size[1])
@@ -278,8 +283,10 @@ class TestChartLabelWiden:
           ② 开着折行 ⇒ 取「每行 4 卡」的形态（n=24 ⇒ 6 行 × 4 卡），此时 960 设计 px
              的**最小宽度地板**不再遮蔽，整图宽 = `200+4*575+3*60 = 2680`，575 仍可观测。
         """
-        ms = [{"name": "很长的里程碑名称测试显示效果", "date": "2026-01-01",
-               "desc": "说明", "group": f"阶段{i % 2}"} for i in range(6)]
+        ms = [
+            {"name": "很长的里程碑名称测试显示效果", "date": "2026-01-01", "desc": "说明", "group": f"阶段{i % 2}"}
+            for i in range(6)
+        ]
         monkeypatch.setenv("TIMELINE_AUTO_WRAP", "0")
         stream = mt._render_timeline_image_v2({"milestones": ms})
         assert stream is not None
@@ -295,8 +302,12 @@ class TestChartLabelWiden:
     def test_layout_zone_wider(self):
         """布局图区域块 zone_w 220→260 ⇒ 2 区域(2 列) total_w = 200+2*650+80 = 1580。"""
         stream = ml._render_layout_image_v2(
-            {"zones": [{"name": "很长的区域名称测试显示效果", "category": "生产区"},
-                       {"name": "生活区", "category": "生活区"}]}
+            {
+                "zones": [
+                    {"name": "很长的区域名称测试显示效果", "category": "生产区"},
+                    {"name": "生活区", "category": "生活区"},
+                ]
+            }
         )
         assert stream is not None
         assert Image.open(stream).width == 1580
@@ -312,7 +323,6 @@ class TestChartLabelWiden:
 # D · 字节体检（CRLF 仓库的 .py 一律字节级改动，改完立即体检）
 # ==========================================================================
 class TestR61ByteIntegrity:
-
     @pytest.mark.parametrize("name", _TOUCHED)
     def test_file_bytes_clean(self, name):
         path = _AI_DIR / name
@@ -322,8 +332,7 @@ class TestR61ByteIntegrity:
         # 裸 LF（去掉 CRLF 后不应再有 \n）
         assert b"\n" not in raw.replace(b"\r\n", b""), f"{name} 存在裸 LF"
         # 控制字节 / 替换字符
-        for bad, label in ((b"\x00", "NUL"), (b"\x07", "BEL"), (b"\x0c", "FF"),
-                           (b"\xef\xbf\xbd", "U+FFFD")):
+        for bad, label in ((b"\x00", "NUL"), (b"\x07", "BEL"), (b"\x0c", "FF"), (b"\xef\xbf\xbd", "U+FFFD")):
             assert bad not in raw, f"{name} 含 {label}"
         py_compile.compile(str(path), doraise=True, cfile=str(path) + "c")
         try:

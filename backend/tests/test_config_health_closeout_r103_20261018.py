@@ -16,6 +16,7 @@
   D 组 · 源码锁：main.py 启动接线 + 熔断/冷却跳过日志降噪（R11 先例）；
   E 组 · 字节体检。
 """
+
 import ast
 import inspect
 import logging
@@ -43,15 +44,15 @@ def seed_reliability():
         pf._provider_reliability.pop("cfg:good-cfg", None)
 
 
-async def _insert_cfg(db, cid, provider="nvidia", model="glm-x",
-                      base_url="https://x.example/v1"):
+async def _insert_cfg(db, cid, provider="nvidia", model="glm-x", base_url="https://x.example/v1"):
     from app.services.crypto import encrypt_api_key
+
     await db.execute(
         "INSERT INTO ai_config (id, provider_name, plan, api_key_encrypted,"
         " base_url, model, is_active, priority, remark, timeout, concurrency)"
         " VALUES (?,?,?,?,?,?,?,?,'',60,4)",
-        (cid, provider, "pay_as_you_go", encrypt_api_key("sk-test"),
-         base_url, model, 1, 0))
+        (cid, provider, "pay_as_you_go", encrypt_api_key("sk-test"), base_url, model, 1, 0),
+    )
     await db.commit()
 
 
@@ -78,8 +79,7 @@ class TestProviderHealthSnapshot:
 
     def test_snapshot_has_full_shape(self):
         snap = pf.provider_health_snapshot("any", "m", "", "")
-        for key in ("samples", "success_rate", "dead", "circuit_open",
-                    "cooldown_remaining_s", "quota_cooldown_s"):
+        for key in ("samples", "success_rate", "dead", "circuit_open", "cooldown_remaining_s", "quota_cooldown_s"):
             assert key in snap, f"快照缺字段 {key}"
 
     def test_snapshot_agrees_with_is_dead_provider(self, seed_reliability):
@@ -93,8 +93,7 @@ class TestProviderHealthSnapshot:
 class TestReportDeadConfigsAtStartup:
     async def test_reports_only_dead_rows(self, db_conn, seed_reliability, caplog):
         await _insert_cfg(db_conn, "dead-cfg")
-        await _insert_cfg(db_conn, "good-cfg", provider="zhipu", model="glm-4",
-                          base_url="https://y.example/v1")
+        await _insert_cfg(db_conn, "good-cfg", provider="zhipu", model="glm-4", base_url="https://y.example/v1")
         with caplog.at_level(logging.WARNING, logger="provider_factory"):
             dead = await pf.report_dead_configs_at_startup()
         assert len(dead) == 1
@@ -111,8 +110,10 @@ class TestReportDeadConfigsAtStartup:
 
     async def test_fail_soft_on_db_error(self, monkeypatch):
         """DB 异常绝不向上传播（启动不得被报告阻断）。"""
+
         async def _boom():
             raise RuntimeError("db down")
+
         monkeypatch.setattr(pf, "get_conn", _boom)
         dead = await pf.report_dead_configs_at_startup()
         assert dead == []
@@ -120,12 +121,13 @@ class TestReportDeadConfigsAtStartup:
 
 # ---------------------------------------------------------------- C 组：接口接线
 class TestConfigsHealthRuntimeHealth:
-    async def test_items_carry_runtime_health_and_summary_counts(
-            self, db_conn, seed_reliability, monkeypatch):
+    async def test_items_carry_runtime_health_and_summary_counts(self, db_conn, seed_reliability, monkeypatch):
         await _insert_cfg(db_conn, "dead-cfg")
+
         # 网络预检打桩：避免用例依赖真实 DNS/TCP
         async def _fake_net(url):
             return {"ok": True, "step": "ok", "ip": "1.2.3.4", "message": ""}
+
         monkeypatch.setattr(conn_mod, "_dns_precheck_async", _fake_net)
         monkeypatch.setattr(conn_mod, "decrypt_api_key", lambda enc: "sk-test")
 
@@ -143,30 +145,34 @@ class TestConfigsHealthRuntimeHealth:
 
         def _spy(provider_name, model="", config_id="", base_url=""):
             calls.append((provider_name, model, config_id))
-            return {"samples": 0, "success_rate": None, "dead": False,
-                    "circuit_open": False, "cooldown_remaining_s": 0.0,
-                    "quota_cooldown_s": 0.0}
+            return {
+                "samples": 0,
+                "success_rate": None,
+                "dead": False,
+                "circuit_open": False,
+                "cooldown_remaining_s": 0.0,
+                "quota_cooldown_s": 0.0,
+            }
 
         monkeypatch.setattr(pf, "provider_health_snapshot", _spy)
+
         async def _fake_net(url):
             return {"ok": True, "step": "ok", "ip": "", "message": ""}
+
         monkeypatch.setattr(conn_mod, "_dns_precheck_async", _fake_net)
         monkeypatch.setattr(conn_mod, "decrypt_api_key", lambda enc: "sk-test")
 
         await conn_mod.configs_health(db=db_conn)
         assert calls, "configs_health 必须调用 provider_health_snapshot"
-        assert all(c[2] == "c-probe" for c in calls), (
-            "快照身份必须带 config_id（与运行时 cfg:{id} 键一致）")
+        assert all(c[2] == "c-probe" for c in calls), "快照身份必须带 config_id（与运行时 cfg:{id} 键一致）"
 
 
 # ---------------------------------------------------------------- D 组：源码锁
 class TestSourceLocks:
     def test_main_wires_startup_report(self):
         src = MAIN_PY.read_text(encoding="utf-8")
-        assert "report_dead_configs_at_startup" in src, (
-            "main.py lifespan 必须接线启动死配置报告")
-        assert "启动死配置报告失败（不影响服务）" in src, (
-            "接线必须 fail-soft（异常只记 warning 不阻断启动）")
+        assert "report_dead_configs_at_startup" in src, "main.py lifespan 必须接线启动死配置报告"
+        assert "启动死配置报告失败（不影响服务）" in src, "接线必须 fail-soft（异常只记 warning 不阻断启动）"
 
     def test_startup_report_after_warmup(self):
         """报告必须在可靠性预热之后（否则统计还没恢复，报告恒空）。"""
@@ -188,13 +194,11 @@ class TestSourceLocks:
         """接口只经单一访问器取健康态，不内联另写判据。"""
         src = CONN_PY.read_text(encoding="utf-8")
         assert "provider_health_snapshot(" in src
-        assert "_is_dead_provider" not in src, (
-            "connectivity 不得自己调死配置判定（判据必须单一出口）")
+        assert "_is_dead_provider" not in src, "connectivity 不得自己调死配置判定（判据必须单一出口）"
 
     def test_snapshot_function_defined_once(self):
         tree = ast.parse(PF_PY.read_text(encoding="utf-8"))
-        names = [n.name for n in ast.walk(tree)
-                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        names = [n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
         assert names.count("provider_health_snapshot") == 1
         assert names.count("report_dead_configs_at_startup") == 1
 

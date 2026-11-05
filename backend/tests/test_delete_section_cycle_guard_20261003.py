@@ -15,6 +15,7 @@ pending，永不相交于空 → all_ids / pending 无限增长，请求永久�
 `if r["id"] not in descendants` 去重 —— 两处一份有守卫一份没有，属判据分叉。
 本文件锁死 delete_section 侧的守卫，并顺带验证正常（无环）级联删除行为不回退。
 """
+
 import asyncio
 import uuid
 
@@ -39,12 +40,12 @@ async def ctx(monkeypatch):
 
     monkeypatch.setattr(_appdb, "get_conn", fake_get_conn)
     import app.services.ai.task_registry as _tr
+
     monkeypatch.setattr(_tr, "get_conn", fake_get_conn)
 
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await conn.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await conn.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+    await conn.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await conn.commit()
     yield conn, sid
     await conn.close()
@@ -57,7 +58,8 @@ async def _seed(conn, sid, pid, rows):
             "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
             " level, sort_order, status, word_budget)"
             " VALUES (?,?,?,?,?,?,?,?,?)",
-            (nid, sid, pid, parent, title, level, 0, "empty", 1500))
+            (nid, sid, pid, parent, title, level, 0, "empty", 1500),
+        )
     await conn.commit()
 
 
@@ -71,10 +73,15 @@ class TestDeleteSectionCycleGuard:
         """环形 A<->B：删除必须收敛返回，而不是无限循环挂起。"""
         conn, sid = ctx
         A, B = uuid.uuid4().hex, uuid.uuid4().hex
-        await _seed(conn, sid, "p", [
-            (A, B, "A", 2),   # A 的父是 B
-            (B, A, "B", 2),   # B 的父是 A —— 成环
-        ])
+        await _seed(
+            conn,
+            sid,
+            "p",
+            [
+                (A, B, "A", 2),  # A 的父是 B
+                (B, A, "B", 2),  # B 的父是 A —— 成环
+            ],
+        )
         # 若遍历无 visited 去重，这里会永久阻塞 → wait_for 抛 TimeoutError
         await asyncio.wait_for(delete_section(sid, A, conn), timeout=5)
         remaining = await _remaining(conn, sid)
@@ -84,12 +91,17 @@ class TestDeleteSectionCycleGuard:
         """正常（无环）三级链：删除父节点应级联删掉全部后代，行为不回退。"""
         conn, sid = ctx
         root, child, grand, other = (uuid.uuid4().hex for _ in range(4))
-        await _seed(conn, sid, "p", [
-            (root, "", "根", 1),
-            (child, root, "子", 2),
-            (grand, child, "孙", 3),
-            (other, "", "另一根", 1),
-        ])
+        await _seed(
+            conn,
+            sid,
+            "p",
+            [
+                (root, "", "根", 1),
+                (child, root, "子", 2),
+                (grand, child, "孙", 3),
+                (other, "", "另一根", 1),
+            ],
+        )
         await asyncio.wait_for(delete_section(sid, root, conn), timeout=5)
         remaining = await _remaining(conn, sid)
         assert remaining == {other}
@@ -100,12 +112,17 @@ class TestDeleteSectionCycleGuard:
         """菱形：删除集合内每个后代只入队一次，DELETE 参数无重复 id。"""
         conn, sid = ctx
         top, left, right, bottom = (uuid.uuid4().hex for _ in range(4))
-        await _seed(conn, sid, "p", [
-            (top, "", "顶", 1),
-            (left, top, "左", 2),
-            (right, top, "右", 2),
-            (bottom, left, "底", 3),
-        ])
+        await _seed(
+            conn,
+            sid,
+            "p",
+            [
+                (top, "", "顶", 1),
+                (left, top, "左", 2),
+                (right, top, "右", 2),
+                (bottom, left, "底", 3),
+            ],
+        )
         await asyncio.wait_for(delete_section(sid, top, conn), timeout=5)
         remaining = await _remaining(conn, sid)
         assert remaining == set()

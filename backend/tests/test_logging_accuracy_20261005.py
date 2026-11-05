@@ -22,6 +22,7 @@
 
 约束：本轮**只改日志文本/级别，不改 SSE 载荷 message、不改任何控制流**。
 """
+
 import inspect
 import logging
 import re
@@ -56,52 +57,60 @@ TR_FLAT = re.sub(r"\s+", " ", TR_SRC)
 class TestLevelCaliber:
     def test_context_assembly_downgrade_is_warning(self):
         """降级为「空上下文继续」= 可恢复异常 → 必须 WARNING（不得 exception）。"""
-        assert 'logger.warning("目录生成上下文装配失败' in SSE_FLAT
-        assert 'logger.exception("目录生成上下文装配失败' not in SSE_FLAT
+        assert re.search(r"logger\.warning\(\s*['\"]目录生成上下文装配失败", SSE_FLAT)
+        assert not re.search(r"logger\.exception\(\s*['\"]目录生成上下文装配失败", SSE_FLAT)
         # 既然是失败仍须留堆栈（exc_info），但级别不能是 ERROR
         assert re.search(
-            r'logger\.warning\("目录生成上下文装配失败[^)]*exc_info=True\)',
-            SSE_FLAT), "降级告警丢失 exc_info=True"
+            r"logger\.warning\(\s*['\"]目录生成上下文装配失败[^)]*exc_info=True\s*,?\s*\)", SSE_FLAT
+        ), "降级告警丢失 exc_info=True"
 
     def test_downgrade_warning_carries_identity(self):
         """降级告警必须带 scheme_id + task_id，否则并发时无法定位。"""
         # ⚠️ 字符串里含 ASCII 引号时必须用单引号 Python 字面量，否则首个 `"`
         # 会被当成字符串定界符（本轮首版护栏即因此 4 例误报）。
-        needle = ('目录生成上下文装配失败（降级为空上下文继续 · scheme_id=%s · task=%s）'
-                  '", scheme_id, task_id')
-        assert needle in SSE_FLAT, needle
+        assert re.search(
+            r'目录生成上下文装配失败（降级为空上下文继续 · scheme_id=%s · task=%s）"\s*,\s*scheme_id\s*,\s*task_id',
+            SSE_FLAT,
+        ), "降级告警必须带 scheme_id + task_id"
 
 
 # ============================================================
 # 2. 失败日志必须带身份标识
 # ============================================================
 class TestFailureIdentity:
-    @pytest.mark.parametrize("msg", [
-        "目录生成失败",
-        "正文生成失败",
-        "全局事实提取失败",
-    ])
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "目录生成失败",
+            "正文生成失败",
+            "全局事实提取失败",
+        ],
+    )
     def test_top_level_failure_carries_scheme_and_task(self, msg):
         """三条顶层终态失败必须带 scheme_id + task_id。"""
-        assert f'logger.exception("{msg}（scheme_id=%s · task=%s）", scheme_id, task_id)' \
-            in SSE_FLAT, f"{msg} 未带方案/任务标识"
+        assert (
+            f'logger.exception("{msg}（scheme_id=%s · task=%s）", scheme_id, task_id)' in SSE_FLAT
+        ), f"{msg} 未带方案/任务标识"
 
     def test_section_failure_carries_section_title_scheme_task(self):
         """章节「最终失败」（单章重试耗尽）必须四标识齐全。"""
-        needle = ('章节生成最终失败（section_id=%s · title=%s · scheme_id=%s · task=%s）: %s'
-                  '", leaf_id, title, scheme_id, task_id, last_err')
+        needle = (
+            "章节生成最终失败（section_id=%s · title=%s · scheme_id=%s · task=%s）: %s"
+            '", leaf_id, title, scheme_id, task_id, last_err'
+        )
         assert needle in SSE_FLAT, needle
 
     def test_section_task_exception_logs_traceback(self):
         """章节子任务异常（可恢复外的兜底）必须补堆栈 + 标识。"""
-        needle = ('章节生成子任务异常（scheme_id=%s · task=%s）: %s'
-                  '", scheme_id, task_id, e, exc_info=True')
+        needle = "章节生成子任务异常（scheme_id=%s · task=%s）: %s" '", scheme_id, task_id, e, exc_info=True'
         assert needle in SSE_FLAT, needle
 
     def test_unexpected_section_exception_keeps_identity_and_traceback(self):
         """guarded_gen 兜底分支的堆栈日志必须同时带上方案/任务标识。"""
-        needle = ('章节生成未预期异常（section_id=%s · title=%s · scheme_id=%s · task=%s）: %s'
-                  '", leaf_id, title, scheme_id, task_id, e, exc_info=True')
+        needle = (
+            "章节生成未预期异常（section_id=%s · title=%s · scheme_id=%s · task=%s）: %s"
+            '", leaf_id, title, scheme_id, task_id, e, exc_info=True'
+        )
         assert needle in SSE_FLAT, needle
 
 
@@ -113,31 +122,32 @@ class TestCheckpointLogUnification:
 
     def test_unified_prefix_used_everywhere(self):
         """13 处 checkpoint 写盘失败告警必须全部走统一前缀（可一次 grep 命中）。"""
-        assert SSE_FLAT.count(self.CHECKPOINT_PREFIX) == 13, (
-            "checkpoint 告警应恰为 13 处：增删该类告警都要同步本断言")
+        assert (
+            len(re.findall(r'logger\.warning\(\s*"检查点写入失败', SSE_FLAT)) == 13
+        ), "checkpoint 告警应恰为 13 处：增删该类告警都要同步本断言"
 
     def test_no_double_failure_phrase(self):
         """禁止「…失败 checkpoint 失败」双失败歧义句式（原 8 处的真实原文）。"""
         assert "失败 checkpoint 失败" not in SSE_SRC
-        for legacy in ("保存目录生成 checkpoint 失败",
-                       "保存正文生成 checkpoint 失败",
-                       "保存目录部分成果 checkpoint 失败",
-                       "保存正文全章失败 checkpoint 失败",
-                       "取消路径保存正文 checkpoint 失败"):
+        for legacy in (
+            "保存目录生成 checkpoint 失败",
+            "保存正文生成 checkpoint 失败",
+            "保存目录部分成果 checkpoint 失败",
+            "保存正文全章失败 checkpoint 失败",
+            "取消路径保存正文 checkpoint 失败",
+        ):
             assert legacy not in SSE_SRC, f"遗留告警原文未替换: {legacy}"
 
     def test_checkpoint_warnings_are_not_bare_exception(self):
         """checkpoint 写盘失败是可恢复异常 → 只能 WARNING，不得升级为 ERROR。"""
-        bad = [ln for ln in SSE_SRC.splitlines()
-               if "检查点写入失败" in ln and "logger.error" in ln]
+        bad = [ln for ln in SSE_SRC.splitlines() if "检查点写入失败" in ln and "logger.error" in ln]
         assert not bad, f"checkpoint 告警被升级为 ERROR: {bad}"
 
     def test_unified_messages_carry_business_and_scene(self):
         """统一前缀必须带业务域（目录生成/正文生成/事实提取）与场景标签。"""
         for biz in ("· 目录生成 ·", "· 正文生成 ·", "· 事实提取 ·"):
             assert biz in SSE_SRC, f"统一前缀缺少业务域: {biz}"
-        for scene in ("部分成果", "终态成果", "阶段成果", "取消路径成果",
-                      "异常终止明细", "成果已落库"):
+        for scene in ("部分成果", "终态成果", "阶段成果", "取消路径成果", "异常终止明细", "成果已落库"):
             assert scene in SSE_SRC, f"统一前缀缺少场景标签: {scene}"
 
 
@@ -160,7 +170,7 @@ class TestAuditChainSchemeIdentity:
         """7 处目录审核/修复链告警必须带方案身份（多方案并发时的唯一线索）。"""
         assert msg in SSE_FLAT, f"审核链告警缺失或未带 scheme 标识: {msg}"
         i = SSE_FLAT.index(msg)
-        window = SSE_FLAT[i:i + 200]
+        window = SSE_FLAT[i : i + 200]
         assert "scheme_name" in window, f"告警未传 scheme_name: {msg}"
 
 
@@ -174,8 +184,12 @@ class TestFinishTaskTerminalLog:
 
     def test_non_completed_logged_with_status_and_message(self):
         """非完成终态（failed/stopped）必须记状态 + 截断后的失败消息。"""
-        assert 'logger.info("任务终止 %s（type=%s · scheme=%s · task=%s）: %s"' in TR_FLAT
-        assert "(message or \"\")[:120]" in TR_FLAT, "终态消息未截断（可能刷爆日志）"
+        # ✅ R180（2026-11-05）：终态行新增可聚合的 reason=%s（取消来源），
+        #    护栏改为「reason 段可选」以兼容旧格式，状态/消息不变。
+        assert re.search(
+            r'logger\.info\(\s*"任务终止 %s（type=%s · scheme=%s · task=%s(?: · reason=%s)?）: %s"', TR_FLAT
+        )
+        assert '(message or "")[:120]' in TR_FLAT, "终态消息未截断（可能刷爆日志）"
 
     def test_info_is_guarded_by_terminal_db_ok(self):
         """INFO 必须以 `_terminal_db_ok` 为门 —— 落库失败时上一行已按 ERROR
@@ -188,7 +202,11 @@ class TestFinishTaskTerminalLog:
         order = [
             "state = _tasks.get(task_id)",
             "_terminal_db_ok = False",
-            "await retry_db_op(",
+            # ✅ R180（2026-11-05）：R177 取消风暴加固把终态落库包进
+            #    `await asyncio.shield(retry_db_op(...))`，源码不再出现裸
+            #    `await retry_db_op(`。锁定的不变式不变：重试落库 → 成功标记
+            #    → 失败 ERROR → 成功后 INFO，顺序与门控必须保持。
+            "retry_db_op(",
             "_terminal_db_ok = True",
             'logger.error("finish_task 终态落库失败',
             "if _terminal_db_ok:",
@@ -196,9 +214,9 @@ class TestFinishTaskTerminalLog:
         ]
         pos = [fin.find(tok) for tok in order]
         assert all(p >= 0 for p in pos), dict(zip(order, pos))
-        assert pos == sorted(pos), (
-            "终态日志门控时序被破坏（应先落库、失败记 ERROR、"
-            "仅成功后才记 INFO）: " + str(dict(zip(order, pos))))
+        assert pos == sorted(pos), "终态日志门控时序被破坏（应先落库、失败记 ERROR、" "仅成功后才记 INFO）: " + str(
+            dict(zip(order, pos))
+        )
 
 
 # ============================================================
@@ -207,11 +225,9 @@ class TestFinishTaskTerminalLog:
 class TestFinishTaskLogBehavior:
     async def test_completed_emits_info_with_identity(self, db_conn, caplog):
         caplog.set_level(logging.INFO)
-        tid = await register_task("generate_outline",
-                                  project_id="p1", scheme_id="scheme-42")
+        tid = await register_task("generate_outline", project_id="p1", scheme_id="scheme-42")
         await finish_task(tid, "completed", "目录生成完成")
-        msgs = [r.getMessage() for r in caplog.records
-                if r.levelno == logging.INFO and "任务完成（" in r.getMessage()]
+        msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO and "任务完成（" in r.getMessage()]
         assert len(msgs) == 1, msgs
         m = msgs[0]
         assert "type=generate_outline" in m
@@ -222,14 +238,12 @@ class TestFinishTaskLogBehavior:
         caplog.set_level(logging.INFO)
         tid = await register_task("generate_content", scheme_id="scheme-7")
         await finish_task(tid, "failed", "全部 38 章生成失败")
-        msgs = [r.getMessage() for r in caplog.records
-                if r.levelno == logging.INFO and "任务终止" in r.getMessage()]
+        msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO and "任务终止" in r.getMessage()]
         assert len(msgs) == 1, msgs
         assert "status=failed" not in msgs[0] and "终止 failed" in msgs[0]
         assert "scheme-7" in msgs[0] and "全部 38 章生成失败" in msgs[0]
 
-    async def test_db_failure_logs_error_without_contradictory_info(
-            self, db_conn, monkeypatch, caplog):
+    async def test_db_failure_logs_error_without_contradictory_info(self, db_conn, monkeypatch, caplog):
         """终态落库失败 → 只有 ERROR，不得再补一条「任务完成」INFO。"""
         caplog.set_level(logging.INFO)
 
@@ -242,5 +256,4 @@ class TestFinishTaskLogBehavior:
         await finish_task(tid, "completed", "目录生成完成")
         texts = [r.getMessage() for r in caplog.records]
         assert any("finish_task 终态落库失败" in t for t in texts), texts
-        assert not any("任务完成（" in t for t in texts), (
-            "落库失败仍记了「任务完成」，与 ERROR 构成矛盾日志")
+        assert not any("任务完成（" in t for t in texts), "落库失败仍记了「任务完成」，与 ERROR 构成矛盾日志"

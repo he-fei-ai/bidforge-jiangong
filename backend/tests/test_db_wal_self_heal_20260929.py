@@ -18,6 +18,7 @@ task 更新 → database is locked）全线失败，全局事实等重度依赖 
 - 安全网：主库本身损坏时，自愈失败会**还原备份、返回 False、绝不删除主库**
   （最关键的不变量：绝不雪上加霜、绝不谎报成功）。
 """
+
 import sqlite3 as _s3
 from unittest.mock import patch
 
@@ -56,8 +57,7 @@ def test_no_wal_is_noop(monkeypatch, tmp_path):
     assert healed is False
     # 主库未被触碰、未生成备份目录
     assert p.exists() and p.stat().st_size == before
-    baks = [d for d in tmp_path.iterdir()
-            if d.is_dir() and d.name.startswith("recov_bak_")]
+    baks = [d for d in tmp_path.iterdir() if d.is_dir() and d.name.startswith("recov_bak_")]
     assert not baks, "无 WAL 时不应生成备份"
 
 
@@ -80,6 +80,7 @@ def test_self_heal_removes_corrupt_wal(monkeypatch, tmp_path):
             class _R:
                 def fetchone(self):
                     return ("ok",) if calls["n"] >= 2 else ("corrupt_tree", "")
+
             return _R()
 
         def close(self):
@@ -92,8 +93,7 @@ def test_self_heal_removes_corrupt_wal(monkeypatch, tmp_path):
     # WAL 已被删除
     assert not p.with_name(p.name + "-wal").exists()
     # 备份目录已生成（含主库副本）
-    baks = [d for d in tmp_path.iterdir()
-            if d.is_dir() and d.name.startswith("recov_bak_")]
+    baks = [d for d in tmp_path.iterdir() if d.is_dir() and d.name.startswith("recov_bak_")]
     assert baks, "自愈应生成 recov_bak 备份目录"
     assert (baks[0] / "heal.db").exists()
     # 主库数据未丢
@@ -126,12 +126,15 @@ def test_self_heal_restores_when_main_still_corrupt(monkeypatch, tmp_path):
     class _FakeConn:
         def __init__(self, n):
             self._n = n
+
         def execute(self, sql, *a):
             class _R:
                 def fetchone(self):
                     # 两次都非 ok：模拟「主库本身也损坏」
                     return ("corrupt_btree", "")
+
             return _R()
+
         def close(self):
             pass
 
@@ -143,7 +146,6 @@ def test_self_heal_restores_when_main_still_corrupt(monkeypatch, tmp_path):
     # 主库文件未被删除、大小不变（未被截断/移除，备份被还原）
     assert p.exists() and p.stat().st_size == size_before
     # 应生成备份目录（含主库副本，便于事后人工介入）
-    baks = [d for d in tmp_path.iterdir()
-            if d.is_dir() and d.name.startswith("recov_bak_")]
+    baks = [d for d in tmp_path.iterdir() if d.is_dir() and d.name.startswith("recov_bak_")]
     assert baks, "主库损坏时应仍生成备份（便于人工介入）"
     assert (baks[0] / "heal_main_corrupt.db").exists()

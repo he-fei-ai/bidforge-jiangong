@@ -6,6 +6,7 @@
   3. sweep_temp：只删匹配模式、不误删其它、异常不阻塞；
   4. register_shutdown_cleanup：回调执行、幂等登记、异常回调不冒泡中断关闭。
 """
+
 import subprocess
 import sys
 import time
@@ -28,8 +29,7 @@ class TestRunChild:
         """sleep(30) 用 1s 超时应被回收并抛 TimeoutExpired，而不是真等 30s。"""
         t0 = time.monotonic()
         with pytest.raises(subprocess.TimeoutExpired):
-            pc.run_child(
-                [sys.executable, "-c", "import time; time.sleep(30)"], timeout=1)
+            pc.run_child([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1)
         elapsed = time.monotonic() - t0
         # 允许收尾余量，但绝不能接近 30s（证明超时生效且子进程被回收）
         assert elapsed < 10, f"超时未生效，耗时 {elapsed:.1f}s"
@@ -41,8 +41,8 @@ class TestRunChild:
 class TestKillProcessTree:
     def test_kills_a_live_child(self):
         proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(30)"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            [sys.executable, "-c", "import time; time.sleep(30)"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
         pid = proc.pid
         assert pc.kill_process_tree(pid, grace_sec=5) is True
         assert pc._pid_alive(pid) is False
@@ -63,8 +63,8 @@ class TestKillProcessTree:
 class TestAssignJob:
     def test_never_raises(self):
         proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(2)"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            [sys.executable, "-c", "import time; time.sleep(2)"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
         try:
             ok = pc.assign_pid_to_kill_job(proc.pid)
             assert isinstance(ok, bool)

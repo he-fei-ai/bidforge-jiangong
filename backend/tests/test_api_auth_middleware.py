@@ -11,6 +11,7 @@
 - 豁免路径（/health、接口文档）无需凭据
 - CORS 预检 OPTIONS 不得被鉴权拦成 401（否则浏览器跨域调用整体失效）
 """
+
 import pytest
 from app.config import settings
 from app.middleware import setup_middleware
@@ -44,6 +45,7 @@ def _make_client(monkeypatch, token: str) -> TestClient:
 # token 为空：行为必须与改造前完全一致
 # ---------------------------------------------------------------------------
 
+
 def test_empty_token_allows_everything(monkeypatch):
     client = _make_client(monkeypatch, "")
     assert client.get("/api/v1/health").status_code == 200
@@ -54,6 +56,7 @@ def test_empty_token_allows_everything(monkeypatch):
 # ---------------------------------------------------------------------------
 # token 非空：拦截与放行
 # ---------------------------------------------------------------------------
+
 
 def test_token_required_when_configured(monkeypatch):
     client = _make_client(monkeypatch, TOKEN)
@@ -75,33 +78,27 @@ def test_x_api_key_header_accepted(monkeypatch):
 
 def test_bearer_token_accepted(monkeypatch):
     client = _make_client(monkeypatch, TOKEN)
-    resp = client.get("/api/v1/projects",
-                      headers={"Authorization": f"Bearer {TOKEN}"})
+    resp = client.get("/api/v1/projects", headers={"Authorization": f"Bearer {TOKEN}"})
     assert resp.status_code == 200
 
 
 def test_bearer_prefix_is_case_insensitive(monkeypatch):
     client = _make_client(monkeypatch, TOKEN)
-    resp = client.get("/api/v1/projects",
-                      headers={"Authorization": f"bearer {TOKEN}"})
+    resp = client.get("/api/v1/projects", headers={"Authorization": f"bearer {TOKEN}"})
     assert resp.status_code == 200
 
 
 def test_wrong_or_missing_credential_rejected(monkeypatch):
     client = _make_client(monkeypatch, TOKEN)
-    assert client.get("/api/v1/projects",
-                      headers={"X-API-Key": "wrong"}).status_code == 401
-    assert client.get("/api/v1/projects",
-                      headers={"Authorization": "Bearer nope"}).status_code == 401
-    assert client.get("/api/v1/projects",
-                      headers={"Authorization": TOKEN}).status_code == 401
+    assert client.get("/api/v1/projects", headers={"X-API-Key": "wrong"}).status_code == 401
+    assert client.get("/api/v1/projects", headers={"Authorization": "Bearer nope"}).status_code == 401
+    assert client.get("/api/v1/projects", headers={"Authorization": TOKEN}).status_code == 401
 
 
 def test_write_endpoints_also_protected(monkeypatch):
     client = _make_client(monkeypatch, TOKEN)
     assert client.post("/api/v1/global-facts/upload-documents").status_code == 401
-    assert client.post("/api/v1/global-facts/upload-documents",
-                       headers={"X-API-Key": TOKEN}).status_code == 200
+    assert client.post("/api/v1/global-facts/upload-documents", headers={"X-API-Key": TOKEN}).status_code == 200
 
 
 def test_health_is_exempt(monkeypatch):
@@ -113,9 +110,8 @@ def test_cors_preflight_not_blocked_by_auth(monkeypatch):
     """回归：预检 OPTIONS 不带自定义头，若被鉴权拦截，跨域调用会整体失效。"""
     client = _make_client(monkeypatch, TOKEN)
     resp = client.options(
-        "/api/v1/projects",
-        headers={"Origin": "http://lan-host:5175",
-                 "Access-Control-Request-Method": "GET"})
+        "/api/v1/projects", headers={"Origin": "http://lan-host:5175", "Access-Control-Request-Method": "GET"}
+    )
     assert resp.status_code == 200
     assert resp.headers.get("access-control-allow-origin") == "*"
 
@@ -144,21 +140,22 @@ def test_non_ascii_api_key_returns_401_not_500(monkeypatch):
 
 def test_non_ascii_bearer_token_returns_401_not_500(monkeypatch):
     client = _make_client(monkeypatch, TOKEN)
-    resp = client.get("/api/v1/projects",
-                      headers={"Authorization": b"Bearer t\xf6k\xe9n"})
+    resp = client.get("/api/v1/projects", headers={"Authorization": b"Bearer t\xf6k\xe9n"})
     assert resp.status_code == 401
 
 
-@pytest.mark.parametrize("raw", [
-    b"t\xf6k\xe9n",          # 非 ASCII（latin-1 可表示）
-    b"\xff\xfe\xfd",         # 高位字节
-    b"   ",                  # 全空白 → strip 后为空
-    b"x" * 5000,             # 超长
-    b"",                     # 空
-])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"t\xf6k\xe9n",  # 非 ASCII（latin-1 可表示）
+        b"\xff\xfe\xfd",  # 高位字节
+        b"   ",  # 全空白 → strip 后为空
+        b"x" * 5000,  # 超长
+        b"",  # 空
+    ],
+)
 def test_malformed_credentials_never_produce_5xx(monkeypatch, raw):
     """任何畸形凭据都只能得到 401：鉴权中间件不得因输入异常而崩溃。"""
     client = _make_client(monkeypatch, TOKEN)
     resp = client.get("/api/v1/projects", headers={"X-API-Key": raw})
     assert resp.status_code == 401, f"{raw!r} -> {resp.status_code}"
-

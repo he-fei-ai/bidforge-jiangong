@@ -15,6 +15,7 @@ B. 标准库收录（STD-03 证据驱动）—— 生产检出但此前不可自
    「碰巧含关键字」的全文件匹配。
 ⚠️ A/B 反向验证：留痕合并摘掉 / 编号撤出注册表 → 各定向失败。
 """
+
 from __future__ import annotations
 
 import re
@@ -28,8 +29,7 @@ from app.services.content_checkpoint import (
     fix_bare_standard_codes,
 )
 
-_SSE_SRC = (Path(__file__).resolve().parent.parent
-            / "app" / "routers" / "sse_handlers.py").read_text(encoding="utf-8")
+_SSE_SRC = (Path(__file__).resolve().parent.parent / "app" / "routers" / "sse_handlers.py").read_text(encoding="utf-8")
 
 #: R27/R29 收录的编号（基号 → 完整编号）。
 #: R27（2026-10-02）5 个；R29（检查点反哺 · STD-03 证据驱动）3 个。
@@ -49,8 +49,8 @@ NEW_CODES = {
 # A. checkpoint_fixes 留痕存活
 # ---------------------------------------------------------------------------
 
-class TestFixesTraceSurvival:
 
+class TestFixesTraceSurvival:
     def test_remerge_wired_after_report_rebuild(self):
         """standard_report 重建之后的窗口内必须把留痕重新挂回。
 
@@ -58,17 +58,18 @@ class TestFixesTraceSurvival:
         600 窗口会把赋值行拦腰截断 —— 本轮实测踩到）。
         """
         at = _SSE_SRC.index("report = standard_report(")
-        window = _SSE_SRC[at:at + 900]
-        assert 'report["checkpoint_fixes"] = _ck_fix_actions' in window, (
-            "standard_report 重建后未恢复 checkpoint_fixes（留痕覆盖丢失）")
+        window = _SSE_SRC[at : at + 900]
+        assert (
+            'report["checkpoint_fixes"] = _ck_fix_actions' in window
+        ), "standard_report 重建后未恢复 checkpoint_fixes（留痕覆盖丢失）"
 
     def test_remerge_gated_on_nonempty(self):
         """无修复动作时不写空键（产物与旧版逐字一致，向后兼容红线）。"""
         at = _SSE_SRC.index("report = standard_report(")
-        window = _SSE_SRC[at:at + 900]
+        window = _SSE_SRC[at : at + 900]
         assert re.search(
-            r"if _ck_fix_actions:\s*\n\s*report\[\"checkpoint_fixes\"\]"
-            r" = _ck_fix_actions", window, re.DOTALL), "合并必须先判非空（空留痕不得入报告）"
+            r"if _ck_fix_actions:\s*\n\s*report\[\"checkpoint_fixes\"\]" r" = _ck_fix_actions", window, re.DOTALL
+        ), "合并必须先判非空（空留痕不得入报告）"
 
     def test_autofix_still_before_report(self):
         """既有红线不破：修复在任何报告计算之前（防本轮改动位移破坏顺序）。"""
@@ -82,9 +83,9 @@ class TestFixesTraceSurvival:
         content, actions = fix_bare_standard_codes(text)
         actions = [a for a in actions if a.get("fixed")]
         assert actions and "GB 50140-2005" in content
-        report = {"error_count": 0}            # standard_report 重建产物
-        report["checkpoint_fixes"] = actions   # 重建前写入（会被覆盖的形态）
-        report = dict(report or {})            # 模拟重建
+        report = {"error_count": 0}  # standard_report 重建产物
+        report["checkpoint_fixes"] = actions  # 重建前写入（会被覆盖的形态）
+        report = dict(report or {})  # 模拟重建
         if actions:
             report["checkpoint_fixes"] = actions  # 本轮补的合并
         assert len(report["checkpoint_fixes"]) == len(actions)
@@ -95,17 +96,17 @@ class TestFixesTraceSurvival:
         _content, actions = fix_bare_standard_codes(text)
         actions = [a for a in actions if a.get("fixed")]
         report = {"checkpoint_fixes": actions}
-        rebuilt = {"error_count": 0}           # 无合并的直接替换
+        rebuilt = {"error_count": 0}  # 无合并的直接替换
         assert "checkpoint_fixes" not in rebuilt
-        assert "checkpoint_fixes" in report     # 旧写入点本身没问题，问题在替换
+        assert "checkpoint_fixes" in report  # 旧写入点本身没问题，问题在替换
 
 
 # ---------------------------------------------------------------------------
 # B. 标准库收录（注册表 → BASE_CODE_INDEX 单一来源链路）
 # ---------------------------------------------------------------------------
 
-class TestRegistryAdditions:
 
+class TestRegistryAdditions:
     @pytest.mark.parametrize("base,full", sorted(NEW_CODES.items()))
     def test_code_indexed_and_fixable(self, base, full):
         """注册表入库即进索引；裸号可被确定性补全年号。
@@ -146,10 +147,8 @@ class TestRegistryAdditions:
                 base2code[base] = s.code
             elif cur != s.code:
                 ambiguous.add(base)
-        assert not (ambiguous & {_normalize_code_for_index(b) for b in NEW_CODES}), (
-            f"歧义基号: {ambiguous}")
-        assert all(BASE_CODE_INDEX.get(_normalize_code_for_index(b)) == f
-                   for b, f in NEW_CODES.items())
+        assert not (ambiguous & {_normalize_code_for_index(b) for b in NEW_CODES}), f"歧义基号: {ambiguous}"
+        assert all(BASE_CODE_INDEX.get(_normalize_code_for_index(b)) == f for b, f in NEW_CODES.items())
 
     def test_new_codes_not_in_abolished(self):
         """收录的是现行版；旧版若在册必须是废止登记（防自相矛盾）。"""
@@ -160,12 +159,11 @@ class TestRegistryAdditions:
         """A/B 对照：把条目撤出注册表 → 索引随之失活（单一来源链路成立）。"""
         saved = {k: list(v) for k, v in sr.CATEGORY_STANDARDS.items()}
         try:
-            without = {k: [s for s in v
-                           if s.code not in NEW_CODES.values()]
-                       for k, v in saved.items()}
+            without = {k: [s for s in v if s.code not in NEW_CODES.values()] for k, v in saved.items()}
             sr.CATEGORY_STANDARDS.clear()
             sr.CATEGORY_STANDARDS.update(without)
             import app.services.content_checkpoint as mod
+
             idx, _amb = mod._build_base_code_index()
             for base in NEW_CODES:
                 assert _normalize_code_for_index(base) not in idx, base

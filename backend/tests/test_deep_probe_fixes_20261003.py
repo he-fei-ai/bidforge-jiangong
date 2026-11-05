@@ -13,6 +13,7 @@
   同一 DB 主键被两个节点携带时旧实现对同一行发两次 UPDATE，两节点坍缩
   成一章、子章节 parent 错挂，返回 ok 却目录树少一章。
 """
+
 import ast
 import inspect
 import uuid
@@ -37,8 +38,7 @@ async def db_ctx(tmp_path):
     for _ in range(2):
         pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
         await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-        await db.execute(
-            "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+        await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
         scopes.append((pid, sid))
     await db.commit()
     yield db, scopes
@@ -52,6 +52,7 @@ async def db_ctx(tmp_path):
 # ---------------------------------------------------------------------------
 # B1 · force_full_repair 透传接线（静态锁：判据指向真实的 run_repair 调用）
 # ---------------------------------------------------------------------------
+
 
 def _run_repair_call_keywords():
     """AST 扫描 generate_content（含嵌套 _run_consistency_pipeline），
@@ -67,7 +68,7 @@ def _run_repair_call_keywords():
         if not isinstance(node, ast.Call):
             continue
         fn = node.func
-        name = (getattr(fn, "attr", "") or getattr(fn, "id", ""))
+        name = getattr(fn, "attr", "") or getattr(fn, "id", "")
         if name == "run_repair":
             found.append({kw.arg for kw in node.keywords})
     return found
@@ -79,7 +80,8 @@ def test_generate_content_wires_force_full_repair_into_run_repair():
     assert calls, "generate_content 内应存在 run_repair 调用"
     assert any("force_full_repair" in kws for kws in calls), (
         "force_full_repair 必须透传给 run_repair：入口解析却不消费 = 前端"
-        "「强制全量重修」勾选在正文生成链路静默失效（2026-10-03 B1 回归）")
+        "「强制全量重修」勾选在正文生成链路静默失效（2026-10-03 B1 回归）"
+    )
 
 
 def test_force_full_repair_value_is_the_parsed_entry_flag():
@@ -88,13 +90,16 @@ def test_force_full_repair_value_is_the_parsed_entry_flag():
     tree = ast.parse(src)
     hit = False
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Call)
-                and (getattr(node.func, "attr", "") or getattr(node.func, "id", "")) == "run_repair"):
+        if (
+            isinstance(node, ast.Call)
+            and (getattr(node.func, "attr", "") or getattr(node.func, "id", "")) == "run_repair"
+        ):
             for kw in node.keywords:
                 if kw.arg == "force_full_repair":
                     assert isinstance(kw.value, ast.Name) and kw.value.id == "force_full_repair", (
                         "run_repair(force_full_repair=...) 必须引用入口解析的同名变量，"
-                        "禁止改回常量 True/False 造成开关形同虚设")
+                        "禁止改回常量 True/False 造成开关形同虚设"
+                    )
                     hit = True
     assert hit
 
@@ -104,21 +109,23 @@ def test_force_full_repair_still_parsed_at_entry():
     src = inspect.getsource(generate_content)
     tree = ast.parse(src)
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Call)
-                and getattr(node.func, "id", "") == "_coerce_bool"):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_coerce_bool":
             for arg in node.args:
-                if (isinstance(arg, ast.Call)
-                        and isinstance(arg.func, ast.Attribute)
-                        and arg.func.attr == "get"
-                        and len(arg.args) == 1
-                        and arg.args[0].value == "force_full_repair"):
+                if (
+                    isinstance(arg, ast.Call)
+                    and isinstance(arg.func, ast.Attribute)
+                    and arg.func.attr == "get"
+                    and len(arg.args) == 1
+                    and arg.args[0].value == "force_full_repair"
+                ):
                     return
-    pytest.fail("generate_content 入口必须保留 body.get(\"force_full_repair\") 的布尔归一解析")
+    pytest.fail('generate_content 入口必须保留 body.get("force_full_repair") 的布尔归一解析')
 
 
 # ---------------------------------------------------------------------------
 # B2 · update_fact 分组重建作用域限定
 # ---------------------------------------------------------------------------
+
 
 async def _seed_fact(db, pid, sid, gid, fid, name, value):
     content = gf._build_fact_content(name, value, False)
@@ -127,15 +134,31 @@ async def _seed_fact(db, pid, sid, gid, fid, name, value):
         "group_title, title, content, category, source_ref, is_simulated, "
         "confidence, is_resolved, has_conflict, conflict_keys, fact_key) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (fid, pid, sid, gid, "工期安排", name, content, "schedule",
-         '[{"file":"招标文件","quote":"x"}]', 0, 0.9, 1, 0, "", name))
+        (
+            fid,
+            pid,
+            sid,
+            gid,
+            "工期安排",
+            name,
+            content,
+            "schedule",
+            '[{"file":"招标文件","quote":"x"}]',
+            0,
+            0.9,
+            1,
+            0,
+            "",
+            name,
+        ),
+    )
     await db.commit()
 
 
 async def _rows_of(db, pid, sid):
     cur = await db.execute(
-        "SELECT id, title, content FROM global_facts "
-        "WHERE project_id=? AND COALESCE(scheme_id,'')=?", (pid, sid))
+        "SELECT id, title, content FROM global_facts " "WHERE project_id=? AND COALESCE(scheme_id,'')=?", (pid, sid)
+    )
     return [dict(r) for r in await cur.fetchall()]
 
 
@@ -148,8 +171,7 @@ async def test_update_fact_group_rebuild_does_not_touch_foreign_scope(db_ctx):
     await _seed_fact(db, pid1, sid1, dup_gid, "f1b", "开工日期", "2026-01-01")
     await _seed_fact(db, pid2, sid2, dup_gid, "f2a", "别的方案的工期", "99天")
 
-    data = FactGroupUpdate(id="f1a", title="工期安排",
-                           content="- 总工期: 45天\n- 开工日期: 2026-02-01")
+    data = FactGroupUpdate(id="f1a", title="工期安排", content="- 总工期: 45天\n- 开工日期: 2026-02-01")
     resp = await gf.update_fact("f1a", data, scheme_id=sid1, db=db)
     assert resp["ok"] is True
 
@@ -175,8 +197,7 @@ async def test_update_fact_group_rebuild_normal_case_unchanged(db_ctx):
     await _seed_fact(db, pid1, sid1, gid, "fa", "总工期", "30天")
     await _seed_fact(db, pid1, sid1, gid, "fb", "基坑深度", "8.5m")
 
-    data = FactGroupUpdate(id="fa", title="工期安排",
-                           content="- 总工期: 60天\n- 基坑深度: 8.5m")
+    data = FactGroupUpdate(id="fa", title="工期安排", content="- 总工期: 60天\n- 基坑深度: 8.5m")
     resp = await gf.update_fact("fa", data, scheme_id=sid1, db=db)
     assert resp["ok"] is True
     rows = await _rows_of(db, pid1, sid1)
@@ -190,10 +211,13 @@ async def test_update_fact_group_rebuild_normal_case_unchanged(db_ctx):
 # B4 · _save_outline_to_db 拒绝重复 __original_id
 # ---------------------------------------------------------------------------
 
+
 async def _first_save(db, sid, pid):
     """落一颗两章的目录树，返回两个真实 DB 主键。"""
-    outline = [{"id": "local_a", "title": "工程概况", "children": []},
-               {"id": "local_b", "title": "施工部署", "children": []}]
+    outline = [
+        {"id": "local_a", "title": "工程概况", "children": []},
+        {"id": "local_b", "title": "施工部署", "children": []},
+    ]
     resp = await sections_mod._save_outline_to_db(db, sid, outline, source="ai")
     assert resp["ok"] and resp["count"] == 2
     ids = [t["id"] for t in resp["tree"]]
@@ -206,19 +230,19 @@ async def test_save_outline_rejects_duplicate_original_id(db_ctx):
     db, ((pid, sid), _) = db_ctx
     id_a, _id_b = await _first_save(db, sid, pid)
 
-    dup = [{"id": "x1", "title": "第一章改名", "__original_id": id_a, "children": []},
-           {"id": "x2", "title": "第二章冒充", "__original_id": id_a, "children": []}]
+    dup = [
+        {"id": "x1", "title": "第一章改名", "__original_id": id_a, "children": []},
+        {"id": "x2", "title": "第二章冒充", "__original_id": id_a, "children": []},
+    ]
     with pytest.raises(HTTPException) as exc:
         await sections_mod._save_outline_to_db(db, sid, dup, source="手动编辑")
     assert exc.value.status_code == 400
     assert "重复" in str(exc.value.detail)
 
     # 拒绝发生在任何写入之前：库内结构原样保留（不是改了一半）
-    cur = await db.execute(
-        "SELECT COUNT(*) FROM sections WHERE scheme_id=?", (sid,))
+    cur = await db.execute("SELECT COUNT(*) FROM sections WHERE scheme_id=?", (sid,))
     assert (await cur.fetchone())[0] == 2
-    cur = await db.execute(
-        "SELECT title FROM sections WHERE id=?", (id_a,))
+    cur = await db.execute("SELECT title FROM sections WHERE id=?", (id_a,))
     assert (await cur.fetchone())["title"] == "工程概况"
 
 
@@ -226,11 +250,15 @@ async def test_save_outline_duplicate_child_id_also_rejected(db_ctx):
     """重复主键藏在子章节层同样拒绝（防御覆盖全深度）。"""
     db, ((pid, sid), _) = db_ctx
     id_a, id_b = await _first_save(db, sid, pid)
-    dup = [{"id": "n1", "title": "工程概况", "__original_id": id_a,
-            "children": [{"id": "n11", "title": "伪装子节",
-                          "__original_id": id_b, "children": []}]},
-           {"id": "n2", "title": "施工部署", "__original_id": id_b,
-            "children": []}]
+    dup = [
+        {
+            "id": "n1",
+            "title": "工程概况",
+            "__original_id": id_a,
+            "children": [{"id": "n11", "title": "伪装子节", "__original_id": id_b, "children": []}],
+        },
+        {"id": "n2", "title": "施工部署", "__original_id": id_b, "children": []},
+    ]
     with pytest.raises(HTTPException) as exc:
         await sections_mod._save_outline_to_db(db, sid, dup, source="手动编辑")
     assert exc.value.status_code == 400
@@ -240,12 +268,11 @@ async def test_save_outline_normal_roundtrip_still_preserves_sections(db_ctx):
     """正常回传（各节点独立 __original_id）：更新而非重建，零影响面。"""
     db, ((pid, sid), _) = db_ctx
     id_a, id_b = await _first_save(db, sid, pid)
-    outline = [{"id": "1", "title": "工程概况（改）", "__original_id": id_a,
-                "children": []},
-               {"id": "2", "title": "施工部署", "__original_id": id_b,
-                "children": []}]
+    outline = [
+        {"id": "1", "title": "工程概况（改）", "__original_id": id_a, "children": []},
+        {"id": "2", "title": "施工部署", "__original_id": id_b, "children": []},
+    ]
     resp = await sections_mod._save_outline_to_db(db, sid, outline, source="手动编辑")
     assert resp["ok"] and resp["count"] == 2
-    cur = await db.execute(
-        "SELECT title FROM sections WHERE id=?", (id_a,))
+    cur = await db.execute("SELECT title FROM sections WHERE id=?", (id_a,))
     assert (await cur.fetchone())["title"] == "工程概况（改）"

@@ -15,6 +15,7 @@
 12. 任务状态内存分支回传 ``message``
 13. 扫描件 OCR 页数上限截断必须留痕
 """
+
 import inspect
 import json
 import sys
@@ -45,25 +46,40 @@ async def ctx(tmp_path, monkeypatch):
     db = await get_conn()
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.commit()
     yield db, pid, sid
     await db.close()
 
 
-async def _insert_fact(db, pid, sid, *, name, key, chunk_hash,
-                       category="schedule", resolved=0, conflict=0,
-                       conflict_keys=""):
+async def _insert_fact(
+    db, pid, sid, *, name, key, chunk_hash, category="schedule", resolved=0, conflict=0, conflict_keys=""
+):
     fid = uuid.uuid4().hex
     await db.execute(
         "INSERT INTO global_facts (id, project_id, scheme_id, group_id, "
         "group_title, title, content, category, source_ref, is_simulated, "
         "confidence, is_resolved, has_conflict, conflict_keys, fact_key, "
         "chunk_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (fid, pid, sid, "g1", "工期安排", name, f"- **{name}**: v",
-         category, json.dumps([{"file": "doc.docx", "quote": ""}]),
-         0, 1.0, resolved, conflict, conflict_keys, key, chunk_hash))
+        (
+            fid,
+            pid,
+            sid,
+            "g1",
+            "工期安排",
+            name,
+            f"- **{name}**: v",
+            category,
+            json.dumps([{"file": "doc.docx", "quote": ""}]),
+            0,
+            1.0,
+            resolved,
+            conflict,
+            conflict_keys,
+            key,
+            chunk_hash,
+        ),
+    )
     await db.commit()
     return fid
 
@@ -81,18 +97,22 @@ def test_generate_ai_image_does_not_call_get_on_row():
 # ---------------------------------------------------------------------------
 # 2. 审核状态机
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("frm,to", [
-    ("", "rejected"),        # 前端「驳回」按钮
-    ("approved", "pending"),  # 前端「重置为待审核」
-    ("rejected", "approved"),  # 前端「整改后通过」/ 方案驳回后重新提交
-])
+@pytest.mark.parametrize(
+    "frm,to",
+    [
+        ("", "rejected"),  # 前端「驳回」按钮
+        ("approved", "pending"),  # 前端「重置为待审核」
+        ("rejected", "approved"),  # 前端「整改后通过」/ 方案驳回后重新提交
+    ],
+)
 def test_review_transitions_align_with_frontend(frm, to):
-    rv._validate_transition(frm, to)   # 不抛异常即通过
+    rv._validate_transition(frm, to)  # 不抛异常即通过
 
 
 def test_review_transitions_still_reject_illegal():
     """非法状态值必须被拒；自流转为幂等放行（契约变更，见下）。"""
     from fastapi import HTTPException
+
     with pytest.raises(HTTPException):
         rv._validate_transition("pending", "unknown")
     with pytest.raises(HTTPException):
@@ -110,29 +130,30 @@ def test_review_transitions_still_reject_illegal():
 async def test_chart_zombie_migration_keeps_data_charts(ctx):
     db, pid, sid = ctx
     from app.db import _migrate
+
     sec = uuid.uuid4().hex
-    await db.execute(
-        "INSERT INTO sections (id, scheme_id, title) VALUES (?,?,?)",
-        (sec, sid, "进度计划"))
+    await db.execute("INSERT INTO sections (id, scheme_id, title) VALUES (?,?,?)", (sec, sid, "进度计划"))
     # ① 结构化数据型图表（规范信封：mermaid_code 为空 + data 非空）→ 不得被重置
-    data_payload = json.dumps({"mermaid_code": "", "data": {"tasks": []},
-                               "title": "横道图", "reason": ""}, ensure_ascii=False)
+    data_payload = json.dumps(
+        {"mermaid_code": "", "data": {"tasks": []}, "title": "横道图", "reason": ""}, ensure_ascii=False
+    )
     await db.execute(
         "INSERT INTO chart_predictions (id, section_id, scheme_id, chart_type, "
         "needed, purpose, priority, status, data_json) VALUES (?,?,?,?,1,?,?,?,?)",
-        (uuid.uuid4().hex, sec, sid, "gantt", "", 5, "generated", data_payload))
+        (uuid.uuid4().hex, sec, sid, "gantt", "", 5, "generated", data_payload),
+    )
     # ② 真正的僵尸行（generated + 无 mermaid_code + 无 data）→ 应被重置为 pending
     await db.execute(
         "INSERT INTO chart_predictions (id, section_id, scheme_id, chart_type, "
         "needed, purpose, priority, status, data_json) VALUES (?,?,?,?,1,?,?,?,?)",
-        (uuid.uuid4().hex, sec, sid, "flowchart", "", 5, "generated", "{}"))
+        (uuid.uuid4().hex, sec, sid, "flowchart", "", 5, "generated", "{}"),
+    )
     await db.commit()
 
     await _migrate(db)
     await db.commit()
 
-    cur = await db.execute(
-        "SELECT chart_type, status FROM chart_predictions WHERE section_id=?", (sec,))
+    cur = await db.execute("SELECT chart_type, status FROM chart_predictions WHERE section_id=?", (sec,))
     status = {r["chart_type"]: r["status"] for r in await cur.fetchall()}
     assert status["gantt"] == "generated", "数据型图表不得被迁移误重置"
     assert status["flowchart"] == "pending", "真僵尸行必须被重置"
@@ -144,25 +165,43 @@ async def test_chart_zombie_migration_keeps_data_charts(ctx):
 async def test_persist_deletion_scope_uses_run_hashes(ctx):
     """跳过段的未确认事实必须保留（用 all 会误删 → 该段不重跑，事实永久丢失）。"""
     db, pid, sid = ctx
-    await _insert_fact(db, pid, sid, name="总工期", key="total_duration",
-                       chunk_hash="AAA")          # 本轮跳过
-    await _insert_fact(db, pid, sid, name="机械数量", key="excavator_count",
-                       chunk_hash="BBB", category="machinery")  # 本轮重跑
+    await _insert_fact(db, pid, sid, name="总工期", key="total_duration", chunk_hash="AAA")  # 本轮跳过
+    await _insert_fact(
+        db, pid, sid, name="机械数量", key="excavator_count", chunk_hash="BBB", category="machinery"
+    )  # 本轮重跑
 
-    item = FactItem(name="挖掘机型号", value="SY215C", key="excavator_model",
-                    category="machinery", source="doc.docx", chunk_hash="BBB")
+    item = FactItem(
+        name="挖掘机型号",
+        value="SY215C",
+        key="excavator_model",
+        category="machinery",
+        source="doc.docx",
+        chunk_hash="BBB",
+    )
     result = ExtractionResult()
-    result.groups = [FactGroup(title="工期安排", category="schedule", items=[
-        FactItem(name="总工期", value="360天", key="total_duration",
-                 category="schedule", source="doc.docx", chunk_hash="BBB")]),
-        FactGroup(title="机械设备", category="machinery", items=[item])]
+    result.groups = [
+        FactGroup(
+            title="工期安排",
+            category="schedule",
+            items=[
+                FactItem(
+                    name="总工期",
+                    value="360天",
+                    key="total_duration",
+                    category="schedule",
+                    source="doc.docx",
+                    chunk_hash="BBB",
+                )
+            ],
+        ),
+        FactGroup(title="机械设备", category="machinery", items=[item]),
+    ]
     result.total_items = 2
-    result.chunk_hashes_all = {"AAA", "BBB"}   # 真实管线口径：含跳过段
-    result.chunk_hashes_run = {"BBB"}          # 本轮实际重跑段
+    result.chunk_hashes_all = {"AAA", "BBB"}  # 真实管线口径：含跳过段
+    result.chunk_hashes_run = {"BBB"}  # 本轮实际重跑段
     await persist_extraction(result, db, pid, sid)
 
-    cur = await db.execute(
-        "SELECT title, chunk_hash FROM global_facts WHERE scheme_id=?", (sid,))
+    cur = await db.execute("SELECT title, chunk_hash FROM global_facts WHERE scheme_id=?", (sid,))
     rows = {(r["title"], r["chunk_hash"]) for r in await cur.fetchall()}
     assert ("总工期", "AAA") in rows, "跳过段的未确认事实不得被删除"
     assert ("机械数量", "BBB") not in rows, "重跑段的旧事实应被刷新"
@@ -175,7 +214,7 @@ async def test_persist_deletion_scope_uses_run_hashes(ctx):
 def test_dump_parse_warnings_always_valid_json():
     many = ["告警内容" * 200 for _ in range(50)]
     raw = fp.dump_parse_warnings(many)
-    parsed = json.loads(raw)          # 必须能解析（旧实现的字节切片会产出非法 JSON）
+    parsed = json.loads(raw)  # 必须能解析（旧实现的字节切片会产出非法 JSON）
     assert isinstance(parsed, list)
     assert 0 < len(parsed) <= fp.MAX_PARSE_WARNINGS
     assert all(len(w) <= fp.MAX_PARSE_WARNING_CHARS for w in parsed)
@@ -190,15 +229,20 @@ def test_dump_parse_warnings_always_valid_json():
 # ---------------------------------------------------------------------------
 async def test_item_update_value_clears_conflict(ctx):
     db, pid, sid = ctx
-    fid = await _insert_fact(db, pid, sid, name="总工期", key="total_duration",
-                             chunk_hash="AAA", resolved=1, conflict=1,
-                             conflict_keys='["- **总工期**: 360天"]')
-    updated, _ = await gf._apply_item_updates(
-        db, [{"fact_id": fid, "value": "300天"}])
+    fid = await _insert_fact(
+        db,
+        pid,
+        sid,
+        name="总工期",
+        key="total_duration",
+        chunk_hash="AAA",
+        resolved=1,
+        conflict=1,
+        conflict_keys='["- **总工期**: 360天"]',
+    )
+    updated, _ = await gf._apply_item_updates(db, [{"fact_id": fid, "value": "300天"}])
     assert updated == 1
-    cur = await db.execute(
-        "SELECT has_conflict, conflict_keys, content FROM global_facts WHERE id=?",
-        (fid,))
+    cur = await db.execute("SELECT has_conflict, conflict_keys, content FROM global_facts WHERE id=?", (fid,))
     row = await cur.fetchone()
     assert row["has_conflict"] == 0
     assert row["conflict_keys"] == ""
@@ -217,13 +261,13 @@ def test_abolished_standard_detected_without_space_or_ascii_dash():
 def test_known_standard_matches_normalized_form():
     assert sr.is_known_standard("GB55034-2022")
     assert sr.is_known_standard("GB 55034-2022")
-    assert not sr.is_known_standard("JGJ46-2005")   # 已废止
+    assert not sr.is_known_standard("JGJ46-2005")  # 已废止
 
 
 def test_preflight_std01_catches_unspaced_abolished_code():
     ctxobj = pf.PreflightContext(
-        sections=[{"id": "1", "title": "编制依据",
-                   "content": "本方案依据 GB50202-2002 编制。"}])
+        sections=[{"id": "1", "title": "编制依据", "content": "本方案依据 GB50202-2002 编制。"}]
+    )
     findings = pf.check_standards(ctxobj)
     assert any(f["rule_id"] == "STD-01" for f in findings)
 
@@ -237,34 +281,39 @@ def _con01(ctxobj) -> list:
 
 def test_con01_ignores_different_equipment_objects():
     """不同设备各有各的数量，不是数值矛盾（旧实现必误报）。"""
-    ctxobj = pf.PreflightContext(sections=[
-        {"id": "1", "title": "施工部署",
-         "content": "现场配置塔吊 2 台，施工电梯 2 台，挖掘机 3 台。"}])
+    ctxobj = pf.PreflightContext(
+        sections=[{"id": "1", "title": "施工部署", "content": "现场配置塔吊 2 台，施工电梯 2 台，挖掘机 3 台。"}]
+    )
     assert _con01(ctxobj) == []
 
 
 def test_con01_ignores_different_member_concrete_grades():
-    ctxobj = pf.PreflightContext(sections=[
-        {"id": "1", "title": "材料",
-         "content": "柱混凝土强度等级为C40，梁混凝土强度等级为C30。"}])
+    ctxobj = pf.PreflightContext(
+        sections=[{"id": "1", "title": "材料", "content": "柱混凝土强度等级为C40，梁混凝土强度等级为C30。"}]
+    )
     assert _con01(ctxobj) == []
 
 
 def test_con01_still_detects_same_object_conflict():
-    ctxobj = pf.PreflightContext(sections=[
-        {"id": "1", "title": "施工部署", "content": "现场配置塔吊 2 台。"},
-        {"id": "2", "title": "资源配置", "content": "现场配置塔吊 5 台。"}])
+    ctxobj = pf.PreflightContext(
+        sections=[
+            {"id": "1", "title": "施工部署", "content": "现场配置塔吊 2 台。"},
+            {"id": "2", "title": "资源配置", "content": "现场配置塔吊 5 台。"},
+        ]
+    )
     hits = _con01(ctxobj)
     assert hits and "塔吊" in hits[0]["detail"]
 
 
 def test_scanner_prescan_groups_by_object():
     import app.services.consistency_scanner as cs
-    same = [{"id": "a", "title": "部署",
-             "content": "配置塔吊 2 台，施工电梯 2 台。"}]
+
+    same = [{"id": "a", "title": "部署", "content": "配置塔吊 2 台，施工电梯 2 台。"}]
     assert cs.program_prescan(same) == []
-    conflict = [{"id": "a", "title": "部署", "content": "配置塔吊 2 台。"},
-                {"id": "b", "title": "资源", "content": "配置塔吊 5 台。"}]
+    conflict = [
+        {"id": "a", "title": "部署", "content": "配置塔吊 2 台。"},
+        {"id": "b", "title": "资源", "content": "配置塔吊 5 台。"},
+    ]
     cands = cs.program_prescan(conflict)
     assert any("设备数量" in c["topic"] for c in cands)
 
@@ -272,10 +321,7 @@ def test_scanner_prescan_groups_by_object():
 # ---------------------------------------------------------------------------
 # 8. 事务内配图超限 → 正文同步裁剪
 # ---------------------------------------------------------------------------
-VALID_FLOWCHART = (
-    'flowchart TD\n    A["开始"] --> B["施工"]\n'
-    '    B --> C{"验收合格?"}\n    C --> D["结束"]'
-)
+VALID_FLOWCHART = 'flowchart TD\n    A["开始"] --> B["施工"]\n' '    B --> C{"验收合格?"}\n    C --> D["结束"]'
 
 
 async def test_apply_plan_clips_content_when_limit_exceeded(ctx):
@@ -285,28 +331,26 @@ async def test_apply_plan_clips_content_when_limit_exceeded(ctx):
         apply_inline_chart_plan,
         build_inline_chart_plan,
     )
+
     content = "前文\n```mermaid\n" + VALID_FLOWCHART + "\n```\n后文"
     ct = _scan_inline_charts(content)[0][0]
     # 其它章节已用满该类型全方案限额（默认 3）
-    await db.execute(
-        "INSERT INTO sections (id, scheme_id, title) VALUES (?,?,?)",
-        ("other-sec", sid, "其它"))
+    await db.execute("INSERT INTO sections (id, scheme_id, title) VALUES (?,?,?)", ("other-sec", sid, "其它"))
     for _ in range(3):
         await db.execute(
             "INSERT INTO chart_predictions (id, section_id, scheme_id, chart_type, "
             "needed, purpose, priority, status, data_json) VALUES (?,?,?,?,1,?,?,?,?)",
-            (uuid.uuid4().hex, "other-sec", sid, ct, "", 5, "generated", "{}"))
+            (uuid.uuid4().hex, "other-sec", sid, ct, "", 5, "generated", "{}"),
+        )
     await db.commit()
 
     # 计划阶段用「空快照」（模拟并发：锁外各自判定通过）
-    _planned, rows = build_inline_chart_plan(
-        sid, "sec-x", content, enforce_limits=True, scheme_type_counts={})
+    _planned, rows = build_inline_chart_plan(sid, "sec-x", content, enforce_limits=True, scheme_type_counts={})
     assert rows, "锁外快照下计划应产出待登记行"
 
     out = await apply_inline_chart_plan(db, "sec-x", rows, content)
     assert "```mermaid" not in out, "超限未登记的图表块必须从正文移除（防幽灵图）"
-    cur = await db.execute(
-        "SELECT COUNT(*) c FROM chart_predictions WHERE section_id=?", ("sec-x",))
+    cur = await db.execute("SELECT COUNT(*) c FROM chart_predictions WHERE section_id=?", ("sec-x",))
     assert (await cur.fetchone())["c"] == 0
 
 
@@ -314,13 +358,19 @@ async def test_apply_plan_clips_content_when_limit_exceeded(ctx):
 # 9. 导出缓存指纹
 # ---------------------------------------------------------------------------
 def _prep_with_scheme_name(name: str) -> dict:
-    return {"scheme": {"name": name, "project_id": "p1"},
-            "config": {}, "fe_codes": [], "sections": [],
-            "chart_fp": [], "global_facts": []}
+    return {
+        "scheme": {"name": name, "project_id": "p1"},
+        "config": {},
+        "fe_codes": [],
+        "sections": [],
+        "chart_fp": [],
+        "global_facts": [],
+    }
 
 
 def test_export_fingerprint_includes_scheme_name():
     import app.routers.export as ex
+
     h1 = ex._content_fingerprint(_prep_with_scheme_name("方案A"))[1]
     h2 = ex._content_fingerprint(_prep_with_scheme_name("方案B"))[1]
     assert h1 != h2, "改方案名（封面标题）必须改变内容指纹，否则命中旧缓存"
@@ -332,19 +382,21 @@ def test_export_fingerprint_includes_scheme_name():
 async def test_renumber_writes_sections_level(ctx):
     db, pid, sid = ctx
     import app.routers.sections as sec_mod
+
     await db.execute(
         "INSERT INTO sections (id, scheme_id, title, parent_id, level, "
         "sort_order, outline_json) VALUES (?,?,?,?,?,?,?)",
-        ("p1", sid, "第一章", "", 1, 1, '{"id": "1"}'))
+        ("p1", sid, "第一章", "", 1, 1, '{"id": "1"}'),
+    )
     await db.execute(
         "INSERT INTO sections (id, scheme_id, title, parent_id, level, "
         "sort_order, outline_json) VALUES (?,?,?,?,?,?,?)",
-        ("c1", sid, "1.1 小节", "p1", 1, 1, '{"id": "1"}'))
+        ("c1", sid, "1.1 小节", "p1", 1, 1, '{"id": "1"}'),
+    )
     await db.commit()
 
     await sec_mod.renumber_sections_after_reorder(db, sid)
-    cur = await db.execute(
-        "SELECT outline_json, level FROM sections WHERE id=?", ("c1",))
+    cur = await db.execute("SELECT outline_json, level FROM sections WHERE id=?", ("c1",))
     row = await cur.fetchone()
     assert row["level"] == 2, "level 列必须与编号层级同步回写"
     assert json.loads(row["outline_json"])["level"] == 2
@@ -356,12 +408,11 @@ async def test_renumber_writes_sections_level(ctx):
 async def test_duplicate_scheme_copies_chunk_hash(ctx):
     db, pid, sid = ctx
     import app.routers.schemes as sch_mod
-    await _insert_fact(db, pid, sid, name="总工期", key="total_duration",
-                       chunk_hash="AAA")
+
+    await _insert_fact(db, pid, sid, name="总工期", key="total_duration", chunk_hash="AAA")
     res = await sch_mod.duplicate_scheme(project_id=pid, scheme_id=sid, db=db)
     new_id = res["id"]
-    cur = await db.execute(
-        "SELECT chunk_hash FROM global_facts WHERE scheme_id=?", (new_id,))
+    cur = await db.execute("SELECT chunk_hash FROM global_facts WHERE scheme_id=?", (new_id,))
     hashes = [r["chunk_hash"] for r in await cur.fetchall()]
     assert hashes == ["AAA"], "副本必须继承 chunk_hash，否则会被当作旧数据刷新删除"
 
@@ -372,9 +423,14 @@ async def test_duplicate_scheme_copies_chunk_hash(ctx):
 async def test_task_status_memory_branch_exposes_message():
     import app.routers.sse_handlers as sh
     import app.services.ai.task_registry as tr
-    tr._tasks["t-mem"] = {"type": "content_generation", "status": "running",
-                          "progress": 0.4, "message": "正在生成第 3 章",
-                          "scheme_id": "s1"}
+
+    tr._tasks["t-mem"] = {
+        "type": "content_generation",
+        "status": "running",
+        "progress": 0.4,
+        "message": "正在生成第 3 章",
+        "scheme_id": "s1",
+    }
     res = await sh.task_status("t-mem")
     assert res["message"] == "正在生成第 3 章"
     assert res["live"] is True
@@ -415,12 +471,11 @@ def test_pdf_ocr_page_limit_records_truncation(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "fitz", _Fitz)
     import app.config as cfg
-    monkeypatch.setattr(cfg, "settings", type("S", (), {
-        "ocr_pdf_max_pages": 20, "ocr_pdf_dpi": 200})())
+
+    monkeypatch.setattr(cfg, "settings", type("S", (), {"ocr_pdf_max_pages": 20, "ocr_pdf_dpi": 200})())
     import app.services.ocr as ocr_mod
-    monkeypatch.setattr(
-        ocr_mod, "ocr_bytes_sync",
-        lambda payload, **k: type("R", (), {"text": "识别内容"})())
+
+    monkeypatch.setattr(ocr_mod, "ocr_bytes_sync", lambda payload, **k: type("R", (), {"text": "识别内容"})())
 
     out = fp._pdf_ocr_fallback(b"%PDF-1.4 fake", diag=diag)
     assert "识别内容" in out

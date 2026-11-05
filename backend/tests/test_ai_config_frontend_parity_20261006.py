@@ -26,6 +26,7 @@
 这样两端任一方向漂移（后端删字段 / 前端漏声明）都会失败，而不需要维护一份
 手写字段清单（手写清单本身会漂移，是本仓反复出现的判据分叉根因，见 AGENTS §5.14）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -48,12 +49,10 @@ PAGE_TSX = FRONTEND_DIR / "src" / "pages" / "AIConfigPage.tsx"
 # 后端：从函数体提取返回体字段（不依赖运行时启动）
 # ---------------------------------------------------------------------------
 
+
 def _str_keys(node: ast.Dict) -> set[str]:
     """Dict 字面量里的字符串键集合（非字面量键一律忽略）。"""
-    return {
-        k.value for k in node.keys
-        if isinstance(k, ast.Constant) and isinstance(k.value, str)
-    }
+    return {k.value for k in node.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)}
 
 
 def _own_children(node: ast.AST) -> list[ast.stmt]:
@@ -68,8 +67,7 @@ def _own_children(node: ast.AST) -> list[ast.stmt]:
 
     def rec(n: ast.AST) -> None:
         for child in ast.iter_child_nodes(n):
-            if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef,
-                                  ast.Lambda, ast.ClassDef)):
+            if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef, ast.Lambda, ast.ClassDef)):
                 continue
             out.append(child)
             rec(child)
@@ -103,9 +101,14 @@ def _append_keys(func: ast.AsyncFunctionDef, target: str) -> set[str]:
         if not isinstance(node, ast.Call):
             continue
         fn = node.func
-        if (isinstance(fn, ast.Attribute) and fn.attr == "append"
-                and isinstance(fn.value, ast.Name) and fn.value.id == target
-                and node.args and isinstance(node.args[0], ast.Dict)):
+        if (
+            isinstance(fn, ast.Attribute)
+            and fn.attr == "append"
+            and isinstance(fn.value, ast.Name)
+            and fn.value.id == target
+            and node.args
+            and isinstance(node.args[0], ast.Dict)
+        ):
             keys |= _str_keys(node.args[0])
     assert keys, f"{func.name} 中找不到 {target}.append({...})"
     return keys
@@ -129,9 +132,9 @@ def _pydantic_fields(src: str, class_name: str) -> set[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == class_name:
             return {
-                stmt.target.id for stmt in node.body
-                if isinstance(stmt, ast.AnnAssign)
-                and isinstance(stmt.target, ast.Name)
+                stmt.target.id
+                for stmt in node.body
+                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
             }
     raise AssertionError(f"找不到模型 {class_name}")
 
@@ -144,13 +147,11 @@ def _route_paths(path: Path, methods: set[str]) -> set[str]:
         if not isinstance(node, ast.Call):
             continue
         fn = node.func
-        if not (isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name)
-                and fn.value.id == "router"):
+        if not (isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) and fn.value.id == "router"):
             continue
         if fn.attr.lower() not in methods:
             continue
-        if (node.args and isinstance(node.args[0], ast.Constant)
-                and isinstance(node.args[0].value, str)):
+        if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
             paths.add(node.args[0].value.lower())
     assert paths, f"{path} 未解析出任何路由"
     return paths
@@ -159,6 +160,7 @@ def _route_paths(path: Path, methods: set[str]) -> set[str]:
 # ---------------------------------------------------------------------------
 # 前端：从 TS 源提取接口/方法声明
 # ---------------------------------------------------------------------------
+
 
 def _ts_interface_fields(src: str, name: str) -> set[str]:
     """``export interface Name { ... }`` 内声明的字段名集合（含嵌套字面量的键）。"""
@@ -171,18 +173,15 @@ def _ts_interface_fields(src: str, name: str) -> set[str]:
         elif src[i] == "}":
             depth -= 1
         i += 1
-    body = src[start:i - 1]
-    return {
-        fm.group(1).strip().rstrip("?")
-        for fm in re.finditer(r"^\s*([A-Za-z_$][\w$]*)\??\s*:", body, flags=re.M)
-    }
+    body = src[start : i - 1]
+    return {fm.group(1).strip().rstrip("?") for fm in re.finditer(r"^\s*([A-Za-z_$][\w$]*)\??\s*:", body, flags=re.M)}
 
 
 def _ts_method_body(src: str, method: str) -> str:
     """``methodName: (args) => ...`` 起始处的一段方法体文本。"""
     m = re.search(rf"\b{re.escape(method)}\s*:\s*\(", src)
     assert m, f"api/index.ts 未声明方法 {method}"
-    return src[m.start():m.start() + 900]
+    return src[m.start() : m.start() + 900]
 
 
 DRY_RUN_PATH = "/ai/config/import/dry-run"
@@ -199,19 +198,16 @@ class TestImportDryRunParity:
     def test_top_level_keys_declared_in_frontend_type(self):
         src = CONFIG_PY.read_text(encoding="utf-8")
         keys = _return_keys(_func_node(src, "import_config_dry_run"))
-        declared = _ts_interface_fields(TYPES_TS.read_text(encoding="utf-8"),
-                                        "AIConfigImportDryRunResponse")
+        declared = _ts_interface_fields(TYPES_TS.read_text(encoding="utf-8"), "AIConfigImportDryRunResponse")
         missing = keys - declared
         assert not missing, (
-            "后端导入预演返回的字段前端类型未声明：" + "、".join(sorted(missing))
-            + "（前端拿不到这些值或退化为 any）"
+            "后端导入预演返回的字段前端类型未声明：" + "、".join(sorted(missing)) + "（前端拿不到这些值或退化为 any）"
         )
 
     def test_planned_item_keys_declared_in_frontend_type(self):
         src = CONFIG_PY.read_text(encoding="utf-8")
         keys = _append_keys(_func_node(src, "import_config_dry_run"), "planned")
-        declared = _ts_interface_fields(TYPES_TS.read_text(encoding="utf-8"),
-                                        "AIConfigImportDryRunResponse")
+        declared = _ts_interface_fields(TYPES_TS.read_text(encoding="utf-8"), "AIConfigImportDryRunResponse")
         missing = keys - declared
         assert not missing, "planned[] 元素的字段前端类型未声明：" + "、".join(sorted(missing))
 
@@ -222,13 +218,14 @@ class TestImportDryRunParity:
     def test_api_method_sends_every_import_field(self):
         """加法式字段不能在前端被静默丢弃（否则后端能力永久闲置）。"""
         fields = _pydantic_fields(MODELS_PY.read_text(encoding="utf-8"), "ConfigImportIn")
-        missing = [f for f in IMPORT_FIELDS
-                   if f not in _ts_method_body(API_TS.read_text(encoding="utf-8"),
-                                               "importConfigDryRun")]
+        missing = [
+            f
+            for f in IMPORT_FIELDS
+            if f not in _ts_method_body(API_TS.read_text(encoding="utf-8"), "importConfigDryRun")
+        ]
         assert not missing, f"导入预演请求体缺字段：{missing}"
         assert set(IMPORT_FIELDS) <= fields, (
-            "后端 ConfigImportIn 字段集与前端请求体不一致（前端发送 "
-            f"{{{'、'.join(IMPORT_FIELDS)}}}）"
+            "后端 ConfigImportIn 字段集与前端请求体不一致（前端发送 " f"{{{'、'.join(IMPORT_FIELDS)}}}）"
         )
 
 
@@ -243,22 +240,19 @@ class TestConfigsHealthParity:
 
     def test_top_level_keys_declared(self):
         keys = _return_keys(self._func())
-        declared = _ts_interface_fields(TYPES_TS.read_text(encoding="utf-8"),
-                                        "AIConfigsHealthResponse")
+        declared = _ts_interface_fields(TYPES_TS.read_text(encoding="utf-8"), "AIConfigsHealthResponse")
         missing = keys - declared
         assert not missing, "体检返回的顶层字段前端类型未声明：" + "、".join(sorted(missing))
 
     def test_item_keys_declared(self):
         keys = _append_keys(self._func(), "items")
-        declared = _ts_interface_fields(TYPES_TS.read_text(encoding="utf-8"),
-                                        "AIConfigsHealthItem")
+        declared = _ts_interface_fields(TYPES_TS.read_text(encoding="utf-8"), "AIConfigsHealthItem")
         missing = keys - declared
         assert not missing, "体检 items[] 的字段前端类型未声明：" + "、".join(sorted(missing))
 
     def test_summary_keys_declared(self):
         keys = _assigned_keys(self._func(), "summary")
-        declared = _ts_interface_fields(TYPES_TS.read_text(encoding="utf-8"),
-                                        "AIConfigsHealthResponse")
+        declared = _ts_interface_fields(TYPES_TS.read_text(encoding="utf-8"), "AIConfigsHealthResponse")
         missing = keys - declared
         assert not missing, "体检 summary 的字段前端类型未声明：" + "、".join(sorted(missing))
 
@@ -273,8 +267,7 @@ class TestPrecheckAllSkippedParity:
     def test_return_keys_declared_and_consumed(self):
         src = CONNECTIVITY_PY.read_text(encoding="utf-8")
         keys = _return_keys(_func_node(src, "precheck_all"))
-        declared = _ts_interface_fields(TYPES_TS.read_text(encoding="utf-8"),
-                                        "AIPrecheckAllResponse")
+        declared = _ts_interface_fields(TYPES_TS.read_text(encoding="utf-8"), "AIPrecheckAllResponse")
         missing = keys - declared
         assert not missing, "precheck-all 返回字段前端类型未声明：" + "、".join(sorted(missing))
         page = PAGE_TSX.read_text(encoding="utf-8")
@@ -326,14 +319,11 @@ class TestImportBackwardCompatibility:
                         "旧版导出文件不含这两个键，非 None 默认值会改变既有行为"
                     )
                 else:
-                    assert stmt.value is not None, (
-                        f"ConfigImportIn.{name} 缺少默认值，会破坏旧调用方"
-                    )
+                    assert stmt.value is not None, f"ConfigImportIn.{name} 缺少默认值，会破坏旧调用方"
         assert found, "models.py 中找不到 ConfigImportIn"
 
     def test_frontend_types_declare_migrated_fields(self):
-        declared = _ts_interface_fields(TYPES_TS.read_text(encoding="utf-8"),
-                                        "AIConfigImportResponse")
+        declared = _ts_interface_fields(TYPES_TS.read_text(encoding="utf-8"), "AIConfigImportResponse")
         want = {"migrated_scene_routes", "migrated_runtime_keys"}
         missing = want - declared
         assert not missing, "导入响应新增的迁移计数未在前端类型声明：" + "、".join(sorted(missing))
@@ -347,5 +337,3 @@ def test_backend_import_response_actually_returns_migrated_counts():
         "POST /ai/config/import 未回传迁移计数："
         + "、".join(sorted({"migrated_scene_routes", "migrated_runtime_keys"} - keys))
     )
-
-

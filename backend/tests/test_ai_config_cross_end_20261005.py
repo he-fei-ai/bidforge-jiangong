@@ -18,6 +18,7 @@
 **源码接线护栏**放 pytest 侧（与 `test_import_parse_closeout_20261005.py` 同构）；
 纯函数行为测试在 `frontend/src/tests/aiConfigGovernance.test.tsx`。
 """
+
 from __future__ import annotations
 
 import re
@@ -65,13 +66,9 @@ def test_concurrency_max_is_dynamic_from_health():
         "（否则管理员改 settings.max_concurrency 后界面与之脱钩）"
     )
     block = _form_item_input(src, "concurrency")
-    assert "max={concurrencyMax}" in block, (
-        "并发 Form.Item 的 max 必须绑定 concurrencyMax（动态口径）"
-    )
+    assert "max={concurrencyMax}" in block, "并发 Form.Item 的 max 必须绑定 concurrencyMax（动态口径）"
     # 旧缺陷形态：写死 max={5}
-    assert not re.search(r"max=\{\s*5\s*\}", block), (
-        "并发上限被写死为 5 —— 后端可配置时会产生漂移"
-    )
+    assert not re.search(r"max=\{\s*5\s*\}", block), "并发上限被写死为 5 —— 后端可配置时会产生漂移"
 
 
 # --------------------------------------------------------------------------- #
@@ -83,19 +80,19 @@ def test_hardcoded_numeric_ranges_match_backend_range():
     src = _strip_comments(_src(_AI_PAGE))
 
     mt = _form_item_input(src, "max_tokens")
-    assert (_num(mt, "min"), _num(mt, "max")) == tuple(map(float, _RANGE["max_tokens"])), (
-        "前端 Max Tokens 区间与后端 _RANGE['max_tokens'] 不一致"
-    )
+    assert (_num(mt, "min"), _num(mt, "max")) == tuple(
+        map(float, _RANGE["max_tokens"])
+    ), "前端 Max Tokens 区间与后端 _RANGE['max_tokens'] 不一致"
 
     tp = _form_item_input(src, "temperature")
-    assert (_num(tp, "min"), _num(tp, "max")) == tuple(map(float, _RANGE["temperature"])), (
-        "前端 Temperature 区间与后端 _RANGE['temperature'] 不一致"
-    )
+    assert (_num(tp, "min"), _num(tp, "max")) == tuple(
+        map(float, _RANGE["temperature"])
+    ), "前端 Temperature 区间与后端 _RANGE['temperature'] 不一致"
 
     to = _form_item_input(src, "timeout")
-    assert (_num(to, "min"), _num(to, "max")) == tuple(map(float, _RANGE["timeout"])), (
-        "前端超时区间与后端 _RANGE['timeout'] 不一致"
-    )
+    assert (_num(to, "min"), _num(to, "max")) == tuple(
+        map(float, _RANGE["timeout"])
+    ), "前端超时区间与后端 _RANGE['timeout'] 不一致"
 
 
 # --------------------------------------------------------------------------- #

@@ -6,6 +6,7 @@
   O12 一致性扫描缓存表：_migrate 在旧库上幂等补 scene 列 + 建 consistency_scan_cache
   O9  确定性错误不重试：402/403/404 等章节级重试循环直接放弃
 """
+
 import aiosqlite
 import app.routers.sse_handlers as sh
 import app.services.ai.provider_factory as pf
@@ -17,30 +18,37 @@ LEGACY_AUDIT_DDL = (
     "id TEXT, provider_name TEXT, model TEXT, action TEXT,"
     " prompt_tokens INTEGER, completion_tokens INTEGER, cached_tokens INTEGER,"
     " duration REAL, success INTEGER, created_at TEXT DEFAULT (datetime('now','localtime')),"
-    " error TEXT DEFAULT '')")
+    " error TEXT DEFAULT '')"
+)
 
 
 class TestNonRetryableError:
     """O9：确定性错误分类（纯函数）。"""
 
-    @pytest.mark.parametrize("msg", [
-        'HTTP 402: {"error":{"message":"Insufficient Balance"}}',
-        'HTTP 403: {"error":{"code":11200,"message":"no valid authorization"}}',
-        "HTTP 404: {\"status\":404,\"title\":\"Not Found\"}",
-        "HTTP 401: invalid api key",
-        "You exceeded your current quota, please check your plan and billing details",
-        'HTTP 404: {"error":{"code":"UnsupportedModel"}}',
-    ])
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            'HTTP 402: {"error":{"message":"Insufficient Balance"}}',
+            'HTTP 403: {"error":{"code":11200,"message":"no valid authorization"}}',
+            'HTTP 404: {"status":404,"title":"Not Found"}',
+            "HTTP 401: invalid api key",
+            "You exceeded your current quota, please check your plan and billing details",
+            'HTTP 404: {"error":{"code":"UnsupportedModel"}}',
+        ],
+    )
     def test_deterministic_errors(self, msg):
         assert pf.is_non_retryable_error(RuntimeError(msg)) is True
 
-    @pytest.mark.parametrize("msg", [
-        "HTTP 429: rate limit",            # 限流可重试（退避后仍可能成功）
-        "HTTP 500: boom",                  # 服务端瞬时错误
-        "ReadTimeout",                      # 网络抖动
-        "所有 AI 提供商调用失败：HTTP 429",
-        "",
-    ])
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "HTTP 429: rate limit",  # 限流可重试（退避后仍可能成功）
+            "HTTP 500: boom",  # 服务端瞬时错误
+            "ReadTimeout",  # 网络抖动
+            "所有 AI 提供商调用失败：HTTP 429",
+            "",
+        ],
+    )
     def test_retryable_errors(self, msg):
         assert pf.is_non_retryable_error(RuntimeError(msg)) is False
 
@@ -55,6 +63,7 @@ class TestAuditFlushDegrade:
            write_tx_conn()，本用例改为 patch write_tx_conn 返回遗留（10 列）内存库。
         """
         from contextlib import asynccontextmanager
+
         conn = await aiosqlite.connect(":memory:")
         conn.row_factory = aiosqlite.Row
         await conn.execute(LEGACY_AUDIT_DDL)
@@ -73,13 +82,20 @@ class TestAuditFlushDegrade:
         pf._audit_buffer.clear()
         pf._audit_legacy_warned = False
 
-        await pf._log_audit("agnes", "agnes-2.5-flash", "chat", 1.0, True,
-                            prompt_tokens=100, completion_tokens=50,
-                            error="", scene="content_draft")
+        await pf._log_audit(
+            "agnes",
+            "agnes-2.5-flash",
+            "chat",
+            1.0,
+            True,
+            prompt_tokens=100,
+            completion_tokens=50,
+            error="",
+            scene="content_draft",
+        )
         await pf.flush_audit_buffer()
 
-        cur = await conn.execute(
-            "SELECT provider_name, prompt_tokens, error FROM ai_audit_logs")
+        cur = await conn.execute("SELECT provider_name, prompt_tokens, error FROM ai_audit_logs")
         rows = await cur.fetchall()
         assert len(rows) == 1, "审计记录不得因缺 scene 列而丢失"
         assert rows[0][0] == "agnes" and rows[0][1] == 100
@@ -90,11 +106,9 @@ class TestAuditFlushDegrade:
         await _insert_config(db_conn)
         fake = _FakeProvider()
         monkeypatch.setattr(pf, "_build_provider", lambda *a, **k: fake)
-        await pf.chat_with_fallback([{"role": "user", "content": "hi"}],
-                                    scene="outline_draft")
+        await pf.chat_with_fallback([{"role": "user", "content": "hi"}], scene="outline_draft")
         await pf.flush_audit_buffer()
-        cur = await db_conn.execute(
-            "SELECT scene FROM ai_audit_logs WHERE action='chat'")
+        cur = await db_conn.execute("SELECT scene FROM ai_audit_logs WHERE action='chat'")
         assert (await cur.fetchone())[0] == "outline_draft"
 
 
@@ -111,8 +125,8 @@ class TestMigrateBackfill:
         cols = {r[1] for r in await cur.fetchall()}
         assert "scene" in cols, "迁移后必须补上 scene 列"
         cur = await conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-            " AND name='consistency_scan_cache'")
+            "SELECT name FROM sqlite_master WHERE type='table'" " AND name='consistency_scan_cache'"
+        )
         assert await cur.fetchone(), "迁移后必须建 consistency_scan_cache 表"
         await _migrate(conn)  # 幂等：再跑一次不报错
         await conn.close()
@@ -145,9 +159,15 @@ class TestChapterRetryGate:
         _patch_outline_runtime(monkeypatch, fake_collect)
         monkeypatch.setattr(sh, "AI_RETRY_ON_QUOTA_ERROR", False)
         st, children = await sh._fetch_chapter_children(
-            0, {"title": "t"}, sub_prompt=[{"role": "user", "content": "p"}],
-            task_id="t", sem=None, validate_fn=None, timeout=1.0,
-            push_stats=None)
+            0,
+            {"title": "t"},
+            sub_prompt=[{"role": "user", "content": "p"}],
+            task_id="t",
+            sem=None,
+            validate_fn=None,
+            timeout=1.0,
+            push_stats=None,
+        )
         assert st == "failed" and children == []
         assert len(calls) == 1, "确定性错误不得发起重试"
 
@@ -162,9 +182,15 @@ class TestChapterRetryGate:
         _patch_outline_runtime(monkeypatch, fake_collect)
         monkeypatch.setattr(sh, "AI_RETRY_ON_QUOTA_ERROR", False)
         st, _ = await sh._fetch_chapter_children(
-            0, {"title": "t"}, sub_prompt=[{"role": "user", "content": "p"}],
-            task_id="t", sem=None, validate_fn=None, timeout=1.0,
-            push_stats=None)
+            0,
+            {"title": "t"},
+            sub_prompt=[{"role": "user", "content": "p"}],
+            task_id="t",
+            sem=None,
+            validate_fn=None,
+            timeout=1.0,
+            push_stats=None,
+        )
         assert st == "failed"
         assert len(calls) == 2, "限流错误仍应重试一次（旧行为不变）"
 
@@ -179,9 +205,15 @@ class TestChapterRetryGate:
         _patch_outline_runtime(monkeypatch, fake_collect)
         monkeypatch.setattr(sh, "AI_RETRY_ON_QUOTA_ERROR", True)
         st, _ = await sh._fetch_chapter_children(
-            0, {"title": "t"}, sub_prompt=[{"role": "user", "content": "p"}],
-            task_id="t", sem=None, validate_fn=None, timeout=1.0,
-            push_stats=None)
+            0,
+            {"title": "t"},
+            sub_prompt=[{"role": "user", "content": "p"}],
+            task_id="t",
+            sem=None,
+            validate_fn=None,
+            timeout=1.0,
+            push_stats=None,
+        )
         assert st == "failed"
         assert len(calls) == 2
 
@@ -199,10 +231,11 @@ class _FakeProvider:
 
 async def _insert_config(db):
     from app.services.crypto import encrypt_api_key
+
     await db.execute(
         "INSERT INTO ai_config (id, provider_name, plan, api_key_encrypted, base_url,"
         " model, is_active, priority, remark, timeout, concurrency, request_mode)"
         " VALUES ('c1','agnes','pay_as_you_go',?,?,?,?,0,'',60,4,'normal')",
-        (encrypt_api_key("sk-test"), "https://api.test.com/v1",
-         "agnes-2.5-flash", 1))
+        (encrypt_api_key("sk-test"), "https://api.test.com/v1", "agnes-2.5-flash", 1),
+    )
     await db.commit()

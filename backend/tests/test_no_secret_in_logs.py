@@ -34,6 +34,7 @@
 - 不解析 f-string 中 Name 表达式（运行时才知值），保守漏报优于误报；
 - 若某处确需记录 Key 前 4 位 + 长度（如 `"prefix=%s, len=%d"`），本护栏不会拦截——只要字面量本身不含密钥特征。
 """
+
 from __future__ import annotations
 
 import ast
@@ -78,11 +79,16 @@ class _LoggerCallVisitor(ast.NodeVisitor):
             # value 必须是 Attribute/Name 且名字含 logger/logging
             value = node.func.value
             if isinstance(value, ast.Name) and value.id.lower() in {
-                "logger", "log", "self.logger", "logging",
+                "logger",
+                "log",
+                "self.logger",
+                "logging",
             }:
                 self.calls.append((node, node.lineno))
             elif isinstance(value, ast.Attribute) and value.attr.lower() in {
-                "logger", "log", "logging",
+                "logger",
+                "log",
+                "logging",
             }:
                 self.calls.append((node, node.lineno))
             elif isinstance(value, ast.Name) and value.id.lower().endswith("logger"):
@@ -126,11 +132,35 @@ def _looks_like_bare_secret(lit: str) -> bool:
     # 已知非密钥前缀白名单（文档/URL/文件路径/常见技术名）
     lower = lit.lower()
     safe_prefixes = (
-        "http://", "https://", "test-", "example-", "path/", "./", "../",
-        "backend/", "frontend/", "tests/", "node_modules/", "package-",
-        "python-", "django-", "fastapi-", "pytest-", "flask-", "uvicorn-",
-        "gunicorn-", "requirements", "pyproject", "setup.py", "pypi-",
-        "docs.", "readme", "license", "manifest", "version-", "release-",
+        "http://",
+        "https://",
+        "test-",
+        "example-",
+        "path/",
+        "./",
+        "../",
+        "backend/",
+        "frontend/",
+        "tests/",
+        "node_modules/",
+        "package-",
+        "python-",
+        "django-",
+        "fastapi-",
+        "pytest-",
+        "flask-",
+        "uvicorn-",
+        "gunicorn-",
+        "requirements",
+        "pyproject",
+        "setup.py",
+        "pypi-",
+        "docs.",
+        "readme",
+        "license",
+        "manifest",
+        "version-",
+        "release-",
     )
     if any(lower.startswith(p) for p in safe_prefixes):
         return False
@@ -155,20 +185,17 @@ def _scan_file(path: Path) -> list[tuple[str, int, str]]:
             for lit in _extract_literals(arg):
                 for label, pat in _SECRET_PATTERNS:
                     if pat.search(lit):
-                        violations.append(
-                            (str(path), lineno, f"{label}（字面量：{lit!r}）"))
+                        violations.append((str(path), lineno, f"{label}（字面量：{lit!r}）"))
                 # 独立字符串参数中直接出现密钥值：即使没有 "key=" 前缀也算泄漏
                 # （例：logger.warning("api_key=%s", "sk-proj-abc1234567890")）
                 if _looks_like_bare_secret(lit):
-                    violations.append(
-                        (str(path), lineno, f"独立字符串参数疑似密钥（字面量：{lit!r}）"))
+                    violations.append((str(path), lineno, f"独立字符串参数疑似密钥（字面量：{lit!r}）"))
                 # 环境变量泄漏：字符串里含 KEY/SECRET/TOKEN/PASSWORD 全大写
                 if _ENV_VAR_PATTERN.search(lit.upper().replace("_", "")):
                     # 更保守：只在看起来是 os.environ/getenv 的目标参数时才拦
                     # 简单判定：字面量本身是纯大写环境变量名
                     if re.fullmatch(r"[A-Z_]*(KEY|SECRET|TOKEN|PASSWORD)[A-Z_]*", lit.strip()):
-                        violations.append(
-                            (str(path), lineno, f"环境变量名泄漏（字面量：{lit!r}）"))
+                        violations.append((str(path), lineno, f"环境变量名泄漏（字面量：{lit!r}）"))
 
     return violations
 
@@ -194,16 +221,10 @@ def test_no_secret_literals_in_logger_calls() -> None:
     if all_violations:
         # 报告最多 20 条，便于定位
         sample = all_violations[:20]
-        report_lines = [
-            f"  {path}:{line}  {reason}" for path, line, reason in sample
-        ]
-        extra = "" if len(all_violations) <= 20 else (
-            f"\n  ... 另有 {len(all_violations) - 20} 条违规未列出"
-        )
+        report_lines = [f"  {path}:{line}  {reason}" for path, line, reason in sample]
+        extra = "" if len(all_violations) <= 20 else (f"\n  ... 另有 {len(all_violations) - 20} 条违规未列出")
         pytest.fail(
-            f"发现 {len(all_violations)} 处日志密钥泄漏风险：\n" +
-            "\n".join(report_lines) + extra +
-            "\n\n修复建议：\n"
+            f"发现 {len(all_violations)} 处日志密钥泄漏风险：\n" + "\n".join(report_lines) + extra + "\n\n修复建议：\n"
             "  1) 不要打印密钥值，改用前缀 + 长度（例：`f'key={api_key[:4]}...,len={len(api_key)}'`）；\n"
             "  2) 不要通过字面量硬编码密钥；\n"
             "  3) 环境变量名不要作为日志字面量出现。"
@@ -248,14 +269,12 @@ def test_no_sk_prefix_in_any_log_message_template() -> None:
     if filtered:
         sample = filtered[:20]
         report = "\n".join(f"  {p}:{l}  {r}" for p, l, r in sample)
-        pytest.fail(
-            f"发现 {len(filtered)} 处密钥字面量（含 docstring 提示性说明也可能命中，请人工判定）：\n{report}"
-        )
+        pytest.fail(f"发现 {len(filtered)} 处密钥字面量（含 docstring 提示性说明也可能命中，请人工判定）：\n{report}")
 
 
 def test_no_secret_in_tests_self_sanity() -> None:
     """自检护栏：用已知违规代码验证扫描逻辑有效。"""
-    sample_bad = '''
+    sample_bad = """
 import logging
 logger = logging.getLogger("test")
 logger.warning("api_key=%s", "sk-proj-abc1234567890")
@@ -263,10 +282,10 @@ logger.error("token=%s", "gAAAAABCD12345678901234567890")
 logger.info("hardcoded api_key='sk-hardcoded12345' should be flagged")
 logger.debug("safe message without secrets")
 logger.warning("api_key=%s", "safe-api-key-value")
-'''
+"""
     import tempfile
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False,
-                                    encoding="utf-8") as tf:
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as tf:
         tf.write(sample_bad)
         tmp_path = Path(tf.name)
 
@@ -290,8 +309,7 @@ logger.warning("api_key=%s", "safe-api-key-value")
                 # 也不该抓 "gAAAAABCD..."（已被 Fernet 规则命中，但会同时命中独立参数规则）
                 # 只要没有误抓 %s 模板即可
                 if "api_key=%s" in reason or "token=%s" in reason:
-                    pytest.fail(
-                        f"误报：参数化模板被误抓为独立裸密钥：{reason}")
+                    pytest.fail(f"误报：参数化模板被误抓为独立裸密钥：{reason}")
     finally:
         tmp_path.unlink(missing_ok=True)
 

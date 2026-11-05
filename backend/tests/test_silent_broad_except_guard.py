@@ -19,6 +19,7 @@
 判别力自证（R57 惯例）：本文件内置违规样例矩阵，证明扫描器真能抓到原始
 缺陷形态、且对全部豁免形态不误报 —— 防止护栏本身退化成恒绿空转。
 """
+
 import ast
 import io
 import os
@@ -70,7 +71,7 @@ def _header_text(src_lines, handler):
     """
     first_body_line = handler.body[0].lineno
     end = max(handler.lineno, first_body_line - 1)
-    return "\n".join(src_lines[handler.lineno - 1:end])
+    return "\n".join(src_lines[handler.lineno - 1 : end])
 
 
 def _exc_type_name(exc_type):
@@ -105,9 +106,11 @@ def scan_source(src, filename="<src>"):
                 child_func = func_name or "<lambda>"
             if isinstance(child, ast.ExceptHandler):
                 type_name = _exc_type_name(child.type)
-                if (type_name in _BROAD_EXC_NAMES and _is_silent_body(child)
-                        and not _NOQA_BLE001.search(
-                            _header_text(src_lines, child))):
+                if (
+                    type_name in _BROAD_EXC_NAMES
+                    and _is_silent_body(child)
+                    and not _NOQA_BLE001.search(_header_text(src_lines, child))
+                ):
                     violations.append((child.lineno, func_name or "<module>"))
             visit(child, child_func)
 
@@ -138,7 +141,8 @@ class TestNoSilentBroadExcept:
         assert violations == [], (
             "发现静默吞异常（except Exception/BaseException 分支体纯空转且无 "
             "# noqa: BLE001 标注）。刻意兜底请补 `# noqa: BLE001 - <理由>`；"
-            "否则请记录日志/返回错误。违规明细：%s" % violations)
+            "否则请记录日志/返回错误。违规明细：%s" % violations
+        )
 
 
 class TestDetectorDiscrimination:
@@ -149,8 +153,7 @@ class TestDetectorDiscrimination:
         assert scan_source(src) == [(4, "f")]
 
     def test_flags_docstring_only_body(self):
-        src = ("def f():\n    try:\n        g()\n    except Exception:\n"
-               "        \"\"\"什么都不做\"\"\"\n")
+        src = "def f():\n    try:\n        g()\n    except Exception:\n" '        """什么都不做"""\n'
         assert scan_source(src) == [(4, "f")]
 
     def test_flags_ellipsis_body(self):
@@ -162,74 +165,75 @@ class TestDetectorDiscrimination:
         assert scan_source(src) == [(4, "f")]
 
     def test_flags_module_level_and_reports_function_name(self):
-        src = ("def outer():\n"
-               "    def inner():\n"
-               "        try:\n"
-               "            g()\n"
-               "        except Exception:\n"
-               "            pass\n")
+        src = (
+            "def outer():\n"
+            "    def inner():\n"
+            "        try:\n"
+            "            g()\n"
+            "        except Exception:\n"
+            "            pass\n"
+        )
         # 行号定位在 except 头部行（第 5 行），函数名取最近嵌套函数
         assert scan_source(src) == [(5, "inner")]
 
     def test_noqa_is_exempt(self):
-        src = ("def f():\n"
-               "    try:\n"
-               "        g()\n"
-               "    except Exception:  # noqa: BLE001 - 刻意兜底，服务启动优先\n"
-               "        pass\n")
+        src = (
+            "def f():\n"
+            "    try:\n"
+            "        g()\n"
+            "    except Exception:  # noqa: BLE001 - 刻意兜底，服务启动优先\n"
+            "        pass\n"
+        )
         assert scan_source(src) == []
 
     def test_narrow_exception_is_not_in_scope(self):
-        src = ("def f():\n"
-               "    try:\n"
-               "        g()\n"
-               "    except ValueError:\n"
-               "        pass\n"
-               "    try:\n"
-               "        g()\n"
-               "    except (ValueError, KeyError):\n"
-               "        pass\n")
+        src = (
+            "def f():\n"
+            "    try:\n"
+            "        g()\n"
+            "    except ValueError:\n"
+            "        pass\n"
+            "    try:\n"
+            "        g()\n"
+            "    except (ValueError, KeyError):\n"
+            "        pass\n"
+        )
         assert scan_source(src) == []
 
     def test_body_with_real_statements_is_not_flagged(self):
-        src = ("import logging\n"
-               "log = logging.getLogger(__name__)\n"
-               "def f():\n"
-               "    try:\n"
-               "        g()\n"
-               "    except Exception as e:\n"
-               "        log.debug(\"忽略: %s\", e)\n"
-               "    try:\n"
-               "        g()\n"
-               "    except Exception:\n"
-               "        x = 1\n"
-               "    try:\n"
-               "        g()\n"
-               "    except Exception:\n"
-               "        return None\n"
-               "    try:\n"
-               "        g()\n"
-               "    except Exception:\n"
-               "        raise\n")
+        src = (
+            "import logging\n"
+            "log = logging.getLogger(__name__)\n"
+            "def f():\n"
+            "    try:\n"
+            "        g()\n"
+            "    except Exception as e:\n"
+            '        log.debug("忽略: %s", e)\n'
+            "    try:\n"
+            "        g()\n"
+            "    except Exception:\n"
+            "        x = 1\n"
+            "    try:\n"
+            "        g()\n"
+            "    except Exception:\n"
+            "        return None\n"
+            "    try:\n"
+            "        g()\n"
+            "    except Exception:\n"
+            "        raise\n"
+        )
         assert scan_source(src) == []
 
     def test_tuple_with_broad_name_is_flagged(self):
-        src = ("def f():\n"
-               "    try:\n"
-               "        g()\n"
-               "    except (ValueError, Exception):\n"
-               "        pass\n")
+        src = "def f():\n" "    try:\n" "        g()\n" "    except (ValueError, Exception):\n" "        pass\n"
         assert scan_source(src) == [(4, "f")]
 
     def test_detector_works_on_real_file_in_tmp_dir(self):
         """端到端：把违规样例写成真实文件进临时目录，目录级扫描必须报出
         文件、行号与函数名 —— 证明 scan_tree 的文件遍历与报告链路可用。"""
         import tempfile
-        src = ("def busted():\n"
-               "    try:\n"
-               "        g()\n"
-               "    except Exception:\n"
-               "        pass\n")
+
+        src = "def busted():\n" "    try:\n" "        g()\n" "    except Exception:\n" "        pass\n"
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "violation_probe.py")
             with io.open(path, "w", encoding="utf-8") as fh:

@@ -14,6 +14,7 @@ database is locked、SSE 生成链路 RuntimeError —— 前端只看到「后�
 另含一条**真损坏注入**的安全性质测试：损坏后门闸要么放弃（字节不变）、
 要么修复后 quick_check 全绿且业务数据完好 —— 不依赖具体错误消息格式。
 """
+
 import ast
 import asyncio
 import hashlib
@@ -48,7 +49,9 @@ def _make_db(path) -> None:
         conn.execute(
             "INSERT INTO consistency_scan_cache"
             "(section_id, scheme_id, content_hash, context_hash, rows_json)"
-            " VALUES (?,?,?,?,?)", (f"c{i}", "p", "h", "h", "[]"))
+            " VALUES (?,?,?,?,?)",
+            (f"c{i}", "p", "h", "h", "[]"),
+        )
         conn.execute("INSERT INTO export_cache(id) VALUES (?)", (f"e{i}",))
     conn.commit()
     conn.close()
@@ -83,6 +86,7 @@ def _gate_bak_dirs(db_path):
 
 # ---------------- A) 完好库：零成本放行 / 逃生开关 / 库不存在 ----------------
 
+
 class TestHealthyPassthrough:
     def test_healthy_db_gate_is_noop(self, tmp_path, monkeypatch):
         p = tmp_path / "t.db"
@@ -112,22 +116,22 @@ class TestHealthyPassthrough:
 
 # ---------------- B) 可归属缓存表损坏：备份 + 重建，业务零触碰 ----------------
 
+
 class TestRebuildPath:
     def test_table_tree_corruption_rebuilt(self, tmp_path, monkeypatch):
         p = tmp_path / "t.db"
         _make_db(p)
         monkeypatch.setattr(appdb, "DB_PATH", p)
-        _patch_check(monkeypatch,
-                     ["Tree 700 page 700 cell 0: Child page depth differs"])
-        monkeypatch.setattr(appdb, "_root_page_owner",
-                            _fake_owner({700: ("table", "consistency_scan_cache", "consistency_scan_cache")}))
+        _patch_check(monkeypatch, ["Tree 700 page 700 cell 0: Child page depth differs"])
+        monkeypatch.setattr(
+            appdb, "_root_page_owner", _fake_owner({700: ("table", "consistency_scan_cache", "consistency_scan_cache")})
+        )
         before = _sha(p)
         assert appdb._startup_db_integrity_gate() is True
         conn = sqlite3.connect(str(p))
         try:
             # 重建表存在、内容按缓存语义清空、列结构与白名单 DDL 一致
-            cols = [r[1] for r in conn.execute(
-                "PRAGMA table_info(consistency_scan_cache)")]
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(consistency_scan_cache)")]
             assert cols, "重建表必须存在"
             n = conn.execute("SELECT COUNT(*) FROM consistency_scan_cache").fetchone()[0]
             assert n == 0
@@ -144,12 +148,17 @@ class TestRebuildPath:
         p = tmp_path / "t.db"
         _make_db(p)
         monkeypatch.setattr(appdb, "DB_PATH", p)
-        _patch_check(monkeypatch,
-                     ["wrong # of entries in index idx_export_cache_lookup"])
-        monkeypatch.setattr(appdb, "_root_page_owner", _fake_owner({
-            4001: ("table", "export_cache", "export_cache"),
-            4002: ("index", "idx_export_cache_lookup", "export_cache"),
-        }))
+        _patch_check(monkeypatch, ["wrong # of entries in index idx_export_cache_lookup"])
+        monkeypatch.setattr(
+            appdb,
+            "_root_page_owner",
+            _fake_owner(
+                {
+                    4001: ("table", "export_cache", "export_cache"),
+                    4002: ("index", "idx_export_cache_lookup", "export_cache"),
+                }
+            ),
+        )
         assert appdb._startup_db_integrity_gate() is True
         conn = sqlite3.connect(str(p))
         try:
@@ -163,11 +172,11 @@ class TestRebuildPath:
         _make_db(p)
         monkeypatch.setattr(appdb, "DB_PATH", p)
         _patch_check(monkeypatch, ["Tree 700 page 700: x"])
-        monkeypatch.setattr(appdb, "_root_page_owner",
-                            _fake_owner({700: ("table", "consistency_scan_cache", "consistency_scan_cache")}))
+        monkeypatch.setattr(
+            appdb, "_root_page_owner", _fake_owner({700: ("table", "consistency_scan_cache", "consistency_scan_cache")})
+        )
         # 注入一条必失败的重建 DDL（语法坏）
-        monkeypatch.setattr(appdb, "_REGENERABLE_CACHE_TABLES", {
-            "consistency_scan_cache": "CREATE TABLE broken ("})
+        monkeypatch.setattr(appdb, "_REGENERABLE_CACHE_TABLES", {"consistency_scan_cache": "CREATE TABLE broken ("})
         before = _sha(p)
         assert appdb._startup_db_integrity_gate() is False
         assert _sha(p) == before, "重建失败必须还原备份（字节逐位一致）"
@@ -175,16 +184,14 @@ class TestRebuildPath:
 
 # ---------------- C) 不可归属 / 业务表 / 超限：绝不触碰 ----------------
 
+
 class TestAbortPath:
     def test_business_table_corruption_never_touched(self, tmp_path, monkeypatch):
         p = tmp_path / "t.db"
         _make_db(p)
         monkeypatch.setattr(appdb, "DB_PATH", p)
-        monkeypatch.setattr(
-            appdb, "_quick_check_errors",
-            lambda _p: ["Tree 500 page 500: Invalid leaf type"])
-        monkeypatch.setattr(appdb, "_root_page_owner",
-                            _fake_owner({500: ("table", "sections", "sections")}))
+        monkeypatch.setattr(appdb, "_quick_check_errors", lambda _p: ["Tree 500 page 500: Invalid leaf type"])
+        monkeypatch.setattr(appdb, "_root_page_owner", _fake_owner({500: ("table", "sections", "sections")}))
         before = _sha(p)
         assert appdb._startup_db_integrity_gate() is False
         assert _sha(p) == before
@@ -195,9 +202,7 @@ class TestAbortPath:
         _make_db(p)
         monkeypatch.setattr(appdb, "DB_PATH", p)
         # freelist 类消息：无 Tree 前缀、无索引名；页号无 owner → 无法归属
-        monkeypatch.setattr(
-            appdb, "_quick_check_errors",
-            lambda _p: ["Freelist: page 9999 is never used"])
+        monkeypatch.setattr(appdb, "_quick_check_errors", lambda _p: ["Freelist: page 9999 is never used"])
         monkeypatch.setattr(appdb, "_root_page_owner", _fake_owner({}))
         before = _sha(p)
         assert appdb._startup_db_integrity_gate() is False
@@ -208,28 +213,39 @@ class TestAbortPath:
         _make_db(p)
         monkeypatch.setattr(appdb, "DB_PATH", p)
         monkeypatch.setattr(
-            appdb, "_quick_check_errors",
-            lambda _p: [f"Tree 700 page {700 + i}: x"
-                        for i in range(appdb._INTEGRITY_PROBE_LIMIT)])
-        monkeypatch.setattr(appdb, "_root_page_owner",
-                            _fake_owner({700: ("table", "consistency_scan_cache", "consistency_scan_cache")}))
+            appdb,
+            "_quick_check_errors",
+            lambda _p: [f"Tree 700 page {700 + i}: x" for i in range(appdb._INTEGRITY_PROBE_LIMIT)],
+        )
+        monkeypatch.setattr(
+            appdb, "_root_page_owner", _fake_owner({700: ("table", "consistency_scan_cache", "consistency_scan_cache")})
+        )
         before = _sha(p)
-        assert appdb._startup_db_integrity_gate() is False, \
-            "错误数达探针上限 = 范围无法确证，必须放弃"
+        assert appdb._startup_db_integrity_gate() is False, "错误数达探针上限 = 范围无法确证，必须放弃"
         assert _sha(p) == before
 
     def test_mixed_cache_and_business_aborts(self, tmp_path, monkeypatch):
         p = tmp_path / "t.db"
         _make_db(p)
         monkeypatch.setattr(appdb, "DB_PATH", p)
-        monkeypatch.setattr(appdb, "_quick_check_errors", lambda _p: [
-            "Tree 700 page 700: x",           # 可归属缓存表
-            "Tree 500 page 500: also broken",  # 业务表 —— 任一不可重建即整体放弃
-        ])
-        monkeypatch.setattr(appdb, "_root_page_owner", _fake_owner({
-            700: ("table", "consistency_scan_cache", "consistency_scan_cache"),
-            500: ("table", "sections", "sections"),
-        }))
+        monkeypatch.setattr(
+            appdb,
+            "_quick_check_errors",
+            lambda _p: [
+                "Tree 700 page 700: x",  # 可归属缓存表
+                "Tree 500 page 500: also broken",  # 业务表 —— 任一不可重建即整体放弃
+            ],
+        )
+        monkeypatch.setattr(
+            appdb,
+            "_root_page_owner",
+            _fake_owner(
+                {
+                    700: ("table", "consistency_scan_cache", "consistency_scan_cache"),
+                    500: ("table", "sections", "sections"),
+                }
+            ),
+        )
         before = _sha(p)
         assert appdb._startup_db_integrity_gate() is False
         assert _sha(p) == before
@@ -240,9 +256,9 @@ class TestAbortPath:
         _make_db(p)
         monkeypatch.setattr(appdb, "DB_PATH", p)
         conn = sqlite3.connect(str(p))
-        rp = conn.execute("SELECT rootpage FROM sqlite_master"
-                          " WHERE type='table' AND name='consistency_scan_cache'"
-                          ).fetchone()[0]
+        rp = conn.execute(
+            "SELECT rootpage FROM sqlite_master" " WHERE type='table' AND name='consistency_scan_cache'"
+        ).fetchone()[0]
         page_size = conn.execute("PRAGMA page_size").fetchone()[0]
         conn.close()
         with open(p, "r+b") as f:
@@ -269,43 +285,45 @@ class TestAbortPath:
 
 # ---------------- D) 接线 / 白名单封闭集 / DDL parity ----------------
 
+
 class TestWiringAndWhitelist:
     def test_init_db_calls_gate_after_wal_heal(self):
         src = textwrap.dedent(inspect.getsource(appdb.init_db))
-        calls = [n.func.id for n in ast.walk(ast.parse(src))
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+        calls = [
+            n.func.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        ]
         assert "_startup_db_integrity_gate" in calls, "init_db 必须接完整性闸门"
         assert calls.index("_self_heal_corrupt_wal") < calls.index(
-            "_startup_db_integrity_gate"), "闸门必须在 WAL 自愈之后"
+            "_startup_db_integrity_gate"
+        ), "闸门必须在 WAL 自愈之后"
 
     def test_rebuild_whitelist_is_closed_cache_set(self):
         assert set(appdb._REGENERABLE_CACHE_TABLES) == {
-            "consistency_scan_cache", "export_cache"}, \
-            "重建白名单只允许可丢弃缓存表；新增条目必须同时过 DDL parity 测试"
+            "consistency_scan_cache",
+            "export_cache",
+        }, "重建白名单只允许可丢弃缓存表；新增条目必须同时过 DDL parity 测试"
 
     def test_rebuild_ddl_matches_schema_sql_columns(self):
         for name, ddl in appdb._REGENERABLE_CACHE_TABLES.items():
             assert name in SCHEMA_SQL, f"{name} 必须存在于 SCHEMA_SQL"
             c_schema = sqlite3.connect(":memory:")
             c_schema.executescript(SCHEMA_SQL)
-            cols_schema = [r[1] for r in c_schema.execute(
-                f"PRAGMA table_info({name})")]
+            cols_schema = [r[1] for r in c_schema.execute(f"PRAGMA table_info({name})")]
             c_gate = sqlite3.connect(":memory:")
             c_gate.execute(ddl)
-            cols_gate = [r[1] for r in c_gate.execute(
-                f"PRAGMA table_info({name})")]
-            assert cols_schema == cols_gate, \
-                f"{name} 重建 DDL 列集必须与 SCHEMA_SQL 逐列一致"
+            cols_gate = [r[1] for r in c_gate.execute(f"PRAGMA table_info({name})")]
+            assert cols_schema == cols_gate, f"{name} 重建 DDL 列集必须与 SCHEMA_SQL 逐列一致"
 
     def test_init_db_starts_runtime_probe(self):
         src = textwrap.dedent(inspect.getsource(appdb.init_db))
-        calls = [n.func.id for n in ast.walk(ast.parse(src))
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
-        assert "_start_integrity_probe_task" in calls, \
-            "init_db 必须接运行期完整性巡检"
+        calls = [
+            n.func.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        ]
+        assert "_start_integrity_probe_task" in calls, "init_db 必须接运行期完整性巡检"
 
 
 # ---------------- E) 运行期完整性巡检（R165b · J 盘持续丢页取证后落地） ----------------
+
 
 class TestRuntimeIntegrityProbe:
     def test_no_task_created_in_test_process(self, monkeypatch):
@@ -332,14 +350,12 @@ class TestRuntimeIntegrityProbe:
         appdb._probe_task = None
 
     async def test_probe_loop_warns_on_corruption(self, monkeypatch, caplog):
-        monkeypatch.setattr(appdb, "_quick_check_errors",
-                            lambda _p: ["Tree 700 page 700: x"])
+        monkeypatch.setattr(appdb, "_quick_check_errors", lambda _p: ["Tree 700 page 700: x"])
         loop_task = asyncio.create_task(appdb._integrity_probe_loop(0.01))
         await asyncio.sleep(0.08)
         loop_task.cancel()
         await asyncio.wait_for(asyncio.gather(loop_task, return_exceptions=True), 2)
-        msgs = [r.message for r in caplog.records
-                if "运行期完整性巡检" in r.message]
+        msgs = [r.message for r in caplog.records if "运行期完整性巡检" in r.message]
         assert msgs and "quick_check 异常" in msgs[0], "损坏必须以 WARNING 点名"
 
     def test_probe_once_healthy_and_missing(self, tmp_path, monkeypatch):

@@ -38,9 +38,11 @@ def _src(path):
 # C-1：word_budget_override 归一化接线
 # ---------------------------------------------------------------------------
 
+
 def test_cu_normalize_rejects_string_compare_hazard():
     """纯函数本身：字符串 "2000" 必须归一为 int，非法值归一为 None。"""
     from app.services.content_utils import normalize_word_budget_override
+
     assert normalize_word_budget_override("2000") == 2000
     assert normalize_word_budget_override(2000) == 2000
     assert normalize_word_budget_override("abc") is None
@@ -66,8 +68,8 @@ def test_c1_no_bare_body_get_assignment():
     """不得出现回退为裸 body.get 的赋值。"""
     src = _src(SSE_PATH)
     assert not re.search(
-        r"^\s*word_budget_override\s*=\s*body\.get\(", src, re.MULTILINE), (
-        "发现裸 `word_budget_override = body.get(...)`，字符串入参会炸整批（C-1 回退）")
+        r"^\s*word_budget_override\s*=\s*body\.get\(", src, re.MULTILINE
+    ), "发现裸 `word_budget_override = body.get(...)`，字符串入参会炸整批（C-1 回退）"
 
 
 def test_c1_normalize_function_still_exists():
@@ -78,6 +80,7 @@ def test_c1_normalize_function_still_exists():
 # ---------------------------------------------------------------------------
 # C-3：stopped 事件必须携带 failed_count
 # ---------------------------------------------------------------------------
+
 
 def _stopped_payloads():
     """从源码中抽取所有 event=='stopped' 的 json.dumps 载荷字面量。"""
@@ -97,21 +100,20 @@ def test_c3_all_stopped_events_carry_failed_count():
     有这个字段"，无法发现拼装点本体把字段删掉）。
     """
     src = _src(SSE_PATH)
-    gen = src[src.index("async def generate_content("):]
+    gen = src[src.index("async def generate_content(") :]
     # B1 拆分：拼装点本体下沉到 _sse_content_payloads，字段断言改读其源码。
     payloads = _src(PAYLOADS_PATH)
     i = payloads.index("def build_stopped_payload(")
-    block = payloads[i:payloads.index("\ndef build_error_payload(", i + 10)]
+    block = payloads[i : payloads.index("\ndef build_error_payload(", i + 10)]
     assert "'event': 'stopped'" in block
-    assert "failed_count" in block, (
-        f"stopped 载荷拼装点必须含 failed_count: {block[:200]}")
-    assert "max(total - len(done_ids), 0)" in block, (
-        "failed_count 必须用 done_ids 口径（与 completed / error 三条终态统一）")
+    assert "failed_count" in block, f"stopped 载荷拼装点必须含 failed_count: {block[:200]}"
+    assert (
+        "max(total - len(done_ids), 0)" in block
+    ), "failed_count 必须用 done_ids 口径（与 completed / error 三条终态统一）"
     # 两条 stopped 路径都必须走该拼装点（不得再有内联手拼）
     assert "_stopped_payload('用户已停止', stop_progress)" in gen
     assert "_stopped_payload('任务已取消')" in gen
-    assert "'event':'stopped'" not in gen, (
-        "正文生成路径不得再内联手拼 stopped 载荷")
+    assert "'event':'stopped'" not in gen, "正文生成路径不得再内联手拼 stopped 载荷"
 
 
 def test_c3_stopped_count_matches_frontend_expectation():
@@ -128,7 +130,8 @@ def test_c3_stopped_count_matches_frontend_expectation():
     src = _src(SSE_PATH)
     assert re.search(r"max\(total\s*-\s*len\(done_ids\),\s*0\)", src), (
         "failed_count 应以 max(total - len(done_ids), 0) 下发（int 类型，"
-        "统一 completed/stopped/cancelled 三条终态口径）")
+        "统一 completed/stopped/cancelled 三条终态口径）"
+    )
 
 
 def test_c3_stopped_payload_json_parsable():
@@ -138,8 +141,11 @@ def test_c3_stopped_payload_json_parsable():
     分支在新载荷下成立（旧载荷恒为 0）。
     """
     payload = {
-        "event": "stopped", "task_id": "t1", "message": "用户已停止",
-        "failed_count": 2, "failed_sections": ["a", "b"],
+        "event": "stopped",
+        "task_id": "t1",
+        "message": "用户已停止",
+        "failed_count": 2,
+        "failed_sections": ["a", "b"],
     }
     evt = json.loads(json.dumps(payload))
     fc = evt["failed_count"] if isinstance(evt.get("failed_count"), (int, float)) else 0
@@ -153,6 +159,7 @@ def test_c3_stopped_payload_json_parsable():
 # A-3：级联失效不得再受 `if done:` 门禁
 # ---------------------------------------------------------------------------
 
+
 def test_a3_cascade_not_gated_by_done():
     """_invalidate_extraction_derived 调用不得位于 if done 块内。"""
     src = _src(BA_PATH)
@@ -161,9 +168,7 @@ def test_a3_cascade_not_gated_by_done():
     for node in ast.walk(tree):
         if isinstance(node, ast.If):
             # 判据：if 的 test 是 Name 'done' 且 body 内含级联调用
-            test_is_done = (
-                isinstance(node.test, ast.Name) and node.test.id == "done"
-            )
+            test_is_done = isinstance(node.test, ast.Name) and node.test.id == "done"
             if not test_is_done:
                 continue
             for sub in ast.walk(node):
@@ -232,6 +237,7 @@ def test_a3_cascade_behavior_when_done_zero():
 # ---------------------------------------------------------------------------
 # 语法与结构完整性
 # ---------------------------------------------------------------------------
+
 
 def test_changed_files_parse():
     for p in (SSE_PATH, BA_PATH, CU_PATH):

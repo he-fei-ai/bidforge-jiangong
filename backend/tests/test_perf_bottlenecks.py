@@ -7,6 +7,7 @@
 - sse_handlers._build_parent_chain：预构建索引路径与重建路径结果一致（防 O(N²) 回归）
 - export 纯函数：内容块解析 / 标题编号剥离 / 中文数字解析 / 代码归一化（导出链路复用缓存 key）
 """
+
 import json
 import time
 from io import BytesIO
@@ -19,8 +20,8 @@ from app.services.crypto import encrypt_api_key
 # ChartCache（对应 P0-2 单飞去重 / P0-1 缓存命中，优化均以此不变量为基座）
 # ---------------------------------------------------------------------------
 
-class TestChartCache:
 
+class TestChartCache:
     def test_same_payload_same_key_roundtrip(self, tmp_path):
         cache = ChartCache(cache_dir=str(tmp_path))
         code = "graph TD\n    A-->B"
@@ -40,6 +41,7 @@ class TestChartCache:
     def test_allow_pil_participates_in_key(self, monkeypatch, tmp_path):
         """get_or_render 的 key 必须包含 allow_pil，否则 PIL 兜底图污染不降级轨"""
         import app.services.ai.mermaid_renderer as mr
+
         calls = {"n": 0}
 
         def fake_render(mermaid_code, chart_type, *, skip_http=False, allow_pil=True):
@@ -49,8 +51,8 @@ class TestChartCache:
         monkeypatch.setattr(mr, "render_mermaid_to_bytes", fake_render)
         cache = ChartCache(cache_dir=str(tmp_path))
         code = "graph TD\n    A-->B"
-        cache.get_or_render(code, "flowchart")                  # allow_pil=True → 渲染第 1 次
-        cache.get_or_render(code, "flowchart")                  # 命中 pil=1 缓存 → 不渲染
+        cache.get_or_render(code, "flowchart")  # allow_pil=True → 渲染第 1 次
+        cache.get_or_render(code, "flowchart")  # 命中 pil=1 缓存 → 不渲染
         cache.get_or_render(code, "flowchart", allow_pil=False)  # pil=0 key 未命中 → 渲染第 2 次
         assert calls["n"] == 2, "allow_pil 必须参与缓存 key，两档互不污染"
         st = cache.get_stats()
@@ -59,6 +61,7 @@ class TestChartCache:
     def test_get_or_render_renders_once_then_hits(self, monkeypatch, tmp_path):
         """相同 key 连续调用只渲染一次，第二次命中缓存（并发单飞的缓存层契约）"""
         import app.services.ai.mermaid_renderer as mr
+
         calls = {"n": 0}
 
         def fake_render(mermaid_code, chart_type, *, skip_http=False, allow_pil=True):
@@ -81,6 +84,7 @@ class TestChartCache:
         import threading
 
         import app.services.ai.mermaid_renderer as mr
+
         calls = {"n": 0}
         calls_lock = threading.Lock()
         start_gate = threading.Barrier(4)
@@ -89,6 +93,7 @@ class TestChartCache:
             with calls_lock:
                 calls["n"] += 1
             import time
+
             time.sleep(0.15)  # 扩大并发窗口
             return BytesIO(b"PNG" * 40)
 
@@ -146,21 +151,47 @@ class TestChartCache:
 # provider_factory._fallback_chain（对应 P0-4：加缓存后语义必须不变）
 # ---------------------------------------------------------------------------
 
-class TestFallbackChainOrdering:
 
+class TestFallbackChainOrdering:
     @pytest.mark.asyncio
     async def test_chain_respects_priority_and_excludes_primary(self, db_conn):
         import app.services.ai.provider_factory as pf
+
         rows = [
-            ("cfg-c", "zhipu", 0, encrypt_api_key("key-c"), "https://open.bigmodel.cn/api/paas/v4", "glm-4-plus", "2026-09-01T00:00:00"),
-            ("cfg-a", "deepseek", 1, encrypt_api_key("key-a"), "https://api.deepseek.com/v1", "deepseek-chat", "2026-09-02T00:00:00"),
-            ("cfg-b", "qwen", 2, encrypt_api_key("key-b"), "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-max", "2026-09-03T00:00:00"),
+            (
+                "cfg-c",
+                "zhipu",
+                0,
+                encrypt_api_key("key-c"),
+                "https://open.bigmodel.cn/api/paas/v4",
+                "glm-4-plus",
+                "2026-09-01T00:00:00",
+            ),
+            (
+                "cfg-a",
+                "deepseek",
+                1,
+                encrypt_api_key("key-a"),
+                "https://api.deepseek.com/v1",
+                "deepseek-chat",
+                "2026-09-02T00:00:00",
+            ),
+            (
+                "cfg-b",
+                "qwen",
+                2,
+                encrypt_api_key("key-b"),
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "qwen-max",
+                "2026-09-03T00:00:00",
+            ),
         ]
         for rid, pname, prio, key, base, model, ts in rows:
             await db_conn.execute(
                 "INSERT INTO ai_config (id, provider_name, is_active, priority, api_key_encrypted, base_url, model, updated_at)"
                 " VALUES (?,?,?,?,?,?,?,?)",
-                (rid, pname, 1, prio, key, base, model, ts))
+                (rid, pname, 1, prio, key, base, model, ts),
+            )
         await db_conn.commit()
 
         chain = await pf._fallback_chain()
@@ -175,10 +206,12 @@ class TestFallbackChainOrdering:
     @pytest.mark.asyncio
     async def test_chain_skips_empty_key_rows(self, db_conn):
         import app.services.ai.provider_factory as pf
+
         await db_conn.execute(
             "INSERT INTO ai_config (id, provider_name, is_active, priority, api_key_encrypted, updated_at)"
             " VALUES (?,?,?,?,?,?)",
-            ("cfg-no-key", "deepseek", 1, 1, "", "2026-09-01T00:00:00"))
+            ("cfg-no-key", "deepseek", 1, 1, "", "2026-09-01T00:00:00"),
+        )
         await db_conn.commit()
         chain = await pf._fallback_chain()
         assert all(c["api_key"] for c in chain), "空 key 配置必须被跳过"
@@ -188,22 +221,23 @@ class TestFallbackChainOrdering:
 # sse_handlers 纯函数（对应 P1-1 批量写 / 目录树 O(N) 预构建不变量）
 # ---------------------------------------------------------------------------
 
-class TestWordBudgetAllocation:
 
+class TestWordBudgetAllocation:
     def _units(self):
         return {
-            "u1": {"unit": {"id": "u1", "title": "单元1"}, "leaves": [
-                {"id": "l1"}, {"id": "l2"}, {"id": "l3"}]},
+            "u1": {"unit": {"id": "u1", "title": "单元1"}, "leaves": [{"id": "l1"}, {"id": "l2"}, {"id": "l3"}]},
         }
 
     def test_adopts_ai_allocation_when_sum_matches(self):
         from app.routers.sse_handlers import _apply_word_budget_allocations
+
         units = self._units()
         _apply_word_budget_allocations(units, 100, {"l1": 40, "l2": 30, "l3": 30})
         assert units["u1"]["alloc"] == {"l1": 40, "l2": 30, "l3": 30}
 
     def test_falls_back_to_equal_split_with_conservation(self):
         from app.routers.sse_handlers import _apply_word_budget_allocations
+
         units = self._units()
         # AI 分配缺失 l3 → 总和 91 ≠ 100 → 降级均分且守恒
         _apply_word_budget_allocations(units, 100, {"l1": 90, "l2": 1})
@@ -213,28 +247,53 @@ class TestWordBudgetAllocation:
 
     def test_single_leaf_unit_skipped(self):
         from app.routers.sse_handlers import _apply_word_budget_allocations
+
         units = {"u1": {"unit": {"id": "u1"}, "leaves": [{"id": "l1"}]}}
         _apply_word_budget_allocations(units, 100, {"l1": 1})
         assert "alloc" not in units["u1"], "单叶子单元不应被 AI 分配覆盖"
 
 
 class TestBuildParentChain:
-
     def _sections(self):
         return [
-            {"id": "r1", "parent_id": "", "title": "第一章 总则", "level": 1,
-             "sort_order": 0, "outline_json": json.dumps({"id": "1"})},
-            {"id": "r2", "parent_id": "", "title": "第二章 施工部署", "level": 1,
-             "sort_order": 1, "outline_json": json.dumps({"id": "2"})},
-            {"id": "c1", "parent_id": "r1", "title": "1.1 概述", "level": 2,
-             "sort_order": 0, "outline_json": json.dumps({"id": "1.1"})},
-            {"id": "leaf", "parent_id": "c1", "title": "细节", "level": 3,
-             "sort_order": 0, "outline_json": json.dumps({"id": "1.1.1"})},
+            {
+                "id": "r1",
+                "parent_id": "",
+                "title": "第一章 总则",
+                "level": 1,
+                "sort_order": 0,
+                "outline_json": json.dumps({"id": "1"}),
+            },
+            {
+                "id": "r2",
+                "parent_id": "",
+                "title": "第二章 施工部署",
+                "level": 1,
+                "sort_order": 1,
+                "outline_json": json.dumps({"id": "2"}),
+            },
+            {
+                "id": "c1",
+                "parent_id": "r1",
+                "title": "1.1 概述",
+                "level": 2,
+                "sort_order": 0,
+                "outline_json": json.dumps({"id": "1.1"}),
+            },
+            {
+                "id": "leaf",
+                "parent_id": "c1",
+                "title": "细节",
+                "level": 3,
+                "sort_order": 0,
+                "outline_json": json.dumps({"id": "1.1.1"}),
+            },
         ]
 
     def test_prebuilt_index_path_matches_rebuild(self):
         """预构建 nodes/children_by_parent 与每次重建结果必须一致（防 O(N²) 回归）"""
         from app.routers.sse_handlers import _build_parent_chain
+
         sections = self._sections()
         nodes = {s["id"]: s for s in sections}
         children: dict[str, list] = {}
@@ -252,6 +311,7 @@ class TestBuildParentChain:
 
     def test_chapter_index_counts_siblings(self):
         from app.routers.sse_handlers import _build_parent_chain
+
         sections = self._sections()
         nodes = {s["id"]: s for s in sections}
         children: dict[str, list] = {}
@@ -265,15 +325,17 @@ class TestBuildParentChain:
 # export 纯函数（对应 P0-3 导出链路 / 渲染轨匹配 key，优化均基于这些解析结果）
 # ---------------------------------------------------------------------------
 
-class TestExportPureFunctions:
 
+class TestExportPureFunctions:
     def test_norm_code_folds_whitespace(self):
         from app.routers.export import _norm_code
+
         assert _norm_code("graph TD\n    A-->B") == _norm_code("graph TD  A-->B")
         assert _norm_code("  a  b ") == "a b"
 
     def test_detect_plain_heading(self):
         from app.routers.export import _detect_plain_heading
+
         assert _detect_plain_heading("2 法律法规依据") == (2, "法律法规依据")
         assert _detect_plain_heading("3.1 国家标准") == (3, "国家标准")
         assert _detect_plain_heading("**1 施工条件分析**") == (2, "施工条件分析")
@@ -288,6 +350,7 @@ class TestExportPureFunctions:
 
     def test_cn_numeral_to_int(self):
         from app.routers.export import _cn_numeral_to_int
+
         assert _cn_numeral_to_int("二十一") == "21"
         assert _cn_numeral_to_int("二十三") == "23"
         assert _cn_numeral_to_int("一百零五") == "105"
@@ -297,17 +360,20 @@ class TestExportPureFunctions:
 
     def test_section_number_prefix(self):
         from app.routers.export import _section_number_prefix
+
         assert _section_number_prefix("第一章 施工组织设计") == "1"
         assert _section_number_prefix("1.2 进度计划") == "1.2"
         assert _section_number_prefix("（一） 设计标准") == ""
 
     def test_strip_title_number(self):
         from app.routers.export import _strip_title_number
+
         assert _strip_title_number("第一章 第一章 工程概况") == "工程概况"
         assert _strip_title_number("1.1 项目基本信息") == "项目基本信息"
 
     def test_parse_content_blocks_full_markdown(self):
         from app.routers.export import _parse_content_blocks
+
         md = (
             "# 1 总体概述\n\n"
             "正文段落。\n\n"
@@ -331,6 +397,7 @@ class TestExportPureFunctions:
 
     def test_parse_content_blocks_unclosed_code_fence_truncated(self):
         from app.routers.export import _parse_content_blocks
+
         md = "```mermaid\ngraph TD\n    A-->B\n"  # 未闭合围栏
         blocks = _parse_content_blocks(md)
         # ✅ 行为变更（2026-09-19）：未闭合围栏 = 生成被截断（实测交付文档取证，
@@ -343,6 +410,7 @@ class TestExportPureFunctions:
     def test_unclosed_fence_does_not_swallow_following_text(self):
         """未闭合围栏之外的正文不得被吞（截断保护的原始意图）。"""
         from app.routers.export import _parse_content_blocks
+
         md = "```mermaid\ngraph TD\n    A-->B\n\n后续正文段落。\n"
         blocks = _parse_content_blocks(md)
         paras = [b for b in blocks if b["type"] == "paragraph"]
@@ -353,8 +421,8 @@ class TestExportPureFunctions:
 # export 倒排索引（对应 P0-3：O(N²) 兜底扫描 → O(1)，语义必须与旧实现完全等价）
 # ---------------------------------------------------------------------------
 
-class TestChartTypeIndex:
 
+class TestChartTypeIndex:
     def test_fallback_keeps_first_match_semantics(self):
         """与旧"遍历 chart_lookup 取第一个同类型非空 code"语义一致。
 
@@ -365,6 +433,7 @@ class TestChartTypeIndex:
         本用例锁的正是这条"未传参 ⇒ 旧语义不变"的向后兼容红线。
         """
         from app.routers.export import _build_chart_type_index, _find_fallback_code
+
         lookup = {
             ("s1", "flowchart"): "graph TD\n    A-->B",
             ("s2", "gantt"): "gantt\n    title x",
@@ -377,7 +446,8 @@ class TestChartTypeIndex:
         assert _find_fallback_code(idx, "gantt")[0] == "gantt\n    title x"
         assert _find_fallback_code(idx, "timeline") == ("", "")
         assert _find_fallback_code(idx, "flowchart")[0] == next(
-            cd for (_sid, c), cd in lookup.items() if c == "flowchart" and cd)
+            cd for (_sid, c), cd in lookup.items() if c == "flowchart" and cd
+        )
         # 来源章节一并回传（D1 可观测性的前提）
         assert _find_fallback_code(idx, "flowchart")[1] == "s1"
 
@@ -386,8 +456,8 @@ class TestChartTypeIndex:
         import random
 
         from app.routers.export import _build_chart_type_index, _find_fallback_code
-        types = ["flowchart", "gantt", "architecture", "labor",
-                 "comparison", "layout", "timeline"]
+
+        types = ["flowchart", "gantt", "architecture", "labor", "comparison", "layout", "timeline"]
         rng = random.Random(42)
         lookup: dict[tuple[str, str], str] = {}
         for i in range(30):
@@ -407,6 +477,7 @@ class TestChartTypeIndex:
 
     def test_index_ignores_empty_codes(self):
         from app.routers.export import _build_chart_type_index
+
         idx = _build_chart_type_index({("s1", "flowchart"): "", ("s2", "flowchart"): None})
         assert "flowchart" not in idx
 
@@ -415,23 +486,26 @@ class TestChartTypeIndex:
 # provider_factory 缓存与审计攒批（对应 P0-4）
 # ---------------------------------------------------------------------------
 
-class TestFallbackChainCaching:
 
+class TestFallbackChainCaching:
     @pytest.mark.asyncio
     async def test_chain_cached_within_ttl(self, db_conn):
         """TTL 内命中缓存，invalidate_config_cache 后强制重读"""
         import app.services.ai.provider_factory as pf
+
         pf._fallback_cache["data"] = None
         pf._fallback_cache["ts"] = 0.0
         # 两条配置：cfg-primary（updated_at 最新=主配置，被排除）、cfg-backup（备选，入链）
         await db_conn.execute(
             "INSERT INTO ai_config (id, provider_name, is_active, priority, api_key_encrypted, updated_at)"
             " VALUES (?,?,?,?,?,?)",
-            ("cfg-backup", "deepseek", 1, 1, encrypt_api_key("key-1"), "2026-09-01T00:00:00"))
+            ("cfg-backup", "deepseek", 1, 1, encrypt_api_key("key-1"), "2026-09-01T00:00:00"),
+        )
         await db_conn.execute(
             "INSERT INTO ai_config (id, provider_name, is_active, priority, api_key_encrypted, updated_at)"
             " VALUES (?,?,?,?,?,?)",
-            ("cfg-primary", "qwen", 1, 2, encrypt_api_key("key-2"), "2026-09-02T00:00:00"))
+            ("cfg-primary", "qwen", 1, 2, encrypt_api_key("key-2"), "2026-09-02T00:00:00"),
+        )
         await db_conn.commit()
 
         chain1 = await pf._fallback_chain()
@@ -450,26 +524,25 @@ class TestFallbackChainCaching:
 
 
 class TestAuditBatching:
-
     @pytest.mark.asyncio
     async def test_periodic_loop_flushes_single_row_without_next_call(self, db_conn, monkeypatch):
         """单条审计后即使没有下一次调用，周期任务也必须按时落库。"""
         import asyncio
 
         import app.services.ai.provider_factory as pf
+
         pf._audit_buffer.clear()
         monkeypatch.setattr(pf, "_AUDIT_FLUSH_INTERVAL", 0.01)
-        pf._audit_buffer.append((
-            "periodic-one", "deepseek", "deepseek-chat", "chat",
-            1, 1, 0, 0.1, 1, "", "content_draft"))
+        pf._audit_buffer.append(
+            ("periodic-one", "deepseek", "deepseek-chat", "chat", 1, 1, 0, 0.1, 1, "", "content_draft")
+        )
         stop = asyncio.Event()
         task = asyncio.create_task(pf.audit_flush_loop(stop))
         found = 0
         try:
             for _ in range(20):
                 await asyncio.sleep(0.01)
-                cur = await db_conn.execute(
-                    "SELECT COUNT(*) FROM ai_audit_logs WHERE id='periodic-one'")
+                cur = await db_conn.execute("SELECT COUNT(*) FROM ai_audit_logs WHERE id='periodic-one'")
                 found = (await cur.fetchone())[0]
                 if found == 1:
                     break
@@ -486,6 +559,7 @@ class TestAuditBatching:
     async def test_audit_batches_until_threshold(self, db_conn):
         """审计攒批：未达阈值不落库；满 50 条触发一次批量落库；flush 兜底"""
         import app.services.ai.provider_factory as pf
+
         pf._audit_buffer.clear()
         pf._audit_last_flush["ts"] = time.time()  # 重置 10s 兜底计时，避免整会话时长误触发 flush
         try:

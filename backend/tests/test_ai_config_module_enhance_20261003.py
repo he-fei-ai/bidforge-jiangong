@@ -9,6 +9,7 @@
 4. 入参长度约束（AIConfigIn / AIConfigTest / ProviderModelsIn）与
    探测 max_tokens 钳制（与保存链路同口径）。
 """
+
 import app.services.ai.provider_factory as pf
 import pytest
 from app.config import settings
@@ -50,9 +51,13 @@ class TestDefaultNumbersSingleSource:
 
     async def test_build_candidates_defaults(self, db_conn):
         """_build_candidates 对缺字段 cfg 的缺省值与声明一致。"""
-        cfg = {"id": "c1", "provider_name": "deepseek",
-               "api_key": "sk-t", "base_url": "https://api.x.com/v1",
-               "model": "m"}
+        cfg = {
+            "id": "c1",
+            "provider_name": "deepseek",
+            "api_key": "sk-t",
+            "base_url": "https://api.x.com/v1",
+            "model": "m",
+        }
         out = await pf._build_candidates(cfg)
         primary = out[0]
         assert primary["timeout"] == 900
@@ -63,6 +68,7 @@ class TestDefaultNumbersSingleSource:
         """_attempt_candidate 的 max_tokens/temperature 缺省引用同一张表。"""
         # 通过源码静态锁防止回退为散落字面量（判据锚定实现）
         import inspect
+
         src = inspect.getsource(pf)
         assert 'c.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"])' in src
         assert 'DEFAULT_CONFIG_NUMBERS["temperature"]' in src
@@ -80,8 +86,7 @@ class TestConcurrencyBound:
         assert pf._RANGE["concurrency"] == (1, pf._MAX_CONCURRENCY)
 
     def test_clamp_concurrency_over_limit(self):
-        assert pf.clamp_config_numbers({"concurrency": 99})["concurrency"] \
-            == pf._MAX_CONCURRENCY
+        assert pf.clamp_config_numbers({"concurrency": 99})["concurrency"] == pf._MAX_CONCURRENCY
 
     def test_clamp_concurrency_under_limit(self):
         """下界钳到 1；非数值（TypeError/ValueError）才走缺省 4。"""
@@ -94,10 +99,18 @@ class TestConcurrencyBound:
 # 3. key_broken 门控区分
 # ===========================================================================
 def _broken_candidate(**over):
-    c = {"config_id": "c1", "provider_name": "deepseek", "api_key": "",
-         "base_url": "https://api.x.com/v1", "model": "m",
-         "max_tokens": 8192, "temperature": 0.7, "timeout": 900,
-         "key_broken": True, "_is_primary": True}
+    c = {
+        "config_id": "c1",
+        "provider_name": "deepseek",
+        "api_key": "",
+        "base_url": "https://api.x.com/v1",
+        "model": "m",
+        "max_tokens": 8192,
+        "temperature": 0.7,
+        "timeout": 900,
+        "key_broken": True,
+        "_is_primary": True,
+    }
     c.update(over)
     return c
 
@@ -117,21 +130,25 @@ class TestKeyBrokenGate:
         显式注入态另行锁定。
         """
         monkeypatch.setattr(pf, "_is_dead_provider", lambda *_a, **_k: False)
-        monkeypatch.setattr(pf, "_provider_reliability_snapshot",
-                            lambda *_a, **_k: (0, None))
+        monkeypatch.setattr(pf, "_provider_reliability_snapshot", lambda *_a, **_k: (0, None))
 
     def test_build_candidates_marks_broken_key_isolated_despite_dead_stats(self):
         """回归锁：即使进程里残留了主配置的死亡级失败统计，隔离后的构建判据
         仍稳定把首位候选指向主配置（摘掉 fixture 即定向失败）。"""
         import asyncio
+
         key = pf._reliability_key("deepseek", "m", "c1", "https://api.x.com/v1")
         with pf._provider_reliability_lock:
             saved = pf._provider_reliability.get(key)
             pf._provider_reliability[key] = {"ok": 0, "fail": 50}
         try:
-            cfg = {"id": "c1", "provider_name": "deepseek",
-                   "api_key_encrypted": "gAAAA-not-a-valid-token",
-                   "base_url": "https://api.x.com/v1", "model": "m"}
+            cfg = {
+                "id": "c1",
+                "provider_name": "deepseek",
+                "api_key_encrypted": "gAAAA-not-a-valid-token",
+                "base_url": "https://api.x.com/v1",
+                "model": "m",
+            }
             cands = asyncio.run(pf._build_candidates(cfg))
             assert cands and cands[0]["config_id"] == "c1"
             assert cands[0]["key_broken"] is True
@@ -145,18 +162,28 @@ class TestKeyBrokenGate:
     def test_build_candidates_marks_broken_key(self):
         """密文存在但解不开 → key_broken=True（不再与未填 Key 混同）。"""
         import asyncio
-        cfg = {"id": "c1", "provider_name": "deepseek",
-               "api_key_encrypted": "gAAAA-not-a-valid-token",
-               "base_url": "https://api.x.com/v1", "model": "m"}
+
+        cfg = {
+            "id": "c1",
+            "provider_name": "deepseek",
+            "api_key_encrypted": "gAAAA-not-a-valid-token",
+            "base_url": "https://api.x.com/v1",
+            "model": "m",
+        }
         cands = asyncio.run(pf._build_candidates(cfg))
         assert cands and cands[0]["key_broken"] is True
         assert cands[0]["api_key"] == ""
 
     def test_build_candidates_valid_key_not_broken(self):
         import asyncio
-        cfg = {"id": "c1", "provider_name": "deepseek",
-               "api_key_encrypted": encrypt_api_key("sk-real"),
-               "base_url": "https://api.x.com/v1", "model": "m"}
+
+        cfg = {
+            "id": "c1",
+            "provider_name": "deepseek",
+            "api_key_encrypted": encrypt_api_key("sk-real"),
+            "base_url": "https://api.x.com/v1",
+            "model": "m",
+        }
         cands = asyncio.run(pf._build_candidates(cfg))
         assert cands[0]["key_broken"] is False
         assert cands[0]["api_key"] == "sk-real"
@@ -164,9 +191,14 @@ class TestKeyBrokenGate:
     def test_build_candidates_no_enc_not_broken(self):
         """未填 Key（无密文）不算 broken —— 两者修法不同，不得混报。"""
         import asyncio
-        cfg = {"id": "c1", "provider_name": "deepseek",
-               "api_key_encrypted": "",
-               "base_url": "https://api.x.com/v1", "model": "m"}
+
+        cfg = {
+            "id": "c1",
+            "provider_name": "deepseek",
+            "api_key_encrypted": "",
+            "base_url": "https://api.x.com/v1",
+            "model": "m",
+        }
         cands = asyncio.run(pf._build_candidates(cfg))
         assert cands[0]["key_broken"] is False
 
@@ -216,16 +248,21 @@ class TestInputLengthConstraints:
 
     def test_existing_legal_payload_unaffected(self):
         """向后兼容：既有合法表单载荷原样通过。"""
-        m = AIConfigIn(provider_name="deepseek", plan="pay_as_you_go",
-                       api_key="sk-abc", base_url="https://api.deepseek.com/v1",
-                       model="deepseek-chat", env="prod")
+        m = AIConfigIn(
+            provider_name="deepseek",
+            plan="pay_as_you_go",
+            api_key="sk-abc",
+            base_url="https://api.deepseek.com/v1",
+            model="deepseek-chat",
+            env="prod",
+        )
         assert m.model == "deepseek-chat" and m.env == "prod"
 
 
 class TestProbeMaxTokensClamp:
     def test_probe_max_tokens_upper(self):
         """探测 max_tokens 与保存链路同一口径钳到 200000。"""
-        assert pf.clamp_config_numbers({"max_tokens": 10 ** 12})["max_tokens"] == 200000
+        assert pf.clamp_config_numbers({"max_tokens": 10**12})["max_tokens"] == 200000
 
     def test_probe_max_tokens_lower(self):
         assert pf.clamp_config_numbers({"max_tokens": 1})["max_tokens"] == 256
@@ -235,6 +272,7 @@ class TestProbeMaxTokensClamp:
         import inspect
 
         from app.routers.ai_config import connectivity
+
         src = inspect.getsource(connectivity.test_config)
         assert "clamp_config_numbers" in src
 
@@ -245,11 +283,13 @@ class TestProbeMaxTokensClamp:
 class TestFallbackChainBrokenKeyWarning:
     async def test_broken_key_candidate_skipped_with_warning(self, db_conn, caplog):
         import logging
+
         await db_conn.execute(
             "INSERT INTO ai_config (id, provider_name, plan, api_key_encrypted,"
             " base_url, model, is_active, priority, timeout, concurrency)"
             " VALUES ('cbrk','deepseek','pay_as_you_go','gAAAA-not-a-valid-token',"
-            "'https://api.x.com/v1','m',0,9,60,4)")
+            "'https://api.x.com/v1','m',0,9,60,4)"
+        )
         await db_conn.commit()
         pf.invalidate_config_cache()
         with caplog.at_level(logging.WARNING, logger="provider_factory"):
@@ -264,7 +304,8 @@ class TestFallbackChainBrokenKeyWarning:
             " base_url, model, is_active, priority, timeout, concurrency)"
             " VALUES ('cok','deepseek','pay_as_you_go',?,"
             "'https://api.x.com/v1','m',0,9,60,4)",
-            (encrypt_api_key("sk-ok"),))
+            (encrypt_api_key("sk-ok"),),
+        )
         await db_conn.commit()
         pf.invalidate_config_cache()
         chain = await pf._fallback_chain()

@@ -16,6 +16,7 @@ B. 配置版本 / 回滚
   11. 边界：create 记录不可回滚（400）、记录不存在（404）、不属于该配置（400）、
       快照里的越界数值仍被收敛（不让历史脏值重新落库）
 """
+
 import contextlib
 import json
 
@@ -36,26 +37,42 @@ def patch_write_tx_conn(db_conn, monkeypatch):
     @contextlib.asynccontextmanager
     async def _fake():
         yield db_conn
+
     monkeypatch.setattr(pf, "write_tx_conn", _fake)
 
 
-async def _insert(db, cid, provider="openai", model="gpt-4o", is_active=0,
-                  priority=0, key="sk-test", base_url="https://api.test.com/v1",
-                  env=""):
+async def _insert(
+    db,
+    cid,
+    provider="openai",
+    model="gpt-4o",
+    is_active=0,
+    priority=0,
+    key="sk-test",
+    base_url="https://api.test.com/v1",
+    env="",
+):
     await db.execute(
         "INSERT INTO ai_config (id, provider_name, plan, api_key_encrypted, base_url,"
         " model, env, is_active, priority, concurrency) VALUES (?,?,?,?,?,?,?,?,?,4)",
-        (cid, provider, "pay_as_you_go", encrypt_api_key(key), base_url, model,
-         env, is_active, priority))
+        (cid, provider, "pay_as_you_go", encrypt_api_key(key), base_url, model, env, is_active, priority),
+    )
     await db.commit()
 
 
 def _payload(**over) -> AIConfigIn:
     data = {
-        "provider_name": "deepseek", "plan": "pay_as_you_go",
-        "api_key": "sk-abc", "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat", "max_tokens": 8192, "temperature": 0.7,
-        "timeout": 900, "concurrency": 4, "is_active": True, "env": "",
+        "provider_name": "deepseek",
+        "plan": "pay_as_you_go",
+        "api_key": "sk-abc",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "max_tokens": 8192,
+        "temperature": 0.7,
+        "timeout": 900,
+        "concurrency": 4,
+        "is_active": True,
+        "env": "",
     }
     data.update(over)
     return AIConfigIn(**data)
@@ -162,13 +179,11 @@ class TestEnvFiltering:
     async def test_scene_route_skipped_for_other_env(self, db_conn):
         await _insert(db_conn, "main", provider="mainprov", is_active=1)
         await _insert(db_conn, "dev", provider="dprov", env="dev")
-        await ai_router.update_scene_route(
-            SceneRouteUpdate(scene="content_draft", config_id="dev"), db=db_conn)
+        await ai_router.update_scene_route(SceneRouteUpdate(scene="content_draft", config_id="dev"), db=db_conn)
         assert (await pf.resolve_scene_config("content_draft"))["id"] == "dev"
 
         await pf.save_runtime_setting(pf.RUNTIME_ACTIVE_ENV_KEY, "prod")
-        assert await pf.resolve_scene_config("content_draft") is None, \
-            "切到 prod 后，路由到 dev 的场景必须回落主配置"
+        assert await pf.resolve_scene_config("content_draft") is None, "切到 prod 后，路由到 dev 的场景必须回落主配置"
 
         # 切回通用（空）→ 路由重新生效（行为可逆，无残留）
         await pf.save_runtime_setting(pf.RUNTIME_ACTIVE_ENV_KEY, "")
@@ -178,8 +193,8 @@ class TestEnvFiltering:
         import sqlite3
 
         await db_conn.execute(
-            "INSERT INTO ai_runtime_settings(key, value) VALUES(?,?)",
-            (pf.RUNTIME_ACTIVE_ENV_KEY, "prod space"))
+            "INSERT INTO ai_runtime_settings(key, value) VALUES(?,?)", (pf.RUNTIME_ACTIVE_ENV_KEY, "prod space")
+        )
         await db_conn.commit()
         pf.invalidate_config_cache()
         with pytest.raises(ValueError, match="配置损坏"):
@@ -248,8 +263,7 @@ class TestSaveConfigEnv:
 # ===========================================================================
 class TestAuditSnapshot:
     async def test_snapshot_never_contains_secret(self, db_conn):
-        res = await ai_router.save_config(
-            _payload(api_key="sk-super-secret-key"), db=db_conn)
+        res = await ai_router.save_config(_payload(api_key="sk-super-secret-key"), db=db_conn)
         rows = await _audits(db_conn, "create")
         assert len(rows) == 1
         snap = rows[0]["snapshot_json"]
@@ -272,16 +286,16 @@ class TestAuditSnapshot:
 
     async def test_changes_only_lists_real_diffs(self, db_conn):
         await _insert(db_conn, "c1", model="gpt-4o")
-        await ai_router.save_config(
-            _payload(id="c1", model="gpt-4o-mini", max_tokens=4096), db=db_conn)
+        await ai_router.save_config(_payload(id="c1", model="gpt-4o-mini", max_tokens=4096), db=db_conn)
         logs = await ai_router.config_audit_logs(db=db_conn)
         update = [i for i in logs["items"] if i["action"] == "update"][0]
         fields = {c["field"] for c in update["changes"]}
         # 真正变化的字段必须在列
         assert {"model", "max_tokens"} <= fields
         # 未变化的字段绝不能出现（否则 diff 只是把整行贴出来，没有信息量）
-        assert not ({"temperature", "timeout", "concurrency",
-                     "env", "remark"} & fields), "未变化的字段不应出现在 diff 中"
+        assert not (
+            {"temperature", "timeout", "concurrency", "env", "remark"} & fields
+        ), "未变化的字段不应出现在 diff 中"
         model_change = [c for c in update["changes"] if c["field"] == "model"][0]
         assert model_change["before"] == "gpt-4o"
         assert model_change["after"] == "gpt-4o-mini"
@@ -291,7 +305,8 @@ class TestAuditSnapshot:
     async def test_changes_empty_when_no_snapshot(self, db_conn):
         await db_conn.execute(
             "INSERT INTO ai_config_audit_logs (id, action, detail, created_at)"
-            " VALUES ('legacy','update','历史记录', datetime('now','localtime'))")
+            " VALUES ('legacy','update','历史记录', datetime('now','localtime'))"
+        )
         await db_conn.commit()
         logs = await ai_router.config_audit_logs(db=db_conn)
         assert logs["items"][0]["changes"] == []
@@ -307,11 +322,9 @@ class TestAuditSnapshot:
 class TestRollback:
     async def _create_then_update(self, db):
         """建一条配置再改模型，返回（创建审计 id, 更新审计 id, 配置 id）。"""
-        res = await ai_router.save_config(
-            _payload(model="v1-model", max_tokens=8192), db=db)
+        res = await ai_router.save_config(_payload(model="v1-model", max_tokens=8192), db=db)
         cid = res["id"]
-        await ai_router.save_config(
-            _payload(id=cid, model="v2-model", max_tokens=4096), db=db)
+        await ai_router.save_config(_payload(id=cid, model="v2-model", max_tokens=4096), db=db)
         creates = await _audits(db, "create")
         updates = await _audits(db, "update")
         return creates[0]["id"], updates[0]["id"], cid
@@ -320,8 +333,7 @@ class TestRollback:
         _create_id, update_id, cid = await self._create_then_update(db_conn)
         assert (await _row(db_conn, cid))["model"] == "v2-model"
 
-        res = await ai_router.rollback_config(
-            cid, ConfigRollbackIn(audit_id=update_id), db=db_conn)
+        res = await ai_router.rollback_config(cid, ConfigRollbackIn(audit_id=update_id), db=db_conn)
         assert res["ok"] is True
         row = await _row(db_conn, cid)
         assert row["model"] == "v1-model"
@@ -336,12 +348,10 @@ class TestRollback:
     async def test_rollback_does_not_touch_api_key(self, db_conn):
         await _insert(db_conn, "c1", model="m1", key="sk-original")
         enc_before = (await _row(db_conn, "c1"))["api_key_encrypted"]
-        await ai_router.save_config(
-            _payload(id="c1", model="m2", api_key=""), db=db_conn)
+        await ai_router.save_config(_payload(id="c1", model="m2", api_key=""), db=db_conn)
         update_id = (await _audits(db_conn, "update"))[0]["id"]
 
-        await ai_router.rollback_config(
-            "c1", ConfigRollbackIn(audit_id=update_id), db=db_conn)
+        await ai_router.rollback_config("c1", ConfigRollbackIn(audit_id=update_id), db=db_conn)
         assert (await _row(db_conn, "c1"))["api_key_encrypted"] == enc_before
 
     async def test_rollback_does_not_resurrect_cleared_key(self, db_conn):
@@ -352,8 +362,7 @@ class TestRollback:
         await ai_router.save_config(_payload(id="c1", model="m2", api_key=""), db=db_conn)
         update_id = (await _audits(db_conn, "update"))[0]["id"]
 
-        await ai_router.rollback_config(
-            "c1", ConfigRollbackIn(audit_id=update_id), db=db_conn)
+        await ai_router.rollback_config("c1", ConfigRollbackIn(audit_id=update_id), db=db_conn)
         assert (await _row(db_conn, "c1"))["api_key_encrypted"] == ""
 
     async def test_rollback_clamps_out_of_range_snapshot(self, db_conn):
@@ -363,11 +372,11 @@ class TestRollback:
             "INSERT INTO ai_config_audit_logs"
             " (id, action, config_id, detail, snapshot_json, created_at)"
             " VALUES ('bad','update','c1','脏快照', ?, datetime('now','localtime'))",
-            ('{"before": {"concurrency": 99, "max_tokens": 999999}, "after": {}}',))
+            ('{"before": {"concurrency": 99, "max_tokens": 999999}, "after": {}}',),
+        )
         await db_conn.commit()
 
-        res = await ai_router.rollback_config(
-            "c1", ConfigRollbackIn(audit_id="bad"), db=db_conn)
+        res = await ai_router.rollback_config("c1", ConfigRollbackIn(audit_id="bad"), db=db_conn)
         row = await _row(db_conn, "c1")
         assert row["concurrency"] == 5
         assert row["max_tokens"] == 200000
@@ -376,44 +385,38 @@ class TestRollback:
     async def test_rollback_create_record_rejected(self, db_conn):
         create_id, _update_id, cid = await self._create_then_update(db_conn)
         with pytest.raises(Exception):
-            await ai_router.rollback_config(
-                cid, ConfigRollbackIn(audit_id=create_id), db=db_conn)
+            await ai_router.rollback_config(cid, ConfigRollbackIn(audit_id=create_id), db=db_conn)
 
     async def test_rollback_unknown_audit_404(self, db_conn):
         await _insert(db_conn, "c1")
         with pytest.raises(Exception):
-            await ai_router.rollback_config(
-                "c1", ConfigRollbackIn(audit_id="ghost"), db=db_conn)
+            await ai_router.rollback_config("c1", ConfigRollbackIn(audit_id="ghost"), db=db_conn)
 
     async def test_rollback_other_config_rejected(self, db_conn):
         _create_id, update_id, _cid = await self._create_then_update(db_conn)
         await _insert(db_conn, "other")
         with pytest.raises(Exception):
-            await ai_router.rollback_config(
-                "other", ConfigRollbackIn(audit_id=update_id), db=db_conn)
+            await ai_router.rollback_config("other", ConfigRollbackIn(audit_id=update_id), db=db_conn)
 
     async def test_rollback_missing_audit_id_400(self, db_conn):
         await _insert(db_conn, "c1")
         with pytest.raises(Exception):
-            await ai_router.rollback_config(
-                "c1", ConfigRollbackIn(audit_id="  "), db=db_conn)
+            await ai_router.rollback_config("c1", ConfigRollbackIn(audit_id="  "), db=db_conn)
 
     async def test_rollback_deleted_config_404(self, db_conn):
         await _insert(db_conn, "c1")
-        await ai_router.clear_config_key("c1", db=db_conn)   # 产生一条带快照的审计
+        await ai_router.clear_config_key("c1", db=db_conn)  # 产生一条带快照的审计
         ck_id = (await _audits(db_conn, "clear_key"))[0]["id"]
         await db_conn.execute("DELETE FROM ai_config WHERE id='c1'")
         await db_conn.commit()
         with pytest.raises(Exception):
-            await ai_router.rollback_config(
-                "c1", ConfigRollbackIn(audit_id=ck_id), db=db_conn)
+            await ai_router.rollback_config("c1", ConfigRollbackIn(audit_id=ck_id), db=db_conn)
 
     async def test_rollback_restores_env_and_is_env_aware(self, db_conn):
         await _insert(db_conn, "c1", env="dev")
         await ai_router.save_config(_payload(id="c1", env="prod"), db=db_conn)
         update_id = (await _audits(db_conn, "update"))[0]["id"]
-        await ai_router.rollback_config(
-            "c1", ConfigRollbackIn(audit_id=update_id), db=db_conn)
+        await ai_router.rollback_config("c1", ConfigRollbackIn(audit_id=update_id), db=db_conn)
         assert (await _row(db_conn, "c1"))["env"] == "dev"
 
 
@@ -425,11 +428,10 @@ class TestRollbackActiveFlag:
         """默认行为：回滚字段不碰「当前使用」标记（主配置唯一性有系统级守卫）。"""
         await _insert(db_conn, "a", is_active=1)
         await _insert(db_conn, "b", is_active=0)
-        await ai_router.toggle_config("b", db=db_conn)      # b 变为当前使用
+        await ai_router.toggle_config("b", db=db_conn)  # b 变为当前使用
         toggle_id = (await _audits(db_conn, "toggle"))[0]["id"]
 
-        res = await ai_router.rollback_config(
-            "b", ConfigRollbackIn(audit_id=toggle_id), db=db_conn)
+        res = await ai_router.rollback_config("b", ConfigRollbackIn(audit_id=toggle_id), db=db_conn)
         assert res["active_restored"] is None
         assert (await _row(db_conn, "b"))["is_active"] == 1, "未显式要求时不得改动主配置标记"
         assert "is_active" not in res["restored"]
@@ -439,14 +441,14 @@ class TestRollbackActiveFlag:
         await _insert(db_conn, "a", provider="aprov", is_active=1)
         await _insert(db_conn, "b", provider="bprov", is_active=0)
         # 更新 a 时它还是「当前使用」→ 该记录的 before.is_active = 1
-        await ai_router.save_config(
-            _payload(id="a", provider_name="aprov", model="m2"), db=db_conn)
+        await ai_router.save_config(_payload(id="a", provider_name="aprov", model="m2"), db=db_conn)
         update_id = (await _audits(db_conn, "update"))[0]["id"]
-        await ai_router.toggle_config("b", db=db_conn)      # a 变为非当前使用
+        await ai_router.toggle_config("b", db=db_conn)  # a 变为非当前使用
         assert (await _row(db_conn, "a"))["is_active"] == 0
 
         res = await ai_router.rollback_config(
-            "a", ConfigRollbackIn(audit_id=update_id, include_active=True), db=db_conn)
+            "a", ConfigRollbackIn(audit_id=update_id, include_active=True), db=db_conn
+        )
         assert res["active_restored"] is True
         assert (await _row(db_conn, "a"))["is_active"] == 1
         assert (await _row(db_conn, "b"))["is_active"] == 0, "主配置必须全局唯一"
@@ -459,11 +461,12 @@ class TestRollbackActiveFlag:
         """守卫：还原为「关闭」会变成零主配置时，保留现状并明确告警。"""
         await _insert(db_conn, "a", is_active=0)
         await _insert(db_conn, "b", is_active=1)
-        await ai_router.toggle_config("a", db=db_conn)      # a 变为当前使用（before.is_active=0）
+        await ai_router.toggle_config("a", db=db_conn)  # a 变为当前使用（before.is_active=0）
         toggle_id = (await _audits(db_conn, "toggle"))[0]["id"]
 
         res = await ai_router.rollback_config(
-            "a", ConfigRollbackIn(audit_id=toggle_id, include_active=True), db=db_conn)
+            "a", ConfigRollbackIn(audit_id=toggle_id, include_active=True), db=db_conn
+        )
         assert res["warning"], "会导致零主配置时必须告警"
         assert (await _row(db_conn, "a"))["is_active"] == 1, "不得把系统置为无主配置"
         assert res["active_restored"] is None
@@ -472,11 +475,9 @@ class TestRollbackActiveFlag:
         """留痕要如实：只有**真的改了**标记才写「含当前使用标记」，避免虚假记录。"""
         # 场景一：请求 include_active 但标记本就一致 → 不得写「含当前使用标记」
         await _insert(db_conn, "a", provider="aprov", is_active=1)
-        await ai_router.save_config(
-            _payload(id="a", provider_name="aprov", model="m2"), db=db_conn)
+        await ai_router.save_config(_payload(id="a", provider_name="aprov", model="m2"), db=db_conn)
         same_id = (await _audits(db_conn, "update"))[0]["id"]
-        res = await ai_router.rollback_config(
-            "a", ConfigRollbackIn(audit_id=same_id, include_active=True), db=db_conn)
+        res = await ai_router.rollback_config("a", ConfigRollbackIn(audit_id=same_id, include_active=True), db=db_conn)
         assert res["active_restored"] is None
         rows = await _audits(db_conn, "rollback")
         assert rows and "当前使用" not in rows[0]["detail"]

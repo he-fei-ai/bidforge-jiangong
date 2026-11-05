@@ -10,6 +10,7 @@
   - 修改 settings.max_concurrency 后，新建的 AdaptiveConcurrencyController 上限必须随之变化
   - 源码静态锁：三处不再出现「= 5」硬编码字面量
 """
+
 import inspect
 
 import app.services.ai.provider_factory as pf
@@ -86,6 +87,7 @@ class TestNoHardcodedFive:
     def test_facts_extractor_not_hardcoded(self):
         """FACTS_MAX_CONCURRENCY 不再写成 `= 5`，必须来自 settings。"""
         import app.services.facts_extractor as fx
+
         src = inspect.getsource(fx)
         # 允许多处出现 max_concurrency 关键字，但不允许「= 5」独立赋给这个常量
         # 用宽松判据：赋值行不能是 `FACTS_MAX_CONCURRENCY = 5`
@@ -95,6 +97,7 @@ class TestNoHardcodedFive:
     def test_provider_factory_still_source_of_truth(self):
         """provider_factory._MAX_CONCURRENCY 保持读 settings（不引入第二份兜底）。"""
         import app.services.ai.provider_factory as pfmod
+
         src = inspect.getsource(pfmod)
         assert 'getattr(settings, "max_concurrency"' in src
 

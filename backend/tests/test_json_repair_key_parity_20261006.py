@@ -68,6 +68,7 @@ R148 盲区收口（2026-11-02，目录生成模块深度探索轮）
   间接派发，本护栏只锁直接调用点（间接派发默认走 GENERIC，合法）。
 - ``json_response.py`` 自身的函数定义节点。
 """
+
 from __future__ import annotations
 
 import ast
@@ -128,8 +129,7 @@ def _build_import_alias_map(tree: ast.Module) -> dict[str, str]:
     return aliases
 
 
-def _classify_repair_key_value(value_node: ast.expr,
-                               aliases: dict[str, str]) -> tuple[str, str]:
+def _classify_repair_key_value(value_node: ast.expr, aliases: dict[str, str]) -> tuple[str, str]:
     """repair_key= 右值的合法性判定。
 
     Name → 按 import 别名解析到三个具名常量之一（allowed_name）；
@@ -153,11 +153,11 @@ def _classify_repair_key_value(value_node: ast.expr,
 
 
 class _CallSite:
-    __slots__ = ("file", "lineno", "func_name", "call_form",
-                 "repair_key_kind", "repair_key_value")
+    __slots__ = ("file", "lineno", "func_name", "call_form", "repair_key_kind", "repair_key_value")
 
-    def __init__(self, file: str, lineno: int, func_name: str, call_form: str,
-                 repair_key_kind: str, repair_key_value: str):
+    def __init__(
+        self, file: str, lineno: int, func_name: str, call_form: str, repair_key_kind: str, repair_key_value: str
+    ):
         self.file = file
         self.lineno = lineno
         self.func_name = func_name
@@ -167,9 +167,11 @@ class _CallSite:
         self.repair_key_value = repair_key_value
 
     def __repr__(self) -> str:  # pragma: no cover - 仅断言失败时看
-        return (f"<CallSite {self.file}:{self.lineno} {self.func_name}"
-                f"[{self.call_form}] repair_key={self.repair_key_kind}"
-                f"({self.repair_key_value!r})>")
+        return (
+            f"<CallSite {self.file}:{self.lineno} {self.func_name}"
+            f"[{self.call_form}] repair_key={self.repair_key_kind}"
+            f"({self.repair_key_value!r})>"
+        )
 
 
 def _scan_call_sites():
@@ -208,14 +210,14 @@ def _scan_call_sites():
                 if kw.arg == "repair_key":
                     rk_kind, rk_value = _classify_repair_key_value(kw.value, aliases)
                     break
-            sites.append(_CallSite(rel, node.lineno, target, call_form,
-                                   rk_kind, rk_value or ""))
+            sites.append(_CallSite(rel, node.lineno, target, call_form, rk_kind, rk_value or ""))
     return sites
 
 
 # ---------------------------------------------------------------------------
 # 护栏 1：默认值不回退（GENERIC_REPAIR_KEY 必须是 json_schema_fix_system）
 # ---------------------------------------------------------------------------
+
 
 def test_generic_repair_key_value_is_not_outline():
     """GENERIC_REPAIR_KEY 常量值必须是 json_schema_fix_system，不得回退 outline。"""
@@ -270,8 +272,7 @@ def test_public_functions_default_repair_key_is_generic_name():
                         break
             assert dflt is not None, f"{node.name} 未声明 repair_key 参数"
             assert isinstance(dflt, ast.Name) and dflt.id == "GENERIC_REPAIR_KEY", (
-                f"{node.name} 的 repair_key 默认值不是 GENERIC_REPAIR_KEY；"
-                f"实际={ast.dump(dflt)}"
+                f"{node.name} 的 repair_key 默认值不是 GENERIC_REPAIR_KEY；" f"实际={ast.dump(dflt)}"
             )
     assert seen == targets, f"未找到全部目标函数：seen={seen}"
 
@@ -280,6 +281,7 @@ def test_public_functions_default_repair_key_is_generic_name():
 # 护栏 2：调用点 repair_key 形态合法
 # ---------------------------------------------------------------------------
 
+
 def test_all_call_sites_repair_key_form_is_legal():
     sites = _scan_call_sites()
     illegal = [s for s in sites if s.repair_key_kind == "illegal"]
@@ -287,8 +289,7 @@ def test_all_call_sites_repair_key_form_is_legal():
         "以下 collect_json_response / collect_json_response_with_provider / "
         "collect_json_response_with_chat 调用点传了 repair_key= 但值不是 "
         "OUTLINE_REPAIR_KEY/FACTS_REPAIR_KEY/GENERIC_REPAIR_KEY 三个具名常量之一"
-        "（拼字符串/硬编码字面量/其他变量都是漂移信号）：\n  "
-        + "\n  ".join(repr(s) for s in illegal)
+        "（拼字符串/硬编码字面量/其他变量都是漂移信号）：\n  " + "\n  ".join(repr(s) for s in illegal)
     )
 
 
@@ -296,14 +297,14 @@ def test_all_call_sites_repair_key_form_is_legal():
 # 护栏 3：扫描自检（≥25 个真实直接调用点 + 三类形态各配非空转自证）
 # ---------------------------------------------------------------------------
 
+
 def test_scan_finds_at_least_25_real_call_sites():
     sites = _scan_call_sites()
     assert len(sites) >= 25, (
         f"扫描只找到 {len(sites)} 个直接调用点（预期 ≥25 = 15 Name 形态 "
         "+ 6 _sh 属性形态 + 4 统一通道；R148 重锚）。"
         "若扫描器被改空/误过滤，本护栏会假绿 —— 先核对 _iter_py_files 路径与 "
-        "ast.Call.func 判定。实际调用点：\n  "
-        + "\n  ".join(repr(s) for s in sites)
+        "ast.Call.func 判定。实际调用点：\n  " + "\n  ".join(repr(s) for s in sites)
     )
 
 
@@ -325,12 +326,9 @@ def test_sse_outline_review_facade_sites_are_covered():
             f"{s.file}:{s.lineno} 形态 {s.call_form!r} 非属性形态（分步编排 "
             "重构不应把 _sh facade 调用改回裸 import）。"
         )
-        assert s.repair_key_kind == "allowed_name", (
-            f"{s.file}:{s.lineno} repair_key 形态非法：{s.repair_key_value!r}"
-        )
+        assert s.repair_key_kind == "allowed_name", f"{s.file}:{s.lineno} repair_key 形态非法：{s.repair_key_value!r}"
         assert s.repair_key_value == "OUTLINE_REPAIR_KEY", (
-            f"{s.file}:{s.lineno} 是目录族调用点，应使用 OUTLINE_REPAIR_KEY，"
-            f"实际={s.repair_key_value!r}"
+            f"{s.file}:{s.lineno} 是目录族调用点，应使用 OUTLINE_REPAIR_KEY，" f"实际={s.repair_key_value!r}"
         )
 
 
@@ -356,16 +354,14 @@ def test_unified_chat_channel_sites_are_covered():
 def test_facts_extractor_uses_named_constant_not_bare_string():
     """回归锁：facts_extractor.py 那处必须传 FACTS_REPAIR_KEY（而非裸字符串）。"""
     sites = _scan_call_sites()
-    facts = [s for s in sites
-             if s.file == os.path.join("services", "facts_extractor.py").replace(os.sep, "/")]
+    facts = [s for s in sites if s.file == os.path.join("services", "facts_extractor.py").replace(os.sep, "/")]
     assert facts, "未在 facts_extractor.py 找到 collect_json_response 调用点"
     for s in facts:
-        assert s.repair_key_kind == "allowed_name", (
-            f"facts_extractor.py:{s.lineno} repair_key 形态非法：{s.repair_key_value!r}"
-        )
+        assert (
+            s.repair_key_kind == "allowed_name"
+        ), f"facts_extractor.py:{s.lineno} repair_key 形态非法：{s.repair_key_value!r}"
         assert s.repair_key_value == "FACTS_REPAIR_KEY", (
-            f"facts_extractor.py:{s.lineno} 应使用 FACTS_REPAIR_KEY，"
-            f"实际={s.repair_key_value!r}"
+            f"facts_extractor.py:{s.lineno} 应使用 FACTS_REPAIR_KEY，" f"实际={s.repair_key_value!r}"
         )
 
 
@@ -378,9 +374,9 @@ def test_outline_family_still_uses_outline_repair_key():
     等非目录调用点合法走默认 GENERIC，不在本计数内。
     """
     sites = _scan_call_sites()
-    outline_sites = [s for s in sites
-                     if s.repair_key_kind == "allowed_name"
-                     and s.repair_key_value == "OUTLINE_REPAIR_KEY"]
+    outline_sites = [
+        s for s in sites if s.repair_key_kind == "allowed_name" and s.repair_key_value == "OUTLINE_REPAIR_KEY"
+    ]
     assert len(outline_sites) >= 10, (
         f"显式传 OUTLINE_REPAIR_KEY 的调用点只有 {len(outline_sites)} 处"
         f"（预期 ≥10）：\n  " + "\n  ".join(repr(s) for s in outline_sites)
@@ -390,6 +386,7 @@ def test_outline_family_still_uses_outline_repair_key():
 # ---------------------------------------------------------------------------
 # 护栏 4：派发点显式键（outline_title_fix 的 _collect 注入派发）
 # ---------------------------------------------------------------------------
+
 
 def test_outline_title_fix_collect_is_outline_key():
     """非空转自证③：``outline_title_fix.py`` 经 ``_collect=_sh.collect_json_response``
@@ -403,8 +400,7 @@ def test_outline_title_fix_collect_is_outline_key():
     aliases = _build_import_alias_map(tree)
     fn_node = None
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-                and node.name == "_try_outline_title_fix":
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_try_outline_title_fix":
             fn_node = node
             break
     assert fn_node is not None, "未在 outline_title_fix.py 找到 _try_outline_title_fix"
@@ -426,6 +422,5 @@ def test_outline_title_fix_collect_is_outline_key():
         "外科式标题重写是目录族调用，缺显式键会静默走 GENERIC 修复提示词。"
     )
     assert hits == ["OUTLINE_REPAIR_KEY"], (
-        f"_try_outline_title_fix 的 repair_key 应恰为 OUTLINE_REPAIR_KEY，"
-        f"实际={hits!r}"
+        f"_try_outline_title_fix 的 repair_key 应恰为 OUTLINE_REPAIR_KEY，" f"实际={hits!r}"
     )

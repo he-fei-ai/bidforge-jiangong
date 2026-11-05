@@ -6,6 +6,7 @@
 照样执行 ALTER TABLE。缺表只应出现在新库/半初始化环境（schema DDL 已含同名列），
 此时正确行为是幂等跳过；表存在但缺列的旧库迁移路径保持不变。
 """
+
 import aiosqlite
 import pytest
 from app.db import _migrate
@@ -24,18 +25,17 @@ class TestMigrateMissingTable:
     async def test_missing_table_no_warning_no_error(self, memory_conn, caplog):
         """空库上跑迁移：不抛异常，且不得再出现 no such table 的迁移告警。"""
         import logging
+
         with caplog.at_level(logging.WARNING):
             await _migrate(memory_conn)  # 不应抛异常
-        noisy = [r for r in caplog.records
-                 if "no such table" in r.getMessage()
-                 and r.getMessage().startswith("迁移")]
+        noisy = [r for r in caplog.records if "no such table" in r.getMessage() and r.getMessage().startswith("迁移")]
         assert not noisy, f"缺表迁移不应告警: {[r.getMessage() for r in noisy]}"
 
     async def test_existing_table_missing_column_still_migrated(self, memory_conn):
         """回归保护：表存在但缺列的旧库，ALTER 补列行为必须保持不变。"""
         await memory_conn.execute(
-            "CREATE TABLE uploaded_outlines ("
-            "id TEXT PRIMARY KEY, parsed_json TEXT DEFAULT '{}')")
+            "CREATE TABLE uploaded_outlines (" "id TEXT PRIMARY KEY, parsed_json TEXT DEFAULT '{}')"
+        )
         await memory_conn.commit()
         await _migrate(memory_conn)
         cur = await memory_conn.execute("PRAGMA table_info(uploaded_outlines)")
@@ -66,12 +66,14 @@ class TestStartupSequenceOnLegacyDb:
             "is_simulated INTEGER DEFAULT 0, confidence REAL DEFAULT 1.0, "
             "is_resolved INTEGER DEFAULT 1, has_conflict INTEGER DEFAULT 0, "
             "conflict_keys TEXT DEFAULT '', fact_key TEXT DEFAULT '', "
-            "chunk_hash TEXT DEFAULT '', updated_at TEXT DEFAULT '')")
+            "chunk_hash TEXT DEFAULT '', updated_at TEXT DEFAULT '')"
+        )
         await setup.execute(
             "CREATE TABLE ai_config ("
             "id TEXT PRIMARY KEY, provider_name TEXT NOT NULL, "
             "api_key_encrypted TEXT DEFAULT '', base_url TEXT DEFAULT '', model TEXT DEFAULT '', "
-            "is_active INTEGER DEFAULT 0, created_at TEXT DEFAULT '', updated_at TEXT DEFAULT '')")
+            "is_active INTEGER DEFAULT 0, created_at TEXT DEFAULT '', updated_at TEXT DEFAULT '')"
+        )
         await setup.commit()
         await setup.close()
 

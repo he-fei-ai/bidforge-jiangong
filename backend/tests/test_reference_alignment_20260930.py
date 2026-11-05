@@ -17,6 +17,7 @@
                                整章重写兜底
 ============================  ==========================================
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -53,8 +54,7 @@ class TestTechScoringRemoved:
         assert svc.get_item_def("techScoring") is None
         assert svc.get_item_prompt("techScoring") is None
         assert svc.get_item_fields("techScoring") == []
-        assert svc.get_item_domain("techScoring") == "", (
-            "已下线项必须 fail-closed 返回空串，不得被当成 scheme 域")
+        assert svc.get_item_domain("techScoring") == "", "已下线项必须 fail-closed 返回空串，不得被当成 scheme 域"
 
     def test_group_removed(self):
         """scoring 分组不得残留（空分组会让前端渲染出一个空白分组卡）。"""
@@ -84,14 +84,24 @@ class TestTechScoringRemoved:
     def test_existing_18_items_untouched(self):
         """既有 18 项的 item_id 与 sort_order 必须逐字不变。"""
         legacy = {
-            "projectBasicInfo": 1, "schemeBasicInfo": 2, "overviewParams": 3,
-            "compilationBasis": 4, "siteConditions": 5, "deploymentSchedule": 6,
-            "constructionTechnique": 7, "resourceAllocation": 8,
-            "safetyMeasures": 9, "qualityAcceptance": 10,
-            "emergencyResponse": 11, "calcAndDrawings": 12,
-            "materialManagement": 13, "equipmentManagement": 14,
-            "constructionDeployment": 15, "constructionProcess": 16,
-            "workInterfaceDivision": 17, "engineeringMethods": 18,
+            "projectBasicInfo": 1,
+            "schemeBasicInfo": 2,
+            "overviewParams": 3,
+            "compilationBasis": 4,
+            "siteConditions": 5,
+            "deploymentSchedule": 6,
+            "constructionTechnique": 7,
+            "resourceAllocation": 8,
+            "safetyMeasures": 9,
+            "qualityAcceptance": 10,
+            "emergencyResponse": 11,
+            "calcAndDrawings": 12,
+            "materialManagement": 13,
+            "equipmentManagement": 14,
+            "constructionDeployment": 15,
+            "constructionProcess": 16,
+            "workInterfaceDivision": 17,
+            "engineeringMethods": 18,
         }
         got = {i["item_id"]: i["sort_order"] for i in svc.ANALYSIS_ITEMS}
         for k, v in legacy.items():
@@ -144,8 +154,7 @@ class TestUniqueSpan:
 
 class TestApplyUniqueEdits:
     def test_single_edit_changes_only_that_span(self):
-        r = ce.apply_unique_edits(_CONTENT, [
-            {"old_text": "总工期为 120 日历天", "new_text": "总工期为 90 日历天"}])
+        r = ce.apply_unique_edits(_CONTENT, [{"old_text": "总工期为 120 日历天", "new_text": "总工期为 90 日历天"}])
         assert r.applied == 1
         assert "总工期为 90 日历天" in r.content
         # 其余内容逐字保留（这是与整章重写的核心差异）
@@ -154,36 +163,39 @@ class TestApplyUniqueEdits:
 
     def test_ambiguous_edit_rejected_content_unchanged(self):
         c = "工期 120 天，工期 120 天"
-        r = ce.apply_unique_edits(c, [{"old_text": "工期 120 天",
-                                       "new_text": "工期 90 天"}])
+        r = ce.apply_unique_edits(c, [{"old_text": "工期 120 天", "new_text": "工期 90 天"}])
         assert r.applied == 0
         assert r.content == c
         assert r.rejected and r.rejected[0][1] == "ambiguous"
 
     def test_not_found_rejected(self):
-        r = ce.apply_unique_edits(_CONTENT, [{"old_text": "完全不存在的一段文字",
-                                              "new_text": "X"}])
+        r = ce.apply_unique_edits(_CONTENT, [{"old_text": "完全不存在的一段文字", "new_text": "X"}])
         assert r.applied == 0 and r.rejected[0][1] == "not_found"
 
     def test_too_short_rejected(self):
         """过短的 old_text 几乎必然多处命中，直接拒绝省一次 AI 重试。"""
-        r = ce.apply_unique_edits(_CONTENT, [{"old_text": "工期",
-                                              "new_text": "总工期"}])
+        r = ce.apply_unique_edits(_CONTENT, [{"old_text": "工期", "new_text": "总工期"}])
         assert r.applied == 0 and r.rejected[0][1] == "too_short"
 
     def test_empty_fields_rejected(self):
-        r = ce.apply_unique_edits(_CONTENT, [
-            {"old_text": "   ", "new_text": "x"},
-            {"old_text": "总工期为 120 日历天", "new_text": "  "},
-        ])
+        r = ce.apply_unique_edits(
+            _CONTENT,
+            [
+                {"old_text": "   ", "new_text": "x"},
+                {"old_text": "总工期为 120 日历天", "new_text": "  "},
+            ],
+        )
         assert r.applied == 0
         assert {reason for _o, reason in r.rejected} == {"empty", "empty_new"}
 
     def test_multiple_edits_applied_in_order(self):
-        r = ce.apply_unique_edits(_CONTENT, [
-            {"old_text": "总工期为 120 日历天", "new_text": "总工期为 90 日历天"},
-            {"old_text": "混凝土强度等级为 C30", "new_text": "混凝土强度等级为 C35"},
-        ])
+        r = ce.apply_unique_edits(
+            _CONTENT,
+            [
+                {"old_text": "总工期为 120 日历天", "new_text": "总工期为 90 日历天"},
+                {"old_text": "混凝土强度等级为 C30", "new_text": "混凝土强度等级为 C35"},
+            ],
+        )
         assert r.applied == 2
         assert "90 日历天" in r.content and "C35" in r.content
 
@@ -203,12 +215,10 @@ class TestApplyUniqueEdits:
         assert ce.apply_unique_edits(_CONTENT, []).content == _CONTENT
 
     def test_result_to_dict_shape(self):
-        r = ce.apply_unique_edits(_CONTENT, [{"old_text": "不存在的内容在这里",
-                                              "new_text": "X"}])
+        r = ce.apply_unique_edits(_CONTENT, [{"old_text": "不存在的内容在这里", "new_text": "X"}])
         d = r.to_dict()
         assert set(d) == {"applied", "rejected"}
         assert "reason" in d["rejected"][0]
-
 
 
 # =========================================================================
@@ -216,31 +226,33 @@ class TestApplyUniqueEdits:
 # =========================================================================
 class TestRepairWiring:
     def test_repair_section_tries_edits_first(self):
-        src = inspect.getsource(
-            __import__("app.services.repair_agent", fromlist=["x"]).repair_section)
+        src = inspect.getsource(__import__("app.services.repair_agent", fromlist=["x"]).repair_section)
         assert "collect_repair_edits" in src
         # 兜底路径必须仍在（模型不支持 JSON 时不让修复能力整体失效）
         assert "consistency_repair_system" in src
 
     def test_edits_path_is_fail_soft(self):
-        src = inspect.getsource(
-            __import__("app.services.repair_agent", fromlist=["x"]).repair_section)
+        src = inspect.getsource(__import__("app.services.repair_agent", fromlist=["x"]).repair_section)
         assert "except Exception" in src
         assert "回落整章重写" in src
 
     def test_chat_fn_is_injected(self):
         """必须注入 repair_agent 的模块级引用，否则既有单测的 monkeypatch 拦不到。"""
-        src = inspect.getsource(
-            __import__("app.services.repair_agent", fromlist=["x"]).repair_section)
+        src = inspect.getsource(__import__("app.services.repair_agent", fromlist=["x"]).repair_section)
         assert "chat_fn=chat_with_fallback" in src
 
     def test_prompts_registered(self):
         from app.services.ai.prompts._registry import render
+
         sys_p = render("consistency_repair_edits_system")
-        usr_p = render("consistency_repair_edits_user",
-                       global_facts="F", authoritative_sources="S",
-                       section_id="s1", section_title="T",
-                       conflicts_in_section="[]")
+        usr_p = render(
+            "consistency_repair_edits_user",
+            global_facts="F",
+            authoritative_sources="S",
+            section_id="s1",
+            section_title="T",
+            conflicts_in_section="[]",
+        )
         assert "old_text" in sys_p and "new_text" in sys_p
         assert "逐字抄写" in sys_p, "必须要求模型逐字抄写原文（否则无法定位）"
         assert "唯一" in sys_p, "必须告知唯一命中约束"
@@ -253,12 +265,21 @@ class TestRepairWiring:
 
     def test_collect_falls_back_on_bad_json(self):
         """模型返回非 JSON → applied=0，由调用方回落到整章重写。"""
+
         async def bad_chat(messages, **kw):
             return "这不是 JSON"
 
-        res = asyncio.run(ce.collect_repair_edits(
-            section_id="s1", section_title="T", section_content=_CONTENT,
-            conflicts_in_section=[], facts="", sources="", chat_fn=bad_chat))
+        res = asyncio.run(
+            ce.collect_repair_edits(
+                section_id="s1",
+                section_title="T",
+                section_content=_CONTENT,
+                conflicts_in_section=[],
+                facts="",
+                sources="",
+                chat_fn=bad_chat,
+            )
+        )
         assert res.applied == 0
         assert res.content == _CONTENT
 
@@ -266,21 +287,36 @@ class TestRepairWiring:
         async def boom(messages, **kw):
             raise RuntimeError("provider down")
 
-        res = asyncio.run(ce.collect_repair_edits(
-            section_id="s1", section_title="T", section_content=_CONTENT,
-            conflicts_in_section=[], facts="", sources="", chat_fn=boom))
+        res = asyncio.run(
+            ce.collect_repair_edits(
+                section_id="s1",
+                section_title="T",
+                section_content=_CONTENT,
+                conflicts_in_section=[],
+                facts="",
+                sources="",
+                chat_fn=boom,
+            )
+        )
         assert res.applied == 0 and res.content == _CONTENT
 
     def test_collect_applies_valid_edits(self):
         async def good_chat(messages, **kw):
-            return json.dumps({"edits": [
-                {"old_text": "总工期为 120 日历天",
-                 "new_text": "总工期为 90 日历天"}]}, ensure_ascii=False)
+            return json.dumps(
+                {"edits": [{"old_text": "总工期为 120 日历天", "new_text": "总工期为 90 日历天"}]}, ensure_ascii=False
+            )
 
-        res = asyncio.run(ce.collect_repair_edits(
-            section_id="s1", section_title="T", section_content=_CONTENT,
-            conflicts_in_section=[], facts="", sources="", chat_fn=good_chat))
+        res = asyncio.run(
+            ce.collect_repair_edits(
+                section_id="s1",
+                section_title="T",
+                section_content=_CONTENT,
+                conflicts_in_section=[],
+                facts="",
+                sources="",
+                chat_fn=good_chat,
+            )
+        )
         assert res.applied == 1
         assert "90 日历天" in res.content
         assert "C30" in res.content, "未冲突内容必须原样保留"
-

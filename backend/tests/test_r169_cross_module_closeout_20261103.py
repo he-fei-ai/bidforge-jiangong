@@ -45,6 +45,7 @@ E 配置安全（FIX-13/FIX-14）
   E2 ``pf.reset_reliability()`` 存在且清空 ``_provider_reliability`` 与
      ``_det_dead_streak``；conftest autouse 必须接线（R110 同族测试隔离）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -69,8 +70,7 @@ def _func_src(source: str, name: str) -> str:
     """按 AST 抽取顶层（或任意层级首个同名）函数的源码片段。"""
     tree = ast.parse(source)
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-                and node.name == name:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return ast.get_source_segment(source, node) or ""
     raise AssertionError(f"源码中找不到函数 {name}")
 
@@ -81,12 +81,20 @@ def _func_src(source: str, name: str) -> str:
 class TestPromptDoubleBraceAndSyncAudit:
     async def test_a1_content_plan_user_render_has_no_doubled_braces(self):
         from app.services.ai.prompts._registry import render
+
         out = render(
             "content_plan_user",
-            scheme_name="方案", scheme_type="基坑", section_number="3.1",
-            section_title="支护", section_description="说明", word_budget=1500,
-            parent_chain="上级", sibling_lines="同级", project_brief="概述",
-            knowledge_names_text="- 基坑规范", fact_titles_text="- 深度",
+            scheme_name="方案",
+            scheme_type="基坑",
+            section_number="3.1",
+            section_title="支护",
+            section_description="说明",
+            word_budget=1500,
+            parent_chain="上级",
+            sibling_lines="同级",
+            project_brief="概述",
+            knowledge_names_text="- 基坑规范",
+            fact_titles_text="- 深度",
         )
         assert "{{" not in out, "JSON 示例渲染后仍含双花括号（畸形 JSON 下发）"
         assert '"writing_focus"' in out
@@ -95,14 +103,14 @@ class TestPromptDoubleBraceAndSyncAudit:
 
     def test_a1b_template_source_has_no_doubled_braces(self):
         from app.services.ai.prompts._registry import get_default_prompt
+
         assert '{{"writing_focus"' not in get_default_prompt("content_plan_user")
 
     async def test_a2_sync_from_code_writes_audit(self, db_conn, monkeypatch):
         from app.routers.prompts import sync_prompts_from_code
 
         async def _audit_count(action: str) -> int:
-            cur = await db_conn.execute(
-                "SELECT COUNT(*) FROM prompt_audit_logs WHERE action=?", (action,))
+            cur = await db_conn.execute("SELECT COUNT(*) FROM prompt_audit_logs WHERE action=?", (action,))
             return (await cur.fetchone())[0]
 
         res = await sync_prompts_from_code(force=False, db=db_conn)
@@ -120,9 +128,7 @@ class TestPromptDoubleBraceAndSyncAudit:
 
         # drift + force：被覆盖的 DB 原文必须进审计快照（可回滚）
         key = "outline_short_system"
-        await db_conn.execute(
-            "UPDATE prompt_templates SET content = content || ? WHERE key=?",
-            ("\n__用户编辑__", key))
+        await db_conn.execute("UPDATE prompt_templates SET content = content || ? WHERE key=?", ("\n__用户编辑__", key))
         await db_conn.commit()
         summary3 = (await sync_prompts_from_code(force=False, db=db_conn))["summary"]
         assert summary3["drift"] >= 1
@@ -131,11 +137,12 @@ class TestPromptDoubleBraceAndSyncAudit:
         cur = await db_conn.execute(
             "SELECT snapshot_json FROM prompt_audit_logs "
             "WHERE prompt_key=? AND action='sync_overwrite' "
-            "ORDER BY created_at DESC LIMIT 1", (key,))
+            "ORDER BY created_at DESC LIMIT 1",
+            (key,),
+        )
         row = await cur.fetchone()
         assert row is not None, "force 覆盖必须落 sync_overwrite 审计"
-        assert "__用户编辑__" in (row[0] or ""), \
-            "审计快照必须包含被覆盖的 DB 原文（否则回滚 UI 永远无法恢复）"
+        assert "__用户编辑__" in (row[0] or ""), "审计快照必须包含被覆盖的 DB 原文（否则回滚 UI 永远无法恢复）"
 
     def test_a2b_sync_audit_actions_are_literal_source_locked(self):
         src = _src("routers/prompts.py")
@@ -150,6 +157,7 @@ class TestPromptDoubleBraceAndSyncAudit:
 class TestChartFixShapeGateAndPipeline:
     def test_b1_json_fix_candidate_rejected(self):
         from app.routers.charts import _json_fix_candidate_rejected as rej
+
         assert rej(True, "graph TD\nA-->B\nB-->C") is True
         assert rej(True, "```mermaid\ngraph TD\nA-->B\n```") is True
         assert rej(True, '{"type":"labor"}') is False
@@ -163,10 +171,9 @@ class TestChartFixShapeGateAndPipeline:
         assert "_json_fix_candidate_rejected(" in src
         tree = ast.parse(src)
         called = any(
-            isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Name)
-            and n.func.id == "_json_fix_candidate_rejected"
-            for n in ast.walk(tree))
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_json_fix_candidate_rejected"
+            for n in ast.walk(tree)
+        )
         assert called, "fix_mermaid 必须调用形态闸（防内联条件被摘除后函数成死码）"
 
     async def test_b3_resync_none_sentinel_not_or_fallback(self, monkeypatch):
@@ -174,8 +181,7 @@ class TestChartFixShapeGateAndPipeline:
             return ""
 
         monkeypatch.setattr(pl, "apply_inline_chart_plan", fake_apply_empty)
-        n, out = await pl.resync_inline_charts(
-            None, "scheme-1", "sec-1", "正文内容", enforce_limits=False)
+        n, out = await pl.resync_inline_charts(None, "scheme-1", "sec-1", "正文内容", enforce_limits=False)
         assert n == 0
         assert out == "", "apply 合法空串（限额裁空）不得回退成裁剪前正文（幽灵图）"
 
@@ -183,20 +189,17 @@ class TestChartFixShapeGateAndPipeline:
             return None
 
         monkeypatch.setattr(pl, "apply_inline_chart_plan", fake_apply_none)
-        _n, out2 = await pl.resync_inline_charts(
-            None, "scheme-1", "sec-1", "正文内容", enforce_limits=False)
+        _n, out2 = await pl.resync_inline_charts(None, "scheme-1", "sec-1", "正文内容", enforce_limits=False)
         assert out2 == "正文内容", "None（未传 content）语义回退保持不变"
 
     def test_b4_rewrite_preserves_eof_fragment(self):
         frag = '前文\n```chart-json\n{"type":"labor"}\n'
-        out = pl._rewrite_code_block(frag, '{"type":"labor"}',
-                                     '{"type":"labor","rows":[]}')
+        out = pl._rewrite_code_block(frag, '{"type":"labor"}', '{"type":"labor","rows":[]}')
         assert out == frag, "eof 残片必须原样保留，绝不补写闭合围栏（洗白）"
         assert out.rstrip().endswith('{"type":"labor"}')
 
         closed = '前文\n```chart-json\n{"type":"labor"}\n```\n后文\n'
-        out2 = pl._rewrite_code_block(closed, '{"type":"labor"}',
-                                      '{"type":"labor","rows":[]}')
+        out2 = pl._rewrite_code_block(closed, '{"type":"labor"}', '{"type":"labor","rows":[]}')
         assert out2 != closed and '{"type":"labor","rows":[]}' in out2
         assert "```\n后文" in out2, "闭合块改写行为保持不变（补写闭合围栏原语义）"
 
@@ -221,15 +224,14 @@ class TestBidAnalysisRetryAndRerunBudget:
         monkeypatch.setattr(ba, "_MARKDOWN_RERUN_MAX_CHARS", 10)
         item = {"item_id": "it1", "label": "测试项", "output_type": "markdown"}
 
-        res = await ba._run_single_item(
-            None, "p1", "s1", item, "x" * 50, ["seg"])
+        res = await ba._run_single_item(None, "p1", "s1", item, "x" * 50, ["seg"])
         assert len(calls) == 1, "超预算不得整卷重跑"
         assert res["status"] == "success"
-        assert is_missing_result(res["content"], "markdown"), \
-            "超预算必须保留缺失哨兵（写成 error 会令 missing_required 误报）"
+        assert is_missing_result(
+            res["content"], "markdown"
+        ), "超预算必须保留缺失哨兵（写成 error 会令 missing_required 误报）"
 
-        res2 = await ba._run_single_item(
-            None, "p1", "s1", item, "短文本", ["seg"])
+        res2 = await ba._run_single_item(None, "p1", "s1", item, "短文本", ["seg"])
         # 第二项：首次调用 + 空结果重跑 = 累计 3 次（首项 1 次未重跑）
         assert calls[1:] == ["短文本", "短文本"], "预算内保留原重跑语义（首次+重跑各一次）"
         assert res2["content"] == MARKDOWN_MISSING_RESULT
@@ -239,11 +241,11 @@ class TestBidAnalysisRetryAndRerunBudget:
         assert "if is_non_retryable_error(e):" in src
         pos_gate = src.index("if is_non_retryable_error(e):")
         pos_backoff = src.index("wait_s = 5 * (attempt + 1)")
-        assert pos_gate < pos_backoff, \
-            "永久错误判定必须在退避等待之前（立即终止，不再白烧 sleep+重试）"
+        assert pos_gate < pos_backoff, "永久错误判定必须在退避等待之前（立即终止，不再白烧 sleep+重试）"
 
     def test_c3_rerun_budget_constant_tied_to_chunk_size(self):
         from app.services.bid_analysis_service import DEFAULT_CHUNK_SIZE
+
         assert ba._MARKDOWN_RERUN_MAX_CHARS == DEFAULT_CHUNK_SIZE * 4
         assert ba._MARKDOWN_RERUN_MAX_CHARS > 0
 
@@ -260,26 +262,23 @@ class TestContentChainLockRetryAndObservability:
         tree = ast.parse(mark_src)
         # _mark_failed_once 是 _mark_section_failed 内的嵌套函数
         nested = any(
-            isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and n.name == "_mark_failed_once" for n in ast.walk(tree))
+            isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_mark_failed_once"
+            for n in ast.walk(tree)
+        )
         assert nested, "UPDATE+commit 必须收敛为可重试闭包"
 
     def test_d2_facts_repair_resync_passes_dropped_out(self):
         src = _src("routers/sse_handlers.py")
         pos = src.index("resync_inline_chart_rows(")
-        window = src[pos:pos + 400]
-        assert "dropped_out=_chart_dropped" in window, \
-            "事实修复后重建配对必须透传 dropped_out（R48 删图可观测）"
+        window = src[pos : pos + 1600]
+        assert "dropped_out=_chart_dropped" in window, "事实修复后重建配对必须透传 dropped_out（R48 删图可观测）"
         # 首建与重建两个入口都透传（防其中一处回退）
         assert src.count("dropped_out=_chart_dropped") >= 2
 
     def test_d3_persist_extraction_cursor_guards(self):
-        persist_src = _func_src(
-            _src("services/facts_extractor.py"), "persist_extraction")
-        assert "R13：db.execute 返回 None（persist_extraction 作用域事实加载）" \
-            in persist_src
-        assert "R13：db.execute 返回 None（persist_extraction 共享保护行回查）" \
-            in persist_src
+        persist_src = _func_src(_src("services/facts_extractor.py"), "persist_extraction")
+        assert "R13：db.execute 返回 None（persist_extraction 作用域事实加载）" in persist_src
+        assert "R13：db.execute 返回 None（persist_extraction 共享保护行回查）" in persist_src
         assert persist_src.count("if cur is None") >= 2
 
 
@@ -329,6 +328,7 @@ class TestCryptoExclusiveCreateAndReliabilityReset:
 
     def test_e1b_existing_valid_key_returned_untouched(self, tmp_path, monkeypatch):
         from cryptography.fernet import Fernet
+
         key_file = tmp_path / "secret_key.key"
         existing = Fernet.generate_key().decode()
         key_file.write_text(existing, encoding="utf-8")
@@ -340,6 +340,7 @@ class TestCryptoExclusiveCreateAndReliabilityReset:
         import builtins
 
         from cryptography.fernet import Fernet
+
         winner = Fernet.generate_key().decode()
         fake = _FakeRacingKeyFile(winner, empty_reads=2)
         monkeypatch.setattr(crypto, "_KEY_FILE", fake)
@@ -361,10 +362,12 @@ class TestCryptoExclusiveCreateAndReliabilityReset:
         assert crypto._is_valid_fernet_key("") is False
         assert crypto._is_valid_fernet_key("半截密钥") is False
         from cryptography.fernet import Fernet
+
         assert crypto._is_valid_fernet_key(Fernet.generate_key().decode()) is True
 
     def test_e2_reset_reliability_clears_module_state(self):
         import app.services.ai.provider_factory as pf
+
         assert hasattr(pf, "reset_reliability")
         with pf._provider_reliability_lock:
             pf._provider_reliability["prov|x|url"] = {"ok": 0, "fail": 9}
@@ -374,8 +377,7 @@ class TestCryptoExclusiveCreateAndReliabilityReset:
         assert pf._det_dead_streak == {}
 
     def test_e2b_conftest_autouse_wires_reset(self):
-        conftest = (Path(__file__).resolve().parent / "conftest.py").read_text(
-            encoding="utf-8")
+        conftest = (Path(__file__).resolve().parent / "conftest.py").read_text(encoding="utf-8")
         assert "pf.reset_reliability()" in conftest
 
 
@@ -384,6 +386,7 @@ class TestCryptoExclusiveCreateAndReliabilityReset:
 # ---------------------------------------------------------------------------
 def test_import_surface_intact():
     import app.services.ai.provider_factory as pf
+
     assert callable(pf.is_non_retryable_error)
     assert callable(pf.reset_reliability)
     assert callable(pl.resync_inline_chart_rows)

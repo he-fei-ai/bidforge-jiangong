@@ -12,6 +12,7 @@
   D 契约：加法式字段、校验/渲染同口径、显式锁定版式
   E 源文件字节体检（R57/R58 行尾判据）+ 前后端符号 parity 锁
 """
+
 import ast
 import math
 import os
@@ -31,8 +32,8 @@ from PIL import Image, ImageDraw
 
 _HERE = Path(__file__).resolve().parent
 _BE = _HERE.parent
-_EDGE_RGB = (100, 116, 139)   # #64748B 连线蓝灰（2026-10-17 样张 v2 取证，子端带同色下箭头）
-_AMBER_RGB = (251, 191, 36)   # #FBBF24 highlight 琥珀金（样张 v2 取证）
+_EDGE_RGB = (100, 116, 139)  # #64748B 连线蓝灰（2026-10-17 样张 v2 取证，子端带同色下箭头）
+_AMBER_RGB = (251, 191, 36)  # #FBBF24 highlight 琥珀金（样张 v2 取证）
 
 
 # ------------------------------------------------------------------ 造树工具
@@ -41,10 +42,12 @@ def _deep_leaf_tree(leaf_count: int, group_size: int = 3) -> dict:
     groups, remaining, gi = [], leaf_count, 0
     while remaining > 0:
         k = min(group_size, remaining)
-        groups.append({
-            "label": f"部门{gi}",
-            "children": [{"label": f"组{gi}{j}"} for j in range(k)],
-        })
+        groups.append(
+            {
+                "label": f"部门{gi}",
+                "children": [{"label": f"组{gi}{j}"} for j in range(k)],
+            }
+        )
         remaining -= k
         gi += 1
     return {"label": "质量管控体系", "children": groups}
@@ -57,14 +60,20 @@ def _mixed_depth_tree() -> dict:
       · 只造「叶子全在同一层」的树，去掉 depth 限定（M2）也不会改变任何结果；
       · 只造「竖排行是最底层」的树，层高退回固定值（M3）也不会真的重叠。
     """
-    return {"label": "质量管控体系", "children": [
-        {"label": "直属专员"},  # depth=1 叶子：永远不得竖排
-        {"label": "部门A", "children": [{"label": f"A{i}组"} for i in range(4)]},
-        {"label": "部门B", "children": [{"label": f"B{i}组"} for i in range(4)]},
-        {"label": "部门C", "children": [
-            {"label": "C分部", "children": [{"label": "C1组"}, {"label": "C2组"}]},
-        ]},
-    ]}
+    return {
+        "label": "质量管控体系",
+        "children": [
+            {"label": "直属专员"},  # depth=1 叶子：永远不得竖排
+            {"label": "部门A", "children": [{"label": f"A{i}组"} for i in range(4)]},
+            {"label": "部门B", "children": [{"label": f"B{i}组"} for i in range(4)]},
+            {
+                "label": "部门C",
+                "children": [
+                    {"label": "C分部", "children": [{"label": "C1组"}, {"label": "C2组"}]},
+                ],
+            },
+        ],
+    }
 
 
 def _by_depth(nodes):
@@ -78,7 +87,6 @@ def _by_depth(nodes):
 # A · 自动切换判定（纯函数，不依赖渲染）
 # ==========================================================================
 class TestVerticalModeDecision:
-
     def test_threshold_boundary_is_strictly_greater_than_six(self):
         """文档 §5：≤6 横排、>6 竖排。6 是边界，必须仍为横排。
 
@@ -111,13 +119,23 @@ class TestVerticalModeDecision:
             nodes, _w, _h = ma._layout_architecture_tree(tree)  # 自动判定
             assert ma.count_vertical_leaf_candidates(tree) == expected
             assert sum(1 for n in nodes if n["vertical"]) == expected
-            assert all(n["depth"] >= ma.LEAF_VERTICAL_MIN_DEPTH
-                       for n in nodes if n["vertical"]), "depth=1 叶子被误判为竖排"
+            assert all(
+                n["depth"] >= ma.LEAF_VERTICAL_MIN_DEPTH for n in nodes if n["vertical"]
+            ), "depth=1 叶子被误判为竖排"
 
-    @pytest.mark.parametrize("raw,expected", [
-        ("1", True), ("true", True), ("on", True),
-        ("0", False), ("false", False), ("NO", False), ("off", False), ("关闭", False),
-    ])
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("1", True),
+            ("true", True),
+            ("on", True),
+            ("0", False),
+            ("false", False),
+            ("NO", False),
+            ("off", False),
+            ("关闭", False),
+        ],
+    )
     def test_env_flag_truth_table(self, raw, expected):
         os.environ["R59_PROBE_FLAG"] = raw
         try:
@@ -141,7 +159,7 @@ class TestVerticalModeDecision:
 
     def test_threshold_env_override_and_illegal_fallback(self, monkeypatch):
         tree = _deep_leaf_tree(3)
-        assert ma.resolve_leaf_vertical_mode(tree) is False      # 默认阈值 6
+        assert ma.resolve_leaf_vertical_mode(tree) is False  # 默认阈值 6
         monkeypatch.setenv(ma.ENV_VERTICAL_THRESHOLD, "2")
         assert ma.vertical_leaf_threshold() == 2
         assert ma.resolve_leaf_vertical_mode(tree) is True
@@ -154,7 +172,6 @@ class TestVerticalModeDecision:
 # B · 几何
 # ==========================================================================
 class TestLayoutGeometry:
-
     def test_horizontal_geometry_is_byte_identical_to_legacy_formula(self):
         """横排回退路径的**逐值锁**：y 仍等于旧内联公式 `depth*(52+48)+60`，
         宽高仍为 220×52。竖排改造不得顺手挪动旧版式的任何一个像素。"""
@@ -277,9 +294,8 @@ def _ink_outside(img: Image.Image, box) -> int:
 
 
 class TestVerticalTextDrawing:
-
     def _draw_in_box(self, text: str, box_w: int = 90, box_h: int = 208, char_gap: int = 10):
-        font = _image_font(37, bold=True)   # 15 设计像素 × 2.5 超采样
+        font = _image_font(37, bold=True)  # 15 设计像素 × 2.5 超采样
         img = Image.new("RGB", (300, 400), "white")
         draw = ImageDraw.Draw(img)
         box = (100, 50, 100 + box_w, 50 + box_h)
@@ -302,8 +318,7 @@ class TestVerticalTextDrawing:
         img, box, _f = self._draw_in_box("质量" * 120)
         assert _ink_outside(img, box) == 0
         px = img.load()
-        inside = sum(1 for y in range(box[1], box[3]) for x in range(box[0], box[2])
-                     if px[x, y] != (255, 255, 255))
+        inside = sum(1 for y in range(box[1], box[3]) for x in range(box[0], box[2]) if px[x, y] != (255, 255, 255))
         assert inside > 200, "竖排区域完全没有墨迹 —— 判据已失去判别力"
 
     def test_capacity_math_is_a_pure_function_of_box(self):
@@ -334,15 +349,16 @@ class TestVerticalTextDrawing:
                 x1 = int((leaf["x"] + leaf["w"]) * 2.5) - 4
                 y0 = int(leaf["y"] * 2.5) + 56 + 4
                 y1 = int((leaf["y"] + leaf["h"]) * 2.5) + 56 - 4
-                ink = sum(1 for y in range(y0, y1, 2) for x in range(x0, x1, 2)
-                          if px[x, y] != _leaf_fill_rgb(leaf))
+                ink = sum(1 for y in range(y0, y1, 2) for x in range(x0, x1, 2) if px[x, y] != _leaf_fill_rgb(leaf))
                 assert ink > 50, f"竖排节点 {leaf['label']} 内无文字墨迹"
                 cx = int(leaf["x"] * 2.5) + int(leaf["w"] * 2.5) // 2
                 top = int(leaf["y"] * 2.5) + 56
                 above = px[cx, top - 6]
-                assert abs(above[0] - _EDGE_RGB[0]) <= 8 and abs(above[1] - _EDGE_RGB[1]) <= 8 \
-                    and abs(above[2] - _EDGE_RGB[2]) <= 8, \
-                    f"顶边中点上方不是连线色：{above}"
+                assert (
+                    abs(above[0] - _EDGE_RGB[0]) <= 8
+                    and abs(above[1] - _EDGE_RGB[1]) <= 8
+                    and abs(above[2] - _EDGE_RGB[2]) <= 8
+                ), f"顶边中点上方不是连线色：{above}"
 
     def test_highlight_leaf_keeps_amber_in_vertical_mode(self):
         tree = _deep_leaf_tree(9)
@@ -358,19 +374,17 @@ def _leaf_fill_rgb(leaf: dict) -> tuple:
     depth_idx = min(leaf["depth"], 4)
     palette = ["#1E3A5F", "#2B579A", "#4472C4", "#5B9BD5", "#A9C6E8"]
     hexc = palette[depth_idx]
-    return tuple(int(hexc[i:i + 2], 16) for i in (1, 3, 5))
+    return tuple(int(hexc[i : i + 2], 16) for i in (1, 3, 5))
 
 
 # ==========================================================================
 # D · 契约（加法式扩展，旧调用方零改动）
 # ==========================================================================
 class TestContract:
-
     def test_layout_returns_three_tuple_with_legacy_keys_plus_vertical(self):
         nodes, w, h = ma._layout_architecture_tree(_deep_leaf_tree(8))
         assert isinstance(w, int) and isinstance(h, int)
-        required = {"id", "label", "x", "y", "w", "h", "depth",
-                    "has_children", "parent_id", "highlight", "vertical"}
+        required = {"id", "label", "x", "y", "w", "h", "depth", "has_children", "parent_id", "highlight", "vertical"}
         assert all(required <= set(n) for n in nodes)
 
     def test_explicit_mode_lock_overrides_env(self, monkeypatch):
@@ -388,6 +402,7 @@ class TestContract:
 
     def test_renderer_reexports_the_new_helper(self):
         from app.services.ai import mermaid_renderer as mr
+
         assert mr._draw_text_vertical_center is _draw_text_vertical_center
 
 
@@ -403,7 +418,6 @@ _TOUCHED = [
 
 
 class TestSourceByteIntegrity:
-
     @pytest.mark.parametrize("path", _TOUCHED, ids=lambda p: p.name)
     def test_no_line_ending_or_control_damage(self, path, tmp_path):
         raw = path.read_bytes()
@@ -428,8 +442,7 @@ class TestSourceByteIntegrity:
         assert "vertical-rl" in arch
 
     def test_architecture_module_has_no_duplicate_top_level_defs(self):
-        tree = ast.parse((_BE / "app" / "services" / "ai" / "mermaid_architecture.py")
-                         .read_text(encoding="utf-8"))
+        tree = ast.parse((_BE / "app" / "services" / "ai" / "mermaid_architecture.py").read_text(encoding="utf-8"))
         seen, dups = set(), []
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):

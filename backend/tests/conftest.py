@@ -5,6 +5,7 @@
 - monkeypatch app.db.get_conn 及所有已导入的引用，使被测代码拿到测试连接
 - autouse fixture 在每个测试前重置模块级全局状态（缓存、订阅者）
 """
+
 import os
 import tempfile
 import time
@@ -34,9 +35,11 @@ def _isolate_chart_cache_dir():
     单例，避免个别导入期绑定的引用仍指向生产目录。
     """
     import app.config as _cfg
+
     _cfg.CHARTS_DIR = Path(os.environ["BIDFORGE_CHART_CACHE_DIR"]).resolve()
     try:
         import app.services.ai.mermaid_renderer as _mr
+
         _mr._chart_cache = _mr.ChartCache()
     except Exception:
         pass
@@ -55,6 +58,7 @@ def _restore_app_db_path():
     复位变量即自动换回正确连接。
     """
     import app.db as _appdb
+
     original = _appdb.DB_PATH
     yield
     if _appdb.DB_PATH != original:
@@ -78,6 +82,7 @@ async def db_conn(monkeypatch):
     #    否则测试库缺列：读这些列的代码（charts.list_charts）在生产能跑、
     #    在测试里却 `no such column`，测试环境与生产 schema 失真。
     from app.db import _migrate
+
     await _migrate(conn)
     await conn.commit()
 
@@ -104,15 +109,18 @@ async def db_conn(monkeypatch):
 
     # patch app.db 模块本身
     import app.db
+
     monkeypatch.setattr(app.db, "get_conn", fake_get_conn)
     monkeypatch.setattr(app.db, "write_tx_conn", fake_write_tx_conn)
 
     # patch 各业务模块中 from app.db import get_conn 绑定的引用
     import app.services.ai.provider_factory as _pf
+
     monkeypatch.setattr(_pf, "get_conn", fake_get_conn)
     monkeypatch.setattr(_pf, "write_tx_conn", fake_write_tx_conn)
 
     import app.services.ai.task_registry as _tr
+
     monkeypatch.setattr(_tr, "get_conn", fake_get_conn)
 
     # ✅ G12-7（2026-09-20 · 测试隔离修复）：`from app.db import get_conn` 是
@@ -131,9 +139,14 @@ async def db_conn(monkeypatch):
     #    （checkpoint_json 读回仍是 "{}"，断言 ckpt["kind"] 抛 KeyError）；
     #    单独跑该文件却全绿。这里把所有存在模块级绑定的模块一并 patch。
     import importlib
-    for _mod_name in ("app.routers.sse_handlers", "app.routers.sse_checkpoint",
-                      "app.services.repair_record",
-                      "app.routers.system", "app.routers.outline_library"):
+
+    for _mod_name in (
+        "app.routers.sse_handlers",
+        "app.routers.sse_checkpoint",
+        "app.services.repair_record",
+        "app.routers.system",
+        "app.routers.outline_library",
+    ):
         try:
             _mod = importlib.import_module(_mod_name)
         except Exception:  # 模块缺失/导入失败不应影响其它用例
@@ -155,6 +168,7 @@ def reset_provider_config_cache():
     会影响后续测试的缓存命中/过期判定。
     """
     import app.services.ai.provider_factory as pf
+
     pf._config_cache["data"] = None
     pf._config_cache["ts"] = 0.0
     pf._fallback_cache["data"] = None
@@ -197,11 +211,15 @@ def reset_provider_config_cache():
     #    前一个用例触发的 ≥3 次 404 连击会让后续依赖同身份键用例的候选
     #    被静默判死剔除（顺序相关偶发红），与 thinking-dead 污染同族。
     pf.reset_reliability()
+    # ✅ 2026-11-05：自适应对冲延迟样本（进程级全局）同样需要隔离，
+    #    否则前一个用例灌入的 P90 会让后续对冲窗口取值不稳定。
+    pf.reset_provider_latency()
     # ✅ 自适应并发控制器（2026-09-22 · 测试隔离修复）：进程级全局。
     #    前面用例的失败调用（402/429 等）会把并发降到 min_c=1 并清不掉，
     #    导致后续依赖并发语义的测试（如 test_perf_content_pipeline 的 hedge）
     #    中两个候选串行排队、对冲失效 —— 表现为顺序相关的偶发失败。
     from app.services.ai.workflows_base import concurrency_controller as _cc
+
     _cc.set_concurrency(_cc.max_c if _cc.target > _cc.max_c else max(1, _cc.target))
     _cc._window.clear()
     _cc._consecutive_429 = 0
@@ -215,4 +233,5 @@ def reset_task_registry_state():
     （2026-10-04 起 `_subscribers` 死链路已清理，此处同步删除。）
     """
     import app.services.ai.task_registry as tr
+
     tr._tasks.clear()

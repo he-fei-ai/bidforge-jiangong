@@ -14,6 +14,7 @@
 判据分五组：A 公共层口径 / B 折行决策纯函数 / C 渲染接线与逐字回退 /
 D 全图种可观测性 / E 源文件字节体检。
 """
+
 from __future__ import annotations
 
 import ast
@@ -33,8 +34,7 @@ from app.services.ai import mermaid_timeline as mt
 from PIL import Image, ImageDraw
 
 _AI_DIR = Path(inspect.getsourcefile(mc)).resolve().parent
-_ENV_NAMES = ("TIMELINE_AUTO_WRAP", "TIMELINE_MAX_ROWS_PER_FIGURE",
-              "CHART_PAPER_MIN_MM", "ARCH_LEAF_PAPER_MIN_MM")
+_ENV_NAMES = ("TIMELINE_AUTO_WRAP", "TIMELINE_MAX_ROWS_PER_FIGURE", "CHART_PAPER_MIN_MM", "ARCH_LEAF_PAPER_MIN_MM")
 
 
 @pytest.fixture(autouse=True)
@@ -56,9 +56,13 @@ def _f(px: int):
 def _ms(n: int, *, long_name: bool = False) -> dict:
     """造 n 个里程碑（默认短名称 ⇒ 不触发省略号，才能单独审「折行不丢字」）。"""
     tpl = "很长的里程碑名称用于验证显示效果%d" if long_name else "里程碑%d"
-    return {"title": "关键里程碑",
-            "milestones": [{"name": tpl % (i + 1), "date": f"第{i * 7 + 1}天",
-                            "desc": "说明", "group": f"阶段{i % 3}"} for i in range(n)]}
+    return {
+        "title": "关键里程碑",
+        "milestones": [
+            {"name": tpl % (i + 1), "date": f"第{i * 7 + 1}天", "desc": "说明", "group": f"阶段{i % 3}"}
+            for i in range(n)
+        ],
+    }
 
 
 def _png(stream) -> tuple[int, int]:
@@ -92,7 +96,7 @@ class _DrawSpy:
             self.texts.append(a[1])
         return self._real.text(*a, **k)
 
-    def __getattr__(self, name):                      # 其余原语直接透传
+    def __getattr__(self, name):  # 其余原语直接透传
         return getattr(self._real, name)
 
 
@@ -120,7 +124,6 @@ def draw_spy(monkeypatch):
 # A · 公共层：纸面下限读数与毫米播报（单一事实源）
 # ==========================================================================
 class TestPaperFloorLayer:
-
     def test_floor_default_is_24mm(self):
         assert mc.paper_floor_mm() == pytest.approx(mc.PAPER_FONT_MIN_MM) == 2.4
 
@@ -152,6 +155,7 @@ class TestPaperFloorLayer:
     def test_font_px_never_raises(self):
         class _NoSize:
             pass
+
         assert mc.font_px(None) == 0
         assert mc.font_px(object()) == 0
         assert mc.font_px(_NoSize()) == 0
@@ -170,24 +174,21 @@ class TestPaperFloorLayer:
 
     def test_note_warning_keys_on_primary_not_worst(self, caplog):
         """小字档（序号/说明）低于下限而主文字达标 ⇒ **不**告警（否则每张图永久红灯）。
-        
+
         ⚠️ 必须同时断言 info **在位**：只断言「没有 warning」时，入参被 `font_px`
         吞成 0（函数整个静默）也能通过 —— 那是假绿，不是本条要证的口径分组。
         """
         with caplog.at_level(logging.INFO):
             mc.paper_floor_note("测试", [_f(30), _f(12)], 2000, 800, primary=[_f(30)])
-        infos = [r.getMessage() for r in caplog.records
-                 if r.levelno == logging.INFO and "纸面可读性" in r.getMessage()]
-        warns = [r for r in caplog.records
-                 if r.levelno == logging.WARNING and "纸面可读性" in r.getMessage()]
+        infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO and "纸面可读性" in r.getMessage()]
+        warns = [r for r in caplog.records if r.levelno == logging.WARNING and "纸面可读性" in r.getMessage()]
         assert len(infos) == 1, "info 必须照常播报最差档"
         assert warns == [], f"主文字达标却告警：{[r.getMessage() for r in warns]}"
         assert mc.paper_font_mm(12, 2000, 800) < mc.paper_floor_mm()  # 前提：小字档确实低于下限
 
     def test_note_warning_fires_when_primary_below_floor(self, caplog):
         with caplog.at_level(logging.WARNING):
-            mc.paper_floor_note("测试", [_f(30), _f(12)], 2000, 800,
-                              primary=[_f(12)], suggest="（试）")
+            mc.paper_floor_note("测试", [_f(30), _f(12)], 2000, 800, primary=[_f(12)], suggest="（试）")
         msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert len(msgs) == 1
         assert "主文字印到纸上" in msgs[0] and "（试）" in msgs[0]
@@ -214,6 +215,7 @@ class TestPaperFloorLayer:
 
     def test_note_never_propagates_logger_failure(self, monkeypatch):
         """播报是**附属**能力：日志器炸了也不能连累出图（渲染路径没有 try 兜这一层）。"""
+
         class _Boom:
             def info(self, *a, **k):
                 raise RuntimeError("boom")
@@ -230,10 +232,10 @@ class TestPaperFloorLayer:
 
 
 class TestFontPxReadsStubOnly:
-
     def test_font_px_reads_size_attribute(self):
         class _F:
             size = 37
+
         assert mc.font_px(_F()) == 37
 
     def test_font_px_on_real_font_is_bounded(self):
@@ -245,16 +247,24 @@ class TestFontPxReadsStubOnly:
 # B · 折行决策：行数由闭式算出（宽 16cm / 高 22cm 两个上限交叉 ⇒ 存在最优）
 # ==========================================================================
 class TestWrapPlanner:
-
     def test_small_counts_stay_single_row(self):
         """n≤4：折行收益不到 20% 门槛 ⇒ 保持原形态（改动必须有理由）。"""
         for n in (1, 2, 3, 4):
             assert mt.plan_timeline_rows(n) == (1, n), n
 
-    @pytest.mark.parametrize("n,expected", [
-        (5, (2, 3)), (6, (2, 3)), (8, (3, 3)), (9, (3, 3)),
-        (12, (4, 3)), (16, (6, 3)), (24, (6, 4)), (30, (8, 4)),
-    ])
+    @pytest.mark.parametrize(
+        "n,expected",
+        [
+            (5, (2, 3)),
+            (6, (2, 3)),
+            (8, (3, 3)),
+            (9, (3, 3)),
+            (12, (4, 3)),
+            (16, (6, 3)),
+            (24, (6, 4)),
+            (30, (8, 4)),
+        ],
+    )
     def test_known_decision_table(self, n, expected):
         assert mt.plan_timeline_rows(n) == expected
 
@@ -283,16 +293,16 @@ class TestWrapPlanner:
         monkeypatch.setenv("TIMELINE_MAX_ROWS_PER_FIGURE", "1")
         assert "TIMELINE_MAX_ROWS_PER_FIGURE" in mt._single_row_reason(8)
         monkeypatch.delenv("TIMELINE_MAX_ROWS_PER_FIGURE")
-        assert "增益" in mt._single_row_reason(4)          # 算过而不值
-        assert "无从折行" in mt._single_row_reason(1)       # 单事件没有「折不折」可言
+        assert "增益" in mt._single_row_reason(4)  # 算过而不值
+        assert "无从折行" in mt._single_row_reason(1)  # 单事件没有「折不折」可言
         for bad in (None, "abc", 0, -2):
-            assert isinstance(mt._single_row_reason(bad), str)      # 绝不抛
+            assert isinstance(mt._single_row_reason(bad), str)  # 绝不抛
 
     def test_max_rows_cap_is_respected(self):
         assert mt.plan_timeline_rows(24, max_rows=1) == (1, 24)
         rows, cards = mt.plan_timeline_rows(24, max_rows=2)
         assert (rows, cards) == (2, 12)
-        assert mt.plan_timeline_rows(24, max_rows=0) == (1, 24)   # 非法上限 ⇒ 不折
+        assert mt.plan_timeline_rows(24, max_rows=0) == (1, 24)  # 非法上限 ⇒ 不折
 
     def test_max_rows_env(self, monkeypatch):
         monkeypatch.setenv("TIMELINE_MAX_ROWS_PER_FIGURE", "2")
@@ -362,7 +372,6 @@ def _timeline_at(cards: int, rows: int) -> tuple[int, int]:
 # C · 渲染接线：折行真的画出来了，且「关掉开关 = 逐字回退」
 # ==========================================================================
 class TestWrapRenderWiring:
-
     def test_switch_off_equals_forced_single_row(self, monkeypatch):
         """两条「回到旧形态」的路径必须产出**同一张 PNG**：env 关 vs 决策恒返回 (1, n)。"""
         payload = _ms(16)
@@ -412,8 +421,7 @@ class TestWrapRenderWiring:
         """
         mt._render_timeline_image_v2(_ms(16))
         spy = draw_spy()
-        ys = sorted({int(p[0][1]) for p in spy.lines
-                     if len(p) == 2 and p[0][1] == p[1][1]})
+        ys = sorted({int(p[0][1]) for p in spy.lines if len(p) == 2 and p[0][1] == p[1][1]})
         assert ys, "没有画任何水平线"
         bands = [[ys[0]]]
         for y in ys[1:]:
@@ -474,8 +482,7 @@ class TestWrapRenderWiring:
         w, h = _png(mt._render_timeline_image_v2(_ms(4)))
         assert (w, h) == (2400, 825 + 3 * 425), (w, h)
         spy = draw_spy()
-        ys = sorted({int(p[0][1]) for p in spy.lines
-                     if len(p) == 2 and p[0][1] == p[1][1]})
+        ys = sorted({int(p[0][1]) for p in spy.lines if len(p) == 2 and p[0][1] == p[1][1]})
         bands = [[ys[0]]]
         for y in ys[1:]:
             (bands[-1].append(y) if y - bands[-1][-1] <= 20 else bands.append([y]))
@@ -493,29 +500,45 @@ class TestWrapRenderWiring:
 # D · 全图种可观测性：五类 PIL 渲染器都要把毫米写进日志
 # ==========================================================================
 _MIN_PAYLOADS = {
-    "mermaid_timeline.py": (mt, "_render_timeline_image_v2",
-                            _ms(6), "时间轴"),
-    "mermaid_layout.py": (mly, "_render_layout_image_v2",
-                          {"zones": [{"name": "钢筋加工区", "category": "生产区"},
-                                     {"name": "生活区", "category": "生活区"}]}, "布局图"),
-    "mermaid_comparison.py": (mcmp, "_render_comparison_image_v2",
-                              {"rows": [{"label": "方案A", "value": 30},
-                                        {"label": "方案B", "value": 70}]}, "对比图"),
-    "mermaid_gantt.py": (mg, "_render_gantt_image_v2",
-                         {"tasks": [{"name": "基础施工", "start": "2026-03-01", "duration": "30d"},
-                                    {"name": "主体封顶", "start": "2026-04-01", "duration": "45d"}]},
-                         "甘特图"),
+    "mermaid_timeline.py": (mt, "_render_timeline_image_v2", _ms(6), "时间轴"),
+    "mermaid_layout.py": (
+        mly,
+        "_render_layout_image_v2",
+        {"zones": [{"name": "钢筋加工区", "category": "生产区"}, {"name": "生活区", "category": "生活区"}]},
+        "布局图",
+    ),
+    "mermaid_comparison.py": (
+        mcmp,
+        "_render_comparison_image_v2",
+        {"rows": [{"label": "方案A", "value": 30}, {"label": "方案B", "value": 70}]},
+        "对比图",
+    ),
+    "mermaid_gantt.py": (
+        mg,
+        "_render_gantt_image_v2",
+        {
+            "tasks": [
+                {"name": "基础施工", "start": "2026-03-01", "duration": "30d"},
+                {"name": "主体封顶", "start": "2026-04-01", "duration": "45d"},
+            ]
+        },
+        "甘特图",
+    ),
     # 劳动力图只认 phases/categories/data 三件套（counts 形态归一器不接受 → None）。
-    "mermaid_labor.py": (mlb, "_render_labor_image_v2",
-                         {"phases": ["基础", "主体", "装修"],
-                          "categories": [{"name": "木工"}, {"name": "钢筋工"}],
-                          "data": [[10, 15], [20, 25], [8, 10]]},
-                         "劳动力图"),
+    "mermaid_labor.py": (
+        mlb,
+        "_render_labor_image_v2",
+        {
+            "phases": ["基础", "主体", "装修"],
+            "categories": [{"name": "木工"}, {"name": "钢筋工"}],
+            "data": [[10, 15], [20, 25], [8, 10]],
+        },
+        "劳动力图",
+    ),
 }
 
 
 class TestAllRenderersReport:
-
     @pytest.mark.parametrize("mod_name", sorted(_MIN_PAYLOADS))
     def test_renderer_emits_floor_note(self, mod_name, caplog):
         mod, fn_name, payload, label = _MIN_PAYLOADS[mod_name]
@@ -532,8 +555,7 @@ class TestAllRenderersReport:
         mod, fn_name, payload, _ = _MIN_PAYLOADS[mod_name]
         with caplog.at_level(logging.WARNING):
             getattr(mod, fn_name)(payload)
-        assert sum(1 for r in caplog.records
-                   if "[纸面可读性]" in r.getMessage()) <= 1
+        assert sum(1 for r in caplog.records if "[纸面可读性]" in r.getMessage()) <= 1
 
     def test_reported_mm_matches_the_delivered_png(self, caplog):
         """播报必须**自洽**：日志里的 px 与 mm，要用**真实交付 PNG 的尺寸**复算得出。
@@ -566,18 +588,19 @@ class TestAllRenderersReport:
         with caplog.at_level(logging.INFO):
             stream = mt._render_timeline_image_v2(_ms(16))
         w, h = _png(stream)
-        info = next(r.getMessage() for r in caplog.records
-                    if r.levelno == logging.INFO and "[纸面可读性]" in r.getMessage())
+        info = next(
+            r.getMessage() for r in caplog.records if r.levelno == logging.INFO and "[纸面可读性]" in r.getMessage()
+        )
         worst_px, worst_mm = re.search(r"最差字号 (\d+)px → 纸面 ([\d.]+)mm", info).groups()
         main_mm = re.search(r"主文字 → ([\d.]+)mm", info).group(1)
-        assert float(worst_mm) == pytest.approx(
-            round(mc.paper_font_mm(int(worst_px), w, h), 2), abs=0.01), info
+        assert float(worst_mm) == pytest.approx(round(mc.paper_font_mm(int(worst_px), w, h), 2), abs=0.01), info
         floor = mc.paper_floor_mm()
         gap = f"最差 {worst_mm} / 主文字 {main_mm} / 下限 {floor}"
         assert float(worst_mm) < floor, f"前提不成立（{gap}）：本例是空跑"
         assert float(main_mm) >= floor, f"前提不成立（{gap}）：本例是空跑"
-        warns = [r.getMessage() for r in caplog.records
-                 if r.levelno == logging.WARNING and "[纸面可读性]" in r.getMessage()]
+        warns = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "[纸面可读性]" in r.getMessage()
+        ]
         assert warns == [], f"主文字已达标仍在告警：{warns}"
 
     def test_single_row_warning_explains_why_not_wrapped(self, caplog):
@@ -590,8 +613,9 @@ class TestAllRenderersReport:
         assert mt.plan_timeline_rows(4) == (1, 4), "前提：n=4 门槛外，保持单行"
         with caplog.at_level(logging.WARNING):
             mt._render_timeline_image_v2(_ms(4))
-        warns = [r.getMessage() for r in caplog.records
-                 if r.levelno == logging.WARNING and "[纸面可读性]" in r.getMessage()]
+        warns = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "[纸面可读性]" in r.getMessage()
+        ]
         assert len(warns) == 1, f"前提：n=4 主文字确实低于下限（实际告警 {len(warns)} 条）"
         assert "增益" in warns[0] and "20%" in warns[0], warns[0]
         assert "最优形态" not in warns[0], warns[0]
@@ -610,8 +634,9 @@ class TestAllRenderersReport:
         assert mt.plan_timeline_rows(8) == (1, 8), "前提：关掉开关后保持单行"
         with caplog.at_level(logging.WARNING):
             mt._render_timeline_image_v2(_ms(8))
-        warns = [r.getMessage() for r in caplog.records
-                 if r.levelno == logging.WARNING and "[纸面可读性]" in r.getMessage()]
+        warns = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "[纸面可读性]" in r.getMessage()
+        ]
         assert len(warns) == 1, f"前提：n=8 单行主文字低于下限（实际告警 {len(warns)} 条）"
         assert "TIMELINE_AUTO_WRAP" in warns[0], warns[0]
         assert "增益" not in warns[0] and "20%" not in warns[0], warns[0]
@@ -626,8 +651,9 @@ class TestAllRenderersReport:
         assert mt.plan_timeline_rows(8) == (1, 8), "前提：上限被钉为 1 ⇒ 单行"
         with caplog.at_level(logging.WARNING):
             mt._render_timeline_image_v2(_ms(8))
-        warns = [r.getMessage() for r in caplog.records
-                 if r.levelno == logging.WARNING and "[纸面可读性]" in r.getMessage()]
+        warns = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "[纸面可读性]" in r.getMessage()
+        ]
         assert len(warns) == 1, f"前提：n=8 单行主文字低于下限（实际告警 {len(warns)} 条）"
         assert "TIMELINE_MAX_ROWS_PER_FIGURE" in warns[0], warns[0]
         assert "TIMELINE_AUTO_WRAP" not in warns[0], warns[0]
@@ -636,9 +662,9 @@ class TestAllRenderersReport:
         """AST 级：五个渲染器各调用 `paper_floor_note` **恰一次**（多处=双告警风险）。"""
         for mod_name in _MIN_PAYLOADS:
             tree = ast.parse((_AI_DIR / mod_name).read_text(encoding="utf-8"))
-            n = sum(1 for x in ast.walk(tree)
-                    if isinstance(x, ast.Call)
-                    and getattr(x.func, "id", "") == "paper_floor_note")
+            n = sum(
+                1 for x in ast.walk(tree) if isinstance(x, ast.Call) and getattr(x.func, "id", "") == "paper_floor_note"
+            )
             assert n == 1, f"{mod_name} 调用 {n} 次（要求恰 1 次）"
 
     def test_architecture_not_wired(self):
@@ -657,19 +683,24 @@ class TestAllRenderersReport:
 # ==========================================================================
 # E · 源文件字节体检（CRLF 仓库的 .py 一律字节级改动，改完立即体检）
 # ==========================================================================
-_TOUCHED = ["mermaid_common.py", "mermaid_timeline.py", "mermaid_layout.py",
-            "mermaid_comparison.py", "mermaid_gantt.py", "mermaid_labor.py",
-            "mermaid_renderer.py", "mermaid_architecture.py"]
+_TOUCHED = [
+    "mermaid_common.py",
+    "mermaid_timeline.py",
+    "mermaid_layout.py",
+    "mermaid_comparison.py",
+    "mermaid_gantt.py",
+    "mermaid_labor.py",
+    "mermaid_renderer.py",
+    "mermaid_architecture.py",
+]
 
 # 本轮同样改过的**测试**文件（补丁④升级 R61 语义）：CRLF 仓库里 .py 被文本工具
 # 展开行尾的事故已经两轮，只体检生产文件等于留洞。
-_TOUCHED_TESTS = ["test_r61_autosplit_and_label_widen_20261010.py",
-                  "test_timeline_paper_wrap_r64_20261011.py"]
+_TOUCHED_TESTS = ["test_r61_autosplit_and_label_widen_20261010.py", "test_timeline_paper_wrap_r64_20261011.py"]
 _TESTS_DIR = _AI_DIR.parents[2] / "tests"
 
 
 class TestR64ByteIntegrity:
-
     @pytest.mark.parametrize("name", _TOUCHED)
     def test_line_endings_and_no_corruption(self, name):
         raw = (_AI_DIR / name).read_bytes()
@@ -707,5 +738,3 @@ class TestR64ByteIntegrity:
         """沿 R61：时间轴/布局/对比三图的修复必须是「非竖排」路线。"""
         for name in ("mermaid_timeline.py", "mermaid_layout.py", "mermaid_comparison.py"):
             assert "_draw_text_vertical_center" not in (_AI_DIR / name).read_text(encoding="utf-8")
-
-

@@ -7,6 +7,7 @@
 
 纯 ASGI 直测，不依赖 HTTP 客户端。
 """
+
 import logging
 
 from app.middleware import RequestLogMiddleware
@@ -18,8 +19,7 @@ def _scope(headers=()) -> dict:
         "type": "http",
         "method": "GET",
         "path": "/api/v1/ping",
-        "headers": [(k.encode("latin-1"), v.encode("latin-1"))
-                    for k, v in headers],
+        "headers": [(k.encode("latin-1"), v.encode("latin-1")) for k, v in headers],
     }
 
 
@@ -30,14 +30,14 @@ async def _receive():
 def _make_send(captured: list):
     async def send(message: dict) -> None:
         captured.append(message)
+
     return send
 
 
 async def _app_ok(scope, receive, send):
     """路由层探针：把当前链路上下文写进响应体，验证 contextvars 透传。"""
     suffix = context_suffix()
-    await send({"type": "http.response.start", "status": 200,
-                "headers": [(b"content-type", b"text/plain")]})
+    await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/plain")]})
     await send({"type": "http.response.body", "body": suffix.encode()})
 
 
@@ -46,8 +46,7 @@ def _start_of(captured: list) -> dict:
 
 
 def _body_of(captured: list) -> str:
-    return next(m for m in captured
-                if m["type"] == "http.response.body")["body"].decode()
+    return next(m for m in captured if m["type"] == "http.response.body")["body"].decode()
 
 
 async def test_trace_id_generated_and_returned():
@@ -62,8 +61,7 @@ async def test_trace_id_generated_and_returned():
 
     tid = dict(start["headers"])[b"x-trace-id"].decode()
     assert len(tid) == 12 and tid.isalnum(), "生成的 trace 应为 12 位短 ID"
-    assert _body_of(captured) == f"trace={tid}", \
-        "路由层应能看到中间件绑定的 trace（contextvars 透传）"
+    assert _body_of(captured) == f"trace={tid}", "路由层应能看到中间件绑定的 trace（contextvars 透传）"
 
 
 async def test_incoming_trace_id_reused():
@@ -95,20 +93,18 @@ async def test_request_log_contains_trace(caplog):
     captured: list = []
     with caplog.at_level(logging.INFO, logger="http"):
         await mw(_scope(), _receive, _make_send(captured))
-    assert any("[trace=" in r.getMessage() for r in caplog.records), \
-        "请求日志应包含 [trace=…] 前缀"
+    assert any("[trace=" in r.getMessage() for r in caplog.records), "请求日志应包含 [trace=…] 前缀"
 
 
 async def test_response_header_not_duplicated():
     """路由层已写同头时不重复追加（中间件让位，不覆盖业务语义）。"""
+
     async def app_with_header(scope, receive, send):
-        await send({"type": "http.response.start", "status": 200,
-                    "headers": [(b"x-trace-id", b"from-app")]})
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"x-trace-id", b"from-app")]})
         await send({"type": "http.response.body", "body": b""})
 
     mw = RequestLogMiddleware(app_with_header)
     captured: list = []
     await mw(_scope(), _receive, _make_send(captured))
-    headers = [h[1] for h in _start_of(captured)["headers"]
-               if h[0] == b"x-trace-id"]
+    headers = [h[1] for h in _start_of(captured)["headers"] if h[0] == b"x-trace-id"]
     assert headers == [b"from-app"]

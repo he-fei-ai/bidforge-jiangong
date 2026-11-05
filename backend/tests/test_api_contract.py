@@ -20,6 +20,7 @@ vitest 都发现不了，只能等运行时 404 / 405 —— 而这类问题往�
 - 只做「形状」比对，不校验请求体 / 查询参数 / 响应结构 —— 参数级契约
   仍需人工或后续 codegen 补齐。
 """
+
 import re
 from pathlib import Path
 
@@ -32,11 +33,15 @@ from app.main import app
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _FRONTEND_SRC = _REPO_ROOT / "frontend" / "src"
 
+_FRONTEND_WB_DIR = _FRONTEND_SRC / "pages" / "schemeWorkbench"
+# R176（2026-11-04）：SchemeWorkbenchPage 正按批拆分（含 tabs/ 子目录），
+# API 调用点已分散到 schemeWorkbench/**；固定路径扫描会把迁移后的调用
+# 整体漏掉（契约测试仍绿，实际已无覆盖）—— 递归纳入全部子模块。
 SCAN_FILES = (
     _FRONTEND_SRC / "api" / "index.ts",
     _FRONTEND_SRC / "pages" / "SchemeWorkbenchPage.tsx",
     _FRONTEND_SRC / "components" / "Layout.tsx",
-)
+) + tuple(sorted(list(_FRONTEND_WB_DIR.rglob("*.ts")) + list(_FRONTEND_WB_DIR.rglob("*.tsx"))))
 
 _API_PREFIX = "/api/v1"
 
@@ -55,9 +60,7 @@ _RAW_FETCH_RE = re.compile(rf"\bfetch\s*\(\s*({_LIT})")
 _CONST_DEF_RE = re.compile(rf"\bconst\s+({_IDENT})\s*=\s*({_LIT})")
 # helper 自身的定义（如 `export async function* sseGetStream(url: string, ...)`）——
 # 其形参列表与调用语法无法用正则区分，必须先剔除，否则定义会被当成一次调用
-_DECL_RE = re.compile(
-    r"\b(?:function\s*\*?\s*|const\s+)(?:sseFetch|sseGetStream)\s*\([^)]*\)"
-)
+_DECL_RE = re.compile(r"\b(?:function\s*\*?\s*|const\s+)(?:sseFetch|sseGetStream)\s*\([^)]*\)")
 
 # 已知的非路由字面量（前端内部标识，不是后端端点）——如需新增请写明原因
 _NOT_A_ROUTE: set[tuple[str, str]] = set()
@@ -69,7 +72,7 @@ def _shape(path: str) -> str:
     if not path.startswith("/"):
         path = "/" + path
     path = re.sub(r"\$\{[^}]*\}", "{}", path)  # 前端模板变量
-    path = re.sub(r"\{[^}]*\}", "{}", path)    # OpenAPI 路径参数
+    path = re.sub(r"\{[^}]*\}", "{}", path)  # OpenAPI 路径参数
     return path.rstrip("/") or "/"
 
 
@@ -101,11 +104,7 @@ def _resolve(raw: str, consts: dict[str, str]) -> str | None:
 def _frontend_calls(text: str) -> set[tuple[str, str | None]]:
     """提取前端声明的 (大写方法, 完整路径)。方法为 None 表示由调用方决定。"""
     # 只保留「值形如路径」的 const 定义，避免同名变量（如 url）跨作用域串味
-    consts = {
-        m.group(1): m.group(2)
-        for m in _CONST_DEF_RE.finditer(text)
-        if _unwrap(m.group(2)).startswith("/")
-    }
+    consts = {m.group(1): m.group(2) for m in _CONST_DEF_RE.finditer(text) if _unwrap(m.group(2)).startswith("/")}
     # helper 定义区间：位于其中的匹配是形参而非调用
     decl_spans = [(m.start(), m.end()) for m in _DECL_RE.finditer(text)]
 
@@ -139,7 +138,7 @@ def _collected(scanned: list[Path] | None = None) -> list[tuple[str, str]]:
     """返回 (来源文件, "METHOD 路径形状") 明细，便于失败时定位。"""
     routes = _backend_routes()
     out: list[tuple[str, str]] = []
-    for src in (scanned if scanned is not None else SCAN_FILES):
+    for src in scanned if scanned is not None else SCAN_FILES:
         text = src.read_text(encoding="utf-8")
         for method, full in sorted(_frontend_calls(text)):
             shape = _shape(full)
@@ -159,6 +158,10 @@ def test_scan_files_exist():
     """被扫描的前端文件必须存在（改名/移动后此用例先失败，而不是静默放过）。"""
     missing = [str(p) for p in SCAN_FILES if not p.exists()]
     assert not missing, f"契约测试扫描目标缺失，请更新 SCAN_FILES：{missing}"
+    # 兜底：拆分目录必须真的被递归纳入（否则拆分后退化为仅扫 facade/index.ts）。
+    split = sorted(list(_FRONTEND_WB_DIR.rglob("*.ts")) + list(_FRONTEND_WB_DIR.rglob("*.tsx")))
+    assert split, f"schemeWorkbench/ 未被递归扫描到：{_FRONTEND_WB_DIR}"
+    assert all(p in SCAN_FILES for p in split), "schemeWorkbench/ 下存在未纳入 SCAN_FILES 的 ts/tsx 文件"
 
 
 def test_frontend_api_paths_match_backend_routes():
@@ -186,9 +189,7 @@ def test_scanner_detects_drift(tmp_path):
         'export const bad = () => api.get("/definitely-not-a-real-endpoint");\n',
         encoding="utf-8",
     )
-    assert _collected([fake]) == [
-        ("Fake.ts", "GET /api/v1/definitely-not-a-real-endpoint")
-    ]
+    assert _collected([fake]) == [("Fake.ts", "GET /api/v1/definitely-not-a-real-endpoint")]
 
 
 def test_scanner_ignores_helper_declarations(tmp_path):
@@ -265,8 +266,7 @@ def test_ai_config_request_injection_not_exposed_as_param():
         ("/api/v1/prompts/{key}/reset", "post"),
     ]:
         params = [q.get("name") for q in schema[path][method].get("parameters", [])]
-        assert "request" not in params, (
-            f"{method.upper()} {path} 的 Request 注入失效（注解被写成联合类型？）")
+        assert "request" not in params, f"{method.upper()} {path} 的 Request 注入失效（注解被写成联合类型？）"
 
 
 if __name__ == "__main__":  # pragma: no cover - 便于本地直接查看漂移清单

@@ -8,6 +8,7 @@
 - P1-4 FactItem 溯源/语义扩展字段落库（含 persist_extraction 端到端）。
 - P1-5 source_ref 引句静默截断：放宽到 120 字并补省略号。
 """
+
 import inspect
 
 import pytest
@@ -27,8 +28,11 @@ from app.services.facts_extractor import (
 
 def _item(item_id, label, content, output_type="markdown", status="success"):
     return item_id, {
-        "item_id": item_id, "label": label, "output_type": output_type,
-        "status": status, "content": content,
+        "item_id": item_id,
+        "label": label,
+        "output_type": output_type,
+        "status": status,
+        "content": content,
     }
 
 
@@ -36,11 +40,17 @@ def _item(item_id, label, content, output_type="markdown", status="success"):
 # P0-1：format_downstream_context 消费全部 18 项
 # --------------------------------------------------------------------------
 
+
 def test_downstream_context_includes_all_non_whitelisted_items():
     """旧实现只认 7 个 item_id，另外 11 项（含 10 个必选）从未进入提示词。"""
     old_whitelist = {
-        "projectBasicInfo", "schemeBasicInfo", "overviewParams", "compilationBasis",
-        "siteConditions", "deploymentSchedule", "constructionTechnique",
+        "projectBasicInfo",
+        "schemeBasicInfo",
+        "overviewParams",
+        "compilationBasis",
+        "siteConditions",
+        "deploymentSchedule",
+        "constructionTechnique",
     }
     non_wl = [d["item_id"] for d in ANALYSIS_ITEMS if d["item_id"] not in old_whitelist]
     assert non_wl, "应存在被旧白名单遗漏的项"
@@ -56,13 +66,17 @@ def test_downstream_context_includes_project_json_and_unknown_fallback():
     """JSON 项平铺；不在权威清单内的未知 item_id 也要兜底追加，不得静默丢弃。"""
     items = {
         "projectBasicInfo": {
-            "item_id": "projectBasicInfo", "label": "项目级基本信息",
-            "output_type": "json", "status": "success",
+            "item_id": "projectBasicInfo",
+            "label": "项目级基本信息",
+            "output_type": "json",
+            "status": "success",
             "content": '{"contractor":"某某建设公司"}',
         },
         "customUnknownItem": {
-            "item_id": "customUnknownItem", "label": "未来新增自定义项",
-            "output_type": "markdown", "status": "success",
+            "item_id": "customUnknownItem",
+            "label": "未来新增自定义项",
+            "output_type": "markdown",
+            "status": "success",
             "content": "未知项内容必须保留",
         },
     }
@@ -73,19 +87,24 @@ def test_downstream_context_includes_project_json_and_unknown_fallback():
 
 def test_downstream_context_still_skips_empty():
     """反例回归：全「没有提及」的 JSON 项仍不得下发空小节。"""
-    out = format_downstream_context({
-        "projectBasicInfo": {
-            "item_id": "projectBasicInfo", "label": "项目级基本信息",
-            "output_type": "json", "status": "success",
-            "content": '{"project_name":"没有提及"}',
-        },
-    })
+    out = format_downstream_context(
+        {
+            "projectBasicInfo": {
+                "item_id": "projectBasicInfo",
+                "label": "项目级基本信息",
+                "output_type": "json",
+                "status": "success",
+                "content": '{"project_name":"没有提及"}',
+            },
+        }
+    )
     assert "项目级基本信息" not in out
 
 
 # --------------------------------------------------------------------------
 # P0-2：正文生成结构化摘要预算对齐（源码级防回归）
 # --------------------------------------------------------------------------
+
 
 def test_content_generation_brief_budget_raised():
     """正文生成的 project_brief 逐章注入，预算必须能容纳结构化提取全量成果。
@@ -94,6 +113,7 @@ def test_content_generation_brief_budget_raised():
     常态化截断（与「完整调用、不丢失不截断」约束相悖），上调为 4000 对齐
     目录生成档；历史低预算档（500/2000 硬编码）不得回退。"""
     import app.routers.sse_handlers as sh
+
     src = inspect.getsource(sh)
     # 正文生成处应为 4000 预算，且不再残留旧的低预算截断
     assert "max_chars=4000" in src
@@ -104,6 +124,7 @@ def test_content_generation_brief_budget_raised():
 # --------------------------------------------------------------------------
 # P1-3：SQL 收敛去重 + 低置信度标注（3/4 元组兼容）
 # --------------------------------------------------------------------------
+
 
 def test_render_facts_text_low_confidence_marker():
     # 低于阈值 → 带低置信度标注
@@ -119,8 +140,7 @@ def test_render_facts_text_low_confidence_marker():
 
 def test_build_injectable_facts_query_shape_and_filter():
     # project_id 非空：带项目级并联条件，两个参数
-    sql, params = build_injectable_facts_query(
-        "s1", "p1", f"{FACTS_GT_COLUMN}, title, content, confidence")
+    sql, params = build_injectable_facts_query("s1", "p1", f"{FACTS_GT_COLUMN}, title, content, confidence")
     assert params == ("s1", "p1")
     assert "project_id=?" in sql
     # 过滤口径固定：剔除矛盾值与未确认事实
@@ -137,12 +157,21 @@ def test_build_injectable_facts_query_shape_and_filter():
 # P1-4：FactItem 扩展字段落库
 # --------------------------------------------------------------------------
 
+
 def test_to_db_row_carries_extended_fields():
     it = FactItem(
-        name="塔吊数量", value="3", key="tower_crane", category="machinery",
-        source="招标文件.pdf", source_ref="拟投入 3 台塔吊",
-        value_unit="台", fact_type="machinery", evidence_kind="table",
-        page_ref=42, zone_type="machinery_stat", is_safety_critical=True,
+        name="塔吊数量",
+        value="3",
+        key="tower_crane",
+        category="machinery",
+        source="招标文件.pdf",
+        source_ref="拟投入 3 台塔吊",
+        value_unit="台",
+        fact_type="machinery",
+        evidence_kind="table",
+        page_ref=42,
+        zone_type="machinery_stat",
+        is_safety_critical=True,
         norm_group="machinery",
     )
     row = it.to_db_row("g1", "p1", "s1", "机械设备")
@@ -155,6 +184,7 @@ def test_to_db_row_carries_extended_fields():
     #    schema 再加列也不会让本用例失效，同时补锁 R80 新列与两个位置契约
     #    （value_kind 先于 is_stale、尾部 4 列 == 九大章节四维）。
     from app.services.facts_extractor import GLOBAL_FACTS_INSERT_COLS
+
     assert len(row) == len(GLOBAL_FACTS_INSERT_COLS) == 29
     cols = GLOBAL_FACTS_INSERT_COLS
 
@@ -182,10 +212,17 @@ def test_to_db_row_carries_extended_fields():
 async def test_persist_extraction_writes_extended_columns(db_conn):
     """端到端：迁移补列 + INSERT 占位符与 to_db_row 元数一致，落库后可回读。"""
     it = FactItem(
-        name="高支模搭设高度", value="12.4", key="formwork_height",
-        category="design_param", source="施组.docx", source_ref="搭设高度 12.4m",
-        fact_type="design_param", evidence_kind="text", page_ref=7,
-        zone_type="structure_zone", norm_group=None,
+        name="高支模搭设高度",
+        value="12.4",
+        key="formwork_height",
+        category="design_param",
+        source="施组.docx",
+        source_ref="搭设高度 12.4m",
+        fact_type="design_param",
+        evidence_kind="text",
+        page_ref=7,
+        zone_type="structure_zone",
+        norm_group=None,
     )
     result = ExtractionResult(
         groups=[FactGroup(title="设计参数", category="design_param", items=[it])],
@@ -198,7 +235,8 @@ async def test_persist_extraction_writes_extended_columns(db_conn):
     cur = await db_conn.execute(
         "SELECT value_unit, fact_type, evidence_kind, page_ref, zone_type, "
         "is_safety_critical, norm_group, source_ref FROM global_facts "
-        "WHERE project_id='p1' AND scheme_id='s1'")
+        "WHERE project_id='p1' AND scheme_id='s1'"
+    )
     rows = [dict(r) for r in await cur.fetchall()]
     assert len(rows) == 1
     r = rows[0]
@@ -213,6 +251,7 @@ async def test_persist_extraction_writes_extended_columns(db_conn):
 # --------------------------------------------------------------------------
 # P1-5：source_ref 引句截断可见化
 # --------------------------------------------------------------------------
+
 
 def test_clip_excerpt():
     assert _clip_excerpt("短引句", MAX_SOURCE_EXCERPT) == "短引句"
@@ -230,6 +269,7 @@ async def test_to_db_row_long_quote_marked_truncated():
     it = FactItem(name="依据", value="x", source_ref="规" * 300)
     row = it.to_db_row("g", "p", "s")
     import json
+
     quote = json.loads(row[8])[0]["quote"]
     assert quote.endswith("…")
     assert len(quote) == MAX_SOURCE_EXCERPT + 1

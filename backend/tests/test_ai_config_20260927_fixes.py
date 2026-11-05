@@ -14,6 +14,7 @@
    详见 ``test_chart_json_registration_parity_20260927.py``（同批修复，同批回归）。
    本文件只放一条端到端护栏，确保两处修复同属"配置/登记口径单一事实来源"这一主线。
 """
+
 import contextlib
 
 import app.services.ai.provider_factory as pf
@@ -28,6 +29,7 @@ def patch_write_tx_conn(db_conn, monkeypatch):
     @contextlib.asynccontextmanager
     async def _fake():
         yield db_conn
+
     monkeypatch.setattr(pf, "write_tx_conn", _fake)
 
 
@@ -35,8 +37,18 @@ async def _insert(db, cid, provider="openai", model="gpt-4o", is_active=0, prior
     await db.execute(
         "INSERT INTO ai_config (id, provider_name, plan, api_key_encrypted, base_url,"
         " model, env, is_active, priority, concurrency) VALUES (?,?,?,?,?,?,?,?,?,4)",
-        (cid, provider, "pay_as_you_go", encrypt_api_key("sk-test"),
-         "https://api.test.com/v1", model, "", is_active, priority))
+        (
+            cid,
+            provider,
+            "pay_as_you_go",
+            encrypt_api_key("sk-test"),
+            "https://api.test.com/v1",
+            model,
+            "",
+            is_active,
+            priority,
+        ),
+    )
     await db.commit()
 
 
@@ -52,8 +64,7 @@ class TestDisabledProviderRecoveryPath:
         pf.invalidate_config_cache()
 
         data = await runtime_router.get_runtime(db=db_conn)
-        assert "legacy_vendor" in data["providers"], (
-            "已禁用厂商即使配置被删也必须可勾选，否则用户无法恢复")
+        assert "legacy_vendor" in data["providers"], "已禁用厂商即使配置被删也必须可勾选，否则用户无法恢复"
         assert "legacy_vendor" in data["disabled_providers"]
 
     async def test_put_echoing_current_state_succeeds(self, db_conn):
@@ -70,11 +81,11 @@ class TestDisabledProviderRecoveryPath:
         await db_conn.commit()
         pf.invalidate_config_cache()
 
-        shown = (await runtime_router.get_runtime(db=db_conn))
+        shown = await runtime_router.get_runtime(db=db_conn)
         # 模拟前端：原样回传当前勾选集合
         res = await runtime_router.set_disabled_providers(
-            DisabledProvidersIn(providers=shown["disabled_providers"]),
-            request=None, db=db_conn)
+            DisabledProvidersIn(providers=shown["disabled_providers"]), request=None, db=db_conn
+        )
         assert res["ok"] is True, "回存当前勾选状态必须成功（否则页面完全不可用）"
         assert res["disabled_providers"] == ["legacy_vendor"]
 
@@ -92,25 +103,27 @@ class TestDisabledProviderRecoveryPath:
         shown = sorted((await runtime_router.get_runtime(db=db_conn))["providers"])
         assert "legacy_vendor" in shown, "前置条件：孤儿厂商必须被 GET 展示"
         for name in shown:
-            await pf.save_disabled_providers(original)   # 复位到同一初始状态
+            await pf.save_disabled_providers(original)  # 复位到同一初始状态
             pf.invalidate_config_cache()
             res = await runtime_router.set_disabled_providers(
-                DisabledProvidersIn(providers=[name]), request=None, db=db_conn)
+                DisabledProvidersIn(providers=[name]), request=None, db=db_conn
+            )
             assert res["ok"] is True, f"{name} 由 GET 展示却被 PUT 拒绝"
 
     async def test_put_still_rejects_truly_unknown_provider(self, db_conn):
         """修复不得放宽成"什么都收"：真正不存在的厂商仍应 400。"""
         with pytest.raises(Exception) as ei:
             await runtime_router.set_disabled_providers(
-                DisabledProvidersIn(providers=["definitely_not_a_provider_xyz"]),
-                request=None, db=db_conn)
+                DisabledProvidersIn(providers=["definitely_not_a_provider_xyz"]), request=None, db=db_conn
+            )
         assert getattr(ei.value, "status_code", None) == 400
 
     async def test_put_still_rejects_illegal_charset(self, db_conn):
         """非法字符集仍应 400（normalize_provider_name 白名单不被绕过）。"""
         with pytest.raises(Exception) as ei:
             await runtime_router.set_disabled_providers(
-                DisabledProvidersIn(providers=["bad name!"]), request=None, db=db_conn)
+                DisabledProvidersIn(providers=["bad name!"]), request=None, db=db_conn
+            )
         assert getattr(ei.value, "status_code", None) == 400
 
     async def test_env_corrupt_does_not_break_runtime_endpoint(self, db_conn, monkeypatch):

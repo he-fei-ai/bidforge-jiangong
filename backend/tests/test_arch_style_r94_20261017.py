@@ -13,6 +13,7 @@
   C 四类子类型（organization/wbs/system/infrastructure）共用同一渲染路径与样张
   D 提示词与源码静态锁（旧色字面量不得回流；highlight 措辞与渲染器口径一致）
 """
+
 import app.services.ai.mermaid_architecture as ma
 from PIL import Image
 
@@ -20,12 +21,12 @@ _SCALE = 2.5
 _TITLE_H = 56
 
 # 样张取证色（与探针输出逐字一致；本文件独立复写一份，防渲染器常量被顺手改糊）
-RGB_ROOT = (30, 58, 95)        # #1E3A5F
-RGB_L1 = (43, 87, 154)         # #2B579A
-RGB_L2 = (68, 114, 196)        # #4472C4
-RGB_AMBER = (251, 191, 36)     # #FBBF24
-RGB_EDGE = (100, 116, 139)     # #64748B
-RGB_SHADOW = (213, 217, 223)   # #D5D9DF
+RGB_ROOT = (30, 58, 95)  # #1E3A5F
+RGB_L1 = (43, 87, 154)  # #2B579A
+RGB_L2 = (68, 114, 196)  # #4472C4
+RGB_AMBER = (251, 191, 36)  # #FBBF24
+RGB_EDGE = (100, 116, 139)  # #64748B
+RGB_SHADOW = (213, 217, 223)  # #D5D9DF
 
 
 def _render(tree: dict) -> Image.Image:
@@ -52,11 +53,11 @@ def _box_px(n: dict):
 def _count_in_box(img: Image.Image, n: dict, rgb: tuple, inset: int = 8) -> int:
     x0, y0, x1, y1 = _box_px(n)
     px = img.load()
-    return sum(1 for y in range(y0 + inset, y1 - inset)
-               for x in range(x0 + inset, x1 - inset) if px[x, y] == rgb)
+    return sum(1 for y in range(y0 + inset, y1 - inset) for x in range(x0 + inset, x1 - inset) if px[x, y] == rgb)
 
 
 # ---------------------------------------------------------------- A 常量事实源
+
 
 class TestStyleConstants:
     def test_depth_palette_matches_sample_evidence(self):
@@ -80,18 +81,22 @@ class TestStyleConstants:
         # 描边必须严格深于填充（逐通道），否则样张"深色描边"判据失真
         for fill, _txt in ma.ARCH_DEPTH_COLORS:
             stroke = ma._darken(fill, ma.ARCH_STROKE_FACTOR)
-            assert all(int(stroke[i:i + 2], 16) < int(fill[i:i + 2], 16)
-                       for i in (1, 3, 5) if int(fill[i:i + 2], 16) > 0)
+            assert all(
+                int(stroke[i : i + 2], 16) < int(fill[i : i + 2], 16) for i in (1, 3, 5) if int(fill[i : i + 2], 16) > 0
+            )
 
 
 # ------------------------------------------------------------------ B 像素级行为
 
+
 class TestRenderedStyle:
-    tree = {"label": "项目经理", "children": [
-        {"label": "技术副经理", "children": [
-            {"label": "技术部", "highlight": True}, {"label": "质量部"}]},
-        {"label": "生产副经理", "children": [{"label": "施工部"}]},
-    ]}
+    tree = {
+        "label": "项目经理",
+        "children": [
+            {"label": "技术副经理", "children": [{"label": "技术部", "highlight": True}, {"label": "质量部"}]},
+            {"label": "生产副经理", "children": [{"label": "施工部"}]},
+        ],
+    }
 
     def test_root_and_levels_use_sample_fills(self):
         nodes, root, child = _root_and_child(self.tree)
@@ -113,7 +118,7 @@ class TestRenderedStyle:
         img = _render(self.tree)
         x0, y0, _x1, y1 = _box_px(root)
         stroke = ma._darken("#1E3A5F", ma.ARCH_STROKE_FACTOR)
-        stroke_rgb = tuple(int(stroke[i:i + 2], 16) for i in (1, 3, 5))
+        stroke_rgb = tuple(int(stroke[i : i + 2], 16) for i in (1, 3, 5))
         mid_y = (y0 + y1) // 2
         band = [img.load()[x0 + k, mid_y] for k in range(0, 6)]
         assert stroke_rgb in band, f"根框左缘无样张描边（期望 {stroke_rgb}，实测 {band}）"
@@ -124,8 +129,7 @@ class TestRenderedStyle:
         img = _render(self.tree)
         x0, _y0, x1, y1 = _box_px(root)
         px = img.load()
-        found = sum(1 for x in range(x0 + 10, x1, 4)
-                    if px[x, y1 + 6] == RGB_SHADOW)
+        found = sum(1 for x in range(x0 + 10, x1, 4) if px[x, y1 + 6] == RGB_SHADOW)
         assert found > 10, "根框底缘下方缺少样张投影带 #D5D9DF"
 
     def test_child_edge_ends_in_down_arrow(self):
@@ -137,45 +141,60 @@ class TestRenderedStyle:
         px = img.load()
         cx = (x0 + x1) // 2
         y = y0 - 20  # 箭头底边附近（箭头高 int(9*2.5)=22），展开宽度≈箭宽而非线宽
-        run = [x for x in range(cx - 30, cx + 30)
-               if all(abs(px[x, y][i] - RGB_EDGE[i]) <= 8 for i in range(3))]
+        run = [x for x in range(cx - 30, cx + 30) if all(abs(px[x, y][i] - RGB_EDGE[i]) <= 8 for i in range(3))]
         width = (max(run) - min(run) + 1) if run else 0
         line_w = int(2 * _SCALE) + 2  # 线宽 int(2*2.5)=5，容差 2
-        assert width >= line_w + 4, \
-            f"子端无样张下箭头（顶边上方 6px 连线色宽度={width}，仅线宽水平）"
+        assert width >= line_w + 4, f"子端无样张下箭头（顶边上方 6px 连线色宽度={width}，仅线宽水平）"
 
     def test_title_painted_sample_navy(self):
         """左上角标题为样张深藏青粗体（取根框上方、标题带区域内 navy 文字像素）。"""
         img = _render(self.tree)
         px = img.load()
-        cnt = sum(1 for y in range(0, 140) for x in range(0, 600)
-                  if px[x, y] == RGB_ROOT)
+        cnt = sum(1 for y in range(0, 140) for x in range(0, 600) if px[x, y] == RGB_ROOT)
         assert cnt > 100, "标题未渲染为样张深藏青 #1E3A5F"
 
 
 # ------------------------------------------------- C 全子类型共用同一渲染路径与样张
+
 
 class TestAllSubtypesShareStyle:
     """organization/wbs/system/infrastructure 四子类型只影响校验器节点数区间，
     渲染恒走 `_render_architecture_image_v2` 单一路径 ⇒ 样张必然逐类型生效。"""
 
     _TREES = {
-        "organization": {"label": "项目经理部", "children": [
-            {"label": "工程部", "children": [{"label": "施工员"}]},
-            {"label": "安质部", "children": [{"label": "安全员"}, {"label": "质检员"}]}]},
-        "wbs": {"label": "单位工程", "children": [
-            {"label": "地基基础", "children": [{"label": "桩基工程"}]},
-            {"label": "主体结构", "children": [{"label": "混凝土工程"}]}]},
-        "system": {"label": "智慧工地平台", "children": [
-            {"label": "感知层", "children": [{"label": "视频监测"}]},
-            {"label": "应用层", "children": [{"label": "预警管理"}]}]},
-        "infrastructure": {"label": "现场临设", "children": [
-            {"label": "供电系统", "children": [{"label": "配电箱"}]},
-            {"label": "排水系统", "children": [{"label": "集水井"}]}]},
+        "organization": {
+            "label": "项目经理部",
+            "children": [
+                {"label": "工程部", "children": [{"label": "施工员"}]},
+                {"label": "安质部", "children": [{"label": "安全员"}, {"label": "质检员"}]},
+            ],
+        },
+        "wbs": {
+            "label": "单位工程",
+            "children": [
+                {"label": "地基基础", "children": [{"label": "桩基工程"}]},
+                {"label": "主体结构", "children": [{"label": "混凝土工程"}]},
+            ],
+        },
+        "system": {
+            "label": "智慧工地平台",
+            "children": [
+                {"label": "感知层", "children": [{"label": "视频监测"}]},
+                {"label": "应用层", "children": [{"label": "预警管理"}]},
+            ],
+        },
+        "infrastructure": {
+            "label": "现场临设",
+            "children": [
+                {"label": "供电系统", "children": [{"label": "配电箱"}]},
+                {"label": "排水系统", "children": [{"label": "集水井"}]},
+            ],
+        },
     }
 
     def test_every_subtype_renders_sample_palette(self):
         from app.services.chart_validators import detect_architecture_subtype, validate_architecture_tree
+
         for expect_subtype, tree in self._TREES.items():
             ok, errors = validate_architecture_tree(tree, expect_subtype)
             assert ok, f"{expect_subtype} 校验失败：{errors}"
@@ -186,17 +205,21 @@ class TestAllSubtypesShareStyle:
             assert _count_in_box(img, root, RGB_ROOT) > 300, f"{expect_subtype} 根样式漂移"
             assert _count_in_box(img, l1, RGB_L1) > 300, f"{expect_subtype} 一级样式漂移"
         # 子类型探测本身仍工作（样张统一不代表探测失效）
-        assert detect_architecture_subtype(
-            {"label": "项目组织机构", "children": [{"label": "部门"}]}, "项目组织机构") == "organization"
+        assert (
+            detect_architecture_subtype({"label": "项目组织机构", "children": [{"label": "部门"}]}, "项目组织机构")
+            == "organization"
+        )
 
 
 # -------------------------------------------------------------- D 静态源码与提示词锁
+
 
 class TestStaticLocks:
     def test_old_style_literals_removed_from_architecture_renderer(self):
         """旧样张字面量（#FFC000 琥珀橙 / #8C8C8C 灰连线 / #2E5FA3 旧一级 /
         #1F3864 旧根 / 扁平无描边注释）不得回流到架构图渲染器。"""
         import inspect
+
         src = inspect.getsource(ma)
         for dead in ('"#FFC000"', '"#8C8C8C"', '"#2E5FA3"', '"#1F3864"'):
             assert dead not in src, f"旧样式字面量回流：{dead}"
@@ -205,6 +228,7 @@ class TestStaticLocks:
     def test_prompts_describe_amber_highlight(self):
         """生成/修复提示词与渲染器口径一致：highlight 描述为琥珀金（不再是橙色/琥珀橙）。"""
         from pathlib import Path
+
         be = Path(ma.__file__).resolve().parents[3]
         charts = (be / "app" / "services" / "ai" / "prompts" / "charts.py").read_text(encoding="utf-8")
         content = (be / "app" / "services" / "ai" / "prompts" / "content.py").read_text(encoding="utf-8")
@@ -215,8 +239,10 @@ class TestStaticLocks:
         """mermaid_renderer 的 architecture 分派必须且只指向 `_render_architecture_image_v2`
         （样张单一出口的结构性保证）。"""
         from pathlib import Path
+
         be = Path(ma.__file__).resolve().parent
         src = (be / "mermaid_renderer.py").read_text(encoding="utf-8")
         assert "_render_architecture_image_v2(" in src
         assert "_render_architecture_image(" not in src.replace(
-            "_render_architecture_image_v2(", ""), "存在旧版架构图渲染旁路"
+            "_render_architecture_image_v2(", ""
+        ), "存在旧版架构图渲染旁路"

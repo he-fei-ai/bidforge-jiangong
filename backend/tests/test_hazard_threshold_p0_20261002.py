@@ -21,6 +21,7 @@
 判据注意（AGENTS.md §5.14）：本文件断言的是**行为**（判定结果），
 不是源码文本 —— 阈值数字改对改错都应被这套行为断言抓住。
 """
+
 import ast
 import io
 import os
@@ -84,9 +85,7 @@ def test_every_declared_threshold_resolves_to_known_rule():
                 # 允许显式声明为「无阈值」（None 表示非参数型危大）
                 if s.get("threshold") is None:
                     continue
-                pytest.fail(
-                    f"子类 {s['id']} 声明阈值键 {key}，"
-                    f"但 HAZARD_THRESHOLDS 无此键（悬空复用声明）")
+                pytest.fail(f"子类 {s['id']} 声明阈值键 {key}，" f"但 HAZARD_THRESHOLDS 无此键（悬空复用声明）")
 
 
 def test_classify_scheme_does_not_pass_raw_subid():
@@ -96,38 +95,41 @@ def test_classify_scheme_does_not_pass_raw_subid():
     """
     with io.open(CLS_PATH, encoding="utf-8") as f:
         src = f.read()
-    fn = [n for n in ast.parse(src).body
-          if isinstance(n, ast.FunctionDef) and n.name == "classify_scheme"][0]
+    fn = [n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "classify_scheme"][0]
     seg = ast.get_source_segment(src, fn) or ""
     assert "evaluate_hazard_level(" in seg
-    call = seg[seg.find("evaluate_hazard_level("):
-               seg.find("evaluate_hazard_level(") + 90]
-    assert "resolve_threshold_key(" in call, (
-        f"classify_scheme 仍直接传 sub_id 做阈值判定（P0 回退）：{call.strip()}")
+    call = seg[seg.find("evaluate_hazard_level(") : seg.find("evaluate_hazard_level(") + 90]
+    assert "resolve_threshold_key(" in call, f"classify_scheme 仍直接传 sub_id 做阈值判定（P0 回退）：{call.strip()}"
 
 
 # ---------------------------------------------------------------------------
 # 2. 复用子类的判定行为（部文口径）
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("name", [
-    "碗扣式钢管脚手架专项施工方案",
-    "盘扣式钢管脚手架专项施工方案",
-    "盘扣式脚手架专项施工方案",
-    "落地式钢管脚手架专项施工方案",
-])
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "碗扣式钢管脚手架专项施工方案",
+        "盘扣式钢管脚手架专项施工方案",
+        "盘扣式脚手架专项施工方案",
+        "落地式钢管脚手架专项施工方案",
+    ],
+)
 def test_scaffold_30m_is_hazardous_not_oversize(name):
     """30m（<50m）应为危大但**非**超规模。旧实现误判超规模。"""
     c = classify_scheme(name, params={"height": 30})
     assert c.is_hazardous is True, "30m 脚手架应属危大（24m 及以上）"
-    assert c.is_oversize is False, (
-        f"30m 脚手架被误判为超过一定规模（部文口径 50m）：{c.hazards}")
+    assert c.is_oversize is False, f"30m 脚手架被误判为超过一定规模（部文口径 50m）：{c.hazards}"
 
 
-@pytest.mark.parametrize("name", [
-    "碗扣式钢管脚手架专项施工方案",
-    "落地式钢管脚手架专项施工方案",
-])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "碗扣式钢管脚手架专项施工方案",
+        "落地式钢管脚手架专项施工方案",
+    ],
+)
 def test_scaffold_50m_is_oversize(name):
     """50m 闭区间临界 → 超规模（部文「50m 及以上」）。"""
     c = classify_scheme(name, params={"height": 50})
@@ -141,21 +143,17 @@ def test_scaffold_24m_boundary_still_hazardous():
     assert c.is_oversize is False
 
 
-@pytest.mark.parametrize("cap,expect", [(50, False), (299, False),
-                                        (300, True), (350, True)])
+@pytest.mark.parametrize("cap,expect", [(50, False), (299, False), (300, True), (350, True)])
 def test_tower_crane_capacity_threshold(cap, expect):
     """塔机 300kN 闭区间；旧实现下 50kN 小塔机也被误判超规模。"""
-    c = classify_scheme("塔式起重机安装拆卸专项施工方案",
-                        params={"crane_capacity": cap})
+    c = classify_scheme("塔式起重机安装拆卸专项施工方案", params={"crane_capacity": cap})
     assert c.is_hazardous is True, "起重机械安装拆卸本身即危大（部文附件一）"
-    assert c.is_oversize is expect, (
-        f"{cap}kN 塔机超规模判定错误（部文口径 300kN）")
+    assert c.is_oversize is expect, f"{cap}kN 塔机超规模判定错误（部文口径 300kN）"
 
 
 def test_construction_hoist_uses_ho_crane_threshold():
     """施工升降机复用 ho_crane 口径：低起重量不应超规模。"""
-    c = classify_scheme("施工升降机安装拆卸专项施工方案",
-                        params={"crane_capacity": 80})
+    c = classify_scheme("施工升降机安装拆卸专项施工方案", params={"crane_capacity": 80})
     assert c.is_oversize is False, "施工升降机未复用 ho_crane 阈值"
 
 
@@ -171,6 +169,7 @@ def test_disc_formwork_uses_fw_support_threshold():
 # 3. 人工挖孔桩（L-2）
 # ---------------------------------------------------------------------------
 
+
 def test_bored_pile_rule_shape():
     rule = HAZARD_THRESHOLDS.get("ot_bored_pile")
     assert rule is not None, "人工挖孔桩缺少阈值规则（L-2 未落地）"
@@ -178,21 +177,24 @@ def test_bored_pile_rule_shape():
     assert rule.get("hazard_always") is True
     assert rule.get("hazard_when") == []
     # 附件二：开挖深度 16m 及以上 → 超规模（闭区间）
-    assert ("pile_depth", ">=", 16) in rule["oversize_when"], \
-        "超规模阈值必须是 16m（部文附件二七(三)原文）"
+    assert ("pile_depth", ">=", 16) in rule["oversize_when"], "超规模阈值必须是 16m（部文附件二七(三)原文）"
     # 缺参时必须保守判超规模（不漏判才是安全红线）
-    assert rule.get("oversize_conservative_missing") is True, \
-        "缺参时若判非超规模，会漏判真正的 16m+ 深孔"
+    assert rule.get("oversize_conservative_missing") is True, "缺参时若判非超规模，会漏判真正的 16m+ 深孔"
 
 
-@pytest.mark.parametrize("depth,expect", [
-    (10, False), (15.9, False), (16, True), (20, True),
-])
+@pytest.mark.parametrize(
+    "depth,expect",
+    [
+        (10, False),
+        (15.9, False),
+        (16, True),
+        (20, True),
+    ],
+)
 def test_bored_pile_oversize_threshold(depth, expect):
     r = evaluate_hazard_level("ot_bored_pile", {"pile_depth": depth})
     assert r["is_hazardous"] is True, "人工挖孔桩本身即危大（附件一无门槛）"
-    assert r["is_oversize"] is expect, \
-        f"挖孔深度 {depth}m 超规模判定应为 {expect}（部文 16m 及以上）"
+    assert r["is_oversize"] is expect, f"挖孔深度 {depth}m 超规模判定应为 {expect}（部文 16m 及以上）"
 
 
 def test_bored_pile_missing_depth_is_conservative():
@@ -206,10 +208,8 @@ def test_bored_pile_missing_depth_is_conservative():
 
 def test_bored_pile_end_to_end():
     """端到端：10m 非超规模 / 16m 超规模 / 缺参保守。"""
-    assert classify_scheme("人工挖孔桩专项施工方案",
-                           params={"pile_depth": 10}).is_oversize is False
-    assert classify_scheme("人工挖孔桩专项施工方案",
-                           params={"pile_depth": 16}).is_oversize is True
+    assert classify_scheme("人工挖孔桩专项施工方案", params={"pile_depth": 10}).is_oversize is False
+    assert classify_scheme("人工挖孔桩专项施工方案", params={"pile_depth": 16}).is_oversize is True
     assert classify_scheme("人工挖孔桩专项施工方案").is_oversize is True
 
 
@@ -222,6 +222,7 @@ def test_bored_pile_sub_threshold_declared():
 # ---------------------------------------------------------------------------
 # 4. 回归：非参数型与既有阈值口径不变
 # ---------------------------------------------------------------------------
+
 
 def test_non_param_subs_still_always_oversize():
     """无阈值声明的子类（拆除/暗挖/四新）仍走「出现即危大即超规模」。"""
@@ -249,8 +250,7 @@ def test_existing_thresholds_unchanged():
         ("ho_lift", {"single_weight": 100}, True, True),
     ):
         r = evaluate_hazard_level(key, params)
-        assert (r["is_hazardous"], r["is_oversize"]) == (hazard, oversize), \
-            f"{key} {params} 判定被改动：{r}"
+        assert (r["is_hazardous"], r["is_oversize"]) == (hazard, oversize), f"{key} {params} 判定被改动：{r}"
 
 
 def test_no_strict_greater_than_left_in_thresholds():
@@ -258,8 +258,7 @@ def test_no_strict_greater_than_left_in_thresholds():
     for key, rule in HAZARD_THRESHOLDS.items():
         for conds in (rule.get("hazard_when", []), rule.get("oversize_when", [])):
             for _, op, _v in conds:
-                assert op == ">=", (
-                    f"{key} 出现严格大于号 {op}（部文口径为闭区间）")
+                assert op == ">=", f"{key} 出现严格大于号 {op}（部文口径为闭区间）"
 
 
 def test_module_parses():

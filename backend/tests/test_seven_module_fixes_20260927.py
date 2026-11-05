@@ -3,6 +3,7 @@
 本文件锁定本轮 8 项修复（P0×4 + P1×4）的核心不变量。每条用例都对应
 一个**已复现**的缺陷，附「还原旧实现后必失败」的反向验证说明。
 """
+
 import ast
 import inspect
 import re
@@ -25,20 +26,18 @@ class TestFilterFactsRowsUnpack:
     FIVE = [("工程概况", "基坑深度", "基坑深度 18.5m，支护等级一级", 0.9, "overview")]
 
     def test_five_tuple_does_not_raise(self):
-        out = sse_handlers._filter_facts_rows(
-            self.FIVE, {"title": "基坑开挖与支护", "description": "深度与支护"})
+        out = sse_handlers._filter_facts_rows(self.FIVE, {"title": "基坑开挖与支护", "description": "深度与支护"})
         assert out, "应保留命中行"
 
     def test_five_tuple_preserved_intact(self):
         """整行原样保留 —— 不得裁回 3 元组（confidence/chapter 有下游消费方）。"""
-        out = sse_handlers._filter_facts_rows(
-            self.FIVE, {"title": "基坑开挖与支护", "description": "深度与支护"})
+        out = sse_handlers._filter_facts_rows(self.FIVE, {"title": "基坑开挖与支护", "description": "深度与支护"})
         assert all(len(r) == 5 for r in out)
 
     def test_legacy_three_tuple_still_works(self):
         out = sse_handlers._filter_facts_rows(
-            [("g", "t", "基坑深度 18.5m")],
-            {"title": "基坑开挖", "description": "深度"})
+            [("g", "t", "基坑深度 18.5m")], {"title": "基坑开挖", "description": "深度"}
+        )
         assert out and len(out[0]) == 3
 
     def test_no_keywords_returns_rows_untouched(self):
@@ -48,8 +47,7 @@ class TestFilterFactsRowsUnpack:
 
     def test_generic_group_hint_kept(self):
         rows = [("编制依据", "规范", "GB50007 无关内容", 1.0, "basis")]
-        out = sse_handlers._filter_facts_rows(
-            rows, {"title": "基坑开挖", "description": "深度"})
+        out = sse_handlers._filter_facts_rows(rows, {"title": "基坑开挖", "description": "深度"})
         assert len(out) == 1
 
     def test_regression_old_impl_raises(self):
@@ -71,11 +69,16 @@ class TestFactsSseTerminalOrder:
         src = inspect.getsource(sse_handlers.generate_facts)
         idx = src.find("**frontend_data}")
         assert idx > 0, "未找到主完成分支"
-        window = src[max(0, idx - 700): idx + 200]
-        assert 'await finish_task(task_id, "completed", done_msg)' in window, \
-            "主完成分支必须先 finish_task 再 yield completed"
-        fi = window.find('await finish_task(task_id, "completed", done_msg)')
-        yi = window.find('yield _sse({"event": "completed"')
+        window = src[max(0, idx - 700) : idx + 200]
+        # ✅ R180（2026-11-05）：主完成分支的终态不再是硬编码 completed ——
+        #    部分段失败时降级为 degraded（`_terminal_status` / `_terminal_event`
+        #    由 `_facts_partial_terminal_payload` 统一产出）。本护栏锁定的
+        #    不变式不变：**任何终态 yield 之前必须已 finish_task**。
+        assert (
+            "await finish_task(task_id, _terminal_status, done_msg)" in window
+        ), "主完成分支必须先 finish_task 再 yield 终态事件"
+        fi = window.find("await finish_task(task_id, _terminal_status, done_msg)")
+        yi = window.find('yield _sse({"event": _terminal_event')
         assert 0 <= fi < yi, "finish_task 必须早于 yield"
 
     def test_every_completed_yield_has_prior_finish_task(self):
@@ -85,22 +88,42 @@ class TestFactsSseTerminalOrder:
         发出，facts 链路同样如此；但 `_phase`/`_stage` 包装的分支字面量略有
         差异，故此处只对**精确字面量**做全量扫描，facts 链路由上面的
         test_finish_task_precedes_completed_yield 单独锁定。
+
+        ✅ 2026-11-05 更新：R175-续把 facts all_skipped 早退的事件名改为
+        动态变量 `_event`（`_facts_all_skipped_payload` 依据「真跳过 vs 失败
+        退避」决定发 completed 还是失败终态 —— 实现语义正确）。静态扫描
+        相应扩展第二形态 `yield _sse({"event": _event`，同样要求窗口内已
+        finish_task 落终态。
         """
         src = inspect.getsource(sse_handlers)
-        needle = 'yield _sse({"event": "completed"'
-        pos = 0
+        # 格式不敏感：允许 `yield _sse(` 与事件字面量之间存在换行/缩进。
         hits = 0
-        while True:
-            i = src.find(needle, pos)
-            if i < 0:
-                break
+        for m in re.finditer(r'yield _sse\(\s*\{\s*"event":\s*"completed"', src):
             hits += 1
-            window = src[max(0, i - 1200): i]
-            assert "await finish_task(" in window, \
-                f"第 {hits} 处 completed yield 前缺少 finish_task"
-            pos = i + 1
-        # facts 链路有 2 处（主完成 + all_skipped 早退），均已就位
-        assert hits >= 2, f"应至少覆盖 facts 两条完成分支，实际 {hits}"
+            window = src[max(0, m.start() - 1200) : m.start()]
+            assert "await finish_task(" in window, f"第 {hits} 处 completed yield 前缺少 finish_task"
+        # facts all_skipped 早退：事件名是动态变量 _event（completed 或失败终态），
+        # 两种取值都必须先 finish_task。
+        dyn_hits = 0
+        for m in re.finditer(r'yield _sse\(\s*\{\s*"event":\s*_event', src):
+            dyn_hits += 1
+            window = src[max(0, m.start() - 1200) : m.start()]
+            assert "await finish_task(" in window, f"第 {dyn_hits} 处动态事件 yield 前缺少 finish_task"
+        # ✅ R180（2026-11-05）：facts 主完成分支同样改为动态终态变量
+        #    _terminal_event（completed / degraded），静态扫描补这一形态；
+        #    不变式不变：终态 yield 前必须已 finish_task。
+        main_terminal_hits = 0
+        for m in re.finditer(r'yield _sse\(\s*\{\s*"event":\s*_terminal_event', src):
+            main_terminal_hits += 1
+            window = src[max(0, m.start() - 1200) : m.start()]
+            assert (
+                "await finish_task(" in window
+            ), f"第 {main_terminal_hits} 处终态事件（_terminal_event）yield 前缺少 finish_task"
+        # facts 链路共 2 处完成出口：主完成（动态 _terminal_event）+ all_skipped 早退（动态 _event）
+        assert (
+            hits + main_terminal_hits >= 1
+        ), f"应至少覆盖 facts 主完成分支，实际 字面量 {hits} / _terminal_event {main_terminal_hits}"
+        assert dyn_hits >= 1, f"应至少覆盖 facts all_skipped 早退分支，实际 {dyn_hits}"
 
 
 # ---------------------------------------------------------------- P0-3
@@ -127,14 +150,15 @@ class TestFactsCheckpoint:
 
     def test_payload_filters_bulk_fields(self):
         """明细不落 checkpoint（会撑大 task_registry 行）。"""
-        out = sse_handlers._facts_checkpoint_payload({
-            "segment_stats": {"failed": 2, "total": 5},
-            "cross_conflicts": [{"a": 1}],
-            "warnings": ["w"],
-            "groups": [{"x": 1}],
-        })
-        assert out == {"segment_stats": {"failed": 2, "total": 5},
-                       "cross_conflicts": [{"a": 1}], "warnings": ["w"]}
+        out = sse_handlers._facts_checkpoint_payload(
+            {
+                "segment_stats": {"failed": 2, "total": 5},
+                "cross_conflicts": [{"a": 1}],
+                "warnings": ["w"],
+                "groups": [{"x": 1}],
+            }
+        )
+        assert out == {"segment_stats": {"failed": 2, "total": 5}, "cross_conflicts": [{"a": 1}], "warnings": ["w"]}
         assert "groups" not in out
 
     def test_payload_tolerates_non_dict(self):
@@ -144,16 +168,16 @@ class TestFactsCheckpoint:
         assert hasattr(sse_handlers, "_save_facts_checkpoint")
 
     def test_attach_returns_facts_result(self):
-        row = {"task_type": "facts_generation",
-               "checkpoint_json": '{"kind":"facts_result","event":"completed",'
-                                  '"segment_stats":{"failed":1}}'}
+        row = {
+            "task_type": "facts_generation",
+            "checkpoint_json": '{"kind":"facts_result","event":"completed",' '"segment_stats":{"failed":1}}',
+        }
         res: dict = {}
         sse_handlers._attach_checkpoint_result(row, res)
         assert res["facts_result"]["segment_stats"] == {"failed": 1}
 
     def test_attach_ignores_kind_mismatch(self):
-        row = {"task_type": "facts_generation",
-               "checkpoint_json": '{"kind":"outline_result","outline":[]}'}
+        row = {"task_type": "facts_generation", "checkpoint_json": '{"kind":"outline_result","outline":[]}'}
         res: dict = {}
         sse_handlers._attach_checkpoint_result(row, res)
         assert "facts_result" not in res
@@ -167,7 +191,7 @@ class TestContentFinalizeNoneCursor:
         src = inspect.getsource(sse_handlers.generate_content)
         i = src.find("COALESCE(SUM(word_count),0)")
         assert i > 0, "未找到总字数统计语句"
-        window = src[i: i + 900]
+        window = src[i : i + 900]
         assert "if cur is None" in window, "收尾统计缺少 cur is None 守卫"
         assert "except Exception" in window, "缺少异常降级"
 
@@ -183,7 +207,7 @@ class TestReviewRecordOnPending:
         src = inspect.getsource(sse_handlers.generate_content)
         i = src.find("review_status='pending'")
         assert i > 0
-        window = src[i: i + 2000]
+        window = src[i : i + 2000]
         assert "_write_review_record" in window, "pending 置位后必须落评审留痕"
 
     def test_old_status_read_precedes_update(self):
@@ -203,7 +227,7 @@ class TestReviewRecordOnPending:
         src = inspect.getsource(sse_handlers.generate_content)
         i = src.find("_write_review_record")
         assert i > 0
-        window = src[i: i + 3000]
+        window = src[i : i + 3000]
         assert "except Exception" in window, "留痕失败不得中断收尾"
         assert "logger.warning" in window, "留痕失败必须留痕到日志"
 
@@ -212,21 +236,21 @@ class TestReviewRecordOnPending:
         src = inspect.getsource(sse_handlers.generate_content)
         i = src.find("_prior: dict = {}")
         assert i > 0, "未找到留痕前的旧状态读取块"
-        window = src[i: i + 2600]
-        assert 'if _old in ("", "pending")' in window, \
-            "未审/待审章节重复置位无信息量，不应再插留痕"
+        window = src[i : i + 2600]
+        assert 'if _old in ("", "pending")' in window, "未审/待审章节重复置位无信息量，不应再插留痕"
         assert "continue" in window
 
     def test_record_preserves_real_from_status(self):
         """from_status 必须取旧值，不能恒为 \"\"（否则审计链断裂）。"""
         src = inspect.getsource(sse_handlers.generate_content)
         i = src.find("_prior: dict = {}")
-        window = src[i: i + 2600]
+        window = src[i : i + 2600]
         assert "COALESCE(review_status,'')" in window, "必须先读旧状态再置位"
-        assert '_old, "pending"' in window, "from_status 必须传真实旧状态"
+        assert re.search(r'_old,\s*"pending"', window), "from_status 必须传真实旧状态"
 
     def test_review_module_exposes_writer(self):
         from app.routers import review
+
         assert hasattr(review, "_write_record")
         assert hasattr(export, "collect_export_issues")
 
@@ -260,6 +284,7 @@ class TestDocPipelineNoneCursor:
                 return None
 
         from fastapi import HTTPException
+
         with pytest.raises(HTTPException) as ei:
             await doc_pipeline._load_doc(_DB(), "missing")
         assert ei.value.status_code == 503
@@ -273,8 +298,7 @@ class TestDocPipelineNoneCursor:
 
         with pytest.raises(Exception) as ei:
             await doc_pipeline.get_chunks("d1", db=_DB())
-        assert getattr(ei.value, "status_code", None) == 503, \
-            "必须是 503 而非 AttributeError"
+        assert getattr(ei.value, "status_code", None) == 503, "必须是 503 而非 AttributeError"
 
 
 # ---------------------------------------------------------------- P1-7
@@ -284,11 +308,11 @@ class TestExportFactsGateParity:
     def test_gate_is_fail_closed(self):
         src = inspect.getsource(export.collect_export_issues)
         assert "COALESCE(is_resolved,0)=0" in src
-        assert "COALESCE(is_resolved,1)=0" not in src, \
-            "NULL 必须计为未确认（与注入侧 is_resolved=1 同口径）"
+        assert "COALESCE(is_resolved,1)=0" not in src, "NULL 必须计为未确认（与注入侧 is_resolved=1 同口径）"
 
     def test_inject_side_is_strict_equality(self):
         from app.services.facts_extractor import get_facts_inject_where
+
         assert "is_resolved=1" in get_facts_inject_where()
 
 
@@ -311,11 +335,11 @@ class TestStandardReportFactBudget:
         gen = inspect.getsource(sse_handlers.generate_content)
         # 1) 上下文构建器产出并返回 _sec_facts
         assert "_sec_facts = _filter_facts_rows(facts_rows, leaf)" in gen
-        assert "return eff_standard, _sec_facts, messages, user_content" in gen, \
-            "_sec_facts 必须从上下文构建器返回，供校验器复用"
+        assert (
+            "return eff_standard, _sec_facts, messages, user_content" in gen
+        ), "_sec_facts 必须从上下文构建器返回，供校验器复用"
         # 2) 调用方把同一个变量透传给 standard_report
-        assert "fact_rows_for_section=_sec_facts" in gen, \
-            "校验器必须消费与提示词同一份 _sec_facts"
+        assert "fact_rows_for_section=_sec_facts" in gen, "校验器必须消费与提示词同一份 _sec_facts"
 
 
 # ---------------------------------------------------------------- parity
@@ -332,35 +356,31 @@ class TestExportGateHighSeverityParity:
     def _frontend_high_types(self):
         import io
         import pathlib
-        p = pathlib.Path(__file__).resolve().parents[2] / (
-            "frontend/src/utils/exportCharts.ts")
+
+        p = pathlib.Path(__file__).resolve().parents[2] / ("frontend/src/utils/exportCharts.ts")
         src = p.read_text(encoding="utf-8")
         i = src.find("const HIGH_EXPORT_ISSUE_TYPES")
         assert i > 0, "未找到前端 HIGH_EXPORT_ISSUE_TYPES"
-        block = src[i: src.find("]);", i)]
+        block = src[i : src.find("]);", i)]
         return {m for m in re.findall(r'"([a-z_]+)"', block)}
 
     def _backend_high_types(self):
-        return {k for k, (_rule, sev) in export._EXPORT_ISSUE_RULE_MAP.items()
-                if sev == "high"}
+        return {k for k, (_rule, sev) in export._EXPORT_ISSUE_RULE_MAP.items() if sev == "high"}
 
     def test_frontend_file_exists(self):
         import pathlib
-        p = pathlib.Path(__file__).resolve().parents[2] / (
-            "frontend/src/utils/exportCharts.ts")
+
+        p = pathlib.Path(__file__).resolve().parents[2] / ("frontend/src/utils/exportCharts.ts")
         assert p.exists(), "前端 exportCharts.ts 缺失，无法做 parity 断言"
 
     def test_parity(self):
         fe = self._frontend_high_types()
         be = self._backend_high_types()
-        assert fe == be, (
-            f"导出门禁 high 类型表前后端不一致："
-            f"仅后端有={sorted(be - fe)}，仅前端有={sorted(fe - be)}")
-
+        assert fe == be, f"导出门禁 high 类型表前后端不一致：" f"仅后端有={sorted(be - fe)}，仅前端有={sorted(fe - be)}"
 
     def test_fact_text_tolerates_all_row_widths(self):
         from app.services.content_standard import _fact_text
+
         assert _fact_text(("g", "t", "c")) == ("t", "c")
         assert _fact_text(("g", "t", "c", 0.9, "overview")) == ("t", "c")
         assert _fact_text({"title": "t", "content": "c"}) == ("t", "c")
-

@@ -12,6 +12,7 @@
 ⚠️ A/B 反向验证见 ``docs/标书智能体方法论四项未落地项收口_R58_20261010.md`` §5。
    每条护栏都必须能红；本文件同时承担「防改回去」与「防恒绿」两个职责。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -36,6 +37,7 @@ class TestOutlineOneshotFallback:
     @staticmethod
     def _src() -> str:
         import io
+
         return io.open(sh.__file__, encoding="utf-8").read()
 
     def test_switch_default_is_on(self):
@@ -52,8 +54,7 @@ class TestOutlineOneshotFallback:
         """两处硬失败必须改为「置标志 + break」，不得再 finish_task(failed)+return。"""
         src = self._src()
         assert 'finish_task(task_id, "failed", "AI 返回空目录")' not in src
-        assert ('finish_task(task_id, "failed", '
-                '"AI 返回目录节点格式非法（裁剪后为空）")') not in src
+        assert ('finish_task(task_id, "failed", ' '"AI 返回目录节点格式非法（裁剪后为空）")') not in src
         assert "_one_shot_ok = False" in src
 
     def test_quota_errors_do_not_switch(self):
@@ -69,8 +70,12 @@ class TestOutlineOneshotFallback:
     def test_progress_and_partial_are_reset_before_switching(self):
         """切档必须重置进度（否则进度条卡在 55%）并清空脏成果。"""
         src = self._src()
-        for frag in ('_prog["stepwise"] = True', '_prog["last_p"] = 0.05',
-                     '_prog["sub_total"] = 0', '_partial_holder["outline"] = []'):
+        for frag in (
+            '_prog["stepwise"] = True',
+            '_prog["last_p"] = 0.05',
+            '_prog["sub_total"] = 0',
+            '_partial_holder["outline"] = []',
+        ):
             assert frag in src, frag
 
     def test_success_path_still_returns(self):
@@ -86,7 +91,7 @@ class TestChartQuotaHint:
     def test_empty_counts_reports_full_quota(self):
         hint = build_chart_quota_hint({})
         assert "【本章图表配额" in hint
-        assert "剩余 3 个" in hint          # 默认上限 3
+        assert "剩余 3 个" in hint  # 默认上限 3
         assert "已达全方案上限" not in hint
         assert hint.endswith("\n")
 
@@ -96,9 +101,8 @@ class TestChartQuotaHint:
         assert "必被删除" in hint
 
     def test_ai_image_has_its_own_limit(self):
-        assert "剩余 6 个" in build_chart_quota_hint({})   # ai_image 上限 6
-        assert "ai_image：已达全方案上限（6/6）" in build_chart_quota_hint(
-            {"ai_image": 6})
+        assert "剩余 6 个" in build_chart_quota_hint({})  # ai_image 上限 6
+        assert "ai_image：已达全方案上限（6/6）" in build_chart_quota_hint({"ai_image": 6})
 
     def test_short_chapter_suggests_no_chart(self):
         assert "建议不配图" in build_chart_quota_hint({}, word_budget=150)
@@ -114,17 +118,25 @@ class TestChartQuotaHint:
     def test_hint_lands_in_task_segment_only(self):
         """逐章变化量只能进任务差异段，否则会击穿 R57 的前缀稳定。"""
         kw = dict(
-            sys_prompt="S", scheme={"name": "n", "type": "t"},
-            project_brief="p", content_scope="c", parent_chain="pc",
-            parent_points=[], sibling_lines="", section_number="3.3",
+            sys_prompt="S",
+            scheme={"name": "n", "type": "t"},
+            project_brief="p",
+            content_scope="c",
+            parent_chain="pc",
+            parent_points=[],
+            sibling_lines="",
+            section_number="3.3",
             leaf={"id": "s1", "title": "降水施工", "description": "d"},
-            word_budget=800, word_budget_hint="800字", prev_sibling_summary="",
-            facts_text="F", eff_standard="precise", knowledge_text="K",
+            word_budget=800,
+            word_budget_hint="800字",
+            prev_sibling_summary="",
+            facts_text="F",
+            eff_standard="precise",
+            knowledge_text="K",
             chapter_extras="",
         )
         hint = build_chart_quota_hint({"gantt": 2})
-        messages, joined = build_chapter_layered_messages(
-            **kw, chart_quota_hint=hint)
+        messages, joined = build_chapter_layered_messages(**kw, chart_quota_hint=hint)
         assert "本章图表配额" in messages[-1]["content"], "必须落在任务差异段"
         assert "本章图表配额" not in messages[1]["content"], "不得污染稳定段"
         assert "本章图表配额" in joined
@@ -162,12 +174,22 @@ class TestFactsSplitInject:
 
     def _build(self, leaf, **over):
         kw = dict(
-            sys_prompt="S", scheme={"name": "n", "type": "t"},
-            project_brief="p", content_scope="c", parent_chain="pc",
-            parent_points=[], sibling_lines="", section_number="3.3",
-            leaf=leaf, word_budget=800, word_budget_hint="800字",
-            prev_sibling_summary="", facts_text="【整案核心事实】",
-            eff_standard="precise", knowledge_text="K", chapter_extras="",
+            sys_prompt="S",
+            scheme={"name": "n", "type": "t"},
+            project_brief="p",
+            content_scope="c",
+            parent_chain="pc",
+            parent_points=[],
+            sibling_lines="",
+            section_number="3.3",
+            leaf=leaf,
+            word_budget=800,
+            word_budget_hint="800字",
+            prev_sibling_summary="",
+            facts_text="【整案核心事实】",
+            eff_standard="precise",
+            knowledge_text="K",
+            chapter_extras="",
         )
         kw.update(over)
         return build_chapter_layered_messages(**kw)
@@ -185,6 +207,7 @@ class TestFactsSplitInject:
     def test_wiring_uses_single_exit(self):
         """sse_handlers 必须走 core_facts_rows 单一出口（不得各写一份分堆判据）。"""
         import io
+
         src = io.open(sh.__file__, encoding="utf-8").read()
         assert "core_facts_rows(facts_rows)" in src
         assert "chapter_facts_text=_chapter_facts_text" in src
@@ -224,9 +247,9 @@ class TestBidJsonUnifiedChannel:
         orig = ba.chat_with_fallback
         ba.chat_with_fallback = fake_chat
         try:
-            out = _await(ba._collect_json_str(
-                [{"role": "user", "content": "给我 JSON"}],
-                scene="bid_analysis", timeout=60))
+            out = _await(
+                ba._collect_json_str([{"role": "user", "content": "给我 JSON"}], scene="bid_analysis", timeout=60)
+            )
         finally:
             ba.chat_with_fallback = orig
         assert out == '{"ok":true}', out
@@ -244,9 +267,9 @@ class TestBidJsonUnifiedChannel:
         orig = ba.chat_with_fallback
         ba.chat_with_fallback = fake_chat
         try:
-            out = _await(ba._collect_json_str(
-                [{"role": "user", "content": "给我 JSON"}],
-                scene="bid_analysis_merge", timeout=60))
+            out = _await(
+                ba._collect_json_str([{"role": "user", "content": "给我 JSON"}], scene="bid_analysis_merge", timeout=60)
+            )
         finally:
             ba.chat_with_fallback = orig
         assert len(calls) == 2, "必须进入定向修复轮"
@@ -254,28 +277,28 @@ class TestBidJsonUnifiedChannel:
 
     def test_all_rounds_fail_falls_back_to_empty_object_sentinel(self):
         """兜底必须是 "{}" —— _json_all_empty / is_missing_result 的失败哨兵契约。"""
+
         async def fake_chat(messages, **kwargs):
             return "不是 JSON"
 
         orig = ba.chat_with_fallback
         ba.chat_with_fallback = fake_chat
         try:
-            out = _await(ba._repair_json("{bad", [{"role": "user", "content": "x"}],
-                                         scene="bid_analysis_merge"))
+            out = _await(ba._repair_json("{bad", [{"role": "user", "content": "x"}], scene="bid_analysis_merge"))
         finally:
             ba.chat_with_fallback = orig
         assert out == "{}", out
 
     def test_repair_shell_recovers_json_without_ai(self):
         """确定性下界：AI 全挂时仍能从原文里抠出可解析的 JSON。"""
+
         async def fake_chat(messages, **kwargs):
             raise RuntimeError("provider 全挂")
 
         orig = ba.chat_with_fallback
         ba.chat_with_fallback = fake_chat
         try:
-            out = _await(ba._repair_json(
-                '前缀{"project_name": "甲"}后缀', [{"role": "user", "content": "x"}]))
+            out = _await(ba._repair_json('前缀{"project_name": "甲"}后缀', [{"role": "user", "content": "x"}]))
         finally:
             ba.chat_with_fallback = orig
         assert json.loads(out)["project_name"] == "甲"
@@ -283,16 +306,20 @@ class TestBidJsonUnifiedChannel:
     def test_single_call_never_raises(self):
         """JSON 项失败必须兜底 "{}"，绝不能把 ValueError 抛给上层
         （会被 SSE 版放大成整项 3 次重跑）。"""
+
         async def fake_chat(messages, **kwargs):
             return "不是 JSON"
 
         orig = ba.chat_with_fallback
         ba.chat_with_fallback = fake_chat
         try:
-            out = _await(ba._run_single_call(
-                {"item_id": "projectBasicInfo", "label": "基本信息",
-                 "output_type": "json", "prompt": "p"},
-                "招标文件正文", "json"))
+            out = _await(
+                ba._run_single_call(
+                    {"item_id": "projectBasicInfo", "label": "基本信息", "output_type": "json", "prompt": "p"},
+                    "招标文件正文",
+                    "json",
+                )
+            )
         finally:
             ba.chat_with_fallback = orig
         assert out == "{}"
@@ -321,12 +348,12 @@ class TestBidJsonUnifiedChannel:
         src = _src_of(ba._collect_json_str)
         assert "repair_key=GENERIC_REPAIR_KEY" in src
         # 注释里会提到 OUTLINE_REPAIR_KEY（说明为什么不用它），故只判**实参**
-        assert "repair_key=OUTLINE_REPAIR_KEY" not in src, (
-            "提取族不得用目录族修复提示词")
+        assert "repair_key=OUTLINE_REPAIR_KEY" not in src, "提取族不得用目录族修复提示词"
 
 
 def _src_of(fn) -> str:
     import inspect
+
     return inspect.getsource(fn)
 
 
@@ -384,6 +411,7 @@ class TestSourceByteIntegrity:
 
     def test_every_touched_file_compiles(self):
         import py_compile
+
         for rel in _TOUCHED_R58:
             for base in (Path(__file__).resolve().parent.parent, Path.cwd()):
                 p = base / rel

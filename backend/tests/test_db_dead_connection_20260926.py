@@ -16,6 +16,7 @@
 
 本文件锁定三件事：死连接可被识别、探针不再误放行、连接池不再回流死连接。
 """
+
 import asyncio
 
 import aiosqlite
@@ -31,6 +32,7 @@ class TestDeadConnDetection:
                 assert db._is_dead_conn(c) is False
             finally:
                 await c.close()
+
         asyncio.run(_t())
 
     def test_closed_conn_is_dead(self):
@@ -38,6 +40,7 @@ class TestDeadConnDetection:
             c = await aiosqlite.connect(":memory:")
             await c.close()
             assert db._is_dead_conn(c) is True
+
         asyncio.run(_t())
 
     def test_none_is_dead(self):
@@ -45,17 +48,24 @@ class TestDeadConnDetection:
 
     def test_detection_never_touches_conn_property(self):
         """死连接判定必须只读不抛 —— 碰 `._conn` 就会抛 "no active connection"。"""
+
         async def _t():
             c = await aiosqlite.connect(":memory:")
             await c.close()
             with pytest.raises(ValueError):
-                _ = c._conn            # 反例基准：property 会抛
-            assert db._is_dead_conn(c) is True   # 本函数不抛
+                _ = c._conn  # 反例基准：property 会抛
+            assert db._is_dead_conn(c) is True  # 本函数不抛
+
         asyncio.run(_t())
 
-    @pytest.mark.parametrize("msg", [
-        "no active connection", "Connection closed", "CONNECTION CLOSED",
-    ])
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "no active connection",
+            "Connection closed",
+            "CONNECTION CLOSED",
+        ],
+    )
     def test_closed_error_wording(self, msg):
         assert db._is_closed_conn_error(ValueError(msg)) is True
 
@@ -69,6 +79,7 @@ class TestProbesRejectDeadConn:
             c = await aiosqlite.connect(":memory:")
             await c.close()
             assert await db._probe_conn(c) is False
+
         asyncio.run(_t())
 
     def test_read_probe_rejects_closed(self):
@@ -76,6 +87,7 @@ class TestProbesRejectDeadConn:
             c = await aiosqlite.connect(":memory:")
             await c.close()
             assert await db._read_probe(c) is False
+
         asyncio.run(_t())
 
     def test_write_probe_accepts_open(self):
@@ -85,6 +97,7 @@ class TestProbesRejectDeadConn:
                 assert await db._probe_conn(c) is True
             finally:
                 await c.close()
+
         asyncio.run(_t())
 
 
@@ -94,7 +107,7 @@ class TestGlobalConnRebuiltWhenDead:
         """全局连接被外部关闭后，get_conn 必须重建（不把死连接发出去）。"""
         monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
         first = await db.get_conn()
-        await first.close()                       # 模拟外部/异常路径关闭
+        await first.close()  # 模拟外部/异常路径关闭
         # 健康检查 TTL 尚未到期（30s），旧实现在此窗口内直接返回死连接
         assert db._last_health_check > 0
         second = await db.get_conn()
@@ -110,8 +123,8 @@ class TestGlobalConnRebuiltWhenDead:
         """close_db 重复调用不得抛（否则残留池连接永远不被清理）。"""
         monkeypatch.setattr(db, "DB_PATH", tmp_path / "t2.db")
         conn = await db.get_conn()
-        await conn.close()            # 先把它关掉，制造「已关闭的全局连接」
-        await db.close_db()            # 不应抛
+        await conn.close()  # 先把它关掉，制造「已关闭的全局连接」
+        await db.close_db()  # 不应抛
         await db.close_db()
         assert db._conn is None
 
@@ -126,6 +139,7 @@ class TestPoolNeverKeepsDeadConn:
             db._db_pool_total = 0
             await db._release_pool_conn(c)
             assert db._db_pool == [], "死连接不得回到写池"
+
         await _t()
 
     @pytest.mark.asyncio
@@ -137,4 +151,5 @@ class TestPoolNeverKeepsDeadConn:
             db._read_pool_total = 0
             await db._release_read_conn(c)
             assert db._read_pool == [], "死连接不得回到读池"
+
         await _t()

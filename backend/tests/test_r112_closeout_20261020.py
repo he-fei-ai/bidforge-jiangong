@@ -10,6 +10,7 @@ A-5 护栏要点（零风险、纯加法式）：
   - 环境变量可覆盖（BIDFORGE_MAX_ARCHIVE_*）
   - 非法值（非整数 / 负数 / 零）回退默认值（fail-soft）
 """
+
 from __future__ import annotations
 
 import importlib
@@ -37,10 +38,12 @@ class TestCompressionBombThresholdsConfigurable:
     def test_defaults_unchanged(self):
         """默认值与旧硬编码逐字相同：2000 / 400MB / 200 / 64MB。"""
         # 清掉环境变量保证走默认值
-        for k in ("BIDFORGE_MAX_ARCHIVE_ENTRIES",
-                  "BIDFORGE_MAX_ARCHIVE_UNCOMPRESSED_BYTES",
-                  "BIDFORGE_MAX_COMPRESSION_RATIO",
-                  "BIDFORGE_MAX_ARCHIVE_ENTRY_BYTES"):
+        for k in (
+            "BIDFORGE_MAX_ARCHIVE_ENTRIES",
+            "BIDFORGE_MAX_ARCHIVE_UNCOMPRESSED_BYTES",
+            "BIDFORGE_MAX_COMPRESSION_RATIO",
+            "BIDFORGE_MAX_ARCHIVE_ENTRY_BYTES",
+        ):
             os.environ.pop(k, None)
         try:
             mod = _reload_file_parser()
@@ -81,8 +84,7 @@ class TestCompressionBombThresholdsConfigurable:
         会在定义期固化，运行期调参失效）。"""
         fp = APP / "services" / "file_parser.py"
         src = fp.read_text(encoding="utf-8")
-        assert "limit is None" in src, (
-            "limit 默认值必须在调用时解析（防定义期固化）")
+        assert "limit is None" in src, "limit 默认值必须在调用时解析（防定义期固化）"
 
 
 if __name__ == "__main__":
@@ -105,39 +107,50 @@ class TestSchemeProjectIdSingleSource:
     def test_no_inline_literal_copy_in_app(self):
         """全仓 app/ 下 ast.Constant 字符串 0 命中该 SQL 字面量（除定义处）。"""
         import ast
+
         hits = []
         for p in self._all_py_files():
             tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str):
                     if self.SQL_SIG in node.value:
-                        is_def = (p.name == "facts_extractor.py"
-                                  and p.parent.name == "services")
+                        is_def = p.name == "facts_extractor.py" and p.parent.name == "services"
                         if not is_def:
                             hits.append((str(p.relative_to(BACKEND)), node.value[:60]))
         assert hits == [], f"内联 SCHEME_PROJECT_ID_SQL 字面量副本：{hits}"
 
     def test_consumers_import_constant(self):
         """各消费方通过 import/`_fe.` 引用常量，不得出现 `db.execute("SELECT...` 拼接。"""
-        for rel in ("routers/global_facts.py", "routers/bid_analysis.py",
-                    "routers/global_facts_docs.py", "routers/upload_outline.py",
-                    "routers/review.py", "routers/sections.py",
-                    "routers/sse_handlers.py", "services/placeholder_inventory.py"):
+        for rel in (
+            "routers/global_facts.py",
+            "routers/bid_analysis.py",
+            "routers/global_facts_docs.py",
+            "routers/upload_outline.py",
+            "routers/review.py",
+            "routers/sections.py",
+            "routers/sse_handlers.py",
+            "services/placeholder_inventory.py",
+        ):
             src = (APP / rel).read_text(encoding="utf-8")
-            assert self.SQL_SIG not in src, (
-                f"{rel} 内联了 SCHEME_PROJECT_ID_SQL 字面量")
+            assert self.SQL_SIG not in src, f"{rel} 内联了 SCHEME_PROJECT_ID_SQL 字面量"
 
     def test_resolve_helper_delegated(self):
         """`resolve_scheme_project_id` 必须存在于 facts_extractor 且被委托消费
         （服务层单一出口不可悬空）。"""
         from app.services import facts_extractor
+
         assert callable(facts_extractor.resolve_scheme_project_id)
         # 至少两个跨模块消费方委托它（export / compliance / facts_builder …）
         import re
+
         delegated = 0
-        for rel in ("routers/export.py", "routers/compliance.py",
-                    "services/facts_builder.py", "services/placeholder_inventory.py",
-                    "services/scheme_fingerprint.py"):
+        for rel in (
+            "routers/export.py",
+            "routers/compliance.py",
+            "services/facts_builder.py",
+            "services/placeholder_inventory.py",
+            "services/scheme_fingerprint.py",
+        ):
             src = (APP / rel).read_text(encoding="utf-8")
             if "resolve_scheme_project_id" in src:
                 delegated += 1
@@ -159,32 +172,29 @@ class TestBidJsonRepairDelegated:
         i_repair = src.find("async def _repair_json")
         i_collect = src.find("async def _collect_json_str")
         assert 0 <= i_collect < i_repair, "未找到 _collect_json_str（应定义于 _repair_json 之前）"
-        seg = src[i_collect:i_collect + 1400]
-        assert "collect_json_response_with_chat" in seg, (
-            "_collect_json_str 未委托统一 JSON 修复通道")
-        assert "chat_with_fallback" in seg, (
-            "_collect_json_str 未注入 ba.chat_with_fallback")
+        seg = src[i_collect : i_collect + 1400]
+        assert "collect_json_response_with_chat" in seg, "_collect_json_str 未委托统一 JSON 修复通道"
+        assert "chat_with_fallback" in seg, "_collect_json_str 未注入 ba.chat_with_fallback"
         # _repair_json 必须调用 _collect_json_str（薄壳接线，docstring 较长故取大窗口）
-        seg_repair = src[i_repair:i_repair + 1600]
-        assert "_collect_json_str(" in seg_repair, (
-            "_repair_json 未委托 _collect_json_str（薄壳断链）")
+        seg_repair = src[i_repair : i_repair + 1600]
+        assert "_collect_json_str(" in seg_repair, "_repair_json 未委托 _collect_json_str（薄壳断链）"
 
     def test_deterministic_lower_bound_preserved(self):
         """确定性下界保留：AI 全挂时仍能「正则抠 JSON」救回可解析片段。"""
         src = (APP / self.SRC).read_text(encoding="utf-8")
         i = src.find("async def _repair_json")
-        seg = src[i:i + 1200]
-        assert "确定性下界" in seg or "re.search" in seg, (
-            "确定性正则兜底被移除")
+        seg = src[i : i + 1200]
+        assert "确定性下界" in seg or "re.search" in seg, "确定性正则兜底被移除"
 
     def test_no_direct_provider_factory_import_for_repair(self):
         """修复路径不直接 import provider_factory 的 chat（保既有 monkeypatch）：
         `collect_json_response` 内部引用 json_response 自己的导入，桩会失效。"""
         src = (APP / self.SRC).read_text(encoding="utf-8")
         i = src.find("async def _repair_json")
-        seg = src[i:i + 1500]
-        assert "from app.services.ai import provider_factory" not in seg, (
-            "_repair_json 直接 import provider_factory（monkeypatch 失效）")
+        seg = src[i : i + 1500]
+        assert (
+            "from app.services.ai import provider_factory" not in seg
+        ), "_repair_json 直接 import provider_factory（monkeypatch 失效）"
 
 
 class TestRendererAdjustmentNeedsProductSignoff:
@@ -204,10 +214,10 @@ class TestRendererAdjustmentNeedsProductSignoff:
         """`_RENDERER_VERSION` 仍是唯一版本源（mermaid_renderer.py），
         改渲染行为必须 bump 它（R62 教训：不 bump 则旧缓存不失效）。"""
         from pathlib import Path
+
         mf = APP / "services" / "ai" / "mermaid_renderer.py"
         src = mf.read_text(encoding="utf-8")
-        assert "_RENDERER_VERSION" in src, (
-            "mermaid_renderer 缺失 _RENDERER_VERSION（渲染缓存失效依赖它）")
+        assert "_RENDERER_VERSION" in src, "mermaid_renderer 缺失 _RENDERER_VERSION（渲染缓存失效依赖它）"
 
     def test_timeline_row_contract_preserved(self):
         """timeline 折行契约（R64）不得被「字号调整」顺手改掉：
@@ -215,10 +225,8 @@ class TestRendererAdjustmentNeedsProductSignoff:
         mt = APP / "services" / "ai" / "mermaid_timeline.py"
         src = mt.read_text(encoding="utf-8")
         assert "plan_timeline_rows" in src
-        assert "paper_font_mm" in src, (
-            "timeline 折行决策不再用纸面毫米（R64 契约破坏）")
-        assert "_DATE_FONT_DESIGN" in src, (
-            "timeline 常驻最小字号契约丢失")
+        assert "paper_font_mm" in src, "timeline 折行决策不再用纸面毫米（R64 契约破坏）"
+        assert "_DATE_FONT_DESIGN" in src, "timeline 常驻最小字号契约丢失"
 
 
 class TestFrontendFactChangeListDeferred:
@@ -235,7 +243,6 @@ class TestFrontendFactChangeListDeferred:
         src = gf.read_text(encoding="utf-8")
         i = src.find("async def list_facts")
         assert i > 0, "未找到 list_facts"
-        seg = src[i:i + 1200]
+        seg = src[i : i + 1200]
         # 不得出现把「逐条变更标记」写进 list_facts 返回体的形态
-        assert "changed_facts" not in seg, (
-            "list_facts 被前端增强回流改写返回契约（B-5 登记项被误修）")
+        assert "changed_facts" not in seg, "list_facts 被前端增强回流改写返回契约（B-5 登记项被误修）"

@@ -2,6 +2,7 @@
 
 覆盖：方案名称解析、危大/超规模阈值判定、九大章节字段映射、完整性校验。
 """
+
 import pytest
 from app.services.scheme_classification import (
     HAZARD_CATEGORIES,
@@ -28,8 +29,12 @@ from app.services.scheme_classification import (
 def test_six_categories_present():
     ids = [c["id"] for c in HAZARD_CATEGORIES]
     assert ids == [
-        "foundation_pit", "formwork", "hoisting",
-        "scaffold", "demolition", "other",
+        "foundation_pit",
+        "formwork",
+        "hoisting",
+        "scaffold",
+        "demolition",
+        "other",
     ]
     # 每个大类至少 1 个子类
     for c in HAZARD_CATEGORIES:
@@ -137,7 +142,7 @@ def test_classify_scheme_aggregates():
     res = classify_scheme("钢结构网架安装专项施工方案", {"span": 40})
     assert "other" in res.category_ids
     assert "ot_steel" in res.sub_ids
-    assert res.is_hazardous is True   # 跨度≥36m → 危大
+    assert res.is_hazardous is True  # 跨度≥36m → 危大
     assert res.is_oversize is True
 
 
@@ -195,6 +200,7 @@ def test_build_classification_hint_from_name():
 
 def test_build_system_prompt_includes_classification_hint():
     from app.services.bid_analysis_service import build_system_prompt
+
     # 旧版：section_hint/classification_hint 均为空 → 与基础 prompt 一致
     base = build_system_prompt()
     assert build_system_prompt("") == base
@@ -292,18 +298,29 @@ async def test_build_category_reference_outline():
     from app.services.outline_reference import build_category_reference_outline
 
     outline = [{"title": "1 工程概况", "children": [{"title": "1.1 开挖深度"}]}]
-    rows = [{
-        "id": "L1", "name": "基坑标准目录", "type": "foundation_pit",
-        "version": "v1.0", "outline_json": _json.dumps(outline),
-    }]
+    rows = [
+        {
+            "id": "L1",
+            "name": "基坑标准目录",
+            "type": "foundation_pit",
+            "version": "v1.0",
+            "outline_json": _json.dumps(outline),
+        }
+    ]
+
     # 极简假 db：仅实现 execute → fetchall
     class _Cur:
-        def __init__(self, r): self.r = r
-        async def fetchall(self): return self.r
+        def __init__(self, r):
+            self.r = r
+
+        async def fetchall(self):
+            return self.r
+
     class _Db:
         async def execute(self, sql, params=()):
             # 模拟 outline_library.type IN (?) 过滤
             return _Cur([r for r in rows if r.get("type") in (params or ())])
+
     text, hits = await build_category_reference_outline(_Db(), ["foundation_pit"])
     assert "基坑标准目录" in text and "工程概况" in text
     assert hits == ["L1"]
@@ -328,4 +345,3 @@ async def test_build_category_reference_outline_swallows_db_error():
 
     text, hits = await build_category_reference_outline(_BrokenDb(), ["foundation_pit"])
     assert text == "" and hits == []
-

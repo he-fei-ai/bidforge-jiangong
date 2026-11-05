@@ -5,6 +5,7 @@ O5：STREAM_CAPABILITY_TTL 3600s → 86400s（模型对流式的支持不会一�
 缩短只会增加 TTL 到期后的重探测浪费）。到期自动重探测、成功即清除的
 自愈机制保持不变（既有 test_content_call_optimization.py 已覆盖）。
 """
+
 import app.services.ai.provider_factory as pf
 from app.config import Settings
 
@@ -19,6 +20,7 @@ class TestO5StreamCapabilityTtl:
     def test_non_positive_clamped(self):
         # 非正配置不生效（避免 TTL<=0 导致每次调用都重探测流式）
         import app.services.ai.provider_factory as _pf
+
         assert _pf.STREAM_CAPABILITY_TTL >= 1.0
 
     def test_memory_mechanism_unchanged(self):
@@ -26,9 +28,9 @@ class TestO5StreamCapabilityTtl:
         pf.reset_stream_capability()
         key = "p|m"
         assert pf._stream_disabled(key) is False
-        assert pf._note_stream_failure(key) is False      # 第 1 次：未达阈值
-        assert pf._note_stream_failure(key) is True       # 第 2 次：认定不支持
-        assert pf._stream_disabled(key) is True           # TTL 内直接跳过
+        assert pf._note_stream_failure(key) is False  # 第 1 次：未达阈值
+        assert pf._note_stream_failure(key) is True  # 第 2 次：认定不支持
+        assert pf._stream_disabled(key) is True  # TTL 内直接跳过
         pf._note_stream_success(key)
-        assert pf._stream_disabled(key) is False          # 成功即清除
+        assert pf._stream_disabled(key) is False  # 成功即清除
         pf.reset_stream_capability()

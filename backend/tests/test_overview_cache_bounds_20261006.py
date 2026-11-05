@@ -16,6 +16,7 @@
 
 本文件覆盖 12 条断言组，已做 5 项 A/B 反向验证（见文件末尾 A/B 说明）。
 """
+
 from __future__ import annotations
 
 import inspect
@@ -48,6 +49,7 @@ from app.routers.compliance import (
 # ---------------------------------------------------------------------------
 # 纯内存单元（不依赖 DB）
 # ---------------------------------------------------------------------------
+
 
 def _fill(store: dict, n: int) -> list[str]:
     """按写入顺序塞 n 条（时间戳单调递增，最旧在前）。"""
@@ -93,8 +95,7 @@ class TestCacheBounded:
 
     def test_expired_entries_pruned_on_put(self):
         # 手工放一条早已过期的（读侧 TTL 判定下它永远不可能命中 → 删除等价）
-        _OVERVIEW_RECENT["dead"] = ("fp-dead", time.monotonic() - OVERVIEW_CACHE_TTL - 1.0,
-                                    {"payload": "stale"})
+        _OVERVIEW_RECENT["dead"] = ("fp-dead", time.monotonic() - OVERVIEW_CACHE_TTL - 1.0, {"payload": "stale"})
         _cache_put(_OVERVIEW_RECENT, "live", ("fp-live", time.monotonic(), {"payload": "ok"}))
         assert "dead" not in _OVERVIEW_RECENT
         assert "live" in _OVERVIEW_RECENT
@@ -116,10 +117,10 @@ class TestWritePathMustGoThroughCachePut:
     def test_both_caches_written_via_cache_put_only(self):
         src = inspect.getsource(_compliance_mod)
         # 旧写法（回归形态）：模块字典被直接赋值
-        assert "_PREFLIGHT_RECENT[scheme_id] =" not in src, \
-            "_PREFLIGHT_RECENT 必须经 _cache_put 写入（直赋值会绕过上限）"
-        assert "_OVERVIEW_RECENT[scheme_id] =" not in src, \
-            "_OVERVIEW_RECENT 必须经 _cache_put 写入（直赋值会绕过上限）"
+        assert (
+            "_PREFLIGHT_RECENT[scheme_id] =" not in src
+        ), "_PREFLIGHT_RECENT 必须经 _cache_put 写入（直赋值会绕过上限）"
+        assert "_OVERVIEW_RECENT[scheme_id] =" not in src, "_OVERVIEW_RECENT 必须经 _cache_put 写入（直赋值会绕过上限）"
         assert src.count("_cache_put(_PREFLIGHT_RECENT,") == 1
         assert src.count("_cache_put(_OVERVIEW_RECENT,") == 1
 
@@ -188,6 +189,7 @@ class TestInvalidateOnSchemeDelete:
 # 端到端（真实 DB）：命中语义零变化 + 删除即回收
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 async def db_ctx(tmp_path):
     _appdb.DB_PATH = tmp_path / "overview-cache-bounds.sqlite"
@@ -198,7 +200,8 @@ async def db_ctx(tmp_path):
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await db.execute(
         "INSERT INTO schemes(id,project_id,name,status,word_budget) VALUES(?,?,?,?,0)",
-        (sid, pid, "深基坑支护专项方案", "目录已确认"))
+        (sid, pid, "深基坑支护专项方案", "目录已确认"),
+    )
     await db.commit()
     for store in (_OVERVIEW_RECENT, _PREFLIGHT_RECENT):
         store.pop(sid, None)
@@ -224,7 +227,7 @@ class TestEndToEnd:
     async def test_delete_scheme_reclaims_dead_keys(self, db_ctx):
         """端到端：删方案 → 两份缓存的死键被回收，且锁不被动。"""
         db, pid, sid = db_ctx
-        await readiness_overview(sid, db=db)           # 灌入 _OVERVIEW_RECENT
+        await readiness_overview(sid, db=db)  # 灌入 _OVERVIEW_RECENT
         _cache_put(_PREFLIGHT_RECENT, sid, ("fp", time.monotonic(), {"x": 1}))
         lock = _overview_lock(sid)
         assert sid in _OVERVIEW_RECENT and sid in _PREFLIGHT_RECENT
@@ -236,8 +239,7 @@ class TestEndToEnd:
         assert sid not in _PREFLIGHT_RECENT, "删除方案后 /preflight 缓存死键必须回收"
         assert _OVERVIEW_LOCKS.get(sid) is lock, "删除不得误清除并发锁（可能正被持有）"
 
-    async def test_delete_scheme_is_failsoft_when_cache_import_fails(self, db_ctx,
-                                                                     monkeypatch):
+    async def test_delete_scheme_is_failsoft_when_cache_import_fails(self, db_ctx, monkeypatch):
         """缓存清理失败（如 import 异常）不得阻断删除本身（fail-soft）。"""
         db, pid, sid = db_ctx
         await readiness_overview(sid, db=db)

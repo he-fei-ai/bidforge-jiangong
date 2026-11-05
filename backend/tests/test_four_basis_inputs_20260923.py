@@ -10,6 +10,7 @@
    去AI化（允许适度口语化）纪律，渲染不残留未替换占位符；
 4. GET /sse/input-coverage/{scheme_id} 端点函数（直调，不落真实库）。
 """
+
 import json
 
 import pytest
@@ -22,20 +23,15 @@ from app.services.scheme_scope import extract_construction_scope, render_scope_f
 # 一、方案名称 → 主要施工内容
 # ===========================================================================
 class TestExtractConstructionScope:
-
     def test_compound_name_splits(self):
         """复合名称逐项拆分：每一项施工内容都是章节划分依据"""
-        assert extract_construction_scope("基坑支护及土方开挖专项施工方案") == \
-            ["基坑支护", "土方开挖"]
-        assert extract_construction_scope("高支模与脚手架工程安全专项施工方案") == \
-            ["高支模", "脚手架"]
-        assert extract_construction_scope("塔吊安拆、使用与维护专项方案") == \
-            ["塔吊安拆", "使用", "维护"]
+        assert extract_construction_scope("基坑支护及土方开挖专项施工方案") == ["基坑支护", "土方开挖"]
+        assert extract_construction_scope("高支模与脚手架工程安全专项施工方案") == ["高支模", "脚手架"]
+        assert extract_construction_scope("塔吊安拆、使用与维护专项方案") == ["塔吊安拆", "使用", "维护"]
 
     def test_single_content_falls_back_to_core(self):
         """单内容方案：返回名称主体（与旧「整名注入」信息等价，不编造）"""
-        assert extract_construction_scope("附着式升降脚手架工程专项施工方案") == \
-            ["附着式升降脚手架"]
+        assert extract_construction_scope("附着式升降脚手架工程专项施工方案") == ["附着式升降脚手架"]
         assert extract_construction_scope("临时用电施工组织设计") == ["临时用电"]
 
     def test_suffix_stripping_loop(self):
@@ -51,8 +47,7 @@ class TestExtractConstructionScope:
         assert extract_construction_scope("专项施工方案")  # 整名即后缀：回退不崩
 
     def test_render_scope_line(self):
-        assert render_scope_for_prompt("基坑支护及土方开挖专项施工方案") == \
-            "基坑支护、土方开挖"
+        assert render_scope_for_prompt("基坑支护及土方开挖专项施工方案") == "基坑支护、土方开挖"
         # 拆不出时回退名称主体；空名给显式占位（不得诱导模型编造）
         assert render_scope_for_prompt("某某工程") == "某某工程"
         assert "未提供" in render_scope_for_prompt("")
@@ -71,18 +66,20 @@ async def _seed_inputs(db_conn, project_id="p1", scheme_id="s1"):
         "INSERT INTO bid_analysis_items(id, project_id, item_id, label, "
         "output_type, status, content, sort_order) VALUES "
         "('a','p1','projectBasicInfo','项目级基本信息','json','success',"
-        "'{\"基坑深度\": \"8.5m\"}',1),"
+        '\'{"基坑深度": "8.5m"}\',1),'
         "('b','p1','overviewParams','工程概况与设计参数','markdown','success',"
         "'未提取到',2),"
         "('c','p1','safetyMeasures','安全保证措施','markdown','success',"
-        "'坑边荷载不得超过设计限值',3)")
+        "'坑边荷载不得超过设计限值',3)"
+    )
     # 事实：已确认可注入 / 未裁决 pending / 矛盾 conflict
     await db_conn.execute(
         "INSERT INTO global_facts(id, project_id, scheme_id, group_title, "
         "title, content, is_resolved, has_conflict) VALUES "
         "('f1','p1','s1','工程概况','基坑深度','8.5m',1,0),"
         "('f2','p1','s1','地质条件','地下水位','待复核',0,0),"
-        "('f3','p1','s1','地质条件','支护形式','两值矛盾',1,1)")
+        "('f3','p1','s1','地质条件','支护形式','两值矛盾',1,1)"
+    )
     await db_conn.commit()
 
 
@@ -90,12 +87,12 @@ async def _seed_inputs(db_conn, project_id="p1", scheme_id="s1"):
 async def test_build_inventory_statuses(db_conn):
     """清单状态：有效/未提取到/可注入/被过滤（矛盾、未确认）逐一显式台账"""
     await _seed_inputs(db_conn)
-    inv = await ic.build_inventory(db_conn, "p1", "s1",
-                                   scope_items=["基坑支护", "土方开挖"],
-                                   requirements_text="必须包含监测方案")
+    inv = await ic.build_inventory(
+        db_conn, "p1", "s1", scope_items=["基坑支护", "土方开挖"], requirements_text="必须包含监测方案"
+    )
     parse = {e.key: e for e in inv.by_source(ic.SRC_PARSE)}
     assert parse["projectBasicInfo"].status == "available"
-    assert parse["overviewParams"].status == "empty"        # 未提取到
+    assert parse["overviewParams"].status == "empty"  # 未提取到
     facts = inv.by_source(ic.SRC_FACTS)
     # 可注入组 + 两个被过滤组（未确认 / 矛盾），分组聚合、状态可辨
     assert any(e.status == "available" and e.label == "工程概况" for e in facts)
@@ -109,20 +106,22 @@ async def test_build_inventory_statuses(db_conn):
 async def test_audit_prompt_coverage_diff(db_conn):
     """差集分析：装配文本出现锚点 → 已调用；未出现 → 缺失；截断源透传"""
     await _seed_inputs(db_conn)
-    inv = await ic.build_inventory(db_conn, "p1", "s1",
-                                   scope_items=["基坑支护", "土方开挖"],
-                                   requirements_text="必须包含监测方案")
-    prompt = ("# 提取项目结果\n\n## 项目级基本信息\n- **基坑深度**: 8.5m\n"
-              "\n## 安全保证措施\n…\n\n### 工程概况\n8.5m\n"
-              "【方案名称主要施工内容】：基坑支护、土方开挖\n"
-              "【编制要求…】：必须包含监测方案\n")
+    inv = await ic.build_inventory(
+        db_conn, "p1", "s1", scope_items=["基坑支护", "土方开挖"], requirements_text="必须包含监测方案"
+    )
+    prompt = (
+        "# 提取项目结果\n\n## 项目级基本信息\n- **基坑深度**: 8.5m\n"
+        "\n## 安全保证措施\n…\n\n### 工程概况\n8.5m\n"
+        "【方案名称主要施工内容】：基坑支护、土方开挖\n"
+        "【编制要求…】：必须包含监测方案\n"
+    )
     report = ic.audit_prompt_coverage(inv, prompt, {ic.SRC_PARSE: "预算截断"})
     injected_labels = {r["label"] for r in report["injected"]}
     assert "项目级基本信息" in injected_labels
     assert "工程概况" in injected_labels
     assert "基坑支护" in injected_labels
     missing_labels = {r["label"] for r in report["missing"]}
-    assert "土方开挖" not in missing_labels        # 已出现 → 不缺失
+    assert "土方开挖" not in missing_labels  # 已出现 → 不缺失
     # 「未提取到」项与两类被过滤事实进入 not_injectable（不冤枉为缺失）
     ni = {r["key"] for r in report["not_injectable"]}
     assert "overviewParams" in ni
@@ -138,23 +137,26 @@ async def test_audit_missing_field_detected(db_conn):
     inv = await ic.build_inventory(db_conn, "p1", "s1", scope_items=[], requirements_text="")
     report = ic.audit_prompt_coverage(inv, "只提到 项目级基本信息：\n## 项目级基本信息\n")
     missing = {r["key"] for r in report["missing"]}
-    assert "safetyMeasures" in missing             # 有效成果未被调用
+    assert "safetyMeasures" in missing  # 有效成果未被调用
     assert "projectBasicInfo" not in missing
 
 
 def test_log_coverage_audit_never_raises():
     """审计日志函数吞掉一切异常（不得阻断生成主流程）"""
-    ic.log_coverage_audit("outline", "s1", {"missing": [], "truncated": [],
-                                            "summary": "ok"})
-    ic.log_coverage_audit("outline", "s1", None)   # 非法入参也不抛
+    ic.log_coverage_audit("outline", "s1", {"missing": [], "truncated": [], "summary": "ok"})
+    ic.log_coverage_audit("outline", "s1", None)  # 非法入参也不抛
 
 
 # ===========================================================================
 # 三、提示词模板：施工内容锚点 + 去AI化/适度口语化
 # ===========================================================================
-OUTLINE_KEYS = ["outline_short_system", "outline_level1_system",
-                "outline_sublevel_system", "outline_sublevel_batch_system",
-                "outline_review_system"]
+OUTLINE_KEYS = [
+    "outline_short_system",
+    "outline_level1_system",
+    "outline_sublevel_system",
+    "outline_sublevel_batch_system",
+    "outline_review_system",
+]
 
 
 @pytest.mark.parametrize("key", OUTLINE_KEYS)
@@ -178,7 +180,7 @@ def test_content_template_deai_and_colloquial():
     assert "语言规范（去AI化，硬性）" in tpl
     assert "适度口语化" in tpl
     assert "排比堆砌" in tpl and "空话套话" in tpl
-    assert "【方案名称主要施工内容】" in tpl   # 内容展开依据条款
+    assert "【方案名称主要施工内容】" in tpl  # 内容展开依据条款
     # 旧「不得出现口语化」一刀切表述已移除
     assert "不得出现口语化" not in tpl
 
@@ -188,6 +190,7 @@ def test_content_scope_line_renders():
     tpl = get_default_prompt("outline_level1_system")
     kwargs = {v: "X" for v in extract_variables(tpl)}
     from app.services.ai.prompts._registry import render_prompt
+
     out = render_prompt(tpl, **kwargs)
     assert "{construction_scope}" not in out
 
@@ -198,11 +201,13 @@ def test_content_scope_line_renders():
 @pytest.mark.asyncio
 async def test_input_coverage_endpoint(db_conn):
     from app.routers.sse_handlers import input_coverage_snapshot
+
     await _seed_inputs(db_conn)
     await db_conn.execute(
         "INSERT INTO schemes(id, project_id, name, type, config_json) "
         "VALUES('s1','p1','基坑支护及土方开挖专项施工方案','深基坑',?)",
-        (json.dumps({"requirements": "必须包含监测方案"}),))
+        (json.dumps({"requirements": "必须包含监测方案"}),),
+    )
     await db_conn.commit()
     data = await input_coverage_snapshot("s1", db=db_conn)
     assert data["construction_scope"]["items"] == ["基坑支护", "土方开挖"]
@@ -225,10 +230,10 @@ async def test_inventory_non_success_not_injectable(db_conn):
         "output_type, status, content, sort_order) VALUES "
         "('x','p1','stuckItem','失败的提取项','markdown','error','旧残留内容',1),"
         "('y','p1','runItem','在途的提取项','markdown','running','上一轮内容',2),"
-        "('z','p1','okItem','正常提取项','markdown','success','有效内容',3)")
+        "('z','p1','okItem','正常提取项','markdown','success','有效内容',3)"
+    )
     await db_conn.commit()
-    inv = await ic.build_inventory(db_conn, "p1", "s1",
-                                   scope_items=[], requirements_text="")
+    inv = await ic.build_inventory(db_conn, "p1", "s1", scope_items=[], requirements_text="")
     parse = {e.key: e for e in inv.by_source(ic.SRC_PARSE)}
     assert parse["stuckItem"].status == "not_success"
     assert parse["runItem"].status == "not_success"
@@ -244,9 +249,9 @@ async def test_inventory_non_success_not_injectable(db_conn):
 def test_site_trunc_extra_uses_actual_budget():
     """M3：截断台账按装配点实际预算入账，未超预算零记录。"""
     from app.routers.sse_handlers import _site_trunc_extra
+
     assert _site_trunc_extra("解析提取", "全局事实", "短文本", 3000) == {}
-    extra = _site_trunc_extra("解析提取", "全局事实",
-                              "x" * 3500, 2000, "f" * 1600, 1500)
+    extra = _site_trunc_extra("解析提取", "全局事实", "x" * 3500, 2000, "f" * 1600, 1500)
     assert extra["解析提取"] == "项目资料摘要 3500 字超本装配点预算 2000 字，已截断"
     assert extra["全局事实"] == "全局事实 1600 字超本装配点预算 1500 字，已截断"
 
@@ -257,21 +262,28 @@ async def test_audit_accepts_callable_and_warns_on_failure(db_conn, caplog):
     import logging
 
     from app.routers.sse_handlers import _run_input_coverage_audit
+
     await _seed_inputs(db_conn)
     # callable 正常路径：不抛
     # ✅ 2026-09-26：scene 由 "content"（已从 KNOWN_SCENES 移除的僵尸总调度
     #    场景）改为真实调用点 "content_draft"。此处只是 mock 参数，但保留一个
     #    未登记的 scene 会让双向护栏 test_all_used_scenes_registered 误报。
     await _run_input_coverage_audit(
-        db_conn, "p1", "s1", ["基坑支护"], "必须含监测",
-        lambda: "## 项目级基本信息\n### 工程概况\n编制要求", scene="content_draft")
+        db_conn,
+        "p1",
+        "s1",
+        ["基坑支护"],
+        "必须含监测",
+        lambda: "## 项目级基本信息\n### 工程概况\n编制要求",
+        scene="content_draft",
+    )
 
     # 样本求值抛错：审计内部吞掉，以 WARNING 曝露（不再只落 DEBUG）
     def _boom():
         raise RuntimeError("行序变化导致渲染失败")
+
     with caplog.at_level(logging.WARNING, logger="sse"):
-        await _run_input_coverage_audit(
-            db_conn, "p1", "s1", [], "", _boom, scene="content_draft")
+        await _run_input_coverage_audit(db_conn, "p1", "s1", [], "", _boom, scene="content_draft")
     assert any("差集审计失败" in r.getMessage() for r in caplog.records)
 
 
@@ -280,6 +292,7 @@ async def test_audit_accepts_callable_and_warns_on_failure(db_conn, caplog):
 # ===========================================================================
 class _BoomDB:
     """任意 execute 均抛错，用子验证 build_inventory 降级路径。"""
+
     async def execute(self, *a, **k):
         raise RuntimeError("db down")
 
@@ -287,8 +300,7 @@ class _BoomDB:
 @pytest.mark.asyncio
 async def test_build_inventory_marks_degraded_on_failure():
     """m3：数据源查询异常时登记降级源（两个 DB 源），非 DB 的施工内容仍入账。"""
-    inv = await ic.build_inventory(_BoomDB(), "p1", "s1",
-                                   scope_items=["基坑支护"], requirements_text="")
+    inv = await ic.build_inventory(_BoomDB(), "p1", "s1", scope_items=["基坑支护"], requirements_text="")
     assert set(inv.degraded) == {ic.SRC_PARSE, ic.SRC_FACTS}
     assert len(inv.by_source(ic.SRC_SCOPE)) == 1
 
@@ -296,18 +308,18 @@ async def test_build_inventory_marks_degraded_on_failure():
 def test_audit_degraded_logs_warning_not_green(caplog):
     """m3：无缺失/无截断但有降级源时，仍必须报 WARNING（不能假全绿 INFO）。"""
     import logging
+
     inv = ic.InputInventory(
-        entries=[ic.FieldEntry(source=ic.SRC_PARSE, key="k",
-                               label="项目级基本信息", status="available", chars=5)],
-        degraded=[ic.SRC_PARSE])
+        entries=[ic.FieldEntry(source=ic.SRC_PARSE, key="k", label="项目级基本信息", status="available", chars=5)],
+        degraded=[ic.SRC_PARSE],
+    )
     rep = ic.audit_prompt_coverage(inv, "## 项目级基本信息\n")
     assert rep["degraded"] == [ic.SRC_PARSE]
     assert "降级源" in rep["summary"]
-    assert not rep["missing"] and not rep["truncated"]   # 否则无法证明“仅降级”触发
+    assert not rep["missing"] and not rep["truncated"]  # 否则无法证明“仅降级”触发
     with caplog.at_level(logging.INFO, logger="input_coverage"):
         ic.log_coverage_audit("outline", "s1", rep)
-    assert any(r.levelno >= logging.WARNING for r in caplog.records), \
-        "降级源必须抬升为 WARNING，避免与“全绿”混淡"
+    assert any(r.levelno >= logging.WARNING for r in caplog.records), "降级源必须抬升为 WARNING，避免与“全绿”混淡"
 
 
 def test_build_structured_brief_uses_boundary_truncation():
@@ -315,6 +327,7 @@ def test_build_structured_brief_uses_boundary_truncation():
     import inspect
 
     from app.routers.sse_handlers import _build_structured_brief
+
     src = inspect.getsource(_build_structured_brief)
     assert "truncate_to_boundary(structured, max_chars)" in src
     assert "[:max_chars + 900]" not in src

@@ -5,26 +5,30 @@
 3/12 的高危冲突留在交付文档里 —— 错误参数/标号直接进文档，质量代价远大于
 省下的调用。O8：组内含 high 级冲突时校验不过仍重试一次；medium/low 维持不重试。
 """
+
 import app.services.repair_agent as ra
 import pytest
 
 
 def _conflict(cid, sid="s0", severity="high"):
     return {
-        "id": cid, "conflict_type": "numeric", "severity": severity,
-        "topic": "檐口高度", "authoritative_value": "42.5m",
-        "authoritative_source": "全局事实", "status": "pending",
-        "occurrences": [{"section_id": sid, "section_title": f"章节{sid}",
-                         "value": "18.5m", "text": "檐口高度 18.5m"}],
+        "id": cid,
+        "conflict_type": "numeric",
+        "severity": severity,
+        "topic": "檐口高度",
+        "authoritative_value": "42.5m",
+        "authoritative_source": "全局事实",
+        "status": "pending",
+        "occurrences": [{"section_id": sid, "section_title": f"章节{sid}", "value": "18.5m", "text": "檐口高度 18.5m"}],
     }
 
 
 async def _seed(db, n=1):
     for i in range(n):
         await db.execute(
-            "INSERT INTO sections (id, scheme_id, title, content, level, sort_order)"
-            " VALUES (?,?,?,?,2,?)",
-            (f"s{i}", "sch1", f"章节s{i}", "原文：檐口高度 18.5m。", i))
+            "INSERT INTO sections (id, scheme_id, title, content, level, sort_order)" " VALUES (?,?,?,?,2,?)",
+            (f"s{i}", "sch1", f"章节s{i}", "原文：檐口高度 18.5m。", i),
+        )
     await db.commit()
 
 
@@ -56,12 +60,10 @@ def _gate_on(monkeypatch):
 
 class TestGroupHasHighSeverity:
     def test_high(self):
-        assert ra._group_has_high_severity(
-            {"conflicts": [{"severity": "high"}]}) is True
+        assert ra._group_has_high_severity({"conflicts": [{"severity": "high"}]}) is True
 
     def test_mixed_contains_high(self):
-        assert ra._group_has_high_severity(
-            {"conflicts": [{"severity": "low"}, {"severity": "HIGH"}]}) is True
+        assert ra._group_has_high_severity({"conflicts": [{"severity": "low"}, {"severity": "HIGH"}]}) is True
 
     def test_medium_low_empty(self):
         for confs in ([{"severity": "medium"}], [{"severity": "low"}], [], None):
@@ -74,8 +76,9 @@ class TestSeverityGradedRetry:
         await _seed(db_conn, 1)
         calls = []
         _patch(monkeypatch, calls=calls, fail_times=1)
-        res = await ra.run_repair(db_conn, scheme_id="sch1", scan_id="scan1",
-                                  conflicts=[_conflict("C001")], mode="auto")
+        res = await ra.run_repair(
+            db_conn, scheme_id="sch1", scan_id="scan1", conflicts=[_conflict("C001")], mode="auto"
+        )
         assert len(calls) == 2, "high 级冲突校验不过必须重试一次"
         assert res["repaired"] == 1 and res["failed"] == 0
 
@@ -84,9 +87,14 @@ class TestSeverityGradedRetry:
         await _seed(db_conn, 1)
         calls = []
         _patch(monkeypatch, calls=calls, fail_times=99)
-        res = await ra.run_repair(db_conn, scheme_id="sch1", scan_id="scan1",
-                                  conflicts=[_conflict("C001", severity="medium")],
-                                  mode="auto", severity_threshold="low")
+        res = await ra.run_repair(
+            db_conn,
+            scheme_id="sch1",
+            scan_id="scan1",
+            conflicts=[_conflict("C001", severity="medium")],
+            mode="auto",
+            severity_threshold="low",
+        )
         assert len(calls) == 1, "medium/low 冲突不得重试"
         assert res["failed"] == 1
 
@@ -96,8 +104,7 @@ class TestSeverityGradedRetry:
         await _seed(db_conn, 1)
         calls = []
         _patch(monkeypatch, calls=calls, fail_times=99)
-        await ra.run_repair(db_conn, scheme_id="sch1", scan_id="scan1",
-                            conflicts=[_conflict("C001")], mode="auto")
+        await ra.run_repair(db_conn, scheme_id="sch1", scan_id="scan1", conflicts=[_conflict("C001")], mode="auto")
         assert len(calls) == 1
 
     async def test_retry_on_invalid_true_is_full_legacy(self, db_conn, monkeypatch):
@@ -106,9 +113,14 @@ class TestSeverityGradedRetry:
         await _seed(db_conn, 1)
         calls = []
         _patch(monkeypatch, calls=calls, fail_times=99)
-        await ra.run_repair(db_conn, scheme_id="sch1", scan_id="scan1",
-                            conflicts=[_conflict("C001", severity="medium")],
-                            mode="auto", severity_threshold="low")
+        await ra.run_repair(
+            db_conn,
+            scheme_id="sch1",
+            scan_id="scan1",
+            conflicts=[_conflict("C001", severity="medium")],
+            mode="auto",
+            severity_threshold="low",
+        )
         assert len(calls) == 2
 
     async def test_ai_exception_still_retries(self, db_conn, monkeypatch):
@@ -125,8 +137,9 @@ class TestSeverityGradedRetry:
             return "修复后正文：檐口高度 42.5m。"
 
         monkeypatch.setattr(ra, "repair_section", flaky)
-        res = await ra.run_repair(db_conn, scheme_id="sch1", scan_id="scan1",
-                                  conflicts=[_conflict("C001")], mode="auto")
+        res = await ra.run_repair(
+            db_conn, scheme_id="sch1", scan_id="scan1", conflicts=[_conflict("C001")], mode="auto"
+        )
         assert len(calls) == 2 and res["repaired"] == 1
 
     async def test_mixed_group_uses_max_severity(self, db_conn, monkeypatch):
@@ -135,9 +148,12 @@ class TestSeverityGradedRetry:
         calls = []
         _patch(monkeypatch, calls=calls, fail_times=1)
         res = await ra.run_repair(
-            db_conn, scheme_id="sch1", scan_id="scan1",
-            conflicts=[_conflict("C001", severity="high"),
-                       _conflict("C002", severity="low")],
-            mode="auto", severity_threshold="low")
+            db_conn,
+            scheme_id="sch1",
+            scan_id="scan1",
+            conflicts=[_conflict("C001", severity="high"), _conflict("C002", severity="low")],
+            mode="auto",
+            severity_threshold="low",
+        )
         assert len(calls) == 2
         assert res["repaired"] == 2

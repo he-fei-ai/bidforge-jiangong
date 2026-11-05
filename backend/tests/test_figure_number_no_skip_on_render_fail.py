@@ -13,6 +13,7 @@
 
 两类用例均为同步单测，不依赖数据库 / 渲染服务。
 """
+
 import io
 import os
 import sys
@@ -22,7 +23,7 @@ import pytest
 from docx import Document
 from PIL import Image
 
-sys.path.insert(0, r"J:\编程\专项方案工具箱\backend")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.routers.export import (  # noqa: E402
     _DEFAULT_HEADING_STYLES,
@@ -48,35 +49,51 @@ def _ppm_bytes() -> bytes:
     return buf.getvalue()
 
 
-def _build(rendered_map: dict, content: str,
-           chart_lookup: dict | None = None, fail_ph: bool = False,
-           image_bytes: dict | None = None) -> Document:
-    secs = [{"id": "s1", "parent_id": "", "level": 1, "sort_order": 0,
-             "title": "第一章 工艺", "content": content}]
+def _build(
+    rendered_map: dict,
+    content: str,
+    chart_lookup: dict | None = None,
+    fail_ph: bool = False,
+    image_bytes: dict | None = None,
+) -> Document:
+    secs = [{"id": "s1", "parent_id": "", "level": 1, "sort_order": 0, "title": "第一章 工艺", "content": content}]
     out = os.path.join(tempfile.mkdtemp(prefix="fig_no_skip_"), "out.docx")
     _build_docx_sync(
-        out_path=out, scheme={"name": "t", "project_id": "P1"},
-        roots=secs, children_map={"": secs}, chart_lookup=chart_lookup or {},
-        rendered_bytes=rendered_map, blocks_cache={},
-        font_name="宋体", font_size=12, page_header="", page_footer="",
-        show_page_number=False, show_title_page=False, show_toc=False,
-        bidder_name="", heading_styles=_DEFAULT_HEADING_STYLES,
-        page_break_before_chapter=True, line_spacing=1.15,
-        page_number_style="simple", toc_depth=3, margins=None,
-        cover_info=None, image_bytes=image_bytes or {}, global_facts=[],
+        out_path=out,
+        scheme={"name": "t", "project_id": "P1"},
+        roots=secs,
+        children_map={"": secs},
+        chart_lookup=chart_lookup or {},
+        rendered_bytes=rendered_map,
+        blocks_cache={},
+        font_name="宋体",
+        font_size=12,
+        page_header="",
+        page_footer="",
+        show_page_number=False,
+        show_title_page=False,
+        show_toc=False,
+        bidder_name="",
+        heading_styles=_DEFAULT_HEADING_STYLES,
+        page_break_before_chapter=True,
+        line_spacing=1.15,
+        page_number_style="simple",
+        toc_depth=3,
+        margins=None,
+        cover_info=None,
+        image_bytes=image_bytes or {},
+        global_facts=[],
         chart_fail_placeholder=fail_ph,
     )
     return Document(out)
 
 
 def _captions(doc: Document) -> list[str]:
-    return [p.text.strip() for p in doc.paragraphs
-            if p.text.strip().startswith("图 ")]
+    return [p.text.strip() for p in doc.paragraphs if p.text.strip().startswith("图 ")]
 
 
 def _chart_codes(content: str) -> list[str]:
-    return [b["code"] for b in _parse_content_blocks(content)
-            if b["type"] == "chart"]
+    return [b["code"] for b in _parse_content_blocks(content) if b["type"] == "chart"]
 
 
 # ============================================================
@@ -146,8 +163,7 @@ class TestDeletedChartFigureNumberCompaction:
 
     @staticmethod
     def _rendered_for(content: str) -> dict:
-        return {("flowchart", c): io.BytesIO(_png_bytes())
-                for c in _chart_codes(content)}
+        return {("flowchart", c): io.BytesIO(_png_bytes()) for c in _chart_codes(content)}
 
     def test_figure_numbers_compact_after_middle_deletion(self):
         codes3 = self._codes(3)
@@ -176,16 +192,19 @@ class TestDeletedChartFigureNumberCompaction:
         content3 = self._content_with(codes3)
         content2 = self._content_with([codes3[0], codes3[2]])
 
-        sec3 = [{"id": "s1", "parent_id": "", "level": 1, "sort_order": 0,
-                 "title": "第一章 工艺", "content": content3}]
+        sec3 = [{"id": "s1", "parent_id": "", "level": 1, "sort_order": 0, "title": "第一章 工艺", "content": content3}]
         sec2 = [dict(sec3[0], content=content2)]
 
         def _fp(sections, codes):
-            return _content_fingerprint({
-                "sections": sections,
-                "chart_fp": [("s1", "flowchart", c) for c in codes],
-                "config": {}, "fe_codes": [], "global_facts": [],
-            })[1]
+            return _content_fingerprint(
+                {
+                    "sections": sections,
+                    "chart_fp": [("s1", "flowchart", c) for c in codes],
+                    "config": {},
+                    "fe_codes": [],
+                    "global_facts": [],
+                }
+            )[1]
 
         h3 = _fp(sec3, codes3)
         h2 = _fp(sec2, [codes3[0], codes3[2]])
@@ -207,11 +226,11 @@ class TestCorruptImageRollback:
 
     def test_corrupt_chart_default_mode_no_number(self, monkeypatch):
         import docx.document as _docx_document
+
         monkeypatch.setattr(_docx_document.Document, "add_picture", self._boom)
         code = "graph TD\n  A[开始] --> B[结束]\n"
         content = "施工工艺流程如下图所示：\n```mermaid\n" + code + "\n```"
-        rendered = {("flowchart", c): io.BytesIO(_png_bytes())
-                    for c in _chart_codes(content)}
+        rendered = {("flowchart", c): io.BytesIO(_png_bytes()) for c in _chart_codes(content)}
         doc = _build(rendered, content)
         assert _captions(doc) == [], "损坏图表不得占号（回退后无图题）"
         full = "\n".join(p.text for p in doc.paragraphs)
@@ -220,18 +239,18 @@ class TestCorruptImageRollback:
 
     def test_corrupt_chart_placeholder_mode_shows_red(self, monkeypatch):
         import docx.document as _docx_document
+
         monkeypatch.setattr(_docx_document.Document, "add_picture", self._boom)
         code = "graph TD\n  A[开始] --> B[结束]\n"
         content = "## 总述\n```mermaid\n" + code + "\n```"
-        rendered = {("flowchart", c): io.BytesIO(_png_bytes())
-                    for c in _chart_codes(content)}
+        rendered = {("flowchart", c): io.BytesIO(_png_bytes()) for c in _chart_codes(content)}
         doc = _build(rendered, content, fail_ph=True)
         full = "\n".join(p.text for p in doc.paragraphs)
-        assert "插入失败" in full or "渲染失败" in full, \
-            "占位模式应显示红字（图号被占用、可见错误）"
+        assert "插入失败" in full or "渲染失败" in full, "占位模式应显示红字（图号被占用、可见错误）"
 
     def test_corrupt_ai_image_default_mode_no_number(self, monkeypatch):
         import docx.document as _docx_document
+
         monkeypatch.setattr(_docx_document.Document, "add_picture", self._boom)
         url = "https://example.com/fig.png"
         content = "现场示意图如下图所示：\n![示意图](%s)\n" % url

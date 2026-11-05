@@ -17,6 +17,7 @@
   F 跨层常量 parity + 源文件字节体检（R57/R58 行尾判据）
   G 纸面字号不足 × 规模超预算**合并为一条**告警（纯函数判据 + 渲染器单告警出口）
 """
+
 import ast
 import io
 import py_compile
@@ -32,23 +33,26 @@ from app.services.ai.mermaid_common import (
 from PIL import Image, ImageDraw
 
 _BE = Path(__file__).resolve().parent.parent
-_TITLE_H = 56                              # 渲染器内标题带高度
-_MM = ma.PAPER_FONT_MIN_MM                 # 纯函数用例统一取常量口径（不隐式读环境）
+_TITLE_H = 56  # 渲染器内标题带高度
+_MM = ma.PAPER_FONT_MIN_MM  # 纯函数用例统一取常量口径（不隐式读环境）
 _ARCH_SRC = (_BE / "app" / "services" / "ai" / "mermaid_architecture.py").read_text(encoding="utf-8")
 _COMMON_SRC = (_BE / "app" / "services" / "ai" / "mermaid_common.py").read_text(encoding="utf-8")
 
 
 # ------------------------------------------------------------------ 造树工具
-def _tree(n_groups: int, per_group: int, extra_depth1: int = 0,
-          label_len: int = 5) -> dict:
+def _tree(n_groups: int, per_group: int, extra_depth1: int = 0, label_len: int = 5) -> dict:
     """造「根 → 二级组 → 叶子」的树；`extra_depth1` 追加 depth=1 的直属叶子。"""
     kids = []
     for gi in range(n_groups):
-        kids.append({
-            "label": f"第{gi}施工组",
-            "children": [{"label": "作" * label_len + f"{gi}{j}",
-                          "highlight": (gi == 0 and j == 0)} for j in range(per_group)],
-        })
+        kids.append(
+            {
+                "label": f"第{gi}施工组",
+                "children": [
+                    {"label": "作" * label_len + f"{gi}{j}", "highlight": (gi == 0 and j == 0)}
+                    for j in range(per_group)
+                ],
+            }
+        )
     for i in range(extra_depth1):
         kids.append({"label": f"总工办直属专员{i}"})
     return {"label": "项目经理部", "children": kids}
@@ -69,8 +73,7 @@ def _drawn_text(text: str, font_px: int) -> str:
     box_h = int((ma.LEAF_VERTICAL_H - 2 * ma.LEAF_VERTICAL_PAD_Y) * scale)
     gap = int(ma.LEAF_VERTICAL_CHAR_GAP * scale)
     font = _image_font(int(font_px * scale), bold=True)
-    return _draw_text_vertical_center(draw, (0, 0, box_w, box_h), text, font,
-                                      "#000000", char_gap=gap)
+    return _draw_text_vertical_center(draw, (0, 0, box_w, box_h), text, font, "#000000", char_gap=gap)
 
 
 def _names_used(src: str, symbol: str) -> int:
@@ -93,7 +96,6 @@ def _names_used(src: str, symbol: str) -> int:
 # A · 纸面字号模型（必须与真实导出函数对得上，不能只是推演）
 # ==========================================================================
 class TestPaperFontModel:
-
     def test_model_agrees_with_real_export_fit(self):
         """`paper_font_mm` vs `export._fit_image_cm` 对真实 PNG 的返回值 —— 独立重算。"""
         from app.routers.export import _fit_image_cm, _read_image_dpi
@@ -105,8 +107,8 @@ class TestPaperFontModel:
         w_cm, _h_cm = _fit_image_cm(pw, ph, dpi)
         nodes, cw, ch = ma._layout_architecture_tree(tree)
         leaf_font = ma.resolve_leaf_vertical_font_px(
-            cw, [n["label"] for n in nodes if n.get("vertical")],
-            min_mm=_MM, canvas_h=ch, title_h=_TITLE_H)
+            cw, [n["label"] for n in nodes if n.get("vertical")], min_mm=_MM, canvas_h=ch, title_h=_TITLE_H
+        )
         # 纸上毫米 = PNG 内字号毫米 × 实际缩放比（缩放比由真实 _fit_image_cm 反推）
         px_to_mm = ma.ARCH_RENDER_SCALE * 2.54 / dpi * 10.0
         expect = leaf_font * px_to_mm * (w_cm / (pw * 2.54 / dpi))
@@ -120,7 +122,7 @@ class TestPaperFontModel:
 
     def test_narrow_chart_is_inserted_at_natural_size(self):
         """画布窄到 16cm 以内时 fit=1：纸面字号按 DPI 自然尺寸，不再随宽度反比变化。"""
-        natural = ma.paper_font_mm(15, 544)          # 544 设计px → PNG 1360px @300dpi → 11.5cm
+        natural = ma.paper_font_mm(15, 544)  # 544 设计px → PNG 1360px @300dpi → 11.5cm
         assert abs(natural - 15 * ma.ARCH_RENDER_SCALE * 2.54 / ma.ARCH_OUTPUT_DPI * 10) < 1e-9
         assert natural < 160.0 * 15 / 544, "窄图被误按 16cm 拉伸，纸面字号会虚高"
 
@@ -140,7 +142,6 @@ class TestPaperFontModel:
 # B · 字号自适应的三条不变量
 # ==========================================================================
 class TestFontAdaptationInvariants:
-
     def test_min_mm_is_a_required_argument(self):
         """`min_mm` 必须必填 —— 有默认值时它只能取常量，忘传的调用点会对运维杀开关
         静默失明（本轮就是被这条逼出了真缺陷）。用 TypeError 把契约钉死。"""
@@ -152,38 +153,37 @@ class TestFontAdaptationInvariants:
     def test_never_shrinks_below_base(self):
         """任何画布宽度下都**不会比旧固定字号更小** —— 本轮零回归面的根源。"""
         for cw in range(300, 6000, 137):
-            assert ma.resolve_paper_font_px(cw, base=15, ceiling=18, min_mm=_MM,
-                                            canvas_h=352, title_h=_TITLE_H) >= 15
+            assert ma.resolve_paper_font_px(cw, base=15, ceiling=18, min_mm=_MM, canvas_h=352, title_h=_TITLE_H) >= 15
             assert ma.resolve_leaf_vertical_font_px(cw, ["作业面"], min_mm=_MM) >= ma.LEAF_VERTICAL_FONT_SIZE
 
     def test_never_exceeds_ceiling(self):
         for cw in (1000, 3000, 9000, 30000):
-            assert ma.resolve_paper_font_px(cw, base=15, ceiling=18, min_mm=_MM,
-                                            canvas_h=352, title_h=_TITLE_H) <= 18
+            assert ma.resolve_paper_font_px(cw, base=15, ceiling=18, min_mm=_MM, canvas_h=352, title_h=_TITLE_H) <= 18
             assert ma.resolve_leaf_vertical_font_px(cw, ["短标签"], min_mm=_MM) <= ma.LEAF_VERTICAL_FONT_MAX
 
     def test_monotonic_in_canvas_width(self):
         """画布越宽要求字号越大（否则大图仍按小图字号出，等于没修）。"""
-        seq = [ma.resolve_paper_font_px(cw, base=15, ceiling=26, min_mm=_MM,
-                                        canvas_h=352, title_h=_TITLE_H)
-               for cw in range(800, 5000, 100)]
+        seq = [
+            ma.resolve_paper_font_px(cw, base=15, ceiling=26, min_mm=_MM, canvas_h=352, title_h=_TITLE_H)
+            for cw in range(800, 5000, 100)
+        ]
         assert all(b >= a for a, b in zip(seq, seq[1:])), seq
 
     def test_target_is_met_when_ceiling_allows(self):
         """只要上限够，纸面就必须 ≥ 目标下限（本功能的验收口径）。"""
         for cw in (900, 1200, 1600, 2000):
-            font = ma.resolve_paper_font_px(cw, base=15, ceiling=40, min_mm=_MM,
-                                            canvas_h=352, title_h=_TITLE_H)
+            font = ma.resolve_paper_font_px(cw, base=15, ceiling=40, min_mm=_MM, canvas_h=352, title_h=_TITLE_H)
             assert ma.paper_font_mm(font, cw, 352, _TITLE_H) >= ma.PAPER_FONT_MIN_MM - 1e-6
 
     def test_disabled_env_returns_exact_base(self, monkeypatch):
         """环境置 0 → `paper_font_min_mm()` 返回 0 → 字号逐字回退 R59 固定值。"""
         monkeypatch.setenv(ma.ENV_PAPER_FONT_MIN_MM, "0")
         assert ma.paper_font_min_mm() == 0.0
-        assert ma.resolve_paper_font_px(4000, base=15, ceiling=18,
-                                        min_mm=ma.paper_font_min_mm()) == 15
-        assert ma.resolve_leaf_vertical_font_px(
-            4000, ["x" * 6], min_mm=ma.paper_font_min_mm()) == ma.LEAF_VERTICAL_FONT_SIZE
+        assert ma.resolve_paper_font_px(4000, base=15, ceiling=18, min_mm=ma.paper_font_min_mm()) == 15
+        assert (
+            ma.resolve_leaf_vertical_font_px(4000, ["x" * 6], min_mm=ma.paper_font_min_mm())
+            == ma.LEAF_VERTICAL_FONT_SIZE
+        )
         assert ma.auto_vertical_enabled() is False
 
     def test_negative_env_also_disables(self, monkeypatch):
@@ -199,11 +199,10 @@ class TestFontAdaptationInvariants:
         """运维调高目标 → 同一画布要求更大字号（证明环境真的接进了链路）。"""
         monkeypatch.setenv(ma.ENV_PAPER_FONT_MIN_MM, "3.5")
         assert ma.paper_font_min_mm() == pytest.approx(3.5)
-        raised = ma.resolve_paper_font_px(1832, base=15, ceiling=40,
-                                          min_mm=ma.paper_font_min_mm(),
-                                          canvas_h=352, title_h=_TITLE_H)
-        default = ma.resolve_paper_font_px(1832, base=15, ceiling=40, min_mm=_MM,
-                                           canvas_h=352, title_h=_TITLE_H)
+        raised = ma.resolve_paper_font_px(
+            1832, base=15, ceiling=40, min_mm=ma.paper_font_min_mm(), canvas_h=352, title_h=_TITLE_H
+        )
+        default = ma.resolve_paper_font_px(1832, base=15, ceiling=40, min_mm=_MM, canvas_h=352, title_h=_TITLE_H)
         assert raised > default, (raised, default)
 
 
@@ -211,20 +210,28 @@ class TestFontAdaptationInvariants:
 # C · 竖排放大不得新增省略号（真实字体度量端到端判定）
 # ==========================================================================
 class TestNoNewEllipsisUnderAdaptation:
-
     def test_capacity_formula_is_shared_with_the_drawer(self):
         """自适应估算与真正绘制必须共用同一函数 —— 两套口径就是假绿。"""
         assert _COMMON_SRC.count("def _vertical_text_capacity(") == 1
-        assert _names_used(_COMMON_SRC, "_vertical_text_capacity") == 1   # 绘制侧调用
-        assert _names_used(_ARCH_SRC, "_vertical_text_capacity") == 2     # 导入 + 自适应调用
+        assert _names_used(_COMMON_SRC, "_vertical_text_capacity") == 1  # 绘制侧调用
+        assert _names_used(_ARCH_SRC, "_vertical_text_capacity") == 2  # 导入 + 自适应调用
         # 列容量算式只能有一处（第二处就是复制粘贴出来的分叉）
         assert _COMMON_SRC.count("per_col = max(1,") == 1
         assert _COMMON_SRC.count("max_cols = max(1,") == 1
 
-    @pytest.mark.parametrize("n_groups,per_group,label_len", [
-        (1, 2, 5), (3, 2, 5), (4, 4, 5), (4, 2, 12), (4, 4, 18),
-        (4, 4, 24), (4, 4, 40), (6, 5, 9),
-    ])
+    @pytest.mark.parametrize(
+        "n_groups,per_group,label_len",
+        [
+            (1, 2, 5),
+            (3, 2, 5),
+            (4, 4, 5),
+            (4, 2, 12),
+            (4, 4, 18),
+            (4, 4, 24),
+            (4, 4, 40),
+            (6, 5, 9),
+        ],
+    )
     def test_every_leaf_is_drawn_in_full_at_resolved_font(self, n_groups, per_group, label_len):
         """**核心护栏**：按自适应字号真画一遍，回传文字必须等于原标签（无 `…`）。
 
@@ -235,18 +242,14 @@ class TestNoNewEllipsisUnderAdaptation:
         nodes, cw, ch = ma._layout_architecture_tree(tree, vertical=True)
         labels = [n["label"] for n in nodes if n.get("vertical")]
         assert labels, "该形态没有竖排节点，用例失效"
-        font = ma.resolve_leaf_vertical_font_px(cw, labels, min_mm=_MM,
-                                                canvas_h=ch, title_h=_TITLE_H)
+        font = ma.resolve_leaf_vertical_font_px(cw, labels, min_mm=_MM, canvas_h=ch, title_h=_TITLE_H)
         for lb in labels:
-            assert _drawn_text(lb, font) == lb.strip(), (
-                f"字号 {font}px 下标签被省略号收口：{lb!r}（画布 {cw}px）")
+            assert _drawn_text(lb, font) == lb.strip(), f"字号 {font}px 下标签被省略号收口：{lb!r}（画布 {cw}px）"
 
     def test_long_labels_pin_the_font_back_down(self):
         """同一画布下，长标签必须把字号压回小值（宁可小一点也要看得全）。"""
-        short = ma.resolve_leaf_vertical_font_px(1832, ["作业面00"], min_mm=_MM,
-                                                 canvas_h=532, title_h=_TITLE_H)
-        long = ma.resolve_leaf_vertical_font_px(1832, ["作" * 30], min_mm=_MM,
-                                                canvas_h=532, title_h=_TITLE_H)
+        short = ma.resolve_leaf_vertical_font_px(1832, ["作业面00"], min_mm=_MM, canvas_h=532, title_h=_TITLE_H)
+        long = ma.resolve_leaf_vertical_font_px(1832, ["作" * 30], min_mm=_MM, canvas_h=532, title_h=_TITLE_H)
         assert long < short
         assert long >= ma.LEAF_VERTICAL_FONT_SIZE
 
@@ -260,8 +263,9 @@ class TestNoNewEllipsisUnderAdaptation:
         assert cap_big >= 12, "上限字号下容量过小，说明 LEAF_VERTICAL_FONT_MAX 定得太高"
 
     def test_empty_labels_never_raise(self):
-        assert (ma.resolve_leaf_vertical_font_px(1832, [], min_mm=_MM)
-                == ma.resolve_leaf_vertical_font_px(1832, [""], min_mm=_MM))
+        assert ma.resolve_leaf_vertical_font_px(1832, [], min_mm=_MM) == ma.resolve_leaf_vertical_font_px(
+            1832, [""], min_mm=_MM
+        )
         assert _drawn_text("   ", 20) == ""
 
 
@@ -269,7 +273,6 @@ class TestNoNewEllipsisUnderAdaptation:
 # D · 可读性驱动的竖排升级（与 R59 数量规则相互独立）
 # ==========================================================================
 class TestReadabilityEscalation:
-
     def test_small_chart_stays_horizontal(self):
         """4 叶/2 组横排画布 1032px，字号到上限时纸面 2.79mm ≥ 目标 → 不升级。"""
         tree = _tree(2, 2)
@@ -293,8 +296,9 @@ class TestReadabilityEscalation:
         auto, wa, ha = ma._layout_architecture_tree(tree)
         forced, wf, hf = ma._layout_architecture_tree(tree, vertical=True)
         assert (wa, ha) == (wf, hf)
-        assert [(n["x"], n["y"], n["w"], n["h"], n["vertical"]) for n in auto] == \
-               [(n["x"], n["y"], n["w"], n["h"], n["vertical"]) for n in forced]
+        assert [(n["x"], n["y"], n["w"], n["h"], n["vertical"]) for n in auto] == [
+            (n["x"], n["y"], n["w"], n["h"], n["vertical"]) for n in forced
+        ]
 
     def test_tree_without_candidates_never_escalates(self):
         """depth=1 的直属叶子不参与竖排（R59 §3.2）：无候选时升级必须空转，
@@ -305,7 +309,7 @@ class TestReadabilityEscalation:
 
     def test_count_rule_still_wins_when_escalation_is_off(self, monkeypatch):
         monkeypatch.delenv(ma.ENV_PAPER_FONT_MIN_MM, raising=False)
-        tree = _tree(4, 3)   # 12 个可竖排叶子 > 6
+        tree = _tree(4, 3)  # 12 个可竖排叶子 > 6
         assert ma.resolve_leaf_vertical_mode(tree, auto_vertical=False) is True
         assert ma.resolve_leaf_vertical_mode(tree, auto_vertical=True) is True
 
@@ -337,7 +341,6 @@ class TestReadabilityEscalation:
 # E · 渲染接线与可观测性
 # ==========================================================================
 class TestRendererWiringAndObservability:
-
     def test_renderer_uses_the_shared_scale_constant(self):
         """`scale = 2.5` 字面量不得残留：模型与渲染器不同源时纸面换算就是空谈。"""
         assert "scale = ARCH_RENDER_SCALE" in _ARCH_SRC
@@ -361,8 +364,8 @@ class TestRendererWiringAndObservability:
         tree = _tree(4, 4)
         nodes, cw, ch = ma._layout_architecture_tree(tree)
         font = ma.resolve_leaf_vertical_font_px(
-            cw, [n["label"] for n in nodes if n.get("vertical")],
-            min_mm=_MM, canvas_h=ch, title_h=_TITLE_H)
+            cw, [n["label"] for n in nodes if n.get("vertical")], min_mm=_MM, canvas_h=ch, title_h=_TITLE_H
+        )
         assert font > ma.LEAF_VERTICAL_FONT_SIZE
         assert ma.paper_font_mm(font, cw, ch, _TITLE_H) >= ma.PAPER_FONT_MIN_MM
 
@@ -372,10 +375,10 @@ class TestRendererWiringAndObservability:
 
         with caplog.at_level(logging.WARNING, logger="app.services.ai.mermaid_architecture"):
             caplog.clear()
-            ma._render_architecture_image_v2({"root": _tree(4, 4)})       # 16 叶：能救
+            ma._render_architecture_image_v2({"root": _tree(4, 4)})  # 16 叶：能救
             assert [r for r in caplog.records if "纸面字号" in r.getMessage()] == []
             caplog.clear()
-            ma._render_architecture_image_v2({"root": _tree(8, 6)})       # 48 叶：救不回来
+            ma._render_architecture_image_v2({"root": _tree(8, 6)})  # 48 叶：救不回来
             msgs = [r.getMessage() for r in caplog.records]
             assert any("纸面字号" in m and "拆分" in m for m in msgs), msgs
 
@@ -409,7 +412,6 @@ def _warn(canvas_w, eff_px, eff_mm, min_mm, cand, budget=_OK_BUDGET, caps=_OK_CA
 
 
 class TestMergedReadabilityWarning:
-
     def test_fine_chart_produces_no_text(self):
         assert _warn(1000, 18, 2.88, _MM, 0) == ""
 
@@ -476,12 +478,20 @@ class TestSingleWarningSite:
 
     def test_renderer_body_contains_exactly_one_warning_call(self):
         """AST 级：渲染函数体内 `logger.warning` 恰 1 处（退回双告警形态会变红）。"""
-        fn = next(n for n in ast.parse(_ARCH_SRC).body
-                  if isinstance(n, ast.FunctionDef) and n.name == "_render_architecture_image_v2")
-        calls = [n for n in ast.walk(fn)
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                 and n.func.attr == "warning"
-                 and isinstance(n.func.value, ast.Name) and n.func.value.id == "logger"]
+        fn = next(
+            n
+            for n in ast.parse(_ARCH_SRC).body
+            if isinstance(n, ast.FunctionDef) and n.name == "_render_architecture_image_v2"
+        )
+        calls = [
+            n
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "warning"
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == "logger"
+        ]
         assert len(calls) == 1, [ast.unparse(c) for c in calls]
 
 
@@ -498,7 +508,6 @@ _TOUCHED = [
 
 
 class TestCrossLayerAndBytes:
-
     def test_paper_geometry_constants_match_export_authority(self):
         """栏宽/高度上限的权威在导出侧；服务层抄一份就必须被锁住。"""
         from app.routers import export
@@ -510,6 +519,7 @@ class TestCrossLayerAndBytes:
 
     def test_renderer_reexports_capacity_helper(self):
         from app.services.ai import mermaid_renderer as mr
+
         assert mr._vertical_text_capacity is _vertical_text_capacity
 
     @pytest.mark.parametrize("path", _TOUCHED, ids=lambda p: p.name)

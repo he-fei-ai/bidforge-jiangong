@@ -17,6 +17,7 @@ TestAntiRebidRedlines             提示词与导出红线：专项施工方案 
 
 ⚠️ 每个断言都必须能**反向验证**：还原被护栏锁住的实现后应定向失败。
 """
+
 from __future__ import annotations
 
 import ast
@@ -26,7 +27,7 @@ import pytest
 from app.services import bid_analysis_service as basvc
 from app.services import scheme_classification as sc
 
-REPO = pathlib.Path(__file__).resolve().parent.parent   # → backend/
+REPO = pathlib.Path(__file__).resolve().parent.parent  # → backend/
 APP = REPO / "app"
 
 # 用户清单原文（《软件重新定位：专项施工方案编写软件》第四节）。
@@ -36,11 +37,9 @@ HAZARD_SPEC = {
     "基坑工程": ["基坑支护", "土方开挖", "基坑监测"],
     "模板工程及支撑体系": ["模板支撑", "高大模板", "盘扣式模板支撑"],
     "起重吊装及起重机械安装拆卸工程": ["起重吊装", "塔机", "施工升降机"],
-    "脚手架工程": ["落地式", "附着式", "悬挑式", "门式", "碗扣式", "盘扣式",
-                   "吊篮", "卸料平台", "操作平台"],
+    "脚手架工程": ["落地式", "附着式", "悬挑式", "门式", "碗扣式", "盘扣式", "吊篮", "卸料平台", "操作平台"],
     "拆除、爆破工程": ["人工拆除", "机械拆除", "爆破"],
-    "其他危大工程": ["幕墙", "钢结构", "网架", "预应力", "暗挖", "顶管",
-                     "水下作业", "人工挖孔桩", "边坡", "新技术"],
+    "其他危大工程": ["幕墙", "钢结构", "网架", "预应力", "暗挖", "顶管", "水下作业", "人工挖孔桩", "边坡", "新技术"],
 }
 
 
@@ -58,8 +57,8 @@ class TestTechScoringOffline:
         item_ids = {i["item_id"] for i in basvc.ANALYSIS_ITEMS}
         prompt_keys = set(basvc._ITEM_PROMPTS.keys())
         assert prompt_keys == item_ids, (
-            f"清单与提示词不同源：多余={sorted(prompt_keys - item_ids)}，"
-            f"缺失={sorted(item_ids - prompt_keys)}")
+            f"清单与提示词不同源：多余={sorted(prompt_keys - item_ids)}，" f"缺失={sorted(item_ids - prompt_keys)}"
+        )
 
     def test_item_maps_cover_all_registered_items(self):
         """id → 定义/域 的两张索引表必须覆盖注册表里的全部条目。
@@ -68,16 +67,16 @@ class TestTechScoringOffline:
         不到定义（脚本 500）；`_ITEM_DOMAIN` 漏改 → 域归属错判（可能把一个
         scheme 项当成其它域处理）。这里用**差集**双向校验。
         """
-        registered = {
-            i["item_id"] for v in basvc.EXTRACTION_DOMAINS.values() for i in v
-        }
+        registered = {i["item_id"] for v in basvc.EXTRACTION_DOMAINS.values() for i in v}
         assert registered, "注册表为空？"
         assert set(basvc._ITEM_MAP.keys()) == registered, (
             f"_ITEM_MAP 差集：缺={sorted(registered - set(basvc._ITEM_MAP))}，"
-            f"多={sorted(set(basvc._ITEM_MAP) - registered)}")
+            f"多={sorted(set(basvc._ITEM_MAP) - registered)}"
+        )
         assert set(basvc._ITEM_DOMAIN.keys()) == registered, (
             f"_ITEM_DOMAIN 差集：缺={sorted(registered - set(basvc._ITEM_DOMAIN))}，"
-            f"多={sorted(set(basvc._ITEM_DOMAIN) - registered)}")
+            f"多={sorted(set(basvc._ITEM_DOMAIN) - registered)}"
+        )
         for item_id, domain in basvc._ITEM_DOMAIN.items():
             assert item_id in {
                 i["item_id"] for i in basvc.EXTRACTION_DOMAINS.get(domain, [])
@@ -92,9 +91,9 @@ class TestTechScoringOffline:
         src = (APP / "services" / "bid_analysis_service.py").read_text("utf-8")
         tree = ast.parse(src)
         literals = {
-            node.value for node in ast.walk(tree)
-            if isinstance(node, ast.Constant) and isinstance(node.value, str)
-            and node.value == "techScoring"
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value == "techScoring"
         }
         assert not literals, "techScoring 字符串字面量已回流"
 
@@ -107,8 +106,9 @@ class TestTechScoringOffline:
         assert len(basvc.ANALYSIS_ITEMS) == 18
         assert len(basvc.REQUIRED_ITEM_IDS) == 17
         assert len(basvc.GROUPS) == 13
-        assert not any("评分" in g.get("label", "") for g in basvc.GROUPS), (
-            "分组名不得再出现评分语义")
+        assert not any("评分" in g.get("label", "") for g in basvc.GROUPS), "分组名不得再出现评分语义"
+
+
 # =========================================================================
 # 2. 招标响应域硬门禁
 # =========================================================================
@@ -118,9 +118,9 @@ class TestBidResponseDomainGate:
         """无论开关怎么写，招标响应域清单都必须 404，且 detail 带定位说明。"""
         from app.config import settings
         from app.routers import bid_analysis as ba
+
         for flag in (False, True):
-            monkeypatch.setattr(settings, "bid_response_domain_enabled",
-                                flag, raising=False)
+            monkeypatch.setattr(settings, "bid_response_domain_enabled", flag, raising=False)
             with pytest.raises(Exception) as exc:
                 await ba.list_analysis_items("bid_response")
             assert getattr(exc.value, "status_code", 0) == 404
@@ -130,8 +130,8 @@ class TestBidResponseDomainGate:
     async def test_single_item_of_retired_domain_404(self):
         """即使调用方知道 item_id，招标响应域的项也不得读。"""
         from app.routers import bid_analysis as ba
-        for item_id in ("projectInfo", "techRequirements", "businessScoring",
-                        "partAInfo", "responseFileRequirements"):
+
+        for item_id in ("projectInfo", "techRequirements", "businessScoring", "partAInfo", "responseFileRequirements"):
             with pytest.raises(Exception) as exc:
                 await ba.get_analysis_item(item_id)
             assert getattr(exc.value, "status_code", 0) == 404, item_id
@@ -140,6 +140,7 @@ class TestBidResponseDomainGate:
     async def test_domains_endpoint_marks_retired(self):
         """/domains 必须回 retired 标记，让前端隐藏而非渲染必 404 的选项。"""
         from app.routers import bid_analysis as ba
+
         res = await ba.list_extraction_domains()
         by_name = {d["domain"]: d for d in res["domains"]}
         assert by_name["scheme"]["enabled"] is True
@@ -153,10 +154,10 @@ class TestBidResponseDomainGate:
         """SSE 入口必须最先做门禁（不查文档、不建任务即拒绝）。"""
         from app.routers import bid_analysis as ba
         from app.services.ai.task_registry import _tasks
+
         _tasks.clear()
         with pytest.raises(Exception) as exc:
-            await ba._start_sse_inner(db_conn, "", "no_such_project", "key",
-                                      "", False, domain="bid_response")
+            await ba._start_sse_inner(db_conn, "", "no_such_project", "key", "", False, domain="bid_response")
         assert getattr(exc.value, "status_code", 0) == 404
         assert not _tasks, "门禁必须在建任务之前，不能留下孤儿任务"
 
@@ -182,26 +183,22 @@ class TestBidResponseDomainGate:
         到达，且可能承载合法的多域数据读写，不纳入本约束。
         """
         tree = ast.parse((APP / "routers" / "bid_analysis.py").read_text("utf-8"))
-        fns = [n for n in ast.walk(tree)
-               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        fns = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
 
         def _called_names(fn):
-            return {n.func.id for n in ast.walk(fn)
-                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+            return {n.func.id for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
 
-        direct_gate = {fn.name for fn in fns
-                       if "_assert_domain_available" in _called_names(fn)}
+        direct_gate = {fn.name for fn in fns if "_assert_domain_available" in _called_names(fn)}
 
         gated, ungated = [], []
         for fn in fns:
-            has_domain = any(a.arg == "domain"
-                             for a in fn.args.args + fn.args.kwonlyargs)
+            has_domain = any(a.arg == "domain" for a in fn.args.args + fn.args.kwonlyargs)
             if not has_domain:
                 continue
             is_endpoint = any(
-                any(prefix in self._deco_attr(d) for prefix in
-                    ("get", "post", "put", "delete", "patch"))
-                for d in fn.decorator_list)
+                any(prefix in self._deco_attr(d) for prefix in ("get", "post", "put", "delete", "patch"))
+                for d in fn.decorator_list
+            )
             if not is_endpoint:
                 continue
             names = _called_names(fn)
@@ -214,10 +211,12 @@ class TestBidResponseDomainGate:
     def test_gate_helper_fails_closed_on_unknown_input(self):
         """非字符串 domain（如单测直传 Query 对象）不得抛 AttributeError。"""
         from app.routers import bid_analysis as ba
+
         ba._assert_domain_available(None)
         ba._assert_domain_available("")
         ba._assert_domain_available("scheme")
         ba._assert_domain_available(object())
+
 
 # =========================================================================
 # 3. 六大类危大工程覆盖度
@@ -249,8 +248,9 @@ class TestHazardCategoryCoverage:
             all_kw.extend(str(k) for k in sub.get("keywords") or ())
             all_kw.append(sub["name"])
         for want in HAZARD_SPEC[cat_name]:
-            assert any(want in kw or kw in want for kw in all_kw if len(kw) >= 2), (
-                f"「{cat_name}」缺少子类：{want}；现有关键词={all_kw}")
+            assert any(
+                want in kw or kw in want for kw in all_kw if len(kw) >= 2
+            ), f"「{cat_name}」缺少子类：{want}；现有关键词={all_kw}"
 
     def test_new_subtypes_wired_end_to_end(self):
         """本轮补齐的 7 个子类必须能真正确定方案名称 → 危大判定。"""
@@ -275,8 +275,7 @@ class TestHazardCategoryCoverage:
                 key = sub.get("threshold")
                 if key is None:
                     continue
-                assert key in sc.HAZARD_THRESHOLDS, (
-                    f"子类 {sub['id']} 的 threshold 键 {key!r} 不在 HAZARD_THRESHOLDS")
+                assert key in sc.HAZARD_THRESHOLDS, f"子类 {sub['id']} 的 threshold 键 {key!r} 不在 HAZARD_THRESHOLDS"
                 r = sc.evaluate_hazard_level(key, {})
                 assert isinstance(r["is_hazardous"], bool)
                 assert isinstance(r["missing_params"], list)
@@ -284,9 +283,8 @@ class TestHazardCategoryCoverage:
     def test_non_parameter_subs_are_conservatively_hazardous(self):
         """threshold=None 的子类必须保守判危大（不漏判是安全红线）。"""
         assert any(
-            sub.get("threshold") is None
-            for cat in sc.HAZARD_CATEGORIES for sub in cat["subs"]), (
-            "阈值表里没有任何非参数型子类，本例将失去意义")
+            sub.get("threshold") is None for cat in sc.HAZARD_CATEGORIES for sub in cat["subs"]
+        ), "阈值表里没有任何非参数型子类，本例将失去意义"
         r = sc.evaluate_hazard_level(None, {})
         assert r["is_hazardous"] is True
 
@@ -313,8 +311,7 @@ class TestNineChaptersIntegrity:
         item_ids = {i["item_id"] for i in basvc.ANALYSIS_ITEMS}
         for ch in sc.NINE_CHAPTERS:
             for sid in ch["source_items"]:
-                assert sid in item_ids, (
-                    f"第{ch['chapter']}章引用了不存在的提取项 {sid}（拆链）")
+                assert sid in item_ids, f"第{ch['chapter']}章引用了不存在的提取项 {sid}（拆链）"
 
     def test_every_chapter_has_at_least_one_source_item(self):
         """每个章节都必须至少绑定一个真实提取项（空映射 = 该章永远无内容）。"""
@@ -343,6 +340,7 @@ class TestNineChaptersIntegrity:
             fields = sc.required_fields_for_chapter(ch["key"], "no_such_category")
             assert isinstance(fields, list)
 
+
 # =========================================================================
 # 5. 防回退红线：专项施工方案 ≠ 投标文件
 # =========================================================================
@@ -361,21 +359,30 @@ class TestAntiRebidRedlines:
         src = self._read("app/services/ai/prompts/_shared.py")
         assert "SHARED_SCOPE_RULES" in src
         assert "文件性质红线" in src
-        for phrase in ("专项施工方案", "不是投标", "严禁设置投标场景章节",
-                       "严禁引用投标术语", "严禁照抄投标件内容"):
+        for phrase in ("专项施工方案", "不是投标", "严禁设置投标场景章节", "严禁引用投标术语", "严禁照抄投标件内容"):
             assert phrase in src, f"红线缺失：{phrase}"
 
     def test_shared_redline_content_is_intact(self):
         """共享红线常量本身的四要素不得被删（唯一事实源本身要有人守）。"""
         from app.services.ai.prompts._shared import SHARED_SCOPE_RULES
-        for phrase in ("专项施工方案", "不是投标", "严禁设置投标场景章节",
-                       "严禁引用投标术语", "严禁照抄投标件内容", "设计文件"):
+
+        for phrase in (
+            "专项施工方案",
+            "不是投标",
+            "严禁设置投标场景章节",
+            "严禁引用投标术语",
+            "严禁照抄投标件内容",
+            "设计文件",
+        ):
             assert phrase in SHARED_SCOPE_RULES, f"红线缺失：{phrase}"
 
-    @pytest.mark.parametrize("rel", [
-        "app/services/ai/prompts/outline.py",
-        "app/services/ai/prompts/content.py",
-    ])
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "app/services/ai/prompts/outline.py",
+            "app/services/ai/prompts/content.py",
+        ],
+    )
     def test_prompt_modules_document_the_redline(self, rel):
         """两个提示词模块都必须**引用**红线（代码或常量二选一）。
 
@@ -405,47 +412,50 @@ class TestAntiRebidRedlines:
         （AGENTS.md §5.7「注释含关键词误伤字面量判定」同构陷阱）。
         """
         import ast
+
         path = APP / "services" / "ai" / "prompts" / "content.py"
         tree = ast.parse(path.read_text("utf-8"))
 
         # (1) 不得再 import 红线常量（注册表是唯一事实源）
         imported = []
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module \
-                    and node.module.endswith("prompts._shared"):
+            if isinstance(node, ast.ImportFrom) and node.module and node.module.endswith("prompts._shared"):
                 imported += [a.name for a in node.names]
-        assert "SHARED_SCOPE_RULES_BRIEF" not in imported, (
-            "正文侧不得再 import 红线常量（导入期值拷贝 = 用户改不动）")
+        assert "SHARED_SCOPE_RULES_BRIEF" not in imported, "正文侧不得再 import 红线常量（导入期值拷贝 = 用户改不动）"
 
         # (2) 不得再有把红线常量 replace 进模板的调用
         for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "replace"):
+            if not (
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "replace"
+            ):
                 continue
             args = [a for a in node.args if isinstance(a, ast.Constant)]
             names = [n for n in ast.walk(node) if isinstance(n, ast.Name)]
             assert not ({"SHARED_SCOPE_RULES_BRIEF"} <= {n.id for n in names}), (
-                "line %d：不得在导入期把出厂红线值拷贝进模板"
-                "（DB 覆盖将永不生效）" % node.lineno)
+                "line %d：不得在导入期把出厂红线值拷贝进模板" "（DB 覆盖将永不生效）" % node.lineno
+            )
 
         # (3) 注册进模板的正文必须保留运行时占位符
-        templates = [n.args[3] for n in ast.walk(tree)
-                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                     and n.func.id == "_reg" and len(n.args) >= 4]
+        templates = [
+            n.args[3]
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_reg" and len(n.args) >= 4
+        ]
         assert templates, "未解析到任何 _reg 模板（AST 结构变了？）"
         inline_brief = [
-            t.lineno for t in templates
-            if isinstance(t, ast.Constant) and isinstance(t.value, str)
+            t.lineno
+            for t in templates
+            if isinstance(t, ast.Constant)
+            and isinstance(t.value, str)
             and "专项施工方案是**指导现场施工的技术文件**" in t.value
         ]
-        assert not inline_brief, (
-            "content.py 的模板里又内联了红线正文，行号：%s" % inline_brief)
+        assert not inline_brief, "content.py 的模板里又内联了红线正文，行号：%s" % inline_brief
 
     def test_scope_rules_brief_is_registered_prompt(self):
         """红线简档必须注册为可编辑提示词（否则编辑器里根本看不到它）。"""
         from app.services.ai.prompts._registry import _ALL_PROMPTS
-        assert "SHARED_SCOPE_RULES_BRIEF" in _ALL_PROMPTS, \
-            "简档未注册 → 用户无法在提示词编辑器看到/修改正文侧红线"
+
+        assert "SHARED_SCOPE_RULES_BRIEF" in _ALL_PROMPTS, "简档未注册 → 用户无法在提示词编辑器看到/修改正文侧红线"
         meta = _ALL_PROMPTS["SHARED_SCOPE_RULES_BRIEF"]
         assert meta.get("category") == "共享规则"
 
@@ -458,6 +468,7 @@ class TestAntiRebidRedlines:
         判定」同构陷阱）。内联副本一定是**注册进模板的字符串**，注释不是。
         """
         import ast
+
         path = APP / "services" / "ai" / "prompts" / "content.py"
         tree = ast.parse(path.read_text("utf-8"))
 
@@ -468,21 +479,20 @@ class TestAntiRebidRedlines:
         #   简档」），会把说明文字误判成内联副本而恒失败。
         templates = []
         for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name)
-                    and node.func.id == "_reg"):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_reg"):
                 continue
             if len(node.args) >= 4:
                 templates.append(node.args[3])
         assert templates, "未解析到任何 _reg 模板（AST 结构变了？）"
 
         inline = [
-            t.lineno for t in templates
-            if isinstance(t, ast.Constant) and isinstance(t.value, str)
+            t.lineno
+            for t in templates
+            if isinstance(t, ast.Constant)
+            and isinstance(t.value, str)
             and ("文件性质红线" in t.value or "本方案是指导" in t.value)
         ]
-        assert not inline, (
-            "content.py 的注册模板里又内联了红线正文，行号：%s" % inline)
+        assert not inline, "content.py 的注册模板里又内联了红线正文，行号：%s" % inline
 
     @pytest.mark.parametrize("key", _CONTENT_KEYS)
     def test_rendered_content_prompt_carries_redline(self, key):
@@ -497,14 +507,12 @@ class TestAntiRebidRedlines:
         #    一直是原样返回）。生产代码一律走前者（render() 即转发到 _cache）。
         from app.services.ai.prompts._cache import get_prompt
         from app.services.ai.prompts._shared import SHARED_SCOPE_RULES_BRIEF
+
         text = get_prompt(key) or ""
         assert "<<SCOPE_RULES>>" not in text, f"{key} 的占位符未被替换"
-        assert "{SHARED_SCOPE_RULES_BRIEF}" not in text, \
-            f"{key} 的运行时共享占位符未解析（正文会收到裸占位符）"
-        assert "SHARED_SCOPE_RULES_BRIEF"[:20] in text or \
-            "文件性质红线" in text, f"{key} 渲染后没有红线内容"
-        assert SHARED_SCOPE_RULES_BRIEF in text, \
-            f"{key} 渲染后红线内容与出厂简档不一致"
+        assert "{SHARED_SCOPE_RULES_BRIEF}" not in text, f"{key} 的运行时共享占位符未解析（正文会收到裸占位符）"
+        assert "SHARED_SCOPE_RULES_BRIEF"[:20] in text or "文件性质红线" in text, f"{key} 渲染后没有红线内容"
+        assert SHARED_SCOPE_RULES_BRIEF in text, f"{key} 渲染后红线内容与出厂简档不一致"
         for term in ("招标文件", "投标文件", "设计文件"):
             assert term in text, f"{key} 渲染后缺少红线要素：{term}"
 
@@ -519,14 +527,13 @@ class TestAntiRebidRedlines:
             SHARED_SCOPE_RULES,
             SHARED_SCOPE_RULES_BRIEF,
         )
-        terms = ("招标文件", "投标文件", "评标办法", "评分标准",
-                 "废标条件", "投标须知", "商务条款")
+
+        terms = ("招标文件", "投标文件", "评标办法", "评分标准", "废标条件", "投标须知", "商务条款")
         for t in terms:
             assert t in SHARED_SCOPE_RULES, f"完整版红线缺术语：{t}"
             assert t in SHARED_SCOPE_RULES_BRIEF, f"简档红线缺术语：{t}"
         for t in ("设计文件与合同依据", "经审批的施工组织设计", "施工合同约定"):
-            assert t in SHARED_SCOPE_RULES and t in SHARED_SCOPE_RULES_BRIEF, (
-                f"替代写法不一致：{t}")
+            assert t in SHARED_SCOPE_RULES and t in SHARED_SCOPE_RULES_BRIEF, f"替代写法不一致：{t}"
 
     def test_export_blocks_bidding_terms(self):
         """导出体检必须继续拦截投标场景用语（否则 AI 幻觉混进出稿）。
@@ -537,8 +544,9 @@ class TestAntiRebidRedlines:
         """
         src_export = self._read("app/routers/export.py")
         src_scan = self._read("app/routers/_export_issue_scan.py")
-        assert "from app.routers._export_issue_scan import" in src_export, (
-            "导出 facade 必须仍引用拆分后的体检模块（词表不得悬空）")
+        assert (
+            "from app.routers._export_issue_scan import" in src_export
+        ), "导出 facade 必须仍引用拆分后的体检模块（词表不得悬空）"
         src = src_export + "\n" + src_scan
         assert "bidding_terms" in src
         for term in ("招标文件", "投标文件", "评标办法", "评分标准", "废标条件"):
@@ -554,4 +562,3 @@ class TestAntiRebidRedlines:
         src = self._read("app/routers/export.py")
         for term in ("投标函", "报价表", "投标保证金", "投标文件封面"):
             assert term not in src, f"导出出现了投标文件模板：{term}"
-

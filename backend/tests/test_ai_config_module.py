@@ -8,6 +8,7 @@
 5. 路由层 —— key 脱敏 / toggle 幂等 / 删除后 priority 重排 / 日志筛选分页 /
    配置导出导入 / 错误分类不再子串误判
 """
+
 import contextlib
 import json
 
@@ -31,31 +32,50 @@ from app.services.crypto import encrypt_api_key
 @pytest.fixture(autouse=True)
 def patch_write_tx_conn(db_conn, monkeypatch):
     """save_ai_config 走 write_tx_conn（独立写池），测试里指向内存连接。"""
+
     @contextlib.asynccontextmanager
     async def _fake():
         yield db_conn
+
     monkeypatch.setattr(pf, "write_tx_conn", _fake)
 
 
-async def _insert(db, cid, provider="openai", model="gpt-4o", is_active=0,
-                  priority=0, key="sk-test", base_url="https://api.test.com/v1",
-                  remark="", plan="pay_as_you_go"):
+async def _insert(
+    db,
+    cid,
+    provider="openai",
+    model="gpt-4o",
+    is_active=0,
+    priority=0,
+    key="sk-test",
+    base_url="https://api.test.com/v1",
+    remark="",
+    plan="pay_as_you_go",
+):
     await db.execute(
         "INSERT INTO ai_config (id, provider_name, plan, api_key_encrypted, base_url,"
         " model, is_active, priority, remark, timeout, concurrency)"
         " VALUES (?,?,?,?,?,?,?,?,?,60,4)",
-        (cid, provider, plan, encrypt_api_key(key), base_url, model,
-         is_active, priority, remark))
+        (cid, provider, plan, encrypt_api_key(key), base_url, model, is_active, priority, remark),
+    )
     await db.commit()
 
 
 def _base_payload(**over):
     data = {
-        "id": "", "provider_name": "deepseek", "plan": "pay_as_you_go",
-        "api_key": "sk-abc", "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat", "max_tokens": 8192, "temperature": 0.7,
-        "timeout": 900, "concurrency": 4, "is_active": True,
-        "priority": None, "remark": "",
+        "id": "",
+        "provider_name": "deepseek",
+        "plan": "pay_as_you_go",
+        "api_key": "sk-abc",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "max_tokens": 8192,
+        "temperature": 0.7,
+        "timeout": 900,
+        "concurrency": 4,
+        "is_active": True,
+        "priority": None,
+        "remark": "",
     }
     data.update(over)
     return data
@@ -105,8 +125,7 @@ class TestSaveAiConfig:
     async def test_new_config_appended_to_chain_end(self, db_conn):
         await _insert(db_conn, "c1", priority=0)
         await _insert(db_conn, "c2", priority=1)
-        cid = await pf.save_ai_config(_base_payload(provider_name="zhipu",
-                                                    model="glm-4-plus", is_active=False))
+        cid = await pf.save_ai_config(_base_payload(provider_name="zhipu", model="glm-4-plus", is_active=False))
         cur = await db_conn.execute("SELECT priority FROM ai_config WHERE id=?", (cid,))
         assert (await cur.fetchone())[0] == 2
 
@@ -123,12 +142,12 @@ class TestSaveAiConfig:
             await pf.save_ai_config(_base_payload(plan="coding_plan", base_url=""))
 
     async def test_clamps_out_of_range_numbers(self, db_conn):
-        cid = await pf.save_ai_config(_base_payload(
-            max_tokens=99999999, temperature=9.9, timeout=1, concurrency=999,
-            is_active=False))
+        cid = await pf.save_ai_config(
+            _base_payload(max_tokens=99999999, temperature=9.9, timeout=1, concurrency=999, is_active=False)
+        )
         cur = await db_conn.execute(
-            "SELECT max_tokens, temperature, timeout, concurrency FROM ai_config WHERE id=?",
-            (cid,))
+            "SELECT max_tokens, temperature, timeout, concurrency FROM ai_config WHERE id=?", (cid,)
+        )
         row = await cur.fetchone()
         assert row[0] == 200000
         assert row[1] == 2.0
@@ -136,14 +155,15 @@ class TestSaveAiConfig:
         # ✅ concurrency 上界跟随 settings.max_concurrency（2026-09-17 P0 收敛为 5），
         #    不再写死数值，避免调全局并发上限时测试失真
         from app.config import settings as _settings
+
         assert row[3] == _settings.max_concurrency
 
     async def test_keeps_old_key_when_api_key_empty(self, db_conn):
         await _insert(db_conn, "c1", key="sk-original", is_active=1)
         await pf.save_ai_config(_base_payload(id="c1", api_key="", remark="x"))
-        cur = await db_conn.execute(
-            "SELECT api_key_encrypted FROM ai_config WHERE id='c1'")
+        cur = await db_conn.execute("SELECT api_key_encrypted FROM ai_config WHERE id='c1'")
         from app.services.crypto import decrypt_api_key
+
         assert decrypt_api_key((await cur.fetchone())[0]) == "sk-original"
 
 
@@ -183,12 +203,13 @@ class TestAuditTokenAccounting:
     async def test_tokens_persisted(self, db_conn):
         pf._audit_buffer.clear()
         pf._audit_last_flush["ts"] = 1e18  # 阻止 10s 兜底自动 flush
-        await pf._log_audit("deepseek", "deepseek-chat", "chat", 1.5, True,
-                            prompt_tokens=120, completion_tokens=45, cached_tokens=30)
+        await pf._log_audit(
+            "deepseek", "deepseek-chat", "chat", 1.5, True, prompt_tokens=120, completion_tokens=45, cached_tokens=30
+        )
         await pf.flush_audit_buffer()
         cur = await db_conn.execute(
-            "SELECT prompt_tokens, completion_tokens, cached_tokens, success"
-            " FROM ai_audit_logs")
+            "SELECT prompt_tokens, completion_tokens, cached_tokens, success" " FROM ai_audit_logs"
+        )
         row = await cur.fetchone()
         assert tuple(row) == (120, 45, 30, 1)
 
@@ -203,11 +224,12 @@ class TestAuditTokenAccounting:
     def test_extract_usage_normalizes(self):
         class P:
             last_usage = {"prompt_tokens": 5, "completion_tokens": 6, "cached_tokens": 1}
-        assert pf.extract_usage(P()) == {
-            "prompt_tokens": 5, "completion_tokens": 6, "cached_tokens": 1}
+
+        assert pf.extract_usage(P()) == {"prompt_tokens": 5, "completion_tokens": 6, "cached_tokens": 1}
 
         class Empty:
             last_usage = {}
+
         assert pf.extract_usage(Empty())["prompt_tokens"] == 0
         assert pf.extract_usage(object())["prompt_tokens"] == 0
 
@@ -215,19 +237,21 @@ class TestAuditTokenAccounting:
 class TestProviderUsageNormalization:
     def test_openai_style(self):
         from app.services.ai.providers.base import BaseProvider
+
         p = BaseProvider("k", "https://x/v1", "m")
-        p._set_usage({"prompt_tokens": 7, "completion_tokens": 2,
-                      "prompt_tokens_details": {"cached_tokens": 1}})
+        p._set_usage({"prompt_tokens": 7, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 1}})
         assert p.last_usage == {"prompt_tokens": 7, "completion_tokens": 2, "cached_tokens": 1}
 
     def test_anthropic_style(self):
         from app.services.ai.providers.base import BaseProvider
+
         p = BaseProvider("k", "https://x/v1", "m")
         p._set_usage({"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 3})
         assert p.last_usage == {"prompt_tokens": 10, "completion_tokens": 5, "cached_tokens": 3}
 
     def test_none_resets(self):
         from app.services.ai.providers.base import BaseProvider
+
         p = BaseProvider("k", "https://x/v1", "m")
         p._set_usage(None)
         assert p.last_usage["prompt_tokens"] == 0
@@ -250,7 +274,8 @@ class TestConfigRoutes:
 
     async def test_get_config_flags_broken_key(self, db_conn):
         await db_conn.execute(
-            "INSERT INTO ai_config (id, provider_name, api_key_encrypted) VALUES ('c1','openai','not-fernet')")
+            "INSERT INTO ai_config (id, provider_name, api_key_encrypted) VALUES ('c1','openai','not-fernet')"
+        )
         await db_conn.commit()
         res = await ai_router.get_config(db=db_conn)
         assert res["items"][0]["key_broken"] is True
@@ -268,8 +293,7 @@ class TestConfigRoutes:
         await _insert(db_conn, "c1", is_active=1)
         await _insert(db_conn, "c2", is_active=0)
         await ai_router.toggle_config("c2", db=db_conn)
-        cur = await db_conn.execute(
-            "SELECT id FROM ai_config WHERE is_active=1")
+        cur = await db_conn.execute("SELECT id FROM ai_config WHERE is_active=1")
         rows = await cur.fetchall()
         assert len(rows) == 1 and rows[0][0] == "c2"
 
@@ -278,8 +302,7 @@ class TestConfigRoutes:
         for i, cid in enumerate(["a", "b", "c"], start=1):
             await _insert(db_conn, cid, priority=i)
         await ai_router.delete_config("b", db=db_conn)
-        cur = await db_conn.execute(
-            "SELECT id, priority FROM ai_config ORDER BY priority ASC")
+        cur = await db_conn.execute("SELECT id, priority FROM ai_config ORDER BY priority ASC")
         rows = [(r[0], r[1]) for r in await cur.fetchall()]
         assert rows == [("main", 0), ("a", 1), ("c", 2)]
 
@@ -292,13 +315,15 @@ class TestConfigRoutes:
         await _insert(db_conn, "c1", priority=0)
         with pytest.raises(Exception):
             await ai_router.update_fallback_chain(
-                FallbackChainUpdate(chain=[{"id": "c1"}, {"id": "ghost"}]), db=db_conn)
+                FallbackChainUpdate(chain=[{"id": "c1"}, {"id": "ghost"}]), db=db_conn
+            )
 
     async def test_fallback_chain_assigns_sequential_priority(self, db_conn):
         for cid in ("a", "b", "c"):
             await _insert(db_conn, cid)
         res = await ai_router.update_fallback_chain(
-            FallbackChainUpdate(chain=[{"id": "c"}, {"id": "a"}, {"id": "b"}]), db=db_conn)
+            FallbackChainUpdate(chain=[{"id": "c"}, {"id": "a"}, {"id": "b"}]), db=db_conn
+        )
         assert res["count"] == 3
         cur = await db_conn.execute("SELECT id FROM ai_config ORDER BY priority ASC")
         assert [r[0] for r in await cur.fetchall()] == ["c", "a", "b"]
@@ -311,14 +336,19 @@ class TestAuditLogRoutes:
                 "INSERT INTO ai_audit_logs (id, provider_name, model, action,"
                 " prompt_tokens, completion_tokens, cached_tokens, duration, success)"
                 " VALUES (?,?,?,?,10,5,2,1.0,?)",
-                (f"log{i}", prov, "m", action, ok))
+                (f"log{i}", prov, "m", action, ok),
+            )
         await db.commit()
 
     async def test_filters_and_pagination(self, db_conn):
-        await self._seed_logs(db_conn, [
-            ("deepseek", "chat", 1), ("deepseek", "chat", 0),
-            ("zhipu", "extract", 1),
-        ])
+        await self._seed_logs(
+            db_conn,
+            [
+                ("deepseek", "chat", 1),
+                ("deepseek", "chat", 0),
+                ("zhipu", "extract", 1),
+            ],
+        )
         res = await ai_router.audit_logs(limit=10, db=db_conn)
         assert res["total"] == 3
         assert set(res["providers"]) == {"deepseek", "zhipu"}
@@ -336,10 +366,11 @@ class TestAuditLogRoutes:
     async def test_cleanup_deletes_old_rows(self, db_conn):
         await db_conn.execute(
             "INSERT INTO ai_audit_logs (id, provider_name, action, success, created_at)"
-            " VALUES ('old','x','chat',1, datetime('now','localtime','-100 days'))")
+            " VALUES ('old','x','chat',1, datetime('now','localtime','-100 days'))"
+        )
         await db_conn.execute(
-            "INSERT INTO ai_audit_logs (id, provider_name, action, success)"
-            " VALUES ('new','x','chat',1)")
+            "INSERT INTO ai_audit_logs (id, provider_name, action, success)" " VALUES ('new','x','chat',1)"
+        )
         await db_conn.commit()
         res = await ai_router.cleanup_audit_logs(AuditLogCleanup(keep_days=30), db=db_conn)
         assert res["deleted"] == 1
@@ -349,13 +380,14 @@ class TestAuditLogRoutes:
     async def test_cleanup_only_failed_keeps_success(self, db_conn):
         await db_conn.execute(
             "INSERT INTO ai_audit_logs (id, provider_name, action, success, created_at)"
-            " VALUES ('oldfail','x','chat',0, datetime('now','localtime','-100 days'))")
+            " VALUES ('oldfail','x','chat',0, datetime('now','localtime','-100 days'))"
+        )
         await db_conn.execute(
             "INSERT INTO ai_audit_logs (id, provider_name, action, success, created_at)"
-            " VALUES ('oldok','x','chat',1, datetime('now','localtime','-100 days'))")
+            " VALUES ('oldok','x','chat',1, datetime('now','localtime','-100 days'))"
+        )
         await db_conn.commit()
-        res = await ai_router.cleanup_audit_logs(
-            AuditLogCleanup(keep_days=30, only_failed=True), db=db_conn)
+        res = await ai_router.cleanup_audit_logs(AuditLogCleanup(keep_days=30, only_failed=True), db=db_conn)
         assert res["deleted"] == 1
         cur = await db_conn.execute("SELECT id FROM ai_audit_logs")
         assert [r[0] for r in await cur.fetchall()] == ["oldok"]
@@ -368,7 +400,8 @@ class TestStatsRoute:
                 "INSERT INTO ai_audit_logs (id, provider_name, model, action,"
                 " prompt_tokens, completion_tokens, cached_tokens, duration, success)"
                 " VALUES (?,?,?,?,?,?,?,1.0,?)",
-                (f"l{i}", "deepseek", "m", "chat", pt, ct, cache, ok))
+                (f"l{i}", "deepseek", "m", "chat", pt, ct, cache, ok),
+            )
         await db_conn.commit()
         res = await ai_router.ai_stats(db=db_conn)
         s = res["summary"]
@@ -402,37 +435,60 @@ class TestConfigExportImport:
         assert "sk-secret-value" not in blob
 
     async def test_import_creates_without_key_and_skips_duplicates(self, db_conn):
-        await _insert(db_conn, "c1", provider="deepseek", model="deepseek-chat",
-                      base_url="https://api.deepseek.com/v1")
-        body = ConfigImportIn(items=[
-            {"provider_name": "deepseek", "model": "deepseek-chat",
-             "base_url": "https://api.deepseek.com/v1"},          # 重复 → 跳过
-            {"provider_name": "zhipu", "model": "glm-4-plus",
-             "base_url": "https://open.bigmodel.cn/api/paas/v4"},  # 新增
-            {"provider_name": "", "model": "x"},                   # 非法 → 跳过
-        ])
+        await _insert(db_conn, "c1", provider="deepseek", model="deepseek-chat", base_url="https://api.deepseek.com/v1")
+        body = ConfigImportIn(
+            items=[
+                {
+                    "provider_name": "deepseek",
+                    "model": "deepseek-chat",
+                    "base_url": "https://api.deepseek.com/v1",
+                },  # 重复 → 跳过
+                {
+                    "provider_name": "zhipu",
+                    "model": "glm-4-plus",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                },  # 新增
+                {"provider_name": "", "model": "x"},  # 非法 → 跳过
+            ]
+        )
         res = await ai_router.import_config(body, db=db_conn)
         assert res["imported"] == 1
         assert res["skipped"] == 2
-        cur = await db_conn.execute(
-            "SELECT api_key_encrypted, is_active FROM ai_config WHERE provider_name='zhipu'")
+        cur = await db_conn.execute("SELECT api_key_encrypted, is_active FROM ai_config WHERE provider_name='zhipu'")
         row = await cur.fetchone()
-        assert row[0] == ""      # 导入不带 Key
-        assert row[1] == 0       # 导入后不自动启用
+        assert row[0] == ""  # 导入不带 Key
+        assert row[1] == 0  # 导入后不自动启用
 
     async def test_import_overwrite_is_individually_rollbackable(self, db_conn):
-        await _insert(db_conn, "c1", provider="deepseek", model="deepseek-chat",
-                      base_url="https://api.deepseek.com/v1", remark="原备注")
-        body = ConfigImportIn(overwrite=True, items=[{
-            "provider_name": "deepseek", "model": "deepseek-chat",
-            "base_url": "https://api.deepseek.com/v1", "remark": "导入覆盖",
-            "max_tokens": 4096, "temperature": 0.2, "timeout": 120,
-            "concurrency": 2, "request_mode": "normal",
-        }])
+        await _insert(
+            db_conn,
+            "c1",
+            provider="deepseek",
+            model="deepseek-chat",
+            base_url="https://api.deepseek.com/v1",
+            remark="原备注",
+        )
+        body = ConfigImportIn(
+            overwrite=True,
+            items=[
+                {
+                    "provider_name": "deepseek",
+                    "model": "deepseek-chat",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "remark": "导入覆盖",
+                    "max_tokens": 4096,
+                    "temperature": 0.2,
+                    "timeout": 120,
+                    "concurrency": 2,
+                    "request_mode": "normal",
+                }
+            ],
+        )
         await ai_router.import_config(body, db=db_conn)
         cur = await db_conn.execute(
             "SELECT id, snapshot_json FROM ai_config_audit_logs "
-            "WHERE action='import' AND config_id='c1' ORDER BY created_at DESC")
+            "WHERE action='import' AND config_id='c1' ORDER BY created_at DESC"
+        )
         row = await cur.fetchone()
         assert row is not None
         snap = json.loads(row[1])
@@ -454,7 +510,7 @@ class TestErrorClassification:
         assert c["category"] != "url"
 
     def test_real_404_is_url_error(self):
-        c = ai_router._classify_error(Exception("HTTP 404: {\"error\":\"not found\"}"))
+        c = ai_router._classify_error(Exception('HTTP 404: {"error":"not found"}'))
         assert c["category"] == "url"
 
     def test_401_is_auth_error(self):
@@ -474,32 +530,34 @@ class TestErrorClassification:
     def test_structured_status_code_from_response(self):
         class Resp:
             status_code = 403
+
         class Err(Exception):
             response = Resp()
+
         assert ai_router._classify_error(Err("boom"))["category"] == "auth"
 
 
 class TestPrecheckAndTestRoutes:
     async def test_test_config_rejects_empty_model(self, db_conn):
         res = await ai_router.test_config(
-            AIConfigTest(provider_name="deepseek", base_url="https://api.deepseek.com/v1",
-                         model="", api_key="sk-x"), db=db_conn)
+            AIConfigTest(provider_name="deepseek", base_url="https://api.deepseek.com/v1", model="", api_key="sk-x"),
+            db=db_conn,
+        )
         assert res["ok"] is False and "模型" in res["error"]
 
     async def test_test_config_rejects_bad_scheme(self, db_conn):
         res = await ai_router.test_config(
-            AIConfigTest(provider_name="custom", base_url="file:///etc/passwd",
-                         model="m", api_key="sk-x"), db=db_conn)
+            AIConfigTest(provider_name="custom", base_url="file:///etc/passwd", model="m", api_key="sk-x"), db=db_conn
+        )
         assert res["ok"] is False
         assert "http" in res["error"].lower()
 
     async def test_test_config_reads_model_from_db(self, db_conn):
         """编辑模式下表单未回填 model 时，应能从已存配置补齐（否则必然 400）。"""
-        await _insert(db_conn, "c1", model="gpt-4o",
-                      base_url="https://api.test.com/v1")
+        await _insert(db_conn, "c1", model="gpt-4o", base_url="https://api.test.com/v1")
         res = await ai_router.test_config(
-            AIConfigTest(config_id="c1", model="", base_url="", api_key="sk-x"),
-            db=db_conn)
+            AIConfigTest(config_id="c1", model="", base_url="", api_key="sk-x"), db=db_conn
+        )
         # 走到 DNS 预检才可能失败（api.test.com 不存在），但不能是「模型名称为空」
         assert res.get("error") != "模型名称为空"
 
@@ -523,10 +581,8 @@ class TestPrecheckAndTestRoutes:
 
     async def test_precheck_all_reports_each_config(self, db_conn, monkeypatch):
         await _insert(db_conn, "ok1", base_url="https://api.good.com/v1")
-        await _insert(db_conn, "bad1", base_url="https://api.bad.com/v1",
-                      provider="zhipu", model="glm-4-plus")
-        await db_conn.execute(
-            "INSERT INTO ai_config (id, provider_name, base_url) VALUES ('nourl','x','')")
+        await _insert(db_conn, "bad1", base_url="https://api.bad.com/v1", provider="zhipu", model="glm-4-plus")
+        await db_conn.execute("INSERT INTO ai_config (id, provider_name, base_url) VALUES ('nourl','x','')")
         await db_conn.commit()
 
         async def _fake(url):
@@ -545,17 +601,16 @@ class TestPrecheckAndTestRoutes:
 
     async def test_fetch_models_requires_credentials(self, db_conn):
         res = await ai_router.fetch_provider_models(
-            ProviderModelsIn(base_url="https://api.test.com/v1", api_key=""), db=db_conn)
+            ProviderModelsIn(base_url="https://api.test.com/v1", api_key=""), db=db_conn
+        )
         assert res["ok"] is False
 
     async def test_test_config_never_uses_saved_key_for_changed_base_url(self, db_conn):
         """已存 Key 只能发往其绑定地址，不能被 config_id + 新地址借走。"""
-        await _insert(
-            db_conn, "c1", key="sk-secret", base_url="https://saved.example.com/v1",
-            model="gpt-4o")
-        res = await ai_router.test_config(AIConfigTest(
-            config_id="c1", base_url="https://attacker.example/v1",
-            model="gpt-4o", api_key=""), db=db_conn)
+        await _insert(db_conn, "c1", key="sk-secret", base_url="https://saved.example.com/v1", model="gpt-4o")
+        res = await ai_router.test_config(
+            AIConfigTest(config_id="c1", base_url="https://attacker.example/v1", model="gpt-4o", api_key=""), db=db_conn
+        )
         assert res["ok"] is False
         assert "API Key" in res["error"]
         assert "重新输入" in res["suggestion"]
@@ -564,9 +619,7 @@ class TestPrecheckAndTestRoutes:
 
     async def test_test_config_allows_changed_url_with_explicit_new_key(self, db_conn, monkeypatch):
         """显式输入新 Key 时仍可测试新地址，不破坏正常的自定义端点工作流。"""
-        await _insert(
-            db_conn, "c1", key="sk-secret", base_url="https://saved.example.com/v1",
-            model="gpt-4o")
+        await _insert(db_conn, "c1", key="sk-secret", base_url="https://saved.example.com/v1", model="gpt-4o")
 
         async def _pre_ok(_url):
             return {"ok": True, "step": "ok", "host": "new.example.com", "ip": "1.2.3.4"}
@@ -584,9 +637,16 @@ class TestPrecheckAndTestRoutes:
 
         monkeypatch.setattr(ai_router.connectivity, "_dns_precheck_async", _pre_ok)
         monkeypatch.setattr(pf, "_build_provider", lambda *a, **k: _Provider())
-        res = await ai_router.test_config(AIConfigTest(
-            config_id="c1", base_url="https://new.example.com/v1",
-            model="gpt-4o", api_key="sk-new", request_mode="normal"), db=db_conn)
+        res = await ai_router.test_config(
+            AIConfigTest(
+                config_id="c1",
+                base_url="https://new.example.com/v1",
+                model="gpt-4o",
+                api_key="sk-new",
+                request_mode="normal",
+            ),
+            db=db_conn,
+        )
         assert res["ok"] is True
 
 
@@ -598,13 +658,19 @@ class TestNoZeroActiveConfigGuard:
 
     async def test_save_keeps_last_active_config(self, db_conn):
         """编辑唯一的主配置并关掉开关 → 必须保留 is_active=1 且返回 warning。"""
-        await _insert(db_conn, "c1", is_active=1, provider="deepseek",
-                      model="deepseek-chat")
+        await _insert(db_conn, "c1", is_active=1, provider="deepseek", model="deepseek-chat")
         res = await ai_router.save_config(
-            AIConfigIn(id="c1", provider_name="deepseek", plan="pay_as_you_go",
-                       api_key="", base_url="https://api.deepseek.com/v1",
-                       model="deepseek-chat", is_active=False),
-            db=db_conn)
+            AIConfigIn(
+                id="c1",
+                provider_name="deepseek",
+                plan="pay_as_you_go",
+                api_key="",
+                base_url="https://api.deepseek.com/v1",
+                model="deepseek-chat",
+                is_active=False,
+            ),
+            db=db_conn,
+        )
         assert res["ok"] is True
         assert res["warning"], "关闭唯一主配置必须给出告警，不能静默成功"
         cur = await db_conn.execute("SELECT is_active FROM ai_config WHERE id='c1'")
@@ -612,13 +678,18 @@ class TestNoZeroActiveConfigGuard:
 
     async def test_save_allows_deactivation_when_other_active_remains(self, db_conn):
         await _insert(db_conn, "active", is_active=1)
-        await _insert(db_conn, "spare", is_active=0, provider="zhipu",
-                      model="glm-4-plus")
+        await _insert(db_conn, "spare", is_active=0, provider="zhipu", model="glm-4-plus")
         res = await ai_router.save_config(
-            AIConfigIn(id="spare", provider_name="zhipu", plan="pay_as_you_go",
-                       base_url="https://open.bigmodel.cn/api/paas/v4",
-                       model="glm-4-plus", is_active=False),
-            db=db_conn)
+            AIConfigIn(
+                id="spare",
+                provider_name="zhipu",
+                plan="pay_as_you_go",
+                base_url="https://open.bigmodel.cn/api/paas/v4",
+                model="glm-4-plus",
+                is_active=False,
+            ),
+            db=db_conn,
+        )
         assert res["warning"] == ""
         cur = await db_conn.execute("SELECT is_active FROM ai_config WHERE id='spare'")
         assert (await cur.fetchone())[0] == 0
@@ -636,7 +707,8 @@ class TestNoZeroActiveConfigGuard:
         await db_conn.execute(
             "INSERT INTO ai_config (id, provider_name, model, api_key_encrypted,"
             " base_url, is_active) VALUES ('broken','zhipu','glm-4-plus',"
-            "'not-fernet','https://open.bigmodel.cn/api/paas/v4',0)")
+            "'not-fernet','https://open.bigmodel.cn/api/paas/v4',0)"
+        )
         await db_conn.commit()
         res = await ai_router.toggle_config("broken", db=db_conn)
         assert "无法解密" in res["warning"]
@@ -668,7 +740,8 @@ class TestHealthStatusSemantics:
         await db_conn.execute(
             "INSERT INTO ai_config (id, provider_name, model, api_key_encrypted,"
             " base_url, is_active) VALUES ('c1','deepseek','deepseek-chat',"
-            "'garbage','https://api.deepseek.com/v1',1)")
+            "'garbage','https://api.deepseek.com/v1',1)"
+        )
         await db_conn.commit()
         res = await ai_router.ai_health(db=db_conn)
         assert res["status"] == "key_invalid"
@@ -683,6 +756,7 @@ class TestHealthStatusSemantics:
         await _insert(db_conn, "c1", is_active=1)
         res = await ai_router.ai_health(db=db_conn)
         assert "concurrency" in res and "live_concurrency" in res
+
 
 def _patch_models_endpoint(monkeypatch, payload, status_code=200):
     """把 httpx.AsyncClient 与 DNS 预检都替换掉，直接走 `_fetch_models_list` 的解析分支。"""
@@ -735,11 +809,16 @@ class TestModelListNormalization:
         assert ai_router._ctx_tokens(-5) == 0
 
     async def test_sorts_by_context_desc_then_name(self, monkeypatch):
-        _patch_models_endpoint(monkeypatch, {"data": [
-            {"id": "small", "context_length": 8000},
-            {"id": "big", "context_length": 200000},
-            {"id": "noctx"},
-        ]})
+        _patch_models_endpoint(
+            monkeypatch,
+            {
+                "data": [
+                    {"id": "small", "context_length": 8000},
+                    {"id": "big", "context_length": 200000},
+                    {"id": "noctx"},
+                ]
+            },
+        )
         res = await ai_router._fetch_models_list("https://api.test.com/v1", "sk-x")
         assert res["ok"] is True
         assert [m["value"] for m in res["models"]] == ["big", "small", "noctx"]
@@ -761,14 +840,11 @@ class TestModelListNormalization:
         assert res["suggestion"]
 
 
-
-
 class TestFallbackChainInput:
     async def test_accepts_bare_id_strings(self, db_conn):
         for cid in ("a", "b"):
             await _insert(db_conn, cid)
-        res = await ai_router.update_fallback_chain(
-            FallbackChainUpdate(chain=["b", "a"]), db=db_conn)
+        res = await ai_router.update_fallback_chain(FallbackChainUpdate(chain=["b", "a"]), db=db_conn)
         assert res["count"] == 2
         cur = await db_conn.execute("SELECT id FROM ai_config ORDER BY priority ASC")
         assert [r[0] for r in await cur.fetchall()] == ["b", "a"]
@@ -778,16 +854,15 @@ class TestFallbackChainInput:
         for cid in ("a", "b"):
             await _insert(db_conn, cid)
         res = await ai_router.update_fallback_chain(
-            FallbackChainUpdate(chain=[{"id": "b"}, {"id": "a"}, {"id": "b"}]),
-            db=db_conn)
+            FallbackChainUpdate(chain=[{"id": "b"}, {"id": "a"}, {"id": "b"}]), db=db_conn
+        )
         assert res["count"] == 2
         cur = await db_conn.execute("SELECT id FROM ai_config ORDER BY priority ASC")
         assert [r[0] for r in await cur.fetchall()] == ["b", "a"]
 
     async def test_empty_chain_is_rejected(self, db_conn):
         with pytest.raises(Exception):
-            await ai_router.update_fallback_chain(
-                FallbackChainUpdate(chain=[]), db=db_conn)
+            await ai_router.update_fallback_chain(FallbackChainUpdate(chain=[]), db=db_conn)
 
 
 class TestTestConfigBrokenKey:
@@ -796,10 +871,10 @@ class TestTestConfigBrokenKey:
         await db_conn.execute(
             "INSERT INTO ai_config (id, provider_name, model, api_key_encrypted,"
             " base_url) VALUES ('c1','deepseek','deepseek-chat','garbage',"
-            "'https://api.deepseek.com/v1')")
+            "'https://api.deepseek.com/v1')"
+        )
         await db_conn.commit()
-        res = await ai_router.test_config(
-            AIConfigTest(config_id="c1", api_key="", base_url="", model=""), db=db_conn)
+        res = await ai_router.test_config(AIConfigTest(config_id="c1", api_key="", base_url="", model=""), db=db_conn)
         assert res["ok"] is False
         assert "无法解密" in res["error"]
         assert res["category"] == "config"
@@ -808,58 +883,74 @@ class TestTestConfigBrokenKey:
 class TestImportHardening:
     async def test_numbers_are_clamped(self, db_conn):
         """导入文件不受表单校验约束，越界值必须在此收敛。"""
-        body = ConfigImportIn(items=[{
-            "provider_name": "zhipu", "model": "glm-4-plus",
-            "base_url": "https://open.bigmodel.cn/api/paas/v4",
-            "max_tokens": 10 ** 9, "temperature": 99, "timeout": 1,
-            "concurrency": 999, "plan": "not_a_plan",
-        }])
+        body = ConfigImportIn(
+            items=[
+                {
+                    "provider_name": "zhipu",
+                    "model": "glm-4-plus",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                    "max_tokens": 10**9,
+                    "temperature": 99,
+                    "timeout": 1,
+                    "concurrency": 999,
+                    "plan": "not_a_plan",
+                }
+            ]
+        )
         res = await ai_router.import_config(body, db=db_conn)
         assert res["imported"] == 1
         cur = await db_conn.execute(
-            "SELECT plan, max_tokens, temperature, timeout, concurrency"
-            " FROM ai_config WHERE provider_name='zhipu'")
+            "SELECT plan, max_tokens, temperature, timeout, concurrency" " FROM ai_config WHERE provider_name='zhipu'"
+        )
         plan, mt, temp, to, conc = await cur.fetchone()
-        assert plan == "pay_as_you_go"      # 白名单归一
-        assert mt == 200000                 # _RANGE["max_tokens"] 上界
-        assert temp == 2.0                  # temperature 上界
-        assert to == 10                     # timeout 下界
+        assert plan == "pay_as_you_go"  # 白名单归一
+        assert mt == 200000  # _RANGE["max_tokens"] 上界
+        assert temp == 2.0  # temperature 上界
+        assert to == 10  # timeout 下界
         # ✅ concurrency 上界跟随 settings.max_concurrency（2026-09-17 P0 收敛为 5）
         from app.config import settings as _settings
+
         assert conc == _settings.max_concurrency
 
     async def test_warns_when_no_active_config_after_import(self, db_conn):
-        body = ConfigImportIn(items=[{
-            "provider_name": "zhipu", "model": "glm-4-plus",
-            "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        }])
+        body = ConfigImportIn(
+            items=[
+                {
+                    "provider_name": "zhipu",
+                    "model": "glm-4-plus",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                }
+            ]
+        )
         res = await ai_router.import_config(body, db=db_conn)
         assert res["imported"] == 1
         assert "当前使用" in res["warning"]
 
     async def test_no_warning_when_active_config_exists(self, db_conn):
         await _insert(db_conn, "main", is_active=1)
-        body = ConfigImportIn(items=[{
-            "provider_name": "zhipu", "model": "glm-4-plus",
-            "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        }])
+        body = ConfigImportIn(
+            items=[
+                {
+                    "provider_name": "zhipu",
+                    "model": "glm-4-plus",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                }
+            ]
+        )
         res = await ai_router.import_config(body, db=db_conn)
         assert res["warning"] == ""
-
 
 
 class TestPrimaryKeyResolution:
     """主配置没填 Key 时不得借用「内置 agnes 的 Key」去请求其他厂商的地址。"""
 
     def test_uses_stored_key(self):
-        cfg = {"provider_name": "deepseek",
-               "api_key_encrypted": encrypt_api_key("sk-deepseek")}
+        cfg = {"provider_name": "deepseek", "api_key_encrypted": encrypt_api_key("sk-deepseek")}
         assert pf._primary_api_key(cfg) == "sk-deepseek"
 
     def test_does_not_borrow_agnes_key_for_other_vendor(self, monkeypatch):
         monkeypatch.setattr(pf.settings, "agnes_api_key", "sk-agnes")
-        assert pf._primary_api_key(
-            {"provider_name": "deepseek", "api_key_encrypted": ""}) == ""
+        assert pf._primary_api_key({"provider_name": "deepseek", "api_key_encrypted": ""}) == ""
 
     def test_borrows_agnes_key_only_for_builtin_agnes(self, monkeypatch):
         monkeypatch.setattr(pf.settings, "agnes_api_key", "sk-agnes")
@@ -868,15 +959,13 @@ class TestPrimaryKeyResolution:
 
     def test_broken_ciphertext_is_not_silently_replaced(self, monkeypatch):
         monkeypatch.setattr(pf.settings, "agnes_api_key", "sk-agnes")
-        assert pf._primary_api_key(
-            {"provider_name": "deepseek", "api_key_encrypted": "garbage"}) == ""
+        assert pf._primary_api_key({"provider_name": "deepseek", "api_key_encrypted": "garbage"}) == ""
 
     async def test_chat_never_sends_agnes_key_to_other_vendor(self, db_conn, monkeypatch):
         """回归：原先 deepseek 会被喂上 agnes 的 Key → 必然 401，
         还会把这次注定失败的调用记到 deepseek 的熔断与审计上。"""
         monkeypatch.setattr(pf.settings, "agnes_api_key", "sk-agnes")
-        await _insert(db_conn, "main", provider="deepseek", model="deepseek-chat",
-                      key="", is_active=1)
+        await _insert(db_conn, "main", provider="deepseek", model="deepseek-chat", key="", is_active=1)
         built: list[tuple] = []
 
         class _FakeProvider:
@@ -897,8 +986,7 @@ class TestPrimaryKeyResolution:
 
     async def test_vision_providers_skip_keyless_primary(self, db_conn, monkeypatch):
         monkeypatch.setattr(pf.settings, "agnes_api_key", "sk-agnes")
-        await _insert(db_conn, "main", provider="deepseek", model="deepseek-chat",
-                      key="", is_active=1)
+        await _insert(db_conn, "main", provider="deepseek", model="deepseek-chat", key="", is_active=1)
         seen: list[str] = []
 
         class _FakeProvider:
@@ -927,8 +1015,7 @@ class TestProbeFallsBackToChat:
     @staticmethod
     def _patch_provider(monkeypatch, *, stream_err, chat_result="", chat_err=None):
         async def _pre_ok(url):
-            return {"ok": True, "step": "ok", "host": "api.test.com",
-                    "ip": "1.2.3.4", "port": 443}
+            return {"ok": True, "step": "ok", "host": "api.test.com", "ip": "1.2.3.4", "port": 443}
 
         monkeypatch.setattr(ai_router.connectivity, "_dns_precheck_async", _pre_ok)
         monkeypatch.setattr(ai_router.models, "_dns_precheck_async", _pre_ok)
@@ -952,12 +1039,11 @@ class TestProbeFallsBackToChat:
         return _P
 
     async def test_stream_failure_falls_back_to_chat(self, db_conn, monkeypatch):
-        self._patch_provider(monkeypatch,
-                             stream_err=RuntimeError("HTTP 400: stream not supported"),
-                             chat_result="ok")
+        self._patch_provider(monkeypatch, stream_err=RuntimeError("HTTP 400: stream not supported"), chat_result="ok")
         res = await ai_router.test_config(
-            AIConfigTest(provider_name="custom", base_url="https://api.test.com/v1",
-                         model="m", api_key="sk-x"), db=db_conn)
+            AIConfigTest(provider_name="custom", base_url="https://api.test.com/v1", model="m", api_key="sk-x"),
+            db=db_conn,
+        )
         assert res["ok"] is True
         assert res["mode"] == "chat_probe"
         assert res["response"].startswith("ok")
@@ -982,18 +1068,22 @@ class TestProbeFallsBackToChat:
         monkeypatch.setattr(ai_router.models, "_dns_precheck_async", _pre_ok)
         monkeypatch.setattr(pf, "_build_provider", lambda *a, **k: _P())
         res = await ai_router.test_config(
-            AIConfigTest(provider_name="custom", base_url="https://api.test.com/v1",
-                         model="m", api_key="sk-x"), db=db_conn)
+            AIConfigTest(provider_name="custom", base_url="https://api.test.com/v1", model="m", api_key="sk-x"),
+            db=db_conn,
+        )
         assert res["ok"] is True and res["mode"] == "stream_probe"
 
     async def test_both_fail_reports_chat_error(self, db_conn, monkeypatch):
         """两条路都失败时，以正文生成实际走的非流式错误为准（而不是流式的 400）。"""
-        self._patch_provider(monkeypatch,
-                             stream_err=RuntimeError("HTTP 400: stream not supported"),
-                             chat_err=RuntimeError("HTTP 402: Insufficient Balance"))
+        self._patch_provider(
+            monkeypatch,
+            stream_err=RuntimeError("HTTP 400: stream not supported"),
+            chat_err=RuntimeError("HTTP 402: Insufficient Balance"),
+        )
         res = await ai_router.test_config(
-            AIConfigTest(provider_name="custom", base_url="https://api.test.com/v1",
-                         model="m", api_key="sk-x"), db=db_conn)
+            AIConfigTest(provider_name="custom", base_url="https://api.test.com/v1", model="m", api_key="sk-x"),
+            db=db_conn,
+        )
         assert res["ok"] is False
         assert res["category"] == "balance", res
         assert "402" in res["raw"]
@@ -1013,7 +1103,8 @@ class TestStatsExcludesCircuitSkipped:
                 "INSERT INTO ai_audit_logs (id, provider_name, model, action,"
                 " prompt_tokens, completion_tokens, cached_tokens, duration, success, error)"
                 " VALUES (?,?,?,?,?,?,?,1.0,?,?)",
-                (f"k{i}", "agnes", "agnes-2.5-flash", action, 10, 0, 0, ok, err))
+                (f"k{i}", "agnes", "agnes-2.5-flash", action, 10, 0, 0, ok, err),
+            )
         await db.commit()
 
     async def test_calls_exclude_skipped(self, db_conn):
@@ -1040,7 +1131,8 @@ class TestStatsExcludesCircuitSkipped:
         await db_conn.execute(
             "INSERT INTO ai_audit_logs (id, provider_name, model, action,"
             " prompt_tokens, completion_tokens, cached_tokens, duration, success, error)"
-            " VALUES ('z1','zhipu','glm-4.7','circuit_skipped',0,0,0,0,0,'熔断器 OPEN')")
+            " VALUES ('z1','zhipu','glm-4.7','circuit_skipped',0,0,0,0,0,'熔断器 OPEN')"
+        )
         await db_conn.commit()
         res = await ai_router.ai_stats(db=db_conn)
         names = {(p["provider_name"], p["model"]) for p in res["by_provider"]}
@@ -1076,8 +1168,7 @@ class TestFallbackChainKeepsBuiltin:
         monkeypatch.setattr(pf.settings, "agnes_base_url", "https://api.agnes-ai.cn/v1")
         monkeypatch.setattr(pf.settings, "agnes_model", "agnes-2.5-flash")
         for i in range(4):
-            await _insert(db_conn, f"c{i}", provider=f"p{i}", model=f"m{i}",
-                          base_url=f"https://p{i}.test/v1")
+            await _insert(db_conn, f"c{i}", provider=f"p{i}", model=f"m{i}", base_url=f"https://p{i}.test/v1")
         pf._provider_reliability.clear()
         pf.invalidate_config_cache()
         try:
@@ -1093,8 +1184,7 @@ class TestAllCandidatesOpenStillProbes:
     async def test_one_probe_is_sent_instead_of_fail_fast(self, db_conn, monkeypatch):
         """全部候选被熔断时旧实现直接抛错、一次请求都不发（3180 条空转）。"""
         monkeypatch.setattr(pf.settings, "agnes_api_key", "")
-        await _insert(db_conn, "main", provider="deepseek", model="m1",
-                      key="sk-1", is_active=1)
+        await _insert(db_conn, "main", provider="deepseek", model="m1", key="sk-1", is_active=1)
         await _insert(db_conn, "alt", provider="zhipu", model="m2", key="sk-2")
         pf._provider_reliability.clear()
         pf.invalidate_config_cache()
@@ -1120,7 +1210,6 @@ class TestAllCandidatesOpenStillProbes:
         finally:
             pf._provider_reliability.clear()
             pf.invalidate_config_cache()
-            cb.record_success("")   # 复位，避免污染其它用例
+            cb.record_success("")  # 复位，避免污染其它用例
         assert out == "ok"
         assert calls, "全熔断时必须放行一次探测，而不是整批空转失败"
-

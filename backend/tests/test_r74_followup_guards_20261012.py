@@ -16,6 +16,7 @@ Vitest 护栏（outlineReviewBasisR74.test.ts / importParseWarningWiringR72）
 - C 组：G4 —— conftest autouse 复位 fixture 在场（静态）+ 行为实证
   （改脏 DB_PATH 的测试之后，下一支测试读到的是原值）。
 """
+
 from __future__ import annotations
 
 import re
@@ -63,15 +64,14 @@ class TestPlanGuidanceWiringR74:
 
     def test_a2_disabled_branch_concatenates_guidance(self):
         """stable-prefix 关闭分支必须把引导语拼进 user_content（修复本体）。"""
-        assert 'user_content = user_content + "\\n\\n" + _plan_guidance' in self.src, (
-            "else 分支对 _plan_guidance 的拼接丢失 —— 引导语将再次静默丢弃"
-        )
+        assert (
+            'user_content = user_content + "\\n\\n" + _plan_guidance' in self.src
+        ), "else 分支对 _plan_guidance 的拼接丢失 —— 引导语将再次静默丢弃"
 
     def test_a3_concat_before_message_assembly(self):
         """拼接必须发生在该分支 messages 组装之前（否则引导语进不了请求体）。"""
         cat = self.src.find('user_content + "\\n\\n" + _plan_guidance')
-        asm = self.src.find(
-            'messages = [{"role": "system", "content": sys_prompt}', cat)
+        asm = self.src.find('messages = [{"role": "system", "content": sys_prompt}', cat)
         assert cat >= 0 and asm > cat, "引导语拼接必须在 else 分支 messages 组装之前"
 
     def test_a4_chapter_extras_if_elif_still_present(self):
@@ -81,8 +81,7 @@ class TestPlanGuidanceWiringR74:
 
     def test_a5_ab_reverse_anchor(self):
         """反向锚：模拟「摘除 else 拼接」的旧形态，判据必须归零（证明在守）。"""
-        stripped = self.src.replace(
-            'user_content = user_content + "\\n\\n" + _plan_guidance', "")
+        stripped = self.src.replace('user_content = user_content + "\\n\\n" + _plan_guidance', "")
         assert "_plan_guidance" in stripped  # 其余消费点仍在场
         assert 'user_content = user_content + "\\n\\n" + _plan_guidance' not in stripped
 
@@ -93,15 +92,14 @@ class TestPlanGuidanceWiringR74:
 @pytest.fixture(scope="module")
 def patch_tpl() -> str:
     src = _read(_PROMPTS)
-    m = re.search(r'_reg\("outline_patch_system".*?"""(.*?)"""', src, re.S)
+    m = re.search(r'_reg\(\s*"outline_patch_system".*?"""(.*?)"""', src, re.S)
     assert m, "outline_patch_system 模板注册丢失"
     return m.group(1)
 
 
 class TestPatchPromptCoverageR74:
     def test_b1_item_by_item_requirement(self, patch_tpl):
-        for phrase in ("逐条对应、一项不漏", "new_chapters 条数不得少于缺失项条数",
-                       "严禁用无关章节充数"):
+        for phrase in ("逐条对应、一项不漏", "new_chapters 条数不得少于缺失项条数", "严禁用无关章节充数"):
             assert phrase in patch_tpl, f"补齐提示词缺少关键判据「{phrase}」"
 
     def test_b2_self_check_clause_present(self, patch_tpl):
@@ -109,8 +107,7 @@ class TestPatchPromptCoverageR74:
 
     def test_b3_placeholders_untouched(self, patch_tpl):
         """迁移护栏：占位符集合是渲染契约（r38/r39），G2 只改正文不得动变量。"""
-        for var in ("scheme_name", "scheme_type", "project_brief",
-                    "project_facts", "chapter_titles", "missing_items"):
+        for var in ("scheme_name", "scheme_type", "project_brief", "project_facts", "chapter_titles", "missing_items"):
             assert "{" + var + "}" in patch_tpl, f"占位符 {{{var}}} 丢失"
 
 
@@ -121,18 +118,14 @@ class TestDbPathRestoreGovernanceR74:
     def test_c1_autouse_fixture_defined(self):
         src = _read(_CONFTEST)
         assert "@pytest.fixture(autouse=True)" in src
-        assert "def _restore_app_db_path" in src, (
-            "conftest 的 DB_PATH 快照-复位 autouse fixture 丢失（G4 治理回退）"
-        )
+        assert "def _restore_app_db_path" in src, "conftest 的 DB_PATH 快照-复位 autouse fixture 丢失（G4 治理回退）"
 
     def test_c2_file_import_pipeline_uses_monkeypatch(self):
         src = _read(_FIP)
-        assert "monkeypatch.setattr(_appdb, \"DB_PATH\"" in src, (
-            "gf_ctx 必须经 monkeypatch 改 DB_PATH（裸赋值即污染源）"
-        )
-        assert not re.search(r"^\s*_appdb\.DB_PATH\s*=", src, re.M), (
-            "test_file_import_pipeline.py 不得残留对 DB_PATH 的裸赋值"
-        )
+        assert 'monkeypatch.setattr(_appdb, "DB_PATH"' in src, "gf_ctx 必须经 monkeypatch 改 DB_PATH（裸赋值即污染源）"
+        assert not re.search(
+            r"^\s*_appdb\.DB_PATH\s*=", src, re.M
+        ), "test_file_import_pipeline.py 不得残留对 DB_PATH 的裸赋值"
 
 
 class TestDbPathRestoreBehaviorR74:
@@ -147,15 +140,15 @@ class TestDbPathRestoreBehaviorR74:
         from pathlib import Path as _P
 
         import app.db as _appdb
+
         _DB_BASELINE["path"] = str(_appdb.DB_PATH)
         _appdb.DB_PATH = _P("__r74_pollution_marker__.sqlite")
         assert "pollution" in str(_appdb.DB_PATH)
 
     def test_c3b_autouse_restored_original(self):
         import app.db as _appdb
-        assert _DB_BASELINE["path"] is not None, (
-            "c3a 未先运行（不得单跑本用例，基线无从而来）")
+
+        assert _DB_BASELINE["path"] is not None, "c3a 未先运行（不得单跑本用例，基线无从而来）"
         assert str(_appdb.DB_PATH) == _DB_BASELINE["path"], (
-            "上一用例改脏的 DB_PATH 未被 conftest autouse 复位 —— "
-            "跨用例污染治理（G4）已失效"
+            "上一用例改脏的 DB_PATH 未被 conftest autouse 复位 —— " "跨用例污染治理（G4）已失效"
         )

@@ -20,6 +20,7 @@ C. 导出版式预设（文档 4.2 ExportStandard：行距 1.5、上下 2.54cm�
 「建议绝不翻转既有 ok 结论」与「常量不得同名遮蔽」（本轮真实踩过的雷：
 首版 `_FENCE_RE` 覆盖模块级围栏正则，打挂 strip_code_blocks 三条既有护栏）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -67,7 +68,6 @@ def _fn_src(path: str, name: str, cls: str = ast.FunctionDef) -> str:
 # A) 目录结构规范：check_structure_standards
 # ===========================================================================
 class TestOutlineStructureStandards:
-
     def _mk(self, n_ch: int, n_sec: int = 3, depth: int = 3) -> list:
         # 标题全文唯一：重名会被连续性校验判 duplicate_titles，
         # 干扰「结构建议不影响连续性结论」这一核心断言。
@@ -77,12 +77,12 @@ class TestOutlineStructureStandards:
             rows = []
             for i in range(n_sec):
                 name = f"{prefix}{d}-{i}"
-                rows.append({"title": name, "level": d + 1,
-                             "children": _level(d + 1, name + ".")})
+                rows.append({"title": name, "level": d + 1, "children": _level(d + 1, name + ".")})
             return rows
-        return [{"title": f"第{i}章 专项工程", "level": 1,
-                 "children": _level(1, f"ch{i}.")}
-                for i in range(1, n_ch + 1)]
+
+        return [
+            {"title": f"第{i}章 专项工程", "level": 1, "children": _level(1, f"ch{i}.")} for i in range(1, n_ch + 1)
+        ]
 
     def test_compliant_outline_produces_no_warnings(self):
         rep = check_structure_standards(self._mk(7, 3, 3))
@@ -130,8 +130,7 @@ class TestOutlineStructureStandards:
         outline = self._mk(5, 2, 2)
         outline[2]["children"] = []
         rep = check_structure_standards(outline)
-        assert "section_count" not in {w["kind"] for w in rep["warnings"]
-                                      if w["path"] == "3"}
+        assert "section_count" not in {w["kind"] for w in rep["warnings"] if w["path"] == "3"}
 
     def test_empty_and_none_never_raise(self):
         for bad in (None, [], ["x", None], [{"title": ""}], [{}]):
@@ -141,8 +140,7 @@ class TestOutlineStructureStandards:
     def test_advisory_never_touches_continuity_source(self):
         # AST 级：check_outline_continuity 函数体内不得引用结构规范
         # （一旦被引用，结构建议就会渗进 ok 判定，微型方案被误判不合格）
-        src = _fn_src(os.path.join(BACKEND, "app", "services", "outline_quality.py"),
-                      "check_outline_continuity")
+        src = _fn_src(os.path.join(BACKEND, "app", "services", "outline_quality.py"), "check_outline_continuity")
         assert "check_structure_standards" not in src
 
     def test_notice_lists_messages_truncated(self):
@@ -156,11 +154,11 @@ class TestOutlineStructureStandards:
 # B) 正文段落结构校验：paragraph_structure_report
 # ===========================================================================
 class TestParagraphStructure:
-
     def test_clean_engineering_text_gets_no_warnings(self):
         rep = paragraph_structure_report(
             "基坑支护采用 φ800 钻孔灌注桩，桩长 18m，混凝土 C30。\n\n"
-            "计划于2026年1月5日开工，总工期 450 日历天，围护桩养护 7 天。")
+            "计划于2026年1月5日开工，总工期 450 日历天，围护桩养护 7 天。"
+        )
         assert rep["warnings"] == []
         assert rep["long_paragraphs"] == 0
         assert rep["paragraphs"] == 2
@@ -173,25 +171,26 @@ class TestParagraphStructure:
         assert lp[0]["severity"] == "advisory"
 
     def test_many_long_paragraphs_capped_at_three(self):
-        body = ("甲" * 600 + "\n\n" + "乙" * 600 + "\n\n"
-                + "丙" * 600 + "\n\n" + "丁" * 600)
+        body = "甲" * 600 + "\n\n" + "乙" * 600 + "\n\n" + "丙" * 600 + "\n\n" + "丁" * 600
         rep = paragraph_structure_report(body)
         assert rep["long_paragraphs"] == 4
-        assert len([w for w in rep["warnings"]
-                    if w["type"] == "long_paragraph"]) == 3
+        assert len([w for w in rep["warnings"] if w["type"] == "long_paragraph"]) == 3
 
     def test_headings_lists_and_tables_excluded(self):
-        md = ("# 第一章 工程概况\n\n"
-              "- 支护形式：排桩加内支撑\n- 降水方式：管井降水\n\n"
-              "| 工序 | 工期 |\n| --- | --- |\n| 开挖 | 120天 |\n")
+        md = (
+            "# 第一章 工程概况\n\n"
+            "- 支护形式：排桩加内支撑\n- 降水方式：管井降水\n\n"
+            "| 工序 | 工期 |\n| --- | --- |\n| 开挖 | 120天 |\n"
+        )
         rep = paragraph_structure_report(md)
         # 表格行里的「120天」不进入散文文本
         assert [w for w in rep["warnings"] if w["type"] == "duration_unit"] == []
 
     def test_dates_norm_compliant_forms_pass(self):
         for ok in ("2026年1月5日", "2027-03-15"):
-            assert [w for w in paragraph_structure_report(
-                f"{ok}开工。")["warnings"] if w["type"] == "date_format"] == []
+            assert [
+                w for w in paragraph_structure_report(f"{ok}开工。")["warnings"] if w["type"] == "date_format"
+            ] == []
         for bad in ("2026/1/5", "2026.1.5", "2026-1-5"):
             rep = paragraph_structure_report(f"计划{bad}进场施工。")
             hits = [w for w in rep["warnings"] if w["type"] == "date_format"]
@@ -209,8 +208,9 @@ class TestParagraphStructure:
         rep2 = paragraph_structure_report("总工期 120 天（即 120 日历天）完成。")
         assert [w for w in rep2["warnings"] if w["type"] == "duration_unit"] == []
         # 无工期语义词的裸「N天」不判
-        assert [w for w in paragraph_structure_report(
-            "闲置 3 天后复用。")["warnings"] if w["type"] == "duration_unit"] == []
+        assert [
+            w for w in paragraph_structure_report("闲置 3 天后复用。")["warnings"] if w["type"] == "duration_unit"
+        ] == []
 
     def test_unclosed_fence_fallback_drops_inner_dates(self):
         # strip_code_blocks 对未闭合围栏无能为力，这里的逐行兜底必须生效
@@ -220,14 +220,11 @@ class TestParagraphStructure:
     def test_garbage_input_never_raises(self):
         for bad in (None, "", 12345, "```\n\n\n```"):
             rep = paragraph_structure_report(bad if isinstance(bad, str) else "")
-            assert set(rep) == {"paragraphs", "recommended_range",
-                               "long_paragraphs", "warnings"}
+            assert set(rep) == {"paragraphs", "recommended_range", "long_paragraphs", "warnings"}
 
     def test_advisory_types_stay_in_declared_value_set(self):
-        rep = paragraph_structure_report(
-            "于2026/1/5进场，总工期120天。\n\n" + "长" * 600)
-        assert {w["type"] for w in rep["warnings"]} <= {
-            "long_paragraph", "date_format", "duration_unit"}
+        rep = paragraph_structure_report("于2026/1/5进场，总工期120天。\n\n" + "长" * 600)
+        assert {w["type"] for w in rep["warnings"]} <= {"long_paragraph", "date_format", "duration_unit"}
         assert all(w["severity"] == "advisory" for w in rep["warnings"])
 
 
@@ -235,13 +232,12 @@ class TestParagraphStructure:
 # C) 导出版式预设：layout_preset
 # ===========================================================================
 class TestLayoutPreset:
-
     def _base(self) -> dict:
-        return {"line_spacing": 1.15, "margins": None, "font_name": "宋体",
-                "font_size": 12}
+        return {"line_spacing": 1.15, "margins": None, "font_name": "宋体", "font_size": 12}
 
     def test_absent_preset_returns_equal_dict(self):
         from app.routers.export import _resolve_layout_preset
+
         base = self._base()
         out = _resolve_layout_preset({}, base)
         assert out == base
@@ -249,8 +245,8 @@ class TestLayoutPreset:
 
     def test_engineering_preset_matches_standard_doc(self):
         from app.routers.export import LAYOUT_PRESETS, _resolve_layout_preset
-        out = _resolve_layout_preset({"layout_preset": "engineering"},
-                                     self._base())
+
+        out = _resolve_layout_preset({"layout_preset": "engineering"}, self._base())
         assert out["line_spacing"] == LAYOUT_PRESETS["engineering"]["line_spacing"] == 1.5
         mg = out["margins"]
         assert (mg["top"], mg["bottom"]) == (2.54, 2.54)
@@ -258,36 +254,36 @@ class TestLayoutPreset:
 
     def test_preset_name_is_case_and_space_tolerant(self):
         from app.routers.export import _resolve_layout_preset
-        out = _resolve_layout_preset({"layout_preset": " Engineering "},
-                                     self._base())
+
+        out = _resolve_layout_preset({"layout_preset": " Engineering "}, self._base())
         assert out["line_spacing"] == 1.5
 
     def test_unknown_preset_noop(self):
         from app.routers.export import _resolve_layout_preset
+
         base = self._base()
         assert _resolve_layout_preset({"layout_preset": "公文"}, base) == base
 
     def test_user_margin_keys_win_over_preset(self):
         from app.routers.export import _resolve_layout_preset
+
         out = _resolve_layout_preset(
-            {"layout_preset": "engineering",
-             "margins": {"top": 2.0, "bogus": "x", "bottom": None}},
-            self._base())
-        assert out["margins"]["top"] == 2.0          # 显式细调保留
-        assert out["margins"]["left"] == 3.18        # 未细调的键由预设补
-        assert "bogus" not in out["margins"]         # 非数值脏键丢弃
-        assert out["margins"]["bottom"] == 2.54      # None 回落预设
+            {"layout_preset": "engineering", "margins": {"top": 2.0, "bogus": "x", "bottom": None}}, self._base()
+        )
+        assert out["margins"]["top"] == 2.0  # 显式细调保留
+        assert out["margins"]["left"] == 3.18  # 未细调的键由预设补
+        assert "bogus" not in out["margins"]  # 非数值脏键丢弃
+        assert out["margins"]["bottom"] == 2.54  # None 回落预设
 
     def test_layout_preset_in_fingerprint_whitelist(self):
         from app.routers.export import _EXPORT_CONFIG_KEYS
-        assert "layout_preset" in _EXPORT_CONFIG_KEYS, \
-            "不入指纹白名单 ⇒ 切预设命中旧缓存，预设形同虚设"
+
+        assert "layout_preset" in _EXPORT_CONFIG_KEYS, "不入指纹白名单 ⇒ 切预设命中旧缓存，预设形同虚设"
 
     def test_preset_applied_at_docx_and_pdf_convergence(self):
         # _build_docx_task 是两条链路唯一收敛点，必须在这里套预设
-        src = _fn_src(os.path.join(BACKEND, "app", "routers", "export.py"),
-                      "_build_docx_task")
-        assert "_resolve_layout_preset(prep.get(\"config\") or {}, prep[\"docx_options\"])" in src
+        src = _fn_src(os.path.join(BACKEND, "app", "routers", "export.py"), "_build_docx_task")
+        assert '_resolve_layout_preset(prep.get("config") or {}, prep["docx_options"])' in src
 
     def test_default_docx_bytes_ignore_preset_code_path(self, tmp_path):
         """未配置预设时构建参数与改造前同值：行距 1.15、边距走 2.5 缺省。"""
@@ -299,35 +295,54 @@ class TestLayoutPreset:
         )
         from docx import Document
         from docx.shared import Cm
+
         content = "本章为施工工艺技术内容，参数按专项计算书核定。"
-        sections = [{"id": "c1", "parent_id": "", "sort_order": 0, "level": 1,
-                     "title": "第一章 施工工艺技术", "content": content}]
+        sections = [
+            {
+                "id": "c1",
+                "parent_id": "",
+                "sort_order": 0,
+                "level": 1,
+                "title": "第一章 施工工艺技术",
+                "content": content,
+            }
+        ]
         blocks = {"c1": _parse_content_blocks(content)}
 
         def _build(opts: dict) -> str:
             out = str(tmp_path / f"preset_{opts['line_spacing']}.docx")
             _build_docx_sync(
-                out, {"id": "s1", "project_id": "p1",
-                      "name": "深基坑开挖专项施工方案"},
-                sections, {}, {}, {}, blocks,
-                opts["font_name"], opts["font_size"], "", "",
-                False, False, False,
+                out,
+                {"id": "s1", "project_id": "p1", "name": "深基坑开挖专项施工方案"},
+                sections,
+                {},
+                {},
+                {},
+                blocks,
+                opts["font_name"],
+                opts["font_size"],
+                "",
+                "",
+                False,
+                False,
+                False,
                 bidder_name="",
                 heading_styles=_load_heading_styles({}),
                 page_break_before_chapter=True,
                 line_spacing=opts["line_spacing"],
-                page_number_style="simple", toc_depth=3,
+                page_number_style="simple",
+                toc_depth=3,
                 margins=opts["margins"],
             )
             return out
 
         base = _resolve_layout_preset({}, self._base())
-        eng = _resolve_layout_preset({"layout_preset": "engineering"},
-                                     self._base())
+        eng = _resolve_layout_preset({"layout_preset": "engineering"}, self._base())
         # 未配置预设且 margins=None 时，_build_docx_sync 不动页面设置
         # （`if margins:` 短路），产物即 python-docx 空白文档的默认版式 ——
         # 与改造前逐字一致。配置预设后左右 3.18cm / 上下 2.54cm / 行距 1.5。
         from docx import Document as _Blank
+
         d_blank = _Blank()
         d0 = Document(_build(base))
         assert d0.sections[0].left_margin == d_blank.sections[0].left_margin
@@ -344,7 +359,6 @@ class TestLayoutPreset:
 # D) 生成链路接线：只报不阻断
 # ===========================================================================
 class TestGenerationWiring:
-
     SSE = os.path.join(BACKEND, "app", "routers", "sse_handlers.py")
     # 拆分兼容：目录评审阶段（含 _attach_quality_report）下沉 _sse_outline_review.py
     SSE_REVIEW = os.path.join(BACKEND, "app", "routers", "_sse_outline_review.py")
@@ -360,7 +374,7 @@ class TestGenerationWiring:
         src = ""
         with io.open(self.SSE, encoding="utf-8") as f:
             src = f.read()
-        assert "report[\"structure\"] = _struct_rep" in src
+        assert 'report["structure"] = _struct_rep' in src
         i_std = src.find("report = standard_report(")
         i_par = src.find("_struct_rep = paragraph_structure_report(content)")
         assert 0 < i_std < i_par, "段落校验必须排在 standard_report 之后，不得被其重建覆盖"
@@ -369,10 +383,17 @@ class TestGenerationWiring:
     def test_continuity_ok_semantics_unchanged(self):
         # 同一份「4 章合规目录」（level 齐备、无跳级、标题唯一）：
         # structure 有建议、continuity 仍 ok —— 章数偏少不得把目录判成不合格
-        outline = [{"title": f"第{i}章 脚手架工程", "level": 1, "children": [
-            {"title": f"{i}a 搭设工艺", "level": 2, "children": [{"title": f"{i}a1 基座检查"}]},
-            {"title": f"{i}b 拆除工艺", "level": 2, "children": [{"title": f"{i}b1 清运顺序"}]}]}
-            for i in range(1, 5)]
+        outline = [
+            {
+                "title": f"第{i}章 脚手架工程",
+                "level": 1,
+                "children": [
+                    {"title": f"{i}a 搭设工艺", "level": 2, "children": [{"title": f"{i}a1 基座检查"}]},
+                    {"title": f"{i}b 拆除工艺", "level": 2, "children": [{"title": f"{i}b1 清运顺序"}]},
+                ],
+            }
+            for i in range(1, 5)
+        ]
         assert check_outline_continuity(outline)["ok"] is True
         assert check_structure_standards(outline)["warnings"]
 
@@ -390,7 +411,6 @@ TOUCHED = [
 
 
 class TestByteHealthAndShadowing:
-
     @pytest.mark.parametrize("path", TOUCHED)
     def test_file_byte_health(self, path):
         with io.open(path, "rb") as f:
@@ -424,31 +444,29 @@ class TestByteHealthAndShadowing:
         子模块再定义一份），宿主 `ImportFrom` 再导出会被子模块定义覆盖，
         属同一类「静默失效」—— 故一并纳入本锁，而非只锁母文件。
         """
-        for path in [os.path.join(BACKEND, "app", "services", "outline_quality.py"),
-                     os.path.join(BACKEND, "app", "services", "content_standard.py"),
-                     os.path.join(BACKEND, "app", "routers", "sse_handlers.py"),
-                     os.path.join(BACKEND, "app", "routers", "export.py"),
-                     os.path.join(BACKEND, "app", "routers", "_export_cache.py"),
-                     os.path.join(BACKEND, "app", "routers", "_export_docx_parts.py"),
-                     os.path.join(BACKEND, "app", "routers", "_export_issue_scan.py"),
-                     os.path.join(BACKEND, "app", "routers", "_sse_outline_build.py"),
-                     os.path.join(BACKEND, "app", "routers",
-                                   "_sse_outline_review.py")]:
+        for path in [
+            os.path.join(BACKEND, "app", "services", "outline_quality.py"),
+            os.path.join(BACKEND, "app", "services", "content_standard.py"),
+            os.path.join(BACKEND, "app", "routers", "sse_handlers.py"),
+            os.path.join(BACKEND, "app", "routers", "export.py"),
+            os.path.join(BACKEND, "app", "routers", "_export_cache.py"),
+            os.path.join(BACKEND, "app", "routers", "_export_docx_parts.py"),
+            os.path.join(BACKEND, "app", "routers", "_export_issue_scan.py"),
+            os.path.join(BACKEND, "app", "routers", "_sse_outline_build.py"),
+            os.path.join(BACKEND, "app", "routers", "_sse_outline_review.py"),
+        ]:
             tree = _tree(path)
             seen: set[str] = set()
             for node in tree.body:
                 targets: list[str] = []
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                     ast.ClassDef)):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     targets = [node.name]
                 elif isinstance(node, ast.Assign):
                     targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
-                elif isinstance(node, ast.AnnAssign) and isinstance(
-                        node.target, ast.Name):
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
                     targets = [node.target.id]
                 for name in targets:
-                    assert name not in seen, \
-                        f"{os.path.basename(path)}: 模块级符号 {name} 重复定义"
+                    assert name not in seen, f"{os.path.basename(path)}: 模块级符号 {name} 重复定义"
                     seen.add(name)
 
     def test_content_standard_fence_regex_single_definition(self):
@@ -463,11 +481,14 @@ class TestByteHealthAndShadowing:
         #    行级翻转副本删掉、改消费 fence_common.iter_all_blocks 后，该断言只靠
         #    「处置注释里逐字引用了旧代码」侥幸为真（注释一改即恒红，副本回流也测不出）。
         #    现按 AST 锁反向不变式：不得重新定义本地围栏正则 + 必须真的消费唯一出口。
-        assigned = {t.id for node in _tree(path).body if isinstance(node, ast.Assign)
-                    for t in node.targets if isinstance(t, ast.Name)}
-        assert "_PS_FENCE_LINE_RE" not in assigned, (
-            "段落校验不得重新定义本地围栏正则（闭合/块行判据唯一事实源 = services/fence_common）"
-        )
-        assert "iter_all_blocks" in src, (
-            "paragraph_structure_report 必须消费 fence_common 的块行口径"
-        )
+        assigned = {
+            t.id
+            for node in _tree(path).body
+            if isinstance(node, ast.Assign)
+            for t in node.targets
+            if isinstance(t, ast.Name)
+        }
+        assert (
+            "_PS_FENCE_LINE_RE" not in assigned
+        ), "段落校验不得重新定义本地围栏正则（闭合/块行判据唯一事实源 = services/fence_common）"
+        assert "iter_all_blocks" in src, "paragraph_structure_report 必须消费 fence_common 的块行口径"

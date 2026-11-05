@@ -35,6 +35,7 @@ def _cands(n, orders=None, prios=None):
 # 1. 向后兼容 / 边界（关闭预算时行为必须逐字不变）
 # ---------------------------------------------------------------------------
 
+
 def test_budget_disabled_returns_all():
     """max_images<=0 视为关闭：原样返回（等于旧行为，零迁移）。"""
     c = _cands(20)
@@ -66,6 +67,7 @@ def test_budget_single_candidate():
 # 2. 硬不变式：返回值数量严格 <= 上限
 # ---------------------------------------------------------------------------
 
+
 def test_budget_count_never_exceeds_limit():
     for n in (2, 7, 13, 20, 50, 80):
         for m in (1, 2, 4, 6, 9, 12):
@@ -84,6 +86,7 @@ def test_budget_returns_subset_of_input():
 # ---------------------------------------------------------------------------
 # 3. 核心语义：分段均匀，避免前段独占（上游设计要点）
 # ---------------------------------------------------------------------------
+
 
 def test_budget_not_front_loaded():
     """20 候选限 6：不能 6 张全落在最前面几章。"""
@@ -112,6 +115,7 @@ def test_budget_even_when_limit_is_one_per_many_chapters():
 # ---------------------------------------------------------------------------
 # 4. 段内优先级 / 文档顺序
 # ---------------------------------------------------------------------------
+
 
 def test_budget_priority_within_same_order():
     """同位置多候选：段内按 priority 降序取。"""
@@ -157,6 +161,7 @@ def test_budget_missing_priority_defaults_zero():
 # 5. 确定性（同输入同输出，便于缓存/回归）
 # ---------------------------------------------------------------------------
 
+
 def test_budget_deterministic():
     c = _cands(20)
     a = [x["key"] for x in apply_image_budget(c, 6)]
@@ -167,6 +172,7 @@ def test_budget_deterministic():
 # ---------------------------------------------------------------------------
 # 6. select_ai_image_codes 包装（export 接线实际调用的是它）
 # ---------------------------------------------------------------------------
+
 
 def _groups(n):
     return {f"code{i}": [{"type": "ai_image", "code": f"code{i}"}] for i in range(n)}

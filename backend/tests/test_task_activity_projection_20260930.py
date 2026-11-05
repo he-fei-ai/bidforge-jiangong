@@ -33,6 +33,7 @@ BUG（P0 ·「AI 明明在跑却说后台空闲」）：`routers/system.py::_bui
   B. 反向：limit 仍然生效（completed 历史条数不因修复而膨胀）；
   C. 无 running 时 running 仍为空（不误报）。
 """
+
 import time
 import uuid
 
@@ -49,8 +50,7 @@ async def db(tmp_path, monkeypatch):
     conn = await get_conn()
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await conn.execute("INSERT INTO projects (id, name) VALUES (?,?)", (pid, "p"))
-    await conn.execute(
-        "INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", (sid, pid, "s"))
+    await conn.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", (sid, pid, "s"))
     await conn.commit()
     yield conn, pid, sid
     await conn.close()
@@ -59,6 +59,7 @@ async def db(tmp_path, monkeypatch):
 def _ts(base: str, offset_sec: int) -> str:
     """base（'YYYY-MM-DD HH:MM:SS'）偏移 offset_sec 秒后的同格式时间戳。"""
     import datetime as _dt
+
     t = _dt.datetime.strptime(base, "%Y-%m-%d %H:%M:%S") + _dt.timedelta(seconds=offset_sec)
     return t.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -68,8 +69,8 @@ async def _mk_task(conn, sid, *, status, created_at, task_type="content_draft"):
     await conn.execute(
         "INSERT INTO task_registry (id, task_type, status, progress, message, "
         "scheme_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
-        (tid, task_type, status, 0.5, "生成中", sid,
-         created_at, created_at))
+        (tid, task_type, status, 0.5, "生成中", sid, created_at, created_at),
+    )
     return tid
 
 
@@ -84,15 +85,14 @@ class TestRunningNotEvictedByLimit:
         long_id = await _mk_task(conn, sid, status="running", created_at=base)
         # 之后完成的 12 个终态任务（正文生成逐章完成会持续插入）
         for i in range(12):
-            await _mk_task(conn, sid, status="completed",
-                           created_at=_ts(base, i + 1))
+            await _mk_task(conn, sid, status="completed", created_at=_ts(base, i + 1))
         await conn.commit()
 
         snap = await _build_activity_snapshot(limit=8)
         running_ids = {t["id"] for t in snap["tasks"]["running"]}
         assert long_id in running_ids, (
-            "运行中的长任务被 updated 任务挤出 LIMIT —— 前端会显示「后台空闲」，"
-            "而 AI 实际仍在调用中")
+            "运行中的长任务被 updated 任务挤出 LIMIT —— 前端会显示「后台空闲」，" "而 AI 实际仍在调用中"
+        )
 
     @pytest.mark.asyncio
     async def test_paused_also_survives(self, db):
@@ -101,8 +101,7 @@ class TestRunningNotEvictedByLimit:
         base = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         pid_task = await _mk_task(conn, sid, status="paused", created_at=base)
         for i in range(12):
-            await _mk_task(conn, sid, status="completed",
-                           created_at=_ts(base, i + 1))
+            await _mk_task(conn, sid, status="completed", created_at=_ts(base, i + 1))
         await conn.commit()
 
         snap = await _build_activity_snapshot(limit=8)
@@ -117,8 +116,7 @@ class TestLimitStillApplies:
         conn, pid, sid = db
         base = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         for i in range(20):
-            await _mk_task(conn, sid, status="completed",
-                           created_at=_ts(base, i + 1))
+            await _mk_task(conn, sid, status="completed", created_at=_ts(base, i + 1))
         await conn.commit()
 
         snap = await _build_activity_snapshot(limit=8)
